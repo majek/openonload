@@ -367,6 +367,20 @@ struct efx_short_copy_buffer {
 	u8 buf[L1_CACHE_BYTES];
 };
 
+/* Copy in explicit 64-bit writes. */
+static void efx_memcpy_64(void *dest, void *src, size_t len)
+{
+	uint64_t *src64 = src, *dest64 = dest;
+	size_t i, l64 = len / 8;
+
+	WARN_ON_ONCE(len % 8 != 0);
+	WARN_ON_ONCE(((u8 *)dest - (u8 *) 0) % 8 != 0);
+	BUILD_BUG_ON(sizeof(uint64_t) != 8);
+
+	for(i = 0; i < l64; ++i)
+		dest64[i] = src64[i];
+}
+
 /* Copy to PIO, respecting that writes to PIO buffers must be dword aligned.
  * Advances piobuf pointer. Leaves additional data in the copy buffer.
  */
@@ -376,7 +390,7 @@ static void efx_memcpy_toio_aligned(struct efx_nic *efx, u8 __iomem **piobuf,
 {
 	int block_len = len & ~(sizeof(copy_buf->buf) - 1);
 
-	memcpy_toio(*piobuf, data, block_len);
+	efx_memcpy_64(*piobuf, data, block_len);
 	*piobuf += block_len;
 	len -= block_len;
 
@@ -408,7 +422,7 @@ static void efx_memcpy_toio_aligned_cb(struct efx_nic *efx, u8 __iomem **piobuf,
 		if (copy_buf->used < sizeof(copy_buf->buf))
 			return;
 
-		memcpy_toio(*piobuf, copy_buf->buf, sizeof(copy_buf->buf));
+		efx_memcpy_64(*piobuf, copy_buf->buf, sizeof(copy_buf->buf));
 		*piobuf += sizeof(copy_buf->buf);
 		data += copy_to_buf;
 		len -= copy_to_buf;
@@ -423,7 +437,7 @@ static void efx_flush_copy_buffer(struct efx_nic *efx, u8 __iomem *piobuf,
 {
 	/* if there's anything in it, write the whole buffer, including junk */
 	if (copy_buf->used)
-		memcpy_toio(piobuf, copy_buf->buf, sizeof(copy_buf->buf));
+		efx_memcpy_64(piobuf, copy_buf->buf, sizeof(copy_buf->buf));
 }
 
 /* Traverse skb structure and copy fragments in to PIO buffer.
@@ -503,8 +517,8 @@ efx_enqueue_skb_pio(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 		 */
 		BUILD_BUG_ON(L1_CACHE_BYTES >
 			     SKB_DATA_ALIGN(sizeof(struct skb_shared_info)));
-		memcpy_toio(tx_queue->piobuf, skb->data,
-			    ALIGN(skb->len, L1_CACHE_BYTES));
+		efx_memcpy_64(tx_queue->piobuf, skb->data,
+			      ALIGN(skb->len, L1_CACHE_BYTES));
 	}
 
 	EFX_POPULATE_QWORD_5(buffer->option,

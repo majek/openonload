@@ -89,9 +89,17 @@
 #define EFX_USE_QWORD_IO 1
 #endif
 
+/* PIO only works on 64-bit architectures */
+#if BITS_PER_LONG == 64
+/* not strictly necessary to restrict to x86 arch, but done for safety
+ * since unusual write combining behaviour can break PIO.
+ */
+#ifdef CONFIG_X86_64
 /* PIO is a win only if write-combining is possible */
 #ifdef ARCH_HAS_IOREMAP_WC
 #define EFX_USE_PIO 1
+#endif
+#endif
 #endif
 
 #ifdef EFX_USE_SSE_IO
