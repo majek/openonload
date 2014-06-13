@@ -1,8 +1,10 @@
 
-openonload-201205-p3a
----------------------
+openonload-201205-p4
+--------------------
 
-- bug33133: Fix bug causing RTT estimates to not be updated.
+- bug30511: Do not remove HW filters when SW filter table fills.
+- bug30519: Fix leak of OS socket reference, leaving UDP port in-use.
+- Update version of libciul to 2.0.0.  (Should have been done in p2 release).
 
 
 openonload-201205-p3

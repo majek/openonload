@@ -1671,6 +1671,7 @@ tcp_helper_dtor(tcp_helper_resource_t* trs)
    *      => tcp_helper_rm_free_locked must have run to completion
    */
   tcp_helper_stop(trs);
+#if defined __linux__
 #if CI_CFG_SUPPORT_STATS_COLLECTION
   if( trs->netif.state->lock.lock != CI_EPLOCK_UNINITIALISED ) {
     /* Flush statistics gathered for the NETIF to global
@@ -1679,6 +1680,7 @@ tcp_helper_dtor(tcp_helper_resource_t* trs)
     ci_ip_stats_update_global(&trs->netif.state->stats_snapshot);
     ci_ip_stats_update_global(&trs->netif.state->stats_cumulative);
   }
+#endif
 #endif
 
   release_netif_resources(trs);

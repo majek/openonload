@@ -163,8 +163,8 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
 
   /* Loopback sockets do not need filters */
   if( OO_SP_NOT_NULL(s->local_peer) ) {
-    ep->os_port_keeper = os_sock_ref;
-    return 0;
+    rc = 0;
+    goto set_os_port_keeper_and_out;
   }
 
   laddr = sock_laddr_be32(s);
@@ -185,21 +185,23 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   }
 
   if( ep->oofilter.sf_local_port != NULL ) {
-    if( protocol == IPPROTO_UDP && ep->oofilter.sf_raddr == 0 &&
-        raddr != 0 ) {
-      rc = oof_udp_connect(efab_tcp_driver.filter_manager, &ep->oofilter,
-                           laddr, raddr, rport);
-      goto out;
+    /* we already have a filter; and we also have a reference of OS socket. */
+    ci_assert(ep->os_port_keeper);
+    oo_file_ref_drop(os_sock_ref);
+    os_sock_ref = NULL;
+    if( protocol == IPPROTO_UDP && raddr != 0 &&
+        ep->oofilter.sf_raddr == 0 ) {
+      return oof_udp_connect(efab_tcp_driver.filter_manager, &ep->oofilter,
+                             laddr, raddr, rport);
     }
     oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
   }
   rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
                       protocol, laddr, lport, raddr, rport);
-  if( rc == 0 ) {
-    ep->os_port_keeper = os_sock_ref;
-    os_sock_ref = NULL;
-  }
- out:
+
+ set_os_port_keeper_and_out:
+  if( os_sock_ref != NULL && rc == 0 )
+    os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, os_sock_ref);
   if( os_sock_ref != NULL )
     oo_file_ref_drop(os_sock_ref);
   return rc;
@@ -219,18 +221,12 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
 int
 tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, int no_sw)
 {
-  ci_irqlock_state_t lock_flags;
+  struct oo_file_ref* os_sock_ref;
 
   oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
-
-  ci_irqlock_lock(&ep->thr->lock, &lock_flags);
-  if( ep->os_port_keeper != NULL ) {
-    oo_file_ref_drop(ep->os_port_keeper);
-    ep->os_port_keeper = NULL;
-  }
-  ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
-
-  ci_assert(ep->n_pinned_pages == 0);
+  os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
+  if( os_sock_ref != NULL )
+    oo_file_ref_drop(os_sock_ref);
   return 0;
 }
 

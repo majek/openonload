@@ -247,7 +247,7 @@ int ci_netif_filter_insert(ci_netif* netif, oo_sp tcp_id,
     if( hash1 == first ) {
       ci_sock_cmn *s = SP_TO_SOCK_CMN(netif, tcp_id);
       if( ! (s->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL) ) {
-        LOG_U(ci_log(FN_FMT "%d FULL %s %s:%u->%s:%u hops=%u",
+        LOG_E(ci_log(FN_FMT "%d FULL %s %s:%u->%s:%u hops=%u",
                      FN_PRI_ARGS(netif),
                      OO_SP_FMT(tcp_id), CI_IP_PROTOCOL_STR(protocol),
                      ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),

@@ -1086,20 +1086,8 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf)
     lpa = &lp->lp_addr[la_i];
     la = &fm->fm_local_addrs[la_i];
     if( skf->sf_raddr ) {
-      if( (rc = oof_socket_add_full_sw(skf)) != 0 ) {
-        /* If we failed to accept new TCP connection, we should remove the
-         * filters for listening socket, since they are useless. */
-        if( lp->lp_protocol == IPPROTO_TCP &&
-            lpa->lpa_filter.trs == oof_cb_socket_stack(skf) ) {
-          OO_DEBUG_ERR(ci_log("%s: ERROR: failed to accept TCP connection "
-                              IP_FMT":%d->"IP_FMT":%d REMOVE HW FILTER",
-                              __FUNCTION__,
-                              IP_ARG(skf->sf_raddr), skf->sf_rport,
-                              IP_ARG(skf->sf_laddr), lp->lp_lport));
-          oof_hw_filter_clear_wild(lp, lpa, skf->sf_laddr);
-        }
+      if( (rc = oof_socket_add_full_sw(skf)) != 0 )
         return rc;
-      }
       if( (rc = oof_socket_add_full_hw(fm, skf, lpa)) != 0 ) {
         oof_socket_del_full_sw(skf);
         return rc;

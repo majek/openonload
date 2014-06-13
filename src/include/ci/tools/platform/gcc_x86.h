@@ -285,6 +285,15 @@ ci_inline int ci_cas32u_fail(volatile ci_uint32* p, ci_uint32 oldval, ci_uint32 
   return ret;
 }
 
+ci_inline ci_uint32 ci_xchg32(volatile ci_uint32* p, ci_uint32 val) {
+  /* NB. No 'lock' prefix required; it is implied. */
+  asm volatile("xchgl %0, %1"
+               : "=r" (val), "+m" (*p)
+               : "0" (val)
+               : "memory");
+  return val;
+}
+
 #ifdef __x86_64__
 
 ci_inline int ci_cas64u_succeed(volatile ci_uint64* p, ci_uint64 oldval,
@@ -309,10 +318,21 @@ ci_inline int ci_cas64u_fail(volatile ci_uint64* p, ci_uint64 oldval,
   return ret;
 }
 
+ci_inline ci_uint64 ci_xchg64(volatile ci_uint64* p, ci_uint64 val) {
+  /* NB. No 'lock' prefix required; it is implied. */
+  asm volatile("xchgq %0, %1"
+               : "=r" (val), "+m" (*p)
+               : "0" (val)
+               : "memory");
+  return val;
+}
+
 # define ci_cas_uintptr_succeed(p,o,n)				\
     ci_cas64u_succeed((volatile ci_uint64*) (p), (o), (n))
 # define ci_cas_uintptr_fail(p,o,n)				\
     ci_cas64u_fail((volatile ci_uint64*) (p), (o), (n))
+# define ci_xchg_uintptr(p, v)                  \
+    ci_xchg64((volatile ci_uint64*) (p), (v))
 
 #else /* __x86_64__ */
 
@@ -363,6 +383,8 @@ ci_inline int ci_cas64u_fail(volatile ci_uint64* p, ci_uint64 oldval,
     ci_cas32u_succeed((volatile ci_uint32*) (p), (o), (n))
 # define ci_cas_uintptr_fail(p,o,n)				\
     ci_cas32u_fail((volatile ci_uint32*) (p), (o), (n))
+# define ci_xchg_uintptr(p, v)                  \
+    ci_xchg32((volatile ci_uint32*) (p), (v))
 
 #endif /* __x86_64__ */
 

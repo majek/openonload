@@ -94,6 +94,8 @@ extern struct oo_file_ref* oo_file_ref_add(struct oo_file_ref*);
 extern void oo_file_ref_drop(struct oo_file_ref*);
 extern int  oo_file_ref_lookup(int fd, struct oo_file_ref**);
 extern void oo_file_ref_drop_list_now(struct oo_file_ref*);
+#define oo_file_ref_xchg(pp, fr)                        \
+  ((struct oo_file_ref*) ci_xchg_uintptr((pp), (ci_uintptr_t) (fr)))
 #endif
 
 

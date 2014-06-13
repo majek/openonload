@@ -181,9 +181,10 @@ struct tcp_helper_endpoint_s {
   /*! Per-socket state for the filter manager. */
   struct oof_socket oofilter;
 
-  /*! OS socket responsible for port reservation;
-   * may differ from os_socket (for accepted socket) and
-   * is freed/installed together with filters. */
+  /*! OS socket responsible for port reservation; may differ from os_socket
+   * (for accepted socket) and is set/cleared together with filters.
+   * Concurrency control is via atomic exchange (oo_file_ref_xchg()).
+   */
   struct oo_file_ref* os_port_keeper;
 
   /*! link so we can be in the list of endpoints to be closed in the future */

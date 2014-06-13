@@ -16,7 +16,7 @@ LINK_CIUL_LIB		:= $(MMakeGenerateLibLink)
 # releases, because the internals of the data structures are exposed.  That
 # means that almost any non-trivial change to ef_vi should cause the MAJOR
 # version number to be incremented.
-lib_maj := 1
+lib_maj := 2
 lib_min := 0
 lib_mic := 0
 CIUL_REALNAME		:= $(MMakeGenerateDllRealname)

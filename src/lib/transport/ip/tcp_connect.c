@@ -357,7 +357,6 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts,
     ci_tcp_initial_seqno(ni);
   ts->snd_max = tcp_snd_nxt(ts) + 1;
 
-  /* Must be after initialising snd_una. */
   ci_tcp_clear_rtt_timing(ts);
   ci_tcp_set_flags(ts, CI_TCP_FLAG_SYN);
   ts->tcpflags &=~ CI_TCPT_FLAG_OPT_MASK;
@@ -806,8 +805,11 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
     os_sock_ref = l_ep->os_socket;
     ci_assert_equal(a_ep->os_port_keeper, NULL);
     if( os_sock_ref != NULL ) {
-      a_ep->os_port_keeper = oo_file_ref_add(os_sock_ref);
+      os_sock_ref = oo_file_ref_add(os_sock_ref);
+      os_sock_ref = oo_file_ref_xchg(&a_ep->os_port_keeper, os_sock_ref);
       ci_irqlock_unlock(&l_ep->thr->lock, &lock_flags);
+      if( os_sock_ref != NULL )
+        oo_file_ref_drop(os_sock_ref);
     }
     else {
       ci_irqlock_unlock(&l_ep->thr->lock, &lock_flags);
