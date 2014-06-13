@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1572,21 +1572,25 @@ static int
 efx_init_rx_cpu_rmap(struct efx_nic *efx, struct msix_entry *xentries)
 {
 #ifdef CONFIG_RFS_ACCEL
+	struct cpu_rmap *cpu_rmap;
 	unsigned int i;
 	int rc;
 
-	efx->net_dev->rx_cpu_rmap = alloc_irq_cpu_rmap(efx->n_rx_channels);
-	if (!efx->net_dev->rx_cpu_rmap)
+	cpu_rmap = alloc_irq_cpu_rmap(efx->n_rx_channels);
+	if (!cpu_rmap)
 		return -ENOMEM;
 	for (i = 0; i < efx->n_rx_channels; i++) {
-		rc = irq_cpu_rmap_add(efx->net_dev->rx_cpu_rmap,
-				      xentries[i].vector);
+		rc = irq_cpu_rmap_add(cpu_rmap, xentries[i].vector);
 		if (rc) {
-			free_irq_cpu_rmap(efx->net_dev->rx_cpu_rmap);
-			efx->net_dev->rx_cpu_rmap = NULL;
+			free_irq_cpu_rmap(cpu_rmap);
 			return rc;
 		}
 	}
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NETDEV_RFS_INFO)
+	efx->net_dev->rx_cpu_rmap = cpu_rmap;
+#else
+	netdev_extended(efx->net_dev)->rfs_data.rx_cpu_rmap = cpu_rmap;
+#endif
 #endif
 	return 0;
 }
@@ -3031,8 +3035,10 @@ static const struct net_device_ops efx_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = efx_netpoll,
 #endif
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NETDEV_RFS_INFO)
 #ifdef CONFIG_RFS_ACCEL
 	.ndo_rx_flow_steer	= efx_filter_rfs,
+#endif
 #endif
 };
 #endif
@@ -3169,6 +3175,11 @@ static int efx_register_netdev(struct efx_nic *efx)
 #endif
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	net_dev->poll_controller = efx_netpoll;
+#endif
+#endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NETDEV_RFS_INFO)
+#ifdef CONFIG_RFS_ACCEL
+	netdev_extended(net_dev)->rfs_data.ndo_rx_flow_steer = efx_filter_rfs;
 #endif
 #endif
 	SET_ETHTOOL_OPS(net_dev, &efx_ethtool_ops);
@@ -3997,8 +4008,13 @@ static void efx_pci_remove_main(struct efx_nic *efx)
 #endif
 
 #ifdef CONFIG_RFS_ACCEL
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NETDEV_RFS_INFO)
 	free_irq_cpu_rmap(efx->net_dev->rx_cpu_rmap);
 	efx->net_dev->rx_cpu_rmap = NULL;
+#else
+	free_irq_cpu_rmap(netdev_extended(efx->net_dev)->rfs_data.rx_cpu_rmap);
+	netdev_extended(efx->net_dev)->rfs_data.rx_cpu_rmap = NULL;
+#endif
 #endif
 	efx_stop_interrupts(efx, false);
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SMP) && !defined(__VMKLNX__)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1231,6 +1231,16 @@ static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
 
   if( (rc = ci_netif_init_fill_rx_rings(ni)) != 0 )
     goto fail5;
+
+  /* If there aren't any stacks yet force a sync of cplane information, to
+   * to help with the case where people create interfaces then immediately
+   * launch their app that uses them.
+   */
+  if( (NI_OPTS(ni).sync_cplane == 2) || ((NI_OPTS(ni).sync_cplane == 1)
+        && (ci_dllist_is_empty(&THR_TABLE.all_stacks))) ) {
+    cicpos_sync_tables(CICP_HANDLE(&rs->netif));
+  }
+
 
   /* We're about to expose this stack to other people.  So we should be
    * sufficiently initialised here that other people don't get upset.

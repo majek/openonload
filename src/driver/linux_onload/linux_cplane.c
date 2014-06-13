@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -85,6 +85,10 @@
 #define FALSE 0
 #endif
 
+
+/* Buffer size for netlink messages.  Largest tables are neighbour and
+ *  * route cache, and it will be nice to fit these tables into the buffer. */
+#define NL_BUFSIZE 16384
 
 
 
@@ -1528,9 +1532,13 @@ static int
 cicpos_handle_rtnl_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr);
 
 static void
-cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only);
+cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only,
+                   char *buf);
 
-
+typedef struct {
+  struct socket *sock;
+  __u32 seq;
+} cicp_nlsock_t;
 
 
 
@@ -1653,23 +1661,21 @@ error:
 
 
 
-/*! This function is NOT re-entrant!
- *  Request the contents of the IP-MAC mapping (ARP) table
+/*! Request the contents of the IP-MAC mapping (ARP) table
  */
 static int 
-request_table(struct socket *sock, __u32 seq, int nlmsg_type)
+request_table(cicp_nlsock_t *nlsock, int nlmsg_type, char* buf)
 {
   struct msghdr msg;
   struct iovec iov;
-  static char buf[8192];
   struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
   int ret;
 
-  memset(buf, 0, sizeof(buf));
+  memset(buf, 0, NL_BUFSIZE);
   nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
   nlhdr->nlmsg_type = nlmsg_type; /* RTM_GET* */
   nlhdr->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
-  nlhdr->nlmsg_seq = seq;
+  nlhdr->nlmsg_seq = ++nlsock->seq;
 
   iov.iov_base = (void*)buf;
   iov.iov_len = nlhdr->nlmsg_len;
@@ -1680,7 +1686,7 @@ request_table(struct socket *sock, __u32 seq, int nlmsg_type)
   msg.msg_iov=&iov;
   msg.msg_iovlen=1;
 
-  ret = sock_sendmsg(sock, &msg, nlhdr->nlmsg_len);
+  ret = sock_sendmsg(nlsock->sock, &msg, nlhdr->nlmsg_len);
   
   if (ret < 0) {
     ci_log("%s():sock_sendmsg failed, err=%d", __FUNCTION__, ret);
@@ -1750,11 +1756,11 @@ netlink_read(struct socket *sock, char *buf, size_t count,
 
 
 static int 
-read_nl_msg(struct socket *sock, char (*buf)[8192], int blocking, int retry)
+read_nl_msg(struct socket *sock, char *buf, int blocking, int retry)
 {   int bytes;
 
-    memset(buf, 0, sizeof(*buf));
-    bytes = netlink_read(sock, (char *) buf, sizeof(*buf), blocking, retry);
+    memset(buf, 0, NL_BUFSIZE);
+    bytes = netlink_read(sock, buf, NL_BUFSIZE, blocking, retry);
     if (bytes < 0)
     {   DEBUGNETLINK(
 	    if (bytes != -EAGAIN)
@@ -1778,28 +1784,28 @@ read_nl_msg(struct socket *sock, char (*buf)[8192], int blocking, int retry)
 /*! read a netlink neighbor packet from socket 'sock'
  */
 static int 
-read_rtnl_response(struct socket *sock, __u32 seq, ci_rtnl_msg_handler_t *hf,
+read_rtnl_response(cicp_nlsock_t *nlsock, ci_rtnl_msg_handler_t *hf,
                    cicpos_parse_state_t *session,
-		   ci_post_handling_fn_t *post_handling_fn)
+		   ci_post_handling_fn_t *post_handling_fn,
+                   char* buf)
 {
   int rc, bytes;
-  static char buf[8192];
   struct nlmsghdr *nlhdr;
 
   do {
 
     /* read an rtnetlink packet in non-blocking mode with retries */
-    rc = bytes = read_nl_msg(sock, &buf, 0, 1);
+    rc = bytes = read_nl_msg(nlsock->sock, buf, 0, 1);
     if (rc < 0) 
       return rc;
     else
     {	nlhdr = (struct nlmsghdr *)buf;
 	while (NLMSG_OK(nlhdr, bytes)) {
 
-	  if (nlhdr->nlmsg_seq != seq) {
+	  if (nlhdr->nlmsg_seq != nlsock->seq) {
 	    /* ignore unsolicited packets */
 	    ci_log("%s: Unsolicited netlink msg, msg_seq=%d, expected_seq=%d",
-		   __FUNCTION__, nlhdr->nlmsg_seq, seq);
+		   __FUNCTION__, nlhdr->nlmsg_seq, nlsock->seq);
 
 	  } else if (nlhdr->nlmsg_type == NLMSG_DONE) {
 	    /* NLMSG_DONE marks the end of a dump */
@@ -1845,14 +1851,13 @@ done:
  */
 ci_inline int
 rtnl_poll(struct socket *sock, ci_rtnl_msg_handler_t *hf,
-	  cicpos_parse_state_t *session)
+	  cicpos_parse_state_t *session, char* buf)
 {
   int rc, bytes;
-  static char buf[8192];
   struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
 
   /* read an rtnetlink packet in non-blocking mode without retries */
-  rc = bytes = read_nl_msg(sock, &buf, 0, 0);
+  rc = bytes = read_nl_msg(sock, buf, 0, 0);
   if (rc < 0) {
     if (rc != -ERESTART && rc != -EAGAIN)
       ci_log(CODEID": failed to read netlink message during poll, rc=%d", -rc);
@@ -1947,7 +1952,7 @@ int cicpos_running = 0;
 /*! Warning: this function is NOT re-entrant
  */
 static int
-efab_netlink_poll_for_updates(cicp_handle_t *control_plane)
+efab_netlink_poll_for_updates(cicp_handle_t *control_plane, char* buf)
 {   
   int rc;
   cicpos_parse_state_t *session = cicpos_parse_state_alloc(control_plane);
@@ -1958,7 +1963,7 @@ efab_netlink_poll_for_updates(cicp_handle_t *control_plane)
     cicpos_parse_init(session, control_plane);
 
     do
-      rc = rtnl_poll(NL_SOCKET, &cicpos_handle_rtnl_msg, session);
+      rc = rtnl_poll(NL_SOCKET, &cicpos_handle_rtnl_msg, session, buf);
     while( rc == 0 );
 
     cicpos_parse_state_free(session);
@@ -1974,12 +1979,13 @@ static void
 cicpos_worker(void *context_cplane)
 {
     static unsigned int count = 0;
+    static char buf[NL_BUFSIZE];
 
     if (cicpos_running)
     {	cicp_handle_t *control_plane = (cicp_handle_t *)context_cplane;
-        efab_netlink_poll_for_updates(control_plane);
+        efab_netlink_poll_for_updates(control_plane, buf);
 	if (count % 2 == 0)
-	    cicpos_dump_tables(control_plane, count%20);
+	    cicpos_dump_tables(control_plane, count%20, buf);
 	count++;
     }
 }
@@ -2395,20 +2401,21 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 
 ci_inline int /* rc */
-cicpos_dump_routet(struct socket *sock, ci_uint32 seq,
-		   cicpos_parse_state_t *session)
+cicpos_dump_routet(cicp_nlsock_t *nlsock,
+		   cicpos_parse_state_t *session, char *buf)
 {   int rc;
 
     /* request the route table */
-    if ((rc = request_table(sock, seq, RTM_GETROUTE)) < 0 ) 
+    if ((rc = request_table(nlsock, RTM_GETROUTE, buf)) < 0 ) 
 	ci_log(CODEID": route table request "
 	       "failed, rc %d", -rc);
 
     /* listen for reply */
-    else if ((rc = read_rtnl_response(sock, seq,
+    else if ((rc = read_rtnl_response(nlsock,
 				      &cicpos_handle_route_msg,
 				      session,
-				      &cicpos_route_post_poll))
+				      &cicpos_route_post_poll,
+                                      buf))
 	     < 0)
 	ci_log(CODEID": failed to read route table from "
 	       "rtnetlink, rc %d", -rc);
@@ -2759,20 +2766,21 @@ cicpos_mac_post_poll(cicpos_parse_state_t *session)
 
 
 ci_inline int /* rc */
-cicpos_dump_mact(struct socket *sock, ci_uint32 seq,
-		 cicpos_parse_state_t *session)
+cicpos_dump_mact(cicp_nlsock_t *nlsock,
+		 cicpos_parse_state_t *session, char *buf)
 {   int rc;
 
     if (cicpos_mact_open(session->control_plane))
     {   /* request the ARP table */
-	if ((rc = request_table(sock, seq, RTM_GETNEIGH)) < 0) 
+	if ((rc = request_table(nlsock, RTM_GETNEIGH, buf)) < 0) 
 	    ci_log(CODEID": arp table request failed, rc %d", rc);
 
 	/* listen for reply */
-	else if ((rc = read_rtnl_response(sock, seq,
+	else if ((rc = read_rtnl_response(nlsock,
 					  &cicpos_handle_mac_msg,
 					  session,
-					  &cicpos_mac_post_poll)) < 0)
+					  &cicpos_mac_post_poll,
+                                          buf)) < 0)
 	{   DEBUGNETLINK(DPRINTF(CODEID": reading of arp table from "
 				 "rtnetlink failed, rc %d", -rc));
 	}
@@ -2940,20 +2948,21 @@ cicpos_handle_llap_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 
 ci_inline int /* rc */
-cicpos_dump_llapt(struct socket *sock, ci_uint32 seq,
-		  cicpos_parse_state_t *session)
+cicpos_dump_llapt(cicp_nlsock_t *nlsock,
+		  cicpos_parse_state_t *session, char *buf)
 {   int rc;
 
     /* request the LLAP table */
-    if ((rc = request_table(sock, seq, RTM_GETLINK)) < 0 )
+    if ((rc = request_table(nlsock, RTM_GETLINK, buf)) < 0 )
 	ci_log(CODEID": route table request "
 	       "failed, rc %d", -rc);
 
     /* listen for reply */
-    else if ((rc = read_rtnl_response(sock, seq,
+    else if ((rc = read_rtnl_response(nlsock,
 				      &cicpos_handle_llap_msg,
 				      session,
-				      &cicpos_llap_post_poll))
+				      &cicpos_llap_post_poll,
+                                      buf))
 	     < 0)
 	ci_log(CODEID": failed to read links table from "
 	       "rtnetlink, rc %d", -rc);
@@ -3110,20 +3119,21 @@ cicpos_handle_ipif_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 
 ci_inline int /* rc */
-cicpos_dump_ipift(struct socket *sock, ci_uint32 seq,
-		  cicpos_parse_state_t *session)
+cicpos_dump_ipift(cicp_nlsock_t *nlsock,
+		  cicpos_parse_state_t *session, char *buf)
 {   int rc;
 
     /* request the list of ip interfaces */
-    if ((rc = request_table(sock, seq, RTM_GETADDR)) < 0 ) 
+    if ((rc = request_table(nlsock, RTM_GETADDR, buf)) < 0 ) 
 	ci_log(CODEID": ip interface list request "
 	       "failed, rc %d", -rc);
 	
     /* listen for reply */
-    else if ((rc = read_rtnl_response(sock, seq,
+    else if ((rc = read_rtnl_response(nlsock,
 				      &cicpos_handle_ipif_msg,
 				      session,
-				      &cicpos_ipif_post_poll)) < 0)
+				      &cicpos_ipif_post_poll,
+                                      buf)) < 0)
     ci_log(CODEID": reading of IP i/f list from rtnetlink "
 	   "failed, rc %d",  -rc);
 
@@ -3212,11 +3222,14 @@ cicpos_handle_rtnl_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
  *  If mac_only is set then only do an IP-MAC mapping update
  */
 static void
-cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only)
+cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only,
+                   char *buf)
 {   int rc;
     cicpos_parse_state_t *session;
-    struct socket *sock = NULL;
-    static __u32 seq = 1;
+    cicp_nlsock_t nlsock = {
+        .sock = NULL,
+        .seq = 1
+    };
 
     session = cicpos_parse_state_alloc(control_plane);
 
@@ -3230,7 +3243,7 @@ cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only)
     CICPOS_MAC_STAT_SET_POLLER_LAST_START(control_plane);
 
     /* setup socket */
-    if ((rc = create_netlink_socket(&sock)) < 0 )
+    if ((rc = create_netlink_socket(&nlsock.sock)) < 0 )
     {   ci_log(CODEID": failed to create netlink socket rc %d", rc);
 	kfree(session);
 	return;
@@ -3239,23 +3252,19 @@ cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only)
     /* We do address resolution updates more often than than route/llap
        etc. updates. */
     if (!mac_only) 
-    {   seq++;
-        session->nosort = CI_TRUE;
+    {   session->nosort = CI_TRUE;
 	/* Ignore rc: if we failed to parse one table, it is not
          * the end of the world. */
-	cicpos_dump_ipift(sock, seq, session);
-	seq++;
-	cicpos_dump_routet(sock, seq, session);
-	seq++;
-	cicpos_dump_llapt(sock, seq, session);
+	cicpos_dump_ipift(&nlsock, session, buf);
+	cicpos_dump_routet(&nlsock, session, buf);
+	cicpos_dump_llapt(&nlsock, session, buf);
     }
 
     /* MAC table is the largest one, and if we fail to read the full
      * answer we spoil all the next tables.  So, read it the last. */
-    seq++;
-    cicpos_dump_mact(sock, seq, session);
+    cicpos_dump_mact(&nlsock, session, buf);
 
-    sock_release(sock);
+    sock_release(nlsock.sock);
 
     CICPOS_MAC_STAT_SET_POLLER_LAST_END(control_plane);
 
@@ -3304,7 +3313,25 @@ cicpos_dtor(cicp_mibs_kern_t *control_plane)
 
 
 
+extern void
+cicpos_sync_tables(cicp_handle_t *control_plane)
+{
+    char *buf;
+    /* This function is called in process context, but wants to use a kernel
+     * buffer for a socket call, so we need to set use of kernel address
+     * space.
+     */
+    mm_segment_t fs = get_fs();
+    set_fs(get_ds());
 
+    buf = ci_alloc(NL_BUFSIZE);
 
+    if( buf ) {
+        /* sync all tables */
+        cicpos_dump_tables(control_plane, 0, buf);
+        ci_free(buf);
+    }
 
+    set_fs(fs);
+}
 

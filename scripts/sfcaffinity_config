@@ -126,6 +126,8 @@ class EthInterface(object):
 
     def is_ethernet(self):
         if self.__type is None:
+            if not os.path.isfile('/sys/class/net/%s/type' % self.name):
+                return False
             self.__type = file_get_int('/sys/class/net/%s/type' % self.name)
         return self.__type == 1
 

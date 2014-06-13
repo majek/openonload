@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -242,6 +242,8 @@ int ef_vi_alloc_from_set(ef_vi* vi, ef_driver_handle vi_dh,
 			 ef_vi* evq_opt, ef_driver_handle evq_dh,
 			 enum ef_vi_flags flags)
 {
+	if( vi_set->vis_pd->pd_flags & EF_PD_PHYS_MODE )
+		flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
 	return __ef_vi_alloc(vi, vi_dh,
 			     efch_make_resource_id(vi_set->vis_res_id),
 			     vi_set_dh, index_in_vi_set,

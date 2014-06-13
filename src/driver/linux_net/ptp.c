@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1919,32 +1919,47 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 #if defined(EFX_NOT_UPSTREAM)
 	unsigned int uuid_len;
 	u8 domain, *uuid;
-#if defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	struct efx_rx_buffer *rx_buff = channel->rx_pkt;
 #endif
-#endif
+	u8 *data = skb->data;
+	unsigned int len = skb->len;
 
 	match->expiry = jiffies + msecs_to_jiffies(PKT_EVENT_LIFETIME_MS);
 
+#if defined(EFX_NOT_UPSTREAM)
+	if (rx_buff->flags & EFX_RX_BUF_VLAN_XTAG) {
+#if !defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+		/* if we are not using fake vlan accel then we need
+		 * skip the vlan header for packet verification, but preserve
+		 * the headers such that the stack can then continue
+		 * as normal once we pass it on
+		 */
+		data = skb->data + VLAN_HLEN;
+		len = skb->len - VLAN_HLEN;
+#endif
+		match->vlan_tci = rx_buff->vlan_tci;
+	}
+	match->flags = rx_buff->flags;
+#endif
 	/* Correct version? */
 	if (ptp->mode == MC_CMD_PTP_MODE_V1) {
-		if (skb->len < PTP_V1_MIN_LENGTH) {
+		if (len < PTP_V1_MIN_LENGTH) {
 			return false;
 		}
-		version = ntohs(*(__be16 *)&skb->data[PTP_V1_VERSION_OFFSET]);
+		version = ntohs(*(__be16 *)&data[PTP_V1_VERSION_OFFSET]);
 		if (version != PTP_VERSION_V1) {
 			return false;
 		}
 		
 		/* PTP V1 uses all six bytes of the UUID to match the packet
 		 * to the timestamp */
-		match_data_012 = skb->data + PTP_V1_UUID_OFFSET;
-		match_data_345 = skb->data + PTP_V1_UUID_OFFSET + 3;
+		match_data_012 = data + PTP_V1_UUID_OFFSET;
+		match_data_345 = data + PTP_V1_UUID_OFFSET + 3;
 	} else {
-		if (skb->len < PTP_V2_MIN_LENGTH) {
+		if (len < PTP_V2_MIN_LENGTH) {
 			return false;
 		}
-		version = skb->data[PTP_V2_VERSION_OFFSET];
+		version = data[PTP_V2_VERSION_OFFSET];
 		if ((version & PTP_VERSION_V2_MASK) != PTP_VERSION_V2) {
 			return false;
 		}
@@ -1954,28 +1969,28 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 		 * two of the bytes of the MAC address used to create the UUID.
 		 * The PTP V2 enhanced mode fixes this issue and uses bytes 0-2
 		 * and byte 5-7 of the UUID. */
-		match_data_345 = skb->data + PTP_V2_UUID_OFFSET + 5;
+		match_data_345 = data + PTP_V2_UUID_OFFSET + 5;
 		if (ptp->mode == MC_CMD_PTP_MODE_V2) {
-			match_data_012 = skb->data + PTP_V2_UUID_OFFSET + 2;
+			match_data_012 = data + PTP_V2_UUID_OFFSET + 2;
 		} else {
-			match_data_012 = skb->data + PTP_V2_UUID_OFFSET + 0;
+			match_data_012 = data + PTP_V2_UUID_OFFSET + 0;
 			BUG_ON(ptp->mode != MC_CMD_PTP_MODE_V2_ENHANCED);
 		}
 	}
 
 	/* Does this packet require timestamping? */
-	if (ntohs(*(__be16 *)&skb->data[PTP_DPORT_OFFSET]) == PTP_EVENT_PORT) {
+	if (ntohs(*(__be16 *)&data[PTP_DPORT_OFFSET]) == PTP_EVENT_PORT) {
 		struct skb_shared_hwtstamps *timestamps;
 
 #if defined(EFX_NOT_UPSTREAM)
 		if (ptp->mode == MC_CMD_PTP_MODE_V1) {
-			uuid = &skb->data[PTP_V1_UUID_OFFSET];
+			uuid = &data[PTP_V1_UUID_OFFSET];
 			uuid_len = PTP_V1_UUID_LENGTH;
 		} else {
-			uuid = &skb->data[PTP_V2_UUID_OFFSET];
+			uuid = &data[PTP_V2_UUID_OFFSET];
 			uuid_len = PTP_V2_UUID_LENGTH;
 			
-			domain = skb->data[PTP_V2_DOMAIN_OFFSET];
+			domain = data[PTP_V2_DOMAIN_OFFSET];
 			if (ptp->domain_filter.enable &&
 			    (ptp->domain_filter.domain != domain)) {
 				return false;
@@ -1987,7 +2002,6 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 			return false;
 		}
 
-#if defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 		/* bug 33071 only singly tagged VLAN packets are currently
 		 * supported for PTP. */
 		if (((rx_buff->flags & EFX_RX_BUF_VLAN_XTAG) == 0) &&
@@ -2001,7 +2015,7 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 		      (rx_buff->vlan_tci & VLAN_TAG_MASK)))) {
 			return false;
 		}
-#endif
+
 #endif
 		
 		match->state = PTP_PACKET_STATE_UNMATCHED;
@@ -2022,18 +2036,12 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 				   (match_data_345[0] << 24));
 		match->words[1] = (match_data_345[1]         |
 				   (match_data_345[2] << 8)  |
-				   (skb->data[PTP_V1_SEQUENCE_OFFSET +
+				   (data[PTP_V1_SEQUENCE_OFFSET +
 					      PTP_V1_SEQUENCE_LENGTH - 1] <<
 				    16));
 	} else {
 		match->state = PTP_PACKET_STATE_MATCH_UNWANTED;
 	}
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
-	if (rx_buff->flags & EFX_RX_BUF_VLAN_XTAG) {
-		match->vlan_tci = rx_buff->vlan_tci;
-		match->flags = rx_buff->flags;
-	}
-#endif
 
 	skb_queue_tail(&ptp->rxq, skb);
 	queue_work(ptp->workwq, &ptp->work);

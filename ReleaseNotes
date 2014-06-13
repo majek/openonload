@@ -1,13 +1,14 @@
-OpenOnload 201210-u2 Release Notes
+
+OpenOnload 201210-u3 Release Notes
 ==================================
 
- This is an update release that fixes bugs in openonload-201210-u1 and adds a
- few enhancements.
+ This is an update release that fixes bugs in openonload-201210-u2.
 
  Please see the ChangeLog file for details of the changes in this release.
  See ReleaseNotes-sfc for details of changes to the sfc net driver.
 
  The release notes for the openonload-201210-u1 release are included below.
+
 
 ----------------------------------------
 Linux 3.10 support

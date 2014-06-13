@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -465,6 +465,20 @@ CI_CFG_OPT("EF_USE_HUGE_PAGES", huge_pages, ci_uint32,
 "free huge pages.",
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
+
+CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
+"When this option is set to 2 Onload will force a sync of control plane "
+"information from the kernel when a stack is created.  This can help to "
+"ensure up to date information is used where a stack is created immediately "
+"following interface configuration."
+"\n"
+"If this option is set to 1 then Onload will only force a sync for the first "
+"stack created.  This can be used if stack creation time for later stacks "
+"is time critical."
+"\n"
+"Setting this option to 0 will disable forced sync.  Synchronising data from "
+"the kernel will continue to happen periodically.",
+           2, , 2, 0, 2, oneof:never;first;always)
 
 CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
 "A bitmask specifying the TCP options to advertise in SYN segments.\n"

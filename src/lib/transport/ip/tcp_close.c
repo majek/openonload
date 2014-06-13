@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -96,6 +96,8 @@ int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif, int can_block)
   if( can_block ) {
     int is_locked = 1;
     pkt = ci_netif_pkt_alloc_block(netif, &is_locked);
+    if (pkt)
+      --netif->state->n_async_pkts;
     ci_assert(is_locked);
     ci_assert(pkt != NULL);
   }

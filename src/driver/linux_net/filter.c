@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1216,10 +1216,8 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	struct efx_filter_spec spec;
 	const struct iphdr *ip;
 	const __be16 *ports;
-	int nhoff;
+	int nhoff = 0;
 	int rc;
-
-	nhoff = skb_network_offset(skb);
 
 	if (skb->protocol != htons(ETH_P_IP))
 		return -EPROTONOSUPPORT;

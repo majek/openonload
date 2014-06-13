@@ -1,3 +1,20 @@
+
+openonload-201210-u3
+--------------------
+
+Updated sfc net driver to v3_3_3_6329
+bug37899, bug23309: Fix EPOLLET and EPOLLONESHOT issues.
+bug38714: Fix range check when allocating a VI from a set.
+bug38900: Fix Onload RPM build on Oracle Server distro.
+bug39730: Fix crash when ef_vi_set_alloc_from_pd is used with phys-mode.
+bug37995: Fix sfcaffinity_config when bonded interfaces present
+bug41751: Fix bogus error message due to uninitialised variable.
+bug40844: Force a sync of cplane state from kernel when first stack is created.
+task40782: Disable interrupt DoS protection, as possibly causing bad perf.
+cleanup: Fix n_async_pkts counter in stackdump going up constantly.
+cleanup: EF_DEFER_WORK_LIMIT was not logged in stackdump.  Is now.
+
+
 openonload-201210-u2
 --------------------
 

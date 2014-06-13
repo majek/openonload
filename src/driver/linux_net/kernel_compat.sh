@@ -247,6 +247,7 @@ EFX_NEED_KOBJECT_SET_NAME_VARGS		nsymbol kobject_set_name_vargs	include/linux/ko
 EFX_USE_ETHTOOL_OPS_EXT			symbol	ethtool_ops_ext		include/linux/ethtool.h
 EFX_HAVE_OLD___VLAN_PUT_TAG		symtype	__vlan_put_tag		include/linux/if_vlan.h	struct sk_buff *(struct sk_buff *, u16)
 EFX_HAVE_NETDEV_NOTIFIER_NETDEV_PTR	nsymbol	netdev_notifier_info	include/linux/netdevice.h
+EFX_HAVE_NETDEV_RFS_INFO		symbol	netdev_rfs_info		include/linux/netdevice.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h

@@ -38,7 +38,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201210-u2
+%define pkgversion 201210-u3
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -53,7 +53,7 @@
 # Determine distro
 %if %{have_lsb}
 # '\' signs are not recognised by RedHat 4 rpm
-%define redhat %(lsb_release -is | grep -i -e RedHat -e Cent -e Fedora > /dev/null && echo 1; lsb_release -is | grep -i SUSE > /dev/null && echo 0)
+%define redhat %(lsb_release -is | grep -qi -e redhat -e cent -e fedora -e oracle && echo 1; lsb_release -is | grep -qi suse && echo 0)
 
 %define thisdist %(lsb_release -rs | cut -d. -f1)
 # Do we really need this? Why?

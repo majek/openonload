@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,6 +60,7 @@ static int __ef_vi_set_alloc(ef_vi_set* viset, ef_driver_handle dh,
 		return rc;
 	}
 	viset->vis_res_id = ra.out_id.index;
+	viset->vis_pd = NULL;
 	return rc;
 }
 
@@ -75,5 +76,7 @@ int ef_vi_set_alloc_from_pd(ef_vi_set* viset, ef_driver_handle dh,
 			    ef_pd* pd, ef_driver_handle pd_dh,
 			    int n_vis)
 {
-	return __ef_vi_set_alloc(viset, dh, pd, pd_dh, -1, n_vis);
+	int rc = __ef_vi_set_alloc(viset, dh, pd, pd_dh, -1, n_vis);
+	viset->vis_pd = pd;
+	return rc;
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -343,8 +343,9 @@ static void efx_resurrect_rx_buffer(struct efx_rx_queue *rx_queue,
 
 	index = rx_queue->added_count & rx_queue->ptr_mask;
 	new_buf = efx_rx_buffer(rx_queue, index);
-	new_buf->dma_addr = rx_buf->dma_addr ^ (PAGE_SIZE >> 1);
 	new_buf->u.page = rx_buf->u.page;
+	new_buf->page_offset = rx_buf->page_offset ^ (PAGE_SIZE >> 1);
+	new_buf->dma_addr = state->dma_addr + new_buf->page_offset;
 	new_buf->len = rx_buf->len;
 	new_buf->flags = EFX_RX_BUF_PAGE;
 	++rx_queue->added_count;
@@ -734,7 +735,7 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 #endif
 
 	if (channel->type->receive_skb)
-                if (channel->type->receive_skb(channel, skb))
+		if (channel->type->receive_skb(channel, skb))
 			goto handled;
 
 	/* Pass the packet up */
@@ -767,7 +768,8 @@ void __efx_rx_packet(struct efx_channel *channel, struct efx_rx_buffer *rx_buf)
 		return;
 	}
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if defined(EFX_NOT_UPSTREAM)
+#if defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	if ((rx_buf->flags & EFX_RX_PKT_VLAN) && efx->vlan_group) {
 		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)eh;
 		unsigned int hash_size =
@@ -780,6 +782,13 @@ void __efx_rx_packet(struct efx_channel *channel, struct efx_rx_buffer *rx_buf)
 		rx_buf->len -= VLAN_HLEN;
 		rx_buf->flags |= EFX_RX_BUF_VLAN_XTAG;
 	}
+#else
+	if ((rx_buf->flags & EFX_RX_PKT_VLAN)) {
+		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)eh;
+		rx_buf->vlan_tci = ntohs(veh->h_vlan_TCI);
+		rx_buf->flags |= EFX_RX_BUF_VLAN_XTAG;
+	}
+#endif
 #endif
 
 	if (!(rx_buf->flags & EFX_RX_BUF_PAGE)) {

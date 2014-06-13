@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1584,6 +1584,10 @@
 #define        MC_CMD_GET_LINK_OUT_BPX_LINK_WIDTH 1
 #define        MC_CMD_GET_LINK_OUT_PHY_LINK_LBN 3
 #define        MC_CMD_GET_LINK_OUT_PHY_LINK_WIDTH 1
+#define        MC_CMD_GET_LINK_OUT_LINK_FAULT_RX_LBN 6
+#define        MC_CMD_GET_LINK_OUT_LINK_FAULT_RX_WIDTH 1
+#define        MC_CMD_GET_LINK_OUT_LINK_FAULT_TX_LBN 7
+#define        MC_CMD_GET_LINK_OUT_LINK_FAULT_TX_WIDTH 1
 #define       MC_CMD_GET_LINK_OUT_FCNTL_OFST 20
 #define          MC_CMD_FCNTL_OFF 0x0 /* enum */
 #define          MC_CMD_FCNTL_RESPOND 0x1 /* enum */

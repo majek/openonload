@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,8 +45,10 @@ int apply_fcntl_to_os_sock(citp_sock_fdi* epi, int fd,
   int rc;
 
   if( (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) &&
-      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) )
+      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
+    *fcntl_result = 0;
     return 0;
+  }
 
   rc = ci_get_os_sock_fd(&epi->sock, fd);
   if( CI_IS_VALID_SOCKET(rc)) {

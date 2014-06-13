@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -165,12 +165,15 @@
 	#define ETH_FLAG_RXHASH 0
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
-	/* Prior to Linux 3.0, NETIF_F_NTUPLE was taken to mean that
-	 * ethtool_ops::set_rx_ntuple was set, which is not the case in
-	 * this driver.  Therefore, we prevent the feature from being
-	 * set even if it is defined.
-	 */
+/* Older kernel versions assume that a device with the NETIF_F_NTUPLE
+ * feature implements ethtool_ops::set_rx_ntuple, which is not the
+ * case in this driver.  If we enable this feature on those kernel
+ * versions, 'ethtool -U' will crash.  Therefore we prevent the
+ * feature from being set even if it is defined, unless this is a safe
+ * version: Linux 3.0+ or RHEL 6 with backported RX NFC and ARFS
+ * support.
+ */
+#if !defined(NETIF_F_NTUPLE) || (LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0) && RHEL_MAJOR != 6)
 	#undef NETIF_F_NTUPLE
 	#define NETIF_F_NTUPLE 0
 	#undef ETH_FLAG_NTUPLE

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,7 +77,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"3.3.0.6309"
+#define EFX_DRIVER_VERSION	"3.3.3.6329"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -304,9 +304,10 @@ struct efx_rx_buffer {
 	u16 page_offset;
 	u16 len;
 	u16 flags;
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if defined(EFX_NOT_UPSTREAM)
 	/* VLAN tag in host byte order.  Iff the EFX_RX_PKT_VLAN_XTAG
-	 * flag is set, the tag has been moved here.
+	 * flag is set, the tag has been moved here. If EFX_USE_FAKE_VLAN_RX_ACCEL
+	 * is not defined that the tag is copied here.
 	 */
 	u16 vlan_tci;
 #define EFX_RX_BUF_VLAN_XTAG	0x8000

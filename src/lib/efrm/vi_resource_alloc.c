@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -359,7 +359,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 					    /* make siena look like falcon */
 					    instance < 64 ||
 					    efrm_pd_get_vf(virs->pd),
-					    1 /* DOS protection */);
+					    0 /* DOS protection */);
 		break;
 	default:
 		EFRM_ASSERT(0);
@@ -678,9 +678,8 @@ int efrm_vi_attr_set_instance(struct efrm_vi_attr *attr,
 			      int instance_in_set)
 {
 	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
-	int end_of_set = vi_set->allocation.instance
-		+ (1 << vi_set->allocation.order);
-	if (instance_in_set >= 0 && instance_in_set < end_of_set) {
+	int set_size = 1 << vi_set->allocation.order;
+	if (instance_in_set >= 0 && instance_in_set < set_size) {
 		a->vi_set = vi_set;
 		a->vi_set_instance = instance_in_set;
 		return 0;

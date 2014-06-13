@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -642,6 +642,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_USE_HUGE_PAGES")) )
     opts->huge_pages = atoi(s);
 #endif
+  if ( (s = getenv("EF_SYNC_CPLANE_AT_CREATE")) ) {
+    opts->sync_cplane = atoi(s);
+  }
   if ( (s = getenv("EF_MAX_ENDPOINTS")) ) {
     ci_uint32 max_ep_bufs = atoi(s);
     ci_uint32 max_ep_bufs_lg2 = ci_log2_ge(max_ep_bufs, 1);
@@ -946,6 +949,7 @@ void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
     DISP_VAL_OPT_DEFAULT("EF_RXQ_MIN", , rxq_min, "%u")
     DISP_VAL_OPT_DEFAULT("EF_MIN_FREE_PACKETS", , min_free_packets, "%u")
     DISP_VAL_OPT_DEFAULT("EF_PREFAULT_PACKETS", , prefault_packets, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_SYNC_CPLANE_AT_CREATE", , sync_cplane, "%u")
     
     if(opts->max_ep_bufs_ln2 == defaults.max_ep_bufs_ln2)
       ci_log("%26s: %lu", "EF_MAX_ENDPOINTS",
@@ -961,6 +965,7 @@ void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
     DISP_VAL_OPT_DEFAULT("EF_TXQ_LIMIT", , txq_limit, "%u")
     DISP_VAL_OPT_DEFAULT("EF_SEND_POLL_THRESH", , send_poll_thresh, "%u")
     DISP_VAL_OPT_DEFAULT("EF_SEND_POLL_MAX_EVS", , send_poll_max_events, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_DEFER_WORK_LIMIT", , defer_work_limit, "%u")
 #if CI_CFG_UDP
     DISP_VAL_OPT_DEFAULT("EF_UDP_SEND_UNLOCK_THRESH", ,
                          udp_send_unlock_thresh, "%u")

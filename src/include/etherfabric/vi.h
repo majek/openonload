@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -145,7 +145,8 @@ extern int ef_eventq_put(unsigned resource_id,
  **********************************************************************/
 
 typedef struct {
-	unsigned vis_res_id;
+	unsigned      vis_res_id;
+	struct ef_pd* vis_pd;
 } ef_vi_set;
 
 

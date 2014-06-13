@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -118,6 +118,12 @@ necessary.  It is not clear if such approach makes things faster.
 
 
 #define EP_NOT_REGISTERED  ((unsigned) -1)
+
+
+/* In the same namespace as EPOLLIN etc.  Assumed not to collide with any
+ * useful events!
+ */
+#define OO_EPOLL_FORCE_SYNC  (1 << 27)
 
 
 #define EPOLL_CTL_FMT  "%d, %s, %d, %x, %llx"
@@ -318,8 +324,21 @@ int citp_epoll_create(int size, int flags)
 /* Reset edge-triggering status of the eitem */
 ci_inline void citp_eitem_reset_epollet(struct citp_epoll_member* eitem)
 {
-  eitem->reported_sleep_seq.rw.rx = 0;
-  eitem->reported_sleep_seq.rw.tx = CI_SLEEP_SEQ_NEVER;
+  if( eitem->epoll_data.events & (EPOLLET | EPOLLONESHOT) ) {
+    /* Only needed for EPOLLET and harmless otherwise.
+     *
+     * FIXME: We should really initialise these to the underlying sleep_seq
+     * minus 1.  If very unlucky the current sleep_seq could match these
+     * values...
+     */
+    eitem->reported_sleep_seq.rw.rx = 0;
+    eitem->reported_sleep_seq.rw.tx = CI_SLEEP_SEQ_NEVER;
+    /* User is arming or re-arming ET or ONESHOT.  If not adding, we have
+     * no idea whether these are still armed in the kernel set, so we must
+     * re-sync before doing a wait.
+     */
+    eitem->epoll_data.events |= OO_EPOLL_FORCE_SYNC;
+  }
 }
 
 
@@ -391,17 +410,13 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
         eitem = CI_ALLOC_OBJ(struct citp_epoll_member);
         eitem->epoll_data = *event;
         eitem->epoll_data.events |= EPOLLERR | EPOLLHUP;
-        if( sync_kernel ) {
-          eitem->epfd_event = eitem->epoll_data;
-        }
-        else {
+        citp_eitem_reset_epollet(eitem);
+        if( ! sync_kernel ) {
           eitem->epfd_event.events = EP_NOT_REGISTERED;
           ++ep->epfd_syncs_needed;
         }
         eitem->fd = fd_fdi->fd;
         eitem->fdi_seq = fd_fdi->seq;
-        citp_eitem_reset_epollet(eitem);
-        ci_dllist_push(&ep->oo_sockets, &eitem->dllink);
       }
       else {
         /* Re-added having previously been deleted (but delete did not
@@ -409,16 +424,14 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
          */
         eitem->epoll_data = *event;
         eitem->epoll_data.events |= EPOLLERR | EPOLLHUP;
-        if( sync_kernel ) {
-          eitem->epfd_event = eitem->epoll_data;
+        citp_eitem_reset_epollet(eitem);
+        if( sync_kernel )
           sync_op = EPOLL_CTL_MOD;
-        }
-        else if( ! citp_eitem_is_synced(eitem) ) {
+        else if( ! citp_eitem_is_synced(eitem) )
           ++ep->epfd_syncs_needed;
-        }
         ci_dllist_remove(&eitem->dllink);
-        ci_dllist_push(&ep->oo_sockets, &eitem->dllink);
       }
+      ci_dllist_push(&ep->oo_sockets, &eitem->dllink);
       /* Remember that this fd has been added to this epoll set.  This
        * is needed to handle accelerated fds being handed over to
        * kernel.
@@ -435,14 +448,13 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
     if(CI_LIKELY( eitem != NULL )) {
       eitem->epoll_data = *event;
       eitem->epoll_data.events |= EPOLLERR | EPOLLHUP;
+      citp_eitem_reset_epollet(eitem);
       if( sync_kernel ) {
         if( eitem->epfd_event.events == EP_NOT_REGISTERED )
           sync_op = EPOLL_CTL_ADD;
-        eitem->epfd_event = eitem->epoll_data;
       }
       else if( ! citp_eitem_is_synced(eitem) )
         ++ep->epfd_syncs_needed;
-      citp_eitem_reset_epollet(eitem);
       /* Reinsert at front to exploit locality of reference if there
        * are many sockets and EPOLL_CTL_MOD is frequent.
        */
@@ -489,6 +501,8 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
                    __FUNCTION__,
                    EPOLL_CTL_ARGS(epoll_fd, op, fd_fdi->fd, event),
                    citp_epoll_op_str(sync_op), errno));
+    eitem->epoll_data.events &= ~OO_EPOLL_FORCE_SYNC;
+    eitem->epfd_event = eitem->epoll_data;
   }
   else {
     Log_POLL(ci_log("%s("EPOLL_CTL_FMT"): rc=%d errno=%d", __FUNCTION__,
@@ -686,8 +700,6 @@ int citp_epoll_ctl(citp_fdinfo* fdi, int op, int fd, struct epoll_event *event)
 }
 
 
-/* Let's hope linux people will not reuse it! */
-#define EPOLL_SYNC_ALWAYS (1 << 28)
 static void citp_ul_epoll_ctl_sync_fd(int epfd,
                                       struct citp_epoll_member* eitem)
 {
@@ -709,19 +721,14 @@ static void citp_ul_epoll_ctl_sync_fd(int epfd,
                   __FUNCTION__,
                   EPOLL_CTL_ARGS(epfd, op, eitem->fd, &eitem->epoll_data),
                   eitem->epfd_event.events));
+  eitem->epoll_data.events &= ~OO_EPOLL_FORCE_SYNC;
+  eitem->epfd_event = eitem->epoll_data;
   rc = ci_sys_epoll_ctl(epfd, op, eitem->fd, &eitem->epoll_data);
   if( rc < 0 )
     Log_E(ci_log("%s: ERROR: sys_epoll_ctl("EPOLL_CTL_FMT") failed (%d,%d)",
                  __FUNCTION__,
                  EPOLL_CTL_ARGS(epfd, op, eitem->fd, &eitem->epoll_data),
                  rc, errno));
-  eitem->epfd_event = eitem->epoll_data;
-
-  /* If user re-arms events with EPOLLET or EPOLLONESHOT, we should pass it
-   * to kernel, even if "events" field is the same.
-   */
-  if( eitem->epoll_data.events & (EPOLLET | EPOLLONESHOT) )
-    eitem->epfd_event.events |= EPOLL_SYNC_ALWAYS;
 }
 
 static inline citp_fdinfo * 
@@ -875,8 +882,11 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
   int pwait_was_spinning = 0;
 #endif
 
-  Log_POLL(ci_log("%s(%d, maxevents=%d, timeout=%d)", __FUNCTION__,
-                  fdi->fd, maxevents, timeout));
+  Log_POLL(ci_log("%s(%d, max_ev=%d, timeout=%d) ul=%d dead=%d syncs=%d",
+                  __FUNCTION__, fdi->fd, maxevents, timeout,
+                  ! ci_dllist_is_empty(&ep->oo_sockets),
+                  ! ci_dllist_is_empty(&ep->dead_sockets),
+                  ep->epfd_syncs_needed));
 
   CITP_EPOLL_EP_LOCK(ep);
 
@@ -1138,13 +1148,13 @@ citp_ul_epoll_store_event(struct oo_ul_epoll_state*__restrict__ eps,
   ++eps->events;
 
   ci_dllist_remove(&eitem->dllink);
-  if( eitem->epoll_data.events & EPOLLONESHOT ) {
-    eitem->epoll_data.events = EPOLLONESHOT;
-    if( eitem->epfd_event.events != EP_NOT_REGISTERED )
-      eitem->epfd_event.events = EPOLLONESHOT;
-  }
   if( eitem->epoll_data.events & (EPOLLONESHOT | EPOLLET) )
     eps->has_epollet = 1;
+  if( eitem->epoll_data.events & EPOLLONESHOT ) {
+    eitem->epoll_data.events = 0;
+    if( ! citp_eitem_is_synced(eitem) )
+      ++(eps->ep->epfd_syncs_needed);
+  }
   ci_dllist_push_tail(&eps->ep->oo_sockets, &eitem->dllink);
 }
 
