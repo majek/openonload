@@ -39,7 +39,7 @@ unsigned ef_iobufset_dimension(ef_iobufset* bufs, int size, int num,
 {
   uint32_t log2_size, size_r, n_pages;
 
-  BUG_ON(size <= 0);
+  EF_VI_BUG_ON(size <= 0);
 
   /* size of individual buffers is aligned */
   size = EF_VI_ROUND_UP(size, align);
@@ -68,7 +68,7 @@ unsigned ef_iobufset_dimension(ef_iobufset* bufs, int size, int num,
 void ef_iobufset_init(ef_iobufset* bufs, ef_addr bufaddr,
                       void* ptr, int offset)
 {
-  BUG_ON(ptr == NULL);
+  EF_VI_BUG_ON(ptr == NULL);
 
 #ifdef __KERNEL__
   bufs->bufs_ptr_off = offset;

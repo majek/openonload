@@ -40,9 +40,9 @@ static void ef_eventq_timer_poke(ef_vi* q, unsigned v)
 void ef_eventq_timer_prime(ef_vi* q, unsigned v)
 {
   int vv = (((v * 1000) + q->timer_quantum_ns - 1) / q->timer_quantum_ns);
-  BUG_ON(v <= 0);
-  BUG_ON(vv <= 0);
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
+  EF_VI_BUG_ON(v <= 0);
+  EF_VI_BUG_ON(vv <= 0);
+  EF_VI_BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
   if( q->nic_type.variant >= 'C' )
     ef_eventq_timer_poke(q, vv | EFVI_FALCON_CZ_EVQTIMER_HOLD);
   else
@@ -53,9 +53,9 @@ void ef_eventq_timer_prime(ef_vi* q, unsigned v)
 void ef_eventq_timer_run(ef_vi* q, unsigned v)
 {
   int vv = (((v * 1000) + q->timer_quantum_ns - 1) / q->timer_quantum_ns);
-  BUG_ON(v <= 0);
-  BUG_ON(vv <= 0);
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
+  EF_VI_BUG_ON(v <= 0);
+  EF_VI_BUG_ON(vv <= 0);
+  EF_VI_BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
   if( q->nic_type.variant >= 'C' )
     ef_eventq_timer_poke(q, vv | EFVI_FALCON_CZ_EVQTIMER_RUN);
   else
@@ -65,7 +65,7 @@ void ef_eventq_timer_run(ef_vi* q, unsigned v)
 
 void ef_eventq_timer_clear(ef_vi* q)
 {
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
+  EF_VI_BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
   if( q->nic_type.variant >= 'C' )
     ef_eventq_timer_poke(q, EFVI_FALCON_CZ_EVQTIMER_DISABLE);
   else
@@ -75,7 +75,7 @@ void ef_eventq_timer_clear(ef_vi* q)
 
 void ef_eventq_timer_zero(ef_vi* q)
 {
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
+  EF_VI_BUG_ON(q->nic_type.arch != EF_VI_ARCH_FALCON);
   if( q->nic_type.variant >= 'C' )
     ef_eventq_timer_poke(q, 1u | EFVI_FALCON_CZ_EVQTIMER_HOLD);
   else

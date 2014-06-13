@@ -43,11 +43,11 @@ int ef_iobufset_alloc(ef_iobufset* bufs, ef_driver_handle bufs_dh,
   void* p;
   int rc;
 
-  BUG_ON(size <= 0);
-  BUG_ON(num <= 0);
-  BUG_ON(!EF_VI_IS_POW2(align));
-  BUG_ON(align < 1);
-  BUG_ON(offset < 0);
+  EF_VI_BUG_ON(size <= 0);
+  EF_VI_BUG_ON(num <= 0);
+  EF_VI_BUG_ON(!EF_VI_IS_POW2(align));
+  EF_VI_BUG_ON(align < 1);
+  EF_VI_BUG_ON(offset < 0);
 
   memset(&ra, 0, sizeof(ra));
   strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));

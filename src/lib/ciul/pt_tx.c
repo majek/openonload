@@ -81,15 +81,15 @@ int ef_vi_transmit_unbundle(ef_vi* vi, const ef_event* ev,
 	ef_vi_txq_state* qs = &vi->ep_state->txq;
 	unsigned i, stop = ev->tx.desc_id & q->mask;
 
-	BUG_ON(EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_TX &&
-               EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_TX_ERROR);
+	EF_VI_BUG_ON(EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_TX &&
+		     EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_TX_ERROR);
 
 	/* Shouldn't be batching more than 64 descriptors, and should not go
 	** backwards. */
-	BUG_ON(((ev->tx.desc_id - qs->removed) & q->mask) > 64);
+	EF_VI_BUG_ON(((ev->tx.desc_id - qs->removed) & q->mask) > 64);
 	/* Should not complete more than we've posted. */
-	BUG_ON(((ev->tx.desc_id - qs->removed) & q->mask) >
-               qs->added - qs->removed);
+	EF_VI_BUG_ON(((ev->tx.desc_id - qs->removed) & q->mask) >
+		     qs->added - qs->removed);
 
 	for( i = qs->removed & q->mask; i != stop; i = ++qs->removed & q->mask )
 		if( q->ids[i] != EF_REQUEST_ID_MASK ) {
@@ -97,7 +97,7 @@ int ef_vi_transmit_unbundle(ef_vi* vi, const ef_event* ev,
 			q->ids[i] = EF_REQUEST_ID_MASK;
 		}
 
-	BUG_ON(ids - ids_in > EF_VI_TRANSMIT_BATCH);
+	EF_VI_BUG_ON(ids - ids_in > EF_VI_TRANSMIT_BATCH);
 	return (int) (ids - ids_in);
 }
 

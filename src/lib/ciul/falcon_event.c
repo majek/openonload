@@ -231,8 +231,8 @@ int ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 	int evs_len_orig = evs_len;
 	ef_vi_qword *pev, ev;
 
-	BUG_ON(evs == NULL);
-	BUG_ON(evs_len < EF_VI_EVENT_POLL_MIN_EVS);
+	EF_VI_BUG_ON(evs == NULL);
+	EF_VI_BUG_ON(evs_len < EF_VI_EVENT_POLL_MIN_EVS);
 
 	if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -1)) ))
 		goto overflow;
@@ -253,7 +253,7 @@ not_empty:
 
 		/* Ugly: Exploit the fact that event code lies in top bits
 		 * of event. */
-		BUG_ON(EV_CODE_LBN < 32u);
+		EF_VI_BUG_ON(EV_CODE_LBN < 32u);
 		switch( ev.u32[1] >> (EV_CODE_LBN - 32u) ) {
 		case RX_IP_EV_DECODE:
 			falcon_rx_event(evq, &ev, &evs, &evs_len);
@@ -308,7 +308,7 @@ int ef_eventq_has_event(ef_vi* vi)
 
 int ef_eventq_has_many_events(ef_vi* vi, int look_ahead)
 {
-	BUG_ON(look_ahead < 0);
+	EF_VI_BUG_ON(look_ahead < 0);
 	return EF_VI_IS_EVENT(EF_VI_EVENT_PTR(vi, look_ahead));
 }
 

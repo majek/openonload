@@ -165,7 +165,7 @@ __falcon_dma_rx_calc_ip_buf(unsigned buf_id, unsigned buf_ofs,
 			    ef_vi_falcon_dma_rx_buf_desc *desc)
 { 
 	/* check alignment of buffer offset and pack */
-	BUG_ON((buf_ofs & 0x1) != 0);
+	EF_VI_BUG_ON((buf_ofs & 0x1) != 0);
 
 	buf_ofs >>= 1;
 
@@ -214,7 +214,7 @@ ef_vi_inline ef_vi_dma_addr_t ef_physaddr(ef_addr efaddr)
 */
 ef_vi_inline ef_vi_buffer_addr_t ef_bufaddr(ef_addr efaddr)
 {
-	BUG_ON(efaddr >= ((uint64_t)1 << 32));
+	EF_VI_BUG_ON(efaddr >= ((uint64_t)1 << 32));
 
 	return (ef_vi_buffer_addr_t) efaddr;
 }
@@ -260,8 +260,8 @@ void falcon_vi_init(ef_vi* vi, void* vvis)
 	struct vi_mappings *vm = (struct vi_mappings*)vvis;
 	uint32_t* ids;
 
-	BUG_ON(vm->signature != VI_MAPPING_SIGNATURE);
-	BUG_ON(vm->nic_type.arch != EF_VI_ARCH_FALCON);
+	EF_VI_BUG_ON(vm->signature != VI_MAPPING_SIGNATURE);
+	EF_VI_BUG_ON(vm->nic_type.arch != EF_VI_ARCH_FALCON);
 
 	/* Initialise masks to zero, so that ef_vi_state_init() will
 	** not do any harm when we don't have DMA queues. */
@@ -281,10 +281,10 @@ void falcon_vi_init(ef_vi* vi, void* vvis)
 		vi->vi_txq.ids = ids;
 		ids += vi->vi_txq.mask + 1;
 		/* Check that the id fifo fits in the space allocated. */
-		BUG_ON((char*) (vi->vi_txq.ids + vm->tx_queue_capacity) >
-                       (char*) vi->ep_state
-                       + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
-                                                vm->tx_queue_capacity));
+		EF_VI_BUG_ON((char*) (vi->vi_txq.ids + vm->tx_queue_capacity) >
+			     (char*) vi->ep_state
+			     + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
+						      vm->tx_queue_capacity));
 	}
 	if( vm->rx_queue_capacity ) {
 		vi->vi_rxq.mask = vm->rx_queue_capacity - 1;
@@ -292,10 +292,10 @@ void falcon_vi_init(ef_vi* vi, void* vvis)
 		vi->vi_rxq.descriptors = vm->rx_dma_falcon;
 		vi->vi_rxq.ids = ids;
 		/* Check that the id fifo fits in the space allocated. */
-		BUG_ON((char*) (vi->vi_rxq.ids + vm->rx_queue_capacity) >
-                       (char*) vi->ep_state
-                       + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
-                                                vm->tx_queue_capacity));
+		EF_VI_BUG_ON((char*) (vi->vi_rxq.ids + vm->rx_queue_capacity) >
+			     (char*) vi->ep_state
+			     + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
+						      vm->tx_queue_capacity));
 	}
 }
 
@@ -311,9 +311,9 @@ int ef_vi_transmitv_init(ef_vi* vi, const ef_iovec* iov, int iov_len,
 	ef_addr dma_addr;
 	unsigned last_len = 0;
 
-	BUG_ON(iov_len <= 0);
-	BUG_ON((dma_id & EF_REQUEST_ID_MASK) != dma_id);
-	BUG_ON(dma_id == 0xffff);
+	EF_VI_BUG_ON(iov_len <= 0);
+	EF_VI_BUG_ON((dma_id & EF_REQUEST_ID_MASK) != dma_id);
+	EF_VI_BUG_ON(dma_id == 0xffffffff);
 
 	dma_addr = iov->iov_base;
 	len = iov->iov_len;
@@ -321,10 +321,10 @@ int ef_vi_transmitv_init(ef_vi* vi, const ef_iovec* iov, int iov_len,
 	if( vi->vi_flags & EF_VI_ISCSI_TX_DDIG ) {
 		/* Last 4 bytes of placeholder for digest must be
 		 * removed for h/w */
-		BUG_ON(len <= 4);
+		EF_VI_BUG_ON(len <= 4);
 		last_len = iov[iov_len - 1].iov_len;
 		if( last_len <= 4 ) {
-			BUG_ON(iov_len <= 1);
+			EF_VI_BUG_ON(iov_len <= 1);
 			--iov_len;
 			last_len = iov[iov_len - 1].iov_len - (4 - last_len);
 		}
@@ -371,7 +371,7 @@ int ef_vi_transmitv_init(ef_vi* vi, const ef_iovec* iov, int iov_len,
 		}
 	}
 
-	BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
+	EF_VI_BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
 	q->ids[di] = dma_id;
 	return 0;
 }
@@ -444,7 +444,7 @@ int ef_vi_receive_init(ef_vi* vi, ef_addr addr, ef_request_id dma_id)
 
 	if( ef_vi_receive_space(vi) ) {
 		di = qs->added++ & q->mask;
-		BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
+		EF_VI_BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
 		q->ids[di] = dma_id;
 
 		if( ! (vi->vi_flags & EF_VI_RX_PHYS_ADDR) ) {

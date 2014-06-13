@@ -81,8 +81,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   void* p;
   int q_label;
 
-  BUG_ON((evq == NULL) != (evq_capacity != 0));
-  BUG_ON(! evq_capacity && ! rxq_capacity && ! txq_capacity);
+  EF_VI_BUG_ON((evq == NULL) != (evq_capacity != 0));
+  EF_VI_BUG_ON(! evq_capacity && ! rxq_capacity && ! txq_capacity);
 
   /* Ensure ef_vi_free() only frees what we allocate. */
   vi->vi_io_mmap_ptr = NULL;
@@ -162,7 +162,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   mem_mmap_ptr = vi->vi_mem_mmap_ptr;
 
   rc = ef_vi_arch_from_efhw_arch(ra.u.vi_out.nic_arch);
-  BUG_ON(rc < 0);
+  EF_VI_BUG_ON(rc < 0);
   nic_type.arch = (unsigned char) rc;
   nic_type.variant = ra.u.vi_out.nic_variant;
   nic_type.revision = ra.u.vi_out.nic_revision;

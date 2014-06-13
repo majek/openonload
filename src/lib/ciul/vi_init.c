@@ -55,8 +55,8 @@
 
 int ef_vi_calc_state_bytes(int rxq_sz, int txq_sz)
 {
-	BUG_ON(rxq_sz != 0 && ! EF_VI_IS_POW2(rxq_sz));
-	BUG_ON(txq_sz != 0 && ! EF_VI_IS_POW2(txq_sz));
+	EF_VI_BUG_ON(rxq_sz != 0 && ! EF_VI_IS_POW2(rxq_sz));
+	EF_VI_BUG_ON(txq_sz != 0 && ! EF_VI_IS_POW2(txq_sz));
 
 	return EF_VI_STATE_BYTES(rxq_sz, txq_sz);
 }
@@ -70,8 +70,8 @@ int ef_vi_state_bytes(ef_vi* vi)
 	if( ef_vi_transmit_capacity(vi) )
 		txq_sz = ef_vi_transmit_capacity(vi) + 1;
 
-	BUG_ON(rxq_sz != 0 && ! EF_VI_IS_POW2(rxq_sz));
-	BUG_ON(txq_sz != 0 && ! EF_VI_IS_POW2(txq_sz));
+	EF_VI_BUG_ON(rxq_sz != 0 && ! EF_VI_IS_POW2(rxq_sz));
+	EF_VI_BUG_ON(txq_sz != 0 && ! EF_VI_IS_POW2(txq_sz));
 
 	return EF_VI_STATE_BYTES(rxq_sz, txq_sz);
 }
@@ -136,7 +136,7 @@ void ef_vi_init(ef_vi* vi, void* vvis, ef_vi_state* state,
 		break;
 	default:
 		/* ?? TODO: We should return an error code. */
-		BUG();
+		EF_VI_BUG_ON(1);
 		break;
 	}
 
@@ -174,9 +174,9 @@ void ef_vi_init_mapping_vi(void* data_area, struct ef_vi_nic_type nic_type,
 	struct vi_mappings* vm = (struct vi_mappings*) data_area;
 	int rx_desc_bytes, rxq_bytes;
 
-	BUG_ON(rxq_capacity <= 0 && txq_capacity <= 0);
-	BUG_ON(io_mmap == NULL);
-	BUG_ON(iobuf_mmap_rx == NULL && iobuf_mmap_tx == NULL);
+	EF_VI_BUG_ON(rxq_capacity <= 0 && txq_capacity <= 0);
+	EF_VI_BUG_ON(io_mmap == NULL);
+	EF_VI_BUG_ON(iobuf_mmap_rx == NULL && iobuf_mmap_tx == NULL);
 
 	vm->signature = VI_MAPPING_SIGNATURE;
 	vm->vi_instance = instance;
@@ -204,7 +204,7 @@ int ef_vi_add_queue(ef_vi* evq_vi, ef_vi* add_vi)
 	if (evq_vi->vi_qs_n == EF_VI_MAX_QS)
 		return -EBUSY;
 	q_label = evq_vi->vi_qs_n++;
-	BUG_ON(evq_vi->vi_qs[q_label] != NULL);
+	EF_VI_BUG_ON(evq_vi->vi_qs[q_label] != NULL);
 	evq_vi->vi_qs[q_label] = add_vi;
 	return q_label;
 }

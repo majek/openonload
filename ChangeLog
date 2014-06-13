@@ -1,4 +1,10 @@
 
+openonload-201205-p3
+--------------------
+
+- bug30429: Fix assertion in kernel when >64K packet buffers used.
+
+
 openonload-201205-p2
 --------------------
 

@@ -139,7 +139,6 @@ ef_vi_inline void writel(uint32_t data, ef_vi_ioaddr_t addr)
 
 
 #define BUG_ON(exp)  assert(!(exp))
-#define BUG()        assert(0)
 
 
 #endif  /* __CI_CIUL_SYSDEP_UNIX_H__ */

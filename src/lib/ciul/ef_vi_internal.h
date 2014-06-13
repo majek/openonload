@@ -68,6 +68,17 @@
 	{ typedef char __EF_VI_BUILD_ASSERT_NAME(__LINE__)[(e) ? 1 : -1]; }
 
 
+#ifdef NDEBUG
+# ifdef __KERNEL__
+#  define EF_VI_BUG_ON(x)  WARN_ON(x)
+# else
+#  define EF_VI_BUG_ON(x)  do{}while(0)
+# endif
+#else
+# define EF_VI_BUG_ON(x)  BUG_ON(x)
+#endif
+
+
 /* *********************************************************************
  * Miscellaneous goodies
  */

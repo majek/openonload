@@ -108,12 +108,6 @@ ef_stack_space_left (void) {
 #define EF_LOG_PID		0x1
 #define EF_LOG_TID		0x2
 
-#ifdef __KERNEL__
-#  define EF_BOMB()  BUG()
-#else /* !__KERNEL__ */
-#  define EF_BOMB()  do{ *(int*) 0 = 0; }while(0)
-#endif
-
 
 void ef_vlog(const char* fmt, va_list args)
 {
@@ -151,7 +145,7 @@ void ef_vlog(const char* fmt, va_list args)
   char line[EF_LOG_MAX_LINE];
 #endif /* __KERNEL__ */
 
-  BUG_ON(fmt == NULL);
+  EF_VI_BUG_ON(fmt == NULL);
 
   if( ef_log_options ) {
 #if defined(__unix__) && !defined(__KERNEL__)
@@ -171,7 +165,7 @@ void ef_vlog(const char* fmt, va_list args)
     len = ci_vsprintf(line + n, fmt, args);
     if (len+1 > EF_LOG_MAX_LINE - n) {
       (ef_log_fn)("ef_vlog: too long");
-      EF_BOMB();
+      EF_VI_BUG_ON(1);
     }
   }
 #endif /* EF_VI_HAVE_NPRINTF */
