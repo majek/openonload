@@ -1,4 +1,10 @@
 
+openonload-201205-p3a
+---------------------
+
+- bug33133: Fix bug causing RTT estimates to not be updated.
+
+
 openonload-201205-p3
 --------------------
 

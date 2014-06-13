@@ -29,9 +29,7 @@
 
 /* This is required to get pread() and pwrite() defined in <unistd.h> */
 #define _GNU_SOURCE
-#if defined __unix__
 # include <aio.h>
-#endif
 
 #include <ci/tools.h>
 #include <ci/internal/transport_config_opt.h>
