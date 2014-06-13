@@ -32,11 +32,15 @@
 
 
 enum ef_filter_type {
-	EF_FILTER_MAC            = 1,
-	EF_FILTER_IP4            = 2,
-	EF_FILTER_ALL_UNICAST    = 4,
-	EF_FILTER_ALL_MULTICAST  = 8,
-        EF_FILTER_VLAN           = 16,
+	EF_FILTER_MAC                 = 0x1,
+	EF_FILTER_IP4                 = 0x2,
+	EF_FILTER_ALL_UNICAST         = 0x4,
+	EF_FILTER_ALL_MULTICAST       = 0x8,
+        EF_FILTER_VLAN                = 0x10,
+	EF_FILTER_MISMATCH_UNICAST    = 0x20,
+	EF_FILTER_MISMATCH_MULTICAST  = 0x40,
+	EF_FILTER_PORT_SNIFF          = 0x80,
+	EF_FILTER_BLOCK_KERNEL        = 0x100,
 };
 
 
@@ -87,7 +91,9 @@ int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id)
 {
 	if (fs->type != 0 && fs->type != EF_FILTER_IP4 &&
 	    fs->type != EF_FILTER_ALL_MULTICAST &&
-	    fs->type != EF_FILTER_ALL_UNICAST)
+	    fs->type != EF_FILTER_ALL_UNICAST &&
+	    fs->type != EF_FILTER_MISMATCH_MULTICAST &&
+	    fs->type != EF_FILTER_MISMATCH_UNICAST)
 		return -EPROTONOSUPPORT;
 	fs->type |= EF_FILTER_VLAN;
 	fs->data[5] = vlan_id;
@@ -121,6 +127,43 @@ int ef_filter_spec_set_multicast_all(ef_filter_spec *fs)
 	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
 		return -EPROTONOSUPPORT;
 	fs->type |= EF_FILTER_ALL_MULTICAST;
+	return 0;
+}
+
+
+int ef_filter_spec_set_unicast_mismatch(ef_filter_spec *fs)
+{
+	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_MISMATCH_UNICAST;
+	return 0;
+}
+
+
+int ef_filter_spec_set_multicast_mismatch(ef_filter_spec *fs)
+{
+	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_MISMATCH_MULTICAST;
+	return 0;
+}
+
+
+int ef_filter_spec_set_port_sniff(ef_filter_spec *fs, int promiscuous)
+{
+	if (fs->type != 0)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_PORT_SNIFF;
+	fs->data[0] = promiscuous;
+	return 0;
+}
+
+
+int ef_filter_spec_set_block_kernel(ef_filter_spec *fs)
+{
+	if (fs->type != 0)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_BLOCK_KERNEL;
 	return 0;
 }
 
@@ -175,12 +218,47 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 	case EF_FILTER_ALL_MULTICAST:
 		op.op = CI_RSOP_FILTER_ADD_ALL_MULTICAST;
 		break;
+	case EF_FILTER_MISMATCH_UNICAST | EF_FILTER_VLAN:
+		op.op = CI_RSOP_FILTER_ADD_MISMATCH_UNICAST_VLAN;
+		op.u.filter_add.mac.vlan_id = fs->data[5];
+		break;
+	case EF_FILTER_MISMATCH_UNICAST:
+		op.op = CI_RSOP_FILTER_ADD_MISMATCH_UNICAST;
+		break;
+	case EF_FILTER_MISMATCH_MULTICAST | EF_FILTER_VLAN:
+		op.op = CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST_VLAN;
+		op.u.filter_add.mac.vlan_id = fs->data[5];
+		break;
+	case EF_FILTER_MISMATCH_MULTICAST:
+		op.op = CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST;
+		break;
+	case EF_FILTER_PORT_SNIFF:
+		op.op = CI_RSOP_PT_SNIFF;
+		op.u.pt_sniff.enable = 1;
+		op.u.pt_sniff.promiscuous = fs->data[0];
+		break;
+	case EF_FILTER_BLOCK_KERNEL:
+		op.op = CI_RSOP_FILTER_BLOCK_KERNEL;
+		op.u.block_kernel.block = 1;
+		break;
 	default:
 		return -EINVAL;
 	}
 	rc = ci_resource_op(dh, &op);
-	if( rc == 0 && filter_cookie_out != NULL )
-		filter_cookie_out->filter_id = op.u.filter_add.out_filter_id;
+	if( rc == 0 && filter_cookie_out != NULL ) {
+		/* SNIFF and BLOCK filters do not return an ID.  The
+		 * filter_id field is ignored for them when removing,
+		 * but let's set it to something that will not be
+		 * confused with a real ID
+		 */
+		if( fs->type == EF_FILTER_PORT_SNIFF ||
+		    fs->type == EF_FILTER_BLOCK_KERNEL )
+			filter_cookie_out->filter_id = -1;
+		else
+			filter_cookie_out->filter_id = 
+				op.u.filter_add.out_filter_id;
+		filter_cookie_out->filter_type = fs->type;
+	}
 	return rc;
 }
 
@@ -190,9 +268,21 @@ static int ef_filter_del(ef_driver_handle dh, int resource_id,
 {
 	ci_resource_op_t op;
 
-	op.op = CI_RSOP_FILTER_DEL;
-	op.id = efch_make_resource_id(resource_id);
-	op.u.filter_del.filter_id = filter_cookie->filter_id;
+	if( filter_cookie->filter_type == EF_FILTER_PORT_SNIFF ) {
+		op.op = CI_RSOP_PT_SNIFF;
+		op.id = efch_make_resource_id(resource_id);
+		op.u.pt_sniff.enable = 0;
+	}
+	else if( filter_cookie->filter_type == EF_FILTER_BLOCK_KERNEL ) {
+		op.op = CI_RSOP_FILTER_BLOCK_KERNEL;
+		op.id = efch_make_resource_id(resource_id);
+		op.u.block_kernel.block = 0;
+	}
+	else {
+		op.op = CI_RSOP_FILTER_DEL;
+		op.id = efch_make_resource_id(resource_id);
+		op.u.filter_del.filter_id = filter_cookie->filter_id;
+	}
 	return ci_resource_op(dh, &op);
 }
 

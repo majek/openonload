@@ -223,7 +223,7 @@ ci_inline int citp_ul_select(struct oo_ul_select_state*__restrict__ s)
 
 /* Generic select/pselect implementation. */
 int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
-                      int *timeout_ms, citp_lib_context_t *lib_context,
+                      ci_uint64 *timeout_ms, citp_lib_context_t *lib_context,
                       const sigset_t *sigmask, sigset_t *sigsaved)
 {
   /* Sorry, but we're relying somewhat on how GLIBC arranges its fd_set.
@@ -339,7 +339,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
     if( *timeout_ms != 0 ) {
       if( s.is_ul_fd && 
           KEEP_POLLING(s.ul_select_spin, s.now_frc, poll_start_frc) ) {
-        if( s.now_frc - poll_start_frc >= (ci_uint64)(*timeout_ms) * ci_cpu_khz ) {
+        if( s.now_frc - poll_start_frc >= *timeout_ms * ci_cpu_khz ) {
           /* Timeout while spinning */
           select_zero(rds, wrs, exs, n_words);
           n = 0;

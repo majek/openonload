@@ -151,7 +151,7 @@ static void thread_main_loop(struct thread* thread)
         assert(EF_EVENT_RX_SOP(evs[i]) != 0);
         assert(EF_EVENT_RX_CONT(evs[i]) == 0);
         handle_rx(thread, vi, EF_EVENT_RX_RQ_ID(evs[i]),
-                  EF_EVENT_RX_BYTES(evs[i]) - vi->rx_prefix_len);
+                  EF_EVENT_RX_BYTES(evs[i]) - vi->frame_off);
         break;
       case EF_EVENT_TYPE_TX:
         n = ef_vi_transmit_unbundle(&vi->vi, &evs[i], ids);
@@ -246,7 +246,7 @@ int main(int argc, char* argv[])
                    "resources\n", argv[i]));
       exit(1);
     }
-    vis[i] = vi_alloc(i, net_if);
+    vis[i] = vi_alloc(i, net_if, EF_VI_FLAGS_DEFAULT);
   }
   for( i = 0; i < thread->vis_n; ++i )
     for( j = 0; j < thread->vis_n; ++j )

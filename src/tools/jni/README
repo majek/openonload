@@ -30,8 +30,10 @@ And now we can build the java classes, and create the headers from them:
 	cd $TMP
 	javac $ONLOAD/src/tools/jni/OnloadExt.java -d $ONLOAD_LIB
 	javac $ONLOAD/src/tools/jni/OnloadZeroCopy.java -d $ONLOAD_LIB
+	javac $ONLOAD/src/tools/jni/OnloadTemplateSend.java -d $ONLOAD_LIB
 	javah -classpath $ONLOAD_LIB -d $TMP OnloadExt
 	javah -classpath $ONLOAD_LIB -d $TMP OnloadZeroCopy
+	javah -classpath $ONLOAD_LIB -d $TMP OnloadTemplateSend
 
 Result should be files (class files in the $ONLOAD_LIB directory and header
 files in $TMP):
@@ -39,6 +41,7 @@ files in $TMP):
 	OnloadExt_Stat.h, OnloadExt$Stat.class,
 	OnloadZeroCopy.h, OnloadZeroCopy.class,
 	OnloadZeroCopy_Callback.h,  OnloadZeroCopy_Callback.class,
+	OnloadTemplateSend.h, OnloadTemplateSend.class,
 	OnloadZeroCopy$1CallbackTest.class
 
 

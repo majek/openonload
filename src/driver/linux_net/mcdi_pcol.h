@@ -407,6 +407,8 @@
  * AOE_ERR_DATA)
  */
 #define          MCDI_EVENT_AOE_BYTEBLASTER 0x9
+/* enum: DDR ECC status update */
+#define          MCDI_EVENT_AOE_DDR_ECC_STATUS 0xa
 #define        MCDI_EVENT_AOE_ERR_DATA_LBN 8
 #define        MCDI_EVENT_AOE_ERR_DATA_WIDTH 8
 #define        MCDI_EVENT_RX_ERR_RXQ_LBN 0
@@ -502,15 +504,32 @@
 #define       MCDI_EVENT_TX_ERR_DATA_OFST 0
 #define       MCDI_EVENT_TX_ERR_DATA_LBN 0
 #define       MCDI_EVENT_TX_ERR_DATA_WIDTH 32
-/* Seconds field of timestamp */
+/* For CODE_PTP_RX, CODE_PTP_PPS and CODE_HW_PPS events the seconds field of
+ * timestamp
+ */
 #define       MCDI_EVENT_PTP_SECONDS_OFST 0
 #define       MCDI_EVENT_PTP_SECONDS_LBN 0
 #define       MCDI_EVENT_PTP_SECONDS_WIDTH 32
-/* Nanoseconds field of timestamp */
+/* For CODE_PTP_RX, CODE_PTP_PPS and CODE_HW_PPS events the major field of
+ * timestamp
+ */
+#define       MCDI_EVENT_PTP_MAJOR_OFST 0
+#define       MCDI_EVENT_PTP_MAJOR_LBN 0
+#define       MCDI_EVENT_PTP_MAJOR_WIDTH 32
+/* For CODE_PTP_RX, CODE_PTP_PPS and CODE_HW_PPS events the nanoseconds field
+ * of timestamp
+ */
 #define       MCDI_EVENT_PTP_NANOSECONDS_OFST 0
 #define       MCDI_EVENT_PTP_NANOSECONDS_LBN 0
 #define       MCDI_EVENT_PTP_NANOSECONDS_WIDTH 32
-/* Lowest four bytes of sourceUUID from PTP packet */
+/* For CODE_PTP_RX, CODE_PTP_PPS and CODE_HW_PPS events the minor field of
+ * timestamp
+ */
+#define       MCDI_EVENT_PTP_MINOR_OFST 0
+#define       MCDI_EVENT_PTP_MINOR_LBN 0
+#define       MCDI_EVENT_PTP_MINOR_WIDTH 32
+/* For CODE_PTP_RX events, the lowest four bytes of sourceUUID from PTP packet
+ */
 #define       MCDI_EVENT_PTP_UUID_OFST 0
 #define       MCDI_EVENT_PTP_UUID_LBN 0
 #define       MCDI_EVENT_PTP_UUID_WIDTH 32
@@ -526,6 +545,13 @@
 #define       MCDI_EVENT_ECC_FATAL_ERR_DATA_OFST 0
 #define       MCDI_EVENT_ECC_FATAL_ERR_DATA_LBN 0
 #define       MCDI_EVENT_ECC_FATAL_ERR_DATA_WIDTH 32
+/* For CODE_PTP_TIME events, the major value of the PTP clock */
+#define       MCDI_EVENT_PTP_TIME_MAJOR_OFST 0
+#define       MCDI_EVENT_PTP_TIME_MAJOR_LBN 0
+#define       MCDI_EVENT_PTP_TIME_MAJOR_WIDTH 32
+/* For CODE_PTP_TIME events, bits 19-26 of the minor value of the PTP clock */
+#define       MCDI_EVENT_PTP_TIME_MINOR_26_19_LBN 36
+#define       MCDI_EVENT_PTP_TIME_MINOR_26_19_WIDTH 8
 
 /* FCDI_EVENT structuredef */
 #define    FCDI_EVENT_LEN 8
@@ -568,6 +594,8 @@
 #define          FCDI_EVENT_CODE_PPS_IN 0x6
 /* enum: Tick event from PTP clock */
 #define          FCDI_EVENT_CODE_PTP_TICK 0x7
+/* enum: ECC error counters */
+#define          FCDI_EVENT_CODE_DDR_ECC_STATUS 0x8
 #define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_OFST 0
 #define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_LBN 0
 #define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_WIDTH 32
@@ -581,35 +609,42 @@
 #define       FCDI_EVENT_LINK_STATE_DATA_OFST 0
 #define       FCDI_EVENT_LINK_STATE_DATA_LBN 0
 #define       FCDI_EVENT_LINK_STATE_DATA_WIDTH 32
-#define       FCDI_EVENT_TIMESTAMP_COUNT_OFST 0
-#define       FCDI_EVENT_TIMESTAMP_COUNT_LBN 0
-#define       FCDI_EVENT_TIMESTAMP_COUNT_WIDTH 32
+#define       FCDI_EVENT_DDR_ECC_STATUS_BANK_ID_LBN 36
+#define       FCDI_EVENT_DDR_ECC_STATUS_BANK_ID_WIDTH 8
+#define       FCDI_EVENT_DDR_ECC_STATUS_STATUS_OFST 0
+#define       FCDI_EVENT_DDR_ECC_STATUS_STATUS_LBN 0
+#define       FCDI_EVENT_DDR_ECC_STATUS_STATUS_WIDTH 32
 
-/* FCDI_EXTENDED_EVENT structuredef */
-#define    FCDI_EXTENDED_EVENT_LENMIN 16
-#define    FCDI_EXTENDED_EVENT_LENMAX 248
-#define    FCDI_EXTENDED_EVENT_LEN(num) (8+8*(num))
+/* FCDI_EXTENDED_EVENT_PPS structuredef: Extended FCDI event to send PPS events
+ * to the MC. Note that this structure | is overlayed over a normal FCDI event
+ * such that bits 32-63 containing | event code, level, source etc remain the
+ * same. In this case the data | field of the header is defined to be the
+ * number of timestamps
+ */
+#define    FCDI_EXTENDED_EVENT_PPS_LENMIN 16
+#define    FCDI_EXTENDED_EVENT_PPS_LENMAX 248
+#define    FCDI_EXTENDED_EVENT_PPS_LEN(num) (8+8*(num))
 /* Number of timestamps following */
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_COUNT_OFST 0
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_COUNT_LBN 0
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_COUNT_WIDTH 32
+#define       FCDI_EXTENDED_EVENT_PPS_COUNT_OFST 0
+#define       FCDI_EXTENDED_EVENT_PPS_COUNT_LBN 0
+#define       FCDI_EXTENDED_EVENT_PPS_COUNT_WIDTH 32
 /* Seconds field of a timestamp record */
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_SECONDS_OFST 8
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_SECONDS_LBN 64
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_SECONDS_WIDTH 32
+#define       FCDI_EXTENDED_EVENT_PPS_SECONDS_OFST 8
+#define       FCDI_EXTENDED_EVENT_PPS_SECONDS_LBN 64
+#define       FCDI_EXTENDED_EVENT_PPS_SECONDS_WIDTH 32
 /* Nanoseconds field of a timestamp record */
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_NANOSECONDS_OFST 12
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_NANOSECONDS_LBN 96
-#define       FCDI_EXTENDED_EVENT_TIMESTAMP_NANOSECONDS_WIDTH 32
+#define       FCDI_EXTENDED_EVENT_PPS_NANOSECONDS_OFST 12
+#define       FCDI_EXTENDED_EVENT_PPS_NANOSECONDS_LBN 96
+#define       FCDI_EXTENDED_EVENT_PPS_NANOSECONDS_WIDTH 32
 /* Timestamp records comprising the event */
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_OFST 8
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_LEN 8
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_LO_OFST 8
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_HI_OFST 12
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_MINNUM 1
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_MAXNUM 30
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_LBN 64
-#define       FCDI_EXTENDED_EVENT_TIMESTAMPS_WIDTH 64
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_OFST 8
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_LEN 8
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_LO_OFST 8
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_HI_OFST 12
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_MINNUM 1
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_MAXNUM 30
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_LBN 64
+#define       FCDI_EXTENDED_EVENT_PPS_TIMESTAMPS_WIDTH 64
 
 
 /***********************************/
@@ -899,6 +934,10 @@
 #define          MC_CMD_PTP_OP_PPS_ENABLE 0x15
 /* enum: Get the time format used by this NIC for PTP operations */
 #define          MC_CMD_PTP_OP_GET_TIME_FORMAT 0x16
+/* enum: Get the clock attributes. NOTE- extended version of
+ * MC_CMD_PTP_OP_GET_TIME_FORMAT
+ */
+#define          MC_CMD_PTP_OP_GET_ATTRIBUTES 0x16
 /* enum: Get corrections that should be applied to the various different
  * timestamps
  */
@@ -909,8 +948,12 @@
 #define          MC_CMD_PTP_OP_TIME_EVENT_SUBSCRIBE 0x18
 /* enum: Unsubscribe to stop receiving time events */
 #define          MC_CMD_PTP_OP_TIME_EVENT_UNSUBSCRIBE 0x19
+/* enum: PPS based manfacturing tests. Requires PPS output to be looped to PPS
+ * input on the same NIC.
+ */
+#define          MC_CMD_PTP_OP_MANFTEST_PPS 0x1a
 /* enum: Above this for future use. */
-#define          MC_CMD_PTP_OP_MAX 0x1a
+#define          MC_CMD_PTP_OP_MAX 0x1b
 
 /* MC_CMD_PTP_IN_ENABLE msgrequest */
 #define    MC_CMD_PTP_IN_ENABLE_LEN 16
@@ -1131,6 +1174,11 @@
 /*            MC_CMD_PTP_IN_CMD_OFST 0 */
 /*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
 
+/* MC_CMD_PTP_IN_GET_ATTRIBUTES msgrequest */
+#define    MC_CMD_PTP_IN_GET_ATTRIBUTES_LEN 8
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+
 /* MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS msgrequest */
 #define    MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS_LEN 8
 /*            MC_CMD_PTP_IN_CMD_OFST 0 */
@@ -1147,10 +1195,21 @@
 #define    MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_LEN 16
 /*            MC_CMD_PTP_IN_CMD_OFST 0 */
 /*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
-/* Subscription number returned when queue was subscribed */
-#define       MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_SUBSCRIPTION_ID_OFST 8
-/* Event queue that is being unsubscribed */
+/* Unsubscribe options */
+#define       MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_CONTROL_OFST 8
+/* enum: Unsubscribe a single queue */
+#define          MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_SINGLE 0x0
+/* enum: Unsubscribe all queues */
+#define          MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_ALL 0x1
+/* Event queue ID */
 #define       MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_QUEUE_OFST 12
+
+/* MC_CMD_PTP_IN_MANFTEST_PPS msgrequest */
+#define    MC_CMD_PTP_IN_MANFTEST_PPS_LEN 12
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+/* 1 to enable PPS test mode, 0 to disable and return result. */
+#define       MC_CMD_PTP_IN_MANFTEST_PPS_TEST_ENABLE_OFST 8
 
 /* MC_CMD_PTP_OUT msgresponse */
 #define    MC_CMD_PTP_OUT_LEN 0
@@ -1165,6 +1224,12 @@
 #define       MC_CMD_PTP_OUT_TRANSMIT_NANOSECONDS_OFST 4
 /* Timestamp minor value */
 #define       MC_CMD_PTP_OUT_TRANSMIT_MINOR_OFST 4
+
+/* MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE msgresponse */
+#define    MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_LEN 0
+
+/* MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE msgresponse */
+#define    MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE_LEN 0
 
 /* MC_CMD_PTP_OUT_READ_NIC_TIME msgresponse */
 #define    MC_CMD_PTP_OUT_READ_NIC_TIME_LEN 8
@@ -1260,6 +1325,16 @@
 #define          MC_CMD_PTP_MANF_PACKET_ENOUGH 0x8
 /* enum: Timestamp trigger GPIO not working */
 #define          MC_CMD_PTP_MANF_GPIO_TRIGGER 0x9
+/* enum: Insufficient PPS events to perform checks */
+#define          MC_CMD_PTP_MANF_PPS_ENOUGH 0xa
+/* enum: PPS time event period not sufficiently close to 1s. */
+#define          MC_CMD_PTP_MANF_PPS_PERIOD 0xb
+/* enum: PPS time event nS reading not sufficiently close to zero. */
+#define          MC_CMD_PTP_MANF_PPS_NS 0xc
+/* enum: PTP peripheral registers incorrect */
+#define          MC_CMD_PTP_MANF_REGISTERS 0xd
+/* enum: Failed to read time from PTP peripheral */
+#define          MC_CMD_PTP_MANF_CLOCK_READ 0xe
 /* Presence of external oscillator */
 #define       MC_CMD_PTP_OUT_MANFTEST_BASIC_TEST_EXTOSC_OFST 4
 
@@ -1296,21 +1371,46 @@
 /* enum: Major register has units of seconds, minor 2^-27s per tick */
 #define          MC_CMD_PTP_OUT_GET_TIME_FORMAT_SECONDS_27FRACTION 0x2
 
+/* MC_CMD_PTP_OUT_GET_ATTRIBUTES msgresponse */
+#define    MC_CMD_PTP_OUT_GET_ATTRIBUTES_LEN 8
+/* Time format required/used by for this NIC. Applies to all PTP MCDI
+ * operations that pass times between the host and firmware. If this operation
+ * is not supported (older firmware) a format of seconds and nanoseconds should
+ * be assumed.
+ */
+#define       MC_CMD_PTP_OUT_GET_ATTRIBUTES_TIME_FORMAT_OFST 0
+/* enum: Times are in seconds and nanoseconds */
+#define          MC_CMD_PTP_OUT_GET_ATTRIBUTES_SECONDS_NANOSECONDS 0x0
+/* enum: Major register has units of 16 second per tick, minor 8 ns per tick */
+#define          MC_CMD_PTP_OUT_GET_ATTRIBUTES_16SECONDS_8NANOSECONDS 0x1
+/* enum: Major register has units of seconds, minor 2^-27s per tick */
+#define          MC_CMD_PTP_OUT_GET_ATTRIBUTES_SECONDS_27FRACTION 0x2
+/* Minimum acceptable value for a corrected synchronization timeset. When
+ * comparing host and NIC clock times, the MC returns a set of samples that
+ * contain the host start and end time, the MC time when the host start was
+ * detected and the time the MC waited between reading the time and detecting
+ * the host end. The corrected sync window is the difference between the host
+ * end and start times minus the time that the MC waited for host end.
+ */
+#define       MC_CMD_PTP_OUT_GET_ATTRIBUTES_SYNC_WINDOW_MIN_OFST 4
+
 /* MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS msgresponse */
 #define    MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN 16
-/* Uncorrected error on transmit timestamps in local clock format */
+/* Uncorrected error on transmit timestamps in NIC clock format */
 #define       MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_TRANSMIT_OFST 0
-/* Uncorrected error on receive timestamps in local clock format */
+/* Uncorrected error on receive timestamps in NIC clock format */
 #define       MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_RECEIVE_OFST 4
-/* Uncorrected error on PPS output in nanoseconds in local clock format */
+/* Uncorrected error on PPS output in NIC clock format */
 #define       MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_PPS_OUT_OFST 8
-/* Uncorrected error on PPS input in nanoseconds in local clock format */
+/* Uncorrected error on PPS input in NIC clock format */
 #define       MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_PPS_IN_OFST 12
 
-/* MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE msgresponse */
-#define    MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_LEN 4
-/* ID to be used to cancel subscription */
-#define       MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_SUBSCRIPTION_ID_OFST 0
+/* MC_CMD_PTP_OUT_MANFTEST_PPS msgresponse */
+#define    MC_CMD_PTP_OUT_MANFTEST_PPS_LEN 4
+/* Results of testing */
+#define       MC_CMD_PTP_OUT_MANFTEST_PPS_TEST_RESULT_OFST 0
+/*            Enum values, see field(s): */
+/*               MC_CMD_PTP_OUT_MANFTEST_BASIC/TEST_RESULT */
 
 
 /***********************************/
@@ -2037,6 +2137,8 @@
 #define          MC_CMD_MEDIA_SFP_PLUS 0x5
 /* enum: 10GBaseT. */
 #define          MC_CMD_MEDIA_BASE_T 0x6
+/* enum: QSFP+. */
+#define          MC_CMD_MEDIA_QSFP_PLUS 0x7
 #define       MC_CMD_GET_PHY_CFG_OUT_MMD_MASK_OFST 48
 /* enum: Native clause 22 */
 #define          MC_CMD_MMD_CLAUSE22 0x0
@@ -3295,7 +3397,7 @@
 #define       MC_CMD_SENSOR_INFO_EXT_IN_PAGE_OFST 0
 
 /* MC_CMD_SENSOR_INFO_OUT msgresponse */
-#define    MC_CMD_SENSOR_INFO_OUT_LENMIN 12
+#define    MC_CMD_SENSOR_INFO_OUT_LENMIN 4
 #define    MC_CMD_SENSOR_INFO_OUT_LENMAX 252
 #define    MC_CMD_SENSOR_INFO_OUT_LEN(num) (4+8*(num))
 #define       MC_CMD_SENSOR_INFO_OUT_MASK_OFST 0
@@ -3396,11 +3498,11 @@
 #define       MC_CMD_SENSOR_ENTRY_LEN 8
 #define       MC_CMD_SENSOR_ENTRY_LO_OFST 4
 #define       MC_CMD_SENSOR_ENTRY_HI_OFST 8
-#define       MC_CMD_SENSOR_ENTRY_MINNUM 1
+#define       MC_CMD_SENSOR_ENTRY_MINNUM 0
 #define       MC_CMD_SENSOR_ENTRY_MAXNUM 31
 
 /* MC_CMD_SENSOR_INFO_EXT_OUT msgresponse */
-#define    MC_CMD_SENSOR_INFO_EXT_OUT_LENMIN 12
+#define    MC_CMD_SENSOR_INFO_EXT_OUT_LENMIN 4
 #define    MC_CMD_SENSOR_INFO_EXT_OUT_LENMAX 252
 #define    MC_CMD_SENSOR_INFO_EXT_OUT_LEN(num) (4+8*(num))
 #define       MC_CMD_SENSOR_INFO_EXT_OUT_MASK_OFST 0
@@ -3413,7 +3515,7 @@
 /*            MC_CMD_SENSOR_ENTRY_LEN 8 */
 /*            MC_CMD_SENSOR_ENTRY_LO_OFST 4 */
 /*            MC_CMD_SENSOR_ENTRY_HI_OFST 8 */
-/*            MC_CMD_SENSOR_ENTRY_MINNUM 1 */
+/*            MC_CMD_SENSOR_ENTRY_MINNUM 0 */
 /*            MC_CMD_SENSOR_ENTRY_MAXNUM 31 */
 
 /* MC_CMD_SENSOR_INFO_ENTRY_TYPEDEF structuredef */
@@ -3990,9 +4092,11 @@
 #define    LICENSED_APP_ID_LEN 4
 #define       LICENSED_APP_ID_ID_OFST 0
 /* enum: OpenOnload */
-#define          LICENSED_APP_ID_ONLOAD  0x1
+#define          LICENSED_APP_ID_ONLOAD            0x1
 /* enum: PTP timestamping */
-#define          LICENSED_APP_ID_PTP     0x2
+#define          LICENSED_APP_ID_PTP               0x2
+/* enum: SolarCapture Pro */
+#define          LICENSED_APP_ID_SOLARCAPTURE_PRO  0x4
 #define       LICENSED_APP_ID_ID_LBN 0
 #define       LICENSED_APP_ID_ID_WIDTH 32
 
@@ -4153,6 +4257,8 @@
 #define        MC_CMD_INIT_RXQ_IN_FLAG_CHAIN_WIDTH 1
 #define        MC_CMD_INIT_RXQ_IN_FLAG_PREFIX_LBN 8
 #define        MC_CMD_INIT_RXQ_IN_FLAG_PREFIX_WIDTH 1
+#define        MC_CMD_INIT_RXQ_IN_FLAG_DISABLE_SCATTER_LBN 9
+#define        MC_CMD_INIT_RXQ_IN_FLAG_DISABLE_SCATTER_WIDTH 1
 /* Owner ID to use if in buffer mode (zero if physical) */
 #define       MC_CMD_INIT_RXQ_IN_OWNER_ID_OFST 20
 /* The port ID associated with the v-adaptor which should contain this DMAQ. */
@@ -6935,6 +7041,30 @@
 
 
 /***********************************/
+/* MC_CMD_CAP_BLK_READ
+ * Read multiple 64bit words from capture block memory
+ */
+#define MC_CMD_CAP_BLK_READ 0xe7
+
+/* MC_CMD_CAP_BLK_READ_IN msgrequest */
+#define    MC_CMD_CAP_BLK_READ_IN_LEN 12
+#define       MC_CMD_CAP_BLK_READ_IN_CAP_REG_OFST 0
+#define       MC_CMD_CAP_BLK_READ_IN_ADDR_OFST 4
+#define       MC_CMD_CAP_BLK_READ_IN_COUNT_OFST 8
+
+/* MC_CMD_CAP_BLK_READ_OUT msgresponse */
+#define    MC_CMD_CAP_BLK_READ_OUT_LENMIN 8
+#define    MC_CMD_CAP_BLK_READ_OUT_LENMAX 248
+#define    MC_CMD_CAP_BLK_READ_OUT_LEN(num) (0+8*(num))
+#define       MC_CMD_CAP_BLK_READ_OUT_BUFFER_OFST 0
+#define       MC_CMD_CAP_BLK_READ_OUT_BUFFER_LEN 8
+#define       MC_CMD_CAP_BLK_READ_OUT_BUFFER_LO_OFST 0
+#define       MC_CMD_CAP_BLK_READ_OUT_BUFFER_HI_OFST 4
+#define       MC_CMD_CAP_BLK_READ_OUT_BUFFER_MINNUM 1
+#define       MC_CMD_CAP_BLK_READ_OUT_BUFFER_MAXNUM 31
+
+
+/***********************************/
 /* MC_CMD_DUMP_DO
  * Take a dump of the DUT state
  */
@@ -6961,6 +7091,10 @@
 #define       MC_CMD_DUMP_DO_IN_DUMPSPEC_SRC_CUSTOM_HOST_MEMORY_MLI_DEPTH_OFST 20
 #define          MC_CMD_DUMP_DO_IN_HOST_MEMORY_MLI_MAX_DEPTH  0x2 /* enum */
 #define       MC_CMD_DUMP_DO_IN_DUMPSPEC_SRC_CUSTOM_UART_PORT_OFST 12
+/* enum: The uart port this command was received over (if using a uart
+ * transport)
+ */
+#define          MC_CMD_DUMP_DO_IN_UART_PORT_SRC  0xff
 #define       MC_CMD_DUMP_DO_IN_DUMPSPEC_SRC_CUSTOM_SIZE_OFST 24
 #define       MC_CMD_DUMP_DO_IN_DUMPFILE_DST_OFST 28
 #define          MC_CMD_DUMP_DO_IN_DUMPFILE_DST_CUSTOM  0x0 /* enum */
@@ -7074,6 +7208,71 @@
 
 /* MC_CMD_ENABLE_OFFLINE_BIST_OUT msgresponse */
 #define    MC_CMD_ENABLE_OFFLINE_BIST_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_UART_SEND_DATA
+ * Send checksummed[sic] block of data over the uart. Response is a placeholder
+ * should we wish to make this reliable; currently requests are fire-and-
+ * forget.
+ */
+#define MC_CMD_UART_SEND_DATA 0xee
+
+/* MC_CMD_UART_SEND_DATA_OUT msgrequest */
+#define    MC_CMD_UART_SEND_DATA_OUT_LENMIN 16
+#define    MC_CMD_UART_SEND_DATA_OUT_LENMAX 252
+#define    MC_CMD_UART_SEND_DATA_OUT_LEN(num) (16+1*(num))
+/* CRC32 over OFFSET, LENGTH, RESERVED, DATA */
+#define       MC_CMD_UART_SEND_DATA_OUT_CHECKSUM_OFST 0
+/* Offset at which to write the data */
+#define       MC_CMD_UART_SEND_DATA_OUT_OFFSET_OFST 4
+/* Length of data */
+#define       MC_CMD_UART_SEND_DATA_OUT_LENGTH_OFST 8
+/* Reserved for future use */
+#define       MC_CMD_UART_SEND_DATA_OUT_RESERVED_OFST 12
+#define       MC_CMD_UART_SEND_DATA_OUT_DATA_OFST 16
+#define       MC_CMD_UART_SEND_DATA_OUT_DATA_LEN 1
+#define       MC_CMD_UART_SEND_DATA_OUT_DATA_MINNUM 0
+#define       MC_CMD_UART_SEND_DATA_OUT_DATA_MAXNUM 236
+
+/* MC_CMD_UART_SEND_DATA_IN msgresponse */
+#define    MC_CMD_UART_SEND_DATA_IN_LEN 0
+
+
+/***********************************/
+/* MC_CMD_UART_RECV_DATA
+ * Request checksummed[sic] block of data over the uart. Only a placeholder,
+ * subject to change and not currently implemented.
+ */
+#define MC_CMD_UART_RECV_DATA 0xef
+
+/* MC_CMD_UART_RECV_DATA_OUT msgrequest */
+#define    MC_CMD_UART_RECV_DATA_OUT_LEN 16
+/* CRC32 over OFFSET, LENGTH, RESERVED */
+#define       MC_CMD_UART_RECV_DATA_OUT_CHECKSUM_OFST 0
+/* Offset from which to read the data */
+#define       MC_CMD_UART_RECV_DATA_OUT_OFFSET_OFST 4
+/* Length of data */
+#define       MC_CMD_UART_RECV_DATA_OUT_LENGTH_OFST 8
+/* Reserved for future use */
+#define       MC_CMD_UART_RECV_DATA_OUT_RESERVED_OFST 12
+
+/* MC_CMD_UART_RECV_DATA_IN msgresponse */
+#define    MC_CMD_UART_RECV_DATA_IN_LENMIN 16
+#define    MC_CMD_UART_RECV_DATA_IN_LENMAX 252
+#define    MC_CMD_UART_RECV_DATA_IN_LEN(num) (16+1*(num))
+/* CRC32 over RESERVED1, RESERVED2, RESERVED3, DATA */
+#define       MC_CMD_UART_RECV_DATA_IN_CHECKSUM_OFST 0
+/* Offset at which to write the data */
+#define       MC_CMD_UART_RECV_DATA_IN_RESERVED1_OFST 4
+/* Length of data */
+#define       MC_CMD_UART_RECV_DATA_IN_RESERVED2_OFST 8
+/* Reserved for future use */
+#define       MC_CMD_UART_RECV_DATA_IN_RESERVED3_OFST 12
+#define       MC_CMD_UART_RECV_DATA_IN_DATA_OFST 16
+#define       MC_CMD_UART_RECV_DATA_IN_DATA_LEN 1
+#define       MC_CMD_UART_RECV_DATA_IN_DATA_MINNUM 0
+#define       MC_CMD_UART_RECV_DATA_IN_DATA_MAXNUM 236
 
 
 /***********************************/
@@ -7600,6 +7799,124 @@
 #define          MC_CMD_GET_LICENSED_APP_STATE_OUT_NOT_LICENSED  0x0
 /* enum: a valid license is present for the application */
 #define          MC_CMD_GET_LICENSED_APP_STATE_OUT_LICENSED  0x1
+
+
+/***********************************/
+/* MC_CMD_LICENSED_APP_OP
+ * Perform an action for an individual licensed application.
+ */
+#define MC_CMD_LICENSED_APP_OP 0xf6
+
+/* MC_CMD_LICENSED_APP_OP_IN msgrequest */
+#define    MC_CMD_LICENSED_APP_OP_IN_LENMIN 8
+#define    MC_CMD_LICENSED_APP_OP_IN_LENMAX 252
+#define    MC_CMD_LICENSED_APP_OP_IN_LEN(num) (8+4*(num))
+/* application ID */
+#define       MC_CMD_LICENSED_APP_OP_IN_APP_ID_OFST 0
+/* the type of operation requested */
+#define       MC_CMD_LICENSED_APP_OP_IN_OP_OFST 4
+/* enum: validate application */
+#define          MC_CMD_LICENSED_APP_OP_IN_OP_VALIDATE  0x0
+/* arguments specific to this particular operation */
+#define       MC_CMD_LICENSED_APP_OP_IN_ARGS_OFST 8
+#define       MC_CMD_LICENSED_APP_OP_IN_ARGS_LEN 4
+#define       MC_CMD_LICENSED_APP_OP_IN_ARGS_MINNUM 0
+#define       MC_CMD_LICENSED_APP_OP_IN_ARGS_MAXNUM 61
+
+/* MC_CMD_LICENSED_APP_OP_OUT msgresponse */
+#define    MC_CMD_LICENSED_APP_OP_OUT_LENMIN 0
+#define    MC_CMD_LICENSED_APP_OP_OUT_LENMAX 252
+#define    MC_CMD_LICENSED_APP_OP_OUT_LEN(num) (0+4*(num))
+/* result specific to this particular operation */
+#define       MC_CMD_LICENSED_APP_OP_OUT_RESULT_OFST 0
+#define       MC_CMD_LICENSED_APP_OP_OUT_RESULT_LEN 4
+#define       MC_CMD_LICENSED_APP_OP_OUT_RESULT_MINNUM 0
+#define       MC_CMD_LICENSED_APP_OP_OUT_RESULT_MAXNUM 63
+
+/* MC_CMD_LICENSED_APP_OP_VALIDATE_IN msgrequest */
+#define    MC_CMD_LICENSED_APP_OP_VALIDATE_IN_LEN 72
+/* application ID */
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_IN_APP_ID_OFST 0
+/* the type of operation requested */
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_IN_OP_OFST 4
+/* validation challenge */
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_IN_CHALLENGE_OFST 8
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_IN_CHALLENGE_LEN 64
+
+/* MC_CMD_LICENSED_APP_OP_VALIDATE_OUT msgresponse */
+#define    MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_LEN 68
+/* feature expiry (time_t) */
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_EXPIRY_OFST 0
+/* validation response */
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_RESPONSE_OFST 4
+#define       MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_RESPONSE_LEN 64
+
+
+/***********************************/
+/* MC_CMD_SET_PORT_SNIFF_CONFIG
+ * Configure port sniffing for the physical port associated with the calling
+ * function. Only a privileged function may change the port sniffing
+ * configuration. A copy of all traffic delivered to the host (non-promiscuous
+ * mode) or all traffic arriving at the port (promiscuous mode) may be
+ * delivered to a specific queue, or a set of queues with RSS.
+ */
+#define MC_CMD_SET_PORT_SNIFF_CONFIG 0xf7
+
+/* MC_CMD_SET_PORT_SNIFF_CONFIG_IN msgrequest */
+#define    MC_CMD_SET_PORT_SNIFF_CONFIG_IN_LEN 16
+/* configuration flags */
+#define       MC_CMD_SET_PORT_SNIFF_CONFIG_IN_FLAGS_OFST 0
+#define        MC_CMD_SET_PORT_SNIFF_CONFIG_IN_ENABLE_LBN 0
+#define        MC_CMD_SET_PORT_SNIFF_CONFIG_IN_ENABLE_WIDTH 1
+#define        MC_CMD_SET_PORT_SNIFF_CONFIG_IN_PROMISCUOUS_LBN 1
+#define        MC_CMD_SET_PORT_SNIFF_CONFIG_IN_PROMISCUOUS_WIDTH 1
+/* receive queue handle (for RSS mode, this is the base queue) */
+#define       MC_CMD_SET_PORT_SNIFF_CONFIG_IN_RX_QUEUE_OFST 4
+/* receive mode */
+#define       MC_CMD_SET_PORT_SNIFF_CONFIG_IN_RX_MODE_OFST 8
+/* enum: receive to just the specified queue */
+#define          MC_CMD_SET_PORT_SNIFF_CONFIG_IN_RX_MODE_SIMPLE  0x0
+/* enum: receive to multiple queues using RSS context */
+#define          MC_CMD_SET_PORT_SNIFF_CONFIG_IN_RX_MODE_RSS  0x1
+/* RSS context (for RX_MODE_RSS) as returned by MC_CMD_RSS_CONTEXT_ALLOC. Note
+ * that these handles should be considered opaque to the host, although a value
+ * of 0xFFFFFFFF is guaranteed never to be a valid handle.
+ */
+#define       MC_CMD_SET_PORT_SNIFF_CONFIG_IN_RX_CONTEXT_OFST 12
+
+/* MC_CMD_SET_PORT_SNIFF_CONFIG_OUT msgresponse */
+#define    MC_CMD_SET_PORT_SNIFF_CONFIG_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_GET_PORT_SNIFF_CONFIG
+ * Obtain the current port sniffing configuration for the physical port
+ * associated with the calling function. Only a privileged function may read
+ * the configuration.
+ */
+#define MC_CMD_GET_PORT_SNIFF_CONFIG 0xf8
+
+/* MC_CMD_GET_PORT_SNIFF_CONFIG_IN msgrequest */
+#define    MC_CMD_GET_PORT_SNIFF_CONFIG_IN_LEN 0
+
+/* MC_CMD_GET_PORT_SNIFF_CONFIG_OUT msgresponse */
+#define    MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_LEN 16
+/* configuration flags */
+#define       MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_FLAGS_OFST 0
+#define        MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_ENABLE_LBN 0
+#define        MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_ENABLE_WIDTH 1
+#define        MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_PROMISCUOUS_LBN 1
+#define        MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_PROMISCUOUS_WIDTH 1
+/* receiving queue handle (for RSS mode, this is the base queue) */
+#define       MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_QUEUE_OFST 4
+/* receive mode */
+#define       MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_MODE_OFST 8
+/* enum: receiving to just the specified queue */
+#define          MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_MODE_SIMPLE  0x0
+/* enum: receiving to multiple queues using RSS context */
+#define          MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_MODE_RSS  0x1
+/* RSS context (for RX_MODE_RSS) */
+#define       MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_CONTEXT_OFST 12
 
 
 #endif /* MCDI_PCOL_H */

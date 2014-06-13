@@ -1,4 +1,69 @@
 
+OpenOnload-201310-u1 Release Notes
+==================================
+
+This is an update release that fixes bugs in openonload-201310 and
+adds a few enhancements.
+
+The accompanying ChangeLog file contains details of the changes made
+in this release.
+
+Please see ReleaseNotes-sfc for details of changes to the sfc net driver
+
+The Release Notes for the openonload-201310 release are included at
+the end of this file.
+
+----------------------------------------
+New Configuration Options 
+-------------------------
+
+EF_TX_PUSH_THRESHOLD
+ - Sets a threshold for the number of outstanding sends before we stop
+   using TX descriptor push.
+
+----------------------------------------
+New features 
+------------
+
+- Support for hardware timestamping of packets using the
+SO_TIMESTAMPING API on hardware that is capable of this (7000-series
+adapters).  It is recommended to update to latest GA firmware to use
+this feature.
+
+- The PIO feature that reduces latency can now be used on multiple
+sends in parallel.  Likewise multiple templated sends in parallel are
+now also possible.
+
+- On 7000-series NICs, the ef_vi support for multicast-all and
+unicast-all filters has been restored.  See Known Issues below for one
+important caveat.
+
+- Added ef_filter_spec_set_{unicast,multicast}_mismatch() to ef_vi API
+to allow reception of packets that do not match other filters.
+
+- Added onload_fd_check_feature() extension API to allow caller to check
+if ONLOAD_MSG_WARM is supported/safe on a given file descriptor.
+
+----------------------------------------
+New Known Issues
+----------------
+
+- Due to the AMD IOMMU driver not returning aligned PCI addresses the use
+of huge pages on systems with AMD IOMMUs is not supported.
+
+- Due to changes in the features requested by Onload when running on
+7000-series adapters which are not supported by earlier firmware
+versions, it is necessary to update to firmware version v4.0.0.6602 or
+later to use this version of Onload on those adapters. (Issue39531)
+
+- There is a change in semantics of multicast-all and unicast-all
+ef_vi filters in this release: a multicast-all filter normally blocks
+other multicast receivers from receiving traffic, but it will also now
+block an unaccelerated unicast receiver.  Similarly a unicast-all
+filter will also block an unaccelerated multicast receiver.  We hope
+to correct this in a future update release.
+
+
 OpenOnload-201310 Release Notes
 ===============================
 

@@ -112,6 +112,27 @@ enum efrm_vi_q_flags {
 	EFRM_VI_TCP_UDP_FILTER        = 0x40,
 	/** RXQ: Contiguous buffer mode.  Only works with EFRM_VI_PHYS_ADDR. */
 	EFRM_VI_CONTIGUOUS            = 0x80,
+	/** RXQ: Timestamp RX packets */
+	EFRM_VI_RX_TIMESTAMPS         = 0x100,
+};
+
+
+/* All the info you need to use this VI in the kernel. */
+struct efrm_vi_mappings {
+	void*            io_page;
+
+	unsigned         evq_size;
+	void*            evq_base;
+
+	unsigned         timer_quantum_ns;
+	unsigned         rx_ts_correction;
+
+	unsigned         rxq_size;
+	void*            rxq_descriptors;
+	unsigned         rxq_prefix_len;
+
+	unsigned         txq_size;
+	void*            txq_descriptors;
 };
 
 
@@ -380,12 +401,8 @@ extern int efrm_pt_pace(struct efrm_vi*, int val);
 extern uint32_t efrm_vi_rm_evq_bytes(struct efrm_vi *virs, int n_entries);
 
 
-/* Fill [out_vi_data] with information required to allow a VI to be init'd.
- * [out_vi_data] must ref at least VI_MAPPINGS_SIZE bytes.
- */
-extern void efrm_vi_resource_mappings(struct efrm_vi *, void *out_vi_data);
+/*! Get the info needed to use a VI in kernel space. */
+extern void efrm_vi_get_mappings(struct efrm_vi *, struct efrm_vi_mappings *);
 
-/*! Find page offset for timer register */
-extern int efrm_vi_timer_page_offset(struct efrm_vi* vi);
 
 #endif /* __CI_EFRM_VI_RESOURCE_H__ */

@@ -77,6 +77,9 @@ public class OnloadExt {
     /** Alter spin for when socket is already locked only.  @see SetSpin */
     public static final int ONLOAD_SPIN_SOCK_LOCK    = 13;
     
+    /** Is the ONLOAD_MSG_WARM feature supported? @see CheckFeature */
+    public static final int ONLOAD_FD_FEAT_MSG_WARM  = 0;
+    
     /** Check whether onload extensions are present.
      * @return True if running under onload. */
     public static native boolean IsPresent();
@@ -163,6 +166,35 @@ public class OnloadExt {
      */
     public static native int FdStat (java.io.FileDescriptor socket, Stat stat );
     
+    /** Checks whether the given feature is supported.
+     * @param fd      The socket to check.
+     * @param feature The feature to check support for.
+     * @return >0 if supported, <0 if not.
+     */
+    public static native int CheckFeature ( int fd, int feature );
+
+    /** Remember the name of the current stack.
+     * @return 0 or negative error code.
+     */
+    public static native int SaveStackName ();
+
+    /** Restore the remembered name.
+     * @return 0 or negative error code.
+     */
+    public static native int RestoreStackName ();
+
+    /** Set the specified stack option, for the next stack created.
+     * @param option   The option to change.
+     * @param value    The new value for it.
+     * @return 0 or negative error code.
+     */
+    public static native int SetStackOption (String option, int value);
+
+    /** Go back to the options specified before SetStackOption was used.
+     * @return 0 or negative error code.
+     */
+    public static native int ResetStackOptions ();
+
     /** Simple unit test and example */
     public static void main(String[] args) throws java.net.SocketException,
                                                   java.io.IOException
@@ -183,61 +215,91 @@ public class OnloadExt {
 
         rc = OnloadExt.SetStackName( ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "Mary" );
         ok &= rc==0;
+
+        rc = OnloadExt.SaveStackName();
+        ok &= rc==0;
+
+        rc = OnloadExt.SetStackName( ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "Hidden" );
+        ok &= rc==0;
+
+        rc = OnloadExt.SetStackOption( "EF_RFC_RTO_MAX", 270 );
+        ok &= rc==0;
+
+        System.out.println( "Expected: oo:java[xxx]: onload_stack_opt_set_int: Requested option EF_NOSUCH_OPTION not found" );
+        rc = OnloadExt.SetStackOption( "EF_NOSUCH_OPTION", 0 );
+        ok &= rc<0;
+
+        rc = OnloadExt.ResetStackOptions();
+        ok &= rc==0;
+
+        rc = OnloadExt.RestoreStackName();
+        ok &= rc==0;
+
+        if ( !ok ) {
+                System.out.println( "Failed before fd_stat." );
+        }
+
         rc = OnloadExt.SetSpin( ONLOAD_SPIN_ALL, true );
         java.net.ServerSocket s2 = new java.net.ServerSocket( 5401 );
         ok &= rc==0;
+
+        ok &= ( 0 == OnloadExt.CheckFeature( 14, OnloadExt.ONLOAD_FD_FEAT_MSG_WARM ) );
 
         System.out.println( "Expected: oo:java[xxx]: Using OpenOnload xxx Copyright 2006-xxx Solarflare Communications, 2002-2005 Level 5 Networks [y,Mary]" );
 
         java.net.Socket s3 = new java.net.Socket( "localhost", 5401 );
 
         rc = OnloadExt.FdStat( d, stat );
-        System.out.println( "\n        Stack ID: " + stat.stackId
+        System.out.println( "\n        Rval: " + rc
+                  + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
                   + " Endpoint State: " + stat.endpointState
                 );
-        System.out.println( "Expect: Stack ID: 0 Name:  Endpoint ID: nn Endpoint State: nn" );
-        ok &= rc == 0;
+        System.out.println( "Expect: Rval: -22 Stack ID: 0 Name:  Endpoint ID: 0 Endpoint State: 0" );
+        ok &= rc <= 0;
         ok &= stat.stackId == 0;
         ok &= stat.stackName.equals("");
         ok &= stat.endpointState == 0;
 
-        OnloadExt.FdStat( s, stat );
-        System.out.println( "\n        Stack ID: " + stat.stackId
+        rc = OnloadExt.FdStat( s, stat );
+        System.out.println( "\n        Rval: " + rc
+                  + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
                   + " Endpoint State: " + stat.endpointState
                 );
-        System.out.println( "Expect: Stack ID: x Name:  Endpoint ID: nn Endpoint State: 45312" );
-        ok &= rc == 0;
+        System.out.println( "Expect: Rval: x Stack ID: x Name:  Endpoint ID: nn Endpoint State: 45312" );
+        ok &= rc > 0;
         ok &= stat.stackName.equals("");
         ok &= stat.endpointId > 0;
         ok &= stat.endpointState == 45312;
 
-        OnloadExt.FdStat( s2, stat );
-        System.out.println( "\n        Stack ID: " + stat.stackId
+        rc = OnloadExt.FdStat( s2, stat );
+        System.out.println( "\n        Rval: " + rc
+                  + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
                   + " Endpoint State: " + stat.endpointState
                 );
-        System.out.println( "Expect: Stack ID: y Name: Mary Endpoint ID: nn Endpoint State: 4934" );
-        ok &= rc == 0;
+        System.out.println( "Expect: Rval: x Stack ID: y Name: Mary Endpoint ID: nn Endpoint State: 4934" );
+        ok &= rc > 0;
         ok &= stat.stackName.equals("Mary");
         ok &= stat.endpointId > 0;
         ok &= stat.endpointState == 4934;
 
-        OnloadExt.FdStat( s3, stat );
-        System.out.println( "\n        Stack ID: " + stat.stackId
+        rc = OnloadExt.FdStat( s3, stat );
+        System.out.println( "\n        Rval: " + rc
+                  + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
                   + " Endpoint State: " + stat.endpointState
                 );
-        System.out.println( "Expect: Stack ID: y Name: Mary Endpoint ID: nn Endpoint State: 4934" );
+        System.out.println( "Expect: Rval: 0 Stack ID: 0 Name:  Endpoint ID: 0 Endpoint State: 0" );
         ok &= rc == 0;
-        ok &= stat.stackName.equals("Mary");
-        ok &= stat.endpointId > 0;
-        ok &= stat.endpointState == 4934;
+        ok &= stat.stackName.equals("");
+        ok &= stat.endpointId == 0;
+        ok &= stat.endpointState == 0;
 
         s.close();
         s2.close();
@@ -251,6 +313,7 @@ public class OnloadExt {
       } else {
         System.out.println( "Onload not present." );
       }
+
     }
     
     /** OnloadExt relies upon the OnloadExt C library */

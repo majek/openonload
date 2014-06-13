@@ -314,7 +314,7 @@ extern unsigned ci_tp_log CI_HV;
   ((errors) & CI_NETIF_ERROR_LOOP_PKTS_LIST ? "LOOP ":"")
 
 
-#define OO_CMSG_FLAGS_FMT  "%s%s%s%s%s%s%s"
+#define OO_CMSG_FLAGS_FMT  "%s%s%s%s%s%s%s%s"
 #define OO_CMSG_FLAGS_PRI_ARG(v)                                \
   ((v) & CI_IP_CMSG_PKTINFO              ? "Pktinfo":""),       \
   ((v) & CI_IP_CMSG_TTL                  ? "Ttl":""),           \
@@ -322,7 +322,8 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_IP_CMSG_RECVOPTS             ? "Recvopts":""),      \
   ((v) & CI_IP_CMSG_RETOPTS              ? "Retopts":""),       \
   ((v) & CI_IP_CMSG_TIMESTAMP            ? "Timestamp":""),     \
-  ((v) & CI_IP_CMSG_TIMESTAMPNS          ? "Timestampns":"")
+  ((v) & CI_IP_CMSG_TIMESTAMPNS          ? "Timestampns":""),   \
+  ((v) & CI_IP_CMSG_TIMESTAMPING         ? "Timestamping":"")
 
 
 /**********************************************************************

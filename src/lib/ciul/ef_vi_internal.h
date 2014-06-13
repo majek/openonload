@@ -60,6 +60,19 @@
 
 
 /**********************************************************************
+ * Initialisation state.
+ */
+
+#define EF_VI_INITED_NIC		0x1
+#define EF_VI_INITED_IO			0x2
+#define EF_VI_INITED_RXQ		0x4
+#define EF_VI_INITED_TXQ		0x8
+#define EF_VI_INITED_EVQ		0x10
+#define EF_VI_INITED_TIMER		0x20
+#define EF_VI_INITED_RX_TIMESTAMPING	0x40
+
+
+/**********************************************************************
  * Debugging.
  */
 
@@ -70,12 +83,14 @@
 
 
 #ifdef NDEBUG
+# define EF_VI_ASSERT(x)   do{}while(0)
 # ifdef __KERNEL__
 #  define EF_VI_BUG_ON(x)  WARN_ON(x)
 # else
 #  define EF_VI_BUG_ON(x)  do{}while(0)
 # endif
 #else
+# define EF_VI_ASSERT(x)  BUG_ON(!(x))
 # define EF_VI_BUG_ON(x)  BUG_ON(x)
 #endif
 
@@ -180,8 +195,7 @@
 /* ******************************************************************** 
  */
 
-extern void falcon_vi_init(ef_vi*, void* vvis ) EF_VI_HF;
-extern void ef_eventq_state_init(ef_vi* evq) EF_VI_HF;
+extern void falcon_vi_init(ef_vi*) EF_VI_HF;
 
 extern void falcon_ef_eventq_prime(ef_vi*);
 extern int falcon_ef_eventq_poll(ef_vi*, ef_event*, int evs_len);
@@ -191,7 +205,7 @@ extern void falcon_ef_eventq_timer_run(ef_vi*, unsigned v);
 extern void falcon_ef_eventq_timer_clear(ef_vi*);
 extern void falcon_ef_eventq_timer_zero(ef_vi*);
 
-extern void ef10_vi_init(ef_vi*, void* vvis ) EF_VI_HF;
+extern void ef10_vi_init(ef_vi*) EF_VI_HF;
 
 extern void ef10_ef_eventq_prime(ef_vi*);
 extern int ef10_ef_eventq_poll(ef_vi*, ef_event*, int evs_len);

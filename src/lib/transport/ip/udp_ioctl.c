@@ -134,7 +134,7 @@ static int ci_udp_ioctl_siocgstamp(ci_netif *netif, ci_udp_state *us,
 {
   ci_uint64 stamp = us->stamp;
 
-  if( us->s.cmsg_flags & (CI_IP_CMSG_TIMESTAMP | CI_IP_CMSG_TIMESTAMPNS) ) 
+  if( us->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY )
     stamp = us->stamp_pre_sots;
 
   if( stamp == 0 )
@@ -142,7 +142,7 @@ static int ci_udp_ioctl_siocgstamp(ci_netif *netif, ci_udp_state *us,
   else if( arg == NULL )
     return -EFAULT;
   else if( stamp != 1 ) {
-    if( us->s.cmsg_flags & (CI_IP_CMSG_TIMESTAMP | CI_IP_CMSG_TIMESTAMPNS) )
+    if( us->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY )
       ci_udp_update_stamp_cache(netif, us, &us->stamp_pre_sots);
     else 
       ci_udp_update_stamp_cache(netif, us, &us->stamp);

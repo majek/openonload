@@ -182,4 +182,18 @@ extern int efch_resource_id_lookup(efch_resource_id_t id,
 				   efch_resource_t **out);
 
 
+/*--------------------------------------------------------------------
+ * licensing
+ */
+
+struct ci_license_challenge_op_s;
+
+/* (efch_license.c)
+ * Check if the given feature is licensed in the NIC and respond to the
+ * challenge. */
+extern int efch_license_challenge(ci_resource_table_t* rt,
+                                  struct ci_license_challenge_op_s* op, 
+                                  int* copy_out
+                                  CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t));
+
 #endif /* __EFCH_H__ */

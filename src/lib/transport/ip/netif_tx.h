@@ -137,11 +137,9 @@ ci_inline void ci_netif_dmaq_and_vi_for_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   } while(0)
 
 
-#define __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, offset, pkt)       \
+#define __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, pkt)              \
   do {                                                                  \
     (pkt)->flags &=~ CI_PKT_FLAG_TX_PENDING;                            \
-    ci_pio_buddy_free(ni, &(ni)->state->nic[(pkt)->intf_i].pio_buddy,   \
-                      offset, order);                                   \
     --(ni)->state->nic[(pkt)->intf_i].tx_dmaq_insert_seq;               \
     (ni)->state->nic[(pkt)->intf_i].tx_bytes_added-=TX_PKT_LEN(pkt);    \
     ci_netif_pkt_release(ni, pkt);                                      \

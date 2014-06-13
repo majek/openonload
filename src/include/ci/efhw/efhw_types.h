@@ -198,10 +198,13 @@ struct efhw_func_ops {
 				    uint n_pages,
 				    int interrupting, 
 				    int enable_dos_p,
-				    int wakeup_evq);
+				    int wakeup_evq,
+				    int enable_time_sync_events,
+				    int *rx_ts_correction_out);
 
 	/*! Disable the given event queue (and any associated timer) */
-	void (*event_queue_disable) (struct efhw_nic *nic, uint evq);
+	void (*event_queue_disable) (struct efhw_nic *nic, uint evq,
+				     int time_sync_events_enabled);
 
 	/*! request wakeup from the NIC on a given event Q */
 	void (*wakeup_request) (struct efhw_nic *nic,
@@ -280,6 +283,38 @@ struct efhw_func_ops {
 	void (*buffer_table_clear) (struct efhw_nic *nic,
 				    struct efhw_buffer_table_block *block,
 				    int first_entry, int n_entries);
+
+  /*-------------- Sniff Support ------------ */
+	/*! Enable or disable port sniff.
+	 * If rss_context_handle is -1 instance is treated as a single RX
+	 * queue.  If rss_context_handle is a valid rss context handle then
+	 * instance is treated as a base queue and RSS is enabled.
+	 */
+	int (*set_port_sniff) (struct efhw_nic *nic, int instance, int enable,
+			       int promiscuous, int rss_context_handle);
+
+  /*-------------- RSS Support ------------ */
+	/*! Allocate an RX RSS context */
+	int (*rss_context_alloc) (struct efhw_nic *nic, int num_qs, int shared,
+				  int *handle_out);
+
+	/*! Free an RX RSS context */
+	int (*rss_context_free) (struct efhw_nic *nic, int handle);
+
+	/*! Set up an indirection table for an RSS context */
+	int (*rss_context_set_table) (struct efhw_nic *nic, int handle,
+				      const uint8_t *table);
+
+	/*! Set up a key for an RSS context */
+	int (*rss_context_set_key) (struct efhw_nic *nic, int handle,
+				    const uint8_t *key);
+
+  /*-------------- Licensing ------------------------ */
+	int (* license_challenge) (struct efhw_nic *nic,
+				   const uint32_t feature,
+				   const uint8_t* challenge,
+				   uint32_t* expiry,
+				   uint8_t* signature);
 
 };
 
@@ -374,7 +409,9 @@ struct efhw_nic {
 	/* Nanoseconds for hardware timeout timer quantum */
 	unsigned timer_quantum_ns;
 
-	/* Prefix inserted by hardware for hash etc. Falcon only */
+	/* On Falcon, this is the prefix len chosen globally by the
+	 * net driver.  On Torino, this is the prefix len if one was
+	 * asked to be inserted during RXQ initialisation. */
 	unsigned rx_prefix_len;
 
 	/* Limit on size of rx buffer to use */

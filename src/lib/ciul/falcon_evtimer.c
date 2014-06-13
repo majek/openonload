@@ -31,10 +31,10 @@
 #include "ef_vi_internal.h"
 
 
-static void ef_eventq_timer_poke(ef_vi* q, unsigned v)
+static void ef_eventq_timer_poke(ef_vi* vi, unsigned v)
 {
-  writel(v, q->evq_timer_reg);
-  mmiowb();
+	writel(v, vi->io + FR_BZ_TIMER_COMMAND_REGP0_OFST);
+	mmiowb();
 }
 
 

@@ -166,8 +166,8 @@ static int efab_add_mm_ref (struct mm_struct *mm) {
   ci_assert (p);
   p->ref++;
 
-  write_unlock (&oo_mm_tbl_lock);
 exit:
+  write_unlock (&oo_mm_tbl_lock);
   return rc;
 }
 
@@ -212,7 +212,13 @@ static void efab_del_mm_ref (struct mm_struct *mm) {
   write_lock (&oo_mm_tbl_lock);
 
   p = oo_mm_tbl_lookup(mm);
-  ci_assert (p);
+  if( p == NULL ) {
+    /* It should happen after ENOMEM in efab_add_mm_ref only */
+    ci_log("%s: ERROR: can not lookup this mm", __func__);
+    write_unlock (&oo_mm_tbl_lock);
+    return;
+  }
+
   ci_assert (p->mm == mm);
 
   do_free = efab_put_mm_hash_locked(p);
@@ -241,14 +247,17 @@ void oo_mm_tbl_init(void)
 static void vm_op_open(struct vm_area_struct* vma)
 {
   tcp_helper_resource_t* map;
-  map = (tcp_helper_resource_t*) vma->vm_private_data;
+  int rc;
 
+  map = (tcp_helper_resource_t*) vma->vm_private_data;
   TCP_HELPER_RESOURCE_ASSERT_VALID(map, 0);
 
   OO_DEBUG_TRAMP(ci_log("vm_op_open: %u vma=%p rs_refs=%d",
 		 map->id, vma, (int) oo_atomic_read(&map->ref_count)));
 
-  efab_add_mm_ref (vma->vm_mm); /* Shit -- what if we ENOMEM? */
+  rc = efab_add_mm_ref (vma->vm_mm);
+  if( rc != 0 )
+    ci_log("%s: ERROR: failed to register mm: rc=%d", __func__, rc);
 }
 
 

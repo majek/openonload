@@ -141,6 +141,7 @@ struct alloc_vi_constraints {
 	struct efrm_nic *efrm_nic;
 	int channel;
 	int min_vis_in_set;
+	int has_rss_context;
 };
 
 
@@ -157,14 +158,14 @@ static bool accept_vi_constraints(int low, unsigned order, void* arg)
 		if( avc->channel >= 0 )
 			ok &= ((low & avc->efrm_nic->falcon_wakeup_mask)
 			       == avc->channel);
+	}
+	if ((avc->min_vis_in_set > 1) && (!avc->has_rss_context)) {
 		/* We need to ensure that if an RSS-enabled filter is
 		 * pointed at this VI-set then the queue selected will be
-		 * within the set.  The queue selected by RSS will be in
-		 * the range (low | (rss_channel_count - 1)).
+		 * within the default set.  The queue selected by RSS will be 
+		 * in the range (low | (rss_channel_count - 1)).
 		 */
-		if (avc->min_vis_in_set > 1)
-			ok &= ((low | (avc->efrm_nic->rss_channel_count - 1))
-			       < high);
+		ok &= ((low | (avc->efrm_nic->rss_channel_count - 1)) < high);
 	}
 	return ok;
 }
@@ -172,18 +173,20 @@ static bool accept_vi_constraints(int low, unsigned order, void* arg)
 
 static int buddy_alloc_vi(struct efrm_nic *efrm_nic,
 			  struct efrm_buddy_allocator *b, int order,
-			  int channel, int min_vis_in_set)
+			  int channel, int min_vis_in_set, int has_rss_context)
 {
 	struct alloc_vi_constraints avc;
 	avc.efrm_nic = efrm_nic;
 	avc.channel = channel;
 	avc.min_vis_in_set = min_vis_in_set;
+	avc.has_rss_context = has_rss_context;
 	return efrm_buddy_alloc_special(b, order, accept_vi_constraints, &avc);
 }
 
 
 int  efrm_vi_allocator_alloc_set(struct efrm_nic *efrm_nic, unsigned vi_props,
-				 int min_vis_in_set, int channel,
+				 int min_vis_in_set, int has_rss_context,
+				 int channel,
 				 struct efrm_vi_allocation *set_out)
 {
 	struct efrm_vi_allocator *va;
@@ -210,7 +213,7 @@ int  efrm_vi_allocator_alloc_set(struct efrm_nic *efrm_nic, unsigned vi_props,
 	spin_lock_bh(&efrm_nic->lock);
 	set_out->instance = buddy_alloc_vi(efrm_nic, &va->instances,
 					   set_out->order, channel,
-					   min_vis_in_set);
+					   min_vis_in_set, has_rss_context);
 	spin_unlock_bh(&efrm_nic->lock);
 	rc = (set_out->instance >= 0) ? 0 : -EBUSY;
 	return rc;

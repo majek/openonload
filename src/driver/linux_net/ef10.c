@@ -70,31 +70,34 @@ struct efx_ef10_filter_table {
 
 	struct {
 		unsigned long spec;	/* pointer to spec plus flag bits */
-/* BUSY flag indicates that an update is in progress.  STACK_OLD is
- * used to mark and sweep stack-owned MAC filters.
+/* BUSY flag indicates that an update is in progress.  AUTO_OLD is
+ * used to mark and sweep MAC filters for the device address lists.
  */
 #define EFX_EF10_FILTER_FLAG_BUSY	1UL
-#define EFX_EF10_FILTER_FLAG_STACK_OLD	2UL
+#define EFX_EF10_FILTER_FLAG_AUTO_OLD	2UL
 #define EFX_EF10_FILTER_FLAGS		3UL
 		u64 handle;		/* firmware handle */
 	} *entry;
 	wait_queue_head_t waitq;
 /* Shadow of net_device address lists, guarded by mac_lock */
-#define EFX_EF10_FILTER_STACK_UC_MAX	32
-#define EFX_EF10_FILTER_STACK_MC_MAX	256
+#define EFX_EF10_FILTER_DEV_UC_MAX	32
+#define EFX_EF10_FILTER_DEV_MC_MAX	256
 	struct {
 		u8 addr[ETH_ALEN];
 		u16 id;
-	} stack_uc_list[EFX_EF10_FILTER_STACK_UC_MAX],
-	  stack_mc_list[EFX_EF10_FILTER_STACK_MC_MAX];
-	int stack_uc_count;		/* negative for PROMISC */
-	int stack_mc_count;		/* negative for PROMISC/ALLMULTI */
+	} dev_uc_list[EFX_EF10_FILTER_DEV_UC_MAX],
+	  dev_mc_list[EFX_EF10_FILTER_DEV_MC_MAX];
+	int dev_uc_count;		/* negative for PROMISC */
+	int dev_mc_count;		/* negative for PROMISC/ALLMULTI */
+#ifdef EFX_NOT_UPSTREAM
+	bool kernel_blocked;
+#endif
 };
 
 /* An arbitrary search limit for the software hash table */
 #define EFX_EF10_FILTER_SEARCH_LIMIT 200
 
-static void efx_ef10_rx_push_indir_table(struct efx_nic *efx);
+static void efx_ef10_rx_push_rss_config(struct efx_nic *efx);
 static void efx_ef10_generate_event(struct efx_nic *efx, unsigned int evq,
 				    u32 event);
 static void efx_ef10_do_defer_refill(struct work_struct *data);
@@ -322,6 +325,12 @@ static int efx_ef10_probe(struct efx_nic *efx)
 	if (rc)
 		goto fail3;
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
+	efx_ptp_probe(efx, NULL);
+#else
+	efx_ptp_defer_probe_with_channel(efx);
+#endif
+
 	return 0;
 
 fail3:
@@ -529,9 +538,12 @@ static void efx_ef10_remove(struct efx_nic *efx)
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	int rc;
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
+	efx_ptp_remove(efx);
+#endif
+
 	efx_mcdi_mon_remove(efx);
 
-	/* This needs to be after efx_ptp_remove_channel() with no filters */
 	efx_ef10_rx_free_indir_table(efx);
 
 	if (nic_data->wc_membase)
@@ -747,7 +759,7 @@ static int efx_ef10_init_nic(struct efx_nic *efx)
 		nic_data->must_restore_piobufs = false;
 	}
 
-	efx_ef10_rx_push_indir_table(efx);
+	efx_ef10_rx_push_rss_config(efx);
 	return 0;
 }
 
@@ -842,8 +854,8 @@ static const struct efx_hw_stat_desc efx_ef10_stat_desc[EF10_STAT_COUNT] = {
 	EF10_DMA_STAT(rx_dp_q_disabled_packets, RXDP_Q_DISABLED_PKTS),
 	EF10_DMA_STAT(rx_dp_di_dropped_packets, RXDP_DI_DROPPED_PKTS),
 	EF10_DMA_STAT(rx_dp_streaming_packets, RXDP_STREAMING_PKTS),
-	EF10_DMA_STAT(rx_dp_emerg_fetch, RXDP_EMERGENCY_FETCH_CONDITIONS),
-	EF10_DMA_STAT(rx_dp_emerg_wait, RXDP_EMERGENCY_WAIT_CONDITIONS),
+	EF10_DMA_STAT(rx_dp_hlb_fetch, RXDP_EMERGENCY_FETCH_CONDITIONS),
+	EF10_DMA_STAT(rx_dp_hlb_wait, RXDP_EMERGENCY_WAIT_CONDITIONS),
 };
 
 #define HUNT_COMMON_STAT_MASK ((1ULL << EF10_STAT_tx_bytes) |		\
@@ -912,8 +924,8 @@ static const struct efx_hw_stat_desc efx_ef10_stat_desc[EF10_STAT_COUNT] = {
 	(1ULL << EF10_STAT_rx_dp_q_disabled_packets) |			\
 	(1ULL << EF10_STAT_rx_dp_di_dropped_packets) |			\
 	(1ULL << EF10_STAT_rx_dp_streaming_packets) |			\
-	(1ULL << EF10_STAT_rx_dp_emerg_fetch) |				\
-	(1ULL << EF10_STAT_rx_dp_emerg_wait))
+	(1ULL << EF10_STAT_rx_dp_hlb_fetch) |				\
+	(1ULL << EF10_STAT_rx_dp_hlb_wait))
 
 static u64 efx_ef10_raw_stat_mask(struct efx_nic *efx)
 {
@@ -1342,7 +1354,8 @@ static void efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 	return;
 
 fail:
-	WARN_ON(true);
+	netdev_WARN(efx->net_dev, "failed to initialise TXQ %d\n",
+		    tx_queue->queue);
 }
 
 static void efx_ef10_tx_fini(struct efx_tx_queue *tx_queue)
@@ -1515,12 +1528,12 @@ static void efx_ef10_rx_free_indir_table(struct efx_nic *efx)
 	efx->rx_rss_context = 0;
 }
 
-static void efx_ef10_rx_push_indir_table(struct efx_nic *efx)
+static void efx_ef10_rx_push_rss_config(struct efx_nic *efx)
 {
 	enum efx_rss_state new_rss_state, old_rss_state = efx->rx_rss_state;
 	int rc;
 
-	netif_dbg(efx, drv, efx->net_dev, "pushing RX indirection table\n");
+	netif_dbg(efx, drv, efx->net_dev, "pushing RSS config\n");
 
 	/* see if the new table matches a preset one. if not then use custom */
 	/* TODO: there are no preset tables yet, so it's always custom */
@@ -1597,8 +1610,9 @@ static void efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
 	MCDI_SET_DWORD(inbuf, INIT_RXQ_IN_LABEL, efx_rx_queue_index(rx_queue));
 	MCDI_SET_DWORD(inbuf, INIT_RXQ_IN_INSTANCE,
 		       efx_rx_queue_index(rx_queue));
-	MCDI_POPULATE_DWORD_1(inbuf, INIT_RXQ_IN_FLAGS,
-			      INIT_RXQ_IN_FLAG_PREFIX, 1);
+	MCDI_POPULATE_DWORD_2(inbuf, INIT_RXQ_IN_FLAGS,
+			      INIT_RXQ_IN_FLAG_PREFIX, 1,
+			      INIT_RXQ_IN_FLAG_TIMESTAMP, 1);
 	MCDI_SET_DWORD(inbuf, INIT_RXQ_IN_OWNER_ID, 0);
 	MCDI_SET_DWORD(inbuf, INIT_RXQ_IN_PORT_ID, EVB_PORT_ID_ASSIGNED);
 
@@ -1616,9 +1630,9 @@ static void efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_INIT_RXQ, inbuf, inlen,
 			  outbuf, sizeof(outbuf), &outlen);
-	WARN_ON(rc);
-
-	return;
+	if (rc)
+		netdev_WARN(efx->net_dev, "failed to initialise RXQ %d\n",
+			    efx_rx_queue_index(rx_queue));
 }
 
 static void efx_ef10_rx_fini(struct efx_rx_queue *rx_queue)
@@ -1847,8 +1861,6 @@ static void efx_ef10_handle_rx_abort(struct efx_rx_queue *rx_queue)
 {
 	unsigned rx_desc_ptr;
 
-	WARN_ON(rx_queue->scatter_n == 0);
-
 	netif_dbg(rx_queue->efx, hw, rx_queue->efx->net_dev,
 		  "scattered RX aborted (dropping %u buffers)\n",
 		  rx_queue->scatter_n);
@@ -1892,7 +1904,10 @@ static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 	rx_l4_class = EFX_QWORD_FIELD(*event, ESF_DZ_RX_L4_CLASS);
 	rx_cont = EFX_QWORD_FIELD(*event, ESF_DZ_RX_CONT);
 
-	WARN_ON(EFX_QWORD_FIELD(*event, ESF_DZ_RX_DROP_EVENT));
+	if (EFX_QWORD_FIELD(*event, ESF_DZ_RX_DROP_EVENT))
+		netdev_WARN(efx->net_dev, "saw RX_DROP_EVENT: event="
+			    EFX_QWORD_FMT "\n",
+			    EFX_QWORD_VAL(*event));
 
 	rx_queue = efx_channel_get_rx_queue(channel);
 
@@ -1907,7 +1922,12 @@ static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 
 		/* detect rx abort */
 		if (unlikely(n_descs == rx_queue->scatter_n)) {
-			WARN_ON(rx_bytes != 0);
+			if (rx_queue->scatter_n == 0 || rx_bytes != 0)
+				netdev_WARN(efx->net_dev,
+					    "invalid RX abort: scatter_n=%u event="
+					    EFX_QWORD_FMT "\n",
+					    rx_queue->scatter_n,
+					    EFX_QWORD_VAL(*event));
 			efx_ef10_handle_rx_abort(rx_queue);
 			return 0;
 		}
@@ -1948,15 +1968,23 @@ static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 	}
 
 	if (unlikely(EFX_QWORD_FIELD(*event, ESF_DZ_RX_IPCKSUM_ERR))) {
-		WARN_ON(rx_l3_class != ESE_DZ_L3_CLASS_IP4 &&
-			rx_l3_class != ESE_DZ_L3_CLASS_IP4_FRAG);
+		if (unlikely(rx_l3_class != ESE_DZ_L3_CLASS_IP4 &&
+			     rx_l3_class != ESE_DZ_L3_CLASS_IP4_FRAG))
+			netdev_WARN(efx->net_dev,
+				    "invalid class for RX_IPCKSUM_ERR: event="
+				    EFX_QWORD_FMT "\n",
+				    EFX_QWORD_VAL(*event));
 		channel->n_rx_ip_hdr_chksum_err += n_packets;
 	} else if (unlikely(EFX_QWORD_FIELD(*event,
 					    ESF_DZ_RX_TCPUDP_CKSUM_ERR))) {
-		WARN_ON(rx_l3_class != ESE_DZ_L3_CLASS_IP4 &&
-			rx_l3_class != ESE_DZ_L3_CLASS_IP6);
-		WARN_ON(rx_l4_class != ESE_DZ_L4_CLASS_TCP &&
-			rx_l4_class != ESE_DZ_L4_CLASS_UDP);
+		if (unlikely((rx_l3_class != ESE_DZ_L3_CLASS_IP4 &&
+			      rx_l3_class != ESE_DZ_L3_CLASS_IP6) ||
+			     (rx_l4_class != ESE_DZ_L4_CLASS_TCP &&
+			      rx_l4_class != ESE_DZ_L4_CLASS_UDP)))
+			netdev_WARN(efx->net_dev,
+				    "invalid class for RX_TCPUDP_CKSUM_ERR: event="
+				    EFX_QWORD_FMT "\n",
+				    EFX_QWORD_VAL(*event));
 		channel->n_rx_tcp_udp_chksum_err += n_packets;
 	} else if (rx_l4_class == ESE_DZ_L4_CLASS_TCP ||
 		   rx_l4_class == ESE_DZ_L4_CLASS_UDP) {
@@ -1986,11 +2014,11 @@ static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 	channel->irq_mod_score += 2 * n_packets;
 
 	/* XXX for bug 37073 */
-	if (WARN_ON(rx_queue->added_count - rx_queue->removed_count < n_descs))
-		netif_err(efx, drv, efx->net_dev,
-			   "added_count=%#x removed_count=%#x n_packets=%u scatter_n=%u\n",
-			   rx_queue->added_count, rx_queue->removed_count,
-			   n_packets, rx_queue->scatter_n);
+	if (rx_queue->added_count - rx_queue->removed_count < n_descs)
+		netdev_WARN(efx->net_dev,
+			    "invalid completion index: added_count=%#x removed_count=%#x n_packets=%u scatter_n=%u\n",
+			    rx_queue->added_count, rx_queue->removed_count,
+			    n_packets, rx_queue->scatter_n);
 
 	/* Handle received packet(s) */
 	for (i = 0; i < n_packets; i++) {
@@ -2445,10 +2473,6 @@ static s32 efx_ef10_filter_insert(struct efx_nic *efx,
 	    EFX_FILTER_FLAG_RX)
 		return -EINVAL;
 
-	/* We don't yet support overriding more specific automatic filters */
-	if (spec->flags & EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO)
-		return -EINVAL;
-
 	rc = efx_ef10_filter_rx_match_pri(table, spec->match_flags);
 	if (rc < 0)
 		return rc;
@@ -2469,6 +2493,14 @@ static s32 efx_ef10_filter_insert(struct efx_nic *efx,
 
 		spin_lock_bh(&efx->filter_lock);
 
+#ifdef EFX_NOT_UPSTREAM
+		if (spec->priority <= EFX_FILTER_PRI_AUTO &&
+		    table->kernel_blocked) {
+			rc = -EPERM;
+			goto out_unlock;
+		}
+#endif
+
 		for (;;) {
 			i = (hash + depth) & (HUNT_FILTER_TBL_ROWS - 1);
 			saved_spec = efx_ef10_filter_entry_spec(table, i);
@@ -2481,10 +2513,7 @@ static s32 efx_ef10_filter_insert(struct efx_nic *efx,
 				    EFX_EF10_FILTER_FLAG_BUSY)
 					break;
 				if (spec->priority < saved_spec->priority &&
-				    !(saved_spec->priority ==
-				      EFX_FILTER_PRI_REQUIRED &&
-				      saved_spec->flags &
-				      EFX_FILTER_FLAG_RX_STACK)) {
+				    spec->priority != EFX_FILTER_PRI_AUTO) {
 					rc = -EPERM;
 					goto out_unlock;
 				}
@@ -2538,11 +2567,13 @@ found:
 	 */
 	saved_spec = efx_ef10_filter_entry_spec(table, ins_index);
 	if (saved_spec) {
-		if (spec->flags & EFX_FILTER_FLAG_RX_STACK) {
+		if (spec->priority == EFX_FILTER_PRI_AUTO &&
+		    saved_spec->priority >= EFX_FILTER_PRI_AUTO) {
 			/* Just make sure it won't be removed */
-			saved_spec->flags |= EFX_FILTER_FLAG_RX_STACK;
+			if (saved_spec->priority > EFX_FILTER_PRI_AUTO)
+				saved_spec->flags |= EFX_FILTER_FLAG_RX_OVER_AUTO;
 			table->entry[ins_index].spec &=
-				~EFX_EF10_FILTER_FLAG_STACK_OLD;
+				~EFX_EF10_FILTER_FLAG_AUTO_OLD;
 			rc = ins_index;
 			goto out_unlock;
 		}
@@ -2582,8 +2613,11 @@ found:
 	if (rc == 0) {
 		if (replacing) {
 			/* Update the fields that may differ */
+			if (saved_spec->priority == EFX_FILTER_PRI_AUTO)
+				saved_spec->flags |=
+					EFX_FILTER_FLAG_RX_OVER_AUTO;
 			saved_spec->priority = spec->priority;
-			saved_spec->flags &= EFX_FILTER_FLAG_RX_STACK;
+			saved_spec->flags &= EFX_FILTER_FLAG_RX_OVER_AUTO;
 			saved_spec->flags |= spec->flags;
 			saved_spec->rss_context = spec->rss_context;
 			saved_spec->dmaq_id = spec->dmaq_id;
@@ -2652,13 +2686,13 @@ static void efx_ef10_filter_update_rx_scatter(struct efx_nic *efx)
 }
 
 /* Remove a filter.
- * If !stack_requested, remove by ID
- * If stack_requested, remove by index
+ * If !by_index, remove by ID
+ * If by_index, remove by index
  * Filter ID may come from userland and must be range-checked.
  */
 static int efx_ef10_filter_remove_internal(struct efx_nic *efx,
-					   enum efx_filter_priority priority,
-					   u32 filter_id, bool stack_requested)
+					   unsigned int priority_mask,
+					   u32 filter_id, bool by_index)
 {
 	struct efx_ef10_filter_table *table = efx->filter_state;
 	MCDI_DECLARE_BUF(inbuf,
@@ -2682,28 +2716,43 @@ static int efx_ef10_filter_remove_internal(struct efx_nic *efx,
 		spin_unlock_bh(&efx->filter_lock);
 		schedule();
 	}
+
 	spec = efx_ef10_filter_entry_spec(table, filter_idx);
-	if (!spec || spec->priority > priority ||
-	    (!stack_requested &&
+	if (!spec ||
+	    (!by_index &&
 	     efx_ef10_filter_rx_match_pri(table, spec->match_flags) !=
 	     filter_id / HUNT_FILTER_TBL_ROWS)) {
 		rc = -ENOENT;
 		goto out_unlock;
 	}
+
+	if (spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO &&
+	    priority_mask == (1U << EFX_FILTER_PRI_AUTO)) {
+		/* Just remove flags */
+		spec->flags &= ~EFX_FILTER_FLAG_RX_OVER_AUTO;
+		table->entry[filter_idx].spec &= ~EFX_EF10_FILTER_FLAG_AUTO_OLD;
+		rc = 0;
+		goto out_unlock;
+	}
+
+	if (!(priority_mask & (1U << spec->priority))) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+
 	table->entry[filter_idx].spec |= EFX_EF10_FILTER_FLAG_BUSY;
 	spin_unlock_bh(&efx->filter_lock);
 
-	if (spec->flags & EFX_FILTER_FLAG_RX_STACK && !stack_requested) {
-		/* Reset steering of a stack-owned filter */
+	if (spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO) {
+		/* Reset to an automatic filter */
 
 		struct efx_filter_spec new_spec = *spec;
 
-		new_spec.priority = EFX_FILTER_PRI_REQUIRED;
+		new_spec.priority = EFX_FILTER_PRI_AUTO;
 		new_spec.flags = (EFX_FILTER_FLAG_RX |
-				  EFX_FILTER_FLAG_RX_RSS |
-				  EFX_FILTER_FLAG_RX_STACK);
+				  EFX_FILTER_FLAG_RX_RSS);
 		new_spec.dmaq_id = 0;
-		new_spec.rss_context = 0;
+		new_spec.rss_context = EFX_FILTER_RSS_CONTEXT_DEFAULT;
 		rc = efx_ef10_filter_push(efx, &new_spec,
 					  &table->entry[filter_idx].handle,
 					  true);
@@ -2729,6 +2778,7 @@ static int efx_ef10_filter_remove_internal(struct efx_nic *efx,
 			efx_ef10_filter_set_entry(table, filter_idx, NULL, 0);
 		}
 	}
+
 	table->entry[filter_idx].spec &= ~EFX_EF10_FILTER_FLAG_BUSY;
 	wake_up_all(&table->waitq);
 out_unlock:
@@ -2741,7 +2791,8 @@ static int efx_ef10_filter_remove_safe(struct efx_nic *efx,
 				       enum efx_filter_priority priority,
 				       u32 filter_id)
 {
-	return efx_ef10_filter_remove_internal(efx, priority, filter_id, false);
+	return efx_ef10_filter_remove_internal(efx, 1U << priority,
+					       filter_id, false);
 }
 
 static int efx_ef10_filter_get_safe(struct efx_nic *efx,
@@ -2767,14 +2818,28 @@ static int efx_ef10_filter_get_safe(struct efx_nic *efx,
 	return rc;
 }
 
-static void efx_ef10_filter_clear_rx(struct efx_nic *efx,
+static int efx_ef10_filter_clear_rx(struct efx_nic *efx,
 				     enum efx_filter_priority priority)
 {
-	/* TODO */
+	unsigned int priority_mask;
+	unsigned int i;
+	int rc;
+
+	priority_mask = (((1U << (priority + 1)) - 1) &
+			 ~(1U << EFX_FILTER_PRI_AUTO));
+
+	for (i = 0; i < HUNT_FILTER_TBL_ROWS; i++) {
+		rc = efx_ef10_filter_remove_internal(efx, priority_mask,
+						     i, true);
+		if (rc && rc != -ENOENT)
+			return rc;
+	}
+
+	return 0;
 }
 
-static void efx_ef10_filter_redirect(struct efx_nic *efx, u32 filter_id,
-				     int rxq_i)
+static int efx_ef10_filter_redirect(struct efx_nic *efx, u32 filter_id,
+				    int rxq_i)
 {
 	struct efx_ef10_filter_table *table = efx->filter_state;
 	struct efx_filter_spec *spec, new_spec;
@@ -2793,8 +2858,13 @@ static void efx_ef10_filter_redirect(struct efx_nic *efx, u32 filter_id,
 		schedule();
 	}
 	spec = efx_ef10_filter_entry_spec(table, filter_idx);
-	if (WARN_ON(!spec))
+	if (!spec) {
+		rc = -ENOENT;
+		netdev_WARN(efx->net_dev,
+			    "invalid filter_id: filter_id=%#x rxq_i=%u\n",
+			    filter_id, rxq_i);
 		goto out_unlock;
+	}
 	table->entry[filter_idx].spec |= EFX_EF10_FILTER_FLAG_BUSY;
 	spin_unlock_bh(&efx->filter_lock);
 
@@ -2803,15 +2873,19 @@ static void efx_ef10_filter_redirect(struct efx_nic *efx, u32 filter_id,
 	new_spec.dmaq_id = rxq_i;
 	rc = efx_ef10_filter_push(efx, &new_spec,
 				  &table->entry[filter_idx].handle, true);
-
+	if (rc)
+		netdev_WARN(efx->net_dev,
+			    "failed to update filter: filter_id=%#x rxq_i=%u rc=%d\n",
+			    filter_id, rxq_i, rc);
 	spin_lock_bh(&efx->filter_lock);
-	if (!WARN_ON(rc))
+	if (!rc)
 		*spec = new_spec;
 	table->entry[filter_idx].spec &= ~EFX_EF10_FILTER_FLAG_BUSY;
 	wake_up_all(&table->waitq);
 out_unlock:
 	spin_unlock_bh(&efx->filter_lock);
 	finish_wait(&table->waitq, &wait);
+	return rc;
 }
 
 static u32 efx_ef10_filter_count_rx_used(struct efx_nic *efx,
@@ -2896,6 +2970,13 @@ static s32 efx_ef10_filter_rfs_insert(struct efx_nic *efx,
 
 	spin_lock_bh(&efx->filter_lock);
 
+#ifdef EFX_NOT_UPSTREAM
+	if (table->kernel_blocked) {
+		rc = -EPERM;
+		goto fail_unlock;
+	}
+#endif
+
 	/* Find any existing filter with the same match tuple or else
 	 * a free slot to insert at.  If an existing filter is busy,
 	 * we have to give up.
@@ -2912,8 +2993,6 @@ static s32 efx_ef10_filter_rfs_insert(struct efx_nic *efx,
 				rc = -EBUSY;
 				goto fail_unlock;
 			}
-			EFX_WARN_ON_PARANOID(saved_spec->flags &
-					     EFX_FILTER_FLAG_RX_STACK);
 			if (spec->priority < saved_spec->priority) {
 				rc = -EPERM;
 				goto fail_unlock;
@@ -3223,8 +3302,11 @@ static void efx_ef10_filter_table_remove(struct efx_nic *efx)
 			       table->entry[filter_idx].handle);
 		rc = efx_mcdi_rpc(efx, MC_CMD_FILTER_OP, inbuf, sizeof(inbuf),
 				  NULL, 0, NULL);
-
-		WARN_ON(rc != 0);
+		if (rc)
+			netdev_WARN(efx->net_dev,
+				    "filter_idx=%#x handle=%#llx\n",
+				    filter_idx,
+				    table->entry[filter_idx].handle);
 		kfree(spec);
 	}
 
@@ -3256,15 +3338,15 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 
 	/* Mark old filters that may need to be removed */
 	spin_lock_bh(&efx->filter_lock);
-	n = table->stack_uc_count < 0 ? 1 : table->stack_uc_count;
+	n = table->dev_uc_count < 0 ? 1 : table->dev_uc_count;
 	for (i = 0; i < n; i++) {
-		filter_idx = table->stack_uc_list[i].id % HUNT_FILTER_TBL_ROWS;
-		table->entry[filter_idx].spec |= EFX_EF10_FILTER_FLAG_STACK_OLD;
+		filter_idx = table->dev_uc_list[i].id % HUNT_FILTER_TBL_ROWS;
+		table->entry[filter_idx].spec |= EFX_EF10_FILTER_FLAG_AUTO_OLD;
 	}
-	n = table->stack_mc_count < 0 ? 1 : table->stack_mc_count;
+	n = table->dev_mc_count < 0 ? 1 : table->dev_mc_count;
 	for (i = 0; i < n; i++) {
-		filter_idx = table->stack_mc_list[i].id % HUNT_FILTER_TBL_ROWS;
-		table->entry[filter_idx].spec |= EFX_EF10_FILTER_FLAG_STACK_OLD;
+		filter_idx = table->dev_mc_list[i].id % HUNT_FILTER_TBL_ROWS;
+		table->entry[filter_idx].spec |= EFX_EF10_FILTER_FLAG_AUTO_OLD;
 	}
 	spin_unlock_bh(&efx->filter_lock);
 
@@ -3272,38 +3354,48 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 	 * address and broadcast address
 	 */
 	netif_addr_lock_bh(net_dev);
+#ifdef EFX_NOT_UPSTREAM
+	if (table->kernel_blocked)
+		table->dev_uc_count = 0;
+	else
+#endif
 	if (net_dev->flags & IFF_PROMISC ||
-	    netdev_uc_count(net_dev) >= EFX_EF10_FILTER_STACK_UC_MAX) {
-		table->stack_uc_count = -1;
+	    netdev_uc_count(net_dev) >= EFX_EF10_FILTER_DEV_UC_MAX) {
+		table->dev_uc_count = -1;
 	} else {
-		table->stack_uc_count = 1 + netdev_uc_count(net_dev);
-		memcpy(table->stack_uc_list[0].addr, net_dev->dev_addr,
+		table->dev_uc_count = 1 + netdev_uc_count(net_dev);
+		memcpy(table->dev_uc_list[0].addr, net_dev->dev_addr,
 		       ETH_ALEN);
 		i = 1;
 		netdev_for_each_uc_addr(uc, net_dev) {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_UC)
-			memcpy(table->stack_uc_list[i].addr,
+			memcpy(table->dev_uc_list[i].addr,
 			       uc->addr, ETH_ALEN);
 #else
-			memcpy(table->stack_uc_list[i].addr,
+			memcpy(table->dev_uc_list[i].addr,
 			       uc->da_addr, ETH_ALEN);
 #endif
 			i++;
 		}
 	}
+#ifdef EFX_NOT_UPSTREAM
+	if (table->kernel_blocked)
+		table->dev_mc_count = 0;
+	else
+#endif
 	if (net_dev->flags & (IFF_PROMISC | IFF_ALLMULTI) ||
-	    netdev_mc_count(net_dev) >= EFX_EF10_FILTER_STACK_MC_MAX) {
-		table->stack_mc_count = -1;
+	    netdev_mc_count(net_dev) >= EFX_EF10_FILTER_DEV_MC_MAX) {
+		table->dev_mc_count = -1;
 	} else {
-		table->stack_mc_count = 1 + netdev_mc_count(net_dev);
-		eth_broadcast_addr(table->stack_mc_list[0].addr);
+		table->dev_mc_count = 1 + netdev_mc_count(net_dev);
+		eth_broadcast_addr(table->dev_mc_list[0].addr);
 		i = 1;
 		netdev_for_each_mc_addr(mc, net_dev) {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_MC)
-			memcpy(table->stack_mc_list[i].addr,
+			memcpy(table->dev_mc_list[i].addr,
 			       mc->addr, ETH_ALEN);
 #else
-			memcpy(table->stack_mc_list[i].addr,
+			memcpy(table->dev_mc_list[i].addr,
 			       mc->dmi_addr, ETH_ALEN);
 #endif
 			i++;
@@ -3312,96 +3404,119 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 	netif_addr_unlock_bh(net_dev);
 
 	/* Insert/renew unicast filters */
-	if (table->stack_uc_count >= 0) {
-		for (i = 0; i < table->stack_uc_count; i++) {
-			efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
-					   EFX_FILTER_FLAG_RX_RSS |
-					   EFX_FILTER_FLAG_RX_STACK,
+	if (table->dev_uc_count >= 0) {
+		for (i = 0; i < table->dev_uc_count; i++) {
+			efx_filter_init_rx(&spec, EFX_FILTER_PRI_AUTO,
+					   EFX_FILTER_FLAG_RX_RSS,
 					   0);
 			efx_filter_set_eth_local(&spec, EFX_FILTER_VID_UNSPEC,
-						 table->stack_uc_list[i].addr);
+						 table->dev_uc_list[i].addr);
 			rc = efx_ef10_filter_insert(efx, &spec, true);
 			if (rc < 0) {
 				/* Fall back to unicast-promisc */
 				while (i--)
 					efx_ef10_filter_remove_safe(
-						efx, EFX_FILTER_PRI_REQUIRED,
-						table->stack_uc_list[i].id);
-				table->stack_uc_count = -1;
+						efx, EFX_FILTER_PRI_AUTO,
+						table->dev_uc_list[i].id);
+				table->dev_uc_count = -1;
 				break;
 			}
-			table->stack_uc_list[i].id = rc;
+			table->dev_uc_list[i].id = rc;
 		}
 	}
-	if (table->stack_uc_count < 0) {
-		efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
-				   EFX_FILTER_FLAG_RX_RSS |
-				   EFX_FILTER_FLAG_RX_STACK,
+	if (table->dev_uc_count < 0) {
+		efx_filter_init_rx(&spec, EFX_FILTER_PRI_AUTO,
+				   EFX_FILTER_FLAG_RX_RSS,
 				   0);
-		efx_filter_set_uc_mismatch(&spec);
+		efx_filter_set_uc_def(&spec);
 		rc = efx_ef10_filter_insert(efx, &spec, true);
 		if (rc < 0) {
 			WARN_ON(1);
-			table->stack_uc_count = 0;
+			table->dev_uc_count = 0;
 		} else {
-			table->stack_uc_list[0].id = rc;
+			table->dev_uc_list[0].id = rc;
 		}
 	}
 
 	/* Insert/renew multicast filters */
-	if (table->stack_mc_count >= 0) {
-		for (i = 0; i < table->stack_mc_count; i++) {
-			efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
-					   EFX_FILTER_FLAG_RX_RSS |
-					   EFX_FILTER_FLAG_RX_STACK,
+	if (table->dev_mc_count >= 0) {
+		for (i = 0; i < table->dev_mc_count; i++) {
+			efx_filter_init_rx(&spec, EFX_FILTER_PRI_AUTO,
+					   EFX_FILTER_FLAG_RX_RSS,
 					   0);
 			efx_filter_set_eth_local(&spec, EFX_FILTER_VID_UNSPEC,
-						 table->stack_mc_list[i].addr);
+						 table->dev_mc_list[i].addr);
 			rc = efx_ef10_filter_insert(efx, &spec, true);
 			if (rc < 0) {
 				/* Fall back to multicast-promisc */
 				while (i--)
 					efx_ef10_filter_remove_safe(
-						efx, EFX_FILTER_PRI_REQUIRED,
-						table->stack_mc_list[i].id);
-				table->stack_mc_count = -1;
+						efx, EFX_FILTER_PRI_AUTO,
+						table->dev_mc_list[i].id);
+				table->dev_mc_count = -1;
 				break;
 			}
-			table->stack_mc_list[i].id = rc;
+			table->dev_mc_list[i].id = rc;
 		}
 	}
-	if (table->stack_mc_count < 0) {
-		efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
-				   EFX_FILTER_FLAG_RX_RSS |
-				   EFX_FILTER_FLAG_RX_STACK,
+	if (table->dev_mc_count < 0) {
+		efx_filter_init_rx(&spec, EFX_FILTER_PRI_AUTO,
+				   EFX_FILTER_FLAG_RX_RSS,
 				   0);
-		efx_filter_set_mc_mismatch(&spec);
+		efx_filter_set_mc_def(&spec);
 		rc = efx_ef10_filter_insert(efx, &spec, true);
 		if (rc < 0) {
 			WARN_ON(1);
-			table->stack_mc_count = 0;
+			table->dev_mc_count = 0;
 		} else {
-			table->stack_mc_list[0].id = rc;
+			table->dev_mc_list[0].id = rc;
 		}
 	}
 
 	/* Remove filters that weren't renewed.  Since nothing else
-	 * changes the STACK_OLD flag or removes these filters, we
+	 * changes the AUTO_OLD flag or removes these filters, we
 	 * don't need to hold the filter_lock while scanning for
 	 * these filters.
 	 */
-	/* XXX don't remove steered filters */
 	for (i = 0; i < HUNT_FILTER_TBL_ROWS; i++) {
 		if (ACCESS_ONCE(table->entry[i].spec) &
-		    EFX_EF10_FILTER_FLAG_STACK_OLD) {
-			if (efx_ef10_filter_remove_internal(efx,
-					EFX_FILTER_PRI_REQUIRED,
-					i, true) < 0)
+		    EFX_EF10_FILTER_FLAG_AUTO_OLD) {
+			if (efx_ef10_filter_remove_internal(
+				    efx, 1U << EFX_FILTER_PRI_AUTO,
+				    i, true) < 0)
 				remove_failed = true;
 		}
 	}
 	WARN_ON(remove_failed);
 }
+
+#ifdef EFX_NOT_UPSTREAM
+
+static int efx_ef10_filter_block_kernel(struct efx_nic *efx)
+{
+	struct efx_ef10_filter_table *table = efx->filter_state;
+
+	spin_lock_bh(&efx->filter_lock);
+	table->kernel_blocked = true;
+	spin_unlock_bh(&efx->filter_lock);
+
+	efx_ef10_filter_sync_rx_mode(efx);
+
+	return efx_ef10_filter_clear_rx(efx, EFX_FILTER_PRI_HINT);
+}
+
+static void efx_ef10_filter_unblock_kernel(struct efx_nic *efx)
+{
+	struct efx_ef10_filter_table *table = efx->filter_state;
+
+	spin_lock_bh(&efx->filter_lock);
+	table->kernel_blocked = false;
+	spin_unlock_bh(&efx->filter_lock);
+
+	efx_ef10_filter_sync_rx_mode(efx);
+}
+
+#endif /* EFX_NOT_UPSTREAM */
 
 static int efx_ef10_mac_reconfigure(struct efx_nic *efx)
 {
@@ -3659,6 +3774,147 @@ int efx_ef10_update_keys(struct efx_nic *efx,
 
 #endif /* EFX_NOT_UPSTREAM */
 
+#ifdef CONFIG_SFC_PTP
+static int efx_ef10_rx_enable_timestamping(struct efx_channel *channel,
+					   bool temp)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_TIME_EVENT_SUBSCRIBE_LEN);
+	int rc;
+
+	if (channel->sync_events_state == SYNC_EVENTS_REQUESTED ||
+	    channel->sync_events_state == SYNC_EVENTS_VALID ||
+	    (temp && channel->sync_events_state == SYNC_EVENTS_DISABLED))
+		return 0;
+	channel->sync_events_state = SYNC_EVENTS_REQUESTED;
+
+	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_TIME_EVENT_SUBSCRIBE);
+	MCDI_SET_DWORD(inbuf, PTP_IN_PERIPH_ID, 0);
+	MCDI_SET_DWORD(inbuf, PTP_IN_TIME_EVENT_SUBSCRIBE_QUEUE,
+		       channel->channel);
+
+	rc = efx_mcdi_rpc(channel->efx, MC_CMD_PTP,
+			  inbuf, sizeof(inbuf), NULL, 0, NULL);
+
+	if (rc != 0)
+		channel->sync_events_state = temp ? SYNC_EVENTS_QUIESCENT :
+						    SYNC_EVENTS_DISABLED;
+
+	return rc;
+}
+
+static int efx_ef10_rx_disable_timestamping(struct efx_channel *channel,
+					    bool temp)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_LEN);
+	int rc;
+
+	if (channel->sync_events_state == SYNC_EVENTS_DISABLED ||
+	    (temp && channel->sync_events_state == SYNC_EVENTS_QUIESCENT))
+		return 0;
+	if (channel->sync_events_state == SYNC_EVENTS_QUIESCENT) {
+		channel->sync_events_state = SYNC_EVENTS_DISABLED;
+		return 0;
+	}
+	channel->sync_events_state = temp ? SYNC_EVENTS_QUIESCENT :
+				            SYNC_EVENTS_DISABLED;
+
+	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_TIME_EVENT_UNSUBSCRIBE);
+	MCDI_SET_DWORD(inbuf, PTP_IN_PERIPH_ID, 0);
+	MCDI_SET_DWORD(inbuf, PTP_IN_TIME_EVENT_UNSUBSCRIBE_CONTROL,
+		       MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_SINGLE);
+	MCDI_SET_DWORD(inbuf, PTP_IN_TIME_EVENT_UNSUBSCRIBE_QUEUE,
+		       channel->channel);
+
+	rc = efx_mcdi_rpc(channel->efx, MC_CMD_PTP,
+			  inbuf, sizeof(inbuf), NULL, 0, NULL);
+
+	return rc;
+}
+
+static int efx_ef10_ptp_set_ts_sync_events(struct efx_nic *efx, bool en,
+					   bool temp)
+{
+	int (*set)(struct efx_channel *channel, bool temp);
+	struct efx_channel *channel;
+
+	set = en ?
+	      efx_ef10_rx_enable_timestamping :
+	      efx_ef10_rx_disable_timestamping;
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
+	efx_for_each_channel(channel, efx) {
+#else
+	channel = efx_ptp_channel(efx);
+	if (channel) {
+#endif
+		int rc = set(channel, temp);
+		if (en && rc != 0) {
+			efx_ef10_ptp_set_ts_sync_events(efx, false, temp);
+			return rc;
+		}
+	}
+
+	return 0;
+}
+
+static int efx_ef10_ptp_set_ts_config(struct efx_nic *efx,
+				      struct hwtstamp_config *init,
+				      bool try_improved_filtering
+				      __attribute__ ((unused)))
+{
+	int rc;
+
+	switch (init->rx_filter) {
+	case HWTSTAMP_FILTER_NONE:
+		efx_ef10_ptp_set_ts_sync_events(efx, false, false);
+		/* if TX timestamping is still requested then leave PTP on */
+		return efx_ptp_change_mode(efx,
+					   init->tx_type != HWTSTAMP_TX_OFF, 0);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
+	case HWTSTAMP_FILTER_ALL:
+	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
+	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
+	case HWTSTAMP_FILTER_PTP_V2_L2_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ:
+	case HWTSTAMP_FILTER_PTP_V2_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
+		init->rx_filter = HWTSTAMP_FILTER_ALL;
+		rc = efx_ptp_change_mode(efx, true, 0);
+#else
+	/* We need to know which PTP protocol to match in efx_ptp_rx() */
+	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
+	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
+		if (init->rx_filter >= HWTSTAMP_FILTER_PTP_V2_L4_EVENT) {
+			init->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
+			rc = efx_ptp_change_mode(efx, true,
+						 MC_CMD_PTP_MODE_V2_ENHANCED);
+		} else {
+			init->rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
+			rc = efx_ptp_change_mode(efx, true,
+						 MC_CMD_PTP_MODE_V1);
+		}
+#endif
+		if (!rc)
+			rc = efx_ef10_ptp_set_ts_sync_events(efx, true, false);
+		if (rc)
+			efx_ptp_change_mode(efx, false, 0);
+		return rc;
+	default:
+		return -ERANGE;
+	}
+}
+#endif
+
 const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.init_module = efx_ef10_init_module,
 	.exit_module = efx_ef10_exit_module,
@@ -3702,7 +3958,7 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.tx_init = efx_ef10_tx_init,
 	.tx_remove = efx_ef10_tx_remove,
 	.tx_write = efx_ef10_tx_write,
-	.rx_push_indir_table = efx_ef10_rx_push_indir_table,
+	.rx_push_rss_config = efx_ef10_rx_push_rss_config,
 	.rx_probe = efx_ef10_rx_probe,
 	.rx_init = efx_ef10_rx_init,
 	.rx_remove = efx_ef10_rx_remove,
@@ -3731,6 +3987,10 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.filter_rfs_insert = efx_ef10_filter_rfs_insert,
 	.filter_rfs_expire_one = efx_ef10_filter_rfs_expire_one,
 #endif
+#ifdef EFX_NOT_UPSTREAM
+	.filter_block_kernel = efx_ef10_filter_block_kernel,
+	.filter_unblock_kernel = efx_ef10_filter_unblock_kernel,
+#endif
 #ifdef CONFIG_SFC_MTD
 	.mtd_probe = efx_ef10_mtd_probe,
 	.mtd_rename = efx_mcdi_mtd_rename,
@@ -3741,12 +4001,15 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 #endif
 #ifdef CONFIG_SFC_PTP
 	.ptp_write_host_time = efx_ef10_ptp_write_host_time,
+	.ptp_set_ts_sync_events = efx_ef10_ptp_set_ts_sync_events,
+	.ptp_set_ts_config = efx_ef10_ptp_set_ts_config,
 #endif
 
 	.revision = EFX_REV_HUNT_A0,
 	.max_dma_mask = DMA_BIT_MASK(ESF_DZ_TX_KER_BUF_ADDR_WIDTH),
 	.rx_prefix_size = ES_DZ_RX_PREFIX_SIZE,
 	.rx_hash_offset = ES_DZ_RX_PREFIX_HASH_OFST,
+	.rx_ts_offset = ES_DZ_RX_PREFIX_TSTAMP_OFST,
 	.can_rx_scatter = true,
 	.always_rx_scatter = true,
 	.max_interrupt_mode = EFX_INT_MODE_MSIX,
@@ -3775,4 +4038,11 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 #endif
 	.mcdi_max_ver = 2,
 	.max_rx_ip_filters = HUNT_FILTER_TBL_ROWS,
+	.hwtstamp_filters = 1 << HWTSTAMP_FILTER_NONE |
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
+			    1 << HWTSTAMP_FILTER_ALL,
+#else
+		 	    1 << HWTSTAMP_FILTER_PTP_V1_L4_EVENT |
+			    1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT,
+#endif
 };

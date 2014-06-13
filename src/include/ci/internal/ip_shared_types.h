@@ -155,8 +155,6 @@ typedef struct {
 } ci_ss_ptr;
 
 
-
-
 /*********************************************************************
 *************************** Packet buffers ***************************
 *********************************************************************/
@@ -177,7 +175,7 @@ typedef union {
     ci_uint32         window;   /* window advertised in the packet */
     ci_uint32         pay_len;  /* length of TCP payload */
     ci_uint64         rx_stamp CI_ALIGN(8); /*!< Time we arrived */
-
+    struct oo_timespec rx_hw_stamp; /*!< UTC time we arrived according to hw */
     union {
       struct {
        /* These fields are valid for the first packet in each block only */
@@ -202,6 +200,7 @@ typedef union {
   struct {
     ci_uint32         pay_len;              /*!< length of UDP payload */
     ci_uint64         rx_stamp CI_ALIGN(8); /*!< Time we arrived */
+    struct oo_timespec rx_hw_stamp; /*!< UTC time we arrived according to hw */
 
     /*! These flags can only be used by (i) netif lock holder, or (ii)
      *  in app context if they know the packet can't be touched by the
@@ -249,7 +248,12 @@ struct ci_ip_pkt_fmt_s {
   oo_pkt_p              pp;
 #endif
 
-  ci_uint32             stack_id; /* Which stack was this pkt allocated for */
+  /* Copied from ni->state->stack_id as check for tmpl/zc sends. */
+  ci_uint32             stack_id;
+
+  /* PIO region associated with this packet. */
+  ci_int16              pio_addr;
+  ci_int16              pio_order;
 
   /* payload length for passing between layers */
   ci_int32              pay_len;
@@ -619,6 +623,7 @@ typedef struct {
   ci_ni_dllist_t        free_lists[CI_PIO_BUDDY_MAX_ORDER+1];
   ci_ni_dllist_link     links[1ul<<CI_PIO_BUDDY_MAX_ORDER];
   ci_uint8              orders[1ul<<CI_PIO_BUDDY_MAX_ORDER];
+  int                   initialised;
 } ci_pio_buddy_allocator;
 
 
@@ -673,12 +678,12 @@ typedef struct {
 *********************************************************************/
 
 #define OO_VI_FLAGS_PIO_EN 0x1
+#define OO_VI_FLAGS_RX_HW_TS_EN 0x2
 
 typedef struct {
-  ef_eventq_state       evq_state CI_ALIGN(8);
-  ci_uint32             evq_timer_offset;  /* This is an offset into a page */
-  ci_uint32             timer_quantum_ns;
+  ci_uint32             timer_quantum_ns CI_ALIGN(8);
   ci_uint32             rx_prefix_len;
+  ci_int32              rx_ts_correction;
   ci_uint32             vi_flags;
   /* set of vi_flags that need to be accessed by onload  */
   ci_uint32             oo_vi_flags;
@@ -698,7 +703,6 @@ typedef struct {
   CI_ULCONST ci_uint8   vi_arch;
   CI_ULCONST ci_uint8   vi_variant;
   CI_ULCONST ci_uint8   vi_revision;
-  CI_ULCONST ci_uint8   vi_hw_flags;
   CI_ULCONST char       pci_dev[20];
   /* Transmit overflow queue.  Packets here are ready to send. */
   oo_pktq               dmaq;
@@ -1296,13 +1300,23 @@ struct ci_sock_cmn_s {
   ci_int16              rx_bind2dev_vlan;
 
   ci_uint8              cmsg_flags;
-# define CI_IP_CMSG_PKTINFO     0x01
-# define CI_IP_CMSG_TTL         0x02
-# define CI_IP_CMSG_TOS         0x04
-# define CI_IP_CMSG_RECVOPTS    0x08
-# define CI_IP_CMSG_RETOPTS     0x10
-# define CI_IP_CMSG_TIMESTAMP   0x20
-# define CI_IP_CMSG_TIMESTAMPNS 0x40
+
+  /* timestamping_flags relate to flags provided with socket option
+   * SO_TIMESTAMPING, it seems we need to store all the values to be able
+   * to give them back to getsockopt regardless of what we support
+   */
+  ci_uint8              timestamping_flags;
+
+# define CI_IP_CMSG_PKTINFO      0x01
+# define CI_IP_CMSG_TTL          0x02
+# define CI_IP_CMSG_TOS          0x04
+# define CI_IP_CMSG_RECVOPTS     0x08
+# define CI_IP_CMSG_RETOPTS      0x10
+# define CI_IP_CMSG_TIMESTAMP    0x20
+# define CI_IP_CMSG_TIMESTAMPNS  0x40
+# define CI_IP_CMSG_TIMESTAMPING 0x80
+# define CI_IP_CMSG_TIMESTAMP_ANY \
+  (CI_IP_CMSG_TIMESTAMP | CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMPING )
 
   ci_uint64             ino CI_ALIGN(8);  /**< Inode of the O/S socket */
   ci_uint32             uid;              /**< who made this socket    */
@@ -1623,9 +1637,6 @@ struct ci_tcp_state_s {
 
   /* List of allocated templated sends on this socket */
   oo_pkt_p            tmpl_head;
-  /* Tracks which sockets with allocated templated sends have been
-   * reset.  Interim implementation.  Will be removed in future. */
-  int                 tmpl_nic_reset;
 
   ci_uint32            tcpflags;
   /* Options negotiated with SYN options. */

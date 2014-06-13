@@ -40,7 +40,6 @@
 #ifndef __EFAB_MEMREG_H__
 #define __EFAB_MEMREG_H__
 
-#include <ci/efhw/common.h>
 #include <etherfabric/base.h>
 
 #ifdef __cplusplus
@@ -78,8 +77,8 @@ extern int ef_memreg_free(ef_memreg*, ef_driver_handle);
    */
 ef_vi_inline ef_addr ef_memreg_dma_addr(ef_memreg* mr, int offset)
 {
-	return mr->mr_dma_addrs[offset >> EFHW_NIC_PAGE_SHIFT] |
-		(offset & (EFHW_NIC_PAGE_SIZE - 1));
+	return mr->mr_dma_addrs[offset >> EF_VI_NIC_PAGE_SHIFT] |
+		(offset & (EF_VI_NIC_PAGE_SIZE - 1));
 }
 
 #ifdef __cplusplus

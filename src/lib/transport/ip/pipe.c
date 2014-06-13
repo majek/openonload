@@ -601,6 +601,9 @@ rewrite:
 
   /* fast exit in case of problems */
   if( ! oo_pipe_is_writable(p) ) {
+    if( total_bytes )
+      __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_RX);
+
     rc = oo_pipe_maybe_claim_buffers(ni, p, 1);
     if( rc > 0 )
       goto rewrite;
@@ -697,6 +700,8 @@ rewrite:
       p->bytes_added += add;
       add = 0;
 
+      if( total_bytes )
+        __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_RX);
       ci_sock_unlock(ni, &p->b);
       rc = oo_pipe_wait_write(ni, p);
       if (rc != 0) {

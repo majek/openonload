@@ -128,6 +128,9 @@ ci_inline ci_uint16 efhw_mcdi_read(char *addr)
 #define _EFHW_MCDI_WORD_FIELD(_buf, _field)				\
 	((u8 *)(_buf) + (_EFHW_MCDI_CHECK_ALIGN(MC_CMD_ ## _field ## _OFST, 2)))
 
+#define EFHW_MCDI_PTR(_buf, _field)					\
+	_EFHW_MCDI_PTR(_buf, MC_CMD_ ## _field ## _OFST)
+
 #define EFHW_MCDI_DECLARE_BUF(_name, _len)				\
 	ci_dword_t _name[DIV_ROUND_UP((_len), 4)]
 

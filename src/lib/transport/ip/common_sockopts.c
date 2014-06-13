@@ -655,6 +655,10 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     u = !!(s->cmsg_flags & CI_IP_CMSG_TIMESTAMPNS);
     goto u_out;
 
+  case ONLOAD_SO_TIMESTAMPING:
+    u = s->timestamping_flags;
+    goto u_out;
+
   default: /* Unexpected & known invalid options end up here */
     goto fail_noopt;
   }
@@ -1133,6 +1137,21 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       s->cmsg_flags |= CI_IP_CMSG_TIMESTAMPNS;
     else
       s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPNS;
+    break;
+
+  case ONLOAD_SO_TIMESTAMPING:
+    if( (rc = opt_not_ok(optval, optlen, unsigned)) )
+      goto fail_inval;
+    v = ci_get_optval(optval, optlen);
+    if( v & ~ONLOAD_SOF_TIMESTAMPING_MASK ) {
+      rc = -EINVAL;
+      goto fail_inval;
+    }
+    s->timestamping_flags = v;
+    if( v )
+      s->cmsg_flags |= CI_IP_CMSG_TIMESTAMPING;
+    else
+      s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPING;
     break;
 
   default:

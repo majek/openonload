@@ -17,6 +17,8 @@
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/pd.h>
+#include <ci/efrm/efrm_port_sniff.h>
+#include <ci/efrm/efrm_filter.h>
 #include "efch.h"
 #include <ci/driver/efab/hardware.h>
 #include <ci/efch/mmap.h>
@@ -307,6 +309,8 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
 void efch_vi_rm_free(efch_resource_t *rs)
 {
   efch_filter_list_free(rs->rs_base, &rs->vi.fl);
+  /* Remove any sniff config we may have set up. */
+  efrm_port_sniff(rs->rs_base, 0, 0, -1);
 }
 
 
@@ -340,6 +344,14 @@ static int efab_vi_get_mac(struct efrm_vi* virs, void* mac_out)
   struct efhw_nic* nic;
   nic = efrm_client_get_nic(virs->rs.rs_client);
   memcpy(mac_out, nic->mac_addr, 6);
+  return 0;
+}
+
+
+static int efch_vi_get_rx_ts_correction(struct efrm_vi* virs,
+                                        int32_t* rx_ts_correction_out)
+{
+  *rx_ts_correction_out = virs->rx_ts_correction;
   return 0;
 }
 
@@ -390,6 +402,12 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       *copy_out = 1;
       break;
 
+    case CI_RSOP_VI_GET_RX_TS_CORRECTION:
+      rc = efch_vi_get_rx_ts_correction
+	      (virs, &op->u.vi_rx_ts_correction.out_rx_ts_correction);
+      *copy_out = 1;
+      break;
+
     case CI_RSOP_PT_ENDPOINT_FLUSH:
       init_completion(&flush_completion);
       efrm_vi_register_flush_callback(virs, &efch_vi_flush_complete,
@@ -404,8 +422,22 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       rc = efrm_pt_pace(virs, op->u.pt.pace);
       break;
 
+    case CI_RSOP_PT_SNIFF:
+      rc = efrm_port_sniff(rs->rs_base, op->u.pt_sniff.enable,
+                           op->u.pt_sniff.promiscuous, -1);
+      break;
+
+    case CI_RSOP_FILTER_BLOCK_KERNEL:
+      rc = efch_filter_list_op_block(rs->rs_base, &rs->vi.fl, op);
+      break;
+
+    case CI_RSOP_FILTER_DEL:
+      rc = efch_filter_list_op_del(rs->rs_base, &rs->vi.fl, op);
+      break;
+
     default:
-      rc = efch_filter_list_op(rs->rs_base, &rs->vi.fl, op, copy_out, 0u);
+      rc = efch_filter_list_op_add(rs->rs_base, &rs->vi.fl, op, copy_out, 0u,
+                                   -1);
       break;
   }
   return rc;

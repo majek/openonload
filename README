@@ -26,6 +26,7 @@ Supported platforms
  Onload supports Solarflare SFC4000 and SFC9000 network controller chips,
  including the following network adapters:
 
+   SFN7122F, SFN7322F
    SFN5122F, SFN5322F
    SFN6122F, SFN6322F
    SFN5812H, SFN5814H
@@ -108,6 +109,6 @@ Any questions?
 
 
 ==========
- version: openonload-201310
-revision: 0cddea124dfc (ool1310) tip
-    date: Fri Oct 11 15:28:49 BST 2013
+ version: openonload-201310-u1
+revision: 1289da18f744 (ool1310) openonload-201310-u1
+    date: Mon Dec  2 16:35:17 GMT 2013

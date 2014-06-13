@@ -427,6 +427,12 @@ extern int onload_set_recv_filter(int fd,
  * converted normal send can block.  ONLOAD_TEMPLATE_FLAGS_DONTWAIT
  * flag provides the same behavior as MSG_DONTWAIT in such scenarios.
  *
+ * By default, if PIO allocation fails, then
+ * onload_msg_template_alloc() will fail.  Setting
+ * ONLOAD_TEMPLATE_FLAGS_PIO_RETRY will cause it to continue without a
+ * PIO AND trying to allocate the PIO in later calls to
+ * onload_msg_template_update().
+ *
  * onload_msg_template_update can be called multiple times and updates
  * are cumulative.
  *
@@ -465,18 +471,24 @@ struct onload_template_msg_update_iovec {
   unsigned otmu_flags;        /* For future use.  Must be set to 0. */
 };
 
-/* Flags for use with onload_msg_template_update */
+/* Flags for use with onload_msg_template_alloc() and
+ * onload_msg_template_update()
+ */
 enum onload_template_flags {
-  ONLOAD_TEMPLATE_FLAGS_SEND_NOW = 0x1, /* Send the packet now */
-  ONLOAD_TEMPLATE_FLAGS_DONTWAIT = MSG_DONTWAIT, /* Don't block */
+  ONLOAD_TEMPLATE_FLAGS_SEND_NOW  = 0x1, /* Send the packet now */
+  ONLOAD_TEMPLATE_FLAGS_PIO_RETRY = 0x2, /* Retry acquiring PIO */
+  ONLOAD_TEMPLATE_FLAGS_DONTWAIT = MSG_DONTWAIT, /* Don't block (0x40) */
 };
 
-/* flags field is for future use and must be set to 0. */
+/* Valid options for flags are: ONLOAD_TEMPLATE_FLAGS_PIO_RETRY */
 extern int onload_msg_template_alloc(int fd, struct iovec* initial_msg, 
                                      int mlen, onload_template_handle* handle,
                                      unsigned flags);
 
 
+/* Valid options for flags are: ONLOAD_TEMPLATE_FLAGS_SEND_NOW,
+ * ONLOAD_TEMPLATE_FLAGS_DONTWAIT
+ */
 extern int
 onload_msg_template_update(int fd, onload_template_handle handle,
                            struct onload_template_msg_update_iovec* updates, 

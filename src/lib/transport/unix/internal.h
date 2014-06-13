@@ -922,7 +922,7 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
  * call for the specified timeout.
  */
 int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
-                      int *timeout_ms, citp_lib_context_t *lib_context,
+                      ci_uint64 *timeout_ms, citp_lib_context_t *lib_context,
                       const sigset_t *sigmask, sigset_t *sigsaved);
 
 /* ppoll/pselect common code.

@@ -39,6 +39,7 @@ struct tcp_recv_info {
   int stack_locked;
   ci_iovec_ptr piov;
   ci_uint64 timestamp;
+  struct timespec hw_timestamp;
   const ci_tcp_recvmsg_args* a;
 };
 
@@ -212,8 +213,11 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
   /* Intention is to return the timestamp from the first packet seen, when
    * ci_tcp_recvmsg_get could be called multiple times; so only update
    * if zero bytes received so far. */
-  if ( rinf->rc == 0 )
+  if( rinf->rc == 0 ) {
     rinf->timestamp = pkt->pf.tcp_rx.rx_stamp;
+    rinf->hw_timestamp.tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
+    rinf->hw_timestamp.tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
+  }
 
   while( 1 ) {
     PKT_TCP_RX_BUF_ASSERT_VALID(netif, pkt);
@@ -346,7 +350,8 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
 /* Turn timestamps into the requested cmsg structure(s). */
 ci_inline void
 ci_tcp_fill_recv_timestamp(ci_netif* ni, struct msghdr* msg,
-                           ci_uint64 timestamp, ci_uint8 flags)
+                           ci_uint64 timestamp, struct timespec* hw_timestamp,
+                           ci_uint8 flags, ci_uint8 timestaping_flags)
 {
   if( msg != NULL && msg->msg_controllen != 0 ) {
 #ifdef __KERNEL__
@@ -355,16 +360,20 @@ ci_tcp_fill_recv_timestamp(ci_netif* ni, struct msghdr* msg,
      */
 #else
     struct cmsg_state cmsg_state;
-    if( CI_UNLIKELY( flags &
-                     ( CI_IP_CMSG_TIMESTAMP | CI_IP_CMSG_TIMESTAMPNS ) ) ) {
+    if( CI_UNLIKELY( flags & CI_IP_CMSG_TIMESTAMP_ANY ) ) {
       cmsg_state.msg = msg;
       cmsg_state.cmsg_bytes_used = 0;
       cmsg_state.cm = CMSG_FIRSTHDR(msg);
 
-      if ( flags & CI_IP_CMSG_TIMESTAMP )
-        ip_cmsg_recv_timestamp(ni, timestamp, &cmsg_state);
       if ( flags & CI_IP_CMSG_TIMESTAMPNS )
         ip_cmsg_recv_timestampns(ni, timestamp, &cmsg_state);
+      else /* CI_IP_CMSG_TIMESTAMP flag gets ignored if NS counterpart is set */
+        if( flags & CI_IP_CMSG_TIMESTAMP )
+          ip_cmsg_recv_timestamp(ni, timestamp, &cmsg_state);
+
+      if( flags & CI_IP_CMSG_TIMESTAMPING )
+        ip_cmsg_recv_timestamping(ni, timestamp, hw_timestamp,
+                timestaping_flags, &cmsg_state);
 
       msg->msg_controllen = cmsg_state.cmsg_bytes_used;
     }
@@ -556,8 +565,9 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
       if( rinf.rc ) {
         ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                                  &a->msg->msg_namelen);
-        ci_tcp_fill_recv_timestamp(ni, a->msg, rinf.timestamp,
-                                 ts->s.cmsg_flags);
+        ci_tcp_fill_recv_timestamp(ni,
+                a->msg, rinf.timestamp, &rinf.hw_timestamp,
+                ts->s.cmsg_flags, ts->s.timestamping_flags);
       } else
         CI_SET_ERROR(rinf.rc, -rc2);
       goto out;
@@ -597,7 +607,8 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
  success_unlock_out:
   ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                            &a->msg->msg_namelen);  /*!\TODO fixme remove cast*/
-  ci_tcp_fill_recv_timestamp(ni, a->msg, rinf.timestamp, ts->s.cmsg_flags);
+  ci_tcp_fill_recv_timestamp(ni, a->msg, rinf.timestamp, &rinf.hw_timestamp,
+      ts->s.cmsg_flags, ts->s.timestamping_flags);
  unlock_out:
   ci_sock_unlock(ni, &ts->s.b);
  out:

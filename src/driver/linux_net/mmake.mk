@@ -69,7 +69,10 @@ ifneq ($(CC),)
 EXTRA_MAKEFLAGS += CC=$(CC)
 endif
 
-DRIVER_SUBDIRS :=
+ifdef BUILD_INKERNEL_TESTS
+DRIVER_SUBDIRS := unittest_filters
+endif
+
 ifneq ($(findstring $(shell uname -p),x86_64 i686),)
 DRIVER_SUBDIRS += unittest
 endif
@@ -120,7 +123,9 @@ all:
 clean:
 	@$(MakeClean)
 
-SUBDIRS :=
+ifdef BUILD_INKERNEL_TESTS
+SUBDIRS := unittest_filters
+endif
 
 ifeq ($(LINUX),1)
 SUBDIRS += util

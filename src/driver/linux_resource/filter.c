@@ -112,16 +112,17 @@ typedef struct efrm_filter_rule_portrange_s {
 typedef struct efrm_filter_rule_macaddress_s {
 	char                  efrm_lcl_mac     [6];
 	char                  efrm_lcl_mask    [6];
-	unsigned short        efrm_vlan_id;
 } efrm_filter_rule_macaddress_t;
 
 typedef struct efrm_filter_rule_s
 {
 	efrm_filter_ruletype_t                eit_ruletype;
-	union efr_rules {
+	struct efr_rules {
+		/* Conceptually a union; but the starting values don't match */
 		efrm_filter_rule_portrange_t  efr_range;
 		efrm_filter_rule_macaddress_t efr_macaddess;
 	}                                     efrm_rule;
+	unsigned short                        efrm_vlan_id;
 	unsigned char                         efr_protocol;
 	efrm_filter_action_t                  efr_action;
 
@@ -887,11 +888,12 @@ static int remove_rule( char const* ifname, int position )
 
 static int print_eth_rule ( struct seq_file *seq, char const* iface,
                                 int number, char const* action,
-                                efrm_filter_rule_macaddress_t* rule )
+                                efrm_filter_rule_macaddress_t const* rule,
+                                unsigned short vlan_id )
 {
 	return seq_printf( seq, "if=%s rule=%d protocol=eth "
 		"mac=%02x:%02x:%02x:%02x:%02x:%02x"
-		"/%02x:%02x:%02x:%02x:%02x:%02x action=%s\n",
+		"/%02x:%02x:%02x:%02x:%02x:%02x vlan=%d action=%s\n",
 		iface ? iface : "?", number,
 		(unsigned char) rule->efrm_lcl_mac[0] & 0xff,
 		(unsigned char) rule->efrm_lcl_mac[1] & 0xff,
@@ -905,18 +907,20 @@ static int print_eth_rule ( struct seq_file *seq, char const* iface,
 		(unsigned char) rule->efrm_lcl_mask[3] & 0xff,
 		(unsigned char) rule->efrm_lcl_mask[4] & 0xff,
 		(unsigned char) rule->efrm_lcl_mask[5] & 0xff,
+		vlan_id,
 		action );
 };
 
 static int print_ip_rule ( struct seq_file *seq, char const* iface,
                                int number, char const* action,
-                               efrm_filter_rule_portrange_t* rule,
-                               efrm_protocol_t protocol )
+                               efrm_filter_rule_portrange_t const* rule,
+                               efrm_protocol_t protocol,
+                               unsigned short vlan_id )
 {
 	return seq_printf( seq, "if=%s rule=%d protocol=%s"
 		" local_ip=" CI_IP_PRINTF_FORMAT "/" CI_IP_PRINTF_FORMAT
 		" remote_ip=" CI_IP_PRINTF_FORMAT "/" CI_IP_PRINTF_FORMAT
-		" local_port=%d-%d remote_port=%d-%d action=%s\n",
+		" local_port=%d-%d remote_port=%d-%d vlan=%d action=%s\n",
 		iface ? iface : "?", number,
 		efrm_get_protocol_name( protocol ),
 		CI_IP_PRINTF_ARGS( &rule->efrp_lcl_ip ),
@@ -925,11 +929,12 @@ static int print_ip_rule ( struct seq_file *seq, char const* iface,
 		CI_IP_PRINTF_ARGS( &rule->efrp_rmt_mask ),
 		rule->efrp_lcl_min, rule->efrp_lcl_max,
 		rule->efrp_rmt_min, rule->efrp_rmt_max,
+		vlan_id,
 		action );
 }
 
-static int print_rule ( struct seq_file *seq, char const* iface,
-                        efrm_filter_rule_t* rule, int number )
+static int print_rule ( struct seq_file *seq,
+                        efrm_filter_rule_t const* rule, int number )
 {
 	/* Print a rule in a human readable form (that the parser can read
 	   back in) to the specified buffer.
@@ -937,34 +942,24 @@ static int print_rule ( struct seq_file *seq, char const* iface,
 
 	/* TODO: Really should indicate a desire to print past the end of the
 	   buffer, and handle the user reading further. */
-	char const* action = efrm_get_action_name( rule->efr_action );
+	efrm_filter_table_t const* table;
+	char const* iface;
+	char const* action;
+
+	action = efrm_get_action_name( rule->efr_action );
+	table = seq ? (efrm_filter_table_t const*) seq->private : NULL;
+	iface = table ? table->efrm_ft_interface_name : NULL;
+
 	if ( rule->efr_protocol == ep_eth ) {
 		return print_eth_rule( seq, iface, number, action,
-		                       &rule->efrm_rule.efr_macaddess );
+		                       &rule->efrm_rule.efr_macaddess,
+		                       rule->efrm_vlan_id );
 	} else {
 		return print_ip_rule( seq, iface, number, action,
 		                      &rule->efrm_rule.efr_range,
-		                      rule->efr_protocol );
+		                      rule->efr_protocol,
+		                      rule->efrm_vlan_id );
 	}
-}
-
-static int
-efrm_print_all_rules( efrm_filter_table_t* table, struct seq_file *seq)
-{
-	/* Print all the rules from a table into the given buffer. */
-	efrm_filter_rule_t* rule;
-	int rule_number = 0;
-
-	if ( !table )
-		return 0;
-
-	rule = table->efrm_ft_first_rule;
-	while ( rule ) {
-		print_rule(seq, table->efrm_ft_interface_name,
-			   rule, rule_number++ );
-		rule = rule->efrm_fr_next;
-	}
-	return 0;
 }
 
 #if EFX_DRIVERLINK_API_VERSION < 9
@@ -1045,8 +1040,7 @@ static inline int efx_filter_get_ipv4(const struct efx_filter_spec *spec,
 }
 #endif
 
-static inline int
-efx_filter_get_mac(const struct efx_filter_spec *spec, u8 *addr, u16* vid )
+static inline int efx_get_vlan(const struct efx_filter_spec *spec, u16* vid )
 {
 #if EFX_DRIVERLINK_API_VERSION < 9
 	switch (spec->type) {
@@ -1059,7 +1053,25 @@ efx_filter_get_mac(const struct efx_filter_spec *spec, u8 *addr, u16* vid )
 	default:
 		return -EINVAL;
 	}
- 
+	return 0;
+#else
+	/* TODO support inner VLAN tag matching */
+	if( spec->match_flags & EFX_FILTER_MATCH_OUTER_VID )
+		*vid = CI_BSWAP_BE16(spec->outer_vid);
+	else
+		*vid = EFX_FILTER_VID_UNSPEC;
+	return 0;
+#endif
+}
+
+static inline int
+efx_filter_get_mac(const struct efx_filter_spec *spec, u8 *addr, u16* vid )
+{
+	int rc = efx_get_vlan(spec, vid);
+	if ( rc < 0 )
+		return rc;
+
+#if EFX_DRIVERLINK_API_VERSION < 9
 	addr[0] = spec->data[2] >> 8;
 	addr[1] = spec->data[2];
 	addr[2] = spec->data[1] >> 24;
@@ -1073,13 +1085,6 @@ efx_filter_get_mac(const struct efx_filter_spec *spec, u8 *addr, u16* vid )
 		return -EINVAL;
 
 	memcpy(addr, spec->loc_mac, ETH_ALEN);
-
-	/* TODO support inner VLAN tag matching */
-	if( spec->match_flags & EFX_FILTER_MATCH_OUTER_VID )
-		*vid = CI_BSWAP_BE16(spec->outer_vid);
-	else
-		*vid = EFX_FILTER_VID_UNSPEC;
-
 	return 0;
 #endif
 }
@@ -1103,34 +1108,52 @@ static int mac_byte_matches( char mac, char mask, char test )
 	return ( test & mask ) == ( mac & mask );
 }
 
+static int efrm_vlan_matches( u16 vlan, efrm_filter_rule_t const* rule )
+{
+	/* If a filter could be included by the rule, it is -
+	   So vlan0 matches everything, and unspecified is matched by any.
+	*/
+	unsigned short rule_vlan = rule->efrm_vlan_id;
+	return (rule_vlan == 0) ||
+	       (vlan == EFX_FILTER_VID_UNSPEC) ||
+	       (vlan == rule_vlan);
+}
 
 static int efrm_portrange_match( struct efx_filter_spec *spec,
-                                        efrm_filter_rule_portrange_t* range,
-                                        efrm_protocol_t protocol,
-                                        __be32 rmt, __be32 lcl,
-                                        int rmt_prt, int lcl_prt )
+                                        efrm_filter_rule_t const* rule )
 {
+	__be32 rmt = 0, lcl = 0;
+	__be16 port1 = 0, port2 = 0;
+	int lcl_prt, rmt_prt;
+	efrm_protocol_t protocol = rule->efr_protocol;
+	u16 vlan = EFX_FILTER_VID_UNSPEC;
+	efrm_filter_rule_portrange_t const* range = &rule->efrm_rule.efr_range;
+
+	efx_filter_get_ipv4(spec, &rmt, &port1, &lcl, &port2);
+	/* TODO: Ensure endianness of ef_iptble in a nicer way that this. */
+	rmt_prt = CI_BSWAP_BE16(port1);
+	lcl_prt = CI_BSWAP_BE16(port2);
+	efx_get_vlan( spec, &vlan );
+	
 	/* right protocol?  In range?  Ip's match? */
 	return efrm_protocol_matches(spec, protocol ) &&
 	       within( range->efrp_lcl_min, range->efrp_lcl_max, lcl_prt ) &&
 	       within( range->efrp_rmt_min, range->efrp_rmt_max, rmt_prt ) &&
 	       ip_matches( range->efrp_lcl_ip, range->efrp_lcl_mask, lcl ) &&
-	       ip_matches( range->efrp_rmt_ip, range->efrp_rmt_mask, rmt );
+	       ip_matches( range->efrp_rmt_ip, range->efrp_rmt_mask, rmt ) &&
+	       efrm_vlan_matches( vlan, rule );
 }
 
-static int efrm_vlan_matches( u16 vlan, efrm_filter_rule_macaddress_t* mac )
-{
-	return (vlan == EFX_FILTER_VID_UNSPEC) || (vlan == mac->efrm_vlan_id);
-}
-
-static int efrm_mac_match( efrm_filter_rule_macaddress_t* mac,
+static int efrm_mac_match( efrm_filter_rule_t const* rule,
                            struct efx_filter_spec* spec )
 {
 	/* Does the mac+vlan in the spec match the mac rule? */
-	u16 vlan = EFX_FILTER_VID_UNSPEC;
+	efrm_filter_rule_macaddress_t const* mac;
+	u16 vlan;
 	int matches = 0;
 	char addr[6];
 	int i;
+	mac = &(rule->efrm_rule.efr_macaddess);
 
 	if ( !efrm_is_mac_spec(spec) )
 		return 0;
@@ -1141,7 +1164,7 @@ static int efrm_mac_match( efrm_filter_rule_macaddress_t* mac,
 		                             mac->efrm_lcl_mask[i],
 		                             addr[i] );
 	}
-	return efrm_vlan_matches( vlan, mac ) && (matches == 6);
+	return (matches == 6) && efrm_vlan_matches( vlan, rule );
 }
 
 static inline int efrm_filter_check (struct efx_dl_device *dl_dev,
@@ -1153,10 +1176,8 @@ static inline int efrm_filter_check (struct efx_dl_device *dl_dev,
 	   (including if it matches an ACCEPT rule)
 	   As it runs at driver level, it cannot grab the mutex; so it must
 	   take the spinlock instead.
+	   TODO: Ideally, should enforce mac rules against IP and vice versa.
 	*/
-	__be32 host1 = 0, host2 = 0;
-	__be16 port1 = 0, port2 = 0;
-	int local_port, remote_port;
 	efrm_filter_action_t rc = EFRM_FR_ACTION_UNSUPPORTED;
 	efrm_filter_rule_t* rule = NULL;
 	efrm_filter_table_t* table = NULL;
@@ -1172,20 +1193,12 @@ static inline int efrm_filter_check (struct efx_dl_device *dl_dev,
 	}
 	rule = table->efrm_ft_first_rule;
 
-	efx_filter_get_ipv4(spec, &host1, &port1, &host2, &port2);
-	/* TODO: Ensure endianness of ef_iptble in a nicer way that this. */
-	remote_port = CI_BSWAP_BE16(port1);
-	local_port = CI_BSWAP_BE16(port2);
-
 	while ( rule )
 	{
 		if ( rule->eit_ruletype == EFRM_FR_PORTRANGE ) {
 			if ( efrm_portrange_match(
 			     spec,
-			     &rule->efrm_rule.efr_range,
-			     rule->efr_protocol,
-			     host1, host2,
-			     remote_port, local_port ) )
+			     rule ) )
 			{
 				/* Matched rule, take its action and stop */
 				rc = rule->efr_action;
@@ -1195,8 +1208,7 @@ static inline int efrm_filter_check (struct efx_dl_device *dl_dev,
 		else if ( rule->eit_ruletype == EFRM_FR_MACADDRESS )
 		{
 			/* TODO include remote MAC filters */
-			if ( efrm_mac_match( &rule->efrm_rule.efr_macaddess,
-			                     spec ) )
+			if ( efrm_mac_match( rule, spec ) )
 			{
 				rc = rule->efr_action;
 				break;
@@ -1229,6 +1241,7 @@ static efrm_filter_rule_t* efrm_allocate_blank_rule(void) {
 	rule->eit_ruletype = EFRM_FR_PORTRANGE;
 	rule->efrm_rule.efr_range.efrp_lcl_max = 65535;
 	rule->efrm_rule.efr_range.efrp_rmt_max = 65535;
+	memset( rule->efrm_rule.efr_macaddess.efrm_lcl_mac, 0xff, 6 );
 	rule->efr_protocol = ep_tcp;
 	rule->efr_action = EFRM_FR_ACTION_ACCEPT;
 	return rule;
@@ -1289,9 +1302,6 @@ efrm_read_action ( const char** buf, size_t* remain, int* done,
 		{
 			*action = EFRM_FR_ACTION_DROP;
 			*seen = 1;
-		}
-		else if ( **buf == '\0' ) {
-			*done = 1;
 		} else {
 			EFRM_ERR("%s: Unable to understand action: %s (%d)",
 					 __func__, *buf, (int)*remain );
@@ -1414,12 +1424,12 @@ static int efrm_read_mac( const char** buf, size_t* remain, int* done,
 }
 
 static int efrm_read_vlan( const char** buf, size_t* remain, int* done,
-                           efrm_filter_rule_macaddress_t* mac )
+                           efrm_filter_rule_t* rule )
 {
 	if ( efrm_compare_and_skip( buf, remain, "vlan=" ) )
 		return 0;
 
-	mac->efrm_vlan_id = efrm_atoi(buf,remain);
+	rule->efrm_vlan_id = efrm_atoi(buf,remain);
 	return 1;
 }
 
@@ -1477,8 +1487,7 @@ efrm_interpret_rule( const char** buf, size_t* remain,
 		                              &rule->efrm_rule.efr_range ) ||
 		          efrm_read_mac( buf, remain, &done,
 		                         &rule->efrm_rule.efr_macaddess ) ||
-		          efrm_read_vlan( buf, remain, &done,
-		                          &rule->efrm_rule.efr_macaddess ) )
+		          efrm_read_vlan( buf, remain, &done, rule ) )
 		{
 			num_matches++;
 		}
@@ -1487,7 +1496,8 @@ efrm_interpret_rule( const char** buf, size_t* remain,
 			if ( if_seen &&
 			     protocol_seen &&
 			     act_seen &&
-			     (num_matches > 0 ) )
+			     (num_matches > 0 )
+			)
 			{
 				return rule;
 			} else {
@@ -1495,10 +1505,11 @@ efrm_interpret_rule( const char** buf, size_t* remain,
 				break;
 			}
 		}
-		else {
+		else if ( !done ) {
+			/* Only print this if we didnt already error out */
 			EFRM_ERR("%s: Unable to understand remainder: %s",
 			         __func__, *buf );
-			done = 1;
+			break;
 		}
 	}
 
@@ -1627,33 +1638,136 @@ static const struct file_operations efrm_fops_del_rule = {
 	.write		= efrm_del_rule,
 };
 
-/* ******************************* */
-/* /proc/driver/sfc_resource/ethX/ */
-/* ******************************* */
+/* ********************************************* */
+/* /proc/driver/sfc_resource/ethX/firewall_rules */
+/* ********************************************* */
 
-static int
-efrm_read_rules(struct seq_file *seq, void *s)
-{
-	/* Entry point from /proc/driver/sfc_resource/ethX/firewall_rules */
-	/* TODO: We may need to support offset if there are many rules */
-	efrm_filter_table_t* table = (efrm_filter_table_t*) seq->private;
-	
-	if ( !table )
-		return -EINVAL;
-	
-	efrm_print_all_rules( table, seq );
-	return 0;
+static efrm_filter_rule_t const*
+efrm_get_rule_by_number( efrm_filter_table_t const* table, int rule_number ) {
+  efrm_filter_rule_t const* rval;
+  int curr = 0;
+
+  if ( !table || rule_number < 0 )
+    return NULL;
+
+  rval = table->efrm_ft_first_rule;
+  while ( curr < rule_number && rval != NULL ) {
+    rval = rval->efrm_fr_next;
+    curr++;
+  }
+  return rval;
 }
-static int efrm_open_rules(struct inode *inode, struct file *file)
-{
-	return single_open(file, efrm_read_rules, PDE_DATA(inode));
+
+efrm_filter_rule_t const*
+efrm_rule_from_iter(struct seq_file* seq, loff_t const* iter_ptr) {
+  efrm_filter_table_t const* table;
+
+  if ( !seq || !iter_ptr )
+    return NULL;
+
+  table = seq ? (efrm_filter_table_t const*) seq->private : NULL;
+
+  return efrm_get_rule_by_number( table, (int)*iter_ptr );
 }
+
+static loff_t efrm_read_rules_iter;
+
+static void* efrm_read_rules_start(struct seq_file* seq, loff_t* pos) {
+  void* rval = NULL;
+
+  mutex_lock( &efrm_ft_mutex );
+
+  if ( efrm_rule_from_iter( seq, pos ) ) {
+    efrm_read_rules_iter = *pos;
+    rval = (void*) &efrm_read_rules_iter;
+  } else {
+    efrm_read_rules_iter = 0;
+    *pos = 0;
+  }
+
+  mutex_unlock( &efrm_ft_mutex );
+
+  return rval;
+}
+
+static void* efrm_read_rules_next(struct seq_file* seq, void* v, loff_t* pos) {
+  loff_t next;
+  loff_t* iter_ptr = (loff_t*) v;
+
+  if ( !iter_ptr )
+    return NULL;
+
+  next = (*(loff_t*)v) + 1;
+
+  mutex_lock( &efrm_ft_mutex );
+
+  if ( efrm_rule_from_iter(seq, &next) ) {
+    *iter_ptr = next;
+    *pos = *pos + 1;
+  } else {
+    *iter_ptr = 0;
+    iter_ptr = NULL;
+  }
+
+  mutex_unlock( &efrm_ft_mutex );
+
+  return (void*) iter_ptr;
+}
+
+int efrm_read_rules_show(struct seq_file* seq, void* v) {
+  efrm_filter_rule_t const* rule;
+  int rule_number;
+  int rc = -EINVAL;
+  loff_t const* iter_ptr = (loff_t const*) v;
+
+  if ( !seq || !iter_ptr )
+    return rc;
+
+  mutex_lock( &efrm_ft_mutex );
+
+  rule = efrm_rule_from_iter(seq, iter_ptr);
+  rule_number = (int) *iter_ptr;
+  if ( rule )
+    rc = print_rule(seq, rule, rule_number );
+
+  mutex_unlock( &efrm_ft_mutex );
+
+  if ( rc > 0 )
+    rc = 0;
+  return rc;
+}
+
+static void efrm_read_rules_stop(struct seq_file* seq, void* v) {
+  /* Nothing to do, the iterator is static */
+}
+
+static struct seq_operations efrm_read_rules_seq_ops = {
+  .start = efrm_read_rules_start,
+  .next = efrm_read_rules_next,
+  .stop = efrm_read_rules_stop,
+  .show = efrm_read_rules_show
+};
+
+static int efrm_read_rules_seq_open(struct inode* inode, struct file* file) {
+  int rc;
+  rc = seq_open(file, &efrm_read_rules_seq_ops);
+  if ( rc >= 0 && file && file->private_data ) {
+    ((struct seq_file*)file->private_data)->private = PDE_DATA(inode);
+  }
+  return rc;
+}
+
+static int efrm_read_rules_release(struct inode* inode, struct file* file) {
+  /* Careful!  seq_release_private would free the table! */
+  return seq_release( inode, file );
+}
+
 static const struct file_operations efrm_fops_rules = {
-	.owner		= THIS_MODULE,
-	.open		= efrm_open_rules,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
+  .owner    = THIS_MODULE,
+  .open     = efrm_read_rules_seq_open,
+  .read     = seq_read,
+  .llseek   = seq_lseek,
+  .release  = efrm_read_rules_release
 };
 
 /* ***************************************** */
@@ -1841,9 +1955,8 @@ int efrm_filter_insert(struct efrm_client *client,
 	   filter to the NIC, to check whether the firewall rules want to
 	   block it. */
 	int rc = efrm_filter_check( efx_dev, spec );
-	if ( rc >= 0 ) {
+	if ( rc >= 0 )
 		rc = efx_dl_filter_insert( efx_dev, spec, replace );
-	}
 	return rc;
 }
 EXPORT_SYMBOL(efrm_filter_insert);
@@ -1865,3 +1978,21 @@ void efrm_filter_redirect(struct efrm_client *client, int filter_id, int rxq_i)
 	efx_dl_filter_redirect(efx_dev, filter_id, rxq_i);
 }
 EXPORT_SYMBOL(efrm_filter_redirect);
+
+
+int efrm_filter_block_kernel(struct efrm_client *client, bool block)
+{
+#if EFX_DRIVERLINK_API_VERSION > 10
+	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
+	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
+	int rc = 0;
+	if ( block ) 
+		rc = efx_dl_filter_block_kernel(efx_dev);
+	else
+		efx_dl_filter_unblock_kernel(efx_dev);
+	return rc;
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+EXPORT_SYMBOL(efrm_filter_block_kernel);

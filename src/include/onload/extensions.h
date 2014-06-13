@@ -78,7 +78,9 @@ extern "C" {
  * WARNING!!! Note that if you use this flag with unaccelerated sockets,
  * then the message may actually be transmitted.  Therefore, we recommend
  * that before using this flag on a socket, you verify that the socket is
- * indeed accelerated by using onload_fd_stat().
+ * indeed accelerated by using onload_fd_stat() or onload_fd_check_feature()
+ * You should check this for each socket, after you call bind() or connect()
+ * on it; as these functions can cause the socket to be handed to the kernel.
  *
  * This flag corresponds to MSG_SYN in the kernel sources, which appears to
  * not be used.
@@ -158,6 +160,23 @@ enum onload_spin_type {
 /* Enable or disable spinning for the current thread. */
 extern int onload_thread_set_spin(enum onload_spin_type type, int spin);
 
+
+/**********************************************************************
+ * onload_fd_check_feature : Check whether or not a feature is supported
+ *
+ * Will return >0 if the feature is supported, or 0 if not.
+ * It will return -EOPNOTSUP if this version of Onload does not know how
+ * to check for that particular feature, even if the feature itself may
+ * be available; or -ENOSYS if onload_fd_check_feature() itself is not
+ * supported.
+ */
+
+enum onload_fd_feature {
+  /* Check whether this fd supports ONLOAD_MSG_WARM or not */
+  ONLOAD_FD_FEAT_MSG_WARM
+};
+
+extern int onload_fd_check_feature(int fd, enum onload_fd_feature feature);
 
 #ifdef __cplusplus
 }

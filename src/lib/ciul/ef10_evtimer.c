@@ -56,24 +56,43 @@
     (FFE_CZ_TIMER_MODE_DIS << ERF_DZ_TC_TIMER_MODE_LBN)
 
 
+#define bug35388_workaround_needed(vi)					\
+  ((vi)->nic_type.variant == 'A' && (vi)->nic_type.revision < 2)
+
+
+static inline void poke_timer(ef_vi* vi, unsigned v)
+{
+  /* TODO: Verify that this NIC variant does not require the bug35388
+   * workaround.
+   */
+  EF_VI_BUG_ON( 1 );
+  writel(v, vi->io + ER_DZ_EVQ_TMR_REG);
+  /* ?? fixme: why does falcon use mmiowb() here but we don't? */
+}
+
+
+static inline void poke_timer_bug35388(ef_vi* vi, unsigned v)
+{
+  writel(v | REV0_OP_TMR, vi->io + ER_DZ_TX_DESC_UPD_REG + 8);
+  /* ?? fixme: why does falcon use mmiowb() here but we don't? */
+}
+
+
 void ef10_ef_eventq_timer_prime(ef_vi* q, unsigned v)
 {
   int vv = (((v * 1000) + q->timer_quantum_ns - 1) / q->timer_quantum_ns);
-  BUG_ON(v <= 0);
-  BUG_ON(vv <= 0);
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_EF10);
+  EF_VI_ASSERT(v > 0);
+  EF_VI_ASSERT(vv > 0);
+  EF_VI_ASSERT(q->nic_type.arch == EF_VI_ARCH_EF10);
+  EF_VI_ASSERT(q->inited & EF_VI_INITED_TIMER);
 
-  if( q->nic_type.flags & EF_VI_NIC_FLAG_BUG35388_WORKAROUND ) {
+  if( bug35388_workaround_needed(q) ) {
     if( vv > 0xff )
       vv = 0xff;
-    writel(REV0_OP_TMR | REV0_HUNTINGTON_DZ_EVQTIMER_HOLD | vv,
-           q->vi_txq.doorbell);
+    poke_timer_bug35388(q, vv | REV0_HUNTINGTON_DZ_EVQTIMER_HOLD);
   }
   else {
-    /* Verify that this NIC variant does not require the workaround.
-     */
-    BUG_ON( q->nic_type.revision < 2 );
-    writel(vv | EFVI_HUNTINGTON_DZ_EVQTIMER_HOLD, q->evq_timer_reg);
+    poke_timer(q, vv | EFVI_HUNTINGTON_DZ_EVQTIMER_HOLD);
   }
 }
 
@@ -81,52 +100,39 @@ void ef10_ef_eventq_timer_prime(ef_vi* q, unsigned v)
 void ef10_ef_eventq_timer_run(ef_vi* q, unsigned v)
 {
   int vv = (((v * 1000) + q->timer_quantum_ns - 1) / q->timer_quantum_ns);
-  BUG_ON(v <= 0);
-  BUG_ON(vv <= 0);
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_EF10);
+  EF_VI_ASSERT(v > 0);
+  EF_VI_ASSERT(vv > 0);
+  EF_VI_ASSERT(q->nic_type.arch == EF_VI_ARCH_EF10);
+  EF_VI_ASSERT(q->inited & EF_VI_INITED_TIMER);
 
-  if( q->nic_type.flags & EF_VI_NIC_FLAG_BUG35388_WORKAROUND ) {
+  if( bug35388_workaround_needed(q) ) {
     if( vv > 0xff )
       vv = 0xff;
-    writel(REV0_OP_TMR | REV0_HUNTINGTON_DZ_EVQTIMER_RUN | vv,
-           q->vi_txq.doorbell);
+    poke_timer_bug35388(q, vv | REV0_HUNTINGTON_DZ_EVQTIMER_RUN);
   }
   else {
-    /* Verify that this NIC variant does not require the workaround.
-     */
-    BUG_ON( q->nic_type.revision < 2 );
-    writel(vv | EFVI_HUNTINGTON_DZ_EVQTIMER_RUN, q->evq_timer_reg);
+    poke_timer(q, vv | EFVI_HUNTINGTON_DZ_EVQTIMER_RUN);
   }
 }
 
 
 void ef10_ef_eventq_timer_clear(ef_vi* q)
 {
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_EF10);
-  if( q->nic_type.flags & EF_VI_NIC_FLAG_BUG35388_WORKAROUND ) {
-    writel(REV0_OP_TMR | REV0_HUNTINGTON_DZ_EVQTIMER_DISABLE,
-           q->vi_txq.doorbell);
-  }
-  else {
-    /* Verify that this NIC variant does not require the workaround.
-     */
-    BUG_ON( q->nic_type.revision < 2 );
-    writel(EFVI_HUNTINGTON_DZ_EVQTIMER_DISABLE, q->evq_timer_reg);
-  }
+  EF_VI_ASSERT(q->nic_type.arch == EF_VI_ARCH_EF10);
+  EF_VI_ASSERT(q->inited & EF_VI_INITED_TIMER);
+  if( bug35388_workaround_needed(q) )
+    poke_timer_bug35388(q, REV0_HUNTINGTON_DZ_EVQTIMER_DISABLE);
+  else
+    poke_timer(q, EFVI_HUNTINGTON_DZ_EVQTIMER_DISABLE);
 }
 
 
 void ef10_ef_eventq_timer_zero(ef_vi* q)
 {
-  BUG_ON(q->nic_type.arch != EF_VI_ARCH_EF10);
-  if( q->nic_type.flags & EF_VI_NIC_FLAG_BUG35388_WORKAROUND ) {
-    writel(1u | REV0_OP_TMR | REV0_HUNTINGTON_DZ_EVQTIMER_HOLD,
-           q->vi_txq.doorbell);
-  }
-  else {
-    /* Verify that this NIC variant does not require the workaround.
-     */
-    BUG_ON( q->nic_type.revision < 2 );
-    writel(1u | EFVI_HUNTINGTON_DZ_EVQTIMER_HOLD, q->evq_timer_reg);
-  }
+  EF_VI_ASSERT(q->nic_type.arch == EF_VI_ARCH_EF10);
+  EF_VI_ASSERT(q->inited & EF_VI_INITED_TIMER);
+  if( bug35388_workaround_needed(q) )
+    poke_timer_bug35388(q, 1u | REV0_HUNTINGTON_DZ_EVQTIMER_HOLD);
+  else
+    poke_timer(q, 1u | EFVI_HUNTINGTON_DZ_EVQTIMER_HOLD);
 }

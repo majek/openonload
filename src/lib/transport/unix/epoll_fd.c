@@ -498,6 +498,14 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
   if( sync_kernel && rc == 0 ) {
     Log_POLL(ci_log("%s("EPOLL_CTL_FMT"): SYNC_KERNEL", __FUNCTION__,
                     EPOLL_CTL_ARGS(epoll_fd, op, fd_fdi->fd, event)));
+    if( sync_op == EPOLL_CTL_ADD ) {
+      ci_fixed_descriptor_t fd = fd_fdi->fd;
+      int saved_errno = errno;
+      ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_ADD_STACK, &fd);
+      /* We ignore rc: we do not care if ioctl failed.
+       * So, we should restore errno. */
+      errno = saved_errno;
+    }
     rc = ci_sys_epoll_ctl(epoll_fd, sync_op, fd_fdi->fd, event);
     if( rc < 0 )
       Log_E(ci_log("%s("EPOLL_CTL_FMT"): ERROR: sys_epoll_ctl(%s) failed (%d)",
@@ -703,7 +711,7 @@ int citp_epoll_ctl(citp_fdinfo* fdi, int op, int fd, struct epoll_event *event)
 }
 
 
-static void citp_ul_epoll_ctl_sync_fd(int epfd,
+static void citp_ul_epoll_ctl_sync_fd(int epfd, struct citp_epoll_fd* ep,
                                       struct citp_epoll_member* eitem)
 {
   int rc, op;
@@ -726,6 +734,14 @@ static void citp_ul_epoll_ctl_sync_fd(int epfd,
                   eitem->epfd_event.events));
   eitem->epoll_data.events &= ~OO_EPOLL_FORCE_SYNC;
   eitem->epfd_event = eitem->epoll_data;
+  if( op == EPOLL_CTL_ADD ) {
+    ci_fixed_descriptor_t fd = eitem->fd;
+    int saved_errno = errno;
+    ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_ADD_STACK, &fd);
+    /* We ignore rc: we do not care if ioctl failed.
+     * So, we should restore errno. */
+    errno = saved_errno;
+  }
   rc = ci_sys_epoll_ctl(epfd, op, eitem->fd, &eitem->epoll_data);
   if( rc < 0 )
     Log_E(ci_log("%s: ERROR: sys_epoll_ctl("EPOLL_CTL_FMT") failed (%d,%d)",
@@ -782,7 +798,7 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
                       dllink, &ep->oo_sockets)
     if( ! citp_eitem_is_synced(eitem) ) {
       if( citp_ul_epoll_member_to_fdi(eitem) )
-        citp_ul_epoll_ctl_sync_fd(epfd, eitem);
+        citp_ul_epoll_ctl_sync_fd(epfd, ep, eitem);
       else {
         ci_dllist_remove(&eitem->dllink);
         CI_FREE_OBJ(eitem);
@@ -1023,6 +1039,11 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
   CITP_EPOLL_EP_UNLOCK(ep, 0);
   Log_POLL(ci_log("%s(%d): to kernel", __FUNCTION__, fdi->fd));
 
+  /* We need it only when not using int-driven stack.
+   * However, as we have a lot of stacks in one epoll set, let's be on the
+   * safe side. */
+  if( rc == 0 && timeout != 0 )
+    ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_PRIME);
 
 #if CI_LIBC_HAS_epoll_pwait
   if( pwait_was_spinning) {

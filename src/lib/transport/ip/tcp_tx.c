@@ -50,7 +50,7 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
   int n, rc;
 #if CI_CFG_PIO
   ci_uint8 order;
-  ci_int32 offset = 0;
+  ci_int32 offset;
   ci_pio_buddy_allocator* buddy;
 #endif
 
@@ -73,47 +73,48 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
      */
   order = ci_log2_ge(tail_pkt->pay_len, CI_CFG_MIN_PIO_BLOCK_ORDER);
   buddy = &ni->state->nic[tail_pkt->intf_i].pio_buddy;
-  if( n == 1 && 
-      oo_pktq_is_empty(dmaq) &&
-      (ni->state->nic[tail_pkt->intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) &&
-      (ef_vi_transmit_fill_level(vi) == 0) &&
-      (NI_OPTS(ni).pio_thresh >= tail_pkt->pay_len) &&
-      /* Must be last check */
-      ((offset = ci_pio_buddy_alloc(ni, buddy, order)) >= 0) ) {
-    ci_netif_pkt_to_pio(ni, tail_pkt, offset);
-    if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
-      __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, offset, tail_pkt);
-      return;
+  if( n == 1 && oo_pktq_is_empty(dmaq) &&
+      (ni->state->nic[tail_pkt->intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) ) {
+    if( tail_pkt->pay_len <= NI_OPTS(ni).pio_thresh ) {
+      if( (offset = ci_pio_buddy_alloc(ni, buddy, order)) >= 0 ) {
+        ci_netif_pkt_to_pio(ni, tail_pkt, offset);
+        if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
+          __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, tail_pkt);
+          ci_pio_buddy_free(ni, &ni->state->nic[tail_pkt->intf_i].pio_buddy,
+                            offset, order);
+          return;
+        }
+        rc = ef_vi_transmit_pio(vi, offset, tail_pkt->pay_len, OO_PKT_ID(pkt));
+        if( rc == 0 ) {
+          CITP_STATS_NETIF_INC(ni, pio_pkts);
+          ci_assert(tail_pkt->pio_addr == -1);
+          tail_pkt->pio_addr = offset;
+          tail_pkt->pio_order = order;
+          return;
+        }
+        else {
+          CITP_STATS_NETIF_INC(ni, no_pio_err);
+          ci_pio_buddy_free(ni, buddy, offset, order);
+          /* Continue and do normal send. */
+        }
+      }
+      else {
+        CI_DEBUG(CITP_STATS_NETIF_INC(ni, no_pio_busy));
+      }
     }
-    rc = ef_vi_transmit_pio(vi, offset, tail_pkt->pay_len, OO_PKT_ID(pkt));
-    /* XXX: Should free up the pio region when we see the associated
-     * TX completion.  However, we are safe as long as we only try
-     * to access the PIO if the TX ring is empty.
-     */
-    ci_pio_buddy_free(ni, buddy, offset, order);
-    if( rc == 0 ) {
-      CITP_STATS_NETIF_INC(ni, pio_pkts);
-      return;
+    else {
+      CI_DEBUG(CITP_STATS_NETIF_INC(ni, no_pio_too_long));
     }
-    else
-      CITP_STATS_NETIF_INC(ni, no_pio_err);
   }
-# ifndef NDEBUG
-  else if( (ni->state->nic[tail_pkt->intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) == 0 )
-    CITP_STATS_NETIF_INC(ni, no_pio_flags);
-  else if( ef_vi_transmit_fill_level(vi) != 0 )
-    CITP_STATS_NETIF_INC(ni, no_pio_fill_level);
-  else if( NI_OPTS(ni).pio_thresh < pkt->pay_len )
-    CITP_STATS_NETIF_INC(ni, no_pio_pkt_len);
-# endif
 #endif
-  __oo_pktq_put_list(ni, dmaq, head_id, tail_pkt, n, netif.tx.dmaq_next);
-  if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
-    __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, offset, tail_pkt);
-    oo_pktq_init(dmaq);
-    return;
+
+  if(CI_LIKELY( ! (ni->flags & CI_NETIF_FLAG_MSG_WARM) )) {
+    __oo_pktq_put_list(ni, dmaq, head_id, tail_pkt, n, netif.tx.dmaq_next);
+    ci_netif_dmaq_shove2(ni, tail_pkt->intf_i);
   }
-  ci_netif_dmaq_shove2(ni, tail_pkt->intf_i);
+  else {
+    __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, tail_pkt);
+  }
 }
 
 

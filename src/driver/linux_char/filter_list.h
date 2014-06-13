@@ -25,10 +25,16 @@ extern void efch_filter_list_free(struct efrm_resource *,
 extern int efch_filter_list_del(struct efrm_resource *,
                                 struct efch_filter_list *, int filter_id);
 
-extern int efch_filter_list_op(struct efrm_resource *,
-                               struct efch_filter_list *,
-                               ci_resource_op_t *, int *copy_out,
-                               unsigned efx_filter_flags);
+extern int efch_filter_list_op_add(struct efrm_resource *,
+                                  struct efch_filter_list *,
+                                  ci_resource_op_t *, int *copy_out,
+                                  unsigned efx_filter_flags, int rss_context);
 
+extern int efch_filter_list_op_del(struct efrm_resource *rs,
+                                   struct efch_filter_list *fl,
+                                   ci_resource_op_t *op);
 
+extern int efch_filter_list_op_block(struct efrm_resource *rs,
+                                     struct efch_filter_list *fl,
+                                     ci_resource_op_t *op);
 #endif  /* __FILTER_LIST_H__ */

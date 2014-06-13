@@ -128,33 +128,36 @@ typedef uint64_t ef_vi_dma_addr_t;
 
 #if defined(__PPC__)
 
-ef_vi_inline void __nosync_writel(uint32_t data, uint32_t *addr)
+ef_vi_inline void __nosync_writel(uint32_t data, volatile void *addr)
 {
-	__asm__ __volatile__("stwbrx %1,0,%2" : "=m" (*addr) :
-			     "r" (data), "r" (addr));
+	__asm__ __volatile__("stwbrx %1,0,%2"
+			     : "=m" (*(uint32_t*)addr)
+			     : "r" (data), "r" (addr));
 }
 
 
-ef_vi_inline void __nosync_writed(uint64_t data, uint64_t *addr)
+ef_vi_inline void __nosync_writed(uint64_t data, volatile void *addr)
 {
-	__asm__ __volatile__("stdbrx %1,0,%2" : "=m" (*addr) :
-			     "r" (data), "r" (addr));
+	__asm__ __volatile__("stdbrx %1,0,%2"
+			     : "=m" (*(uint64_t*)addr)
+			     : "r" (data), "r" (addr));
 }
 
-ef_vi_inline void writel(uint32_t data, ef_vi_ioaddr_t addr)
+ef_vi_inline void writel(uint32_t data, volatile void *addr)
 {
-	__asm__ __volatile__("sync; stwbrx %1,0,%2" : "=m" (*addr) :
-			     "r" (data), "r" (addr));
+	__asm__ __volatile__("sync; stwbrx %1,0,%2"
+			     : "=m" (*(uint32_t*)addr)
+			     : "r" (data), "r" (addr));
 }
 
 #else
 
-ef_vi_inline void __raw_writel(uint32_t data, ef_vi_ioaddr_t addr)
+ef_vi_inline void __raw_writel(uint32_t data, volatile void *addr)
 {
 	*((volatile uint32_t *) addr) = data;
 }
 
-ef_vi_inline void writel(uint32_t data, ef_vi_ioaddr_t addr)
+ef_vi_inline void writel(uint32_t data, volatile void *addr)
 {
 	__raw_writel(cpu_to_le32(data), addr);
 }

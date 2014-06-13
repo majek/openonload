@@ -54,7 +54,9 @@ struct efrm_vi_set {
 	struct efrm_resource      rs;
 	struct efrm_vi_allocation allocation;
 	struct efrm_pd           *pd;
+	spinlock_t                free_lock;
 	uint64_t                  free;
+	int                       rss_context;
 };
 
 

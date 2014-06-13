@@ -89,6 +89,7 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
   s->rx_bind2dev_vlan = 0;
 
   s->cmsg_flags = 0u;
+  s->timestamping_flags = 0u;
   s->os_sock_status = OO_OS_STATUS_TX;
 
 

@@ -453,8 +453,8 @@ enum {
 	EF10_STAT_rx_dp_q_disabled_packets,
 	EF10_STAT_rx_dp_di_dropped_packets,
 	EF10_STAT_rx_dp_streaming_packets,
-	EF10_STAT_rx_dp_emerg_fetch,
-	EF10_STAT_rx_dp_emerg_wait,
+	EF10_STAT_rx_dp_hlb_fetch,
+	EF10_STAT_rx_dp_hlb_wait,
 	EF10_STAT_COUNT
 };
 
@@ -620,18 +620,49 @@ extern int efx_ptp_ts_set_vlan_filter(struct efx_nic *efx, struct efx_ts_set_vla
 extern int efx_ptp_ts_set_uuid_filter(struct efx_nic *efx, struct efx_ts_set_uuid_filter *uuid_filter);
 extern int efx_ptp_ts_set_domain_filter(struct efx_nic *efx, struct efx_ts_set_domain_filter *domain_filter);
 #endif
-extern void efx_ptp_probe(struct efx_nic *efx);
-extern int efx_ptp_ioctl(struct efx_nic *efx, struct ifreq *ifr, int cmd);
+extern int efx_ptp_disable(struct efx_nic *efx);
+extern int efx_ptp_stop(struct efx_nic *efx);
+extern int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel);
+extern void efx_ptp_defer_probe_with_channel(struct efx_nic *efx);
+extern struct efx_channel *efx_ptp_channel(struct efx_nic *efx);
+extern void efx_ptp_remove(struct efx_nic *efx);
+#if defined(EFX_NOT_UPSTREAM)
+extern bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb,
+		       bool vlan_tagged, u16 vlan_tci);
+#else
+extern bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb);
+#endif
+int efx_ptp_set_ts_config(struct efx_nic *efx, struct ifreq *ifr);
+int efx_ptp_get_ts_config(struct efx_nic *efx, struct ifreq *ifr);
 extern void efx_ptp_get_ts_info(struct efx_nic *efx,
 				struct ethtool_ts_info *ts_info);
 extern bool efx_ptp_is_ptp_tx(struct efx_nic *efx, struct sk_buff *skb);
 extern int efx_ptp_tx(struct efx_nic *efx, struct sk_buff *skb);
+extern int efx_ptp_get_mode(struct efx_nic *efx);
+extern int efx_ptp_change_mode(struct efx_nic *efx, bool enable_wanted,
+			       unsigned int new_mode);
 extern void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev);
 extern size_t efx_ptp_describe_stats(struct efx_nic *efx, u8 *strings);
 extern size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats);
+extern void efx_time_sync_event(struct efx_channel *channel, efx_qword_t *ev);
+extern void __efx_rx_skb_attach_timestamp(struct efx_channel *channel,
+					  struct sk_buff *skb);
+static inline void efx_rx_skb_attach_timestamp(struct efx_channel *channel,
+					       struct sk_buff *skb)
+{
+	if (channel->sync_events_state == SYNC_EVENTS_VALID)
+		__efx_rx_skb_attach_timestamp(channel, skb);
+}
+extern void efx_ptp_start_datapath(struct efx_nic *efx);
+extern void efx_ptp_stop_datapath(struct efx_nic *efx);
 #else
-static inline void efx_ptp_probe(struct efx_nic *efx) {}
-static inline int efx_ptp_ioctl(struct efx_nic *efx, struct ifreq *ifr, int cmd) {return -ENOSYS; }
+static inline int efx_ptp_disable(struct efx_nic *efx) { return -EOPNOTSUPP; }
+static inline int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
+{ return -ENODEV; }
+static inline void efx_ptp_defer_probe_with_channel(struct efx_nic *efx) {}
+static inline void efx_ptp_remove(struct efx_nic *efx) {}
+static inline int efx_ptp_set_ts_config(struct efx_nic *efx, struct ifreq *ifr) {return -EOPNOTSUPP; }
+static inline int efx_ptp_get_ts_config(struct efx_nic *efx, struct ifreq *ifr) {return -EOPNOTSUPP; }
 static inline int efx_ptp_get_ts_info(struct efx_nic *efx,
 				      struct ethtool_ts_info *ts_info)
 { return -EOPNOTSUPP; }
@@ -642,6 +673,12 @@ static inline size_t efx_ptp_describe_stats(struct efx_nic *efx, u8 *strings)
 { return 0; }
 static inline size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats)
 { return 0; }
+static inline void efx_rx_skb_attach_timestamp(struct efx_channel *channel,
+					       struct sk_buff *skb) {}
+static inline void efx_time_sync_event(struct efx_channel *channel,
+				       efx_qword_t *ev) {}
+static inline void efx_ptp_start_datapath(struct efx_nic *efx) {}
+static inline void efx_ptp_stop_datapath(struct efx_nic *efx) {}
 #endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
@@ -779,10 +816,10 @@ extern int efx_farch_filter_remove_safe(struct efx_nic *efx,
 extern int efx_farch_filter_get_safe(struct efx_nic *efx,
 				     enum efx_filter_priority priority,
 				     u32 filter_id, struct efx_filter_spec *);
-extern void efx_farch_filter_clear_rx(struct efx_nic *efx,
-				      enum efx_filter_priority priority);
-extern void efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id,
-				      int rxq_i);
+extern int efx_farch_filter_clear_rx(struct efx_nic *efx,
+				     enum efx_filter_priority priority);
+extern int efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id,
+				     int rxq_i);
 extern u32 efx_farch_filter_count_rx_used(struct efx_nic *efx,
 					  enum efx_filter_priority priority);
 extern u32 efx_farch_filter_get_rx_id_limit(struct efx_nic *efx);
@@ -794,6 +831,10 @@ extern s32 efx_farch_filter_rfs_insert(struct efx_nic *efx,
 				       struct efx_filter_spec *spec);
 extern bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 					    unsigned int index);
+#endif
+#ifdef EFX_NOT_UPSTREAM
+int efx_farch_filter_block_kernel(struct efx_nic *efx);
+void efx_farch_filter_unblock_kernel(struct efx_nic *efx);
 #endif
 extern void efx_farch_filter_sync_rx_mode(struct efx_nic *efx);
 
@@ -858,10 +899,6 @@ extern void falcon_reset_phy(struct efx_nic *efx);
 extern int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw);
 extern void efx_farch_init_common(struct efx_nic *efx);
 extern void efx_ef10_handle_drain_event(struct efx_nic *efx);
-static inline void efx_nic_push_rx_indir_table(struct efx_nic *efx)
-{
-	efx->type->rx_push_indir_table(efx);
-}
 extern void efx_farch_rx_push_indir_table(struct efx_nic *efx);
 extern unsigned efx_nic_check_pcie_link(struct efx_nic *efx,
 					unsigned full_width,

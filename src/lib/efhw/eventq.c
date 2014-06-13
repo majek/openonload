@@ -160,7 +160,9 @@ efhw_keventq_ctor(struct efhw_nic *nic, int instance,
 				    1 << page_order,
 				    ev_handlers != NULL /* interrupting */,
 				    1 /* dos protection enable*/,
-				    0 /* not used on falcon */);
+				    0 /* not used on falcon */,
+				    0 /* not used on falcon */,
+				    NULL /* not used on falcon */);
 
 	evq->lock = KEVQ_UNLOCKED;
 	evq->evq_base = efhw_iopages_ptr(&evq->hw.iobuff);
@@ -183,7 +185,8 @@ void efhw_keventq_dtor(struct efhw_nic *nic, struct efhw_keventq *evq)
 
 	/* Zero the timer-value for this queue.
 	   And Tell NIC to stop using this event queue. */
-	efhw_nic_event_queue_disable(nic, evq->instance);
+	efhw_nic_event_queue_disable(nic, evq->instance,
+				     0 /* not used on falcon */);
 
 	/* Free buftable entries */
 	efhw_nic_buffer_table_clear(nic, evq->hw.bt_block, 0,

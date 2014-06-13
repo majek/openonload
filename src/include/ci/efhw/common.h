@@ -96,6 +96,8 @@ typedef union {
 #define EFHW_VI_TX_Q_MASK_WIDTH_0  0x2000  /*! TX filter q_mask_width bit 0 */
 #define EFHW_VI_TX_Q_MASK_WIDTH_1  0x4000  /*! TX filter q_mask_width bit 1 */
 #define EFHW_VI_RX_HDR_SPLIT       0x8000  /*! RX header split */
+#define EFHW_VI_RX_PREFIX          0x10000  /*! RX prefix */
+#define EFHW_VI_RX_TIMESTAMPS      0x20000  /*! RX timestamping */
 
 /* Flags for hw features */
 #define EFHW_VI_NIC_BUG35388_WORKAROUND 0x01  /*! workaround for bug35388 */

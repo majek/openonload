@@ -82,7 +82,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.0.0.6585"
+#define EFX_DRIVER_VERSION	"4.0.2.6628"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -107,6 +107,7 @@
 #endif
 
 #if defined(EFX_NOT_UPSTREAM) && !defined(__VMKLNX__)
+#define EFX_RX_PAGE_RECYCLE	1
 #ifdef EFX_HAVE_VLAN_RX_PATH
 #define EFX_USE_FAKE_VLAN_RX_ACCEL 1
 #endif
@@ -218,6 +219,8 @@ struct efx_special_buffer {
  * @len: Length of this fragment.
  *	This field is zero when the queue slot is empty.
  * @unmap_len: Length of this fragment to unmap
+ * @dma_offset: Offset of @dma_addr from the address of the backing DMA mapping.
+ * Only valid if @unmap_len != 0.
  */
 struct efx_tx_buffer {
 	union {
@@ -231,6 +234,7 @@ struct efx_tx_buffer {
 	unsigned short flags;
 	unsigned short len;
 	unsigned short unmap_len;
+	unsigned short dma_offset;
 };
 #define EFX_TX_BUF_CONT		1	/* not last descriptor of packet */
 #define EFX_TX_BUF_SKB		2	/* buffer is last part of skb */
@@ -324,11 +328,11 @@ struct efx_tx_queue {
 	unsigned int tso_packets;
 	unsigned int pushes;
 	unsigned int pio_packets;
-#ifdef EFX_NOT_UPSTREAM
 	/* Statistics to supplement MAC stats */
+#ifdef EFX_NOT_UPSTREAM
 	u64 tx_bytes;
-	u32 tx_packets;
 #endif /* EFX_NOT_UPSTREAM */
+	unsigned long tx_packets;
 
 	/* Members shared between paths and sometimes updated */
 	unsigned int empty_read_count ____cacheline_aligned_in_smp;
@@ -350,8 +354,15 @@ struct efx_tx_queue {
  */
 struct efx_rx_buffer {
 	dma_addr_t dma_addr;
+#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 	struct page *page;
 	u16 page_offset;
+#else
+	/* @skb: The associated socket buffer.
+	 * Will be %NULL if the buffer slot is currently free.
+	 */
+	struct sk_buff *skb;
+#endif
 	u16 len;
 	u16 flags;
 #if defined(EFX_NOT_UPSTREAM)
@@ -379,12 +390,9 @@ struct efx_rx_buffer {
  * Used to facilitate sharing dma mappings between recycled rx buffers
  * and those passed up to the kernel.
  *
- * @refcnt: Number of struct efx_rx_buffer's referencing this page.
- *	When refcnt falls to zero, the page is unmapped for dma
  * @dma_addr: The dma address of this page.
  */
 struct efx_rx_page_state {
-	unsigned refcnt;
 	dma_addr_t dma_addr;
 
 	unsigned int __pad[0] ____cacheline_aligned;
@@ -439,6 +447,7 @@ struct efx_rx_queue {
 	unsigned int removed_count;
 	unsigned int scatter_n;
 	unsigned int scatter_len;
+#if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_RECYCLE)
 	struct page **page_ring;
 	unsigned int page_add;
 	unsigned int page_remove;
@@ -446,6 +455,7 @@ struct efx_rx_queue {
 	unsigned int page_recycle_failed;
 	unsigned int page_recycle_full;
 	unsigned int page_ptr_mask;
+#endif
 	unsigned int max_fill;
 	unsigned int fast_fill_trigger;
 	unsigned int min_fill;
@@ -454,10 +464,14 @@ struct efx_rx_queue {
 	struct timer_list slow_fill;
 	unsigned int slow_fill_count;
 	unsigned int failed_flush_count;
+	/* Statistics to supplement MAC stats */
+	unsigned long rx_packets;
 
+#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 #define SKB_CACHE_SIZE 8
 	struct sk_buff *skb_cache[SKB_CACHE_SIZE];
 	unsigned skb_cache_next_unused;
+#endif
 
 #ifdef CONFIG_SFC_DEBUGFS
 	efx_debugfs_entry *debug_dir;
@@ -549,11 +563,14 @@ struct efx_ssr_state {
 
 #endif
 
-enum efx_rx_alloc_method {
-	RX_ALLOC_METHOD_AUTO = 0,
-	RX_ALLOC_METHOD_SKB = 1,
-	RX_ALLOC_METHOD_PAGE = 2,
+#ifdef CONFIG_SFC_PTP
+enum efx_sync_events_state {
+	SYNC_EVENTS_DISABLED = 0,
+	SYNC_EVENTS_QUIESCENT,
+	SYNC_EVENTS_REQUESTED,
+	SYNC_EVENTS_VALID,
 };
+#endif
 
 /**
  * struct efx_channel - An Efx channel
@@ -597,6 +614,9 @@ enum efx_rx_alloc_method {
  *	by __efx_rx_packet(), if @rx_pkt_n_frags != 0
  * @rx_queue: RX queue for this channel
  * @tx_queue: TX queues for this channel
+ * @sync_events_state: Current state of sync events on this channel
+ * @sync_timestamp_major: Major part of the last ptp sync event
+ * @sync_timestamp_minor: Minor part of the last ptp sync event
  */
 struct efx_channel {
 	struct efx_nic *efx;
@@ -658,6 +678,12 @@ struct efx_channel {
 
 	struct efx_rx_queue rx_queue;
 	struct efx_tx_queue tx_queue[2];
+
+#ifdef CONFIG_SFC_PTP
+	enum efx_sync_events_state sync_events_state;
+	u32 sync_timestamp_major;
+	u32 sync_timestamp_minor;
+#endif
 };
 
 /**
@@ -742,15 +768,6 @@ enum nic_state {
 	STATE_DISABLED = 2,	/* device disabled due to hardware errors */
 	STATE_RECOVERY = 3,	/* device recovering from PCI error */
 };
-
-/*
- * Alignment of the skb->head which wraps a page-allocated RX buffer
- *
- * The skb allocated to wrap an rx_buffer can have this alignment. Since
- * the data is memcpy'd from the rx_buf, it does not need to be equal to
- * NET_IP_ALIGN.
- */
-#define EFX_PAGE_SKB_ALIGN 2
 
 /* Forward declaration */
 struct efx_nic;
@@ -899,6 +916,13 @@ struct vfdi_status;
  * struct efx_nic - an Efx NIC
  * @name: Device name (net device name or bus id before net device registered)
  * @pci_dev: The PCI device
+ * @node: List node for maintaning primary/secondary function lists
+ * @primary: &struct efx_nic instance for the primary function of this
+ *	controller.  May be the same structure, and may be %NULL if no
+ *	primary function is bound.  Serialised by rtnl_lock.
+ * @secondary_list: List of &struct efx_nic instances for the secondary PCI
+ *	functions of the controller, if this is for the primary function.
+ *	Serialised by rtnl_lock.
  * @revision: Hardware architecture revision
  * @dl_revision: Revision name for driverlink
  * @type: Controller type attributes
@@ -940,7 +964,9 @@ struct vfdi_status;
  * @tx_channel_stride: Stride between channels used for TX (only in VMware port)
  * @n_wanted_channels: Number of interrupts efx_probe_interrupts() attempted
  *     to enable.
- * @n_rx_netqs: Number of additional receive NETQs (only in VMware port)
+ * @n_rx_netqs: Number of receive NETQs including default (only in VMware port)
+ * @rx_ip_align: RX DMA address offset to have IP header aligned in
+ *	in accordance with NET_IP_ALIGN
  * @rx_dma_len: Current maximum RX DMA length
  * @rx_buffer_order: Order (log2) of number of pages for each RX buffer
  * @rx_buffer_truesize: Amortised allocation size of an RX buffer,
@@ -950,6 +976,8 @@ struct vfdi_status;
  *	(valid only if @rx_prefix_size != 0; always negative)
  * @rx_packet_len_offset: Offset of RX packet length from start of packet data
  *	(valid only for NICs that set %EFX_RX_PKT_PREFIX_LEN; always negative)
+ * @rx_packet_ts_offset: Offset of timestamp from start of packet data
+ *	(valid only if channel->sync_timestamps_enabled; always negative)
  * @rx_hash_key: Toeplitz hash key for RSS
  * @rx_indir_table: Indirection table for RSS
  * @rx_rss_state: RSS context state
@@ -1043,6 +1071,9 @@ struct efx_nic {
 	/* The following fields should be written very rarely */
 
 	char name[IFNAMSIZ];
+	struct list_head node;
+	struct efx_nic *primary;
+	struct list_head secondary_list;
 	struct pci_dev *pci_dev;
 	unsigned int port_num;
 	const struct efx_nic_type *type;
@@ -1092,15 +1123,19 @@ struct efx_nic {
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 	unsigned int n_rx_netqs;
 #endif
+	unsigned int rx_ip_align;
 	unsigned int rx_dma_len;
+#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 	unsigned int rx_buffer_order;
 	unsigned int rx_buffer_truesize;
 	unsigned int rx_page_buf_step;
 	unsigned int rx_bufs_per_page;
 	unsigned int rx_pages_per_batch;
+#endif
 	unsigned int rx_prefix_size;
 	int rx_packet_hash_offset;
 	int rx_packet_len_offset;
+	int rx_packet_ts_offset;
 	u8 rx_hash_key[40];
 	u32 rx_indir_table[128];
 	enum efx_rss_state rx_rss_state;
@@ -1188,6 +1223,14 @@ struct efx_nic {
 	struct efx_dl_device_info *dl_info;
 	struct list_head dl_node;
 	struct list_head dl_device_list;
+#ifdef EFX_NOT_UPSTREAM
+/* Mutex protecting @dl_block_kernel_count and corresponding per-client state */
+	struct mutex dl_block_kernel_mutex;
+/* Number of times Driverlink clients are blocking the kernel stack from
+ * receiving packets
+ */
+	unsigned int dl_block_kernel_count;
+#endif
 
 #ifdef CONFIG_SFC_DEBUGFS
 	efx_debugfs_entry *debug_dir;
@@ -1197,7 +1240,6 @@ struct efx_nic {
 #endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 	int netq_active;
-	u8 vlan_rss_mask[4096/8];
 #endif
 
 	atomic_t active_queues;
@@ -1329,7 +1371,7 @@ struct efx_mtd_partition {
  * @tx_init: Initialise TX queue on the NIC
  * @tx_remove: Free resources for TX queue
  * @tx_write: Write TX descriptors and doorbell
- * @rx_push_indir_table: Write RSS indirection table to the NIC
+ * @rx_push_rss_config: Write RSS hash key and indirection table to the NIC
  * @rx_probe: Allocate resources for RX queue
  * @rx_init: Initialise RX queue on the NIC
  * @rx_remove: Free resources for RX queue
@@ -1348,7 +1390,8 @@ struct efx_mtd_partition {
  * @filter_insert: add or replace a filter
  * @filter_remove_safe: remove a filter by ID, carefully
  * @filter_get_safe: retrieve a filter by ID, carefully
- * @filter_clear_rx: remove RX filters by priority
+ * @filter_clear_rx: Remove all RX filters whose priority is less than or
+ *	equal to the given priority and is not %EFX_FILTER_PRI_AUTO
  * @filter_redirect: update the queue for an existing RX filter
  * @filter_count_rx_used: Get the number of filters in use at a given priority
  * @filter_get_rx_id_limit: Get maximum value of a filter id, plus 1
@@ -1367,6 +1410,8 @@ struct efx_mtd_partition {
  * @mtd_sync: Wait for write-back to complete on MTD partition.  This
  *	also notifies the driver that a writer has finished using this
  *	partition.
+ * @set_rx_timestamping: Enable or disable inline RX timestamping,
+ *	possibly only temporarily for the purposes of a reset.
  * @revision: Hardware architecture revision
  * @txd_ptr_tbl_base: TX descriptor ring base address
  * @rxd_ptr_tbl_base: RX descriptor ring base address
@@ -1376,6 +1421,7 @@ struct efx_mtd_partition {
  * @max_dma_mask: Maximum possible DMA mask
  * @rx_prefix_size: Size of RX prefix before packet data
  * @rx_hash_offset: Offset of RX flow hash within prefix
+ * @rx_ts_offset: Offset of timestamp within prefix
  * @rx_buffer_padding: Size of padding at end of RX packet
  * @can_rx_scatter: NIC is able to scatter packets to multiple buffers
  * @always_rx_scatter: NIC will always scatter packets to multiple buffers
@@ -1389,6 +1435,7 @@ struct efx_mtd_partition {
  * @offload_features: net_device feature flags for protocol offload
  *	features implemented in hardware
  * @mcdi_max_ver: Maximum MCDI version supported
+ * @hwtstamp_filters: Mask of hardware timestamp filter types supported
  */
 struct efx_nic_type {
 	int (*init_module)(void);
@@ -1456,7 +1503,7 @@ struct efx_nic_type {
 	void (*tx_init)(struct efx_tx_queue *tx_queue);
 	void (*tx_remove)(struct efx_tx_queue *tx_queue);
 	void (*tx_write)(struct efx_tx_queue *tx_queue);
-	void (*rx_push_indir_table)(struct efx_nic *efx);
+	void (*rx_push_rss_config)(struct efx_nic *efx);
 	int (*rx_probe)(struct efx_rx_queue *rx_queue);
 	void (*rx_init)(struct efx_rx_queue *rx_queue);
 	void (*rx_remove)(struct efx_rx_queue *rx_queue);
@@ -1481,9 +1528,9 @@ struct efx_nic_type {
 	int (*filter_get_safe)(struct efx_nic *efx,
 			       enum efx_filter_priority priority,
 			       u32 filter_id, struct efx_filter_spec *);
-	void (*filter_clear_rx)(struct efx_nic *efx,
-				enum efx_filter_priority priority);
-	void (*filter_redirect)(struct efx_nic *efx, u32 filter_id, int rxq_i);
+	int (*filter_clear_rx)(struct efx_nic *efx,
+			       enum efx_filter_priority priority);
+	int (*filter_redirect)(struct efx_nic *efx, u32 filter_id, int rxq_i);
 	u32 (*filter_count_rx_used)(struct efx_nic *efx,
 				    enum efx_filter_priority priority);
 	u32 (*filter_get_rx_id_limit)(struct efx_nic *efx);
@@ -1495,6 +1542,14 @@ struct efx_nic_type {
 				 struct efx_filter_spec *spec);
 	bool (*filter_rfs_expire_one)(struct efx_nic *efx, u32 flow_id,
 				      unsigned int index);
+#endif
+#ifdef EFX_NOT_UPSTREAM
+/* Block kernel from receiving packets except through explicit
+ * configuration, i.e. remove and disable filters with priority < MANUAL
+ */
+	int (*filter_block_kernel)(struct efx_nic *efx);
+/* Unblock kernel, i.e. enable automatic and hint filters */
+	void (*filter_unblock_kernel)(struct efx_nic *efx);
 #endif
 #ifdef CONFIG_SFC_MTD
 	int (*mtd_probe)(struct efx_nic *efx);
@@ -1508,6 +1563,10 @@ struct efx_nic_type {
 #endif
 #ifdef CONFIG_SFC_PTP
 	void (*ptp_write_host_time)(struct efx_nic *efx, u32 host_time);
+	int (*ptp_set_ts_sync_events)(struct efx_nic *efx, bool en, bool temp);
+	int (*ptp_set_ts_config)(struct efx_nic *efx,
+				 struct hwtstamp_config *init,
+				 bool try_improved_filtering);
 #endif
 
 	int revision;
@@ -1519,6 +1578,7 @@ struct efx_nic_type {
 	u64 max_dma_mask;
 	unsigned int rx_prefix_size;
 	unsigned int rx_hash_offset;
+	unsigned int rx_ts_offset;
 	unsigned int rx_buffer_padding;
 	bool can_rx_scatter;
 	bool always_rx_scatter;
@@ -1530,6 +1590,7 @@ struct efx_nic_type {
 	netdev_features_t offload_features;
 	int mcdi_max_ver;
 	unsigned int max_rx_ip_filters;
+	u32 hwtstamp_filters;
 };
 
 /* Is Driverlink supported on this device? */

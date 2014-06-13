@@ -165,6 +165,13 @@ int onload_recvmsg_kernel(int fd, struct msghdr* msg, int flags)
 /**************************************************************************/
 
 __attribute__((weak))
+int onload_fd_check_feature(int fd, enum onload_fd_feature feature)
+{
+  return -ENOSYS;
+}
+/**************************************************************************/
+
+__attribute__((weak))
 int onload_thread_set_spin(enum onload_spin_type type, int spin)
 {
   return -ENOSYS;

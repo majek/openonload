@@ -53,6 +53,7 @@
 #include <linux/time.h>
 #include <linux/bitops.h>
 #include <linux/jhash.h>
+#include <linux/ktime.h>
 #ifdef CONFIG_SFC_MTD
 /* This is conditional because Onload also includes kernel_compat.h
  * and the RHEL 4 workaround of a local <mtd/mtd-abi.h> doesn't work
@@ -385,6 +386,10 @@
 	#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
 #endif
 
+#ifndef SIOCGHWTSTAMP
+	#define SIOCGHWTSTAMP	0x89b1
+#endif
+
 /**************************************************************************/
 
 #ifdef EFX_NEED_IRQ_HANDLER_T
@@ -623,6 +628,19 @@
 
 	#define ETHTOOL_GMODULEINFO     0x00000042
 	#define ETHTOOL_GMODULEEEPROM   0x00000043
+#endif
+
+#ifndef ETHTOOL_GET_TS_INFO
+	struct ethtool_ts_info {
+		__u32	cmd;
+		__u32	so_timestamping;
+		__s32	phc_index;
+		__u32	tx_types;
+		__u32	tx_reserved[3];
+		__u32	rx_filters;
+		__u32	rx_reserved[3];
+	};
+	#define ETHTOOL_GET_TS_INFO	0x00000041 /* Get time stamping and PHC info */
 #endif
 
 #ifndef FLOW_CTRL_TX
@@ -1333,6 +1351,11 @@ extern struct i2c_driver efx_lm90_driver;
 })
 #endif
 
+/* netdev_WARN may be defined wrongly (with a trailing semi-colon) */
+#undef netdev_WARN
+#define netdev_WARN(dev, format, args...)			\
+	WARN(1, "netdevice: %s\n" format, netdev_name(dev), ##args)
+
 #ifndef pr_err
 	#define pr_err(fmt, arg...) \
 		printk(KERN_ERR fmt, ##arg)
@@ -1983,16 +2006,42 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	  for (__i = 0, sg = (sglist); __i < (nr); __i++, sg = sg_next(sg))
 #endif
 
+#if defined(EFX_NEED_WARN) || defined(EFX_NEED_WARN_ON)
+	void efx_warn_slowpath(const char *file, const int line,
+			       const char *function, const char *fmt, ...)
+		__attribute__((format(printf, 4, 5)));
+#endif
+#ifdef EFX_NEED_WARN
+	#define WARN(condition, format...) ({				\
+		int __ret_warn_on = !!(condition);			\
+		if (unlikely(__ret_warn_on))				\
+			efx_warn_slowpath(__FILE__, __LINE__, __func__,	\
+					  format);			\
+		unlikely(__ret_warn_on);				\
+	})
+#endif
 #ifdef EFX_NEED_WARN_ON
+	void efx_warn_on_slowpath(const char *file, const int line,
+				  const char *function);
 	#undef WARN_ON
-	#define WARN_ON(condition) ({				\
-		typeof(condition) __ret_warn_on = (condition);	\
-		if (unlikely(__ret_warn_on)) {			\
-			printk("BUG: warning at %s:%d/%s()\n",	\
-			__FILE__, __LINE__, __FUNCTION__);	\
-				dump_stack();			\
-		}						\
-		unlikely(__ret_warn_on);			\
+	#define WARN_ON(condition) ({					\
+		int __ret_warn_on = !!(condition);			\
+		if (unlikely(__ret_warn_on))				\
+			efx_warn_on_slowpath(__FILE__, __LINE__,	\
+					     __func__);			\
+		unlikely(__ret_warn_on);				\
+	})
+#endif
+#ifdef EFX_NEED_WARN_ON_ONCE
+	#undef WARN_ON_ONCE
+	#define WARN_ON_ONCE(condition)					\
+	({								\
+		static bool __warned = false;				\
+		int __ret_warn_once = !!(condition);			\
+		if (unlikely(__ret_warn_once))				\
+			if (WARN_ON(!__warned)) 			\
+				__warned = true;			\
+		unlikely(__ret_warn_once);				\
 	})
 #endif
 
@@ -2131,91 +2180,13 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	struct timespec ns_to_timespec(const s64 nsec);
 #endif
 
-#ifndef EFX_NEED_KTIME
-	#include <linux/ktime.h>
-#else
-	typedef union {
-		s64	tv64;
-	#if BITS_PER_LONG != 64
-		struct {
-	# ifdef __BIG_ENDIAN
-		s32	sec, nsec;
-	# else
-		s32	nsec, sec;
-	# endif
-		} tv;
+#ifdef EFX_NEED_KTIME_SUB_NS
+	#if BITS_PER_LONG == 64 || defined(CONFIG_KTIME_SCALAR)
+		#define ktime_sub_ns(kt, nsval) \
+				({ (ktime_t){ .tv64 = (kt).tv64 - (nsval) }; })
+	#else
+		extern ktime_t ktime_sub_ns(const ktime_t kt, u64 nsec);
 	#endif
-	} ktime_t;
-
-	#if BITS_PER_LONG == 64
-
-	static inline ktime_t
-	ktime_set(const long secs, const unsigned long nsecs)
-	{
-		return (ktime_t) { .tv64 = ((s64)secs * NSEC_PER_SEC +
-					    (s64)nsecs) };
-	}
-
-	#define ktime_sub(lhs, rhs)					\
-		({ (ktime_t){ .tv64 = (lhs).tv64 - (rhs).tv64 }; })
-
-	#define ktime_add(lhs, rhs)					\
-		({ (ktime_t){ .tv64 = (lhs).tv64 + (rhs).tv64 }; })
-
-	#define ktime_to_timespec(kt)		ns_to_timespec((kt).tv64)
-
-	#define ktime_to_ns(kt)			((kt).tv64)
-
-	#else /* BITS_PER_LONG == 32 */
-
-	static inline ktime_t
-	ktime_set(const long secs, const unsigned long nsecs)
-	{
-		return (ktime_t) { .tv = { .sec = secs, .nsec = nsecs } };
-	}
-
-	static inline ktime_t ktime_sub(const ktime_t lhs, const ktime_t rhs)
-	{
-		ktime_t res;
-
-		res.tv64 = lhs.tv64 - rhs.tv64;
-		if (res.tv.nsec < 0)
-			res.tv.nsec += NSEC_PER_SEC;
-
-		return res;
-	}
-
-	static inline ktime_t ktime_add(const ktime_t add1, const ktime_t add2)
-	{
-		ktime_t res;
-
-		res.tv64 = add1.tv64 + add2.tv64;
-		/*
-		 * performance trick: the (u32) -NSEC gives 0x00000000Fxxxxxxx
-		 * so we subtract NSEC_PER_SEC and add 1 to the upper 32 bit.
-		 *
-		 * it's equivalent to:
-		 *   tv.nsec -= NSEC_PER_SEC
-		 *   tv.sec ++;
-		 */
-		if (res.tv.nsec >= NSEC_PER_SEC)
-			res.tv64 += (u32)-NSEC_PER_SEC;
-
-		return res;
-	}
-
-	static inline struct timespec ktime_to_timespec(const ktime_t kt)
-	{
-		return (struct timespec) { .tv_sec = (time_t) kt.tv.sec,
-					   .tv_nsec = (long) kt.tv.nsec };
-	}
-
-	static inline u64 ktime_to_ns(const ktime_t kt)
-	{
-		return (u64) kt.tv.sec * NSEC_PER_SEC + kt.tv.nsec;
-	}
-
-	#endif /* BITS_PER_LONG */
 #endif
 
 #ifdef EFX_HAVE_NET_TSTAMP
@@ -2238,6 +2209,49 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	{
 		return (struct skb_shared_hwtstamps *) skb->cb;
 	}
+
+	enum {
+		SOF_TIMESTAMPING_TX_HARDWARE = (1<<0),
+		SOF_TIMESTAMPING_TX_SOFTWARE = (1<<1),
+		SOF_TIMESTAMPING_RX_HARDWARE = (1<<2),
+		SOF_TIMESTAMPING_RX_SOFTWARE = (1<<3),
+		SOF_TIMESTAMPING_SOFTWARE = (1<<4),
+		SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
+		SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
+		SOF_TIMESTAMPING_MASK =
+		(SOF_TIMESTAMPING_RAW_HARDWARE - 1) |
+		SOF_TIMESTAMPING_RAW_HARDWARE
+	};
+
+	enum hwtstamp_tx_types {
+		HWTSTAMP_TX_OFF,
+		HWTSTAMP_TX_ON,
+		HWTSTAMP_TX_ONESTEP_SYNC,
+	};
+
+	enum hwtstamp_rx_filters {
+		HWTSTAMP_FILTER_NONE,
+		HWTSTAMP_FILTER_ALL,
+		HWTSTAMP_FILTER_SOME,
+		HWTSTAMP_FILTER_PTP_V1_L4_EVENT,
+		HWTSTAMP_FILTER_PTP_V1_L4_SYNC,
+		HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ,
+		HWTSTAMP_FILTER_PTP_V2_L4_EVENT,
+		HWTSTAMP_FILTER_PTP_V2_L4_SYNC,
+		HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ,
+		HWTSTAMP_FILTER_PTP_V2_L2_EVENT,
+		HWTSTAMP_FILTER_PTP_V2_L2_SYNC,
+		HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ,
+		HWTSTAMP_FILTER_PTP_V2_EVENT,
+		HWTSTAMP_FILTER_PTP_V2_SYNC,
+		HWTSTAMP_FILTER_PTP_V2_DELAY_REQ,
+	};
+
+	struct hwtstamp_config {
+		int flags;
+		int tx_type;
+		int rx_filter;
+	};
 #endif
 
 #ifdef EFX_NEED_TIMESPEC_ADD_NS
@@ -2633,19 +2647,6 @@ static inline unsigned long efx_get_open_fds(unsigned long fd, const struct fdta
 	};
 
 	struct ptp_clock_info {
-		struct module *owner;
-		char name[16];
-		s32 max_adj;
-		int n_alarm;
-		int n_ext_ts;
-		int n_per_out;
-		int pps;
-		int (*adjfreq)(struct ptp_clock_info *ptp, s32 delta);
-		int (*adjtime)(struct ptp_clock_info *ptp, s64 delta);
-		int (*gettime)(struct ptp_clock_info *ptp, struct timespec *ts);
-		int (*settime)(struct ptp_clock_info *ptp, const struct timespec *ts);
-		int (*enable)(struct ptp_clock_info *ptp,
-				struct ptp_clock_request *request, int on);
 	};
 #else
 #include <linux/ptp_clock_kernel.h>

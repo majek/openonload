@@ -27,11 +27,10 @@
 #include <ci/internal/cplane_ops.h>
 #include <ci/internal/efabcfg.h>
 #include <onload/version.h>
+#include <etherfabric/init.h>
 
 #ifndef __KERNEL__
 #include <ci/internal/efabcfg.h>
-/*STG TO FIX*/
-#include <etherfabric/vi.h>  /* For VI_MAPPINGS_SIZE */
 #if CI_CFG_PKTS_AS_HUGE_PAGES
 #include <sys/shm.h>
 #endif
@@ -712,6 +711,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 #endif
   if( (s = getenv("EF_TX_PUSH")) )
     opts->tx_push = atoi(s);
+  if( opts->tx_push && (s = getenv("EF_TX_PUSH_THRESHOLD")) )
+    opts->tx_push_thresh = atoi(s);
   if( (s = getenv("EF_PACKET_BUFFER_MODE")) )
     opts->packet_buffer_mode = atoi(s);
   if( (s = getenv("EF_TCP_RST_DELAYED_CONN")) )
@@ -904,6 +905,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   else if ( (s = getenv("EF_PIO_THRESHOLD")) )
     opts->pio_thresh = atoi(s);
 #endif
+
+  if( (s = getenv("EF_RX_TIMESTAMPING")) )
+    opts->rx_timestamping = atoi(s);
 }
 
 #endif
@@ -1075,6 +1079,29 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
 }
 
 
+static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
+                       int vi_io_offset_full, int vi_mem_offset)
+{
+  ef_vi_state* state = (void*) ((char*) ni->state + vi_state_offset);
+  ci_netif_state_nic_t* nsn = &(ni->state->nic[nic_i]);
+  ef_vi* vi = &(ni->nic_hw[nic_i].vi);
+  uint32_t* ids = (void*) (state + 1);
+
+  ef_vi_init(vi, ef_vi_arch_from_efhw_arch(nsn->vi_arch), nsn->vi_variant,
+             nsn->vi_revision, nsn->vi_flags, state);
+  ef_vi_init_io(vi, ni->io_ptr + vi_io_offset_full);
+  ef_vi_init_timer(vi, nsn->timer_quantum_ns);
+  ef_vi_init_evq(vi, nsn->vi_evq_bytes / 8, ni->buf_ptr + vi_mem_offset);
+  vi_mem_offset += (nsn->vi_evq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
+  ef_vi_init_rxq(vi, nsn->vi_rxq_size, ni->buf_ptr + vi_mem_offset, ids,
+                 nsn->rx_prefix_len);
+  vi_mem_offset += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
+  ids += nsn->vi_rxq_size;
+  ef_vi_init_txq(vi, nsn->vi_txq_size, ni->buf_ptr + vi_mem_offset, ids);
+  ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
+}
+
+
 static int netif_tcp_helper_build(ci_netif* ni)
 {
   /* On entry we require the following to be initialised:
@@ -1083,11 +1110,9 @@ static int netif_tcp_helper_build(ci_netif* ni)
   **   ci_netif_get_driver_handle(ni), ni->tcp_mmap (for user builds only)
   */
   ci_netif_state* ns = ni->state;
-  struct ef_vi_nic_type nic_type;
   int rc, nic_i;
   char* mmap_ptr;
   unsigned vi_io_offset, vi_mem_offset, vi_state_offset;
-  char vi_data[VI_MAPPINGS_SIZE];
   int vi_state_bytes;
   int vi_io_offset_full;
 #if CI_CFG_PIO
@@ -1117,8 +1142,6 @@ static int netif_tcp_helper_build(ci_netif* ni)
 
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     ci_netif_state_nic_t* nsn = &ns->nic[nic_i];
-    char* io_mmap = ni->buf_ptr + vi_mem_offset +
-      (( nsn->vi_evq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK);
 
     LOG_NV(ci_log("%s: ni->io_ptr=%p io_offset=%d mem_offset=%d state_offset=%d",
                 __FUNCTION__, ni->io_ptr,
@@ -1128,10 +1151,6 @@ static int netif_tcp_helper_build(ci_netif* ni)
 
     rc = ef_vi_arch_from_efhw_arch(nsn->vi_arch);
     CI_TEST(rc >= 0);
-    nic_type.arch = (unsigned char) rc;
-    nic_type.variant = nsn->vi_variant;
-    nic_type.revision = nsn->vi_revision;
-    nic_type.flags = nsn->vi_hw_flags;
 
 #if CI_PAGE_SIZE > 8192
     /******** WARNING *******
@@ -1151,23 +1170,12 @@ static int netif_tcp_helper_build(ci_netif* ni)
     vi_io_offset_full = vi_io_offset;
 #endif
 
-    memset(vi_data, 0, sizeof(vi_data));
-    ef_vi_init_mapping_evq(vi_data, nic_type, nsn->vi_instance,
-                           ni->io_ptr + vi_io_offset_full,
-                           nsn->vi_evq_bytes,
-                           ni->buf_ptr + vi_mem_offset,
-                           ni->io_ptr + vi_io_offset_full + nsn->evq_timer_offset,
-                           nsn->timer_quantum_ns);
-    ef_vi_init_mapping_vi(vi_data, nic_type, nsn->vi_rxq_size,
-                          nsn->vi_txq_size, nsn->vi_instance,
-                          ni->io_ptr + vi_io_offset_full,
-                          io_mmap, io_mmap, nsn->vi_flags,
-                          nsn->rx_prefix_len);
-    ef_vi_init(&ni->nic_hw[nic_i].vi, vi_data,
-               (ef_vi_state*) ((char*) ni->state + vi_state_offset),
-               &nsn->evq_state, nsn->vi_flags);
+    init_ef_vi(ni, nic_i, vi_state_offset, vi_io_offset_full, vi_mem_offset);
     ef_vi_add_queue(&ni->nic_hw[nic_i].vi, &ni->nic_hw[nic_i].vi);
     ef_vi_set_stats_buf(&ni->nic_hw[nic_i].vi, &ni->state->vi_stats);
+    if( NI_OPTS(ni).tx_push )
+      ef_vi_set_tx_push_threshold(&ni->nic_hw[nic_i].vi,
+                                  NI_OPTS(ni).tx_push_thresh);
 
     vi_state_bytes = ef_vi_calc_state_bytes(nsn->vi_rxq_size,
                                             nsn->vi_txq_size);

@@ -296,12 +296,10 @@ OO_STAT("Number times inserting filter into software table failed.",
 OO_STAT("Number of times PIO has been used to send a packet",
         ci_uint32, pio_pkts, count)
 # ifndef NDEBUG
-OO_STAT("Number of times PIO was not used due to txq fill level",
-        ci_uint32, no_pio_fill_level, count)
 OO_STAT("Number of times PIO was not used due to packet length",
-        ci_uint32, no_pio_pkt_len, count)
+        ci_uint32, no_pio_too_long, count)
 OO_STAT("Number of times PIO was not used due to flags",
-        ci_uint32, no_pio_flags, count)
+        ci_uint32, no_pio_busy, count)
 # endif
 OO_STAT("Number of times PIO was not used due to an error",
         ci_uint32, no_pio_err, count)

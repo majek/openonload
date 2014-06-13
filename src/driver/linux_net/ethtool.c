@@ -441,6 +441,35 @@ static int efx_ethtool_fill_self_tests(struct efx_nic *efx,
 	return n;
 }
 
+static size_t efx_describe_per_queue_stats(struct efx_nic *efx, u8 *strings)
+{
+	size_t n_stats = 0;
+	struct efx_channel *channel;
+
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_tx_queues(channel)) {
+			n_stats++;
+			if (strings != NULL) {
+				snprintf(strings, ETH_GSTRING_LEN,
+					 "tx-%u.tx_packets",
+					 channel->tx_queue[0].queue / EFX_TXQ_TYPES);
+				strings += ETH_GSTRING_LEN;
+			}
+		}
+	}
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_rx_queue(channel)) {
+			n_stats++;
+			if (strings != NULL) {
+				snprintf(strings, ETH_GSTRING_LEN,
+					 "rx-%d.rx_packets", channel->channel);
+				strings += ETH_GSTRING_LEN;
+			}
+		}
+	}
+	return n_stats;
+}
+
 static int efx_ethtool_get_sset_count(struct net_device *net_dev,
 				      int string_set)
 {
@@ -449,8 +478,9 @@ static int efx_ethtool_get_sset_count(struct net_device *net_dev,
 	switch (string_set) {
 	case ETH_SS_STATS:
 		return efx->type->describe_stats(efx, NULL) +
-			EFX_ETHTOOL_SW_STAT_COUNT +
-			efx_ptp_describe_stats(efx, NULL);
+		       EFX_ETHTOOL_SW_STAT_COUNT +
+		       efx_describe_per_queue_stats(efx, NULL) +
+		       efx_ptp_describe_stats(efx, NULL);
 	case ETH_SS_TEST:
 		return efx_ethtool_fill_self_tests(efx, NULL, NULL, NULL);
 	default:
@@ -483,6 +513,8 @@ static void efx_ethtool_get_strings(struct net_device *net_dev,
 			strlcpy(strings + i * ETH_GSTRING_LEN,
 				efx_sw_stat_desc[i].name, ETH_GSTRING_LEN);
 		strings += EFX_ETHTOOL_SW_STAT_COUNT * ETH_GSTRING_LEN;
+		strings += (efx_describe_per_queue_stats(efx, strings) *
+			    ETH_GSTRING_LEN);
 		efx_ptp_describe_stats(efx, strings);
 		break;
 	case ETH_SS_TEST:
@@ -502,6 +534,7 @@ static void efx_ethtool_get_stats(struct net_device *net_dev,
 	const struct efx_sw_stat_desc *stat;
 	struct efx_channel *channel;
 	struct efx_tx_queue *tx_queue;
+	struct efx_rx_queue *rx_queue;
 	int i;
 
 	spin_lock_bh(&efx->stats_lock);
@@ -536,6 +569,25 @@ static void efx_ethtool_get_stats(struct net_device *net_dev,
 	data += EFX_ETHTOOL_SW_STAT_COUNT;
 
 	spin_unlock_bh(&efx->stats_lock);
+
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_tx_queues(channel)) {
+			data[0] = 0;
+			efx_for_each_channel_tx_queue(tx_queue, channel) {
+				data[0] += tx_queue->tx_packets;
+			}
+			data++;
+		}
+	}
+	efx_for_each_channel(channel, efx) {
+		if (efx_channel_has_rx_queue(channel)) {
+			data[0] = 0;
+			efx_for_each_channel_rx_queue(rx_queue, channel) {
+				data[0] += rx_queue->rx_packets;
+			}
+			data++;
+		}
+	}
 
 	efx_ptp_update_stats(efx, data);
 }
@@ -636,17 +688,15 @@ static int efx_ethtool_set_flags(struct net_device *net_dev, u32 data)
 #endif
 
 	if (data & ~supported)
-		rc = -EINVAL;
-	else {
-		rc = 0;
-		net_dev->features = (net_dev->features & ~supported) | data;
+		return -EINVAL;
+
+	if (net_dev->features & ~data & ETH_FLAG_NTUPLE) {
+		rc = efx->type->filter_clear_rx(efx, EFX_FILTER_PRI_MANUAL);
+		if (rc)
+			return rc;
 	}
-	if (rc)
-		return rc;
 
-	if (~data & ETH_FLAG_NTUPLE)
-		efx_filter_clear_rx(efx, EFX_FILTER_PRI_MANUAL);
-
+	net_dev->features = (net_dev->features & ~supported) | data;
 	return 0;
 }
 #endif
@@ -1214,18 +1264,12 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 	case ETHER_FLOW:
 		if (!is_zero_ether_addr(mac_mask->h_dest)) {
 			if (ether_addr_equal(mac_mask->h_dest,
-					     mac_addr_ig_mask)) {
-				/* For backward compatibility, request
-				 * overriding automatic filters
-				 */
-				spec.flags |=
-					EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO;
+					     mac_addr_ig_mask))
 				spec.match_flags |= EFX_FILTER_MATCH_LOC_MAC_IG;
-			} else if (is_broadcast_ether_addr(mac_mask->h_dest)) {
+			else if (is_broadcast_ether_addr(mac_mask->h_dest))
 				spec.match_flags |= EFX_FILTER_MATCH_LOC_MAC;
-			} else {
+			else
 				return -EINVAL;
-			}
 			memcpy(spec.loc_mac, mac_entry->h_dest, ETH_ALEN);
 		}
 		if (!is_zero_ether_addr(mac_mask->h_source)) {
@@ -1310,7 +1354,7 @@ static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
 	struct efx_nic *efx = netdev_priv(net_dev);
 
 	memcpy(efx->rx_indir_table, indir, sizeof(efx->rx_indir_table));
-	efx_nic_push_rx_indir_table(efx);
+	efx->type->rx_push_rss_config(efx);
 	return 0;
 }
 
@@ -1364,9 +1408,13 @@ static int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 }
 #endif
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_PHC_SUPPORT)
+int efx_ethtool_get_ts_info(struct net_device *net_dev,
+			    struct ethtool_ts_info *ts_info)
+#else
 static int efx_ethtool_get_ts_info(struct net_device *net_dev,
 				   struct ethtool_ts_info *ts_info)
+#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
@@ -1378,7 +1426,6 @@ static int efx_ethtool_get_ts_info(struct net_device *net_dev,
 	efx_ptp_get_ts_info(efx, ts_info);
 	return 0;
 }
-#endif
 
 #ifdef EFX_USE_KCOMPAT
 int efx_ethtool_get_module_eeprom(struct net_device *net_dev,

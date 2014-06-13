@@ -754,8 +754,9 @@ static void efx_start_datapath(struct efx_nic *efx)
 	efx->rx_dma_len = (efx->rx_prefix_size +
 			   EFX_MAX_FRAME_LEN(efx->net_dev->mtu) +
 			   efx->type->rx_buffer_padding);
+#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 	rx_buf_len = (sizeof(struct efx_rx_page_state) +
-		      NET_IP_ALIGN + efx->rx_dma_len);
+		      efx->rx_ip_align + efx->rx_dma_len);
 	if (rx_buf_len <= PAGE_SIZE) {
 		efx->rx_scatter = efx->type->always_rx_scatter;
 		efx->rx_buffer_order = 0;
@@ -787,6 +788,9 @@ static void efx_start_datapath(struct efx_nic *efx)
 			  "RX buf len=%u step=%u bpp=%u; page batch=%u\n",
 			  efx->rx_dma_len, efx->rx_page_buf_step,
 			  efx->rx_bufs_per_page, efx->rx_pages_per_batch);
+#else
+	(void)rx_buf_len;
+#endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 #if defined(EFX_HAVE_NDO_SET_FEATURES)
@@ -836,6 +840,8 @@ static void efx_start_datapath(struct efx_nic *efx)
 		WARN_ON(channel->rx_pkt_n_frags);
 	}
 
+	efx_ptp_start_datapath(efx);
+
 	if (netif_device_present(efx->net_dev))
 		netif_tx_wake_all_queues(efx->net_dev);
 }
@@ -849,6 +855,8 @@ static void efx_stop_datapath(struct efx_nic *efx)
 
 	EFX_ASSERT_RESET_SERIALISED(efx);
 	BUG_ON(efx->port_enabled);
+
+	efx_ptp_stop_datapath(efx);
 
 	/* Stop RX refill */
 	efx_for_each_channel(channel, efx) {
@@ -1206,15 +1214,10 @@ static int efx_probe_port(struct efx_nic *efx)
 	if (phy_flash_cfg)
 		efx->phy_mode = PHY_MODE_SPECIAL;
 
-	/* Register debugfs entries */
-	rc = efx_init_debugfs_port(efx);
-	if (rc)
-		return rc;
-
 	/* Connect up MAC/PHY operations table */
 	rc = efx->type->probe_port(efx);
 	if (rc)
-		goto fail1;
+		return rc;
 
 	/* Initialise MAC address to permanent address */
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
@@ -1224,10 +1227,6 @@ static int efx_probe_port(struct efx_nic *efx)
 #endif
 
 	return 0;
-
-fail1:
-	efx_fini_debugfs_port(efx);
-	return rc;
 }
 
 static int efx_init_port(struct efx_nic *efx)
@@ -1337,7 +1336,6 @@ static void efx_remove_port(struct efx_nic *efx)
 	netif_dbg(efx, drv, efx->net_dev, "destroying port\n");
 
 	efx->type->remove_port(efx);
-	efx_fini_debugfs_port(efx);
 }
 
 /**************************************************************************
@@ -1345,6 +1343,77 @@ static void efx_remove_port(struct efx_nic *efx)
  * NIC handling
  *
  **************************************************************************/
+
+static LIST_HEAD(efx_primary_list);
+static LIST_HEAD(efx_unassociated_list);
+
+static bool efx_same_controller(struct efx_nic *left, struct efx_nic *right)
+{
+	return left->type == right->type &&
+		left->vpd_sn && right->vpd_sn &&
+		!strcmp(left->vpd_sn, right->vpd_sn);
+}
+
+static void efx_associate(struct efx_nic *efx)
+{
+	struct efx_nic *other, *next;
+
+	if (efx->primary == efx) {
+		/* Adding primary function; look for secondaries */
+
+		netif_dbg(efx, probe, efx->net_dev, "adding to primary list\n");
+		list_add_tail(&efx->node, &efx_primary_list);
+
+		list_for_each_entry_safe(other, next, &efx_unassociated_list,
+					 node) {
+			if (efx_same_controller(efx, other)) {
+				list_del(&other->node);
+				netif_dbg(other, probe, other->net_dev,
+					  "moving to secondary list of %s %s\n",
+					  pci_name(efx->pci_dev),
+					  efx->net_dev->name);
+				list_add_tail(&other->node,
+					      &efx->secondary_list);
+				other->primary = efx;
+			}
+		}
+	} else {
+		/* Adding secondary function; look for primary */
+
+		list_for_each_entry(other, &efx_primary_list, node) {
+			if (efx_same_controller(efx, other)) {
+				netif_dbg(efx, probe, efx->net_dev,
+					  "adding to secondary list of %s %s\n",
+					  pci_name(other->pci_dev),
+					  other->net_dev->name);
+				list_add_tail(&efx->node,
+					      &other->secondary_list);
+				efx->primary = other;
+				return;
+			}
+		}
+
+		netif_dbg(efx, probe, efx->net_dev,
+			  "adding to unassociated list\n");
+		list_add_tail(&efx->node, &efx_unassociated_list);
+	}
+}
+
+static void efx_dissociate(struct efx_nic *efx)
+{
+	struct efx_nic *other, *next;
+
+	list_del(&efx->node);
+	efx->primary = NULL;
+
+	list_for_each_entry_safe(other, next, &efx->secondary_list, node) {
+		list_del(&other->node);
+		netif_dbg(other, probe, other->net_dev,
+			  "moving to unassociated list\n");
+		list_add_tail(&other->node, &efx_unassociated_list);
+		other->primary = NULL;
+	}
+}
 
 /* This configures the PCI device to enable I/O and DMA. */
 static int efx_init_io(struct efx_nic *efx)
@@ -1621,6 +1690,29 @@ static unsigned int efx_wanted_parallelism(struct efx_nic *efx)
 }
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
+/* Allocation priority:
+ * 1. One Rx channel
+ * 2. One separate Tx channel if requested (fallback to shared if impossible)
+ * 3. Extra channels
+ * 4. Rx netqueues
+ * 5. Tx netqueues
+ * 6. RSS
+ *
+ * Total number of allocated channels:
+ *  - if separate_tx_channels:
+ *    n_rx_netqs * n_rss_channels + n_tx_channels
+ *  - else
+ *    max(n_tx_channels, n_rx_netqs) * n_rss_channels
+ *
+ * Rx netqueue [0 .. n_rx_netqs - 1] to channel mapping:
+ *   channel = netqueueu * n_rss_channels
+ *
+ * Tx netqueue [0 .. n_tx_channels - 1] to channel mapping:
+ *   channel = tx_channel_offset + netqueue * tx_channel_stride
+ * where
+ *   tx_channel_offset = separate_tx_channels ? n_rx_channels : 0
+ *   tx_channel_stride = separate_tx_channels ? 1 : n_rss_channels
+ */
 static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 					       unsigned int max_channels,
 					       unsigned int extra_channels,
@@ -1629,10 +1721,13 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 	unsigned int dedicated_tx_channels;
 	unsigned int channels;
 	unsigned int remaining_channels = max_channels;
+	unsigned int n_groups;
+
 	/* allocate 1 channel to RX and TX if necessary before
 	 * allocating further */
-	efx->n_rss_channels = min(1U, remaining_channels);
-	remaining_channels -= efx->n_rss_channels;
+	BUG_ON(remaining_channels < 1U);
+	efx->n_rx_netqs = 1;
+	remaining_channels -= efx->n_rx_netqs;
 	if (separate_tx_channels)
 		dedicated_tx_channels = min(1U, remaining_channels);
 	else
@@ -1645,52 +1740,57 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 		remaining_channels -= extra_channels;
 
 	/* then allocate netqs, beginning with a single channel each */
-	efx->n_rx_netqs = min((num_rx_netqs >= 1U ? num_rx_netqs
-						  : parallelism) - 1,
-			      remaining_channels);
-	remaining_channels -= efx->n_rx_netqs;
+	channels = min((num_rx_netqs >= 1U ? num_rx_netqs : parallelism) - 1,
+		       remaining_channels);
+	remaining_channels -= channels;
+	efx->n_rx_netqs += channels;
+	n_groups = efx->n_rx_netqs;
 
-	/* then allocate extra tx and rx channels */
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_TX_MQ)
-	if (separate_tx_channels) {
+	/* then allocate extra tx channels */
+	if (dedicated_tx_channels > 0) {
 		channels = min((num_tx_channels >= 1U ? num_tx_channels
 						      : parallelism) - 1,
-			       remaining_channels/2);
+			       remaining_channels);
 		dedicated_tx_channels += channels;
 		remaining_channels -= channels;
-	}
-#endif
-	/* When using netq the rss channels per queue must be a power of 2 */
-	if (efx->n_rss_channels)
-		while (remaining_channels >=
-				     (efx->n_rx_netqs+1) * efx->n_rss_channels
-				&& efx->n_rss_channels < parallelism) {
-			remaining_channels -= efx->n_rss_channels *
-					      (efx->n_rx_netqs+1);
-			efx->n_rss_channels *= 2;
-		}
-
-	efx->n_rx_channels = (efx->n_rx_netqs + 1) * efx->n_rss_channels;
-	efx->rss_spread = min(efx->n_rss_channels, parallelism);
-	efx->n_channels = efx->n_rx_channels + dedicated_tx_channels;
-	if (dedicated_tx_channels > 0) {
 		efx->n_tx_channels = dedicated_tx_channels;
+	} else {
+		/* Tx share channels with Rx. n_groups Rx channels are
+		 * allocated. Allocate more from remaining if required. */
+		efx->n_tx_channels = min(num_tx_channels >= 1U ? num_tx_channels
+							       : parallelism,
+					 remaining_channels + n_groups);
+		/* More Tx channels than already allocated Rx */
+		if (efx->n_tx_channels > n_groups) {
+			remaining_channels -= efx->n_tx_channels - n_groups;
+			n_groups = efx->n_tx_channels;
+		}
+	}
+#else
+	if (dedicated_tx_channels > 0)
+		efx->n_tx_channels = dedicated_tx_channels;
+	else
+		efx->n_tx_channels = 1;
+#endif
+	efx->n_rss_channels = 1;
+	/* When using netq the rss channels per queue must be a power of 2 */
+	while (remaining_channels >= n_groups * efx->n_rss_channels &&
+	       efx->n_rss_channels < parallelism) {
+		remaining_channels -= efx->n_rss_channels * n_groups;
+		efx->n_rss_channels *= 2;
+	}
+
+	efx->n_rx_channels = efx->n_rx_netqs * efx->n_rss_channels;
+	efx->rss_spread = min(efx->n_rss_channels, parallelism);
+	efx->n_channels =
+		n_groups * efx->n_rss_channels + dedicated_tx_channels;
+	if (dedicated_tx_channels > 0) {
 		efx->tx_channel_offset = efx->n_rx_channels;
 		efx->tx_channel_stride = 1;
 	} else {
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_TX_MQ)
-		efx->n_tx_channels = min(efx->n_rx_channels,
-					 (num_tx_channels >= 1U
-						? num_tx_channels
-						: parallelism));
-#else
-		efx->n_tx_channels = 1;
-#endif
 		efx->tx_channel_offset = 0;
-		efx->tx_channel_stride =
-			efx->n_tx_channels * efx->n_rx_netqs <= efx->n_rx_channels ?
-				efx->n_rss_channels :
-				1;
+		efx->tx_channel_stride = efx->n_rss_channels;
 	}
 
 	netif_info(efx, drv, efx->net_dev,
@@ -1698,7 +1798,7 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 		   efx->n_rss_channels, dedicated_tx_channels);
 	netif_info(efx, drv, efx->net_dev,
 		   "Also allocating %u RX netqs\n",
-		   efx->n_rx_netqs);
+		   efx->n_rx_netqs - 1);
 
 	return efx->n_channels;
 }
@@ -1815,7 +1915,7 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 		efx->tx_channel_offset = 0;
 		efx->n_wanted_channels = 1;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-		efx->n_rx_netqs = 0;
+		efx->n_rx_netqs = 1;
 #endif
 		rc = pci_enable_msi(efx->pci_dev);
 		if (rc == 0) {
@@ -1838,7 +1938,7 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 		efx->tx_channel_offset = separate_tx_channels ? 1 : 0;
 		efx->n_wanted_channels = efx->n_channels;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-		efx->n_rx_netqs = 0;
+		efx->n_rx_netqs = 1;
 #endif
 		efx->legacy_irq = efx->pci_dev->irq;
 	}
@@ -2275,6 +2375,11 @@ static int efx_probe_nic(struct efx_nic *efx)
 
 	netif_dbg(efx, probe, efx->net_dev, "creating NIC\n");
 
+	/* Register debugfs entries */
+	rc = efx_init_debugfs_nic(efx);
+	if (rc)
+		return rc;
+
 	/* Initialise NIC resource information */
 	efx->farch_resources = efx->type->farch_resources;
 	efx->farch_resources.biu_lock = &efx->biu_lock;
@@ -2306,24 +2411,19 @@ static int efx_probe_nic(struct efx_nic *efx)
 	netif_set_real_num_tx_queues(efx->net_dev, efx->n_tx_channels);
 	netif_set_real_num_rx_queues(efx->net_dev, efx->n_rx_channels);
 
-	/* Register debugfs entries */
-	rc = efx_init_debugfs_nic(efx);
-	if (rc)
-		goto fail4;
-
 	/* Initialise the interrupt moderation settings */
 	efx_init_irq_moderation(efx, tx_irq_mod_usec, rx_irq_mod_usec,
 				irq_adapt_enable, true);
 
 	return 0;
 
-fail4:
 fail3:
 	efx_remove_interrupts(efx);
 fail2:
 	efx->type->remove(efx);
 fail1:
 	efx->dl_info = NULL;
+	efx_fini_debugfs_nic(efx);
 	return rc;
 }
 
@@ -2681,9 +2781,11 @@ static int efx_ioctl(struct net_device *net_dev, struct ifreq *ifr, int cmd)
 		return -ENOSYS;
 #endif
 
-#if defined(SIOCSHWTSTAMP)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
 	if (cmd == SIOCSHWTSTAMP)
-		return efx_ptp_ioctl(efx, ifr, cmd);
+		return efx_ptp_set_ts_config(efx, ifr);
+	if (cmd == SIOCGHWTSTAMP)
+		return efx_ptp_get_ts_config(efx, ifr);
 #endif
 
 #if defined(EFX_NOT_UPSTREAM)
@@ -2998,7 +3100,7 @@ static int efx_set_features(struct net_device *net_dev, netdev_features_t data)
 
 	/* If disabling RX n-tuple filtering, clear existing filters */
 	if (net_dev->features & ~data & NETIF_F_NTUPLE)
-		efx_filter_clear_rx(efx, EFX_FILTER_PRI_MANUAL);
+		return efx->type->filter_clear_rx(efx, EFX_FILTER_PRI_MANUAL);
 
 	return 0;
 }
@@ -3342,6 +3444,7 @@ static int efx_register_netdev(struct efx_nic *efx)
 	if (efx_dl_supported(efx))
 		efx_dl_register_nic(efx);
 
+	efx_associate(efx);
 	efx->state = STATE_READY;
 
 	rtnl_unlock();
@@ -3380,6 +3483,7 @@ fail_debugfs:
 fail_registered:
 	rtnl_lock();
 	efx->state = STATE_UNINIT;
+	efx_dissociate(efx);
 	if (efx_dl_supported(efx))
 		efx_dl_unregister_nic(efx);
 	unregister_netdevice(net_dev);
@@ -3765,6 +3869,8 @@ static int efx_init_struct(struct efx_nic *efx,
 	int i;
 
 	/* Initialise common structures */
+	INIT_LIST_HEAD(&efx->node);
+	INIT_LIST_HEAD(&efx->secondary_list);
 	spin_lock_init(&efx->biu_lock);
 #ifdef CONFIG_SFC_MTD
 	INIT_LIST_HEAD(&efx->mtd_list);
@@ -3788,14 +3894,21 @@ static int efx_init_struct(struct efx_nic *efx,
 #endif
 #endif
 	efx->rx_prefix_size = efx->type->rx_prefix_size;
+	efx->rx_ip_align =
+		NET_IP_ALIGN ? (efx->rx_prefix_size + NET_IP_ALIGN) % 4 : 0;
 	efx->rx_packet_hash_offset =
 		efx->type->rx_hash_offset - efx->type->rx_prefix_size;
+	efx->rx_packet_ts_offset =
+		efx->type->rx_ts_offset - efx->type->rx_prefix_size;
 	spin_lock_init(&efx->stats_lock);
 	mutex_init(&efx->mac_lock);
 	efx->phy_op = &efx_dummy_phy_operations;
 	efx->mdio.dev = net_dev;
 	INIT_LIST_HEAD(&efx->dl_node);
 	INIT_LIST_HEAD(&efx->dl_device_list);
+#ifdef EFX_NOT_UPSTREAM
+	mutex_init(&efx->dl_block_kernel_mutex);
+#endif
 	INIT_WORK(&efx->mac_work, efx_mac_work);
 	init_waitqueue_head(&efx->flush_wq);
 
@@ -4212,6 +4325,7 @@ static void efx_pci_remove(struct pci_dev *pci_dev)
 
 	/* Mark the NIC as fini, then stop the interface */
 	rtnl_lock();
+	efx_dissociate(efx);
 	if (efx_dl_supported(efx))
 		efx_dl_unregister_nic(efx);
 	dev_close(efx->net_dev);

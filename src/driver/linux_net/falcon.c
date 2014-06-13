@@ -563,6 +563,24 @@ static irqreturn_t falcon_legacy_interrupt_a1(int irq, void *dev_id,
 
 /**************************************************************************
  *
+ * RSS
+ *
+ **************************************************************************
+ */
+
+static void falcon_b0_rx_push_rss_config(struct efx_nic *efx)
+{
+	efx_oword_t temp;
+
+	/* Set hash key for IPv4 */
+	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
+	efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
+
+	efx_farch_rx_push_indir_table(efx);
+}
+
+/**************************************************************************
+ *
  * EEPROM/flash
  *
  **************************************************************************
@@ -2594,6 +2612,8 @@ static int falcon_probe_nic(struct efx_nic *efx)
 	struct falcon_board *board;
 	int rc;
 
+	efx->primary = efx; /* only one usable function per controller */
+
 	/* Allocate storage for hardware specific data */
 	nic_data = kzalloc(sizeof(*nic_data), GFP_KERNEL);
 	if (!nic_data)
@@ -2964,9 +2984,7 @@ static int falcon_init_nic(struct efx_nic *efx)
 	falcon_init_rx_cfg(efx);
 
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
-		/* Set hash key for IPv4 */
-		memcpy(&temp, efx->rx_hash_key, sizeof(temp));
-		efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
+		falcon_b0_rx_push_rss_config(efx);
 
 		/* Set destination of both TX and RX Flush events */
 		EFX_POPULATE_OWORD_1(temp, FRF_BZ_FLS_EVQ_ID, 0);
@@ -3208,7 +3226,7 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.tx_init = efx_farch_tx_init,
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
-	.rx_push_indir_table = efx_farch_rx_push_indir_table,
+	.rx_push_rss_config = efx_port_dummy_op_void,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
 	.rx_remove = efx_farch_rx_remove,
@@ -3237,6 +3255,10 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.filter_count_rx_used = efx_farch_filter_count_rx_used,
 	.filter_get_rx_id_limit = efx_farch_filter_get_rx_id_limit,
 	.filter_get_rx_ids = efx_farch_filter_get_rx_ids,
+#ifdef EFX_NOT_UPSTREAM
+	.filter_block_kernel = efx_farch_filter_block_kernel,
+	.filter_unblock_kernel = efx_farch_filter_unblock_kernel,
+#endif
 
 #ifdef CONFIG_SFC_MTD
 	.mtd_probe = falcon_mtd_probe,
@@ -3307,7 +3329,7 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.tx_init = efx_farch_tx_init,
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
-	.rx_push_indir_table = efx_farch_rx_push_indir_table,
+	.rx_push_rss_config = falcon_b0_rx_push_rss_config,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
 	.rx_remove = efx_farch_rx_remove,
@@ -3335,6 +3357,10 @@ const struct efx_nic_type falcon_b0_nic_type = {
 #ifdef CONFIG_RFS_ACCEL
 	.filter_rfs_insert = efx_farch_filter_rfs_insert,
 	.filter_rfs_expire_one = efx_farch_filter_rfs_expire_one,
+#endif
+#ifdef EFX_NOT_UPSTREAM
+	.filter_block_kernel = efx_farch_filter_block_kernel,
+	.filter_unblock_kernel = efx_farch_filter_unblock_kernel,
 #endif
 #ifdef CONFIG_SFC_MTD
 	.mtd_probe = falcon_mtd_probe,

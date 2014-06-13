@@ -108,6 +108,7 @@
     onload_msg_template_alloc;
     onload_msg_template_update;
     onload_msg_template_abort;
+    onload_fd_check_feature;
   local:
     /* everything else must not be in the dynamic symbol table */
     *;

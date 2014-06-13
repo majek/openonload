@@ -684,6 +684,7 @@
 #define          MC_CMD_FC_IN_DDR_BANK_B1  0x1 /* enum */
 #define          MC_CMD_FC_IN_DDR_BANK_T0  0x2 /* enum */
 #define          MC_CMD_FC_IN_DDR_BANK_T1  0x3 /* enum */
+#define          MC_CMD_FC_IN_DDR_NUM_BANKS  0x4 /* enum */
 
 /* MC_CMD_FC_IN_DDR_SET_SPD msgrequest */
 #define    MC_CMD_FC_IN_DDR_SET_SPD_LEN 148
@@ -1456,6 +1457,8 @@
 #define          MC_CMD_AOE_OP_DDR 0x14
 /* enum: FC control */
 #define          MC_CMD_AOE_OP_FC 0x15
+/* enum: DDR ECC status reads */
+#define          MC_CMD_AOE_OP_DDR_ECC_STATUS 0x16
 
 /* MC_CMD_AOE_OUT msgresponse */
 #define    MC_CMD_AOE_OUT_LEN 0
@@ -1660,6 +1663,13 @@
 #define    MC_CMD_AOE_IN_FC_LEN 4
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
 
+/* MC_CMD_AOE_IN_DDR_ECC_STATUS msgrequest */
+#define    MC_CMD_AOE_IN_DDR_ECC_STATUS_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_DDR_ECC_STATUS_BANK_OFST 4
+/*            Enum values, see field(s): */
+/*               MC_CMD_FC/MC_CMD_FC_IN_DDR/MC_CMD_FC_IN_DDR_BANK */
+
 /* MC_CMD_AOE_OUT_INFO msgresponse */
 #define    MC_CMD_AOE_OUT_INFO_LEN 44
 /* JTAG IDCODE of CPLD */
@@ -1851,3 +1861,24 @@
 
 /* MC_CMD_AOE_OUT_FC msgresponse */
 #define    MC_CMD_AOE_OUT_FC_LEN 0
+
+/* MC_CMD_AOE_OUT_DDR_ECC_STATUS msgresponse */
+#define    MC_CMD_AOE_OUT_DDR_ECC_STATUS_LEN 8
+/* Flags describing status info on the module. */
+#define       MC_CMD_AOE_OUT_DDR_ECC_STATUS_FLAGS_OFST 0
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_VALID_LBN 0
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_VALID_WIDTH 1
+/* DDR ECC status on the module. */
+#define       MC_CMD_AOE_OUT_DDR_ECC_STATUS_STATUS_OFST 4
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_SBE_LBN 0
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_SBE_WIDTH 1
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_DBE_LBN 1
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_DBE_WIDTH 1
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_CORDROP_LBN 2
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_CORDROP_WIDTH 1
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_SBE_COUNT_LBN 8
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_SBE_COUNT_WIDTH 8
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_DBE_COUNT_LBN 16
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_DBE_COUNT_WIDTH 8
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_CORDROP_COUNT_LBN 24
+#define        MC_CMD_AOE_OUT_DDR_ECC_STATUS_CORDROP_COUNT_WIDTH 8

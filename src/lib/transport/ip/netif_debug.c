@@ -545,9 +545,9 @@ void ci_netif_dump_vi(ci_netif* ni, int intf_i)
     return;
   }
 
-  log("%s: stack=%d intf=%d dev=%s hw=%d%c%d(%x)", __FUNCTION__,
+  log("%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
       NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
-      nic->vi_variant, (int) nic->vi_revision, nic->vi_hw_flags);
+      nic->vi_variant, (int) nic->vi_revision);
   log("  vi=%d pd_owner=%d", ef_vi_instance(vi), nic->pd_owner);
   log("  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
       ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),

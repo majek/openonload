@@ -196,24 +196,13 @@ efx_filter_get_filter_safe(struct efx_nic *efx,
 }
 
 /**
- * efx_farch_filter_clear_rx - remove RX filters by priority
- * @efx: NIC from which to remove the filters
- * @priority: Maximum priority to remove
- */
-static inline void efx_filter_clear_rx(struct efx_nic *efx,
-				       enum efx_filter_priority priority)
-{
-	return efx->type->filter_clear_rx(efx, priority);
-}
-
-/**
- * efx_farch_filter_redirect_id - update the queue for an existing RX filter
+ * efx_filter_redirect_id - update the queue for an existing RX filter
  * @efx: NIC in which to update the filter
  * @filter_id: ID of filter, as returned by @efx_filter_insert_filter
  * @rxq_i: Index of RX queue
  */
-static inline void efx_filter_redirect_id(struct efx_nic *efx,
-					  u32 filter_id, int rxq_i)
+static inline int efx_filter_redirect_id(struct efx_nic *efx,
+					 u32 filter_id, int rxq_i)
 {
 	return efx->type->filter_redirect(efx, filter_id, rxq_i);
 }
@@ -281,6 +270,10 @@ extern int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
 					  struct ethtool_rxfh_indir *indir);
 extern int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 					  const struct ethtool_rxfh_indir *indir);
+#endif
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_PHC_SUPPORT)
+int efx_ethtool_get_ts_info(struct net_device *net_dev,
+			    struct ethtool_ts_info *ts_info);
 #endif
 #if defined(EFX_USE_KCOMPAT)
 extern int efx_ethtool_get_module_eeprom(struct net_device *net_dev,

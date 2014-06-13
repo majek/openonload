@@ -139,11 +139,6 @@ efrm_vi_resource_issue_rx_flush(struct efrm_vi *virs, bool *completed)
 		      &nvi->rx_flush_outstanding_list);
 	virs->rx_flush_outstanding = virs->q[EFHW_RXQ].flushing;
 	++(nvi->rx_flush_outstanding_count);
-	
-	if (atomic_read(&nvi->flush_timer_running) == 0) {
-		atomic_set(&nvi->flush_timer_running, 1);
-		mod_timer(&nvi->flush_timer, jiffies + HZ);
-	}
 
 	/* Drop spin lock as efhw_nic_* calls can block */
 	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
@@ -153,6 +148,11 @@ efrm_vi_resource_issue_rx_flush(struct efrm_vi *virs, bool *completed)
 	efhw_nic_flush_rx_dma_channel(&efrm_nic->efhw_nic, instance);
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
+
+	if (atomic_read(&nvi->flush_timer_running) == 0) {
+		atomic_set(&nvi->flush_timer_running, 1);
+		mod_timer(&nvi->flush_timer, jiffies + HZ);
+	}
 }
 
 static void
@@ -170,11 +170,6 @@ efrm_vi_resource_issue_tx_flush(struct efrm_vi *virs, bool *completed)
 	list_add_tail(&virs->q[EFHW_TXQ].flush_link,
 		      &efrm_nic->nvi.tx_flush_outstanding_list);
 
-	if (atomic_read(&nvi->flush_timer_running) == 0) {
-		atomic_set(&nvi->flush_timer_running, 1);
-		mod_timer(&nvi->flush_timer, jiffies + HZ);
-	}
-
 	/* Drop spin lock as efhw_nic_* calls can block */
 	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 
@@ -185,6 +180,11 @@ efrm_vi_resource_issue_tx_flush(struct efrm_vi *virs, bool *completed)
 		efrm_vi_resource_tx_flush_done(virs, completed);
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
+
+	if (atomic_read(&nvi->flush_timer_running) == 0) {
+		atomic_set(&nvi->flush_timer_running, 1);
+		mod_timer(&nvi->flush_timer, jiffies + HZ);
+	}
 }
 
 static void efrm_vi_resource_process_flushes(struct efrm_nic *efrm_nic,
@@ -280,8 +280,6 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	bool found = false;
 
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(&efrm_vi_manager->rm);
-
-	EFRM_TRACE("%s: %p", __FUNCTION__, efrm_vi_manager);
 
 	nvi = container_of(data, struct efrm_nic_vi, flush_work_item);
 	efrm_nic = container_of(nvi, struct efrm_nic, nvi);
@@ -564,6 +562,7 @@ efrm_handle_dmaq_flushed_schedule(struct efhw_nic *flush_nic,
 		return 1;
 	}
 	else {
+		kfree(req);
 		return 0;
 	}
 }

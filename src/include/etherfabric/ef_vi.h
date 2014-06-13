@@ -56,9 +56,11 @@
 #if defined(__GNUC__)
 # if defined(__linux__) && defined(__KERNEL__)
 #  include <linux/types.h>
+#  include <linux/time.h>
 # else
 #  include <stdint.h>
 #  include <inttypes.h>
+#  include <time.h>
 #   include <sys/types.h>
 # endif
 # define EF_VI_ALIGN(x) __attribute__ ((aligned (x)))
@@ -251,6 +253,9 @@ enum {
 
 typedef struct {
 	ef_eventq_ptr	   evq_ptr;
+	unsigned	   sync_timestamp_major;
+	unsigned	   sync_timestamp_minor;
+	unsigned	   sync_timestamp_synchronised;
 } ef_eventq_state;
 
 
@@ -289,7 +294,9 @@ enum ef_vi_flags {
 	EF_VI_TX_FILTER_MASK_3  = (0x1000 | 0x2000),  /* Siena only */
 	EF_VI_TX_PUSH_DISABLE   = 0x4000,
 	EF_VI_TX_PUSH_ALWAYS    = 0x8000,             /* ef10 only */
+	EF_VI_RX_TIMESTAMPS     = 0x10000,            /* ef10 only */
 };
+
 
 typedef struct {
 	uint32_t  previous;
@@ -307,14 +314,12 @@ typedef struct {
 
 typedef struct {
 	uint32_t         mask;
-	void*            doorbell;
 	void*            descriptors;
 	uint32_t*        ids;
 } ef_vi_txq;
 
 typedef struct {
 	uint32_t         mask;
-	void*            doorbell;
 	void*            descriptors;
 	uint32_t*        ids;
 } ef_vi_rxq;
@@ -338,15 +343,10 @@ enum ef_vi_arch {
 	EF_VI_ARCH_EF10,
 };
 
-enum ef_vi_nic_flags {
-	EF_VI_NIC_FLAG_BUG35388_WORKAROUND = 0x1,
-};
-
 struct ef_vi_nic_type {
 	unsigned char  arch;
 	char           variant;
 	unsigned char  revision;
-	unsigned char  flags;
 };
 
 
@@ -361,25 +361,28 @@ struct ef_pio;
 ** the network.
 */
 typedef struct ef_vi {
+	unsigned                      inited;
 	unsigned                      vi_resource_id;
 	unsigned                      vi_i;
 
 	unsigned                      rx_buffer_len;
 	unsigned                      rx_prefix_len;
+	int                           rx_ts_correction;
 
-	char*				vi_mem_mmap_ptr;
+	char*			      vi_mem_mmap_ptr;
 	int                           vi_mem_mmap_bytes;
-	char*				vi_io_mmap_ptr;
+	char*			      vi_io_mmap_ptr;
 	int                           vi_io_mmap_bytes;
+
+	ef_vi_ioaddr_t                io;
 
 	struct ef_pio*                linked_pio;
 
-	ef_eventq_state*              evq_state;
 	char*                         evq_base;
 	unsigned                      evq_mask;
-	ef_vi_ioaddr_t                evq_timer_reg;
 	unsigned                      timer_quantum_ns;
-	ef_vi_ioaddr_t                evq_prime;
+
+	unsigned                      tx_push_thresh;
 
 	ef_vi_txq                     vi_txq;
 	ef_vi_rxq                     vi_rxq;
@@ -414,79 +417,22 @@ typedef struct ef_vi {
 } ef_vi;
 
 
-/* This structure is opaque to the client & used to pass mapping data
- * from the resource manager to the ef_vi lib. for ef_vi_init().
- */
-struct vi_mappings {
-	uint32_t         signature;
-# define VI_MAPPING_VERSION   0x05  /*Byte: Increment me if struct altered*/
-# define VI_MAPPING_SIGNATURE (0xBA1150 + VI_MAPPING_VERSION)
-
-	struct ef_vi_nic_type nic_type;
-
-	int              vi_instance;
-
-	unsigned         evq_bytes;
-	char*            evq_base;
-	ef_vi_ioaddr_t   evq_timer_reg;
-
-	unsigned         timer_quantum_ns;
-
-	unsigned         rx_queue_capacity;
-	ef_vi_ioaddr_t   rx_dma_ef1;
-	char*            rx_dma_falcon;
-	char*            rx_dma_ef10;
-	ef_vi_ioaddr_t   rx_bell;
-	unsigned         rx_prefix_len;
-
-	unsigned         tx_queue_capacity;
-	ef_vi_ioaddr_t   tx_dma_ef1;
-	char*            tx_dma_falcon;
-	char*            tx_dma_ef10;
-	ef_vi_ioaddr_t   tx_bell;
-
-	ef_vi_ioaddr_t   evq_prime;
+enum ef_vi_layout_type {
+	EF_VI_LAYOUT_FRAME,
+	EF_VI_LAYOUT_MINOR_TICKS,
 };
-/* This is used by clients to allocate a suitably sized buffer for the 
- * resource manager to fill & ef_vi_init() to use. */
-#define VI_MAPPINGS_SIZE (sizeof(struct vi_mappings))
+
+
+typedef struct {
+	enum ef_vi_layout_type   evle_type;
+	int                      evle_offset;
+	const char*              evle_description;
+} ef_vi_layout_entry;
 
 
 /**********************************************************************
  * ef_vi **************************************************************
  **********************************************************************/
-
-/* Initialise [data_area] with information required to initialise an ef_vi.
- * In the following, an unused param should be set to NULL. Note the case
- * marked (*) of [iobuf_mmap] for falcon/driver; for normal driver this
- * must be NULL.
- *
- * \param  data_area     [in,out] required, must ref at least VI_MAPPINGS_SIZE 
- *                                bytes
- * \param  evq_capacity  [in] number of events in event queue.  Specify 0 for
- *                            no event queue.
- * \param  rxq_capacity  [in] number of descriptors in RX DMA queue.  Specify
- *                            0 for no RX queue.
- * \param  txq_capacity  [in] number of descriptors in TX DMA queue.  Specify
- *                            0 for no TX queue.
- * \param  mmap_info     [in] mem-map info for resource
- * \param  io_mmap       [in] ef1,    required
- *                            falcon, required
- * \param  iobuf_mmap    [in] ef1,    UL: unused
- *                            falcon, UL: required
- */
-extern void ef_vi_init_mapping_vi(void* data_area, struct ef_vi_nic_type,
-                                  unsigned rxq_capacity,
-                                  unsigned txq_capacity, int instance,
-                                  void* io_mmap, void* iobuf_mmap_rx,
-                                  void* iobuf_mmap_tx, enum ef_vi_flags,
-				  unsigned rx_prefix_len);
-
-
-extern void ef_vi_init_mapping_evq(void* data_area, struct ef_vi_nic_type,
-                                   int instance, void* io_mmap,
-				   unsigned evq_bytes, void* base,
-				   void* timer_reg, unsigned timer_quantum_ns);
 
 ef_vi_inline unsigned ef_vi_resource_id(ef_vi* vi)
 { 
@@ -700,7 +646,7 @@ ef_vi_inline int ef_eventq_capacity(ef_vi* vi)
 
 ef_vi_inline unsigned ef_eventq_current(ef_vi* evq)
 {
-	return (unsigned) evq->evq_state->evq_ptr;
+	return (unsigned) evq->ep_state->evq.evq_ptr;
 }
 
 /* Returns the instance ID of [vi] */
@@ -720,15 +666,6 @@ extern int ef_vi_state_bytes(ef_vi*);
 ** queue).
 */
 extern int ef_vi_calc_state_bytes(int rxq_size, int txq_size);
-
-/*! Initialise [ef_vi] from the provided resources. [vvis] must have been
-** created by ef_make_vi_data() & remains owned by the caller.
-*/
-extern void ef_vi_init(ef_vi*, void* vi_info, ef_vi_state* state,
-                       ef_eventq_state* evq_state, enum ef_vi_flags);
-
-extern void ef_vi_state_init(ef_vi*);
-extern void ef_eventq_state_init(ef_vi*);
 
 /*! Convert an efhw device arch to ef_vi_arch, or returns -1 if not
 ** recognised.
@@ -761,6 +698,48 @@ extern const char* ef_vi_version_str(void);
  * this build of ef_vi.
  */
 extern const char* ef_vi_driver_interface_str(void);
+
+/* Set the number of sends to have outstanding before switching from
+ * using TX descriptor push (better latency) to using a doorbell
+ * (better efficiency).
+ *
+ * The default value for this is controlled using
+ * EF_VI_TX_PUSH_DISABLE and EF_VI_TX_PUSH_ALWAYS flags to
+ * ef_vi_init().
+ *
+ * This is ignored on Falcon architectures.
+ */
+extern void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold);
+
+/* This function returns a table that describes the layout of the data
+ * delivered by the adapter into receive buffers.  Depending on the adapter
+ * type and options selected, there can be a meta-data prefix in front of
+ * each packet delivered into memory.
+ *
+ * The first entry is always of type EF_VI_LAYOUT_FRAME, and the offset is
+ * the same as the value returned by ef_vi_receive_prefix_len().
+ */
+extern int ef_vi_receive_query_layout(ef_vi* vi,
+			      const ef_vi_layout_entry**const layout_out,
+			      int* layout_len_out);
+
+
+ /*! Retrieve the UTC timestamp associated with a received packet.
+  *
+  * Returns 0 on success, or -1 if a timestamp could not be retrieved.
+  *
+  * This function must be called after retrieving the associated RX event
+  * via ef_eventq_poll(), and before calling ef_eventq_poll() again.
+  *
+  * If the VI does not have RX timestamps enabled then this function may
+  * fail, or it may return an invalid timestamp.
+  *
+  * This function will also fail if the VI has not yet synchronised with
+  * the adapter clock.  This can take from a few hundred milliseconds up to
+  * several seconds from when the vi is allocated.
+  */
+extern int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
+				       struct timespec* ts_out);
 
 
 /**********************************************************************

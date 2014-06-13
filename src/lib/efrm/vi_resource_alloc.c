@@ -140,6 +140,7 @@ static int efrm_vi_rm_alloc_instance_set(struct efrm_vi *virs,
 					 struct efrm_vi_set* vi_set,
 					 int instance)
 {
+	int rc;
 	if (instance != 0xff) {
 		if (instance >= (1 << vi_set->allocation.order) ) {
 			EFRM_ERR("%s: ERROR: vi_set instance=%d out-of-range "
@@ -148,16 +149,29 @@ static int efrm_vi_rm_alloc_instance_set(struct efrm_vi *virs,
 			return -EINVAL;
 		}
 	} else {
+		spin_lock(&vi_set->free_lock);
 		instance = ci_ffs64(vi_set->free) - 1;
 		if (instance < 0) {
 			EFRM_WARN("%s: ERROR: vi_set no free members",
 				  __FUNCTION__);
-			return -ENOSPC;
+			rc = -ENOSPC;
+			goto unlock_and_out;
 		}
 	}
 
-	EFRM_ASSERT(vi_set->free & (1 << instance));
-	vi_set->free &= ~(1 << instance);
+	if(! spin_is_locked(&vi_set->free_lock))
+		spin_lock(&vi_set->free_lock);
+
+	if(! (vi_set->free & ((uint64_t)1 << instance))) {
+		EFRM_ERR("%s: instance %d already allocated.", __FUNCTION__,
+			 instance);
+		rc = -EEXIST;
+		goto unlock_and_out;
+	}
+
+	EFRM_ASSERT(vi_set->free & ((uint64_t)1 << instance));
+	vi_set->free &= ~((uint64_t)1 << instance);
+	spin_unlock(&vi_set->free_lock);
 
 	virs->allocation.instance = vi_set->allocation.instance + instance;
 	virs->allocation.allocator_id = -1;
@@ -165,6 +179,9 @@ static int efrm_vi_rm_alloc_instance_set(struct efrm_vi *virs,
 	virs->vi_set = vi_set;
 	efrm_resource_ref(efrm_vi_set_to_resource(vi_set));
 	return 0;
+unlock_and_out:
+	spin_unlock(&vi_set->free_lock);
+	return rc;
 }
 
 
@@ -210,7 +227,7 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 		vi_props = vi_with_interrupt;
 	else
 		vi_props = vi_with_timer;
-	return efrm_vi_allocator_alloc_set(efrm_nic, vi_props, 1,
+	return efrm_vi_allocator_alloc_set(efrm_nic, vi_props, 1, 0,
 					   channel, &virs->allocation);
 }
 
@@ -220,8 +237,10 @@ static void efrm_vi_rm_free_instance(struct efrm_vi *virs)
 	if (virs->vi_set != NULL) {
 		int si = (virs->allocation.instance
 			  - virs->vi_set->allocation.instance);
+		spin_lock(&virs->vi_set->free_lock);
 		EFRM_ASSERT((virs->vi_set->free & (1 << si)) == 0);
 		virs->vi_set->free |= 1 << si;
+		spin_unlock(&virs->vi_set->free_lock);
 		efrm_vi_set_release(virs->vi_set);
 	}
 #ifdef CONFIG_SFC_RESOURCE_VF
@@ -361,6 +380,12 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_RX_PHYS_ADDR_EN;
 		if (!(q_flags & EFRM_VI_CONTIGUOUS))
 			vi_flags |= EFHW_VI_JUMBO_EN;
+		if (q_flags & EFRM_VI_RX_TIMESTAMPS)
+			vi_flags |= EFHW_VI_RX_PREFIX | EFHW_VI_RX_TIMESTAMPS;
+		break;
+	case EFHW_EVQ:
+		if (q_flags & EFRM_VI_RX_TIMESTAMPS)
+			vi_flags |= EFHW_VI_RX_TIMESTAMPS;
 		break;
 	default:
 		break;
@@ -396,6 +421,12 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_PHYS_ADDR;
 		if (!(vi_flags & EFHW_VI_JUMBO_EN))
 			q_flags |= EFRM_VI_CONTIGUOUS;
+		if (vi_flags & EFHW_VI_RX_TIMESTAMPS)
+			q_flags |= EFRM_VI_RX_TIMESTAMPS;
+		break;
+	case EFHW_EVQ:
+		if (vi_flags & EFHW_VI_RX_TIMESTAMPS)
+			q_flags |= EFRM_VI_RX_TIMESTAMPS;
 		break;
 	default:
 		break;
@@ -463,12 +494,15 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			0:
 			instance % efrm_nic->rss_channel_count;
 		/* NB. We do not enable DOS protection because of bug12916. */
-		efhw_nic_event_queue_enable(nic, instance, q->capacity,
-			efrm_bt_allocation_base(&q->bt_alloc),
-			q->dma_addrs,
-			(1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-			interrupting, 0 /* DOS protection */,
-			wakeup_evq);
+		rc = efhw_nic_event_queue_enable
+			(nic, instance, q->capacity,
+			 efrm_bt_allocation_base(&q->bt_alloc),
+			 q->dma_addrs,
+			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
+			 interrupting, 0 /* DOS protection */,
+			 wakeup_evq,
+			 (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0,
+			 &virs->rx_ts_correction);
 		break;
 	default:
 		EFRM_ASSERT(0);
@@ -498,7 +532,8 @@ efrm_vi_rm_fini_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type)
 		efhw_nic_pace(nic, instance, 0);
 		break;
 	case EFHW_EVQ:
-		efhw_nic_event_queue_disable(nic, instance);
+		efhw_nic_event_queue_disable(nic, instance,
+				(virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
 		break;
 	default:
 		break;
@@ -1166,7 +1201,12 @@ static int efrm_vi_q_init_pf(struct efrm_vi *virs, enum efhw_q_type q_type,
 
 	if (q_type != EFHW_EVQ)
 		efrm_vi_attach_evq(virs, q_type, evq);
-	return efrm_vi_rm_init_dmaq(virs, q_type, nic);
+	rc = efrm_vi_rm_init_dmaq(virs, q_type, nic);
+	if (rc != 0)
+		if (nic->devtype.arch == EFHW_ARCH_FALCON)
+			efrm_bt_manager_free(nic, &virs->bt_manager,
+					     &q->bt_alloc);
+	return rc;
 }
 
 

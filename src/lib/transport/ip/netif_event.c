@@ -31,7 +31,14 @@
 #include "tcp_rx.h"
 #include <ci/tools/pktdump.h>
 #include <etherfabric/timer.h>
+#include <etherfabric/vi.h>
+#include <ci/internal/pio_buddy.h>
 
+#ifdef __KERNEL__
+#include <linux/time.h>
+#else
+#include <time.h>
+#endif
 
 #define SAMPLE(n) (n)
 
@@ -163,19 +170,43 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
 
     if( CI_LIKELY(not_fast == 0) ) {
       char* payload = (char*) ip + sizeof(ci_ip4_hdr);
+      ci_netif_state_nic_t* nsn = &netif->state->nic[pkt->intf_i];
+      struct timespec stamp;
+
       ip_paylen = (int) ip_tot_len - sizeof(ci_ip4_hdr);
       /* This will go negative if the ip_tot_len was too small even
       ** for the IP header.  The ULP is expected to notice...
       */
 
+      if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
+        if( ef_vi_receive_get_timestamp(&netif->nic_hw[pkt->intf_i].vi,
+                                        PKT_START(pkt) - nsn->rx_prefix_len,
+                                        &stamp) == 0 ) {
+          LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu", OO_PKT_FMT(pkt),
+              stamp.tv_sec, stamp.tv_nsec));
+        } else {
+          LOG_NR(log(LPF "RX id=%d missing timestamp", OO_PKT_FMT(pkt)));
+          stamp.tv_sec = 0;
+        }
+      }
+      else
+        stamp.tv_sec = 0;
+        /* no need to set tv_nsec to 0 here as socket layer ignores
+         * timestamps when tv_sec is 0
+         */
+
       /* Demux to appropriate protocol. */
       if( ip->ip_protocol == IPPROTO_TCP ) {
+        pkt->pf.tcp_rx.rx_hw_stamp.tv_sec = stamp.tv_sec;
+        pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
         ci_tcp_handle_rx(netif, ps, pkt, (ci_tcp_hdr*) payload, ip_paylen);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
       }
 #if CI_CFG_UDP
       else if(CI_LIKELY( ip->ip_protocol == IPPROTO_UDP )) {
+        pkt->pf.udp.rx_hw_stamp.tv_sec = stamp.tv_sec;
+        pkt->pf.udp.rx_hw_stamp.tv_nsec = stamp.tv_nsec;
         ci_udp_handle_rx(netif, pkt, (ci_udp_hdr*) payload, ip_paylen);
         CI_IPV4_STATS_INC_IN_DELIVERS( netif );
         return;
@@ -508,9 +539,9 @@ static void process_post_poll_list(ci_netif* ni)
 # define UDP_CAN_FREE(us)  ((us)->tx_count == 0)
 
 
-void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
-                                  struct ci_netif_poll_state* ps,
-                                  ci_ip_pkt_fmt* pkt)
+static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
+                                         struct ci_netif_poll_state* ps,
+                                         ci_ip_pkt_fmt* pkt)
 {
   ci_udp_state* us;
   oo_pkt_p frag_next;
@@ -563,6 +594,36 @@ void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 }
 
 #endif
+
+
+ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
+                                          struct ci_netif_poll_state* ps,
+                                          ci_ip_pkt_fmt* pkt)
+{
+  ci_netif_state_nic_t* nic = &ni->state->nic[pkt->intf_i];
+  /* debug check - take back ownership of buffer from NIC */
+  ci_assert(pkt->flags & CI_PKT_FLAG_TX_PENDING);
+  pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
+  nic->tx_bytes_removed += TX_PKT_LEN(pkt);
+  ci_assert((int) (nic->tx_bytes_added - nic->tx_bytes_removed) >=0);
+  if( pkt->pio_addr >= 0 ) {
+    ci_pio_buddy_free(ni, &nic->pio_buddy, pkt->pio_addr, pkt->pio_order);
+    pkt->pio_addr = -1;
+  }
+#if CI_CFG_UDP
+  if( pkt->flags & CI_PKT_FLAG_UDP )
+    ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
+  else
+#endif
+    ci_netif_pkt_release(ni, pkt);
+}
+
+
+void ci_netif_tx_pkt_complete(ci_netif* ni, struct ci_netif_poll_state* ps,
+                              ci_ip_pkt_fmt* pkt)
+{
+  __ci_netif_tx_pkt_complete(ni, ps, pkt);
+}
 
 
 #define CI_NETIF_TX_VI(ni, nic_i, label)  (&(ni)->nic_hw[nic_i].vi)
@@ -635,7 +696,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
           OO_PP_INIT(ni, pp, ids[j]);
           pkt = PKT_CHK(ni, pp);
           ++ni->state->nic[intf_i].tx_dmaq_done_seq;
-          ci_netif_tx_pkt_complete(ni, ps, pkt);
+          __ci_netif_tx_pkt_complete(ni, ps, pkt);
         }
         ci_assert_equiv((ef_vi_transmit_fill_level(vi) == 0 &&
                          ni->state->nic[intf_i].dmaq.num == 0),

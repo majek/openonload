@@ -251,55 +251,12 @@ falcon_dma_tx_calc_ip_phys(ef_vi_dma_addr_t	src_dma_addr, unsigned bytes,
 }
 
 
-void falcon_vi_init(ef_vi* vi, void* vvis)
+void falcon_vi_init(ef_vi* vi)
 {
-	struct vi_mappings *vm = (struct vi_mappings*)vvis;
-	uint32_t* ids;
-
-	EF_VI_BUG_ON(vm->signature != VI_MAPPING_SIGNATURE);
-	EF_VI_BUG_ON(vm->nic_type.arch != EF_VI_ARCH_FALCON);
-
-	vi->rx_prefix_len = vm->rx_prefix_len;
-
 	/* ?? FIXME: We need to query the driver to find this value, since
 	 * ultimately it is set by the sfc net driver.
 	 */
 	vi->rx_buffer_len = 2048 - 256;
-
-	/* Initialise masks to zero, so that ef_vi_state_init() will
-	** not do any harm when we don't have DMA queues. */
-	vi->vi_rxq.mask = vi->vi_txq.mask = 0;
-
-	/* Initialise doorbell addresses to a distinctive small value
-	** which will cause a segfault, to trap doorbell pushes to VIs
-	** without DMA queues. */
-	vi->vi_rxq.doorbell = vi->vi_txq.doorbell = (ef_vi_ioaddr_t)0xdb;
-
-	ids = (uint32_t*) (vi->ep_state + 1);
-
-	if( vm->tx_queue_capacity ) {
-		vi->vi_txq.mask = vm->tx_queue_capacity - 1;
-		vi->vi_txq.doorbell = vm->tx_bell + 12;
-		vi->vi_txq.descriptors = vm->tx_dma_falcon;
-		vi->vi_txq.ids = ids;
-		ids += vi->vi_txq.mask + 1;
-		/* Check that the id fifo fits in the space allocated. */
-		EF_VI_BUG_ON((char*) (vi->vi_txq.ids + vm->tx_queue_capacity) >
-			     (char*) vi->ep_state
-			     + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
-						      vm->tx_queue_capacity));
-	}
-	if( vm->rx_queue_capacity ) {
-		vi->vi_rxq.mask = vm->rx_queue_capacity - 1;
-		vi->vi_rxq.doorbell = vm->rx_bell + 12;
-		vi->vi_rxq.descriptors = vm->rx_dma_falcon;
-		vi->vi_rxq.ids = ids;
-		/* Check that the id fifo fits in the space allocated. */
-		EF_VI_BUG_ON((char*) (vi->vi_rxq.ids + vm->rx_queue_capacity) >
-			     (char*) vi->ep_state
-			     + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
-						      vm->tx_queue_capacity));
-	}
 
 	falcon_vi_initialise_ops(vi);
 }
@@ -390,6 +347,7 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 	ef_vi_falcon_dma_tx_buf_desc* dp = 
 		(ef_vi_falcon_dma_tx_buf_desc*) q->descriptors + di;
 	ci_oword_t d;
+	uint32_t* doorbell = (void*) (vi->io + FR_BZ_TX_DESC_UPD_REGP0_OFST);
 
 #if  !defined(__KERNEL__) && defined(__powerpc64__) &&  __GNUC__ >= 4
 	d.u32[0] = dp->u32[0];
@@ -412,26 +370,26 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 	 */
 	__asm__("movups %1, %%xmm0\n\t"
 		"movaps %%xmm0, %0"
-		: "=m" (*(volatile uint64_t*)((char*)vi->vi_txq.doorbell - 12))
+		: "=m" (*(volatile uint64_t*)doorbell)
 		: "m" (d)
 		: "xmm0");
 #elif  !defined(__KERNEL__) && defined(__powerpc64__) &&  __GNUC__ >= 4
 	__asm__ __volatile__ 
 		("lxvw4x %%vs32, 0, %2\n\t"
 		 "stxvw4x %%vs32, 0, %1"
-		 : "=m" (*(volatile uint64_t*)((char*)vi->vi_txq.doorbell - 12))
-                 : "r" ((char*)vi->vi_txq.doorbell - 12), 
+		 : "=m" (*(volatile uint64_t*)doorbell)
+                 : "r" (doorbell), 
 		    "r" (&d)
 		 : "vs32");
 		
 #else
 	/* byte swapping was already performed, bytes were filled in correct
 	 * order */
-	writel(d.u32[0], ((ef_vi_ioaddr_t)vi->vi_txq.doorbell) - 12);
-	writel(d.u32[1], ((ef_vi_ioaddr_t)vi->vi_txq.doorbell) - 8);
-	writel(d.u32[2], ((ef_vi_ioaddr_t)vi->vi_txq.doorbell) - 4);
+	writel(d.u32[0], doorbell);
+	writel(d.u32[1], doorbell + 1);
+	writel(d.u32[2], doorbell + 2);
 	wmb();
-	writel(d.u32[3], vi->vi_txq.doorbell);
+	writel(d.u32[3], doorbell + 3);
 #endif
 	mmiowb();
 }
@@ -443,7 +401,7 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 
 	writel((vi->ep_state->txq.added & vi->vi_txq.mask) <<
 	       __DW4(FRF_AZ_TX_DESC_WPTR_LBN),
-	       vi->vi_txq.doorbell);
+	       vi->io + FR_BZ_TX_DESC_UPD_REGP0_OFST + 12);
 	mmiowb();
 }
 
@@ -451,12 +409,16 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 static void falcon_ef_vi_transmit_push(ef_vi* vi)
 {
 	ef_vi_txq_state* qs = &vi->ep_state->txq;
-        /* If added is one bigger than removed, then we have exactly
-         * one descriptor to push and the queue was otherwise empty,
-         * so we can use TX push 
+        /* If tx push is enabled, then thresh == 1, and if added is
+	 * one bigger than removed, then we have exactly one
+	 * descriptor to push and the queue was otherwise empty, so we
+	 * can use TX push.
+	 *
+	 * If tx push is disabled, then thresh == 0, and this will
+	 * evaluate false
          */
-	if( (qs->removed+1 == qs->added) &&
-	    ! (vi->vi_flags & EF_VI_TX_PUSH_DISABLE) )
+	EF_VI_BUG_ON(vi->tx_push_thresh > 1);
+	if( qs->added - qs->removed == vi->tx_push_thresh )
 		ef_vi_transmit_push_desc(vi);
 	else
 		ef_vi_transmit_push_doorbell(vi);
@@ -469,7 +431,7 @@ static int falcon_ef_vi_transmit_pio(ef_vi* vi, ef_addr offset, int len,
                                      ef_request_id dma_id)
 {
 	LOGVV(ef_log("%s: falcon does not support PIO", __FUNCTION__));
-	return -EINVAL;
+	return -EOPNOTSUPP;
 }
 
 
@@ -516,7 +478,7 @@ static void falcon_ef_vi_receive_push(ef_vi* vi)
 
 	writel ((vi->ep_state->rxq.added & vi->vi_rxq.mask) <<
 		__DW4(FRF_AZ_RX_DESC_WPTR_LBN),
-		vi->vi_rxq.doorbell);
+		vi->io + FR_BZ_RX_DESC_UPD_REGP0_OFST + 12);
 	mmiowb();
 }
 

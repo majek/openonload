@@ -50,7 +50,7 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 10
+#define EFX_DRIVERLINK_API_VERSION 11
 
 /**
  * enum efx_dl_ev_prio - Driverlink client's priority level for event handling
@@ -410,10 +410,31 @@ extern void efx_dl_schedule_reset(struct efx_dl_device *efx_dev);
 extern int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 				struct efx_filter_spec *spec,
 				bool replace_equal);
-extern void efx_dl_filter_remove(struct efx_dl_device *efx_dev,
-				 int filter_id);
-extern void efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
-				   int filter_id, int rxq_i);
+extern int efx_dl_filter_remove(struct efx_dl_device *efx_dev,
+				int filter_id);
+extern int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
+				  int filter_id, int rxq_i);
+
+/**
+ * efx_dl_filter_block_kernel - Block the kernel from receiving packets
+ * @dl_dev: Driverlink client device context
+ *
+ * This increments the kernel block count for the client.  So long as
+ * any client has a non-zero count, all filters with priority HINT or
+ * AUTO will be removed (or pointed to a drop queue).  The kernel
+ * stack and upper devices will not receive packets except through
+ * explicit configuration (e.g. ethtool -U or PTP on Siena).  The net
+ * driver's loopback self-test will also fail.
+ */
+extern int efx_dl_filter_block_kernel(struct efx_dl_device *dl_dev);
+
+/**
+ * efx_dl_filter_unblock_kernel - Reverse efx_filter_block_kernel()
+ * @dl_dev: Driverlink client device context
+ *
+ * This decrements the kernel block count for the client.
+ */
+extern void efx_dl_filter_unblock_kernel(struct efx_dl_device *dl_dev);
 
 /**
  * efx_dl_mcdi_rpc - Issue an MCDI command and wait for completion

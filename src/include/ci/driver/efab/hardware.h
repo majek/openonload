@@ -151,14 +151,19 @@
 /*-------------- Event support  ------------ */
 
 #define efhw_nic_event_queue_enable(nic, evq, size, buf_base, dma_addrs, \
-				    n_pages, interrupting, dos_p, wakeup_evq) \
-	((nic)->efhw_func->event_queue_enable((nic), (evq), (size),      \
-					    (buf_base), (dma_addrs),     \
-                                            (n_pages), (interrupting),   \
-                                            (dos_p), (wakeup_evq)))
+				    n_pages, interrupting, dos_p, wakeup_evq, \
+                                    enable_time_sync_events,            \
+                                    rx_ts_correction_out)               \
+  ((nic)->efhw_func->event_queue_enable((nic), (evq), (size),           \
+                                        (buf_base), (dma_addrs),        \
+                                        (n_pages), (interrupting),      \
+                                        (dos_p), (wakeup_evq),          \
+                                        (enable_time_sync_events),      \
+                                        (rx_ts_correction_out)))
 
-#define efhw_nic_event_queue_disable(nic, evq)                  \
-	((nic)->efhw_func->event_queue_disable(nic, evq))
+#define efhw_nic_event_queue_disable(nic, evq, time_sync_events_enabled) \
+	((nic)->efhw_func->event_queue_disable(nic, evq,		\
+					       time_sync_events_enabled))
 
 #define efhw_nic_wakeup_request(nic, iopage, rd_ptr)                    \
 	((nic)->efhw_func->wakeup_request((nic), (iopage), (rd_ptr)))
@@ -224,6 +229,29 @@
 #define efhw_nic_buffer_table_clear(nic, block, first_entry, n_entries) \
 	((nic)->efhw_func->buffer_table_clear(nic, block, first_entry,  \
 					      n_entries))
+/*-------------- Sniff ------------ */
+#define efhw_nic_set_port_sniff(nic, instance, enable, promiscuous, handle) \
+	((nic)->efhw_func->set_port_sniff((nic), (instance), (enable),      \
+					  (promiscuous), (handle)))
+
+/*-------------- RSS ------------ */
+#define efhw_nic_rss_context_alloc(nic, num_qs, shared, handle_out)     \
+        ((nic)->efhw_func->rss_context_alloc((nic), (num_qs), (shared), \
+                                             (handle_out)))
+
+#define efhw_nic_rss_context_free(nic, handle)                          \
+        ((nic)->efhw_func->rss_context_free((nic), (handle)))
+
+#define efhw_nic_rss_context_set_table(nic, handle, table)              \
+	((nic)->efhw_func->rss_context_set_table((nic), (handle), (table)))
+
+#define efhw_nic_rss_context_set_key(nic, handle, key)                  \
+	((nic)->efhw_func->rss_context_set_key((nic), (handle), (key)))
+
+/*-------------- Licensing ---------------- */
+#define efhw_nic_license_challenge(nic, feature, challenge, expiry, signature) \
+	((nic)->efhw_func->license_challenge(nic, feature, challenge, expiry,  \
+                                             signature))
 
 
 /*----------------------------------------------------------------------------

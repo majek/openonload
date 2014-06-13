@@ -47,6 +47,8 @@
 #include "ef_vi_internal.h"
 #include "efch_intf_ver.h"
 #include <onload/version.h>
+#include <etherfabric/init.h>
+
 
 #define EF_VI_STATE_BYTES(rxq_sz, txq_sz)			\
 	(sizeof(ef_vi_state) + (rxq_sz) * sizeof(uint32_t)	\
@@ -64,10 +66,10 @@ int ef_vi_calc_state_bytes(int rxq_sz, int txq_sz)
 int ef_vi_state_bytes(ef_vi* vi)
 {
 	int rxq_sz = 0, txq_sz = 0;
-	if( ef_vi_receive_capacity(vi) )
-		rxq_sz = ef_vi_receive_capacity(vi) + 1;
-	if( ef_vi_transmit_capacity(vi) )
-		txq_sz = ef_vi_transmit_capacity(vi) + 1;
+	if( vi->vi_rxq.mask )
+		rxq_sz = vi->vi_rxq.mask + 1;
+	if( vi->vi_txq.mask )
+		txq_sz = vi->vi_txq.mask + 1;
 
 	EF_VI_BUG_ON(rxq_sz != 0 && ! EF_VI_IS_POW2(rxq_sz));
 	EF_VI_BUG_ON(txq_sz != 0 && ! EF_VI_IS_POW2(txq_sz));
@@ -76,163 +78,14 @@ int ef_vi_state_bytes(ef_vi* vi)
 }
 
 
-void ef_eventq_state_init(ef_vi* evq)
+void ef_vi_init_state(ef_vi* vi)
 {
-	evq->evq_state->evq_ptr = 0;
-}
-
-
-void ef_vi_state_init(ef_vi* vi)
-{
-	ef_vi_state* state = vi->ep_state;
-	unsigned i;
-
-	state->txq.previous = state->txq.added = state->txq.removed = 0;
-	state->rxq.added = state->rxq.removed = state->rxq.prev_added = 0;
-	state->rxq.in_jumbo = 0;
-	state->rxq.bytes_acc = 0;
-
-	if( vi->vi_rxq.mask )
-		for( i = 0; i <= vi->vi_rxq.mask; ++i )
-			vi->vi_rxq.ids[i] = EF_REQUEST_ID_MASK;
-	if( vi->vi_txq.mask )
-		for( i = 0; i <= vi->vi_txq.mask; ++i )
-			vi->vi_txq.ids[i] = EF_REQUEST_ID_MASK;
-}
-
-
-void ef_vi_init_mapping_evq(void* data_area, struct ef_vi_nic_type nic_type,
-			    int instance, void* io_mmap, unsigned evq_bytes,
-			    void* base, void* timer_reg,
-			    unsigned timer_quantum_ns)
-{
-	struct vi_mappings* vm = (struct vi_mappings*) data_area;
-
-	vm->signature = VI_MAPPING_SIGNATURE;
-	vm->vi_instance = instance;
-	vm->nic_type = nic_type;
-	vm->evq_bytes = evq_bytes;
-	vm->evq_base = base;
-	vm->evq_timer_reg = timer_reg;
-        vm->timer_quantum_ns = timer_quantum_ns;
-
-	switch( nic_type.arch ) {
-	case EF_VI_ARCH_FALCON:
-		vm->evq_prime = (char*) io_mmap +
-			(FR_BZ_EVQ_RPTR_REGP0_OFST & (EF_VI_PAGE_SIZE - 1));
-		break;
-	case EF_VI_ARCH_EF10:
-		vm->evq_prime = (char*) io_mmap + ER_DZ_EVQ_RPTR_REG;
-		break;
-	default:
-		/* ?? TODO: We should return an error code. */
-		EF_VI_BUG_ON(1);
-		break;
-	}
-}
-
-
-void ef_vi_init(ef_vi* vi, void* vvis, ef_vi_state* state,
-		ef_eventq_state* evq_state, enum ef_vi_flags vi_flags)
-{
-	struct vi_mappings* vm = (struct vi_mappings*) vvis;
-
-	memset(vi->vi_qs, 0, sizeof(vi->vi_qs));
-	vi->vi_qs_n = 0;
-	vi->vi_i = vm->vi_instance;
-	vi->ep_state = state;
-	vi->vi_flags = vi_flags;
-	vi->vi_stats = NULL;
-
-	switch( vm->nic_type.arch ) {
-	case EF_VI_ARCH_FALCON:
-		falcon_vi_init(vi, vvis);
-		break;
-	case EF_VI_ARCH_EF10:
-		ef10_vi_init(vi, vvis);
-		break;
-	default:
-		/* ?? TODO: We should return an error code. */
-		EF_VI_BUG_ON(1);
-		break;
-	}
-
-	vi->nic_type = vm->nic_type;
-        vi->timer_quantum_ns = vm->timer_quantum_ns;
-
-	if( vm->evq_bytes ) {
-		vi->evq_state = evq_state;
-		vi->evq_mask = vm->evq_bytes - 1u;
-		vi->evq_base = vm->evq_base;
-		vi->evq_timer_reg = vm->evq_timer_reg;
-	}
-	vi->evq_prime = vm->evq_prime;
-}
-
-
-/* Initialise [data_area] with information required to initialise an ef_vi.
- * In the following, an unused param should be set to NULL. Note the case
- * marked (*) of [iobuf_mmap] for falcon/driver; for the normal driver this
- * must be NULL.
- *
- * \param  data_area     [in,out] required, must ref at least VI_MAPPING_SIZE 
- *                                bytes
- * \param  io_mmap       [in] ef1,    required
- *                            falcon, required
- * \param  iobuf_mmap    [in] ef1,    unused
- *                            falcon, required
- */
-void ef_vi_init_mapping_vi(void* data_area, struct ef_vi_nic_type nic_type,
-                           unsigned rxq_capacity, unsigned txq_capacity,
-                           int instance, void* io_mmap,
-                           void* iobuf_mmap_rx, void* iobuf_mmap_tx,
-                           enum ef_vi_flags vi_flags, unsigned rx_prefix_len)
-{
-	struct vi_mappings* vm = (struct vi_mappings*) data_area;
-	int rx_desc_bytes, rxq_bytes;
-
-	EF_VI_BUG_ON(rxq_capacity <= 0 && txq_capacity <= 0);
-	EF_VI_BUG_ON(io_mmap == NULL);
-	EF_VI_BUG_ON(iobuf_mmap_rx == NULL && iobuf_mmap_tx == NULL);
-
-	vm->signature = VI_MAPPING_SIGNATURE;
-	vm->vi_instance = instance;
-	vm->nic_type = nic_type;
-
-	if( vm->nic_type.arch == EF_VI_ARCH_EF10 )
-		rx_desc_bytes = 8;
-	else
-		rx_desc_bytes = (vi_flags & EF_VI_RX_PHYS_ADDR) ? 8 : 4;
-	rxq_bytes = rxq_capacity * rx_desc_bytes;
-	rxq_bytes = (rxq_bytes + EF_VI_PAGE_SIZE - 1) & ~(EF_VI_PAGE_SIZE - 1);
-	rxq_bytes = (rxq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
-
-	if( iobuf_mmap_rx == iobuf_mmap_tx )
-		iobuf_mmap_tx = (char*) iobuf_mmap_rx + rxq_bytes;
-
-	vm->rx_queue_capacity = rxq_capacity;
-	vm->rx_dma_ef10 = vm->rx_dma_falcon = iobuf_mmap_rx;
-	vm->tx_queue_capacity = txq_capacity;
-	vm->tx_dma_ef10 = vm->tx_dma_falcon = iobuf_mmap_tx;
-
-	vm->rx_prefix_len = rx_prefix_len;
-
-	switch( vm->nic_type.arch ) {
-	case EF_VI_ARCH_FALCON:
-		vm->rx_bell = (char*) io_mmap +
-			(FR_BZ_RX_DESC_UPD_REGP0_OFST & (EF_VI_PAGE_SIZE - 1));
-		vm->tx_bell = (char*) io_mmap +
-			(FR_BZ_TX_DESC_UPD_REGP0_OFST & (EF_VI_PAGE_SIZE - 1));
-		break;
-	case EF_VI_ARCH_EF10:
-		vm->rx_bell = (char*) io_mmap + ER_DZ_RX_DESC_UPD_REG;
-		vm->tx_bell = (char*) io_mmap + ER_DZ_TX_DESC_UPD_REG;
-		break;
-	default:
-		/* ?? TODO: We should return an error code. */
-		EF_VI_BUG_ON(1);
-		break;
-	}
+	ef_vi_reset_rxq(vi);
+	ef_vi_reset_txq(vi);
+	/* NB. Must not clear the ring as it may already have an
+	 * initialisation event in it.
+	 */
+	ef_vi_reset_evq(vi, 0);
 }
 
 
@@ -251,6 +104,13 @@ int ef_vi_add_queue(ef_vi* evq_vi, ef_vi* add_vi)
 void ef_vi_set_stats_buf(ef_vi* vi, ef_vi_stats* s)
 {
 	vi->vi_stats = s;
+}
+
+
+void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold)
+{
+	if( vi->nic_type.arch != EF_VI_ARCH_FALCON )
+		vi->tx_push_thresh = threshold;
 }
 
 
@@ -309,6 +169,162 @@ int ef_vi_txq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
 int ef_vi_evq_reinit(ef_vi* vi)
 {
   memset(vi->evq_base, (char)0xff, vi->evq_mask + 1);
-  vi->evq_state->evq_ptr = 0;
+  vi->ep_state->evq.evq_ptr = 0;
   return 0;
+}
+
+
+/**********************************************************************
+ * ef_vi_init*
+ */
+
+static int rx_desc_bytes(struct ef_vi* vi)
+{
+  switch( vi->nic_type.arch ) {
+  case EF_VI_ARCH_FALCON:
+    return (vi->vi_flags & EF_VI_RX_PHYS_ADDR) ? 8 : 4;
+  case EF_VI_ARCH_EF10:
+    return 8;
+  default:
+    EF_VI_BUG_ON(1);
+    return 8;
+  }
+}
+
+
+int ef_vi_rx_ring_bytes(struct ef_vi* vi)
+{
+	EF_VI_ASSERT(vi->inited & EF_VI_INITED_RXQ);
+	return (vi->vi_rxq.mask + 1) * rx_desc_bytes(vi);
+}
+
+
+int ef_vi_init(struct ef_vi* vi, int arch, int variant, int revision,
+	       unsigned ef_vi_flags, ef_vi_state* state)
+{
+	memset(vi, 0, sizeof(*vi));
+	/* vi->vi_qs_n = 0; */
+	/* vi->inited = 0; */
+	/* vi->vi_i = 0; */
+	vi->nic_type.arch = arch;
+	vi->nic_type.variant = variant;
+	vi->nic_type.revision = revision;
+	vi->vi_flags = (enum ef_vi_flags) ef_vi_flags;
+	vi->ep_state = state;
+	/* vi->vi_stats = NULL; */
+	/* vi->io = NULL; */
+	/* vi->linked_pio = NULL; */
+	switch( arch ) {
+	case EF_VI_ARCH_FALCON:
+		falcon_vi_init(vi);
+		break;
+	case EF_VI_ARCH_EF10:
+		ef10_vi_init(vi);
+		break;
+	default:
+		return -EINVAL;
+	}
+	vi->inited |= EF_VI_INITED_NIC;
+	return 0;
+}
+
+
+void ef_vi_init_io(struct ef_vi* vi, void* io_area)
+{
+	EF_VI_BUG_ON(vi->inited & EF_VI_INITED_IO);
+	EF_VI_BUG_ON(io_area == NULL);
+	vi->io = io_area;
+	vi->inited |= EF_VI_INITED_IO;
+}
+
+
+void ef_vi_init_rxq(struct ef_vi* vi, int ring_size, void* descriptors,
+		    void* ids, int prefix_len)
+{
+	EF_VI_BUG_ON(vi->inited & EF_VI_INITED_RXQ);
+	EF_VI_BUG_ON(ring_size & (ring_size - 1)); /* not power-of-2 */
+	vi->vi_rxq.mask = ring_size - 1;
+	vi->vi_rxq.descriptors = descriptors;
+	vi->vi_rxq.ids = ids;
+	vi->rx_prefix_len = prefix_len;
+	vi->inited |= EF_VI_INITED_RXQ;
+}
+
+
+void ef_vi_init_txq(struct ef_vi* vi, int ring_size, void* descriptors,
+		    void* ids)
+{
+	EF_VI_BUG_ON(vi->inited & EF_VI_INITED_TXQ);
+	vi->vi_txq.mask = ring_size - 1;
+	vi->vi_txq.descriptors = descriptors;
+	vi->vi_txq.ids = ids;
+	vi->tx_push_thresh = 1;
+	if( vi->vi_flags & EF_VI_TX_PUSH_DISABLE )
+		vi->tx_push_thresh = 0;
+	if( (vi->vi_flags & EF_VI_TX_PUSH_ALWAYS) && 
+	    vi->nic_type.arch != EF_VI_ARCH_FALCON )
+		vi->tx_push_thresh = (unsigned) -1;
+	vi->inited |= EF_VI_INITED_TXQ;
+}
+
+
+void ef_vi_init_evq(struct ef_vi* vi, int ring_size, void* event_ring)
+{
+	EF_VI_BUG_ON(vi->inited & EF_VI_INITED_EVQ);
+	vi->evq_mask = ring_size * 8 - 1;
+	vi->evq_base = event_ring;
+	vi->inited |= EF_VI_INITED_EVQ;
+}
+
+
+void ef_vi_init_timer(struct ef_vi* vi, int timer_quantum_ns)
+{
+	vi->timer_quantum_ns = timer_quantum_ns;
+	vi->inited |= EF_VI_INITED_TIMER;
+}
+
+
+void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction)
+{
+	vi->rx_ts_correction = rx_ts_correction;
+	vi->inited |= EF_VI_INITED_RX_TIMESTAMPING;
+}
+
+
+void ef_vi_reset_rxq(struct ef_vi* vi)
+{
+	ef_vi_rxq_state* qs = &vi->ep_state->rxq;
+	qs->prev_added = 0;
+	qs->added = 0;
+	qs->removed = 0;
+	qs->in_jumbo = 0;
+	qs->bytes_acc = 0;
+	if( vi->vi_rxq.mask ) {
+		int i;
+		for( i = 0; i <= vi->vi_rxq.mask; ++i )
+			vi->vi_rxq.ids[i] = EF_REQUEST_ID_MASK;
+	}
+}
+
+
+void ef_vi_reset_txq(struct ef_vi* vi)
+{
+	ef_vi_txq_state* qs = &vi->ep_state->txq;
+	qs->previous = 0;
+	qs->added = 0;
+	qs->removed = 0;
+	if( vi->vi_txq.mask ) {
+		int i;
+		for( i = 0; i <= vi->vi_txq.mask; ++i )
+			vi->vi_txq.ids[i] = EF_REQUEST_ID_MASK;
+	}
+}
+
+
+void ef_vi_reset_evq(struct ef_vi* vi, int clear_ring)
+{
+	if( clear_ring )
+		memset(vi->evq_base, (char) 0xff, vi->evq_mask + 1);
+	vi->ep_state->evq.evq_ptr = 0;
+	vi->ep_state->evq.sync_timestamp_synchronised = 0;
 }

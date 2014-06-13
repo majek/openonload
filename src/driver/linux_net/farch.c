@@ -1792,8 +1792,7 @@ void efx_farch_rx_push_indir_table(struct efx_nic *efx)
 	size_t i = 0;
 	efx_dword_t dword;
 
-	if (efx_nic_rev(efx) < EFX_REV_FALCON_B0)
-		return;
+	BUG_ON(efx_nic_rev(efx) < EFX_REV_FALCON_B0);
 
 	BUILD_BUG_ON(ARRAY_SIZE(efx->rx_indir_table) !=
 		     FR_BZ_RX_INDIRECTION_TBL_ROWS);
@@ -2030,8 +2029,6 @@ void efx_farch_init_common(struct efx_nic *efx)
 	EFX_INVERT_OWORD(temp);
 	efx_writeo(efx, &temp, FR_AZ_FATAL_INTR_KER);
 
-	efx_farch_rx_push_indir_table(efx);
-
 	/* Disable the ugly timer-based TX DMA backoff and allow TX DMA to be
 	 * controlled by the RX FIFO fill level. Set arbitration to one pkt/Q.
 	 */
@@ -2125,6 +2122,9 @@ struct efx_farch_filter_table {
 
 struct efx_farch_filter_state {
 	struct efx_farch_filter_table table[EFX_FARCH_FILTER_TABLE_COUNT];
+#ifdef EFX_NOT_UPSTREAM
+	bool		kernel_blocked;
+#endif
 };
 
 static void
@@ -2302,16 +2302,6 @@ efx_farch_filter_from_gen_spec(struct efx_farch_filter_spec *spec,
 
 	if ((gen_spec->flags & EFX_FILTER_FLAG_RX_RSS) &&
 	    gen_spec->rss_context != EFX_FILTER_RSS_CONTEXT_DEFAULT)
-		return -EINVAL;
-
-	/* Since we don't currently use the MAC filter table to match
-	 * the MAC addresses configured by the kernel stack, setting a
-	 * default MAC filters will effectively override those
-	 * specific filters.  Check that the corresponding flag is set
-	 * in exactly that case.
-	 */
-	if (!!(gen_spec->flags & EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO)
-	    != (gen_spec->match_flags == EFX_FILTER_MATCH_LOC_MAC_IG))
 		return -EINVAL;
 
 	spec->priority = gen_spec->priority;
@@ -2495,14 +2485,14 @@ efx_farch_filter_to_gen_spec(struct efx_filter_spec *gen_spec,
 }
 
 static void
-efx_farch_filter_init_rx_for_stack(struct efx_nic *efx,
-				   struct efx_farch_filter_spec *spec)
+efx_farch_filter_init_rx_auto(struct efx_nic *efx,
+			      struct efx_farch_filter_spec *spec)
 {
 	/* If there's only one channel then disable RSS for non VF
 	 * traffic, thereby allowing VFs to use RSS when the PF can't.
 	 */
-	spec->priority = EFX_FILTER_PRI_REQUIRED;
-	spec->flags = (EFX_FILTER_FLAG_RX | EFX_FILTER_FLAG_RX_STACK |
+	spec->priority = EFX_FILTER_PRI_AUTO;
+	spec->flags = (EFX_FILTER_FLAG_RX |
 		       (efx->n_rss_channels > 1 ? EFX_FILTER_FLAG_RX_RSS : 0) |
 		       (efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0));
 	spec->dmaq_id = 0;
@@ -2713,11 +2703,6 @@ s32 efx_farch_filter_insert(struct efx_nic *efx,
 		rep_index = spec.type - EFX_FARCH_FILTER_UC_DEF;
 		ins_index = rep_index;
 
-		/* XXX If the RX_OVERRIDE_ALL_AUTO flag is set, we
-		 * should remove all priority=HINT filters and stop
-		 * ARFS inserting them.
-		 */
-
 		spin_lock_bh(&efx->filter_lock);
 	} else {
 		/* Search concurrently for
@@ -2749,6 +2734,14 @@ s32 efx_farch_filter_insert(struct efx_nic *efx,
 		depth = 1;
 
 		spin_lock_bh(&efx->filter_lock);
+
+#ifdef EFX_NOT_UPSTREAM
+		if (spec.priority <= EFX_FILTER_PRI_AUTO &&
+		    state->kernel_blocked) {
+			rc = -EPERM;
+			goto out;
+		}
+#endif
 
 		for (;;) {
 			if (!test_bit(i, table->used_bitmap)) {
@@ -2790,20 +2783,13 @@ s32 efx_farch_filter_insert(struct efx_nic *efx,
 			rc = -EEXIST;
 			goto out;
 		}
-		if (spec.priority < saved_spec->priority &&
-		    !(saved_spec->priority == EFX_FILTER_PRI_REQUIRED &&
-		      saved_spec->flags & EFX_FILTER_FLAG_RX_STACK)) {
+		if (spec.priority < saved_spec->priority) {
 			rc = -EPERM;
 			goto out;
 		}
-		if (spec.flags & EFX_FILTER_FLAG_RX_STACK) {
-			/* Just make sure it won't be removed */
-			saved_spec->flags |= EFX_FILTER_FLAG_RX_STACK;
-			rc = 0;
-			goto out;
-		}
-		/* Retain the RX_STACK flag */
-		spec.flags |= saved_spec->flags & EFX_FILTER_FLAG_RX_STACK;
+		if (saved_spec->priority == EFX_FILTER_PRI_AUTO ||
+		    saved_spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO)
+			spec.flags |= EFX_FILTER_FLAG_RX_OVER_AUTO;
 	}
 
 	/* Insert the filter */
@@ -2884,11 +2870,11 @@ static int efx_farch_filter_remove(struct efx_nic *efx,
 	struct efx_farch_filter_spec *spec = &table->spec[filter_idx];
 
 	if (!test_bit(filter_idx, table->used_bitmap) ||
-	    spec->priority > priority)
+	    spec->priority != priority)
 		return -ENOENT;
 
-	if (spec->flags & EFX_FILTER_FLAG_RX_STACK) {
-		efx_farch_filter_init_rx_for_stack(efx, spec);
+	if (spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO) {
+		efx_farch_filter_init_rx_auto(efx, spec);
 		efx_farch_filter_push_rx_config(efx);
 	} else {
 		efx_farch_filter_table_clear_entry(efx, table, filter_idx);
@@ -2972,12 +2958,15 @@ efx_farch_filter_table_clear(struct efx_nic *efx,
 	unsigned int filter_idx;
 
 	spin_lock_bh(&efx->filter_lock);
-	for (filter_idx = 0; filter_idx < table->size; ++filter_idx)
-		efx_farch_filter_remove(efx, table, filter_idx, priority);
+	for (filter_idx = 0; filter_idx < table->size; ++filter_idx) {
+		if (table->spec[filter_idx].priority != EFX_FILTER_PRI_AUTO)
+			efx_farch_filter_remove(efx, table,
+						filter_idx, priority);
+	}
 	spin_unlock_bh(&efx->filter_lock);
 }
 
-void efx_farch_filter_clear_rx(struct efx_nic *efx,
+int efx_farch_filter_clear_rx(struct efx_nic *efx,
 			       enum efx_filter_priority priority)
 {
 	efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_IP,
@@ -2986,9 +2975,10 @@ void efx_farch_filter_clear_rx(struct efx_nic *efx,
 				     priority);
 	efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_DEF,
 				     priority);
+	return 0;
 }
 
-void efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id, int rxq_i)
+int efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id, int rxq_i)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
 	enum efx_farch_filter_table_id table_id;
@@ -2996,13 +2986,22 @@ void efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id, int rxq_i)
 	unsigned int filter_i;
 	struct efx_farch_filter_spec *spec;
 	efx_oword_t filter;
+	int rc = 0;
 
 	table_id = efx_farch_filter_id_table_id(filter_id);
-	BUG_ON(table_id >= EFX_FARCH_FILTER_TABLE_COUNT);
+	if (WARN_ON((unsigned int)table_id >= EFX_FARCH_FILTER_TABLE_COUNT))
+		return -ENOENT;
 	table = &state->table[table_id];
 	filter_i = efx_farch_filter_id_index(filter_id);
+	if (WARN_ON(filter_i >= table->size))
+		return -ENOENT;
 
 	spin_lock_bh(&efx->filter_lock);
+
+	if (WARN_ON(!test_bit(filter_i, table->used_bitmap))) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
 
 	spec = &table->spec[filter_i];
 	spec->dmaq_id = rxq_i;
@@ -3013,8 +3012,9 @@ void efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id, int rxq_i)
 		efx_writeo(efx, &filter,
 			   table->offset + table->step * filter_i);
 	}
-
+out_unlock:
 	spin_unlock_bh(&efx->filter_lock);
+	return rc;
 }
 
 u32 efx_farch_filter_count_rx_used(struct efx_nic *efx,
@@ -3188,7 +3188,7 @@ int efx_farch_filter_table_probe(struct efx_nic *efx)
 		for (i = 0; i < EFX_FARCH_FILTER_SIZE_RX_DEF; i++) {
 			spec = &table->spec[i];
 			spec->type = EFX_FARCH_FILTER_UC_DEF + i;
-			efx_farch_filter_init_rx_for_stack(efx, spec);
+			efx_farch_filter_init_rx_auto(efx, spec);
 			__set_bit(i, table->used_bitmap);
 		}
 	}
@@ -3273,6 +3273,76 @@ bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 }
 
 #endif /* CONFIG_RFS_ACCEL */
+
+#ifdef EFX_NOT_UPSTREAM
+
+int efx_farch_filter_block_kernel(struct efx_nic *efx)
+{
+	struct efx_farch_filter_state *state = efx->filter_state;
+	struct efx_farch_filter_table *table;
+	struct efx_farch_filter_spec *spec;
+	unsigned int i;
+
+	/* On Falcon, unmatched packets always go to queue 0 (with
+	 * optional RSS offset), so we can't drop them
+	 */
+	if (state->table[EFX_FARCH_FILTER_TABLE_RX_DEF].size == 0)
+		return -EOPNOTSUPP;
+
+	spin_lock_bh(&efx->filter_lock);
+
+	state->kernel_blocked = true;
+
+	/* On Siena, the default filters always exist, so we point
+	 * them at the drop queue unless they are already steered
+	 */
+	table = &state->table[EFX_FARCH_FILTER_TABLE_RX_DEF];
+	for (i = 0; i < EFX_FARCH_FILTER_SIZE_RX_DEF; i++) {
+		spec = &table->spec[i];
+		if (!(spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO)) {
+			spec->flags = EFX_FILTER_FLAG_RX; /* no RSS */
+			spec->dmaq_id = EFX_FILTER_RX_DMAQ_ID_DROP;
+		}
+	}
+	efx_farch_filter_push_rx_config(efx);
+
+	spin_unlock_bh(&efx->filter_lock);
+
+	/* Remove all HINT filters */
+	efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_IP,
+				     EFX_FILTER_PRI_HINT);
+	efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_MAC,
+				     EFX_FILTER_PRI_HINT);
+
+	return 0;
+}
+
+void efx_farch_filter_unblock_kernel(struct efx_nic *efx)
+{
+	struct efx_farch_filter_state *state = efx->filter_state;
+	struct efx_farch_filter_table *table =
+		&state->table[EFX_FARCH_FILTER_TABLE_RX_DEF];
+	struct efx_farch_filter_spec *spec;
+	unsigned int i;
+
+	WARN_ON(table->size == 0);
+
+	spin_lock_bh(&efx->filter_lock);
+
+	state->kernel_blocked = false;
+
+	/* Restore default filters */
+	for (i = 0; i < EFX_FARCH_FILTER_SIZE_RX_DEF; i++) {
+		spec = &table->spec[i];
+		if (!(spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO))
+			efx_farch_filter_init_rx_auto(efx, spec);
+	}
+	efx_farch_filter_push_rx_config(efx);
+
+	spin_unlock_bh(&efx->filter_lock);
+}
+
+#endif /* EFX_NOT_UPSTREAM */
 
 void efx_farch_filter_sync_rx_mode(struct efx_nic *efx)
 {

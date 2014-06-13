@@ -162,7 +162,7 @@ def to_comma_sep_list(mask):
 def to_int_list(mask):
     mask = to_int(mask)
     r = []
-    for i in range(0, 1000000):
+    for i in xrange(0, 1000000):
         if mask & (1 << i):
             r.append(i)
             mask &= ~(1 << i)

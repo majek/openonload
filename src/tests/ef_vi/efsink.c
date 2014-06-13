@@ -79,6 +79,7 @@ struct thread {
 
 
 static int cfg_hexdump;
+static int cfg_timestamping;
 
 
 static void hexdump(const void* pv, int len)
@@ -91,15 +92,60 @@ static void hexdump(const void* pv, int len)
 }
 
 
+/* If (t1 >= t2) the sets result_out to t1 - t2 and returns 0 else
+ * sets result_out to t2 - t1 and returns -1 */
+static int ts_diff(const struct timespec* t1, const struct timespec* t2,
+                   struct timespec* result_out)
+{
+  if( (t1->tv_sec > t2->tv_sec) ||
+      ((t1->tv_sec == t2->tv_sec) && (t1->tv_nsec >= t2->tv_nsec)) ) {
+    /* t1 >= t2 */
+    result_out->tv_sec = t1->tv_sec - t2->tv_sec;
+    if( t1->tv_nsec < t2->tv_nsec ) {
+      result_out->tv_nsec = t1->tv_nsec + 1000000000L - t2->tv_nsec;
+      --result_out->tv_sec;
+    }
+    else {
+      result_out->tv_nsec = t1->tv_nsec - t2->tv_nsec;
+    }
+    return 0;
+  }
+  else {
+    result_out->tv_sec = t2->tv_sec - t1->tv_sec;
+    if( t2->tv_nsec < t1->tv_nsec ) {
+      result_out->tv_nsec = t2->tv_nsec + 1000000000L - t1->tv_nsec;
+      --result_out->tv_sec;
+    }
+    else {
+      result_out->tv_nsec = t2->tv_nsec - t1->tv_nsec;
+    }
+    return -1;
+  }
+}
+
+
 static void handle_rx(struct thread* thread, struct vi* vi,
                       int pkt_buf_i, int len)
 {
   struct pkt_buf* pkt_buf;
+  struct timespec hw_ts, sw_ts;
+  struct timespec diff;
+  void* dma;
 
   LOGI(fprintf(stderr, "INFO: [%s] received pkt=%d len=%d\n",
                vi->interface, pkt_buf_i, len));
 
   pkt_buf = pkt_buf_from_id(vi, pkt_buf_i);
+
+  if( cfg_timestamping ) {
+    TRY(clock_gettime(CLOCK_REALTIME, &sw_ts));
+    dma = (char*) pkt_buf + RX_DMA_OFF;
+    TRY(ef_vi_receive_get_timestamp(&vi->vi, dma, &hw_ts));
+    printf("HW: %ld.%ld diff: ", hw_ts.tv_sec, hw_ts.tv_nsec);
+    if( ts_diff(&sw_ts, &hw_ts, &diff) != 0 )
+      printf("-");
+    printf("%ld.%ld\n", diff.tv_sec, diff.tv_nsec);
+  }
 
   /* Do something useful with packet contents here!  Packet payload starts
    * at RX_PKT_PTR(pkt_buf).
@@ -160,7 +206,7 @@ static void thread_main_loop(struct thread* thread)
         assert(EF_EVENT_RX_SOP(evs[i]) != 0);
         assert(EF_EVENT_RX_CONT(evs[i]) == 0);
         handle_rx(thread, vi, EF_EVENT_RX_RQ_ID(evs[i]),
-                  EF_EVENT_RX_BYTES(evs[i]) - vi->rx_prefix_len);
+                  EF_EVENT_RX_BYTES(evs[i]) - vi->frame_off);
         break;
       case EF_EVENT_TYPE_TX:
         n = ef_vi_transmit_unbundle(&vi->vi, &evs[i], ids);
@@ -169,7 +215,7 @@ static void thread_main_loop(struct thread* thread)
         break;
       case EF_EVENT_TYPE_RX_DISCARD:
         handle_rx_discard(thread, vi, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
-                          EF_EVENT_RX_DISCARD_BYTES(evs[i])-vi->rx_prefix_len,
+                          EF_EVENT_RX_DISCARD_BYTES(evs[i]) - vi->frame_off,
                           EF_EVENT_RX_DISCARD_TYPE(evs[i]));
         break;
       default:
@@ -228,13 +274,20 @@ static void* monitor_fn(void* arg)
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
-  fprintf(stderr, "  efsink <interface> <filter-spec>...\n");
+  fprintf(stderr, "  efsink <options> <interface> <filter-spec>...\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "filter-spec:\n");
   fprintf(stderr, "  {udp|tcp}:[vid=<vlan>,]<local-host>:<local-port>"
           "[,<remote-host>:<remote-port>]\n");
   fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
   fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");
+  fprintf(stderr, "  {unicast-mis,multicast-mis}:[vid=<vlan>]\n");
+  fprintf(stderr, "  {sniff}:[promisc|no-promisc]\n");
+  fprintf(stderr, "  {block-kernel}\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "options:\n");
+  fprintf(stderr, "  -d     hexdump received packet\n");
+  fprintf(stderr, "  -t     Request hardware timestamping of packets\n");
   exit(1);
 }
 
@@ -248,10 +301,13 @@ int main(int argc, char* argv[])
   struct vi* vi;
   int c;
 
-  while( (c = getopt (argc, argv, "d")) != -1 )
+  while( (c = getopt (argc, argv, "dt")) != -1 )
     switch( c ) {
     case 'd':
       cfg_hexdump = 1;
+      break;
+    case 't':
+      cfg_timestamping = 1;
       break;
     case '?':
       usage();
@@ -271,7 +327,13 @@ int main(int argc, char* argv[])
                  "resources\n", interface));
     exit(1);
   }
-  vi = vi_alloc(0, net_if);
+  vi = vi_alloc(0, net_if, cfg_timestamping ?
+                EF_VI_RX_TIMESTAMPS :
+                EF_VI_FLAGS_DEFAULT);
+
+   thread = calloc(1, sizeof(*thread));
+   thread->vi = vi;
+
   printf("rxq_size=%d\n", ef_vi_receive_capacity(&vi->vi));
   printf("evq_size=%d\n", ef_eventq_capacity(&vi->vi));
 

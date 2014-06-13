@@ -1,6 +1,6 @@
-Solarflare 3.3 Linux network driver
+Solarflare 4.0 Linux network driver
 ===================================
-Version:  3.3.0.6246
+Version:  4.0.2.6628
 
 
 Overview
@@ -15,14 +15,20 @@ The drivers contained in this package support the following Solarflare
 adapters:
 
 - Solarflare Onload Server Adapters:
+  - Solarflare SFN7122F Dual Port SFP+ Server Adapter
+  - Solarflare SFN7322F Precision Time Synchronization Server Adapter
   - Solarflare SFN6122F Dual Port SFP+ Server Adapter
   - Solarflare SFN6322F Precision Time Synchronization Server Adapter
+  - Solarflare SFN6832F SFP+ Mezzanine Adapter
   - Solarflare SFN5322F Precision Time Synchronization Server Adapter
   - Solarflare SFN5122F Dual Port SFP+ Server Adapter
   - Solarflare SFN5121T Dual Port 10GBASE-T Server Adapter
   - Solarflare SFN5802K Mezzanine Adapter (for HP BladeSystem c-Class)
   - Solarflare SFN5812H/SFN5814H Mezzanine Adapter (for IBM BladeCenter)
   
+- Solarflare AOE Adapters:
+  - Solarflare SFA6902F SFP+ AOE Adapter
+
 - Solarflare Performant Server Adapters:
   - Solarflare SFN5151T 10GBASE-T Server Adapter
   - Solarflare SFN5152F SFP+ Server Adapter
@@ -32,15 +38,35 @@ adapters:
 
 Building and installation
 -------------------------
-To build a binary RPM for the running kernel type 
+To build a binary RPM for the running kernel type:
+ 
+  rpmbuild --rebuild <source rpm filename>
+ 
+To install the resulting binary rpm:
+ 
+  Locate the file that was created in the preceding step, prefixed with the
+  annotation "Wrote:", then type:
+ 
+  rpm -Uvh <binary rpm filename>
+ 
+To ensure that the correct version of the driver is loaded into the current
+kernel
+   /sbin/modprobe -r sfc
+   /sbin/modprobe sfc
+  
+Installation of the driver can be confirmed by typing:
+   modinfo sfc | grep version
+and checking for the line:
+   version: 4.0.2.6628
 
- rpmbuild --rebuild <package name>
+All network interfaces available on the system can be found with:
+  ifconfig -a
 
 
 Driver updates
 --------------
 The latest version of this driver can always be downloaded from
-<http://download.solarflare.com/>.
+<https://support.solarflare.com/>.
 
 
 Documentation
@@ -48,13 +74,13 @@ Documentation
 For detailed instructions of how to install and configure the Linux driver 
 please refer to the "Solarflare Server Adapter User's Guide"
 (part number SF-103837-CD) which is available as a PDF from
-<http://download.solarflare.com/>.
+<https://support.solarflare.com/>.
 
 
 Linux distribution support for Solarflare Adapters
 --------------------------------------------------
 RHEL6 and SLES11 have in-built Solarflare adapter drivers but these
-drivers may not support the latest SFN5XXXX adapters.
+drivers may not support the latest SFN7XXX adapters.
 
 It is recommended to install the latest Solarflare supplied drivers.
 
@@ -69,7 +95,179 @@ Please contact your local Solarflare support representative or email
 Changelog
 ---------
 
-### v3.3.0.6246
+### v4.0.2.6628 - Feature release
+
+Add support for RX time-stamping and PTP on SFN7XXX family adapters:
+   ~ This release provides the driver support necessary for both the 
+     Solarflare Enhanced PTP daemon ("sfptpd") and linuxptpd which is 
+     provided in some distributions.
+
+Issue 37568:
+  ~ Properly deliver VLAN-tagged PTP packets when disabling PTP.
+Issue 39894:
+  ~ Fix DMA unmapping of incorrect addresses for TSO TX buffers on SFN7XXX
+    family adapters.
+    This bug would be observed as unmap page errors, and would affect users with
+    TSO (enabled by default) and an IOMMU enabled.
+Issue 38352:
+  ~ Remove build time warning message when MTD is disabled, as sfutils can now
+    work on linux using an IOCTL to the driver.
+
+
+### v4.0.0.6585 - Feature release
+
+Support for SFN7XXX family adapters (using SFC91XX family silicon):
+  ~ This release contains full GA quality support for the new SFN7XXX series of
+    network adapters.
+  ~ Currently running PTP on SFN7XXX adpaters is not supported. This support
+    will be in a subsequent release in 2013Q4.
+  ~ There are new counters exposed via "ethtool -S" to expose any new internal
+    packet counters.
+  ~ driver support for the "sfkey" utility to modify feature licenses on the
+    adpater.
+
+TX improvements:
+  ~ Support for SFC91XX TX PIO (Programmed IO) feature for lower TX latency.
+    This is controlled by the new module parameter "piobuf_size" (default on
+    x86 is 256 bytes). For frames that are smaller than this, and if there are
+    adapter resources available, a packet will be transfered directly to the
+    adapter via PIO rather than incur the latency of a bus mastered DMA. 
+
+RX improvements:
+  ~ The driver now uses a single optimized RX buffer allocation strategy
+    (the "rx_alloc_method" module parameter has been deprecated and has no
+    effect other than to print a warning).
+  ~ Use memory more efficiently by supporting RX scatter for large MTU values
+  ~ Make initial fill of RX descriptors synchronous. This is to avoid a non-zero
+    "rx_nodesc_drops" count which could previously increment during driver load
+    when there was incoming traffic.
+
+Support for POWER systems, including:
+  ~ AER/EEH support in the net driver
+  ~ Improve performance by reusing DMA-mapped pages
+  ~ Improve performance by allocating RX buffers more efficiently in pages of
+    memory
+
+Ethtool offline self-test behaviour for SFN7XXX:
+  ~ For SFN7XXX series adapters the ethtool offline selftest (which can be used
+    to verify hardware operation) can cause operations on other network
+    interfaces on the same adapter to fail (as the whole adapter goes into a
+    test mode). Only run the ethtool offline self-test on one port at a time,
+    and expect to see loss of link for the duration of the test on all ports.
+    Note the ethtool online test does not have this limitation.
+
+Issue 39031:
+  ~ Remove ethtool RESET operation that could be used by an unpriviledged local
+    user to cause a local denial of service.
+Issue 31933:
+  ~ Cancel interrupt self-test on interface-down on Linux <2.6.23
+Issue 36071:
+  ~ Avoid kernel warning in skb_try_coalesce
+Issue 34973:
+  ~ Fix RX buffer handling on non-x86 and non-POWER systems
+Issue 35013:
+  ~ Fix potential kernel panic when using certain (uncommon) MTU values
+Issue 35019:
+  ~ Fix build failure on RHEL5 kernel
+Issue 34716:
+  ~ Fix rare memory leak on RX data path
+Issue 33921 / 33922:
+  ~ Fix RX filter insertion conflicts
+Issue 34253:
+  ~ Disable AOE on RHEL4 to fix build failure
+Issue 34299:
+  ~ Fix potential flood of syslog if PTP packet storm occurs
+Issue 16820:
+  ~ Detach network device during reconfiguration to avoid TX watchdog event
+Issue 34335:
+  ~ Fix driver load failure due to symbols exported on some kernel versions
+
+
+
+### v3.3.3.6329 -- Update release
+Issue 38482:
+  ~ Fix issue in dealing with multicast mismatch present in v3.3.0.6262, which
+   was caused by the fix for Issue 31533. This could cause old packet data to
+   be received (and hence could look like packet loss, or out-of-order
+   packets).
+
+   The bug hits when the following events coincide:
+    1) The arrival of a frame that is discarded by the driver.
+    2) The receiving channel is in "page-mode" for RX buffer allocation.
+    3) The previous packet received has been consumed and freed.
+
+   By default the RX allocation mode is selected automatically by the
+   driver according to the traffic profile, and will prefer page-mode when
+   packets that can be handled by kernel GRO dominate.
+
+   A workaround for affected drivers is to set the driver parameter
+   "rx_alloc_method=1" (to force SKB based allocations).
+Issue 37963:
+  ~ Allow PTP to work with vlans post 2.6.37
+Issue 37405:
+  ~  Add kernel compat for RHEL 6.5 backport of ARFS
+
+
+### v3.3.0.6309 -- Update release
+
+Issue 34948:
+  ~ Fix CPU soft-lockup on interrupted self-test
+Issue 34511:
+  ~ Fix kernel panic when VLAN group rapidly created/destroyed
+Issue 30759:
+  ~ Changes to max buffer table and VI advertised via driverlink
+  ~ Respect num_vis setting even if it exceeds the heuristic limit
+Issue 35637:
+  ~ Fix kernel panic on RX completion with unexpected index
+Issue 35644:
+  ~ Use hardware checksum offload under circumstances when we previously didn't
+    (specifically, packets not aggregated by LRO and not passed into GRO)
+Issue 35774:
+  ~ Remove sfc_tune from RPM builds and disable CONFIG_SFC_TUNE
+Issue 36530:
+  ~ Kernel compat fix for getnstime_raw_and_real() on 2.6.26.8
+Issue 37257:
+  ~ Build fixes for Linux 3.10: VLAN API, I2C API
+Issue 37256:
+  ~ Remove write permission from phy_type attribute (Linux 3.10 compatibility)
+Issue 37280:
+  ~ Update netdev notifier function for API change in Linux 3.11
+Issue 37110:
+  ~ Always store port number in private data, not net_device::dev_id
+
+Issue 35400:
+  ~ PTP: Fix incorrect filter address for PTP Peer Delay Multicast
+Issue 
+  ~ PTP: Fix crash if PTP hardware clock cannot be registered
+Issue 37248:
+  ~ PTP: mask out PCP and DEI fields in VLAN matching
+
+
+### v3.3.0.6262 -- Update release
+
+Issue 31533: 
+  ~ Fix sync of RX DMA buffer when it is not the last in the page (non issue on x86 servers) 
+Issue 31533: 
+  ~ Fix efx_rx_buf_offset() in the presence of swiotlb (used on 32bit systems with >3Gb RAM)
+Issue 33851:
+  ~ Fix very rare data corruption - use TX push only with a single descriptor 
+
+Issue
+  ~ AOE: Expose FC partition for use by sfupdate
+
+Issue 33711:
+  ~ PTP: Fix for MC statistics.
+Issue 33719:
+  ~ PTP: Check that PTP is enabled in the kernel before compiling PHC support
+Issue 34355:
+  ~ PTP: Guard against using PPS ioctl API on non-PTP adapters
+Issue 34356: 
+  ~ PTP: Improve accuracy of PPS timestamps
+Issue 34482:
+  ~ PTP: Fix to SO_TIMESTAMPING system timestamps (in conversion of hwardware timestamps)
+
+
+### v3.3.0.6246 -- Update release
 
 Support for Enhanced PTP daemon, including:
   ~ Support for VLAN tagged PTP packets
@@ -93,7 +291,7 @@ Issue 32292:
     (lock TX queues before calling netif_device_detach())
 
 
-### v3.3.0.6222B
+### v3.3.0.6222B -- Feature release
 
 General improvements / fixes:
   ~ Support for byte queue limits (requires Linux 3.3)
@@ -507,5 +705,5 @@ Issue 19951
 
 Copyright
 ---------
-Copyright 2009-2012 Solarflare Communications Inc.  All rights reserved.
+Copyright 2009-2013 Solarflare Communications Inc.  All rights reserved.
 Use is subject to license terms.

@@ -61,6 +61,8 @@
   #define RX_EV_PKT_OK_WIDTH 1
   #define RX_EV_BUF_OWNER_ID_ERR_LBN 54
   #define RX_EV_BUF_OWNER_ID_ERR_WIDTH 1
+  #define RX_EV_IP_FRAG_ERR_LBN 53
+  #define RX_EV_IP_FRAG_ERR_WIDTH 1
   #define RX_EV_IP_HDR_CHKSUM_ERR_LBN 52
   #define RX_EV_IP_HDR_CHKSUM_ERR_WIDTH 1
   #define RX_EV_TCP_UDP_CHKSUM_ERR_LBN 51
@@ -170,3 +172,7 @@
   #define DRV_GEN_EV_CODE_WIDTH 4
   #define DRV_GEN_EV_DATA_LBN 0
   #define DRV_GEN_EV_DATA_WIDTH 60
+
+/* RX packet prefix */
+#define FS_BZ_RX_PREFIX_HASH_OFST 12
+#define FS_BZ_RX_PREFIX_SIZE 16

@@ -74,12 +74,16 @@ enum efx_filter_match_flags {
 /**
  * enum efx_filter_priority - priority of a hardware filter specification
  * @EFX_FILTER_PRI_HINT: Performance hint
- * @EFX_FILTER_PRI_MANUAL: Manually configurable filter
+ * @EFX_FILTER_PRI_AUTO: Automatic filter based on device address list
+ *	or hardware requirements.  This may only be used by the filter
+ *	implementation for each NIC type.
+ * @EFX_FILTER_PRI_MANUAL: Manually configured filter
  * @EFX_FILTER_PRI_REQUIRED: Required for correct behaviour (user-level
  *	networking and SR-IOV)
  */
 enum efx_filter_priority {
 	EFX_FILTER_PRI_HINT = 0,
+	EFX_FILTER_PRI_AUTO,
 	EFX_FILTER_PRI_MANUAL,
 	EFX_FILTER_PRI_REQUIRED,
 };
@@ -95,24 +99,20 @@ enum efx_filter_priority {
  *	queue.  Note that this cannot be enabled independently for
  *	unicast and multicast default filters; it will only be enabled
  *	if both have this flag set.
- * @EFX_FILTER_FLAG_RX_STACK: Indicates a filter inserted for the
- *	network stack.  The filter must have a priority of
- *	%EFX_FILTER_PRI_REQUIRED.  It can be steered by a replacement
- *	request with priority %EFX_FILTER_PRI_MANUAL, and a removal
- *	request with priority %EFX_FILTER_PRI_MANUAL will reset the
- *	steering (but not remove the filter).
+ * @EFX_FILTER_FLAG_RX_OVER_AUTO: Indicates a filter that is
+ *	overriding an automatic filter (priority
+ *	%EFX_FILTER_PRI_AUTO).  This may only be set by the filter
+ *	implementation for each type.  A removal request will restore
+ *	the automatic filter in its place.
  * @EFX_FILTER_FLAG_RX: Filter is for RX
  * @EFX_FILTER_FLAG_TX: Filter is for TX
- * @EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO: Filter should override automatic
- *	filters (for rx_mode and ARFS)
  */
 enum efx_filter_flags {
 	EFX_FILTER_FLAG_RX_RSS = 0x01,
 	EFX_FILTER_FLAG_RX_SCATTER = 0x02,
-	EFX_FILTER_FLAG_RX_STACK = 0x04,
+	EFX_FILTER_FLAG_RX_OVER_AUTO = 0x04,
 	EFX_FILTER_FLAG_RX = 0x08,
 	EFX_FILTER_FLAG_TX = 0x10,
-	EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO = 0x20,
 };
 
 /**
@@ -266,50 +266,21 @@ static inline int efx_filter_set_eth_local(struct efx_filter_spec *spec,
 }
 
 /**
- * efx_filter_set_uc_mismatch - specify matching otherwise-unmatched unicast
- * @spec: Specification to initialise
- */
-static inline int efx_filter_set_uc_mismatch(struct efx_filter_spec *spec)
-{
-	spec->match_flags |= EFX_FILTER_MATCH_LOC_MAC_IG;
-	return 0;
-}
-
-/**
- * efx_filter_set_mc_mismatch - specify matching otherwise-unmatched multicast
- * @spec: Specification to initialise
- */
-static inline int efx_filter_set_mc_mismatch(struct efx_filter_spec *spec)
-{
-	spec->match_flags |= EFX_FILTER_MATCH_LOC_MAC_IG;
-	spec->loc_mac[0] = 1;
-	return 0;
-}
-
-/**
- * efx_filter_set_uc_def - specify matching all unicast not manually filtered
+ * efx_filter_set_uc_def - specify matching otherwise-unmatched unicast
  * @spec: Specification to initialise
  */
 static inline int efx_filter_set_uc_def(struct efx_filter_spec *spec)
 {
-	if (!(spec->flags & EFX_FILTER_FLAG_RX))
-		return -EINVAL;
-
-	spec->flags |= EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO;
 	spec->match_flags |= EFX_FILTER_MATCH_LOC_MAC_IG;
 	return 0;
 }
 
 /**
- * efx_filter_set_mc_def - specify matching all multicast not manually filtered
+ * efx_filter_set_mc_def - specify matching otherwise-unmatched multicast
  * @spec: Specification to initialise
  */
 static inline int efx_filter_set_mc_def(struct efx_filter_spec *spec)
 {
-	if (!(spec->flags & EFX_FILTER_FLAG_RX))
-		return -EINVAL;
-
-	spec->flags |= EFX_FILTER_FLAG_RX_OVERRIDE_ALL_AUTO;
 	spec->match_flags |= EFX_FILTER_MATCH_LOC_MAC_IG;
 	spec->loc_mac[0] = 1;
 	return 0;

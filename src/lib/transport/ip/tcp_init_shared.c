@@ -242,7 +242,6 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
     ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
 
   ts->tmpl_head = OO_PP_NULL;
-  ts->tmpl_nic_reset = 0;
 
   memset(&ts->stats, 0, sizeof(ts->stats));
 }

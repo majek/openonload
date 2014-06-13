@@ -196,7 +196,7 @@ struct ci_netif_s {
   ci_netif_config_opts opts;
 
   /* Stack overflow avoidance, used from allocate_vi(). */
-  char vi_data[VI_MAPPINGS_SIZE];
+  ci_uint64 vi_data[10];
 #endif
 
   /* Used from ci_netif_poll_evq() only.  Moved here to avoid stack

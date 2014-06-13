@@ -97,8 +97,10 @@ struct vi {
   void*            pkt_bufs;
   int              pkt_bufs_n;
   ef_memreg        memreg;
-  /* Length of prefix pre-pended to packet by NIC. */
-  int              rx_prefix_len;
+  /* Offset where the ethernet header starts on RX packets. */
+  int              frame_off;
+  /* Offset where the minor ticks can be found on RX packets. */
+  int              minor_ticks_off;
   /* Pool of free packet buffers (LIFO to minimise working set). */
   struct pkt_buf*  free_pkt_bufs;
   int              free_pkt_bufs_n;
@@ -151,7 +153,7 @@ struct pkt_buf {
 /* Where does a received packet start?  The hardware usually puts a
  * meta-data prefix in front of the packet data.
  */
-#define RX_PKT_OFF(vi)   (RX_DMA_OFF + (vi)->rx_prefix_len)
+#define RX_PKT_OFF(vi)   (RX_DMA_OFF + (vi)->frame_off)
 
 /* Get pointer to the received packet payload. */
 #define RX_PKT_PTR(pb)   ((char*) (pb) + RX_PKT_OFF((pb)->vi_owner))
@@ -186,7 +188,7 @@ extern int
 filter_parse(ef_filter_spec* fs, const char* s_in);
 
 extern struct vi*
-vi_alloc(int id, struct net_if*);
+vi_alloc(int id, struct net_if*, enum ef_vi_flags flags);
 
 extern struct vi*
 vi_alloc_from_set(int id, struct net_if*, int vi_set_instance);

@@ -91,7 +91,8 @@ extern void efrm_vi_allocator_dtor(struct efrm_nic *);
  * of VIs are allocated (if possible).
  */
 extern int  efrm_vi_allocator_alloc_set(struct efrm_nic *, unsigned vi_props,
-					int min_vis_in_set, int channel,
+					int min_vis_in_set,
+					int has_rss_context, int channel,
 					struct efrm_vi_allocation *set_out);
 extern void efrm_vi_allocator_free_set(struct efrm_nic *,
 				       struct efrm_vi_allocation *);

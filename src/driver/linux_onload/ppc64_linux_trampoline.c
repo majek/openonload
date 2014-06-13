@@ -55,7 +55,7 @@
 
 /* Debugging for internal use only */
 #  define TRAMP_DEBUG(x...) (void)0
-//#define TRAMP_DEBUG(x...) printk(KERN_ERR x)
+//#define TRAMP_DEBUG(x...) ci_log(x)
 
 
 #define TRAMPOLINE_BITS_64  0
@@ -70,18 +70,15 @@ typedef struct state_struct
     /* We don't actually replace these syscalls, but we do thunk them so
      * that we can call them ourselves.
      */
+#if CI_CFG_USERSPACE_EPOLL
     syscall_entry_t *no_replace_epoll_create1;
     syscall_entry_t *no_replace_epoll_create;
 
     syscall_entry_t *no_replace_epoll_ctl;
     syscall_entry_t *no_replace_epoll_wait;
+#endif
 
-    syscall_entry_t *no_replace_accept4;
-    syscall_entry_t *no_replace_accept;
     syscall_entry_t *no_replace_socketcall;
-    syscall_entry_t *no_replace_sendmsg;
-
-    syscall_entry_t *no_replace_ipc;
 } state_t;
 
 state_t state;
@@ -210,151 +207,66 @@ asmlinkage int efab_linux_sys_epoll_wait(int epfd, struct epoll_event *events,
 #endif /* CI_CFG_USERSPACE_EPOLL */
 
 
-asmlinkage int efab_linux_sys_accept4(int fd, struct sockaddr __user* addr,
-                                      int __user* addrlen,
-                                      unsigned long __user*socketcall_args,
-                                      int flags)
-{
-  int rc;
-
-
-#ifdef __NR_accept4
-  {
-    asmlinkage int (*sys_accept4_fn)(int, struct sockaddr*, socklen_t *, int);
-
-    if( state.no_replace_accept4 == NULL ) {
-        ci_log("Unexpected accept4() request before full init");
-        return -EFAULT;
-    }
-
-    
-    sys_accept4_fn = (int (*)(int, struct sockaddr *, socklen_t *, int))
-    (state.no_replace_accept4->original_entry64);
-
-    TRAMP_DEBUG ("accept4(%d,%p,%d,%d) via %p...", fd, addr, *addrlen,
-                 flags, sys_accept4_fn);
-    rc = sys_accept4_fn(fd, addr, addrlen, flags);
-    if( rc != -ENOSYS )
-      goto out;
-  }
-  /* Drop through if rc == ENOSYS to try accept() */
-#endif
-#if defined(__NR_accept)
-  {
-    asmlinkage int (*sys_accept_fn)(int, struct sockaddr *, socklen_t *);
-
-    if (state.no_replace_accept == NULL) {
-        ci_log("Unexpected accept() request before full init");
-        return -EFAULT;
-    }
-        
-    sys_accept_fn = (int (*)(int, struct sockaddr *, socklen_t *))
-       (state.no_replace_accept->original_entry64);
-    TRAMP_DEBUG ("accept(%d,%p,%d) via %p...", fd, addr, *addrlen,
-                 sys_accept_fn);
-    rc = sys_accept_fn(fd, addr, addrlen);
-
-    /* If we ever need non-zero flags here, we should implement it
-     * For now, we use non-zero flags iff the system has accept4. */
-    ci_assert_equal(flags, 0);
-    if( rc != -ENOSYS )
-      goto out;
-  }
-  /* Drop through if rc == ENOSYS to try socketcall() */
-#endif
-#if defined(__NR_socketcall)
-  {
-    asmlinkage int (*sys_socketcall_fn)(int, unsigned long *);
-    unsigned long args[4];
-
-    if (state.no_replace_socketcall == NULL) {
-        ci_log("Unexpected socketcall() request before full init");
-        return -EFAULT;
-    }
-
-    sys_socketcall_fn = (int (*)(int, unsigned long *))(state.no_replace_socketcall->original_entry64);
-    TRAMP_DEBUG ("accept4(%d,%p,%p(%d),%d) via %p...", fd, addr, addrlen,
-                 addrlen ? *addrlen : 0,
-                 flags, sys_socketcall_fn);
-    memset(args, 0, sizeof(args));
-    args[0] = (unsigned long)fd;
-    args[1] = (unsigned long)addr;
-    args[2] = (unsigned long)addrlen;
-    args[3] = (unsigned long)flags;
-    rc = -EFAULT;
-    if (copy_to_user(socketcall_args, args, sizeof(args)))
-      goto out;
-
-# ifdef SYS_ACCEPT4
-    rc = (sys_socketcall_fn) (SYS_ACCEPT4, socketcall_args);
-    if( rc == -EINVAL )
-# endif
-    {
-      rc = (sys_socketcall_fn) (SYS_ACCEPT, socketcall_args);
-      /* If we ever need non-zero flags here, we should implement it */
-      ci_assert_equal(flags, 0);
-    }
-    goto out;
-  }
-#endif
-
-#if !defined(__NR_accept) && !defined(__NR_accept) && !defined(__NR_socketcall)
-#error "Can't find accept syscall number"
-#endif
-
-out:
-  TRAMP_DEBUG ("... = %d", rc);
-  return rc;
-}
-
-
 asmlinkage int efab_linux_sys_sendmsg(int fd, struct msghdr __user* msg,
                                       unsigned long __user* socketcall_args,
                                       unsigned flags)
 {
   int rc;
+  asmlinkage int (*sys_socketcall_fn)(int, unsigned long *);
+  unsigned long args[3];
 
-
-  {
-#ifdef __NR_sendmsg
-    asmlinkage int (*sys_sendmsg_fn)(int, struct msghdr *, unsigned);
-
-    if( state.no_replace_sendmsg == NULL ) {
-        ci_log("Unexpected sendmsg() request before full init");
-        return -EFAULT;
-    }
-    sys_sendmsg_fn = (int (*)(int, struct msghdr *, unsigned ))
-        (state.no_replace_sendmsg->original_entry64);
-    TRAMP_DEBUG ("sendmsg(%d,%p,%d) via %p...", fd, msg, flags, sys_sendmsg_fn);
-    rc = sys_sendmsg_fn(fd, msg, flags);
-#elif defined(__NR_socketcall)
-    asmlinkage int (*sys_socketcall_fn)(int, unsigned long *);
-    unsigned long args[3];
-
-    if( state.no_replace_socketcall == NULL ) {
-        ci_log("Unexpected sendmsg->socketcall() request before full init");
-        return -EFAULT;
-    }
-
-    sys_socketcall_fn = (int (*)(int, unsigned long *))
-        (state.no_replace_socketcall->original_entry64);
-    TRAMP_DEBUG ("sendmsg(%d,%p,%d) via %p...", fd, msg,
-                 flags, sys_socketcall_fn);
-    memset(args, 0, sizeof(args));
-    args[0] = (unsigned long)fd;
-    args[1] = (unsigned long)msg;
-    args[2] = (unsigned long)flags;
-    rc = -EFAULT;
-    if (copy_to_user(socketcall_args, args, sizeof(args)) == 0)
-      rc = (sys_socketcall_fn) (SYS_SENDMSG, socketcall_args);
-#else
-#error "Can't find sendmsg syscall number"
-#endif
+  if( state.no_replace_socketcall == NULL ) {
+      ci_log("Unexpected sendmsg->socketcall() request before full init");
+      return -EFAULT;
   }
+
+  sys_socketcall_fn = (void *)
+          state.no_replace_socketcall->original_entry64;
+  TRAMP_DEBUG ("sendmsg(%d,%p,%d) via %p...", fd, msg,
+               flags, sys_socketcall_fn);
+  memset(args, 0, sizeof(args));
+  args[0] = (unsigned long)fd;
+  args[1] = (unsigned long)msg;
+  args[2] = (unsigned long)flags;
+  rc = -EFAULT;
+  if (copy_to_user(socketcall_args, args, sizeof(args)) == 0)
+    rc = (sys_socketcall_fn) (SYS_SENDMSG, socketcall_args);
 
   TRAMP_DEBUG ("... = %d", rc);
   return rc;
 }
+
+#ifdef CONFIG_COMPAT
+asmlinkage int
+efab_linux_sys_sendmsg32(int fd, struct compat_msghdr __user* msg,
+                         unsigned long __user* socketcall_args,
+                         unsigned flags)
+{
+  int rc;
+  asmlinkage int (*sys_socketcall_fn)(int, unsigned long *);
+  compat_ulong_t args[3];
+
+  if( state.no_replace_socketcall == NULL ) {
+      ci_log("Unexpected sendmsg->socketcall() request before full init");
+      return -EFAULT;
+  }
+
+  sys_socketcall_fn = (void *)
+          state.no_replace_socketcall->original_entry32;
+  TRAMP_DEBUG ("sendmsg(%d,%p,%d) via %p...", fd, msg,
+               flags, sys_socketcall_fn);
+  memset(args, 0, sizeof(args));
+  args[0] = (unsigned long)fd;
+  args[1] = (unsigned long)msg;
+  args[2] = (unsigned long)flags;
+  rc = -EFAULT;
+  if (copy_to_user(socketcall_args, args, sizeof(args)) == 0)
+    rc = (sys_socketcall_fn) (SYS_SENDMSG, socketcall_args);
+
+  TRAMP_DEBUG ("... = %d", rc);
+  return rc;
+}
+#endif
 
 asmlinkage int efab_linux_sys_sigaction(int signum,
                                         const struct sigaction *act,
@@ -375,6 +287,7 @@ asmlinkage int efab_linux_sys_sigaction(int signum,
   return rc;
 }
 
+#ifdef CONFIG_COMPAT
 asmlinkage int efab_linux_sys_sigaction32(int signum,
                                           const struct sigaction32 *act,
                                           struct sigaction32 *oact)
@@ -393,6 +306,7 @@ asmlinkage int efab_linux_sys_sigaction32(int signum,
   TRAMP_DEBUG ("... = %d", rc);
   return rc;
 }
+#endif
 
 /* Our close handler, 64-bit */
 static int efab_linux_trampoline_close64(int fd)
@@ -432,6 +346,7 @@ static int efab_linux_trampoline_close64(int fd)
   return rc;
 }
 
+#ifdef CONFIG_COMPAT
 int efab_linux_trampoline_close32(int fd)
 {
   /* Firstly, is this one our sockets?  If not, do the usual thing */
@@ -468,6 +383,7 @@ int efab_linux_trampoline_close32(int fd)
   efab_syscall_exit();
   return rc;
 }
+#endif
 
 static int setup_trampoline(struct pt_regs *regs, 
                             int opcode, int arg, 
@@ -517,12 +433,14 @@ static int setup_trampoline(struct pt_regs *regs,
                                (void *)trampoline_entry, (void *)trampoline_toc,
                                (void *)trampoline_fixup);
         }
+#ifdef CONFIG_COMPAT
         else
         {
             setup_trampoline32(regs, opcode, arg,
                                (void *)trampoline_entry, (void *)trampoline_toc,
                                (void *)trampoline_fixup);
         }
+#endif
         rc = 0;
     }
     else
@@ -534,57 +452,6 @@ static int setup_trampoline(struct pt_regs *regs,
 }
 
 
-#ifdef OO_DO_HUGE_PAGES
-
-
-#include <linux/unistd.h>
-asmlinkage int efab_linux_sys_shmget(key_t key, size_t size, int shmflg)
-{
-    int rc;
-    sys_ipc_fn_t fn = get_ipc_fn();
-
-    TRAMP_DEBUG ("shmget(%d,%d,%d) via %p...", key, size, shmflg,
-                 fn);
-    rc = sys_shmget(key, size, shmflg);
-    TRAMP_DEBUG ("... = %d", rc);
-    return rc;
-}
-
-asmlinkage long efab_linux_sys_shmat(int shmid, char __user *addr, int shmflg)
-{
-    long rc;
-    int r;
-
-    /* We need to do this directly, for lack of a user-space address to
-     * put the result address in 
-     */
-    TRAMP_DEBUG ("shmat(%d,%p,%d) via %p...", shmid, addr, shmflg,
-                 do_shmat);
-    r = do_shmat(shmid, addr, shmflg, &rc);
-    if (r < 0) { rc = (long)-1; }
-    TRAMP_DEBUG ("... = %p", rc);
-    return rc;
-}
-asmlinkage int efab_linux_sys_shmdt(char __user *addr)
-{
-    int rc;
-    
-    TRAMP_DEBUG ("shmdt(%p) via %p...", addr, sys_shmdt);
-    rc = sys_shmdt(addr);
-    TRAMP_DEBUG ("... = %d", rc);
-    return rc;
-}
-asmlinkage int efab_linux_sys_shmctl(int shmid, int cmd, struct shmid_ds __user *buf)
-{
-  int rc;
-
-  TRAMP_DEBUG ("shmdt(%p) via %p...", shmid, cmd, buf, sys_shmctl);
-  rc = 
-      sys_shmctl(shmid, cmd, buf);
-  TRAMP_DEBUG ("... = %d", rc);
-  return rc;
-}
-#endif
 
 int efab_linux_trampoline_ctor(int no_sct)
 {
@@ -619,6 +486,7 @@ int efab_linux_trampoline_ctor(int no_sct)
                                                          efab_linux_trampoline_sigaction32);
         }
 
+#if CI_CFG_USERSPACE_EPOLL
 #ifdef __NR_epoll_create1
         state.no_replace_epoll_create1 = 
             linux_trampoline_ppc64_intercept_syscall(__NR_epoll_create1,
@@ -630,23 +498,10 @@ int efab_linux_trampoline_ctor(int no_sct)
             linux_trampoline_ppc64_intercept_syscall(__NR_epoll_ctl, NULL, NULL);
         state.no_replace_epoll_wait = 
             linux_trampoline_ppc64_intercept_syscall(__NR_epoll_wait, NULL, NULL);
+#endif
 
-#ifdef __NR_accept4
-        state.no_replace_accept4 = 
-            linux_trampoline_ppc64_intercept_syscall(__NR_accept4, NULL, NULL);
-#endif
-#ifdef __NR_accept
-        state.no_replace_accept = 
-            linux_trampoline_ppc64_intercept_syscall(__NR_accept, NULL, NULL);
-#endif
-#ifdef __NR_socketcall
         state.no_replace_socketcall =
             linux_trampoline_ppc64_intercept_syscall(__NR_socketcall, NULL, NULL);
-#endif
-        /* On PPC, there is only one SysV IPC syscall .. */
-
-        state.no_replace_ipc = 
-            linux_trampoline_ppc64_intercept_syscall(__NR_ipc, NULL, NULL);
     }
     else
     {
@@ -691,7 +546,7 @@ int efab_linux_trampoline_dtor(int no_sct)
         /* Try to wait .. */
         schedule_timeout(msecs_to_jiffies(50));
         ci_log("Unload is dangerous on RT kernels: prepare to crash.");
-        #endif
+#endif
     }
  
     linux_trampoline_ppc64_dispose();

@@ -264,6 +264,62 @@ siena_test_tables(struct efx_nic *efx,
 
 /**************************************************************************
  *
+ * PTP
+ *
+ **************************************************************************
+ */
+
+#ifdef CONFIG_SFC_PTP
+
+static void siena_ptp_write_host_time(struct efx_nic *efx, u32 host_time)
+{
+	_efx_writed(efx, __cpu_to_le32(host_time),
+		    FR_CZ_MC_TREG_SMEM + MC_SMEM_P0_PTP_TIME_OFST);
+}
+
+static int siena_ptp_set_ts_config(struct efx_nic *efx,
+				   struct hwtstamp_config *init,
+				   bool try_improved_filtering)
+{
+	int rc;
+
+	switch (init->rx_filter) {
+	case HWTSTAMP_FILTER_NONE:
+		/* if TX timestamping is still requested then leave PTP on */
+		return efx_ptp_change_mode(efx,
+					   init->tx_type != HWTSTAMP_TX_OFF,
+					   efx_ptp_get_mode(efx));
+	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
+		init->rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
+		return efx_ptp_change_mode(efx, true, MC_CMD_PTP_MODE_V1);
+	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
+	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
+	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
+		init->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
+		if (try_improved_filtering)
+			rc = efx_ptp_change_mode(efx, true,
+						 MC_CMD_PTP_MODE_V2_ENHANCED);
+		else
+			rc = -EINVAL;
+		/* bug 33070 - old versions of the firmware do not support the
+		 * improved UUID filtering option. Similarly old versions of the
+		 * application do not expect it to be enabled. If the firmware
+		 * does not accept the enhanced mode, fall back to the standard
+		 * PTP v2 UUID filtering. */
+		if (rc != 0)
+			rc = efx_ptp_change_mode(efx, true, MC_CMD_PTP_MODE_V2);
+		return rc;
+	default:
+		return -ERANGE;
+	}
+}
+
+#endif /* CONFIG_SFC_PTP */
+
+/**************************************************************************
+ *
  * Device reset
  *
  **************************************************************************
@@ -525,7 +581,7 @@ static int siena_probe_nic(struct efx_nic *efx)
 #endif
 
 	efx_sriov_probe(efx);
-	efx_ptp_probe(efx);
+	efx_ptp_defer_probe_with_channel(efx);
 
 	return 0;
 
@@ -545,6 +601,31 @@ fail3:
 fail1:
 	kfree(efx->nic_data);
 	return rc;
+}
+
+static void siena_rx_push_rss_config(struct efx_nic *efx)
+{
+	efx_oword_t temp;
+
+	/* Set hash key for IPv4 */
+	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
+	efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
+
+	/* Enable IPv6 RSS */
+	BUILD_BUG_ON(sizeof(efx->rx_hash_key) <
+		     2 * sizeof(temp) + FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8 ||
+		     FRF_CZ_RX_RSS_IPV6_TKEY_HI_LBN != 0);
+	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
+	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG1);
+	memcpy(&temp, efx->rx_hash_key + sizeof(temp), sizeof(temp));
+	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG2);
+	EFX_POPULATE_OWORD_2(temp, FRF_CZ_RX_RSS_IPV6_THASH_ENABLE, 1,
+			     FRF_CZ_RX_RSS_IPV6_IP_THASH_ENABLE, 1);
+	memcpy(&temp, efx->rx_hash_key + 2 * sizeof(temp),
+	       FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8);
+	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG3);
+
+	efx_farch_rx_push_indir_table(efx);
 }
 
 /* This call performs hardware-specific global initialisation, such as
@@ -588,23 +669,7 @@ static int siena_init_nic(struct efx_nic *efx)
 			    EFX_RX_USR_BUF_SIZE >> 5);
 	efx_writeo(efx, &temp, FR_AZ_RX_CFG);
 
-	/* Set hash key for IPv4 */
-	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
-	efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
-
-	/* Enable IPv6 RSS */
-	BUILD_BUG_ON(sizeof(efx->rx_hash_key) <
-		     2 * sizeof(temp) + FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8 ||
-		     FRF_CZ_RX_RSS_IPV6_TKEY_HI_LBN != 0);
-	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
-	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG1);
-	memcpy(&temp, efx->rx_hash_key + sizeof(temp), sizeof(temp));
-	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG2);
-	EFX_POPULATE_OWORD_2(temp, FRF_CZ_RX_RSS_IPV6_THASH_ENABLE, 1,
-			     FRF_CZ_RX_RSS_IPV6_IP_THASH_ENABLE, 1);
-	memcpy(&temp, efx->rx_hash_key + 2 * sizeof(temp),
-	       FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8);
-	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG3);
+	siena_rx_push_rss_config(efx);
 
 	/* Enable event logging */
 	rc = efx_mcdi_log_ctrl(efx, true, false, 0);
@@ -1147,23 +1212,6 @@ fail:
 
 /**************************************************************************
  *
- * PTP
- *
- **************************************************************************
- */
-
-#ifdef CONFIG_SFC_PTP
-
-static void siena_ptp_write_host_time(struct efx_nic *efx, u32 host_time)
-{
-	_efx_writed(efx, __cpu_to_le32(host_time),
-		    FR_CZ_MC_TREG_SMEM + MC_SMEM_P0_PTP_TIME_OFST);
-}
-
-#endif /* CONFIG_SFC_PTP */
-
-/**************************************************************************
- *
  * Revision-dependent attributes used by efx.c and nic.c
  *
  **************************************************************************
@@ -1220,7 +1268,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.tx_init = efx_farch_tx_init,
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
-	.rx_push_indir_table = efx_farch_rx_push_indir_table,
+	.rx_push_rss_config = siena_rx_push_rss_config,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
 	.rx_remove = efx_farch_rx_remove,
@@ -1249,6 +1297,10 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.filter_rfs_insert = efx_farch_filter_rfs_insert,
 	.filter_rfs_expire_one = efx_farch_filter_rfs_expire_one,
 #endif
+#ifdef EFX_NOT_UPSTREAM
+	.filter_block_kernel = efx_farch_filter_block_kernel,
+	.filter_unblock_kernel = efx_farch_filter_unblock_kernel,
+#endif
 #ifdef CONFIG_SFC_MTD
 	.mtd_probe = siena_mtd_probe,
 	.mtd_rename = efx_mcdi_mtd_rename,
@@ -1259,6 +1311,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 #endif
 #ifdef CONFIG_SFC_PTP
 	.ptp_write_host_time = siena_ptp_write_host_time,
+	.ptp_set_ts_config = siena_ptp_set_ts_config,
 #endif
 
 	.revision = EFX_REV_SIENA_A0,
@@ -1298,4 +1351,11 @@ const struct efx_nic_type siena_a0_nic_type = {
 #endif
 	.mcdi_max_ver = 1,
 	.max_rx_ip_filters = FR_BZ_RX_FILTER_TBL0_ROWS,
+	.hwtstamp_filters = (1 << HWTSTAMP_FILTER_NONE |
+			     1 << HWTSTAMP_FILTER_PTP_V1_L4_EVENT |
+			     1 << HWTSTAMP_FILTER_PTP_V1_L4_SYNC |
+			     1 << HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ |
+			     1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT |
+			     1 << HWTSTAMP_FILTER_PTP_V2_L4_SYNC |
+			     1 << HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ),
 };

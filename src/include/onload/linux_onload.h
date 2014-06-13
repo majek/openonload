@@ -36,6 +36,10 @@
 #include <linux/socket.h>
 #include <linux/signal.h>
 #include <linux/version.h>
+#ifdef CONFIG_COMPAT
+#include <linux/compat.h>
+#include <net/compat.h>
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
 #define CI_LINUX_NO_MOVE_ADDR
@@ -56,6 +60,12 @@ efab_linux_sys_close(int fd);
 extern asmlinkage int
 efab_linux_sys_sendmsg(int fd, struct msghdr __user* msg,
                        unsigned long __user* socketcall_args, unsigned flags);
+#ifdef CONFIG_COMPAT
+extern asmlinkage int
+efab_linux_sys_sendmsg32(int fd, struct compat_msghdr __user* msg,
+                         unsigned long __user* socketcall_args,
+                         unsigned flags);
+#endif
 
 
 #if CI_CFG_USERSPACE_EPOLL

@@ -939,7 +939,9 @@ CI_CFG_OPT("EF_TCP_BACKLOG_MAX", tcp_backlog_max, ci_uint32,
            , , CI_TCP_LISTENQ_MAX, MIN, MAX, bincount)
 
 CI_CFG_OPT("EF_TCP_INITIAL_CWND", initial_cwnd, ci_int32,
-"Sets the initial size of the congestion window for TCP connections."
+"Sets the initial size of the congestion window (in bytes) for TCP "
+"connections. Some care is needed as, for example, setting smaller than the "
+"segment size may result in Onload being unable to send traffic. "
 "\n"
 "WARNING: Modifying this option may violate the TCP protocol.",
            ,  , 0, 0, SMAX, count)
@@ -1059,6 +1061,23 @@ CI_CFG_OPT("EF_PIO_THRESHOLD", pio_thresh, ci_uint16,
            , , 1514, 0, MAX, count)
 #endif
 
+CI_CFG_OPT("EF_TX_PUSH_THRESHOLD", tx_push_thresh, ci_uint16,
+"Sets a threshold for the number of outstanding sends before we stop using "
+"TX descriptor push.  This has no effect if EF_TX_PUSH=0.  This "
+"threshold is ignored, and assumed to be 1, on pre-SFN7000-series "
+"hardware. It makes sense to set this value similar to EF_SEND_POLL_THRESH",
+           , , 100, 1, MAX, count)
+
+CI_CFG_OPT("EF_RX_TIMESTAMPING", rx_timestamping, ci_uint32,
+"Control of hardware timestamping of received packets, possible values:\n"
+"  0 - do not do timestamping (default);\n"
+"  1 - request timestamping but continue if hardware is not capable or it"
+" does not succeed;\n"
+"  2 - request timestamping and fail if hardware is capable and it does"
+" not succeed;\n"
+"  3 - request timestamping and fail if hardware is not capable or it"
+" does not succeed;\n",
+           , , 0, 0, 3, count)
 
 #ifdef CI_CFG_OPTGROUP
 /* define some categories - currently more as an example than as the final

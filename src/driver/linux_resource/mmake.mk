@@ -8,7 +8,7 @@
 
 RESOURCE_SRCS	:= resource_driver.c \
 	iopage.c driverlink_new.c kernel_proc.c vf_driver.c filter.c \
-	bt_stats.c compat_pat_wc.c
+	bt_stats.c compat_pat_wc.c port_sniff.c
 
 EFHW_SRCS	:= nic.c eventq.c falcon.c ef10.c
 
@@ -31,7 +31,8 @@ EFRM_SRCS	:=			\
 		buddy.c			\
 		kfifo.c			\
 		bt_manager.c		\
-		driver_object.c
+		driver_object.c         \
+		licensing.c
 
 EFRM_HDRS	:= efrm_internal.h efrm_vi.h efrm_vi_set.h efrm_vf.h \
 		efrm_pd.h efrm_pio.h bt_manager.h

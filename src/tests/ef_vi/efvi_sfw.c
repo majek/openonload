@@ -132,15 +132,46 @@ static void vi_init_pktbufs(struct vi* vi)
   /* Register memory for DMA, and initialise the meta-data. */
   TRY(ef_memreg_alloc(&vi->memreg, vi->dh, &vi->net_if->pd, vi->net_if->dh,
                       vi->pkt_bufs, pbuf_size));
-  vi->rx_prefix_len = ef_vi_receive_prefix_len(&vi->vi);
   vi->free_pkt_bufs_n = 0;
   for( i = 0; i < vi->pkt_bufs_n; ++i )
     pkt_buf_init(vi, i);
 }
 
 
+static void vi_init_layout(struct vi* vi, enum ef_vi_flags flags)
+{
+  const ef_vi_layout_entry* layout;
+  int len, i, found_minor_ticks_offset = 0, found_frame_offset = 0;
+
+  TRY(ef_vi_receive_query_layout(&vi->vi, &layout, &len));
+  for( i = 0; i < len; ++i ) {
+    if( layout[i].evle_type == EF_VI_LAYOUT_FRAME ) {
+      vi->frame_off = layout[i].evle_offset;
+      ++found_frame_offset;
+    }
+    if( layout[i].evle_type == EF_VI_LAYOUT_MINOR_TICKS ) {
+      vi->minor_ticks_off = layout[i].evle_offset;
+      ++found_minor_ticks_offset;
+    }
+  }
+
+  if( (found_minor_ticks_offset == 0) &&
+      ((flags & EF_VI_RX_TIMESTAMPS) != 0) ) {
+    fprintf(stderr,
+            "Didn't find minor ticks offset in ef_vi_receive_query_layout.\n");
+    exit(1);
+  }
+  if( (found_frame_offset == 0) ) {
+    fprintf(stderr,
+            "Didn't find frame offset in ef_vi_receive_query_layout.\n");
+    exit(1);
+  }
+
+}
+
+
 static struct vi* __vi_alloc(int vi_id, struct net_if* net_if,
-                             int vi_set_instance)
+                             int vi_set_instance, enum ef_vi_flags flags)
 {
   struct vi* vi;
 
@@ -151,33 +182,32 @@ static struct vi* __vi_alloc(int vi_id, struct net_if* net_if,
   TRY(ef_driver_open(&vi->dh));
   if( vi_set_instance < 0 ) {
     TRY(ef_vi_alloc_from_pd(&vi->vi, vi->dh, &net_if->pd, net_if->dh,
-                            -1, -1, -1, NULL, -1,
-                            EF_VI_FLAGS_DEFAULT));
+                            -1, -1, -1, NULL, -1, flags));
   }
   else {
     TEST(net_if->vi_set_size > 0);
     TEST(vi_set_instance < net_if->vi_set_size);
     TRY(ef_vi_alloc_from_set(&vi->vi, vi->dh, &net_if->vi_set, net_if->dh,
-                             vi_set_instance, -1, -1, -1, NULL, -1,
-                             EF_VI_FLAGS_DEFAULT));
+                             vi_set_instance, -1, -1, -1, NULL, -1, flags));
   }
   vi_init_pktbufs(vi);
+  vi_init_layout(vi, flags);
   vi_refill_rx_ring(vi);
 
   return vi;
 }
 
 
-struct vi* vi_alloc(int vi_id, struct net_if* net_if)
+struct vi* vi_alloc(int vi_id, struct net_if* net_if, enum ef_vi_flags flags)
 {
-  return __vi_alloc(vi_id, net_if, -1);
+  return __vi_alloc(vi_id, net_if, -1, flags);
 }
 
 
 struct vi* vi_alloc_from_set(int vi_id, struct net_if* net_if,
                              int vi_set_instance)
 {
-  return __vi_alloc(vi_id, net_if, vi_set_instance);
+  return __vi_alloc(vi_id, net_if, vi_set_instance, 0);
 }
 
 
@@ -335,6 +365,51 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
       ++vlan;
       TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
     }
+    rc = 0;
+  }
+
+  else if( ! strcmp("multicast-mis", type) ) {
+    TRY(ef_filter_spec_set_multicast_mismatch(fs));
+    if( strlen(type) != strlen(s_in) ) {
+      remainder = strtok(NULL, "");
+      if( ! (vlan = strchr(remainder, '=')) )
+        goto out;
+      ++vlan;
+      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
+    }
+    rc = 0;
+  }
+
+  else if( ! strcmp("unicast-mis", type) ) {
+    TRY(ef_filter_spec_set_unicast_mismatch(fs));
+    if( strlen(type) != strlen(s_in) ) {
+      remainder = strtok(NULL, "");
+      if( ! (vlan = strchr(remainder, '=')) )
+        goto out;
+      ++vlan;
+      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
+    }
+    rc = 0;
+  }
+
+  else if( ! strcmp("sniff", type) ) {
+    if( strlen(type) == strlen(s_in) ) {
+      TRY(ef_filter_spec_set_port_sniff(fs, 1));
+    }
+    else {
+      remainder = strtok(NULL, "");
+      if( ! strcmp("promisc", remainder) )
+        TRY(ef_filter_spec_set_port_sniff(fs, 1));
+      else if( ! strcmp("no-promisc", remainder) )
+        TRY(ef_filter_spec_set_port_sniff(fs, 0));
+      else
+        TRY(-EINVAL);
+    }
+    rc = 0;
+  }
+
+  else if( ! strcmp("block-kernel", type) ) {
+    TRY(ef_filter_spec_set_block_kernel(fs));
     rc = 0;
   }
 

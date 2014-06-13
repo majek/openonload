@@ -134,6 +134,27 @@ int onload_thread_set_spin(enum onload_spin_type type, int spin)
   return 0;
 }
 
+static int onload_fd_check_msg_warm(int fd)
+{
+  struct onload_stat stat;
+  int ok = CI_TCP_STATE_SOCKET | CI_TCP_STATE_TCP | CI_TCP_STATE_TCP_CONN;
+  if ( ( onload_fd_stat(fd, &stat) > 0 ) &&
+       ( ok == (stat.endpoint_state & ok) ) )
+    return 1;
+  else
+    return 0;
+}
+
+int onload_fd_check_feature(int fd, enum onload_fd_feature feature)
+{
+  switch ( feature ) {
+  case ONLOAD_FD_FEAT_MSG_WARM:
+    return onload_fd_check_msg_warm( fd );
+  default:
+    break;
+  }
+  return -EOPNOTSUPP;
+}
 
 static int oo_extensions_version_check(void)
 {

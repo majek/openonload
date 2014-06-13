@@ -37,6 +37,7 @@
 #include <onload/version.h>
 
 #include <etherfabric/timer.h>
+#include <etherfabric/init.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/pd.h>
@@ -696,7 +697,6 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
     rc = -EINVAL;
   }
 
-  efrm_pd_release(pd);
   return rc;
 }
 
@@ -715,8 +715,6 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
 
   if( trs_nic->pio_rs == NULL ) {
     rc = efrm_pio_alloc(pd, &trs_nic->pio_rs);
-    efrm_pd_release(pd); /* vi and pio keep a ref to pd */
-    
     if( rc < 0 ) {
       if( NI_OPTS(ni).pio == 1 ) {
         if( rc == -ENOSPC ) {
@@ -805,6 +803,52 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
 #endif /* CI_CFG_PIO */
 
 
+/* Evaluates whether timestamping is to be enabled
+ * based on respective netif options and NIC architecture.
+ * in result function updates value of parameters:
+ * ef_vi_flags, efhw_vi_flags, oo_vi_flags
+ */
+static int
+check_timestamping_support(ci_netif* ni, int rx_timestamping, int arch,
+                           enum ef_vi_flags* ef_vi_flags_out,
+                           ci_uint32* efhw_vi_flags_out, int* oo_vi_flags_out,
+                           int* retry_without_ts)
+{
+  const enum ef_vi_flags ts_ef_vi_flags = EF_VI_RX_TIMESTAMPS;
+  const ci_uint32 ts_efhw_vi_flags = EFHW_VI_RX_TIMESTAMPS | EFHW_VI_RX_PREFIX;
+  const ci_uint32 ts_oo_vi_flags = OO_VI_FLAGS_RX_HW_TS_EN;
+  const int device_supports_ts = arch == EFHW_ARCH_EF10;
+  int want_timestamping = rx_timestamping != 0;
+  *retry_without_ts = 0;
+  if( ! device_supports_ts && (rx_timestamping == 3) ) {
+    ci_log(
+        "[%s]: timestamping not supported on given interface",
+        ni->state->pretty_name);
+    return -ENOENT;
+  }
+  if( ! device_supports_ts && (rx_timestamping == 2) ) {
+    ci_log(
+      "[%s]: timestamping not supported on given interface, "
+      "continuing with timestamping disabled on this particular interface",
+      ni->state->pretty_name);
+    want_timestamping = 0;
+  }
+  if( rx_timestamping == 1 ) {
+      *retry_without_ts = 1; /* in case alloc fails do retry without ts*/
+  }
+  if( want_timestamping ) {
+    *ef_vi_flags_out |= ts_ef_vi_flags;
+    *efhw_vi_flags_out |= ts_efhw_vi_flags;
+    *oo_vi_flags_out |= ts_oo_vi_flags;
+  } else {
+    *ef_vi_flags_out &= ~ts_ef_vi_flags;
+    *efhw_vi_flags_out &= ~ts_efhw_vi_flags;
+    *oo_vi_flags_out &= ~ts_oo_vi_flags;
+  }
+  return 0;
+}
+
+
 static int allocate_vi(tcp_helper_resource_t* trs,
                        unsigned evq_sz, ci_resource_onload_alloc_t* alloc,
                        void* vi_state, unsigned vi_state_bytes)
@@ -815,7 +859,7 @@ static int allocate_vi(tcp_helper_resource_t* trs,
   ci_netif* ni = &trs->netif;
   ci_netif_state* ns = ni->state;
   enum ef_vi_flags vi_flags;
-  ci_uint16 in_flags;
+  ci_uint32 in_flags;
   int rc, intf_i;
   ci_uint32 txq_capacity = 0, rxq_capacity = 0;
   const char* pci_dev_name;
@@ -825,6 +869,7 @@ static int allocate_vi(tcp_helper_resource_t* trs,
 #if CI_CFG_PIO
   unsigned pio_buf_offset = 0;
 #endif
+  int retry_without_ts = 0; /* in case vi alloc with ts fails */
 
   /* The array of nic_hw is potentially sparse, but the memory mapping
    * is not, so we keep a count to calculate offsets rather than use
@@ -869,8 +914,11 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
     ci_netif_state_nic_t* nsn = &ns->nic[intf_i];
     struct efhw_nic* nic = efrm_client_get_nic(trs_nic->oo_nic->efrm_client);
+    struct efrm_vi_mappings* vm;
     struct efrm_vf *vf = NULL;
     struct efrm_pd *pd = NULL;
+    struct ef_vi* vi;
+    uint32_t* vi_ids;
 
     ci_assert(trs_nic->vi_rs == NULL);
     ci_assert(trs_nic->oo_nic != NULL);
@@ -930,12 +978,35 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     }
     ci_assert(pd);
 
-    rc = efrm_vi_resource_alloc(trs_nic->oo_nic->efrm_client,
+    nsn->oo_vi_flags = 0;
+    rc = check_timestamping_support(ni, NI_OPTS(ni).rx_timestamping,
+                                    nic->devtype.arch,
+                                    &vi_flags, &in_flags, &nsn->oo_vi_flags,
+                                    &retry_without_ts);
+    if( rc == 0 ) {
+      rc = efrm_vi_resource_alloc(trs_nic->oo_nic->efrm_client,
                                 NULL, NULL, 0, pd, vf_name, in_flags,
                                 evq_sz, txq_capacity, rxq_capacity, 0, 0, 
                                 NI_OPTS(ni).irq_core, NI_OPTS(ni).irq_channel,
                                 &trs_nic->vi_rs, &nsn->vi_io_mmap_bytes,
                                 &nsn->vi_mem_mmap_bytes, NULL, NULL);
+      if( retry_without_ts && (rc != 0) ) {
+        ci_log(
+          "[%s]: enabling timestamping on given interface failed, continuing"
+          " with timestamping disabled on this particular interface",
+          ni->state->pretty_name);
+        /* allocation with timestamping attempted but failed */
+        check_timestamping_support(ni, 0, nic->devtype.arch,
+                                   &vi_flags, &in_flags, &nsn->oo_vi_flags,
+                                   &retry_without_ts);
+        rc = efrm_vi_resource_alloc(trs_nic->oo_nic->efrm_client,
+                                  NULL, NULL, 0, pd, vf_name, in_flags,
+                                  evq_sz, txq_capacity, rxq_capacity, 0, 0,
+                                  NI_OPTS(ni).irq_core, NI_OPTS(ni).irq_channel,
+                                  &trs_nic->vi_rs, &nsn->vi_io_mmap_bytes,
+                                  &nsn->vi_mem_mmap_bytes, NULL, NULL);
+      }
+    }
     if( rc < 0 ) {
       OO_DEBUG_VM (ci_log ("%s: ERROR: efrm_vi_resource_alloc(%d) failed %d",
                            __FUNCTION__, intf_i, rc));
@@ -944,19 +1015,6 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     }
 
     nsn->pd_owner = efrm_pd_owner_id(pd);
-    nsn->oo_vi_flags = 0;
-
-#if CI_CFG_PIO
-    if( NI_OPTS(ni).pio && (nic->devtype.arch == EFHW_ARCH_EF10) ) {
-      rc = allocate_pio(trs, intf_i, pd, nic, &pio_buf_offset);
-      if( rc < 0 ) 
-        goto error_out;
-    }
-    else
-      efrm_pd_release(pd); /* vi keeps a ref to pd */
-#else
-    efrm_pd_release(pd); /* vi keeps a ref to pd */
-#endif
 
     pci_dev_name = pci_name(efrm_vi_get_pci_dev(trs_nic->vi_rs));
     strncpy(nsn->pci_dev, pci_dev_name, sizeof(nsn->pci_dev));
@@ -966,25 +1024,45 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     nsn->vi_arch = (ci_uint8) nic->devtype.arch;
     nsn->vi_variant = (ci_uint8) nic->devtype.variant;
     nsn->vi_revision = (ci_uint8) nic->devtype.revision;
-    nsn->vi_hw_flags = (ci_uint8) (nic->flags & NIC_FLAG_BUG35388_WORKAROUND) ?
-                                   EF_VI_NIC_FLAG_BUG35388_WORKAROUND : 0;
 
-    efrm_vi_resource_mappings(trs_nic->vi_rs, ni->vi_data);
-    ef_vi_init(&ni->nic_hw[intf_i].vi, ni->vi_data, (ef_vi_state*) vi_state,
-               &nsn->evq_state, vi_flags);
+    vi = &(ni->nic_hw[intf_i].vi);
+    vi_ids = (void*) ((ef_vi_state*) vi_state + 1);
+    BUILD_BUG_ON(sizeof(ni->vi_data) < sizeof(struct efrm_vi_mappings));
+    vm = (void*) ni->vi_data;
+    efrm_vi_get_mappings(trs_nic->vi_rs, vm);
+    ef_vi_init(vi, nsn->vi_arch, nsn->vi_variant,
+               nsn->vi_revision, vi_flags, (ef_vi_state*) vi_state);
+    ef_vi_init_io(vi, vm->io_page);
+    ef_vi_init_timer(vi, vm->timer_quantum_ns);
+    ef_vi_init_evq(vi, vm->evq_size, vm->evq_base);
+    ef_vi_init_rxq(vi, vm->rxq_size, vm->rxq_descriptors, vi_ids, vm->rxq_prefix_len);
+    vi_ids += vm->rxq_size;
+    ef_vi_init_txq(vi, vm->txq_size, vm->txq_descriptors, vi_ids);
+    ef_vi_init_state(&ni->nic_hw[intf_i].vi);
     ef_vi_set_stats_buf(&ni->nic_hw[intf_i].vi, &ni->state->vi_stats);
+
+#if CI_CFG_PIO
+    if( NI_OPTS(ni).pio && (nic->devtype.arch == EFHW_ARCH_EF10) ) {
+      rc = allocate_pio(trs, intf_i, pd, nic, &pio_buf_offset);
+      if( rc < 0 ) {
+        efrm_pd_release(pd);
+        goto error_out;
+      }
+    }
+#endif
+
+    efrm_pd_release(pd); /* vi keeps a ref to pd */
+
     vi_state = (char*) vi_state + vi_state_bytes;
-    ef_eventq_state_init(&ni->nic_hw[intf_i].vi);
-    ef_vi_state_init(&ni->nic_hw[intf_i].vi);
     if( txq_capacity || rxq_capacity )
       ef_vi_add_queue(&ni->nic_hw[intf_i].vi, &ni->nic_hw[intf_i].vi);
     nsn->vi_flags = vi_flags;
     nsn->vi_evq_bytes = efrm_vi_rm_evq_bytes(trs_nic->vi_rs, -1);
-    nsn->vi_rxq_size = (ci_uint16) NI_OPTS(ni).rxq_size;
-    nsn->vi_txq_size = (ci_uint16) NI_OPTS(ni).txq_size;
-    nsn->evq_timer_offset = efrm_vi_timer_page_offset(trs_nic->vi_rs);
-    nsn->timer_quantum_ns = nic->timer_quantum_ns;
-    nsn->rx_prefix_len = ni->nic_hw[intf_i].vi.rx_prefix_len;
+    nsn->vi_rxq_size = vm->rxq_size;
+    nsn->vi_txq_size = vm->txq_size;
+    nsn->timer_quantum_ns = vm->timer_quantum_ns;
+    nsn->rx_prefix_len = vm->rxq_prefix_len;
+    nsn->rx_ts_correction = vm->rx_ts_correction;
     trs->buf_mmap_bytes += efab_vi_resource_mmap_bytes(trs_nic->vi_rs, 1);
     trs->io_mmap_bytes += efab_vi_resource_mmap_bytes(trs_nic->vi_rs, 0);
 
@@ -997,6 +1075,10 @@ static int allocate_vi(tcp_helper_resource_t* trs,
                             "of %d", __FUNCTION__, (int) NI_OPTS(ni).irq_core,
                             num_online_cpus()));
     }
+
+    if( NI_OPTS(ni).tx_push )
+      ef_vi_set_tx_push_threshold(&ni->nic_hw[intf_i].vi, 
+                                  NI_OPTS(ni).tx_push_thresh);
   }
 
   OO_DEBUG_RES(ci_log("%s: done", __FUNCTION__));
@@ -1995,10 +2077,6 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
   thr->intfs_to_reset = 0;
   ci_irqlock_unlock(&thr->lock, &lock_flags);
 
-#if CI_CFG_PIO
-  ci_tcp_tmpl_handle_nic_reset(ni);
-#endif
-
   for( intf_i = 0; intf_i < CI_CFG_MAX_INTERFACES; ++intf_i ) {
     if( intfs_to_reset & (1 << intf_i) ) {
       ci_log("%s: reset stack %d intf %d (0x%x)",
@@ -2027,6 +2105,7 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
           ni->state->nic[intf_i].oo_vi_flags &=~ OO_VI_FLAGS_PIO_EN;
           ni->state->nic[intf_i].pio_io_mmap_bytes = 0;
           ni->state->nic[intf_i].pio_io_len = 0;
+          ci_pio_buddy_dtor(ni, &ni->state->nic[intf_i].pio_buddy);
           /* Leave efrm references in place as we can't remove them
            * now - they will get removed as normal when stack
            * destroyed
@@ -2101,6 +2180,13 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
       tcp_helper_request_wakeup_nic(thr, intf_i);
     }
   }
+
+#if CI_CFG_PIO
+  /* This should only be done after we have tried to reacquire PIO
+   * regions. */
+  ci_tcp_tmpl_handle_nic_reset(ni);
+#endif
+
   ci_free(hw_addrs);
 }
 
@@ -3161,6 +3247,7 @@ efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs)
     __ci_netif_pkt_clean(pkt);
     pkt->refcount = 0;
     pkt->stack_id = trs->id;
+    pkt->pio_addr = -1;
     OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
       pkt->dma_addr[intf_i] = hw_addrs[(intf_i) * (1 << HW_PAGES_PER_SET_S) +
                                        i / PKTS_PER_HW_PAGE] +

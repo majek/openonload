@@ -251,6 +251,11 @@ int efx_debugfs_read_int(struct seq_file *file, void *data)
 	return seq_printf(file, "%d\n", *(int *)data);
 }
 
+int efx_debugfs_read_ulong(struct seq_file *file, void *data)
+{
+	return seq_printf(file, "%lu\n", *(unsigned long *)data);
+}
+
 int efx_debugfs_read_atomic(struct seq_file *file, void *data)
 {
 	unsigned int value = atomic_read((atomic_t *) data);
@@ -489,46 +494,6 @@ static void *efx_debugfs_get_same(void *ref, unsigned index)
 }
 
 /**
- * efx_init_debugfs_port - create debugfs directory for port
- * @efx:		Efx NIC
- *
- * Create a debugfs directory containing parameter-files for @efx.
- * Return a negative error code or 0 on success.  The directory must be
- * cleaned up using efx_fini_debugfs_port().
- */
-int efx_init_debugfs_port(struct efx_nic *efx)
-{
-	int rc;
-
-	/* Create directory */
-	efx->debug_port_dir = debugfs_create_dir("port0", efx->debug_dir);
-	if (!efx->debug_port_dir)
-		return -ENOMEM;
-
-	/* Create files */
-	rc = efx_init_debugfs_files(efx->debug_port_dir,
-				    efx_debugfs_port_parameters, 0,
-				    efx_debugfs_get_same, efx, 0);
-	if (rc)
-		efx_fini_debugfs_port(efx);
-
-	return rc;
-}
-
-/**
- * efx_fini_debugfs_port - remove debugfs directory for port
- * @efx:		Efx NIC
- *
- * Remove directory created for @efx by efx_init_debugfs_port().
- */
-void efx_fini_debugfs_port(struct efx_nic *efx)
-{
-	efx_fini_debugfs_dir(efx->debug_port_dir,
-			     efx_debugfs_port_parameters, NULL);
-	efx->debug_port_dir = NULL;
-}
-
-/**
  * efx_extend_debugfs_port - add parameter-files to directory for port
  * @efx:		Efx NIC
  * @structure:		Structure containing parameters
@@ -544,6 +509,9 @@ int efx_extend_debugfs_port(struct efx_nic *efx,
 			    void *structure, u64 ignore,
 			    struct efx_debugfs_parameter *params)
 {
+	if (WARN_ON(!efx->debug_port_dir))
+		return -ENOENT;
+
 	return efx_init_debugfs_files(efx->debug_port_dir, params, ignore,
 				      efx_debugfs_get_same, structure, 0);
 }
@@ -561,7 +529,7 @@ void efx_trim_debugfs_port(struct efx_nic *efx,
 {
 	efx_debugfs_entry *dir = efx->debug_port_dir;
 
-	if (dir) {
+	if (!WARN_ON(dir == NULL)) {
 		struct efx_debugfs_parameter *field;
 		for (field = params; field->name; field++)
 			efx_fini_debugfs_child(dir, field->name);
@@ -579,7 +547,7 @@ static struct efx_debugfs_parameter efx_debugfs_tx_queue_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_tx_queue, pushes),
 #ifdef EFX_NOT_UPSTREAM
 	EFX_U64_PARAMETER(struct efx_tx_queue, tx_bytes),
-	EFX_UINT_PARAMETER(struct efx_tx_queue, tx_packets),
+	EFX_ULONG_PARAMETER(struct efx_tx_queue, tx_packets),
 #endif
 	{NULL},
 };
@@ -991,6 +959,11 @@ int efx_init_debugfs_nic(struct efx_nic *efx)
 	if (!efx->errors.debug_dir)
 		goto err_mem;
 
+	/* Create port directory */
+	efx->debug_port_dir = debugfs_create_dir("port0", efx->debug_dir);
+	if (!efx->debug_port_dir)
+		goto err_mem;
+
 	/* Create files */
 	rc = efx_init_debugfs_files(efx->debug_dir,
 				    efx_debugfs_nic_parameters, 0,
@@ -1000,6 +973,11 @@ int efx_init_debugfs_nic(struct efx_nic *efx)
 	rc = efx_init_debugfs_files(efx->errors.debug_dir,
 				    efx_debugfs_nic_error_parameters, 0,
 				    efx_debugfs_get_same, &efx->errors, 0);
+	if (rc)
+		goto err;
+	rc = efx_init_debugfs_files(efx->debug_port_dir,
+				    efx_debugfs_port_parameters, 0,
+				    efx_debugfs_get_same, efx, 0);
 	if (rc)
 		goto err;
 
@@ -1020,6 +998,9 @@ int efx_init_debugfs_nic(struct efx_nic *efx)
  */
 void efx_fini_debugfs_nic(struct efx_nic *efx)
 {
+	efx_fini_debugfs_dir(efx->debug_port_dir,
+			     efx_debugfs_port_parameters, NULL);
+	efx->debug_port_dir = NULL;
 	efx_fini_debugfs_dir(efx->errors.debug_dir,
 			     efx_debugfs_nic_error_parameters, NULL);
 	efx->errors.debug_dir = NULL;

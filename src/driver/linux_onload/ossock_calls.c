@@ -541,14 +541,19 @@ int efab_tcp_helper_os_sock_sendmsg_raw(ci_private_t* priv, void *arg)
   int fd, rc;
   unsigned flags = op->flags;
 
-#ifdef CONFIG_COMPAT
-  if( op->sizeof_ptr != sizeof(void*) )
-    flags |= MSG_CMSG_COMPAT;
-#endif
   ep = ci_trs_get_valid_ep(priv->thr, op->sock_id);
   fd = get_os_fd_from_ep(ep);
+
+#ifdef CONFIG_COMPAT
+  if( op->sizeof_ptr != sizeof(void*) )
+    rc = efab_linux_sys_sendmsg32(fd, CI_USER_PTR_GET(op->msg),
+                                  CI_USER_PTR_GET(op->socketcall_args),
+                                  flags);
+  else
+#endif
   rc = efab_linux_sys_sendmsg(fd, CI_USER_PTR_GET(op->msg),
                               CI_USER_PTR_GET(op->socketcall_args), flags);
+
   /* Clear OS TX flag if necessary  */
   oo_os_sock_status_bit_clear(SP_TO_SOCK(&ep->thr->netif, ep->id),
                               OO_OS_STATUS_TX,

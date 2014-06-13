@@ -123,12 +123,15 @@ ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* b)
 
   /* At initialisation we have one free block containing the whole space. */
   ci_pio_buddy_free_list_add(ni, b, CI_PIO_BUDDY_MAX_ORDER, 0);
+
+  b->initialised = 1;
 }
 
 
 void
 ci_pio_buddy_dtor(ci_netif* ni, ci_pio_buddy_allocator* b)
 {
+  b->initialised = 0;
 }
 
 
@@ -137,39 +140,42 @@ ci_pio_buddy_alloc(ci_netif* ni, ci_pio_buddy_allocator* b, ci_uint8 order)
 {
   ci_uint8 smallest;
   ci_uint32 addr;
-  order -= CI_CFG_MIN_PIO_BLOCK_ORDER;
+  if( b->initialised ) {
+    order -= CI_CFG_MIN_PIO_BLOCK_ORDER;
 
-  /* Find smallest free block that is big enough. */
-  smallest = order;
-  while( smallest <= CI_PIO_BUDDY_MAX_ORDER &&
-         ci_pio_buddy_free_list_empty(ni, b, smallest) )
-    ++smallest;
+    /* Find smallest free block that is big enough. */
+    smallest = order;
+    while( smallest <= CI_PIO_BUDDY_MAX_ORDER &&
+           ci_pio_buddy_free_list_empty(ni, b, smallest) )
+      ++smallest;
 
-  if( smallest > CI_PIO_BUDDY_MAX_ORDER ) {
-    DEBUG_ALLOC(ci_log("buddy - alloc order %d failed - max order %d",
-                       order, CI_PIO_BUDDY_MAX_ORDER););
-    return -ENOMEM;
+    if( smallest > CI_PIO_BUDDY_MAX_ORDER ) {
+      DEBUG_ALLOC(ci_log("buddy - alloc order %d failed - max order %d",
+                         order, CI_PIO_BUDDY_MAX_ORDER););
+      return -ENOMEM;
+    }
+
+    /* Take a block from the free list that we've identified. */
+    addr = ci_pio_buddy_free_list_pop(ni, b, smallest);
+
+    DEBUG_ALLOC(ci_log("buddy - alloc %x order %d cut from order %d",
+                       addr, order, smallest););
+
+    /* If the block we've got is larger than the order requested then split
+     * blocks.
+     */
+    while( smallest-- > order )
+      ci_pio_buddy_free_list_add(ni, b, smallest, addr + ci_pow2(smallest));
+
+    b->orders[addr] = (ci_uint8) order;
+
+    /* Should never end up with an addr outside our range of blocks. */
+    ci_assert_ge((ci_int32) addr, 0);
+    ci_assert_lt(addr, 1u << CI_PIO_BUDDY_MAX_ORDER);
+
+    return addr * (1u << CI_CFG_MIN_PIO_BLOCK_ORDER);
   }
-
-  /* Take a block from the free list that we've identified. */
-  addr = ci_pio_buddy_free_list_pop(ni, b, smallest);
-
-  DEBUG_ALLOC(ci_log("buddy - alloc %x order %d cut from order %d",
-                     addr, order, smallest););
-
-  /* If the block we've got is larger than the order requested then split
-   * blocks.
-   */
-  while( smallest-- > order )
-    ci_pio_buddy_free_list_add(ni, b, smallest, addr + ci_pow2(smallest));
-
-  b->orders[addr] = (ci_uint8) order;
-
-  /* Should never end up with an addr outside our range of blocks. */
-  ci_assert_ge((ci_int32) addr, 0);
-  ci_assert_lt(addr, 1u << CI_PIO_BUDDY_MAX_ORDER);
-
-  return addr * (1u << CI_CFG_MIN_PIO_BLOCK_ORDER);
+  return -ENOSPC;
 }
 
 

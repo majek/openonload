@@ -505,6 +505,24 @@ struct timespec ns_to_timespec(const s64 nsec)
 
 #endif /* EFX_NEED_NS_TO_TIMESPEC */
 
+#if defined(EFX_NEED_KTIME_SUB_NS) &&				\
+	!(BITS_PER_LONG == 64 || defined(CONFIG_KTIME_SCALAR))
+ktime_t ktime_sub_ns(const ktime_t kt, u64 nsec)
+{
+	ktime_t tmp;
+
+	if (likely(nsec < NSEC_PER_SEC)) {
+		tmp.tv64 = nsec;
+	} else {
+		unsigned long rem = do_div(nsec, NSEC_PER_SEC);
+
+		tmp = ktime_set((long)nsec, rem);
+	}
+
+	return ktime_sub(kt, tmp);
+}
+#endif
+
 #ifdef EFX_HAVE_PARAM_BOOL_INT
 
 int efx_param_set_bool(const char *val, struct kernel_param *kp)
@@ -668,3 +686,42 @@ int efx_kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
 }
 
 #endif /* EFX_NEED_KOBJECT_INIT_AND_ADD */
+
+#if defined(EFX_NEED_WARN) || defined(EFX_NEED_WARN_ON)
+void efx_warn_slowpath(const char *file, const int line, const char *function,
+		       const char *fmt, ...)
+{
+	va_list args;
+
+	printk(KERN_WARNING "------------[ cut here ]------------\n");
+	printk(KERN_WARNING "WARNING: CPU: %d PID:%d at %s:%d %s()\n",
+	       raw_smp_processor_id(), current->pid, file, line, function);
+
+	va_start(args, fmt);
+	vprintk(fmt, args);
+	va_end(args);
+
+	/* Can't call print_modules() as it's not exported */
+	dump_stack();
+	/* Can't call print_oops_end_marker() as it's not exported */
+	printk(KERN_WARNING "---[ end trace ]---\n");
+#ifdef TAINT_WARN
+	add_taint(TAINT_WARN);
+#endif
+}
+EXPORT_SYMBOL(efx_warn_slowpath); /* Onload */
+#endif
+
+#ifdef EFX_NEED_WARN_ON
+/* This trivial wrapper could be combined with the WARN_ON macro, except
+ * that it depends on the -Wno-format-zero-length compiler option.
+ * When Onload includes kernel_compat.h it does not set that option and
+ * we can't really expect it to do so.
+ */
+void efx_warn_on_slowpath(const char *file, const int line,
+			  const char *function)
+{
+	efx_warn_slowpath(file, line, function, "");
+}
+EXPORT_SYMBOL(efx_warn_on_slowpath); /* Onload */
+#endif

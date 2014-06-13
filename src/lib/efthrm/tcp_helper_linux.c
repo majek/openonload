@@ -908,6 +908,10 @@ struct file_operations linux_tcp_helper_fops_udp =
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
   CI_STRUCT_MBR(fasync, linux_tcp_helper_fop_fasync),
+  CI_STRUCT_MBR(sendpage, linux_tcp_helper_fop_sendpage_udp),
+#ifdef fop_has_splice
+  CI_STRUCT_MBR(splice_write, generic_splice_sendpage)
+#endif
 };
 
 #if CI_CFG_USERSPACE_PIPE

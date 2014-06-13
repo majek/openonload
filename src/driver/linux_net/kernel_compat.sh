@@ -48,6 +48,7 @@ EFX_USE_ETHTOOL_OP_GET_TX_CSUM		kver	>=	2.6.12
 EFX_NEED_UNREGISTER_NETDEVICE_NOTIFIER_FIX	kver	<	2.6.17
 EFX_HAVE_COMPOUND_PAGES			kver	>=	2.6.15
 EFX_HAVE_NONCONST_ETHTOOL_OPS		kver	<	2.6.19
+EFX_NEED_WARN_ON_ONCE			kver	<	2.6.19
 EFX_USE_GSO_SIZE_FOR_MSS		kver	>=	2.6.19
 EFX_USE_FASTCALL			kver	<	2.6.20
 EFX_USE_VLAN_RX_KILL_VID		kver	<	2.6.22
@@ -174,6 +175,7 @@ EFX_USE_PM				symbol	PM_EVENT_SUSPEND	include/linux/pm.h
 EFX_USE_PM_EXT_OPS			symbol	pm_ext_ops		include/linux/pm.h
 EFX_USE_DEV_PM_OPS			symbol	dev_pm_ops		include/linux/pm.h
 EFX_NEED_ATOMIC_CMPXCHG			custom
+EFX_NEED_WARN				nsymbol	WARN			include/asm-generic/bug.h
 EFX_NEED_WARN_ON			custom
 EFX_NEED_ETHTOOL_CONSTANTS		nsymbol	ADVERTISED_Pause	include/linux/ethtool.h
 EFX_NEED_PCI_WAKE_FROM_D3		nsymbol pci_wake_from_d3        include/linux/pci.h
@@ -217,7 +219,7 @@ EFX_HAVE_VLAN_RX_PATH			symbol	vlan_hwaccel_receive_skb include/linux/if_vlan.h
 EFX_HAVE_NDO_SET_MULTICAST_LIST		symbol	ndo_set_multicast_list	include/linux/netdevice.h
 EFX_HAVE_OLD_ETHTOOL_GET_RXNFC		memtype	struct_ethtool_ops	get_rxnfc	include/linux/ethtool.h int (*)(struct net_device *, struct ethtool_rxnfc *, void *)
 EFX_HAVE_CPU_RMAP			file				include/linux/cpu_rmap.h
-EFX_NEED_KTIME				nfile				include/linux/ktime.h
+EFX_NEED_KTIME_SUB_NS			nsymbol	ktime_sub_ns		include/linux/ktime.h
 EFX_HAVE_NET_TSTAMP			file				include/linux/net_tstamp.h include/uapi/linux/net_tstamp.h
 EFX_NEED_PPS_SUB_TS			nsymbol pps_sub_ts		include/linux/pps_kernel.h
 EFX_HAVE_PHC_SUPPORT			custom
@@ -237,7 +239,7 @@ EFX_NEED_ETHTOOL_RXFH_INDIR_DEFAULT	nsymbol	ethtool_rxfh_indir_default	include/l
 EFX_NEED_IS_COMPAT_TASK			custom
 EFX_NEED_COMPAT_U64			nsymbol	compat_u64		include/asm/compat.h arch/$SRCARCH/include/asm/compat.h include/asm-$SRCARCH/compat.h
 EFX_USE_IRQ_SET_AFFINITY_HINT		symbol	irq_set_affinity_hint	include/linux/interrupt.h
-EFX_HAVE_GSO_MAX_SEGS			symbol	gso_max_segs		include/linux/netdevice.h
+EFX_HAVE_GSO_MAX_SEGS			member	struct_net_device	gso_max_segs		include/linux/netdevice.h
 EFX_NEED_BYTE_QUEUE_LIMITS		nsymbol	netdev_tx_sent_queue	include/linux/netdevice.h
 EFX_NEED_PCI_VPD_ATTR			nsymbol	pci_vpd			include/linux/pci.h
 EFX_NEED_SKB_CHECKSUM_NONE_ASSERT	nsymbol	skb_checksum_none_assert	include/linux/skbuff.h

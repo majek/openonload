@@ -339,6 +339,22 @@ efx_ioctl_ts_read(struct efx_nic *efx, union efx_ioctl_data *data)
 #endif
 
 #ifdef EFX_NOT_UPSTREAM
+
+static int
+efx_ioctl_get_ts_config(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	mm_segment_t old_fs;
+	struct ifreq ifr;
+	int rc;
+
+	ifr.ifr_data = &data->ts_init;
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	rc = efx_ptp_get_ts_config(efx, &ifr);
+	set_fs(old_fs);
+	return rc;
+}
+
 static int
 efx_ioctl_ts_settime(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -356,6 +372,16 @@ efx_ioctl_ts_sync(struct efx_nic *efx, union efx_ioctl_data *data)
 {
 	return efx_ptp_ts_sync(efx, &data->ts_sync);
 }
+
+#ifndef EFX_HAVE_PHC_SUPPORT
+static int
+efx_ioctl_get_ts_info(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	memset(&data->ts_info, 0, sizeof(data->ts_info));
+	data->ts_info.cmd = ETHTOOL_GET_TS_INFO;
+	return efx_ethtool_get_ts_info(efx->net_dev, &data->ts_info);
+}
+#endif
 
 static int
 efx_ioctl_ts_set_vlan_filter(struct efx_nic *efx, union efx_ioctl_data *data)
@@ -578,6 +604,10 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		break;
 #endif
 #if defined(EFX_NOT_UPSTREAM)
+	case EFX_GET_TS_CONFIG:
+		size = sizeof(data.ts_init);
+		op = efx_ioctl_get_ts_config;
+		break;
 	case EFX_TS_SETTIME:
 		size = sizeof(data.ts_settime);
 		op = efx_ioctl_ts_settime;
@@ -590,6 +620,12 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		size = sizeof(data.ts_sync);
 		op = efx_ioctl_ts_sync;
 		break;
+#ifndef EFX_HAVE_PHC_SUPPORT
+	case EFX_GET_TS_INFO:
+		size = sizeof(data.ts_info);
+		op = efx_ioctl_get_ts_info;
+		break;
+#endif
 	case EFX_TS_SET_VLAN_FILTER:
 		size = sizeof(data.ts_vlan_filter);
 		op = efx_ioctl_ts_set_vlan_filter;

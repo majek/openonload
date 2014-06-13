@@ -213,8 +213,7 @@ static void efx_dequeue_buffer(struct efx_tx_queue *tx_queue,
 {
 	if (buffer->unmap_len) {
 		struct device *dma_dev = &tx_queue->efx->pci_dev->dev;
-		dma_addr_t unmap_addr = (buffer->dma_addr + buffer->len -
-					 buffer->unmap_len);
+		dma_addr_t unmap_addr = buffer->dma_addr - buffer->dma_offset;
 		if (buffer->flags & EFX_TX_BUF_MAP_SINGLE)
 			dma_unmap_single(dma_dev, unmap_addr, buffer->unmap_len,
 					 DMA_TO_DEVICE);
@@ -687,6 +686,7 @@ begin_packet:
 #endif
 		buffer->flags = EFX_TX_BUF_CONT | dma_flags;
 		buffer->unmap_len = unmap_len;
+		buffer->dma_offset = buffer->dma_addr - unmap_addr;
 		unmap_len = 0;
 
 		/* Get address and size of next fragment */
@@ -711,8 +711,8 @@ finish_packet:
 	/* Pass off to hardware */
 	efx_nic_push_buffers(tx_queue);
 
-#if defined(EFX_NOT_UPSTREAM)
 	tx_queue->tx_packets++;
+#if defined(EFX_NOT_UPSTREAM)
 	tx_queue->tx_bytes += skb->len;
 #endif
 
@@ -1197,6 +1197,7 @@ static int efx_tso_put_header(struct efx_tx_queue *tx_queue,
 			return -ENOMEM;
 		}
 		buffer->unmap_len = buffer->len;
+		buffer->dma_offset = 0;
 		buffer->flags |= EFX_TX_BUF_MAP_SINGLE;
 	}
 
@@ -1347,6 +1348,7 @@ static void tso_fill_packet_with_fragment(struct efx_tx_queue *tx_queue,
 	if (st->in_len == 0) {
 		/* Transfer ownership of the DMA mapping */
 		buffer->unmap_len = st->unmap_len;
+		buffer->dma_offset = buffer->unmap_len - buffer->len;
 		buffer->flags |= st->dma_flags;
 		st->unmap_len = 0;
 	}
@@ -1451,6 +1453,7 @@ static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 		if (is_last) {
 			buffer->flags = EFX_TX_BUF_CONT | EFX_TX_BUF_MAP_SINGLE;
 			buffer->unmap_len = st->header_unmap_len;
+			buffer->dma_offset = 0;
 			/* Ensure we only unmap them once in case of a
 			 * later DMA mapping error and rollback
 			 */
@@ -1469,9 +1472,7 @@ static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 
 	++tx_queue->tso_packets;
 
-#if defined(EFX_NOT_UPSTREAM)
 	tx_queue->tx_packets++;
-#endif
 
 	return 0;
 }

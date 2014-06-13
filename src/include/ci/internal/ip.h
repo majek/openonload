@@ -450,6 +450,8 @@ extern int  ci_netif_poll_intf_fast(ci_netif*, int intf_i, ci_uint64 now_frc)
   CI_HF;
 extern int  ci_netif_poll_n(ci_netif*, int max_evs) CI_HF;
 #define     ci_netif_poll(ni)  ci_netif_poll_n((ni), 0x7fffffff)
+extern void ci_netif_tx_pkt_complete(ci_netif*, struct ci_netif_poll_state*,
+                                     ci_ip_pkt_fmt*);
 
 extern void ci_netif_send(ci_netif*, ci_ip_pkt_fmt* pkt) CI_HF;
 extern void ci_netif_rx_post(ci_netif* netif, int nic_index) CI_HF;
@@ -3561,30 +3563,6 @@ ci_inline void ci_netif_poll_free_pkts(ci_netif* ni,
   ci_netif_pkt_free_nonb_list(ni, ps->tx_pkt_free_list, tail);
   ni->state->n_async_pkts += ps->tx_pkt_free_list_n;
   CITP_STATS_NETIF_ADD(ni, pkt_nonb, ps->tx_pkt_free_list_n);
-}
-
-
-extern void ci_netif_tx_pkt_complete_udp(ci_netif* ni,
-                                         struct ci_netif_poll_state* ps,
-                                         ci_ip_pkt_fmt* pkt);
-
-
-ci_inline void ci_netif_tx_pkt_complete(ci_netif* ni,
-                                        struct ci_netif_poll_state* ps,
-                                        ci_ip_pkt_fmt* pkt)
-{
-  /* debug check - take back ownership of buffer from NIC */
-  ci_assert(pkt->flags & CI_PKT_FLAG_TX_PENDING);
-  pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
-  ni->state->nic[pkt->intf_i].tx_bytes_removed += TX_PKT_LEN(pkt);
-  ci_assert((int) (ni->state->nic[pkt->intf_i].tx_bytes_added -
-                   ni->state->nic[pkt->intf_i].tx_bytes_removed) >=0);
-#if CI_CFG_UDP
-  if( pkt->flags & CI_PKT_FLAG_UDP )
-    ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
-  else
-#endif
-    ci_netif_pkt_release(ni, pkt);
 }
 
 

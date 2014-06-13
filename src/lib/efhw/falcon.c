@@ -382,6 +382,9 @@ falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 	int iscsi_ddig_en = ((flags & EFHW_VI_ISCSI_RX_DDIG_EN) != 0);
 	int hdr_split_en = ((flags & EFHW_VI_RX_HDR_SPLIT) != 0);
 
+	if (flags & EFHW_VI_RX_TIMESTAMPS)
+		return -EOPNOTSUPP;
+
 	/* initialise the TX descriptor queue pointer table */
 	offset = falcon_dma_rx_q_offset(nic, dmaq);
 
@@ -1351,9 +1354,14 @@ static int
 falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			      uint buf_base_id, dma_addr_t *dma_addrs, 
 			      uint n_pages, int interrupting, int enable_dos_p,
-			      int wakeup_evq /* ef10 only */)
+			      int wakeup_evq /* ef10 only */,
+			      int enable_time_sync_events /* ef10 only */,
+			      int *rx_ts_correction_out /* ef10 only */)
 {
 	EFHW_ASSERT(nic);
+
+	if (enable_time_sync_events)
+		return -EOPNOTSUPP;
 
 	if (nic->devtype.variant < 'C')
 		/* Whether or not queue has an interrupt depends on
@@ -1371,7 +1379,8 @@ falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 }
 
 static void
-falcon_nic_event_queue_disable(struct efhw_nic *nic, uint evq)
+falcon_nic_event_queue_disable(struct efhw_nic *nic, uint evq,
+			       int time_sync_events_enabled /* ef10 only */)
 {
 	EFHW_ASSERT(nic);
 
@@ -1634,6 +1643,15 @@ falcon_nic_buffer_table_set(struct efhw_nic *nic,
 	}
 }
 
+static int falcon_license_challenge(struct efhw_nic *nic, 
+				    const uint32_t feature, 
+				    const uint8_t* challenge, 
+				    uint32_t* expiry,
+				    uint8_t* signature) 
+{
+	return -EOPNOTSUPP;
+}
+
 /*--------------------------------------------------------------------
  *
  * DMA Queues - mid level API
@@ -1755,6 +1773,53 @@ static int falcon_flush_rx_dma_channel(struct efhw_nic *nic, uint dmaq)
 	return __falcon_really_flush_rx_dma_channel(nic, dmaq);
 }
 
+
+/*--------------------------------------------------------------------
+ *
+ * RSS
+ *
+ *--------------------------------------------------------------------*/
+
+int falcon_nic_rss_context_alloc(struct efhw_nic *nic, int num_qs, int shared,
+				 int *handle_out)
+{
+        return -EOPNOTSUPP;
+}
+
+
+int falcon_nic_rss_context_free(struct efhw_nic *nic, int handle)
+{
+        return -EOPNOTSUPP;
+}
+
+
+int falcon_nic_rss_context_set_table(struct efhw_nic *nic, int handle,
+				     const uint8_t *table)
+{
+	return -EOPNOTSUPP;
+}
+
+
+int falcon_nic_rss_context_set_key(struct efhw_nic *nic, int handle,
+				   const uint8_t *key)
+{
+	return -EOPNOTSUPP;
+}
+
+
+/*--------------------------------------------------------------------
+ *
+ * Sniff
+ *
+ *--------------------------------------------------------------------*/
+
+int falcon_nic_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
+			      int promiscuous, int rss_context)
+{
+        return -EOPNOTSUPP;
+}
+
+
 /*--------------------------------------------------------------------
  *
  * Falcon specific event callbacks
@@ -1862,4 +1927,10 @@ struct efhw_func_ops falcon_char_functional_units = {
 	falcon_nic_buffer_table_free,
 	falcon_nic_buffer_table_set,
 	falcon_nic_buffer_table_clear,
+	falcon_nic_set_port_sniff,
+	falcon_nic_rss_context_alloc,
+	falcon_nic_rss_context_free,
+	falcon_nic_rss_context_set_table,
+	falcon_nic_rss_context_set_key,
+	falcon_license_challenge,
 };

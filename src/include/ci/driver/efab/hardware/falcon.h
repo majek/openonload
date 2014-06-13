@@ -320,30 +320,6 @@ falcon_read_qq(volatile char __iomem *addr, uint64_t *q0, uint64_t *q1)
 #define FALCON_BUFFER_4K_OFF(vaddr) \
 	((vaddr) & __FALCON_MASK32(FALCON_VADDR_4K_S))
 
-/*----------------------------------------------------------------------------
- *
- * Timer helpers
- *
- *---------------------------------------------------------------------------*/
-
-static inline int falcon_timer_page_addr(uint idx)
-{
-#ifdef HEADER_REVIEW
-#warning TBD this needs more clean up; the function does not get a version
-#warning the function makes an index range check; this is device dependent
-#endif
-	if (idx < 1024)
-		return FR_BZ_TIMER_COMMAND_REGP0_OFST + (idx * EFHW_8K);
-	else
-		return FR_AB_TIMER_COMMAND_REGP123_OFST + ((idx - 1024) * EFHW_8K);
-}
-
-#define FALCON_TIMER_PAGE_MASK		(EFHW_8K-1)
-
-static inline int falcon_timer_page_offset(uint idx)
-{
-	return falcon_timer_page_addr(idx) & FALCON_TIMER_PAGE_MASK;
-}
 
 /*----------------------------------------------------------------------------
  *

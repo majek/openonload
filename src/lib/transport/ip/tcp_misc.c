@@ -467,7 +467,16 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
         LOG_U(log(LPF "MSS(bad length %d)", (int) opt[1]));
         goto fail_out;
       }
-      if( topts )  topts->smss = CI_BSWAP_BE16(*(ci_uint16*)(opt + 2));
+      if( topts ) {
+        topts->smss = CI_BSWAP_BE16(*(ci_uint16*)(opt + 2));
+        /* RFC 1191 specifies 68 as a minimum, but Linux and
+         * ANVL tests use 64.*/
+        if( topts->smss < 64 ) {
+          LOG_U(log("%s: Clamping smss to 64, value give is %d",
+                    __FUNCTION__, topts->smss));
+          topts->smss = 64;
+        }
+      }
       opt += 4; bytes -= 4;
       break;
     case CI_TCP_OPT_WINSCALE:

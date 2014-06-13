@@ -67,7 +67,6 @@ efab_vi_rm_mmap_io(struct efrm_vi *virs,
   case EFHW_ARCH_FALCON:
     ci_assert_lt(falcon_tx_dma_page_offset(instance), CI_PAGE_SIZE);
     ci_assert_lt(falcon_rx_dma_page_offset(instance), CI_PAGE_SIZE);
-    ci_assert_lt(falcon_timer_page_offset(instance), CI_PAGE_SIZE);
     ci_assert_equal(falcon_tx_dma_page_base(instance),
                     falcon_rx_dma_page_base(instance));
     base = falcon_tx_dma_page_base(instance);
@@ -76,7 +75,6 @@ efab_vi_rm_mmap_io(struct efrm_vi *virs,
   case EFHW_ARCH_EF10:
     ci_assert_lt(ef10_tx_dma_page_offset(instance), CI_PAGE_SIZE);
     ci_assert_lt(ef10_rx_dma_page_offset(instance), CI_PAGE_SIZE);
-    ci_assert_lt(ef10_timer_page_offset(instance), CI_PAGE_SIZE);
     ci_assert_equal(ef10_tx_dma_page_base(instance),
                     ef10_rx_dma_page_base(instance));
     base = ef10_tx_dma_page_base(instance);

@@ -285,13 +285,9 @@ static void stack_dump(ci_netif *ni)
     paylen = pkt->pay_len;
 
     /* Check interface: since intf_i is already checked, we should
-     * check VLAN id only (and strip it). */
-    if( strip_vlan ) {
-      if( pkt->vlan != cfg_encap.vlan_id )
-        continue;
-      else
-        paylen -= ETH_HLEN;
-    }
+     * check VLAN id only. */
+    if( strip_vlan && pkt->vlan != cfg_encap.vlan_id )
+      continue;
 
     /* For loopback, ensure that ethernet header is correct */
     if( pkt->intf_i == OO_INTF_I_LOOPBACK )

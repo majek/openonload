@@ -57,6 +57,67 @@
 #define efrm_vi_set(rs1)  container_of((rs1), struct efrm_vi_set, rs)
 
 
+/* These values are defined by hardware. */
+#define RSS_KEY_LEN 40
+#define RSS_TABLE_LEN 128
+
+
+int efrm_rss_context_alloc(struct efrm_client *client,
+			   struct efrm_vi_set *vi_set, int num_qs)
+{
+	int rc;
+	int shared = 0;
+	int index;
+	uint8_t rx_hash_key[RSS_KEY_LEN];
+	uint8_t rx_indir_table[RSS_TABLE_LEN];
+
+	/* If the number of queues needed is a power of 2 we can simply use
+	 * one of the shared contexts.
+	 */
+	if ( !(num_qs & (num_qs - 1)) ) {
+		/* Shared rss contexts are only valid up to 64 queues - we
+		 * don't allow min_n_vis any bigger anyway, so this has already
+		 * been checked.
+		 */
+		EFRM_ASSERT(num_qs <= 64);
+
+		shared = 1;
+	}
+
+	rc = efhw_nic_rss_context_alloc(client->nic, num_qs, shared,
+					&vi_set->rss_context);
+
+	if (rc < 0 || shared)
+		return rc;
+
+	/* If we have an exclusive context we need to set up the key and
+	 * indirection table.
+	 *
+	 * Just use a random key.
+	 */
+	get_random_bytes(rx_hash_key, RSS_KEY_LEN);
+	rc = efhw_nic_rss_context_set_key(client->nic, vi_set->rss_context,
+					  rx_hash_key);
+	if (rc < 0)
+		goto fail;
+
+	/* Set up the indirection table to stripe evenly(ish) across vis. */
+	for (index = 0; index < RSS_TABLE_LEN; index++)
+		rx_indir_table[index] = index % num_qs;
+
+	rc = efhw_nic_rss_context_set_table(client->nic, vi_set->rss_context,
+					    rx_indir_table);
+	if (rc <  0)
+		goto fail;
+
+	return rc;
+
+fail:
+	efhw_nic_rss_context_free(client->nic, vi_set->rss_context);
+	return rc;
+}
+
+
 int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 		      unsigned vi_props, struct efrm_vi_set **vi_set_out)
 {
@@ -76,7 +137,25 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 
 	client = efrm_pd_to_resource(pd)->rs_client;
 	efrm_nic = container_of(client->nic, struct efrm_nic, efhw_nic);
+
+	rc = efrm_rss_context_alloc(client, vi_set, min_n_vis);
+	/* If we failed to allocate an RSS context fall back to
+	 * using the netdriver's default context.
+	 *
+	 * This can occur if the FW does not support allocating an
+	 * RSS context, or if it's out of contexts.
+	 */
+	if (rc != 0) {
+		if (rc != -EOPNOTSUPP)
+			EFRM_ERR("%s: WARNING: Failed to allocate RSS "
+				 "context of size %d (rc %d), falling "
+				 "back to default context.",
+				 __FUNCTION__, min_n_vis, rc);
+		vi_set->rss_context = -1;
+	}
+
 	rc = efrm_vi_allocator_alloc_set(efrm_nic, vi_props, min_n_vis,
+					 vi_set->rss_context != -1 ? 1 : 0,
 					 -1, &vi_set->allocation);
 	if (rc == 0) {
 		efrm_resource_init(&vi_set->rs, EFRM_RESOURCE_VI_SET,
@@ -85,8 +164,13 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 		vi_set->pd = pd;
 		efrm_resource_ref(efrm_pd_to_resource(pd));
 		vi_set->free = (1 << (1 << vi_set->allocation.order)) - 1;
+		spin_lock_init(&vi_set->free_lock);
 		*vi_set_out = vi_set;
 	}
+	else if (vi_set->rss_context != -1 ) {
+		efhw_nic_rss_context_free(client->nic, vi_set->rss_context);
+	}
+
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_set_alloc);
@@ -105,6 +189,9 @@ void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 	struct efrm_nic *efrm_nic;
 	efrm_nic = container_of(vi_set->rs.rs_client->nic,
 				struct efrm_nic, efhw_nic);
+	if (vi_set->rss_context != -1)
+		efhw_nic_rss_context_free(vi_set->rs.rs_client->nic,
+					  vi_set->rss_context);
 	efrm_vi_allocator_free_set(efrm_nic, &vi_set->allocation);
 	efrm_pd_release(vi_set->pd);
 	efrm_client_put(vi_set->rs.rs_client);
@@ -125,6 +212,13 @@ int efrm_vi_set_get_base(struct efrm_vi_set *vi_set)
 	return vi_set->allocation.instance;
 }
 EXPORT_SYMBOL(efrm_vi_set_get_base);
+
+
+int efrm_vi_set_get_rss_context(struct efrm_vi_set *vi_set)
+{
+	return vi_set->rss_context;
+}
+EXPORT_SYMBOL(efrm_vi_set_get_rss_context);
 
 
 struct efrm_resource * efrm_vi_set_to_resource(struct efrm_vi_set *vi_set)

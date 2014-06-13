@@ -49,12 +49,15 @@ LIST_HEAD(efx_port_list);
  * @efx: efx_nic backing the driverlink device
  * @port_node: per-device list head
  * @driver_node: per-driver list head
+ * @block_kernel_count: Number of times this client is blocking the kernel
+ *	stack from receiving packets
  */
 struct efx_dl_handle {
 	struct efx_dl_device efx_dev;
 	struct efx_nic *efx;
 	struct list_head port_node;
 	struct list_head driver_node;
+	unsigned int block_kernel_count;
 };
 
 static struct efx_dl_handle *efx_dl_handle(struct efx_dl_device *efx_dev)
@@ -78,6 +81,15 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 
 	list_del(&efx_handle->driver_node);
 	list_del(&efx_handle->port_node);
+
+	/* Remove this client's kernel blocks */
+	mutex_lock(&efx->dl_block_kernel_mutex);
+	if (efx_handle->block_kernel_count) {
+		efx->dl_block_kernel_count -= efx_handle->block_kernel_count;
+		if (efx->dl_block_kernel_count == 0)
+			efx->type->filter_unblock_kernel(efx);
+	}
+	mutex_unlock(&efx->dl_block_kernel_mutex);
 
 	kfree(efx_handle);
 }
@@ -313,22 +325,23 @@ int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 }
 EXPORT_SYMBOL(efx_dl_filter_insert);
 
-void efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id)
+int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id)
 {
 	if (filter_id < 0)
-		return;
-	efx_filter_remove_id_safe(efx_dl_handle(efx_dev)->efx,
-				  filter_id >> EFX_FILTER_PRI_SHIFT,
-				  filter_id & EFX_FILTER_ID_MASK);
+		return -EINVAL;
+	return efx_filter_remove_id_safe(efx_dl_handle(efx_dev)->efx,
+					 filter_id >> EFX_FILTER_PRI_SHIFT,
+					 filter_id & EFX_FILTER_ID_MASK);
 }
 EXPORT_SYMBOL(efx_dl_filter_remove);
 
-void efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
-			    int filter_id, int rxq_i)
+int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
+			   int filter_id, int rxq_i)
 {
-	BUG_ON(filter_id < 0);
-	efx_filter_redirect_id(efx_dl_handle(efx_dev)->efx,
-			       filter_id & EFX_FILTER_ID_MASK, rxq_i);
+	if (WARN_ON(filter_id < 0))
+		return -EINVAL;
+	return efx_filter_redirect_id(efx_dl_handle(efx_dev)->efx,
+				      filter_id & EFX_FILTER_ID_MASK, rxq_i);
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
 
@@ -348,3 +361,47 @@ int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
 			    (efx_dword_t *)outbuf, outlen, outlen_actual);
 }
 EXPORT_SYMBOL(efx_dl_mcdi_rpc);
+
+int efx_dl_filter_block_kernel(struct efx_dl_device *efx_dev)
+{
+	struct efx_dl_handle *handle = efx_dl_handle(efx_dev);
+	struct efx_nic *efx = handle->efx;
+	int rc;
+
+	mutex_lock(&efx->dl_block_kernel_mutex);
+
+	if (efx->dl_block_kernel_count == 0) {
+		rc = efx->type->filter_block_kernel(efx);
+		if (rc)
+			goto unlock;
+	}
+
+	++handle->block_kernel_count;
+	++efx->dl_block_kernel_count;
+
+unlock:
+	mutex_unlock(&efx->dl_block_kernel_mutex);
+
+	return rc;
+}
+EXPORT_SYMBOL(efx_dl_filter_block_kernel);
+
+void efx_dl_filter_unblock_kernel(struct efx_dl_device *efx_dev)
+{
+	struct efx_dl_handle *handle = efx_dl_handle(efx_dev);
+	struct efx_nic *efx = handle->efx;
+
+	mutex_lock(&efx->dl_block_kernel_mutex);
+
+	if (WARN_ON(handle->block_kernel_count == 0))
+		goto unlock;
+
+	--handle->block_kernel_count;
+	--efx->dl_block_kernel_count;
+
+	if (efx->dl_block_kernel_count == 0)
+		efx->type->filter_unblock_kernel(efx);
+unlock:
+	mutex_unlock(&efx->dl_block_kernel_mutex);
+}
+EXPORT_SYMBOL(efx_dl_filter_unblock_kernel);

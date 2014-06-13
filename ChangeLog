@@ -1,3 +1,56 @@
+openonload-201310-u1
+--------------------
+
+Updated net driver (v4_0_2_6628) and firmware (v4_0_1_6624)
+Add support for RHEL6 update 5
+
+task33976: Support overlapping PIO sends (both templated and not).
+task17899: Support empty stackname to onload_set_stackname()
+task39134: Add ef_filter_spec_set_{unicast,multicast}_mismatch()
+task40066: Implement UDP sendfile (via OS)
+task33976: Improvements to templated sends
+task36587: onload iptables support for VLANs on EF10
+task39338: support additional filter types needed for SolarCapture Pro
+task40139: support license challenge needed for SolarCapture Pro
+task40573: allow use of variable size RSS sets on EF10
+task40019: Add onload_fd_check_feature() to extensions API
+task39340: Initial support for allocating VIs from a set to get load spreading
+task39156: add ef_filter_spec_set_block_kernel() at ef_vi layer
+
+bug40764: Fix packet length in onload_tcpdump when VLAN header is removed
+bug40884: Use 64 bits timeout value in select()
+bug40951: Fix leak of pd when allocate_pio() returns an error
+bug39156: Restore correct operation of multicast/unicast-all filters on EF10
+bug40825: Fix kernel panic when efab_add_mm_ref() fails with ENOMEM
+bug40749: Fix theoretical issue pushing improper descriptor with doorbell
+bug40571: Improve time conversion in getsockopt(TCP_DEFER_ACCEPT)
+bug40199: Return >1k of data when accessing onload iptables /proc files
+bug39052: Forbid TCP MSS < 64 to avoid problems with hostile stacks
+bug39549: Fix JNI wrapper's use of onload_fd_stat() to cope with fd_stat failure
+bug40526: Fix assertion firing when tmpl_alloc() fails to allocate pio
+cleanup: Improve performance of sfcaffinity_config and sfcirqaffinity
+bug40452: Fix efrm_vi_q_alloc() failing causing kernel panic
+bug40357: Fix kernel panic when ef_vi_alloc_from_set() fails
+cleanup:  Fix error code returned by ef_vi_transmit_pio() when not supported.
+cleanup:  Fix memory leak when NIC compatibility check failed in ef_vi
+bug40277: Report correct errno even if OO_EPOLL1_IOC_ADD_STACK ioctl called
+bug40215: Fix 32bit UL on 64bit kernel cmsg issue on Linux >= 3.10 
+bug40169: Fix corruption of TX DMA overflow queue by ONLOAD_MSG_WARM
+bug39858: prime all stacks before going to sleep in epoll to avoid long delays
+bug40077: Don't try and remove filters with spinlock held on ef_vi app exit
+bug40081: cope with Linux >= 3.3 internal API change for f_op->sendpage
+bug39531: request event merging on EF10 to improve throughput at high pkt rates
+bug39531: Allow control of threshold for tx push (EF_TX_PUSH_THRESHOLD)
+cleanup:  Build fixes for C++ compilers.
+bug39536: Use 32 bit dma_id on EF10 to allow EF_MAX_PACKETS > 64K
+bug39834: Avoid pipe getting stuck in read when trying to send big buffer
+bug39990: Don't enable event queue DOS protection on NIC reset
+bug37217: Avoid outstanding flush events on real-time kernels
+bug37217: Fix memory leak when dealing with outstanding flush events
+bug39897: Fix 3.4.6 kernel panic using MAP_HUGETLB and ef_memreg_alloc
+bug39874: Fix header contamination in memreg.h (don't include ci/efhw/common.h)
+bug39821: Fix state corruption when MSG_WARM is used together with PIO.
+
 
 openonload-201310
 -----------------

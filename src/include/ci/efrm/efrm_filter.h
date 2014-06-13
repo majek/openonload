@@ -59,11 +59,12 @@ struct device;
 
 
 extern int  efrm_filter_insert(struct efrm_client *,
-                              struct efx_filter_spec *spec,
-                              bool replace_equal);
+			       struct efx_filter_spec *spec,
+			       bool replace_equal);
 extern void efrm_filter_remove(struct efrm_client *, int filter_id);
 extern void efrm_filter_redirect(struct efrm_client *,
 				 int filter_id, int rxq_i);
+extern int efrm_filter_block_kernel(struct efrm_client *client, bool block);
 
 extern void efrm_filter_shutdown(void);
 extern void efrm_filter_init(void);

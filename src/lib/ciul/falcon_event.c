@@ -50,7 +50,8 @@
 typedef ci_qword_t ef_vi_event;
 
 #define EF_VI_EVENT_OFFSET(q, i)					\
-	(((q)->evq_state->evq_ptr + (i) * sizeof(ef_vi_event)) & (q)->evq_mask)
+	(((q)->ep_state->evq.evq_ptr + (i) * sizeof(ef_vi_event)) &	\
+	 (q)->evq_mask)
 
 #define EF_VI_EVENT_PTR(q, i)                                           \
 	((ef_vi_event*) ((q)->evq_base + EF_VI_EVENT_OFFSET((q), (i))))
@@ -259,7 +260,7 @@ not_empty:
 #else
 		CI_SET_QWORD(*pev);
 #endif
-		evq->evq_state->evq_ptr += sizeof(ef_vi_event);
+		evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
 
 		/* Ugly: Exploit the fact that event code lies in top bits
 		 * of event. */
@@ -297,7 +298,7 @@ not_empty:
 			 * the next slot.  Has NIC failed to write event
 			 * somehow?
 			 */
-			evq->evq_state->evq_ptr += sizeof(ef_vi_event);
+			evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
 			INC_ERROR_STAT(evq, evq_gap);
 			goto not_empty;
 		}
@@ -326,7 +327,9 @@ int ef_eventq_has_many_events(ef_vi* vi, int look_ahead)
 void falcon_ef_eventq_prime(ef_vi* vi)
 {
 	unsigned ring_i = (ef_eventq_current(vi) & vi->evq_mask) / 8;
-	writel(ring_i << FRF_AZ_EVQ_RPTR_LBN, vi->evq_prime);
+	void* io = vi->io + (FR_BZ_EVQ_RPTR_REGP0_OFST & (EF_VI_PAGE_SIZE-1));
+	EF_VI_ASSERT(vi->inited & EF_VI_INITED_IO);
+	writel(ring_i << FRF_AZ_EVQ_RPTR_LBN, io);
 	mmiowb();
 }
 

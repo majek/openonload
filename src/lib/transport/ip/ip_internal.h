@@ -129,6 +129,9 @@ void ip_cmsg_recv_timestamp(ci_netif *ni, ci_uint64 timestamp,
                                       struct cmsg_state *cmsg_state);
 void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp, 
                                         struct cmsg_state *cmsg_state);
+void ip_cmsg_recv_timestamping(ci_netif *ni,
+      ci_uint64 sys_timestamp, struct timespec* hw_timestamp,
+      int flags, struct cmsg_state *cmsg_state);
 
 
 /**********************************************************************
@@ -338,6 +341,27 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
 #ifndef SO_TIMESTAMPNS
 # define SO_TIMESTAMPNS 35
 #endif
+
+/* The following value needs to match its counterpart
+ * in kernel headers.
+ */
+#define ONLOAD_SO_TIMESTAMPING 37
+
+/* The following values need to match their counterparts in
+ * linux kernel header linux/net_tstamp.h
+ */
+enum {
+	ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE = (1<<0),
+	ONLOAD_SOF_TIMESTAMPING_TX_SOFTWARE = (1<<1),
+	ONLOAD_SOF_TIMESTAMPING_RX_HARDWARE = (1<<2),
+	ONLOAD_SOF_TIMESTAMPING_RX_SOFTWARE = (1<<3),
+	ONLOAD_SOF_TIMESTAMPING_SOFTWARE = (1<<4),
+	ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
+	ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
+	ONLOAD_SOF_TIMESTAMPING_MASK =
+	(ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE - 1) |
+	ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
+};
 
 /* check [ov] is a non-NULL ptr & [ol] indicates the right space for
  * type [ty] */

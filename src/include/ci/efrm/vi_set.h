@@ -69,6 +69,9 @@ efrm_vi_set_num_vis(struct efrm_vi_set *);
 extern int
 efrm_vi_set_get_base(struct efrm_vi_set *);
 
+extern int
+efrm_vi_set_get_rss_context(struct efrm_vi_set *);
+
 extern struct efrm_resource *
 efrm_vi_set_to_resource(struct efrm_vi_set *);
 

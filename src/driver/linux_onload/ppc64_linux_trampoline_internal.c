@@ -69,7 +69,7 @@
 
 /* Debugging for internal use only */
 #  define TRAMP_DEBUG(x...) (void)0
-// #define TRAMP_DEBUG(x...) printk(KERN_NOTICE x)
+// #define TRAMP_DEBUG(x...) ci_log(x)
 
 
 /* These are in fact labels in the PPC64 trampoline assembler */
@@ -146,7 +146,9 @@ static void restore_syscall_entry(syscall_entry_t *ent, void *syscall_table)
               ent->original_entry64[0], ent->original_entry32[0]);
     
     syscall_p[0] = (uint64_t *)ent->original_entry64[0];
+#ifdef CONFIG_COMPAT
     syscall_p[1] = (uint64_t *)ent->original_entry32[0];
+#endif
     flush_dcache_range((unsigned long)syscall_p, (unsigned long)syscall_p + 16);
 }
 
@@ -159,11 +161,15 @@ static void patch_syscall_entry(syscall_entry_t *to_patch, void *syscall_table)
         struct paca_struct *alpaca = get_paca();
 
         to_patch->original_entry64[0] = (uint64_t *)syscall_p[0]; // Pointer to 64-bit entry.
-        to_patch->original_entry32[0] = (uint64_t *)syscall_p[1];
         to_patch->original_entry64[1] = (uint64_t *)alpaca->kernel_toc;
+        TRAMP_DEBUG("64-bit 0x%p \n", to_patch->original_entry64[0], 
+                  to_patch->original_entry64[1]);
+#ifdef CONFIG_COMPAT
+        to_patch->original_entry32[0] = (uint64_t *)syscall_p[1];
         to_patch->original_entry32[1] = (uint64_t *)alpaca->kernel_toc;
-        TRAMP_DEBUG("64-bit 0x%p 0x%p \n", to_patch->original_entry64[0], 
+        TRAMP_DEBUG("64-bit 0x%p 0x%p \n", to_patch->original_entry32[0], 
                   to_patch->original_entry32[1]);
+#endif
     }
 
     TRAMP_DEBUG("syscall_p[0] = 0x%p \n", syscall_p[0]);
@@ -175,8 +181,10 @@ static void patch_syscall_entry(syscall_entry_t *to_patch, void *syscall_table)
      */
     if (to_patch->entry64)
         syscall_p[0] = (uint64_t *)to_patch->entry64;
+#ifdef CONFIG_COMPAT
     if (to_patch->entry32)
         syscall_p[1] = (uint64_t *)to_patch->entry32;
+#endif
 
     flush_dcache_range((unsigned long)syscall_p, (unsigned long)syscall_p + 16);
 }
@@ -578,6 +586,7 @@ syscall_entry_t *linux_trampoline_ppc64_intercept_syscall(int syscall_nr,
         ent->entry64 = NULL;
     }
 
+#ifdef CONFIG_COMPAT
     if (entry32)
     {
         rc = thunks_add(&ppc64_data, entry32, ppc64_data.syscall_return_point,
@@ -593,6 +602,7 @@ syscall_entry_t *linux_trampoline_ppc64_intercept_syscall(int syscall_nr,
     {
         ent->entry32 = NULL;
     }
+#endif
 
     TRAMP_DEBUG("64-bit thunk @ %p , 32-bit thunk @ %p, \n",
               ent->entry64, ent->entry32);

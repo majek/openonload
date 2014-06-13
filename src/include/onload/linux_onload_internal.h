@@ -80,6 +80,9 @@ extern struct file_operations oo_epoll_fops;
 extern ssize_t
 linux_tcp_helper_fop_sendpage(struct file*, struct page*, int offset,
                               size_t size, loff_t* ppos, int more);
+extern ssize_t
+linux_tcp_helper_fop_sendpage_udp(struct file*, struct page*, int offset,
+                                  size_t size, loff_t* ppos, int more);
 
 extern int efab_fds_dump(unsigned pid);
 

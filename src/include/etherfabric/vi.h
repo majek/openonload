@@ -192,6 +192,7 @@ enum {
 
 typedef struct {
 	int filter_id;
+	int filter_type;
 } ef_filter_cookie;
 
 
@@ -206,6 +207,10 @@ extern int ef_filter_spec_set_eth_local(ef_filter_spec *, int vlan_id,
 					const void *mac);
 extern int ef_filter_spec_set_unicast_all(ef_filter_spec *);
 extern int ef_filter_spec_set_multicast_all(ef_filter_spec *);
+extern int ef_filter_spec_set_unicast_mismatch(ef_filter_spec *);
+extern int ef_filter_spec_set_multicast_mismatch(ef_filter_spec *);
+extern int ef_filter_spec_set_port_sniff(ef_filter_spec *, int promiscuous);
+extern int ef_filter_spec_set_block_kernel(ef_filter_spec *);
 
 extern int ef_vi_filter_add(ef_vi*, ef_driver_handle, const ef_filter_spec*,
 			    ef_filter_cookie *filter_cookie_out);

@@ -222,6 +222,7 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 	unsigned di = qs->previous & q->mask;
 	ef_vi_ef10_dma_tx_phys_desc *dp =
 		(ef_vi_ef10_dma_tx_buf_desc*) q->descriptors + di;
+	uint32_t *dbell = (void*) (vi->io + ER_DZ_TX_DESC_UPD_REG);
 
 #if !defined(__KERNEL__) && (defined(__x86_64__) || defined(__i386__))
 	ci_oword_t d;
@@ -230,15 +231,14 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 	d.u32[2] = qs->added & q->mask;
 	__asm__("movups %1, %%xmm0\n\t"
 		"movaps %%xmm0, %0"
-		: "=m" (*(volatile uint64_t*)((char*)vi->vi_txq.doorbell - 8))
+		: "=m" (*(volatile uint64_t*)(dbell))
 		: "m" (d)
 		: "xmm0");
 #else
-	uint32_t *dbell = vi->vi_txq.doorbell;
-	writel(cpu_to_le32(dp->u32[0]), (void *)(dbell - 2));
-	writel(cpu_to_le32(dp->u32[1]), (void *)(dbell - 1));
+	writel(cpu_to_le32(dp->u32[0]), (void *)(dbell));
+	writel(cpu_to_le32(dp->u32[1]), (void *)(dbell + 1));
 	wmb();
-	writel((vi->ep_state->txq.added & vi->vi_txq.mask), (void *)dbell);
+	writel((qs->added & q->mask), dbell + 2);
 #endif
 	mmiowb();
 }
@@ -246,8 +246,9 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 
 static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 {
+	uint32_t* doorbell = (void*) (vi->io + ER_DZ_TX_DESC_UPD_REG);
 	wmb();
-	writel(vi->ep_state->txq.added & vi->vi_txq.mask, vi->vi_txq.doorbell);
+	writel(vi->ep_state->txq.added & vi->vi_txq.mask, doorbell + 2);
 	mmiowb();
 }
 
@@ -255,9 +256,7 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 static void ef10_ef_vi_transmit_push(ef_vi* vi)
 {
 	ef_vi_txq_state* qs = &vi->ep_state->txq;
-	if( vi->vi_flags & EF_VI_TX_PUSH_ALWAYS ||
-	    (qs->removed == qs->previous &&
-	     ! (vi->vi_flags & EF_VI_TX_PUSH_DISABLE)) )
+	if( (qs->previous - qs->removed) < vi->tx_push_thresh )
 		ef_vi_transmit_push_desc(vi);
 	else
 		ef_vi_transmit_push_doorbell(vi);
@@ -287,26 +286,19 @@ static int ef10_ef_vi_transmitv(ef_vi* vi, const ef_iovec* iov, int iov_len,
 }
 
 
+/* currently with pio only packets spanning over single contigous buffer
+ * can be transmitted
+ */
 static int ef10_ef_vi_transmit_pio(ef_vi* vi, ef_addr offset, int len,
 				   ef_request_id dma_id)
 {
-	/* XXX: This code does not handle fragmented packets.
-	 *
-	 * XXX: We should use assembly to do the 3 writes below so the
-	 * whole thing gets emitted as a single TLP.
-	 *
-	 * XXX: This probably wouldn't work on PPC due to endianness
-	 * issues.
-	 */
 	ef_vi_txq* q = &vi->vi_txq;
 	ef_vi_txq_state* qs = &vi->ep_state->txq;
 	ef_vi_ef10_dma_tx_buf_desc* dp;
 	unsigned di;
-	unsigned added_save = qs->added;
-	uint32_t *dbell = vi->vi_txq.doorbell;
 
 #if defined(__powerpc64__)
-	return -EINVAL;
+	return -EOPNOTSUPP;
 #endif
 
 	EF_VI_BUG_ON((dma_id & EF_REQUEST_ID_MASK) != dma_id);
@@ -314,10 +306,8 @@ static int ef10_ef_vi_transmit_pio(ef_vi* vi, ef_addr offset, int len,
 	EF_VI_BUG_ON(offset > 0x7ff);
 	EF_VI_BUG_ON(len > 0xfff);
 
-	if( qs->added - qs->removed >= q->mask ) {
-		qs->added = added_save;
+	if( qs->added - qs->removed >= q->mask )
 		return -EAGAIN;
-	}
 
 	di = qs->added++ & q->mask;
 	dp = (ef_vi_ef10_dma_tx_buf_desc*) q->descriptors + di;
@@ -328,34 +318,9 @@ static int ef10_ef_vi_transmit_pio(ef_vi* vi, ef_addr offset, int len,
 		ESF_DZ_TX_PIO_BYTE_CNT, len,
 		ESF_DZ_TX_PIO_BUF_ADDR, offset);
 
-	q->ids[di] = (uint16_t) dma_id;
+	q->ids[di] = dma_id;
 
-	if( vi->vi_flags & EF_VI_TX_PUSH_ALWAYS ||
-	    (qs->removed == qs->previous &&
-	     ! (vi->vi_flags & EF_VI_TX_PUSH_DISABLE)) ) {
-#if !defined(__KERNEL__) && (defined(__x86_64__) || defined(__i386__))
-		ci_oword_t d;
-		d.u32[0] = cpu_to_le32(dp->u32[0]);
-		d.u32[1] = cpu_to_le32(dp->u32[1]);
-		d.u32[2] = qs->added & q->mask;
-		__asm__("movups %1, %%xmm0\n\t"
-			"movaps %%xmm0, %0"
-			: "=m" (*(volatile uint64_t*)(dbell - 2))
-			: "m" (d)
-			: "xmm0");
-#else
-		writel(cpu_to_le32(dp->u32[0]), (void *)(dbell - 2));
-		writel(cpu_to_le32(dp->u32[1]), (void *)(dbell - 1));
-		wmb();
-		writel(vi->ep_state->txq.added & vi->vi_txq.mask, (void *)dbell);
-#endif
-	}
-	else {
-		wmb();
-		writel(vi->ep_state->txq.added & vi->vi_txq.mask, (void *)dbell);
-	}
-	mmiowb();
-	qs->previous = qs->added;
+	ef10_ef_vi_transmit_push(vi);
 	return 0;
 }
 
@@ -370,7 +335,7 @@ static int ef10_ef_vi_receive_init(ef_vi* vi, ef_addr addr,
 	if( ef_vi_receive_space(vi) ) {
 		di = qs->added++ & q->mask;
 		EF_VI_BUG_ON(q->ids[di] !=  EF_REQUEST_ID_MASK);
-		q->ids[di] = (uint16_t) dma_id;
+		q->ids[di] = dma_id;
 
 		if( vi->vi_flags & EF_VI_RX_PHYS_ADDR ) {
 			ef_vi_ef10_dma_rx_phys_desc* dp;
@@ -396,7 +361,7 @@ static void ef10_ef_vi_receive_push(ef_vi* vi)
 		return;
 	wmb();
 	writel(((qs->added - ((qs->added - qs->prev_added) & 7)) &
-		vi->vi_rxq.mask), vi->vi_rxq.doorbell);
+		vi->vi_rxq.mask), vi->io + ER_DZ_RX_DESC_UPD_REG);
 	qs->prev_added = qs->added - ((qs->added - qs->prev_added) & 7);
 	mmiowb();
 }
@@ -420,7 +385,7 @@ static void ef10_vi_initialise_ops(ef_vi* vi)
 }
 
 
-void ef10_vi_init(ef_vi* vi, void* vvis)
+void ef10_vi_init(ef_vi* vi)
 {
 	/* XXX: bug31845: need to push a descriptor to enable checksum
 	 * offload to be similar to seina.  According to comment3 on
@@ -429,56 +394,12 @@ void ef10_vi_init(ef_vi* vi, void* vvis)
 	 * Still documenting this in case in future we stop pusing the
 	 * enable checksum offload at startup. */
 
-	struct vi_mappings* vm = vvis;
-	uint32_t* ids;
-
-	EF_VI_BUG_ON(vm->signature != VI_MAPPING_SIGNATURE);
-	EF_VI_BUG_ON(vm->nic_type.arch != EF_VI_ARCH_EF10);
-
-	/* Initialise masks to zero, so that ef_vi_state_init() will
-	** not do any harm when we don't have DMA queues. */
-	vi->vi_rxq.mask = vi->vi_txq.mask = 0;
-
-	/* Initialise doorbell addresses to a distinctive small value
-	** which will cause a segfault, to trap doorbell pushes to VIs
-	** without DMA queues. */
-	vi->vi_rxq.doorbell = vi->vi_txq.doorbell = (ef_vi_ioaddr_t)0xdb;
-
-	ids = (uint32_t*) (vi->ep_state + 1);
-
-	if( vm->tx_queue_capacity ) {
-		vi->vi_txq.mask = vm->tx_queue_capacity - 1;
-		vi->vi_txq.doorbell = vm->tx_bell + 8;
-		vi->vi_txq.descriptors = vm->tx_dma_ef10;
-		vi->vi_txq.ids = ids;
-		ids += vi->vi_txq.mask + 1;
-		/* Check that the id fifo fits in the space allocated. */
-		EF_VI_BUG_ON((char*) (vi->vi_txq.ids + vm->tx_queue_capacity) >
-			     (char*) vi->ep_state
-			     + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
-						      vm->tx_queue_capacity));
-	}
-	if( vm->rx_queue_capacity ) {
-		vi->vi_rxq.mask = vm->rx_queue_capacity - 1;
-		vi->vi_rxq.doorbell = vm->rx_bell;
-		vi->vi_rxq.descriptors = vm->rx_dma_ef10;
-		vi->vi_rxq.ids = ids;
-		/* Check that the id fifo fits in the space allocated. */
-		EF_VI_BUG_ON((char*) (vi->vi_rxq.ids + vm->rx_queue_capacity) >
-			     (char*) vi->ep_state
-			     + ef_vi_calc_state_bytes(vm->rx_queue_capacity,
-						      vm->tx_queue_capacity));
-	}
-
 	/* This is set to match Falcon arch.  In future we should provide a
 	 * way for applications to override.
 	 */
 	vi->rx_buffer_len = 2048 - 256;
 
-        vi->rx_prefix_len = vm->rx_prefix_len;
-
 	ef10_vi_initialise_ops(vi);
 }
-
 
 /*! \cidoxg_end */

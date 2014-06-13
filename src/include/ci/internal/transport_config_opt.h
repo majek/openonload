@@ -117,11 +117,10 @@
 #if CI_CFG_USERSPACE_EPOLL
 
 /* Maximum number of onload stacks handled by single epoll object.
- * Used for EF_UL_EPOLL=2 mode.  See also epoll2_max_stacks module
- * parameter.
+ * See also epoll_max_stacks module parameter.
  * Socket from other stacks will look just like "regular file descriptor"
  * for the onload object, without onload-specific acceleration. */
-#define CI_CFG_EPOLL2_MAX_STACKS         16
+#define CI_CFG_EPOLL_MAX_STACKS         16
 
 /* Maximum number of postponed epoll_ctl operations, in case of
  * EF_UL_EPOLL=2 and EF_EPOLL_CTL_FAST=1 */

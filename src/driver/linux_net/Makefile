@@ -39,8 +39,6 @@ ifdef KERNELRELEASE
 ifdef CONFIG_NET
 ifndef CONFIG_MTD
 ifdef CONFIG_SFC_MTD
-$(warning Kernel does not support MTD)
-$(warning => The sfboot and sfupdate utilities will not work)
 override CONFIG_SFC_MTD :=
 endif
 endif
@@ -148,7 +146,7 @@ sfc-y			+= linux_mdio.o
 sfc-$(CONFIG_SFC_AOE)	+= aoe.o
 sfc-$(CONFIG_SFC_DEBUGFS) += debugfs.o
 sfc-$(CONFIG_SFC_HWMON)	+= lm87.o lm90.o
-ifndef CONFIG_SFC_PTP
+ifneq ($(CONFIG_SFC_PTP),y)
 sfc-y			:= $(filter-out ptp.o,$(sfc-y))
 endif
 endif
@@ -249,7 +247,8 @@ ifndef cc-disable-warning
 cc-disable-warning = $(call try-run,\
 	$(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) -W$(strip $(1)) -c -xc /dev/null -o "$$TMP",-Wno-$(strip $(1)))
 endif
-override EXTRA_CFLAGS += $(call cc-disable-warning, unused-but-set-variable)
+override EXTRA_CFLAGS += $(call cc-disable-warning, unused-but-set-variable) \
+			 $(call cc-disable-warning, format-zero-length)
 
 else # !KERNELRELEASE
 
@@ -275,6 +274,9 @@ all : modules
 ifneq ($(findstring $(shell uname -p),x86_64 i686),)
 	! [ -d unittest ] || $(MAKE) -C unittest
 endif
+ifdef BUILD_INKERNEL_TESTS
+	! [ -d unittest_filters ] || $(MAKE) -C unittest_filters
+endif
 
 modules :
 	$(MAKE) -C $(KPATH) $(EXTRA_MAKEFLAGS) M=$$(pwd)
@@ -294,6 +296,7 @@ clean : clean_modules clean_tests
 
 clean_tests:
 	! [ -d unittest ] || $(MAKE) -C unittest clean
+	! [ -d unittest_filters ] || $(MAKE) -C unittest_filters clean
 
 clean_modules :
 	rm -f *.o *.s *.ko *.mod.c *.symvers config.h autocompat.h .kpath

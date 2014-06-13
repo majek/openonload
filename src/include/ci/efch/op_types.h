@@ -165,6 +165,13 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_IP4_VLAN     0x70
 # define                CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN   0x71
 # define                CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN 0x72
+# define                CI_RSOP_FILTER_ADD_MISMATCH_UNICAST        0x73
+# define                CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST      0x74
+# define                CI_RSOP_FILTER_ADD_MISMATCH_UNICAST_VLAN   0x75
+# define                CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST_VLAN 0x76
+# define                CI_RSOP_VI_GET_RX_TS_CORRECTION            0x77
+# define                CI_RSOP_PT_SNIFF                0x78
+# define                CI_RSOP_FILTER_BLOCK_KERNEL     0x79
 
   union {
     struct {
@@ -206,21 +213,55 @@ typedef struct ci_resource_op_s {
         ci_int16        vlan_id;
         uint8_t         mac[6];
       } mac;
-      int               replace;
+      int32_t           replace;
       int32_t           out_filter_id;
     } filter_add;
     struct {
       int32_t           filter_id;
     } filter_del;
+    struct {
+      int32_t           out_rx_ts_correction;
+    } vi_rx_ts_correction;
+    struct {
+      uint8_t           enable;
+      uint8_t           promiscuous;
+    } pt_sniff;
+    struct {
+      uint8_t           block;
+    } block_kernel;
   } u CI_ALIGN(8);
 } ci_resource_op_t;
 
+
+/**********************************************************************
+ *
+ * License challenge
+ *
+ */
+
+/* These values are well-known */
+#define CI_LCOP_CHALLENGE_CHALLENGE_LEN (64)
+#define CI_LCOP_CHALLENGE_SIGNATURE_LEN (64)
+
+typedef struct ci_license_challenge_op_s {
+  int32_t               fd;
+  efch_resource_id_t    pd_id;
+
+  ci_int16          feature;
+/* SolarCapture Pro feature id. Well known. */
+#define CI_LCOP_CHALLENGE_FEATURE_SCPRO     (4)
+
+  uint32_t          expiry;
+  uint8_t           challenge[CI_LCOP_CHALLENGE_CHALLENGE_LEN];
+  uint8_t           signature[CI_LCOP_CHALLENGE_SIGNATURE_LEN];
+} ci_license_challenge_op_t;
 
 #define CI_IOC_CHAR_BASE       81
 
 #define CI_RESOURCE_OP      (CI_IOC_CHAR_BASE+ 0)  /* ioctls for resources */
 #define CI_RESOURCE_ALLOC   (CI_IOC_CHAR_BASE+ 1)  /* allocate resources   */
-#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 2)
+#define CI_LICENSE_CHALLENGE (CI_IOC_CHAR_BASE+ 2) /* license challenge   */
+#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 3)
 
 
 /**********************************************************************

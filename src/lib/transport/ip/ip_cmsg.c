@@ -32,6 +32,10 @@
 
 #define LPF "IP CMSG "
 
+/* On some glibc versions CMSG_NXTHDR looks into unitialized data and
+ * may return null */
+#define NEED_A_WORKAROUND_FOR_GLIBC_BUG_13500
+
 
 
 /**
@@ -55,6 +59,8 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
    * is enough space for the cmsghdr itself, so just need to check
    * that it is != NULL here
    */
+  if( cmsg_state->msg->msg_flags & MSG_CTRUNC )
+    return;
   if( cmsg_state->cm == NULL ) {
     cmsg_state->msg->msg_flags |= MSG_CTRUNC;
     return;
@@ -67,7 +73,7 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
     cmsg_state->msg->msg_flags |= MSG_CTRUNC;
     return;
   }
-  
+
   if( data_len > data_space ) {
     cmsg_state->msg->msg_flags |= MSG_CTRUNC;
     data_len = data_space;
@@ -80,7 +86,17 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
   memcpy(CMSG_DATA(cmsg_state->cm), data, data_len);
 
   cmsg_state->cmsg_bytes_used += CMSG_SPACE(data_len);
+
+  if( cmsg_state->msg->msg_flags & MSG_CTRUNC )
+    return;
+
+#if !defined(NEED_A_WORKAROUND_FOR_GLIBC_BUG_13500) || defined(__KERNEL__)
   cmsg_state->cm = CMSG_NXTHDR(cmsg_state->msg, cmsg_state->cm);
+#else
+  /* space has been already checked so just updating ptr */
+  cmsg_state->cm = (struct cmsghdr*)(((char*)(cmsg_state->cm))
+      + (CMSG_ALIGN(cmsg_state->cm->cmsg_len)));
+#endif
 }
 
 
@@ -183,6 +199,42 @@ void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp,
 
 
 /**
+ * Put a SO_TIMESTAMPING control message into msg ancillary data buffer.
+ */
+void ip_cmsg_recv_timestamping(ci_netif *ni,
+      ci_uint64 sys_timestamp, struct timespec* hw_timestamp,
+      int flags, struct cmsg_state *cmsg_state)
+{
+  struct {
+    struct timespec systime;
+    struct timespec hwtimetrans;
+    struct timespec hwtimeraw;
+  } ts;
+
+  int c_flags = 0;
+
+  if( hw_timestamp->tv_sec != 0 )
+    c_flags = flags & (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
+                      | ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE);
+  if( sys_timestamp != 0 )
+    c_flags |= flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE;
+
+  if( ! c_flags )
+    return;
+
+  memset(&ts, 0, sizeof(ts));
+  if( c_flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE )
+    ci_udp_compute_stamp(ni, sys_timestamp, &ts.systime);
+  if( c_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE )
+    ts.hwtimeraw = *hw_timestamp;
+  if( c_flags & ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE )
+    ts.hwtimetrans = *hw_timestamp;
+
+  ci_put_cmsg(cmsg_state, SOL_SOCKET, ONLOAD_SO_TIMESTAMPING, sizeof(ts), &ts);
+}
+
+
+/**
  * Fill in the msg ancillary data buffer with all control messages
  * according to cmsg_flags the user has set beforehand.
  */
@@ -210,11 +262,30 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
   if (flags & CI_IP_CMSG_TOS)
     ip_cmsg_recv_tos(pkt, &cmsg_state);
 
-  if( flags & CI_IP_CMSG_TIMESTAMP )
-    ip_cmsg_recv_timestamp(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
-
   if( flags & CI_IP_CMSG_TIMESTAMPNS )
     ip_cmsg_recv_timestampns(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
+  else /* SO_TIMESTAMP gets ignored when SO_TIMESTAMPNS one is set */
+    if( flags & CI_IP_CMSG_TIMESTAMP )
+      ip_cmsg_recv_timestamp(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
+
+  if( flags & CI_IP_CMSG_TIMESTAMPING ) {
+    struct timespec rx_hw_stamp;
+    rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
+    rx_hw_stamp.tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
+    ip_cmsg_recv_timestamping(ni, pkt->pf.udp.rx_stamp, &rx_hw_stamp,
+              us->s.timestamping_flags, &cmsg_state);
+  }
+
+#ifndef NEED_A_WORKAROUND_FOR_GLIBC_BUG_13500
+  /* This is to ensure that a client unaware of the bug
+   * will not miss last cmsg.
+   */
+  if( (cmsg_state->cm) &&
+      ( ((char*)((&cmsg_state->cm->cmsg_len) + 1))
+          - ((char*)cmsg_state->msg->msg_control)
+        <= cmsg_state->msg->msg_controllen ) )
+    cmsg_state->cm->cmsg_len = 0;
+#endif
 
   msg->msg_controllen = cmsg_state.cmsg_bytes_used;
 }

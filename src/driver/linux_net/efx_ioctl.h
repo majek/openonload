@@ -275,19 +275,34 @@ struct efx_timespec {
 	__s32	tv_nsec;
 };
 
-#if !defined(EFX_HAVE_NET_TSTAMP)
-
-/* Initialise timestamping, like SIOCHWTSTAMP *******************************/
+/* Set/get hardware timestamp config, like SIOC{S,G}HWTSTAMP ****************/
 #define EFX_TS_INIT 0xef12
+#define EFX_GET_TS_CONFIG 0xef25
 
 #define EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED 0x80000000
 
-enum {
-	HWTSTAMP_TX_OFF,
-	HWTSTAMP_TX_ON,
-};
+#if !defined(__KERNEL__) || defined(__VMKLNX__)
 
 enum {
+	SOF_TIMESTAMPING_TX_HARDWARE = (1<<0),
+	SOF_TIMESTAMPING_TX_SOFTWARE = (1<<1),
+	SOF_TIMESTAMPING_RX_HARDWARE = (1<<2),
+	SOF_TIMESTAMPING_RX_SOFTWARE = (1<<3),
+	SOF_TIMESTAMPING_SOFTWARE = (1<<4),
+	SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
+	SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
+	SOF_TIMESTAMPING_MASK =
+	(SOF_TIMESTAMPING_RAW_HARDWARE - 1) |
+	SOF_TIMESTAMPING_RAW_HARDWARE
+};
+
+enum hwtstamp_tx_types {
+	HWTSTAMP_TX_OFF,
+	HWTSTAMP_TX_ON,
+	HWTSTAMP_TX_ONESTEP_SYNC,
+};
+
+enum hwtstamp_rx_filters {
 	HWTSTAMP_FILTER_NONE,
 	HWTSTAMP_FILTER_ALL,
 	HWTSTAMP_FILTER_SOME,
@@ -306,10 +321,14 @@ enum {
 };
 
 struct hwtstamp_config {
-	__u32 flags;
-	__u32 tx_type;
-	__u32 rx_filter;
+	int flags;
+	int tx_type;
+	int rx_filter;
 };
+
+#endif /* !__KERNEL__ || __VMKLNX__ */
+
+#if !defined(EFX_HAVE_NET_TSTAMP)
 
 /* Read any transmit or receive timestamps since the last call **************/
 #define EFX_TS_READ 0xef13
@@ -345,6 +364,21 @@ struct efx_ts_adjtime {
 struct efx_ts_sync {
 	struct efx_timespec ts;
 };
+
+/* Get the clock/timestamp capabilities, like ETHTOOL_GET_TS_INFO ***********/
+#define EFX_GET_TS_INFO 0xef24
+#ifndef ETHTOOL_GET_TS_INFO
+	struct ethtool_ts_info {
+		__u32	cmd;
+		__u32	so_timestamping;
+		__s32	phc_index;
+		__u32	tx_types;
+		__u32	tx_reserved[3];
+		__u32	rx_filters;
+		__u32	rx_reserved[3];
+	};
+	#define ETHTOOL_GET_TS_INFO	0x00000041 /* Get time stamping and PHC info */
+#endif
 
 /* Get pluging module eeprom if not availble via ethtool ********************/
 #define EFX_MODULEEEPROM 0xef17
@@ -451,7 +485,7 @@ struct efx_device_ids {
 	__u8 perm_addr[6];			/* non-volatile MAC address */
 };
 
-/* Next available cmd number is 0xef24 */
+/* Next available cmd number is 0xef26 */
 
 /* Efx private ioctl command structures *************************************/
 
@@ -461,13 +495,14 @@ union efx_ioctl_data {
 	struct efx_reset_flags reset_flags;
 	struct efx_ethtool_rxnfc rxnfc;
 	struct efx_rxfh_indir rxfh_indir;
-#if !defined(EFX_HAVE_NET_TSTAMP)
 	struct hwtstamp_config ts_init;
+#if !defined(EFX_HAVE_NET_TSTAMP)
 	struct efx_ts_read ts_read;
 #endif
 	struct efx_ts_settime ts_settime;
 	struct efx_ts_adjtime ts_adjtime;
 	struct efx_ts_sync ts_sync;
+	struct ethtool_ts_info ts_info;
 	struct efx_get_module_eeprom eeprom;
 	struct efx_get_module_info modinfo;
 	struct efx_ts_set_vlan_filter ts_vlan_filter;

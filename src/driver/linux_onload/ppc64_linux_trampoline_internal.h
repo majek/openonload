@@ -47,7 +47,9 @@ typedef struct syscall_entry_struct
     int syscall_nr;
 
     void *entry64;
+#ifdef CONFIG_COMPAT
     void *entry32;
+#endif
     
     /* These are in fact type-punned indirect function pointers,
      * ( fn, toc ), so that you can call them to get the original
@@ -59,7 +61,9 @@ typedef struct syscall_entry_struct
      * happen and we will have to think again.
      */
     void *original_entry64[2];
-    void *original_entry32[2];    
+#ifdef CONFIG_COMPAT
+    void *original_entry32[2];
+#endif
 } syscall_entry_t;
 
 /* Initialise the trampoline */

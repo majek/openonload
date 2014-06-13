@@ -345,8 +345,7 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
        */
       if( (rc = opt_not_ok(optval, optlen, char)) )
         goto fail_inval;
-      if( (us->s.cmsg_flags & 
-          (CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMP)) == 0 ) {
+      if( (us->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY) == 0 ) {
           /* Make sure the siocgstamp returns correct value until
            * SO_TIMESTAMP[NS] is turned off again
            */

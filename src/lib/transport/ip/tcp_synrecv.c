@@ -296,6 +296,7 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
                         s->pkt.ip.ip_ttl,
                         s->pkt.ip.ip_tos);
   ts->s.cmsg_flags = s->cmsg_flags;
+  ts->s.timestamping_flags = s->timestamping_flags;
 
   /* Must have set up so.sndbuf */
   ci_tcp_init_rcv_wnd(ts, ctxt);

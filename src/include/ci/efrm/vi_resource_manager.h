@@ -119,6 +119,8 @@ struct efrm_vi {
 
 	unsigned rx_prefix_len;
 
+	int rx_ts_correction;
+
 	/*! EFHW_VI_* flags or EFRM_VI_RELEASED */
 	unsigned flags;
 #define EFRM_VI_RELEASED 0x10000000

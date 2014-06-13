@@ -19,7 +19,8 @@ LIB_SRCS	:= assert_valid.c \
 		   vf_resource.c \
 		   buddy.c \
 		   kfifo.c \
-		   driver_object.c
+		   driver_object.c \
+		   licensing.c
 
 
 ifndef MMAKE_NO_RULES

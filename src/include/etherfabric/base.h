@@ -40,6 +40,10 @@ extern "C" {
 #define CI_DEFAULT_NIC 0
 
 
+#define EF_VI_NIC_PAGE_SHIFT 12
+#define EF_VI_NIC_PAGE_SIZE  (1<<EF_VI_NIC_PAGE_SHIFT)
+
+
   /*! \i_ef_base An [ef_driver_handle] is needed to allocate resources. */
 #ifdef __KERNEL__
 typedef struct efhw_nic*   ef_driver_handle;
@@ -49,7 +53,7 @@ typedef int                ef_driver_handle;
 
 struct timeval;
 
-#define EF_ADDR_FMT             "%"CI_PRIx64
+#define EF_ADDR_FMT             "%" CI_PRIx64
 #define EF_INVALID_ADDR         ((ef_addr) -1)
 
 

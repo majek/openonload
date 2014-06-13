@@ -53,13 +53,16 @@
  * EPOLL2 private file data
  *************************************************************/
 static int set_max_stacks(const char *val, struct kernel_param *kp);
-static unsigned epoll2_max_stacks = CI_CFG_EPOLL2_MAX_STACKS;
+static unsigned epoll2_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
 module_param_call(epoll2_max_stacks, set_max_stacks, param_get_uint,
                   &epoll2_max_stacks, S_IRUGO);
 __MODULE_PARM_TYPE(epoll2_max_stacks, "uint");
-MODULE_PARM_DESC(epoll2_max_stacks,
-"Maximum number of onload stacks handled by single epoll object "
-"in EF_UL_EPOLL=2 mode.");
+static unsigned epoll_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
+module_param_call(epoll_max_stacks, set_max_stacks, param_get_uint,
+                  &epoll_max_stacks, S_IRUGO);
+__MODULE_PARM_TYPE(epoll_max_stacks, "uint");
+MODULE_PARM_DESC(epoll_max_stacks,
+"Maximum number of onload stacks handled by single epoll object.");
 
 struct oo_epoll2_private {
   struct file  *kepo;
@@ -93,6 +96,9 @@ struct oo_epoll1_private {
 
   /* kernel epoll file */
   struct file *os_file;
+
+  spinlock_t    lock;
+  tcp_helper_resource_t** stacks;
 };
 
 /*************************************************************
@@ -144,16 +150,23 @@ static int set_max_stacks(const char *val, struct kernel_param *kp)
   int rc = param_set_uint(val, kp);
   if( rc != 0 )
     return rc;
+
+  /* Backward compatibility: epoll2_max_stacks */
+  if( epoll2_max_stacks != CI_CFG_EPOLL_MAX_STACKS &&
+      epoll_max_stacks == CI_CFG_EPOLL_MAX_STACKS)
+    epoll_max_stacks = epoll2_max_stacks;
+
   /* do not accept 0 value: use default instead */
-  if( epoll2_max_stacks == 0 )
-    epoll2_max_stacks = CI_CFG_EPOLL2_MAX_STACKS;
+  if( epoll_max_stacks == 0 )
+    epoll_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
+
   return 0;
 }
 
 static int oo_epoll2_ctor(struct oo_epoll2_private *priv, int kepfd)
 {
   struct file  *kepo = fget(kepfd);
-  int size = sizeof(priv->stacks[0]) * epoll2_max_stacks;
+  int size = sizeof(priv->stacks[0]) * epoll_max_stacks;
 
   if( kepo == NULL )
     return -EBADF;
@@ -191,7 +204,7 @@ static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
   /* Common case is that we already know about this stack, so make that
    * fast.
    */
-  for( i = 0; i < epoll2_max_stacks; ++i )
+  for( i = 0; i < epoll_max_stacks; ++i )
     if( priv->stacks[i] == fd_thr )
       return 1;
     else if(unlikely( priv->stacks[i] == NULL ))
@@ -199,7 +212,7 @@ static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
 
   /* Try to add stack.  NB. May already be added by concurrent thread. */
   spin_lock(&priv->lock);
-  for( i = 0; i < epoll2_max_stacks; ++i ) {
+  for( i = 0; i < epoll_max_stacks; ++i ) {
     if( priv->stacks[i] == fd_thr )
       break;
     if( priv->stacks[i] != NULL )
@@ -211,7 +224,37 @@ static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
     break;
   }
   spin_unlock(&priv->lock);
-  return i < epoll2_max_stacks;
+  return i < epoll_max_stacks;
+}
+static int oo_epoll1_add_stack(struct oo_epoll1_private* priv,
+                              tcp_helper_resource_t* fd_thr)
+{
+  unsigned i;
+
+  /* Common case is that we already know about this stack, so make that
+   * fast.
+   */
+  for( i = 0; i < epoll_max_stacks; ++i )
+    if( priv->stacks[i] == fd_thr )
+      return 1;
+    else if(unlikely( priv->stacks[i] == NULL ))
+      break;
+
+  /* Try to add stack.  NB. May already be added by concurrent thread. */
+  spin_lock(&priv->lock);
+  for( i = 0; i < epoll_max_stacks; ++i ) {
+    if( priv->stacks[i] == fd_thr )
+      break;
+    if( priv->stacks[i] != NULL )
+      continue;
+    priv->stacks[i] = fd_thr;
+    /* We already keep ref for this thr via file,
+     * so efab_tcp_helper_k_ref_count_inc() can't fail. */
+    efab_tcp_helper_k_ref_count_inc(fd_thr);
+    break;
+  }
+  spin_unlock(&priv->lock);
+  return i < epoll_max_stacks;
 }
 
 
@@ -281,7 +324,7 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
     static int printed;
     if( !printed )
       ci_log("Can't add stack %d to epoll set: consider "
-             "increasing epoll2_max_stacks module option", fd_thr->id);
+             "increasing epoll_max_stacks module option", fd_thr->id);
     /* fall through to sys_epoll_ctl() without interrupt */
   }
 
@@ -326,7 +369,7 @@ static int oo_epoll2_apply_ctl(struct oo_epoll2_private *priv,
 
 
 #define OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni)                       \
-  for( i = 0; i < epoll2_max_stacks; ++i )                              \
+  for( i = 0; i < epoll_max_stacks; ++i )                              \
     if( (thr = (priv)->stacks[i]) == NULL )                             \
       break;                                                            \
     else if(unlikely( thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )) \
@@ -576,7 +619,7 @@ static void oo_epoll2_release(struct oo_epoll2_private *priv)
     fput(priv->kepo);
 
   /* Release references to all stacks */
-  for( i = 0; i < epoll2_max_stacks; i++ ) {
+  for( i = 0; i < epoll_max_stacks; i++ ) {
     if( priv->stacks[i] == NULL )
       break;
     efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
@@ -695,12 +738,24 @@ fail1:
 
 static int oo_epoll1_release(struct oo_epoll1_private* priv)
 {
+  int i;
+
   ci_assert(priv->whead);
   remove_wait_queue(priv->whead, &priv->wait);
 
   fput(priv->os_file);
 
   __free_page(priv->page);
+
+  /* Release references to all stacks */
+  for( i = 0; i < epoll_max_stacks; i++ ) {
+    if( priv->stacks[i] == NULL )
+      break;
+    efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
+    priv->stacks[i] = NULL;
+  }
+  kfree(priv->stacks);
+
   return 0;
 }
 
@@ -807,6 +862,42 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     break;
   }
 
+  case OO_EPOLL1_IOC_ADD_STACK: {
+    ci_fixed_descriptor_t sock_fd;
+    struct file *sock_file;
+    ci_private_t *sock_priv;
+    ci_assert_equal(_IOC_SIZE(cmd), sizeof(sock_fd));
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    if( copy_from_user(&sock_fd, argp, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+
+    sock_file = fget(sock_fd);
+    if( sock_file->f_op != &linux_tcp_helper_fops_udp &&
+        sock_file->f_op != &linux_tcp_helper_fops_tcp ) {
+      fput(sock_file);
+      return -EINVAL;
+    }
+    sock_priv = sock_file->private_data;
+
+    rc = oo_epoll1_add_stack(&priv->p.p1, sock_priv->thr);
+    
+    fput(sock_file);
+    break;
+  }
+
+  case OO_EPOLL1_IOC_PRIME: {
+    int i;
+    tcp_helper_resource_t* thr;
+    ci_netif* ni;
+    
+    OO_EPOLL_FOR_EACH_STACK(&priv->p.p1, i, thr, ni) {
+      tcp_helper_request_wakeup(thr);
+    }
+    rc = 0;
+    break;
+  }
+
   default:
     ci_log("unknown epoll device ioctl: 0x%x", cmd);
     rc = -EINVAL;
@@ -873,14 +964,26 @@ static unsigned oo_epoll_fop_poll(struct file* filp, poll_table* wait)
 static int oo_epoll_fop_mmap(struct file* filp, struct vm_area_struct* vma)
 {
   struct oo_epoll_file_private *priv = filp->private_data;
+  int size = sizeof(priv->p.p1.stacks[0]) * epoll_max_stacks;
   int rc;
 
   ci_assert(priv);
   if( priv->type != OO_EPOLL_TYPE_UNKNOWN)
     return -EINVAL;
+
+  priv->p.p1.stacks = kmalloc(size, GFP_KERNEL);
+  if( priv->p.p1.stacks == NULL )
+    return -ENOMEM;
+  memset(priv->p.p1.stacks, 0, size);
+  spin_lock_init(&priv->p.p1.lock);
+
   rc = oo_epoll1_mmap(&priv->p.p1, vma);
-  if( rc == 0 )
-    priv->type = OO_EPOLL_TYPE_1;
+  if( rc != 0 ) {
+    kfree(priv->p.p1.stacks);
+    return rc;
+  }
+
+  priv->type = OO_EPOLL_TYPE_1;
   return rc;
 }
 

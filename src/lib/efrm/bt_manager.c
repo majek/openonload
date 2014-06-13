@@ -165,6 +165,7 @@ efrm_bt_manager_alloc(struct efhw_nic *nic,
 	if (size < EFHW_BUFFER_TABLE_BLOCK_SIZE) {
 		spin_lock_bh(&manager->btm_lock);
 		if (size <= EFHW_BUFFER_TABLE_BLOCK_SIZE / 2 ||
+		    manager->btm_block == NULL ||
 		    ffs(manager->btm_block->btb_free_mask) > size)
 			manager->btm_block = a->bta_blocks;
 		spin_unlock_bh(&manager->btm_lock);

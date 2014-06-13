@@ -247,24 +247,6 @@ ef10_read_qq(volatile char __iomem *addr, uint64_t *q0, uint64_t *q1)
 
 /*----------------------------------------------------------------------------
  *
- * Timer helpers
- *
- *---------------------------------------------------------------------------*/
-
-static inline int ef10_timer_page_addr(uint idx)
-{
-    return ER_DZ_EVQ_TMR_REG + ER_DZ_EVQ_TMR_REG_STEP * idx;
-}
-
-#define EF10_TIMER_PAGE_MASK		(EFHW_4K-1)
-
-static inline int ef10_timer_page_offset(uint idx)
-{
-	return ef10_timer_page_addr(idx) & EF10_TIMER_PAGE_MASK;
-}
-
-/*----------------------------------------------------------------------------
- *
  * DMA Queue helpers
  *
  *---------------------------------------------------------------------------*/

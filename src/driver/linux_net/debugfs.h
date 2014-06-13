@@ -39,8 +39,6 @@ struct efx_debugfs_parameter {
 extern void efx_fini_debugfs_child(efx_debugfs_entry *dir, const char *name);
 extern int efx_init_debugfs_netdev(struct net_device *net_dev);
 extern void efx_fini_debugfs_netdev(struct net_device *net_dev);
-extern int efx_init_debugfs_port(struct efx_nic *efx);
-extern void efx_fini_debugfs_port(struct efx_nic *efx);
 extern int efx_init_debugfs_nic(struct efx_nic *efx);
 extern void efx_fini_debugfs_nic(struct efx_nic *efx);
 extern int efx_init_debugfs_channels(struct efx_nic *efx);
@@ -55,6 +53,7 @@ extern void efx_trim_debugfs_port(struct efx_nic *efx,
 
 /* Helpers for handling debugfs entry reads */
 extern int efx_debugfs_read_uint(struct seq_file *, void *);
+extern int efx_debugfs_read_ulong(struct seq_file *, void *);
 extern int efx_debugfs_read_string(struct seq_file *, void *);
 extern int efx_debugfs_read_int(struct seq_file *, void *);
 extern int efx_debugfs_read_atomic(struct seq_file *, void *);
@@ -123,6 +122,11 @@ extern int efx_debugfs_read_bool(struct seq_file *, void *);
 #define EFX_UINT_PARAMETER(container_type, parameter)		\
 	EFX_PARAMETER(container_type, parameter,		\
 		      unsigned int, efx_debugfs_read_uint)
+
+/* An unsigned long integer parameter */
+#define EFX_ULONG_PARAMETER(container_type, parameter)		\
+	EFX_PARAMETER(container_type, parameter,		\
+		      unsigned long, efx_debugfs_read_ulong)
 
 /* A dword parameter */
 #define EFX_DWORD_PARAMETER(container_type, parameter)		\

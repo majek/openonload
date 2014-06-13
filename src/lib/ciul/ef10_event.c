@@ -47,11 +47,13 @@
 /*! \cidoxg_lib_ef */
 #include "ef_vi_internal.h"
 #include "logging.h"
+#include "mcdi_pcol.h"
 
 typedef ci_qword_t ef_vi_event;
 
 #define EF_VI_EVENT_OFFSET(q, i)					\
-	(((q)->evq_state->evq_ptr + (i) * sizeof(ef_vi_event)) & (q)->evq_mask)
+	(((q)->ep_state->evq.evq_ptr + (i) * sizeof(ef_vi_qword)) &	\
+	 (q)->evq_mask)
 
 #define EF_VI_EVENT_PTR(q, i)                                           \
 	((ef_vi_event*) ((q)->evq_base + EF_VI_EVENT_OFFSET((q), (i))))
@@ -188,6 +190,109 @@ ef_vi_inline void ef10_tx_event(const ef_vi_event* ev,
 }
 
 
+int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
+				struct timespec* ts_out)
+{
+#define ONE_SEC                  0x8000000
+#define MAX_RX_PKT_DELAY         0xCCCCCC  /* ONE_SECOND / 10 */
+#define MAX_TIME_SYNC_DELAY      0x1999999 /* ONE_SECOND * 2 / 10 */
+#define SYNC_EVENTS_PER_SECOND   4
+
+	/* sync_timestamp_major contains the number of seconds and
+	 * sync_timestamp_minor contains the upper bits of ns.
+	 *
+	 * The API dictates that this function be called before
+	 * eventq_poll() is called again.  We do not allow
+	 * eventq_poll() to process mcdi events (time sync events) if
+	 * it has already processed any normal events.  Hence, we are
+	 * guaranteed that the RX events should be happening in the
+	 * range [MAX_RX_PKT_DELAY before time sync event, ONE_SECOND
+	 * / SYNC_EVENTS_PER_SECOND + MAX_TIME_SYNC_DELAY after time
+	 * sync event].
+	 */
+
+	/* Note that pkt_minor is not ns since last sync event but
+	 * simply the current ns.
+	 */
+
+	/* Note that it is possible for us to incorrectly associate a
+	 * pkt_minor with an invalid sync event and there is no way to
+	 * detect it.
+	 */
+
+	ef_eventq_state* evqs = &(vi->ep_state->evq);
+	uint32_t* data = (uint32_t*) ((uint8_t*)pkt +
+                                      ES_DZ_RX_PREFIX_TSTAMP_OFST);
+	/* pkt_minor contains 27 bits of ns */
+	uint32_t pkt_minor =
+		(CI_BSWAPC_LE32(*data) + vi->rx_ts_correction) & 0x7FFFFFF;
+	uint32_t diff;
+
+	EF_VI_ASSERT(vi->vi_flags & EF_VI_RX_TIMESTAMPS);
+
+	if( evqs->sync_timestamp_synchronised ) {
+		ts_out->tv_nsec = ((uint64_t) pkt_minor * 1000000000) >> 27;
+		diff = (pkt_minor - evqs->sync_timestamp_minor) & (ONE_SEC - 1);
+		if (diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) +
+			MAX_TIME_SYNC_DELAY) {
+			/* pkt_minor taken after sync event in the
+			 * valid range.  Adjust seconds if sync event
+			 * happened, then the second boundary, and
+			 * then the pkt_minor.
+			 */
+			ts_out->tv_sec = evqs->sync_timestamp_major;
+			ts_out->tv_sec +=
+				diff + evqs->sync_timestamp_minor >= ONE_SEC;
+			return 0;
+		} else if (diff > ONE_SEC - MAX_RX_PKT_DELAY) {
+			/* pkt_minor taken before sync event in the
+			 * valid range.  Adjust seconds if pkt_minor
+			 * happened, then the second boundary, and
+			 * then the sync event.
+			 */
+			ts_out->tv_sec = evqs->sync_timestamp_major;
+			ts_out->tv_sec -=
+				diff + evqs->sync_timestamp_minor <= ONE_SEC;
+			return 0;
+		} else {
+			/* diff between pkt_minor and sync event in
+			 * invalid range.  Either function used
+			 * incorrectly or we lost some sync events.
+			 */
+			evqs->sync_timestamp_synchronised = 0;
+		}
+	}
+	return -1;
+}
+
+
+static void ef10_major_tick(ef_vi* vi, unsigned major, unsigned minor)
+{
+	ef_eventq_state* evqs = &(vi->ep_state->evq);
+	evqs->sync_timestamp_major = major;
+	evqs->sync_timestamp_minor = minor << 19;
+	evqs->sync_timestamp_synchronised = 1;
+}
+
+
+static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev)
+{
+	int code = QWORD_GET_U(MCDI_EVENT_CODE, *ev);
+	uint32_t major, minor;
+	switch( code ) {
+	case MCDI_EVENT_CODE_PTP_TIME:
+		major = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MAJOR, *ev);
+		minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_19, *ev);
+		ef10_major_tick(evq, major, minor);
+		break;
+	default:
+		ef_log("%s: ERROR: Unhandled mcdi event code=%u", __FUNCTION__,
+		       code);
+		break;
+	}
+}
+
+
 int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 {
 	int evs_len_orig = evs_len;
@@ -214,13 +319,6 @@ not_empty:
 	if (!EF_VI_IS_EVENT(&ev))
 		goto empty;
 	do {
-#ifdef __powerpc__
-		CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, -16));
-#else
-		CI_SET_QWORD(*pev);
-#endif
-		evq->evq_state->evq_ptr += sizeof(ef_vi_event);
-
 		/* Ugly: Exploit the fact that event code lies in top bits
 		 * of event. */
 		BUG_ON(ESF_DZ_EV_CODE_LBN < 32u);
@@ -231,6 +329,15 @@ not_empty:
 
 		case ESE_DZ_EV_CODE_TX_EV:
 			ef10_tx_event(&ev, &evs, &evs_len);
+			break;
+
+		case ESE_DZ_EV_CODE_MCDI_EV:
+			/* Do not process MCDI events if we have
+			 * already delivered other events to the
+			 * app */
+			if (evs_len != evs_len_orig)
+				goto out;
+			ef10_mcdi_event(evq, &ev);
 			break;
 
 		case ESE_DZ_EV_CODE_DRIVER_EV:
@@ -247,6 +354,15 @@ not_empty:
 			break;
 		}
 
+		/* Consume event.  Must do after event checking above,
+		 * in case we don't want to consume it. */
+#ifdef __powerpc__
+		CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, -16));
+#else
+		CI_SET_QWORD(*pev);
+#endif
+		evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
+
 		if (evs_len < EF_VI_EVENT_POLL_MIN_EVS)
 			break;
 
@@ -254,6 +370,7 @@ not_empty:
 		ev = *pev;
 	} while (EF_VI_IS_EVENT(&ev));
 
+out:
 	return evs_len_orig - evs_len;
 
 empty:
@@ -266,7 +383,7 @@ empty:
 			 * the next slot.  Has NIC failed to write event
 			 * somehow?
 			 */
-			evq->evq_state->evq_ptr += sizeof(ef_vi_event);
+			evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
 			INC_ERROR_STAT(evq, evq_gap);
 			goto not_empty;
 		}
@@ -284,7 +401,8 @@ overflow:
 void ef10_ef_eventq_prime(ef_vi* vi)
 {
 	unsigned ring_i = (ef_eventq_current(vi) & vi->evq_mask) / 8;
-	writel(ring_i << ERF_DZ_EVQ_RPTR_LBN, vi->evq_prime);
+	EF_VI_ASSERT(vi->inited & EF_VI_INITED_IO);
+	writel(ring_i << ERF_DZ_EVQ_RPTR_LBN, vi->io + ER_DZ_EVQ_RPTR_REG);
 	mmiowb();
 }
 

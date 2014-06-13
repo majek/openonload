@@ -36,12 +36,52 @@
 
 #include "OnloadExt.h"
 #include "OnloadZeroCopy.h"
+#include "OnloadTemplateSend.h"
 
 struct native_zc_userdata {
 	JNIEnv*	env;
 	jobject	cb;
 	int fd;
 };
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_SaveStackName (JNIEnv* env, jclass cls)
+{
+	(void) env;
+	(void) cls;
+	return (jint) onload_stackname_save();
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_RestoreStackName (JNIEnv* env, jclass cls)
+{
+	return (jint) onload_stackname_restore();
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_SetStackOption (JNIEnv* env, jclass cls,
+				jstring option, jint opt_val )
+{
+	int64_t val = opt_val;
+	char* opt = JNU_GetStringNativeChars(env, option);
+	jint rval;
+	(void) cls;
+
+	if ( !opt )
+		return -EINVAL;
+
+	rval = (jint) onload_stack_opt_set_int( opt, val );
+	free(opt);
+	return rval;
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_ResetStackOptions (JNIEnv* env, jclass cls)
+{
+	(void) env;
+	(void) cls;
+	return (jint) onload_stack_opt_reset();
+}
 
 
 /* ******************************************************** */
@@ -50,6 +90,7 @@ struct native_zc_userdata {
 
 #define CHECK_CONSTANT(_x) ( _x == OnloadExt_##_x )
 #define CHECK_CONSTANT_ZC(_x) ( _x == OnloadZeroCopy_##_x )
+#define CHECK_CONSTANT_TMPL(_x) ( _x == OnloadTemplateSend_##_x )
 
 static int AreContstantsOk()
 {
@@ -80,6 +121,7 @@ static int AreContstantsOk()
 	&& CHECK_CONSTANT(ONLOAD_SPIN_POLL)
 	&& CHECK_CONSTANT(ONLOAD_SPIN_PKT_WAIT)
 	&& CHECK_CONSTANT(ONLOAD_SPIN_EPOLL_WAIT)
+	&& CHECK_CONSTANT(ONLOAD_FD_FEAT_MSG_WARM)
 	&& CHECK_CONSTANT_ZC(ONLOAD_MSG_RECV_OS_INLINE)
 	&& CHECK_CONSTANT_ZC(ONLOAD_MSG_DONTWAIT)
 	&& CHECK_CONSTANT_ZC(ONLOAD_ZC_MSG_SHARED)
@@ -92,7 +134,10 @@ static int AreContstantsOk()
 	&& CHECK_CONSTANT_ZC(ONLOAD_ZC_BUFFER_HDR_UDP)
 	&& CHECK_CONSTANT_ZC(ONLOAD_ZC_BUFFER_HDR_TCP)
 	&& CHECK_CONSTANT_ZC(ONLOAD_MSG_NOSIGNAL)
-	&& CHECK_CONSTANT_ZC(ONLOAD_MSG_NOSIGNAL);
+	&& CHECK_CONSTANT_ZC(ONLOAD_MSG_NOSIGNAL)
+	&& CHECK_CONSTANT_TMPL(ONLOAD_TEMPLATE_FLAGS_SEND_NOW)
+	&& CHECK_CONSTANT_TMPL(ONLOAD_TEMPLATE_FLAGS_DONTWAIT)
+	;
 }
 
 /* ***************** */
@@ -479,10 +524,21 @@ Java_OnloadExt_FdStat__ILOnloadExt_Stat_2 (JNIEnv * env, jclass cls,
 	
 	if ( !field_sid || !field_name || !field_eid || !field_state )
 		return -EINVAL;
-	
+
+	(*env)->SetIntField( env, stat, field_sid, 0 );
+	(*env)->SetIntField( env, stat, field_eid, 0 );
+	(*env)->SetIntField( env, stat, field_state, 0 );
+	stack_name = JNU_NewStringNative(env, "" );
+	if ( stack_name )
+		(*env)->SetObjectField( env, stat, field_name,
+					stack_name );
+
+        if ( fd_val < 0 )
+            return -EINVAL;
+
 	rval = onload_fd_stat( fd_val, &native_stats );
-	
-	if( rval==0 ) {
+
+	if( rval ) { 
 		(*env)->SetIntField( env, stat, field_sid,
 					native_stats.stack_id );
 		(*env)->SetIntField( env, stat, field_eid,
@@ -509,6 +565,11 @@ Java_OnloadExt_FdStat (JNIEnv * env, jclass cls,
 							fd_val, stat );
 }
 
+JNIEXPORT jint JNICALL
+Java_OnloadExt_CheckFeature (JNIEnv * env, jclass cls, jint fd, jint feature )
+{
+	return onload_fd_check_feature( fd, feature );
+}
 
 /* ******** */
 /* Zerocopy */
@@ -750,5 +811,137 @@ Java_OnloadZeroCopy_Send ( JNIEnv* env, jclass cls,
 	int native_fd = GetFdFromUnknown( env, fd );
 	return Java_OnloadZeroCopy_Send___3Ljava_nio_ByteBuffer_2II( env, cls,
 						array, flags, native_fd );
+}
+
+
+/* ************** */
+/* Templated Send */
+/* ************** */
+
+JNIEXPORT jboolean JNICALL
+Java_OnloadTemplateSend_IsTemplatedSendEnabled (JNIEnv* env, jclass cls)
+{
+	/* Same requirements as zerocopy -
+	   We need onload_ext to be present, and for DirectByteBuffer to work.
+	  - DirectByteBuffer isnt supported by all VMs */
+	/* TODO: We also really ought to check if we're on a 7122, but we have
+	   no way to easily do so. */
+	return Java_OnloadZeroCopy_IsZeroCopyEnabled(env, cls);
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadTemplateSend_Alloc ( JNIEnv* env, jclass cls,
+                                jint fd, jobject out, jobject data,
+                                jint flags )
+{
+	jint rval = 0;
+	onload_template_handle handle = 0;
+	struct iovec initial_msg;
+
+	initial_msg.iov_base = (*env)->GetDirectBufferAddress( env, data );
+	if ( !initial_msg.iov_base )
+		return -ENOMEM;
+	initial_msg.iov_len = (*env)->GetDirectBufferCapacity( env, data );
+	if ( initial_msg.iov_len < 1 )
+		return -ENOMEM;
+
+	rval = onload_msg_template_alloc(fd, &initial_msg, 1, &handle, flags );
+
+	if ( rval >= 0 ) {
+		SetLongOnObject( env, out, "opaque", (long)handle );
+		SetIntOnObject( env, out, "fd", fd );
+	} else {
+		SetLongOnObject( env, out, "opaque", -1 );
+		SetIntOnObject( env, out, "fd", -1 );
+	}
+
+	return rval;
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadTemplateSend_Alloc__Ljava_net_ServerSocket_2LOnloadTemplateSend_2Ljava_nio_ByteBuffer_2
+			(JNIEnv* env, jclass cls, jobject sock, jobject out,
+			jobject data, jint flags )
+{
+	int fd = GetFdFromUnknown( env, sock );
+	if ( (*env)->ExceptionOccurred(env) )
+		return -EINVAL;
+	return Java_OnloadTemplateSend_Alloc( env, cls, fd, out, data, flags );
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadTemplateSend_Alloc__Ljava_net_Socket_2LOnloadTemplateSend_2Ljava_nio_ByteBuffer_2I
+			(JNIEnv* env, jclass cls, jobject sock, jobject out,
+			jobject data, jint flags )
+{
+	int fd = GetFdFromUnknown( env, sock );
+	if ( (*env)->ExceptionOccurred(env) )
+		return -EINVAL;
+	return Java_OnloadTemplateSend_Alloc( env, cls, fd, out, data, flags );
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadTemplateSend_Alloc__Ljava_io_FileDescriptor_2LOnloadTemplateSend_2Ljava_nio_ByteBuffer_2I
+			(JNIEnv* env, jclass cls, jobject sock, jobject out,
+			jobject data, jint flags )
+{
+	int fd = GetFdFromUnknown( env, sock );
+	if ( (*env)->ExceptionOccurred(env) )
+		return -EINVAL;
+	return Java_OnloadTemplateSend_Alloc( env, cls, fd, out, data, flags );
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadTemplateSend_Update ( JNIEnv* env, jclass cls,
+                                 jobject handle, jobject data,
+                                 jint offset, jint flags )
+{
+	jlong h = GetLongFromObject( env, handle, "handle" );
+	struct onload_template_msg_update_iovec update;
+	jint rval = 0;
+	jint fd = GetIntFromObject( env, handle, "fd" );
+	if ( (*env)->ExceptionOccurred(env) )
+		return -EINVAL;
+
+	update.otmu_base = (*env)->GetDirectBufferAddress( env, data );
+	if ( !update.otmu_base )
+		return -ENOMEM;
+	update.otmu_len = (*env)->GetDirectBufferCapacity( env, data );
+	if ( update.otmu_len < 1 )
+		return -ENOMEM;
+
+	update.otmu_offset = offset;
+	update.otmu_flags = 0;
+
+	rval = onload_msg_template_update( fd,
+	                                   (onload_template_handle) h,
+	                                   &update, 1, flags );
+	if ( rval >= 0 && (flags & ONLOAD_TEMPLATE_FLAGS_SEND_NOW) ) {
+		SetLongOnObject( env, handle, "opaque", -1 );
+	}
+	return rval;
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadTemplateSend_Abort (JNIEnv* env, jclass cls,
+                               jobject handle )
+{
+	jint rval = 0;
+	jint fd;
+	jlong h = GetLongFromObject( env, handle, "opaque" );
+	if ( (*env)->ExceptionOccurred(env) )
+		return -EINVAL;
+
+	fd = GetIntFromObject( env, handle, "fd" );
+	if ( (*env)->ExceptionOccurred(env) )
+		return -EINVAL;
+
+	rval = onload_msg_template_abort(fd, (onload_template_handle)h);
+
+	if ( rval >= 0 ) {
+		SetLongOnObject( env, handle, "opaque", -1 );
+	}
+
+	return rval;
 }
 

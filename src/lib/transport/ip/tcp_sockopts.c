@@ -350,11 +350,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
       if( *(int*) optval > 0 ) {
         /* Value is timeout in seconds.  Convert to a number of retries. */
         int timeo = CI_MIN(*(int*) optval, 100000) * 1000;
-#ifndef __KERNEL__
-        timeo = ci_ip_time_ms2ticks_fast(netif, timeo);
-#else
         timeo = ci_ip_time_ms2ticks_slow(netif, timeo);
-#endif
         timeo = CI_MIN(timeo, NI_CONF(netif).tconst_rto_max);
         c->tcp_defer_accept = 0;
         while( timeo > ((int) NI_CONF(netif).tconst_rto_initial

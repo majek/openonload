@@ -46,21 +46,16 @@ int onload_msg_template_alloc(int fd, struct iovec* initial_msg,
 
   Log_CALL(ci_log("%s(%d, %p, %d, %p, %d)", __FUNCTION__, fd, initial_msg, mlen,
                   handlep, flags));
-  if( flags == 0 ) {
-    citp_enter_lib(&lib_context);
-    if( (fdi = citp_fdtable_lookup(fd)) != NULL ) {
-      rc = citp_fdinfo_get_ops(fdi)->
-        tmpl_alloc(fdi, initial_msg, mlen, omt_pp, flags);
-      citp_fdinfo_release_ref(fdi, 0);
-    }
-    else {
-      rc = -ESOCKTNOSUPPORT;
-    }
-    citp_exit_lib(&lib_context, TRUE);
+  citp_enter_lib(&lib_context);
+  if( (fdi = citp_fdtable_lookup(fd)) != NULL ) {
+    rc = citp_fdinfo_get_ops(fdi)->
+      tmpl_alloc(fdi, initial_msg, mlen, omt_pp, flags);
+    citp_fdinfo_release_ref(fdi, 0);
   }
   else {
-    rc = -EINVAL;
+    rc = -ESOCKTNOSUPPORT;
   }
+  citp_exit_lib(&lib_context, TRUE);
   Log_CALL_RESULT(rc);
   return rc;
 }

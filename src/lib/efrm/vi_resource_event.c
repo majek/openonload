@@ -90,7 +90,8 @@ void efrm_eventq_reset(struct efrm_vi *virs)
 
 	/* FIXME: Protect against concurrent resets. */
 
-	efhw_nic_event_queue_disable(nic, instance);
+	efhw_nic_event_queue_disable(nic, instance,
+				  (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
 
 	wakeup_evq = virs->net_drv_wakeup_channel >= 0?
 		virs->net_drv_wakeup_channel:
@@ -99,14 +100,16 @@ void efrm_eventq_reset(struct efrm_vi *virs)
 		instance % efrm_nic->rss_channel_count;
 	memset(efrm_eventq_base(virs), EFHW_CLEAR_EVENT_VALUE,
 	       efrm_vi_rm_evq_bytes(virs, -1));
+	/* NB. We do not enable DOS protection because of bug12916. */
 	efhw_nic_event_queue_enable(nic, instance, virs->q[EFHW_EVQ].capacity,
 			efrm_bt_allocation_base(&virs->q[EFHW_EVQ].bt_alloc),
 			virs->q[EFHW_EVQ].dma_addrs, 
 			1 << virs->q[EFHW_EVQ].page_order,
 				    /* make siena look like falcon for now */
 				    instance < 64, 
-				    /* make dos protection enable by default */
-				    1, wakeup_evq);
+				    0, wakeup_evq,
+				    (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0,
+				    &virs->rx_ts_correction);
 	EFRM_TRACE("%s: " EFRM_RESOURCE_FMT, __FUNCTION__,
 		   EFRM_RESOURCE_PRI_ARG(&virs->rs));
 }

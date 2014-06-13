@@ -1100,7 +1100,7 @@ OO_INTERCEPT(int, select,
               struct timeval* timeout))
 {
   citp_lib_context_t lib_context;
-  int timeout_ms;
+  ci_uint64 timeout_ms;
   int rc;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
@@ -1121,7 +1121,10 @@ OO_INTERCEPT(int, select,
   }
 
   if( timeout == NULL )
-    timeout_ms = -1;
+    /* citp_ul_do_select() multiplies this value by ci_cpu_khz and
+     * expects it not to overflow.  So we are dividing by 10GHz here.
+     * This does limit us to maximum timeout of about 58 years. */
+    timeout_ms = (ci_uint64) -1 / 10000000;
   else
     timeout_ms = timeout->tv_sec * 1000 + timeout->tv_usec / 1000;
 
@@ -1153,7 +1156,7 @@ OO_INTERCEPT(int, pselect,
 {
   citp_lib_context_t lib_context;
   sigset_t sigsaved;
-  int timeout_ms;
+  ci_uint64 timeout_ms;
   int rc = 0;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
@@ -1176,7 +1179,10 @@ OO_INTERCEPT(int, pselect,
 
   /* Calculate timeout */
   if( timeout_ts == NULL )
-    timeout_ms = -1;
+    /* citp_ul_do_select() multiplies this value by ci_cpu_khz and
+     * expects it not to overflow.  So we are dividing by 10GHz here.
+     * This does limit us to maximum timeout of about 58 years. */
+    timeout_ms = (ci_uint64) -1 / 10000000;
   else
     timeout_ms = timeout_ts->tv_sec * 1000 + timeout_ts->tv_nsec / 1000000;
 

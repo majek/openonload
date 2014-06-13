@@ -18,6 +18,8 @@
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/vi_allocation.h>
 #include <ci/efrm/pd.h>
+#include <ci/efrm/efrm_port_sniff.h>
+#include <ci/efrm/efrm_filter.h>
 #include <ci/efch/op_types.h>
 #include "char_internal.h"
 #include "filter_list.h"
@@ -89,7 +91,11 @@ vi_set_rm_alloc(ci_resource_alloc_t* alloc_,
 
 static void vi_set_rm_free(efch_resource_t *rs)
 {
+  struct efrm_vi_set *vi_set = efrm_vi_set_from_resource(rs->rs_base);
+
   efch_filter_list_free(rs->rs_base, &rs->vi_set.fl);
+  /* Remove any sniff config we may have set up. */
+  efrm_port_sniff(rs->rs_base, 0, 0, efrm_vi_set_get_rss_context(vi_set));
 }
 
 
@@ -115,9 +121,31 @@ vi_set_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
                 CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t bc))
 {
   unsigned flags = 0;
-  if( efrm_vi_set_num_vis(efrm_vi_set_from_resource(rs->rs_base)) > 1 )
-    flags |= (unsigned) EFX_FILTER_FLAG_RX_RSS;
-  return efch_filter_list_op(rs->rs_base, &rs->vi_set.fl, op, copy_out, flags);
+  struct efrm_vi_set *vi_set = efrm_vi_set_from_resource(rs->rs_base);
+  int rss = efrm_vi_set_num_vis(vi_set) > 1;
+  int rss_context = efrm_vi_set_get_rss_context(vi_set);
+
+  int rc;
+  switch(op->op) {
+    case CI_RSOP_PT_SNIFF:
+      rc = efrm_port_sniff(rs->rs_base, op->u.pt_sniff.enable,
+                           op->u.pt_sniff.promiscuous, rss_context);
+      break;
+    case CI_RSOP_FILTER_DEL:
+      rc = efch_filter_list_op_del(rs->rs_base, &rs->vi_set.fl, op);
+      break;
+    case CI_RSOP_FILTER_BLOCK_KERNEL:
+      rc = efch_filter_list_op_block(rs->rs_base, &rs->vi_set.fl, op);
+      break;
+    default:
+      if( rss )
+        flags |= (unsigned) EFX_FILTER_FLAG_RX_RSS;
+      rc = efch_filter_list_op_add(rs->rs_base, &rs->vi_set.fl, op, copy_out,
+                                  flags, rss_context == -1 ?
+                                  EFX_FILTER_RSS_CONTEXT_DEFAULT : rss_context);
+  }
+
+  return rc;
 }
 
 

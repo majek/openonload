@@ -32,6 +32,7 @@
 #include "driver_access.h"
 #include "logging.h"
 #include "efch_intf_ver.h"
+#include <etherfabric/init.h>
 
 
 /* ****************************************************************************
@@ -56,14 +57,8 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
   if( vi_flags & EF_VI_TX_FILTER_MAC     ) efab_flags |= EFHW_VI_TX_ETH_FILTER_EN;
   if( vi_flags & EF_VI_TX_FILTER_MASK_1  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_0;
   if( vi_flags & EF_VI_TX_FILTER_MASK_2  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_1;
+  if( vi_flags & EF_VI_RX_TIMESTAMPS     ) efab_flags |= EFHW_VI_RX_TIMESTAMPS;
   return efab_flags;
-}
-
-
-static unsigned efab_flags_to_nic_flags(unsigned efab_flags)
-{
-  return (efab_flags & EFHW_VI_NIC_BUG35388_WORKAROUND) ?
-          EF_VI_NIC_FLAG_BUG35388_WORKAROUND : 0;
 }
 
 
@@ -77,7 +72,12 @@ static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
     if (vi_flags & EF_VI_TX_PUSH_ALWAYS) {
       LOGVV(ef_log("%s: ERROR: TX PUSH ALWAYS flag not supported"
                    " on FALCON architecture", __FUNCTION__));
-      return -EINVAL;
+      return -EOPNOTSUPP;
+    }
+    if (vi_flags & EF_VI_RX_TIMESTAMPS) {
+      LOGVV(ef_log("%s: ERROR: RX TIMESTAMPS flag not supported"
+                   " on FALCON architecture", __FUNCTION__));
+      return -EOPNOTSUPP;
     }
     return 0;
     
@@ -87,6 +87,19 @@ static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
   default:
     return -EINVAL;
   }
+}
+
+
+static int get_ts_correction(ef_driver_handle vi_dh, int res_id,
+			     int* rx_ts_correction)
+{
+  ci_resource_op_t op;
+  int rc;
+  op.op = CI_RSOP_VI_GET_RX_TS_CORRECTION;
+  op.id = efch_make_resource_id(res_id);
+  rc = ci_resource_op(vi_dh, &op);
+  *rx_ts_correction = op.u.vi_rx_ts_correction.out_rx_ts_correction;
+  return rc;
 }
 
 
@@ -101,13 +114,13 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 		  enum ef_vi_flags vi_flags)
 {
   struct ef_vi_nic_type nic_type;
-  char vi_data[VI_MAPPINGS_SIZE];
   ci_resource_alloc_t ra;
   char* mem_mmap_ptr;
   ef_vi_state* state;
   char* io_mmap_ptr;
-  int instance, rc;
+  int rc;
   const char* s;
+  uint32_t* ids;
   void* p;
   int q_label;
 
@@ -115,8 +128,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   EF_VI_BUG_ON(! evq_capacity && ! rxq_capacity && ! txq_capacity);
 
   /* Ensure ef_vi_free() only frees what we allocate. */
-  vi->vi_io_mmap_ptr = NULL;
-  vi->vi_mem_mmap_ptr = NULL;
+  io_mmap_ptr = NULL;
+  mem_mmap_ptr = NULL;
 
   if( evq == NULL )
     q_label = 0;
@@ -160,82 +173,87 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     goto fail1;
   }
 
+  evq_capacity = ra.u.vi_out.evq_capacity;
+  txq_capacity = ra.u.vi_out.txq_capacity;
+  rxq_capacity = ra.u.vi_out.rxq_capacity;
+
   rc = -ENOMEM;
-  state = malloc(ef_vi_calc_state_bytes(ra.u.vi_out.rxq_capacity,
-                                        ra.u.vi_out.txq_capacity));
-  if( state == NULL )  goto fail1;
+  state = malloc(ef_vi_calc_state_bytes(rxq_capacity, txq_capacity));
+  if( state == NULL )
+    goto fail1;
 
-  instance = ra.u.vi_out.instance;
-  vi->vi_resource_id = ra.out_id.index;
-  vi->vi_mem_mmap_bytes = ra.u.vi_out.mem_mmap_bytes;
-  vi->vi_io_mmap_bytes = ra.u.vi_out.io_mmap_bytes;
-
-  if( vi->vi_io_mmap_bytes ) {
-    rc = ci_resource_mmap(vi_dh, ra.out_id.index, 0, vi->vi_io_mmap_bytes,&p);
+  if( ra.u.vi_out.io_mmap_bytes ) {
+    rc = ci_resource_mmap(vi_dh, ra.out_id.index, 0,
+			  ra.u.vi_out.io_mmap_bytes, &p);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: ci_resource_mmap (io) %d", __FUNCTION__, rc));
       goto fail2;
     }
-    vi->vi_io_mmap_ptr = (char*) p;
+    io_mmap_ptr = (char*) p;
   }
 
   if( ra.u.vi_out.mem_mmap_bytes ) {
-    rc = ci_resource_mmap(vi_dh, ra.out_id.index, 1,vi->vi_mem_mmap_bytes,&p);
+    rc = ci_resource_mmap(vi_dh, ra.out_id.index, 1,
+			  ra.u.vi_out.mem_mmap_bytes, &p);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: ci_resource_mmap (mem) %d", __FUNCTION__, rc));
       goto fail3;
     }
-    vi->vi_mem_mmap_ptr = (char*) p;
+    mem_mmap_ptr = (char*) p;
   }
-
-  io_mmap_ptr = vi->vi_io_mmap_ptr;
-  mem_mmap_ptr = vi->vi_mem_mmap_ptr;
 
   rc = ef_vi_arch_from_efhw_arch(ra.u.vi_out.nic_arch);
   EF_VI_BUG_ON(rc < 0);
   nic_type.arch = (unsigned char) rc;
   nic_type.variant = ra.u.vi_out.nic_variant;
   nic_type.revision = ra.u.vi_out.nic_revision;
-  nic_type.flags = efab_flags_to_nic_flags(ra.u.vi_out.nic_flags);
 
   rc = check_nic_compatibility(vi_flags, nic_type.arch);
   if( rc != 0 )
-    goto fail3;
+    goto fail4;
 
-  memset(vi_data, 0, sizeof(vi_data));
+  ids = (void*) (state + 1);
 
+  ef_vi_init(vi, nic_type.arch, nic_type.variant, nic_type.revision,
+	     vi_flags, state);
+  ef_vi_init_io(vi, io_mmap_ptr);
   if( evq_capacity ) {
-    ef_vi_init_mapping_evq(vi_data, nic_type, instance, io_mmap_ptr,
-                           ra.u.vi_out.evq_capacity * sizeof(efhw_event_t),
-                           mem_mmap_ptr, NULL, 0);
-    /* we should align the pointer */
-    mem_mmap_ptr += ((ra.u.vi_out.evq_capacity * sizeof(efhw_event_t))
-                     + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
-    vi->ep_state = state;
+    ef_vi_init_evq(vi, evq_capacity, mem_mmap_ptr);
+    mem_mmap_ptr += ((evq_capacity * sizeof(efhw_event_t) + CI_PAGE_SIZE - 1)
+		     & CI_PAGE_MASK);
   }
+  if( rxq_capacity ) {
+    ef_vi_init_rxq(vi, rxq_capacity, mem_mmap_ptr, ids,
+		   ra.u.vi_out.rx_prefix_len);
+    mem_mmap_ptr += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
+    ids += rxq_capacity;
+    if( vi_flags & EF_VI_RX_TIMESTAMPS ) {
+      int rx_ts_correction;
+      rc = get_ts_correction(vi_dh, ra.out_id.index, &rx_ts_correction);
+      if( rc < 0 )
+        goto fail4;
+      ef_vi_init_rx_timestamping(vi, rx_ts_correction);
+    }
+  }
+  if( txq_capacity )
+    ef_vi_init_txq(vi, txq_capacity, mem_mmap_ptr, ids);
 
-  if( rxq_capacity || txq_capacity )
-    ef_vi_init_mapping_vi(vi_data, nic_type,
-                          ra.u.vi_out.rxq_capacity,
-                          ra.u.vi_out.txq_capacity,
-                          instance, io_mmap_ptr,
-                          mem_mmap_ptr, mem_mmap_ptr,
-                          vi_flags, ra.u.vi_out.rx_prefix_len);
-
-  ef_vi_init(vi, vi_data, state, &state->evq, vi_flags);
-  ef_vi_add_queue(evq, vi);
-
-  if( evq_capacity )
-    ef_eventq_state_init(vi);
-  if( rxq_capacity || txq_capacity )
-    ef_vi_state_init(vi);
-
+  vi->vi_io_mmap_ptr = io_mmap_ptr;
+  vi->vi_mem_mmap_ptr = mem_mmap_ptr;
+  vi->vi_io_mmap_bytes = ra.u.vi_out.io_mmap_bytes;
+  vi->vi_mem_mmap_bytes = ra.u.vi_out.mem_mmap_bytes;
+  vi->vi_resource_id = ra.out_id.index;
+  ef_vi_init_state(vi);
+  rc = ef_vi_add_queue(evq, vi);
+  BUG_ON(rc != q_label);
   return q_label;
 
-
+ fail4:
+  if( mem_mmap_ptr != NULL )
+    ci_resource_munmap(vi_dh, mem_mmap_ptr, ra.u.vi_out.mem_mmap_bytes);
  fail3:
-  if( vi->vi_io_mmap_bytes )
-    ci_resource_munmap(vi_dh, vi->vi_io_mmap_ptr, vi->vi_io_mmap_bytes);
+  if( io_mmap_ptr != NULL )
+    ci_resource_munmap(vi_dh, io_mmap_ptr, ra.u.vi_out.io_mmap_bytes);
  fail2:
   free(state);
  fail1:

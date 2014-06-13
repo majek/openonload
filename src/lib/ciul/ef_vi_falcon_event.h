@@ -13,8 +13,33 @@
 ** Lesser General Public License for more details.
 */
 
-//////////////---- Events Format C Header ----//////////////
-//////////////---- Event entry ----//////////////
+/****************************************************************************
+ * Copyright 2002-2005: Level 5 Networks Inc.
+ * Copyright 2005-2008: Solarflare Communications Inc,
+ *                      9501 Jeronimo Road, Suite 250,
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/*************---- Events Format C Header ----*************/
+/*************---- Event entry ----*************/
   #define EV_CODE_LBN 60
   #define EV_CODE_WIDTH 4
       #define RX_IP_EV_DECODE 0
@@ -24,7 +49,7 @@
       #define DRV_GEN_EV_DECODE 7
   #define EV_DATA_LBN 0
   #define EV_DATA_WIDTH 60
-//////////////---- Receive IP events for both Kernel & User event queues ----//////////////
+/******---- Receive IP events for both Kernel & User event queues ----******/
   #define RX_EV_PKT_OK_LBN 56
   #define RX_EV_PKT_OK_WIDTH 1
   #define RX_EV_BUF_OWNER_ID_ERR_LBN 54
@@ -81,7 +106,7 @@
   #define RX_ISCSI_HDIG_ERR_WIDTH 1
   #define RX_EV_DESC_PTR_LBN 0
   #define RX_EV_DESC_PTR_WIDTH 12
-//////////////---- Transmit IP events for both Kernel & User event queues ----//////////////
+/******---- Transmit IP events for both Kernel & User event queues ----******/
   #define TX_EV_PKT_ERR_LBN 38
   #define TX_EV_PKT_ERR_WIDTH 1
   #define TX_EV_PKT_TOO_BIG_LBN 37
@@ -98,7 +123,7 @@
   #define TX_EV_COMP_WIDTH 1
   #define TX_EV_DESC_PTR_LBN 0
   #define TX_EV_DESC_PTR_WIDTH 12
-//////////////---- Char or Kernel driver events ----//////////////
+/*************---- Char or Kernel driver events ----*************/
   #define DRIVER_EV_SUB_CODE_LBN 56
   #define DRIVER_EV_SUB_CODE_WIDTH 4
       #define TX_DESCQ_FLS_DONE_EV_DECODE 0x0
@@ -111,6 +136,8 @@
       #define TX_PKT_NON_TCP_UDP_DECODE 0x9
       #define TIMER_EV_DECODE 0xA
       #define RX_DSC_ERROR_EV_DECODE 0xE
+  #define DRIVER_EV_RX_FLUSH_FAIL_LBN 12
+  #define DRIVER_EV_RX_FLUSH_FAIL_WIDTH 1
   #define DRIVER_EV_TX_DESCQ_ID_LBN 0
   #define DRIVER_EV_TX_DESCQ_ID_WIDTH 12
   #define DRIVER_EV_RX_DESCQ_ID_LBN 0
@@ -124,7 +151,7 @@
       #define SRM_CLR_EV_DECODE 0
       #define SRM_UPD_EV_DECODE 1
       #define SRM_ILLCLR_EV_DECODE 2
-//////////////---- Global events. Sent to both event queue 0 and 4. ----//////////////
+/********---- Global events. Sent to both event queue 0 and 4. ----********/
   #define XFP_PHY_INTR_LBN 10
   #define XFP_PHY_INTR_WIDTH 1
   #define XG_PHY_INTR_LBN 9
@@ -133,8 +160,12 @@
   #define G_PHY1_INTR_WIDTH 1
   #define G_PHY0_INTR_LBN 7
   #define G_PHY0_INTR_WIDTH 1
-//////////////---- Driver generated events ----//////////////
+/*************---- Driver generated events ----*************/
   #define DRV_GEN_EV_CODE_LBN 60
   #define DRV_GEN_EV_CODE_WIDTH 4
   #define DRV_GEN_EV_DATA_LBN 0
   #define DRV_GEN_EV_DATA_WIDTH 60
+
+/* RX packet prefix */
+#define FS_BZ_RX_PREFIX_HASH_OFST 12
+#define FS_BZ_RX_PREFIX_SIZE 16
