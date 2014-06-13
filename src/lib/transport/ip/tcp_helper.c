@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,6 +31,7 @@
 
 # include <netinet/in.h>
 # include <onload/unix_intf.h>
+#include <onload/dup2_lock.h>
 
 #include <ci/internal/ip.h>
 # include <ci/internal/trampoline.h>
@@ -245,7 +246,9 @@ int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
   op.ep_id = ep_id;
   op.domain = domain;
   op.type = type;
+  oo_rwlock_lock_read(&citp_dup2_lock);
   rc = oo_resource_op(stack_fd, OO_IOC_SOCK_ATTACH, &op);
+  oo_rwlock_unlock_read (&citp_dup2_lock);
   if( rc < 0 )
     return rc;
   return op.fd;
@@ -288,14 +291,14 @@ int ci_tcp_helper_close_no_trampoline(int fd) {
   /* Since ebx is the PIC register, gcc fails register allocation if
    * we use the "b" constraint when compiling with -fpic.  We
    * therefore pass the fd in ecx. */
-  asm volatile("xchgl %%ebx, %%ecx\n\t"
-      "int $0x80\n"
-      "ci_tcp_helper_close_no_trampoline_retaddr:\n\t"
-      ".global ci_tcp_helper_close_no_trampoline_retaddr\n\t"
-      ".hidden ci_tcp_helper_close_no_trampoline_retaddr\n\t"
-      "xchgl %%ebx, %%ecx"
-      :"=a"(res)
-      :"0"(call_num),"c"(fd));
+  __asm__ __volatile__("xchgl %%ebx, %%ecx\n\t"
+                       "int $0x80\n"
+                       "ci_tcp_helper_close_no_trampoline_retaddr:\n\t"
+                       ".global ci_tcp_helper_close_no_trampoline_retaddr\n\t"
+                       ".hidden ci_tcp_helper_close_no_trampoline_retaddr\n\t"
+                       "xchgl %%ebx, %%ecx"
+                       :"=a"(res)
+                       :"0"(call_num),"c"(fd));
 
   if (CI_UNLIKELY(res < 0)) {
     errno = -res;
@@ -303,12 +306,12 @@ int ci_tcp_helper_close_no_trampoline(int fd) {
   }
 
 #elif defined(__x86_64__)
-  asm volatile("syscall\n"
-      "ci_tcp_helper_close_no_trampoline_retaddr:"
-      ".global ci_tcp_helper_close_no_trampoline_retaddr\n\t"
-      ".hidden ci_tcp_helper_close_no_trampoline_retaddr\n\t"
-      :"=a"(res)
-      :"a"(call_num),"D"(fd));
+  __asm__ __volatile__("syscall\n"
+                       "ci_tcp_helper_close_no_trampoline_retaddr:"
+                       ".global ci_tcp_helper_close_no_trampoline_retaddr\n\t"
+                       ".hidden ci_tcp_helper_close_no_trampoline_retaddr\n\t"
+                       :"=a"(res)
+                       :"a"(call_num),"D"(fd));
 
   if (CI_UNLIKELY(res < 0)) {
     errno = -res;

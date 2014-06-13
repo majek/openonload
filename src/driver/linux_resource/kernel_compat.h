@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -167,6 +167,22 @@ out:
 static inline void efrm_pci_disable_msi(struct pci_dev *dev) {}
 #undef pci_disable_msi
 #define pci_disable_msi efrm_pci_disable_msi
+#endif
+
+/* VM_RESERVED prevents the MM from attempting to swap-out these
+ * pages.
+ *
+ * VM_IO is there to avoid people getting references to our pages to
+ * do direct-IO.  This has been recommended on the LKML.
+ * http://www.forbiddenweb.org/viewtopic.php?id=83167&page=3#347912
+ *
+ * From linux-3.7, VM_RESERVED is removed.
+ * VM_DONTEXPAND | VM_DONTDUMP is recommended as a replacement.
+ */
+#ifdef VM_RESERVED
+#define EFRM_VM_IO_FLAGS (VM_IO | VM_RESERVED | VM_DONTEXPAND)
+#else
+#define EFRM_VM_IO_FLAGS (VM_IO | VM_DONTDUMP | VM_DONTEXPAND)
 #endif
 
 #endif /* DRIVER_LINUX_RESOURCE_KERNEL_COMPAT_H */

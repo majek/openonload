@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -782,6 +782,7 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
       "ooo=%d", pf, ts->retransmits, ts->dup_acks, stats.rtos,
       stats.fast_recovers, stats.rx_seq_errs, stats.rx_ack_seq_errs,
       stats.rx_ooo_pkts, stats.rx_ooo_fill);
+  log("%s  tx_nomac=%u", pf, stats.tx_nomac_defer);
 
 #ifndef __KERNEL__
 # define fmt_timer(_b, _l, _n, name, field)                             \

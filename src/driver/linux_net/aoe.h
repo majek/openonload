@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,11 +33,20 @@
 #include "io.h"
 #include "regs.h"
 #include "nic.h"
+#include "efx_ioctl.h"
 
 #if defined(EFX_NOT_UPSTREAM) && defined( CONFIG_SFC_AOE)
-void efx_aoe_event(struct efx_nic *efx, efx_qword_t *event);
+bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event);
+int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld);
+int efx_aoe_update_keys(struct efx_nic *efx,
+			struct efx_update_license *key_stats);
 #else
-void efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return; };
+bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return false; };
+int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld) { return -ENOSYS; }
+int efx_aoe_update_keys(struct efx_nic *efx,
+			struct efx_update_license *key_stats) {
+	return -ENOSYS;
+}
 #endif
 
 #endif /* EFX_AOE_H */

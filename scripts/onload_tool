@@ -125,6 +125,7 @@ do_unload() {
   tryunload sfc_tune
   tryunload sfc_mtd
   tryunload sfc_control
+  tryunload sfc_aoe
   tryunload sfc
   grep -q sfc/sfc.ko /lib/modules/$(uname -r)/modules.dep && \
       log "WARNING: sfc driver may reload due to an in-distro driver"
@@ -145,6 +146,8 @@ cmd_reload() {
   trylog /sbin/modprobe sfc_tune
   trylog /sbin/modprobe onload
   isloaded onload || fail "ERROR: onload module did not load"
+  # NB. sfc_aoe not always installed; don't want to moan...
+  /sbin/modprobe sfc_aoe >/dev/null 2>&1
   exit 0
 }
 

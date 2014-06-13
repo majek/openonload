@@ -68,6 +68,7 @@ EFX_HAVE_OLD_CSUM			nsymbol __sum16			include/linux/types.h
 EFX_HAVE_OLD_IP_FAST_CSUM		custom
 EFX_NEED_CSUM_UNFOLDED			nsymbol csum_unfold		include/net/checksum.h
 EFX_NEED_CSUM_TCPUDP_NOFOLD		custom
+EFX_NEED_ROOT_DEVICE_REGISTER		nsymbol root_device_register	include/linux/device.h
 EFX_NEED_DEV_NOTICE			nsymbol	dev_notice		include/linux/device.h
 EFX_NEED_DEV_CREATE_FIX			symtype	device_create		include/linux/device.h struct device *(struct class *, struct device *, dev_t, char *, ...)
 EFX_HAVE_GRO				custom
@@ -157,7 +158,7 @@ EFX_HAVE_BIN_ATTRIBUTE_OP_ATTR_PARAM	custom
 EFX_HAVE_BIN_ATTRIBUTE_OP_FILE_PARAM	custom
 EFX_NEED_BOOL				nsymbol	bool			include/linux/types.h
 EFX_USE_ETHTOOL_GET_SSET_COUNT		symbol	get_sset_count		include/linux/ethtool.h
-EFX_HAVE_ETHTOOL_RESET			member  struct_ethtool_ops	reset	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_RESET			custom
 EFX_HAVE_ETHTOOL_SET_PHYS_ID		symbol	set_phys_id		include/linux/ethtool.h
 EFX_NEED_ETHTOOL_CMD_SPEED		nsymbol	ethtool_cmd_speed	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_GMODULEEEPROM		symbol	get_module_eeprom	include/linux/ethtool.h
@@ -206,7 +207,8 @@ EFX_NEED_TIMESPEC_ADD_NS		nsymbol	timespec_add_ns		include/linux/time.h
 EFX_NEED_TIMESPEC_SUB			nsymbol	timespec_sub		include/linux/time.h
 EFX_NEED_TIMESPEC_COMPARE		nsymbol	timespec_compare	include/linux/time.h
 EFX_NEED_NS_TO_TIMESPEC			nexport ns_to_timespec		include/linux/time.h	kernel/time.c
-EFX_HAVE_FDTABLE_ACCESSORS		symbol	__set_close_on_exec	include/linux/fdtable.h
+EFX_HAVE_FDTABLE_FULL_ACCESSORS		symbol	__set_close_on_exec	include/linux/fdtable.h
+EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS	symbol	fd_is_open		include/linux/fdtable.h
 EFX_HAVE_FDTABLE_H			file				include/linux/fdtable.h
 EFX_NEED_SET_NORMALIZED_TIMESPEC	custom
 EFX_HAVE_PROCFS_DELETED			symbol	deleted			include/linux/proc_fs.h
@@ -215,7 +217,11 @@ EFX_HAVE_NDO_SET_MULTICAST_LIST		symbol	ndo_set_multicast_list	include/linux/net
 EFX_HAVE_OLD_ETHTOOL_GET_RXNFC		memtype	struct_ethtool_ops	get_rxnfc	include/linux/ethtool.h int (*)(struct net_device *, struct ethtool_rxnfc *, void *)
 EFX_HAVE_CPU_RMAP			file				include/linux/cpu_rmap.h
 EFX_NEED_KTIME				nfile				include/linux/ktime.h
-EFX_HAVE_NET_TSTAMP			file				include/linux/net_tstamp.h
+EFX_HAVE_NET_TSTAMP			file				include/linux/net_tstamp.h include/uapi/linux/net_tstamp.h
+EFX_NEED_PPS_SUB_TS			nsymbol pps_sub_ts		include/linux/pps_kernel.h
+EFX_HAVE_PHC_SUPPORT			symbol	PTP_CLOCK_PPSUSR	include/linux/ptp_clock_kernel.h
+EFX_NEED_PPS_EVENT_TIME			nsymbol	pps_event_time		include/linux/pps_kernel.h
+EFX_HAVE_PPS_KERNEL			file				include/linux/pps_kernel.h
 EFX_HAVE_DIV_S64_REM			symbol	div_s64_rem		include/linux/math64.h
 EFX_NEED_IP_IS_FRAGMENT			nsymbol	ip_is_fragment		include/net/ip.h
 EFX_NEED_NETDEV_FEATURES_T		nsymbol	netdev_features_t	include/linux/netdevice.h
@@ -235,6 +241,9 @@ EFX_NEED_SKB_CHECKSUM_NONE_ASSERT	nsymbol	skb_checksum_none_assert	include/linux
 EFX_NEED_SKB_HEADER_CLONED		nsymbol	skb_header_cloned	include/linux/skbuff.h
 EFX_HAVE_NON_CONST_KERNEL_PARAM		symtype	param_set_uint		include/linux/moduleparam.h	int (const char *, struct kernel_param *)
 EFX_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops		include/linux/moduleparam.h
+EFX_NEED_KOBJECT_INIT_AND_ADD		nsymbol	kobject_init_and_add	include/linux/kobject.h
+EFX_NEED_KOBJECT_SET_NAME_VARGS		nsymbol kobject_set_name_vargs	include/linux/kobject.h
+EFX_USE_ETHTOOL_OPS_EXT			symbol	ethtool_ops_ext		include/linux/ethtool.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
@@ -258,6 +267,7 @@ EFX_HAVE_STRUCT_PATH			symtype	alloc_file		include/linux/file.h struct file *(st
 EFX_HAVE_CONST_D_OP			memtype	struct_dentry_operations d_op	include/linux/dcache.h	const struct dentry_operations *
 EFX_FSTYPE_HAS_MOUNT			member	struct_file_system_type	mount	include/linux/fs.h
 EFX_NEED_VFSMOUNT_PARAM_IN_GET_SB	memtype	struct_file_system_type	get_sb	include/linux/fs.h	int (*)(struct file_system_type *, int, const char *, void *, struct vfsmount *)
+EFX_HAVE_OLD_STRUCT_MODULE_MKOBJ_PTR	memtype struct_module mkobj include/linux/module.h struct module_kobject*
 
 # Note this is the only place where the first test is needed to perform the subsequent kcompat tests
 EFX_HAVE_KMEM_CACHE_S			custom
@@ -266,6 +276,7 @@ EFX_HAVE_KMEM_CACHE_FLAGS		symtype	kmem_cache_create	include/linux/slab.h struct
 EFX_HAVE_KMEM_CACHE_CACHEP		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(struct kmem_cache *, void*))
 
 EFX_HAVE_ALLOC_FILE			symbol	alloc_file	include/linux/file.h
+EFX_NEED_LE_BIT_OPS			nsymbol	set_bit_le		include/asm-generic/bitops/le.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 
@@ -354,8 +365,16 @@ function do_export()
     test_export $sym "$@"
 }
 function do_nexport() { ! do_export "$@"; }
-function do_file()    { test -f $KBUILD_SRC/$3; }
-function do_nfile()   { ! test -f $KBUILD_SRC/$3; }
+function do_file()
+{
+    for file in "$@"; do
+        if [ -f $KBUILD_SRC/$file ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+function do_nfile()   { ! do_file "$@"; }
 
 function do_custom()  { do_$1; }
 
@@ -391,6 +410,8 @@ function test_symbol()
     local symbol=$1
     shift
     local file
+    local prefix
+    local prefix_list
 
     for file in "$@"; do
         # For speed, lets just grep through the file. The symbol may
@@ -401,13 +422,28 @@ function test_symbol()
         #     void (*SYMBOL)(void)
         #     enum { SYMBOL, } void
         #
-        if [ $verbose = true ]; then
-            echo >&2 "Looking for '$symbol' in '$KBUILD_SRC/$file'"
+	# Since 3.7 headers can be in both $KBUILD_SRC/include
+	#     or $KBUILD_SRC/include/uapi so check both
+	# If the file contains "include/linux" then build set of
+        # prefixes 
+
+        prefix=$(dirname $file)
+	file=$(basename $file)
+        if [ "$prefix" == "include/linux" ]; then
+            prefix_list="include/linux/ include/uapi/linux/"
+	else
+            prefix_list="$prefix/"
         fi
-        [ -f "$KBUILD_SRC/$file" ] &&  \
-            strip_comments $KBUILD_SRC/$file | \
-            egrep -w "$symbol" >/dev/null && \
-            return 0
+
+	for prefix in $prefix_list; do
+            if [ $verbose = true ]; then
+                echo >&2 "Looking for '$symbol' in '$KBUILD_SRC/$prefix$file'"
+            fi
+            [ -f "$KBUILD_SRC/$prefix$file" ] &&  \
+                strip_comments $KBUILD_SRC/$prefix$file | \
+                egrep -w "$symbol" >/dev/null && \
+                return 0
+        done
     done
     return 1
 }
@@ -621,8 +657,11 @@ function do_EFX_HAVE_MTD_DIRECT_ACCESS()
 {
     # RHEL 4 is missing <mtd/mtd-abi.h>; assume old operation names
     # in this case
-    ! test -f $KBUILD_SRC/include/mtd/mtd-abi.h || \
-	defer_test_memtype pos struct_mtd_info erase include/linux/mtd/mtd.h void
+    # kernels post 3.5 changed to use _<operator> for function pointers
+    # kernels post 3.7 changed the location of mtd-abi.h to uapi/..
+    (! test -f $KBUILD_SRC/include/mtd/mtd-abi.h && \
+    ! test -f $KBUILD_SRC/include/uapi/mtd/mtd-abi.h ) || \
+	 defer_test_memtype pos struct_mtd_info erase include/linux/mtd/mtd.h void
 }
 
 function do_EFX_NEED_GFP_T()
@@ -837,6 +876,12 @@ void (*ctor)(void*, struct kmem_cache_s *, unsigned long), \
 void (*dtor)(void*, kmem_cache_t *, unsigned long))) *kernel_compat_dummy = \
 &kmem_cache_create;
 "
+}
+
+function do_EFX_HAVE_ETHTOOL_RESET
+{
+    test_symbol ethtool_ops_ext include/linux/ethtool.h || \
+	defer_test_memtype pos struct_ethtool_ops reset include/linux/ethtool.h void
 }
 
 ######################################################################

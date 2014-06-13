@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -554,6 +554,7 @@ OO_INTERCEPT(int, shutdown,
      * Solaris validates it after validation of the socket state. */
     if (!citp_shutdown_how_is_valid(how)) {
       errno = EINVAL;
+      citp_fdinfo_release_ref(fdi, 0);
       citp_exit_lib(&lib_context, FALSE);
       Log_CALL_RESULT(-1);
       return -1;
@@ -664,8 +665,8 @@ OO_INTERCEPT(int, getsockopt,
     } else {
       rc = citp_fdinfo_get_ops(fdi)->getsockopt(fdi,level,optname,optval,
                                                 optlen);
-      citp_fdinfo_release_ref(fdi, 0);
     }
+    citp_fdinfo_release_ref(fdi, 0);
     citp_exit_lib(&lib_context, rc == 0);
   } else {
     Log_PT(log("PT: sys_getsockopt(%d, %d, %d)", fd, level, optname));
@@ -1477,13 +1478,13 @@ OO_INTERCEPT(int, epoll_wait,
     else if (fdi->protocol->type == CITP_EPOLLB_FD ) {
       rc = citp_epollb_wait(fdi, events, maxevents, timeout, NULL,
                             &lib_context);
-      citp_fdinfo_release_ref(fdi, 0);
       citp_exit_lib(&lib_context, rc >= 0);
     }
     else {
       citp_fdinfo_release_ref(fdi, 0);
       goto error;
     }
+    citp_fdinfo_release_ref(fdi, 0);
     Log_CALL_RESULT(rc);
     return rc;
   }
@@ -1517,20 +1518,21 @@ OO_INTERCEPT(int, epoll_pwait,
 
   if( (fdi=citp_fdtable_lookup(epfd)) ) {
     int rc;
-    if( fdi->protocol->type == CITP_EPOLL_FD )
+    if( fdi->protocol->type == CITP_EPOLL_FD ) {
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
       rc = citp_epoll_wait(fdi, events, maxevents, timeout, sigmask,
                            &lib_context);
+    }
     else if (fdi->protocol->type == CITP_EPOLLB_FD ) {
       rc = citp_epollb_wait(fdi, events, maxevents, timeout, sigmask,
                             &lib_context);
-      citp_fdinfo_release_ref(fdi, 0);
       citp_exit_lib(&lib_context, rc >= 0);
     }
     else {
       citp_fdinfo_release_ref(fdi, 0);
       goto error;
     }
+    citp_fdinfo_release_ref(fdi, 0);
     Log_CALL_RESULT(rc);
     return rc;
   }
@@ -2324,6 +2326,10 @@ OO_INTERCEPT(int, pipe,
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_pipe(fd);
   }
+  if( fd == NULL ) {
+    errno = EFAULT;
+    return -1;
+  }
 
   Log_CALL(ci_log("%s([%d],[%d])", __FUNCTION__, fd[0], fd[1]));
   citp_enter_lib(&lib_context);
@@ -2359,6 +2365,8 @@ OO_INTERCEPT(int, pipe2,
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_pipe2(fd, flags);
   }
+  if( fd == NULL || (flags & ~O_CLOEXEC) != 0)
+    return ci_sys_pipe2(fd, flags);
 
   Log_CALL(ci_log("%s([%d],[%d], %x)", __FUNCTION__, fd[0], fd[1], flags));
   citp_enter_lib(&lib_context);

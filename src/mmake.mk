@@ -38,10 +38,6 @@ ifeq ($(DOS),1)
 SUBDIRS              := driver
 endif
 
-ifeq ($(SIENAMC),1)
-SUBDIRS	:= firmware
-endif
-
 ifeq ($(DOS32_UTILS)$(LINUX_UIO_UTILS),1)
 SUBDIRS              := tools
 endif

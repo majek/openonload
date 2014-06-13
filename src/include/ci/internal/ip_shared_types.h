@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1583,6 +1583,7 @@ struct oo_tcp_socket_stats {
   ci_uint32  tx_stop_more;    /* TX stopped by CORK, MSG_MORE etc. */
   ci_uint32  tx_stop_nagle;   /* TX stopped by nagle's algorithm   */
   ci_uint32  tx_stop_app;     /* TX stopped because TXQ empty      */
+  ci_uint32  tx_nomac_defer;  /* Deferred send waiting for ARP     */
 #if CI_CFG_BURST_CONTROL
   ci_uint32  tx_stop_burst;   /* TX stopped by burst control       */
 #endif

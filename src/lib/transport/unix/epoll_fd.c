@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1005,7 +1005,6 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     if( rc < 0 ) {
       if( eps.has_epollet )
         ep->avoid_spin_once = 1;
-      citp_fdinfo_release_ref(fdi, 0);
       return rc;
     }
   }
@@ -1029,7 +1028,6 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     ep->blocking = 0;
   }
 
-  citp_fdinfo_release_ref(fdi, 0);
   Log_POLL(ci_log("%s(%d): to kernel => %d (%d)", __FUNCTION__, fdi->fd,
                   rc, errno));
   return rc;

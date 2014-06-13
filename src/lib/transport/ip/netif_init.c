@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1617,6 +1617,9 @@ int ci_netif_pkt_prefault(ci_netif* ni)
    * The return value is not useful, and only exists to prevent
    * optimisations that would render this function useless.  This is also
    * the reason the function is not static.
+   *
+   * Similarly, the cast into volatile is designed to prevent compiler
+   * optimisations.
    */
   ci_ip_pkt_fmt* pkt;
   int i, n;
@@ -1626,7 +1629,7 @@ int ci_netif_pkt_prefault(ci_netif* ni)
     n = ni->state->n_pkts_allocated;
     for( i = 0; i < n; ++i ) {
       pkt = PKT(ni, i);
-      rc += pkt->refcount;
+      rc += *(volatile ci_int32*)(&pkt->refcount);
     }
   }
   return rc;

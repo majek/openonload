@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -311,12 +311,14 @@ static int citp_pipe_recv_none(citp_fdinfo* fdinfo,
 static int citp_pipe_bind(citp_fdinfo* fdinfo,
                           const struct sockaddr* sa, socklen_t sa_len)
 {
+  citp_fdinfo_release_ref(fdinfo, 0);
   errno = ENOTSOCK;
   return -1;
 }
 
 static int citp_pipe_listen(citp_fdinfo* fdinfo, int backlog)
 {
+  citp_fdinfo_release_ref(fdinfo, 0);
   errno = ENOTSOCK;
   return -1;
 }
@@ -332,6 +334,7 @@ static int citp_pipe_connect(citp_fdinfo* fdinfo,
                               const struct sockaddr* sa, socklen_t sa_len,
                               citp_lib_context_t* lib_context)
 {
+  citp_fdinfo_release_ref(fdinfo, 0);
   errno = ENOTSOCK;
   return -1;
 }
@@ -361,6 +364,7 @@ static int citp_pipe_getsockopt(citp_fdinfo* fdinfo, int level,
 static int citp_pipe_setsockopt(citp_fdinfo* fdinfo, int level, int optname,
                                  const void* optval, socklen_t optlen)
 {
+  citp_fdinfo_release_ref(fdinfo, 0);
   errno = ENOTSOCK;
   return -1;
 }
@@ -410,6 +414,41 @@ static int citp_pipe_ioctl(citp_fdinfo *fdinfo, int cmd, void *arg)
   return rc;
 }
 
+
+static int citp_pipe_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg,
+                                 int flags)
+{
+  msg->rc = -ENOTSOCK;
+  return 1;
+}
+
+
+static int citp_pipe_zc_recv(citp_fdinfo* fdi,
+                                 struct onload_zc_recv_args* args)
+{
+  return -ENOTSOCK;
+}
+
+
+static int citp_pipe_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
+                                        int flags)
+{
+  return -ENOTSOCK;
+}
+
+
+static int citp_pipe_zc_recv_filter(citp_fdinfo* fdi,
+                                        onload_zc_recv_filter_callback filter,
+                                        void* cb_arg, int flags)
+{
+#if CI_CFG_ZC_RECV_FILTER
+  return -ENOTSOCK;
+#else
+  return -ENOSYS;
+#endif
+}
+
+
 /* Read and write ends of the pipe have different protocol implementations in the same
  * manner as they have them separate in linux kernel. All io-unrelated hooks are common,
  * reader has no write/send support of any kind, writer has no read/recv support.
@@ -447,6 +486,10 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .epoll       = citp_pipe_epoll_reader,
 #endif
 #endif
+    .zc_send     = citp_pipe_zc_send,
+    .zc_recv     = citp_pipe_zc_recv,
+    .zc_recv_filter = citp_pipe_zc_recv_filter,
+    .recvmsg_kernel = citp_pipe_recvmsg_kernel,
 #if CI_CFG_SENDFILE
     /* qustion kostik: will we ever ever need this??? */
     .sendfile_post_hook = NULL,
@@ -487,6 +530,10 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .epoll       = citp_pipe_epoll_writer,
 #endif
 #endif
+    .zc_send     = citp_pipe_zc_send,
+    .zc_recv     = citp_pipe_zc_recv,
+    .zc_recv_filter = citp_pipe_zc_recv_filter,
+    .recvmsg_kernel = citp_pipe_recvmsg_kernel,
 #if CI_CFG_SENDFILE
     /* qustion kostik: will we ever ever need this??? */
     .sendfile_post_hook = NULL,

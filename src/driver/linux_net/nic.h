@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -173,6 +173,8 @@ struct siena_nic_data {
 #ifdef CONFIG_SFC_MCDI_MON
 	struct efx_mcdi_mon hwmon;
 #endif
+	u64 rx_nodesc_drops_total;
+	u64 rx_nodesc_drops_while_down;
 };
 
 #ifdef CONFIG_SFC_MCDI_MON
@@ -282,30 +284,57 @@ extern int efx_sriov_set_vf_spoofchk(struct net_device *net_dev, int vf,
 #endif
 #endif
 
+struct ethtool_ts_info;
 #ifdef CONFIG_SFC_PTP
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NET_TSTAMP)
 struct hwtstamp_config;
 struct efx_ts_read;
-extern int efx_ptp_ts_init(struct efx_nic *efx, struct hwtstamp_config *init);
+extern int efx_ptp_ts_init(struct efx_nic *efx, struct hwtstamp_config *init,
+			   bool try_improved_filtering);
 extern int efx_ptp_ts_read(struct efx_nic *efx, struct efx_ts_read *read);
 #endif
 struct efx_ts_settime;
 struct efx_ts_adjtime;
 struct efx_ts_sync;
+struct efx_ts_set_vlan_filter;
+struct efx_ts_set_uuid_filter;
+struct efx_ts_set_domain_filter;
+#if defined(EFX_NOT_UPSTREAM)
 extern int efx_ptp_ts_settime(struct efx_nic *efx, struct efx_ts_settime *settime);
 extern int efx_ptp_ts_adjtime(struct efx_nic *efx, struct efx_ts_adjtime *adjtime);
 extern int efx_ptp_ts_sync(struct efx_nic *efx, struct efx_ts_sync *sync);
+extern int efx_ptp_ts_set_vlan_filter(struct efx_nic *efx, struct efx_ts_set_vlan_filter *vlan_filter);
+extern int efx_ptp_ts_set_uuid_filter(struct efx_nic *efx, struct efx_ts_set_uuid_filter *uuid_filter);
+extern int efx_ptp_ts_set_domain_filter(struct efx_nic *efx, struct efx_ts_set_domain_filter *domain_filter);
+#endif
 extern void efx_ptp_probe(struct efx_nic *efx);
 extern int efx_ptp_ioctl(struct efx_nic *efx, struct ifreq *ifr, int cmd);
+extern int efx_ptp_get_ts_info(struct net_device *net_dev,
+			       struct ethtool_ts_info *ts_info);
 extern bool efx_ptp_is_ptp_tx(struct efx_nic *efx, struct sk_buff *skb);
 extern int efx_ptp_tx(struct efx_nic *efx, struct sk_buff *skb);
 extern void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev);
 #else
 static inline void efx_ptp_probe(struct efx_nic *efx) {}
 static inline int efx_ptp_ioctl(struct efx_nic *efx, struct ifreq *ifr, int cmd) {return -ENOSYS; }
+static inline int efx_ptp_get_ts_info(struct net_device *net_dev,
+				      struct ethtool_ts_info *ts_info)
+{ return -EOPNOTSUPP; }
 static inline bool efx_ptp_is_ptp_tx(struct efx_nic *efx, struct sk_buff *skb) { return false; }
 static inline int efx_ptp_tx(struct efx_nic *efx, struct sk_buff *skb) { return NETDEV_TX_OK; }
 static inline void efx_ptp_event(struct efx_nic *efx, efx_qword_t *ev) {}
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
+struct efx_ts_get_pps;
+struct efx_ts_hw_pps;
+extern int efx_ptp_pps_get_event(struct efx_nic *efx, struct efx_ts_get_pps *data);
+extern int efx_ptp_hw_pps_enable(struct efx_nic *efx, struct efx_ts_hw_pps *data);
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+extern int efx_aoe_attach(struct efx_nic *efx);
+extern void efx_aoe_detach(struct efx_nic *efx);
 #endif
 
 extern const struct efx_nic_type falcon_a1_nic_type;

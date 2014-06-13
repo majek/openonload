@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -481,12 +481,20 @@ static int oo_pipe_wait_write(ci_netif* ni, struct oo_pipe* p)
 #ifndef __KERNEL__
   if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_PIPE_SEND) ) {
     ci_uint64 now_frc, start_frc;
+    ci_uint64 schedule_frc;
+    citp_signal_info* si = citp_signal_get_specific_inited();
 
     ci_frc64(&now_frc);
     start_frc = now_frc;
+    schedule_frc = now_frc;
 
     do {
-      ci_spinloop_pause();
+      rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
+                                           false, NULL, si);
+      if( rc < 0 ) {
+        CI_SET_ERROR(rc, -rc);
+        return rc;
+      }
 
       if ( oo_pipe_is_writable(p) )
         return 0;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -165,9 +165,15 @@
 	#define ETH_FLAG_RXHASH 0
 #endif
 
-#ifndef NETIF_F_NTUPLE
-	/* This reduces the need for #ifdefs */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0)
+	/* Prior to Linux 3.0, NETIF_F_NTUPLE was taken to mean that
+	 * ethtool_ops::set_rx_ntuple was set, which is not the case in
+	 * this driver.  Therefore, we prevent the feature from being
+	 * set even if it is defined.
+	 */
+	#undef NETIF_F_NTUPLE
 	#define NETIF_F_NTUPLE 0
+	#undef ETH_FLAG_NTUPLE
 	#define ETH_FLAG_NTUPLE 0
 #endif
 
@@ -1645,6 +1651,19 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	}
 #endif
 
+#ifdef EFX_NEED_KOBJECT_INIT_AND_ADD
+	#define kobject_init_and_add efx_kobject_init_and_add
+	extern int
+	efx_kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
+	 			 struct kobject *parent, const char *fmt, ...);
+#endif
+
+#ifdef EFX_NEED_KOBJECT_SET_NAME_VARGS
+	extern int
+	kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs);
+#endif
+
+
 /**************************************************************************
  *
  * Wrappers to fix bugs and parameter changes
@@ -2329,7 +2348,43 @@ ssize_t efx_pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, void *bu
 #define pci_read_vpd efx_pci_read_vpd
 #endif
 
-#ifdef EFX_HAVE_FDTABLE_ACCESSORS
+#if defined(EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS) && !defined(EFX_HAVE_FDTABLE_FULL_ACCESSORS)
+#include <linux/fdtable.h>
+static inline void efx_set_close_on_exec(int fd, struct fdtable *fdt)
+{
+	__set_bit(fd, fdt->close_on_exec);
+}
+
+static inline void efx_clear_close_on_exec(int fd, struct fdtable *fdt)
+{
+	__clear_bit(fd, fdt->close_on_exec);
+}
+
+static inline bool efx_close_on_exec(int fd, const struct fdtable *fdt)
+{
+	return close_on_exec(fd, fdt);
+}
+
+static inline void efx_set_open_fd(int fd, struct fdtable *fdt)
+{
+	__set_bit(fd, fdt->open_fds);
+}
+
+static inline void efx_clear_open_fd(int fd, struct fdtable *fdt)
+{
+	__clear_bit(fd, fdt->open_fds);
+}
+
+static inline bool efx_fd_is_open(int fd, const struct fdtable *fdt)
+{
+	return fd_is_open(fd, fdt);
+}
+
+static inline unsigned long efx_get_open_fds(int fd, const struct fdtable *fdt)
+{
+	return fdt->open_fds[fd];
+}
+#elif defined(EFX_HAVE_FDTABLE_FULL_ACCESSORS)
 #include <linux/fdtable.h>
 static inline void efx_set_close_on_exec(int fd, struct fdtable *fdt)
 {
@@ -2417,5 +2472,122 @@ static inline void *skb_frag_address(const skb_frag_t *frag)
 	return page_address(frag->page) + frag->page_offset;
 }
 #endif
+
+#ifdef EFX_NEED_PPS_EVENT_TIME
+	struct pps_event_time {
+	#ifdef CONFIG_NTP_PPS
+		struct timespec ts_raw;
+	#endif /* CONFIG_NTP_PPS */
+		struct timespec ts_real;
+	};
+
+	#ifdef CONFIG_NTP_PPS
+	static inline void pps_get_ts(struct pps_event_time *ts)
+	{
+		getnstime_raw_and_real(&ts->ts_raw, &ts->ts_real);
+	}
+
+	#else /* CONFIG_NTP_PPS */
+
+	static inline void pps_get_ts(struct pps_event_time *ts)
+	{
+		getnstimeofday(&ts->ts_real);
+	}
+
+	#endif /* CONFIG_NTP_PPS */
+#endif
+
+#ifdef EFX_NEED_PPS_SUB_TS
+#ifdef EFX_HAVE_PPS_KERNEL
+	#include <linux/pps_kernel.h>
+#endif
+	static inline void pps_sub_ts(struct pps_event_time *ts, struct timespec delta)
+	{
+		ts->ts_real = timespec_sub(ts->ts_real, delta);
+	#ifdef CONFIG_NTP_PPS
+		ts->ts_raw = timespec_sub(ts->ts_raw, delta);
+	#endif
+	}
+#endif
+
+#ifndef EFX_HAVE_PHC_SUPPORT
+	struct ptp_clock_time {
+		__s64 sec;
+		__u32 nsec;
+		__u32 reserved;
+	};
+
+	struct ptp_extts_request {
+		unsigned int index;
+		unsigned int flags;
+		unsigned int rsv[2];
+	};
+
+	struct ptp_perout_request {
+		struct ptp_clock_time start;
+		struct ptp_clock_time period;
+		unsigned int index;
+		unsigned int flags;
+		unsigned int rsv[4];
+	};
+
+	struct ptp_clock_request {
+		enum {
+			PTP_CLK_REQ_EXTTS,
+			PTP_CLK_REQ_PEROUT,
+			PTP_CLK_REQ_PPS,
+		} type;
+		union {
+			struct ptp_extts_request extts;
+			struct ptp_perout_request perout;
+		};
+	};
+
+	struct ptp_clock_info {
+		struct module *owner;
+		char name[16];
+		s32 max_adj;
+		int n_alarm;
+		int n_ext_ts;
+		int n_per_out;
+		int pps;
+		int (*adjfreq)(struct ptp_clock_info *ptp, s32 delta);
+		int (*adjtime)(struct ptp_clock_info *ptp, s64 delta);
+		int (*gettime)(struct ptp_clock_info *ptp, struct timespec *ts);
+		int (*settime)(struct ptp_clock_info *ptp, const struct timespec *ts);
+		int (*enable)(struct ptp_clock_info *ptp,
+				struct ptp_clock_request *request, int on);
+	};
+#else
+#include <linux/ptp_clock_kernel.h>
+#endif
+
+#ifdef EFX_NEED_PTP_PPS_USR
+#define PTP_CLOCK_PPSUSR (PTP_CLOCK_PPS + 1)
+#endif
+
+#ifdef EFX_NEED_LE_BIT_OPS
+static inline void set_bit_le(unsigned nr, unsigned char *addr)
+{
+	addr[nr / 8] |= (1 << (nr % 8));
+}
+
+static inline void clear_bit_le(unsigned nr, unsigned char *addr)
+{
+	addr[nr / 8] &= ~(1 << (nr % 8));
+}
+#endif
+
+#ifdef EFX_NEED_ROOT_DEVICE_REGISTER
+#define root_device_register(_name) \
+	__root_device_register(_name, THIS_MODULE)
+
+extern struct device * __root_device_register(const char *name, struct module *owner);
+
+void root_device_unregister(struct device *dev);
+
+extern void device_destroy(struct class *class, dev_t devt);
+
+#endif /* EFX_NEED_ROOT_DEVICE_REGISTER */
 
 #endif /* EFX_KERNEL_COMPAT_H */

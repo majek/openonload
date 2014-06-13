@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -120,7 +120,9 @@ int citp_epoll_getsockopt(citp_fdinfo* fdinfo, int level,
 int citp_epoll_setsockopt(citp_fdinfo* fdinfo, int level, int optname,
                           const void* optval, socklen_t optlen)
 {
-  return ci_sys_setsockopt(fdinfo->fd, level, optname, optval, optlen);
+  citp_fdinfo_release_ref(fdinfo, 0);
+  errno = ENOTSOCK;
+  return -1;
 }
 int citp_epoll_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags)
 {

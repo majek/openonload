@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2334,7 +2334,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     /*! \TODO: which counter do I increment here?  Also improve these log
      * messages.
      */
-    return;
+    goto freepkt_out;
   }
 
 #if CI_CFG_LIMIT_AMSS
@@ -3313,7 +3313,8 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         {
           LOG_U(log(LNTS_FMT" data arrived with SHUT_RD (rx=%x tx=%x)",
                     LNTS_PRI_ARGS(netif, ts), ts->s.rx_errno, ts->s.tx_errno));
-          ci_tcp_send_rst(netif, ts);
+          ci_netif_pkt_release_rx(netif, pkt);
+          ci_tcp_send_rst(netif,ts);
           ci_tcp_drop(netif, ts, ECONNRESET);
           return;
         }
@@ -3617,8 +3618,10 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
       if( pkt != NULL )
         ci_tcp_send_ack(netif, ts, pkt);
     }
-    else 
+    else {
+      ci_netif_pkt_release_rx(netif, pkt);
       ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_TX);
+    }
     return;
   }
 

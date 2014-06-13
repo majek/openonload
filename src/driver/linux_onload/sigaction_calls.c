@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -68,7 +68,7 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
   rc = __get_user(old_type, &user_data->type);
   if( rc != 0 )
     return rc;
-  seq = old_type + (1 << OO_SIGHANGLER_SEQ_SHIFT);
+  seq = (old_type & OO_SIGHANGLER_SEQ_MASK) + (1 << OO_SIGHANGLER_SEQ_SHIFT);
 
   /* We are going to change signal handler: UL should wait until we've
    * finished */

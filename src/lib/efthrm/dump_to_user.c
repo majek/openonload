@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,8 +36,15 @@ static void oo_dump_to_buf(void* opaque, const char* fmt, ...)
     va_start(args, fmt);
     rc = vsnprintf(ds->buf + ds->off, ds->buf_len - ds->off, fmt, args);
     va_end(args);
-    if( rc <= 0 || rc >= ds->buf_len - ds->off ) {
+    if( rc <= 0 ) {
       ds->off = -1;
+    }
+    else if( rc >= ds->buf_len - ds->off ) {
+      /* vsnprintf() will return a larger value to indicate how many
+       * bytes it would have written.  Simplify this to "the buffer is
+       * full" 
+       */
+      ds->off = ds->buf_len;
     }
     else {
       ds->off += rc;

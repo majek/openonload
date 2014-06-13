@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -665,6 +665,9 @@ ci_inline int oo_clone_fd(struct file* filp, struct file** new_filp_out,
 
   if( new_fd >= 0 ) {
     struct file *new_filp;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)
+    new_filp = dentry_open(&filp->f_path, filp->f_flags, current_cred());
+#else
     dget(filp->f_dentry);
     mntget(filp->f_vfsmnt);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29))
@@ -672,10 +675,11 @@ ci_inline int oo_clone_fd(struct file* filp, struct file** new_filp_out,
 #else
     new_filp = dentry_open(filp->f_dentry, filp->f_vfsmnt, filp->f_flags,
                            current_cred());
-#endif
+#endif /* linux-2.6.9 */
     /* NB. If dentry_open() fails it drops the refs to f_dentry and
     ** f_vfsmnt for us, so there's no leak here.  Move along.
     */
+#endif /* linux-3.6 */
     if( ! IS_ERR(new_filp) ) {
       if( new_filp_out ) {
 	*new_filp_out = new_filp;

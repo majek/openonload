@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -555,12 +555,22 @@ static int libstack_mappings_init(void)
     pid_t pid = atoi(ent->d_name);
     if( pid == my_pid )
       continue;
+
+    /* http://www.novell.com/support/kb/doc.php?id=3649220 some kernel
+     * versions on SUSE have a pid=0 directory which is seen in "ls
+     * /proc" but isn't accessible so don't try to read it.
+     */
+    if( pid == 0 )
+      continue;
+
     int* stack_ids;
     rc = is_onloaded(pid, &stack_ids);
     if( rc == 0 )
       continue;
     if( rc == -1 ) {
-      if( errno == EACCES )
+      /* EACCES: do not have permissions for this process
+       * ENOENT: process have died while we were running here */
+      if( errno == EACCES || errno == ENOENT )
         continue;
       return -1;
     }
@@ -698,6 +708,7 @@ void libstack_pid_mapping_print(void)
   int i;
   struct pid_mapping* pm = pid_mappings;
   int max_spacing = 0;
+  int cnt;
 
   if( ! pid_mappings )
     return;
@@ -708,7 +719,7 @@ void libstack_pid_mapping_print(void)
     pm = pm->next;
   }
 
-  printf("#pid  stack-id");
+  printf("#pid      stack-id");
   if( max_spacing > strlen("stack-id") ) {
     for(i = 0; i < max_spacing - strlen("stack-id") - 1; ++i )
       printf(" ");
@@ -719,7 +730,7 @@ void libstack_pid_mapping_print(void)
 
   pm = pid_mappings;
   while( pm ) {
-    printf("%-6d", pm->pid);
+    printf("%-10d", pm->pid);
     for( i = 0; i < pm->n_stack_ids; ++i ) {
       printf("%d", pm->stack_ids[i]);
       if( i != pm->n_stack_ids - 1 )
@@ -738,8 +749,14 @@ void libstack_pid_mapping_print(void)
     snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
     int cmdline = open(cmdline_path, O_RDONLY);
     char buf[256];
-    while( read(cmdline, buf, 256) )
-      printf("%s", buf);
+    while( (cnt = read(cmdline, buf, 256)) > 0 ) {
+      for( i = 0; i < cnt; ++i ) {
+        if( buf[i] == '\0' )
+          printf(" ");
+        else
+          printf("%c", buf[i]);
+      }
+    }
     printf("\n");
 
     pm = pm->next;
@@ -796,6 +813,8 @@ static void print_threads_info(pid_t pid)
 
 int libstack_affinities_print(void)
 {
+  int i, cnt;
+
   if( ! pid_mappings )
     return 0;
 
@@ -808,8 +827,14 @@ int libstack_affinities_print(void)
     snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
     int cmdline = open(cmdline_path, O_RDONLY);
     char cmdline_buf[256];
-    while( read(cmdline, cmdline_buf, 256) )
-      printf("%s", cmdline_buf);
+    while( (cnt = read(cmdline, cmdline_buf, 256)) > 0 ) {
+      for( i = 0; i < cnt; ++i ) {
+        if( cmdline_buf[i] == '\0' )
+          printf(" ");
+        else
+          printf("%c", cmdline_buf[i]);
+      }
+    }
     printf("\n");
     print_threads_info(pm->pid);
     pm = pm->next;

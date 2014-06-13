@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -120,6 +120,8 @@ extern int efab_thr_get_inaccessible_stack_info(unsigned id,
 
 extern int efab_thr_can_access_stack(tcp_helper_resource_t* thr,
                                      int check_user);
+extern int efab_thr_user_can_access_stack(uid_t uid, uid_t euid,
+                                          ci_netif* ni);
 
 /*! Lookup a stack and grab a reference if found.  If [name] is not NULL,
  * search by name, else by [id]. 
@@ -212,6 +214,10 @@ extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t* ep,
                                              ci_int32 how);
 
 extern int efab_tcp_helper_connect_os_sock (ci_private_t *priv, void *arg);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+extern int sock_map_fd(struct socket *sock, int flags);
+#endif
 
 
 extern int efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs);

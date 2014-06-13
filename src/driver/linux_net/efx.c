@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2369,7 +2369,14 @@ static void efx_start_all(struct efx_nic *efx)
 		mutex_unlock(&efx->mac_lock);
 	}
 
+	/* Wait for NAPI to schedule to fill the RX descriptor ring */
+	msleep(250);
 	efx->type->start_stats(efx);
+	/* Wait to allow the first stats DMA to occur */
+	msleep(10);
+	spin_lock_bh(&efx->stats_lock);
+	efx->type->update_stats(efx);
+	spin_unlock_bh(&efx->stats_lock);
 }
 
 /* Flush all delayed work. Should only be called when no more delayed work
@@ -3142,6 +3149,9 @@ static int efx_register_netdev(struct efx_nic *efx)
 #endif
 #endif
 	SET_ETHTOOL_OPS(net_dev, &efx_ethtool_ops);
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_ETHTOOL_OPS_EXT)
+	set_ethtool_ops_ext(net_dev, &efx_ethtool_ops_ext);
+#endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_GSO_MAX_SEGS)
 	net_dev->gso_max_segs = EFX_TSO_MAX_SEGS;
 #endif
@@ -3371,7 +3381,7 @@ int efx_reset(struct efx_nic *efx, enum reset_type method)
 	netif_info(efx, drv, efx->net_dev, "resetting (%s)\n",
 		   RESET_TYPE(method));
 
-	netif_device_detach(efx->net_dev);
+	efx_device_detach_sync(efx);
 	efx_reset_down(efx, method);
 
 	rc = efx->type->reset(efx, method);
@@ -4238,7 +4248,7 @@ static int efx_pm_freeze(struct device *dev)
 	efx_dl_reset_suspend(efx);
 
 	if (efx->state != STATE_DISABLED) {
-		netif_device_detach(efx->net_dev);
+		efx_device_detach_sync(efx);
 
 		efx_stop_all(efx);
 		efx_stop_interrupts(efx, false);

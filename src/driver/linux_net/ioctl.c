@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,6 +48,7 @@
 #include "nic.h"
 #include "mcdi.h"
 #include "mcdi_pcol.h"
+#include "aoe.h"
 
 #ifdef EFX_NOT_UPSTREAM
 
@@ -261,7 +262,14 @@ efx_ioctl_rxfh_indir(struct efx_nic *efx, union efx_ioctl_data *data)
 static int
 efx_ioctl_ts_init(struct efx_nic *efx, union efx_ioctl_data *data)
 {
-	return efx_ptp_ts_init(efx, &data->ts_init);
+	/* bug 33070 For backward compatibility, we use a bit in the
+	 * flags field to indicate that the application wants to use PTPV2
+	 * enhanced UUID filtering. Old application code has this bit set to
+	 * zero. Note that this has no effect if a V1 mode is specified. */
+	bool try_improved_filtering =
+		data->ts_init.flags & EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED;
+	data->ts_init.flags &= ~EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED;
+	return efx_ptp_ts_init(efx, &data->ts_init, try_improved_filtering);
 }
 
 static int
@@ -272,6 +280,7 @@ efx_ioctl_ts_read(struct efx_nic *efx, union efx_ioctl_data *data)
 
 #endif
 
+#if defined(EFX_NOT_UPSTREAM)
 static int
 efx_ioctl_ts_settime(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -290,7 +299,54 @@ efx_ioctl_ts_sync(struct efx_nic *efx, union efx_ioctl_data *data)
 	return efx_ptp_ts_sync(efx, &data->ts_sync);
 }
 
+static int
+efx_ioctl_ts_set_vlan_filter(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ptp_ts_set_vlan_filter(efx, &data->ts_vlan_filter);
+}
+
+static int
+efx_ioctl_ts_set_uuid_filter(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ptp_ts_set_uuid_filter(efx, &data->ts_uuid_filter);
+}
+
+static int
+efx_ioctl_ts_set_domain_filter(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ptp_ts_set_domain_filter(efx, &data->ts_domain_filter);
+}
 #endif
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
+static int
+efx_ioctl_get_pps_event(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ptp_pps_get_event(efx, &data->pps_event);
+}
+
+static int
+efx_ioctl_hw_pps_enable(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ptp_hw_pps_enable(efx, &data->pps_enable);
+}
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+static int
+efx_ioctl_update_cpld(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_aoe_update_cpld(efx, &data->cpld);
+}
+
+static int
+efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_aoe_update_keys(efx, &data->key_stats);
+}
+#endif
+
 
 static int
 efx_ioctl_get_mod_eeprom(struct efx_nic *efx,
@@ -403,6 +459,7 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		op = efx_ioctl_ts_read;
 		break;
 #endif
+#if defined(EFX_NOT_UPSTREAM)
 	case EFX_TS_SETTIME:
 		size = sizeof(data.ts_settime);
 		op = efx_ioctl_ts_settime;
@@ -414,6 +471,39 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	case EFX_TS_SYNC:
 		size = sizeof(data.ts_sync);
 		op = efx_ioctl_ts_sync;
+		break;
+	case EFX_TS_SET_VLAN_FILTER:
+		size = sizeof(data.ts_vlan_filter);
+		op = efx_ioctl_ts_set_vlan_filter;
+		break;
+	case EFX_TS_SET_UUID_FILTER:
+		size = sizeof(data.ts_uuid_filter);
+		op = efx_ioctl_ts_set_uuid_filter;
+		break;
+	case EFX_TS_SET_DOMAIN_FILTER:
+		size = sizeof(data.ts_domain_filter);
+		op = efx_ioctl_ts_set_domain_filter;
+		break;
+#endif
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
+	case EFX_TS_GET_PPS:
+		size = sizeof(data.pps_event);
+		op = efx_ioctl_get_pps_event;
+		break;
+	case EFX_TS_ENABLE_HW_PPS:
+		size = sizeof(data.pps_enable);
+		op = efx_ioctl_hw_pps_enable;
+		break;
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+	case EFX_UPDATE_CPLD:
+		size = sizeof(data.cpld);
+		op = efx_ioctl_update_cpld;
+		break;
+	case EFX_LICENSE_UPDATE:
+		size = sizeof(data.key_stats);
+		op = efx_ioctl_update_license;
 		break;
 #endif
 	case EFX_MODULEEEPROM:

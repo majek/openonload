@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -470,12 +470,12 @@ static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 	user_addr = bt_alloc->base << 12u;
 	for (i = 0; i < n_pages; ++i) {
 		efrm_buffer_table_set_n(bt_alloc, nic, 1 << gfp_order,
-				        i, *pci_addrs, pd->owner_id);
+				        i << gfp_order, *pci_addrs, pd->owner_id);
 		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
 		pages = (void *)((char *)pages + pages_stride);
 		user_addr_put(user_addr, user_addrs);
 		user_addrs = (void *)((char *)user_addrs + user_addrs_stride);
-		user_addr += 4096;
+		user_addr += 4096 << gfp_order;
 	}
 	efrm_buffer_table_commit(nic);
 	return 0;
@@ -508,7 +508,7 @@ int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 
 	for (i = 0; i < n_pages; ++i) {
 		efrm_buffer_table_set_n(bt_alloc, nic, 1 << gfp_order,
-					i, *pci_addrs, pd->owner_id);
+					i << gfp_order, *pci_addrs, pd->owner_id);
 		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
 	}
 	efrm_buffer_table_commit(nic);

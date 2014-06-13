@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1211,6 +1211,7 @@ efrm_interpret_rule( const char** buf, size_t* remain,
             }
             else if ( efrm_compare_and_skip( buf, remain, "eth" ) == 0 ) {
                 rule->efr_protocol = ep_eth;
+                rule->eit_ruletype = EFRM_FR_MACADDRESS;
             }
             else {
                 EFRM_ERR("%s: Unable to understand protocol: %s", __func__, *buf );

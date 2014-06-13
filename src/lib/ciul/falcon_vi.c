@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -401,11 +401,11 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 	/* This beats the individual writes (below) because the whole thing
 	 * gets emitted as a single TLP.
 	 */
-	asm("movups %1, %%xmm0\n\t"
-	    "movaps %%xmm0, %0"
-	    : "=m" (*(volatile uint64_t*)((char*)vi->vi_txq.doorbell - 12))
-	    : "m" (d)
-	    : "xmm0");
+	__asm__("movups %1, %%xmm0\n\t"
+		"movaps %%xmm0, %0"
+		: "=m" (*(volatile uint64_t*)((char*)vi->vi_txq.doorbell - 12))
+		: "m" (d)
+		: "xmm0");
 #else
 	writel(d.u32[0], ((ef_vi_ioaddr_t)vi->vi_txq.doorbell) - 12);
 	writel(d.u32[1], ((ef_vi_ioaddr_t)vi->vi_txq.doorbell) - 8);

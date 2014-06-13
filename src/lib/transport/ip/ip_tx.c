@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -146,6 +146,7 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
     }
     cicp_user_defer_send(ni, retrrc_nomac, &rc, OO_PKT_P(pkt), 
                          ts->s.pkt.ifindex);
+    ++ts->stats.tx_nomac_defer;
     return;
   case retrrc_noroute:
     rc = -EHOSTUNREACH;

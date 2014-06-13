@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -287,10 +287,10 @@ ci_inline int ci_cas32u_fail(volatile ci_uint32* p, ci_uint32 oldval, ci_uint32 
 
 ci_inline ci_uint32 ci_xchg32(volatile ci_uint32* p, ci_uint32 val) {
   /* NB. No 'lock' prefix required; it is implied. */
-  asm volatile("xchgl %0, %1"
-               : "=r" (val), "+m" (*p)
-               : "0" (val)
-               : "memory");
+  __asm__ __volatile__("xchgl %0, %1"
+                       : "=r" (val), "+m" (*p)
+                       : "0" (val)
+                       : "memory");
   return val;
 }
 
@@ -320,10 +320,10 @@ ci_inline int ci_cas64u_fail(volatile ci_uint64* p, ci_uint64 oldval,
 
 ci_inline ci_uint64 ci_xchg64(volatile ci_uint64* p, ci_uint64 val) {
   /* NB. No 'lock' prefix required; it is implied. */
-  asm volatile("xchgq %0, %1"
-               : "=r" (val), "+m" (*p)
-               : "0" (val)
-               : "memory");
+  __asm__ __volatile__("xchgq %0, %1"
+                       : "=r" (val), "+m" (*p)
+                       : "0" (val)
+                       : "memory");
   return val;
 }
 

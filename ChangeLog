@@ -1,4 +1,45 @@
 
+openonload-201210-u1
+--------------------
+
+Updated sfc net driver to v3_3_0_6246.
+task32441: stackdump: Add count of TCP sends via kernel due to no mac.
+task33571: Added EF_SIGNALS_NOPOSTPONE option to control signals intercepted.
+task32571: Support for AOE (FPGA NICs).
+task20738: Added support for IP_ADD_SOURCE_MEMBERSHIP etc.
+
+bug32440: Fix handling of firewall MAC rules.
+bug31498: Fix return value from sendmmsg() in error case.
+bug32839: Fix leak of epoll file descriptor.
+bug33072: Fix leak of pipe file descriptor.
+bug32957: bug32960: Fix handling of bad parameters to pipe() and pipe2().
+bug33042: Fix EF_PREFAULT_PACKETS on some versions of gcc.
+bug33144: Allocate more random initial sequence numbers for TCP.
+bug33133: Fix bug causing RTT estimates to not be updated.
+bug32511: Handle iommu_attach_device failure in efrm_pci_vf_probe.
+bug30511: Do not remove HW filters when SW filter table fills.
+bug33311: Fix handling of SA_RESETHAND (SA_ONESHOT).
+bug33405: Check for pending signals when spinning in write(pipefd).
+bug33237, bug33192: Fixes to Onload recovery following NIC reset.
+bug33571, bug33654: Do not defer signals: SIGBUS, SIGSEGV, SIGPROF.
+bug32061: Reset affinity hint before freeing VF interrupt.
+bug33459: Fix buffer leak after close with EF_TCP_SERVER_LOOPBACK=2.
+bug32280: stackdump: Fix error accessing files under /proc.
+bug33565: stackdump: Fixup printing of cmdline to account for null byte.
+bug33632: Fix once-per-stack memory leak.
+bug33647: Fix memory leak when using huge pages.
+bug33639: Fix warning due to creating proc entries in atomic context.
+bug32467: Fix bug when TCP bind() call results in handover to kernel.
+bug32325: Fix problem installing init scripts on Fedora 17 with lsb package.
+bug32602: Fix leak of packet buffers in TCP receive path corner cases.
+bug32670: Fix bug allocating packet buffers when memory is fragmented.
+bug32494: Fix truncation of "onload_stackdump filters" output when large.
+bug32721: Fix kernel panic provoked by low system memory.
+bug32462: Fix onload_iptables on older python versions (2.4).
+bug32659: Fix hang in fork() (exhibited by Java processes).
+bug33759: Compile fixes for Linux kernel 3.7.
+
+
 openonload-201210
 -----------------
 

@@ -4,6 +4,7 @@
 
 import subprocess
 import sys
+import re
 from optparse import OptionParser
 
 global unparsable_is_fatal
@@ -16,11 +17,12 @@ unparsable_is_fatal = True
 program_version = "0.1"
 use_verbose_iptables = True
 
-class CommentException(Exception):
-	def __init__(self, value):
-		self.value = value
-	def __str__(self):
-		return repr(self.value)
+def StripComments(line):
+	''' Return c-style comment separately. '''
+	matches = re.match('.*\/\*(.*)\*\/.*', line)
+	if matches:
+		matches = str(matches.group(1))
+	return ( matches, re.sub('/\*.*?\*/', '', line, re.S) )
 
 def GenerateIptables():
 	''' Open up a connection to iptables, and generate each line from it '''
@@ -75,6 +77,7 @@ def GenerateDefaultPolicies(announce=False):
 	else:
 		if announce:
 			print ( "# Default policy." )
+		yield "%s udp  --  0.0.0.0/0.0.0.0 0.0.0.0/0.0.0.0 udp spts:0:65535 dpts:0:65535"%(action)
 		yield "%s udp  --  0.0.0.0/0.0.0.0 0.0.0.0/0.0.0.0 udp spts:0:65535 dpts:0:65535"%(action)
 		yield "%s tcp  --  0.0.0.0/0.0.0.0 0.0.0.0/0.0.0.0 tcp spts:0:65535 dpts:0:65535"%(action)
 
@@ -212,10 +215,7 @@ def GetBits( bits ):
 	''' Take the 'rule' part of a map and return a map giving source and destination port ranges '''
 	# interpret the pieces of bits['rule']
 	#print "@b", bits
-	if bits['module'] == "/*":
-		raise CommentException( ' '.join(bits['rule']) )
-	else:
-		return MergePieces(FilterValidPieces( GenerateRulesPieces( bits ) ))
+	return MergePieces(FilterValidPieces( GenerateRulesPieces( bits ) ))
 
 def ComprehensibleIpRule( d, strict ):
 	''' Turn a map of iptable rule pieces into a map which includes all our fields for enforcment, or raise a ValueError if it cannot be done. '''
@@ -301,12 +301,21 @@ def GetInterfaces( options ):
 
 def MakeSysFsRuleFromLine( line, options ):
 	''' Turn a line (from iptables -L) into another line, in SysFs format (going via a map). '''
-	bits = GenerateBits(line)
+	comment,good = StripComments(line)
+	if comment:
+		# It's ok to not have a valid rule if it's potentially a comment rule.
+		try:
+			bits = GenerateBits(good)
+		except:
+			return( comment, "" )
+	else:
+		# Otherwise, we do need to propogate exceptions
+		bits = GenerateBits(good)
 	rulemap = ComprehensibleIpRule( bits, options.strict )
 	#print "@rulemap", rulemap
 	interfaces = GetInterfaces( options )
 	rules = RuleFromInterface( interfaces, rulemap )
-	return "\n".join( rules )
+	return ( comment, "\n".join( rules ) )
 
 def PrintFrom(x, options):
 	''' Prints the rules, one at a time '''
@@ -315,11 +324,12 @@ def PrintFrom(x, options):
 	for line in x:
 		print ( line )
 		try:
-			sysfs = MakeSysFsRuleFromLine(line, options)
+			comment, sysfs = MakeSysFsRuleFromLine(line, options)
 			print ( "=> %s" % sysfs )
-		except CommentException as c:
-			print ( "=> /* %s" %str(c) )
-		except Exception as e:
+			if comment:
+				print ( "=> /* %s */" %comment )
+		except Exception:
+			e = sys.exc_info()[1]
 			sys.stderr.write( "=> Error parsing: %s\n"%str(e) )
 			if ( unparsable_is_fatal ):
 				return 1
@@ -336,12 +346,14 @@ def OutputFilterRulesFrom(x, options):
 	failure_count = 0
 	for line in x:
 		try:
-			all_rules.append( MakeSysFsRuleFromLine(line, options) )
-		except CommentException as c:
-			# A comment is ALWAYS something we can skip
-			sys.stderr.write( "Comment skipped: %s\n"%str(c) )
+			comment, rule = MakeSysFsRuleFromLine(line, options)
+			all_rules.append( rule )
+			if comment:
+				# A comment is ALWAYS something we can skip
+				sys.stderr.write( "Comment skipped: %s\n"%comment )
 			pass
-		except Exception as e:
+		except Exception:
+			e = sys.exc_info()[1]
 			sys.stderr.write( "Error parsing '%s': %s\n"%(line,str(e)) )
 			if ( unparsable_is_fatal ):
 				return ( "", -1 )
@@ -351,13 +363,13 @@ def OutputFilterRulesFrom(x, options):
 				pass
 	return ( all_rules, failure_count )
 
-def ParseCommandLineOoptions():
+def ParseCommandLineOptions():
 	''' Parse the Commnadline options. '''
 	global unparsable_is_fatal
 	global use_verbose_iptables
 	parser = OptionParser( version=" ".join( ("%prog", "version", program_version) ),
-						   description="Turn iptables rules into Onload filter rules.",
-						   epilog="Return value will be the number of lines that could not be parsed before execution stopped.\n" )
+						   description="Turn iptables rules into Onload filter rules.\n"
+						   "Return value will be the number of lines that could not be parsed before execution stopped.\n" )
 	parser.add_option("-v", "--verbose",
 					  action="store_true", dest="verbose", default=False,
 					  help="Output longer list of which iptables rules were parsed, and which were ignored.")
@@ -396,16 +408,10 @@ def ParseCommandLineOoptions():
 
 def SelectSource(options):
 	''' Apply commandline option to open up iptables, or a source file or stdin. '''
-	try:
-		if options.filename:
-			return open( options.filename, "r" )
-		elif options.interactive:
-			return sys.stdin
-	except Exception as e:
-		#sys.stderr.write( "Warning: Problem '%s' parsing source option, using iptables.\n"%str(e) )
-		#sys.stderr.write( "Options were: %s\n"%str(options) )
-		# Probably better to just propogate this error instead.
-		raise e
+	if options.filename:
+		return open( options.filename, "r" )
+	elif options.interactive:
+		return sys.stdin
 	return GenerateIptables()
 
 def del_existing_rules( options ):
@@ -415,18 +421,20 @@ def del_existing_rules( options ):
 			file.write( "%s all\n"%interface )
 			file.flush()
 			file.close()
-		except Exception as e:
+		except Exception:
+			e = sys.exc_info()[1]
 			sys.stderr.write( "Error deleting firewall rules for %s: %s" % (str(interface),str(e)) )
 			pass
 
 def main():
 	''' Main entry point '''
-	options, args = ParseCommandLineOoptions()
+	options, args = ParseCommandLineOptions()
 	#print "@opt", options
 	
 	try:
 		source = SelectSource(options)
-	except Exception as e:
+	except Exception:
+		e = sys.exc_info()[1]
 		sys.stderr.write( "Error: %s\n"%str(e) )
 		return -2
 	
@@ -448,7 +456,8 @@ def main():
 				del_existing_rules( options )
 				file = open( "/proc/driver/sfc_resource/firewall_add", "w" )
 				file_needs_closing = True
-		except Exception as e:
+		except Exception:
+			e = sys.exc_info()[1]
 			sys.stderr.write( "Error: %s\n"%str(e) )
 			return -3
 		
@@ -458,14 +467,16 @@ def main():
 			try:
 				file.write( "%s\n"%rule )
 				file.flush()
-			except Exception as e:
+			except Exception:
+				e = sys.exc_info()[1]
 				sys.stderr.write( "Error %s when writing rule %s" % (str(e),str(rule)) )
 		
 		if file_needs_closing:
 			try:
 				file.flush()
 				file.close()
-			except Exception as e:
+			except Exception:
+				e = sys.exc_info()[1]
 				sys.stderr.write( "Error %s when closing file" % str(e) )
 		return rval
 

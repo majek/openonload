@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -365,6 +365,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts,
     ci_tcp_initial_seqno(ni);
   ts->snd_max = tcp_snd_nxt(ts) + 1;
 
+  /* Must be after initialising snd_una. */
   ci_tcp_clear_rtt_timing(ts);
   ci_tcp_set_flags(ts, CI_TCP_FLAG_SYN);
   ts->tcpflags &=~ CI_TCPT_FLAG_OPT_MASK;

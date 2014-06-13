@@ -46,9 +46,6 @@ usage () {
   err "  --libc                - LibC version number"
   err "  --interfaces          - list etherfabric interfaces"
   err "  --sourcever           - software version from source code"
-  err "  --hostnictype         - nic in this host (blank for ef1)"
-  err "  --buildnictype        - nic current build is for (blank for ef1)"
-  err "  --nictype             - build type if in build tree, else host type"
   err "  --boardtype           - Type of board (rather than controller)"
   err
   err "Environment variables used:"
@@ -59,7 +56,6 @@ usage () {
   err "  EF_USERBUILD          - use as user build dir, if set"
   err "  EF_DRIVERBUILD        - use as driver build dir, if set"
   err "  EF_MCBUILD            - use as MCPU build dir, if set"
-  err "  EF_NICTYPE            - use as NIC type instead of looking at PCI"
   exit 1
 }
 
@@ -102,34 +98,6 @@ toolplatform() {
 
 #######################################################################
 
-hostnictype_linux() {
-  export PATH="/sbin:/usr/sbin:$PATH"
-  local output="$(lspci -n -d 1924: | head -1)"
-  # TODO cope with multiple NICs (or at least warn)
-  # For now order has been chosen to be newest to oldest NIC types
-  echo "$output" | egrep -q '1924:0813' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0803 \(rev 03\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0803 \(rev 02\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0803 \(rev 01\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0803 \(rev 00\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0803' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:7778 \(rev 00\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:7778' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:7777 \(rev 00\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:7777' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0770' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0710 \(rev 02\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:0703 \(rev 02\)' && echo falcon_b0 && return 0
-  echo "$output" | egrep -q '1924:6703 \(rev 01\)' && echo falcon && return 0
-  echo "$output" | egrep -q '1924:0703 \(rev 01\)' && echo falcon && return 0
-  echo "$output" | egrep -q '1924:6703 \(rev 00\)' && echo falcon && return 0
-  echo "$output" | egrep -q '1924:0703 \(rev 00\)' && echo falcon && return 0
-  echo "$output" | egrep -q '1924:6703' && echo falcon && return 0
-  echo "$output" | egrep -q '1924:0703' && echo falcon && return 0
-  echo "$output" | grep -q '1924:c101' && echo ef1 && return 0
-  fail "Couldn't find SFC NIC using lspci. Is there an SFC NIC in this machine? Or set EF_NICTYPE"
-}
-
 boardtype_linux() {
   export PATH="/sbin:/usr/sbin:$PATH"
   # TODO cope with multiple NICs (or at least warn)
@@ -142,41 +110,6 @@ boardtype_linux() {
   echo "$output" | egrep -q '\(rev 03\)' && echo platform_hs && return 0 # large BAR
   
   fail "Unknown board type or no SFC NIC present/enumerated"
-}
-
-######################################################################
-
-hostnictype_sunos() {
-  return 0
-}
-
-hostnictype_freebsd() {
-  return 0
-}
-
-hostnictype_darwin() {
-  return 0
-}
-
-hostnictype_cygwin() {
-  return 0
-}
-
-hostnictype() {
-  k=$(toolplatform)
-  case "$k" in
-     linux)		hostnictype_linux;;
-     freebsd)	 	hostnictype_freebsd;;
-     darwin)	 	hostnictype_darwin;;
-     sunos)		hostnictype_sunos;;
-     cygwin_nt*)	hostnictype_cygwin;;
-     *) err "mmaketool:hostnictype: unknown platform"; exit 1;;
-  esac
-}
-
-hostnictype_() {
-  t=$(hostnictype)
-  [ -n "$t" ] && echo "${t}_"
 }
 
 ######################################################################
@@ -205,38 +138,6 @@ boardtype() {
 }
 
 ######################################################################
-
-buildnictype() {
-  echo "$NICTYPE"
-}
-
-buildnictype_() {
-  [ -n "$NICTYPE" ] && echo "${NICTYPE}_"
-}
-
-nictype() {
-  if [ "$EF_NICTYPE" == "ef1" ];then
-    echo ""
-  elif [ -n "$EF_NICTYPE" ]; then
-    echo "$EF_NICTYPE"
-  elif $inbuild; then
-    buildnictype
-  else
-    hostnictype
-  fi
-}
-
-nictype_() {
-  if [ "$EF_NICTYPE" == "ef1" ];then
-    echo ""
-  elif [ -n "$EF_NICTYPE" ]; then
-    echo "$EF_NICTYPE""_"
-  elif $inbuild; then
-    buildnictype_
-  else
-    hostnictype_
-  fi
-}
 
 kernelver() {
   if [ -n "$KVER" ]; then
@@ -325,11 +226,11 @@ add_opts() {
 userbuild_base() {
   k=$(toolplatform)
   case "$k" in
-    linux)      echo $(nictype_)$(userbuild_linux);;
+    linux)      echo $(userbuild_linux);;
     freebsd)    echo $(userbuild_freebsd);;
     sunos)      echo $(userbuild_sunos);;
     darwin)     echo $(userbuild_darwin);;
-    cygwin_nt*) echo $(nictype_)$(userbuild_cygwin);;
+    cygwin_nt*) echo $(userbuild_cygwin);;
     *)          err "mmaketool:userbuild_base: unknown system type"; exit 1;;
   esac
 }
@@ -337,8 +238,6 @@ userbuild_base() {
 userbuild_rb() {
     local distrib=$(sfc_disttag | tr A-Z a-z)
     local p=$distrib"_"$(userarch)
-    local nt=$(nictype)
-    [ -n "$nt" ] && nt="_"$nt
 
     [ "$NDEBUG" = 1 ] && local d=_NDEBUG
     echo "ul_"$p$nt$d
@@ -352,11 +251,11 @@ userbuild() {
     userbuild_rb
   else
     case "$k" in
-        linux)      add_opts $(nictype_)$(userbuild_linux);;
+        linux)      add_opts $(userbuild_linux);;
 	freebsd)    add_opts $(userbuild_freebsd);;
 	sunos)      add_opts $(userbuild_sunos);;
 	darwin)     add_opts $(userbuild_darwin);;
-	cygwin_nt*) add_opts $(nictype_)$(userbuild_cygwin);;
+	cygwin_nt*) add_opts $(userbuild_cygwin);;
 	*)          err "mmaketool:userbuild: unknown platform"; exit 1;;
     esac
   fi
@@ -401,14 +300,14 @@ driverbuild_base() {
   if [ "$k" = "linux" ]; then
     case "$kv" in
       2.6.* | [3-9].* | [1-9][0-9]*)
-	echo "$(nictype_)${us}2.6"
+	echo "${us}2.6"
 	;;
       *)
 	err "mmaketool:driverbuild_base: Linux version <2.6"; exit 1
 	;;
     esac
   elif [ "$k" = "freebsd" ]; then
-    echo "$(nictype_)$us${kv:0:3}"
+    echo "$us${kv:0:3}"
   elif [ "$k" = "sunos" ]; then
     driverbuild_sunos
   else
@@ -420,8 +319,6 @@ driverbuild_rb() {
     local distrib=$(sfc_disttag | tr A-Z a-z)
     local p=$distrib"_"$(userarch)
     local kv=$(kernelver)"_"
-    local nt=$(nictype)
-    [ -n "$nt" ] && nt="_"$nt
 
     [ "$NDEBUG" = 1 ] && local d=_NDEBUG
     echo $kv$p$nt$d
@@ -434,11 +331,11 @@ driverbuild() {
   elif [ -n "$MMAKETOOL_RB_NAMES" ]; then
     driverbuild_rb
   elif [ "$k" = "linux" ]; then
-    add_opts "$(nictype_)$(driverbuild_linux)"
+    add_opts "$(driverbuild_linux)"
   elif [ "$k" = "sunos" ]; then
     add_opts "$(driverbuild_sunos)"
   elif [ "$k" = "freebsd" ]; then
-    add_opts "$(nictype_)$(driverbuild_freebsd)"
+    add_opts "$(driverbuild_freebsd)"
   elif [ "$k" = "darwin" ]; then
     add_opts "$(driverbuild_darwin)"
   else
@@ -447,26 +344,17 @@ driverbuild() {
 }
 
 mcbuild_base() {
-  local prenic=$(nictype_)
-  # names like falcon_b0_sienamc don't make much sense but the "sienamc" part
-  # has been set by the way mmakebuildtree is used e.g. for a cosim NIC
-  # "$(nictype)mc" or"$(nictype_)mc" might make more sense in the future
-  if [ "$prenic" = "_siena" ]; then
-      prenic=
-  fi
   case "$(processor)" in
-    x86_64) echo ${prenic}sienamc_host_x86_64 ;;
-    ia64)   echo ${prenic}sienamc_host_ia64 ;;
-    ppc64)  echo ${prenic}sienamc_host_ppc64 ;;
-    *)      echo ${prenic}sienamc ;;
+    x86_64) echo sienamc_host_x86_64 ;;
+    ia64)   echo sienamc_host_ia64 ;;
+    ppc64)  echo sienamc_host_ppc64 ;;
+    *)      echo sienamc ;;
   esac
 }
 
 mcbuild_rb() {
     local distrib=$(sfc_disttag | tr A-Z a-z)
     local p=$distrib"_"$(userarch)
-    local nt=$(nictype)
-    [ -n "$nt" ] && nt="_"$nt
 
     [ "$NDEBUG" = 1 ] && local d=_NDEBUG
     echo "mc_"$p$nt$d
@@ -535,7 +423,7 @@ transportlib() {
   suffix="lib/transport/unix/libcitransport0.so"
   # $inbuild means that we may be in driver tree.  Check that there is no
   # "linux" in the PLATFORM.
-  if $inbuild && [ ${PLATFORM%linux*} == $PLATFORM ] ; then
+  if $inbuild && [ "${PLATFORM%linux*}" == "$PLATFORM" ] ; then
     echo "$BUILDPATH/$suffix"
   else
     echo "$TOPPATH/build/$(userbuild)/$suffix"
@@ -657,14 +545,6 @@ case "$1" in
 --interfaces)	sfc__list_interfaces
 		;;
 --sourcever)	fetchver "$TOPPATH/src/include/ci/internal/version.h"
-		;;
---hostnictype)	hostnictype
-		;;
---buildnictype)	buildnictype
-		;;
---nictype)	nictype
-		;;
---boardtype)	boardtype
 		;;
 *)	        usage
 		;;

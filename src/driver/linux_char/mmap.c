@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,6 +48,7 @@
 #include <ci/efch/op_types.h>
 #include <ci/tools/dllist.h>
 #include "char_internal.h"
+#include "../linux_resource/kernel_compat.h"
 
 
 struct mm_hash {
@@ -373,14 +374,7 @@ ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma)
   if( (rc = efch_add_mm_ref (vma->vm_mm)) < 0 )
     return rc;
 
-  /* VM_RESERVED prevents the MM from attempting to swap-out these
-   * pages.
-   *
-   * VM_IO is there to avoid people getting references to our pages to
-   * do direct-IO.  This has been recommended on the LKML.
-   * http://www.forbiddenweb.org/viewtopic.php?id=83167&page=3#347912
-   */
-  vma->vm_flags |= VM_RESERVED | VM_IO;
+  vma->vm_flags |= EFRM_VM_IO_FLAGS;
 
   /* Hook into the VM so we can keep a proper reference count on this
   ** resource.

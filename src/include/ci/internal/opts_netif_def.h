@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -627,9 +627,12 @@ CI_CFG_OPT("EF_UDP_PORT_HANDOVER3_MAX", udp_port_handover3_max, ci_uint16,
 #endif
 
 CI_CFG_OPT("EF_DELACK_THRESH", delack_thresh, ci_uint16,
-"Maximum number of in-order TCP segments with payload that may be received "
-"before reponding with an ACK.  Set to zero to disable delayed "
-"acknowledgements.",
+"This option controls the delayed acknowledgement algorithm.  A socket may "
+"receive up to the specified number of TCP segments without generating an "
+"ACK.  Setting this option to 0 disables delayed acknowledgements."
+"\n"
+"NB. This option is overridden by EF_DYNAMIC_ACK_THRESH, so both options need "
+"to be set to 0 to disable delayed acknowledgements.",
            , , 1, 0, 65535, count)
            
 #if CI_CFG_DYNAMIC_ACK_RATE

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,6 +17,7 @@
 #include <ci/driver/internal.h>
 #include "linux_char_internal.h"
 #include "char_internal.h"
+#include "../linux_resource/kernel_compat.h"
 
 
 /****************************************************************************
@@ -42,13 +43,8 @@ ci_mmap_bar(struct efhw_nic* nic, off_t base, size_t len, void* opaque,
   ci_assert((*offset &~ CI_PAGE_MASK) == 0);
   ci_assert(*map_num == 0 || *offset > 0);
 
-  /* VM_IO tells kernel not to read this memory (eg. when dumping core) */
-  vma->vm_flags |= VM_IO;
+  vma->vm_flags |= EFRM_VM_IO_FLAGS;
   
-#if defined(__PPC__)  
-  vma->vm_flags |= VM_RESERVED;
-#endif
- 
   pgprot_val(vma->vm_page_prot) |= CI_PAGE_DISABLE_CACHE;
 
   EFCH_TRACE("%s: pages=%d offset=0x%x phys=0x%llx prot=0x%lx",

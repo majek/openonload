@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,9 +29,7 @@
 
 /* This is required to get pread() and pwrite() defined in <unistd.h> */
 #define _GNU_SOURCE
-#if defined __unix__
 # include <aio.h>
-#endif
 
 #include <ci/tools.h>
 #include <ci/internal/transport_config_opt.h>

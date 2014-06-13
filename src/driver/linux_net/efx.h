@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -193,6 +193,9 @@ extern int efx_ethtool_get_module_info(struct net_device *net_dev,
 #endif
 
 extern const struct ethtool_ops efx_ethtool_ops;
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_ETHTOOL_OPS_EXT)
+extern const struct ethtool_ops_ext efx_ethtool_ops_ext;
+#endif
 
 /* Reset handling */
 extern int efx_reset(struct efx_nic *efx, enum reset_type method);
@@ -248,5 +251,18 @@ extern void efx_link_set_wanted_fc(struct efx_nic *efx, u8);
 #if defined(EFX_USE_KCOMPAT) && (!defined(EFX_USE_CANCEL_WORK_SYNC) || !defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC))
 extern struct workqueue_struct *efx_workqueue;
 #endif
+
+static inline void efx_device_detach_sync(struct efx_nic *efx)
+{
+	struct net_device *dev = efx->net_dev;
+
+	/* Lock/freeze all TX queues so that we can be sure the
+	 * TX scheduler is stopped when we're done and before
+	 * netif_device_present() becomes false.
+	 */
+	netif_tx_lock(dev);
+	netif_device_detach(dev);
+	netif_tx_unlock(dev);
+}
 
 #endif /* EFX_EFX_H */

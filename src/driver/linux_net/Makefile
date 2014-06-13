@@ -23,6 +23,7 @@ export CONFIG_SFC_TUNE := m
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
+export CONFIG_SFC_PPS := y
 endif
 
 ifdef KSRCDIR
@@ -118,6 +119,11 @@ endif
 ifneq ($(filter 0 1 2 3 4 5 6 7 8,$(word 3,$(KVERPARTS))),)
 $(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
 endif
+ifneq ($(filter 9 10 11 12 13 14 15,$(word 3,$(KVERPARTS))),)
+$(warning Kernel <=2.6.15 does not support PTP)
+override CONFIG_SFC_PTP :=
+override CONFIG_SFC_PPS :=
+endif
 endif
 
 endif # export-srpm
@@ -204,7 +210,7 @@ $(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
 	@touch $@
 
 define filechk_config.h
-	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
+	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
 endef
 
 $(obj)/config.h: $(src)/Makefile FORCE

@@ -26,6 +26,7 @@ export CONFIG_SFC_TUNE := m
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
+export CONFIG_SFC_PPS := y
 
 ifdef GCOV
 IMPORT        := ../linux/gcov.c ../linux/gcov.h

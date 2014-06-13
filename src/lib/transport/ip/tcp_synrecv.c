@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -458,6 +458,10 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
 
       ci_tcp_update_rtt(netif, ts,
                         ci_tcp_time_now(netif) - rxp->timestamp_echo);
+    }
+    else {
+      /* Must be after initialising snd_una. */
+      ci_tcp_clear_rtt_timing(ts);
     }
     /* SACK has nothing to be done. */
 

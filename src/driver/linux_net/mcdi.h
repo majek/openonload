@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -132,11 +132,13 @@ extern void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 #define MCDI_EVENT_FIELD(_ev, _field)			\
 	EFX_QWORD_FIELD(_ev, MCDI_EVENT_ ## _field)
 #define MCDI_ARRAY_FIELD(_buf, _field1, _type, _index, _field2)		\
-	EFX_DWORD_FIELD(						\
+	EFX_EXTRACT_DWORD(						\
 		*((efx_dword_t *)					\
 		  (MCDI_ARRAY_PTR(_buf, _field1, _type, _index) +	\
 		   (MC_CMD_ ## _type ## _TYPEDEF_ ## _field2 ## _OFST & ~3))), \
-		MC_CMD_ ## _type ## _TYPEDEF_ ## _field2)
+		MC_CMD_ ## _type ## _TYPEDEF_ ## _field2 ## _LBN & 0x1f, \
+		(MC_CMD_ ## _type ## _TYPEDEF_ ## _field2 ## _LBN & 0x1f) + \
+		MC_CMD_ ## _type ## _TYPEDEF_ ## _field2 ## _WIDTH - 1)
 
 extern void efx_mcdi_print_fwver(struct efx_nic *efx, char *buf, size_t len);
 extern int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
@@ -177,6 +179,7 @@ extern int efx_mcdi_mac_stats(struct efx_nic *efx, dma_addr_t dma_addr,
 			      u32 dma_len, int enable, int clear);
 extern int efx_mcdi_mac_reconfigure(struct efx_nic *efx);
 extern bool efx_mcdi_mac_check_fault(struct efx_nic *efx);
+extern int efx_mcdi_power_monitor(struct efx_nic *efx, bool enable);
 
 #ifdef CONFIG_SFC_MCDI_MON
 extern int efx_mcdi_mon_probe(struct efx_nic *efx);
@@ -185,7 +188,5 @@ extern void efx_mcdi_mon_remove(struct efx_nic *efx);
 static inline int efx_mcdi_mon_probe(struct efx_nic *efx) { return 0; }
 static inline void efx_mcdi_mon_remove(struct efx_nic *efx) {}
 #endif
-
-extern int efx_mcdi_proxy_handler(void *cmd);
 
 #endif /* EFX_MCDI_H */

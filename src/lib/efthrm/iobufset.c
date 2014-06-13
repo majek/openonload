@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -97,10 +97,11 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
 #ifdef current_cred
   if (~current_cred()->cap_effective.cap[0] & (1 << CAP_IPC_LOCK)) {
     creds = prepare_creds();
-    *creds = *current_cred();
-    creds->cap_effective.cap[0] |= 1 << CAP_IPC_LOCK;
-    commit_creds(creds);
-    restore_creds = 1;
+    if( creds != NULL ) {
+      creds->cap_effective.cap[0] |= 1 << CAP_IPC_LOCK;
+      commit_creds(creds);
+      restore_creds = 1;
+    }
   }
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24) || \
   !defined(CONFIG_SECURITY)
@@ -213,9 +214,10 @@ out:
   if (restore_creds) {
 #ifdef current_cred
     creds = prepare_creds();
-    *creds = *current_cred();
-    creds->cap_effective.cap[0] &= ~(1 << CAP_IPC_LOCK);
-    commit_creds(creds);
+    if( creds != NULL ) {
+      creds->cap_effective.cap[0] &= ~(1 << CAP_IPC_LOCK);
+      commit_creds(creds);
+    }
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
     kernel_cap_t eff = current->cap_effective;
     cap2int(eff) &= ~(1 << CAP_IPC_LOCK);
@@ -284,13 +286,21 @@ static int oo_bufpage_alloc(struct oo_buffer_pages **pages_out,
 
   if( size < PAGE_SIZE ) {
     pages = kmalloc(size, gfp_flag);
+    if( pages == NULL )
+      return -ENOMEM;
     pages->pages = (void *)(pages + 1);
   }
   else {
     /* Avoid multi-page allocations */
     pages = kmalloc(sizeof(struct oo_buffer_pages), gfp_flag);
+    if( pages == NULL )
+      return -ENOMEM;
     ci_assert_le(n_bufs * sizeof(struct page *), PAGE_SIZE);
     pages->pages = kmalloc(n_bufs * sizeof(struct page *), gfp_flag);
+    if( pages->pages == NULL ) {
+      kfree(pages);
+      return -ENOMEM;
+    }
   }
 
   pages->n_bufs = n_bufs;

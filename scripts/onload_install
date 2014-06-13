@@ -170,8 +170,8 @@ install_uninstall() {
 install_userland() {
   # Install libraries and tools.
   try $do cd "$bin/../build"
-  u32="${nictype}_gnu"
-  u64="${nictype}_gnu_x86_64"
+  u32="gnu"
+  u64="gnu_x86_64"
   if [ -d "$u64" ]; then
     # Tolerate lack of 32-bit transport library on 64-bit systems.
     install_plib32 "$u32/lib/transport/unix/libcitransport0.so" \
@@ -245,6 +245,16 @@ install_userland() {
   try $do cd "$bin/../src/include"
   install_f onload/extensions.h "$i_include/onload/extensions.h"
   install_f onload/extensions_zc.h "$i_include/onload/extensions_zc.h"
+
+  # Install aoe header files
+  try $do cd "$bin/../src/include"
+  if [ -e aoe/amm_streams.h ]; then
+    install_f aoe/amm_streams.h "$i_include/aoe/amm_streams.h"
+  fi
+  try $do cd "$bin/../src/driver"
+  if [ -e  linux_aoe/aoe_ioctl.h ]; then
+    install_f linux_aoe/aoe_ioctl.h "$i_include/aoe/aoe_ioctl.h"
+  fi
 }
 
 
@@ -259,7 +269,7 @@ install_kernel_modules() {
   # Install kernel drivers.
   did="$i_prefix/lib/modules/$KVER/extra"
   try $do cd "$bin/../build"
-  d=$(EF_NICTYPE="$nictype" mmaketool --driverbuild)
+  d=$(mmaketool --driverbuild)
   if ! $test; then
     try [ -n "$d" ]
     try [ -d "$d" ]
@@ -269,6 +279,9 @@ install_kernel_modules() {
   install_f sfc_tune.ko "$did/sfc_tune.ko"
   install_f sfc_resource.ko "$did/sfc_resource.ko"
   install_f sfc_char.ko "$did/sfc_char.ko"
+  if [ -e sfc_aoe.ko ]; then 
+    install_f sfc_aoe.ko "$did/sfc_aoe.ko"
+  fi
   install_f onload.ko "$did/onload.ko"
   $affinity && install_f sfc_affinity.ko "$did/sfc_affinity.ko"
   if [ -z "$i_prefix" ]; then
@@ -281,6 +294,9 @@ install_kernel_modules() {
   install_f linux_net/Module.symvers "$mid/sfc/Module.symvers"
   install_f linux_resource/Module.symvers "$mid/sfc_resource/Module.symvers"
   install_f linux_char/Module.symvers "$mid/sfc_char/Module.symvers"
+  if [ -e linux_aoe/Module.symvers ]; then
+    install_f linux_aoe/Module.symvers "$mid/sfc_aoe/Module.symvers"
+  fi
   install_f linux_onload/Module.symvers "$mid/onload/Module.symvers"
   install_f linux_affinity/Module.symvers "$mid/sfc_affinity/Module.symvers"
 }
@@ -304,6 +320,7 @@ install_modprobe_conf() {
   try $do cd "$bin/../scripts"
 
   install_f onload_misc/onload_modprobe.conf "$i_etc/modprobe.d/onload.conf"
+  install_f onload_misc/sfc_aoe_modprobe.conf "$i_etc/modprobe.d/sfc_aoe.conf"
   if is_rhel4 && ! $test; then
     rhel4_modprobe_fixup
   fi
@@ -316,9 +333,11 @@ install_modprobe_conf() {
 
 # this function should be used only in case we failed to determine the distro
 install_init_script_gen() {
-  if [ -x /usr/lib/lsb/install_initd ]; then
-    try $do /usr/lib/lsb/install_initd /etc/init.d/openonload
-  elif $try_chkconfig && which chkconfig >/dev/null 2>&1; then
+  if [ -x /usr/lib/lsb/install_initd ] &&
+     $do /usr/lib/lsb/install_initd /etc/init.d/openonload; then
+    return 0
+  fi
+  if $try_chkconfig && which chkconfig >/dev/null 2>&1; then
     try $do chkconfig --add openonload
   elif which update-rc.d >/dev/null 2>&1; then
     try $do update-rc.d openonload start 50 3 5 .
@@ -403,7 +422,7 @@ check_whether_installed() {
     return
   fi
   local drv where
-  for drv in sfc.ko sfc_tune.ko onload.ko; do
+  for drv in sfc.ko sfc_tune.ko onload.ko sfc_aoe.ko; do
     for where in updates extra; do
       check_file_installed "$i_prefix/lib/modules/$KVER/$where/$drv"
     done
@@ -436,7 +455,6 @@ do_rpm_post() {
 
 PATH="$bin:$PATH:/sbin"; export PATH
 
-nictype=falcon_b0
 buildargs=
 build=true
 affinity=true
@@ -463,7 +481,6 @@ export KVER
 
 while [ $# -gt 0 ]; do
   case "$1" in
-  --nictype)    nictype="$2"; shift;;
   --newkernel)  [ $# -gt 1 ] || usage; shift; KVER="$1";
                 check_install=false; all=false; kernelfiles=true; sfccheck=false
                 buildargs="$buildargs --kernel";;

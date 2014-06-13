@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -771,7 +771,11 @@ static void ci_tcp_recvmsg_recv2_peek2(const ci_tcp_recvmsg_args* a,
 
 #ifdef __KERNEL__
     rc = copy_to_user(CI_IOVEC_BASE(&piov->io), oo_offbuf_ptr(buf) + peek_off, n);
-    ci_assert(rc == 0);
+    if( rc != 0 ) {
+      LOG_URG(log(LNTS_FMT "%s: copy_to_user returned %d", 
+                  LNTS_PRI_ARGS(ni, ts), __FUNCTION__, rc));
+      ci_assert(rc == 0);
+    }
 #else
     memcpy(CI_IOVEC_BASE(&piov->io), oo_offbuf_ptr(buf) + peek_off, n);
 #endif

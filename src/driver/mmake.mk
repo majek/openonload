@@ -12,12 +12,15 @@ ifeq ($(LINUX),1)
 # DRIVER_SUBDIRS must be ordered according to inter-driver dependencies
 DRIVER_SUBDIRS	:= linux_net linux_affinity linux_resource \
 		linux_char linux_onload linux
+
+ifneq ($(wildcard $(linux_aoe) ),"")
+DRIVER_SUBDIRS += linux_aoe
+endif
+
 ifeq ($(BUILD_AFONLOAD),1)
 DRIVER_SUBDIRS  += openonload
 endif
 #DRIVER_SUBDIRS	+=  linux_iscsi
-
-OTHER_SUBDIRS += microcode
 
 ifeq ($(BUILD_XEN),1)
 DRIVER_SUBDIRS += linux_xen
@@ -35,10 +38,6 @@ endif
 
 ifeq ($(DARWIN),1)
 DRIVER_SUBDIRS	:= macosx
-endif
-
-ifeq ($(SIENAMC),1)
-SUBDIRS	:= microcode
 endif
 
 ifeq ($(DOS), 1)

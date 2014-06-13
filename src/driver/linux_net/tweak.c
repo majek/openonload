@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -447,6 +447,7 @@ static int efx_tweak_probe(struct efx_dl_device *efx_dev,
 
 static struct efx_dl_driver efx_tweak_driver = {
 	.name = "sfc_tune",
+	.priority = EFX_DL_EV_LOW,
 	.probe = efx_tweak_probe,
 };
 

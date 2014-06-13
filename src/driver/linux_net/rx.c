@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -728,6 +728,10 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 		efx_netq_process_rx(channel->efx, channel, skb);
 #endif
 
+	if (channel->type->receive_skb)
+                if (channel->type->receive_skb(channel, skb))
+			goto handled;
+
 	/* Pass the packet up */
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	if (rx_buf->flags & EFX_RX_BUF_VLAN_XTAG)
@@ -736,11 +740,9 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 	else
 		/* fall through */
 #endif
-	if (channel->type->receive_skb)
-		channel->type->receive_skb(channel, skb);
-	else
 		netif_receive_skb(skb);
 
+handled:
 	/* Update allocation strategy method */
 	channel->rx_alloc_level += RX_ALLOC_FACTOR_SKB;
 }
@@ -794,7 +796,7 @@ void __efx_rx_packet(struct efx_channel *channel, struct efx_rx_buffer *rx_buf)
 		/* Move past the ethernet header */
 		skb->protocol = eth_type_trans(skb, efx->net_dev);
 
-		skb_record_rx_queue(skb, channel->channel);
+		skb_record_rx_queue(skb, channel->rx_queue.core_index);
 	}
 #ifdef EFX_NOT_UPSTREAM
 	channel->rx_packets++;

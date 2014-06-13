@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -198,9 +198,10 @@ static int citp_tcp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
   rc = ci_tcp_bind(&epi->sock, sa, sa_len, fdinfo->fd);
   ci_netif_unlock_fdi(epi);
   if( rc == CI_SOCKET_HANDOVER ) {
+    int fd = fdinfo->fd;
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_bind);
     tcp_handover(epi);
-    return 0;
+    return ci_sys_bind(fd, sa, sa_len);
   }
   citp_fdinfo_release_ref(fdinfo, 0);
   return rc;

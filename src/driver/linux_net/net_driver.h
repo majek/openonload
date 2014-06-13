@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,7 +77,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"3.3.0.6222B"
+#define EFX_DRIVER_VERSION	"3.3.0.6246"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -140,6 +140,11 @@ struct netq_hw_filter;
 
 /* Forward declare structure used in the Precision Time Protocol (PTP) support. */
 struct efx_ptp_data;
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+/* Forward declare structure used in the AOE support */
+struct efx_aoe_data;
+#endif
 
 struct efx_self_tests;
 
@@ -620,7 +625,7 @@ struct efx_channel_type {
 	void (*post_remove)(struct efx_channel *);
 	void (*get_name)(struct efx_channel *, char *buf, size_t len);
 	struct efx_channel *(*copy)(const struct efx_channel *);
-	void (*receive_skb)(struct efx_channel *, struct sk_buff *);
+	bool (*receive_skb)(struct efx_channel *, struct sk_buff *);
 	bool keep_eventq;
 };
 
@@ -975,7 +980,6 @@ struct vfdi_status;
  * @dl_info: Linked list of hardware parameters exposed through driverlink
  * @dl_node: Driverlink port list
  * @dl_device_list: Driverlink device list
- * @dl_event_handler: Driverlink device handling unrecognised events
  * @debug_dir: NIC debugfs directory
  * @debug_symlink: NIC debugfs sym-link (nic_eth\%d)
  * @debug_port_dir: Port debugfs directory
@@ -1140,7 +1144,6 @@ struct efx_nic {
 	struct efx_dl_device_info *dl_info;
 	struct list_head dl_node;
 	struct list_head dl_device_list;
-	struct efx_dl_device *dl_event_handler;
 
 #ifdef CONFIG_SFC_DEBUGFS
 	efx_debugfs_entry *debug_dir;
@@ -1181,6 +1184,10 @@ struct efx_nic {
 
 #ifdef CONFIG_SFC_PTP
 	struct efx_ptp_data *ptp_data;
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+	struct efx_aoe_data *aoe_data;
 #endif
 
 	/* The following fields may be written more often */
@@ -1424,19 +1431,6 @@ static inline struct efx_rx_buffer *efx_rx_buffer(struct efx_rx_queue *rx_queue,
 {
 	return &rx_queue->buffer[index];
 }
-
-/* Set bit in a little-endian bitfield */
-static inline void set_bit_le(unsigned nr, unsigned char *addr)
-{
-	addr[nr / 8] |= (1 << (nr % 8));
-}
-
-/* Clear bit in a little-endian bitfield */
-static inline void clear_bit_le(unsigned nr, unsigned char *addr)
-{
-	addr[nr / 8] &= ~(1 << (nr % 8));
-}
-
 
 /**
  * EFX_MAX_FRAME_LEN - calculate maximum frame length

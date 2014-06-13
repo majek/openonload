@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -235,19 +235,10 @@ int efab_thr_get_inaccessible_stack_info(unsigned id, uid_t* uid, uid_t* euid,
 }
 
 
-int efab_thr_can_access_stack(tcp_helper_resource_t* thr, int check_user)
+int efab_thr_user_can_access_stack(uid_t uid, uid_t euid,
+                                   ci_netif* ni)
 {
-  /* On entry, [check_user] tells us whether the calling code path requires
-   * the user to be checked.  Some paths do not because the call is not
-   * being made on behalf of a user.
-   */
-  ci_netif* ni = &thr->netif;
-  uid_t euid = ci_geteuid();
-  uid_t uid = ci_getuid();
-
-  if( /* We're not about to give a user access to the stack. */
-     ! (check_user & EFAB_THR_TABLE_LOOKUP_CHECK_USER) ||
-      /* bob and setuid-bob can access stacks created by bob or setuid-bob. */
+  if( /* bob and setuid-bob can access stacks created by bob or setuid-bob. */
       euid == ni->euid ||
       /* root can map any stack. */
       uid == 0 )
@@ -263,6 +254,21 @@ int efab_thr_can_access_stack(tcp_helper_resource_t* thr, int check_user)
    * because the setuid process could then be compromised.
    */
   return euid == uid || allow_insecure_setuid_sharing;
+}
+
+int efab_thr_can_access_stack(tcp_helper_resource_t* thr, int check_user)
+{
+  /* On entry, [check_user] tells us whether the calling code path requires
+   * the user to be checked.  Some paths do not because the call is not
+   * being made on behalf of a user.
+   */
+
+  if( /* We're not about to give a user access to the stack. */
+     ! (check_user & EFAB_THR_TABLE_LOOKUP_CHECK_USER) )
+    return 1;
+
+  return efab_thr_user_can_access_stack(ci_getuid(), ci_geteuid(),
+                                        &thr->netif);
 }
 
 /* 
@@ -999,6 +1005,9 @@ release_netif_resources(tcp_helper_resource_t* trs)
   }
   ci_free(ni->k_shmbufs);
 #endif
+#ifdef OO_DO_HUGE_PAGES
+  ci_vfree(trs->pkt_shm_id);
+#endif
   ci_contig_shmbuf_free(&ni->state_buf);
 }
 
@@ -1357,6 +1366,8 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
   ef_vi* vi;
   struct thr_reset_stack_tx_cb_state cb_state;
 
+  pkt_sets_n = ni->pkt_sets_n;
+
   ci_irqlock_lock(&thr->lock, &lock_flags);
   intfs_to_reset = thr->intfs_to_reset;
   thr->intfs_to_reset = 0;
@@ -1369,10 +1380,7 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
 
       vi = &ni->nic_hw[intf_i].vi;
 
-      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_TXQ);
-      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_RXQ);
-      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_EVQ);
-
+      /* Reset sw queues */
       ef_vi_evq_reinit(vi);
       ef_vi_rxq_reinit(vi, thr_reset_stack_rx_cb, thr);
 
@@ -1381,6 +1389,14 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
       cb_state.ps.tx_pkt_free_list_insert = &cb_state.ps.tx_pkt_free_list;
       cb_state.ps.tx_pkt_free_list_n = 0;
       ef_vi_txq_reinit(vi, thr_reset_stack_tx_cb, &cb_state);
+
+      /* Reset hw queues.  This must be done after resetting the sw
+         queues as the hw will start delivering events after being
+         reset. */
+      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_TXQ);
+      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_RXQ);
+      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_EVQ);
+
       if( cb_state.ps.tx_pkt_free_list_n )
         ci_netif_poll_free_pkts(ni, &cb_state.ps);
 
@@ -1390,7 +1406,6 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
         ci_netif_pkt_release(ni, pkt);
       }
 
-      pkt_sets_n = ni->pkt_sets_n;
       for( i = 0; i < pkt_sets_n; ++i )
         oo_iobufset_resource_remap_bt(ni->nic_hw[intf_i].pkt_rs[i]);
 
@@ -1782,8 +1797,14 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
      * There are some cases when we fail to send FIN to passively-opened
      * connection: reset such connections. */
     if( w->state & CI_TCP_STATE_CAN_FIN ) {
+#ifndef NDEBUG
+      /* It is normal for EF_TCP_SERVER_LOOPBACK=2 if client closes
+       * loopback connection before it is accepted.
+       * Do not scare users unless they want to be scared:
+       * keep this under #ifndef NDEBUG. */
       OO_DEBUG_ERR(ci_log("%s: %d:%d in %s state when stack is closed",
                    __func__, trs->id, i, ci_tcp_state_str(w->state)));
+#endif
       ci_tcp_send_rst(netif, &wo->tcp);
       ci_tcp_drop(netif, &wo->tcp, ECONNRESET);
       continue;
@@ -1859,8 +1880,7 @@ oo_trusted_lock_drop(tcp_helper_resource_t* trs)
       efab_tcp_helper_rm_free_locked(trs, 0);
       return;
     }
-    else if( l & (OO_TRUSTED_LOCK_NEED_POLL_PRIME |
-                  OO_TRUSTED_LOCK_CLOSE_ENDPOINT) ) {
+    else if( l & ~OO_TRUSTED_LOCK_LOCKED ) {
       sl_flags = 0;
       if( l & OO_TRUSTED_LOCK_NEED_POLL_PRIME )
         sl_flags |= CI_EPLOCK_NETIF_NEED_PRIME | CI_EPLOCK_NETIF_NEED_POLL;
@@ -2012,7 +2032,6 @@ tcp_helper_dtor(tcp_helper_resource_t* trs)
    *      => tcp_helper_rm_free_locked must have run to completion
    */
   tcp_helper_stop(trs);
-#if defined __linux__
 #if CI_CFG_SUPPORT_STATS_COLLECTION
   if( trs->netif.state->lock.lock != CI_EPLOCK_UNINITIALISED ) {
     /* Flush statistics gathered for the NETIF to global
@@ -2021,7 +2040,6 @@ tcp_helper_dtor(tcp_helper_resource_t* trs)
     ci_ip_stats_update_global(&trs->netif.state->stats_snapshot);
     ci_ip_stats_update_global(&trs->netif.state->stats_cumulative);
   }
-#endif
 #endif
 
   release_netif_resources(trs);
@@ -2409,7 +2427,8 @@ efab_tcp_helper_iobufset_alloc(tcp_helper_resource_t* trs,
 #if CI_CFG_PKTS_AS_HUGE_PAGES
     if( (flags ^ ni->huge_pages_flag) ==
         OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED ) {
-      ci_log("[%s]: unable to allocate huge page", ni->state->pretty_name);
+      ci_log("[%s]: unable to allocate huge page, using standard pages instead",
+             ni->state->pretty_name);
     }
     ni->huge_pages_flag = flags;
 #endif
@@ -3167,19 +3186,32 @@ int
 efab_attach_os_socket(tcp_helper_endpoint_t* ep, int os_sock_fd)
 {
   int rc;
+  struct oo_file_ref* os_socket;
 
   ci_assert(ep);
   ci_assert(IS_VALID_DESCRIPTOR(os_sock_fd));
   ci_assert_equal(ep->os_socket, NULL);
 
-  rc = oo_file_ref_lookup(os_sock_fd, &ep->os_socket);
+  rc = oo_file_ref_lookup(os_sock_fd, &os_socket);
   if( rc < 0 ) {
     OO_DEBUG_ERR(ci_log("%s: %d:%d fd="DESCRIPTOR_FMT" lookup failed (%d)",
                         __FUNCTION__, ep->thr->id, OO_SP_FMT(ep->id),
                         DESCRIPTOR_PRI_ARG(os_sock_fd), rc));
     return rc;
   }
+
+  /* Check that this os_socket is really a socket. */
+  if( !S_ISSOCK(os_socket->file->f_dentry->d_inode->i_mode) ||
+      SOCKET_I(os_socket->file->f_dentry->d_inode)->file != os_socket->file) {
+    oo_file_ref_drop(os_socket);
+    OO_DEBUG_ERR(ci_log("%s: %d:%d fd="DESCRIPTOR_FMT" is not a socket",
+                        __FUNCTION__, ep->thr->id, OO_SP_FMT(ep->id),
+                        DESCRIPTOR_PRI_ARG(os_sock_fd)));
+    return -EBUSY;
+  }
+
   efab_linux_sys_close(os_sock_fd);
+  ep->os_socket = os_socket;
   if( SP_TO_WAITABLE(&ep->thr->netif, ep->id)->state == CI_TCP_STATE_UDP )
     efab_tcp_helper_os_pollwait_register(ep);
   return 0;

@@ -18,7 +18,7 @@ LINK_CIUL_LIB		:= $(MMakeGenerateLibLink)
 # version number to be incremented.
 lib_maj := 1
 lib_min := 1
-lib_mic := 0
+lib_mic := 1
 CIUL_REALNAME		:= $(MMakeGenerateDllRealname)
 CIUL_SONAME		:= $(MMakeGenerateDllSoname)
 CIUL_LINKNAME		:= $(MMakeGenerateDllLinkname)

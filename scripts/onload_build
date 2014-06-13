@@ -47,13 +47,10 @@ user32=false
 user64=false
 all=true
 keepbuild=false
-nictype=falcon_b0
 NDEBUG=1; export NDEBUG
 
 while [ $# -gt 0 ]; do
   case "$1" in
-  --nictype)    [ $# -gt 1 ] || usage; nictype="$2"; shift;;
-  --nictype=*)  nictype=${1#--nictype=};;
   --kernelver)  [ $# -gt 1 ] || usage; KVER="$2"; export KVER; shift;;
   --kernelver=*)KVER=${1#--kernelver=};;
   --user)       all=false; user=true;;
@@ -89,7 +86,7 @@ else
 fi
 
 try cd "$bin/.."
-d=$(EF_NICTYPE="$nictype" mmaketool --driverbuild)
+d=$(mmaketool --driverbuild)
 try [ -n "$d" ]
 $keepbuild || rm -rf build
 try mkdir -p build
@@ -100,7 +97,7 @@ if $all || $kernel; then
   if [ -d "$d" ]; then
     nodeps=
   else
-    try mmakebuildtree --driver -n "$nictype" -d "$d"
+    try mmakebuildtree --driver -d "$d"
     echo "EFX_WANT_CONTROL := 0" >>"$d/options_config.mk"
     echo "EFX_EXPORTED := 1" >>"$d/options_config.mk"
     nodeps=MMAKE_NO_DEPS=1
@@ -112,26 +109,26 @@ fi
 if $all || $user || $user64; then
   if $is64; then
     # 64-bit user-level drivers and tools.
-    if [ -d "${nictype}_gnu_x86_64" ]; then
+    if [ -d "gnu_x86_64" ]; then
       nodeps=
     else
-      try mmakebuildtree "${nictype}_gnu_x86_64"
+      try mmakebuildtree "gnu_x86_64"
       nodeps=MMAKE_NO_DEPS=1
     fi
-    make -j4 -C "${nictype}_gnu_x86_64" ONLOAD_ONLY=1 $nodeps ||
+    make -j4 -C "gnu_x86_64" ONLOAD_ONLY=1 $nodeps ||
       fail "ERROR: Failed to build 64-bit user-level components."
   fi
 fi
 
 if $all || $user || $user32; then
   # 32-bit user-level drivers and tools.
-  if [ -d "${nictype}_gnu" ]; then
+  if [ -d "gnu" ]; then
     nodeps=
   else
-    try mmakebuildtree "${nictype}_gnu"
+    try mmakebuildtree "gnu"
     nodeps=MMAKE_NO_DEPS=1
   fi
-  make -j4 -C "${nictype}_gnu" ONLOAD_ONLY=1 $nodeps || {
+  make -j4 -C "gnu" ONLOAD_ONLY=1 $nodeps || {
     if $is64; then
       err
       log "WARNING: Failed to build 32-bit user-level components."

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -711,7 +711,10 @@ static const struct siena_nvram_type_info siena_nvram_types[] = {
 	[MC_CMD_NVRAM_TYPE_EXP_ROM_CFG_PORT1]	= { 1, "sfc_exp_rom_cfg" },
 	[MC_CMD_NVRAM_TYPE_PHY_PORT0]		= { 0, "sfc_phy_fw" },
 	[MC_CMD_NVRAM_TYPE_PHY_PORT1]		= { 1, "sfc_phy_fw" },
-	[MC_CMD_NVRAM_TYPE_FPGA]		= { 0, "sfc_fpga" },
+	[MC_CMD_NVRAM_TYPE_FPGA]    		= { 0, "sfc_fpga" },
+	[MC_CMD_NVRAM_TYPE_FPGA_BACKUP]    	= { 0, "sfc_fpgadiag" },
+	[MC_CMD_NVRAM_TYPE_CPLD]		= { 0, "sfc_cpld" },
+	[MC_CMD_NVRAM_TYPE_LICENSE]		= { 0, "sfc_license" },
 };
 
 static int siena_mtd_probe_partition(struct efx_nic *efx,

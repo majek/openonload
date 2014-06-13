@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -401,11 +401,11 @@ static int citp_udp_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* mmsg,
 
   do {
     rc = ci_udp_sendmsg(&a, &mmsg[i].msg_hdr, flags);
-    mmsg[i].msg_len = rc;
+    if(CI_LIKELY( rc >= 0 ) )
+      mmsg[i].msg_len = rc;
     ++i;
   } while( rc >= 0 && i < vlen );
-
-  return i;
+  return (rc>=0) ? i : rc;
 }
 #endif
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -289,6 +289,11 @@
 #define          MCDI_EVENT_AOE_FC_WATCHDOG 0x3 /* enum */
 #define          MCDI_EVENT_AOE_FC_NO_START 0x4 /* enum */
 #define          MCDI_EVENT_AOE_FAULT 0x5 /* enum */
+#define          MCDI_EVENT_AOE_CPLD_REPROGRAMMED 0x6 /* enum */
+#define          MCDI_EVENT_AOE_LOAD 0x7 /* enum */
+#define          MCDI_EVENT_AOE_DMA 0x8 /* enum */
+#define        MCDI_EVENT_AOE_ERR_DATA_LBN 8
+#define        MCDI_EVENT_AOE_ERR_DATA_WIDTH 8
 #define       MCDI_EVENT_DATA_LBN 0
 #define       MCDI_EVENT_DATA_WIDTH 32
 #define       MCDI_EVENT_SRC_LBN 36
@@ -313,6 +318,8 @@
 #define          MCDI_EVENT_CODE_PTP_FAULT  0xe /* enum */
 #define          MCDI_EVENT_CODE_PTP_PPS  0xf /* enum */
 #define          MCDI_EVENT_CODE_AOE  0x12 /* enum */
+#define          MCDI_EVENT_CODE_VCAL_FAIL  0x13 /* enum */
+#define          MCDI_EVENT_CODE_HW_PPS  0x14 /* enum */
 #define       MCDI_EVENT_CMDDONE_DATA_OFST 0
 #define       MCDI_EVENT_CMDDONE_DATA_LBN 0
 #define       MCDI_EVENT_CMDDONE_DATA_WIDTH 32
@@ -365,6 +372,7 @@
 #define          FCDI_EVENT_CODE_ASSERT 0x2 /* enum */
 #define          FCDI_EVENT_CODE_DDR_TEST_RESULT 0x3 /* enum */
 #define          FCDI_EVENT_CODE_LINK_STATE 0x4 /* enum */
+#define          FCDI_EVENT_CODE_TIMED_READ 0x5 /* enum */
 #define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_OFST 0
 #define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_LBN 0
 #define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_WIDTH 32
@@ -575,6 +583,11 @@
 #define          MC_CMD_FC_OP_GLOBAL_FLAGS 0x11 /* enum */
 #define          MC_CMD_FC_OP_IO_REL 0x12 /* enum */
 #define          MC_CMD_FC_OP_UHLINK 0x13 /* enum */
+#define          MC_CMD_FC_OP_SET_LOOPBACK 0x14 /* enum */
+#define          MC_CMD_FC_OP_LICENSE 0x15 /* enum */
+#define          MC_CMD_FC_OP_STARTUP 0x16 /* enum */
+#define          MC_CMD_FC_OP_DMA 0x17 /* enum */
+#define          MC_CMD_FC_OP_TIMED_READ 0x18 /* enum */
 #define          MC_CMD_FC_IN_PORT_EXT_OFST 0x0 /* enum */
 #define          MC_CMD_FC_IN_PORT_INT_OFST 0x40 /* enum */
 
@@ -871,6 +884,9 @@
 #define        MC_CMD_FC_IN_UHLINK_OP_WIDTH 8
 #define          MC_CMD_FC_OP_UHLINK_PHY 0x1 /* enum */
 #define          MC_CMD_FC_OP_UHLINK_MAC 0x2 /* enum */
+#define          MC_CMD_FC_OP_UHLINK_RX_EYE 0x3 /* enum */
+#define          MC_CMD_FC_OP_UHLINK_DUMP_RX_EYE_PLOT 0x4 /* enum */
+#define          MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT 0x5 /* enum */
 #define        MC_CMD_FC_IN_UHLINK_PORT_TYPE_LBN 8
 #define        MC_CMD_FC_IN_UHLINK_PORT_TYPE_WIDTH 8
 #define        MC_CMD_FC_IN_UHLINK_PORT_IDX_LBN 16
@@ -889,6 +905,123 @@
 #define    MC_CMD_FC_OP_UHLINK_MAC_LEN 8
 /*            MC_CMD_FC_IN_CMD_OFST 0 */
 /*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+
+/* MC_CMD_FC_OP_UHLINK_RX_EYE msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_RX_EYE_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+#define       MC_CMD_FC_OP_UHLINK_RX_EYE_INDEX_OFST 8
+#define          MC_CMD_FC_UHLINK_RX_EYE_PER_BLOCK 0x30 /* enum */
+
+/* MC_CMD_FC_OP_UHLINK_DUMP_RX_EYE_PLOT msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_DUMP_RX_EYE_PLOT_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+
+/* MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT_LEN 20
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+#define       MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT_DC_GAIN_OFST 8
+#define       MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT_EQ_CONTROL_OFST 12
+#define       MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT_INDEX_OFST 16
+#define          MC_CMD_FC_UHLINK_RX_EYE_PLOT_ROWS_PER_BLOCK 0x1e /* enum */
+
+/* MC_CMD_FC_IN_SET_LOOPBACK msgrequest */
+#define    MC_CMD_FC_IN_SET_LOOPBACK_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_SET_LOOPBACK_MODE_OFST 4
+#define       MC_CMD_FC_IN_SET_LOOPBACK_SPEED_OFST 8
+
+/* MC_CMD_FC_IN_LICENSE msgrequest */
+#define    MC_CMD_FC_IN_LICENSE_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_LICENSE_OP_OFST 4
+#define          MC_CMD_FC_IN_LICENSE_UPDATE_LICENSE 0x0 /* enum */
+#define          MC_CMD_FC_IN_LICENSE_GET_KEY_STATS 0x1 /* enum */
+
+/* MC_CMD_FC_IN_STARTUP msgrequest */
+#define    MC_CMD_FC_IN_STARTUP_LEN 36
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_STARTUP_BASE_OFST 4
+#define       MC_CMD_FC_IN_STARTUP_LENGTH_OFST 8
+#define       MC_CMD_FC_IN_STARTUP_ID_OFST 12
+#define       MC_CMD_FC_IN_STARTUP_ID_LEN 1
+#define       MC_CMD_FC_IN_STARTUP_ID_NUM 24
+
+/* MC_CMD_FC_IN_DMA msgrequest */
+#define    MC_CMD_FC_IN_DMA_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DMA_OP_OFST 4
+#define          MC_CMD_FC_IN_DMA_STOP  0x0 /* enum */
+#define          MC_CMD_FC_IN_DMA_READ  0x1 /* enum */
+
+/* MC_CMD_FC_IN_DMA_STOP msgrequest */
+#define    MC_CMD_FC_IN_DMA_STOP_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_DMA_OP_OFST 4 */
+#define       MC_CMD_FC_IN_DMA_STOP_FC_HANDLE_OFST 8
+
+/* MC_CMD_FC_IN_DMA_READ msgrequest */
+#define    MC_CMD_FC_IN_DMA_READ_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_DMA_OP_OFST 4 */
+#define       MC_CMD_FC_IN_DMA_READ_OFFSET_OFST 8
+#define       MC_CMD_FC_IN_DMA_READ_LENGTH_OFST 12
+
+/* MC_CMD_FC_IN_TIMED_READ msgrequest */
+#define    MC_CMD_FC_IN_TIMED_READ_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_TIMED_READ_OP_OFST 4
+#define          MC_CMD_FC_IN_TIMED_READ_SET  0x0 /* enum */
+#define          MC_CMD_FC_IN_TIMED_READ_GET  0x1 /* enum */
+#define          MC_CMD_FC_IN_TIMED_READ_CLEAR  0x2 /* enum */
+
+/* MC_CMD_FC_IN_TIMED_READ_SET msgrequest */
+#define    MC_CMD_FC_IN_TIMED_READ_SET_LEN 44
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_TIMED_READ_OP_OFST 4 */
+#define       MC_CMD_FC_IN_TIMED_READ_SET_HOST_HANDLE_OFST 8
+#define       MC_CMD_FC_IN_TIMED_READ_SET_HOST_DMA_ADDRESS_OFST 12
+#define       MC_CMD_FC_IN_TIMED_READ_SET_HOST_DMA_ADDRESS_LEN 8
+#define       MC_CMD_FC_IN_TIMED_READ_SET_HOST_DMA_ADDRESS_LO_OFST 12
+#define       MC_CMD_FC_IN_TIMED_READ_SET_HOST_DMA_ADDRESS_HI_OFST 16
+#define       MC_CMD_FC_IN_TIMED_READ_SET_AOE_ADDRESS_OFST 20
+#define       MC_CMD_FC_IN_TIMED_READ_SET_AOE_ADDRESS_LEN 8
+#define       MC_CMD_FC_IN_TIMED_READ_SET_AOE_ADDRESS_LO_OFST 20
+#define       MC_CMD_FC_IN_TIMED_READ_SET_AOE_ADDRESS_HI_OFST 24
+#define       MC_CMD_FC_IN_TIMED_READ_SET_AOE_LENGTH_OFST 28
+#define       MC_CMD_FC_IN_TIMED_READ_SET_HOST_LENGTH_OFST 32
+#define       MC_CMD_FC_IN_TIMED_READ_SET_FLAGS_OFST 36
+#define        MC_CMD_FC_IN_TIMED_READ_SET_INDIRECT_LBN 0
+#define        MC_CMD_FC_IN_TIMED_READ_SET_INDIRECT_WIDTH 1
+#define        MC_CMD_FC_IN_TIMED_READ_SET_DOUBLE_LBN 1
+#define        MC_CMD_FC_IN_TIMED_READ_SET_DOUBLE_WIDTH 1
+#define        MC_CMD_FC_IN_TIMED_READ_SET_EVENT_LBN 2
+#define        MC_CMD_FC_IN_TIMED_READ_SET_EVENT_WIDTH 1
+#define        MC_CMD_FC_IN_TIMED_READ_SET_PREREAD_LBN 3
+#define        MC_CMD_FC_IN_TIMED_READ_SET_PREREAD_WIDTH 2
+#define          MC_CMD_FC_IN_TIMED_READ_SET_NONE  0x0 /* enum */
+#define          MC_CMD_FC_IN_TIMED_READ_SET_READ  0x1 /* enum */
+#define          MC_CMD_FC_IN_TIMED_READ_SET_WRITE  0x2 /* enum */
+#define          MC_CMD_FC_IN_TIMED_READ_SET_READWRITE  0x3 /* enum */
+#define        MC_CMD_FC_IN_TIMED_READ_SET_OFFSET_LBN 8
+#define        MC_CMD_FC_IN_TIMED_READ_SET_OFFSET_WIDTH 8
+#define        MC_CMD_FC_IN_TIMED_READ_SET_DATA_LBN 16
+#define        MC_CMD_FC_IN_TIMED_READ_SET_DATA_WIDTH 16
+#define       MC_CMD_FC_IN_TIMED_READ_SET_PERIOD_OFST 40
+
+/* MC_CMD_FC_IN_TIMED_READ_GET msgrequest */
+#define    MC_CMD_FC_IN_TIMED_READ_GET_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_TIMED_READ_OP_OFST 4 */
+#define       MC_CMD_FC_IN_TIMED_READ_GET_FC_HANDLE_OFST 8
+
+/* MC_CMD_FC_IN_TIMED_READ_CLEAR msgrequest */
+#define    MC_CMD_FC_IN_TIMED_READ_CLEAR_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_TIMED_READ_OP_OFST 4 */
+#define       MC_CMD_FC_IN_TIMED_READ_CLEAR_FC_HANDLE_OFST 8
 
 /* MC_CMD_FC_OUT msgresponse */
 #define    MC_CMD_FC_OUT_LEN 0
@@ -1093,14 +1226,14 @@
 /* MC_CMD_FC_OUT_FPGA_BUILD msgresponse */
 #define    MC_CMD_FC_OUT_FPGA_BUILD_LEN 16
 #define       MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_INFO_OFST 0
-#define        MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_ID_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_ID_LBN 16
 #define        MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_ID_WIDTH 16
-#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MAJOR_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MAJOR_LBN 12
 #define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MAJOR_WIDTH 4
-#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MINOR_LBN 20
-#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MINOR_WIDTH 4
-#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_NUM_LBN 24
-#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_NUM_WIDTH 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MINOR_LBN 4
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MINOR_WIDTH 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_NUM_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_NUM_WIDTH 4
 #define       MC_CMD_FC_OUT_FPGA_BUILD_TIMESTAMP_OFST 4
 #define       MC_CMD_FC_OUT_FPGA_BUILD_PARAMETERS_OFST 8
 #define        MC_CMD_FC_OUT_FPGA_BUILD_FPGA_TYPE_LBN 0
@@ -1139,8 +1272,8 @@
 #define        MC_CMD_FC_OUT_FPGA_BUILD_SFP0_MAC_DEF_WIDTH 1
 #define        MC_CMD_FC_OUT_FPGA_BUILD_SFP1_MAC_DEF_LBN 30
 #define        MC_CMD_FC_OUT_FPGA_BUILD_SFP1_MAC_DEF_WIDTH 1
-#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED2_LBN 31
-#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED2_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_CRC_APPEND_LBN 31
+#define        MC_CMD_FC_OUT_FPGA_BUILD_CRC_APPEND_WIDTH 1
 #define       MC_CMD_FC_OUT_FPGA_BUILD_IDENTIFIER_OFST 12
 #define        MC_CMD_FC_OUT_FPGA_BUILD_CHANGESET_LBN 0
 #define        MC_CMD_FC_OUT_FPGA_BUILD_CHANGESET_WIDTH 16
@@ -1159,6 +1292,17 @@
 #define    MC_CMD_FC_OUT_READ_MAP_INDEX_LEN 164
 #define       MC_CMD_FC_OUT_READ_MAP_INDEX_INDEX_OFST 0
 #define       MC_CMD_FC_OUT_READ_MAP_INDEX_OPTIONS_OFST 4
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_ALIGN_8  0x0 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_ALIGN_16  0x1 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_ALIGN_32  0x2 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_ALIGN_64  0x3 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_ALIGN_MASK  0x3 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_PATH_FC  0x4 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_PATH_MEM  0x8 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_PERM_READ  0x10 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_PERM_WRITE  0x20 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_LICENSE_FREE  0x0 /* enum */
+#define          MC_CMD_FC_OUT_READ_MAP_INDEX_LICENSE_LICENSED  0x40 /* enum */
 #define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_OFST 8
 #define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_LEN 8
 #define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_LO_OFST 8
@@ -1261,8 +1405,69 @@
 #define       MC_CMD_FC_OUT_UHLINK_MAC_ADDR_LO_OFST 12
 #define       MC_CMD_FC_OUT_UHLINK_MAC_ADDR_HI_OFST 16
 
+/* MC_CMD_FC_OUT_UHLINK_RX_EYE msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_RX_EYE_LEN ((((0-1+(32*MC_CMD_FC_UHLINK_RX_EYE_PER_BLOCK))+1))>>3)
+#define       MC_CMD_FC_OUT_UHLINK_RX_EYE_RX_EYE_OFST 0
+#define       MC_CMD_FC_OUT_UHLINK_RX_EYE_RX_EYE_LEN 4
+#define       MC_CMD_FC_OUT_UHLINK_RX_EYE_RX_EYE_NUM MC_CMD_FC_UHLINK_RX_EYE_PER_BLOCK
+
+/* MC_CMD_FC_OUT_UHLINK_DUMP_RX_EYE_PLOT msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_DUMP_RX_EYE_PLOT_LEN 0
+
+/* MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_LEN ((((32-1+(64*MC_CMD_FC_UHLINK_RX_EYE_PLOT_ROWS_PER_BLOCK))+1))>>3)
+#define       MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_VALID_OFST 0
+#define       MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_ROWS_OFST 4
+#define       MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_ROWS_LEN 8
+#define       MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_ROWS_LO_OFST 4
+#define       MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_ROWS_HI_OFST 8
+#define       MC_CMD_FC_OUT_UHLINK_READ_RX_EYE_PLOT_ROWS_NUM MC_CMD_FC_UHLINK_RX_EYE_PLOT_ROWS_PER_BLOCK
+
 /* MC_CMD_FC_OUT_UHLINK msgresponse */
 #define    MC_CMD_FC_OUT_UHLINK_LEN 0
+
+/* MC_CMD_FC_OUT_LICENSE msgresponse */
+#define    MC_CMD_FC_OUT_LICENSE_LEN 12
+#define       MC_CMD_FC_OUT_LICENSE_VALID_KEYS_OFST 0
+#define       MC_CMD_FC_OUT_LICENSE_INVALID_KEYS_OFST 4
+#define       MC_CMD_FC_OUT_LICENSE_BLACKLISTED_KEYS_OFST 8
+
+/* MC_CMD_FC_OUT_DMA_READ msgrequest */
+#define    MC_CMD_FC_OUT_DMA_READ_LENMIN 1
+#define    MC_CMD_FC_OUT_DMA_READ_LENMAX 252
+#define    MC_CMD_FC_OUT_DMA_READ_LEN(num) (0+1*(num))
+#define       MC_CMD_FC_OUT_DMA_READ_DATA_OFST 0
+#define       MC_CMD_FC_OUT_DMA_READ_DATA_LEN 1
+#define       MC_CMD_FC_OUT_DMA_READ_DATA_MINNUM 1
+#define       MC_CMD_FC_OUT_DMA_READ_DATA_MAXNUM 252
+
+/* MC_CMD_FC_OUT_TIMED_READ_SET msgresponse */
+#define    MC_CMD_FC_OUT_TIMED_READ_SET_LEN 4
+#define       MC_CMD_FC_OUT_TIMED_READ_SET_FC_HANDLE_OFST 0
+
+/* MC_CMD_FC_OUT_TIMED_READ_GET msgresponse */
+#define    MC_CMD_FC_OUT_TIMED_READ_GET_LEN 52
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_HOST_HANDLE_OFST 0
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_HOST_DMA_ADDRESS_OFST 4
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_HOST_DMA_ADDRESS_LEN 8
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_HOST_DMA_ADDRESS_LO_OFST 4
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_HOST_DMA_ADDRESS_HI_OFST 8
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_AOE_ADDRESS_OFST 12
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_AOE_ADDRESS_LEN 8
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_AOE_ADDRESS_LO_OFST 12
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_AOE_ADDRESS_HI_OFST 16
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_AOE_LENGTH_OFST 20
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_HOST_LENGTH_OFST 24
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_FLAGS_OFST 28
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_PERIOD_OFST 32
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_START_OFST 36
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_START_LEN 8
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_START_LO_OFST 36
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_START_HI_OFST 40
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_END_OFST 44
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_END_LEN 8
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_END_LO_OFST 44
+#define       MC_CMD_FC_OUT_TIMED_READ_GET_CLOCK_END_HI_OFST 48
 
 
 /***********************************/
@@ -1283,7 +1488,7 @@
 #define          MC_CMD_AOE_OP_CPLD_READ 0x5 /* enum */
 #define          MC_CMD_AOE_OP_CPLD_WRITE 0x6 /* enum */
 #define          MC_CMD_AOE_OP_CPLD_INSTRUCTION 0x7 /* enum */
-#define          MC_CMD_AOE_OP_RESERVED 0x8 /* enum */
+#define          MC_CMD_AOE_OP_CPLD_REPROGRAM 0x8 /* enum */
 #define          MC_CMD_AOE_OP_POWER 0x9 /* enum */
 #define          MC_CMD_AOE_OP_LOAD 0xa /* enum */
 #define          MC_CMD_AOE_OP_FAN_CONTROL 0xb /* enum */
@@ -1293,6 +1498,8 @@
 #define          MC_CMD_AOE_OP_JTAG_WRITE 0xf /* enum */
 #define          MC_CMD_AOE_OP_FPGA_ACCESS 0x10 /* enum */
 #define          MC_CMD_AOE_OP_SET_MTU_OFFSET 0x11 /* enum */
+#define          MC_CMD_AOE_OP_LINK_STATE 0x12 /* enum */
+#define          MC_CMD_AOE_OP_SIENA_STATS 0x13 /* enum */
 
 /* MC_CMD_AOE_OUT msgresponse */
 #define    MC_CMD_AOE_OUT_LEN 0
@@ -1331,14 +1538,23 @@
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
 #define       MC_CMD_AOE_IN_CPLD_INSTRUCTION_INSTRUCTION_OFST 4
 
-/* MC_CMD_AOE_IN_RESERVED msgrequest */
-#define    MC_CMD_AOE_IN_RESERVED_LEN 4
+/* MC_CMD_AOE_IN_CPLD_REPROGRAM msgrequest */
+#define    MC_CMD_AOE_IN_CPLD_REPROGRAM_LEN 8
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_CPLD_REPROGRAM_OP_OFST 4
+#define          MC_CMD_AOE_IN_CPLD_REPROGRAM_REPROGRAM 0x1 /* enum */
+#define          MC_CMD_AOE_IN_CPLD_REPROGRAM_REPROGRAM_EVENT 0x3 /* enum */
+#define          MC_CMD_AOE_IN_CPLD_REPROGRAM_STATUS 0x4 /* enum */
 
 /* MC_CMD_AOE_IN_POWER msgrequest */
 #define    MC_CMD_AOE_IN_POWER_LEN 8
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
-#define       MC_CMD_AOE_IN_POWER_ON_OFST 4
+#define       MC_CMD_AOE_IN_POWER_OP_OFST 4
+#define          MC_CMD_AOE_IN_POWER_OFF  0x0 /* enum */
+#define          MC_CMD_AOE_IN_POWER_ON  0x1 /* enum */
+#define          MC_CMD_AOE_IN_POWER_CLEAR  0x2 /* enum */
+#define          MC_CMD_AOE_IN_POWER_SHOW_CURRENT  0x3 /* enum */
+#define          MC_CMD_AOE_IN_POWER_SHOW_PEAK  0x4 /* enum */
 
 /* MC_CMD_AOE_IN_LOAD msgrequest */
 #define    MC_CMD_AOE_IN_LOAD_LEN 8
@@ -1385,24 +1601,16 @@
 #define       MC_CMD_AOE_IN_GET_PHY_MEDIA_INFO_PORT_OFST 4
 #define       MC_CMD_AOE_IN_GET_PHY_MEDIA_INFO_PAGE_OFST 8
 
-/* MC_CMD_AOE_IN_SET_MTU_OFFSET msgrequest */
-#define    MC_CMD_AOE_IN_SET_MTU_OFFSET_LEN 12
-/*            MC_CMD_AOE_IN_CMD_OFST 0 */
-#define       MC_CMD_AOE_IN_SET_MTU_OFFSET_PORT_OFST 4
-#define          MC_CMD_AOE_IN_SET_MTU_OFFSET_ALL_EXTERNAL 0x8000 /* enum */
-#define          MC_CMD_AOE_IN_SET_MTU_OFFSET_ALL_INTERNAL 0x4000 /* enum */
-#define       MC_CMD_AOE_IN_SET_MTU_OFFSET_OFFSET_OFST 8
-
 /* MC_CMD_AOE_IN_JTAG_WRITE msgrequest */
 #define    MC_CMD_AOE_IN_JTAG_WRITE_LENMIN 9
-#define    MC_CMD_AOE_IN_JTAG_WRITE_LENMAX 255
+#define    MC_CMD_AOE_IN_JTAG_WRITE_LENMAX 252
 #define    MC_CMD_AOE_IN_JTAG_WRITE_LEN(num) (8+1*(num))
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
 #define       MC_CMD_AOE_IN_JTAG_WRITE_DATALEN_OFST 4
 #define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_OFST 8
 #define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_LEN 1
 #define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_MINNUM 1
-#define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_MAXNUM 247
+#define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_MAXNUM 244
 
 /* MC_CMD_AOE_IN_FPGA_ACCESS msgrequest */
 #define    MC_CMD_AOE_IN_FPGA_ACCESS_LEN 5
@@ -1412,8 +1620,31 @@
 #define          MC_CMD_AOE_IN_FPGA_ACCESS_ENABLE 0x1 /* enum */
 #define          MC_CMD_AOE_IN_FPGA_ACCESS_DISABLE 0x2 /* enum */
 
+/* MC_CMD_AOE_IN_SET_MTU_OFFSET msgrequest */
+#define    MC_CMD_AOE_IN_SET_MTU_OFFSET_LEN 12
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_SET_MTU_OFFSET_PORT_OFST 4
+#define          MC_CMD_AOE_IN_SET_MTU_OFFSET_ALL_EXTERNAL 0x8000 /* enum */
+#define          MC_CMD_AOE_IN_SET_MTU_OFFSET_ALL_INTERNAL 0x4000 /* enum */
+#define       MC_CMD_AOE_IN_SET_MTU_OFFSET_OFFSET_OFST 8
+
+/* MC_CMD_AOE_IN_LINK_STATE msgrequest */
+#define    MC_CMD_AOE_IN_LINK_STATE_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_LINK_STATE_MODE_OFST 4
+#define          MC_CMD_AOE_IN_LINK_STATE_SIMPLE_SEPARATE  0x0 /* enum */
+#define          MC_CMD_AOE_IN_LINK_STATE_SIMPLE_COMBINED  0x1 /* enum */
+#define          MC_CMD_AOE_IN_LINK_STATE_DIAGNOSTIC  0x2 /* enum */
+
+/* MC_CMD_AOE_IN_SIENA_STATS msgrequest */
+#define    MC_CMD_AOE_IN_SIENA_STATS_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_SIENA_STATS_MODE_OFST 4
+#define          MC_CMD_AOE_IN_SIENA_STATS_STATS_SIENA  0x0 /* enum */
+#define          MC_CMD_AOE_IN_SIENA_STATS_STATS_AOE  0x1 /* enum */
+
 /* MC_CMD_AOE_OUT_INFO msgresponse */
-#define    MC_CMD_AOE_OUT_INFO_LEN 32
+#define    MC_CMD_AOE_OUT_INFO_LEN 40
 #define       MC_CMD_AOE_OUT_INFO_CPLD_IDCODE_OFST 0
 #define       MC_CMD_AOE_OUT_INFO_CPLD_VERSION_OFST 4
 #define       MC_CMD_AOE_OUT_INFO_FPGA_IDCODE_OFST 8
@@ -1424,18 +1655,55 @@
 #define       MC_CMD_AOE_OUT_INFO_FC_STATE_OFST 28
 #define          MC_CMD_AOE_OUT_INFO_WATCHDOG 0x1 /* enum */
 #define          MC_CMD_AOE_OUT_INFO_COMMS 0x2 /* enum */
+#define       MC_CMD_AOE_OUT_INFO_FLAGS_OFST 32
+#define          MC_CMD_AOE_OUT_INFO_PEG_POWER 0x1 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_CPLD_GOOD 0x2 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_FPGA_GOOD 0x4 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_FPGA_POWER 0x8 /* enum */
+#define       MC_CMD_AOE_OUT_INFO_BOARD_REVISION_OFST 36
+#define          MC_CMD_AOE_OUT_INFO_UNKNOWN  0x0 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_R1_0  0x10 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_R1_1  0x11 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_R1_2  0x12 /* enum */
 
 /* MC_CMD_AOE_OUT_CURRENTS msgresponse */
-#define    MC_CMD_AOE_OUT_CURRENTS_LEN 32
+#define    MC_CMD_AOE_OUT_CURRENTS_LEN 68
 #define       MC_CMD_AOE_OUT_CURRENTS_VALUES_OFST 0
 #define       MC_CMD_AOE_OUT_CURRENTS_VALUES_LEN 4
-#define       MC_CMD_AOE_OUT_CURRENTS_VALUES_NUM 8
+#define       MC_CMD_AOE_OUT_CURRENTS_VALUES_NUM 17
+#define          MC_CMD_AOE_OUT_CURRENTS_I_2V5 0x0 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_1V8 0x1 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_GXB 0x2 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_PGM 0x3 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_XCVR 0x4 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_1V5 0x5 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_V_3V3 0x6 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_V_1V5 0x7 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_IN 0x8 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_OUT 0x9 /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_V_IN 0xa /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_OUT_DDR1 0xb /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_V_OUT_DDR1 0xc /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_OUT_DDR2 0xd /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_V_OUT_DDR2 0xe /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_I_OUT_DDR3 0xf /* enum */
+#define          MC_CMD_AOE_OUT_CURRENTS_V_OUT_DDR3 0x10 /* enum */
 
 /* MC_CMD_AOE_OUT_TEMPERATURES msgresponse */
 #define    MC_CMD_AOE_OUT_TEMPERATURES_LEN 40
 #define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_OFST 0
 #define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_LEN 4
 #define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_NUM 10
+#define          MC_CMD_AOE_OUT_TEMPERATURES_MAIN_0 0x0 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_MAIN_1 0x1 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_IND_0 0x2 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_IND_1 0x3 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_VCCIO1 0x4 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_VCCIO2 0x5 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_VCCIO3 0x6 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_PSU 0x7 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_FPGA 0x8 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SIENA 0x9 /* enum */
 
 /* MC_CMD_AOE_OUT_CPLD_READ msgresponse */
 #define    MC_CMD_AOE_OUT_CPLD_READ_LEN 4
@@ -1450,6 +1718,10 @@
 #define       MC_CMD_AOE_OUT_FAN_FAILURES_COUNT_MINNUM 1
 #define       MC_CMD_AOE_OUT_FAN_FAILURES_COUNT_MAXNUM 63
 
+/* MC_CMD_AOE_OUT_CPLD_REPROGRAM msgresponse */
+#define    MC_CMD_AOE_OUT_CPLD_REPROGRAM_LEN 4
+#define       MC_CMD_AOE_OUT_CPLD_REPROGRAM_STATUS_OFST 0
+
 /* MC_CMD_AOE_OUT_MAC_STATS_DMA msgresponse */
 #define    MC_CMD_AOE_OUT_MAC_STATS_DMA_LEN 0
 
@@ -1463,23 +1735,23 @@
 
 /* MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO msgresponse */
 #define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LENMIN 5
-#define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LENMAX 255
+#define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LENMAX 252
 #define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LEN(num) (4+1*(num))
 #define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATALEN_OFST 0
 #define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_OFST 4
 #define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_LEN 1
 #define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_MINNUM 1
-#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_MAXNUM 251
+#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_MAXNUM 248
 
 /* MC_CMD_AOE_OUT_JTAG_WRITE msgresponse */
 #define    MC_CMD_AOE_OUT_JTAG_WRITE_LENMIN 5
-#define    MC_CMD_AOE_OUT_JTAG_WRITE_LENMAX 255
+#define    MC_CMD_AOE_OUT_JTAG_WRITE_LENMAX 252
 #define    MC_CMD_AOE_OUT_JTAG_WRITE_LEN(num) (4+1*(num))
 #define       MC_CMD_AOE_OUT_JTAG_WRITE_DATALEN_OFST 0
 #define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_OFST 4
 #define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_LEN 1
 #define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_MINNUM 1
-#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_MAXNUM 251
+#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_MAXNUM 248
 
 /* MC_CMD_AOE_OUT_FPGA_ACCESS msgresponse */
 #define    MC_CMD_AOE_OUT_FPGA_ACCESS_LEN 0
@@ -1510,8 +1782,13 @@
 #define          MC_CMD_PTP_OP_FPGAWRITE 0xd /* enum */
 #define          MC_CMD_PTP_OP_CLOCK_OFFSET_ADJUST 0xe /* enum */
 #define          MC_CMD_PTP_OP_CLOCK_FREQ_ADJUST 0xf /* enum */
-#define          MC_CMD_PTP_OP_RECEIVE_SET_FILTER 0x10 /* enum */
-#define          MC_CMD_PTP_OP_MAX 0x11 /* enum */
+#define          MC_CMD_PTP_OP_RX_SET_VLAN_FILTER 0x10 /* enum */
+#define          MC_CMD_PTP_OP_RX_SET_UUID_FILTER 0x11 /* enum */
+#define          MC_CMD_PTP_OP_RX_SET_DOMAIN_FILTER 0x12 /* enum */
+#define          MC_CMD_PTP_OP_SET_CLK_SRC 0x13 /* enum */
+#define          MC_CMD_PTP_OP_RST_CLK 0x14 /* enum */
+#define          MC_CMD_PTP_OP_PPS_ENABLE 0x15 /* enum */
+#define          MC_CMD_PTP_OP_MAX 0x16 /* enum */
 
 /* MC_CMD_PTP_IN_ENABLE msgrequest */
 #define    MC_CMD_PTP_IN_ENABLE_LEN 16
@@ -1523,6 +1800,7 @@
 #define          MC_CMD_PTP_MODE_V1_VLAN 0x1 /* enum */
 #define          MC_CMD_PTP_MODE_V2 0x2 /* enum */
 #define          MC_CMD_PTP_MODE_V2_VLAN 0x3 /* enum */
+#define          MC_CMD_PTP_MODE_V2_ENHANCED 0x4 /* enum */
 
 /* MC_CMD_PTP_IN_DISABLE msgrequest */
 #define    MC_CMD_PTP_IN_DISABLE_LEN 8
@@ -1531,7 +1809,7 @@
 
 /* MC_CMD_PTP_IN_TRANSMIT msgrequest */
 #define    MC_CMD_PTP_IN_TRANSMIT_LENMIN 13
-#define    MC_CMD_PTP_IN_TRANSMIT_LENMAX 255
+#define    MC_CMD_PTP_IN_TRANSMIT_LENMAX 252
 #define    MC_CMD_PTP_IN_TRANSMIT_LEN(num) (12+1*(num))
 /*            MC_CMD_PTP_IN_CMD_OFST 0 */
 /*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
@@ -1539,7 +1817,7 @@
 #define       MC_CMD_PTP_IN_TRANSMIT_PACKET_OFST 12
 #define       MC_CMD_PTP_IN_TRANSMIT_PACKET_LEN 1
 #define       MC_CMD_PTP_IN_TRANSMIT_PACKET_MINNUM 1
-#define       MC_CMD_PTP_IN_TRANSMIT_PACKET_MAXNUM 243
+#define       MC_CMD_PTP_IN_TRANSMIT_PACKET_MAXNUM 240
 
 /* MC_CMD_PTP_IN_READ_NIC_TIME msgrequest */
 #define    MC_CMD_PTP_IN_READ_NIC_TIME_LEN 8
@@ -1604,7 +1882,7 @@
 
 /* MC_CMD_PTP_IN_FPGAWRITE msgrequest */
 #define    MC_CMD_PTP_IN_FPGAWRITE_LENMIN 13
-#define    MC_CMD_PTP_IN_FPGAWRITE_LENMAX 255
+#define    MC_CMD_PTP_IN_FPGAWRITE_LENMAX 252
 #define    MC_CMD_PTP_IN_FPGAWRITE_LEN(num) (12+1*(num))
 /*            MC_CMD_PTP_IN_CMD_OFST 0 */
 /*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
@@ -1612,7 +1890,7 @@
 #define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_OFST 12
 #define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_LEN 1
 #define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_MINNUM 1
-#define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_MAXNUM 243
+#define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_MAXNUM 240
 
 /* MC_CMD_PTP_IN_CLOCK_OFFSET_ADJUST msgrequest */
 #define    MC_CMD_PTP_IN_CLOCK_OFFSET_ADJUST_LEN 16
@@ -1631,16 +1909,39 @@
 #define       MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST_FREQ_HI_OFST 12
 /*               MC_CMD_PTP_IN_ADJUST_BITS 0x28 */
 
-/* MC_CMD_PTP_IN_RECEIVE_SET_FILTER msgrequest */
-#define    MC_CMD_PTP_IN_RECEIVE_SET_FILTER_LENMIN 10
-#define    MC_CMD_PTP_IN_RECEIVE_SET_FILTER_LENMAX 254
-#define    MC_CMD_PTP_IN_RECEIVE_SET_FILTER_LEN(num) (8+2*(num))
+/* MC_CMD_PTP_IN_RX_SET_VLAN_FILTER msgrequest */
+#define    MC_CMD_PTP_IN_RX_SET_VLAN_FILTER_LEN 24
 /*            MC_CMD_PTP_IN_CMD_OFST 0 */
 /*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
-#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_OFST 8
-#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_LEN 2
-#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_MINNUM 1
-#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_MAXNUM 123
+#define       MC_CMD_PTP_IN_RX_SET_VLAN_FILTER_NUM_VLAN_TAGS_OFST 8
+#define       MC_CMD_PTP_IN_RX_SET_VLAN_FILTER_VLAN_TAG_OFST 12
+#define       MC_CMD_PTP_IN_RX_SET_VLAN_FILTER_VLAN_TAG_LEN 4
+#define       MC_CMD_PTP_IN_RX_SET_VLAN_FILTER_VLAN_TAG_NUM 3
+
+/* MC_CMD_PTP_IN_RX_SET_UUID_FILTER msgrequest */
+#define    MC_CMD_PTP_IN_RX_SET_UUID_FILTER_LEN 20
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_RX_SET_UUID_FILTER_ENABLE_OFST 8
+#define       MC_CMD_PTP_IN_RX_SET_UUID_FILTER_UUID_OFST 12
+#define       MC_CMD_PTP_IN_RX_SET_UUID_FILTER_UUID_LEN 8
+#define       MC_CMD_PTP_IN_RX_SET_UUID_FILTER_UUID_LO_OFST 12
+#define       MC_CMD_PTP_IN_RX_SET_UUID_FILTER_UUID_HI_OFST 16
+
+/* MC_CMD_PTP_IN_RX_SET_DOMAIN_FILTER msgrequest */
+#define    MC_CMD_PTP_IN_RX_SET_DOMAIN_FILTER_LEN 16
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_RX_SET_DOMAIN_FILTER_ENABLE_OFST 8
+#define       MC_CMD_PTP_IN_RX_SET_DOMAIN_FILTER_DOMAIN_OFST 12
+
+/* MC_CMD_PTP_IN_PPS_ENABLE msgrequest */
+#define    MC_CMD_PTP_IN_PPS_ENABLE_LEN 12
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+#define       MC_CMD_PTP_IN_PPS_ENABLE_OP_OFST 4
+#define          MC_CMD_PTP_ENABLE_PPS 0x0 /* enum */
+#define          MC_CMD_PTP_DISABLE_PPS 0x1 /* enum */
+#define       MC_CMD_PTP_IN_PPS_ENABLE_QUEUE_ID_OFST 8
 
 /* MC_CMD_PTP_OUT msgresponse */
 #define    MC_CMD_PTP_OUT_LEN 0
@@ -1711,23 +2012,12 @@
 
 /* MC_CMD_PTP_OUT_FPGAREAD msgresponse */
 #define    MC_CMD_PTP_OUT_FPGAREAD_LENMIN 1
-#define    MC_CMD_PTP_OUT_FPGAREAD_LENMAX 255
+#define    MC_CMD_PTP_OUT_FPGAREAD_LENMAX 252
 #define    MC_CMD_PTP_OUT_FPGAREAD_LEN(num) (0+1*(num))
 #define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_OFST 0
 #define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_LEN 1
 #define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_MINNUM 1
-#define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_MAXNUM 255
-
-/* MC_CMD_PTP_FILTER_ENTRY_TYPEDEF structuredef */
-#define    MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_LEN 2
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_OFST 0
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_LEN 1
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_LBN 0
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_WIDTH 8
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_OFST 1
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_LEN 1
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_LBN 8
-#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_WIDTH 8
+#define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_MAXNUM 252
 
 
 /***********************************/
@@ -2186,7 +2476,7 @@
 
 /* MC_CMD_PUTS_IN msgrequest */
 #define    MC_CMD_PUTS_IN_LENMIN 13
-#define    MC_CMD_PUTS_IN_LENMAX 255
+#define    MC_CMD_PUTS_IN_LENMAX 252
 #define    MC_CMD_PUTS_IN_LEN(num) (12+1*(num))
 #define       MC_CMD_PUTS_IN_DEST_OFST 0
 #define        MC_CMD_PUTS_IN_UART_LBN 0
@@ -2198,7 +2488,7 @@
 #define       MC_CMD_PUTS_IN_STRING_OFST 12
 #define       MC_CMD_PUTS_IN_STRING_LEN 1
 #define       MC_CMD_PUTS_IN_STRING_MINNUM 1
-#define       MC_CMD_PUTS_IN_STRING_MAXNUM 243
+#define       MC_CMD_PUTS_IN_STRING_MAXNUM 240
 
 /* MC_CMD_PUTS_OUT msgresponse */
 #define    MC_CMD_PUTS_OUT_LEN 0
@@ -2931,6 +3221,8 @@
 #define          MC_CMD_NVRAM_TYPE_FPGA_BACKUP 0xe /* enum */
 #define          MC_CMD_NVRAM_TYPE_FC_FW 0xf /* enum */
 #define          MC_CMD_NVRAM_TYPE_FC_FW_BACKUP 0x10 /* enum */
+#define          MC_CMD_NVRAM_TYPE_CPLD 0x11 /* enum */
+#define          MC_CMD_NVRAM_TYPE_LICENSE 0x12 /* enum */
 
 
 /***********************************/
@@ -2991,12 +3283,12 @@
 
 /* MC_CMD_NVRAM_READ_OUT msgresponse */
 #define    MC_CMD_NVRAM_READ_OUT_LENMIN 1
-#define    MC_CMD_NVRAM_READ_OUT_LENMAX 255
+#define    MC_CMD_NVRAM_READ_OUT_LENMAX 252
 #define    MC_CMD_NVRAM_READ_OUT_LEN(num) (0+1*(num))
 #define       MC_CMD_NVRAM_READ_OUT_READ_BUFFER_OFST 0
 #define       MC_CMD_NVRAM_READ_OUT_READ_BUFFER_LEN 1
 #define       MC_CMD_NVRAM_READ_OUT_READ_BUFFER_MINNUM 1
-#define       MC_CMD_NVRAM_READ_OUT_READ_BUFFER_MAXNUM 255
+#define       MC_CMD_NVRAM_READ_OUT_READ_BUFFER_MAXNUM 252
 
 
 /***********************************/
@@ -3007,7 +3299,7 @@
 
 /* MC_CMD_NVRAM_WRITE_IN msgrequest */
 #define    MC_CMD_NVRAM_WRITE_IN_LENMIN 13
-#define    MC_CMD_NVRAM_WRITE_IN_LENMAX 255
+#define    MC_CMD_NVRAM_WRITE_IN_LENMAX 252
 #define    MC_CMD_NVRAM_WRITE_IN_LEN(num) (12+1*(num))
 #define       MC_CMD_NVRAM_WRITE_IN_TYPE_OFST 0
 /*            Enum values, see field(s): */
@@ -3017,7 +3309,7 @@
 #define       MC_CMD_NVRAM_WRITE_IN_WRITE_BUFFER_OFST 12
 #define       MC_CMD_NVRAM_WRITE_IN_WRITE_BUFFER_LEN 1
 #define       MC_CMD_NVRAM_WRITE_IN_WRITE_BUFFER_MINNUM 1
-#define       MC_CMD_NVRAM_WRITE_IN_WRITE_BUFFER_MAXNUM 243
+#define       MC_CMD_NVRAM_WRITE_IN_WRITE_BUFFER_MAXNUM 240
 
 /* MC_CMD_NVRAM_WRITE_OUT msgresponse */
 #define    MC_CMD_NVRAM_WRITE_OUT_LEN 0
@@ -3146,6 +3438,10 @@
 #define          MC_CMD_SENSOR_FAN_2  0x15 /* enum */
 #define          MC_CMD_SENSOR_FAN_3  0x16 /* enum */
 #define          MC_CMD_SENSOR_FAN_4  0x17 /* enum */
+#define          MC_CMD_SENSOR_IN_VAOE  0x18 /* enum */
+#define          MC_CMD_SENSOR_OUT_IAOE  0x19 /* enum */
+#define          MC_CMD_SENSOR_IN_IAOE  0x1a /* enum */
+#define          MC_CMD_SENSOR_NIC_POWER  0x1b /* enum */
 #define       MC_CMD_SENSOR_ENTRY_OFST 4
 #define       MC_CMD_SENSOR_ENTRY_LEN 8
 #define       MC_CMD_SENSOR_ENTRY_LO_OFST 4
@@ -3358,13 +3654,13 @@
 
 /* MC_CMD_GET_PHY_MEDIA_INFO_OUT msgresponse */
 #define    MC_CMD_GET_PHY_MEDIA_INFO_OUT_LENMIN 5
-#define    MC_CMD_GET_PHY_MEDIA_INFO_OUT_LENMAX 255
+#define    MC_CMD_GET_PHY_MEDIA_INFO_OUT_LENMAX 252
 #define    MC_CMD_GET_PHY_MEDIA_INFO_OUT_LEN(num) (4+1*(num))
 #define       MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATALEN_OFST 0
 #define       MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATA_OFST 4
 #define       MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATA_LEN 1
 #define       MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATA_MINNUM 1
-#define       MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATA_MAXNUM 251
+#define       MC_CMD_GET_PHY_MEDIA_INFO_OUT_DATA_MAXNUM 248
 
 
 /***********************************/

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -79,6 +79,10 @@
 # else
 #  define __devinitconst
 # endif
+#endif
+
+#ifndef IRQF_SAMPLE_RANDOM
+#define IRQF_SAMPLE_RANDOM 0
 #endif
 
 
@@ -633,7 +637,7 @@ static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
 		rc = iommu_attach_device(efrm_pt_domain, &pci_dev->dev);
 		mutex_unlock(&efrm_iommu_mutex);
 		if (rc != 0 )
-			return rc;
+			goto fail2;
 		vf->iova_basep = &efrm_pt_iova_base;
 	}
 #endif
@@ -702,6 +706,10 @@ fail4:
 	/* pci_clear_master is called from pci_disable_device */
 	pci_disable_device(pci_dev);
 fail3:
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
+	iommu_detach_device(efrm_pt_domain, &pci_dev->dev);
+fail2:
+#endif
 	kfree(vf);
 	return rc;
 }
@@ -1260,6 +1268,9 @@ void efrm_vf_eventq_callback_kill(struct efrm_vi *virs)
 	if (virs->evq_callback_fn == NULL)
 		return;
 
+#ifdef EFX_USE_IRQ_SET_AFFINITY_HINT
+	irq_set_affinity_hint(vi->irq, NULL);
+#endif
 	free_irq(vi->irq, vi);
 #ifndef EXF_HAVE_THREADED_IRQ
 	if (efrm_vf_use_threaded_irq)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,7 @@
 #include <internal.h>
 #include <ci/internal/transport_config_opt.h>
 #include <ci/tools/sllist.h>
+#include <onload/dup2_lock.h>
 
 
 #define LPF "citp_netif_"
@@ -89,6 +90,7 @@ void citp_netif_pre_fork_hook(void)
 
   citp_enter_lib(&citp_lib_context_across_fork);
   CITP_LOCK(&citp_ul_lock);
+  oo_rwlock_lock_write(&citp_dup2_lock);
   pthread_mutex_lock(&citp_pkt_map_lock);
 
   if( citp.init_level < CITP_INIT_NETIF )
@@ -120,6 +122,7 @@ void citp_netif_parent_fork_hook(void)
 
   Log_CALL(ci_log("%s()", __FUNCTION__));
   pthread_mutex_unlock(&citp_pkt_map_lock);
+  oo_rwlock_unlock_write(&citp_dup2_lock);
 
   if( citp.init_level < CITP_INIT_FDTABLE)
     goto unlock_fork;
@@ -164,6 +167,7 @@ void citp_netif_child_fork_hook(void)
    */
   pthread_mutex_init(&citp_dup_lock, NULL);
   CITP_LOCK_CTOR(&citp_ul_lock);
+  oo_rwlock_ctor(&citp_dup2_lock);
   pthread_mutex_init(&citp_pkt_map_lock, NULL);
 
   if( citp.init_level < CITP_INIT_FDTABLE)

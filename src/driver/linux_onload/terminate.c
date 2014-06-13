@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -429,10 +429,6 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
 #define KALLSYMS_ON_EACH_SYMBOL_EXPORTED
-#elif 0 && !defined(RHEL_MAJOR) && (LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,18))
-/* 2.6.18-8.1.8.el5 does not have RHEL_MAJOR or something like this,
- * so turn it off - use our implementation of zap_other_threads. */
-#define KALLSYMS_LOOKUP_NAME_EXPORTED
 #endif
 #endif
 

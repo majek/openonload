@@ -20,12 +20,6 @@ endif
 
 DRIVER_SUBDIRS	:= driver
 
-ifeq ($(WINDOWS),1)
-SUBDIRS       	:= nic ip driver
-DRIVER_SUBDIRS	:=
-OTHER_SUBDIRS	:= tweaks
-endif
-
 ifeq ($(FREEBSD),1)
 SUBDIRS         := ip
 DRIVER_SUBDIRS	:=

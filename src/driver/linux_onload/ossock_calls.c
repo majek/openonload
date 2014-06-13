@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -248,6 +248,16 @@ int oo_install_file_to_fd_cloexec(struct file *file)
 
   return fd;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+int sock_map_fd(struct socket *sock, int flags)
+{
+  struct file *file = sock_alloc_file(sock, flags, NULL);
+  if( file == NULL )
+    return PTR_ERR(file);
+  return oo_install_file_to_fd_cloexec(file);
+}
+#endif
 
 static int get_os_fd_from_ep(tcp_helper_endpoint_t *ep)
 {

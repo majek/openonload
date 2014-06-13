@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,7 +45,14 @@ struct efx_dl_device;
 struct efx_dl_device_info;
 
 /* An extra safeguard in addition to symbol versioning */
-#define EFX_DRIVERLINK_API_VERSION 6
+#define EFX_DRIVERLINK_API_VERSION 7
+
+/* enum efx_dl_ev_prio - Priority level that driverlink handles registe at */
+enum efx_dl_ev_prio {
+	EFX_DL_EV_HIGH = 0,
+	EFX_DL_EV_MED,
+	EFX_DL_EV_LOW,
+};
 
 /**
  * struct efx_dl_driver - An Efx driverlink device driver
@@ -80,6 +87,7 @@ struct efx_dl_device_info;
  */
 struct efx_dl_driver {
 	const char *name;
+	enum efx_dl_ev_prio priority;
 
 	int (*probe) (struct efx_dl_device *efx_dl_dev,
 		      const struct net_device *net_dev,
@@ -88,7 +96,7 @@ struct efx_dl_driver {
 	void (*remove) (struct efx_dl_device *efx_dev);
 	void (*reset_suspend) (struct efx_dl_device *efx_dev);
 	void (*reset_resume) (struct efx_dl_device *efx_dev, int ok);
-	void (*handle_event) (struct efx_dl_device *efx_dev, void *p_event);
+	bool (*handle_event) (struct efx_dl_device *efx_dev, void *p_event);
 
 /* private: */
 	struct list_head node;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -350,6 +350,10 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts, int can_block)
  drop:
   LOG_TC(log(LPF "%d drop connection in %s state", S_FMT(ts), 
               ci_tcp_state_str(ts->s.b.state)));
+  /* ci_tcp_drop should really drop connection instead of leaking it,
+   * because we can get here only when asyncronyously closing alien
+   * non-accepted connection from listen socket closure. */
+  ci_bit_clear(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
   ci_tcp_drop(netif, ts, ECONNRESET);
   return 0;
 }

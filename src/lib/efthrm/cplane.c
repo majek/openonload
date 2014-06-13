@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2780,7 +2780,7 @@ static int oo_timesync_ctor(cicp_mibs_kern_t *mibs)
     oo_ts->smoothed_ticks = 0;
     oo_ts->smoothed_ns = 0;
     oo_ts->generation_count = 0;
-    oo_ts->update_jiffies = 0;
+    oo_ts->update_jiffies = jiffies - 1;
 
     umibs->oo_timesync = oo_ts;
     return 0;

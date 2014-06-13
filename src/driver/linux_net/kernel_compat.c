@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -519,6 +519,7 @@ void set_normalized_timespec(struct timespec *ts, time_t sec, long nsec)
 	ts->tv_sec = sec;
 	ts->tv_nsec = nsec;
 }
+EXPORT_SYMBOL(set_normalized_timespec);
 #endif
 
 #ifdef EFX_HAVE_PARAM_BOOL_INT
@@ -558,6 +559,7 @@ int efx_param_get_bool(char *buffer, struct kernel_param *kp)
 	/* Y and N chosen as being relatively non-coder friendly */
 	return sprintf(buffer, "%c", *(bool *)kp->arg ? 'Y' : 'N');
 }
+EXPORT_SYMBOL(efx_param_get_bool);
 
 #endif /* EFX_HAVE_PARAM_BOOL_INT */
 
@@ -613,3 +615,154 @@ int efx_pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
 	return -ENOENT;
 }
 #endif /* EFX_NEED_PCI_VPD_LRDT */
+
+#ifdef EFX_NEED_KOBJECT_SET_NAME_VARGS
+int kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs)
+{
+	char *s;
+	int need;
+	int limit;
+	char *name;
+	const char *old_name;
+	va_list cvargs;
+
+	if (kobject_name(kobj) && !fmt)
+		return 0;
+
+	va_copy(cvargs, vargs);
+	need = vsnprintf(NULL, 0, fmt, vargs);
+	va_end(cvargs);
+
+	/* 
+	 * Need more space? Allocate it and try again 
+	 */
+	limit = need + 1;
+	name = kmalloc(limit,GFP_KERNEL);
+	if (!name)
+		return -ENOMEM;
+
+	vsnprintf(name,limit,fmt,vargs);
+
+	/* ewww... some of these buggers have '/' in the name ... */
+	while ((s = strchr(name, '/')))
+		s[0] = '!';
+
+	/* Free the old name, if necessary. */
+	old_name = kobject_name(kobj);
+	if (old_name && (old_name != name))
+		kfree(old_name);
+
+	/* Now, set the new name */
+	kobject_set_name(kobj, name);
+
+	return 0;
+}
+#endif /* EFX_NEED_KOBJECT_SET_NAME_VARGS */
+
+#ifdef EFX_NEED_KOBJECT_INIT_AND_ADD
+int efx_kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
+			     struct kobject *parent, const char *fmt, ...)
+{
+	int retval;
+	va_list args;
+
+	BUG_ON(!kobj || !ktype || atomic_read(&kobj->kref.refcount));
+
+	kref_init(&kobj->kref);
+	INIT_LIST_HEAD(&kobj->entry);
+	kobj->ktype = ktype;
+
+	va_start(args, fmt);
+	retval = kobject_set_name_vargs(kobj, fmt, args);
+	va_end(args);
+
+	if (retval) {
+		printk(KERN_ERR "kobject: can not set name properly!\n");
+		return retval;
+	}
+	kobj->parent = parent;
+	return kobject_add(kobj);
+}
+EXPORT_SYMBOL(kobject_init_and_add);
+
+#endif /* EFX_NEED_KOBJECT_INIT_AND_ADD */
+
+#ifdef EFX_NEED_ROOT_DEVICE_REGISTER
+struct root_device {
+        struct device dev;
+        struct module *owner;
+};
+
+int dev_set_name(struct device *dev, const char *fmt, ...)
+{
+	va_list vargs;
+	int err;
+
+	va_start(vargs, fmt);
+	err = kobject_set_name_vargs(&dev->kobj, fmt, vargs);
+	va_end(vargs);
+	return err;
+}
+
+inline struct root_device *to_root_device(struct device *d)
+{
+	return container_of(d, struct root_device, dev);
+}
+
+static void root_device_release(struct device *dev)
+{
+	kfree(to_root_device(dev));
+}
+
+struct device * __root_device_register(const char *name, struct module *owner)
+{
+	struct root_device *root;
+	int err = -ENOMEM;
+
+	root = kzalloc(sizeof(struct root_device), GFP_KERNEL);
+	if (!root)
+		return ERR_PTR(err);
+
+	err = dev_set_name(&root->dev, "%s", name);
+	if (err) {
+		kfree(root);
+		return ERR_PTR(err);
+	}
+
+	root->dev.release = root_device_release;
+
+	err = device_register(&root->dev);
+	if (err) {
+		put_device(&root->dev);
+		return ERR_PTR(err);
+	}
+
+#ifdef CONFIG_MODULES   /* gotta find a "cleaner" way to do this */
+	if (owner) {
+#ifdef EFX_HAVE_OLD_STRUCT_MODULE_MKOBJ_PTR
+		struct module_kobject *mk =  owner->mkobj;
+#else
+		struct module_kobject *mk = &owner->mkobj;
+#endif
+		err = sysfs_create_link(&root->dev.kobj, &mk->kobj, "module");
+		if (err) {
+			device_unregister(&root->dev);
+			return ERR_PTR(err);
+		}
+		root->owner = owner;
+	}
+#endif
+
+	return &root->dev;
+}
+
+void root_device_unregister(struct device *dev)
+{
+	struct root_device *root = to_root_device(dev);
+
+	if (root->owner)
+		sysfs_remove_link(&root->dev.kobj, "module");
+
+	device_unregister(dev);
+}
+#endif /* EFX_NEED_ROOT_DEVICE_REGISTER */

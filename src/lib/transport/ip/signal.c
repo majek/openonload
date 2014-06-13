@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,6 +30,7 @@
 #include <ci/internal/ip_signal.h>
 #include <ci/internal/ip_log.h>
 #include <linux/version.h>
+#include <ci/internal/efabcfg.h>
 
 /*! \TODO - remove (useful for debugging though) */
 #define LOG_SIG(x)
@@ -223,7 +224,8 @@ void citp_signal_intercept_3(int signum, siginfo_t *info, void *context)
    * intercept handler has been installed, but before that thread uses any
    * of the interposing library functions.)
    */
-  if (our_info && our_info->inside_lib)
+  if (our_info && our_info->inside_lib &&
+      (CITP_OPTS.signals_no_postpone & (1 << (signum-1))) == 0)
     citp_signal_set_pending(signum, info, context, our_info);
   else
     citp_signal_run_now(signum, info, context, our_info);

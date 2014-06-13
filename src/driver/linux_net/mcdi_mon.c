@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -42,7 +42,9 @@ enum efx_hwmon_type {
 	EFX_HWMON_UNKNOWN,
 	EFX_HWMON_TEMP,         /* temperature */
 	EFX_HWMON_COOL,         /* cooling device, probably a heatsink */
-	EFX_HWMON_IN            /* input voltage */
+	EFX_HWMON_IN,		/* voltage */
+	EFX_HWMON_CURR,		/* current */
+	EFX_HWMON_POWER,	/* power */
 };
 
 static const struct {
@@ -76,6 +78,10 @@ static const struct {
 	SENSOR(FAN_2,		   NULL,		   EFX_HWMON_COOL, -1),
 	SENSOR(FAN_3,		   NULL,		   EFX_HWMON_COOL, -1),
 	SENSOR(FAN_4,		   NULL,		   EFX_HWMON_COOL, -1),
+	SENSOR(IN_VAOE,	   	   "AOE input supply",	   EFX_HWMON_IN,   -1),
+	SENSOR(OUT_IAOE,	   "AOE output current",   EFX_HWMON_CURR, -1),
+	SENSOR(IN_IAOE,	   	   "AOE input current",	   EFX_HWMON_CURR, -1),
+	SENSOR(NIC_POWER,   	   "Board power use",	   EFX_HWMON_POWER,-1),
 #undef SENSOR
 };
 
@@ -188,9 +194,19 @@ static ssize_t efx_mcdi_mon_show_value(struct device *dev,
 
 	value = EFX_DWORD_FIELD(entry, MC_CMD_SENSOR_VALUE_ENTRY_TYPEDEF_VALUE);
 
-	/* Convert temperature from degrees to milli-degrees Celsius */
-	if (efx_mcdi_sensor_type[mon_attr->type].hwmon_type == EFX_HWMON_TEMP)
+	switch (efx_mcdi_sensor_type[mon_attr->type].hwmon_type) {
+	case EFX_HWMON_TEMP:
+		/* Convert temperature from degrees to milli-degrees Celsius */
 		value *= 1000;
+		break;
+	case EFX_HWMON_POWER:
+		/* Convert power from watts to microwatts */
+		value *= 1000000;
+		break;
+	default:
+		/* No conversion needed */
+		break;
+	}
 
 	return sprintf(buf, "%u\n", value);
 }
@@ -205,9 +221,19 @@ static ssize_t efx_mcdi_mon_show_limit(struct device *dev,
 
 	value = mon_attr->limit_value;
 
-	/* Convert temperature from degrees to milli-degrees Celsius */
-	if (efx_mcdi_sensor_type[mon_attr->type].hwmon_type == EFX_HWMON_TEMP)
+	switch (efx_mcdi_sensor_type[mon_attr->type].hwmon_type) {
+	case EFX_HWMON_TEMP:
+		/* Convert temperature from degrees to milli-degrees Celsius */
 		value *= 1000;
+		break;
+	case EFX_HWMON_POWER:
+		/* Convert power from watts to microwatts */
+		value *= 1000000;
+		break;
+	default:
+		/* No conversion needed */
+		break;
+	}
 
 	return sprintf(buf, "%u\n", value);
 }
@@ -256,8 +282,8 @@ static ssize_t efx_mcdi_mon_show_label(struct device *dev,
 #define SHOW(index) SHOW_2(index)
 #define SHOW_2(index) efx_mcdi_mon_show_attr_ ## index
 
-/* Allow for name + up to 23 sensors, 5 unlabelled
- * => 1 + 23 * 6 - 5 = 134 attributes
+/* Allow for name + up to 27 sensors, 5 unlabelled
+ * => 1 + 27 * 6 - 5 = 158 attributes
  */
 DEFINE_SHOW(0) DEFINE_SHOW(1) DEFINE_SHOW(2) DEFINE_SHOW(3) DEFINE_SHOW(4)
 DEFINE_SHOW(5) DEFINE_SHOW(6) DEFINE_SHOW(7) DEFINE_SHOW(8) DEFINE_SHOW(9)
@@ -287,7 +313,13 @@ DEFINE_SHOW(116) DEFINE_SHOW(117) DEFINE_SHOW(118) DEFINE_SHOW(119)
 DEFINE_SHOW(120) DEFINE_SHOW(121) DEFINE_SHOW(122) DEFINE_SHOW(123)
 DEFINE_SHOW(124) DEFINE_SHOW(125) DEFINE_SHOW(126) DEFINE_SHOW(127)
 DEFINE_SHOW(128) DEFINE_SHOW(129) DEFINE_SHOW(130) DEFINE_SHOW(131)
-DEFINE_SHOW(132) DEFINE_SHOW(133)
+DEFINE_SHOW(132) DEFINE_SHOW(133) DEFINE_SHOW(134) DEFINE_SHOW(135)
+DEFINE_SHOW(136) DEFINE_SHOW(137) DEFINE_SHOW(138) DEFINE_SHOW(139)
+DEFINE_SHOW(140) DEFINE_SHOW(141) DEFINE_SHOW(142) DEFINE_SHOW(143)
+DEFINE_SHOW(144) DEFINE_SHOW(145) DEFINE_SHOW(146) DEFINE_SHOW(147)
+DEFINE_SHOW(148) DEFINE_SHOW(149) DEFINE_SHOW(150) DEFINE_SHOW(151)
+DEFINE_SHOW(152) DEFINE_SHOW(153) DEFINE_SHOW(154) DEFINE_SHOW(155)
+DEFINE_SHOW(156) DEFINE_SHOW(157)
 static ssize_t
 (*const efx_mcdi_mon_show_attr_by_index[])(struct device *, char *) = {
 	SHOW(0), SHOW(1), SHOW(2), SHOW(3), SHOW(4), SHOW(5), SHOW(6),
@@ -310,6 +342,10 @@ static ssize_t
 	SHOW(116), SHOW(117), SHOW(118), SHOW(119), SHOW(120), SHOW(121),
 	SHOW(122), SHOW(123), SHOW(124), SHOW(125), SHOW(126), SHOW(127),
 	SHOW(128), SHOW(129), SHOW(130), SHOW(131), SHOW(132), SHOW(133),
+	SHOW(134), SHOW(135), SHOW(136), SHOW(137), SHOW(138), SHOW(139),
+	SHOW(140), SHOW(141), SHOW(142), SHOW(143), SHOW(144), SHOW(145),
+	SHOW(146), SHOW(147), SHOW(148), SHOW(149), SHOW(150), SHOW(151),
+	SHOW(152), SHOW(153), SHOW(154), SHOW(155), SHOW(156), SHOW(157),
 };
 
 #undef DEFINE_SHOW
@@ -355,7 +391,8 @@ efx_mcdi_mon_add_attr(struct efx_nic *efx, const char *name,
 int efx_mcdi_mon_probe(struct efx_nic *efx)
 {
 	struct efx_mcdi_mon *hwmon = efx_mcdi_mon(efx);
-	unsigned int n_attrs, n_temp = 0, n_cool = 0, n_in = 0;
+	unsigned int n_temp = 0, n_cool = 0, n_in = 0, n_curr = 0, n_power = 0;
+	unsigned int n_attrs;
 	u8 outbuf[MC_CMD_SENSOR_INFO_OUT_LENMAX];
 	size_t outlen;
 	char name[12];
@@ -412,6 +449,7 @@ int efx_mcdi_mon_probe(struct efx_nic *efx)
 		goto fail;
 
 	for (i = 0, type = -1; ; i++) {
+		enum efx_hwmon_type hwmon_type;
 		const char *hwmon_prefix;
 		unsigned hwmon_index;
 		u16 min1, max1, min2, max2;
@@ -425,12 +463,13 @@ int efx_mcdi_mon_probe(struct efx_nic *efx)
 		}
 
 		/* Skip sensors specific to a different port */
-		if (efx_mcdi_sensor_type[type].hwmon_type != EFX_HWMON_UNKNOWN &&
+		hwmon_type = efx_mcdi_sensor_type[type].hwmon_type;
+		if (hwmon_type != EFX_HWMON_UNKNOWN &&
 		    efx_mcdi_sensor_type[type].port >= 0 &&
 		    efx_mcdi_sensor_type[type].port != efx_port_num(efx))
 			continue;
 
-		switch (efx_mcdi_sensor_type[type].hwmon_type) {
+		switch (hwmon_type) {
 		case EFX_HWMON_TEMP:
 			hwmon_prefix = "temp";
 			hwmon_index = ++n_temp; /* 1-based */
@@ -446,6 +485,14 @@ int efx_mcdi_mon_probe(struct efx_nic *efx)
 		default:
 			hwmon_prefix = "in";
 			hwmon_index = n_in++; /* 0-based */
+			break;
+		case EFX_HWMON_CURR:
+			hwmon_prefix = "curr";
+			hwmon_index = ++n_curr; /* 1-based */
+			break;
+		case EFX_HWMON_POWER:
+			hwmon_prefix = "power";
+			hwmon_index = ++n_power; /* 1-based */
 			break;
 		}
 
@@ -466,13 +513,15 @@ int efx_mcdi_mon_probe(struct efx_nic *efx)
 			if (rc)
 				goto fail;
 
-			snprintf(name, sizeof(name), "%s%u_min",
-				 hwmon_prefix, hwmon_index);
-			rc = efx_mcdi_mon_add_attr(
-				efx, name, efx_mcdi_mon_show_limit,
-				i, type, min1);
-			if (rc)
-				goto fail;
+			if (hwmon_type != EFX_HWMON_POWER) {
+				snprintf(name, sizeof(name), "%s%u_min",
+					 hwmon_prefix, hwmon_index);
+				rc = efx_mcdi_mon_add_attr(
+					efx, name, efx_mcdi_mon_show_limit,
+					i, type, min1);
+				if (rc)
+					goto fail;
+			}
 
 			snprintf(name, sizeof(name), "%s%u_max",
 				 hwmon_prefix, hwmon_index);

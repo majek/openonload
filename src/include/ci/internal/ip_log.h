@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -146,6 +146,7 @@
                                  (s) == retrrc_nomac ? "NoMac" :        \
                                  (s) == retrrc_noroute ? "NoRoute" :    \
                                  (s) == retrrc_alienroute ? "ViaOs" :   \
+                                 (s) == retrrc_localroute ? "Local" :   \
                                  "MacFail")
 
 #define OOF_IPCACHE_VALID            "%s"

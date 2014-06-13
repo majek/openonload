@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,9 +56,10 @@ CI_CFG_OPT("EF_UL_SELECT", ul_select, ci_uint32,
            1, ,1, 0, 1, yesno)
 
 CI_CFG_OPT("EF_SELECT_SPIN", ul_select_spin, ci_uint32,
-"Spin in select() calls until the select set is satisfied or the spin timeout "
-"elapses (whichever is the sooner).  If the spin timeout elapses, enter the "
-"kernel and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
+"Spin in blocking select() calls until the select set is satisfied or the "
+"spin timeout expires (whichever is the sooner).  If the spin timeout "
+"expires, enter the kernel and block.  The spin timeout is set by "
+"EF_SPIN_USEC or EF_POLL_USEC.",
            1, ,0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_SELECT_FAST", ul_select_fast, ci_uint32,
@@ -79,7 +80,7 @@ CI_CFG_OPT("EF_UL_POLL", ul_poll, ci_uint32,
 
 CI_CFG_OPT("EF_POLL_SPIN", ul_poll_spin, ci_uint32, 
 "Spin in poll() calls until an event is satisfied or the spin timeout "
-"elapses (whichever is the sooner).  If the spin timeout elapses, enter the "
+"expires (whichever is the sooner).  If the spin timeout expires, enter the "
 "kernel and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
            1, ,0, 0, 1, yesno)
 
@@ -110,7 +111,7 @@ CI_CFG_OPT("EF_UL_EPOLL", ul_epoll, ci_uint32,
 
 CI_CFG_OPT("EF_EPOLL_SPIN", ul_epoll_spin, ci_uint32, 
 "Spin in epoll_wait() calls until an event is satisfied or the spin timeout "
-"elapses (whichever is the sooner).  If the spin timeout elapses, enter the "
+"expires (whichever is the sooner).  If the spin timeout expires, enter the "
 "kernel and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
@@ -227,16 +228,17 @@ CI_CFG_OPT("EF_DONT_ACCELERATE", dont_accelerate, ci_uint32,
 
 #if CI_CFG_UDP
 CI_CFG_OPT("EF_UDP_RECV_SPIN", udp_recv_spin, ci_uint32,
-"Spin in UDP receive calls until data arrives or the spin timeout elapses "
-"(whichever is the sooner).  If the spin timeout elapses, enter the kernel "
-"and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
+"Spin in blocking UDP receive calls until data arrives, the spin timeout "
+"expires or the socket timeout expires (whichever is the sooner).  If the "
+"spin timeout expires, enter the kernel and block.  The spin timeout is set by"
+" EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_UDP_SEND_SPIN", udp_send_spin, ci_uint32,
-"Spin in UDP send calls until space becomes available in the socket buffer or "
-"the spin timeout elapses (whichever is the sooner).  If the spin timeout "
-"elapses, enter the kernel and block.  The spin timeout is set by "
-"EF_SPIN_USEC or EF_POLL_USEC.\n"
+"Spin in blocking UDP send calls until space becomes available in the socket "
+"buffer, the spin timeout expires or the socket timeout expires (whichever "
+"is the sooner). If the spin timeout expires, enter the kernel and block.  "
+"The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.\n"
 
 "Note: UDP sends usually complete very quickly, but can block if the "
 "application does a large burst of sends at a high rate.  This option reduces "
@@ -245,46 +247,49 @@ CI_CFG_OPT("EF_UDP_SEND_SPIN", udp_send_spin, ci_uint32,
 #endif
 
 CI_CFG_OPT("EF_TCP_RECV_SPIN", tcp_recv_spin, ci_uint32,
-"Spin in TCP receive calls until data arrives or the spin timeout elapses "
-"(whichever is the sooner).  If the spin timeout elapses, enter the kernel "
-"and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
+"Spin in blocking TCP receive calls until data arrives, the spin timeout "
+"expires or the socket timeout expires (whichever is the sooner).  If the "
+"spin timeout expires, enter the kernel and block.  The spin timeout is "
+"set by EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_SEND_SPIN", tcp_send_spin, ci_uint32,
-"Spin in TCP send calls until window is updated by peer or the spin timeout "
-"elapses (whichever is the sooner).  If the spin timeout elapses, enter the "
-"kernel and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
+"Spin in blocking TCP send calls until window is updated by peer, the spin "
+"timeout expires or the socket timeout expires (whichever is the sooner).  "
+"If the spin timeout expires, enter the kernel and block.  The spin timeout "
+"is set by EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_ACCEPT_SPIN", tcp_accept_spin, ci_uint32,
-"Spin in TCP accept() calls until data arrives or the spin timeout elapses "
-"(whichever is the sooner).  If the spin timeout elapses, enter the kernel "
-"and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
+"Spin in blocking TCP accept() calls until data arrives, the spin timeout "
+"expires or the socket timeout expires(whichever is the sooner).  If the "
+"spin timeout expires, enter the kernel and block.  The spin timeout is set "
+"by EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_PKT_WAIT_SPIN", pkt_wait_spin, ci_uint32,
-"Spin while waiting for DMA buffers.  If the spin timeout elapses, enter the "
+"Spin while waiting for DMA buffers.  If the spin timeout expires, enter the "
 "kernel and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
 #if CI_CFG_USERSPACE_PIPE
 CI_CFG_OPT("EF_PIPE_RECV_SPIN", pipe_recv_spin, ci_uint32,
-"Spin in pipe receive calls until data arrives or the spin timeout elapses "
-"(whichever is the sooner).  If the spin timeout elapses, enter the kernel "
+"Spin in pipe receive calls until data arrives or the spin timeout expires "
+"(whichever is the sooner).  If the spin timeout expires, enter the kernel "
 "and block.  The spin timeout is set by EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_PIPE_SEND_SPIN", pipe_send_spin, ci_uint32,
 "Spin in pipe send calls until space becomes available in the socket buffer or"
-" the spin timeout elapses (whichever is the sooner).  If the spin timeout "
-"elapses, enter the kernel and block.  The spin timeout is set by "
+" the spin timeout expires (whichever is the sooner).  If the spin timeout "
+"expires, enter the kernel and block.  The spin timeout is set by "
 "EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
 #endif
 
 CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
 "Spin while waiting to obtain a per-socket lock.  If the spin timeout "
-"elapses, enter the kernel and block.  The spin timeout is set by "
+"expires, enter the kernel and block.  The spin timeout is set by "
 "EF_BUZZ_USEC.\n"
 "The per-socket lock is taken in recv() calls and similar.  This option can "
 "reduce jitter when multiple threads invoke recv() on the same socket, "
@@ -292,7 +297,7 @@ CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
-"Spin while waiting to obtain a per-stack lock.  If the spin timeout elapses, "
+"Spin while waiting to obtain a per-stack lock.  If the spin timeout expires, "
 "enter the kernel and block.  The spin timeout is set by EF_BUZZ_USEC.\n"
 "This option reduces jitter caused by lock contention, but can reduce "
 "fairness between threads competing for the lock.",
@@ -471,6 +476,19 @@ CI_CFG_OPT("EF_POLL_NONBLOCK_FAST_USEC", ul_poll_nonblock_fast_usec, ci_uint32,
            , , 200, MIN, MAX, time:usec)
 
 
+
+CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
+"Comma-separated list of signal numbers to avoid postponing "
+"of the signal handlers.  "
+"Your application will deadlock if one of the handlers uses socket "
+"function.  By default, the list includes SIGBUS, SIGSEGV and SIGPROF.\n"
+"Please specify numbers, not string aliases: EF_SIGNALS_NOPOSTPONE=7,11,27 "
+"instead of EF_SIGNALS_NOPOSTPONE=SIGBUS,SIGSEGV,SIGPROF.\n"
+"You can set EF_SIGNALS_NOPOSTPONE to empty value to postpone "
+"all signal handlers in the same way if you suspect these signals "
+"to call network functions.",
+        ,, (1 << (SIGBUS-1)) | (1 << (SIGSEGV-1) | (1 << (SIGPROF-1))),
+        0, (ci_uint64)(-1), bitmask)
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

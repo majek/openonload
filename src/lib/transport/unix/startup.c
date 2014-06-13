@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -201,6 +201,7 @@ static void citp_dump_opts(citp_opts_t *o)
 #if CI_CFG_USERSPACE_PIPE
   DUMP_OPT_INT("EF_PIPE", ul_pipe);
 #endif
+  DUMP_OPT_HEX("EF_SIGNALS_NOPOSTPONE", signals_no_postpone);
 }
 
 
@@ -382,6 +383,16 @@ static void citp_opts_getenv(citp_opts_t* opts)
     opts->netif_dtor = CI_MIN(v, CITP_NETIF_DTOR_ALL);
   }
 
+  if( (s = getenv("EF_SIGNALS_NOPOSTPONE")) ) {
+    opts->signals_no_postpone = 0;
+    while( sscanf(s, "%u", &v) == 1 ) {
+      opts->signals_no_postpone |= (1 << (v-1));
+      s = strchr(s, ',');
+      if( s == NULL )
+        break;
+      s++;
+    }
+  }
 }
 
 
@@ -399,6 +410,9 @@ static void citp_opts_validate_env(void)
 #include <ci/internal/opts_citp_def.h>
 #include <ci/internal/opts_user_def.h>
     "EF_NAME",
+    "EF_USERBUILD",
+    "EF_NO_PRELOAD_RESTORE",
+    "EF_LD_PRELOAD",
     NULL
   };
   char** env_name;

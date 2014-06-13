@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1244,7 +1244,7 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
   while( iterate_netifs_unlocked(&alien_ni) == 0 ) {
 
     if( !efab_thr_can_access_stack(netif2tcp_helper_resource(alien_ni),
-                          EFAB_THR_TABLE_LOOKUP_CHECK_USER) )
+                                   EFAB_THR_TABLE_LOOKUP_CHECK_USER) )
       continue; /* no permission to look in here */
 
     if( NI_OPTS(alien_ni).tcp_server_loopback == CITP_TCP_LOOPBACK_OFF )
@@ -1258,9 +1258,8 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 
     if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
         CITP_TCP_LOOPBACK_TO_LISTSTACK &&
-        priv->thr->netif.euid != alien_ni->euid
-        /* todo: better checks, like
-         * efab_thr_can_access_stack(priv->thr->netif) in alien process */ )
+        !efab_thr_user_can_access_stack(alien_ni->uid, alien_ni->euid,
+                                        &priv->thr->netif) )
       continue; /* server can't accept our socket */
 
     tls_id = ci_tcp_connect_find_local_peer(alien_ni, carg->dst_addr,

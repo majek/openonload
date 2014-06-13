@@ -260,7 +260,6 @@ endif
 else  # ifdef USE_MAKEDEPEND
 
 ifndef MMAKE_USE_KBUILD
-ifndef SIENAMC
 %.d: %.c
 	@set -e; gcc $(mmake_c_compile) -M $< 2>/dev/null |    \
 	 sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.o $@ : /g' >$@
@@ -270,32 +269,6 @@ ifndef SIENAMC
 	@set -e; g++ $(mmake_cxx_compile) -M $< 2>/dev/null |  \
 	 sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.o $@ : /g' >$@
 	@[ -s $@ ] || rm -f $@
-else
-%.d: %.c
-	@set -e; $(MCC) $(mips_mmake_c_compile) -M $< 2>/dev/null |    \
-	 sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.mips $@ : /g' >$@
-	@[ -s $@ ] || rm -f $@
-
-%.d: %.S
-	@set -e; $(MCC) $(mips_mmake_s_compile) -M $< 2>/dev/null |    \
-	 sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.mips $@ : /g' >$@
-	@[ -s $@ ] || rm -f $@
-
-ifneq ($(MMAKE_S_SRCS),)
-sinclude $(subst .S,.d,$(MMAKE_S_SRCS))
-endif
-
-%.lds.d: %.ldpre
-	@set -e; $(MCPP) $(MIPS_CPPFLAGS) -P -M $< 2>/dev/null |    \
-	sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.lds $@ : /g' >$@
-	@[ -s $@ ] || rm -f $@
-
-
-ifneq ($(MMAKE_LDPRE_SRCS),)
-sinclude $(subst .ldpre,.lds.d,$(MMAKE_LDPRE_SRCS))
-endif
-
-endif # ifneq($SIENMC),1)
 
 ifneq ($(MMAKE_C_SRCS),)
 sinclude $(subst .c,.d,$(MMAKE_C_SRCS))

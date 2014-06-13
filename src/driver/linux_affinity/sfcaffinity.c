@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -195,7 +195,6 @@ static void interface_add_proc_int(struct aff_interface *intf,
 
 static void interface_add_proc_entries(struct aff_interface *intf)
 {
-	/* Caller must hold [lock]. */
 	intf->proc_dir = proc_mkdir(intf->proc_name, aff_proc_root);
 	if (intf->proc_dir != NULL) {
 		interface_add_proc_int(intf, "ifindex", &intf->ifindex);
@@ -210,7 +209,6 @@ static void interface_add_proc_entries(struct aff_interface *intf)
 
 static void interface_remove_proc_entries(struct aff_interface *intf)
 {
-	/* Caller must hold [lock]. */
 	if (intf->proc_dir != NULL) {
 		remove_proc_entry("ifindex", intf->proc_dir);
 		remove_proc_entry("n_rxqs", intf->proc_dir);
@@ -225,7 +223,7 @@ static void interface_remove_proc_entries(struct aff_interface *intf)
 static struct aff_interface *interface_up(int ifindex, int n_rxqs,
 					  struct efx_dl_device *dl_dev)
 {
-	int i, n_cpus = num_possible_cpus();
+	int i, add_proc = 0, n_cpus = num_possible_cpus();
 	struct aff_interface *new_intf;
 	struct aff_interface *intf;
 	int *new_cpu_to_q;
@@ -262,9 +260,13 @@ static struct aff_interface *interface_up(int ifindex, int n_rxqs,
 	intf->n_rxqs = n_rxqs;
 	if (__interface_find(ifindex) == NULL) {
 		list_add(&intf->all_interfaces_link, &all_interfaces);
-		interface_add_proc_entries(intf);
+		add_proc = 1;
 	}
 	spin_unlock(&lock);
+
+	/* This must be after dropping spin lock as proc_mkdir() can block */
+	if (add_proc)
+		interface_add_proc_entries(intf);
 
 	kfree(new_cpu_to_q);
 	kfree(new_intf);
@@ -767,6 +769,9 @@ static void dl_remove(struct efx_dl_device* dl_dev)
 
 static struct efx_dl_driver dl_driver = {
   .name   = "sfcaffinity",
+#if EFX_DRIVERLINK_API_VERSION >= 7
+  .priority = EFX_DL_EV_LOW,
+#endif
   .probe  = dl_probe,
   .remove = dl_remove,
 };
@@ -810,6 +815,7 @@ fail1:
 
 static void cleanup_sfc_affinity(void)
 {
+	/* TODO shouldn't this take [lock]? */
 	T(printk("sfc_affinity: cleaning up\n"));
 	unregister_chrdev(dev_major, "sfc_affinity");
 	efx_dl_unregister_driver(&dl_driver);

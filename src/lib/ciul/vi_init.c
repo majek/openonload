@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -268,6 +268,7 @@ int ef_vi_txq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
 
 int ef_vi_evq_reinit(ef_vi* vi)
 {
+  memset(vi->evq_base, (char)0xff, vi->evq_mask + 1);
   vi->evq_state->evq_ptr = 0;
   return 0;
 }

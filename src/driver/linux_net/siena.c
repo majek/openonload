@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,12 +60,12 @@ static inline bool maranello_possible(struct siena_nic_data *nic)
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
 static inline bool aoe_enabled(struct siena_nic_data *nic)
 {
-	return (nic->caps & (1 << MC_CMD_CAPABILITIES_AOE_ACTIVE_LBN));
+	return (nic->caps & (1 << MC_CMD_CAPABILITIES_AOE_LBN));
 }
 
 static inline bool aoe_active(struct siena_nic_data *nic)
 {
-	return (nic->caps & (1 << MC_CMD_CAPABILITIES_FC_ACTIVE_LBN));
+	return (nic->caps & (1 << MC_CMD_CAPABILITIES_AOE_ACTIVE_LBN));
 }
 #endif
 
@@ -287,7 +287,7 @@ static const struct efx_nic_table_test siena_table_tests[] = {
 
 static int siena_test_chip(struct efx_nic *efx, struct efx_self_tests *tests)
 {
-	enum reset_type reset_method = reset_method;
+	enum reset_type reset_method = RESET_TYPE_ALL;
 	int rc, rc2;
 
 	efx_reset_down(efx, reset_method);
@@ -600,11 +600,25 @@ static int siena_probe_nic(struct efx_nic *efx)
 			goto fail6;
 	}
 
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+	if (aoe_enabled(efx->nic_data)) {
+		rc = efx_aoe_attach(efx);
+		if (rc)
+			goto fail7;
+	}
+#endif
+
 	efx_sriov_probe(efx);
 	efx_ptp_probe(efx);
 
 	return 0;
-	
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+fail7:
+	if (maranello_possible(efx->nic_data))
+		device_remove_file(&efx->pci_dev->dev,
+				   &dev_attr_turbo_mode);
+#endif
 fail6:
 	efx_mcdi_mon_remove(efx);
 fail5:
@@ -689,11 +703,16 @@ static int siena_init_nic(struct efx_nic *efx)
 	efx_writeo(efx, &temp, FR_CZ_USR_EV_CFG);
 
 	efx_nic_init_common(efx);
+
 	return 0;
 }
 
 static void siena_remove_nic(struct efx_nic *efx)
 {
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+	efx_aoe_detach(efx);
+#endif
+
 	efx_mcdi_mon_remove(efx);
 
 	efx_nic_free_buffer(efx, &efx->irq_status);
@@ -720,9 +739,12 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 	struct efx_mac_stats *mac_stats;
 	__le64 generation_start, generation_end;
 	u64 stat_val;
+	struct siena_nic_data *nic_data;
+	u64 rx_nodesc_drops_total;
 
 	mac_stats = &efx->mac_stats;
 	dma_stats = efx->stats_buffer.addr;
+	nic_data = efx->nic_data;
 
 	generation_end = dma_stats[MC_CMD_MAC_GENERATION_END];
 	if (generation_end == STATS_GENERATION_INVALID)
@@ -799,10 +821,6 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 	MAC_STAT(rx_length_error, RX_LENGTH_ERROR_PKTS);
 	MAC_STAT(rx_internal_error, RX_INTERNAL_ERROR_PKTS);
 	mac_stats->rx_good_lt64 = 0;
-
-	efx->n_rx_nodesc_drop_cnt =
-		le64_to_cpu(dma_stats[MC_CMD_MAC_RX_NODESC_DROPS]);
-
 	stat_val = le64_to_cpu(dma_stats[MC_CMD_MAC_RX_LANES01_CHAR_ERR]);
 	mac_stats->rx_char_error_lane0 = (stat_val >>  0) & 0xffffffff;
 	mac_stats->rx_char_error_lane1 = (stat_val >> 32) & 0xffffffff;
@@ -816,6 +834,15 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 	mac_stats->rx_disp_error_lane2 = (stat_val >>  0) & 0xffffffff;
 	mac_stats->rx_disp_error_lane3 = (stat_val >> 32) & 0xffffffff;
 	MAC_STAT(rx_match_fault, RX_MATCH_FAULT);
+	rx_nodesc_drops_total =
+		le64_to_cpu(dma_stats[MC_CMD_MAC_RX_NODESC_DROPS]);
+	if (!(efx->net_dev->flags & IFF_UP))
+		nic_data->rx_nodesc_drops_while_down +=
+			rx_nodesc_drops_total -
+			nic_data->rx_nodesc_drops_total;
+	nic_data->rx_nodesc_drops_total = rx_nodesc_drops_total;
+	efx->n_rx_nodesc_drop_cnt = (nic_data->rx_nodesc_drops_total -
+				     nic_data->rx_nodesc_drops_while_down);
 #undef MAC_STAT
 
 	rmb();

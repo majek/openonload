@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -732,7 +732,7 @@ static int efx_ethtool_set_flags(struct net_device *net_dev, u32 data)
 	if (rc)
 		return rc;
 
-	if (!(data & ETH_FLAG_NTUPLE))
+	if (~data & ETH_FLAG_NTUPLE)
 		efx_filter_clear_rx(efx, EFX_FILTER_PRI_MANUAL);
 
 	return 0;
@@ -1531,9 +1531,9 @@ const struct ethtool_ops efx_ethtool_ops = {
 #endif
 	.self_test		= efx_ethtool_self_test,
 	.get_strings		= efx_ethtool_get_strings,
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_SET_PHYS_ID)
+#if !defined(EFX_USE_KCOMPAT) || (defined(EFX_HAVE_ETHTOOL_SET_PHYS_ID) && !defined(EFX_USE_ETHTOOL_OPS_EXT))
 	.set_phys_id		= efx_ethtool_phys_id,
-#else
+#elif !defined(EFX_USE_ETHTOOL_OPS_EXT)
 	.phys_id		= efx_ethtool_phys_id_loop,
 #endif
 	.get_ethtool_stats	= efx_ethtool_get_stats,
@@ -1542,7 +1542,7 @@ const struct ethtool_ops efx_ethtool_ops = {
 #endif
 	.get_wol                = efx_ethtool_get_wol,
 	.set_wol                = efx_ethtool_set_wol,
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_RESET)
+#if !defined(EFX_USE_KCOMPAT) || (defined(EFX_HAVE_ETHTOOL_RESET) && !defined(EFX_USE_ETHTOOL_OPS_EXT))
 	.reset			= efx_ethtool_reset,
 #endif
 #if !defined(EFX_USE_KCOMPAT)
@@ -1551,6 +1551,13 @@ const struct ethtool_ops efx_ethtool_ops = {
 #elif defined(EFX_HAVE_ETHTOOL_RXNFC)
 	.get_rxnfc		= efx_ethtool_get_rxnfc_wrapper,
 	.set_rxnfc		= efx_ethtool_set_rxnfc_wrapper,
+#endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_ETHTOOL_OPS_EXT)
+};
+const struct ethtool_ops_ext efx_ethtool_ops_ext = {
+	.size			= sizeof(struct ethtool_ops_ext),
+	.set_phys_id		= efx_ethtool_phys_id,
+	.reset			= efx_ethtool_reset,
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
@@ -1562,7 +1569,10 @@ const struct ethtool_ops efx_ethtool_ops = {
 	.set_rxfh_indir		= efx_ethtool_old_set_rxfh_indir,
 #endif
 #endif
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_ETHTOOL_GMODULEEEPROM)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
+	.get_ts_info		= efx_ptp_get_ts_info,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GMODULEEEPROM)
 	.get_module_info	= efx_ethtool_get_module_info,
 	.get_module_eeprom	= efx_ethtool_get_module_eeprom,
 #endif

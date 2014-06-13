@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1562,10 +1562,11 @@ falcon_nic_buffer_table_set_n(struct efhw_nic *nic, int buffer_id,
 			_falcon_nic_buffer_table_set(nic, dma_addr, 
 						     EFHW_NIC_PAGE_SIZE,
 						     region, own_id, 
-						     buffer_id++);
+						     buffer_id);
 			falcon_nic_buffer_table_lazy_commit(nic);
 		}
 		FALCON_LOCK_UNLOCK(nic);
+		buffer_id++;
 		dma_addr += EFHW_NIC_PAGE_SIZE;
 	}
 }

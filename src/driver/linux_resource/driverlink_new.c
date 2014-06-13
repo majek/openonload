@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,10 +77,18 @@ static struct notifier_block efrm_netdev_notifier = {
 	.notifier_call = efrm_netdev_event,
 };
 
-static void efrm_dl_event_falcon(struct efx_dl_device *efx_dev, void *p_event);
+#if EFX_DRIVERLINK_API_VERSION >= 7
+static bool 
+#else
+static void 
+#endif
+efrm_dl_event_falcon(struct efx_dl_device *efx_dev, void *p_event);
 
 static struct efx_dl_driver efrm_dl_driver = {
 	.name = "resource",
+#if EFX_DRIVERLINK_API_VERSION >= 7
+	.priority = EFX_DL_EV_HIGH,
+#endif
 	.probe = efrm_dl_probe,
 	.remove = efrm_dl_remove,
 	.reset_suspend = efrm_dl_reset_suspend,
@@ -273,20 +281,30 @@ static int efrm_netdev_event(struct notifier_block *this,
 	return NOTIFY_DONE;
 }
 
-
-static void efrm_dl_event_falcon(struct efx_dl_device *efx_dev, void *p_event)
+#if EFX_DRIVERLINK_API_VERSION >= 7
+static bool 
+#else
+static void 
+#endif
+efrm_dl_event_falcon(struct efx_dl_device *efx_dev, void *p_event)
 {
 	struct efhw_nic *nic = efx_dev->priv;
 	struct linux_efhw_nic *lnic = linux_efhw_nic(nic);
 	efhw_event_t *ev = p_event;
+	bool rc;
 
 	switch (FALCON_EVENT_CODE(ev)) {
 	case FALCON_EVENT_CODE_CHAR:
 		falcon_handle_char_event(nic, lnic->ev_handlers, ev);
+		rc = true;
 		break;
 	default:
-		EFRM_WARN("%s: unknown event type=%x", __func__,
-			  (unsigned)FALCON_EVENT_CODE(ev));
+		EFRM_NOTICE("%s: unknown event type=%x", __func__,
+			    (unsigned)FALCON_EVENT_CODE(ev));
+		rc = false;
 		break;
 	}
+#if EFX_DRIVERLINK_API_VERSION >= 7
+	return rc;
+#endif
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1679,19 +1679,19 @@ efab_linux_trampoline_dtor (int no_sct) {
 #endif
     while( atomic_read(&efab_syscall_used) ) {
       if( !waiting ) {
-        ci_log("Waiting for intercepted syscalls to finish...");
+        ci_log("%s: Waiting for intercepted syscalls to finish...",
+               __FUNCTION__);
         waiting = 1;
       }
       schedule_timeout(msecs_to_jiffies(50));
     }
     if( waiting )
-      ci_log("\t...OK");
+      ci_log("%s: All syscalls have finished", __FUNCTION__);
     /* And now wait for exiting from syscall after efab_syscall_used-- */
     synchronize_sched();
 #ifdef CONFIG_PREEMPT
     /* No guarantee, but let's try to wait */
     schedule_timeout(msecs_to_jiffies(50));
-    ci_log("Unload is dangerous on RT kernels: prepare to crash.");
 #endif
   }
 

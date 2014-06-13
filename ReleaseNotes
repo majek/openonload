@@ -1,10 +1,71 @@
 
+OpenOnload 201210-u1 Release Notes
+==================================
+
+ This is an update release that fixes bugs in openonload-201210 and adds a
+ few enhancements.
+
+ Please see the ChangeLog file for details of the changes in this release.
+ See ReleaseNotes-sfc for details of changes to the sfc net driver.
+
+
+----------------------------------------
+Configuration options
+---------------------
+
+ The following new configuration options have been added:
+
+ EF_SIGNALS_NOPOSTPONE
+ - Onload intercepts signals in order to prevent deadlocks due to signal
+   handlers reentering the Onload stack.  This option provides a way to
+   stop Onload from intercepting certain signals.  By default SIGBUS,
+   SIGSEGV and SIGPROF are not intercepted.
+
+   For more information on the circumstances under which this option is
+   useful, please see the Onload User Guide.
+
+
+----------------------------------------
+IP_ADD_SOURCE_MEMBERSHIP etc.
+-----------------------------
+
+ This release adds support for the following socket options (when Onload is
+ built on distributions that support them):
+
+   IP_ADD_SOURCE_MEMBERSHIP
+   IP_DROP_SOURCE_MEMBERSHIP
+   MCAST_JOIN_SOURCE_GROUP
+   MCAST_LEAVE_SOURCE_GROUP
+
+ Note that the behaviour of these options differs from that of the Linux
+ kernel stack in that Onload does not prevent datagrams with different
+ source addresses from being delivered to the socket if they arrive at the
+ network interface.  However, these options are still useful with Onload
+ because they can take advantage of source-specific IGMPv3.
+
+ We will address this limitation in a future release of Onload.
+
+
+----------------------------------------
+Red Hat Enterprise 6.4
+----------------------
+
+ This release has been tested on the beta of RHEL6.4.  We will test
+ RHEL6.4-final when it is released.
+
+
+David Riddoch
+2013/01/31
+
+
+
+Below are the release notes from the openonload-201210 release:
+
+
 OpenOnload 201210 Release Notes
 ===============================
 
- This is a beta release that adds new features to OpenOnload.  We would be
- very grateful if you could test this release and report any issues you
- find to support@solarflare.com.
+ This is a major release that adds new features to OpenOnload.
 
  Below is a brief summary of the major new features and limitations that we
  are aware of.  See the ChangeLog for further details and bugs fixed.

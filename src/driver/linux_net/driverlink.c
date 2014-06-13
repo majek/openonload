@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -73,9 +73,6 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 		   "%s driverlink client unregistering\n",
 		   efx_dev->driver->name);
 
-	if (efx->dl_event_handler == efx_dev)
-		efx->dl_event_handler = NULL;
-
 	if (efx_dev->driver->remove)
 		efx_dev->driver->remove(efx_dev);
 
@@ -92,8 +89,10 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 				  struct efx_dl_driver *driver)
 {
 	struct efx_dl_handle *efx_handle;
+	struct efx_dl_handle *ex_efx_handle;
 	struct efx_dl_device *efx_dev;
 	int rc;
+	bool added = false;
 
 	efx_handle = kzalloc(sizeof(*efx_handle), GFP_KERNEL);
 	if (!efx_handle)
@@ -110,26 +109,30 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 	if (rc)
 		goto fail;
 
-	list_add_tail(&efx_handle->driver_node, &driver->device_list);
-	list_add_tail(&efx_handle->port_node, &efx->dl_device_list);
+	/* Rather than just add to the end of the list,
+	 * find the point that is at the start of the desired priority level
+	 * and insert there
+	 */
 
-	/* Install event handler if appropriate */
-	if (!efx_nic_is_dual_func(efx) && driver->handle_event) {
-		if (efx->dl_event_handler) {
-			netif_warn(efx, drv, efx->net_dev,
-				   "not replacing %s event handler with %s\n",
-				   efx->dl_event_handler->driver->name,
-				   driver->name);
-		} else {
-			efx->dl_event_handler = efx_dev;
+	list_for_each_entry(ex_efx_handle, &efx->dl_device_list, port_node) {
+		if (ex_efx_handle->efx_dev.driver->priority >=
+			driver->priority) {
+			list_add_tail(&efx_handle->port_node, &ex_efx_handle->port_node);
+			added = true;
+			break;
 		}
 	}
+
+	if (!added)
+		list_add_tail(&efx_handle->port_node, &efx->dl_device_list);
+
+	list_add_tail(&efx_handle->driver_node, &driver->device_list);
 
 	netif_info(efx, drv, efx->net_dev,
 		   "%s driverlink client registered\n", driver->name);
 	return;
 
- fail:
+fail:
 	netif_info(efx, drv, efx->net_dev,
 		   "%s driverlink client skipped\n", driver->name);
 
@@ -272,13 +275,17 @@ void efx_dl_reset_resume(struct efx_nic *efx, int ok)
 
 bool efx_dl_handle_event(struct efx_nic *efx, void *event)
 {
-	struct efx_dl_device *efx_dev = efx->dl_event_handler;
+	struct efx_dl_handle *efx_handle;
+	struct efx_dl_device *efx_dev;
 
-	if (!efx_dev)
-		return false;
+	list_for_each_entry(efx_handle, &efx->dl_device_list, port_node) {
+		efx_dev = &efx_handle->efx_dev;
+		if (efx_dev->driver->handle_event &&
+		    efx_dev->driver->handle_event(efx_dev, event))
+			return true;
+	}
 
-	efx_dev->driver->handle_event(efx_dev, event);
-	return true;
+	return false;
 }
 
 EXPORT_SYMBOL(efx_filter_set_ipv4_local);

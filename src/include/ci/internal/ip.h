@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -3217,19 +3217,13 @@ ci_inline int ci_tcp_recv_not_blocked(ci_tcp_state* ts)
 }
 
 
-/* Use a 4us clock to generate ISN see p27 of RFC793.  ?? TODO We want
-** something more secure. */
+/* Use cycle-counter to generate ISN.  Byte swap so that fast moving bits
+ * are used for the most-significant bits of the ISN.
+ */
 ci_inline unsigned ci_tcp_initial_seqno(ci_netif* ni) {
-#if defined(CI_HAVE_FRC64)  
   ci_uint64 frc;
-  ci_frc64(&frc);  
-  return (ci_iptime_t)(frc >> (IPTIMER_STATE(ni)->ci_ip_time_frc2us -2));
-#elif defined(CI_HAVE_FRC32)
-  /* ?? TODO support for FRC32 */
-  return ci_ip_time_now(ni);
-#else
-  return 0;
-#endif
+  ci_frc64(&frc);
+  return CI_BSWAP_32((ci_uint32) frc);
 }
 
 

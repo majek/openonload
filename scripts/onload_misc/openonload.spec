@@ -38,7 +38,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201210
+%define pkgversion 201210-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -285,6 +285,7 @@ rm -fR $RPM_BUILD_ROOT
 %docdir %{_defaultdocdir}/%{name}-%{pkgversion}
 %attr(644, -, -) %{_defaultdocdir}/%{name}-%{pkgversion}/*
 %attr(644, -, -) %{_sysconfdir}/modprobe.d/onload.conf
+%attr(644, -, -) %{_sysconfdir}/modprobe.d/sfc_aoe.conf
 %attr(644, -, -) %{_sysconfdir}/depmod.d/onload.conf
 %config %attr(644, -, -) %{_sysconfdir}/sysconfig/openonload
 %{_sysconfdir}/init.d/openonload

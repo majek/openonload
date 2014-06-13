@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -420,6 +420,33 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       break;
     }
 
+#ifdef IP_ADD_SOURCE_MEMBERSHIP
+    case IP_ADD_SOURCE_MEMBERSHIP:
+    case IP_DROP_SOURCE_MEMBERSHIP:
+    {
+      /* NB. We are treating this just like IP_ADD_MEMBERSHIP.  ie. The
+       * hardware filters we insert are not source specific.  The kernel
+       * will still take account of the source for igmp purposes.
+       *
+       * I think this should be okay, because joining a group controls the
+       * delivery of packets to the host.  It does not in any way limit the
+       * packets that can arrive at a particular socket.
+       */
+      const struct ip_mreq_source *mreqs = (void *)optval;
+
+      if( optlen >= sizeof(struct ip_mreq_source) ) {
+        rc = ci_mcast_join_leave(netif, us, 0, mreqs->imr_interface.s_addr,
+                                 mreqs->imr_multiaddr.s_addr,
+                                 optname == IP_ADD_SOURCE_MEMBERSHIP);
+      }
+      else
+        RET_WITH_ERRNO(EFAULT);
+      if( rc )
+        return rc;
+      break;
+    }
+#endif
+
 #ifdef MCAST_JOIN_GROUP
     case MCAST_JOIN_GROUP:
     case MCAST_LEAVE_GROUP:
@@ -433,6 +460,33 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       rc = ci_mcast_join_leave(netif, us, greq->gr_interface, 0,
                 CI_SIN(&greq->gr_group)->sin_addr.s_addr,
                 optname == MCAST_JOIN_GROUP);
+      if( rc )
+        return rc;
+      break;
+    }
+#endif
+
+#ifdef MCAST_JOIN_SOURCE_GROUP
+    case MCAST_JOIN_SOURCE_GROUP:
+    case MCAST_LEAVE_SOURCE_GROUP:
+    {
+      /* NB. We are treating this just like IP_ADD_MEMBERSHIP.  ie. The
+       * hardware filters we insert are not source specific.  The kernel
+       * will still take account of the source for igmp purposes.
+       *
+       * I think this should be okay, because joining a group controls the
+       * delivery of packets to the host.  It does not in any way limit the
+       * packets that can arrive at a particular socket.
+       */
+      struct group_source_req *gsreq = (void *)optval;
+
+      if( optlen < sizeof(struct group_source_req) )
+        RET_WITH_ERRNO(EFAULT);
+      if( gsreq->gsr_group.ss_family != AF_INET )
+        return CI_SOCKET_HANDOVER;
+      rc = ci_mcast_join_leave(netif, us, gsreq->gsr_interface, 0,
+                CI_SIN(&gsreq->gsr_group)->sin_addr.s_addr,
+                optname == MCAST_JOIN_SOURCE_GROUP);
       if( rc )
         return rc;
       break;

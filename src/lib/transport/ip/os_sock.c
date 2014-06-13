@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -156,14 +156,20 @@ int oo_os_sock_sendmsg_raw(ci_netif* ni, oo_sp sock_p,
 {
   unsigned long socketcall_args[8];
   oo_os_sock_sendmsg_raw_t op;
+  int rc;
 
   op.sock_id = OO_SP_TO_INT(sock_p);
   op.sizeof_ptr = sizeof(void*);
   op.flags = flags;
   CI_USER_PTR_SET(op.msg, msg);
   CI_USER_PTR_SET(op.socketcall_args, socketcall_args);
-  return oo_resource_op(ci_netif_get_driver_handle(ni),
-                        OO_IOC_OS_SOCK_SENDMSG_RAW, &op);
+
+  oo_rwlock_lock_read(&citp_dup2_lock);
+  rc = oo_resource_op(ci_netif_get_driver_handle(ni),
+                      OO_IOC_OS_SOCK_SENDMSG_RAW, &op);
+  oo_rwlock_unlock_read (&citp_dup2_lock);
+
+  return rc;
 }
 
 
@@ -208,8 +214,10 @@ int oo_os_sock_accept(ci_netif* ni, oo_sp sock_p, struct sockaddr *addr,
   CI_USER_PTR_SET(op.socketcall_args, socketcall_args);
   op.flags = flags;
 
+  oo_rwlock_lock_read(&citp_dup2_lock);
   rc = oo_resource_op(ci_netif_get_driver_handle(ni),
                       OO_IOC_OS_SOCK_ACCEPT, &op);
+  oo_rwlock_unlock_read (&citp_dup2_lock);
 
   return rc == 0 ? op.rc : rc;
 }

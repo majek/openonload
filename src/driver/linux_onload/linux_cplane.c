@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2012  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -619,6 +619,14 @@ cicpplos_ctor(cicp_mibs_kern_t *control_plane)
 }
 
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)
+/* We can not use dst_confirm() because we have no dst
+ * and we do not want to use expensive neigh_update(). */
+#define neigh_confirm(neigh) \
+  do {                              \
+    (neigh)->confirmed = jiffies;   \
+  } while(0)
+#endif
 
 void cicpos_arp_stale_update(ci_ip_addr_t dst, ci_ifid_t ifindex, int confirm)
 {

@@ -20,7 +20,6 @@ usage () {
   err
   err "options:"
   err "  -h <hostname>          - make driver build for the given host"
-  err "  -n --nictype <type>    - choose NIc type (currently support falcon)"
   err "  -d <directory-name>    - override name of build destination directory"
   err "  -c --custom            - present custom / non-supported builds"
   err "  -l <directory-path>    - do as local build in directory "
@@ -43,7 +42,6 @@ usage () {
   err "  EF_USERBUILD          - use as user build dir, if set"
   err "  EF_DRIVERBUILD        - use as driver build dir, if set"
   err "  EF_MCBUILD            - use as MCPU build dir, if set"
-  err "  EF_NICTYPE            - use as NIC type instead of looking at PCI"
   exit 1
 }
 
@@ -117,7 +115,6 @@ do_top_level () {
     BUILDHOST=$(uname -n)
     REMOTEBUILDFLAG=0
   fi
-  [ -z "$nictype" ] || nt="NICTYPE := $nictype"
 
   cat <<-EOF >config.mk
 	PLATFORM := $PLATFORM
@@ -296,14 +293,12 @@ do_use_tmp () {
 
 remote_command() {
   if [ "$host" = "$localhost" ]; then
-    EF_NICTYPE=$nictype $@
+    $@
   else
     local propogate;
-    propogate="EF_NICTYPE=$nictype;"
     propogate="EF_DRIVERBUILD=$EF_DRIVERBUILD;$propogate"
     propogate="EF_USERBUILD=$EF_USERBUILD;$propogate"
     propogate="EF_MCBUILD=$EF_MCBUILD;$propogate"
-    propogate="EF_NICTYPE=$EF_NICTYPE;$propogate"
     propogate="MMAKETOOL_RB_NAME=$MMAKETOOL_RB_NAME;$propogate"
     propogate="MMAKETOOL_ADD_LIBC=$MMAKETOOL_ADD_LIBC;$propogate"
     propogate="MMAKETOOL_ADD_DISTRIBUTION=$MMAKETOOL_ADD_DISTRIBUTION;$propogate"
@@ -339,8 +334,6 @@ host=
 builddir=
 usetemp=0
 remotebuild_host=
-nictype=
-usehostnictype=
 custom=0
 gnu=
 localhost=$(hostname)
@@ -356,9 +349,8 @@ while [ $# -gt 0 ]; do
     -ltmp) builddir="mmakeltmp_${USER}_$(date '+%Y%m%d%H%M%S')"; usetemp=1;;
     -r)	if [ -z "$2" ]; then usage; fi; remotebuild_host="$2"; shift;;
     --inplace) builddir="";  shift;;
-    --driver) host="$localhost"; usehostnictype=1;;
-    --gnu|--user) gnu=1; usehostnictype=1;;
-    -n|--nictype) nictype="$2"; shift;;
+    --driver) host="$localhost";;
+    --gnu|--user) gnu=1;;
     --help | -*) usage;;
     *)	break;;
   esac
@@ -371,49 +363,16 @@ case $# in
  *)	usage;;
 esac
 
-# Use EF_NICTYPE if set and -n not specified
-if [ -z "$nictype" -a -n "$EF_NICTYPE" ]; then
-    nictype="$EF_NICTYPE"
-fi
-
-    # use host NIC type for --driver and --gnu
-if [ -z "$nictype" -a -n "$usehostnictype" ]; then
-    nictype=`mmaketool --hostnictype`
-    fi
-
-# Squash EF1 nictype
-if [ "$nictype" == "ef1" ]; then
-  nictype=
-  fi
-
-# setup nictype_
-if [ ! -z "$nictype" ]; then
-  nictype_="${nictype}_"
-else
-  nictype_=
-fi
-
 # Sort out GNU builds
 if [ -n "$gnu" ]; then
-  PLATFORM=`EF_NICTYPE=$nictype mmaketool --userbuild_base`; 
-  [ -z "$dest" ] && dest=`EF_NICTYPE=$nictype mmaketool --userbuild`
-else
-  if [ ! -z "$PLATFORM" ]; then
-    if [ ! "$(mmaketool --toolplatform)" = "sunos" ]; then
-      PLATFORM="${nictype_}$PLATFORM";
-    fi
-  fi
+  PLATFORM=`mmaketool --userbuild_base`; 
+  [ -z "$dest" ] && dest=`mmaketool --userbuild`
 fi
 
 ######################################################################
 #check not local build and remote build selected
 if [ ! -z "$builddir" -a ! -z "$remotebuild_host" ] ; then
   log "ERROR: cannot specify local and remote (rsync build) at the same time"
-  exit -1
-fi
-
-if [ ! -z "$nictype" -a "$custom" == 1 ]; then
-  log "ERROR: cannot speicfy --nictype  and --custom at the same time"
   exit -1
 fi
 
@@ -426,7 +385,6 @@ if "$mmaketool" --inbuild; then
   INBUILD=1
   try orient-in-build-tree
   # N.B. this may set PLATFORM to a nic-prefixed value
-  nictype=$NICTYPE
   [ -f "$DESTPATH/options_config.mk" ] && sourceconfig "$DESTPATH/options_config.mk"
 
   if [ "$CURRENT" = src -a -z "$DESTFLAG" ] ; then
@@ -491,9 +449,6 @@ fi
 # Choose platform if it is not set and add nic type
 if [ -z "$PLATFORM" ]; then
     choose_platform
-    if [ ! "$(mmaketool --toolplatform)" = "sunos" ]; then
-      PLATFORM="${nictype_}$PLATFORM";
-    fi
 fi
 check_platform_exists "$PLATFORM"
 
