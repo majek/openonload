@@ -87,7 +87,7 @@ struct efx_reset_flags {
 		 * ETH_RESET_SHARED_SHIFT to reset a shared component of the
 		 * same type.
 		 */
-	  	ETH_RESET_MGMT		= 1 << 0,	/* Management processor */
+		ETH_RESET_MGMT		= 1 << 0,	/* Management processor */
 		ETH_RESET_IRQ		= 1 << 1,	/* Interrupt requester */
 		ETH_RESET_DMA		= 1 << 2,	/* DMA engine */
 		ETH_RESET_FILTER	= 1 << 3,	/* Filtering/flow direction */
@@ -236,13 +236,13 @@ struct hwtstamp_config {
 
 struct efx_ts_read {
 	__u32 tx_valid;
-	struct efx_timespec tx_ts;	
-	struct efx_timespec tx_ts_hw;	
+	struct efx_timespec tx_ts;
+	struct efx_timespec tx_ts_hw;
 	__u32 rx_valid;
 	struct efx_timespec rx_ts;
 	struct efx_timespec rx_ts_hw;
-	__u8 uuid [6];
-	__u8 seqid [2];
+	__u8 uuid[6];
+	__u8 seqid[2];
 };
 #endif
 

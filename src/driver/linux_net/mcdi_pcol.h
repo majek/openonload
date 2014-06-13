@@ -63,8 +63,7 @@
 
 /* Unused commands: 0x23, 0x27, 0x30, 0x31 */
 
-/**
- * MCDI version 1
+/* MCDI version 1
  *
  * Each MCDI request starts with an MCDI_HEADER, which is a 32byte
  * structure, filled in by the client.
@@ -283,6 +282,13 @@
 #define          MCDI_EVENT_PTP_ERR_FILTER 0x2 /* enum */
 #define          MCDI_EVENT_PTP_ERR_FIFO 0x3 /* enum */
 #define          MCDI_EVENT_PTP_ERR_QUEUE 0x4 /* enum */
+#define        MCDI_EVENT_AOE_ERR_TYPE_LBN 0
+#define        MCDI_EVENT_AOE_ERR_TYPE_WIDTH 8
+#define          MCDI_EVENT_AOE_NO_LOAD 0x1 /* enum */
+#define          MCDI_EVENT_AOE_FC_ASSERT 0x2 /* enum */
+#define          MCDI_EVENT_AOE_FC_WATCHDOG 0x3 /* enum */
+#define          MCDI_EVENT_AOE_FC_NO_START 0x4 /* enum */
+#define          MCDI_EVENT_AOE_FAULT 0x5 /* enum */
 #define       MCDI_EVENT_DATA_LBN 0
 #define       MCDI_EVENT_DATA_WIDTH 32
 #define       MCDI_EVENT_SRC_LBN 36
@@ -305,6 +311,8 @@
 #define          MCDI_EVENT_CODE_TX_FLUSH  0xc /* enum */
 #define          MCDI_EVENT_CODE_PTP_RX  0xd /* enum */
 #define          MCDI_EVENT_CODE_PTP_FAULT  0xe /* enum */
+#define          MCDI_EVENT_CODE_PTP_PPS  0xf /* enum */
+#define          MCDI_EVENT_CODE_AOE  0x12 /* enum */
 #define       MCDI_EVENT_CMDDONE_DATA_OFST 0
 #define       MCDI_EVENT_CMDDONE_DATA_LBN 0
 #define       MCDI_EVENT_CMDDONE_DATA_WIDTH 32
@@ -329,6 +337,47 @@
 #define       MCDI_EVENT_PTP_UUID_OFST 0
 #define       MCDI_EVENT_PTP_UUID_LBN 0
 #define       MCDI_EVENT_PTP_UUID_WIDTH 32
+
+/* FCDI_EVENT structuredef */
+#define    FCDI_EVENT_LEN 8
+#define       FCDI_EVENT_CONT_LBN 32
+#define       FCDI_EVENT_CONT_WIDTH 1
+#define       FCDI_EVENT_LEVEL_LBN 33
+#define       FCDI_EVENT_LEVEL_WIDTH 3
+#define          FCDI_EVENT_LEVEL_INFO  0x0 /* enum */
+#define          FCDI_EVENT_LEVEL_WARN 0x1 /* enum */
+#define          FCDI_EVENT_LEVEL_ERR 0x2 /* enum */
+#define          FCDI_EVENT_LEVEL_FATAL 0x3 /* enum */
+#define       FCDI_EVENT_DATA_OFST 0
+#define        FCDI_EVENT_LINK_STATE_STATUS_LBN 0
+#define        FCDI_EVENT_LINK_STATE_STATUS_WIDTH 1
+#define          FCDI_EVENT_LINK_DOWN 0x0 /* enum */
+#define          FCDI_EVENT_LINK_UP 0x1 /* enum */
+#define       FCDI_EVENT_DATA_LBN 0
+#define       FCDI_EVENT_DATA_WIDTH 32
+#define       FCDI_EVENT_SRC_LBN 36
+#define       FCDI_EVENT_SRC_WIDTH 8
+#define       FCDI_EVENT_EV_CODE_LBN 60
+#define       FCDI_EVENT_EV_CODE_WIDTH 4
+#define       FCDI_EVENT_CODE_LBN 44
+#define       FCDI_EVENT_CODE_WIDTH 8
+#define          FCDI_EVENT_CODE_REBOOT 0x1 /* enum */
+#define          FCDI_EVENT_CODE_ASSERT 0x2 /* enum */
+#define          FCDI_EVENT_CODE_DDR_TEST_RESULT 0x3 /* enum */
+#define          FCDI_EVENT_CODE_LINK_STATE 0x4 /* enum */
+#define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_OFST 0
+#define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_LBN 0
+#define       FCDI_EVENT_ASSERT_INSTR_ADDRESS_WIDTH 32
+#define       FCDI_EVENT_ASSERT_TYPE_LBN 36
+#define       FCDI_EVENT_ASSERT_TYPE_WIDTH 8
+#define       FCDI_EVENT_DDR_TEST_RESULT_STATUS_CODE_LBN 36
+#define       FCDI_EVENT_DDR_TEST_RESULT_STATUS_CODE_WIDTH 8
+#define       FCDI_EVENT_DDR_TEST_RESULT_RESULT_OFST 0
+#define       FCDI_EVENT_DDR_TEST_RESULT_RESULT_LBN 0
+#define       FCDI_EVENT_DDR_TEST_RESULT_RESULT_WIDTH 32
+#define       FCDI_EVENT_LINK_STATE_DATA_OFST 0
+#define       FCDI_EVENT_LINK_STATE_DATA_LBN 0
+#define       FCDI_EVENT_LINK_STATE_DATA_WIDTH 32
 
 
 /***********************************/
@@ -479,6 +528,8 @@
 #define       MC_CMD_GET_VERSION_OUT_FIRMWARE_OFST 0
 #define          MC_CMD_GET_VERSION_OUT_FIRMWARE_ANY 0xffffffff /* enum */
 #define          MC_CMD_GET_VERSION_OUT_FIRMWARE_BOOTROM 0xb0070000 /* enum */
+#define          MC_CMD_GET_VERSION_OUT_FIRMWARE_SIENA_BOOTROM 0xb0070000 /* enum */
+#define          MC_CMD_GET_VERSION_OUT_FIRMWARE_HUNT_BOOTROM 0xb0070001 /* enum */
 
 /* MC_CMD_GET_VERSION_OUT msgresponse */
 #define    MC_CMD_GET_VERSION_OUT_LEN 32
@@ -495,44 +546,943 @@
 
 
 /***********************************/
-/* MC_CMD_GET_FPGAREG 
- * Read multiple bytes from PTP FPGA.
+/* MC_CMD_FC 
+ * Perform an FC operation
  */
-#define MC_CMD_GET_FPGAREG  0x9
+#define MC_CMD_FC  0x9
 
-/* MC_CMD_GET_FPGAREG_IN msgrequest */
-#define    MC_CMD_GET_FPGAREG_IN_LEN 8
-#define       MC_CMD_GET_FPGAREG_IN_ADDR_OFST 0
-#define       MC_CMD_GET_FPGAREG_IN_NUMBYTES_OFST 4
+/* MC_CMD_FC_IN msgrequest */
+#define    MC_CMD_FC_IN_LEN 4
+#define       MC_CMD_FC_IN_OP_HDR_OFST 0
+#define        MC_CMD_FC_IN_OP_LBN 0
+#define        MC_CMD_FC_IN_OP_WIDTH 8
+#define          MC_CMD_FC_OP_NULL 0x1 /* enum */
+#define          MC_CMD_FC_OP_PHY 0x2 /* enum */
+#define          MC_CMD_FC_OP_MAC 0x3 /* enum */
+#define          MC_CMD_FC_OP_READ32 0x4 /* enum */
+#define          MC_CMD_FC_OP_WRITE32 0x5 /* enum */
+#define          MC_CMD_FC_OP_TRC_READ 0x6 /* enum */
+#define          MC_CMD_FC_OP_TRC_WRITE 0x7 /* enum */
+#define          MC_CMD_FC_OP_GET_VERSION 0x8 /* enum */
+#define          MC_CMD_FC_OP_TRC_RX_READ 0x9 /* enum */
+#define          MC_CMD_FC_OP_TRC_RX_WRITE 0xa /* enum */
+#define          MC_CMD_FC_OP_SFP 0xb /* enum */
+#define          MC_CMD_FC_OP_DDR_TEST 0xc /* enum */
+#define          MC_CMD_FC_OP_GET_ASSERT 0xd /* enum */
+#define          MC_CMD_FC_OP_FPGA_BUILD 0xe /* enum */
+#define          MC_CMD_FC_OP_READ_MAP 0xf /* enum */
+#define          MC_CMD_FC_OP_CAPABILITIES 0x10 /* enum */
+#define          MC_CMD_FC_OP_GLOBAL_FLAGS 0x11 /* enum */
+#define          MC_CMD_FC_OP_IO_REL 0x12 /* enum */
+#define          MC_CMD_FC_OP_UHLINK 0x13 /* enum */
+#define          MC_CMD_FC_IN_PORT_EXT_OFST 0x0 /* enum */
+#define          MC_CMD_FC_IN_PORT_INT_OFST 0x40 /* enum */
 
-/* MC_CMD_GET_FPGAREG_OUT msgresponse */
-#define    MC_CMD_GET_FPGAREG_OUT_LENMIN 1
-#define    MC_CMD_GET_FPGAREG_OUT_LENMAX 255
-#define    MC_CMD_GET_FPGAREG_OUT_LEN(num) (0+1*(num))
-#define       MC_CMD_GET_FPGAREG_OUT_BUFFER_OFST 0
-#define       MC_CMD_GET_FPGAREG_OUT_BUFFER_LEN 1
-#define       MC_CMD_GET_FPGAREG_OUT_BUFFER_MINNUM 1
-#define       MC_CMD_GET_FPGAREG_OUT_BUFFER_MAXNUM 255
+/* MC_CMD_FC_IN_NULL msgrequest */
+#define    MC_CMD_FC_IN_NULL_LEN 4
+#define       MC_CMD_FC_IN_CMD_OFST 0
+
+/* MC_CMD_FC_IN_PHY msgrequest */
+#define    MC_CMD_FC_IN_PHY_LEN 5
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_PHY_OP_OFST 4
+#define       MC_CMD_FC_IN_PHY_OP_LEN 1
+#define          MC_CMD_FC_OP_PHY_OP_INIT 0x1 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_RECONFIGURE 0x2 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_REBOOT 0x3 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_GET_SUPPORTED_CAP 0x4 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_GET_CONFIG 0x5 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_GET_MEDIA_INFO 0x6 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_SET_LED 0x7 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_LASI_INTERRUPT 0x8 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_CHECK_LINK 0x9 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_FILL_STATS 0xa /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_BPX_LINK_STATE_CHANGED 0xb /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_GET_STATE 0xc /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_START_BIST 0xd /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_POLL_BIST 0xe /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_NVRAM_TEST 0xf /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_RELINQUISH_SPI 0x10 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_GET_CONNECTION 0x11 /* enum */
+#define          MC_CMD_FC_OP_PHY_OP_GET_FLAGS 0x12 /* enum */
+
+/* MC_CMD_FC_IN_PHY_INIT msgrequest */
+#define    MC_CMD_FC_IN_PHY_INIT_LEN 4
+#define       MC_CMD_FC_IN_PHY_CMD_OFST 0
+
+/* MC_CMD_FC_IN_MAC msgrequest */
+#define    MC_CMD_FC_IN_MAC_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_MAC_HEADER_OFST 4
+#define        MC_CMD_FC_IN_MAC_OP_LBN 0
+#define        MC_CMD_FC_IN_MAC_OP_WIDTH 8
+#define          MC_CMD_FC_OP_MAC_OP_RECONFIGURE 0x1 /* enum */
+#define          MC_CMD_FC_OP_MAC_OP_SET_LINK 0x2 /* enum */
+#define          MC_CMD_FC_OP_MAC_OP_GET_STATS 0x3 /* enum */
+#define          MC_CMD_FC_OP_MAC_OP_GET_RX_STATS 0x6 /* enum */
+#define          MC_CMD_FC_OP_MAC_OP_GET_TX_STATS 0x7 /* enum */
+#define          MC_CMD_FC_OP_MAC_OP_READ_STATUS 0x8 /* enum */
+#define        MC_CMD_FC_IN_MAC_PORT_TYPE_LBN 8
+#define        MC_CMD_FC_IN_MAC_PORT_TYPE_WIDTH 8
+#define          MC_CMD_FC_PORT_EXT 0x0 /* enum */
+#define          MC_CMD_FC_PORT_INT 0x1 /* enum */
+#define        MC_CMD_FC_IN_MAC_PORT_IDX_LBN 16
+#define        MC_CMD_FC_IN_MAC_PORT_IDX_WIDTH 8
+#define        MC_CMD_FC_IN_MAC_CMD_FORMAT_LBN 24
+#define        MC_CMD_FC_IN_MAC_CMD_FORMAT_WIDTH 8
+#define          MC_CMD_FC_OP_MAC_CMD_FORMAT_DEFAULT 0x0 /* enum */
+#define          MC_CMD_FC_OP_MAC_CMD_FORMAT_PORT_OVERRIDE 0x1 /* enum */
+
+/* MC_CMD_FC_IN_MAC_RECONFIGURE msgrequest */
+#define    MC_CMD_FC_IN_MAC_RECONFIGURE_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_MAC_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_MAC_SET_LINK msgrequest */
+#define    MC_CMD_FC_IN_MAC_SET_LINK_LEN 32
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_MAC_HEADER_OFST 4 */
+#define       MC_CMD_FC_IN_MAC_SET_LINK_MTU_OFST 8
+#define       MC_CMD_FC_IN_MAC_SET_LINK_DRAIN_OFST 12
+#define       MC_CMD_FC_IN_MAC_SET_LINK_ADDR_OFST 16
+#define       MC_CMD_FC_IN_MAC_SET_LINK_ADDR_LEN 8
+#define       MC_CMD_FC_IN_MAC_SET_LINK_ADDR_LO_OFST 16
+#define       MC_CMD_FC_IN_MAC_SET_LINK_ADDR_HI_OFST 20
+#define       MC_CMD_FC_IN_MAC_SET_LINK_REJECT_OFST 24
+#define        MC_CMD_FC_IN_MAC_SET_LINK_REJECT_UNICAST_LBN 0
+#define        MC_CMD_FC_IN_MAC_SET_LINK_REJECT_UNICAST_WIDTH 1
+#define        MC_CMD_FC_IN_MAC_SET_LINK_REJECT_BRDCAST_LBN 1
+#define        MC_CMD_FC_IN_MAC_SET_LINK_REJECT_BRDCAST_WIDTH 1
+#define       MC_CMD_FC_IN_MAC_SET_LINK_FCNTL_OFST 28
+
+/* MC_CMD_FC_IN_MAC_READ_STATUS msgrequest */
+#define    MC_CMD_FC_IN_MAC_READ_STATUS_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_MAC_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_MAC_GET_RX_STATS msgrequest */
+#define    MC_CMD_FC_IN_MAC_GET_RX_STATS_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_MAC_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_MAC_GET_TX_STATS msgrequest */
+#define    MC_CMD_FC_IN_MAC_GET_TX_STATS_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_MAC_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_MAC_GET_STATS msgrequest */
+#define    MC_CMD_FC_IN_MAC_GET_STATS_LEN 20
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_MAC_HEADER_OFST 4 */
+#define       MC_CMD_FC_IN_MAC_GET_STATS_STATS_INDEX_OFST 8
+#define       MC_CMD_FC_IN_MAC_GET_STATS_FLAGS_OFST 12
+#define        MC_CMD_FC_IN_MAC_GET_STATS_CLEAR_ALL_LBN 0
+#define        MC_CMD_FC_IN_MAC_GET_STATS_CLEAR_ALL_WIDTH 1
+#define        MC_CMD_FC_IN_MAC_GET_STATS_CLEAR_LBN 1
+#define        MC_CMD_FC_IN_MAC_GET_STATS_CLEAR_WIDTH 1
+#define        MC_CMD_FC_IN_MAC_GET_STATS_UPDATE_LBN 2
+#define        MC_CMD_FC_IN_MAC_GET_STATS_UPDATE_WIDTH 1
+#define       MC_CMD_FC_IN_MAC_GET_STATS_NUM_OFST 16
+#define          MC_CMD_FC_MAC_NSTATS_PER_BLOCK 0x1e /* enum */
+#define          MC_CMD_FC_MAC_NBYTES_PER_STAT 0x8 /* enum */
+
+/* MC_CMD_FC_IN_READ32 msgrequest */
+#define    MC_CMD_FC_IN_READ32_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_READ32_ADDR_HI_OFST 4
+#define       MC_CMD_FC_IN_READ32_ADDR_LO_OFST 8
+#define       MC_CMD_FC_IN_READ32_NUMWORDS_OFST 12
+
+/* MC_CMD_FC_IN_WRITE32 msgrequest */
+#define    MC_CMD_FC_IN_WRITE32_LENMIN 16
+#define    MC_CMD_FC_IN_WRITE32_LENMAX 252
+#define    MC_CMD_FC_IN_WRITE32_LEN(num) (12+4*(num))
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_WRITE32_ADDR_HI_OFST 4
+#define       MC_CMD_FC_IN_WRITE32_ADDR_LO_OFST 8
+#define       MC_CMD_FC_IN_WRITE32_BUFFER_OFST 12
+#define       MC_CMD_FC_IN_WRITE32_BUFFER_LEN 4
+#define       MC_CMD_FC_IN_WRITE32_BUFFER_MINNUM 1
+#define       MC_CMD_FC_IN_WRITE32_BUFFER_MAXNUM 60
+
+/* MC_CMD_FC_IN_TRC_READ msgrequest */
+#define    MC_CMD_FC_IN_TRC_READ_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_TRC_READ_TRC_OFST 4
+#define       MC_CMD_FC_IN_TRC_READ_CHANNEL_OFST 8
+
+/* MC_CMD_FC_IN_TRC_WRITE msgrequest */
+#define    MC_CMD_FC_IN_TRC_WRITE_LEN 28
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_TRC_WRITE_TRC_OFST 4
+#define       MC_CMD_FC_IN_TRC_WRITE_CHANNEL_OFST 8
+#define       MC_CMD_FC_IN_TRC_WRITE_DATA_OFST 12
+#define       MC_CMD_FC_IN_TRC_WRITE_DATA_LEN 4
+#define       MC_CMD_FC_IN_TRC_WRITE_DATA_NUM 4
+
+/* MC_CMD_FC_IN_GET_VERSION msgrequest */
+#define    MC_CMD_FC_IN_GET_VERSION_LEN 4
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+
+/* MC_CMD_FC_IN_TRC_RX_READ msgrequest */
+#define    MC_CMD_FC_IN_TRC_RX_READ_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_TRC_RX_READ_TRC_OFST 4
+#define       MC_CMD_FC_IN_TRC_RX_READ_CHANNEL_OFST 8
+
+/* MC_CMD_FC_IN_TRC_RX_WRITE msgrequest */
+#define    MC_CMD_FC_IN_TRC_RX_WRITE_LEN 20
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_TRC_RX_WRITE_TRC_OFST 4
+#define       MC_CMD_FC_IN_TRC_RX_WRITE_CHANNEL_OFST 8
+#define       MC_CMD_FC_IN_TRC_RX_WRITE_DATA_OFST 12
+#define       MC_CMD_FC_IN_TRC_RX_WRITE_DATA_LEN 4
+#define       MC_CMD_FC_IN_TRC_RX_WRITE_DATA_NUM 2
+
+/* MC_CMD_FC_IN_SFP msgrequest */
+#define    MC_CMD_FC_IN_SFP_LEN 24
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_SFP_SPEED_OFST 4
+#define       MC_CMD_FC_IN_SFP_COPPER_LEN_OFST 8
+#define       MC_CMD_FC_IN_SFP_DUAL_SPEED_OFST 12
+#define       MC_CMD_FC_IN_SFP_PRESENT_OFST 16
+#define       MC_CMD_FC_IN_SFP_TYPE_OFST 20
+
+/* MC_CMD_FC_IN_DDR_TEST msgrequest */
+#define    MC_CMD_FC_IN_DDR_TEST_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DDR_TEST_HEADER_OFST 4
+#define        MC_CMD_FC_IN_DDR_TEST_OP_LBN 0
+#define        MC_CMD_FC_IN_DDR_TEST_OP_WIDTH 8
+#define          MC_CMD_FC_OP_DDR_TEST_START 0x1 /* enum */
+#define          MC_CMD_FC_OP_DDR_TEST_POLL 0x2 /* enum */
+
+/* MC_CMD_FC_IN_DDR_TEST_START msgrequest */
+#define    MC_CMD_FC_IN_DDR_TEST_START_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_DDR_TEST_HEADER_OFST 4 */
+#define       MC_CMD_FC_IN_DDR_TEST_START_MASK_OFST 8
+#define        MC_CMD_FC_IN_DDR_TEST_START_T0_LBN 0
+#define        MC_CMD_FC_IN_DDR_TEST_START_T0_WIDTH 1
+#define        MC_CMD_FC_IN_DDR_TEST_START_T1_LBN 1
+#define        MC_CMD_FC_IN_DDR_TEST_START_T1_WIDTH 1
+#define        MC_CMD_FC_IN_DDR_TEST_START_B0_LBN 2
+#define        MC_CMD_FC_IN_DDR_TEST_START_B0_WIDTH 1
+#define        MC_CMD_FC_IN_DDR_TEST_START_B1_LBN 3
+#define        MC_CMD_FC_IN_DDR_TEST_START_B1_WIDTH 1
+
+/* MC_CMD_FC_IN_DDR_TEST_POLL msgrequest */
+#define    MC_CMD_FC_IN_DDR_TEST_POLL_LEN 8
+#define       MC_CMD_FC_IN_DDR_TEST_CMD_OFST 0
+/*            MC_CMD_FC_IN_DDR_TEST_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_GET_ASSERT msgrequest */
+#define    MC_CMD_FC_IN_GET_ASSERT_LEN 4
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+
+/* MC_CMD_FC_IN_FPGA_BUILD msgrequest */
+#define    MC_CMD_FC_IN_FPGA_BUILD_LEN 4
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+
+/* MC_CMD_FC_IN_READ_MAP msgrequest */
+#define    MC_CMD_FC_IN_READ_MAP_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_READ_MAP_HEADER_OFST 4
+#define        MC_CMD_FC_IN_READ_MAP_OP_LBN 0
+#define        MC_CMD_FC_IN_READ_MAP_OP_WIDTH 8
+#define          MC_CMD_FC_OP_READ_MAP_COUNT 0x1 /* enum */
+#define          MC_CMD_FC_OP_READ_MAP_INDEX 0x2 /* enum */
+
+/* MC_CMD_FC_IN_READ_MAP_COUNT msgrequest */
+#define    MC_CMD_FC_IN_READ_MAP_COUNT_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_READ_MAP_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_READ_MAP_INDEX msgrequest */
+#define    MC_CMD_FC_IN_READ_MAP_INDEX_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_READ_MAP_HEADER_OFST 4 */
+#define       MC_CMD_FC_IN_MAP_INDEX_OFST 8
+
+/* MC_CMD_FC_IN_CAPABILITIES msgrequest */
+#define    MC_CMD_FC_IN_CAPABILITIES_LEN 4
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+
+/* MC_CMD_FC_IN_GLOBAL_FLAGS msgrequest */
+#define    MC_CMD_FC_IN_GLOBAL_FLAGS_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_GLOBAL_FLAGS_FLAGS_OFST 4
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_RX_TUNING_CABLE_PLUGGED_IN_LBN 0
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_RX_TUNING_CABLE_PLUGGED_IN_WIDTH 1
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_RX_TUNING_LINK_MONITORING_LBN 1
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_RX_TUNING_LINK_MONITORING_WIDTH 1
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_DFE_ENABLE_LBN 2
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_DFE_ENABLE_WIDTH 1
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_1D_EYE_ENABLE_LBN 3
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_1D_EYE_ENABLE_WIDTH 1
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_1D_TUNING_ENABLE_LBN 4
+#define        MC_CMD_FC_IN_GLOBAL_FLAGS_1D_TUNING_ENABLE_WIDTH 1
+
+/* MC_CMD_FC_IN_IO_REL msgrequest */
+#define    MC_CMD_FC_IN_IO_REL_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_IO_REL_HEADER_OFST 4
+#define        MC_CMD_FC_IN_IO_REL_OP_LBN 0
+#define        MC_CMD_FC_IN_IO_REL_OP_WIDTH 8
+#define          MC_CMD_FC_IN_IO_REL_GET_ADDR 0x1 /* enum */
+#define          MC_CMD_FC_IN_IO_REL_READ32 0x2 /* enum */
+#define          MC_CMD_FC_IN_IO_REL_WRITE32 0x3 /* enum */
+#define        MC_CMD_FC_IN_IO_REL_COMP_TYPE_LBN 8
+#define        MC_CMD_FC_IN_IO_REL_COMP_TYPE_WIDTH 8
+#define          MC_CMD_FC_COMP_TYPE_APP_ADDR_SPACE 0x1 /* enum */
+#define          MC_CMD_FC_COMP_TYPE_FLASH 0x2 /* enum */
+
+/* MC_CMD_FC_IN_IO_REL_GET_ADDR msgrequest */
+#define    MC_CMD_FC_IN_IO_REL_GET_ADDR_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_IO_REL_HEADER_OFST 4 */
+
+/* MC_CMD_FC_IN_IO_REL_READ32 msgrequest */
+#define    MC_CMD_FC_IN_IO_REL_READ32_LEN 20
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_IO_REL_HEADER_OFST 4 */
+#define       MC_CMD_FC_IN_IO_REL_READ32_ADDR_HI_OFST 8
+#define       MC_CMD_FC_IN_IO_REL_READ32_ADDR_LO_OFST 12
+#define       MC_CMD_FC_IN_IO_REL_READ32_NUMWORDS_OFST 16
+
+/* MC_CMD_FC_IN_IO_REL_WRITE32 msgrequest */
+#define    MC_CMD_FC_IN_IO_REL_WRITE32_LENMIN 20
+#define    MC_CMD_FC_IN_IO_REL_WRITE32_LENMAX 252
+#define    MC_CMD_FC_IN_IO_REL_WRITE32_LEN(num) (16+4*(num))
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_IO_REL_HEADER_OFST 4 */
+#define       MC_CMD_FC_IN_IO_REL_WRITE32_ADDR_HI_OFST 8
+#define       MC_CMD_FC_IN_IO_REL_WRITE32_ADDR_LO_OFST 12
+#define       MC_CMD_FC_IN_IO_REL_WRITE32_BUFFER_OFST 16
+#define       MC_CMD_FC_IN_IO_REL_WRITE32_BUFFER_LEN 4
+#define       MC_CMD_FC_IN_IO_REL_WRITE32_BUFFER_MINNUM 1
+#define       MC_CMD_FC_IN_IO_REL_WRITE32_BUFFER_MAXNUM 59
+
+/* MC_CMD_FC_IN_UHLINK msgrequest */
+#define    MC_CMD_FC_IN_UHLINK_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_UHLINK_HEADER_OFST 4
+#define        MC_CMD_FC_IN_UHLINK_OP_LBN 0
+#define        MC_CMD_FC_IN_UHLINK_OP_WIDTH 8
+#define          MC_CMD_FC_OP_UHLINK_PHY 0x1 /* enum */
+#define          MC_CMD_FC_OP_UHLINK_MAC 0x2 /* enum */
+#define        MC_CMD_FC_IN_UHLINK_PORT_TYPE_LBN 8
+#define        MC_CMD_FC_IN_UHLINK_PORT_TYPE_WIDTH 8
+#define        MC_CMD_FC_IN_UHLINK_PORT_IDX_LBN 16
+#define        MC_CMD_FC_IN_UHLINK_PORT_IDX_WIDTH 8
+#define        MC_CMD_FC_IN_UHLINK_CMD_FORMAT_LBN 24
+#define        MC_CMD_FC_IN_UHLINK_CMD_FORMAT_WIDTH 8
+#define          MC_CMD_FC_OP_UHLINK_CMD_FORMAT_DEFAULT 0x0 /* enum */
+#define          MC_CMD_FC_OP_UHLINK_CMD_FORMAT_PORT_OVERRIDE 0x1 /* enum */
+
+/* MC_CMD_FC_OP_UHLINK_PHY msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_PHY_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+
+/* MC_CMD_FC_OP_UHLINK_MAC msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_MAC_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+
+/* MC_CMD_FC_OUT msgresponse */
+#define    MC_CMD_FC_OUT_LEN 0
+
+/* MC_CMD_FC_OUT_NULL msgresponse */
+#define    MC_CMD_FC_OUT_NULL_LEN 0
+
+/* MC_CMD_FC_OUT_READ32 msgresponse */
+#define    MC_CMD_FC_OUT_READ32_LENMIN 4
+#define    MC_CMD_FC_OUT_READ32_LENMAX 252
+#define    MC_CMD_FC_OUT_READ32_LEN(num) (0+4*(num))
+#define       MC_CMD_FC_OUT_READ32_BUFFER_OFST 0
+#define       MC_CMD_FC_OUT_READ32_BUFFER_LEN 4
+#define       MC_CMD_FC_OUT_READ32_BUFFER_MINNUM 1
+#define       MC_CMD_FC_OUT_READ32_BUFFER_MAXNUM 63
+
+/* MC_CMD_FC_OUT_WRITE32 msgresponse */
+#define    MC_CMD_FC_OUT_WRITE32_LEN 0
+
+/* MC_CMD_FC_OUT_TRC_READ msgresponse */
+#define    MC_CMD_FC_OUT_TRC_READ_LEN 16
+#define       MC_CMD_FC_OUT_TRC_READ_DATA_OFST 0
+#define       MC_CMD_FC_OUT_TRC_READ_DATA_LEN 4
+#define       MC_CMD_FC_OUT_TRC_READ_DATA_NUM 4
+
+/* MC_CMD_FC_OUT_TRC_WRITE msgresponse */
+#define    MC_CMD_FC_OUT_TRC_WRITE_LEN 0
+
+/* MC_CMD_FC_OUT_GET_VERSION msgresponse */
+#define    MC_CMD_FC_OUT_GET_VERSION_LEN 12
+#define       MC_CMD_FC_OUT_GET_VERSION_FIRMWARE_OFST 0
+#define       MC_CMD_FC_OUT_GET_VERSION_VERSION_OFST 4
+#define       MC_CMD_FC_OUT_GET_VERSION_VERSION_LEN 8
+#define       MC_CMD_FC_OUT_GET_VERSION_VERSION_LO_OFST 4
+#define       MC_CMD_FC_OUT_GET_VERSION_VERSION_HI_OFST 8
+
+/* MC_CMD_FC_OUT_TRC_RX_READ msgresponse */
+#define    MC_CMD_FC_OUT_TRC_RX_READ_LEN 8
+#define       MC_CMD_FC_OUT_TRC_RX_READ_DATA_OFST 0
+#define       MC_CMD_FC_OUT_TRC_RX_READ_DATA_LEN 4
+#define       MC_CMD_FC_OUT_TRC_RX_READ_DATA_NUM 2
+
+/* MC_CMD_FC_OUT_TRC_RX_WRITE msgresponse */
+#define    MC_CMD_FC_OUT_TRC_RX_WRITE_LEN 0
+
+/* MC_CMD_FC_OUT_MAC_RECONFIGURE msgresponse */
+#define    MC_CMD_FC_OUT_MAC_RECONFIGURE_LEN 0
+
+/* MC_CMD_FC_OUT_MAC_SET_LINK msgresponse */
+#define    MC_CMD_FC_OUT_MAC_SET_LINK_LEN 0
+
+/* MC_CMD_FC_OUT_MAC_READ_STATUS msgresponse */
+#define    MC_CMD_FC_OUT_MAC_READ_STATUS_LEN 4
+#define       MC_CMD_FC_OUT_MAC_READ_STATUS_STATUS_OFST 0
+
+/* MC_CMD_FC_OUT_MAC_GET_RX_STATS msgresponse */
+#define    MC_CMD_FC_OUT_MAC_GET_RX_STATS_LEN ((((0-1+(64*MC_CMD_FC_MAC_RX_NSTATS))+1))>>3)
+#define       MC_CMD_FC_OUT_MAC_GET_RX_STATS_STATISTICS_OFST 0
+#define       MC_CMD_FC_OUT_MAC_GET_RX_STATS_STATISTICS_LEN 8
+#define       MC_CMD_FC_OUT_MAC_GET_RX_STATS_STATISTICS_LO_OFST 0
+#define       MC_CMD_FC_OUT_MAC_GET_RX_STATS_STATISTICS_HI_OFST 4
+#define       MC_CMD_FC_OUT_MAC_GET_RX_STATS_STATISTICS_NUM MC_CMD_FC_MAC_RX_NSTATS
+#define          MC_CMD_FC_MAC_RX_STATS_OCTETS  0x0 /* enum */
+#define          MC_CMD_FC_MAC_RX_OCTETS_OK  0x1 /* enum */
+#define          MC_CMD_FC_MAC_RX_ALIGNMENT_ERRORS  0x2 /* enum */
+#define          MC_CMD_FC_MAC_RX_PAUSE_MAC_CTRL_FRAMES  0x3 /* enum */
+#define          MC_CMD_FC_MAC_RX_FRAMES_OK  0x4 /* enum */
+#define          MC_CMD_FC_MAC_RX_CRC_ERRORS  0x5 /* enum */
+#define          MC_CMD_FC_MAC_RX_VLAN_OK  0x6 /* enum */
+#define          MC_CMD_FC_MAC_RX_ERRORS  0x7 /* enum */
+#define          MC_CMD_FC_MAC_RX_UCAST_PKTS  0x8 /* enum */
+#define          MC_CMD_FC_MAC_RX_MULTICAST_PKTS  0x9 /* enum */
+#define          MC_CMD_FC_MAC_RX_BROADCAST_PKTS  0xa /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_DROP_EVENTS  0xb /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS  0xc /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_UNDERSIZE_PKTS  0xd /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_64  0xe /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_65_127  0xf /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_128_255  0x10 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_256_511  0x11 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_512_1023  0x12 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_1024_1518  0x13 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_PKTS_1519_MAX  0x14 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_OVERSIZE_PKTS  0x15 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_JABBERS  0x16 /* enum */
+#define          MC_CMD_FC_MAC_RX_STATS_FRAGMENTS  0x17 /* enum */
+#define          MC_CMD_FC_MAC_RX_MAC_CONTROL_FRAMES  0x18 /* enum */
+#define          MC_CMD_FC_MAC_RX_NSTATS  0x19 /* enum */
+
+/* MC_CMD_FC_OUT_MAC_GET_TX_STATS msgresponse */
+#define    MC_CMD_FC_OUT_MAC_GET_TX_STATS_LEN ((((0-1+(64*MC_CMD_FC_MAC_TX_NSTATS))+1))>>3)
+#define       MC_CMD_FC_OUT_MAC_GET_TX_STATS_STATISTICS_OFST 0
+#define       MC_CMD_FC_OUT_MAC_GET_TX_STATS_STATISTICS_LEN 8
+#define       MC_CMD_FC_OUT_MAC_GET_TX_STATS_STATISTICS_LO_OFST 0
+#define       MC_CMD_FC_OUT_MAC_GET_TX_STATS_STATISTICS_HI_OFST 4
+#define       MC_CMD_FC_OUT_MAC_GET_TX_STATS_STATISTICS_NUM MC_CMD_FC_MAC_TX_NSTATS
+#define          MC_CMD_FC_MAC_TX_STATS_OCTETS  0x0 /* enum */
+#define          MC_CMD_FC_MAC_TX_OCTETS_OK  0x1 /* enum */
+#define          MC_CMD_FC_MAC_TX_ALIGNMENT_ERRORS  0x2 /* enum */
+#define          MC_CMD_FC_MAC_TX_PAUSE_MAC_CTRL_FRAMES  0x3 /* enum */
+#define          MC_CMD_FC_MAC_TX_FRAMES_OK  0x4 /* enum */
+#define          MC_CMD_FC_MAC_TX_CRC_ERRORS  0x5 /* enum */
+#define          MC_CMD_FC_MAC_TX_VLAN_OK  0x6 /* enum */
+#define          MC_CMD_FC_MAC_TX_ERRORS  0x7 /* enum */
+#define          MC_CMD_FC_MAC_TX_UCAST_PKTS  0x8 /* enum */
+#define          MC_CMD_FC_MAC_TX_MULTICAST_PKTS  0x9 /* enum */
+#define          MC_CMD_FC_MAC_TX_BROADCAST_PKTS  0xa /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_DROP_EVENTS  0xb /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS  0xc /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_UNDERSIZE_PKTS  0xd /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_64  0xe /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_65_127  0xf /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_128_255  0x10 /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_256_511  0x11 /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_512_1023  0x12 /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_1024_1518  0x13 /* enum */
+#define          MC_CMD_FC_MAC_TX_STATS_PKTS_1519_TX_MTU  0x14 /* enum */
+#define          MC_CMD_FC_MAC_TX_MAC_CONTROL_FRAMES  0x15 /* enum */
+#define          MC_CMD_FC_MAC_TX_NSTATS  0x16 /* enum */
+
+/* MC_CMD_FC_OUT_MAC_GET_STATS msgresponse */
+#define    MC_CMD_FC_OUT_MAC_GET_STATS_LEN ((((0-1+(64*MC_CMD_FC_MAC_NSTATS_PER_BLOCK))+1))>>3)
+#define       MC_CMD_FC_OUT_MAC_GET_STATS_STATISTICS_OFST 0
+#define       MC_CMD_FC_OUT_MAC_GET_STATS_STATISTICS_LEN 8
+#define       MC_CMD_FC_OUT_MAC_GET_STATS_STATISTICS_LO_OFST 0
+#define       MC_CMD_FC_OUT_MAC_GET_STATS_STATISTICS_HI_OFST 4
+#define       MC_CMD_FC_OUT_MAC_GET_STATS_STATISTICS_NUM MC_CMD_FC_MAC_NSTATS_PER_BLOCK
+
+/* MC_CMD_FC_OUT_MAC msgresponse */
+#define    MC_CMD_FC_OUT_MAC_LEN 0
+
+/* MC_CMD_FC_OUT_SFP msgresponse */
+#define    MC_CMD_FC_OUT_SFP_LEN 0
+
+/* MC_CMD_FC_OUT_DDR_TEST_START msgresponse */
+#define    MC_CMD_FC_OUT_DDR_TEST_START_LEN 0
+
+/* MC_CMD_FC_OUT_DDR_TEST_POLL msgresponse */
+#define    MC_CMD_FC_OUT_DDR_TEST_POLL_LEN 8
+#define       MC_CMD_FC_OUT_DDR_TEST_POLL_STATUS_OFST 0
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_CODE_LBN 0
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_CODE_WIDTH 8
+#define          MC_CMD_FC_OP_DDR_TEST_NONE 0x0 /* enum */
+#define          MC_CMD_FC_OP_DDR_TEST_INPROGRESS 0x1 /* enum */
+#define          MC_CMD_FC_OP_DDR_TEST_SUCCESS 0x2 /* enum */
+#define          MC_CMD_FC_OP_DDR_TEST_TIMER_EXPIRED 0x3 /* enum */
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_T0_LBN 11
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_T0_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_T1_LBN 10
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_T1_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_B0_LBN 9
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_B0_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_B1_LBN 8
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_PRESENT_B1_WIDTH 1
+#define       MC_CMD_FC_OUT_DDR_TEST_POLL_RESULT_OFST 4
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_T0_LBN 31
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_T0_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_T1_LBN 30
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_T1_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_B0_LBN 29
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_B0_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_B1_LBN 28
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_FPGA_SUPPORTS_B1_WIDTH 1
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_T0_LBN 15
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_T0_WIDTH 5
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_T1_LBN 10
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_T1_WIDTH 5
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_B0_LBN 5
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_B0_WIDTH 5
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_B1_LBN 0
+#define        MC_CMD_FC_OUT_DDR_TEST_POLL_B1_WIDTH 5
+#define          MC_CMD_FC_OUT_DDR_TEST_POLL_TEST_COMPLETE 0x0 /* enum */
+#define          MC_CMD_FC_OUT_DDR_TEST_POLL_TEST_FAIL 0x1 /* enum */
+#define          MC_CMD_FC_OUT_DDR_TEST_POLL_TEST_PASS 0x2 /* enum */
+#define          MC_CMD_FC_OUT_DDR_TEST_POLL_CAL_FAIL 0x3 /* enum */
+#define          MC_CMD_FC_OUT_DDR_TEST_POLL_CAL_SUCCESS 0x4 /* enum */
+
+/* MC_CMD_FC_OUT_DDR_TEST msgresponse */
+#define    MC_CMD_FC_OUT_DDR_TEST_LEN 0
+
+/* MC_CMD_FC_OUT_GET_ASSERT msgresponse */
+#define    MC_CMD_FC_OUT_GET_ASSERT_LEN 144
+#define       MC_CMD_FC_OUT_GET_ASSERT_GLOBAL_FLAGS_OFST 0
+#define        MC_CMD_FC_OUT_GET_ASSERT_STATE_LBN 8
+#define        MC_CMD_FC_OUT_GET_ASSERT_STATE_WIDTH 8
+#define          MC_CMD_FC_GET_ASSERT_FLAGS_STATE_CLEAR 0x0 /* enum */
+#define          MC_CMD_FC_GET_ASSERT_FLAGS_STATE_NEW 0x1 /* enum */
+#define          MC_CMD_FC_GET_ASSERT_FLAGS_STATE_NOTIFIED 0x2 /* enum */
+#define        MC_CMD_FC_OUT_GET_ASSERT_TYPE_LBN 0
+#define        MC_CMD_FC_OUT_GET_ASSERT_TYPE_WIDTH 8
+#define          MC_CMD_FC_GET_ASSERT_FLAGS_TYPE_NONE 0x0 /* enum */
+#define          MC_CMD_FC_GET_ASSERT_FLAGS_TYPE_EXCEPTION 0x1 /* enum */
+#define          MC_CMD_FC_GET_ASSERT_FLAGS_TYPE_ASSERTION 0x2 /* enum */
+#define       MC_CMD_FC_OUT_GET_ASSERT_SAVED_PC_OFFS_OFST 4
+#define       MC_CMD_FC_OUT_GET_ASSERT_GP_REGS_OFFS_OFST 8
+#define       MC_CMD_FC_OUT_GET_ASSERT_GP_REGS_OFFS_LEN 4
+#define       MC_CMD_FC_OUT_GET_ASSERT_GP_REGS_OFFS_NUM 31
+#define       MC_CMD_FC_OUT_GET_ASSERT_EXCEPTION_TYPE_OFFS_OFST 132
+#define       MC_CMD_FC_OUT_GET_ASSERT_EXCEPTION_PC_ADDR_OFFS_OFST 136
+#define       MC_CMD_FC_OUT_GET_ASSERT_EXCEPTION_BAD_ADDR_OFFS_OFST 140
+
+/* MC_CMD_FC_OUT_FPGA_BUILD msgresponse */
+#define    MC_CMD_FC_OUT_FPGA_BUILD_LEN 16
+#define       MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_INFO_OFST 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_ID_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_COMPONENT_ID_WIDTH 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MAJOR_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MAJOR_WIDTH 4
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MINOR_LBN 20
+#define        MC_CMD_FC_OUT_FPGA_BUILD_VERSION_MINOR_WIDTH 4
+#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_NUM_LBN 24
+#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_NUM_WIDTH 8
+#define       MC_CMD_FC_OUT_FPGA_BUILD_TIMESTAMP_OFST 4
+#define       MC_CMD_FC_OUT_FPGA_BUILD_PARAMETERS_OFST 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_FPGA_TYPE_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_FPGA_TYPE_WIDTH 8
+#define          MC_CMD_FC_FPGA_TYPE_A7 0xa7 /* enum */
+#define          MC_CMD_FC_FPGA_TYPE_A5 0xa5 /* enum */
+#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED1_LBN 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED1_WIDTH 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SFP_XFI_DEF_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SFP_XFI_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SIENA_XFI_DEF_LBN 17
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SIENA_XFI_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SIENA_XAUI_DEF_LBN 18
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SIENA_XAUI_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM1_RLDRAM_DEF_LBN 19
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM1_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM2_RLDRAM_DEF_LBN 20
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM2_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM3_RLDRAM_DEF_LBN 21
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM3_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM4_RLDRAM_DEF_LBN 22
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM4_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_T0_DDR3_DEF_LBN 23
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_T0_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_T1_DDR3_DEF_LBN 24
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_T1_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_B0_DDR3_DEF_LBN 25
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_B0_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_B1_DDR3_DEF_LBN 26
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SODIMM_B1_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_NIC0_MAC_DEF_LBN 27
+#define        MC_CMD_FC_OUT_FPGA_BUILD_NIC0_MAC_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_NIC1_MAC_DEF_LBN 28
+#define        MC_CMD_FC_OUT_FPGA_BUILD_NIC1_MAC_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SFP0_MAC_DEF_LBN 29
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SFP0_MAC_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SFP1_MAC_DEF_LBN 30
+#define        MC_CMD_FC_OUT_FPGA_BUILD_SFP1_MAC_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED2_LBN 31
+#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED2_WIDTH 1
+#define       MC_CMD_FC_OUT_FPGA_BUILD_IDENTIFIER_OFST 12
+#define        MC_CMD_FC_OUT_FPGA_BUILD_CHANGESET_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_CHANGESET_WIDTH 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_FLAG_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_BUILD_FLAG_WIDTH 1
+#define          MC_CMD_FC_FPGA_BUILD_FLAG_INTERNAL 0x0 /* enum */
+#define          MC_CMD_FC_FPGA_BUILD_FLAG_RELEASE 0x1 /* enum */
+#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED3_LBN 17
+#define        MC_CMD_FC_OUT_FPGA_BUILD_RESERVED3_WIDTH 15
+
+/* MC_CMD_FC_OUT_READ_MAP_COUNT msgresponse */
+#define    MC_CMD_FC_OUT_READ_MAP_COUNT_LEN 4
+#define       MC_CMD_FC_OUT_READ_MAP_COUNT_NUM_MAPS_OFST 0
+
+/* MC_CMD_FC_OUT_READ_MAP_INDEX msgresponse */
+#define    MC_CMD_FC_OUT_READ_MAP_INDEX_LEN 164
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_INDEX_OFST 0
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_OPTIONS_OFST 4
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_OFST 8
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_LEN 8
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_LO_OFST 8
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_ADDRESS_HI_OFST 12
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LEN_OFST 16
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LEN_LEN 8
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LEN_LO_OFST 16
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LEN_HI_OFST 20
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_COMP_INFO_OFST 24
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LICENSE_DATE_OFST 28
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LICENSE_DATE_LEN 8
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LICENSE_DATE_LO_OFST 28
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_LICENSE_DATE_HI_OFST 32
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_NAME_OFST 36
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_NAME_LEN 1
+#define       MC_CMD_FC_OUT_READ_MAP_INDEX_NAME_NUM 128
+
+/* MC_CMD_FC_OUT_READ_MAP msgresponse */
+#define    MC_CMD_FC_OUT_READ_MAP_LEN 0
+
+/* MC_CMD_FC_OUT_CAPABILITIES msgresponse */
+#define    MC_CMD_FC_OUT_CAPABILITIES_LEN 8
+#define       MC_CMD_FC_OUT_CAPABILITIES_INTERNAL_OFST 0
+#define       MC_CMD_FC_OUT_CAPABILITIES_EXTERNAL_OFST 4
+
+/* MC_CMD_FC_OUT_GLOBAL_FLAGS msgresponse */
+#define    MC_CMD_FC_OUT_GLOBAL_FLAGS_LEN 4
+#define       MC_CMD_FC_OUT_GLOBAL_FLAGS_FLAGS_OFST 0
+
+/* MC_CMD_FC_OUT_IO_REL msgresponse */
+#define    MC_CMD_FC_OUT_IO_REL_LEN 0
+
+/* MC_CMD_FC_OUT_IO_REL_GET_ADDR msgresponse */
+#define    MC_CMD_FC_OUT_IO_REL_GET_ADDR_LEN 8
+#define       MC_CMD_FC_OUT_IO_REL_GET_ADDR_ADDR_HI_OFST 0
+#define       MC_CMD_FC_OUT_IO_REL_GET_ADDR_ADDR_LO_OFST 4
+
+/* MC_CMD_FC_OUT_IO_REL_READ32 msgresponse */
+#define    MC_CMD_FC_OUT_IO_REL_READ32_LENMIN 4
+#define    MC_CMD_FC_OUT_IO_REL_READ32_LENMAX 252
+#define    MC_CMD_FC_OUT_IO_REL_READ32_LEN(num) (0+4*(num))
+#define       MC_CMD_FC_OUT_IO_REL_READ32_BUFFER_OFST 0
+#define       MC_CMD_FC_OUT_IO_REL_READ32_BUFFER_LEN 4
+#define       MC_CMD_FC_OUT_IO_REL_READ32_BUFFER_MINNUM 1
+#define       MC_CMD_FC_OUT_IO_REL_READ32_BUFFER_MAXNUM 63
+
+/* MC_CMD_FC_OUT_IO_REL_WRITE32 msgresponse */
+#define    MC_CMD_FC_OUT_IO_REL_WRITE32_LEN 0
+
+/* MC_CMD_FC_OUT_UHLINK_PHY msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_PHY_LEN 48
+#define       MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_SETTINGS_0_OFST 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_VOD_LBN 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_VOD_WIDTH 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_PREEMP_1STPOSTTAP_LBN 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_PREEMP_1STPOSTTAP_WIDTH 16
+#define       MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_SETTINGS_1_OFST 4
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_PREEMP_PRETAP_LBN 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_PREEMP_PRETAP_WIDTH 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_PREEMP_2NDPOSTTAP_LBN 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_TX_PREEMP_2NDPOSTTAP_WIDTH 16
+#define       MC_CMD_FC_OUT_UHLINK_PHY_TRC_RX_SETTINGS_OFST 8
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_RX_DC_GAIN_LBN 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_RX_DC_GAIN_WIDTH 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_RX_EQ_CONTROL_LBN 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_TRC_RX_EQ_CONTROL_WIDTH 16
+#define       MC_CMD_FC_OUT_UHLINK_PHY_RX_EYE_OFST 12
+#define        MC_CMD_FC_OUT_UHLINK_PHY_RX_EYE_WIDTH_LBN 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_RX_EYE_WIDTH_WIDTH 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_RX_EYE_HEIGHT_LBN 16
+#define        MC_CMD_FC_OUT_UHLINK_PHY_RX_EYE_HEIGHT_WIDTH 16
+#define       MC_CMD_FC_OUT_UHLINK_PHY_PCS_STATUS_OFST 16
+#define       MC_CMD_FC_OUT_UHLINK_PHY_LINK_STATE_WORD_OFST 20
+#define        MC_CMD_FC_OUT_UHLINK_PHY_LINK_STATE_LBN 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_LINK_STATE_WIDTH 1
+#define        MC_CMD_FC_OUT_UHLINK_PHY_LINK_CONFIGURED_LBN 1
+#define        MC_CMD_FC_OUT_UHLINK_PHY_LINK_CONFIGURED_WIDTH 1
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_PARAMS_OFST 24
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_PARAMS_LEN 20
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_SPEED_OFST 24
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_COPPER_LEN_OFST 28
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_DUAL_SPEED_OFST 32
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_PRESENT_OFST 36
+#define       MC_CMD_FC_OUT_UHLINK_PHY_SFP_TYPE_OFST 40
+#define       MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_OFST 44
+#define        MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_DFE_LBN 0
+#define        MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_DFE_WIDTH 1
+#define        MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_AEQ_LBN 1
+#define        MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_AEQ_WIDTH 1
+#define        MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_RX_TUNING_LBN 2
+#define        MC_CMD_FC_OUT_UHLINK_PHY_PHY_CFG_RX_TUNING_WIDTH 1
+
+/* MC_CMD_FC_OUT_UHLINK_MAC msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_MAC_LEN 20
+#define       MC_CMD_FC_OUT_UHLINK_MAC_CONFIG_OFST 0
+#define       MC_CMD_FC_OUT_UHLINK_MAC_MTU_OFST 4
+#define       MC_CMD_FC_OUT_UHLINK_MAC_IF_STATUS_OFST 8
+#define       MC_CMD_FC_OUT_UHLINK_MAC_ADDR_OFST 12
+#define       MC_CMD_FC_OUT_UHLINK_MAC_ADDR_LEN 8
+#define       MC_CMD_FC_OUT_UHLINK_MAC_ADDR_LO_OFST 12
+#define       MC_CMD_FC_OUT_UHLINK_MAC_ADDR_HI_OFST 16
+
+/* MC_CMD_FC_OUT_UHLINK msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_LEN 0
 
 
 /***********************************/
-/* MC_CMD_PUT_FPGAREG 
- * Write multiple bytes to PTP FPGA.
+/* MC_CMD_AOE 
+ * AOE operations (on MC rather than FC)
  */
-#define MC_CMD_PUT_FPGAREG  0xa
+#define MC_CMD_AOE  0xa
 
-/* MC_CMD_PUT_FPGAREG_IN msgrequest */
-#define    MC_CMD_PUT_FPGAREG_IN_LENMIN 5
-#define    MC_CMD_PUT_FPGAREG_IN_LENMAX 255
-#define    MC_CMD_PUT_FPGAREG_IN_LEN(num) (4+1*(num))
-#define       MC_CMD_PUT_FPGAREG_IN_ADDR_OFST 0
-#define       MC_CMD_PUT_FPGAREG_IN_BUFFER_OFST 4
-#define       MC_CMD_PUT_FPGAREG_IN_BUFFER_LEN 1
-#define       MC_CMD_PUT_FPGAREG_IN_BUFFER_MINNUM 1
-#define       MC_CMD_PUT_FPGAREG_IN_BUFFER_MAXNUM 251
+/* MC_CMD_AOE_IN msgrequest */
+#define    MC_CMD_AOE_IN_LEN 4
+#define       MC_CMD_AOE_IN_OP_HDR_OFST 0
+#define        MC_CMD_AOE_IN_OP_LBN 0
+#define        MC_CMD_AOE_IN_OP_WIDTH 8
+#define          MC_CMD_AOE_OP_INFO 0x1 /* enum */
+#define          MC_CMD_AOE_OP_CURRENTS 0x2 /* enum */
+#define          MC_CMD_AOE_OP_TEMPERATURES 0x3 /* enum */
+#define          MC_CMD_AOE_OP_CPLD_IDLE 0x4 /* enum */
+#define          MC_CMD_AOE_OP_CPLD_READ 0x5 /* enum */
+#define          MC_CMD_AOE_OP_CPLD_WRITE 0x6 /* enum */
+#define          MC_CMD_AOE_OP_CPLD_INSTRUCTION 0x7 /* enum */
+#define          MC_CMD_AOE_OP_RESERVED 0x8 /* enum */
+#define          MC_CMD_AOE_OP_POWER 0x9 /* enum */
+#define          MC_CMD_AOE_OP_LOAD 0xa /* enum */
+#define          MC_CMD_AOE_OP_FAN_CONTROL 0xb /* enum */
+#define          MC_CMD_AOE_OP_FAN_FAILURES 0xc /* enum */
+#define          MC_CMD_AOE_OP_MAC_STATS 0xd /* enum */
+#define          MC_CMD_AOE_OP_GET_PHY_MEDIA_INFO 0xe /* enum */
+#define          MC_CMD_AOE_OP_JTAG_WRITE 0xf /* enum */
+#define          MC_CMD_AOE_OP_FPGA_ACCESS 0x10 /* enum */
+#define          MC_CMD_AOE_OP_SET_MTU_OFFSET 0x11 /* enum */
 
-/* MC_CMD_PUT_FPGAREG_OUT msgresponse */
-#define    MC_CMD_PUT_FPGAREG_OUT_LEN 0
+/* MC_CMD_AOE_OUT msgresponse */
+#define    MC_CMD_AOE_OUT_LEN 0
+
+/* MC_CMD_AOE_IN_INFO msgrequest */
+#define    MC_CMD_AOE_IN_INFO_LEN 4
+#define       MC_CMD_AOE_IN_CMD_OFST 0
+
+/* MC_CMD_AOE_IN_CURRENTS msgrequest */
+#define    MC_CMD_AOE_IN_CURRENTS_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
+/* MC_CMD_AOE_IN_TEMPERATURES msgrequest */
+#define    MC_CMD_AOE_IN_TEMPERATURES_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
+/* MC_CMD_AOE_IN_CPLD_IDLE msgrequest */
+#define    MC_CMD_AOE_IN_CPLD_IDLE_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
+/* MC_CMD_AOE_IN_CPLD_READ msgrequest */
+#define    MC_CMD_AOE_IN_CPLD_READ_LEN 12
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_CPLD_READ_REGISTER_OFST 4
+#define       MC_CMD_AOE_IN_CPLD_READ_WIDTH_OFST 8
+
+/* MC_CMD_AOE_IN_CPLD_WRITE msgrequest */
+#define    MC_CMD_AOE_IN_CPLD_WRITE_LEN 16
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_CPLD_WRITE_REGISTER_OFST 4
+#define       MC_CMD_AOE_IN_CPLD_WRITE_WIDTH_OFST 8
+#define       MC_CMD_AOE_IN_CPLD_WRITE_VALUE_OFST 12
+
+/* MC_CMD_AOE_IN_CPLD_INSTRUCTION msgrequest */
+#define    MC_CMD_AOE_IN_CPLD_INSTRUCTION_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_CPLD_INSTRUCTION_INSTRUCTION_OFST 4
+
+/* MC_CMD_AOE_IN_RESERVED msgrequest */
+#define    MC_CMD_AOE_IN_RESERVED_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
+/* MC_CMD_AOE_IN_POWER msgrequest */
+#define    MC_CMD_AOE_IN_POWER_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_POWER_ON_OFST 4
+
+/* MC_CMD_AOE_IN_LOAD msgrequest */
+#define    MC_CMD_AOE_IN_LOAD_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_LOAD_IMAGE_OFST 4
+
+/* MC_CMD_AOE_IN_FAN_CONTROL msgrequest */
+#define    MC_CMD_AOE_IN_FAN_CONTROL_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_FAN_CONTROL_REAL_RPM_OFST 4
+
+/* MC_CMD_AOE_IN_FAN_FAILURES msgrequest */
+#define    MC_CMD_AOE_IN_FAN_FAILURES_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
+/* MC_CMD_AOE_IN_MAC_STATS msgrequest */
+#define    MC_CMD_AOE_IN_MAC_STATS_LEN 24
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_MAC_STATS_PORT_OFST 4
+#define       MC_CMD_AOE_IN_MAC_STATS_DMA_ADDR_OFST 8
+#define       MC_CMD_AOE_IN_MAC_STATS_DMA_ADDR_LEN 8
+#define       MC_CMD_AOE_IN_MAC_STATS_DMA_ADDR_LO_OFST 8
+#define       MC_CMD_AOE_IN_MAC_STATS_DMA_ADDR_HI_OFST 12
+#define       MC_CMD_AOE_IN_MAC_STATS_CMD_OFST 16
+#define        MC_CMD_AOE_IN_MAC_STATS_DMA_LBN 0
+#define        MC_CMD_AOE_IN_MAC_STATS_DMA_WIDTH 1
+#define        MC_CMD_AOE_IN_MAC_STATS_CLEAR_LBN 1
+#define        MC_CMD_AOE_IN_MAC_STATS_CLEAR_WIDTH 1
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_CHANGE_LBN 2
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_CHANGE_WIDTH 1
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_ENABLE_LBN 3
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_ENABLE_WIDTH 1
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_CLEAR_LBN 4
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_CLEAR_WIDTH 1
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_NOEVENT_LBN 5
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIODIC_NOEVENT_WIDTH 1
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIOD_MS_LBN 16
+#define        MC_CMD_AOE_IN_MAC_STATS_PERIOD_MS_WIDTH 16
+#define       MC_CMD_AOE_IN_MAC_STATS_DMA_LEN_OFST 20
+
+/* MC_CMD_AOE_IN_GET_PHY_MEDIA_INFO msgrequest */
+#define    MC_CMD_AOE_IN_GET_PHY_MEDIA_INFO_LEN 12
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_GET_PHY_MEDIA_INFO_PORT_OFST 4
+#define       MC_CMD_AOE_IN_GET_PHY_MEDIA_INFO_PAGE_OFST 8
+
+/* MC_CMD_AOE_IN_SET_MTU_OFFSET msgrequest */
+#define    MC_CMD_AOE_IN_SET_MTU_OFFSET_LEN 12
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_SET_MTU_OFFSET_PORT_OFST 4
+#define          MC_CMD_AOE_IN_SET_MTU_OFFSET_ALL_EXTERNAL 0x8000 /* enum */
+#define          MC_CMD_AOE_IN_SET_MTU_OFFSET_ALL_INTERNAL 0x4000 /* enum */
+#define       MC_CMD_AOE_IN_SET_MTU_OFFSET_OFFSET_OFST 8
+
+/* MC_CMD_AOE_IN_JTAG_WRITE msgrequest */
+#define    MC_CMD_AOE_IN_JTAG_WRITE_LENMIN 9
+#define    MC_CMD_AOE_IN_JTAG_WRITE_LENMAX 255
+#define    MC_CMD_AOE_IN_JTAG_WRITE_LEN(num) (8+1*(num))
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_JTAG_WRITE_DATALEN_OFST 4
+#define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_OFST 8
+#define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_LEN 1
+#define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_MINNUM 1
+#define       MC_CMD_AOE_IN_JTAG_WRITE_DATA_MAXNUM 247
+
+/* MC_CMD_AOE_IN_FPGA_ACCESS msgrequest */
+#define    MC_CMD_AOE_IN_FPGA_ACCESS_LEN 5
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+#define       MC_CMD_AOE_IN_FPGA_ACCESS_OP_OFST 4
+#define       MC_CMD_AOE_IN_FPGA_ACCESS_OP_LEN 1
+#define          MC_CMD_AOE_IN_FPGA_ACCESS_ENABLE 0x1 /* enum */
+#define          MC_CMD_AOE_IN_FPGA_ACCESS_DISABLE 0x2 /* enum */
+
+/* MC_CMD_AOE_OUT_INFO msgresponse */
+#define    MC_CMD_AOE_OUT_INFO_LEN 32
+#define       MC_CMD_AOE_OUT_INFO_CPLD_IDCODE_OFST 0
+#define       MC_CMD_AOE_OUT_INFO_CPLD_VERSION_OFST 4
+#define       MC_CMD_AOE_OUT_INFO_FPGA_IDCODE_OFST 8
+#define       MC_CMD_AOE_OUT_INFO_FPGA_VERSION_OFST 12
+#define       MC_CMD_AOE_OUT_INFO_FPGA_TYPE_OFST 16
+#define       MC_CMD_AOE_OUT_INFO_FPGA_STATE_OFST 20
+#define       MC_CMD_AOE_OUT_INFO_FPGA_IMAGE_OFST 24
+#define       MC_CMD_AOE_OUT_INFO_FC_STATE_OFST 28
+#define          MC_CMD_AOE_OUT_INFO_WATCHDOG 0x1 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_COMMS 0x2 /* enum */
+
+/* MC_CMD_AOE_OUT_CURRENTS msgresponse */
+#define    MC_CMD_AOE_OUT_CURRENTS_LEN 32
+#define       MC_CMD_AOE_OUT_CURRENTS_VALUES_OFST 0
+#define       MC_CMD_AOE_OUT_CURRENTS_VALUES_LEN 4
+#define       MC_CMD_AOE_OUT_CURRENTS_VALUES_NUM 8
+
+/* MC_CMD_AOE_OUT_TEMPERATURES msgresponse */
+#define    MC_CMD_AOE_OUT_TEMPERATURES_LEN 40
+#define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_OFST 0
+#define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_LEN 4
+#define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_NUM 10
+
+/* MC_CMD_AOE_OUT_CPLD_READ msgresponse */
+#define    MC_CMD_AOE_OUT_CPLD_READ_LEN 4
+#define       MC_CMD_AOE_OUT_CPLD_READ_VALUE_OFST 0
+
+/* MC_CMD_AOE_OUT_FAN_FAILURES msgresponse */
+#define    MC_CMD_AOE_OUT_FAN_FAILURES_LENMIN 4
+#define    MC_CMD_AOE_OUT_FAN_FAILURES_LENMAX 252
+#define    MC_CMD_AOE_OUT_FAN_FAILURES_LEN(num) (0+4*(num))
+#define       MC_CMD_AOE_OUT_FAN_FAILURES_COUNT_OFST 0
+#define       MC_CMD_AOE_OUT_FAN_FAILURES_COUNT_LEN 4
+#define       MC_CMD_AOE_OUT_FAN_FAILURES_COUNT_MINNUM 1
+#define       MC_CMD_AOE_OUT_FAN_FAILURES_COUNT_MAXNUM 63
+
+/* MC_CMD_AOE_OUT_MAC_STATS_DMA msgresponse */
+#define    MC_CMD_AOE_OUT_MAC_STATS_DMA_LEN 0
+
+/* MC_CMD_AOE_OUT_MAC_STATS_NO_DMA msgresponse */
+#define    MC_CMD_AOE_OUT_MAC_STATS_NO_DMA_LEN (((MC_CMD_MAC_NSTATS*64))>>3)
+#define       MC_CMD_AOE_OUT_MAC_STATS_NO_DMA_STATISTICS_OFST 0
+#define       MC_CMD_AOE_OUT_MAC_STATS_NO_DMA_STATISTICS_LEN 8
+#define       MC_CMD_AOE_OUT_MAC_STATS_NO_DMA_STATISTICS_LO_OFST 0
+#define       MC_CMD_AOE_OUT_MAC_STATS_NO_DMA_STATISTICS_HI_OFST 4
+#define       MC_CMD_AOE_OUT_MAC_STATS_NO_DMA_STATISTICS_NUM MC_CMD_MAC_NSTATS
+
+/* MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO msgresponse */
+#define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LENMIN 5
+#define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LENMAX 255
+#define    MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_LEN(num) (4+1*(num))
+#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATALEN_OFST 0
+#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_OFST 4
+#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_LEN 1
+#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_MINNUM 1
+#define       MC_CMD_AOE_OUT_GET_PHY_MEDIA_INFO_DATA_MAXNUM 251
+
+/* MC_CMD_AOE_OUT_JTAG_WRITE msgresponse */
+#define    MC_CMD_AOE_OUT_JTAG_WRITE_LENMIN 5
+#define    MC_CMD_AOE_OUT_JTAG_WRITE_LENMAX 255
+#define    MC_CMD_AOE_OUT_JTAG_WRITE_LEN(num) (4+1*(num))
+#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATALEN_OFST 0
+#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_OFST 4
+#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_LEN 1
+#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_MINNUM 1
+#define       MC_CMD_AOE_OUT_JTAG_WRITE_DATA_MAXNUM 251
+
+/* MC_CMD_AOE_OUT_FPGA_ACCESS msgresponse */
+#define    MC_CMD_AOE_OUT_FPGA_ACCESS_LEN 0
 
 
 /***********************************/
@@ -556,7 +1506,12 @@
 #define          MC_CMD_PTP_OP_MANFTEST_PACKET 0x9 /* enum */
 #define          MC_CMD_PTP_OP_RESET_STATS 0xa /* enum */
 #define          MC_CMD_PTP_OP_DEBUG 0xb /* enum */
-#define          MC_CMD_PTP_OP_MAX 0xc /* enum */
+#define          MC_CMD_PTP_OP_FPGAREAD 0xc /* enum */
+#define          MC_CMD_PTP_OP_FPGAWRITE 0xd /* enum */
+#define          MC_CMD_PTP_OP_CLOCK_OFFSET_ADJUST 0xe /* enum */
+#define          MC_CMD_PTP_OP_CLOCK_FREQ_ADJUST 0xf /* enum */
+#define          MC_CMD_PTP_OP_RECEIVE_SET_FILTER 0x10 /* enum */
+#define          MC_CMD_PTP_OP_MAX 0x11 /* enum */
 
 /* MC_CMD_PTP_IN_ENABLE msgrequest */
 #define    MC_CMD_PTP_IN_ENABLE_LEN 16
@@ -640,6 +1595,53 @@
 /*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
 #define       MC_CMD_PTP_IN_DEBUG_DEBUG_PARAM_OFST 8
 
+/* MC_CMD_PTP_IN_FPGAREAD msgrequest */
+#define    MC_CMD_PTP_IN_FPGAREAD_LEN 16
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_FPGAREAD_ADDR_OFST 8
+#define       MC_CMD_PTP_IN_FPGAREAD_NUMBYTES_OFST 12
+
+/* MC_CMD_PTP_IN_FPGAWRITE msgrequest */
+#define    MC_CMD_PTP_IN_FPGAWRITE_LENMIN 13
+#define    MC_CMD_PTP_IN_FPGAWRITE_LENMAX 255
+#define    MC_CMD_PTP_IN_FPGAWRITE_LEN(num) (12+1*(num))
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_FPGAWRITE_ADDR_OFST 8
+#define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_OFST 12
+#define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_LEN 1
+#define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_MINNUM 1
+#define       MC_CMD_PTP_IN_FPGAWRITE_BUFFER_MAXNUM 243
+
+/* MC_CMD_PTP_IN_CLOCK_OFFSET_ADJUST msgrequest */
+#define    MC_CMD_PTP_IN_CLOCK_OFFSET_ADJUST_LEN 16
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_CLOCK_OFFSET_ADJUST_SECONDS_OFST 8
+#define       MC_CMD_PTP_IN_CLOCK_OFFSET_ADJUST_NANOSECONDS_OFST 12
+
+/* MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST msgrequest */
+#define    MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST_LEN 16
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST_FREQ_OFST 8
+#define       MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST_FREQ_LEN 8
+#define       MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST_FREQ_LO_OFST 8
+#define       MC_CMD_PTP_IN_CLOCK_FREQ_ADJUST_FREQ_HI_OFST 12
+/*               MC_CMD_PTP_IN_ADJUST_BITS 0x28 */
+
+/* MC_CMD_PTP_IN_RECEIVE_SET_FILTER msgrequest */
+#define    MC_CMD_PTP_IN_RECEIVE_SET_FILTER_LENMIN 10
+#define    MC_CMD_PTP_IN_RECEIVE_SET_FILTER_LENMAX 254
+#define    MC_CMD_PTP_IN_RECEIVE_SET_FILTER_LEN(num) (8+2*(num))
+/*            MC_CMD_PTP_IN_CMD_OFST 0 */
+/*            MC_CMD_PTP_IN_PERIPH_ID_OFST 4 */
+#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_OFST 8
+#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_LEN 2
+#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_MINNUM 1
+#define       MC_CMD_PTP_IN_RECEIVE_SET_FILTER_FILTER_ENTRY_MAXNUM 123
+
 /* MC_CMD_PTP_OUT msgresponse */
 #define    MC_CMD_PTP_OUT_LEN 0
 
@@ -706,6 +1708,26 @@
 #define       MC_CMD_PTP_OUT_MANFTEST_PACKET_TEST_RESULT_OFST 0
 #define       MC_CMD_PTP_OUT_MANFTEST_PACKET_TEST_FPGACOUNT_OFST 4
 #define       MC_CMD_PTP_OUT_MANFTEST_PACKET_TEST_FILTERCOUNT_OFST 8
+
+/* MC_CMD_PTP_OUT_FPGAREAD msgresponse */
+#define    MC_CMD_PTP_OUT_FPGAREAD_LENMIN 1
+#define    MC_CMD_PTP_OUT_FPGAREAD_LENMAX 255
+#define    MC_CMD_PTP_OUT_FPGAREAD_LEN(num) (0+1*(num))
+#define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_OFST 0
+#define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_LEN 1
+#define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_MINNUM 1
+#define       MC_CMD_PTP_OUT_FPGAREAD_BUFFER_MAXNUM 255
+
+/* MC_CMD_PTP_FILTER_ENTRY_TYPEDEF structuredef */
+#define    MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_LEN 2
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_OFST 0
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_LEN 1
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_LBN 0
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_OFFSET_WIDTH 8
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_OFST 1
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_LEN 1
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_LBN 8
+#define       MC_CMD_PTP_FILTER_ENTRY_TYPEDEF_VALUE_WIDTH 8
 
 
 /***********************************/
@@ -939,6 +1961,12 @@
 #define          MC_CMD_CAPABILITIES_TURBO_ACTIVE_WIDTH 0x1 /* enum */
 #define          MC_CMD_CAPABILITIES_PTP_LBN 0x3 /* enum */
 #define          MC_CMD_CAPABILITIES_PTP_WIDTH 0x1 /* enum */
+#define          MC_CMD_CAPABILITIES_AOE_LBN 0x4 /* enum */
+#define          MC_CMD_CAPABILITIES_AOE_WIDTH 0x1 /* enum */
+#define          MC_CMD_CAPABILITIES_AOE_ACTIVE_LBN 0x5 /* enum */
+#define          MC_CMD_CAPABILITIES_AOE_ACTIVE_WIDTH 0x1 /* enum */
+#define          MC_CMD_CAPABILITIES_FC_ACTIVE_LBN 0x6 /* enum */
+#define          MC_CMD_CAPABILITIES_FC_ACTIVE_WIDTH 0x1 /* enum */
 #define       MC_CMD_GET_BOARD_CFG_OUT_CAPABILITIES_PORT1_OFST 40
 /*            Enum values, see field(s): */
 /*               CAPABILITIES_PORT0 */
@@ -1900,6 +2928,9 @@
 #define          MC_CMD_NVRAM_TYPE_PHY_PORT1 0xb /* enum */
 #define          MC_CMD_NVRAM_TYPE_LOG 0xc /* enum */
 #define          MC_CMD_NVRAM_TYPE_FPGA 0xd /* enum */
+#define          MC_CMD_NVRAM_TYPE_FPGA_BACKUP 0xe /* enum */
+#define          MC_CMD_NVRAM_TYPE_FC_FW 0xf /* enum */
+#define          MC_CMD_NVRAM_TYPE_FC_FW_BACKUP 0x10 /* enum */
 
 
 /***********************************/
@@ -2106,6 +3137,15 @@
 #define          MC_CMD_SENSOR_IN_12V0  0xc /* enum */
 #define          MC_CMD_SENSOR_IN_1V2A  0xd /* enum */
 #define          MC_CMD_SENSOR_IN_VREF  0xe /* enum */
+#define          MC_CMD_SENSOR_OUT_VAOE  0xf /* enum */
+#define          MC_CMD_SENSOR_AOE_TEMP  0x10 /* enum */
+#define          MC_CMD_SENSOR_PSU_AOE_TEMP  0x11 /* enum */
+#define          MC_CMD_SENSOR_PSU_TEMP  0x12 /* enum */
+#define          MC_CMD_SENSOR_FAN_0  0x13 /* enum */
+#define          MC_CMD_SENSOR_FAN_1  0x14 /* enum */
+#define          MC_CMD_SENSOR_FAN_2  0x15 /* enum */
+#define          MC_CMD_SENSOR_FAN_3  0x16 /* enum */
+#define          MC_CMD_SENSOR_FAN_4  0x17 /* enum */
 #define       MC_CMD_SENSOR_ENTRY_OFST 4
 #define       MC_CMD_SENSOR_ENTRY_LEN 8
 #define       MC_CMD_SENSOR_ENTRY_LO_OFST 4

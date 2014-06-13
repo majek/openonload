@@ -227,6 +227,11 @@ static int oo_pipe_unlock(ci_netif* ni, struct oo_pipe* p, int lock, int wake)
 #endif /* OO_PIPE_LOCKLESS */
 
 
+/* Amount of space left in the pipe for writing. */
+#define oo_pipe_space(p)                                        \
+  (OO_PIPE_BUF_SIZE * (p)->bufs_num - oo_pipe_data_len(p))
+
+
 /* Update 'offset' of the _op pointer and may be shift to the new buffer idx */
 /* question kostik: should we write all with expressions w/o if */
 #define pipe_buf_next(_ni, _p, _op, _offset)                            \
@@ -253,8 +258,10 @@ ci_inline void __oo_pipe_wake_peer(ci_netif* ni, struct oo_pipe* p,
   if( wake & CI_SB_FLAG_WAKE_TX )
     ++p->b.sleep_seq.rw.tx;
   ci_mb();
-  if( p->b.wake_request & wake )
+  if( p->b.wake_request & wake ) {
+    p->b.sb_flags |= wake;
     citp_waitable_wakeup(ni, &p->b);
+  }
 }
 
 
@@ -280,10 +287,107 @@ ci_inline char* pipe_get_point(struct oo_pipe *p, ci_netif* ni,
 }
 
 
-int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
-                 const struct iovec *iov,
-                 size_t iovlen CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+ci_inline int do_copy_read(void* to, const void* from, int n_bytes
+                           CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
+#ifdef __KERNEL__
+  if( addr_spc != CI_ADDR_SPC_KERNEL )
+    return copy_to_user(to, from, n_bytes) != 0;
+#endif
+  memcpy(to, from, n_bytes);
+  return 0;
+}
+
+
+ci_inline int do_copy_write(void* to, const void* from, int n_bytes
+                            CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+{
+#ifdef __KERNEL__
+  if( addr_spc != CI_ADDR_SPC_KERNEL )
+    return copy_from_user(to, from, n_bytes) != 0;
+#endif
+  memcpy(to, from, n_bytes);
+  return 0;
+}
+
+
+static int oo_pipe_read_wait(ci_netif* ni, struct oo_pipe* p)
+{
+  ci_uint64 sleep_seq;
+  int rc;
+
+  if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) ) {
+  closed_double_check:
+    ci_mb();
+    return oo_pipe_data_len(p) ? 1 : 0;
+  }
+
+  LOG_PIPE("%s: not enough data in the pipe",
+           __FUNCTION__);
+
+  if( p->aflags & (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_READER_SHIFT) ) {
+    LOG_PIPE("%s: O_NONBLOCK is set so exit", __FUNCTION__);
+    CI_SET_ERROR(rc, EAGAIN);
+    return rc;
+  }
+
+#ifndef __KERNEL__
+  if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_PIPE_RECV) ) {
+    ci_uint64 now_frc, start_frc;
+    ci_uint64 schedule_frc;
+    citp_signal_info* si = citp_signal_get_specific_inited();
+
+    ci_frc64(&now_frc);
+    start_frc = now_frc;
+    schedule_frc = now_frc;
+    do {
+      rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
+                                           false, NULL, si);
+      if( rc < 0 ) {
+        CI_SET_ERROR(rc, -rc);
+        return rc;
+      }
+      if( oo_pipe_data_len(p) )
+        return 1;
+      if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) )
+        goto closed_double_check;
+      ci_frc64(&now_frc);
+    } while( now_frc - start_frc < ni->state->spin_cycles );
+  }
+#endif
+
+  while( 1 ) {
+    sleep_seq = p->b.sleep_seq.all;
+    ci_rmb();
+    if( oo_pipe_data_len(p) )
+      return 1;
+    if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) )
+      goto closed_double_check;
+
+    LOG_PIPE("%s [%u]: going to sleep seq=(%u, %u) data_len=%d aflags=%x",
+             __FUNCTION__, p->b.bufid,
+             ((ci_sleep_seq_t *)(&sleep_seq))->rw.rx,
+             ((ci_sleep_seq_t *)(&sleep_seq))->rw.tx,
+             oo_pipe_data_len(p), p->aflags);
+    rc = ci_sock_sleep(ni, &p->b, CI_SB_FLAG_WAKE_RX, 0, sleep_seq, 0);
+    LOG_PIPE("%s[%u]: woke up: rc=%d data_len=%d aflags=%x", __FUNCTION__,
+             p->b.bufid, rc, (int)oo_pipe_data_len(p), p->aflags);
+    if( rc < 0 ) {
+      LOG_PIPE("%s: sleep rc = %d", __FUNCTION__, rc);
+      CI_SET_ERROR(rc, -rc);
+      return rc;
+    }
+    if( oo_pipe_data_len(p) )
+      return 1;
+  }
+}
+
+
+int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
+                 const struct iovec *iov, size_t iovlen
+                 CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+{
+  int bytes_available;
   int rc;
   int i;
 
@@ -292,100 +396,28 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
   ci_assert(iov);
   ci_assert_gt(iovlen, 0);
 
-  LOG_PIPE("%s[%u]: ENTER %d", __FUNCTION__, p->b.bufid, oo_pipe_data_len(p));
-
+  LOG_PIPE("%s[%u]: ENTER data_len=%d aflags=%x",
+           __FUNCTION__, p->b.bufid, oo_pipe_data_len(p), p->aflags);
   pipe_dump(p);
 
-reread:
-  /* depending on the non-block status we should or should not
-   * sleep */
-  if( ! oo_pipe_data_len(p) ) {
-    if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) ) {
-      /* double-check to avoid a race as we have no locks */
-      ci_mb();
-      if( oo_pipe_data_len(p) )
-        goto data;
-      rc = 0;
-      goto out;
-    }
-
-    LOG_PIPE("%s: not enough data in the pipe",
-             __FUNCTION__);
-
-    if ( ~p->aflags & (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_READER_SHIFT) ) {
-      ci_uint64 sleep_seq;
-      
-#ifndef __KERNEL__
-      if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_PIPE_RECV) ) {
-        ci_uint64 now_frc, start_frc;
-        ci_uint64 schedule_frc;
-        citp_signal_info* si = citp_signal_get_specific_inited();
-
-        /* the right place to spin */
-        ci_frc64(&now_frc);
-        start_frc = now_frc;
-
-        /* call spinloop_pause first couple of times */
-        schedule_frc = now_frc;
-        do {
-          rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
-                                               false, NULL, si);
-          if( rc < 0 ) {
-            CI_SET_ERROR(rc, -rc);
-            goto out;
-          }
-
-          if ( oo_pipe_data_len(p) )
-            goto data;
-          if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) )
-            goto reread;
-
-          ci_frc64(&now_frc);
-        } while( now_frc - start_frc < ni->state->spin_cycles );
-      }        /* spin code end */
-#endif
-
-      for (;;) {
-        sleep_seq = p->b.sleep_seq.all;
-        ci_rmb();
-
-        /* check the condition after saving sleep_seq! */
-        if( oo_pipe_data_len(p) )
-          goto data;
-        if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) )
-          goto reread;
-
-        LOG_PIPE("%s [%u]: going to sleep seq=(%u, %u) data=%d",
-                 __FUNCTION__, p->b.bufid,
-                 ((ci_sleep_seq_t *)(&sleep_seq))->rw.rx,
-                 ((ci_sleep_seq_t *)(&sleep_seq))->rw.tx,
-                 oo_pipe_data_len(p));
-
-        rc = ci_sock_sleep(ni, &p->b, CI_SB_FLAG_WAKE_RX, 0, sleep_seq, 0);
-        if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) )
-          /* no lock taken */
-          goto reread;
-
-        LOG_PIPE("%s[%u]: woke up: rc=%d data=%d", __FUNCTION__,
-                 p->b.bufid, rc, (int)oo_pipe_data_len(p));
-        if( rc < 0 ) {
-          LOG_PIPE("%s: sleep rc = %d", __FUNCTION__, rc);
-          CI_SET_ERROR(rc, -rc);
-          return -1;
-        }
-        if( oo_pipe_data_len(p) )
-          goto data;
-        LOG_PIPE("%s[%u]: sleep again", __FUNCTION__, p->b.bufid);
+  bytes_available = oo_pipe_data_len(p);
+  if( bytes_available == 0 ) {
+    /* Do not block if read called with count=0 */
+    int count_is_zero = 1;
+    for( i = 0; i < iovlen; ++i ) {
+      if( iov[i].iov_len != 0 ) {
+        count_is_zero = 0;
+        break;
       }
     }
-    else {
-      LOG_PIPE("%s: O_NONBLOCK is set so exit", __FUNCTION__);
-      CI_SET_ERROR(rc, EAGAIN);
+    if( count_is_zero )
+      return 0;
+
+    if( (rc = oo_pipe_read_wait(ni, p)) != 1 )
       goto out;
-    }
+    bytes_available = oo_pipe_data_len(p);
   }
 
-data:
   rc = ci_sock_lock(ni, &p->b);
 #ifdef __KERNEL__
   if( rc < 0 )
@@ -401,14 +433,18 @@ data:
                                         p->read_ptr.offset);
       int burst = CI_MIN(OO_PIPE_BUF_SIZE - p->read_ptr.offset,
                          end - start);
-      burst = CI_MIN(burst, oo_pipe_data_len(p) - rc);
-      memcpy(start, read_point, burst);
+      burst = CI_MIN(burst, bytes_available - rc);
+      if(CI_UNLIKELY( do_copy_read(start, read_point, burst
+                                   CI_KERNEL_ARG(addr_spc)) != 0 )) {
+        rc = -EFAULT;
+        goto wake_and_unlock_out;
+      }
 
       rc += burst;
       start += burst;
       pipe_buf_next(ni, p, read, burst);
 
-      if( oo_pipe_data_len(p) == rc )
+      if( bytes_available == rc )
         goto read;
     }
   }
@@ -416,10 +452,11 @@ data:
 read:
   ci_wmb();
   p->bytes_removed += rc;
+wake_and_unlock_out:
   __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_TX);
   ci_sock_unlock(ni, &p->b);
 out:
-  LOG_PIPE("%s[%u]: EXIT", __FUNCTION__, p->b.bufid);
+  LOG_PIPE("%s[%u]: EXIT return %d", __FUNCTION__, p->b.bufid, rc);
   return rc;
 }
 
@@ -507,8 +544,8 @@ static int oo_pipe_wait_write(ci_netif* ni, struct oo_pipe* p)
  *
  * Warning!  Grabs the stack lock and possibly socket lock).
  */
-ci_inline int oo_pipe_maybe_claim_buffers(ci_netif* ni, struct oo_pipe* p,
-                                          int pipe_lock_required)
+static int oo_pipe_maybe_claim_buffers(ci_netif* ni, struct oo_pipe* p,
+                                       int pipe_lock_required)
 {
   int rc;
 
@@ -619,7 +656,11 @@ rewrite:
                (int)(end - start),
                (int)(oo_pipe_space(p) - add) - OO_PIPE_BUF_SIZE);
       if( burst ) {
-        memcpy(write_point, start, burst);
+        if(CI_UNLIKELY( do_copy_write(write_point, start, burst
+                                      CI_KERNEL_ARG(addr_spc)) != 0 )) {
+          rc = -EFAULT;
+          goto wake_and_unlock_out;
+        }
 
         /* local move */
         add += burst;
@@ -688,14 +729,13 @@ rewrite:
   total_bytes += add;
   ci_wmb();
   p->bytes_added += add;
+  rc = total_bytes;
+ wake_and_unlock_out:
   __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_RX);
   ci_sock_unlock(ni, &p->b);
-  rc = total_bytes;
-  goto out;
 
 out:
-  LOG_PIPE("%s[%u]: EXIT return %d", __FUNCTION__,
-           p->b.bufid, total_bytes);
+  LOG_PIPE("%s[%u]: EXIT return %d", __FUNCTION__, p->b.bufid, rc);
   return rc;
 
  sent_not_locked:
@@ -710,8 +750,8 @@ out:
  * index of the assigned buffers (it's assumed that they are
  * allocated as a continous chunk
  */
-ci_inline void oo_pipe_assign_buffers(struct oo_pipe* p,
-                                      int num, ci_uint32 bufs_start)
+static void oo_pipe_assign_buffers(struct oo_pipe* p,
+                                   int num, ci_uint32 bufs_start)
 {
   int i;
   ci_uint32 insert_bufid;
@@ -745,7 +785,7 @@ ci_inline void oo_pipe_assign_buffers(struct oo_pipe* p,
              insert_bufid + num, p->bufs_num + num);
     for( i = p->bufs_num - 1; i >= insert_bufid; i-- )
       p->buffer_idxs[i + num] =  p->buffer_idxs[i];
-    if( p->read_ptr.bufid > insert_bufid )
+    if( p->read_ptr.bufid >= insert_bufid )
       p->read_ptr.bufid += num;
   }
 

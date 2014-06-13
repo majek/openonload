@@ -152,6 +152,10 @@ extern void sockets_watch(void);
 **********************************************************************/
 
 extern int /*rc*/ libstack_init(sa_sigaction_t* signal_handlers);
+extern void libstack_stack_mapping_print(void);
+extern void libstack_pid_mapping_print(void);
+extern int libstack_env_print(void);
+extern int libstack_affinities_print(void);
 extern void libstack_end(void);
 extern int libstack_netif_lock(ci_netif* ni);
 extern void libstack_netif_unlock(ci_netif* ni);

@@ -31,7 +31,6 @@
  */
 
 #define EFX_WORKAROUND_ALWAYS(efx) 1
-#define EFX_WORKAROUND_NEVER(efx) 0
 #define EFX_WORKAROUND_FALCON_A(efx) (efx_nic_rev(efx) <= EFX_REV_FALCON_A1)
 #define EFX_WORKAROUND_FALCON_B(efx) (efx_nic_rev(efx) == EFX_REV_FALCON_B0)
 #define EFX_WORKAROUND_FALCON_AB(efx) (efx_nic_rev(efx) <= EFX_REV_FALCON_B0)

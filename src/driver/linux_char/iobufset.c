@@ -149,7 +149,7 @@ iobufset_rm_mmap(struct efrm_resource* ors, unsigned long* bytes,
 }
 
 #if defined CI_HAVE_OS_NOPAGE
-unsigned
+unsigned long
 efab_iobufset_resource_nopage(struct iobufset_resource* iobrs, void* opaque, 
                               unsigned long offset, unsigned long map_size)
 {
@@ -159,9 +159,8 @@ efab_iobufset_resource_nopage(struct iobufset_resource* iobrs, void* opaque,
 
   return efhw_iopage_pfn(&iobrs->bufs[page_offset]);
 }
-EXPORT_SYMBOL(efab_iobufset_resource_nopage);
 
-static unsigned
+static unsigned long
 iobufset_rm_nopage(struct efrm_resource* ors, void* opaque, 
 				   unsigned long offset,
 				   unsigned long map_size)

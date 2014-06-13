@@ -207,6 +207,7 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts,
 }
 
 
+#if CI_CFG_FD_CACHING
 /* Uncache an EP.
  *  netif: The netif we're uncaching from
  *  ts:    The state we're uncachine
@@ -243,72 +244,6 @@ static void uncache_ep (ci_netif *netif, ci_tcp_state *ts)
 }
 
 
-
-int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts, int can_block)
-{
-  ci_assert(netif);
-  ci_assert(ts);
-  ci_assert(ci_netif_is_locked(netif));
-  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
-
-  if( ts->s.b.state == CI_TCP_CLOSED ) {
-    LOG_TV(ci_log(LPF "%d CLOSE already closed", S_FMT(ts)));
-    if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN )
-      ci_tcp_state_free(netif, ts);
-    return 0;
-  }
-
-  if( tcp_rcv_usr(ts) != 0 ) {
-    /* Linux specific behaviour: send reset and ditch
-     * connection if all rx data not read.
-     */
-    CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_CLOSE(netif);
-    LOG_TV(log(LPF "%d CLOSE sent RST, as rx data present added %d "
-               "delivered %d tcp_rcv_usr=%d", S_FMT(ts), ts->rcv_added,
-               ts->rcv_delivered, tcp_rcv_usr(ts)));
-    ci_tcp_send_rst(netif, ts);
-    goto drop;
-  }
-  if( (ts->s.s_flags & CI_SOCK_FLAG_LINGER) && ts->s.so.linger == 0 ) {
-    /* TCP abort, drop connection, send reset only if connected,
-    ** rfc793 p62.
-    */
-    CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_DATA(netif);
-    if( ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
-      LOG_TV(log(LPF "%d ABORT sent reset", S_FMT(ts)));
-      ci_tcp_send_rst(netif, ts);
-    }
-    goto drop;
-  }
-
-  if( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
-      (ts->s.b.state == CI_TCP_CLOSING)   ||
-      (ts->s.b.state == CI_TCP_LAST_ACK) )
-    return 0;
-
-  if( ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
-    int rc;
-    rc = __ci_tcp_shutdown(netif, ts, SHUT_RDWR, can_block);
-
-    if( (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ) {
-      if( ts->s.b.state == CI_TCP_CLOSED )
-        ci_tcp_state_free(netif, ts);
-      else if( ts->s.s_flags & CI_SOCK_FLAG_LINGER &&
-          ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) ) {
-        ci_assert(ts->s.so.linger != 0);
-        ci_bit_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_IN_SO_LINGER_BIT);
-      }
-    }
-    return rc;
-  }
-
- drop:
-  LOG_TC(log(LPF "%d drop connection in %s state", S_FMT(ts), 
-              ci_tcp_state_str(ts->s.b.state)));
-  ci_tcp_drop(netif, ts, ECONNRESET);
-  return 0;
-}
-
 static void
 uncache_list (ci_netif *netif, ci_ni_dllist_t *thelist)
 {
@@ -343,6 +278,82 @@ uncache_list (ci_netif *netif, ci_ni_dllist_t *thelist)
 #endif /* __KERNEL__ */
   }
 }
+#endif
+
+
+int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts, int can_block)
+{
+  ci_assert(netif);
+  ci_assert(ts);
+  ci_assert(ci_netif_is_locked(netif));
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+
+  if( ts->s.b.state == CI_TCP_CLOSED ) {
+    LOG_TV(ci_log(LPF "%d CLOSE already closed", S_FMT(ts)));
+    if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN )
+      ci_tcp_state_free(netif, ts);
+    return 0;
+  }
+
+  if( tcp_rcv_usr(ts) != 0 ) {
+    /* Linux specific behaviour: send reset and ditch
+     * connection if all rx data not read.
+     */
+    CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_CLOSE(netif);
+    LOG_TV(log(LPF "%d CLOSE sent RST, as rx data present added %u "
+               "delivered %u tcp_rcv_usr=%u", S_FMT(ts), ts->rcv_added,
+               ts->rcv_delivered, tcp_rcv_usr(ts)));
+    ci_tcp_send_rst(netif, ts);
+    goto drop;
+  }
+  if( (ts->s.s_flags & CI_SOCK_FLAG_LINGER) && ts->s.so.linger == 0 ) {
+    /* TCP abort, drop connection, send reset only if connected,
+    ** rfc793 p62.
+    */
+    CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_DATA(netif);
+    if( ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
+      LOG_TV(log(LPF "%d ABORT sent reset", S_FMT(ts)));
+      ci_tcp_send_rst(netif, ts);
+    }
+    goto drop;
+  }
+
+  if( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
+      (ts->s.b.state == CI_TCP_CLOSING)   ||
+      (ts->s.b.state == CI_TCP_LAST_ACK) )
+    return 0;
+
+  if( ! (ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED) ) {
+    int rc;
+
+    if( ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ ) {
+      ci_tcp_send_rst(netif, ts);
+      ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
+      ci_tcp_state_free(netif, ts);
+      return 0;
+    }
+
+    rc = __ci_tcp_shutdown(netif, ts, SHUT_RDWR, can_block);
+
+    if( (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ) {
+      if( ts->s.b.state == CI_TCP_CLOSED )
+        ci_tcp_state_free(netif, ts);
+      else if( ts->s.s_flags & CI_SOCK_FLAG_LINGER &&
+          ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) ) {
+        ci_assert(ts->s.so.linger != 0);
+        ci_bit_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_IN_SO_LINGER_BIT);
+      }
+    }
+    return rc;
+  }
+
+ drop:
+  LOG_TC(log(LPF "%d drop connection in %s state", S_FMT(ts), 
+              ci_tcp_state_str(ts->s.b.state)));
+  ci_tcp_drop(netif, ts, ECONNRESET);
+  return 0;
+}
+
 
 #ifdef __KERNEL__
 void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
@@ -351,7 +362,6 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
 
   /* we are going to lock/unlock stacks, so do not call this from interrupt
    * context */
-  ci_assert(!in_interrupt() || tls->acceptq_n_alien == 0);
   ci_assert(ci_netif_is_locked(netif));
 
   /* clear up synrecv queue */
@@ -383,7 +393,6 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
   while( ci_tcp_acceptq_not_empty(tls) ) {
     citp_waitable* w;
     ci_tcp_state* ats;    /* accepted ts */
-    ci_netif *ani;        /* netif of the accepted socket */
     tcp_helper_resource_t *thr = NULL;
 
     w = ci_tcp_acceptq_get(netif, tls);
@@ -391,6 +400,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
     if( w->state == CI_TCP_STATE_ALIEN ) {
       oo_sp sp;
       ci_uint32 stack_id;
+      ci_netif *ani;        /* netif of the accepted socket */
 
 #ifdef NDEBUG
       if( in_interrupt() ) {
@@ -411,6 +421,9 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
       citp_waitable_obj_free(netif, w);
       /* do not use w or aep any more */
 
+      LOG_TV(log("%s: alien socket %d:%d in accept queue %d:%d", __FUNCTION__,
+                 stack_id, OO_SP_FMT(sp), NI_ID(netif), S_FMT(tls)));
+
       if( efab_thr_table_lookup(NULL, stack_id,
                                 EFAB_THR_TABLE_LOOKUP_CHECK_USER,
                                 &thr) != 0 ) {
@@ -421,26 +434,35 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
       }
       ani = &thr->netif;
 
+      if( !(SP_TO_WAITABLE(ani, sp)->state & CI_TCP_STATE_TCP) ||
+          SP_TO_WAITABLE(ani, sp)->state == CI_TCP_LISTEN ) {
+        LOG_U(log("%s: listening socket %d:%d has non-TCP "
+                  "acceptq memeber %d:%d", __FUNCTION__,
+                  netif->state->stack_id, tls->s.b.bufid, stack_id, sp));
+        continue;
+      }
       ats = SP_TO_TCP(ani, sp);
 
-      ci_netif_unlock(netif);
-      ci_netif_lock_fixme(ani);
+      /* Do not remove IN_ACCEPTQ flag: ci_tcp_close should know that we
+       * are sending RST, not FIN. */
+      ci_bit_clear(&ats->s.b.sb_aflags, CI_SB_AFLAG_ORPHAN_BIT);
+      efab_tcp_helper_close_endpoint(thr, sp);
+      efab_thr_release(thr);
+      continue;
     }
-    else {
-      ani = netif;
-      ats = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
-    }
-    ci_assert(ats->s.b.state & CI_TCP_STATE_TCP);
-    ci_assert(ats->s.b.state != CI_TCP_LISTEN);
 
-    ci_assert(ats->cached_on_fd != -1 ||
-              ats->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN);
+    ats = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
+
+    ci_assert(ci_tcp_is_cached(ats) ||
+              (ats->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
     ci_assert(ats->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
 
+#if CI_CFG_FD_CACHING
     if( ats->cached_on_fd != -1 )  {
       LOG_EP(ci_log ("listen_shutdown - uncache from acceptq"));
       uncache_ep(netif, ats);
     }
+#endif
 
     /* Remove acceptq flag to allow state free on drop */
     ci_bit_clear(&ats->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
@@ -448,16 +470,10 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
     if( ats->s.b.state != CI_TCP_CLOSED &&
         ats->s.b.state != CI_TCP_TIME_WAIT ) {
       LOG_TV(log("%s: send reset to accepted connection", __FUNCTION__));
-      ci_tcp_send_rst(ani, ats);
+      ci_tcp_send_rst(netif, ats);
     }
 
-    ci_tcp_drop(ani, ats, ECONNRESET);
-    if( thr != NULL ) {
-      ci_netif_unlock(ani);
-      /* release the ref taken by efab_thr_table_lookup */
-      efab_thr_release(thr);
-      ci_netif_lock_fixme(netif);
-    }
+    ci_tcp_drop(netif, ats, ECONNRESET);
   }
 
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
@@ -505,6 +521,7 @@ void __ci_tcp_listen_shutdown(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_E(ci_log("%s: [%d:%d] shutdown(os_sock) failed %d",
                  __FUNCTION__, NI_ID(netif), S_FMT(tls), rc));
 
+#if CI_CFG_FD_CACHING
   /* Above we uncached and closed EPs on the accept q.  While an EP is cached
    * it will move across three queues: the pending queue, the cached queue,
    * then the accept queue.  Here we ensure that any EPs on cached on the
@@ -514,6 +531,7 @@ void __ci_tcp_listen_shutdown(ci_netif* netif, ci_tcp_socket_listen* tls,
   uncache_list (netif, &tls->epcache_cache);
   LOG_EP(ci_log ("listen_shutdown - uncache all on pending list"));
   uncache_list (netif, &tls->epcache_pending);
+#endif
 }
 
 
@@ -547,6 +565,7 @@ void ci_tcp_all_fds_gone(ci_netif* netif, ci_sock_cmn* s)
     if( s->b.state & CI_TCP_STATE_TIMEOUT_ORPHAN )
       ci_netif_fin_timeout_enter(netif, ts);
 
+#if CI_CFG_FD_CACHING
     if( ts->cached_on_fd != -1 ) {
       LOG_EP(ci_log ("Uncaching ep %d because all_fds_gone",
 		     ts->cached_on_fd));
@@ -554,9 +573,12 @@ void ci_tcp_all_fds_gone(ci_netif* netif, ci_sock_cmn* s)
     }
 
     /* How can a socket be in the accept queue and not be an orphan?
-     * A: Because it is cached...
+     * A1: Because it is cached, no need to call ci_tcp_close()
+     * A2: because it is alien socket in accept queue.  We should not remove
+     * IN_ACCEPTQ bit: ci_tcp_close() must send RST instead of FIN.
      */
     if( ! (ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ) )
+#endif
       /* This frees [ts] if appropriate. */
       ci_tcp_close(netif, ts, 0);
   }

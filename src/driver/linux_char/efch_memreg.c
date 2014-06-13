@@ -35,7 +35,7 @@ static void efch_memreg_free(struct efch_memreg *mr)
 {
   int i;
   if (mr->mapped)
-    efrm_pd_dma_unmap(mr->pd, mr->n_pages,
+    efrm_pd_dma_unmap(mr->pd, mr->n_pages, 0,
                       mr->dma_addrs, sizeof(mr->dma_addrs[0]),
                       &mr->buf_tbl_alloc);
   for (i = 0; i < mr->n_pages; ++i)
@@ -141,7 +141,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     goto fail3;
   }
 
-  rc = efrm_pd_dma_map(pd, mr->n_pages,
+  rc = efrm_pd_dma_map(pd, mr->n_pages, 0,
                        mr->pages, sizeof(mr->pages[0]),
                        mr->dma_addrs, sizeof(mr->dma_addrs[0]),
                        (void *)(ci_uintptr_t)alloc->in_addrs_out_ptr,

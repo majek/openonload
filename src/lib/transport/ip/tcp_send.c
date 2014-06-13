@@ -83,7 +83,7 @@ static void ci_tcp_tx_advance_nagle(ci_netif* ni, ci_tcp_state* ts)
   ci_ip_pkt_queue* sendq = &ts->send;
   ci_ip_pkt_fmt* pkt = NULL;
 
-  ci_assert(ci_ip_queue_is_valid(ni, sendq, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(ni, sendq));
   ci_assert(! ci_ip_queue_is_empty(sendq));
 
   if( (sendq->num != 1) | (ci_tcp_inflight(ts) == 0) |
@@ -140,7 +140,7 @@ int ci_tcp_sendmsg_fill_pkt(ci_netif* ni, struct tcp_send_info* sinf,
 {
   /* Initialise and fill a packet buffer from an iovec. */
   int n;
-  ci_ip_pkt_fmt* pkt = oo_pkt_filler_next_pkt(ni, &sinf->pf);
+  ci_ip_pkt_fmt* pkt = oo_pkt_filler_next_pkt(ni, &sinf->pf, sinf->stack_locked);
 
   ci_assert(! ci_iovec_ptr_is_empty_proper(piov));
   ci_tcp_tx_pkt_init(pkt, hdrlen, maxlen);
@@ -496,7 +496,7 @@ static int ci_tcp_sendmsg_free_pkt_list(ci_netif* ni, ci_tcp_state* ts,
 
   if( ! netif_locked && ! ci_netif_trylock(ni) ) {
     do {
-      pkt = PKT_NNL(ni, pkt_list);
+      pkt = PKT(ni, pkt_list);
       pkt_list = pkt->next;
       /* ?? TODO: cope with these cases */
       ci_assert_equal(pkt->refcount, 1);
@@ -728,7 +728,7 @@ static int ci_tcp_sendmsg_no_pkt_buf(ci_netif* ni, ci_tcp_state* ts,
 {
   ci_ip_pkt_fmt* pkt;
   do {
-    pkt = ci_netif_pkt_alloc_nonb(ni, sinf->stack_locked);
+    pkt = ci_netif_pkt_alloc_nonb(ni);
     if( pkt ) 
       oo_pkt_filler_add_pkt(&sinf->pf, pkt);
     else
@@ -791,7 +791,7 @@ static int ci_tcp_sendmsg_no_pkt_buf(ci_netif* ni, ci_tcp_state* ts,
         return -1;
       }
       do {
-        pkt = ci_netif_pkt_alloc_nonb(ni, CI_FALSE);
+        pkt = ci_netif_pkt_alloc_nonb(ni);
         if( pkt ) 
           oo_pkt_filler_add_pkt(&sinf->pf, pkt);
         else
@@ -1398,6 +1398,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
   while( j < msg->msg.msghdr.msg_iovlen ) {
     pkt = (ci_ip_pkt_fmt*)msg->msg.iov[j].buf;
 
+    ci_assert_equal(pkt->stack_id, ni->state->stack_id);
     ci_assert(msg->msg.iov[j].iov_base != NULL);
     ci_assert_gt(msg->msg.iov[j].iov_len, 0);
     ci_assert_le(msg->msg.iov[j].iov_len, eff_mss);
@@ -1407,7 +1408,8 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
                  msg->msg.iov[j].iov_len, 
                  ((char*)pkt) + CI_CFG_PKT_BUF_SIZE);
       
-    if( msg->msg.iov[j].iov_len <= 0 || 
+    if( pkt->stack_id != ni->state->stack_id ||
+        msg->msg.iov[j].iov_len <= 0 || 
         msg->msg.iov[j].iov_len > eff_mss || 
         (char*)msg->msg.iov[j].iov_base < 
         PKT_START(pkt) + ts->outgoing_hdrs_len ||

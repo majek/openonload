@@ -24,10 +24,6 @@
 #define oo_pipe_data_len(_p) \
   ((_p)->bytes_added - (_p)->bytes_removed)
 
-/* Amount of space left in the pipe */
-#define oo_pipe_space(_p) \
-  (OO_PIPE_BUF_SIZE * p->bufs_num - (oo_pipe_data_len(_p)))
-
 /* if we don't have a free pipe buffer to use we
  * call this 'no space'. This is close to linux kernel
  * behaviour except they think that pipe is full if

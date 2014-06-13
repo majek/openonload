@@ -78,6 +78,7 @@ typedef struct tcp_helper_resource_s {
 #define OO_TRUSTED_LOCK_AWAITING_FREE     0x2
 #define OO_TRUSTED_LOCK_NEED_POLL_PRIME   0x4
 #define OO_TRUSTED_LOCK_CLOSE_ENDPOINT    0x8
+#define OO_TRUSTED_LOCK_RESET_STACK       0x10
   volatile unsigned      trusted_lock;
 
   /*! Link for global list of stacks. */
@@ -112,6 +113,7 @@ typedef struct tcp_helper_resource_s {
   atomic_t                 timer_running;
   /*! timer "process" data: tasklet or workqueue */
   union {
+#ifdef CONFIG_SFC_RESOURCE_VF
     /*! timer is workqueue */
     struct {
       struct workqueue_struct *wq;
@@ -119,6 +121,7 @@ typedef struct tcp_helper_resource_s {
       /*! onload:pretty_name-timer */
       char                     name[7 + CI_CFG_STACK_NAME_LEN+8 + 7];
     } wq;
+#endif
     /*! timer is tasklet */
     struct {
       struct tasklet_struct  tasklet;
@@ -145,8 +148,12 @@ typedef struct tcp_helper_resource_s {
    *    - ep_tobe_closed
    *    - wakeup_list
    *    - n_ep_closing_refs
+   *    - intfs_to_reset 
    */
   ci_irqlock_t          lock;
+
+  /* Bit mask of intf_i that need resetting by the lock holder */
+  unsigned              intfs_to_reset;
 
   int                   mem_mmap_bytes;
   int                   io_mmap_bytes;
@@ -161,6 +168,11 @@ typedef struct tcp_helper_resource_s {
   void (*callback_fn)(void *arg, int why);
 
   struct tcp_helper_nic      nic[CI_CFG_MAX_INTERFACES];
+
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  /* shmid of packet set */
+  ci_int32             *pkt_shm_id;
+#endif
 } tcp_helper_resource_t;
 
 
@@ -219,9 +231,7 @@ struct tcp_helper_endpoint_s {
 
   /*!< OS socket that backs this user-level socket.  May be NULL (not all
    * socket types have an OS socket).
-   * OS socket removal should be protected by thr lock, since it may be
-   * accessed simultaneously by tcp_helper_endpoint_set_filters() and
-   * ci_tcp_connect_alien().
+   * os_socket should be set only when aflags & OO_THR_EP_AFLAG_ATTACHED
    */
   struct oo_file_ref* os_socket;
 
@@ -240,11 +250,10 @@ struct tcp_helper_endpoint_s {
   ** only. */
   ci_addr_spc_t addr_spc;
 
-  /*! Atomic flags not visible for UL.
-   * TODO: move addr_spc here. */
+  /*! Atomic endpoint flags not visible for UL. */
   volatile ci_uint32 aflags;
-  /*! Used for pipe and, potentially, for IP-loopback.*/
-#define OO_THR_EP_AFLAG_PEER_CLOSED 0x1
+#define OO_THR_EP_AFLAG_ATTACHED    0x1
+#define OO_THR_EP_AFLAG_PEER_CLOSED 0x2 /*!< Used for pipe .*/
 
 
 

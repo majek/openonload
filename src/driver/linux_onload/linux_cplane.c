@@ -1084,7 +1084,7 @@ cicpos_mac_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
                                     0 != sync->source_prot? "P": "p",
                                     0 != sync->recent_sync? "R": "r");
                     len += snprintf(buf+len, bufsz-len, " v%d rc %d",
-                                    row->version, -row->rc);
+                                    row->version, (ci_int16)row->rc);
                     *(buf + len) = ' ';
                     len = str_end;
                     *(buf + len) = '\n';
@@ -3223,8 +3223,6 @@ cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only)
 	return;
     }
         
-    cicpos_dump_mact(sock, seq, session);
-
     /* We do address resolution updates more often than than route/llap
        etc. updates. */
     if (!mac_only) 
@@ -3238,6 +3236,12 @@ cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only)
 	seq++;
 	cicpos_dump_llapt(sock, seq, session);
     }
+
+    /* MAC table is the largest one, and if we fail to read the full
+     * answer we spoil all the next tables.  So, read it the last. */
+    seq++;
+    cicpos_dump_mact(sock, seq, session);
+
     sock_release(sock);
 
     CICPOS_MAC_STAT_SET_POLLER_LAST_END(control_plane);

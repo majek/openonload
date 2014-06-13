@@ -1,5 +1,9 @@
 	.file	"linux_trampoline_asm.S"
 
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
+#include <linux/autoconf.h>
+#endif
 #include <ci/internal/trampoline.h>
 
 	/* This wraps our replacement for sys_close.  It calls our handler with

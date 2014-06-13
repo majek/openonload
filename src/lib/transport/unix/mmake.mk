@@ -39,6 +39,7 @@ LIB_SRCS	:=			\
 		common_fcntl.c		\
 		trampoline.c		\
 		wqlock.c		\
+		poll_select.c		\
 		debug.c
 
 

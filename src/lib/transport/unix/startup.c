@@ -124,6 +124,10 @@ static void __oo_per_thread_init_thread(struct oo_per_thread* pt)
   if( CITP_OPTS.ul_epoll_spin )
     pt->spinstate |= (1 << ONLOAD_SPIN_EPOLL_WAIT);
 #endif
+  if( CITP_OPTS.sock_lock_buzz )
+    pt->spinstate |= (1 << ONLOAD_SPIN_SOCK_LOCK);
+  if( CITP_OPTS.stack_lock_buzz )
+    pt->spinstate |= (1 << ONLOAD_SPIN_STACK_LOCK);
 }
 
 
@@ -173,6 +177,8 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_PIPE_RECV_SPIN",     pipe_recv_spin);
   DUMP_OPT_INT("EF_PIPE_SEND_SPIN",     pipe_send_spin);
 #endif
+  DUMP_OPT_INT("EF_SOCK_LOCK_BUZZ",     sock_lock_buzz);
+  DUMP_OPT_INT("EF_STACK_LOCK_BUZZ",    stack_lock_buzz);
 #if CI_CFG_USERSPACE_EPOLL
   DUMP_OPT_INT("EF_UL_EPOLL",	        ul_epoll);
   DUMP_OPT_INT("EF_EPOLL_SPIN",	        ul_epoll_spin);
@@ -313,6 +319,13 @@ static void citp_opts_getenv(citp_opts_t* opts)
     opts->tcp_recv_spin = 1;
     opts->tcp_send_spin = 1;
     opts->pkt_wait_spin = 1;
+    opts->sock_lock_buzz = 1;
+    opts->stack_lock_buzz = 1;
+  }
+
+  if( (s = getenv("EF_BUZZ_USEC")) && atoi(s) ) {
+    opts->sock_lock_buzz = 1;
+    opts->stack_lock_buzz = 1;
   }
 
   GET_ENV_OPT_HEX("EF_UNIX_LOG",	log_level);
@@ -339,6 +352,8 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_PIPE_RECV_SPIN",  pipe_recv_spin);
   GET_ENV_OPT_INT("EF_PIPE_SEND_SPIN",  pipe_send_spin);
 #endif
+  GET_ENV_OPT_INT("EF_SOCK_LOCK_BUZZ",  sock_lock_buzz);
+  GET_ENV_OPT_INT("EF_STACK_LOCK_BUZZ", stack_lock_buzz);
 #if CI_CFG_USERSPACE_EPOLL
   GET_ENV_OPT_INT("EF_UL_EPOLL",        ul_epoll);
   GET_ENV_OPT_INT("EF_EPOLL_SPIN",      ul_epoll_spin);
@@ -370,6 +385,58 @@ static void citp_opts_getenv(citp_opts_t* opts)
 }
 
 
+extern char** environ;
+static void citp_opts_validate_env(void)
+{
+#undef CI_CFG_OPTFILE_VERSION
+#undef CI_CFG_OPTGROUP
+#undef CI_CFG_OPT
+
+#define CI_CFG_OPT(env, name, type, doc, bits, group, default, minimum, maximum, pres) env,
+
+  char* ef_names[] = {
+#include <ci/internal/opts_netif_def.h>
+#include <ci/internal/opts_citp_def.h>
+#include <ci/internal/opts_user_def.h>
+    "EF_NAME",
+    NULL
+  };
+  char** env_name;
+  int i;
+  int len;
+  char* s;
+  
+  s = getenv("EF_VALIDATE_ENV");
+  if( s ) {
+    char* s_end;
+    long v;
+    v = strtol(s, &s_end, 0);
+    
+    if( ! s_end )
+      ci_log("Invalid option for EF_VALIDATE_ENV: \"%s\"", s);
+    else if( ! v )
+      return;
+  }
+    
+  env_name = environ;
+  while( *env_name != NULL ) {
+    
+    if( ! strncmp(*env_name, "EF_", 3) ) {
+      len = strchrnul(*env_name, '=') - *env_name;        
+      for( i = 0;  ef_names[i]; ++i ) {
+        if( strlen(ef_names[i]) == len &&
+            ! strncmp(ef_names[i], *env_name, len) )
+          break;
+      }
+      
+      if( ! ef_names[i] )
+        ci_log("Unknown option \"%s\" identified", *env_name);
+    }
+    env_name++;
+  }
+}
+
+
 static int
 citp_cfg_init(void)
 {
@@ -388,6 +455,7 @@ citp_transport_init(void)
 
   citp_get_process_name();
   citp_setup_logging_prefix();
+  citp_opts_validate_env();
 
   CITP_OPTS.load_env = 1;
   if( (s = getenv("EF_LOAD_ENV")) )

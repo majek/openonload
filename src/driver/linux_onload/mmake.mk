@@ -15,15 +15,28 @@ ONLOAD_SRCS	:= driver.c linux_cplane.c \
 		bonding.c epoll_device.c terminate.c sigaction_calls.c \
 		onloadfs.c
 
+EFTHRM_SRCS	:= cplane.c cplane_prot.c eplock_resource_manager.c \
+		tcp_helper_endpoint.c tcp_helper_resource.c \
+		tcp_helper_ioctl.c tcp_helper_mmap.c tcp_helper_sleep.c \
+		tcp_filters.c oof_filters.c oof_onload.c \
+		driverlink_filter.c ip_prot_rx.c ip_protocols.c \
+		efabcfg.c onload_nic.c id_pool.c dump_to_user.c iobufset.c
+
+EFTHRM_HDRS	:= oo_hw_filter.h oof_impl.h tcp_filters_internal.h
+
+ifeq ($(LINUX),1)
+EFTHRM_SRCS	+= tcp_helper_linux.c
+endif
 
 # Build host
 CPPFLAGS += -DCI_BUILD_HOST=$(HOSTNAME)
 
 IMPORT		:= $(EFAB_SRCS:%=../efab/%) ../linux/linux_trampoline_asm.S \
-		$(CHAR_SRCS:%=../linux/%)
+		$(EFTHRM_SRCS:%=../../lib/efthrm/%) \
+		$(EFTHRM_HDRS:%=../../lib/efthrm/%)
 
 IP_TARGET      := onload.o
-IP_TARGET_SRCS := $(EFAB_SRCS) $(ONLOAD_SRCS) $(CHAR_SRCS)
+IP_TARGET_SRCS := $(EFAB_SRCS) $(ONLOAD_SRCS) $(EFTHRM_SRCS)
 IP_TARGET_SRCS += linux_trampoline_asm.o
 
 TARGETS		:= $(IP_TARGET)
@@ -55,8 +68,7 @@ obj-m := $(IP_TARGET)
 
 ifeq ($(strip $(CI_PREBUILT_IPDRV)),)
 onload-objs  := $(IP_TARGET_SRCS:%.c=%.o)
-onload-objs  += $(BUILD)/lib/efthrm/lib.a	\
-		$(BUILD)/lib/transport/ip/lib.a	\
+onload-objs  += $(BUILD)/lib/transport/ip/lib.a	\
 		$(BUILD)/lib/citools/lib.a	\
 		$(BUILD)/lib/efabcfg/lib.a \
 		$(BUILD)/lib/ciul/lib.a

@@ -71,7 +71,7 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_rx_to_tx(ci_netif* ni,
     if(CI_LIKELY( OO_PP_NOT_NULL(ni->state->freepkts) ))
       pkt = ci_netif_pkt_get(ni);
     else
-      pkt = ci_netif_pkt_alloc_nonb(ni, CI_TRUE);
+      pkt = ci_netif_pkt_alloc_nonb(ni);
     if( pkt == NULL ) {
       LOG_U(ci_log("%s: can't allocate reply packet", __FUNCTION__));
       CITP_STATS_NETIF_INC(ni, poll_no_pkt);
@@ -478,9 +478,6 @@ ci_inline void ci_tcp_tso_update(ci_netif* ni, ci_tcp_state* ts,
                                  ci_uint32 beg_seq, ci_uint32 end_seq,
                                  ci_uint32 tsval)
 {
-  if( ci_tcp_time_now(ni) - ts->tspaws > ts->rto )
-    CITP_TCP_FASTSTART(ts->faststart_acks = NI_OPTS(ni).tcp_faststart_idle);
-
   if( SEQ_LE(beg_seq, ts->tslastack) &&
 #if CI_CFG_TCP_RFC1323_STRICT_TSO
       SEQ_LT(ts->tslastack, end_seq)
@@ -969,7 +966,7 @@ static void ci_tcp_rx_sack_process(ci_netif* netif, ci_tcp_state* ts,
 
   LOG_TO(log(LPF "%d: %d SACK blocks", S_FMT(ts), rxp->sack_blocks));
 
-  ci_assert(ci_ip_queue_is_valid(netif, &ts->retrans, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, &ts->retrans));
   ci_assert(rxp->flags & CI_TCPT_FLAG_SACK);
   ci_assert(SEQ_LE(tcp_snd_una(ts), rxp->ack));
 
@@ -1031,7 +1028,7 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
   struct ci_netif_poll_state* ps = rxp->poll_state;
   ci_ip_pkt_queue* rtq = &ts->retrans;
 
-  ci_assert(ci_ip_queue_is_valid(netif, rtq, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, rtq));
   ci_assert(!ci_ip_queue_is_empty(rtq));
   ts->retransmits=0;
 
@@ -1383,7 +1380,7 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
 
   ++ts->stats.rx_ooo_fill;
   rob = &ts->rob;
-  ci_assert(ci_ip_queue_is_valid(netif, rob, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, rob));
   id = rob->head;
   pkt = PKT_CHK(netif, id);
   seq = CI_BSWAP_BE32(PKT_TCP_HDR(pkt)->tcp_seq_be32);
@@ -1514,7 +1511,7 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
     ci_tcp_rx_process_fin(netif, ts);
   }
 
-  ci_assert(ci_ip_queue_is_valid(netif, rob, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, rob));
 
   if( ci_tcp_can_use_fast_path(ts) )
     ci_tcp_fast_path_enable(ts);
@@ -1763,7 +1760,7 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
              LNT_PRI_ARGS(netif, ts), TCP_RCV_PRI_ARG(ts), rxp->seq));
 
   ci_assert(OO_SP_IS_NULL(ts->s.local_peer));
-  ci_assert(ci_ip_queue_is_valid(netif, rob, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, rob));
   for( prev_id = OO_PP_NULL, block_id = rob->head;
        OO_PP_NOT_NULL(block_id) &&
        (block_pkt = PKT_CHK(netif, block_id),
@@ -1802,7 +1799,7 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
       ts->dsack_block = prev_id;
     }
     ci_netif_pkt_release_rx(netif, pkt);
-    ci_assert(ci_ip_queue_is_valid(netif, rob, CI_TRUE));
+    ci_assert(ci_ip_queue_is_valid(netif, rob));
     return 1;
   }
 
@@ -2163,8 +2160,10 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   ** should get retransmitted eventually.  But this might be a common
   ** case if the remote stack supports queueing data on a socket before
   ** its connected.
+  ** We enqueue non-SYN data (when TCP_DEFER_ACCEPT is used).
   */
-  LOG_TC(if( pkt->pf.tcp_rx.end_seq != rxp->seq )
+  LOG_TC(if( pkt->pf.tcp_rx.end_seq != rxp->seq &&
+                (tcp->tcp_flags & CI_TCP_FLAG_SYN))
            log(LNT_FMT "SYNRECV (ESTABLISHED) ack had data "
                "pkt=%08x-%08x BINNED", LNT_PRI_ARGS(netif, tls),
                rxp->seq, pkt->pf.tcp_rx.end_seq));
@@ -2646,7 +2645,8 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
     if( handle_syn_sent_opts(netif, ts, rxp) < 0 ) return;
     ts->snd_una = ts->snd_nxt;
     ts->snd_max = ts->snd_nxt + pkt->pf.tcp_rx.window;
-    peer->snd_max = peer->snd_una + ts->s.so.rcvbuf;
+    if( peer->s.b.state != CI_TCP_LISTEN )
+      peer->snd_max = peer->snd_una + ts->s.so.rcvbuf;
 
     goto set_isn;
   }
@@ -3171,9 +3171,14 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     goto mem_pressure;
  continue_mem_pressure:
 
-  /* Record this time so we can tell if the keepalive timer has
-   * expired prematurely */
-  ts->t_last_recv = ci_tcp_time_now(netif);
+  /* Record time to enable detection of keepalive timer expiring early
+   * and heuristics to send ACKs if gap that may have caused sender to
+   * validate its congestion window
+   */
+  if( pkt->pay_len )
+    ts->t_last_recv_payload = ci_tcp_time_now(netif);
+  else
+    ts->t_last_recv_ack = ci_tcp_time_now(netif);
 
   /* Reconfirm ARP entry if necessary. */
   if( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON )
@@ -3723,6 +3728,7 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
   }
 
   if( reset ) {
+    pkt->pay_len -= CI_TCP_HDR_LEN(tcp);
     pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pay_len;
     pkt->pf.tcp_rx.end_seq +=
       (tcp->tcp_flags & CI_TCP_FLAG_SYN) >> CI_TCP_FLAG_SYN_BIT;
@@ -3828,7 +3834,7 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
     /* Record this time so we can tell if the keepalive timer has expired
      * prematurely.
      */
-    ts->t_last_recv = ci_tcp_time_now(ni);
+    ts->t_last_recv_payload = ci_tcp_time_now(ni);
 
     /* Fast receiver path.  Packet contains in-order data, no unexpected
      * flags, and doesn't ack any new data.  Also, we've not got any
@@ -3896,7 +3902,6 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
   LOG_U(log(LPF "%d PAWS failed (fast) tsval=%x tsrecent=%x", S_FMT(ts),
             rxp->timestamp, ts->tsrecent));
   handle_unacceptable_seq(ni, ts, rxp);
-  ci_netif_pkt_release_rx_1ref(ni, pkt);
   rxp->pkt = NULL;
   return 1;  /* finished -- don't deliver to any other socket */
 #endif
@@ -3940,22 +3945,46 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
 
   if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
     ci_sock_cmn *s = ID_TO_SOCK_CMN(netif, pkt->pf.lo.rx_sock);
+    ci_sock_cmn *sender = ID_TO_SOCK_CMN(netif, pkt->pf.lo.tx_sock);
     int bad_recipient = (s == NULL) ||
         (~s->b.state & CI_TCP_STATE_TCP) ||
         (tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16);
 
+    /* Fast path: these sockets are connected */
+    if( !bad_recipient && sender != NULL &&
+        (sender->b.state & CI_TCP_STATE_TCP) &&
+        sender->local_peer == pkt->pf.lo.rx_sock &&
+        s->local_peer == pkt->pf.lo.tx_sock ) {
+      ci_tcp_rx_deliver_to_conn(s, &rxp);
+      return;
+    }
+
+    if( tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16 )
+      bad_recipient = 1;
+
     if( !bad_recipient && s->b.state == CI_TCP_LISTEN &&
         ( s->pkt.ip.ip_saddr_be32 == INADDR_ANY ||
-          s->pkt.ip.ip_saddr_be32 == ip->ip_daddr_be32 ))
+          s->pkt.ip.ip_saddr_be32 == ip->ip_daddr_be32 )) {
+      ci_assert( ((tcp->tcp_flags & CI_TCP_FLAG_SYN) &&
+                  ! (tcp->tcp_flags & CI_TCP_FLAG_ACK)) ||
+                 (! (tcp->tcp_flags & CI_TCP_FLAG_SYN) &&
+                  (tcp->tcp_flags & CI_TCP_FLAG_ACK) &&
+                  (SOCK_TO_TCP(sender)->tcpflags &
+                   CI_TCPT_FLAG_LOOP_DEFERRED)) );
+      /* SYN to listening socket or data with TCP_DEFER_ACCEPT */
       ci_tcp_rx_deliver_to_listen(s, &rxp);
+    }
     else if( !bad_recipient && s->b.state & CI_TCP_STATE_TCP_CONN &&
             ip->ip_daddr_be32 == s->pkt.ip.ip_saddr_be32 &&
             ip->ip_saddr_be32 == s->pkt.ip.ip_daddr_be32 &&
-            tcp->tcp_source_be16 == S_TCP_HDR(s)->tcp_dest_be16)
+            tcp->tcp_source_be16 == S_TCP_HDR(s)->tcp_dest_be16) {
+      /* FIN from now-dead socket or SINACK */
+      ci_assert( (tcp->tcp_flags & (CI_TCP_FLAG_FIN | CI_TCP_FLAG_RST)) ||
+                 ( (tcp->tcp_flags & CI_TCP_FLAG_SYN) &&
+                   (tcp->tcp_flags & CI_TCP_FLAG_ACK) ) );
       ci_tcp_rx_deliver_to_conn(s, &rxp);
+    }
     else {
-      ci_sock_cmn *sender = ID_TO_SOCK_CMN(netif, pkt->pf.lo.tx_sock);
-
       ci_log(FN_FMT "loopback packet to destroyed socket: %d -> %d",
              FN_PRI_ARGS(netif), pkt->pf.lo.tx_sock, pkt->pf.lo.rx_sock);
       if( (sender->b.state & CI_TCP_STATE_TCP_CONN) &&

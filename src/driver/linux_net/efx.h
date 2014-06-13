@@ -29,10 +29,6 @@
 #include "net_driver.h"
 #include "filter.h"
 
-/* PCI IDs */
-#define BETHPAGE_A_P_DEVID      0x0803
-#define SIENA_A_P_DEVID         0x0813
-
 /* Solarstorm controllers use BAR 0 for I/O space and BAR 2(&3) for memory */
 #define EFX_MEM_BAR 2
 
@@ -82,6 +78,9 @@ extern void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue);
 #define EFX_MAX_EVQ_SIZE 16384UL
 #define EFX_MIN_EVQ_SIZE 512UL
 
+/* Maximum number of TCP segments we support for soft-TSO */
+#define EFX_TSO_MAX_SEGS	100
+
 /* The smallest [rt]xq_entries that the driver supports.  RX minimum
  * is a bit arbitrary.  For TX, we must have space for at least 2
  * TSO skbs.
@@ -120,8 +119,6 @@ extern void efx_remove_filters(struct efx_nic *efx);
 extern s32 efx_filter_insert_filter(struct efx_nic *efx,
 				    struct efx_filter_spec *spec,
 				    bool replace);
-extern int efx_filter_remove_filter(struct efx_nic *efx,
-				    struct efx_filter_spec *spec);
 extern int efx_filter_remove_id_safe(struct efx_nic *efx,
 				     enum efx_filter_priority priority,
 				     u32 filter_id);
@@ -160,10 +157,6 @@ extern void efx_channel_dummy_op_void(struct efx_channel *channel);
 extern void efx_process_channel_now(struct efx_channel *channel);
 extern int
 efx_realloc_channels(struct efx_nic *efx, u32 rxq_entries, u32 txq_entries);
-
-#ifdef __VMKLNX__
-extern void rx_set_num_qs_per_nic(struct efx_nic *efx);
-#endif
 
 /* Ports */
 extern int efx_reconfigure_port(struct efx_nic *efx);
@@ -208,8 +201,6 @@ extern int efx_reset_up(struct efx_nic *efx, enum reset_type method, bool ok);
 
 /* Global */
 extern void efx_schedule_reset(struct efx_nic *efx, enum reset_type type);
-extern void efx_start_all(struct efx_nic *efx);
-extern void efx_stop_all(struct efx_nic *efx);
 extern int efx_init_irq_moderation(struct efx_nic *efx, unsigned int tx_usecs,
 				   unsigned int rx_usecs, bool rx_adaptive,
 				   bool rx_may_override_tx);
@@ -252,7 +243,7 @@ static inline void efx_schedule_channel_irq(struct efx_channel *channel)
 
 extern void efx_link_status_changed(struct efx_nic *efx);
 extern void efx_link_set_advertising(struct efx_nic *efx, u32);
-extern void efx_link_set_wanted_fc(struct efx_nic *efx, enum efx_fc_type);
+extern void efx_link_set_wanted_fc(struct efx_nic *efx, u8);
 
 #if defined(EFX_USE_KCOMPAT) && (!defined(EFX_USE_CANCEL_WORK_SYNC) || !defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC))
 extern struct workqueue_struct *efx_workqueue;

@@ -27,7 +27,6 @@
 /*! \cidoxg_lib_ef */
 #include <ci/compat.h>
 #include <onload/ul/rwlock.h>
-#include <onload/cas32.h>
 
 
 /**********************************************************************/
@@ -270,7 +269,7 @@ __oo_rwlock_lock_read_slow (oo_rwlock *l) {
       new_state.s.n_readers++;
     }
   }
-  while (ef_vi_cas32_fail (&l->state.val, old_state.val, new_state.val));
+  while (ci_cas32_fail (&l->state.val, old_state.val, new_state.val));
 
   /* When we get here either we've taken the lock in read mode, or registered
    * our interest in it.  Wait until it becomes taken in read mode.
@@ -320,7 +319,7 @@ __oo_rwlock_unlock_read_slow (oo_rwlock *l) {
       do_wake = 1;
     }
   }
-  while (ef_vi_cas32_fail (&l->state.val, old_state.val, new_state.val));
+  while (ci_cas32_fail (&l->state.val, old_state.val, new_state.val));
 
   CI_TRY(rwlock_internal_mutex_unlock(l));
 
@@ -362,7 +361,7 @@ void __oo_rwlock_lock_write_slow(oo_rwlock* l, int mutex_held)
         }
       }
     }
-    while( ef_vi_cas32_fail (&l->state.val, old_state.val, new_state.val) );
+    while( ci_cas32_fail (&l->state.val, old_state.val, new_state.val) );
 
     /* Either we took the lock in write mode, or we registered interest in
     ** it. */
@@ -430,7 +429,7 @@ __oo_rwlock_unlock_write_slow (oo_rwlock *l, int mutex_held) {
     new_state.s.write_held = 0;
     
   } 
-  while (ef_vi_cas32_fail (&l->state.val, old_state.val, new_state.val));
+  while (ci_cas32_fail (&l->state.val, old_state.val, new_state.val));
     
   if (!mutex_held)
     CI_TRY(rwlock_internal_mutex_unlock (l));

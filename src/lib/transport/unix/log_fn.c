@@ -48,12 +48,19 @@
 void citp_log_fn_ul(const char* msg)
 {
   struct iovec v[2];
+  int tmp_fd = 0;
 
   if( citp.log_fd < 0 ) {
-    citp.log_fd = oo_fcntl_dupfd_cloexec(STDERR_FILENO, 3);
-    if( citp.log_fd < 0 )  return;
-    if( citp_fdtable.table )
-      citp_fdtable.table[citp.log_fd].fdip=fdi_to_fdip(&citp_the_reserved_fd);
+    if( citp.init_level >= CITP_INIT_SYSCALLS ) {
+      citp.log_fd = oo_fcntl_dupfd_cloexec(STDERR_FILENO, 3);
+      if( citp.log_fd >= 0 && citp_fdtable.table != NULL )
+        citp_fdtable.table[citp.log_fd].fdip =
+          fdi_to_fdip(&citp_the_reserved_fd);
+    }
+    if( citp.log_fd < 0 ) {
+      citp.log_fd = STDERR_FILENO;
+      tmp_fd = 1;
+    }
   }
 
   v[0].iov_base = (void*) msg;
@@ -62,6 +69,9 @@ void citp_log_fn_ul(const char* msg)
   v[1].iov_len = strlen(v[1].iov_base);
 
   my_syscall3(writev, citp.log_fd, (long) v, 2); 
+
+  if( tmp_fd )
+    citp.log_fd = -1;
 }
 
 

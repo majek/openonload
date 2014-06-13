@@ -350,10 +350,8 @@ static int ci_udp_sendmsg_os(ci_netif* ni, ci_udp_state* us,
   ++us->stats.n_tx_os;
 
   rc = oo_os_sock_get(ni, S_ID(us), &os_sock);
-  if( rc == 0 ) {
+  if( rc == 0 )
     rc = do_sys_sendmsg(&us->s, os_sock, msg, flags, user_buffers, atomic);
-    oo_os_sock_release(ni, os_sock);
-  }
   return rc;
 }
 

@@ -32,11 +32,14 @@
 #include <internal.h>
 #include <dlfcn.h>
 
+
 static int load_sym_fail(const char* sym)
 {
-  Log_E(log("dlsym(\"%s\"): dlerror '%s'", sym, dlerror()));
+  Log_E(log("citp_find_calls: ERROR: dlsym(\"%s\") failed '%s'",
+            sym, dlerror()));
   return -1;
 }
+
 
 static int
 citp_find_all_sys_calls(void)
@@ -60,7 +63,8 @@ citp_find_all_sys_calls(void)
   const char* lib = "libc.so.6";  /* ?? */
   dlhandle = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
   if( dlhandle == 0 ) {    
-    Log_E(log("dlopen: dlerror '%s'", dlerror()));
+    Log_E(log("%s: ERROR: dlopen(%s) failed dlerror=%s",
+              __FUNCTION__, lib, dlerror()));
     return -1;
   }
 # define CI_MK_DECL(ret, fn, args)              \
@@ -86,7 +90,7 @@ citp_find_all_sys_calls(void)
 
 #ifndef RTLD_NEXT
   if( dlclose(dlhandle) != 0 )
-    Log_E(log("dlclose != 0"));
+    Log_E(log("%s: ERROR: dlclose != 0", __FUNCTION__));
 #endif
 
   return 0;
@@ -113,7 +117,7 @@ citp_find_all_libc_calls(void)
 #include <onload/declare_libccalls.h.tmpl>
 
   if( dlclose(dlhandle) != 0 )
-    Log_E(log("dlclose != 0"));
+    Log_E(log("%s: ERROR: dlclose != 0", __FUNCTION__));
 
   return 0;
 }
@@ -146,7 +150,8 @@ int citp_onload_dev_major(void)
       dev_major = citp_major(st.st_rdev);
     else {
       dev_major = -2;
-      Log_E(log("%s: Failed to find major num of efab device", __FUNCTION__));
+      Log_E(log("%s: ERROR: stats(%s) failed errno=%d",
+                __FUNCTION__, ONLOAD_DEV, errno));
     }
   }
 

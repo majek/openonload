@@ -126,8 +126,10 @@ efrm_eventq_register_callback(struct efrm_vi *virs,
 	virs->evq_callback_arg = arg;
 	virs->evq_callback_fn = handler;
 
+#ifdef CONFIG_SFC_RESOURCE_VF
 	if (virs->allocation.vf)
 		return efrm_vf_eventq_callback_registered(virs);
+#endif
 
 	instance = virs->rs.rs_instance;
 	cb_info = &efrm_nic(virs->rs.rs_client->nic)->vis[instance];
@@ -154,10 +156,12 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	EFRM_ASSERT(virs->q[EFHW_EVQ].capacity != 0);
 	EFRM_ASSERT(virs->rs.rs_client != NULL);
 
+#ifdef CONFIG_SFC_RESOURCE_VF
 	if (virs->allocation.vf) {
 		efrm_vf_eventq_callback_kill(virs);
 		return;
 	}
+#endif
 
 	instance = virs->rs.rs_instance;
 	cb_info = &efrm_nic(virs->rs.rs_client->nic)->vis[instance];
@@ -267,8 +271,10 @@ void efrm_handle_sram_event(struct efhw_nic *nic)
 
 int efrm_vi_irq_moderate(struct efrm_vi *vi, int usec)
 {
+#ifdef CONFIG_SFC_RESOURCE_VF
 	if (vi->allocation.vf)
 		return efrm_vf_vi_qmoderate(vi, usec);
+#endif
 	return -EINVAL;
 }
 EXPORT_SYMBOL(efrm_vi_irq_moderate);
@@ -276,8 +282,10 @@ EXPORT_SYMBOL(efrm_vi_irq_moderate);
 
 int efrm_vi_irq_affinity(struct efrm_vi *vi, int cpu_core_id)
 {
+#ifdef CONFIG_SFC_RESOURCE_VF
 	if (vi->allocation.vf)
 		return efrm_vf_vi_set_cpu_affinity(vi, cpu_core_id);
+#endif
 	return -EINVAL;
 }
 EXPORT_SYMBOL(efrm_vi_irq_affinity);

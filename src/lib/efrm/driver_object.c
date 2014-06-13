@@ -56,6 +56,7 @@
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/efrm_nic.h>
 #include <ci/efrm/driver_private.h>
+#include <ci/efrm/buffer_table.h>
 #include "efrm_internal.h"
 
 
@@ -115,6 +116,7 @@ void efrm_driver_dtor(void)
 
 
 int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
+		  int bt_min, int bt_lim,
 		  const struct vi_resource_dimensions *res_dim)
 {
 	unsigned max_vis;
@@ -139,11 +141,20 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 		goto fail2;
 	}
 
+	rc = efrm_nic_buffer_table_ctor(efrm_nic, bt_min, bt_lim);
+	if (rc < 0) {
+		EFRM_ERR("%s: efrm_nic_buffer_table_ctor(%d, %d) failed (%d)",
+			 __FUNCTION__, bt_min, bt_lim, rc);
+		goto fail3;
+	}
+
 	spin_lock_init(&efrm_nic->lock);
 	efrm_nic->efhw_nic.ifindex = ifindex;
 	INIT_LIST_HEAD(&efrm_nic->clients);
 	return 0;
 
+fail3:
+	efrm_vi_allocator_dtor(efrm_nic);
 fail2:
 	vfree(efrm_nic->vis);
 fail1:
@@ -156,6 +167,7 @@ void efrm_nic_dtor(struct efrm_nic *efrm_nic)
 	/* Things have gone very wrong if there are any driver clients */
 	EFRM_ASSERT(list_empty(&efrm_nic->clients));
 
+	efrm_nic_buffer_table_dtor(efrm_nic);
 	efrm_vi_allocator_dtor(efrm_nic);
 	vfree(efrm_nic->vis);
 
@@ -169,9 +181,8 @@ int efrm_driver_register_nic(struct efrm_nic *rnic)
 {
 	struct efhw_nic *nic = &rnic->efhw_nic;
 	int nic_index, rc = 0;
-	irq_flags_t lock_flags;
 
-	efrm_driver_lock(lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 
 	if (efrm_nic_table_held()) {
 		EFRM_ERR("%s: driver object is in use", __FUNCTION__);
@@ -194,11 +205,11 @@ int efrm_driver_register_nic(struct efrm_nic *rnic)
 	nic->index = nic_index;
 	list_add(&rnic->link, &efrm_nics);
 	efrm_nic_vi_ctor(&rnic->nvi);
-	efrm_driver_unlock(lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 	return 0;
 
 done:
-	efrm_driver_unlock(lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 	return rc;
 }
 
@@ -207,18 +218,17 @@ void efrm_driver_unregister_nic(struct efrm_nic *rnic)
 {
 	struct efhw_nic *nic = &rnic->efhw_nic;
 	int nic_index = nic->index;
-	irq_flags_t lock_flags;
 
 	EFRM_ASSERT(nic_index >= 0);
 
 	efrm_nic_vi_dtor(&rnic->nvi);
 
-	efrm_driver_lock(lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	EFRM_ASSERT(efrm_nic_tablep->nic[nic_index] == nic);
 	list_del(&rnic->link);
 	nic->index = -1;
 	efrm_nic_tablep->nic[nic_index] = NULL;
-	efrm_driver_unlock(lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 }
 
 
@@ -230,9 +240,8 @@ int efrm_nic_post_reset(struct efhw_nic *nic)
 	struct efrm_nic *rnic = efrm_nic(nic);
 	struct efrm_client *client;
 	struct list_head *client_link;
-	irq_flags_t lock_flags;
 
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each(client_link, &rnic->clients) {
 		client = container_of(client_link, struct efrm_client, link);
 		EFRM_ERR("%s: client %p", __FUNCTION__, client);
@@ -240,7 +249,7 @@ int efrm_nic_post_reset(struct efhw_nic *nic)
 			client->callbacks->post_reset(client, 
 						      client->user_data);
 	}
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 
 	return 0;
 }
@@ -260,7 +269,6 @@ int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 		    void *user_data, struct efrm_client **client_out)
 {
 	struct efrm_nic *n, *rnic = NULL;
-	irq_flags_t lock_flags;
 	struct list_head *link;
 	struct efrm_client *client;
 
@@ -271,7 +279,7 @@ int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 	if (client == NULL)
 		return -ENOMEM;
 
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each(link, &efrm_nics) {
 		n = container_of(link, struct efrm_nic, link);
 		if (n->efhw_nic.ifindex == ifindex || ifindex < 0) {
@@ -287,7 +295,7 @@ int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 		INIT_LIST_HEAD(&client->resources);
 		list_add(&client->link, &rnic->clients);
 	}
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 
 	if (rnic == NULL) {
 		kfree(client);
@@ -302,16 +310,14 @@ EXPORT_SYMBOL(efrm_client_get);
 
 void efrm_client_put(struct efrm_client *client)
 {
-	irq_flags_t lock_flags;
-
 	EFRM_ASSERT(client->ref_count > 0);
 
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	if (--client->ref_count > 0)
 		client = NULL;
 	else
 		list_del(&client->link);
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 	kfree(client);
 }
 EXPORT_SYMBOL(efrm_client_put);
@@ -319,11 +325,10 @@ EXPORT_SYMBOL(efrm_client_put);
 
 void efrm_client_add_ref(struct efrm_client *client)
 {
-	irq_flags_t lock_flags;
 	EFRM_ASSERT(client->ref_count > 0);
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	++client->ref_count;
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 }
 EXPORT_SYMBOL(efrm_client_add_ref);
 
@@ -344,17 +349,16 @@ EXPORT_SYMBOL(efrm_client_get_ifindex);
 int efrm_nic_present(int ifindex)
 {
 	struct efrm_nic *nic;
-	irq_flags_t lock_flags;
 	int rc = 0;
 
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each_entry(nic, &efrm_nics, link) {
 		if (nic->efhw_nic.ifindex == ifindex) {
 			rc = 1;
 			break;
 		}
 	}
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 
 	return rc;
 }

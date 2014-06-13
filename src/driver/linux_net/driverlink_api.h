@@ -45,7 +45,7 @@ struct efx_dl_device;
 struct efx_dl_device_info;
 
 /* An extra safeguard in addition to symbol versioning */
-#define EFX_DRIVERLINK_API_VERSION 5
+#define EFX_DRIVERLINK_API_VERSION 6
 
 /**
  * struct efx_dl_driver - An Efx driverlink device driver
@@ -104,12 +104,15 @@ struct efx_dl_driver {
  * @EFX_DL_FALCON_RESOURCES: Information type is &struct efx_dl_falcon_resources
  * @EFX_DL_HASH_INSERTION: Information type is &struct efx_dl_hash_insertion
  * @EFX_DL_SIENA_SRIOV: Information type is &struct efx_dl_siena_sriov
+ * @EFX_DL_AOE_RESOURCES: Information type is &struct efx_dl_aoe
  */
 enum efx_dl_device_info_type {
 	/** Falcon resources available for export */
 	EFX_DL_FALCON_RESOURCES = 0,
 	EFX_DL_HASH_INSERTION = 1,
 	EFX_DL_SIENA_SRIOV = 2,
+	EFX_DL_MCDI_RESOURCES = 3,
+	EFX_DL_AOE_RESOURCES = 4,
 };
 
 /**
@@ -176,7 +179,7 @@ enum efx_dl_falcon_resource_flags {
  *	only present if %EFX_DL_FALCON_HAVE_RSS_CHANNEL_COUNT is set.
  * @timer_quantum_ns: Timer quantum (nominal period between timer ticks)
  *	for wakeup timers, in nanoseconds. This member is only present if
- * 	%EFX_DL_FALCON_HAVE_TIMER_QUANTUM_NS is set.
+ *	%EFX_DL_FALCON_HAVE_TIMER_QUANTUM_NS is set.
  */
 struct efx_dl_falcon_resources {
 	struct efx_dl_device_info hdr;
@@ -236,13 +239,25 @@ struct efx_dl_hash_insertion {
  * @hdr: Resource linked list header
  * @vi_base: The zeroth VI mapped into VFs
  * @vi_scale: Log2 of the number of VIs per VF
- * @vf_count: Number of VFs that have been enabled
+ * @vf_count: Number of VFs intended to be enabled
  */
 struct efx_dl_siena_sriov {
 	struct efx_dl_device_info hdr;
 	unsigned vi_base;
 	unsigned vi_scale;
 	unsigned vf_count;
+};
+
+/**
+ * struct efx_dl_aoe - AOE information
+ *
+ * @hdr: Resource linked list header
+ */
+
+struct efx_dl_aoe_resources {
+	struct efx_dl_device_info hdr;
+	unsigned internal_macs;
+	unsigned external_macs;
 };
 
 /**
@@ -319,6 +334,10 @@ extern void efx_dl_filter_remove(struct efx_dl_device *efx_dev,
 extern void efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 				   int filter_id, int rxq_i);
 
+extern int efx_dl_mcdi_rpc(struct efx_dl_device *dl_dev, unsigned int cmd,
+			   size_t inlen, size_t outlen, size_t *outlen_actual,
+			   const u8 *inbuf, u8 *outbuf);
+
 /**
  * efx_dl_for_each_device_info_matching - iterate an efx_dl_device_info list
  * @_dev_info: Pointer to first &struct efx_dl_device_info
@@ -330,7 +349,7 @@ extern void efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
  * Example:
  *	struct efx_dl_falcon_resources *res;
  *	efx_dl_for_each_device_info_matching(dev_info, EFX_DL_FALCON_RESOURCES,
- *		 			     struct efx_dl_falcon_resources,
+ *					     struct efx_dl_falcon_resources,
  *					     hdr, res) {
  *		if (res->flags & EFX_DL_FALCON_DUAL_FUNC)
  *			....

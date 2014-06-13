@@ -76,6 +76,7 @@ struct efrm_nic {
 	struct efrm_vi_allocator vi_allocators[EFRM_NIC_N_VI_ALLOCATORS];
 	unsigned falcon_wakeup_mask;
 	unsigned rss_channel_count;
+	struct efrm_buddy_allocator buf_tbl;
 };
 
 

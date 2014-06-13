@@ -177,7 +177,7 @@ static int falcon_getscl(void *data)
 	return EFX_OWORD_FIELD(reg, FRF_AB_GPIO0_IN);
 }
 
-static struct i2c_algo_bit_data falcon_i2c_bit_operations = {
+static const struct i2c_algo_bit_data falcon_i2c_bit_operations = {
 	.setsda		= falcon_setsda,
 	.setscl		= falcon_setscl,
 	.getsda		= falcon_getsda,
@@ -703,7 +703,7 @@ static void falcon_stats_complete(struct efx_nic *efx)
 	if (!nic_data->stats_pending)
 		return;
 
-	nic_data->stats_pending = 0;
+	nic_data->stats_pending = false;
 	if (*nic_data->stats_dma_done == FALCON_STATS_DONE) {
 		rmb(); /* read the done flag before the stats */
 		falcon_update_stats_xmac(efx);
@@ -1026,7 +1026,8 @@ falcon_handle_global_event(struct efx_channel *channel, efx_qword_t *event)
 
 /* Read and verify the correctness of the nvram, optionally returning a copy
  * of the nvram configuration section if appropriate */
-int falcon_read_nvram(struct efx_nic *efx, struct falcon_nvconfig *nvconfig_out)
+static int
+falcon_read_nvram(struct efx_nic *efx, struct falcon_nvconfig *nvconfig_out)
 {
 	struct falcon_nic_data *nic_data = efx->nic_data;
 	struct falcon_nvconfig *nvconfig;
@@ -1110,13 +1111,13 @@ falcon_b0_test_sram(struct efx_nic *efx,
 	 * via SRAM_DBG_REG rather than BUF_FULL_TBL. */
 	BUG_ON(efx->port_enabled);
 	membase = ioremap_nocache(efx->membase_phys + FR_BZ_SRM_DBG,
-				  efx->sram_lim);
+				  efx->sram_lim_qw * sizeof(efx_qword_t));
 	if (!membase) {
 		netif_err(efx, hw, efx->net_dev, "Unable to map SRAM_DBG\n");
 		return -EIO;
 	}
 
-	finish = efx->sram_lim / sizeof(buf1) - 1;
+	finish = efx->sram_lim_qw - 1;
 
 	/* write and verify the pattern in 64 8-byte chunks, to avoid
 	 * potentially overrunning the sram update fifo */
@@ -1636,9 +1637,9 @@ static int falcon_dimension_resources(struct efx_nic *efx)
 		res->rxq_lim = internal_dcs_entries / efx->rx_dc_entries;
 		res->txq_lim = internal_dcs_entries / efx->tx_dc_entries;
 		res->buffer_table_lim = 8192;
-		efx->rx_dc_base = 0x100000;
-		efx->tx_dc_base = 0x130000;
-		efx->sram_lim = 0x140000;
+		efx->rx_dc_base = 0x20000;
+		efx->tx_dc_base = 0x26000;
+		efx->sram_lim_qw = 0x28000;
 		return 0;
 	} else {
 		/* Otherwise we have a large block of external SRAM */
@@ -1661,7 +1662,8 @@ static int falcon_dimension_resources(struct efx_nic *efx)
 			sram_size = 16 * 1024 * 1024;
 			break;
 		}
-		efx->resources.buffer_table_lim = sram_size / 8;
+		sram_size /= sizeof(efx_qword_t);
+		efx->resources.buffer_table_lim = sram_size;
 		return efx_nic_dimension_resources(efx, sram_size);
 	}
 }
@@ -2273,6 +2275,7 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.remove_port = falcon_remove_port,
 	.handle_global_event = falcon_handle_global_event,
 	.prepare_flush = falcon_prepare_flush,
+	.finish_flush = efx_port_dummy_op_void,
 	.update_stats = falcon_update_nic_stats,
 	.start_stats = falcon_start_nic_stats,
 	.stop_stats = falcon_stop_nic_stats,
@@ -2326,6 +2329,7 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.remove_port = falcon_remove_port,
 	.handle_global_event = falcon_handle_global_event,
 	.prepare_flush = falcon_prepare_flush,
+	.finish_flush = efx_port_dummy_op_void,
 	.update_stats = falcon_update_nic_stats,
 	.start_stats = falcon_start_nic_stats,
 	.stop_stats = falcon_stop_nic_stats,

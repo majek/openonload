@@ -75,8 +75,8 @@
  * information into its domain asynchronously.  After writing the
  * status, the PF driver will send an event of the form:
  *
- *       0             16                        24   31
- *      | reserved    | VFDI_EV_TYPE_REQ_STATUS | SEQ   |
+ *       0             16                       24   31
+ *      | reserved    | VFDI_EV_TYPE_STATUS    | SEQ   |
  *
  * In case the VF must be reset for any reason, the PF driver will
  * send an event of the form:
@@ -95,7 +95,7 @@
 #define VFDI_EV_TYPE_REQ_WORD1 1
 #define VFDI_EV_TYPE_REQ_WORD2 2
 #define VFDI_EV_TYPE_REQ_WORD3 3
-#define VFDI_EV_TYPE_REQ_STATUS 4
+#define VFDI_EV_TYPE_STATUS 4
 #define VFDI_EV_TYPE_RESET 5
 #define VFDI_EV_DATA_LBN 0
 #define VFDI_EV_DATA_WIDTH 16
@@ -107,38 +107,43 @@ struct vfdi_endpoint {
 
 /**
  * enum vfdi_op - VFDI operation enumeration
- * @VFDI_RESPONSE: Indicates a response to the request.
- * @VFDI_INIT_EVQ: Initialize SRAM entries and initialize an EVQ.
- * @VFDI_INIT_RXQ: Initialize SRAM entries and initialize an RXQ.
- * @VFDI_INIT_TXQ: Initialize SRAM entries and initialize a TXQ.
- * @VFDI_FINI_ALL_QUEUES: Flush all queues, finalize all queues, then
+ * @VFDI_OP_RESPONSE: Indicates a response to the request.
+ * @VFDI_OP_INIT_EVQ: Initialize SRAM entries and initialize an EVQ.
+ * @VFDI_OP_INIT_RXQ: Initialize SRAM entries and initialize an RXQ.
+ * @VFDI_OP_INIT_TXQ: Initialize SRAM entries and initialize a TXQ.
+ * @VFDI_OP_FINI_ALL_QUEUES: Flush all queues, finalize all queues, then
  *	finalize the SRAM entries.
- * @VFDI_INSERT_FILTER: Insert a MAC filter targetting the given RXQ.
- * @VFDI_REMOVE_ALL_FILTERS: Remove all filters.
- * @VFDI_SET_STATUS_PAGE: Set the DMA page(s) used for status updates
+ * @VFDI_OP_INSERT_FILTER: Insert a MAC filter targetting the given RXQ.
+ * @VFDI_OP_REMOVE_ALL_FILTERS: Remove all filters.
+ * @VFDI_OP_SET_STATUS_PAGE: Set the DMA page(s) used for status updates
  *	from PF and write the initial status.
- * @VFDI_CLEAR_STATUS_PAGE: Clear the DMA page(s) used for status
+ * @VFDI_OP_CLEAR_STATUS_PAGE: Clear the DMA page(s) used for status
  *	updates from PF.
  */
 enum vfdi_op {
-	VFDI_RESPONSE = 0,
-	VFDI_INIT_EVQ = 1,
-	VFDI_INIT_RXQ = 2,
-	VFDI_INIT_TXQ = 3,
-	VFDI_FINI_ALL_QUEUES = 4,
-	VFDI_INSERT_FILTER = 5,
-	VFDI_REMOVE_ALL_FILTERS = 6,
-	VFDI_SET_STATUS_PAGE = 7,
-	VFDI_CLEAR_STATUS_PAGE = 8,
-	VFDI_LIMIT,
+	VFDI_OP_RESPONSE = 0,
+	VFDI_OP_INIT_EVQ = 1,
+	VFDI_OP_INIT_RXQ = 2,
+	VFDI_OP_INIT_TXQ = 3,
+	VFDI_OP_FINI_ALL_QUEUES = 4,
+	VFDI_OP_INSERT_FILTER = 5,
+	VFDI_OP_REMOVE_ALL_FILTERS = 6,
+	VFDI_OP_SET_STATUS_PAGE = 7,
+	VFDI_OP_CLEAR_STATUS_PAGE = 8,
+	VFDI_OP_LIMIT,
 };
+
+/* Response codes for VFDI operations. Other values may be used in future. */
+#define VFDI_RC_SUCCESS		0
+#define VFDI_RC_ENOMEM		(-12)
+#define VFDI_RC_EINVAL		(-22)
+#define VFDI_RC_EOPNOTSUPP	(-95)
+#define VFDI_RC_ETIMEDOUT	(-110)
 
 /**
  * struct vfdi_req - Request from VF driver to PF driver
  * @op: Operation code or response indicator, taken from &enum vfdi_op.
- * @seq: Reserved.
- * @rc: Response code.  Set to 0 on success or a negative Linux error code
- *	 on failure.
+ * @rc: Response code.  Set to 0 on success or a negative error code on failure.
  * @u.init_evq.index: Index of event queue to create.
  * @u.init_evq.buf_count: Number of 4k buffers backing event queue.
  * @u.init_evq.addr: Array of length %u.init_evq.buf_count containing DMA
@@ -174,7 +179,7 @@ enum vfdi_op {
  */
 struct vfdi_req {
 	u32 op;
-	u32 seq;
+	u32 reserved1;
 	s32 rc;
 	u32 reserved2;
 	union {
@@ -189,7 +194,7 @@ struct vfdi_req {
 			u32 evq;
 			u32 label;
 			u32 flags;
-#define RXQ_FLAG_SCATTER_EN 1
+#define VFDI_RXQ_FLAG_SCATTER_EN 1
 			u32 reserved;
 			u64 addr[];
 		} init_rxq;
@@ -199,16 +204,16 @@ struct vfdi_req {
 			u32 evq;
 			u32 label;
 			u32 flags;
-#define TXQ_FLAG_IP_CSUM_DIS 1
-#define TXQ_FLAG_TCPUDP_CSUM_DIS 2
+#define VFDI_TXQ_FLAG_IP_CSUM_DIS 1
+#define VFDI_TXQ_FLAG_TCPUDP_CSUM_DIS 2
 			u32 reserved;
 			u64 addr[];
 		} init_txq;
 		struct {
 			u32 rxq;
 			u32 flags;
-#define MAC_FILTER_FLAG_RSS 1
-#define MAC_FILTER_FLAG_SCATTER 2
+#define VFDI_MAC_FILTER_FLAG_RSS 1
+#define VFDI_MAC_FILTER_FLAG_SCATTER 2
 		} mac_filter;
 		struct {
 			u64 dma_addr;

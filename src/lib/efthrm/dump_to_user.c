@@ -36,7 +36,7 @@ static void oo_dump_to_buf(void* opaque, const char* fmt, ...)
     va_start(args, fmt);
     rc = vsnprintf(ds->buf + ds->off, ds->buf_len - ds->off, fmt, args);
     va_end(args);
-    if( rc <= 0 ) {
+    if( rc <= 0 || rc >= ds->buf_len - ds->off ) {
       ds->off = -1;
     }
     else {

@@ -33,6 +33,7 @@
 
 #include <onload/tcp_helper_fns.h>
 #include <onload/linux_onload.h>
+#include <onload/linux_onload_internal.h>
 
 #include "onload_kernel_compat.h"
 
@@ -46,89 +47,161 @@ static struct file_operations oo_fop_do_nothing =
   .owner = THIS_MODULE,
   .release  = oo_fop_release_nothing,
 };
+
+/* "safe" handover: if we are the only holder of the oo_file, we can
+ * rewrite its fields to keep epoll references in the same state. */
+static void oo_fd_handover_overwrite(struct file* oo_file, struct file* os_file)
+{
+  /* We keep the oo_file "opened", but rewrite all data from the
+   * os_file.  In this way, epoll membership is kept untouched. */
+  struct dentry *old_dentry = oo_file->f_dentry;
+  struct vfsmount *old_vfsmnt = oo_file->f_vfsmnt;
+
+  /* Copy data from os_file to oo_file */
+  oo_file->private_data = os_file->private_data;
+  oo_file->f_op = os_file->f_op;
+  oo_file->f_dentry = os_file->f_dentry;
+  oo_file->f_vfsmnt = os_file->f_vfsmnt;
+  oo_file->f_owner = os_file->f_owner;
+
+  /* socket is now referencing the oo_file.
+   * We never handover anything except socket! */
+  ci_assert(S_ISSOCK(os_file->f_dentry->d_inode->i_mode));
+  SOCKET_I(os_file->f_dentry->d_inode)->file = oo_file;
+
+  /* Set up os_file before we "close" it */
+  os_file->f_op = &oo_fop_do_nothing;
+  os_file->f_dentry = old_dentry;
+  os_file->f_vfsmnt = old_vfsmnt;
+}
 #endif
 
-int efab_fd_handover(struct file* old_filp, struct file* new_filp, int fd)
-{
-  int rc;
 
-  ci_assert(old_filp != NULL);
-  ci_assert(new_filp != NULL);
+/*! Replace [old_filp] with [new_filp] in the current process's fdtable.
+** Fails if [fd] is bad, or doesn't currently resolve to [old_filp].
+*/
+static int efab_fd_handover_replace(struct file* old_filp,
+                                    struct file* new_filp, int fd)
+{
+  int rc = -ENOENT;
 
   spin_lock(&current->files->file_lock);
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  if( !list_empty(&old_filp->f_ep_links) &&
-      file_count(old_filp) == 1 && file_count(new_filp) == 1 &&
-      fcheck(fd) == old_filp ) {
-    /* we are the only holder of this file,
-     * and we can rewrite old_filp->fops & friends.
-     * So, we keep the old_filp "opened", but rewrite all data from the
-     * new_filp.  In this way, epoll membership is kept untouched. */
-    ci_private_t *priv = old_filp->private_data;
-    struct dentry *old_dentry = old_filp->f_dentry;
-    struct vfsmount *old_vfsmnt = old_filp->f_vfsmnt;
-    ci_private_t priv_copy = *priv;
-
-    /* Copy data from new_filp to old_filp */
-    old_filp->private_data = new_filp->private_data;
-    old_filp->f_op = new_filp->f_op;
-    old_filp->f_dentry = new_filp->f_dentry;
-    old_filp->f_vfsmnt = new_filp->f_vfsmnt;
-    old_filp->f_owner = new_filp->f_owner;
-
-    /* socket is now referencing the old_filp.
-     * We never handover anything except socket! */
-    ci_assert(S_ISSOCK(new_filp->f_dentry->d_inode->i_mode));
-    SOCKET_I(new_filp->f_dentry->d_inode)->file = old_filp;
-
-    /* Set up new_filp before we "close" it */
-    new_filp->f_op = &oo_fop_do_nothing;
-    new_filp->f_dentry = old_dentry;
-    new_filp->f_vfsmnt = old_vfsmnt;
-
-    spin_unlock(&current->files->file_lock);
-    fput(new_filp); /* just release the struct file itself */
-
-    /* now we should release endpoint structure */
-    generic_tcp_helper_close(&priv_copy);
-    if (priv_copy.thr != NULL) {
-      TCP_HELPER_RESOURCE_ASSERT_VALID(priv_copy.thr, 0);
-      efab_thr_release(priv_copy.thr);
-    }
-    return 0;
-  }
-#endif
-
-  /* Replace old_filp by new_filp in fdtable; breaks dup/fork and epoll. */
-
-  /* If others have reference to our old_filp, they are lost for us.
-   * file_count is incremented by:
-   * - dup/dup2/... - another fd points to old_filp;
-   * - fork - same fd in another process points to old_filp;
-   * - in multithreaded app, file_count=2, and nobody has references to
-   *   old_filp.  I failed to find how Linux makes this.
-   */
-  if( file_count(old_filp) != 1 &&
-      (file_count(old_filp) != 2 || ! thread_group_empty(current) ) ) {
-    LOG_U(ci_log("%s: handover socket fd=%d which is already duplicated "
-                 "by dup or fork: file_count=%lu", __func__,
-                 fd, (unsigned long)file_count(old_filp)));
-    /* fixme: implement "handover endpoint", so we can pass all socket
-     * operations via our old_filp */
-  }
-
   if( fcheck(fd) == old_filp ) {
     get_file(new_filp);
     ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, new_filp);
     rc = 0;
   }
-  else {
-    rc = -ENOENT;
-  }
   spin_unlock(&current->files->file_lock);
+
   if( rc == 0 )
     fput(old_filp);
+
   return rc;
+}
+
+/* Handover the user-level socket to the OS one.  This means that the FD
+** that previously pointed at a ul socket will now point at the OS socket
+** that backed it.  This gets called when we connect through a non-l5
+** interface, or bind to a non-l5 interface.
+*/
+int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
+{
+  tcp_helper_endpoint_t* ep;
+  int fd = *(ci_int32*) p_fd;
+  struct file *oo_file, *os_file;
+  ci_private_t *fd_priv;
+  int rc, line;
+
+  /* We invoke this on the stack-fd rather than the socket-fd because if we
+   * do the latter it is hard to know whether there are any other refs to
+   * the socket.
+   */
+  if( priv->fd_type != CI_PRIV_TYPE_NETIF ) {
+    line = __LINE__;
+    goto unexpected_error;
+  }
+  /* Check fd is an Onload socket in the right stack with an OS socket. */
+  oo_file = fget(fd);
+  if( oo_file->f_op != &linux_tcp_helper_fops_tcp &&
+      oo_file->f_op != &linux_tcp_helper_fops_udp ) {
+    line = __LINE__;
+    goto unexpected_error;
+  }
+  fd_priv = oo_file->private_data;
+  ci_assert( CI_PRIV_TYPE_IS_ENDPOINT(fd_priv->fd_type) );
+  if( priv->thr != fd_priv->thr ) {
+    line = __LINE__;
+    goto unexpected_error;
+  }
+  ep = ci_trs_ep_get(fd_priv->thr, fd_priv->sock_id);
+  if( ep->os_socket == NULL ) {
+    line = __LINE__;
+    goto unexpected_error;
+  }
+
+  os_file = ep->os_socket->file;
+  rc = efab_fd_handover_replace(oo_file, os_file, fd);
+  if( rc != 0 ) {
+    LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: handover failed due to race",
+                 __FUNCTION__, ep->thr->id, ep->id, fd));
+    return rc;
+  }
+
+  /* If others have reference to our oo_file, they are lost for us.
+   * file_count is incremented by:
+   * - dup/dup2/... - another fd points to oo_file;
+   * - fork - same fd in another process points to oo_file;
+   * - syscall from another thread.
+   */
+  if( file_count(oo_file) != 1 ) {
+    LOG_E(ci_log("%s: ERROR: handover of %d:%d fd=%d duplicated by dup or fork "
+                 "(refs=%d)", __FUNCTION__, ep->thr->id, ep->id, fd,
+                 (int) file_count(oo_file)));
+    /* fixme: implement "handover endpoint", so we can pass all socket
+     * operations via our oo_file */
+  }
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+  else if( ! list_empty(&oo_file->f_ep_links) ) {
+    /* This socket is a member of an epoll set.  To avoid dropping the
+     * socket out of the epoll set, we overwrite oo_file with fields from
+     * os_file and put oo_file back in the fdtable.
+     *
+     * First release the onload resources before we overwrite oo_file.
+     * This needs to be done outside of spinlock.  Also need to grab ref to
+     * os_file, as ref via oo_file is going away, and it could also have
+     * been dropped from the fdtable.
+     */
+    int did_swap = 0;
+    get_file(os_file);
+    oo_file->f_op->release(oo_file->f_dentry->d_inode, oo_file);
+    oo_file->f_op = &oo_fop_do_nothing;
+    spin_lock(&current->files->file_lock);
+    if( fcheck(fd) == os_file ) {
+      oo_fd_handover_overwrite(oo_file, os_file);
+      get_file(oo_file);
+      ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, oo_file);
+      did_swap = 1;
+    }
+    else {
+      LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: epoll handover failed; socket "
+                   "likely dropped from epoll set",
+                   __FUNCTION__, ep->thr->id, ep->id, fd));
+    }
+    spin_unlock(&current->files->file_lock);
+    fput(os_file);
+    if( did_swap )
+      fput(os_file);
+  }
+#endif
+
+  fput(oo_file);
+  return rc;
+
+
+ unexpected_error:
+  OO_DEBUG_ERR(ci_log("%s: ERROR: unexpected error in HANDOVER at line %d",
+                      __FUNCTION__, line));
+  return -EINVAL;
 }
 
 
@@ -162,6 +235,7 @@ int oo_install_file_to_fd_cloexec(struct file *file)
 
   if(unlikely( fd < 0 ))
     return fd;
+
   get_file(file);
 
 
@@ -177,10 +251,12 @@ int oo_install_file_to_fd_cloexec(struct file *file)
 
 static int get_os_fd_from_ep(tcp_helper_endpoint_t *ep)
 {
-  if( ep->os_socket == NULL || ep->os_socket->file == NULL )
+  struct file *os_file;
+
+  if( oo_os_sock_get_from_ep(ep, &os_file) != 0 )
     return -EINVAL;
 
-  return oo_install_file_to_fd_cloexec(ep->os_socket->file);
+  return oo_install_file_to_fd_cloexec(os_file);
 }
 
 /* This really sucks, but sometimes we can't get at the kernel state that we
@@ -210,16 +286,15 @@ int efab_tcp_helper_get_sock_fd(ci_private_t* priv, void *arg)
 ** it can't go away while we're in this ioctl!.
 */
 static struct socket *
-get_linux_socket(struct oo_file_ref *os_socket)
+get_linux_socket(tcp_helper_endpoint_t* ep)
 {
   ci_os_file socketp;
   struct inode *inode;
   struct socket *sock;
+  int rc;
 
-  if( os_socket == NULL )
-    return NULL;
-  socketp = os_socket->file;
-  if( socketp == NULL )
+  rc = oo_os_sock_get_from_ep(ep, &socketp);
+  if( rc != 0 )
     return NULL;
   inode = socketp->f_dentry->d_inode;
   if( inode == NULL )
@@ -230,7 +305,6 @@ get_linux_socket(struct oo_file_ref *os_socket)
   ci_assert (sock->file == socketp);
   return sock;
 }
-
 
 int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
 {
@@ -254,7 +328,7 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
   unsigned char *ctl_buf = local_ctl;
 
   ep = ci_trs_get_valid_ep(priv->thr, op->sock_id); 
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return  -EINVAL;
 
@@ -394,7 +468,7 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
   int i, rc;
 
   ep = ci_trs_get_valid_ep(priv->thr, op->sock_id); 
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return 0;
 
@@ -536,7 +610,7 @@ extern int efab_tcp_helper_bind_os_sock (tcp_helper_resource_t *trs,
   ep = ci_trs_get_valid_ep(trs, sock_id);
   if( ep == NULL )
     return -EINVAL;
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return -EINVAL;
 
@@ -567,7 +641,7 @@ int efab_tcp_helper_listen_os_sock(tcp_helper_resource_t* trs,
   ci_assert (trs);
 
   ep = ci_trs_get_valid_ep(trs, sock_id); 
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return -EINVAL;
 
@@ -591,7 +665,7 @@ extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t *ep,
 
   ci_assert (ep);
 
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return -EINVAL;
 
@@ -689,7 +763,7 @@ extern int efab_tcp_helper_connect_os_sock(ci_private_t *priv, void *arg)
 
   /* Get at the OS socket backing the u/l socket for fd */
   ep = ci_trs_get_valid_ep(priv->thr, priv->sock_id); 
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return -EINVAL;
   s = SP_TO_SOCK(&priv->thr->netif, ep->id);
@@ -714,6 +788,7 @@ efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
 
   tcp_helper_endpoint_t* ep;
   ci_netif* ni = &trs->netif;
+  struct file *file;
 
   ci_assert(trs);
   ci_assert(p_mask_out);
@@ -721,11 +796,12 @@ efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
   if( ! IS_VALID_SOCK_P(ni, sock_id) )  return -EINVAL;
 
   ep = ci_trs_get_valid_ep(trs, sock_id);
-  if( ep->os_socket != NULL ) {
-    struct file* file = ep->os_socket->file;
+  oo_os_sock_get_from_ep(ep, &file);
+  if( file != NULL ) {
     ci_assert(file->f_op != NULL);
     ci_assert(file->f_op->poll != NULL);
     *p_mask_out = file->f_op->poll(file, 0);
+    fput(file);
     return 0;
   }
 
@@ -744,7 +820,7 @@ int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,
   ep = ci_trs_get_valid_ep(thr, sock_id);
   if( ep == NULL )
     return -EINVAL;
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return  -EINVAL;
   tcp_set_state(sock->sk, TCP_CLOSE);
@@ -761,7 +837,7 @@ extern int efab_tcp_helper_getsockopt(tcp_helper_resource_t* trs,
   int rc = -EINVAL;
 
   ep = ci_trs_get_valid_ep(trs, sock_id);
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return  -EINVAL;
   rc = sock->ops->getsockopt(sock, level, optname, optval, optlen);
@@ -784,7 +860,7 @@ extern int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs,
   ** it can't go away while we're in setsockopt.
   */
   ep = ci_trs_get_valid_ep(trs, sock_id);
-  sock = get_linux_socket(ep->os_socket);
+  sock = get_linux_socket(ep);
   if( sock == NULL )
     return  -EINVAL;
   rc = sock->ops->setsockopt(sock, level, optname, optval, optlen);

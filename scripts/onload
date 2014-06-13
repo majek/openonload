@@ -93,7 +93,7 @@ sfc_preload_linux() {
 
   if $verbose; then
     # Dump interesting bits of the environment.
-    env | egrep "^EF_|^LD_PRELOAD=|^LD_LIBRARY_PATH=" | sed "s/^/$me: env: /"
+    env | egrep "^EF_|^LD_PRELOAD=|^LD_LIBRARY_PATH=|^LD_PRELOAD_64=" | sed "s/^/$me: env: /"
   fi
 }
 

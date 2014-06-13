@@ -76,22 +76,26 @@ extern
 int citp_epoll_send(citp_fdinfo* fdinfo, const struct msghdr* msg, int flags);
 #if CI_CFG_RECVMMSG
 extern
-int citp_nosock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
-                         unsigned vlen, int flags, 
+int citp_nosock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
+                         unsigned vlen, int flags,
                          const struct timespec *timeout);
 #endif
-
+#if CI_CFG_SENDMMSG
 extern
-int citp_epoll_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg, 
+int citp_nosock_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
+                         unsigned vlen, int flags);
+#endif
+extern
+int citp_epoll_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg,
                        int flags);
 extern
-int citp_epoll_zc_recv(citp_fdinfo* fdi, 
+int citp_epoll_zc_recv(citp_fdinfo* fdi,
                        struct onload_zc_recv_args* args);
 extern
-int citp_epoll_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg, 
+int citp_epoll_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
                               int flags);
-extern 
-int citp_epoll_zc_recv_filter(citp_fdinfo* fdi, 
+extern
+int citp_epoll_zc_recv_filter(citp_fdinfo* fdi,
                               onload_zc_recv_filter_callback filter,
                               void* cb_arg, int flags);
 
@@ -141,13 +145,6 @@ static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
  **************** The first EPOLL implementation *************************
  *************************************************************************/
 
-
-
-/* By default, we expect Os socket to be writable, but not readable and no
- * exceptions.  So, before we check, lets think it has following events: */
-#define OO_EPOLL_OS_EVENTS_DEFAULT (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND)
-
-
 /* We rely on the fact that EPOLLxxx == POLLxxx.  Check it at build time! */
 CI_BUILD_ASSERT(EPOLLOUT == POLLOUT);
 CI_BUILD_ASSERT(EPOLLIN == POLLIN);
@@ -160,21 +157,9 @@ struct citp_epoll_member {
   struct epoll_event    epfd_event; /*!< event synchronised to kernel */
   ci_uint64             fdi_seq;    /*!< fdi->seq */
   int                   fd;         /*!< Onload fd */
-  ci_uint32             reported_events;
   ci_sleep_seq_t        reported_sleep_seq;
-  ci_sleep_seq_t        polled_sleep_seq;
-
-  /* Events we've got at this epoll_wait() call.
-   * - First of all, we get ul_events.
-   * - Second, we get os_events.
-   * - When there are some events to report, return.
-   * - Spin and repeat polling for ul_events for some time;
-   *   periodically repeat polling for os_events..
-   */
-  ci_uint32             ul_events;
-  ci_uint32             os_events;
-  ci_uint8              all_events;
 };
+
 
 /*! Data associated with each epoll epfd.  */
 struct citp_epoll_fd {
@@ -208,6 +193,9 @@ struct citp_epoll_fd {
    * state (EF_EPOLL_CTL_FAST).
    */
   int         blocking;
+
+  /* Avoid spinning in next epoll_pwait call */
+  int avoid_spin_once;
 };
 
 
@@ -225,11 +213,11 @@ struct oo_ul_epoll_state {
   /* Parameters of this epoll fd */
   struct citp_epoll_fd*__restrict__ ep;
 
-  /* List of sockets with events (citp_epoll_member), moved from oo_sockets */
-  ci_dllist             sockets_ready;
+  /* Where to store events. */
+  struct epoll_event*__restrict__ events;
 
-  /* Number of events we've already got. */
-  int                   n;
+  /* End of the [events] array. */
+  struct epoll_event*__restrict__ events_top;
 
   /* Timestamp for the beginning of the current poll.  Used to avoid doing
    * ci_netif_poll() on stacks too frequently.
@@ -238,6 +226,10 @@ struct oo_ul_epoll_state {
 
   /* Whether or not this call should spin */
   unsigned              ul_epoll_spin;
+
+  /* We have found some EPOLLET or EPOLLONESHOT events, and they can not be
+   * dropped. */
+  int                   has_epollet;
 };
 
 
@@ -250,90 +242,43 @@ extern int citp_epoll_wait(citp_fdinfo*, struct epoll_event*,
 extern void citp_epoll_on_handover(citp_fdinfo*, int fdt_locked) CI_HF;
 
 
-#define OO_EPOLL_READ_EVENTS   (EPOLLIN | EPOLLRDNORM)
-#define OO_EPOLL_WRITE_EVENTS  (EPOLLOUT | EPOLLWRNORM)
+/* At time of writing, we never generate the following epoll events:
+ *
+ *  EPOLLRDHUP
+ *  EPOLLRDBAND
+ *  EPOLLMSG
+ */
+#define OO_EPOLL_READ_EVENTS   (EPOLLIN | EPOLLRDNORM | EPOLLPRI)
+#define OO_EPOLL_WRITE_EVENTS  (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND)
 #define OO_EPOLL_HUP_EVENTS    (EPOLLHUP | EPOLLERR)
 
+#define OO_EPOLL_ALL_EVENTS    (OO_EPOLL_READ_EVENTS  | \
+                                OO_EPOLL_WRITE_EVENTS | \
+                                OO_EPOLL_HUP_EVENTS)
 
-ci_inline 
-int citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
-                              struct citp_epoll_member* eitem)
+
+int
+citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
+                          struct citp_epoll_member*__restrict__ eitem,
+                          unsigned events, ci_uint64 sleep_seq);
+
+/* Function to be called at the end of citp_protocol_impl->epoll()
+ * function, when UL reports events "mask".
+ *
+ * Returns true if an event was stored, else false.
+ */
+ci_inline int
+citp_ul_epoll_set_ul_events(struct oo_ul_epoll_state*__restrict__ eps,
+                            struct citp_epoll_member*__restrict__ eitem,
+                            unsigned events, ci_uint64 sleep_seq)
 {
-  int old_event = !!eitem->all_events;
-  
-  eitem->all_events = 0;
-  if (eitem->ul_events == 0 &&
-      (eitem->os_events & ~OO_EPOLL_OS_EVENTS_DEFAULT) == 0)
-    return 0;
-
-  if (eitem->epoll_data.events & EPOLLET) {
-    if ((eitem->ul_events & OO_EPOLL_READ_EVENTS) &&
-        eitem->polled_sleep_seq.rw.rx == eitem->reported_sleep_seq.rw.rx)
-      eitem->ul_events &=~ OO_EPOLL_READ_EVENTS;
-    if ((eitem->ul_events & OO_EPOLL_WRITE_EVENTS) &&
-        eitem->polled_sleep_seq.rw.tx == eitem->reported_sleep_seq.rw.tx)
-      eitem->ul_events &=~ OO_EPOLL_WRITE_EVENTS;
-    if ((eitem->ul_events & OO_EPOLL_HUP_EVENTS) &&
-        eitem->polled_sleep_seq.all == eitem->reported_sleep_seq.all)
-      eitem->ul_events &=~ OO_EPOLL_HUP_EVENTS;
-  }
-
-  /* For write events we need both ul and os to be ready;
-   * for other events we accept any one, ul or os. */
-  eitem->all_events = 
-    ((eitem->ul_events | eitem->os_events) & ~OO_EPOLL_OS_EVENTS_DEFAULT) |
-     (eitem->ul_events & eitem->os_events);
-
-  if (eitem->all_events == 0)
-    return 0;
-  if ((eitem->epoll_data.events & EPOLLONESHOT) && eitem->reported_events)
-    return 0;
-  if (old_event == !!eitem->all_events)
-    return 0;
-
-  /* If we have new event, move eitem to sockets_ready;
-   * if event vanished, move it back to oo_sockets.
-   *
-   * Event can vanish, for example, if there was write event, but OS
-   * polling returned no write event.
-   */
-  ci_dllist_remove(&eitem->dllink);
-  if (CI_LIKELY(eitem->all_events)) {
-    Log_POLL(ci_log("%s: new event in eitem %llx: %x", __FUNCTION__,
-                    (long long)eitem->epoll_data.data.u64, eitem->all_events));
-    ci_dllist_push(&eps->sockets_ready, &eitem->dllink);
-    eps->n++;
-    return 1;
-  }
-
-  /* Almost impossible.  If the event was handled by another thread, we'll
-   * get "vanished" event.
-   * TODO possibly, we should report "old_events
-   * | new_events" to make such case impossible. */
-  ci_dllist_push(&eps->ep->oo_sockets, &eitem->dllink);
-  eps->n--;
-  return 0;
+  Log_POLL(ci_log("%s: member=%llx mask=%x events=%x report=%x",
+                  __FUNCTION__, (long long) eitem->epoll_data.data.u64,
+                  eitem->epoll_data.events, events,
+                  eitem->epoll_data.events & events));
+  events &= eitem->epoll_data.events;
+  return events ? citp_ul_epoll_find_events(eps, eitem, events, sleep_seq) : 0;
 }
-
-/* Function to be called at the end of citp_protocol_impl->epoll() function,
- * when UL reports events "mask". */
-ci_inline 
-int citp_ul_epoll_set_ul_events(struct oo_ul_epoll_state*__restrict__ eps,
-                                struct citp_epoll_member*__restrict__ eitem,
-                                ci_uint32 mask, ci_uint64 sleep_seq)
-{
-  eitem->polled_sleep_seq.all = sleep_seq;
-
-  mask &= eitem->epoll_data.events;
-  if (mask == eitem->ul_events)
-    return 0;
-
-  Log_POLL(ci_log("%s: set ul events of eitem %llx to %x", __FUNCTION__,
-                  (long long)eitem->epoll_data.data.u64, mask));
-  eitem->ul_events = mask;
-  return citp_ul_epoll_find_events(eps, eitem);
-}
-
 
 
 /*************************************************************************

@@ -50,6 +50,8 @@
  * Date: 2009/10/01
  */
 
+#define _GNU_SOURCE 1
+
 #include <etherfabric/vi.h>
 #include <etherfabric/iobufset.h>
 #include <etherfabric/pd.h>

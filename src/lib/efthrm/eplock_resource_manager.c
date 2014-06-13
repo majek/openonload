@@ -130,8 +130,10 @@ efab_eplock_unlock_and_wake(ci_netif *ni)
     goto again;
   }
 
-  if( l & CI_EPLOCK_FL_NEED_WAKE )
+  if( l & CI_EPLOCK_FL_NEED_WAKE ) {
+    CITP_STATS_NETIF_INC(ni, lock_wakes);
     wake_up_interruptible(&ni->eplock_helper.wq);
+  }
 
   return 0;
 }

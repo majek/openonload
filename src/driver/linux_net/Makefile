@@ -15,12 +15,14 @@ ifndef KERNELRELEASE
 export CONFIG_SFC := m
 export CONFIG_SFC_DEBUGFS := y
 export CONFIG_SFC_HWMON := y
+export CONFIG_SFC_MCDI_MON := y
 export CONFIG_SFC_SFE4001 := y
 export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
 export CONFIG_SFC_TUNE := m
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
+export CONFIG_SFC_AOE := y
 endif
 
 ifdef KSRCDIR
@@ -60,6 +62,7 @@ ifdef CONFIG_SFC_HWMON
 ifndef CONFIG_HWMON
 $(warning Kernel does not support HWMON)
 override CONFIG_SFC_HWMON :=
+override CONFIG_SFC_MCDI_MON :=
 endif
 ifndef CONFIG_HWMON_VID
 $(warning Kernel does not support HWMON_VID)
@@ -71,7 +74,17 @@ endif
 ifndef CONFIG_SFC_HWMON
 $(warning => Temperature and voltage monitoring for SFC4000 boards will be disabled)
 endif
+ifndef CONFIG_SFC_MCDI_MON
+$(warning => Temperature and voltage reporting for SFC9000-family boards will be disabled)
+endif
 endif # CONFIG_SFC_HWMON
+ifdef CONFIG_SFC_SRIOV
+ifndef CONFIG_PCI_IOV
+$(warning Kernel does not support PCI_IOV)
+override CONFIG_SFC_SRIOV :=
+$(warning => SR-IOV functionality will be disabled)
+endif
+endif
 endif # CONFIG_NET
 
 else # !KERNELRELEASE
@@ -116,10 +129,11 @@ sfc-y			+= efx.o nic.o falcon.o siena.o tx.o rx.o filter.o \
 			   falcon_xmac.o mcdi_mac.o selftest.o \
 			   driverlink.o ethtool.o qt202x_phy.o mdio_10g.o \
 			   tenxpress.o txc43128_phy.o falcon_boards.o mcdi.o \
-			   mcdi_phy.o ioctl.o
+			   mcdi_phy.o mcdi_mon.o ioctl.o
 sfc-$(CONFIG_SFC_MTD)	+= mtd.o
-sfc-$(CONFIG_SFC_SRIOV)	+= sriov.o
+sfc-$(CONFIG_SFC_SRIOV)	+= siena_sriov.o
 sfc-$(CONFIG_SFC_PTP)	+= ptp.o
+sfc-$(CONFIG_SFC_AOE)	+= aoe.o
 ifndef EFX_UPSTREAM
 sfc-$(CONFIG_SFC_DEBUGFS) += debugfs.o
 ifneq ($(MAKECMDGOALS),export)
@@ -190,7 +204,7 @@ $(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
 	@touch $@
 
 define filechk_config.h
-	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
+	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
 endef
 
 $(obj)/config.h: $(src)/Makefile FORCE

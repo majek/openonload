@@ -48,6 +48,7 @@
 
 
 struct efrm_vf;
+#ifdef CONFIG_SFC_RESOURCE_VF
 struct efrm_resource_manager;
 struct vi_resource_dimensions;
 
@@ -58,6 +59,7 @@ efrm_create_vf_resource_manager(struct efrm_resource_manager **,
 
 extern void
 efrm_vf_resource_free(struct efrm_vf *);
+#endif
 
 
 #endif  /* __EFRM_VF_H__ */

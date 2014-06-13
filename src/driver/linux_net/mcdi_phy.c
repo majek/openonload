@@ -149,7 +149,7 @@ fail:
 
 	return rc;
 }
-	
+
 static void efx_mcdi_phy_stats_fini(struct efx_nic *efx)
 {
 	struct efx_mcdi_phy_data *phy_data = efx->phy_data;
@@ -245,7 +245,7 @@ static int efx_mcdi_loopback_modes(struct efx_nic *efx, u64 *loopback_modes)
 		goto fail;
 	}
 
-	*loopback_modes = MCDI_QWORD(outbuf, 
+	*loopback_modes = MCDI_QWORD(outbuf,
 				     GET_LOOPBACK_MODES_OUT_SUGGESTED);
 
 	return 0;
@@ -330,7 +330,7 @@ static u32 mcdi_to_ethtool_cap(u32 media, u32 cap)
 		if (cap & (1 << MC_CMD_PHY_CAP_1000FDX_LBN))
 			result |= SUPPORTED_1000baseT_Full;
 		if (cap & (1 << MC_CMD_PHY_CAP_10000FDX_LBN))
-			result |= SUPPORTED_10000baseT_Full;	
+			result |= SUPPORTED_10000baseT_Full;
 		break;
 
 	case MC_CMD_MEDIA_BASE_T:
@@ -513,7 +513,6 @@ static int efx_mcdi_phy_probe(struct efx_nic *efx)
 	/* The MC indicates that LOOPBACK_NONE is a valid loopback mode,
 	 * but by convention we don't */
 	efx->loopback_modes &= ~(1 << LOOPBACK_NONE);
-	efx->startup_loopback_mode = __ffs(efx->loopback_modes);
 
 	/* Set the initial link mode */
 	efx_mcdi_phy_decode_link(
@@ -773,8 +772,7 @@ static int efx_mcdi_phy_test_alive(struct efx_nic *efx)
 
 	if (outlen < MC_CMD_GET_PHY_STATE_OUT_LEN)
 		return -EIO;
-	if (MCDI_DWORD(outbuf, GET_PHY_STATE_OUT_STATE) != 
-	    MC_CMD_PHY_STATE_OK)
+	if (MCDI_DWORD(outbuf, GET_PHY_STATE_OUT_STATE) != MC_CMD_PHY_STATE_OK)
 		return -EINVAL;
 
 	return 0;
@@ -812,7 +810,7 @@ static int efx_mcdi_bist(struct efx_nic *efx, unsigned int bist_mode,
 		goto out;
 
 	/* Wait up to 10s for BIST to finish */
-	for( retry = 0; retry < 100; ++retry) {
+	for (retry = 0; retry < 100; ++retry) {
 		BUILD_BUG_ON(MC_CMD_POLL_BIST_IN_LEN != 0);
 		rc = efx_mcdi_rpc(efx, MC_CMD_POLL_BIST, NULL, 0,
 				  buf, 0x100, &outlen);
@@ -889,7 +887,7 @@ static int efx_mcdi_phy_run_tests(struct efx_nic *efx, int *results,
 		if (rc < 0)
 			return rc;
 		results += rc;
-	}	
+	}
 
 	return 0;
 }
@@ -997,7 +995,7 @@ static int efx_mcdi_phy_get_module_info(struct efx_nic *efx,
 
 const struct efx_phy_operations efx_mcdi_phy_ops = {
 	.probe		= efx_mcdi_phy_probe,
-	.init 	 	= efx_port_dummy_op_int,
+	.init		= efx_port_dummy_op_int,
 	.reconfigure	= efx_mcdi_phy_reconfigure,
 	.poll		= efx_mcdi_phy_poll,
 	.fini		= efx_port_dummy_op_void,

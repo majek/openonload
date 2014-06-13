@@ -49,13 +49,8 @@
 #include <netinet/tcp.h>
 #include <sys/uio.h>
 #include <pthread.h>
-#include <ci/internal/os_sock.h>
 
-#include <onload/ul/stackname.h>
-#include <onload/ul/per_thread.h>
 #include <onload/extensions_zc.h>
-
-#include <onload/syscall_unix.h>
 #include <ci/internal/efabcfg.h>
 
 #include <ci/internal/transport_config_opt.h>
@@ -159,6 +154,9 @@ typedef struct {
                        const struct timespec*);
 #endif
   int  (*send        )(citp_fdinfo*, const struct msghdr*, int);
+#if CI_CFG_SENDMMSG
+  int  (*sendmmsg    )(citp_fdinfo*, struct mmsghdr*, unsigned, int);
+#endif
   int  (*fcntl       )(citp_fdinfo*, int, long);
   int  (*ioctl       )(citp_fdinfo*, int, void *);
 #if CI_CFG_USERSPACE_SELECT
@@ -290,13 +288,14 @@ struct citp_fdinfo_s {
 # define FDI_ON_RCZ_DONE	6
   volatile char        on_ref_count_zero;
 
+#if CI_CFG_FD_CACHING
   /* Zero normally, non-zero if this fdinfo is cached */
   char                 is_cached;
-
   /* Non-zero if this fd is eligable for caching (i.e. if created via
    * accept).
    */
   char                 can_cache;
+#endif
 
   /* This bit is redundant -- can be calculated from other state.  However,
    * it allows us to calculate more quickly whether a FD needs special
@@ -318,7 +317,9 @@ extern ci_uint64 fdtable_seq_no;
 
 ci_inline void citp_fdinfo_init(citp_fdinfo* fdi, citp_protocol_impl* p) {
   /* The rest of the initialisation is done in citp_fdtable_insert(). */
+#if CI_CFG_FD_CACHING
   fdi->can_cache = 0;
+#endif
   oo_atomic_set(&fdi->ref_count, 1);
   fdi->protocol = p;
   fdi->seq = fdtable_seq_no++;
@@ -404,6 +405,11 @@ ci_inline void citp_fdinfo_release_ref_fast(citp_fdinfo* fdinfo) {
   if( citp_fdtable_not_mt_safe() )
     citp_fdinfo_release_ref(fdinfo, 0);
 }
+/*! Take the same number of references as with citp_fdtable_lookup_fast(). */
+ci_inline void citp_fdinfo_ref_fast(citp_fdinfo* fdinfo) {
+  if( citp_fdtable_not_mt_safe() )
+    citp_fdinfo_ref(fdinfo);
+}
 
 
 /* Hands-over the socket to the kernel.  That is, it replaces the
@@ -449,7 +455,9 @@ extern int         __citp_exec_restore( int fd ) CI_HF;
  */
 
 extern citp_protocol_impl citp_tcp_protocol_impl CI_HV;
+#if CI_CFG_FD_CACHING
 extern citp_protocol_impl citp_tcp_cached_protocol_impl CI_HV;
+#endif
 extern citp_protocol_impl citp_udp_protocol_impl CI_HV;
 #if CI_CFG_USERSPACE_EPOLL
 extern citp_protocol_impl citp_epoll_protocol_impl CI_HV;
@@ -529,6 +537,15 @@ extern int citp_onload_dev_major(void);
 extern int citp_onload_epoll_dev_major(void);
 extern dev_t citp_onloadfs_dev_t(void);
 
+/* Locking order:
+ * - citp_pkt_map_lock is the innermost lock;
+ * - citp_dup_lock should be taken before citp_ul_lock.
+ * citp_dup_lock protects dups and forks, which are not async-safe and can
+ * not be called from signal handler.  So, citp_dup_lock may be taken
+ * without enter_lib.
+ */
+extern pthread_mutex_t citp_dup_lock;
+extern pthread_mutex_t citp_pkt_map_lock;
 
 /**********************************************************************
  ** fdtable internals.
@@ -635,9 +652,14 @@ extern citp_fdinfo*  citp_fdtable_lookup(unsigned fd) CI_HF;
 extern citp_fdinfo*  citp_fdtable_lookup_fast(citp_lib_context_t*,
                                               unsigned fd) CI_HF;
 
+/* Find out what sort of thing [fd] is, and if it is a user-level socket
+ * then map in the user-level state.
+ */
+citp_fdinfo * citp_fdtable_probe_locked(unsigned fd, int print_banner) CI_HF;
+
 extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd) CI_HF;
 
-extern void          citp_fdtable_close_cached(int fdt_locked) CI_HF;
+extern void          citp_fdtable_close_cached(void) CI_HF;
 extern void          citp_fdtable_new_fd_set(unsigned fd, citp_fdinfo_p,
 					     int fdt_locked) CI_HF;
 extern void          citp_fdtable_insert(citp_fdinfo*,
@@ -772,7 +794,9 @@ ci_inline void __citp_enter_lib(citp_lib_context_t *lib_context
 {
   lib_context->saved_errno = errno;
   lib_context->thread = __oo_per_thread_get();
-  Log_LIB(log("  citp_enter_lib(%p) %s (%d)", lib_context->thread, fn, line));
+  Log_LIB(log("  citp_enter_lib(%p) inside_lib=%d %s (%d)",
+              lib_context->thread, lib_context->thread->sig.inside_lib,
+              fn, line));
   ci_assert_ge(lib_context->thread->sig.inside_lib, 0);
   ++lib_context->thread->sig.inside_lib;
 }
@@ -782,7 +806,9 @@ ci_inline void __citp_reenter_lib(citp_lib_context_t *lib_context
                                   CI_DEBUG_ARG(const char *fn)
                                   CI_DEBUG_ARG(int line) ) 
 {
-  Log_LIB(log("  citp_reenter_lib(%p) %s (%d)", lib_context->thread, fn, line));
+  Log_LIB(log("  citp_reenter_lib(%p) inside_lib=%d %s (%d)",
+              lib_context->thread, lib_context->thread->sig.inside_lib,
+              fn, line));
   ci_assert_ge(lib_context->thread->sig.inside_lib, 0);
   ++lib_context->thread->sig.inside_lib;
 }
@@ -792,7 +818,9 @@ ci_inline void __citp_exit_lib(citp_lib_context_t *lib_context, int do_errno
                                CI_DEBUG_ARG(const char *fn)
                                CI_DEBUG_ARG(int line) ) 
 {
-  Log_LIB(log("  citp_exit_lib(%p) %s (%d)", lib_context->thread, fn, line));
+  Log_LIB(log("  citp_exit_lib(%p) inside_lib=%d %s (%d)",
+              lib_context->thread, lib_context->thread->sig.inside_lib,
+              fn, line));
   ci_assert_ge(lib_context->thread->sig.inside_lib, 1);
   --lib_context->thread->sig.inside_lib;
   ci_compiler_barrier();
@@ -870,10 +898,125 @@ extern int onload_close(int fd) CI_HF;
 # define ci_major(dev) ((dev) & 0xff00)
 
 
-/* The events that correspond to the select() sets. */
-#define SELECT_RD_SET  (POLLIN | POLLRDNORM | POLLRDBAND | POLLHUP | POLLERR)
-#define SELECT_WR_SET  (POLLOUT | POLLWRNORM | POLLWRBAND | POLLERR)
-#define SELECT_EX_SET  (POLLPRI)
+/**********************************************************************
+ * poll, select, epoll
+ */
+
+#if CI_CFG_USERSPACE_SELECT
+/* Generic poll/ppoll implementation.
+ * This function is called after citp_enter_lib(), and it MUST NOT call
+ * citp_exit_lib().
+ * At exit time, if *timeout_ms!=0 and rc==0, caller should block in system
+ * call for the specified timeout.
+ */
+int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
+                    int *timeout_ms, citp_lib_context_t *lib_context);
+/* Generic select/pselect implementation.
+ * This function is called after citp_enter_lib(), and it MUST NOT call
+ * citp_exit_lib().
+ * At exit time, if *timeout_ms!=0 and rc==0, caller should block in system
+ * call for the specified timeout.
+ */
+int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
+                      int *timeout_ms, citp_lib_context_t *lib_context,
+                      const sigset_t *sigmask, sigset_t *sigsaved);
+
+/* ppoll/pselect common code.
+ *
+ * ppoll/pselect functions work in following way:
+ * - enter lib;
+ * - non-blocking poll/select and fast exit if we've got anything;
+ * - exit lib if not spinning
+ * - spin:
+ *   - citp_ul_pwait_spin_pre():
+ *     - exit lib;
+ *     - block all signals to be blocked;
+ *     - enter lib to prevent all signals to be handled;
+ *     - set sigprocmask - allow some new signals;
+ *     - check for pending signals and return -1(errno=EINTR) if necessary.
+ *   - citp_ul_do_(poll|select)
+ *   - citp_ul_pwait_spin_done():
+ *     - restore sigmask
+ *     - check signals to return -1(errno=EINTR) if any;
+ *     - exit lib;
+ *   - return to user if we have found something;
+ * - ci_sys_p(poll|select)
+ *
+ *
+ *
+ * Known bug
+ * ---------
+ * When spinning for a limited time (i.e. we spin, then block).
+ * Is a SIGX is allowed by sigsaved, it MAY be handled silently by
+ * ppoll/pselect/epoll_pwait.  No reasonable application I can imagine
+ * should not be broken by this.
+ *
+ * To fix this bug, we can block all signals between spinning and OS call.
+ * I.e instead of current citp_ul_pwait_spin_done()+sys_ppoll() we can do:
+ * sigprocmask(block all)+sys_ppoll()+sigprocmask(restore).
+ * It makes the code much more complicated and adds sigprocmask syscall
+ * to the latency-critical path without any visible benefit.
+ */
+
+static inline int
+citp_ul_pwait_spin_pre(citp_lib_context_t *lib_context,
+                       const sigset_t *sigmask, sigset_t *sigsaved)
+{
+  Log_POLL(log("%s(%p,%p)", __func__, sigmask, sigsaved));
+  sigprocmask(SIG_BLOCK, sigmask, sigsaved);
+  citp_enter_lib(lib_context);
+
+  if( sigmask == NULL )
+    return 0;
+
+  sigprocmask(SIG_SETMASK, sigmask, NULL);
+  if(CI_UNLIKELY( lib_context->thread->sig.run_pending )) {
+    sigprocmask(SIG_SETMASK, sigsaved, NULL);
+    Log_POLL(log("%s: interrupted", __func__));
+    errno = EINTR;
+    return -1;
+  }
+  return 0;
+}
+static inline void
+citp_ul_pwait_spin_done(citp_lib_context_t *lib_context,
+                        sigset_t *sigsaved, int *p_rc)
+{
+  Log_POLL(log("%s(%p,%d)", __func__, sigsaved, *p_rc));
+  sigprocmask(SIG_BLOCK, sigsaved, NULL);
+  if(CI_UNLIKELY( lib_context->thread->sig.run_pending )) {
+    Log_POLL(log("%s: interrupted", __func__));
+    errno = EINTR;
+    *p_rc = -1;
+  }
+  citp_exit_lib(lib_context, *p_rc >= 0);
+
+  /* If you want to fix the bug described above, move this sigprocmask to
+   * after OS call. */
+  sigprocmask(SIG_SETMASK, sigsaved, NULL);
+}
+
+
+/* Poll the stack if allowed, needed and we can grab the lock.  Return true
+ * if we did poll the stack, otherwise return false.
+ *
+ * Used by poll(), select() and epoll_wait().
+ */
+static inline int citp_poll_if_needed(ci_netif* ni, ci_uint64 recent_frc,
+                                      int is_spinning)
+{
+  if( ci_netif_may_poll(ni) &&
+      ci_netif_need_poll_maybe_spinning(ni, recent_frc, is_spinning) &&
+      ci_netif_trylock(ni) ) {
+    ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
+    if( is_spinning )
+      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
+    ci_netif_unlock(ni);
+    return 1;
+  }
+  return 0;
+}
+#endif
 
 
 #endif  /* __CI_TRANSPORT_INTERNAL_H__ */

@@ -1320,13 +1320,27 @@ cicp_user_retrieve(ci_netif*                    ni,
       ipcache->nexthop = ipcache->ip.ip_daddr_be32;
     }
   }
+
   /* ?? TODO: The next line is expensive because we iterate over the whole
    * route table (again).  I'm sure we can make this much cheaper in the
    * common case.
    */
   cicp_fwdinfo_addr_kind(fwdt, ipcache->nexthop, &kind);
-  if( kind.bitsvalue != 0 )
-    goto alienroute;
+  if( kind.bitsvalue ) {
+    /* 
+     * This detects the case where the user has created a gateway to
+     * the same interface from which the packet would have gone out if
+     * the gateway didn't exist. It would be a silly route to have but
+     * since linux handles it, we want to handle it as well. Note that
+     * linux does not handle (i.e. no traffic is passed) the situation
+     * when the gateway points to a non-sf interface or to another sf
+     * interface. We are matching that behavior as well.
+     */
+    if( kind.bits.is_ownaddr && ipcache->nexthop == row->pref_source )
+      ipcache->nexthop = ipcache->ip.ip_daddr_be32;
+    else
+      goto alienroute;
+  }
 
   /* Find the MAC address of the first hop destination.
    *

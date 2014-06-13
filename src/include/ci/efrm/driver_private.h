@@ -66,8 +66,6 @@
 /* Internal structure for resource driver */
 extern struct efrm_resource_manager *efrm_rm_table[];
 
-/* Do we have buffer table at all? */
-extern int efrm_has_buffer_table;
 
 /*--------------------------------------------------------------------
  *
@@ -82,6 +80,7 @@ extern void efrm_driver_ctor(void);
 extern void efrm_driver_stop(void);
 extern void efrm_driver_dtor(void);
 extern int  efrm_nic_ctor(struct efrm_nic *, int ifindex,
+			  int bt_min, int bt_lim,
 			  const struct vi_resource_dimensions *);
 extern void efrm_nic_dtor(struct efrm_nic *);
 extern int  efrm_driver_register_nic(struct efrm_nic *);
@@ -108,8 +107,7 @@ struct vi_resource_dimensions {
 
 /*! Initialise resources */
 extern int
-efrm_resources_init(const struct vi_resource_dimensions *,
-		    int buffer_table_min, int buffer_table_lim);
+efrm_resources_init(const struct vi_resource_dimensions *);
 
 /*! Tear down resources */
 extern void efrm_resources_fini(void);

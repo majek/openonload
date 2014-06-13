@@ -32,6 +32,7 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/efabcfg.h>
 #include <onload/oof_interface.h>
+#include <onload/version.h>
 
 
 int
@@ -60,7 +61,6 @@ oo_priv_set_stack(ci_private_t* priv, tcp_helper_resource_t* trs)
     }
   } while( ci_cas_uintptr_fail(p, old, new) );
 
-  efab_thr_ref(trs);
   return 0;
 }
 
@@ -71,13 +71,15 @@ oo_priv_lookup_and_attach_stack(ci_private_t* priv, const char* name,
 {
   tcp_helper_resource_t* trs;
   int rc;
-  if( (rc = efab_thr_table_lookup(name, id, EFAB_THR_TABLE_LOOKUP_CHECK_USER,
+  if( (rc = efab_thr_table_lookup(name, id,
+                                  EFAB_THR_TABLE_LOOKUP_CHECK_USER,
                                   &trs)) == 0 ) {
     if( (rc = oo_priv_set_stack(priv, trs)) == 0 ) {
       priv->fd_type = CI_PRIV_TYPE_NETIF;
       priv->sock_id = OO_SP_NULL;
     }
-    efab_thr_release(trs);
+    else
+      efab_thr_release(trs);
   }
   return rc;
 }
@@ -88,18 +90,21 @@ efab_tcp_helper_stack_attach(ci_private_t* priv, void *arg)
 {
   oo_stack_attach_t* op = arg;
   tcp_helper_resource_t* trs = priv->thr;
+  int rc;
 
-  OO_DEBUG_TCPH(ci_log("%s: att_fd:%lld", __FUNCTION__, op->fd));
   if( trs == NULL ) {
     LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
     return -EINVAL;
   }
+  OO_DEBUG_TCPH(ci_log("%s: [%d]", __FUNCTION__, NI_ID(&trs->netif)));
 
-  op->fd = oo_create_stack_fd(trs);
-  if( op->fd < 0 ) {
-    OO_DEBUG_ERR(ci_log("%s: oo_create_stack_fd failed (%lld)", __FUNCTION__, op->fd));
-    return op->fd;
+  rc = oo_create_stack_fd(trs);
+  if( rc < 0 ) {
+    OO_DEBUG_ERR(ci_log("%s: oo_create_stack_fd failed (%d)",
+                        __FUNCTION__, rc));
+    return rc;
   }
+  op->fd = rc;
 
   /* Re-read the OS socket buffer size settings.  This ensures we'll use
    * up-to-date values for this new socket.
@@ -117,12 +122,13 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   tcp_helper_resource_t* trs = priv->thr;
   tcp_helper_endpoint_t* ep = NULL;
   citp_waitable_obj *wo;
-  int flags;
+  int rc, flags, type = op->type;
 
 /* SOCK_CLOEXEC and SOCK_NONBLOCK exist from 2.6.27 both */
 #ifdef SOCK_TYPE_MASK
   BUILD_BUG_ON(SOCK_CLOEXEC != O_CLOEXEC);
-  flags = op->type & ~SOCK_TYPE_MASK;
+  flags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
+  type &= SOCK_TYPE_MASK;
 # ifdef SOCK_NONBLOCK
     if( SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK) )
       flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
@@ -130,7 +136,6 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
 #else
   flags = 0;
 #endif
-
 
   OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
   if( trs == NULL ) {
@@ -142,6 +147,8 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
     return -EINVAL;
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
+  if( ci_cas32u_fail(&ep->aflags, 0, OO_THR_EP_AFLAG_ATTACHED ) )
+    return -EBUSY;
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
 
   /* create OS socket */
@@ -149,18 +156,32 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
     struct socket *sock;
     int sock_fd;
 
-    sock_fd = sock_create(op->domain, op->type, 0, &sock);
-    if( sock_fd < 0 )
-      return sock_fd;
+    rc = sock_create(op->domain, type, 0, &sock);
+    if( rc < 0 ) {
+      LOG_E(ci_log("%s: ERROR: sock_create(%d, %d, 0) failed (%d)",
+                   __FUNCTION__, op->domain, type, rc));
+      ep->aflags = 0;
+      return rc;
+    }
 #ifdef SOCK_TYPE_MASK
     sock_fd = sock_map_fd(sock, flags | SOCK_CLOEXEC);
 #else
     sock_fd = sock_map_fd(sock);
 #endif
-
-    if( sock_fd < 0 )
+    if( sock_fd < 0 ) {
+      LOG_E(ci_log("%s: ERROR: sock_map_fd failed (%d)",
+                   __FUNCTION__, sock_fd));
+      ep->aflags = 0;
       return sock_fd;
-    efab_attach_os_socket(ep, sock_fd);
+    }
+    rc = efab_attach_os_socket(ep, sock_fd);
+    if( rc < 0 ) {
+      LOG_E(ci_log("%s: ERROR: efab_attach_os_socket failed (%d)",
+                   __FUNCTION__, rc));
+      efab_linux_sys_close(sock_fd);
+      ep->aflags = 0;
+      return rc;
+    }
     wo->sock.domain = op->domain;
     wo->sock.ino = ep->os_socket->file->f_dentry->d_inode->i_ino;
     wo->sock.uid = ep->os_socket->file->f_dentry->d_inode->i_uid;
@@ -169,11 +190,10 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   /* Create a new file descriptor to attach the stack to. */
   ci_assert((wo->waitable.state & CI_TCP_STATE_TCP) ||
             wo->waitable.state == CI_TCP_STATE_UDP);
-  op->fd = oo_create_fd(ep, flags,
-                  (wo->waitable.state & CI_TCP_STATE_TCP) ==
-                                                    CI_TCP_STATE_TCP ?
-                  CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP);
-  if( op->fd < 0 ) {
+  rc = oo_create_fd(ep, flags,
+                    (wo->waitable.state & CI_TCP_STATE_TCP) ?
+                    CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP);
+  if( rc < 0 ) {
     ci_irqlock_state_t lock_flags;
     ci_irqlock_lock(&ep->thr->lock, &lock_flags);
     if( ep->os_socket != NULL ) {
@@ -181,9 +201,11 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
       ep->os_socket = NULL;
     }
     ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
-    return op->fd;
+    ep->aflags = 0;
+    return rc;
   }
 
+  op->fd = rc;
 #ifdef SOCK_NONBLOCK
   if( op->type & SOCK_NONBLOCK )
     ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_NONBLOCK);
@@ -202,6 +224,7 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   oo_pipe_attach_t* op = arg;
   tcp_helper_resource_t* trs = priv->thr;
   tcp_helper_endpoint_t* ep = NULL;
+  int rc;
 
   OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
   if( trs == NULL ) {
@@ -213,49 +236,24 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
     return -EINVAL;
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
+  if( ci_cas32u_fail(&ep->aflags, 0, OO_THR_EP_AFLAG_ATTACHED ) )
+    return -EBUSY;
 
-  op->rfd = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_READER);
-  if( op->rfd < 0 )
-    return op->rfd;
+  rc = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_READER);
+  if( rc < 0 ) {
+    ep->aflags = 0;
+    return rc;
+  }
+  op->rfd = rc;
 
-  op->wfd = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_WRITER);
-  if( op->wfd < 0 ) {
+  rc = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_WRITER);
+  if( rc < 0 ) {
     efab_linux_sys_close(op->rfd);
-    return op->wfd;
+    ep->aflags = 0;
+    return rc;
   }
+  op->wfd = rc;
 
-  return 0;
-}
-
-
-/* Handover the user-level socket to the OS one.  This means that the FD
-** that previously pointed at a ul socket will now point at the OS socket
-** that backed it.  This gets called when we connect through a non-l5
-** interface, or bind to a non-l5 interface.
-*/
-static int
-efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
-{
-  tcp_helper_endpoint_t* ep;
-  int fd = *(ci_int32*) p_fd;
-
-  if( ! CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type) )
-    return -EINVAL;
-
-  ep = ci_trs_ep_get(priv->thr, priv->sock_id);
-  if( ep->os_socket == NULL ) {
-    OO_DEBUG_ERR(ci_log("%s: %d:%d No O/S socket to handover",
-                        __FUNCTION__, ep->thr->id, ep->id));
-    return -EINVAL;
-  }
-  return efab_fd_handover(priv->_filp, ep->os_socket->file, fd);
-}
-
-
-static int efab_tcp_helper_get_asid(ci_private_t *priv_unused, void *arg)
-{
-  oo_netif_get_addr_spc_id_t *op = arg;
-  ci_addr_spc_id_set(&op->addr_spc_id, current->mm);
   return 0;
 }
 
@@ -376,8 +374,6 @@ efab_tcp_helper_move_state(ci_private_t* priv, void *arg)
 }
 
 
-
-
 /*--------------------------------------------------------------------
  *!
  * Entry point from user-mode when the TCP/IP stack requests
@@ -461,7 +457,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
   int index, rc=0;
   tcp_helper_resource_t* thr = NULL;
   ci_netif* ni = NULL;
-  int check_user = EFAB_THR_TABLE_LOOKUP_CHECK_USER;
+  int flags = EFAB_THR_TABLE_LOOKUP_CHECK_USER | EFAB_THR_TABLE_LOOKUP_NO_WARN; 
 
 #if CI_CFG_EFAB_EPLOCK_RECORD_CONTENTIONS
   int j;
@@ -469,31 +465,40 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
 #endif
 
   info->ni_exists = 0;
+  info->ni_no_perms_exists = 0;
   if( info->ni_orphan ) {
-    check_user |= EFAB_THR_TABLE_LOOKUP_NO_UL;
+    flags |= EFAB_THR_TABLE_LOOKUP_NO_UL;
     info->ni_orphan = 0;
   }
-  if( efab_thr_table_lookup(NULL, info->ni_index, check_user, &thr) == 0 ) {
+  rc = efab_thr_table_lookup(NULL, info->ni_index, flags, &thr);
+  if( rc == 0 ) {
     info->ni_exists = 1;
     info->ni_orphan = (thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND);
     ni = &thr->netif;
     info->mmap_bytes = thr->mem_mmap_bytes;
     info->k_ref_count = thr->k_ref_count;
     info->rs_ref_count = oo_atomic_read(&thr->ref_count);
+    memcpy(info->ni_name, ni->state->name, sizeof(ni->state->name));
+  } else if( rc == -EACCES ) {
+    info->ni_no_perms_id = info->ni_index;
+    if( efab_thr_get_inaccessible_stack_info(info->ni_index, 
+                                             &info->ni_no_perms_uid,
+                                             &info->ni_no_perms_euid,
+                                             &info->ni_no_perms_share_with,
+                                             info->ni_no_perms_name) == 0 )
+      info->ni_no_perms_exists = 1;
   }
 
   /* sub-ops that do not need the netif to exist */
   if( info->ni_subop == CI_DBG_NETIF_INFO_GET_NEXT_NETIF ) {
     tcp_helper_resource_t* next_thr;
-    if( ni )
-      memcpy(info->u.ni_next_ni.ni_name, ni->state->name,
-             sizeof(ni->state->name));
+
     info->u.ni_next_ni.index = -1;
     for( index = info->ni_index + 1;
          index < 10000 /* FIXME: magic! */;
-         ++index )
-      if( (rc = efab_thr_table_lookup(NULL, index, check_user,
-                                      &next_thr)) == 0 ) {
+         ++index ) {
+      rc = efab_thr_table_lookup(NULL, index, flags, &next_thr);
+      if( rc == 0 ) {
         if( next_thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )
           efab_tcp_helper_k_ref_count_dec(next_thr, 1);
         else
@@ -501,6 +506,11 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
         info->u.ni_next_ni.index = index;
         break;
       }
+      if( rc == -EACCES ) {
+        info->u.ni_next_ni.index = index;
+        break;
+      }
+    }
     rc = 0;
   }
   else if( info->ni_subop == CI_DBG_NETIF_INFO_NOOP ) {
@@ -1042,18 +1052,27 @@ ioctl_printk(ci_private_t *priv, void *arg)
 static int
 tcp_helper_alloc_rsop(ci_private_t *priv, void *arg)
 {
+  /* Using lock to serialize multiple processes trying to create
+   * stacks with same name.
+   */
+static DEFINE_MUTEX(ctor_mutex);
+
   ci_resource_onload_alloc_t *alloc = arg;
   tcp_helper_resource_t* trs;
   int rc;
-  rc = tcp_helper_alloc_ul(alloc, NULL, 0, &trs);
-  if( rc < 0 )
-    return rc;
-  rc = oo_priv_set_stack(priv, trs);
+
+  mutex_lock(&ctor_mutex);
+  rc = tcp_helper_alloc_ul(alloc, NULL, -1, &trs);
   if( rc == 0 ) {
-    priv->fd_type = CI_PRIV_TYPE_NETIF;
-    priv->sock_id = OO_SP_NULL;
+    rc = oo_priv_set_stack(priv, trs);
+    if( rc == 0 ) {
+      priv->fd_type = CI_PRIV_TYPE_NETIF;
+      priv->sock_id = OO_SP_NULL;
+    }
+    else
+      efab_thr_release(trs);
   }
-  efab_thr_release(trs);
+  mutex_unlock(&ctor_mutex);
   return rc;
 }
 void tcp_helper_pace(tcp_helper_resource_t* trs, int pace_val)
@@ -1106,25 +1125,121 @@ ioctl_kill_self(ci_private_t *priv, void *unused)
 }
 extern int ioctl_iscsi_control_op (ci_private_t *priv, void *arg);
 
+
+/* Move priv file to the alien_ni stack.
+ * If rc=0, returns with alien_ni stack locked. */
+static int efab_file_move_to_alien_stack(ci_private_t *priv,
+                                         ci_netif *alien_ni)
+{
+  tcp_helper_resource_t *old_thr = priv->thr;
+  tcp_helper_resource_t *new_thr = netif2tcp_helper_resource(alien_ni);
+  ci_tcp_state *old_ts = SP_TO_TCP(&old_thr->netif, priv->sock_id);
+  ci_tcp_state *mid_ts;
+  ci_tcp_state *new_ts;
+  tcp_helper_endpoint_t *ep;
+  struct oo_file_ref *os_socket;
+  int rc;
+
+  mid_ts = CI_ALLOC_OBJ(ci_tcp_state);
+  if( mid_ts == NULL ) {
+    ci_netif_unlock(&old_thr->netif);
+    return -ENOMEM;
+  }
+  *mid_ts = *old_ts;
+
+  /* We are starting with locked "current stack" and finish with
+   * locked "current stack".  Change the lock! */
+  ci_netif_unlock(&old_thr->netif);
+  rc = ci_netif_lock(alien_ni);
+  if( rc != 0 ) {
+    CI_FREE_OBJ(mid_ts);
+    return -EBUSY;
+  }
+
+  /* Allocate a socket in the alien_ni stack */
+  new_ts = ci_tcp_get_state_buf(alien_ni);
+  if( new_ts == NULL ) {
+    /* too bad: can't move fd to another stack. */
+    ci_netif_unlock(alien_ni);
+    CI_FREE_OBJ(mid_ts);
+    return -ENOMEM;
+  }
+
+  /* Move os_socket from one ep to another */
+  ep = ci_trs_ep_get(old_thr, priv->sock_id);
+  os_socket = NULL;
+  if( ep->os_socket != NULL )
+    os_socket = oo_file_ref_add(ep->os_socket);
+  ep = ci_trs_ep_get(new_thr, new_ts->s.b.bufid);
+  if( ci_cas32u_fail(&ep->aflags, 0, OO_THR_EP_AFLAG_ATTACHED ) ) {
+    ci_tcp_state_free(alien_ni, new_ts);
+    ci_netif_unlock(alien_ni);
+    if( os_socket != NULL )
+      oo_file_ref_drop(os_socket);
+    CI_FREE_OBJ(mid_ts);
+    return -EBUSY;
+  }
+  ci_assert_equal(ep->os_socket, NULL);
+  ep->os_socket = os_socket;
+
+  /* do not copy old_ts->s.b.bufid! */
+  new_ts->c = mid_ts->c;
+  new_ts->tcpflags = mid_ts->tcpflags;
+  new_ts->s.s_flags = mid_ts->s.s_flags;
+  new_ts->s.s_aflags = mid_ts->s.s_aflags;
+  new_ts->s.domain = mid_ts->s.domain;
+  new_ts->s.cp = mid_ts->s.cp;
+  new_ts->s.pkt = mid_ts->s.pkt;
+  new_ts->s.space_for_hdrs.space_for_tcp_hdr =
+          mid_ts->s.space_for_hdrs.space_for_tcp_hdr;
+  new_ts->s.uid = mid_ts->s.uid;
+  CI_DEBUG(new_ts->s.pid = mid_ts->s.pid);
+  new_ts->s.ino = mid_ts->s.ino;
+  new_ts->s.cmsg_flags = mid_ts->s.cmsg_flags;
+  ci_pmtu_state_init(alien_ni, &new_ts->s, &new_ts->s.pkt.pmtus,
+                     CI_IP_TIMER_PMTU_DISCOVER);
+  new_ts->s.so = mid_ts->s.so;
+  new_ts->s.so_priority = mid_ts->s.so_priority;
+  new_ts->s.so_error = mid_ts->s.so_error;
+  new_ts->s.tx_errno = mid_ts->s.tx_errno;
+  new_ts->s.rx_errno = mid_ts->s.rx_errno;
+  new_ts->s.b.state = mid_ts->s.b.state;
+  new_ts->s.b.sb_flags = mid_ts->s.b.sb_flags;
+  new_ts->s.b.sb_aflags = mid_ts->s.b.sb_aflags;
+
+  /* free temporary mid_ts storage */
+  CI_FREE_OBJ(mid_ts);
+
+  /* hack fd to point to the new endpoint */
+  oo_move_file(priv, new_thr, new_ts->s.b.bufid);
+
+  /* Free resources from the old endpoint. */
+  efab_tcp_helper_close_endpoint(old_thr, old_ts->s.b.bufid);
+  efab_thr_release(old_thr);
+
+  return 0;
+}
+
 static int
 efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 {
   struct oo_op_loopback_connect *carg = arg;
   ci_netif *alien_ni = NULL;
   oo_sp tls_id;
-  tcp_helper_endpoint_t *ep;
+
+  carg->out_moved = 0;
 
   if( !CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type) )
     return -EINVAL;
   if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
       CITP_TCP_LOOPBACK_TO_CONNSTACK &&
       NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
-      CITP_TCP_LOOPBACK_TO_LISTSTACK ) {
+      CITP_TCP_LOOPBACK_TO_LISTSTACK &&
+      NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
+      CITP_TCP_LOOPBACK_TO_NEWSTACK) {
     ci_netif_unlock(&priv->thr->netif);
     return -EINVAL;
   }
-  ep = ci_trs_ep_get(priv->thr, priv->sock_id);
-
 
   while( iterate_netifs_unlocked(&alien_ni) == 0 ) {
 
@@ -1135,15 +1250,17 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
     if( NI_OPTS(alien_ni).tcp_server_loopback == CITP_TCP_LOOPBACK_OFF )
       continue; /* server does not accept loopback connections */
 
-    if( NI_OPTS(&priv->thr->netif).tcp_client_loopback ==
-        CITP_TCP_LOOPBACK_TO_CONNSTACK &&
+    if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
+        CITP_TCP_LOOPBACK_TO_LISTSTACK &&
         NI_OPTS(alien_ni).tcp_server_loopback !=
-        CITP_TCP_LOOPBACK_TO_CONNSTACK )
+        CITP_TCP_LOOPBACK_ALLOW_ALIEN_IN_ACCEPTQ )
       continue; /* options of the stacks to not match */
 
-    if( NI_OPTS(&priv->thr->netif).tcp_client_loopback ==
-        CITP_TCP_LOOPBACK_TO_CONNSTACK &&
-        priv->thr->netif.euid != alien_ni->euid /* todo: better checks */ )
+    if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
+        CITP_TCP_LOOPBACK_TO_LISTSTACK &&
+        priv->thr->netif.euid != alien_ni->euid
+        /* todo: better checks, like
+         * efab_thr_can_access_stack(priv->thr->netif) in alien process */ )
       continue; /* server can't accept our socket */
 
     tls_id = ci_tcp_connect_find_local_peer(alien_ni, carg->dst_addr,
@@ -1157,92 +1274,70 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
       efab_thr_ref(netif2tcp_helper_resource(alien_ni));
       iterate_netifs_unlocked_dropref(alien_ni);
 
-      if( NI_OPTS(&priv->thr->netif).tcp_client_loopback ==
-          CITP_TCP_LOOPBACK_TO_CONNSTACK ) {
-        rc = ci_tcp_connect_alien(&priv->thr->netif, priv->sock_id,
-                                  carg->dst_addr, alien_ni, tls_id);
+      switch( NI_OPTS(&priv->thr->netif).tcp_client_loopback ) {
+      case CITP_TCP_LOOPBACK_TO_CONNSTACK:
+        carg->out_rc =
+            ci_tcp_connect_lo_toconn(&priv->thr->netif, priv->sock_id,
+                                     carg->dst_addr, alien_ni, tls_id);
         efab_thr_release(netif2tcp_helper_resource(alien_ni));
-        return rc;
-      }
-      else {
-        tcp_helper_resource_t *old_thr = priv->thr;
-        ci_tcp_state *old_ts = SP_TO_TCP(&old_thr->netif, priv->sock_id);
-        ci_tcp_state *mid_ts;
-        ci_tcp_state *new_ts;
-        struct oo_file_ref *os_socket = ep->os_socket;
+        return 0;
 
-        ci_assert_equal(NI_OPTS(&priv->thr->netif).tcp_client_loopback,
-                        CITP_TCP_LOOPBACK_TO_LISTSTACK);
-
-        mid_ts = CI_ALLOC_OBJ(ci_tcp_state);
-        if( mid_ts == NULL ) {
-          ci_netif_unlock(&old_thr->netif);
+      case CITP_TCP_LOOPBACK_TO_LISTSTACK:
+        rc = efab_file_move_to_alien_stack(priv, alien_ni);
+        if( rc != 0 ) {
           efab_thr_release(netif2tcp_helper_resource(alien_ni));
-          return -ECONNREFUSED;
-        }
-        *mid_ts = *old_ts;
-
-        ci_netif_unlock(&old_thr->netif);
-
-        /* Allocate a socket in the alien_ni stack */
-        ci_netif_lock_fixme(alien_ni);
-        new_ts = ci_tcp_get_state_buf(alien_ni);
-        ci_netif_unlock(alien_ni);
-        if( new_ts == NULL ) {
-          efab_thr_release(netif2tcp_helper_resource(alien_ni));
-          /* too bad: can't move fd to another stack.  Handover. */
-          CI_FREE_OBJ(mid_ts);
           /* if we return error, UL will do handover. */
-          return -ECONNREFUSED;
+          return rc;
         }
-
-        /* From now on, we can't fail:
-         * hack fd to point to the new endpoint. */
-        ci_netif_lock_fixme(&old_thr->netif);
-
-        ep->os_socket = NULL;
-        ci_bit_set(&old_ts->s.b.sb_aflags, CI_SB_AFLAG_ORPHAN_BIT);
-        ci_ip_timer_clear(&old_thr->netif, &old_ts->s.pkt.pmtus.tid);
-        citp_waitable_obj_free(&old_thr->netif, &old_ts->s.b);
-        ci_netif_unlock(&old_thr->netif);
-
-        oo_move_file(priv, netif2tcp_helper_resource(alien_ni),
-                     new_ts->s.b.bufid);
-        efab_thr_release(old_thr);
-
-        /* do not copy old_ts->s.b.bufid! */
-        ci_netif_lock_fixme(alien_ni);
-        ci_trs_ep_get(priv->thr, priv->sock_id)->os_socket = os_socket;
-        new_ts->c = mid_ts->c;
-        new_ts->tcpflags = mid_ts->tcpflags;
-        new_ts->s.s_flags = mid_ts->s.s_flags;
-        new_ts->s.s_aflags = mid_ts->s.s_aflags;
-        new_ts->s.domain = mid_ts->s.domain;
-        new_ts->s.addr_spc_id = mid_ts->s.addr_spc_id;
-        new_ts->s.cp = mid_ts->s.cp;
-        new_ts->s.pkt = mid_ts->s.pkt;
-        new_ts->s.space_for_hdrs.space_for_tcp_hdr =
-                mid_ts->s.space_for_hdrs.space_for_tcp_hdr;
-        new_ts->s.uid = mid_ts->s.uid;
-        CI_DEBUG(new_ts->s.pid = mid_ts->s.pid);
-        new_ts->s.ino = mid_ts->s.ino;
-        new_ts->s.cmsg_flags = mid_ts->s.cmsg_flags;
-        ci_pmtu_state_init(alien_ni, &new_ts->s, &new_ts->s.pkt.pmtus,
-                           CI_IP_TIMER_PMTU_DISCOVER);
-        new_ts->s.so = mid_ts->s.so;
-        new_ts->s.so_priority = mid_ts->s.so_priority;
-        new_ts->s.so_error = mid_ts->s.so_error;
-        new_ts->s.tx_errno = mid_ts->s.tx_errno;
-        new_ts->s.rx_errno = mid_ts->s.rx_errno;
-        new_ts->s.b.state = mid_ts->s.b.state;
-        new_ts->s.b.sb_flags = mid_ts->s.b.sb_flags;
-        new_ts->s.b.sb_aflags = mid_ts->s.b.sb_aflags;
-        new_ts->s.local_peer = tls_id;
-        ci_netif_unlock(alien_ni);
-        CI_FREE_OBJ(mid_ts);
 
         /* Connect again, using new endpoint */
-        return -EREMOTE;
+        carg->out_rc =
+            ci_tcp_connect_lo_samestack(alien_ni,
+                                        SP_TO_TCP(alien_ni, priv->sock_id),
+                                        tls_id);
+        ci_netif_unlock(alien_ni);
+        carg->out_moved = 1;
+        return 0;
+
+
+      case CITP_TCP_LOOPBACK_TO_NEWSTACK:
+      {
+        tcp_helper_resource_t *new_thr;
+        ci_resource_onload_alloc_t alloc;
+
+        /* create new stack
+         * todo: no hardware interfaces are necessary */
+        alloc.in_cpu_khz = IPTIMER_STATE(&priv->thr->netif)->khz;
+        strcpy(alloc.in_version, ONLOAD_VERSION);
+        strcpy(alloc.in_uk_intf_ver, oo_uk_intf_ver);
+        alloc.in_name[0] = '\0';
+        alloc.in_flags = 0;
+        rc = tcp_helper_alloc_kernel(&alloc, &NI_OPTS(&priv->thr->netif),
+                                     NULL/*ifindices*/, 0, &new_thr);
+        if( rc != 0 ) {
+          ci_log("%s: tcp_helper_rm_alloc failed with %d", __func__, rc);
+          efab_thr_release(netif2tcp_helper_resource(alien_ni));
+          return -ECONNREFUSED;
+        }
+
+        /* move connecting socket to the new stack */
+        rc = efab_file_move_to_alien_stack(priv, &new_thr->netif);
+        if( rc != 0 ) {
+          ci_log("%s: efab_file_move_to_alien_stack failed with %d", __func__, rc);
+          efab_thr_release(netif2tcp_helper_resource(alien_ni));
+          efab_thr_release(new_thr);
+          return -ECONNREFUSED;
+        }
+        carg->out_moved = 1;
+        carg->out_rc = -ECONNREFUSED;
+
+        /* now connect via CITP_TCP_LOOPBACK_TO_CONNSTACK */
+        carg->out_rc =
+            ci_tcp_connect_lo_toconn(&priv->thr->netif, priv->sock_id,
+                                     carg->dst_addr, alien_ni, tls_id);
+        efab_thr_release(netif2tcp_helper_resource(alien_ni));
+        return 0;
+      }
       }
     }
   }
@@ -1255,10 +1350,11 @@ static int
 efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
 {
   struct oo_op_tcp_drop_from_acceptq *carg = arg;
-  ci_tcp_state *ts;
   tcp_helper_resource_t *thr;
   tcp_helper_endpoint_t *ep;
-  int rc;
+  citp_waitable *w;
+  ci_tcp_state *ts;
+  int rc = -EINVAL;
 
   /* find stack */
   rc = efab_thr_table_lookup(NULL, carg->stack_id,
@@ -1273,17 +1369,25 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
   /* find endpoint and drop OS socket */
   ep = ci_trs_get_valid_ep(thr, carg->sock_id);
   if( ep == NULL )
-    return -EINVAL;
+    goto fail1;
+
+  w = SP_TO_WAITABLE(&thr->netif, carg->sock_id);
+  if( !(w->state & CI_TCP_STATE_TCP) || w->state == CI_TCP_LISTEN )
+    goto fail2;
+  ts = SP_TO_TCP(&thr->netif, carg->sock_id);
   ci_assert(ep->os_port_keeper);
   ci_assert_equal(ep->os_socket, NULL);
 
-
-  ts = SP_TO_TCP(&thr->netif, carg->sock_id);
   LOG_TV(ci_log("%s: send reset to non-accepted connection", __FUNCTION__));
 
   /* copy from ci_tcp_listen_shutdown_queues() */
   ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-  ci_netif_lock_fixme(&thr->netif);
+  rc = ci_netif_lock(&thr->netif);
+  if( rc != 0 ) {
+    ci_assert_equal(rc, -EINTR);
+    rc = -ERESTARTSYS;
+    goto fail2;
+  }
   ci_bit_clear(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
   /* We have no way to close this connection from the other side:
    * there was no RST from peer. */
@@ -1295,6 +1399,12 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
   ci_netif_unlock(&thr->netif);
   efab_tcp_helper_k_ref_count_dec(thr, 1);
   return 0;
+
+fail1:
+  efab_thr_release(thr);
+fail2:
+  ci_log("%s: inconsistent ep %d:%d", __func__, carg->stack_id, carg->sock_id);
+  return rc;
 }
 
 /*************************************************************************
@@ -1336,7 +1446,10 @@ oo_operations_table_t oo_operations[] = {
 
   op(OO_IOC_TCP_SOCK_SLEEP,   efab_tcp_helper_sock_sleep_rsop),
   op(OO_IOC_WAITABLE_WAKE,    efab_tcp_helper_waitable_wake_rsop),
+#if CI_CFG_FD_CACHING
   op(OO_IOC_TCP_CAN_CACHE_FD, efab_tcp_helper_can_cache_fd),
+  op(OO_IOC_TCP_XFER,         efab_tcp_helper_xfer_cached),
+#endif
 
   op(OO_IOC_EP_FILTER_SET,       efab_ep_filter_set),
   op(OO_IOC_EP_FILTER_CLEAR,     efab_ep_filter_clear),
@@ -1360,7 +1473,6 @@ oo_operations_table_t oo_operations[] = {
 #if CI_CFG_USERSPACE_PIPE
   op(OO_IOC_PIPE_ATTACH,       efab_tcp_helper_pipe_attach ),
 #endif
-  op(OO_IOC_GET_ADDR_SPC_ID, efab_tcp_helper_get_asid),
 
   op(OO_IOC_OS_SOCK_FD_GET,        efab_tcp_helper_get_sock_fd),
   op(OO_IOC_OS_SOCK_SENDMSG,       efab_tcp_helper_os_sock_sendmsg),
@@ -1372,8 +1484,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_LISTEN_OS_SOCK,    efab_tcp_helper_listen_os_sock_rsop),
   op(OO_IOC_TCP_CONNECT_OS_SOCK,   efab_tcp_helper_connect_os_sock),
   op(OO_IOC_TCP_HANDOVER,          efab_tcp_helper_handover),
-  op(OO_IOC_TCP_XFER,              efab_tcp_helper_xfer_cached),
-  op(OO_IOC_TCP_SET_ADDR_SPC,      efab_tcp_helper_set_addr_spc),
   op(OO_IOC_TCP_CLOSE_OS_SOCK,     efab_tcp_helper_set_tcp_close_os_sock_rsop),
 
   op(OO_IOC_CP_IPIF_ADDR_KIND,     cicp_ipif_addr_kind_rsop),

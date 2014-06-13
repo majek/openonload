@@ -270,15 +270,25 @@ static inline void falcon_read_q(volatile char __iomem *addr, uint64_t *q0)
 static inline void
 falcon_write_qq(volatile char __iomem *kva, uint64_t q0, uint64_t q1)
 {
+	union __u64to32 u;
 	writeq(q0, kva + 0);
-	falcon_write_q(kva + 8, q1);
+	u.u64 = q1;
+	writel(u.s.a, kva + 8);
+	wmb();
+	writel(u.s.b, kva + 12);
+	wmb();
 }
 
 static inline void
 falcon_read_qq(volatile char __iomem *addr, uint64_t *q0, uint64_t *q1)
 {
-	falcon_read_q(addr, q0);
-	*q1 = readq(addr + 8);
+	union __u64to32 u;
+	u.s.a = readl(addr);
+	rmb();
+	u.s.b = readl(addr+4);
+	*q0 = u.u64;
+	*q1 = readq(addr+8);
+	rmb();
 }
 
 

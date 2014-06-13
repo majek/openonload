@@ -16,13 +16,12 @@
 
 #include <ci/efrm/resource.h>
 #include <ci/efrm/efrm_client.h>
+#include <ci/efrm/efrm_filter.h>
 #include "efch.h"
 #include <ci/efch/op_types.h>
 #include <ci/driver/resource/linux_efhw_nic.h>
 #include "filter_list.h"
-
-#include <driver/linux_net/driverlink_api.h>
-
+#include <driver/linux_resource/linux_resource_internal.h>
 
 struct filter {
   ci_dllink  link;
@@ -74,7 +73,8 @@ static int efch_filter_list_add(struct efrm_resource *rs,
   if( (f = ci_alloc(sizeof(*f))) == NULL )
     return -ENOMEM;
   nic = efrm_client_get_nic(rs->rs_client);
-  rc = efx_dl_filter_insert(linux_efhw_nic(nic)->dl_device, spec, replace);
+ 
+  rc = efrm_filter_insert (linux_efhw_nic(nic)->dl_device, spec, replace);
   if( rc < 0 ) {
     ci_free(f);
     return rc;

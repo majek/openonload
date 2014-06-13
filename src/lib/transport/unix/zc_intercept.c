@@ -148,8 +148,19 @@ int onload_zc_release_buffers(int fd, onload_zc_handle* bufs, int bufs_len)
       epi = fdi_to_sock_fdi(fdi);
       ni = epi->sock.netif;
       ci_netif_lock(ni);
-      for( i = 0; i < bufs_len; ++i )
-        ci_netif_pkt_release_check_keep(ni, (ci_ip_pkt_fmt*)bufs[i]);
+      for( i = 0; i < bufs_len; ++i ) {
+        ci_ip_pkt_fmt* pkt = (ci_ip_pkt_fmt*)bufs[i];
+        if( pkt->stack_id != ni->state->stack_id ) {
+          LOG_U(log("%s: attempt to free buffer from stack %d to stack %d",
+                    __FUNCTION__, pkt->stack_id, ni->state->stack_id));
+          rc = -EINVAL;
+          break;
+        }
+      }
+      if( rc == 0 ) {
+        for( i = 0; i < bufs_len; ++i )
+          ci_netif_pkt_release_check_keep(ni, (ci_ip_pkt_fmt*)bufs[i]);
+      }
       ci_netif_unlock(ni);
       break;
 #if CI_CFG_USERSPACE_EPOLL

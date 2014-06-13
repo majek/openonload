@@ -141,7 +141,7 @@ static int oo_extensions_version_check(void)
 
   /* Accept version of onload_ext library if:
    * - onload_ext is not present (no onload_ext_version symbol) 
-   * - or major versions match and lib's minor is greater than or
+   * - or major versions match and lib's minor is less than or
    *   equal to onload's
    */
   if( oev == NULL )

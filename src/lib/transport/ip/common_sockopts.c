@@ -91,8 +91,7 @@ int ci_sock_rx_bind2dev(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
   rc = cicp_llap_retrieve(CICP_HANDLE(ni), ifindex, NULL/*mtu*/, &hwport,
                           NULL/*mac*/, &encap, &base_ifindex, NULL);
   if( rc != 0 ) {
-    LOG_E(ci_log("%s: ERROR: cicp_llap_retrieve(ifindex=%d) failed (%d)",
-                 __FUNCTION__, ifindex, rc));
+    /* non-Ethernet interface */
     return CI_SOCKET_HANDOVER;
   }
   if( (unsigned) hwport >= CI_CFG_MAX_REGISTER_INTERFACES )

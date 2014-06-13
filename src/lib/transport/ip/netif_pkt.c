@@ -25,29 +25,57 @@
 /*! \cidoxg_lib_transport_ip */
 #include "ip_internal.h"
 
-#if ! defined(CI_HAVE_OS_NOPAGE) && ! defined(__KERNEL__)
+#if CI_CFG_MMAP_EACH_PKTSET && ! defined(__KERNEL__)
+#include <onload/mmap.h>
+#include <sys/shm.h>
 
-ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id,
-                              ci_boolean_t ni_locked)
+pthread_mutex_t citp_pkt_map_lock = PTHREAD_MUTEX_INITIALIZER;
+
+ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
 {
   int rc;
   ci_ip_pkt_fmt* pkt = 0;
+  unsigned setid = id >> CI_CFG_PKTS_PER_SET_S;
+  void *p;
 
-  if( ! ni_locked ) {
-    ci_netif_lock(ni);
-    /* Recheck the condition now we have the lock */
-    if( PKT_BUFSET_U_MMAPPED(ni, id >> PKTS_PER_SET_S) )
-      /* The mapping appeared while we were waiting for the lock */
-      goto got_pkt_out;
+  pthread_mutex_lock(&citp_pkt_map_lock);
+  /* Recheck the condition now we have the lock */
+  if( PKT_BUFSET_U_MMAPPED(ni, setid) )
+    /* The mapping appeared while we were waiting for the lock */
+    goto got_pkt_out;
+
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  if( ni->pkt_shm_id != NULL && ni->pkt_shm_id[setid] >= 0 ) {
+    p = shmat(ni->pkt_shm_id[setid], NULL, 0);
+    if( p == (void *)-1) {
+      ci_log("%s: shmat(0x%x) failed for pkt set %d (%d)", __FUNCTION__,
+             ni->pkt_shm_id[setid], setid, -errno);
+      goto out;
+    }
   }
-
-  rc = ci_tcp_helper_mmap_pktbufs_to(ni, id);
-  ci_assert_equal(rc,0);
+  else
+#endif
+  {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          CI_NETIF_MMAP_ID_PKTSET(setid),
+                          CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET,
+                          &p);
+    if( rc < 0 ) {
+      ci_log("%s: oo_resource_mmap for pkt set %d failed (%d)",
+             __FUNCTION__, setid, rc);
+      goto out;
+    }
+  }
+  ci_assert(p);
+  ni->pkt_sets[setid] = p;
 
  got_pkt_out:
   pkt = (ci_ip_pkt_fmt*) __PKT_BUF(ni, id);
 
-  if( ! ni_locked )  ci_netif_unlock(ni);
+ out:
+  pthread_mutex_unlock(&citp_pkt_map_lock);
+  if( CI_UNLIKELY(pkt == NULL) )
+    ci_log("Failed to map packets!  Crashing...");
   return pkt;
 }
 
@@ -71,7 +99,7 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx)
    * because those packet buffers are already allocated to TX.
    */
   if( for_tcp_tx || ni->state->pkt_sets_n == ni->state->pkt_sets_max )
-    if( (pkt = ci_netif_pkt_alloc_nonb(ni, CI_TRUE)) != NULL ) {
+    if( (pkt = ci_netif_pkt_alloc_nonb(ni)) != NULL ) {
       --ni->state->n_async_pkts;
       CITP_STATS_NETIF_INC(ni, pkt_nonb_steal);
       pkt->flags &= ~CI_PKT_FLAG_NONB_POOL;
@@ -130,11 +158,16 @@ void ci_netif_pkt_free(ci_netif* ni, ci_ip_pkt_fmt* pkt)
     __ci_dbg_poison_header(pkt, 0xDECEA5ED);
 #endif
 
-  pkt->next = ni->state->freepkts;
-  ni->state->freepkts = OO_PKT_P(pkt);
-  ++ni->state->n_freepkts;
-
-  CHECK_FREEPKTS(ni);
+  if( pkt->flags & CI_PKT_FLAG_NONB_POOL ) { 
+    ci_netif_pkt_free_nonb_list(ni, OO_PKT_P(pkt), pkt);
+    ++ni->state->n_async_pkts;
+  }
+  else {
+    pkt->next = ni->state->freepkts;
+    ni->state->freepkts = OO_PKT_P(pkt);
+    ++ni->state->n_freepkts;
+    CHECK_FREEPKTS(ni);
+  }
 }
 
 
@@ -176,7 +209,7 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_block(ci_netif* ni, int* p_netif_locked)
 
  again:
   if( *p_netif_locked == 0 ) {
-    if( (pkt = ci_netif_pkt_alloc_nonb(ni, 0)) )
+    if( (pkt = ci_netif_pkt_alloc_nonb(ni)) )
       return pkt;
     if( ! ci_netif_trylock(ni) ) {
       rc = ci_netif_lock(ni);

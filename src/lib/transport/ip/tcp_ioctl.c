@@ -131,12 +131,6 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
      * invoked.
      */
     rc = ci_sys_ioctl(fd, request, arg);
-    if( rc == 0 ) {
-      rc = ci_cmn_ioctl(netif, ep->s, request, arg, rc, os_socket_exists);
-    }
-    else {
-      CI_SET_ERROR(rc, -rc);
-    }
     break;
 
   case SIOCSPGRP:
@@ -202,7 +196,7 @@ int ci_tcp_ioctl(citp_socket* ep, ci_fd_t fd, int request, void* arg)
     return -EFAULT;
   }
 
-  ci_netif_lock_fixme(ep->netif);
+  ci_netif_lock(ep->netif);
   rc = ci_tcp_ioctl_lk(ep, fd, request, arg);
   ci_netif_unlock(ep->netif);
   return rc;

@@ -59,21 +59,40 @@
 #include "efrm_pd.h"
 
 
-int efrm_has_buffer_table;
+static char *shared_buffer_table;
+module_param(shared_buffer_table, charp, 0444);
+MODULE_PARM_DESC(shared_buffer_table, "Set number of buffer table entries"
+		 "that can be used across all network ports.  This is "
+		 "needed for legacy ef_vi applications that use the "
+		 "ef_iobufset interface.");
 
 
 int
-efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim,
-		    int buffer_table_min, int buffer_table_lim)
+efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
 {
+	unsigned bt_shd_low = 0, bt_shd_high = 0;
 	int i, rc;
 
-	if (buffer_table_min != buffer_table_lim) {
-		rc = efrm_buffer_table_ctor(buffer_table_min, buffer_table_lim);
-		if (rc != 0)
-			return rc;
-		efrm_has_buffer_table = 1;
+	if (shared_buffer_table != NULL) {
+		char dummy;
+		rc = sscanf(shared_buffer_table, "%u%c", &bt_shd_high, &dummy);
+		if (rc == 1) {
+			bt_shd_low = 5000;
+			bt_shd_high += bt_shd_low;
+		} else {
+			rc = sscanf(shared_buffer_table, "%u-%u%c",
+				    &bt_shd_low, &bt_shd_high, &dummy);
+		}
+		if (rc < 1 || rc > 2 || bt_shd_low >= bt_shd_high) {
+			EFRM_ERR("%s: ERROR: bad shared_buffer_table module "
+				 "parameter '%s'",
+				 __FUNCTION__, shared_buffer_table);
+			bt_shd_low = bt_shd_high = 0;
+		}
 	}
+	rc = efrm_buffer_table_ctor(bt_shd_low, bt_shd_high);
+	if (rc != 0)
+		return rc;
 
 	/* Create resources in the correct order */
 	for (i = 0; i < EFRM_RESOURCE_NUM; ++i) {
@@ -91,9 +110,11 @@ efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim,
 		case EFRM_RESOURCE_VI_SET:
 			rc = efrm_create_vi_set_resource_manager(rmp);
 			break;
+#ifdef CONFIG_SFC_RESOURCE_VF
 		case EFRM_RESOURCE_VF:
 			rc = efrm_create_vf_resource_manager(rmp, vi_res_dim);
 			break;
+#endif
 		case EFRM_RESOURCE_PD:
 			rc = efrm_create_pd_resource_manager(rmp);
 			break;

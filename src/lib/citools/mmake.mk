@@ -40,14 +40,13 @@ LIB_SRCS	:= \
 		ip_csum_precompute.c \
 		tcp_csum_precompute.c \
 		udp_csum_precompute.c \
-		ippacket.c \
+		ippacket.c
 
 ifeq ($(DRIVER),1)
 LIB_SRCS	+= drv_log_fn.c drv_get_cpu_khz.c memleak_debug.c
 LIB_SRCS	+= drv_thread.c
 else
 LIB_SRCS	+= cithread.c get_cpu_khz.c log_fn.c log_file.c
-LIB_SRCS	+= dump_select.c
 ifneq ($(ONLOAD_ONLY),1)
 LIB_SRCS	+= rbmw_parse.c \
 		rbmw_simulator.c \

@@ -220,100 +220,18 @@ csum_tcpudp_nofold (unsigned long saddr, unsigned long daddr,
 }
 #endif /* EFX_NEED_CSUM_TCPUDP_NOFOLD */
 
-#ifdef EFX_NEED_RANDOM_ETHER_ADDR
-/* Generate random MAC address */
-void efx_random_ether_addr(uint8_t *addr) {
-        get_random_bytes (addr, ETH_ALEN);
-	addr [0] &= 0xfe;       /* clear multicast bit */
-	addr [0] |= 0x02;       /* set local assignment bit (IEEE802) */
-}
-#endif /* EFX_NEED_RANDOM_ETHER_ADDR */
-
-#ifdef EFX_NEED_MSECS_TO_JIFFIES
-/*
- * When we convert to jiffies then we interpret incoming values
- * the following way:
- *
- * - negative values mean 'infinite timeout' (MAX_JIFFY_OFFSET)
- *
- * - 'too large' values [that would result in larger than
- *   MAX_JIFFY_OFFSET values] mean 'infinite timeout' too.
- *
- * - all other values are converted to jiffies by either multiplying
- *   the input value by a factor or dividing it with a factor
- *
- * We must also be careful about 32-bit overflows.
- */
-#ifndef MSEC_PER_SEC
-#define MSEC_PER_SEC	1000L
-#endif
-unsigned long msecs_to_jiffies(const unsigned int m)
-{
-	/*
-	 * Negative value, means infinite timeout:
-	 */
-	if ((int)m < 0)
-		return MAX_JIFFY_OFFSET;
-
-#if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
-	/*
-	 * HZ is equal to or smaller than 1000, and 1000 is a nice
-	 * round multiple of HZ, divide with the factor between them,
-	 * but round upwards:
-	 */
-	return (m + (MSEC_PER_SEC / HZ) - 1) / (MSEC_PER_SEC / HZ);
-#elif HZ > MSEC_PER_SEC && !(HZ % MSEC_PER_SEC)
-	/*
-	 * HZ is larger than 1000, and HZ is a nice round multiple of
-	 * 1000 - simply multiply with the factor between them.
-	 *
-	 * But first make sure the multiplication result cannot
-	 * overflow:
-	 */
-	if (m > jiffies_to_msecs(MAX_JIFFY_OFFSET))
-		return MAX_JIFFY_OFFSET;
-
-	return m * (HZ / MSEC_PER_SEC);
-#else
-	/*
-	 * Generic case - multiply, round and divide. But first
-	 * check that if we are doing a net multiplication, that
-	 * we wouldnt overflow:
-	 */
-	if (HZ > MSEC_PER_SEC && m > jiffies_to_msecs(MAX_JIFFY_OFFSET))
-		return MAX_JIFFY_OFFSET;
-
-	return (m * HZ + MSEC_PER_SEC - 1) / MSEC_PER_SEC;
-#endif
-}
-#endif /* EFX_NEED_MSECS_TO_JIFFIES */
-
-#ifdef EFX_NEED_MSLEEP
-/**
- * msleep - sleep safely even with waitqueue interruptions
- * @msecs: Time in milliseconds to sleep for
- */
-void msleep(unsigned int msecs)
-{
-	unsigned long timeout = msecs_to_jiffies(msecs) + 1;
-
-	while (timeout)
-		timeout = schedule_timeout_uninterruptible(timeout);
-}
-#endif
-
 #ifdef EFX_USE_I2C_LEGACY
 
 #ifdef CONFIG_SFC_HWMON
 
 struct i2c_client *i2c_new_device(struct i2c_adapter *adap,
-				  struct i2c_board_info *info)
+				  const struct i2c_board_info *info)
 {
 	return i2c_new_probed_device(adap, info, NULL);
 }
 
 struct i2c_client *i2c_new_probed_device(struct i2c_adapter *adap,
-					 struct i2c_board_info *info,
+					 const struct i2c_board_info *info,
 					 const unsigned short *addr_list)
 {
 	int (*probe)(struct i2c_client *, const struct i2c_device_id *);
@@ -633,6 +551,7 @@ int efx_param_set_bool(const char *val, struct kernel_param *kp)
 	*(bool *)kp->arg = v;
 	return 0;
 }
+EXPORT_SYMBOL(efx_param_set_bool);
 
 int efx_param_get_bool(char *buffer, struct kernel_param *kp)
 {

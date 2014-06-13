@@ -78,7 +78,6 @@
 #include <linux/log2.h>
 #endif
 
-
 /********************************************************************
  *
  * List API
@@ -142,5 +141,6 @@ struct efrm_threaded_irq {
 	struct work_struct irq_work;
 };
 #endif
+
 
 #endif /* __CI_EFRM_SYSDEP_LINUX_H__ */

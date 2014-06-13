@@ -45,8 +45,7 @@
 #include <onload/linux_mmap.h>
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
-#include <onload/common.h> /* for EFAB_MMAP_OFFSET_TO_MAP_ID */
-#include <ci/efch/mmap.h>
+#include <onload/mmap.h>
 #include <onload/linux_trampoline.h>
 
 
@@ -67,6 +66,10 @@ static ci_dllist mm_hash_tbl[MM_HASH_SIZE];
  */
 DEFINE_RWLOCK(oo_mm_tbl_lock);
 
+
+static inline unsigned
+OO_MMAP_OFFSET_TO_MAP_ID(off_t offset)
+{ return offset >> CI_NETIF_MMAP_ID_SHIFT; }
 
 /* Function to hash an 'mm' pointer */
 static inline unsigned int
@@ -263,13 +266,14 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 				 int* type)
 {
   tcp_helper_resource_t* trs = (tcp_helper_resource_t*) vma->vm_private_data;
-  unsigned pfn;
+  unsigned long pfn;
   struct page *pg;
 
   TCP_HELPER_RESOURCE_ASSERT_VALID(trs, 0);
 
-  pfn = tcp_helper_rm_nopage(trs, vma, address - vma->vm_start,
-                             vma->vm_end - vma->vm_start);
+  pfn = tcp_helper_rm_nopage(trs, vma,
+                             OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)),
+                             address - vma->vm_start);
   if( pfn != (unsigned) -1 ) {
     pg = pfn_to_page(pfn);
 
@@ -292,10 +296,10 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 
     if( type )  *type = VM_FAULT_MINOR;
 
-    OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%x",
+    OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%lx",
 		   __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
 		   (address - vma->vm_start) >> CI_PAGE_SHIFT,
-                   EFAB_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn));
+                   OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn));
 
     return pg;
   }
@@ -305,7 +309,7 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
     CI_DEBUG(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d FAILED",
 		    __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
 		    (address - vma->vm_start) >> CI_PAGE_SHIFT,
-                    EFAB_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma))));
+                    OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma))));
 
   return NOPAGE_SIGBUS;
 }
@@ -384,7 +388,7 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
   map_offset = map_num = 0;
 
   rc = efab_tcp_helper_rm_mmap(priv->thr, &bytes, vma, &map_num, &map_offset,
-                               EFAB_MMAP_OFFSET_TO_MAP_ID(offset));
+                               OO_MMAP_OFFSET_TO_MAP_ID(offset));
   if( rc < 0 )
     efab_del_mm_ref (vma->vm_mm);
 
@@ -396,7 +400,7 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
     ci_log("mmap: %u %d pages unmapped (offset=%lx "
            "map_id=%d res_id=)",
            priv->thr->id, (int) (bytes>>CI_PAGE_SHIFT),
-           (unsigned long) offset, (int) EFAB_MMAP_OFFSET_TO_MAP_ID(offset));
+           (unsigned long) offset, (int) OO_MMAP_OFFSET_TO_MAP_ID(offset));
 #endif
 
   return rc;

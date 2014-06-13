@@ -36,13 +36,23 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
              alloc->in_ifindex, rc);
     goto out;
   }
+#ifdef CONFIG_SFC_RESOURCE_VF
   if (alloc->in_flags & (EFCH_PD_FLAG_VF | EFCH_PD_FLAG_VF_OPTIONAL)) {
-    if ((rc = efrm_vf_resource_alloc(client, NULL, &vf)) < 0 &&
+    if ((rc = efrm_vf_resource_alloc(client,
+                                     NULL /* do not share iommu domain */,
+                                     1 /* iommu on */,
+                                     &vf)) < 0 &&
         !(alloc->in_flags & EFCH_PD_FLAG_VF_OPTIONAL)) {
       EFCH_NOTICE("%s: could not allocate VF", __FUNCTION__);
       goto out;
     }
   }
+#else
+  if (alloc->in_flags & EFCH_PD_FLAG_VF) {
+    rc = -ENODEV;
+    goto out;
+  }
+#endif
   if ((alloc->in_flags & EFCH_PD_FLAG_PHYS_ADDR) && vf == NULL &&
       ci_geteuid() != 0) {
     EFCH_ERR("%s: ERROR: not permitted to use phys mode", __FUNCTION__);
@@ -55,8 +65,10 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
  out:
   if (client != NULL)
     efrm_client_put(client);
+#ifdef CONFIG_SFC_RESOURCE_VF
   if (vf != NULL)
     efrm_vf_resource_release(vf);
+#endif
   if (rc == 0)
     ch_rs->rs_base = efrm_pd_to_resource(pd_rs);
   return rc;

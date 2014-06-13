@@ -91,9 +91,9 @@ int efhw_iopage_map(struct pci_dev *pci_dev, struct efhw_iopage *p,
 			return -ENOMEM;
 		}
 	} else
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 	{
-        int rc;
+		int rc;
 
 		p->dma_addr = iova_base;
 		rc = iommu_map(vf_domain, p->dma_addr, page_to_phys(page), 0,
@@ -118,7 +118,7 @@ void efhw_iopage_unmap(struct pci_dev *pci_dev, struct efhw_iopage *p,
 	if (!vf_domain)
 		dma_unmap_page(dev, p->dma_addr, PAGE_SIZE, DMA_BIDIRECTIONAL);
 	else {
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 		/* NB IOVA is not reused */
 		mutex_lock(&efrm_iommu_mutex);
 		iommu_unmap(vf_domain, p->dma_addr, 0);
@@ -168,7 +168,7 @@ efhw_iopages_alloc(struct pci_dev *pci_dev, struct efhw_iopages *p,
 				goto fail3;
 			}
 		} else
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 		{
 			int rc;
 
@@ -195,7 +195,7 @@ fail3:
 			dma_unmap_page(dev, p->dma_addrs[i],
 				       PAGE_SIZE, DMA_BIDIRECTIONAL);
 		} else {
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 			mutex_lock(&efrm_iommu_mutex);
 			iommu_unmap(vf_domain, iova_base, 0);
 			mutex_unlock(&efrm_iommu_mutex);
@@ -218,7 +218,7 @@ void efhw_iopages_free(struct pci_dev *pci_dev, struct efhw_iopages *p,
 			dma_unmap_page(dev, p->dma_addrs[i],
 				       PAGE_SIZE, DMA_BIDIRECTIONAL);
 		else {
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 			mutex_lock(&efrm_iommu_mutex);
 			iommu_unmap(vf_domain, p->dma_addrs[i], 0);
 			mutex_unlock(&efrm_iommu_mutex);

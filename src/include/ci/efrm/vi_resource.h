@@ -221,6 +221,11 @@ extern int efrm_vi_q_init(struct efrm_vi *virs, enum efhw_q_type q_type,
 			  struct efrm_vi *evq);
 
 /**
+ * Reinitialises a VI after a NIC reset 
+ */
+extern int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type);
+
+/**
  * Allocate a VI dma/event queue.
  *
  * This function does everything that efrm_vi_q_init() does, but also
@@ -261,7 +266,7 @@ extern int
 efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi *evq_virs,
 		       struct efrm_vi_set *vi_set, int vi_set_instance,
-		       struct efrm_vf *vf, const char *name,
+		       struct efrm_pd *pd, const char *name,
 		       unsigned vi_flags,
 		       int evq_capacity, int txq_capacity, int rxq_capacity,
 		       int tx_q_tag, int rx_q_tag, int wakeup_cpu_core,

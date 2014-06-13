@@ -1,130 +1,132 @@
 
-OpenOnload 201205-u1 Release Notes
-==================================
+OpenOnload 201210 Release Notes
+===============================
 
- This is an update release of OpenOnload that includes fixes for a number
- of bugs found during testing.  Please see the ChangeLog for the full list
- of changes.
+ This is a beta release that adds new features to OpenOnload.  We would be
+ very grateful if you could test this release and report any issues you
+ find to support@solarflare.com.
 
- There are no major new features in this release, so the notes below detail
- features added in the openonload-201205 release.
+ Below is a brief summary of the major new features and limitations that we
+ are aware of.  See the ChangeLog for further details and bugs fixed.
 
 
 ----------------------------------------
-TCP loopback acceleration
+New features
+------------
+
+- Use huge pages for Onload packet buffers (EF_USE_HUGE_PAGES).
+
+- Improvements to onload_stackdump default output and new commands.
+
+- Performance improvements in epoll_wait() and poll().
+
+- Physical addressing mode (EF_PACKET_BUFFER_MODE=2 or 3).
+
+- Option to put TCP loopback connections in a separate stack.
+
+- sendmmsg() support for accelerated UDP sockets, whether or not GLIBC
+  and/or the kernel support this call.
+
+- Net driver: VLAN insertion and stripping support.
+
+- Firewalling including Iptables integration (BETA).
+
+
+----------------------------------------
+Configuration options
+---------------------
+
+ The following new configuration options have been added:
+
+ EF_PACKET_BUFFER_MODE
+ - New options 2 and 3 enable physical addressing mode.  Physical
+   addressing mode is insecure in that the user-level application can
+   provoke the network adapter to read and write arbitrary addresses in
+   memory.  See also phys_mode_gid below.
+
+  EF_TCP_CLIENT_LOOPBACK=4
+  - New option 4 causes TCP loopback connections to be placed in a separate
+    Onload stack.  This can improve performance by reducing contention
+    between resources.
+
+  EF_USE_HUGE_PAGES
+  - Enable use of huge pages for packet buffers.
+
+  EF_VALIDATE_ENV
+  - Warn about any obsolete or misspelled options in the environment.
+
+
+----------------------------------------
+Module options
+--------------
+
+ The following module options have been added:
+
+ epoll2_max_stacks (onload module)
+ - Controls the maximum number of stacks that an epoll fd can handle when
+   EF_UL_EPOLL=2.
+
+ phys_mode_gid (onload module)
+ - Set this option to enable physical addressing mode and restrict which
+   users can use it.
+
+ shared_buffer_table (sfc_resource module)
+ - This module option needs to be set to enable legacy ef_vi applications
+   that use the ef_iobufset API.  For example, setting
+   shared_buffer_table=10000 makes 10000 buffer table entries available for
+   use with ef_iobufset.
+
+
+ The following module options have been removed:
+
+ unsafe_sriov_without_iommu (sfc_resource module)
+ - Obsoleted by the new physical addressing modes and phys_mode_gid.
+
+ buffer_table_min (sfc_resource module)
+ buffer_table_max
+ - These options existed because previous versions of the sfc_resource
+   driver required uniform resources across all network adapters.  That
+   caused problems when different types of adapter were placed together in
+   one host.  That limitation is no longer present, so these module options
+   are not needed.
+
+
+----------------------------------------
+Iptables and firewalling
+------------------------
+
+ This release adds a BETA of support for iptables integration.  This
+ feature allows the administrator to place limits on which flows are
+ permitted to bypass the kernel stack.  Flows that are not permitted to
+ bypass the kernel stack are therefore subject to iptables rules (if
+ enabled) in the normal way.
+
+ This feature does not perform iptables rules checking on the adapter
+ itself.
+
+ The onload_iptables script provides a way to configure the Onload firewall
+ automatically so that a subset of iptables rules will be respected when
+ using Onload.  The script should tell you about any iptables rules that
+ are incompatible with Onload acceleration.
+
+
+----------------------------------------
+ef_iobufset is deprecated
 -------------------------
 
- This release adds acceleration of TCP loopback connections.  This feature
- is disabled by default; To enable loopback acceleration, set the following
- environment variables:
-
-   export EF_TCP_SERVER_LOOPBACK=2
-   export EF_TCP_CLIENT_LOOPBACK=2
-
- The sockets at both ends of an accelerated TCP loopback connection have to
- reside in the same Onload stack.  In the configuration given above, they
- will both reside in the stack of the connecting socket.  It is also
- possible to have the connecting socket moved into the stack of the
- listening socket, by setting EF_TCP_CLIENT_LOOPBACK=3.
-
- See the documentation for details of other options.
-
- NOTE: If spinning is enabled, then loopback acceleration may cause threads
- to spin that didn't in previous releases.
+ The ef_iobufset interface in ef_vi is deprecated and will be removed in a
+ future release.  We recommend you migrate ef_vi applications to the
+ ef_memreg interface instead.
 
 
 ----------------------------------------
-New configuration options
--------------------------
+Known bugs
+----------
 
- In addition to those mentioned elsewhere, the following configuration
- options have been added.  See the manual for more details:
+ - bug31498: sendmmsg() returns error code incorrectly.
 
- EF_TCP_RST_DELAYED_CONN
- - Set this option to prevent data being delivered late by TCP due to
-   retransmits.  Useful for trading applications where delivering the data
-   late is worse than not delivering it at all.
-
- EF_DYNAMIC_ACK_THRESH
- - This option reduces the ACK rate when streaming TCP data, which
-   increases throughput and reduces CPU utilisation.  This option is
-   enabled by default; set to 0 to get the old behaviour.
-
-
-----------------------------------------
-Control plane table sizes
--------------------------
-
- We've added the following new module parameters to the 'onload' kernel
- module.
-
-   max_layer2_interfaces
-   - Sets the maximum number of network interfaces (including physical
-     interfaces, vlan interfaces and bonds) supported in Onload's control
-     plane.  The default is 50.
-
-   max_routes
-   - Sets the maximum number of entries in Onload's route table.  The
-     default is 256.
-
-   max_neighs
-   - Sets the maximum number of entries in Onload's ARP/neighbour table.
-     This is rounded up internally to a power of two.  The default is 1024.
-
-
-----------------------------------------
-ef_vi Improvements
-------------------
-
- ef_vi has been extended with two new types:
-
- - ef_pd: A protection domain essentially defines an address space.
-
- - ef_memreg: Allows you to register ordinary program memory for DMA.
-
- Together these increase flexibility significantly.  Multiple VIs can be
- allocated within a protection domain, and any VI in the domain can access
- any memory registered in the domain.
-
- We've also added an option (EF_PD_VF) to allocate VIs within SR-IOV VFs.
- The advantages of this are reduced latency and no limit on the amount of
- memory that can be registered.
-
- Another option (EF_PD_PHYS_MODE) allows a VI to use physical addresses
- rather than protected I/O addresses.  This option is only available to
- processes running as root, as it allows the application to cause the
- adapter to read and write arbitrary addresses in memory.
-
- The interface between the ef_vi user-space library and the driver is
- backwards compatible with the following earlier releases:
-
-   openonload-201109-u2
-   enterpriseonload-2.0.0.x
-
- ef_vi applications built against those releases will continue to work with
- the drivers in this release.
-
-
-----------------------------------------
-Scalable packet buffer mode
----------------------------
-
- Support for SR-IOV is disabled on 32-bit kernels.  This means the
- following features are not available on 32-bit kernels:
-
- - Scalable packet buffer mode (EF_PACKET_BUFFER_MODE=1)
- - ef_vi with VFs
-
-
- On some recent kernel versions, configuring the adapter to have a large
- number of VFs (via sfboot) can cause kernel panics.  This problem affects
- kernel versions in the range 3.0 to 3.3 inclusive, and is due to netlink
- messages that include information about network interfaces growing too
- large.
-
- This problem can be avoided by ensuring that the total number of physical
- network interfaces, including VFs, is no more than 30.
+ - bug31280: Build failure with gcc 4.7.1 due to string concatenation.
 
 
 David Riddoch
-2012/07/05
+2012/10/09

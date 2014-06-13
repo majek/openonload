@@ -39,6 +39,9 @@
 #include <onload/debug.h>
 
 
+extern int phys_mode_gid;
+
+
 /*--------------------------------------------------------------------
  *
  * Linux file operations.
@@ -76,14 +79,6 @@ extern struct file_operations oo_epoll_fops;
 extern ssize_t
 linux_tcp_helper_fop_sendpage(struct file*, struct page*, int offset,
                               size_t size, loff_t* ppos, int more);
-
-  /*! Replace [old_filp] with [new_filp] in the current process's fdtable.
-  ** Fails if [fd] is bad, or doesn't currently resolve to [old_filp].
-  ** Alternatively, [old_filp] may be null, in which case the entry at [fd]
-  ** is replaced unconditionally.
-  */
-extern int efab_fd_handover(struct file* old_filp,
-			    struct file* new_filp, int fd);
 
 extern int efab_fds_dump(unsigned pid);
 

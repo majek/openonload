@@ -52,11 +52,16 @@
 #ifndef __CI_EFRM_VF_RESOURCE_H__
 #define __CI_EFRM_VF_RESOURCE_H__
 
+#include <ci/efhw/iopage.h>
+
+struct efrm_vf;
+
+
+#ifdef CONFIG_SFC_RESOURCE_VF
 #include <ci/efrm/resource.h>
 #include <ci/efrm/vi_allocation.h>
 
 
-struct efrm_vf;
 struct efrm_vi;
 struct efrm_client;
 
@@ -75,7 +80,8 @@ efrm_vf_from_resource(struct efrm_resource *) __attribute__ ((__pure__));
 
 extern int
 efrm_vf_resource_alloc(struct efrm_client *,
-		       struct efrm_vf *linked, struct efrm_vf **vf_out);
+		       struct efrm_vf *linked, int use_iommu,
+		       struct efrm_vf **vf_out);
 extern void
 efrm_vf_resource_release(struct efrm_vf *);
 
@@ -102,6 +108,12 @@ extern int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu);
 extern unsigned long efrm_vf_alloc_ioaddrs(struct efrm_vf *, int n_pages,
 					   efhw_iommu_domain **);
 
-
+#else /* !CONFIG_SFC_RESOURCE_VF */
+static inline efhw_iommu_domain *
+efrm_vf_get_iommu_domain(struct efrm_vf *vf)
+{
+	return NULL;
+}
+#endif /* CONFIG_SFC_RESOURCE_VF */
 #endif /* __CI_EFRM_VF_RESOURCE_H__ */
 

@@ -282,6 +282,22 @@ CI_CFG_OPT("EF_PIPE_SEND_SPIN", pipe_send_spin, ci_uint32,
            1, , 0, 0, 1, yesno)
 #endif
 
+CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
+"Spin while waiting to obtain a per-socket lock.  If the spin timeout "
+"elapses, enter the kernel and block.  The spin timeout is set by "
+"EF_BUZZ_USEC.\n"
+"The per-socket lock is taken in recv() calls and similar.  This option can "
+"reduce jitter when multiple threads invoke recv() on the same socket, "
+"but can reduce fairness between threads competing for the lock.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
+"Spin while waiting to obtain a per-stack lock.  If the spin timeout elapses, "
+"enter the kernel and block.  The spin timeout is set by EF_BUZZ_USEC.\n"
+"This option reduces jitter caused by lock contention, but can reduce "
+"fairness between threads competing for the lock.",
+           1, , 0, 0, 1, yesno)
+
 #define CITP_NETIF_DTOR_NONE                0
 #define CITP_NETIF_DTOR_ONLY_SHARED         1
 #define CITP_NETIF_DTOR_ALL                 2

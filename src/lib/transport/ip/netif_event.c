@@ -92,19 +92,16 @@ static int ci_tcp_csum_correct(ci_ip_pkt_fmt* pkt, int ip_paylen)
 
 static void ci_parse_rx_vlan(ci_ip_pkt_fmt* pkt)
 {
-#define GET_ETHERTYPE(ether_base)               \
-  (((const ci_uint16*) (ether_base))[6])
-#define GET_VLAN_TAG(ether_base)                                \
-  (CI_BSWAP_BE16(((const ci_uint16*) (ether_base))[7]) & 0xfff)
-
+  const ci_uint8* type_ptr = pkt->ether_base + 2 * ETH_ALEN;
   ci_assert_equal(pkt->pkt_layout, CI_PKT_LAYOUT_INVALID);
-  if( GET_ETHERTYPE(pkt->ether_base) != CI_ETHERTYPE_8021Q ) {
+  if( *((const ci_uint16*)type_ptr) != CI_ETHERTYPE_8021Q ) {
     pkt->pkt_layout = CI_PKT_LAYOUT_RX_SIMPLE;
     pkt->vlan = 0;
   }
   else {
+    const ci_uint8* vlan_ptr = pkt->ether_base + ETH_HLEN;
     pkt->pkt_layout = CI_PKT_LAYOUT_RX_VLAN;
-    pkt->vlan = GET_VLAN_TAG(pkt->ether_base);
+    pkt->vlan = CI_BSWAP_BE16(*((const ci_uint16*)vlan_ptr)) & 0xfff;
   }
 }
 
@@ -423,12 +420,22 @@ static void ci_sock_put_on_reap_list(ci_netif* ni, ci_sock_cmn* s)
 static void process_post_poll_list(ci_netif* ni)
 {
   ci_ni_dllist_link* lnk;
-  int need_wake = 0;
+  int i, need_wake = 0;
+  citp_waitable* sb;
 
-  for( lnk = ci_ni_dllist_start(ni, &ni->state->post_poll_list);
+  (void) i;  /* prevent warning; effectively unused at userlevel */
+
+  for( i = 0, lnk = ci_ni_dllist_start(ni, &ni->state->post_poll_list);
        lnk != ci_ni_dllist_end(ni, &ni->state->post_poll_list); ) {
-    citp_waitable* sb = CI_CONTAINER(citp_waitable, post_poll_link, lnk);
 
+#ifdef __KERNEL__
+    if(CI_UNLIKELY( i++ > ni->ep_tbl_n )) {
+      ci_netif_error_detected(ni, CI_NETIF_ERROR_POST_POLL_LIST, __FUNCTION__);
+      return;
+    }
+#endif
+
+    sb = CI_CONTAINER(citp_waitable, post_poll_link, lnk);
     lnk = (ci_ni_dllist_link*) CI_NETIF_PTR(ni, lnk->next);
 
     if( sb->sb_flags & CI_SB_FLAG_TCP_POST_POLL )
@@ -443,11 +450,10 @@ static void process_post_poll_list(ci_netif* ni)
         ++sb->sleep_seq.rw.tx;
       ci_mb();
 #ifdef __KERNEL__
-      if( (sb->sb_flags & sb->wake_request) ) {
-        sb->wake_request = 0;
+      if( (sb->sb_flags & sb->wake_request) )
         citp_waitable_wakeup(ni, sb);
-      }
-      sb->sb_flags = 0;
+      else
+        sb->sb_flags = 0;
 #else
       /* Leave endpoints that need waking on the post-poll list so they can
        * be woken in the driver with a single syscall when we drop the
@@ -482,9 +488,9 @@ static void process_post_poll_list(ci_netif* ni)
 # define UDP_CAN_FREE(us)  ((us)->tx_count == 0)
 
 
-static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
-                                         struct ci_netif_poll_state* ps,
-                                         ci_ip_pkt_fmt* pkt)
+void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
+                                  struct ci_netif_poll_state* ps,
+                                  ci_ip_pkt_fmt* pkt)
 {
   ci_udp_state* us;
   oo_pkt_p frag_next;
@@ -537,25 +543,6 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 }
 
 #endif
-
-
-ci_inline void ci_netif_tx_pkt_complete(ci_netif* ni,
-                                        struct ci_netif_poll_state* ps,
-                                        ci_ip_pkt_fmt* pkt)
-{
-  /* debug check - take back ownership of buffer from NIC */
-  ci_assert(pkt->flags & CI_PKT_FLAG_TX_PENDING);
-  pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
-  ni->state->nic[pkt->intf_i].tx_bytes_removed += TX_PKT_LEN(pkt);
-  ci_assert((int) (ni->state->nic[pkt->intf_i].tx_bytes_added -
-                   ni->state->nic[pkt->intf_i].tx_bytes_removed) >=0);
-#if CI_CFG_UDP
-  if( pkt->flags & CI_PKT_FLAG_UDP )
-    ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
-  else
-#endif
-    ci_netif_pkt_release(ni, pkt);
-}
 
 
 #define CI_NETIF_TX_VI(ni, nic_i, label)  (&(ni)->nic_hw[nic_i].vi)
@@ -708,22 +695,6 @@ static void ci_netif_tx_progress(ci_netif* ni, int intf_i)
 }
 
 
-static void ci_netif_poll_free_pkts(ci_netif* ni,
-                                    struct ci_netif_poll_state* ps)
-{
-  ci_ip_pkt_fmt* tail = CI_CONTAINER(ci_ip_pkt_fmt, next,
-                                     ps->tx_pkt_free_list_insert);
-  /* ?? TODO: Might consider freeing to normal pool in some circumstances.
-   * e.g. If we know we can't alloc any more buffers, and normal pool is
-   * very low.  But be careful to avoid flip-flopping buffers between
-   * pools.
-   */
-  ci_netif_pkt_free_nonb_list(ni, ps->tx_pkt_free_list, tail);
-  ni->state->n_async_pkts += ps->tx_pkt_free_list_n;
-  CITP_STATS_NETIF_ADD(ni, pkt_nonb, ps->tx_pkt_free_list_n);
-}
-
-
 static int ci_netif_poll_intf(ci_netif* ni, int intf_i, int max_evs)
 {
   struct ci_netif_poll_state ps;
@@ -796,11 +767,28 @@ int ci_netif_poll_intf_fast(ci_netif* ni, int intf_i, ci_uint64 now_frc)
 static void ci_netif_loopback_pkts_send(ci_netif* ni)
 {
   ci_ip_pkt_fmt* pkt;
+  oo_pkt_p send_list = OO_PP_ID_NULL;
   ci_ip4_hdr* ip;
+#ifdef __KERNEL__
+  int i = 0;
+#endif
 
   while( OO_PP_NOT_NULL(ni->state->looppkts) ) {
+#ifdef __KERNEL__
+    if(CI_UNLIKELY( i++ > ni->pkt_sets_n * PKTS_PER_SET )) {
+      ci_netif_error_detected(ni, CI_NETIF_ERROR_LOOP_PKTS_LIST, __FUNCTION__);
+      return;
+    }
+#endif
     pkt = PKT_CHK(ni, ni->state->looppkts);
     ni->state->looppkts = pkt->next;
+    pkt->next = send_list;
+    send_list = OO_PKT_ID(pkt);
+  }
+
+  while( OO_PP_NOT_NULL(send_list) ) {
+    pkt = PKT_CHK(ni, send_list);
+    send_list = pkt->next;
 
     LOG_NR(ci_log(N_FMT "loopback RX pkt %d: %d->%d", N_PRI_ARGS(ni),
                   OO_PKT_FMT(pkt),
@@ -826,6 +814,11 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
 int ci_netif_poll_n(ci_netif* netif, int max_evs)
 {
   int intf_i, n_evs_handled = 0;
+
+#if defined(__KERNEL__) || ! defined(NDEBUG)
+  if( netif->error_flags )
+    return 0;
+#endif
 
   ci_assert(ci_netif_is_locked(netif));
   CHECK_NI(netif);

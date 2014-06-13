@@ -135,9 +135,12 @@ ci_inline int __ci_bind(ci_netif *ni, ci_sock_cmn *s,
    * check if we can handle this socket */
   if( rc != 0 )
     return rc;
-  s->s_flags |= CI_SOCK_FLAG_BOUND;
   if( user_port != 0 )
     s->s_flags |= CI_SOCK_FLAG_PORT_BOUND;
+  if( ip_addr_be32 != INADDR_ANY )
+    s->s_flags |= CI_SOCK_FLAG_ADDR_BOUND;
+  s->s_flags &= ~CI_SOCK_FLAG_CONNECT_MUST_BIND;
+
 #ifndef __ci_driver__
   /* We do not call bind() to alien address from in-kernel code */
   if( ip_addr_be32 != INADDR_ANY &&
@@ -280,10 +283,15 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts,
    *    Do connect().
    */
   ci_assert_nequal(ts->s.pkt.ip.ip_saddr_be32, INADDR_ANY);
-  if( ! (ts->s.s_flags & CI_SOCK_FLAG_BOUND) ) {
-    /* They haven't done a bind, so we need to choose a TCP port. */
+
+  if( ts->s.s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND ) {
+    ci_sock_cmn* s = &ts->s;
     ci_uint16 source_be16 = 0;
-    rc = __ci_bind(ni, &ts->s, INADDR_ANY, &source_be16);
+
+    if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
+      rc = __ci_bind(ni, &ts->s, ts->s.pkt.ip.ip_saddr_be32, &source_be16);
+    else 
+      rc = __ci_bind(ni, &ts->s, INADDR_ANY, &source_be16);
     if(CI_LIKELY( rc == 0 )) {
       TS_TCP(ts)->tcp_source_be16 = source_be16;
       ts->s.cp.lport_be16 = source_be16;
@@ -302,7 +310,6 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts,
       CI_SET_ERROR(*fail_rc, EINVAL);
       return CI_CONNECT_UL_FAIL;
     }
-    ts->tcpflags |= CI_TCPT_FLAG_TMP_SRC_IP;
   }
 
   ci_tcp_set_peer(ts, dst_be32, dport_be16);
@@ -337,7 +344,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts,
       /* Either a different error, or our efforts to free a filter did not
        * work.
        */
-      if( ts->tcpflags & CI_TCPT_FLAG_TMP_SRC_IP ) {
+      if( ! (ts->s.s_flags & CI_SOCK_FLAG_ADDR_BOUND) ) {
         ts->s.pkt.ip.ip_saddr_be32 = 0;
         ts->s.cp.ip_laddr_be32 = 0;
       }
@@ -470,8 +477,8 @@ static int ci_tcp_connect_ul_syn_sent(ci_netif *ni, ci_tcp_state *ts)
     /* We should re-bind socket on the next use if the port was determined by
      * OS.
      */
-    if (!(ts->s.s_flags & CI_SOCK_FLAG_PORT_BOUND))
-      ts->s.s_flags &= ~CI_SOCK_FLAG_BOUND;
+    if( ! (ts->s.s_flags & CI_SOCK_FLAG_PORT_BOUND) )
+      ts->s.s_flags |= CI_SOCK_FLAG_CONNECT_MUST_BIND;
 
     /* - if SO_ERROR is set, handle it and return this value;
      * - else if rx_errno is set, return it;
@@ -480,7 +487,7 @@ static int ci_tcp_connect_ul_syn_sent(ci_netif *ni, ci_tcp_state *ts)
         rc = TCP_RX_ERRNO(ts) ? TCP_RX_ERRNO(ts) : ECONNABORTED;
     CI_SET_ERROR(rc, rc);
 
-    if( ts->tcpflags & CI_TCPT_FLAG_TMP_SRC_IP ) {
+    if( ! (ts->s.s_flags & CI_SOCK_FLAG_ADDR_BOUND) ) {
       ts->s.pkt.ip.ip_saddr_be32 = 0;
       ts->s.cp.ip_laddr_be32 = 0;
     }
@@ -503,7 +510,7 @@ static int ci_tcp_connect_ul_syn_sent(ci_netif *ni, ci_tcp_state *ts)
  *                             to set errno since it isn't a real error
  */
 int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
-		   socklen_t addrlen, ci_fd_t fd, int no_addr_check)
+		   socklen_t addrlen, ci_fd_t fd, int *p_moved)
 {
   /* Address family is validated earlier. */
   struct sockaddr_in* inaddr = (struct sockaddr_in*) serv_addr;
@@ -519,13 +526,6 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
   ci_netif_lock(ep->netif);
   CHECK_TEP(ep);
   ci_netif_poll(ep->netif);
-
-  /* We've been here already; just go back to the ul connect */
-  if( no_addr_check ) {
-    ci_assert(OO_SP_NOT_NULL(s->local_peer));
-    dst_be32 = ci_get_ip4_addr(inaddr->sin_family, serv_addr);
-    goto connect_ul_start;
-  }
 
   /*
    * 1. Check if state of the socket is OK for connect operation.
@@ -547,6 +547,10 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
 	rc = 0;
 	goto unlock_out;
       }
+      if( serv_addr->sa_family == AF_UNSPEC )
+        LOG_E(ci_log("Onload does not support TCP disconnect via "
+
+                     "connect(addr->sa_family==AF_UNSPEC)"));
       CI_SET_ERROR(rc, EISCONN);
     }
     else if( s->b.state == CI_TCP_LISTEN ) {
@@ -617,14 +621,16 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
     op.dst_addr = dst_be32;
     /* this operation unlocks netif */
     rc = oo_resource_op(fd, OO_IOC_TCP_LOOPBACK_CONNECT, &op);
-    if( rc < 0) {
-      if( rc == -EREMOTE )
-        return CI_SOCKET_MOVED;
-      if( rc == -EINPROGRESS )
-        RET_WITH_ERRNO( EINPROGRESS );
-      else
-        return CI_SOCKET_HANDOVER;
-    }
+    if( rc < 0)
+      return CI_SOCKET_HANDOVER;
+    if( op.out_moved )
+      *p_moved = 1;
+    if( op.out_rc == -EINPROGRESS )
+      RET_WITH_ERRNO( EINPROGRESS );
+    else if( op.out_rc == -EAGAIN )
+      return -EAGAIN;
+    else if( op.out_rc != 0 )
+      return CI_SOCKET_HANDOVER;
     return 0;
   }
 
@@ -635,7 +641,6 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
     goto unlock_out;
   }
 
-connect_ul_start:
   crc = ci_tcp_connect_ul_start(ep->netif, ts, dst_be32, inaddr->sin_port, &rc);
   if( crc != CI_CONNECT_UL_OK ) {
     switch( crc ) {
@@ -669,7 +674,6 @@ static void ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
   tls->acceptq_get = OO_SP_NULL;
   tls->n_listenq = 0;
   tls->n_listenq_new = 0;
-  tls->acceptq_n_alien = 0;
 
   /* Initialise the listenQ. */
   for( i = 0; i < CI_CFG_TCP_LISTENQ_BUCKETS; ++i ) {
@@ -684,6 +688,7 @@ static void ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
   LOG_EP (log ("Initialise cache and pending list for id %d",
 	       S_FMT(tls)));
 
+#if CI_CFG_FD_CACHING
   sp = TS_OFF(ni, tls);
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_cache));
   ci_ni_dllist_init(ni, &tls->epcache_cache, sp, "epch");
@@ -691,19 +696,37 @@ static void ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
   sp = TS_OFF(ni, tls);
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_pending));
   ci_ni_dllist_init(ni, &tls->epcache_pending, sp, "eppd");
+#endif
 }
 
+
 #ifdef __KERNEL__
-int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
-                         ci_netif *l_ni, oo_sp l_id)
+int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id)
+{
+  int crc, rc = 0;
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  ts->s.local_peer = tls_id;
+  crc = ci_tcp_connect_ul_start(ni, ts, ts->s.pkt.ip_saddr_be32,
+                                ts->s.pkt.dport_be16, &rc);
+
+  /* The connect is really finished, but we should return EINPROGRESS
+   * for non-blocking connect and 0 for normal. */
+  if( crc == CI_CONNECT_UL_OK )
+    rc = ci_tcp_connect_ul_syn_sent(ni, ts);
+  return rc;
+}
+
+int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
+                             ci_netif *l_ni, oo_sp l_id)
 {
   ci_tcp_state *ts;
   ci_tcp_socket_listen *tls, *alien_tls;
   citp_waitable_obj *wo;
   citp_waitable *w;
   struct oo_alien_ep *ref_ep;
-  int rc = 0;
-  int crc;
+  int rc;
 
   ci_assert(ci_netif_is_locked(c_ni));
   ci_assert(OO_SP_NOT_NULL(c_id));
@@ -750,30 +773,17 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
 
   /* Connect c_id to tls */
   ts = SP_TO_TCP(c_ni, c_id);
-  ts->s.local_peer = tls->s.b.bufid;
-  crc = ci_tcp_connect_ul_start(c_ni, ts, ts->s.pkt.ip_saddr_be32,
-                                ts->s.pkt.dport_be16, &rc);
-
-  /* The connect is really finished, but we should return EINPROGRESS
-   * for non-blocking connect and 0 for normal. */
-  if( crc == CI_CONNECT_UL_OK )
-    rc = ci_tcp_connect_ul_syn_sent(c_ni, ts);
-
-  ci_netif_unlock(c_ni);
-  ci_sock_lock_fixme(c_ni, &tls->s.b);
+  rc = ci_tcp_connect_lo_samestack(c_ni, ts, tls->s.b.bufid);
 
   /* Accept as from tls */
   if( !ci_tcp_acceptq_not_empty(tls) ) {
     /* it is possible, for example, if ci_tcp_listenq_try_promote() failed
      * because there are no endpoints */
-    ci_sock_unlock(c_ni, &tls->s.b);
-    ci_netif_lock_fixme(c_ni);
     citp_waitable_obj_free(c_ni, &tls->s.b);
     ci_netif_unlock(c_ni);
     return -EBUSY;
   }
   w = ci_tcp_acceptq_get(c_ni, tls);
-  ci_sock_unlock(c_ni, &tls->s.b);
   ci_assert(w);
   LOG_TV(ci_log("%s: %d:%d to %d:%d shadow %d:%d accepted %d:%d",
                 __FUNCTION__,
@@ -790,7 +800,6 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
    * shutdown.
    */
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
-  ci_netif_lock_fixme(c_ni);
   citp_waitable_obj_free(c_ni, &tls->s.b);
   ci_netif_unlock(c_ni);
 
@@ -814,38 +823,31 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
     }
     else {
       ci_irqlock_unlock(&l_ep->thr->lock, &lock_flags);
-      ci_netif_lock_fixme(c_ni);
-      ci_tcp_drop(c_ni, ts, EBUSY);
-      ci_bit_clear(&w->sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
-      ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
-      ci_tcp_drop(c_ni, (ci_tcp_state *)w, EBUSY);
-      ci_netif_unlock(c_ni);
-      return -EBUSY;
+      goto cleanup;
     }
   }
 
   /* lock l_ni: Check that l_id is the same socket it used to be */
   /* create ref-sock in l_ni, put it into acc q */
-  ci_netif_lock_fixme(l_ni);
+  if( ci_netif_lock(l_ni) != 0 )
+    goto cleanup;
   if( alien_tls->s.b.state != CI_TCP_LISTEN ||
       (alien_tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ||
       S_TCP_HDR(&alien_tls->s)->tcp_source_be16 != TS_TCP(ts)->tcp_dest_be16 ||
       (alien_tls->s.pkt.ip.ip_saddr_be32 != INADDR_ANY &&
        alien_tls->s.pkt.ip.ip_saddr_be32 != ts->s.pkt.ip.ip_daddr_be32) ) {
     ci_netif_unlock(l_ni);
-    ci_netif_lock_fixme(c_ni);
-    ci_tcp_drop(c_ni, ts, EBUSY);
-    ci_bit_clear(&w->sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
-    ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
-    ci_tcp_drop(c_ni, (ci_tcp_state *)w, EBUSY);
-    ci_netif_unlock(c_ni);
-    return -EBUSY;
+    goto cleanup;
   }
 
   ci_bit_mask_set(&w->sb_aflags,
                   CI_SB_AFLAG_TCP_IN_ACCEPTQ | CI_SB_AFLAG_ORPHAN);
 
   wo = citp_waitable_obj_alloc(l_ni);
+  if( wo == NULL ) {
+    ci_netif_unlock(l_ni);
+    goto cleanup;
+  }
   ref_ep = &wo->alien;
   ref_ep->b.state = CI_TCP_STATE_ALIEN;
   ref_ep->stack_id = c_ni->state->stack_id;
@@ -855,16 +857,26 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
              c_ni->state->stack_id, OO_SP_TO_INT(ref_ep->sock_id)));
 
   ci_tcp_acceptq_put(l_ni, alien_tls, &wo->waitable);
-  alien_tls->acceptq_n_alien++;
   citp_waitable_wake_not_in_poll(l_ni, &alien_tls->s.b, CI_SB_FLAG_WAKE_RX);
   ci_netif_unlock(l_ni);
 
   return rc;
+
+cleanup:
+  ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
+  ci_bit_mask_clear(&w->sb_aflags,
+                    CI_SB_AFLAG_TCP_IN_ACCEPTQ | CI_SB_AFLAG_ORPHAN);
+  efab_tcp_helper_close_endpoint(netif2tcp_helper_resource(c_ni), w->bufid);
+  /* we can not guarantee c_ni lock, so we can' call
+   * ci_tcp_drop(c_ni, ts).  So, we return error; UL will handover
+   * and close ts endpoint. */
+  return -EBUSY;
 }
 #endif
 
 
  
+#ifndef  __KERNEL__
 /* In this bind handler we just check that the address to which
  * are binding is either "any" or one of ours. 
  * In the Linux kernel version [fd] is unused.
@@ -914,6 +926,7 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
 
   CI_LOGLEVEL_TRY_RET(LOG_TV,
 		      __ci_bind(ep->netif, ep->s, addr_be32, &new_port));
+  ep->s->s_flags |= CI_SOCK_FLAG_BOUND;
   sock_lport_be16(s) = new_port; 
   sock_laddr_be32(s) = addr_be32;
   if( CI_IP_IS_MULTICAST(addr_be32) )
@@ -967,11 +980,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
       return CI_SOCKET_HANDOVER;
   }
 
-#ifndef __ci_driver__
   ul_backlog = CI_MAX(backlog, (int) NI_OPTS(netif).acceptq_min_backlog);
-#else
-  ul_backlog = backlog;
-#endif
 
   if( s->b.state == CI_TCP_LISTEN ) {
     tls = SOCK_TO_TCP_LISTEN(s);
@@ -1099,7 +1108,6 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
 }
 
 
-
 static int ci_tcp_shutdown_listen(citp_socket* ep, int how, ci_fd_t fd)
 {
   ci_tcp_socket_listen* tls = SOCK_TO_TCP_LISTEN(ep->s);
@@ -1107,12 +1115,11 @@ static int ci_tcp_shutdown_listen(citp_socket* ep, int how, ci_fd_t fd)
   if( how == SHUT_WR )
     return 0;
 
-  ci_sock_lock_fixme(ep->netif, &tls->s.b);
-  ci_netif_lock_fixme(ep->netif);
+  ci_sock_lock(ep->netif, &tls->s.b);
+  ci_netif_lock(ep->netif);
   LOG_TC(ci_log(SK_FMT" shutdown(SHUT_RD)", SK_PRI_ARGS(ep)));
   __ci_tcp_listen_shutdown(ep->netif, tls, fd);
   __ci_tcp_listen_to_normal(ep->netif, tls);
-#ifndef __KERNEL__
   {
     ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
     int flags = ci_sys_fcntl(os_sock, F_GETFL);
@@ -1120,7 +1127,6 @@ static int ci_tcp_shutdown_listen(citp_socket* ep, int how, ci_fd_t fd)
     ci_sys_fcntl(os_sock, F_SETFL, flags); 
     ci_rel_os_sock_fd(os_sock);
   }
-#endif
   ci_netif_unlock(ep->netif);
   ci_sock_unlock(ep->netif, &tls->s.b);
   return 0;
@@ -1135,7 +1141,7 @@ int ci_tcp_shutdown(citp_socket* ep, int how, ci_fd_t fd)
   if( ep->s->b.state == CI_TCP_LISTEN )
     return ci_tcp_shutdown_listen(ep, how, fd);
 
-  ci_netif_lock_fixme(ep->netif);
+  ci_netif_lock(ep->netif);
   /* Poll to get up-to-date.  This is slightly spurious but done to ensure
    * ordered response to all packets preceding this FIN (e.g. ANVL tcp_core
    * 9.18)
@@ -1180,7 +1186,7 @@ void ci_tcp_linger(ci_netif* ni, ci_tcp_state* ts)
   }
 
   if( ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) ) {
-    ci_netif_lock_fixme(ni);
+    ci_netif_lock(ni);
     /* check we are working with the same socket, and it was not closed and
      * dropped under our feet. */
     if( ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) &&
@@ -1215,7 +1221,6 @@ int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
 }
 
 
-#ifdef __KERNEL__
 
 /* Abort a TCP connection.  Semantics are:
  * - must be called with the netif lock held

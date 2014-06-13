@@ -75,21 +75,6 @@ struct efrm_nic_table {
 /* Resource driver structures used by other drivers as well */
 extern struct efrm_nic_table *efrm_nic_tablep;
 
-/* We use #define rather than static inline here so that the Windows
- * "prefast" compiler can see its own locking primitive when these
- * two function are used (and then perform extra checking where they
- * are used)
- *
- * Both macros operate on an irq_flags_t
-*/
-
-#define efrm_driver_lock(irqlock_state) \
-	spin_lock_irqsave(&efrm_nic_tablep->lock, irqlock_state)
-
-#define efrm_driver_unlock(irqlock_state)		\
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock,	\
-			       irqlock_state);
-
 static inline void efrm_nic_table_hold(void)
 {
 	atomic_inc(&efrm_nic_tablep->ref_count);

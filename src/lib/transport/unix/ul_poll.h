@@ -27,6 +27,7 @@
 #ifndef __UL_POLL_H__
 #define __UL_POLL_H__
 
+#if CI_CFG_USERSPACE_SELECT
 
 #define OO_POLL_MAX_KFDS   1024
 
@@ -63,5 +64,7 @@ struct oo_ul_poll_state {
   /* Should it spin */
   unsigned              ul_poll_spin;
 };
+
+#endif /* CI_CFG_USERSPACE_SELECT */
 
 #endif  /* __UL_POLL_H__ */

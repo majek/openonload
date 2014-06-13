@@ -172,11 +172,16 @@ static void ci_udp_pkt_to_zc_msg(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 {
   int i, bytes_left = pkt->pay_len;
   ci_ip_pkt_fmt* frag;
-  frag = pkt;
+  ci_ip_pkt_fmt* handle_frag;
+
+  handle_frag = frag = pkt;
   i = 0;
   ci_assert_nequal(zc_msg->iov, NULL);
 
-  /* Ignore first frag if zero length and there is another frag */
+  /* Ignore first frag if zero length and there is another frag, but
+   * still pass the zero-length buffer as the onload_zc_handle so it
+   * will get freed correctly
+   */
   if( oo_offbuf_left(&frag->buf) == 0 && OO_PP_NOT_NULL(frag->frag_next) )
     frag = PKT_CHK_NNL(ni, frag->frag_next);
 
@@ -184,7 +189,7 @@ static void ci_udp_pkt_to_zc_msg(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     zc_msg->iov[i].iov_len = CI_MIN(oo_offbuf_left(&frag->buf), 
                                     bytes_left);
     zc_msg->iov[i].iov_base = oo_offbuf_ptr(&frag->buf);
-    zc_msg->iov[i].buf = (onload_zc_handle)frag;
+    zc_msg->iov[i].buf = (onload_zc_handle)handle_frag;
     zc_msg->iov[i].iov_flags = 0;
     bytes_left -= zc_msg->iov[i].iov_len;
     ++i;
@@ -193,6 +198,7 @@ static void ci_udp_pkt_to_zc_msg(ci_netif* ni, ci_ip_pkt_fmt* pkt,
         (bytes_left == 0) )
       break;
     frag = PKT_CHK_NNL(ni, frag->frag_next);
+    handle_frag = frag;
   } while( 1 );
   zc_msg->msghdr.msg_iovlen = i;
 }
@@ -688,14 +694,10 @@ struct recvmsg_spinstate {
 
 
 static int 
-ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
-                                ci_netif* ni, ci_udp_state* us,
-                                struct recvmsg_spinstate *spin_state)
+ci_udp_recvmsg_block(ci_udp_iomsg_args* a, ci_netif* ni, ci_udp_state* us,
+                     int timeout)
 {
   int rc;
-  int timeout = spin_state->timeout;
-
-  ci_sock_unlock(ni, &us->s.b);
 
 #ifndef __KERNEL__
   {
@@ -733,10 +735,8 @@ ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
     si->inside_lib = inside_lib;
 #endif
 
-    if( rc > 0 ) {
-      ci_sock_lock(ni, &us->s.b);
+    if( rc > 0 )
       return 0;
-    }
     else if( rc == 0 )
       rc = -EAGAIN;
     else if( errno == EINTR && si->need_restart && timeout == -1 ) {
@@ -744,8 +744,6 @@ ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
       goto continue_to_block;
     } else 
       rc = -errno;
-
-    ci_sock_lock(ni, &us->s.b);
 
     return rc;
   }
@@ -763,7 +761,6 @@ ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
     rc = efab_tcp_helper_poll_udp(a->filp, &mask, &t);
     if( rc == 0 ) {
       if( mask ) {
-        ci_sock_lock_fixme(ni, &us->s.b);
         return 0;
       }
       else
@@ -771,7 +768,6 @@ ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
     }
     else if( rc == -ERESTARTSYS &&  us->s.so.rcvtimeo_msec )
       rc = -EINTR;
-    ci_sock_lock_fixme(ni, &us->s.b);
   }
   return rc;
 #endif /* __KERNEL__ */
@@ -957,7 +953,9 @@ ci_udp_recvmsg_socklocked(ci_udp_iomsg_args *a, struct msghdr* msg,
   }
 #endif
 
-  rc = ci_udp_recvmsg_socklocked_block(a, ni, us, &spin_state);
+  ci_sock_unlock(ni, &us->s.b);
+  rc = ci_udp_recvmsg_block(a, ni, us, spin_state.timeout);
+  ci_sock_lock_fixme(ni, &us->s.b);
   if( rc == 0 )
     goto check_ul_recv_q;
   CI_SET_ERROR(rc, -rc);
@@ -1076,12 +1074,12 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
                                   enum onload_zc_callback_rc* cb_rc)
 {
 #define ZC_BUFFERS_FOR_64K_DATAGRAM ((0x10000 / (CI_CFG_PKT_BUF_SIZE - \
-                                                 PKT_START_OFF_MIN())) + 1)
+                                                 PKT_START_OFF())) + 1)
   int rc, i, cb_flags;
   struct msghdr msg;
   struct iovec iov[ZC_BUFFERS_FOR_64K_DATAGRAM];
   struct onload_zc_iovec zc_iov[ZC_BUFFERS_FOR_64K_DATAGRAM];
-  oo_pkt_p pkt_p;
+  oo_pkt_p pkt_p, first_pkt_p;
   ci_ip_pkt_fmt* pkt;
 
   if( us->zc_kernel_datagram_count < ZC_BUFFERS_FOR_64K_DATAGRAM) {
@@ -1091,8 +1089,10 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
     ci_netif_lock(ni);
     while( us->zc_kernel_datagram_count < ZC_BUFFERS_FOR_64K_DATAGRAM ) {
       pkt = ci_netif_pkt_alloc(ni);
-      if( !pkt )
+      if( !pkt ) {
+        ci_netif_unlock(ni);
         return -ENOBUFS;
+      }
       pkt->frag_next = us->zc_kernel_datagram;
       us->zc_kernel_datagram = OO_PKT_P(pkt);
       ++us->zc_kernel_datagram_count;
@@ -1149,6 +1149,21 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
     pkt_p = pkt->frag_next;
   }
 
+  /* Clear last packet's frag_next in chain we're passing to callback.
+   * We'll restore it later if they don't keep the buffers  
+   */
+  pkt->frag_next = OO_PP_NULL;
+  /* pkt_p handily points to the buffer after the last one used for
+   * this datagram, and i is the number of buffers we used.  Remove
+   * them from the zc_kernel_datagram list
+   */
+  first_pkt_p = us->zc_kernel_datagram;
+  us->zc_kernel_datagram = pkt_p;
+#ifndef NDEBUG
+  ci_assert_ge(us->zc_kernel_datagram_count, i);
+#endif
+  us->zc_kernel_datagram_count -= i;
+
   args->msg.iov = zc_iov;
   args->msg.msghdr.msg_iovlen = i;
   args->msg.msghdr.msg_control = msg.msg_control;
@@ -1162,25 +1177,17 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
       (us->s.os_sock_status & OO_OS_STATUS_RX) == 0 )
     cb_flags |= ONLOAD_ZC_END_OF_BURST;
 
+  /* Beware - as soon as we provide the pkts to the callback we can't 
+   * touch them anymore as we don't know what the app might be doing with
+   * them, such as releasing them.
+   */
   *cb_rc = (*args->cb)(args, cb_flags);
 
-  if( (*cb_rc) & ONLOAD_ZC_KEEP ) {
-    pkt = PKT_CHK_NNL(ni, us->zc_kernel_datagram);
-
-    /* pkt_p handily points to the buffer after the last one used for
-     * this datagram, and i is the number of buffers we used
-     */
-    us->zc_kernel_datagram = pkt_p;
-#ifndef NDEBUG
-    ci_assert_ge(us->zc_kernel_datagram_count, i);
-#endif
-    us->zc_kernel_datagram_count -= i;
-
-    while( i > 0 ) {
-      pkt->pf.udp.rx_flags |= CI_IP_PKT_FMT_PREFIX_UDP_RX_KEEP;
-      pkt = PKT_CHK_NNL(ni, pkt->frag_next);
-      --i;
-    } 
+  if( !((*cb_rc) & ONLOAD_ZC_KEEP) ) {
+    /* Put the buffers back on the zc_kernel_datagram list */
+    pkt->frag_next = us->zc_kernel_datagram;
+    us->zc_kernel_datagram = first_pkt_p;
+    us->zc_kernel_datagram_count += i;
   }
 
   if( cb_flags & ONLOAD_ZC_END_OF_BURST ) {
@@ -1284,11 +1291,18 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
       if( (ci_udp_recv_q_pkts(&us->recv_q) == 1) &&
           ((us->s.os_sock_status & OO_OS_STATUS_RX) == 0) )
         cb_flags |= ONLOAD_ZC_END_OF_BURST;
+
+      /* Add KEEP flag before calling callback, and remove it after
+       * if not needed.  This prevents races where the app releases
+       * the pkt before we've added the flag.
+       */
+      pkt->pf.udp.rx_flags |= CI_IP_PKT_FMT_PREFIX_UDP_RX_KEEP;
+
       cb_rc = (*args->cb)(args, cb_flags);
 
-      if( cb_rc & ONLOAD_ZC_KEEP ) {
+      if( ! (cb_rc & ONLOAD_ZC_KEEP) ) {
         /* indicate need for ref to prevent it being reaped */
-        pkt->pf.udp.rx_flags |= CI_IP_PKT_FMT_PREFIX_UDP_RX_KEEP;
+        pkt->pf.udp.rx_flags &=~ CI_IP_PKT_FMT_PREFIX_UDP_RX_KEEP;
       }
 
       us->recv_q.bytes_delivered += pkt->pay_len;
@@ -1445,7 +1459,9 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
       goto out;
   }
 
-  rc = ci_udp_recvmsg_socklocked_block(a, ni, us, &spin_state);
+  ci_sock_unlock(ni, &us->s.b);
+  rc = ci_udp_recvmsg_block(a, ni, us, spin_state.timeout);
+  ci_sock_lock(ni, &us->s.b);
   if( rc == 0 ) {
     if( ci_udp_recv_q_not_empty(us) )
       goto not_empty;

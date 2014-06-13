@@ -51,5 +51,4 @@ int ci_tcp_helper_pipebufs_to_socks(ci_netif* ni)
 }
 #endif
 
-
 /*! \cidoxg_end */

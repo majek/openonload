@@ -28,7 +28,6 @@
 #include <onload/linux_onload.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/linux_mmap.h>
-#include <onload/linux_sock_ops.h>
 #include <ci/internal/ip.h>
 #include <onload/linux_trampoline.h>
 #include <onload/linux_onload_internal.h>
@@ -119,11 +118,13 @@ MODULE_PARM_DESC(oof_shared_steal_thresh,
                  "the filter to persist even when a new wildcard socket needs "
                  "the filter.");
 
-extern int allow_insecure_setuid_sharing;
-module_param(allow_insecure_setuid_sharing, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(allow_insecure_setuid_sharing,
-                 "Override default security rules and allow setuid processes "
-                 "to map Onload stacks created by other users.");
+int phys_mode_gid = -2;
+module_param(phys_mode_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(phys_mode_gid,
+                 "Group id which may use physical buffer mode.  "
+                 "-2 (default) means \"physical buffer mode forbidden\"; "
+                 "-1 means \"any user may use physical buffer mode\".  "
+                 "See EF_PACKET_BUFFER_MODE environment variable.");
 
 int timesync_period = 500;
 module_param(timesync_period, int, S_IRUGO | S_IWUSR);
@@ -138,17 +139,6 @@ MODULE_PARM_DESC(safe_signals_and_exit,
                  "shared stacks are properly closed.\n"
                  "Intercept rt_sigaction() syscall and postpone signal "
                  "handlers to avoid Onload stack deadlock.");
-
-/* Provides upper limit to EF_MAX_PACKETS. default is 512K packets,
- * which equates to roughly 1GB of memory 
- */
-unsigned max_packets_per_stack = 0x80000;
-module_param(max_packets_per_stack, uint, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(max_packets_per_stack,
-                 "Limit the number of packets that a stack can allocate to "
-                 "allow more stacks to be supported in parallel. "
-                 "NB. Does not apply retrospectively to stacks created before "
-                 "this option is modified");
 
 
 /* Following set of three options define the control plane table sizes */
@@ -322,9 +312,6 @@ int oo_fop_open(struct inode* inode, struct file* filp)
   priv->_filp = filp;
   priv->fd_type = CI_PRIV_TYPE_NONE;
 
-  /* Make the file descriptor look more socket-like (if config opt enabled) */
-  efab_linux_attach_sock_ops(filp);
-
   filp->private_data = (void*) priv;
   filp->f_op = &oo_fops;
 
@@ -350,10 +337,6 @@ int oo_fop_release(struct inode* inode, struct file* filp)
     efab_thr_release(priv->thr);
   }
   onload_priv_free(priv);
-
-  /* May need to clean up state in inode if socket operations were attached */
-  efab_linux_cleanup_sock_ops(inode);
-
   return 0;
 }
 
@@ -537,12 +520,12 @@ ci_chrdev_dtor(const char* name)
 
 static int onload_sanity_checks(void)
 {
-  if( FALCON_RX_USR_BUF_SIZE + PKT_START_OFF_MIN() > CI_CFG_PKT_BUF_SIZE ) {
+  if( FALCON_RX_USR_BUF_SIZE + PKT_START_OFF() > CI_CFG_PKT_BUF_SIZE ) {
     ci_log("ERROR: FALCON_RX_USR_BUF_SIZE=%d PKT_START_OFF=%d BUF_SIZE=%d",
-           FALCON_RX_USR_BUF_SIZE, PKT_START_OFF_MIN(), CI_CFG_PKT_BUF_SIZE);
+           FALCON_RX_USR_BUF_SIZE, PKT_START_OFF(), CI_CFG_PKT_BUF_SIZE);
     return -EINVAL;
   }
-  if( FALCON_RX_USR_BUF_SIZE + PKT_START_OFF_MIN() < CI_CFG_PKT_BUF_SIZE - 64)
+  if( FALCON_RX_USR_BUF_SIZE + PKT_START_OFF() < CI_CFG_PKT_BUF_SIZE - 64)
     ci_log("WARNING: FALCON_RX_USR_BUF_SIZE=%d could be bigger",
            FALCON_RX_USR_BUF_SIZE);
   return 0;
@@ -700,10 +683,6 @@ EXPORT_SYMBOL(ci_netif_ctor);
 EXPORT_SYMBOL(ci_tcp_sendmsg);
 EXPORT_SYMBOL(ci_netif_poll_n);
 EXPORT_SYMBOL(ci_tcp_close);
-EXPORT_SYMBOL(ci_tcp_shutdown);
-EXPORT_SYMBOL(ci_tcp_abort);
-EXPORT_SYMBOL(ci_tcp_getsockopt);
-EXPORT_SYMBOL(ci_tcp_setsockopt);
 EXPORT_SYMBOL(ci_netif_dtor);
 EXPORT_SYMBOL(ci_tcp_recvmsg);
 EXPORT_SYMBOL(__ef_eplock_lock_slow);
@@ -718,9 +697,6 @@ EXPORT_SYMBOL(ci_netif_send);
 EXPORT_SYMBOL(ci_netif_pkt_alloc_slow);
 EXPORT_SYMBOL(__ci_copy_iovec_to_pkt);
 EXPORT_SYMBOL(ci_netif_pkt_wait);
-EXPORT_SYMBOL(ci_tcp_bind);
-EXPORT_SYMBOL(ci_tcp_listen);
-EXPORT_SYMBOL(ci_tcp_ioctl);
 EXPORT_SYMBOL(efab_linux_sys_close);
 EXPORT_SYMBOL(ef_eventq_has_event);
 #if CI_CFG_BUILD_DUMP_CODE_IN_KERNEL

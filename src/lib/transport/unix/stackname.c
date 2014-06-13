@@ -349,6 +349,7 @@ void oo_stackname_state_init(struct oo_stackname_state *spt)
 
   if( (s = getenv("EF_NAME")) != NULL ) {
     spt->context = ONLOAD_SCOPE_GLOBAL;
+    strncpy(spt->stackname, s, CI_CFG_STACK_NAME_LEN);
     strncpy(spt->scoped_stackname, s, CI_CFG_STACK_NAME_LEN);
   }
 

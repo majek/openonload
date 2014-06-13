@@ -38,7 +38,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201205-u1
+%define pkgversion 201210
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -67,7 +67,7 @@
 
 %if %kernel_installed
 
-%define kernel_pkg %( rpm -q --whatprovides /lib/modules/%{kernel} | grep -v source | grep -v base) 
+%define kernel_pkg %( rpm -q --whatprovides /lib/modules/%{kernel} | grep kernel | grep -v source | grep -v base) 
 # form a fake kernel name in known format 2.6.32-0.41-rt
 %define kernel_long %( echo %{kernel_pkg} | sed "s/kernel-\\([a-zA-Z_-]*\\)[-\.]\\([2-9].[0-9].*\\)/\\2-\\1/; s/kernel-//")
 
@@ -214,20 +214,23 @@ export KPATH=%{kpath}
 export i_prefix=%{buildroot}
 mkdir -p "$i_prefix/etc/modprobe.d"
 mkdir -p "$i_prefix/etc/depmod.d"
-./scripts/onload_install --verbose --nobuild --kernelver "%{kernel}" \
-  --nouninstall --noinitscript --noldconfig --noinstallcheck --nosfccheck \
-  %{?debug:--debug}
+./scripts/onload_install --verbose --kernelver "%{kernel}" \
+  %{?debug:--debug} rpm_install
+rm -f "%{buildroot}/etc/modprobe.conf"  # may be created by onload_install
 docdir="$i_prefix%{_defaultdocdir}/%{name}-%{pkgversion}"
 mkdir -p "$docdir"
-install -m 644 LICENSE README* "$docdir"
+install -m 644 LICENSE README* ChangeLog* ReleaseNotes* "$docdir"
 install -D scripts/onload_install "%{buildroot}/lib/onload/onload_install"
 
 %post
-/lib/onload/onload_install --nobuild --nouninstall --noinstallcheck \
-  --initscript
+/lib/onload/onload_install rpm_post
 ldconfig -n /usr/lib /usr/lib64
 
 %preun
+if [ -f /etc/modprobe.conf ]; then
+  sed -i '/onload_start/,/onload_end/d' /etc/modprobe.conf
+fi
+
 if [ "$1" = 0 ]; then  # Erase, not upgrade
   if [ -x /usr/lib/lsb/remove_initd ]; then            \
     /usr/lib/lsb/remove_initd /etc/init.d/openonload;  \

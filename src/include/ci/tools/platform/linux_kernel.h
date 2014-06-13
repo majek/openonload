@@ -424,6 +424,15 @@ ci_inline uid_t ci_getuid(void)
 #endif
 }
 
+ci_inline uid_t ci_getgid(void)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
+  return current->gid;
+#else
+  return current_gid();
+#endif
+}
+
 
 #endif  /* __CI_TOOLS_LINUX_KERNEL_H__ */
 /*! \cidoxg_end */

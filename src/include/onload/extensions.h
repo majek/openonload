@@ -120,6 +120,8 @@ enum onload_spin_type {
   ONLOAD_SPIN_POLL,
   ONLOAD_SPIN_PKT_WAIT,
   ONLOAD_SPIN_EPOLL_WAIT,
+  ONLOAD_SPIN_STACK_LOCK,
+  ONLOAD_SPIN_SOCK_LOCK,
   ONLOAD_SPIN_MAX /* special value to mark largest valid input */
 };
 

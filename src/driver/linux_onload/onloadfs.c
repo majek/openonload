@@ -124,7 +124,8 @@ static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
     len = snprintf(buffer, buflen, "[%s:%d:%d]",
                    priv_type_to_str(priv->fd_type), priv->thr->id,
                    priv->sock_id);
-  return len;
+  buffer[buflen-1] = '\0';
+  return len + 1;
 }
 #ifdef EFX_HAVE_D_DNAME
 static char *onloadfs_dname(struct dentry *dentry, char *buffer, int buflen)
@@ -133,11 +134,16 @@ static char *onloadfs_dname(struct dentry *dentry, char *buffer, int buflen)
                                          struct onload_inode, vfs_inode);
   ci_private_t *priv = &ei->priv;
   int len;
+  char temp[64];
   /* dynamic_dname() is not exported */
 
-  len = snprintf(buffer, buflen, "onload:");
-  onloadfs_name(priv, buffer + len, buflen - len);
-  return buffer;
+  len = snprintf(temp, sizeof(temp), "onload:");
+  len += onloadfs_name(priv, temp + len, sizeof(temp) - len);
+  if( len > sizeof(temp) || len > buflen )
+    return ERR_PTR(-ENAMETOOLONG);
+
+  buffer += buflen - len;
+  return memcpy(buffer, temp, len);
 }
 #endif
 
@@ -351,8 +357,14 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
          thr->id, ep_id, fd, priv);*/
 
 #ifdef EFX_FSTYPE_HAS_MOUNT
-  path.dentry = d_alloc_pseudo(onload_mnt->mnt_sb, &name);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,37)
+  path.dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
+  if( path.dentry != NULL )
+    path.dentry->d_op = &onloadfs_dentry_operations;
 #else
+  path.dentry = d_alloc_pseudo(onload_mnt->mnt_sb, &name);
+#endif
+#else /* EFX_FSTYPE_HAS_MOUNT */
 #ifdef EFX_HAVE_D_DNAME
   my_dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
 #else
@@ -366,12 +378,14 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
     my_dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
   }
 #endif
-#endif
+#endif /* EFX_FSTYPE_HAS_MOUNT */
+
   if( my_dentry == NULL ) {
     put_unused_fd(fd);
     iput(inode);
     return -ENOMEM;
   }
+
 #if !defined(EFX_FSTYPE_HAS_MOUNT) || defined(EFX_OLD_MOUNT_PSEUDO)
   my_dentry->d_op = &onloadfs_dentry_operations;
 #if !defined(EFX_HAVE_STRUCT_PATH) && defined(EFX_HAVE_D_DNAME)

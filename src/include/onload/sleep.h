@@ -55,8 +55,10 @@ ci_inline void citp_waitable_wake_not_in_poll(ci_netif* ni,
     ++sb->sleep_seq.rw.tx;
   ci_mb();
 #ifdef __KERNEL__
-  if( what & sb->wake_request )
+  if( what & sb->wake_request ) {
+    sb->sb_flags |= what;
     citp_waitable_wakeup(ni, sb);
+  }
 #else
   if( what & sb->wake_request ) {
     sb->sb_flags |= what;

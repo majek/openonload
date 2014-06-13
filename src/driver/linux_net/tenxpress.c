@@ -145,7 +145,7 @@
 #define GPHY_XCONTROL_REG	49152
 #define GPHY_ISOLATE_LBN	10
 #define GPHY_ISOLATE_WIDTH	1
-#define GPHY_DUPLEX_LBN	  	8
+#define GPHY_DUPLEX_LBN		8
 #define GPHY_DUPLEX_WIDTH	1
 #define GPHY_LOOPBACK_NEAR_LBN	14
 #define GPHY_LOOPBACK_NEAR_WIDTH 1
@@ -324,7 +324,6 @@ static int tenxpress_phy_probe(struct efx_nic *efx)
 	efx->mdio.mode_support = MDIO_SUPPORTS_C45;
 
 	efx->loopback_modes = SFX7101_LOOPBACKS | FALCON_XMAC_LOOPBACKS;
-	efx->startup_loopback_mode = LOOPBACK_PCS;
 
 	strlcpy(efx->phy_name, "SFX7101 10GBASE-T",
 		sizeof(efx->phy_name));

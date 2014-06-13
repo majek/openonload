@@ -44,11 +44,12 @@ extern void ci_ipp_dump_stats(void);
  * This function is intended to safely decode a TCP helper resource
  * handle that we passed to the NET driver back into a locked netif
  *
- * Given a TCP helper resource handle, this function attempts to 
- * return a locked netif. If it succeeds its up to the callee to 
- * drop the netif lock by calling efab_tcp_helper_netif_unlock.
- * This function can fail because the handle is no longer valid OR
- * its not possible to get the netif lock at this time
+ * Given a TCP helper resource handle, this function attempts to
+ * return a locked netif. If it succeeds its up to the callee to drop
+ * the netif lock by calling efab_tcp_helper_netif_unlock, and drop a
+ * reference by calling efab_thr_release().  This function can fail
+ * because the handle is no longer valid OR its not possible to get
+ * the netif lock at this time
  *
  * \param nic           nic object the handle relates to
  * \param tcp_id        TCP helper resource id
@@ -74,7 +75,7 @@ efab_ipp_get_locked_thr_from_tcp_handle(unsigned tcp_id)
     /* so we have found the resource in the table and have incremented
     ** its reference count  - now lets try and lock the associated netif 
     */
-    if ( !efab_tcp_helper_netif_try_lock(thr, CI_ADDR_SPC_ID_KERNEL) ) {
+    if ( !efab_tcp_helper_netif_try_lock(thr) ) {
       OO_DEBUG_IPP( ci_log("%s: Failed to lock TCP helper", __FUNCTION__) );
       efab_thr_release(thr);
       thr = NULL;

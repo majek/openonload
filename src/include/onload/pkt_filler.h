@@ -56,20 +56,20 @@ ci_inline void oo_pkt_filler_init(struct oo_pkt_filler* pf,
   /* ?? FIXME: should depend on runtime buffer size */
 }
 
-extern int oo_pkt_filler_alloc_pkts(ci_netif* ni, int* p_netif_locked, 
-                                    struct oo_pkt_filler* pf, int n) CI_HF;
 
 extern void oo_pkt_filler_free_unused_pkts(ci_netif* ni, int* p_netif_locked,
                                            struct oo_pkt_filler* pf) CI_HF;
 
+
 ci_inline ci_ip_pkt_fmt* oo_pkt_filler_next_pkt(ci_netif* ni, 
-                                                struct oo_pkt_filler* pf)
+                                                struct oo_pkt_filler* pf,
+                                                int ni_locked)
 {
   ci_ip_pkt_fmt* pkt = NULL;
   if( pf->alloc_pkt != NULL ) {
     pkt = pf->alloc_pkt;
     if( OO_PP_NOT_NULL(pkt->next) )
-      pf->alloc_pkt = PKT_CHK(ni, pkt->next);
+      pf->alloc_pkt = PKT_CHK_NML(ni, pkt->next, ni_locked);
     else
       pf->alloc_pkt = NULL;
   }

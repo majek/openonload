@@ -29,6 +29,7 @@
 #include "regs.h"
 #include "mcdi_pcol.h"
 #include "phy.h"
+#include "aoe.h"
 
 /**************************************************************************
  *
@@ -335,8 +336,23 @@ static void efx_mcdi_ev_cpl(struct efx_nic *efx, unsigned int seqno,
 		efx_mcdi_complete(mcdi);
 }
 
-/* Issue the given command by writing the data into the shared memory PDU,
- * ring the doorbell and wait for completion. Copyout the result. */
+/**
+ * efx_mcdi_rpc - Issue an MCDI command and wait for completion
+ * @efx: NIC through which to issue the command
+ * @cmd: Command type number
+ * @inbuf: Command parameters
+ * @inlen: Length of command parameters, in bytes.  Must be a multiple
+ *	of 4 and no greater than %MC_SMEM_PDU_LEN.
+ * @outbuf: Response buffer.  May be %NULL if @outlen is 0.
+ * @outlen: Length of response buffer, in bytes.  If the actual
+ *	reponse is longer than @outlen & ~3, it will be truncated
+ *	to that length.
+ * @outlen_actual: Pointer through which to return the actual response
+ *	length.  May be %NULL if this is not needed.
+ *
+ * This function may sleep and therefore must be called in process
+ * context.
+ */
 int efx_mcdi_rpc(struct efx_nic *efx, unsigned cmd,
 		 const u8 *inbuf, size_t inlen, u8 *outbuf, size_t outlen,
 		 size_t *outlen_actual)
@@ -548,51 +564,6 @@ static void efx_mcdi_process_link_change(struct efx_nic *efx, efx_qword_t *ev)
 	efx_link_status_changed(efx);
 }
 
-static const char *sensor_names[] = {
-	[MC_CMD_SENSOR_CONTROLLER_TEMP] = "Controller temp. sensor",
-	[MC_CMD_SENSOR_PHY_COMMON_TEMP] = "PHY shared temp. sensor",
-	[MC_CMD_SENSOR_CONTROLLER_COOLING] = "Controller cooling",
-	[MC_CMD_SENSOR_PHY0_TEMP] = "PHY 0 temp. sensor",
-	[MC_CMD_SENSOR_PHY0_COOLING] = "PHY 0 cooling",
-	[MC_CMD_SENSOR_PHY1_TEMP] = "PHY 1 temp. sensor",
-	[MC_CMD_SENSOR_PHY1_COOLING] = "PHY 1 cooling",
-	[MC_CMD_SENSOR_IN_1V0] = "1.0V supply sensor",
-	[MC_CMD_SENSOR_IN_1V2] = "1.2V supply sensor",
-	[MC_CMD_SENSOR_IN_1V8] = "1.8V supply sensor",
-	[MC_CMD_SENSOR_IN_2V5] = "2.5V supply sensor",
-	[MC_CMD_SENSOR_IN_3V3] = "3.3V supply sensor",
-	[MC_CMD_SENSOR_IN_12V0] = "12V supply sensor",
-	[MC_CMD_SENSOR_IN_1V2A] = "1.2V analogue supply sensor",
-	[MC_CMD_SENSOR_IN_VREF] = "Reference voltage supply sensor"
-};
-
-static const char *sensor_status_names[] = {
-	[MC_CMD_SENSOR_STATE_OK] = "OK",
-	[MC_CMD_SENSOR_STATE_WARNING] = "Warning",
-	[MC_CMD_SENSOR_STATE_FATAL] = "Fatal",
-	[MC_CMD_SENSOR_STATE_BROKEN] = "Device failure",
-};
-
-static void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev)
-{
-	unsigned int monitor, state, value;
-	const char *name, *state_txt;
-	monitor = EFX_QWORD_FIELD(*ev, MCDI_EVENT_SENSOREVT_MONITOR);
-	state = EFX_QWORD_FIELD(*ev, MCDI_EVENT_SENSOREVT_STATE);
-	value = EFX_QWORD_FIELD(*ev, MCDI_EVENT_SENSOREVT_VALUE);
-	/* Deal gracefully with the board having more drivers than we
-	 * know about, but do not expect new sensor states. */
-	name = (monitor >= ARRAY_SIZE(sensor_names))
-				    ? "No sensor name available" :
-				    sensor_names[monitor];
-	EFX_BUG_ON_PARANOID(state >= ARRAY_SIZE(sensor_status_names));
-	state_txt = sensor_status_names[state];
-
-	netif_err(efx, hw, efx->net_dev,
-		  "Sensor %d (%s) reports condition '%s' for raw value %d\n",
-		  monitor, name, state_txt, value);
-}
-
 static void efx_mcdi_fwalert_event(struct efx_nic *efx, efx_qword_t *ev)
 {
 	unsigned int reason, data;
@@ -664,6 +635,9 @@ void efx_mcdi_process_event(struct efx_channel *channel,
 	case MCDI_EVENT_CODE_PTP_RX:
 	case MCDI_EVENT_CODE_PTP_FAULT:
 		efx_ptp_event(efx, event);
+		break;
+	case MCDI_EVENT_CODE_AOE:
+		efx_aoe_event(efx, event);
 		break;
 
 	default:
@@ -743,9 +717,8 @@ int efx_mcdi_get_board_cfg(struct efx_nic *efx, u8 *mac_address,
 			   u16 *fw_subtype_list, u32 *capabilities)
 {
 	uint8_t outbuf[MC_CMD_GET_BOARD_CFG_OUT_LENMAX];
-	size_t outlen, src_size, dst_size;
+	size_t outlen, offset, i;
 	int port_num = efx_port_num(efx);
-	int offset;
 	int rc;
 
 	BUILD_BUG_ON(MC_CMD_GET_BOARD_CFG_IN_LEN != 0);
@@ -766,25 +739,24 @@ int efx_mcdi_get_board_cfg(struct efx_nic *efx, u8 *mac_address,
 	if (mac_address)
 		memcpy(mac_address, outbuf + offset, ETH_ALEN);
 	if (fw_subtype_list) {
-		/* Truncate or zero-pad as necessary */
-		src_size = (outlen -
-			    MC_CMD_GET_BOARD_CFG_OUT_FW_SUBTYPE_LIST_OFST);
-		dst_size = (MC_CMD_GET_BOARD_CFG_OUT_FW_SUBTYPE_LIST_MAXNUM *
-			    sizeof(*fw_subtype_list));
-		memcpy(fw_subtype_list,
-		       outbuf + MC_CMD_GET_BOARD_CFG_OUT_FW_SUBTYPE_LIST_OFST,
-		       min(src_size, dst_size));
-		if (dst_size < src_size)
-			memset(fw_subtype_list + src_size, 0,
-			       dst_size - src_size);
+		/* Byte-swap and truncate or zero-pad as necessary */
+		offset = MC_CMD_GET_BOARD_CFG_OUT_FW_SUBTYPE_LIST_OFST;
+		for (i = 0;
+		     i < MC_CMD_GET_BOARD_CFG_OUT_FW_SUBTYPE_LIST_MAXNUM;
+		     i++) {
+			fw_subtype_list[i] =
+				(offset + 2 <= outlen) ?
+				le16_to_cpup((__le16 *)(outbuf + offset)) : 0;
+			offset += 2;
+		}
 	}
 	if (capabilities) {
 		if (port_num)
 			*capabilities = MCDI_DWORD(outbuf,
-				   	GET_BOARD_CFG_OUT_CAPABILITIES_PORT1);
+					GET_BOARD_CFG_OUT_CAPABILITIES_PORT1);
 		else
 			*capabilities = MCDI_DWORD(outbuf,
-				   	GET_BOARD_CFG_OUT_CAPABILITIES_PORT0);
+					GET_BOARD_CFG_OUT_CAPABILITIES_PORT0);
 	}
 
 	return 0;
@@ -1029,7 +1001,7 @@ static int efx_mcdi_nvram_test(struct efx_nic *efx, unsigned int type)
 
 int efx_mcdi_nvram_test_all(struct efx_nic *efx)
 {
-	u32 nvram_types = 0;
+	u32 nvram_types;
 	unsigned int type;
 	int rc;
 
@@ -1118,12 +1090,17 @@ static void efx_mcdi_exit_assertion(struct efx_nic *efx)
 {
 	u8 inbuf[MC_CMD_REBOOT_IN_LEN];
 
-	/* Atomically reboot the mcfw out of the assertion handler */
+	/* If the MC is running debug firmware, it might now be
+	 * waiting for a debugger to attach, but we just want it to
+	 * reboot.  We set a flag that makes the command a no-op if it
+	 * has already done so.  We don't know what return code to
+	 * expect (0 or -EIO), so ignore it.
+	 */
 	BUILD_BUG_ON(MC_CMD_REBOOT_OUT_LEN != 0);
 	MCDI_SET_DWORD(inbuf, REBOOT_IN_FLAGS,
 		       MC_CMD_REBOOT_FLAGS_AFTER_ASSERTION);
-	efx_mcdi_rpc(efx, MC_CMD_REBOOT, inbuf, MC_CMD_REBOOT_IN_LEN,
-		     NULL, 0, NULL);
+	(void) efx_mcdi_rpc(efx, MC_CMD_REBOOT, inbuf, MC_CMD_REBOOT_IN_LEN,
+			    NULL, 0, NULL);
 }
 
 int efx_mcdi_handle_assertion(struct efx_nic *efx)
@@ -1296,7 +1273,7 @@ int efx_mcdi_flush_rxqs(struct efx_nic *efx)
 			}
 		}
 	}
-	
+
 	rc = efx_mcdi_rpc(efx, MC_CMD_FLUSH_RX_QUEUES, (u8 *)qid,
 			  count * sizeof(*qid), NULL, 0, NULL);
 	WARN_ON(rc > 0);
@@ -1320,4 +1297,3 @@ fail:
 	netif_err(efx, hw, efx->net_dev, "%s: failed rc=%d\n", __func__, rc);
 	return rc;
 }
-

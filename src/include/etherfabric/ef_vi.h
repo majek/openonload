@@ -686,6 +686,22 @@ extern const char* ef_vi_version_str(void);
  */
 extern const char* ef_vi_driver_interface_str(void);
 
+
+/**********************************************************************
+ * Re-Initialisation **************************************************
+ **********************************************************************/
+
+/* This set of functions will reinitialise the software rings and deal
+ * with any buffers that they contain by calling the supplied callback
+ * for each one to allow it to be freed.
+ */
+
+typedef void (*ef_vi_reinit_callback)(ef_request_id id, void* arg);
+
+extern int ef_vi_rxq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg);
+extern int ef_vi_txq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg);
+extern int ef_vi_evq_reinit(ef_vi* vi);
+
 #ifdef __cplusplus
 }
 #endif

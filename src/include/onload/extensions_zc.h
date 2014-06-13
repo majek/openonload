@@ -145,9 +145,12 @@ extern int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
                                    enum onload_zc_buffer_type_flags flags);
 
 /* onload_zc_release_buffers will release 1 or more previously
- * allocated buffers supplied in the bufs array.  This can also be
- * used to free buffers retained by setting ONLOAD_ZC_KEEP in a
- * receive callback.
+ * allocated buffers supplied in the bufs array.
+ * 
+ * This can also be used to free buffers retained by setting
+ * ONLOAD_ZC_KEEP in a receive callback.  Only the first buffer from
+ * each received datagram needs to be freed this way; the rest are
+ * freed automatically as they are internally chained from the first.
  *
  * Returns zero on success, or <0 to indicate an error
  */
@@ -178,6 +181,11 @@ extern int onload_zc_release_buffers(int fd, onload_zc_handle* bufs,
  *  - msg.msghdr.msg_name & msg_namelen set as you would for recvmsg
  *  - flags set to indicate behavior (e.g. ONLOAD_MSG_DONTWAIT)
  *
+ * Onload makes only limited checks for validity on the arguments
+ * passed in, so care should be taken to ensure they are correct.
+ * Cases such as NULL args pointer, etc. may result in incorrect
+ * application behaviour.
+ *
  * The supplied onload_zc_recv_args structure is passed through to
  * the callback every time the callback is called.
  *
@@ -190,15 +198,15 @@ extern int onload_zc_release_buffers(int fd, onload_zc_handle* bufs,
  * (stored in onload_zc_recv_args.msg.iov) and can indicate the
  * following by setting flags on its return code:
  *
- * - onload should stop processing this set of messages and
- * return from onload_zc_recv() (rc & ONLOAD_ZC_TERMINATE).
- * - onload should transfer ownership of the buffer to the
- * application, as the application wishes to keep it for now and will
- * release or reuse it later (rc & ONLOAD_ZC_KEEP)
+ * - onload should stop processing this set of messages and return
+ * from onload_zc_recv() (rc & ONLOAD_ZC_TERMINATE).  - onload should
+ * transfer ownership of the buffer(s) to the application, as the
+ * application wishes to keep them for now and will release or reuse
+ * them later (rc & ONLOAD_ZC_KEEP).  See onload_zc_release_buffers()
  *
  * As the return code is flags-based the application is free to set
  * any combination of these.  If no flags are set onload will continue
- * to process the next message and ownership of the buffer remains
+ * to process the next message and ownership of the buffer(s) remains
  * with onload.
  * 
  * The callback can access valid cmsg data (if requested by setting

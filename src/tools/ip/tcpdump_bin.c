@@ -398,11 +398,11 @@ static int stackfilter_match_name(ci_netif_info_t *info)
 {
   int i;
   for( i = 0; i < filter_patterns_n; i++ ) {
-    if( fnmatch(filter_patterns[i], info->u.ni_next_ni.ni_name, 0) == 0)
+    if( fnmatch(filter_patterns[i], info->ni_name, 0) == 0)
       return 1;
   }
   LOG_DUMP(ci_log("Onload stack [%d,%s]: not interested",
-                  info->ni_index, info->u.ni_next_ni.ni_name));
+                  info->ni_index, info->ni_name));
   return 0; /* Not interested */
 }
 

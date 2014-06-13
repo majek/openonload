@@ -31,10 +31,6 @@
 
 void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
 {
-  /* NOTE: this is used from __ci_tcp_listen_to_normal, where we want
-     to preserve s->addr_spc_id. So if the caller wants s->addr_spc_id
-     cleared back to CI_ADDR_SPC_ID_INVALID2 they need to do it
-     themselvves. */
   s->so_error = 0;
 
   s->tx_errno = EPIPE;
@@ -72,7 +68,7 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
   oo_sock_cplane_init(&s->cp);
   s->local_peer = OO_SP_NULL;
 
-  s->s_flags = 0u;
+  s->s_flags = CI_SOCK_FLAG_CONNECT_MUST_BIND;
   s->s_aflags = 0u;
 
   ci_assert_equal( 0, CI_IP_DFLT_TOS );
@@ -98,7 +94,6 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
 
 
   ci_sock_cmn_reinit(ni, s);
-  s->addr_spc_id = CI_ADDR_SPC_ID_INVALID2;
   ci_pmtu_state_init(ni, s, &s->pkt.pmtus, CI_IP_TIMER_PMTU_DISCOVER);
 
   sp = oo_sockp_to_statep(ni, SC_SP(s));

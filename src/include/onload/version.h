@@ -29,7 +29,7 @@
 
 
 #ifndef ONLOAD_VERSION
-# define ONLOAD_VERSION "201205-u1"
+# define ONLOAD_VERSION "201210"
 #endif
 
 #define ONLOAD_PRODUCT "OpenOnload"

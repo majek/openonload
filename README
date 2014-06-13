@@ -108,6 +108,6 @@ Any questions?
 
 
 ==========
- version: openonload-201205-u1
-revision: 71cc77f8f44e (ool201205) oo_32031/openonload-201205-u1
-    date: Wed Jul 18 09:48:13 BST 2012
+ version: openonload-201210
+revision: d8bb683137ad (ool1210) openonload-201210
+    date: Tue Oct  9 21:59:20 BST 2012

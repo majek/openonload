@@ -152,10 +152,12 @@ int ci_netif_timeout_reap(ci_netif* ni)
     ci_netif_timeout_leave(ni, ts);
     CITP_STATS_NETIF(++ni->state->stats.timewait_reap);
 
+#if CI_CFG_FD_CACHING
     if (ts->cached_on_fd != -1) {
       /* This was a cached EP; will have been returned to the cache */
       return 2;
     }
+#endif
   }
 
   return 1;
@@ -507,7 +509,7 @@ int ci_netif_mem_pressure_try_exit(ci_netif* ni)
      * we need, and put back.
      */
     while( ni->state->n_freepkts < pkts_needed ) {
-      if( (pkt = ci_netif_pkt_alloc_nonb(ni, 1)) == NULL )
+      if( (pkt = ci_netif_pkt_alloc_nonb(ni)) == NULL )
         return 0;
       --ni->state->n_async_pkts;
       CITP_STATS_NETIF_INC(ni, pkt_nonb_steal);
@@ -629,7 +631,7 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
  not_enough_pkts:
 #if ! CI_CFG_PP_IS_PTR
   /* Grab buffers from the non-blocking pool. */
-  while( (pkt = ci_netif_pkt_alloc_nonb(netif, CI_TRUE)) != NULL ) {
+  while( (pkt = ci_netif_pkt_alloc_nonb(netif)) != NULL ) {
     --netif->state->n_async_pkts;
     CITP_STATS_NETIF_INC(netif, pkt_nonb_steal);
     pkt->flags &= ~CI_PKT_FLAG_NONB_POOL;
@@ -784,23 +786,17 @@ static void ci_netif_unlock_slow(ci_netif* ni)
 
   ci_assert(ci_netif_is_locked(ni));  /* double unlock? */
 
-#if CI_CFG_STATS_NETIF
-  ++ni->state->stats.unlock_slow;
-  if( l & CI_EPLOCK_FL_NEED_WAKE )  ++ni->state->stats.lock_wakes;
-#endif
-
   if( l & CI_EPLOCK_NETIF_IS_PKT_WAITER )
     if( ci_netif_pkt_tx_can_alloc_now(ni) ) {
       ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_IS_PKT_WAITER);
       ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_PKT_WAKE);
       l = ni->state->lock.lock;
+      CITP_STATS_NETIF_INC(ni, unlock_slow_pkt_waiter);
     }
 
   if( l & CI_EPLOCK_NETIF_SOCKET_LIST )
     l = ci_netif_purge_deferred_socket_list(ni);
-
   ci_assert(! (l & CI_EPLOCK_NETIF_SOCKET_LIST));
-
   ni->state->defer_work_count = 0;
 
   if( !(l & (CI_EPLOCK_NETIF_KERNEL_FLAGS | CI_EPLOCK_FL_NEED_WAKE)) )
@@ -817,6 +813,7 @@ static void ci_netif_unlock_slow(ci_netif* ni)
 #ifndef __KERNEL__
     ci_assert(ni->state->lock.lock & CI_EPLOCK_LOCKED);
     ci_assert(~ni->state->lock.lock & CI_EPLOCK_UNLOCKED);
+    CITP_STATS_NETIF_INC(ni, unlock_slow_syscall);
     rc = oo_resource_op(ci_netif_get_driver_handle(ni),
                         OO_IOC_EPLOCK_WAKE, NULL);
 #else
@@ -831,11 +828,11 @@ static void ci_netif_unlock_slow(ci_netif* ni)
 void ci_netif_unlock(ci_netif* ni)
 {
   ci_assert_equal(ni->state->in_poll, 0);
-  if( ni->state->lock.lock == CI_EPLOCK_LOCKED &&
-      ci_cas32_succeed(&ni->state->lock.lock,
-                       CI_EPLOCK_LOCKED, CI_EPLOCK_UNLOCKED) )
+  if(CI_LIKELY( ni->state->lock.lock == CI_EPLOCK_LOCKED &&
+                ci_cas32_succeed(&ni->state->lock.lock,
+                                 CI_EPLOCK_LOCKED, CI_EPLOCK_UNLOCKED) ))
     return;
-
+  CITP_STATS_NETIF_INC(ni, unlock_slow);
   ci_netif_unlock_slow(ni);
 }
 
@@ -861,5 +858,20 @@ int ci_netif_mmap_shmbuf(ci_netif* netif, int shmbufid)
   return 0;
 }
 #endif
+
+
+void ci_netif_error_detected(ci_netif* ni, unsigned error_flag,
+                             const char* caller)
+{
+  if( ni->error_flags & error_flag )
+    return;
+  ci_log("%s: ERROR: [%d] runtime error %x detected in %s()",
+         __FUNCTION__, NI_ID(ni), error_flag, caller);
+  ci_log("%s: ERROR: [%d] errors detected: %x %x "CI_NETIF_ERRORS_FMT,
+         __FUNCTION__, NI_ID(ni), ni->error_flags, ni->state->error_flags,
+         CI_NETIF_ERRORS_PRI_ARG(ni->error_flags | ni->state->error_flags));
+  ni->error_flags |= error_flag;
+  ni->state->error_flags |= ni->error_flags;
+}
 
 /*! \cidoxg_end */

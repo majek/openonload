@@ -7,8 +7,11 @@ SUBDIRS		:= ciul \
                    ef_vi
 
 OTHER_SUBDIRS	:= tweaks \
-                   syscalls \
-                   cplane
+                   syscalls
+
+ifdef BROKEN
+OTHER_SUBDIRS	+= cplane
+endif
 
 ifeq ($(ONLOAD_ONLY),1)
 SUBDIRS		:= ef_vi

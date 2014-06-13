@@ -231,22 +231,15 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, int no_sw)
 }
 
 
-struct oof_socket_dump_args {
-  struct oof_manager* fm;
-  struct oof_socket*  skf;
-};
-
-
 static void oof_socket_dump_fn(void* arg, oo_dump_log_fn_t log, void* log_arg)
 {
-  struct oof_socket_dump_args* args = arg;
-  oof_socket_dump(args->fm, args->skf, log, log_arg);
+  oof_socket_dump(efab_tcp_driver.filter_manager, arg, log, log_arg);
 }
 
 
 static void oof_manager_dump_fn(void* arg, oo_dump_log_fn_t log, void* log_arg)
 {
-  oof_manager_dump((struct oof_manager*) arg, log, log_arg);
+  oof_manager_dump(efab_tcp_driver.filter_manager, log, log_arg);
 }
 
 
@@ -254,23 +247,14 @@ int
 tcp_helper_endpoint_filter_dump(tcp_helper_resource_t* thr, oo_sp sockp,
                                 void* user_buf, int user_buf_len)
 {
-  oo_dump_fn_t fn;
-  void* fn_arg;
-
   if( OO_SP_NOT_NULL(sockp) ) {
     tcp_helper_endpoint_t* ep = ci_trs_get_valid_ep(thr, sockp);
-    struct oof_socket_dump_args args = {
-      efab_tcp_driver.filter_manager, &ep->oofilter
-    };
-    fn = oof_socket_dump_fn;
-    fn_arg = &args;
+    return oo_dump_to_user(oof_socket_dump_fn, &ep->oofilter,
+                           user_buf, user_buf_len);
   }
   else {
-    fn = oof_manager_dump_fn;
-    fn_arg = efab_tcp_driver.filter_manager;
+    return oo_dump_to_user(oof_manager_dump_fn, NULL, user_buf, user_buf_len);
   }
-
-  return oo_dump_to_user(fn, fn_arg, user_buf, user_buf_len);
 }
 
 

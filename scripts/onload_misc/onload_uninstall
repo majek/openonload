@@ -23,6 +23,8 @@ usage() {
 ######################################################################
 # main
 
+PATH="$PATH:/sbin"; export PATH
+
 [ $# = 0 ] || usage
 
 libexec=/usr/libexec/onload
@@ -48,6 +50,10 @@ done
 exec 5<&-
 
 ldconfig -n /usr/lib /usr/lib64
+
+if [ -f /etc/modprobe.conf ]; then
+  sed -i '/onload_start/,/onload_end/d' /etc/modprobe.conf
+fi
 
 log "Updating kernel module dependencies..."
 grep "^/lib/modules/" "$m" | sed 's+/lib/modules/\([^/]*\)/.*+\1+' |

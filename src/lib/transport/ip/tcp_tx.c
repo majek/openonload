@@ -142,12 +142,20 @@ static void ci_ip_send_tcp_list_loopback(ci_netif* ni, ci_tcp_state* ts,
     pp = pkt->next;
     pkt->pf.lo.tx_sock = S_SP(ts);
     pkt->pf.lo.rx_sock = ts->s.local_peer;
+    if( CI_UNLIKELY(OO_SP_IS_NULL(pkt->pf.lo.rx_sock)) ) {
+      ci_netif_pkt_release(ni, pkt);
+      continue;
+    }
+    pkt->next = ni->state->looppkts;
+    ni->state->looppkts = OO_PKT_ID(pkt);
+    LOG_NT(ci_log(NS_FMT "loopback TX pkt %d to %d", NS_PRI_ARGS(ni, &ts->s),
+                  OO_PKT_FMT(pkt), OO_SP_FMT(pkt->pf.lo.rx_sock)));
   } while( pkt != tail_pkt );
-  tail_pkt->next = ni->state->looppkts;
-  ni->state->looppkts = head_id;
 
   /* really send all the packets */
-  if( !ni->state->in_poll )
+  if( CI_UNLIKELY(OO_SP_IS_NULL(pkt->pf.lo.rx_sock)) )
+    ci_tcp_drop(ni, ts, ECONNRESET);
+  else if( !ni->state->in_poll )
     ci_netif_poll(ni);
 }
 
@@ -581,7 +589,7 @@ int ci_tcp_send_sim_synack(ci_netif* netif, ci_tcp_state *ts)
 
   /* check txq is non empty */
   ci_assert(!ci_ip_queue_is_empty(&ts->retrans));
-  ci_assert(ci_ip_queue_is_valid(netif, &ts->retrans, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, &ts->retrans));
 
   pkt = PKT_CHK(netif, ts->retrans.head);
   tcp = TX_PKT_TCP(pkt);
@@ -1438,7 +1446,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
     if(CI_LIKELY( OO_PP_NOT_NULL(netif->state->freepkts) ))
       pkt = ci_netif_pkt_get(netif);
     else
-      pkt = ci_netif_pkt_alloc_nonb(netif, CI_TRUE);
+      pkt = ci_netif_pkt_alloc_nonb(netif);
     if( pkt == NULL ) {
       LOG_U(ci_log("%s: can't allocate packet", __FUNCTION__));
       CITP_STATS_NETIF_INC(netif, poll_no_pkt);
@@ -1594,12 +1602,7 @@ void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts)
   if( ~w_peer->state & CI_TCP_STATE_TCP_CONN )
     return;
   peer = (ci_tcp_state *)w_peer;
-  if( ts->s.pkt.ip.ip_saddr_be32 != peer->s.pkt.ip.ip_daddr_be32 ||
-      ts->s.pkt.ip.ip_daddr_be32 != peer->s.pkt.ip.ip_saddr_be32 ||
-      TS_TCP(ts)->tcp_source_be16 != TS_TCP(peer)->tcp_dest_be16 ||
-      TS_TCP(ts)->tcp_dest_be16 != TS_TCP(peer)->tcp_source_be16 ||
-      SEQ_LT(tcp_rcv_nxt(ts), peer->snd_una) ||
-      SEQ_LT(tcp_rcv_wnd_right_edge_sent(ts), peer->snd_max))
+  if( peer->s.local_peer != S_SP(ts) )
     return;
 
   do {

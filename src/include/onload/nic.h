@@ -31,5 +31,7 @@ extern void oo_nic_remove(struct oo_nic*);
 
 extern struct oo_nic* oo_nic_find_ifindex(int ifindex);
 
+extern int oo_nic_hwport(struct oo_nic*);
+
 
 #endif  /* __ONLOAD_NIC_H__ */

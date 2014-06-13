@@ -32,11 +32,9 @@
 #include <ci/internal/efabcfg.h>
 /*STG TO FIX*/
 #include <etherfabric/vi.h>  /* For VI_MAPPINGS_SIZE */
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+#include <sys/shm.h>
 #endif
-
-
-#ifdef __KERNEL__
-# define getpid()  0
 #endif
 
 #ifdef NDEBUG
@@ -76,41 +74,6 @@ ci_inline ci_uint64 usec_to_cycles64(ci_uint32 usec, int cpu_khz)
   return (ci_uint64) (((ci_uint64) usec * cpu_khz * 1048) >> 20);
 #else
   return (ci_uint64) usec * cpu_khz / 1000;
-#endif
-}
-
-
-static void netif_state_init_epcache_n(ci_netif_state* nis)
-{
-  /* The maximum number of EPs cachable defaults to the
-   * CI_CFG_TCP_EPCACHE_MAX macro, but it can be overridden by the
-   * EF_EPCACHE_MAX environment var.  However - we only use fd caching if
-   * we're running with NPTL, not linuxthreads.  Linuxthreads has different
-   * pids for different threads, and there's no easy way from user-space to
-   * determine if two contexts are operating with the same pid.  Although
-   * there is code to cope with this, it gets very difficult when threads
-   * exit -- there's no way to go from the EP's cached_on_pid field to
-   * anythign useful (this is bug 1777).  Hence, fd-caching disabled with
-   * linuxthreads.
-   */
-#if defined(__KERNEL__) || defined(_WIN32)
-  /* No endpoint caching for kernel-created netif */
-  nis->epcache_n = 0;
-#else
-  if( ci_glibc_uses_nptl() ) {
-    int nptl_broken = ci_glibc_nptl_broken();
-
-    if( nptl_broken == 1 )
-      /* ?? TODO: We should reference a FAQ entry here. */
-      ci_log("%s: NPTL v0.29 is broken and will not work with Onload",
-             __FUNCTION__);
-    else if( nptl_broken == -1 )
-      LOG_S(ci_log("%s: NPTL version not detected.", __FUNCTION__));
-
-    nis->epcache_n = nis->opts.epcache_max;
-  } else {
-    nis->epcache_n = 0;
-  }
 #endif
 }
 
@@ -237,23 +200,16 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   nis->dump_write_i = 0;
   memset(nis->dump_intf, 0, sizeof(nis->dump_intf));
 #endif
-}
 
-#endif
-
-
-/* initialize any part of the shared state that is dependent on the environment
-   (user/kernel) in which the netif is being created
-*/
-static void netif_state_init_source(const ci_netif* ni)
-{
-  ci_netif_state* nis = ni->state;
-  nis->pid = getpid();
-#ifdef __KERNEL__
   nis->uid = ni->uid;
+  nis->pid = current->tgid;
+
+#if CI_CFG_FD_CACHING
+  nis->epcache_n = nis->opts.epcache_max;
 #endif
-  netif_state_init_epcache_n(nis);
 }
+
+#endif
 
 
 static int citp_ipstack_params_inited = 0;
@@ -563,14 +519,14 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     if( opts->spin_usec != 0 ) {
       /* Don't buzz for too long by default! */
       opts->buzz_usec = CI_MIN(opts->spin_usec, 100);
-      opts->sock_lock_buzz = 1;
-      opts->stack_lock_buzz = 1;
       /* Disable EF_INT_DRIVEN by default when spinning. */
       opts->int_driven = 0;
       /* These are only here to expose defaults through stackdump.  FIXME:
        * Would be much better to initialise these from the CITP options to
        * avoid potential inconsistency.
        */
+      opts->sock_lock_buzz = 1;
+      opts->stack_lock_buzz = 1;
       opts->ul_select_spin = 1;
       opts->ul_poll_spin = 1;
 #if CI_CFG_USERSPACE_EPOLL
@@ -626,7 +582,7 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_POISON")) )       opts->poison_rx_buf = atoi(s);
 #endif
 #if CI_CFG_RANDOM_DROP
-  if( (s = getenv("EF_DROP")) ) {
+  if( (s = getenv("EF_RX_DROP_RATE")) ) {
     int r = atoi(s);
     if( r )  opts->rx_drop_rate = RAND_MAX / r;
   }
@@ -658,10 +614,11 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if ( (s = getenv("EF_MAX_PACKETS")) ) {
     int max_packets_rq = atoi(s);
-    opts->max_packets = ((max_packets_rq + PKTS_PER_SET - 1) >> PKTS_PER_SET_S)
-      << PKTS_PER_SET_S;
+    opts->max_packets = (max_packets_rq + PKTS_PER_SET - 1) &
+                                                ~(PKTS_PER_SET - 1);
     if( opts->max_packets != max_packets_rq )
-      /* ?? TODO: log message */;
+      /* ?? TODO: log message */
+      ;
     opts->max_rx_packets = opts->max_packets * 3 / 4;
     opts->max_tx_packets = opts->max_packets * 3 / 4;
   }
@@ -681,6 +638,10 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->min_free_packets = atoi(s);
   if( (s = getenv("EF_PREFAULT_PACKETS")) )
     opts->prefault_packets = atoi(s);
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  if( (s = getenv("EF_USE_HUGE_PAGES")) )
+    opts->huge_pages = atoi(s);
+#endif
   if ( (s = getenv("EF_MAX_ENDPOINTS")) ) {
     ci_uint32 max_ep_bufs = atoi(s);
     ci_uint32 max_ep_bufs_lg2 = ci_log2_ge(max_ep_bufs, 1);
@@ -728,8 +689,10 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
    */
   opts->dynack_thresh = CI_MAX(opts->dynack_thresh, opts->delack_thresh);
 #endif
+#if CI_CFG_FD_CACHING
   if ( (s = getenv("EF_EPCACHE_MAX")) )
     opts->epcache_max = atoi(s);
+#endif
 
 #if CI_CFG_PORT_STRIPING
   /* configuration opttions for striping */
@@ -931,141 +894,196 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
 void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
 {
+  const ci_netif_config_opts defaults = {
+    #undef CI_CFG_OPTFILE_VERSION
+    #undef CI_CFG_OPT
+    #undef CI_CFG_OPTGROUP
+
+    #define CI_CFG_OPTFILE_VERSION(version)
+    #define CI_CFG_OPTGROUP(group, category, expertise)
+    #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, presentation) \
+            default,
+
+    #include <ci/internal/opts_netif_def.h>
+  };
+  #define DISP_VAL_OPT_DEFAULT(name, mod, var, fmt) \
+        if(opts->var == defaults.var)                    \
+          ci_log("%26s: "fmt, name, mod opts->var);      \
+        else                                             \
+          ci_log("%26s: "fmt" (default: "fmt")", name,   \
+                 mod opts->var, mod defaults.var);
+    
 #if CI_CFG_POISON_BUFS
-    ci_log("                 EF_POISON: %d", opts->poison_rx_buf);
+    DISP_VAL_OPT_DEFAULT("EF_POISON", , poison_rx_buf, "%d")
 #endif
 #if CI_CFG_RANDOM_DROP
-    ci_log("                   EF_DROP: 1 in %d",
-           opts->rx_drop_rate ? RAND_MAX / opts->rx_drop_rate : -1);
+# ifndef __KERNEL__
+    DISP_VAL_OPT_DEFAULT("           EF_RX_DROP_RATE: 1 in ", ,
+        rx_drop_rate ? RAND_MAX / opts->rx_drop_rate : 0, "%d")
+# endif
 #endif
     ci_log("                    NDEBUG: %d", ! IS_DEBUG);
-    ci_log("         EF_IRQ_MODERATION: %u", opts->irq_usec);
-    ci_log("              EF_SPIN_USEC: %d", (int) opts->spin_usec);
+    DISP_VAL_OPT_DEFAULT("EF_IRQ_MODERATION", , irq_usec, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_SPIN_USEC", (int), spin_usec, "%d")
 #if CI_CFG_UDP
-    ci_log("             EF_MCAST_RECV: %u", opts->mcast_recv);
-    ci_log("   EF_FORCE_SEND_MULTICAST: %u", opts->force_send_multicast);
-    ci_log("     EF_MULTICAST_LOOP_OFF: %u", opts->multicast_loop_off);
+    DISP_VAL_OPT_DEFAULT("EF_MCAST_RECV", , mcast_recv, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_FORCE_SEND_MULTICAST", ,
+                         force_send_multicast, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_MULTICAST_LOOP_OFF", , multicast_loop_off, "%u")
 #endif
-    ci_log("              EF_BUZZ_USEC: %d", (int) opts->buzz_usec);
-    ci_log("         EF_SOCK_LOCK_BUZZ: %d", (int) opts->sock_lock_buzz);
-    ci_log("        EF_STACK_LOCK_BUZZ: %d", (int) opts->stack_lock_buzz);
-    ci_log("            EF_HELPER_USEC: %d", (int) opts->timer_usec);
-    ci_log("      EF_HELPER_PRIME_USEC: %d", (int) opts->timer_prime_usec);
-    ci_log("           EF_EVS_PER_POLL: %d", opts->evs_per_poll);
-    ci_log("         EF_TCP_TCONST_MSL: %d", opts->msl_seconds);
-    ci_log("        EF_TCP_FIN_TIMEOUT: %d", opts->fin_timeout);
-    ci_log("           EF_TCP_SYN_OPTS: %x", opts->syn_opts);
-    ci_log("            EF_MAX_PACKETS: %u", opts->max_packets);
-    ci_log("         EF_MAX_RX_PACKETS: %u", opts->max_rx_packets);
-    ci_log("         EF_MAX_TX_PACKETS: %u", opts->max_tx_packets);
-    ci_log("                EF_RXQ_MIN: %u", opts->rxq_min);
-    ci_log("       EF_MIN_FREE_PACKETS: %u", opts->min_free_packets);
-    ci_log("       EF_PREFAULT_PACKETS: %u", opts->prefault_packets);
-    ci_log("          EF_MAX_ENDPOINTS: %lu", ci_pow2(opts->max_ep_bufs_ln2));
-    ci_log("             EF_SHARE_WITH: %d", opts->share_with);
-    ci_log("               EF_RXQ_SIZE: %u", opts->rxq_size);
-    ci_log("              EF_RXQ_LIMIT: %u", opts->rxq_limit);
-    ci_log("               EF_TXQ_SIZE: %u", opts->txq_size);
-    ci_log("              EF_TXQ_LIMIT: %u", opts->txq_limit);
-    ci_log("       EF_SEND_POLL_THRESH: %u", opts->send_poll_thresh);
-    ci_log("      EF_SEND_POLL_MAX_EVS: %u", opts->send_poll_max_events);
+    DISP_VAL_OPT_DEFAULT("EF_BUZZ_USEC", , buzz_usec, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_SOCK_LOCK_BUZZ", , sock_lock_buzz, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_STACK_LOCK_BUZZ", , stack_lock_buzz, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_HELPER_USEC", , timer_usec, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_HELPER_PRIME_USEC", , timer_prime_usec, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_EVS_PER_POLL", , evs_per_poll, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_TCONST_MSL", , msl_seconds, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_FIN_TIMEOUT", , fin_timeout, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_SYN_OPTS", , syn_opts, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_MAX_PACKETS", , max_packets, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_MAX_RX_PACKETS", , max_rx_packets, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_MAX_TX_PACKETS", , max_tx_packets, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_RXQ_MIN", , rxq_min, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_MIN_FREE_PACKETS", , min_free_packets, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_PREFAULT_PACKETS", , prefault_packets, "%u")
+    
+    if(opts->max_ep_bufs_ln2 == defaults.max_ep_bufs_ln2)
+      ci_log("%26s: %lu", "EF_MAX_ENDPOINTS",
+            ci_pow2(opts->max_ep_bufs_ln2));
+    else
+      ci_log("%26s: %lu (default: %lu)", "EF_MAX_ENDPOINTS",
+            ci_pow2(opts->max_ep_bufs_ln2), ci_pow2(defaults.max_ep_bufs_ln2));
+
+    DISP_VAL_OPT_DEFAULT("EF_SHARE_WITH", , share_with, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_RXQ_SIZE", , rxq_size, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_RXQ_LIMIT", , rxq_limit, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TXQ_SIZE", , txq_size, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TXQ_LIMIT", , txq_limit, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_SEND_POLL_THRESH", , send_poll_thresh, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_SEND_POLL_MAX_EVS", , send_poll_max_events, "%u")
 #if CI_CFG_UDP
-    ci_log(" EF_UDP_SEND_UNLOCK_THRESH: %u", opts->udp_send_unlock_thresh);
-    ci_log("  EF_UDP_PORT_HANDOVER_MIN: %u", opts->udp_port_handover_min);
-    ci_log("  EF_UDP_PORT_HANDOVER_MAX: %u", opts->udp_port_handover_max);
-    ci_log(" EF_UDP_PORT_HANDOVER2_MIN: %u", opts->udp_port_handover2_min);
-    ci_log(" EF_UDP_PORT_HANDOVER2_MAX: %u", opts->udp_port_handover2_max);
-    ci_log(" EF_UDP_PORT_HANDOVER3_MIN: %u", opts->udp_port_handover3_min);
-    ci_log(" EF_UDP_PORT_HANDOVER3_MAX: %u", opts->udp_port_handover3_max);
+    DISP_VAL_OPT_DEFAULT("EF_UDP_SEND_UNLOCK_THRESH", ,
+                         udp_send_unlock_thresh, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_PORT_HANDOVER_MIN", ,
+                         udp_port_handover_min, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_PORT_HANDOVER_MAX", ,
+                         udp_port_handover_max, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_PORT_HANDOVER2_MIN", ,
+                         udp_port_handover2_min, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_PORT_HANDOVER2_MAX", ,
+                         udp_port_handover2_max, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_PORT_HANDOVER3_MIN", ,
+                         udp_port_handover3_min, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_PORT_HANDOVER3_MAX", ,
+                         udp_port_handover3_max, "%u")
 #endif
-    ci_log("          EF_DELACK_THRESH: %u", opts->delack_thresh);
+    DISP_VAL_OPT_DEFAULT("EF_DELACK_THRESH", , delack_thresh, "%u")
 #if CI_CFG_DYNAMIC_ACK_RATE
-    ci_log("     EF_DYNAMIC_ACK_THRESH: %u", opts->dynack_thresh);
+    DISP_VAL_OPT_DEFAULT("EF_DYNAMIC_ACK_THRESH", , dynack_thresh, "%u")
 #endif
-    ci_log("            EF_EPCACHE_MAX: %u", opts->epcache_max);
+#if CI_CFG_FD_CACHING
+    DISP_VAL_OPT_DEFAULT("EF_EPCACHE_MAX", , epcache_max, "%u")
+#endif
 #if CI_CFG_PORT_STRIPING
     /* swap back before displaying */
-    ci_log("         EF_STRIPE_NETMASK: "CI_IP_PRINTF_FORMAT,
-                                CI_IP_PRINTF_ARGS(&opts->stripe_netmask_be32));
-    ci_log("   EF_STRIPE_DUPACK_THRESH: %d", opts->stripe_dupack_threshold);
-    ci_log("         EF_STRIPE_TCP_OPT: %d", opts->stripe_tcp_opt);
+    if(opts->stripe_netmask_be32 == defaults.stripe_netmask_be32)
+      ci_log("%26s: "CI_IP_PRINTF_FORMAT, "EF_STRIPE_NETMASK",
+            CI_IP_PRINTF_ARGS(&opts->stripe_netmask_be32));
+    else
+      ci_log("%26s: "CI_IP_PRINTF_FORMAT" (default: "CI_IP_PRINTF_FORMAT")",
+            "EF_STRIPE_NETMASK", CI_IP_PRINTF_ARGS(&opts->stripe_netmask_be32),
+	    CI_IP_PRINTF_ARGS(&defaults->stripe_netmask_be32));
+
+    DISP_VAL_OPT_DEFAULT("EF_STRIPE_DUPACK_THRESH", ,
+                         stripe_dupack_threshold, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_STRIPE_TCP_OPT", , stripe_tcp_opt, "%d")
 #endif
-    ci_log("                EF_TX_PUSH: %u", opts->tx_push);
-    ci_log("     EF_PACKET_BUFFER_MODE: %d", opts->packet_buffer_mode);
-    ci_log("   EF_TCP_RST_DELAYED_CONN: %d", opts->rst_delayed_conn);
-    ci_log("         EF_POLL_ON_DEMAND: %u", opts->poll_on_demand);
-    ci_log("             EF_INT_DRIVEN: %u", opts->int_driven);
-    ci_log("            EF_INT_REPRIME: %u", opts->int_reprime);
-    ci_log("   EF_NONAGLE_INFLIGHT_MAX: %u", opts->nonagle_inflight_max);
-    ci_log("               EF_IRQ_CORE: %u", opts->irq_core);
-    ci_log("            EF_IRQ_CHANNEL: %u", opts->irq_channel);
-    ci_log("    EF_TCP_LISTEN_HANDOVER: %u", opts->tcp_listen_handover);
-    ci_log("   EF_TCP_CONNECT_HANDOVER: %u", opts->tcp_connect_handover);
-    ci_log("   EF_UDP_CONNECT_HANDOVER: %u", opts->udp_connect_handover);
+    DISP_VAL_OPT_DEFAULT("EF_TX_PUSH", , tx_push, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_PACKET_BUFFER_MODE", , packet_buffer_mode, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_RST_DELAYED_CONN", , rst_delayed_conn, "%d")
+    DISP_VAL_OPT_DEFAULT("EF_POLL_ON_DEMAND", , poll_on_demand, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_INT_DRIVEN", , int_driven, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_INT_REPRIME", , int_reprime, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_NONAGLE_INFLIGHT_MAX", ,
+                         nonagle_inflight_max, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_IRQ_CORE", , irq_core, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_IRQ_CHANNEL", , irq_channel, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_LISTEN_HANDOVER", , tcp_listen_handover, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_CONNECT_HANDOVER", ,
+                         tcp_connect_handover, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_CONNECT_HANDOVER", ,
+                         udp_connect_handover, "%u")
 #if CI_CFG_UDP_SEND_UNLOCK_OPT
-    ci_log("      EF_UDP_SEND_UNLOCKED: %u", opts->udp_send_unlocked);
+    DISP_VAL_OPT_DEFAULT("EF_UDP_SEND_UNLOCKED", , udp_send_unlocked, "%u")
 #endif
-    ci_log("          EF_UNCONFINE_SYN: %u", opts->unconfine_syn);
-    ci_log("  EF_BINDTODEVICE_HANDOVER: %u", opts->bindtodevice_handover);
-    ci_log("EF_MCAST_JOIN_BINDTODEVICE: %u", opts->mcast_join_bindtodevice);
+    DISP_VAL_OPT_DEFAULT("EF_UNCONFINE_SYN", , unconfine_syn, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_BINDTODEVICE_HANDOVER", ,
+                         bindtodevice_handover, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_MCAST_JOIN_BINDTODEVICE", ,
+                         mcast_join_bindtodevice, "%u")
 #if CI_CFG_RATE_PACING
-    ci_log("           EF_TX_QOS_CLASS: %u", opts->tx_qos_class);
+    DISP_VAL_OPT_DEFAULT("EF_TX_QOS_CLASS", , tx_qos_class, "%u")
 #endif
-    ci_log("    EF_MCAST_JOIN_HANDOVER: %u", opts->mcast_join_handover);
-    ci_log("    EF_TCP_SERVER_LOOPBACK: %u", opts->tcp_server_loopback);
-    ci_log("    EF_TCP_CLIENT_LOOPBACK: %u", opts->tcp_client_loopback);
-    ci_log("          EF_TCP_RX_CHECKS: %x", opts->tcp_rx_checks);
-    ci_log("            EF_SELECT_SPIN: %x", opts->ul_select_spin);
-    ci_log("              EF_POLL_SPIN: %x", opts->ul_poll_spin);
+    DISP_VAL_OPT_DEFAULT("EF_MCAST_JOIN_HANDOVER", , mcast_join_handover, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_SERVER_LOOPBACK", , tcp_server_loopback, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_CLIENT_LOOPBACK", , tcp_client_loopback, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_RX_CHECKS", , tcp_rx_checks, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_SELECT_SPIN", , ul_select_spin, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_POLL_SPIN", , ul_poll_spin, "%x")
 #if CI_CFG_USERSPACE_EPOLL
-    ci_log("             EF_EPOLL_SPIN: %x", opts->ul_epoll_spin);
+    DISP_VAL_OPT_DEFAULT("EF_EPOLL_SPIN", , ul_epoll_spin, "%x")
 #endif
 #if CI_CFG_UDP
-    ci_log("          EF_UDP_RECV_SPIN: %x", opts->udp_recv_spin);
-    ci_log("          EF_UDP_SEND_SPIN: %x", opts->udp_send_spin);
+    DISP_VAL_OPT_DEFAULT("EF_UDP_RECV_SPIN", , udp_recv_spin, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_SEND_SPIN", , udp_send_spin, "%x")
 #endif
-    ci_log("          EF_TCP_RECV_SPIN: %x", opts->tcp_recv_spin);
-    ci_log("          EF_TCP_SEND_SPIN: %x", opts->tcp_send_spin);
-    ci_log("        EF_TCP_ACCEPT_SPIN: %x", opts->tcp_accept_spin);
+    DISP_VAL_OPT_DEFAULT("EF_TCP_RECV_SPIN", , tcp_recv_spin, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_SEND_SPIN", , tcp_send_spin, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_ACCEPT_SPIN", , tcp_accept_spin, "%x")
 #if CI_CFG_USERSPACE_PIPE
-    ci_log("         EF_PIPE_RECV_SPIN: %x", opts->pipe_recv_spin);
-    ci_log("         EF_PIPE_SEND_SPIN: %x", opts->pipe_send_spin);
+    DISP_VAL_OPT_DEFAULT("EF_PIPE_RECV_SPIN", , pipe_recv_spin, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_PIPE_SEND_SPIN", , pipe_send_spin, "%x")
 #endif
-    ci_log("       EF_TCP_RX_LOG_FLAGS: %x", opts->tcp_rx_log_flags);
-    ci_log("                EF_URG_RFC: %u", opts->urg_rfc);
-    ci_log("             EF_TCP_SNDBUF: %u", opts->tcp_sndbuf_user);
-    ci_log("             EF_TCP_RCVBUF: %u", opts->tcp_rcvbuf_user);
-    ci_log("             EF_UDP_SNDBUF: %u", opts->udp_sndbuf_user);
-    ci_log("             EF_UDP_RCVBUF: %u", opts->udp_rcvbuf_user);
-    ci_log("       EF_TCP_INITIAL_CWND: %u", opts->initial_cwnd);
-    ci_log("      EF_TCP_LOSS_MIN_CWND: %u", opts->loss_min_cwnd);
-    ci_log("     EF_TCP_FASTSTART_INIT: %u", opts->tcp_faststart_init);
-    ci_log("     EF_TCP_FASTSTART_IDLE: %u", opts->tcp_faststart_idle);
-    ci_log("     EF_TCP_FASTSTART_LOSS: %u", opts->tcp_faststart_loss);
-    ci_log("        EF_RFC_RTO_INITIAL: %u", opts->rto_initial);
-    ci_log("            EF_RFC_RTO_MIN: %u", opts->rto_min);
-    ci_log("            EF_RFC_RTO_MAX: %u", opts->rto_max);
-    ci_log("EF_SO_TIMESTAMP_RESYNC_TIME: %u", opts->timestamp_resync_usec);
+    DISP_VAL_OPT_DEFAULT("EF_TCP_RX_LOG_FLAGS", , tcp_rx_log_flags, "%x")
+    DISP_VAL_OPT_DEFAULT("EF_URG_RFC", , urg_rfc, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_SNDBUF", , tcp_sndbuf_user, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_RCVBUF", , tcp_rcvbuf_user, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_SNDBUF", , udp_sndbuf_user, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_UDP_RCVBUF", , udp_rcvbuf_user, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_INITIAL_CWND", , initial_cwnd, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_LOSS_MIN_CWND", , loss_min_cwnd, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_FASTSTART_INIT", , tcp_faststart_init, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_FASTSTART_IDLE", , tcp_faststart_idle, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_TCP_FASTSTART_LOSS", , tcp_faststart_loss, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_RFC_RTO_INITIAL", , rto_initial, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_RFC_RTO_MIN", , rto_min, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_RFC_RTO_MAX", , rto_max, "%u")
+    DISP_VAL_OPT_DEFAULT("EF_SO_TIMESTAMP_RESYNC_TIME", ,
+                         timestamp_resync_usec, "%u")
 #ifndef NDEBUG
-    ci_log("    EF_TCP_MAX_SEQERR_MSGS: %u", opts->tcp_max_seqerr_msg);
+    DISP_VAL_OPT_DEFAULT("EF_TCP_MAX_SEQERR_MSGS", , tcp_max_seqerr_msg, "%u")
 #endif
 #if CI_CFG_BURST_CONTROL
-    ci_log("    EF_BURST_CONTROL_LIMIT: %u", opts->burst_control_limit);
+    DISP_VAL_OPT_DEFAULT("EF_BURST_CONTROL_LIMIT", , burst_control_limit, "%u")
 #endif
 #if CI_CFG_RATE_PACING
-    ci_log("        EF_TX_MIN_IPG_CNTL: %u", opts->tx_min_ipg_cntl);
+    DISP_VAL_OPT_DEFAULT("EF_TX_MIN_IPG_CNTL", , tx_min_ipg_cntl, "%u")
 #endif
 #if CI_CFG_CONG_AVOID_NOTIFIED
-    ci_log("     EF_CONG_NOTIFY_THRESH: %u", opts->cong_notify_thresh);
+    DISP_VAL_OPT_DEFAULT("EF_CONG_NOTIFY_THRESH", , cong_notify_thresh, "%u")
 #endif
 #if CI_CFG_TAIL_DROP_PROBE
-    ci_log("        EF_TAIL_DROP_PROBE: %u", opts->tail_drop_probe);
+    DISP_VAL_OPT_DEFAULT("EF_TAIL_DROP_PROBE", , tail_drop_probe, "%u")
 #endif
 #if CI_CFG_CONG_AVOID_SCALE_BACK
-    ci_log("  EF_CONG_AVOID_SCALE_BACK: %u", opts->cong_avoid_scale_back);
+    DISP_VAL_OPT_DEFAULT("EF_CONG_AVOID_SCALE_BACK", ,
+                         cong_avoid_scale_back, "%u")
 #endif
 #if CI_CFG_SENDFILE
-    ci_log("    EF_MAX_EP_PINNED_PAGES: %u", opts->max_ep_pinned_pages);
+    DISP_VAL_OPT_DEFAULT("EF_MAX_EP_PINNED_PAGES", , max_ep_pinned_pages, "%u")
+#endif
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+    DISP_VAL_OPT_DEFAULT("EF_USE_HUGE_PAGES", , huge_pages, "%u")
 #endif
 }
 
@@ -1090,33 +1108,51 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
   void* p;
   int rc;
 
-  /* This is cunningly evil; we map the same resource with the same
-   * offset twice, and discriminate between them (in
-   * driver/efab/tcp_helper_resource.c:tcp_helper_rm_mmap) 
-   * by looking at the size.
-   */
-
   /****************************************************************************
    * Create the I/O mapping.
    */
-  rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
-                        CI_NETIF_MMAP_ID_IO, ns->io_mmap_bytes, &p);
-  if( rc < 0 ) {
-    LOG_NV(ci_log("%s: oo_resource_mmap io %d", __FUNCTION__, rc));
-    goto fail1;
+  if( ns->io_mmap_bytes != 0 ) {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          CI_NETIF_MMAP_ID_IO, ns->io_mmap_bytes, &p);
+    if( rc < 0 ) {
+      LOG_NV(ci_log("%s: oo_resource_mmap io %d", __FUNCTION__, rc));
+      goto fail1;
+    }
+    ni->io_ptr = (char*) p;
   }
-  ni->io_ptr = (char*) p;
 
   /****************************************************************************
    * Create the I/O buffer mapping.
    */
-  rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
-                        CI_NETIF_MMAP_ID_IOBUFS, ns->buf_mmap_bytes, &p);
+  if( ns->buf_mmap_bytes != 0 ) {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          CI_NETIF_MMAP_ID_IOBUFS, ns->buf_mmap_bytes, &p);
+    if( rc < 0 ) {
+      LOG_NV(ci_log("%s: oo_resource_mmap iobufs %d", __FUNCTION__, rc));
+      goto fail2;
+    }
+    ni->buf_ptr = (char*) p;
+  }
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  if( ns->buf_ofs == (ci_uint32)-1 )
+    ni->pkt_shm_id = NULL;
+  else
+    ni->pkt_shm_id = (void *)(ni->buf_ptr + ns->buf_ofs);
+#endif
+
+#if !CI_CFG_MMAP_EACH_PKTSET
+  /****************************************************************************
+   * Create the packets mapping.
+   */
+  rc = oo_resource_mmap(ci_netif_get_driver_handle(ni), CI_NETIF_MMAP_ID_PKTS,
+                        CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET * ns->pkt_sets_max,
+                        &p);
   if( rc < 0 ) {
     LOG_NV(ci_log("%s: oo_resource_mmap iobufs %d", __FUNCTION__, rc));
     goto fail2;
   }
-  ni->buf_ptr = (char*) p;
+  ni->pkt_sets = (char*) p;
+#endif
 
   return 0;
 
@@ -1133,6 +1169,34 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
   int rc;
 
   /* Buffer mapping. */
+#if CI_CFG_MMAP_EACH_PKTSET
+  {
+    unsigned id;
+
+    /* Unmap packets pages */
+    for( id = 0; id < ni->state->pkt_sets_n; id++ ) {
+      if( PKT_BUFSET_U_MMAPPED(ni, id) ) {
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+        if( ni->pkt_shm_id && ni->pkt_shm_id[id] >= 0 )
+          rc = shmdt(ni->pkt_sets[id]);
+        else
+#endif
+        {
+          rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
+                                  ni->pkt_sets[id],
+                                  CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET);
+        }
+        if( rc < 0 )
+          LOG_NV(ci_log("%s: munmap packets %d", __FUNCTION__, rc));
+      }
+    }
+  }
+#else
+  rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
+                          ni->pkt_sets,
+                          CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET *
+                          ni->state->pkt_sets_max);
+#endif
   rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
                           ni->buf_ptr, ni->state->buf_mmap_bytes);
   if( rc < 0 )  LOG_NV(ci_log("%s: munmap bufs %d", __FUNCTION__, rc));
@@ -1156,7 +1220,7 @@ static int netif_tcp_helper_build(ci_netif* ni)
   */
   ci_netif_state* ns = ni->state;
   struct ef_vi_nic_type nic_type;
-  int i, rc, nic_i;
+  int rc, nic_i;
   char* mmap_ptr;
   unsigned vi_io_offset, vi_mem_offset, vi_state_offset;
   char vi_data[VI_MAPPINGS_SIZE];
@@ -1215,29 +1279,12 @@ static int netif_tcp_helper_build(ci_netif* ni)
     vi_mem_offset += nsn->vi_mem_mmap_bytes;
   }
 
-  ni->pkt_bufs = CI_ALLOC_ARRAY(ef_iobufset*, ns->pkt_sets_max);
-  CI_ZERO_ARRAY(ni->pkt_bufs, ni->state->pkt_sets_max);
 
-  for( i = 0; i < (int) ns->pkt_sets_max; ++i ) {
-#ifdef CI_HAVE_OS_NOPAGE
-    ni->pkt_bufs[i] = CI_ALLOC_OBJ(ef_iobufset);
-
-    ci_pkt_dimension_iobufset(ni->pkt_bufs[i]);
-    /* check we get the size we are expecting */
-    ci_assert(ni->pkt_bufs[i]->bufs_size == CI_CFG_PKT_BUF_SIZE);
-    /* Note that 0 passed as NIC buffer address here. Because buffers are
-       not allocated, we are don't know actual NIC addresses. User-space
-       code should use buffer address stored in the packet header! */
-    ef_iobufset_init(ni->pkt_bufs[i], 0,
-                     ni->buf_ptr + ns->buf_ofs + ns->pkt_set_bytes * i,
-                     PKT_START_OFF_MIN());
-    ef_iobufset_offset_ptrs(ni->pkt_bufs[i], PKT_START_OFF_MIN());
-#else
-  ni->pkt_bufs[i] = 0;
+#if CI_CFG_MMAP_EACH_PKTSET
+  ni->pkt_sets = CI_ALLOC_ARRAY(char*, ns->pkt_sets_max);
+  CI_ZERO_ARRAY(ni->pkt_sets, ni->state->pkt_sets_max);
 #endif
-  }
 
-  ni->u_mmapped_pktbuf_iobufset=0;
   mmap_ptr = (char*) ni->state + ns->netif_mmap_bytes;
 
   /* Initialise timer related stuff that is only used at user level */
@@ -1272,7 +1319,6 @@ static void netif_tcp_helper_build2(ci_netif* ni)
 {
   ni->filter_table =
     (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
-  ni->addr_spc_id = CI_ADDR_SPC_ID_INVALID1;
 }
 
 
@@ -1313,15 +1359,7 @@ ci_inline void netif_tcp_helper_free(ci_netif* ni)
 #ifdef __KERNEL__
   efab_thr_release(netif2tcp_helper_resource(ni));
 #else
-# ifdef CI_HAVE_OS_NOPAGE
-  {
-    int i;
-    for( i = 0; i < (int) ni->state->pkt_sets_max; ++i )
-      CI_FREE_OBJ(ni->pkt_bufs[i]);
-  }
-# endif
   netif_tcp_helper_munmap(ni);
-  ci_free(ni->pkt_bufs);
 #endif
 }
 
@@ -1367,38 +1405,41 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
 
   rc = oo_resource_alloc(fd, &ra);
   if( rc < 0 ) {
-    if( rc == -ELIBACC ) {
+    switch( rc ) {
+    case -ELIBACC: {
       static int once;
-      if( once == 0 ) {
+      if( ! once ) {
         once = 1;
         ci_log("ERROR: Driver/Library version mismatch detected.");
         ci_log("This application will not be accelerated.");
         ci_log("HINT: Most likely you need to reload the sfc and onload "
                "drivers");
       }
+      break;
     }
-    else if (rc == -EEXIST) {
+    case -EEXIST:
       /* This is not really an error.  It means we "raced" with another thread
        * to create a stack with this name, and the other guy won the race.  We
        * return the error code and further up the call-chain we'll retry to
        * attach to the stack with the given name.
        */
-    }
-    else
-      LOG_E(ci_log("%s: ci_resource_alloc failed (%d)", __FUNCTION__, rc));
-
-    if (rc == -ENODEV)
+      break;
+    case -ENODEV:
       LOG_E(ci_log("%s: This error can occur if no Solarflare network "
 		   "interfaces are active/UP. Please check your config with "
 		   "ip addr or ifconfig", __FUNCTION__));
-
+      break;
+    default:
+      LOG_E(ci_log("%s: ERROR: Failed to allocate stack (rc=%d)",
+                   __FUNCTION__, rc));
+      break;
+    }
     return rc;
   }
 
   /****************************************************************************
    * Perform post-alloc driver setup.
    */
-  ni->addr_spc_id = ra.out_addr_spc_id;
   ni->nic_set = ra.out_nic_set;
   LOG_NC(ci_log("%s: nic set " EFRM_NIC_SET_FMT, __FUNCTION__,
 	                efrm_nic_set_pri_arg(&ni->nic_set)));
@@ -1584,7 +1625,7 @@ int ci_netif_pkt_prefault(ci_netif* ni)
   if( NI_OPTS(ni).prefault_packets ) {
     n = ni->state->n_pkts_allocated;
     for( i = 0; i < n; ++i ) {
-      pkt = PKT_NNL(ni, i);
+      pkt = PKT(ni, i);
       rc += pkt->refcount;
     }
   }
@@ -1627,13 +1668,13 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   */
   if( (rc = netif_tcp_helper_alloc_u(fd, ni, opts, flags, stack_name)) < 0 )
     return rc;
-  netif_state_init_source(ni);
 
   CI_MAGIC_SET(ni, NETIF_MAGIC);
   ci_netif_pkt_prefault(ni);
   ci_netif_pkt_prefault_reserve(ni);
   oo_atomic_set(&ni->ref_count, 0);
   ni->flags = 0;
+  ni->error_flags = 0;
 
   ci_log("Using "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT" [%s]",
          ni->state->pretty_name);
@@ -1668,17 +1709,23 @@ int ci_netif_set_rxq_limit(ci_netif* ni)
     fill_limit = max_ring_pkts / n_intf;
   if( fill_limit < NI_OPTS(ni).rxq_limit ) {
     if( fill_limit < rxq_cap )
-      LOG_W(ci_log("WARNING: "N_FMT "RX ring fill level reduced from %d to %d",
-                   N_PRI_ARGS(ni), NI_OPTS(ni).rxq_limit, fill_limit));
+      LOG_W(ci_log("WARNING: "N_FMT "RX ring fill level reduced from %d to %d "
+                   "max_ring_pkts=%d rxq_cap=%d n_intf=%d",
+                   N_PRI_ARGS(ni), NI_OPTS(ni).rxq_limit, fill_limit,
+                   max_ring_pkts, rxq_cap, n_intf));
     ni->opts.rxq_limit = fill_limit;
     ni->state->opts.rxq_limit = fill_limit;
   }
-  if( NI_OPTS(ni).rxq_limit <= 2 * CI_CFG_RX_DESC_BATCH ) {
+  if( ni->nic_n == 0 ) {
+    /* we do not use .rxq_limit, but let's make all checkers happy */
+     NI_OPTS(ni).rxq_limit = CI_CFG_RX_DESC_BATCH;
+  }
+  else if( NI_OPTS(ni).rxq_limit < NI_OPTS(ni).rxq_min ) {
     /* Do not allow user to create a stack that is too severely
      * constrained.
      */
-    LOG_E(ci_log("ERROR: "N_FMT "rxq_limit=%d is too small",
-                 N_PRI_ARGS(ni), NI_OPTS(ni).rxq_limit);
+    LOG_E(ci_log("ERROR: "N_FMT "rxq_limit=%d is too small (rxq_min=%d)",
+                 N_PRI_ARGS(ni), NI_OPTS(ni).rxq_limit, NI_OPTS(ni).rxq_min);
           ci_log("HINT: Use a larger value for EF_RXQ_LIMIT or "
                  "EF_MAX_RX_PACKETS or EF_MAX_PACKETS"));
     rc = -EINVAL;
@@ -1695,6 +1742,9 @@ int ci_netif_set_rxq_limit(ci_netif* ni)
 
 static int __ci_netif_init_fill_rx_rings(ci_netif* ni)
 {
+  /* Saving rxq_limit as it may get modified during call to
+   * ci_netif_rx_post().
+   */
   int intf_i, rxq_limit = ni->state->rxq_limit;
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
     ci_netif_rx_post(ni, intf_i);
@@ -1710,12 +1760,21 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
   oo_pkt_p pkt_list;
   int lim, rc, n;
 
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  ni->huge_pages_flag = NI_OPTS(ni).huge_pages;
+#endif
   ci_netif_mem_pressure_pkt_pool_fill(ni);
   if( (rc = ci_netif_set_rxq_limit(ni)) < 0 )
     return rc;
 
   /* Reserve some packet buffers for the free pool. */
   n = ci_netif_pkt_reserve(ni, NI_OPTS(ni).min_free_packets, &pkt_list);
+  if( n < NI_OPTS(ni).min_free_packets ) {
+    LOG_E(ci_log("%s: ERROR: Insufficient packet buffers available for "
+                 "EF_MIN_FREE_PACKETS=%d", __FUNCTION__,
+                 NI_OPTS(ni).min_free_packets));
+    return -ENOMEM;
+  }
 
   /* Fill the RX rings a little at a time.  Reason is to ensure that if we
    * are short of packet buffers, we don't fill some rings completely and
@@ -1725,11 +1784,18 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
        lim += CI_CFG_RX_DESC_BATCH ) {
     ni->state->rxq_limit = lim;
     if( (rc = __ci_netif_init_fill_rx_rings(ni)) < 0 || ni->state->rxq_low ) {
+      rc = -ENOMEM;
       if( lim < NI_OPTS(ni).rxq_min )
         LOG_E(ci_log("%s: ERROR: Insufficient packet buffers to fill RX rings "
-                     "(rxq_limit=%d rxq_low=%d)", __FUNCTION__,
-                     NI_OPTS(ni).rxq_limit, ni->state->rxq_low));
+                     "(rxq_limit=%d rxq_low=%d rxq_min=%d)", __FUNCTION__,
+                     NI_OPTS(ni).rxq_limit, ni->state->rxq_low,
+                     NI_OPTS(ni).rxq_min));
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+      else if( ni->huge_pages_flag == 2 )
+        LOG_E(ci_log("%s: ERROR: Failed to allocate huge pages to fill RX "
+                     "rings", __FUNCTION__));
       else
+#endif
         rc = 0;
       break;
     }
@@ -1737,6 +1803,14 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
 
   ci_netif_pkt_reserve_free(ni, pkt_list, n);
   ni->state->rxq_limit =  NI_OPTS(ni).rxq_limit;
+
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  /* Initial packets allocated: allow other packets to be in non-huge pages
+   * if necessary.
+   */
+  if( ni->huge_pages_flag == 2 )
+    ni->huge_pages_flag = 1;
+#endif
   return rc;
 }
 
@@ -1769,8 +1843,6 @@ int ci_netif_ctor(ci_netif** ni_out, const ci_netif_config_opts* opts_in,
 
   /* sanity -- killme */
   ci_assert_equal(ni->ep_ofs, ni->state->ep_ofs);
-
-  netif_state_init_source(ni);
 
   if( !opts_in )
     ci_free(opts);
@@ -1911,8 +1983,8 @@ int ci_netif_restore(ci_netif* ni, ef_driver_handle fd,
   }
 #endif
 
-  ni->addr_spc_id = CI_ADDR_SPC_ID_INVALID1;
-
+  /* We do not want this stack to be used as default */
+  ni->flags |= CI_NETIF_FLAGS_DONT_USE_ANON;
 
   CI_MAGIC_SET(ni, NETIF_MAGIC);
 

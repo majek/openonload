@@ -193,7 +193,7 @@ efab_vi_rm_nopage_nic(struct efrm_vi *virs, unsigned *pfn_ptr,
   return CI_FALSE;
 }
 
-unsigned
+unsigned long
 efab_vi_resource_nopage(struct efrm_vi *virs, void *opaque,
                         unsigned long offset, unsigned long map_size)
 {

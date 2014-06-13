@@ -126,7 +126,9 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 				     const struct vi_attr *vi_attr)
 {
 	struct efrm_nic *efrm_nic;
+#ifdef CONFIG_SFC_RESOURCE_VF
 	struct efrm_vf *vf;
+#endif
 	unsigned vi_props;
 	int channel;
 
@@ -142,9 +144,11 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 		return 0;
 	}
 
+#ifdef CONFIG_SFC_RESOURCE_VF
 	vf = efrm_pd_get_vf(pd);
 	if (vf != NULL)
 		return efrm_vf_alloc_vi_set(vf, 1, &virs->allocation);
+#endif
 
 	
 	efrm_nic = container_of(efrm_pd_to_resource(pd)->rs_client->nic,
@@ -397,7 +401,7 @@ efrm_vi_rm_fini_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type)
 		efhw_iopages_free(efrm_vi_get_pci_dev(virs), &q->pages,
 			iommu_domain);
 	if (q->buf_tbl_alloc.base != -1)
-		efrm_buffer_table_free(&q->buf_tbl_alloc);
+		efrm_nic_buffer_table_free(efrm_nic(nic), &q->buf_tbl_alloc);
 }
 
 
@@ -428,9 +432,11 @@ __efrm_vi_resource_free(struct efrm_vi *virs)
 	efrm_vi_detach_evq(virs, EFHW_TXQ);
 	if (virs->vi_set != NULL) {
 		efrm_vi_set_release(virs->vi_set);
+#ifdef CONFIG_SFC_RESOURCE_VF
 	} else if (virs->allocation.vf != NULL) {
 		efrm_vf_vi_drop(virs);
 		efrm_vf_free_vi_set(&virs->allocation);
+#endif
 	} else {
 		efrm_vi_allocator_free_set(efrm_nic, &virs->allocation);
 	}
@@ -454,7 +460,7 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 	int i, rc, q_flags;
 	struct efrm_vf *vf = virs->allocation.vf;
 	efhw_iommu_domain *iommu_domain = efrm_vf_get_iommu_domain(vf);
-	unsigned long iova_base;
+	unsigned long iova_base = 0;
 
 	if (n_q_entries == 0)
 		return 0;
@@ -478,8 +484,10 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 		}
 	}
 
+#ifdef CONFIG_SFC_RESOURCE_VF
 	iova_base = vf ? efrm_vf_alloc_ioaddrs(vf,
 		1 << qsize.q_len_page_order, NULL) : 0;
+#endif
 	rc = efhw_iopages_alloc(efrm_vi_get_pci_dev(virs), &q->pages,
 				qsize.q_len_page_order, iommu_domain,
 				iova_base);
@@ -524,7 +532,7 @@ int
 efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi *evq_virs,
 		       struct efrm_vi_set *vi_set, int vi_set_instance,
-		       struct efrm_vf *vf, const char *name,
+		       struct efrm_pd *pd, const char *name,
 		       unsigned vi_flags,
 		       int evq_capacity, int txq_capacity, int rxq_capacity,
 		       int tx_q_tag, int rx_q_tag, int wakeup_cpu_core,
@@ -538,16 +546,13 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 	struct efrm_vi *virs;
 	int rc;
 
-	if (vf == NULL && !efrm_has_buffer_table)
-		return -ENOENT;
-
 	efrm_vi_attr_init(&attr);
 	if (vi_flags & EFHW_VI_RM_WITH_INTERRUPT)
 		efrm_vi_attr_set_with_interrupt(&attr, 1);
 	if (vi_set != NULL)
 		efrm_vi_attr_set_instance(&attr, vi_set, vi_set_instance);
-	if (vf != NULL)
-		efrm_vi_attr_set_vf(&attr, vf);
+	if (pd != NULL)
+		efrm_vi_attr_set_pd(&attr, pd);
 	if (wakeup_cpu_core >= 0)
 		efrm_vi_attr_set_interrupt_core(&attr, wakeup_cpu_core);
 	if (wakeup_channel >= 0)
@@ -556,8 +561,11 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 	if ((rc = efrm_vi_alloc(client, &attr, &virs)) < 0)
 		goto fail_vi_alloc;
 
-	if (vf) {
+#ifdef CONFIG_SFC_RESOURCE_VF
+	if (efrm_pd_get_vf(pd))
 		efrm_vf_vi_set_name(virs, name);
+#endif
+	if (efrm_pd_owner_id(pd) == 0) {
 		EFRM_ASSERT(vi_flags & EFHW_VI_RX_PHYS_ADDR_EN);
 		EFRM_ASSERT(vi_flags & EFHW_VI_TX_PHYS_ADDR_EN);
 		virs->flags |= EFHW_VI_RX_PHYS_ADDR_EN |
@@ -735,9 +743,11 @@ int  efrm_vi_alloc(struct efrm_client *client,
 		/* Legacy compatibility.  Create a [pd] from [client]. */
 		if (client == NULL)
 			return -EINVAL;
+#ifdef CONFIG_SFC_RESOURCE_VF
 		if (attr->vf != NULL &&
 		    efrm_vf_to_resource(attr->vf)->rs_client != client)
 			return -EINVAL;
+#endif
 		rc = efrm_pd_alloc(&pd, client, attr->vf, attr->vf != NULL);
 		if (rc < 0)
 			goto fail_alloc_pd;
@@ -798,8 +808,10 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	atomic_set(&virs->evq_refs, 1);
 	virs->flags = vi_flags;
 	virs->pd = pd;
+#ifdef CONFIG_SFC_RESOURCE_VF
 	if (virs->allocation.vf != NULL)
 		efrm_vf_vi_set(virs);
+#endif
 	efrm_client_add_resource(client, &virs->rs);
 	*p_virs_out = virs;
 	return 0;
@@ -914,7 +926,8 @@ static int efrm_vi_q_init_pf(struct efrm_vi *virs, enum efhw_q_type q_type,
 	if (evq == NULL)
 		evq = virs;
 
-	rc = efrm_buffer_table_alloc(q->page_order, &q->buf_tbl_alloc);
+	rc = efrm_nic_buffer_table_alloc(efrm_nic(nic), q->page_order,
+					 &q->buf_tbl_alloc);
 	if (rc != 0) {
 		EFRM_ERR("%s: Failed to allocate %s buffer table entries",
 			 __FUNCTION__, q_names[q_type]);
@@ -953,3 +966,30 @@ int efrm_vi_q_init(struct efrm_vi *virs, enum efhw_q_type q_type,
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_q_init);
+
+
+
+int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type)
+{
+	int i;
+	struct efrm_vi_q *q;
+	struct efhw_nic *nic;
+
+	EFRM_WARN("%s: %p %d", __FUNCTION__, virs, q_type);
+
+	q = &virs->q[q_type];
+	nic = virs->rs.rs_client->nic;
+
+	if (q->capacity == 0) 
+		return -EINVAL;
+
+	for (i = 0; i < (1 << q->page_order); ++i)
+		efhw_nic_buffer_table_set(nic, q->dma_addrs[i],
+					  0, 0, q->buf_tbl_alloc.base + i);
+	falcon_nic_buffer_table_confirm(nic);
+
+	efrm_vi_rm_init_dmaq(virs, q_type, nic);
+
+	return 0;
+}
+EXPORT_SYMBOL(efrm_vi_q_reinit);

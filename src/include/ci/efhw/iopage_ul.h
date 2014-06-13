@@ -88,9 +88,6 @@ ci_inline dma_addr_t efhw_iopage_dma_addr(struct efhw_iopage* p)
 { return p->dma_addr; }
 
 #define efhw_iopage_ptr(iop)		efhw_page_ptr(&(iop)->p)
-#define efhw_iopage_pfn(iop)		efhw_page_pfn(&(iop)->p)
-#define efhw_iopage_mark_invalid(iop)	efhw_page_mark_invalid(&(iop)->p)
-#define efhw_iopage_is_valid(iop)		efhw_page_is_valid(&(iop)->p)
 
 /*--------------------------------------------------------------------
  *

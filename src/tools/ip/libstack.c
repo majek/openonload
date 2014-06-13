@@ -38,7 +38,7 @@
 #include <etherfabric/vi.h>
 #include "libstack.h"
 #include <ci/internal/ip_signal.h>
-
+#include <dirent.h>
 
 #undef DO
 #undef IGNORE
@@ -353,6 +353,24 @@ static stat_desc_t tcp_ext_stats_fields[] = {
 #endif  /* CI_CFG_SUPPORT_STATS_COLLECTION */
 
 
+struct pid_mapping {
+  struct pid_mapping* next;
+  int*                stack_ids;
+  int                 n_stack_ids;
+  pid_t               pid;
+};
+static struct pid_mapping* pid_mappings;
+
+
+struct stack_mapping {
+  struct stack_mapping* next;
+  pid_t*                pids;
+  int                   n_pids;
+  int                   stack_id;
+};
+static struct stack_mapping* stack_mappings;
+
+
 static sa_sigaction_t*  libstack_signal_handlers;
 static int              signal_fired;
 
@@ -378,24 +396,30 @@ int             cfg_zombie = 0;
 ci_inline unsigned cycles64_to_usec(ci_uint64 cycles)
 {
   static unsigned cpu_khz = -1;
-  if( cpu_khz < 0 )  CI_TRY(ci_get_cpu_khz(&cpu_khz));
+  if( cpu_khz == (unsigned) -1 )
+    CI_TRY(ci_get_cpu_khz(&cpu_khz));
   return (unsigned) (cycles * 1000 / cpu_khz);
 }
+
 
 ci_inline ci_uint64 usec_to_cycles64(unsigned usec)
 {
   static unsigned cpu_khz = -1;
   if( usec == (unsigned) -1 )
     return (ci_uint64) -1;
-  if( cpu_khz < 0 )  CI_TRY(ci_get_cpu_khz(&cpu_khz));
+  if( cpu_khz == (unsigned) -1 )
+    CI_TRY(ci_get_cpu_khz(&cpu_khz));
   return (ci_uint64) usec * cpu_khz / 1000;
 }
+
 
 ci_inline void libstack_defer_signals(citp_signal_info* si)
 {
   si->inside_lib = 1;
   ci_compiler_barrier();
 }
+
+
 ci_inline void libstack_process_signals(citp_signal_info* si)
 {
   si->inside_lib = 0;
@@ -448,6 +472,404 @@ int libstack_init_signals(int fd)
   if(rc == -1)
     ci_log ("Error %d registering trampoline handler", errno);
   return rc;
+}
+
+
+static int is_pid(const char* name)
+{
+  int i;
+  for( i = 0; i < strlen(name); ++i ) {
+    if( name[i] < '0' || name[i] > '9' )
+      return 0;
+  }
+  return 1;
+}
+
+
+/*
+ * Walk /proc/<pid/fd/ to check if any fds refer to onload.  Returns
+ * list of onload stacks or -1 on failure.
+ */
+static int is_onloaded(pid_t pid, int** ret_stacks_ids)
+{
+  int i;
+  char fd_dir_path[256];
+  snprintf(fd_dir_path, 256, "/proc/%d/fd", pid);
+  DIR* fd_dir = opendir(fd_dir_path);
+  if( ! fd_dir )
+    return -1;
+
+  int n_stacks = 0;
+  int* stack_ids = NULL;
+  struct dirent* ent;
+  while( (ent = readdir(fd_dir)) ) {
+    if( ent->d_name[0] == '.' )
+      continue;
+    char fd_path[256];
+    snprintf(fd_path, 256, "%s/%s", fd_dir_path, ent->d_name);
+    char sym_buf[256];
+    ssize_t rc = readlink(fd_path, sym_buf, 256);
+    if( rc == -1 )
+      return rc;
+    sym_buf[rc] = '\0';
+    if( ! strncmp(sym_buf, "onload", strlen("onload")) &&
+        ! strstr(sym_buf, "stack") ) {
+      char* ptr = strchr(sym_buf, '[');
+      ptr = strchr(ptr, ':');
+      ++ptr;
+      int stack_id = atoi(ptr);
+      int stack_seen = 0;
+      for( i = 0; i < n_stacks; ++i ) {
+        if( stack_ids[i] == stack_id )
+          stack_seen = 1;
+      }
+      if( ! stack_seen ) {
+        stack_ids = realloc(stack_ids, sizeof(*stack_ids) * (n_stacks + 1));
+        stack_ids[n_stacks] = stack_id;
+        ++n_stacks;
+      }
+    }
+  }
+  *ret_stacks_ids = stack_ids;
+  return n_stacks;
+}
+
+
+static int libstack_mappings_init(void)
+{
+  int rc, i;
+  pid_t my_pid = getpid();
+
+  DIR* proc = opendir("/proc");
+  if( ! proc )
+    return -1;
+
+  /* Walk over entire '/proc/' looking into '/proc/<pid>/fd/' to see
+   * if there are any onloaded fds. Fill in pid_mappings accordingly.
+   */
+  struct dirent* ent;
+  while( (ent = readdir(proc)) ) {
+    if( ! is_pid(ent->d_name) )
+      continue;
+
+    pid_t pid = atoi(ent->d_name);
+    if( pid == my_pid )
+      continue;
+    int* stack_ids;
+    rc = is_onloaded(pid, &stack_ids);
+    if( rc == 0 )
+      continue;
+    if( rc == -1 ) {
+      if( errno == EACCES )
+        continue;
+      return -1;
+    }
+
+    struct pid_mapping* pm = calloc(1, sizeof(*pm));
+    pm->pid         = pid;
+    pm->stack_ids   = stack_ids;
+    pm->n_stack_ids = rc;
+    pm->next        = pid_mappings;
+    pid_mappings    = pm;
+  }
+
+  /* Set stack ids in stack_mappings using debug ioctl
+   */
+  ci_netif_info_t info;
+  oo_fd fd;
+  CI_TRY(oo_fd_open(&fd));
+  info.mmap_bytes = 0;
+  info.ni_exists = 0;
+  i = 0;
+  while( i >= 0 ) {
+    info.ni_index = i;
+    info.ni_orphan = cfg_zombie;
+    info.ni_subop = CI_DBG_NETIF_INFO_GET_NEXT_NETIF;
+    CI_TRY(oo_ioctl(fd, OO_IOC_DBG_GET_STACK_INFO, &info));
+    int stack_id = -1;
+    if( info.ni_exists )
+      stack_id = info.ni_index;
+    else if( info.ni_no_perms_exists ) {
+      stack_id = info.ni_no_perms_id;
+      fprintf(stderr, "User %d:%d cannot access full details of stack %d(%s) "
+             "owned by %d:%d share_with=%d\n", (int) getuid(), (int) geteuid(),
+             info.ni_no_perms_id, info.ni_no_perms_name,
+             (int) info.ni_no_perms_uid, (int) info.ni_no_perms_euid,
+             info.ni_no_perms_share_with);
+    }
+
+    if( stack_id != -1 ) {
+      struct stack_mapping* sm = calloc(1, sizeof(*sm));
+      sm->stack_id = stack_id;
+      sm->next = stack_mappings;
+      stack_mappings = sm;
+    }
+    i = info.u.ni_next_ni.index;
+  }
+  CI_TRY(oo_fd_close(fd));
+
+  /* Fill in pids in stack_mappings using pid_mappings
+   */
+  struct pid_mapping* pm = pid_mappings;
+  while( pm ) {
+    for( i = 0; i < pm->n_stack_ids; ++i ) {
+      struct stack_mapping* sm = stack_mappings;
+      int found_stack = 0;
+      while( sm ) {
+        if( pm->stack_ids[i] == sm->stack_id ) {
+          sm->pids = realloc(sm->pids, sizeof(*sm->pids) * (sm->n_pids + 1));
+          sm->pids[sm->n_pids] = pm->pid;
+          ++sm->n_pids;
+          found_stack = 1;
+        }
+        sm = sm->next;
+      }
+      if( ! found_stack )
+        fprintf(stderr, "Warning: Traversing /proc found stack %d"
+                " which debug ioctl did not\n", pm->stack_ids[i]);
+    }
+    pm = pm->next;
+  }
+
+  return 0;
+}
+
+
+void libstack_stack_mapping_print_pids(int stack_id)
+{
+  const int buf_len = 1024;
+  char buf[buf_len];
+  int i, consumed = 0;
+  struct stack_mapping* sm = stack_mappings;
+
+  while( sm && sm->stack_id != stack_id )
+    sm = sm->next;
+  if( sm == NULL ) {
+    ci_log("No stack_mapping for stack %d found", stack_id);
+    return;
+  }
+
+  consumed += snprintf(&buf[consumed], buf_len - consumed, "pids: ");
+  for( i = 0; i < sm->n_pids; ++i ) {
+    if( i == sm->n_pids - 1 )
+      consumed += snprintf(&buf[consumed], buf_len - consumed, "%d",
+                           sm->pids[i]);
+    else
+      consumed += snprintf(&buf[consumed], buf_len - consumed, "%d,",
+                           sm->pids[i]);
+  }
+  ci_log(buf);
+}
+
+
+void libstack_stack_mapping_print(void)
+{
+  int i;
+  if( ! stack_mappings )
+    return;
+  printf("#stack-id stack-name      pids\n");
+  struct stack_mapping* sm = stack_mappings;
+  while( sm ) {
+    if( sm->n_pids == 0 ) {
+      printf("%-9d -               -\n", sm->stack_id);      
+    }
+    else {
+      stack_attach(sm->stack_id);
+      netif_t* netif = stack_attached(sm->stack_id);
+      if( strlen(netif->ni.state->name) != 0 )
+        printf("%-9d %-16s", sm->stack_id, netif->ni.state->name);
+      else
+        printf("%-9d -               ", sm->stack_id);
+
+      for( i = 0; i < sm->n_pids; ++i ) {
+        printf("%d", sm->pids[i]);
+        if( i != sm->n_pids - 1 )
+          printf(",");
+      }
+      printf("\n");
+    }
+    sm = sm->next;
+  }
+}
+
+
+void libstack_pid_mapping_print(void)
+{
+  int i;
+  struct pid_mapping* pm = pid_mappings;
+  int max_spacing = 0;
+
+  if( ! pid_mappings )
+    return;
+
+  while( pm ) {
+    if( max_spacing < pm->n_stack_ids * 2 + 1 )
+      max_spacing = pm->n_stack_ids * 2 + 1;
+    pm = pm->next;
+  }
+
+  printf("#pid  stack-id");
+  if( max_spacing > strlen("stack-id") ) {
+    for(i = 0; i < max_spacing - strlen("stack-id") - 1; ++i )
+      printf(" ");
+  }
+  else
+    printf(" ");
+  printf("cmdline\n");
+
+  pm = pid_mappings;
+  while( pm ) {
+    printf("%-6d", pm->pid);
+    for( i = 0; i < pm->n_stack_ids; ++i ) {
+      printf("%d", pm->stack_ids[i]);
+      if( i != pm->n_stack_ids - 1 )
+        printf(",");
+    }
+    if( max_spacing > strlen("stack-id") ) {
+      for( i = 0; i < max_spacing - pm->n_stack_ids * 2; ++i )
+        printf(" ");
+    }
+    else {
+      for( i = 0; i < strlen("stack-id") - pm->n_stack_ids * 2 + 2; ++i )
+        printf(" ");
+    }
+
+    char cmdline_path[256];
+    snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
+    int cmdline = open(cmdline_path, O_RDONLY);
+    char buf[256];
+    while( read(cmdline, buf, 256) )
+      printf("%s", buf);
+    printf("\n");
+
+    pm = pm->next;
+  }
+}
+
+
+static int get_file_size(const char* path)
+{
+  int fd = open(path, O_RDONLY);
+  if( fd == -1 )
+    return -1;
+  char buf[128];
+  int len = 0;
+  while( 1 ) {
+    ssize_t rc = read(fd, buf, 128);
+    if( rc == -1 )
+      return -1;
+    len += rc;
+    if( rc == 0 )
+      return len;
+  }
+}
+
+
+static void print_threads_info(pid_t pid)
+{
+  char task_path[256];
+  snprintf(task_path, 256, "/proc/%d/task", pid);
+  DIR* task_dir = opendir(task_path);
+
+  struct dirent* ent;
+  while( (ent = readdir(task_dir)) ) {
+    if( ent->d_name[0] == '.' )
+      continue;
+    char status_path[256];
+    snprintf(status_path, 256, "/proc/%d/task/%s/status", pid, ent->d_name);
+    FILE* status = fopen(status_path, "r");
+    char buf[256];
+    while( fgets(buf, 256, status) ) {
+      if( strncmp(buf, "Cpus_allowed:", strlen("Cpus_allowed:")) )
+        continue;
+      char* ptr = strchr(buf, ':');
+      ++ptr;
+      while( *ptr == '\t' )
+        ++ptr;
+      char* newline = strchr(ptr, '\n');
+      *newline = '\0';
+      printf("task%s: %s\n", ent->d_name, ptr);
+    }
+  }
+}
+
+
+int libstack_affinities_print(void)
+{
+  if( ! pid_mappings )
+    return 0;
+
+  struct pid_mapping* pm = pid_mappings;
+  while( pm ) {
+    printf("--------------------------------------------\n");
+    printf("pid=%d\n", pm->pid);
+    printf("cmdline=");
+    char cmdline_path[256];
+    snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
+    int cmdline = open(cmdline_path, O_RDONLY);
+    char cmdline_buf[256];
+    while( read(cmdline, cmdline_buf, 256) )
+      printf("%s", cmdline_buf);
+    printf("\n");
+    print_threads_info(pm->pid);
+    pm = pm->next;
+  }
+  printf("--------------------------------------------\n");
+  return 0;
+}
+
+
+int libstack_env_print(void)
+{
+  if( ! pid_mappings )
+    return 0;
+
+  struct pid_mapping* pm = pid_mappings;
+  while( pm ) {
+    printf("--------------------------------------------\n");
+    printf("pid: %d\n", pm->pid);
+    printf("cmdline: ");
+    char cmdline_path[256];
+    snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
+    int cmdline = open(cmdline_path, O_RDONLY);
+    char cmdline_buf[256];
+    while( read(cmdline, cmdline_buf, 256) )
+      printf("%s", cmdline_buf);
+    printf("\n");
+    char env_path[256];
+    snprintf(env_path, 256, "/proc/%d/environ", pm->pid);
+
+    int file_len = get_file_size(env_path);
+    if( file_len == -1 )
+      return -1;
+
+    char* buf = calloc(file_len, sizeof(*buf));
+    int env = open(env_path, O_RDONLY);
+    if( env == -1 )
+      return -1;
+    int rc = read(env, buf, file_len);
+    if( rc == -1 )
+      return rc;
+    if( rc != file_len ) {
+      fprintf(stderr, "%s: Read less than expected amount\n", __FUNCTION__);
+      return -1;
+    }
+
+    char* var = buf;
+    while( var ) {
+      if( ! strncmp(var, "EF_", strlen("EF_")) )
+        printf("env: %s\n", var);
+      while( *var != '\0' )
+        ++var;
+      ++var;
+      if( var - buf >= file_len )
+        break;
+    }
+    free(buf);
+    pm = pm->next;
+  }
+  printf("--------------------------------------------\n");
+  return 0;
 }
 
 
@@ -576,7 +998,12 @@ void list_all_stacks2(stackfilter_t *filter,
         if( stack_attach(i) && post_attach )
           post_attach(&stacks[i]->ni);
       }
-    }
+    } else if( info.ni_no_perms_exists )
+      ci_log("User %d:%d can't share stack %d(%s) owned by %d:%d "
+             "share_with=%d", (int) getuid(), (int) geteuid(),
+             info.ni_no_perms_id, info.ni_no_perms_name,
+             (int) info.ni_no_perms_uid, (int) info.ni_no_perms_euid,
+             info.ni_no_perms_share_with);
     i = info.u.ni_next_ni.index;
   }
 
@@ -1508,13 +1935,13 @@ static void stack_nonb_pkt_pool_n(ci_netif* ni)
                        0x00000000ffffffffllu | (link & 0xffffffff00000000llu)) )
       goto again;
     OO_PP_INIT(ni, pp, id);
-    pkt = PKT_NNL(ni, pp);
+    pkt = PKT(ni, pp);
     n = 0;
     while( 1 ) {
       ++n;
       if( OO_PP_IS_NULL(pkt->next) )
         break;
-      pkt = PKT_NNL(ni, pkt->next);
+      pkt = PKT(ni, pkt->next);
     }
     ci_netif_pkt_free_nonb_list(ni, id, pkt);
   }
@@ -1534,7 +1961,7 @@ static void stack_alloc_nonb_pkts(ci_netif* ni)
   oo_pkt_p* ppi = &pp;
   int n_to_alloc = arg_u[0];
   for( ; n < n_to_alloc; ++n ) {
-    if( (pkt = ci_netif_pkt_alloc_nonb(ni, 1)) == NULL )
+    if( (pkt = ci_netif_pkt_alloc_nonb(ni)) == NULL )
       break;
     pkt->refcount = 0;
     __ci_netif_pkt_clean(pkt);
@@ -1580,7 +2007,7 @@ static void stack_nonb_thrash(ci_netif* ni)
   }
 
   for( i = 0; i < iter; ++i ) {
-    pkt = ci_netif_pkt_alloc_nonb(ni, 0);
+    pkt = ci_netif_pkt_alloc_nonb(ni);
     if( pkt != NULL ) {
       pkt->refcount = 0;
       __ci_netif_pkt_clean(pkt);
@@ -1595,7 +2022,7 @@ static void stack_txpkt(ci_netif* ni)
 {
   int pkt_id = arg_u[0];
   if( IS_VALID_PKT_ID(ni, pkt_id) ) {
-    ci_ip_pkt_fmt* pkt = __PKT(ni, pkt_id, 1);
+    ci_ip_pkt_fmt* pkt = __PKT(ni, pkt_id);
     ci_tcp_pkt_dump(ni, pkt, 0, 0);
   }
   else
@@ -1606,7 +2033,7 @@ static void stack_rxpkt(ci_netif* ni)
 {
   int pkt_id = arg_u[0];
   if( IS_VALID_PKT_ID(ni, pkt_id) ) {
-    ci_ip_pkt_fmt* pkt = __PKT(ni, pkt_id, 1);
+    ci_ip_pkt_fmt* pkt = __PKT(ni, pkt_id);
     ci_tcp_pkt_dump(ni, pkt, 1, 0);
   }
   else
@@ -1618,7 +2045,7 @@ static void stack_segments(ci_netif* ni)
   int i, pkt_id = arg_u[0];
   oo_pkt_p buf;
   if( IS_VALID_PKT_ID(ni, pkt_id) ) {
-    ci_ip_pkt_fmt* pkt = __PKT(ni, pkt_id, 1);
+    ci_ip_pkt_fmt* pkt = __PKT(ni, pkt_id);
     ci_log("%d: pkt=%d n_buffers=%d", NI_ID(ni), pkt_id, pkt->n_buffers);
     buf = OO_PKT_P(pkt);
     for( i = 0; i < pkt->n_buffers; ++i ) {
@@ -1744,6 +2171,7 @@ static void stack_lots(ci_netif* ni)
   ci_log("============================================================");
   ci_netif_dump(ni);
   ci_netif_dump_extra(ni);
+  libstack_stack_mapping_print_pids(NI_ID(ni));
   ci_log("============================================================");
   ci_netif_dump_sockets(ni);
   dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 0);
@@ -1754,6 +2182,7 @@ static void stack_lots(ci_netif* ni)
   ci_netif_config_opts_dump(&NI_OPTS(ni));
   stack_time(ni);
 }
+
 
 static void stack_reap_list(ci_netif* ni)
 {
@@ -2079,6 +2508,15 @@ static void socket_recv(ci_netif* ni, ci_tcp_state* ts) {
 	 NI_ID(ni), S_SP(ts), (int) CI_IOVEC_LEN(&iov), rc);
 }
 
+static void socket_ppl_corrupt_loop(ci_netif* ni, ci_tcp_state* ts)
+{
+  /* Put this socket on the post-poll-list and corrupt the list by creating
+   * a loop.
+   */
+  ci_netif_put_on_post_poll(ni, &ts->s.b);
+  ts->s.b.post_poll_link.next = ts->s.b.post_poll_link.addr;
+}
+
 /**********************************************************************/
 
 ci_inline unsigned t_usec(void)
@@ -2298,6 +2736,8 @@ static const socket_op_t socket_ops[] = {
              "transmit bytes on socket", "<bytes>"),
   TCPC_OP_A (recv, FL_ARG_U,
              "receive bytes on TCP socket", "<bytes>"),
+  TCPC_OP   (ppl_corrupt_loop,
+             "corrupt post-poll-list with a loop"),
 };
 #define N_SOCKET_OPTS	(sizeof(socket_ops) / sizeof(socket_ops[0]))
 
@@ -2334,6 +2774,8 @@ int libstack_init(sa_sigaction_t* signal_handlers)
 {
   ci_set_log_prefix("");
   ci_dllist_init(&stacks_list);
+  if( libstack_mappings_init() )
+    return -1;
   if( signal_handlers )
     libstack_signal_handlers = signal_handlers;
   else

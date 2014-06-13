@@ -28,16 +28,6 @@ typedef struct {
 #define CI_USER_PTR_SET(p,x)  ((p).ptr = (ci_uint64)(ci_uintptr_t)(x))
 
 
-/* An opaque type that identifies an address space.  You may not use this
-** value for anything at all other than comparing with another such value.
-*/
-typedef ci_uint64               ci_addr_spc_id_t;
-#define CI_ADDR_SPC_ID_FMT      "%"CI_PRIx64
-#define CI_ADDR_SPC_ID_KERNEL	0
-#define CI_ADDR_SPC_ID_INVALID1	((ci_uint64) -1) /* stack uninitialised */
-#define CI_ADDR_SPC_ID_INVALID2	((ci_uint64) -2) /* socket uninitialised */
-
-
 typedef struct ci_netif_s		ci_netif;
 typedef struct ci_netif_state_s		ci_netif_state;
 typedef struct ci_ip_pkt_fmt_s		ci_ip_pkt_fmt;

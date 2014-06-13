@@ -66,8 +66,15 @@ struct oo_file_ref {
 typedef ci_os_file oo_os_file;
 
 
+#ifdef __KERNEL__
+struct tcp_helper_endpoint_s;
+extern int oo_os_sock_get_from_ep(struct tcp_helper_endpoint_s* ep,
+                                  oo_os_file* os_sock_out) CI_HF;
+#endif
 extern int  oo_os_sock_get(struct ci_netif_s*, oo_sp, oo_os_file* out) CI_HF;
+#ifndef __KERNEL__
 extern void oo_os_sock_release(struct ci_netif_s*, oo_os_file) CI_HF;
+#endif
 
 extern int oo_os_sock_sendmsg(struct ci_netif_s*, oo_sp,
                               const struct msghdr*, int flags) CI_HF;

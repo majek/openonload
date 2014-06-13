@@ -43,6 +43,8 @@
 */
 
 
+#define _GNU_SOURCE 1
+
 #include "efvi_sfw.h"
 
 #include <net/if.h>

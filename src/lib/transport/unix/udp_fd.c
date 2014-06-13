@@ -378,6 +378,38 @@ static int citp_udp_send(citp_fdinfo* fdinfo, const struct msghdr * msg,
 }
 
 
+#if CI_CFG_SENDMMSG
+static int citp_udp_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* mmsg, 
+                             unsigned vlen, int flags)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
+  ci_udp_iomsg_args a;
+  int i, rc;
+
+  Log_V(log(LPF "sendmmsg(%d, msg, %u, %#x)", fdinfo->fd, vlen, 
+            (unsigned) flags));
+
+  if( vlen == 0 ) 
+    return 0;
+
+  a.ep = &epi->sock;
+  a.fd = fdinfo->fd;
+  a.ni = epi->sock.netif;
+  a.us = SOCK_TO_UDP(epi->sock.s);
+
+  i = 0;
+
+  do {
+    rc = ci_udp_sendmsg(&a, &mmsg[i].msg_hdr, flags);
+    mmsg[i].msg_len = rc;
+    ++i;
+  } while( rc >= 0 && i < vlen );
+
+  return i;
+}
+#endif
+
+
 static int citp_udp_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
 {
   return citp_sock_fcntl(fdi_to_sock_fdi(fdinfo),
@@ -415,15 +447,7 @@ static int citp_udp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
   us = SOCK_TO_UDP(epi->sock.s);
   ni = epi->sock.netif;
 
-  if( ci_netif_may_poll(ni) &&
-      ci_netif_need_poll_maybe_spinning(ni, ss->now_frc, ss->ul_select_spin) &&
-      ci_netif_trylock(ni) ) {
-    ci_netif_poll(ni);
-    if( ss->ul_select_spin )
-      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
-  }
-
+  citp_poll_if_needed(ni, ss->now_frc, ss->ul_select_spin);
   mask = ci_udp_poll_events(ni, us);
 
   if( rd && (mask & SELECT_RD_SET) ) {
@@ -439,59 +463,54 @@ static int citp_udp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
 }
 
 
-static int citp_udp_poll(citp_fdinfo* fdi, struct pollfd* pfd,
-                          struct oo_ul_poll_state* ps)
+static int citp_udp_poll(citp_fdinfo*__restrict__ fdi,
+                         struct pollfd*__restrict__ pfd,
+                         struct oo_ul_poll_state*__restrict__ ps)
 {
   citp_sock_fdi *epi = fdi_to_sock_fdi(fdi);
   ci_udp_state* us = SOCK_TO_UDP(epi->sock.s);
   ci_netif* ni = epi->sock.netif;
   unsigned mask;
 
-  if( ci_netif_may_poll(ni) &&
-      ci_netif_need_poll_maybe_spinning(ni, ps->this_poll_frc,
-                                        ps->ul_poll_spin) &&
-      ci_netif_trylock(ni) ) {
-    ci_netif_poll(ni);
-    if( ps->ul_poll_spin )
-      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
-  }
-
   mask = ci_udp_poll_events(ni, us);
-
   pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
+  if( pfd->revents == 0 )
+    if( citp_poll_if_needed(ni, ps->this_poll_frc, ps->ul_poll_spin) ) {
+      mask = ci_udp_poll_events(ni, us);
+      pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
+    }
+
   return 1;
 }
+
+#endif
+
 
 #if CI_CFG_USERSPACE_EPOLL
 #include "ul_epoll.h"
 /* More-or-less copy of citp_udp_poll */
-static void citp_udp_epoll(citp_fdinfo* fdi, struct citp_epoll_member* eitem,
-                           struct oo_ul_epoll_state* eps)
+static void citp_udp_epoll(citp_fdinfo*__restrict__ fdi,
+                           struct citp_epoll_member*__restrict__ eitem,
+                           struct oo_ul_epoll_state*__restrict__ eps)
 {
-  citp_sock_fdi *epi = fdi_to_sock_fdi(fdi);
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
   ci_udp_state* us = SOCK_TO_UDP(epi->sock.s);
   ci_netif* ni = epi->sock.netif;
-  unsigned mask;
   ci_uint64 sleep_seq;
+  unsigned mask;
 
-  if( ci_netif_may_poll(ni) &&
-      ci_netif_need_poll_maybe_spinning(ni, eps->this_poll_frc,
-                                        eps->ul_epoll_spin) &&
-      ci_netif_trylock(ni) ) {
-    ci_netif_poll(ni);
-    if( eps->ul_epoll_spin )
-      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
-  }
-
+  /* Try to return a result without polling if we can. */
   sleep_seq = us->s.b.sleep_seq.all;
   mask = ci_udp_poll_events(ni, us);
-
-  citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+  if( ! citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq) )
+    if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
+      sleep_seq = us->s.b.sleep_seq.all;
+      mask = ci_udp_poll_events(ni, us);
+      citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+    }
 }
 #endif
-#endif
+
 
 static int citp_udp_listen(citp_fdinfo* fdinfo, int backlog)
 {
@@ -588,6 +607,9 @@ citp_protocol_impl citp_udp_protocol_impl = {
     .recvmmsg    = citp_udp_recvmmsg,
 #endif
     .send        = citp_udp_send,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_udp_sendmmsg,
+#endif
     .fcntl       = citp_udp_fcntl,
     .ioctl       = citp_udp_ioctl,
 #if CI_CFG_USERSPACE_SELECT

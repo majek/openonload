@@ -264,8 +264,10 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 		}
 	}
 	for (i = 0; i < iobrs->n_bufs; ++i) {
-		unsigned long iova_base;
+		unsigned long iova_base = 0;
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 		iova_base = vf ? efrm_vf_alloc_ioaddrs(vf, 1, NULL) : 0;
+#endif
 		rc = efhw_iopage_map(iobrs->pci_dev, &iobrs->bufs[i],
 				     iommu_domain, iova_base);
 		if (rc < 0) {
@@ -303,7 +305,7 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 								   bufs[i]),
 					      owner_id);
 		}
-		efrm_buffer_table_commit();
+		efrm_buffer_table_commit(efrm_client_get_nic(client));
 	}
 
 	EFRM_TRACE("%s: " EFRM_RESOURCE_FMT " %d pages @ "
@@ -361,32 +363,8 @@ efrm_create_iobufset_resource_manager(struct efrm_resource_manager **rm_out)
 		return -ENOMEM;
 	memset(efrm_iobufset_manager, 0, sizeof(*efrm_iobufset_manager));
 
-	/*
-	 * Bug 1145, 1370: We need to set initial size of both the resource
-	 * table and instance id table so they never need to grow as we
-	 * want to be allocate new iobufset at tasklet time. Lets make
-	 * a pessimistic guess at maximum number of iobufsets possible.
-	 * Could be less because
-	 *   - jumbo frames have same no of packets per iobufset BUT more
-	 *     pages per buffer
-	 *   - buffer table entries used independently of iobufsets by
-	 *     sendfile
-	 *
-	 * Based on TCP/IP stack setting of PKTS_PER_SET_S=5 ...
-	 *  - can't use this define here as it breaks the layering.
-	 */
-#define MIN_PAGES_PER_IOBUFSET  (1 << 4)
-
-	max = efrm_buffer_table_size() / MIN_PAGES_PER_IOBUFSET;
-	max = min_t(int, max, EFRM_IOBUFSET_MAX_NUM_INSTANCES);
-
-	/* HACK: There currently exists an option to allocate buffers that
-	 * are not programmed into the buffer table, so the max number is
-	 * not limited by the buffer table size.  I'm hoping this usage
-	 * will go away eventually.
-	 */
+	/* HACK: Magic number! */
 	max = 32768;
-
 	rc = efrm_kfifo_id_ctor(&efrm_iobufset_manager->free_ids, 0, max);
 	if (rc != 0)
 		goto fail1;

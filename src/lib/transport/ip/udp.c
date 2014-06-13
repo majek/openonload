@@ -151,7 +151,8 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   fd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(netif),  
                                  SC_SP(&us->s), domain, type);
   if( fd < 0 ) {
-    LOG_E(ci_log("%s: ci_tcp_helper_sock_attach %d", __FUNCTION__, fd));
+    LOG_E(ci_log("%s: ci_tcp_helper_sock_attach(domain=%d, type=%d) failed %d",
+                 __FUNCTION__, domain, type, fd));
     ci_udp_state_free(netif, us);
     ci_netif_unlock(netif);
     return fd;

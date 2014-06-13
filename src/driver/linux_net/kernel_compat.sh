@@ -50,8 +50,10 @@ EFX_HAVE_NONCONST_ETHTOOL_OPS		kver	<	2.6.19
 EFX_USE_GSO_SIZE_FOR_MSS		kver	>=	2.6.19
 EFX_USE_FASTCALL			kver	<	2.6.20
 EFX_USE_VLAN_RX_KILL_VID		kver	<	2.6.22
+EFX_NEED___CPU_TO_LE32_CONSTANT_FIX	kver	<	2.6.22
 EFX_NEED_BONDING_HACKS			kver	<	2.6.24
 EFX_NEED_DEV_CLOSE_HACK			kver	<	2.6.25
+EFX_HAVE_VLAN_NETWORK_HEADER_BUG	kver	<	2.6.27
 EFX_NEED_LM87_DRIVER			kver	<	2.6.28
 EFX_NEED_LM90_DRIVER			kver	<	2.6.28
 EFX_USE_NET_DEVICE_LAST_RX		kver	<	2.6.29
@@ -64,36 +66,27 @@ EFX_USE_ETHTOOL_OP_GET_LINK		kver	>=	2.6.38
 EFX_HAVE_OLD_NAPI			nsymbol napi_schedule		include/linux/netdevice.h
 EFX_HAVE_OLD_CSUM			nsymbol __sum16			include/linux/types.h
 EFX_HAVE_OLD_IP_FAST_CSUM		custom
-EFX_NEED_BYTEORDER_TYPES		nsymbol	__be32			include/linux/types.h
 EFX_NEED_CSUM_UNFOLDED			nsymbol csum_unfold		include/net/checksum.h
 EFX_NEED_CSUM_TCPUDP_NOFOLD		custom
 EFX_NEED_DEV_NOTICE			nsymbol	dev_notice		include/linux/device.h
-EFX_NEED_DUMMY_PCI_DISABLE_MSI		nexport	pci_disable_msi		include/linux/pci.h	drivers/pci/msi.c
-EFX_NEED_DUMMY_MSIX			nsymbol msix_entry		include/linux/pci.h
-EFX_NEED_ENABLE_MSIX			nexport	pci_enable_msix		include/linux/pci.h	drivers/pci/msi.c
+EFX_NEED_DEV_CREATE_FIX			symtype	device_create		include/linux/device.h struct device *(struct class *, struct device *, dev_t, char *, ...)
 EFX_HAVE_GRO				custom
 EFX_NEED_GRO_RESULT_T			nsymbol	gro_result_t		include/linux/netdevice.h
 EFX_HAVE_NAPI_GRO_RECEIVE_GR		symbol	napi_gro_receive_gr	include/linux/netdevice.h
 EFX_NEED_GFP_T				custom
 EFX_NEED_HEX_DUMP			nexport	print_hex_dump		include/linux/kernel.h include/linux/printk.h lib/hexdump.c
 EFX_NEED_HEX_DUMP_CONST_FIX 		symtype	print_hex_dump		include/linux/kernel.h void(const char *, const char *, int, int, int, void *, size_t, bool)
-EFX_NEED_IF_MII				nsymbol	if_mii			include/linux/mii.h
 EFX_HAVE_IRQ_HANDLER_REGS		symbol	pt_regs			include/linux/interrupt.h
 EFX_NEED_IRQ_HANDLER_T			nsymbol	irq_handler_t		include/linux/interrupt.h
-EFX_NEED_KCALLOC			nsymbol	kcalloc			include/linux/slab.h
 EFX_NEED_KZALLOC			nsymbol	kzalloc			include/linux/slab.h
 EFX_NEED_VZALLOC			nsymbol	vzalloc			include/linux/vmalloc.h
 EFX_NEED_MII_CONSTANTS			nsymbol	LPA_1000FULL		include/linux/mii.h
 EFX_NEED_MII_ADVERTISE_FLOWCTRL		nsymbol	mii_advertise_flowctrl	include/linux/mii.h
 EFX_NEED_MII_RESOLVE_FLOWCTRL_FDX	nsymbol	mii_resolve_flowctrl_fdx include/linux/mii.h
 EFX_HAVE_LINUX_MDIO_H			file				include/linux/mdio.h
-EFX_NEED_MSECS_TO_JIFFIES		custom
 EFX_NEED_MDELAY				custom
-EFX_NEED_MSLEEP				nexport	msleep			include/linux/delay.h	kernel/timer.c
-EFX_NEED_SSLEEP				nsymbol	ssleep			include/linux/delay.h
 EFX_NEED_MTD_DEVICE_REGISTER		nsymbol	mtd_device_register	include/linux/mtd/mtd.h
-EFX_NEED_MTD_ERASE_CALLBACK		nsymbol	mtd_erase_callback	include/linux/mtd/mtd.h
-EFX_HAVE_MTD_DIRECT_ACCESS              member  struct_mtd_info erase   include/linux/mtd/mtd.h
+EFX_HAVE_MTD_DIRECT_ACCESS              custom
 EFX_NEED_MUTEX				nsymbol	mutex_is_locked		include/linux/mutex.h
 EFX_NEED_NETDEV_ALLOC_SKB		nsymbol	netdev_alloc_skb	include/linux/skbuff.h
 EFX_NEED_SKB_COPY_FROM_LINEAR_DATA	nsymbol skb_copy_from_linear_data	include/linux/skbuff.h
@@ -105,14 +98,12 @@ EFX_NEED_NETIF_ADDR_LOCK		nsymbol	netif_addr_lock		include/linux/netdevice.h
 EFX_NEED_ALLOC_ETHERDEV_MQ		nsymbol	alloc_etherdev_mq	include/linux/etherdevice.h
 EFX_NEED_TX_MQ_API			nsymbol	__netif_tx_unlock	include/linux/netdevice.h
 EFX_USE_TX_MQ				symbol	real_num_tx_queues	include/linux/netdevice.h
-EFX_HAVE___NETIF_TX_LOCK_1PARAM		symtype	__netif_tx_lock		include/linux/netdevice.h void(struct netdev_queue *)
 EFX_NEED_NETIF_SET_REAL_NUM_TX_QUEUES	nsymbol	netif_set_real_num_tx_queues include/linux/netdevice.h
 EFX_NEED_NETIF_SET_REAL_NUM_RX_QUEUES	nsymbol	netif_set_real_num_rx_queues include/linux/netdevice.h
 EFX_NEED_PCI_CLEAR_MASTER		nsymbol	pci_clear_master	include/linux/pci.h
 EFX_NEED_PCI_MATCH_ID			nsymbol pci_match_id		include/linux/pci.h
 EFX_NEED_PCI_SAVE_RESTORE_WRAPPERS	symtype	pci_save_state		include/linux/pci.h int(struct pci_dev *, u32 *)
 EFX_NEED_PRINT_MAC			nsymbol print_mac		include/linux/if_ether.h
-EFX_NEED_RANDOM_ETHER_ADDR		nsymbol	random_ether_addr	include/linux/etherdevice.h
 EFX_NEED_RESOURCE_SIZE_T		nsymbol resource_size_t		include/linux/types.h
 EFX_NEED_RTNL_TRYLOCK			nsymbol	rtnl_trylock		include/linux/rtnetlink.h
 EFX_HAVE_ROUND_JIFFIES_UP		symbol	round_jiffies_up	include/linux/timer.h
@@ -126,8 +117,6 @@ EFX_HAVE_CSUM_START			symbol	csum_start		include/linux/skbuff.h
 EFX_HAVE_SKB_SET_TRANSPORT_HEADER	symbol	skb_set_transport_header	include/linux/skbuff.h
 EFX_HAVE_OLD_SKB_LINEARIZE		nsymtype skb_linearize		include/linux/skbuff.h int(struct sk_buff *)
 EFX_HAVE_SKBTX_HW_TSTAMP		symbol	SKBTX_HW_TSTAMP		include/linux/skbuff.h
-EFX_NEED_ETH_HDR			nsymbol	eth_hdr			include/linux/if_ether.h
-EFX_NEED_VLAN_ETH_HDR			nsymbol	vlan_eth_hdr		include/linux/if_vlan.h
 EFX_NEED_TCP_HDR			nsymbol	tcp_hdr			include/linux/tcp.h
 EFX_NEED_UDP_HDR			nsymbol	udp_hdr			include/linux/udp.h
 EFX_NEED_IP_HDR				nsymbol	ip_hdr			include/linux/ip.h
@@ -143,7 +132,6 @@ EFX_USE_ETHTOOL_MDIO_SUPPORT		symbol	mdio_support		include/linux/ethtool.h
 EFX_USE_LINUX_IO_H			file				include/linux/io.h
 EFX_NEED_MMIOWB				custom
 EFX_USE_LINUX_UACCESS_H			file				include/linux/uaccess.h
-EFX_USE_MTD_ERASE_FAIL_ADDR		symbol	fail_addr		include/linux/mtd/mtd.h
 EFX_USE_MTD_WRITESIZE			symbol	writesize		include/linux/mtd/mtd.h
 EFX_USE_NETDEV_DEV			member	struct_net_device	dev	include/linux/netdevice.h
 EFX_USE_NETDEV_DEV_ID			member	struct_net_device	dev_id	include/linux/netdevice.h
@@ -175,7 +163,8 @@ EFX_NEED_ETHTOOL_CMD_SPEED		nsymbol	ethtool_cmd_speed	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_GMODULEEEPROM		symbol	get_module_eeprom	include/linux/ethtool.h
 EFX_NEED_I2C_LOCK_ADAPTER		nsymbol	i2c_lock_adapter	include/linux/i2c.h
 EFX_USE_I2C_BUS_SEMAPHORE		custom
-EFX_HAVE_OLD_PCI_DMA_MAPPING_ERROR	custom
+EFX_HAVE_OLD_DMA_MAPPING_ERROR		custom
+EFX_NEED_DMA_SET_COHERENT_MASK		nsymbol	dma_set_coherent_mask	include/linux/dma-mapping.h
 EFX_HAVE_LINUX_SEMAPHORE_H		file				include/linux/semaphore.h
 EFX_NEED_DEV_GET_STATS			nsymbol	dev_get_stats		include/linux/netdevice.h
 EFX_HAVE_OLD_CPUMASK_SCNPRINTF		nsymtype cpumask_scnprintf	include/linux/cpumask.h int(char *, int, const struct cpumask *)
@@ -186,13 +175,12 @@ EFX_USE_PM_EXT_OPS			symbol	pm_ext_ops		include/linux/pm.h
 EFX_USE_DEV_PM_OPS			symbol	dev_pm_ops		include/linux/pm.h
 EFX_NEED_ATOMIC_CMPXCHG			custom
 EFX_NEED_WARN_ON			custom
-EFX_NEED_WAIT_EVENT_TIMEOUT		nsymbol wait_event_timeout	include/linux/wait.h
 EFX_NEED_ETHTOOL_CONSTANTS		nsymbol	ADVERTISED_Pause	include/linux/ethtool.h
 EFX_NEED_PCI_WAKE_FROM_D3		nsymbol pci_wake_from_d3        include/linux/pci.h
 EFX_HAVE_DEV_DISABLE_LRO		export	dev_disable_lro		include/linux/netdevice.h	net/core/dev.c
 EFX_NEED_UNMASK_MSIX_VECTORS		nsymbol	masked			include/linux/msi.h
 EFX_HAVE_PM_IDLE			export	pm_idle			include/linux/pm.h arch/$SRCARCH/kernel/process.c
-EFX_HAVE_SKB_RECORD_RX_QUEUE		symbol	skb_record_rx_queue	include/linux/skbuff.h
+EFX_NEED_SKB_RECORD_RX_QUEUE		nsymbol	skb_record_rx_queue	include/linux/skbuff.h
 EFX_HAVE_XEN_XEN_H			file				include/xen/xen.h
 EFX_HAVE_SYSDEV_H			file				include/linux/sysdev.h
 EFX_HAVE_ASM_SYSTEM_H			file				asm/system.h
@@ -201,16 +189,17 @@ EFX_HAVE_CPUMASK_OF_NODE		symbol	cpumask_of_node		include/asm/topology.h	arch/$S
 EFX_NEED_SET_CPUS_ALLOWED_PTR		nexport set_cpus_allowed_ptr	include/linux/sched.h		kernel/sched.c
 EFX_NEED_ON_EACH_CPU_WRAPPER 		custom
 EFX_HAVE_EXPORTED_CPU_SIBLING_MAP	export	(per_cpu__)?cpu_sibling_map	include/asm/smp.h	arch/$SRCARCH/include/asm/smp.h	arch/$SRCARCH/kernel/smpboot.c	drivers/xen/core/smpboot.c
-EFX_HAVE_ROUNDDOWN_POW_OF_TWO		symbol	rounddown_pow_of_two	include/linux/log2.h include/linux/kernel.h
-EFX_HAVE_ROUNDUP_POW_OF_TWO		symbol	roundup_pow_of_two	include/linux/log2.h include/linux/kernel.h
+EFX_NEED_ROUNDDOWN_POW_OF_TWO		nsymbol	rounddown_pow_of_two	include/linux/log2.h include/linux/kernel.h
 EFX_HAVE_SRIOV				export	pci_enable_sriov	include/linux/pci.h	drivers/pci/iov.c
 EFX_HAVE_NET_DEVICE_OPS			symbol	net_device_ops		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_MAC 		symbol	ndo_set_vf_mac		include/linux/netdevice.h
+EFX_HAVE_NDO_SET_VF_SPOOFCHK		symbol	ndo_set_vf_spoofchk	include/linux/netdevice.h
 EFX_HAVE_NDO_SET_FEATURES		symbol	ndo_set_features	include/linux/netdevice.h
 EFX_NEED_IS_ZERO_ETHER_ADDR		nsymbol	is_zero_ether_addr	include/linux/etherdevice.h
 EFX_NEED_IS_BROADCAST_ETHER_ADDR	nsymbol	is_broadcast_ether_addr	include/linux/etherdevice.h
 EFX_NEED_IS_MULTICAST_ETHER_ADDR	nsymbol	is_multicast_ether_addr	include/linux/etherdevice.h
 EFX_NEED_COMPARE_ETHER_ADDR		nsymbol	compare_ether_addr	include/linux/etherdevice.h
+EFX_NEED_ETHER_ADDR_EQUAL		nsymbol	ether_addr_equal	include/linux/etherdevice.h
 EFX_HAVE_LIST_SPLICE_TAIL_INIT		symbol	list_splice_tail_init	include/linux/list.h
 EFX_NEED_LIST_FIRST_ENTRY		nsymbol	list_first_entry	include/linux/list.h
 EFX_NEED_TIMESPEC_ADD_NS		nsymbol	timespec_add_ns		include/linux/time.h
@@ -228,17 +217,24 @@ EFX_HAVE_CPU_RMAP			file				include/linux/cpu_rmap.h
 EFX_NEED_KTIME				nfile				include/linux/ktime.h
 EFX_HAVE_NET_TSTAMP			file				include/linux/net_tstamp.h
 EFX_HAVE_DIV_S64_REM			symbol	div_s64_rem		include/linux/math64.h
+EFX_NEED_IP_IS_FRAGMENT			nsymbol	ip_is_fragment		include/net/ip.h
 EFX_NEED_NETDEV_FEATURES_T		nsymbol	netdev_features_t	include/linux/netdevice.h
 EFX_NEED_SKB_FILL_PAGE_DESC		nsymbol	skb_fill_page_desc	include/linux/skbuff.h
 EFX_NEED_SKB_FRAG_DMA_MAP		nsymbol	skb_frag_dma_map	include/linux/skbuff.h
+EFX_NEED_SKB_FRAG_SIZE			nsymbol	skb_frag_size		include/linux/skbuff.h
 EFX_NEED_SKB_FRAG_ADDRESS		nsymbol	skb_frag_address	include/linux/skbuff.h
 EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR		custom
 EFX_NEED_ETHTOOL_RXFH_INDIR_DEFAULT	nsymbol	ethtool_rxfh_indir_default	include/linux/ethtool.h
 EFX_NEED_IS_COMPAT_TASK			custom
 EFX_NEED_COMPAT_U64			nsymbol	compat_u64		include/asm/compat.h arch/$SRCARCH/include/asm/compat.h include/asm-$SRCARCH/compat.h
 EFX_USE_IRQ_SET_AFFINITY_HINT		symbol	irq_set_affinity_hint	include/linux/interrupt.h
-EFX_HAVE_TSO_SEGS_LIMIT			symbol	TCP_MAX_GSO_SEGS	include/net/tcp.h
+EFX_HAVE_GSO_MAX_SEGS			symbol	gso_max_segs		include/linux/netdevice.h
+EFX_NEED_BYTE_QUEUE_LIMITS		nsymbol	netdev_tx_sent_queue	include/linux/netdevice.h
 EFX_NEED_PCI_VPD_ATTR			nsymbol	pci_vpd			include/linux/pci.h
+EFX_NEED_SKB_CHECKSUM_NONE_ASSERT	nsymbol	skb_checksum_none_assert	include/linux/skbuff.h
+EFX_NEED_SKB_HEADER_CLONED		nsymbol	skb_header_cloned	include/linux/skbuff.h
+EFX_HAVE_NON_CONST_KERNEL_PARAM		symtype	param_set_uint		include/linux/moduleparam.h	int (const char *, struct kernel_param *)
+EFX_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops		include/linux/moduleparam.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
@@ -253,7 +249,7 @@ EFX_HAVE_NETFILTER_INDIRECT_SKB		memtype	struct_nf_hook_ops	hook	include/linux/n
 EFX_HAVE_NFPROTO_CONSTANTS		symbol	NFPROTO_NUMPROTO	include/linux/netfilter.h
 EFX_HAVE_FDTABLE			symbol	files_fdtable		include/linux/file.h include/linux/fdtable.h
 EFX_HAVE_REMAP_PFN_RANGE		symbol	remap_pfn_range		include/linux/mm.h
-EFX_HAVE_GETNSTIMEOFDAY			export	getnstimeofday		include/linux/time.h
+EFX_NEED_GETNSTIMEOFDAY			nexport	getnstimeofday		include/linux/time.h
 EFX_NEED_PCI_READ_VPD			nsymbol pci_read_vpd		include/linux/pci.h
 EFX_NEED_PCI_VPD_LRDT			nsymbol PCI_VPD_LRDT		include/linux/pci.h
 EFX_HAVE_KERN_UMOUNT			symbol	kern_unmount		include/linux/fs.h
@@ -621,14 +617,12 @@ void test(void) { mdelay(100); }"
     defer_test_compile neg "$source"
 }
 
-function do_EFX_NEED_MSECS_TO_JIFFIES()
+function do_EFX_HAVE_MTD_DIRECT_ACCESS()
 {
-    # inline up to 2.6.20, then became extern
-    local s=msecs_to_jiffies
-
-    ! test_inline_symbol $s include/linux/jiffies.h && \
-	! test_inline_symbol $s include/linux/time.h && \
-	! test_export $s kernel/time.c
+    # RHEL 4 is missing <mtd/mtd-abi.h>; assume old operation names
+    # in this case
+    ! test -f $KBUILD_SRC/include/mtd/mtd-abi.h || \
+	defer_test_memtype pos struct_mtd_info erase include/linux/mtd/mtd.h void
 }
 
 function do_EFX_NEED_GFP_T()
@@ -717,13 +711,13 @@ struct semaphore *f(struct i2c_adapter *a) { return &a->bus_lock; }
 "
 }
 
-function do_EFX_HAVE_OLD_PCI_DMA_MAPPING_ERROR()
+function do_EFX_HAVE_OLD_DMA_MAPPING_ERROR()
 {
-    # We should be able to use symtype for this, but pci_dma_mapping_error
+    # We should be able to use symtype for this, but dma_mapping_error
     # used to be defined as a macro on some architectures.
     defer_test_compile pos "
-#include <linux/pci.h>
-int f(void) { return pci_dma_mapping_error(0); }
+#include <linux/dma-mapping.h>
+int f(void) { return dma_mapping_error(0); }
 "
 }
 
@@ -866,7 +860,9 @@ unset M
 unset TOPDIR
 
 # Filter out make options except for job-server (parallel make)
+set +u
 old_MAKEFLAGS="$MAKEFLAGS"
+set -u
 MAKEFLAGS=
 for word in $old_MAKEFLAGS; do
     case "$word" in

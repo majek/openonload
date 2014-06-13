@@ -216,22 +216,6 @@ MULTICAST_LIMITATIONS_NOTE,
 #endif
 
 
-CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
-"Spin while waiting to obtain a per-socket lock.  If the spin timeout "
-"elapses, enter the kernel and block.  The spin timeout is set by "
-"EF_BUZZ_USEC.\n"
-
-"The per-socket lock is taken in recv() calls and similar.  This option can "
-"reduce jitter when multiple threads invoke recv() on the same socket.",
-           1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
-"Spin while waiting to obtain a per-stack lock.  If the spin timeout elapses, "
-"enter the kernel and block.  The spin timeout is set by EF_BUZZ_USEC. "
-" This option reduces jitter caused by lock contention.",
-           1, , 0, 0, 1, yesno)
-
-
 CI_CFG_OPT("EF_TCP_LISTEN_HANDOVER", tcp_listen_handover, ci_uint32,
 "When an accelerated TCP socket calls listen(), hand it over to the kernel "
 "stack.  This option disables acceleration of TCP listening sockets and "
@@ -308,6 +292,10 @@ CI_CFG_OPT("EF_TAIL_DROP_PROBE", tail_drop_probe, ci_uint32,
            , , 1, 0, 1, yesno)
 #endif
 
+CI_CFG_OPT("EF_VALIDATE_ENV", validate_env, ci_uint32,
+"When set this option validates Onload related environment "
+"variables (starting with EF_).",
+           , , 1, 0, 1, level)
 
 /* These EF_*_SPIN options are only here so that the application defaults
  * set by environment variables get exposed through stackdump.  (Because
@@ -352,15 +340,11 @@ CI_CFG_OPT("EF_PIPE_SEND_SPIN", pipe_send_spin, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
 #endif
 
-CI_CFG_OPT("EF_PACKET_BUFFER_MODE", packet_buffer_mode, ci_uint32,
-"This option affects how DMA buffers are managed.  The default packet buffer "
-"mode uses a limited hardware resource, and so restricts the total amount "
-"of memory that can be used by Onload for DMA."
-"\n"
-"Setting EF_PACKET_BUFFER_MODE=1 enables 'scalable packet buffer mode' which "
-"removes that limit.  To use this mode SR-IOV must be enabled in the BIOS, "
-"OS kernel and on the network adapter.",
-           1, , 0, 0, 1, yesno)
+CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
+           "", 1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
+           "", 1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_RST_DELAYED_CONN", rst_delayed_conn, ci_uint32,
 "This option tells Onload to reset TCP connections rather than allow data to "
@@ -394,34 +378,93 @@ CI_CFG_OPT("EF_POISON_RX_BUF", poison_rx_buf, ci_uint32,
            2, , 0, 0, 2, oneof:no;headers;headersandpayload)
 #endif
 
+/* packet_buffer_mode bits to be ORed: */
+#define CITP_PKTBUF_MODE_VF      1
+#define CITP_PKTBUF_MODE_PHYS    2
+CI_CFG_OPT("EF_PACKET_BUFFER_MODE", packet_buffer_mode, ci_uint32,
+"This option affects how DMA buffers are managed.  The default packet buffer "
+"mode uses a limited hardware resource, and so restricts the total amount "
+"of memory that can be used by Onload for DMA."
+"\n"
+"Setting EF_PACKET_BUFFER_MODE!=0 enables 'scalable packet buffer mode' which "
+"removes that limit.  See details for each mode below."
+"\n"
+"  1  -  SR-IOV with IOMMU.  Each stack allocates a separate PCI Virtual "
+"Function.  IOMMU guarantees that different stacks do not have any access "
+"to each other data."
+"\n"
+"  2  -  Physical address mode.  Inherently unsafe; no address space "
+"separation between different stacks or net driver packets."
+"\n"
+"  3  -  SR-IOV with physical address mode.  Each stack allocates a "
+"separate PCI Virtual Function.  IOMMU is not used, so this mode is unsafe "
+"in the same way as (2)."
+"\n"
+"To use odd modes (1 and 3) SR-IOV must be enabled in the BIOS, "
+"OS kernel and on the network adapter.  In these modes you also get faster "
+"interrupt handler which can improve latency for some workloads."
+"\n"
+"For mode (1) you also have to enable IOMMU (also known as VT-d) in BIOS"
+"and in your kernel."
+"\n"
+"For unsafe physical address modes (2) and (3), you should tune "
+"phys_mode_gid module parameter of the onload module.",
+           2, , 0, 0, 3, oneof:buf_table;sriov_iommu;phys;sriov_phys)
+
 #define CITP_TCP_LOOPBACK_OFF           0
 #define CITP_TCP_LOOPBACK_SAMESTACK     1
 #define CITP_TCP_LOOPBACK_TO_CONNSTACK  2
+#define CITP_TCP_LOOPBACK_ALLOW_ALIEN_IN_ACCEPTQ 2
 #define CITP_TCP_LOOPBACK_TO_LISTSTACK  3
+#define CITP_TCP_LOOPBACK_TO_NEWSTACK   4
 
 CI_CFG_OPT("EF_TCP_SERVER_LOOPBACK", tcp_server_loopback, ci_uint32,
 "Enable acceleration of TCP loopback connections on the listening (server) "
 "side:\n"
-"  0  -  not accelerated;\n"
+"  0  -  not accelerated (default);\n"
 "  1  -  accelerate if the connecting socket is in the same stack (you "
 "should also set EF_TCP_CLIENT_LOOPBACK!=0);\n"
-"  2  -  accelerate and move accepted socket to the stack of the connecting "
-"socket (client should allow this via EF_TCP_CLIENT_LOOPBACK=2).",
-           2, , 0, 0, 2, oneof:no;samestack;toconn)
+"  2  -  accelerate and allow accepted socket to be in another stack "
+"(this is necessary for clients with EF_TCP_CLIENT_LOOPBACK=2,4).",
+           2, , CITP_TCP_LOOPBACK_OFF, 0,
+           CITP_TCP_LOOPBACK_ALLOW_ALIEN_IN_ACCEPTQ,
+           oneof:no;samestack;allowalien)
 
 CI_CFG_OPT("EF_TCP_CLIENT_LOOPBACK", tcp_client_loopback, ci_uint32,
 "Enable acceleration of TCP loopback connections on the connecting (client) "
 "side:\n"
-"  0  -  not accelerated;\n"
+"  0  -  not accelerated (default);\n"
 "  1  -  accelerate if the listening socket is in the same stack "
 "(you should also set EF_TCP_SERVER_LOOPBACK!=0);\n"
 "  2  -  accelerate and move accepted socket to the stack of the connecting "
 "socket (server should allow this via EF_TCP_SERVER_LOOPBACK=2);\n"
 "  3  -  accelerate and move the connecting socket to the stack of the "
 "listening socket (server should allow this via EF_TCP_SERVER_LOOPBACK!=0).\n"
+"  4  -  accelerate and move both connecting and accepted  sockets to the "
+"new stack (server should allow this via EF_TCP_SERVER_LOOPBACK=2).\n"
 "\n"
 "NOTE: Option 3 breaks some usecases with epoll, fork and dup calls.\n",
-           2, , 0, 0, 3, oneof:no;samestack;toconn;tolist)
+           3, , CITP_TCP_LOOPBACK_OFF, 0, CITP_TCP_LOOPBACK_TO_NEWSTACK,
+           oneof:no;samestack;toconn;tolist;nonew)
+
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+CI_CFG_OPT("EF_USE_HUGE_PAGES", huge_pages, ci_uint32,
+"Control of whether huge pages are used for packet buffers:\n"
+"  0 - no;\n"
+"  1 - use huge pages if available (default);\n"
+"  2 - always use huge pages and fail if huge pages are not available.\n"
+"Mode 1 prints syslog message if there is not enough huge pages "
+"in the system.\n"
+"Mode 2 guarantees only initially-allocated packets to be in huge pages.  "
+"It is recommended to use this mode together with EF_MIN_FREE_PACKETS, "
+"to control the number of such guaranteed huge pages.  All non-initial "
+"packets are allocated in huge pages when possible; syslog message is "
+"printed if the system is out of huge pages.\n"
+"Non-initial packets may be allocated in non-huge pages without "
+"any warning in syslog for both mode 1 and 2 even if the system has "
+"free huge pages.",
+           2, , 1, 0, 2, oneof:no;try;always)
+#endif
 
 CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
 "A bitmask specifying the TCP options to advertise in SYN segments.\n"
@@ -519,9 +562,10 @@ CI_CFG_OPT("EF_TX_MIN_IPG_CNTL", tx_min_ipg_cntl, ci_int16,
 
 
 CI_CFG_OPT("EF_IRQ_MODERATION", irq_usec, ci_uint32,
-"Interrupt moderation interval, in microseconds, when scalable packet buffer "
-"mode is enabled (see EF_PACKET_BUFFER_MODE).  When scalable packet buffer "
-"mode is not used, the interrupt moderation settings of the kernel net driver "
+"Interrupt moderation interval, in microseconds."
+"\n"
+"This option only takes effective with EF_PACKET_BUFFER_MODE=1 or 3.  "
+"Otherwise the interrupt moderation settings of the kernel net driver "
 "take effect.",
            , , 0, 0, 1000000, time:usec)
 
@@ -595,15 +639,17 @@ CI_CFG_OPT("EF_DYNAMIC_ACK_THRESH", dynack_thresh, ci_uint16,
 "throughput.  The value is used as the threshold for number of pending "
 "ACKs before an ACK is forced.  If set to zero then the standard "
 "delayed-ack algorithm is used.",
-           , , 32, 0, 65535, count)
+           , , 16, 0, 65535, count)
 #endif
 
+#if CI_CFG_FD_CACHING
 CI_CFG_OPT("EF_EPCACHE_MAX", epcache_max, ci_uint16,
 "Sets the maximum number of TCP sockets to cache.  When set >0, OpenOnload "
 "will cache resources associated with sockets in order to improve "
 "connection set-up and tear-down performance.  This improves performance for "
 "applications that make new TCP connections at a high rate.",
            , , 0, MIN, MAX, count)
+#endif
 
 CI_CFG_OPT("EF_ACCEPTQ_MIN_BACKLOG", acceptq_min_backlog, ci_uint16,
 "Sets a minimum value to use for the 'backlog' argument to the listen() "
@@ -626,17 +672,29 @@ CI_CFG_OPT("EF_DEFER_WORK_LIMIT", defer_work_limit, ci_uint16,
            , , 32, MIN, MAX, count)
 
 CI_CFG_OPT("EF_IRQ_CORE", irq_core, ci_int16,
-"Specify which CPU core interrupts for this stack should be handled on.  "
-"The sfc_affinity driver is used to choose which net-driver receive channel "
-"is used to handle interrupts.",
+"Specify which CPU core interrupts for this stack should be handled on."
+"\n"
+"With EF_PACKET_BUFFER_MODE=1 or 3, Onload creates dedicated interrupts for "
+"each stack, and the interrupt is assigned to the requested core."
+"\n"
+"With EF_PACKET_BUFFER_MODE=0 (default) or 2, Onload interrupts are handled "
+"via net driver receive channel interrupts.  The sfc_affinity driver is "
+"used to choose which net-driver receive channel is used.  It is only "
+"possible for interrupts to be handled on the requested core if a net driver "
+"interrupt is assigned to the selected core.  Otherwise a nearby core will "
+"be selected."
+"\n"
+"Note that if the IRQ balancer service is enabled it may redirect interrupts "
+"to other cores.",
 	   , , -1, -1, SMAX, count)
 
 CI_CFG_OPT("EF_IRQ_CHANNEL", irq_channel, ci_int16,
 "Set the net-driver receive channel that will be used to handle interrupts "
-"for this stack."
+"for this stack.  The core that receives interrupts for this stack will be "
+"whichever core is configured to handle interrupts for the specified net "
+"driver receive channel."
 "\n"
-"This option only takes effect when using the default packet buffer mode "
-"(see EF_PACKET_BUFFER_MODE).",
+"This option only takes effect EF_PACKET_BUFFER_MODE=0 (default) or 2.",
 	   , , -1, -1, SMAX, count)
 
 CI_CFG_OPT("EF_TXQ_LIMIT", txq_limit, ci_uint32,
@@ -760,16 +818,15 @@ CI_CFG_OPT("EF_PREFAULT_PACKETS", prefault_packets, ci_int32,
 /* Max is currently 32k EPs */
 CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs_ln2, ci_uint32,
 "This option places an upper limit on the number of accelerated endpoints "
-"(sockets, pipes etc.) in an Onload stack.  The EF_MAX_ENDPOINTS environment "
-"variable should be set to a power of two between 1 and 32,768.  (The value "
-"is stored internally as the base-2-logarithm)."
+"(sockets, pipes etc.) in an Onload stack.  This option should be set to a "
+"power of two between 1 and 32,768."
 "\n"
-"If the application exhausts the pool of endpoints, then listening sockets "
-"will not be able to accept further accelerated connections, and any new "
-"sockets created are handed over to the kernel stack and not accelerated."
+"When this limit is reached listening sockets are not able to accept new "
+"connections over accelerated interfaces.  New sockets and pipes created via "
+"socket() and pipe() etc. are handed over to the kernel stack and so are not "
+"accelerated."
 "\n"
-"Notes: Multiple of these endpoint buffers are consumed by each "
-"accelerated pipe.  This option cannot be modifed by onload_stackdump.",
+"Note: Multiple endpoint buffers are consumed by each accelerated pipe.",
            , , CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT, 0,
            CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT_MAX, count)
 

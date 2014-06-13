@@ -54,7 +54,7 @@
 typedef struct ci_netif_nic_s {
   ef_vi                      vi;
 #ifdef __KERNEL__
-  struct iobufset_resource** pkt_rs;
+  struct oo_iobufset** pkt_rs;
 #endif
 } ci_netif_nic_t;
 
@@ -107,7 +107,6 @@ struct ci_netif_s {
 # ifndef CI_HAVE_OS_NOPAGE
   void **              u_shmbufs;
 # endif
-  unsigned             u_mmapped_pktbuf_iobufset;
 #endif
 
 
@@ -122,20 +121,22 @@ struct ci_netif_s {
 
   ci_netif_filter_table* filter_table;
 
-  /* I/O buffers */
-  ef_iobufset**        pkt_bufs;           /**< packet buffers */
 #ifdef __KERNEL__
-  /** pkt resources, 1:1 mapping with [pkt_bufs]. Note that these have
-   *  the SAME lifetime as [pkt_bufs]. Entry in this array MUST NOT be
+  /** pkt resources, 1:1 mapping with [pkt_rs]. Note that these have
+   *  the SAME lifetime as [pkt_rs]. Entry in this array MUST NOT be
    *  taken to imply that a ref. has been taken; it hasn't! */
-  struct iobufset_resource** pkt_rs;
+  struct oo_buffer_pages** buf_pages;
+# if CI_CFG_PKTS_AS_HUGE_PAGES
+  int                   huge_pages_flag;
+# endif
+#elif CI_CFG_MMAP_EACH_PKTSET
+# if CI_CFG_PKTS_AS_HUGE_PAGES
+  ci_int32             *pkt_shm_id;
+# endif
+  char**                pkt_sets; /* array of mmaped pkt sets */
+#else
+  char*                 pkt_sets; /* one area for all packets */
 #endif
-  /* At user level, this is the address space id of the process in
-     which this netif resides (and so only set once).  In the kernel
-     (on windows) this is the current address space that the kernel
-     netif is using (and so can change), but on linux is a constant
-     (CI_ADDR_SPC_ID_KERNEL), I think. */
-  ci_addr_spc_id_t     addr_spc_id;
 
 #ifdef __ci_driver__
   ci_contig_shmbuf_t   state_buf;
@@ -187,14 +188,17 @@ struct ci_netif_s {
 
 #ifdef __KERNEL__
   ci_netif_config_opts opts;
+
+  /* Stack overflow avoidance, used from allocate_vi(). */
+  char vi_data[VI_MAPPINGS_SIZE];
 #endif
 
   /* Used from ci_netif_poll_evq() only.  Moved here to avoid stack
    * overflow. */
   ef_event      events[16];
   ef_request_id tx_events[EF_VI_TRANSMIT_BATCH];
-  /* Another stack overflow avoidance, used from allocate_vi(). */
-  char vi_data[VI_MAPPINGS_SIZE];
+  /* See also copy in ci_netif_state. */
+  unsigned      error_flags;
 };
 
 

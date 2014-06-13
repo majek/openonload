@@ -325,3 +325,12 @@ void efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 			       filter_id & EFX_FILTER_ID_MASK, rxq_i);
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
+
+int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
+		    size_t inlen, size_t outlen, size_t *outlen_actual,
+		    const u8 *inbuf, u8 *outbuf)
+{
+        return efx_mcdi_rpc(efx_dl_handle(efx_dev)->efx, cmd, inbuf, inlen,
+                            outbuf, outlen, outlen_actual);
+}
+EXPORT_SYMBOL(efx_dl_mcdi_rpc);

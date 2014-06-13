@@ -304,6 +304,25 @@ static int efx_debugfs_read_loop_mode(struct seq_file *file, void *data)
 	EFX_PARAMETER(container_type, parameter,			\
 		      enum efx_loopback_mode, efx_debugfs_read_loop_mode)
 
+static const char *const nic_state_names[] = {
+	[STATE_UNINIT] =	"UNINIT",
+	[STATE_READY] =		"READY",
+	[STATE_DISABLED] =	"DISABLED"
+};
+static const unsigned int nic_state_max = sizeof(nic_state_names);
+
+static int efx_debugfs_read_nic_state(struct seq_file *file, void *data)
+{
+	unsigned int value = *(enum nic_state *)data;
+
+	return seq_printf(file, "%d => %s\n", value,
+			  STRING_TABLE_LOOKUP(value, nic_state));
+}
+
+#define EFX_NIC_STATE_PARAMETER(container_type, parameter)		\
+	EFX_PARAMETER(container_type, parameter,			\
+		      enum nic_state, efx_debugfs_read_nic_state)
+
 int efx_debugfs_read_string(struct seq_file *file, void *data)
 {
 	return seq_printf(file, "%s\n", (const char *)data);
@@ -752,7 +771,7 @@ static struct efx_debugfs_parameter efx_debugfs_channel_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_overlength),
 	EFX_UINT_PARAMETER(struct efx_channel, n_skbuff_leaks),
 	EFX_INT_PARAMETER(struct efx_channel, rx_alloc_level),
-	EFX_INT_PARAMETER(struct efx_channel, rx_alloc_push_pages),
+	EFX_BOOL_PARAMETER(struct efx_channel, rx_alloc_push_pages),
 #ifdef EFX_NOT_UPSTREAM
 	EFX_U64_PARAMETER(struct efx_channel, rx_bytes),
 	EFX_UINT_PARAMETER(struct efx_channel, rx_packets),
@@ -832,6 +851,14 @@ static void efx_fini_debugfs_channel(struct efx_channel *channel)
 	channel->debug_dir = NULL;
 }
 
+static int efx_nic_debugfs_read_desc(struct seq_file *file, void *data)
+{
+	struct efx_nic *efx = data;
+
+	return seq_printf(file, "%s %s board\n",
+			  efx->type->dl_revision, efx->phy_name);
+}
+
 /* Per-NIC parameters */
 static struct efx_debugfs_parameter efx_debugfs_nic_parameters[] = {
 	EFX_INT_PARAMETER(struct efx_nic, legacy_irq),
@@ -842,7 +869,7 @@ static struct efx_debugfs_parameter efx_debugfs_nic_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_nic, n_tx_channels),
 	EFX_UINT_PARAMETER(struct efx_nic, rx_buffer_len),
 	EFX_INT_MODE_PARAMETER(struct efx_nic, interrupt_mode),
-	EFX_UINT_PARAMETER(struct efx_nic, state),
+	EFX_NIC_STATE_PARAMETER(struct efx_nic, state),
 	{.name = "hardware_desc",
 	 .offset = 0,
 	 .reader = efx_nic_debugfs_read_desc},

@@ -26,7 +26,6 @@
 
 struct tcp_helper_resource_s;
 struct oo_hw_filter;
-struct oof_port_ref;
 
 
 /* State per protocol/local-ip/local-port triple. */
@@ -136,12 +135,17 @@ struct oof_manager {
 };
 
 
+/* A multicast filter.  Shared by all sockets in a stack that have
+ * subscribed to a particular {maddr, port}.
+ */
 struct oof_mcast_filter {
 
   struct oo_hw_filter mf_filter;
 
   unsigned            mf_maddr;
-  int                 mf_ifindex; 
+
+  /* Union of the physical interfaces wanted by the [mf_memberships]. */
+  unsigned            mf_hwport_mask;
 
   /* Link for [oof_local_port::lp_mcast_filters]. */
   ci_dllink           mf_lp_link;
@@ -151,6 +155,9 @@ struct oof_mcast_filter {
 };
 
 
+/* A multicast group membership (or subscription if you like).  A
+ * bi-directional link between oof_socket and oof_mcast_filter.
+ */
 struct oof_mcast_member {
 
   /* The filter, or NULL if the socket does not yet have filters installed. */
@@ -166,6 +173,9 @@ struct oof_mcast_member {
    * it will be the master interface rather than any of the slaves 
    */
   int                      mm_ifindex;
+
+  /* The physical interfaces underlying [mm_ifindex]. */
+  unsigned                 mm_hwport_mask;
 
   /* Link for [struct oof_socket::sf_mcast_memberships]. */
   ci_dllink                mm_socket_link;

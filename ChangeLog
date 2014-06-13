@@ -1,4 +1,71 @@
 
+openonload-201210
+-----------------
+
+- Updated sfc net driver to v3_3_0_6222B.
+- task26187: Firewall interface to limit traffic that can bypass kernel stack.
+- task26187: Iptables integration supports subset of iptables rules.
+- task28045: Default onload_stackdump output improved to identify process info.
+- task28045: New onload_stackdump commands: env, processes, affinities
+- task19306: Acceleration of pselect(), ppoll() and epoll_pwait().
+- task31567: Improve epoll_wait() and poll() performance when heavily loaded.
+- task30177: Add physical addressing mode EF_PACKET_BUFFER_MODE=2 or 3.
+- task30177: Add onload module option phys_mode_gid.
+- task8595:  Removed module option unsafe_sriov_without_iommu.
+- task26188: Support packet buffers in huge pages (EF_USE_HUGE_PAGES).
+- task31354: New mode EF_TCP_CLIENT_LOOPBACK=4 to put loopback in new stack
+- task29363: Keep non-blocking free pool replenished in loopback cases.
+- task8595:  Fix frequency with which we call schedule() with EF_UL_EPOLL=2.
+- task30187: Added support for sendmmsg() on accelerated UDP sockets.
+- task8595:  Set IRQ affinity hint for EF_IRQ_CORE with VFs.
+- task8595:  New stackdump stats relating to sock_wakes and unlock_slow.
+
+- bug30208: Return error if zero-copy buffers are used with wrong stack.
+- bug31176: drop lock if returning error from ci_udp_zc_recv_from_os
+- bug30890: Fix bug with EF_UL_EPOLL=2 when sockets are handed over to kernel.
+- bug22388, bug25644: Fix cleanup when fail to insert h/w filter for multicast.
+- bug24199: Fix bug relating to multicast joins on multiple vlan interfaces.
+- bug31262: Fix kernel buffer overrun provoked by "onload_stackdump filters"
+- bug31333: Fix acceleration with SOCK_NONBLOCK or SOCK_CLOEXEC.
+- bug31130: Fix bug on second call to connect() on TCP socket.
+- bug30731, bug31368: Prevent infinite loop due to post-poll-list corruption.
+- bug30731, bug31368: Prevent infinite loop due to loopback-list corruption.
+- bug31449: Fix timeout bug in accept() when spinning.
+- bug31464: Fix bug in onload_zc_recv() when multiple multicast recipients.
+- bug31494: Do not accept net packets for loopback sockets.
+- bug31494: Properly reorder loopback packets when sending.
+- bug31497: Increase default number of stacks EF_UL_EPOLL=2 can handle.
+- bug31497: Add module option epoll2_max_stacks.
+- bug31515: Fix kernel panic with EF_UL_EPOLL=2.
+- bug30825: Don't allow packets to be received from ports that are down.
+- bug31548: Fix case that could leave onload stack persisting after app exit.
+- bug31565: Fix bug in combination of EPOLLPRI and EPOLLET in userlevel epoll.
+- bug31573: Userlevel epoll ignored EPOLLWRNORM and EPOLLWRBAND.
+- bug31574: Determine kernel pkg name without being confused by other pkgs.
+- bug31565: Fix combination of EPOLLWRBAND and EPOLLET in userlevel epoll.
+- bug31600: Fix build for linux kernels >= 3.5.2
+- bug31619: Fix bug in accelerated pipe causing data corruption.
+- bug28514: Fix double-release of packet on out-of-order TCP receive.
+- bug31638: Fix TCP_DEFER_ACCEPT with TCP loopback acceleration.
+- bug29449: Fix bug relating to FIOASYNC signal handling.
+- bug31310: Fix EF_NAME with setuid applications.
+- bug31410: Fix route via a gateway that is a local IP on an accelerated intf.
+- bug30140: Fix blocking read of length zero from pipe: it should not block.
+- bug31785: Enforce EF_RXQ_MIN and EF_MIN_FREE_PACKETS.
+- bug31278: Fix incorrect ACK field in RST-ACK packet.
+- bug25680: Avoid thundering herd problem when apps start with same EF_NAME.
+- bug32011: Enable faststart after idle sender when no timestamp option.
+- bug32011: Reduce default dynamic ACK threshold to 16 by default.
+- bug32028: Fix EPOLLONESHOT bug that could cause epoll_wait to not unblock.
+- bug32166: Further workarounds for IOMMU foibles.
+- bug32168: Do not block in read() with count=0.
+- bug32234: Add diagnostic to warn user about old unsupported iommu.
+- bug32284: Intercept __recv_chk and __recvfrom_chk.
+- bug31889: Fix crash with TCP loopback accept() and out of endpoint buffers.
+- bug31669: Drop TCP loopback connection if the other end is destroyed.
+- bug31974: Fix accept() from kernel on 2.6.18-308.11.1.el5.
+
+
 openonload-201205-u1
 --------------------
 

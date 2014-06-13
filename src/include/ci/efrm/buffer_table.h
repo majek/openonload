@@ -56,6 +56,11 @@
 
 #include <ci/efhw/efhw_types.h>
 
+
+struct efrm_nic;
+struct efhw_buffer_table_allocation;
+
+
 /*--------------------------------------------------------------------
  *
  * NIC's buffer table.
@@ -79,6 +84,23 @@ extern int efrm_buffer_table_alloc(unsigned order,
  * by efrm_buffer_table_alloc() */
 extern void efrm_buffer_table_limits(int *low, int *high);
 
+
+/* Initialise per-nic buffer table allocator. */
+extern int efrm_nic_buffer_table_ctor(struct efrm_nic *,
+				      int bt_min, int bt_lim);
+
+/* Destroy per-nic buffer table allocator. */
+extern void efrm_nic_buffer_table_dtor(struct efrm_nic *);
+
+/* Allocate buffer table entries for use with single NIC. */
+extern int efrm_nic_buffer_table_alloc(struct efrm_nic *, unsigned order,
+				       struct efhw_buffer_table_allocation *);
+
+/* Free buffer table entries allocated with efrm_nic_buffer_table_alloc. */
+extern void efrm_nic_buffer_table_free(struct efrm_nic *,
+				       struct efhw_buffer_table_allocation *);
+
+
 /*--------------------------------------------------------------------
  *
  * buffer table operations through the HW independent API
@@ -88,12 +110,14 @@ extern void efrm_buffer_table_limits(int *low, int *high);
 /*! free a previously allocated region of buffer table space */
 extern void efrm_buffer_table_free(struct efhw_buffer_table_allocation *a);
 
-/*! commit the update of a buffer table entry to every NIC */
-extern void efrm_buffer_table_commit(void);
+extern void efrm_buffer_table_commit(struct efhw_nic*);
 
 extern void efrm_buffer_table_set(struct efhw_buffer_table_allocation *,
 				  struct efhw_nic *,
 				  unsigned i, dma_addr_t dma_addr, int owner);
+extern void efrm_buffer_table_set_n(struct efhw_buffer_table_allocation *a,
+				    struct efhw_nic *nic, int n_pages,
+				    unsigned i, dma_addr_t dma_addr, int owner);
 
 
 #endif /* __CI_EFRM_BUFFER_TABLE_H__ */

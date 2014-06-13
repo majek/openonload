@@ -351,7 +351,6 @@ static int txc43128_phy_probe(struct efx_nic *efx)
 	efx->mdio.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
 
 	efx->loopback_modes = TXC_LOOPBACKS | FALCON_XMAC_LOOPBACKS;
-	efx->startup_loopback_mode = LOOPBACK_PMAPMD;
 
 	strlcpy(efx->phy_name, "Mysticom CX4", sizeof(efx->phy_name));
 
@@ -530,7 +529,7 @@ static bool txc43128_phy_poll(struct efx_nic *efx)
 	return efx->link_state.up != was_up;
 }
 
-static const char *txc43128_test_names[] = {
+static const char *const txc43128_test_names[] = {
 	"bist"
 };
 

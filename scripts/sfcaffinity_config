@@ -15,7 +15,7 @@ import sfcmask as mask
 import optparse
 
 
-usage_str = "%prog <command> [args...]\n\n"
+usage_str = "%prog [options] <command> [args...]\n\n"
 usage_str += "commands:\n"
 usage_str += "  show [ethx]\n"
 usage_str += "  auto [ethx]...\n"

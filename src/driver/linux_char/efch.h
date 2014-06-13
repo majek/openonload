@@ -87,8 +87,8 @@ typedef struct efch_resource_ops_s {
    *  Should only be defined if CI_HAVE_OS_NOPAGE, and the only current
    *  implementation is Linux.
    */
-  unsigned (*rm_nopage)(struct efrm_resource*, void* opaque,
-                        unsigned long offset, unsigned long map_size);
+  unsigned long (*rm_nopage)(struct efrm_resource*, void* opaque,
+                             unsigned long offset, unsigned long map_size);
 
   /** dump resource info (optionally within context with priv_opt), and write
    line_prefix at the start of each line. */

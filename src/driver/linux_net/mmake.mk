@@ -18,13 +18,14 @@ ifdef DRIVER
 export CONFIG_SFC := m
 export CONFIG_SFC_DEBUGFS := y
 export CONFIG_SFC_HWMON := y
+export CONFIG_SFC_MCDI_MON := y
 export CONFIG_SFC_SFE4001 := y
-export CONFIG_SFC_SFE4005 := y
 export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
 export CONFIG_SFC_TUNE := m
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
+export CONFIG_SFC_AOE := y
 
 ifdef GCOV
 IMPORT        := ../linux/gcov.c ../linux/gcov.h
@@ -54,6 +55,8 @@ EXTRA_MAKEFLAGS += CC=$(CC)
 endif
 
 all:	kbuild Module.symvers $(DRIVER_SUBDIRS)
+
+unexport NDEBUG
 
 kbuild:
 	@if ! [ -h $(CURDIR)/Kbuild ]; then				\

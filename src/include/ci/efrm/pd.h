@@ -93,17 +93,25 @@ efrm_pd_get_vf(struct efrm_pd *);
 /* Return the PCI device associated with the protection domain. */
 struct pci_dev *efrm_pd_get_pci_dev(struct efrm_pd *pd);
 
+/* Return true if a mapping to one protection domain may be re-used by
+ * another.  It happens when:
+ * - DMA map is the same (for example, same IOMMU domain);
+ * - buffer table is not used (physicall address mode).
+ */
+int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1);
 
-extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages,
+extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages, int gfp_order,
 			   struct page **pages, int pages_stride,
 			   void *dma_addrs, int dma_addrs_stride,
 			   uint64_t *user_addrs, int user_addrs_stride,
 			   void (*user_addr_put)(uint64_t, uint64_t *),
 			   struct efhw_buffer_table_allocation *);
 
-extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages,
+extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int gfp_order,
 			      void *dma_addrs, int dma_addrs_stride,
 			      struct efhw_buffer_table_allocation *);
 
-
+extern int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
+                                dma_addr_t *pci_addrs, int pci_addrs_stride,
+                                struct efhw_buffer_table_allocation *bt_alloc);
 #endif /* __CI_EFRM_PD_H__ */

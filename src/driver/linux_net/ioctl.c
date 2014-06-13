@@ -138,7 +138,6 @@ struct efx_compat_ethtool_rxnfc {
 };
 #endif
 
-#ifndef __VMKLNX__
 static int efx_ioctl_rxnfc(struct efx_nic *efx, void __user *useraddr)
 {
 #ifdef CONFIG_COMPAT
@@ -232,7 +231,6 @@ err_out:
 
 	return ret;
 }
-#endif /* !__VMKLNX__ */
 #endif
 
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
@@ -300,7 +298,8 @@ efx_ioctl_get_mod_eeprom(struct efx_nic *efx,
 {
 	struct ethtool_eeprom eeprom;
 	struct ethtool_modinfo modinfo;
-	void __user *userbuf = ((void *)&useraddr->eeprom.ee) + sizeof(eeprom);
+	void __user *userbuf =
+		((void __user *)&useraddr->eeprom.ee) + sizeof(eeprom);
 	void __user *userbufptr = userbuf;
 	u32 bytes_remaining;
 	u32 total_len;
@@ -382,12 +381,10 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		op = efx_ioctl_reset_flags;
 		break;
 #endif
-#ifndef __VMKLNX__
 #ifdef EFX_USE_KCOMPAT
 	case EFX_RXNFC:
 		/* This command has variable length */
 		return efx_ioctl_rxnfc(efx, &user_data->rxnfc);
-#endif
 #endif
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
 	case EFX_RXFHINDIR:

@@ -62,13 +62,14 @@
 #include <asm/hardirq.h>
 #endif
 #include <linux/types.h>
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 # include <linux/iommu.h>
 #endif
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <ci/efhw/debug.h>
 #include <driver/linux_net/kernel_compat.h>
+#include <ci/efrm/config.h>
 
 
 /*--------------------------------------------------------------------
@@ -82,7 +83,7 @@ struct efhw_page {
 	unsigned long kva;
 };
 
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 typedef struct iommu_domain efhw_iommu_domain;
 extern struct mutex efrm_iommu_mutex;
 #else
@@ -155,19 +156,9 @@ static inline dma_addr_t efhw_iopage_dma_addr(struct efhw_iopage *p)
 	return p->dma_addr;
 }
 
-static inline unsigned efhw_iopage_pfn(struct efhw_iopage *p)
+static inline unsigned long efhw_iopage_pfn(struct efhw_iopage *p)
 {
-	return (unsigned)(__pa(p->kva) >> PAGE_SHIFT);
-}
-
-static inline void efhw_iopage_mark_invalid(struct efhw_iopage *p)
-{
-	p->kva = NULL;
-}
-
-static inline int efhw_iopage_is_valid(struct efhw_iopage *p)
-{
-	return p->kva != NULL;
+	return __pa(p->kva) >> PAGE_SHIFT;
 }
 
 /* Copy IO page from one efhw_iopage to another.

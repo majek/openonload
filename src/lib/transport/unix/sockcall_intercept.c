@@ -29,12 +29,9 @@
 #define _GNU_SOURCE
 
 #include "internal.h"
-#include "ul_poll.h"
-#include "ul_select.h"
 #if CI_CFG_USERSPACE_PIPE
 #include "ul_pipe.h"
 #endif
-#include <onload/ul/tcp_helper.h>
 #include <onload/syscalls.h>
 
 #include <stdarg.h>
@@ -753,6 +750,15 @@ OO_INTERCEPT(ssize_t, recv,
   return rc;
 }
 
+#if CI_LIBC_HAS___recv_chk
+OO_INTERCEPT(ssize_t, __recv_chk,
+             (int fd, void* buf, size_t count, size_t buflen, int flags))
+{
+  if (count > buflen)
+    ci_sys___read_chk(fd, buf, count, buflen);
+  return onload_recv(fd, buf, count, flags);
+}
+#endif
 
 OO_INTERCEPT(ssize_t, recvfrom,
              (int fd, void* buf, size_t len, int flags,
@@ -810,6 +816,16 @@ OO_INTERCEPT(ssize_t, recvfrom,
   return rc;
 }
 
+#if CI_LIBC_HAS___recvfrom_chk
+OO_INTERCEPT(ssize_t, __recvfrom_chk,
+             (int fd, void* buf, size_t count, size_t buflen, int flags,
+              struct sockaddr* addr, socklen_t* addrlen))
+{
+  if (count > buflen)
+    ci_sys___read_chk(fd, buf, count, buflen);
+  return onload_recvfrom(fd, buf, count, flags, addr, addrlen);
+}
+#endif
 
 OO_INTERCEPT(ssize_t, recvmsg,
              (int fd, struct msghdr* msg, int flags))
@@ -1037,679 +1053,284 @@ OO_INTERCEPT(ssize_t, sendmsg,
 }
 
 
-#if CI_CFG_USERSPACE_SELECT
+#if CI_CFG_SENDMMSG
 
-#ifdef __GLIBC__
-# define CI_NFDBITS        __NFDBITS
-# define CI_FDS_BITS(f)    __FDS_BITS(f)
-  typedef __fd_mask        ci_fd_mask;
-#else
-# error Need help here please.
-#endif
-
-
-#define merge_fdsets(n_words, out, in1, in2)            \
-do {                                                    \
-  int i;                                                \
-  for (i = 0; i < (n_words); i++) {                     \
-    CI_FDS_BITS(out)[i] = CI_FDS_BITS(in1)[i] |         \
-                          CI_FDS_BITS(in2)[i];          \
-  }                                                     \
-} while(0)
-
-
-#ifdef NDEBUG
-
-# define log_select(msg, nfds, rds, wrs, exs, timeout)  \
-         do{}while(0)
-
-# define do_sys_select(why, nfds, rds, wrs, exs, timeout)       \
-         ci_sys_select((nfds), (rds), (wrs), (exs), (timeout))
-
-#else
-
-static void log_select(const char* msg,
-                       int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
-                       struct timeval* timeout)
+# ifdef OO_SENDMMSG_NOT_IN_LIBC
+int ci_sys_sendmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
+                    int flags)
 {
-  char s[1024];
-  ci_format_select(s, sizeof(s), nfds, rds, wrs, exs, timeout);
-  ci_log("select[%s]%s", msg, s);
+  static int (*sys_sendmmsg)(int, struct mmsghdr*, unsigned, int);
+
+  if( sys_sendmmsg == NULL )
+    if( (sys_sendmmsg = dlsym(RTLD_NEXT, "sendmmsg")) == NULL ) {
+      errno = ENOSYS;
+      return -1;
+    }
+
+  return sys_sendmmsg(fd, mmsg, vlen, flags);
 }
+# endif
 
 
-static int do_sys_select(const char* why,
-                         int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
-                         struct timeval* timeout)
+OO_INTERCEPT(int, sendmmsg, 
+             (int fd, struct mmsghdr* msg, unsigned vlen, int flags))
 {
-  char s[1024];
-  char r[256], w[256], e[256];
-  int rc;
-  Log_SEL(ci_format_select(s, sizeof(s), nfds, rds, wrs, exs, timeout));
-  rc = ci_sys_select(nfds, rds, wrs, exs, timeout);
-  Log_SEL(if( rc > 0 ) {
-            ci_format_select_set(r, sizeof(r), nfds, rds);
-            ci_format_select_set(w, sizeof(w), nfds, wrs);
-            ci_format_select_set(e, sizeof(e), nfds, exs);
-            ci_log("select[%s]%s => %d (%s %s %s)", why, s, rc, r, w, e);
-          }
-          else {
-            ci_log("select[%s]%s => %d", why, s, rc);
-          }
-          );
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+  int rc, i;
+
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
+    citp_do_init(CITP_INIT_SYSCALLS);
+    return ci_sys_sendmmsg(fd, msg, vlen, flags);
+  }
+
+  Log_CALL(ci_log("%s(%d, %p, %u, 0x%x)", __FUNCTION__, fd, msg, vlen, flags));
+
+  if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
+    if(CI_UNLIKELY( msg == NULL && vlen != 0 )) {
+      CI_SET_ERROR(rc, EFAULT);
+    }
+    else {
+      for( i = 0; i < vlen; ++i )
+        if(CI_UNLIKELY( msg[i].msg_hdr.msg_iov == NULL && 
+                        msg[i].msg_hdr.msg_iovlen != 0 )) {
+          CI_SET_ERROR(rc, EFAULT);
+          goto release_and_exit;
+        }
+      rc = citp_fdinfo_get_ops(fdi)->sendmmsg(fdi, msg, vlen, flags);
+    }
+  release_and_exit:
+    citp_fdinfo_release_ref_fast(fdi);
+    citp_exit_lib(&lib_context, rc >= 0);
+  }
+  else {
+    Log_PT(log("PT: sys_sendmmsg(%d, msg, %u, 0x%x)", fd, vlen, flags));
+    citp_exit_lib_if(&lib_context, TRUE);
+    rc = ci_sys_sendmmsg(fd, msg, vlen, flags);
+  }
+  Log_CALL_RESULT(rc);
   return rc;
 }
 
-#endif
+# ifdef OO_SENDMMSG_NOT_IN_LIBC
+strong_alias(onload_sendmmsg, sendmmsg);
+# endif
+
+#endif /* CI_CFG_SENDMMSG */
 
 
-static void select_zero(fd_set* rds, fd_set* wrs, fd_set* exs, int n_words)
-{
-  if( rds )  memset(rds, 0, n_words * sizeof(ci_fd_mask));
-  if( wrs )  memset(wrs, 0, n_words * sizeof(ci_fd_mask));
-  if( exs )  memset(exs, 0, n_words * sizeof(ci_fd_mask));
-}
-
-
-/*
-** Performs a select for user level entries in the fdset
-** Input fdsets are {rd,wr,ex}in
-** Kernel fds are returned in {rd,rw,ex}k - assumed clear on entry
-** Ul status is returned in {rd,rw,ex}out - assumed clear on entry
-*/
-ci_inline int citp_ul_select(struct oo_ul_select_state*__restrict__ s)
-{
-  int r, w, e, fd, n = 0;
-
-  ci_assert(s->nfds_inited >= 0);
-  ci_assert(s->nfds_inited <= citp_fdtable.inited_count);
-
-  if( citp_fdtable_not_mt_safe() )
-    CITP_FDTABLE_LOCK_RD();
-
-  s->is_kernel_fd = 0;
-
-  for( fd = 0; fd < s->nfds_inited; ++fd ) {
-    r = FD_ISSET(fd, s->rdi);
-    w = FD_ISSET(fd, s->wri);
-    e = FD_ISSET(fd, s->exi);
-
-    if( r | w | e ) {
-      citp_fdinfo_p fdip = citp_fdtable.table[fd].fdip;
-      if( fdip_is_normal(fdip) ) {
-	citp_fdinfo* fdi = fdip_to_fdi(fdip);
-	if( citp_fdinfo_get_ops(fdi)->select(fdi, &n, r, w, e, s) ) {
-	  s->is_ul_fd = 1;
-	  continue;
-	}
-      }
-
-      if( r )  FD_SET(fd, s->rdk);
-      if( w )  FD_SET(fd, s->wrk);
-      if( e )  FD_SET(fd, s->exk);
-      s->is_kernel_fd = 1;
-    }
-  }
-
-  if( citp_fdtable_not_mt_safe() )
-    CITP_FDTABLE_UNLOCK_RD();
-
-  for( ; fd < s->nfds_split; ++fd ) {
-    r = FD_ISSET(fd, s->rdi);
-    w = FD_ISSET(fd, s->wri);
-    e = FD_ISSET(fd, s->exi);
-    if( r | w | e ) {
-      if( r )  FD_SET(fd, s->rdk);
-      if( w )  FD_SET(fd, s->wrk);
-      if( e )  FD_SET(fd, s->exk);
-      s->is_kernel_fd = 1;
-    }
-  }
-
-  return n;
-}
-
+#if CI_CFG_USERSPACE_SELECT
 
 OO_INTERCEPT(int, select,
              (int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
               struct timeval* timeout))
 {
-  /* Sorry, but we're relying somewhat on how GLIBC arranges its fd_set.
-  ** Will need some work to run on anything other than GLIBC.
-  */
-  struct oo_ul_select_state s;
-  int n_words;           // number of words to store the fdsets
-  int n_words_bs;        // number of words before the split
-  int n_bytes_bs;        // number of bytes before the split
-  int n_bytes_as;        // number of bytes after the split
-  int n;                 // number of ul fds that are ready
-  int split;             // true if a split is occuring
-  int polled_kfds = 0;
   citp_lib_context_t lib_context;
-  struct timeval non_blocking;
-  ci_uint64 poll_start_frc = 0, timeout_ms = 0;
+  int timeout_ms;
+  int rc;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_select(nfds, rds, wrs, exs, timeout);
   }
 
-  /* TODO: show the fd sets in detail in the Log_CALL tracing */
-  Log_FL(CI_UL_LOG_CALL | CI_UL_LOG_SEL,
-         log_select("enter", nfds, rds, wrs, exs, timeout));
+  Log_CALL(ci_log("%s(%d, %p, %p, %p, {%d,%d})", __FUNCTION__,
+                  nfds, rds, wrs, exs,
+                  timeout ? (int)timeout->tv_sec : -1,
+                  timeout ? (int)timeout->tv_usec : -1));
 
-  if(CI_UNLIKELY( (!CITP_OPTS.ul_select) | (nfds <= 0) ))
-    goto pass_through;
-  citp_enter_lib(&lib_context);
-
-  /* Cope with some apps just passing a really big number in [nfds]
-  ** Split between ul/kern and kern only handling at nfds_split
-  */
-  /* Round to a word address */
-  n_words    = (nfds                      + CI_NFDBITS - 1) / CI_NFDBITS;
-  n_words_bs = (citp_fdtable.inited_count + CI_NFDBITS - 1) / CI_NFDBITS;
-  split      = n_words_bs < n_words;
-  if( split ) {
-    s.nfds_inited = citp_fdtable.inited_count;
-    s.nfds_split = n_words_bs * CI_NFDBITS;
-  }
-  else {
-    n_words_bs = n_words;
-    s.nfds_inited = CI_MIN(nfds, citp_fdtable.inited_count);
-    s.nfds_split = nfds;
-  }
-  n_bytes_bs = n_words_bs * sizeof(ci_fd_mask);
-  n_bytes_as = (n_words - n_words_bs) * sizeof(ci_fd_mask);
-  s.is_ul_fd = 0;
-  s.ul_select_spin = 
-    oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_SELECT);
-
-  { /* Should indent here, but don't want to mess up CVS history. */
-    ci_fd_mask *bits = alloca(n_words * 7 * sizeof (ci_fd_mask));
-
-  /* If any input sets are NULL, we point them at a set of zeros.  (This is
-  ** just to avoid some conditionals).
-  */
-  if (!rds | !wrs | !exs) {
-    /* Create a zero set
-     * cast to a char* to avoid strict aliasing warning */
-    char* zero_set = (char*) (bits + 0 * n_words);
-    memset(bits, 0, n_words_bs * sizeof(ci_fd_mask));
-    s.rdi = rds ? rds : (fd_set*)zero_set;
-    s.wri = wrs ? wrs : (fd_set*)zero_set;
-    s.exi = exs ? exs : (fd_set*)zero_set;
-  } else {
-    s.rdi = rds;
-    s.wri = wrs;
-    s.exi = exs;
-  }
-
-  /* {rd,wr,ex}u - ul output
-   * {rd,wr,ex}k - kernel fdset inputs with zeroed ul fds */
-  s.rdk = NULL;
-  s.wrk = NULL;
-  s.exk = NULL;
-  s.rdu = (fd_set*) (bits + 4*n_words);
-  s.wru = (fd_set*) (bits + 4*n_words + 1*n_words_bs);
-  s.exu = (fd_set*) (bits + 4*n_words + 2*n_words_bs);
-
-  ci_frc64(&poll_start_frc);
-  s.now_frc = poll_start_frc;
-  timeout_ms = timeout == NULL ? 0 :
-                timeout->tv_sec * 1000 + timeout->tv_usec / 1000;
-
- poll_again:
-  /* zero {rd,wr,ex}u */
-  memset(s.rdu , 0, n_bytes_bs*3);
-  /* zero {rd,wr,ex}k before the split */
-  if( rds ) {
-    s.rdk = (fd_set*) (bits + 1*n_words);
-    memset(s.rdk, 0, n_bytes_bs);
-  }
-  if( wrs ) {
-    s.wrk = (fd_set*) (bits + 2*n_words);
-    memset(s.wrk, 0, n_bytes_bs);
-  }
-  if( exs ) {
-    s.exk = (fd_set*) (bits + 3*n_words);
-    memset(s.exk, 0, n_bytes_bs);
-  }
-
-  /* Poll the user level state and create input fds for the kernel */
-  n = citp_ul_select(&s);
-
-  /* [is_kernel_fd] currently tells us whether there are any kernel fds
-  ** below the split.  Let's make it tell us whether there are any kernel
-  ** fds at all (including any above the split).
-  */
-  s.is_kernel_fd |= split;
-
-  errno = lib_context.saved_errno;
-  if( n ) {
-    /* We have userlevel (and/or kernel) sockets ready.  So just need to do
-    ** a non-blocking poll of kernel sockets and we're done.
-    */
-    citp_exit_lib(&lib_context, FALSE);
-    if( CITP_OPTS.ul_select_fast || ! s.is_kernel_fd || polled_kfds )
-      goto copy_ul_only_and_out;
-    else
-      goto poll_kernel_merge_and_out;
-  }
-
-  /* We spin for a while if we've got any U/L sockets. */
-  if( timeout == NULL || (timeout->tv_sec | timeout->tv_usec) ) {
-    if( s.is_ul_fd && 
-        KEEP_POLLING(s.ul_select_spin, s.now_frc, poll_start_frc) ) {
-      if( timeout != NULL && 
-          s.now_frc - poll_start_frc >= timeout_ms * ci_cpu_khz ) {
-        /* Timeout while spinning */
-        citp_exit_lib(&lib_context, FALSE);
-        select_zero(rds, wrs, exs, n_words);
-        n = 0;
-        timeout->tv_sec = timeout->tv_usec = 0;
-        Log_SEL(log_select("spin_timeout", nfds, rds, wrs, exs, timeout));
-        goto out;
-      }
-
-      if( s.is_kernel_fd ) {
-        /* We need to keep an eye on the kernel fds when polling, else smp
-        ** configs can really suffer.  We don't need to citp_exit_lib()
-        ** before the syscall, as we're not blocking.
-        */
-        /* copy the input fdsets after the split into {rd,wr,ex}k */
-        if( split ) {
-          if( rds )
-            memcpy((char*)s.rdk+n_bytes_bs, (char*)rds+n_bytes_bs, n_bytes_as);
-          if( wrs )
-            memcpy((char*)s.wrk+n_bytes_bs, (char*)wrs+n_bytes_bs, n_bytes_as);
-          if( exs )
-            memcpy((char*)s.exk+n_bytes_bs, (char*)exs+n_bytes_bs, n_bytes_as);
-        }
-        non_blocking.tv_sec = non_blocking.tv_usec = 0;
-        n = do_sys_select("poll_k", nfds, s.rdk, s.wrk, s.exk, &non_blocking);
-        if( n ) {
-          citp_exit_lib(&lib_context, FALSE);
-          if( n < 0 ) {
-            /* Do not touch fdsets, as Linux does not do it in case of
-             * error.
-             */
-            Log_CALL_RESULT(n);
-            return n;
-          }
-          goto copy_k_only_and_out;
-        }
-      }
-      if(CI_UNLIKELY( lib_context.thread->sig.run_pending )) {
-        citp_exit_lib(&lib_context, FALSE);
-        errno = EINTR;
-        Log_CALL_RESULT(-1);
-        return -1;
-      }
-      polled_kfds = 1;
-      goto poll_again;
-    }
-    citp_exit_lib(&lib_context, FALSE);
-    goto pass_through;
-  }
-  else if( ! s.is_kernel_fd ) {
-    citp_exit_lib(&lib_context, FALSE);
-    select_zero(rds, wrs, exs, n_words);
-    Log_SEL(log_select("ul_only_nonb_0", nfds, rds, wrs, exs, timeout));
-    n = 0;
+  if(CI_UNLIKELY( (!CITP_OPTS.ul_select) || (nfds <= 0) ||
+                  (timeout != NULL &&
+                   (timeout->tv_sec < 0 || timeout->tv_usec < 0)))) {
+    rc = ci_sys_select(nfds, rds, wrs, exs, timeout);
     goto out;
   }
-  /* No userlevel fds are ready, and we're non-blocking, but we do have to
-   * check the kernel fds.
-   */
-  citp_exit_lib(&lib_context, FALSE);
-  if( ! s.is_ul_fd )
-    /* No userlevel fds, so avoid cost merging. */
-    goto pass_through;
-  if( split ) {
-    if( rds )
-      memcpy((char*) s.rdk + n_bytes_bs, (char*) rds + n_bytes_bs, n_bytes_as);
-    if( wrs )
-      memcpy((char*) s.wrk + n_bytes_bs, (char*) wrs + n_bytes_bs, n_bytes_as);
-    if( exs )
-      memcpy((char*) s.exk + n_bytes_bs, (char*) exs + n_bytes_bs, n_bytes_as);
+
+  if( timeout == NULL )
+    timeout_ms = -1;
+  else
+    timeout_ms = timeout->tv_sec * 1000 + timeout->tv_usec / 1000;
+
+  citp_enter_lib(&lib_context);
+  rc = citp_ul_do_select(nfds, rds, wrs, exs, &timeout_ms, &lib_context,
+                         NULL, NULL);
+
+  if( rc == CI_SOCKET_HANDOVER ) {
+    if( timeout != NULL) {
+      timeout->tv_sec = timeout_ms / 1000;
+      timeout->tv_usec = (timeout_ms % 1000) * 1000;
+    }
+    rc = ci_sys_select(nfds, rds, wrs, exs, timeout);
   }
-  if( (n = do_sys_select("nonb_k", nfds, s.rdk, s.wrk, s.exk, timeout)) > 0 )
-    goto copy_k_only_and_out;
-  if( n == 0 )
-    select_zero(rds, wrs, exs, n_words);
-  Log_CALL_RESULT(n);
-  return n;
+  else if( timeout != NULL ) {
+    ci_assert_le(timeout_ms, timeout->tv_sec * 1000 + timeout->tv_usec / 1000);
+    timeout->tv_sec = timeout_ms / 1000;
+    timeout->tv_usec = (timeout_ms % 1000) * 1000;
+  }
 
+out:
+  Log_CALL_RESULT(rc);
+  return rc;
+}
 
- poll_kernel_merge_and_out:
-  {
-    int rc;
-    /* copy the input fdsets after the split into {rd,wr,ex}k */
-    if( split ) {
-      if( rds )
-        memcpy((char*)s.rdk + n_bytes_bs, (char*)rds + n_bytes_bs, n_bytes_as);
-      if( wrs )
-        memcpy((char*)s.wrk + n_bytes_bs, (char*)wrs + n_bytes_bs, n_bytes_as);
-      if( exs )
-        memcpy((char*)s.exk + n_bytes_bs, (char*)exs + n_bytes_bs, n_bytes_as);
-    }
-    non_blocking.tv_sec = non_blocking.tv_usec = 0;
-    rc = do_sys_select("ul_rdy", nfds, s.rdk, s.wrk, s.exk, &non_blocking);
-    if(CI_UNLIKELY( rc < 0 )) {
-      n = rc;
-      goto out;
-    }
-    if( rc != 0 ) {
-      n += rc;
-      if( rds ) {
-        merge_fdsets(n_words_bs, rds, s.rdu, s.rdk);
-        if (split)
-          memcpy((char *)rds+n_bytes_bs, (char *)s.rdk+n_bytes_bs, n_bytes_as);
-      }
-      if( wrs ) {
-        merge_fdsets(n_words_bs, wrs, s.wru, s.wrk);
-        if (split)
-          memcpy((char *)wrs+n_bytes_bs, (char *)s.wrk+n_bytes_bs, n_bytes_as);
-      }
-      if( exs ) {
-        merge_fdsets(n_words_bs, exs, s.exu, s.exk);
-        if (split)
-          memcpy((char *)exs+n_bytes_bs, (char *)s.exk+n_bytes_bs, n_bytes_as);
-      }
-      Log_SEL(log_select("merge_out", nfds, rds, wrs, exs, timeout));
-      goto out;
+OO_INTERCEPT(int, pselect,
+             (int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
+              const struct timespec *timeout_ts, const sigset_t *sigmask))
+{
+  citp_lib_context_t lib_context;
+  sigset_t sigsaved;
+  int timeout_ms;
+  int rc = 0;
+
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
+    citp_do_init(CITP_INIT_SYSCALLS);
+    return ci_sys_pselect(nfds, rds, wrs, exs, timeout_ts, sigmask);
+  }
+
+  Log_CALL(ci_log("%s(%d, %p, %p, %p, {%d,%d}, %p)", __FUNCTION__, nfds,
+                  rds, wrs, exs,
+                  timeout_ts ? (int)timeout_ts->tv_sec : -1,
+                  timeout_ts ? (int)timeout_ts->tv_nsec : -1,
+                  sigmask));
+
+  if( ! CITP_OPTS.ul_poll || nfds <= 0 ||
+      (timeout_ts != NULL &&
+       (timeout_ts->tv_sec < 0 || timeout_ts->tv_nsec < 0 ))) {
+    rc = ci_sys_pselect(nfds, rds, wrs, exs, timeout_ts, sigmask);
+    goto out;
+  }
+
+  /* Calculate timeout */
+  if( timeout_ts == NULL )
+    timeout_ms = -1;
+  else
+    timeout_ms = timeout_ts->tv_sec * 1000 + timeout_ts->tv_nsec / 1000000;
+
+  /* Set up signal mask and spin */
+  citp_enter_lib(&lib_context);
+  rc = citp_ul_do_select(nfds, rds, wrs, exs, &timeout_ms, &lib_context,
+                         sigmask, &sigsaved);
+
+  /* we should not return 0 without signal check; do it now: */
+  if( rc == CI_SOCKET_HANDOVER || (rc == 0 && sigmask != NULL) ) {
+    if( timeout_ts != NULL) {
+      struct timespec ts;
+      ts.tv_sec = timeout_ms / 1000;
+      ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+      rc = ci_sys_pselect(nfds, rds, wrs, exs, &ts, sigmask);
     }
     else
-      goto copy_ul_only_and_out;
+      rc = ci_sys_pselect(nfds, rds, wrs, exs, NULL, sigmask);
   }
 
-
- copy_ul_only_and_out:
-  if( rds ) {
-    memcpy(rds, s.rdu, n_bytes_bs);
-    if (split) memset((char *)rds+n_bytes_bs, 0, n_bytes_as);
-  }
-  if( wrs ) {
-    memcpy(wrs, s.wru, n_bytes_bs);
-    if (split) memset((char *)wrs+n_bytes_bs, 0, n_bytes_as);
-  }
-  if( exs ) {
-    memcpy(exs, s.exu, n_bytes_bs);
-    if (split) memset((char *)exs+n_bytes_bs, 0, n_bytes_as);
-  }
-  Log_SEL(log_select("ul_out", nfds, rds, wrs, exs, timeout));
-  } /* End of block that declares [bits]. */
-
- out:
-  /* Linux updates timeout parameter.  When spinning, we should do it
-   * ourself. */
-  if( timeout_ms ) {
-    /* If timeout_ms was calculated, then s.now_frc & poll_start_frc are
-     * also initialized. Update timeout parameter. */
-    timeout_ms -= (s.now_frc - poll_start_frc) / ci_cpu_khz;
-    timeout->tv_sec = timeout_ms / 1000;
-    timeout->tv_usec = (timeout_ms - timeout->tv_sec * 1000) * 1000;
-  }
-  Log_CALL_RESULT(n);
-  return n;
-
-
- copy_k_only_and_out:
-  if( rds )  memcpy(rds, s.rdk, n_words * sizeof(ci_fd_mask));
-  if( wrs )  memcpy(wrs, s.wrk, n_words * sizeof(ci_fd_mask));
-  if( exs )  memcpy(exs, s.exk, n_words * sizeof(ci_fd_mask));
-  Log_SEL(log_select("k_out", nfds, rds, wrs, exs, timeout));
-  goto out;
-
-
- pass_through:
-  /* Linux updates timeout parameter.  When spinning, we should do it
-   * ourself. */
-  if( timeout_ms ) {
-    /* If timeout_ms was calculated, then s.now_frc & poll_start_frc are
-     * also initialized. Update timeout parameter. */
-    timeout_ms -= (s.now_frc - poll_start_frc) / ci_cpu_khz;
-    timeout->tv_sec = timeout_ms / 1000;
-    timeout->tv_usec = (timeout_ms - timeout->tv_sec * 1000) * 1000;
-    timeout_ms = 0; /* do not update timeout again */
-  }
-  n = do_sys_select("passthru", nfds, rds, wrs, exs, timeout);
-  goto out;
+out:
+  Log_CALL_RESULT(rc);
+  return rc;
 }
-
-
-/* Return the number of non-kernel fds,
-   or negative if there are too mnay kernel fds.
-*/
-static int citp_ul_poll(int nfds, struct oo_ul_poll_state*__restrict__ ps)
-{
-  int i;
-
-  ps->n_ul_ready = 0;
-  ps->n_ul_fds = 0;
-  ps->nkfds = 0;
-
-  if( citp_fdtable_not_mt_safe() )
-    CITP_FDTABLE_LOCK_RD();
-
-  for( i = 0; i < nfds; ++i ) {
-    unsigned fd = ps->pfds[i].fd;
-
-    if( fd < citp_fdtable.inited_count ) {
-      citp_fdinfo_p fdip = citp_fdtable.table[fd].fdip;
-      if( fdip_is_normal(fdip) ) {
-        ++ps->n_ul_fds;
-        if( citp_fdinfo_get_ops(fdip_to_fdi(fdip))->poll(fdip_to_fdi(fdip),
-                                                         &ps->pfds[i], ps) ) {
-          if( ps->pfds[i].revents != 0 )
-            ++ps->n_ul_ready;
-          continue;
-        }
-      }
-    }
-
-    if( (int) fd < 0 ) {
-      ps->pfds[i].revents = 0;
-      continue;
-    }
-    if(CI_UNLIKELY( ps->nkfds == OO_POLL_MAX_KFDS )) {
-      /* too many kernel fds */
-      ps->n_ul_ready = -1;
-      goto unlock_out;
-    }
-
-    ci_assert(ps->nkfds < OO_POLL_MAX_KFDS);
-    ps->kfd_map[ps->nkfds] = i;
-    /* ?? Could delay these two lines until we are about to do sys_poll. */
-    ps->kfds[ps->nkfds].fd = fd;
-    ps->kfds[ps->nkfds].events = ps->pfds[i].events;
-    ps->pfds[i].revents = 0;
-    ++ps->nkfds;
-  }
-
- unlock_out:
-  if( citp_fdtable_not_mt_safe() )
-    CITP_FDTABLE_UNLOCK_RD();
-  FDTABLE_ASSERT_VALID();
-  return ps->n_ul_ready;
-}
-
-
-static void citp_ul_poll_merge_kfds(struct oo_ul_poll_state*__restrict__ ps)
-{
-  int i;
-  for( i = 0; i < ps->nkfds; ++i )
-    ps->pfds[ps->kfd_map[i]].revents = ps->kfds[i].revents;
-}
-
 
 OO_INTERCEPT(int, poll,
              (struct pollfd*__restrict__ fds, nfds_t nfds, int timeout_ms))
 {
-  struct oo_ul_poll_state ps;
-  int rc, i, n, polled_kfds = 0;
   citp_lib_context_t lib_context;
-  ci_uint64 poll_start_frc;
-  ci_uint64 poll_fast_frc = 0;
+  int rc;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_poll(fds, nfds, timeout_ms);
   }
 
-  if( ! CITP_OPTS.ul_poll )
-    goto pass_through;
+  if( ! CITP_OPTS.ul_poll || nfds <= 0 )
+    return ci_sys_poll(fds, nfds, timeout_ms);
 
   Log_CALL(ci_log("%s(%p, %ld, %d)", __FUNCTION__, fds, nfds, timeout_ms));
 
   citp_enter_lib(&lib_context);
-  ci_frc64(&poll_start_frc);
-  ps.this_poll_frc = poll_start_frc;
-  ps.pfds = fds;
-  ps.ul_poll_spin = oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_POLL);
+  rc = citp_ul_do_poll(fds, nfds, &timeout_ms, &lib_context);
 
- poll_again:
-  n = citp_ul_poll(nfds, &ps);
-  if(CI_UNLIKELY( n < 0 ))
-    goto exit_lib_and_pass_through;
+  /* fixme: signals may come after spin but before ci_sys_select(); we'll
+   * handle them but do not return -1(EINTR). */
+  citp_exit_lib(&lib_context, rc >= 0);
+  if( timeout_ms != 0 && rc == 0 )
+    rc = ci_sys_poll(fds, nfds, timeout_ms);
 
-  ci_assert(ps.nkfds <= OO_POLL_MAX_KFDS);
-
-  if( n ) {
-    /* We have userlevel sockets ready.  So just need to do a non-blocking
-     * poll of kernel sockets (at most) and we're done.
-     */
-    if( CITP_OPTS.ul_poll_fast || ps.nkfds == 0 || polled_kfds ) {
-      citp_exit_lib(&lib_context, TRUE);
-      for( i = 0; i < ps.nkfds; ++i )
-        fds[ps.kfd_map[i]].revents = 0;
-      Log_CALL_RESULT(n);
-      return n;
-    }
-    goto poll_kfds_and_return;
-  }
-
-  if( timeout_ms == 0 && CITP_OPTS.ul_poll_nonblock_fast_usec ) {
-    if( ps.this_poll_frc - lib_context.thread->poll_nonblock_fast_frc < 
-        citp.poll_nonblock_fast_cycles ) {
-      citp_exit_lib(&lib_context, TRUE);
-      Log_CALL_RESULT(0);
-      return 0;
-    }
-    else {
-      /* We are going to poll the kernel fds, so record the time at
-       * which we did it.
-       */
-      lib_context.thread->poll_nonblock_fast_frc = poll_start_frc;
-    }
-  }
-
-  if( ps.n_ul_fds != 0 ) {
-    /* We have some userlevel fds. */
-    if( timeout_ms ) {
-      /* Blocking.  Shall we spin? */
-      if( KEEP_POLLING(ps.ul_poll_spin, ps.this_poll_frc, poll_start_frc) ) {
-        /* Timeout while spinning? */
-        if( timeout_ms > 0 && (ps.this_poll_frc - poll_start_frc >=
-                               (ci_uint64) timeout_ms * ci_cpu_khz) ) {
-          citp_exit_lib(&lib_context, TRUE);
-          for( i = 0; i < ps.nkfds; ++i )
-            fds[ps.kfd_map[i]].revents = 0;
-          Log_CALL_RESULT(0);
-          return 0;
-        }
-        if( ps.this_poll_frc - poll_fast_frc > citp.poll_fast_cycles ) {
-          /* Spend most of our time while spinning only looking at
-           * user-level state.  First time around we'll look at kernel
-           * state, but after that only 1 in n usecs.  This minimises
-           * latency for user-level traffic.
-           */
-          if( ps.nkfds ) {
-            /* We need to keep an eye on the kernel fds when polling.  We
-             * don't need to citp_exit_lib() here because we're not blocking.
-             */
-            rc = ci_sys_poll(ps.kfds, ps.nkfds, 0);
-            if( rc ) {
-              citp_exit_lib(&lib_context, rc >= 0);
-              citp_ul_poll_merge_kfds(&ps);
-              Log_CALL_RESULT(rc);
-              return rc;
-            }
-          }
-          polled_kfds = 1;
-          if( CITP_OPTS.ul_poll_fast_usec )
-            poll_fast_frc = ps.this_poll_frc;
-          if(CI_UNLIKELY( lib_context.thread->sig.run_pending )) {
-            citp_exit_lib(&lib_context, FALSE);
-            errno = EINTR;
-            Log_CALL_RESULT(-1);
-            return -1;
-          }
-        }
-        goto poll_again;
-      }
-      /* We've not found any events yet, and we'd like to block.  We may or
-       * may not have looked at kernel fds.
-       */
-      if( ! polled_kfds ) {
-        /* Poll the kernel fds separately to avoid polling onload sockets
-         * in the kernel (which will enable interrupts).
-         */
-        citp_exit_lib(&lib_context, TRUE);
-        if( (n = ci_sys_poll(ps.kfds, ps.nkfds, 0)) ) {
-          citp_ul_poll_merge_kfds(&ps);
-          Log_CALL_RESULT(n);
-          return n;
-        }
-        goto pass_through;
-      }
-      goto exit_lib_and_pass_through;
-    }
-    else if( ps.nkfds == 0 ) {
-      /* Non-blocking and no kernel fds. */
-      citp_exit_lib(&lib_context, TRUE);
-      Log_CALL_RESULT(0);
-      return 0;
-    }
-    else {
-      /* Non-blocking.  Just need to poll kernel fds before returning.
-       * This is likely more efficient than pass-through, esp. if many UL
-       * sockets.
-       */
-      n = 0;
-      goto poll_kfds_and_return;
-    }
-  }
-  /* We only have kernel fds, or we want to block; so pass through. */
-
- exit_lib_and_pass_through:
-  citp_exit_lib(&lib_context, TRUE);
- pass_through:
-  n = ci_sys_poll(fds, nfds, timeout_ms);
-  Log_CALL_RESULT(n);
-  return n;
-
- poll_kfds_and_return:
-  { /* Poll the kernel descriptors, and merge results into output. */
-    citp_exit_lib(&lib_context, TRUE);
-    rc = ci_sys_poll(ps.kfds, ps.nkfds, 0);
-    if( rc > 0 ) {
-      citp_ul_poll_merge_kfds(&ps);
-      n += rc;
-    }
-    else if(CI_UNLIKELY( rc < 0 )) {
-      /* Ensure [revents == 0] for all entries if returning error. */
-      for( i = 0; i < nfds; ++i )
-        fds[i].revents = 0;
-      n = rc;
-    }
-    else {
-      /* kfd revents fields are already zeroed by citp_ul_poll(). */
-    }
-    Log_CALL_RESULT(n);
-    return n;
-  }
+  Log_CALL_RESULT(rc);
+  return rc;
 }
+
+#if CI_LIBC_HAS_ppoll
+OO_INTERCEPT(int, ppoll,
+             (struct pollfd*__restrict__ fds, nfds_t nfds,
+              const struct timespec *timeout_ts, const sigset_t *sigmask))
+{
+  citp_lib_context_t lib_context;
+  sigset_t sigsaved;
+  int timeout_ms;
+  int rc = 0;
+  int was_spinning = 0;
+
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
+    citp_do_init(CITP_INIT_SYSCALLS);
+    return ci_sys_ppoll(fds, nfds, timeout_ts, sigmask);
+  }
+
+  Log_CALL(ci_log("%s(%p, %ld, {%d,%d}, %p)", __FUNCTION__, fds, nfds,
+                  timeout_ts ? (int)timeout_ts->tv_sec : -1,
+                  timeout_ts ? (int)timeout_ts->tv_nsec : -1,
+                  sigmask));
+
+  if( ! CITP_OPTS.ul_poll || nfds <= 0 ||
+      (timeout_ts != NULL &&
+       (timeout_ts->tv_sec < 0 || timeout_ts->tv_nsec < 0 ))) {
+    rc = ci_sys_ppoll(fds, nfds, timeout_ts, sigmask);
+    goto out;
+  }
+
+  /* Non-blocking check: do we have anything ready? */
+  timeout_ms = 0;
+  citp_enter_lib(&lib_context);
+  rc = citp_ul_do_poll(fds, nfds, &timeout_ms, &lib_context);
+  citp_exit_lib(&lib_context, rc >=0);
+  if( rc != 0)
+    goto out;
+
+  /* Calculate timeout */
+  if( timeout_ts == NULL )
+    timeout_ms = -1;
+  else
+    timeout_ms = timeout_ts->tv_sec * 1000 + timeout_ts->tv_nsec / 1000000;
+
+  /* Set up signal mask and spin */
+  if( timeout_ms != 0 &&
+      (oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_POLL)) ) {
+    was_spinning = 1;
+    rc = citp_ul_pwait_spin_pre(&lib_context, sigmask, &sigsaved);
+    if( rc < 0 ) {
+      citp_exit_lib(&lib_context, rc >=0);
+      goto out;
+    }
+
+    rc = citp_ul_do_poll(fds, nfds, &timeout_ms, &lib_context);
+
+    citp_ul_pwait_spin_done(&lib_context, &sigsaved, &rc);
+    if( rc != 0 )
+      goto out;
+  }
+
+  /* Block in the OS */
+  if( (timeout_ms != 0 || !was_spinning)  && rc == 0 ) {
+    struct timespec ts;
+    if( timeout_ms >= 0 ) {
+      ts.tv_sec = timeout_ms / 1000;
+      ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+    }
+    rc = ci_sys_ppoll(fds, nfds, timeout_ms >= 0 ? &ts : NULL, sigmask);
+  }
+
+out:
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+#endif
 
 
 #if CI_CFG_USERSPACE_EPOLL
@@ -2205,6 +1826,9 @@ OO_INTERCEPT(ssize_t, read,
     CI_DEBUG(m.msg_control = CI_NOT_NULL);
     m.msg_controllen = 0;
     /* msg_flags is output only */
+    if( count == 0 )
+      rc = 0;
+    else
     rc = citp_fdinfo_get_ops(fdi)->recv(fdi, &m, 0);
     citp_fdinfo_release_ref_fast(fdi);
     FDTABLE_ASSERT_VALID();
@@ -2292,6 +1916,14 @@ OO_INTERCEPT(ssize_t, readv,
 
   if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
     {
+      int len_is_zero = 1;
+      int i;
+      for( i = 0; i < count; i++ ) {
+        if( vector[i].iov_len ) {
+          len_is_zero = 0;
+          break;
+        }
+      }
       /* See note about convertions above in this file */
       CI_DEBUG(m.msg_name = CI_NOT_NULL);
       m.msg_namelen = 0;
@@ -2300,6 +1932,9 @@ OO_INTERCEPT(ssize_t, readv,
       CI_DEBUG(m.msg_control = CI_NOT_NULL);
       m.msg_controllen = 0;
       /* msg_flags is output only */
+      if( len_is_zero )
+        rc = 0;
+      else
       rc = citp_fdinfo_get_ops(fdi)->recv(fdi, &m, 0);
     }
     citp_fdinfo_release_ref_fast(fdi);

@@ -182,6 +182,9 @@ static void usage(const char* msg)
   ci_log(" ");
   ci_log("misc commands:");
   ci_log("  doc");
+  ci_log("  affinities         Show thread affinities of onload processes");
+  ci_log("  env                Show onload related environment of processes");
+  ci_log("  processes          Show list of onloaded processes");
 
   ci_log(" ");
   ci_log("stack commands:");
@@ -338,10 +341,10 @@ int main(int argc, char* argv[])
   CI_TRY(libstack_init(NULL));
 
   /* Special case for onload_stackdump called with no arguments 
-   * - just list stacks and return
+   * - just list stacks and pids and return
    */
   if( no_args ) {
-    list_all_stacks(0);
+    libstack_stack_mapping_print();
     return 0;
   }
 
@@ -402,6 +405,21 @@ int main(int argc, char* argv[])
       }
       print_docs(argc, argv);
       break;
+    }
+    else if( ! strcmp(argv[0], "affinities") ) {
+      if( doing_sockets || doing_stacks )
+        ci_app_usage("Cannot mix doc with other commands");
+      CI_TRY(libstack_affinities_print());
+    }
+    else if( ! strcmp(argv[0], "env") ) {
+      if( doing_sockets || doing_stacks )
+        ci_app_usage("Cannot mix doc with other commands");
+      CI_TRY(libstack_env_print());
+    }
+    else if( ! strcmp(argv[0], "processes") ) {
+      if( doing_sockets || doing_stacks )
+        ci_app_usage("Cannot mix doc with other commands");
+      libstack_pid_mapping_print();
     }
     else if( ! cfg_zombie && ! strcmp(argv[0], "kill") ) {
       ci_app_usage("Cannot use kill without -z");

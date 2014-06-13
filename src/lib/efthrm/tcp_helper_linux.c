@@ -66,7 +66,7 @@ efab_fop_poll__poll_if_needed(tcp_helper_resource_t* trs, citp_waitable* w)
      * expense later).
      */
     if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) &&
-        efab_tcp_helper_netif_try_lock(trs, CI_ADDR_SPC_ID_KERNEL) ) {
+        efab_tcp_helper_netif_try_lock(trs) ) {
       ci_netif_poll(ni);
       efab_tcp_helper_netif_unlock(trs);
     }
@@ -427,15 +427,21 @@ int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode)
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
   tcp_helper_endpoint_t* ep = ci_trs_ep_get(trs, priv->sock_id);
   citp_waitable* w = SP_TO_WAITABLE(&trs->netif, ep->id);
+  int rc;
 
   OO_DEBUG_ASYNC(ci_log("%s: %d:%d fd=%d mode=%d sigown=%d", __FUNCTION__,
                         N_PRI_ARGS(&trs->netif), W_FMT(w), fd, mode,
                         w->sigown));
 
+  if( mode )
+    ci_bit_mask_set(&w->sb_aflags, CI_SB_AFLAG_O_ASYNC);
+  else
+    ci_bit_mask_clear(&w->sb_aflags, CI_SB_AFLAG_O_ASYNC);
   if( mode && w->sigown )
     ci_bit_set(&w->wake_request, CI_SB_FLAG_WAKE_RX_B);
 
-  return fasync_helper(fd, filp, mode, &ep->fasync_queue);
+  rc = fasync_helper(fd, filp, mode, &ep->fasync_queue);
+  return rc < 0 ? rc : 0;
 }
 
 
@@ -920,6 +926,7 @@ struct file_operations linux_tcp_helper_fops_pipe_writer =
 };
 #endif
 
+#if CI_CFG_FD_CACHING
 int efab_tcp_helper_can_cache_fd(ci_private_t *priv_ni, void *arg)
 {
   unsigned fd = (unsigned)(ci_uintptr_t)arg;
@@ -1111,25 +1118,8 @@ int efab_tcp_helper_xfer_cached(ci_private_t *priv, void *arg)
   ci_unlock_task();
   return rc;
 }
+#endif
 
-
-int efab_tcp_helper_set_addr_spc(ci_private_t *priv, void *arg)
-{
-  oo_tcp_set_addr_spc_t *op = arg;
-  citp_waitable_obj* wo;
-  tcp_helper_endpoint_t* ep;
-  int rc = efab_ioctl_get_ep(priv, op->ep_id, &ep);
-  if (rc != 0)
-    return rc;
-
-  wo = SP_TO_WAITABLE_OBJ(&priv->thr->netif, op->ep_id);
-
-  ep->addr_spc = current->mm;
-  ci_addr_spc_id_set(&wo->tcp.s.addr_spc_id, ep->addr_spc);
-  ci_addr_spc_id_set(&op->addr_spc_id, ep->addr_spc);
-
-  return 0;
-}
 
 /**********************************************************************
  * oo_file_ref operations.
@@ -1320,7 +1310,7 @@ static int efab_os_callback(wait_queue_t *wait, unsigned mode, int sync,
   ci_int32 so_error;
   unsigned long mask = (unsigned long)key;
   ci_sock_cmn *s = SP_TO_SOCK(&ep->thr->netif, ep->id);
-  int do_wakeup = 0;
+  int wq_active, do_wakeup = 0;
 
   OO_DEBUG_ASYNC(ci_log("%s: %d:%d %s:%d key=%lx", __FUNCTION__,
                          ep->thr->id, OO_SP_FMT(ep->id),
@@ -1393,9 +1383,14 @@ static int efab_os_callback(wait_queue_t *wait, unsigned mode, int sync,
            NI_OPTS(&ep->thr->netif).udp_connect_handover )
 #endif
       ) {
-    if( ci_waitable_active(&ep->waitq) )
-      CITP_STATS_NETIF(++ep->thr->netif.state->stats.sock_wakes);
+    wq_active = ci_waitable_active(&ep->waitq);
     ci_waitable_wakeup_all(&ep->waitq);
+    if( wq_active ) {
+      if( mask & POLLIN )
+        CITP_STATS_NETIF_INC(&ep->thr->netif, sock_wakes_rx_os);
+      if( mask & POLLOUT )
+        CITP_STATS_NETIF_INC(&ep->thr->netif, sock_wakes_tx_os);
+    }
   }
 
   return 1;

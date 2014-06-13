@@ -53,6 +53,8 @@
 #ifndef __CI_EFRM_VF_RESOURCE_INTERNAL_H__
 #define __CI_EFRM_VF_RESOURCE_INTERNAL_H__
 
+#ifdef CONFIG_SFC_RESOURCE_VF
+
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/buddy.h>
 
@@ -92,7 +94,9 @@ struct efrm_vf {
 	struct list_head link;
 	int nic_index;
 
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 	struct efrm_vf *linked;
+#endif
 
 	/* Number of this VF and VIs */
 	int pci_dev_fn;
@@ -103,9 +107,10 @@ struct efrm_vf {
 
 	/* state for IOMMU mappings */
 	efhw_iommu_domain *iommu_domain;
-	int iommu_prot;
-	unsigned long iova_base;
 	unsigned long *iova_basep;
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
+	unsigned long iova_base;
+#endif
 
 	/* Data from the status page: */
 	u8 vi_scale;
@@ -126,7 +131,9 @@ extern void efrm_vf_removed(struct efrm_vf *vf);
 
 /* driver OS-dependent functions called from library */
 extern void efrm_vf_free_reset(struct efrm_vf *vf);
-extern int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked);
+extern int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked,
+                              int use_iommu);
 
 
+#endif /* CONFIG_SFC_RESOURCE_VF */
 #endif /* __CI_EFRM_VF_RESOURCE_INTERNAL_H__ */

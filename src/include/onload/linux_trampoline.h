@@ -66,7 +66,9 @@ extern int efab_linux_trampoline_dtor(int no_sct);
 extern int efab_linux_trampoline_register(ci_private_t *priv, void *arg);
 
 extern asmlinkage int efab_linux_trampoline_close(int fd);
+#ifdef CONFIG_COMPAT
 extern asmlinkage int efab_linux_trampoline_close32(int fd);
+#endif
 extern asmlinkage int efab_linux_trampoline_ioctl (unsigned int fd,
                                                    unsigned int cmd,
                                                    unsigned long arg);

@@ -106,16 +106,10 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
   {
     ci_ifid_t ifindex = 0;
     int rc = 0;
-    ci_uint16 vlan_id = 0;
-
-    if( pkt->pkt_layout == CI_PKT_LAYOUT_RX_VLAN ) {
-      vlan_id = *(ci_uint16*) (pkt->ether_base + ETH_HLEN);
-      vlan_id = CI_BSWAP_BE16(vlan_id) & 0xfff;
-    }
 
     hwport = netif->state->intf_i_to_hwport[pkt->intf_i];
     rc = cicp_llap_find(CICP_HANDLE(netif), &ifindex,
-                        CI_HWPORT_ID(hwport), vlan_id);
+                        CI_HWPORT_ID(hwport), pkt->vlan);
     if( rc != 0 )
       LOG_E(ci_log("%s: cicp_llap_find(intf_i=%d, hwport=%d) failed rc=%d",
                    __FUNCTION__, pkt->intf_i, hwport, rc));

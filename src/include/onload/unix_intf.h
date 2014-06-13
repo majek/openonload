@@ -40,6 +40,7 @@
 #include <ci/driver/efab/open.h>
 #include <onload/ioctl.h>
 #include <onload/common.h>
+#include <onload/mmap.h>
 
 
 ci_inline int oo_fcntl_dupfd_cloexec(int fd, int arg)
@@ -94,8 +95,7 @@ ci_inline int
 oo_resource_mmap(ci_fd_t fp, unsigned map_id, unsigned bytes, void** p_out)
 {
   *p_out = mmap((void*) 0, bytes, PROT_READ | PROT_WRITE,
-                MAP_SHARED, fp,
-                (map_id << EFRM_RESOURCE_MAX_PER_FD_BITS) << CI_PAGE_SHIFT);
+                MAP_SHARED, fp, map_id << CI_NETIF_MMAP_ID_SHIFT);
   return *p_out != MAP_FAILED ? 0 : -errno;
 }
 
@@ -114,14 +114,6 @@ oo_resource_op(ci_fd_t fp, ci_uint32 cmd, void* io)
   int r;
   if( (r = ci_sys_ioctl(fp, cmd, io)) < 0 )  return -errno;
   return r;
-}
-
-ci_inline int 
-oo_resource_op_blocking(ci_fd_t fp, ci_uint32 cmd, void* io,
-                        ci_uint32 timeout_ms_in_unused,
-                        ci_uint32 *timeout_ms_out_unused)
-{
-  return oo_resource_op(fp, cmd, io);
 }
 
 

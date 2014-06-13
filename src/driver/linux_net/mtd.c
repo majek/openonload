@@ -25,7 +25,9 @@
 
 #include <linux/bitops.h>
 #include <linux/module.h>
-#undef DEBUG /* <linux/mtd/mtd.h> has its own use for DEBUG */
+#ifdef EFX_USE_KCOMPAT
+#undef DEBUG /* <linux/mtd/mtd.h> may have its own use for DEBUG */
+#endif
 #include <linux/mtd/mtd.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
@@ -64,16 +66,6 @@
 	{
 		return del_mtd_device(master);
 	}
-#endif
-
-#ifdef EFX_NEED_MTD_ERASE_CALLBACK
-	static inline void efx_mtd_erase_callback(struct erase_info *instr)
-	{
-		if (instr->callback)
-			instr->callback(instr);
-	}
-	#undef mtd_erase_callback
-	#define mtd_erase_callback efx_mtd_erase_callback
 #endif
 
 #endif /* EFX_USE_KCOMPAT */
@@ -140,7 +132,7 @@ static int siena_mtd_probe(struct efx_nic *efx);
 static int
 efx_spi_slow_wait(struct efx_mtd_partition *part, bool uninterruptible)
 {
-	struct efx_mtd *efx_mtd = part->mtd.priv;	
+	struct efx_mtd *efx_mtd = part->mtd.priv;
 	const struct efx_spi_device *spi = efx_mtd->spi;
 	struct efx_nic *efx = efx_mtd->efx;
 	u8 status;
@@ -202,7 +194,7 @@ efx_spi_unlock(struct efx_nic *efx, const struct efx_spi_device *spi)
 static int
 efx_spi_erase(struct efx_mtd_partition *part, loff_t start, size_t len)
 {
-	struct efx_mtd *efx_mtd = part->mtd.priv;	
+	struct efx_mtd *efx_mtd = part->mtd.priv;
 	const struct efx_spi_device *spi = efx_mtd->spi;
 	struct efx_nic *efx = efx_mtd->efx;
 	unsigned pos, block_len;
@@ -260,9 +252,7 @@ static int efx_mtd_erase(struct mtd_info *mtd, struct erase_info *erase)
 		erase->state = MTD_ERASE_DONE;
 	} else {
 		erase->state = MTD_ERASE_FAILED;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_MTD_ERASE_FAIL_ADDR)
 		erase->fail_addr = 0xffffffff;
-#endif
 	}
 	mtd_erase_callback(erase);
 	return rc;
@@ -469,7 +459,7 @@ static int falcon_mtd_sync(struct mtd_info *mtd)
 	return rc;
 }
 
-static struct efx_mtd_ops falcon_mtd_ops = {
+static const struct efx_mtd_ops falcon_mtd_ops = {
 	.read	= falcon_mtd_read,
 	.erase	= falcon_mtd_erase,
 	.write	= falcon_mtd_write,
@@ -632,7 +622,7 @@ static int siena_mtd_erase(struct mtd_info *mtd, loff_t start, size_t len)
 		rc = efx_mcdi_nvram_update_start(efx, part->mcdi.nvram_type);
 		if (rc)
 			goto out;
-		part->mcdi.updating = 1;
+		part->mcdi.updating = true;
 	}
 
 	/* The MCDI interface can in fact do multiple erase blocks at once;
@@ -664,7 +654,7 @@ static int siena_mtd_write(struct mtd_info *mtd, loff_t start,
 		rc = efx_mcdi_nvram_update_start(efx, part->mcdi.nvram_type);
 		if (rc)
 			goto out;
-		part->mcdi.updating = 1;
+		part->mcdi.updating = true;
 	}
 
 	while (offset < end) {
@@ -689,14 +679,14 @@ static int siena_mtd_sync(struct mtd_info *mtd)
 	int rc = 0;
 
 	if (part->mcdi.updating) {
-		part->mcdi.updating = 0;
+		part->mcdi.updating = false;
 		rc = efx_mcdi_nvram_update_finish(efx, part->mcdi.nvram_type);
 	}
 
 	return rc;
 }
 
-static struct efx_mtd_ops siena_mtd_ops = {
+static const struct efx_mtd_ops siena_mtd_ops = {
 	.read	= siena_mtd_read,
 	.erase	= siena_mtd_erase,
 	.write	= siena_mtd_write,
@@ -708,7 +698,7 @@ struct siena_nvram_type_info {
 	const char *name;
 };
 
-static struct siena_nvram_type_info siena_nvram_types[] = {
+static const struct siena_nvram_type_info siena_nvram_types[] = {
 	[MC_CMD_NVRAM_TYPE_DISABLED_CALLISTO]	= { 0, "sfc_dummy_phy" },
 	[MC_CMD_NVRAM_TYPE_MC_FW]		= { 0, "sfc_mcfw" },
 	[MC_CMD_NVRAM_TYPE_MC_FW_BACKUP]	= { 0, "sfc_mcfw_backup" },
@@ -730,7 +720,7 @@ static int siena_mtd_probe_partition(struct efx_nic *efx,
 				     unsigned int type)
 {
 	struct efx_mtd_partition *part = &efx_mtd->part[part_id];
-	struct siena_nvram_type_info *info;
+	const struct siena_nvram_type_info *info;
 	size_t size, erase_size;
 	bool protected;
 	int rc;

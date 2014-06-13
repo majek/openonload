@@ -30,16 +30,15 @@
 
 #ifndef __KERNEL__
 # include <onload/ul.h>
+# include "ip_internal.h"
 #endif
-
-#include <onload/cas32.h>
 
 
 static int __ef_eplock_lock_wait(ci_netif *ni)
 {
 #ifndef __KERNEL__
-  return oo_resource_op_blocking(ci_netif_get_driver_handle(ni),
-                                 OO_IOC_EPLOCK_LOCK_WAIT, NULL, 0, NULL);
+  return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_EPLOCK_LOCK_WAIT,
+                        NULL);
 #else
   return efab_eplock_lock_wait(ni
 		       CI_BLOCKING_CTX_ARG(ci_blocking_ctx_arg_needed()));
@@ -61,7 +60,7 @@ int __ef_eplock_lock_slow(ci_netif *ni)
   /* Limit to user-level for now.  Could allow spinning in kernel if we did
    * not rely on user-level accessible state for spin timeout.
    */
-  if( NI_OPTS(ni).stack_lock_buzz ) {
+  if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_STACK_LOCK) ) {
     CITP_STATS_NETIF(++ni->state->stats.stack_lock_buzz);
     ci_frc64(&now_frc);
     start_frc = now_frc;
@@ -111,7 +110,7 @@ int __ef_eplock_lock_slow(ci_netif *ni)
     l = ni->state->lock.lock;
     if( l & CI_EPLOCK_UNLOCKED ) {
       n = (l &~ CI_EPLOCK_UNLOCKED) | CI_EPLOCK_LOCKED;
-      if( ef_vi_cas32_succeed(&ni->state->lock.lock, l, n) )
+      if( ci_cas32_succeed(&ni->state->lock.lock, l, n) )
 	return 0;
       else
 	goto again;

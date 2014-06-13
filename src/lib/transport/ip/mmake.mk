@@ -47,16 +47,6 @@ LIB_SRCS	:=		\
 		pkt_filler.c	\
 		pipe.c
 
-ifeq ($(LINUX),1)
-ifeq ($(DRIVER),1)
-LIB_SRCS        +=		\
-		tcp_ioctl.c	\
-		common_ioctl.c	\
-		common_sockopts.c \
-		tcp_sockopts.c
-endif
-endif
-
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\
 		tcp_ioctl.c	\
@@ -126,7 +116,8 @@ _UK_INTF_HDRS	:= ci/internal/ip_shared_types.h	\
 		ci/internal/opts_netif_def.h		\
 		onload/common.h				\
 		onload/primitive_types.h		\
-		onload/ioctl.h
+		onload/ioctl.h				\
+		onload/mmap.h
 
 UK_INTF_HDRS	:= $(_UK_INTF_HDRS:%=$(SRCPATH)/include/%)
 

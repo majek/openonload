@@ -103,3 +103,10 @@ struct oo_nic* oo_nic_find_ifindex(int ifindex)
       return &oo_nics[i];
   return NULL;
 }
+
+
+int oo_nic_hwport(struct oo_nic* onic)
+{
+  int oo_nic_i = onic - oo_nics;
+  return CI_HWPORT_ID(oo_nic_i);
+}

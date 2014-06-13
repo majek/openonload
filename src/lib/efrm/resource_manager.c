@@ -128,10 +128,9 @@ static void __efrm_resource_manager_add_resource(struct efrm_resource *rs)
 
 void efrm_resource_manager_add_resource(struct efrm_resource *rs)
 {
-	irq_flags_t lock_flags;
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	__efrm_resource_manager_add_resource(rs);
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 }
 
 
@@ -148,43 +147,39 @@ static void __efrm_resource_manager_remove_resource(struct efrm_resource *rs)
 void efrm_client_add_resource(struct efrm_client *client,
 			      struct efrm_resource *rs)
 {
-	irq_flags_t lock_flags;
-
 	EFRM_ASSERT(client != NULL);
 	EFRM_ASSERT(rs != NULL);
 
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	__efrm_resource_manager_add_resource(rs);
 	rs->rs_client = client;
 	++client->ref_count;
 	list_add(&rs->rs_client_link, &client->resources);
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 }
 
 
 void efrm_resource_ref(struct efrm_resource *rs)
 {
-	irq_flags_t lock_flags;
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	++rs->rs_ref_count;
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 }
 EXPORT_SYMBOL(efrm_resource_ref);
 
 
 int __efrm_resource_release(struct efrm_resource *rs)
 {
-	irq_flags_t lock_flags;
 	int free_rs;
 
-	spin_lock_irqsave(&efrm_nic_tablep->lock, lock_flags);
+	spin_lock_bh(&efrm_nic_tablep->lock);
 	free_rs = --rs->rs_ref_count == 0;
 	if (free_rs) {
 		__efrm_resource_manager_remove_resource(rs);
 		if (rs->rs_client != NULL)
 			list_del(&rs->rs_client_link);
 	}
-	spin_unlock_irqrestore(&efrm_nic_tablep->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic_tablep->lock);
 	return free_rs;
 }
 EXPORT_SYMBOL(__efrm_resource_release);
@@ -204,9 +199,11 @@ void efrm_resource_release(struct efrm_resource *rs)
 	case EFRM_RESOURCE_VI_SET:
 		efrm_vi_set_free(efrm_vi_set_from_resource(rs));
 		break;
+#ifdef CONFIG_SFC_RESOURCE_VF
 	case EFRM_RESOURCE_VF:
 		efrm_vf_resource_free(efrm_vf_from_resource(rs));
 		break;
+#endif
 	case EFRM_RESOURCE_PD:
 		efrm_pd_free(efrm_pd_from_resource(rs));
 		break;

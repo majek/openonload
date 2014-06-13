@@ -52,8 +52,10 @@ NDEBUG=1; export NDEBUG
 
 while [ $# -gt 0 ]; do
   case "$1" in
-  --nictype)    nictype="$2"; shift;;
-  --kernelver)  KVER="$2"; export KVER; shift;;
+  --nictype)    [ $# -gt 1 ] || usage; nictype="$2"; shift;;
+  --nictype=*)  nictype=${1#--nictype=};;
+  --kernelver)  [ $# -gt 1 ] || usage; KVER="$2"; export KVER; shift;;
+  --kernelver=*)KVER=${1#--kernelver=};;
   --user)       all=false; user=true;;
   --user32)     all=false; user32=true;;
   --user64)     all=false; user64=true;;

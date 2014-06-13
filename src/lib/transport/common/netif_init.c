@@ -36,6 +36,7 @@
 
 #include <onload/ul/tcp_helper.h>
 #include <onload/ul.h>
+#include <onload/version.h>
 
 #define LPF "citp_netif_"
 #define LPFIN "-> " LPF
@@ -204,6 +205,9 @@ int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni)
   citp_netif_ctor_hook(ni, 0);
 
   CITP_UNLOCK(&citp_ul_lock);
+
+  ci_log("Importing "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT
+         " [%s]", ni->state->pretty_name);
 
   *out_ni = ni;
   return 0;
@@ -377,7 +381,7 @@ int citp_netif_recreate_probed(ci_fd_t ul_sock_fd,
   }
 
   /* Restore the netif mmaps and user-level state */
-  ci_netif_restore(ni, (ci_fd_t)rc, map_size);
+  CI_TRY_RET(ci_netif_restore(ni, (ci_fd_t)rc, map_size));
 
   CI_MAGIC_CHECK(ni, NETIF_MAGIC);
 

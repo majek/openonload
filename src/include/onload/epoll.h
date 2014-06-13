@@ -73,8 +73,9 @@ struct oo_epoll1_action_arg {
 };
 
 struct oo_epoll1_shared {
-  ci_fixed_descriptor_t epfd; /* OS epoll fd; UL should not use it */
-  ci_uint32             flag; /* seq << 1 | event */
+  ci_fixed_descriptor_t epfd; /**< OS epoll fd; UL should use it for
+                                   closing only */
+  ci_uint32             flag; /**< seq << 1 | event */
 #define OO_EPOLL1_FLAG_EVENT     1
 #define OO_EPOLL1_FLAG_SEQ_SHIFT 1
 };

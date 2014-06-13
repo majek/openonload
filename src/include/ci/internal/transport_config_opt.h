@@ -117,9 +117,11 @@
 #if CI_CFG_USERSPACE_EPOLL
 
 /* Maximum number of onload stacks handled by single epoll object.
+ * Used for EF_UL_EPOLL=2 mode.  See also epoll2_max_stacks module
+ * parameter.
  * Socket from other stacks will look just like "regular file descriptor"
  * for the onload object, without onload-specific acceleration. */
-#define CI_CFG_EPOLL_MAX_STACKS         4
+#define CI_CFG_EPOLL2_MAX_STACKS         16
 
 /* Maximum number of postponed epoll_ctl operations, in case of
  * EF_UL_EPOLL=2 and EF_EPOLL_CTL_FAST=1 */
@@ -391,15 +393,6 @@
 /* Stolen from procps/sysctl.c */
 #define CI_CFG_PROC_LINE_LEN_MAX	1025
 
-
-/* If this is enabled, socket system calls are intercepted in the kernel, by
-** making char driver files look like sockets and attaching socket operations
-** to them.  Any socket call on one of our fds that makes it down to the kernel
-** will log a message and fail with the error of your choice. 
-*/
-#define CI_CFG_SOCKET_SYSCALL_INTERCEPT  0
-#define CI_CFG_SOCKET_SYSCALL_ERROR      -ENOTSOCK
-
 /*
  * CI_CFG_HANDLE_UDP_FRAG enables support for fragmented UDP interception
  * in the net driver (when disabled all UDP frags are passed to the kernel).
@@ -542,10 +535,11 @@
 #define CI_CFG_FAKE_IPV6 1
 
 
-/* The maximum number of passively opened EPs that are cached by default.
-** This can be overridden via the EF_EPCACHE_MAX environment variable.
+/* Include support for caching file descriptors at user-level.
+**
+** NB. At time of writing this feature is broken.
 */
-#define CI_CFG_TCP_EPCACHE_MAX 32
+#define CI_CFG_FD_CACHING      0
 
 /* Enable iSCSI features. */
 #define CI_CFG_ISCSI           0
@@ -625,6 +619,9 @@
 /* Enable support for recvmmsg(). */
 #define CI_CFG_RECVMMSG          1
 
+/* Enable support for sendmmsg(). */
+#define CI_CFG_SENDMMSG          1
+
 /* Enable filtering of packets before delivery */
 #define CI_CFG_ZC_RECV_FILTER    1
 
@@ -669,6 +666,56 @@
 
 /* Support for reducing ACK rate at high throughput to improve efficiency */
 #define CI_CFG_DYNAMIC_ACK_RATE 1
+
+/* Mmap each packet set from kernel to userspace separately.
+ * CI_CFG_MMAP_EACH_PKTSET=0 is going to be removed sooner or later.
+ *
+ * In Linux, this is necessary for huge pages, since huge pages
+ * should be mmaped separately.  If you are not going to use huge pages,
+ * feel set this to 0 to speed up non-huge mappings.
+ *
+ * Solaris needs this to 1.
+ */
+#define CI_CFG_MMAP_EACH_PKTSET 1
+
+/* Allocate packets in huge pages when possible */
+#if defined(__linux__) && CI_CFG_MMAP_EACH_PKTSET
+/* Can be turned off.  Does not really work unless your kernel has
+ * CONFIG_HUGETLB_PAGE on and your kernel is 64-bit. */
+#define CI_CFG_PKTS_AS_HUGE_PAGES 1
+#else
+/* Huge pages are not supported on non-linux or
+ * with CI_CFG_MMAP_EACH_PKTSET=0 */
+#define CI_CFG_PKTS_AS_HUGE_PAGES 0
+#endif
+
+/* Compatibility check */
+#if CI_CFG_PKTS_AS_HUGE_PAGES && \
+    (!defined(__linux__) || !CI_CFG_MMAP_EACH_PKTSET)
+#error "Incompatible CI_CFG settings"
+#endif
+
+
+/* Page=4KiB=2pkts; huge page=2MiB=2^10pkts.
+ * To use huge pages, we should allocate exactly 2^10 pkts per set.
+ * DO NOT CHANGE THIS VALUE if you have CI_CFG_PKTS_AS_HUGE_PAGES=1 */
+#if CI_CFG_PKT_BUF_SIZE == 2048
+#define CI_CFG_PKTS_PER_SET_S  10u
+#elif CI_CFG_PKT_BUF_SIZE == 4096
+#define CI_CFG_PKTS_PER_SET_S  9u
+#else
+#error "Incorrect CI_CFG_PKT_BUF_SIZE value"
+#endif
+
+
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+/* Maximum number of packet sets; each packet set is 2Mib (huge page)
+ * = 2^9 or 2^10 packets, depending on CI_CFG_PKT_BUF_SIZE.
+ * See also max_packets_per_stack module parameter. */
+#define CI_CFG_MAX_PKT_SETS 1024
+#endif
+
+
 
 
 

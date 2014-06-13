@@ -543,35 +543,6 @@ extern void ci_udp_compute_stamp(ci_netif *netif, ci_uint64 stamp,
 #define ECANCELED 125
 #endif
 
-/* ********************************************************
- * Helper - this code is used to check state in many of the
- * the API funcs.
- */
-
-ci_inline int check_and_set_address_space(ci_netif* ni, ci_sock_cmn* s)
-{
-#ifndef __KERNEL__
-  if( s->addr_spc_id != ni->addr_spc_id ) {
-    /* Currently we fail if ts->addr_spc_id has already been set;
-       ultimately we'd like to deal with this properly (by blocking
-       until the previous user of the ts has finished), but it's one
-       step of complication too far at the moment */
-    CI_TEST(s->addr_spc_id == CI_ADDR_SPC_ID_INVALID2);
-
-    CI_DEBUG_TRY(ci_tcp_helper_set_addr_spc(ni, SC_SP(s)));
-    CI_TEST(s->addr_spc_id == ni->addr_spc_id);
-  }
-#endif
-  return 1;
-}
-
-
-/* NOTE: As the cross-process problem is seen in Windows, the following
- * macro has the test optimised-out for non-Windows builds */
-
-/*! \todo  not sure what to return in case of an error really. */
-#define TRY_RET_CHECKNSET_ADDRESS_SPACE(n,ts) check_and_set_address_space((n),&((ts)->s))
-
 
 #if defined(__KERNEL__)
 extern void ci_ip_queue_enqueue_nnl(ci_netif* netif, ci_ip_pkt_queue*qu,

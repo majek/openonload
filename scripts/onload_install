@@ -51,6 +51,11 @@ donot() {
 }
 
 
+is_rhel4() {
+  grep -qi "Red Hat Enterprise.*release 4" /etc/redhat-release 2>/dev/null
+}
+
+
 manifest_add() {
   if [ -n "$manifest" ] && ! $test; then
     echo "$1" >>"$manifest"
@@ -212,6 +217,7 @@ install_userland() {
   install_x onload_misc/onload_init_rc "$i_etc/init.d/openonload"
   install_f onload_misc/onload_sysconfig "$i_etc/sysconfig/openonload"
   install_x onload_tcpdump "$i_usrbin/onload_tcpdump"
+  install_x onload_iptables "$i_usrbin/onload_iptables"
   $affinity && {
     install_x sfcaffinity_config "$i_usrsbin/sfcaffinity_config"
     install_x sfcaffinity "$i_usrbin/sfcaffinity"
@@ -280,23 +286,28 @@ install_kernel_modules() {
 }
 
 
+rhel4_modprobe_fixup() {
+  mpf="$i_etc/modprobe.conf"
+  if [ -f "$mpf" ]; then
+    # Delete any legacy settings.
+    sed -i '/onload_start/,/onload_end/d' "$mpf" >/dev/null 2>&1
+    (
+      echo "# onload_start"
+      echo "include /etc/modprobe.d/onload.conf"
+      echo "# onload_end"
+    ) >>"$mpf"
+  fi
+}
+
+
 install_modprobe_conf() {
   try $do cd "$bin/../scripts"
-  if [ -d "$i_etc/modprobe.d" ]; then
-    install_f onload_misc/onload_modprobe.conf "$i_etc/modprobe.d/onload.conf"
-  else
-    mpf="$i_etc/modprobe.conf"
-    if ! $test; then
-      if [ -f "$mpf" ]; then
-        cat onload_misc/onload_modprobe.conf >>"$mpf"
-      else
-        # Must not add modprobe.conf to the manifest!
-        try $do install -D -m 644 onload_misc/onload_modprobe.conf "$mpf"
-      fi
-    else
-      echo "edit $mpf"
-    fi
+
+  install_f onload_misc/onload_modprobe.conf "$i_etc/modprobe.d/onload.conf"
+  if is_rhel4 && ! $test; then
+    rhel4_modprobe_fixup
   fi
+
   if [ -d "$i_etc/depmod.d" ]; then
     install_f onload_misc/onload_depmod.conf "$i_etc/depmod.d/onload.conf"
   fi
@@ -386,7 +397,7 @@ check_whether_installed() {
              "To remove, run: rpm -qa | grep 'enterpriseonload' | xargs rpm -e"
     return
   fi
-  if echo "$rpm_qa" | grep -q 'openonload'; then
+  if echo "$rpm_qa" | grep -q 'openonload'| grep -e 'dkms'; then
     conflict "OpenOnload rpms are already installed." \
              "To remove, run: rpm -qa | grep 'openonload' | xargs rpm -e"
     return
@@ -397,6 +408,26 @@ check_whether_installed() {
       check_file_installed "$i_prefix/lib/modules/$KVER/$where/$drv"
     done
   done
+}
+
+
+######################################################################
+
+do_rpm_install() {
+  build=false
+  uninstall=false
+  initscript=false
+  ldconfig=false
+  check_install=false
+  sfccheck=false
+}
+
+
+do_rpm_post() {
+  # Invoked by the rpm install.
+  install_init_script
+  is_rhel4 && rhel4_modprobe_fixup
+  exit
 }
 
 
@@ -433,11 +464,14 @@ export KVER
 while [ $# -gt 0 ]; do
   case "$1" in
   --nictype)    nictype="$2"; shift;;
-  --newkernel)  shift; KVER="$1";
-                check_install=false
-                all=false; kernelfiles=true; sfccheck=false
+  --newkernel)  [ $# -gt 1 ] || usage; shift; KVER="$1";
+                check_install=false; all=false; kernelfiles=true; sfccheck=false
                 buildargs="$buildargs --kernel";;
-  --kernelver)  shift; KVER="$1";;
+  --newkernel=*)KVER=${1#--newkernel=};
+                check_install=false; all=false; kernelfiles=true; sfccheck=false
+                buildargs="$buildargs --kernel";;
+  --kernelver)  [ $# -gt 1 ] || usage; shift; KVER="$1";;
+  --kernelver=*)KVER=${1#--kernelver=};;
   --nobuild)    build=false;;
   --require32)  require32=true;;
   --setuid)     setuid=true;;
@@ -472,8 +506,6 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-[ $# = 0 ] || usage
-
 # Where do we put everything?
 i_usrlibexec="$i_prefix/usr/libexec/onload"
 i_libexec="$i_prefix/lib/onload"
@@ -484,6 +516,23 @@ i_lib32="$i_prefix/usr/lib"
 i_lib64="$i_prefix/usr/lib64"
 i_etc="$i_prefix/etc"
 i_include="$i_prefix/usr/include"
+
+# Special commands.  May do something and exit, or may modify settings and
+# continue.
+case $# in
+  0)
+    ;;
+  1)
+    case "$1" in
+      rpm_install) do_rpm_install;;
+      rpm_post)    do_rpm_post;;
+      *)           usage;;
+    esac
+    ;;
+  *)
+    usage
+    ;;
+esac
 
 
 check_whether_installed
@@ -501,8 +550,8 @@ manifest=
 ${uninstall:-$all}   && install_uninstall
 ${userfiles:-$all}   && install_userland
 ${ldconfig:-$all}    && install_ldconfig
-${kernelfiles:-$all} && install_kernel_modules
 ${modprobe:-$all}    && install_modprobe_conf
+${kernelfiles:-$all} && install_kernel_modules
 ${initscript:-$all}  && install_init_script
 
 if $fail32 && $require32; then

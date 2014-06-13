@@ -185,7 +185,6 @@ static int ci_udp_ioctl_slow(ci_netif* ni, ci_udp_state* us,
       /* This is very unexpected, as it worked on the OS socket. */
       LOG_E(ci_log("%s: ERROR: FIOASYNC failed on fd=%d rc=%d errno=%d",
                    __FUNCTION__, fd, rc, errno));
-    rc = ci_cmn_ioctl(ni, &us->s, request, arg, os_rc, 1);
     break;
 
   case SIOCSPGRP:

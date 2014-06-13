@@ -36,6 +36,16 @@
 
 #ifdef __KERNEL__
 
+int oo_os_sock_get_from_ep(tcp_helper_endpoint_t* ep, oo_os_file* os_sock_out)
+{
+  if( ep->os_socket == NULL )
+    return -EINVAL;
+  ci_assert(ep->os_socket->file);
+
+  *os_sock_out = ep->os_socket->file;
+  return 0;
+}
+
 int oo_os_sock_get(ci_netif* ni, oo_sp sock_p, oo_os_file* os_sock_out)
 {
   int sock_id = OO_SP_TO_INT(sock_p);
@@ -53,17 +63,9 @@ int oo_os_sock_get(ci_netif* ni, oo_sp sock_p, oo_os_file* os_sock_out)
     return -ENOENT;
   }
 
-  /* ?? FIXME: need lock to protect os_socket. */
-  *os_sock_out = ep->os_socket->file;
-  get_file(*os_sock_out);
-  return 0;
+  return oo_os_sock_get_from_ep(ep, os_sock_out);
 }
 
-
-void oo_os_sock_release(ci_netif* ni, oo_os_file fd)
-{
-  fput(fd);
-}
 
 #else
 
@@ -93,7 +95,6 @@ void oo_os_sock_release(ci_netif* ni, oo_os_file fd)
                  __FUNCTION__, NI_ID(ni), rc, errno));
 }
 
-#endif
 
 
 /**********************************************************************
@@ -106,14 +107,9 @@ int oo_os_sock_ioctl(ci_netif* ni, oo_sp sock_p, int request, void* arg,
   oo_os_file os_sock_fd;
   int rc;
   if( (rc = oo_os_sock_get(ni, sock_p, &os_sock_fd)) == 0 ) {
-#ifdef __KERNEL__
-    struct socket* sock = SOCKET_I(os_sock_fd->f_dentry->d_inode);
-    rc = sock->ops->ioctl(sock, request, (long) arg);
-#else
     rc = ci_sys_ioctl(os_sock_fd, request, arg);
     if( rc < 0 )
       rc = -errno;
-#endif
     oo_os_sock_release(ni, os_sock_fd);
     if( ioctl_rc != NULL ) {
       *ioctl_rc = rc;
@@ -129,7 +125,6 @@ int oo_os_sock_ioctl(ci_netif* ni, oo_sp sock_p, int request, void* arg,
 }
 
 
-#ifndef __KERNEL__
 
 int oo_os_sock_sendmsg(ci_netif* ni, oo_sp sock_p,
                        const struct msghdr* msg, int flags)

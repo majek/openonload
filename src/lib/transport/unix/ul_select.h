@@ -28,6 +28,14 @@
 #define __UL_SELECT_H__
 
 
+#if CI_CFG_USERSPACE_SELECT
+
+/* The events that correspond to the select() sets. */
+#define SELECT_RD_SET  (POLLIN | POLLRDNORM | POLLRDBAND | POLLHUP | POLLERR)
+#define SELECT_WR_SET  (POLLOUT | POLLWRNORM | POLLWRBAND | POLLERR)
+#define SELECT_EX_SET  (POLLPRI)
+
+
 struct oo_ul_select_state {
   fd_set *rdu, *wru, *exu;
   fd_set *rdk, *wrk, *exk;
@@ -40,5 +48,6 @@ struct oo_ul_select_state {
   unsigned  ul_select_spin;
 };
 
+#endif
 
 #endif  /* __UL_SELECT_H__ */

@@ -52,6 +52,14 @@
  */
 # define OO_RECVMMSG_NOT_IN_LIBC 1
 # define MSG_WAITFORONE  0x10000
+#endif
+
+#if CI_CFG_SENDMMSG && !CI_LIBC_HAS_sendmmsg
+/* sendmmsg() is a similar special case */
+# define OO_SENDMMSG_NOT_IN_LIBC 1
+#endif
+
+#if defined(OO_RECVMMSG_NOT_IN_LIBC) && defined(OO_SENDMMSG_NOT_IN_LIBC)
 struct mmsghdr {
   struct msghdr  msg_hdr;
   unsigned       msg_len;
@@ -60,6 +68,14 @@ struct mmsghdr {
 
 #if CI_LIBC_HAS___read_chk
 extern ssize_t __read_chk (int fd, void *buf, size_t nbytes, size_t buflen);
+#endif
+#if CI_LIBC_HAS___recv_chk
+extern ssize_t __recv_chk (int fd, void *buf, size_t nbytes, size_t buflen,
+                           int flags);
+#endif
+#if CI_LIBC_HAS___recvfrom_chk
+extern ssize_t __recvfrom_chk (int fd, void *buf, size_t nbytes, size_t buflen,
+                              int flags, struct sockaddr*, socklen_t*);
 #endif
 
 
@@ -75,6 +91,11 @@ extern ssize_t __read_chk (int fd, void *buf, size_t nbytes, size_t buflen);
 #ifdef OO_RECVMMSG_NOT_IN_LIBC
 extern int ci_sys_recvmmsg(int fd, struct mmsghdr* msg, unsigned vlen,
                            int flags, const struct timespec* timeout);
+#endif
+
+#ifdef OO_SENDMMSG_NOT_IN_LIBC
+extern int ci_sys_sendmmsg(int fd, struct mmsghdr* msg, unsigned vlen,
+                           int flags);
 #endif
 
 

@@ -27,23 +27,6 @@
 #include <onload/pkt_filler.h>
 
 
-int oo_pkt_filler_alloc_pkts(ci_netif* ni, int* p_netif_locked, 
-                             struct oo_pkt_filler* pf, int n)
-{
-  ci_ip_pkt_fmt* next_pkt;
-
-  while( n-- > 0 ) {
-    next_pkt = ci_netif_pkt_alloc_block(ni, p_netif_locked);
-#ifdef __KERNEL__
-    if(CI_UNLIKELY( next_pkt == NULL ))
-      return -ERESTARTSYS;
-#endif
-    oo_pkt_filler_add_pkt(pf, next_pkt);
-  }
-  return 0;
-}
-
-
 void oo_pkt_filler_free_unused_pkts(ci_netif* ni, int* p_netif_locked,
                                     struct oo_pkt_filler* pf)
 {
@@ -132,7 +115,7 @@ int oo_pkt_fill(ci_netif* ni, int* p_netif_locked,
       pf->last_pkt->buf_len =
         pf->buf_start - PKT_START(pf->last_pkt);
 
-      next_pkt = oo_pkt_filler_next_pkt(ni, pf);
+      next_pkt = oo_pkt_filler_next_pkt(ni, pf, *p_netif_locked);
       if( next_pkt == NULL ) {
         next_pkt = ci_netif_pkt_alloc_block(ni, p_netif_locked);
 #ifdef __KERNEL__

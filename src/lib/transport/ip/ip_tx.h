@@ -74,7 +74,8 @@ ci_inline void ci_ip_local_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_assert(ci_netif_is_locked(ni));
   pkt->pf.lo.tx_sock = SC_SP(s);
   pkt->pf.lo.rx_sock = OO_SP_IS_NULL(dst) ? s->local_peer : dst;
-  ci_assert(OO_SP_NOT_NULL(pkt->pf.lo.rx_sock));
+  if( OO_SP_IS_NULL(pkt->pf.lo.rx_sock) )
+    return;
   LOG_NT(ci_log(NS_FMT "loopback TX pkt %d to %d", NS_PRI_ARGS(ni, s),
                 OO_PKT_FMT(pkt), OO_SP_FMT(pkt->pf.lo.rx_sock)));
   ci_netif_pkt_hold(ni, pkt);

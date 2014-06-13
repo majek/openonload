@@ -78,9 +78,11 @@
 #endif
 #ifdef CIS_SOCK_HAVE_SELECT
 # define cis_select		CIS_SOCK_MK_ID(select)
+# define cis_pselect		CIS_SOCK_MK_ID(pselect)
 #endif
 #ifdef CIS_SOCK_HAVE_POLL
 # define cis_poll		CIS_SOCK_MK_ID(poll)
+# define cis_ppoll		CIS_SOCK_MK_ID(ppoll)
 #endif
 #ifdef CIS_SOCK_HAVE_EPOLL
 # define cis_epoll_ctl		CIS_SOCK_MK_ID(epoll_ctl)

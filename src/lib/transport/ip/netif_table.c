@@ -179,8 +179,9 @@ void ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
 	   (raddr    - sock_raddr_be32(s)     ) |
 	   (rport    - sock_rport_be16(s)     ) |
 	   (protocol - sock_protocol(s)       )) == 0 )
-        if(CI_LIKELY( s->rx_bind2dev_ifindex == CI_IFID_BAD ||
-                      ci_sock_intf_check(ni, s, intf_i, vlan) ))
+        if(CI_LIKELY( (s->rx_bind2dev_ifindex == CI_IFID_BAD ||
+                       ci_sock_intf_check(ni, s, intf_i, vlan)) &&
+                      s->local_peer < 0 ))
           if( callback(s, callback_arg) != 0 )
             return;
     }

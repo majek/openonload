@@ -49,15 +49,6 @@ int ci_cmn_ioctl(ci_netif* netif, ci_sock_cmn* s, int request,
                  (long) arg, (long) arg));
 
   switch( request ) {
-  case FIOASYNC:
-    if( ! CI_IOCTL_ARG_OK(int, arg) )
-      goto fail_fault;
-    if( CI_IOCTL_GETARG(int, arg) != 0 )
-      ci_bit_mask_set(&s->b.sb_aflags, CI_SB_AFLAG_O_ASYNC);
-    else
-      ci_bit_mask_clear(&s->b.sb_aflags, CI_SB_AFLAG_O_ASYNC);
-    break;
-
   case SIOCGPGRP:
     /* get the process ID/group that is receiving signals for this fd */
     if( !CI_IOCTL_ARG_OK(int, arg) )
@@ -93,9 +84,4 @@ int ci_cmn_ioctl(ci_netif* netif, ci_sock_cmn* s, int request,
 		 __FUNCTION__, NS_PRI_ARGS(netif, s),
 		 request, request, (long)arg, (long)arg));
   RET_WITH_ERRNO(EINVAL);
- fail_fault:
-  LOG_SC( ci_log("%s: "NS_FMT" req %d/%#x arg %ld unhandled (EFAULT)", 
-		 __FUNCTION__, NS_PRI_ARGS(netif, s), request, request, 
-		 (long)arg));
-  RET_WITH_ERRNO(EFAULT);
 }

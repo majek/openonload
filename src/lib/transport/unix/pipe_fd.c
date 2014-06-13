@@ -435,6 +435,9 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .recvmmsg    = citp_nosock_recvmmsg,
 #endif
     .send        = citp_pipe_send_none,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_nosock_sendmmsg,
+#endif
     .fcntl       = citp_pipe_fcntl,
     .ioctl       = citp_pipe_ioctl,
 #if CI_CFG_USERSPACE_SELECT
@@ -472,6 +475,9 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .recvmmsg    = citp_nosock_recvmmsg,
 #endif
     .send        = citp_pipe_send,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_nosock_sendmmsg,
+#endif
     .fcntl       = citp_pipe_fcntl,
     .ioctl       = citp_pipe_ioctl,
 #if CI_CFG_USERSPACE_SELECT

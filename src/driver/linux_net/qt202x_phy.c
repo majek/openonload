@@ -62,7 +62,7 @@
 #define PMA_PMD_FTX_STATIC_LBN	13
 #define PMA_PMD_VEND1_REG	0xc001
 #define PMA_PMD_VEND1_LBTXD_LBN	15
-#define PCS_VEND1_REG	   	0xc000
+#define PCS_VEND1_REG		0xc000
 #define PCS_VEND1_LBTXD_LBN	5
 
 void falcon_qt202x_set_led(struct efx_nic *p, int led, int mode)
@@ -197,15 +197,16 @@ static void qt2025c_firmware_id(struct efx_nic *efx)
 				 (firmware_id[4] << 8) | firmware_id[5];
 }
 
-/* The PHY can get stuck in a state where it reports PHY_XS and PMA/PMD layers
- * up, but PCS down (no block_lock).  If we notice this state persisting
- * for a couple of seconds, we switch PMA/PMD loopback briefly on and then
- * off again, which is normally sufficient to recover it.
- */
 static void qt2025c_bug17190_workaround(struct efx_nic *efx)
 {
 	struct qt202x_phy_data *phy_data = efx->phy_data;
 
+	/* The PHY can get stuck in a state where it reports PHY_XS and PMA/PMD
+	 * layers up, but PCS down (no block_lock).  If we notice this state
+	 * persisting for a couple of seconds, we switch PMA/PMD loopback
+	 * briefly on and then off again, which is normally sufficient to
+	 * recover it.
+	 */
 	if (efx->link_state.up ||
 	    !efx_mdio_links_ok(efx, MDIO_DEVS_PMAPMD | MDIO_DEVS_PHYXS)) {
 		phy_data->bug17190_in_bad_state = false;
@@ -369,7 +370,6 @@ static int qt202x_phy_probe(struct efx_nic *efx)
 	efx->mdio.mode_support = MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
 
 	efx->loopback_modes = QT202X_LOOPBACKS | FALCON_XMAC_LOOPBACKS;
-	efx->startup_loopback_mode = LOOPBACK_PCS;
 
 	strlcpy(efx->phy_name,
 		(efx->phy_type == PHY_TYPE_QT2025C) ? "Quake SFP+" : "Quake XFP",
@@ -514,9 +514,9 @@ const struct efx_phy_operations falcon_qt202x_phy_ops = {
 	.probe		 = qt202x_phy_probe,
 	.init		 = qt202x_phy_init,
 	.reconfigure	 = qt202x_phy_reconfigure,
-	.poll	     	 = qt202x_phy_poll,
+	.poll		 = qt202x_phy_poll,
 	.fini		 = efx_port_dummy_op_void,
-	.remove	  	 = qt202x_phy_remove,
+	.remove		 = qt202x_phy_remove,
 	.get_settings	 = qt202x_phy_get_settings,
 	.set_settings	 = efx_mdio_set_settings,
 	.test_alive	 = efx_mdio_test_alive,

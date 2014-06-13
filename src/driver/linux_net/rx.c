@@ -29,6 +29,8 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <linux/prefetch.h>
+#include <linux/moduleparam.h>
 #include <net/ip.h>
 #include <net/tcp.h>
 #include <net/checksum.h>
@@ -41,7 +43,7 @@
 #include "nic.h"
 #include "selftest.h"
 #include "workarounds.h"
-#if defined (EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 #include "efx_netq.h"
 #endif
 
@@ -123,11 +125,11 @@ static inline unsigned int efx_rx_buf_offset(struct efx_nic *efx,
 	/* Offset is always within one page, so we don't need to consider
 	 * the page order.
 	 */
-	return (((__force unsigned long) buf->dma_addr & (PAGE_SIZE - 1)) +
+	return ((unsigned int) buf->dma_addr & (PAGE_SIZE - 1)) +
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 		((buf->flags & EFX_RX_BUF_VLAN_XTAG) ? VLAN_HLEN : 0) +
 #endif
-		efx->rx_buffer_hash_size);
+		efx->rx_buffer_hash_size;
 }
 static inline unsigned int efx_rx_buf_size(struct efx_nic *efx)
 {
@@ -152,10 +154,10 @@ static inline u32 efx_rx_buf_hash(const u8 *eh)
 	return __le32_to_cpup((const __le32 *)(eh - 4));
 #else
 	const u8 *data = eh - 4;
-	return ((u32)data[0]       |
-		(u32)data[1] << 8  |
-		(u32)data[2] << 16 |
-		(u32)data[3] << 24);
+	return (u32)data[0]	  |
+	       (u32)data[1] << 8  |
+	       (u32)data[2] << 16 |
+	       (u32)data[3] << 24;
 #endif
 }
 
@@ -190,17 +192,12 @@ static int efx_init_rx_buffers_skb(struct efx_rx_queue *rx_queue)
 		skb_reserve(skb, NET_IP_ALIGN);
 		rx_buf->len = skb_len - NET_IP_ALIGN;
 		rx_buf->flags = 0;
-		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_VMWARE_3_DOT_5)
-		rx_buf->dma_addr = skb->headMA;
-#else
-		rx_buf->dma_addr = pci_map_single(efx->pci_dev,
+		rx_buf->dma_addr = dma_map_single(&efx->pci_dev->dev,
 						  skb->data, rx_buf->len,
-						  PCI_DMA_FROMDEVICE);
-#endif
-		if (unlikely(pci_dma_mapping_error(efx->pci_dev,
-						   rx_buf->dma_addr))) {
+						  DMA_FROM_DEVICE);
+		if (unlikely(dma_mapping_error(&efx->pci_dev->dev,
+					       rx_buf->dma_addr))) {
 			dev_kfree_skb_any(skb);
 			rx_buf->u.skb = NULL;
 			return -EIO;
@@ -228,7 +225,6 @@ static int efx_init_rx_buffers_page(struct efx_rx_queue *rx_queue)
 	struct efx_nic *efx = rx_queue->efx;
 	struct efx_rx_buffer *rx_buf;
 	struct page *page;
-	void *page_addr;
 	struct efx_rx_page_state *state;
 	dma_addr_t dma_addr;
 	unsigned index, count;
@@ -241,19 +237,17 @@ static int efx_init_rx_buffers_page(struct efx_rx_queue *rx_queue)
 				   efx->rx_buffer_order);
 		if (unlikely(page == NULL))
 			return -ENOMEM;
-		dma_addr = pci_map_page(efx->pci_dev, page, 0,
+		dma_addr = dma_map_page(&efx->pci_dev->dev, page, 0,
 					efx_rx_buf_size(efx),
-					PCI_DMA_FROMDEVICE);
-		if (unlikely(pci_dma_mapping_error(efx->pci_dev, dma_addr))) {
+					DMA_FROM_DEVICE);
+		if (unlikely(dma_mapping_error(&efx->pci_dev->dev, dma_addr))) {
 			__free_pages(page, efx->rx_buffer_order);
 			return -EIO;
 		}
-		page_addr = page_address(page);
-		state = page_addr;
+		state = page_address(page);
 		state->refcnt = 0;
 		state->dma_addr = dma_addr;
 
-		page_addr += sizeof(struct efx_rx_page_state);
 		dma_addr += sizeof(struct efx_rx_page_state);
 
 	split:
@@ -271,7 +265,6 @@ static int efx_init_rx_buffers_page(struct efx_rx_queue *rx_queue)
 			/* Use the second half of the page */
 			get_page(page);
 			dma_addr += (PAGE_SIZE >> 1);
-			page_addr += (PAGE_SIZE >> 1);
 			++count;
 			goto split;
 		}
@@ -288,14 +281,14 @@ static void efx_unmap_rx_buffer(struct efx_nic *efx,
 
 		state = page_address(rx_buf->u.page);
 		if (--state->refcnt == 0) {
-			pci_unmap_page(efx->pci_dev,
+			dma_unmap_page(&efx->pci_dev->dev,
 				       state->dma_addr,
 				       efx_rx_buf_size(efx),
-				       PCI_DMA_FROMDEVICE);
+				       DMA_FROM_DEVICE);
 		}
 	} else if (!(rx_buf->flags & EFX_RX_BUF_PAGE) && rx_buf->u.skb) {
-		pci_unmap_single(efx->pci_dev, rx_buf->dma_addr,
-				 rx_buf->len, PCI_DMA_FROMDEVICE);
+		dma_unmap_single(&efx->pci_dev->dev, rx_buf->dma_addr,
+				 rx_buf->len, DMA_FROM_DEVICE);
 	}
 }
 
@@ -381,6 +374,7 @@ static void efx_recycle_rx_buffer(struct efx_channel *channel,
 /**
  * efx_fast_push_rx_descriptors - push new RX descriptors quickly
  * @rx_queue:		RX descriptor queue
+ *
  * This will aim to fill the RX descriptor queue up to
  * @rx_queue->@max_fill. If there is insufficient atomic
  * memory to do so, a slow fill will be scheduled.
@@ -499,9 +493,8 @@ static inline bool efx_gro_enabled(const struct efx_nic *efx)
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_GRO)
 
-/* Pass a received packet up through the generic GRO stack
- *
- * Passes the fragment up via the appropriate GRO method
+/* Pass a received packet up through GRO.  GRO can handle pages
+ * regardless of checksum state and skbs with a good checksum.
  */
 static void efx_rx_packet_gro(struct efx_channel *channel,
 			      struct efx_rx_buffer *rx_buf,
@@ -510,7 +503,6 @@ static void efx_rx_packet_gro(struct efx_channel *channel,
 	struct napi_struct *napi = &channel->napi_str;
 	gro_result_t gro_result;
 
-	/* Pass the skb/page into the GRO engine */
 	if (rx_buf->flags & EFX_RX_BUF_PAGE) {
 		struct efx_nic *efx = channel->efx;
 		struct page *page = rx_buf->u.page;
@@ -553,6 +545,7 @@ static void efx_rx_packet_gro(struct efx_channel *channel,
 
 		EFX_BUG_ON_PARANOID(!(rx_buf->flags & EFX_RX_PKT_CSUMMED));
 		rx_buf->u.skb = NULL;
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 		if (rx_buf->flags & EFX_RX_BUF_VLAN_XTAG)
@@ -596,7 +589,6 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_nic *efx,
 	EFX_BUG_ON_PARANOID(skb_shinfo(skb)->nr_frags);
 	EFX_BUG_ON_PARANOID(rx_buf->len < hdr_len);
 
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	skb_reserve(skb, EFX_PAGE_SKB_ALIGN);
 
 	skb->len = rx_buf->len;
@@ -696,15 +688,6 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 {
 	struct sk_buff *skb;
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_VMWARE_3_DOT_5)
-	/* Trying to receive a packet before we attach to the stack
-	 * will die messily. */
-	if (!efx_dev_registered(channel->efx)) {
-		efx_free_rx_buffer(channel->efx, rx_buf);
-		return;
-	}
-#endif
-
 #if (defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_GRO)) || (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO))
 	/* Form an skb if required */
 	if (rx_buf->flags & EFX_RX_BUF_PAGE) {
@@ -714,6 +697,7 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 			efx_free_rx_buffer(channel->efx, rx_buf);
 			return;
 		}
+		skb_record_rx_queue(skb, channel->rx_queue.core_index);
 	} else {
 		/* We now own the SKB */
 		skb = rx_buf->u.skb;
@@ -727,11 +711,11 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 #endif
 
 	/* Set the SKB flags */
+	skb_checksum_none_assert(skb);
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_GRO)
-	if (unlikely(!(rx_buf->flags & EFX_RX_PKT_CSUMMED)))
-		/* fall through to next statement, else skip */
+	if (likely(rx_buf->flags & EFX_RX_PKT_CSUMMED))
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
 #endif
-	skb->ip_summed = CHECKSUM_NONE;
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 	/* This will mark the skb with the correct queue ID.
@@ -743,7 +727,6 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 	if (channel->efx->netq_active)
 		efx_netq_process_rx(channel->efx, channel, skb);
 #endif
-	skb_record_rx_queue(skb, channel->rx_queue.core_index);
 
 	/* Pass the packet up */
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
@@ -860,12 +843,12 @@ void efx_rx_strategy(struct efx_channel *channel)
 
 #if defined(EFX_NOT_UPSTREAM) && !defined(EFX_USE_COMPOUND_PAGES)
 	if (channel->efx->rx_buffer_order > 0) {
-		channel->rx_alloc_push_pages = 0;
+		channel->rx_alloc_push_pages = false;
 		return;
 	}
 #endif
 	if (channel->type->receive_skb) {
-		channel->rx_alloc_push_pages = 0;
+		channel->rx_alloc_push_pages = false;
 		return;
 	}
 
@@ -905,12 +888,12 @@ int efx_probe_rx_queue(struct efx_rx_queue *rx_queue)
 	rx_queue->ptr_mask = entries - 1;
 
 	netif_dbg(efx, probe, efx->net_dev,
-		  "creating RX queue %d size 0x%x mask 0x%x\n",
+		  "creating RX queue %d size %#x mask %#x\n",
 		  efx_rx_queue_index(rx_queue), efx->rxq_entries,
 		  rx_queue->ptr_mask);
 
 	/* Allocate RX buffers */
-	rx_queue->buffer = kzalloc(entries * sizeof(*rx_queue->buffer),
+	rx_queue->buffer = kcalloc(entries, sizeof(*rx_queue->buffer),
 				   GFP_KERNEL);
 	if (!rx_queue->buffer)
 		return -ENOMEM;
@@ -967,7 +950,7 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 
 	/* A flush failure might have left rx_queue->enabled */
 	rx_queue->enabled = false;
-	
+
 	del_timer_sync(&rx_queue->slow_fill);
 	efx_nic_fini_rx(rx_queue);
 
@@ -1165,7 +1148,7 @@ static void efx_ssr_deliver(struct efx_ssr_state *st, struct efx_ssr_conn *c)
 	/* Finish off packet munging and recalculate IP header checksum. */
 	if (EFX_SSR_CONN_IS_TCPIPV4(c)) {
 		struct iphdr *iph = (struct iphdr *) c->skb->data;
-		iph->tot_len = htons(iph->tot_len);
+		iph->tot_len = htons(c->sum_len);
 		iph->check = 0;
 #if __GNUC__+0 == 4 && __GNUC_MINOR__+0 == 5 && __GNUC_PATCHLEVEL__+0 <= 1
 		/* Compiler may wrongly eliminate the preceding assignment */
@@ -1175,13 +1158,14 @@ static void efx_ssr_deliver(struct efx_ssr_state *st, struct efx_ssr_conn *c)
 		c_th = (struct tcphdr *)(iph + 1);
 	} else {
 		struct ipv6hdr *iph = (struct ipv6hdr *) c->skb->data;
-		iph->payload_len = htons(iph->payload_len);
+		iph->payload_len = htons(c->sum_len);
 		c_th = (struct tcphdr *)(iph + 1);
 	}
 
 	c_eh = eth_hdr(c->skb);
 	len = c->skb->len + ((u8 *)c->skb->data - (u8 *)c_eh);
 	c->skb->truesize = len + sizeof(struct sk_buff);
+	c->skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 	c_th->window = c->th_last->window;
 	c_th->ack_seq = c->th_last->ack_seq;
@@ -1248,13 +1232,12 @@ efx_ssr_merge(struct efx_ssr_state *st, struct efx_ssr_conn *c,
 	/* Update the connection state flags */
 	if (EFX_SSR_CONN_IS_TCPIPV4(c)) {
 		struct iphdr *iph = (struct iphdr *) c->skb->data;
-		iph->tot_len += data_length;
 		c_th = (struct tcphdr *)(iph + 1);
 	} else {
 		struct ipv6hdr *iph = (struct ipv6hdr *) c->skb->data;
-		iph->payload_len += data_length;
 		c_th = (struct tcphdr *)(iph + 1);
 	}
+	c->sum_len += data_length;
 	c_th->psh |= th->psh;
 	c->th_last = th;
 	++st->n_merges;
@@ -1287,13 +1270,12 @@ efx_ssr_start(struct efx_ssr_state *st, struct efx_ssr_conn *c,
 	skb_shinfo(c->skb)->gso_size = data_length;
 #endif
 
-	/* Mangle header fields for later processing */
 	if (EFX_SSR_CONN_IS_TCPIPV4(c)) {
 		struct iphdr *iph = (struct iphdr *) c->skb->data;
-		iph->tot_len = ntohs(iph->tot_len);
+		c->sum_len = ntohs(iph->tot_len);
 	} else {
 		struct ipv6hdr *iph = (struct ipv6hdr *) c->skb->data;
-		iph->payload_len = ntohs(iph->payload_len);
+		c->sum_len = ntohs(iph->payload_len);
 	}
 }
 
@@ -1394,7 +1376,7 @@ efx_ssr_try_merge(struct efx_channel *channel, struct efx_ssr_conn *c)
 		th = (struct tcphdr *)(iph + 1);
 		pkt_length = ntohs(iph->payload_len) + (u8 *) th - (u8 *) eh;
 	}
-	
+
 	hdr_length = (u8 *) th + th->doff * 4 - (u8 *) eh;
 	rx_buf->len = min(pkt_length, rx_buf->len);
 	data_length = rx_buf->len - hdr_length;
@@ -1404,9 +1386,9 @@ efx_ssr_try_merge(struct efx_channel *channel, struct efx_ssr_conn *c)
 
 	/* Check for options other than aligned timestamp. */
 	if (th->doff != 5) {
-		const u32 *opt_ptr = (const u32 *) (th + 1);
+		const __be32 *opt_ptr = (const __be32 *) (th + 1);
 		if (th->doff == 8 &&
-		    opt_ptr[0] == ntohl((TCPOPT_NOP << 24) |
+		    opt_ptr[0] == htonl((TCPOPT_NOP << 24) |
 					(TCPOPT_NOP << 16) |
 					(TCPOPT_TIMESTAMP << 8) |
 					TCPOLEN_TIMESTAMP)) {
@@ -1548,12 +1530,12 @@ void efx_ssr(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 		struct iphdr *iph = nh;
 		if ((iph->protocol - IPPROTO_TCP) |
 		    (iph->ihl - (sizeof(*iph) >> 2u)) |
-		    (iph->frag_off & htons(IP_MF | IP_OFFSET)))
+		    (__force u16)(iph->frag_off & htons(IP_MF | IP_OFFSET)))
 			goto deliver_now;
 		th = (struct tcphdr *)(iph + 1);
 		if (conn_hash == 0)
-			conn_hash = (ip_fast_csum(&iph->saddr, 2) ^
-				     th->source ^ th->dest);
+			conn_hash = ((__force u32)ip_fast_csum(&iph->saddr, 2) ^
+				     (__force u32)(th->source ^ th->dest));
 	} else if (eh->h_proto == htons(ETH_P_IPV6)) {
 		struct ipv6hdr *iph = nh;
 		if (iph->nexthdr != NEXTHDR_TCP)
@@ -1561,8 +1543,8 @@ void efx_ssr(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 		l2_id |= EFX_SSR_L2_ID_IPV6;
 		th = (struct tcphdr *)(iph + 1);
 		if (conn_hash == 0)
-			conn_hash = (ip_fast_csum(&iph->saddr, 8) ^
-				     th->source ^ th->dest);
+			conn_hash = ((__force u32)ip_fast_csum(&iph->saddr, 8) ^
+				     (__force u32)(th->source ^ th->dest));
 	} else {
 		goto deliver_now;
 	}
@@ -1572,14 +1554,14 @@ void efx_ssr(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 	list_for_each_entry(c, &channel->ssr.conns[bucket], link) {
 		if ((c->l2_id - l2_id) | (c->conn_hash - conn_hash))
 			continue;
-		if ((c->source - th->source) | (c->dest - th->dest))
+		if ((c->source ^ th->source) | (c->dest ^ th->dest))
 			continue;
 		if (c->skb) {
 			if (EFX_SSR_CONN_IS_TCPIPV4(c)) {
 				struct iphdr *c_iph, *iph = nh;
 				c_iph = (struct iphdr *) c->skb->data;
-				if ((c_iph->saddr - iph->saddr) |
-				    (c_iph->daddr - iph->daddr))
+				if ((c_iph->saddr ^ iph->saddr) |
+				    (c_iph->daddr ^ iph->daddr))
 					continue;
 			} else {
 				struct ipv6hdr *c_iph, *iph = nh;

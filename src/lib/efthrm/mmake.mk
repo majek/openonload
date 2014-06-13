@@ -19,7 +19,8 @@ LIB_SRCS	:= cplane.c \
 		   efabcfg.c \
 		   onload_nic.c \
 		   id_pool.c \
-		   dump_to_user.c
+		   dump_to_user.c \
+		   iobufset.c
 
 ifeq ($(LINUX),1)
 LIB_SRCS	+= tcp_helper_linux.c

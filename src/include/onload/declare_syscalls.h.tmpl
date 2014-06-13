@@ -73,6 +73,13 @@ CI_MK_DECL(int           , connect    , (int, const struct sockaddr*, socklen_t)
 CI_MK_DECL(ssize_t       , recv       , (int s, void*, size_t, int));
 CI_MK_DECL(ssize_t       , recvfrom   , (int, void*, size_t, int,
                                          struct sockaddr*, socklen_t*));
+#if CI_LIBC_HAS___recv_chk
+CI_MK_DECL(ssize_t       , __recv_chk , (int s, void*, size_t, size_t, int));
+#endif
+#if CI_LIBC_HAS___recvfrom_chk
+CI_MK_DECL(ssize_t       , __recvfrom_chk , (int, void*, size_t, size_t, int,
+                                         struct sockaddr*, socklen_t*));
+#endif
 CI_MK_DECL(ssize_t       , recvmsg    , (int, struct msghdr*, int));
 #if CI_CFG_RECVMMSG && ! defined(OO_RECVMMSG_NOT_IN_LIBC)
 CI_MK_DECL(int           , recvmmsg   , (int, struct mmsghdr*, unsigned, int, const struct timespec*));
@@ -81,6 +88,9 @@ CI_MK_DECL(ssize_t       , send       , (int, const void*, size_t, int));
 CI_MK_DECL(ssize_t       , sendto     , (int, const void*, size_t, int,
                                          const struct sockaddr*, socklen_t));
 CI_MK_DECL(ssize_t       , sendmsg    , (int, const struct msghdr*, int));
+#if CI_CFG_SENDMMSG && ! defined(OO_SENDMMSG_NOT_IN_LIBC)
+CI_MK_DECL(int           , sendmmsg   , (int, struct mmsghdr*, unsigned, int));
+#endif
 CI_MK_DECL(ssize_t       , read       , (int, void*, size_t));
 #if CI_LIBC_HAS___read_chk
 CI_MK_DECL(ssize_t       , __read_chk , (int, void*, size_t, size_t));
@@ -89,9 +99,12 @@ CI_MK_DECL(ssize_t       , write      , (int, const void*, size_t));
 
 CI_MK_DECL(int           , close      , (int));
 CI_MK_DECL(int           , fcntl      , (int, int, ...));
-
 CI_MK_DECL(int           , poll       , (struct pollfd *, nfds_t, int));
+#if CI_LIBC_HAS_ppoll
+CI_MK_DECL(int           , ppoll       , (struct pollfd *, nfds_t, const struct timespec *, const sigset_t *));
+#endif
 CI_MK_DECL(int           , select     , (int, fd_set*, fd_set*, fd_set*, struct timeval*));
+CI_MK_DECL(int           , pselect     , (int, fd_set*, fd_set*, fd_set*, const struct timespec*, const sigset_t *));
 CI_MK_DECL(pid_t         , vfork      , (void));
 
 CI_MK_DECL(int           , open       , (const char*, int, ...));

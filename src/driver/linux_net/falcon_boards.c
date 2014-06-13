@@ -104,7 +104,7 @@ static const u8 falcon_lm87_common_regs[] = {
 	0
 };
 
-static int efx_init_lm87(struct efx_nic *efx, struct i2c_board_info *info,
+static int efx_init_lm87(struct efx_nic *efx, const struct i2c_board_info *info,
 			 const u8 *reg_values)
 {
 	struct falcon_board *board = falcon_board(efx);
@@ -195,7 +195,7 @@ static int efx_check_lm87(struct efx_nic *efx, unsigned mask)
 
 #else /* !CONFIG_SFC_HWMON */
 
-static int efx_init_lm87(struct efx_nic *efx, struct i2c_board_info *info,
+static int efx_init_lm87(struct efx_nic *efx, const struct i2c_board_info *info,
 			 const u8 *reg_values)
 {
 	return 0;
@@ -400,7 +400,7 @@ static ssize_t set_phy_flash_cfg(struct device *dev,
 		new_mode = PHY_MODE_SPECIAL;
 	if (!((old_mode ^ new_mode) & PHY_MODE_SPECIAL)) {
 		err = 0;
-	} else if (efx->state != STATE_RUNNING || netif_running(efx->net_dev)) {
+	} else if (efx->state != STATE_READY || netif_running(efx->net_dev)) {
 		err = -EBUSY;
 	} else {
 		/* Reset the PHY, reconfigure the MAC and enable/disable
@@ -465,7 +465,7 @@ static int sfe4001_check_hw(struct efx_nic *efx)
 }
 
 #ifdef CONFIG_SFC_HWMON
-static struct i2c_board_info sfe4001_hwmon_info = {
+static const struct i2c_board_info sfe4001_hwmon_info = {
 	I2C_BOARD_INFO("max6647", 0x4e),
 };
 #endif
@@ -546,7 +546,7 @@ static const u8 sfe4002_lm87_regs[] = {
 	0
 };
 
-static struct i2c_board_info sfe4002_hwmon_info = {
+static const struct i2c_board_info sfe4002_hwmon_info = {
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_NEED_LM87_DRIVER)
 	I2C_BOARD_INFO("lm87", 0x2e),
 #else
@@ -618,7 +618,7 @@ static const u8 sfn4112f_lm87_regs[] = {
 	0
 };
 
-static struct i2c_board_info sfn4112f_hwmon_info = {
+static const struct i2c_board_info sfn4112f_hwmon_info = {
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_NEED_LM87_DRIVER)
 	I2C_BOARD_INFO("lm87", 0x2e),
 #else
@@ -684,7 +684,7 @@ static const u8 sfe4003_lm87_regs[] = {
 	0
 };
 
-static struct i2c_board_info sfe4003_hwmon_info = {
+static const struct i2c_board_info sfe4003_hwmon_info = {
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_NEED_LM87_DRIVER)
 	I2C_BOARD_INFO("lm87", 0x2e),
 #else

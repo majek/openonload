@@ -240,6 +240,8 @@ struct ci_ip_pkt_fmt_s {
   oo_pkt_p              pp;
 #endif
 
+  ci_uint32             stack_id; /* Which stack was this pkt allocated for */
+
   /* payload length for passing between layers */
   ci_int32              pay_len;
   ci_int32              refcount;
@@ -475,6 +477,13 @@ typedef struct {
   ci_iptime_t tconst_delack;
 #define CI_TCP_TCONST_DELACK      50    /* milliseconds                 */
 
+  /* If there's a gap between packets we've received we'll re-enter
+   * fast start to avoid conflict between other end's congestion
+   * window validation and our delayed acknowledgements
+   */
+  ci_iptime_t tconst_idle;
+#define CI_TCP_TCONST_IDLE        50    /* milliseconds                 */
+
   /* TCP keepalive configuration */
   ci_iptime_t tconst_keepalive_time;  /* time before probes */
   ci_iptime_t tconst_keepalive_time_in_secs;  /* time before probes */
@@ -650,6 +659,8 @@ typedef struct {
 # define CI_EPLOCK_NETIF_NEED_WAKE         0x08000000
   /* need to wake someone waiting for free packet buffers */
 # define CI_EPLOCK_NETIF_PKT_WAKE          0x00100000
+  /* need to reinitialise VIs after NIC reset */
+# define CI_EPLOCK_NETIF_RESET_STACK       0x00200000
   /* mask for the above flags */
 # define CI_EPLOCK_NETIF_KERNEL_FLAGS      0x0f700000
   /* someone's waiting for free packet buffers */
@@ -720,6 +731,13 @@ struct ci_netif_state_s {
 # define CI_NETIF_FLAG_DEBUG              0x1 /* driver is debug build   */
 # define CI_NETIF_FLAG_ONLOAD_UNSUPPORTED 0x2 /* OOL unsupported on this h/w */
 
+  /* To give insight into runtime errors detected.  See also copy in
+   * ci_netif.
+   */
+  ci_uint32             error_flags;
+# define CI_NETIF_ERROR_POST_POLL_LIST    0x1
+# define CI_NETIF_ERROR_LOOP_PKTS_LIST    0x2
+
   /* The bits of this field are used for eventq-primed flags. */
 
   ci_uint32             evq_primed;
@@ -752,7 +770,9 @@ struct ci_netif_state_s {
   oo_pkt_p              freepkts;   /**< List of free packet buffers */
   ci_int32              n_freepkts; /**< Number of buffers in freepkts list */
 
-  oo_pkt_p              looppkts;   /**< List of packets sent via loopback */
+  /** List of packets sent via loopback in order of transmit;
+   * it should be reverted when delivering to receiver. */
+  oo_pkt_p              looppkts;
 
   /* Number of packets that are in use by the RX path.  This includes
   ** packets posted as RX descriptors, and those queued in socket
@@ -800,10 +820,11 @@ struct ci_netif_state_s {
   CI_ULCONST ci_uint32  vi_ofs;
 
   CI_ULCONST ci_uint32  table_ofs;       /**< offset of s/w filter table */
+#if CI_CFG_PKTS_AS_HUGE_PAGES
   CI_ULCONST ci_uint32  buf_ofs;         /**< offset of packet buffers */
+#endif
   CI_ULCONST ci_uint32  pkt_sets_n;      /**< number of pkt sets allocated */
   CI_ULCONST ci_uint32  pkt_sets_max;    /**< max number of iobufsets */
-  CI_ULCONST ci_uint32  pkt_set_bytes;   /**< size of each packet set */
 
   /* Packet buffers allocated.  This is [pkt_sets_n * PKTS_PER_SET]. */
   CI_ULCONST ci_int32   n_pkts_allocated;
@@ -852,12 +873,9 @@ struct ci_netif_state_s {
   
   oo_p                  free_synrecvs;    /**< Free list of synrecv bufs. */
 
-  /* We cache up to CI_CFG_TCP_EPCACHE_MAX end-points.  This makes it nice
-   * and fast for apps like web-servers that do a lot of accept/close ops
-   * -- most of the state is simply re-used in the accept from the
-   * most-recent close.
-   */ 
-  ci_int32             epcache_n;       /**< No of entries avail on ep-cache */
+#if CI_CFG_FD_CACHING
+  ci_int32              epcache_n;       /**< Num entries avail on ep-cache */
+#endif
 
   ci_netif_config       conf CI_ALIGN(8);
   ci_netif_config_opts  opts CI_ALIGN(8);
@@ -1178,6 +1196,7 @@ struct ci_sock_cmn_s {
 #define CI_SOCK_FLAG_SET_RCVBUF   0x00000800   /* app as set SO_RCVBUF */
 #define CI_SOCK_FLAG_SW_FILTER_FULL 0x00001000 /* s/w filter insert failed */
 #define CI_SOCK_FLAG_BOUND_ALIEN  0x00002000   /* bound to non-SFC address */
+#define CI_SOCK_FLAG_CONNECT_MUST_BIND 0x00004000 /* Call bind in connect() */
 
 
   ci_uint32             s_aflags;
@@ -1273,9 +1292,6 @@ struct ci_sock_cmn_s {
   ci_uint32             uid;              /**< who made this socket    */
   ci_int32		pid;
 
-
-  /* Address space that "owns" this socket. */
-  ci_addr_spc_id_t      addr_spc_id CI_ALIGN(8);
 
   ci_uint8              domain;           /*!<  PF_INET or PF_INET6 */
 
@@ -1597,9 +1613,7 @@ struct ci_tcp_state_s {
   /* Has socket ever been ESTABLISHED?  Simulates SS_CONNECTED state in
    * Linux (more or less). */
 # define CI_TCPT_FLAG_NONBLOCK_CONNECT  0x200
-  /* Second connect on socket in non-blocked mode or with interrupted
-   * connect.  Equal to SS_CONNECTING state in Linux. */
-# define CI_TCPT_FLAG_TMP_SRC_IP        0x400
+
   /* Using temporary source IP addr. */
 #define CI_TCPT_FLAG_PASSIVE_OPENED     0x80000  /* was passively opened */
 #define CI_TCPT_FLAG_NO_ARP             0x100000 /* there was a failed ARP */
@@ -1722,11 +1736,21 @@ struct ci_tcp_state_s {
 #define CI_TCP_TAIL_DROP_PROBED   0x8
 #endif
 
-  /* Keep alive probes */
-  ci_iptime_t          t_last_recv; /* timestamp of last in-seq packet */
+  /* Keep alive probes, and sending ACKs after gaps that may cause
+   * other end to validated its congetion window 
+   */
+  ci_iptime_t          t_prev_recv_payload; /* timestamp of prev in-seq 
+                                             * burst with payload */
+  ci_iptime_t          t_last_recv_payload; /* timestamp of last in-seq 
+                                             * packet with payload */
+  ci_iptime_t          t_last_recv_ack;     /* timestamp of last in-seq 
+                                             * packet without payload */
 
-  /* congestion window validation RFC2861 */
+  /* congestion window validation RFC2861; 
+   * also used for time-wait state timeout
+   */
   ci_iptime_t          t_last_sent; /* timestamp of last segment          */
+
 #if CI_CFG_CONGESTION_WINDOW_VALIDATION
   ci_iptime_t          t_last_full; /* timestamp when window last full    */
   ci_uint32            cwnd_used;   /* congestion window used             */
@@ -1810,13 +1834,14 @@ struct ci_tcp_state_s {
   ci_int32             stats_fmt;        /**< Output format */
 #endif
  
+#if CI_CFG_FD_CACHING
   /* Used to cache TCP-state and associated fds to improve accept performance */
   ci_int32             cached_on_fd;
   ci_int32             cached_on_pid;
-
   /* Link into either the epcache_pending, the epcache_cache, the
      epcache_acceptex, or none */
   ci_ni_dllist_link    epcache_link;
+#endif
 
   /* An extension of the send queue.  Packets are put here when the netif
   ** lock is contended, and are later transferred to the sendq.  This is a
@@ -1856,8 +1881,6 @@ struct ci_tcp_socket_listen_s {
   oo_sp                acceptq_get;
   ci_uint32            acceptq_n_out;
 
-  ci_uint32            acceptq_n_alien;
-
   /* For each listening socket we have a list of SYNRECV buffs, one for each
    * SYN we've received for which there hasn't yet been an ACK.  i.e. on
    * receipt of SYN we make a synrecv buf, then send the SYNACK.  The on
@@ -1868,6 +1891,7 @@ struct ci_tcp_socket_listen_s {
   ci_int32             n_listenq_new;
   ci_ni_dllist_t       listenq[CI_CFG_TCP_LISTENQ_BUCKETS];
 
+#if CI_CFG_FD_CACHING
   /* We cache EPs between close and accept to speed up passive opens.  See
    * comment in defintion of ci_netif_state_s::epcache_free for details.
    */
@@ -1888,6 +1912,7 @@ struct ci_tcp_socket_listen_s {
    * make accept nice and quick.
    */
   ci_ni_dllist_t       epcache_pending;
+#endif
 
   /* timer to poll the listen queue for retransmits */
   ci_ip_timer          listenq_tid;

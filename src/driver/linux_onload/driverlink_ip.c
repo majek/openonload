@@ -35,6 +35,7 @@
 #include <ci/internal/cplane_handle.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/nic.h>
+#include <onload/oof_interface.h>
 #include <ci/efrm/efrm_client.h>
 #include "onload_internal.h"
 
@@ -219,6 +220,26 @@ static struct nf_hook_ops oo_netfilter_ip_hook = {
 };
 
 
+static void oo_efrm_reset_callback(struct efrm_client* client, void* arg)
+{
+  struct oo_nic* onic;
+  ci_netif* ni = NULL;
+  int hwport, intf_i;
+  int ifindex = efrm_client_get_ifindex(client);
+
+  if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
+    hwport = onic - oo_nics;
+    while( iterate_netifs_unlocked(&ni) == 0 )
+      if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
+        tcp_helper_reset_stack(ni, intf_i);
+  }
+}
+
+static struct efrm_client_callbacks oo_efrm_client_callbacks = {
+  oo_efrm_reset_callback
+};
+
+
 /* This function will create an oo_nic if one hasn't already been created.
  *
  * There are two code paths whereby this function can be called multiple
@@ -241,19 +262,23 @@ static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
   BUG_ON(!netif_running(net_dev));
 
   onic = oo_nic_find_ifindex(net_dev->ifindex);
-  if (onic != NULL)
-    return onic;
 
-  rc = efrm_client_get(net_dev->ifindex, NULL, NULL, &efrm_client);
-  if( rc != 0 )
-    /* Probably not one of our devices */
-    goto fail1;
-
-  onic = oo_nic_add(efrm_client);
   if( onic == NULL ) {
-    ci_log("%s: oo_nic_add(ifindex=%d) failed", __func__, net_dev->ifindex);
-    goto fail2;
+    rc = efrm_client_get(net_dev->ifindex, &oo_efrm_client_callbacks, 
+                         NULL, &efrm_client);
+    if( rc != 0 )
+      /* Resource driver doesn't know about this ifindex. */
+      goto fail1;
+
+    onic = oo_nic_add(efrm_client);
+    if( onic == NULL ) {
+      ci_log("%s: oo_nic_add(ifindex=%d) failed", __func__, net_dev->ifindex);
+      goto fail2;
+    }
   }
+
+  if( net_dev->flags & IFF_UP )
+    oof_hwport_up_down(oo_nic_hwport(onic), 1);
 
   return onic;
 
@@ -440,12 +465,13 @@ static void oo_netdev_going_down(struct net_device* netdev)
 
   onic = oo_nic_find_ifindex(netdev->ifindex);
   if( onic != NULL ) {
+      oof_hwport_up_down(oo_nic_hwport(onic), 0);
       ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
       if( ci_dllist_is_empty(&THR_TABLE.all_stacks) )
         oo_netdev_remove(onic);
       else
-        ci_log("Unable to oo_nic_remove(ifindex=%d) because of open stacks",
-               netdev->ifindex);
+        ci_log("Unable to oo_nic_remove(ifindex=%d, hwport=%d) because of "
+               "open stacks", netdev->ifindex, oo_nic_hwport(onic));
       ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
     }
     else {

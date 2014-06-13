@@ -34,8 +34,6 @@ ci_inline int ci_tcp_need_ack(ci_netif* ni, ci_tcp_state* ts)
    * - Right edge has moved significantly.  (This breaks RFC, but
    * reduces ack rate (and linux behaves like this).
    *
-   * - Significant time has passed since the last ack.
-   *
    * - We're in fast-start.
    */
   int max_window = CI_MIN(tcp_rcv_buff(ts), (0xffff << ts->rcv_wscl));
@@ -72,6 +70,12 @@ ci_inline void ci_tcp_rx_post_poll(ci_netif* ni, ci_tcp_state* ts)
     if( ci_tcp_tx_advertise_space(ts) )
       ci_tcp_wake(ni, ts, CI_SB_FLAG_WAKE_TX);
   }
+
+#if CI_CFG_TCP_FASTSTART
+  if( ci_tcp_time_now(ni) - ts->t_prev_recv_payload > NI_CONF(ni).tconst_idle )
+    ts->faststart_acks = NI_OPTS(ni).tcp_faststart_idle;
+  ts->t_prev_recv_payload = ts->t_last_recv_payload;
+#endif
 
   if( ts->acks_pending ) {
 #ifndef NDEBUG

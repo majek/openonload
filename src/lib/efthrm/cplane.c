@@ -1349,7 +1349,7 @@ cicp_bond_remove_slave_row(cicp_handle_t *control_plane,
    * users of this hwport still in unacceleratable bonds
    */
   if( slave->slave.hwport != CI_HWPORT_ID_BAD )
-    oof_update_available_hwports(slave->slave.hwport, 1);
+    oof_hwport_un_available(slave->slave.hwport, 1);
 
   slave->type = CICP_BOND_ROW_TYPE_FREE;
 }
@@ -1588,7 +1588,7 @@ cicp_bond_add_slave(cicp_handle_t *control_plane,
             !(master_llap->encapsulation.type & 
               CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT) && 
             row->slave.hwport != CI_HWPORT_ID_BAD )
-          oof_update_available_hwports(row->slave.hwport, 0);
+          oof_hwport_un_available(row->slave.hwport, 0);
       }
 
       ci_verlock_write_stop(&fwdinfot->version);
@@ -2745,7 +2745,7 @@ cicp_hwport_remove_nic(cicp_handle_t *control_plane, ci_hwport_id_t hwport)
      * this hwport re-appears later 
      */
     ci_assert(hwport != CI_HWPORT_ID_BAD);
-    oof_update_available_hwports(hwport, 1);
+    oof_hwport_un_available(hwport, 1);
 }
 
 
@@ -6582,7 +6582,7 @@ extern int cicp_llap_update_can_onload_bad_hwport(cicp_handle_t *control_plane,
             bond_row = &mibs->user.bondinfo_utable->bond[bond_row->next];
             ci_assert(bond_row->type & CICP_BOND_ROW_TYPE_SLAVE);
             if( bond_row->slave.hwport != CI_HWPORT_ID_BAD )
-              oof_update_available_hwports(bond_row->slave.hwport, can_onload);
+              oof_hwport_un_available(bond_row->slave.hwport, can_onload);
           }
         }
       }

@@ -39,67 +39,6 @@
 #define VERB(x)
 
 
-
-#if ! defined(CI_HAVE_OS_NOPAGE)
-/* Allocate and mmap more iobufsets until have some free packets */
-static int
-ci_tcp_helper_extend_buf(ci_netif* ni)
-{
-  ci_netif_state *ns = ni->state;
-  unsigned id;
-  void* p;
-  int rc;
-
-  do {
-    id = ni->u_mmapped_pktbuf_iobufset;
-    ci_assert(id < ns->pkt_sets_max);
-    ci_assert(!PKT_BUFSET_U_MMAPPED(ni, id));
-    ci_assert(PKT_BUFSET_ALLOCATED( ni, id ));
-
-    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni), 0,
-                          CI_NETIF_MMAP_ID_PKT(id), ns->pkt_set_bytes, &p);
-    if( rc < 0 ) {
-      ci_log("%s: oo_resource_mmap failed (%d)", __FUNCTION__, rc);
-      return rc;
-    }
-
-    if ((ni->pkt_bufs[id] = CI_ALLOC_OBJ(ef_iobufset)) == NULL)
-      return -ENOMEM;
-
-    ci_pkt_dimension_iobufset(ni->pkt_bufs[id]);
-    ni->pkt_bufs[id]->bufs_ptr =  (char*) p;
-    ni->u_mmapped_pktbuf_iobufset++;
-    id = ni->u_mmapped_pktbuf_iobufset;
-
-    /* Allocate more iobufsets */
-    if (ns->freepkts == CI_ILL_END && id < ns->pkt_sets_max &&
-	      !PKT_BUFSET_ALLOCATED(ni, id))
-      ci_tcp_helper_more_bufs(ni);
-
-  } while( ns->freepkts == CI_ILL_END && id < ns->pkt_sets_max );
-
-  if (ns->freepkts == CI_ILL_END)
-    return -ENOMEM;
-
-  return 0;
-}
-#endif
-
-
-#if ! defined(CI_HAVE_OS_NOPAGE)
-int ci_tcp_helper_mmap_pktbufs_to(ci_netif *ni, unsigned id)
-{
-  unsigned setid = (id) >> PKTS_PER_SET_S;
-  while (!PKT_BUFSET_U_MMAPPED(ni, setid)) {
-    if (ci_tcp_helper_extend_buf(ni))
-      break;
-  }
-  /* We don't care whether we got any more buffers, just whether
-   * the buffer we know about got mapped succesfully. */
-  return (PKT_BUFSET_U_MMAPPED(ni, setid)) ? 0 : -ENOMEM;
-}
-#endif
-
 int ci_tcp_helper_more_bufs(ci_netif* ni)
 {
   return oo_resource_op(ci_netif_get_driver_handle(ni),
@@ -328,6 +267,7 @@ int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
   return rc;
 }
 
+#if defined(__unix__) && CI_CFG_FD_CACHING
 int ci_tcp_helper_xfer_cached(ci_fd_t fd, oo_sp ep_id,
                               int other_pid, ci_fd_t other_fd)
 {
@@ -338,6 +278,7 @@ int ci_tcp_helper_xfer_cached(ci_fd_t fd, oo_sp ep_id,
   op.other_fd  = other_fd;
   return oo_resource_op(fd, OO_IOC_TCP_XFER, &op);
 }
+#endif
 
 int ci_tcp_helper_close_no_trampoline(int fd) {
   int res;
@@ -411,10 +352,10 @@ int ci_tcp_helper_close_no_trampoline(int fd) {
 }
 
 
-int ci_tcp_helper_handover (ci_fd_t fd)
+int ci_tcp_helper_handover (ci_fd_t stack_fd, ci_fd_t sock_fd)
 {
-  ci_int32 io_fd = fd;
-  return oo_resource_op(fd, OO_IOC_TCP_HANDOVER, &io_fd);
+  ci_int32 io_fd = sock_fd;
+  return oo_resource_op(stack_fd, OO_IOC_TCP_HANDOVER, &io_fd);
 }
 
 
@@ -548,40 +489,6 @@ int ci_tcp_helper_connect_os_sock(ci_fd_t fd, const struct sockaddr*address,
   ci_assert (rc == 0);
   return rc;
 }
-
-
-int ciul_netif_get_addr_spc_id(ci_netif* ni)
-{
-  oo_netif_get_addr_spc_id_t op;
-  int rc;
-
-  rc = oo_resource_op(ci_netif_get_driver_handle(ni),
-                      OO_IOC_GET_ADDR_SPC_ID, &op);
-  ni->addr_spc_id = op.addr_spc_id;
-  return rc;
-}
-
-int ci_tcp_helper_set_addr_spc(ci_netif* ni, oo_sp ep_id)
-{
-  oo_tcp_set_addr_spc_t op;
-  int rc;
-
-  op.ep_id = ep_id;
-  rc = oo_resource_op(ci_netif_get_driver_handle(ni),
-                      OO_IOC_TCP_SET_ADDR_SPC, &op);
-
-  ci_assert(rc < 0 || ni->addr_spc_id == CI_ADDR_SPC_ID_INVALID1 ||
-	    ni->addr_spc_id == op.addr_spc_id);
-
-  /* May already be set, but no harm in doing it again. In fact this
-   * definitely has been set up unless the netif was set up by 
-   * ci_netif_restore_id. If that case is no longer relevant
-   * this should go. */
-  ni->addr_spc_id = op.addr_spc_id;
-
-  return rc;
-}
-
 
 
 int ci_tcp_helper_set_tcp_close_os_sock(ci_netif *ni, oo_sp sock_id)

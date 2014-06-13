@@ -238,6 +238,9 @@ citp_protocol_impl citp_epollb_protocol_impl = {
     .recvmmsg    = citp_nosock_recvmmsg,
 #endif
     .send        = citp_epoll_send,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_nosock_sendmmsg,
+#endif
     .ioctl       = citp_epollb_ioctl,
     .zc_send     = citp_epoll_zc_send,
     .zc_recv     = citp_epoll_zc_recv,

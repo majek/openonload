@@ -107,31 +107,45 @@ void citp_signal_run_pending(citp_signal_info *our_info)
   /* preserve errno across calls to this function, as it's often
      called at error time as a result of EXIT_LIB */
   int old_errno = errno;
+  int i;
 
   LOG_SIG(log("%s: start", __FUNCTION__));
   ci_wmb();
-  while (our_info->run_pending) {
-    int signum;
+  ci_assert_equal(our_info->inside_lib, 0);
+  ci_assert(our_info->run_pending);
     
-    our_info->run_pending = 0;
-    ci_wmb();
-    for( signum = 1; signum < NSIG + 1; signum++ ) {
-      if (our_info->signals[signum].pending) {
-        siginfo_t *saved_info = our_info->signals[signum].saved_info;
-        void *saved_context = our_info->signals[signum].saved_context;
-        ci_mb();
-        our_info->signals[signum].pending = 0;
-        our_info->need_restart =
-            !!citp_signal_run_app_handler(signum, saved_info, saved_context);
-      }
-    }
+  our_info->run_pending = 0;
+  ci_wmb();
+  for( i = 0; i < OO_SIGNAL_MAX_PENDING; i++ ) {
+    siginfo_t saved_info;
+    void *saved_context;
+    int signum;
+
+    if (our_info->signals[i].signum == 0)
+      break;
+
+    saved_context = our_info->signals[i].saved_context;
+    if( our_info->signals[i].saved_context )
+      memcpy(&saved_info, &our_info->signals[i].saved_info,
+             sizeof(saved_info));
+    signum = our_info->signals[i].signum;
+    ci_mb();
+    if( ci_cas32_fail(&our_info->signals[i].signum, signum, 0) )
+      break;
+    our_info->need_restart =
+        !!citp_signal_run_app_handler(
+                signum,
+                saved_context == NULL ? NULL : &saved_info,
+                saved_context);
   }
   LOG_SIG(log("%s: end", __FUNCTION__));
   errno = old_errno;
 }
 
 
-/*! Mark a signal as pending
+/*! Mark a signal as pending.
+ * Should be called from signal handler only.
+ *
 ** \param  signum   Signal number
 ** \param  info     Saved info for sa_sigaction handler
 ** \param  context  Saved context for sa_sigaction handler
@@ -139,19 +153,28 @@ void citp_signal_run_pending(citp_signal_info *our_info)
 */
 ci_inline void citp_signal_set_pending(int signum, siginfo_t *info,
                                        void *context,
-                                       citp_signal_info *our_info) {
-  if (!our_info->signals[signum].pending) {
+                                       citp_signal_info *our_info)
+{
+  int i;
+
+  ci_assert(our_info->inside_lib);
+
+  for( i = 0; i < OO_SIGNAL_MAX_PENDING; i++ ) {
+    if( our_info->signals[i].signum )
+      continue;
+    if( ci_cas32_fail(&our_info->signals[i].signum, 0, signum) )
+      continue;
     LOG_SIG(log("%s: signal %d pending", __FUNCTION__, signum));
-    our_info->signals[signum].saved_info = info;
-    our_info->signals[signum].saved_context = context;
-    ci_wmb();
-    our_info->signals[signum].pending = 1;
+    ci_assert_equiv(info, context);
+    if( info != NULL )
+      memcpy(&our_info->signals[i].saved_info, info, sizeof(siginfo_t));
+    our_info->signals[i].saved_context = context;
     ci_wmb();
     our_info->run_pending = 1;
-  } else {
-    LOG_SIG(log("%s: ignoring already pending signal %d", __FUNCTION__,
-                signum));
+    return;
   }
+
+  log("%s: no empty slot to set pending signal %d", __FUNCTION__, signum);
 }
 
 /*! Run signal handler immediatedly, just now.
@@ -253,10 +276,13 @@ void *citp_signal_sarestorer_get(void)
   if( citp_signal_sarestorer_inited )
     return citp_signal_sarestorer;
 
-  LOG_SIG(log("%s: citp_signal_intercept_1=%p, citp_signal_intercept_3=%p, "
-              "citp_signal_terminate=%p", __func__,
-              citp_signal_intercept_1, citp_signal_intercept_3,
+  LOG_SIG(log("%s: citp_signal_intercept_1=%p, citp_signal_intercept_3=%p",
+              __func__, citp_signal_intercept_1, citp_signal_intercept_3));
+  /* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
+  LOG_SIG(log("%s: citp_signal_terminate=%p", __func__, 
               citp_signal_terminate));
+#endif
   for( sig = 1; sig < _NSIG; sig++ ) {
     LOG_SIG(log("find sa_restorer via signal %d", sig));
     /* If the handler was already set by libc, we get sa_restorer just now */

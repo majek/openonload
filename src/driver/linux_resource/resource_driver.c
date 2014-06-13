@@ -13,6 +13,21 @@
 ** GNU General Public License for more details.
 */
 
+/*
+** Copyright 2005-2012  Solarflare Communications Inc.
+**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
+** Copyright 2002-2005  Level 5 Networks Inc.
+**
+** This program is free software; you can redistribute it and/or modify it
+** under the terms of version 2 of the GNU General Public License as
+** published by the Free Software Foundation.
+**
+** This program is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+** GNU General Public License for more details.
+*/
+
 /****************************************************************************
  * Driver for Solarflare network controllers -
  *          resource management for Xen backend, OpenOnload, etc
@@ -60,6 +75,8 @@
 #include <ci/efrm/vi_resource_private.h>
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/driver_private.h>
+#include <driver/linux_net/filter.h>
+#include <ci/efrm/efrm_filter.h>
 
 MODULE_AUTHOR("Solarflare Communications");
 MODULE_LICENSE("GPL");
@@ -78,18 +95,11 @@ const int max_hardware_init_repeats = 10;
  *
  *--------------------------------------------------------------------*/
 
-static int buffer_table_min;
-module_param(buffer_table_min, int, S_IRUGO);
-MODULE_PARM_DESC(buffer_table_min, "Set minimum bottom for buffer table");
-
-static int buffer_table_max = 1000000000;
-module_param(buffer_table_max, int, S_IRUGO);
-MODULE_PARM_DESC(buffer_table_max, "Set max top for buffer table");
-
-#ifdef CONFIG_PCI_IOV
+#ifdef CONFIG_SFC_RESOURCE_VF
 int claim_vf = 1;
 module_param(claim_vf, int, S_IRUGO);
-MODULE_PARM_DESC(claim_vf, "Do not claim PCI virtual functions ownership");
+MODULE_PARM_DESC(claim_vf, "Set to 0 to prevent this driver from binding "
+		 "to virtual functions");
 #endif
 
 /*--------------------------------------------------------------------
@@ -110,8 +120,9 @@ MODULE_PARM_DESC(claim_vf, "Do not claim PCI virtual functions ownership");
 
 /* Allocate buffer table entries for a particular NIC.
  */
-static int efrm_nic_buffer_table_alloc(struct efhw_nic *nic)
+static int efrm_nic_buftbl_alloc(struct efrm_nic *efrm_nic)
 {
+	struct efhw_nic *nic = &efrm_nic->efhw_nic;
 	int capacity;
 	int page_order;
 	int rc;
@@ -133,9 +144,8 @@ static int efrm_nic_buffer_table_alloc(struct efhw_nic *nic)
 
 	/* allocate buffer table entries to map onto the iobuffer */
 	page_order = get_order(capacity * sizeof(efhw_event_t));
-	rc = efrm_buffer_table_alloc(page_order,
-				     &nic->non_interrupting_evq.hw.
-				     buf_tbl_alloc);
+	rc = efrm_nic_buffer_table_alloc(efrm_nic, page_order,
+				 &nic->non_interrupting_evq.hw.buf_tbl_alloc);
 	if (rc < 0) {
 		EFRM_WARN
 		    ("%s: failed (%d) to alloc %d buffer table entries",
@@ -148,11 +158,12 @@ static int efrm_nic_buffer_table_alloc(struct efhw_nic *nic)
 
 /* Free buffer table entries allocated for a particular NIC.
  */
-static void efrm_nic_buffer_table_free(struct efhw_nic *nic)
+static void efrm_nic_buftbl_free(struct efrm_nic *efrm_nic)
 {
+	struct efhw_nic *nic = &efrm_nic->efhw_nic;
 	if (nic->non_interrupting_evq.hw.buf_tbl_alloc.base != (unsigned)-1)
-		efrm_buffer_table_free(&nic->non_interrupting_evq
-				       .hw.buf_tbl_alloc);
+		efrm_nic_buffer_table_free(efrm_nic,
+				  &nic->non_interrupting_evq.hw.buf_tbl_alloc);
 }
 
 static int iomap_bar(struct linux_efhw_nic *lnic, size_t len)
@@ -194,6 +205,7 @@ static int linux_efhw_nic_map_ctr_ap(struct linux_efhw_nic *lnic)
 static int
 linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		    spinlock_t *reg_lock, unsigned nic_flags, int ifindex,
+		    int bt_min, int bt_lim,
 		    const struct vi_resource_dimensions *res_dim,
 		    struct efhw_device_type dev_type)
 {
@@ -210,7 +222,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	if (rc < 0)
 		return rc;
 
-	rc = efrm_nic_ctor(&lnic->efrm_nic, ifindex, res_dim);
+	rc = efrm_nic_ctor(&lnic->efrm_nic, ifindex, bt_min, bt_lim, res_dim);
 	if (rc < 0) {
 		iounmap(nic->bar_ioaddr);
 		return rc;
@@ -222,6 +234,9 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	 * drivers share a single PCI function (falcon B series).
 	 */
 	nic->reg_lock = reg_lock;
+	
+	efrm_init_resource_filter(&dev->dev, ifindex);
+
 	return 0;
 }
 
@@ -237,8 +252,9 @@ static void linux_efrm_nic_dtor(struct linux_efhw_nic *lnic)
 	EFRM_ASSERT(bar_ioaddr);
 	iounmap(bar_ioaddr);
 	nic->bar_ioaddr = 0;
+	
+	efrm_shutdown_resource_filter(&nic->pci_dev->dev);
 }
-
 
 static void efrm_dev_show(struct pci_dev *dev, int revision,
 			  struct efhw_device_type dev_type, int ifindex,
@@ -311,21 +327,13 @@ efrm_nic_add(struct pci_dev *dev, unsigned flags, const uint8_t *mac_addr,
 	efrm_dev_show(dev, class_revision, dev_type, ifindex,
 		      bt_min, bt_lim, res_dim);
 
-	if (bt_min < buffer_table_min)
-		bt_min = buffer_table_min;
-	if (bt_lim > buffer_table_max)
-		bt_lim = buffer_table_max;
-
 	if (n_nics_probed == 0) {
-		rc = efrm_resources_init(res_dim, bt_min, bt_lim);
+		rc = efrm_resources_init(res_dim);
 		if (rc != 0)
 			goto failed;
 		resources_init = 1;
 	} else {
-		/* bug21669: The buffer table implementation isn't currently
-		 * safe w.r.t ports with differing buffer table dimensions */
-		int low, high;
-#ifdef CONFIG_PCI_IOV
+#ifdef CONFIG_SFC_RESOURCE_VF
 		unsigned vi_base, vi_scale, vf_count;
 
 		/* VF check first, to set claim_vf properly */
@@ -342,17 +350,6 @@ efrm_nic_add(struct pci_dev *dev, unsigned flags, const uint8_t *mac_addr,
 			claim_vf = 0;
 		}
 #endif
-
-		if (bt_min != bt_lim) {
-			efrm_buffer_table_limits(&low, &high);
-			if (bt_min > low || bt_lim < high) {
-				EFRM_ERR("%s: ERROR: incompatible buffer "
-					 "table size: [%d,%d) < [%d,%d)",
-					 __func__, bt_min, bt_lim, low, high);
-				rc = -EINVAL;
-				goto failed;
-			}
-		}
 	}
 
 	/* Allocate memory for the new adapter-structure. */
@@ -370,7 +367,7 @@ efrm_nic_add(struct pci_dev *dev, unsigned flags, const uint8_t *mac_addr,
 
 	/* OS specific hardware mappings */
 	rc = linux_efrm_nic_ctor(lnic, dev, reg_lock, flags, ifindex,
-				 res_dim, dev_type);
+				 bt_min, bt_lim, res_dim, dev_type);
 	if (rc < 0) {
 		EFRM_ERR("%s: ERROR: linux_efrm_nic_ctor failed (%d)",
 			 __func__, rc);
@@ -396,17 +393,10 @@ efrm_nic_add(struct pci_dev *dev, unsigned flags, const uint8_t *mac_addr,
 	}
 	registered_nic = 1;
 
-	if( efrm_has_buffer_table ) {
-		rc = efrm_nic_buffer_table_alloc(nic);
-		if (rc != 0)
-			goto failed;
-		buffers_allocated = 1;
-	}
-	else {
-		/* PCI VFs may be available */
-		nic->non_interrupting_evq.hw.capacity = 0;
-		non_irq_evq = 0;
-	}
+	rc = efrm_nic_buftbl_alloc(efrm_nic);
+	if (rc != 0)
+		goto failed;
+	buffers_allocated = 1;
 
 	/****************************************************/
 	/* hardware bringup                                 */
@@ -453,7 +443,7 @@ efrm_nic_add(struct pci_dev *dev, unsigned flags, const uint8_t *mac_addr,
 
 failed:
 	if (buffers_allocated)
-		efrm_nic_buffer_table_free(nic);
+		efrm_nic_buftbl_free(efrm_nic);
 	if (registered_nic)
 		efrm_driver_unregister_nic(efrm_nic);
 	if (constructed)
@@ -478,7 +468,7 @@ void efrm_nic_del(struct linux_efhw_nic *lnic)
 
 	efrm_vi_wait_nic_complete_flushes(nic);
 
-	efrm_nic_buffer_table_free(nic);
+	efrm_nic_buftbl_free(&lnic->efrm_nic);
 
 	efrm_driver_unregister_nic(&lnic->efrm_nic);
 
@@ -505,6 +495,7 @@ static int __devinit init_sfc_resource(void)
 	EFRM_TRACE("%s: RESOURCE driver starting", __func__);
 
 	efrm_driver_ctor();
+	efrm_filter_init();
 
 	/* Register the driver so that our 'probe' function is called for
 	 * each EtherFabric device in the system.
@@ -520,8 +511,9 @@ static int __devinit init_sfc_resource(void)
 		EFRM_WARN("%s: WARNING: failed to install /proc entries",
 			  __func__);
 	}
-
-#ifdef CONFIG_PCI_IOV
+	efrm_filter_install_proc_entries();
+	
+#ifdef CONFIG_SFC_RESOURCE_VF
 	efrm_vf_driver_init();
 #endif
 
@@ -529,6 +521,7 @@ static int __devinit init_sfc_resource(void)
 
 failed_driverlink:
 	efrm_driver_stop();
+	efrm_filter_shutdown();
 	efrm_driver_dtor();
 	return rc;
 }
@@ -540,10 +533,12 @@ failed_driverlink:
  ****************************************************************************/
 static void __devinit cleanup_sfc_resource(void)
 {
-#ifdef CONFIG_PCI_IOV
+#ifdef CONFIG_SFC_RESOURCE_VF
 	efrm_vf_driver_fini();
 #endif
 
+	efrm_filter_shutdown();
+	efrm_filter_remove_proc_entries();
 	efrm_uninstall_proc_entries();
 
 	efrm_driver_stop();
@@ -559,4 +554,3 @@ static void __devinit cleanup_sfc_resource(void)
 
 module_init(init_sfc_resource);
 module_exit(cleanup_sfc_resource);
-

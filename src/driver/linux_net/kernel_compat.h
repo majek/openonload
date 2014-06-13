@@ -34,10 +34,10 @@
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/workqueue.h>
-#include <linux/moduleparam.h>
 #include <linux/interrupt.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/i2c.h>
 #include <linux/sysfs.h>
@@ -51,6 +51,7 @@
 #include <linux/vmalloc.h>
 #include <linux/if_vlan.h>
 #include <linux/time.h>
+#include <net/ip.h>
 
 /**************************************************************************
  *
@@ -74,10 +75,6 @@
 	#undef EFX_HAVE_LINUX_MDIO_H
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_KCOMPAT) && (!defined(EFX_HAVE_SRIOV) || !defined(CONFIG_PCI_IOV))
-	#undef CONFIG_SFC_SRIOV
-#endif
-
 /**************************************************************************
  *
  * Version/config/architecture compatability.
@@ -87,10 +84,6 @@
  * The preferred kernel compatability mechanism is through the autoconf
  * layer above. The following definitions are all deprecated
  */
-
-#if defined(__VMKLNX__) && defined (EFX_NOT_UPSTREAM)
-#include "kernel_compat_vmware.h"
-#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9)
 	#error "This kernel version is now unsupported"
@@ -318,6 +311,10 @@
 	#define DEVICE_ATTR(_name, _mode, _show, _store)		\
 		struct device_attribute dev_attr_ ## _name =		\
 			__ATTR(_name, _mode, _show, _store)
+#endif
+
+#ifndef sysfs_attr_init
+	#define sysfs_attr_init(attr) do {} while(0)
 #endif
 
 #ifndef to_i2c_adapter
@@ -684,18 +681,11 @@
 	#define skb_tail_pointer(skb)   ((skb)->tail)
 	#define skb_set_mac_header(skb, offset)			\
 		((skb)->mac.raw = (skb)->data + (offset))
+	#define skb_transport_header(skb) ((skb)->h.raw)
 #endif
 
-#ifndef EFX_HAVE_SKB_RECORD_RX_QUEUE
+#ifdef EFX_NEED_SKB_RECORD_RX_QUEUE
 	#define skb_record_rx_queue(_skb, _channel)
-#endif
-
-#ifdef EFX_NEED_ETH_HDR
-	#define eth_hdr(skb)		((struct ethhdr *)skb_mac_header(skb))
-#endif
-
-#ifdef EFX_NEED_VLAN_ETH_HDR
-	#define vlan_eth_hdr(skb)	((struct vlan_ethhdr *)skb_mac_header(skb))
 #endif
 
 #ifdef EFX_NEED_TCP_HDR
@@ -891,10 +881,6 @@
 	#define gso_segs efx_gso_segs
 #endif
 
-#ifndef EFX_HAVE_TSO_SEGS_LIMIT
-	#define TCP_MAX_GSO_SEGS 100
-#endif
-
 #ifndef GSO_MAX_SIZE
 	#define GSO_MAX_SIZE 65536
 #endif
@@ -1084,33 +1070,12 @@
 	#define dev_notice dev_warn
 #endif
 
-#ifdef EFX_NEED_IF_MII
-	#include <linux/mii.h>
-	static inline struct mii_ioctl_data *efx_if_mii ( struct ifreq *rq ) {
-		return ( struct mii_ioctl_data * ) &rq->ifr_ifru;
-	}
-	#undef if_mii
-	#define if_mii efx_if_mii
-#endif
-
-#ifdef EFX_NEED_DUMMY_PCI_DISABLE_MSI
-	#include <linux/pci.h>
-	static inline void dummy_pci_disable_msi ( struct pci_dev *dev ) {
-		/* Do nothing */
-	}
-	#undef pci_disable_msi
-	#define pci_disable_msi dummy_pci_disable_msi
-#endif
-
-#ifdef EFX_NEED_DUMMY_MSIX
-	struct msix_entry {
-		u16 	vector;	/* kernel uses to write allocated vector */
-		u16	entry;	/* driver uses to specify entry, OS writes */
-	};
-	static inline int pci_enable_msix(struct pci_dev* dev,
-					  struct msix_entry *entries, int nvec)
-		{return -1;}
-	static inline void pci_disable_msix(struct pci_dev *dev) { /* Do nothing */}
+#ifdef EFX_NEED_DEV_CREATE_FIX
+	#define efx_device_create(cls, parent, devt, drvdata, fmt, _args...) \
+			device_create(cls, parent, devt, fmt ## _args)
+#else
+	#define efx_device_create(cls, parent, devt, drvdata, fmt, _args...) \
+			device_create(cls, parent, devt, drvdata, fmt ## _args)
 #endif
 
 #ifdef EFX_NEED_RESOURCE_SIZE_T
@@ -1130,10 +1095,10 @@
 			.type = (dev_type), .addr = (dev_addr)
 	#endif
 	struct i2c_client *
-	i2c_new_device(struct i2c_adapter *adap, struct i2c_board_info *info);
+	i2c_new_device(struct i2c_adapter *adap, const struct i2c_board_info *info);
 	struct i2c_client *
 	i2c_new_probed_device(struct i2c_adapter *adap,
-			      struct i2c_board_info *info,
+			      const struct i2c_board_info *info,
 			      const unsigned short *addr_list);
 	void i2c_unregister_device(struct i2c_client *);
 	struct i2c_device_id;
@@ -1179,14 +1144,7 @@
 	#endif
 #endif
 
-#ifdef EFX_HAVE_OLD_PCI_DMA_MAPPING_ERROR
-	static inline int
-	efx_pci_dma_mapping_error(struct pci_dev *dev, dma_addr_t dma_addr)
-	{
-        	return pci_dma_mapping_error(dma_addr);
-	}
-	#undef pci_dma_mapping_error
-	#define pci_dma_mapping_error efx_pci_dma_mapping_error
+#ifdef EFX_HAVE_OLD_DMA_MAPPING_ERROR
 	static inline int
 	efx_dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
 	{
@@ -1194,6 +1152,13 @@
 	}
 	#undef dma_mapping_error
 	#define dma_mapping_error efx_dma_mapping_error
+#endif
+
+#ifdef EFX_NEED_DMA_SET_COHERENT_MASK
+	static inline int dma_set_coherent_mask(struct device *dev, u64 mask)
+	{
+		return pci_set_consistent_dma_mask(to_pci_dev(dev), mask);
+	}
 #endif
 
 #ifdef EFX_NEED_FOR_EACH_PCI_DEV
@@ -1223,47 +1188,6 @@ int efx_lm90_probe(struct i2c_client *client);
 int efx_lm90_probe(struct i2c_client *client, const struct i2c_device_id *);
 #endif
 extern struct i2c_driver efx_lm90_driver;
-#endif
-
-#ifdef EFX_NEED_WAIT_EVENT_TIMEOUT
-#define __wait_event_timeout(wq, condition, ret)                        \
-do {                                                                    \
-        DEFINE_WAIT(__wait);                                            \
-                                                                        \
-        for (;;) {                                                      \
-                prepare_to_wait(&wq, &__wait, TASK_UNINTERRUPTIBLE);    \
-                if (condition)                                          \
-                        break;                                          \
-                ret = schedule_timeout(ret);                            \
-                if (!ret)                                               \
-                        break;                                          \
-        }                                                               \
-        finish_wait(&wq, &__wait);                                      \
-} while (0)
-
-/**
- * wait_event_timeout - sleep until a condition gets true or a timeout elapses
- * @wq: the waitqueue to wait on
- * @condition: a C expression for the event to wait for
- * @timeout: timeout, in jiffies
- *
- * The process is put to sleep (TASK_UNINTERRUPTIBLE) until the
- * @condition evaluates to true. The @condition is checked each time
- * the waitqueue @wq is woken up.
- *
- * wake_up() has to be called after changing any variable that could
- * change the result of the wait condition.
- *
- * The function returns 0 if the @timeout elapsed, and the remaining
- * jiffies if the condition evaluated to true before the timeout elapsed.
- */
-#define wait_event_timeout(wq, condition, timeout)                      \
-({                                                                      \
-        long __ret = timeout;                                           \
-        if (!(condition))                                               \
-                __wait_event_timeout(wq, condition, __ret);             \
-        __ret;                                                          \
-})
 #endif
 
 /*
@@ -1377,6 +1301,10 @@ do {                                                                    \
 	#define pr_err(fmt, arg...) \
 		printk(KERN_ERR fmt, ##arg)
 #endif
+#ifndef pr_warning
+	#define pr_warning(fmt, arg...) \
+		printk(KERN_WARNING fmt, ##arg)
+#endif
 
 #ifndef __always_unused
 	#define __always_unused __attribute__((unused))
@@ -1415,6 +1343,20 @@ do {                                                                    \
 	}
 #endif
 
+#ifdef EFX_NEED_ETHER_ADDR_EQUAL
+	static inline bool ether_addr_equal(const u8 *addr1, const u8 *addr2)
+	{
+		return !compare_ether_addr(addr1, addr2);
+	}
+#endif
+
+#ifdef EFX_NEED_IP_IS_FRAGMENT
+	static inline bool ip_is_fragment(const struct iphdr *iph)
+	{
+		return (iph->frag_off & htons(IP_MF | IP_OFFSET)) != 0;
+	}
+#endif
+
 #ifdef EFX_NEED_NETDEV_FEATURES_T
 	typedef u32 netdev_features_t;
 #endif
@@ -1443,12 +1385,39 @@ do {                                                                    \
 	}
 #endif
 
+#ifdef EFX_NEED_SKB_FRAG_SIZE
+	static inline unsigned int skb_frag_size(const skb_frag_t *frag)
+	{
+		return frag->size;
+	}
+#endif
+
 #if defined(CONFIG_COMPAT) && defined(EFX_NEED_COMPAT_U64)
 	#if defined(CONFIG_X86_64) || defined(CONFIG_IA64)
 		typedef u64 __attribute__((aligned(4))) compat_u64;
 	#else
 		typedef u64 compat_u64;
 	#endif
+#endif
+
+#ifdef EFX_NEED___CPU_TO_LE32_CONSTANT_FIX
+	#ifdef __BIG_ENDIAN
+		#undef __cpu_to_le32
+		#define __cpu_to_le32(x)		\
+		(__builtin_constant_p((__u32)(x)) ?	\
+		 ___constant_swab32((x)) :		\
+		 __fswab32((x)))
+	#endif
+#endif
+
+#ifdef EFX_NEED_BYTE_QUEUE_LIMITS
+static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
+					unsigned int bytes)
+{}
+static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
+					     unsigned pkts, unsigned bytes)
+{}
+static inline void netdev_tx_reset_queue(struct netdev_queue *q) {}
 #endif
 
 #ifdef EFX_NEED_IS_COMPAT_TASK
@@ -1466,6 +1435,24 @@ do {                                                                    \
 	}
 #endif
 
+#ifdef EFX_NEED_SKB_CHECKSUM_NONE_ASSERT
+static inline void skb_checksum_none_assert(const struct sk_buff *skb)
+{
+#ifdef DEBUG
+	BUG_ON(skb->ip_summed != CHECKSUM_NONE);
+#endif
+}
+#endif
+
+#ifdef EFX_NEED_SKB_HEADER_CLONED
+	/* This is a bit pessimistic but it's the best we can do */
+	#define skb_header_cloned skb_cloned
+#endif
+
+#ifndef __read_mostly
+	#define __read_mostly
+#endif
+
 /**************************************************************************
  *
  * Missing functions provided by kernel_compat.c
@@ -1473,14 +1460,6 @@ do {                                                                    \
  **************************************************************************
  *
  */
-#ifdef EFX_NEED_RANDOM_ETHER_ADDR
-	extern void efx_random_ether_addr(uint8_t *addr);
-	#ifndef EFX_IN_KCOMPAT_C
-		#undef random_ether_addr
-		#define random_ether_addr efx_random_ether_addr
-	#endif
-#endif
-
 #ifdef EFX_NEED_UNREGISTER_NETDEVICE_NOTIFIER_FIX
 	/* unregister_netdevice_notifier() does not wait for the notifier
 	 * to be unused before 2.6.17 */
@@ -1518,21 +1497,6 @@ do {                                                                    \
 
 #ifdef EFX_NEED_PCI_WAKE_FROM_D3
 	extern int pci_wake_from_d3(struct pci_dev *dev, bool enable);
-#endif
-
-#ifdef EFX_NEED_MSECS_TO_JIFFIES
-	extern unsigned long msecs_to_jiffies(const unsigned int m);
-#endif
-
-#ifdef EFX_NEED_MSLEEP
-	extern void msleep(unsigned int msecs);
-#endif
-
-#ifdef EFX_NEED_SSLEEP
-	static inline void ssleep(unsigned int seconds)
-	{
-		msleep(seconds * 1000);
-	}
 #endif
 
 #ifdef EFX_NEED_MDELAY
@@ -2004,18 +1968,15 @@ do {                                                                    \
 	}
 #endif
 
-#ifndef EFX_HAVE_ROUNDUP_POW_OF_TWO
-static inline unsigned long __attribute_const__ roundup_pow_of_two(unsigned long x)
-{
-	return 1UL << fls(x - 1);
-}
-#endif
-
-#ifndef EFX_HAVE_ROUNDDOWN_POW_OF_TWO
+#ifdef EFX_NEED_ROUNDDOWN_POW_OF_TWO
 static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned long x)
 {
 	return 1UL << (fls(x) - 1);
 }
+#endif
+
+#ifndef order_base_2
+#define order_base_2(x) fls((x) - 1)
 #endif
 
 #ifdef EFX_NEED_ON_EACH_CPU_WRAPPER
@@ -2025,10 +1986,6 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 }
 #undef on_each_cpu
 #define on_each_cpu efx_on_each_cpu
-#endif
-
-#ifdef EFX_HAVE___NETIF_TX_LOCK_1PARAM
-	#define __netif_tx_lock(_queue, _cpu) __netif_tx_lock(_queue)
 #endif
 
 #ifndef EFX_HAVE_LIST_SPLICE_TAIL_INIT
@@ -2094,23 +2051,6 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 		{
 			memcpy(to, skb->data, len);
 		}
-#endif
-
-#if defined(EFX_NEED_SKB_CHECKSUM_START_OFFSET) && defined(EFX_HAVE_CSUM_START)
-	static inline int skb_checksum_start_offset(const struct sk_buff *skb)
-	{
-	        return skb->csum_start - skb_headroom(skb);
-	}
-#elif defined(EFX_NEED_SKB_CHECKSUM_START_OFFSET)
-	static inline int skb_checksum_start_offset(const struct sk_buff *skb)
-	{
-	        return 0;
-	}
-	static inline void efx_skb_set_transport_header(struct sk_buff *skb, const int offset)
-	{
-		/* Do nothing */
-	}
-	#define skb_set_transport_header efx_skb_set_transport_header
 #endif
 
 #ifdef EFX_NEED_NS_TO_TIMESPEC
@@ -2298,7 +2238,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 #define remap_pfn_range remap_page_range
 #endif
 
-#ifndef EFX_HAVE_GETNSTIMEOFDAY
+#ifdef EFX_NEED_GETNSTIMEOFDAY
 	static inline void efx_getnstimeofday(struct timespec *tv)
 	{
 		struct timeval x;

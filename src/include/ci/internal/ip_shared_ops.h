@@ -432,8 +432,7 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 ************************ Packet buffer access ************************
 *********************************************************************/
 
-#define PKTS_PER_SET_S  6u
-#define PKTS_PER_SET    (1u << PKTS_PER_SET_S)
+#define PKTS_PER_SET    (1u << CI_CFG_PKTS_PER_SET_S)
 #define PKTS_PER_SET_M  (PKTS_PER_SET - 1u)
 
 
@@ -446,10 +445,13 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 ci_inline oo_pkt_p VALID_PKT_ID(ci_netif* ni, oo_pkt_p pp) {
 #if ! CI_CFG_PP_IS_PTR
 # ifdef __KERNEL__
-  OO_PP_INIT(ni, pp, OO_PP_ID(pp) % ((ni)->pkt_sets_n << PKTS_PER_SET_S));
-# else
-  OO_PP_INIT(ni, pp, OO_PP_ID(pp) % ((ni)->state->pkt_sets_n<<PKTS_PER_SET_S));
-# endif
+# define pkt_sets_n(ni) (ni)->pkt_sets_n
+#else
+# define pkt_sets_n(ni) (ni)->state->pkt_sets_n
+#endif
+  OO_PP_INIT(ni, pp,
+             OO_PP_ID(pp) % (pkt_sets_n(ni) << CI_CFG_PKTS_PER_SET_S));
+#undef pkt_sets_n
 #endif
   return pp;
 }
@@ -467,8 +469,8 @@ ci_inline oo_pkt_p VALID_PKT_ID(ci_netif* ni, oo_pkt_p pp) {
 ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
                                     const char* f, int l) {
   unsigned id = OO_PP_ID(pp);
-  ci_ss_assertfl(ni, id < ni->pkt_sets_n << PKTS_PER_SET_S, f, l);
-  OO_PP_INIT(ni, pp, id % (ni->pkt_sets_n << PKTS_PER_SET_S));
+  ci_ss_assertfl(ni, id < ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S, f, l);
+  OO_PP_INIT(ni, pp, id % (ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S));
   return pp;
 }
 #else
@@ -493,17 +495,19 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 #ifdef __KERNEL__
 /* Note that, to avoid us having kernel-only args (or unused args in 
  * user mode), ef_iobufset_ptr() doesn't exist in the kernel */
-# define __PKT_BUF(ni, id)                                              \
-  efrm_iobufset_ptr((ni)->pkt_rs[(id) >> PKTS_PER_SET_S],               \
-		    ((id) & (PKTS_PER_SET_M)) *                         \
-		    (ni)->pkt_bufs[(id) >> PKTS_PER_SET_S]->bufs_size)
+# define __PKT_BUF(ni, id)                                          \
+  oo_iobufset_ptr((ni)->buf_pages[(id) >> CI_CFG_PKTS_PER_SET_S],   \
+                  ((id) & PKTS_PER_SET_M) * CI_CFG_PKT_BUF_SIZE)
+#elif CI_CFG_MMAP_EACH_PKTSET
+# define __PKT_BUF(ni, id)                                      \
+  ((ni)->pkt_sets[(id) >> CI_CFG_PKTS_PER_SET_S] +              \
+            ((id) & PKTS_PER_SET_M) * CI_CFG_PKT_BUF_SIZE)
 #else
 # define __PKT_BUF(ni, id)                                      \
-  ef_iobufset_ptr((ni)->pkt_bufs[(id) >> PKTS_PER_SET_S],       \
-		  (id) & (PKTS_PER_SET_M))
+  ((ni)->pkt_sets + id * CI_CFG_PKT_BUF_SIZE)
 #endif
 
-/* __PKT(ni, pp, ni_locked)
+/* __PKT(ni, pp)
 **
 ** Converts an [oo_pkt_p] to a packet without any checks.  Maps it into the
 ** current address space if necessary.
@@ -511,27 +515,24 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 #if CI_CFG_PP_IS_PTR
 
 /* ?? this cast should not be necessary!!!!!!!!!!! */
-# define __PKT(ni, pp, locked)  ((ci_ip_pkt_fmt*) (pp))
+# define __PKT(ni, pp)  ((ci_ip_pkt_fmt*) (pp))
 
-#elif defined(__KERNEL__) || defined(CI_HAVE_OS_NOPAGE)
+#elif defined(__KERNEL__) || !CI_CFG_MMAP_EACH_PKTSET
 
   /* Buffer will already be mmaped, or faulted in on demand. */
-# define __PKT(ni, pp, locked)  ((ci_ip_pkt_fmt*) __PKT_BUF((ni),OO_PP_ID(pp)))
+# define __PKT(ni, pp)  ((ci_ip_pkt_fmt*) __PKT_BUF((ni),OO_PP_ID(pp)))
 
 #else
 
-# define PKT_BUFSET_U_MMAPPED(ni, id)  ((ni)->pkt_bufs[(id)] != NULL)
+# define PKT_BUFSET_U_MMAPPED(ni, setid)  ((ni)->pkt_sets[setid] != NULL)
 
-extern ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id,
-                                     ci_boolean_t ni_locked) CI_HF;
+extern ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id) CI_HF;
 
-ci_inline ci_ip_pkt_fmt* __PKT(ci_netif* ni, unsigned id,
-                               ci_boolean_t ni_locked) {
-  ci_assert(! ni_locked || ci_netif_is_locked(ni));
-  if(CI_LIKELY( PKT_BUFSET_U_MMAPPED((ni), (id) >> PKTS_PER_SET_S) ))
+ci_inline ci_ip_pkt_fmt* __PKT(ci_netif* ni, unsigned id) {
+  if(CI_LIKELY( PKT_BUFSET_U_MMAPPED((ni), (id) >> CI_CFG_PKTS_PER_SET_S) ))
     return (ci_ip_pkt_fmt*) __PKT_BUF((ni), (id));
   else
-    return __ci_netif_pkt(ni, id, ni_locked);
+    return __ci_netif_pkt(ni, id);
 }
 
 #endif
@@ -542,15 +543,8 @@ ci_inline ci_ip_pkt_fmt* __PKT(ci_netif* ni, unsigned id,
 **
 ** PKT_CHK() does some additional checks on fields on the packet, so use
 ** this when the packet should be in a valid state.  Netif must be locked.
-**
-** PKT_NNL() (and PKT_CHK_NNL() - NNL = Netif Not Locked) may be called
-** when the netif is not locked, and may take the lock when necessary in
-** order to map packet buffers into the current address space.
 */
-#define PKT(ni, id)      __PKT((ni), TRUSTED_PKT_ID((ni), (id)), CI_TRUE)
-#define PKT_NNL(ni, id)  __PKT((ni), TRUSTED_PKT_ID((ni), (id)), CI_FALSE)
-#define PKT_NML(ni, id, ni_locked)                                      \
-                         __PKT((ni), TRUSTED_PKT_ID((ni), (id)), (ni_locked))
+#define PKT(ni, id)      __PKT((ni), TRUSTED_PKT_ID((ni), (id)))
 
 
 /* Validate packet.  Requires netif lock. */
@@ -566,9 +560,9 @@ ci_inline ci_ip_pkt_fmt* __ci_pkt_chk(ci_netif* ni, oo_pkt_p pp, int ni_locked,
                                       const char* file, int line) {
 #if CI_CFG_DETAILED_CHECKS
   (void) __TRUSTED_PKT_ID(ni, pp, file, line);
-  ci_assert_valid_pkt(ni, __PKT(ni, pp, ni_locked), ni_locked, file, line);
+  ci_assert_valid_pkt(ni, __PKT(ni, pp), ni_locked, file, line);
 #endif
-  return __PKT(ni, __TRUSTED_PKT_ID(ni, pp, file, line), ni_locked);
+  return __PKT(ni, __TRUSTED_PKT_ID(ni, pp, file, line));
 }
 
 #define PKT_CHK(ni, id)                                 \
@@ -630,7 +624,9 @@ ci_inline int oo_ether_hdr_size(const struct ci_ip_pkt_fmt_s *pkt)
  * offset instead of ether offset. */
 ci_inline ci_uint16 oo_ether_type_get(const struct ci_ip_pkt_fmt_s *pkt)
 {
-  return *((ci_uint16 *)PKT_IP_HDR_START(pkt) - 1);
+  char* tmp = (char*) PKT_IP_HDR_START(pkt);
+  tmp = tmp - sizeof(ci_uint16);
+  return *(ci_uint16 *)tmp;
 }
 ci_inline void oo_tx_ether_type_set(struct ci_ip_pkt_fmt_s *pkt,
                                     ci_uint16 type)

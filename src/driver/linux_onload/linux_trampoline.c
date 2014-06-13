@@ -602,11 +602,13 @@ asmlinkage int efab_linux_sys_accept4(int fd, struct sockaddr __user* addr,
 
 # ifdef SYS_ACCEPT4
     rc = (sys_socketcall_fn) (SYS_ACCEPT4, socketcall_args);
-# else
-    rc = (sys_socketcall_fn) (SYS_ACCEPT, socketcall_args);
-    /* If we ever need non-zero flags here, we should implement it */
-    ci_assert_equal(flags, 0);
+    if( rc == -EINVAL )
 # endif
+    {
+      rc = (sys_socketcall_fn) (SYS_ACCEPT, socketcall_args);
+      /* If we ever need non-zero flags here, we should implement it */
+      ci_assert_equal(flags, 0);
+    }
     goto out;
   }
 #endif
@@ -1416,6 +1418,65 @@ efab_linux_trampoline_handler_close32(int fd, struct pt_regs *regs, void *ret) {
 }
 
 #endif
+
+#ifdef OO_DO_HUGE_PAGES
+#include <linux/unistd.h>
+asmlinkage int efab_linux_sys_shmget(key_t key, size_t size, int shmflg)
+{
+  asmlinkage int (*sys_shmget_fn)(key_t, size_t, int);
+  int rc;
+
+  ci_assert(syscall_table);
+
+  sys_shmget_fn = syscall_table[__NR_shmget];
+  TRAMP_DEBUG ("shmget(%d,%d,%d) via %p...", key, size, shmflg,
+               sys_shmget_fn);
+  rc = sys_shmget_fn(key, size, shmflg);
+  TRAMP_DEBUG ("... = %d", rc);
+  return rc;
+}
+asmlinkage long efab_linux_sys_shmat(int shmid, char __user *addr, int shmflg)
+{
+  asmlinkage long (*sys_shmat_fn)(int, char __user *, int);
+  long rc;
+
+  ci_assert(syscall_table);
+
+  sys_shmat_fn = syscall_table[__NR_shmat];
+  TRAMP_DEBUG ("shmat(%d,%p,%d) via %p...", shmid, addr, shmflg,
+               sys_shmat_fn);
+  rc = sys_shmat_fn(shmid, addr, shmflg);
+  TRAMP_DEBUG ("... = %p", rc);
+  return rc;
+}
+asmlinkage int efab_linux_sys_shmdt(char __user *addr)
+{
+  asmlinkage int (*sys_shmdt_fn)(char __user *);
+  int rc;
+
+  ci_assert(syscall_table);
+
+  sys_shmdt_fn = syscall_table[__NR_shmdt];
+  TRAMP_DEBUG ("shmdt(%p) via %p...", addr, sys_shmdt_fn);
+  rc = sys_shmdt_fn(addr);
+  TRAMP_DEBUG ("... = %d", rc);
+  return rc;
+}
+asmlinkage int efab_linux_sys_shmctl(int shmid, int cmd, struct shmid_ds __user *buf)
+{
+  asmlinkage int (*sys_shmctl_fn)(int, int, struct shmid_ds __user *);
+  int rc;
+
+  ci_assert(syscall_table);
+
+  sys_shmctl_fn = syscall_table[__NR_shmctl];
+  TRAMP_DEBUG ("shmdt(%p) via %p...", shmid, cmd, buf, sys_shmctl_fn);
+  rc = sys_shmctl_fn(shmid, cmd, buf);
+  TRAMP_DEBUG ("... = %d", rc);
+  return rc;
+}
+#endif
+
 
 /* This function abstracts writing to the syscall.  Sadly some later kernels
  * map the syscall tables read-only.  Fidling with permissions is tricky, so we

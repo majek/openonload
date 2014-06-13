@@ -13,6 +13,21 @@
 ** GNU General Public License for more details.
 */
 
+/*
+** Copyright 2005-2012  Solarflare Communications Inc.
+**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
+** Copyright 2002-2005  Level 5 Networks Inc.
+**
+** This program is free software; you can redistribute it and/or modify it
+** under the terms of version 2 of the GNU General Public License as
+** published by the Free Software Foundation.
+**
+** This program is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+** GNU General Public License for more details.
+*/
+
 /* README!
  *
  * Please do not add any new '#include's here without first talking to
@@ -54,11 +69,21 @@ int oof_shared_keep_thresh = 100;
 int oof_shared_steal_thresh = 200;
 
 
-/* Which hwports are currently acceleratable.  Initialise to -1
- * (i.e. all ports available). Add/remove ports from this set with
- * oof_update_available_hwports()
+static struct oof_manager* the_manager;
+
+/* This mask tracks which hwports are up.  Unicast filters are usually
+ * installed on all interfaces that are up and mapped into the
+ * corresponding stack and not unavailable (see below).
  */
-unsigned oof_available_hwport_mask = (unsigned)-1;
+static unsigned oof_hwports_up;
+
+/* This mask tracks which hwports are unavailable because they are members
+ * of an unacceleratable bond.  ie. Filters should not be used with
+ * unavailable hwports because traffic arriving on them goes via the kernel
+ * stack.
+ */
+static unsigned oof_hwports_available = (unsigned) -1;
+
 
 #define IPF_LOG(...)  OO_DEBUG_IPF(ci_log(__VA_ARGS__))
 
@@ -100,19 +125,9 @@ static void
 oof_socket_mcast_remove(struct oof_manager* fm, struct oof_socket* skf,
                         ci_dllist* mcast_filters);
 
-
-/**********************************************************************
-***********************************************************************
-**********************************************************************/
-
-void oof_update_available_hwports(int hwport, int add)
-{
-  if( add ) 
-    oof_available_hwport_mask |= (1 << hwport);
-  else
-    oof_available_hwport_mask &= ~(1 << hwport);
-}
-
+static unsigned
+oof_mcast_filter_unconflicted_hwports(struct oof_local_port* lp,
+                                      struct oof_mcast_filter* mf);
 
 /**********************************************************************
 ***********************************************************************
@@ -128,10 +143,6 @@ static int __oof_hw_filter_set(struct oof_socket* skf,
 {
   int rc;
 
-  hwport_mask = hwport_mask & oof_available_hwport_mask;
-  if( hwport_mask == 0 )
-    return 0;
-
   rc = oo_hw_filter_set(oofilter, trs, protocol, saddr, sport,
                             daddr, dport, hwport_mask);
   if( rc == 0 ) {
@@ -140,6 +151,11 @@ static int __oof_hw_filter_set(struct oof_socket* skf,
     oof_dl_filter_set(oofilter,
                       oof_cb_stack_id(oof_cb_socket_stack(skf)),
                       protocol, saddr, sport, daddr, dport);
+  }
+  else if( rc == -EACCES ) {
+    OO_DEBUG_ERR(ci_log(FSK_FMT "FILTER "QUIN_FMT" blocked by firewall",
+                        caller, SK_PRI_ARGS(skf),
+                        QUIN_ARGS(protocol, daddr, dport, saddr, sport)));
   }
   else if( fail_is_error ) {
     OO_DEBUG_ERR(ci_log(FSK_FMT "ERROR: FILTER "QUIN_FMT" failed (%d)",
@@ -182,13 +198,15 @@ static void __oof_hw_filter_clear_wild(struct oof_local_port* lp,
 static void __oof_hw_filter_move(struct oof_socket* skf,
                                  struct oof_local_port* lp,
                                  struct oof_local_port_addr* lpa,
-                                 unsigned laddr,
+                                 unsigned laddr, unsigned hwport_mask,
                                  const char* caller)
 {
   IPF_LOG(FSK_FMT "MOVE "TRIPLE_FMT" from stack %d", caller, SK_PRI_ARGS(skf),
           TRIPLE_ARGS(lp->lp_protocol, laddr, lp->lp_lport),
           oof_cb_stack_id(lpa->lpa_filter.trs));
-  oo_hw_filter_move(&lpa->lpa_filter, oof_cb_socket_stack(skf));
+  oo_hw_filter_update(&lpa->lpa_filter, oof_cb_socket_stack(skf),
+                      lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
+                      hwport_mask);
 }
 
 
@@ -202,8 +220,8 @@ static void __oof_hw_filter_move(struct oof_socket* skf,
 #define oof_hw_filter_clear_wild(lp, lpa, laddr)                        \
       __oof_hw_filter_clear_wild((lp), (lpa), (laddr), __FUNCTION__)
 
-#define oof_hw_filter_move(skf, lp, lpa, laddr)                         \
-  __oof_hw_filter_move((skf), (lp), (lpa), (laddr), __FUNCTION__)
+#define oof_hw_filter_move(skf, lp, lpa, laddr, hwports)                \
+  __oof_hw_filter_move((skf), (lp), (lpa), (laddr), (hwports), __FUNCTION__)
 
 
 static void oof_sw_insert_fail(struct oof_socket* skf,
@@ -367,6 +385,8 @@ oof_manager_alloc(unsigned local_addr_max)
   struct oof_manager* fm;
   int hash;
 
+  ci_assert(the_manager == NULL);
+
   fm = CI_ALLOC_OBJ(struct oof_manager);
   if( fm == NULL )
     return NULL;
@@ -382,6 +402,7 @@ oof_manager_alloc(unsigned local_addr_max)
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
     ci_dllist_init(&fm->fm_local_ports[hash]);
   ci_dllist_init(&fm->fm_mcast_laddr_socks);
+  the_manager = fm;
   return fm;
 }
 
@@ -391,6 +412,8 @@ oof_manager_free(struct oof_manager* fm)
 {
   int hash;
   ci_assert(ci_dllist_is_empty(&fm->fm_mcast_laddr_socks));
+  ci_assert(fm == the_manager);
+  the_manager = NULL;
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
     ci_assert(ci_dllist_is_empty(&fm->fm_local_ports[hash]));
   ci_irqlock_dtor(&fm->fm_lock);
@@ -502,7 +525,7 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
       if( skf != NULL )
         oof_hw_filter_set(skf, &lpa->lpa_filter, oof_cb_socket_stack(skf),
                           lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
-                          OO_HW_PORT_ALL, 1);
+                          oof_hwports_available & oof_hwports_up, 1);
       /* Add h/w filters for full-match sockets. */
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                           &lpa->lpa_full_socks) {
@@ -513,7 +536,8 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
         else
           oof_hw_filter_set(skf, &skf->sf_full_match_filter, skf_stack,
                             lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                            skf->sf_laddr, lp->lp_lport, OO_HW_PORT_ALL, 1);
+                            skf->sf_laddr, lp->lp_lport,
+                            oof_hwports_available & oof_hwports_up, 1);
       }
       /* Add s/w filters for wild sockets. */
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
@@ -648,6 +672,111 @@ oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
   ci_irqlock_unlock(&fm->fm_lock, &lock_flags);
 }
 
+/**********************************************************************
+***********************************************************************
+**********************************************************************/
+
+static void
+oof_manager_update_all_filters(struct oof_manager* fm)
+{
+  /* Invoked when physical interfaces come and go.  We add and remove
+   * hardware filters to ensure that we don't receive packets through
+   * interfaces that are down.  (At time of writing nothing in the net
+   * driver or hardware stops packets being delivered when the interface is
+   * administratively down).
+   */
+  struct oof_local_port_addr* lpa;
+  struct oof_mcast_filter* mf;
+  struct oof_local_port* lp;
+  struct oof_socket* skf;
+  unsigned laddr, hwport_mask;
+  int hash, la_i;
+
+  /* Find all filters potentially affected by a change in the set of
+   * hwports, and modify the set of ports filtered as needed.
+   */
+  for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
+    CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
+                        &fm->fm_local_ports[hash]) {
+      /* Find and update unicast filters. */
+      for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
+        lpa = &lp->lp_addr[la_i];
+        laddr = fm->fm_local_addrs[la_i].la_laddr;
+        if( lpa->lpa_filter.trs != NULL )
+          oo_hw_filter_update(&lpa->lpa_filter, lpa->lpa_filter.trs,
+                              lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
+                              oof_hwports_available & oof_hwports_up);
+        CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
+                            &lpa->lpa_full_socks)
+          if( skf->sf_full_match_filter.trs != NULL )
+            oo_hw_filter_update(&skf->sf_full_match_filter,
+                                skf->sf_full_match_filter.trs,
+                                lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
+                                skf->sf_laddr, lp->lp_lport,
+                                oof_hwports_available & oof_hwports_up);
+      }
+      /* Find and update multicast filters. */
+      CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
+                          &lp->lp_mcast_filters)
+        if( mf->mf_filter.trs != NULL ) {
+          hwport_mask = oof_mcast_filter_unconflicted_hwports(lp, mf);
+          hwport_mask &= oof_hwports_up & oof_hwports_available;
+          oo_hw_filter_update(&mf->mf_filter, mf->mf_filter.trs,
+                              lp->lp_protocol, 0, 0,
+                              mf->mf_maddr, lp->lp_lport, hwport_mask);
+        }
+    }
+}
+
+
+void oof_hwport_up_down(int hwport, int up)
+{
+  /* A physical interface has gone up or down.
+   *
+   * Caller must *not* hold the control-plane lock.
+   */
+  struct oof_manager* fm = the_manager;
+  ci_irqlock_state_t cicp_lock_state;
+  ci_irqlock_state_t lock_flags;
+  oof_cb_cicp_lock(&cicp_lock_state);
+  ci_irqlock_lock(&fm->fm_lock, &lock_flags);
+  if( up )
+    oof_hwports_up |= 1 << hwport;
+  else
+    oof_hwports_up &= ~(1 << hwport);
+  IPF_LOG("%s: %s hwport=%d mask=%x",
+          __FUNCTION__, up?"UP":"DOWN", hwport, oof_hwports_up);
+  oof_manager_update_all_filters(fm);
+  ci_irqlock_unlock(&fm->fm_lock, &lock_flags);
+  oof_cb_cicp_unlock(&cicp_lock_state);
+}
+
+
+void oof_hwport_un_available(int hwport, int available)
+{
+  /* A physical interface is (or isn't) unavailable because it is a member
+   * of an unacceleratable bond.  ie. We should(n't) install filters on
+   * this hwport.
+   *
+   * Caller must hold the control-plane lock.
+   */
+  struct oof_manager* fm = the_manager;
+  ci_irqlock_state_t lock_flags;
+  ci_irqlock_lock(&fm->fm_lock, &lock_flags);
+  if( available )
+    oof_hwports_available |= 1 << hwport;
+  else
+    oof_hwports_available &= ~(1 << hwport);
+  IPF_LOG("%s: %s hwport=%d mask=%x",
+          __FUNCTION__, available?"AVAIL":"UNAVAIL",
+               hwport, oof_hwports_available);
+  oof_manager_update_all_filters(fm);
+  ci_irqlock_unlock(&fm->fm_lock, &lock_flags);
+}
+
+/**********************************************************************
+***********************************************************************
+**********************************************************************/
 
 static struct oof_local_port*
 oof_local_port_find(struct oof_manager* fm, int protocol, int lport)
@@ -777,7 +906,8 @@ oof_full_socks_add_hw_filters(struct oof_manager* fm,
       continue;
     rc = oof_hw_filter_set(skf, &skf->sf_full_match_filter, filter_stack,
                            lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                           skf->sf_laddr, lp->lp_lport, OO_HW_PORT_ALL, 0);
+                           skf->sf_laddr, lp->lp_lport,
+                           oof_hwports_available & oof_hwports_up, 0);
     if( rc < 0 ) {
       oof_full_socks_del_hw_filters(fm, lp, lpa);
       break;
@@ -879,11 +1009,13 @@ oof_local_port_addr_fixup_wild(struct oof_manager* fm,
     if( lpa->lpa_filter.trs == NULL ) {
       ci_assert(lpa->lpa_n_full_sharers == 0);
       rc = oof_hw_filter_set(skf, &lpa->lpa_filter, skf_stack, lp->lp_protocol,
-                             0, 0, laddr, lp->lp_lport, OO_HW_PORT_ALL, 1);
+                             0, 0, laddr, lp->lp_lport,
+                             oof_hwports_available & oof_hwports_up, 1);
       skf_has_filter = rc == 0;
     }
     else if( lpa->lpa_filter.trs != skf_stack && lpa->lpa_n_full_sharers==0 ) {
-      oof_hw_filter_move(skf, lp, lpa, laddr);
+      oof_hw_filter_move(skf, lp, lpa, laddr,
+                         oof_hwports_available & oof_hwports_up);
       ci_assert(lpa->lpa_filter.trs == skf_stack);
       skf_has_filter = 1;
     }
@@ -960,7 +1092,8 @@ oof_socket_add_full_hw(struct oof_manager* fm, struct oof_socket* skf,
     struct oof_local_port* lp = skf->sf_local_port;
     rc = oof_hw_filter_set(skf, &skf->sf_full_match_filter, skf_stack,
                            lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
-                           skf->sf_laddr, lp->lp_lport, OO_HW_PORT_ALL, 1);
+                           skf->sf_laddr, lp->lp_lport,
+                           oof_hwports_available & oof_hwports_up, 1);
     if( rc < 0 ) {
       /* I think there are the following ways this can fail:
        *
@@ -1008,7 +1141,8 @@ __oof_socket_add_wild(struct oof_manager* fm, struct oof_socket* skf,
 
   if( lpa->lpa_filter.trs == NULL ) {
     rc = oof_hw_filter_set(skf, &lpa->lpa_filter, skf_stack, lp->lp_protocol,
-                           0, 0, laddr, lp->lp_lport, OO_HW_PORT_ALL, 1);
+                           0, 0, laddr, lp->lp_lport,
+                           oof_hwports_available & oof_hwports_up, 1);
     if( rc != 0 )
       oof_cb_sw_filter_remove(skf, laddr, lp->lp_lport, 0, 0,
                               lp->lp_protocol);
@@ -1086,8 +1220,20 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf)
     lpa = &lp->lp_addr[la_i];
     la = &fm->fm_local_addrs[la_i];
     if( skf->sf_raddr ) {
-      if( (rc = oof_socket_add_full_sw(skf)) != 0 )
+      if( (rc = oof_socket_add_full_sw(skf)) != 0 ) {
+        /* If we failed to accept new TCP connection, we should remove the
+         * filters for listening socket, since they are useless. */
+        if( lp->lp_protocol == IPPROTO_TCP &&
+            lpa->lpa_filter.trs == oof_cb_socket_stack(skf) ) {
+          OO_DEBUG_ERR(ci_log("%s: ERROR: failed to accept TCP connection "
+                              IP_FMT":%d->"IP_FMT":%d REMOVE HW FILTER",
+                              __FUNCTION__,
+                              IP_ARG(skf->sf_raddr), skf->sf_rport,
+                              IP_ARG(skf->sf_laddr), lp->lp_lport));
+          oof_hw_filter_clear_wild(lp, lpa, skf->sf_laddr);
+        }
         return rc;
+      }
       if( (rc = oof_socket_add_full_hw(fm, skf, lpa)) != 0 ) {
         oof_socket_del_full_sw(skf);
         return rc;
@@ -1340,7 +1486,7 @@ oof_udp_connect_mcast_laddr(struct oof_manager* fm, struct oof_socket* skf,
   rc = oof_hw_filter_set(skf, &skf->sf_full_match_filter,
                          oof_cb_socket_stack(skf), lp->lp_protocol,
                          raddr, rport, laddr, lp->lp_lport,
-                         OO_HW_PORT_ALL, 1);
+                         oof_hwports_available & oof_hwports_up, 1);
   if( rc != 0 )
     goto fail2;
   return 0;
@@ -1546,13 +1692,13 @@ oof_mcast_filter_list_free(ci_dllist* mcast_filters)
 }
 
 
-static int 
-oof_mcast_member_find_dup(struct oof_mcast_member *mm, ci_dllist* list)
+static int
+oof_socket_has_maddr_filter(struct oof_socket* skf, unsigned maddr)
 {
-  struct oof_mcast_member* gmm;
-  CI_DLLIST_FOR_EACH2(struct oof_mcast_member, gmm, mm_socket_link, list)
-    if( gmm != mm && gmm->mm_maddr == mm->mm_maddr &&
-        gmm->mm_socket == mm->mm_socket && gmm->mm_filter != NULL )
+  struct oof_mcast_member* mm;
+  CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_socket_link,
+                      &skf->sf_mcast_memberships)
+    if( mm->mm_maddr == maddr && mm->mm_filter != NULL )
       return 1;
   return 0;
 }
@@ -1560,7 +1706,7 @@ oof_mcast_member_find_dup(struct oof_mcast_member *mm, ci_dllist* list)
 
 static struct oof_mcast_member*
 oof_mcast_member_alloc(struct oof_socket* skf, unsigned maddr,
-                       int ifindex)
+                       int ifindex, unsigned hwport_mask)
 {
   struct oof_mcast_member* mm;
   mm = CI_ALLOC_OBJ(struct oof_mcast_member);
@@ -1569,53 +1715,84 @@ oof_mcast_member_alloc(struct oof_socket* skf, unsigned maddr,
     mm->mm_socket = skf;
     mm->mm_maddr = maddr;
     mm->mm_ifindex = ifindex;
+    mm->mm_hwport_mask = hwport_mask;
   }
   return mm;
 }
 
 
+static const char*
+oof_mcast_member_state(struct oof_mcast_member* mm)
+{
+  unsigned hwports_got;
+  const char* s;
+  hwports_got = oo_hw_filter_hwports(&mm->mm_filter->mf_filter);
+  if( mm->mm_hwport_mask ) {
+    if( (hwports_got & mm->mm_hwport_mask) == mm->mm_hwport_mask )
+      s = "ACCELERATED";
+    else if( hwports_got & mm->mm_hwport_mask )
+      s = "PARTIALLY_ACCELERATED";
+    else
+      s = "KERNEL";
+  }
+  else
+    s = "NO_ACCELERATABLE_PORTS";
+  return s;
+}
+
+
 static void
-oof_mcast_filter_init(struct oof_mcast_filter* mf, unsigned maddr,
-                      int ifindex)
+oof_mcast_filter_init(struct oof_mcast_filter* mf, unsigned maddr)
 {
   oo_hw_filter_init(&mf->mf_filter);
   mf->mf_maddr = maddr;
-  mf->mf_ifindex = ifindex;
+  mf->mf_hwport_mask = 0;
   ci_dllist_init(&mf->mf_memberships);
 }
 
 
+static unsigned
+oof_mcast_filter_hwport_mask(struct oof_mcast_filter* mf)
+{
+  struct oof_mcast_member* mm;
+  unsigned hwport_mask = 0;
+  CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_filter_link,
+                      &mf->mf_memberships)
+    hwport_mask |= mm->mm_hwport_mask;
+  return hwport_mask;
+}
+
+
 static struct oof_mcast_filter*
-oof_local_port_mcast_find(struct oof_local_port* lp, unsigned maddr,
-                          unsigned ifindex)
+oof_local_port_find_mcast_filter(struct oof_local_port* lp,
+                                 struct tcp_helper_resource_s* stack,
+                                 unsigned maddr)
 {
   struct oof_mcast_filter* mf;
   CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
                       &lp->lp_mcast_filters)
-    if( mf->mf_maddr == maddr && mf->mf_ifindex == ifindex)
+    if( mf->mf_filter.trs == stack && mf->mf_maddr == maddr )
       break;
   return mf;
 }
 
 
-static struct tcp_helper_resource_s*
-oof_mcast_filter_stack(struct oof_mcast_filter* mf)
+/* Find out whether there are any hwports that [mf] can install filters on.
+ * ie. We're looking for hwports that no other stack wants to install the
+ * same multicast filter on.
+ */
+static unsigned
+oof_mcast_filter_unconflicted_hwports(struct oof_local_port* lp,
+                                      struct oof_mcast_filter* mf)
 {
-  /* If all member sockets are from the same stack, return that stack, else
-   * return NULL.
-   */
-  struct tcp_helper_resource_s* f_stack = NULL;
-  struct tcp_helper_resource_s* skf_stack;
-  struct oof_mcast_member* mm;
-
-  CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_filter_link,
-                      &mf->mf_memberships) {
-    skf_stack = oof_cb_socket_stack(mm->mm_socket);
-    if( f_stack && f_stack != skf_stack )
-      return NULL;
-    f_stack = skf_stack;
-  }
-  return f_stack;
+  unsigned hwport_mask = mf->mf_hwport_mask;
+  struct oof_mcast_filter* mf2;
+  CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf2, mf_lp_link,
+                      &lp->lp_mcast_filters)
+    if( mf2 != mf && mf2->mf_maddr == mf->mf_maddr &&
+        mf2->mf_filter.trs != mf->mf_filter.trs )
+      hwport_mask &= ~mf2->mf_hwport_mask;
+  return hwport_mask;
 }
 
 
@@ -1626,64 +1803,69 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
   struct oof_socket* skf = mm->mm_socket;
   struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
   struct oof_local_port* lp = skf->sf_local_port;
+  unsigned install_hwport_mask;
   struct oof_mcast_filter* mf;
-  unsigned hwport_mask;
-  int install_sw_filter = 0;
   int rc;
 
   ci_assert(lp != NULL);
   ci_assert(OOF_NEED_MCAST_FILTER(skf, mm->mm_maddr));
   ci_irqlock_check_locked(&fm->fm_lock);
 
-  /* In case we already have a mcast member installed on this socket -
-   * no need to install another sw filter */
-  if (!oof_mcast_member_find_dup(mm, &skf->sf_mcast_memberships) ) {
+  /* Install a software filter if this socket doesn't already have a filter
+   * for this maddr.  (This happens if the socket joins the same group on
+   * more than one interface).
+   */
+  if( ! oof_socket_has_maddr_filter(skf, mm->mm_maddr) ) {
     rc = oof_cb_sw_filter_insert(skf, mm->mm_maddr, lp->lp_lport,
                                  0, 0, lp->lp_protocol);
     if( rc != 0 )
       return; /* SW filter failed: do not insert HW */
-    install_sw_filter = 1;
   }
 
-  mf = oof_local_port_mcast_find(lp, mm->mm_maddr, mm->mm_ifindex);
-  if( mf == NULL ) {
-    mf = oof_mcast_filter_list_get(mcast_filters);
-    oof_mcast_filter_init(mf, mm->mm_maddr, mm->mm_ifindex);
-    ci_dllist_push(&lp->lp_mcast_filters, &mf->mf_lp_link);
-
-    if( (oof_cb_get_hwport_mask(mm->mm_ifindex, &hwport_mask) != 0) ||
-        hwport_mask == 0 ) {
-      IPF_LOG(FSK_FMT "no hwports for filter on ifindex %d", 
-              FSK_PRI_ARGS(skf), mm->mm_ifindex);
-    } else {
-      /* If this fails all is not lost -- traffic will be delivered via the
-       * kernel stack.
-       */
-      rc = oof_hw_filter_set(skf, &mf->mf_filter, skf_stack, lp->lp_protocol,
-                             0, 0, mf->mf_maddr, lp->lp_lport, hwport_mask, 1);
-      if( rc != 0 && install_sw_filter ) {
-        IPF_LOG(FSK_FMT "failed to set mcast hw filter", FSK_PRI_ARGS(skf));
-        oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport, 0, 0,
-                                lp->lp_protocol);
-        /* do not add this mm to the mf_memberships list;
-         * remove it from lp_mcast_filters list */
-        ci_dllist_remove(&mf->mf_lp_link);
-        return;
+  /* Find filters that conflict with the one we want to install.  ie. Those
+   * with same maddr+port and overlapping hwports, and not pointing at the
+   * same stack.  Remove hardware filters that conflict.
+   *
+   * NB. This will not be needed in Huntington.
+   */
+  CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
+                      &lp->lp_mcast_filters)
+    if( mm->mm_maddr == mf->mf_maddr && mf->mf_filter.trs != skf_stack ) {
+      if( mm->mm_hwport_mask & mf->mf_hwport_mask ) {
+        IPF_LOG(FSK_FMT "CONFLICT: maddr="IPPORT_FMT" if=%d hwports=%x "
+                "AND stack=%d hwports=%x", FSK_PRI_ARGS(skf),
+                IPPORT_ARG(mm->mm_maddr, lp->lp_lport), mm->mm_ifindex,
+                mm->mm_hwport_mask, oof_cb_stack_id(mf->mf_filter.trs),
+                mf->mf_hwport_mask);
+        oo_hw_filter_clear_hwports(&mf->mf_filter, mm->mm_hwport_mask);
       }
     }
+
+  mf = oof_local_port_find_mcast_filter(lp, skf_stack, mm->mm_maddr);
+  if( mf == NULL ) {
+    mf = oof_mcast_filter_list_get(mcast_filters);
+    oof_mcast_filter_init(mf, mm->mm_maddr);
+    ci_dllist_push(&lp->lp_mcast_filters, &mf->mf_lp_link);
   }
-  else {
-    if( mf->mf_filter.trs && mf->mf_filter.trs != skf_stack ) {
-      /* Sockets in multiple stacks want the same packets, so we cannot
-       * accelerate.
-       */
-      oo_hw_filter_clear(&mf->mf_filter);
-      IPF_LOG(FSK_FMT "CLEAR "IPPORT_FMT" cannot share", FSK_PRI_ARGS(skf),
-              IPPORT_ARG(mm->mm_maddr, lp->lp_lport));
-    }
-  }
+
   mm->mm_filter = mf;
   ci_dllist_push(&mf->mf_memberships, &mm->mm_filter_link);
+  mf->mf_hwport_mask |= mm->mm_hwport_mask;
+  install_hwport_mask = oof_mcast_filter_unconflicted_hwports(lp, mf);
+  rc = oo_hw_filter_update(&mf->mf_filter, skf_stack, lp->lp_protocol,
+                           0, 0, mf->mf_maddr, lp->lp_lport,
+                           install_hwport_mask);
+  if( rc != 0 )
+    /* We didn't get all of the filters we wanted, but traffic should
+     * still get there via the kernel stack.
+     */
+    OO_DEBUG_ERR(ci_log(FSK_FMT "mcast hw filter error: maddr="IPPORT_FMT
+                        " if=%d wanted=%x,%x install=%x got=%x",
+                        FSK_PRI_ARGS(skf),
+                        IPPORT_ARG(mm->mm_maddr, lp->lp_lport),
+                        mm->mm_ifindex, mm->mm_hwport_mask, mf->mf_hwport_mask,
+                        install_hwport_mask,
+                        oo_hw_filter_hwports(&mf->mf_filter)));
 }
 
 
@@ -1692,72 +1874,85 @@ oof_mcast_remove(struct oof_manager* fm, struct oof_mcast_member* mm,
                  ci_dllist* mcast_filters)
 {
   struct oof_mcast_filter* mf = mm->mm_filter;
-  struct tcp_helper_resource_s* stack;
   struct oof_socket* skf = mm->mm_socket;
   struct oof_local_port* lp = skf->sf_local_port;
   unsigned hwport_mask;
+  int rc;
 
-  ci_assert(mf != NULL);
+  ci_assert(mm->mm_filter != NULL);
   ci_assert(ci_dllist_not_empty(&mf->mf_memberships));
   ci_assert(mf->mf_maddr == mm->mm_maddr);
-
-  /* In case we already have a mcast member installed on this socket -
-   * no need to install another sw filter
-   */
-  if (!oof_mcast_member_find_dup(mm, &skf->sf_mcast_memberships) )
-    oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport,
-                            0, 0, lp->lp_protocol);
 
   mm->mm_filter = NULL;
   ci_dllist_remove(&mm->mm_filter_link);
   if( ci_dllist_is_empty(&mf->mf_memberships) ) {
-    if( mf->mf_filter.trs != NULL ) {
-      oo_hw_filter_clear(&mf->mf_filter);
-      IPF_LOG(FSK_FMT "CLEAR "IPPORT_FMT, FSK_PRI_ARGS(skf),
-              IPPORT_ARG(mm->mm_maddr, lp->lp_lport));
-    }
+    oo_hw_filter_clear(&mf->mf_filter);
+    IPF_LOG(FSK_FMT "CLEAR "IPPORT_FMT, FSK_PRI_ARGS(skf),
+            IPPORT_ARG(mm->mm_maddr, lp->lp_lport));
     ci_dllist_remove(&mf->mf_lp_link);
     ci_dllist_push(mcast_filters, &mf->mf_lp_link);
   }
-  else if( mf->mf_filter.trs == NULL ) {
-    stack = oof_mcast_filter_stack(mf);
-    if( stack != NULL ) {
-      if( oof_cb_get_hwport_mask(mm->mm_ifindex, &hwport_mask) == 0 ) {
-        oof_hw_filter_set(skf, &mf->mf_filter, stack, lp->lp_protocol,
-                          0, 0, mm->mm_maddr, lp->lp_lport, hwport_mask, 1);
-        IPF_LOG(FSK_FMT "FILTER "TRIPLE_FMT" => %d", FSK_PRI_ARGS(skf),
-                TRIPLE_ARGS(lp->lp_protocol, mm->mm_maddr, lp->lp_lport),
-                oof_cb_stack_id(stack));
+  else {
+    mf->mf_hwport_mask = oof_mcast_filter_hwport_mask(mf);
+    hwport_mask = oof_mcast_filter_unconflicted_hwports(lp, mf);
+    oo_hw_filter_update(&mf->mf_filter, mf->mf_filter.trs, lp->lp_protocol,
+                        0, 0, mf->mf_maddr, lp->lp_lport, hwport_mask);
+  }
+
+  /* Is it now possible to insert filters to accelerate this group for
+   * another stack?
+   */
+  CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
+                      &lp->lp_mcast_filters)
+    if( mf->mf_maddr == mm->mm_maddr ) {
+      unsigned got_hwport_mask;
+      got_hwport_mask = oo_hw_filter_hwports(&mf->mf_filter);
+      if( mf->mf_hwport_mask != got_hwport_mask ) {
+        hwport_mask = oof_mcast_filter_unconflicted_hwports(lp, mf);
+        if( hwport_mask != got_hwport_mask ) {
+          IPF_LOG(FSK_FMT "maddr="IPPORT_FMT" if=%d MODIFY stack=%d wanted=%x "
+                  "had=%x install=%x", FSK_PRI_ARGS(skf),
+                  IPPORT_ARG(mm->mm_maddr, lp->lp_lport), mm->mm_ifindex,
+                  oof_cb_stack_id(mf->mf_filter.trs), mf->mf_hwport_mask,
+                  got_hwport_mask, hwport_mask);
+          rc = oo_hw_filter_update(&mf->mf_filter, mf->mf_filter.trs,
+                                   lp->lp_protocol, 0, 0, mf->mf_maddr,
+                                   lp->lp_lport, hwport_mask);
+          if( rc != 0 )
+            OO_DEBUG_ERR(ci_log("%s: mcast hw filter error: maddr="IPPORT_FMT
+                                " wanted=%x install=%x got=%x", __FUNCTION__,
+                                IPPORT_ARG(mf->mf_maddr, lp->lp_lport),
+                                mf->mf_hwport_mask, hwport_mask,
+                                oo_hw_filter_hwports(&mf->mf_filter)));
+        }
       }
     }
-  }
+
+  /* Remove software filter if no filters remain for maddr. */
+  if( ! oof_socket_has_maddr_filter(skf, mm->mm_maddr) )
+    oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport,
+                            0, 0, lp->lp_protocol);
 }
 
 
 static void
 oof_mcast_update(struct oof_manager* fm, struct oof_local_port *lp,
-                 struct oof_mcast_filter* mf, int ifindex,
-                 unsigned hwport_mask)
+                 struct oof_mcast_filter* mf, int ifindex)
 {
-  struct oof_mcast_member* mm;
+  unsigned install_hwport_mask, before_hwport_mask;
+  int rc;
 
-  ci_irqlock_check_locked(&fm->fm_lock);
-
-  CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_filter_link,
-                      &mf->mf_memberships) {
-    ci_assert(mm->mm_ifindex == ifindex);
-
-    IPF_LOG("%s: MOVE "TRIPLE_FMT" hwport_mask=%x", __FUNCTION__,
-            TRIPLE_ARGS(lp->lp_protocol, mm->mm_maddr, lp->lp_lport),
-            hwport_mask);
-
-    /* Ignore rc to be consistent with oof_mcast_install(): traffic will be
-     * delivered via kernel if there is a failure.
-     */
-    oof_hw_filter_set(mm->mm_socket, &mf->mf_filter,
-                      oof_cb_socket_stack(mm->mm_socket),
-                      lp->lp_protocol, 0, 0, mf->mf_maddr, 
-                      lp->lp_lport, hwport_mask, 1);
+  before_hwport_mask = oo_hw_filter_hwports(&mf->mf_filter);
+  install_hwport_mask = oof_mcast_filter_unconflicted_hwports(lp, mf);
+  if( install_hwport_mask != before_hwport_mask ) {
+    rc = oo_hw_filter_update(&mf->mf_filter, mf->mf_filter.trs, lp->lp_protocol,
+                             0, 0, mf->mf_maddr, lp->lp_lport,
+                             install_hwport_mask);
+    IPF_LOG("%s: UPDATE "IPPORT_FMT" if=%d hwports before=%x wanted=%x "
+            "install=%x after=%x", __FUNCTION__,
+            IPPORT_ARG(mf->mf_maddr, lp->lp_lport),
+            ifindex, before_hwport_mask, mf->mf_hwport_mask,
+            install_hwport_mask, oo_hw_filter_hwports(&mf->mf_filter));
   }
 }
 
@@ -1768,27 +1963,41 @@ oof_mcast_update_filters(struct oof_manager* fm, int ifindex)
   ci_irqlock_state_t lock_flags;
   struct oof_local_port* lp;
   struct oof_mcast_filter* mf;
-  int hash;
+  struct oof_mcast_member* mm;
   unsigned hwport_mask;
-
-  IPF_LOG("%s: ifindex=%u", __FUNCTION__, ifindex);
+  int rc, hash, touched;
 
   /* Caller must hold the CICP_LOCK. */
   ci_irqlock_lock(&fm->fm_lock, &lock_flags);
 
-  if( oof_cb_get_hwport_mask(ifindex, &hwport_mask) != 0 )
+  if( (rc = oof_cb_get_hwport_mask(ifindex, &hwport_mask)) != 0 ) {
+    OO_DEBUG_ERR(ci_log("%s: ERROR: oof_cb_get_hwport_mask(%d) failed rc=%d",
+                        __FUNCTION__, ifindex, rc));
     goto out;
+  }
+
+  IPF_LOG("%s: if=%u hwports=%x", __FUNCTION__, ifindex, hwport_mask);
 
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
     CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
                         &fm->fm_local_ports[hash]) {
+      /* Need to update mf_hwport_mask in all filters first for
+       * oof_mcast_filter_unconflicted_hwports() to give correct results.
+       */
+      touched = 0;
       CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
-                          &lp->lp_mcast_filters) {
-        if( mf->mf_ifindex == ifindex )
-          oof_mcast_update(fm, lp, mf, ifindex, hwport_mask);
-        else if ( mf->mf_ifindex == OO_IFID_ALL )
-          oof_mcast_update(fm, lp, mf, OO_IFID_ALL, OO_HW_PORT_ALL);
-      }
+                          &lp->lp_mcast_filters)
+        CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_filter_link,
+                            &mf->mf_memberships)
+          if( mm->mm_ifindex == ifindex ) {
+            mm->mm_hwport_mask = hwport_mask;
+            mf->mf_hwport_mask = oof_mcast_filter_hwport_mask(mf);
+            touched = 1;
+          }
+      if( touched )
+        CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
+                            &lp->lp_mcast_filters)
+          oof_mcast_update(fm, lp, mf, ifindex);
     }
 
  out:
@@ -1806,9 +2015,11 @@ oof_socket_mcast_add(struct oof_manager* fm, struct oof_socket* skf,
   struct oof_mcast_filter* mf;
   struct oof_mcast_member* mm;
   ci_dllist mcast_filters;
+  unsigned hwport_mask;
   int rc;
 
-  IPF_LOG(FSK_FMT "maddr="IP_FMT, FSK_PRI_ARGS(skf), IP_ARG(maddr));
+  IPF_LOG(FSK_FMT "maddr="IP_FMT" if=%d",
+          FSK_PRI_ARGS(skf), IP_ARG(maddr), ifindex);
 
   ci_dllist_init(&mcast_filters);
   new_mm = NULL;
@@ -1818,7 +2029,19 @@ oof_socket_mcast_add(struct oof_manager* fm, struct oof_socket* skf,
     rc = -EINVAL;
     goto out;
   }
-  if( (new_mm = oof_mcast_member_alloc(skf, maddr, ifindex)) == NULL )
+
+  oof_cb_cicp_lock(&cicp_lock_state);
+  hwport_mask = 0;
+  rc = oof_cb_get_hwport_mask(ifindex, &hwport_mask);
+  oof_cb_cicp_unlock(&cicp_lock_state);
+  if( rc != 0 || hwport_mask == 0 ) {
+    IPF_LOG(FSK_FMT "ERROR: no hwports for if=%d rc=%d",
+            FSK_PRI_ARGS(skf), ifindex, rc);
+    /* Carry on -- we may get hwports later due to cplane changes. */
+  }
+
+  new_mm = oof_mcast_member_alloc(skf, maddr, ifindex, hwport_mask);
+  if( new_mm == NULL )
     goto out_of_memory;
   if( (mf = CI_ALLOC_OBJ(struct oof_mcast_filter)) == NULL )
     goto out_of_memory;
@@ -1933,6 +2156,7 @@ oof_socket_mcast_del_all(struct oof_manager* fm, struct oof_socket* skf)
 static void
 oof_socket_mcast_install(struct oof_manager* fm, struct oof_socket* skf)
 {
+  struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
   ci_irqlock_state_t lock_flags;
   ci_irqlock_state_t cicp_lock_state;
   struct oof_mcast_filter* mf;
@@ -1962,8 +2186,8 @@ oof_socket_mcast_install(struct oof_manager* fm, struct oof_socket* skf)
                           &skf->sf_mcast_memberships)
         if( mm->mm_filter == NULL &&
             OOF_NEED_MCAST_FILTER(skf, mm->mm_maddr) &&
-            oof_local_port_mcast_find(lp, mm->mm_maddr, 
-                                      mm->mm_ifindex) == NULL )
+            oof_local_port_find_mcast_filter(lp, skf_stack,
+                                             mm->mm_maddr) == NULL )
           ++mf_needed;
     }
     if( mf_n >= mf_needed )
@@ -2035,10 +2259,10 @@ oof_socket_mcast_remove(struct oof_manager* fm, struct oof_socket* skf,
 **********************************************************************/
 
 static void
-__oof_socket_dump(const char* pf, struct oof_manager* fm,
-                  struct oof_socket* skf,
-                  void (*log)(void* opaque, const char* fmt, ...),
-                  void* loga)
+oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
+                     struct oof_socket* skf,
+                     void (*log)(void* opaque, const char* fmt, ...),
+                     void* loga)
 {
   struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
   struct oof_local_port* lp = skf->sf_local_port;
@@ -2058,13 +2282,11 @@ __oof_socket_dump(const char* pf, struct oof_manager* fm,
   else if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
     CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
                         &lp->lp_mcast_filters)
-      if( mf->mf_maddr == skf->sf_laddr ) {
-        if( mf->mf_filter.trs == NULL )
-          state = "KERNEL (multicast laddr)";
-        else if( mf->mf_filter.trs == skf_stack )
+      if( mf->mf_maddr == skf->sf_laddr && mf->mf_filter.trs == skf_stack ) {
+        if( oo_hw_filter_hwports(&mf->mf_filter) )
           state = "ACCELERATED (multicast laddr)";
         else
-          state = "!! ORPHANED (bug) !!";  /* This shouldn't happen! */
+          state = "KERNEL (multicast laddr)";
         break;
       }
     if( state == NULL )
@@ -2131,25 +2353,27 @@ oof_socket_dump(struct oof_manager* fm, struct oof_socket* skf,
 {
   ci_irqlock_state_t lock_flags;
   struct oof_mcast_member* mm;
-  const char* state;
+  struct oof_mcast_filter* mf;
+  unsigned hwports_got;
 
   ci_irqlock_lock(&fm->fm_lock, &lock_flags);
   if( skf->sf_local_port != NULL )
-    __oof_socket_dump(__FUNCTION__, fm, skf, log, loga);
+    oof_socket_dump_w_lp(__FUNCTION__, fm, skf, log, loga);
   CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_socket_link,
                       &skf->sf_mcast_memberships) {
-    if( mm->mm_filter == NULL )
-      state = "NOT_BOUND";
-    else if( ! OOF_NEED_MCAST_FILTER(skf, mm->mm_maddr) )
-      state = "MASKED (by laddr)";
-    else if( mm->mm_filter->mf_filter.trs == oof_cb_socket_stack(skf) )
-      state = "ACCELERATED";
-    else if( mm->mm_filter->mf_filter.trs == NULL )
-      state = "KERNEL (shared)";
-    else
-      state = "!! ORPHANED (bug) !!";  /* This shouldn't happen! */
-    log(loga, "%s:   maddr="IP_FMT" %s", __FUNCTION__,
-        IP_ARG(mm->mm_maddr), state);
+    if( (mf = mm->mm_filter) == NULL ) {
+      log(loga, "%s:   maddr="IP_FMT" if=%d hwports=%x NOT_BOUND",
+          __FUNCTION__, IP_ARG(mm->mm_maddr), mm->mm_ifindex,
+          mm->mm_hwport_mask);
+    }
+    else {
+      hwports_got = oo_hw_filter_hwports(&mf->mf_filter);
+      log(loga, "%s:   maddr="IP_FMT" if=%d hwports=%x,%x,%x %s", __FUNCTION__,
+          IP_ARG(mm->mm_maddr), mm->mm_ifindex, mm->mm_hwport_mask,
+          oof_mcast_filter_unconflicted_hwports(skf->sf_local_port, mf) &
+            mm->mm_hwport_mask,
+          hwports_got & mm->mm_hwport_mask, oof_mcast_member_state(mm));
+    }
   }
   ci_irqlock_unlock(&fm->fm_lock, &lock_flags);
 }
@@ -2160,6 +2384,7 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
                     void (*log)(void* opaque, const char* fmt, ...),
                     void* loga)
 {
+  unsigned hwports_got, hwports_uc;
   struct oof_local_port_addr* lpa;
   struct oof_mcast_filter* mf;
   struct oof_mcast_member* mm;
@@ -2174,27 +2399,28 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
   if( ci_dllist_not_empty(&lp->lp_wild_socks) ) {
     log(loga, "  wild sockets:");
     CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, &lp->lp_wild_socks)
-      __oof_socket_dump("    ", fm, skf, log, loga);
+      oof_socket_dump_w_lp("    ", fm, skf, log, loga);
   }
 
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
     lpa = &lp->lp_addr[la_i];
     if( lpa->lpa_filter.trs != NULL )
-      log(loga, "  FILTER "IPPORT_FMT" => %d",
+      log(loga, "  FILTER "IPPORT_FMT" hwports=%x stack=%d",
           IPPORT_ARG(la->la_laddr, lp->lp_lport),
+          oo_hw_filter_hwports(&lpa->lpa_filter),
           oof_cb_stack_id(lpa->lpa_filter.trs));
     if( ci_dllist_not_empty(&lpa->lpa_semi_wild_socks) ) {
       log(loga, "  semi-wild sockets:");
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                           &lpa->lpa_semi_wild_socks)
-        __oof_socket_dump("    ", fm, skf, log, loga);
+        oof_socket_dump_w_lp("    ", fm, skf, log, loga);
     }
     if( ci_dllist_not_empty(&lpa->lpa_full_socks) ) {
       log(loga, "  full-match sockets:");
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                           &lpa->lpa_full_socks)
-        __oof_socket_dump("    ", fm, skf, log, loga);
+        oof_socket_dump_w_lp("    ", fm, skf, log, loga);
     }
   }
 
@@ -2202,17 +2428,19 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
     log(loga, "  mcast filters:");
     CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
                         &lp->lp_mcast_filters) {
-      int n_socks = 0;
+      hwports_got = oo_hw_filter_hwports(&mf->mf_filter);
+      hwports_uc = oof_mcast_filter_unconflicted_hwports(lp, mf);
+      log(loga, "    maddr="IPPORT_FMT" stack=%d hwports=%x,%x,%x",
+          IPPORT_ARG(mf->mf_maddr, lp->lp_lport),
+          oof_cb_stack_id(mf->mf_filter.trs), mf->mf_hwport_mask,
+          hwports_uc, hwports_got);
       CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_filter_link,
                           &mf->mf_memberships)
-        ++n_socks;
-      if( mf->mf_filter.trs != NULL )
-        log(loga, "    maddr="IP_FMT" n_socks=%d ifindex=%d HW_FILTER => %d",
-            IP_ARG(mf->mf_maddr), n_socks, mf->mf_ifindex,
-            oof_cb_stack_id(mf->mf_filter.trs));
-      else
-        log(loga, "    maddr="IP_FMT" n_socks=%d ifindex=%d",
-            IP_ARG(mf->mf_maddr), n_socks, mf->mf_ifindex);
+        log(loga, "      "SK_FMT" "SK_ADDR_FMT" if=%d hwports=%x,%x,%x %s",
+            SK_PRI_ARGS(mm->mm_socket), SK_ADDR_ARGS(mm->mm_socket),
+            mm->mm_ifindex, mm->mm_hwport_mask,
+            hwports_uc & mm->mm_hwport_mask, hwports_got & mm->mm_hwport_mask,
+            oof_mcast_member_state(mm));
     }
   }
 }
@@ -2223,15 +2451,18 @@ oof_manager_dump(struct oof_manager* fm,
                 void (*log)(void* opaque, const char* fmt, ...),
                 void* loga)
 {
+  ci_irqlock_state_t cicp_lock_state;
   ci_irqlock_state_t lock_flags;
   struct oof_local_port* lp;
   struct oof_local_addr* la;
   struct oof_socket* skf;
   int la_i, hash;
 
+  oof_cb_cicp_lock(&cicp_lock_state);
   ci_irqlock_lock(&fm->fm_lock, &lock_flags);
 
-  log(loga, "%s: local_addr_n=%d", __FUNCTION__, fm->fm_local_addr_n);
+  log(loga, "%s: hwports up=%x unavailable=%x local_addr_n=%d", __FUNCTION__,
+      oof_hwports_up, ~oof_hwports_available, fm->fm_local_addr_n);
 
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
@@ -2246,7 +2477,7 @@ oof_manager_dump(struct oof_manager* fm,
         __FUNCTION__);
     CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                         &fm->fm_mcast_laddr_socks)
-      __oof_socket_dump("  ", fm, skf, log, loga);
+      oof_socket_dump_w_lp("  ", fm, skf, log, loga);
   }
 
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
@@ -2255,4 +2486,5 @@ oof_manager_dump(struct oof_manager* fm,
       oof_local_port_dump(fm, lp, log, loga);
 
   ci_irqlock_unlock(&fm->fm_lock, &lock_flags);
+  oof_cb_cicp_unlock(&cicp_lock_state);
 }

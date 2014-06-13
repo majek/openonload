@@ -88,9 +88,20 @@ typedef struct {
   ci_uint32             ni_orphan;
   /*! OUT:  does netif exist at this index? */
   ci_int32              ni_exists; 
+  /*! OUT: name of the current netif, if ni_exists==1 */
+  char                  ni_name[CI_CFG_STACK_NAME_LEN + 1];
+
   ci_uint32		mmap_bytes;
   ci_int32		k_ref_count;
   ci_int32		rs_ref_count;
+
+  /*! OUT: netif exists but not sufficient permissions to access it */
+  ci_int32              ni_no_perms_exists;
+  unsigned              ni_no_perms_id;
+  char                  ni_no_perms_name[CI_CFG_STACK_NAME_LEN + 1];
+  uid_t                 ni_no_perms_uid;
+  uid_t                 ni_no_perms_euid;
+  ci_int32              ni_no_perms_share_with;
 
 #define CI_DBG_NETIF_INFO_NOOP                    0
 #define CI_DBG_NETIF_INFO_GET_NEXT_NETIF          1
@@ -103,8 +114,6 @@ typedef struct {
     struct {
       /*! OUT: index of next netif - -1 if no more */
       ci_int32		index;
-      /*! OUT: name of the current netif, if ni_exists==1 */
-      char              ni_name[CI_CFG_STACK_NAME_LEN + 1];
     } ni_next_ni;
 
     /* Thread-specific info - this struct is also present in

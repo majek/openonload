@@ -78,16 +78,12 @@ enum efx_filter_priority {
  *	queue.  Note that this cannot be enabled independently for
  *	unicast and multicast default filters; it will only be enabled
  *	if both have this flag set.
- * @EFX_FILTER_FLAG_RX_OVERRIDE_IP: Enables a MAC filter to override
- *	any IP filter that matches the same packet.  By default, IP
- *	filters take precedence.
  * @EFX_FILTER_FLAG_RX: Filter is for RX
  * @EFX_FILTER_FLAG_TX: Filter is for TX
  */
 enum efx_filter_flags {
 	EFX_FILTER_FLAG_RX_RSS = 0x01,
 	EFX_FILTER_FLAG_RX_SCATTER = 0x02,
-	EFX_FILTER_FLAG_RX_OVERRIDE_IP = 0x04,
 	EFX_FILTER_FLAG_RX = 0x08,
 	EFX_FILTER_FLAG_TX = 0x10,
 };
@@ -105,12 +101,11 @@ enum efx_filter_flags {
  *
  * The @priority field is used by software to determine whether a new
  * filter may replace an old one.  The hardware priority of a filter
- * depends on the filter type and %EFX_FILTER_FLAG_RX_OVERRIDE_IP
- * flag.
+ * depends on the filter type.
  */
 struct efx_filter_spec {
-	u8	type : 4;
-	u8	priority : 4;
+	u8	type:4;
+	u8	priority:4;
 	u8	flags;
 	u16	dmaq_id;
 	u32	data[3];

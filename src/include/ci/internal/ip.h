@@ -57,12 +57,11 @@
 #ifdef __KERNEL__
 # include <ci/internal/ip_log.h>
 # include <onload/shmbuf.h>
-# include <ci/efrm/iobufset.h>
+# include <onload/iobufset.h>
 # include <onload/eplock_resource.h>
 #endif
 
 #include <etherfabric/base.h>
-#include <etherfabric/iobufset.h>
 #include <ci/efrm/nic_set.h>
 #include <ci/driver/efab/open.h>
 #include <ci/internal/ip_types.h>
@@ -127,43 +126,6 @@ extern const char* oo_uk_intf_ver;
  * lock held. At the moment it does nothing. */
 # define CHECK_TEP_NNL(ep)
 
-#endif
-
-
-/*********************************************************************
-***************************** Memory maps ****************************
-*********************************************************************/
-
-#define CI_NETIF_MMAP_ID_STATE    0
-#define CI_NETIF_MMAP_ID_CPLANE   1
-#define CI_NETIF_MMAP_ID_IO       2
-#define CI_NETIF_MMAP_ID_IOBUFS   3
-
-/* The shared memory allocation schemes are subtly different on Windows
- * and Solaris.  
- *
- * For Windows the following effectively controls the max. number of 
- * elements in the netif's EP shmbuf arrays.  The sum of 
- * CI_NETIF_MMAP_ID_ID_BITS + EP_BUF_BLOCKSHIFT defines the limit
- * for the number of endpoints (sockets) available from one netif - 
- * typically this means the number of sockets per process. The sum is
- * also used to provide an upper limit to the max. endpoints/netif in
- * the netif config. [max_ep_bufs_ln2].
- *
- * In non-Windows builds (but only seen as an issue in Solaris) this
- * value is limited by EFAB_MMAP_OFFSET_MAP_ID_BITS. The netif EP limit
- * is not currently defined in terms of CI_NETIF_MMAP_ID_ID_BITS or 
- * EP_BUF_BLOCKSHIFT.
- */
-# define CI_NETIF_MMAP_ID_ID_BITS  8u
-
-#define CI_NETIF_MMAP_ID_ID_MASK  ((1u << CI_NETIF_MMAP_ID_ID_BITS) - 1u)
-
-#ifndef CI_HAVE_OS_NOPAGE
-# define CI_NETIF_MMAP_ID_PAGES   (1u << CI_NETIF_MMAP_ID_ID_BITS)
-# define CI_NETIF_MMAP_ID_PKTS    (2u << CI_NETIF_MMAP_ID_ID_BITS)
-# define CI_NETIF_MMAP_ID_PAGE(i) (CI_NETIF_MMAP_ID_PAGES | (i))
-# define CI_NETIF_MMAP_ID_PKT(i)  (CI_NETIF_MMAP_ID_PKTS | (i))
 #endif
 
 
@@ -364,13 +326,11 @@ do {                                                            \
 #define TX_PKT_LEN(pkt) (pkt)->tx_pkt_len
 
 /* Offset from start of [ci_ip_pkt_fmt] to start of packet payload.
+ * Mostly used to set up DMA RX buffer;
+ * TX offset depends on VLAN tag presence.
  * (NB. This may not always be the start of the DMA buffer for receive).
- * TODO do we really need these macros?
  */
-/* RX case or TX+VLAN */
-#define PKT_START_OFF_MIN() CI_MEMBER_OFFSET(ci_ip_pkt_fmt, ether_base)
-/* TX without VLAN tag */
-#define PKT_START_OFF_MAX() (CI_MEMBER_OFFSET(ci_ip_pkt_fmt, ether_base) + ETH_VLAN_HLEN)
+#define PKT_START_OFF() CI_MEMBER_OFFSET(ci_ip_pkt_fmt, ether_base)
 
 /* Offset of current buffer position from start of TCP payload. */
 #define PKT_RX_BUF_OFF(pkt)                                                 \
@@ -413,10 +373,6 @@ do {                                                            \
 /* TODO: replace PKT_UDP_HDR and PKT_IOVEC_UDP_PFX by TX-specific and
  * generic function; see oo_tx_ip_hdr() performance notes. */
 #define PKT_UDP_HDR(pkt)       ((ci_udp_hdr*)&(oo_ip_hdr(pkt))[1])
-
-#define ci_pkt_dimension_iobufset(iobs)                 \
-  ef_iobufset_dimension((iobs), CI_CFG_PKT_BUF_SIZE,    \
-                        PKTS_PER_SET, 4)
 
 
 /**********************************************************************
@@ -491,6 +447,9 @@ extern int  ci_netif_restore_name(ci_netif*, const char*) CI_HF;
 extern int  ci_netif_restore(ci_netif* ni, ci_fd_t fd,
 			     unsigned netif_mmap_bytes) CI_HF;
 extern int  ci_netif_dtor(ci_netif*) CI_HF;
+
+extern void ci_netif_error_detected(ci_netif*, unsigned error_flag,
+                                    const char* caller) CI_HF;
 
 extern int  ci_netif_poll_intf_fast(ci_netif*, int intf_i, ci_uint64 now_frc)
   CI_HF;
@@ -1502,15 +1461,6 @@ extern int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level, int optname
 			     const void*optval, socklen_t optlen) CI_HF;
 extern int ci_tcp_ioctl(citp_socket* ep, ci_fd_t fd, int request, void* arg) CI_HF;
 
-#else
-/* kernel */
-extern int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
-                       socklen_t addrlen, ci_fd_t fd) CI_HF;
-extern int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level, int optname,
-			     void *optval, socklen_t *optlen) CI_HF;
-extern int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level, int optname,
-			     const void*optval, socklen_t optlen) CI_HF;
-extern int ci_tcp_ioctl(citp_socket* ep, ci_fd_t fd, int request, void* arg) CI_HF;
 #endif /* #ifndef __KERNEL__ */
 
 extern int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog) CI_HF;
@@ -1542,7 +1492,7 @@ extern ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif,
 /* Connect/close also called from within kernel now */
 
 extern int ci_tcp_connect(citp_socket*, const struct sockaddr*, socklen_t,
-                          ci_fd_t fd, int) CI_HF;
+                          ci_fd_t fd, int *p_moved) CI_HF;
 extern int ci_tcp_shutdown(citp_socket*, int how, ci_fd_t fd) CI_HF;
 extern int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts, int block) CI_HF;
 
@@ -1552,8 +1502,10 @@ extern oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni,
 
 #ifdef __KERNEL__
 extern int ci_tcp_abort(citp_socket*) CI_HF;
-extern int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
-                                ci_netif *l_ni, oo_sp l_id) CI_HF;
+extern int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts,
+                                       oo_sp tls_id) CI_HF;
+extern int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
+                                    ci_netif *l_ni, oo_sp l_id) CI_HF;
 #endif
 
 #if CI_CFG_LIMIT_AMSS || CI_CFG_LIMIT_SMSS
@@ -1641,10 +1593,6 @@ extern int ci_sock_sleep(ci_netif* ni, citp_waitable* w, ci_bits why,
 
 /*! Return value where a handover is required by a higher layer. */
 #define CI_SOCKET_HANDOVER -2
-
-/*! Return value where the endpoint was moved to another stack under our
- * feet */
-#define CI_SOCKET_MOVED -3
 
 
 /* *****************
@@ -2601,24 +2549,6 @@ ci_inline int ci_netif_pkt_tx_can_alloc_now(ci_netif* ni) {
 }
 
 
-/* Returns the number of packet buffers (in the free pool) available for
- * use by the TX path.
- *
- * NB. The answer may be negative, which of course means the same as zero.
- */
-ci_inline int ci_netif_pkt_tx_tcp_available_now(ci_netif* ni) {
-  int n_tx_pkts = ni->state->n_pkts_allocated - ni->state->n_rx_pkts
-    - ni->state->n_freepkts;
-  int n1, n2;
-  n1 = NI_OPTS(ni).max_packets - NI_OPTS(ni).max_rx_packets - n_tx_pkts;
-  if(CI_LIKELY( ni->state->mem_pressure == 0 )) {
-    n2 = NI_OPTS(ni).max_tx_packets - n_tx_pkts;
-    n1 = CI_MAX(n1, n2);
-  }
-  return CI_MIN(n1, ni->state->n_freepkts);
-}
-
-
 /* Allocate a packet for the TCP TX path.  Such packets may get stuck in
  * the send queue or retransmit queue for a long time, so we must be
  * careful not to deplete the pool of free buffers too much.
@@ -2634,8 +2564,7 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_tx_tcp_alloc(ci_netif* ni) {
 
 #if ! CI_CFG_PP_IS_PTR
 
-ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc_nonb(ci_netif* ni,
-                                                 ci_boolean_t netif_locked) 
+ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc_nonb(ci_netif* ni) 
 {
   volatile ci_uint64 *nonb_pkt_pool_ptr;
   ci_uint64 link, new_link;
@@ -2650,7 +2579,7 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc_nonb(ci_netif* ni,
   id = link & 0xffffffff;
   if( id != 0xffffffff ) {
     OO_PP_INIT(ni, pp, id);
-    pkt = PKT_NML(ni, pp, netif_locked);
+    pkt = PKT(ni, pp);
     new_link = ((unsigned)OO_PP_ID(pkt->next)) | (link & 0xffffffff00000000llu);
     if( ci_cas64u_fail(nonb_pkt_pool_ptr, link, new_link) )
       goto again;
@@ -2680,12 +2609,12 @@ ci_inline void ci_netif_pkt_free_nonb_list(ci_netif *ni, oo_pkt_p pkt_list,
 #endif
 
 ci_inline void ci_netif_pkt_hold(ci_netif* ni, ci_ip_pkt_fmt* pkt) {
-  ci_assert(pkt->refcount > 0);
+  ci_assert_gt(pkt->refcount, 0);
   ++pkt->refcount;
 }
 
 ci_inline void ci_netif_pkt_release(ci_netif* ni, ci_ip_pkt_fmt* pkt) {
-  ci_assert(pkt->refcount > 0);
+  ci_assert_gt(pkt->refcount, 0);
   ci_assert( ci_netif_is_locked(ni) );
   if( --pkt->refcount == 0 )
     ci_netif_pkt_free(ni, pkt);
@@ -2697,7 +2626,7 @@ ci_inline void ci_netif_pkt_release(ci_netif* ni, ci_ip_pkt_fmt* pkt) {
 */
 #if CI_CFG_TCP_RX_1REF
 ci_inline void ci_netif_pkt_release_1ref(ci_netif* ni, ci_ip_pkt_fmt* pkt) {
-  ci_assert(pkt->refcount == 1);
+  ci_assert_equal(pkt->refcount, 1);
   pkt->refcount = 0;
   ci_netif_pkt_free(ni, pkt);
 }
@@ -2746,32 +2675,30 @@ ci_inline int ci_ip_queue_not_empty(ci_ip_pkt_queue *qu)
 { return qu->num; }
 
 
-ci_inline int ci_ip_queue_is_valid(ci_netif* netif, ci_ip_pkt_queue* qu, 
-                                   ci_boolean_t netif_locked)
+ci_inline int ci_ip_queue_is_valid(ci_netif* netif, ci_ip_pkt_queue* qu)
 {
   if( qu->num == 0 )
     return OO_PP_IS_NULL(qu->head);
   else
     return IS_VALID_PKT_ID(netif, qu->head) && 
       IS_VALID_PKT_ID(netif, qu->tail) &&
-      OO_PP_IS_NULL(PKT_NML(netif, qu->tail, netif_locked)->next);
+      OO_PP_IS_NULL(PKT(netif, qu->tail)->next);
 }
 
 #ifndef NDEBUG
 /* This function should be NEVER used in production!
  * For temporary debugging only! */
 ci_inline int ci_ip_queue_is_valid_long(ci_netif* netif, ci_ip_pkt_queue* qu, 
-                                        const char *name,
-                                        ci_boolean_t netif_locked)
+                                        const char *name)
 {
   int i = 0, found_tail = 0;
   oo_pkt_p id;
 
-  if( !ci_ip_queue_is_valid(netif, qu, netif_locked) )
+  if( !ci_ip_queue_is_valid(netif, qu) )
     return 0;
   for( id = qu->head; OO_PP_NOT_NULL(id); 
-       id = PKT_NML(netif, id, netif_locked)->next ) {
-    ci_ip_pkt_fmt *pkt = netif_locked ? PKT(netif, id) : PKT_NNL(netif, id);
+       id = PKT(netif, id)->next ) {
+    ci_ip_pkt_fmt *pkt = PKT(netif, id);
     i++;
     ci_log("%s queue %d: %d %08x-%08x", name, i, OO_PP_FMT(id),
            pkt->pf.tcp_tx.start_seq, pkt->pf.tcp_tx.end_seq);
@@ -3244,6 +3171,16 @@ ci_inline void ci_tcp_retrans_drop(ci_netif* ni, ci_tcp_state* ts)
 ****************************** TCP socket *****************************
 **********************************************************************/
 
+ci_inline int ci_tcp_is_cached(ci_tcp_state* ts)
+{
+#if CI_CFG_FD_CACHING
+  return ts->cached_on_fd != -1;
+#else
+  return 0;
+#endif
+}
+
+
 ci_inline ci_uint32 tcp_eff_mss(const ci_tcp_state* ts) {
   if( ts->s.b.state != CI_TCP_CLOSED ) {
     ci_assert(ts->s.b.state != CI_TCP_LISTEN);
@@ -3264,21 +3201,6 @@ ci_inline void ci_tcp_fast_path_enable(ci_tcp_state* ts) {
 ci_inline void ci_tcp_fast_path_disable(ci_tcp_state* ts) {
   ci_assert(!ci_tcp_can_use_fast_path(ts));
   ts->fast_path_check = ~CI_TCP_FAST_PATH_MASK;
-}
-
-
-ci_inline ci_boolean_t ci_tcp_is_my_addr_spc(ci_netif *ni, ci_tcp_state *ts){
-#ifdef __KERNEL__
-  if( ni->flags & CI_NETIF_FLAGS_IS_TRUSTED )
-    return ts->s.addr_spc_id == CI_ADDR_SPC_ID_KERNEL;
-  else
-    /* In kernel, and untrusted, means no address space is directly
-       accessible */
-    return CI_FALSE;
-#else
-  /* If user-level, only the user-level address space will do */
-  return ni->addr_spc_id == ts->s.addr_spc_id;
-#endif
 }
 
 
@@ -3692,6 +3614,41 @@ ci_inline void ci_netif_put_on_post_poll(ci_netif* ni, citp_waitable* sb)
 {
   ci_ni_dllist_remove(ni, &sb->post_poll_link);
   ci_ni_dllist_put(ni, &ni->state->post_poll_list, &sb->post_poll_link);
+}
+
+
+ci_inline void ci_netif_poll_free_pkts(ci_netif* ni,
+                                       struct ci_netif_poll_state* ps)
+{
+  ci_ip_pkt_fmt* tail = CI_CONTAINER(ci_ip_pkt_fmt, next,
+                                     ps->tx_pkt_free_list_insert);
+  ci_netif_pkt_free_nonb_list(ni, ps->tx_pkt_free_list, tail);
+  ni->state->n_async_pkts += ps->tx_pkt_free_list_n;
+  CITP_STATS_NETIF_ADD(ni, pkt_nonb, ps->tx_pkt_free_list_n);
+}
+
+
+extern void ci_netif_tx_pkt_complete_udp(ci_netif* ni,
+                                         struct ci_netif_poll_state* ps,
+                                         ci_ip_pkt_fmt* pkt);
+
+
+ci_inline void ci_netif_tx_pkt_complete(ci_netif* ni,
+                                        struct ci_netif_poll_state* ps,
+                                        ci_ip_pkt_fmt* pkt)
+{
+  /* debug check - take back ownership of buffer from NIC */
+  ci_assert(pkt->flags & CI_PKT_FLAG_TX_PENDING);
+  pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
+  ni->state->nic[pkt->intf_i].tx_bytes_removed += TX_PKT_LEN(pkt);
+  ci_assert((int) (ni->state->nic[pkt->intf_i].tx_bytes_added -
+                   ni->state->nic[pkt->intf_i].tx_bytes_removed) >=0);
+#if CI_CFG_UDP
+  if( pkt->flags & CI_PKT_FLAG_UDP )
+    ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
+  else
+#endif
+    ci_netif_pkt_release(ni, pkt);
 }
 
 

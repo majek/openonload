@@ -139,9 +139,11 @@ EXPORT_SYMBOL(efrm_vi_get_pd);
 
 struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *virs)
 {
+#ifdef CONFIG_SFC_RESOURCE_VF
 	if (virs->allocation.vf)
 		return virs->allocation.vf->pci_dev;
 	else
+#endif
 		return virs->rs.rs_client->nic->pci_dev;
 }
 EXPORT_SYMBOL(efrm_vi_get_pci_dev);

@@ -123,21 +123,26 @@ static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts)
 
   sock_laddr_be32(&(ts->s)) = 0;
   TS_TCP(ts)->tcp_source_be16 = 0;
+#if CI_CFG_FD_CACHING
   ts->cached_on_pid = -1;
+#endif
 }
 
 /* Reset state for a connection, used for shutdown following listen. */
 static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
 {
-  oo_p sp;
-
   ci_tcp_state_setup_timers(netif, ts);
 
-  ts->cached_on_fd = -1;
-  sp = TS_OFF(netif, ts);
-  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_link));
-  ci_ni_dllist_link_init(netif, &ts->epcache_link, sp, "epch");
-  CI_DEBUG (ci_ni_dllist_mark_free (&ts->epcache_link));
+#if CI_CFG_FD_CACHING
+  {
+    oo_p sp;
+    ts->cached_on_fd = -1;
+    sp = TS_OFF(netif, ts);
+    OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_link));
+    ci_ni_dllist_link_init(netif, &ts->epcache_link, sp, "epch");
+    CI_DEBUG (ci_ni_dllist_mark_free (&ts->epcache_link));
+  }
+#endif
 
   ts->s.b.state = CI_TCP_CLOSED;
   ci_tcp_fast_path_disable(ts);
@@ -189,7 +194,8 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
   ts->t_last_full = ci_tcp_time_now(netif);
   ts->cwnd_used = 0;
 #endif
-  ts->t_last_recv = ci_tcp_time_now(netif);
+  ts->t_last_recv_ack = ts->t_last_recv_payload = ts->t_prev_recv_payload = 
+    ci_tcp_time_now(netif);
 
   ts->eff_mss = 0;
   ts->amss = 0;

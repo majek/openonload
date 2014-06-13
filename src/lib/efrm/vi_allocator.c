@@ -175,7 +175,6 @@ int  efrm_vi_allocator_alloc_set(struct efrm_nic *efrm_nic, unsigned vi_props,
 				 struct efrm_vi_allocation *set_out)
 {
 	struct efrm_vi_allocator *va;
-	irq_flags_t lock_flags;
 	int i, rc;
 
 	if (min_vis_in_set < 1)
@@ -196,11 +195,11 @@ int  efrm_vi_allocator_alloc_set(struct efrm_nic *efrm_nic, unsigned vi_props,
         set_out->vf = NULL;
 	set_out->allocator_id = i;
 	set_out->order = fls(min_vis_in_set - 1);
-	spin_lock_irqsave(&efrm_nic->lock, lock_flags);
+	spin_lock_bh(&efrm_nic->lock);
 	set_out->instance = buddy_alloc_vi(efrm_nic, &va->instances,
 					   set_out->order, channel,
 					   min_vis_in_set);
-	spin_unlock_irqrestore(&efrm_nic->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic->lock);
 	rc = (set_out->instance >= 0) ? 0 : -EBUSY;
 	return rc;
 }
@@ -209,14 +208,12 @@ int  efrm_vi_allocator_alloc_set(struct efrm_nic *efrm_nic, unsigned vi_props,
 void efrm_vi_allocator_free_set(struct efrm_nic *efrm_nic,
 				struct efrm_vi_allocation *set)
 {
-	irq_flags_t lock_flags;
-
 	EFRM_ASSERT(set->instance >= 0);
 	EFRM_ASSERT(set->allocator_id >= 0);
 	EFRM_ASSERT(set->allocator_id < EFRM_NIC_N_VI_ALLOCATORS);
 
-	spin_lock_irqsave(&efrm_nic->lock, lock_flags);
+	spin_lock_bh(&efrm_nic->lock);
 	efrm_buddy_free(&efrm_nic->vi_allocators[set->allocator_id].instances,
 			set->instance, set->order);
-	spin_unlock_irqrestore(&efrm_nic->lock, lock_flags);
+	spin_unlock_bh(&efrm_nic->lock);
 }

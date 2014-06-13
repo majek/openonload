@@ -89,7 +89,6 @@ typedef struct ci_resource_onload_alloc_s {
   char                    in_version[OO_VER_STR_LEN + 1];
   char                    in_uk_intf_ver[CI_CHSUM_STR_LEN + 1];
   char                    in_name[CI_CFG_STACK_NAME_LEN + 1];
-  ci_addr_spc_id_t        out_addr_spc_id CI_ALIGN(8);
   efrm_nic_set_t          out_nic_set;
   ci_uint32               out_netif_mmap_bytes;
 } ci_resource_onload_alloc_t;
@@ -194,16 +193,6 @@ typedef struct {
   ci_int32      bufs_start;
 } oo_tcp_sock_more_pipe_bufs_t;
 #endif
-
-typedef struct {
-  ci_addr_spc_id_t  addr_spc_id; /* OUT */
-} oo_netif_get_addr_spc_id_t;
-
-
-typedef struct {
-  ci_addr_spc_id_t  addr_spc_id;
-  oo_sp             ep_id;
-} oo_tcp_set_addr_spc_t;
 
 typedef struct {
   ci_int32          other_fd;
@@ -433,7 +422,7 @@ typedef struct {
 } ci_ep_info_t;
 
 typedef struct {
-  ci_uint32             flags;
+  ci_uint64             flags; /* it's u8 really, but we need to be compat */
   ci_fixed_descriptor_t fd;
 } ci_clone_fd_t;
 
@@ -516,8 +505,10 @@ struct oo_op_sigaction {
 };
 
 struct oo_op_loopback_connect {
-  ci_uint16 dst_port;
-  ci_uint32 dst_addr;
+  ci_uint32 dst_addr;   /*!< destination address to connect to */
+  ci_uint16 dst_port;   /*!< destination port to connect to */
+  ci_uint8 out_moved;   /*!< have we moved socket to another stack? */
+  ci_int8  out_rc;      /*!< rc of connect() */
 };
 
 struct oo_op_tcp_drop_from_acceptq {
@@ -532,19 +523,6 @@ struct oo_op_tcp_drop_from_acceptq {
  *---------------------------------------------------------------------------*/
 
 #include <onload/debug_intf.h>   
-
-/*----------------------------------------------------------------------------
- *
- *  Mmap-related macros
- *
- *---------------------------------------------------------------------------*/
-
-/* TODO: considering moving OS specific mmap stuff somewhere else */
-#define EFRM_RESOURCE_MAX_PER_FD_BITS    9
-
-ci_inline unsigned
-EFAB_MMAP_OFFSET_TO_MAP_ID(off_t offset)
-{ return offset >> (CI_PAGE_SHIFT + EFRM_RESOURCE_MAX_PER_FD_BITS); }
 
 
 /*--------------------------------------------------------------------

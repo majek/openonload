@@ -215,7 +215,7 @@ typedef struct ci_tcp_hdr_s {
 
 
 #define CI_TCP_HDR_SET_LEN(hdr, hlen) ((hdr)->tcp_hdr_len_sl4 = (hlen) << 2u)
-#define CI_TCP_HDR_LEN(hdr)           ((hdr)->tcp_hdr_len_sl4 >> 2u)
+#define CI_TCP_HDR_LEN(hdr)           (((hdr)->tcp_hdr_len_sl4 & 0xf0) >> 2u)
 #define CI_TCP_HDR_OPT_LEN(hdr)       (CI_TCP_HDR_LEN(hdr)-sizeof(ci_tcp_hdr))
 #define CI_TCP_HDR_OPTS(hdr)          ((ci_uint8*)&(hdr)->tcp_urg_ptr_be16+2)
 #define CI_TCP_PAYLOAD(hdr)           ((char*)(hdr) + CI_TCP_HDR_LEN(hdr))

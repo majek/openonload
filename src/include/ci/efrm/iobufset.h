@@ -100,27 +100,4 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 
 extern void efrm_iobufset_resource_release(struct iobufset_resource *);
 
-static inline char *
-efrm_iobufset_ptr(struct iobufset_resource *rs, unsigned offs)
-{
-	EFRM_ASSERT(offs < (unsigned)(rs->n_bufs << PAGE_SHIFT));
-	return efhw_iopage_ptr(&rs->bufs[offs >> PAGE_SHIFT])
-	    + (offs & (PAGE_SIZE - 1));
-}
-
-static inline char *efrm_iobufset_page_ptr(struct iobufset_resource *rs,
-				       unsigned page_i)
-{
-	EFRM_ASSERT(page_i < (unsigned)rs->n_bufs);
-	return efhw_iopage_ptr(&rs->bufs[page_i]);
-}
-
-static inline dma_addr_t
-efrm_iobufset_dma_addr(struct iobufset_resource *rs, unsigned offs)
-{
-	EFRM_ASSERT(offs < (unsigned)(rs->n_bufs << PAGE_SHIFT));
-	return efhw_iopage_dma_addr(&rs->bufs[offs >> PAGE_SHIFT])
-	    + (offs & (PAGE_SIZE - 1));
-}
-
 #endif /* __CI_EFRM_IOBUFSET_H__ */

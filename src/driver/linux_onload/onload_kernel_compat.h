@@ -72,4 +72,8 @@
 
 #endif
 
+#ifndef __NFDBITS
+# define __NFDBITS BITS_PER_LONG
+#endif
+
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

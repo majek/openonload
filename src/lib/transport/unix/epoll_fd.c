@@ -117,7 +117,6 @@ necessary.  It is not clear if such approach makes things faster.
   CI_CONTAINER(struct citp_epoll_member, dllink, (lnk))
 
 
-#define EP_NONEVENT_BITS   (EPOLLONESHOT | EPOLLET)
 #define EP_NOT_REGISTERED  ((unsigned) -1)
 
 
@@ -163,12 +162,14 @@ static void citp_epoll_dtor(citp_fdinfo* fdi, int fdt_locked)
     return;
 
   CITP_FDTABLE_LOCK();
+  ci_tcp_helper_close_no_trampoline(ep->shared->epfd);
   __citp_fdtable_reserve(ep->shared->epfd, 0);
-  __citp_fdtable_reserve(ep->epfd_os, 0);
   munmap(ep->shared, sizeof(*ep->shared));
-  /* it also closes ep->shared->epfd: */
+
   ci_tcp_helper_close_no_trampoline(ep->epfd_os);
+  __citp_fdtable_reserve(ep->epfd_os, 0);
   CITP_FDTABLE_UNLOCK();
+
   CI_FREE_OBJ(ep);
 }
 static int citp_epoll_close(citp_fdinfo *fdi, int may_cache)
@@ -228,6 +229,9 @@ citp_protocol_impl citp_epoll_protocol_impl = {
     .recvmmsg    = citp_nosock_recvmmsg,
 #endif
     .send        = citp_epoll_send,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_nosock_sendmmsg,
+#endif
     .ioctl       = citp_epoll_ioctl,
     .zc_send     = citp_epoll_zc_send,
     .zc_recv     = citp_epoll_zc_recv,
@@ -313,12 +317,8 @@ int citp_epoll_create(int size, int flags)
 /* Reset edge-triggering status of the eitem */
 ci_inline void citp_eitem_reset_epollet(struct citp_epoll_member* eitem)
 {
-  eitem->ul_events = eitem->all_events = eitem->reported_events = 0;
   eitem->reported_sleep_seq.rw.rx = 0;
   eitem->reported_sleep_seq.rw.tx = CI_SLEEP_SEQ_NEVER;
-  eitem->polled_sleep_seq.rw.rx = 0;
-  eitem->polled_sleep_seq.rw.tx = 0;
-  eitem->os_events = OO_EPOLL_OS_EVENTS_DEFAULT;
 }
 
 
@@ -586,8 +586,9 @@ citp_epoll_ctl_try_defer_to_lock_holder(struct citp_epoll_fd* ep, int op,
 }
 
 
-int citp_epoll_ctl_onload(citp_fdinfo* fdi, int op,
-                          struct epoll_event *event, citp_fdinfo *fd_fdi)
+static int citp_epoll_ctl_onload(citp_fdinfo* fdi, int op,
+                                 struct epoll_event* event,
+                                 citp_fdinfo* fd_fdi)
 {
   struct citp_epoll_fd* ep = fdi_to_epoll(fdi);
   int rc;
@@ -625,8 +626,9 @@ int citp_epoll_ctl_onload(citp_fdinfo* fdi, int op,
   return rc;
 }
 
-int citp_epoll_ctl_os(citp_fdinfo* fdi, int op, int fd,
-                      struct epoll_event *event)
+
+static int citp_epoll_ctl_os(citp_fdinfo* fdi, int op, int fd,
+                             struct epoll_event *event)
 {
   /* Apply this epoll_ctl() to both epoll fds (the one containing
    * everything, and the one containing just non-accelerated fds).
@@ -690,10 +692,18 @@ static void citp_ul_epoll_ctl_sync_fd(int epfd,
 {
   int rc, op;
 
-  if( eitem->epfd_event.events == EP_NOT_REGISTERED )
+  if( eitem->epfd_event.events == EP_NOT_REGISTERED ) {
+    if( (eitem->epfd_event.events & OO_EPOLL_ALL_EVENTS) == 0 )
+      /* No events to register, so don't bother to sync for now.  (In
+       * EPOLLONESHOT case this is important, else kernel could report one
+       * of the always-on events).
+       */
+      return;
     op = EPOLL_CTL_ADD;
-  else
+  }
+  else {
     op = EPOLL_CTL_MOD;
+  }
   Log_POLL(ci_log("%s: sys_epoll_ctl("EPOLL_CTL_FMT") old_evs=%x",
                   __FUNCTION__,
                   EPOLL_CTL_ARGS(epfd, op, eitem->fd, &eitem->epoll_data),
@@ -749,7 +759,7 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
 
 
 static void citp_ul_epoll_one(struct oo_ul_epoll_state*__restrict__ eps,
-                              struct citp_epoll_member* eitem)
+                              struct citp_epoll_member*__restrict__ eitem)
 {
   citp_fdinfo_p fdip;
   citp_fdinfo* fdi = NULL;
@@ -759,7 +769,7 @@ static void citp_ul_epoll_one(struct oo_ul_epoll_state*__restrict__ eps,
   do {
     if(CI_LIKELY( fdip_is_normal(fdip = citp_fdtable.table[eitem->fd].fdip) &&
                   (fdi = fdip_to_fdi(fdip))->seq == eitem->fdi_seq )) {
-      if( (eitem->epoll_data.events & ~EP_NONEVENT_BITS) != 0 )
+      if( (eitem->epoll_data.events & OO_EPOLL_ALL_EVENTS) != 0 )
         citp_fdinfo_get_ops(fdi)->epoll(fdi, eitem, eps);
       return;
     }
@@ -782,89 +792,29 @@ static void citp_ul_epoll_one(struct oo_ul_epoll_state*__restrict__ eps,
 }
 
 
-ci_inline void citp_epoll_poll_ul(struct oo_ul_epoll_state*__restrict__ eps,
-                                  int maxevents)
+static void citp_epoll_poll_ul(struct oo_ul_epoll_state*__restrict__ eps)
 {
   /* Poll accelerated sockets for events. */
 
-  struct citp_epoll_member *eitem, *tmp_eitem;
+  struct citp_epoll_member* eitem;
+  ci_dllink *next, *last;
 
-  eps->n = 0;
+  if( ci_dllist_not_empty(&eps->ep->oo_sockets) ) {
+    if( citp_fdtable_not_mt_safe() )
+      CITP_FDTABLE_LOCK_RD();
 
-  if( citp_fdtable_not_mt_safe() )
-    CITP_FDTABLE_LOCK_RD();
+    last = ci_dllist_last(&eps->ep->oo_sockets);
+    next = ci_dllist_start(&eps->ep->oo_sockets);
+    do {
+      eitem = CI_CONTAINER(struct citp_epoll_member, dllink, next);
+      next = next->next;
+      citp_ul_epoll_one(eps, eitem);
+    } while( eps->events < eps->events_top && &eitem->dllink != last );
 
-  CI_DLLIST_FOR_EACH3(struct citp_epoll_member, eitem, dllink,
-                      &eps->ep->oo_sockets, tmp_eitem) {
-    citp_ul_epoll_one(eps, eitem);
-    if( eps->n >= maxevents )
-      break;
+    if( citp_fdtable_not_mt_safe() )
+      CITP_FDTABLE_UNLOCK_RD();
   }
-
-  if( citp_fdtable_not_mt_safe() )
-    CITP_FDTABLE_UNLOCK_RD();
   FDTABLE_ASSERT_VALID();
-  Log_POLL(if( eps->n )  ci_log("%s: n=%d", __FUNCTION__, eps->n));
-}
-
-
-static int citp_ul_epoll_store_events(
-                                struct oo_ul_epoll_state*__restrict__ eps,
-                                struct epoll_event*__restrict__ events,
-                                int maxevents)
-{
-  struct citp_epoll_member *eitem, *next_eitem;
-  int is_room_in_events = (maxevents > 0);
-  int n = 0;
-
-  Log_POLL(ci_log("%s:", __FUNCTION__));
-
-  /* NB. We're not using the standard dllist methods to access this list
-   * because we're never going to use it again.
-   */
-  eitem = EITEM_FROM_DLLINK(ci_dllist_start(&eps->sockets_ready));
-  CI_DEBUG(memset(&eps->sockets_ready, 0, sizeof(eps->sockets_ready)));
-
-  for( ; &eitem->dllink != ci_dllist_end(&eps->sockets_ready);
-       eitem = next_eitem ) {
-    next_eitem = EITEM_FROM_DLLINK(eitem->dllink.next);
-
-    eitem->ul_events = 0;
-    eitem->os_events = OO_EPOLL_OS_EVENTS_DEFAULT;
-    if( ! is_room_in_events ||  ! eitem->all_events ) {
-      ci_dllist_push(&eps->ep->oo_sockets, &eitem->dllink);
-      eitem->all_events = 0;
-      continue;
-    }
-
-    Log_POLL(ci_log("%s: store events=%x in %llx", __FUNCTION__,
-                    eitem->all_events, (long long)eitem->epoll_data.data.u64));
-    events[n].events = eitem->all_events;
-    events[n].data = eitem->epoll_data.data;
-    eitem->all_events = 0;
-
-    if( eitem->epoll_data.events & EPOLLONESHOT ) {
-      eitem->epoll_data.events = EPOLLONESHOT;
-      eitem->epfd_event.events = EPOLLONESHOT;
-      ci_dllist_push_tail(&eps->ep->oo_sockets, &eitem->dllink);
-    }
-    else if( eitem->epoll_data.events & EPOLLET ) {
-      eitem->reported_events = events[n].events;
-      eitem->reported_sleep_seq = eitem->polled_sleep_seq;
-      ci_dllist_push(&eps->ep->oo_sockets, &eitem->dllink);
-    }
-    else
-      ci_dllist_push_tail(&eps->ep->oo_sockets, &eitem->dllink);
-
-    if( ++n == maxevents ) {
-      ci_assert_ge(eps->n, maxevents);
-      is_room_in_events = FALSE;
-    }
-  }
-
-  if( is_room_in_events )
-    ci_assert_equal(n, eps->n);
-  return n;
 }
 
 
@@ -891,46 +841,59 @@ ci_inline int citp_epoll_os_fds(citp_epoll_fdi *efdi,
 }
 
 
-int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event *events,
+int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
                     int maxevents, int timeout, const sigset_t *sigmask,
                     citp_lib_context_t *lib_context)
 {
   struct citp_epoll_fd* ep = fdi_to_epoll(fdi);
   struct oo_ul_epoll_state eps;
   ci_uint64 poll_start_frc;
-  int rc, rc_os;
+  int rc = 0, rc_os;
+#if CI_LIBC_HAS_epoll_pwait
+  sigset_t sigsaved;
+  int pwait_was_spinning = 0;
+#endif
 
   Log_POLL(ci_log("%s(%d, maxevents=%d, timeout=%d)", __FUNCTION__,
                   fdi->fd, maxevents, timeout));
 
   CITP_EPOLL_EP_LOCK(ep);
 
-  if(CI_UNLIKELY( ci_dllist_is_empty(&ep->oo_sockets) ||
-                  maxevents <= 0 || timeout < -1 || events == NULL ||
-                  sigmask != NULL))
-    /* No accelerated fds, or invalid parameters, or epoll_pwait(). */
-    goto sys_epoll_wait;
+  if( (ci_dllist_is_empty(&ep->oo_sockets) && !ep->epfd_syncs_needed) ||
+      maxevents <= 0 || timeout < -1 || events == NULL ) {
+    /* No accelerated fds or invalid parameters). */
+    CITP_EPOLL_EP_UNLOCK(ep, 0);
+    citp_exit_lib(lib_context, FALSE);
+    Log_POLL(ci_log("%s(%d, ..): passthrough", __FUNCTION__, fdi->fd));
+#if CI_LIBC_HAS_epoll_pwait
+    if( sigmask != NULL )
+      return ci_sys_epoll_pwait(fdi->fd, events, maxevents, timeout, sigmask);
+    else
+#endif
+      return ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
+  }
 
   /* Set up epoll state */
   ci_frc64(&poll_start_frc);
   eps.this_poll_frc = poll_start_frc;
   eps.ep = ep;
-  ci_dllist_init(&eps.sockets_ready);
+  eps.events = events;
+  eps.events_top = events + maxevents;
+  eps.has_epollet = 0;
   /* NB. We do need to call oo_per_thread_get() here (despite having
    * [lib_context] in scope) to ensure [spinstate] is initialised.
-   *
    */
   eps.ul_epoll_spin = 
     oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_EPOLL_WAIT);
 
  poll_again:
-  citp_epoll_poll_ul(&eps, maxevents);
+  citp_epoll_poll_ul(&eps);
 
-  if( eps.n ) {
+  if( eps.events != events ) {
     /* We have userlevel sockets ready.  So just need to do a non-blocking
      * poll of kernel sockets (at most) and we're done.
      */
-    rc = citp_ul_epoll_store_events(&eps, events, maxevents);
+    rc = eps.events - events;
     ci_assert_le(rc, maxevents);
     rc_os = 0;
     if(CI_UNLIKELY( ep->shared->flag & OO_EPOLL1_FLAG_EVENT )) {
@@ -955,6 +918,24 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event *events,
 
   /* Blocking.  Shall we spin? */
   if( KEEP_POLLING(eps.ul_epoll_spin, eps.this_poll_frc, poll_start_frc) ) {
+#if CI_LIBC_HAS_epoll_pwait
+    if( !pwait_was_spinning && sigmask != NULL) {
+      if( ep->avoid_spin_once ) {
+        eps.ul_epoll_spin = 0;
+        ep->avoid_spin_once = 0;
+        goto passthrough;
+      }
+      citp_exit_lib(lib_context, CI_FALSE);
+      rc = citp_ul_pwait_spin_pre(lib_context, sigmask, &sigsaved);
+      if( rc != 0 ) {
+        CITP_EPOLL_EP_UNLOCK(ep, 0);
+        citp_exit_lib(lib_context, CI_FALSE);
+        return rc;
+      }
+      pwait_was_spinning = 1;
+    }
+#endif
+
     /* We need to keep an eye on the kernel fds when polling.  We
      * don't need to citp_exit_lib() here because we're not blocking.
      */
@@ -973,6 +954,7 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event *events,
                         (ci_uint64) timeout * ci_cpu_khz) ) {
       Log_POLL(ci_log("%s(%d): timeout during spin", __FUNCTION__, fdi->fd));
       rc = 0;
+      timeout = 0;
       goto unlock_release_exit_ret;
     }
 
@@ -993,34 +975,63 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event *events,
                     __FUNCTION__, timeout));
   }
 
- sys_epoll_wait:
+#if CI_LIBC_HAS_epoll_pwait
+ passthrough:
+#endif
   /* Synchronise state to kernel (if necessary) and block. */
   if( ep->epfd_syncs_needed )
     citp_ul_epoll_ctl_sync(ep, fdi->fd);
-  ep->blocking = 1;
-  CITP_EPOLL_EP_UNLOCK(ep, 0);
-  Log_POLL(ci_log("%s(%d): to kernel", __FUNCTION__, fdi->fd));
-  citp_exit_lib(lib_context, TRUE);
-#if CI_LIBC_HAS_epoll_pwait
-  if( sigmask )
-    rc = ci_sys_epoll_pwait(fdi->fd, events, maxevents, timeout, sigmask);
-  else
-#endif
-    rc = ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
-  Log_POLL(ci_log("%s(%d): to kernel => %d (%d)", __FUNCTION__, fdi->fd,
-                  rc, errno));
-  citp_reenter_lib(lib_context);
-  if( rc < 0 )
-    lib_context->saved_errno = errno;
-  ep->blocking = 0;
-  citp_fdinfo_release_ref(fdi, 0);
-  citp_exit_lib(lib_context, rc >= 0);
-  return rc;
-
  unlock_release_exit_ret:
   CITP_EPOLL_EP_UNLOCK(ep, 0);
+  Log_POLL(ci_log("%s(%d): to kernel", __FUNCTION__, fdi->fd));
+
+
+#if CI_LIBC_HAS_epoll_pwait
+  if( pwait_was_spinning) {
+    /* Fixme:
+     * if we've got both signal and event, we can't return both to user.
+     * As signal will be processed anyway (in exit_lib), we MUST
+     * tell the user about it with -1(EINTR).  User will get events with
+     * the next epoll_pwait call.
+     *
+     * The problem is, if some events are with EPOLLET or EPOLLONESHOT,
+     * they are lost.  Ideally, we should un-mark them as "reported" in our
+     * internal oo_sockets list.
+     *
+     * Workaround is to disable spinning for one next epoll_pwait call,
+     * because we report EPOLLET events twice in such a way.
+     */
+    citp_ul_pwait_spin_done(lib_context, &sigsaved, &rc);
+    if( rc < 0 ) {
+      if( eps.has_epollet )
+        ep->avoid_spin_once = 1;
+      citp_fdinfo_release_ref(fdi, 0);
+      return rc;
+    }
+  }
+  else
+#endif
+    citp_exit_lib(lib_context, FALSE);
+
+  if( rc == 0 && (timeout != 0
+#if CI_LIBC_HAS_epoll_pwait
+                  || sigmask != NULL
+#endif
+                  ) ) {
+    if( timeout != 0 )
+      ep->blocking = 1;
+#if CI_LIBC_HAS_epoll_pwait
+    if( sigmask != NULL )
+      rc = ci_sys_epoll_pwait(fdi->fd, events, maxevents, timeout, sigmask);
+    else
+#endif
+      rc = ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
+    ep->blocking = 0;
+  }
+
   citp_fdinfo_release_ref(fdi, 0);
-  citp_exit_lib(lib_context, rc >= 0);
+  Log_POLL(ci_log("%s(%d): to kernel => %d (%d)", __FUNCTION__, fdi->fd,
+                  rc, errno));
   return rc;
 }
 
@@ -1087,6 +1098,62 @@ void citp_epoll_on_handover(citp_fdinfo* fd_fdi, int fdt_locked)
                     (unsigned long long) fd_fdi->epoll_fd_seq, fd_fdi->fd));
   }
   citp_fdinfo_release_ref(epoll_fdi, fdt_locked);
+}
+
+
+ci_inline void
+citp_ul_epoll_store_event(struct oo_ul_epoll_state*__restrict__ eps,
+                          struct citp_epoll_member*__restrict__ eitem,
+                          unsigned events)
+{
+  Log_POLL(ci_log("%s: member=%llx events=%x", __FUNCTION__,
+                  (long long) eitem->epoll_data.data.u64, events));
+
+  ci_assert(eps->events_top - eps->events > 0);
+  eps->events[0].events = events;
+  eps->events[0].data = eitem->epoll_data.data;
+  ++eps->events;
+
+  ci_dllist_remove(&eitem->dllink);
+  if( eitem->epoll_data.events & EPOLLONESHOT ) {
+    eitem->epoll_data.events = EPOLLONESHOT;
+    if( eitem->epfd_event.events != EP_NOT_REGISTERED )
+      eitem->epfd_event.events = EPOLLONESHOT;
+  }
+  if( eitem->epoll_data.events & (EPOLLONESHOT | EPOLLET) )
+    eps->has_epollet = 1;
+  ci_dllist_push_tail(&eps->ep->oo_sockets, &eitem->dllink);
+}
+
+
+int
+citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
+                          struct citp_epoll_member*__restrict__ eitem,
+                          unsigned events, ci_uint64 sleep_seq)
+{
+  if( eitem->epoll_data.events & EPOLLET ) {
+    ci_sleep_seq_t polled_sleep_seq;
+    polled_sleep_seq.all = sleep_seq;
+    Log_POLL(ci_log("%s: EPOLLET rx_seq=%d,%d tx_seq=%d,%d",
+                    __FUNCTION__,
+                    eitem->reported_sleep_seq.rw.rx, polled_sleep_seq.rw.rx,
+                    eitem->reported_sleep_seq.rw.tx, polled_sleep_seq.rw.tx));
+    if( polled_sleep_seq.all == eitem->reported_sleep_seq.all )
+      events = 0;
+    else if( polled_sleep_seq.rw.rx == eitem->reported_sleep_seq.rw.rx )
+      events &=~ OO_EPOLL_READ_EVENTS;
+    else if( polled_sleep_seq.rw.tx == eitem->reported_sleep_seq.rw.tx )
+      events &=~ OO_EPOLL_WRITE_EVENTS;
+    eitem->reported_sleep_seq = polled_sleep_seq;
+  }
+
+  if( events != 0 ) {
+    citp_ul_epoll_store_event(eps, eitem, events);
+    return 1;
+  }
+  else {
+    return 0;
+  }
 }
 
 #endif  /* CI_CFG_USERSPACE_EPOLL */

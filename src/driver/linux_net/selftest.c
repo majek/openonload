@@ -34,7 +34,6 @@
 #include <linux/udp.h>
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
-#include <asm/io.h>
 #include "net_driver.h"
 #include "efx.h"
 #include "nic.h"
@@ -444,7 +443,7 @@ static void efx_iterate_state(struct efx_nic *efx)
 	/* saddr set later and used as incrementing count */
 	payload->ip.daddr = htonl(INADDR_LOOPBACK);
 	payload->ip.ihl = 5;
-	payload->ip.check = htons(0xdead);
+	payload->ip.check = (__force __sum16) htons(0xdead);
 	payload->ip.tot_len = htons(sizeof(*payload) - sizeof(struct ethhdr));
 	payload->ip.version = IPVERSION;
 	payload->ip.protocol = IPPROTO_UDP;
@@ -544,11 +543,11 @@ static int efx_end_loopback(struct efx_tx_queue *tx_queue,
 
 	/* Count the number of tx completions, and decrement the refcnt. Any
 	 * skbs not already completed will be free'd when the queue is flushed */
-	for (i=0; i < state->packet_count; i++) {
+	for (i = 0; i < state->packet_count; i++) {
 		skb = state->skbs[i];
 		if (skb && !skb_shared(skb))
 			++tx_done;
-		dev_kfree_skb_any(skb);
+		dev_kfree_skb(skb);
 	}
 
 	netif_tx_unlock_bh(efx->net_dev);
@@ -601,8 +600,8 @@ efx_test_loopback(struct efx_tx_queue *tx_queue,
 		/* Determine how many packets to send */
 		state->packet_count = efx->txq_entries / 3;
 		state->packet_count = min(1 << (i << 2), state->packet_count);
-		state->skbs = kzalloc(sizeof(state->skbs[0]) *
-				      state->packet_count, GFP_KERNEL);
+		state->skbs = kcalloc(state->packet_count,
+				      sizeof(state->skbs[0]), GFP_KERNEL);
 		if (!state->skbs)
 			return -ENOMEM;
 		state->flush = false;

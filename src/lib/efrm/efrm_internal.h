@@ -41,8 +41,6 @@ extern void efrm_resource_manager_add_resource(struct efrm_resource *);
 extern void efrm_client_add_resource(struct efrm_client *,
 				     struct efrm_resource *);
 
-extern int efrm_buffer_table_size(void);
-
 extern void efrm_nic_vi_ctor(struct efrm_nic_vi *);
 extern void efrm_nic_vi_dtor(struct efrm_nic_vi *);
 

@@ -31,21 +31,8 @@
 
 #include <ci/internal/transport_config_opt.h>
 
-#ifndef __ci_driver__
-#error "This is a driver module."
-#endif
-
 
 extern int efab_linux_dump_inode(int fd);
 
-#if CI_CFG_SOCKET_SYSCALL_INTERCEPT
-extern void efab_linux_attach_sock_ops(struct file *filp);
-extern void efab_linux_cleanup_sock_ops(struct inode *inode);
-#else
-ci_inline void efab_linux_attach_sock_ops(struct file *filp)    {}
-ci_inline void efab_linux_cleanup_sock_ops(struct inode *inode) {}
-#endif
 
 #endif
-
-/*! \cidoxg_end */

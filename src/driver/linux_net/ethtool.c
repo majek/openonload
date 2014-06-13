@@ -78,7 +78,7 @@ static u64 efx_get_atomic_stat(void *field)
 }
 
 #define EFX_ETHTOOL_U64_MAC_STAT(field)				\
-	EFX_ETHTOOL_STAT(field, mac_stats, field, 		\
+	EFX_ETHTOOL_STAT(field, mac_stats, field,		\
 			  u64, efx_get_u64_stat)
 
 #define EFX_ETHTOOL_UINT_NIC_STAT(name)				\
@@ -97,7 +97,7 @@ static u64 efx_get_atomic_stat(void *field)
 	EFX_ETHTOOL_STAT(tx_##field, tx_queue, field,		\
 			 unsigned int, efx_get_uint_stat)
 
-static struct efx_ethtool_stat efx_ethtool_stats[] = {
+static const struct efx_ethtool_stat efx_ethtool_stats[] = {
 	EFX_ETHTOOL_U64_MAC_STAT(tx_bytes),
 	EFX_ETHTOOL_U64_MAC_STAT(tx_good_bytes),
 	EFX_ETHTOOL_U64_MAC_STAT(tx_bad_bytes),
@@ -307,7 +307,7 @@ static int efx_ethtool_set_settings(struct net_device *net_dev,
 	 */
 	if (ecmd->advertising != efx->link_advertising
 	    && ecmd->autoneg && !(ecmd->advertising & ADVERTISED_Autoneg)) {
-		if (ecmd->advertising == 
+		if (ecmd->advertising ==
 		    (ADVERTISED_100baseT_Full | ADVERTISED_100baseT_Half |
 		     ADVERTISED_10baseT_Full | ADVERTISED_10baseT_Half |
 		     ADVERTISED_1000baseT_Full | ADVERTISED_1000baseT_Half))
@@ -565,7 +565,7 @@ static void efx_ethtool_get_strings(struct net_device *net_dev,
 	switch (string_set) {
 	case ETH_SS_STATS:
 		for (i = 0; i < EFX_ETHTOOL_NUM_STATS; i++)
-			strncpy(ethtool_strings[i].name,
+			strlcpy(ethtool_strings[i].name,
 				efx_ethtool_stats[i].name,
 				sizeof(ethtool_strings[i].name));
 		break;
@@ -585,7 +585,7 @@ static void efx_ethtool_get_stats(struct net_device *net_dev,
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_mac_stats *mac_stats = &efx->mac_stats;
-	struct efx_ethtool_stat *stat;
+	const struct efx_ethtool_stat *stat;
 	struct efx_channel *channel;
 	struct efx_tx_queue *tx_queue;
 	int i;
@@ -718,7 +718,7 @@ static int efx_ethtool_set_flags(struct net_device *net_dev, u32 data)
 	u32 supported = (efx->type->offload_features &
 			 (ETH_FLAG_RXHASH | ETH_FLAG_NTUPLE));
 	int rc;
-	
+
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 	supported |= ETH_FLAG_LRO;
 #endif
@@ -753,18 +753,13 @@ static void efx_ethtool_self_test(struct net_device *net_dev,
 	if (!efx_tests)
 		goto fail;
 
-
-	ASSERT_RTNL();
-	if (efx->state != STATE_RUNNING) {
+	if (efx->state != STATE_READY) {
 		rc = -EBUSY;
 		goto out;
 	}
 
 	netif_info(efx, drv, efx->net_dev, "starting %sline testing\n",
 		   (test->flags & ETH_TEST_FL_OFFLINE) ? "off" : "on");
-
-	if (test->flags & ETH_TEST_FL_OFFLINE)
-		efx_dl_reset_suspend(efx);
 
 	/* We need rx buffers and interrupts. */
 	already_up = (efx->net_dev->flags & IFF_UP);
@@ -773,7 +768,7 @@ static void efx_ethtool_self_test(struct net_device *net_dev,
 		if (rc) {
 			netif_err(efx, drv, efx->net_dev,
 				  "failed opening device.\n");
-			goto out_resume;
+			goto out;
 		}
 	}
 
@@ -786,12 +781,6 @@ static void efx_ethtool_self_test(struct net_device *net_dev,
 		   rc == 0 ? "passed" : "failed",
 		   (test->flags & ETH_TEST_FL_OFFLINE) ? "off" : "on");
 
-out_resume:
-	if (test->flags & ETH_TEST_FL_OFFLINE) {
-		/* Return success because if efx_reset_up() failed, an
-		 * EFX_RESET_DISABLE reset will have been scheduled */
-		efx_dl_reset_resume(efx, true);
-	}
 out:
 	efx_ethtool_fill_self_tests(efx, efx_tests, NULL, data);
 	kfree(efx_tests);
@@ -862,9 +851,6 @@ static int efx_ethtool_get_coalesce(struct net_device *net_dev,
 	return 0;
 }
 
-/* Set coalescing parameters
- * The difficulties occur for shared channels
- */
 static int efx_ethtool_set_coalesce(struct net_device *net_dev,
 				    struct ethtool_coalesce *coalesce)
 {
@@ -914,12 +900,8 @@ static void efx_ethtool_get_ringparam(struct net_device *net_dev,
 
 	ring->rx_max_pending = EFX_MAX_DMAQ_SIZE;
 	ring->tx_max_pending = EFX_MAX_DMAQ_SIZE;
-	ring->rx_mini_max_pending = 0;
-	ring->rx_jumbo_max_pending = 0;
 	ring->rx_pending = efx->rxq_entries;
 	ring->tx_pending = efx->txq_entries;
-	ring->rx_mini_pending = 0;
-	ring->rx_jumbo_pending = 0;
 }
 
 static int efx_ethtool_set_ringparam(struct net_device *net_dev,
@@ -953,7 +935,7 @@ static int efx_ethtool_set_pauseparam(struct net_device *net_dev,
 				      struct ethtool_pauseparam *pause)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
-	enum efx_fc_type wanted_fc, old_fc;
+	u8 wanted_fc, old_fc;
 	u32 old_adv;
 	bool reset;
 	int rc = 0;
@@ -1067,6 +1049,9 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
 /* MAC address mask including only MC flag */
 static const u8 mac_addr_mc_mask[ETH_ALEN] = { 0x01, 0, 0, 0, 0, 0 };
 
+#define IP4_ADDR_FULL_MASK	((__force __be32)~0)
+#define PORT_FULL_MASK		((__force __be16)~0)
+
 #ifdef EFX_USE_KCOMPAT
 static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 				      struct efx_ethtool_rx_flow_spec *rule)
@@ -1118,15 +1103,15 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 				       &ip_entry->ip4dst, &ip_entry->pdst);
 	if (rc != 0) {
 		rc = efx_filter_get_ipv4_full(
-			&spec, &proto, &ip_entry->ip4src, &ip_entry->psrc,
-			&ip_entry->ip4dst, &ip_entry->pdst);
+			&spec, &proto, &ip_entry->ip4dst, &ip_entry->pdst,
+			&ip_entry->ip4src, &ip_entry->psrc);
 		EFX_WARN_ON_PARANOID(rc);
-		ip_mask->ip4src = ~0;
-		ip_mask->psrc = ~0;
+		ip_mask->ip4src = IP4_ADDR_FULL_MASK;
+		ip_mask->psrc = PORT_FULL_MASK;
 	}
 	rule->flow_type = (proto == IPPROTO_TCP) ? TCP_V4_FLOW : UDP_V4_FLOW;
-	ip_mask->ip4dst = ~0;
-	ip_mask->pdst = ~0;
+	ip_mask->ip4dst = IP4_ADDR_FULL_MASK;
+	ip_mask->pdst = PORT_FULL_MASK;
 	return rc;
 }
 
@@ -1141,7 +1126,7 @@ efx_ethtool_get_rxnfc(struct net_device *net_dev,
 #endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
-	
+
 	switch (info->cmd) {
 	case ETHTOOL_GRXRINGS:
 		info->data = efx->n_rx_channels;
@@ -1247,9 +1232,7 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 	int rc;
 
 	/* Check that user wants us to choose the location */
-	if (rule->location != RX_CLS_LOC_ANY &&
-	    rule->location != RX_CLS_LOC_FIRST &&
-	    rule->location != RX_CLS_LOC_LAST)
+	if (rule->location != RX_CLS_LOC_ANY)
 		return -EINVAL;
 
 	/* Range-check ring_cookie */
@@ -1259,13 +1242,11 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 
 	/* Check for unsupported extensions */
 	if ((rule->flow_type & FLOW_EXT) &&
-	    (rule->m_ext.vlan_etype | rule->m_ext.data[0] |
+	    (rule->m_ext.vlan_etype || rule->m_ext.data[0] ||
 	     rule->m_ext.data[1]))
 		return -EINVAL;
 
-	efx_filter_init_rx(&spec, EFX_FILTER_PRI_MANUAL,
-			   (rule->location == RX_CLS_LOC_FIRST) ?
-			   EFX_FILTER_FLAG_RX_OVERRIDE_IP : 0,
+	efx_filter_init_rx(&spec, EFX_FILTER_PRI_MANUAL, 0,
 			   (rule->ring_cookie == RX_CLS_FLOW_DISC) ?
 			   0xfff : rule->ring_cookie);
 
@@ -1276,16 +1257,16 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 			    IPPROTO_TCP : IPPROTO_UDP);
 
 		/* Must match all of destination, */
-		if ((__force u32)~ip_mask->ip4dst |
-		    (__force u16)~ip_mask->pdst)
+		if (!(ip_mask->ip4dst == IP4_ADDR_FULL_MASK &&
+		      ip_mask->pdst == PORT_FULL_MASK))
 			return -EINVAL;
 		/* all or none of source, */
-		if ((ip_mask->ip4src | ip_mask->psrc) &&
-		    ((__force u32)~ip_mask->ip4src |
-		     (__force u16)~ip_mask->psrc))
+		if ((ip_mask->ip4src || ip_mask->psrc) &&
+		    !(ip_mask->ip4src == IP4_ADDR_FULL_MASK &&
+		      ip_mask->psrc == PORT_FULL_MASK))
 			return -EINVAL;
 		/* and nothing else */
-		if (ip_mask->tos | rule->m_ext.vlan_tci)
+		if (ip_mask->tos || rule->m_ext.vlan_tci)
 			return -EINVAL;
 
 		if (ip_mask->ip4src)
@@ -1314,7 +1295,7 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 			return -EINVAL;
 
 		/* Is it a default UC or MC filter? */
-		if (!compare_ether_addr(mac_mask->h_dest, mac_addr_mc_mask) &&
+		if (ether_addr_equal(mac_mask->h_dest, mac_addr_mc_mask) &&
 		    vlan_tag_mask == 0) {
 			if (is_multicast_ether_addr(mac_entry->h_dest))
 				rc = efx_filter_set_mc_def(&spec);
@@ -1324,7 +1305,7 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 		/* Otherwise, it must match all of destination and all
 		 * or none of VID.
 		 */
-		else if (is_broadcast_ether_addr(mac_mask->h_dest) && 
+		else if (is_broadcast_ether_addr(mac_mask->h_dest) &&
 			 (vlan_tag_mask == 0xfff || vlan_tag_mask == 0)) {
 			rc = efx_filter_set_eth_local(
 				&spec,
@@ -1394,8 +1375,8 @@ static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
 	return 0;
 }
 
-static int
-efx_ethtool_set_rxfh_indir(struct net_device *net_dev, const u32 *indir)
+static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
+				      const u32 *indir)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 

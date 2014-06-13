@@ -148,6 +148,8 @@ static void citp_tcp_dtor(citp_fdinfo* fdinfo, int fdt_locked)
   citp_netif_release_ref(epi->sock.netif, fdt_locked);
 }
 
+
+#if CI_CFG_FD_CACHING
 static void citp_tcp_cached_dtor(citp_fdinfo* fdi, int fdt_locked)
 {
   /* ?? FIXME: We're not holding the netif lock, so we can't touch this.
@@ -156,6 +158,8 @@ static void citp_tcp_cached_dtor(citp_fdinfo* fdi, int fdt_locked)
 
   citp_tcp_dtor(fdi, fdt_locked);
 }
+#endif
+
 
 static void tcp_handover(citp_sock_fdi* sock_fdi)
 {
@@ -243,9 +247,9 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
 }
 
 
-ci_inline int citp_tcp_accept_os(citp_sock_fdi* epi, int fd,
-                                 struct sockaddr* sa, socklen_t* p_sa_len,
-                                 int flags)
+static int citp_tcp_accept_os(citp_sock_fdi* epi, int fd,
+                              struct sockaddr* sa, socklen_t* p_sa_len,
+                              int flags)
 {
   int rc;
 
@@ -261,218 +265,11 @@ ci_inline int citp_tcp_accept_os(citp_sock_fdi* epi, int fd,
 }
 
 
-static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
-			      ci_tcp_socket_listen* listener,
-			      struct sockaddr* sa, socklen_t* p_sa_len,
-                              int flags)
+static int citp_tcp_accept_complete(ci_netif* ni,
+                                    struct sockaddr* sa, socklen_t* p_sa_len,
+                                    ci_tcp_socket_listen* listener,
+                                    ci_tcp_state* ts, int newfd)
 {
-  citp_fdinfo* newfdi;
-  ci_tcp_state* ts;
-  citp_waitable* w;
-  int newfd, rc;
-  int ul_cached;
-
-  Log_VSS(ci_log(LPF "accept(%d:%d, sa, %d)", fdinfo->fd,
-                 S_FMT(listener), p_sa_len ? *p_sa_len : -1));
-
-  /* Pop the socket off the accept queue. */
-  ci_assert(ci_sock_is_locked(ni, &listener->s.b));
-  ci_assert(ci_tcp_acceptq_not_empty(listener));
-  w = ci_tcp_acceptq_get(ni, listener);
-  ci_sock_unlock(ni, &listener->s.b);
-
-  if( w->state == CI_TCP_STATE_ALIEN ) {
-    struct oo_alien_ep *aep = &CI_CONTAINER(citp_waitable_obj,
-                                            waitable, w)->alien;
-    ci_netif *ani;
-    oo_sp sp = aep->sock_id;
-    ci_uint32 stack_id = aep->stack_id;
-    int locked = fdtable_strict();
-    citp_sock_fdi* newepi;
-
-    listener->acceptq_n_alien--;
-
-    ci_netif_lock(ni);
-    citp_waitable_obj_free(ni, w);
-    ci_netif_unlock(ni);
-
-    rc = citp_netif_by_id(stack_id, &ani);
-    if( rc != 0 ) {
-      struct oo_op_tcp_drop_from_acceptq op;
-      /* free the zombie:
-       * ci_tcp_send_rst(stack_id, sp)
-       * ci_tcp_drop(stack_id, sp) */
-      op.stack_id = stack_id;
-      op.sock_id = sp;
-      ci_sys_ioctl(ci_netif_get_driver_handle(ni),
-                   OO_IOC_TCP_DROP_FROM_ACCEPTQ, &op);
-      CI_SET_ERROR(rc, -rc);
-      return -1;
-    }
-    ci_assert(ani);
-
-    newfd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(ani),
-                                      sp, AF_UNSPEC, flags);
-    if( newfd < 0 ) {
-      if( locked )  CITP_FDTABLE_UNLOCK();
-      return -1;
-    }
-    citp_fdtable_new_fd_set(newfd, fdip_busy, locked);
-    if( locked )  CITP_FDTABLE_UNLOCK();
-    Log_EP(ci_log("%s: %d:%d accepted fd=%d %d:%d", __FUNCTION__,
-                  ni->state->stack_id, S_ID(listener), newfd,
-                  ani->state->stack_id, OO_SP_TO_INT(sp)));
-    ts = SP_TO_TCP(ani, sp);
-
-    ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
-    ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ));
-
-    newepi = CI_ALLOC_OBJ(citp_sock_fdi);
-    if( newepi == 0 ) {
-      Log_E (ci_log(LPF "accept: newepi malloc failed"));
-      ef_onload_driver_close(newfd);
-      citp_netif_release_ref(ani, 0);
-      CI_SET_ERROR(rc, -ENOMEM);
-      return -1;
-    }
-    newfdi = &newepi->fdinfo;
-    citp_fdinfo_init(newfdi, &citp_tcp_protocol_impl);
-    newfdi->can_cache = 0;
-    newepi->sock.s = &ts->s;
-    newepi->sock.netif = ani;
-
-    /* get new file descriptor into table */
-    citp_fdtable_insert(newfdi, newfd, 0);
-
-    goto accepted_out;
-  }
-
-  ci_assert(w->state & CI_TCP_STATE_TCP);
-  ci_assert(w->state != CI_TCP_LISTEN);
-  ts = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
-  ul_cached = 0;
-  newfd = ts->cached_on_fd;
-
-  if (newfd != -1) {
-    /* If newfd is not -1, it means that we get it off the cache.  Need to
-     * check the cached_on_pid to ensure it was cached for our process.
-     */
-    if (ts->cached_on_pid == getpid())
-      ul_cached = 1;
-    else {
-      /* Cached on another pid -- bring it across to this process */
-      Log_EP(ci_log("%s: need xfer from %d:%d", __FUNCTION__,
-                    ts->cached_on_pid, ts->cached_on_fd));
-
-      rc = ci_tcp_helper_xfer_cached(fdinfo->fd, S_SP(ts),
-                                     ts->cached_on_pid, newfd);
-      if (rc == -ESRCH) {
-        /* This means that the cached_on_pid process no longer exists.  This
-         * means it's currently being cleaned up, and all the cached EPs will
-         * shortly be destroyed.  So, we can't use the cached EP for this
-         * connection.
-         */
-        Log_EP(ci_log("%s: not found: assuming uncached", __FUNCTION__));
-        ci_assert (ul_cached == 0);
-        newfd = ts->cached_on_fd = -1;
-      } else if (rc < 0) {
-        goto exit;
-      } else {
-        ci_assert (ul_cached == 0);
-
-        if( fdtable_strict() )  CITP_FDTABLE_LOCK();
-        newfd = rc;
-        ts->cached_on_pid = getpid();
-        citp_fdtable_new_fd_set(newfd, fdip_busy, fdtable_strict());
-        Log_EP(ci_log("%s: accepted fd=%d (cached)", __FUNCTION__, newfd));
-        if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
-      }
-    }
-
-    /* We're reusing a cached socket, we don't attach; merely change its
-    ** state.
-    */
-    ci_atomic32_and(&ts->s.b.sb_aflags,
-		    ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
-    ts->cached_on_fd = -1;
-  } else {
-    /* Need to create new fd */
-    ci_assert (ul_cached == 0);
-    if( fdtable_strict() )  CITP_FDTABLE_LOCK();
-    newfd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(ni),
-				   S_SP(ts), AF_UNSPEC, flags);
-    if( newfd < 0 ) {
-      Log_E(ci_log(LPF "%s: ci_tcp_helper_sock_attach %d",
-                   __FUNCTION__, newfd));
-      if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
-      rc = -1;
-      goto exit;
-    }
-    citp_fdtable_new_fd_set(newfd, fdip_busy, fdtable_strict());
-    Log_EP(ci_log("%s: accepted fd=%d (not cached)", __FUNCTION__, newfd));
-    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
-  }
-
-  if( ul_cached ) {
-    /* There is probably a race here with the cached fd being closed by
-    ** another thread in this process.  Wants to reorg to sort nicely.
-    */
-    volatile citp_fdinfo_p* p_fdip;
-    citp_fdinfo_p fdip;
-
-    Log_EP(ci_log("%s: fd=%d from cache", __FUNCTION__, newfd));
-
-    ci_assert_ge(newfd, 0);
-
-    p_fdip = &citp_fdtable.table[newfd].fdip;
-    fdip = *p_fdip;
-  fdip_again:
-    if( fdip_is_busy(fdip) )  fdip = citp_fdtable_busy_wait(newfd, 0);
-    if( fdip_cas_fail(p_fdip, fdip, fdip_busy) )  goto fdip_again;
-
-    ci_assert(fdip_is_normal(fdip));
-    newfdi = fdip_to_fdi(fdip);
-    ci_assert(newfdi != &citp_the_closed_fd);
-    ci_assert(newfdi->fd == newfd);
-    ci_assert(newfdi->is_cached);
-    ci_assert(newfdi->can_cache);
-    ci_assert(newfdi->is_special);
-
-    /* This fd is no longer cached */
-    newfdi->is_special = newfdi->is_cached = 0;
-    /* Put back the protocol ops to the TCP ones */
-    ci_assert (newfdi->protocol == &citp_tcp_cached_protocol_impl);
-    newfdi->protocol = &citp_tcp_protocol_impl;
-    citp_fdtable_busy_clear(newfd, fdip, 0);
-  }
-  else {
-    /* ts didn't come from cache, or it was for another process.  Either
-     * way, we need to create the u/l state for the fd (i.e. fdinfo)
-     */
-    citp_sock_fdi* newepi;
-
-    ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
-    ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ));
-
-    newepi = CI_ALLOC_OBJ(citp_sock_fdi);
-    if( newepi == 0 ) {
-      Log_E (ci_log(LPF "accept: newepi malloc failed"));
-      ef_onload_driver_close(newfd);
-      rc = -1;
-      goto exit;
-    }
-    newfdi = &newepi->fdinfo;
-    citp_fdinfo_init(newfdi, &citp_tcp_protocol_impl);
-    newfdi->can_cache = 1;
-    newepi->sock.s = &ts->s;
-    newepi->sock.netif = ni;
-    citp_netif_add_ref(ni);
-
-    /* get new file descriptor into table */
-    citp_fdtable_insert(newfdi, newfd, 0);
-  }
-
-accepted_out:
   CITP_STATS_NETIF(++ni->state->stats.ul_accepts);
 
   if( sa ) {
@@ -493,13 +290,271 @@ accepted_out:
   ts->s.uid = listener->s.uid;
   CI_DEBUG(ts->s.pid = getpid());
 
-  Log_VSS(ci_log(LPF "accept(%d:%d, sa, %d) = %d:%d", fdinfo->fd,
-                 S_FMT(listener), p_sa_len ? *p_sa_len : 0, newfd, S_FMT(ts)));
+  return newfd;
+}
 
-  rc = newfd;
 
- exit:
-  return rc;
+static int citp_tcp_accept_alien(ci_netif* ni, ci_tcp_socket_listen* listener,
+                                 struct sockaddr* sa, socklen_t* p_sa_len,
+                                 int flags, citp_waitable* w)
+{
+  struct oo_alien_ep *aep = &CI_CONTAINER(citp_waitable_obj,
+                                          waitable, w)->alien;
+  ci_netif *ani;
+  oo_sp sp = aep->sock_id;
+  ci_uint32 stack_id = aep->stack_id;
+  int locked = fdtable_strict();
+  citp_sock_fdi* newepi;
+  citp_fdinfo* newfdi;
+  citp_waitable *neww;
+  ci_tcp_state* ts;
+  int newfd, rc;
+
+  ci_netif_lock(ni);
+  citp_waitable_obj_free(ni, w);
+  ci_netif_unlock(ni);
+
+  rc = citp_netif_by_id(stack_id, &ani);
+  if( rc != 0 ) {
+    struct oo_op_tcp_drop_from_acceptq op;
+    /* free the zombie:
+     * ci_tcp_send_rst(stack_id, sp)
+     * ci_tcp_drop(stack_id, sp) */
+    op.stack_id = stack_id;
+    op.sock_id = sp;
+    ci_sys_ioctl(ci_netif_get_driver_handle(ni),
+                 OO_IOC_TCP_DROP_FROM_ACCEPTQ, &op);
+    CI_SET_ERROR(rc, -rc);
+    return -1;
+  }
+  ci_assert(ani);
+
+  newfd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(ani),
+                                    sp, AF_UNSPEC, flags);
+  if( newfd < 0 ) {
+    if( locked )  CITP_FDTABLE_UNLOCK();
+    return -1;
+  }
+  citp_fdtable_new_fd_set(newfd, fdip_busy, locked);
+  if( locked )  CITP_FDTABLE_UNLOCK();
+  Log_EP(ci_log("%s: %d:%d accepted fd=%d %d:%d", __FUNCTION__,
+                ni->state->stack_id, S_ID(listener), newfd,
+                ani->state->stack_id, OO_SP_TO_INT(sp)));
+
+  /* Check that this ts looks in the way we expect;
+   * there is no guarantee that it is the same stack it used to be. */
+  neww = SP_TO_WAITABLE(ani, sp);
+  if( !(neww->state & CI_TCP_STATE_TCP) || neww->state == CI_TCP_LISTEN ) {
+    errno = EINVAL;
+    goto fail;
+  }
+
+  ts = SP_TO_TCP(ani, sp);
+  if( sock_lport_be16(&ts->s) != sock_lport_be16(&listener->s) ||
+      (sock_laddr_be32(&listener->s) != INADDR_ANY &&
+       (sock_laddr_be32(&listener->s) !=  sock_laddr_be32(&ts->s)) )) {
+    errno = EINVAL;
+    goto fail;
+  }
+
+  ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
+  ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+
+  newepi = CI_ALLOC_OBJ(citp_sock_fdi);
+  if( newepi == 0 ) {
+    errno = ENOMEM;
+    goto fail;
+  }
+  newfdi = &newepi->fdinfo;
+  citp_fdinfo_init(newfdi, &citp_tcp_protocol_impl);
+#if CI_CFG_FD_CACHING
+  newfdi->can_cache = 0;
+#endif
+  newepi->sock.s = &ts->s;
+  newepi->sock.netif = ani;
+
+  /* get new file descriptor into table */
+  citp_fdtable_insert(newfdi, newfd, 0);
+  return citp_tcp_accept_complete(ni, sa, p_sa_len, listener, ts, newfd);
+
+fail:
+    Log_E (ci_log(LPF "failed to get accepted socket from alien stack [%d]:"
+                  " errno=%d", NI_ID(ani), errno));
+  ef_onload_driver_close(newfd);
+  citp_netif_release_ref(ani, 0);
+  return -1;
+}
+
+
+#if CI_CFG_FD_CACHING
+
+/* Accept a socket that is cached.  Returns -1 on error, -2 if socket turns
+ * out not to be cached.  >= 0 indicates success and return value is the
+ * new fd.
+ */
+static int citp_tcp_accept_cached(citp_fdinfo* fdinfo, ci_netif* ni,
+                                  struct sockaddr* sa, socklen_t* p_sa_len,
+                                  ci_tcp_socket_listen* listener,
+                                  ci_tcp_state* ts, int* newfd_out)
+{
+  volatile citp_fdinfo_p* p_fdip;
+  citp_fdinfo_p fdip;
+  citp_fdinfo* newfdi;
+  int newfd, rc;
+
+  newfd = ts->cached_on_fd;
+
+  /* If newfd is not -1, it means that we get it off the cache.  Need to
+   * check the cached_on_pid to ensure it was cached for our process.
+   */
+  if( ts->cached_on_pid != getpid() ) {
+    /* Cached on another pid -- bring it across to this process */
+    Log_EP(ci_log("%s: need xfer from %d:%d", __FUNCTION__,
+                  ts->cached_on_pid, ts->cached_on_fd));
+    rc = ci_tcp_helper_xfer_cached(fdinfo->fd, S_SP(ts),
+                                   ts->cached_on_pid, newfd);
+    if( rc == -ESRCH ) {
+      /* This means that the cached_on_pid process no longer exists.  This
+       * means it's currently being cleaned up, and all the cached EPs will
+       * shortly be destroyed.  So, we can't use the cached EP for this
+       * connection.
+       */
+      Log_EP(ci_log("%s: not found: assuming uncached", __FUNCTION__));
+      *newfd_out = ts->cached_on_fd = -1;
+      return -1;
+    }
+    else if( rc < 0 ) {
+      return rc;
+    }
+    else {
+      if( fdtable_strict() )  CITP_FDTABLE_LOCK();
+      *newfd_out = rc;
+      ts->cached_on_pid = getpid();
+      citp_fdtable_new_fd_set(newfd, fdip_busy, fdtable_strict());
+      Log_EP(ci_log("%s: accepted fd=%d (cached)", __FUNCTION__, newfd));
+      if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+    }
+  }
+
+  /* We're reusing a cached socket, we don't attach; merely change its
+  ** state.
+  */
+  ci_atomic32_and(&ts->s.b.sb_aflags,
+                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+  ts->cached_on_fd = -1;
+
+  /* There is probably a race here with the cached fd being closed by
+  ** another thread in this process.  Wants to reorg to sort nicely.
+  */
+  Log_EP(ci_log("%s: fd=%d from cache", __FUNCTION__, newfd));
+
+  ci_assert_ge(newfd, 0);
+
+  p_fdip = &citp_fdtable.table[newfd].fdip;
+  fdip = *p_fdip;
+ fdip_again:
+  if( fdip_is_busy(fdip) )  fdip = citp_fdtable_busy_wait(newfd, 0);
+  if( fdip_cas_fail(p_fdip, fdip, fdip_busy) )  goto fdip_again;
+
+  ci_assert(fdip_is_normal(fdip));
+  newfdi = fdip_to_fdi(fdip);
+  ci_assert(newfdi != &citp_the_closed_fd);
+  ci_assert(newfdi->fd == newfd);
+  ci_assert(newfdi->is_cached);
+  ci_assert(newfdi->can_cache);
+  ci_assert(newfdi->is_special);
+
+  /* This fd is no longer cached */
+  newfdi->is_special = newfdi->is_cached = 0;
+  /* Put back the protocol ops to the TCP ones */
+  ci_assert (newfdi->protocol == &citp_tcp_cached_protocol_impl);
+  newfdi->protocol = &citp_tcp_protocol_impl;
+  citp_fdtable_busy_clear(newfd, fdip, 0);
+
+  return citp_tcp_accept_complete(ni, sa, p_sa_len, listener, ts, newfd);
+}
+
+#endif
+
+
+static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
+			      ci_tcp_socket_listen* listener,
+			      struct sockaddr* sa, socklen_t* p_sa_len,
+                              int flags)
+{
+  citp_sock_fdi* newepi;
+  citp_fdinfo* newfdi;
+  ci_tcp_state* ts;
+  citp_waitable* w;
+  int newfd;
+
+  Log_VSS(ci_log(LPF "accept(%d:%d, sa, %d)", fdinfo->fd,
+                 S_FMT(listener), p_sa_len ? *p_sa_len : -1));
+
+  /* Pop the socket off the accept queue. */
+  ci_assert(ci_sock_is_locked(ni, &listener->s.b));
+  ci_assert(ci_tcp_acceptq_not_empty(listener));
+  w = ci_tcp_acceptq_get(ni, listener);
+  ci_sock_unlock(ni, &listener->s.b);
+
+  if( w->state == CI_TCP_STATE_ALIEN )
+    return citp_tcp_accept_alien(ni, listener, sa, p_sa_len, flags, w);
+
+  ci_assert(w->state & CI_TCP_STATE_TCP);
+  ci_assert(w->state != CI_TCP_LISTEN);
+  ts = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
+  newfd = -1;
+
+#if CI_CFG_FD_CACHING
+  if( ci_tcp_is_cached(ts) ) {
+    int rc = citp_tcp_accept_cached(fdinfo, ni, sa, p_sa_len,
+                                    listener, ts, &newfd);
+    if( rc != -2 )
+      return rc;
+  }
+#endif
+
+  if( newfd < 0 ) {
+    /* Need to create new fd */
+    if( fdtable_strict() )  CITP_FDTABLE_LOCK();
+    newfd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(ni),
+                                      S_SP(ts), AF_UNSPEC, flags);
+    if( newfd < 0 ) {
+      Log_E(ci_log(LPF "%s: ci_tcp_helper_sock_attach %d",
+                   __FUNCTION__, newfd));
+      if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+      return -1;
+    }
+    citp_fdtable_new_fd_set(newfd, fdip_busy, fdtable_strict());
+    Log_EP(ci_log("%s: accepted fd=%d (not cached)", __FUNCTION__, newfd));
+    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+  }
+
+  /* ts didn't come from cache, or it was for another process.  Either way,
+   * we need to create the u/l state for the fd (i.e. fdinfo).
+   */
+  ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
+  ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+
+  newepi = CI_ALLOC_OBJ(citp_sock_fdi);
+  if( newepi == 0 ) {
+    Log_E (ci_log(LPF "accept: newepi malloc failed"));
+    ef_onload_driver_close(newfd);
+    return -1;
+  }
+  newfdi = &newepi->fdinfo;
+  citp_fdinfo_init(newfdi, &citp_tcp_protocol_impl);
+#if CI_CFG_FD_CACHING
+  newfdi->can_cache = 1;
+#endif
+  newepi->sock.s = &ts->s;
+  newepi->sock.netif = ni;
+  citp_netif_add_ref(ni);
+
+  /* get new file descriptor into table */
+  citp_fdtable_insert(newfdi, newfd, 0);
+
+  return citp_tcp_accept_complete(ni, sa, p_sa_len, listener, ts, newfd);
 }
 
 
@@ -559,7 +614,7 @@ check_ul_accept_q:
             CITP_STATS_TCP_LISTEN(++listener->stats.n_accept_loop2_closed);
             ci_log("%s: failed to accept connection: errno=%d",
                    __FUNCTION__, errno);
-            ci_log("See limitations of EF_TCP_*_LOOPBACK=2 mode");
+            ci_log("See limitations of EF_TCP_SERVER_LOOPBACK=2 mode");
             rc = 0;
             goto check_ul_accept_q;
           }
@@ -603,6 +658,7 @@ check_ul_accept_q:
 
   /* We need to block (optionally spinning first). */
 
+  timeout = listener->s.so.rcvtimeo_msec;
   if( tcp_accept_spin ) {
     ci_uint64 now_frc;
     ci_frc64(&now_frc);
@@ -621,9 +677,11 @@ check_ul_accept_q:
           errno = EINTR;
           return -1;
         }
+
+        /* run any pending signals: */
         citp_exit_lib(lib_context, FALSE);
-        citp_signal_run_pending(&lib_context->thread->sig);
-        citp_enter_lib(lib_context);
+        citp_reenter_lib(lib_context);
+
         if( !lib_context->thread->sig.need_restart ) {
           ni->state->is_spinner = 0;
           errno = EINTR;
@@ -637,11 +695,9 @@ check_ul_accept_q:
       errno = EAGAIN;
       return -1;
     }
-    timeout = listener->s.so.rcvtimeo_msec -
-          (now_frc - start_frc) / IPTIMER_STATE(ni)->khz;
+    if( timeout )
+      timeout -= (now_frc - start_frc) / IPTIMER_STATE(ni)->khz;
   }
-  else
-    timeout = listener->s.so.rcvtimeo_msec;
 
   {
     struct pollfd pfd;
@@ -691,37 +747,48 @@ check_ul_accept_q:
 /* Re-probe fdinfo after endpoint was moved.
  * refcounts is the number of reference counf of fdinfo taken by this code
  * path. */
-static citp_fdinfo *citp_reprobe_moved(citp_fdinfo* fdinfo, int refcounts)
+static citp_fdinfo *citp_reprobe_moved(citp_fdinfo* fdinfo, int from_fast_lookup)
 {
   volatile citp_fdinfo_p *p_fdip;
   citp_fdinfo_p fdip;
   int fd = fdinfo->fd;
-  int i;
 
-  ci_assert_ge(refcounts, 1);
+  CITP_FDTABLE_LOCK();
 
   p_fdip = &citp_fdtable.table[fd].fdip;
   do {
     fdip = *p_fdip;
+    ci_assert(fdip_is_normal(fdip));
+
+    if( fdip_to_fdi(fdip) != fdinfo ) {
+      fdinfo = fdip_to_fdi(fdip);
+      if( from_fast_lookup )
+        citp_fdinfo_ref_fast(fdinfo);
+      else
+        citp_fdinfo_ref(fdinfo);
+      CITP_FDTABLE_UNLOCK();
+      return fdinfo;
+    }
   } while( fdip_cas_fail(p_fdip, fdip, fdip_unknown) );
 
-  CITP_FDTABLE_LOCK();
   fdinfo->on_ref_count_zero = FDI_ON_RCZ_MOVED;
-  /* one ref from fdtable, another from this function */
-  for( i = 0; i < refcounts; i++ )
+  /* One refcount from the caller */
+  if( from_fast_lookup )
+    citp_fdinfo_release_ref_fast(fdinfo);
+  else
     citp_fdinfo_release_ref(fdinfo, 1);
-  CITP_FDTABLE_UNLOCK();
+  /* One refcount from fdtable */
+  citp_fdinfo_release_ref(fdinfo, 1);
   
   /* re-probe new fd */
-  fdinfo = citp_fdtable_lookup(fd);
+  fdinfo = citp_fdtable_probe_locked(fd, CI_TRUE);
+  CITP_FDTABLE_UNLOCK();
   if( fdinfo == NULL )
     return NULL;
 
-  if( refcounts == 1 )
+  if( from_fast_lookup ) {
     citp_fdinfo_release_ref(fdinfo, 0);
-  else {
-    for( i = 2; i < refcounts; i++ )
-      citp_fdinfo_ref(fdinfo);
+    citp_fdinfo_ref_fast(fdinfo);
   }
 
   return fdinfo;
@@ -733,6 +800,7 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   int rc;
+  int moved = 0;
 
 #if !CI_CFG_FAKE_IPV6
   Log_VSS(const struct sockaddr_in* sai = (const struct sockaddr_in*) sa;
@@ -742,20 +810,20 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
               (sai != NULL) ? CI_BSWAP_BE16(sai->sin_port) : 0, sa_len));
 #endif
 
-  rc = ci_tcp_connect( &epi->sock, sa, sa_len, fdinfo->fd, 0);
+  rc = ci_tcp_connect( &epi->sock, sa, sa_len, fdinfo->fd, &moved);
 
-  if (rc == CI_SOCKET_MOVED ) {
-    fdinfo = citp_reprobe_moved(fdinfo, 2);
+  if( moved ) {
+    fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE);
     if( fdinfo == NULL ) {
       /* Most probably, it is EMFILE, but we can't know for sure.
        * And we can't handover since there is no fdinfo now. */
       errno = EMFILE;
       return -1;
     }
-    else {
-      epi = fdi_to_sock_fdi(fdinfo);
-      rc = ci_tcp_connect( &epi->sock, sa, sa_len, fdinfo->fd, 1);
-    }
+
+    /* Possibly we also should handover.  To do it properly, we need
+     * current epi value. */
+    epi = fdi_to_sock_fdi(fdinfo);
   }
 
   if (rc == CI_SOCKET_HANDOVER
@@ -816,6 +884,9 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
   return rc;
 }
 
+
+#if CI_CFG_FD_CACHING
+
 static void citp_tcp_cached_protocol_impl_init(void)
 {
   citp_tcp_cached_protocol_impl.ops = citp_closed_protocol_impl.ops;
@@ -829,6 +900,84 @@ static ci_boolean_t can_cache_fd(ci_netif* ni, int fd)
                          OO_IOC_TCP_CAN_CACHE_FD, &fd) == 0);
 }
 
+
+static int citp_tcp_close_cached(citp_fdinfo* fdinfo)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
+  ci_sock_cmn* s = epi->sock.s;
+  ci_netif* ni = epi->sock.netif;
+  ci_tcp_state* ts = SOCK_TO_TCP(s);
+  int ni_locked;
+
+  ci_assert(ts->cached_on_fd == -1);
+
+  if( (ni_locked = ci_netif_trylock(ni)) && ni->state->epcache_n > 0 ) {
+    unsigned laddr = sock_laddr_be32(s);
+    unsigned lport = sock_lport_be16(s);
+    int rc = ci_netif_filter_lookup(ni, laddr, lport, 0,0, sock_protocol(s));
+    if( rc >= 0 ) {
+      ci_tcp_socket_listen* tlo =
+        SP_TO_TCP_LISTEN(ni, CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, rc));
+
+      /* Check reference-counts.  We may only cache an FD if no-one else is
+      ** using it -- i.e. ref count in of file object in kernel is exactly
+      ** 1.
+      */
+#define DANGEROUS_CACHING  0
+      if( DANGEROUS_CACHING || can_cache_fd(ni, fdinfo->fd) ) {
+        ni->state->epcache_n--;
+
+        /* Setting the TCP-state's 'fd' field means that this tcp-state
+         * will be cached, associated with this fd.
+         */
+        ts->cached_on_fd = fdinfo->fd;
+        ts->cached_on_pid = getpid();
+        Log_EP(ci_log ("Pushing fd %d (pid %u) on to pending list",
+                       fdinfo->fd, (unsigned) getpid()));
+        ci_ni_dllist_push (ni, &tlo->epcache_pending, &ts->epcache_link);
+
+        /* Now close the connection */
+/*XXX missing errorcheck? */
+        ci_tcp_close(ni, ts, 1);
+
+        fdinfo->is_special = fdinfo->is_cached = 1;
+
+        /* Swizzle the ops of this fd to be the closed ops.  i.e. any
+         * operations on it will return EBADF
+         */
+        ci_assert (fdinfo->protocol == &citp_tcp_protocol_impl);
+        if( citp_tcp_cached_protocol_impl.ops.dtor == 0 )
+          citp_tcp_cached_protocol_impl_init();
+        fdinfo->protocol = &citp_tcp_cached_protocol_impl;
+
+        /* And we're done; unlock and out... */
+        ci_netif_unlock_fdi(epi);
+        return 1;  /* Indicate to caller fd is cached */
+      }
+
+      /* We are not able to cache the FD.  This probably means someone else
+       * is using it (i.e. its ref-count in the kernel was > 1).  Oh well.
+       * Return 0, telling our caller that it's closed at UL, but not
+       * cached
+       */
+      Log_EP(log("FD %d not cached - kernel ref-count non-zero", fdinfo->fd));
+    }
+    else
+      Log_EP(ci_log("FD %d not cached - no listening socket", fdinfo->fd));
+  }
+  else
+    Log_EP(log("FD %d not cached - cache full / locked (%d)",
+               fdinfo->fd, ni_locked));
+
+  if( ni_locked )
+    ci_netif_unlock(ni);
+
+  return 0;
+}
+
+#endif
+
+
 /* Close a user-level file-descriptor.
  * If this function returns 0, the fd is closed.
  * A return of 1 means the fd is closed in user-space, but it's tcp EP is
@@ -839,7 +988,6 @@ static int citp_tcp_close(citp_fdinfo* fdinfo, int may_cache)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   ci_sock_cmn* s = epi->sock.s;
-  ci_netif* ni = epi->sock.netif;
   int rc = 0;
 
   /* SO_LINGER is handled in-kernel */
@@ -850,88 +998,25 @@ static int citp_tcp_close(citp_fdinfo* fdinfo, int may_cache)
   else
     epi->sock.so_linger_hash = 0;
 
-  /* Note: if this is a listening socket, we don't need to uncache any cached
-   * EPs that belong to this listening socket here.  Instead we leave this to
-   * __ci_tcp_listen_shutdown, which will uncache everything there (this way
-   * we're consistent with a close due to application exit). The user-level
-   * state will be cleared up lazily - when the kernel gives us an fd for which
-   * we have an fdinfo that is cached, we unpick user-level state there.
+#if CI_CFG_FD_CACHING
+  /* Note: if this is a listening socket, we don't need to uncache any
+   * cached EPs that belong to this listening socket here.  Instead we
+   * leave this to __ci_tcp_listen_shutdown, which will uncache everything
+   * there (this way we're consistent with a close due to application
+   * exit). The user-level state will be cleared up lazily - when the
+   * kernel gives us an fd for which we have an fdinfo that is cached, we
+   * unpick user-level state there.
    */
-
-  if( (rc >= 0) && may_cache &&
-      ((s->b.state == CI_TCP_ESTABLISHED) |
-       (s->b.state == CI_TCP_CLOSE_WAIT)) &&
-      ni->state->epcache_n > 0 && fdinfo->can_cache ) {
-
-    ci_tcp_state* ts = SOCK_TO_TCP(s);
-    int ni_locked;
-
-    ci_assert(ts->cached_on_fd == -1);
-
-    if( (ni_locked = ci_netif_trylock(ni)) && ni->state->epcache_n > 0 ) {
-      unsigned laddr = sock_laddr_be32(s);
-      unsigned lport = sock_lport_be16(s);
-      int rc = ci_netif_filter_lookup(ni, laddr, lport, 0,0, sock_protocol(s));
-      if (rc >= 0) {
-        ci_tcp_socket_listen* tlo =
-          SP_TO_TCP_LISTEN(ni, CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, rc));
-
-        /* Check reference-counts.  We may only cache an FD if no-one else
-	** is using it -- i.e. ref count in of file object in kernel is
-	** exactly 1.
-	*/
-#define DANGEROUS_CACHING  0
-        if( DANGEROUS_CACHING || can_cache_fd(ni, fdinfo->fd) ) {
-          ni->state->epcache_n--;
-
-          /* Setting the TCP-state's 'fd' field means that this tcp-state
-           * will be cached, associated with this fd.
-           */
-          ts->cached_on_fd = fdinfo->fd;
-          ts->cached_on_pid = getpid();
-          Log_EP(ci_log ("Pushing fd %d (pid %u) on to pending list",
-                       fdinfo->fd, (unsigned) getpid()));
-          ci_ni_dllist_push (ni, &tlo->epcache_pending, &ts->epcache_link);
-
-          /* Now close the connection */
-/*XXX missing errorcheck? */
-          ci_tcp_close(ni, ts, 1);
-
-          fdinfo->is_special = fdinfo->is_cached = 1;
-
-          /* Swizzle the ops of this fd to be the closed ops.  i.e. any
-           * operations on it will return EBADF
-           */
-          ci_assert (fdinfo->protocol == &citp_tcp_protocol_impl);
-	  if( citp_tcp_cached_protocol_impl.ops.dtor == 0 )
-	    citp_tcp_cached_protocol_impl_init();
-          fdinfo->protocol = &citp_tcp_cached_protocol_impl;
-
-          /* And we're done; unlock and out... */
-          ci_netif_unlock_fdi(epi);
-
-          return 1;  /* Indicate to caller fd is cached */
-        }
-
-        /* We are not able to cache the FD.  This probably means someone else is
-         * using it (i.e. its ref-count in the kernel was > 1).  Oh well.
-         * Return 0, telling our caller that it's closed at UL, but not cached
-         */
-        rc = 0;
-        Log_EP(log("FD %d not cached - kernel ref-count non-zero", fdinfo->fd));
-      }
-      else
-        Log_EP(ci_log("FD %d not cached - no listening socket", fdinfo->fd));
-    }
-    else
-      Log_EP(log("FD %d not cached - cache full / locked (%d)",
-                 fdinfo->fd, ni_locked));
-
-    if( ni_locked )  ci_netif_unlock(ni);
+  if( may_cache && fdinfo->can_cache &&
+      epi->sock.netif->state->epcache_n > 0 &&
+      ((s->b.state == CI_TCP_ESTABLISHED) ||
+       (s->b.state == CI_TCP_CLOSE_WAIT)) ) {
+    rc = citp_tcp_close_cached(fdinfo);
   }
   else
     Log_EP(log("FD %d not cached - not in suitable state - state 0x%x",
                fdinfo->fd, s->b.state));
+#endif
 
   Log_VSS(ci_log(LPF "close("EF_FMT")", EF_PRI_ARGS(epi, fdinfo->fd)));
   return rc;
@@ -1047,7 +1132,7 @@ static int citp_tcp_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags)
             CI_SOCKCALL_FLAGS_PRI_ARG(flags)));
 
   if( ~epi->sock.s->b.state & CI_TCP_STATE_TCP ) {
-    fdinfo = citp_reprobe_moved(fdinfo, 1);
+    fdinfo = citp_reprobe_moved(fdinfo, CI_TRUE);
     if( fdinfo == NULL ) {
       if( msg->msg_namelen != 0 || msg->msg_controllen != 0 ||
           msg->msg_flags != 0 ) {
@@ -1087,6 +1172,16 @@ static int citp_tcp_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
 }
 #endif
 
+#if CI_CFG_SENDMMSG
+static int citp_tcp_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
+                             unsigned vlen, int flags)
+{
+  Log_E(ci_log("%s: TCP fd sendmmsg not supported by OpenOnload",
+               __FUNCTION__));
+  errno = ENOSYS;
+  return -1;
+}
+#endif
 
 static int citp_tcp_send(citp_fdinfo* fdinfo, const struct msghdr* msg,
                          int flags)
@@ -1095,7 +1190,7 @@ static int citp_tcp_send(citp_fdinfo* fdinfo, const struct msghdr* msg,
   int rc;
 
   if( ~epi->sock.s->b.state & CI_TCP_STATE_TCP ) {
-    fdinfo = citp_reprobe_moved(fdinfo, 1);
+    fdinfo = citp_reprobe_moved(fdinfo, CI_TRUE);
     if( fdinfo == NULL ) {
       if( msg->msg_namelen != 0 || msg->msg_controllen != 0 ||
           msg->msg_flags != 0 ) {
@@ -1185,14 +1280,7 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
   ci_sock_cmn* s = epi->sock.s;
   ci_netif* ni = epi->sock.netif;
 
-  if( ci_netif_may_poll(ni) &&
-      ci_netif_need_poll_maybe_spinning(ni, ss->now_frc, ss->ul_select_spin) &&
-      ci_netif_trylock(ni) ) {
-    ci_netif_poll(ni);
-    if( ss->ul_select_spin )
-      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
-  }
+  citp_poll_if_needed(ni, ss->now_frc, ss->ul_select_spin);
 
   /* Fast path: CI_TCP_LISTEN or
    * CI_TCP_ESTABLISHED || CI_TCP_CLOSE_WAIT.
@@ -1240,66 +1328,65 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
 }
 
 
-static int citp_tcp_poll(citp_fdinfo* fdi, struct pollfd* pfd,
-                          struct oo_ul_poll_state* ps)
+static int citp_tcp_poll(citp_fdinfo*__restrict__ fdi,
+                         struct pollfd*__restrict__ pfd,
+                         struct oo_ul_poll_state*__restrict__ ps)
 {
   citp_sock_fdi *epi = fdi_to_sock_fdi(fdi);
   ci_sock_cmn* s = epi->sock.s;
   ci_netif* ni = epi->sock.netif;
   unsigned mask;
 
-  if( ci_netif_may_poll(ni) &&
-      ci_netif_need_poll_maybe_spinning(ni, ps->this_poll_frc,
-                                        ps->ul_poll_spin) &&
-      ci_netif_trylock(ni) ) {
-    ci_netif_poll(ni);
-    if( ps->ul_poll_spin )
-      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
-  }
-
   if( s->b.state != CI_TCP_LISTEN )
     mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-  else if( (mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s))) != 0 )
-    ;
-
+  else
+    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
   pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
+  if( pfd->revents == 0 )
+    if( citp_poll_if_needed(ni, ps->this_poll_frc, ps->ul_poll_spin) ) {
+      if( s->b.state != CI_TCP_LISTEN )
+        mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
+      else
+        mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+      pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
+    }
+
   return 1;
 }
+
+#endif /*CI_CFG_USERSPACE_SELECT*/
+
 
 #if CI_CFG_USERSPACE_EPOLL
 #include "ul_epoll.h"
 /* More-or-less copy of citp_tcp_poll */
-static void citp_tcp_epoll(citp_fdinfo* fdi, struct citp_epoll_member* eitem,
-                           struct oo_ul_epoll_state* eps)
+static void citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
+                           struct citp_epoll_member*__restrict__ eitem,
+                           struct oo_ul_epoll_state*__restrict__ eps)
 {
-  citp_sock_fdi *epi = fdi_to_sock_fdi(fdi);
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
   ci_sock_cmn* s = epi->sock.s;
   ci_netif* ni = epi->sock.netif;
-  ci_uint32 mask;
   ci_uint64 sleep_seq;
+  ci_uint32 mask;
 
-  if( ci_netif_may_poll(ni) &&
-      ci_netif_need_poll_maybe_spinning(ni, eps->this_poll_frc,
-                                        eps->ul_epoll_spin) &&
-      ci_netif_trylock(ni) ) {
-    ci_netif_poll(ni);
-    if( eps->ul_epoll_spin )
-      ni->state->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
-    ci_netif_unlock(ni);
-  }
-
+  /* Try to return a result without polling if we can. */
   sleep_seq = s->b.sleep_seq.all;
-
   if( s->b.state != CI_TCP_LISTEN )
     mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-  else if( (mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s))) != 0 )
-    ;
-
-  citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+  else
+    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+  if( ! citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq) )
+    if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
+      sleep_seq = s->b.sleep_seq.all;
+      if( s->b.state != CI_TCP_LISTEN )
+        mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
+      else
+        mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+      citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+    }
 }
 #endif /*CI_CFG_USERSPACE_EPOLL*/
-#endif /*CI_CFG_USERSPACE_SELECT*/
 
 
 #if CI_CFG_SENDFILE
@@ -1412,6 +1499,9 @@ citp_protocol_impl citp_tcp_protocol_impl = {
     .recvmmsg           = citp_tcp_recvmmsg,
 #endif
     .send               = citp_tcp_send,
+#if CI_CFG_SENDMMSG
+    .sendmmsg           = citp_tcp_sendmmsg,
+#endif
     .fcntl              = citp_tcp_fcntl,
     .ioctl              = citp_tcp_ioctl,
 #if CI_CFG_USERSPACE_SELECT

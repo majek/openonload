@@ -195,10 +195,13 @@ static void ci_tcp_state_free_internal(ci_netif *ni, ci_tcp_state *ts)
   VERB(ci_log("%s("NTS_FMT")", __FUNCTION__, NTS_PRI_ARGS(ni,ts)));
   ci_assert(ni);
   ci_assert(ts);
-  ci_assert((ts->cached_on_fd != -1) || (ts->s.b.state == CI_TCP_CLOSED));
-  ci_assert((ts->cached_on_fd != -1) ||
-            (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
-  ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+
+  /* Disconnect local peer if any */
+  if( OO_SP_NOT_NULL(ts->s.local_peer) ) {
+    ci_sock_cmn* peer = ID_TO_SOCK_CMN(ni, ts->s.local_peer);
+    if( peer->local_peer == S_SP(ts) )
+      peer->local_peer = OO_SP_NULL;
+  }
 
   /* Remove from any lists we're in. */
   ci_ni_dllist_remove_safe(ni, &ts->s.b.post_poll_link);
@@ -215,6 +218,10 @@ static void ci_tcp_state_free_internal(ci_netif *ni, ci_tcp_state *ts)
   ci_ip_queue_drop(ni, &ts->recv1);
   ci_ip_queue_drop(ni, &ts->recv2);
 
+#if CI_CFG_FD_CACHING
+  ci_assert((ts->cached_on_fd != -1) || (ts->s.b.state == CI_TCP_CLOSED));
+  ci_assert((ts->cached_on_fd != -1) ||
+            (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
   if (ts->cached_on_fd != -1) {
     /* This is a cached EP.  The only time we can be freeing a cached TCP
      * state is if the state is unaccepted, and the app is closing down.
@@ -223,6 +230,7 @@ static void ci_tcp_state_free_internal(ci_netif *ni, ci_tcp_state *ts)
     LOG_TC (log ("Warning: freeing a cached EP state!"));
     ci_tcp_ep_clear_filters(ni, S_SP(ts), 1);
   }
+#endif
 
 # define chk(x) ci_assert(!ci_ip_timer_pending(ni, &ts->x))
   chk(rto_tid);
@@ -608,7 +616,7 @@ void ci_ip_queue_drop(ci_netif* netif, ci_ip_pkt_queue *qu)
 
   ci_assert(netif);
   ci_assert(qu);
-  ci_assert(ci_ip_queue_is_valid(netif, qu, CI_TRUE));
+  ci_assert(ci_ip_queue_is_valid(netif, qu));
 
   while( OO_PP_NOT_NULL(qu->head)   CI_DEBUG( && i-- > 0) ) {
     p = PKT_CHK(netif, qu->head);
@@ -631,6 +639,60 @@ static void ci_tcp_tx_drop_queues(ci_netif* ni, ci_tcp_state* ts)
   ts->congstate = CI_TCP_CONG_OPEN;
   ts->cwnd_extra = 0;
   ts->dup_acks = 0;
+}
+
+
+static void ci_tcp_drop_cached(ci_netif* ni, ci_tcp_state* ts,
+                               unsigned laddr, unsigned lport)
+{
+#if CI_CFG_FD_CACHING
+  /* We're caching this state.  Put it on the cache pool, as opposed to
+   * freeing it (note we didn't call ci_tcp_state_free above)
+   */
+  int rc;
+
+  ci_assert (laddr);
+  ci_assert (lport);
+
+  rc = ci_netif_filter_lookup(ni, laddr, lport, 0, 0, tcp_protocol(ts));
+  if (rc >= 0) {
+    ci_tcp_socket_listen* tlo =
+      SP_TO_TCP_LISTEN(ni, CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, rc));
+    
+    ci_assert(tlo->s.b.state == CI_TCP_LISTEN);
+
+    /* Pop off the pending list, push on the cached list. Means that next
+     * time a SYNACK is received, try_promote will reuse this cached item,
+     * rather than allocating a new TCP state
+     */
+#if CI_CFG_DETAILED_CHECKS
+    {
+      /* Check that this TS is really on the pending list */
+      ci_ni_dllist_link *link = ci_ni_dllist_start (ni, &tlo->epcache_pending);
+      while (link != ci_ni_dllist_end (ni, &tlo->epcache_pending)) {
+        if (ts == CI_CONTAINER (ci_tcp_state, epcache_link, link))
+          break;
+        ci_ni_dllist_iter(ni, link);
+      }
+      ci_assert (link != ci_ni_dllist_end(ni, &tlo->epcache_pending));
+    }
+#endif
+    /* Switch lists */
+    LOG_EP (ci_log ("Cached fd %d from pending to cached", ts->cached_on_fd));
+    ci_assert(!ci_ni_dllist_is_free(&ts->epcache_link));
+    ci_ni_dllist_remove(ni, &ts->epcache_link);
+    ci_ni_dllist_push(ni, &tlo->epcache_cache, &ts->epcache_link);
+  }
+  else {
+    /* We don't expect this to happen -- assert fail in debug builds.
+     * In release builds, let's do our best to cope
+     */
+    LOG_U (log ("No listening socket; cannot cache EP for fd %d",
+                ts->cached_on_fd));
+    ci_assert (0);
+    ts->cached_on_fd = -1;
+  }
+#endif
 }
 
 
@@ -688,7 +750,7 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
      * and as such they are assumed by various parts of the code not to have
      * filters set.   This is Bug #1359)
      */
-    if( (ts->cached_on_fd == -1) |
+    if( ! ci_tcp_is_cached(ts) ||
         (ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ) ) {
       ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
     }
@@ -698,7 +760,6 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
       raddr = tcp_raddr_be32(ts);
       rport = tcp_rport_be16(ts);
       protocol = tcp_protocol(ts);
-
       ci_netif_filter_remove(netif, S_SP(ts), laddr, lport,
                              raddr, rport, protocol);
     }
@@ -724,52 +785,8 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
                                        CI_SB_FLAG_WAKE_RX|CI_SB_FLAG_WAKE_TX);
     }
 
-    if (ts->cached_on_fd != -1) {
-      /* We're caching this state.  Put it on the cache pool, as opposed to
-       * freeing it (note we didn't call ci_tcp_state_free above)
-       */
-      int rc;
-      ci_assert (laddr);
-      ci_assert (lport);
-      rc = ci_netif_filter_lookup(netif, laddr, lport, 0, 0, tcp_protocol(ts));
-      if (rc >= 0) {
-        ci_tcp_socket_listen* tlo =
-          SP_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
-
-        ci_assert(tlo->s.b.state == CI_TCP_LISTEN);
-
-        /* Pop off the pending list, push on the cached list. Means that next
-         * time a SYNACK is received, try_promote will reuse this cached item,
-         * rather than allocating a new TCP state
-         */
-#if CI_CFG_DETAILED_CHECKS
-        {
-          /* Check that this TS is really on the pending list */
-          ci_ni_dllist_link *link = ci_ni_dllist_start (netif, &tlo->epcache_pending);
-          while (link != ci_ni_dllist_end (netif, &tlo->epcache_pending)) {
-            if (ts == CI_CONTAINER (ci_tcp_state, epcache_link, link))
-              break;
-            ci_ni_dllist_iter (netif, link);
-          }
-          ci_assert (link != ci_ni_dllist_end (netif, &tlo->epcache_pending));
-        }
-#endif
-        /* Switch lists */
-        LOG_EP (ci_log ("Cached fd %d from pending to cached", ts->cached_on_fd));
-        ci_assert(!ci_ni_dllist_is_free(&ts->epcache_link));
-        ci_ni_dllist_remove (netif, &ts->epcache_link);
-        ci_ni_dllist_push (netif, &tlo->epcache_cache, &ts->epcache_link);
-      }
-      else {
-        /* We don't expect this to happen -- assert fail in debug builds.
-         * In release builds, let's do our best to cope
-         */
-         LOG_U (log ("No listening socket; cannot cache EP for fd %d",
-                    ts->cached_on_fd));
-         ci_assert (0);
-         ts->cached_on_fd = -1;
-      }
-    }
+    if( ci_tcp_is_cached(ts) )
+      ci_tcp_drop_cached(netif, ts, laddr, lport);
   }
 }
 

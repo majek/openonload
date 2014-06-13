@@ -7,7 +7,7 @@
 ############################
 
 RESOURCE_SRCS	:= resource_driver.c \
-	iopage.c driverlink_new.c kernel_proc.c vf_driver.c
+	iopage.c driverlink_new.c kernel_proc.c vf_driver.c filter.c
 
 EFHW_SRCS	:= nic.c eventq.c falcon.c
 

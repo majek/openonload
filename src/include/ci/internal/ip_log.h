@@ -166,7 +166,7 @@
  * Format various flags fields etc.
  */
 
-#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_TCP_SOCKET_FLAGS_PRI_ARG(ts)                                \
   ((ts)->tcpflags & CI_TCPT_FLAG_TSO    ? "TSO " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_WSCL   ? "WSCL ":""),                 \
@@ -176,7 +176,6 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_ADVANCE_NEEDED   ? "ADV_NEED "  :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_WAS_ESTAB        ? "ESTAB "     :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT ? "NONBCON "   :""), \
-  ((ts)->tcpflags & CI_TCPT_FLAG_TMP_SRC_IP       ? "TMP_SRC "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED   ? "PASSIVE "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NO_ARP           ? "ARP_FAIL "  :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":"")
@@ -302,6 +301,12 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_EPLOCK_NETIF_PKT_WAKE        ? "PKT_WAKE ":""),             \
   ((v) & CI_EPLOCK_NETIF_IS_PKT_WAITER   ? "PKT_WAIT ":""),             \
   ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":"")
+
+
+#define CI_NETIF_ERRORS_FMT       "%s%s"
+#define CI_NETIF_ERRORS_PRI_ARG(errors)                         \
+  ((errors) & CI_NETIF_ERROR_POST_POLL_LIST ? "PPL ":""),       \
+  ((errors) & CI_NETIF_ERROR_LOOP_PKTS_LIST ? "LOOP ":"")
 
 
 #define OO_CMSG_FLAGS_FMT  "%s%s%s%s%s%s%s"

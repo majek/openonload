@@ -48,7 +48,7 @@ int efx_mcdi_set_mac(struct efx_nic *efx)
 		(1 << MC_CMD_SET_MAC_IN_REJECT_UNCST_LBN);
 	MCDI_SET_DWORD(cmdbytes, SET_MAC_IN_REJECT, reject);
 
-	switch ((unsigned)efx->wanted_fc) {
+	switch (efx->wanted_fc) {
 	case EFX_FC_RX | EFX_FC_TX:
 		fcntl = MC_CMD_FCNTL_BIDIR;
 		break;

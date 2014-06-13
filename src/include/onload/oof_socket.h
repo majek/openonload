@@ -18,7 +18,6 @@
 
 
 struct oof_local_port;
-struct oof_port_ref;
 
 
 /* Per-socket state for the filtering module.

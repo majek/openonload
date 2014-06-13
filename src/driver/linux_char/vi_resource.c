@@ -404,7 +404,7 @@ static int efch_vi_rm_mmap(struct efrm_resource *rs, unsigned long *bytes,
 
 
 #ifndef CI_HAVE_OS_NOPAGE
-static unsigned
+static unsigned long
 efab_vi_rm_nopage_not_supported(struct efrm_resource* rs,
                                 void* opaque, unsigned long offset,
                                 unsigned long map_size)
@@ -417,7 +417,7 @@ efab_vi_rm_nopage_not_supported(struct efrm_resource* rs,
 #endif
 
 
-static unsigned
+static unsigned long
 efch_vi_rm_nopage(struct efrm_resource *rs, void *opaque,
                   unsigned long offset, unsigned long map_size)
 {

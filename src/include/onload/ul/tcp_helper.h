@@ -40,8 +40,6 @@ extern int ci_tcp_helper_more_pipe_bufs(struct ci_netif_s*,
 /*! Comment? */
 extern int ci_tcp_helper_more_bufs(struct ci_netif_s* ni) CI_HF;
 
-extern int ci_tcp_helper_mmap_pktbufs_to(struct ci_netif_s *ni, unsigned id);
-
 /* Allocate fd for a stack; attach the stack from [from_fd] to thie new fd;
  * specialise it as a netif-fd. */
 extern int ci_tcp_helper_stack_attach(ci_fd_t from_fd,
@@ -54,14 +52,16 @@ extern int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
 extern int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                      int flags, int fds[2]);
 
+#if CI_CFG_FD_CACHING
 extern int ci_tcp_helper_xfer_cached(ci_fd_t fd, oo_sp ep_id,
                                      int other_pid, ci_fd_t other_fd) CI_HF;
+#endif
 
 #if defined(__unix__) && ! defined(__ci_driver__)
 extern int ci_tcp_helper_close_no_trampoline(int) CI_HF;
 extern void ci_tcp_helper_close_no_trampoline_retaddr(void) CI_HF;
 
-extern int ci_tcp_helper_handover(ci_fd_t fd) CI_HF;
+extern int ci_tcp_helper_handover(ci_fd_t stack_fd, ci_fd_t sock_fd) CI_HF;
 
 extern ci_fd_t ci_tcp_helper_get_sock_fd(ci_fd_t fd) CI_HF;
 
@@ -184,16 +184,6 @@ ci_tcp_helper_ep_mcast_add_del(ci_fd_t           fd,
                                ci_uint32         mcast_addr,
                                ci_ifid_t         ifindex,
                                int               add);
-
-/*--------------------------------------------------------------------
- *!
- * Set the address space for asynchronous IO
- *--------------------------------------------------------------------*/
-extern 
-int ci_tcp_helper_set_addr_spc(struct ci_netif_s *netif, oo_sp);
-
-extern
-int ciul_netif_get_addr_spc_id(struct ci_netif_s *netif);
 
 /*--------------------------------------------------------------------
  *!

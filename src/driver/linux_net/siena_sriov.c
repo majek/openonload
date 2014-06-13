@@ -34,48 +34,72 @@
 #include "vfdi.h"
 
 /* Number of longs required to track all the VIs in a VF */
-#define VI_MASK_LENGTH						\
-	DIV_ROUND_UP(1 << EFX_VI_SCALE_MAX, BITS_PER_LONG)
+#define VI_MASK_LENGTH BITS_TO_LONGS(1 << EFX_VI_SCALE_MAX)
 
 /**
- * struct efx_vf - A VF
- * @efx: The Efx NIC owning this PF
+ * enum efx_vf_tx_filter_mode - TX MAC filtering behaviour
+ * @VF_TX_FILTER_OFF: Disabled
+ * @VF_TX_FILTER_AUTO: Enabled if MAC address assigned to VF and only
+ *	2 TX queues allowed per VF.
+ * @VF_TX_FILTER_ON: Enabled
+ */
+enum efx_vf_tx_filter_mode {
+	VF_TX_FILTER_OFF,
+	VF_TX_FILTER_AUTO,
+	VF_TX_FILTER_ON,
+};
+
+#ifdef EFX_NOT_UPSTREAM
+static int vf_tx_filter = VF_TX_FILTER_AUTO;
+module_param(vf_tx_filter, int, 0444);
+MODULE_PARM_DESC(vf_tx_filter,
+		 "VF transmit filter mode 0=>never, 1=>auto(default), 2=>always");
+#endif
+
+/**
+ * struct efx_vf - Back-end resource and protocol state for a PCI VF
+ * @efx: The Efx NIC owning this VF
  * @pci_rid: The PCI requester ID for this VF
  * @pci_name: The PCI name (formatted address) of this VF
- * @index: The zero-based index of this VF.
+ * @index: Index of VF within its port and PF.
  * @req: VFDI incoming request work item. Incoming USR_EV events are received
  *	by the NAPI handler, but must be handled by executing MCDI requests
  *	inside a work item.
- * @req_addr: VFDI incoming request dma address (in VF's pci address space).
- * @req_type: Expected next incoming (from VF) VFDI_EV_TYPE member.
- * @req_seqno: Expected next incoming (from VF) VFDI_EV_SEQ member.
- * @msg_seqno: Next VFDI_EV_SEQ member to reply to VF. Protected by %status_lock
+ * @req_addr: VFDI incoming request DMA address (in VF's PCI address space).
+ * @req_type: Expected next incoming (from VF) %VFDI_EV_TYPE member.
+ * @req_seqno: Expected next incoming (from VF) %VFDI_EV_SEQ member.
+ * @msg_seqno: Next %VFDI_EV_SEQ member to reply to VF. Protected by
+ *	@status_lock
  * @busy: VFDI request queued to be processed or being processed. Receiving
- *	a VFDI request when %busy is set is an error condition.
- * @buf: Incoming VFDI requests are dma from the VF into this buffer.
+ *	a VFDI request when @busy is set is an error condition.
+ * @buf: Incoming VFDI requests are DMA from the VF into this buffer.
  * @buftbl_base: Buffer table entries for this VF start at this index.
  * @rx_filtering: Receive filtering has been requested by the VF driver.
- * @rx_filter_flags: The flags sent in the INSERT_FILTER VFDI request.
+ * @rx_filter_flags: The flags sent in the %VFDI_OP_INSERT_FILTER request.
  * @rx_filter_qid: VF relative qid for RX filter requested by VF.
- * @rx_filter_id: Receive mac filter ID. Only one filter per VF is supported.
- * @tx_filter_id: Transmit mac filter ID.
- * @addr: The mac address and outer vlan tag of the VF.
- * @status_addr: VF dma address of page for vfdi_status updates.
- * @status_lock: Mutex protecting %status_addr and %addr from simultaneous
- *	updates by the VM and consumption by efx_sriov_update_vf_addr()
+ * @rx_filter_id: Receive MAC filter ID. Only one filter per VF is supported.
+ * @tx_filter_mode: Transmit MAC filtering mode.
+ * @tx_filter_id: Transmit MAC filter ID.
+ * @addr: The MAC address and outer vlan tag of the VF.
+ * @status_addr: VF DMA address of page for &struct vfdi_status updates.
+ * @status_lock: Mutex protecting @msg_seqno, @status_addr, @addr,
+ *	@peer_page_addrs and @peer_page_count from simultaneous
+ *	updates by the VM and consumption by
+ *	efx_sriov_update_vf_addr()
  * @peer_page_addrs: Pointer to an array of guest pages for local addresses.
- * @peer_page_count: Number of entries in %peer_page_count.
- * @evq0_addrs: Pointer to an array of guest pages backing evq0.
- * @evq0_count: Number of entries in %evq0_addrs.
- * @wq: wait queue used by %VFDI_FINI_ALL_QUEUES handler to wait for flush
- *	completions.
+ * @peer_page_count: Number of entries in @peer_page_count.
+ * @evq0_addrs: Array of guest pages backing evq0.
+ * @evq0_count: Number of entries in @evq0_addrs.
+ * @flush_waitq: wait queue used by %VFDI_OP_FINI_ALL_QUEUES handler
+ *	to wait for flush completions.
+ * @txq_lock: Mutex for TX queue allocation.
  * @txq_mask: Mask of initialized transmit queues.
  * @txq_count: Number of initialized transmit queues.
  * @rxq_mask: Mask of initialized receive queues.
  * @rxq_count: Number of initialized receive queues.
  * @rxq_retry_mask: Mask or receive queues that need to be flushed again
  *	due to flush failure.
- * @rxq_retry_count: Number of receive queues in %rxq_retry_mask.
+ * @rxq_retry_count: Number of receive queues in @rxq_retry_mask.
  * @reset_work: Work item to schedule a VF reset.
  */
 struct efx_vf {
@@ -95,22 +119,25 @@ struct efx_vf {
 	enum efx_filter_flags rx_filter_flags;
 	unsigned rx_filter_qid;
 	int rx_filter_id;
+	enum efx_vf_tx_filter_mode tx_filter_mode;
 	int tx_filter_id;
 	struct vfdi_endpoint addr;
-	dma_addr_t status_addr;
+	u64 status_addr;
 	struct mutex status_lock;
 	u64 *peer_page_addrs;
 	unsigned peer_page_count;
-	u64 *evq0_addrs;
+	u64 evq0_addrs[EFX_MAX_VF_EVQ_SIZE * sizeof(efx_qword_t) /
+		       EFX_BUF_SIZE];
 	unsigned evq0_count;
-	wait_queue_head_t wq;
+	wait_queue_head_t flush_waitq;
+	struct mutex txq_lock;
 	unsigned long txq_mask[VI_MASK_LENGTH];
 	unsigned txq_count;
 	unsigned long rxq_mask[VI_MASK_LENGTH];
 	unsigned rxq_count;
 	unsigned long rxq_retry_mask[VI_MASK_LENGTH];
 	atomic_t rxq_retry_count;
-#ifdef EFX_USE_KCOMPAT
+#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
 	struct pci_dev *pci_dev;
 	struct device_attribute dev_attr_mac_addr;
 	struct device_attribute dev_attr_tci;
@@ -135,16 +162,12 @@ struct efx_memcpy_req {
  * on the vswitch, so that they can arrange for an alternative
  * software datapath to be used.
  *
- * There is no security issue here because a the hardware guarantees
- * that a VF driver can only send traffic on its assigned vlan,address.
- * Knowing the other addresses doesn't help.
- *
  * @link: List head for insertion into efx->local_addr_list.
- * @mac_addr: Ethernet address
+ * @addr: Ethernet address
  */
 struct efx_local_addr {
 	struct list_head link;
-	struct vfdi_endpoint addr;
+	u8 addr[ETH_ALEN];
 };
 
 /**
@@ -179,33 +202,25 @@ module_param(vf_max_tx_channels, uint, 0444);
 MODULE_PARM_DESC(vf_max_tx_channels,
 		 "Limit the number of TX channels VFs can use");
 
-static int vf_count = -1;
-module_param(vf_count, int, 0444);
-MODULE_PARM_DESC(vf_count,
+static int max_vfs = -1;
+module_param(max_vfs, int, 0444);
+MODULE_PARM_DESC(max_vfs,
 		 "Reduce the number of VFs initialized by the driver");
 
-enum {
-	VF_TX_FILTER_NEVER,
-	VF_TX_FILTER_AUTO,
-	VF_TX_FILTER_ALWAYS,
-};
+#ifdef EFX_NOT_UPSTREAM
+/* Original name for max_vfs */
+module_param_named(vf_count, max_vfs, int, 0);
+#endif
 
-static int vf_tx_filter = VF_TX_FILTER_AUTO;
-module_param(vf_tx_filter, int, 0444);
-MODULE_PARM_DESC(vf_tx_filter,
-		 "VF transmit filter mode 0=>never, 1=>auto(default), 2=>always");
-
-#ifdef CONFIG_SFC_SRIOV
-
-/* Workqueue used by VFDI communication. We can't use keventd_wq because
- * in a VMDq configuration the VF driver's probe() routine will be blocked
- * there waiting for a VFDI response.
+/* Workqueue used by VFDI communication.  We can't use the global
+ * workqueue because it may be running the VF driver's probe()
+ * routine, which will be blocked there waiting for a VFDI response.
  */
 static struct workqueue_struct *vfdi_workqueue;
 
 static unsigned abs_index(struct efx_vf *vf, unsigned index)
 {
-	return EFX_VI_BASE + (vf->index << vf->efx->vi_scale) + index;
+	return EFX_VI_BASE + vf->index * efx_vf_size(vf->efx) + index;
 }
 
 static int efx_sriov_cmd(struct efx_nic *efx, bool enable,
@@ -262,8 +277,8 @@ static int efx_sriov_memcpy(struct efx_nic *efx, struct efx_memcpy_req *req,
 	mb();	/* Finish writing source/reading dest before DMA starts */
 
 	used = MC_CMD_MEMCPY_IN_LEN(count);
-	if (used > MCDI_CTL_SDU_LEN_MAX)
-		return -ENOSPC;
+	if (WARN_ON(used > MCDI_CTL_SDU_LEN_MAX))
+		return -ENOBUFS;
 
 	/* Allocate room for the largest request */
 	inbuf = kzalloc(MCDI_CTL_SDU_LEN_MAX, GFP_KERNEL);
@@ -284,8 +299,8 @@ static int efx_sriov_memcpy(struct efx_nic *efx, struct efx_memcpy_req *req,
 			from_lo = (u32)req->from_addr;
 			from_hi = (u32)(req->from_addr >> 32);
 		} else {
-			if (used + req->length > MCDI_CTL_SDU_LEN_MAX) {
-				rc = -ENOSPC;
+			if (WARN_ON(used + req->length > MCDI_CTL_SDU_LEN_MAX)) {
+				rc = -ENOBUFS;
 				goto out;
 			}
 
@@ -318,7 +333,8 @@ out:
 }
 
 /* The TX filter is entirely controlled by this driver, and is modified
- * underneath the feet of the VF */
+ * underneath the feet of the VF
+ */
 static void efx_sriov_reset_tx_filter(struct efx_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
@@ -336,6 +352,12 @@ static void efx_sriov_reset_tx_filter(struct efx_vf *vf)
 
 	if (is_zero_ether_addr(vf->addr.mac_addr))
 		return;
+
+	/* Turn on TX filtering automatically if not explicitly
+	 * enabled or disabled.
+	 */
+	if (vf->tx_filter_mode == VF_TX_FILTER_AUTO && vf_max_tx_channels <= 2)
+		vf->tx_filter_mode = VF_TX_FILTER_ON;
 
 	vlan = ntohs(vf->addr.tci) & VLAN_VID_MASK;
 	efx_filter_init_tx(&filter, abs_index(vf, 0));
@@ -403,10 +425,11 @@ static void __efx_sriov_update_vf_addr(struct efx_vf *vf)
 	queue_work(vfdi_workqueue, &vf->efx->peer_work);
 }
 
-/* Push the peer list to this VF. The caller must hold %status_lock to interlock
+/* Push the peer list to this VF. The caller must hold status_lock to interlock
  * with VFDI requests, and they must be serialised against manipulation of
- * %local_page_list, either by acquiring %local_lock or by running from
- * efx_sriov_peer_work() */
+ * local_page_list, either by acquiring local_lock or by running from
+ * efx_sriov_peer_work()
+ */
 static void __efx_sriov_push_vf_status(struct efx_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
@@ -432,7 +455,8 @@ static void __efx_sriov_push_vf_status(struct efx_vf *vf)
 	copy[0].length = sizeof(status->generation_start);
 	/* DMA the rest of the structure (excluding the generations). This
 	 * assumes that the non-generation portion of vfdi_status is in
-	 * one chunk starting at the version member. */
+	 * one chunk starting at the version member.
+	 */
 	data_offset = offsetof(struct vfdi_status, version);
 	copy[1].from_rid = efx->pci_dev->devfn;
 	copy[1].from_addr = efx->vfdi_status.dma_addr + data_offset;
@@ -446,7 +470,8 @@ static void __efx_sriov_push_vf_status(struct efx_vf *vf)
 	list_for_each_entry(epp, &efx->local_page_list, link) {
 		if (count == vf->peer_page_count) {
 			/* The VF driver will know they need to provide more
-			 * pages because peer_addr_count is too large. */
+			 * pages because peer_addr_count is too large.
+			 */
 			break;
 		}
 		copy[pos].from_buf = NULL;
@@ -475,10 +500,10 @@ static void __efx_sriov_push_vf_status(struct efx_vf *vf)
 	EFX_POPULATE_QWORD_3(event,
 			     FSF_AZ_EV_CODE, FSE_CZ_EV_CODE_USER_EV,
 			     VFDI_EV_SEQ, (vf->msg_seqno & 0xff),
-			     VFDI_EV_TYPE, VFDI_EV_TYPE_REQ_STATUS);
+			     VFDI_EV_TYPE, VFDI_EV_TYPE_STATUS);
 	++vf->msg_seqno;
-	efx_generate_event(efx, EFX_VI_BASE + (vf->index << efx->vi_scale),
-			   &event);
+	efx_generate_event(efx, EFX_VI_BASE + vf->index * efx_vf_size(efx),
+			      &event);
 }
 
 static void efx_sriov_bufs(struct efx_nic *efx, unsigned offset,
@@ -500,7 +525,7 @@ static void efx_sriov_bufs(struct efx_nic *efx, unsigned offset,
 
 static bool bad_vf_index(struct efx_nic *efx, unsigned index)
 {
-	return (index >= (1 << efx->vi_scale));
+	return index >= efx_vf_size(efx);
 }
 
 static bool bad_buf_count(unsigned buf_count, unsigned max_entry_count)
@@ -511,21 +536,24 @@ static bool bad_buf_count(unsigned buf_count, unsigned max_entry_count)
 	return ((buf_count & (buf_count - 1)) || buf_count > max_buf_count);
 }
 
-static bool bad_abs_index(struct efx_nic *efx, unsigned abs_index,
-			  struct efx_vf **vf_out, unsigned *rel_index_out)
+/* Check that VI specified by per-port index belongs to a VF.
+ * Optionally set VF index and VI index within the VF.
+ */
+static bool map_vi_index(struct efx_nic *efx, unsigned abs_index,
+			 struct efx_vf **vf_out, unsigned *rel_index_out)
 {
 	unsigned vf_i;
 
 	if (abs_index < EFX_VI_BASE)
 		return true;
-	vf_i = (abs_index - EFX_VI_BASE) >> efx->vi_scale;
+	vf_i = (abs_index - EFX_VI_BASE) / efx_vf_size(efx);
 	if (vf_i >= efx->vf_init_count)
 		return true;
 
 	if (vf_out)
 		*vf_out = efx->vf + vf_i;
 	if (rel_index_out)
-		*rel_index_out = abs_index & ((1 << efx->vi_scale) - 1);
+		*rel_index_out = abs_index % efx_vf_size(efx);
 	return false;
 }
 
@@ -545,7 +573,7 @@ static int efx_vfdi_init_evq(struct efx_vf *vf)
 			netif_err(efx, hw, efx->net_dev,
 				  "ERROR: Invalid INIT_EVQ from %s: evq %d bufs %d\n",
 				  vf->pci_name, vf_evq, buf_count);
-		return -EINVAL;
+		return VFDI_RC_EINVAL;
 	}
 
 	efx_sriov_bufs(efx, buftbl, req->u.init_evq.addr, buf_count);
@@ -562,19 +590,12 @@ static int efx_vfdi_init_evq(struct efx_vf *vf)
 	efx_writeo_table(efx, &reg, FR_BZ_EVQ_PTR_TBL, abs_evq);
 
 	if (vf_evq == 0) {
-		kfree(vf->evq0_addrs);
-		vf->evq0_addrs = NULL;
-		vf->evq0_count = 0;
-
-		vf->evq0_addrs = kcalloc(buf_count, sizeof(u64), GFP_KERNEL);
-		if (vf->evq0_addrs) {
-			memcpy(vf->evq0_addrs, req->u.init_evq.addr,
-			       buf_count * sizeof(u64));
-			vf->evq0_count = buf_count;
-		}
+		memcpy(vf->evq0_addrs, req->u.init_evq.addr,
+		       buf_count * sizeof(u64));
+		vf->evq0_count = buf_count;
 	}
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 static int efx_vfdi_init_rxq(struct efx_vf *vf)
@@ -595,7 +616,7 @@ static int efx_vfdi_init_rxq(struct efx_vf *vf)
 				  "ERROR: Invalid INIT_RXQ from %s: rxq %d evq %d "
 				  "buf_count %d\n", vf->pci_name, vf_rxq,
 				  vf_evq, buf_count);
-		return -EINVAL;
+		return VFDI_RC_EINVAL;
 	}
 	if (__test_and_set_bit(req->u.init_rxq.index, vf->rxq_mask))
 		++vf->rxq_count;
@@ -608,12 +629,13 @@ static int efx_vfdi_init_rxq(struct efx_vf *vf)
 			     FRF_AZ_RX_DESCQ_LABEL, label,
 			     FRF_AZ_RX_DESCQ_SIZE, __ffs(buf_count),
 			     FRF_AZ_RX_DESCQ_JUMBO,
-			     !!(req->u.init_rxq.flags & RXQ_FLAG_SCATTER_EN),
+			     !!(req->u.init_rxq.flags &
+				VFDI_RXQ_FLAG_SCATTER_EN),
 			     FRF_AZ_RX_DESCQ_EN, 1);
 	efx_writeo_table(efx, &reg, FR_BZ_RX_DESC_PTR_TBL,
 			 abs_index(vf, vf_rxq));
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 static int efx_vfdi_init_txq(struct efx_vf *vf)
@@ -635,19 +657,16 @@ static int efx_vfdi_init_txq(struct efx_vf *vf)
 				  "ERROR: Invalid INIT_TXQ from %s: txq %d evq %d "
 				  "buf_count %d\n", vf->pci_name, vf_txq,
 				  vf_evq, buf_count);
-		return -EINVAL;
+		return VFDI_RC_EINVAL;
 	}
 
+	mutex_lock(&vf->txq_lock);
 	if (__test_and_set_bit(req->u.init_txq.index, vf->txq_mask))
 		++vf->txq_count;
+	mutex_unlock(&vf->txq_lock);
 	efx_sriov_bufs(efx, buftbl, req->u.init_txq.addr, buf_count);
 
-	if (vf_tx_filter == VF_TX_FILTER_ALWAYS ||
-	    (vf_tx_filter == VF_TX_FILTER_AUTO &&
-	     !is_zero_ether_addr(vf->addr.mac_addr) && vf_max_tx_channels <= 2))
-		eth_filt_en = 1;
-	else
-		eth_filt_en = 0;
+	eth_filt_en = vf->tx_filter_mode == VF_TX_FILTER_ON;
 
 	label = req->u.init_txq.label & EFX_FIELD_MASK(FRF_AZ_TX_DESCQ_LABEL);
 	EFX_POPULATE_OWORD_8(reg,
@@ -662,7 +681,7 @@ static int efx_vfdi_init_txq(struct efx_vf *vf)
 	efx_writeo_table(efx, &reg, FR_BZ_TX_DESC_PTR_TBL,
 			 abs_index(vf, vf_txq));
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 /* Returns true when efx_vfdi_fini_all_queues should wake */
@@ -689,20 +708,19 @@ static int efx_vfdi_fini_all_queues(struct efx_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
 	efx_oword_t reg;
-	unsigned count = (1 << efx->vi_scale);
-	unsigned vf_offset = EFX_VI_BASE + (vf->index << efx->vi_scale);
-	unsigned timeout = msecs_to_jiffies(1000); /* 1s */
+	unsigned count = efx_vf_size(efx);
+	unsigned vf_offset = EFX_VI_BASE + vf->index * efx_vf_size(efx);
+	unsigned timeout = HZ;
 	unsigned index, rxqs_count;
 	__le32 *rxqs;
 	int rc;
 
 	rxqs = kmalloc(count * sizeof(*rxqs), GFP_KERNEL);
 	if (rxqs == NULL)
-		return -ENOMEM;
+		return VFDI_RC_ENOMEM;
 
 	rtnl_lock();
-	if (efx->fc_disable++ == 0)
-		efx_mcdi_set_mac(efx);
+	siena_prepare_flush(efx);
 	rtnl_unlock();
 
 	/* Flush all the initialized queues */
@@ -725,7 +743,8 @@ static int efx_vfdi_fini_all_queues(struct efx_vf *vf)
 				  rxqs_count * sizeof(*rxqs), NULL, 0, NULL);
 		WARN_ON(rc < 0);
 
-		timeout = wait_event_timeout(vf->wq, efx_vfdi_flush_wake(vf),
+		timeout = wait_event_timeout(vf->flush_waitq,
+					     efx_vfdi_flush_wake(vf),
 					     timeout);
 		rxqs_count = 0;
 		for (index = 0; index < count; ++index) {
@@ -738,8 +757,7 @@ static int efx_vfdi_fini_all_queues(struct efx_vf *vf)
 	}
 
 	rtnl_lock();
-	if (--efx->fc_disable == 0)
-		efx_mcdi_set_mac(efx);
+	siena_finish_flush(efx);
 	rtnl_unlock();
 
 	/* Irrespective of success/failure, fini the queues */
@@ -755,15 +773,13 @@ static int efx_vfdi_fini_all_queues(struct efx_vf *vf)
 				 vf_offset + index);
 	}
 	efx_sriov_bufs(efx, vf->buftbl_base, NULL,
-		       EFX_VF_BUFTBL_PER_VI << efx->vi_scale);
+		       EFX_VF_BUFTBL_PER_VI * efx_vf_size(efx));
 	kfree(rxqs);
 	efx_vfdi_flush_clear(vf);
 
-	kfree(vf->evq0_addrs);
-	vf->evq0_addrs = NULL;
 	vf->evq0_count = 0;
 
-	return timeout ? 0 : -ETIMEDOUT;
+	return timeout ? 0 : VFDI_RC_ETIMEDOUT;
 }
 
 static int efx_vfdi_insert_filter(struct efx_vf *vf)
@@ -779,13 +795,13 @@ static int efx_vfdi_insert_filter(struct efx_vf *vf)
 				  "ERROR: Invalid INSERT_FILTER from %s: rxq %d "
 				  "flags 0x%x\n", vf->pci_name, vf_rxq,
 				  req->u.mac_filter.flags);
-		return -EINVAL;
+		return VFDI_RC_EINVAL;
 	}
 
 	flags = 0;
-	if (req->u.mac_filter.flags & MAC_FILTER_FLAG_RSS)
+	if (req->u.mac_filter.flags & VFDI_MAC_FILTER_FLAG_RSS)
 		flags |= EFX_FILTER_FLAG_RX_RSS;
-	if (req->u.mac_filter.flags & MAC_FILTER_FLAG_SCATTER)
+	if (req->u.mac_filter.flags & VFDI_MAC_FILTER_FLAG_SCATTER)
 		flags |= EFX_FILTER_FLAG_RX_SCATTER;
 	vf->rx_filter_flags = flags;
 	vf->rx_filter_qid = vf_rxq;
@@ -794,7 +810,7 @@ static int efx_vfdi_insert_filter(struct efx_vf *vf)
 	efx_sriov_reset_rx_filter(vf);
 	queue_work(vfdi_workqueue, &efx->peer_work);
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 static int efx_vfdi_remove_all_filters(struct efx_vf *vf)
@@ -803,7 +819,7 @@ static int efx_vfdi_remove_all_filters(struct efx_vf *vf)
 	efx_sriov_reset_rx_filter(vf);
 	queue_work(vfdi_workqueue, &vf->efx->peer_work);
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 static int efx_vfdi_set_status_page(struct efx_vf *vf)
@@ -821,7 +837,7 @@ static int efx_vfdi_set_status_page(struct efx_vf *vf)
 			netif_err(efx, hw, efx->net_dev,
 				  "ERROR: Invalid SET_STATUS_PAGE from %s\n",
 				  vf->pci_name);
-		return -EINVAL;
+		return VFDI_RC_EINVAL;
 	}
 
 	mutex_lock(&efx->local_lock);
@@ -847,7 +863,7 @@ static int efx_vfdi_set_status_page(struct efx_vf *vf)
 	mutex_unlock(&vf->status_lock);
 	mutex_unlock(&efx->local_lock);
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 static int efx_vfdi_clear_status_page(struct efx_vf *vf)
@@ -856,20 +872,20 @@ static int efx_vfdi_clear_status_page(struct efx_vf *vf)
 	vf->status_addr = 0;
 	mutex_unlock(&vf->status_lock);
 
-	return 0;
+	return VFDI_RC_SUCCESS;
 }
 
 typedef int (*efx_vfdi_op_t)(struct efx_vf *vf);
 
-static const efx_vfdi_op_t vfdi_ops[VFDI_LIMIT] = {
-	[VFDI_INIT_EVQ] = efx_vfdi_init_evq,
-	[VFDI_INIT_TXQ] = efx_vfdi_init_txq,
-	[VFDI_INIT_RXQ] = efx_vfdi_init_rxq,
-	[VFDI_FINI_ALL_QUEUES] = efx_vfdi_fini_all_queues,
-	[VFDI_INSERT_FILTER] = efx_vfdi_insert_filter,
-	[VFDI_REMOVE_ALL_FILTERS] = efx_vfdi_remove_all_filters,
-	[VFDI_SET_STATUS_PAGE] = efx_vfdi_set_status_page,
-	[VFDI_CLEAR_STATUS_PAGE] = efx_vfdi_clear_status_page,
+static const efx_vfdi_op_t vfdi_ops[VFDI_OP_LIMIT] = {
+	[VFDI_OP_INIT_EVQ] = efx_vfdi_init_evq,
+	[VFDI_OP_INIT_TXQ] = efx_vfdi_init_txq,
+	[VFDI_OP_INIT_RXQ] = efx_vfdi_init_rxq,
+	[VFDI_OP_FINI_ALL_QUEUES] = efx_vfdi_fini_all_queues,
+	[VFDI_OP_INSERT_FILTER] = efx_vfdi_insert_filter,
+	[VFDI_OP_REMOVE_ALL_FILTERS] = efx_vfdi_remove_all_filters,
+	[VFDI_OP_SET_STATUS_PAGE] = efx_vfdi_set_status_page,
+	[VFDI_OP_CLEAR_STATUS_PAGE] = efx_vfdi_clear_status_page,
 };
 
 static void efx_sriov_vfdi(struct work_struct *work)
@@ -898,7 +914,7 @@ static void efx_sriov_vfdi(struct work_struct *work)
 		return;
 	}
 
-	if (req->op < VFDI_LIMIT && vfdi_ops[req->op] != NULL) {
+	if (req->op < VFDI_OP_LIMIT && vfdi_ops[req->op] != NULL) {
 		rc = vfdi_ops[req->op](vf);
 		if (rc == 0) {
 			netif_dbg(efx, hw, efx->net_dev,
@@ -910,7 +926,7 @@ static void efx_sriov_vfdi(struct work_struct *work)
 			  "ERROR: Unrecognised request %d from VF %s addr "
 			  "%llx\n", req->op, vf->pci_name,
 			  (unsigned long long)vf->req_addr);
-		rc = -EOPNOTSUPP;
+		rc = VFDI_RC_EOPNOTSUPP;
 	}
 
 	/* Allow subsequent VF requests */
@@ -919,7 +935,7 @@ static void efx_sriov_vfdi(struct work_struct *work)
 
 	/* Respond to the request */
 	req->rc = rc;
-	req->op = VFDI_RESPONSE;
+	req->op = VFDI_OP_RESPONSE;
 
 	memset(copy, '\0', sizeof(copy));
 	copy[0].from_buf = &req->rc;
@@ -986,7 +1002,7 @@ static void efx_sriov_reset_vf(struct efx_vf *vf, struct efx_buffer *buffer)
 		}
 	}
 
-	/* Reinitialise and arm evq0 */
+	/* Reinitialise, arm and trigger evq0 */
 	abs_evq = abs_index(vf, 0);
 	buftbl = EFX_BUFTBL_EVQ_BASE(vf, 0);
 	efx_sriov_bufs(efx, buftbl, vf->evq0_addrs, vf->evq0_count);
@@ -1052,13 +1068,13 @@ void efx_sriov_probe(struct efx_nic *efx)
 {
 	unsigned count;
 
-	if (!vf_count)
+	if (!max_vfs)
 		return;
 
 	if (efx_sriov_cmd(efx, false, &efx->vi_scale, &count))
 		return;
-	if (count > 0 && count > vf_count)
-		count = vf_count;
+	if (count > 0 && count > max_vfs)
+		count = max_vfs;
 
 	/* efx_nic_dimension_resources() will reduce vf_count as appopriate */
 	efx->vf_count = count;
@@ -1066,8 +1082,7 @@ void efx_sriov_probe(struct efx_nic *efx)
 	efx->extra_channel_type[EFX_EXTRA_CHANNEL_IOV] = &efx_sriov_channel_type;
 }
 
-#ifdef EFX_USE_KCOMPAT
-
+#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
 static ssize_t show_mac_addr(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
@@ -1119,7 +1134,7 @@ static ssize_t set_tci(struct device *dev, struct device_attribute *attr,
 {
 	struct efx_vf *vf = container_of(attr, struct efx_vf, dev_attr_tci);
 	char *end;
-	__le16 tci;
+	u16 tci;
 
 	tci = simple_strtoul(buf, &end, 0x10);
 	if (*end)
@@ -1135,7 +1150,9 @@ static ssize_t set_tci(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(tci, 0644, show_tci, set_tci);
 
-#endif
+#endif /* EFX_USE_KCOMPAT && !__VMKLNX__ */
+
+#ifdef EFX_NOT_UPSTREAM
 
 /* Print as many entries as we can fit in a PAGE */
 static ssize_t show_local_addrs(struct device *dev,
@@ -1148,7 +1165,7 @@ static ssize_t show_local_addrs(struct device *dev,
 	mutex_lock(&efx->local_lock);
 	list_for_each_entry(local_addr, &efx->local_addr_list, link) {
 		chunk = snprintf(buf + length, PAGE_SIZE - length,
-				 "%pM\n", local_addr->addr.mac_addr);
+				 "%pM\n", local_addr->addr);
 		length += chunk;
 		if (PAGE_SIZE - length < chunk + 1)
 			break;
@@ -1181,7 +1198,7 @@ static ssize_t set_local_addrs(struct device *dev,
 
 	mutex_lock(&efx->local_lock);
 	list_for_each_entry(local_addr, &efx->local_addr_list, link) {
-		if (!memcmp(local_addr->addr.mac_addr, new_addr, ETH_ALEN)) {
+		if (!memcmp(local_addr->addr, new_addr, ETH_ALEN)) {
 			if (buf[0] == '-') {
 				list_del(&local_addr->link);
 				kfree(local_addr);
@@ -1196,7 +1213,7 @@ static ssize_t set_local_addrs(struct device *dev,
 			rc = -ENOMEM;
 			goto unlock;
 		}
-		memcpy(local_addr->addr.mac_addr, new_addr, ETH_ALEN);
+		memcpy(local_addr->addr, new_addr, ETH_ALEN);
 		list_add_tail(&local_addr->link, &efx->local_addr_list);
 		goto update;
 	}
@@ -1211,6 +1228,8 @@ unlock:
 }
 
 static DEVICE_ATTR(local_addrs, 0644, show_local_addrs, set_local_addrs);
+
+#endif /* EFX_NOT_UPSTREAM */
 
 /* Copy the list of individual addresses into the vfdi_status.peers
  * array and auxillary pages, protected by %local_lock. Drop that lock
@@ -1235,7 +1254,9 @@ static void efx_sriov_peer_work(struct work_struct *data)
 	INIT_LIST_HEAD(&pages);
 	list_splice_tail_init(&efx->local_page_list, &pages);
 
-	/* Populate the VF addresses */
+	/* Populate the VF addresses starting from entry 1 (entry 0 is
+	 * the PF address)
+	 */
 	peer = vfdi_status->peers + 1;
 	peer_space = ARRAY_SIZE(vfdi_status->peers) - 1;
 	peer_count = 1;
@@ -1254,7 +1275,9 @@ static void efx_sriov_peer_work(struct work_struct *data)
 
 	/* Fill the remaining addresses */
 	list_for_each_entry(local_addr, &efx->local_addr_list, link) {
-		*peer++ = local_addr->addr;
+		memcpy(peer->mac_addr, local_addr->addr, ETH_ALEN);
+		peer->tci = 0;
+		++peer;
 		++peer_count;
 		if (--peer_space == 0) {
 			if (list_empty(&pages)) {
@@ -1340,11 +1363,17 @@ static int efx_sriov_vf_alloc(struct efx_nic *efx)
 		vf->efx = efx;
 		vf->index = index;
 		vf->rx_filter_id = -1;
+#ifdef EFX_NOT_UPSTREAM
+		vf->tx_filter_mode = vf_tx_filter;
+#else
+		vf->tx_filter_mode = VF_TX_FILTER_AUTO;
+#endif
 		vf->tx_filter_id = -1;
 		INIT_WORK(&vf->req, efx_sriov_vfdi);
 		INIT_WORK(&vf->reset_work, efx_sriov_reset_vf_work);
-		init_waitqueue_head(&vf->wq);
+		init_waitqueue_head(&vf->flush_waitq);
 		mutex_init(&vf->status_lock);
+		mutex_init(&vf->txq_lock);
 	}
 
 	return 0;
@@ -1363,8 +1392,6 @@ static void efx_sriov_vfs_fini(struct efx_nic *efx)
 		vf->peer_page_addrs = NULL;
 		vf->peer_page_count = 0;
 
-		kfree(vf->evq0_addrs);
-		vf->evq0_addrs = NULL;
 		vf->evq0_count = 0;
 	}
 }
@@ -1391,7 +1418,7 @@ static int efx_sriov_vfs_init(struct efx_nic *efx)
 
 		/* Reserve buffer entries */
 		vf->buftbl_base = buftbl_base;
-		buftbl_base += EFX_VF_BUFTBL_PER_VI << efx->vi_scale;
+		buftbl_base += EFX_VF_BUFTBL_PER_VI * efx_vf_size(efx);
 
 		vf->pci_rid = devfn;
 		snprintf(vf->pci_name, sizeof(vf->pci_name),
@@ -1413,7 +1440,7 @@ fail:
 	return rc;
 }
 
-#ifdef EFX_USE_KCOMPAT
+#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
 static void efx_sriov_vf_attrs_init(struct efx_nic *efx)
 {
 	struct pci_dev *pci_dev = efx->pci_dev;
@@ -1470,7 +1497,7 @@ static void efx_sriov_vf_attrs_fini(struct efx_nic *efx)
 		}
 	}
 }
-#endif /* EFX_USE_KCOMPAT */
+#endif /* EFX_USE_KCOMPAT && !__VMKLNX__ */
 
 int efx_sriov_init(struct efx_nic *efx)
 {
@@ -1482,6 +1509,9 @@ int efx_sriov_init(struct efx_nic *efx)
 	BUILD_BUG_ON(EFX_MAX_CHANNELS + 1 >= EFX_VI_BASE);
 	/* Ensure that VI_BASE is aligned on VI_SCALE */
 	BUILD_BUG_ON(EFX_VI_BASE & ((1 << EFX_VI_SCALE_MAX) - 1));
+
+	if (efx->vf_count == 0)
+		return 0;
 
 	rc = efx_sriov_cmd(efx, true, NULL, NULL);
 	if (rc)
@@ -1508,9 +1538,11 @@ int efx_sriov_init(struct efx_nic *efx)
 	INIT_WORK(&efx->peer_work, efx_sriov_peer_work);
 	INIT_LIST_HEAD(&efx->local_addr_list);
 	INIT_LIST_HEAD(&efx->local_page_list);
+#ifdef EFX_NOT_UPSTREAM
 	rc = device_create_file(&efx->pci_dev->dev, &dev_attr_local_addrs);
 	if (rc)
 		goto fail_dev;
+#endif
 
 	rc = efx_sriov_vfs_init(efx);
 	if (rc)
@@ -1541,7 +1573,7 @@ int efx_sriov_init(struct efx_nic *efx)
 	efx->vf_rtnl_count = efx->vf_count;
 	rtnl_unlock();
 
-#ifdef EFX_USE_KCOMPAT
+#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
 	/* This has to be done after enabling SR-IOV, since there were
 	 * previously no devices to attach the attributes to.
 	 */
@@ -1550,7 +1582,7 @@ int efx_sriov_init(struct efx_nic *efx)
 
 	netif_info(efx, probe, net_dev,
 		   "enabled SR-IOV for %d VFs, %d VI per VF\n",
-		   efx->vf_count, 1 << efx->vi_scale);
+		   efx->vf_count, efx_vf_size(efx));
 	return 0;
 
 fail_pci:
@@ -1560,7 +1592,9 @@ fail_pci:
 	rtnl_unlock();
 	efx_sriov_vfs_fini(efx);
 fail_vfs:
+#ifdef EFX_NOT_UPSTREAM
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_local_addrs);
+#endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_WORK_SYNC)
 	cancel_work_sync(&efx->peer_work);
 #else
@@ -1588,7 +1622,7 @@ void efx_sriov_fini(struct efx_nic *efx)
 		return;
 
 	/* Disable all interfaces to reconfiguration */
-#ifdef EFX_USE_KCOMPAT
+#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
 	efx_sriov_vf_attrs_fini(efx);
 #endif
 	BUG_ON(efx->vfdi_channel->enabled);
@@ -1597,7 +1631,9 @@ void efx_sriov_fini(struct efx_nic *efx)
 	efx->vf_rtnl_count = 0;
 	efx->vf_init_count = 0;
 	rtnl_unlock();
+#ifdef EFX_NOT_UPSTREAM
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_local_addrs);
+#endif
 
 	/* Flush all reconfiguration work */
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_WORK_SYNC)
@@ -1640,7 +1676,7 @@ void efx_sriov_event(struct efx_channel *channel, efx_qword_t *event)
 		   "USR_EV event from qid %d seq 0x%x type %d data 0x%x\n",
 		   qid, seq, type, data);
 
-	if (bad_abs_index(efx, qid, &vf, NULL))
+	if (map_vi_index(efx, qid, &vf, NULL))
 		return;
 	if (vf->busy)
 		goto error;
@@ -1693,8 +1729,6 @@ void efx_sriov_flr(struct efx_nic *efx, unsigned vf_i)
 	efx_vfdi_remove_all_filters(vf);
 	efx_vfdi_flush_clear(vf);
 
-	kfree(vf->evq0_addrs);
-	vf->evq0_addrs = NULL;
 	vf->evq0_count = 0;
 }
 
@@ -1715,7 +1749,7 @@ void efx_sriov_tx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 	unsigned queue, qid;
 
 	queue = EFX_QWORD_FIELD(*event,  FSF_AZ_DRIVER_EV_SUBDATA);
-	if (bad_abs_index(efx, queue, &vf, &qid))
+	if (map_vi_index(efx, queue, &vf, &qid))
 		return;
 	/* Ignore flush completions triggered by an FLR */
 	if (!test_bit(qid, vf->txq_mask))
@@ -1725,7 +1759,7 @@ void efx_sriov_tx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 	--vf->txq_count;
 
 	if (efx_vfdi_flush_wake(vf))
-		wake_up(&vf->wq);
+		wake_up(&vf->flush_waitq);
 }
 
 void efx_sriov_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
@@ -1736,7 +1770,7 @@ void efx_sriov_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 	queue = EFX_QWORD_FIELD(*event, FSF_AZ_DRIVER_EV_RX_DESCQ_ID);
 	ev_failed = EFX_QWORD_FIELD(*event,
 				    FSF_AZ_DRIVER_EV_RX_FLUSH_FAIL);
-	if (bad_abs_index(efx, queue, &vf, &qid))
+	if (map_vi_index(efx, queue, &vf, &qid))
 		return;
 	if (!test_bit(qid, vf->rxq_mask))
 		return;
@@ -1749,7 +1783,7 @@ void efx_sriov_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 		--vf->rxq_count;
 	}
 	if (efx_vfdi_flush_wake(vf))
-		wake_up(&vf->wq);
+		wake_up(&vf->flush_waitq);
 }
 
 /* Called from napi. Schedule the reset work item */
@@ -1758,7 +1792,7 @@ void efx_sriov_desc_fetch_err(struct efx_nic *efx, unsigned dmaq)
 	struct efx_vf *vf;
 	unsigned int rel;
 
-	if (bad_abs_index(efx, dmaq, &vf, &rel))
+	if (map_vi_index(efx, dmaq, &vf, &rel))
 		return;
 
 	if (net_ratelimit())
@@ -1798,7 +1832,8 @@ int efx_init_sriov(void)
 {
 	/* A single threaded workqueue is sufficient. efx_sriov_vfdi() and
 	 * efx_sriov_peer_work() spend almost all their time sleeping for
-	 * MCDI to complete anyway */
+	 * MCDI to complete anyway
+	 */
 	vfdi_workqueue = create_singlethread_workqueue("sfc_vfdi");
 	if (!vfdi_workqueue)
 		return -ENOMEM;
@@ -1811,7 +1846,7 @@ void efx_fini_sriov(void)
 	destroy_workqueue(vfdi_workqueue);
 }
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_MAC)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_MAC) || defined(__VMKLNX__)
 
 int efx_sriov_set_vf_mac(struct net_device *net_dev, int vf_i, u8 *mac)
 {
@@ -1850,6 +1885,32 @@ int efx_sriov_set_vf_vlan(struct net_device *net_dev, int vf_i,
 	return 0;
 }
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_SPOOFCHK)
+int efx_sriov_set_vf_spoofchk(struct net_device *net_dev, int vf_i,
+			      bool spoofchk)
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_vf *vf;
+	int rc;
+
+	if (vf_i >= efx->vf_init_count)
+		return -EINVAL;
+	vf = efx->vf + vf_i;
+
+	mutex_lock(&vf->txq_lock);
+	if (vf->txq_count == 0) {
+		vf->tx_filter_mode =
+			spoofchk ? VF_TX_FILTER_ON : VF_TX_FILTER_OFF;
+		rc = 0;
+	} else {
+		/* This cannot be changed while TX queues are running */
+		rc = -EBUSY;
+	}
+	mutex_unlock(&vf->txq_lock);
+	return rc;
+}
+#endif
+
 int efx_sriov_get_vf_config(struct net_device *net_dev, int vf_i,
 			    struct ifla_vf_info *ivi)
 {
@@ -1871,10 +1932,11 @@ int efx_sriov_get_vf_config(struct net_device *net_dev, int vf_i,
 	tci = ntohs(vf->addr.tci);
 	ivi->vlan = tci & VLAN_VID_MASK;
 	ivi->qos = (tci >> VLAN_PRIO_SHIFT) & 0x7;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_SPOOFCHK)
+	ivi->spoofchk = vf->tx_filter_mode == VF_TX_FILTER_ON;
+#endif
 
 	return 0;
 }
 
-#endif
-
-#endif
+#endif /* !EFX_USE_KCOMPAT || EFX_HAVE_NDO_SET_VF_MAC || __VMKLNX__ */

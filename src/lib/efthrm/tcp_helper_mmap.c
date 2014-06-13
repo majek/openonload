@@ -28,6 +28,7 @@
 #include <ci/internal/cplane_handle.h>
 #include <onload/tcp_helper.h>
 #include <ci/efch/mmap.h>
+#include <onload/mmap.h>
 
 
 
@@ -98,11 +99,8 @@ static int tcp_helper_rm_mmap_buf(tcp_helper_resource_t* trs,
 {
   int intf_i, rc;
   ci_netif* ni;
-  ci_netif_state* ns;
 
   ni = &trs->netif;
-  ns = ni->state;
-  ci_assert(ns);
   OO_DEBUG_SHM(ci_log("mmap buf %lx %lx", *offset, *bytes));
   OO_DEBUG_VM(ci_log("tcp_helper_rm_mmap_buf: %u "
                      "map_num=%d bytes=0x%lx offset=0x%lx",
@@ -113,26 +111,42 @@ static int tcp_helper_rm_mmap_buf(tcp_helper_resource_t* trs,
                                map_num, offset, 1);
     if( rc < 0 )  return rc;
   }
+#ifdef OO_DO_HUGE_PAGES
+  *bytes -= (((ni->pkt_sets_max * sizeof(trs->pkt_shm_id[0])) >> PAGE_SHIFT)
+                                                        + 1) << PAGE_SHIFT;
+#endif
+  return 0;
+}
+
+static int tcp_helper_rm_mmap_pkts(tcp_helper_resource_t* trs,
+                                   unsigned long* bytes,
+                                   void* opaque, int map_id,
+                                   unsigned long* offset)
+{
+  ci_netif* ni;
+  ci_netif_state* ns;
+  unsigned long n;
+
+  ni = &trs->netif;
+  ns = ni->state;
+  ci_assert(ns);
 
   /* Reserve space for packet buffers */
-#ifdef CI_HAVE_OS_NOPAGE
+#if !CI_CFG_MMAP_EACH_PKTSET
+  n = CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET * ns->pkt_sets_max;
+#else
   {
-    unsigned long n;
-    unsigned i;
-
-    for( i = 0; i < ns->pkt_sets_max; i++ )
-      if (ni->pkt_bufs[i] != NULL) {
-        rc = efab_iobufset_resource_mmap(ni->pkt_rs[i], bytes, opaque,
-					 map_num, offset, 0);
-        if( rc < 0 )  return rc;
-      }
-      else {
-        n = ns->pkt_set_bytes;
-        n = CI_MIN(n, *bytes);
-        *bytes -= n;
-      }
+    int bufid = map_id - CI_NETIF_MMAP_ID_PKTS;
+    if( bufid < 0 || bufid > ns->pkt_sets_max || ni->buf_pages[bufid] == NULL ) {
+      OO_DEBUG_ERR(ci_log("%s: %u BAD bufset_id=%d", __FUNCTION__,
+                          trs->id, bufid));
+      return -EINVAL;
+    }
   }
+  n = CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET;
 #endif
+  n = CI_MIN(n, *bytes);
+  *bytes -= n;
 
   return 0;
 }
@@ -165,8 +179,8 @@ static int tcp_helper_rm_mmap_pktbuf(tcp_helper_resource_t* trs,
   OO_DEBUG_SHM(ci_log("%s: offset=%lx index=%u", __FUNCTION__, *offset, index));
 
   if( index < trs->netif.pkt_sets_n ) {
-    return efab_iobufset_resource_mmap(trs->netif.pkt_rs[index], bytes, opaque,
-                                       map_num, offset, index);
+    return efab_iobufset_resource_mmap(trs->netif.buf_pages[index], bytes,
+                                       opaque, map_num, offset, index);
   }
 
   DEBUGERR(ci_log("%s: bad index=%d n=%u", __FUNCTION__, index,
@@ -181,7 +195,6 @@ int efab_tcp_helper_rm_mmap(tcp_helper_resource_t* trs, unsigned long* bytes,
                             void* opaque, int* map_num,
                             unsigned long* offset, int map_id)
 {
-  int map_type = map_id &~ CI_NETIF_MMAP_ID_ID_MASK;
   int rc;
 
   TCP_HELPER_RESOURCE_ASSERT_VALID(trs, 0);
@@ -191,19 +204,7 @@ int efab_tcp_helper_rm_mmap(tcp_helper_resource_t* trs, unsigned long* bytes,
                      "map_num=%d bytes=0x%lx offset=0x%lx map_id=%x",
                      trs->id, *map_num, *bytes, *offset, map_id));
 
-  switch( map_type ) {
-#ifndef CI_HAVE_OS_NOPAGE
-  case CI_NETIF_MMAP_ID_PAGES:
-    rc = tcp_helper_rm_mmap_page(trs, bytes, opaque, map_num, offset,
-                                 map_id & CI_NETIF_MMAP_ID_ID_MASK);
-    break;
-  case CI_NETIF_MMAP_ID_PKTS:
-    rc = tcp_helper_rm_mmap_pktbuf(trs, bytes, opaque, map_num, offset,
-                                   map_id & CI_NETIF_MMAP_ID_ID_MASK);
-    break;
-#endif
-  default:
-    switch( map_id ) {
+  switch( map_id ) {
     case CI_NETIF_MMAP_ID_STATE:
       rc = tcp_helper_rm_mmap_mem(trs, bytes, opaque, map_num, offset);
       break;
@@ -213,11 +214,17 @@ int efab_tcp_helper_rm_mmap(tcp_helper_resource_t* trs, unsigned long* bytes,
     case CI_NETIF_MMAP_ID_IOBUFS:
       rc = tcp_helper_rm_mmap_buf(trs, bytes, opaque, map_num, offset);
       break;
+#if !CI_CFG_MMAP_EACH_PKTSET
+    case CI_NETIF_MMAP_ID_PKTS:
+      rc = tcp_helper_rm_mmap_pkts(trs, bytes, opaque, map_id, offset);
+      break;
     default:
       rc = -EINVAL;
       break;
-    }
-    break;
+#else
+    default:
+      rc = tcp_helper_rm_mmap_pkts(trs, bytes, opaque, map_id, offset);
+#endif
   }
 
   if( rc == 0 )  return 0;

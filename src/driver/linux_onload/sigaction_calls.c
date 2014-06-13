@@ -47,8 +47,7 @@ efab_signal_handler_type(int sig, __sighandler_t user_handler)
     return OO_SIGHANGLER_TERM;
 }
 
-/* Substitute signal handler by our variant.
- * Should be called under sighand->siglock. */
+/* Substitute signal handler by our variant. */
 static int
 efab_signal_substitute(int sig, struct sigaction *new_act,
                        const struct mm_signal_data *tramp_data)
@@ -64,7 +63,11 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
 
   user_data = &(((struct oo_sigaction *)
                  (CI_USER_PTR_GET(tramp_data->user_data)))[sig - 1]);
-  __get_user(old_type, &user_data->type);
+  if( !access_ok(VERIFY_WRITE, user_data, sizeof(struct oo_sigaction) ) )
+    return -EFAULT;
+  rc = __get_user(old_type, &user_data->type);
+  if( rc != 0 )
+    return rc;
   seq = old_type + (1 << OO_SIGHANGLER_SEQ_SHIFT);
 
   /* We are going to change signal handler: UL should wait until we've
@@ -116,7 +119,7 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
                          k->sa.sa_flags, k->sa.sa_restorer));
 
   /* Copy signal_data to UL; type BUSY */
-  rc = copy_to_user(user_data, &signal_data, sizeof(signal_data));
+  rc = __copy_to_user(user_data, &signal_data, sizeof(signal_data));
   if( rc != 0 )
     return -EFAULT;
   /* Fill in the real type */
@@ -200,9 +203,12 @@ efab_signal_report_sigaction(int sig, struct sigaction *sa,
   int tried_changed = 0;
   int sa_provided = (sa != NULL);
 
+  if( !access_ok(VERIFY_WRITE, user_data, sizeof(struct oo_sigaction) ) )
+    return -EFAULT;
+
 re_read_data:
   do {
-    rc = copy_from_user(&signal_data, user_data, sizeof(signal_data));
+    rc = __copy_from_user(&signal_data, user_data, sizeof(signal_data));
     if( rc != 0 )
       return -EFAULT;
     tried_busy++;
@@ -246,7 +252,7 @@ report:
 
   /* Re-check that UL have not changed signal_data. */
   type = signal_data.type;
-  rc = copy_from_user(&signal_data, user_data, sizeof(signal_data));
+  rc = __copy_from_user(&signal_data, user_data, sizeof(signal_data));
   if( rc != 0 )
     return rc;
   if( type != signal_data.type ) {

@@ -35,7 +35,7 @@ DRIVER_SUBDIRS	:= 3rdparty win sfgpxe
 endif
 
 ifeq ($(LINUX),1)
-DRIVER_SUBDIRS	:= citools ciul efthrm transport efabcfg
+DRIVER_SUBDIRS	:= citools ciul transport efabcfg
 OTHER_SUBDIRS	:= spektor
 SUBDIRS		+= sfcaffinity sfgpxe onload_ext fsbc
 endif

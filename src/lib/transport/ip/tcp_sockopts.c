@@ -491,7 +491,7 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
 	if( s->b.state != CI_TCP_LISTEN ) {
 	  ci_tcp_state* ts = SOCK_TO_TCP(s);
 	  if( ts->send.num == 1 ) {
-	    ci_netif_lock_fixme(ni);
+	    ci_netif_lock(ni);
 	    if( ts->send.num == 1 ) {
               TX_PKT_TCP(PKT_CHK(ni, ts->send.head))->tcp_flags |=
                                                     CI_TCP_FLAG_PSH;
@@ -518,7 +518,7 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
             if( (cork = (s->s_aflags & CI_SOCK_AFLAG_CORK)) )
               ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
 
-            ci_netif_lock_fixme(ni);
+            ci_netif_lock(ni);
             if( ci_ip_queue_not_empty(&ts->send) )
               ci_tcp_tx_advance(ts, ni);
 	    ci_netif_unlock(ni);

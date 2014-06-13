@@ -16,13 +16,18 @@
     setsockopt;
     recv;
     recvfrom;
+    __recv_chk;
+    __recvfrom_chk;
     recvmsg;
     recvmmsg;
     send;
     sendto;
     sendmsg;
+    sendmmsg;
     select;
+    pselect;
     poll;
+    ppoll;
     sendfile;
     sendfile64;
     sendfilev;

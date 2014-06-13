@@ -26,7 +26,7 @@ DRIVER_SUBDIRS  :=
 endif
 
 ifeq ($(SOLARIS),1)
-SUBDIRS       	:= solaris
+SUBDIRS       	:= solaris sfutils
 DRIVER_SUBDIRS	:=
 OTHER_SUBDIRS	:= 
 ifneq ($(ONLOAD_ONLY),1)

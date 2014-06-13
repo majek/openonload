@@ -42,7 +42,8 @@
 
 #define TCP_HELPER_WAITQ(rs, i) (&((rs)->netif.ep_tbl[OO_SP_TO_INT(i)]->waitq))
 
-
+/* If ifindices_len=0, create stack without hw (useful for TCP loopback);
+ * if ifindices_len<0, autodetect all available NICs. */
 extern int tcp_helper_alloc_kernel(ci_resource_onload_alloc_t* alloc,
                                    const ci_netif_config_opts* opts,
                                    const int* ifindices, int ifindices_len,
@@ -52,15 +53,16 @@ extern int tcp_helper_alloc_ul(ci_resource_onload_alloc_t* alloc,
                                const int* ifindices, int ifindices_len,
                                tcp_helper_resource_t** rs_out);
 
+extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
+
 extern int efab_tcp_helper_rm_mmap(tcp_helper_resource_t*,
                                    unsigned long* bytes,
                                    void* opaque, int* map_num,
-                                   unsigned long* offset, int index);
+                                   unsigned long* offset, int map_id);
 
-extern unsigned tcp_helper_rm_nopage(tcp_helper_resource_t* trs,
-                                     void* opaque,
-                                     unsigned long offset,
-                                     unsigned long map_size);
+extern unsigned long tcp_helper_rm_nopage(tcp_helper_resource_t* trs,
+                                          void* opaque, int map_id, 
+                                          unsigned long offset);
 
 extern void tcp_helper_rm_dump(int fd_type, oo_sp sock_id,
                                tcp_helper_resource_t* trs,
@@ -105,20 +107,38 @@ ci_inline tcp_helper_resource_t* efab_priv_to_thr(ci_private_t* priv) {
   return priv->thr;
 }
 
+extern int efab_thr_get_inaccessible_stack_info(unsigned id,
+                                                uid_t* uid, 
+                                                uid_t* euid,
+                                                ci_int32* share_with, 
+                                                char* name);
 
-#define EFAB_THR_TABLE_LOOKUP_NO_CHECK_USER  0
-#define EFAB_THR_TABLE_LOOKUP_CHECK_USER     1
-#define EFAB_THR_TABLE_LOOKUP_NO_UL          2
+#define EFAB_THR_TABLE_LOOKUP_NO_CHECK_USER       0
+#define EFAB_THR_TABLE_LOOKUP_CHECK_USER          1
+#define EFAB_THR_TABLE_LOOKUP_NO_WARN             2
+#define EFAB_THR_TABLE_LOOKUP_NO_UL               4
 
 extern int efab_thr_can_access_stack(tcp_helper_resource_t* thr,
                                      int check_user);
 
 /*! Lookup a stack and grab a reference if found.  If [name] is not NULL,
- * search by name, else by [id].  Only stacks that still have a userland
- * reference are found.
+ * search by name, else by [id]. 
+ *
+ * If flags has:
+ *
+ * - CHECK_USER bit set then only stacks that the user has permission
+ * to access will be returned.  Others will return -EACCES.
+ * 
+ * - NO_WARN bit set then no warning message about being unable to
+ * access a stack will be output
+ * 
+ * - NO_UL bit set then only orphan stacks will be returned.  You may
+ * still get EACCES returned for non-orphan stacks.  Without NO_UL set
+ * you will only get non-orphan stacks.
+ * 
+ * Caller is responsible for dropping the reference taken on success.
  */
-extern int efab_thr_table_lookup(const char* name, unsigned id,
-                                 int check_user,
+extern int efab_thr_table_lookup(const char* name, unsigned id, int flags,
                                  tcp_helper_resource_t** stack_out);
 
 
@@ -152,8 +172,6 @@ extern void efab_thr_release(tcp_helper_resource_t *thr);
 extern int efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
                                         oo_sp, ci_uint16* p_mask_out);
 
-extern int efab_tcp_helper_xfer_cached (ci_private_t *priv, void *arg);
-
 extern int efab_tcp_helper_sock_sleep(tcp_helper_resource_t*,
 				      oo_tcp_sock_sleep_t* op
 				      CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t));
@@ -166,7 +184,11 @@ extern int efab_tcp_helper_sock_lock_slow(tcp_helper_resource_t*, oo_sp
 				  CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t));
 extern void efab_tcp_helper_sock_unlock_slow(tcp_helper_resource_t*, oo_sp);
 
+#if CI_CFG_FD_CACHING
 extern int efab_tcp_helper_can_cache_fd(ci_private_t *priv_ni, void *arg);
+extern int efab_tcp_helper_xfer_cached (ci_private_t *priv, void *arg);
+
+#endif
 
 
 extern int efab_tcp_helper_get_sock_fd(ci_private_t*, void*);
@@ -252,7 +274,6 @@ efab_tcp_helper_k_ref_count_inc(tcp_helper_resource_t* trs)
  * the eplock
  *
  * \param trs             TCP helper resource
- * \param addr_spc        Address space id we wnat to run the stack in
  *
  * \return                non-zero if callee succeeded in obtaining 
  *                        the netif lock
@@ -260,7 +281,28 @@ efab_tcp_helper_k_ref_count_inc(tcp_helper_resource_t* trs)
  *--------------------------------------------------------------------*/
 
 extern int
-efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*, ci_addr_spc_t);
+efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*);
+
+/*--------------------------------------------------------------------
+ *!
+ * Called by kernel code to get the shared user/kernel mode netif
+ * lock This obtains the kernel netif "lock" first so we can deduce
+ * who owns the eplock.  If it can't get both locks it sets the
+ * supplied flags on the lock that it can't obtain
+ *
+ * \param trs             TCP helper resource
+ * \param trusted_flags   Flags to set on the kernel netif lock
+ * \param untrusted_flags Flags to set on the shared netif lock
+ *
+ * \return                non-zero if callee succeeded in obtaining 
+ *                        the netif locks, or zero if it set flags instead
+ *
+ *--------------------------------------------------------------------*/
+
+extern int
+efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs, 
+                                        unsigned trusted_flags,
+                                        unsigned untrusted_flags);
 
 
 /*--------------------------------------------------------------------
@@ -339,9 +381,9 @@ int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,
 
 
 
-extern int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode);
+extern int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd);
 
-extern int efab_tcp_helper_set_addr_spc(ci_private_t *priv, void *arg);
+extern int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode);
 
 extern unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file*,
 						   tcp_helper_resource_t*,

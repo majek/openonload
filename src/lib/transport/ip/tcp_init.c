@@ -60,7 +60,8 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   fd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(netif), S_SP(ts),
                                  domain, type);
   if( fd < 0 ) {
-    LOG_E(ci_log("%s: ci_tcp_helper_sock_attach %d", __FUNCTION__, fd));
+    LOG_E(ci_log("%s: ci_tcp_helper_sock_attach(domain=%d, type=%d) failed %d",
+                 __FUNCTION__, domain, type, fd));
     ci_tcp_state_free(netif, ts);
   }
   else {

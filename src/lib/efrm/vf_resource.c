@@ -50,6 +50,10 @@
  ****************************************************************************
  */
 
+#include <ci/efrm/config.h>
+
+#ifdef CONFIG_SFC_RESOURCE_VF
+
 #include <ci/efrm/nic_table.h>
 #include <ci/efrm/private.h>
 #include "efrm_internal.h"
@@ -148,7 +152,8 @@ efrm_vf_to_resource(struct efrm_vf *vf)
 
 int
 efrm_vf_resource_alloc(struct efrm_client *client, 
-		       struct efrm_vf *linked, struct efrm_vf **vf_out)
+		       struct efrm_vf *linked, int use_iommu,
+		       struct efrm_vf **vf_out)
 {
 	struct efrm_vf_nic_params *nic =
 		&efrm_vf_manager->nic[client->nic->index];
@@ -162,20 +167,24 @@ efrm_vf_resource_alloc(struct efrm_client *client,
 		return -EBUSY;
 	}
 
-	do {
-		spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
-		if (list_empty(&nic->free_list)) {
-			spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
-			return rc == 0 ? -ENOBUFS : rc;
-		}
-		vf = list_entry(nic->free_list.next, struct efrm_vf, link);
-		list_del(&vf->link);
+	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
+	if (list_empty(&nic->free_list)) {
 		spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
+		return rc == 0 ? -ENOBUFS : rc;
+	}
+	vf = list_entry(nic->free_list.next, struct efrm_vf, link);
+	list_del(&vf->link);
+	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 
-		/* Re-init VF.  Do not put VF back to the list
-		 * in case of failure - probably, BIOS does not
-		 * support so many VFs. */
-	} while (efrm_vf_alloc_init(vf, linked));
+	rc = efrm_vf_alloc_init(vf, linked, use_iommu);
+	if (rc != 0) {
+		/* Scary warnings are already printed, just return */
+		/* Add to the tail of the list in hope another function
+		 * is better. */
+		list_add_tail(&vf->link,
+			      &efrm_vf_manager->nic[vf->nic_index].free_list);
+		return rc;
+	}
 
 	EFRM_ASSERT(vf);
 	EFRM_ASSERT(vf->irq_count);
@@ -332,10 +341,8 @@ int efrm_vf_probed(struct efrm_vf *vf)
 void efrm_vf_removed(struct efrm_vf *vf)
 {
 	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
-	if (vf->vi_count) {
-		list_del(&vf->link);
-		vf->vi_count = 0;
-	}
+	list_del(&vf->link);
+	vf->vi_count = 0;
 	efrm_vf_manager->nic[vf->nic_index].vf_count--;
 	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 }
@@ -423,10 +430,14 @@ unsigned long efrm_vf_alloc_ioaddrs(struct efrm_vf *vf, int n_pages,
 		return 0;
 	}
 
-	iova = *vf->iova_basep;
 	size = n_pages * PAGE_SIZE;
+	iova = *vf->iova_basep;
 	if (size > 0) {
 		spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
+		iova = *vf->iova_basep;
+		if ((iova & (size - 1)) != 0 )
+			iova = (iova + size - 1) & ~(size - 1);
+
 		if ((iova <= IOAPIC_RANGE_END) &&
 		    ((iova + size) > IOAPIC_RANGE_START))
 			iova = IOAPIC_RANGE_END + 1;
@@ -437,6 +448,8 @@ unsigned long efrm_vf_alloc_ioaddrs(struct efrm_vf *vf, int n_pages,
 			 iova + size > vf->pci_dev->resource[2].start)
 			iova = vf->pci_dev->resource[2].end + 1;
 
+		if ((iova & (size - 1)) != 0 )
+			iova = (iova + size - 1) & ~(size - 1);
 		*vf->iova_basep = iova + size;
 		spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 	}
@@ -445,4 +458,4 @@ unsigned long efrm_vf_alloc_ioaddrs(struct efrm_vf *vf, int n_pages,
 		*iommu_domain_out = vf->iommu_domain;
 	return iova;
 }
-EXPORT_SYMBOL(efrm_vf_alloc_ioaddrs);
+#endif /*CONFIG_SFC_RESOURCE_VF*/

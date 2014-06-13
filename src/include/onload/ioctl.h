@@ -107,8 +107,12 @@ enum {
 #define OO_IOC_TCP_SOCK_SLEEP   OO_IOC_RW(TCP_SOCK_SLEEP, oo_tcp_sock_sleep_t)
   OO_OP_WAITABLE_WAKE,
 #define OO_IOC_WAITABLE_WAKE    OO_IOC_W(WAITABLE_WAKE, oo_waitable_wake_t)
+#if CI_CFG_FD_CACHING
   OO_OP_TCP_CAN_CACHE_FD,
 #define OO_IOC_TCP_CAN_CACHE_FD OO_IOC_W(TCP_CAN_CACHE_FD, ci_uint32)
+  OO_OP_TCP_XFER,
+#define OO_IOC_TCP_XFER         OO_IOC_RW(TCP_XFER, oo_tcp_xfer_t)
+#endif
 
   /* Filter operations */
   OO_OP_EP_FILTER_SET,
@@ -158,9 +162,6 @@ enum {
 #define OO_IOC_PIPE_ATTACH          OO_IOC_RW(PIPE_ATTACH, \
                                               oo_pipe_attach_t)
 #endif
-  OO_OP_GET_ADDR_SPC_ID,
-#define OO_IOC_GET_ADDR_SPC_ID      OO_IOC_W(GET_ADDR_SPC_ID, \
-                                             oo_netif_get_addr_spc_id_t)
 
   /* OS-specific TCP helper operations */
   OO_OP_OS_SOCK_FD_GET,
@@ -191,12 +192,7 @@ enum {
                                              oo_tcp_sockaddr_with_len_t)
   OO_OP_TCP_HANDOVER,
 #define OO_IOC_TCP_HANDOVER         OO_IOC_W(TCP_HANDOVER, ci_int32)
-  OO_OP_TCP_XFER,
-#define OO_IOC_TCP_XFER             OO_IOC_RW(TCP_XFER, oo_tcp_xfer_t)
 
-  OO_OP_TCP_SET_ADDR_SPC,
-#define OO_IOC_TCP_SET_ADDR_SPC     OO_IOC_RW(TCP_SET_ADDR_SPC, \
-                                              oo_tcp_set_addr_spc_t)
   OO_OP_TCP_CLOSE_OS_SOCK,
 #define OO_IOC_TCP_CLOSE_OS_SOCK    OO_IOC_W(TCP_CLOSE_OS_SOCK, oo_sp)
 
@@ -282,8 +278,8 @@ enum {
 #define OO_IOC_GET_ONLOADFS_DEV     OO_IOC_R(GET_ONLOADFS_DEV, ci_uint32)
 
   OO_OP_TCP_LOOPBACK_CONNECT,
-#define OO_IOC_TCP_LOOPBACK_CONNECT OO_IOC_W(TCP_LOOPBACK_CONNECT, \
-                                             struct oo_op_loopback_connect)
+#define OO_IOC_TCP_LOOPBACK_CONNECT OO_IOC_RW(TCP_LOOPBACK_CONNECT, \
+                                              struct oo_op_loopback_connect)
   OO_OP_TCP_DROP_FROM_ACCEPTQ,
 #define OO_IOC_TCP_DROP_FROM_ACCEPTQ OO_IOC_W(TCP_DROP_FROM_ACCEPTQ, \
                                           struct oo_op_tcp_drop_from_acceptq)

@@ -42,10 +42,24 @@
 #define OO_EPOLL_NEED_NEST_PROTECTION
 #endif
 
+/* This is needed for RHEL4 and similar vintage kernels */
+#ifndef __MODULE_PARM_TYPE
+#define __MODULE_PARM_TYPE(name, _type)                 \
+  __MODULE_INFO(parmtype, name##type, #name ":" _type)
+#endif
 
 /*************************************************************
  * EPOLL2 private file data
  *************************************************************/
+static int set_max_stacks(const char *val, struct kernel_param *kp);
+static unsigned epoll2_max_stacks = CI_CFG_EPOLL2_MAX_STACKS;
+module_param_call(epoll2_max_stacks, set_max_stacks, param_get_uint,
+                  &epoll2_max_stacks, S_IRUGO);
+__MODULE_PARM_TYPE(epoll2_max_stacks, "uint");
+MODULE_PARM_DESC(epoll2_max_stacks,
+"Maximum number of onload stacks handled by single epoll object "
+"in EF_UL_EPOLL=2 mode.");
+
 struct oo_epoll2_private {
   struct file  *kepo;
   spinlock_t    lock;
@@ -53,7 +67,7 @@ struct oo_epoll2_private {
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
   struct list_head busy_tasks;
 #endif
-  tcp_helper_resource_t* stacks[CI_CFG_EPOLL_MAX_STACKS];
+  tcp_helper_resource_t** stacks;
 };
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
 struct oo_epoll_busy_task {
@@ -75,6 +89,9 @@ struct oo_epoll1_private {
   poll_table pt;
   wait_queue_t wait;
   wait_queue_head_t *whead;
+
+  /* kernel epoll file */
+  struct file *os_file;
 };
 
 /*************************************************************
@@ -121,36 +138,59 @@ static inline void oo_epoll_warn_postpone_error(ci_uint32 ctl_n,
 /*************************************************************
  * EPOLL2-specific code
  *************************************************************/
-static void oo_epoll2_ctor(struct oo_epoll2_private *priv, struct file  *kepo)
+static int set_max_stacks(const char *val, struct kernel_param *kp)
 {
+  int rc = param_set_uint(val, kp);
+  if( rc != 0 )
+    return rc;
+  /* do not accept 0 value: use default instead */
+  if( epoll2_max_stacks == 0 )
+    epoll2_max_stacks = CI_CFG_EPOLL2_MAX_STACKS;
+  return 0;
+}
+
+static int oo_epoll2_ctor(struct oo_epoll2_private *priv, int kepfd)
+{
+  struct file  *kepo = fget(kepfd);
+  int size = sizeof(priv->stacks[0]) * epoll2_max_stacks;
+
+  if( kepo == NULL )
+    return -EBADF;
+
+  priv->stacks = kmalloc(size, GFP_KERNEL);
+  if( priv->stacks == NULL )
+    return -ENOMEM;
+  memset(priv->stacks, 0, size);
+
   spin_lock_init(&priv->lock);
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
   INIT_LIST_HEAD(&priv->busy_tasks);
 #endif
   priv->kepo = kepo;
+  return 0;
 }
 
 static int oo_epoll2_init(struct oo_epoll_file_private *priv,
                          ci_fixed_descriptor_t kepfd)
 {
-  struct file *file = fget((int)kepfd);
+  int rc;
 
-  if(unlikely( file == NULL ))
-    return -EBADF;
+  rc = oo_epoll2_ctor(&priv->p.p2, (int)kepfd);
+  if( rc != 0 )
+    return rc;
   priv->type = OO_EPOLL_TYPE_2;
-  oo_epoll2_ctor(&priv->p.p2, file);
   return 0;
 }
 
 static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
                               tcp_helper_resource_t* fd_thr)
 {
-  int i;
+  unsigned i;
 
   /* Common case is that we already know about this stack, so make that
    * fast.
    */
-  for( i = 0; i < CI_CFG_EPOLL_MAX_STACKS; ++i )
+  for( i = 0; i < epoll2_max_stacks; ++i )
     if( priv->stacks[i] == fd_thr )
       return 1;
     else if(unlikely( priv->stacks[i] == NULL ))
@@ -158,7 +198,7 @@ static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
 
   /* Try to add stack.  NB. May already be added by concurrent thread. */
   spin_lock(&priv->lock);
-  for( i = 0; i < CI_CFG_EPOLL_MAX_STACKS; ++i ) {
+  for( i = 0; i < epoll2_max_stacks; ++i ) {
     if( priv->stacks[i] == fd_thr )
       break;
     if( priv->stacks[i] != NULL )
@@ -170,7 +210,7 @@ static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
     break;
   }
   spin_unlock(&priv->lock);
-  return i < CI_CFG_EPOLL_MAX_STACKS;
+  return i < epoll2_max_stacks;
 }
 
 
@@ -197,7 +237,7 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
    * We should check that we are not adding ourself. */
   {
     struct oo_epoll_file_private *p = file->private_data;
-    if(unlikely( p->type == OO_EPOLL_TYPE_2 && &p->p.p2 == priv )) {
+    if(unlikely( &p->p.p2 == priv )) {
       fput(file);
       return -EINVAL;
     }
@@ -240,7 +280,7 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
     static int printed;
     if( !printed )
       ci_log("Can't add stack %d to epoll set: consider "
-             "increasing CI_CFG_EPOLL_MAX_STACKS", fd_thr->id);
+             "increasing epoll2_max_stacks module option", fd_thr->id);
     /* fall through to sys_epoll_ctl() without interrupt */
   }
 
@@ -285,7 +325,7 @@ static int oo_epoll2_apply_ctl(struct oo_epoll2_private *priv,
 
 
 #define OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni)                       \
-  for( i = 0; i < CI_CFG_EPOLL_MAX_STACKS; ++i )                        \
+  for( i = 0; i < epoll2_max_stacks; ++i )                              \
     if( (thr = (priv)->stacks[i]) == NULL )                             \
       break;                                                            \
     else if(unlikely( thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )) \
@@ -299,7 +339,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
   ci_uint64 start_frc = 0, now_frc = 0; /* =0 to make gcc happy */
   tcp_helper_resource_t* thr;
   ci_netif* ni;
-  int i;
+  unsigned i;
   ci_int32 timeout = op->timeout;
 
   /* Get the start of time. */
@@ -386,7 +426,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
         goto do_exit;
 
       ci_frc64(&now_frc);
-      if(unlikely( now_frc - schedule_frc > cpu_khz / 1000 )) {
+      if(unlikely( now_frc - schedule_frc > cpu_khz )) {
         schedule(); /* schedule() every 1ms */
         schedule_frc = now_frc;
       }
@@ -535,7 +575,7 @@ static void oo_epoll2_release(struct oo_epoll2_private *priv)
     fput(priv->kepo);
 
   /* Release references to all stacks */
-  for( i = 0; i < CI_CFG_EPOLL_MAX_STACKS; i++ ) {
+  for( i = 0; i < epoll2_max_stacks; i++ ) {
     if( priv->stacks[i] == NULL )
       break;
     efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
@@ -601,7 +641,6 @@ static void oo_epoll1_queue_proc(struct file *file,
 static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
                           struct vm_area_struct* vma)
 {
-  struct file *file;
   int rc;
 
   if (vma->vm_end - vma->vm_start != PAGE_SIZE)
@@ -628,6 +667,7 @@ static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
     rc = priv->sh->epfd;
     goto fail1;
   }
+  priv->os_file = fget(priv->sh->epfd);
 
   /* Map memory to user */
   if( remap_pfn_range(vma, vma->vm_start, page_to_pfn(priv->page),
@@ -638,13 +678,12 @@ static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
 
   /* Install callback */
   init_poll_funcptr(&priv->pt, oo_epoll1_queue_proc);
-  file = fget(priv->sh->epfd);
-  file->f_op->poll(file, &priv->pt);
-  fput(file);
+  priv->os_file->f_op->poll(priv->os_file, &priv->pt);
 
   return 0;
 
 fail2:
+  fput(priv->os_file);
   efab_linux_sys_close(priv->sh->epfd);
 fail1:
   priv->sh = NULL;
@@ -657,13 +696,7 @@ static int oo_epoll1_release(struct oo_epoll1_private* priv)
   ci_assert(priv->whead);
   remove_wait_queue(priv->whead, &priv->wait);
 
-  /* We can get here in 2 ways: via sys_close and via
-   * (sys|efab)_exit_group -> put_files_struct.
-   * In the second case, we cant't call sys_close(priv->sh->epfd), because
-   * current->files is already set to NULL.
-   */
-  if( current->files )
-    efab_linux_sys_close(priv->sh->epfd);
+  fput(priv->os_file);
 
   __free_page(priv->page);
   return 0;
@@ -696,7 +729,6 @@ static int oo_epoll1_action(struct oo_epoll1_private *priv,
 
   if( op->maxevents ) {
     ci_uint32 tmp;
-    struct file *file = NULL;
     op->rc = efab_linux_sys_epoll_wait(priv->sh->epfd,
                                        CI_USER_PTR_GET(op->events),
                                        op->maxevents, 0/*timeout*/);
@@ -706,14 +738,10 @@ static int oo_epoll1_action(struct oo_epoll1_private *priv,
       tmp = priv->sh->flag;
       if( (tmp & 1) == 0 )
         break;
-      if( file == NULL )
-        file = fget(priv->sh->epfd);
-      if( file == NULL || file->f_op->poll(file, NULL) )
+      if( priv->os_file->f_op->poll(priv->os_file, NULL) )
         break;
     } while( ci_cas32u_fail(&priv->sh->flag, tmp,
                             tmp & ~OO_EPOLL1_FLAG_EVENT) );
-    if( file != NULL )
-      fput(file);
   }
   else
     op->rc = rc;

@@ -224,7 +224,7 @@ void ci_assert_valid_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 {
   _ci_assert(pkt, file, line);
   ASSERT_VALID_PKT_ID(ni, OO_PKT_P(pkt));
-  _ci_assert_equal(pkt, __PKT(ni, OO_PKT_P(pkt), ni_locked), file, line);
+  _ci_assert_equal(pkt, __PKT(ni, OO_PKT_P(pkt)), file, line);
 
   if( ni_locked ) {
     _ci_assert(ci_netif_is_locked(ni), file, line);
@@ -258,10 +258,10 @@ void ci_netif_dump_sockets(ci_netif* ni)
 
 void ci_netif_dump_pkt_summary(ci_netif* ni)
 {
-  int intf_i, rx_ring = 0, tx_ring = 0, tx_oflow = 0, used;
+  int intf_i, rx_ring = 0, tx_ring = 0, tx_oflow = 0, used, rx_queued;
   ci_netif_state* ns = ni->state;
 
-  rx_ring = ns->mem_pressure_pkt_pool_n;
+  rx_ring = 0;
   tx_ring = 0;
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
     rx_ring += ef_vi_receive_fill_level(ci_netif_rx_vi(ni, intf_i));
@@ -269,14 +269,15 @@ void ci_netif_dump_pkt_summary(ci_netif* ni)
     tx_oflow += ns->nic[intf_i].dmaq.num;
   }
   used = ns->n_pkts_allocated - ns->n_freepkts - ns->n_async_pkts;
+  rx_queued = ns->n_rx_pkts - rx_ring - ns->mem_pressure_pkt_pool_n;
 
   log("  pkt_bufs: size=%d max=%d alloc=%d free=%d async=%d%s",
       CI_CFG_PKT_BUF_SIZE, ns->pkt_sets_max * PKTS_PER_SET,
       ns->n_pkts_allocated, ns->n_freepkts, ns->n_async_pkts,
       (ns->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ? " CRITICAL":
       (ns->mem_pressure ? " LOW":""));
-  log("  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d",
-      ns->n_rx_pkts, rx_ring, (ns->n_rx_pkts - rx_ring));
+  log("  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d pressure_pool=%d",
+      ns->n_rx_pkts, rx_ring, rx_queued, ns->mem_pressure_pkt_pool_n);
   log("  pkt_bufs: tx=%d tx_ring=%d tx_oflow=%d tx_other=%d",
       (used - ns->n_rx_pkts), tx_ring, tx_oflow,
       (used - ns->n_rx_pkts - tx_ring - tx_oflow));
@@ -602,6 +603,10 @@ void ci_netif_dump(ci_netif* ni)
       (unsigned) IPTIMER_STATE(ni)->sched_ticks,
       (unsigned) its.ci_ip_time_real_ticks, diff / 1000, diff % 1000,
       diff > 5000 ? " !! STUCK !!":"");
+
+  if( ns->error_flags )
+    log("  ERRORS: "CI_NETIF_ERRORS_FMT,
+        CI_NETIF_ERRORS_PRI_ARG(ns->error_flags));
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     ci_netif_dump_vi(ni, intf_i);

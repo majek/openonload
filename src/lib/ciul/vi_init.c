@@ -226,3 +226,48 @@ const char* ef_vi_driver_interface_str(void)
 {
 	return EFCH_INTF_VER;
 }
+
+
+int ef_vi_rxq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
+{
+  ef_vi_state* state = vi->ep_state;
+  int di;
+  
+  while( state->rxq.removed < state->rxq.added ) {
+    di = state->rxq.removed & vi->vi_rxq.mask;
+    BUG_ON(vi->vi_rxq.ids[di] == EF_REQUEST_ID_MASK);
+    (*cb)(vi->vi_rxq.ids[di], cb_arg);
+    vi->vi_rxq.ids[di] = EF_REQUEST_ID_MASK;
+    ++state->rxq.removed;
+  }
+
+  state->rxq.added = state->rxq.removed = 0;
+
+  return 0;
+}
+
+
+int ef_vi_txq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
+{
+  ef_vi_state* state = vi->ep_state;
+  int di;
+
+  while( state->txq.removed < state->txq.added ) {
+    di = state->txq.removed & vi->vi_txq.mask;
+    if( vi->vi_txq.ids[di] != EF_REQUEST_ID_MASK )
+      (*cb)(vi->vi_txq.ids[di], cb_arg);
+    vi->vi_txq.ids[di] = EF_REQUEST_ID_MASK;
+    ++state->txq.removed;
+  }
+
+  state->txq.previous = state->txq.added = state->txq.removed = 0;
+
+  return 0;
+}
+
+
+int ef_vi_evq_reinit(ef_vi* vi)
+{
+  vi->evq_state->evq_ptr = 0;
+  return 0;
+}

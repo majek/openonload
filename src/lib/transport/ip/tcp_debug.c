@@ -427,11 +427,11 @@ void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
   /* NB. Window can shrink, so the following is not a valid test: */
   /* verify(SEQ_LE(tcp_snd_nxt(ts), ts->snd_max)); */
 
-  verify(ci_ip_queue_is_valid(netif, &ts->send, CI_TRUE));
-  verify(ci_ip_queue_is_valid(netif, &ts->retrans, CI_TRUE));
-  verify(ci_ip_queue_is_valid(netif, &ts->recv1, CI_TRUE));
-  verify(ci_ip_queue_is_valid(netif, &ts->recv2, CI_TRUE));
-  verify(ci_ip_queue_is_valid(netif, &ts->rob, CI_TRUE));
+  verify(ci_ip_queue_is_valid(netif, &ts->send));
+  verify(ci_ip_queue_is_valid(netif, &ts->retrans));
+  verify(ci_ip_queue_is_valid(netif, &ts->recv1));
+  verify(ci_ip_queue_is_valid(netif, &ts->recv2));
+  verify(ci_ip_queue_is_valid(netif, &ts->rob));
 
   if(!(ts->s.b.state & CI_TCP_STATE_TXQ_ACTIVE)){
     verify(ci_ip_queue_is_empty(&ts->send));
@@ -686,10 +686,12 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
   log("%s  acceptq: max=%d n=%d  get=%d put=%d total=%d", pf, 
       tls->acceptq_max, ci_tcp_acceptq_n(tls), OO_SP_FMT(tls->acceptq_get),
       tls->acceptq_put, tls->acceptq_n_in);
+  log("%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
+#if CI_CFG_FD_CACHING
   log("%s  epcache: n=%d cache=%s pending=%s", pf, ni->state->epcache_n,
       ci_ni_dllist_is_empty(ni, &tls->epcache_cache) ? "EMPTY":"yes",
       ci_ni_dllist_is_empty(ni, &tls->epcache_pending) ? "EMPTY":"yes");
-  log("%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
+#endif
 #if CI_CFG_STATS_TCP_LISTEN
   {
     ci_tcp_socket_listen_stats* s = &tls->stats;
@@ -736,8 +738,8 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
 
   ci_tcp_socket_cmn_dump(ni, &ts->c, pf);
 
-  log("%s  tcpflags: "CI_TCP_SOCKET_FLAGS_FMT,
-      pf, CI_TCP_SOCKET_FLAGS_PRI_ARG(ts));
+  log("%s  tcpflags: "CI_TCP_SOCKET_FLAGS_FMT" local_peer: %d",
+      pf, CI_TCP_SOCKET_FLAGS_PRI_ARG(ts), ts->s.local_peer);
 
   log("%s  snd: up=%08x una-nxt-max=%08x-%08x-%08x enq=%08x%s",
       pf,

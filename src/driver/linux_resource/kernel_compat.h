@@ -62,7 +62,7 @@
 #else
 # include <asm/io.h>
 #endif
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 # include <linux/iommu.h>
 #endif
 
@@ -128,7 +128,7 @@ out:
 #endif
 
 /********* IOMMU mapping ********************/
-#ifdef CONFIG_IOMMU_API
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 #  if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34) || defined(RHEL_MAJOR)
   static inline int iommu_map(struct iommu_domain *domain,
 			      unsigned long iova, phys_addr_t paddr,

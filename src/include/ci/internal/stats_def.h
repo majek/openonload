@@ -76,8 +76,20 @@ OO_STAT("Times a thread has blocked on a single socket.",
         ci_uint32, sock_sleeps, count)
 OO_STAT("Times a thread has enabled interrupts before blocking on a socket.",
         ci_uint32, sock_sleep_primes, count)
-OO_STAT("Times we've woken threads waiting on a socket.",
-        ci_uint32, sock_wakes, count)
+OO_STAT("Times Onload has woken threads waiting on a socket for receive.",
+        ci_uint32, sock_wakes_rx, count)
+OO_STAT("Times Onload has woken threads waiting on a socket for transmit.",
+        ci_uint32, sock_wakes_tx, count)
+OO_STAT("Times OS has woken threads waiting on an Onload socket for receive.",
+        ci_uint32, sock_wakes_rx_os, count)
+OO_STAT("Times OS has woken threads waiting on an Onload socket for transmit.",
+        ci_uint32, sock_wakes_tx_os, count)
+OO_STAT("Times Onload has potentially sent a signal due to O_ASYNC.",
+        ci_uint32, sock_wakes_signal, count)
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+OO_STAT("Number of huge pages allocated for packet sets.",
+        ci_uint32, pkt_huge_pages, count)
+#endif
 OO_STAT("Number of packet buffers cycled through the non-blocking pool.",
         ci_uint32, pkt_nonb, count)
 OO_STAT("Times we've taken a packet from the non-blocking pool while locked.",
@@ -94,6 +106,14 @@ OO_STAT("Times a thread has spun waiting for a packet.",
         ci_uint32, pkt_wait_spin, count)
 OO_STAT("Times we've taken the slow path unlocking the stack lock.",
         ci_uint32, unlock_slow, count)
+OO_STAT("Times packet memory shortage provoked the unlock slow path.",
+        ci_uint32, unlock_slow_pkt_waiter, count)
+OO_STAT("Times the unlock slow path was taken to wake threads.",
+        ci_uint32, unlock_slow_wake, count)
+OO_STAT("Times the unlock slow path was taken to close sockets/pipes.",
+        ci_uint32, unlock_slow_close, count)
+OO_STAT("Times a syscall was needed on the unlock slow path.",
+        ci_uint32, unlock_slow_syscall, count)
 OO_STAT("Times we've woken a thread blocked on the stack lock.",
         ci_uint32, lock_wakes, count)
 OO_STAT("Times a thread has spun waiting for the stack lock.",

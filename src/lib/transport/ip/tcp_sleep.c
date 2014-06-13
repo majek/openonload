@@ -85,9 +85,8 @@ int ci_sock_sleep(ci_netif* ni, citp_waitable* w, ci_bits why,
   /* Danger: "again" label must immediately precede the blocking call. */
 #endif
 
-  rc = oo_resource_op_blocking(ci_netif_get_driver_handle(ni),
-                               OO_IOC_TCP_SOCK_SLEEP, &op,
-                               *timeout_ms_p, timeout_ms_p);
+  rc = oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_TCP_SOCK_SLEEP,
+                      &op);
 #if HANDLE_SIGNALS
   ci_assert(si->inside_lib == 0);
   if(CI_UNLIKELY( rc == -EBUSY )) {
@@ -185,9 +184,8 @@ static int ci_sock_lock_block(ci_netif* ni, citp_waitable* w)
 static int ci_sock_lock_block(ci_netif* ni, citp_waitable* w)
 {
   oo_sp w_sp = W_SP(w);
-  return oo_resource_op_blocking(ci_netif_get_driver_handle(ni),
-                                 OO_IOC_TCP_SOCK_LOCK, &w_sp,
-                                 0, NULL);
+  return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_TCP_SOCK_LOCK,
+                        &w_sp);
 }
 
 #endif
@@ -208,7 +206,7 @@ int ci_sock_lock_slow(ci_netif* ni, citp_waitable* w)
   /* Limit to user-level for now.  Could allow spinning in kernel if we did
    * not rely on user-level accessible state for spin timeout.
    */
-  if( NI_OPTS(ni).sock_lock_buzz ) {
+  if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_SOCK_LOCK) ) {
     CITP_STATS_NETIF(++ni->state->stats.sock_lock_buzz);
     ci_frc64(&now_frc);
     start_frc = now_frc;
@@ -371,9 +369,8 @@ int ci_netif_pkt_wait(ci_netif* ni, int lock_flags)
                                   &lock_flags
                             CI_BLOCKING_CTX_ARG(ci_blocking_ctx_arg_needed()));
 #else
-    rc = oo_resource_op_blocking(ci_netif_get_driver_handle(ni),
-                                 OO_IOC_TCP_PKT_WAIT, &lock_flags,
-                                 0, NULL);
+    rc = oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_TCP_PKT_WAIT,
+                        &lock_flags);
     /* We treat allocation of memory (inc. packet buffers) as being
      * non-interruptible, because that is how the kernel behaves. */
     if( rc == -EINTR )

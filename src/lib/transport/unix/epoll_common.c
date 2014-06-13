@@ -160,11 +160,24 @@ int citp_epoll_zc_recv_filter(citp_fdinfo* fdi,
 
 
 #if CI_CFG_USERSPACE_EPOLL || CI_CFG_USERSPACE_PIPE
-#if CI_CFG_RECVMMSG
+
+#if CI_CFG_RECVMMSG || CI_CFG_SENDMMSG
 #include "internal.h"
+#endif
+
+#if CI_CFG_RECVMMSG
 int citp_nosock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
                          unsigned vlen, int flags, 
                          const struct timespec *timeout)
+{
+  errno = ENOTSOCK;
+  return -1;
+}
+#endif
+
+#if CI_CFG_SENDMMSG
+int citp_nosock_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
+                         unsigned vlen, int flags)
 {
   errno = ENOTSOCK;
   return -1;

@@ -57,6 +57,18 @@ static inline bool maranello_possible(struct siena_nic_data *nic)
 	return (nic->caps & (1 << MC_CMD_CAPABILITIES_TURBO_LBN));
 }
 
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+static inline bool aoe_enabled(struct siena_nic_data *nic)
+{
+	return (nic->caps & (1 << MC_CMD_CAPABILITIES_AOE_ACTIVE_LBN));
+}
+
+static inline bool aoe_active(struct siena_nic_data *nic)
+{
+	return (nic->caps & (1 << MC_CMD_CAPABILITIES_FC_ACTIVE_LBN));
+}
+#endif
+
 static void siena_push_irq_moderation(struct efx_channel *channel)
 {
 	efx_dword_t timer_cmd;
@@ -151,12 +163,24 @@ static void siena_remove_port(struct efx_nic *efx)
 	efx_nic_free_buffer(efx, &efx->stats_buffer);
 }
 
+void siena_prepare_flush(struct efx_nic *efx)
+{
+	if (efx->fc_disable++ == 0)
+		efx_mcdi_set_mac(efx);
+}
+
+void siena_finish_flush(struct efx_nic *efx)
+{
+	if (--efx->fc_disable == 0)
+		efx_mcdi_set_mac(efx);
+}
+
 static int siena_test_sram(struct efx_nic *efx,
 			   void (*pattern)(unsigned, efx_qword_t *, int, int),
 			   int a, int b)
 {
 	void __iomem *membase = efx->membase + FR_BZ_BUF_FULL_TBL;
-	int finish = efx->sram_lim / 8;
+	int finish = efx->sram_lim_qw;
 	efx_qword_t buf1, buf2;
 	efx_oword_t reg;
 	int wptr = 0, rptr = 0;
@@ -407,10 +431,14 @@ static int siena_probe_nvconfig(struct efx_nic *efx)
 
 static int siena_dimension_resources(struct efx_nic *efx)
 {
-	/* There is a small block of internal SRAM dedicated to the
-	 * buffer table and descriptor caches. */
-	size_t sram_size = 72 * 1024 * 64 / 8;
+	/* Each port has a small block of internal SRAM dedicated to
+	 * the buffer table and descriptor caches.  In theory we can
+	 * map both blocks to one port, but we don't.
+	 */
+	unsigned sram_lim_qw = FR_CZ_BUF_FULL_TBL_ROWS / 2;
 	struct efx_dl_falcon_resources *res = &efx->resources;
+	struct siena_nic_data *nic_data = efx->nic_data;
+	struct efx_dl_device_info *end_res;
 	u8 outbuf[MC_CMD_GET_RESOURCE_LIMITS_OUT_LEN];
 	size_t outlen;
 	int rc;
@@ -420,7 +448,7 @@ static int siena_dimension_resources(struct efx_nic *efx)
 	rc = efx_mcdi_rpc(efx, MC_CMD_GET_RESOURCE_LIMITS, NULL, 0,
 			  outbuf, sizeof(outbuf), &outlen);
 	if (rc == -ENOSYS) {
-		res->buffer_table_lim = sram_size / 8;
+		res->buffer_table_lim = sram_lim_qw;
 	} else if (rc) {
 		return rc;
 	} else {
@@ -430,7 +458,7 @@ static int siena_dimension_resources(struct efx_nic *efx)
 		res->txq_lim = MCDI_DWORD(outbuf, GET_RESOURCE_LIMITS_OUT_TXQ);
 		res->evq_timer_lim =
 			MCDI_DWORD(outbuf, GET_RESOURCE_LIMITS_OUT_EVQ);
-		if (res->buffer_table_lim < sram_size / 8) {
+		if (res->buffer_table_lim < sram_lim_qw) {
 			efx->resources.flags |=
 				EFX_DL_FALCON_ONLOAD_UNSUPPORTED;
 		}
@@ -439,19 +467,36 @@ static int siena_dimension_resources(struct efx_nic *efx)
 	res->flags |= EFX_DL_FALCON_HAVE_TIMER_QUANTUM_NS;
 	res->timer_quantum_ns = efx->timer_quantum_ns; /* same as IRQ timers */
 
-	rc = efx_nic_dimension_resources(efx, sram_size);
+	rc = efx_nic_dimension_resources(efx, sram_lim_qw);
 	if (rc)
 		return rc;
 
-	if (efx->vf_count) {
+	end_res = &efx->resources.hdr;
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+	/* If the board is AOE enabled */
+	if (nic_data && (aoe_enabled(nic_data))) {
+		/* Number of MACs is hardcoded for now */
+		efx->aoe_resources.internal_macs = 2;
+		efx->aoe_resources.external_macs = 2;
+		efx->aoe_resources.hdr.type = EFX_DL_AOE_RESOURCES;
+		efx->aoe_resources.hdr.next = end_res->next;
+		end_res->next = &efx->aoe_resources.hdr;
+		end_res = &efx->aoe_resources.hdr;
+	}
+#endif
+
+#ifdef CONFIG_SFC_SRIOV
+	if (efx_sriov_wanted(efx)) {
 		/* Advertise SR-IOV through driverlink */
 		efx->sriov_resources.hdr.type = EFX_DL_SIENA_SRIOV;
 		efx->sriov_resources.vi_base = EFX_VI_BASE;
 		efx->sriov_resources.vi_scale = efx->vi_scale;
 		efx->sriov_resources.vf_count = efx->vf_count;
-		efx->sriov_resources.hdr.next = efx->resources.hdr.next;
-		efx->resources.hdr.next = &efx->sriov_resources.hdr;
+		efx->sriov_resources.hdr.next = end_res->next;
+		end_res->next = &efx->sriov_resources.hdr;
 	}
+#endif
 
 	return 0;
 }
@@ -459,7 +504,7 @@ static int siena_dimension_resources(struct efx_nic *efx)
 static int siena_probe_nic(struct efx_nic *efx)
 {
 	struct siena_nic_data *nic_data;
-	bool already_attached = 0;
+	bool already_attached = false;
 	efx_oword_t reg;
 	int rc;
 
@@ -544,18 +589,24 @@ static int siena_probe_nic(struct efx_nic *efx)
 		goto fail5;
 	}
 
+	rc = efx_mcdi_mon_probe(efx);
+	if (rc)
+		goto fail5;
+
 	if (maranello_possible(efx->nic_data)) {
 		rc = device_create_file(&efx->pci_dev->dev,
 					&dev_attr_turbo_mode);
 		if (rc)
-			goto fail5;
+			goto fail6;
 	}
 
 	efx_sriov_probe(efx);
 	efx_ptp_probe(efx);
 
 	return 0;
-
+	
+fail6:
+	efx_mcdi_mon_remove(efx);
 fail5:
 	efx_nic_free_buffer(efx, &efx->irq_status);
 fail4:
@@ -643,6 +694,8 @@ static int siena_init_nic(struct efx_nic *efx)
 
 static void siena_remove_nic(struct efx_nic *efx)
 {
+	efx_mcdi_mon_remove(efx);
+
 	efx_nic_free_buffer(efx, &efx->irq_status);
 
 	siena_reset_hw(efx, RESET_TYPE_ALL);
@@ -659,7 +712,7 @@ static void siena_remove_nic(struct efx_nic *efx)
 	efx->nic_data = NULL;
 }
 
-#define STATS_GENERATION_INVALID ((__le64)(-1))
+#define STATS_GENERATION_INVALID ((__force __le64)(-1))
 
 static int siena_try_update_nic_stats(struct efx_nic *efx)
 {
@@ -669,7 +722,7 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 	u64 stat_val;
 
 	mac_stats = &efx->mac_stats;
-	dma_stats = (__force __le64 *)efx->stats_buffer.addr;
+	dma_stats = efx->stats_buffer.addr;
 
 	generation_end = dma_stats[MC_CMD_MAC_GENERATION_END];
 	if (generation_end == STATS_GENERATION_INVALID)
@@ -790,7 +843,7 @@ static void siena_update_nic_stats(struct efx_nic *efx)
 
 static void siena_start_nic_stats(struct efx_nic *efx)
 {
-	__le64 *dma_stats = (__le64 *)efx->stats_buffer.addr;
+	__le64 *dma_stats = efx->stats_buffer.addr;
 
 	dma_stats[MC_CMD_MAC_GENERATION_END] = STATS_GENERATION_INVALID;
 
@@ -894,7 +947,8 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.reset = siena_reset_hw,
 	.probe_port = siena_probe_port,
 	.remove_port = siena_remove_port,
-	.prepare_flush = efx_port_dummy_op_void,
+	.prepare_flush = siena_prepare_flush,
+	.finish_flush = siena_finish_flush,
 	.update_stats = siena_update_nic_stats,
 	.start_stats = siena_start_nic_stats,
 	.stop_stats = siena_stop_nic_stats,

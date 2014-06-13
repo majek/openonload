@@ -20,9 +20,11 @@
 struct tcp_helper_resource_s;
 struct oof_socket;
 struct oof_manager;
-struct oof_port_ref;
+struct oo_hw_filter;
+
 
 #define OO_IFID_ALL (-2)
+
 
 /**********************************************************************
  * The oof module interface.
@@ -43,6 +45,12 @@ oof_manager_addr_add(struct oof_manager*, unsigned laddr, unsigned ifindex);
 
 extern void
 oof_manager_addr_del(struct oof_manager*, unsigned laddr, unsigned ifindex);
+
+extern void
+oof_hwport_up_down(int hwport, int up);
+
+extern void
+oof_hwport_un_available(int hwport, int available);
 
 extern void
 oof_socket_ctor(struct oof_socket*);
@@ -86,8 +94,6 @@ oof_manager_dump(struct oof_manager*,
                  void (*dump_fn)(void* opaque, const char* fmt, ...),
                  void* opaque);
 
-extern void oof_update_available_hwports(int hwport, int add);
-
 
 /**********************************************************************
  * Callbacks.  These are invoked by the oof module.
@@ -114,12 +120,6 @@ extern struct oof_socket*
 oof_cb_sw_filter_lookup(struct tcp_helper_resource_s*,
                         unsigned laddr, int lport,
                         unsigned raddr, int rport, int protocol);
-
-extern void
-oof_cb_port_ref_release(struct oof_port_ref*);
-
-
-struct oo_hw_filter;
 
 extern void
 oof_dl_filter_set(struct oo_hw_filter* filter, int stack_id, int protocol,

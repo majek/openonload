@@ -151,11 +151,12 @@ void ci_tcp_listenq_drop_oldest(ci_netif* ni, ci_tcp_socket_listen* tls)
 ci_inline ci_tcp_state*
 get_ts_from_cache (ci_netif *netif, 
                    ci_tcp_state_synrecv* tsr, 
-                   ci_tcp_socket_listen* tls) {
-  int rc;
+                   ci_tcp_socket_listen* tls)
+{
   ci_tcp_state *ts = NULL;
+#if CI_CFG_FD_CACHING
   if (!ci_ni_dllist_is_empty (netif, &tls->epcache_cache)) {
-    int switch_filter = 0;
+    int rc, switch_filter = 0;
     unsigned protocol, laddr, lport, raddr, rport;
     ci_ni_dllist_link *link = ci_ni_dllist_pop (netif, &tls->epcache_cache);
 
@@ -223,7 +224,7 @@ get_ts_from_cache (ci_netif *netif,
       }
     }
   }
-
+#endif
   return ts;
 }
 
@@ -334,6 +335,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     if( OO_SP_NOT_NULL(tsr->local_peer) ) {
       ci_tcp_state *ts = ID_TO_TCP(netif, tsr->local_peer);
       ts->tcpflags |= CI_TCPT_FLAG_LOOP_DEFERRED;
+      LOG_TC(log(LNT_FMT "loopback connection deferred", LNT_PRI_ARGS(netif, ts)));
     }
     return 0;
   }
@@ -348,7 +350,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     if( !ts ) {
         /* None on cache; try allocating a new ts */
         ts = ci_tcp_get_state_buf(netif);
-        if( ts == NULL && netif->state->epcache_n > 0 )  {
+#if CI_CFG_FD_CACHING
+        if( ts == NULL && netif->state->epcache_n > 0 ) {
           /* We've reaped.  Did this result in any being cached */
           ts = get_ts_from_cache(netif, tsr, tls);
           if (ts == NULL ) {
@@ -356,6 +359,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
             ts = ci_tcp_get_state_buf(netif);
           }
         }
+#endif
         if( ts == NULL ) {
           LOG_TV(ci_log("%s: [%d] out of socket buffers",
                         __FUNCTION__, NI_ID(netif)));
@@ -363,11 +367,11 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
           return -ENOMEM;
 	}
 
-        ci_assert((ts->cached_on_fd != -1) ||
+        ci_assert(ci_tcp_is_cached(ts) ||
                   (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
     }
 
-    if (ts->cached_on_fd == -1) {
+    if( ! ci_tcp_is_cached(ts) ) {
       /* copy and initialise state */
       ts->s.pkt.ip.ip_saddr_be32 = tsr->l_addr;
       TS_TCP(ts)->tcp_source_be16 = sock_lport_be16(&tls->s);

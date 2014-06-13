@@ -176,6 +176,17 @@ static int citp_closedfd_send(citp_fdinfo* fdinfo,
   return -1;
 }
 
+#if CI_CFG_SENDMMSG
+static int citp_closedfd_sendmmsg(citp_fdinfo* fdinfo,
+                                  struct mmsghdr* msg, 
+                                  unsigned vlen, int flags)
+{
+  Log_V(log(LPF "sendmmsg(%d, msg, %d, 0x%x)", fdinfo->fd, vlen, 
+            (unsigned) flags));
+  errno = EBADF;
+  return -1;
+}
+#endif
 
 static int citp_closedfd_fcntl(citp_fdinfo *fdinfo, int cmd, long arg)
 {
@@ -273,6 +284,9 @@ citp_protocol_impl citp_closed_protocol_impl = {
     .recvmmsg    = citp_closedfd_recvmmsg,
 #endif
     .send        = citp_closedfd_send,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_closedfd_sendmmsg,
+#endif
     .ioctl       = citp_closedfd_ioctl,
     .fcntl       = citp_closedfd_fcntl,
 #if CI_CFG_USERSPACE_SELECT

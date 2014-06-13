@@ -53,11 +53,6 @@ static struct oo_stackname_state stackname_config_across_fork;
 /* Storage for library context across fork() */
 static citp_lib_context_t citp_lib_context_across_fork;
 
-/* Lock to protect citp_lib_context_across_fork across fork(). 
- * Signal handlers should not call fork(), so this lock may not be 
- * protected by citp_enter_lib()/citp_exit_lib() */
-static citp_ul_lock_t citp_fork_lock;
-
 /* I do not understand why, but __register_atfork seems to work better than
  * __libc_atfork */
 extern int __register_atfork(void (*prepare)(void), void (*parent)(void), 
@@ -66,7 +61,6 @@ extern int __register_atfork(void (*prepare)(void), void (*parent)(void),
 int ci_setup_fork(void)
 {
     Log_CALL(ci_log("%s()", __FUNCTION__));
-    CITP_LOCK_CTOR(&citp_fork_lock);
     return __register_atfork(citp_netif_pre_fork_hook,
                              citp_netif_parent_fork_hook, 
                              citp_netif_child_fork_hook, NULL);
@@ -87,13 +81,15 @@ void citp_netif_pre_fork_hook(void)
 
   Log_CALL(ci_log("%s()", __FUNCTION__));
 
-  CITP_LOCK(&citp_fork_lock);
+  /* Lock to protect citp_lib_context_across_fork across fork(). */
+  pthread_mutex_lock(&citp_dup_lock);
 
   if( citp.init_level < CITP_INIT_FDTABLE )
     return;
 
   citp_enter_lib(&citp_lib_context_across_fork);
   CITP_LOCK(&citp_ul_lock);
+  pthread_mutex_lock(&citp_pkt_map_lock);
 
   if( citp.init_level < CITP_INIT_NETIF )
     return;
@@ -123,6 +119,7 @@ void citp_netif_parent_fork_hook(void)
   }
 
   Log_CALL(ci_log("%s()", __FUNCTION__));
+  pthread_mutex_unlock(&citp_pkt_map_lock);
 
   if( citp.init_level < CITP_INIT_FDTABLE)
     goto unlock_fork;
@@ -136,7 +133,7 @@ unlock:
   CITP_UNLOCK(&citp_ul_lock);
   citp_exit_lib(&citp_lib_context_across_fork, 0);
 unlock_fork:
-  CITP_UNLOCK(&citp_fork_lock);
+  pthread_mutex_unlock(&citp_dup_lock);
 }
 
 /* Handles user-level netif internals post fork() in the child */
@@ -165,13 +162,14 @@ void citp_netif_child_fork_hook(void)
    * as condition variables."
    * So, we just follow this book recommendation.
    */
-  CITP_LOCK_CTOR(&citp_fork_lock);
+  pthread_mutex_init(&citp_dup_lock, NULL);
+  CITP_LOCK_CTOR(&citp_ul_lock);
+  pthread_mutex_init(&citp_pkt_map_lock, NULL);
 
   if( citp.init_level < CITP_INIT_FDTABLE)
     return;
 
-  CITP_LOCK(&citp_fork_lock);
-  CITP_LOCK_CTOR(&citp_ul_lock);
+  pthread_mutex_lock(&citp_dup_lock);
   CITP_LOCK(&citp_ul_lock);
 
   if( citp.init_level < CITP_INIT_NETIF)
@@ -198,11 +196,11 @@ setup_fdtable:
   ** Ditch fds marked as cached endpoints. We only want them to remain
   ** cached in the parent table.
   */
-  citp_fdtable_close_cached(1);
+  citp_fdtable_close_cached();
 
   CITP_UNLOCK(&citp_ul_lock);
   citp_exit_lib(&citp_lib_context_across_fork, 0);
-  CITP_UNLOCK(&citp_fork_lock);
+  pthread_mutex_unlock(&citp_dup_lock);
 }
 
 /* Handles user-level netif internals pre bproc_move() */

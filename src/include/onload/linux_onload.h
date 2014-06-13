@@ -94,6 +94,18 @@ asmlinkage int efab_linux_sys_sigaction32(int signum,
                                           struct sigaction32 *oact);
 #endif
 
+#if defined(CONFIG_HUGETLB_PAGE) && CI_CFG_PKTS_AS_HUGE_PAGES && \
+    defined(__x86_64__)
+#define OO_DO_HUGE_PAGES
+#include <linux/mm.h>
+#include <linux/hugetlb.h>
+struct shmid_ds;
+asmlinkage int efab_linux_sys_shmget(key_t key, size_t size, int shmflg);
+asmlinkage long efab_linux_sys_shmat(int shmid, char __user *addr, int shmflg);
+asmlinkage int efab_linux_sys_shmdt(char __user *addr);
+asmlinkage int efab_linux_sys_shmctl(int shmid, int cmd,
+                                     struct shmid_ds __user *buf);
+#endif
 
 
 

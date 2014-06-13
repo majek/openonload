@@ -36,6 +36,18 @@
 #define PM_CFG_LOG_FILE "/var/log/etherfabric_users"
 #endif
 
+
+#ifndef SOCK_TYPE_MASK
+# define SOCK_TYPE_MASK  0xf
+#endif
+#ifndef SOCK_NONBLOCK
+# define SOCK_NONBLOCK   0
+#endif
+#ifndef SOCK_CLOEXEC
+# define SOCK_CLOEXEC    0
+#endif
+
+
 static CI_DLLIST_DECLARE(stream_protocols);
 static CI_DLLIST_DECLARE(dgram_protocols);
 
@@ -124,14 +136,13 @@ int citp_protocol_manager_create_socket(int domain, int type, int protocol)
   if( domain != PF_INET )  return CITP_NOT_HANDLED;
 #endif
 
-#ifdef SOCK_TYPE_MASK
-  /* If flags bits have anything but SOCK_NONBLOCK or SOCK_CLOEXEC
-   * then don't try to handle it as we haven't implemented support
+  /* If flags bits have anything but SOCK_NONBLOCK or SOCK_CLOEXEC (when
+   * defined) then don't try to handle it as we haven't implemented
+   * support.
    */
   if( type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC | SOCK_TYPE_MASK) )
     return CITP_NOT_HANDLED;
   type_no_flags = type & SOCK_TYPE_MASK;
-#endif
 
   if( type_no_flags == SOCK_STREAM && 
       (protocol == 0 || protocol == IPPROTO_TCP) )

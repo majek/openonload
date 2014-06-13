@@ -151,7 +151,7 @@ struct cicp_bufpool_s
 
 
 
-#define CICPPL_PKTBUF_SIZE (PKT_START_OFF_MIN() + CI_MAX_ETH_FRAME_LEN)
+#define CICPPL_PKTBUF_SIZE (PKT_START_OFF() + CI_MAX_ETH_FRAME_LEN)
 
 
 extern ci_ip_pkt_fmt *

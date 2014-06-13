@@ -41,11 +41,13 @@ static void ci_tcp_timer_dump_consts(ci_netif* netif)
       "  rto_initial: %uticks (%ums)\n" 
       "  rto_min: %uticks (%ums)\n" 
       "  rto_max: %uticks (%ums)\n"
-      "  delack: %uticks (%ums)",
+      "  delack: %uticks (%ums)\n"
+      "  idle: %uticks (%ums)",
       NI_CONF(netif).tconst_rto_initial, NI_OPTS(netif).rto_initial,
       NI_CONF(netif).tconst_rto_min, NI_OPTS(netif).rto_min,
       NI_CONF(netif).tconst_rto_max, NI_OPTS(netif).rto_max,
-      NI_CONF(netif).tconst_delack, CI_TCP_TCONST_DELACK);
+      NI_CONF(netif).tconst_delack, CI_TCP_TCONST_DELACK,
+      NI_CONF(netif).tconst_idle, CI_TCP_TCONST_IDLE);
   log("  keepalive_time: %uticks (%ums)\n" 
       "  keepalive_intvl: %uticks (%ums)\n" 
       "  keepalive_probes: %u\n"
@@ -92,6 +94,9 @@ void ci_tcp_timer_init(ci_netif* netif)
 
   NI_CONF(netif).tconst_delack = 
     ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_DELACK);
+
+  NI_CONF(netif).tconst_idle = 
+    ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_IDLE);
 
   NI_CONF(netif).tconst_keepalive_time = 
     ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).keepalive_time);
@@ -217,14 +222,16 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 /* Called as action on a keep alive timeout (KALIVE) */
 void ci_tcp_timeout_kalive(ci_netif* netif, ci_tcp_state* ts)
 {
+  ci_iptime_t t_last_recv = 
+    CI_MAX(ts->t_last_recv_payload, ts->t_last_recv_ack);
+
   ci_assert(netif);
   ci_assert(ts);
   ci_assert(ts->s.b.state != CI_TCP_CLOSED);
 
-
   /* Check to see if this has expired prematurely */
   if (ts->ka_probes == 0 && 
-      ci_tcp_time_now(netif) - ts->t_last_recv < ci_tcp_kalive_idle_get(ts)) {
+      ci_tcp_time_now(netif) - t_last_recv < ci_tcp_kalive_idle_get(ts)) {
     /* NB. The above old code alludes to a special case on Linux where
      * instead of waiting for t_idle it waits for t_intvl if t_idle <
      * t_intvl.  It's not clear if this is just the case when we've
@@ -233,16 +240,16 @@ void ci_tcp_timeout_kalive(ci_netif* netif, ci_tcp_state* ts)
 
     ci_tcp_kalive_restart(netif, ts, 
                           ci_tcp_kalive_idle_get(ts) - 
-                          (ci_tcp_time_now(netif) - ts->t_last_recv));
+                          (ci_tcp_time_now(netif) - t_last_recv));
     return;
   }
 
   if (ts->ka_probes != 0 && 
-      ci_tcp_time_now(netif) - ts->t_last_recv < 
+      ci_tcp_time_now(netif) - t_last_recv < 
       ci_tcp_kalive_intvl_get(netif, ts)) {
     ci_tcp_kalive_restart(netif, ts, 
                           ci_tcp_kalive_intvl_get(netif, ts) - 
-                          (ci_tcp_time_now(netif) - ts->t_last_recv));
+                          (ci_tcp_time_now(netif) - t_last_recv));
     return;
   }
 

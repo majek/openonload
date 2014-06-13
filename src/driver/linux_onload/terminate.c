@@ -386,7 +386,6 @@ efab_linux_trampoline_exit_group(int status)
 int
 efab_signal_die(ci_private_t *priv_unused, void *arg)
 {
-#ifdef OO_CAN_HANDLE_TERMINATION
   ci_int32 sig = *(ci_int32 *)arg;
   tcp_helper_resource_t *stacks[TERMINATE_STACKS_NUM];
   ci_uint32 stacks_num = 0;
@@ -422,7 +421,6 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
 
   send_sig(sig, current, 0);
   /*UNREACHABLE*/
-#endif
   return 0;
 }
 
@@ -482,4 +480,13 @@ void efab_linux_termination_ctor(void)
     }
 
 }
-#endif
+
+#else  /* OO_CAN_HANDLE_TERMINATION */
+
+int
+efab_signal_die(ci_private_t *priv_unused, void *arg)
+{
+  return 0;
+}
+
+#endif /* OO_CAN_HANDLE_TERMINATION */

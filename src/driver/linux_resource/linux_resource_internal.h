@@ -57,6 +57,7 @@
 #include <ci/efrm/debug.h>
 #include <ci/efrm/driver_private.h>
 #include <ci/driver/efab/hardware.h>
+#include <driver/linux_net/driverlink_api.h>
 
 extern int  efrm_driverlink_register(void);
 extern void efrm_driverlink_unregister(void);
@@ -69,11 +70,10 @@ efrm_nic_add(struct pci_dev *dev, unsigned int opts, const uint8_t *mac_addr,
              unsigned timer_quantum_ns);
 extern void efrm_nic_del(struct linux_efhw_nic *);
 
-
 extern int efrm_install_proc_entries(void);
 extern void efrm_uninstall_proc_entries(void);
 
-#ifdef CONFIG_PCI_IOV
+#ifdef CONFIG_SFC_RESOURCE_VF
 extern void __devinit efrm_vf_driver_init(void);
 extern void __devinit efrm_vf_driver_fini(void);
 #endif
