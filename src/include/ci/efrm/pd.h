@@ -52,7 +52,7 @@ struct efrm_pd;
 struct efrm_vf;
 struct efrm_resource;
 struct efrm_client;
-struct efrm_buffer_table_allocation;
+struct efrm_bt_collection;
 struct page;
 struct efrm_pd_owner_ids;
 
@@ -147,12 +147,12 @@ extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages, int gfp_order,
 			   void *dma_addrs, int dma_addrs_stride,
 			   uint64_t *user_addrs, int user_addrs_stride,
 			   void (*user_addr_put)(uint64_t, uint64_t *),
-			   struct efrm_buffer_table_allocation *);
+			   struct efrm_bt_collection *);
 
 /* Unmap pages previously mapped by efrm_pd_dma_map(). */
 extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int gfp_order,
 			      void *dma_addrs, int dma_addrs_stride,
-			      struct efrm_buffer_table_allocation *);
+			      struct efrm_bt_collection *);
 
 /* Re-map pages already mapped by efrm_pd_dma_map() after NIC reset.
  * In: pd, n_pages, gfp_order, pages, dma_addrs.
@@ -170,5 +170,5 @@ extern int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 				dma_addr_t *pci_addrs, int pci_addrs_stride,
 				uint64_t *user_addrs, int user_addrs_stride,
 				void (*user_addr_put)(uint64_t, uint64_t *),
-                                struct efrm_buffer_table_allocation *bt_alloc);
+                                struct efrm_bt_collection *bt_alloc);
 #endif /* __CI_EFRM_PD_H__ */

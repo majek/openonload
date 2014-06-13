@@ -96,7 +96,6 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 	ev_out->rx.q_id = q_label;
 	ev_out->rx.rq_id = vi->vi_rxq.ids[desc_i];
 	vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;  /* ?? killme */
-	++vi->ep_state->rxq.removed;
 
 	rx_bytes = QWORD_GET_U(ESF_DZ_RX_BYTES, *ev);
 
@@ -125,9 +124,14 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 	 * should have been set but wasn't - i.e. it's a frame
 	 * trunc 
 	 */
-	if(likely( ! ((ev->u32[0] & discard_mask) || (rx_bytes == 0)) ))
+	if(likely( ! ((ev->u32[0] & discard_mask) || (rx_bytes == 0)) )) {
+		++vi->ep_state->rxq.removed;
 		return;
+	}
 	if( rx_bytes == 0 ) {
+		/* If this is an abort then we didn't really consume a
+		 * descriptor, so don't increment removed count.
+		 */
 		ev_out->rx_discard.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
 		return;
 	}
@@ -143,6 +147,8 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 		/* TCPUDP_CKSUM or IPCKSUM error
 		 */
 		ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CSUM_BAD;
+
+	++vi->ep_state->rxq.removed;
 }
 
 
@@ -170,29 +176,100 @@ ef_vi_inline void ef10_rx_event(ef_vi* evq_vi, const ef_vi_event* ev,
 }
 
 
-ef_vi_inline void ef10_tx_event(const ef_vi_event* ev,
-				ef_event** evs, int* evs_len)
+static uint32_t timestamp_extract(ef_vi_event ev)
 {
-	if(likely(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) == 0)) {
-		/* Transmit completion event. */
+	uint32_t lo = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, ev);
+	uint32_t hi = QWORD_GET_U(ESF_DZ_TX_SOFT2, ev);
+	return (hi << 16) | lo;
+}
+
+
+static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
+				     ef_event** evs, int* evs_len)
+{
+	EF_VI_ASSERT(evq->vi_flags & EF_VI_TX_TIMESTAMPS);
+	/* When TX timestamping is enabled, we get three events for
+	 * every transmit.  A TX completion and two timestamp events.
+	 * We ignore the completion and store the first timestamp in
+	 * the per TXQ state.  On the second timestamp we retrieve the
+	 * first one and construct a EF_EVENT_TYPE_TX_WITH_TIMESTAMP
+	 * event to send to the user. */
+	if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) == 
+	   TX_TIMESTAMP_EVENT_TX_EV_COMPLETION) {
+		/* TX completion event.  Ignored */
+	}
+	else if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
+		TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO) {
+		ef_vi_txq_state* qs = &evq->ep_state->txq;
+		EF_VI_BUG_ON(qs->ts_nsec != EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
+		qs->ts_nsec =
+			(((((uint64_t)timestamp_extract(*ev)) *
+			   1000000000UL) >> 29) << 2) |
+			evq->ep_state->evq.sync_flags;
+	}
+	else if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
+		TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI) {
+		ef_vi_txq_state* qs = &evq->ep_state->txq;
+		ef_vi_txq* q = &evq->vi_txq;
 		ef_event* ev_out = (*evs)++;
 		--(*evs_len);
-		ev_out->tx.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
-		ev_out->tx.desc_id = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, *ev) + 1;
-		ev_out->tx.type = EF_EVENT_TYPE_TX;
+		ev_out->tx_timestamp.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
+		ev_out->tx.type = EF_EVENT_TYPE_TX_WITH_TIMESTAMP;
+		EF_VI_BUG_ON(qs->ts_nsec == EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
+		ev_out->tx_timestamp.ts_nsec = qs->ts_nsec;
+		EF_VI_DEBUG(qs->ts_nsec = EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
+		ev_out->tx_timestamp.ts_sec = timestamp_extract(*ev);
+		/* One TX pkt could have spanned multiple
+		 * descriptors. Iterate to find the one that actually
+		 * is finished. */
+		while( q->ids[qs->removed & q->mask] == EF_REQUEST_ID_MASK )
+			++qs->removed;
+		ev_out->tx_timestamp.rq_id = q->ids[qs->removed & q->mask];
+		q->ids[qs->removed & q->mask] = EF_REQUEST_ID_MASK;
+		++qs->removed;
 	}
 	else {
-		/* Something else (probably TX timestamp event). */
-		ef_log("%s: ERROR: soft1=%x ev="CI_QWORD_FMT, __FUNCTION__,
-		       (unsigned) QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
+		ef_log("%s:%d: ERROR: soft1=%x ev="CI_QWORD_FMT, __FUNCTION__,
+		       __LINE__, (unsigned) QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
 		       CI_QWORD_VAL(*ev));
 	}
 }
 
 
-int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
-				struct timespec* ts_out)
+ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
+				ef_event** evs, int* evs_len)
 {
+	EF_VI_ASSERT(EF_VI_IS_EVENT(ev));
+	if( ! (evq->vi_flags & EF_VI_TX_TIMESTAMPS) ) {
+		if(likely(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
+			  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION)) {
+			/* Transmit completion event. */
+			ef_event* ev_out = (*evs)++;
+			--(*evs_len);
+			ev_out->tx.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
+			ev_out->tx.desc_id = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX,
+							 *ev) + 1;
+			ev_out->tx.type = EF_EVENT_TYPE_TX;
+		}
+		else {
+			ef_log("%s:%d: ERROR: soft1=%x ev="CI_QWORD_FMT,
+			       __FUNCTION__, __LINE__, (unsigned)
+			       QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
+			       CI_QWORD_VAL(*ev));
+		}
+	}
+	else {
+		ef10_tx_event_ts_enabled(evq, ev, evs, evs_len);
+	}
+}
+
+
+int
+ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
+					    struct timespec* ts_out,
+				            unsigned* flags_out)
+{
+#define FLAG_NO_TIMESTAMP        0x80000000
 #define ONE_SEC                  0x8000000
 #define MAX_RX_PKT_DELAY         0xCCCCCC  /* ONE_SECOND / 10 */
 #define MAX_TIME_SYNC_DELAY      0x1999999 /* ONE_SECOND * 2 / 10 */
@@ -224,13 +301,15 @@ int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 	uint32_t* data = (uint32_t*) ((uint8_t*)pkt +
                                       ES_DZ_RX_PREFIX_TSTAMP_OFST);
 	/* pkt_minor contains 27 bits of ns */
+	uint32_t pkt_minor_raw = CI_BSWAPC_LE32(*data);
 	uint32_t pkt_minor =
-		(CI_BSWAPC_LE32(*data) + vi->rx_ts_correction) & 0x7FFFFFF;
+		( pkt_minor_raw + vi->rx_ts_correction) & 0x7FFFFFF;
 	uint32_t diff;
 
 	EF_VI_ASSERT(vi->vi_flags & EF_VI_RX_TIMESTAMPS);
 
-	if( evqs->sync_timestamp_synchronised ) {
+	if( evqs->sync_timestamp_synchronised &&
+	    (pkt_minor_raw & FLAG_NO_TIMESTAMP) == 0 ) {
 		ts_out->tv_nsec = ((uint64_t) pkt_minor * 1000000000) >> 27;
 		diff = (pkt_minor - evqs->sync_timestamp_minor) & (ONE_SEC - 1);
 		if (diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) +
@@ -243,6 +322,7 @@ int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 			ts_out->tv_sec = evqs->sync_timestamp_major;
 			ts_out->tv_sec +=
 				diff + evqs->sync_timestamp_minor >= ONE_SEC;
+			*flags_out = evqs->sync_flags;
 			return 0;
 		} else if (diff > ONE_SEC - MAX_RX_PKT_DELAY) {
 			/* pkt_minor taken before sync event in the
@@ -253,6 +333,7 @@ int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 			ts_out->tv_sec = evqs->sync_timestamp_major;
 			ts_out->tv_sec -=
 				diff + evqs->sync_timestamp_minor <= ONE_SEC;
+			*flags_out = evqs->sync_flags;
 			return 0;
 		} else {
 			/* diff between pkt_minor and sync event in
@@ -262,16 +343,31 @@ int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 			evqs->sync_timestamp_synchronised = 0;
 		}
 	}
-	return -1;
+        if( (pkt_minor_raw & FLAG_NO_TIMESTAMP) != 0 )
+          return -ENODATA;
+	return (evqs->sync_timestamp_major == ~0u) ? -ENOMSG : -EL2NSYNC;
 }
 
 
-static void ef10_major_tick(ef_vi* vi, unsigned major, unsigned minor)
+extern int
+ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
+			    struct timespec* ts_out)
+{
+	unsigned flags_out;
+	int rc = ef_vi_receive_get_timestamp_with_sync_flags
+		(vi, pkt, ts_out, &flags_out);
+	return rc < 0 ? -1 : 0;
+}
+
+
+static void ef10_major_tick(ef_vi* vi, unsigned major, unsigned minor,
+			    unsigned sync_flags)
 {
 	ef_eventq_state* evqs = &(vi->ep_state->evq);
 	evqs->sync_timestamp_major = major;
-	evqs->sync_timestamp_minor = minor << 19;
+	evqs->sync_timestamp_minor = minor;
 	evqs->sync_timestamp_synchronised = 1;
+	evqs->sync_flags = sync_flags;
 }
 
 
@@ -279,11 +375,22 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev)
 {
 	int code = QWORD_GET_U(MCDI_EVENT_CODE, *ev);
 	uint32_t major, minor;
+	/* Sync status reporting not supported, let's assume clock is
+	 * always in sync */
+	uint32_t sync_flags = EF_VI_SYNC_FLAG_CLOCK_SET |
+			      EF_VI_SYNC_FLAG_CLOCK_IN_SYNC;
+
 	switch( code ) {
 	case MCDI_EVENT_CODE_PTP_TIME:
 		major = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MAJOR, *ev);
-		minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_19, *ev);
-		ef10_major_tick(evq, major, minor);
+		minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 21;
+		if( evq->vi_out_flags & EF_VI_OUT_CLOCK_SYNC_STATUS )
+		    sync_flags =
+			(QWORD_GET_U(MCDI_EVENT_PTP_TIME_NIC_CLOCK_VALID, *ev) ?
+				EF_VI_SYNC_FLAG_CLOCK_SET: 0) |
+			(QWORD_GET_U(MCDI_EVENT_PTP_TIME_HOST_NIC_IN_SYNC, *ev) ?
+				EF_VI_SYNC_FLAG_CLOCK_IN_SYNC: 0);
+		ef10_major_tick(evq, major, minor, sync_flags);
 		break;
 	default:
 		ef_log("%s: ERROR: Unhandled mcdi event code=%u", __FUNCTION__,
@@ -328,7 +435,7 @@ not_empty:
 			break;
 
 		case ESE_DZ_EV_CODE_TX_EV:
-			ef10_tx_event(&ev, &evs, &evs_len);
+			ef10_tx_event(evq, &ev, &evs, &evs_len);
 			break;
 
 		case ESE_DZ_EV_CODE_MCDI_EV:
@@ -355,7 +462,7 @@ not_empty:
 		}
 
 		/* Consume event.  Must do after event checking above,
-		 * in case we don't want to consume it. */
+   		 * in case we don't want to consume it. */
 #ifdef __powerpc__
 		CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, -16));
 #else
@@ -388,6 +495,7 @@ empty:
 			goto not_empty;
 		}
 	}
+
 	return 0;
 
 overflow:

@@ -353,15 +353,14 @@ static struct oo_msg_template* ci_tcp_tmpl_pkt_to_omt(ci_ip_pkt_fmt* pkt)
 
 static void __ci_tcp_tmpl_handle_nic_reset(ci_netif* ni, ci_tcp_state* ts)
 {
-  int rc;
   oo_pkt_p* pp;
   for( pp = &ts->tmpl_head; OO_PP_NOT_NULL(*pp); ) {
     ci_ip_pkt_fmt* tmpl = PKT_CHK(ni, *pp);
     if( tmpl->pio_addr >= 0 ) {
       if( ni->state->nic[tmpl->intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN ) {
-        rc = ef_pio_memcpy(&ni->nic_hw[tmpl->intf_i].vi, PKT_START(tmpl),
-                           tmpl->pio_addr, tmpl->buf_len);
-        ci_assert_equal(rc, 0);
+        CI_DEBUG_TRY(ef_pio_memcpy(&ni->nic_hw[tmpl->intf_i].vi,
+                                   PKT_START(tmpl),
+                                   tmpl->pio_addr, tmpl->buf_len));
       }
       else {
         ci_pio_buddy_free(ni, &ni->state->nic[tmpl->intf_i].pio_buddy,
@@ -493,6 +492,9 @@ static int __ci_tcp_tmpl_normal_send(ci_netif* ni, ci_tcp_state* ts,
   CI_DEBUG(msg.msg_control = CI_NOT_NULL);
   msg.msg_controllen = 0;
   /* msg_flags is output only */
+
+  if( ts->s.b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY) )
+    flags |= MSG_DONTWAIT;
 
   ++ts->stats.tx_tmpl_send_slow;
 
@@ -1701,6 +1703,7 @@ unroll_msg_warm(ci_netif* ni, ci_tcp_state* ts, struct tcp_send_info* sinf,
 #endif
   tcp_snd_nxt(ts) = sinf->old_tcp_snd_nxt;
   --ts->stats.tx_stop_app;
+  CI_TCP_STATS_DEC_OUT_SEGS(ni);
   if( ! is_zc_send ) {
     pkt = PKT_CHK(ni, ts->send.tail);
     ci_netif_pkt_release_1ref(ni, pkt);
@@ -1799,6 +1802,9 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
      * All the cases are nicely handled in ci_tcp_tx_advance_nagle(), so
      * just call it.
      */
+#ifdef MSG_SENDPAGE_NOTLAST
+    if( ~flags & MSG_SENDPAGE_NOTLAST )
+#endif
     ci_tcp_tx_advance_nagle(ni, ts);
 
     if( sinf.stack_locked ) ci_netif_unlock(ni);
@@ -1882,15 +1888,24 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
         else
           TX_PKT_TCP(sinf.fill_list)->tcp_flags = 
             CI_TCP_FLAG_PSH | CI_TCP_FLAG_ACK;
+#ifdef MSG_SENDPAGE_NOTLAST
+        if( ~flags & MSG_SENDPAGE_NOTLAST )
+#endif
+        {
         ci_tcp_tx_advance_nagle(ni, ts);
         if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM ))
           unroll_msg_warm(ni, ts, &sinf, 0);
+        }
         /* Assert that there's no need to free unused packets */
         ci_assert_equal(sinf.pf.alloc_pkt, NULL);
         if( sinf.stack_locked ) ci_netif_unlock(ni);
         return sinf.total_sent;
       }
 
+#ifdef MSG_SENDPAGE_NOTLAST
+      if( ~flags & MSG_SENDPAGE_NOTLAST )
+#endif
+      {
       /* Stuff left to do -- push out what we've got first. */
       ci_assert(! (flags & ONLOAD_MSG_WARM));
       if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) )
@@ -1903,6 +1918,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
       }
       if(CI_LIKELY( ! ci_ip_queue_is_empty(sendq) ))
         ci_tcp_tx_advance(ts, ni);
+      }
     }
     else {
       if( ts->s.tx_errno ) {
@@ -2088,6 +2104,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
   ci_assert(msg != NULL);
   ci_assert(ts);
   ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+  ci_assert(msg->msg.msghdr.msg_iovlen);
 
   if( !(ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) ) {
     msg->rc = ts->s.tx_errno ? -ts->s.tx_errno : -EPIPE;

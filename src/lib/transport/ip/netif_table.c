@@ -128,16 +128,6 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
 }
 
 
-ci_inline int ci_netif_intf_i_to_base_ifindex(ci_netif* ni, int intf_i)
-{
-  ci_hwport_id_t hwport;
-  ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
-  hwport = ni->state->intf_i_to_hwport[intf_i];
-  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_REGISTER_INTERFACES);
-  return cicp_fwd_hwport_to_base_ifindex(&CICP_MIBS(CICP_HANDLE(ni))->user,
-                                         hwport);
-}
-
 
 ci_inline int ci_sock_intf_check(ci_netif* ni, ci_sock_cmn* s,
                                  int intf_i, int vlan)

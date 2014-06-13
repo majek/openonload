@@ -5,6 +5,7 @@ MMAKE_TYPE	:= LIB
 LIB_SRCS	:= \
 		testapp.c \
 		net.c \
+		bytepattern.c
 
 ifneq ($(ONLOAD_ONLY),1)
 LIB_SRCS	+= \
@@ -16,7 +17,6 @@ LIB_SRCS	+= \
 		iarray_variance.c \
 		qsort_compare_int.c \
 		testpattern.c \
-		bytepattern.c \
 		select.c \
 		errno.c \
 		read_exact.c \

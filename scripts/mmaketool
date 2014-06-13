@@ -150,7 +150,8 @@ kernelver() {
 
 userarch() {
   case $(uname -s) in
-    Linux|FreeBSD)	uname -m;;
+    Linux)		gcc -dumpmachine | sed s/-.*$// | sed s/powerpc/ppc/;;
+    FreeBSD)		uname -m;;
     Darwin)		uname -m;;
     CYGWIN_NT*) 	uname -m;;
     SunOS)		processor;;
@@ -167,7 +168,7 @@ userbuild_linux32() {
 }
 
 userbuild_linux() {
-  case "$(processor)" in
+  case "$(userarch)" in
     x86_64) echo gnu_x86_64 ;;
     ia64)   echo gnu_ia64 ;;
     ppc64)  echo gnu_ppc64 ;;
@@ -357,6 +358,13 @@ driverbuild() {
     add_opts "$(driverbuild_darwin)"
   else
     err "mmaketool:driverbuild: unknown platform"; exit 1
+  fi
+}
+
+distrib_is_ubuntu() {
+  lsb_release="/usr/bin/lsb_release"
+  if [ -f $lsb_release ] && [ "`$lsb_release -i -s`" = "Ubuntu" ] ; then
+    echo `$lsb_release -r -s`
   fi
 }
 
@@ -558,6 +566,8 @@ case "$1" in
 --userarch)	userarch
 		;;
 --distribution)	sfc_disttag
+		;;
+--distrib_is_ubuntu)	distrib_is_ubuntu
 		;;
 --libc)         libc_version
 		;;

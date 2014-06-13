@@ -29,6 +29,7 @@
 #ifndef __CI_DRIVER_EFAB_TCP_DRIVER_H__
 #define __CI_DRIVER_EFAB_TCP_DRIVER_H__
 
+#include <ci/driver/internal.h>
 #include <onload/cplane_types.h>
 #include <onload/ipid.h>
 #include <onload/id_pool.h>
@@ -78,10 +79,10 @@ typedef struct efab_tcp_driver_s {
   /*! Management of RX demux -- s/w and h/w filters. */
   struct oof_manager*           filter_manager;
   cicpos_ipif_callback_handle_t filter_manager_cp_handle;
-  ci_workitem_t                 filter_work_item;
+  struct work_struct            filter_work_item;
 
   /*! work queue */
-  ci_workqueue_t          workqueue;
+  struct workqueue_struct      *workqueue;
 
   /*! Number of pages pinned by all sendpage() users */
   ci_atomic_t sendpage_pinpages_n;
@@ -92,7 +93,7 @@ typedef struct efab_tcp_driver_s {
   struct efx_dlfilt_cb_s* dlfilter;
 
   struct oo_file_ref*     file_refs_to_drop;
-  ci_workitem_t           file_refs_work_item;
+  struct work_struct      file_refs_work_item;
 
   /* Dynamic stack list update: flag and wait queue.  Used by tcpdump */
   ci_uint32         stack_list_seq;

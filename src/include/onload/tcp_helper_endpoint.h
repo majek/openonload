@@ -46,6 +46,18 @@ extern void efab_tcp_driver_dtor(void);
 extern int tcp_helper_rx_vi_id(tcp_helper_resource_t*, int hwport);
 
 
+/* Return the hw stack id of the VI associated with the named hwport,
+ * or -1 if we don't have a VI for that hwport.
+ */
+extern int tcp_helper_vi_hw_stack_id(tcp_helper_resource_t* trs, int hwport);
+
+/* Return whether receiving of looped back traffic is enabled on
+ * the named hwport, or -1 if we don't have a VI for that hwport.
+ */
+extern int tcp_helper_vi_hw_rx_loopback_supported(tcp_helper_resource_t* trs,
+                                                  int hwport);
+
+
 /*--------------------------------------------------------------------
 *
 *
@@ -106,6 +118,10 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
 extern int
 tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, 
                                   int supress_hw_ops);
+
+extern int
+tcp_helper_endpoint_move_filters(tcp_helper_endpoint_t* ep_from,
+                                 tcp_helper_endpoint_t* ep_to);
 
 /*--------------------------------------------------------------------
  *!

@@ -124,6 +124,11 @@ struct efrm_vi {
 	/*! EFHW_VI_* flags or EFRM_VI_RELEASED */
 	unsigned flags;
 #define EFRM_VI_RELEASED 0x10000000
+#define EFRM_VI_OWNS_STACK_ID 0x20000000
+#define EFRM_VI_STOPPING 0x40000000
+
+	/*! EFHW_VI_ effective flags */
+	unsigned out_flags;
 
 	int      rx_flush_outstanding;
 	uint64_t flush_time;
@@ -146,6 +151,10 @@ struct efrm_vi {
 	 * this efrm_vi.
 	 */
 	volatile char __iomem *io_page;
+
+	/* hw stack_id required for self-traffic suppression during
+	 * hw multicast loopback */
+	unsigned hw_stack_id;
 };
 
 

@@ -101,7 +101,6 @@ op_load() {
 
   try cd "$dd"
   try loadmod sfc
-  try loadmod sfc_tune
   try loadmod sfc_resource
   try loadmod sfc_char
   try loadmod onload
@@ -126,7 +125,6 @@ op_unload() {
   tryunload onload
   tryunload sfc_char
   tryunload sfc_resource
-  tryunload sfc_tune
   tryunload sfc_mtd
   tryunload sfc_control
   tryunload sfc

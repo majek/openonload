@@ -93,7 +93,6 @@ static const struct efx_sw_stat_desc efx_sw_stat_desc[] = {
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_eth_crc_err),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_mcast_mismatch),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_frm_trunc),
-	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_nodesc_trunc),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_merge_events),
 	EFX_ETHTOOL_UINT_CHANNEL_STAT(rx_merge_packets),
 };
@@ -599,11 +598,6 @@ static int efx_ethtool_set_tso(struct net_device *net_dev, u32 enable)
 	struct efx_nic *efx __attribute__ ((unused)) = netdev_priv(net_dev);
 	u32 features;
 
-#if defined(EFX_NEED_ETHTOOL_OFFLOAD_SANITY_CHECKS)
-	if (enable && !(net_dev->features & NETIF_F_SG))
-		return -EINVAL;
-#endif
-
 	features = NETIF_F_TSO;
 	if (efx->type->offload_features & NETIF_F_V6_CSUM)
 		features |= NETIF_F_TSO6;
@@ -616,37 +610,11 @@ static int efx_ethtool_set_tso(struct net_device *net_dev, u32 enable)
 	return 0;
 }
 
-#if defined(EFX_NEED_ETHTOOL_OFFLOAD_SANITY_CHECKS)
-static int efx_ethtool_set_sg(struct net_device *net_dev, u32 enable)
-{
-	if (enable) {
-		if (!(net_dev->features & NETIF_F_ALL_CSUM))
-			return -EINVAL;
-		net_dev->features |= NETIF_F_SG;
-	} else {
-		efx_ethtool_set_tso(net_dev, 0);
-		net_dev->features &= ~NETIF_F_SG;
-	}
-	return 0;
-}
-#endif
-
-#if !defined(EFX_USE_ETHTOOL_OP_GET_TX_CSUM)
-static u32 efx_ethtool_get_tx_csum(struct net_device *net_dev)
-{
-	return (net_dev->features & NETIF_F_ALL_CSUM) != 0;
-}
-#endif
-
 static int efx_ethtool_set_tx_csum(struct net_device *net_dev, u32 enable)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	u32 features = efx->type->offload_features & NETIF_F_ALL_CSUM;
 
-#if defined(EFX_NEED_ETHTOOL_OFFLOAD_SANITY_CHECKS)
-	if (!enable)
-		efx_ethtool_set_sg(net_dev, 0);
-#endif
 	if (enable)
 		net_dev->features |= features;
 	else
@@ -679,12 +647,28 @@ static int efx_ethtool_set_flags(struct net_device *net_dev, u32 data)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	u32 supported = (efx->type->offload_features &
-			 (ETH_FLAG_RXHASH | ETH_FLAG_NTUPLE));
+			(ETH_FLAG_RXHASH | ETH_FLAG_NTUPLE))
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+			 | NETIF_F_HW_VLAN_RX
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
+			 | NETIF_F_HW_VLAN_CTAG_TX
+#endif
+			 ;
 	int rc;
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 	if (efx->lro_available)
 		supported |= ETH_FLAG_LRO;
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+        /* soft VLAN acceleration cannot be disabled at runtime */
+        data |= NETIF_F_HW_VLAN_RX;
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
+        /* soft VLAN acceleration cannot be disabled at runtime */
+	data |= NETIF_F_HW_VLAN_CTAG_TX;
 #endif
 
 	if (data & ~supported)
@@ -994,7 +978,7 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
 }
 
 /* MAC address mask including only I/G bit */
-static const u8 mac_addr_ig_mask[ETH_ALEN] = { 0x01, 0, 0, 0, 0, 0 };
+static const u8 mac_addr_ig_mask[ETH_ALEN] __aligned(2) = {0x01, 0, 0, 0, 0, 0};
 
 #define IP4_ADDR_FULL_MASK	((__force __be32)~0)
 #define PORT_FULL_MASK		((__force __be16)~0)
@@ -1059,16 +1043,15 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 		rule->flow_type = ETHER_FLOW;
 		if (spec.match_flags &
 		    (EFX_FILTER_MATCH_LOC_MAC | EFX_FILTER_MATCH_LOC_MAC_IG)) {
-			memcpy(mac_entry->h_dest, spec.loc_mac, ETH_ALEN);
+			ether_addr_copy(mac_entry->h_dest, spec.loc_mac);
 			if (spec.match_flags & EFX_FILTER_MATCH_LOC_MAC)
-				memset(mac_mask->h_dest, ~0, ETH_ALEN);
+				eth_broadcast_addr(mac_mask->h_dest);
 			else
-				memcpy(mac_mask->h_dest, mac_addr_ig_mask,
-				       ETH_ALEN);
+				ether_addr_copy(mac_mask->h_dest, mac_addr_ig_mask);
 		}
 		if (spec.match_flags & EFX_FILTER_MATCH_REM_MAC) {
-			memcpy(mac_entry->h_source, spec.rem_mac, ETH_ALEN);
-			memset(mac_mask->h_source, ~0, ETH_ALEN);
+			ether_addr_copy(mac_entry->h_source, spec.rem_mac);
+			eth_broadcast_addr(mac_mask->h_source);
 		}
 		if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE) {
 			mac_entry->h_proto = spec.ether_type;
@@ -1270,13 +1253,13 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 				spec.match_flags |= EFX_FILTER_MATCH_LOC_MAC;
 			else
 				return -EINVAL;
-			memcpy(spec.loc_mac, mac_entry->h_dest, ETH_ALEN);
+			ether_addr_copy(spec.loc_mac, mac_entry->h_dest);
 		}
 		if (!is_zero_ether_addr(mac_mask->h_source)) {
 			if (!is_broadcast_ether_addr(mac_mask->h_source))
 				return -EINVAL;
 			spec.match_flags |= EFX_FILTER_MATCH_REM_MAC;
-			memcpy(spec.rem_mac, mac_entry->h_source, ETH_ALEN);
+			ether_addr_copy(spec.rem_mac, mac_entry->h_source);
 		}
 		if (mac_mask->h_proto) {
 			if (mac_mask->h_proto != ETHER_TYPE_FULL_MASK)
@@ -1408,13 +1391,11 @@ static int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 }
 #endif
 
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_PHC_SUPPORT)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) || defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
+static
+#endif
 int efx_ethtool_get_ts_info(struct net_device *net_dev,
 			    struct ethtool_ts_info *ts_info)
-#else
-static int efx_ethtool_get_ts_info(struct net_device *net_dev,
-				   struct ethtool_ts_info *ts_info)
-#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
@@ -1494,19 +1475,11 @@ const struct ethtool_ops efx_ethtool_ops = {
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES)
 	.get_rx_csum		= efx_ethtool_get_rx_csum,
 	.set_rx_csum		= efx_ethtool_set_rx_csum,
-#if defined(EFX_USE_ETHTOOL_OP_GET_TX_CSUM)
 	.get_tx_csum		= ethtool_op_get_tx_csum,
-#else
-	.get_tx_csum		= efx_ethtool_get_tx_csum,
-#endif
 	/* Need to enable/disable IPv6 too */
 	.set_tx_csum		= efx_ethtool_set_tx_csum,
 	.get_sg			= ethtool_op_get_sg,
-#if !defined(EFX_NEED_ETHTOOL_OFFLOAD_SANITY_CHECKS)
 	.set_sg			= ethtool_op_set_sg,
-#else
-	.set_sg			= efx_ethtool_set_sg,
-#endif
 	.get_tso		= ethtool_op_get_tso,
 	/* Need to enable/disable TSO-IPv6 too */
 	.set_tso		= efx_ethtool_set_tso,
@@ -1561,7 +1534,7 @@ const struct ethtool_ops_ext efx_ethtool_ops_ext = {
 	.set_rxfh_indir		= efx_ethtool_old_set_rxfh_indir,
 #endif
 #endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) || defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
 	.get_ts_info		= efx_ethtool_get_ts_info,
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GMODULEEEPROM)

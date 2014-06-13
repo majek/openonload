@@ -87,6 +87,31 @@ extern "C" {
  */
 #define ONLOAD_MSG_WARM 0x400
 
+/* Use ONLOAD_SOF_TIMESTAMPING_STREAM with SO_TIMESTAMPING on TCP sockets.
+ *
+ * The timestamp information is returned via MSG_ERRQUEUE using
+ * onload_scm_timestamping_stream structure.
+ * The only valid TX flag combination is
+ * (SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_SYS_HARDWARE |
+ *  ONLOAD_SOF_TIMESTAMPING_STREAM).
+ *
+ * Onload sometimes sends packets via OS.  If it happens, the corresponding
+ * timestamp is 0.
+ *
+ * If a segment was not retransmitted, last_sent is 0.
+ */
+#define ONLOAD_SOF_TIMESTAMPING_STREAM (1 << 23)
+
+/* Use ONLOAD_SCM_TIMESTAMPING_STREAM when decoding error queue from TCP
+ * socket.
+ */
+#define ONLOAD_SCM_TIMESTAMPING_STREAM ONLOAD_SOF_TIMESTAMPING_STREAM
+
+struct onload_scm_timestamping_stream {
+  struct timespec  first_sent; /* Time segment was first sent. */
+  struct timespec  last_sent;  /* Time segment was last sent. */
+  size_t           len; /* Number of bytes of message payload. */
+};
 
 extern int onload_is_present(void);
 
@@ -177,6 +202,58 @@ enum onload_fd_feature {
 };
 
 extern int onload_fd_check_feature(int fd, enum onload_fd_feature feature);
+
+/**********************************************************************
+ * onload_move_fd: Move the file descriptor to the current stack.
+ *
+ * Move Onload file descriptor to the current stack, set by
+ * onload_set_stackname() or other tools.  Useful for descriptors obtained
+ * by accept(), to move the client connection to per-thread stack out of
+ * the listening one.
+ *
+ * Not all kinds of Onload file descriptors are supported. Currently, it
+ * works only with TCP closed sockets and TCP accepted sockets with some
+ * limitations.
+ * Current limitations for accepted sockets:
+ * a) empty send queue and retransmit queue (i.e. send() was never called
+ *    on this socket);
+ * b) simple receive queue: no loss, no reordering, no urgent data.
+ *
+ * Returns 0 f moved successfully, -1 otherwise.
+ * In any case, fd is a good accelerated socket after this call.
+ */
+extern int onload_move_fd(int fd);
+
+
+/**********************************************************************
+ * onload_ordered_epoll_wait: Wire order delivery via epoll
+ *
+ * Where an epoll set contains accelerated sockets in only one stack this
+ * function can be used as a replacement for epoll_wait, but where the returned
+ * EPOLLIN events are ordered.
+ *
+ * This function can only be used if EF_UL_EPOLL=1, which is the default.
+ *
+ * Hardware timestamping is required for correct operation.
+ *
+ * Any file descriptors that are returned as ready without a valid timestamp
+ * (tv_sec is 0) should be considered un-ordered, with respect to each other
+ * and the rest of the set.  This will occur where data is received via the
+ * kernel, or without a hardware timestamp, for example on a pipe, or on an
+ * interface that does not provide hardware timestamps.
+ */
+
+struct onload_ordered_epoll_event {
+  /* The hardware timestamp of the first readable data. */
+  struct timespec ts;
+  /* Number of bytes that may be read to respect ordering. */
+  int bytes;
+};
+
+struct epoll_event;
+int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
+                              struct onload_ordered_epoll_event *oo_events,
+                              int maxevents, int timeout);
 
 #ifdef __cplusplus
 }

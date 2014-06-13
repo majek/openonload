@@ -1971,11 +1971,16 @@ void efrm_filter_remove(struct efrm_client *client, int filter_id)
 EXPORT_SYMBOL(efrm_filter_remove);
 
 
-void efrm_filter_redirect(struct efrm_client *client, int filter_id, int rxq_i)
+void efrm_filter_redirect(struct efrm_client *client, int filter_id,
+			  int rxq_i, int stack_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
+#if EFX_DRIVERLINK_API_VERSION >= 16
+	efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
+#else
 	efx_dl_filter_redirect(efx_dev, filter_id, rxq_i);
+#endif
 }
 EXPORT_SYMBOL(efrm_filter_redirect);
 

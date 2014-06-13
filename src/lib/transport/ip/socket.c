@@ -92,6 +92,9 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
   s->timestamping_flags = 0u;
   s->os_sock_status = OO_OS_STATUS_TX;
 
+  ci_ip_queue_init(&s->timestamp_q);
+  s->timestamp_q_extract = OO_PP_NULL;
+
 
   ci_sock_cmn_reinit(ni, s);
 
@@ -102,10 +105,94 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
 }
 
 
+static int ci_sock_cmn_timestamp_q_reapable(ci_netif* ni, ci_sock_cmn* s)
+{
+  int count = 0;
+  oo_pkt_p p = s->timestamp_q.head;
+  while( ! OO_PP_EQ(p, s->timestamp_q_extract) ) {
+    ++count;
+    p = PKT_CHK(ni, p)->tsq_next;
+  }
+  return count;
+}
+
+
+void ci_sock_cmn_timestamp_q_drop(ci_netif* netif, ci_sock_cmn* s)
+{
+  ci_ip_pkt_queue* qu = &s->timestamp_q;
+  ci_ip_pkt_fmt* p;
+  CI_DEBUG(int i = qu->num);
+
+  ci_assert(netif);
+  ci_assert(qu);
+
+  while( OO_PP_NOT_NULL(qu->head)   CI_DEBUG( && i-- > 0) ) {
+    p = PKT_CHK(netif, qu->head);
+    qu->head = p->tsq_next;
+    ci_netif_pkt_release(netif, p);
+  }
+  ci_assert_equal(i, 0);
+  ci_assert(OO_PP_IS_NULL(qu->head));
+  qu->num = 0;
+}
+
+
+void ci_sock_cmn_timestamp_q_enqueue(ci_netif* ni, ci_sock_cmn* s,
+                                     ci_ip_pkt_fmt* pkt)
+{
+  ci_ip_pkt_queue* qu = &s->timestamp_q;
+  oo_pkt_p prev_head = qu->head;
+
+  /* This part is effectively ci_ip_queue_enqueue(ni, &s->timestamp_q, p);
+   * but inlined to allow using tsq_next field 
+   */
+  pkt->tsq_next = OO_PP_NULL;
+  if( ci_ip_queue_is_empty(qu) ) {
+    ci_assert(OO_PP_IS_NULL(qu->head));
+    qu->head = OO_PKT_P(pkt);
+  }
+  else {
+    ci_assert(OO_PP_NOT_NULL(qu->head));
+    /* This assumes the netif lock is held, so use
+       ci_ip_queue_enqueue_nnl() if it's not */
+    PKT(ni, qu->tail)->tsq_next = OO_PKT_P(pkt);
+  }
+  qu->tail = OO_PKT_P(pkt);
+  qu->num++;
+
+
+  if( OO_PP_IS_NULL(prev_head) ) {
+    ci_assert(OO_PP_IS_NULL(s->timestamp_q_extract));
+    s->timestamp_q_extract = qu->head;
+  } 
+  else {
+    ci_sock_cmn_timestamp_q_reap(ni, s);
+  }
+
+  /* Tells post-poll loop to put socket on the [reap_list]. */
+  s->b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
+}
+
+
+void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_sock_cmn* s)
+{ 
+  ci_assert(ci_netif_is_locked(ni));
+  while( ! OO_PP_EQ(s->timestamp_q.head, s->timestamp_q_extract) ) {
+    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, s->timestamp_q.head);
+    oo_pkt_p next = pkt->tsq_next;
+
+    ci_netif_pkt_release(ni, pkt);
+    --s->timestamp_q.num;
+    s->timestamp_q.head = next;
+  }
+}
+
+
 
 
 void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf)
 {
+  int ts_q_reapable = ci_sock_cmn_timestamp_q_reapable(ni, s);
   log("%s  s_flags: "CI_SOCK_FLAGS_FMT, pf,
       CI_SOCK_FLAGS_PRI_ARG(s));
   log("%s  rcvbuf=%d sndbuf=%d bindtodev=%d(%d,%d:%d) ttl=%d", pf,
@@ -122,4 +209,7 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf)
       s->os_sock_status >> OO_OS_STATUS_SEQ_SHIFT,
       (s->os_sock_status & OO_OS_STATUS_RX) ? ",RX":"",
       (s->os_sock_status & OO_OS_STATUS_TX) ? ",TX":"");
+  if( s->timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+    log("%s  TX timestamping queue: packets %d reap %d extract %d", pf, 
+        s->timestamp_q.num - ts_q_reapable, ts_q_reapable, OO_PP_ID(s->timestamp_q_extract));
 }

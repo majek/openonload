@@ -25,8 +25,7 @@
 #ifndef EFX_EF10_REGS_H
 #define EFX_EF10_REGS_H
 
-/*
- * EF10 hardware architecture definitions have a name prefix following
+/* EF10 hardware architecture definitions have a name prefix following
  * the format:
  *
  *     E<type>_<min-rev><max-rev>_

@@ -78,5 +78,8 @@ efrm_vi_set_to_resource(struct efrm_vi_set *);
 extern struct efrm_vi_set *
 efrm_vi_set_from_resource(struct efrm_resource *);
 
+extern struct efrm_pd *
+efrm_vi_set_get_pd(struct efrm_vi_set *);
+
 
 #endif /* __CI_EFRM_VI_SET_H__ */

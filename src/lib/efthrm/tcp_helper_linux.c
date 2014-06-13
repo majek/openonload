@@ -67,9 +67,9 @@ efab_fop_poll__poll_if_needed(tcp_helper_resource_t* trs, citp_waitable* w)
      * expense later).
      */
     if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) &&
-        efab_tcp_helper_netif_try_lock(trs) ) {
+        efab_tcp_helper_netif_try_lock(trs, 0) ) {
       ci_netif_poll(ni);
-      efab_tcp_helper_netif_unlock(trs);
+      efab_tcp_helper_netif_unlock(trs, 0);
     }
     return 1;
   }
@@ -268,7 +268,6 @@ static unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file* filp,
     if( wait != NULL ) {
       efab_fop_poll__prime_if_needed(trs, tep_p, TCP_POLL_MASK_CAN_BLOCK(mask),
                                      enable_interrupts);
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
       /* From the closed state, handover is possible.  We should add OS
        * socket waitqueue to the poll table.
        */
@@ -278,7 +277,6 @@ static unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file* filp,
         ci_assert(os_sock->f_op->poll != NULL);
         os_sock->f_op->poll(os_sock, wait); /* drop results */
       }
-#endif
     }
   }
   else {
@@ -301,19 +299,11 @@ static unsigned linux_tcp_helper_fop_poll_tcp(struct file* filp,
   int rc = POLLERR;
 
   /* bug34448: we should check f_op AFTER getting private data
-   * to ensure it is our file.  Also, epoll does not increment refcount,
-   * so we should lock here to prevent handover process from endpoint
-   * desruction. */
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  down_read(&handover_rwlock);
-#endif
+   * to ensure it is our file. */
   priv = filp->private_data;
   if( filp->f_op == &linux_tcp_helper_fops_tcp)
     rc = efab_linux_tcp_helper_fop_poll_tcp(filp, efab_priv_to_thr(priv), 
 					    priv->sock_id, wait);
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  up_read(&handover_rwlock);
-#endif
   return rc;
 }
 
@@ -329,17 +319,9 @@ static unsigned linux_tcp_helper_fop_poll_udp(struct file* filp,
   unsigned mask;
   oo_sp id;
 
-  /* bug34448: see comments in linux_tcp_helper_fop_poll_tcp */
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  down_read(&handover_rwlock);
-#endif
   priv = filp->private_data;
-  if( filp->f_op != &linux_tcp_helper_fops_udp) {
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-    up_read(&handover_rwlock);
-#endif
+  if( filp->f_op != &linux_tcp_helper_fops_udp)
     return POLLERR;
-  }
 
   trs = efab_priv_to_thr(priv);
   ni = &trs->netif;
@@ -366,31 +348,10 @@ static unsigned linux_tcp_helper_fop_poll_udp(struct file* filp,
   ci_atomic32_or(&us->s.b.wake_request, CI_SB_FLAG_WAKE_TX|CI_SB_FLAG_WAKE_RX);
   enable_interrupts = efab_fop_poll__poll_if_needed(trs, &us->s.b);
 
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  /* For non-connected socket handover is possible.  We should add OS
-   * socket waitqueue to the poll table.  And connected socket may be
-   * disconnected and connected-to-OS again, so no guarantee here.  Let's
-   * be safe.
-   *
-   * ?? FIXME: I really don't believe this logic...
-   */
-  if( wait != NULL &&
-      (NI_OPTS(ni).udp_connect_handover || sock_lport_be16(&us->s) == 0) ) {
-    struct file* os_sock = tep_p->os_socket->file;
-    ci_assert(os_sock->f_op != NULL);
-    ci_assert(os_sock->f_op->poll != NULL);
-    if( os_sock != NULL )  /* belt and braces */
-      (void) os_sock->f_op->poll(os_sock, wait);
-  }
-#endif
-
   mask = ci_udp_poll_events(ni, us);
   efab_fop_poll__prime_if_needed(trs, tep_p, UDP_POLL_MASK_CAN_BLOCK(mask),
                                  enable_interrupts);
 
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  up_read(&handover_rwlock);
-#endif
   return mask;
 }
 
@@ -849,6 +810,80 @@ static ssize_t linux_tcp_helper_fop_aio_read_udp(struct kiocb *iocb,
 }
 
 
+static ssize_t
+linux_tcp_helper_fop_read_passthrough(struct file *filp, char *buf,
+                                      size_t len, loff_t *off)
+{
+  ci_private_t *priv = filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  return os_file->f_op->read(os_file, buf, len, off);
+}
+static ssize_t
+linux_tcp_helper_fop_write_passthrough(struct file *filp, const char *buf,
+                                       size_t len, loff_t *off)
+{
+  ci_private_t *priv = filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  return os_file->f_op->write(os_file, buf, len, off);
+}
+#ifdef fop_has_readv
+static ssize_t
+linux_tcp_helper_fop_readv_passthrough(struct file *filp,
+                                       const struct iovec *iov,
+                                       unsigned long iovlen, loff_t *off)
+{
+  ci_private_t *priv = filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  return os_file->f_op->readv(os_file, iov, iovlen, off);
+}
+static ssize_t
+linux_tcp_helper_fop_writev_passthrough(struct file *filp,
+                                        const struct iovec *iov,
+                                        unsigned long iovlen, loff_t *off)
+{
+  ci_private_t *priv = filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  return os_file->f_op->writev(os_file, iov, iovlen, off);
+}
+#else
+static ssize_t
+linux_tcp_helper_fop_aio_read_passthrough(struct kiocb *iocb, 
+                                          const struct iovec *iov, 
+                                          unsigned long iovlen, loff_t pos)
+{
+  ci_private_t *priv = iocb->ki_filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  iocb->ki_filp = os_file;
+  return os_file->f_op->aio_read(iocb, iov, iovlen, pos);
+}
+static ssize_t
+linux_tcp_helper_fop_aio_write_passthrough(struct kiocb *iocb, 
+                                           const struct iovec *iov, 
+                                           unsigned long iovlen, loff_t pos)
+{
+  ci_private_t *priv = iocb->ki_filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  iocb->ki_filp = os_file;
+  return os_file->f_op->aio_write(iocb, iov, iovlen, pos);
+}
+#endif
+
+static unsigned linux_tcp_helper_fop_poll_passthrough(struct file* filp,
+                                                      poll_table* wait)
+{
+  ci_private_t *priv = filp->private_data;
+  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+                                                        os_socket->file;
+  return os_file->f_op->poll(os_file, wait);
+}
+
+
 /* Linux file operations for TCP and UDP.
 */
 struct file_operations linux_tcp_helper_fops_tcp =
@@ -909,6 +944,36 @@ struct file_operations linux_tcp_helper_fops_udp =
   CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
   CI_STRUCT_MBR(fasync, linux_tcp_helper_fop_fasync),
   CI_STRUCT_MBR(sendpage, linux_tcp_helper_fop_sendpage_udp),
+#ifdef fop_has_splice
+  CI_STRUCT_MBR(splice_write, generic_splice_sendpage)
+#endif
+};
+
+struct file_operations linux_tcp_helper_fops_passthrough =
+{
+  CI_STRUCT_MBR(owner, THIS_MODULE),
+  CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_passthrough),
+  CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_passthrough),
+#ifdef fop_has_readv
+  CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_passthrough),
+  CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_passthrough),
+#else
+  CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_passthrough),
+  CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_passthrough),
+#endif
+  CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_passthrough),
+#if HAVE_UNLOCKED_IOCTL
+  CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
+#else
+  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
+#endif
+#if HAVE_COMPAT_IOCTL
+  CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
+#endif
+  CI_STRUCT_MBR(mmap, oo_fop_mmap),
+  CI_STRUCT_MBR(open, oo_fop_open),
+  CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
+  CI_STRUCT_MBR(fasync, linux_tcp_helper_fop_fasync),
 #ifdef fop_has_splice
   CI_STRUCT_MBR(splice_write, generic_splice_sendpage)
 #endif
@@ -1201,8 +1266,7 @@ void oo_file_ref_drop(struct oo_file_ref* fr)
     fr->next = efab_tcp_driver.file_refs_to_drop;
     efab_tcp_driver.file_refs_to_drop = fr;
     ci_irqlock_unlock(&efab_tcp_driver.thr_table.lock, &lock_flags);
-    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE,
-                     &efab_tcp_driver.file_refs_work_item);
+    queue_work(CI_GLOBAL_WORKQUEUE, &efab_tcp_driver.file_refs_work_item);
   }
 }
 
@@ -1221,9 +1285,8 @@ int oo_file_ref_lookup(struct file* file, struct oo_file_ref** fr_out)
 }
 
 
-void oo_file_ref_drop_list_now(void *context)
+void oo_file_ref_drop_list_now(struct oo_file_ref* fr_next)
 {
-  struct oo_file_ref* fr_next = context;
   struct oo_file_ref* fr;
 
   ci_assert(! in_interrupt());
@@ -1415,15 +1478,7 @@ static int efab_os_callback(wait_queue_t *wait, unsigned mode, int sync,
                         mask, do_wakeup));
 
   /* Wake up endpoint if someone is waiting on poll() */
-  if( do_wakeup
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-      /* Double wakeups are bad things: no real use, additional lock
-       * contention.  So, we avoid wakeup if OS socket is already in the
-       * waitq. */
-      && ( s->b.state != CI_TCP_STATE_UDP ||
-           NI_OPTS(&ep->thr->netif).udp_connect_handover )
-#endif
-      ) {
+  if( do_wakeup ) {
     wq_active = ci_waitable_active(&ep->waitq);
     ci_waitable_wakeup_all(&ep->waitq);
     if( wq_active ) {

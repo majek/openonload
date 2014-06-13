@@ -99,8 +99,6 @@ struct ci_netif_s {
 #ifdef __ci_driver__
   ci_int8              hwport_to_intf_i[CI_CFG_MAX_REGISTER_INTERFACES];
   ci_int8              intf_i_to_hwport[CI_CFG_MAX_INTERFACES];
-  ci_int8              blacklist_intf_i[CI_CFG_MAX_BLACKLIST_INTERFACES];
-  unsigned             blacklist_length;
   uid_t                uid;
   uid_t                euid;
 # ifdef CI_HAVE_OS_NOPAGE

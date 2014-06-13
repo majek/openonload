@@ -1055,7 +1055,11 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
     ci_ip_queue_dequeue(netif, rtq, p);
 
     ci_assert(p->refcount > 0);
-    if( --p->refcount == 0 ) {
+
+    if( p->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
+      ci_sock_cmn_timestamp_q_enqueue(netif, &ts->s, p);
+    }
+    else if( --p->refcount == 0 ) {
       ci_assert(OO_PP_IS_NULL(p->frag_next));
       ci_assert(!(p->flags & CI_PKT_FLAG_RX));
       __ci_netif_pkt_clean(p);
@@ -1077,6 +1081,14 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
       ci_tcp_kalive_restart(netif, ts, ci_tcp_kalive_idle_get(ts));
       break;
     }
+  }
+
+  /* Make sure reap will happen in a timely manner if we've added
+   * packets to the timestamp queue 
+   */
+  if( ts->s.b.sb_flags & CI_SB_FLAG_RX_DELIVERED ) {
+    ci_netif_put_on_post_poll(netif, &ts->s.b);
+    ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_RX);
   }
 
   ci_assert(!ci_ip_queue_is_empty(rtq) || SEQ_EQ(rxp->ack, tcp_snd_nxt(ts)));
@@ -1859,12 +1871,23 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
 /* Out-of-line function to avoid doing the memcmp in the handle_rx
  * fast code path 
  */
-static void check_rx_ip_cache_mac_update(ci_netif* ni, ci_tcp_state* ts,
-                                         ci_ip_pkt_fmt* pkt, int confirm)
+ci_noinline void mac_update_if_mac_match(ci_netif* ni, ci_tcp_state* ts,
+                                         ci_ip_pkt_fmt* pkt)
 {
   if( memcmp(ci_ip_cache_ether_dhost(&ts->s.pkt), oo_ether_shost(pkt),
              ETH_ALEN) == 0 )
-    cicp_ip_cache_mac_update(ni, &ts->s.pkt, confirm);
+    cicp_ip_cache_mac_update(ni, &ts->s.pkt, 1 /*confirm*/);
+}
+
+
+ci_noinline void mac_update_if_ack_new_or_mac_match(ci_netif* ni,
+                                                    ci_tcp_state* ts,
+                                                    const ciip_tcp_rx_pkt* rxp)
+{
+  if( SEQ_GT(rxp->ack, tcp_snd_una(ts)) ||
+      memcmp(ci_ip_cache_ether_dhost(&ts->s.pkt),
+             oo_ether_shost(rxp->pkt), ETH_ALEN) == 0 )
+    cicp_ip_cache_mac_update(ni, &ts->s.pkt, 1 /*confirm*/);
 }
 
 
@@ -2088,15 +2111,31 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   /*
   ** Either:
+  **  - duplicate or resent SYN from other side (resent synack)
   **  - out of window, send an ACK
   **  - reset from other end which should revert us to listen
   **    (this is currently handled in handle_rx_rst)
   **  - this is an ACK for SYNACK and the connection is established
-  **  - duplicate or resent SYN from other side (do nothing we will timeout)
   **  - incoming segment ack does not ack our SYNACK then we reset,
   **    SYN or SYNACK not for our SYNACK then also reset,
   **    unless it is out of window (rfc793 p71)
   */
+
+  /* Check for bad SYN packets: process it before seq_unacceptable */
+  if( tcp->tcp_flags & CI_TCP_FLAG_SYN ) {
+    if( !SEQ_EQ(rxp->seq+1, tsr->rcv_nxt) ) {
+      LOG_U(log(LNT_FMT "SYNRECV non-dup SYN will reset pkt=%08x-%08x"
+                " rcv=%08x-%08x", LNT_PRI_ARGS(netif, tls),
+                rxp->seq, pkt->pf.tcp_rx.end_seq,
+                tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd));
+      /* ?? fixme CI_IP_SOCK_STATS_INC_BADSYN( tls );*/
+      CITP_STATS_NETIF_INC(netif, rst_sent_synrecv_bad_syn);
+      goto reset_out;
+    }
+    LOG_TV(log(LNT_FMT "SYNRECV dup SYN", LNT_PRI_ARGS(netif, tls)));
+    /* ?? fixme CI_IP_SOCK_STATS_INC_SYNDUP( ts );*/
+    goto retransmit_synack;
+  }
 
   /* check sequence number */
   if( ci_tcp_seq_probably_unacceptable(tsr->rcv_nxt,
@@ -2114,23 +2153,6 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   /* RST handled elsewhere; see handle_rx_rst. */
   ci_assert(~tcp->tcp_flags & CI_TCP_FLAG_RST);
-
-  /* Check for bad SYN packets */
-  if( tcp->tcp_flags & CI_TCP_FLAG_SYN ) {
-    if( !SEQ_EQ(rxp->seq+1, tsr->rcv_nxt) ) {
-      LOG_U(log(LNT_FMT "SYNRECV non-dup SYN will reset pkt=%08x-%08x"
-                " rcv=%08x-%08x", LNT_PRI_ARGS(netif, tls),
-                rxp->seq, pkt->pf.tcp_rx.end_seq,
-                tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd));
-      /* ?? fixme CI_IP_SOCK_STATS_INC_BADSYN( tls );*/
-      CITP_STATS_NETIF_INC(netif, rst_sent_synrecv_bad_syn);
-      goto reset_out;
-    }
-    LOG_U(log(LNT_FMT "SYNRECV dup SYN",
-              LNT_PRI_ARGS(netif, tls)));
-    /* ?? fixme CI_IP_SOCK_STATS_INC_SYNDUP( ts );*/
-    goto retransmit_synack;
-  }
 
   /* check paws */
   if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO ) {
@@ -2232,6 +2254,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   ci_ip_cached_hdrs ipcache;
   struct oo_sock_cplane sock_cp;
   oo_sp local_peer = OO_SP_NULL;
+  int do_syncookie = 0;
 
   ci_assert(tls);
   ci_assert(tls->s.b.state == CI_TCP_LISTEN);
@@ -2287,28 +2310,33 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
       goto freepkt_out;
     }
 
-    /* If listen queue is full, then normally we'll drop the SYN.  However,
-    ** if the accept queue is also full, then we're liable to be left with
-    ** a listen queue full of synrecvs that will only be promoted after a
-    ** timeout.  This can lead to the accept queue drying up (and killing
-    ** app performance).
-    **
-    ** Therefore if the accept queue is also full, boot out the oldest
-    ** synrecv.
-    */
-    if( tls->n_listenq >= ci_tcp_listenq_max(netif) &&
-        ci_tcp_acceptq_n(tls) >= tls->acceptq_max )
-      ci_tcp_listenq_drop_oldest(netif, tls);
-
-    /* If we're overloaded then we need to minimise the work we do.  So
-    ** fail early if this is a SYN and the listen queue is full. */
+    /* If listen queue is full: */
     if( (tls->n_listenq >= ci_tcp_listenq_max(netif)) |
-        OO_P_IS_NULL(netif->state->free_synrecvs) ) {
-      if( tls->n_listenq >= ci_tcp_listenq_max(netif) )
+        (OO_P_IS_NULL(netif->state->free_synrecvs)) ) {
+
+      /* If we cope with acceptq, we can try syncookie. */
+      if( NI_OPTS(netif).tcp_syncookies )
+            do_syncookie = 1;
+      /* If listen queue is full, then normally we'll drop the SYN.  However,
+      ** if the accept queue is also full, then we're liable to be left with
+      ** a listen queue full of synrecvs that will only be promoted after a
+      ** timeout.  This can lead to the accept queue drying up (and killing
+      ** app performance).
+      **
+      ** Therefore if the accept queue is also full, boot out the oldest
+      ** synrecv.
+      */
+      else if( ci_tcp_acceptq_n(tls) >= tls->acceptq_max )
+        ci_tcp_listenq_drop_oldest(netif, tls);
+
+      /* If we're overloaded then we need to minimise the work we do.  So
+      ** fail early if this is a SYN and the listen queue is full. */
+      else if( tls->n_listenq >= ci_tcp_listenq_max(netif) )
         CITP_STATS_TCP_LISTEN(++tls->stats.n_listenq_overflow);
       else
         CITP_STATS_TCP_LISTEN(++tls->stats.n_listenq_no_synrecv);
-      goto freepkt_out;
+      if( !do_syncookie )
+        goto freepkt_out;
     }
   }
 
@@ -2363,6 +2391,17 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     handle_rx_synrecv_ack(netif, tls, tsr, rxp, &ipcache);
     return;
   }
+  
+  /* Is it a syncookie? */
+  if( NI_OPTS(netif).tcp_syncookies && tcp->tcp_flags == CI_TCP_FLAG_ACK &&
+      ci_tcp_acceptq_n(tls) < tls->acceptq_max ) {
+    ci_tcp_state_synrecv* tsr;
+    ci_tcp_syncookie_ack(netif, tls, rxp, &tsr);
+    if( tsr != NULL ) {
+      handle_rx_synrecv_ack(netif, tls, tsr, rxp, &ipcache);
+      return;
+    }
+  }
 
   /*
   ** This should be the first SYN of a new connection on a listening socket
@@ -2378,11 +2417,13 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   /* Want to do minimum work when overloaded, so check for listen queue
   ** overflow early. */
-  if(CI_UNLIKELY( tls->n_listenq >= ci_tcp_listenq_max(netif) )) {
+  if(CI_UNLIKELY( !do_syncookie &&
+                  tls->n_listenq >= ci_tcp_listenq_max(netif) )) {
     CITP_STATS_TCP_LISTEN(++tls->stats.n_listenq_overflow);
     goto freepkt_out;
   }
-  if(CI_UNLIKELY( OO_P_IS_NULL(netif->state->free_synrecvs) )) {
+  if(CI_UNLIKELY( !do_syncookie &&
+                  OO_P_IS_NULL(netif->state->free_synrecvs) )) {
     CITP_STATS_TCP_LISTEN(++tls->stats.n_listenq_no_synrecv);
     goto freepkt_out;
   }
@@ -2462,10 +2503,15 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   }
 
   /* Allocate synrecv. */
-  ci_assert( ! OO_P_IS_NULL(netif->state->free_synrecvs) );
-  tsr =
-    (ci_tcp_state_synrecv*) CI_NETIF_PTR(netif, netif->state->free_synrecvs);
-  netif->state->free_synrecvs = tsr->link.next;
+  if( do_syncookie ) {
+    tsr = ci_alloc(sizeof(ci_tcp_state_synrecv));
+  }
+  else {
+    ci_assert( ! OO_P_IS_NULL(netif->state->free_synrecvs) );
+    tsr =
+      (ci_tcp_state_synrecv*) CI_NETIF_PTR(netif, netif->state->free_synrecvs);
+    netif->state->free_synrecvs = tsr->link.next;
+  }
 
   /* parse the SYN options */
   memset(&tsr->tcpopts, 0, sizeof(tsr->tcpopts));
@@ -2485,29 +2531,36 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     goto reset_out;
 #endif
   }
-  tsr->tcpopts.flags |= rxp->flags & CI_TCPT_FLAG_TSO;
-  if( ! ci_tcp_can_stripe(netif, ip->ip_daddr_be32,ip->ip_saddr_be32) )
-    tsr->tcpopts.flags &=~ CI_TCPT_FLAG_STRIPE;
-  tsr->tcpopts.flags &= NI_OPTS(netif).syn_opts | CI_TCPT_FLAG_STRIPE;
 
-  /* store timestamp in echo reply */
-  tsr->timest = ci_tcp_time_now(netif);
+  tsr->tcpopts.flags |= rxp->flags & CI_TCPT_FLAG_TSO;
   if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO )
     tsr->tspeer = rxp->timestamp;
+
+  if( !do_syncookie ) {
+    if( ! ci_tcp_can_stripe(netif, ip->ip_daddr_be32,ip->ip_saddr_be32) )
+      tsr->tcpopts.flags &=~ CI_TCPT_FLAG_STRIPE;
+    tsr->tcpopts.flags &= NI_OPTS(netif).syn_opts | CI_TCPT_FLAG_STRIPE;
+  }
 
   /* setup synrecv state */
   tsr->l_addr = ip->ip_daddr_be32;
   tsr->r_addr = ip->ip_saddr_be32;
   tsr->r_port = tcp->tcp_source_be16;
 
-  tsr->rcv_nxt = rxp->seq + 1;
-  tsr->snd_isn = ci_tcp_initial_seqno(netif);
-
+  /* store timestamp in echo reply */
+  tsr->timest = ci_tcp_time_now(netif);
   tsr->rcv_wscl = (ci_uint8) ci_tcp_wscl_by_buff(netif, tcp_rcv_buff(tls));
+  tsr->rcv_nxt = rxp->seq + 1;
 
-  /* Insert synrecv into the listen queue. */
-  ci_tcp_listenq_insert(netif, tls, tsr);
-  CITP_STATS_NETIF(++netif->state->stats.listen2synrecv);
+  if( do_syncookie )
+    ci_tcp_syncookie_syn(netif, tls, tsr);
+  else {
+    tsr->snd_isn = ci_tcp_initial_seqno(netif);
+
+    /* Insert synrecv into the listen queue. */
+    ci_tcp_listenq_insert(netif, tls, tsr);
+    CITP_STATS_NETIF(++netif->state->stats.listen2synrecv);
+  }
 
   LOG_TC(log(LNT_FMT "SYN-RECV rcv=%08x-%08x snd=%08x-%08x",
              LNT_PRI_ARGS(netif, tls),
@@ -2543,6 +2596,9 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     }
     ci_netif_pkt_release(netif, pkt);
   }
+
+  if( do_syncookie )
+    ci_free(tsr);
   return;
 
  freepkt_out:
@@ -3196,21 +3252,20 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     ts->t_last_recv_ack = ci_tcp_time_now(netif);
 
   /* Reconfirm ARP entry if necessary. */
-  if( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON ) {
+  if(CI_UNLIKELY( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON )) {
     /* If we can't be sure that the other end is getting our data then we
      * need to compare our dest MAC with the source MAC of the incoming packet
      * before confirming.
      *
-     * If this is a pure new ACK then we're getting data through to the other
-     * end, so confirm MAC unconditionally.  This allows us to deal better
-     * with the cases where a virtual MAC address is in use (HSRP/VRRP) where
-     * the dest MAC for our outgoing packet (virtual router MAC) does not match
-     * the source MAC for the incoming packet (actual router MAC).
+     * If this segment acks new data then we're getting data through to the
+     * other end, so confirm MAC unconditionally.  This allows us to handle
+     * cases where incoming and outgoing mac differ.  This happens when
+     * packets arrive and leave on different interfaces, and also when
+     * virtual MAC addresses are in use ((HSRP/VRRP) where the dest MAC for
+     * our outgoing packet (virtual router MAC) does not match the source
+     * MAC for the incoming packet (actual router MAC)).
      */
-    if( pkt->pf.tcp_rx.pay_len > 0 || SEQ_GE(tcp_snd_una(ts), rxp->ack) )
-      check_rx_ip_cache_mac_update(netif, ts, pkt, 1);
-    else
-      cicp_ip_cache_mac_update(netif, &ts->s.pkt, 1);
+    mac_update_if_ack_new_or_mac_match(netif, ts, rxp);
   }
   
   /* Once you're synchronised rfc793 says all segments must have an ACK.
@@ -3567,7 +3622,8 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     ci_netif_pkt_release_rx(netif, pkt);
     break;
   case CI_TCP_CLOSED:
-    /* If doing a s/w demux, then this can't happen, 'cos this connection
+    /* For non-loopback connections:
+    ** If doing a s/w demux, then this can't happen, 'cos this connection
     ** wouldn't be in the hash table.  If h/w does demux and identifies
     ** connection for us, then it potentially can, since events can take a
     ** while to arrive.
@@ -3575,10 +3631,13 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     ** We are doing s/w demux, and I don't anticipate this changing any
     ** time soon.  We shouldn't get here.
     **
-    ** ... however, if we do, we'll cope gracefully
+    ** However, if we do, we'll cope gracefully by handling in the same way
+    ** as a loopback connection.
     */
-    LOG_E(ci_log(LNT_FMT "ERROR demux to CLOSED socket",
-                 LNT_PRI_ARGS(netif, ts)));
+    ci_assert(pkt->intf_i == OO_INTF_I_LOOPBACK);
+    if(!(pkt->intf_i == OO_INTF_I_LOOPBACK))
+      LOG_E(ci_log(LNT_FMT "ERROR demux to CLOSED socket",
+                   LNT_PRI_ARGS(netif, ts)));
     CITP_STATS_NETIF_INC(netif, rst_sent_no_match);
     ci_tcp_reply_with_rst(netif, rxp);
     return;
@@ -3916,8 +3975,9 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
                    pkt->pf.tcp_rx.pay_len);
     ci_tcp_rx_enqueue_packet(ni, ts, pkt);
 
-    if( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON )
-      check_rx_ip_cache_mac_update(ni, ts, pkt, 1);
+    if(CI_UNLIKELY( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON ))
+      /* This segment does not ACK new data, so MACs must match. */
+      mac_update_if_mac_match(ni, ts, pkt);
 
     rxp->pkt = NULL;
 
@@ -3992,7 +4052,7 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
       return;
     }
 
-    if( tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16 )
+    if( !bad_recipient && tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16 )
       bad_recipient = 1;
 
     if( !bad_recipient && s->b.state == CI_TCP_LISTEN &&

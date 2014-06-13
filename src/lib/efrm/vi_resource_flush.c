@@ -60,7 +60,6 @@
 #include "efrm_vi.h"
 #include "efrm_vi_set.h"
 
-
 /* Workqueue item to postpone processing of "flush complete" event. */
 struct efrm_flushed_req {
 	struct efhw_nic *flush_nic;
@@ -150,10 +149,8 @@ efrm_vi_resource_issue_rx_flush(struct efrm_vi *virs, bool *completed)
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 
-	if (atomic_read(&nvi->flush_timer_running) == 0) {
-		atomic_set(&nvi->flush_timer_running, 1);
-		mod_timer(&nvi->flush_timer, jiffies + HZ);
-	}
+	queue_delayed_work(efrm_vi_manager->workqueue,
+			   &nvi->flush_work_item, HZ);
 }
 
 static void
@@ -182,10 +179,8 @@ efrm_vi_resource_issue_tx_flush(struct efrm_vi *virs, bool *completed)
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 
-	if (atomic_read(&nvi->flush_timer_running) == 0) {
-		atomic_set(&nvi->flush_timer_running, 1);
-		mod_timer(&nvi->flush_timer, jiffies + HZ);
-	}
+	queue_delayed_work(efrm_vi_manager->workqueue,
+			   &nvi->flush_work_item, HZ);
 }
 
 static void efrm_vi_resource_process_flushes(struct efrm_nic *efrm_nic,
@@ -254,21 +249,12 @@ static bool efrm_vi_rm_flushes_pending_nic(struct efhw_nic *nic)
 static void efrm_vi_rm_may_complete_flushes(struct efrm_nic *efrm_nic)
 {
 	if (!efrm_vi_rm_flushes_pending(efrm_nic))
-		atomic_set(&efrm_nic->nvi.flush_timer_running, 0);
+		cancel_delayed_work(&efrm_nic->nvi.flush_work_item);
 	/* If there's any chance of a completion meaning
 	 * efrm_vi_rm_flushes_pending_nic() could return true for any
 	 * NIC then wake any waiters rather than go to the trouble of
 	 * being more accurate */
 	wake_up(&flush_wq);
-}
-
-void efrm_vi_flush_timer_fn(unsigned long l)
-{
-	struct efrm_nic_vi *nvi = (void *)l;
-	if( atomic_read(&nvi->flush_timer_running) == 0 )
-		return;
-	queue_work(efrm_vi_manager->workqueue, &nvi->flush_work_item);
-	mod_timer(&nvi->flush_timer, jiffies + HZ);
 }
 
 void efrm_vi_check_flushes(struct work_struct *data)
@@ -282,7 +268,11 @@ void efrm_vi_check_flushes(struct work_struct *data)
 
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(&efrm_vi_manager->rm);
 
+#ifdef EFX_NEED_WORK_API_WRAPPERS
 	nvi = container_of(data, struct efrm_nic_vi, flush_work_item);
+#else
+	nvi = container_of(data, struct efrm_nic_vi, flush_work_item.work);
+#endif
 	efrm_nic = container_of(nvi, struct efrm_nic, nvi);
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
@@ -299,8 +289,9 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 * for bug18474/bug20608 is needed, and we'd
 			 * like to know about it.
 			 */
-			EFRM_WARN("%s: rx flush outstanding after 1 second\n",
-				  __FUNCTION__);
+			EFRM_WARN("%s: rx flush outstanding after 1 second on"
+				  " ifindex %d\n", __FUNCTION__, 
+				  efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_rx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -316,8 +307,9 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 * for bug18474/bug20608 is needed, and we'd
 			 * like to know about it.
 			 */
-			EFRM_WARN("%s: tx flush outstanding after 1 second\n",
-				  __FUNCTION__);
+			EFRM_WARN("%s: tx flush outstanding after 1 second on"
+				  " ifindex %d\n", __FUNCTION__, 
+				  efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_tx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -332,19 +324,16 @@ void efrm_vi_check_flushes(struct work_struct *data)
 
  out:
 	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
+	if (efrm_vi_rm_flushes_pending(efrm_nic)) {
+		queue_delayed_work(efrm_vi_manager->workqueue,
+				   &nvi->flush_work_item, HZ);
+	}
 }
 
 
 void efrm_vi_wait_nic_complete_flushes(struct efhw_nic *nic)
 {
 	struct efrm_nic *efrm_nic = efrm_nic_from_efhw_nic(nic);
-#ifndef NDEBUG
-	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
-	/* flushes pending implies flush timer running */
-	EFRM_ASSERT(!efrm_vi_rm_flushes_pending_nic(nic) || 
-		    atomic_read(&efrm_nic->nvi.flush_timer_running));
-	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
-#endif
 	wait_event(flush_wq, !efrm_vi_rm_flushes_pending_nic(nic));
 
 	/* Make use of the workqueue synchronisation guarantee, by enqueuing onto
@@ -489,7 +478,7 @@ efrm_handle_tx_dmaq_flushed(struct efhw_nic *nic, int instance,
 		   __FUNCTION__, nic->index, instance);
 }
 
-void
+static void
 efrm_handle_dmaq_flushed(struct efhw_nic *flush_nic, unsigned instance,
 			 int rx_flush, int failed)
 {
@@ -586,6 +575,7 @@ void efrm_vi_rm_delayed_free(struct work_struct *data)
 	struct efrm_nic_vi *nvi;
 	struct list_head close_pending;
 	struct efrm_vi *virs;
+	unsigned flags;
 
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(&efrm_vi_manager->rm);
 
@@ -602,11 +592,15 @@ void efrm_vi_rm_delayed_free(struct work_struct *data)
 		EFRM_TRACE("%s: flushed VI instance=%d", __FUNCTION__,
 			   virs->rs.rs_instance);
 
-		if (~virs->flags & EFRM_VI_RELEASED)
+		if ( (~virs->flags & EFRM_VI_RELEASED) &&
+		     (~virs->flags & EFRM_VI_STOPPING) )
 			efrm_vi_rm_reinit_dmaqs(virs);
+
+		/* Save flags before callback */
+		flags = virs->flags;
 		if (virs->flush_callback_fn != NULL)
 			virs->flush_callback_fn(virs->flush_callback_arg);
-		if (virs->flags & EFRM_VI_RELEASED)
+		if (flags & EFRM_VI_RELEASED)
 			efrm_vi_rm_free_flushed_resource(virs);
 	}
 }
@@ -638,15 +632,24 @@ void efrm_vi_resource_release(struct efrm_vi *virs)
 }
 EXPORT_SYMBOL(efrm_vi_resource_release);
 
-void efrm_vi_resource_release_callback(struct efrm_vi *virs)
+
+void efrm_vi_resource_stop_callback(struct efrm_vi *virs)
 {
 	EFRM_ASSERT(virs->flush_callback_fn);
+	virs->flags |= EFRM_VI_STOPPING;
+	efrm_pt_flush(virs);
+}
+EXPORT_SYMBOL(efrm_vi_resource_stop_callback);
+
+
+void efrm_vi_resource_release_flushed(struct efrm_vi *virs)
+{
 	if (__efrm_resource_release(&virs->rs)) {
 		virs->flags |= EFRM_VI_RELEASED;
-		efrm_pt_flush(virs);
+		efrm_vi_rm_free_flushed_resource(virs);
 	}
 }
-EXPORT_SYMBOL(efrm_vi_resource_release_callback);
+EXPORT_SYMBOL(efrm_vi_resource_release_flushed);
 
 /*
  * vi: sw=8:ai:aw

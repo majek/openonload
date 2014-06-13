@@ -21,9 +21,19 @@ prefix()  { sed "s/^/$me: /"; }
 
 
 sfc_version() {
-  local lib=/usr/lib64/libonload.so
-  [ -x "$lib" ] || lib=/usr/lib/libonload.so
-  [ -x "$bin/mmaketool" ] && lib=$("$bin/mmaketool" --transportlib)
+  local lib
+
+  # find which library is in use.  It is a bit tricky, as we install the
+  # library into different directories depending on the distribution, and
+  # we do not want to copy the dir-detectng code here.
+  if [ -n "$ONLOAD_PRELOAD" ]; then
+    lib="$ONLOAD_PRELOAD"
+  elif [ -x "$bin/mmaketool" ]; then
+    lib=$(sfc_lib_linux_intree "$1")
+  else
+    lib=$(LD_PRELOAD=libonload.so ldd /bin/sh |grep libonload |awk '{print $3}')
+  fi
+
   "$lib" 2>/dev/null
   echo -n "Kernel module: "
   mod_ver=/sys/module/onload/version

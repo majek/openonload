@@ -114,12 +114,12 @@ citp_tcp_socket(int domain, int type, int protocol)
 }
 
 
-static citp_fdinfo* citp_tcp_dup(citp_fdinfo* orig_fdi)
+citp_fdinfo* citp_tcp_dup(citp_fdinfo* orig_fdi)
 {
   citp_socket* orig_sock = fdi_to_socket(orig_fdi);
   citp_sock_fdi* sock_fdi = CI_ALLOC_OBJ(citp_sock_fdi);
   if( sock_fdi ) {
-    citp_fdinfo_init(&sock_fdi->fdinfo, &citp_tcp_protocol_impl);
+    citp_fdinfo_init(&sock_fdi->fdinfo, orig_fdi->protocol);
     sock_fdi->sock = *orig_sock;
     citp_netif_add_ref(orig_sock->netif);
     return &sock_fdi->fdinfo;
@@ -187,6 +187,8 @@ static int citp_tcp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
                          socklen_t sa_len)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
+  citp_socket* ep = &epi->sock;
+  ci_sock_cmn* s = ep->s;
   int rc;
 
 #if !CI_CFG_FAKE_IPV6
@@ -197,14 +199,33 @@ static int citp_tcp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
 #endif
 
   ci_netif_lock_fdi(epi);
-  rc = ci_tcp_bind(&epi->sock, sa, sa_len, fdinfo->fd);
+  rc = ci_tcp_bind(ep, sa, sa_len, fdinfo->fd);
   ci_netif_unlock_fdi(epi);
   if( rc == CI_SOCKET_HANDOVER ) {
     int fd = fdinfo->fd;
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_bind);
     tcp_handover(epi);
-    return ci_sys_bind(fd, sa, sa_len);
+    fdinfo = citp_fdtable_lookup(fd);
+    if( fdinfo == NULL )
+      return ci_sys_bind(fd, sa, sa_len);
+    else {
+      ci_assert_equal( fdinfo->protocol->type, CITP_PASSTHROUGH_FD);
+      return citp_passthrough_bind(fdinfo, sa, sa_len);
+    }
   }
+
+  if( rc == 0 )
+    if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 )
+      /* If the following fails, we are not undoing the bind() done
+       * above as that is non-trivial.  We are still leaving the socket
+       * in a working state albeit bound without reuseport set.
+       */
+      if( (rc = ci_tcp_reuseport_bind(s, fdinfo->fd)) == 0 )
+        /* The socket has moved so need to reprobe the fd.  This will also
+         * map the the new stack into user space of the executing process.
+         */
+        fdinfo = citp_fdtable_lookup(fdinfo->fd);
+
   citp_fdinfo_release_ref(fdinfo, 0);
   return rc;
 }
@@ -576,7 +597,7 @@ static int citp_tcp_accept(citp_fdinfo* fdinfo,
                            citp_lib_context_t* lib_context)
 {
   ci_tcp_socket_listen* listener;
-  citp_sock_fdi* epi;
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   ci_netif* ni;
   int have_polled = 0;
   ci_uint64 start_frc = 0 /* for effing stoopid compilers */;
@@ -592,7 +613,6 @@ static int citp_tcp_accept(citp_fdinfo* fdinfo,
    * NULL socklen_t*: Linux will wait, Sun gives an error right away;
    * both NULL's are ok. */
   
-  epi = fdi_to_sock_fdi(fdinfo);
   ni = epi->sock.netif;
 
   /* Prepare to spin if necessary */
@@ -754,56 +774,6 @@ check_ul_accept_q:
  unlock_out:
   ni->state->is_spinner = 0;
   return rc;
-}
-
-/* Re-probe fdinfo after endpoint was moved.
- * refcounts is the number of reference counf of fdinfo taken by this code
- * path. */
-static citp_fdinfo *citp_reprobe_moved(citp_fdinfo* fdinfo, int from_fast_lookup)
-{
-  volatile citp_fdinfo_p *p_fdip;
-  citp_fdinfo_p fdip;
-  int fd = fdinfo->fd;
-
-  CITP_FDTABLE_LOCK();
-
-  p_fdip = &citp_fdtable.table[fd].fdip;
-  do {
-    fdip = *p_fdip;
-    ci_assert(fdip_is_normal(fdip));
-
-    if( fdip_to_fdi(fdip) != fdinfo ) {
-      fdinfo = fdip_to_fdi(fdip);
-      if( from_fast_lookup )
-        citp_fdinfo_ref_fast(fdinfo);
-      else
-        citp_fdinfo_ref(fdinfo);
-      CITP_FDTABLE_UNLOCK();
-      return fdinfo;
-    }
-  } while( fdip_cas_fail(p_fdip, fdip, fdip_unknown) );
-
-  fdinfo->on_ref_count_zero = FDI_ON_RCZ_MOVED;
-  /* One refcount from the caller */
-  if( from_fast_lookup )
-    citp_fdinfo_release_ref_fast(fdinfo);
-  else
-    citp_fdinfo_release_ref(fdinfo, 1);
-  /* One refcount from fdtable */
-  citp_fdinfo_release_ref(fdinfo, 1);
-  
-  /* re-probe new fd */
-  fdinfo = citp_fdtable_probe_locked(fd, CI_TRUE);
-  CITP_FDTABLE_UNLOCK();
-  if( fdinfo == NULL )
-    return NULL;
-
-  if( from_fast_lookup ) {
-    citp_fdinfo_release_ref(fdinfo, 0);
-    citp_fdinfo_ref_fast(fdinfo);
-  }
-
-  return fdinfo;
 }
 
 static int citp_tcp_connect(citp_fdinfo* fdinfo,
@@ -1124,6 +1094,18 @@ static int citp_tcp_setsockopt(citp_fdinfo* fdinfo, int level,
       RET_WITH_ERRNO(EINVAL);
   }
 
+  if( (epi->sock.s->s_flags & CI_SOCK_FLAG_PORT_BOUND) != 0 &&
+      ci_opt_is_setting_reuseport(level, optname, optval, optlen) != 0 )
+    /* If the following fails, we are not undoing the bind() done
+     * before as that is non-trivial.  We are still leaving the socket
+     * in a working state albeit bound without reuseport set.
+     */
+    if( (rc = ci_tcp_reuseport_bind(epi->sock.s, fdinfo->fd)) == 0 )
+      /* The socket has moved so need to reprobe the fd.  This will also
+       * map the the new stack into user space of the executing process.
+       */
+      fdinfo = citp_fdtable_lookup(fdinfo->fd);
+
   citp_fdinfo_release_ref(fdinfo, 0);
   return rc;
 }
@@ -1142,19 +1124,6 @@ static int citp_tcp_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags)
             EF_PRI_ARGS(epi,fdinfo->fd),
             ci_iovec_bytes(msg->msg_iov, msg->msg_iovlen),
             CI_SOCKCALL_FLAGS_PRI_ARG(flags)));
-
-  if( ~epi->sock.s->b.state & CI_TCP_STATE_TCP ) {
-    fdinfo = citp_reprobe_moved(fdinfo, CI_TRUE);
-    if( fdinfo == NULL ) {
-      if( msg->msg_namelen != 0 || msg->msg_controllen != 0 ||
-          msg->msg_flags != 0 ) {
-        errno = ENOTSOCK;
-        return -1;
-      }
-      return ci_sys_readv(fdinfo->fd, msg->msg_iov, msg->msg_iovlen);
-    }
-    epi = fdi_to_sock_fdi(fdinfo);
-  }
 
   if( epi->sock.s->b.state != CI_TCP_LISTEN ) {
     if (msg->msg_iovlen == 0 || msg->msg_iov == NULL)
@@ -1200,19 +1169,6 @@ static int citp_tcp_send(citp_fdinfo* fdinfo, const struct msghdr* msg,
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   int rc;
-
-  if( ~epi->sock.s->b.state & CI_TCP_STATE_TCP ) {
-    fdinfo = citp_reprobe_moved(fdinfo, CI_TRUE);
-    if( fdinfo == NULL ) {
-      if( msg->msg_namelen != 0 || msg->msg_controllen != 0 ||
-          msg->msg_flags != 0 ) {
-        errno = ENOTSOCK;
-        return -1;
-      }
-      return ci_sys_writev(fdinfo->fd, msg->msg_iov, msg->msg_iovlen);
-    }
-    epi = fdi_to_sock_fdi(fdinfo);
-  }
 
   ci_assert(msg != NULL);
 
@@ -1381,6 +1337,7 @@ static void citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
   ci_netif* ni = epi->sock.netif;
   ci_uint64 sleep_seq;
   ci_uint32 mask;
+  int stored_event;
 
   /* Try to return a result without polling if we can. */
   sleep_seq = s->b.sleep_seq.all;
@@ -1388,7 +1345,12 @@ static void citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
     mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
   else
     mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
-  if( ! citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq) )
+  stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+  /* Try a poll if we don't already have events.  If this is an ordered wait
+   * (ie we have ordering_info) another netif poll will be too late, so don't
+   * bother.
+   */
+  if( !stored_event && !eps->ordering_info ) {
     if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
       sleep_seq = s->b.sleep_seq.all;
       if( s->b.state != CI_TCP_LISTEN )
@@ -1397,6 +1359,7 @@ static void citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
         mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
       citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
     }
+  }
 }
 #endif /*CI_CFG_USERSPACE_EPOLL*/
 
@@ -1527,6 +1490,60 @@ int citp_tcp_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
 }
 
 
+#if CI_CFG_USERSPACE_EPOLL
+int citp_tcp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
+                          struct timespec* next_out, int* bytes_out)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
+  ci_sock_cmn* s = epi->sock.s;
+  ci_tcp_state* ts;
+  ci_ip_pkt_fmt* pkt;
+
+  *bytes_out = 0;
+  next_out->tv_sec = 0;
+
+  if( s->b.state != CI_TCP_LISTEN ) {
+    ts = SOCK_TO_TCP(s);
+
+    ci_sock_lock(epi->sock.netif, &ts->s.b);
+    if( tcp_rcv_usr(ts) <= 0 || OO_PP_IS_NULL(ts->recv1_extract)) {
+      ci_sock_unlock(epi->sock.netif, &ts->s.b);
+      return 0;
+    }
+
+    pkt = PKT_CHK_NNL(epi->sock.netif, ts->recv1_extract);
+    if( oo_offbuf_is_empty(&pkt->buf) ) {
+      if( OO_PP_IS_NULL(pkt->next) )  {
+        ci_sock_unlock(epi->sock.netif, &ts->s.b);
+        return 0;  /* recv1 is empty. */
+      }
+      pkt = PKT_CHK_NNL(epi->sock.netif, pkt->next);
+      ci_assert(oo_offbuf_not_empty(&pkt->buf));
+    }
+
+    do {
+      if( citp_oo_timespec_compare(&pkt->pf.tcp_rx.rx_hw_stamp, limit) < 1 ) {
+        *bytes_out += oo_offbuf_left(&pkt->buf);
+      }
+      else {
+        next_out->tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
+        next_out->tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
+        break;
+      }
+      if( ! OO_PP_IS_NULL(pkt->next) )
+        pkt = PKT_CHK_NNL(epi->sock.netif, pkt->next);
+      else
+        break;
+    }
+    while( 1 );
+
+    ci_sock_unlock(epi->sock.netif, &ts->s.b);
+  }
+
+  return 1;
+}
+#endif
+
 citp_protocol_impl citp_tcp_protocol_impl = {
   .type        = CITP_TCP_SOCKET,
   .ops         = {
@@ -1570,6 +1587,9 @@ citp_protocol_impl citp_tcp_protocol_impl = {
     .tmpl_alloc         = citp_tcp_tmpl_alloc,
     .tmpl_update        = citp_tcp_tmpl_update,
     .tmpl_abort         = citp_tcp_tmpl_abort,
+#if CI_CFG_USERSPACE_EPOLL
+    .ordered_data       = citp_tcp_ordered_data,
+#endif
   }
 };
 

@@ -537,12 +537,23 @@ static inline int efrm_pd_bt_find_order_idx(struct efrm_pd *pd,
 }
 
 static void efrm_pd_dma_unmap_bt(struct efrm_pd *pd,
-				 struct efrm_buffer_table_allocation *bt_alloc)
+				 struct efrm_bt_collection *bt_alloc)
 {
-	int ord_idx = efrm_pd_bt_find_order_idx(pd, bt_alloc->bta_order);
+	int ord_idx;
+	int i;
 
-	efrm_bt_manager_free(efrm_client_get_nic(pd->rs.rs_client),
-			     &pd->bt_managers[ord_idx], bt_alloc);
+	for (i = 0; i < bt_alloc->num_allocs; i++) {
+		if (bt_alloc->allocs[i].bta_size == 0)
+			break;
+		ord_idx = efrm_pd_bt_find_order_idx(
+				pd, bt_alloc->allocs[i].bta_order);
+
+		efrm_bt_manager_free(efrm_client_get_nic(pd->rs.rs_client),
+				     &pd->bt_managers[ord_idx],
+				     &bt_alloc->allocs[i]);
+	}
+
+	kfree(bt_alloc->allocs);
 }
 
 
@@ -550,55 +561,68 @@ static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 			  dma_addr_t *pci_addrs, int pci_addrs_stride,
 			  uint64_t *user_addrs, int user_addrs_stride,
 			  void (*user_addr_put)(uint64_t, uint64_t *),
-			  struct efrm_buffer_table_allocation *bt_alloc)
+			  struct efrm_bt_collection *bt_alloc)
 {
-	int i, j, n, first;
+	int i, n, first;
 	dma_addr_t *dma_addrs;
-	dma_addr_t base_dma_addr;
 	uint64_t user_addr;
 	struct efhw_buffer_table_block *block;
-	int nic_sub_order = EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order) -
-						bt_alloc->bta_order;
+	int dma_size, bt_num;
+	dma_addr_t page_offset;
 
-	if (pd->owner_id == OWNER_ID_PHYS_MODE) 
-		return 0;
+	EFRM_ASSERT(pd->owner_id != OWNER_ID_PHYS_MODE);
 
-	dma_addrs = kmalloc((n_pages << nic_sub_order) * sizeof(dma_addr_t),
-			    GFP_ATOMIC);
+	dma_size = 0;
+	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		if (dma_size < bt_alloc->allocs[bt_num].bta_size)
+			dma_size = bt_alloc->allocs[bt_num].bta_size;
+	}
+	dma_addrs = kmalloc(dma_size * sizeof(dma_addr_t), GFP_ATOMIC);
 	if (dma_addrs == NULL)
 		return -ENOMEM;
-	for (i = 0; i < n_pages; ++i) {
-		base_dma_addr = *pci_addrs;
-		for (j = 0; j < (1 << nic_sub_order); j++) {
-			dma_addrs[(i << nic_sub_order) + j] = base_dma_addr;
-			base_dma_addr += EFHW_NIC_PAGE_SIZE <<
-							bt_alloc->bta_order;
+
+	/* Program dma address for the buffer table entries. */
+	page_offset = 0;
+	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		for (i = 0; i < bt_alloc->allocs[bt_num].bta_size; i++) {
+			dma_addrs[i] = *pci_addrs + page_offset;
+			page_offset +=
+				EFHW_NIC_PAGE_SIZE <<
+				bt_alloc->allocs[bt_num].bta_order;
+			if (page_offset == PAGE_SIZE << gfp_order) {
+				page_offset = 0;
+				pci_addrs++;
+			}
 		}
-		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
+		efrm_bt_nic_set(efrm_client_get_nic(pd->rs.rs_client),
+				&bt_alloc->allocs[bt_num], dma_addrs);
 	}
-	efrm_bt_nic_set(efrm_client_get_nic(pd->rs.rs_client),
-			bt_alloc, dma_addrs);
 	kfree(dma_addrs);
 
-	block = bt_alloc->bta_blocks;
-	n = bt_alloc->bta_size;
-	first = bt_alloc->bta_first_entry_offset;
-	do {
-		user_addr = block->btb_vaddr +
-			(first << (EFHW_NIC_PAGE_SHIFT + bt_alloc->bta_order));
-		first = 0;
-		for (i = 0;
-		     i < min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE) <<
-						bt_alloc->bta_order;
-		     i++) {
-			user_addr_put(user_addr, user_addrs);
-			user_addrs = (void *)((char *)user_addrs +
-							user_addrs_stride);
-			user_addr += EFHW_NIC_PAGE_SIZE;
-		}
-		block = block->btb_next;
-		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
-	} while (n > 0);
+	/* Copy buftable addresses to user. */
+	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		block = bt_alloc->allocs[bt_num].bta_blocks;
+		n = bt_alloc->allocs[bt_num].bta_size;
+		first = bt_alloc->allocs[bt_num].bta_first_entry_offset;
+		do {
+			user_addr = block->btb_vaddr +
+				(first << (EFHW_NIC_PAGE_SHIFT +
+					   bt_alloc->allocs[bt_num].bta_order));
+			first = 0;
+			for (i = 0;
+			     i < min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE) <<
+					bt_alloc->allocs[bt_num].bta_order;
+			     i++) {
+				user_addr_put(user_addr, user_addrs);
+				user_addrs = (void *)((char *)user_addrs +
+						      user_addrs_stride);
+				user_addr += EFHW_NIC_PAGE_SIZE;
+			}
+			block = block->btb_next;
+			n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
+		} while (n > 0);
+	}
+
 	return 0;
 }
 
@@ -627,26 +651,137 @@ efrm_pd_nic_order_fixup(struct efrm_pd *pd, int ord_idx, int n_pages,
 	return ord_idx;
 }
 
+static inline int efrm_pd_bt_alloc(struct efrm_pd *pd, int bytes,
+				   int ord_idx,
+				   struct efrm_buffer_table_allocation *bt)
+{
+	return efrm_bt_manager_alloc(efrm_client_get_nic(pd->rs.rs_client),
+				    &pd->bt_managers[ord_idx],
+				    bytes >> (EFHW_NIC_PAGE_SHIFT +
+					      pd->bt_managers[ord_idx].order),
+				    bt);
+}
+
+static int
+efrm_pd_dma_map_bt_unaligned(struct efrm_pd *pd, int n_pages, int gfp_order,
+			     dma_addr_t *pci_addrs, int pci_addrs_stride,
+			     struct efrm_bt_collection *bt_alloc,
+			     int ord_idx, int ord_idx_min)
+{
+	int ord_idx_mid = ord_idx;
+	int bt_num, i;
+	int rc = 0;
+	dma_addr_t mask = (EFHW_NIC_PAGE_SIZE <<
+			   pd->bt_managers[ord_idx].order) - 1;
+	dma_addr_t mask_mid = mask;
+
+	/* ord_idx_min: bt order which can always be used: everything is
+	 * aligned.
+	 * ord_idx: bt order we'd like to use if the dma address is
+	 * aligned.
+	 * Else we map non-aligned parts with ord_idx_min, and
+	 * use ord_idx or (ord_idx-1) for the middle.
+	 */
+	bt_alloc->num_allocs = n_pages * 3;
+	if (PAGE_SHIFT + gfp_order ==
+	    EFHW_NIC_PAGE_SHIFT + pd->bt_managers[ord_idx].order) {
+		ord_idx_mid = ord_idx - 1;
+		mask_mid = (EFHW_NIC_PAGE_SIZE <<
+			   pd->bt_managers[ord_idx_mid].order) - 1;
+		if (ord_idx_mid == ord_idx_min)
+			bt_alloc->num_allocs = n_pages;
+	}
+	EFRM_ASSERT(ord_idx_mid >= ord_idx_min);
+
+	bt_alloc->allocs = kmalloc(
+			sizeof(struct efrm_buffer_table_allocation) *
+						bt_alloc->num_allocs,
+			GFP_ATOMIC);
+	memset(bt_alloc->allocs, 0,
+	       sizeof(struct efrm_buffer_table_allocation) *
+	       bt_alloc->num_allocs);
+	if (bt_alloc->allocs == NULL)
+		return -ENOMEM;
+
+	bt_num = 0;
+	for (i = 0; i < n_pages; i++) {
+		if ((*pci_addrs & mask) == 0) {
+			/* Aligned page: map it */
+			rc = efrm_pd_bt_alloc(
+				pd, PAGE_SIZE << gfp_order, ord_idx,
+				&bt_alloc->allocs[bt_num++]);
+		}
+		else if ((*pci_addrs & mask_mid) == 0) {
+			/* Aligned page, smaller order: map it */
+			rc = efrm_pd_bt_alloc(pd, PAGE_SIZE << gfp_order,
+					      ord_idx_mid,
+					      &bt_alloc->allocs[bt_num++]);
+		}
+		else {
+			/* Non-aligned page: map non-aligned pieces
+			 * separately. */
+			rc = efrm_pd_bt_alloc(
+				pd,
+				((mask_mid + 1) - ((*pci_addrs) & mask_mid)),
+				ord_idx_min,
+				&bt_alloc->allocs[bt_num++]);
+			if (rc != 0)
+				break;
+			rc = efrm_pd_bt_alloc(
+				pd,
+				(PAGE_SIZE << gfp_order) - (mask_mid + 1),
+				ord_idx_mid,
+				&bt_alloc->allocs[bt_num++]);
+			if (rc != 0)
+				break;
+			rc = efrm_pd_bt_alloc(
+				pd,
+				((*pci_addrs) & mask_mid),
+				ord_idx_min,
+				&bt_alloc->allocs[bt_num++]);
+			if (rc != 0)
+				break;
+		}
+		EFRM_ASSERT(bt_num <= bt_alloc->num_allocs);
+	}
+
+	if (rc != 0)
+		efrm_pd_dma_unmap_bt(pd, bt_alloc);
+	return rc;
+}
+
 static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 			      dma_addr_t *pci_addrs, int pci_addrs_stride,
 			      uint64_t *user_addrs, int user_addrs_stride,
 			      void (*user_addr_put)(uint64_t, uint64_t *),
-			      struct efrm_buffer_table_allocation *bt_alloc)
+			      struct efrm_bt_collection *bt_alloc)
 {
-	int rc;
-	int ord_idx;
+	int rc = 0;
+	int ord_idx, ord_idx_min;
 	int nic_order = EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order);
 
 	ord_idx = efrm_pd_bt_find_order_idx(pd, nic_order);
-	ord_idx = efrm_pd_nic_order_fixup(pd, ord_idx, n_pages,
-					  pci_addrs, pci_addrs_stride);
+	ord_idx_min = efrm_pd_nic_order_fixup(pd, ord_idx, n_pages,
+					      pci_addrs, pci_addrs_stride);
 
-	rc = efrm_bt_manager_alloc(
-			efrm_client_get_nic(pd->rs.rs_client),
-			&pd->bt_managers[ord_idx],
-			n_pages << (EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order)
-				    - pd->bt_managers[ord_idx].order),
-			bt_alloc);
+	if (ord_idx == ord_idx_min) {
+		bt_alloc->num_allocs = 1;
+		bt_alloc->allocs = kmalloc(
+			sizeof(struct efrm_buffer_table_allocation),
+			GFP_ATOMIC);
+		if (bt_alloc->allocs == NULL)
+			return -ENOMEM;
+		rc = efrm_pd_bt_alloc(
+				pd, n_pages << (PAGE_SHIFT + gfp_order),
+				ord_idx, &bt_alloc->allocs[0]);
+	}
+	else {
+		rc = efrm_pd_dma_map_bt_unaligned(pd, n_pages, gfp_order,
+						  pci_addrs, pci_addrs_stride,
+						  bt_alloc,
+						  ord_idx, ord_idx_min);
+	}
+
 	if (rc < 0) {
 		EFRM_ERR("%s: ERROR: out of buffer table (%d pages order %d)",
 			 __FUNCTION__, n_pages, gfp_order);
@@ -687,20 +822,26 @@ int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 			 dma_addr_t *pci_addrs, int pci_addrs_stride,
 			 uint64_t *user_addrs, int user_addrs_stride,
 			 void (*user_addr_put)(uint64_t, uint64_t *),
-			 struct efrm_buffer_table_allocation *bt_alloc)
+			 struct efrm_bt_collection *bt_alloc)
 {
 	int rc;
-	int ord_idx = efrm_pd_bt_find_order_idx(pd, bt_alloc->bta_order);
+	int bt_num;
 
 	if (pd->owner_id == OWNER_ID_PHYS_MODE)
 		return -ENOSYS;
 
-	rc = efrm_bt_manager_realloc(efrm_client_get_nic(pd->rs.rs_client),
-				     &pd->bt_managers[ord_idx], bt_alloc);
-	if (rc < 0) {
-		EFRM_ERR("%s: ERROR: out of buffer table (%d pages)",
-			 __FUNCTION__, n_pages);
-		return rc;
+	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		int ord_idx = efrm_pd_bt_find_order_idx(
+				pd, bt_alloc->allocs[bt_num].bta_order);
+		rc = efrm_bt_manager_realloc(
+				efrm_client_get_nic(pd->rs.rs_client),
+				&pd->bt_managers[ord_idx],
+				&bt_alloc->allocs[bt_num]);
+		if (rc < 0) {
+			EFRM_ERR("%s: ERROR: out of buffer table (%d pages)",
+				 __FUNCTION__, n_pages);
+			return rc;
+		}
 	}
 
 	return efrm_pd_bt_map(pd, n_pages, gfp_order,
@@ -716,7 +857,7 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 		    void *p_pci_addrs, int pci_addrs_stride,
 		    uint64_t *user_addrs, int user_addrs_stride,
 		    void (*user_addr_put)(uint64_t, uint64_t *),
-		    struct efrm_buffer_table_allocation *bt_alloc)
+		    struct efrm_bt_collection *bt_alloc)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	int rc;
@@ -767,7 +908,7 @@ EXPORT_SYMBOL(efrm_pd_dma_map);
 
 void efrm_pd_dma_unmap(struct efrm_pd *pd, int n_pages, int gfp_order,
 		       void *p_pci_addrs, int pci_addrs_stride,
-		       struct efrm_buffer_table_allocation *bt_alloc)
+		       struct efrm_bt_collection *bt_alloc)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	if (pd->owner_id != OWNER_ID_PHYS_MODE)

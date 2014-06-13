@@ -57,16 +57,8 @@ Overview
  these events by calling ef_eventq_poll().
 
  The buffers used for packet data are special: They must be pinned so that
- they cannot be paged, and they must be registered for DMA.  There are two
- ways to get memory suitable for DMA:
-
- a) The preferred method is to register application memory using ef_memreg.
-    This approach is the more flexible option because you can use shared
-    memory and/or huge pages.
-
- b) The type ef_iobufset provides an interface for allocating memory
-    suitable for DMA.  This interface is maintained for legacy
-    applications.
+ they cannot be paged, and they must be registered for DMA using an
+ ef_memreg.
 
  The NIC uses a special address space to identify locations in registered
  memory, and such addresses are designated by the type "ef_addr".
@@ -80,9 +72,16 @@ Overview
  received packets to a given VI.
 
  You can request a protection domain be associated with an SR-IOV virtual
- function (VF).  This yields lower latency and allows much more memory to
- be registered.  See the Solarflare Server Adapter User's Guide for details
- of how to enable SR-IOV.
+ function (VF).  This allows more memory to be registered.  Latency and
+ packet rate are slightly worse when using VFs due to address translations
+ in the system IOMMU.  See the Solarflare Server Adapter User's Guide for
+ details of how to enable SR-IOV.
+
+ It is also possible to use physical addressing.  This mode gives the best
+ latency and allows unlimited amounts of memory to be registered.  However,
+ an application using physical addressing can cause the network adapter to
+ read and write arbitrary host memory, and so breaks the system security
+ model.
 
 
 Documentation

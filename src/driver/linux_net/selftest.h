@@ -59,14 +59,13 @@ struct efx_self_tests {
 	struct efx_loopback_self_tests loopback[LOOPBACK_TEST_MAX + 1];
 };
 
-extern void efx_loopback_rx_packet(struct efx_nic *efx,
-				   const char *buf_ptr, int pkt_len);
-extern int efx_selftest(struct efx_nic *efx,
-			struct efx_self_tests *tests,
-			unsigned flags);
-extern void efx_selftest_async_start(struct efx_nic *efx);
-extern void efx_selftest_async_cancel(struct efx_nic *efx);
-extern void efx_selftest_async_work(struct work_struct *data);
-extern int efx_test_memory(struct efx_nic *efx);
+void efx_loopback_rx_packet(struct efx_nic *efx, const char *buf_ptr,
+			    int pkt_len);
+int efx_selftest(struct efx_nic *efx, struct efx_self_tests *tests,
+		 unsigned flags);
+void efx_selftest_async_start(struct efx_nic *efx);
+void efx_selftest_async_cancel(struct efx_nic *efx);
+void efx_selftest_async_work(struct work_struct *data);
+int efx_test_memory(struct efx_nic *efx);
 
 #endif /* EFX_SELFTEST_H */

@@ -42,11 +42,7 @@ function usage()
 
 function generate_kompat_symbols() {
     echo "
-EFX_NEED_ETHTOOL_OFFLOAD_SANITY_CHECKS	kver	<	2.6.10
-EFX_HAVE_MSIX_TABLE_RESERVED		kver	<	2.6.12
-EFX_USE_ETHTOOL_OP_GET_TX_CSUM		kver	>=	2.6.12
 EFX_NEED_UNREGISTER_NETDEVICE_NOTIFIER_FIX	kver	<	2.6.17
-EFX_HAVE_COMPOUND_PAGES			kver	>=	2.6.15
 EFX_HAVE_NONCONST_ETHTOOL_OPS		kver	<	2.6.19
 EFX_NEED_WARN_ON_ONCE			kver	<	2.6.19
 EFX_USE_GSO_SIZE_FOR_MSS		kver	>=	2.6.19
@@ -106,6 +102,7 @@ EFX_NEED_NETIF_SET_REAL_NUM_RX_QUEUES	nsymbol	netif_set_real_num_rx_queues inclu
 EFX_NEED_PCI_CLEAR_MASTER		nsymbol	pci_clear_master	include/linux/pci.h
 EFX_NEED_PCI_MATCH_ID			nsymbol pci_match_id		include/linux/pci.h
 EFX_NEED_PCI_SAVE_RESTORE_WRAPPERS	symtype	pci_save_state		include/linux/pci.h int(struct pci_dev *, u32 *)
+EFX_HAVE_PCI_RESET_FUNCTION		symbol	pci_reset_function	include/linux/pci.h
 EFX_NEED_PRINT_MAC			nsymbol print_mac		include/linux/if_ether.h
 EFX_NEED_RESOURCE_SIZE_T		nsymbol resource_size_t		include/linux/types.h
 EFX_NEED_RESOURCE_SIZE			nsymbol	resource_size		include/linux/ioport.h
@@ -199,12 +196,15 @@ EFX_HAVE_NET_DEVICE_OPS			symbol	net_device_ops		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_MAC 		symbol	ndo_set_vf_mac		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_SPOOFCHK		symbol	ndo_set_vf_spoofchk	include/linux/netdevice.h
 EFX_HAVE_NDO_SET_FEATURES		symbol	ndo_set_features	include/linux/netdevice.h
+EFX_NEED_ETHER_ADDR_COPY		nsymbol ether_addr_copy		include/linux/etherdevice.h
 EFX_NEED_IS_ZERO_ETHER_ADDR		nsymbol	is_zero_ether_addr	include/linux/etherdevice.h
 EFX_NEED_IS_BROADCAST_ETHER_ADDR	nsymbol	is_broadcast_ether_addr	include/linux/etherdevice.h
 EFX_NEED_IS_MULTICAST_ETHER_ADDR	nsymbol	is_multicast_ether_addr	include/linux/etherdevice.h
 EFX_NEED_COMPARE_ETHER_ADDR		nsymbol	compare_ether_addr	include/linux/etherdevice.h
 EFX_NEED_ETHER_ADDR_EQUAL		nsymbol	ether_addr_equal	include/linux/etherdevice.h
 EFX_NEED_ETH_BROADCAST_ADDR		nsymbol	eth_broadcast_addr	include/linux/etherdevice.h
+EFX_NEED_MAC_PTON			nsymbol mac_pton		include/linux/kernel.h	include/linux/if_ether.h
+EFX_HAVE_HEX_TO_BIN			symbol hex_to_bin		include/linux/kernel.h
 EFX_NEED_IPV4_IS_MULTICAST		nsymbol	ipv4_is_multicast	include/linux/in.h
 EFX_HAVE_LIST_SPLICE_TAIL_INIT		symbol	list_splice_tail_init	include/linux/list.h
 EFX_NEED_LIST_FIRST_ENTRY		nsymbol	list_first_entry	include/linux/list.h
@@ -216,7 +216,6 @@ EFX_HAVE_FDTABLE_FULL_ACCESSORS		symbol	__set_close_on_exec	include/linux/fdtabl
 EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS	symbol	fd_is_open		include/linux/fdtable.h
 EFX_HAVE_FDTABLE_H			file				include/linux/fdtable.h
 EFX_NEED_SET_NORMALIZED_TIMESPEC	custom
-EFX_HAVE_PROCFS_DELETED			symbol	deleted			include/linux/proc_fs.h
 EFX_HAVE_VLAN_RX_PATH			symbol	vlan_hwaccel_receive_skb include/linux/if_vlan.h
 EFX_HAVE_NDO_SET_MULTICAST_LIST		symbol	ndo_set_multicast_list	include/linux/netdevice.h
 EFX_HAVE_OLD_ETHTOOL_GET_RXNFC		memtype	struct_ethtool_ops	get_rxnfc	include/linux/ethtool.h int (*)(struct net_device *, struct ethtool_rxnfc *, void *)
@@ -253,6 +252,8 @@ EFX_NEED_KOBJECT_INIT_AND_ADD		nsymbol	kobject_init_and_add	include/linux/kobjec
 EFX_HAVE_NON_CONST_JHASH2		symtype	jhash2			include/linux/jhash.h		u32 (u32 *, u32, u32)
 EFX_NEED_KOBJECT_SET_NAME_VARGS		nsymbol kobject_set_name_vargs	include/linux/kobject.h
 EFX_USE_ETHTOOL_OPS_EXT			symbol	ethtool_ops_ext		include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_GET_TS_INFO		member	struct_ethtool_ops get_ts_info	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO	member	struct_ethtool_ops_ext get_ts_info	include/linux/ethtool.h
 EFX_HAVE_OLD___VLAN_PUT_TAG		symtype	__vlan_put_tag		include/linux/if_vlan.h	struct sk_buff *(struct sk_buff *, u16)
 EFX_HAVE_NETDEV_NOTIFIER_NETDEV_PTR	nsymbol	netdev_notifier_info	include/linux/netdevice.h
 EFX_HAVE_NETDEV_RFS_INFO		symbol	netdev_rfs_info		include/linux/netdevice.h
@@ -265,6 +266,14 @@ EFX_HAVE_PHYS_ADDR_T                    custom
 EFX_HAVE_IOREMAP_WC			symbol	ioremap_wc		arch/$SRCARCH/include/asm/io.h include/asm-$SRCARCH/io.h include/asm-generic/io.h
 EFX_NEED_SKB_TRANSPORT_HEADER_WAS_SET	nsymbol	skb_transport_header_was_set include/linux/skbuff.h
 EFX_HAVE_OLD_KMAP_ATOMIC		custom
+EFX_HAVE_DEBUGFS_CREATE_SYMLINK		symbol	debugfs_create_symlink	include/linux/debugfs.h
+EFX_HAVE_INODE_U_GENERIC_IP		symbol	generic_ip		include/linux/fs.h
+EFX_HAVE_NAPI_STRUCT			symbol	napi_struct		include/linux/netdevice.h
+EFX_NEED_NAPI_HASH			nsymbol	napi_hash_add		include/linux/netdevice.h
+EFX_NEED_SKB_SET_HASH			nsymbol skb_set_hash		include/linux/skbuff.h
+EFX_HAVE_SKB_L4HASH			member	struct_sk_buff l4_rxhash	include/linux/skbuff.h
+EFX_HAVE_BUSY_POLL			file				include/net/busy_poll.h
+EFX_NEED_USLEEP_RANGE			nsymbol	usleep_range		include/linux/delay.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
@@ -297,6 +306,14 @@ EFX_HAVE_KMEM_CACHE_FLAGS		symtype	kmem_cache_create	include/linux/slab.h struct
 EFX_HAVE_KMEM_CACHE_CACHEP		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(struct kmem_cache *, void*))
 
 EFX_HAVE_ALLOC_FILE			symbol	alloc_file	include/linux/file.h
+EFX_HAVE_SELECT_QUEUE			member	struct_net_device_ops ndo_select_queue	include/linux/netdevice.h
+EFX_HAVE_SKB_OOO_OKAY			member	struct_sk_buff ooo_okay	include/linux/skbuff.h
+EFX_HAVE_SKB_TX_HASH			symbol	skb_tx_hash	include/linux/netdevice.h include/linux/skbuff.h
+EFX_HAVE_SK_SET_TX_QUEUE		symbol	sk_tx_queue_set	include/net/sock.h
+EFX_HAVE_SKB_GET_RX_QUEUE		symbol	skb_get_rx_queue	include/linux/skbuff.h
+EFX_NEED_RCU_ACCESS_POINTER		nsymbol	rcu_access_pointer	include/linux/rcupdate.h
+EFX_NEED_CPU_ONLINE_MASK		nsymbol	cpu_online_mask		include/linux/cpumask.h
+EFX_HAVE_CPUMASK_OF_PCIBUS		symbol	cpumask_of_pcibus	arch/$SRCARCH/include/asm/pci.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 

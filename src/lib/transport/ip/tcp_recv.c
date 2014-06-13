@@ -43,7 +43,9 @@ struct tcp_recv_info {
   const ci_tcp_recvmsg_args* a;
 };
 
+#ifndef __KERNEL__
 static int ci_tcp_recvmsg_urg(struct tcp_recv_info *rinf);
+#endif
 
 static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf);
 
@@ -371,9 +373,12 @@ ci_tcp_fill_recv_timestamp(ci_netif* ni, struct msghdr* msg,
         if( flags & CI_IP_CMSG_TIMESTAMP )
           ip_cmsg_recv_timestamp(ni, timestamp, &cmsg_state);
 
-      if( flags & CI_IP_CMSG_TIMESTAMPING )
+      if( flags & CI_IP_CMSG_TIMESTAMPING ) {
+        if( ! (hw_timestamp->tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
+                timestaping_flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
         ip_cmsg_recv_timestamping(ni, timestamp, hw_timestamp,
                 timestaping_flags, &cmsg_state);
+      }
 
       msg->msg_controllen = cmsg_state.cmsg_bytes_used;
     }
@@ -419,8 +424,12 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   have_polled = 0;
   ci_assert_equal(rinf.rc, 0);
 
-  if( (flags & MSG_OOB) )
+#ifndef __KERNEL__
+  if( (flags & (MSG_OOB | MSG_ERRQUEUE)) )
     goto slow_path;
+#else
+  ci_assert_equal(flags & ~MSG_DONTWAIT, 0);
+#endif
 
   /* [piov] gives keeps track of our position in the apps buffer(s). */
   ci_iovec_ptr_init_nz(&rinf.piov, a->msg->msg_iov, a->msg->msg_iovlen);
@@ -577,7 +586,69 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   goto poll_recv_queue;
 
 
+#ifndef __KERNEL__
  slow_path:
+
+  if( flags & MSG_ERRQUEUE ) {
+    if( OO_PP_NOT_NULL(ts->s.timestamp_q_extract) ) {
+      ci_ip_pkt_fmt* pkt;
+      struct onload_scm_timestamping_stream stamps;
+      struct cmsg_state cmsg_state;
+      int tx_hw_stamp_in_sync;
+
+      pkt = PKT_CHK_NNL(ni, ts->s.timestamp_q_extract);
+      if( pkt->tx_hw_stamp.tv_sec == CI_PKT_TX_HW_STAMP_CONSUMED ) {
+        if( OO_PP_IS_NULL(pkt->tsq_next) ) {
+          rinf.rc = -EAGAIN;
+          CI_SET_ERROR(rinf.rc, -rinf.rc);
+          goto unlock_out;   
+        }
+        ts->s.timestamp_q_extract = pkt->tsq_next;
+        pkt = PKT_CHK_NNL(ni, ts->s.timestamp_q_extract);
+        ci_assert(pkt->tx_hw_stamp.tv_sec != CI_PKT_TX_HW_STAMP_CONSUMED);
+      }
+
+      a->msg->msg_flags = 0;
+      cmsg_state.msg = a->msg;
+      cmsg_state.cm = a->msg->msg_control;
+      cmsg_state.cmsg_bytes_used = 0;
+      memset(&stamps, 0, sizeof(stamps));
+      tx_hw_stamp_in_sync = pkt->tx_hw_stamp.tv_nsec &
+                            CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC;
+
+      if( pkt->flags & CI_PKT_FLAG_RTQ_RETRANS ) {
+        if( pkt->pf.tcp_tx.first_tx_hw_stamp.tv_nsec &
+            CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC ) {
+          stamps.first_sent.tv_sec = pkt->pf.tcp_tx.first_tx_hw_stamp.tv_sec;
+          stamps.first_sent.tv_nsec = pkt->pf.tcp_tx.first_tx_hw_stamp.tv_nsec;
+        }
+        if( tx_hw_stamp_in_sync ) {
+          stamps.last_sent.tv_sec = pkt->tx_hw_stamp.tv_sec;
+          stamps.last_sent.tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+        }
+      }
+      else if( tx_hw_stamp_in_sync ) {
+        stamps.first_sent.tv_sec = pkt->tx_hw_stamp.tv_sec;
+        stamps.first_sent.tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+      }
+      stamps.len = pkt->pf.tcp_tx.end_seq - pkt->pf.tcp_tx.start_seq;
+
+      ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING_STREAM,
+                  sizeof(stamps), &stamps);
+
+      /* Mark this packet/timestamp as consumed */
+      pkt->tx_hw_stamp.tv_sec = CI_PKT_TX_HW_STAMP_CONSUMED;
+
+      ci_ip_cmsg_finish(&cmsg_state);
+      a->msg->msg_flags |= MSG_ERRQUEUE;
+
+      rinf.rc = 0;
+      goto unlock_out;
+    }
+    rinf.rc = -EAGAIN;
+    CI_SET_ERROR(rinf.rc, -rinf.rc);
+    goto unlock_out;
+  }
 
   ci_assert(flags & MSG_OOB);
   rinf.rc = ci_tcp_recvmsg_urg(&rinf);
@@ -585,6 +656,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   if( rinf.rc >= 0 )  goto success_unlock_out;
   CI_SET_ERROR(rinf.rc, -rinf.rc);
   goto unlock_out;
+#endif
 
  rx_done:
   if( tcp_rcv_usr(ts) && !ci_iovec_ptr_is_empty_proper(&rinf.piov) )
@@ -667,6 +739,7 @@ static void move_from_recv2_to_recv1(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
+#ifndef __KERNEL__
 static int ci_tcp_recvmsg_urg(struct tcp_recv_info *rinf)
 {
   ci_netif* ni = rinf->a->ni;
@@ -757,6 +830,7 @@ static int ci_tcp_recvmsg_urg(struct tcp_recv_info *rinf)
   rinf->stack_locked = 0;
   return rc;
 }
+#endif
 
 
 static void ci_tcp_recvmsg_recv2_peek2(struct tcp_recv_info *rinfo,

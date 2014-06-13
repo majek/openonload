@@ -179,11 +179,23 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
       */
 
       if( nsn->oo_vi_flags & OO_VI_FLAGS_RX_HW_TS_EN ) {
-        if( ef_vi_receive_get_timestamp(&netif->nic_hw[pkt->intf_i].vi,
-                                        PKT_START(pkt) - nsn->rx_prefix_len,
-                                        &stamp) == 0 ) {
-          LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu", OO_PKT_FMT(pkt),
-              stamp.tv_sec, stamp.tv_nsec));
+        unsigned sync_flags;
+        int rc = ef_vi_receive_get_timestamp_with_sync_flags
+          (&netif->nic_hw[pkt->intf_i].vi,
+           PKT_START(pkt) - nsn->rx_prefix_len, &stamp, &sync_flags);
+        if( rc == 0 ) {
+          int tsf = (NI_OPTS(netif).timestamping_reporting &
+                     CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC) ?
+                    EF_VI_SYNC_FLAG_CLOCK_IN_SYNC :
+                    EF_VI_SYNC_FLAG_CLOCK_SET;
+          stamp.tv_nsec =
+                    (stamp.tv_nsec & ~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) |
+                    ((sync_flags & tsf) ? CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
+          nsn->last_rx_timestamp.tv_sec = stamp.tv_sec;
+          nsn->last_rx_timestamp.tv_nsec = stamp.tv_nsec;
+
+          LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
+              OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
         } else {
           LOG_NR(log(LPF "RX id=%d missing timestamp", OO_PKT_FMT(pkt)));
           stamp.tv_sec = 0;
@@ -313,50 +325,65 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
    */
   ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
 
-  ip = oo_ip_hdr(pkt);
   pkt->pay_len = frame_len;
   oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
+  if( pkt->pay_len <=
+      sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr) + oo_ether_hdr_size(pkt) ) {
+    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
+    LOG_U(log(FN_FMT "BAD frame_len=%d",
+              FN_PRI_ARGS(ni), pkt->pay_len));
+    goto drop;
+  }
+  
+  ip = oo_ip_hdr(pkt);
   ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
   ip_paylen = ip_len - sizeof(ci_ip4_hdr);
-
-  if( ci_ip_csum_correct(ip, pkt->pay_len - oo_ether_hdr_size(pkt)) ) {
-    if( pkt->pay_len < oo_ether_hdr_size(pkt) + ip_len ) {
-      LOG_U(log(FN_FMT "BAD ip_len=%d frame_len=%d",
-                FN_PRI_ARGS(ni), ip_len, pkt->pay_len));
-    }
-    else if( ip->ip_protocol == IPPROTO_TCP ) {
-      if( ci_tcp_csum_correct(pkt, ip_paylen) ) {
-        handle_rx_pkt(ni, ps, pkt);
-        return 1;
-      }
-      else {
-        LOG_U(log(FN_FMT "BAD TCP CHECKSUM %04x "PKT_DBG_FMT, FN_PRI_ARGS(ni),
-                  (unsigned) PKT_TCP_HDR(pkt)->tcp_check_be16,
-                  PKT_DBG_ARGS(pkt)));
-        LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), frame_len, 0));
-      }
-    }
-#if CI_CFG_UDP
-    else if( ip->ip_protocol == IPPROTO_UDP ) {
-      if( ci_udp_csum_correct(pkt, PKT_UDP_HDR(pkt)) ) {
-        handle_rx_pkt(ni, ps, pkt);
-        return 1;
-      }
-      else {
-        CI_UDP_STATS_INC_IN_ERRS(ni);
-        LOG_U(log(FN_FMT "BAD UDP CHECKSUM %04x", FN_PRI_ARGS(ni),
-                  (unsigned) PKT_UDP_HDR(pkt)->udp_check_be16));
-        LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), frame_len, 0));
-      }
-    }
-#endif
+  if( pkt->pay_len < oo_ether_hdr_size(pkt) + ip_len ||
+      ip_paylen < sizeof(ci_tcp_hdr) ) {
+    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
+    LOG_U(log(FN_FMT "BAD ip_len=%d frame_len=%d",
+              FN_PRI_ARGS(ni), ip_len, pkt->pay_len));
+    goto drop;
   }
-  else {
+
+  if( ! ci_ip_csum_correct(ip, pkt->pay_len - oo_ether_hdr_size(pkt)) ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
     LOG_U(log(FN_FMT "IP BAD CHECKSUM", FN_PRI_ARGS(ni)));
-    LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), frame_len, 0));
+    goto drop;
   }
 
+
+  if( ip->ip_protocol == IPPROTO_TCP ) {
+    if( ci_tcp_csum_correct(pkt, ip_paylen) ) {
+      handle_rx_pkt(ni, ps, pkt);
+      return 1;
+    }
+    else {
+      LOG_U(log(FN_FMT "BAD TCP CHECKSUM %04x "PKT_DBG_FMT, FN_PRI_ARGS(ni),
+                (unsigned) PKT_TCP_HDR(pkt)->tcp_check_be16,
+                PKT_DBG_ARGS(pkt)));
+      goto drop;
+    }
+  }
+#if CI_CFG_UDP
+  else if( ip->ip_protocol == IPPROTO_UDP ) {
+    ci_udp_hdr* udp = PKT_UDP_HDR(pkt);
+    pkt->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16);
+    if( ci_udp_csum_correct(pkt, udp) ) {
+      handle_rx_pkt(ni, ps, pkt);
+      return 1;
+    }
+    else {
+      CI_UDP_STATS_INC_IN_ERRS(ni);
+      LOG_U(log(FN_FMT "BAD UDP CHECKSUM %04x", FN_PRI_ARGS(ni),
+                (unsigned) udp->udp_check_be16));
+      goto drop;
+    }
+  }
+#endif
+
+drop:
+  LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), frame_len, 0));
   LOG_NR(log(LPF "DROP"));
   LOG_DR(ci_hex_dump(ci_log_fn, pkt, 40, 0));
   return 0;
@@ -538,6 +565,8 @@ static void process_post_poll_list(ci_netif* ni)
 
 # define UDP_CAN_FREE(us)  ((us)->tx_count == 0)
 
+#define CI_NETIF_TX_VI(ni, nic_i, label)  (&(ni)->nic_hw[nic_i].vi)
+
 
 static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
                                          struct ci_netif_poll_state* ps,
@@ -554,7 +583,7 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 
   if( ci_udp_tx_advertise_space(us) ) {
     if( ! (us->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ) {
-      ci_udp_wake(netif, us, CI_SB_FLAG_WAKE_TX);
+      ci_udp_wake_possibly_not_in_poll(netif, us, CI_SB_FLAG_WAKE_TX);
       ci_netif_put_on_post_poll(netif, &us->s.b);
     }
     else if( UDP_CAN_FREE(us) ) {
@@ -563,6 +592,17 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
     }
   }
 
+  /* linux/Documentation/networking/timestamping.txt:
+   * If the outgoing packet has to be fragmented, then only the first
+   * fragment is time stamped and returned to the sending socket. */
+  if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
+    frag_next = ci_udp_timestamp_q_enqueue(netif, us, pkt);
+    if( OO_PP_IS_NULL(frag_next) )
+      return;
+    pkt = PKT_CHK(netif, frag_next);
+  }
+
+  /* Free this packet and all the fragments if possible. */
   while( 1 ) {
     if( pkt->refcount == 1 ) {
       frag_next = pkt->frag_next;
@@ -598,7 +638,7 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 
 ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
                                           struct ci_netif_poll_state* ps,
-                                          ci_ip_pkt_fmt* pkt)
+                                          ci_ip_pkt_fmt* pkt, ef_event* ev)
 {
   ci_netif_state_nic_t* nic = &ni->state->nic[pkt->intf_i];
   /* debug check - take back ownership of buffer from NIC */
@@ -610,6 +650,35 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
     ci_pio_buddy_free(ni, &nic->pio_buddy, pkt->pio_addr, pkt->pio_order);
     pkt->pio_addr = -1;
   }
+
+  if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
+    if( ev != NULL && EF_EVENT_TYPE(*ev) == EF_EVENT_TYPE_TX_WITH_TIMESTAMP ) {
+      int opt_tsf = ((NI_OPTS(ni).timestamping_reporting) &
+                     CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC) ?
+                    EF_VI_SYNC_FLAG_CLOCK_IN_SYNC :
+                    EF_VI_SYNC_FLAG_CLOCK_SET;
+      int pkt_tsf = EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(*ev);
+
+      pkt->tx_hw_stamp.tv_sec = EF_EVENT_TX_WITH_TIMESTAMP_SEC(*ev);
+      pkt->tx_hw_stamp.tv_nsec =
+                    (EF_EVENT_TX_WITH_TIMESTAMP_NSEC(*ev) &
+                     (~CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC)) |
+                    ((pkt_tsf & opt_tsf) ?
+                     CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
+    }
+    else {
+      /* Fixme: suppress this message if ev=NULL as a result of reset? */
+      if( CI_NETIF_TX_VI(ni, pkt->intf_i, ev->tx_timestamp.q_id)->vi_flags &
+          EF_VI_TX_TIMESTAMPS ) {
+        ci_log("ERROR: TX timestamp requested, but non-timestamped "
+                "TX complete event received.");
+      }
+      pkt->flags &= ~CI_PKT_FLAG_TX_TIMESTAMPED;
+    }
+
+  }
+
+
 #if CI_CFG_UDP
   if( pkt->flags & CI_PKT_FLAG_UDP )
     ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
@@ -622,11 +691,9 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
 void ci_netif_tx_pkt_complete(ci_netif* ni, struct ci_netif_poll_state* ps,
                               ci_ip_pkt_fmt* pkt)
 {
-  __ci_netif_tx_pkt_complete(ni, ps, pkt);
+  __ci_netif_tx_pkt_complete(ni, ps, pkt, NULL);
 }
 
-
-#define CI_NETIF_TX_VI(ni, nic_i, label)  (&(ni)->nic_hw[nic_i].vi)
 
 
 static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
@@ -640,7 +707,6 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
   int i, n_evs;
   oo_pkt_p pp;
 
-  s.rx_pkt = NULL;
   s.frag_pkt = NULL;
   s.frag_bytes = 0;  /*??*/
 
@@ -657,6 +723,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
     if( n_evs == 0 )
       break;
 
+    s.rx_pkt = NULL;
     for( i = 0; i < n_evs; ++i ) {
       /* Look for RX events first to minimise latency. */
       if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX ) {
@@ -696,12 +763,16 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
           OO_PP_INIT(ni, pp, ids[j]);
           pkt = PKT_CHK(ni, pp);
           ++ni->state->nic[intf_i].tx_dmaq_done_seq;
-          __ci_netif_tx_pkt_complete(ni, ps, pkt);
+          __ci_netif_tx_pkt_complete(ni, ps, pkt, &ev[i]);
         }
-        ci_assert_equiv((ef_vi_transmit_fill_level(vi) == 0 &&
-                         ni->state->nic[intf_i].dmaq.num == 0),
-                        (ni->state->nic[intf_i].tx_dmaq_insert_seq ==
-                         ni->state->nic[intf_i].tx_dmaq_done_seq));
+      }
+
+      else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_TX_WITH_TIMESTAMP ) {
+        CITP_STATS_NETIF_INC(ni, tx_evs);
+        OO_PP_INIT(ni, pp, ev[i].tx_timestamp.rq_id);
+        pkt = PKT_CHK(ni, pp);
+        ++ni->state->nic[intf_i].tx_dmaq_done_seq;
+        __ci_netif_tx_pkt_complete(ni, ps, pkt, &ev[i]);
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_NO_DESC_TRUNC ) {
@@ -735,13 +806,23 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
       }
     }
 
+#ifndef NDEBUG
+    {
+      ef_vi* vi = CI_NETIF_TX_VI(ni, intf_i, ev[i].tx_timestamp.q_id);
+      ci_assert_equiv((ef_vi_transmit_fill_level(vi) == 0 &&
+                       ni->state->nic[intf_i].dmaq.num == 0),
+                      (ni->state->nic[intf_i].tx_dmaq_insert_seq ==
+                       ni->state->nic[intf_i].tx_dmaq_done_seq));
+    }
+#endif
+
+    if( s.rx_pkt != NULL ) {
+      ci_parse_rx_vlan(s.rx_pkt);
+      handle_rx_pkt(ni, ps, s.rx_pkt);
+    }
+
     total_evs += n_evs;
   } while( total_evs < NI_OPTS(ni).evs_per_poll );
-
-  if( s.rx_pkt != NULL ) {
-    ci_parse_rx_vlan(s.rx_pkt);
-    handle_rx_pkt(ni, ps, s.rx_pkt);
-  }
 
   if( s.frag_pkt != NULL ) {
     s.frag_pkt->pay_len = s.frag_bytes;

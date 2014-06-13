@@ -23,7 +23,7 @@
 
 
 struct efch_memreg {
-  struct efrm_buffer_table_allocation buf_tbl_alloc;
+  struct efrm_bt_collection           buf_tbl_alloc;
   struct efrm_pd                     *pd;
   int                                 n_pages;
   int                                 order;

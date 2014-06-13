@@ -162,6 +162,7 @@ efhw_keventq_ctor(struct efhw_nic *nic, int instance,
 				    1 /* dos protection enable*/,
 				    0 /* not used on falcon */,
 				    0 /* not used on falcon */,
+				    NULL /* not used on falcon */,
 				    NULL /* not used on falcon */);
 
 	evq->lock = KEVQ_UNLOCKED;

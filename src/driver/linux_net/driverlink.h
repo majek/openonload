@@ -28,15 +28,20 @@
 
 struct efx_nic;
 
-extern void efx_dl_register_nic(struct efx_nic *efx);
-extern void efx_dl_unregister_nic(struct efx_nic *efx);
+void efx_dl_register_nic(struct efx_nic *efx);
+void efx_dl_unregister_nic(struct efx_nic *efx);
 
 /* Suspend and resume client drivers over a hardware reset */
-extern void efx_dl_reset_suspend(struct efx_nic *efx);
-extern void efx_dl_reset_resume(struct efx_nic *efx, int ok);
+void efx_dl_reset_suspend(struct efx_nic *efx);
+void efx_dl_reset_resume(struct efx_nic *efx, int ok);
 
 /* Send unrecognised event to client drivers */
-extern bool efx_dl_handle_event(struct efx_nic *efx, void *event);
+bool efx_dl_handle_event(struct efx_nic *efx, void *event);
+
+/* Pass the first fragment of an RX packet to client drivers for inspection,
+ * allowing them to request that it be discarded
+ */
+bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len);
 
 /* List of all registered Efx ports. Protected by the rtnl_lock */
 extern struct list_head efx_port_list;

@@ -99,22 +99,19 @@ MODULE_PARM_DESC(efx_disable_port_on_mpe,
 #define _EFX_CHANNEL_MAGIC_RX_DRAIN	0x000103
 #define _EFX_CHANNEL_MAGIC_TX_DRAIN	0x000104
 
-#define _EFX_CHANNEL_MAGIC(_code, _data)			\
-	((_code) << 8 | (_data))
-#define _EFX_CHANNEL_MAGIC_CODE(_magic)				\
-	((_magic) >> 8)
+#define _EFX_CHANNEL_MAGIC(_code, _data)	((_code) << 8 | (_data))
+#define _EFX_CHANNEL_MAGIC_CODE(_magic)		((_magic) >> 8)
 
-#define EFX_CHANNEL_MAGIC_TEST(_channel)			\
-	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_TEST,		\
-			   (_channel)->channel)
-#define EFX_CHANNEL_MAGIC_FILL(_rx_queue)			\
-	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_FILL,		\
+#define EFX_CHANNEL_MAGIC_TEST(_channel)				\
+	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_TEST, (_channel)->channel)
+#define EFX_CHANNEL_MAGIC_FILL(_rx_queue)				\
+	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_FILL,			\
 			   efx_rx_queue_index(_rx_queue))
-#define EFX_CHANNEL_MAGIC_RX_DRAIN(_rx_queue)			\
-	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_RX_DRAIN,		\
+#define EFX_CHANNEL_MAGIC_RX_DRAIN(_rx_queue)				\
+	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_RX_DRAIN,			\
 			   efx_rx_queue_index(_rx_queue))
-#define EFX_CHANNEL_MAGIC_TX_DRAIN(_tx_queue)			\
-	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_TX_DRAIN,		\
+#define EFX_CHANNEL_MAGIC_TX_DRAIN(_tx_queue)				\
+	_EFX_CHANNEL_MAGIC(_EFX_CHANNEL_MAGIC_TX_DRAIN,			\
 			   (_tx_queue)->queue)
 
 static void efx_farch_magic_event(struct efx_channel *channel, u32 magic);
@@ -125,7 +122,6 @@ static void efx_farch_magic_event(struct efx_channel *channel, u32 magic);
  *
  **************************************************************************/
 
-/* Write to a buffer table entry, locking as appropriate. */
 static inline void efx_write_buf_tbl(struct efx_nic *efx, efx_qword_t *value,
 				     unsigned int index)
 {
@@ -314,13 +310,12 @@ static int efx_alloc_special_buffer(struct efx_nic *efx,
 		return -ENOMEM;
 	buffer->entries = len / EFX_BUF_SIZE;
 	BUG_ON(buffer->buf.dma_addr & (EFX_BUF_SIZE - 1));
-	buffer->index = efx->next_buffer_table;
 
 	/* Select new buffer ID */
 	buffer->index = efx->next_buffer_table;
 	efx->next_buffer_table += buffer->entries;
 #ifdef CONFIG_SFC_SRIOV
-	BUG_ON(efx_sriov_enabled(efx) &&
+	BUG_ON(efx_siena_sriov_enabled(efx) &&
 	       efx->vf_buftbl_base < efx->next_buffer_table);
 #endif
 
@@ -387,6 +382,20 @@ static inline void efx_farch_push_tx_desc(struct efx_tx_queue *tx_queue,
 			FR_BZ_TX_DESC_UPD_P0, tx_queue->queue);
 }
 
+/* Decide whether to push a TX descriptor to the NIC vs merely writing
+ * the doorbell.  This can reduce latency when we are adding a single
+ * descriptor to an empty queue, but is otherwise pointless.  Further,
+ * Falcon and Siena have hardware bugs (SF bug 33851) that may be
+ * triggered if we don't check this.
+*/
+static inline bool efx_farch_may_push_tx_desc(struct efx_tx_queue *tx_queue,
+					      unsigned int write_count)
+{
+	bool was_empty = __efx_nic_tx_is_empty(tx_queue, write_count);
+
+	tx_queue->empty_read_count = 0;
+	return was_empty && tx_queue->write_count - write_count == 1;
+}
 
 /* For each entry inserted into the software descriptor ring, create a
  * descriptor in the hardware TX descriptor ring (in host memory), and
@@ -421,7 +430,7 @@ void efx_farch_tx_write(struct efx_tx_queue *tx_queue)
 
 	wmb(); /* Ensure descriptors are written before they are fetched */
 
-	if (efx_nic_may_push_tx_desc(tx_queue, old_write_count)) {
+	if (efx_farch_may_push_tx_desc(tx_queue, old_write_count)) {
 		txd = efx_tx_desc(tx_queue,
 				  old_write_count & tx_queue->ptr_mask);
 		efx_farch_push_tx_desc(tx_queue, txd);
@@ -452,14 +461,14 @@ int efx_farch_tx_probe(struct efx_tx_queue *tx_queue)
 
 void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 {
-	efx_oword_t tx_desc_ptr;
 	struct efx_nic *efx = tx_queue->efx;
+	efx_oword_t reg;
 
 	/* Pin TX descriptor ring */
 	efx_init_special_buffer(efx, &tx_queue->txd);
 
 	/* Push TX descriptor ring to card */
-	EFX_POPULATE_OWORD_10(tx_desc_ptr,
+	EFX_POPULATE_OWORD_10(reg,
 			      FRF_AZ_TX_DESCQ_EN, 1,
 			      FRF_AZ_TX_ISCSI_DDIG_EN, 0,
 			      FRF_AZ_TX_ISCSI_HDIG_EN, 0,
@@ -475,17 +484,15 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
 		int csum = tx_queue->queue & EFX_TXQ_TYPE_OFFLOAD;
-		EFX_SET_OWORD_FIELD(tx_desc_ptr, FRF_BZ_TX_IP_CHKSM_DIS, !csum);
-		EFX_SET_OWORD_FIELD(tx_desc_ptr, FRF_BZ_TX_TCP_CHKSM_DIS,
+		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_IP_CHKSM_DIS, !csum);
+		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_TCP_CHKSM_DIS,
 				    !csum);
 	}
 
-	efx_writeo_table(efx, &tx_desc_ptr, efx->type->txd_ptr_tbl_base,
+	efx_writeo_table(efx, &reg, efx->type->txd_ptr_tbl_base,
 			 tx_queue->queue);
 
 	if (efx_nic_rev(efx) < EFX_REV_FALCON_B0) {
-		efx_oword_t reg;
-
 		/* Only 128 bits in this register */
 		BUILD_BUG_ON(EFX_MAX_TX_QUEUES > 128);
 
@@ -708,7 +715,7 @@ static int efx_farch_flush_queues_wait(struct efx_nic *efx, unsigned timeout)
 		 * the firmware (though we will still have to poll for
 		 * completion). If that fails, fall back to the old scheme.
 		 */
-		if (efx_sriov_enabled(efx)) {
+		if (efx_siena_sriov_enabled(efx)) {
 			rc = efx_mcdi_flush_rxqs(efx);
 			if (!rc)
 				goto wait;
@@ -748,21 +755,21 @@ static bool efx_check_tx_flush_complete(struct efx_nic *efx)
 	efx_oword_t txd_ptr_tbl;
 	struct efx_channel *channel;
 	struct efx_tx_queue *tx_queue;
-	int err;
 
 	efx_for_each_channel(channel, efx) {
 		efx_for_each_channel_tx_queue(tx_queue, channel) {
 			efx_reado_table(efx, &txd_ptr_tbl,
 					FR_BZ_TX_DESC_PTR_TBL, tx_queue->queue);
-			err = (EFX_OWORD_FIELD(txd_ptr_tbl, FRF_AZ_TX_DESCQ_FLUSH) ||
-			       EFX_OWORD_FIELD(txd_ptr_tbl, FRF_AZ_TX_DESCQ_EN));
-			if (err) {
+			if (EFX_OWORD_FIELD(txd_ptr_tbl,
+					    FRF_AZ_TX_DESCQ_FLUSH) ||
+			    EFX_OWORD_FIELD(txd_ptr_tbl,
+					    FRF_AZ_TX_DESCQ_EN)) {
 				netif_dbg(efx, hw, efx->net_dev,
 					  "flush did not complete on TXQ %d\n",
 					  tx_queue->queue);
 				i = false;
-			}
-			else if (atomic_cmpxchg(&tx_queue->flush_outstanding, 1, 0)) {
+			} else if (atomic_cmpxchg(&tx_queue->flush_outstanding,
+						  1, 0)) {
 				/* The flush is complete, but we didn't
 				 * receive a flush completion event
 				 */
@@ -847,6 +854,28 @@ int efx_farch_fini_dmaq(struct efx_nic *efx)
 
 	return rc;
 }
+
+/* Reset queue and flush accounting after FLR
+ *
+ * One possible cause of FLR recovery is that DMA may be failing (eg. if bus
+ * mastering was disabled), in which case we don't receive (RXQ) flush
+ * completion events.  This means that efx->rxq_flush_outstanding remained at 4
+ * after the FLR; also, efx->active_queues was non-zero (as no flush completion
+ * events were received, and we didn't go through efx_check_tx_flush_complete())
+ * If we don't fix this up, on the next call to efx_realloc_channels() we won't
+ * flush any RX queues because efx->rxq_flush_outstanding is at the limit of 4
+ * for batched flush requests; and the efx->active_queues gets messed up because
+ * we keep incrementing for the newly initialised queues, but it never went to
+ * zero previously.  Then we get a timeout every time we try to restart the
+ * queues, as it doesn't go back to zero when we should be flushing the queues.
+ */
+void efx_farch_finish_flr(struct efx_nic *efx)
+{
+	atomic_set(&efx->rxq_flush_pending, 0);
+	atomic_set(&efx->rxq_flush_outstanding, 0);
+	atomic_set(&efx->active_queues, 0);
+}
+
 
 /**************************************************************************
  *
@@ -965,7 +994,7 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 	bool rx_ev_tcp_udp_chksum_err, rx_ev_eth_crc_err;
 	bool rx_ev_frm_trunc, rx_ev_drib_nib, rx_ev_tobe_disc;
 	bool rx_ev_other_err, rx_ev_pause_frm;
-	bool rx_ev_ip_frag_err, rx_ev_hdr_type, rx_ev_mcast_pkt;
+	bool rx_ev_hdr_type, rx_ev_mcast_pkt;
 	unsigned rx_ev_pkt_type;
 
 	rx_ev_hdr_type = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_HDR_TYPE);
@@ -974,7 +1003,6 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 	rx_ev_pkt_type = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_PKT_TYPE);
 	rx_ev_buf_owner_id_err = EFX_QWORD_FIELD(*event,
 						 FSF_AZ_RX_EV_BUF_OWNER_ID_ERR);
-	rx_ev_ip_frag_err = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_IP_FRAG_ERR);
 	rx_ev_ip_hdr_chksum_err = EFX_QWORD_FIELD(*event,
 						  FSF_AZ_RX_EV_IP_HDR_CHKSUM_ERR);
 	rx_ev_tcp_udp_chksum_err = EFX_QWORD_FIELD(*event,
@@ -1004,8 +1032,6 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 		else if (rx_ev_tcp_udp_chksum_err)
 			++channel->n_rx_tcp_udp_chksum_err;
 	}
-	if (rx_ev_ip_frag_err)
-		++channel->n_rx_ip_frag;
 
 	/* TOBE_DISC is expected on unicast mismatches; don't print out an
 	 * error message.  FRM_TRUNC indicates RXDP dropped the packet due
@@ -1230,7 +1256,8 @@ static void efx_farch_handle_generated_event(struct efx_channel *channel,
 
 /* If this flush done event corresponds to a &struct efx_tx_queue, then
  * send an %EFX_CHANNEL_MAGIC_TX_DRAIN event to drain the event queue
- * of all transmit completions. */
+ * of all transmit completions.
+ */
 static void
 efx_farch_handle_tx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 {
@@ -1250,7 +1277,8 @@ efx_farch_handle_tx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 
 /* If this flush done event corresponds to a &struct efx_rx_queue: If the flush
  * was succesful then send an %EFX_CHANNEL_MAGIC_RX_DRAIN, otherwise add
- * the RX queue back to the mask of RX queues in need of flushing. */
+ * the RX queue back to the mask of RX queues in need of flushing.
+ */
 static void
 efx_farch_handle_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 {
@@ -1299,14 +1327,14 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 		netif_vdbg(efx, hw, efx->net_dev, "channel %d TXQ %d flushed\n",
 			   channel->channel, ev_sub_data);
 		efx_farch_handle_tx_flush_done(efx, event);
-		efx_sriov_tx_flush_done(efx, event);
+		efx_siena_sriov_tx_flush_done(efx, event);
 		efx_dl_handle_event(efx, event);
 		break;
 	case FSE_AZ_RX_DESCQ_FLS_DONE_EV:
 		netif_vdbg(efx, hw, efx->net_dev, "channel %d RXQ %d flushed\n",
 			   channel->channel, ev_sub_data);
 		efx_farch_handle_rx_flush_done(efx, event);
-		efx_sriov_rx_flush_done(efx, event);
+		efx_siena_sriov_rx_flush_done(efx, event);
 		efx_dl_handle_event(efx, event);
 		break;
 	case FSE_AZ_EVQ_INIT_DONE_EV:
@@ -1350,7 +1378,7 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 			atomic_inc(&efx->errors.rx_desc_fetch);
 			efx_schedule_reset(efx, RESET_TYPE_DMA_ERROR);
 		} else
-			efx_sriov_desc_fetch_err(efx, ev_sub_data);
+			efx_siena_sriov_desc_fetch_err(efx, ev_sub_data);
 		break;
 	case FSE_BZ_TX_DSC_ERROR_EV:
 		if (ev_sub_data < EFX_VI_BASE) {
@@ -1361,7 +1389,7 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 			atomic_inc(&efx->errors.tx_desc_fetch);
 			efx_schedule_reset(efx, RESET_TYPE_DMA_ERROR);
 		} else
-			efx_sriov_desc_fetch_err(efx, ev_sub_data);
+			efx_siena_sriov_desc_fetch_err(efx, ev_sub_data);
 		break;
 	default:
 		if (!efx_dl_handle_event(efx, event)) {
@@ -1430,7 +1458,7 @@ int efx_farch_ev_process(struct efx_channel *channel, int budget)
 				goto out;
 			break;
 		case FSE_CZ_EV_CODE_USER_EV:
-			efx_sriov_event(channel, &event);
+			efx_siena_sriov_event(channel, &event);
 			break;
 		case FSE_CZ_EV_CODE_MCDI_EV:
 			efx_mcdi_process_event(channel, &event);
@@ -1651,10 +1679,6 @@ irqreturn_t efx_farch_fatal_interrupt(struct efx_nic *efx)
 
 /* Handle a legacy interrupt
  * Acknowledges the interrupt and schedule event queue processing.
- *
- * This routine must guarantee not to touch the hardware when
- * interrupts are disabled, to allow for correct semantics of
- * efx_suspend() and efx_resume().
  */
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_IRQ_HANDLER_REGS)
 irqreturn_t efx_farch_legacy_interrupt(int irq, void *dev_id)
@@ -1718,8 +1742,8 @@ irqreturn_t efx_farch_legacy_interrupt(int irq, void *dev_id,
 		if (efx->irq_zero_count++ == 0)
 			result = IRQ_HANDLED;
 
-		if (soft_enabled) {
-			/* Ensure we schedule or rearm all event queues */
+		/* Ensure we schedule or rearm all event queues */
+		if (likely(soft_enabled)) {
 			efx_for_each_channel(channel, efx) {
 				event = efx_event(channel,
 						  channel->eventq_read_ptr);
@@ -1745,10 +1769,6 @@ irqreturn_t efx_farch_legacy_interrupt(int irq, void *dev_id,
  * queue processing.  No interrupt acknowledgement cycle is necessary.
  * Also, we never need to check that the interrupt is for us, since
  * MSI interrupts cannot be shared.
- *
- * This routine must guarantee not to touch the hardware when
- * interrupts are disabled, to allow for correct semantics of
- * efx_suspend() and efx_resume().
  */
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_IRQ_HANDLER_REGS)
 irqreturn_t efx_farch_msi_interrupt(int irq, void *dev_id)
@@ -1852,7 +1872,7 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 		vi_count * vi_dc_entries;
 
 #ifdef CONFIG_SFC_SRIOV
-	if (efx_sriov_wanted(efx))
+	if (efx->type->sriov_wanted(efx))
 		vi_count = max_t(unsigned, vi_count, EFX_VI_BASE);
 	efx->vf_buftbl_base = res->buffer_table_min;
 	entries_per_vf = (vi_dc_entries + EFX_VF_BUFTBL_PER_VI) * efx_vf_size(efx);
@@ -1890,7 +1910,7 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 
 #ifdef CONFIG_SFC_SRIOV
 	/* If there is buffer table left, then try and allocate VFs */
-	if (efx_sriov_wanted(efx)) {
+	if (efx->type->sriov_wanted(efx)) {
 		unsigned vf_limit = min(buftbl_free / entries_per_vf,
 					res->evq_timer_lim - vi_count);
 		vf_limit = min_t(unsigned, vf_limit, EFX_VF_COUNT_MAX);
@@ -1905,7 +1925,8 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 				  efx->vf_count, vf_limit);
 			efx->vf_count = vf_limit;
 		}
-		res->buffer_table_min += efx->vf_count * entries_per_vf;
+		res->buffer_table_min +=
+			efx->vf_count * efx_vf_size(efx) * EFX_VF_BUFTBL_PER_VI;
 		vi_count += efx->vf_count * efx_vf_size(efx);
 		buftbl_free -= efx->vf_count * entries_per_vf;
 	}
@@ -1930,6 +1951,11 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	efx->tx_dc_base = sram_lim_qw - vi_count * efx->tx_dc_entries;
 	efx->rx_dc_base = efx->tx_dc_base - vi_count * efx->rx_dc_entries;
 
+	BUG_ON(efx->rx_dc_base < res->buffer_table_min);
+
+	/* The buffer table extends up to RX_DC_BASE but the region
+	 * usable by Onload may be smaller
+	 */
 	res->buffer_table_lim = min(res->buffer_table_lim, efx->rx_dc_base);
 	if (res->buffer_table_lim < res->buffer_table_min)
 		res->buffer_table_min = res->buffer_table_lim;
@@ -1937,7 +1963,7 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	res->rxq_lim = min(res->rxq_lim, vi_count);
 	res->txq_lim = min(res->txq_lim, vi_count);
 #ifdef CONFIG_SFC_SRIOV
-	if (efx_sriov_wanted(efx)) {
+	if (efx->type->sriov_wanted(efx)) {
 		unsigned vnic_base = EFX_VI_BASE +
 			efx->vf_count * efx_vf_size(efx);
 
@@ -2394,6 +2420,7 @@ efx_farch_filter_from_gen_spec(struct efx_farch_filter_spec *spec,
 
 	return 0;
 }
+
 static void
 efx_farch_filter_to_gen_spec(struct efx_filter_spec *gen_spec,
 			     const struct efx_farch_filter_spec *spec)
@@ -2673,7 +2700,8 @@ u32 efx_farch_filter_get_rx_id_limit(struct efx_nic *efx)
 }
 
 s32 efx_farch_filter_insert(struct efx_nic *efx,
-			    struct efx_filter_spec *gen_spec, bool replace_equal)
+			    struct efx_filter_spec *gen_spec,
+			    bool replace_equal)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
 	struct efx_farch_filter_table *table;
@@ -2915,8 +2943,7 @@ int efx_farch_filter_remove_safe(struct efx_nic *efx,
 
 int efx_farch_filter_get_safe(struct efx_nic *efx,
 			      enum efx_filter_priority priority,
-			      u32 filter_id,
-			      struct efx_filter_spec *spec_buf)
+			      u32 filter_id, struct efx_filter_spec *spec_buf)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
 	enum efx_farch_filter_table_id table_id;
@@ -2980,7 +3007,8 @@ int efx_farch_filter_clear_rx(struct efx_nic *efx,
 	return 0;
 }
 
-int efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id, int rxq_i)
+int efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id,
+			      int rxq_i, int stack_id)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
 	enum efx_farch_filter_table_id table_id;
@@ -3080,6 +3108,7 @@ out:
 	return count;
 }
 
+/* Restore filter stater after reset */
 void efx_farch_filter_table_restore(struct efx_nic *efx)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
@@ -3248,13 +3277,30 @@ void efx_farch_filter_update_rx_scatter(struct efx_nic *efx)
 	spin_unlock_bh(&efx->filter_lock);
 }
 
-#ifdef CONFIG_RFS_ACCEL
+#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
 
-s32 efx_farch_filter_rfs_insert(struct efx_nic *efx,
-				struct efx_filter_spec *gen_spec)
+s32 efx_farch_filter_async_insert(struct efx_nic *efx,
+				  struct efx_filter_spec *gen_spec)
 {
 	return efx_farch_filter_insert(efx, gen_spec, true);
 }
+
+int efx_farch_filter_async_remove(struct efx_nic *efx, unsigned int index)
+{
+	struct efx_farch_filter_state *state = efx->filter_state;
+	struct efx_farch_filter_table *table =
+		&state->table[EFX_FARCH_FILTER_TABLE_RX_IP];
+
+	if (test_bit(index, table->used_bitmap) &&
+	    table->spec[index].priority <= EFX_FILTER_PRI_HINT) {
+		efx_farch_filter_table_clear_entry(efx, table, index);
+		return 0;
+	}
+
+	return -ENOENT;
+}
+
+#ifdef CONFIG_RFS_ACCEL
 
 bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 				     unsigned int index)
@@ -3263,8 +3309,12 @@ bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 	struct efx_farch_filter_table *table =
 		&state->table[EFX_FARCH_FILTER_TABLE_RX_IP];
 
-	if (test_bit(index, table->used_bitmap) &&
-	    table->spec[index].priority == EFX_FILTER_PRI_HINT &&
+	if (!test_bit(index, table->used_bitmap))
+		return false;
+
+	WARN_ON(table->spec[index].priority != EFX_FILTER_PRI_HINT);
+
+	if (table->spec[index].priority == EFX_FILTER_PRI_HINT &&
 	    rps_may_expire_flow(efx->net_dev, table->spec[index].dmaq_id,
 				flow_id, index)) {
 		efx_farch_filter_table_clear_entry(efx, table, index);
@@ -3275,6 +3325,8 @@ bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 }
 
 #endif /* CONFIG_RFS_ACCEL */
+
+#endif /* CONFIG_RFS_ACCEL || EFX_USE_SARFS */
 
 #ifdef EFX_NOT_UPSTREAM
 

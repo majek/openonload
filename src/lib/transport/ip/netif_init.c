@@ -209,6 +209,9 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
 
   /* This gets set appropriately in tcp_helper_init_max_mss() */
   nis->max_mss = 0;
+
+  if( nis->opts.tcp_syncookies )
+    get_random_bytes(&nis->syncookie_salt, sizeof(nis->syncookie_salt));
 }
 
 #endif
@@ -500,7 +503,6 @@ void ci_netif_config_opts_rangecheck(ci_netif_config_opts* opts)
 struct string_to_bitmask {
   int               stb_index;
   const char*const  stb_str;
-  int               stb_default;
 };
 
 
@@ -514,11 +516,6 @@ static void convert_string_to_bitmask(const char* str,
                                       int opts_len, ci_uint32* bitmask_out)
 {
   int len, i, opt_found, negate;
-
-  /* Set defaults */
-  for( i = 0; i < opts_len; ++i )
-    if( opts[i].stb_default )
-      *bitmask_out |= 1 << opts[i].stb_index;
 
   if( ! str )
     return;
@@ -566,9 +563,9 @@ static void convert_string_to_bitmask(const char* str,
 static void ci_netif_config_opts_getenv_ef_log(ci_netif_config_opts* opts)
 {
   struct string_to_bitmask options[EF_LOG_MAX] = {
-    {EF_LOG_BANNER, "banner", 1},
-    {EF_LOG_RESOURCE_WARNINGS, "resource_warnings", 1},
-    {EF_LOG_CONN_DROP, "conn_drop", 0},
+    {EF_LOG_BANNER, "banner"},
+    {EF_LOG_RESOURCE_WARNINGS, "resource_warnings"},
+    {EF_LOG_CONN_DROP, "conn_drop"},
   };
 
   convert_string_to_bitmask(getenv("EF_LOG"), options, EF_LOG_MAX,
@@ -665,8 +662,21 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->mcast_recv = atoi(s);
   if( (s = getenv("EF_FORCE_SEND_MULTICAST")) )
     opts->force_send_multicast = atoi(s);
-  if( (s = getenv("EF_MULTICAST_LOOP_OFF")) )
+  if( (s = getenv("EF_MCAST_SEND")) )
+    opts->mcast_send = atoi(s);
+  else if( (s = getenv("EF_MULTICAST_LOOP_OFF")) ) {
     opts->multicast_loop_off = atoi(s);
+    switch( opts->multicast_loop_off ) {
+      case 0:
+        opts->mcast_send = CITP_MCAST_SEND_FLAG_LOCAL;
+        break;
+      case 1:
+        opts->mcast_send = 0;
+        break;
+    }
+  }
+  if( (s = getenv("EF_MCAST_RECV_HW_LOOP")) )
+    opts->mcast_recv_hw_loop = atoi(s);
 #endif
   if( (s = getenv("EF_EVS_PER_POLL")) )
     opts->evs_per_poll = atoi(s);
@@ -993,7 +1003,17 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_RX_TIMESTAMPING")) )
     opts->rx_timestamping = atoi(s);
 
+  if( (s = getenv("EF_TX_TIMESTAMPING")) )
+    opts->tx_timestamping = atoi(s);
+
+  if( (s = getenv("EF_TIMESTAMPING_REPORTING")) )
+    opts->timestamping_reporting = atoi(s);
+
+  if( (s = getenv("EF_TCP_SYNCOOKIES")) )
+    opts->tcp_syncookies = atoi(s);
+
   ci_netif_config_opts_getenv_ef_log(opts);
+
 }
 
 #endif
@@ -1186,6 +1206,7 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
 
   ef_vi_init(vi, ef_vi_arch_from_efhw_arch(nsn->vi_arch), nsn->vi_variant,
              nsn->vi_revision, nsn->vi_flags, state);
+  ef_vi_init_out_flags(vi, nsn->vi_out_flags);
   ef_vi_init_io(vi, ni->io_ptr + vi_io_offset_full);
   ef_vi_init_timer(vi, nsn->timer_quantum_ns);
   ef_vi_init_evq(vi, nsn->vi_evq_bytes / 8, ni->buf_ptr + vi_mem_offset);
@@ -1196,6 +1217,7 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   ids += nsn->vi_rxq_size;
   ef_vi_init_txq(vi, nsn->vi_txq_size, ni->buf_ptr + vi_mem_offset, ids);
   ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
+  ef_vi_init_tx_timestamping(vi);
 }
 
 
@@ -1533,8 +1555,7 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
 
 static int
 netif_tcp_helper_alloc_k(ci_netif** ni_out, const ci_netif_config_opts* opts,
-                         unsigned flags, const int* ifindices,
-                         int ifindices_len)
+                         unsigned flags, int ifindices_len)
 {
   ci_resource_onload_alloc_t ra;
   tcp_helper_resource_t* trs;
@@ -1542,7 +1563,7 @@ netif_tcp_helper_alloc_k(ci_netif** ni_out, const ci_netif_config_opts* opts,
   int rc;
 
   init_resource_alloc(&ra, opts, flags, NULL);
-  rc = tcp_helper_alloc_kernel(&ra, opts, ifindices, ifindices_len, &trs);
+  rc = tcp_helper_alloc_kernel(&ra, opts, ifindices_len, &trs);
   if( rc < 0 ) {
     ci_log("%s: tcp_helper_alloc_kernel() failed (%d)", __FUNCTION__, rc);
     return rc;
@@ -1671,6 +1692,23 @@ static void ci_netif_pkt_prefault_reserve(ci_netif* ni)
 }
 
 
+#if !CI_CFG_USE_PIO
+/*
+ * Enforce EF_PIO semantics: on non-x86_64 systems we need to also
+ * perform this check here at user-level, rather than just in the kernel
+ */
+static int check_pio(ci_netif_config_opts* opts)
+{
+  if( opts->pio == 2 ) {
+    /* EF_PIO == 2 => fail if no PIO */
+    ci_log("ERROR: PIO not supported on this system");
+    return -EINVAL;
+  }
+  return 0;
+}
+#endif
+
+
 int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
                   unsigned flags)
 {
@@ -1685,6 +1723,11 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
 
   ci_assert(ni);
   ci_netif_sanity_checks();
+
+#if !CI_CFG_USE_PIO
+  rc = check_pio(opts);
+  if( rc < 0 ) return rc;
+#endif
 
   ni->driver_handle = fd;
 
@@ -1866,7 +1909,7 @@ int ci_netif_ctor(ci_netif** ni_out, const ci_netif_config_opts* opts_in,
   * Allocate kernel helper and link into netif
   */
   /* TODO: Let caller specify the nics to use. */
-  CI_TRY_RET(netif_tcp_helper_alloc_k(&ni, opts, flags, NULL, 0));
+  CI_TRY_RET(netif_tcp_helper_alloc_k(&ni, opts, flags, 0));
 
   /* sanity -- killme */
   ci_assert_equal(ni->ep_ofs, ni->state->ep_ofs);

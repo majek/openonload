@@ -49,9 +49,7 @@ struct efrm_nic_vi {
 	 */
 	struct list_head   close_pending;
 	struct work_struct work_item;
-	struct work_struct flush_work_item;
-	struct timer_list  flush_timer;
-	atomic_t           flush_timer_running;
+	struct delayed_work flush_work_item;
 };
 
 
@@ -66,6 +64,8 @@ struct efrm_vi_allocator {
  */
 #define EFRM_NIC_N_VI_ALLOCATORS  2
 
+#define EFRM_MAX_STACK_ID 255
+
 struct efrm_nic {
 	struct efhw_nic efhw_nic;
 	spinlock_t lock;
@@ -78,6 +78,8 @@ struct efrm_nic {
 	unsigned falcon_wakeup_mask;
 	unsigned rss_channel_count;
 	const struct efx_dl_device_info *dl_dev_info;
+	unsigned stack_id_usage[(EFRM_MAX_STACK_ID + sizeof(unsigned) * 8)
+				/ (sizeof(unsigned) * 8)];
 };
 
 

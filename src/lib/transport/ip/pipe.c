@@ -942,11 +942,12 @@ static void oo_pipe_free(ci_netif* ni, struct oo_pipe* p)
 }
 
 
-void ci_pipe_all_fds_gone(ci_netif* ni, struct oo_pipe* p)
+void ci_pipe_all_fds_gone(ci_netif* ni, struct oo_pipe* p, int do_free)
 {
   ci_assert(p);
   ci_assert(ni);
   ci_assert(ci_netif_is_locked(ni));
+  ci_assert(do_free); /* do_free==0 in case of handover; it is not for pipe */
 
   pipe_dump(p);
 

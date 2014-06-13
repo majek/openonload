@@ -798,5 +798,4 @@ int falcon_probe_board(struct efx_nic *efx, u16 revision_info)
 			  type_id);
 		return -ENODEV;
 	}
-	return 0;
 }

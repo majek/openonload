@@ -189,6 +189,14 @@ typedef struct {
                       struct onload_template_msg_update_iovec*, int,
                       unsigned);
   int  (*tmpl_abort)(citp_fdinfo*, struct oo_msg_template*);
+#if CI_CFG_USERSPACE_EPOLL
+  /* Examines receive queue up to timespec limit, and fills in first_out
+   * with the timestamp of the first data available, and bytes_out with the
+   * number of bytes available to be read before reaching limit.
+   */
+  int  (*ordered_data)(citp_fdinfo*, struct timespec* limit,
+                       struct timespec* first_out, int* bytes_out);
+#endif
 } citp_fdops;
 
 
@@ -197,12 +205,13 @@ struct citp_protocol_impl_s {
 # define        CITP_CI_SOCKET       0
 # define        CITP_TCP_SOCKET      1
 # define        CITP_UDP_SOCKET      2
+# define        CITP_PASSTHROUGH_FD  3
 #if CI_CFG_USERSPACE_EPOLL
-# define        CITP_EPOLL_FD        3
-# define        CITP_EPOLLB_FD       4
+# define        CITP_EPOLL_FD        4
+# define        CITP_EPOLLB_FD       5
 #endif
 #if CI_CFG_USERSPACE_PIPE
-# define        CITP_PIPE_FD         5
+# define        CITP_PIPE_FD         6
 #endif
 
   citp_fdops    ops;
@@ -476,6 +485,7 @@ extern citp_protocol_impl citp_epollb_protocol_impl CI_HV;
 extern citp_protocol_impl citp_pipe_read_protocol_impl CI_HV;
 extern citp_protocol_impl citp_pipe_write_protocol_impl CI_HV;
 #endif
+extern citp_protocol_impl citp_passthrough_protocol_impl;
 
 
 typedef struct {
@@ -485,6 +495,17 @@ typedef struct {
 
 #define fdi_to_sock_fdi(fdi)    CI_CONTAINER(citp_sock_fdi, fdinfo, (fdi))
 #define fdi_to_socket(fdi)      (&fdi_to_sock_fdi(fdi)->sock)
+
+typedef struct {
+  citp_fdinfo  fdinfo;
+  ci_netif*     netif;
+  struct oo_alien_ep* ep;
+  int os_socket;
+} citp_alien_fdi;
+
+#define fdi_to_alien_fdi(fdi)    CI_CONTAINER(citp_alien_fdi, fdinfo, (fdi))
+
+extern void citp_passthrough_init(citp_alien_fdi* epi);
 
 #if CI_CFG_USERSPACE_EPOLL
 #include <onload/epoll.h>
@@ -540,6 +561,8 @@ extern int citp_onload_dev_major(void);
 extern int citp_onload_epoll_dev_major(void);
 extern dev_t citp_onloadfs_dev_t(void);
 
+extern citp_fdinfo* citp_tcp_dup(citp_fdinfo* orig_fdi);
+
 /* Locking order:
  * - citp_pkt_map_lock is the innermost lock;
  * - citp_dup_lock should be taken before citp_ul_lock.
@@ -549,6 +572,12 @@ extern dev_t citp_onloadfs_dev_t(void);
  */
 extern pthread_mutex_t citp_dup_lock;
 extern pthread_mutex_t citp_pkt_map_lock;
+
+extern int citp_timespec_compare(const struct timespec* a,
+                                 const struct timespec* b) CI_HF;
+
+extern int citp_oo_timespec_compare(const struct oo_timespec* a,
+                                    const struct timespec* b) CI_HF;
 
 /**********************************************************************
  ** fdtable internals.
@@ -655,12 +684,10 @@ extern citp_fdinfo*  citp_fdtable_lookup(unsigned fd) CI_HF;
 extern citp_fdinfo*  citp_fdtable_lookup_fast(citp_lib_context_t*,
                                               unsigned fd) CI_HF;
 
-/* Find out what sort of thing [fd] is, and if it is a user-level socket
- * then map in the user-level state.
- */
-citp_fdinfo * citp_fdtable_probe_locked(unsigned fd, int print_banner) CI_HF;
-
 extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd) CI_HF;
+
+extern citp_fdinfo* citp_reprobe_moved(citp_fdinfo* fdinfo,
+                                       int from_fast_lookup);
 
 extern void          citp_fdtable_close_cached(void) CI_HF;
 extern void          citp_fdtable_new_fd_set(unsigned fd, citp_fdinfo_p,
@@ -707,6 +734,13 @@ ci_inline void citp_fdtable_passthru(int fd, int fdt_locked) {
     citp_fdtable_new_fd_set(fd, fdip_passthru, fdt_locked);
 }
 
+extern int
+citp_passthrough_bind(citp_fdinfo* fdi,
+                      const struct sockaddr* sa, socklen_t sa_len);
+extern int
+citp_passthrough_accept(citp_fdinfo* fdi,
+                        struct sockaddr* sa, socklen_t* p_sa_len, int flags,
+                        citp_lib_context_t* lib_context);
 
 /**********************************************************************
  ** Stack name state access

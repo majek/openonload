@@ -700,6 +700,13 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
     log("%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d",
 	pf, s->n_accept_loop2_closed, s->n_accept_no_fd,
 	s->n_acks_reset, s->n_accept_os);
+    if( NI_OPTS(ni).tcp_syncookies ) {
+      log("%s  syncookies: syn_recv=%d ack_recv=%d ack_answ=%d",
+          pf, s->n_syncookie_syn, s->n_syncookie_ack_recv,
+          s->n_syncookie_ack_answ);
+      log("%s  syncookies rejected: timestamp=%d crypto_hash=%d",
+          pf, s->n_syncookie_ack_ts_rej, s->n_syncookie_ack_hash_rej);
+    }
   }
 #endif
 }

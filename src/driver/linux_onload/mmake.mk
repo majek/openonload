@@ -6,7 +6,6 @@
 #
 ############################
 
-EFAB_SRCS	:= workqueue.c
 
 ONLOAD_SRCS	:= driver.c linux_cplane.c \
 		tcp_sendpage.c driverlink_ip.c linux_stats.c pinbuf.c \
@@ -18,9 +17,11 @@ ONLOAD_SRCS	:= driver.c linux_cplane.c \
 EFTHRM_SRCS	:= cplane.c cplane_prot.c eplock_resource_manager.c \
 		tcp_helper_endpoint.c tcp_helper_resource.c \
 		tcp_helper_ioctl.c tcp_helper_mmap.c tcp_helper_sleep.c \
+		tcp_helper_endpoint_move.c \
 		tcp_filters.c oof_filters.c oof_onload.c \
 		driverlink_filter.c ip_prot_rx.c ip_protocols.c \
-		efabcfg.c onload_nic.c id_pool.c dump_to_user.c iobufset.c
+		efabcfg.c onload_nic.c id_pool.c dump_to_user.c iobufset.c \
+		tcp_helper_cluster.c
 
 EFTHRM_HDRS	:= oo_hw_filter.h oof_impl.h tcp_filters_internal.h
 
@@ -31,12 +32,11 @@ endif
 # Build host
 CPPFLAGS += -DCI_BUILD_HOST=$(HOSTNAME)
 
-IMPORT		:= $(EFAB_SRCS:%=../efab/%) \
-		$(EFTHRM_SRCS:%=../../lib/efthrm/%) \
+IMPORT		:= $(EFTHRM_SRCS:%=../../lib/efthrm/%) \
 		$(EFTHRM_HDRS:%=../../lib/efthrm/%)
 
 IP_TARGET      := onload.o
-IP_TARGET_SRCS := $(EFAB_SRCS) $(ONLOAD_SRCS) $(EFTHRM_SRCS)
+IP_TARGET_SRCS := $(ONLOAD_SRCS) $(EFTHRM_SRCS)
 
 TARGETS		:= $(IP_TARGET)
 

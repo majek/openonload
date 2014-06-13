@@ -34,61 +34,37 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/linux_onload.h>
 #include <onload/linux_onload_internal.h>
+#include <onload/tcp_helper_endpoint.h>
 
 #include "onload_kernel_compat.h"
 
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
 
-DECLARE_RWSEM(handover_rwlock);
-
-static int oo_fop_release_nothing(struct inode *inode, struct file *file)
+static void efab_ep_handover_setup(ci_private_t* priv, int* in_epoll_p)
 {
-  return 0;
+  citp_waitable_obj* w = SP_TO_WAITABLE_OBJ(&priv->thr->netif, priv->sock_id);
+
+  /*
+   * 1. Mark this "struct file" as alien.  Userland will know what to do
+   * with it.
+   * 2. If we are in epoll list, mark endpoint.  We should not close this
+   * endpoint until the OS file is alive.
+   * 3. Do dup() but preserver flags.  This fd is now OK; other fd
+   * referencing this file will reprobe the state.
+   */
+  w->waitable.state = CI_TCP_STATE_ALIEN;
+  w->alien.stack_id = OO_STACK_ID_INVALID;
+  w->alien.flags = 0;
+
+  priv->fd_type = CI_PRIV_TYPE_PASSTHROUGH_EP;
+  priv->_filp->f_op = &linux_tcp_helper_fops_passthrough;
+  oo_move_file(priv, priv->thr, priv->sock_id);
+
+  *in_epoll_p = 0;
+  if( ! list_empty(&priv->_filp->f_ep_links) ) {
+    w->alien.flags = OO_ALIEN_FLAGS_IN_EPOLL;
+    *in_epoll_p = 1;
+  }
 }
-static struct file_operations oo_fop_do_nothing =
-{
-  .owner = THIS_MODULE,
-  .release  = oo_fop_release_nothing,
-};
-
-/* "safe" handover: if we are the only holder of the oo_file, we can
- * rewrite its fields to keep epoll references in the same state. */
-static void oo_fd_handover_overwrite(struct file* oo_file, struct file* os_file)
-{
-  /* We keep the oo_file "opened", but rewrite all data from the
-   * os_file.  In this way, epoll membership is kept untouched. */
-  struct dentry *old_dentry = oo_file->f_dentry;
-  struct vfsmount *old_vfsmnt = oo_file->f_vfsmnt;
-
-  /* Copy data from os_file to oo_file */
-  oo_file->private_data = os_file->private_data;
-  oo_file->f_op = os_file->f_op;
-  oo_file->f_dentry = os_file->f_dentry;
-  oo_file->f_vfsmnt = os_file->f_vfsmnt;
-  oo_file->f_owner.pid = os_file->f_owner.pid;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
-  oo_file->f_owner.pid_type = os_file->f_owner.pid_type;
-#endif
-  oo_file->f_owner.uid = os_file->f_owner.uid;
-  oo_file->f_owner.euid = os_file->f_owner.euid;
-  oo_file->f_owner.signum = os_file->f_owner.signum;
-  oo_file->f_flags = os_file->f_flags;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0)
-  oo_file->f_inode = os_file->f_inode;
-#endif
-
-  /* socket is now referencing the oo_file.
-   * We never handover anything except socket! */
-  ci_assert(S_ISSOCK(os_file->f_dentry->d_inode->i_mode));
-  SOCKET_I(os_file->f_dentry->d_inode)->file = oo_file;
-
-  /* Set up os_file before we "close" it */
-  os_file->f_op = &oo_fop_do_nothing;
-  os_file->f_dentry = old_dentry;
-  os_file->f_vfsmnt = old_vfsmnt;
-}
-#endif
-
 
 /*! Replace [old_filp] with [new_filp] in the current process's fdtable.
 ** Fails if [fd] is bad, or doesn't currently resolve to [old_filp].
@@ -96,20 +72,26 @@ static void oo_fd_handover_overwrite(struct file* oo_file, struct file* os_file)
 static int efab_fd_handover_replace(struct file* old_filp,
                                     struct file* new_filp, int fd)
 {
-  int rc = -ENOENT;
-
   spin_lock(&current->files->file_lock);
-  if( fcheck(fd) == old_filp ) {
-    get_file(new_filp);
-    ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, new_filp);
-    rc = 0;
+  if( fcheck(fd) != old_filp ) {
+    spin_unlock(&current->files->file_lock);
+    return 0;
   }
+
+  /* If others have reference to our oo_file, they can restore the file
+   * from the shared state.
+   * file_count is incremented by:
+   * - dup/dup2/... - another fd points to oo_file;
+   * - fork - same fd in another process points to oo_file;
+   * - syscall from another thread.
+   */
+  get_file(new_filp);
+  ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, new_filp);
   spin_unlock(&current->files->file_lock);
 
-  if( rc == 0 )
-    fput(old_filp);
+  fput(old_filp);
 
-  return rc;
+  return 0;
 }
 
 /* Handover the user-level socket to the OS one.  This means that the FD
@@ -121,9 +103,12 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
 {
   tcp_helper_endpoint_t* ep;
   int fd = *(ci_int32*) p_fd;
-  struct file *oo_file, *os_file;
+  struct file *oo_file;
   ci_private_t *fd_priv;
-  int rc, line;
+  int rc, line, in_epoll;
+  citp_waitable_obj* wobj;
+
+  oo_file = fget(fd);
 
   /* We invoke this on the stack-fd rather than the socket-fd because if we
    * do the latter it is hard to know whether there are any other refs to
@@ -134,7 +119,11 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     goto unexpected_error;
   }
   /* Check fd is an Onload socket in the right stack with an OS socket. */
-  oo_file = fget(fd);
+  if( oo_file->f_op == &linux_tcp_helper_fops_passthrough ) {
+    fd_priv = oo_file->private_data;
+    ep = ci_trs_ep_get(fd_priv->thr, fd_priv->sock_id);
+    goto file_replace;
+  }
   if( oo_file->f_op != &linux_tcp_helper_fops_tcp &&
       oo_file->f_op != &linux_tcp_helper_fops_udp ) {
     line = __LINE__;
@@ -151,88 +140,43 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     line = __LINE__;
     goto unexpected_error;
   }
+  /* Legacy Clustering: Don't currently allow handover of sockets sharing
+   * an os socket to do legacy reuseport.  This should be prevented at user
+   * level.
+   */
+  ci_assert( (ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT) == 0 );
+
+  /* get locks */
+  wobj = SP_TO_WAITABLE_OBJ(&priv->thr->netif, fd_priv->sock_id);
+  rc = ci_netif_lock(&priv->thr->netif);
+  if( rc != 0 ) {
+    fput(oo_file);
+    return rc;
+  }
 
   /* shut down fasync */
   if( ep->fasync_queue )
     fasync_helper(-1, oo_file, 0, &ep->fasync_queue);
 
-  os_file = ep->os_socket->file;
-  rc = efab_fd_handover_replace(oo_file, os_file, fd);
-  if( rc != 0 ) {
-    LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: handover failed due to race",
-                 __FUNCTION__, ep->thr->id, ep->id, fd));
+  citp_waitable_cleanup(&priv->thr->netif, wobj, 0);
+  efab_ep_handover_setup(fd_priv, &in_epoll);
+  ci_netif_unlock(&priv->thr->netif);
+
+  if( in_epoll ) {
     fput(oo_file);
-    return rc;
+    return -EBUSY;
   }
 
-
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  if( file_count(oo_file) == 1
-#ifdef NDEBUG /* we really want to test this code, so turn it on in DEBUG build */
-      && ! list_empty(&oo_file->f_ep_links)
-    /* This socket is a member of an epoll set.  To avoid dropping the
-     * socket out of the epoll set, we overwrite oo_file with fields from
-     * os_file and put oo_file back in the fdtable. */
-#endif
-      ) {
-    ci_private_t *priv = (ci_private_t *) oo_file->private_data;
-
-    down_write(&handover_rwlock);
-    spin_lock(&current->files->file_lock);
-    if( file_count(oo_file) == 1 && fcheck(fd) == os_file ) {
-      oo_fd_handover_overwrite(oo_file, os_file);
-      ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, oo_file);
-    }
-    else {
-      spin_unlock(&current->files->file_lock);
-      up_write(&handover_rwlock);
-      LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: epoll handover failed; socket "
-                   "likely dropped from epoll set",
-                   __FUNCTION__, ep->thr->id, ep->id, fd));
-      goto non_epoll;
-    }
-    spin_unlock(&current->files->file_lock);
-    up_write(&handover_rwlock);
-
-    /* Release the onload resources after we overwrite oo_file.
-     * This needs to be done outside of spinlock. */
-    generic_tcp_helper_close(priv);
-    efab_thr_release(priv->thr);
-
-    /* We are going to drop the old ref to os_file from fdtable. */
-    ci_assert_equal(file_count(os_file), 1);
-    /* simple fput(os_file) will drop socketfs inode - we do not want it! */
-    os_file->f_op = &oo_fop_do_nothing;
-    fput(os_file);
-    return 0;
-  }
-
-non_epoll:
-#endif
-
-  /* If others have reference to our oo_file, they are lost for us.
-   * file_count is incremented by:
-   * - dup/dup2/... - another fd points to oo_file;
-   * - fork - same fd in another process points to oo_file;
-   * - syscall from another thread.
-   *
-   * This does not change anything for this file instance:
-   * we complete our handover in normal manner; just warn DEBUG users.
-   */
-  if( file_count(oo_file) != 1 ) {
-    LOG_E(ci_log("%s: ERROR: handover of %d:%d fd=%d duplicated by dup or fork "
-                 "(refs=%d)", __FUNCTION__, ep->thr->id, ep->id, fd,
-                 (int) file_count(oo_file)));
-    /* fixme: implement "handover endpoint", so we can pass all socket
-     * operations via our oo_file */
-  }
+file_replace:
+  rc = efab_fd_handover_replace(oo_file, ep->os_socket->file, fd);
 
   /* drop the last reference to the onload file */
   fput(oo_file);
-  return 0;
+  return rc;
 
 
  unexpected_error:
+  fput(oo_file);
   OO_DEBUG_ERR(ci_log("%s: ERROR: unexpected error in HANDOVER at line %d",
                       __FUNCTION__, line));
   return -EINVAL;
@@ -757,6 +701,16 @@ int efab_tcp_helper_listen_os_sock(tcp_helper_resource_t* trs,
   if( sock == NULL )
     return -EINVAL;
 
+  /* If this is a legacy reuseport sock we need to check if this socket should
+   * do the os listen.
+   */
+  if( (ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT) &&
+      !tcp_helper_cluster_legacy_os_listen(ep) ) {
+    LOG_TV(ci_log("%s: Not listening on legacy reuseport os sock",
+                  __FUNCTION__));
+    return 0;
+  }
+
   /* Install callback into OS socket:
    * - do not do it twice: listen() may be called again after shutdown()
    * - do it before calling the real listen() to avoid race */
@@ -764,6 +718,13 @@ int efab_tcp_helper_listen_os_sock(tcp_helper_resource_t* trs,
     efab_tcp_helper_os_pollwait_register(ep);
 
   rc = sock->ops->listen (sock, backlog);
+
+  /* If this is a legacy reuseport socket, and we failed to listen, then
+   * notify the cluster that this socket isn't listening.
+   */
+  if( (ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT) && (rc < 0) )
+    tcp_helper_cluster_legacy_os_shutdown(ep);
+
   LOG_TV(ci_log("%s: rc=%d", __FUNCTION__, rc));
 
   return rc;
@@ -780,6 +741,16 @@ extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t *ep,
   sock = get_linux_socket(ep);
   if( sock == NULL )
     return -EINVAL;
+
+  /* If this is a legacy reuseport sock we don't shutdown, and we inform the
+   * cluster.
+   */
+  if( ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT ) {
+    tcp_helper_cluster_legacy_os_shutdown(ep);
+    LOG_TV(ci_log("%s: Not shutting down legacy reuseport os sock",
+                  __FUNCTION__));
+    return 0;
+  }
 
   rc = sock->ops->shutdown (sock, how);
   LOG_TV(ci_log("%s: shutdown(%d) rc=%d", __FUNCTION__, how, rc));

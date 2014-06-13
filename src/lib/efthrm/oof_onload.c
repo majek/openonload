@@ -56,6 +56,12 @@ oof_onload_on_cplane_ipdel(ci_ip_addr_net_t net_ip,
     oof_manager_addr_del(on_drv->filter_manager, net_ip, ifindex);
 }
 
+static void
+oof_do_deferred_work_fn(struct work_struct *data)
+{
+  oof_do_deferred_work(container_of(data, efab_tcp_driver_t,
+                                    filter_work_item)->filter_manager);
+}
 
 int
 oof_onload_ctor(efab_tcp_driver_t* on_drv, unsigned local_addr_max)
@@ -64,9 +70,7 @@ oof_onload_ctor(efab_tcp_driver_t* on_drv, unsigned local_addr_max)
   on_drv->filter_manager = oof_manager_alloc(local_addr_max, on_drv);
   if( on_drv->filter_manager == NULL )
     return -ENOMEM;
-  ci_workitem_init(&on_drv->filter_work_item,
-                   (CI_WITEM_ROUTINE) oof_do_deferred_work,
-                   on_drv->filter_manager);
+  INIT_WORK(&on_drv->filter_work_item, oof_do_deferred_work_fn);
 
   on_drv->filter_manager_cp_handle =
     cicpos_ipif_callback_register(&on_drv->cplane_handle,
@@ -103,6 +107,13 @@ struct tcp_helper_resource_s*
 oof_cb_socket_stack(struct oof_socket* skf)
 {
   return skf_to_ep(skf)->thr;
+}
+
+
+struct tcp_helper_cluster_s*
+oof_cb_stack_thc(struct tcp_helper_resource_s* skf_stack)
+{
+  return skf_stack->thc;
 }
 
 
@@ -222,5 +233,5 @@ void
 oof_cb_defer_work(void* owner_private)
 {
   efab_tcp_driver_t* on_drv = owner_private;
-  ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &on_drv->filter_work_item);
+  queue_work(CI_GLOBAL_WORKQUEUE, &on_drv->filter_work_item);
 }

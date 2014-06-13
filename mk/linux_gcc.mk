@@ -56,6 +56,10 @@ cwarnings	+= -Wundef -Wpointer-arith -Wstrict-prototypes -Wnested-externs
 #cwarnings	+= -Wdeclaration-after-statement -Wunreachable-code \
 #		-Wdisabled-optimization
 
+ifdef W_NO_UNUSED_RESULT
+cwarnings += -Wno-unused-result
+endif
+
 cxxwarnings	:= $(warnerror) -Wall -Wundef -Wpointer-arith
 
 MMAKE_CFLAGS	+= $(MMAKE_CARCH) $(cwarnings)

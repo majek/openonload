@@ -41,6 +41,10 @@
 #include "ul_pipe.h"
 #endif
 
+#if CI_CFG_USERSPACE_EPOLL
+#include "ul_epoll.h"
+#endif
+
 
 int onload_is_present(void)
 {
@@ -134,15 +138,53 @@ int onload_thread_set_spin(enum onload_spin_type type, int spin)
   return 0;
 }
 
+int onload_move_fd(int fd)
+{
+  ef_driver_handle fd_ni;
+  ci_fixed_descriptor_t op_arg;
+  int rc;
+  ci_netif* ni;
+  citp_lib_context_t lib_context;
+  citp_fdinfo *fdi;
+
+  Log_CALL(ci_log("%s(%d)", __func__, fd));
+  citp_enter_lib(&lib_context);
+
+  rc = citp_netif_alloc_and_init(&fd_ni, &ni);
+  if( rc != 0 )
+    goto out;
+
+  op_arg = ci_netif_get_driver_handle(ni);
+  rc = oo_resource_op(fd, OO_IOC_MOVE_FD, &op_arg);
+  if( rc != 0 )
+    goto out;
+
+  fdi = citp_fdtable_lookup(fd);
+  fdi = citp_reprobe_moved(fdi, CI_FALSE);
+  citp_fdinfo_release_ref(fdi, CI_FALSE);
+
+out:
+  citp_exit_lib(&lib_context, CI_TRUE);
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+
+
 static int onload_fd_check_msg_warm(int fd)
 {
-  struct onload_stat stat;
+  struct onload_stat stat = { .stack_name = NULL };
   int ok = CI_TCP_STATE_SOCKET | CI_TCP_STATE_TCP | CI_TCP_STATE_TCP_CONN;
+  int rc;
+
   if ( ( onload_fd_stat(fd, &stat) > 0 ) &&
        ( ok == (stat.endpoint_state & ok) ) )
-    return 1;
+    rc = 1;
   else
-    return 0;
+    rc = 0;
+
+  free(stat.stack_name);
+
+  return rc;
 }
 
 int onload_fd_check_feature(int fd, enum onload_fd_feature feature)
@@ -155,6 +197,35 @@ int onload_fd_check_feature(int fd, enum onload_fd_feature feature)
   }
   return -EOPNOTSUPP;
 }
+
+
+int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
+                              struct onload_ordered_epoll_event *oo_events,
+                              int maxevents, int timeout)
+{
+  citp_fdinfo* fdi;
+  int rc = -EINVAL;
+
+#if CI_CFG_USERSPACE_EPOLL
+  citp_lib_context_t lib_context;
+  citp_enter_lib(&lib_context);
+
+  if( (fdi = citp_fdtable_lookup(epfd)) != NULL ) {
+    if( fdi->protocol->type == CITP_EPOLL_FD ) {
+      rc = citp_epoll_ordered_wait(fdi, events, oo_events, maxevents, timeout,
+                                     NULL, &lib_context);
+      citp_fdinfo_release_ref(fdi, 0);
+      return rc;
+    }
+    citp_fdinfo_release_ref(fdi, 0);
+  }
+
+  citp_exit_lib(&lib_context, FALSE);
+
+#endif
+  return rc;
+}
+
 
 static int oo_extensions_version_check(void)
 {

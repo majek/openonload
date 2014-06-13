@@ -42,19 +42,6 @@
  * This file provides functionality missing from earlier kernels.
  */
 
-#ifdef EFX_NEED_COMPOUND_PAGE_FIX
-
-void efx_compound_page_destructor(struct page *page)
-{
-	/* Fake up page state to keep __free_pages happy */
-	set_page_count(page, 1);
-	page[1].mapping = NULL;
-
-	__free_pages(page, (unsigned long)page[1].index);
-}
-
-#endif /* NEED_COMPOUND_PAGE_FIX */
-
 #ifdef EFX_NEED_HEX_DUMP
 
 /**************************************************************************
@@ -66,7 +53,9 @@ void efx_compound_page_destructor(struct page *page)
  */
 
 #define hex_asc(x)	"0123456789abcdef"[x]
+#ifndef isascii
 #define isascii(c) (((unsigned char)(c)) <= 0x7f)
+#endif
 
 static void hex_dump_to_buffer(const void *buf, size_t len, int rowsize,
 			       int groupsize, char *linebuf, size_t linebuflen,
@@ -322,6 +311,16 @@ struct i2c_client *efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address)
 
 #endif /* EFX_NEED_I2C_NEW_DUMMY */
 
+#ifdef EFX_NEED_USLEEP_RANGE
+
+void usleep_range(unsigned long min, unsigned long max)
+{
+	unsigned long delay = DIV_ROUND_UP(min, 1000) ? : 1;
+	msleep(delay);
+}
+
+#endif
+
 #ifdef EFX_NEED_PCI_CLEAR_MASTER
 
 void pci_clear_master(struct pci_dev *dev)
@@ -355,9 +354,8 @@ int pci_wake_from_d3(struct pci_dev *dev, bool enable)
 
 #endif /* EFX_NEED_PCI_WAKE_FROM_D3 */
 
-#if (defined(EFX_NEED_UNMASK_MSIX_VECTORS) || \
-     defined(EFX_NEED_SAVE_MSIX_MESSAGES)) && \
-	!defined(EFX_HAVE_MSIX_TABLE_RESERVED)
+#if defined(EFX_NEED_UNMASK_MSIX_VECTORS) || \
+    defined(EFX_NEED_SAVE_MSIX_MESSAGES)
 
 #undef pci_save_state
 #undef pci_restore_state
@@ -450,8 +448,7 @@ void efx_pci_restore_state(struct pci_dev *pci_dev)
 				 efx_restore_msix_state);
 }
 
-#endif /* (EFX_NEED_UNMASK_MSIX_VECTORS || EFX_NEED_SAVE_MSIX_MESSAGES) &&
-	  !EFX_HAVE_MSIX_TABLE_RESERVED */
+#endif /* EFX_NEED_UNMASK_MSIX_VECTORS || EFX_NEED_SAVE_MSIX_MESSAGES */
 
 #ifdef EFX_NEED_NS_TO_TIMESPEC
 

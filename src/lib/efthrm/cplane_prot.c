@@ -52,7 +52,6 @@
 #include <ci/tools.h>
 #include <ci/net/arp.h>
 #include <onload/tcp_driver.h>
-#include <ci/driver/efab/workqueue.h>
 
 
 #ifndef TRUE
@@ -470,7 +469,7 @@ ci_inline void
 cicppl_rx_fifo_dtor(cicppl_rx_fifo_t *fifo)
 {
   /* flush the workqueue to make sure there are no pending ARP work items */
-  ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+  flush_workqueue(CI_GLOBAL_WORKQUEUE);
   ci_irqlock_dtor(&fifo->lock);
 }
 
@@ -645,29 +644,13 @@ cicppl_arp_pkt_update(cicp_handle_t *control_plane,
 
 
 
-/*! schedule efab_handle_arp_data() to run at process context(i.e. non-irq) */
-#define cicppl_schedule_arp_data_handler(wi)                                 \
-  do {                                                                       \
-    int rc;                                                                  \
-    ci_assert_equal(CI_WORKITEM_GET_ROUTINE(wi),                             \
-                     (CI_WITEM_ROUTINE) &cicppl_handle_arp_data);            \
-    ci_assert_nequal(CI_WORKITEM_GET_CONTEXT(wi) /*control_plane*/, NULL);   \
-    rc = ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, (wi));                       \
-    if (CI_UNLIKELY( (rc != 0) && (rc != -EALREADY) ))                       \
-      OO_DEBUG_ARP(DPRINTF(CODEID": Can't queue ARP data handler, rc %d",       \
-		        -rc));             		                     \
-  } while(0)
-
-
-
-
 /*! Work item routine that get scheduled in the work queue and reads ARP
     headers from the fifo and updates the arp table. */
 static void 
-cicppl_handle_arp_data(void *context)
+cicppl_handle_arp_data(struct work_struct *data)
 {
   cicppl_rx_fifo_item_t *item_ptr;
-  cicp_handle_t *control_plane = (cicp_handle_t *)context;
+  cicp_handle_t *control_plane = &CI_GLOBAL_CPLANE;
   
   /* is there anything to do? */
   while (NULL != (item_ptr = cicppl_rx_fifo_pop(&static_fifo))) {
@@ -736,11 +719,13 @@ cicppl_queue_arp(cicp_handle_t *control_plane, ci_ether_arp *arp,
 {
   cicppl_rx_fifo_item_t *item_ptr =
       cicppl_rx_fifo_get_from_free_list(&static_fifo);
-  static ci_workitem_t wi =
-      CI_WORKITEM_INITIALISER(wi,
-                              (CI_WITEM_ROUTINE) &cicppl_handle_arp_data,
-                              NULL);
-  CI_WORKITEM_SET_CONTEXT(&wi, (void *)control_plane);
+  static struct work_struct wi;
+  static int initialized = 0;
+  if( !initialized ) {
+    INIT_WORK(&wi, cicppl_handle_arp_data);
+    /*CI_WORKITEM_SET_CONTEXT(&wi, (void *)control_plane);*/
+    initialized = 1;
+  }
 
   if (NULL != item_ptr) {
     /* populate the work item */
@@ -751,7 +736,7 @@ cicppl_queue_arp(cicp_handle_t *control_plane, ci_ether_arp *arp,
     cicppl_rx_fifo_push(&static_fifo, item_ptr);
 
     /* schedule a job to consume the ARP packet at a better time */
-    cicppl_schedule_arp_data_handler(&wi);
+    queue_work(CI_GLOBAL_WORKQUEUE, &wi);
   } else {
     CICP_STAT_INC_FIFO_OVERFLOW(control_plane);
     OO_DEBUG_ARP(DPRINTF(CODEID": dropped received ARP packet - "

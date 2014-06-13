@@ -90,7 +90,7 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
   oo_pktq* dmaq;
   ef_vi* vi;
   ef_iovec iov[CI_IP_PKT_SEGMENTS_MAX];
-#if CI_CFG_PIO
+#if CI_CFG_USE_PIO
   ci_uint8 order;
   ci_int32 offset;
   ci_pio_buddy_allocator* buddy;
@@ -103,10 +103,10 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
 
   __ci_netif_dmaq_insert_prep_pkt(netif, pkt);
 
-  LOG_NT(log("%s: id=%d nseg=%d 0:["EF_ADDR_FMT":%d] dhost="
-             CI_MAC_PRINTF_FORMAT, __FUNCTION__, OO_PKT_FMT(pkt),
-             pkt->n_buffers, pkt->dma_addr[pkt->intf_i], pkt->buf_len,
-             CI_MAC_PRINTF_ARGS(oo_ether_dhost(pkt))));
+  LOG_NT(log("%s: [%d] id=%d nseg=%d 0:["EF_ADDR_FMT":%d] dhost="
+             CI_MAC_PRINTF_FORMAT, __FUNCTION__, NI_ID(netif),
+             OO_PKT_FMT(pkt), pkt->n_buffers, pkt->dma_addr[pkt->intf_i],
+             pkt->buf_len, CI_MAC_PRINTF_ARGS(oo_ether_dhost(pkt))));
 
   ci_check( ! ci_eth_addr_is_zero((ci_uint8 *)oo_ether_dhost(pkt)));
 
@@ -126,7 +126,7 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
   ci_assert_equal(vi, &netif->nic_hw[pkt->intf_i].vi);
 
   if( oo_pktq_is_empty(dmaq) ) {
-#if CI_CFG_PIO
+#if CI_CFG_USE_PIO
     /* pio_thresh is set to zero if PIO disabled on this stack, so don't
      * need to check NI_OPTS().pio here
      */

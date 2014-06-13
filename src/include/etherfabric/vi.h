@@ -178,6 +178,7 @@ extern int ef_vi_alloc_from_set(ef_vi* vi, ef_driver_handle vi_dh,
 enum ef_filter_flags {
 	EF_FILTER_FLAG_NONE           = 0x0,
 	EF_FILTER_FLAG_REPLACE        = 0x1,
+	EF_FILTER_FLAG_MCAST_LOOP_RECEIVE     = 0x2,
 };
 
 typedef struct {

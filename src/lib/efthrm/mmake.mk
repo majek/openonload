@@ -7,6 +7,7 @@ LIB_SRCS	:= cplane.c \
 		   eplock_resource_manager.c \
 		   tcp_helper_endpoint.c \
 		   tcp_helper_resource.c \
+		   tcp_helper_cluster.c \
 		   tcp_helper_ioctl.c \
 		   tcp_helper_mmap.c \
 		   tcp_helper_sleep.c \

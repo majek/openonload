@@ -443,6 +443,13 @@ efab_ep_filter_dump(ci_private_t *priv, void *arg)
                                          CI_USER_PTR_GET(op->buf),
                                          op->buf_len);
 }
+static int
+efab_cluster_dump(ci_private_t *priv, void *arg)
+{
+  oo_cluster_dump_t *op = arg;
+  return tcp_helper_cluster_dump(priv->thr, CI_USER_PTR_GET(op->buf),
+                                 op->buf_len);
+}
 
 
 /*--------------------------------------------------------------------
@@ -950,7 +957,7 @@ cicpos_route_delete_rsop(ci_private_t *priv, void *arg)
   if (priv->thr == NULL)
     return -EINVAL;
   cicpos_route_delete(CICP_HANDLE(&priv->thr->netif), 
-                      op->dest_ip, op->dest_ipset);
+                      op->dest_ip, op->dest_ipset, CI_IFID_BAD);
   return 0;
 }
 static int
@@ -1012,7 +1019,7 @@ oo_ioctl_debug_op(ci_private_t *priv, void *arg)
                                op->u.dump_stack.orphan_only);
     break;
   case __CI_DEBUG_OP_KILL_STACK__:
-    rc = tcp_helper_kill_stack(op->u.stack_id);
+    rc = tcp_helper_kill_stack_by_id(op->u.stack_id);
     break;
   default:
     rc = -EINVAL;
@@ -1063,7 +1070,7 @@ static DEFINE_MUTEX(ctor_mutex);
   int rc;
 
   mutex_lock(&ctor_mutex);
-  rc = tcp_helper_alloc_ul(alloc, NULL, -1, &trs);
+  rc = tcp_helper_alloc_ul(alloc, -1, &trs);
   if( rc == 0 ) {
     rc = oo_priv_set_stack(priv, trs);
     if( rc == 0 ) {
@@ -1127,229 +1134,10 @@ ioctl_kill_self(ci_private_t *priv, void *unused)
 extern int ioctl_iscsi_control_op (ci_private_t *priv, void *arg);
 
 
-/* Move priv file to the alien_ni stack.
- * If rc=0, returns with alien_ni stack locked. */
-static int efab_file_move_to_alien_stack(ci_private_t *priv,
-                                         ci_netif *alien_ni)
-{
-  tcp_helper_resource_t *old_thr = priv->thr;
-  tcp_helper_resource_t *new_thr = netif2tcp_helper_resource(alien_ni);
-  ci_tcp_state *old_ts = SP_TO_TCP(&old_thr->netif, priv->sock_id);
-  ci_tcp_state *mid_ts;
-  ci_tcp_state *new_ts;
-  tcp_helper_endpoint_t *ep;
-  struct oo_file_ref *os_socket;
-  int rc;
+extern int efab_file_move_to_alien_stack_rsop(ci_private_t *priv, void *arg);
+extern int efab_tcp_loopback_connect(ci_private_t *priv, void *arg);
+extern int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg);
 
-  /* Endpoints in epoll list should not be moved, because waitq is already
-   * in the epoll internal structures (bug 41152). */
-  if( !list_empty(&priv->_filp->f_ep_links) )
-    return -EBUSY;
-
-  mid_ts = CI_ALLOC_OBJ(ci_tcp_state);
-  if( mid_ts == NULL ) {
-    ci_netif_unlock(&old_thr->netif);
-    return -ENOMEM;
-  }
-  *mid_ts = *old_ts;
-
-  /* We are starting with locked "current stack" and finish with
-   * locked "current stack".  Change the lock! */
-  ci_netif_unlock(&old_thr->netif);
-  rc = ci_netif_lock(alien_ni);
-  if( rc != 0 ) {
-    CI_FREE_OBJ(mid_ts);
-    return -EBUSY;
-  }
-
-  /* Allocate a socket in the alien_ni stack */
-  new_ts = ci_tcp_get_state_buf(alien_ni);
-  if( new_ts == NULL ) {
-    /* too bad: can't move fd to another stack. */
-    ci_netif_unlock(alien_ni);
-    CI_FREE_OBJ(mid_ts);
-    return -ENOMEM;
-  }
-
-  /* Move os_socket from one ep to another */
-  ep = ci_trs_ep_get(old_thr, priv->sock_id);
-  os_socket = NULL;
-  if( ep->os_socket != NULL )
-    os_socket = oo_file_ref_add(ep->os_socket);
-  ep = ci_trs_ep_get(new_thr, new_ts->s.b.bufid);
-  if( tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
-      OO_THR_EP_AFLAG_ATTACHED ) {
-    ci_tcp_state_free(alien_ni, new_ts);
-    ci_netif_unlock(alien_ni);
-    if( os_socket != NULL )
-      oo_file_ref_drop(os_socket);
-    CI_FREE_OBJ(mid_ts);
-    return -EBUSY;
-  }
-  ci_assert_equal(ep->os_socket, NULL);
-  ep->os_socket = os_socket;
-
-  /* do not copy old_ts->s.b.bufid! */
-  new_ts->c = mid_ts->c;
-  new_ts->tcpflags = mid_ts->tcpflags;
-  new_ts->s.s_flags = mid_ts->s.s_flags;
-  new_ts->s.s_aflags = mid_ts->s.s_aflags;
-  new_ts->s.domain = mid_ts->s.domain;
-  new_ts->s.cp = mid_ts->s.cp;
-  new_ts->s.pkt = mid_ts->s.pkt;
-  new_ts->s.space_for_hdrs.space_for_tcp_hdr =
-          mid_ts->s.space_for_hdrs.space_for_tcp_hdr;
-  new_ts->s.uid = mid_ts->s.uid;
-  CI_DEBUG(new_ts->s.pid = mid_ts->s.pid);
-  new_ts->s.ino = mid_ts->s.ino;
-  new_ts->s.cmsg_flags = mid_ts->s.cmsg_flags;
-  ci_pmtu_state_init(alien_ni, &new_ts->s, &new_ts->pmtus,
-                     CI_IP_TIMER_PMTU_DISCOVER);
-  new_ts->s.so = mid_ts->s.so;
-  new_ts->s.so_priority = mid_ts->s.so_priority;
-  new_ts->s.so_error = mid_ts->s.so_error;
-  new_ts->s.tx_errno = mid_ts->s.tx_errno;
-  new_ts->s.rx_errno = mid_ts->s.rx_errno;
-  new_ts->s.b.state = mid_ts->s.b.state;
-  new_ts->s.b.sb_flags = mid_ts->s.b.sb_flags;
-  new_ts->s.b.sb_aflags = mid_ts->s.b.sb_aflags;
-
-  /* free temporary mid_ts storage */
-  CI_FREE_OBJ(mid_ts);
-
-  /* hack fd to point to the new endpoint */
-  oo_move_file(priv, new_thr, new_ts->s.b.bufid);
-
-  /* Free resources from the old endpoint. */
-  efab_tcp_helper_close_endpoint(old_thr, old_ts->s.b.bufid);
-  efab_thr_release(old_thr);
-
-  return 0;
-}
-
-static int
-efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
-{
-  struct oo_op_loopback_connect *carg = arg;
-  ci_netif *alien_ni = NULL;
-  oo_sp tls_id;
-
-  carg->out_moved = 0;
-
-  if( !CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type) )
-    return -EINVAL;
-  if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
-      CITP_TCP_LOOPBACK_TO_CONNSTACK &&
-      NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
-      CITP_TCP_LOOPBACK_TO_LISTSTACK &&
-      NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
-      CITP_TCP_LOOPBACK_TO_NEWSTACK) {
-    ci_netif_unlock(&priv->thr->netif);
-    return -EINVAL;
-  }
-
-  while( iterate_netifs_unlocked(&alien_ni) == 0 ) {
-
-    if( !efab_thr_can_access_stack(netif2tcp_helper_resource(alien_ni),
-                                   EFAB_THR_TABLE_LOOKUP_CHECK_USER) )
-      continue; /* no permission to look in here */
-
-    if( NI_OPTS(alien_ni).tcp_server_loopback == CITP_TCP_LOOPBACK_OFF )
-      continue; /* server does not accept loopback connections */
-
-    if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
-        CITP_TCP_LOOPBACK_TO_LISTSTACK &&
-        NI_OPTS(alien_ni).tcp_server_loopback !=
-        CITP_TCP_LOOPBACK_ALLOW_ALIEN_IN_ACCEPTQ )
-      continue; /* options of the stacks to not match */
-
-    if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
-        CITP_TCP_LOOPBACK_TO_LISTSTACK &&
-        !efab_thr_user_can_access_stack(alien_ni->uid, alien_ni->euid,
-                                        &priv->thr->netif) )
-      continue; /* server can't accept our socket */
-
-    tls_id = ci_tcp_connect_find_local_peer(alien_ni, carg->dst_addr,
-                                            carg->dst_port);
-
-    if( OO_SP_NOT_NULL(tls_id) ) {
-      int rc;
-
-      /* We are going to exit in this or other way: get ref and
-       * drop kref of alien_ni */
-      efab_thr_ref(netif2tcp_helper_resource(alien_ni));
-      iterate_netifs_unlocked_dropref(alien_ni);
-
-      switch( NI_OPTS(&priv->thr->netif).tcp_client_loopback ) {
-      case CITP_TCP_LOOPBACK_TO_CONNSTACK:
-        carg->out_rc =
-            ci_tcp_connect_lo_toconn(&priv->thr->netif, priv->sock_id,
-                                     carg->dst_addr, alien_ni, tls_id);
-        efab_thr_release(netif2tcp_helper_resource(alien_ni));
-        return 0;
-
-      case CITP_TCP_LOOPBACK_TO_LISTSTACK:
-        rc = efab_file_move_to_alien_stack(priv, alien_ni);
-        if( rc != 0 ) {
-          efab_thr_release(netif2tcp_helper_resource(alien_ni));
-          /* if we return error, UL will do handover. */
-          return rc;
-        }
-
-        /* Connect again, using new endpoint */
-        carg->out_rc =
-            ci_tcp_connect_lo_samestack(alien_ni,
-                                        SP_TO_TCP(alien_ni, priv->sock_id),
-                                        tls_id);
-        ci_netif_unlock(alien_ni);
-        carg->out_moved = 1;
-        return 0;
-
-
-      case CITP_TCP_LOOPBACK_TO_NEWSTACK:
-      {
-        tcp_helper_resource_t *new_thr;
-        ci_resource_onload_alloc_t alloc;
-
-        /* create new stack
-         * todo: no hardware interfaces are necessary */
-        strcpy(alloc.in_version, ONLOAD_VERSION);
-        strcpy(alloc.in_uk_intf_ver, oo_uk_intf_ver);
-        alloc.in_name[0] = '\0';
-        alloc.in_flags = 0;
-        rc = tcp_helper_alloc_kernel(&alloc, &NI_OPTS(&priv->thr->netif),
-                                     NULL/*ifindices*/, 0, &new_thr);
-        if( rc != 0 ) {
-          ci_log("%s: tcp_helper_rm_alloc failed with %d", __func__, rc);
-          efab_thr_release(netif2tcp_helper_resource(alien_ni));
-          return -ECONNREFUSED;
-        }
-
-        /* move connecting socket to the new stack */
-        rc = efab_file_move_to_alien_stack(priv, &new_thr->netif);
-        if( rc != 0 ) {
-          ci_log("%s: efab_file_move_to_alien_stack failed with %d", __func__, rc);
-          efab_thr_release(netif2tcp_helper_resource(alien_ni));
-          efab_thr_release(new_thr);
-          return -ECONNREFUSED;
-        }
-        carg->out_moved = 1;
-        carg->out_rc = -ECONNREFUSED;
-
-        /* now connect via CITP_TCP_LOOPBACK_TO_CONNSTACK */
-        carg->out_rc =
-            ci_tcp_connect_lo_toconn(&priv->thr->netif, priv->sock_id,
-                                     carg->dst_addr, alien_ni, tls_id);
-        efab_thr_release(netif2tcp_helper_resource(alien_ni));
-        return 0;
-      }
-      }
-    }
-  }
-
-  ci_netif_unlock(&priv->thr->netif);
-  return -ENOENT;
-}
 
 static int
 efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
@@ -1528,5 +1316,8 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_GET_ONLOADFS_DEV, onloadfs_get_dev_t),
   op(OO_IOC_TCP_LOOPBACK_CONNECT, efab_tcp_loopback_connect),
   op(OO_IOC_TCP_DROP_FROM_ACCEPTQ, efab_tcp_drop_from_acceptq),
+  op(OO_IOC_MOVE_FD, efab_file_move_to_alien_stack_rsop),
+  op(OO_IOC_EP_REUSEPORT_BIND, efab_tcp_helper_reuseport_bind),
+  op(OO_IOC_CLUSTER_DUMP,      efab_cluster_dump),
 #undef op
 };

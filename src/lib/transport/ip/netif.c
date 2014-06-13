@@ -317,6 +317,30 @@ static int ci_netif_try_to_reap_udp(ci_netif* ni, ci_udp_state* udp,
 }
 
 
+static int ci_netif_try_to_reap_timestamp_q(ci_netif* ni, 
+                                            struct ci_sock_cmn_s* s,
+                                            int* add_to_reap_list)
+{
+  ci_ip_pkt_queue* tsq = &s->timestamp_q;
+  int tsq_num_before = tsq->num;
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  while( ! OO_PP_EQ(tsq->head, s->timestamp_q_extract) ) {
+    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, tsq->head);
+    oo_pkt_p next = pkt->tsq_next;
+
+    ci_netif_pkt_release(ni, pkt);
+    --tsq->num;
+    tsq->head = next;
+  }
+
+  if( tsq->num > 1 )
+    ++(*add_to_reap_list);
+  return tsq_num_before - tsq->num;
+}
+
+
 void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
 {
   /* Look for packet buffers that can be reaped. */
@@ -325,6 +349,7 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
   ci_ni_dllist_link* last;
   citp_waitable_obj* wo;
   int freed_n = 0;
+  int add_to_reap_list;
 
   if( ci_ni_dllist_is_empty(ni, &ni->state->reap_list) )
     return;
@@ -339,6 +364,8 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
   last = ci_ni_dllist_start_last(ni, &ni->state->reap_list);
 
   do {
+    add_to_reap_list = 0;
+
     wo = CI_CONTAINER(citp_waitable_obj, sock.reap_link, lnk);
     lnk = (ci_ni_dllist_link*) CI_NETIF_PTR(ni, lnk->next);
     ci_ni_dllist_remove_safe(ni, &wo->sock.reap_link);
@@ -348,18 +375,20 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
       int q_num_b4 = ts->recv1.num;
       ci_tcp_rx_reap_rxq_bufs(ni, ts);
       freed_n += q_num_b4 - ts->recv1.num;
-      if( ts->recv1.num > 1 )
+      freed_n += ci_netif_try_to_reap_timestamp_q(ni, &ts->s,
+                                                  &add_to_reap_list);
+      if( ts->recv1.num > 1 || add_to_reap_list)
         ci_ni_dllist_put(ni, &ni->state->reap_list, &ts->s.reap_link);
     }
     else if( wo->waitable.state == CI_TCP_STATE_UDP ) {
-      int add_to_reap_list = 0;
       ci_udp_state* us = &wo->udp;
       freed_n += ci_netif_try_to_reap_udp(ni, us, &us->recv_q,
                                           &add_to_reap_list);
+      freed_n += ci_netif_try_to_reap_timestamp_q(ni, &us->s,
+                                                  &add_to_reap_list);
       if( add_to_reap_list )
         ci_ni_dllist_put(ni, &ni->state->reap_list, &us->s.reap_link);
     }
-
   } while( freed_n < stop_once_freed_n && &wo->sock.reap_link != last );
 
   CITP_STATS_NETIF_ADD(ni, pkts_reaped, freed_n);
@@ -716,9 +745,15 @@ static void citp_waitable_deferred_work(ci_netif* ni, citp_waitable* w)
   if( wo->waitable.state & CI_TCP_STATE_TCP )
     ci_tcp_perform_deferred_socket_work(ni, &wo->tcp);
 #if CI_CFG_UDP
-  else
+  else if( wo->waitable.state == CI_TCP_STATE_UDP )
     ci_udp_perform_deferred_socket_work(ni, &wo->udp);
 #endif
+  else {
+    /* This happens when we move socket and continue to use it from another
+     * thread or signal handler */
+    ci_log("%s: unexpected status %s for socket [%d:%d]", __func__,
+           ci_tcp_state_str(wo->waitable.state), NI_ID(ni), w->bufid);
+  }
 }
 
 
@@ -818,6 +853,8 @@ static void ci_netif_unlock_slow(ci_netif* ni)
   ** already in kernel.
   */
   int l = ni->state->lock.lock;
+  int intf_i;
+  unsigned after_unlock_flags;
 
   ci_assert(ci_netif_is_locked(ni));  /* double unlock? */
 
@@ -829,15 +866,60 @@ static void ci_netif_unlock_slow(ci_netif* ni)
       CITP_STATS_NETIF_INC(ni, unlock_slow_pkt_waiter);
     }
 
-  if( l & CI_EPLOCK_NETIF_SOCKET_LIST )
+  if( l & CI_EPLOCK_NETIF_SOCKET_LIST ) {
+    CITP_STATS_NETIF_INC(ni, unlock_slow_socket_list);
     l = ci_netif_purge_deferred_socket_list(ni);
+  }
   ci_assert(! (l & CI_EPLOCK_NETIF_SOCKET_LIST));
+  /* OK to clear this before dropping the lock here, as not in a loop */
   ni->state->defer_work_count = 0;
 
-  if( !(l & (CI_EPLOCK_NETIF_KERNEL_FLAGS | CI_EPLOCK_FL_NEED_WAKE)) )
+  if( l & CI_EPLOCK_NETIF_NEED_POLL ) {
+    CITP_STATS_NETIF(++ni->state->stats.deferred_polls);
+    ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_NEED_POLL);
+    ci_netif_poll(ni);
+    l = ni->state->lock.lock;
+  }
+
+  /* Store NEED_PRIME flag and clear it - we'll handle it if set,
+   * either below or by dropping to the kernel 
+   */
+  after_unlock_flags = l;
+  if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME )
+    ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_NEED_PRIME);
+
+  /* Could loop here if flags have been set again, but to keep things
+   * simple just drop to the kernel unless we've already done
+   * everything we needed to do
+   */
+
+  if( !(l & (CI_EPLOCK_NETIF_UNLOCK_FLAGS |
+             CI_EPLOCK_NETIF_SOCKET_LIST |
+             CI_EPLOCK_FL_NEED_WAKE)) ) {
     if( ci_cas32_succeed(&ni->state->lock.lock,
-                        l, (l &~ CI_EPLOCK_LOCKED) | CI_EPLOCK_UNLOCKED) )
+                         l, (l &~ CI_EPLOCK_LOCKED) | CI_EPLOCK_UNLOCKED) ) {
+      /* If the NEED_PRIME flag was set, handle it here */
+      if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME ) {
+        CITP_STATS_NETIF_INC(ni, unlock_slow_need_prime);
+        ci_assert(NI_OPTS(ni).int_driven);
+        /* TODO: When interrupt driven, evq_primed is never cleared, so we
+         * don't know here which subset of interfaces needs to be primed.
+         * Would be more efficient if we did.
+         */
+        OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+          ef_eventq_prime(&ni->nic_hw[intf_i].vi);
+      }
+
+      /* We've handled everything we needed to, so can return without
+       * dropping to the kernel 
+       */
       return;
+    }
+  }
+
+  /* We cleared NEED_PRIME above, but haven't handled it - restore setting */
+  if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME )
+    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_PRIME);
 
 #endif
 

@@ -80,6 +80,7 @@
 #else
 #include <linux/semaphore.h>
 #endif
+#include <linux/workqueue.h>
 
 #include <ci/tools/config.h>
 
@@ -438,6 +439,13 @@ ci_inline uid_t ci_getgid(void)
   return __kgid_val(current_gid());
 #endif
 }
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
+#define ci_net_random() net_random()
+#else
+#define ci_net_random() prandom_u32()
+#endif
 
 
 #endif  /* __CI_TOOLS_LINUX_KERNEL_H__ */

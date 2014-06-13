@@ -555,7 +555,19 @@ int ci_udp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
   os_sock = ci_get_os_sock_fd(ep, fd);
   ci_assert(CI_IS_VALID_SOCKET(os_sock));
   rc = __set_socket_opt(ep, os_sock, level, optname, optval, optlen);
-  if( rc == CI_SOCKET_ERROR )  goto out;
+  if( rc == CI_SOCKET_ERROR ) {
+    /* We support reuseport where the OS doesn't, so set a flag to say that's
+     * what we're doing, and hide the error.
+     */
+    if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) &&
+        errno == ENOPROTOOPT ) {
+      ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
+      rc = 0;
+    }
+    else {
+      goto out;
+    }
+  }
 
   if( level == SOL_SOCKET ) {
     rc = ci_set_sol_socket_nolock(ep->netif, ep->s, optname, optval, optlen);

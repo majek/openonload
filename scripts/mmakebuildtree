@@ -125,8 +125,9 @@ do_top_level () {
 	DESTFLAG := $DESTFLAG
 	REMOTEBUILDFLAG := $REMOTEBUILDFLAG
 	TOPPATH := $TOPPATH
-	BUILDENV := $($mmaketool --distribution)-$(uname -m)
+	BUILDENV := $($mmaketool --distribution)-$(gcc -dumpmachine)
 	BUILDHOST := $BUILDHOST
+	W_NO_UNUSED_RESULT := $W_NO_UNUSED_RESULT
 	$nt
 	$kpath
 EOF
@@ -327,6 +328,7 @@ TOPPATH=
 RELATIVE_TOP=
 ABSOLUTE_TOP=
 INBUILD=0
+W_NO_UNUSED_RESULT=
 
 dest=
 what="--platforms"
@@ -489,6 +491,12 @@ case "$PLATFORM" in
    *)            VPATH_ENABLED=1;;
 esac
 vpath_mode="VPATH_ENABLED := $VPATH_ENABLED"
+
+# Disable unused-result warning for Ubuntu build, because of extra checking
+# of unused values returned by functions e.g. in logging code.
+if [ -n "$($mmaketool --distrib_is_ubuntu)" ] ; then
+  W_NO_UNUSED_RESULT="1"
+fi
 
 [ -z "$SRCPATH" ] && SRCPATH=$("$mmaketool" --toppath)/src
 

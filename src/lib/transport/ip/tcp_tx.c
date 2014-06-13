@@ -47,8 +47,9 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
   oo_pktq* dmaq;
   oo_pkt_p pp;
   ef_vi* vi;
-  int n, rc;
-#if CI_CFG_PIO
+  int n;
+#if CI_CFG_USE_PIO
+  int rc;
   ci_uint8 order;
   ci_int32 offset;
   ci_pio_buddy_allocator* buddy;
@@ -59,6 +60,8 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
   do {
     pkt = PKT_CHK(ni, pp);
     pp = pkt->next;
+    if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+      pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     __ci_netif_dmaq_insert_prep_pkt(ni, pkt);
     pkt->netif.tx.dmaq_next = pkt->next;
@@ -67,7 +70,7 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
 
   ci_netif_dmaq_and_vi_for_pkt(ni, tail_pkt, &dmaq, &vi);
 
-#if CI_CFG_PIO
+#if CI_CFG_USE_PIO
     /* pio_thresh is set to zero if PIO disabled on this stack, so don't
      * need to check NI_OPTS().pio here
      */
@@ -135,6 +138,8 @@ static void ci_ip_tcp_list_to_dmaq_striping(ci_netif* ni, ci_tcp_state* ts,
   n = 0;
   do {
     pkt = PKT_CHK(ni, pp);
+    if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+      pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     pp = pkt->next;
     __ci_netif_dmaq_insert_prep_pkt(ni, pkt);
@@ -239,6 +244,10 @@ fast:
     do {
       pkt = PKT_CHK(ni, head_id);
       head_id = pkt->next;
+
+      if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+        pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
+
       ci_ip_send_tcp_slow(ni, ts, pkt);
       if( pkt == tail_pkt )
         break;
@@ -777,7 +786,11 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   /* align TSO option so that tcp_tx_finish can overwrite it if need be */
   if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO ) {
-    unsigned now = ci_tcp_time_now(netif);
+    unsigned now;
+    if( tsr->tcpopts.flags & CI_TCPT_FLAG_SYNCOOKIE )
+      now = tsr->timest;
+    else
+      now = ci_tcp_time_now(netif);
     optlen += ci_tcp_tx_opt_tso(&opt, now, tsr->tspeer);
   }
 
@@ -907,6 +920,9 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
   ts->t_last_sent = ci_tcp_time_now(netif);
 #endif
 
+  if( (pkt->flags & (CI_PKT_FLAG_RTQ_RETRANS | CI_PKT_FLAG_TX_TIMESTAMPED)) ==
+      CI_PKT_FLAG_TX_TIMESTAMPED )
+    pkt->pf.tcp_tx.first_tx_hw_stamp = pkt->tx_hw_stamp;
   ci_tcp_tx_maybe_do_striping(pkt, ts);
   __ci_ip_send_tcp(netif, pkt, ts);
   CI_TCP_STATS_INC_OUT_SEGS(netif);
@@ -966,12 +982,6 @@ static int ci_tcp_retrans(ci_netif* ni, ci_tcp_state* ts, int seq_limit,
       at_start_of_block = 1;
       ci_assert(~pkt->flags & CI_PKT_FLAG_RTQ_SACKED);
     }
-
-#ifdef __KERNEL__
-    if( pkt->flags & CI_PKT_FLAG_RTQ_RETRANS )
-        dump_stack();
-#endif
-    ci_assert(~pkt->flags & CI_PKT_FLAG_RTQ_RETRANS);
 
     if( at_start_of_block )  ci_tcp_retrans_coalesce_block(ni, ts, pkt);
 

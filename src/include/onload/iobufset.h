@@ -56,7 +56,6 @@
 #include <onload/common.h>
 #include <onload/linux_onload.h>
 #include <onload/atomics.h>
-#include <ci/driver/efab/workqueue.h>
 
 /********************************************************************
  *
@@ -91,7 +90,7 @@ struct oo_buffer_pages {
   int shmid;
 #ifdef CLONE_NEWIPC
   struct ipc_namespace *ipc_ns;
-  ci_workitem_t wi;
+  struct work_struct wi;
 #endif
 #endif
   struct page **pages;     /*!< array of Linux compound pages */
@@ -101,7 +100,7 @@ struct oo_buffer_pages {
 struct oo_iobufset {
   struct efrm_pd *pd;
   oo_atomic_t ref_count;
-  struct efrm_buffer_table_allocation buf_tbl_alloc;
+  struct efrm_bt_collection buf_tbl_alloc;
   struct oo_buffer_pages *pages;   /*!< allocated memory */
   dma_addr_t *dma_addrs;            /*!< array of pages->n_buf entries */
 };

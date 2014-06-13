@@ -331,8 +331,8 @@ def interface_n_rxqs(ethname):
 
 def sfc_interface_n_rxqs(ethname):
     try:
-        dir = "/proc/driver/sfc/nic_%s" % ethname
-        cmd = "cd %s 2>/dev/null && /bin/ls -d rxq[0-9]* | wc -w" % dir
+        dir = "/sys/class/net/%s/queues" % ethname
+        cmd = "cd %s 2>/dev/null && /bin/ls -d rx-[0-9]* | wc -w" % dir
         f = do_popen(cmd)
         return int(f.read().strip())
     except:

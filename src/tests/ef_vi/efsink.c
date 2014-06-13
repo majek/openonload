@@ -277,7 +277,7 @@ static void usage(void)
   fprintf(stderr, "  efsink <options> <interface> <filter-spec>...\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "filter-spec:\n");
-  fprintf(stderr, "  {udp|tcp}:[vid=<vlan>,]<local-host>:<local-port>"
+  fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:<local-port>"
           "[,<remote-host>:<remote-port>]\n");
   fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
   fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");

@@ -65,20 +65,12 @@ void efrm_nic_vi_ctor(struct efrm_nic_vi *nvi)
 	nvi->rx_flush_outstanding_count = 0;
 	INIT_LIST_HEAD(&nvi->close_pending);
 	INIT_WORK(&nvi->work_item, efrm_vi_rm_delayed_free);
-	INIT_WORK(&nvi->flush_work_item, efrm_vi_check_flushes);
-	init_timer(&nvi->flush_timer);
-	nvi->flush_timer.function = &efrm_vi_flush_timer_fn;
-	nvi->flush_timer.data = (unsigned long)nvi;
+	INIT_DELAYED_WORK(&nvi->flush_work_item, efrm_vi_check_flushes);
 }
 
 
 void efrm_nic_vi_dtor(struct efrm_nic_vi *nvi)
 {
-	atomic_set(&nvi->flush_timer_running, 0);
-
-        /* See Bug30934 for why two flushes are needed */
-	flush_workqueue(efrm_vi_manager->workqueue);
-	del_timer_sync(&nvi->flush_timer);
 	flush_workqueue(efrm_vi_manager->workqueue);
 
 	/* Now that workqueue and flush timer have gone check that there
@@ -89,6 +81,16 @@ void efrm_nic_vi_dtor(struct efrm_nic_vi *nvi)
 	EFRM_ASSERT(nvi->rx_flush_outstanding_count == 0);
 	EFRM_ASSERT(list_empty(&nvi->tx_flush_outstanding_list));
 	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
+
+#ifdef EFX_USE_CANCEL_DELAYED_WORK_SYNC
+	cancel_delayed_work_sync(&nvi->flush_work_item);
+#else
+	/* Flush work item will not respawn because there is nothing
+	 * outstanding. */
+	cancel_delayed_work(&nvi->flush_work_item);
+	flush_workqueue(efrm_vi_manager->workqueue);
+#endif
+
 	EFRM_ASSERT(list_empty(&nvi->close_pending));
 }
 

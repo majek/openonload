@@ -158,6 +158,8 @@
 	  hw_name ## _ ## offset }
 #define FALCON_OTHER_STAT(ext_name)					\
 	[FALCON_STAT_ ## ext_name] = { #ext_name, 0, 0 }
+#define GENERIC_SW_STAT(ext_name)				\
+	[GENERIC_STAT_ ## ext_name] = { #ext_name, 0, 0 }
 
 static const struct efx_hw_stat_desc falcon_stat_desc[FALCON_STAT_COUNT] = {
 	FALCON_DMA_STAT(tx_bytes, XgTxOctets),
@@ -207,6 +209,8 @@ static const struct efx_hw_stat_desc falcon_stat_desc[FALCON_STAT_COUNT] = {
 	FALCON_DMA_STAT(rx_length_error, XgRxLengthError),
 	FALCON_DMA_STAT(rx_internal_error, XgRxInternalMACError),
 	FALCON_OTHER_STAT(rx_nodesc_drop_cnt),
+	GENERIC_SW_STAT(rx_nodesc_trunc),
+	GENERIC_SW_STAT(rx_noskb_drops),
 };
 static const unsigned long falcon_stat_mask[] = {
 	[0 ... BITS_TO_LONGS(FALCON_STAT_COUNT) - 1] = ~0UL,
@@ -1362,7 +1366,7 @@ static void falcon_poll_xmac(struct efx_nic *efx)
 {
 	struct falcon_nic_data *nic_data = efx->nic_data;
 
-        /* We expect xgmii faults if the wireside link is down */
+	/* We expect xgmii faults if the wireside link is down */
 	if (!efx->link_state.up || !nic_data->xmac_poll_required)
 		return;
 
@@ -1802,7 +1806,6 @@ static int falcon_probe_port(struct efx_nic *efx)
 	struct falcon_nic_data *nic_data = efx->nic_data;
 	int rc;
 
-	/* Hook in PHY operations table */
 	switch (efx->phy_type) {
 	case PHY_TYPE_SFX7101:
 		efx->phy_op = &falcon_sfx7101_phy_ops;
@@ -2296,23 +2299,6 @@ static int falcon_reset_hw(struct efx_nic *efx, enum reset_type method)
 	return rc;
 }
 
-void falcon_reset_phy(struct efx_nic *efx)
-{
-	efx_oword_t oword;
-
-	BUG_ON(!mutex_is_locked(&efx->mac_lock));
-
-	efx_reado(efx, &oword, FR_AB_GPIO_CTL);
-	EFX_SET_OWORD_FIELD(oword, FRF_AB_GPIO2_OUT, 0);
-	EFX_SET_OWORD_FIELD(oword, FRF_AB_GPIO2_OEN, 1);
-	efx_writeo(efx, &oword, FR_AB_GPIO_CTL);
-
-	msleep(10);
-
-	EFX_SET_OWORD_FIELD(oword, FRF_AB_GPIO2_OEN, 0);
-	efx_writeo(efx, &oword, FR_AB_GPIO_CTL);
-}
-
 static void falcon_monitor(struct efx_nic *efx)
 {
 	bool link_changed;
@@ -2429,9 +2415,9 @@ static int falcon_probe_nvconfig(struct efx_nic *efx)
 		goto out;
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
-	memcpy(efx->net_dev->perm_addr, nvconfig->mac_address[0], ETH_ALEN);
+	ether_addr_copy(efx->net_dev->perm_addr, nvconfig->mac_address[0]);
 #else
-	memcpy(efx->perm_addr, nvconfig->mac_address[0], ETH_ALEN);
+	ether_addr_copy(efx->perm_addr, nvconfig->mac_address[0]);
 #endif
 
 	efx->phy_type = nvconfig->board_v2.port0_phy_type;
@@ -3078,6 +3064,7 @@ static size_t falcon_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 				     stats[FALCON_STAT_rx_bytes] -
 				     stats[FALCON_STAT_rx_good_bytes] -
 				     stats[FALCON_STAT_rx_control] * 64);
+		efx_update_sw_stats(efx, stats);
 	}
 
 	if (full_stats)
@@ -3088,7 +3075,9 @@ static size_t falcon_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 		core_stats->tx_packets = stats[FALCON_STAT_tx_packets];
 		core_stats->rx_bytes = stats[FALCON_STAT_rx_bytes];
 		core_stats->tx_bytes = stats[FALCON_STAT_tx_bytes];
-		core_stats->rx_dropped = stats[FALCON_STAT_rx_nodesc_drop_cnt];
+		core_stats->rx_dropped = stats[FALCON_STAT_rx_nodesc_drop_cnt] +
+					 stats[GENERIC_STAT_rx_nodesc_trunc] +
+					 stats[GENERIC_STAT_rx_noskb_drops];
 		core_stats->multicast = stats[FALCON_STAT_rx_multicast];
 		core_stats->rx_length_errors =
 			stats[FALCON_STAT_rx_gtjumbo] +
@@ -3119,7 +3108,7 @@ void falcon_start_nic_stats(struct efx_nic *efx)
 /* We don't acutally pull stats on falcon. Wait 10ms so that
  * they arrive when we call this just after start_stats
  */
-void falcon_pull_nic_stats(struct efx_nic *efx)
+static void falcon_pull_nic_stats(struct efx_nic *efx)
 {
 	msleep(10);
 }
@@ -3184,8 +3173,6 @@ static int falcon_set_wol(struct efx_nic *efx, u32 type)
  */
 
 const struct efx_nic_type falcon_a1_nic_type = {
-	.init_module = efx_void_dummy_op_int,
-	.exit_module = efx_void_dummy_op_void,
 	.mem_map_size = falcon_a1_mem_map_size,
 	.probe = falcon_probe_nic,
 	.dimension_resources = falcon_dimension_resources,
@@ -3202,6 +3189,8 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.fini_dmaq = efx_farch_fini_dmaq,
 	.prepare_flush = falcon_prepare_flush,
 	.finish_flush = efx_port_dummy_op_void,
+	.prepare_flr = efx_port_dummy_op_void,
+	.finish_flr = efx_farch_finish_flr,
 	.describe_stats = falcon_describe_nic_stats,
 	.update_stats = falcon_update_nic_stats,
 	.start_stats = falcon_start_nic_stats,
@@ -3268,6 +3257,11 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.mtd_write = falcon_mtd_write,
 	.mtd_sync = falcon_mtd_sync,
 #endif
+	.sriov_init = efx_falcon_sriov_init,
+	.sriov_fini = efx_falcon_sriov_fini,
+	.sriov_mac_address_changed = efx_falcon_sriov_mac_address_changed,
+	.sriov_wanted = efx_falcon_sriov_wanted,
+	.sriov_reset = efx_falcon_sriov_reset,
 
 	.revision = EFX_REV_FALCON_A1,
 	.txd_ptr_tbl_base = FR_AA_TX_DESC_PTR_TBL_KER,
@@ -3278,6 +3272,7 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.max_dma_mask = DMA_BIT_MASK(FSF_AZ_TX_KER_BUF_ADDR_WIDTH),
 	.rx_buffer_padding = 0x24,
 	.can_rx_scatter = false,
+	.option_descriptors = false,
 	.max_interrupt_mode = EFX_INT_MODE_MSI,
 	.timer_period_max =  1 << FRF_AB_TC_TIMER_VAL_WIDTH,
 	.offload_features = NETIF_F_IP_CSUM,
@@ -3285,8 +3280,6 @@ const struct efx_nic_type falcon_a1_nic_type = {
 };
 
 const struct efx_nic_type falcon_b0_nic_type = {
-	.init_module = efx_void_dummy_op_int,
-	.exit_module = efx_void_dummy_op_void,
 	.mem_map_size = falcon_b0_mem_map_size,
 	.probe = falcon_probe_nic,
 	.dimension_resources = falcon_dimension_resources,
@@ -3303,6 +3296,8 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.fini_dmaq = efx_farch_fini_dmaq,
 	.prepare_flush = falcon_prepare_flush,
 	.finish_flush = efx_port_dummy_op_void,
+	.prepare_flr = efx_port_dummy_op_void,
+	.finish_flr = efx_farch_finish_flr,
 	.describe_stats = falcon_describe_nic_stats,
 	.update_stats = falcon_update_nic_stats,
 	.start_stats = falcon_start_nic_stats,
@@ -3355,7 +3350,7 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.filter_get_rx_id_limit = efx_farch_filter_get_rx_id_limit,
 	.filter_get_rx_ids = efx_farch_filter_get_rx_ids,
 #ifdef CONFIG_RFS_ACCEL
-	.filter_rfs_insert = efx_farch_filter_rfs_insert,
+	.filter_async_insert = efx_farch_filter_async_insert,
 	.filter_rfs_expire_one = efx_farch_filter_rfs_expire_one,
 #endif
 #ifdef EFX_NOT_UPSTREAM
@@ -3370,6 +3365,11 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.mtd_write = falcon_mtd_write,
 	.mtd_sync = falcon_mtd_sync,
 #endif
+	.sriov_init = efx_falcon_sriov_init,
+	.sriov_fini = efx_falcon_sriov_fini,
+	.sriov_mac_address_changed = efx_falcon_sriov_mac_address_changed,
+	.sriov_wanted = efx_falcon_sriov_wanted,
+	.sriov_reset = efx_falcon_sriov_reset,
 
 	.revision = EFX_REV_FALCON_B0,
 	.txd_ptr_tbl_base = FR_BZ_TX_DESC_PTR_TBL,
@@ -3382,6 +3382,7 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.rx_hash_offset = FS_BZ_RX_PREFIX_HASH_OFST,
 	.rx_buffer_padding = 0,
 	.can_rx_scatter = true,
+	.option_descriptors = false,
 	.max_interrupt_mode = EFX_INT_MODE_MSIX,
 	.timer_period_max =  1 << FRF_AB_TC_TIMER_VAL_WIDTH,
 	.farch_resources = {

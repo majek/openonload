@@ -202,6 +202,25 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_PIPE", ul_pipe);
 #endif
   DUMP_OPT_HEX("EF_SIGNALS_NOPOSTPONE", signals_no_postpone);
+  DUMP_OPT_INT("EF_CLUSTER_SIZE",  cluster_size);
+  DUMP_OPT_INT("EF_CLUSTER_RESTART",  cluster_restart_opt);
+  ci_log("EF_CLUSTER_NAME=%s", o->cluster_name);
+  if( o->tcp_reuseports == 0 ) {
+    DUMP_OPT_INT("EF_TCP_FORCE_REUSEPORT", tcp_reuseports);
+  } else {
+    struct ci_port_list *force_reuseport;
+    CI_DLLIST_FOR_EACH2(struct ci_port_list, force_reuseport, link,
+                        (ci_dllist*)(ci_uintptr_t)o->tcp_reuseports)
+      ci_log("%s=%d", "EF_TCP_FORCE_REUSEPORT", ntohs(force_reuseport->port));
+  }
+  if( o->udp_reuseports == 0 ) {
+    DUMP_OPT_INT("EF_UDP_FORCE_REUSEPORT", udp_reuseports);
+  } else {
+    struct ci_port_list *force_reuseport;
+    CI_DLLIST_FOR_EACH2(struct ci_port_list, force_reuseport, link,
+                        (ci_dllist*)(ci_uintptr_t)o->udp_reuseports)
+      ci_log("%s=%d", "EF_UDP_FORCE_REUSEPORT", ntohs(force_reuseport->port));
+  }
 }
 
 
@@ -256,12 +275,55 @@ static int get_env_opt_int(const char* name, int old_val, int hex)
   return old_val;
 }
 
-
 #define GET_ENV_OPT_INT(envstr, var)					\
   do{ opts->var = get_env_opt_int((envstr), opts->var, 0); }while(0)
 
 #define GET_ENV_OPT_HEX(envstr, var)					\
   do{ opts->var = get_env_opt_int((envstr), opts->var, 1); }while(0)
+
+
+/* This function assumes an option of the same form and types as
+ * EF_TCP_FORCE_REUSEPORT
+ */
+static void get_env_opt_port_list(ci_uint64* opt, const char* name)
+{
+  char *s;
+  unsigned v;
+  if( (s = getenv(name)) ) {
+    /* The memory used for this list is never freed, as we need it
+     * persist until the process terminates 
+     */
+    *opt = (ci_uint64)(ci_uintptr_t)malloc(sizeof(ci_dllist));
+    if( ! *opt )
+      log("Could not allocate memory for %s list", name);
+    else {
+      struct ci_port_list *curr;
+      ci_dllist *opt_list = (ci_dllist*)(ci_uintptr_t)*opt;
+      ci_dllist_init(opt_list);
+
+      while( sscanf(s, "%u", &v) == 1 ) {
+        curr = malloc(sizeof(struct ci_port_list));
+        if( ! curr ) {
+          log("Could not allocate memory for %s list entry", name);
+          break;
+        }
+        curr->port = v;
+        if( curr->port != v ) {
+          log("ERROR: %s contains value that is too large: %u", name, v);
+          free(curr);
+        }
+        else {
+          curr->port = htons(curr->port);
+          ci_dllist_push(opt_list, &curr->link);
+        }
+        s = strchr(s, ',');
+        if( s == NULL )
+          break;
+        s++;
+      }
+    }
+  }
+}
 
 
 static void citp_opts_getenv(citp_opts_t* opts)
@@ -394,6 +456,20 @@ static void citp_opts_getenv(citp_opts_t* opts)
       s++;
     }
   }
+
+  if( (s = getenv("EF_CLUSTER_NAME")) ) {
+    strncpy(opts->cluster_name, s, CI_CFG_STACK_NAME_LEN >> 1);
+    opts->cluster_name[CI_CFG_STACK_NAME_LEN >> 1] = '\0';
+  }
+  else {
+    opts->cluster_name[0] = '\0';
+  }
+  GET_ENV_OPT_INT("EF_CLUSTER_SIZE",	cluster_size);
+  if( opts->cluster_size < 2 )
+    log("ERROR: cluster_size < 2 are not supported");
+  GET_ENV_OPT_INT("EF_CLUSTER_RESTART",	cluster_restart_opt);
+  get_env_opt_port_list(&opts->tcp_reuseports, "EF_TCP_FORCE_REUSEPORT");
+  get_env_opt_port_list(&opts->udp_reuseports, "EF_UDP_FORCE_REUSEPORT");
 }
 
 
@@ -414,6 +490,7 @@ static void citp_opts_validate_env(void)
     "EF_USERBUILD",
     "EF_NO_PRELOAD_RESTORE",
     "EF_LD_PRELOAD",
+    "EF_CLUSTER_NAME",
     NULL
   };
   char** env_name;

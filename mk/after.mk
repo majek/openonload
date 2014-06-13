@@ -22,7 +22,7 @@ endif
 endif
 
 ifneq ($(BUILDENV),)
-buildenv := $(shell mmaketool --distribution)-$(shell uname -m)
+buildenv := $(shell mmaketool --distribution)-$(shell gcc -dumpmachine)
 
 ifneq ($(buildenv),$(BUILDENV))
 $(shell echo >&2 "********** Warning: building on different host environment. **********")

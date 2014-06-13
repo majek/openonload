@@ -38,8 +38,6 @@
 #define VERB(x)
 
 
-#ifndef __KERNEL__
-
 /* Set up ip4/udp headers.  The dest addr and ports are not set and 
  * there are no IP options.  The source port is defaulted to port 0 
  */
@@ -102,7 +100,7 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
 }
 
 
-static ci_udp_state* ci_udp_get_state_buf(ci_netif* netif)
+ci_udp_state* ci_udp_get_state_buf(ci_netif* netif)
 {
   citp_waitable_obj* wo;
 
@@ -120,6 +118,7 @@ static ci_udp_state* ci_udp_get_state_buf(ci_netif* netif)
 ** Public interface
 */
 
+#ifndef __KERNEL__
 #ifndef __ci_driver__
 ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
 {

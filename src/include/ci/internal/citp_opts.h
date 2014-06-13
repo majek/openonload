@@ -58,6 +58,7 @@ typedef struct {
         type name _CI_CFG_BITFIELD##bits;
 
 #include <ci/internal/opts_citp_def.h>
+  char cluster_name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
 } CI_ALIGN(8) citp_opts_t; /* This alignment is needed for running
                             * 32bits apps on 64bits kernel.  Aligning
                             * it where the struct is actually used

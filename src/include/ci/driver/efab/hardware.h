@@ -153,13 +153,14 @@
 #define efhw_nic_event_queue_enable(nic, evq, size, buf_base, dma_addrs, \
 				    n_pages, interrupting, dos_p, wakeup_evq, \
                                     enable_time_sync_events,            \
-                                    rx_ts_correction_out)               \
+                                    rx_ts_correction_out, flags_out)    \
   ((nic)->efhw_func->event_queue_enable((nic), (evq), (size),           \
                                         (buf_base), (dma_addrs),        \
                                         (n_pages), (interrupting),      \
                                         (dos_p), (wakeup_evq),          \
                                         (enable_time_sync_events),      \
-                                        (rx_ts_correction_out)))
+                                        (rx_ts_correction_out),         \
+					(flags_out)))
 
 #define efhw_nic_event_queue_disable(nic, evq, time_sync_events_enabled) \
 	((nic)->efhw_func->event_queue_disable(nic, evq,		\
@@ -180,17 +181,17 @@
 /*-------------- DMA support  ------------ */
 #define efhw_nic_dmaq_tx_q_init(nic, dmaq, evq, owner, tag,		\
 				dmaq_size, index, dma_addrs, n_dma_addrs, \
-                                flags)                                  \
+                                stack_id, flags)                          \
 	((nic)->efhw_func->dmaq_tx_q_init(nic, dmaq, evq, owner, tag,	\
 					  dmaq_size, index, dma_addrs,  \
-                                          n_dma_addrs, flags))
+                                          n_dma_addrs, stack_id, flags))
 
 #define efhw_nic_dmaq_rx_q_init(nic, dmaq, evq, owner, tag,		\
 				dmaq_size, index, dma_addrs, n_dma_addrs, \
-                                flags)                                  \
+                                stack_id, flags)                          \
 	((nic)->efhw_func->dmaq_rx_q_init(nic, dmaq, evq, owner, tag,	\
 					  dmaq_size, index, dma_addrs,  \
-                                          n_dma_addrs, flags))
+                                          n_dma_addrs, stack_id, flags))
 
 #define efhw_nic_dmaq_tx_q_disable(nic, dmaq) \
 	((nic)->efhw_func->dmaq_tx_q_disable(nic, dmaq))

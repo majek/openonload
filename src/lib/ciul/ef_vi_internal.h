@@ -71,6 +71,8 @@
 #define EF_VI_INITED_EVQ		0x10
 #define EF_VI_INITED_TIMER		0x20
 #define EF_VI_INITED_RX_TIMESTAMPING	0x40
+#define EF_VI_INITED_TX_TIMESTAMPING	0x80
+#define EF_VI_INITED_OUT_FLAGS		0x100
 
 
 /**********************************************************************
@@ -120,6 +122,8 @@
  */
 #define EF_VI_PAGE_SIZE   4096
 #define EF_VI_PAGE_SHIFT  12
+
+#define EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID (1u<<30)
 
 /* required for CI_PAGE_SIZE and related things */
 #include "ci/compat.h"

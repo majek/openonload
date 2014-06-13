@@ -2798,7 +2798,7 @@ extern int timesync_period;
 unsigned oo_timesync_cpu_khz;
 
 
-ci_workitem_t stabilize_cpu_khz_wi;
+struct work_struct stabilize_cpu_khz_wi;
 
 /* Internal, do not use!  Use
  *  oo_timesync_wait_for_cpu_khz_to_stabilize() instead.  Signal sent
@@ -2942,7 +2942,7 @@ static void stabilize_cpu_khz_wi_fn_cont(unsigned long unused)
 }
 
 
-static void stabilize_cpu_khz_wi_fn(void* unused)
+static void stabilize_cpu_khz_wi_fn(struct work_struct* unused)
 {
   /* Need two data points sufficiently (0.5 sec) far apart. */
   oo_timesync_update(&CI_GLOBAL_CPLANE);
@@ -2981,8 +2981,8 @@ static int oo_timesync_ctor(cicp_mibs_kern_t *mibs)
 
     umibs->oo_timesync = oo_ts;
 
-    ci_workitem_init(&stabilize_cpu_khz_wi, stabilize_cpu_khz_wi_fn, NULL);
-    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &stabilize_cpu_khz_wi);
+    INIT_WORK(&stabilize_cpu_khz_wi, stabilize_cpu_khz_wi_fn);
+    queue_work(CI_GLOBAL_WORKQUEUE, &stabilize_cpu_khz_wi);
     return 0;
   } 
   else
@@ -3921,9 +3921,9 @@ cicp_dtor(cicp_mibs_kern_t *cp)
 
     /* ensure the timer is gone */
     signal_cpu_khz_stabilized = 2;
-    ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+    flush_workqueue(CI_GLOBAL_WORKQUEUE);
     del_timer(&timer_node);
-    ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+    flush_workqueue(CI_GLOBAL_WORKQUEUE);
 }
 
 
@@ -5311,7 +5311,7 @@ cicpos_route_import(cicp_handle_t      *control_plane,
         }
 
         if (CI_LIKELY(!CI_IP_ADDR_IS_EMPTY(&pref_source))) {
-	    rowid = _cicpos_route_find(routet, dest_ip, dest_ipset);
+	    rowid = _cicpos_route_find(routet, dest_ip, dest_ipset, ifindex);
             if (CICP_ROUTE_ROWID_BAD == rowid) {
                 rc = cicpos_route_add(control_plane,
 				      routet, kroutet, &rowid, dest_ip,
@@ -5462,7 +5462,8 @@ cicpos_route_compress(cicp_fwdinfo_t    *routet,
 extern void
 cicpos_route_delete(cicp_handle_t     *control_plane, 
 		    ci_ip_addr_t       dest_ip,
-		    ci_ip_addrset_t    dest_ipset)
+		    ci_ip_addrset_t    dest_ipset,
+                    ci_ifid_t          dest_ifindex)
 {   const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
     cicp_fwdinfo_t *routet;
     cicp_route_kmib_t *kroutet;
@@ -5478,7 +5479,8 @@ cicpos_route_delete(cicp_handle_t     *control_plane,
     CICP_LOCK_BEGIN(control_plane)
 	
 	CI_IP_ADDR_SET_SUBNET(&dest_ip, &dest_ip, dest_ipset);
-	rowid = _cicpos_route_find(routet, dest_ip, dest_ipset);
+	rowid = _cicpos_route_find(routet, dest_ip, dest_ipset,
+                                   dest_ifindex);
 	if (CICP_ROUTE_ROWID_BAD != rowid)
 	{   CI_VERLOCK_WRITE(routet->version,
 			     cicp_fwd_row_free(&routet->path[rowid]);

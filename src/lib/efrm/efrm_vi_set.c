@@ -138,19 +138,27 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 	client = efrm_pd_to_resource(pd)->rs_client;
 	efrm_nic = container_of(client->nic, struct efrm_nic, efhw_nic);
 
-	rc = efrm_rss_context_alloc(client, vi_set, n_vis);
-	/* If we failed to allocate an RSS context fall back to
-	 * using the netdriver's default context.
-	 *
-	 * This can occur if the FW does not support allocating an
-	 * RSS context, or if it's out of contexts.
-	 */
-	if (rc != 0) {
-		if (rc != -EOPNOTSUPP)
-			EFRM_ERR("%s: WARNING: Failed to allocate RSS "
-				 "context of size %d (rc %d), falling "
-				 "back to default context.",
-				 __FUNCTION__, n_vis, rc);
+	if( n_vis > 1 ) {
+		rc = efrm_rss_context_alloc(client, vi_set, n_vis);
+		/* If we failed to allocate an RSS context fall back to
+		* using the netdriver's default context.
+		*
+		* This can occur if the FW does not support allocating an
+		* RSS context, or if it's out of contexts.
+	 	*/
+		if (rc != 0) {
+			if (rc != -EOPNOTSUPP)
+				EFRM_ERR("%s: WARNING: Failed to allocate RSS "
+					 "context of size %d (rc %d), falling "
+					 "back to default context.",
+					 __FUNCTION__, n_vis, rc);
+			vi_set->rss_context = -1;
+		}
+	}
+	else {
+		/* Don't bother allocating a context of size 1, just use
+		 * the netdriver's context.
+		 */
 		vi_set->rss_context = -1;
 	}
 
@@ -244,6 +252,13 @@ struct efrm_vi_set * efrm_vi_set_from_resource(struct efrm_resource *rs)
 	return efrm_vi_set(rs);
 }
 EXPORT_SYMBOL(efrm_vi_set_from_resource);
+
+
+struct efrm_pd* efrm_vi_set_get_pd(struct efrm_vi_set *vi_set)
+{
+	return vi_set->pd;
+}
+EXPORT_SYMBOL(efrm_vi_set_get_pd);
 
 
 static void efrm_vi_set_rm_dtor(struct efrm_resource_manager *rm)

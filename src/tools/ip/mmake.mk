@@ -58,7 +58,7 @@ MMAKE_L5_FTL_LIBS := $(LINK_L5_FTL_LIB) -lcurses -lhistory -lreadline
 MMAKE_L5_FTL_LIB_DEPS += $(L5_FTL_LIB_DEPEND)
 endif
 
-ifeq  ($(shell CC="${CC}" CFLAGS="${CFLAGS} ${MMAKE_CFLAGS}" check_library_presence pcap.h pcap),1)
+ifeq  ($(shell CC="${CC}" CFLAGS="${CFLAGS} ${MMAKE_CFLAGS}" check_library_presence pcap.h pcap 2>/dev/null),1)
 MMAKE_LIBS_LIBPCAP=-lpcap
 endif
 

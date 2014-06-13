@@ -100,7 +100,7 @@ extern int oo_os_sock_ioctl(ci_netif*, oo_sp, int request, void* arg,
 extern struct oo_file_ref* oo_file_ref_add(struct oo_file_ref*);
 extern void oo_file_ref_drop(struct oo_file_ref*);
 extern int  oo_file_ref_lookup(struct file*, struct oo_file_ref**);
-extern void oo_file_ref_drop_list_now(void*);
+extern void oo_file_ref_drop_list_now(struct oo_file_ref*);
 #define oo_file_ref_xchg(pp, fr)                        \
   ((struct oo_file_ref*) ci_xchg_uintptr((pp), (ci_uintptr_t) (fr)))
 #endif

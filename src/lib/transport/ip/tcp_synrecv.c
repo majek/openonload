@@ -492,8 +492,12 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
 
     /* Remove the synrecv structure from the listen queue, and free the
     ** buffer. */
-    ci_tcp_listenq_remove(netif, tls, tsr);
-    ci_tcp_synrecv_free(netif, tsr);
+    if( tsr->tcpopts.flags & CI_TCPT_FLAG_SYNCOOKIE )
+      ci_free(tsr);
+    else {
+      ci_tcp_listenq_remove(netif, tls, tsr);
+      ci_tcp_synrecv_free(netif, tsr);
+    }
 
     ci_bit_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
     ci_tcp_acceptq_put(netif, tls, &ts->s.b);

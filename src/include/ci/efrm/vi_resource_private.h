@@ -67,9 +67,7 @@ extern void efrm_handle_wakeup_event(struct efhw_nic *nic, unsigned id);
 /*! Timeout handler */
 extern void efrm_handle_timeout_event(struct efhw_nic *nic, unsigned id);
 
-/*! DMA flush handlers: in-place and postponed */
-extern void efrm_handle_dmaq_flushed(struct efhw_nic *nic, unsigned id,
-				     int rx_flush, int failed);
+/*! DMA flush handler */
 extern int efrm_handle_dmaq_flushed_schedule(struct efhw_nic *nic,
 					      unsigned id,
 					      int rx_flush, int failed);

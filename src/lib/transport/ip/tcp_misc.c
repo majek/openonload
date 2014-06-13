@@ -220,6 +220,8 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
   ci_ip_queue_drop(ni, &ts->recv1);
   ci_ip_queue_drop(ni, &ts->recv2);
 
+  ci_sock_cmn_timestamp_q_drop(ni, &ts->s);
+
 #if CI_CFG_FD_CACHING
   ci_assert((ts->cached_on_fd != -1) || (ts->s.b.state == CI_TCP_CLOSED));
   ci_assert((ts->cached_on_fd != -1) ||
@@ -709,7 +711,7 @@ void ci_tcp_clear_sacks(ci_netif* ni, ci_tcp_state* ts)
   while( OO_PP_NOT_NULL(id) ) {
     pkt = PKT_CHK(ni, id);
     pkt->pf.tcp_tx.block_end = OO_PP_NULL;
-    pkt->flags &=~ (CI_PKT_FLAG_RTQ_RETRANS | CI_PKT_FLAG_RTQ_SACKED);
+    pkt->flags &=~ CI_PKT_FLAG_RTQ_SACKED;
     id = pkt->next;
   }
 
@@ -721,8 +723,6 @@ void ci_tcp_clear_sacks(ci_netif* ni, ci_tcp_state* ts)
 void ci_tcp_retrans_init_ptrs(ci_netif* ni, ci_tcp_state* ts,
                               unsigned* recover_seq_out)
 {
-  /* Clear the RETRANS flag on unSACKed packets. */
-
   ci_ip_pkt_queue* rtq = &ts->retrans;
   ci_ip_pkt_fmt* pkt;
 
@@ -737,8 +737,6 @@ void ci_tcp_retrans_init_ptrs(ci_netif* ni, ci_tcp_state* ts,
       *recover_seq_out = pkt->pf.tcp_tx.start_seq;
       pkt = PKT_CHK(ni, pkt->pf.tcp_tx.block_end);
     }
-    else
-      pkt->flags &=~ CI_PKT_FLAG_RTQ_RETRANS;
 
     if( OO_PP_IS_NULL(pkt->next) )  break;
     pkt = PKT_CHK(ni, pkt->next);

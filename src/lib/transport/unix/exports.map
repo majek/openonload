@@ -108,7 +108,9 @@
     onload_msg_template_alloc;
     onload_msg_template_update;
     onload_msg_template_abort;
+    onload_move_fd;
     onload_fd_check_feature;
+    onload_ordered_epoll_wait;
   local:
     /* everything else must not be in the dynamic symbol table */
     *;

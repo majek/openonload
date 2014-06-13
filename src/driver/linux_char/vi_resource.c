@@ -138,8 +138,18 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
     goto fail_q_alloc;
   rxq_capacity = rc;
 
+  /* Size EVQ sensibly based on RX and TX Q sizes */
   if (evq_virs == NULL && evq_capacity < 0) {
-    evq_capacity = rxq_capacity + txq_capacity;
+    if (vi_flags & EFHW_VI_TX_TIMESTAMPS) {
+      if (txq_capacity == 0) {
+        rc = -EINVAL;
+        goto fail_q_alloc;
+      }
+      /* Each TX completion is accompanied by 2 timestamp events. */
+      evq_capacity = rxq_capacity + 3 * txq_capacity;
+    }
+    else
+      evq_capacity = rxq_capacity + txq_capacity;
     if (evq_capacity == 0)
       evq_capacity = -1;
   }
@@ -278,6 +288,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   alloc_out->io_mmap_bytes = 4096;
   alloc_out->mem_mmap_bytes = virs->mem_mmap_bytes;
   alloc_out->rx_prefix_len = virs->rx_prefix_len;
+  alloc_out->out_flags = virs->out_flags;
 
   rs->rs_base = &virs->rs;
   EFCH_TRACE("%s: Allocated "EFRM_RESOURCE_FMT" rc=%d", __FUNCTION__,

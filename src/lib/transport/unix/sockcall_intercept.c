@@ -1452,7 +1452,7 @@ OO_INTERCEPT(int, epoll_wait,
     int rc;
     if( fdi->protocol->type == CITP_EPOLL_FD )
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
-      rc = citp_epoll_wait(fdi, events, maxevents, timeout, NULL,
+      rc = citp_epoll_wait(fdi, events, NULL, maxevents, timeout, NULL,
                            &lib_context);
     else if (fdi->protocol->type == CITP_EPOLLB_FD ) {
       rc = citp_epollb_wait(fdi, events, maxevents, timeout, NULL,
@@ -1499,7 +1499,7 @@ OO_INTERCEPT(int, epoll_pwait,
     int rc;
     if( fdi->protocol->type == CITP_EPOLL_FD ) {
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
-      rc = citp_epoll_wait(fdi, events, maxevents, timeout, sigmask,
+      rc = citp_epoll_wait(fdi, events, NULL, maxevents, timeout, sigmask,
                            &lib_context);
     }
     else if (fdi->protocol->type == CITP_EPOLLB_FD ) {
@@ -2388,7 +2388,7 @@ OO_INTERCEPT(int, socketpair,
   }
 
   Log_CALL(ci_log("%s(%d, %d, %d, [%d, %d])", __FUNCTION__,d,type,protocol,
-                  sv[0], sv[1]));
+                  sv ? sv[0] : -1, sv ? sv[1] : -1));
 
   rc = ci_sys_socketpair(d, type, protocol, sv);
   citp_enter_lib(&lib_context);

@@ -94,6 +94,7 @@ struct oof_local_port {
    */
   struct oof_local_port_addr *lp_addr;
 
+  struct oof_thc             *lp_thcf;
 };
 
 

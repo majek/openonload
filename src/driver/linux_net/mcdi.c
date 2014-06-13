@@ -23,7 +23,9 @@
  */
 
 #include <linux/delay.h>
+#ifdef EFX_NOT_UPSTREAM
 #include <linux/moduleparam.h>
+#endif
 #include "net_driver.h"
 #include "nic.h"
 #include "io.h"
@@ -68,12 +70,7 @@ static void efx_mcdi_timeout_async(unsigned long context);
 static int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 			       bool *was_attached_out);
 static bool efx_mcdi_poll_once(struct efx_nic *efx);
-
-static inline struct efx_mcdi_iface *efx_mcdi(struct efx_nic *efx)
-{
-	EFX_BUG_ON_PARANOID(!efx->mcdi);
-	return &efx->mcdi->iface;
-}
+static void efx_mcdi_abandon(struct efx_nic *efx);
 
 int efx_mcdi_init(struct efx_nic *efx)
 {
@@ -206,6 +203,7 @@ static int efx_mcdi_errno(unsigned int mcdi_err)
 	TRANSLATE_ERROR(EACCES);
 	TRANSLATE_ERROR(EBUSY);
 	TRANSLATE_ERROR(EINVAL);
+	TRANSLATE_ERROR(ERANGE);
 	TRANSLATE_ERROR(EDEADLK);
 	TRANSLATE_ERROR(ENOSYS);
 	TRANSLATE_ERROR(ETIME);
@@ -344,7 +342,8 @@ static bool efx_mcdi_acquire_async(struct efx_mcdi_iface *mcdi)
 static void efx_mcdi_acquire_sync(struct efx_mcdi_iface *mcdi)
 {
 	/* Wait until the interface becomes QUIESCENT and we win the race
-	 * to mark it RUNNING_SYNC. */
+	 * to mark it RUNNING_SYNC.
+	 */
 	wait_event(mcdi->wq,
 		   atomic_cmpxchg(&mcdi->state,
 				  MCDI_STATE_QUIESCENT,
@@ -572,10 +571,12 @@ static int _efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned cmd, size_t inlen,
 			  cmd, (int)inlen, mcdi->mode);
 
 		if (mcdi->mode == MCDI_MODE_EVENTS && efx_mcdi_poll_once(efx)) {
-			netif_err(efx, hw, efx->net_dev, "MCDI request was "
-				  "completed without an event\n");
+			netif_err(efx, hw, efx->net_dev,
+				  "MCDI request was completed without an event\n");
 			rc = 0;
 		}
+
+		efx_mcdi_abandon(efx);
 
 		/* Close the race with efx_mcdi_ev_cpl() executing just too late
 		 * and completing a request we've just cancelled, by ensuring
@@ -616,8 +617,7 @@ static int _efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned cmd, size_t inlen,
 		if (cmd == MC_CMD_REBOOT && rc == -EIO) {
 			/* Don't reset if MC_CMD_REBOOT returns EIO */
 		} else if (rc == -EIO || rc == -EINTR) {
-			netif_err(efx, hw, efx->net_dev, "MC fatal error %d\n",
-				  -rc);
+			netif_err(efx, hw, efx->net_dev, "MC rebooted unexpectedly %d\n", -rc);
 			efx_schedule_reset(efx, RESET_TYPE_MC_FAILURE);
 		} else if (rc && !quiet) {
 			efx_mcdi_display_error(efx, cmd, inlen, errbuf, err_len,
@@ -715,6 +715,9 @@ int efx_mcdi_rpc_start(struct efx_nic *efx, unsigned cmd,
 	if (efx->mc_bist_for_other_fn)
 		return -ENETDOWN;
 
+	if (mcdi->mode == MCDI_MODE_FAIL)
+		return -ENETDOWN;
+
 	efx_mcdi_acquire_sync(mcdi);
 	efx_mcdi_send_request(efx, cmd, inbuf, inlen);
 	return 0;
@@ -779,11 +782,8 @@ static int _efx_mcdi_rpc_async(struct efx_nic *efx, unsigned int cmd,
  * @efx: NIC through which to issue the command
  * @cmd: Command type number
  * @inbuf: Command parameters
- * @inlen: Length of command parameters, in bytes.  Must be a multiple
- *	of 4 and no greater than %MCDI_CTL_SDU_LEN_MAX_V1.
- * @outlen: Length to allocate for response buffer, in bytes.  If the
- *	actual reponse is longer than @outlen & ~3, it will be truncated
- *	to that length.
+ * @inlen: Length of command parameters, in bytes
+ * @outlen: Length to allocate for response buffer, in bytes
  * @complete: Function to be called on completion or cancellation.
  * @cookie: Arbitrary value to be passed to @complete.
  *
@@ -842,8 +842,7 @@ void efx_mcdi_display_error(struct efx_nic *efx, unsigned cmd,
 	if (outlen >= MC_CMD_ERR_ARG_OFST + 4)
 		err_arg = MCDI_DWORD(outbuf, ERR_ARG);
 	netif_err(efx, hw, efx->net_dev,
-		  "MC command 0x%x inlen %d failed "
-		  "rc=%d (raw=%d) arg=%d\n",
+		  "MC command 0x%x inlen %d failed rc=%d (raw=%d) arg=%d\n",
 		  cmd, (int)inlen, rc, code, err_arg);
 }
 
@@ -859,7 +858,11 @@ void efx_mcdi_mode_poll(struct efx_nic *efx)
 		return;
 
 	mcdi = efx_mcdi(efx);
-	if (mcdi->mode == MCDI_MODE_POLL)
+	/* If already in polling mode, nothing to do.
+	 * If in fail-fast state, don't switch to polled completion.  FLR recovery
+	 * will do that later.
+	 */
+	if (mcdi->mode == MCDI_MODE_POLL || mcdi->mode == MCDI_MODE_FAIL)
 		return;
 
 	/* We can switch from event completion to polled completion, because
@@ -888,8 +891,8 @@ void efx_mcdi_flush_async(struct efx_nic *efx)
 
 	mcdi = efx_mcdi(efx);
 
-	/* We must be in polling mode so no more requests can be queued */
-	BUG_ON(mcdi->mode != MCDI_MODE_POLL);
+	/* We must be in poll or fail mode so no more requests can be queued */
+	BUG_ON(mcdi->mode == MCDI_MODE_EVENTS);
 
 	del_timer_sync(&mcdi->async_timer);
 
@@ -922,8 +925,11 @@ void efx_mcdi_mode_event(struct efx_nic *efx)
 		return;
 
 	mcdi = efx_mcdi(efx);
-
-	if (mcdi->mode == MCDI_MODE_EVENTS)
+	/* If already in event completion mode, nothing to do.
+	 * If in fail-fast state, don't switch to event completion.  FLR
+	 * recovery will do that later.
+	 */
+	if (mcdi->mode == MCDI_MODE_EVENTS || mcdi->mode == MCDI_MODE_FAIL)
 		return;
 
 	/* We can't switch from polled to event completion in the middle of a
@@ -1013,6 +1019,19 @@ static void efx_mcdi_ev_bist(struct efx_nic *efx)
 	spin_unlock(&mcdi->iface_lock);
 }
 
+/* MCDI timeouts seen, so make all MCDI calls fail-fast and issue an FLR to try
+ * to recover.
+ */
+static void efx_mcdi_abandon(struct efx_nic *efx)
+{
+	struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
+
+	if (xchg(&mcdi->mode, MCDI_MODE_FAIL) == MCDI_MODE_FAIL)
+		return; /* it had already been done */
+	netif_dbg(efx, hw, efx->net_dev, "MCDI is timing out; trying to recover\n");
+	efx_schedule_reset(efx, RESET_TYPE_MCDI_TIMEOUT);
+}
+
 static void efx_mcdi_fwalert_event(struct efx_nic *efx, efx_qword_t *ev)
 {
 	unsigned int reason, data;
@@ -1070,7 +1089,6 @@ void efx_mcdi_process_event(struct efx_channel *channel,
 		break;
 	case MCDI_EVENT_CODE_REBOOT:
 	case MCDI_EVENT_CODE_MC_REBOOT: /* XXX should handle this differently? */
-		netif_info(efx, hw, efx->net_dev, "MC Reboot\n");
 		efx_mcdi_ev_death(efx, -EIO);
 		break;
 	case MCDI_EVENT_CODE_MC_BIST:
@@ -1084,7 +1102,7 @@ void efx_mcdi_process_event(struct efx_channel *channel,
 		efx_mcdi_fwalert_event(efx, event);
 		break;
 	case MCDI_EVENT_CODE_FLR:
-		efx_sriov_flr(efx, MCDI_EVENT_FIELD(*event, FLR_VF));
+		efx_siena_sriov_flr(efx, MCDI_EVENT_FIELD(*event, FLR_VF));
 		break;
 	case MCDI_EVENT_CODE_PTP_RX:
 	case MCDI_EVENT_CODE_PTP_FAULT:
@@ -1272,6 +1290,9 @@ int efx_mcdi_get_board_cfg(struct efx_nic *efx, u8 *mac_address,
 	int rc;
 
 	BUILD_BUG_ON(MC_CMD_GET_BOARD_CFG_IN_LEN != 0);
+	/* we need __aligned(2) for ether_addr_copy */
+	BUILD_BUG_ON(MC_CMD_GET_BOARD_CFG_OUT_MAC_ADDR_BASE_PORT0_OFST & 1);
+	BUILD_BUG_ON(MC_CMD_GET_BOARD_CFG_OUT_MAC_ADDR_BASE_PORT1_OFST & 1);
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_GET_BOARD_CFG, NULL, 0,
 			  outbuf, sizeof(outbuf), &outlen);
@@ -1284,11 +1305,10 @@ int efx_mcdi_get_board_cfg(struct efx_nic *efx, u8 *mac_address,
 	}
 
 	if (mac_address)
-		memcpy(mac_address,
-		       port_num ?
-		       MCDI_PTR(outbuf, GET_BOARD_CFG_OUT_MAC_ADDR_BASE_PORT1) :
-		       MCDI_PTR(outbuf, GET_BOARD_CFG_OUT_MAC_ADDR_BASE_PORT0),
-		       ETH_ALEN);
+		ether_addr_copy(mac_address,
+				port_num ?
+				MCDI_PTR(outbuf, GET_BOARD_CFG_OUT_MAC_ADDR_BASE_PORT1) :
+				MCDI_PTR(outbuf, GET_BOARD_CFG_OUT_MAC_ADDR_BASE_PORT0));
 	if (fw_subtype_list) {
 		for (i = 0;
 		     i < MCDI_VAR_ARRAY_LEN(outlen,
@@ -1556,9 +1576,17 @@ void efx_mcdi_set_id_led(struct efx_nic *efx, enum efx_led_mode mode)
 			  NULL, 0, NULL);
 }
 
-static int efx_mcdi_reset_port(struct efx_nic *efx)
+static int efx_mcdi_reset_func(struct efx_nic *efx)
 {
-	return efx_mcdi_rpc(efx, MC_CMD_PORT_RESET, NULL, 0, NULL, 0, NULL);
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_ENTITY_RESET_IN_LEN);
+	int rc;
+
+	BUILD_BUG_ON(MC_CMD_ENTITY_RESET_OUT_LEN != 0);
+	MCDI_POPULATE_DWORD_1(inbuf, ENTITY_RESET_IN_FLAG,
+			      ENTITY_RESET_IN_FUNCTION_RESOURCE_RESET, 1);
+	rc = efx_mcdi_rpc(efx, MC_CMD_ENTITY_RESET, inbuf, sizeof(inbuf),
+			  NULL, 0, NULL);
+	return rc;
 }
 
 static int efx_mcdi_reset_mc(struct efx_nic *efx)
@@ -1587,15 +1615,35 @@ int efx_mcdi_reset(struct efx_nic *efx, enum reset_type method)
 {
 	int rc;
 
+	/* If MCDI is down, we can't handle_assertion */
+	if (method == RESET_TYPE_MCDI_TIMEOUT) {
+		rc = pci_reset_function(efx->pci_dev);
+		if (rc)
+			return rc;
+		/* Re-enable polled MCDI completion */
+		if (efx->mcdi) {
+			struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
+			mcdi->mode = MCDI_MODE_POLL;
+		}
+		return 0;
+	}
+
 	/* Recover from a failed assertion pre-reset */
 	rc = efx_mcdi_handle_assertion(efx);
 	if (rc)
 		return rc;
 
 	if (method == RESET_TYPE_WORLD)
-		return efx_mcdi_reset_mc(efx);
+		if (efx->mcdi->fn_flags &
+		    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_TRUSTED)) {
+			return efx_mcdi_reset_mc(efx);
+		} else {
+			netif_err(efx, hw, efx->net_dev,
+				  "untrusted PF cannot reset the MC\n");
+			return 0;
+		}
 	else
-		return efx_mcdi_reset_port(efx);
+		return efx_mcdi_reset_func(efx);
 }
 
 static int efx_mcdi_wol_filter_set(struct efx_nic *efx, u32 type,
@@ -1609,7 +1657,7 @@ static int efx_mcdi_wol_filter_set(struct efx_nic *efx, u32 type,
 	MCDI_SET_DWORD(inbuf, WOL_FILTER_SET_IN_WOL_TYPE, type);
 	MCDI_SET_DWORD(inbuf, WOL_FILTER_SET_IN_FILTER_MODE,
 		       MC_CMD_FILTER_MODE_SIMPLE);
-	memcpy(MCDI_PTR(inbuf, WOL_FILTER_SET_IN_MAGIC_MAC), mac, ETH_ALEN);
+	ether_addr_copy(MCDI_PTR(inbuf, WOL_FILTER_SET_IN_MAGIC_MAC), mac);
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_WOL_FILTER_SET, inbuf, sizeof(inbuf),
 			  outbuf, sizeof(outbuf), &outlen);

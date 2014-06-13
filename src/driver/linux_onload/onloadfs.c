@@ -37,6 +37,7 @@ static struct file_operations *oo_fops_by_type(int fd_type)
     case CI_PRIV_TYPE_NETIF: return &oo_fops;
     case CI_PRIV_TYPE_TCP_EP: return &linux_tcp_helper_fops_tcp;
     case CI_PRIV_TYPE_UDP_EP: return &linux_tcp_helper_fops_udp;
+    case CI_PRIV_TYPE_PASSTHROUGH_EP: return &linux_tcp_helper_fops_passthrough;
 #if CI_CFG_USERSPACE_PIPE
     case CI_PRIV_TYPE_PIPE_READER: return &linux_tcp_helper_fops_pipe_reader;
     case CI_PRIV_TYPE_PIPE_WRITER: return &linux_tcp_helper_fops_pipe_writer;
@@ -96,6 +97,7 @@ static const char *priv_type_to_str(char fd_type)
   switch( fd_type ) {
     case CI_PRIV_TYPE_TCP_EP: return "tcp";
     case CI_PRIV_TYPE_UDP_EP: return "udp";
+    case CI_PRIV_TYPE_PASSTHROUGH_EP: return "os_sock";
 #if CI_CFG_USERSPACE_PIPE
     case CI_PRIV_TYPE_PIPE_READER: return "piper";
     case CI_PRIV_TYPE_PIPE_WRITER: return "pipew";

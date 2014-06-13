@@ -126,6 +126,51 @@ int ci_tcp_helper_ep_set_filters(ci_fd_t           fd,
   return rc;
 }
 
+
+/*--------------------------------------------------------------------
+ *!
+ * TODO
+ *
+ *--------------------------------------------------------------------*/
+int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
+                                    const char*       cluster_name,
+                                    ci_int32          cluster_size,
+                                    ci_uint32         cluster_restart_opt,
+                                    ci_uint32         addr_be32,
+                                    ci_uint16         port_be16)
+{
+  oo_tcp_reuseport_bind_t op;
+  int rc;
+
+  strncpy(op.cluster_name, cluster_name, (CI_CFG_STACK_NAME_LEN >> 1));
+  op.cluster_name[CI_CFG_STACK_NAME_LEN >> 1] = '\0';
+  op.cluster_size = cluster_size;
+  op.cluster_restart_opt = cluster_restart_opt;
+  op.addr_be32 = addr_be32;
+  op.port_be16 = port_be16;
+  VERB(ci_log("%s: id=%d", __FUNCTION__, fd));
+  rc = oo_resource_op(fd, OO_IOC_EP_REUSEPORT_BIND, &op);
+
+  if( rc < 0 )
+    LOG_SV(ci_log("%s: failed for %d (rc=%d)", __FUNCTION__, fd, rc));
+  return rc;
+}
+
+
+/*--------------------------------------------------------------------
+ *!
+ * TODO
+ *
+ *--------------------------------------------------------------------*/
+int ci_tcp_helper_cluster_dump(ci_fd_t fd, void* buf, int buf_len)
+{
+  oo_cluster_dump_t op;
+  CI_USER_PTR_SET(op.buf, buf);
+  op.buf_len = buf_len;
+  return oo_resource_op(fd, OO_IOC_CLUSTER_DUMP, &op);
+}
+
+
 /*--------------------------------------------------------------------
  *!
  * Clear all filters for an endpoint

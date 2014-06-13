@@ -45,6 +45,7 @@
 #define LPFIN LPF
 #define LPFOUT LPF
 
+#define IOVLEN_WORKAROUND_RC_VALUE (1<<30)
 
 /* Implementation:
 **  MSG_PEEK         supported
@@ -631,8 +632,65 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
                              1 /* assume at least one pkt freed */);
   /* In the kernel recv() with flags is not called.
    * only read(). So flags may only contain MSG_DONTWAIT */
+#ifdef __KERNEL__
+  ci_assert_equal(flags, 0);
+#endif
+
 #ifndef __KERNEL__
   if( flags & MSG_ERRQUEUE_CHK ) {
+    if( OO_PP_NOT_NULL(us->s.timestamp_q_extract) ) {
+      ci_ip_pkt_fmt* pkt;
+      struct timespec ts[3];
+      struct cmsg_state cmsg_state;
+      ci_udp_hdr* udp;
+      int paylen;
+
+      /* TODO is this necessary? - mirroring ci_udp_recvmsg_get() */
+      ci_rmb();
+      
+      pkt = PKT_CHK_NNL(ni, us->s.timestamp_q_extract);
+      if( pkt->tx_hw_stamp.tv_sec == CI_PKT_TX_HW_STAMP_CONSUMED ) {
+        if( OO_PP_IS_NULL(pkt->tsq_next) )
+          goto errqueue_empty;
+        us->s.timestamp_q_extract = pkt->tsq_next;
+        pkt = PKT_CHK_NNL(ni, us->s.timestamp_q_extract);
+        ci_assert(pkt->tx_hw_stamp.tv_sec != CI_PKT_TX_HW_STAMP_CONSUMED);
+      }
+
+      udp = oo_ip_data(pkt);
+      paylen = CI_BSWAP_BE16(oo_ip_hdr(pkt)->ip_tot_len_be16) -
+                        sizeof(ci_ip4_hdr) - sizeof(udp);
+
+      msg->msg_flags = 0;
+      cmsg_state.msg = msg;
+      cmsg_state.cm = msg->msg_control;
+      cmsg_state.cmsg_bytes_used = 0;
+      ci_iovec_ptr_init_nz(piov, msg->msg_iov, msg->msg_iovlen);
+      memset(ts, 0, sizeof(ts));
+
+      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE ) {
+        ts[2].tv_sec = pkt->tx_hw_stamp.tv_sec;
+        ts[2].tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+      }
+      if( (us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE) &&
+          (pkt->tx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) ) {
+        ts[1].tv_sec = pkt->tx_hw_stamp.tv_sec;
+        ts[1].tv_nsec = pkt->tx_hw_stamp.tv_nsec;
+      }
+      ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
+                  sizeof(ts), &ts);
+      oo_offbuf_set_start(&pkt->buf, udp + 1);
+      oo_offbuf_set_len(&pkt->buf, paylen);
+      rc = oo_copy_pkt_to_iovec_no_adv(ni, pkt, piov, paylen);
+
+      /* Mark this packet/timestamp as consumed */
+      pkt->tx_hw_stamp.tv_sec = CI_PKT_TX_HW_STAMP_CONSUMED;
+
+      ci_ip_cmsg_finish(&cmsg_state);
+      msg->msg_flags |= MSG_ERRQUEUE_CHK;
+      return rc;
+    }
+  errqueue_empty:
     /* ICMP is handled via OS, so get OS error */
     rc = oo_os_sock_recvmsg(ni, SC_SP(&us->s), msg, flags);
     if( rc < 0 ) {
@@ -669,7 +727,7 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
     ** msg_iovlen is 0 Linux 2.4.21-15.EL does not set MSG_TRUNC when a
     ** datagram has non-zero length.  We do. */
     CI_IOVEC_LEN(&piov->io) = piov->iovlen = 0;
-    return 1;
+    return IOVLEN_WORKAROUND_RC_VALUE;
   }
   return 0;
 }
@@ -979,7 +1037,7 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, struct msghdr* msg, int flags,
   rc = ci_udp_recvmsg_socklocked_slowpath(a, msg, &piov, flags);
   if( rc == 0 ) 
     goto back_to_fast_path;
-  else if( rc == 1 )
+  else if( rc == IOVLEN_WORKAROUND_RC_VALUE )
     goto piov_inited;
   else
     goto out;

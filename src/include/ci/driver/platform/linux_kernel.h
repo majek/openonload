@@ -207,8 +207,7 @@ extern struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t address);
 /* Do allow system administration via ioctl? */
 ci_inline int ci_is_sysadmin(void)
 {
-  /* Allow access for superuser or when in a debug build */
-  return ( capable(CAP_SYS_ADMIN) || CI_DEBUG(1)+0 );
+  return capable(CAP_SYS_ADMIN);
 }
 
 

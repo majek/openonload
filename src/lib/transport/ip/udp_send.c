@@ -240,7 +240,8 @@ static void ci_udp_sendmsg_mcast(ci_netif* ni, ci_udp_state* us,
   struct ci_udp_rx_deliver_state state;
   const ci_udp_hdr* udp;
 
-  if( ! (us->udpflags & CI_UDPF_MCAST_LOOP) || NI_OPTS(ni).multicast_loop_off )
+  if( ! (us->udpflags & CI_UDPF_MCAST_LOOP) ||
+      ! (NI_OPTS(ni).mcast_send & CITP_MCAST_SEND_FLAG_LOCAL) )
     return;
   if(CI_UNLIKELY( ni->state->n_rx_pkts >= NI_OPTS(ni).max_rx_packets )) {
     ci_netif_try_to_reap(ni, 100);
@@ -290,10 +291,15 @@ ci_inline void prep_send_pkt(ci_netif* ni, ci_udp_state* us,
   pkt->pf.udp.tx_sock_id = S_SP(us);
   CI_UDP_STATS_INC_OUT_DGRAMS( ni );
 
-  if( (ip->ip_frag_off_be16 & (CI_IP4_FRAG_MORE | CI_IP4_OFFSET_MASK))
-      == CI_IP4_FRAG_MORE )
-    /* First fragmented chunk: calculate UDP checksum. */
-    ci_udp_sendmsg_chksum(ni, pkt, ip);
+  if( (ip->ip_frag_off_be16 & CI_IP4_OFFSET_MASK) == 0 ) {
+    /* Request TX timestamp for the first segment */
+    if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+      pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
+    if( ip->ip_frag_off_be16 & CI_IP4_FRAG_MORE ) {
+      /* First fragmented chunk: calculate UDP checksum. */
+      ci_udp_sendmsg_chksum(ni, pkt, ip);
+    }
+  }
 }
 
 

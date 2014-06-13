@@ -4,11 +4,6 @@
 # the Makefile for building it standalone.
 #
 
-# The Kbuild link should override the mmake-generated Makefile, but
-# Linux <2.6.10 does not look for that.  Do nothing if included by
-# Kbuild.
-ifndef MMAKE_IN_KBUILD
-
 CONFIG_FILES := config.h autocompat.h
 MMAKE_GEN_SRCS := %.mod.c $(CONFIG_FILES)
 
@@ -22,7 +17,6 @@ export CONFIG_SFC_MCDI_MON := y
 export CONFIG_SFC_SFE4001 := y
 export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
-export CONFIG_SFC_TUNE := m
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
@@ -32,7 +26,7 @@ ifdef GCOV
 IMPORT        := ../linux/gcov.c ../linux/gcov.h
 endif
 
-TARGETS := sfc.o sfc_tune.o
+TARGETS := sfc.o
 ifdef GCOV
 TARGETS += sfc_gcov.o
 endif
@@ -111,7 +105,7 @@ Module.symvers: kbuild
 
 clean:
 	@$(MakeClean)
-	rm -rf *.ko Module.symvers .tmp_versions .*.cmd $(CONFIG_FILES)
+	rm -rf *.ko Module.symvers Modules.symvers .tmp_versions .*.cmd $(CONFIG_FILES)
 
 else # DRIVER
 
@@ -134,5 +128,3 @@ endif
 endif # DRIVER
 
 .PHONY : $(DRIVER_SUBDIRS)
-
-endif # !MMAKE_IN_KBUILD

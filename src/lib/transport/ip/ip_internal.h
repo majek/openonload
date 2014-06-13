@@ -49,6 +49,9 @@
  * definition so just define it to 0.
  */
 #define ONLOAD_MSG_WARM 0
+
+/* This should match with UL-only header onload/extensions.h */
+#define ONLOAD_SOF_TIMESTAMPING_STREAM (1 << 23)
 #endif
 
 
@@ -213,6 +216,25 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
   return rc;
 }
 
+#ifndef __ci_driver__
+ci_inline int
+ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
+                         ci_int32 cluster_size, ci_uint32 cluster_restart_opt,
+                         ci_uint32 addr_be32, ci_uint16 port_be16)
+{
+  int rc;
+
+  LOG_TC(ci_log("%s: %d addr_be32: %d port: %d", __FUNCTION__, fd, addr_be32,
+                port_be16));
+  rc = ci_tcp_helper_ep_reuseport_bind(fd, cluster_name, cluster_size,
+                                       cluster_restart_opt, addr_be32,
+                                       port_be16);
+  LOG_TC( if(rc < 0)
+            ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
+  return rc;
+}
+#endif
+
 /*--------------------------------------------------------------------
  *!
  * Clear all filters for an endpoint
@@ -345,10 +367,15 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
 # define SO_TIMESTAMPNS 35
 #endif
 
+#ifndef SO_REUSEPORT
+# define SO_REUSEPORT   15
+#endif
+
 /* The following value needs to match its counterpart
  * in kernel headers.
  */
 #define ONLOAD_SO_TIMESTAMPING 37
+#define ONLOAD_SCM_TIMESTAMPING ONLOAD_SO_TIMESTAMPING
 
 /* The following values need to match their counterparts in
  * linux kernel header linux/net_tstamp.h
@@ -362,8 +389,7 @@ enum {
 	ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
 	ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
 	ONLOAD_SOF_TIMESTAMPING_MASK =
-	(ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE - 1) |
-	ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
+	( (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE << 1) - 1 )
 };
 
 /* check [ov] is a non-NULL ptr & [ol] indicates the right space for
@@ -706,6 +732,16 @@ extern citp_init_thread_callback init_thread_callback CI_HV;
 #if CI_CFG_PORT_STRIPING
 #define ci_ts_port_swap(seq, ts) ((seq / tcp_eff_mss(ts)) & 1)
 #endif
+
+ci_inline int ci_netif_intf_i_to_base_ifindex(ci_netif* ni, int intf_i)
+{
+  ci_hwport_id_t hwport;
+  ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
+  hwport = ni->state->intf_i_to_hwport[intf_i];
+  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_REGISTER_INTERFACES);
+  return cicp_fwd_hwport_to_base_ifindex(&CICP_MIBS(CICP_HANDLE(ni))->user,
+                                         hwport);
+}
 
 #endif /* __CI_LIB_IP_INTERNAL_H__ */
 /*! \cidoxg_end */

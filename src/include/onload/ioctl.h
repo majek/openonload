@@ -288,6 +288,17 @@ enum {
 #define OO_IOC_TCP_DROP_FROM_ACCEPTQ OO_IOC_W(TCP_DROP_FROM_ACCEPTQ, \
                                           struct oo_op_tcp_drop_from_acceptq)
 
+  OO_OP_MOVE_FD,
+#define OO_IOC_MOVE_FD              OO_IOC_W(MOVE_FD, \
+                                             ci_fixed_descriptor_t)
+
+  OO_OP_EP_REUSEPORT_BIND,
+#define OO_IOC_EP_REUSEPORT_BIND                        \
+  OO_IOC_W(EP_REUSEPORT_BIND, oo_tcp_reuseport_bind_t)
+  OO_OP_CLUSTER_DUMP,
+#define OO_IOC_CLUSTER_DUMP       OO_IOC_W(CLUSTER_DUMP,            \
+                                             oo_cluster_dump_t)
+
   OO_OP_END  /* This had better be last! */
 };
 

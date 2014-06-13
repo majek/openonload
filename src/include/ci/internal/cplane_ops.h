@@ -581,7 +581,8 @@ CICP_OPTSYSBODY(
 CICP_OPTSYSCALL void
 cicpos_route_delete(cicp_handle_t     *cplane_netif, 
 		    ci_ip_addr_t       dest_ip,
-		    ci_ip_addrset_t    dest_ipset)
+		    ci_ip_addrset_t    dest_ipset,
+                    ci_ifid_t          dest_ifindex)
 CICP_OPTSYSBODY(
     cp_route_delete_t op;
 
@@ -1242,9 +1243,8 @@ _cicp_mac_find_ipunaloc(cicp_mac_mib_t *mact, ci_ifid_t ifindex,
 extern cicp_fwd_rowid_t 
 _cicpos_route_find(const cicp_fwdinfo_t   *routet,
 		   ci_ip_addr_t            dest_ip,
-                   ci_ip_addrset_t         dest_set);
-extern const cicp_fwd_row_t *
-_cicp_fwd_find_ip(const cicp_fwdinfo_t *fwdt, ci_ip_addr_t ip_dest);
+                   ci_ip_addrset_t         dest_set,
+                   ci_ifid_t               dest_ifindex);
 
 extern cicp_fwd_row_t *
 _cicpos_fwd_find_free(cicp_fwdinfo_t *fwdt);

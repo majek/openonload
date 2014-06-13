@@ -4,7 +4,9 @@ SUBDIRS		:= ciul \
                    ip \
                    citools \
                    driver \
-                   ef_vi
+                   ef_vi \
+                   onload
+
 
 OTHER_SUBDIRS	:= tweaks \
                    syscalls
@@ -14,7 +16,8 @@ OTHER_SUBDIRS	+= cplane
 endif
 
 ifeq ($(ONLOAD_ONLY),1)
-SUBDIRS		:= ef_vi
+SUBDIRS		:= ef_vi \
+                   onload
 endif
 endif
 

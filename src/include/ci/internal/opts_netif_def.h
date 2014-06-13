@@ -203,16 +203,48 @@ CI_CFG_OPT("EF_FORCE_SEND_MULTICAST", force_send_multicast, ci_uint32,
 "IP_MULTICAST_LOOP flag."
 "\n"
 "This option disables loopback of multicast traffic to receivers on the same "
-"host, unless those receivers are sharing an OpenOnload stack with the sender "
-"(see EF_NAME) and EF_MULTICAST_LOOP_OFF=0."
+"host, unless\n"
+"(a) those receivers are sharing an OpenOnload stack with the sender "
+"(see EF_NAME) and EF_MCAST_SEND is set to 1 or 3, or\n"
+"(b) prerequisites to support loopback to other OpenOnload stacks are met "
+"(see EF_MCAST_SEND)."
 MULTICAST_LIMITATIONS_NOTE,
            1, , 1, 0, 1, yesno)
 
 CI_CFG_OPT("EF_MULTICAST_LOOP_OFF", multicast_loop_off, ci_uint32,
+"EF_MULTICAST_LOOP_OFF is deprecated in favour of EF_MCAST_SEND\n"
 "When set, disables loopback of multicast traffic to receivers in the same "
-"OpenOnload stack."
+"OpenOnload stack.\n"
+"This option only takes effect when EF_MCAST_SEND is not set and is "
+"equivalent to EF_MCAST_SEND=1 or EF_MCAST_SEND=0 "
+"for values of 0 and 1 respectively."
 MULTICAST_LIMITATIONS_NOTE,
            1, , 1, 0, 1, yesno)
+
+#define CITP_MCAST_SEND_FLAG_LOCAL 1
+#define CITP_MCAST_SEND_FLAG_EXT 2
+
+CI_CFG_OPT("EF_MCAST_SEND", mcast_send, ci_uint32,
+"Controls loopback of multicast traffic to receivers in the same and other "
+"OpenOnload stacks.\n"
+"When set to 0 (default) disables loopback within the same stack as well as to "
+"other OpenOnload stacks.\n"
+"When set to 1 enables loopback to the same stack\n"
+"When set to 2 enables loopback to other OpenOnload stacks.\n"
+"When set to 3 enables loopback to the same as well as other OpenOnload "
+"stacks.\n"
+"In respect to loopback to other OpenOnload stacks the options is just a hint "
+"and the feature requires: (a) 7000-series or newer device, and "
+"(b) selecting firmware variant with loopback support."
+MULTICAST_LIMITATIONS_NOTE,
+           2, , 0, 0, 3, oneof:none;local;ext;all;)
+
+CI_CFG_OPT("EF_MCAST_RECV_HW_LOOP", mcast_recv_hw_loop, ci_uint32,
+"When enabled allows udp sockets to receive multicast traffic that "
+"originates from other OpenOnload stacks."
+MULTICAST_LIMITATIONS_NOTE,
+           1, , 1, 0, 1, yesno)
+
 #endif
 
 CI_CFG_OPT("EF_TCP_LISTEN_HANDOVER", tcp_listen_handover, ci_uint32,
@@ -373,6 +405,9 @@ CI_CFG_OPT("EF_TCP_SNDBUF_MODE", tcp_sndbuf_mode, ci_uint32,
            "size of the send queue and retransmit queue combined.",
            1, , 0, 0, 1, yesno)
 
+CI_CFG_OPT("EF_TCP_SYNCOOKIES", tcp_syncookies, ci_uint32,
+"Use TCP syncookies to protect from SYN flood attack",
+           1, , 0, 0, 1, yesno)
 /**********************************************************************
  * Narrow fields (few bits).
  */
@@ -494,7 +529,8 @@ CI_CFG_OPT("EF_PIO", pio, ci_uint32,
 "there is no difference between mode 1 and mode 2\n"
 "In all cases, PIO will only be used for small packets (see EF_PIO_THRESHOLD) "
 "and if the VI's transmit queue is currently empty.  If these conditions are "
-"not met DMA will be used, even in mode 2.",
+"not met DMA will be used, even in mode 2.\n"
+"Note: PIO is currently only available on x86_64 systems",
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
 
@@ -1093,6 +1129,28 @@ CI_CFG_OPT("EF_RX_TIMESTAMPING", rx_timestamping, ci_uint32,
 " does not succeed;\n",
            , , 0, 0, 3, count)
 
+CI_CFG_OPT("EF_TX_TIMESTAMPING", tx_timestamping, ci_uint32,
+"Control of hardware timestamping of transmitted packets, possible values:\n"
+"  0 - do not do timestamping (default);\n"
+"  1 - request timestamping but continue if hardware is not capable or it"
+" does not succeed;\n"
+"  2 - request timestamping and fail if hardware is capable and it does"
+" not succeed;\n"
+"  3 - request timestamping and fail if hardware is not capable or it"
+" does not succeed;\n",
+           , , 0, 0, 3, count)
+
+#define CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC 1
+CI_CFG_OPT("EF_TIMESTAMPING_REPORTING", timestamping_reporting, ci_uint32,
+"Controls timestamp reporting, possible values:\n"
+" 0: report translated timestamps only when the NIC clock has been set;\n"
+" 1: report translated timestamps only when the NIC clock is synchronised "
+"(e.g. using ptpd)\n"
+"If the above conditions are not met Onload will only report raw "
+"(not translated) timestamps.\n",
+           1, , 0, 0, 1, yesno)
+
+#define CI_EF_LOG_DEFAULT ((1 << EF_LOG_BANNER) | (1 << EF_LOG_RESOURCE_WARNINGS))
 CI_CFG_OPT("EF_LOG", log_category, ci_uint32,
 "Designed to control how chatty Onload's informative/warning messages are.  "
 "Specified as a comma seperated list of options to enable and disable "
@@ -1100,7 +1158,7 @@ CI_CFG_OPT("EF_LOG", log_category, ci_uint32,
 "'resource_warnings' (on by default), and 'conn_drop' (off by default).  "
 "E.g.: To enable conn_drop: EF_LOG=conn_drop.  E.g.: To enable conn_drop and "
 "turn off resource warnings: EF_LOG=conn_drop,-resource_warnings",
-           , , 0, 0, MAX, count)
+           , , CI_EF_LOG_DEFAULT, 0, MAX, count)
 
 
 #ifdef CI_CFG_OPTGROUP

@@ -30,7 +30,6 @@
 
 #include <ci/compat.h>
 #include <ci/internal/ip.h>
-#include <ci/driver/efab/workqueue.h>
 #include <onload/osfile.h>
 #include <onload/oof_hw_filter.h>
 #include <onload/oof_socket.h>
@@ -50,6 +49,30 @@ struct tcp_helper_nic {
   unsigned             pio_io_mmap_bytes;
 #endif
 };
+
+
+struct tcp_helper_resource_s;
+
+typedef struct thc_legacy_os_sock_s {
+    ci_uint32                    tlos_laddr_be32;
+    ci_uint16                    tlos_lport_be16;
+    int                          tlos_protocol;
+    int                          tlos_pollwait_registered;
+    struct oo_file_ref*          tlos_os_sock;
+    int                          tlos_refs;
+    ci_dllink                    tlos_next;
+} thc_legacy_os_sock_t;
+
+typedef struct tcp_helper_cluster_s {
+  struct efrm_vi_set*           thc_vi_set[CI_CFG_MAX_REGISTER_INTERFACES];
+  struct oof_thc*               thc_oof_head;
+  struct tcp_helper_resource_s* thc_thr_head;
+  char                          thc_name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
+  int                           thc_cluster_size;
+  uid_t                         thc_euid;
+  ci_dllist                     thc_tlos;
+  struct tcp_helper_cluster_s*  thc_next;
+} tcp_helper_cluster_t;
 
 
  /*--------------------------------------------------------------------
@@ -80,9 +103,10 @@ typedef struct tcp_helper_resource_s {
 #define OO_TRUSTED_LOCK_UNLOCKED          0x0
 #define OO_TRUSTED_LOCK_LOCKED            0x1
 #define OO_TRUSTED_LOCK_AWAITING_FREE     0x2
-#define OO_TRUSTED_LOCK_NEED_POLL_PRIME   0x4
+#define OO_TRUSTED_LOCK_NEED_POLL         0x4
 #define OO_TRUSTED_LOCK_CLOSE_ENDPOINT    0x8
 #define OO_TRUSTED_LOCK_RESET_STACK       0x10
+#define OO_TRUSTED_LOCK_NEED_PRIME        0x20
   volatile unsigned      trusted_lock;
 
   /*! Link for global list of stacks. */
@@ -110,7 +134,7 @@ typedef struct tcp_helper_resource_s {
   int n_ep_closing_refs;
 
   /*! this is used so we can schedule destruction at task time */
-  ci_workitem_t work_item_dtor;
+  struct work_struct work_item_dtor;
 
   /* For deferring work to a non-atomic context. */
   char wq_name[11 + CI_CFG_STACK_NAME_LEN];
@@ -181,6 +205,13 @@ typedef struct tcp_helper_resource_s {
 
   /* bool: avoid packet allocations when in atomic mode */
   int avoid_atomic_allocations;
+
+  /* The cluster this stack is associated with if any */
+  tcp_helper_cluster_t*         thc;
+  /* TID of thread that created this stack within the cluster */
+  pid_t                         thc_tid;
+  /* Track list of stacks associated with a single thc */
+  struct tcp_helper_resource_s* thc_thr_next;
 } tcp_helper_resource_t;
 
 
@@ -263,6 +294,12 @@ struct tcp_helper_endpoint_s {
 #define OO_THR_EP_AFLAG_NON_ATOMIC     0x4  /* On the non-atomic list */
 #define OO_THR_EP_AFLAG_CLEAR_FILTERS  0x8  /* Needs filters clearing */
 #define OO_THR_EP_AFLAG_NEED_FREE      0x10 /* Endpoint to be freed */
+#define OO_THR_EP_AFLAG_OS_NOTIFIER    0x20 /* Pollwait registration for os
+                                             * sock used by cluster without
+                                             * kernel reuseport support is
+                                             * owned by this endpoint.
+                                             */
+#define OO_THR_EP_AFLAG_LEGACY_REUSEPORT    0x40
 
 
 

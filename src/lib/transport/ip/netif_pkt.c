@@ -50,8 +50,18 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
   if( ni->pkt_shm_id != NULL && ni->pkt_shm_id[setid] >= 0 ) {
     p = shmat(ni->pkt_shm_id[setid], NULL, 0);
     if( p == (void *)-1) {
-      ci_log("%s: shmat(0x%x) failed for pkt set %d (%d)", __FUNCTION__,
-             ni->pkt_shm_id[setid], setid, -errno);
+      if( errno == EACCES ) {
+        ci_log("Failed to mmap packet buffer for [%s] with errno=EACCES.\n"
+               "Probably, you are using this stack from processes with "
+               "different UIDs.\n"
+               "Try either allowing user stack sharing: EF_SHARE_WITH=-1\n"
+               "or turn off huge pages: EF_USE_HUGE_PAGES=0\n",
+               ni->state->pretty_name);
+      }
+      else {
+        ci_log("%s: shmat(0x%x) failed for pkt set %d (%d)", __FUNCTION__,
+               ni->pkt_shm_id[setid], setid, -errno);
+      }
       goto out;
     }
   }

@@ -286,6 +286,11 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
     protocol = strcasecmp(type, "tcp") ? IPPROTO_UDP : IPPROTO_TCP;
 
     remainder = strtok(NULL, "");
+    if( ! strncmp("mcastloop-rx,", remainder, strlen("mcastloop-rx,")) ) {
+      ef_filter_spec_init(fs, EF_FILTER_FLAG_MCAST_LOOP_RECEIVE);
+      strtok(remainder, ",");
+      remainder = strtok(NULL, "");
+    }
     if( ! strncmp("vid=", remainder, strlen("vid=")) ) {
       vlan = strtok(remainder, ",");
       remainder = strtok(NULL, "");

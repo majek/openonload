@@ -365,6 +365,13 @@ struct efx_ts_sync {
 	struct efx_timespec ts;
 };
 
+/* Set the NIC-system synchronization status ********************************/
+#define EFX_TS_SET_SYNC_STATUS 0xef27
+struct efx_ts_set_sync_status {
+	__u32 in_sync;		/* 0 == not in sync, 1 == in sync */
+	__u32 timeout;		/* Seconds until no longer in sync */
+};
+
 /* Get the clock/timestamp capabilities, like ETHTOOL_GET_TS_INFO ***********/
 #define EFX_GET_TS_INFO 0xef24
 #ifndef ETHTOOL_GET_TS_INFO
@@ -469,6 +476,12 @@ struct efx_update_license2 {
 	__u32 wrong_node_keys;
 };
 
+#define EFX_LICENSED_APP_STATE 0xef26
+struct efx_licensed_app_state {
+	__u32 app_id;
+	__u32 state;
+};
+
 /* Reset the AOE application and controller *********************************/
 #define EFX_RESET_AOE 0xef20
 struct efx_aoe_reset {
@@ -485,7 +498,7 @@ struct efx_device_ids {
 	__u8 perm_addr[6];			/* non-volatile MAC address */
 };
 
-/* Next available cmd number is 0xef26 */
+/* Next available cmd number is 0xef28 */
 
 /* Efx private ioctl command structures *************************************/
 
@@ -502,6 +515,7 @@ union efx_ioctl_data {
 	struct efx_ts_settime ts_settime;
 	struct efx_ts_adjtime ts_adjtime;
 	struct efx_ts_sync ts_sync;
+	struct efx_ts_set_sync_status ts_set_sync_status;
 	struct ethtool_ts_info ts_info;
 	struct efx_get_module_eeprom eeprom;
 	struct efx_get_module_info modinfo;
@@ -515,6 +529,7 @@ union efx_ioctl_data {
 	struct efx_update_license2 key_stats2;
 	struct efx_aoe_reset aoe_reset;
 	struct efx_device_ids device_ids;
+	struct efx_licensed_app_state app_state;
 };
 
 /**
@@ -575,10 +590,10 @@ struct efx_sock_ioctl {
 } __attribute__ ((packed));
 
 #ifdef __KERNEL__
-extern int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
-			     union efx_ioctl_data __user *data);
-extern int efx_control_init(void);
-extern void efx_control_fini(void);
+int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
+		      union efx_ioctl_data __user *data);
+int efx_control_init(void);
+void efx_control_fini(void);
 #endif
 
 #endif /* EFX_IOCTL_H */

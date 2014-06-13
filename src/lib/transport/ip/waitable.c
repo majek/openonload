@@ -217,6 +217,28 @@ void citp_waitable_obj_free_nnl(ci_netif* ni, citp_waitable* w)
 
 #ifdef __KERNEL__
 
+void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo, int do_free)
+{
+  if( wo->waitable.state == CI_TCP_LISTEN )
+    ci_tcp_listen_all_fds_gone(ni, &wo->tcp_listen, do_free);
+  else if( wo->waitable.state & CI_TCP_STATE_TCP )
+    ci_tcp_all_fds_gone(ni, &wo->tcp, do_free);
+#if CI_CFG_UDP
+  else if( wo->waitable.state == CI_TCP_STATE_UDP )
+    ci_udp_all_fds_gone(ni, wo->waitable.bufid, do_free);
+#endif
+#if CI_CFG_USERSPACE_PIPE
+  else if( wo->waitable.state == CI_TCP_STATE_PIPE )
+    ci_pipe_all_fds_gone(ni, &wo->pipe, do_free);
+#endif
+  else if( do_free ) {
+    /* The only non-TCP and non-UDP state in FREE.  But FREE endpoint is
+     * already free, we can't free it again.  Possibly, it is a
+     * placeholder for future endpoint types, such as epoll? */
+    citp_waitable_obj_free(ni, &wo->waitable);
+  }
+}
+
 void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
 {
   citp_waitable_obj* wo;
@@ -255,24 +277,7 @@ void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
    */
   ci_ni_dllist_remove_safe(ni, &wo->waitable.post_poll_link);
 
-  if( wo->waitable.state == CI_TCP_LISTEN )
-    ci_tcp_listen_all_fds_gone(ni, &wo->tcp_listen);
-  else if( wo->waitable.state & CI_TCP_STATE_TCP )
-    ci_tcp_all_fds_gone(ni, &wo->tcp);
-#if CI_CFG_UDP
-  else if( wo->waitable.state == CI_TCP_STATE_UDP )
-    ci_udp_all_fds_gone(ni, w_id);
-#endif
-#if CI_CFG_USERSPACE_PIPE
-  else if( wo->waitable.state == CI_TCP_STATE_PIPE )
-    ci_pipe_all_fds_gone(ni, &wo->pipe);
-#endif
-  else {
-    /* The only non-TCP and non-UDP state in FREE.  But FREE endpoint is
-     * already free, we can't free it again.  Possibly, it is a
-     * placeholder for future endpoint types, such as epoll? */
-    citp_waitable_obj_free(ni, &wo->waitable);
-  }
+  citp_waitable_cleanup(ni, wo, 1);
 }
 
 #endif  /* __KERNEL__ */
@@ -283,6 +288,7 @@ const char* citp_waitable_type_str(citp_waitable* w)
   if( w->state & CI_TCP_STATE_TCP )         return "TCP";
   else if( w->state == CI_TCP_STATE_UDP )   return "UDP";
   else if( w->state == CI_TCP_STATE_FREE )  return "FREE";
+  else if( w->state == CI_TCP_STATE_ALIEN ) return "ALIEN";
 #if CI_CFG_USERSPACE_PIPE
   else if( w->state == CI_TCP_STATE_PIPE )  return "PIPE";
 #endif
@@ -343,6 +349,36 @@ void citp_waitable_dump(ci_netif* ni, citp_waitable* w, const char* pf)
   else if( w->state == CI_TCP_STATE_PIPE )
     oo_pipe_dump(ni, &wo->pipe, pf);
 #endif
+}
+
+
+void citp_waitable_print(citp_waitable* w)
+{
+  /* Output socket using netstat style output:
+   *   TCP 2 0 0.0.0.0:12865 0.0.0.0:0 LISTEN
+   *   UDP 0 0 172.16.129.131:57521 0.0.0.0:0 UDP
+   */
+  if( w->state & CI_TCP_STATE_SOCKET ) {
+    ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+    citp_waitable_obj* wo = CI_CONTAINER(citp_waitable_obj, waitable, w);
+    int tq = 0;
+    int rq = 0;
+    
+    if( (w->state & CI_TCP_STATE_TCP) &&
+       !(w->state & CI_TCP_STATE_NOT_CONNECTED) ) {
+      tq = ci_tcp_sendq_n_pkts(&wo->tcp);
+      rq = wo->tcp.recv1.num + wo->tcp.recv2.num;
+    }
+    else if( w->state == CI_TCP_STATE_UDP ) {
+      tq = wo->udp.tx_count + oo_atomic_read(&wo->udp.tx_async_q_level);
+      rq = ci_udp_recv_q_pkts(&wo->udp.recv_q);
+    }
+    log("%s %d %d "OOF_IP4PORT" "OOF_IP4PORT" %s",
+        citp_waitable_type_str(w), rq, tq,
+        OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
+        OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
+        ci_tcp_state_str(w->state));
+  }
 }
 
 

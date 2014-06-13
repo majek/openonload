@@ -31,6 +31,9 @@
 #include <onload/common.h>
 #include <onload/sleep.h>
 
+#ifndef __KERNEL__
+#include <ci/internal/efabcfg.h>
+#endif
 
 #define VERB(x)
 
@@ -879,6 +882,24 @@ cleanup:
 
  
 #ifndef  __KERNEL__
+
+/* Set a reuseport bind on a socket.
+ */
+int ci_tcp_reuseport_bind(ci_sock_cmn* sock, ci_fd_t fd)
+{
+  /* With legacy reuseport we delay the __ci_bind actions to avoid errors
+   * when trying to re-use a port for the os socket, so won't have set the
+   * PORT_BOUND flag yet.
+   */
+  ci_assert(((sock->s_flags & CI_SOCK_FLAG_PORT_BOUND) != 0) ||
+            ((sock->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) != 0));
+  ci_assert_nequal(sock->s_flags & CI_SOCK_FLAG_REUSEPORT, 0);
+  return ci_tcp_ep_reuseport_bind(fd, CITP_OPTS.cluster_name,
+                                  CITP_OPTS.cluster_size,
+                                  CITP_OPTS.cluster_restart_opt,
+                                  sock_laddr_be32(sock), sock_lport_be16(sock));
+}
+
 /* In this bind handler we just check that the address to which
  * are binding is either "any" or one of ours. 
  * In the Linux kernel version [fd] is unused.
@@ -891,6 +912,7 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   ci_uint32 addr_be32;
   ci_sock_cmn* s = ep->s;
   ci_tcp_state* c = &SOCK_TO_WAITABLE_OBJ(s)->tcp;
+  int rc;
 
   CHECK_TEP(ep);
 
@@ -929,8 +951,28 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   /* Using the port number provided, see if we can do this bind */
   new_port = my_addr_in->sin_port;
 
-  CI_LOGLEVEL_TRY_RET(LOG_TV,
-		      __ci_bind(ep->netif, ep->s, addr_be32, &new_port));
+  if( CITP_OPTS.tcp_reuseports != 0 && new_port != 0 ) {
+    struct ci_port_list *force_reuseport;
+    CI_DLLIST_FOR_EACH2(struct ci_port_list, force_reuseport, link,
+                        (ci_dllist*)(ci_uintptr_t)CITP_OPTS.tcp_reuseports) {
+      if( force_reuseport->port == new_port ) {
+        int one = 1;
+        ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
+        ci_assert(CI_IS_VALID_SOCKET(os_sock));
+        rc = ci_sys_setsockopt(os_sock, SOL_SOCKET, SO_REUSEPORT, &one,
+                               sizeof(one));
+        if( rc != 0 && errno == ENOPROTOOPT )
+          ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
+        ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT;
+        LOG_TC(log("%s "SF_FMT", applied legacy SO_REUSEPORT flag for port %u",
+                   __FUNCTION__, SF_PRI_ARGS(ep, fd), new_port));
+      }
+    }
+  }
+
+  if( !(ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) ) 
+    CI_LOGLEVEL_TRY_RET(LOG_TV,
+		        __ci_bind(ep->netif, ep->s, addr_be32, &new_port));
   ep->s->s_flags |= CI_SOCK_FLAG_BOUND;
   sock_lport_be16(s) = new_port; 
   sock_laddr_be32(s) = addr_be32;
@@ -939,6 +981,7 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   else
     s->cp.ip_laddr_be32 = addr_be32;
   s->cp.lport_be16 = new_port;
+  sock_rport_be16(s) = sock_raddr_be32(s) = 0;
 
   LOG_TC(log(LPF "bind to %s:%u n_p:%u lp:%u", ip_addr_str(addr_be32),
 	     (unsigned) CI_BSWAP_BE16(my_addr_in->sin_port),

@@ -162,20 +162,6 @@ static int citp_udp_socket(int domain, int type, int protocol)
 }
 
 
-static citp_fdinfo* citp_udp_dup(citp_fdinfo* orig_fdi)
-{
-  citp_socket* orig_sock = fdi_to_socket(orig_fdi);
-  citp_sock_fdi* sock_fdi = CI_ALLOC_OBJ(citp_sock_fdi);
-  if( sock_fdi ) {
-    citp_fdinfo_init(&sock_fdi->fdinfo, &citp_udp_protocol_impl);
-    sock_fdi->sock = *orig_sock;
-    citp_netif_add_ref(orig_sock->netif);
-    return &sock_fdi->fdinfo;
-  }
-  return 0;
-}
-
-
 static void citp_udp_dtor(citp_fdinfo* fdinfo, int fdt_locked)
 {
   citp_netif_release_ref(fdi_to_socket(fdinfo)->netif, fdt_locked);
@@ -186,15 +172,36 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
 			 socklen_t sa_len)
 {
   citp_sock_fdi *epi = fdi_to_sock_fdi(fdinfo);
+  citp_socket* ep = &epi->sock;
+  ci_sock_cmn* s = ep->s;
   int rc;
 
   Log_V(log(LPF "bind(%d, sa, %d)", fdinfo->fd, sa_len));
 
+  ci_udp_handle_force_reuseport(fdinfo->fd, ep, sa, sa_len);
+
+  if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 ) {
+    if( (rc = ci_udp_reuseport_bind(ep, fdinfo->fd, sa, sa_len)) == 0 ) {
+      /* The socket has moved so need to reprobe the fd.  This will also
+       * map the the new stack into user space of the executing process.
+       */
+      fdinfo = citp_fdtable_lookup(fdinfo->fd);
+      fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE);
+      epi = fdi_to_sock_fdi(fdinfo);
+      ep = &epi->sock;
+    }
+    else {
+      goto done;
+    }
+  }
+
   ci_netif_lock_fdi(epi);
-  rc = ci_udp_bind(&epi->sock, fdinfo->fd, sa, sa_len);
+  rc = ci_udp_bind(ep, fdinfo->fd, sa, sa_len);
   ci_netif_unlock_fdi(epi);
 
+ done:
   if( rc == CI_SOCKET_HANDOVER ) {
+    ci_assert_equal(s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY, 0);
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.udp_handover_bind);
     citp_fdinfo_handover(fdinfo, -1);
     return 0;
@@ -213,6 +220,12 @@ static int citp_udp_connect(citp_fdinfo* fdinfo,
   int rc;
 
   Log_V(log(LPF "connect(%d, sa, %d)", fdinfo->fd, sa_len));
+
+  if( (epi->sock.s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) != 0 ) {
+    log("ERROR: connect of socket with SO_REUSEPORT not supported unless "
+        "supported by the OS.");
+    return -1;
+  }
 
   ci_netif_lock_fdi(epi);
   rc = ci_udp_connect(&epi->sock, fdinfo->fd, sa, sa_len);
@@ -298,6 +311,8 @@ static int citp_udp_setsockopt(citp_fdinfo* fdinfo, int level,
 		       int optname, const void* optval, socklen_t optlen)
 {
   citp_sock_fdi *epi = fdi_to_sock_fdi(fdinfo);
+  citp_socket* ep    = &epi->sock;
+  ci_sock_cmn* s     = ep->s;
   int rc;
 
   Log_VSC(log("%s("EF_FMT", %d, %d)", __FUNCTION__,
@@ -312,6 +327,13 @@ static int citp_udp_setsockopt(citp_fdinfo* fdinfo, int level,
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.udp_handover_setsockopt);
     citp_fdinfo_handover(fdinfo, -1);
     return 0;
+  }
+
+  if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) != 0 &&
+      ! CI_SOCK_NOT_BOUND(s) ) {
+    ci_log("%s: setting reuseport after binding on udp not supported",
+           __FUNCTION__);
+    return -ENOSYS;
   }
 
   citp_fdinfo_release_ref(fdinfo, 0);
@@ -500,11 +522,13 @@ static void citp_udp_epoll(citp_fdinfo*__restrict__ fdi,
   ci_netif* ni = epi->sock.netif;
   ci_uint64 sleep_seq;
   unsigned mask;
+  int stored_event;
 
   /* Try to return a result without polling if we can. */
   sleep_seq = us->s.b.sleep_seq.all;
   mask = ci_udp_poll_events(ni, us);
-  if( ! citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq) )
+  stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+  if( !stored_event && !eps->ordering_info )
     if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
       sleep_seq = us->s.b.sleep_seq.all;
       mask = ci_udp_poll_events(ni, us);
@@ -610,12 +634,85 @@ int citp_udp_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
 }
 
 
+#if CI_CFG_USERSPACE_EPOLL
+int citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
+                          struct timespec* next_out, int* bytes_out)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
+  ci_udp_state* us = SOCK_TO_UDP(epi->sock.s);
+  ci_ip_pkt_fmt* pkt;
+  *bytes_out = 0;
+  next_out->tv_sec = 0;
+
+  ci_sock_lock(epi->sock.netif, &us->s.b);
+
+  if( ci_udp_recv_q_not_readable(epi->sock.netif, us) ) {
+    ci_sock_unlock(epi->sock.netif, &us->s.b);
+    return 0;
+  } 
+
+  pkt = PKT_CHK_NNL(epi->sock.netif, us->recv_q.extract);
+  if( pkt->pf.udp.rx_flags & CI_IP_PKT_FMT_PREFIX_UDP_RX_CONSUMED ) {
+    /* We know that the receive queue is not empty and if a filter is
+     * involved that there are some that have passed the filter, so if
+     * this pkt is already consumed, the next one must be OK to
+     * receive (and already have been filtered)
+     */   
+    pkt = PKT_CHK_NNL(epi->sock.netif, pkt->next);
+    ci_assert( !(pkt->pf.udp.rx_flags &
+                 CI_IP_PKT_FMT_PREFIX_UDP_RX_CONSUMED) );
+  }
+
+  do {
+     /* Skip over any packets that won't be delivered to the user. */
+#if CI_CFG_ZC_RECV_FILTER
+    while( pkt->pf.udp.rx_flags & CI_IP_PKT_FMT_PREFIX_UDP_RX_FILTER_DROPPED ) {
+      if( ! OO_PP_IS_NULL(pkt->next) ) {
+        pkt = PKT_CHK_NNL(epi->sock.netif, pkt->next);
+      }
+      else {
+        goto out;
+      }
+    }
+#endif
+
+    if( pkt->flags & CI_PKT_FLAG_RX_INDIRECT )
+      pkt = PKT_CHK_NNL(epi->sock.netif, pkt->frag_next);
+
+    if( citp_oo_timespec_compare(&pkt->pf.udp.rx_hw_stamp, limit) < 1 ) {
+      /* We have data before the limit, add on the number of readable bytes. */
+      *bytes_out += pkt->pf.udp.pay_len;
+    }
+    else {
+      /* We have more data, but it's after the limit.  Set the next data
+       * limit here, and stop.
+       */
+      next_out->tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
+      next_out->tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
+      break;
+    }
+
+    if( ! OO_PP_IS_NULL(pkt->next) ) {
+      pkt = PKT_CHK_NNL(epi->sock.netif, pkt->next);
+    }
+    else {
+      break;
+    }
+  }
+  while( 1 );
+
+out:
+  ci_sock_unlock(epi->sock.netif, &us->s.b);
+  return 1;
+}
+#endif
+
 citp_protocol_impl citp_udp_protocol_impl = {
   .type        = CITP_UDP_SOCKET,
   .ops         = {
     .socket      = citp_udp_socket,
     .dtor        = citp_udp_dtor,
-    .dup         = citp_udp_dup,
+    .dup         = citp_tcp_dup,
     .bind        = citp_udp_bind,
     .listen      = citp_udp_listen,
     .accept      = citp_udp_accept,
@@ -653,6 +750,9 @@ citp_protocol_impl citp_udp_protocol_impl = {
     .tmpl_alloc     = citp_udp_tmpl_alloc,
     .tmpl_update    = citp_udp_tmpl_update,
     .tmpl_abort     = citp_udp_tmpl_abort,
+#if CI_CFG_USERSPACE_EPOLL
+    .ordered_data   = citp_udp_ordered_data,
+#endif
   }
 };
 

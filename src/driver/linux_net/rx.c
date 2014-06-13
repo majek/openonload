@@ -53,7 +53,9 @@
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 #include "efx_netq.h"
 #endif
+#ifdef CONFIG_SFC_TRACING
 #include <trace/events/sfc.h>
+#endif
 
 /* Preferred number of descriptors to fill at once */
 #define EFX_RX_PREFERRED_BATCH 8U
@@ -587,7 +589,7 @@ static void
 efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 		  unsigned int n_frags, u8 *eh)
 {
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)) || defined(CONFIG_SFC_TRACING)
 	struct efx_rx_buffer *head_buf = rx_buf;
 #endif
 	struct napi_struct *napi = &channel->napi_str;
@@ -607,7 +609,8 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_RXHASH_SUPPORT)
 	if (efx->net_dev->features & NETIF_F_RXHASH)
-		skb->rxhash = efx_rx_buf_hash(efx, eh);
+		skb_set_hash(skb, efx_rx_buf_hash(efx, eh),
+			     PKT_HASH_TYPE_L3);
 #endif
 	skb->ip_summed = ((rx_buf->flags & EFX_RX_PKT_CSUMMED) ?
 			  CHECKSUM_UNNECESSARY : CHECKSUM_NONE);
@@ -629,11 +632,12 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 
 	skb_record_rx_queue(skb, channel->rx_queue.core_index);
 
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
-	trace_sfc_receive(skb, true);
-#else
+	skb_mark_napi_id(skb, &channel->napi_str);
+#ifdef CONFIG_SFC_TRACING
 	trace_sfc_receive(skb, true, head_buf->flags & EFX_RX_BUF_VLAN_XTAG,
 			  head_buf->vlan_tci);
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	if (head_buf->flags & EFX_RX_BUF_VLAN_XTAG)
 		gro_result = vlan_gro_frags(napi, efx->vlan_group,
 					    head_buf->vlan_tci);
@@ -666,8 +670,10 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 		skb = netdev_alloc_skb(efx->net_dev,
 				       efx->rx_ip_align + efx->rx_prefix_size +
 				       hdr_len);
-		if (unlikely(skb == NULL))
+		if (unlikely(skb == NULL)) {
+			atomic_inc(&efx->n_rx_noskb_drops);
 			return NULL;
+		}
 	}
 
 	EFX_BUG_ON_PARANOID(rx_buf->len < hdr_len);
@@ -704,6 +710,8 @@ static struct sk_buff *efx_rx_mk_skb(struct efx_channel *channel,
 
 	/* Move past the ethernet header */
 	skb->protocol = eth_type_trans(skb, efx->net_dev);
+
+	skb_mark_napi_id(skb, &channel->napi_str);
 
 	return skb;
 }
@@ -846,11 +854,11 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 			return;
 
 	/* Pass the packet up */
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
-	trace_sfc_receive(skb, false);
-#else
+#ifdef CONFIG_SFC_TRACING
 	trace_sfc_receive(skb, false, rx_buf->flags & EFX_RX_BUF_VLAN_XTAG,
 			  rx_buf->vlan_tci);
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	if (rx_buf->flags & EFX_RX_BUF_VLAN_XTAG) {
 		vlan_hwaccel_receive_skb(skb, channel->efx->vlan_group,
 					 rx_buf->vlan_tci);
@@ -880,6 +888,12 @@ void __efx_rx_packet(struct efx_channel *channel)
 	 */
 	if (unlikely(efx->loopback_selftest)) {
 		efx_loopback_rx_packet(efx, eh, rx_buf->len);
+		efx_free_rx_buffer(rx_buf);
+		goto out;
+	}
+
+	/* Driverlink clients can request that the packet be discarded */
+	if (efx_dl_rx_packet(efx, channel->channel, eh, rx_buf->len)) {
 		efx_free_rx_buffer(rx_buf);
 		goto out;
 	}
@@ -924,7 +938,8 @@ void __efx_rx_packet(struct efx_channel *channel)
 		/* fall through */
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_GRO)
-	if ((rx_buf->flags & EFX_RX_PKT_TCP) && !channel->type->receive_skb)
+	if ((rx_buf->flags & EFX_RX_PKT_TCP) && !channel->type->receive_skb &&
+	    !efx_channel_busy_polling(channel))
 		efx_rx_packet_gro(channel, rx_buf, channel->rx_pkt_n_frags, eh);
 	else
 #endif
@@ -1337,11 +1352,11 @@ static void efx_ssr_deliver(struct efx_ssr_state *st, struct efx_ssr_conn *c)
 			container_of(st, struct efx_channel, ssr), c->skb);
 #endif
 
-#if !defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
-	trace_sfc_receive(c->skb, false);
-#else
+#ifdef CONFIG_SFC_TRACING
 	trace_sfc_receive(c->skb, false, EFX_SSR_CONN_IS_VLAN_ENCAP(c),
 			  EFX_SSR_CONN_VLAN_TCI(c));
+#endif
+#ifdef EFX_USE_FAKE_VLAN_RX_ACCEL
 	if (EFX_SSR_CONN_IS_VLAN_ENCAP(c))
 		vlan_hwaccel_receive_skb(c->skb, st->efx->vlan_group,
 					 EFX_SSR_CONN_VLAN_TCI(c));
@@ -1473,7 +1488,7 @@ efx_ssr_merge_page(struct efx_ssr_state *st, struct efx_ssr_conn *c,
 			return 0;
 
 #ifdef EFX_HAVE_RXHASH_SUPPORT
-		c->skb->rxhash = c->conn_hash;
+		skb_set_hash(c->skb, c->conn_hash, PKT_HASH_TYPE_L3);
 #endif
 		if (EFX_SSR_CONN_IS_TCPIPV4(c)) {
 			struct iphdr *iph =
@@ -1773,6 +1788,9 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	int nhoff;
 	int rc;
 
+	if (flow_id == RPS_FLOW_ID_INVALID)
+		return -EINVAL;
+
 	/* The core RPS/RFS code has already parsed and validated
 	 * VLAN, IP and transport headers.  We assume they are in the
 	 * header area.
@@ -1833,7 +1851,7 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	spec.rem_port = ports[0];
 	spec.loc_port = ports[1];
 
-	rc = efx->type->filter_rfs_insert(efx, &spec);
+	rc = efx->type->filter_async_insert(efx, &spec);
 	if (rc < 0)
 		return rc;
 
@@ -1855,6 +1873,11 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 			   spec.rem_host, ntohs(ports[0]), spec.loc_host,
 			   ntohs(ports[1]), rxq_index, flow_id, rc);
 
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
+	/* since we have real ARFS, disable SARFS */
+	efx_sarfs_disable(efx);
+#endif
+
 	return rc;
 }
 
@@ -1872,10 +1895,14 @@ bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota)
 	size = efx->type->max_rx_ip_filters;
 	while (quota--) {
 		flow_id = efx->rps_flow_id[index];
-		if (expire_one(efx, flow_id, index))
+
+		if (flow_id != RPS_FLOW_ID_INVALID &&
+		    expire_one(efx, flow_id, index)) {
 			netif_info(efx, rx_status, efx->net_dev,
 				   "expired filter %d [flow %u]\n",
 				   index, flow_id);
+			efx->rps_flow_id[index] = RPS_FLOW_ID_INVALID;
+		}
 		if (++index == size)
 			index = 0;
 	}

@@ -165,6 +165,7 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #define CI_ALIGN(x) __attribute__ ((aligned (x)))
 
 #define CI_PRINTF_LIKE(a,b) __attribute__((format(printf,a,b)))
+#define CI_UNUSED __attribute__((__unused__))
 
 
 /* Compiler barrier: prevent compiler from reordering.  (Does nothing to

@@ -659,6 +659,10 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     u = s->timestamping_flags;
     goto u_out;
 
+  case SO_REUSEPORT:
+    u = !!(s->s_flags & CI_SOCK_FLAG_REUSEPORT);
+    goto u_out;
+
   default: /* Unexpected & known invalid options end up here */
     goto fail_noopt;
   }
@@ -1139,16 +1143,75 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPNS;
     break;
 
+  case SO_REUSEPORT:
+    if( (rc = opt_not_ok(optval, optlen, unsigned)) )
+      goto fail_inval;
+    if( *(unsigned*) optval )
+      s->s_flags |= CI_SOCK_FLAG_REUSEPORT;
+    else
+      s->s_flags &= ~CI_SOCK_FLAG_REUSEPORT;
+    break;
+
   case ONLOAD_SO_TIMESTAMPING:
     if( (rc = opt_not_ok(optval, optlen, unsigned)) )
       goto fail_inval;
     v = ci_get_optval(optval, optlen);
-    if( v & ~ONLOAD_SOF_TIMESTAMPING_MASK ) {
-      rc = -EINVAL;
+    rc = -EINVAL;
+    if( v & ~(ONLOAD_SOF_TIMESTAMPING_MASK |
+              ONLOAD_SOF_TIMESTAMPING_STREAM) )
       goto fail_inval;
+    if( (v & ONLOAD_SOF_TIMESTAMPING_STREAM) &&
+        ( ! (s->b.state & CI_TCP_STATE_TCP) ||
+          ! (v & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE) ) )
+      goto fail_inval;
+
+    if( (v & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE) ) {
+      int intf_i;
+      int some_good = 0;
+
+      for( intf_i = 1; intf_i < oo_stack_intf_max(netif); ++intf_i ) {
+        if( netif->state->nic[intf_i].oo_vi_flags &
+            OO_VI_FLAGS_TX_HW_TS_EN )
+          some_good = 1;
+        else
+          LOG_U(log("WARNING: Request for SOF_TIMESTAMPING_TX_HARDWARE when "
+                    "TX timestamps are off on the network interface "
+                    "with ifindex=%d.  "
+                    "Try setting EF_TX_TIMESTAMPING.",
+                    ci_netif_intf_i_to_base_ifindex(netif, intf_i)));
+      }
+      if( ! some_good )
+        log("WARNING: Request for SOF_TIMESTAMPING_TX_HARDWARE when "
+            "TX timestamps are off for ALL Onload network interfaces.  "
+            "Try setting EF_TX_TIMESTAMPING.");
     }
+    if( (v & ONLOAD_SOF_TIMESTAMPING_RX_HARDWARE) ) {
+      int intf_i;
+      int some_good = 0;
+
+      for( intf_i = 1; intf_i < oo_stack_intf_max(netif); ++intf_i ) {
+        if( netif->state->nic[intf_i].oo_vi_flags &
+            OO_VI_FLAGS_RX_HW_TS_EN )
+          some_good = 1;
+        else
+          LOG_U(log("WARNING: Request for SOF_TIMESTAMPING_RX_HARDWARE when "
+                    "RX timestamps are off on the network interface "
+                    "with ifindex=%d.  "
+                    "Try setting EF_RX_TIMESTAMPING.",
+                    ci_netif_intf_i_to_base_ifindex(netif, intf_i)));
+      }
+      if( ! some_good )
+        log("WARNING: Request for SOF_TIMESTAMPING_RX_HARDWARE when "
+            "RX timestamps are off for ALL Onload network interfaces.  "
+            "Try setting EF_RX_TIMESTAMPING.");
+    }
+
+    rc = 0;
     s->timestamping_flags = v;
-    if( v )
+
+    /* cmsg_flags is used for RX path only.  Set a flags in it: */
+    if( v & (ONLOAD_SOF_TIMESTAMPING_RX_HARDWARE |
+             ONLOAD_SOF_TIMESTAMPING_RX_SOFTWARE) )
       s->cmsg_flags |= CI_IP_CMSG_TIMESTAMPING;
     else
       s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPING;
@@ -1177,6 +1240,16 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
 
  fail_other:
   RET_WITH_ERRNO(-rc);
+}
+
+
+int ci_opt_is_setting_reuseport(int level, int optname, const void* optval,
+                                socklen_t optlen)
+{
+  if( level == SOL_SOCKET && optname == SO_REUSEPORT &&
+      opt_ok(optval, optlen, unsigned) && *(unsigned*)optval == 1 )
+    return 1;
+  return 0;
 }
 
 

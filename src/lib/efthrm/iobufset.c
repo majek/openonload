@@ -238,14 +238,23 @@ out:
   return rc;
 }
 
+#ifdef CLONE_NEWIPC
+static void oo_bufpage_huge_free(struct oo_buffer_pages *p);
+
+static void oo_bufpage_huge_free_work(struct work_struct *data)
+{
+  oo_bufpage_huge_free(container_of(data, struct oo_buffer_pages, wi));
+}
+#endif
+
 static void oo_bufpage_huge_free(struct oo_buffer_pages *p)
 {
   ci_assert(p->shmid >= 0);
   ci_assert(current);
 #ifdef CLONE_NEWIPC
   if( current->nsproxy == NULL ) {
-    ci_workitem_init(&p->wi, (CI_WITEM_ROUTINE)oo_bufpage_huge_free, p);
-    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &p->wi);
+    INIT_WORK(&p->wi, oo_bufpage_huge_free_work);
+    queue_work(CI_GLOBAL_WORKQUEUE, &p->wi);
   }
   else if( CI_UNLIKELY( current->nsproxy->ipc_ns != p->ipc_ns ) ) {
     /* Ideally, we'd like to call switch_task_namespaces() to get old
@@ -501,7 +510,6 @@ oo_iobufset_resource_alloc(struct oo_buffer_pages * pages, struct efrm_pd *pd,
   oo_atomic_set(&iobrs->ref_count, 1);
   iobrs->pd = pd;
   iobrs->pages = pages;
-  iobrs->buf_tbl_alloc.bta_blocks = NULL;
 
   rc = efrm_pd_dma_map(iobrs->pd, pages->n_bufs,
                        compound_order(pages->pages[0]),

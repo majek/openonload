@@ -159,6 +159,10 @@ typedef struct {
 *************************** Packet buffers ***************************
 *********************************************************************/
 
+/*! Indicates whether timetsamp is taken when adapter clock has sync with ptp
+ * To be tested tested against *hw_stamp.tv_nsec */
+#define CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC 1
+
 /*!
 ** ci_ip_pkt_fmt_prefix
 **
@@ -195,6 +199,7 @@ typedef union {
     ci_uint32         end_seq;
     ci_uint32         start_seq;
     oo_pkt_p          block_end;     /* end of the current (un)sacked block */
+    struct oo_timespec first_tx_hw_stamp; /* Timestamp of the first transmit */
     ci_user_ptr_t     next CI_ALIGN(8);   /* for ci_tcp_sendmsg() local use only! */
   } tcp_tx CI_ALIGN(8);
   struct {
@@ -255,9 +260,17 @@ struct ci_ip_pkt_fmt_s {
   ci_int16              pio_addr;
   ci_int16              pio_order;
 
+  /*! DMA address corresponding to [dma_start] for each interface. */
+  ef_addr               dma_addr[CI_CFG_MAX_INTERFACES] CI_ALIGN(8);
+
+  ci_int32              refcount;
+
+  /*******************************************************
+   * When copying packets between stacks, we copy
+   * starting from this point */
+
   /* payload length for passing between layers */
   ci_int32              pay_len;
-  ci_int32              refcount;
 
   /* For receive packets, describes position of payload data.  For transmit
    * packets, identifies free space. 
@@ -271,6 +284,15 @@ struct ci_ip_pkt_fmt_s {
   ci_int16              intf_i;
   /* VLAN tag from packet header (RX). */
   ci_int16              vlan;
+
+  /*! UTC time we were sent according to hw */
+  struct oo_timespec    tx_hw_stamp;
+  /* Special value for tx_hw_stamp that indicates this
+   * timestamp/packet has already been consumed from the timestamp_q
+   */
+#define CI_PKT_TX_HW_STAMP_CONSUMED 0xffffffff
+  /* Next pointer for insertion in ci_sock_cmn.timestamp_q */
+  oo_pkt_p              tsq_next;
 
   union {
     struct {
@@ -288,23 +310,19 @@ struct ci_ip_pkt_fmt_s {
 #define CI_PKT_FLAG_RTQ_RETRANS    0x0004  /* pkt has been retransmitted */
 #define CI_PKT_FLAG_RTQ_SACKED     0x0008  /* pkt has been SACKed        */
 #define CI_PKT_FLAG_UDP            0x0010  /* UDP pkt                    */
-                                /* 0x0020     currently unused */
-#define CI_PKT_FLAG_MSG_CONFIRM    0x0040  /* request MSG_CONFIRM        */
-#define CI_PKT_FLAG_TX_PSH         0x0800  /* needs PSH bit setting      */
-#define CI_PKT_FLAG_TX_MORE        0x1000  /* Do not transmit the packet when
+#define CI_PKT_FLAG_MSG_CONFIRM    0x0020  /* request MSG_CONFIRM        */
+#define CI_PKT_FLAG_TX_PSH         0x0040  /* needs PSH bit setting      */
+#define CI_PKT_FLAG_TX_MORE        0x0080  /* Do not transmit the packet when
                                             * it is the last one, see
                                             * MSG_MORE */
-                                /* 0x2000     currently unused */
-#define CI_PKT_FLAG_NONB_POOL      0x4000  /* allocated from nonb-pool   */
-#define CI_PKT_FLAG_RX             0x8000  /* pkt is on RX path          */
+#define CI_PKT_FLAG_NONB_POOL      0x0100  /* allocated from nonb-pool   */
+#define CI_PKT_FLAG_RX             0x0200  /* pkt is on RX path          */
+#define CI_PKT_FLAG_TX_TIMESTAMPED 0x0400  /* pkt with a TX timestamp    */
 #define CI_PKT_FLAG_DEBUG          0xff000000u  /* reserved debug fields */
 #define CI_PKT_FLAG_TX_MASK_ALLOWED                                     \
     (CI_PKT_FLAG_DEBUG | CI_PKT_FLAG_TX_MORE | CI_PKT_FLAG_TX_PSH |     \
      CI_PKT_FLAG_NONB_POOL)
   ci_uint32             flags;
-
-  /*! DMA address corresponding to [dma_start] for each interface. */
-  ef_addr               dma_addr[CI_CFG_MAX_INTERFACES] CI_ALIGN(8);
 
   /*! Length of data from base_addr used in this buffer. */
   ci_int32              buf_len;
@@ -549,7 +567,7 @@ typedef struct {
         type name _CI_CFG_BITFIELD##bits;
 
 #include <ci/internal/opts_netif_def.h>
-    
+
     ci_boolean_t inited;
 } ci_netif_config_opts;
 
@@ -661,8 +679,8 @@ typedef struct {
 # define CI_EPLOCK_NETIF_PKT_WAKE          0x00100000
   /* need to reinitialise VIs after NIC reset */
 # define CI_EPLOCK_NETIF_RESET_STACK       0x00200000
-  /* mask for the above flags */
-# define CI_EPLOCK_NETIF_KERNEL_FLAGS      0x0f700000
+  /* mask for the above flags that must be handled before dropping lock */
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0x0f700000
   /* someone's waiting for free packet buffers */
 # define CI_EPLOCK_NETIF_IS_PKT_WAITER     0x00800000
   /* these bits are the head of a linked list of sockets */
@@ -679,12 +697,15 @@ typedef struct {
 
 #define OO_VI_FLAGS_PIO_EN 0x1
 #define OO_VI_FLAGS_RX_HW_TS_EN 0x2
+#define OO_VI_FLAGS_TX_HW_LOOPBACK_EN 0x4
+#define OO_VI_FLAGS_TX_HW_TS_EN 0x8
 
 typedef struct {
   ci_uint32             timer_quantum_ns CI_ALIGN(8);
   ci_uint32             rx_prefix_len;
   ci_int32              rx_ts_correction;
   ci_uint32             vi_flags;
+  ci_uint32             vi_out_flags;
   /* set of vi_flags that need to be accessed by onload  */
   ci_uint32             oo_vi_flags;
 #if CI_CFG_PIO
@@ -721,6 +742,8 @@ typedef struct {
   oo_pkt_p              rx_frags;
   /* Owner of EFRM PD */
   ci_uint32             pd_owner;
+  /* Timestamp of the last packet received with a hardware timestamp. */
+  struct oo_timespec    last_rx_timestamp;
 } ci_netif_state_nic_t;
 
 
@@ -764,8 +787,6 @@ struct ci_netif_state_s {
 
   ci_int8               hwport_to_intf_i[CI_CFG_MAX_REGISTER_INTERFACES];
   ci_int8               intf_i_to_hwport[CI_CFG_MAX_INTERFACES];
-  ci_int8               blacklist_intf_i[CI_CFG_MAX_BLACKLIST_INTERFACES];
-  ci_uint32             blacklist_length;
 
   /* Count of threads spinning.  Manipulated using atomics. */
   ci_uint32             n_spinners;
@@ -938,6 +959,8 @@ struct ci_netif_state_s {
   
   ci_uint32             defer_work_count;
 
+  CI_ULCONST ci_uint8   syncookie_salt[16];
+
 #if CI_CFG_STATS_NETIF
   ci_netif_stats        stats;
 #endif
@@ -1033,6 +1056,7 @@ typedef struct {
 # define CI_SB_FLAG_WAKE_RX      (1u << CI_SB_FLAG_WAKE_RX_B)      /* 0x2 */
 # define CI_SB_FLAG_TCP_POST_POLL 0x4
 # define CI_SB_FLAG_RX_DELIVERED  0x8
+# define CI_SB_FLAG_MOVED         0x10
 
   /* Atomic flags.  Manipulate only with atomic ops. */
   ci_uint32             sb_aflags;
@@ -1216,6 +1240,9 @@ struct ci_sock_cmn_s {
 #define CI_SOCK_FLAG_CONNECT_MUST_BIND 0x00004000 /* Call bind in connect() */
 #define CI_SOCK_FLAG_PMTU_DO      0x00008000   /* do PMTU discover */
 #define CI_SOCK_FLAG_ALWAYS_DF    0x00010000   /* always set DF bit in IP */
+#define CI_SOCK_FLAG_REUSEPORT    0x00020000   /* socket SO_REUSEPORT option */
+#define CI_SOCK_FLAG_REUSEPORT_LEGACY 0x00040000 /* Kernel does not support
+                                                  * SO_REUSEPORT */
 
   ci_uint32             s_aflags;
 #define CI_SOCK_AFLAG_CORK              0x01          /* TCP_CORK     */
@@ -1325,6 +1352,9 @@ struct ci_sock_cmn_s {
   ci_uint8              domain;           /*!<  PF_INET or PF_INET6 */
 
   ci_ni_dllist_link     reap_link;
+
+  ci_ip_pkt_queue       timestamp_q;
+  oo_pkt_p              timestamp_q_extract; 
 };
 
 
@@ -1647,7 +1677,8 @@ struct ci_tcp_state_s {
 # define CI_TCPT_FLAG_SACK              0x04  /* SACK RFC2018         */
 # define CI_TCPT_FLAG_ECN               0x08  /* ECN RFC3168          */
 # define CI_TCPT_FLAG_STRIPE            0x10  /* Striping             */
-# define CI_TCPT_FLAG_OPT_MASK          0x1f
+# define CI_TCPT_FLAG_SYNCOOKIE         0x20  /* Syncookie */
+# define CI_TCPT_FLAG_OPT_MASK          0x3f
   /* TCP socket state flags */
 # define CI_TCPT_FLAG_ADVANCE_NEEDED    0x80  /* used for sendfile   */
 # define CI_TCPT_FLAG_WAS_ESTAB         0x100
@@ -1909,6 +1940,11 @@ typedef struct {
   ci_uint32            n_accept_loop2_closed;
   ci_uint32            n_accept_os;
   ci_uint32            n_accept_no_fd;
+  ci_uint32            n_syncookie_syn;
+  ci_uint32            n_syncookie_ack_recv;
+  ci_uint32            n_syncookie_ack_ts_rej;
+  ci_uint32            n_syncookie_ack_hash_rej;
+  ci_uint32            n_syncookie_ack_answ;
 } ci_tcp_socket_listen_stats;
 
 
@@ -1975,7 +2011,10 @@ struct ci_tcp_socket_listen_s {
 struct oo_alien_ep {
   citp_waitable b;
   ci_uint32 stack_id;
+#define OO_STACK_ID_INVALID ((ci_uint32)(-1))
   oo_sp     sock_id;
+  ci_uint32 flags;
+#define OO_ALIEN_FLAGS_IN_EPOLL 1
 };
 
 /*!

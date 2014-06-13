@@ -176,6 +176,13 @@ typedef union {
 	struct {
 		unsigned       type       :16;
 		unsigned       q_id       :16;
+		unsigned       rq_id      :32;
+		unsigned       ts_sec     :32;
+		unsigned       ts_nsec    :32;
+	} tx_timestamp;
+	struct {
+		unsigned       type       :16;
+		unsigned       q_id       :16;
 	} rx_no_desc_trunc;
 	struct {
 		unsigned       type       :16;
@@ -200,6 +207,8 @@ enum {
 	EF_EVENT_TYPE_SW,
 	/** Event queue overflow. */
 	EF_EVENT_TYPE_OFLOW,
+	/** TX timestamp event. */
+	EF_EVENT_TYPE_TX_WITH_TIMESTAMP,
 };
 
 #define EF_EVENT_RX_BYTES(e)    ((e).rx.len)
@@ -231,8 +240,19 @@ enum {
 	EF_EVENT_RX_DISCARD_OTHER,
 };
 
-#define EF_EVENT_TX_ERROR_Q_ID(e)    ((e).tx_error.q_id)
-#define EF_EVENT_TX_ERROR_TYPE(e)    ((e).tx_error.subtype)
+#define EF_EVENT_TX_ERROR_Q_ID(e)              ((e).tx_error.q_id)
+#define EF_EVENT_TX_ERROR_TYPE(e)              ((e).tx_error.subtype)
+#define EF_EVENT_TX_WITH_TIMESTAMP_Q_ID(e)     ((e).tx_timestamp.q_id)
+/* Use to retrieve the dma_id used when pkt was transmitted. */
+#define EF_EVENT_TX_WITH_TIMESTAMP_RQ_ID(e)    ((e).tx_timestamp.rq_id)
+#define EF_EVENT_TX_WITH_TIMESTAMP_SEC(e)      ((e).tx_timestamp.ts_sec)
+#define EF_EVENT_TX_WITH_TIMESTAMP_NSEC(e)     \
+	((e).tx_timestamp.ts_nsec)
+#define EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(e) ((e).tx_timestamp.ts_nsec & 3)
+
+#define EF_VI_SYNC_FLAG_CLOCK_SET 1
+#define EF_VI_SYNC_FLAG_CLOCK_IN_SYNC 2
+
 enum {
 	EF_EVENT_TX_ERROR_RIGHTS,
 	EF_EVENT_TX_ERROR_OFLOW,
@@ -255,7 +275,8 @@ typedef struct {
 	ef_eventq_ptr	   evq_ptr;
 	unsigned	   sync_timestamp_major;
 	unsigned	   sync_timestamp_minor;
-	unsigned	   sync_timestamp_synchronised;
+	unsigned	   sync_timestamp_synchronised; /* with adapter */
+	unsigned	   sync_flags;
 } ef_eventq_state;
 
 
@@ -295,13 +316,19 @@ enum ef_vi_flags {
 	EF_VI_TX_PUSH_DISABLE   = 0x4000,
 	EF_VI_TX_PUSH_ALWAYS    = 0x8000,             /* ef10 only */
 	EF_VI_RX_TIMESTAMPS     = 0x10000,            /* ef10 only */
+	EF_VI_TX_TIMESTAMPS     = 0x20000,            /* ef10 only */
+	EF_VI_TX_LOOPBACK       = 0x40000,            /* ef10 only */
 };
 
+enum ef_vi_out_flags {
+	EF_VI_OUT_CLOCK_SYNC_STATUS = 0x1,            /* ef10 only */
+};
 
 typedef struct {
 	uint32_t  previous;
 	uint32_t  added;
 	uint32_t  removed;
+	uint32_t  ts_nsec;
 } ef_vi_txq_state;
 
 typedef struct {
@@ -389,6 +416,7 @@ typedef struct ef_vi {
 	ef_vi_rxq                     vi_rxq;
 	ef_vi_state*                  ep_state;
 	enum ef_vi_flags              vi_flags;
+	enum ef_vi_out_flags          vi_out_flags;
 	ef_vi_stats*		      vi_stats;
 
 	struct ef_vi*		      vi_qs[EF_VI_MAX_QS];
@@ -726,6 +754,9 @@ extern int ef_vi_receive_query_layout(ef_vi* vi,
 
 
  /*! Retrieve the UTC timestamp associated with a received packet.
+  * 
+  * Use of this function is now deprecated, 
+  * use ef_vi_receive_get_timestamp_with_sync_flags instead.
   *
   * Returns 0 on success, or -1 if a timestamp could not be retrieved.
   *
@@ -741,6 +772,42 @@ extern int ef_vi_receive_query_layout(ef_vi* vi,
   */
 extern int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 				       struct timespec* ts_out);
+
+
+ /*! Retrieve the UTC timestamp associated with a received packet as well as
+  * clock sync status flags.
+  *
+  * Returns 0 on success filling ts_out and flags_out fields. flags_out contains
+  * the following flags:
+  *
+  * In case of success these flags are present:
+  * - EF_VI_SYNC_FLAG_CLOCK_SET
+  *   indicates whether adapter clock has ever been set (in sync with system)
+  * - EF_VI_SYNC_FLAG_CLOCK_IN_SYNC
+  *   indicates whether adapter clock is in sync with external clock (ptp)
+  * 
+  * In case of error the function will return one of the following values:
+  * - ENOMSG - synchronization with adapter has not been achieved yet.
+  *            (It may time short after vi is created before it is achieved).
+  * - ENODATA - packet has arrived without timestamp (e.g. a HW multicast
+  *             loopback packet)
+  * - EL2NSYNC - sync with adapter has been lost
+  *
+  * This function must be called after retrieving the associated RX event
+  * via ef_eventq_poll(), and before calling ef_eventq_poll() again.
+  *
+  * If the VI does not have RX timestamps enabled then this function may
+  * fail, or it may return an invalid timestamp.
+  *
+  * This function will also fail if the VI has not yet synchronised with
+  * the adapter clock.  This can take from a few hundred milliseconds up to
+  * several seconds from when the vi is allocated.
+  */
+extern int
+ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi,
+					    const void* pkt,
+					    struct timespec* ts_out,
+					    unsigned* flags_out);
 
 
 /**********************************************************************

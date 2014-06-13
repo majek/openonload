@@ -345,7 +345,8 @@ int main(int argc, char* argv[])
 
   ci_app_getopt("[stack-index]", &argc, argv, cfg_opts, N_CFG_OPTS);
   --argc; ++argv;
-  CI_TRY(libstack_init(NULL));
+  if( libstack_init(NULL) != 0 )
+    return -1;
 
   /* Special case for onload_stackdump called with no arguments 
    * - just list stacks and pids and return

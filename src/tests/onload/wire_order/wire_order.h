@@ -13,20 +13,23 @@
 ** GNU General Public License for more details.
 */
 
-/****************************************************************************
- * Driver for Solarflare network controllers and boards
- * Copyright 2007 Solarflare Communications Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published
- * by the Free Software Foundation, incorporated herein by reference.
- */
+#ifndef WIRE_ORDER_H
+#define WIRE_ORDER_H
 
-#ifndef EFX_IDLE_H
-#define EFX_IDLE_H
+/* Default port the server runs on */
+#define DEFAULT_PORT              2048
 
-extern int efx_idle_init(void);
-extern void efx_idle_fini(void);
-extern int efx_idle_enhance(void);
+/* Default size of the listen queue */
+#define DEFAULT_LISTEN_BACKLOG    100
 
-#endif /* EFX_IDLE_H */
+/* Default number of events to request in onload_ordered_epoll_wait() */
+#define DEFAULT_MAX_EPOLL_EVENTS  10
+
+/* Flags for configuring the server setup. */
+#define WIRE_ORDER_CFG_FLAGS_UDP 1
+
+#define WIRE_ORDER_CFG_LEN 8
+#define WIRE_ORDER_CFG_FLAGS_OFST 0
+#define WIRE_ORDER_CFG_N_SOCKS_OFST 4
+
+#endif /* WIRE_ORDER_H */

@@ -70,7 +70,7 @@ extern int  efrm_filter_insert(struct efrm_client *,
 			       bool replace_equal);
 extern void efrm_filter_remove(struct efrm_client *, int filter_id);
 extern void efrm_filter_redirect(struct efrm_client *,
-				 int filter_id, int rxq_i);
+				 int filter_id, int rxq_i, int stack_id);
 extern int efrm_filter_block_kernel(struct efrm_client *client, int flags,
                                     bool block);
 

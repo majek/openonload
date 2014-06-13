@@ -70,6 +70,7 @@ extern struct file_operations linux_tcp_helper_fops_pipe_writer;
 #if CI_CFG_USERSPACE_EPOLL
 extern struct file_operations oo_epoll_fops;
 #endif
+extern struct file_operations linux_tcp_helper_fops_passthrough;
 
 /*--------------------------------------------------------------------
  *

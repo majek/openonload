@@ -73,6 +73,7 @@ enum efx_filter_match_flags {
 
 /**
  * enum efx_filter_priority - priority of a hardware filter specification
+ * @EFX_FILTER_PRI_SARFS: Driver inserted performance hint
  * @EFX_FILTER_PRI_HINT: Performance hint
  * @EFX_FILTER_PRI_AUTO: Automatic filter based on device address list
  *	or hardware requirements.  This may only be used by the filter
@@ -82,7 +83,8 @@ enum efx_filter_match_flags {
  *	networking and SR-IOV)
  */
 enum efx_filter_priority {
-	EFX_FILTER_PRI_HINT = 0,
+	EFX_FILTER_PRI_SARFS = 0,
+	EFX_FILTER_PRI_HINT,
 	EFX_FILTER_PRI_AUTO,
 	EFX_FILTER_PRI_MANUAL,
 	EFX_FILTER_PRI_REQUIRED,
@@ -106,6 +108,7 @@ enum efx_filter_priority {
  *	the automatic filter in its place.
  * @EFX_FILTER_FLAG_RX: Filter is for RX
  * @EFX_FILTER_FLAG_TX: Filter is for TX
+ * @EFX_FILTER_FLAG_STACK_ID: Stack ID value for self loopback supression.
  */
 enum efx_filter_flags {
 	EFX_FILTER_FLAG_RX_RSS = 0x01,
@@ -113,6 +116,7 @@ enum efx_filter_flags {
 	EFX_FILTER_FLAG_RX_OVER_AUTO = 0x04,
 	EFX_FILTER_FLAG_RX = 0x08,
 	EFX_FILTER_FLAG_TX = 0x10,
+	EFX_FILTER_FLAG_STACK_ID = 0x20,
 };
 
 /**
@@ -123,6 +127,8 @@ enum efx_filter_flags {
  * @rss_context: RSS context to use, if %EFX_FILTER_FLAG_RX_RSS is set
  * @dmaq_id: Source/target queue index, or %EFX_FILTER_RX_DMAQ_ID_DROP for
  *	an RX drop filter
+ * @stack_id: Stack id associated with RX queue, used for
+ *	multicast loopback suppression
  * @outer_vid: Outer VLAN ID to match, if %EFX_FILTER_MATCH_OUTER_VID is set
  * @inner_vid: Inner VLAN ID to match, if %EFX_FILTER_MATCH_INNER_VID is set
  * @loc_mac: Local MAC address to match, if %EFX_FILTER_MATCH_LOC_MAC or
@@ -146,10 +152,11 @@ enum efx_filter_flags {
  * depends on which fields are matched.
  */
 struct efx_filter_spec {
-	u32	match_flags:12;
-	u32	priority:2;
-	u32	flags:6;
-	u32	dmaq_id:12;
+	u32	match_flags:16;
+	u32	priority:8;
+	u32	flags:8;
+	u32	dmaq_id:16;
+	u32	stack_id:16;
 	u32	rss_context;
 	__be16	outer_vid __aligned(4); /* allow jhash2() of match values */
 	__be16	inner_vid;
@@ -260,7 +267,7 @@ static inline int efx_filter_set_eth_local(struct efx_filter_spec *spec,
 	}
 	if (addr != NULL) {
 		spec->match_flags |= EFX_FILTER_MATCH_LOC_MAC;
-		memcpy(spec->loc_mac, addr, ETH_ALEN);
+		ether_addr_copy(spec->loc_mac, addr);
 	}
 	return 0;
 }
@@ -284,6 +291,18 @@ static inline int efx_filter_set_mc_def(struct efx_filter_spec *spec)
 	spec->match_flags |= EFX_FILTER_MATCH_LOC_MAC_IG;
 	spec->loc_mac[0] = 1;
 	return 0;
+}
+
+/**
+ * efx_filter_set_stack_id - set stack id relating to filter
+ * @spec: Specification to initialise
+ * @stack_id: ID of the stack used to suppress stack's own traffic on loopback.
+ */
+static inline void efx_filter_set_stack_id(struct efx_filter_spec *spec,
+				      unsigned stack_id)
+{
+	spec->flags |= EFX_FILTER_FLAG_STACK_ID;
+	spec->stack_id = stack_id;
 }
 
 #endif /* EFX_FILTER_H */

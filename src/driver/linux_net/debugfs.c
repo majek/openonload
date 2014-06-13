@@ -25,14 +25,7 @@
 
 #include <linux/module.h>
 #include <linux/pci.h>
-#ifndef EFX_USE_KCOMPAT
 #include <linux/debugfs.h>
-#else
-/* For out-of-tree builds we always need procfs, if only for a compatibility
- * symlink.
- */
-#include <linux/proc_fs.h>
-#endif
 #include <linux/dcache.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
@@ -44,9 +37,6 @@
 
 /* Parameter definition bound to a structure - each file has one of these */
 struct efx_debugfs_bound_param {
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_DEBUGFS)
-	struct efx_debugfs_bound_param *next;
-#endif
 	const struct efx_debugfs_parameter *param;
 	void *(*get_struct)(void *, unsigned);
 	void *ref;
@@ -56,43 +46,37 @@ struct efx_debugfs_bound_param {
 
 #ifdef EFX_USE_KCOMPAT
 
-/* EFX_USE_DEBUGFS is defined by kernel_compat.h so we can't decide whether to
- * include this earlier.
+#ifndef EFX_HAVE_DEBUGFS_CREATE_SYMLINK
+
+/* We don't absolutely need the symlinks, and we don't do anything
+ * with the returned dentry pointer except compare it to NULL and then
+ * later pass it to debugfs_remove().  So make
+ * debugfs_create_symlink() return a fake dentry and filter that out
+ * in debugfs_remove().
  */
-#ifdef EFX_USE_DEBUGFS
-#include <linux/debugfs.h>
-#endif
 
-#ifndef EFX_USE_DEBUGFS
+static struct dentry efx_debugfs_dummy_dentry;
 
-#ifdef EFX_HAVE_PROCFS_DELETED
-static atomic_t efx_procfs_refcnt = ATOMIC_INIT(0);
-static DECLARE_WAIT_QUEUE_HEAD(efx_procfs_wq);
-#endif
-
-static void efx_debugfs_remove(struct proc_dir_entry *entry)
+static struct dentry *
+efx_debugfs_create_symlink(const char *name, struct dentry *old_dentry,
+			   const char *dest)
 {
-	struct efx_debugfs_bound_param *binding, *next;
+	return &efx_debugfs_dummy_dentry;
+}
+#define debugfs_create_symlink efx_debugfs_create_symlink
 
-	if (!entry)
-		return;
-	remove_proc_entry(entry->name, entry->parent);
-#ifdef EFX_HAVE_PROCFS_DELETED
-	wait_event(efx_procfs_wq, !atomic_read(&efx_procfs_refcnt));
-#endif
-	if (S_ISDIR(entry->mode)) {
-		for (binding = entry->data; binding != NULL; binding = next) {
-			next = binding->next;
-			kfree(binding);
-		}
-	}
+static void efx_debugfs_remove(struct dentry *dentry)
+{
+	if (dentry != &efx_debugfs_dummy_dentry)
+		debugfs_remove(dentry);
 }
 #define debugfs_remove efx_debugfs_remove
 
-#define debugfs_create_dir proc_mkdir
-#define debugfs_create_symlink proc_symlink
+#endif
 
-#endif /* !EFX_USE_DEBUGFS */
+#ifdef EFX_HAVE_INODE_U_GENERIC_IP
+#define i_private u.generic_ip
+#endif
 
 #endif /* EFX_USE_KCOMPAT */
 
@@ -102,15 +86,13 @@ static void efx_debugfs_remove(struct proc_dir_entry *entry)
 
 
 /* Top-level debug directory ([/sys/kernel]/debug/sfc) */
-static efx_debugfs_entry *efx_debug_root;
+static struct dentry *efx_debug_root;
 
 /* "cards" directory ([/sys/kernel]/debug/sfc/cards) */
-static efx_debugfs_entry *efx_debug_cards;
+static struct dentry *efx_debug_cards;
 
 
 /* Sequential file interface to bound parameters */
-
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_DEBUGFS)
 
 static int efx_debugfs_seq_show(struct seq_file *file, void *v)
 {
@@ -130,41 +112,6 @@ static int efx_debugfs_open(struct inode *inode, struct file *file)
 	return single_open(file, efx_debugfs_seq_show, inode->i_private);
 }
 
-#else /* EFX_USE_KCOMPAT && !EFX_USE_DEBUGFS */
-
-static int efx_debugfs_seq_show(struct seq_file *file, void *v)
-{
-	struct proc_dir_entry *entry = file->private;
-	struct efx_debugfs_bound_param *binding = entry->data;
-	void *structure;
-	int rc;
-
-	if (!binding)
-		return -EIO;
-#ifdef EFX_HAVE_PROCFS_DELETED
-	if (entry->deleted)
-		return -EIO;
-	atomic_inc(&efx_procfs_refcnt);
-#endif
-	rtnl_lock();
-	structure = binding->get_struct(binding->ref, binding->index);
-	rc = binding->param->reader(file, structure + binding->param->offset);
-	rtnl_unlock();
-#ifdef EFX_HAVE_PROCFS_DELETED
-	if (atomic_dec_and_test(&efx_procfs_refcnt))
-		wake_up(&efx_procfs_wq);
-#endif
-
-	return rc;
-}
-
-static int efx_debugfs_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, efx_debugfs_seq_show, PROC_I(inode)->pde);
-}
-
-#endif /* !EFX_USE_KCOMPAT || EFX_USE_DEBUGFS */
-
 
 static struct file_operations efx_debugfs_file_ops = {
 	.owner   = THIS_MODULE,
@@ -175,8 +122,6 @@ static struct file_operations efx_debugfs_file_ops = {
 };
 
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_DEBUGFS)
-
 /**
  * efx_fini_debugfs_child - remove a named child of a debugfs directory
  * @dir:		Directory
@@ -184,10 +129,10 @@ static struct file_operations efx_debugfs_file_ops = {
  *
  * This removes the named child from the directory, if it exists.
  */
-void efx_fini_debugfs_child(efx_debugfs_entry *dir, const char *name)
+void efx_fini_debugfs_child(struct dentry *dir, const char *name)
 {
 	struct qstr child_name;
-	efx_debugfs_entry *child;
+	struct dentry *child;
 
 	child_name.len = strlen(name);
 	child_name.name = name;
@@ -202,18 +147,6 @@ void efx_fini_debugfs_child(efx_debugfs_entry *dir, const char *name)
 	}
 }
 
-#else /* EFX_USE_KCOMPAT && !EFX_USE_DEBUGFS */
-
-void efx_fini_debugfs_child(struct proc_dir_entry *dir, const char *name)
-{
-	remove_proc_entry(name, dir);
-#ifdef EFX_HAVE_PROCFS_DELETED
-	wait_event(efx_procfs_wq, !atomic_read(&efx_procfs_refcnt));
-#endif
-}
-
-#endif /* !EFX_USE_KCOMPAT || EFX_USE_DEBUGFS */
-
 /*
  * Remove a debugfs directory.
  *
@@ -221,7 +154,7 @@ void efx_fini_debugfs_child(struct proc_dir_entry *dir, const char *name)
  * directory, and the directory itself.  It does not do any recursion
  * to subdirectories.
  */
-static void efx_fini_debugfs_dir(efx_debugfs_entry *dir,
+static void efx_fini_debugfs_dir(struct dentry *dir,
 				 struct efx_debugfs_parameter *params,
 				 const char *const *symlink_names)
 {
@@ -345,7 +278,7 @@ int efx_debugfs_read_string(struct seq_file *file, void *data)
  * negative error code or 0 on success.
  */
 static int
-efx_init_debugfs_files(efx_debugfs_entry *parent,
+efx_init_debugfs_files(struct dentry *parent,
 		       struct efx_debugfs_parameter *params, u64 ignore,
 		       void *(*get_struct)(void *, unsigned),
 		       void *ref, unsigned struct_index)
@@ -354,7 +287,7 @@ efx_init_debugfs_files(efx_debugfs_entry *parent,
 	unsigned int pos;
 
 	for (pos = 0; params[pos].name; pos++) {
-		efx_debugfs_entry *entry;
+		struct dentry *entry;
 
 		if ((1ULL << pos) & ignore)
 			continue;
@@ -367,23 +300,8 @@ efx_init_debugfs_files(efx_debugfs_entry *parent,
 		binding->ref = ref;
 		binding->index = struct_index;
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_DEBUGFS)
 		entry = debugfs_create_file(params[pos].name, S_IRUGO, parent,
 					    binding, &efx_debugfs_file_ops);
-#else
-		entry = create_proc_entry(params[pos].name, S_IRUGO, parent);
-		if (entry) {
-			entry->data = binding;
-			smp_wmb();
-			entry->proc_fops = &efx_debugfs_file_ops;
-
-			/* Add binding to parent's list so it can be
-			 * freed when the parent is removed.
-			 */
-			binding->next = parent->data;
-			parent->data = binding;
-		}
-#endif
 		if (!entry) {
 			kfree(binding);
 			goto err;
@@ -527,7 +445,7 @@ int efx_extend_debugfs_port(struct efx_nic *efx,
 void efx_trim_debugfs_port(struct efx_nic *efx,
 			   struct efx_debugfs_parameter *params)
 {
-	efx_debugfs_entry *dir = efx->debug_port_dir;
+	struct dentry *dir = efx->debug_port_dir;
 
 	if (!WARN_ON(dir == NULL)) {
 		struct efx_debugfs_parameter *field;
@@ -731,7 +649,6 @@ static struct efx_debugfs_parameter efx_debugfs_channel_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_channel, irq_moderation),
 	EFX_UINT_PARAMETER(struct efx_channel, eventq_read_ptr),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_tobe_disc),
-	EFX_UINT_PARAMETER(struct efx_channel, n_rx_ip_frag),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_ip_hdr_chksum_err),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_tcp_udp_chksum_err),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_eth_crc_err),
@@ -841,6 +758,13 @@ static int efx_nic_debugfs_read_desc(struct seq_file *file, void *data)
 	return seq_printf(file, "%s %s board\n", rev_name, efx->phy_name);
 }
 
+static int efx_nic_debugfs_read_name(struct seq_file *file, void *data)
+{
+	struct efx_nic *efx = data;
+
+	return seq_printf(file, "%s\n", efx->name);
+}
+
 /* Per-NIC parameters */
 static struct efx_debugfs_parameter efx_debugfs_nic_parameters[] = {
 	EFX_INT_PARAMETER(struct efx_nic, legacy_irq),
@@ -857,6 +781,9 @@ static struct efx_debugfs_parameter efx_debugfs_nic_parameters[] = {
 	{.name = "hardware_desc",
 	 .offset = 0,
 	 .reader = efx_nic_debugfs_read_desc},
+	{.name = "name",
+	 .offset = 0,
+	 .reader = efx_nic_debugfs_read_name},
 	{NULL},
 };
 
@@ -1019,11 +946,7 @@ void efx_fini_debugfs_nic(struct efx_nic *efx)
 int efx_init_debugfs(void)
 {
 	/* Create top-level directory */
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_DEBUGFS)
 	efx_debug_root = debugfs_create_dir("sfc", NULL);
-#else
-	efx_debug_root = proc_mkdir("driver/sfc", NULL);
-#endif
 	if (!efx_debug_root)
 		goto err;
 
@@ -1032,11 +955,6 @@ int efx_init_debugfs(void)
 	if (!efx_debug_cards)
 		goto err;
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_DEBUGFS)
-	/* Create compatibility sym-link */
-	if (!proc_symlink("driver/sfc", NULL, "/sys/kernel/debug/sfc"))
-		goto err;
-#endif
 	return 0;
 
  err:
@@ -1051,9 +969,6 @@ int efx_init_debugfs(void)
  */
 void efx_fini_debugfs(void)
 {
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_DEBUGFS)
-	remove_proc_entry("driver/sfc", NULL);
-#endif
 	debugfs_remove(efx_debug_cards);
 	efx_debug_cards = NULL;
 	debugfs_remove(efx_debug_root);

@@ -368,6 +368,8 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_in_segs)
 #define CI_TCP_STATS_INC_OUT_SEGS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_out_segs)
+#define CI_TCP_STATS_DEC_OUT_SEGS( netif ) \
+      __CI_TCP_COUNT_STATS_DEC( (netif), tcp_out_segs)
 #define CI_TCP_STATS_INC_RETRAN_SEGS( netif ) \
       __CI_TCP_COUNT_STATS_INC( (netif), tcp_retran_segs)
 #define CI_TCP_STATS_INC_IN_ERRS( netif ) \

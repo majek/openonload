@@ -35,7 +35,7 @@ usage() {
 
 
 have_64bit_userland() {
-  echo | gcc -m64 -x c -c -o /dev/null - >/dev/null 2>&1
+  mmaketool --userarch | grep 64 >/dev/null 2>&1
 }
 
 is_ppc () {

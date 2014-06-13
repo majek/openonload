@@ -98,10 +98,6 @@
 	((width) == 32 ? ~((u32) 0) :		\
 	 (((((u32) 1) << (width))) - 1))
 
-typedef struct {
-	__le64 b, a;
-} efx_le_128  __attribute__((aligned(16)));
-
 /* A doubleword (i.e. 4 byte) datatype - little-endian in HW */
 typedef union efx_dword {
 	__le32 u32[1];
@@ -116,7 +112,6 @@ typedef union efx_qword {
 
 /* An octword (eight-word, i.e. 16 byte) datatype - little-endian in HW */
 typedef union efx_oword {
-	efx_le_128 u128;
 	__le64 u64[2];
 	efx_qword_t qword[2];
 	__le32 u32[4];

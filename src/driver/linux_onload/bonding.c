@@ -30,9 +30,9 @@
 #include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/netdevice.h>
+#include <linux/workqueue.h>
 
 #include <ci/driver/internal.h>
-#include <ci/driver/efab/workqueue.h>
 #include <ci/efrm/efrm_client.h>
 #include <onload/tcp_driver.h>
 #include <onload/nic.h>
@@ -110,8 +110,16 @@ static int ci_bonding_start_sysfs_read(char *filename,
 static int ci_bonding_do_sysfs_read(struct ci_bonding_sysfs_read* state, 
                                     char* data, int count)
 {
-  return state->f->f_op->read(state->f, (__user char *)data, count,
+  int rc;
+
+  do {
+    rc = state->f->f_op->read(state->f, (__user char *)data, count,
                               &state->f->f_pos);
+    /* See linux/drivers/net/bonding/bond_sysfs.c:
+     * if it can't get rtnl_lock, it exits with -ERESTARTNOINTR.
+     * I've never seen -ERESTARTSYS, but let's add it here. */
+  } while( rc == -ERESTARTNOINTR || rc == -ERESTARTSYS );
+  return rc;
 }
 
 
@@ -198,7 +206,7 @@ static int ci_bonding_get_mode(char *bond_name, int *mode)
   if ( buffer == NULL )
     return -ENOMEM;
 
-  len = strlen(bond_name) + SYSFS_BASE_STRLEN + SYSFS_MODE_LEAF_STRLEN;
+  len = strlen(bond_name) + SYSFS_BASE_STRLEN + SYSFS_MODE_LEAF_STRLEN + 1;
   filename = kmalloc(len, GFP_KERNEL);
   if ( filename == NULL ) {
     kfree(buffer);
@@ -253,7 +261,8 @@ static int ci_bonding_get_hash_policy(char *bond_name, int *policy)
   if ( buffer == NULL )
     return -ENOMEM;
 
-  len = strlen(bond_name) + SYSFS_BASE_STRLEN + SYSFS_HASHPOLICY_LEAF_STRLEN;
+  len = strlen(bond_name) +
+    SYSFS_BASE_STRLEN + SYSFS_HASHPOLICY_LEAF_STRLEN + 1;
   filename = kmalloc(len, GFP_KERNEL);
   if ( filename == NULL )
     return -ENOMEM;
@@ -307,7 +316,8 @@ static int ci_bonding_get_ab_active_slave(char *bond_name, char *active,
   if ( buffer == NULL )
     return -ENOMEM;
 
-  len = strlen(bond_name) + SYSFS_BASE_STRLEN + SYSFS_ACTIVESLAVE_LEAF_STRLEN;
+  len = strlen(bond_name) +
+    SYSFS_BASE_STRLEN + SYSFS_ACTIVESLAVE_LEAF_STRLEN + 1;
   filename = kmalloc(len, GFP_KERNEL);
   if ( filename == NULL ) {
     kfree(buffer);
@@ -594,7 +604,7 @@ static int ci_bonding_get_lacp_active_slave(char* bond_name, char* slave_name)
   if ( buffer == NULL )
     return -ENOMEM;
 
-  len = strlen(bond_name) + PROC_NET_BONDING_STRLEN;
+  len = strlen(bond_name) + PROC_NET_BONDING_STRLEN + 1;
   filename = kmalloc(len, GFP_KERNEL);
   if ( filename == NULL ) {
     kfree(buffer);
@@ -1213,7 +1223,7 @@ static void ci_bonding_process_master(struct ci_bonding_ifname *master)
 }
 
 
-static void ci_bonding_workitem_fn(void* context)
+static void ci_bonding_workitem_fn(struct work_struct *data)
 {
   ci_dllist masters;
   struct ci_bonding_ifname* master;
@@ -1244,7 +1254,7 @@ static void ci_bonding_workitem_fn(void* context)
 
 atomic_t timer_running;
 static struct timer_list bonding_timer;
-ci_workitem_t bonding_workitem;
+struct work_struct bonding_workitem;
 
 static int timer_period;
 static int timer_occurences;
@@ -1269,7 +1279,7 @@ static void ci_bonding_timer_fn(unsigned long l)
 
   last_timer_jiffies = jiffies;
 
-  ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &bonding_workitem);
+  queue_work(CI_GLOBAL_WORKQUEUE, &bonding_workitem);
 
   mod_timer(&bonding_timer, jiffies + ci_bonding_get_timer_period());
 }
@@ -1292,7 +1302,7 @@ void ci_bonding_set_timer_period(int period, int occurences)
 int ci_bonding_init(void)
 {
 #if CI_CFG_TEAMING
-  ci_workitem_init(&bonding_workitem, ci_bonding_workitem_fn, NULL);
+  INIT_WORK(&bonding_workitem, ci_bonding_workitem_fn);
 
   init_timer(&bonding_timer);
   bonding_timer.function = &ci_bonding_timer_fn;
@@ -1310,9 +1320,9 @@ void ci_bonding_fini(void)
 #if CI_CFG_TEAMING
   atomic_set(&timer_running, 0);
   /* See Bug30934 for why two flushes are needed */
-  ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE);
+  flush_workqueue(CI_GLOBAL_WORKQUEUE);
   del_timer_sync(&bonding_timer);
-  ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE);
+  flush_workqueue(CI_GLOBAL_WORKQUEUE);
 #endif
   return;
 }

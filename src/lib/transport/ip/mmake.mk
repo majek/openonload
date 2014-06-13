@@ -46,7 +46,8 @@ LIB_SRCS	:=		\
 		os_sock.c	\
 		pkt_filler.c	\
 		pio_buddy.c	\
-		pipe.c
+		pipe.c		\
+		tcp_syncookie.c
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\

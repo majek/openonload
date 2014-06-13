@@ -27,7 +27,9 @@
  */
 
 #include <linux/slab.h>
+#ifdef CONFIG_SFC_DEBUGFS
 #include <linux/seq_file.h>
+#endif
 #include "efx.h"
 #include "debugfs.h"
 #include "phy.h"
@@ -158,7 +160,6 @@ static void efx_mcdi_phy_stats_fini(struct efx_nic *efx)
 
 #endif
 
-
 static int
 efx_mcdi_get_phy_cfg(struct efx_nic *efx, struct efx_mcdi_phy_data *cfg)
 {
@@ -235,8 +236,7 @@ static int efx_mcdi_loopback_modes(struct efx_nic *efx, u64 *loopback_modes)
 		goto fail;
 	}
 
-	*loopback_modes = MCDI_QWORD(outbuf,
-				     GET_LOOPBACK_MODES_OUT_SUGGESTED);
+	*loopback_modes = MCDI_QWORD(outbuf, GET_LOOPBACK_MODES_OUT_SUGGESTED);
 
 	return 0;
 
@@ -309,15 +309,20 @@ static u32 mcdi_to_ethtool_cap(u32 media, u32 cap)
 			result |= SUPPORTED_1000baseKX_Full;
 		if (cap & (1 << MC_CMD_PHY_CAP_10000FDX_LBN))
 			result |= SUPPORTED_10000baseKX4_Full;
+		if (cap & (1 << MC_CMD_PHY_CAP_40000FDX_LBN))
+			result |= SUPPORTED_40000baseKR4_Full;
 		break;
 
 	case MC_CMD_MEDIA_XFP:
 	case MC_CMD_MEDIA_SFP_PLUS:
+	case MC_CMD_MEDIA_QSFP_PLUS:
 		result |= SUPPORTED_FIBRE;
 		if (cap & (1 << MC_CMD_PHY_CAP_1000FDX_LBN))
 			result |= SUPPORTED_1000baseT_Full;
 		if (cap & (1 << MC_CMD_PHY_CAP_10000FDX_LBN))
 			result |= SUPPORTED_10000baseT_Full;
+		if (cap & (1 << MC_CMD_PHY_CAP_40000FDX_LBN))
+			result |= SUPPORTED_40000baseCR4_Full;
 		break;
 
 	case MC_CMD_MEDIA_BASE_T:
@@ -367,6 +372,8 @@ static u32 ethtool_to_mcdi_cap(u32 cap)
 		result |= (1 << MC_CMD_PHY_CAP_1000FDX_LBN);
 	if (cap & (SUPPORTED_10000baseT_Full | SUPPORTED_10000baseKX4_Full))
 		result |= (1 << MC_CMD_PHY_CAP_10000FDX_LBN);
+	if (cap & (SUPPORTED_40000baseCR4_Full | SUPPORTED_40000baseKR4_Full))
+		result |= (1 << MC_CMD_PHY_CAP_40000FDX_LBN);
 	if (cap & SUPPORTED_Pause)
 		result |= (1 << MC_CMD_PHY_CAP_PAUSE_LBN);
 	if (cap & SUPPORTED_Asym_Pause)
@@ -415,6 +422,7 @@ static u32 mcdi_to_ethtool_media(u32 media)
 
 	case MC_CMD_MEDIA_XFP:
 	case MC_CMD_MEDIA_SFP_PLUS:
+	case MC_CMD_MEDIA_QSFP_PLUS:
 		return PORT_FIBRE;
 
 	case MC_CMD_MEDIA_BASE_T:
@@ -897,8 +905,8 @@ static const char *efx_mcdi_phy_test_name(struct efx_nic *efx,
 	return NULL;
 }
 
-#define SFP_PAGE_SIZE   128
-#define SFP_NUM_PAGES   2
+#define SFP_PAGE_SIZE	128
+#define SFP_NUM_PAGES	2
 static int efx_mcdi_phy_get_module_eeprom(struct efx_nic *efx,
 					  struct ethtool_eeprom *ee, u8 *data)
 {
@@ -940,7 +948,7 @@ static int efx_mcdi_phy_get_module_eeprom(struct efx_nic *efx,
 		/* Copy as much as we can into data */
 		payload_len -= page_off;
 		to_copy = (space_remaining < payload_len) ?
-			   space_remaining : payload_len;
+			space_remaining : payload_len;
 
 		memcpy(user_data,
 		       MCDI_PTR(outbuf, GET_PHY_MEDIA_INFO_OUT_DATA) + page_off,
@@ -1030,8 +1038,8 @@ int efx_mcdi_set_mac(struct efx_nic *efx)
 
 	BUILD_BUG_ON(MC_CMD_SET_MAC_OUT_LEN != 0);
 
-	memcpy(MCDI_PTR(cmdbytes, SET_MAC_IN_ADDR),
-	       efx->net_dev->dev_addr, ETH_ALEN);
+	ether_addr_copy(MCDI_PTR(cmdbytes, SET_MAC_IN_ADDR),
+			efx->net_dev->dev_addr);
 
 	MCDI_SET_DWORD(cmdbytes, SET_MAC_IN_MTU,
 			EFX_MAX_FRAME_LEN(efx->net_dev->mtu));

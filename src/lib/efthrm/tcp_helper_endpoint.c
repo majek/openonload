@@ -140,6 +140,12 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   int rc;
   ci_irqlock_state_t lock_flags;
 
+  laddr = sock_laddr_be32(s);
+  raddr = sock_raddr_be32(s);
+  lport = sock_lport_be16(s);
+  rport = sock_rport_be16(s);
+  protocol = sock_protocol(s);
+
   /* Grab reference to the O/S socket.  This will be consumed by
    * oof_socket_add() if it succeeds.  [from_tcp_id] identifies a listening
    * TCP socket, and is used when we're setting filters for a passively
@@ -162,12 +168,6 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
     rc = 0;
     goto set_os_port_keeper_and_out;
   }
-
-  laddr = sock_laddr_be32(s);
-  raddr = sock_raddr_be32(s);
-  lport = sock_lport_be16(s);
-  rport = sock_rport_be16(s);
-  protocol = sock_protocol(s);
 
   if( ep->oofilter.sf_local_port != NULL ) {
     /* we already have a filter; and we also have a reference of OS socket. */
@@ -226,8 +226,9 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
      * delivered to this endpoint.  Defer oof_socket_del() if needed
      * to non-atomic context.
      */
-    if( oof_socket_del_sw(efab_tcp_driver.filter_manager, &ep->oofilter) )
+    if( oof_socket_del_sw(efab_tcp_driver.filter_manager, &ep->oofilter) ) {
       tcp_helper_endpoint_queue_non_atomic(ep, OO_THR_EP_AFLAG_CLEAR_FILTERS);
+    }
     else {
       os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
       ci_assert(os_sock_ref);
@@ -244,6 +245,54 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
   return 0;
 }
 
+
+/* Move filters from one endpoint to another.
+ * This function MUST NOT clear software filters from ep_from!
+ *
+ * We support 2 cases:
+ * - closed TCP socket: no filters;
+ * - accepted TCP socket:
+ *   * ep_from has shared filter,
+ *   * ep_to gets full filter and os socket ref */
+int
+tcp_helper_endpoint_move_filters(tcp_helper_endpoint_t* ep_from,
+                                 tcp_helper_endpoint_t* ep_to)
+{
+  struct oo_file_ref* os_sock_ref;
+  int rc;
+  ci_sock_cmn* s = SP_TO_SOCK(&ep_from->thr->netif, ep_from->id);
+
+  ci_assert(!in_atomic());
+
+  if( ep_to->os_port_keeper != NULL ) {
+    ci_log("%s: non-null target port keeper", __func__);
+    ci_assert(0);
+    return -EINVAL;
+  }
+
+  if( s->b.state != CI_TCP_CLOSED && ep_from->oofilter.sf_local_port != NULL ) {
+    if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 ) {
+      LOG_E(ci_log("%s: ERROR: reuseport being set and socket not closed",
+                   __func__));
+      return -EINVAL;
+    }
+    rc = tcp_helper_endpoint_set_filters(ep_to, CI_IFID_ALL, OO_SP_NULL);
+    if( rc != 0 )
+      return rc;
+  }
+
+  os_sock_ref = oo_file_ref_xchg(&ep_from->os_port_keeper, NULL);
+  if( os_sock_ref != NULL ) {
+    struct oo_file_ref* old_ref;
+    old_ref = oo_file_ref_xchg(&ep_to->os_port_keeper, os_sock_ref);
+    ci_assert_equal(old_ref, NULL);
+    if( old_ref != NULL )
+      oo_file_ref_drop(old_ref);
+  }
+
+
+  return 0;
+}
 
 static void oof_socket_dump_fn(void* arg, oo_dump_log_fn_t log, void* log_arg)
 {

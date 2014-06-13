@@ -38,6 +38,33 @@
 #define VERB(x)
 
 
+
+
+
+oo_pkt_p ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us, 
+                                    ci_ip_pkt_fmt* pkt)
+{
+  oo_pkt_p frag_next = pkt->frag_next;
+
+  ci_sock_cmn_timestamp_q_enqueue(ni, &us->s, pkt);
+
+  /* TODO is this necessary? - mirroring ci_udp_recv_q_put() */
+  ci_wmb();
+
+  ci_netif_put_on_post_poll(ni, &us->s.b);
+  ci_udp_wake_possibly_not_in_poll(ni, us, CI_SB_FLAG_WAKE_RX);
+
+  /* 
+   * If the outgoing packet has to be fragmented, then only the first
+   * fragment is time stamped and returned to the sending socket. 
+   */
+  if( OO_PP_IS_NULL(frag_next) )
+    return OO_PP_NULL;
+  pkt->frag_next = OO_PP_NULL;
+  return frag_next;
+}
+
+
 void ci_udp_recv_q_reap(ci_netif* ni, ci_udp_recv_q* q)
 {
   while( ! OO_PP_EQ(q->head, q->extract) ) {
@@ -62,18 +89,15 @@ void ci_udp_recv_q_drop(ci_netif* ni, ci_udp_recv_q* q)
 
 int ci_udp_csum_correct(ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp)
 {
-  int ip_len, ip_paylen, udp_len;
+  int ip_len, ip_paylen;
   ci_ip4_pseudo_hdr ph;
   unsigned csum;
 
   ip_len = CI_BSWAP_BE16(oo_ip_hdr(pkt)->ip_tot_len_be16);
   ip_paylen = ip_len - sizeof(ci_ip4_hdr);
-  udp_len = CI_BSWAP_BE16(udp->udp_len_be16);
+  pkt->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16);
 
-  /* Caller should have checked this. */
-  ci_assert_ge(pkt->pf.udp.pay_len, oo_ether_hdr_size(pkt) + ip_len);
-
-  if( udp_len > ip_paylen )
+  if( pkt->pf.udp.pay_len + sizeof(ci_udp_hdr) > ip_paylen )
     return 0;
 
   if( udp->udp_check_be16 == 0 )
@@ -83,10 +107,10 @@ int ci_udp_csum_correct(ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp)
   ph.ip_daddr_be32 = oo_ip_hdr(pkt)->ip_daddr_be32;
   ph.zero = 0;
   ph.ip_protocol = IPPROTO_UDP;
-  ph.length_be16 = CI_BSWAP_BE16(udp_len);
+  ph.length_be16 = CI_BSWAP_BE16(pkt->pf.udp.pay_len);
 
   csum = ci_ip_csum_partial(0, &ph, sizeof(ph));
-  csum = ci_ip_csum_partial(csum, udp, udp_len);
+  csum = ci_ip_csum_partial(csum, udp, pkt->pf.udp.pay_len);
   csum = ci_ip_hdr_csum_finish(csum);
   return csum == 0;
 }

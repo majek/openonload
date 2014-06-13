@@ -5,13 +5,12 @@
 # Provides: openonload
 # Required-Start: $network
 # Required-Stop: 
-# Default-Start: 3 5
+# Default-Start: 2 3 4 5
 # Default-Stop: 
 ### END INIT INFO
 
 case "$1" in
   start)
-    /sbin/modprobe sfc_tune
     /sbin/modprobe onload
     /sbin/onload_tool mknod sfc_char
     /sbin/onload_tool mknod onload

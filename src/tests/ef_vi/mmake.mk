@@ -1,5 +1,5 @@
 
-TEST_APPS	:= efpingpong efforward efrss efsink efpio
+TEST_APPS	:= efpingpong efforward efrss efsink efpio eftap
 
 TARGETS		:= $(TEST_APPS:%=$(AppPattern))
 
@@ -25,3 +25,6 @@ efpingpong: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
 
 efpio: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
 efpio: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+
+eftap: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
+eftap: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)

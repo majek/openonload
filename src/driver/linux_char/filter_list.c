@@ -168,7 +168,7 @@ static int efch_filter_list_add(struct efrm_resource *rs,
   int rc;
   int block_flags = 0;
 
-  if( op->u.filter_add.replace )
+  if( op->u.filter_add.flags & CI_RSOP_FILTER_ADD_FLAG_REPLACE )
     replace = true;
 
   if( (f = ci_alloc(sizeof(*f))) == NULL )
@@ -331,6 +331,9 @@ int efch_filter_list_op_add(struct efrm_resource *rs,
   int replace;
   struct efx_filter_spec spec;
   int need_spec = ! is_op_block_kernel_only(op->op);
+
+  if( op->u.filter_add.flags & CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE )
+    efx_filter_flags |= EFX_FILTER_FLAG_TX;
 
   if( need_spec ) {
     efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,

@@ -53,10 +53,6 @@
  * EPOLL2 private file data
  *************************************************************/
 static int set_max_stacks(const char *val, struct kernel_param *kp);
-static unsigned epoll2_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
-module_param_call(epoll2_max_stacks, set_max_stacks, param_get_uint,
-                  &epoll2_max_stacks, S_IRUGO);
-__MODULE_PARM_TYPE(epoll2_max_stacks, "uint");
 static unsigned epoll_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
 module_param_call(epoll_max_stacks, set_max_stacks, param_get_uint,
                   &epoll_max_stacks, S_IRUGO);
@@ -66,12 +62,10 @@ MODULE_PARM_DESC(epoll_max_stacks,
 
 struct oo_epoll2_private {
   struct file  *kepo;
-  spinlock_t    lock;
   int           do_spin;
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
   struct list_head busy_tasks;
 #endif
-  tcp_helper_resource_t** stacks;
 };
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
 struct oo_epoll_busy_task {
@@ -97,18 +91,20 @@ struct oo_epoll1_private {
   /* kernel epoll file */
   struct file *os_file;
 
-  spinlock_t    lock;
-  tcp_helper_resource_t** stacks;
 };
 
 /*************************************************************
  * EPOLL common private file data
  *************************************************************/
-struct oo_epoll_file_private {
+struct oo_epoll_private {
   int type;
 #define OO_EPOLL_TYPE_UNKNOWN   0
 #define OO_EPOLL_TYPE_1         1
 #define OO_EPOLL_TYPE_2         2
+
+  spinlock_t    lock;
+  tcp_helper_resource_t** stacks;
+
   union {
     struct oo_epoll1_private p1;
     struct oo_epoll2_private p2;
@@ -116,31 +112,62 @@ struct oo_epoll_file_private {
 };
 
 
-static inline int oo_epoll_ctl_copy_to_kernel(struct oo_epoll_item *item_u,
-                                              ci_uint32 epoll_ctl_n,
-                                              struct oo_epoll_item *dest)
+static int oo_epoll_init_common(struct oo_epoll_private *priv)
 {
-  if( epoll_ctl_n > CI_CFG_EPOLL_MAX_POSTPONED )
-    return -EFAULT;
-  if( copy_from_user(dest, item_u,
-                     sizeof(struct oo_epoll_item) * epoll_ctl_n) )
-    return -EFAULT;
+  int size = sizeof(priv->stacks[0]) * epoll_max_stacks;
+
+  priv->stacks = kmalloc(size, GFP_KERNEL);
+  if( priv->stacks == NULL )
+    return -ENOMEM;
+  memset(priv->stacks, 0, size);
+  spin_lock_init(&priv->lock);
   return 0;
 }
 
-
-static inline void oo_epoll_warn_postpone_error(ci_uint32 ctl_n,
-                                                int fd, int i, int rc,
-                                                ci_int32 maxevents)
+static int oo_epoll_add_stack(struct oo_epoll_private* priv,
+                              tcp_helper_resource_t* fd_thr)
 {
-  if( rc && (i != ctl_n - 1 || maxevents != 0) ) {
-    ci_log("postponed epoll_ctl(fd=%d) returned error %d; ignoring",
-           fd, rc);
-    ci_log("consider disabling EF_EPOLL_CTL_FAST to get "
-           "the correct behaviour");
+  unsigned i;
+
+  /* Common case is that we already know about this stack, so make that
+   * fast.
+   */
+  for( i = 0; i < epoll_max_stacks; ++i )
+    if( priv->stacks[i] == fd_thr )
+      return 1;
+    else if(unlikely( priv->stacks[i] == NULL ))
+      break;
+
+  /* Try to add stack.  NB. May already be added by concurrent thread. */
+  spin_lock(&priv->lock);
+  for( i = 0; i < epoll_max_stacks; ++i ) {
+    if( priv->stacks[i] == fd_thr )
+      break;
+    if( priv->stacks[i] != NULL )
+      continue;
+    priv->stacks[i] = fd_thr;
+    /* We already keep ref for this thr via file,
+     * so efab_tcp_helper_k_ref_count_inc() can't fail. */
+    efab_tcp_helper_k_ref_count_inc(fd_thr);
+    break;
   }
+  spin_unlock(&priv->lock);
+  return i < epoll_max_stacks;
 }
 
+static void oo_epoll_release_common(struct oo_epoll_private* priv)
+{
+  int i;
+
+  /* Release references to all stacks */
+  for( i = 0; i < epoll_max_stacks; i++ ) {
+    if( priv->stacks[i] == NULL )
+      break;
+    efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
+    priv->stacks[i] = NULL;
+  }
+  kfree(priv->stacks);
+}
 
 /*************************************************************
  * EPOLL2-specific code
@@ -151,11 +178,6 @@ static int set_max_stacks(const char *val, struct kernel_param *kp)
   if( rc != 0 )
     return rc;
 
-  /* Backward compatibility: epoll2_max_stacks */
-  if( epoll2_max_stacks != CI_CFG_EPOLL_MAX_STACKS &&
-      epoll_max_stacks == CI_CFG_EPOLL_MAX_STACKS)
-    epoll_max_stacks = epoll2_max_stacks;
-
   /* do not accept 0 value: use default instead */
   if( epoll_max_stacks == 0 )
     epoll_max_stacks = CI_CFG_EPOLL_MAX_STACKS;
@@ -163,102 +185,29 @@ static int set_max_stacks(const char *val, struct kernel_param *kp)
   return 0;
 }
 
-static int oo_epoll2_ctor(struct oo_epoll2_private *priv, int kepfd)
+static int oo_epoll2_init(struct oo_epoll_private *priv,
+                         ci_fixed_descriptor_t kepfd)
 {
   struct file  *kepo = fget(kepfd);
-  int size = sizeof(priv->stacks[0]) * epoll_max_stacks;
+  int rc;
 
   if( kepo == NULL )
     return -EBADF;
 
-  priv->stacks = kmalloc(size, GFP_KERNEL);
-  if( priv->stacks == NULL )
-    return -ENOMEM;
-  memset(priv->stacks, 0, size);
-
-  spin_lock_init(&priv->lock);
-#ifdef OO_EPOLL_NEED_NEST_PROTECTION
-  INIT_LIST_HEAD(&priv->busy_tasks);
-#endif
-  priv->kepo = kepo;
-  return 0;
-}
-
-static int oo_epoll2_init(struct oo_epoll_file_private *priv,
-                         ci_fixed_descriptor_t kepfd)
-{
-  int rc;
-
-  rc = oo_epoll2_ctor(&priv->p.p2, (int)kepfd);
+  rc = oo_epoll_init_common(priv);
   if( rc != 0 )
     return rc;
+
+#ifdef OO_EPOLL_NEED_NEST_PROTECTION
+  INIT_LIST_HEAD(&priv->p.p2.busy_tasks);
+#endif
+  priv->p.p2.kepo = kepo;
+
   priv->type = OO_EPOLL_TYPE_2;
   return 0;
 }
 
-static int oo_epoll2_add_stack(struct oo_epoll2_private* priv,
-                              tcp_helper_resource_t* fd_thr)
-{
-  unsigned i;
-
-  /* Common case is that we already know about this stack, so make that
-   * fast.
-   */
-  for( i = 0; i < epoll_max_stacks; ++i )
-    if( priv->stacks[i] == fd_thr )
-      return 1;
-    else if(unlikely( priv->stacks[i] == NULL ))
-      break;
-
-  /* Try to add stack.  NB. May already be added by concurrent thread. */
-  spin_lock(&priv->lock);
-  for( i = 0; i < epoll_max_stacks; ++i ) {
-    if( priv->stacks[i] == fd_thr )
-      break;
-    if( priv->stacks[i] != NULL )
-      continue;
-    priv->stacks[i] = fd_thr;
-    /* We already keep ref for this thr via file,
-     * so efab_tcp_helper_k_ref_count_inc() can't fail. */
-    efab_tcp_helper_k_ref_count_inc(fd_thr);
-    break;
-  }
-  spin_unlock(&priv->lock);
-  return i < epoll_max_stacks;
-}
-static int oo_epoll1_add_stack(struct oo_epoll1_private* priv,
-                              tcp_helper_resource_t* fd_thr)
-{
-  unsigned i;
-
-  /* Common case is that we already know about this stack, so make that
-   * fast.
-   */
-  for( i = 0; i < epoll_max_stacks; ++i )
-    if( priv->stacks[i] == fd_thr )
-      return 1;
-    else if(unlikely( priv->stacks[i] == NULL ))
-      break;
-
-  /* Try to add stack.  NB. May already be added by concurrent thread. */
-  spin_lock(&priv->lock);
-  for( i = 0; i < epoll_max_stacks; ++i ) {
-    if( priv->stacks[i] == fd_thr )
-      break;
-    if( priv->stacks[i] != NULL )
-      continue;
-    priv->stacks[i] = fd_thr;
-    /* We already keep ref for this thr via file,
-     * so efab_tcp_helper_k_ref_count_inc() can't fail. */
-    efab_tcp_helper_k_ref_count_inc(fd_thr);
-    break;
-  }
-  spin_unlock(&priv->lock);
-  return i < epoll_max_stacks;
-}
-
-
-static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
+static int oo_epoll2_ctl(struct oo_epoll_private *priv, int op_kepfd,
                          int op_op, int op_fd, struct epoll_event *op_event)
 {
   tcp_helper_resource_t *fd_thr;
@@ -279,12 +228,9 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
 
   /* Check for the dead circle.
    * We should check that we are not adding ourself. */
-  {
-    struct oo_epoll_file_private *p = file->private_data;
-    if(unlikely( &p->p.p2 == priv )) {
-      fput(file);
-      return -EINVAL;
-    }
+  if(unlikely( file->private_data == priv )) {
+    fput(file);
+    return -EINVAL;
   }
 
   /* Is op->fd ours and if yes, which netif it has? */
@@ -296,14 +242,14 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
     struct oo_epoll_busy_task t;
     t.task = current;
     spin_lock(&priv->lock);
-    list_add(&t.link, &priv->busy_tasks);
+    list_add(&t.link, &priv->p.p2.busy_tasks);
     spin_unlock(&priv->lock);
 #endif
 
 #if CI_CFG_USERSPACE_PIPE
     if( ( file->f_op == &linux_tcp_helper_fops_pipe_reader ||
           file->f_op == &linux_tcp_helper_fops_pipe_writer ) )
-      priv->do_spin = 1;
+      priv->p.p2.do_spin = 1;
 #endif
     fput(file);
     rc = efab_linux_sys_epoll_ctl(op_kepfd, op_op, op_fd, op_event);
@@ -318,9 +264,9 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
   /* Onload socket here! */
   fd_thr = ((ci_private_t *)file->private_data)->thr;
   fd_sock_id = ((ci_private_t *)file->private_data)->sock_id;
-  priv->do_spin = 1;
+  priv->p.p2.do_spin = 1;
 
-  if(unlikely( ! oo_epoll2_add_stack(priv, fd_thr) )) {
+  if(unlikely( ! oo_epoll_add_stack(priv, fd_thr) )) {
     static int printed;
     if( !printed )
       ci_log("Can't add stack %d to epoll set: consider "
@@ -342,7 +288,7 @@ static int oo_epoll2_ctl(struct oo_epoll2_private *priv, int op_kepfd,
 
 /* Apply all postponed epoll_ctl and ignore the results (just print
  * a message), since there is nothing to do now. */
-static int oo_epoll2_apply_ctl(struct oo_epoll2_private *priv,
+static int oo_epoll2_apply_ctl(struct oo_epoll_private *priv,
                                struct oo_epoll2_action_arg *op)
 {
   struct oo_epoll_item postponed_k[CI_CFG_EPOLL_MAX_POSTPONED];
@@ -350,16 +296,22 @@ static int oo_epoll2_apply_ctl(struct oo_epoll2_private *priv,
   int i;
   int rc = 0;
 
-  rc = oo_epoll_ctl_copy_to_kernel(postponed_u, op->epoll_ctl_n, postponed_k);
-  if( rc != 0 )
-    return rc;
+  if( op->epoll_ctl_n > CI_CFG_EPOLL_MAX_POSTPONED )
+    return -EFAULT;
+  if( copy_from_user(postponed_k, postponed_u,
+                     sizeof(struct oo_epoll_item) * op->epoll_ctl_n) )
+    return -EFAULT;
 
   for( i = 0; i < op->epoll_ctl_n; i++ ) {
     if(  postponed_k[i].fd != -1 ) {
       rc = oo_epoll2_ctl(priv, op->kepfd, postponed_k[i].op,
                          postponed_k[i].fd, &postponed_u[i].event);
-      oo_epoll_warn_postpone_error(op->epoll_ctl_n, postponed_k[i].fd, i, rc,
-                                   op->maxevents);
+      if( rc && (i != op->epoll_ctl_n - 1 || op->maxevents != 0) ) {
+        ci_log("postponed epoll_ctl(fd=%d) returned error %d; ignoring",
+               (int)postponed_k[i].fd, rc);
+        ci_log("consider disabling EF_EPOLL_CTL_FAST to get "
+               "the correct behaviour");
+      }
     }
   }
 
@@ -377,7 +329,7 @@ static int oo_epoll2_apply_ctl(struct oo_epoll2_private *priv,
     else if( (ni = &thr->netif) || 1 )
 
 
-static void oo_epoll2_wait(struct oo_epoll2_private *priv,
+static void oo_epoll2_wait(struct oo_epoll_private *priv,
                            struct oo_epoll2_action_arg *op)
 {
   /* This function uses oo_timesync_cpu_khz but we do not want to
@@ -519,7 +471,7 @@ do_exit:
 }
 
 
-static int oo_epoll2_action(struct oo_epoll2_private *priv,
+static int oo_epoll2_action(struct oo_epoll_private *priv,
                             struct oo_epoll2_action_arg *op)
 {
 #ifdef __NR_epoll_pwait
@@ -531,7 +483,7 @@ static int oo_epoll2_action(struct oo_epoll2_private *priv,
 
   /* Restore kepfd if necessary */
   if(unlikely( op->kepfd == -1 )) {
-    op->kepfd = oo_install_file_to_fd(priv->kepo, O_CLOEXEC);
+    op->kepfd = oo_install_file_to_fd(priv->p.p2.kepo, O_CLOEXEC);
     if( op->kepfd < 0 )
       return op->kepfd;
     /* We've restored kepfd.  Now we should return 0! */
@@ -569,10 +521,10 @@ static int oo_epoll2_action(struct oo_epoll2_private *priv,
       struct oo_epoll_busy_task t;
       t.task = current;
       spin_lock(&priv->lock);
-      list_add(&t.link, &priv->busy_tasks);
+      list_add(&t.link, &priv->p.p2.busy_tasks);
       spin_unlock(&priv->lock);
 #endif
-    if( priv->do_spin )
+    if( priv->p.p2.do_spin )
       oo_epoll2_wait(priv, op);
     else {
       op->rc = efab_linux_sys_epoll_wait(op->kepfd,
@@ -609,36 +561,29 @@ static int oo_epoll2_action(struct oo_epoll2_private *priv,
     return op->rc;
 }
 
-static void oo_epoll2_release(struct oo_epoll2_private *priv)
+static void oo_epoll2_release(struct oo_epoll_private *priv)
 {
-  int i;
   ci_assert(priv);
 
   /* Release KEPO */
-  if( priv->kepo )
-    fput(priv->kepo);
+  if( priv->p.p2.kepo )
+    fput(priv->p.p2.kepo);
 
-  /* Release references to all stacks */
-  for( i = 0; i < epoll_max_stacks; i++ ) {
-    if( priv->stacks[i] == NULL )
-      break;
-    efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
-    priv->stacks[i] = NULL;
-  }
+  oo_epoll_release_common(priv);
 
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
-  ci_assert(list_empty(&priv->busy_tasks));
+  ci_assert(list_empty(&priv->p.p2.busy_tasks));
 #endif
 }
 
-static unsigned oo_epoll2_poll(struct oo_epoll2_private* priv,
+static unsigned oo_epoll2_poll(struct oo_epoll_private* priv,
                                poll_table* wait)
 {
 #ifdef OO_EPOLL_NEED_NEST_PROTECTION
   if( current ) {
     struct oo_epoll_busy_task *t;
     spin_lock(&priv->lock);
-    list_for_each_entry(t, &priv->busy_tasks, link) {
+    list_for_each_entry(t, &priv->p.p2.busy_tasks, link) {
       if( t->task == current) {
         spin_unlock(&priv->lock);
         return POLLNVAL;
@@ -650,7 +595,7 @@ static unsigned oo_epoll2_poll(struct oo_epoll2_private* priv,
 
   /* Fixme: poll all netifs? */
 
-  return priv->kepo->f_op->poll(priv->kepo, wait);
+  return priv->p.p2.kepo->f_op->poll(priv->p.p2.kepo, wait);
 }
 
 
@@ -736,74 +681,51 @@ fail1:
   return rc;
 }
 
-static int oo_epoll1_release(struct oo_epoll1_private* priv)
+static int oo_epoll1_release(struct oo_epoll_private* priv)
 {
-  int i;
+  ci_assert(priv->p.p1.whead);
+  remove_wait_queue(priv->p.p1.whead, &priv->p.p1.wait);
 
-  ci_assert(priv->whead);
-  remove_wait_queue(priv->whead, &priv->wait);
+  fput(priv->p.p1.os_file);
 
-  fput(priv->os_file);
+  __free_page(priv->p.p1.page);
 
-  __free_page(priv->page);
-
-  /* Release references to all stacks */
-  for( i = 0; i < epoll_max_stacks; i++ ) {
-    if( priv->stacks[i] == NULL )
-      break;
-    efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
-    priv->stacks[i] = NULL;
-  }
-  kfree(priv->stacks);
+  oo_epoll_release_common(priv);
 
   return 0;
 }
 
-static int oo_epoll1_action(struct oo_epoll1_private *priv,
-                           struct oo_epoll1_action_arg *op)
+static int oo_epoll1_ctl(struct oo_epoll1_private *priv,
+                           struct oo_epoll1_ctl_arg *op)
 {
-  struct oo_epoll_item item[CI_CFG_EPOLL_MAX_POSTPONED];
-  struct oo_epoll_item *item_u = CI_USER_PTR_GET(op->epoll_ctl);
-  int i;
+  int rc = efab_linux_sys_epoll_ctl(op->epfd, op->op,
+                                    op->fd, CI_USER_PTR_GET(op->event));
+  /* It's valid to have already added the fd to the os epoll set. */
+  if( rc == 0 || rc == -EEXIST )
+    return efab_linux_sys_epoll_ctl(priv->sh->epfd, op->op,
+                                    op->fd, CI_USER_PTR_GET(op->event));
+  return rc;
+}
+
+static int oo_epoll1_wait(struct oo_epoll1_private *priv,
+                          struct oo_epoll1_wait_arg *op)
+{
   int rc = 0;
+  ci_uint32 tmp;
 
-  if( op->epoll_ctl_n ) {
-    rc = oo_epoll_ctl_copy_to_kernel(item_u, op->epoll_ctl_n, item);
-    if( rc )
-      return rc;
-
-    for( i = 0; i < op->epoll_ctl_n; i++ ) {
-      rc = efab_linux_sys_epoll_ctl(op->epfd, item[i].op,
-                                    item[i].fd, &item_u[i].event);
-      /* It's valid to have already added the fd to the os epoll set. */
-      if( rc == 0 || rc == -EEXIST ) {
-        rc = efab_linux_sys_epoll_ctl(priv->sh->epfd, item[i].op,
-                                      item[i].fd, &item_u[i].event);
-      }
-
-      oo_epoll_warn_postpone_error(op->epoll_ctl_n, item[i].fd, i, rc,
-                                   op->maxevents);
-    }
-  }
-
-  if( op->maxevents ) {
-    ci_uint32 tmp;
-    op->rc = efab_linux_sys_epoll_wait(priv->sh->epfd,
-                                       CI_USER_PTR_GET(op->events),
-                                       op->maxevents, 0/*timeout*/);
-    if( op->rc < 0 )
-      rc = op->rc;
-    do {
-      tmp = priv->sh->flag;
-      if( (tmp & 1) == 0 )
-        break;
-      if( priv->os_file->f_op->poll(priv->os_file, NULL) )
-        break;
-    } while( ci_cas32u_fail(&priv->sh->flag, tmp,
-                            tmp & ~OO_EPOLL1_FLAG_EVENT) );
-  }
-  else
-    op->rc = rc;
+  op->rc = efab_linux_sys_epoll_wait(priv->sh->epfd,
+                                     CI_USER_PTR_GET(op->events),
+                                     op->maxevents, 0/*timeout*/);
+  if( op->rc < 0 )
+    rc = op->rc;
+  do {
+    tmp = priv->sh->flag;
+    if( (tmp & 1) == 0 )
+      break;
+    if( priv->os_file->f_op->poll(priv->os_file, NULL) )
+      break;
+  } while( ci_cas32u_fail(&priv->sh->flag, tmp,
+                          tmp & ~OO_EPOLL1_FLAG_EVENT) );
 
   return rc;
 }
@@ -814,7 +736,7 @@ static int oo_epoll1_action(struct oo_epoll1_private *priv,
 static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
                                         unsigned cmd, unsigned long arg)
 {
-  struct oo_epoll_file_private *priv = filp->private_data;
+  struct oo_epoll_private *priv = filp->private_data;
   void __user* argp = (void __user*) arg;
   int rc;
 
@@ -828,7 +750,7 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) )
       return -EFAULT;
 
-    rc = oo_epoll2_action(&priv->p.p2, &local_arg);
+    rc = oo_epoll2_action(priv, &local_arg);
 
     if( rc == 0 && copy_to_user(argp, &local_arg, _IOC_SIZE(cmd)) )
       return -EFAULT;
@@ -847,16 +769,28 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     break;
   }
 
-  case OO_EPOLL1_IOC_ACTION: {
-    struct oo_epoll1_action_arg local_arg;
+  case OO_EPOLL1_IOC_CTL: {
+    struct oo_epoll1_ctl_arg local_arg;
+    ci_assert_equal(_IOC_SIZE(cmd), sizeof(local_arg));
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) ) {
+      return -EFAULT;
+    }
+
+    rc = oo_epoll1_ctl(&priv->p.p1, &local_arg);
+    break;
+  }
+
+  case OO_EPOLL1_IOC_WAIT: {
+    struct oo_epoll1_wait_arg local_arg;
     ci_assert_equal(_IOC_SIZE(cmd), sizeof(local_arg));
     if( priv->type != OO_EPOLL_TYPE_1 )
       return -EINVAL;
     if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) )
       return -EFAULT;
 
-    rc = oo_epoll1_action(&priv->p.p1, &local_arg);
-
+    rc = oo_epoll1_wait(&priv->p.p1, &local_arg);
     if( rc == 0 && copy_to_user(argp, &local_arg, _IOC_SIZE(cmd)) )
       return -EFAULT;
     break;
@@ -880,7 +814,7 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     }
     sock_priv = sock_file->private_data;
 
-    rc = oo_epoll1_add_stack(&priv->p.p1, sock_priv->thr);
+    rc = oo_epoll_add_stack(priv, sock_priv->thr);
     
     fput(sock_file);
     break;
@@ -891,7 +825,7 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     tcp_helper_resource_t* thr;
     ci_netif* ni;
     
-    OO_EPOLL_FOR_EACH_STACK(&priv->p.p1, i, thr, ni) {
+    OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
       tcp_helper_request_wakeup(thr);
     }
     rc = 0;
@@ -915,7 +849,7 @@ int oo_epoll_fop_ioctl(struct inode* inode, struct file *filp,
 
 static int oo_epoll_fop_open(struct inode* inode, struct file* filp)
 {
-  struct oo_epoll_file_private *priv = kmalloc(sizeof(*priv), GFP_KERNEL);
+  struct oo_epoll_private *priv = kmalloc(sizeof(*priv), GFP_KERNEL);
 
   /* oo_epoll2_wait() uses the definition of oo_timesync_cpu_khz.  We
      don't want to block on it to stablize there on the fast path so
@@ -934,14 +868,14 @@ static int oo_epoll_fop_open(struct inode* inode, struct file* filp)
 
 static int oo_epoll_fop_release(struct inode* inode, struct file* filp)
 {
-  struct oo_epoll_file_private *priv = filp->private_data;
+  struct oo_epoll_private *priv = filp->private_data;
 
   ci_assert(priv);
 
   /* Type-specific cleanup */
   switch( priv->type ) {
-    case OO_EPOLL_TYPE_1: oo_epoll1_release(&priv->p.p1); break;
-    case OO_EPOLL_TYPE_2: oo_epoll2_release(&priv->p.p2); break;
+    case OO_EPOLL_TYPE_1: oo_epoll1_release(priv); break;
+    case OO_EPOLL_TYPE_2: oo_epoll2_release(priv); break;
     default: ci_assert_equal(priv->type, OO_EPOLL_TYPE_UNKNOWN);
   }
 
@@ -953,33 +887,30 @@ static int oo_epoll_fop_release(struct inode* inode, struct file* filp)
 
 static unsigned oo_epoll_fop_poll(struct file* filp, poll_table* wait)
 {
-  struct oo_epoll_file_private *priv = filp->private_data;
+  struct oo_epoll_private *priv = filp->private_data;
 
   ci_assert(priv);
   if( priv->type != OO_EPOLL_TYPE_2 )
     return POLLNVAL;
-  return oo_epoll2_poll(&priv->p.p2, wait);
+  return oo_epoll2_poll(priv, wait);
 }
 
 static int oo_epoll_fop_mmap(struct file* filp, struct vm_area_struct* vma)
 {
-  struct oo_epoll_file_private *priv = filp->private_data;
-  int size = sizeof(priv->p.p1.stacks[0]) * epoll_max_stacks;
+  struct oo_epoll_private *priv = filp->private_data;
   int rc;
 
   ci_assert(priv);
   if( priv->type != OO_EPOLL_TYPE_UNKNOWN)
     return -EINVAL;
 
-  priv->p.p1.stacks = kmalloc(size, GFP_KERNEL);
-  if( priv->p.p1.stacks == NULL )
-    return -ENOMEM;
-  memset(priv->p.p1.stacks, 0, size);
-  spin_lock_init(&priv->p.p1.lock);
+  rc = oo_epoll_init_common(priv);
+  if( rc != 0 )
+    return rc;
 
   rc = oo_epoll1_mmap(&priv->p.p1, vma);
   if( rc != 0 ) {
-    kfree(priv->p.p1.stacks);
+    oo_epoll_release_common(priv);
     return rc;
   }
 

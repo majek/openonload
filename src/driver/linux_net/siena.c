@@ -273,13 +273,12 @@ siena_test_tables(struct efx_nic *efx,
 
 static void siena_ptp_write_host_time(struct efx_nic *efx, u32 host_time)
 {
-	_efx_writed(efx, __cpu_to_le32(host_time),
+	_efx_writed(efx, cpu_to_le32(host_time),
 		    FR_CZ_MC_TREG_SMEM + MC_SMEM_P0_PTP_TIME_OFST);
 }
 
 static int siena_ptp_set_ts_config(struct efx_nic *efx,
-				   struct hwtstamp_config *init,
-				   bool try_improved_filtering)
+				   struct hwtstamp_config *init)
 {
 	int rc;
 
@@ -298,11 +297,8 @@ static int siena_ptp_set_ts_config(struct efx_nic *efx,
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
 		init->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
-		if (try_improved_filtering)
-			rc = efx_ptp_change_mode(efx, true,
-						 MC_CMD_PTP_MODE_V2_ENHANCED);
-		else
-			rc = -EINVAL;
+		rc = efx_ptp_change_mode(efx, true,
+					 MC_CMD_PTP_MODE_V2_ENHANCED);
 		/* bug 33070 - old versions of the firmware do not support the
 		 * improved UUID filtering option. Similarly old versions of the
 		 * application do not expect it to be enabled. If the firmware
@@ -415,6 +411,9 @@ static int siena_dimension_resources(struct efx_nic *efx)
 	 * the buffer table and descriptor caches.  In theory we can
 	 * map both blocks to one port, but we don't.
 	 */
+#ifdef CONFIG_SFC_SRIOV
+	struct siena_nic_data *nic_data = efx->nic_data;
+#endif
 	unsigned sram_lim_qw = FR_CZ_BUF_FULL_TBL_ROWS / 2;
 	struct efx_dl_falcon_resources *res = &efx->farch_resources;
 	struct efx_dl_device_info *end_res;
@@ -467,14 +466,14 @@ static int siena_dimension_resources(struct efx_nic *efx)
 #endif
 
 #ifdef CONFIG_SFC_SRIOV
-	if (efx_sriov_wanted(efx)) {
+	if (efx_siena_sriov_wanted(efx)) {
 		/* Advertise SR-IOV through driverlink */
-		efx->sriov_resources.hdr.type = EFX_DL_SIENA_SRIOV;
-		efx->sriov_resources.vi_base = EFX_VI_BASE;
-		efx->sriov_resources.vi_scale = efx->vi_scale;
-		efx->sriov_resources.vf_count = efx->vf_count;
-		efx->sriov_resources.hdr.next = end_res->next;
-		end_res->next = &efx->sriov_resources.hdr;
+		nic_data->sriov_resources.hdr.type = EFX_DL_SIENA_SRIOV;
+		nic_data->sriov_resources.vi_base = EFX_VI_BASE;
+		nic_data->sriov_resources.vi_scale = efx->vi_scale;
+		nic_data->sriov_resources.vf_count = efx->vf_count;
+		nic_data->sriov_resources.hdr.next = end_res->next;
+		end_res->next = &nic_data->sriov_resources.hdr;
 	}
 #endif
 
@@ -580,7 +579,7 @@ static int siena_probe_nic(struct efx_nic *efx)
 	}
 #endif
 
-	efx_sriov_probe(efx);
+	efx_siena_sriov_probe(efx);
 	efx_ptp_defer_probe_with_channel(efx);
 
 	return 0;
@@ -684,7 +683,6 @@ static int siena_init_nic(struct efx_nic *efx)
 	efx_writeo(efx, &temp, FR_CZ_USR_EV_CFG);
 
 	efx_farch_init_common(efx);
-
 	return 0;
 }
 
@@ -693,7 +691,6 @@ static void siena_remove_nic(struct efx_nic *efx)
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
 	efx_aoe_detach(efx);
 #endif
-
 	efx_mcdi_mon_remove(efx);
 
 	efx_nic_free_buffer(efx, &efx->irq_status);
@@ -721,6 +718,8 @@ static void siena_remove_nic(struct efx_nic *efx)
 	{ #ext_name2, 32, 8 * MC_CMD_MAC_ ## mcdi_name + 4 }
 #define SIENA_OTHER_STAT(ext_name)				\
 	[SIENA_STAT_ ## ext_name] = { #ext_name, 0, 0 }
+#define GENERIC_SW_STAT(ext_name)				\
+	[GENERIC_STAT_ ## ext_name] = { #ext_name, 0, 0 }
 
 static const struct efx_hw_stat_desc siena_stat_desc[SIENA_STAT_COUNT] = {
 	SIENA_DMA_STAT(tx_bytes, TX_BYTES),
@@ -780,6 +779,8 @@ static const struct efx_hw_stat_desc siena_stat_desc[SIENA_STAT_COUNT] = {
 	SIENA_DMA_STAT(rx_length_error, RX_LENGTH_ERROR_PKTS),
 	SIENA_DMA_STAT(rx_internal_error, RX_INTERNAL_ERROR_PKTS),
 	SIENA_DMA_STAT(rx_nodesc_drop_cnt, RX_NODESC_DROPS),
+	GENERIC_SW_STAT(rx_nodesc_trunc),
+	GENERIC_SW_STAT(rx_noskb_drops),
 	SIENA_DMA_PACKED_STAT(rx_char_error_lane0, rx_char_error_lane1,
 			      RX_LANES01_CHAR_ERR),
 	SIENA_DMA_PACKED_STAT(rx_char_error_lane2, rx_char_error_lane3,
@@ -808,7 +809,6 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 	__le64 generation_start, generation_end;
 
 	dma_stats = efx->stats_buffer.addr;
-	nic_data = efx->nic_data;
 
 	generation_end = dma_stats[MC_CMD_MAC_GENERATION_END];
 	if (generation_end == EFX_MC_STATS_GENERATION_INVALID)
@@ -835,6 +835,7 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 	efx_update_diff_stat(&stats[SIENA_STAT_rx_good_bytes],
 			     stats[SIENA_STAT_rx_bytes] -
 			     stats[SIENA_STAT_rx_bad_bytes]);
+	efx_update_sw_stats(efx, stats);
 	return 0;
 }
 
@@ -866,7 +867,9 @@ static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 		core_stats->tx_packets = stats[SIENA_STAT_tx_packets];
 		core_stats->rx_bytes = stats[SIENA_STAT_rx_bytes];
 		core_stats->tx_bytes = stats[SIENA_STAT_tx_bytes];
-		core_stats->rx_dropped = stats[SIENA_STAT_rx_nodesc_drop_cnt];
+		core_stats->rx_dropped = stats[SIENA_STAT_rx_nodesc_drop_cnt] +
+					 stats[GENERIC_STAT_rx_nodesc_trunc] +
+					 stats[GENERIC_STAT_rx_noskb_drops];
 		core_stats->multicast = stats[SIENA_STAT_rx_multicast];
 		core_stats->collisions = stats[SIENA_STAT_tx_collision];
 		core_stats->rx_length_errors =
@@ -1218,8 +1221,6 @@ fail:
  */
 
 const struct efx_nic_type siena_a0_nic_type = {
-	.init_module = efx_void_dummy_op_int,
-	.exit_module = efx_void_dummy_op_void,
 	.mem_map_size = siena_mem_map_size,
 	.probe = siena_probe_nic,
 	.dimension_resources = siena_dimension_resources,
@@ -1239,6 +1240,8 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.fini_dmaq = efx_farch_fini_dmaq,
 	.prepare_flush = siena_prepare_flush,
 	.finish_flush = siena_finish_flush,
+	.prepare_flr = efx_port_dummy_op_void,
+	.finish_flr = efx_farch_finish_flr,
 	.describe_stats = siena_describe_nic_stats,
 	.update_stats = siena_update_nic_stats,
 	.start_stats = efx_mcdi_mac_start_stats,
@@ -1293,9 +1296,14 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.filter_count_rx_used = efx_farch_filter_count_rx_used,
 	.filter_get_rx_id_limit = efx_farch_filter_get_rx_id_limit,
 	.filter_get_rx_ids = efx_farch_filter_get_rx_ids,
+#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
+	.filter_async_insert = efx_farch_filter_async_insert,
+#endif
 #ifdef CONFIG_RFS_ACCEL
-	.filter_rfs_insert = efx_farch_filter_rfs_insert,
 	.filter_rfs_expire_one = efx_farch_filter_rfs_expire_one,
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
+	.filter_async_remove = efx_farch_filter_async_remove,
 #endif
 #ifdef EFX_NOT_UPSTREAM
 	.filter_block_kernel = efx_farch_filter_block_kernel,
@@ -1313,6 +1321,11 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.ptp_write_host_time = siena_ptp_write_host_time,
 	.ptp_set_ts_config = siena_ptp_set_ts_config,
 #endif
+	.sriov_init = efx_siena_sriov_init,
+	.sriov_fini = efx_siena_sriov_fini,
+	.sriov_mac_address_changed = efx_siena_sriov_mac_address_changed,
+	.sriov_wanted = efx_siena_sriov_wanted,
+	.sriov_reset = efx_siena_sriov_reset,
 
 	.revision = EFX_REV_SIENA_A0,
 	.txd_ptr_tbl_base = FR_BZ_TX_DESC_PTR_TBL,
@@ -1325,6 +1338,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.rx_hash_offset = FS_BZ_RX_PREFIX_HASH_OFST,
 	.rx_buffer_padding = 0,
 	.can_rx_scatter = true,
+	.option_descriptors = false,
 	.max_interrupt_mode = EFX_INT_MODE_MSIX,
 	.timer_period_max = 1 << FRF_CZ_TC_TIMER_VAL_WIDTH,
 	.farch_resources = {

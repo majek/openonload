@@ -322,67 +322,6 @@ static int citp_pipe_recv_none(citp_fdinfo* fdinfo,
   return -1;
 }
 
-static int citp_pipe_bind(citp_fdinfo* fdinfo,
-                          const struct sockaddr* sa, socklen_t sa_len)
-{
-  citp_fdinfo_release_ref(fdinfo, 0);
-  errno = ENOTSOCK;
-  return -1;
-}
-
-static int citp_pipe_listen(citp_fdinfo* fdinfo, int backlog)
-{
-  citp_fdinfo_release_ref(fdinfo, 0);
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_accept(citp_fdinfo* fdinfo,
-                             struct sockaddr* sa, socklen_t* p_sa_len,
-                             int flags,
-                             citp_lib_context_t* lib_context)
-{
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_connect(citp_fdinfo* fdinfo,
-                              const struct sockaddr* sa, socklen_t sa_len,
-                              citp_lib_context_t* lib_context)
-{
-  citp_fdinfo_release_ref(fdinfo, 0);
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_shutdown(citp_fdinfo* fdinfo, int how)
-{
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_getsockname(citp_fdinfo* fdinfo,
-                                  struct sockaddr* sa, socklen_t* p_sa_len)
-{
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_getpeername(citp_fdinfo* fdinfo,
-                                  struct sockaddr* sa, socklen_t* p_sa_len)
-{
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_getsockopt(citp_fdinfo* fdinfo, int level,
-                                 int optname, void* optval, socklen_t* optlen)
-{
-  errno = ENOTSOCK;
-  return -1;
-}
-static int citp_pipe_setsockopt(citp_fdinfo* fdinfo, int level, int optname,
-                                 const void* optval, socklen_t optlen)
-{
-  citp_fdinfo_release_ref(fdinfo, 0);
-  errno = ENOTSOCK;
-  return -1;
-}
-
 static int citp_pipe_ioctl(citp_fdinfo *fdinfo, int cmd, void *arg)
 {
   int rc = 0;
@@ -429,60 +368,7 @@ static int citp_pipe_ioctl(citp_fdinfo *fdinfo, int cmd, void *arg)
 }
 
 
-static int citp_pipe_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg,
-                                 int flags)
-{
-  msg->rc = -ENOTSOCK;
-  return 1;
-}
 
-
-static int citp_pipe_zc_recv(citp_fdinfo* fdi,
-                                 struct onload_zc_recv_args* args)
-{
-  return -ENOTSOCK;
-}
-
-
-static int citp_pipe_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
-                                        int flags)
-{
-  return -ENOTSOCK;
-}
-
-
-static int citp_pipe_zc_recv_filter(citp_fdinfo* fdi,
-                                        onload_zc_recv_filter_callback filter,
-                                        void* cb_arg, int flags)
-{
-#if CI_CFG_ZC_RECV_FILTER
-  return -ENOTSOCK;
-#else
-  return -ENOSYS;
-#endif
-}
-
-
-int citp_pipe_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
-                         int mlen, struct oo_msg_template** omt_pp,
-                         unsigned flags)
-{
-  return -EOPNOTSUPP;
-}
-
-
-int citp_pipe_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
-                          struct onload_template_msg_update_iovec* updates,
-                          int ulen, unsigned flags)
-{
-  return -EOPNOTSUPP;
-}
-
-
-int citp_pipe_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
-{
-  return -EOPNOTSUPP;
-}
 
 
 /* Read and write ends of the pipe have different protocol implementations in the same
@@ -495,24 +381,11 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .socket      = NULL,        /* nobody should ever call this */
     .dtor        = citp_pipe_dtor,
     .dup         = citp_pipe_dup,
-    .bind        = citp_pipe_bind,
-    .listen      = citp_pipe_listen,
-    .accept      = citp_pipe_accept,
-    .connect     = citp_pipe_connect,
     .close       = citp_pipe_close,
-    .shutdown    = citp_pipe_shutdown,
-    .getsockname = citp_pipe_getsockname,
-    .getpeername = citp_pipe_getpeername,
-    .getsockopt  = citp_pipe_getsockopt,
-    .setsockopt  = citp_pipe_setsockopt,
+
     .recv        = citp_pipe_recv,
-#if CI_CFG_RECVMMSG
-    .recvmmsg    = citp_nosock_recvmmsg,
-#endif
     .send        = citp_pipe_send_none,
-#if CI_CFG_SENDMMSG
-    .sendmmsg    = citp_nosock_sendmmsg,
-#endif
+
     .fcntl       = citp_pipe_fcntl,
     .ioctl       = citp_pipe_ioctl,
 #if CI_CFG_USERSPACE_SELECT
@@ -522,17 +395,32 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .epoll       = citp_pipe_epoll_reader,
 #endif
 #endif
-    .zc_send     = citp_pipe_zc_send,
-    .zc_recv     = citp_pipe_zc_recv,
-    .zc_recv_filter = citp_pipe_zc_recv_filter,
-    .recvmsg_kernel = citp_pipe_recvmsg_kernel,
-#if CI_CFG_SENDFILE
-    /* qustion kostik: will we ever ever need this??? */
-    .sendfile_post_hook = NULL,
+
+    .bind        = citp_nonsock_bind,
+    .listen      = citp_nonsock_listen,
+    .accept      = citp_nonsock_accept,
+    .connect     = citp_nonsock_connect,
+    .shutdown    = citp_nonsock_shutdown,
+    .getsockname = citp_nonsock_getsockname,
+    .getpeername = citp_nonsock_getpeername,
+    .getsockopt  = citp_nonsock_getsockopt,
+    .setsockopt  = citp_nonsock_setsockopt,
+#if CI_CFG_RECVMMSG
+    .recvmmsg    = citp_nonsock_recvmmsg,
 #endif
-    .tmpl_alloc    = citp_pipe_tmpl_alloc,
-    .tmpl_update   = citp_pipe_tmpl_update,
-    .tmpl_abort    = citp_pipe_tmpl_abort,
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_nonsock_sendmmsg,
+#endif
+    .zc_send     = citp_nonsock_zc_send,
+    .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
+    .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
+    .tmpl_alloc    = citp_nonsock_tmpl_alloc,
+    .tmpl_update   = citp_nonsock_tmpl_update,
+    .tmpl_abort    = citp_nonsock_tmpl_abort,
+#if CI_CFG_USERSPACE_EPOLL
+    .ordered_data   = citp_nonsock_ordered_data,
+#endif
   }
 };
 
@@ -542,24 +430,11 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .socket      = NULL,        /* nobody should ever call this */
     .dtor        = citp_pipe_dtor,
     .dup         = citp_pipe_dup,
-    .bind        = citp_pipe_bind,
-    .listen      = citp_pipe_listen,
-    .accept      = citp_pipe_accept,
-    .connect     = citp_pipe_connect,
     .close       = citp_pipe_close,
-    .shutdown    = citp_pipe_shutdown,
-    .getsockname = citp_pipe_getsockname,
-    .getpeername = citp_pipe_getpeername,
-    .getsockopt  = citp_pipe_getsockopt,
-    .setsockopt  = citp_pipe_setsockopt,
+
     .recv        = citp_pipe_recv_none,
-#if CI_CFG_RECVMMSG
-    .recvmmsg    = citp_nosock_recvmmsg,
-#endif
     .send        = citp_pipe_send,
-#if CI_CFG_SENDMMSG
-    .sendmmsg    = citp_nosock_sendmmsg,
-#endif
+
     .fcntl       = citp_pipe_fcntl,
     .ioctl       = citp_pipe_ioctl,
 #if CI_CFG_USERSPACE_SELECT
@@ -569,17 +444,36 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .epoll       = citp_pipe_epoll_writer,
 #endif
 #endif
-    .zc_send     = citp_pipe_zc_send,
-    .zc_recv     = citp_pipe_zc_recv,
-    .zc_recv_filter = citp_pipe_zc_recv_filter,
-    .recvmsg_kernel = citp_pipe_recvmsg_kernel,
+
+    .bind        = citp_nonsock_bind,
+    .listen      = citp_nonsock_listen,
+    .accept      = citp_nonsock_accept,
+    .connect     = citp_nonsock_connect,
+    .shutdown    = citp_nonsock_shutdown,
+    .getsockname = citp_nonsock_getsockname,
+    .getpeername = citp_nonsock_getpeername,
+    .getsockopt  = citp_nonsock_getsockopt,
+    .setsockopt  = citp_nonsock_setsockopt,
+#if CI_CFG_RECVMMSG
+    .recvmmsg    = citp_nonsock_recvmmsg,
+#endif
+#if CI_CFG_SENDMMSG
+    .sendmmsg    = citp_nonsock_sendmmsg,
+#endif
+    .zc_send     = citp_nonsock_zc_send,
+    .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
+    .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
 #if CI_CFG_SENDFILE
     /* qustion kostik: will we ever ever need this??? */
     .sendfile_post_hook = NULL,
 #endif
-    .tmpl_alloc    = citp_pipe_tmpl_alloc,
-    .tmpl_update   = citp_pipe_tmpl_update,
-    .tmpl_abort    = citp_pipe_tmpl_abort,
+    .tmpl_alloc    = citp_nonsock_tmpl_alloc,
+    .tmpl_update   = citp_nonsock_tmpl_update,
+    .tmpl_abort    = citp_nonsock_tmpl_abort,
+#if CI_CFG_USERSPACE_EPOLL
+    .ordered_data   = citp_nonsock_ordered_data,
+#endif
   }
 };
 

@@ -461,6 +461,11 @@ extern void ci_cfg_drv_dtor(void);
 extern ci_cfg_opts_t ci_cfg_opts CI_HV;
 extern int ci_cfg_query(char *proc_name_utf8, int *ref_cfgerr);
 
+/* Needed to support list of port numbers in EF_ options */
+struct ci_port_list {
+  ci_dllink link;
+  ci_uint16 port;
+};
 
 ci_inline void ci_cfg_dont_intercept(citp_opts_t *opts)
 {

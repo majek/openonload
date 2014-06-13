@@ -65,7 +65,7 @@ ci_inline void ci_netif_pkt_to_iovec(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 }
 
 
-#if CI_CFG_PIO
+#if CI_CFG_USE_PIO
 ci_inline void ci_netif_pkt_to_pio(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                                    ci_int32 offset)
 {

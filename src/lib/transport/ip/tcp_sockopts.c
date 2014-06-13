@@ -33,7 +33,7 @@
 #if !defined(__KERNEL__)
 #  include <netinet/tcp.h>
 #else
-#  include <linux/tcp.h>
+#  error "this file is UL-only"
 #endif
 
 
@@ -403,7 +403,8 @@ ci_inline int ci_tcp_validtimestampopt( int level, int optname,
                                         socklen_t optlen )
 {
   return ( level == SOL_SOCKET) &&
-         ( optname == SO_TIMESTAMP || optname == SO_TIMESTAMPNS ) &&
+         ( optname == SO_TIMESTAMP || optname == SO_TIMESTAMPNS ||
+           optname == ONLOAD_SO_TIMESTAMPING ) &&
          ( optlen >= sizeof(int) );
 }
 
@@ -417,56 +418,35 @@ ci_inline int ci_tcp_validtimestampopt( int level, int optname,
  * \return         As for setsockopt()
  */
 int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
-		      int optname, const void* __optval,
+		      int optname, const void* optval,
 		      socklen_t optlen )
 {
   ci_sock_cmn* s = ep->s;
   ci_netif* ni = ep->netif;
   int rc = 0;
-#if defined(__KERNEL__) && defined (__linux__)
-  union {
-    long l;
-    int  i;
-    char dummy[16];
-  } opts;
-  void* optval = &opts;
-
-  /* Security (bug27705): User may have specified a short optlen, in which
-   * case [opts] may include some data from the stack which can leak into
-   * the shared state.
-   */
-  memset(&opts, 0, sizeof(opts));
-
-  rc = copy_from_user(optval, __optval, CI_MIN(optlen, sizeof(opts)));
-  if( rc )
-    return -EFAULT;
-#else
-# define optval __optval
-#endif
 
   /* If not yet connected, apply to the O/S socket.  This keeps the O/S
   ** socket in sync in case we need to hand-over.
-  **
-  ** WINDOWS: Thanks to disconnectex() we have to make sure that the OS
-  ** socket stays in sync with our socket at all times so that we can
-  ** handover to the OS on one use, handback on disconnect and then re-use
-  ** the socket for an Efab connection (&vv).
   */
   /*! \todo This is very much a "make it work" change.  Ideally we should
    * do the updates lazily so that we don't waste time with a socket that
    * may never be used for an OS connection.
    */
-  if( ! (s->b.state & CI_TCP_STATE_SYNCHRONISED) ) 
-  {
-#ifndef __KERNEL__
+  if( ! (s->b.state & CI_TCP_STATE_SYNCHRONISED) ) {
     ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
     if( CI_IS_VALID_SOCKET(os_sock) ) {
       rc = ci_sys_setsockopt(os_sock, level, optname, optval, optlen);
+      if( rc != 0 && errno == ENOPROTOOPT ) {
+        /* We support reuseport where the OS doesn't, so set a flag to say
+         * that's what we're doing, and hide the error.
+         */
+        if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) ) {
+          s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
+          rc = 0;
+        }
+      }
+  
       ci_rel_os_sock_fd(os_sock);
-#else
-    {
-      rc = ci_khelper_setsockopt(ni, SC_SP(s), level, optname, __optval, optlen);
-#endif
       if( rc < 0 && !ci_tcp_validtimestampopt(level, optname, optlen) )
         return rc;
     }

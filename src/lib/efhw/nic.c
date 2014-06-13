@@ -132,6 +132,7 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 			return 0;
 		}
 		break;
+        case 0x0923:
         case 0x0903:
         case 0x0901:
 		dt->arch = EFHW_ARCH_EF10;

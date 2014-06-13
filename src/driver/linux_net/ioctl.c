@@ -68,7 +68,7 @@ static void efx_ioctl_mcdi_complete_reset(struct efx_nic *efx,
 	 * reset here.
 	 */
 	if (cmd == MC_CMD_REBOOT && rc == -EIO) {
-		netif_err(efx, drv, efx->net_dev, "MC fatal error %d\n", -rc);
+		netif_warn(efx, drv, efx->net_dev, "Expected MC rebooted\n");
 		efx_schedule_reset(efx, RESET_TYPE_MC_FAILURE);
 	}
 }
@@ -320,14 +320,21 @@ efx_ioctl_rxfh_indir(struct efx_nic *efx, union efx_ioctl_data *data)
 static int
 efx_ioctl_ts_init(struct efx_nic *efx, union efx_ioctl_data *data)
 {
-	/* bug 33070 For backward compatibility, we use a bit in the
-	 * flags field to indicate that the application wants to use PTPV2
-	 * enhanced UUID filtering. Old application code has this bit set to
-	 * zero. Note that this has no effect if a V1 mode is specified. */
-	bool try_improved_filtering =
-		data->ts_init.flags & EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED;
+	/* bug 33070: We use a bit in the flags field to indicate that
+	 * the application wants to use PTPV2 enhanced UUID
+	 * filtering. Old application code has this bit set to
+	 * zero. Note that this has no effect if a V1 mode is
+	 * specified.
+	 */
+	if (data->ts_init.rx_filter >= HWTSTAMP_FILTER_PTP_V2_L4_EVENT &&
+	    !(data->ts_init.flags & EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED)) {
+		netif_err(efx, drv, efx->net_dev,
+			  "PTPv2 now requires at least sfptpd 2.0.0.5\n");
+		return -EINVAL;
+	}
+
 	data->ts_init.flags &= ~EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED;
-	return efx_ptp_ts_init(efx, &data->ts_init, try_improved_filtering);
+	return efx_ptp_ts_init(efx, &data->ts_init);
 }
 
 static int
@@ -373,7 +380,13 @@ efx_ioctl_ts_sync(struct efx_nic *efx, union efx_ioctl_data *data)
 	return efx_ptp_ts_sync(efx, &data->ts_sync);
 }
 
-#ifndef EFX_HAVE_PHC_SUPPORT
+static int
+efx_ioctl_ts_set_sync_status(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ptp_ts_set_sync_status(efx, &data->ts_set_sync_status);
+}
+
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) && !defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
 static int
 efx_ioctl_get_ts_info(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -515,6 +528,9 @@ efx_ioctl_get_device_ids(struct efx_nic *efx, union efx_ioctl_data *data)
 	ids->subsys_device_id = efx->pci_dev->subsystem_device;
 	ids->phy_type = efx->phy_type;
 	ids->port_num = efx_port_num(efx);
+	/* ids->perm_addr isn't __aligned(2), so we can't use ether_addr_copy
+	 * (and we can't change it because it's an ioctl argument)
+	 */
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
 	memcpy(ids->perm_addr, efx->net_dev->perm_addr, ETH_ALEN);
 #else
@@ -552,6 +568,17 @@ efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
 #endif
 
 	return 0;
+}
+
+static int
+efx_ioctl_licensed_app_state(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	int rc;
+
+	if (efx_nic_rev(efx) < EFX_REV_HUNT_A0)
+		return -EOPNOTSUPP;
+	rc = efx_ef10_licensed_app_state(efx, &data->app_state);
+	return rc;
 }
 
 /*****************************************************************************/
@@ -620,7 +647,11 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		size = sizeof(data.ts_sync);
 		op = efx_ioctl_ts_sync;
 		break;
-#ifndef EFX_HAVE_PHC_SUPPORT
+	case EFX_TS_SET_SYNC_STATUS:
+		size = sizeof(data.ts_set_sync_status);
+		op = efx_ioctl_ts_set_sync_status;
+		break;
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) && !defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
 	case EFX_GET_TS_INFO:
 		size = sizeof(data.ts_info);
 		op = efx_ioctl_get_ts_info;
@@ -678,6 +709,10 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	case EFX_LICENSE_UPDATE2:
 		size = sizeof(data.key_stats2);
 		op = efx_ioctl_update_license;
+		break;
+	case EFX_LICENSED_APP_STATE:
+		size = sizeof(data.app_state);
+		op = efx_ioctl_licensed_app_state;
 		break;
 	default:
 		netif_err(efx, drv, efx->net_dev,

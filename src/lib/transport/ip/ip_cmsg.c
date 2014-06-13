@@ -219,9 +219,6 @@ void ip_cmsg_recv_timestamping(ci_netif *ni,
   if( sys_timestamp != 0 )
     c_flags |= flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE;
 
-  if( ! c_flags )
-    return;
-
   memset(&ts, 0, sizeof(ts));
   if( c_flags & ONLOAD_SOF_TIMESTAMPING_SOFTWARE )
     ci_udp_compute_stamp(ni, sys_timestamp, &ts.systime);
@@ -233,6 +230,21 @@ void ip_cmsg_recv_timestamping(ci_netif *ni,
   ci_put_cmsg(cmsg_state, SOL_SOCKET, ONLOAD_SO_TIMESTAMPING, sizeof(ts), &ts);
 }
 
+void ci_ip_cmsg_finish(struct cmsg_state* cmsg_state)
+{
+#ifndef NEED_A_WORKAROUND_FOR_GLIBC_BUG_13500
+  /* This is to ensure that a client unaware of the bug
+   * will not miss last cmsg.
+   */
+  if( (cmsg_state->cm) &&
+      ( ((char*)((&cmsg_state->cm->cmsg_len) + 1))
+          - ((char*)cmsg_state->msg->msg_control)
+        <= cmsg_state->msg->msg_controllen ) )
+    cmsg_state->cm->cmsg_len = 0;
+#endif
+
+  cmsg_state->msg->msg_controllen = cmsg_state->cmsg_bytes_used;
+}
 
 /**
  * Fill in the msg ancillary data buffer with all control messages
@@ -270,24 +282,16 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
 
   if( flags & CI_IP_CMSG_TIMESTAMPING ) {
     struct timespec rx_hw_stamp;
+    int flags = us->s.timestamping_flags;
     rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
     rx_hw_stamp.tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
+    if( ! (rx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
+        flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
     ip_cmsg_recv_timestamping(ni, pkt->pf.udp.rx_stamp, &rx_hw_stamp,
-              us->s.timestamping_flags, &cmsg_state);
+                              flags, &cmsg_state);
   }
 
-#ifndef NEED_A_WORKAROUND_FOR_GLIBC_BUG_13500
-  /* This is to ensure that a client unaware of the bug
-   * will not miss last cmsg.
-   */
-  if( (cmsg_state->cm) &&
-      ( ((char*)((&cmsg_state->cm->cmsg_len) + 1))
-          - ((char*)cmsg_state->msg->msg_control)
-        <= cmsg_state->msg->msg_controllen ) )
-    cmsg_state->cm->cmsg_len = 0;
-#endif
-
-  msg->msg_controllen = cmsg_state.cmsg_bytes_used;
+  ci_ip_cmsg_finish(&cmsg_state);
 }
 
 #endif /* !__KERNEL__ */

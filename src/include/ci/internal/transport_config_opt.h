@@ -126,13 +126,6 @@
  * EF_UL_EPOLL=2 and EF_EPOLL_CTL_FAST=1 */
 #define CI_CFG_EPOLL_MAX_POSTPONED      10
 
-
-/* Workaround for handing over sockets from the epoll set.
- * 0: UL workaround, for EF_UL_EPOLL=1 only
- * 1: in-kernel workaround, for all epoll implementations
- */
-#define CI_CFG_EPOLL_HANDOVER_WORKAROUND 1
-
 #endif
 
 /* Use userland pipe() implementation. */
@@ -697,6 +690,18 @@
 /* Whether to include code to transmit small packets via PIO */
 #define CI_CFG_PIO 1
 #define CI_CFG_MIN_PIO_BLOCK_ORDER 7
+
+/* Whether this build should use PIO or not.  
+ *
+ * This is needed in addition to CI_CFG_PIO as on some 32 bit systems
+ * PIO is suspected to not be safe, but those builds may be sharing a
+ * stack with a 64 bit system that is using PIO safely.
+ */
+#if defined(__x86_64__)
+#define CI_CFG_USE_PIO CI_CFG_PIO
+#else
+#define CI_CFG_USE_PIO 0
+#endif
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */

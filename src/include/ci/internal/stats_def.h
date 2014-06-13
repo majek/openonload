@@ -108,6 +108,10 @@ OO_STAT("Times we've taken the slow path unlocking the stack lock.",
         ci_uint32, unlock_slow, count)
 OO_STAT("Times packet memory shortage provoked the unlock slow path.",
         ci_uint32, unlock_slow_pkt_waiter, count)
+OO_STAT("Times deferred socket list provoked the unlock slow path.",
+        ci_uint32, unlock_slow_socket_list, count)
+OO_STAT("Times interrupt priming provoked the unlock slow path.",
+        ci_uint32, unlock_slow_need_prime, count)
 OO_STAT("Times the unlock slow path was taken to wake threads.",
         ci_uint32, unlock_slow_wake, count)
 OO_STAT("Times the unlock slow path was taken to close sockets/pipes.",
@@ -124,7 +128,7 @@ OO_STAT("Times a thread has slept waiting for a sock lock.",
         ci_uint32, sock_lock_sleeps, count)
 OO_STAT("Times a thread has spun waiting for a sock lock.",
         ci_uint32, sock_lock_buzz, count)
-OO_STAT("Number of times TCP sendmsg() found the non-blocking poll empty.",
+OO_STAT("Number of times TCP sendmsg() found the non-blocking pool empty.",
         ci_uint32, tcp_send_nonb_pool_empty, count)
 OO_STAT("Number of times TCP sendmsg() contended the stack lock.",
         ci_uint32, tcp_send_ni_lock_contends, count)

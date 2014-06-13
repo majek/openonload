@@ -98,6 +98,13 @@ typedef union {
 #define EFHW_VI_RX_HDR_SPLIT       0x8000  /*! RX header split */
 #define EFHW_VI_RX_PREFIX          0x10000  /*! RX prefix */
 #define EFHW_VI_RX_TIMESTAMPS      0x20000  /*! RX timestamping */
+#define EFHW_VI_TX_TIMESTAMPS      0x40000  /*! TX timestamping */
+#define EFHW_VI_TX_LOOPBACK        0x80000  /*! loopback outgoing traffic */
+#define EFHW_VI_RX_LOOPBACK        0x100000  /*! receive loopback traffic */
+
+/* Flags indicating effective setings determined at
+ * queue allocation/enabling */
+#define EFHW_VI_CLOCK_SYNC_STATUS  0x01  /*! sync status reporting */
 
 /* Flags for hw features */
 #define EFHW_VI_NIC_BUG35388_WORKAROUND 0x01  /*! workaround for bug35388 */

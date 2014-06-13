@@ -17,7 +17,6 @@ usage() {
   err "usage:"
   err "  $me unload                       - unload sfc/onload drivers"
   err "  $me reload                       - reload sfc/onload drivers"
-  err "  $me disable_cstates [persist]    - disable CPU low power states"
   err "  $me mknod <driver-name>          - make /dev/<driver-name>"
   err "  $me mod_params <driver-name>     - return module parameters"
   err
@@ -40,10 +39,18 @@ getmajor() {
 tryunload () {
   local mod="$1"
   if isloaded "$mod"; then
-    echo "$me: /sbin/modprobe -r $mod"
-    if ! /sbin/modprobe -r "$mod"; then
-      log "ERROR: modprobe -r $mod failed ($?)"
-      rc=1
+    # rmmod is used, to avoid modprobe failure as
+    # sfc_tune was removed from all modprobe conf files
+    # in latest onload
+    if [ "$mod" = sfc_tune ]; then
+       echo "$me: rmmod -f $mod"
+       rmmod -f $mod
+    else
+      echo "$me: /sbin/modprobe -r $mod"
+      if ! /sbin/modprobe -r "$mod"; then
+        log "ERROR: modprobe -r $mod failed ($?)"
+        rc=1
+      fi
     fi
   fi
   if ! isdev "$mod" && [ -e "/dev/$mod" ]; then
@@ -122,7 +129,7 @@ do_unload() {
   tryunload sfc_char
   tryunload sfc_resource
   tryunload sfc_affinity
-  tryunload sfc_tune
+  tryunload sfc_tune  #Need it while upgrading from olden version of onload
   tryunload sfc_mtd
   tryunload sfc_control
   tryunload sfc_aoe
@@ -143,40 +150,10 @@ cmd_unload() {
 cmd_reload() {
   [ $# = 0 ] || usage
   do_unload || fail "ERROR: could not unload all drivers"
-  trylog /sbin/modprobe sfc_tune
   trylog /sbin/modprobe onload
   isloaded onload || fail "ERROR: onload module did not load"
   # NB. sfc_aoe not always installed; don't want to moan...
   /sbin/modprobe sfc_aoe >/dev/null 2>&1
-  exit 0
-}
-
-######################################################################
-
-cmd_disable_cstates() {
-  case $# in
-    0)  ;;
-    1)  [ "$1" = persist ] || usage;;
-    *)  usage;;
-  esac
-  [ $# -gt 1 ] && usage
-  tryunload sfc_tune
-  isloaded sfc_tune && fail "ERROR: did not unload sfc_tune module"
-  trylog /sbin/modprobe sfc_tune idle_enable=2
-  isloaded sfc_tune || fail "ERROR: sfc_tune module did not load"
-  if [ "$1" = persist ]; then
-    if grep -q "^options sfc_tune.*idle_enable=2" /etc/modprobe.conf; then
-      exit 0  # already done
-    elif grep -q "^options.*sfc_tune" /etc/modprobe.conf; then
-      log "ERROR: /etc/modprobe.conf already has sfc_tune options."
-      log "ERROR: Will not change existing settings."
-      exit 1
-    else
-      msg="options sfc_tune idle_enable=2"
-      echo "$msg" >>/etc/modprobe.conf
-      echo "$me: NOTE: Added '$msg' to modprobe.conf"
-    fi
-  fi
   exit 0
 }
 
@@ -210,9 +187,6 @@ case "$cmd" in
     ;;
   unload)
     cmd_unload "$@"
-    ;;
-  disable_cstates)
-    cmd_disable_cstates "$@"
     ;;
   *)
     usage

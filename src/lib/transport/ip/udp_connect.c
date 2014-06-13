@@ -30,6 +30,10 @@
 #include "ip_internal.h"
 #include <onload/common.h>
 
+#ifndef __KERNEL__
+#include <ci/internal/efabcfg.h>
+#endif
+
 #define LPF "ci_udp_"
 #define LPFIN "-> " LPF
 #define LPFOUT "<- " LPF
@@ -169,19 +173,10 @@ static int ci_udp_set_filters(citp_socket* ep, ci_udp_state* us)
  * Interface
  */
 
-/* Conclude the EP's binding.  This function is abstracted from the
- * main bind code to allow implicit binds that occur when sendto() is
- * called on an OS socket.  [lport] and CI_SIN(addr)->sin_port do not
- * have to be the same value. */
-int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
-		         ci_uint16 lport )
+int ci_udp_should_handover(citp_socket* ep, const struct sockaddr* addr,
+                           ci_uint16 lport)
 {
-  ci_udp_state* us;
   ci_uint32 addr_be32;
-  int rc;
-
-  CHECK_UEP(ep);
-  ci_assert(addr != NULL);
 
 #if CI_CFG_FAKE_IPV6
   if( ep->s->domain == AF_INET6 && ! ci_tcp_ipv6_is_ipv4(addr) )
@@ -212,6 +207,31 @@ int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
       * The filters (if any) have already been removed, so we just get out. */
     goto handover;
   }
+
+  return 0;
+ handover:
+  return 1;
+}
+
+/* Conclude the EP's binding.  This function is abstracted from the
+ * main bind code to allow implicit binds that occur when sendto() is
+ * called on an OS socket.  [lport] and CI_SIN(addr)->sin_port do not
+ * have to be the same value. */
+static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
+                                ci_uint16 lport )
+{
+  ci_udp_state* us;
+  ci_uint32 addr_be32;
+  int rc;
+
+  CHECK_UEP(ep);
+  ci_assert(addr != NULL);
+
+  if( ci_udp_should_handover(ep, addr, lport) )
+    goto handover;
+
+  addr_be32 = ci_get_ip4_addr(ep->s->domain, addr);
+
   ci_udp_set_laddr(ep, addr_be32, lport);
   us = SOCK_TO_UDP(ep->s);
   if( addr_be32 != 0 )
@@ -242,13 +262,85 @@ int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
 }
 
 
+void ci_udp_handle_force_reuseport(ci_fd_t fd, citp_socket* ep,
+                                   const struct sockaddr* sa, socklen_t sa_len)
+{
+  int rc;
+
+  if( CITP_OPTS.udp_reuseports != 0 &&
+      ((struct sockaddr_in*)sa)->sin_port != 0 ) {
+    struct ci_port_list *force_reuseport;
+    CI_DLLIST_FOR_EACH2(struct ci_port_list, force_reuseport, link,
+                        (ci_dllist*)(ci_uintptr_t)CITP_OPTS.udp_reuseports) {
+      if( force_reuseport->port == ((struct sockaddr_in*)sa)->sin_port ) {
+        int one = 1;
+        ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
+        ci_assert(CI_IS_VALID_SOCKET(os_sock));
+        rc = ci_sys_setsockopt(os_sock, SOL_SOCKET, SO_REUSEPORT, &one,
+                               sizeof(one));
+        if( rc != 0 && errno == ENOPROTOOPT )
+          ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
+        ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT;
+        LOG_UC(log("%s "SF_FMT", applied legacy SO_REUSEPORT flag for port %u",
+                   __FUNCTION__, SF_PRI_ARGS(ep, fd), force_reuseport->port));
+      }
+    }
+  }
+}
+
+
+/* Set a reuseport bind on a socket.
+ */
+int ci_udp_reuseport_bind(citp_socket* ep, ci_fd_t fd,
+                          const struct sockaddr* sa, socklen_t sa_len)
+{
+  int rc;
+  ci_uint32 laddr_be32 = ci_get_ip4_addr(ep->s->domain, sa);
+  int lport_be16 = ((struct sockaddr_in*)sa)->sin_port;
+  ci_assert_nequal(ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT, 0);
+
+  /* We cannot support binding to port 0 as the kernel would assign
+   * the socket a port number.  We must move the socket before binding
+   * the OS socket and we don't have a port number to look up
+   * clusters.
+   */
+  if( lport_be16 == 0 ) {
+    LOG_UC(ci_log("%s: Binding to port 0 with reuseport set not supported",
+                  __FUNCTION__));
+    RET_WITH_ERRNO(ENOSYS);
+  }
+
+  /* If we don't have SO_REUSEPORT support in the kernel then we can't allow
+   * clustered sockets to be handed over - they're sharing an os socket.
+   * We don't allow implicit reuseport bind, so we can see now whether we'd
+   * have to handover.
+   *
+   * Legacy reuseport: This could still change before bind conclusion.
+   */
+  if( ci_udp_should_handover(ep, sa, lport_be16) ) {
+    LOG_U(ci_log("%s: Binding would result in handover, which is not supported"
+                 " on kernels that do not support SO_REUSEPORT", __FUNCTION__));
+    RET_WITH_ERRNO(ENOSYS);
+  }
+
+  if( (rc = ci_tcp_ep_reuseport_bind(fd, CITP_OPTS.cluster_name,
+                                     CITP_OPTS.cluster_size,
+                                     CITP_OPTS.cluster_restart_opt, laddr_be32,
+                                     lport_be16)) != 0 ) {
+    errno = -rc;
+    return -1;
+  }
+  return rc;
+}
+
+
 /* To handle bind we just let the underlying OS socket make all
  * of the decisions for us.  If The bind leaves things such that
  * the source address is not one of ours then we hand it over to the
  * OS (by returning CI_SOCKET_HANDOVER) - in which case the OS socket 
  * will be bound as expected. */
 int ci_udp_bind(citp_socket* ep, ci_fd_t fd, const struct sockaddr* addr,
-		socklen_t addrlen )
+		socklen_t addrlen)
 {
   int rc;
   ci_uint16 local_port;
@@ -264,11 +356,20 @@ int ci_udp_bind(citp_socket* ep, ci_fd_t fd, const struct sockaddr* addr,
    */
   ci_udp_clr_filters(ep);
 
-  rc = ci_tcp_helper_bind_os_sock(ep->netif, SC_SP(ep->s), addr,
-                                  addrlen, &local_port);
+  /* If the OS doesn't support reuseport we need to allow the clustering code
+   * to decide whether to bind the OS socket.
+   */
+  if( ! (ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) ) {
+    rc = ci_tcp_helper_bind_os_sock(ep->netif, SC_SP(ep->s), addr,
+                                    addrlen, &local_port);
+  }
+  else {
+    local_port = ((struct sockaddr_in*)addr)->sin_port;
+    rc = 0;
+  }
+
   if( rc == CI_SOCKET_ERROR )
     return rc;
-
   return ci_udp_bind_conclude(ep, addr, local_port );
 }
 
@@ -455,6 +556,12 @@ int ci_udp_connect(citp_socket* ep, ci_fd_t fd,
   LOG_UC(log("%s("SF_FMT", addrlen=%d)", __FUNCTION__,
              SF_PRI_ARGS(ep,fd), addrlen));
 
+  if( ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY ) {
+    ci_log("%s: Connecting a UDP socket with SO_REUSEPORT set is not supported"
+           " where the kernel does not support SO_REUSEPORT.", __FUNCTION__);
+    return -1;
+  }
+
   os_sock = ci_get_os_sock_fd (ep, fd);
   if( !CI_IS_VALID_SOCKET( os_sock ) ) {
     LOG_U(ci_log("%s: no backing socket", __FUNCTION__));
@@ -576,7 +683,7 @@ int ci_udp_getpeername(citp_socket*ep, struct sockaddr* name, socklen_t* namelen
 
 #ifdef __ci_driver__
 
-void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id)
+void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id, int do_free)
 {
   /* All process references to this socket have gone.  So we should
    * shutdown() if necessary, and arrange for all resources to eventually
@@ -608,7 +715,7 @@ void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id)
   /* Only free state if no outstanding tx packets: otherwise it'll get
    * freed by the tx completion event.
    */
-  if( us->tx_count == 0 )
+  if( us->tx_count == 0 && do_free )
     ci_udp_state_free(netif, us);
 }
 

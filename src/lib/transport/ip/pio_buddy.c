@@ -138,6 +138,7 @@ ci_pio_buddy_dtor(ci_netif* ni, ci_pio_buddy_allocator* b)
 ci_int32
 ci_pio_buddy_alloc(ci_netif* ni, ci_pio_buddy_allocator* b, ci_uint8 order)
 {
+#if CI_CFG_USE_PIO
   ci_uint8 smallest;
   ci_uint32 addr;
   if( b->initialised ) {
@@ -175,6 +176,7 @@ ci_pio_buddy_alloc(ci_netif* ni, ci_pio_buddy_allocator* b, ci_uint8 order)
 
     return addr * (1u << CI_CFG_MIN_PIO_BLOCK_ORDER);
   }
+#endif
   return -ENOSPC;
 }
 

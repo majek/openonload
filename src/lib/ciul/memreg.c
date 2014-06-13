@@ -75,6 +75,7 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
 
 int ef_memreg_free(ef_memreg* mr, ef_driver_handle mr_dh)
 {
+  free(mr->mr_dma_addrs);
   EF_VI_DEBUG(memset(mr, 0, sizeof(*mr)));
   return 0;
 }

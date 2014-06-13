@@ -57,6 +57,10 @@
 #include <ci/efhw/efhw_types.h>
 #include <ci/efrm/debug.h>
 
+struct efrm_bt_collection {
+	struct efrm_buffer_table_allocation *allocs;
+	int num_allocs;
+};
 
 struct efrm_buffer_table_allocation {
 	/* list of blocks, not null-terminated */

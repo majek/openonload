@@ -429,7 +429,7 @@ int cicp_raw_ip_send(const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex)
 
 
 struct cicp_raw_sock_work_parcel {
-  ci_workitem_t wqi;
+  struct work_struct wqi;
   int pktid;
   const cicp_handle_t *control_plane;
   ci_ifid_t ifindex;
@@ -437,9 +437,10 @@ struct cicp_raw_sock_work_parcel {
 
 
 static void
-cicppl_arp_pkt_tx_queue(void *context)
+cicppl_arp_pkt_tx_queue(struct work_struct *data)
 {
-  struct cicp_raw_sock_work_parcel *wp = context;
+  struct cicp_raw_sock_work_parcel *wp =
+            container_of(data, struct cicp_raw_sock_work_parcel, wqi);
   struct cicp_bufpool_pkt* pkt;
   ci_ip4_hdr* ip;
   int rc;
@@ -498,8 +499,8 @@ cicpplos_pktbuf_defer_send(const cicp_handle_t *control_plane,
     wp->pktid = pendable_pktid;
     wp->control_plane = control_plane;
     wp->ifindex = ifindex;
-    ci_workitem_init(&wp->wqi, cicppl_arp_pkt_tx_queue, wp);
-    ci_verify(ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &wp->wqi) == 0);
+    INIT_WORK(&wp->wqi, cicppl_arp_pkt_tx_queue);
+    ci_verify(queue_work(CI_GLOBAL_WORKQUEUE, &wp->wqi) != 0);
     return 0;
   } else {
     return -ENOMEM;
@@ -1044,7 +1045,7 @@ static int cicpos_mac_open(struct inode *inode, struct file *file)
 {
     int rc;
     rc = seq_open(file, &cicpos_mac_seq_ops);
-    if (rc != 0)
+    if (rc == 0)
         ((struct seq_file *)file->private_data)->private = PDE_DATA(inode);
     return rc;
 }
@@ -1258,7 +1259,7 @@ static int cicpos_fwd_open(struct inode *inode, struct file *file)
 {
     int rc;
     rc = seq_open(file, &cicpos_fwd_seq_ops);
-    if (rc != 0)
+    if (rc == 0)
         ((struct seq_file *)file->private_data)->private = PDE_DATA(inode);
     return rc;
 }
@@ -1835,7 +1836,7 @@ static cicpos_timer_data_t cicpos_timer_data;
 */
 
 /*! Control plane timer node */
-static struct timer_list cicpos_timer_node;
+static struct delayed_work cicpos_update_work;
 
 /*! Netlink socket */
 static struct socket *NL_SOCKET;
@@ -1883,38 +1884,24 @@ efab_netlink_poll_for_updates(cicp_handle_t *control_plane, char* buf)
 
 /*! control plane pollers */
 static void 
-cicpos_worker(void *context_cplane)
+cicpos_worker(struct work_struct *data)
 {
     static unsigned int count = 0;
     static char buf[NL_BUFSIZE];
 
+    if( cicpos_timer_data.stop )
+	return;
+
     if (cicpos_running)
-    {	cicp_handle_t *control_plane = (cicp_handle_t *)context_cplane;
+    {	cicp_handle_t *control_plane = &CI_GLOBAL_CPLANE;
         efab_netlink_poll_for_updates(control_plane, buf);
 	if (count % 2 == 0)
 	    cicpos_dump_tables(control_plane, count%20, buf);
 	count++;
     }
-}
 
-
-
-
-
-/** Timer function that schedules the synchronization task */
-static void 
-cicpos_timer(unsigned long in_data)
-{
-  cicpos_timer_data_t *datap = (void *) in_data;
-
-  if (! datap->stop) {
-    static ci_workitem_t wi =
-      CI_WORKITEM_INITIALISER(wi, (CI_WITEM_ROUTINE) &cicpos_worker, NULL);
-    CI_WORKITEM_SET_CONTEXT(&wi, datap->control_plane);
-    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &wi);
-
-    mod_timer(&cicpos_timer_node, jiffies + CICPOS_SCAN_INTERVAL);
-  }
+    queue_delayed_work(CI_GLOBAL_WORKQUEUE, &cicpos_update_work,
+		       CICPOS_SCAN_INTERVAL);
 }
 
 
@@ -1948,18 +1935,14 @@ cicpos_sync_ctor(cicp_handle_t *control_plane)
 	    /* init synchronizer timer function data */
 	    cicpos_timer_data.stop = 0;
 
-	    /* init synchronizer timer */
-	    init_timer(&cicpos_timer_node);
-	    cicpos_timer_node.expires = jiffies + CICPOS_SCAN_INTERVAL;
-	    cicpos_timer_node.data = (unsigned long) &cicpos_timer_data;
-	    cicpos_timer_node.function = &cicpos_timer;
-
 	    /*
 	     * Start the timer that schedules a regular kernel system MIB poll.
 	     * Regularity is achieved by re-registering the timer at each
 	     * trigger.
 	     */
-	    add_timer(&cicpos_timer_node);
+	    INIT_DELAYED_WORK(&cicpos_update_work, cicpos_worker);
+	    queue_delayed_work(CI_GLOBAL_WORKQUEUE, &cicpos_update_work,
+			       CICPOS_SCAN_INTERVAL);
 
 	    DEBUGNETLINK(DPRINTF(CODEID": constructed"));
 	    rc = 0;
@@ -1993,18 +1976,16 @@ cicpos_sync_dtor(cicp_handle_t *control_plane)
 	/* delete the arp poll timer synchronously */
 	DEBUGNETLINK(DPRINTF("Deleting synchronizer timer"));
 
-	/* flush the workqueue to make sure there are no pending ARP
-         * work items:
-	 * - flush workqueue; it may re-enable timer if cicpos_timer()
-	 *   started before cicpos_timer_data.stop was set to 1;
-	 * - disable timer;
-	 * - flush workqueue; now cicpos_timer() can not restart.
-         * 
-         * See Bug30934 for full details of why two flushes are needed
-         */
-	ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
-	del_timer_sync(&cicpos_timer_node);
-	ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+	/* Stop MIB updates */
+#ifdef EFX_USE_CANCEL_DELAYED_WORK_SYNC
+	cancel_delayed_work_sync(&cicpos_update_work);
+#else
+	cancel_delayed_work(&cicpos_update_work);
+	/* Wait for the last update to finish */
+	flush_workqueue(CI_GLOBAL_WORKQUEUE);
+	/* Cancel again for the case we've rescheduled */
+	cancel_delayed_work(&cicpos_update_work);
+#endif
 
 	/* destroy the persistent netlink socket */
 	sock_release(NL_SOCKET);
@@ -2308,7 +2289,8 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 	}
 	if( nlhdr->nlmsg_type == RTM_DELROUTE ) {
-	    cicpos_route_delete(session->control_plane, dest_ip, dest_ipset);
+	    cicpos_route_delete(session->control_plane, dest_ip,
+                                dest_ipset, ifindex);
             if (session->nosort) {
                 session->nosort = CI_FALSE;
                 DEBUGNETLINK(ci_log("%s: delete route when dumping",
@@ -2502,7 +2484,7 @@ extern void
 cicpos_mac_kmib_dtor(cicpos_mac_mib_t *sync)
 {   (void)sync; /* not actually used */
     /* flush the workqueue to make sure there are no pending ARP work items */
-    ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+    flush_workqueue(CI_GLOBAL_WORKQUEUE);
 }
 
 

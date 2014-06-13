@@ -1,136 +1,4 @@
-OpenOnload-201310-u3 Release Notes
-==================================
-
-This is an update release that fixes a bug in the net driver bundled
-with openonload-201310-u2.
-
-The accompanying ChangeLog file contains details of the changes made
-in this release.
-
-The Release Notes for the openonload-201310 series of releases are
-included at the end of this file.
-
-
-OpenOnload-201310-u2 Release Notes
-==================================
-
-This is an update release that fixes bugs in openonload-201310 and
-adds a few enhancements.
-
-The accompanying ChangeLog file contains details of the changes made
-in this release.
-
-Please see ReleaseNotes-sfc for details of changes to the sfc net driver
-
-The Release Notes for the openonload-201310 and openonload-201310-u1
-releases are included at the end of this file.
-
-----------------------------------------
-New Configuration Options
--------------------------
-
-EF_LOG
-
-This option is designed to control how "chatty" Onload's informative
-and warning messages are.  It takes a comma-separated list of message
-groups to enable and disable (if prefixed with a minus sign).
-
-Current valid message groups are:
- banner (on by default) for the Onload copyright banner;
- resource_warnings (on by default) for (e.g.) huge page allocation messages;
- conn_drop (off by default) for (e.g.) connections dropped from listen queue;
-E.g. to enable conn_drop and disable resource_warnings set:
-EF_LOG=conn_drop,-resource_warnings
-
-Future releases will likely extend the set of messages controlled by
-each group and add more groups of log messages that can be controlled
-in this way.
-
-----------------------------------------
-New features
-------------
-
- - solar_clusterd: this uses support for ef_vi application clustering
- to allow SolarCapturePro to scale across many CPUs.  Application
- clustering allows a stream of traffic to be split across many VIs so
- that a cluster of applications can process it in parallel to increase
- scalability.
-
- - unicast-all and multicast-all ef_vi filters: the change in
- semantics outlined below for openonload-201310-u1 has now been
- resolved, such that unicast-all only blocks unicast traffic, and
- multicast-all only blocks multicast traffic.
-
- - phys_mod_gid module option to sfc_char: this controls the group ID
- of ef_vi applications which are allowed to use physical buffer mode.
-
-
-OpenOnload-201310-u1 Release Notes
-==================================
-
-This is an update release that fixes bugs in openonload-201310 and
-adds a few enhancements.
-
-The accompanying ChangeLog file contains details of the changes made
-in this release.
-
-Please see ReleaseNotes-sfc for details of changes to the sfc net driver
-
-The Release Notes for the openonload-201310 release are included at
-the end of this file.
-
-----------------------------------------
-New Configuration Options 
--------------------------
-
-EF_TX_PUSH_THRESHOLD
- - Sets a threshold for the number of outstanding sends before we stop
-   using TX descriptor push.
-
-----------------------------------------
-New features 
-------------
-
-- Support for hardware timestamping of packets using the
-SO_TIMESTAMPING API on hardware that is capable of this (7000-series
-adapters).  It is recommended to update to latest GA firmware to use
-this feature.
-
-- The PIO feature that reduces latency can now be used on multiple
-sends in parallel.  Likewise multiple templated sends in parallel are
-now also possible.
-
-- On 7000-series NICs, the ef_vi support for multicast-all and
-unicast-all filters has been restored.  See Known Issues below for one
-important caveat.
-
-- Added ef_filter_spec_set_{unicast,multicast}_mismatch() to ef_vi API
-to allow reception of packets that do not match other filters.
-
-- Added onload_fd_check_feature() extension API to allow caller to check
-if ONLOAD_MSG_WARM is supported/safe on a given file descriptor.
-
-----------------------------------------
-New Known Issues
-----------------
-
-- Due to the AMD IOMMU driver not returning aligned PCI addresses the use
-of huge pages on systems with AMD IOMMUs is not supported.
-
-- Due to changes in the features requested by Onload when running on
-7000-series adapters which are not supported by earlier firmware
-versions, it is necessary to update to firmware version v4.0.0.6602 or
-later to use this version of Onload on those adapters. (Issue39531)
-
-- There is a change in semantics of multicast-all and unicast-all
-ef_vi filters in this release: a multicast-all filter normally blocks
-other multicast receivers from receiving traffic, but it will also now
-block an unaccelerated unicast receiver.  Similarly a unicast-all
-filter will also block an unaccelerated multicast receiver.  We hope
-to correct this in a future update release.
-
-
-OpenOnload-201310 Release Notes
+OpenOnload-201405 Release Notes
 ===============================
 
 This is a major update release that adds new features to OpenOnload.
@@ -139,146 +7,380 @@ Below is a brief summary of the new features and limitations that we
 are aware of.  See the ChangeLog for further details and bugs fixed.
 
 
-----------------------------------------
-New features 
-------------
+Hardware multicast loopback
+---------------------------
+Onload now supports two modes of multicast loopback:
+ - software loopback where two sockets are sharing a stack;
+ - hardware loopback with no requirement for stack sharing.
 
-This release adds the following new features.  Please see the user
-guide for full details.
+Hardware multicast loopback enables multicast traffic to be passed
+between onload stacks. This allows applications running on the same
+machine to benefit from onload acceleration without the need to share
+a stack and so avoid problems such as lock contention or resource
+shortages.
 
-- Support for the Solarflare 7000-series adapters including the SFN7122F.
-New features of 7000-series adapters include hardware multicast
-replication, large buffer table support, reduced latency and the templated
-sends API (see below).
+To use hardware multicast loopback you must have:
+ - SFC 7000-series (Flareon) NIC;
+ - updated firmware to v4_0_7_6710 or later;
+ - selected fully featured firmware variant via the sfboot utility.
 
-- MSG_WARM, a new flag which when used on TCP send calls will exercise
-the send path to keep it warm and improve the latency of subsequent
-sends.
+Note: the feature is not supported on the low-latency firmware
+variant.
 
-- Support for the PowerPC architecture.
+Multicast loopback is controlled per OpenOnload stack by two
+environment variables:
 
-- A JNI wrapper for the onload extensions API is now included.
-
-- SO_TIMESTAMP[NS] is now supported for accelerated TCP sockets
-
-- Added extension API (onload_stack_opt_set_int()) to set onload stack
-options at runtime.
-
-- Added extension API (onload_stackname_save(),
-onload_stackname_restore()) to save and restore current stack name.
-
-
-----------------------------------------
-Configuration Options 
+EF_MCAST_RECV_HW_LOOP
 ---------------------
+Reception of loopback traffic from other OpenOnload stacks is by
+default enabled.  It can be disabled for stacks that do not wish to
+receive it by setting EF_MCAST_RECV_HW_LOOP to 0.
 
-The following new configuration options have been added:
+EF_MCAST_SEND
+-------------
+Sending of traffic to the hardware loopback path is by default
+disabled, and enabling requires setting EF_MCAST_SEND to either 2 or
+3.  This new EF_MCAST_SEND option deprecates EF_MCAST_LOOP_OFF.
 
-EF_PIO
- - Control of whether the Programmed I/O (PIO) latency optimisation is used
- on SFN7122F adapters.
+EF_MCAST_SEND controls loopback of multicast traffic to receivers in
+the same and other OpenOnload stacks.
+When set to 0 (default) disables loopback within the same stack as
+well as to other OpenOnload stacks.
+When set to 1 enables loopback to the same stack.
+When set to 2 enables loopback to other OpenOnload stacks.
+When set to 3 enables loopback to the same as well as other OpenOnload
+stacks.
+In respect to loopback to other OpenOnload stacks the option is just a
+hint and the feature requires: (a) 7000-series or newer device, and
+(b) selecting firmware version/variant with hardware loopback support.
 
-EF_PIO_THRESHOLD
- - Set the maximum packet size that will use PIO.
+Loopback issues and limitations
+-------------------------------
+1. Hardware multicast loopback can only be enabled on interfaces that
+support it.  For interfaces without support the environment variable
+settings will be silently ignored.
 
-EF_VFORK_MODE
- - Control how vfork() interception works.
+2. Although a stack may opt out from receiving loopback multicast
+traffic (with EF_MCAST_RECV_HW_LOOP=0) this option can in some
+circumstances be overriden/ignored:
 
-EF_TCP_SNDBUF_MODE
- - Control whether send buffer limit applies to just the TCP send queue, or
- to the sum of the TCP send and retransmit queues.
+ - another stack created with EF_MCAST_RECV_HW_LOOP=1 opts to receive
+ the same multicast stream; or
 
-The sfc_resource module option "shared_buffer_table" has been removed
-(see discussion of ef_iobufset below).
+ - reception of loopback traffic has been enabled globally (with
+ SRIOV, not yet supported)
 
+3. Specifying MULTICAST_TTL=0 on a socket disables sending traffic to
+both the normal network path and the hardware loopback path
 
-----------------------------------------
-Known Issues
-------------
+4. The IP_MULTICAST_LOOP socket option has no effect on hardware
+multicast loopback.  In general a given stack will receive at least as
+much traffic as it requested.
 
-- The PIO feature that reduces latency can only be used for a single
-outstanding send at a time, so applications doing a number of sends in
-quick succession are likely to get the performance advantage only for the
-first send.  This limitation will addressed in an update in the near
-future.
+5. Packets received via the hardware multicast loopback path will not
+have hardware RX timestamps added.  If using this combination, you
+must have a 4.1 or later firmware version.
 
-- 32 bit application binaries are known not to work correctly with
-OpenOnload on PowerPC architectures.  This issue only affects PowerPC.
-
-- SRIOV is not supported in this release on PowerPC architectures.  We
-recommend using EF_PACKET_BUFFER_MODE=0 or 2, but not 1 or 3.
-
-- PowerPC architectures do not currently support the new PIO method
-for reducing transmit latency (EF_PIO).  We recommend setting EF_PIO=0.
-
-- EEH error injection tests on PowerPC systems have been seen to cause
-the NIC to be disabled by the hypervisor.  This can be recovered by
-resetting the system.
-
-- Some SLES11 kernels exhibit a bug when running OpenOnload with SRIOV
-and Intel IOMMUs.  This is typically seen when loading drivers.  This
-bug has been fixed in more recent kernels (introduced in 3.1, fixed in
-3.6 and 3.2.stable).
-
-- When switching between "low-latency" and "full-featured" firmware
-variants it is necessary to reload drivers afterwards for the change
-to fully take effect.
-
-- On 7122f NICs, the ef_vi support for multicast-all and unicast-all
-filters does not work.  Attempts to install such filters will return
-an error.  (Support will be added at a later date).
-
-- On 7122f NICs, we currently only support 1 physical function per NIC
-port.
-
-- Reloading drivers on 7122f NICs on SLES10 OS using MSI-X has been
-seen to result in the driver failing to obtain an interrupt and
-reporting MCDI request timeouts.  This can be worked around by setting
-interrupt_mode=0 module option for the sfc driver to force MSI
-interrupts.
-
-- In rare circumstances the combination of a zero-copy send and the
-accelerated TCP loopback feature causes a connection to get
-stuck/corrupted.  (In DEBUG builds an assertion is triggered).  This is not
-a regression, and affects earlier releases in the same way.
-
-- There is a small difference in semantics of ef_vi_filter_add() on
-7122f and Siena NICs.  On Siena, if you try to insert a MAC filter,
-and there is already an existing matching MAC filter, it will fail.
-On 7122f this is also the case for explicit MAC filters, but an
-existing implicit MAC filter will get replaced and the new filter will
-succeed.
-
-- This release removes support for the ef_iobufset API.  ef_vi
-applications that use this will not work with this release, and ef_vi
-binaries compiled against EnterpriseOnload 2.0 and OpenOnload 201109
-and earlier will not work with this release.  ef_vi applications
-should be updated to use the ef_memreg API instead.
+6. The combination of clustering (see below) and hardware multicast
+loopback on a single socket is not supported in the current release.
+We hope to address this in a future release.
 
 
-----------------------------------------
-Templated send API
+Transmit Hardware Timestamping
+------------------------------
+
+This release adds support for packets sent to be timestamped by the
+NIC, and this timestamp returned to the application using the standard
+SO_TIMESTAMPING API.  This features requires (i) suitable 7000-series
+Flareon NIC; (ii) PTP licence installed; and (iii) either a
+SolarCapture Pro or Performance Monitor licence installed.  It is also
+recommend that sfptpd be used to synchronise the NIC clock and
+configure global access to hardware timestamping using the
+SIOCHWTSTAMP ioctl.
+
+Onload extends the Linux SO_TIMESTAMPING API to allow TCP sockets to
+also receive transmit timestamps.  As a TCP segment may be transmitted
+more than once, the returned data includes the times of both the first
+and last time it was transmitted.  These are not provided to the
+application until the data have been acknowledged by the receiver.  As
+packets transmitted may include a number of application-level sends
+combined together, or split a single application send into many
+separate packets, each timestamp includes the number of bytes in the
+byte stream that it corresponds to.
+
+An example application to document the use of these timestamps is
+included in src/tests/onload/hwtimestamping
+
+There are some new onload options to control the delivery of transmit
+timestamps:
+
+EF_TX_TIMESTAMPING
 ------------------
+Control of hardware timestamping of transmitted packets, possible values:
+  0 - do not do timestamping (default);
+  1 - request timestamping but continue if hardware is not capable or it
+ does not succeed;
+  2 - request timestamping and fail if hardware is capable and it does
+ not succeed;
+  3 - request timestamping and fail if hardware is not capable or it
+ does not succeed;
 
-This release includes a preview of the "Templated Send API" for 7000-series
-adapters.  See /usr/include/onload/extensions_zc.h for details.
+EF_TIMESTAMPING_REPORTING
+-------------------------
+Controls timestamp reporting, possible values:
+ 0: report translated timestamps only when the NIC clock has been set;
+ 1: report translated timestamps only when the NIC clock is synchronised 
+(e.g. using ptpd).
+If the above conditions are not met Onload will only report raw (not
+translated) timestamps.
+The current version of sfptpd (v2.1.0.34) does not request the
+synchronisation reporting that this feature relies on.  This will be
+addressed in the next sfptpd release.
 
-WARNING: The implementation in this release has a number of known bugs, and
-has not yet been fully performance optimised.
 
-This API provides a way to reduce the latency of TCP sends by providing a
-template for a message in advance of the critical path.  This allows Onload
-to perform a number of steps ahead of the critical path, including copying
-the message payload to the adapter.  On the critical path the application
-can optionally update the message, and then send it.
+SO_REUSEPORT application clustering
+-----------------------------------
 
-This implementation has a number of bugs in the handling of changes to the
-control plane.  In particular, if the route to the socket's peer changes so
-that packets are routed to a different layer-2 interface then the packet
-may be routed via the wrong interface.
+This version of Onload includes a new feature to allow clusters of
+applications share a local port number through SO_REUSEPORT and spread
+traffic for that port among them.  This allows the cluster of
+applications to scale across more CPUs.
 
-This implementation only allows a single message template to be outstanding
-at a time.
+There are some new onload options to control the use of application
+clustering:
 
-The above mentioned limitation and bugs will be addressed in an update in
-the near future.
+EF_CLUSTER_SIZE
+---------------
+If use of SO_REUSEPORT creates a cluster, this option specifies size
+of the cluster to be created.  This option has no impact if use of
+SO_REUSEPORT joins a cluster that already exists.  Note that if fewer
+sockets than specified here join the cluster, then some traffic will
+be lost.  Refer to the SO_REUSEPORT section in the manual for more
+detail.
+
+EF_CLUSTER_NAME
+---------------
+Specifies the name of the cluster to create or join when SO_REUSEPORT
+is used.  If no name is specified (default) then a cluster will be
+chosen based on the port numbers used.
+
+EF_CLUSTER_RESTART
+------------------
+This option controls the behaviour when recreating a stack (e.g. due to 
+restarting a process) in an SO_REUSEPORT cluster and it encounters a resource 
+limitation such as an orphan stack from the previous process:
+ 0 - return an error
+ 1 - terminate the orphan to allow the new process to continue
+
+EF_TCP_FORCE_REUSEPORT / EF_UDP_FORCE_REUSEPORT
+-----------------------------------------------
+
+These options specify comma-separated lists of port numbers.  TCP /
+UDP sockets respectively that bind to those port numbers will have
+SO_REUSEPORT automatically applied to them, allowing the use of
+application clustering for applications that don't make use of
+SO_REUSEPORT natively.
+
+Application Clustering Limitations
+----------------------------------
+
+There are some limitations to Onload's support for application
+clustering:
+
+- NIC reset while a cluster is active is not supported.  After a NIC
+reset the cluster will not have the correct filters installed.  We
+hope to address this in a future release.
+
+- If a cluster is not fully populated by stacks some traffic will get
+lost.  The traffic is spread among EF_CLUSTER_SIZE stacks, regardless
+of whether all those stacks are present.
+
+- Clustering is only dependent on the port numbers used, not on the IP
+addresses.  If one application binds to 1.1.1.1:12345 and another to
+2.2.2.2:12345, then 1.1.1.1:12345 can get some traffic destined to
+2.2.2.2:12345 which will be dropped in software by Onload.  To get
+correct behaviour all members of the cluster should bind to the same
+IP address. We hope to remove this limitation in future.
+
+- Restarting applications that are using a cluster can fail due to the
+stacks from the previous instance still being present.  Use
+EF_CLUSTER_RESTART to control the behaviour of Onload in this case.
+
+- Support for clustering and SO_REUSEPORT on legacy OSes (where the OS
+does not itself support SO_REUSEPORT) is currently in alpha.  We
+recommend that on these OSes this should only be used to evaluate the
+feature, and that a future release will make support for this suitable
+for use in production.
+
+- To match linux kernel SO_REUSEPORT implementation, we do not do
+clustering on multicast. i.e. SO_REUSEPORT has the same effect as
+SO_REUSEADDR for multicast.
+
+- Spreading of traffic between members of a cluster is done via the
+NICs RSS hash functionality.  For TCP, we hash on source and
+destination IP addresses and ports.  For UDP, we hash only on source
+and destination IP addresses.
+
+- The combination of clustering and hardware multicast loopback on a
+single socket is not supported in the current release.  We hope to
+address this in a future release.
+
+
+Wire-Order Delivery API (WODA)
+------------------------------
+
+This release of Onload includes a new extension API to allow an
+application to wait for and receive data from a set of sockets in a
+similar way to epoll_wait(), but with additional information to ensure
+that the sockets become readable in the same order as the
+corresponding data on the wire.
+
+int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
+                              struct onload_ordered_epoll_event *oo_events,
+                              int maxevents, int timeout);
+
+When onload_ordered_epoll_wait returns with ready events, the events
+are presented in wire order.  To maintain the ordering of the data
+only a certain amount of data should be read from each ready fd.  The
+amount that can be read is given by the bytes field in the associated
+onload_ordered_epoll_event.  The onload_ordered_epoll_event also
+contains the timestamp of the first available ordered data as would
+normally be obtained via the cmsg structure to recvmsg().  The
+timestamp of each received data can also be retrieved as normal if
+desired. 
+
+It is possible to receive data that can not be ordered.  E.g. if the
+data are delivered via the kernel or from a non-Solarflare interface.
+If the associated onload_ordered_epoll_event has ts.tv_sec == 0 then
+that fd is ready without ordered data.
+
+There is some example code included showing use of the API.  You can
+find this in src/tests/onload/wire_order/.  This comprises two
+applications:
+
+ - wire_order_server: This uses onload_ordered_epoll_wait to receive
+ ordered data over a set of sockets.  Received data is echoed back on
+ a single reply socket.
+
+ - wire_order_client: This sends sequenced data across a set of
+ sockets.  It reads the reply data from the server, and ensures this
+ is received in sequence.
+
+The example code is not built as part of the standard install, so to
+build it:
+ cd openonload-<ver>/build/gnu_x86_64/tests/onload/wire_order
+ USEONLOADEXT=1 make
+
+To run the code with the default options:
+hosta: EF_RX_TIMESTAMPING=3 onload ./wire_order_server
+
+hostb: onload --profile=latency ./wire_order_client hosta
+
+This will use a set of 100 TCP sockets, and send sequenced data over
+them.  You can control the number of sockets used with the -s option,
+the number of iterations with -n and use UDP sockets instead with -U.
+
+Some things to note:
+- to ensure sends are done synchronously, and avoid re-ordering between
+streams the latency profile should be used with onload on the sending
+side (wire_order_client)
+- The test will not work without enabling EF_RX_TIMESTAMPING on the server
+
+Wire-Order Delivery API limitations
+-----------------------------------
+
+There are some limitations to the wire-order delivering API:
+
+- WODA only works with EF_UL_EPOLL=1, EF_RX_TIMESTAMPING set, and a
+suitable licence to allow timestamping.
+
+- all accelerated sockets in the epoll set must be in a single onload
+stack for correct operation.
+
+- only data that has been received via onload with a hardware timestamp
+will be ordered (e.g. loopback traffic will not be accelerated)
+
+- onload_ordered_epoll_wait() will only work level triggered.  It does
+not support an edge-triggered mode.
+
+- a return value of 0 does not necessarily mean that no fds are ready,
+just that no fds are ready with ordered data.
+
+- the ordering list only contains each socket once, that means if data
+is received to sockets A, B, A, B then you would need to call
+onload_ordered_epoll_wait() (at least) twice to discover all the
+available data.
+
+
+onload_move_fd() extension API
+------------------------------
+
+This version of Onload includes a new extension API to allow sockets
+to be moved between stacks.  This is in addition to the
+onload_set_stackname() API that allows applications to select the
+stack that will be used before a socket is created.  onload_move_fd()
+is particularly useful for servers, as by default all sockets accepted
+from a listening socket will share the same stack as the listening
+socket.  This can result in many sockets sharing a stack, and for some
+servers with multiple worker threads this can cause contention between
+the threads.
+
+int onload_move_fd(int fd);
+
+The supplied file descriptor will be moved to the current stack.  The
+current stack can be controlled using onload_set_stackname().
+
+Currently onload_move_fd() can only be used for:
+ - Unbound UDP sockets; or 
+ - TCP accepted sockets or TCP sockets in the closed state
+
+In all cases the following conditions must be met:
+ - empty send and retransmit queues (i.e. send() etc. has never been
+ called on the socket)
+ - simple receive queue (no loss, reordering, or urgent data)
+ - socket has not yet been added to an epoll set
+ - socket is not yet in an application cluster (SO_REUSEPORT)
+
+Returns 0 if successful, otherwise -1.  In all cases the socket is
+usable even if the call failed.
+
+
+TCP SYN cookies
+---------------
+
+This release adds support for TCP SYN cookies to protect against a SYN
+flood attack.  This is controlled through the use of the
+EF_TCP_SYNCOOKIES environment variable (default 0, off).
+
+
+sfc_tune module removal
+-----------------------
+
+This release removes the sfc_tune module that previously would, when
+enabled, attempt to keep CPUs from entering particular cstates and so
+ensure jitter caused by CPUs sleeping was avoided.  Please instead use
+the standard "intel_idle.max_cstate=0 idle=poll" Linux kernel command
+line options to achieve the same affect.
+
+
+
+Performance
+-----------
+
+Testing for this release has highlighted a small throughput
+performance regression compared to the previous (openonload-201310-u2)
+release.  This affects interrupt-driven streams with small message
+sizes.  The exact difference in performance is dependent on the server
+in use and the message size, but is typically a few percent of
+throughput.  We are aiming to restore the previous performance in the
+next update release.
+
+
+ifenslave with EF_PACKET_BUFFER_MODE=3
+--------------------------------------
+
+In some testing using ifenslave to configure bond interfaces we have
+been able to provoke soft lockup warnings from the Linux kernel.  This
+is thought to only apply to RHEL5 update 6 using VFs without an IOMMU,
+i.e. EF_PACKET_BUFFER_MODE=3.  We are aiming to fix this in the next
+update release.

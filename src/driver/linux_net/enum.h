@@ -158,6 +158,7 @@ enum efx_loopback_mode {
  * @RESET_TYPE_WORLD: Reset as much as possible
  * @RESET_TYPE_RECOVER_OR_DISABLE: Try to recover. Apply RESET_TYPE_DISABLE if
  * unsuccessful.
+ * @RESET_TYPE_MC_BIST: MC entering BIST mode.
  * @RESET_TYPE_DISABLE: Reset datapath, MAC and PHY; leave NIC disabled
  * @RESET_TYPE_TX_WATCHDOG: reset due to TX watchdog
  * @RESET_TYPE_INT_ERROR: reset due to internal error
@@ -165,14 +166,16 @@ enum efx_loopback_mode {
  * @RESET_TYPE_DMA_ERROR: DMA error
  * @RESET_TYPE_TX_SKIP: hardware completed empty tx descriptors
  * @RESET_TYPE_MC_FAILURE: MC reboot/assertion
+ * @RESET_TYPE_MCDI_TIMEOUT: MCDI timeout.
  */
 enum reset_type {
-	RESET_TYPE_INVISIBLE = 0,
-	RESET_TYPE_RECOVER_OR_ALL = 1,
-	RESET_TYPE_ALL = 2,
-	RESET_TYPE_WORLD = 3,
-	RESET_TYPE_RECOVER_OR_DISABLE = 4,
-	RESET_TYPE_DISABLE = 5,
+	RESET_TYPE_INVISIBLE,
+	RESET_TYPE_RECOVER_OR_ALL,
+	RESET_TYPE_ALL,
+	RESET_TYPE_WORLD,
+	RESET_TYPE_RECOVER_OR_DISABLE,
+	RESET_TYPE_MC_BIST,
+	RESET_TYPE_DISABLE,
 	RESET_TYPE_MAX_METHOD,
 	RESET_TYPE_TX_WATCHDOG,
 	RESET_TYPE_INT_ERROR,
@@ -180,7 +183,13 @@ enum reset_type {
 	RESET_TYPE_DMA_ERROR,
 	RESET_TYPE_TX_SKIP,
 	RESET_TYPE_MC_FAILURE,
-	RESET_TYPE_MC_BIST,
+	/* RESET_TYPE_MC_BIST and RESET_TYPE_MCDI_TIMEOUT are actually methods, not
+	 * just reasons, but they don't fit the scope hierarchy (they're not well-
+	 * ordered by inclusion)
+	 * We encode this by having their enum values be greater than
+	 * RESET_TYPE_MAX_METHOD.  This also prevents issuing them with
+	 * efx_ioctl_reset */
+	RESET_TYPE_MCDI_TIMEOUT,
 	RESET_TYPE_MAX,
 };
 

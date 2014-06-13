@@ -163,5 +163,13 @@ wrap(int, onload_recvmsg_kernel, (int fd, struct msghdr* msg, int flags),
 wrap(int, onload_thread_set_spin, (enum onload_spin_type type, int spin),
      (type, spin), -ENOSYS)
 
+wrap(int, onload_move_fd, (int fd), (fd), -ENOSYS)
+
 wrap( int, onload_fd_check_feature, (int fd, enum onload_fd_feature feature),
      (fd, feature), -ENOSYS)
+
+wrap( int, onload_ordered_epoll_wait, (int epfd, struct epoll_event *events,
+                                  struct onload_ordered_epoll_event *oo_events,
+                                  int maxevents, int timeout),
+    (epfd, events, oo_events, maxevents, timeout), -ENOSYS)
+

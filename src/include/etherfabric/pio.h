@@ -58,8 +58,10 @@ typedef struct ef_pio {
 struct ef_pd;
 struct ef_vi;
 
+#ifdef __x86_64__
 extern int ef_pio_alloc(ef_pio*, ef_driver_handle pio_dh, struct ef_pd*,
 			unsigned len_hint, ef_driver_handle pd_dh);
+#endif
 extern int ef_pio_free(ef_pio*, ef_driver_handle dh);
 extern int ef_pio_link_vi(ef_pio*, ef_driver_handle pio_dh, struct ef_vi*,
 			  ef_driver_handle vi_dh);

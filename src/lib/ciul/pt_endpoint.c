@@ -58,6 +58,7 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
   if( vi_flags & EF_VI_TX_FILTER_MASK_1  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_0;
   if( vi_flags & EF_VI_TX_FILTER_MASK_2  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_1;
   if( vi_flags & EF_VI_RX_TIMESTAMPS     ) efab_flags |= EFHW_VI_RX_TIMESTAMPS;
+  if( vi_flags & EF_VI_TX_TIMESTAMPS     ) efab_flags |= EFHW_VI_TX_TIMESTAMPS;
   return efab_flags;
 }
 
@@ -76,6 +77,11 @@ static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
     }
     if (vi_flags & EF_VI_RX_TIMESTAMPS) {
       LOGVV(ef_log("%s: ERROR: RX TIMESTAMPS flag not supported"
+                   " on FALCON architecture", __FUNCTION__));
+      return -EOPNOTSUPP;
+    }
+    if (vi_flags & EF_VI_TX_TIMESTAMPS) {
+      LOGVV(ef_log("%s: ERROR: TX TIMESTAMPS flag not supported"
                    " on FALCON architecture", __FUNCTION__));
       return -EOPNOTSUPP;
     }
@@ -216,6 +222,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 
   ef_vi_init(vi, nic_type.arch, nic_type.variant, nic_type.revision,
 	     vi_flags, state);
+  ef_vi_init_out_flags(vi, (ra.u.vi_out.out_flags & EFHW_VI_CLOCK_SYNC_STATUS) ?
+                           EF_VI_OUT_CLOCK_SYNC_STATUS : 0);
   ef_vi_init_io(vi, io_mmap_ptr);
   if( evq_capacity ) {
     ef_vi_init_evq(vi, evq_capacity, mem_mmap_ptr);

@@ -47,12 +47,20 @@
  * if ifindices_len<0, autodetect all available NICs. */
 extern int tcp_helper_alloc_kernel(ci_resource_onload_alloc_t* alloc,
                                    const ci_netif_config_opts* opts,
-                                   const int* ifindices, int ifindices_len,
+                                   int ifindices_len,
                                    tcp_helper_resource_t** rs_out);
 
 extern int tcp_helper_alloc_ul(ci_resource_onload_alloc_t* alloc,
-                               const int* ifindices, int ifindices_len,
+                               int ifindices_len,
                                tcp_helper_resource_t** rs_out);
+
+extern int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
+                               const ci_netif_config_opts* opts,
+                               int ifindices_len, tcp_helper_cluster_t* thc,
+                               tcp_helper_resource_t** rs_out);
+
+extern void tcp_helper_dtor(tcp_helper_resource_t* trs);
+
 
 extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
 
@@ -151,7 +159,7 @@ extern int efab_thr_table_lookup(const char* name, unsigned id, int flags,
 extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only);
 
 /*! Try to kill an orphan/zombie stack */
-extern int tcp_helper_kill_stack(unsigned id);
+extern int tcp_helper_kill_stack_by_id(unsigned id);
 
 ci_inline void
 efab_thr_ref(tcp_helper_resource_t *thr)
@@ -233,6 +241,45 @@ extern int efab_tcp_helper_more_pipe_bufs(ci_netif* ni,
 
 extern void efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs,
                                            oo_sp ep_id);
+extern int efab_file_move_to_alien_stack(ci_private_t *priv,
+                                         ci_netif *alien_ni);
+
+extern void
+tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
+                           tcp_helper_resource_t* trs);
+
+extern int
+tcp_helper_cluster_from_cluster(tcp_helper_resource_t* thr);
+
+extern int
+tcp_helper_cluster_dump(tcp_helper_resource_t* thr, void* buf, int buf_len);
+
+/*! Called when a socket with the CI_SOCK_FLAG_REUSEPORT_LEGACY flag is closed
+ */
+extern void
+tcp_helper_cluster_legacy_os_close(tcp_helper_endpoint_t* ep);
+
+/*! Called when a socket with the CI_SOCK_FLAG_REUSEPORT_LEGACY flag set
+ * tries to listen on it's backing sock.  In the legacy reuseport case that
+ * backing socket is shared, so we need the cluster to decide whether this
+ * ep should be responsible for the os pollwait registration.
+ *
+ * \return 1 if this endpoint should do the listen and pollwait register
+ *         0 if not
+ */
+extern int
+tcp_helper_cluster_legacy_os_listen(tcp_helper_endpoint_t* ep);
+
+/*! Called when a socket with the CI_SOCK_FLAG_REUSEPORT_LEGACY flag set
+ * tries to shutdown it's backing sock.  In the legacy reuseport case that
+ * backing socket is shared, so we should not do the shutdown and the
+ * clustering code should be informed.
+ *
+ * Legacy Clustering: Would be nicer to work out when we could actually
+ * shutdown the os socket.
+ */
+extern void
+tcp_helper_cluster_legacy_os_shutdown(tcp_helper_endpoint_t* ep);
 
 
 extern void tcp_helper_pace(tcp_helper_resource_t*, int pace_val);
@@ -287,7 +334,7 @@ efab_tcp_helper_k_ref_count_inc(tcp_helper_resource_t* trs)
  *--------------------------------------------------------------------*/
 
 extern int
-efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*);
+efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*, int in_dl_context);
 
 
 /*--------------------------------------------------------------------
@@ -300,9 +347,7 @@ efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*);
  *--------------------------------------------------------------------*/
 
 extern void
-efab_tcp_helper_netif_unlock(tcp_helper_resource_t*);
-
-
+efab_tcp_helper_netif_unlock(tcp_helper_resource_t*, int in_dl_context);
 
 
 /**********************************************************************

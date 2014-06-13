@@ -483,7 +483,6 @@ void ci_tcp_retrans_coalesce_block(ci_netif* ni, ci_tcp_state* ts,
           */
           ts->retrans_ptr = OO_PKT_P(pkt);
           ts->retrans_seq = pkt->pf.tcp_tx.start_seq;
-          pkt->flags &=~ CI_PKT_FLAG_RTQ_RETRANS;
         }
 
         if( OO_PP_EQ(pkt->pf.tcp_tx.block_end, next_id) ) {

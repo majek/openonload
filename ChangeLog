@@ -1,7 +1,54 @@
-openonload-201310-u3
---------------------
+openonload-201405
+-----------------
 
-Updated net driver (v4_0_2_6645-pio64)
+Update net driver and firmware (4.1.0.6734)
+Add AOE driver
+Add support for SFN7142 (40G) NICs
+Add support for recent Linux kernels (up to Linux 3.14)
+Add support for recent enterprise distributions (RHEL7)
+Add support for recent compiler versions (gcc-4.8)
+Add SO_REUSEPORT application clustering
+Add support for transmit timestamping (SO_TIMESTAMPING, TCP and UDP)
+Add wire-order delivery extension API
+Add onload_move_fd() extension API
+Add support for multicast hardware loopback
+Add coded examples for extension API in src/tests/onload/
+Add SYN cookie implementation to Onload TCP stack
+	
+bug39598: fix 32-bit app on 64 bit kernel Power PC assertion failure
+bug37972: fix initialization for static work_structs to only happen once
+bug40081: use new Linux MSG_SENDPAGE_NOTLAST flag to speed up TCP sendfile
+bug40027: don't leak time-wait and fin-wait-2 sockets when killing orphan stack
+bug40957: correctly handle timestamp events when event processing is delayed
+bug34927: don't report erroneous bad stack message when using stackdump -z
+bug41686: don't dereference NULL pointer in TCP recv for non-TCP/unknown fd
+bug41688: don't leak memory in onload_fd_check_msg_warm()
+bug41687: don't check tcp header fields in the case recipient is known bad
+bug42281: remove sfc_tune module; use "intel_idle.max_cstate=0 idle=poll" instead
+bug42246: fix debug build assertions in UDP checksum validation
+bug42246: properly check all lengths (eth,ip,udp) of bad incoming packets
+bug42011: improve handling of SO_BINDTODEVICE multiple interfaces on same subnet
+bug42489: free resources in ef_memreg_free() that ef_memreg_alloc() allocates
+bug42634: fix abort event handling: invalid descriptor ids could be seen in ef_vi
+bug41907: show stack name in onload_stackdump output even if no PIDs to display
+bug42668: remove spurious fallback warning when allocating RSS set of size 1.
+bug42777: fix issue causing timestamps to possibly lose sync.
+bug42276: improve build and installation on Debian and Ubuntu 
+bug42745: avoid system hang on realtime kernels caused by softirq MCDI deadlock
+bug41129: improve chances of stacks choosing different IP ID ranges
+bug42907: correctly report EF_LOG default in onload_stackdump lots output
+bug24806: add netstat-style output to onload_stackdump
+bug43392: don't increment tcp_out_segs onload_stackdump counter for MSG_WARM
+bug43521: make onload_msg_template_update() respect O_NONBLOCK flag
+bug39578: reinforce ARP entry when new data is ACKed, even if not pure ACK.
+bug43754: fix bonding intf not accelerated on 3.13 kernels, restart sysfs read.
+bug43884: fix bonding filename buffer length calculation.
+bug43900: fix theoretical data reordering when repriming EF_INT_DRIVEN=1 stack
+bug43896: disable PIO on 32 bit systems
+bug35506: improve warning when running stackdump prior to loading drivers
+bug43451: count all reasons unlock_slow is happening in onload_stackdump output
+bug43753: fix lockup closing endpoints in wrong context on real-time kernels
+
 
 openonload-201310-u2
 --------------------

@@ -176,3 +176,23 @@ int onload_thread_set_spin(enum onload_spin_type type, int spin)
 {
   return -ENOSYS;
 }
+/**************************************************************************/
+
+__attribute__((weak))
+int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
+                              struct onload_ordered_epoll_event *oo_events,
+                              int maxevents, int timeout)
+{
+  return -ENOSYS;
+}
+
+
+
+/**************************************************************************/
+
+__attribute__((weak))
+int onload_move_fd(int fd)
+{
+  return -EINVAL;
+}
+

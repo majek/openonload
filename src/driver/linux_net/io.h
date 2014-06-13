@@ -81,10 +81,6 @@
  * architecture.
  */
 
-#ifdef CONFIG_X86_64
-#define EFX_USE_SSE_IO 1
-#endif
-
 #if BITS_PER_LONG == 64
 #define EFX_USE_QWORD_IO 1
 #endif
@@ -102,13 +98,13 @@
 #endif
 #endif
 
-#ifdef EFX_USE_SSE_IO
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_X86_64)
 
-static inline void _efx_writeo(struct efx_nic *efx, efx_le_128 value,
+static inline void _efx_writeo(struct efx_nic *efx, __le64 value[2],
 			       unsigned int reg)
 {
 	unsigned long cr0;
-	efx_le_128 xmm_save[1];
+	__le64 xmm_save[2];
 	void __iomem *addr = efx->membase + reg;
 
 	preempt_disable();
@@ -129,7 +125,7 @@ static inline void _efx_writeo(struct efx_nic *efx, efx_le_128 value,
 		"movdqu %1,%%xmm0       ;\n\t"
 		"movdqa %%xmm0,%0       ;\n\t"
 		: "=m" (*(unsigned long __force *)addr)
-		: "m" (value)
+		: "m" (*value)
 		: "memory");
 
 	/* Restore the xmm0 register */
@@ -143,7 +139,7 @@ static inline void _efx_writeo(struct efx_nic *efx, efx_le_128 value,
 
 	preempt_enable();
 }
-#endif /* EFX_USE_SSE_IO */
+#endif /* EFX_NOT_UPSTREAM && CONFIG_X86_64 */
 
 #ifdef EFX_USE_QWORD_IO
 static inline void _efx_writeq(struct efx_nic *efx, __le64 value,
@@ -178,7 +174,6 @@ static inline void efx_writeo(struct efx_nic *efx, const efx_oword_t *value,
 		   EFX_OWORD_VAL(*value));
 
 	spin_lock_irqsave(&efx->biu_lock, flags);
-
 #ifdef EFX_USE_QWORD_IO
 	_efx_writeq(efx, value->u64[0], reg + 0);
 	_efx_writeq(efx, value->u64[1], reg + 8);
@@ -306,8 +301,9 @@ static inline void _efx_writeo_page(struct efx_nic *efx, efx_oword_t *value,
 	netif_vdbg(efx, hw, efx->net_dev,
 		   "writing register %x with " EFX_OWORD_FMT "\n", reg,
 		   EFX_OWORD_VAL(*value));
-#ifdef EFX_USE_SSE_IO
-	_efx_writeo(efx, value->u128, reg + 0);
+
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_X86_64)
+	_efx_writeo(efx, value->u64, reg + 0);
 #else
 #ifdef EFX_USE_QWORD_IO
 	_efx_writeq(efx, value->u64[0], reg + 0);

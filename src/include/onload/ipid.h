@@ -42,6 +42,7 @@ typedef struct {
   int init;
 # define EFAB_IPID_INIT 0x7706EE9B
 #endif
+  int last_block_used;
 } efab_ipid_cb_t;
 
 /*! Allocate a block of IDs from the pool of ID blocks */
@@ -58,6 +59,7 @@ efab_ipid_ctor( efab_ipid_cb_t* ipid )
   ci_assert(ipid);
   ci_irqlock_ctor( &ipid->lock );
   memset( ipid->range, 0, sizeof( ipid->range ));
+  ipid->last_block_used = 0;
 #ifndef NDEBUG
   ipid->init = EFAB_IPID_INIT;
 #endif

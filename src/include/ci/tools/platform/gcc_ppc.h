@@ -788,13 +788,49 @@ ci_inline int ci_cas64u_fail(volatile ci_uint64* p, ci_uint64 oldval, ci_uint64 
 # define ci_cas_uintptr_succeed(p,o,n)    ci_cas32u_succeed((volatile ci_uint32*) (p), (o), (n))
 # define ci_cas_uintptr_fail(p,o,n)       ci_cas32u_fail((volatile ci_uint32*) (p), (o), (n))
 
-ci_inline unsigned long ci_cas64(volatile ci_uint64 *p, ci_uint64 old, ci_uint64 new)
-{	
- /* LIES! - rrw 2012-12-12 */
-    unsigned long prev;
-    prev = *p;
-    *p = new;
-    return prev;
+/* This is super-hackery but it seems to work well reliably.
+ * The problem here is that GCC assumes 32-bit registers when passed -m32,
+ * even when CPU is 64-bit (so its registers are in fact 64-bit even in 32-bit mode).
+ * Therefore if a 64-bit value is passed to __asm__, GCC insist on putting it
+ * into two consecutive registers (well, that's actually what PPC 32-bit ABI spec mandates).
+ * So we pass 64-bit values as two 32-bit ones and use an auxiliary register to
+ * build 64-bit values and use 64-bit atomic load/stores on them
+ */
+
+ci_inline ci_uint64 ci_cas64(volatile ci_uint64 *p, ci_uint64 old, ci_uint64 new)
+{  
+  register volatile ci_uint32 prev0;
+  register volatile ci_uint32 prev1;
+  register volatile ci_uint32 old0 = (ci_uint32)old;
+  register volatile ci_uint32 old1 = (ci_uint32)(old >> 32);
+  register volatile ci_uint32 new0 = (ci_uint32)new;
+  register volatile ci_uint32 new1 = (ci_uint32)(new >> 32);
+
+   __asm__ __volatile__ (
+
+
+      "       mr 9, %4\n"
+      "       insrdi 9, %5, 32, 0\n"
+      "       mr 10, %6\n"
+      "       insrdi 10, %7, 32, 0\n"
+      CI_SMP_SYNC
+
+      "1:     ldarx   %0,0,%3     \n"
+      "       cmpd    0,%0,9     \n"
+      "       bne-    2f          \n"
+      "       stdcx.  10,0,%3     \n"
+      "       bne-    1b          \n"
+
+      CI_SMP_ISYNC
+
+      "2:                         \n"
+      "       sradi %1, %0, 32    \n"
+
+      : "=&r" (prev0), "=r" (prev1), "=m" (*p)
+      : "r" (p), "r" (old0), "r" (old1), "r" (new0), "r" (new1), "m" (*p)
+      : "cc", "memory", "r9", "r10"
+   );
+   return ((ci_uint64)prev1 << 32) | prev0;
 }
 
 ci_inline int ci_cas64_succeed(volatile ci_uint64* p, ci_uint64 oldval, ci_uint64 newval)

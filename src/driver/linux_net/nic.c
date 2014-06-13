@@ -44,14 +44,6 @@
 #include "io.h"
 #include "workarounds.h"
 
-const struct efx_nic_type *const efx_nic_types[] = {
-	&falcon_a1_nic_type,
-	&falcon_b0_nic_type,
-	&siena_a0_nic_type,
-	&efx_hunt_a0_nic_type,
-	NULL
-};
-
 /**************************************************************************
  *
  * Generic buffer handling
@@ -174,7 +166,7 @@ int efx_nic_init_interrupt(struct efx_nic *efx)
 	efx_for_each_channel(channel, efx) {
 		if (n_irqs-- == 0)
 			break;
-		free_irq(channel->irq, &efx->channel[channel->channel]);
+		free_irq(channel->irq, &efx->msi_context[channel->channel]);
 	}
  fail1:
 	return rc;

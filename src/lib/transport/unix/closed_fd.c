@@ -61,6 +61,9 @@ static void citp_closedfd_dtor(citp_fdinfo* fdinfo, int fdt_locked)
 }
 
 
+/* bind(), listen() at al should not use citp_nonsock_* functions because
+ * we have to return EBADF instead of ENOTSOCK */
+
 static int citp_closedfd_bind(citp_fdinfo* fdinfo,
 			    const struct sockaddr* sa, socklen_t sa_len)
 {

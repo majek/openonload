@@ -50,7 +50,7 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 12
+#define EFX_DRIVERLINK_API_VERSION 17
 
 /**
  * enum efx_dl_ev_prio - Driverlink client's priority level for event handling
@@ -110,6 +110,10 @@ enum efx_dl_driver_flags {
  *	registered for a device implement this operation, they will be
  *	called in priority order from high to low, until one returns
  *	%true.  Context: NAPI.
+ * @rx_packet: Called when processing an RX packet, after prefetching the data
+ *      but before forming the skb.  Returns %true if the client wants the
+ *      packet to be discarded, else %false.
+ *      Context: NAPI.
  *
  * Prior to API version 7, only one driver with non-null @handle_event
  * could be registered for each device.  The @priority field was not
@@ -128,6 +132,8 @@ struct efx_dl_driver {
 	void (*reset_suspend) (struct efx_dl_device *efx_dev);
 	void (*reset_resume) (struct efx_dl_device *efx_dev, int ok);
 	bool (*handle_event) (struct efx_dl_device *efx_dev, void *p_event);
+	bool (*rx_packet) (struct efx_dl_device *efx_dev, int channel,
+			   u8 *pkt_hdr, int len);
 
 /* private: */
 	struct list_head node;
@@ -372,7 +378,7 @@ struct efx_dl_device {
  * This acquires the rtnl_lock and therefore must be called from
  * process context.
  */
-extern int efx_dl_register_driver(struct efx_dl_driver *driver);
+int efx_dl_register_driver(struct efx_dl_driver *driver);
 
 /**
  * efx_dl_unregister_driver() - Unregister a client driver
@@ -381,16 +387,16 @@ extern int efx_dl_register_driver(struct efx_dl_driver *driver);
  * This acquires the rtnl_lock and therefore must be called from
  * process context.
  */
-extern void efx_dl_unregister_driver(struct efx_dl_driver *driver);
+void efx_dl_unregister_driver(struct efx_dl_driver *driver);
 
 /**
  * efx_dl_netdev_is_ours() - Check whether device is handled by sfc
  * @net_dev: Net device to be checked
  */
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
-extern bool fastcall efx_dl_netdev_is_ours(const struct net_device *net_dev);
+bool fastcall efx_dl_netdev_is_ours(const struct net_device *net_dev);
 #else
-extern bool efx_dl_netdev_is_ours(const struct net_device *net_dev);
+bool efx_dl_netdev_is_ours(const struct net_device *net_dev);
 #endif
 
 /**
@@ -405,15 +411,13 @@ efx_dl_dev_from_netdev(const struct net_device *net_dev,
 		       struct efx_dl_driver *driver);
 
 /* Schedule a reset without grabbing any locks */
-extern void efx_dl_schedule_reset(struct efx_dl_device *efx_dev);
+void efx_dl_schedule_reset(struct efx_dl_device *efx_dev);
 
-extern int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
-				struct efx_filter_spec *spec,
-				bool replace_equal);
-extern int efx_dl_filter_remove(struct efx_dl_device *efx_dev,
-				int filter_id);
-extern int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
-				  int filter_id, int rxq_i);
+int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
+			 struct efx_filter_spec *spec, bool replace_equal);
+int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id);
+int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
+			   int filter_id, int rxq_i, int stack_id);
 
 
 /**
@@ -439,9 +443,8 @@ enum efx_dl_filter_block_kernel_type {
  * explicit configuration (e.g. ethtool -U or PTP on Siena).  The net
  * driver's loopback self-test will also fail.
  */
-extern int efx_dl_filter_block_kernel(struct efx_dl_device *dl_dev,
-				      enum efx_dl_filter_block_kernel_type
-				      block);
+int efx_dl_filter_block_kernel(struct efx_dl_device *dl_dev,
+			       enum efx_dl_filter_block_kernel_type block);
 
 /**
  * efx_dl_filter_unblock_kernel - Reverse efx_filter_block_kernel()
@@ -450,9 +453,8 @@ extern int efx_dl_filter_block_kernel(struct efx_dl_device *dl_dev,
  *
  * This decrements the kernel block count for the client.
  */
-extern void efx_dl_filter_unblock_kernel(struct efx_dl_device *dl_dev,
-					 enum efx_dl_filter_block_kernel_type
-					 type);
+void efx_dl_filter_unblock_kernel(struct efx_dl_device *dl_dev,
+				  enum efx_dl_filter_block_kernel_type type);
 
 /**
  * efx_dl_mcdi_rpc - Issue an MCDI command and wait for completion
@@ -471,9 +473,9 @@ extern void efx_dl_filter_unblock_kernel(struct efx_dl_device *dl_dev,
  * This function may sleep and therefore must be called in process
  * context.  Defined from API version 6.
  */
-extern int efx_dl_mcdi_rpc(struct efx_dl_device *dl_dev, unsigned int cmd,
-			   size_t inlen, size_t outlen, size_t *outlen_actual,
-			   const u8 *inbuf, u8 *outbuf);
+int efx_dl_mcdi_rpc(struct efx_dl_device *dl_dev, unsigned int cmd,
+		    size_t inlen, size_t outlen, size_t *outlen_actual,
+		    const u8 *inbuf, u8 *outbuf);
 
 /**
  * efx_dl_for_each_device_info_matching - iterate an efx_dl_device_info list

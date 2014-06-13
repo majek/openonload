@@ -943,15 +943,17 @@ cicp_fwdinfo_addr_kind(const cicp_fwdinfo_t *fwdt, ci_ip_addr_net_t ip,
  *  held in earlier entries and more widely applicable ones held in later
  *  ones.  Thus the first match will always be the correct one.
  */
-extern const cicp_fwd_row_t *
-_cicp_fwd_find_ip(const cicp_fwdinfo_t *fwdt, ci_ip_addr_t ip_dest)
+static const cicp_fwd_row_t *
+_cicp_fwd_find_ip(const cicp_fwdinfo_t *fwdt, ci_ip_addr_t ip_dest,
+                  ci_ifid_t dest_ifindex)
 {
   const cicp_fwd_row_t *row    = &fwdt->path[0];
   const cicp_fwd_row_t *maxrow = row + fwdt->rows_max;
     
   while (row < maxrow && cicp_fwd_row_allocated(row) &&
-         !CI_IP_ADDR_SAME_NETWORK(&ip_dest,
-                                  &row->destnet_ip, row->destnet_ipset))
+         (!CI_IP_ADDR_SAME_NETWORK(&ip_dest,
+                                  &row->destnet_ip, row->destnet_ipset) ||
+         (dest_ifindex != CI_IFID_BAD && dest_ifindex != row->dest_ifindex)))
     row++;
 
   return row < maxrow && cicp_fwd_row_allocated(row)?
@@ -1004,7 +1006,8 @@ _cicpos_fwd_find_free(cicp_fwdinfo_t *fwdt)
 extern cicp_fwd_rowid_t 
 _cicpos_route_find(const cicp_fwdinfo_t   *routet,
 		   ci_ip_addr_t            dest_ip,
-                   ci_ip_addrset_t         dest_set)
+                   ci_ip_addrset_t         dest_set,
+                   ci_ifid_t               dest_ifindex)
 {   const cicp_fwd_row_t *minrow = &routet->path[0];
     const cicp_fwd_row_t *maxrow = minrow + routet->rows_max;
     const cicp_fwd_row_t *row = minrow;
@@ -1013,7 +1016,9 @@ _cicpos_route_find(const cicp_fwdinfo_t   *routet,
        the table */
     while (row < maxrow && cicp_fwd_row_allocated(row) &&
 	   !(CI_IP_ADDR_EQ(&row->destnet_ip, &dest_ip) &&
-	     dest_set == row->destnet_ipset)
+	     dest_set == row->destnet_ipset &&
+             ( dest_ifindex == CI_IFID_BAD ||
+               dest_ifindex == row->dest_ifindex ) )
 	  )
 	row++;
 
@@ -1207,7 +1212,8 @@ cicp_user_retrieve(ci_netif*                    ni,
    * ?? TODO: Are there scenarious with SO_BINDTODEVICE where a route table
    * lookup can be avoided?  Probably there are.
    */
-  row = _cicp_fwd_find_ip(fwdt, ipcache->ip.ip_daddr_be32);
+  row = _cicp_fwd_find_ip(fwdt, ipcache->ip.ip_daddr_be32,
+                          sock_cp->so_bindtodevice);
 
   if( sock_cp->so_bindtodevice != CI_IFID_BAD ) {
     ipcache->ifindex = sock_cp->so_bindtodevice;

@@ -33,6 +33,8 @@ struct tcp_helper_resource_s;
  */
 #define OO_HW_VLAN_DEFAULT (0)
 
+#define OO_HW_SRC_FLAG_LOOPBACK (1)
+
 
 /* Initialise filter object. */
 extern void oo_hw_filter_init(struct oo_hw_filter* oofilter);
@@ -65,7 +67,7 @@ extern int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                                     unsigned saddr, int sport,
                                     unsigned daddr, int dport,
                                     ci_uint16 vlan_id, unsigned set_vlan_mask,
-                                    unsigned hwport_mask);
+                                    unsigned hwport_mask, unsigned src_flags);
 
 /* Clear existing filter, if any.  The insert new filters and associate
  * filter object with given stack.
@@ -77,7 +79,7 @@ extern int oo_hw_filter_set(struct oo_hw_filter* oofilter,
                             unsigned saddr, int sport,
                             unsigned daddr, int dport,
                             ci_uint16 vlan_id, unsigned set_vlan_mask,
-                            unsigned hwport_mask);
+                            unsigned hwport_mask, unsigned src_flags);
 
 /* Redirect filter to direct packets to a different stack.  This is similar
  * to doing clear then set, except that it is guaranteed that (for
@@ -90,7 +92,7 @@ extern int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                                unsigned saddr, int sport,
                                unsigned daddr, int dport,
                                ci_uint16 vlan_id, unsigned set_vlan_mask,
-                               unsigned hwport_mask);
+                               unsigned hwport_mask, unsigned src_flags);
 
 
 /* Transfer filters on ports in hwport_mask from oofilter_old to oofilter_new.
@@ -109,5 +111,10 @@ extern void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
  */
 extern unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter);
 
+
+extern int oo_hw_filter_set_thc(struct oo_hw_filter* oofilter,
+                                struct tcp_helper_cluster_s* thc, int protocol,
+                                unsigned daddr, int dport,
+                                unsigned hwport_mask);
 
 #endif  /* __ONLOAD_HW_FILTER_H__ */

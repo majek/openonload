@@ -71,6 +71,7 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 {
 	struct efx_dl_handle *efx_handle = efx_dl_handle(efx_dev);
 	struct efx_nic *efx = efx_handle->efx;
+	struct efx_channel *channel;
 	unsigned int type;
 
 	netif_info(efx, drv, efx->net_dev,
@@ -81,7 +82,22 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 		efx_dev->driver->remove(efx_dev);
 
 	list_del(&efx_handle->driver_node);
+
+	/* Disable and then re-enable NAPI when removing efx interface from list
+	 * to prevent a race with read access from NAPI context; napi_disable()
+	 * ensures that NAPI is no longer running when it returns.  Also
+	 * internally lock NAPI while disabled to prevent busy-polling.
+	 */
+	efx_for_each_channel(channel, efx) {
+		napi_disable(&channel->napi_str);
+		while (!efx_channel_lock_napi(channel))
+			msleep(1);
+	}
 	list_del(&efx_handle->port_node);
+	efx_for_each_channel(channel, efx) {
+		efx_channel_unlock_napi(channel);
+		napi_enable(&channel->napi_str);
+	}
 
 	/* Remove this client's kernel blocks */
 	mutex_lock(&efx->dl_block_kernel_mutex);
@@ -309,6 +325,22 @@ bool efx_dl_handle_event(struct efx_nic *efx, void *event)
 	return false;
 }
 
+bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
+{
+	struct efx_dl_handle *efx_handle;
+	struct efx_dl_device *efx_dev;
+	bool discard = false;
+
+	list_for_each_entry(efx_handle, &efx->dl_device_list, port_node) {
+		efx_dev = &efx_handle->efx_dev;
+		if (efx_dev->driver->rx_packet &&
+		    efx_dev->driver->rx_packet(efx_dev, channel, pkt_hdr, len))
+			discard = true;
+	}
+
+	return discard;
+}
+
 /* We additionally include priority in the filter ID so that we
  * can pass it back into efx_filter_remove_id_safe().
  */
@@ -340,12 +372,13 @@ int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id)
 EXPORT_SYMBOL(efx_dl_filter_remove);
 
 int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
-			   int filter_id, int rxq_i)
+			   int filter_id, int rxq_i, int stack_id)
 {
 	if (WARN_ON(filter_id < 0))
 		return -EINVAL;
 	return efx_filter_redirect_id(efx_dl_handle(efx_dev)->efx,
-				      filter_id & EFX_FILTER_ID_MASK, rxq_i);
+				      filter_id & EFX_FILTER_ID_MASK,
+				      rxq_i, stack_id);
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
 

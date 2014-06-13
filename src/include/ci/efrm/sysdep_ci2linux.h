@@ -119,44 +119,6 @@ ci_inline void *kcalloc(size_t n, size_t size, gfp_t flags)
 #define ERR_PTR(err) ((void*)(uintptr_t)(long)(err))
 
 
-/* Work Queues; untested */
-#ifdef __KERNEL__
-
-#include <ci/driver/efab/workqueue.h>
-
-#define workqueue_struct ci_workqueue_s
-#define work_struct ci_workitem_s
-
-ci_inline struct workqueue_struct * create_workqueue(const char *name)
-{
-  struct workqueue_struct *wqueue = kcalloc(sizeof(struct workqueue_struct), 1,
-                                            GFP_KERNEL);
-  if (wqueue == NULL) return NULL;
-
-  if (ci_workqueue_ctor(wqueue) != 0) {
-    kfree(wqueue);
-    return NULL;
-  }
-
-  return wqueue;
-}
-
-ci_inline void destroy_workqueue(struct workqueue_struct *wq) {
-  ci_workqueue_dtor(wq);
-  kfree(wq);
-}
-
-#define queue_work ci_workqueue_add
-ci_inline void flush_workqueue(struct workqueue_struct *wq)
-{
-  ci_verify(ci_workqueue_flush(wq) == 0);
-}
-#define INIT_WORK(wi, r) ci_workitem_init(wi, r, wi)
-#define __WORK_INITIALIZER(wi, r, ctx) CI_WORKITEM_INITIALISER(wi, r, ctx)
-
-#endif
-
-
 
 #define roundup_pow_of_two(n) (1 << ci_log2_ge(n,0))
 #define is_power_of_2(N) CI_IS_POW2(N)

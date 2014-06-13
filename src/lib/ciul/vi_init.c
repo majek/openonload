@@ -294,6 +294,19 @@ void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction)
 }
 
 
+void ef_vi_init_tx_timestamping(struct ef_vi* vi)
+{
+	vi->inited |= EF_VI_INITED_TX_TIMESTAMPING;
+}
+
+
+void ef_vi_init_out_flags(struct ef_vi* vi, unsigned flags)
+{
+	vi->inited |= EF_VI_INITED_OUT_FLAGS;
+	vi->vi_out_flags = flags;
+}
+
+
 void ef_vi_reset_rxq(struct ef_vi* vi)
 {
 	ef_vi_rxq_state* qs = &vi->ep_state->rxq;
@@ -316,6 +329,7 @@ void ef_vi_reset_txq(struct ef_vi* vi)
 	qs->previous = 0;
 	qs->added = 0;
 	qs->removed = 0;
+	qs->ts_nsec = EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID;
 	if( vi->vi_txq.mask ) {
 		int i;
 		for( i = 0; i <= vi->vi_txq.mask; ++i )
@@ -330,4 +344,6 @@ void ef_vi_reset_evq(struct ef_vi* vi, int clear_ring)
 		memset(vi->evq_base, (char) 0xff, vi->evq_mask + 1);
 	vi->ep_state->evq.evq_ptr = 0;
 	vi->ep_state->evq.sync_timestamp_synchronised = 0;
+	vi->ep_state->evq.sync_timestamp_major = ~0u;
+	vi->ep_state->evq.sync_flags = 0;
 }

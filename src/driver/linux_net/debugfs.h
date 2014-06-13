@@ -36,30 +36,30 @@ struct efx_debugfs_parameter {
 	int (*reader)(struct seq_file *, void *);
 };
 
-extern void efx_fini_debugfs_child(efx_debugfs_entry *dir, const char *name);
-extern int efx_init_debugfs_netdev(struct net_device *net_dev);
-extern void efx_fini_debugfs_netdev(struct net_device *net_dev);
-extern int efx_init_debugfs_nic(struct efx_nic *efx);
-extern void efx_fini_debugfs_nic(struct efx_nic *efx);
-extern int efx_init_debugfs_channels(struct efx_nic *efx);
-extern void efx_fini_debugfs_channels(struct efx_nic *efx);
-extern int efx_init_debugfs(void);
-extern void efx_fini_debugfs(void);
-extern int efx_extend_debugfs_port(struct efx_nic *efx,
-				   void *context, u64 ignore,
-				   struct efx_debugfs_parameter *params);
-extern void efx_trim_debugfs_port(struct efx_nic *efx,
-				  struct efx_debugfs_parameter *params);
+void efx_fini_debugfs_child(struct dentry *dir, const char *name);
+int efx_init_debugfs_netdev(struct net_device *net_dev);
+void efx_fini_debugfs_netdev(struct net_device *net_dev);
+int efx_init_debugfs_nic(struct efx_nic *efx);
+void efx_fini_debugfs_nic(struct efx_nic *efx);
+int efx_init_debugfs_channels(struct efx_nic *efx);
+void efx_fini_debugfs_channels(struct efx_nic *efx);
+int efx_init_debugfs(void);
+void efx_fini_debugfs(void);
+int efx_extend_debugfs_port(struct efx_nic *efx,
+			    void *context, u64 ignore,
+			    struct efx_debugfs_parameter *params);
+void efx_trim_debugfs_port(struct efx_nic *efx,
+			   struct efx_debugfs_parameter *params);
 
 /* Helpers for handling debugfs entry reads */
-extern int efx_debugfs_read_uint(struct seq_file *, void *);
-extern int efx_debugfs_read_ulong(struct seq_file *, void *);
-extern int efx_debugfs_read_string(struct seq_file *, void *);
-extern int efx_debugfs_read_int(struct seq_file *, void *);
-extern int efx_debugfs_read_atomic(struct seq_file *, void *);
-extern int efx_debugfs_read_dword(struct seq_file *, void *);
-extern int efx_debugfs_read_u64(struct seq_file *, void *);
-extern int efx_debugfs_read_bool(struct seq_file *, void *);
+int efx_debugfs_read_uint(struct seq_file *, void *);
+int efx_debugfs_read_ulong(struct seq_file *, void *);
+int efx_debugfs_read_string(struct seq_file *, void *);
+int efx_debugfs_read_int(struct seq_file *, void *);
+int efx_debugfs_read_atomic(struct seq_file *, void *);
+int efx_debugfs_read_dword(struct seq_file *, void *);
+int efx_debugfs_read_u64(struct seq_file *, void *);
+int efx_debugfs_read_bool(struct seq_file *, void *);
 
 /* Handy macros for filling out parameters */
 

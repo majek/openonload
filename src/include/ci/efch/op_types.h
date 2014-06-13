@@ -84,6 +84,7 @@ struct efch_vi_alloc_out {
   uint32_t            io_mmap_bytes;
   int32_t             instance;
   uint32_t            rx_prefix_len;
+  uint32_t            out_flags; /* EFAB_VI_* flags */
 };
 
 
@@ -217,7 +218,9 @@ typedef struct ci_resource_op_s {
         ci_int16        vlan_id;
         uint8_t         mac[6];
       } mac;
-      int32_t           replace;
+#     define            CI_RSOP_FILTER_ADD_FLAG_REPLACE            1
+#     define            CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE 2
+      int32_t           flags;
       int32_t           out_filter_id;
     } filter_add;
     struct {

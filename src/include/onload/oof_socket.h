@@ -18,6 +18,7 @@
 
 
 struct oof_local_port;
+struct oof_thc;
 
 
 /* Per-socket state for the filtering module.
@@ -50,5 +51,17 @@ struct oof_socket {
 
 };
 
+
+/* A clustered filter.  Shared by all sockets that have been bound to
+ * a clustering {laddr, lport}.
+ */
+struct oof_thc {
+  struct oo_hw_filter*         tf_filters;
+  struct tcp_helper_cluster_s* tf_thc;
+  struct oof_thc*              tf_next;
+  unsigned                     tf_laddr;
+  int                          tf_ref;
+  int                          tf_filters_installed;
+};
 
 #endif  /* __ONLOAD_OOF_SOCKET_H__ */

@@ -20,6 +20,20 @@ usage() {
   exit 1
 }
 
+uninstall_ldconfig() {
+  local manifest_pathname="$1"
+  local dir_to_clean=""
+  local path
+
+  for path in $(cat $manifest_pathname | grep "\.so") ; do
+    path=${path%/*}
+    [ "$dir_to_clean" = "$path" ] && continue
+
+    dir_to_clean="$path"
+    ldconfig -n $dir_to_clean
+  done
+}
+
 ######################################################################
 # main
 
@@ -64,7 +78,7 @@ exec 5<&-
 rmdir $i_include &> /dev/null || \
     log "Leaving $i_include directoy as it's not empty."
 
-ldconfig -n /usr/lib /usr/lib64
+uninstall_ldconfig $m
 
 if [ -f /etc/modprobe.conf ]; then
   sed -i '/onload_start/,/onload_end/d' /etc/modprobe.conf

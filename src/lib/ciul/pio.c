@@ -32,6 +32,7 @@
 #include "efch_intf_ver.h"
 
 
+#ifdef __x86_64__
 int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
                  unsigned len_hint, ef_driver_handle pd_dh)
 {
@@ -65,7 +66,7 @@ int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
   free(pio->pio_buffer);
   return rc;
 }
-
+#endif
 
 int ef_pio_free(ef_pio* pio, ef_driver_handle dh)
 {

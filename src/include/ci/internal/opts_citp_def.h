@@ -486,7 +486,7 @@ CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
 "You can set EF_SIGNALS_NOPOSTPONE to empty value to postpone "
 "all signal handlers in the same way if you suspect these signals "
 "to call network functions.",
-        ,, (1 << (SIGBUS-1)) | (1 << (SIGSEGV-1) | (1 << (SIGPROF-1))),
+        A8,, (1 << (SIGBUS-1)) | (1 << (SIGSEGV-1) | (1 << (SIGPROF-1))),
         0, (ci_uint64)(-1), bitmask)
 
 # define CITP_VFORK_USE_FORK           0
@@ -504,6 +504,37 @@ CI_CFG_OPT("EF_VFORK_MODE", vfork_mode, ci_uint32,
 "  1 - Replace vfork() with fork() and block parent till child exits/execs"
 "  2 - Replace vfork() with vfork()",
            2, , 1, 0, 2, level)
+
+CI_CFG_OPT("EF_CLUSTER_SIZE", cluster_size, ci_uint32,
+"If use of SO_REUSEPORT creates a cluster, this option specifies size"
+"of the cluster to be created.  This option has no impact if use of"
+"SO_REUSEPORT joins a cluster that already exists.  Note that if fewer"
+"sockets than specified here join the cluster, then some traffic will"
+"be lost.  Refer to the SO_REUSEPORT section in the manual for more"
+"detail.\n",
+           , , 2, 2, MAX, count)
+
+# define CITP_CLUSTER_RESTART_FAIL              0
+# define CITP_CLUSTER_RESTART_TERMINATE_ORPHANS 1
+CI_CFG_OPT("EF_CLUSTER_RESTART", cluster_restart_opt, ci_uint32,
+"This option controls the behaviour when recreating a stack (e.g. due to "
+"restarting a process) in an SO_REUSEPORT cluster and it encounters a resource "
+"limitation such as an orphan stack from the previous process:\n "
+" 0 - return an error.\n"
+" 1 - terminate the orphan to allow the new process to continue",
+           , , 0, 0, 1, level)
+
+CI_CFG_OPT("EF_TCP_FORCE_REUSEPORT", tcp_reuseports, ci_uint64,
+"This option specifies a comma-separated list of port numbers.  TCP "
+"sockets that bind to those port numbers will have SO_REUSEPORT "
+"automatically applied to them.\n",
+           A8, , 0, MIN, MAX, list)
+
+CI_CFG_OPT("EF_UDP_FORCE_REUSEPORT", udp_reuseports, ci_uint64,
+"This option specifies a comma-separated list of port numbers.  UDP "
+"sockets that bind to those port numbers will have SO_REUSEPORT "
+"automatically applied to them.\n",
+           A8, , 0, MIN, MAX, list)
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

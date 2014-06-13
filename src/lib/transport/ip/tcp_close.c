@@ -299,6 +299,9 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts, int can_block)
     return 0;
   }
 
+  if( (ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
+    goto drop;
+
   if( tcp_rcv_usr(ts) != 0 ) {
     /* Linux specific behaviour: send reset and ditch
      * connection if all rx data not read.
@@ -545,7 +548,8 @@ void __ci_tcp_listen_shutdown(ci_netif* netif, ci_tcp_socket_listen* tls,
 
 
 #ifdef __KERNEL__
-void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls)
+void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls,
+                                int do_free)
 {
   /* All process references to this socket have gone.  So we should
    * shutdown() if necessary, and arrange for all resources to eventually
@@ -559,11 +563,12 @@ void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls)
 
   __ci_tcp_listen_shutdown(ni, tls, NULL);
   __ci_tcp_listen_to_normal(ni, tls);
-  citp_waitable_obj_free(ni, &tls->s.b);
+  if( do_free )
+    citp_waitable_obj_free(ni, &tls->s.b);
 }
 
 
-void ci_tcp_all_fds_gone(ci_netif* ni, ci_tcp_state* ts)
+void ci_tcp_all_fds_gone(ci_netif* ni, ci_tcp_state* ts, int do_free)
 {
   /* All process references to this socket have gone.  So we should
    * shutdown() if necessary, and arrange for all resources to eventually
@@ -576,11 +581,13 @@ void ci_tcp_all_fds_gone(ci_netif* ni, ci_tcp_state* ts)
   ci_assert(ts->s.b.state & CI_TCP_STATE_TCP);
 
   /* If we are in a state where we time out orphaned connections: */
-  if( ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN )
+  if( (ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN) &&
+      !(ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
     ci_netif_fin_timeout_enter(ni, ts);
 
   /* This frees [ts] if appropriate. */
-  ci_tcp_close(ni, ts, 0);
+  if( do_free )
+    ci_tcp_close(ni, ts, 0);
 }
 #endif
 

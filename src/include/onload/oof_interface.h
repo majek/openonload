@@ -21,6 +21,7 @@ struct tcp_helper_resource_s;
 struct oof_socket;
 struct oof_manager;
 struct oo_hw_filter;
+struct tcp_helper_cluster_s;
 
 
 #define OO_IFID_ALL (-2)
@@ -61,6 +62,18 @@ oof_socket_ctor(struct oof_socket*);
 
 extern void
 oof_socket_dtor(struct oof_socket*);
+
+extern int
+oof_local_port_thc_search(struct oof_manager* fm, int protocol, int lport,
+                          struct tcp_helper_cluster_s** thc_out);
+
+extern int
+oof_socket_cluster_add(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
+                       int protocol, int lport);
+
+extern void
+oof_socket_cluster_del(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
+                       int protocol, int lport);
 
 extern int
 oof_socket_add(struct oof_manager*, struct oof_socket*,
@@ -106,13 +119,15 @@ oof_manager_dump(struct oof_manager*,
                  void (*dump_fn)(void* opaque, const char* fmt, ...),
                  void* opaque);
 
-
 /**********************************************************************
  * Callbacks.  These are invoked by the oof module.
  */
 
 extern struct tcp_helper_resource_s*
 oof_cb_socket_stack(struct oof_socket* skf);
+
+extern struct tcp_helper_cluster_s*
+oof_cb_stack_thc(struct tcp_helper_resource_s* skf_stack);
 
 extern int
 oof_cb_socket_id(struct oof_socket* skf);

@@ -215,40 +215,43 @@ citp_protocol_impl citp_epollb_protocol_impl = {
     .dup         = citp_epollb_dup,
     .dtor        = citp_epollb_dtor,
     .close       = citp_epollb_close,
+    .ioctl       = citp_epollb_ioctl,
 
-    .fcntl       = citp_epoll_fcntl,
     /* Poll/select for epollfd is done via kernel. */
-    .select      = citp_epoll_select,
-    .poll        = citp_epoll_poll,
+    .select      = citp_passthrough_select,
+    .poll        = citp_passthrough_poll,
+    .fcntl       = citp_passthrough_fcntl,
 
     /* "Invalid" members; normal user should not call it and should not
      * expect good behaviour */
-    .socket      = citp_closedfd_socket,
-    .bind        = citp_epoll_bind,
-    .listen      = citp_epoll_listen,
-    .accept      = citp_epoll_accept,
-    .connect     = citp_epoll_connect,
-    .shutdown    = citp_epoll_shutdown,
-    .getsockname = citp_epoll_getsockname,
-    .getpeername = citp_epoll_getpeername,
-    .getsockopt  = citp_epoll_getsockopt,
-    .setsockopt  = citp_epoll_setsockopt,
-    .recv        = citp_epoll_recv,
+    .socket      = NULL,        /* nobody should ever call this */
+    .recv        = citp_nonsock_recv,
+    .send        = citp_nonsock_send,
+    .bind        = citp_nonsock_bind,
+    .listen      = citp_nonsock_listen,
+    .accept      = citp_nonsock_accept,
+    .connect     = citp_nonsock_connect,
+    .shutdown    = citp_nonsock_shutdown,
+    .getsockname = citp_nonsock_getsockname,
+    .getpeername = citp_nonsock_getpeername,
+    .getsockopt  = citp_nonsock_getsockopt,
+    .setsockopt  = citp_nonsock_setsockopt,
 #if CI_CFG_RECVMMSG
-    .recvmmsg    = citp_nosock_recvmmsg,
+    .recvmmsg    = citp_nonsock_recvmmsg,
 #endif
-    .send        = citp_epoll_send,
 #if CI_CFG_SENDMMSG
-    .sendmmsg    = citp_nosock_sendmmsg,
+    .sendmmsg    = citp_nonsock_sendmmsg,
 #endif
-    .ioctl       = citp_epollb_ioctl,
-    .zc_send     = citp_epoll_zc_send,
-    .zc_recv     = citp_epoll_zc_recv,
-    .zc_recv_filter = citp_epoll_zc_recv_filter,
-    .recvmsg_kernel = citp_epoll_recvmsg_kernel,
-    .tmpl_alloc     = citp_epoll_tmpl_alloc,
-    .tmpl_update    = citp_epoll_tmpl_update,
-    .tmpl_abort     = citp_epoll_tmpl_abort,
+    .zc_send     = citp_nonsock_zc_send,
+    .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
+    .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
+    .tmpl_alloc     = citp_nonsock_tmpl_alloc,
+    .tmpl_update    = citp_nonsock_tmpl_update,
+    .tmpl_abort     = citp_nonsock_tmpl_abort,
+#if CI_CFG_USERSPACE_EPOLL
+    .ordered_data   = citp_nonsock_ordered_data,
+#endif
   }
 };
 

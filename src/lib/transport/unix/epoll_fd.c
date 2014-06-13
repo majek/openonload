@@ -35,6 +35,7 @@
 
 #include <ci/internal/transport_common.h>
 #include <onload/ul/tcp_helper.h>
+#include <onload/extensions.h>
 #include "ul_epoll.h"
 
 
@@ -213,39 +214,43 @@ citp_protocol_impl citp_epoll_protocol_impl = {
     .dup         = citp_epoll_dup,
     .dtor        = citp_epoll_dtor,
     .close       = citp_epoll_close,
-    .fcntl       = citp_epoll_fcntl,
+    .ioctl       = citp_epoll_ioctl,
+
     /* Poll/select for epollfd is done via kernel. */
-    .select      = citp_epoll_select,
-    .poll        = citp_epoll_poll,
+    .select      = citp_passthrough_select,
+    .poll        = citp_passthrough_poll,
+    .fcntl       = citp_passthrough_fcntl,
 
     /* "Invalid" members; normal user should not call it and should not
      * expect good behaviour */
-    .socket      = citp_closedfd_socket,
-    .bind        = citp_epoll_bind,
-    .listen      = citp_epoll_listen,
-    .accept      = citp_epoll_accept,
-    .connect     = citp_epoll_connect,
-    .shutdown    = citp_epoll_shutdown,
-    .getsockname = citp_epoll_getsockname,
-    .getpeername = citp_epoll_getpeername,
-    .getsockopt  = citp_epoll_getsockopt,
-    .setsockopt  = citp_epoll_setsockopt,
-    .recv        = citp_epoll_recv,
+    .socket      = NULL,        /* nobody should ever call this */
+    .recv        = citp_nonsock_recv,
+    .send        = citp_nonsock_send,
+    .bind        = citp_nonsock_bind,
+    .listen      = citp_nonsock_listen,
+    .accept      = citp_nonsock_accept,
+    .connect     = citp_nonsock_connect,
+    .shutdown    = citp_nonsock_shutdown,
+    .getsockname = citp_nonsock_getsockname,
+    .getpeername = citp_nonsock_getpeername,
+    .getsockopt  = citp_nonsock_getsockopt,
+    .setsockopt  = citp_nonsock_setsockopt,
 #if CI_CFG_RECVMMSG
-    .recvmmsg    = citp_nosock_recvmmsg,
+    .recvmmsg    = citp_nonsock_recvmmsg,
 #endif
-    .send        = citp_epoll_send,
 #if CI_CFG_SENDMMSG
-    .sendmmsg    = citp_nosock_sendmmsg,
+    .sendmmsg    = citp_nonsock_sendmmsg,
 #endif
-    .ioctl       = citp_epoll_ioctl,
-    .zc_send     = citp_epoll_zc_send,
-    .zc_recv     = citp_epoll_zc_recv,
-    .zc_recv_filter = citp_epoll_zc_recv_filter,
-    .recvmsg_kernel = citp_epoll_recvmsg_kernel,
-    .tmpl_alloc     = citp_epoll_tmpl_alloc,
-    .tmpl_update    = citp_epoll_tmpl_update,
-    .tmpl_abort     = citp_epoll_tmpl_abort,
+    .zc_send     = citp_nonsock_zc_send,
+    .zc_recv     = citp_nonsock_zc_recv,
+    .zc_recv_filter = citp_nonsock_zc_recv_filter,
+    .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
+    .tmpl_alloc     = citp_nonsock_tmpl_alloc,
+    .tmpl_update    = citp_nonsock_tmpl_update,
+    .tmpl_abort     = citp_nonsock_tmpl_abort,
+#if CI_CFG_USERSPACE_EPOLL
+    .ordered_data   = citp_nonsock_ordered_data,
+#endif
   }
 };
 
@@ -299,6 +304,7 @@ int citp_epoll_create(int size, int flags)
   oo_wqlock_init(&ep->lock);
   ep->not_mt_safe = ! CITP_OPTS.ul_epoll_mt_safe;
   ci_dllist_init(&ep->oo_sockets);
+  ep->oo_sockets_n = 0;
   ci_dllist_init(&ep->dead_sockets);
   oo_atomic_set(&ep->refcount, 1);
   ep->epfd_syncs_needed = 0;
@@ -435,6 +441,7 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
         ci_dllist_remove(&eitem->dllink);
       }
       ci_dllist_push(&ep->oo_sockets, &eitem->dllink);
+      ep->oo_sockets_n++;
       /* Remember that this fd has been added to this epoll set.  This
        * is needed to handle accelerated fds being handed over to
        * kernel.
@@ -473,6 +480,7 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
     fd_fdi->epoll_fd = -1;
     if(CI_LIKELY( eitem != NULL )) {
       ci_dllist_remove(&eitem->dllink);
+      ep->oo_sockets_n--;
       if( eitem->epfd_event.events == EP_NOT_REGISTERED )
         sync_kernel = 0;
       if( sync_kernel || eitem->epfd_event.events == EP_NOT_REGISTERED ) {
@@ -662,7 +670,7 @@ static int citp_epoll_ctl_os(citp_fdinfo* fdi, int op, int fd,
    * To avoid doing two syscalls, we do this via an internal ioctl().
    */
   struct citp_epoll_fd* ep = fdi_to_epoll(fdi);
-  struct oo_epoll1_action_arg oop;
+  struct oo_epoll1_ctl_arg oop;
   struct oo_epoll_item ev;
   int rc;
 
@@ -677,20 +685,14 @@ static int citp_epoll_ctl_os(citp_fdinfo* fdi, int op, int fd,
   else {
     ev.event = *event;
   }
-  CI_USER_PTR_SET(oop.epoll_ctl, &ev);
-  oop.epoll_ctl_n = 1;
-  oop.maxevents = 0;
+  oop.fd = ev.fd;
+  CI_USER_PTR_SET(oop.event, &ev.event);
+  oop.op = ev.op;
   oop.epfd = fdi->fd;
-  rc = ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_ACTION, &oop);
-  Log_POLL(ci_log("%s("EPOLL_CTL_FMT"): rc=%d errno=%d op_rc=%d", __FUNCTION__,
-                  EPOLL_CTL_ARGS(fdi->fd, op, fd, event), rc, errno, oop.rc));
-  if( rc < 0 )
-    return rc;
-  if( oop.rc == 0 )
-    return 0;
-  ci_assert_lt(oop.rc, 0);
-  errno = -oop.rc;
-  return -1;
+  rc = ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_CTL, &oop);
+  Log_POLL(ci_log("%s("EPOLL_CTL_FMT"): rc=%d errno=%d", __FUNCTION__,
+                  EPOLL_CTL_ARGS(fdi->fd, op, fd, event), rc, errno));
+  return rc;
 }
 
 
@@ -801,6 +803,7 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
         citp_ul_epoll_ctl_sync_fd(epfd, ep, eitem);
       else {
         ci_dllist_remove(&eitem->dllink);
+        ep->oo_sockets_n--;
         CI_FREE_OBJ(eitem);
       }
       if( --ep->epfd_syncs_needed == 0 )
@@ -835,6 +838,7 @@ static void citp_ul_epoll_one(struct oo_ul_epoll_state*__restrict__ eps,
   Log_POLL(ci_log("%s: auto remove fd %d from epoll set",
                   __FUNCTION__, eitem->fd));
   ci_dllist_remove(&eitem->dllink);
+  eps->ep->oo_sockets_n--;
   CI_FREE_OBJ(eitem);
 }
 
@@ -868,7 +872,7 @@ static void citp_epoll_poll_ul(struct oo_ul_epoll_state*__restrict__ eps)
 ci_inline int citp_epoll_os_fds(citp_epoll_fdi *efdi,
                                 struct epoll_event* events, int maxevents)
 {
-  struct oo_epoll1_action_arg op;
+  struct oo_epoll1_wait_arg op;
   struct citp_epoll_fd* ep = efdi->epoll;
   int rc;
 
@@ -879,16 +883,16 @@ ci_inline int citp_epoll_os_fds(citp_epoll_fdi *efdi,
 
   Log_POLL(ci_log("%s(%d): poll os fds", __FUNCTION__, efdi->fdinfo.fd));
 
-  op.epoll_ctl_n = 0;
   op.epfd = efdi->fdinfo.fd;
   op.maxevents = maxevents;
   CI_USER_PTR_SET(op.events, events);
-  rc = ci_sys_ioctl(efdi->epoll->epfd_os, OO_EPOLL1_IOC_ACTION, &op);
+  rc = ci_sys_ioctl(efdi->epoll->epfd_os, OO_EPOLL1_IOC_WAIT, &op);
   return rc < 0 ? rc : op.rc;
 }
 
 
 int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
+                    struct citp_ordered_wait* ordering,
                     int maxevents, int timeout, const sigset_t *sigmask,
                     citp_lib_context_t *lib_context)
 {
@@ -900,6 +904,7 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
   sigset_t sigsaved;
   int pwait_was_spinning = 0;
 #endif
+  int have_spun = 0;
 
   Log_POLL(ci_log("%s(%d, max_ev=%d, timeout=%d) ul=%d dead=%d syncs=%d",
                   __FUNCTION__, fdi->fd, maxevents, timeout,
@@ -933,6 +938,7 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
   eps.ep = ep;
   eps.events = events;
   eps.events_top = events + maxevents;
+  eps.ordering_info = ordering ? ordering->ordering_info : NULL;
   eps.has_epollet = 0;
   /* NB. We do need to call oo_per_thread_get() here (despite having
    * [lib_context] in scope) to ensure [spinstate] is initialised.
@@ -958,6 +964,14 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
           rc += rc_os;
       }
     }
+
+    /* If we've been spinning for some time before getting events, then any
+     * events are probably past the limit being used for ordering.  Tell caller
+     * that it would be worth polling again.
+     */
+    if( have_spun && ordering )
+      ordering->poll_again = 1;
+
     Log_POLL(ci_log("%s(%d): return %d ul + %d kernel",
                     __FUNCTION__, fdi->fd, rc, rc_os));
     goto unlock_release_exit_ret;
@@ -1018,6 +1032,7 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
       goto unlock_release_exit_ret;
     }
 
+    have_spun = 1;
     goto poll_again;
   } /* endif ul_epoll_spin spinning*/
 
@@ -1084,6 +1099,8 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     else
 #endif
       rc = ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
+    if( rc && ordering )
+      ordering->poll_again = 1;
     ep->blocking = 0;
   }
 
@@ -1103,9 +1120,7 @@ void citp_epoll_on_handover(citp_fdinfo* fd_fdi, int fdt_locked)
   struct citp_epoll_member* eitem;
   struct citp_epoll_fd* ep;
   citp_fdinfo* epoll_fdi;
-#if !CI_CFG_EPOLL_HANDOVER_WORKAROUND
   int rc;
-#endif
 
   if( (epoll_fdi = citp_fdtable_lookup(fd_fdi->epoll_fd)) == NULL ) {
     Log_POLL(ci_log("%s: epoll_fd=%d not found (fd=%d)", __FUNCTION__,
@@ -1127,19 +1142,20 @@ void citp_epoll_on_handover(citp_fdinfo* fd_fdi, int fdt_locked)
                       eitem->epoll_data.events,
                       (unsigned long long) eitem->epoll_data.data.u64));
       ci_dllist_remove(&eitem->dllink);
+      ep->oo_sockets_n--;
       CITP_EPOLL_EP_UNLOCK(ep, fdt_locked);
-#if !CI_CFG_EPOLL_HANDOVER_WORKAROUND
-      rc =
-#endif
-          citp_epoll_ctl(epoll_fdi, EPOLL_CTL_ADD, fd_fdi->fd,
-                          &eitem->epoll_data);
-#if !CI_CFG_EPOLL_HANDOVER_WORKAROUND
+      if( fd_fdi->protocol->type == CITP_PASSTHROUGH_FD )
+        rc = citp_epoll_ctl(epoll_fdi, EPOLL_CTL_ADD,
+                            fdi_to_alien_fdi(fd_fdi)->os_socket,
+                            &eitem->epoll_data);
+      else
+        rc = citp_epoll_ctl(epoll_fdi, EPOLL_CTL_ADD, fd_fdi->fd,
+                            &eitem->epoll_data);
       /* Error is OK: it means this fd is already in the kernel epoll set,
        * and kernel workaround is used */
       if( rc != 0 )
         Log_E(ci_log("%s: ERROR: epoll_ctl(%d, ADD, %d, ev) failed (%d)",
                      __FUNCTION__, epoll_fdi->fd, fd_fdi->fd, errno));
-#endif
       CI_FREE_OBJ(eitem);
     }
     else {
@@ -1170,6 +1186,18 @@ citp_ul_epoll_store_event(struct oo_ul_epoll_state*__restrict__ eps,
   eps->events[0].events = events;
   eps->events[0].data = eitem->epoll_data.data;
   ++eps->events;
+  if( eps->ordering_info ) {
+    citp_fdinfo* fdi = citp_ul_epoll_member_to_fdi(eitem);
+    struct timespec zero = {0, 0};
+    ci_assert(fdi);
+    eps->ordering_info[0].fdi = fdi;
+    if( events & EPOLLIN )
+      /* Grab the timestamp of the first data available. */
+      citp_fdinfo_get_ops(fdi)->ordered_data(fdi, &zero,
+                                        &eps->ordering_info[0].oo_event.ts,
+                                        &eps->ordering_info[0].oo_event.bytes);
+    ++eps->ordering_info;
+  }
 
   ci_dllist_remove(&eitem->dllink);
   if( eitem->epoll_data.events & (EPOLLONESHOT | EPOLLET) )
@@ -1212,5 +1240,251 @@ citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
     return 0;
   }
 }
+
+
+/* Gets the limiting timestamp for a netif, the earliest if the earliest
+ * parameter is true, else the latest.
+ */
+static void citp_epoll_netif_limit(ci_netif* ni, struct timespec* ts_out,
+                                   int earliest)
+{
+  ci_netif_state_nic_t* nsn = &ni->state->nic[0];
+  int intf_i;
+  int check = earliest ? -1 : 1;
+
+  ts_out->tv_sec = nsn->last_rx_timestamp.tv_sec;
+  ts_out->tv_nsec = nsn->last_rx_timestamp.tv_nsec;
+  for( intf_i = 1; intf_i < oo_stack_intf_max(ni); ++intf_i ) {
+    nsn = &ni->state->nic[intf_i];
+
+    if( citp_oo_timespec_compare(&nsn->last_rx_timestamp, ts_out) == check ) {
+      ts_out->tv_sec = nsn->last_rx_timestamp.tv_sec;
+      ts_out->tv_nsec = nsn->last_rx_timestamp.tv_nsec;
+    }
+  }
+}
+
+
+static void citp_epoll_latest_rx(ci_netif* ni, struct timespec* ts_out)
+{
+  citp_epoll_netif_limit(ni, ts_out, 0);
+}
+
+static void citp_epoll_earliest_rx(ci_netif* ni, struct timespec* ts_out)
+{
+  citp_epoll_netif_limit(ni, ts_out, 1);
+}
+
+
+static void citp_epoll_get_ordering_limit(ci_netif* ni,
+                                          struct timespec* limit_out)
+{
+  struct timespec base_ts;
+
+  ci_netif_lock(ni);
+  citp_epoll_latest_rx(ni, &base_ts);
+  ci_netif_poll(ni);
+  citp_epoll_earliest_rx(ni, limit_out);
+  ci_netif_unlock(ni);
+
+  if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
+    limit_out->tv_sec = base_ts.tv_sec;
+    limit_out->tv_nsec = base_ts.tv_nsec;
+  }
+
+  Log_POLL(ci_log("%s: poll limit %lu:%09lu", __FUNCTION__,
+                  limit_out->tv_sec, limit_out->tv_nsec));
+}
+
+
+int citp_epoll_ordering_compare(const void* a, const void* b)
+{
+  return citp_timespec_compare(
+                          &((const struct citp_ordering_info*)a)->oo_event.ts,
+                          &((const struct citp_ordering_info*)b)->oo_event.ts);
+}
+
+
+int citp_epoll_sort_results(struct epoll_event*__restrict__ events,
+                            struct epoll_event*__restrict__ wait_events,
+                            struct onload_ordered_epoll_event* oo_events,
+                            struct citp_ordering_info* ordering_info,
+                            int ready_socks, int maxevents,
+                            struct timespec* limit)
+{
+  int i;
+  int ordered_events = 0;
+  struct timespec next;
+  struct timespec* next_data_limit;
+  if( ready_socks < maxevents )
+    maxevents = ready_socks;
+
+  /* Update ordering info to point at the corresponding event, so that we know
+   * which event it corresponds to after sorting.
+   */
+  for( i = 0; i < ready_socks; i++ )
+    ordering_info[i].event = &wait_events[i];
+
+  /* Sort list of ready sockets based on timestamp of next available data. */
+  qsort(ordering_info, ready_socks, sizeof(*ordering_info),
+        citp_epoll_ordering_compare);
+
+  /* Working from head of list, copy ordered data into output array, stopping
+   * when any of the following conditions are true:
+   * - we have filled the output event array (i == maxevents)
+   * - the timestamp for the current event is after the limit
+   * - a ready socket has additional data that is earlier than the next socket's
+   *
+   * If a socket has additional data that is after the next socket's, but
+   * still earlier than the limit, then reduce the limit to that timestamp.
+   */
+  for( i = 0; i < maxevents; i++ ) {
+    /* If this event has a valid timestamp, then get ordering data for it. */
+    if( ordering_info[i].oo_event.ts.tv_sec != 0 ) {
+      /* If this event is after the limit, stop here. */
+      if( citp_timespec_compare(limit, &ordering_info[i].oo_event.ts) < 0 )
+        break;
+
+      /* If there is another ready socket then use the start of their data
+       * to bound the amount we claim as available from this socket.
+       */
+      if( (i + 1) < ready_socks && ordering_info[i + 1].oo_event.ts.tv_sec &&
+          citp_timespec_compare(&ordering_info[i + 1].oo_event.ts, limit) < 0 )
+        next_data_limit = &ordering_info[i + 1].oo_event.ts;
+      else
+        next_data_limit = limit;
+
+      /* Get the number of bytes available in order, and the timestamp of the
+       * first data that is after that.
+       */
+      if( ordering_info[i].fdi )
+        citp_fdinfo_get_ops(ordering_info[i].fdi)->ordered_data(
+                                       ordering_info[i].fdi, next_data_limit,
+                                       &next, &ordering_info[i].oo_event.bytes);
+
+      /* If we have more data then don't let us return anything beyond that. */
+      if( next.tv_sec && citp_timespec_compare(&next, limit) < 0 )
+        *limit = next;
+    }
+
+    memcpy(&events[i], ordering_info[i].event, sizeof(struct epoll_event));
+    memcpy(&oo_events[i], &ordering_info[i].oo_event,
+           sizeof(struct onload_ordered_epoll_event));
+    ordered_events++;
+  }
+  Log_POLL(ci_log("%s: got %d ordered events", __FUNCTION__, ordered_events));
+
+  return ordered_events;
+}
+
+int citp_epoll_ordered_wait(citp_fdinfo* fdi,
+                            struct epoll_event*__restrict__ events,
+                            struct onload_ordered_epoll_event* oo_events,
+                            int maxevents, int timeout, const sigset_t *sigmask,
+                            citp_lib_context_t *lib_context)
+{
+  int rc;
+  struct citp_epoll_fd* ep = fdi_to_epoll(fdi);
+  struct citp_epoll_member* eitem;
+  citp_fdinfo* sock_fdi = NULL;
+  citp_sock_fdi* sock_epi = fdi_to_sock_fdi(fdi);
+  ci_netif* ni = NULL;
+  struct timespec limit_ts = {0, 0};
+  struct citp_ordering_info* ordering_info = NULL;
+  struct epoll_event* wait_events = NULL;
+  struct citp_ordered_wait wait;
+  int n_socks;
+
+  Log_POLL(ci_log("%s(%d, max_ev=%d, timeout=%d) ul=%d dead=%d syncs=%d",
+                  __FUNCTION__, fdi->fd, maxevents, timeout,
+                  ! ci_dllist_is_empty(&ep->oo_sockets),
+                  ! ci_dllist_is_empty(&ep->dead_sockets),
+                  ep->epfd_syncs_needed));
+
+  CITP_EPOLL_EP_LOCK(ep);
+
+  /* We need to consider all accelerated sockets in the set.  We drop the lock
+   * before polling the sockets, so it's possible to increase the size of the
+   * set during this call, and not have all sockets considered.
+   *
+   * It's possible that the set also contains un-accelerated fds, so if
+   * maxevents is bigger than the number of accelerated fds then we'll use
+   * that value.
+   */
+  n_socks = CI_MAX(maxevents, ep->oo_sockets_n);
+  ordering_info = ci_calloc(n_socks, sizeof(*ordering_info));
+  wait_events = ci_calloc(n_socks, sizeof(*wait_events));
+
+  if( !ordering_info || !wait_events ) {
+    CITP_EPOLL_EP_UNLOCK(ep, 0);
+    citp_exit_lib(lib_context, FALSE);
+    free(ordering_info);
+    free(wait_events);
+    errno = ENOMEM;
+    return -1;
+  }
+
+  if( ci_dllist_not_empty(&ep->oo_sockets) ) {
+    ci_dllink *link;
+    ci_assert(ep->oo_sockets_n);
+
+    if( citp_fdtable_not_mt_safe() )
+      CITP_FDTABLE_LOCK_RD();
+
+    CI_DLLIST_FOR_EACH(link, &ep->oo_sockets) {
+      eitem = CI_CONTAINER(struct citp_epoll_member, dllink, link);
+
+      ci_assert_lt(eitem->fd, citp_fdtable.inited_count);
+
+      /* Use the first orderable socket we find to select the netif to use
+       * for ordering.
+       */
+      if(CI_LIKELY( (sock_fdi = citp_ul_epoll_member_to_fdi(eitem)) != NULL )) {
+        if( sock_fdi->protocol->type == CITP_TCP_SOCKET ||
+            sock_fdi->protocol->type == CITP_UDP_SOCKET ) {
+
+          sock_epi = fdi_to_sock_fdi(sock_fdi);
+          ni = sock_epi->sock.netif;
+
+          citp_epoll_get_ordering_limit(ni, &limit_ts);
+          break;
+        }
+      }
+    }
+
+    if( citp_fdtable_not_mt_safe() )
+      CITP_FDTABLE_UNLOCK_RD();
+  }
+  FDTABLE_ASSERT_VALID();
+
+  CITP_EPOLL_EP_UNLOCK(ep, 0);
+
+  wait.poll_again = 0;
+  wait.ordering_info = ordering_info;
+  /* citp_epoll_wait will do citp_exit_lib */
+  rc = citp_epoll_wait(fdi, wait_events, &wait, n_socks,
+                       timeout, sigmask, lib_context);
+
+  /* If we ended up going via the kernel we won't have the info we need for
+   * the ordering - but the fds will be ready next time the user does a wait.
+   */
+  if( wait.poll_again && ni ) {
+    Log_POLL(ci_log("%s: need repoll at user level", __FUNCTION__));
+    citp_epoll_get_ordering_limit(ni, &limit_ts);
+
+    citp_reenter_lib(lib_context);
+    rc = citp_epoll_wait(fdi, wait_events, &wait, n_socks,
+                         0, sigmask, lib_context);
+  }
+
+  if( rc > 0 )
+    rc = citp_epoll_sort_results(events, wait_events, oo_events, ordering_info,
+                                 rc, maxevents, &limit_ts);
+
+  ci_free(ordering_info);
+  ci_free(wait_events);
+  return rc;
+}
+
 
 #endif  /* CI_CFG_USERSPACE_EPOLL */

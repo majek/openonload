@@ -24,90 +24,7 @@
 #include <onload/ul/wqlock.h>
 #include "internal.h"
 #include "ul_poll.h"
-
-
-/*************************************************************************
- **************** Common general epoll-related code **********************
- *************************************************************************/
-
-extern
-int citp_epoll_fcntl(citp_fdinfo *fdi, int cmd, long arg);
-extern
-int citp_epoll_select(citp_fdinfo* fdinfo, int* n, int rd, int wr, int ex,
-                      struct oo_ul_select_state*);
-extern
-int citp_epoll_poll(citp_fdinfo* fdinfo, struct pollfd* pfd,
-                           struct oo_ul_poll_state* ps);
-extern int citp_closedfd_socket(int domain, int type, int protocol);
-extern
-int citp_epoll_bind(citp_fdinfo* fdinfo,
-                    const struct sockaddr* sa, socklen_t sa_len);
-extern
-int citp_epoll_listen(citp_fdinfo* fdinfo, int backlog);
-extern
-int citp_epoll_accept(citp_fdinfo* fdinfo,
-                      struct sockaddr* sa, socklen_t* p_sa_len, int flags,
-                      citp_lib_context_t* lib_context);
-extern
-int citp_epoll_connect(citp_fdinfo* fdinfo,
-                       const struct sockaddr* sa, socklen_t sa_len,
-                       citp_lib_context_t* lib_context);
-extern
-int citp_epoll_connect(citp_fdinfo* fdinfo,
-                       const struct sockaddr* sa, socklen_t sa_len,
-                       citp_lib_context_t* lib_context);
-extern
-int citp_epoll_shutdown(citp_fdinfo* fdinfo, int how);
-extern
-int citp_epoll_getsockname(citp_fdinfo* fdinfo,
-                           struct sockaddr* sa, socklen_t* p_sa_len);
-extern
-int citp_epoll_getpeername(citp_fdinfo* fdinfo,
-                           struct sockaddr* sa, socklen_t* p_sa_len);
-extern
-int citp_epoll_getsockopt(citp_fdinfo* fdinfo, int level,
-                          int optname, void* optval, socklen_t* optlen);
-extern
-int citp_epoll_setsockopt(citp_fdinfo* fdinfo, int level, int optname,
-                          const void* optval, socklen_t optlen);
-extern
-int citp_epoll_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags);
-extern
-int citp_epoll_send(citp_fdinfo* fdinfo, const struct msghdr* msg, int flags);
-#if CI_CFG_RECVMMSG
-extern
-int citp_nosock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
-                         unsigned vlen, int flags,
-                         const struct timespec *timeout);
-#endif
-#if CI_CFG_SENDMMSG
-extern
-int citp_nosock_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
-                         unsigned vlen, int flags);
-#endif
-extern
-int citp_epoll_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg,
-                       int flags);
-extern
-int citp_epoll_zc_recv(citp_fdinfo* fdi,
-                       struct onload_zc_recv_args* args);
-extern
-int citp_epoll_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
-                              int flags);
-extern
-int citp_epoll_zc_recv_filter(citp_fdinfo* fdi,
-                              onload_zc_recv_filter_callback filter,
-                              void* cb_arg, int flags);
-extern
-int citp_epoll_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
-                          int mlen, struct oo_msg_template** omt_pp,
-                          unsigned flags);
-extern
-int citp_epoll_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
-                           struct onload_template_msg_update_iovec* updates,
-                           int ulen, unsigned flags);
-extern
-int citp_epoll_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt);
+#include "nonsock.h"
 
 
 static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
@@ -188,6 +105,7 @@ struct citp_epoll_fd {
 
   /* List of onload sockets (struct citp_epoll_member) */
   ci_dllist             oo_sockets;
+  int                   oo_sockets_n;
 
   /* List of deleted sockets (struct citp_epoll_member) */
   ci_dllist             dead_sockets;
@@ -217,6 +135,17 @@ typedef struct {
 #define fdi_to_epoll_fdi(fdi)  CI_CONTAINER(citp_epoll_fdi, fdinfo, (fdi))
 #define fdi_to_epoll(fdi)      (fdi_to_epoll_fdi(fdi)->epoll)
 
+struct citp_ordering_info {
+  struct epoll_event* event;
+  struct onload_ordered_epoll_event oo_event;
+  struct timespec next_rx_ts;
+  citp_fdinfo* fdi;
+};
+
+struct citp_ordered_wait {
+  struct citp_ordering_info* ordering_info;
+  int poll_again;
+};
 
 /* Epoll state in user-land poll.  Copied from oo_ul_poll_state */
 struct oo_ul_epoll_state {
@@ -228,6 +157,9 @@ struct oo_ul_epoll_state {
 
   /* End of the [events] array. */
   struct epoll_event*__restrict__ events_top;
+
+  /* Information associated with ordering. */
+  struct citp_ordering_info* ordering_info;
 
   /* Timestamp for the beginning of the current poll.  Used to avoid doing
    * ci_netif_poll() on stacks too frequently.
@@ -247,9 +179,17 @@ extern int citp_epoll_create(int size, int flags) CI_HF;
 extern int citp_epoll_ctl(citp_fdinfo* fdi, int op, int fd,
                           struct epoll_event *event) CI_HF;
 extern int citp_epoll_wait(citp_fdinfo*, struct epoll_event*,
+                           struct citp_ordered_wait* ordering,
                            int maxev, int timeout, const sigset_t *sigmask,
                            citp_lib_context_t*) CI_HF;
 extern void citp_epoll_on_handover(citp_fdinfo*, int fdt_locked) CI_HF;
+struct onload_ordered_epoll_event;
+extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
+                                   struct epoll_event*__restrict__ events,
+                                   struct onload_ordered_epoll_event* oo_events,
+                                   int maxevents, int timeout,
+                                   const sigset_t *sigmask,
+                                   citp_lib_context_t *lib_context);
 
 
 /* At time of writing, we never generate the following epoll events:

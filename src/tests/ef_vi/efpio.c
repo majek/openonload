@@ -131,7 +131,9 @@ static ef_vi		 vi;
 struct pkt_buf*          pkt_bufs[N_RX_BUFS + 1];
 static ef_pd             pd;
 static ef_memreg         memreg;
+#ifdef __x86_64__
 static ef_pio            pio;
+#endif
 static unsigned          rx_posted, rx_completed;
 static int               tx_frame_len;
 
@@ -311,9 +313,13 @@ static void do_init(int ifindex)
   TRY(ef_pd_alloc(&pd, driver_handle, ifindex, pd_flags));
   TRY(ef_vi_alloc_from_pd(&vi, driver_handle, &pd, driver_handle,
                           -1, -1, -1, NULL, -1, vi_flags));
-
+#ifdef __x86_64__
   TRY(ef_pio_alloc(&pio, driver_handle, &pd, -1, driver_handle));
   TRY(ef_pio_link_vi(&pio, driver_handle, &vi, driver_handle));
+#else
+  /* PIO is only available on x86_64 systems */
+  TEST(0);
+#endif
 
   ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_ip4_local(&filter_spec, IPPROTO_UDP,

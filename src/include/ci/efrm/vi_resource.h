@@ -114,6 +114,12 @@ enum efrm_vi_q_flags {
 	EFRM_VI_CONTIGUOUS            = 0x80,
 	/** RXQ: Timestamp RX packets */
 	EFRM_VI_RX_TIMESTAMPS         = 0x100,
+	/** TXQ: Timestamp TX packets */
+	EFRM_VI_TX_TIMESTAMPS         = 0x200,
+	/** TXQ: Send outgoing traffic to loopback datapath beside MAC */
+	EFRM_VI_TX_LOOPBACK           = 0x400,
+	/** RXQ: Enable support to receive from loopback datapath beside MAC */
+	EFRM_VI_RX_LOOPBACK           = 0x800,
 };
 
 
@@ -133,6 +139,8 @@ struct efrm_vi_mappings {
 
 	unsigned         txq_size;
 	void*            txq_descriptors;
+
+	unsigned         out_flags;
 };
 
 
@@ -173,6 +181,15 @@ extern int efrm_vi_attr_set_interrupt_core(struct efrm_vi_attr *, int core);
 extern int efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *,
 					   int channel_id);
 
+/** Set a hw_stack_id for a VI, value
+ * -1: force auto allocate the id, even if it is not needed,
+ * 0: auto allocate the id if needed,
+ * 1-EFHW_MAX_STACK_ID: request hw stack_id to be set to a specific value,
+ *   note: only reusing values is possible
+ * */
+extern int efrm_vi_attr_set_hw_stack_id(struct efrm_vi_attr *,
+					   int hw_stack_id);
+
 
 /**
  * Allocate a VI resource instance.
@@ -195,6 +212,15 @@ extern int  efrm_vi_alloc(struct efrm_client *client,
 extern void efrm_vi_get_info(struct efrm_vi *virs,
 			     struct efrm_vi_info *info_out);
 
+/**
+ * Returns hw stack id assocaited with a VI.
+ */
+extern unsigned efrm_vi_get_hw_stack_id(struct efrm_vi *virs);
+
+/**
+ * Tells whether rx loopback is supported by a VI.
+ */
+extern int efrm_vi_is_hw_rx_loopback_supported(struct efrm_vi *virs);
 
 #define EFRM_VI_Q_GET_SIZE_CURRENT  -123
 
@@ -288,6 +314,13 @@ efrm_resource *efrm_from_vi_resource(struct efrm_vi *rs)
 #define EFAB_VI_RESOURCE_PRI_ARG(virs) \
     (efrm_from_vi_resource(virs)->rs_instance)
 
+enum efrm_vi_alloc_failure {
+	EFRM_VI_ALLOC_VI_FAILED,
+	EFRM_VI_ALLOC_EVQ_FAILED,
+	EFRM_VI_ALLOC_RXQ_FAILED,
+	EFRM_VI_ALLOC_TXQ_FAILED,
+};
+
 extern int
 efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi *evq_virs,
@@ -301,10 +334,12 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		       uint32_t *out_io_mmap_bytes,
 		       uint32_t *out_mem_mmap_bytes,
 		       uint32_t *out_txq_capacity,
-		       uint32_t *out_rxq_capacity);
+		       uint32_t *out_rxq_capacity,
+		       enum efrm_vi_alloc_failure *out_failure_reason);
 
 extern void efrm_vi_resource_release(struct efrm_vi *);
-extern void efrm_vi_resource_release_callback(struct efrm_vi *virs);
+extern void efrm_vi_resource_stop_callback(struct efrm_vi *virs);
+extern void efrm_vi_resource_release_flushed(struct efrm_vi *virs);
 
 /* Return the protection domain associated with this VI.  This function
  * returns a borrowed reference which lives as long as the VI.

@@ -57,12 +57,8 @@ int efx_aoe_attach(struct efx_nic *efx)
 
 void efx_aoe_detach(struct efx_nic *efx)
 {
-	if (efx->aoe_data) {
-		kfree(efx->aoe_data);
-		efx->aoe_data = NULL;
-	}
-
-	return;
+	kfree(efx->aoe_data);
+	efx->aoe_data = NULL;
 }
 
 bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event)

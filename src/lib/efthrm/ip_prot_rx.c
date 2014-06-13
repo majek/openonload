@@ -39,6 +39,7 @@
 extern void ci_ipp_dump_stats(void);
 #endif
 
+
 /*--------------------------------------------------------------------
  *!
  * This function is intended to safely decode a TCP helper resource
@@ -75,7 +76,7 @@ efab_ipp_get_locked_thr_from_tcp_handle(unsigned tcp_id)
     /* so we have found the resource in the table and have incremented
     ** its reference count  - now lets try and lock the associated netif 
     */
-    if ( !efab_tcp_helper_netif_try_lock(thr) ) {
+    if ( !efab_tcp_helper_netif_try_lock(thr, 1) ) {
       OO_DEBUG_IPP( ci_log("%s: Failed to lock TCP helper", __FUNCTION__) );
       efab_thr_release(thr);
       thr = NULL;
@@ -117,7 +118,7 @@ int efab_handle_ipp_pkt_task(int thr_id, const void* in_data, int len)
     CI_ICMP_STATS_INC_IN_MSGS( &thr->netif );
     s = efab_ipp_icmp_for_thr( thr, &addr );
     if( s )  efab_ipp_icmp_qpkt( thr, s, &addr );
-    efab_tcp_helper_netif_unlock( thr );
+    efab_tcp_helper_netif_unlock( thr, 1 );
     efab_thr_release(thr);
   }
 

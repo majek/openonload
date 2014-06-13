@@ -84,7 +84,6 @@ struct proc_dir_entry *oo_proc_root = NULL;
  *
  *--------------------------------------------------------------------*/
 
-static const struct file_operations efab_workq_fops;
 static const struct file_operations efab_version_fops;
 static const struct file_operations efab_dlfilters_fops;
 
@@ -101,7 +100,6 @@ typedef struct ci_proc_efab_entry_s {
 } ci_proc_efab_entry_t;
 static ci_proc_efab_entry_t ci_proc_efab_table[] = {
     {"cplane",        &cicp_stat_fops}, 
-    {"workqueue",     &efab_workq_fops},
     {"version",       &efab_version_fops},
     {"dlfilters",     &efab_dlfilters_fops},
 };
@@ -126,48 +124,6 @@ ci_ip_stats_update_global(ci_ip_stats *stats) {
 }
 EXPORT_SYMBOL(ci_ip_stats_update_global);
 
-
-
-/****************************************************************************
- *
- * /proc/drivers/onload/workqueue
- *
- ****************************************************************************/
-
-static int 
-efab_workq_read_proc(struct seq_file *seq, void *s)
-{
-  ci_irqlock_state_t lock_flags;
-  ci_workqueue_t *wqueue;
-  wqueue = &CI_GLOBAL_WORKQUEUE;
-  ci_irqlock_lock(&wqueue->lock, &lock_flags);
-  if (wqueue->state == CI_WQ_ALIVE) {
-#define EFAB_WORKQ_READ_PROC_PRINT(v)			\
-  seq_printf(seq, "%14s = %u\n", #v, wqueue->stats.v)
-      EFAB_WORKQ_READ_PROC_PRINT(working);
-      EFAB_WORKQ_READ_PROC_PRINT(iter);
-      EFAB_WORKQ_READ_PROC_PRINT(backlog);
-      EFAB_WORKQ_READ_PROC_PRINT(started);
-#undef EFAB_WORKQ_READ_PROC_PRINT
-  }
-  else {	
-    seq_printf(seq, "The workqueue is not running.\n");
-  }
-  ci_irqlock_unlock(&wqueue->lock, &lock_flags);
-
-  return 0;
-}
-static int efab_workq_open_proc(struct inode *inode, struct file *file)
-{
-    return single_open(file, efab_workq_read_proc, 0);
-}
-static const struct file_operations efab_workq_fops = {
-    .owner   = THIS_MODULE,
-    .open    = efab_workq_open_proc,
-    .read    = seq_read,
-    .llseek  = seq_lseek,
-    .release = single_release,
-};
 
 
 /****************************************************************************

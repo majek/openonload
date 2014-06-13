@@ -22,39 +22,19 @@
  * by the Free Software Foundation, incorporated herein by reference.
  */
 
-/* sparse doesn't like the tracepoint definitions.  It will complain
- * about the tracepoint functions being undefined now, but at least it
- * won't give up after trying to parse this file.
- */
-#ifndef __CHECKER__
-
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM sfc
 
 #if !defined(TRACE_EVENTS_SFC_H) || defined(TRACE_HEADER_MULTI_READ)
 #define TRACE_EVENTS_SFC_H
 
-#ifndef CONFIG_SFC_TRACING
-#undef TP_PROTO
-#define TP_PROTO(proto...) proto
-#undef TRACE_EVENT
-#define TRACE_EVENT(name, proto, ...)			\
-	static inline void trace_ ## name(proto) {}
-#else
 #include <linux/tracepoint.h>
-#endif
 
 TRACE_EVENT(sfc_receive,
 
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
-	TP_PROTO(const struct sk_buff *skb, bool gro),
-
-	TP_ARGS(skb, gro),
-#else
 	TP_PROTO(const struct sk_buff *skb, bool gro, bool vlan_tagged, u16 vlan_tci),
 
 	TP_ARGS(skb, gro, vlan_tagged, vlan_tci),
-#endif
 
 	TP_STRUCT__entry(
 		__string(	dev_name,		skb->dev->name	)
@@ -89,9 +69,13 @@ TRACE_EVENT(sfc_receive,
 		__entry->queue_mapping = skb->queue_mapping;
 		__entry->skbaddr = skb;
 		__entry->gro = gro;
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#ifndef EFX_USE_FAKE_VLAN_RX_ACCEL
+		/* Ignore vlan arguments and look at the skb, as the
+		 * vlan arguments are *not* being passed separately
+		 * to the kernel
+		 */
 		__entry->vlan_tagged = vlan_tx_tag_present(skb);
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD___VLAN_PUT_TAG)
+#ifndef EFX_HAVE_OLD___VLAN_PUT_TAG
 		__entry->vlan_proto = ntohs(skb->vlan_proto);
 #else
 		__entry->vlan_proto = ETH_P_8021Q;
@@ -104,12 +88,12 @@ TRACE_EVENT(sfc_receive,
 #endif
 		__entry->protocol = ntohs(skb->protocol);
 		__entry->ip_summed = skb->ip_summed;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_RXHASH_SUPPORT)
+#ifdef EFX_HAVE_RXHASH_SUPPORT
 		__entry->rxhash = skb->rxhash;
 #else
 		__entry->rxhash = 0;
 #endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_L4_RXHASH)
+#ifdef EFX_HAVE_L4_RXHASH
 		__entry->l4_rxhash = skb->l4_rxhash;
 #else
 		__entry->l4_rxhash = false;
@@ -165,7 +149,7 @@ TRACE_EVENT(sfc_transmit,
 		__entry->queue_mapping = skb->queue_mapping;
 		__entry->skbaddr = skb;
 		__entry->vlan_tagged = vlan_tx_tag_present(skb);
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD___VLAN_PUT_TAG)
+#ifndef EFX_HAVE_OLD___VLAN_PUT_TAG
 		__entry->vlan_proto = ntohs(skb->vlan_proto);
 #else
 		__entry->vlan_proto = ETH_P_8021Q;
@@ -179,7 +163,7 @@ TRACE_EVENT(sfc_transmit,
 		__entry->transport_offset_valid =
 			skb_transport_header_was_set(skb);
 		__entry->transport_offset = skb_transport_offset(skb);
-#if !defined(EFX_USE_KCOMPAT) || (defined(EFX_HAVE_NET_TSTAMP) && defined(EFX_HAVE_SKBTX_HW_TSTAMP))
+#if defined(EFX_HAVE_NET_TSTAMP) && defined(EFX_HAVE_SKBTX_HW_TSTAMP)
 		__entry->tx_flags = skb_shinfo(skb)->tx_flags;
 #else
 		__entry->tx_flags = skb_shinfo(skb)->tx_flags.flags;
@@ -200,8 +184,4 @@ TRACE_EVENT(sfc_transmit,
 
 #endif /* TRACE_EVENTS_SFC_H */
 
-#ifdef CONFIG_SFC_TRACING
 #include <trace/define_trace.h>
-#endif
-
-#endif /* __CHECKER__ */

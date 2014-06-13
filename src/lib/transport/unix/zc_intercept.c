@@ -115,6 +115,9 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
       rc = -ENOTSOCK;
       break;
 #endif
+    case CITP_PASSTHROUGH_FD:
+      rc = -ESOCKTNOSUPPORT;
+      break;
     default:
       LOG_U(log("%s: unknown fdinfo type %d", __FUNCTION__, 
                 citp_fdinfo_get_type(fdi)));

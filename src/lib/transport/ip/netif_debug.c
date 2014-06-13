@@ -256,6 +256,24 @@ void ci_netif_dump_sockets(ci_netif* ni)
 }
 
 
+void ci_netif_print_sockets(ci_netif* ni)
+{
+  ci_netif_state* ns = ni->state;
+  unsigned id;
+
+  for( id = 0; id < ns->n_ep_bufs; ++id ) {
+    if( oo_sock_id_is_waitable(ni, id) ) {
+      citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
+      if( wo->waitable.state != CI_TCP_STATE_FREE &&
+          wo->waitable.state != CI_TCP_CLOSED &&
+          wo->waitable.state & CI_TCP_STATE_SOCKET ) {
+        citp_waitable_print(&wo->waitable);
+      }
+    }
+  }
+}
+
+
 void ci_netif_dump_pkt_summary(ci_netif* ni)
 {
   int intf_i, rx_ring = 0, tx_ring = 0, tx_oflow = 0, used, rx_queued;

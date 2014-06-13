@@ -32,7 +32,7 @@ LIB_SRCS	:=			\
 		tcp_fd.c		\
 		udp_fd.c		\
 		pipe_fd.c		\
-		epoll_common.c		\
+		nonsock.c		\
 		epoll_fd.c		\
 		epoll_fd_b.c		\
 		netif_init.c		\
@@ -42,7 +42,9 @@ LIB_SRCS	:=			\
 		trampoline.c		\
 		wqlock.c		\
 		poll_select.c		\
-		debug.c                 
+		passthrough_fd.c	\
+		debug.c                 \
+		utils.c
 
 MMAKE_OBJ_PREFIX := ci_tp_unix_
 LIB_OBJS	:= $(LIB_SRCS:%.c=$(MMAKE_OBJ_PREFIX)%.o)

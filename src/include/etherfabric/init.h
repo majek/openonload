@@ -38,6 +38,9 @@ extern void ef_vi_init_evq(struct ef_vi*, int ring_size, void* event_ring);
 extern void ef_vi_init_timer(struct ef_vi* vi, int timer_quantum_ns);
 
 extern void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction);
+extern void ef_vi_init_tx_timestamping(struct ef_vi* vi);
+
+extern void ef_vi_init_out_flags(struct ef_vi* vi, unsigned flags);
 
 extern void ef_vi_init_state(struct ef_vi*);
 

@@ -202,53 +202,6 @@ _ef10_nic_check_licence(struct efhw_nic *nic) {
 }
 
 
-static int _ef10_nic_check_14_byte_prefix_present(struct efhw_nic *nic,
-						  const char* caller) 
-{
-	size_t out_size;
-	unsigned flags;
-	int rc;
-
-	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_CAPABILITIES_IN_LEN);
-	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_OUT_LEN);
-
-	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_CAPABILITIES,
-			   sizeof(in), sizeof(out), &out_size,
-			   (const char*)&in, (char*)&out);
-	check_response(caller, __FUNCTION__, rc,
-		       MC_CMD_GET_CAPABILITIES_OUT_LEN, out_size);
-	if (rc != 0)
-		return rc;
-	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_OUT_FLAGS1);
-	return flags & (1u << MC_CMD_GET_CAPABILITIES_OUT_RX_PREFIX_LEN_14_LBN);
-}
-
-
-static int _ef10_nic_get_rx_timestamp_correction(struct efhw_nic *nic,
-						  int *rx_ts_correction,
-						  const char* caller)
-{
-	int rc;
-	size_t out_size;
-
-	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS_LEN);
-	EFHW_MCDI_DECLARE_BUF(out,
-			      MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN);
-
-	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP,
-			    MC_CMD_PTP_OP_GET_TIMESTAMP_CORRECTIONS);
-	EFHW_MCDI_SET_DWORD(in, PTP_IN_PERIPH_ID, 0);
-
-	rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), sizeof(out), &out_size,
-			   (const char*)in, (char*)out);
-	check_response(caller, __FUNCTION__, rc,
-		       MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN, out_size);
-	if( rc == 0 )
-		*rx_ts_correction =
-		EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_RECEIVE);
-	return rc;
-}
-
 static int
 ef10_nic_license_challenge(struct efhw_nic *nic, 
 			   const uint32_t feature, 
@@ -293,6 +246,61 @@ ef10_nic_license_challenge(struct efhw_nic *nic,
 }
 
 
+static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
+					unsigned* capabitlity_flags,
+					const char* caller)
+{
+	size_t out_size;
+	unsigned flags;
+	int rc;
+
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_CAPABILITIES_IN_LEN);
+	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_OUT_LEN);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_CAPABILITIES,
+			   sizeof(in), sizeof(out), &out_size,
+			   (const char*)&in, (char*)&out);
+	check_response(caller, __FUNCTION__, rc,
+		       MC_CMD_GET_CAPABILITIES_OUT_LEN, out_size);
+	if (rc != 0)
+		return rc;
+	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_OUT_FLAGS1);
+	if (flags & (1u <<
+		     MC_CMD_GET_CAPABILITIES_OUT_RX_PREFIX_LEN_14_LBN))
+		*capabitlity_flags |= NIC_FLAG_14BYTE_PREFIX;
+	if (flags & (1u <<
+		     MC_CMD_GET_CAPABILITIES_OUT_TX_MCAST_UDP_LOOPBACK_LBN))
+		*capabitlity_flags |= NIC_FLAG_MCAST_LOOP_HW;
+	return rc;
+}
+
+
+static int _ef10_nic_get_rx_timestamp_correction(struct efhw_nic *nic,
+						  int *rx_ts_correction,
+						  const char* caller)
+{
+	int rc;
+	size_t out_size;
+
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS_LEN);
+	EFHW_MCDI_DECLARE_BUF(out,
+			      MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN);
+
+	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP,
+			    MC_CMD_PTP_OP_GET_TIMESTAMP_CORRECTIONS);
+	EFHW_MCDI_SET_DWORD(in, PTP_IN_PERIPH_ID, 0);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), sizeof(out), &out_size,
+			   (const char*)in, (char*)out);
+	check_response(caller, __FUNCTION__, rc,
+		       MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN, out_size);
+	if( rc == 0 )
+		*rx_ts_correction =
+		EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_RECEIVE);
+	return rc;
+}
+
+
 static void
 ef10_nic_tweak_hardware(struct efhw_nic *nic)
 {
@@ -311,21 +319,24 @@ ef10_nic_tweak_hardware(struct efhw_nic *nic)
                         1 << MC_CMD_FILTER_OP_IN_MATCH_OUTER_VLAN_LBN | \
                         1 << MC_CMD_FILTER_OP_IN_MATCH_IP_PROTO_LBN)
 
+	nic->flags &= ~(NIC_FLAG_MCAST_LOOP_HW | NIC_FLAG_14BYTE_PREFIX |
+			NIC_FLAG_VLAN_FILTERS | NIC_FLAG_BUG35388_WORKAROUND);
+
 	if( _ef10_nic_check_supported_filter(nic, VLAN_IP_WILD) )
 		nic->flags |= NIC_FLAG_VLAN_FILTERS;
-	else
-		nic->flags &= ~NIC_FLAG_VLAN_FILTERS;
 
 	if( _ef10_nic_check_35388_workaround(nic) )
 		nic->flags |= NIC_FLAG_BUG35388_WORKAROUND;
-	else
-		nic->flags &= ~NIC_FLAG_BUG35388_WORKAROUND;
-	
-	if( _ef10_nic_check_14_byte_prefix_present(nic, __FUNCTION__) )
-		nic->rx_prefix_len = 14;
-	else
-		nic->rx_prefix_len = 0;
 
+	_ef10_nic_check_capabilities(nic, &nic->flags, __FUNCTION__);
+
+	nic->rx_prefix_len = (nic->flags & NIC_FLAG_14BYTE_PREFIX) ?
+			      14 :
+			      0;
+
+#if EFX_DRIVERLINK_API_VERSION < 15
+	nic->flags &= ~NIC_FLAG_MCAST_LOOP_HW;
+#endif
 }
 
 
@@ -335,6 +346,7 @@ ef10_nic_init_hardware(struct efhw_nic *nic,
 		       const uint8_t *mac_addr, int non_irq_evq,
 		       int bt_min, int bt_lim)
 {
+	int rc;
 	EFHW_TRACE("%s:", __FUNCTION__);
 
 	nic->flags |= NIC_FLAG_10G;
@@ -342,8 +354,10 @@ ef10_nic_init_hardware(struct efhw_nic *nic,
 	memcpy(nic->mac_addr, mac_addr, ETH_ALEN);
 
 	ef10_nic_tweak_hardware(nic);
-	
-	if( !_ef10_nic_check_licence(nic) ) {
+
+	rc = _ef10_nic_check_licence(nic);
+	if( rc < 0 ) return rc;
+	if( rc == 0 ) {
 		EFHW_ERR("%s: Firmware reports no Onload licence present",
 			 __FUNCTION__);
 		return -EOPNOTSUPP;
@@ -470,21 +484,33 @@ _ef10_mcdi_cmd_driver_event(struct efhw_nic *nic, uint64_t data, uint32_t evq)
 
 static int
 _ef10_mcdi_cmd_ptp_time_event_subscribe(struct efhw_nic *nic, uint32_t evq,
-					const char* caller)
+					unsigned* out_flags, const char* caller)
 {
 	int rc;
 	size_t out_size;
+	static const uint32_t rs =
+	    (1 << MC_CMD_PTP_IN_TIME_EVENT_SUBSCRIBE_REPORT_SYNC_STATUS_LBN);
+	int sync_flag = EFHW_VI_CLOCK_SYNC_STATUS;
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_TIME_EVENT_SUBSCRIBE_LEN);
 
 	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP, MC_CMD_PTP_OP_TIME_EVENT_SUBSCRIBE);
 	EFHW_MCDI_SET_DWORD(in, PTP_IN_PERIPH_ID, 0); 
-	EFHW_MCDI_SET_DWORD(in, PTP_IN_TIME_EVENT_SUBSCRIBE_QUEUE, evq);
+	EFHW_MCDI_SET_DWORD(in, PTP_IN_TIME_EVENT_SUBSCRIBE_QUEUE, evq | rs);
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), 0, &out_size,
 			   (const char*)&in, NULL);
+	if (rc == -ERANGE) {
+		sync_flag = 0;
+		EFHW_MCDI_SET_DWORD(in, PTP_IN_TIME_EVENT_SUBSCRIBE_QUEUE, evq);
+		rc = ef10_mcdi_rpc(nic, MC_CMD_PTP,sizeof(in), 0, &out_size,
+				   (const char*)&in, NULL);
+	}
 	check_response(caller, __FUNCTION__, rc,
 		       MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_LEN, out_size);
+	if( rc == 0 && out_flags != NULL) {
+		*out_flags |= sync_flag;
+	}
 	return rc;
 }
 
@@ -521,7 +547,7 @@ ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			    uint buf_base_id, dma_addr_t *dma_addrs,
 			    uint n_pages, int interrupting, int enable_dos_p,
 			    int wakeup_evq, int enable_time_sync_events,
-			    int *rx_ts_correction_out)
+			    int *rx_ts_correction_out, int* flags_out)
 {
         int rc;
 	rc = _ef10_mcdi_cmd_event_queue_enable(nic, evq, evq_size, dma_addrs, 
@@ -534,9 +560,10 @@ ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 	if( rc == 0 && enable_time_sync_events ) {
 		rc = _ef10_nic_get_rx_timestamp_correction
 			(nic, rx_ts_correction_out, __FUNCTION__);
-		if( rc == 0 )
+		if( rc == 0 ) {
 			rc = _ef10_mcdi_cmd_ptp_time_event_subscribe
-				(nic, evq, __FUNCTION__);
+				(nic, evq, flags_out, __FUNCTION__);
+		}
 		if( rc != 0 ) {
 			_ef10_mcdi_cmd_event_queue_disable(nic, evq);
 			/* Firmware returns EPERM if you do not have
@@ -687,10 +714,58 @@ ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 
 /*----------------------------------------------------------------------------
  *
- * DMAQ low-level register interface - MCDI cmds
+ * multicast loopback - MCDI cmds
  *
  *---------------------------------------------------------------------------*/
 
+static int
+_ef10_mcdi_cmd_enable_multicast_loopback(struct efhw_nic *nic,
+					 int instance, int enable)
+{
+	int rc;
+	size_t out_size;
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_PARSER_DISP_CONFIG_IN_LEN(1));
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_TYPE,
+			MC_CMD_SET_PARSER_DISP_CONFIG_IN_TXQ_MCAST_UDP_DST_LOOKUP_EN);
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_ENTITY, instance);
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_VALUE, enable ? 1 : 0);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_SET_PARSER_DISP_CONFIG, sizeof(in), 0,
+			   &out_size, (const char*)&in, NULL);
+	check_response("ef10_enable_multicast_loopback", __FUNCTION__, rc,
+		       MC_CMD_SET_PARSER_DISP_CONFIG_OUT_LEN, out_size);
+	return rc;
+}
+
+
+static int
+_ef10_mcdi_cmd_set_multicast_loopback_suppression
+		(struct efhw_nic *nic,
+		 int suppress_self_transmission,
+		 uint32_t port_id )
+{
+	int rc;
+	size_t out_size;
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_PARSER_DISP_CONFIG_IN_LEN(1));
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_TYPE,
+			MC_CMD_SET_PARSER_DISP_CONFIG_IN_VADAPTOR_SUPPRESS_SELF_TX);
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_ENTITY, port_id);
+	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_VALUE,
+			    suppress_self_transmission ? 1 : 0);
+	rc = ef10_mcdi_rpc(nic, MC_CMD_SET_PARSER_DISP_CONFIG, sizeof(in), 0,
+			   &out_size, (const char*)&in, NULL);
+	check_response("ef10_enable_loopback_self_suppression", __FUNCTION__, rc,
+		       MC_CMD_SET_PARSER_DISP_CONFIG_OUT_LEN, out_size);
+	return rc;
+}
+
+
+
+/*----------------------------------------------------------------------------
+ *
+ * DMAQ low-level register interface - MCDI cmds
+ *
+ *---------------------------------------------------------------------------*/
 
 static int
 _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
@@ -774,45 +849,80 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
  * DMAQ low-level register interface
  *
  *---------------------------------------------------------------------------*/
+static uint32_t ef10_gen_port_id(struct efhw_nic *nic, uint stack_id)
+{
+	return EVB_PORT_ID_ASSIGNED | EVB_STACK_ID( stack_id );
+}
+
 
 static int
 ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 		    uint tag, uint dmaq_size, uint buf_idx,
-		    dma_addr_t *dma_addrs, int n_dma_addrs, uint flags)
+		    dma_addr_t *dma_addrs, int n_dma_addrs, uint stack_id, uint flags)
 {
-	/* Not supporting timestamping in phase 1 */
-	int flag_timestamp = 0;
+	int rc;
+	uint32_t port_id = EVB_PORT_ID_ASSIGNED;
+
+	int flag_timestamp = (flags & EFHW_VI_TX_TIMESTAMPS) != 0;
 	int flag_tcp_udp_only = (flags & EFHW_VI_TX_TCPUDP_ONLY) != 0;
 	int flag_tcp_csum_dis = (flags & EFHW_VI_TX_TCPUDP_CSUM_DIS) != 0;
 	int flag_ip_csum_dis = (flags & EFHW_VI_TX_IP_CSUM_DIS) != 0;
 	int flag_buff_mode = (flags & EFHW_VI_TX_PHYS_ADDR_EN) == 0;
+	int flag_loopback = (flags & EFHW_VI_TX_LOOPBACK) != 0;
 
 	/* No option for this yet, but we want it on as it cuts latency. */
 	int flag_pacer_bypass = 1;
 
-	return _ef10_mcdi_cmd_init_txq
-		(nic, dma_addrs, n_dma_addrs, EVB_PORT_ID_ASSIGNED,
+	if (nic->flags & NIC_FLAG_MCAST_LOOP_HW) {
+		rc = _ef10_mcdi_cmd_enable_multicast_loopback
+			(nic, dmaq, flag_loopback);
+		if(rc != 0) {
+			/* We are greaceful in case there is firmware
+			 * with incomplete support */
+			if (flag_loopback || rc != ENOSYS)
+				return rc;
+		}
+	}
+
+	if (flag_loopback) {
+		port_id = ef10_gen_port_id(nic, stack_id);
+
+		if (nic->flags & NIC_FLAG_MCAST_LOOP_HW) {
+			rc = _ef10_mcdi_cmd_set_multicast_loopback_suppression
+				(nic, 1, port_id);
+			if( rc != 0 )
+				return rc;
+		}
+	}
+
+	rc = _ef10_mcdi_cmd_init_txq
+		(nic, dma_addrs, n_dma_addrs, port_id,
 		 REAL_OWNER_ID(own_id), flag_timestamp, QUEUE_CRC_MODE_NONE,
 		 flag_tcp_udp_only, flag_tcp_csum_dis, flag_ip_csum_dis,
 		 flag_buff_mode, flag_pacer_bypass,
 		 dmaq, tag, evq_id, dmaq_size);
+
+	return rc;
 }
 
 
 static int 
 ef10_dmaq_rx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 		    uint tag, uint dmaq_size, uint buf_idx,
-		    dma_addr_t *dma_addrs, int n_dma_addrs, uint flags)
+		    dma_addr_t *dma_addrs, int n_dma_addrs, uint stack_id, uint flags)
 {
 	int rc;
+	uint32_t port_id = EVB_PORT_ID_ASSIGNED;
 
 	int flag_rx_prefix = (flags & EFHW_VI_RX_PREFIX) != 0;
 	int flag_timestamp = (flags & EFHW_VI_RX_TIMESTAMPS) != 0;
 	int flag_hdr_split = (flags & EFHW_VI_RX_HDR_SPLIT) != 0;
 	int flag_buff_mode = (flags & EFHW_VI_RX_PHYS_ADDR_EN) == 0;
+	if (stack_id)
+		port_id = ef10_gen_port_id(nic, stack_id);
 
 	rc = _ef10_mcdi_cmd_init_rxq
-		(nic, dma_addrs, n_dma_addrs, EVB_PORT_ID_ASSIGNED,
+		(nic, dma_addrs, n_dma_addrs, port_id,
 		 REAL_OWNER_ID(own_id), QUEUE_CRC_MODE_NONE, flag_timestamp,
 		 flag_hdr_split, flag_buff_mode, flag_rx_prefix, dmaq, tag,
 		 evq_id, dmaq_size);

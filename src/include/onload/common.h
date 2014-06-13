@@ -133,6 +133,14 @@ typedef struct {
 } oo_tcp_filter_set_t;
 
 typedef struct {
+  char      cluster_name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
+  ci_int32  cluster_size;
+  ci_uint32 cluster_restart_opt;
+  ci_uint32 addr_be32;
+  ci_uint16 port_be16;
+} oo_tcp_reuseport_bind_t;
+
+typedef struct {
   oo_sp             tcp_id;
 } oo_tcp_filter_clear_t;
 
@@ -141,6 +149,11 @@ typedef struct {
   ci_int32          addr;
   ci_ifid_t         ifindex;
 } oo_tcp_filter_mcast_t;
+
+typedef struct {
+  ci_user_ptr_t buf;
+  ci_int32      buf_len;
+} oo_cluster_dump_t;
 
 typedef struct {
   oo_sp         sock_id;
@@ -397,17 +410,20 @@ typedef struct {
 # define CI_PRIV_TYPE_TCP_EP    1
 # define CI_PRIV_TYPE_UDP_EP    2
 # define CI_PRIV_TYPE_NETIF     3
+# define CI_PRIV_TYPE_PASSTHROUGH_EP 4
 #if CI_CFG_USERSPACE_PIPE
-# define CI_PRIV_TYPE_PIPE_READER 4
-# define CI_PRIV_TYPE_PIPE_WRITER 5
+# define CI_PRIV_TYPE_PIPE_READER 5
+# define CI_PRIV_TYPE_PIPE_WRITER 6
 #endif
 #if CI_CFG_USERSPACE_PIPE
-# define CI_PRIV_TYPE_IS_ENDPOINT(t)                                  \
-    ((t) == CI_PRIV_TYPE_TCP_EP || (t) == CI_PRIV_TYPE_UDP_EP ||      \
+# define CI_PRIV_TYPE_IS_ENDPOINT(t)                                \
+    ((t) == CI_PRIV_TYPE_TCP_EP || (t) == CI_PRIV_TYPE_UDP_EP ||    \
+     (t) == CI_PRIV_TYPE_PASSTHROUGH_EP ||                          \
      (t) == CI_PRIV_TYPE_PIPE_READER || (t) == CI_PRIV_TYPE_PIPE_WRITER)
 #else
 # define CI_PRIV_TYPE_IS_ENDPOINT(t)                                \
-    ((t) == CI_PRIV_TYPE_TCP_EP || (t) == CI_PRIV_TYPE_UDP_EP)
+    ((t) == CI_PRIV_TYPE_TCP_EP || (t) == CI_PRIV_TYPE_UDP_EP ||    \
+     (t) == I_PRIV_TYPE_PASSTHROUGH_EP)
 #endif
 
   ci_uint32              resource_id;

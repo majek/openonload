@@ -228,7 +228,7 @@ static int
 falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 		      uint dmaq, uint evq_id, uint own_id,
 		      uint tag, uint dmaq_size, uint buf_idx,
-		      dma_addr_t *dma_addrs, int n_dma_addrs, uint flags)
+		      dma_addr_t *dma_addrs, int n_dma_addrs, uint stack_id, uint flags)
 {
 	FALCON_LOCK_DECL;
 	uint index, desc_type;
@@ -246,6 +246,9 @@ falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 	int tx_eth_filter_en = ((flags & EFHW_VI_TX_ETH_FILTER_EN) != 0);
 	int q_mask_width = ((flags & EFHW_VI_TX_Q_MASK_WIDTH_0) != 0) |
 			   (((flags & EFHW_VI_TX_Q_MASK_WIDTH_1) != 0) << 1);
+
+	if (flags & EFHW_VI_TX_TIMESTAMPS)
+		return -EOPNOTSUPP;
 
 	/* initialise the TX descriptor queue pointer table */
 
@@ -368,7 +371,7 @@ static int
 falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 		      uint dmaq, uint evq_id, uint own_id,
 		      uint tag, uint dmaq_size, uint buf_idx,
-		      dma_addr_t *dma_addrs, int n_dma_addrs, uint flags)
+		      dma_addr_t *dma_addrs, int n_dma_addrs, uint stack_id, uint flags)
 {
 	FALCON_LOCK_DECL;
 	uint i, desc_type = 1;
@@ -1356,7 +1359,8 @@ falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			      uint n_pages, int interrupting, int enable_dos_p,
 			      int wakeup_evq /* ef10 only */,
 			      int enable_time_sync_events /* ef10 only */,
-			      int *rx_ts_correction_out /* ef10 only */)
+			      int *rx_ts_correction_out /* ef10 only */,
+			      int* flags_out /* ef10 only */)
 {
 	EFHW_ASSERT(nic);
 
@@ -1643,14 +1647,6 @@ falcon_nic_buffer_table_set(struct efhw_nic *nic,
 	}
 }
 
-static int falcon_license_challenge(struct efhw_nic *nic, 
-				    const uint32_t feature, 
-				    const uint8_t* challenge, 
-				    uint32_t* expiry,
-				    uint8_t* signature) 
-{
-	return -EOPNOTSUPP;
-}
 
 /*--------------------------------------------------------------------
  *
@@ -1819,6 +1815,21 @@ int falcon_nic_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
         return -EOPNOTSUPP;
 }
 
+
+/*--------------------------------------------------------------------
+ *
+ * Licensing
+ *
+ *--------------------------------------------------------------------*/
+
+static int falcon_license_challenge(struct efhw_nic *nic, 
+				    const uint32_t feature, 
+				    const uint8_t* challenge, 
+				    uint32_t* expiry,
+				    uint8_t* signature) 
+{
+	return -EOPNOTSUPP;
+}
 
 /*--------------------------------------------------------------------
  *

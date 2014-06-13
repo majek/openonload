@@ -136,6 +136,14 @@ ci_tcp_helper_ep_set_filters(ci_fd_t           fd,
                              ci_ifid_t         bindto_ifindex,
                              oo_sp             from_tcp_id) CI_HF;
 
+extern int
+ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
+                                const char*       cluster_name,
+                                ci_int32          cluster_size,
+                                ci_uint32         cluster_restart_opt,
+                                ci_uint32         addr_be32,
+                                ci_uint16         port_be16) CI_HF;
+
 
 /*--------------------------------------------------------------------
  *!
@@ -163,6 +171,9 @@ ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp) CI_HF;
 
 extern int
 ci_tcp_helper_ep_filter_dump(ci_fd_t fd, oo_sp, void* buf, int buf_len) CI_HF;
+
+extern int
+ci_tcp_helper_cluster_dump(ci_fd_t fd, void* buf, int buf_len) CI_HF;
 
 /*--------------------------------------------------------------------
  *!

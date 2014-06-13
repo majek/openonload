@@ -200,7 +200,8 @@ struct efhw_func_ops {
 				    int enable_dos_p,
 				    int wakeup_evq,
 				    int enable_time_sync_events,
-				    int *rx_ts_correction_out);
+				    int *rx_ts_correction_out,
+				    int* flags_out);
 
 	/*! Disable the given event queue (and any associated timer) */
 	void (*event_queue_disable) (struct efhw_nic *nic, uint evq,
@@ -224,14 +225,14 @@ struct efhw_func_ops {
 			       uint dmaq, uint evq, uint owner, uint tag,
 			       uint dmaq_size, uint buf_idx,
 			       dma_addr_t *dma_addrs, int n_dma_addrs,
-			       uint flags);
+			       uint stack_id, uint flags);
 
 	/*! Initialise NIC state for a given RX DMAQ */
 	int (*dmaq_rx_q_init) (struct efhw_nic *nic,
 			       uint dmaq, uint evq, uint owner, uint tag,
 			       uint dmaq_size, uint buf_idx,
 			       dma_addr_t *dma_addrs, int n_dma_addrs,
-			       uint flags);
+			       uint stack_id, uint flags);
 
 	/*! Disable a given TX DMAQ */
 	void (*dmaq_tx_q_disable) (struct efhw_nic *nic, uint dmaq);
@@ -360,6 +361,8 @@ struct efhw_nic {
 # define NIC_FLAG_ONLOAD_UNSUPPORTED    0x20
 # define NIC_FLAG_VLAN_FILTERS          0x40
 # define NIC_FLAG_BUG35388_WORKAROUND   0x80
+# define NIC_FLAG_MCAST_LOOP_HW         0x100
+# define NIC_FLAG_14BYTE_PREFIX         0x200
 
 	unsigned resetting;	/*!< NIC is currently being reset */
 

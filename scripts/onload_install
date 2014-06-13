@@ -332,7 +332,6 @@ install_kernel_modules() {
   fi
   try $do cd "$bin/../build/$d/driver/linux"
   install_f sfc.ko "$did/sfc.ko"
-  install_f sfc_tune.ko "$did/sfc_tune.ko"
   install_f sfc_resource.ko "$did/sfc_resource.ko"
   install_f sfc_char.ko "$did/sfc_char.ko"
   if [ -e sfc_aoe.ko ]; then 
@@ -342,6 +341,11 @@ install_kernel_modules() {
   $affinity && install_f sfc_affinity.ko "$did/sfc_affinity.ko"
   if [ -z "$i_prefix" ]; then
     $do /sbin/depmod -a "$KVER" || log "depmod exited with status $?"
+  fi
+  # Debian/Ubuntu: get new sfc.ko into ramfs
+  if [ -z "$i_prefix" -a -f "/boot/initrd.img-$KVER" ] && \
+     which update-initramfs >/dev/null 2>&1; then
+    update-initramfs -u -k $KVER
   fi
 
   # Install driver meta-data.
@@ -396,12 +400,16 @@ install_init_script_gen() {
   if $try_chkconfig && which chkconfig >/dev/null 2>&1; then
     try $do chkconfig --add openonload
   elif which update-rc.d >/dev/null 2>&1; then
-    try $do update-rc.d openonload start 50 3 5 .
+    try $do update-rc.d openonload start 50 2 3 4 5 .
   else
-    if [ -d /etc/rc.d/rc3.d ] && [ -d /etc/rc.d/rc5.d ]; then
-      install_link /etc/init.d/openonload /etc/rc.d/rc3.d/S50openonload
-      install_link /etc/init.d/openonload /etc/rc.d/rc5.d/S50openonload
-    else
+    local dir linked
+    for dir in /etc/rc.d/rc[2345].d; do
+      if [ -d $dir ]; then
+	install_link /etc/init.d/openonload $dir/S50openonload
+	linked=y
+      fi
+    done
+    if [ -z "$linked" ]; then
       log "Could not detect the type of init scripts used on this OS"
       log "Please configure /etc/init.d/openonload service to start on boot"
     fi
@@ -478,7 +486,7 @@ check_whether_installed() {
     return
   fi
   local drv where
-  for drv in sfc.ko sfc_tune.ko onload.ko sfc_aoe.ko; do
+  for drv in sfc.ko onload.ko sfc_aoe.ko; do
     for where in updates extra; do
       check_file_installed "$i_prefix/lib/modules/$KVER/$where/$drv"
     done
@@ -509,7 +517,7 @@ do_rpm_post() {
 ######################################################################
 # main
 
-PATH="$bin:$PATH:/sbin"; export PATH
+PATH="$bin:$PATH:/usr/sbin:/sbin"; export PATH
 
 buildargs=
 build=true
@@ -586,10 +594,32 @@ i_libexec="$i_prefix/lib/onload"
 i_sbin="$i_prefix/sbin"
 i_usrbin="$i_prefix/usr/bin"
 i_usrsbin="$i_prefix/usr/sbin"
-i_lib32="$i_prefix/usr/lib"
-i_lib64="$i_prefix/usr/lib64"
 i_etc="$i_prefix/etc"
 i_include="$i_prefix/usr/include"
+
+# look for biarch/multiarch library directories
+#
+# TODO Is it possible to use autodetecttion for these directories?
+# Something like
+# i_lib=`ldd $(which lspci) |grep libpci.so |awk -e '{print $3}' | sed -e
+# 's/\/libpci\.so.*//'`
+i_lib32="$i_prefix/usr/lib"
+i_lib64="$i_prefix/usr/lib64"
+if [ -e /lib/x86_64-linux-gnu/libc.so.6 ]; then
+  # multiarch
+  i_lib64="$i_prefix/usr/lib/x86_64-linux-gnu"
+elif [ -e /lib64/libc.so.6 ]; then
+  # either biarch or pure64 with compatibility link
+  i_lib64="$i_prefix/usr/lib64"
+  i_lib32="$i_prefix/usr/lib"
+fi
+if [ -e /lib/i386-linux-gnu/libc.so.6 ]; then
+  # multiarch
+  i_lib32="$i_prefix/usr/lib/i386-linux-gnu"
+elif [ -e /lib32/libc.so.6 ]; then
+  # pure64 with secondary 32-bit
+  i_lib32="$i_prefix/usr/lib32"
+fi
 
 # Special commands.  May do something and exit, or may modify settings and
 # continue.

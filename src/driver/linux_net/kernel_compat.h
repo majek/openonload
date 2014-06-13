@@ -27,9 +27,6 @@
 #define EFX_KERNEL_COMPAT_H
 
 #include <linux/version.h>
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,15)
-#include <linux/autoconf.h>
-#endif
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
@@ -54,11 +51,9 @@
 #include <linux/bitops.h>
 #include <linux/jhash.h>
 #include <linux/ktime.h>
+#include <linux/ctype.h>
 #ifdef CONFIG_SFC_MTD
-/* This is conditional because Onload also includes kernel_compat.h
- * and the RHEL 4 workaround of a local <mtd/mtd-abi.h> doesn't work
- * for it due to differing header search paths.
- */
+/* This is conditional because it's fairly disgusting */
 #include "linux_mtd_mtd.h"
 #endif
 #include <asm/byteorder.h>
@@ -100,21 +95,8 @@
  * layer above. The following definitions are all deprecated
  */
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16)
 	#error "This kernel version is now unsupported"
-#endif
-
-#if defined(EFX_HAVE_COMPOUND_PAGES) || defined(CONFIG_HUGETLB_PAGE)
-	#define EFX_USE_COMPOUND_PAGES yes
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,16) && defined(EFX_USE_COMPOUND_PAGES)
-	#define EFX_NEED_COMPOUND_PAGE_FIX
-#endif
-
-/* debugfs only supports sym-links from 2.6.21 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,21) && defined(CONFIG_DEBUG_FS)
-	#define EFX_USE_DEBUGFS yes
 #endif
 
 /* netif_device_{detach,attach}() were missed in multiqueue transition */
@@ -706,6 +688,10 @@
 	#define SUPPORTED_10000baseKX4_Full	(1 << 18)
 	#define SUPPORTED_10000baseKR_Full	(1 << 19)
 	#define SUPPORTED_10000baseR_FEC	(1 << 20)
+#endif
+#ifndef SUPPORTED_40000baseKR4_Full
+	#define SUPPORTED_40000baseKR4_Full	(1 << 23)
+	#define SUPPORTED_40000baseCR4_Full	(1 << 24)
 #endif
 
 #ifdef EFX_NEED_SKB_HEADER_MACROS
@@ -1385,6 +1371,18 @@ extern struct i2c_driver efx_lm90_driver;
 	#define __always_unused __attribute__((unused))
 #endif
 
+#ifdef EFX_NEED_ETHER_ADDR_COPY
+	static inline void ether_addr_copy(u8 *dst, const u8 *src)
+	{
+		u16 *a = (u16 *)dst;
+		const u16 *b = (const u16 *)src;
+
+		a[0] = b[0];
+		a[1] = b[1];
+		a[2] = b[2];
+	}
+#endif
+
 #ifdef EFX_NEED_IS_ZERO_ETHER_ADDR
 	static inline int is_zero_ether_addr(const u8 *addr)
 	{
@@ -1429,6 +1427,37 @@ extern struct i2c_driver efx_lm90_driver;
 	static inline void eth_broadcast_addr(u8 *addr)
 	{
 		memset(addr, 0xff, ETH_ALEN);
+	}
+#endif
+
+#ifdef EFX_NEED_MAC_PTON
+	#ifndef EFX_HAVE_HEX_TO_BIN
+		static inline int hex_to_bin(char ch)
+		{
+			if ((ch >= '0') && (ch <= '9'))
+				return ch - '0';
+			ch = tolower(ch);
+			if ((ch >= 'a') && (ch <= 'f'))
+				return ch - 'a' + 10;
+			return -1;
+		}
+	#endif
+
+	static inline int mac_pton(const char *s, u8 *mac)
+	{
+		int i;
+		if (strlen(s) < 3 * ETH_ALEN - 1)
+			return 0;
+		for (i = 0; i < ETH_ALEN; i++) {
+			if (!isxdigit(s[i * 3]) || !isxdigit(s[i * 3 + 1]))
+				return 0;
+			if (i != ETH_ALEN - 1 && s[i * 3 + 2] != ':')
+				return 0;
+			}
+		for (i = 0; i < ETH_ALEN; i++)
+			mac[i] = (hex_to_bin(s[i * 3]) << 4) |
+				  hex_to_bin(s[i * 3 + 1]);
+		return 1;
 	}
 #endif
 
@@ -1637,6 +1666,59 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	#endif
 #endif
 
+#ifndef EFX_HAVE_NAPI_STRUCT
+/* We use a napi_struct pointer as context in some compat functions even if the
+ * kernel doesn't use this structure at all.
+ */
+struct efx_napi_dummy {};
+#define napi_struct efx_napi_dummy
+#endif
+
+#ifdef EFX_NEED_NAPI_HASH
+static inline void napi_hash_add(struct napi_struct *napi) {}
+static inline void napi_hash_del(struct napi_struct *napi) {}
+#endif
+
+#ifdef EFX_HAVE_RXHASH_SUPPORT
+#ifdef EFX_NEED_SKB_SET_HASH
+enum pkt_hash_types {
+	PKT_HASH_TYPE_NONE,
+	PKT_HASH_TYPE_L2,
+	PKT_HASH_TYPE_L3,
+	PKT_HASH_TYPE_L4,
+};
+
+static inline void skb_set_hash(struct sk_buff *skb, __u32 hash,
+				enum pkt_hash_types type)
+{
+#ifdef EFX_HAVE_SKB_L4HASH
+	skb->l4_rxhash = (type == PKT_HASH_TYPE_L4);
+#endif
+	skb->rxhash = hash;
+}
+#endif
+#endif
+
+#ifndef EFX_HAVE_BUSY_POLL
+static inline void skb_mark_napi_id(struct sk_buff *skb,
+				    struct napi_struct *napi) {}
+#endif
+
+#ifdef EFX_NEED_USLEEP_RANGE
+void usleep_range(unsigned long min, unsigned long max);
+#endif
+
+#ifndef EFX_HAVE_PCI_RESET_FUNCTION
+	static inline int pci_reset_function(struct pci_dev *dev)
+	{
+		/* If it doesn't have pci_reset_function, it probably doesn't
+		 * have all the things we need to implement it either.
+		 * So just return ENOSYS and don't have FLR recovery.
+		 */
+		return -ENOSYS;
+	}
+#endif
+
 /**************************************************************************
  *
  * Missing functions provided by kernel_compat.c
@@ -1661,11 +1743,7 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #endif
 
 #if defined(EFX_NEED_PRINT_MAC)
-	extern char *print_mac(char *buf, const u8 *addr);
-#endif
-
-#ifdef EFX_NEED_COMPOUND_PAGE_FIX
-	extern void efx_compound_page_destructor(struct page *page);
+	char *print_mac(char *buf, const u8 *addr);
 #endif
 
 #ifdef EFX_NEED_HEX_DUMP
@@ -1676,11 +1754,11 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #endif
 
 #ifdef EFX_NEED_PCI_CLEAR_MASTER
-	extern void pci_clear_master(struct pci_dev *dev);
+	void pci_clear_master(struct pci_dev *dev);
 #endif
 
 #ifdef EFX_NEED_PCI_WAKE_FROM_D3
-	extern int pci_wake_from_d3(struct pci_dev *dev, bool enable);
+	int pci_wake_from_d3(struct pci_dev *dev, bool enable);
 #endif
 
 #ifdef EFX_NEED_MDELAY
@@ -1693,18 +1771,17 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 		} while (0);
 #endif
 
-#if (defined(EFX_NEED_UNMASK_MSIX_VECTORS) || \
-     defined(EFX_NEED_SAVE_MSIX_MESSAGES)) && \
-	!defined(EFX_HAVE_MSIX_TABLE_RESERVED)
+#if defined(EFX_NEED_UNMASK_MSIX_VECTORS) || \
+    defined(EFX_NEED_SAVE_MSIX_MESSAGES)
 
 	#if defined(EFX_NEED_SAVE_MSIX_MESSAGES)
 		#include <linux/msi.h>
 	#endif
 
-	extern int efx_pci_save_state(struct pci_dev *dev);
+	int efx_pci_save_state(struct pci_dev *dev);
 	#define pci_save_state efx_pci_save_state
 
-	extern void efx_pci_restore_state(struct pci_dev *dev);
+	void efx_pci_restore_state(struct pci_dev *dev);
 	#define pci_restore_state efx_pci_restore_state
 
 #endif
@@ -1900,8 +1977,6 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #if defined(EFX_HAVE_OLD_NAPI)
 
 	#ifndef EFX_USE_GRO
-		struct efx_napi_dummy {};
-		#define napi_struct efx_napi_dummy
 		#define napi_gro_flush(napi)
 	#endif
 
@@ -1970,28 +2045,6 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	#define vlan_gro_receive(_napi, _group, _tag, _skb)	\
 		({ vlan_gro_receive(_napi, _group, _tag, _skb);	\
 		   GRO_MERGED; })
-#endif
-
-#ifdef EFX_NEED_COMPOUND_PAGE_FIX
-	static inline
-	struct page *efx_alloc_pages(gfp_t flags, unsigned int order)
-	{
-		struct page *p = alloc_pages(flags, order);
-		if ((flags & __GFP_COMP) && (p != NULL) && (order > 0))
-			p[1].mapping = (void *)efx_compound_page_destructor;
-		return p;
-	}
-	#undef alloc_pages
-	#define alloc_pages efx_alloc_pages
-
-	static inline
-	void efx_free_pages(struct page *p, unsigned int order)
-	{
-		if ((order > 0) && (page_count(p) == 1))
-			p[1].mapping = NULL;
-		__free_pages(p, order);
-	}
-	#define __free_pages efx_free_pages
 #endif
 
 #ifdef EFX_NEED_HEX_DUMP_CONST_FIX
@@ -2202,7 +2255,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 		#define ktime_sub_ns(kt, nsval) \
 				({ (ktime_t){ .tv64 = (kt).tv64 - (nsval) }; })
 	#else
-		extern ktime_t ktime_sub_ns(const ktime_t kt, u64 nsec);
+		ktime_t ktime_sub_ns(const ktime_t kt, u64 nsec);
 	#endif
 #endif
 
@@ -2351,10 +2404,6 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 #ifdef EFX_HAVE_OLDER_SKB_CHECKSUM_HELP
 	static inline int efx_skb_checksum_help(struct sk_buff *skb)
 	{
-	#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9)
-		/* No way we can wrap around this behaviour */
-		#error "skb_checksum_help() may reallocate skb"
-	#endif
 		return skb_checksum_help(&skb, 0);
 	}
 	#define skb_checksum_help efx_skb_checksum_help
@@ -2387,9 +2436,9 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 
 #ifdef EFX_HAVE_PARAM_BOOL_INT
 	#define param_ops_bool efx_param_ops_bool
-	extern int efx_param_set_bool(const char *val, struct kernel_param *kp);
+	int efx_param_set_bool(const char *val, struct kernel_param *kp);
 	#define param_set_bool efx_param_set_bool
-	extern int efx_param_get_bool(char *buffer, struct kernel_param *kp);
+	int efx_param_get_bool(char *buffer, struct kernel_param *kp);
 	#define param_get_bool efx_param_get_bool
 	#undef param_check_bool
 	#define param_check_bool(name, p) __param_check(name, p, bool)
@@ -2692,5 +2741,13 @@ typedef resource_size_t phys_addr_t;
 #define iommu_present(b) 0
 #endif /* EFX_HAVE_IOMMU_FOUND */
 #endif /* !EFX_HAVE_IOMMU_PRESENT */
+
+#ifdef EFX_NEED_RCU_ACCESS_POINTER
+#define rcu_access_pointer rcu_dereference
+#endif
+
+#ifdef EFX_NEED_CPU_ONLINE_MASK
+#define cpu_online_mask (&cpu_online_map)
+#endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

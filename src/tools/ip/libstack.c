@@ -555,7 +555,7 @@ static int libstack_mappings_init(void)
 
   DIR* proc = opendir("/proc");
   if( ! proc )
-    return -1;
+    CI_TRY(-1);
 
   /* Walk over entire '/proc/' looking into '/proc/<pid>/fd/' to see
    * if there are any onloaded fds. Fill in pid_mappings accordingly.
@@ -586,6 +586,7 @@ static int libstack_mappings_init(void)
       if( errno == EACCES || errno == ENOENT )
         continue;
       closedir(proc);
+      CI_TRY(-1);
       return -1;
     }
 
@@ -601,7 +602,15 @@ static int libstack_mappings_init(void)
    */
   ci_netif_info_t info;
   oo_fd fd;
-  CI_TRY(oo_fd_open(&fd));
+  rc = oo_fd_open(&fd);
+  if( rc == -ENOENT ) {
+    fprintf(stderr, "Could not open /dev/onload (rc=%d) - "
+                    "check Onload drivers are loaded\n", rc);
+    closedir(proc);
+    errno = ENOENT;
+    return -1;
+  }
+  CI_TRY(rc);
   info.mmap_bytes = 0;
   info.ni_exists = 0;
   i = 0;
@@ -648,7 +657,7 @@ static int libstack_mappings_init(void)
         }
         sm = sm->next;
       }
-      if( ! found_stack )
+      if( ! found_stack && ! cfg_zombie )
         fprintf(stderr, "Warning: Traversing /proc found stack %d"
                 " which debug ioctl did not\n", pm->stack_ids[i]);
     }
@@ -683,7 +692,7 @@ void libstack_stack_mapping_print_pids(int stack_id)
       consumed += snprintf(&buf[consumed], buf_len - consumed, "%d,",
                            sm->pids[i]);
   }
-  ci_log(buf);
+  ci_log("%s", buf);
 }
 
 
@@ -695,17 +704,19 @@ void libstack_stack_mapping_print(void)
   printf("#stack-id stack-name      pids\n");
   struct stack_mapping* sm = stack_mappings;
   while( sm ) {
-    if( sm->n_pids == 0 ) {
-      printf("%-9d -               -\n", sm->stack_id);      
-    }
-    else {
-      stack_attach(sm->stack_id);
-      netif_t* netif = stack_attached(sm->stack_id);
-      if( strlen(netif->ni.state->name) != 0 )
-        printf("%-9d %-16s", sm->stack_id, netif->ni.state->name);
-      else
-        printf("%-9d -               ", sm->stack_id);
+    printf("%-9d ", sm->stack_id);
 
+    stack_attach(sm->stack_id);
+    netif_t* netif = stack_attached(sm->stack_id);
+
+    if( strlen(netif->ni.state->name) != 0 )
+      printf("%-16s", netif->ni.state->name);
+    else
+      printf("-               ");
+
+    if( sm->n_pids == 0 )
+      printf("-\n");
+    else {
       for( i = 0; i < sm->n_pids; ++i ) {
         printf("%d", sm->pids[i]);
         if( i != sm->n_pids - 1 )
@@ -1419,6 +1430,29 @@ void socket_add_all_all(void)
 ***********************************************************************
 **********************************************************************/
 
+static void cluster_dump(ci_netif* ni)
+{
+  int buf_len = 8192;
+  char* buf;
+  int rc;
+  while( 1 ) {
+    if( (buf = malloc(buf_len)) == NULL ) {
+      ci_log("%s: Out of memory", __FUNCTION__);
+      break;
+    }
+    rc = ci_tcp_helper_cluster_dump(ci_netif_get_driver_handle(ni), buf,
+                                    buf_len);
+    if( rc >= 0 && rc <= buf_len )
+      printf("%s", buf);
+    free(buf);
+    if( rc < 0 )
+      ci_log("%s: failed (%d)", __FUNCTION__, -rc);
+    if( rc <= buf_len )
+      break;
+    buf_len = rc;
+  }
+}
+
 static void filter_dump(ci_netif* ni, oo_sp sock_id)
 {
   int buf_len = 8192;
@@ -1519,6 +1553,12 @@ static void stack_netif(ci_netif* ni)
 static void stack_netif_extra(ci_netif* ni)
 {
   ci_netif_dump_extra(ni);
+}
+
+
+static void stack_netstat(ci_netif* ni)
+{
+  ci_netif_print_sockets(ni);
 }
 
 static void stack_dmaq(ci_netif* ni)
@@ -1709,13 +1749,9 @@ static void stack_filters(ci_netif* ni)
   filter_dump(ni, OO_SP_NULL);
 }
 
-static void stack_blacklist_intf_i(ci_netif* ni)
+static void stack_clusters(ci_netif* ni)
 {
-  int i;
-  ci_log("blacklist_intf_i: stack=%d, bl_length=%u", NI_ID(ni), 
-         ni->state->blacklist_length);
-  for( i = 0; i < ni->state->blacklist_length; ++i )
-    ci_log("  %d: %d", i, ni->state->blacklist_intf_i[i]);
+  cluster_dump(ni);
 }
 
 static void stack_qs(ci_netif* ni)
@@ -2345,6 +2381,7 @@ static const stack_op_t stack_ops[] = {
   STACK_OP(dump,               "show core state of stack and sockets"),
   STACK_OP(netif,              "show core per-stack state"),
   STACK_OP(netif_extra,        "show extra per-stack state"),
+  STACK_OP(netstat,            "show netstat like output for sockets"),
   STACK_OP(dmaq,               "show state of DMA queue"),
   STACK_OP(timeoutq,           "show state of timeout queue"),
   STACK_OP(opts,               "show configuration options"),
@@ -2369,7 +2406,7 @@ static const stack_op_t stack_ops[] = {
   STACK_OP(timers,             "dump state of stack timers"),
   STACK_OP(filter_table,       "show stack filter table"),
   STACK_OP_F(filters,          "show stack filters (syslog)", FL_ONCE),
-  STACK_OP(blacklist_intf_i,   "dump blacklist_intf_i"),
+  STACK_OP_F(clusters,         "show clusters", FL_ONCE),
   STACK_OP(qs,                 "show queues for each socket in stack"),
   STACK_OP(lock,               "lock the stack"),
   STACK_OP(trylock,            "try to lock the stack"),

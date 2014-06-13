@@ -19,7 +19,6 @@ export CONFIG_SFC_MCDI_MON := y
 export CONFIG_SFC_SFE4001 := y
 export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
-export CONFIG_SFC_TUNE := m
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
@@ -90,6 +89,13 @@ ifndef CONFIG_EVENT_TRACING
 $(error Kernel does not support EVENT_TRACING)
 endif
 endif
+ifdef CONFIG_SFC_DEBUGFS
+ifndef CONFIG_DEBUG_FS
+$(warning Kernel does not support DEBUG_FS)
+override CONFIG_SFC_DEBUGFS :=
+$(warning => Some diagnostic information will be unavailable)
+endif
+endif
 endif # CONFIG_NET
 
 else # !KERNELRELEASE ###### The following is for the standalone Makefile case
@@ -127,12 +133,12 @@ endif # export-srpm
 endif # !KERNELRELEASE
 
 endif # !EFX_UPSTREAM
-
-sfc-y			+= efx.o nic.o farch.o falcon.o siena.o ef10.o \
-			   tx.o rx.o selftest.o \
-			   driverlink.o ethtool.o qt202x_phy.o mdio_10g.o \
-			   tenxpress.o txc43128_phy.o falcon_boards.o mcdi.o \
-			   mcdi_port.o mcdi_mon.o ptp.o
+#
+sfc-y			+= efx.o nic.o farch.o falcon.o siena.o ef10.o tx.o \
+			   rx.o selftest.o ethtool.o qt202x_phy.o mdio_10g.o \
+			   tenxpress.o txc43128_phy.o falcon_boards.o \
+			   mcdi.o mcdi_port.o mcdi_mon.o ptp.o
+sfc-y			+= driverlink.o 
 sfc-$(CONFIG_SFC_MTD)	+= mtd.o
 sfc-$(CONFIG_SFC_SRIOV)	+= siena_sriov.o
 ifndef EFX_NO_KCOMPAT
@@ -153,11 +159,8 @@ endif
 endif # !EFX_UPSTREAM
 
 obj-$(CONFIG_SFC)	+= sfc.o
-
+#
 ifndef EFX_UPSTREAM
-
-sfc_tune-y		+= tweak.o idle.o
-obj-$(CONFIG_SFC_TUNE)	+= sfc_tune.o
 
 # Compiler flags
 EXTRA_CFLAGS += -I$(src) -Wall -Wno-unused-label -Wno-deprecated-declarations -DEFX_NOT_UPSTREAM=1 -DEFX_USE_KCOMPAT=1 -DWITH_MCDI_V2
@@ -171,6 +174,12 @@ EXTRA_CFLAGS += -DEFX_USE_GRO
 endif
 ifndef EFX_DISABLE_SFC_LRO
 EXTRA_CFLAGS += -DEFX_USE_SFC_LRO
+endif
+ifndef EFX_DISABLE_SFC_XPS
+EXTRA_CFLAGS += -DEFX_ENABLE_SFC_XPS
+endif
+ifndef EFX_DISABLE_SARFS
+EXTRA_CFLAGS += -DEFX_ENABLE_SARFS
 endif
 
 
@@ -229,7 +238,7 @@ endef
 $(obj)/config.h: $(src)/Makefile FORCE
 	$(call filechk,config.h)
 
-$(addprefix $(obj)/,$(sfc-y) $(sfc_tune-y)): \
+$(addprefix $(obj)/,$(sfc-y)): \
 	$(obj)/.kpath $(obj)/autocompat.h $(obj)/config.h
 
 # Select the right warnings - complicated by working out which options work
@@ -307,16 +316,16 @@ clean_modules :
 
 # Export into kernel tree
 export:
-	./export.sh $(KPATH) $(sfc-y:%.o=%.c) trace/events/sfc.h
+	./export.sh $(KPATH) $(sfc-y:%.o=%.c)
 
 # Export into a Xen kernel tree
 export-xen:
-	./export.sh -k -kk $(KPATH) $(sfc-y:%.o=%.c) trace/events/sfc.h
+	./export.sh -k -kk $(KPATH) $(sfc-y:%.o=%.c)
 
 # Export for SRPM
 export-srpm:
 	mkdir -p $(KPATH)/mtd
-	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c)  $(sfc_tune-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh
+	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh
 
 .PHONY : intranet doc clean_doc util clean_util export export-xen export-srpm
 

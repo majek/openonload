@@ -200,7 +200,11 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 	int rc;
 
 	op.id = efch_make_resource_id(resource_id);
-	op.u.filter_add.replace = (fs->flags & EF_FILTER_FLAG_REPLACE) ? 1 : 0;
+	op.u.filter_add.flags =
+		( (fs->flags & EF_FILTER_FLAG_REPLACE) ?
+		  CI_RSOP_FILTER_ADD_FLAG_REPLACE : 0 ) |
+		( (fs->flags & EF_FILTER_FLAG_MCAST_LOOP_RECEIVE) ?
+		  CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE : 0);
 	switch (fs->type) {
 	case EF_FILTER_IP4 | EF_FILTER_VLAN:
 		op.op = CI_RSOP_FILTER_ADD_IP4_VLAN;

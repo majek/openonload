@@ -218,6 +218,7 @@ int onload_stackname_restore(void)
 {
   int rc;
   struct oo_stackname_state* state = oo_stackname_thread_get();
+  struct saved_stacks* to_del;
 
   if( state->saved_stacks_head == NULL )
     return -EINVAL;
@@ -227,7 +228,7 @@ int onload_stackname_restore(void)
                                    state->saved_stacks_head->stackname)) )
     return rc;
 
-  struct saved_stacks* to_del = state->saved_stacks_head;
+  to_del = state->saved_stacks_head;
   state->saved_stacks_head = state->saved_stacks_head->next;
   free(to_del);
   return 0;
