@@ -1,0 +1,946 @@
+#include "ci/tools/customer_event_log_gendefs.h"
+
+/* Note on event log ID numbers: these numbers get embedded in both current and
+   previously released drivers.  Ideally the resource file that this
+   specification generates would remain applicable to old drivers.  Therefore
+   ID numbers should not be altered unnecessarily, and formerly allocated ID
+   numbers should not be reused.
+
+   Beware that event log ID numbes MUST be contiguous in this file - so you
+   must include definitions even for former redundant events.
+*/
+
+/*
+For APP LCPLANE ISCSI
+ */
+
+MCC_HEADER(mcc)
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x5,
+ INFORMATION,
+ APP,
+ CI_EVT_INTERNAL_LOG,
+ 1,MCC_FMT_STRING)
+
+MCC_MESSAGE_RECORD(
+   English,MCC_INTERNAL)
+MCC_MESSAGE_RECORD(
+   German,MCC_INTERNAL)
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x6,
+ INFORMATION,
+ APP,
+ CI_EVT_APP_PASSTHROUGH,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Etherfabric acceleration is disabled (application='%2')")
+MCC_MESSAGE_RECORD(
+   German,"Etherfabric acceleration is disabled (application='%2')")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x7,
+ ERROR,
+ APP,
+ CI_EVT_APP_RESOURCE_ALLOC_EXCEPTION,
+ 3,MCC_FMT_STRING MCC_FMT_INT MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Resource allocation failed (resource type='%3' amount='%4' id='%5' application='%2'")
+MCC_MESSAGE_RECORD(
+   German,"Resource allocation failed (resource type='%3' amount='%4' id='%5' application='%2'")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x8,
+ ERROR,
+ APP,
+ CI_EVT_APP_UNKNOWN_EXCEPTION,
+ 2,MCC_FMT_INT MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Unknown exception (code='%3' id='%4' application='%2'")
+MCC_MESSAGE_RECORD(
+   German,"Unknown exception (code='%3' id='%4' application='%2'")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x9,
+ WARNING,
+ APP,
+ CI_EVT_APP_NO_DRIVER,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarstorm acceleration is disabled; EfabW driver is not present/enabled (application='%2')")
+MCC_MESSAGE_RECORD(
+   German,"Solarstorm acceleration is disabled; EfabW driver is not present/enabled (application='%2')")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0xa,
+ ERROR,
+ SYSTEM,
+ CI_EVT_SYS_HARDWARE_SELF_TEST_ERROR,
+ 3,MCC_FMT_STRING MCC_FMT_INT MCC_FMT_INT)
+
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware self test failed during '%3' test (code='%4' id='%5')")
+MCC_MESSAGE_RECORD(
+   German,"Hardware self test failed during '%3' test (code='%4' id='%5')")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0xb,
+ ERROR,
+ SYSTEM,
+ CI_EVT_SYS_RESOURCE_ALLOC_EXCEPTION,
+ 3,MCC_FMT_STRING MCC_FMT_INT MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Resource allocation failed (resource type='%3' amount='%4' id='%5' driver='%2'")
+MCC_MESSAGE_RECORD(
+   German,"Resource allocation failed (resource type='%3' amount='%4' id='%5' driver='%2'")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0xc,
+ ERROR,
+ SYSTEM,
+ CI_EVT_SYS_UNKNOWN_EXCEPTION,
+ 2, MCC_FMT_INT  MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Unknown exception (code='%3' id='%4' driver='%2'")
+MCC_MESSAGE_RECORD(
+   German,"Unknown exception (code='%3' id='%4' driver='%2'")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0xd,
+ INFORMATION,
+ SYSTEM,
+ CI_EVT_SYS_RESYNCHRONIZING,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Resynchronizing")
+MCC_MESSAGE_RECORD(
+   German,"Resynchronizing")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0xe,
+ INFORMATION,
+ APP,
+ CI_EVT_SYS_CONFIGURATION_UPDATED,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Configuration updated")
+MCC_MESSAGE_RECORD(
+   German,"Configuration updated")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0xf,
+ WARNING,
+ SYSTEM,
+ CI_EVT_SYSTEM_EVENT_TEST,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"No configuration")
+MCC_MESSAGE_RECORD(
+   German,"No configuration")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x10,
+ INFORMATION,
+ APP,
+ CI_EVT_APP_PASSTHROUGH_CYGWIN,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarstorm acceleration is disabled (application='%2'); application uses cygwin")
+MCC_MESSAGE_RECORD(
+   German,"Solarstorm acceleration is disabled (application='%2'); application uses cygwin")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x11,
+ ERROR,
+ APP,
+ CI_EVT_APP_DRIVER_OPEN_EXCEPTION,
+ 2, MCC_FMT_INT MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Failed to open driver and fetch configuration for application (application='%2' rc='%3' desc='%4')")
+MCC_MESSAGE_RECORD(
+   German,"Failed to open driver and fetch configuration for application (application='%2' rc='%3' desc='%4')")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x12,
+ INFORMATION,
+ APP,
+ CI_EVT_APP_PASSTHROUGH_NOT_WINSOCK2P2,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarstorm acceleration is disabled (application='%2'); application does not use winsock2.2")
+MCC_MESSAGE_RECORD(
+   German,"Solarstorm acceleration is disabled (application='%2'); application does not use winsock 2.2")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x13,
+ INFORMATION,
+ APP,
+ CI_EVT_APP_PASSTHROUGH_CONFIG_TCP_EQ_0,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarstorm acceleration is disabled (application='%2'); application ul_tcp option set to 'false'")
+MCC_MESSAGE_RECORD(
+   German,"Solarstorm acceleration is disabled (application='%2'); application ul_tcp option set to 'false'")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x14,
+ INFORMATION,
+ APP,
+ CI_EVT_APP_INTERCEPT,
+ 2,MCC_FMT_STRING MCC_FMT_STRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarstorm acceleration is enabled (application='%2' protocols='%3')%4")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarstorm acceleration is enabled (application='%2' protocols='%3')%4")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x15,
+ ERROR,
+ APP,
+ CI_EVT_APP_TEST_FAILURE_EXITING,
+ 3,MCC_FMT_STRING MCC_FMT_STRING MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Application exited due to unsupported feature (application='%2' detail='%3 failed in %4(...) at %5')")
+
+MCC_MESSAGE_RECORD(
+   German,"Application exited due to unsupported feature (application='%2' detail='%3 failed in %4(...) at %5')")
+
+/*****************************************************************************/
+/*****************************************************************************/
+/* This and the next event are always used together */
+MCC_MESSAGE_HEADER(
+ 0x16,
+ WARNING,
+ CPLANE,
+ CI_EVT_CP_MAC_DUPLICATE_NEW,
+ 3, MCC_FMT_IFID MCC_FMT_IP MCC_FMT_MAC)
+
+MCC_MESSAGE_RECORD(
+   English,"Another claimant for %3 currrently owned by %4 has arrived on Interface %2")
+
+MCC_MESSAGE_RECORD(
+   German,"Another claimant for %3 currrently owned by %4 has arrived on Interface %2")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x17,
+ WARNING,
+ CPLANE,
+ CI_EVT_CP_MAC_DUPLICATE_ACCEPT,
+ 3, MCC_FMT_IFID MCC_FMT_IP MCC_FMT_MAC)
+
+MCC_MESSAGE_RECORD(
+   English,"Accepting claim for %3 by %4 on Interface %2")
+
+MCC_MESSAGE_RECORD(
+   German,"Accepting claim for %3 by %4 on Interface %2")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x18,
+ ERROR,
+ CPLANE,
+ CI_EVT_CP_ROUTE_NOSRC,
+ 4, MCC_FMT_IFID MCC_FMT_IP MCC_FMT_IPSET MCC_FMT_IP)
+
+MCC_MESSAGE_RECORD(
+   English,"Ignored route %3/%4->%5 from system - there is no home address on Interface %2")
+
+MCC_MESSAGE_RECORD(
+   German,"Ignored route %3/%4->%5 from system - there is no home address on Interface %2")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x19,
+ ERROR,
+ CPLANE,
+ CI_EVT_CP_MAC_ARP_NOBUFS,
+ 0,NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"No space in which to store IP packet while its destination address is being found")
+
+MCC_MESSAGE_RECORD(
+   German,"No space in which to store IP packet while its destination address is being found")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x1a,
+ ERROR,
+ CPLANE,
+ CI_EVT_CP_MAC_NORECONFIRM,
+ 1, MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Request to reconfirm a Solarflare device ARP entry in the system ARP table failed (rc '%2')")
+
+MCC_MESSAGE_RECORD(
+   German,"Request to reconfirm a Solarflare device ARP entry in in the system ARP table failed (rc '%2')")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x1b,
+ ERROR,
+ CPLANE,
+ CI_EVT_CP_FWD_RETRIEVE,
+ 2, MCC_FMT_IP MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Failed to obtain routing information about %2 from Solarflare device MIBs (rc '%3')")
+
+MCC_MESSAGE_RECORD(
+   German,"Failed to obtain routing information about %2 from Solarflare device MIBs (rc '%3')")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x1c,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_NODRIVER,
+ 1,MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to open Solarflare driver (err='%2')")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to open Solarflare driver (err='%2')")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x1d,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_NOCONTROLPLANE,
+ 1, MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to open control plane in open driver (err='%2') - wrong driver version?")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to open control plane in open driver (err='%2') - wrong driver version?")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x1e,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_SYNC_BADOP,
+ 2, MCC_FMT_STRING MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - '%2' of driver Control Plane event stream failed (err '%3')?")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - '%2' of driver Control Plane event stream failed (err '%3')?")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x1f,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_OSMIB_NOREAD,
+ 2, MCC_FMT_STRING MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to read system MIB with '%2' (sys rc '%3')?")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to read system MIB with '%2' (sys rc '%3')?")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x20,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_OSMIB_MAC_BADWRITE,
+ 3, MCC_FMT_IFID MCC_FMT_IP MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to write entry for %3 on interface %2 to system ARP table (sys err '%4')?")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to write entry for %3 on interface %2 to system ARP table (sys err '%4')?")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x21,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_MIB_BADWRITE,
+ 2, MCC_FMT_STRING MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to write entry to '%2' MIB (err '%3')?")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to write entry to '%2' MIB (err '%3')?")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x22,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_MIB_BADDELETE,
+ 2, MCC_FMT_STRING MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to delete entry from '%2' MIB (err '%3')?")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to delete entry from '%2' MIB (err '%3')?")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x23,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_EFABCFG_NOCMD,
+ 2, MCC_FMT_STRING MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - failed to run configuration command '%2' (err '%3'). The device driver will remain unconfigured.")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - failed to run configuration command '%2' (err '%3'). The device driver will remain unconfigured.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x24,
+ ERROR,
+ CPLANE,
+ CI_EVT_LCPLANE_EFABCFG_FAIL,
+ 2, MCC_FMT_STRING MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare device MIB Mirror - configuration command '%2' returned an error '%3'. The device driver will remain unconfigured.")
+
+MCC_MESSAGE_RECORD(
+   German,"Solarflare device MIB Mirror - configuration command '%2' returned an error '%3'. The device driver will remain unconfigured.")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x25,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_REG_KEY_OPENFAIL,
+ 2, MCC_FMT_INT MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI registry - could not open device registry key (type %2 status %3).")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI registry - could not open device registry key (type %2 status %3).")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x26,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_REG_VALUE_INVALID,
+ 1, MCC_FMT_WSTRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI registry - key '%2' has an invalid value - deleted.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI registry - key '%2' has an invalid value - deleted.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x27,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_REG_VALUE_LOGIN_INVALID,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI registry - login entry corrupted - deleted.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI registry - login entry corrupted - deleted.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x28,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_REG_VALUE_MAC_INVALID,
+ 1, MCC_FMT_WSTRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI registry - value '%2' is an invalid MAC address - deleted.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI registry - value '%2' is an invalid MAC address - deleted.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x29,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_LINK_OPENFAIL,
+ 1, MCC_FMT_SYSRC)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare bus link - could not establish a link - status '%2'.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare bus link - could not establish a link - status '%2'.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x2a,
+ INFORMATION,
+ ISCSI,
+ CI_EVT_ISCSI_LINK_OPEN,
+ 3, MCC_FMT_STRING MCC_FMT_STRING MCC_FMT_STRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI device - in %2 driver built %3 - found device serial number '%4'.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI device - in %2 driver built %3 - found device serial number '%4'.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x2b,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_TCP_NOTIPV4,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"iSCSI MiniPort startup - target IP address is not in IPv4 format.")
+MCC_MESSAGE_RECORD(
+   German,"iSCSI MiniPort startup - target IP address is not in IPv4 format.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x2c,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_TCP_BADIPSET,
+ 2, MCC_FMT_IPSET MCC_FMT_HWPORT)
+
+MCC_MESSAGE_RECORD(
+   English,"iSCSI port startup - invalid value for IP prefix (%2) to use on port %3.")
+MCC_MESSAGE_RECORD(
+   German,"iSCSI port startup - invalid value for IP prefix (%2) to use on port %3.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x2d,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_TCP_NODHCP,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"iSCSI port startup - failed to start DHCP, attempting to use default addressing information for port.")
+MCC_MESSAGE_RECORD(
+   German,"iSCSI port startup - failed to start DHCP, attempting to use default addressing information for port.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x2e,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_TCP_NOHOMEIP,
+ 1, MCC_FMT_HWPORT)
+
+MCC_MESSAGE_RECORD(
+   English,"iSCSI port startup - no home IP address available for port %2 - failing.")
+MCC_MESSAGE_RECORD(
+   German,"iSCSI port startup - no home IP address available for port %2 - failing.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x2f,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_LINK_BADVERSION,
+ 2, MCC_FMT_INT MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare bus link - interface found has version %2, but expected version %3 - ignoring link.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare bus link - interface found has version %2, but expected version %3 - ignoring link.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x30,
+ INFORMATION,
+ ISCSI,
+ CI_EVT_ISCSI_RESET,
+ 1, MCC_FMT_STRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI - '%2' reset was necessary.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI - '%2' reset was necessary.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x31,
+ ERROR,
+ ISCSI,
+ CI_EVT_ISCSI_LOGIN_NOPORT,
+ 1, MCC_FMT_HWPORT)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI - gave up waiting for port '%2' to come up to connect persistent targets to.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI - gave up waiting for port '%2' to come up to connect persistent targets to.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x32,
+ INFORMATION,
+ ISCSI,
+ CI_EVT_ISCSI_LOGIN_OPEN,
+ 1, MCC_FMT_STRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI - logged in to target '%2'.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI - logged in to target '%2'.")
+
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x33,
+ INFORMATION,
+ ISCSI,
+ CI_EVT_ISCSI_LOGIN_CLOSE,
+ 1, MCC_FMT_STRING)
+
+MCC_MESSAGE_RECORD(
+   English,"Solarflare iSCSI - logged out of target '%2'.")
+MCC_MESSAGE_RECORD(
+   German,"Solarflare iSCSI - logged out of target '%2'.")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x34,
+ WARNING,
+ SYSTEM,
+ CI_EVT_FALCON_SLOT_NOT_EIGHT_LANE,
+ 1, MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"WARNING: the Solarflare Network Adapter has been plugged into a PCI-Express slot with less than 8 lanes (%3 detected). This will limit the maximum achievable bandwidth! Consult your motherboard documentation to find a slot that is 8 lanes electrically and physically.")
+
+MCC_MESSAGE_RECORD(
+   German,"WARNING: the Solarflare Network Adapter has been plugged into a PCI-Express slot with less than 8 lanes (%3 detected). This will limit the maximum achievable bandwidth! Consult your motherboard documentation to find a slot that is 8 lanes electrically and physically.")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x35,
+ ERROR,
+ SYSTEM,
+ CI_EVT_UNKNOWN_DRV_ERR,
+ 1, MCC_FMT_INT)
+
+MCC_MESSAGE_RECORD(
+   English,"The solarflare driver has reported an error, but the error code is not known (%3).")
+
+MCC_MESSAGE_RECORD(
+   German,"The solarflare driver has reported an error, but the error code is not known (%3).")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x36,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_SRAM_OOB,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: SRAM_OOB")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: SRAM_OOB")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x37,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_BUFID_DC_OOB,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: BUFID_DC_OOB")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: BUFID_DC_OOB")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x38,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_MEM_PERR,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: MEM_PERR")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: MEM_PERR")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x39,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_RBUF_OWN,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: RBUF_OWN")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: RBUF_OWN")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x3A,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_TBUF_OWN,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: TBUF_OWN")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: TBUF_OWN")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x3B,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_RDESQ_OWN,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: RDESQ_OWN")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: RDESQ_OWN")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x3C,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_TDESQ_OWN,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: TDESQ_OWN")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: TDESQ_OWN")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x3D,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_EVQ_OWN,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: EVQ_OWN")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflar device: EVQ_OWN")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x3E,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_EVFF_OFLO,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: EVFF_OFLO")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: EVFF_OFLO")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x3F,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_ILL_ADDR,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: ILL_ADDR")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: ILL_ADDR")
+
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x40,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_SRAM_PERR,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: SRAM_PERR")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: SRAM_PERR")
+   
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x41,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_SFX7101_POWER,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: SFX7101_POWER")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: SFX7101_POWER")
+/*****************************************************************************/
+/*****************************************************************************/
+MCC_MESSAGE_HEADER(
+ 0x42,
+ ERROR,
+ SYSTEM,
+ CI_EVT_EFX_ERR_SFX7101_LP,
+ 0, NULL)
+
+MCC_MESSAGE_RECORD(
+   English,"Hardware error on solarflare device: SFX7101_LP")
+
+MCC_MESSAGE_RECORD(
+   German,"Hardware error on solarflare device: SFX7101_LP")
+
+MCC_TRAILER(mcc)

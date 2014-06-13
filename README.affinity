@@ -1,0 +1,97 @@
+
+sfc_affinity
+============
+
+ This is a preview of the sfc_affinity driver for Solarflare network
+ controllers.
+
+ The sfc_affinity driver gives control over the steering of packet streams
+ to CPU cores, which can improve performance by performing the processing
+ of received packets close to the application, and reducing cross-talk
+ between CPUs and between their caches.
+
+ The sfc_affinity driver steers received packets to particular receive
+ channels using filters in the network controller.  sfc_affinity will only
+ steer packets to receive channels handled by the sfc driver.
+
+ With regular receive side scaling (RSS), incoming packets are distributed
+ over the multiple CPU cores by means of a hash.  i.e. Packets belonging to
+ a stream are consistently steered to a particular CPU, but it is not
+ possible in general to control which streams are steered to which CPUs.
+ This is the problem that sfc_affinity solves.
+
+
+Installing and configuring
+==========================
+
+ sfc_affinity is included in the Onload distribution.  Install Onload
+ according to the instructions in the README file.
+
+ The easiest way to use sfc_affinity is as follows:
+
+   1) Configure the sfc driver to have one receive channel per CPU core or
+      hyperthread.  The default is one receive channel per core.
+
+   2) Configure sfc_affinity:
+
+     $ sfcaffinity_config auto
+
+     This command spreads the receive channels for each interface over the
+     CPU cores, and configures the sfc_affinity kernel module.
+
+
+ To verify the sfc_affinity configuration, run the following command:
+
+   $ sfcaffinity_config check
+
+ The following command shows details of the sfc_affinity configuration.
+
+   $ sfcaffinity_config show
+
+
+Using sfc_affinity
+==================
+
+ There is no need to make any changes to applications to take advantage of
+ sfc_affinity.  The steering of packet streams to CPU cores is controlled
+ by sfcaffinity_tool, which accepts a set of filter specifications.  The
+ filter specifications may be given on the command line, or to the standard
+ input.
+
+ Filters persist until they are overridden, or until sfcaffinity_tool
+ exits.
+
+ The easiest way to explain how to use sfcaffinity_tool is with examples:
+
+ These two commands have the same effect.  The first uses the command
+ line, and the second passes filter specifications to the input:
+
+   $ sfcaffinity_tool -c "tcp 10.1.2.3:80 rxq 0" -c "udp 10.1.2.3:21 rxq 1"
+
+   $ sfcaffinity_tool
+   tcp 10.1.2.3:80 rxq 0
+   udp 10.1.2.3:21 rxq 1
+
+
+ If is also possible to specify a "full match" filter by giving the remote
+ address and port.  IP addresses may be given in dotted-quad form, as
+ above, or as hostnames as below.
+
+   tcp localhostname:80 remotehostname:9000 rxq 3
+
+ The IP address may be a multicast address:
+
+   udp 225.4.5.6:4567 rxq 0
+
+
+ The ability to pass filter specs to the input can be useful to facilite
+ scripting.  For example, using bash:
+
+   (
+     for i in 34 35 36 37; do
+       echo "udp 230.3.4.$i:9000 rxq 0"
+     done
+     for i in 38 39 40 41; do
+       echo "udp 230.3.4.$i:9000 rxq 1"
+     done
+   ) | sfcaffinity_tool

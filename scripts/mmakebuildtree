@@ -1,0 +1,571 @@
+#!/usr/bin/env bash
+######################################################################
+# (c) 2002 Cambridge Internetworking Ltd.
+# (c) 2003-2004 Level 5 Networks Ltd.
+# Author: David Riddoch
+#
+# Creates a build tree.
+######################################################################
+
+. "$(dirname "$0")/sh/fns"
+. "$bin/sh/mmake-fns"
+
+export PATH="$bin/sh:$bin:$PATH"
+
+######################################################################
+
+usage () {
+  err
+  err "usage:  $p [options] [platform]"
+  err
+  err "options:"
+  err "  -h <hostname>          - make driver build for the given host"
+  err "  -n --nictype <type>    - choose NIc type (currently support falcon)"
+  err "  -d <directory-name>    - override name of build destination directory"
+  err "  -c --custom            - present custom / non-supported builds"
+  err "  -l <directory-path>    - do as local build in directory "
+  err "                           (e.g. /scratch/mybuilds )"
+  err "  -ltmp                  - do as local build in hosts /tmp directory"
+  err "  -r <remotebuild-host>  - do as remote build using rsync"
+  err "  --inplace              - do as non-local build (default)"
+  err "useful quick build selections for the current machine:"
+  err "  --driver               - make driver tree for this machine"
+  err "  --gnu|--user           - make gnu/user tree for  this machine"
+  err "(MC build options are gone as the MC firmware has moved to firmwaresrc)"
+  err
+  err "Environment variables used (via mmaketool):"
+  err "  MMAKETOOL_RB_NAMES    - use runbench build dir name, if set"
+  err "  MMAKETOOL_ADD_LIBC    - add gcc library version to build dir, if set"
+  err "  MMAKETOOL_ADD_DISTRIBUTION - add linux distn to build dir, if set"
+  err "  MMAKETOOL_ADD_HOST    - add host name to build dir, if set"
+  err "  MMAKETOOL_DISTFILES   - location of distfiles repository"
+  err "  MMAKETOOL_FIRMWARE    - location of firmware repository"
+  err "  EF_USERBUILD          - use as user build dir, if set"
+  err "  EF_DRIVERBUILD        - use as driver build dir, if set"
+  err "  EF_MCBUILD            - use as MCPU build dir, if set"
+  err "  EF_NICTYPE            - use as NIC type instead of looking at PCI"
+  exit 1
+}
+
+
+check_dir () {
+  [ -d "$1" ] && return 0
+  log "$p: Not in a mmake build directory"
+  log "    (cannot find directory '$1')"
+  log
+  usage
+}
+
+
+check_platform_exists () {
+  [ -f "$TOP/mk/platform/$1.mk" ] && return 0
+  pwd
+  log "$p: Platform '$1' not known"
+  log "    (cannot find file '\$TOP/mk/platform/$1.mk')"
+  log
+  usage
+}
+
+
+choose_platform () {
+  local done=false  # hack for bash v1, which does not return on return!
+  echo "Select platform:"
+  select PLATFORM in $("$mmaketool" $what); do
+    [ -z "$PLATFORM" ] && fail "Aborted."
+    done=true
+    return
+  done
+  $done || fail "Aborted."
+}
+
+
+mk_and_cd () {
+  [ -d "$1" ] || try mkdir -p "$1"
+  try cd "$1"
+}
+
+
+do_top_level () {
+  if [ "$DESTFLAG" = 1 ] ; then
+    cat <<-EOF >options_config.mk
+	$cflags
+	$cppflags
+	$ndebug
+	$gcov
+	$mmake_toolchain
+	$mmake_distfiles
+	$mmake_firmware
+	$vpath_mode
+        $osol_build
+	$build_eftest
+	EOF
+  fi
+  if [ "$REMOTEBUILDFLAG" = 1 ] ; then
+    if [ ! -z "$remotebuild_host"  ] ; then
+      BUILDHOST=$remotebuild_host
+    fi
+    chmod 600 ${TOPPATH}/mk/site/rsync.key
+    ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
+      mkdir -p ~${BUILDPATH}
+  elif [ ! -z "$remotebuild_host" ] ; then
+    BUILDHOST=$remotebuild_host
+    REMOTEBUILDFLAG=1
+    chmod 600 ${TOPPATH}/mk/site/rsync.key
+    ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
+      mkdir -p ~${BUILDPATH}
+  else
+    BUILDHOST=$(uname -n)
+    REMOTEBUILDFLAG=0
+  fi
+  [ -z "$nictype" ] || nt="NICTYPE := $nictype"
+
+  cat <<-EOF >config.mk
+	PLATFORM := $PLATFORM
+	BUILDPATH := $BUILDPATH
+	SRCPATH := $SRCPATH
+	DESTPATH := $DESTPATH
+	BUILDFLAG := $BUILDFLAG
+	DESTFLAG := $DESTFLAG
+	REMOTEBUILDFLAG := $REMOTEBUILDFLAG
+	TOPPATH := $TOPPATH
+	BUILDENV := $($mmaketool --distribution)-$(uname -m)
+	BUILDHOST := $BUILDHOST
+	$nt
+	$kpath
+EOF
+  echo "$PLATFORM" >mmake_platform
+}
+
+do_build_tree () {
+   local dir=$1
+
+   # non locals
+   BUILDFLAG=$2
+   DESTFLAG=$3
+
+   if [ "$INBUILD" = 1 ]; then
+      if [ "$DESTFLAG" = 1 ]; then
+         #log "cleaning $DESTPATH/$THISDIR/*"
+         rm -rf $DESTPATH/$THISDIR/*
+         cd $DESTPATH/$THISDIR
+      else
+         #log "cleaning $BUILDPATH/$THISDIR/*"
+         rm -rf "$BUILDPATH/$THISDIR"/*
+         cd "$BUILDPATH/$THISDIR"
+      fi
+   else
+      if [ ! -d $dir ]; then
+         #log "making $dir"
+         try mkdir -p "$dir"
+      else
+         #log "cleaning $dir"
+         rm -rf $dir/*
+      fi
+      cd $dir
+   fi
+
+   if [ "$DESTFLAG" = 1 ] ; then
+      TOP=$RELATIVE_TOP
+   else
+      TOP=$ABSOLUTE_TOP
+   fi
+   #log "do_build_tree $1 $2 $3 TOP=$TOP CURRENT=$CURRENT THISDIR=$THISDIR"
+
+  [ "$CURRENT" = src ] && do_top_level
+  export MMAKE_NO_DEPS=1
+
+  if [ "$REMOTEBUILDFLAG" = 1 ] ; then
+     if [ "$THISDIR" = "." ] ; then
+        ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
+          rm -rf ~${BUILDPATH}  &>/dev/null
+     else
+        ssh -i ${TOPPATH}/mk/site/rsync.key rsync@${BUILDHOST} \
+          rm -rf ~${BUILDPATH}/$THISDIR &>/dev/null
+     fi
+  fi
+
+  [ "$DESTFLAG" = 1 ] && recurse
+}
+
+
+recurse () {
+  # Invoke mmake, which will invoke mmakebuildtree_gen in the context of
+  # the make variables that are appropriate for this platform.
+
+  # mmakebuildtree_gen generates platform-specific makefiles, and does some
+  # more sym-linking to import source files.
+
+  [ -a "$TOP/$CURRENT/mmake.mk" ] || return 0
+
+  csubdirs=$("$bin"/mmake -s buildtree MMAKEBUILDTREE=1)
+  [ $? = 0 ] || fail "mmake buildtree MMAKEBUILDTREE=1 FAILED"
+
+  for f in $csubdirs; do
+    try mkdir -p "$f"
+    (
+      THISDIR="$THISDIR/$f"
+      CURRENT="$CURRENT/$f"
+      if [ "$DESTFLAG" = 1 ]; then
+         TOP="$TOP/.."
+      fi
+      try cd "$f"
+      recurse
+    ) || return
+  done
+}
+
+
+do_use_tmp () {
+  tmp_to_use=
+
+  if [ -f "/etc/local_scratch" ] ; then 
+     tmp_list=`cat /etc/local_scratch`
+  else
+     tmp_list="/tmp"
+  fi
+
+  for f in $tmp_list ; do
+     if [ ! -d $f ] ; then
+         log "WARNING /etc/local_scratch skipping bad directory '$f'"
+         continue
+     fi
+
+     current_tmpdirs=`find $f -maxdepth 1 -name "mmakeltmp_${USER}*"`
+
+     for ctd in $current_tmpdirs ; do
+        keeptmpdir=0
+
+        current_configmks=`find $ctd -mindepth 1 -maxdepth 1 -type d`
+        for ccmk in $current_configmks ; do
+           tmp_inuse=0
+           dp=`grep DESTPATH $ccmk/config.mk`
+           dp=${dp:12}
+           bp=`grep BUILDPATH $ccmk/config.mk`
+           if [ -f $dp/config.mk ] ; then
+              bpc=`grep BUILDPATH $dp/config.mk`
+              if [ "$bpc" = "$bp" ] ; then
+                 tmp_inuse=1
+              fi
+           fi
+
+           if [ "$tmp_inuse" = 0 ] ; then
+              log "NOTE tmp $ccmk not in use, deleting"
+              rm -rf $ccmk
+           else
+              #log "NOTE tmp $ccmk in use, keeping"
+              keeptmpdir=1
+           fi
+        done
+
+        if [ "$keeptmpdir" = 0 ] ; then
+           #log "NOTE deleting $ctd"
+           rm -rf $ctd
+        fi
+     done
+
+  done
+
+  for f in $tmp_list ; do
+
+     if [ ! -d $f ] ; then
+         continue
+     fi
+
+     if [ "$OS" = Windows_NT ] ; then
+        avail=1000001
+        log "WARNING on cygwin cannot check tmp directory disk capacity"
+     else
+        read -r fs blocks used avail foo < <(df -k $f | tail -1)
+     fi
+
+     if [ $avail -gt 1000000 ]; then 
+        log "temp space available $avail kbytes in '$f' for build '$builddir'"
+        tmp_to_use=$f
+        break
+     else
+        log "temp space NOT available in '$f'"
+     fi
+  done
+
+  if [ -z $tmp_to_use ] ; then
+     log "ERROR: Cannot find temporary directory to use (need disk space>1Gb). Candidate temporary directories can be listed in /etc/local_scratch"
+     exit -1
+  fi
+  builddir=$tmp_to_use/$builddir
+}
+
+remote_command() {
+  if [ "$host" = "$localhost" ]; then
+    EF_NICTYPE=$nictype $@
+  else
+    local propogate;
+    propogate="EF_NICTYPE=$nictype;"
+    propogate="EF_DRIVERBUILD=$EF_DRIVERBUILD;$propogate"
+    propogate="EF_USERBUILD=$EF_USERBUILD;$propogate"
+    propogate="EF_MCBUILD=$EF_MCBUILD;$propogate"
+    propogate="EF_NICTYPE=$EF_NICTYPE;$propogate"
+    propogate="MMAKETOOL_RB_NAME=$MMAKETOOL_RB_NAME;$propogate"
+    propogate="MMAKETOOL_ADD_LIBC=$MMAKETOOL_ADD_LIBC;$propogate"
+    propogate="MMAKETOOL_ADD_DISTRIBUTION=$MMAKETOOL_ADD_DISTRIBUTION;$propogate"
+    propogate="MMAKETOOL_ADD_HOST=$MMAKETOOL_ADD_HOST;$propogate"
+    ssh -xTn $host $propogate$@
+  fi
+  return $?
+}
+
+######################################################################
+# main()
+
+TOP=../..
+BUILD=.
+CURRENT=src
+THISDIR=.
+PLATFORM=
+BUILDPATH=
+SRCPATH=
+DESTPATH=
+BUILDFLAG=
+DESTFLAG=
+REMOTEBUILDFLAG=
+BUILDENV=
+TOPPATH=
+RELATIVE_TOP=
+ABSOLUTE_TOP=
+INBUILD=0
+
+dest=
+what="--platforms"
+host=
+builddir=
+usetemp=0
+remotebuild_host=
+nictype=
+usehostnictype=
+custom=0
+gnu=
+localhost=$(hostname)
+
+
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d)	if [ -z "$2" ]; then usage; fi; dest="$2"; shift;;
+    -c|--custom) custom=1; what="--allplatforms"; shift;;
+    -h)	if [ -z "$2" ]; then usage; fi; host="$2"; shift;;
+    -l) if [ -z "$2" ]; then usage; fi; builddir="$2";  shift;;
+    -ltmp) builddir="mmakeltmp_${USER}_$(date '+%Y%m%d%H%M%S')"; usetemp=1;;
+    -r)	if [ -z "$2" ]; then usage; fi; remotebuild_host="$2"; shift;;
+    --inplace) builddir="";  shift;;
+    --driver) host="$localhost"; usehostnictype=1;;
+    --gnu|--user) gnu=1; usehostnictype=1;;
+    -n|--nictype) nictype="$2"; shift;;
+    --help | -*) usage;;
+    *)	break;;
+  esac
+  shift
+done
+
+case $# in
+ 0)	;;
+ 1)	PLATFORM="$1";;
+ *)	usage;;
+esac
+
+# Use EF_NICTYPE if set and -n not specified
+if [ -z "$nictype" -a -n "$EF_NICTYPE" ]; then
+    nictype="$EF_NICTYPE"
+fi
+
+    # use host NIC type for --driver and --gnu
+if [ -z "$nictype" -a -n "$usehostnictype" ]; then
+    nictype=`mmaketool --hostnictype`
+    fi
+
+# Squash EF1 nictype
+if [ "$nictype" == "ef1" ]; then
+  nictype=
+  fi
+
+# setup nictype_
+if [ ! -z "$nictype" ]; then
+  nictype_="${nictype}_"
+else
+  nictype_=
+fi
+
+# Sort out GNU builds
+if [ -n "$gnu" ]; then
+  PLATFORM=`EF_NICTYPE=$nictype mmaketool --userbuild_base`; 
+  [ -z "$dest" ] && dest=`EF_NICTYPE=$nictype mmaketool --userbuild`
+else
+  if [ ! -z "$PLATFORM" ]; then
+    if [ ! "$(mmaketool --toolplatform)" = "sunos" ]; then
+      PLATFORM="${nictype_}$PLATFORM";
+    fi
+  fi
+fi
+
+######################################################################
+#check not local build and remote build selected
+if [ ! -z "$builddir" -a ! -z "$remotebuild_host" ] ; then
+  log "ERROR: cannot specify local and remote (rsync build) at the same time"
+  exit -1
+fi
+
+if [ ! -z "$nictype" -a "$custom" == 1 ]; then
+  log "ERROR: cannot speicfy --nictype  and --custom at the same time"
+  exit -1
+fi
+
+[ "$usetemp" = 1 ] && do_use_tmp
+
+mmaketool="$bin/mmaketool"
+"$mmaketool" --intree || fail "Not in a mmake tree."
+
+if "$mmaketool" --inbuild; then
+  INBUILD=1
+  try orient-in-build-tree
+  # N.B. this may set PLATFORM to a nic-prefixed value
+  nictype=$NICTYPE
+  [ -f "$DESTPATH/options_config.mk" ] && sourceconfig "$DESTPATH/options_config.mk"
+
+  if [ "$CURRENT" = src -a -z "$DESTFLAG" ] ; then
+     DESTFLAG=1
+     DESTPATH="$BUILDPATH"
+  fi
+  #log "`pwd` is in build directory - TOP=$TOP"
+
+else
+  RELATIVE_TOP=$TOP
+  ABSOLUTE_TOP=$("$mmaketool" --toppath)
+  TOP=$ABSOLUTE_TOP
+  #log "`pwd` is not in build directory - TOP=$TOP"
+  cd $TOP
+  mk_and_cd build
+fi
+
+[ -n "$host" ] && {	# Make build tree for given host.
+  [ -n "$PLATFORM" ] && fail "Cannot specify both host and platform."
+  # is the remote host up?
+  if [ "$host" != "$localhost" ]; then
+    k=$($mmaketool --toolplatform)
+    case "$k" in
+      sunos) ping -n -c 1 -t 1 $host 1 &>/dev/null || fail "Host $host is not up";;
+      *)     ping -q -n -c 1 -w 1 "$host" &>/dev/null || fail "Host $host is not up." ;;
+    esac
+  fi
+  # The required build is dependent on the remote platform
+  processor=$(remote_command "$mmaketool --processor")
+  remoteplatform=$(remote_command "$mmaketool --toolplatform") || fail "Could not ssh to $host"
+  # TODO: Remove sunos special cases as mmaketool --driverbuild_base should handle them
+  case "$remoteplatform" in
+    sunos)
+      [ -z "$dest" ] && {
+        # This must be a kernel driver build
+        dest=$(remote_command "$mmaketool --driverbuild") || fail "Could not ssh to $host"
+	      [ -d "$dest" ] && fail "Build tree for $host is $dest"
+      }
+      PLATFORM=$(remote_command "$mmaketool --driverbuild_base") || fail "Could not ssh to $host"
+      ;;
+    *)
+      [ -z "$dest" ] && {
+        # This must be a kernel driver build
+        dest=$(remote_command "$mmaketool --driverbuild") || fail "Could not ssh to $host"
+        [ -d "$dest" ] && fail "Build tree for $host is $dest"
+      }
+      PLATFORM=$(remote_command "$mmaketool --driverbuild_base") || fail "Could not ssh to $host"
+      # Sanity checking
+      kernel=$(remote_command "uname -s") || fail "Could not ssh to $host"
+      kernel=$(echo "$kernel" | tr '[A-Z]' '[a-z]')
+      [ -z "$KVER" ] && KVER=$(remote_command "uname -r")
+      [ -d "$KPATH" ] || {
+	modules="/lib/modules/$KVER"
+	[ -d "${modules}" ] || fail "No kernel modules at '$modules'"
+        KPATH=$(readlink -f "${modules}/build")
+        [ -d "$KPATH" ] || fail "No kernel build at '$KPATH'"
+      }
+      ;;
+  esac
+}
+
+# Choose platform if it is not set and add nic type
+if [ -z "$PLATFORM" ]; then
+    choose_platform
+    if [ ! "$(mmaketool --toolplatform)" = "sunos" ]; then
+      PLATFORM="${nictype_}$PLATFORM";
+    fi
+fi
+check_platform_exists "$PLATFORM"
+
+[ "$CURRENT" = src ] && {  # Going to need to make top-level config files.
+  unset kpath cflags cppflags ndebug mmake_toolchain mmake_distfiles mmake_firmware
+  echo "$PLATFORM" | grep linux >/dev/null && {
+    [ -n "$KPATH" ] && {
+      kpath="KPATH := $KPATH"
+      [ -f "$KPATH/config.mk" ] && sourceconfig "$KPATH/config.mk"
+    }
+  }
+  [ -n "$CFLAGS"   ] && cflags="CFLAGS := $CFLAGS"
+  [ -n "$CPPFLAGS" ] && cppflags="CPPFLAGS := $CPPFLAGS"
+  [ -n "$NDEBUG"   ] && ndebug="NDEBUG := $NDEBUG"
+  [ -n "$GCOV"     ] && gcov="GCOV := $GCOV"
+
+  [ -n "$MMAKE_TOOLCHAIN"   ] && mmake_toolchain="MMAKE_TOOLCHAIN := $MMAKE_TOOLCHAIN"
+  [ -n "$MMAKE_DISTFILES"   ] && mmake_distfiles="MMAKE_DISTFILES := $MMAKE_DISTFILES"
+  [ -n "$MMAKE_FIRMWARE"   ] && mmake_firmware="MMAKE_FIRMWARE := $MMAKE_FIRMWARE"
+
+  # Solaris specific
+  [ -n "$OSOL_BUILD"   ] && osol_build="OSOL_BUILD := $OSOL_BUILD"
+
+  # EFTEST build
+  [ -n "$BUILD_EFTEST" ] && build_eftest="BUILD_EFTEST := $BUILD_EFTEST"
+}
+
+[ -z "$dest" ] && dest="$PLATFORM"
+
+case "$PLATFORM" in
+   *linux2.6)    VPATH_ENABLED=0;;
+   *x86_win32_*) VPATH_ENABLED=0;;
+   *x64_win64_*) VPATH_ENABLED=0;;
+   *_wxp)        VPATH_ENABLED=0;;
+   *_wnet)       VPATH_ENABLED=0;;
+   *_wlh)        VPATH_ENABLED=0;;
+   *_win7)       VPATH_ENABLED=0;;
+   *)            VPATH_ENABLED=1;;
+esac
+vpath_mode="VPATH_ENABLED := $VPATH_ENABLED"
+
+[ -z "$SRCPATH" ] && SRCPATH=$("$mmaketool" --toppath)/src
+
+if [ -z "$builddir" -a -z "$BUILDPATH" ] ; then
+   BUILDPATH="$TOP/build/$dest"
+elif [ -z "$BUILDPATH" ]; then
+   BUILDPATH="$builddir/$dest"
+   [ -f "$builddir" ] || try mkdir -p "$builddir"
+fi
+
+if [ -z "$DESTPATH" ] ; then 
+   DESTPATH="$TOP/build/$dest"
+fi
+
+[ -z "$TOPPATH" ] && TOPPATH=$("$mmaketool" --toppath)
+
+if [ "$BUILDPATH" = "$DESTPATH" ] ; then 
+   do_build_tree "$BUILDPATH" 1 1
+   rc=$?
+else
+   do_build_tree "$BUILDPATH" 1 0
+   rc=$?
+   if [ $rc -eq 0 ]; then
+     do_build_tree "$DESTPATH" 0 1
+     rc=$?
+   fi
+fi
+
+if [ $rc -eq 0 ]; then
+   echo "Build tree made for $PLATFORM as $dest"
+else
+   echo "Failed to build tree for $PLATFORM - exit $rc"
+fi
+
+exit $rc

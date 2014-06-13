@@ -1,0 +1,27 @@
+#!/bin/sh
+# chkconfig: 35 50 50
+# description: OpenOnload initialisation
+### BEGIN INIT INFO
+# Provides: openonload
+# Required-Start: $network
+# Required-Stop: 
+# Default-Start: 3 5
+# Default-Stop: 
+### END INIT INFO
+
+case "$1" in
+  start)
+    /sbin/modprobe sfc_tune
+    /sbin/modprobe onload
+    /sbin/onload_tool mknod sfc_char
+    /sbin/onload_tool mknod onload
+    /sbin/onload_tool mknod onload onload_epoll
+    /sbin/modprobe sfc_affinity
+    /sbin/onload_tool mknod sfc_affinity
+    # TODO: Configure sfc_affinity.
+    #/usr/sbin/sfcaffinity_config auto
+    ;;
+  *)
+    ;;
+esac
+exit 0

@@ -1,0 +1,87 @@
+PATH MTU IMPLEMENTATION NOTES
+=============================
+
+Author:   S.Grantham
+Revision: A (alpha version of library)
+Started:  8 July 2004
+
+References
+----------
+RFC792   "Internet Control Message Protocol"
+RFC1191  "Path MTU Discovery"
+RFC2923  "TCP Problems With Path MT Discovery"
+
+Introduction
+------------
+The Path PMU (PMTU) implementation in the library uses storage in the 
+per-endpoint ci_tcp_state structure to record the current PMTU, the
+allocation strategy and the destination IP address to which the PMTU
+applies.  The module implements the "plateau" discovery mechanism 
+detailed in RFC1191 ch7.
+
+Overview
+--------
+All mandatory aspects of RFC1191 and, wherever possible, recomendations of 
+RFC1191 have been implemented.  In the alpha release the TCP output queue
+mechanism does not lend itself to fragmentation - and therefore it has
+been decided that the PMTU will be applied on a demand basis at the
+point of transmission. Therefore any packet exceeding the discovered PMTU 
+will simply have it's IP header's DF bit cleared (which is acceptible under
+RFC1191). 
+
+At first glance the inclusion of a destination IP address seems superfluous
+as, after all, we know where the data are being sent.  However, as UDP
+sockets API does not require that a call to connect() has been made before
+any send call, it is probable that one socket will be used for a number of 
+destinations.  On that basis one might expect that a small (but > 1) cache 
+would be worthwhile - and indeed it may, however, given a likely tendency 
+for tx-to-tx coherence it is considered a fair trade-off to have a cache 
+of 1 address - and to gain experience before trying to optimise. That said,
+ it is likely that the final release will move towards a more centralised
+(kernel?) approach to caching - possibly in conjunction with the software 
+filter table and/or routing table. 
+
+Implementation
+--------------
+The initial and upper-bound PMTU should be assumed to be that of the local
+network (first hop), the plateau table suggests that 1492 bytes be used 
+to accomodate other transports. Therefore there are just 4 other plateau
+values from RFC1191 available - the least of which, 68, is the official 
+minimum MTU and highly unlikely to ever be used.  
+
+The PMTU value affects the fragmentation of all upper-layer packets, to
+this end it is integrated into the TCP send mechanism through incorporation
+into the MSS (ci_tcp_state field "eff_mss") and directly into the UDP send.
+
+The discovery process is implemented as follows:
+
+ +------------+ +--------------------------+     
+ |"Too big" rx| | No Discovery in progress |-<--+
+ +------------+ +--------------------------+    |
+       |                     |                  |
+       |         ( "Too big" ICMP received)     |
+       +-->----- ( PMTU value reduced     )     |
+                 ( Slow timer started     )     |
+                             |                  |
+                +--------------------------+    |
+ +->----+-->----|   Discovery in progress  |    |
+ |      |       +--------------------------+    |
+ |      ^                    |                  ^
+ |      |        ( Timeout of timer       )     |
+ |      |        ( PMTU increased         )     |
+ |      |                    |                  |
+ |      |       /--------------------------\    |
+ |      |       | At max PMTU value?       |-Y--+
+ |  (Fast timer \--------------------------/
+ |   Started)                |
+ |      |       /--------------------------\
+ |      + N -<--| At min. PMTU value?      |
+ |              \--------------------------/ 
+ |                           |
+ +-(Recover timer started)-<-+
+
+Note that a "Too Big" ICMP message is assumed to be able to appear at any
+time and will possibly update the PMTU value & cause a timer restart.
+
+Internals
+---------

@@ -1,0 +1,145 @@
+#!/bin/sh
+######################################################################
+# Make build trees and compile.
+# Author: David Riddoch
+######################################################################
+
+bin=$(cd $(dirname "$0") && /bin/pwd)
+me=$(basename "$0")
+
+err()  { echo >&2 "$*"; }
+log()  { err "$me: $*"; }
+fail() { log "$*"; exit 1; }
+try()  { "$@" || fail "FAILED: $*"; }
+
+
+usage() {
+  err
+  err "usage:"
+  err "  $me"
+  err
+  err "options:"
+  err "  --kernelver <ver>  - Specify kernel version for modules"
+  err "  --user             - Build only user-level components"
+  err "  --kernel           - Build only kernel modules"
+  err "  --keep             - Keep the existing build tree"
+  err "  --debug            - Build debug binaries"
+  err "  --strict           - Compiler warnings are errors"
+  err
+  exit 1
+}
+
+
+have_64bit_userland() {
+  echo | gcc -m64 -x c -c -o /dev/null - >/dev/null 2>&1
+}
+
+
+######################################################################
+# main
+
+PATH="$bin:$PATH"; export PATH
+
+strict=false
+kernel=false
+user=false
+user32=false
+user64=false
+all=true
+keepbuild=false
+nictype=falcon_b0
+NDEBUG=1; export NDEBUG
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --nictype)    nictype="$2"; shift;;
+  --kernelver)  KVER="$2"; export KVER; shift;;
+  --user)       all=false; user=true;;
+  --user32)     all=false; user32=true;;
+  --user64)     all=false; user64=true;;
+  --kernel)     all=false; kernel=true;;
+  --keep)       keepbuild=true;;
+  --debug)	unset NDEBUG;;
+  --strict)     strict=true;;
+  -*)           usage;;
+  *)            break;;
+  esac
+  shift
+done
+
+[ $# = 0 ] || usage
+
+# Try to build 64-bit userland if they asked for it, or if this system
+# looks like it has a 64-bit userland.
+if $user64 || have_64bit_userland; then
+  is64=true
+else
+  is64=false
+fi
+
+if [ -n "$ONLOAD_BUILD_STRICT" ] || $strict; then
+  unset MMAKE_LIBERAL
+  unset NOWERROR
+else
+  # We allow compiler warnings by default.
+  MMAKE_LIBERAL=1; export MMAKE_LIBERAL
+  NOWERROR=1; export NOWERROR
+fi
+
+try cd "$bin/.."
+d=$(EF_NICTYPE="$nictype" mmaketool --driverbuild)
+try [ -n "$d" ]
+$keepbuild || rm -rf build
+try mkdir -p build
+try cd build
+
+if $all || $kernel; then
+  # Kernel drivers.
+  if [ -d "$d" ]; then
+    nodeps=
+  else
+    try mmakebuildtree --driver -n "$nictype" -d "$d"
+    echo "EFX_WANT_CONTROL := 0" >>"$d/options_config.mk"
+    echo "EFX_EXPORTED := 1" >>"$d/options_config.mk"
+    nodeps=MMAKE_NO_DEPS=1
+  fi
+  make -j4 -C "$d" ONLOAD_ONLY=1 $nodeps ||
+    fail "ERROR: Failed to build driver components."
+fi
+
+if $all || $user || $user64; then
+  if $is64; then
+    # 64-bit user-level drivers and tools.
+    if [ -d "${nictype}_gnu_x86_64" ]; then
+      nodeps=
+    else
+      try mmakebuildtree "${nictype}_gnu_x86_64"
+      nodeps=MMAKE_NO_DEPS=1
+    fi
+    make -j4 -C "${nictype}_gnu_x86_64" ONLOAD_ONLY=1 $nodeps ||
+      fail "ERROR: Failed to build 64-bit user-level components."
+  fi
+fi
+
+if $all || $user || $user32; then
+  # 32-bit user-level drivers and tools.
+  if [ -d "${nictype}_gnu" ]; then
+    nodeps=
+  else
+    try mmakebuildtree "${nictype}_gnu"
+    nodeps=MMAKE_NO_DEPS=1
+  fi
+  make -j4 -C "${nictype}_gnu" ONLOAD_ONLY=1 $nodeps || {
+    if $is64; then
+      err
+      log "WARNING: Failed to build 32-bit user-level components."
+      log "WARNING: Most likely this is because 32-bit development"
+      log "WARNING: packages are not installed."
+      err
+    else
+      fail "ERROR: Failed to build 32-bit user-level components."
+    fi
+  }
+fi
+
+exit 0

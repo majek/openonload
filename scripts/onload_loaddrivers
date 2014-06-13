@@ -1,0 +1,160 @@
+#!/bin/bash
+######################################################################
+# Load kernel drivers for onload and af_onload.
+# Author: David Riddoch
+######################################################################
+
+bin=$(cd $(dirname "$0") && /bin/pwd)
+me=$(basename "$0")
+
+err()  { echo >&2 "$*"; }
+log()  { err "$me: $*"; }
+fail() { log "$*"; exit 1; }
+try()  { "$@" || fail "FAILED: $*"; }
+
+usage() {
+  err
+  err "usage:"
+  err "  $me [-p driver:opt=val]... [load]"
+  err "  $me unload"
+  err
+  exit 1
+}
+
+isloaded() { /sbin/lsmod | grep -q "^$1\>"; }
+
+isdev() { grep -qw "$1" /proc/devices; }
+
+nl="
+"
+mod_params=""
+
+add_mod_param() {
+  mod_params="${mod_params}${nl}$1"
+}
+
+get_cmdline_mod_params() {
+  echo "$mod_params" | grep "^$1:" |
+    while read line; do
+      IFS=: read driver rest < <(echo "$line")
+      echo "$rest"
+    done
+}
+
+get_mod_params() {
+  echo $(onload_tool mod_params "$1")
+  echo $(get_cmdline_mod_params "$1")
+}
+
+loadmod() {
+  local mod="$1"
+  shift
+  if isloaded "$mod"; then
+    echo "$me: $mod already loaded"
+    true
+  else
+    params=$(get_mod_params "$mod")
+    echo "$me:" /sbin/insmod "$mod.ko" $params
+    /sbin/insmod "$mod.ko" $params
+  fi
+}
+
+tryunload () {
+  local mod="$1"
+  if isloaded "$mod"; then
+    echo "$me: unloading $mod"
+    /sbin/rmmod "$mod" || { log "rmmod $mod failed ($?)"; bad=true; return 1; }
+  fi
+  if ! isdev "$mod"; then
+    rm -f "/dev/$mod"
+  fi
+  return 0
+}
+
+op_load() {
+  dd="$(mmaketool --toppath)/build/$(mmaketool --driverbuild)/driver/linux"
+  [ -d "$dd" ] || {
+    log "Could not find driver directory.  Expected it to be here:"
+    log "  $dd"
+    exit 1
+  }
+
+  if which onload_uninstall &>/dev/null && ! $force; then
+    log "ERROR: Onload is installed in system directories.  We"
+    log "recommend you load drivers using modprobe to ensure"
+    log "consistency between user and kernel drivers, and to"
+    log "ensure custom module options are used."
+    exit 2
+  fi
+
+  # Prerequesites (but they are sometimes built into kernel).
+  /sbin/modprobe -q mii
+  /sbin/modprobe -q crc32
+  /sbin/modprobe -q hwmon_vid
+  /sbin/modprobe -q hwmon
+  /sbin/modprobe -q i2c_algo_bit
+  /sbin/modprobe -q i2c_core
+  /sbin/modprobe -q mdio
+  if /sbin/modprobe -q mtdpart || /sbin/modprobe -q mtd; then
+    /sbin/modprobe -q mtdchar
+  fi
+
+  try cd "$dd"
+  try loadmod sfc
+  try loadmod sfc_tune
+  try loadmod sfc_resource
+  try loadmod sfc_char
+  try loadmod onload
+  [ -f af_onload.ko ] && try loadmod af_onload
+  [ -f sfc_affinity.ko ] && try loadmod sfc_affinity
+
+  onload_tool mknod onload
+  onload_tool mknod onload onload_epoll
+  onload_tool mknod sfc_affinity
+  onload_tool mknod sfc_char
+
+  # ?? FIXME: Recent sfc drivers don't use /proc
+  #echo "Solarstorm Ethernet interfaces:"
+  #cd /proc/driver/sfc && /bin/ls -d if_* | sed 's/if_/  /'
+
+  return 0
+}
+
+op_unload() {
+  tryunload sfc_affinity
+  tryunload af_onload
+  tryunload onload
+  tryunload sfc_char
+  tryunload sfc_resource
+  tryunload sfc_tune
+  tryunload sfc_mtd
+  tryunload sfc_control
+  tryunload sfc
+  return 0
+}
+
+######################################################################
+
+export PATH="$bin:$PATH"
+force=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --force)	force=true;;
+  -p)		add_mod_param "$2"; shift;;
+  -*)		usage;;
+  *)	break;;
+  esac
+  shift
+done
+
+case $# in
+ 0)  op=load;;
+ 1)  op="$1";;
+ *)  usage;;
+esac
+
+
+type "op_$op" &>/dev/null || usage
+op_$op
+exit

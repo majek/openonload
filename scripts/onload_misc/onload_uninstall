@@ -1,0 +1,61 @@
+#!/bin/sh
+######################################################################
+# Uninstall onload files from system directories.
+# Author: David Riddoch
+######################################################################
+
+bin=$(cd $(dirname "$0") && /bin/pwd)
+me=$(basename "$0")
+
+err()  { echo >&2 "$*"; }
+log()  { err "$me: $*"; }
+fail() { log "$*"; exit 1; }
+try()  { "$@" || fail "FAILED: $*"; }
+
+usage() {
+  err
+  err "usage:"
+  err "  $me"
+  err
+  exit 1
+}
+
+######################################################################
+# main
+
+[ $# = 0 ] || usage
+
+libexec=/usr/libexec/onload
+manifest="$libexec/uninstall_manifest"
+
+[ -f "$manifest" ] ||
+  fail "ERROR: Uninstall manifest not found at '$manifest'"
+
+m=$(mktemp)
+try [ -n "$m" ]
+try cp "$manifest" "$m"
+rm -f "$manifest" || {
+  rm -f "$m"
+  fail "ERROR: You need to be 'root' to run this script."
+}
+
+log "Removing OpenOnload files..."
+cd /
+exec 5<"$m" || exit
+while read -r f <&5; do
+  rm -rf "$f"
+done
+exec 5<&-
+
+ldconfig -n /usr/lib /usr/lib64
+
+log "Updating kernel module dependencies..."
+grep "^/lib/modules/" "$m" | sed 's+/lib/modules/\([^/]*\)/.*+\1+' |
+  sort | uniq |
+  while read -r kver; do
+    log "  $kver..."
+    /sbin/depmod "$kver"
+  done
+
+rm -f "$m"
+log "Done."

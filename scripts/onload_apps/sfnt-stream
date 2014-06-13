@@ -1,0 +1,2 @@
+onload_import latency
+onload_set EF_STACK_PER_THREAD 1

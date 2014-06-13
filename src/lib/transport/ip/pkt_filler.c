@@ -1,0 +1,151 @@
+/*
+** Copyright 2005-2012  Solarflare Communications Inc.
+**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
+** Copyright 2002-2005  Level 5 Networks Inc.
+**
+** This program is free software; you can redistribute it and/or modify it
+** under the terms of version 2 of the GNU General Public License as
+** published by the Free Software Foundation.
+**
+** This program is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+** GNU General Public License for more details.
+*/
+
+/**************************************************************************\
+** <L5_PRIVATE L5_SOURCE>
+**   Copyright: (c) Solarflare Communications Inc.
+**      Author: djr
+**     Started: 2009/01/14
+** Description: Fill packet buffers.
+** </L5_PRIVATE>
+\**************************************************************************/
+
+/*! \cidoxg_lib_transport_ip */
+#include "ip_internal.h"
+#include <onload/pkt_filler.h>
+
+
+int oo_pkt_filler_alloc_pkts(ci_netif* ni, int* p_netif_locked, 
+                             struct oo_pkt_filler* pf, int n)
+{
+  ci_ip_pkt_fmt* next_pkt;
+
+  while( n-- > 0 ) {
+    next_pkt = ci_netif_pkt_alloc_block(ni, p_netif_locked);
+#ifdef __KERNEL__
+    if(CI_UNLIKELY( next_pkt == NULL ))
+      return -ERESTARTSYS;
+#endif
+    oo_pkt_filler_add_pkt(pf, next_pkt);
+  }
+  return 0;
+}
+
+
+void oo_pkt_filler_free_unused_pkts(ci_netif* ni, int* p_netif_locked,
+                                    struct oo_pkt_filler* pf)
+{
+  int n_pkts = 0;
+  if( pf->alloc_pkt != NULL ) {
+    if( *p_netif_locked == 0 && ci_netif_lock(ni) )
+      *p_netif_locked = 1;
+    if( *p_netif_locked ) {
+      oo_pkt_p next = OO_PKT_P(pf->alloc_pkt);
+      while( OO_PP_NOT_NULL(next) ) {
+        ci_ip_pkt_fmt *p = PKT_CHK(ni, next);
+        next = p->next;
+        ci_netif_pkt_release(ni, p);
+        ++n_pkts;
+      }
+      ni->state->n_async_pkts -= n_pkts;
+    }
+    else 
+      LOG_U(ci_log("%s: pkts leaked due to lock failure", __FUNCTION__));
+  }
+}
+
+
+ci_inline int oo_pkt_fill_copy(void* to, const void* from, int n_bytes
+                               CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+{
+#ifdef __KERNEL__
+  if( addr_spc != CI_ADDR_SPC_KERNEL )
+    return copy_from_user(to, from, n_bytes);
+#endif
+  memcpy(to, from, n_bytes);
+  return 0;
+}
+
+
+int oo_pkt_fill(ci_netif* ni, int* p_netif_locked,
+                struct oo_pkt_filler* pf, ci_iovec_ptr* piov,
+                int bytes_to_copy  CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+{
+  ci_ip_pkt_fmt* next_pkt;
+  int n;
+
+  ci_assert_le(bytes_to_copy, ci_iovec_ptr_bytes_count(piov));
+  ci_assert_ge((int) (pf->buf_end - pf->buf_start), 0);
+  ci_assert(pf->buf_start >= PKT_START(pf->last_pkt));
+  ci_assert(pf->buf_start <= pf->buf_end);
+  /* ?? FIXME -- should depend on buffer size */
+  ci_assert(pf->buf_end <= CI_PTR_ALIGN_FWD(PKT_START(pf->last_pkt),
+                                            CI_CFG_PKT_BUF_SIZE));
+
+  while( 1 ) {
+    n = (int) (pf->buf_end - pf->buf_start);
+    n = CI_MIN(n, CI_IOVEC_LEN(&piov->io));
+    n = CI_MIN(n, bytes_to_copy);
+    if(CI_UNLIKELY( oo_pkt_fill_copy(pf->buf_start, CI_IOVEC_BASE(&piov->io),
+                                     n CI_KERNEL_ARG(addr_spc)) != 0 ))
+      return -EFAULT;
+
+    pf->buf_start += n;
+    pf->pkt->tx_pkt_len += n;
+    ci_iovec_ptr_advance(piov, n);
+
+    if( n == bytes_to_copy )
+      break;
+
+    bytes_to_copy -= n;
+
+    if( pf->buf_start == pf->buf_end ) {
+      /* If [bytes_to_copy > 0] then there *must* be more to copy out of
+       * [piov].  This is important so we don't allocate a new packet
+       * buffer and put nothing in it.
+       */
+      ci_assert(CI_IOVEC_LEN(&piov->io) > 0 || piov->iovlen > 0);
+
+      pf->last_pkt->buf_len =
+        pf->buf_start - PKT_START(pf->last_pkt);
+
+      next_pkt = oo_pkt_filler_next_pkt(ni, pf);
+      if( next_pkt == NULL ) {
+        next_pkt = ci_netif_pkt_alloc_block(ni, p_netif_locked);
+#ifdef __KERNEL__
+        if(CI_UNLIKELY( next_pkt == NULL ))
+          return -ERESTARTSYS;
+#endif
+      }
+      ++pf->pkt->n_buffers;
+
+      pf->last_pkt->frag_next = OO_PKT_P(next_pkt);
+      pf->last_pkt = next_pkt;
+      pf->buf_start = PKT_START(next_pkt);
+      /* ?? FIXME -- should depend on buffer size */
+      pf->buf_end = CI_PTR_ALIGN_FWD(pf->buf_start, CI_CFG_PKT_BUF_SIZE);
+      continue;
+    }
+
+    ci_assert_equal(CI_IOVEC_LEN(&piov->io), 0);
+    if( piov->iovlen == 0 )
+      break;
+    piov->io = *piov->iov++;
+    --piov->iovlen;
+  }
+
+  pf->last_pkt->buf_len = pf->buf_start - PKT_START(pf->last_pkt);
+  return 0;
+}

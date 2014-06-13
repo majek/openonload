@@ -1,0 +1,215 @@
+#!/bin/sh
+######################################################################
+# Create onload device node.
+# Author: David Riddoch
+######################################################################
+
+me=$(basename "$0")
+
+err()  { echo >&2 "$*"; }
+log()  { err "$me: $*"; }
+fail() { log "$*"; exit 1; }
+try()  { "$@" || fail "FAILED: $*"; }
+trylog() { echo "$me: $*"; "$@" || fail "FAILED: $*"; }
+
+usage() {
+  err
+  err "usage:"
+  err "  $me unload                       - unload sfc/onload drivers"
+  err "  $me reload                       - reload sfc/onload drivers"
+  err "  $me disable_cstates [persist]    - disable CPU low power states"
+  err "  $me mknod <driver-name>          - make /dev/<driver-name>"
+  err "  $me mod_params <driver-name>     - return module parameters"
+  err
+  exit 1
+}
+
+isloaded() {
+  # NB. Check for /sys/module/onload is in case drivers are built-in.
+  /sbin/lsmod | grep -q "^$1\>" || [ -d "/sys/module/$1" ]
+}
+
+isdev() {
+  grep -qw "$1" /proc/devices
+}
+
+getmajor() {
+  grep -w "$1" /proc/devices | awk '{ print $1 }'
+}
+
+tryunload () {
+  local mod="$1"
+  if isloaded "$mod"; then
+    echo "$me: /sbin/modprobe -r $mod"
+    if ! /sbin/modprobe -r "$mod"; then
+      log "ERROR: modprobe -r $mod failed ($?)"
+      rc=1
+    fi
+  fi
+  if ! isdev "$mod" && [ -e "/dev/$mod" ]; then
+    rm -f "/dev/$mod"
+  fi
+}
+
+modusedby() {
+  local mod="$1"
+  local usedby="$2"
+  /sbin/lsmod | grep -q "^$mod\>.*\<$usedby\>"
+}
+
+domknod () {
+  local path="$1"
+  local major="$2"
+  local minor="$3"
+  local perm="$4"
+
+  try rm -f "$path"
+  try mknod -m "$perm" "$path" c "$major" "$minor"
+  [ -x /sbin/restorecon ] && /sbin/restorecon "$path"
+}
+
+mknod_for_dev() {
+  local name="$1"
+  local dev="$1"
+  local major=$(getmajor "$name")
+  if ! [ -n "$major" ]; then
+    err "ERROR: Did not find $name in /proc/devices"
+    rc=1
+    return
+  fi
+  local DEV=$(echo "$dev" | tr '[a-z]' '[A-Z]')
+  eval user=\"\${${DEV}_USER:-root}\"
+  eval group=\"\${${DEV}_GROUP:-root}\"
+  eval perm=\"\${${DEV}_MODE:-666}\"
+  domknod "/dev/$dev" "$major" 0 "$perm"
+  chown "$user:$group" "/dev/$dev"
+}
+
+cmd_mknod() {
+  local driver device
+  case $# in
+    1)	device="$1";;
+    2)	device="$2";;
+    *)	usage;;
+  esac
+  local driver="$1"
+  rc=0
+  if isloaded "$driver"; then
+    mknod_for_dev "$device"
+  else
+    rm -f "/dev/$1"
+    rc=2
+  fi
+  exit $rc
+}
+
+######################################################################
+
+cmd_mod_params() {
+  #case "$1" in
+  #esac
+  exit 0
+}
+
+######################################################################
+
+do_unload() {
+  rc=0
+  modusedby sfc_resource sfc_affinity &&
+    tryunload sfc_affinity
+  tryunload af_onload
+  tryunload onload || ( [ -x "$(which onload_fuser)" ] && onload_fuser -v )
+  tryunload sfc_char
+  tryunload sfc_resource
+  tryunload sfc_affinity
+  tryunload sfc_tune
+  tryunload sfc_mtd
+  tryunload sfc_control
+  tryunload sfc
+  return $rc
+}
+
+
+cmd_unload() {
+  [ $# = 0 ] || usage
+  do_unload
+  exit
+}
+
+
+cmd_reload() {
+  [ $# = 0 ] || usage
+  do_unload || fail "ERROR: could not unload all drivers"
+  trylog /sbin/modprobe sfc_tune
+  trylog /sbin/modprobe onload
+  isloaded onload || fail "ERROR: onload module did not load"
+  exit 0
+}
+
+######################################################################
+
+cmd_disable_cstates() {
+  case $# in
+    0)  ;;
+    1)  [ "$1" = persist ] || usage;;
+    *)  usage;;
+  esac
+  [ $# -gt 1 ] && usage
+  tryunload sfc_tune
+  isloaded sfc_tune && fail "ERROR: did not unload sfc_tune module"
+  trylog /sbin/modprobe sfc_tune idle_enable=2
+  isloaded sfc_tune || fail "ERROR: sfc_tune module did not load"
+  if [ "$1" = persist ]; then
+    if grep -q "^options sfc_tune.*idle_enable=2" /etc/modprobe.conf; then
+      exit 0  # already done
+    elif grep -q "^options.*sfc_tune" /etc/modprobe.conf; then
+      log "ERROR: /etc/modprobe.conf already has sfc_tune options."
+      log "ERROR: Will not change existing settings."
+      exit 1
+    else
+      msg="options sfc_tune idle_enable=2"
+      echo "$msg" >>/etc/modprobe.conf
+      echo "$me: NOTE: Added '$msg' to modprobe.conf"
+    fi
+  fi
+  exit 0
+}
+
+######################################################################
+# main
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -*)  usage;;
+    *)   break;;
+  esac
+  shift
+done
+
+[ $# -ge 1 ] || usage
+
+[ -f /etc/sysconfig/openonload ] && . /etc/sysconfig/openonload
+
+cmd="$1"
+shift
+
+case "$cmd" in
+  mknod)
+    cmd_mknod "$@"
+    ;;
+  mod_params)
+    cmd_mod_params "$@"
+    ;;
+  reload)
+    cmd_reload "$@"
+    ;;
+  unload)
+    cmd_unload "$@"
+    ;;
+  disable_cstates)
+    cmd_disable_cstates "$@"
+    ;;
+  *)
+    usage
+    ;;
+esac

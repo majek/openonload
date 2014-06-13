@@ -1,0 +1,157 @@
+/**************************************************************************\
+*//*! \file
+** <L5_PRIVATE L5_HEADER >
+** \author  djr
+**  \brief  Definitions of system calls for templates
+**   \date  
+**    \cop  (c) Level 5 Networks Limited.
+** </L5_PRIVATE>
+*//*
+\**************************************************************************/
+
+/*! \cidoxg_include_ci_ul */
+
+/* -*- Mode: c; -*- */
+
+/* No header guards: may be included multiple times. */
+
+#include <sys/resource.h>
+#include <sys/syscall.h>
+
+/*
+** This template helps generate declarations, definitions or code for the
+** socket system calls and related calls that we need to intercept to do
+** user-level networking.
+**
+** The user must define a CI_MK_DECL() macro that generates the
+** declarations or definitions.  For example, to declare pointers to
+** functions with a ci_ prefix, use the following:
+**
+**   #define CI_MK_DECL(ret, name, args)  extern ret (*ci_##name) args
+*/
+
+#if !defined(CI_MK_DECL)
+# error Do not include this file unless you know what you are doing.
+#endif
+
+struct aiocb;
+struct mmsghdr;
+
+CI_MK_DECL(int           , socket     , (int, int, int));
+CI_MK_DECL(int           , bind       , (int, const struct sockaddr*, socklen_t));
+CI_MK_DECL(int           , listen     , (int, int));
+CI_MK_DECL(int           , shutdown   , (int, int));
+CI_MK_DECL(int           , getsockname, (int, struct sockaddr*, socklen_t*));
+CI_MK_DECL(int           , getpeername, (int, struct sockaddr*, socklen_t*));
+CI_MK_DECL(int           , getsockopt , (int, int, int, void*, socklen_t*));
+CI_MK_DECL(int           , setsockopt , (int, int, int, const void*, socklen_t));
+
+#if defined(__linux__) || defined(__sun__)
+CI_MK_DECL(ssize_t       , sendfile   , (int, int, off_t*, size_t));
+#endif
+
+#ifdef __sun__
+CI_MK_DECL(ssize_t       , sendfilev  , (int, const struct sendfilevec *, int, size_t *));
+#endif
+
+CI_MK_DECL(ssize_t       , readv      , (int, const struct iovec*, int));
+CI_MK_DECL(ssize_t       , writev     , (int, const struct iovec*, int));
+
+#ifdef __GLIBC__
+CI_MK_DECL(int           , ioctl      , (int, unsigned long, ...));
+#else
+CI_MK_DECL(int           , ioctl      , (int, int, ...));
+#endif
+
+CI_MK_DECL(int           , dup        , (int));
+CI_MK_DECL(int           , dup2       , (int, int));
+CI_MK_DECL(int           , accept     , (int, struct sockaddr*, socklen_t*));
+#if CI_LIBC_HAS_accept4
+CI_MK_DECL(int           , accept4     , (int, struct sockaddr*, socklen_t*, int flags));
+#endif
+CI_MK_DECL(int           , connect    , (int, const struct sockaddr*, socklen_t));
+CI_MK_DECL(ssize_t       , recv       , (int s, void*, size_t, int));
+CI_MK_DECL(ssize_t       , recvfrom   , (int, void*, size_t, int,
+                                         struct sockaddr*, socklen_t*));
+CI_MK_DECL(ssize_t       , recvmsg    , (int, struct msghdr*, int));
+#if CI_CFG_RECVMMSG && ! defined(OO_RECVMMSG_NOT_IN_LIBC)
+CI_MK_DECL(int           , recvmmsg   , (int, struct mmsghdr*, unsigned, int, const struct timespec*));
+#endif
+CI_MK_DECL(ssize_t       , send       , (int, const void*, size_t, int));
+CI_MK_DECL(ssize_t       , sendto     , (int, const void*, size_t, int,
+                                         const struct sockaddr*, socklen_t));
+CI_MK_DECL(ssize_t       , sendmsg    , (int, const struct msghdr*, int));
+CI_MK_DECL(ssize_t       , read       , (int, void*, size_t));
+#if CI_LIBC_HAS___read_chk
+CI_MK_DECL(ssize_t       , __read_chk , (int, void*, size_t, size_t));
+#endif
+CI_MK_DECL(ssize_t       , write      , (int, const void*, size_t));
+
+CI_MK_DECL(int           , close      , (int));
+CI_MK_DECL(int           , fcntl      , (int, int, ...));
+
+CI_MK_DECL(int           , poll       , (struct pollfd *, nfds_t, int));
+CI_MK_DECL(int           , select     , (int, fd_set*, fd_set*, fd_set*, struct timeval*));
+CI_MK_DECL(pid_t         , vfork      , (void));
+
+CI_MK_DECL(int           , open       , (const char*, int, ...));
+CI_MK_DECL(int           , creat      , (const char*, mode_t));
+
+CI_MK_DECL(int           , setrlimit  , (__rlimit_resource_t, const struct rlimit *));
+
+#ifdef	__linux__
+CI_MK_DECL(int           , __fxstat   , (int, int, struct stat *));
+# ifdef __USE_LARGEFILE64
+CI_MK_DECL(int           , open64     , (const char*, int, ...));
+CI_MK_DECL(int           , creat64    , (const char*, mode_t));
+CI_MK_DECL(int           , setrlimit64, (__rlimit_resource_t, const struct rlimit64 *));
+CI_MK_DECL(int           , __fxstat64 , (int, int, struct stat64 *));
+CI_MK_DECL(ssize_t       , sendfile64 , (int, int, off64_t*, size_t));
+# endif
+#endif
+
+#ifdef	__sun__
+# ifdef _LP64
+CI_MK_DECL(int           , fstat      , (int, struct stat *));
+# else
+CI_MK_DECL(int           , open64     , (const char*, int, ...));
+CI_MK_DECL(int           , creat64    , (const char*, mode_t));
+CI_MK_DECL(int           , setrlimit64, (__rlimit_resource_t, const struct rlimit64 *));
+CI_MK_DECL(int           , _fxstat    , (int, int, struct stat *));
+CI_MK_DECL(ssize_t       , sendfile64 , (int, int, off64_t*, size_t));
+# endif
+#endif
+
+CI_MK_DECL(int           , socketpair , (int, int, int, int sv[2]));
+CI_MK_DECL(int           , pipe       , (int fd[2]));
+#if defined(SYS_pipe2) && CI_LIBC_HAS_pipe2
+CI_MK_DECL(int           , pipe2      , (int fd[2], int));
+#endif
+CI_MK_DECL(int           , setuid     , (uid_t));
+CI_MK_DECL(int           , chroot     , (const char*));
+
+#ifdef	__linux__
+CI_MK_DECL(int           , execve     , (const char*, char* const argv[], char* const envp[]));
+CI_MK_DECL(int           , execl      , (const char*, const char*, ...));
+CI_MK_DECL(int           , execlp     , (const char*, const char*, ...));
+CI_MK_DECL(int           , execle     , (const char*, const char*, ...));
+CI_MK_DECL(int           , execv      , (const char*, char *const argv[]));
+CI_MK_DECL(int           , execvp     , (const char*, char *const argv[]));
+#endif
+
+#if CI_CFG_USERSPACE_EPOLL
+#include <sys/epoll.h>
+CI_MK_DECL(int           , epoll_create, (int));
+#ifdef EPOLL_CLOEXEC
+CI_MK_DECL(int           , epoll_create1, (int));
+#endif
+CI_MK_DECL(int           , epoll_ctl, (int, int, int, struct epoll_event *));
+CI_MK_DECL(int           , epoll_wait, (int, struct epoll_event *, int, int));
+#if CI_LIBC_HAS_epoll_pwait
+CI_MK_DECL(int           , epoll_pwait, (int, struct epoll_event *, int, int, const sigset_t *));
+#endif
+#endif
+
+#undef CI_MK_DECL
+
+/*! \cidoxg_end */

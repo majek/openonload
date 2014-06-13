@@ -1,0 +1,1 @@
+LINUX_UIO_UTILS := 1

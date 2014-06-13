@@ -1,0 +1,127 @@
+
+OpenOnload 201205 Release Notes
+===============================
+
+ This is a major release of OpenOnload that includes new features and bug
+ fixes.  Please see the ChangeLog for the full list of changes.  These
+ release notes give further details about the more significant changes.
+
+
+----------------------------------------
+TCP loopback acceleration
+-------------------------
+
+ This release adds acceleration of TCP loopback connections.  This feature
+ is disabled by default; To enable loopback acceleration, set the following
+ environment variables:
+
+   export EF_TCP_SERVER_LOOPBACK=2
+   export EF_TCP_CLIENT_LOOPBACK=2
+
+ The sockets at both ends of an accelerated TCP loopback connection have to
+ reside in the same Onload stack.  In the configuration given above, they
+ will both reside in the stack of the connecting socket.  It is also
+ possible to have the connecting socket moved into the stack of the
+ listening socket, by setting EF_TCP_CLIENT_LOOPBACK=3.
+
+ See the documentation for details of other options.
+
+ NOTE: If spinning is enabled, then loopback acceleration may cause threads
+ to spin that didn't in previous releases.
+
+
+----------------------------------------
+New configuration options
+-------------------------
+
+ In addition to those mentioned elsewhere, the following configuration
+ options have been added.  See the manual for more details:
+
+ EF_TCP_RST_DELAYED_CONN
+ - Set this option to prevent data being delivered late by TCP due to
+   retransmits.  Useful for trading application where delivering the data
+   late is worse than not delivering it at all.
+
+ EF_DYNAMIC_ACK_THRESH
+ - This option reduces the ACK rate when streaming TCP data, which
+   increases throughput and reduces CPU utilisation.  This option is
+   enabled by default; set to 0 to get the old behaviour.
+
+
+----------------------------------------
+Control plane table sizes
+-------------------------
+
+ We've added the following new module parameters to the 'onload' kernel
+ module.
+
+   max_layer2_interfaces
+   - Sets the maximum number of network interfaces (including physical
+     interfaces, vlan interfaces and bonds) supported in Onload's control
+     plane.  The default is 50.
+
+   max_routes
+   - Sets the maximum number of entries in Onload's route table.  The
+     default is 256.
+
+   max_neighs
+   - Sets the maximum number of entries in Onload's ARP/neighbour table.
+     This is rounded up internally to a power of two.  The default is 1024.
+
+
+----------------------------------------
+ef_vi Improvements
+------------------
+
+ ef_vi has been extended with two new types:
+
+ - ef_pd: A protection domain essentially defines an address space.
+
+ - ef_memreg: Allows you to register ordinary program memory for DMA.
+
+ Together these increase flexibility significantly.  Multiple VIs can be
+ allocated within a protection domain, and any VI in the domain can access
+ any memory registered in the domain.
+
+ We've also added an option (EF_PD_VF) to allocate VIs within SR-IOV VFs.
+ The advantages of this are reduced latency and no limit on the amount of
+ memory that can be registered.
+
+ Another option (EF_PD_PHYS_MODE) allows a VI to use physical addresses
+ rather than protected I/O addresses.  This option is only available to
+ processes running as root, as it allows the application to cause the
+ adapter to read and write arbitrary addresses in memory.
+
+ The interface between the ef_vi user-space library and the driver is
+ backwards compatible with the following earlier releases:
+
+   openonload-201109-u2
+   enterpriseonload-2.0.0.x
+
+ ef_vi applications built against those releases will continue to work with
+ the drivers in this release.
+
+
+----------------------------------------
+Scalable packet buffer mode
+---------------------------
+
+ Support for SR-IOV is disabled on 32-bit kernels.  This means the
+ following features are not available on 32-bit kernels:
+
+ - Scalable packet buffer mode (EF_PACKET_BUFFER_MODE=1)
+ - ef_vi with VFs
+
+
+ On some recent kernel versions, configuring the adapter to have a large
+ number of VFs (via sfboot) can cause kernel panics.  This problem affects
+ kernel versions in the range 3.0 to 3.3 inclusive, and is due to netlink
+ messages that include information about network interfaces growing too
+ large.
+
+ This problem can be avoided by ensuring that the total number of physical
+ network interfaces, including VFs, is no more than 30.
+
+
+David Riddoch
+2012/05/02

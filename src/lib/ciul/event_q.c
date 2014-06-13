@@ -1,0 +1,88 @@
+/*
+** Copyright 2005-2012  Solarflare Communications Inc.
+**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
+** Copyright 2002-2005  Level 5 Networks Inc.
+**
+** This library is free software; you can redistribute it and/or
+** modify it under the terms of version 2.1 of the GNU Lesser General Public
+** License as published by the Free Software Foundation.
+**
+** This library is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+** Lesser General Public License for more details.
+*/
+
+/**************************************************************************\
+*//*! \file
+** <L5_PRIVATE L5_SOURCE>
+** \author  djr
+**  \brief  Event queues.
+**   \date  2003/03/04
+**    \cop  (c) Level 5 Networks Limited.
+** </L5_PRIVATE>
+*//*
+\**************************************************************************/
+  
+/*! \cidoxg_lib_ef */
+#include <ci/driver/efab/os_intf.h>
+#include <etherfabric/vi.h>
+#include <ci/efch/op_types.h>
+#include "ef_vi_internal.h"
+#include "logging.h"
+
+
+int ef_eventq_alloc(ef_vi* evq, ef_driver_handle fd, unsigned capacity)
+{
+  return ef_vi_alloc(evq, fd, -1, capacity ? capacity : -1, 0, 0, NULL, -1, 0);
+}
+
+
+int ef_eventq_free(ef_vi* evq, ef_driver_handle fd)
+{
+  return ef_vi_free(evq, fd);
+}
+
+
+int ef_eventq_wait(ef_vi* evq, ef_driver_handle fd,
+		   unsigned current_ptr, const struct timeval* timeout)
+{
+  /* Should we consider using absolute timeouts instead of relative ones?
+  ** Or if we use relative ones, should we reduce [timeout] on return to
+  ** indicate how long we waited?  (Like what select() does).
+  **
+  ** Also consider making [timeout] be non-optional.  Can always have an
+  ** inline ciul_eventq_wait_forever() function for those that don't want
+  ** to supply one.
+  */
+  ci_resource_op_t  op;
+
+  op.op = CI_RSOP_EVENTQ_WAIT;
+  op.id = efch_make_resource_id(evq->vi_resource_id);
+  if( timeout ){
+    op.u.evq_wait.timeout.tv_sec = timeout->tv_sec;
+    op.u.evq_wait.timeout.tv_usec = timeout->tv_usec;
+  }
+  else {
+    op.u.evq_wait.timeout.tv_sec = 0;
+    op.u.evq_wait.timeout.tv_usec = 0;
+  }
+  op.u.evq_wait.current_ptr = current_ptr;
+  /* This is a bit limiting, but the only callers of this function are tests
+   * and disused code, so we can live with it only being able to use NIC 0. 
+   * If that changes we can easily add a parameter to ef_eventq_wait */
+  op.u.evq_wait.nic_index = CI_DEFAULT_NIC;
+
+  LOGVVV(ef_log("ef_eventq_wait: current_ptr=%x next_i=%u",
+		(unsigned) current_ptr,
+		(unsigned) ((current_ptr & evq->evq_mask)
+			    / sizeof(efhw_event_t))));
+
+  /* ?? FIXME: This cast of [timeout] looks dodgy.  (NB. Only used on
+  ** windows).
+  */
+  return ci_resource_op_blocking(fd, &op, (const ci_timeval_t*) timeout,
+                                 NULL);
+}
+
+/*! \cidoxg_end */

@@ -1,0 +1,41 @@
+/**************************************************************************\
+*//*! \file
+** <L5_PRIVATE L5_HEADER >
+** \author  pd
+**  \brief  Definitions of system calls for templates
+**   \date  
+**    \cop  (c) Level 5 Networks Limited.
+** </L5_PRIVATE>
+*//*
+\**************************************************************************/
+
+/*! \cidoxg_include_ci_ul */
+
+/* -*- Mode: c; -*- */
+
+/* No header guards: may be included multiple times. */
+
+#include <sys/resource.h>
+
+/*
+** This template helps generate declarations, definitions or code for the
+** libc calls and related calls that we need to intercept to do
+** user-level networking.
+**
+** The user must define a CI_MK_DECL() macro that generates the
+** declarations or definitions.  For example, to declare pointers to
+** functions with a ci_ prefix, use the following:
+**
+**   #define CI_MK_DECL(ret, name, args)  extern ret (*ci_##name) args
+*/
+
+#if !defined(CI_MK_DECL)
+# error Do not include this file unless you know what you are doing.
+#endif
+
+CI_MK_DECL(void *        , malloc     , (size_t));
+CI_MK_DECL(void          , free       , (void *));
+
+#undef CI_MK_DECL
+
+/*! \cidoxg_end */

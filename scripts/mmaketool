@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+######################################################################
+# (c) 2002 Cambridge Internetworking Ltd.
+# (c) 2004 Level 5 Networks Ltd.
+# Author: David Riddoch
+#
+# Useful info for other scripts.
+######################################################################
+
+. "$(dirname "$0")/sh/fns"
+. "$bin/sh/mmake-fns"
+. "$bin/sh/disttag"
+
+usage () {
+  err
+  err "usage:  $p <request>"
+  err
+  err "requests:"
+  err "  --intree              - true if in a ci check-out or build tree"
+  err "  --inbuild             - true if in a build tree"
+  err "  --top                 - relative path to top of ci check-out"
+  err "  --toppath             - absolute path to top of ci check-out"
+  err "  --buildplatform       - platform name of build tree"
+  err "  --build               - relative path to top of build tree"
+  err "  --buildpath           - absolute path to top of build tree"
+  err "  --current             - path from top of build tree to current"
+  err "  --platforms           - list supported platforms"
+  err "  --allplatforms        - list all platforms including unsupported"
+  err "  --driverbuild         - canonical driver build name for this host"
+  err "  --driverbuild_base    - base canonical driver build name for this host"
+  err "  --driverbuild_rb      - driver build name in runbennch format"
+  err "  --userbuild           - canonical userlevel build name for this host"
+  err "  --userbuild_base      - base userlevel build name for this host"
+  err "  --userbuild_rb        - userlevel build name in runbennch format"
+  err "  --mcbuild             - canonical MCPU build name for this NIC type"
+  err "  --mcbuild_base        - base MCPU build name for this NIC type"
+  err "  --mcbuild_rb          - MCPU build name in runbennch format"
+  err "  --ignoreenv           - Ignore MMAKE_*"
+  err "  --kernelid            - kernel-dependent part of --driverbuild"
+  err "  --transportlib        - location of userlevel transport library"
+  err "  --afonloadlib         - location of kernel transport preloader"
+  err "  --processor           - processor name for this machine"
+  err "  --userarch            - processor name for this machine"
+  err "  --toolplatform        - local tool platform mmaketool is running on"
+  err "  --distribution        - OS distribution name for this machine"
+  err "  --libc                - LibC version number"
+  err "  --interfaces          - list etherfabric interfaces"
+  err "  --sourcever           - software version from source code"
+  err "  --hostnictype         - nic in this host (blank for ef1)"
+  err "  --buildnictype        - nic current build is for (blank for ef1)"
+  err "  --nictype             - build type if in build tree, else host type"
+  err "  --boardtype           - Type of board (rather than controller)"
+  err
+  err "Environment variables used:"
+  err "  MMAKETOOL_RB_NAMES    - use runbench build dir name, if set"
+  err "  MMAKETOOL_ADD_LIBC    - add gcc library version to build dir, if set"
+  err "  MMAKETOOL_ADD_DISTRIBUTION - add linux distn to build dir, if set"
+  err "  MMAKETOOL_ADD_HOST    - add host name to build dir, if set"
+  err "  EF_USERBUILD          - use as user build dir, if set"
+  err "  EF_DRIVERBUILD        - use as driver build dir, if set"
+  err "  EF_MCBUILD            - use as MCPU build dir, if set"
+  err "  EF_NICTYPE            - use as NIC type instead of looking at PCI"
+  exit 1
+}
+
+# This isn't ideal, as -p seems like the right thing to use, but it
+# doesn't exist on some Debian systems, and gives an unhelpful string
+# on others (bug29199).
+processor_linux() {
+  uname -m
+}
+
+processor_cygwin() {
+  uname -m
+}
+
+processor_darwin() {
+  uname -m
+}
+
+processor_sunos() {
+  isalist | grep sparcv9 > /dev/null && echo "sparcv9" && return 0
+  isalist | grep amd64 > /dev/null && echo "amd64" && return 0
+  isalist | grep i386 > /dev/null && echo "i386" && return 0
+  isalist | awk '{ print $1 }'
+}
+
+processor() {
+  k=$(toolplatform)
+  case "$k" in
+      linux|freebsd)	processor_linux;;
+      sunos)		processor_sunos;;
+      darwin)		processor_darwin;;
+      cygwin_nt*)	processor_cygwin;;
+      *) err "mmaketool:processor: unknown platform"; exit 1;;
+  esac
+}
+
+toolplatform() {
+    uname -s | tr '[A-Z]' '[a-z]'
+}
+
+#######################################################################
+
+hostnictype_linux() {
+  export PATH="/sbin:/usr/sbin:$PATH"
+  local output="$(lspci -n -d 1924: | head -1)"
+  # TODO cope with multiple NICs (or at least warn)
+  # For now order has been chosen to be newest to oldest NIC types
+  echo "$output" | egrep -q '1924:0813' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0803 \(rev 03\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0803 \(rev 02\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0803 \(rev 01\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0803 \(rev 00\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0803' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:7778 \(rev 00\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:7778' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:7777 \(rev 00\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:7777' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0770' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0710 \(rev 02\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:0703 \(rev 02\)' && echo falcon_b0 && return 0
+  echo "$output" | egrep -q '1924:6703 \(rev 01\)' && echo falcon && return 0
+  echo "$output" | egrep -q '1924:0703 \(rev 01\)' && echo falcon && return 0
+  echo "$output" | egrep -q '1924:6703 \(rev 00\)' && echo falcon && return 0
+  echo "$output" | egrep -q '1924:0703 \(rev 00\)' && echo falcon && return 0
+  echo "$output" | egrep -q '1924:6703' && echo falcon && return 0
+  echo "$output" | egrep -q '1924:0703' && echo falcon && return 0
+  echo "$output" | grep -q '1924:c101' && echo ef1 && return 0
+  fail "Couldn't find SFC NIC using lspci. Is there an SFC NIC in this machine? Or set EF_NICTYPE"
+}
+
+boardtype_linux() {
+  export PATH="/sbin:/usr/sbin:$PATH"
+  # TODO cope with multiple NICs (or at least warn)
+  # Note this is a match on subsystem id
+  local output="$(lspci -d 1924:0803 -nv | head -n 2)"
+  echo "$output" | egrep -q '1924:6200' && echo florence && return 0
+  echo "$output" | egrep -q '1924:6300' && echo zebedee && return 0
+  echo "$output" | egrep -q '\(rev 01\)' && fail "SFC NIC has default PCI values. Please use sienaconfig"
+  echo "$output" | egrep -q '\(rev 02\)' && echo platform_hs && return 0 # small BAR
+  echo "$output" | egrep -q '\(rev 03\)' && echo platform_hs && return 0 # large BAR
+  
+  fail "Unknown board type or no SFC NIC present/enumerated"
+}
+
+######################################################################
+
+hostnictype_sunos() {
+  return 0
+}
+
+hostnictype_freebsd() {
+  return 0
+}
+
+hostnictype_darwin() {
+  return 0
+}
+
+hostnictype_cygwin() {
+  return 0
+}
+
+hostnictype() {
+  k=$(toolplatform)
+  case "$k" in
+     linux)		hostnictype_linux;;
+     freebsd)	 	hostnictype_freebsd;;
+     darwin)	 	hostnictype_darwin;;
+     sunos)		hostnictype_sunos;;
+     cygwin_nt*)	hostnictype_cygwin;;
+     *) err "mmaketool:hostnictype: unknown platform"; exit 1;;
+  esac
+}
+
+hostnictype_() {
+  t=$(hostnictype)
+  [ -n "$t" ] && echo "${t}_"
+}
+
+######################################################################
+
+boardtype_sunos() {
+  return 0
+}
+
+boardtype_darwin() {
+  return 0
+}
+
+boardtype_cygwin() {
+  return 0
+}
+
+boardtype() {
+  k=$(toolplatform)
+  case "$k" in
+     linux|freebsd)	boardtype_linux;;
+     darwin)		boardtype_darwin;;
+     sunos)		boardtype_sunos;;
+     cygwin_nt*)	boardtype_cygwin;;
+     *) err "mmaketool:boardtype: unknown platform"; exit 1;;
+  esac
+}
+
+######################################################################
+
+buildnictype() {
+  echo "$NICTYPE"
+}
+
+buildnictype_() {
+  [ -n "$NICTYPE" ] && echo "${NICTYPE}_"
+}
+
+nictype() {
+  if [ "$EF_NICTYPE" == "ef1" ];then
+    echo ""
+  elif [ -n "$EF_NICTYPE" ]; then
+    echo "$EF_NICTYPE"
+  elif $inbuild; then
+    buildnictype
+  else
+    hostnictype
+  fi
+}
+
+nictype_() {
+  if [ "$EF_NICTYPE" == "ef1" ];then
+    echo ""
+  elif [ -n "$EF_NICTYPE" ]; then
+    echo "$EF_NICTYPE""_"
+  elif $inbuild; then
+    buildnictype_
+  else
+    hostnictype_
+  fi
+}
+
+kernelver() {
+  if [ -n "$KVER" ]; then
+    echo "$KVER"
+  else
+    uname -r
+  fi
+}
+
+userarch() {
+  case $(uname -s) in
+    Linux|FreeBSD)	uname -m;;
+    Darwin)		uname -m;;
+    CYGWIN_NT*) 	uname -m;;
+    SunOS)		processor;;
+    *)			err "mmaketool:userarch: unknown system type"; exit 1;;
+  esac
+}
+
+userbuild_linux() {
+  case "$(processor)" in
+    x86_64) echo gnu_x86_64 ;;
+    ia64)   echo gnu_ia64 ;;
+    ppc64)  echo gnu_ppc64 ;;
+    *)      echo gnu ;;
+  esac
+}
+
+userbuild_freebsd() {
+  case "$(processor)" in
+    x86_64) echo freebsd_x86_64 ;;
+    *)      echo freebsd ;;
+  esac
+}
+
+userbuild_sunos() {
+  a=$(uname -p)
+  echo "solaris_${a}"
+}
+
+userbuild_darwin() {
+  echo macosx
+}
+
+userbuild_cygwin() {
+  if [ "$(processor)" = amd64 ]; then
+    echo "x64_win64"
+  else
+    echo "x86_win32"
+  fi
+}
+
+add_opts() {
+  local dir="$1"
+  local host=$(uname -n)
+  local k=$(toolplatform)
+
+  if [ -n "$MMAKETOOL_ADD_LIBC" ]; then
+    local libc=$(libc_version)
+    if [ -n "$libc" ]; then
+      dir="$libc""_$dir"
+    fi
+  fi
+
+  if [ -n "$MMAKETOOL_ADD_DISTRIBUTION" ]; then
+    local distrib=$(sfc_disttag)
+
+    if [ "$k" == "sunos" ]; then
+	distrib="$distrib""_"`kernelver`
+    fi
+
+    if [ -n "$distrib" ]; then
+      dir="$distrib""_$dir"
+    fi
+  fi
+
+  if [ -n "$MMAKETOOL_ADD_HOST" ]; then
+    echo "$host""_$dir"
+  else
+    echo "$dir"
+  fi
+}
+
+
+
+userbuild_base() {
+  k=$(toolplatform)
+  case "$k" in
+    linux)      echo $(nictype_)$(userbuild_linux);;
+    freebsd)    echo $(userbuild_freebsd);;
+    sunos)      echo $(userbuild_sunos);;
+    darwin)     echo $(userbuild_darwin);;
+    cygwin_nt*) echo $(nictype_)$(userbuild_cygwin);;
+    *)          err "mmaketool:userbuild_base: unknown system type"; exit 1;;
+  esac
+}
+
+userbuild_rb() {
+    local distrib=$(sfc_disttag | tr A-Z a-z)
+    local p=$distrib"_"$(userarch)
+    local nt=$(nictype)
+    [ -n "$nt" ] && nt="_"$nt
+
+    [ "$NDEBUG" = 1 ] && local d=_NDEBUG
+    echo "ul_"$p$nt$d
+}
+
+userbuild() {
+  k=$(toolplatform)
+  if [ -n "$EF_USERBUILD" ]; then
+    echo "$EF_USERBUILD"
+  elif [ -n "$MMAKETOOL_RB_NAMES" ]; then
+    userbuild_rb
+  else
+    case "$k" in
+        linux)      add_opts $(nictype_)$(userbuild_linux);;
+	freebsd)    add_opts $(userbuild_freebsd);;
+	sunos)      add_opts $(userbuild_sunos);;
+	darwin)     add_opts $(userbuild_darwin);;
+	cygwin_nt*) add_opts $(nictype_)$(userbuild_cygwin);;
+	*)          err "mmaketool:userbuild: unknown platform"; exit 1;;
+    esac
+  fi
+}
+
+driverbuild_linux() {
+  p=$(processor)
+  kv=$(kernelver)
+  echo "${p}_linux-${kv}"
+}
+
+driverbuild_freebsd() {
+  p=$(processor)
+  kv=$(uname -r)
+  echo "${p}_freebsd-${kv}"
+}
+
+driverbuild_darwin() {
+  p=$(processor)
+  kv=$(uname -r)
+  echo "${p}_darwin-${kv}"
+}
+
+driverbuild_sunos() {
+  p=$(processor)
+  r=$(kernelver)
+  if [ "$r" = "5.10" ]; then
+      g="gldv3_sol10"
+  elif [ "$r" = "5.11" ]; then
+      g="gldv3_sol11"
+  else
+      g="gldv3"
+  fi
+  echo "sunos_${p}_${g}"
+}
+
+driverbuild_base() {
+  k=$(toolplatform)
+  p=$(processor)
+  kv=$(kernelver)
+  us=$(uname -s | tr '[A-Z]' '[a-z]')
+  if [ "$k" = "linux" ]; then
+    case "$kv" in
+      2.6.* | [3-9].* | [1-9][0-9]*)
+	echo "$(nictype_)${us}2.6"
+	;;
+      *)
+	err "mmaketool:driverbuild_base: Linux version <2.6"; exit 1
+	;;
+    esac
+  elif [ "$k" = "freebsd" ]; then
+    echo "$(nictype_)$us${kv:0:3}"
+  elif [ "$k" = "sunos" ]; then
+    driverbuild_sunos
+  else
+    err "mmaketool:driverbuild_base: unknown platform"; exit 1
+  fi
+}
+
+driverbuild_rb() {
+    local distrib=$(sfc_disttag | tr A-Z a-z)
+    local p=$distrib"_"$(userarch)
+    local kv=$(kernelver)"_"
+    local nt=$(nictype)
+    [ -n "$nt" ] && nt="_"$nt
+
+    [ "$NDEBUG" = 1 ] && local d=_NDEBUG
+    echo $kv$p$nt$d
+}
+
+driverbuild() {
+  k=$(toolplatform)
+  if [ -n "$EF_DRIVERBUILD" ]; then
+    echo "$EF_DRIVERBUILD"
+  elif [ -n "$MMAKETOOL_RB_NAMES" ]; then
+    driverbuild_rb
+  elif [ "$k" = "linux" ]; then
+    add_opts "$(nictype_)$(driverbuild_linux)"
+  elif [ "$k" = "sunos" ]; then
+    add_opts "$(driverbuild_sunos)"
+  elif [ "$k" = "freebsd" ]; then
+    add_opts "$(nictype_)$(driverbuild_freebsd)"
+  elif [ "$k" = "darwin" ]; then
+    add_opts "$(driverbuild_darwin)"
+  else
+    err "mmaketool:driverbuild: unknown platform"; exit 1
+  fi
+}
+
+mcbuild_base() {
+  local prenic=$(nictype_)
+  # names like falcon_b0_sienamc don't make much sense but the "sienamc" part
+  # has been set by the way mmakebuildtree is used e.g. for a cosim NIC
+  # "$(nictype)mc" or"$(nictype_)mc" might make more sense in the future
+  if [ "$prenic" = "_siena" ]; then
+      prenic=
+  fi
+  case "$(processor)" in
+    x86_64) echo ${prenic}sienamc_host_x86_64 ;;
+    ia64)   echo ${prenic}sienamc_host_ia64 ;;
+    ppc64)  echo ${prenic}sienamc_host_ppc64 ;;
+    *)      echo ${prenic}sienamc ;;
+  esac
+}
+
+mcbuild_rb() {
+    local distrib=$(sfc_disttag | tr A-Z a-z)
+    local p=$distrib"_"$(userarch)
+    local nt=$(nictype)
+    [ -n "$nt" ] && nt="_"$nt
+
+    [ "$NDEBUG" = 1 ] && local d=_NDEBUG
+    echo "mc_"$p$nt$d
+}
+
+mcbuild() {
+  k=$(toolplatform)
+  if [ -n "$EF_MCBUILD" ]; then
+    echo "$EF_MCBUILD"
+  elif [ -n "$MMAKETOOL_RB_NAMES" ]; then
+    mcbuild_rb
+  else
+    add_opts $(mcbuild_base)
+  fi
+}
+
+kernelid() {
+  k=$(toolplatform)
+  if [ "$k" = "linux" ]; then
+    echo "$(driverbuild_linux)"
+  elif [ "$k" = "sunos" ]; then
+    echo "$(driverbuild_sunos)"
+  elif [ "$k" = "darwin" ]; then
+    echo "$(driverbuild_darwin)"
+  else
+    err "mmaketool:kernelid: unknown platform"; exit 1
+  fi
+}
+
+do-find-top() {
+  mytoppath=$(cd "$bin/.." && /bin/pwd)
+  if find-top; then
+    # Check mmaketool is in same tree as working directory.
+    [ "$mytoppath" = "$TOPPATH" ] ||
+      fail "ERROR: Using mmaketool from $mytoppath in $TOPPATH."
+  else
+    TOPPATH="$mytoppath"
+  fi
+}
+
+fetchdef () {
+  awk "/#define $1/ { print \$3 }" $2 | sed 's/[() ]//g'
+}
+
+fetchver () {
+  maj=$(fetchdef CI_MAJ_RELEASE_VERSION "$1")
+  min=$(fetchdef CI_MIN_RELEASE_VERSION "$1")
+  maint=$(fetchdef CI_MAINT_RELEASE_VERSION "$1")
+  inc=$(fetchdef CI_INCREMENTING_VERSION "$1")
+  while [ ${#inc} -lt 4 ]; do inc="0$inc"; done
+  echo "$maj.$min.$maint.$inc"
+}
+
+libc_version_linux() {
+  strings /lib/libc.so.* | sed -n 's/^GNU C Library \w* release version \(.*\),.*/\1/; { T end; p; :end }'
+}
+
+libc_version() {
+  k=$(toolplatform)
+  case "$k" in
+      linux) libc_version_linux;;
+  esac
+}
+
+transportlib() {
+  suffix="lib/transport/unix/libcitransport0.so"
+  # $inbuild means that we may be in driver tree.  Check that there is no
+  # "linux" in the PLATFORM.
+  if $inbuild && [ ${PLATFORM%linux*} == $PLATFORM ] ; then
+    echo "$BUILDPATH/$suffix"
+  else
+    echo "$TOPPATH/build/$(userbuild)/$suffix"
+  fi
+}
+
+afonloadlib() {
+  suffix="lib/tools/preload/libaf_onload.so"
+  if $inbuild; then
+    echo "$BUILDPATH/$suffix"
+  else
+    echo "$TOPPATH/build/$(userbuild)/$suffix"
+  fi
+}
+
+######################################################################
+# main()
+
+# filter out custom platforms here
+unsupported='-e'/sim_/d' -e'/falcon_/d''
+
+inbuild=false
+orient-in-build-tree && inbuild=true
+
+incitree=false
+find-top && incitree=true
+
+# execute --help even if called from the wrong place
+case "$1" in
+--help)		usage
+		;;
+esac
+
+# Check mmaketool is in same tree as working directory.
+mytoppath=$(cd "$bin/.." && /bin/pwd)
+if $incitree; then
+  [ "$mytoppath" = "$TOPPATH" ] ||
+    fail "ERROR: Using mmaketool from $mytoppath in $TOPPATH."
+else
+  TOPPATH="$mytoppath"
+fi
+
+
+option="yes"
+while [ "$option" = "yes" ]; do
+option=no
+case "$1" in
+--ignoreenv)    MMAKETOOL_ADD_LIBC=
+		MMAKETOOL_ADD_DISTRIBUTION=
+		MMAKETOOL_ADD_HOST=
+		MMAKETOOL_RB_NAMES=
+		option=yes
+		;;
+--intree)	$incitree
+		exit
+		;;
+--inbuild)	$inbuild
+		exit
+		;;
+--top)		$incitree || exit 1
+		echo "$TOP"
+		;;
+--toppath)	echo "$TOPPATH"
+		;;
+--buildplatform) $inbuild || exit 1
+		echo "$PLATFORM"
+		;;
+--build)	$inbuild || exit 1
+		echo "$BUILD"
+		;;
+--buildpath)	$inbuild || exit 1
+		echo "$BUILDPATH"
+		;;
+--current)	$inbuild || exit 1
+		echo "$CURRENT"
+		;;
+--toolplatform) toolplatform
+	        ;;
+--platforms)	$incitree || fail "Not in CI check-out"
+		cd "$TOP"/mk/platform || fail "Could not cd $TOP/mk/platform"
+		/bin/ls *.mk | sed $unsupported | sed 's/\.mk//'
+		;;
+--allplatforms)	$incitree || fail "Not in CI check-out"
+		cd "$TOP"/mk/platform || fail "Could not cd $TOP/mk/custom"
+		/bin/ls *.mk | sed 's/\.mk//'
+		;;
+--driverbuild)	driverbuild
+		;;
+--driverbuild_base) driverbuild_base
+		;;
+--driverbuild_rb) driverbuild_rb
+		;;
+--userbuild)	userbuild
+		;;
+--userbuild_base) userbuild_base
+		;;
+--userbuild_rb) userbuild_rb
+		;;
+--mcbuild)	mcbuild
+		;;
+--mcbuild_base) mcbuild_base
+		;;
+--mcbuild_rb)   mcbuild_rb
+		;;
+--kernelid)	kernelid
+		;;
+--transportlib)	transportlib
+		;;
+--afonloadlib)	afonloadlib
+		;;
+--processor)	processor
+		;;
+--userarch)	userarch
+		;;
+--distribution)	sfc_disttag
+		;;
+--libc)         libc_version
+		;;
+--interfaces)	sfc__list_interfaces
+		;;
+--sourcever)	fetchver "$TOPPATH/src/include/ci/internal/version.h"
+		;;
+--hostnictype)	hostnictype
+		;;
+--buildnictype)	buildnictype
+		;;
+--nictype)	nictype
+		;;
+--boardtype)	boardtype
+		;;
+*)	        usage
+		;;
+esac
+shift
+done

@@ -1,0 +1,14 @@
+
+TARGETS :=
+
+all: _all
+
+-include copy.depends
+
+_all: $(TARGETS)
+
+
+clean:
+	rm -rf $(TARGETS)
+
+

@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+######################################################################
+# (c) 2002 Cambridge Internetworking Ltd.
+# Author: David Riddoch
+#
+# Helper for mmakebuildtree
+######################################################################
+
+. "$(dirname "$0")/fns"
+. "$bin/mmake-fns"
+
+######################################################################
+
+check_env () {
+  [ -n "$TOP" ] && [ -n "$BUILD" ] && [ -n "$CURRENT" ] &&
+  [ -n "$PLATFORM" ]
+}
+
+do_copies () {
+  local path=$1
+  local source_path=$2
+  [ -z "$BUILD_TREE_COPY" ] && return
+  for f in $BUILD_TREE_COPY; do
+    #log "Copying: '$f'"
+    if [ -f "$TOP/$CURRENT/$f" ]; then
+      cp $source_path/$f $path
+    elif [ -d "$TOP/$CURRENT/$f" ]; then
+      cp -r $source_path/$f $path
+    else log "Warning: Copy file '$f' missing in '$CURRENT'"
+    fi
+  done
+}
+
+
+generate_gnumake () {
+  local path=$1
+  local ttop=$2
+  cat <<-EOF >$path/GNUmakefile
+	TOP := $ttop
+        DISTFILES := $DISTFILES
+	BUILD := $BUILD
+	THISDIR := $THISDIR
+	CURRENT := $CURRENT
+	VPATH := $VPATH
+	include \$(TOP)/mk/site/mmake.mk
+	EOF
+}
+
+generate_linux26 () {
+  local path=$1
+  [ -f $TOP/$CURRENT/mmake.mk ] || return
+  cat <<-EOF >$path/Makefile
+	include $BUILDPATH/config.mk
+	include $TOPPATH/mk/linux_kbuild.mk
+	include $TOPPATH/$CURRENT/mmake.mk
+	EOF
+}
+
+generate_wdk () {
+  local path=$1
+  local f ttop ddir dpath srcs
+  # For NDIS and WDM builds we may need to choose the appropriate makefile.
+  [ "$DRIVER" = 1 ] || return
+  f="sources_wdk_common"
+
+  if [ $BUILDFLAG = 0 ] ; then
+     ttop=`cd $TOPPATH && pwd` #strip trailing slash
+     ttop=`cygpath -w $ttop`
+     ddir=${ttop:0:1}
+     dpath=${ttop:2}
+     ttop='$(L5DMAP)':$dpath
+  else
+     ttop=$TOP
+  fi
+
+  if [ -f "$TOP/$CURRENT/$f" ] ; then
+     if [ $BUILDFLAG = 0 ] ; then
+        srcs=$path/sources
+        cat <<-EOF >$srcs
+		! IF DEFINED(DRIVE_MAP_OVERRIDE)
+		L5DMAP=\$(DRIVE_MAP_OVERRIDE)
+		! ELSE
+		L5DMAP=$ddir
+		! ENDIF
+		EOF
+     else
+        srcs=sources
+	cp /dev/null $srcs
+     fi
+     echo "DISTFILES=$DISTFILES" >>$srcs
+     echo "L5TOP=$ttop" >>$srcs
+     echo "L5BUILD=$BUILD" >>$srcs
+     echo "L5CURRENT=$CURRENT" >>$srcs
+     echo "L5TOP_DOS=\$(L5TOP:/=\\)" >>$srcs
+     echo "L5BUILD_DOS=\$(L5BUILD:/=\\)" >>$srcs
+     echo "L5CURRENT_DOS=\$(L5CURRENT:/=\\)" >>$srcs
+     echo "L5DISTFILES=$MMAKE_DISTFILES" >>$srcs
+     echo "L5FIRMWARE=$MMAKE_FIRMWARE" >>$srcs
+     echo "L5DISTFILES_DOS=\$(L5DISTFILES:/=\\)" >>$srcs
+     echo "L5FIRMWARE_DOS=\$(L5FIRMWARE:/=\\)" >>$srcs
+     echo "SOURCES_USED=" >>$srcs
+     if [ $DRIVER_SIZE = "32" ] ; then
+     echo "# 32-bit platform" >>$srcs
+     echo "C_DEFINES=\$(C_DEFINES) -D__i386__" >>$srcs
+     echo "!IF \"\$(DDKBUILDENV)\" != \"checked\"" >> $srcs
+     echo "LIBDIR=lib_x86_fre" >> $srcs
+     echo "!ELSE" >> $srcs
+     echo "LIBDIR=lib_x86_chk" >> $srcs
+     echo "!ENDIF" >> $srcs
+     else
+     echo "# 64-bit platform" >>$srcs
+     echo "C_DEFINES=\$(C_DEFINES) -D__x86_64__" >>$srcs
+     echo "!IF \"\$(DDKBUILDENV)\" != \"checked\"" >> $srcs
+     echo "LIBDIR=lib_x86_fre" >> $srcs
+     echo "!ELSE" >> $srcs
+     echo "LIBDIR=lib_x86_chk" >> $srcs
+     echo "!ENDIF" >> $srcs
+     fi
+     echo "# For native DDK builds certain variables won't be valid, so to ensure the" >>$srcs
+     echo "# build can continue set the necessary variables to defaults values" >>$srcs
+     echo "!IF \"\$(STAMPINF)\" == \"\"" >>$srcs
+     echo "STAMPINF=stampinf" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "!IF \"\$(INF2CAT)\" == \"\"" >>$srcs
+     echo "INF2CAT=inf2cat" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "!IF \"\$(SIGNTOOL)\" == \"\"" >>$srcs
+     echo "SIGNTOOL=signtool" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "# For native DDK builds UNIX2DOS won't be valid as the files will have" >>$srcs
+     echo "# already been pre-processed. So to ensure that the build can continue" >>$srcs
+     echo "# the UNIX2DOS variable is set so that the operation is ignored" >>$srcs
+     echo "!IF \"\$(UNIX2DOS)\" == \"\"" >>$srcs
+     echo "UNIX2DOS=rem" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "# For native DDK builds TARGET_PLATFORM won't be valid, so to ensure " >>$srcs
+     echo "# the build can continue set the necessary variables based on the DDK " >>$srcs
+     echo "# target specification" >>$srcs
+     echo "!IF \"\$(TARGET_PLATFORM)\" == \"\"" >>$srcs
+     echo "!IF \"\$(_NT_TARGET_VERSION)\" == \"0x601\"" >>$srcs
+     echo "TARGET_PLATFORM=win7" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "# Check NIC type" >>$srcs
+     echo "!IF \"\$(CI_HARDWARE_CONFIG_FALCON)\" == \"1\"" >>$srcs
+     echo "C_DEFINES=\$(C_DEFINES) -D__CI_HARDWARE_CONFIG_FALCON__" >>$srcs
+     echo "!ELSEIF \"\$(CI_HARDWARE_CONFIG_FALCON_10G)\" == \"1\"" >>$srcs
+     echo "C_DEFINES=\$(C_DEFINES) -D__ci_10G_driver__ -DFALCON_10G_ENABLED=1 -DFALCON_1G_ENABLED=0" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "!IF \"\$(CI_HARDWARE_CONFIG_FALCON_B0)\" == \"1\"" >>$srcs
+     echo "C_DEFINES=\$(C_DEFINES) -D__CI_HARDWARE_CONFIG_FALCON_B0__" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "!IF \"\$(VMQ_SUPPORT)\" == \"1\"" >>$srcs
+     echo "C_DEFINES=\$(C_DEFINES) -DVMQ_SUPPORT=1" >>$srcs
+     echo "!ENDIF" >>$srcs
+     echo "!INCLUDE ./$f" >>$srcs
+     echo "SOURCES_USED=\$(SOURCES_USED) ./$f" >>$srcs
+     echo "!MESSAGE C_DEFINES=\$(C_DEFINES)" >>$srcs
+     #use this echo scheme due to cygwin weirdness
+
+     echo "!INCLUDE \$(NTMAKEENV)\\makefile.def" >$path/makefile
+  fi
+  if [ -f "$TOP/$CURRENT/dirs_${DRIVER_TYPE}" ] ; then 
+     cp "$TOP/$CURRENT/dirs_${DRIVER_TYPE}" $path/dirs
+  elif [ -f "$TOP/$CURRENT/dirs" ] ; then
+     cp "$TOP/$CURRENT/dirs" $path
+  fi
+}
+
+######################################################################
+# main()
+
+#log mmakebuildtree_gen hello
+#log "TOP=$TOP"
+#log "BUILD=$BUILD"
+#log "CURRENT=$CURRENT"
+#log "PLATFORM=$PLATFORM"
+#log "VPATH=$VPATH"
+#log "SUBDIRS=$SUBDIRS"
+
+[ "$#" = 0 ] || fail "Eh?  I think you wanted mmakebuildtree..."
+check_env || fail "Environment check failed"
+
+if [ "$VPATH_ENABLED" = 1 ] ; then
+   export COPYDEPENDS=0
+else
+   export COPYDEPENDS=1
+fi
+
+if [ -z "$THISDIR" ] ; then
+ dp=$DESTPATH
+ bp=$BUILDPATH
+else
+ dp=$DESTPATH/$THISDIR
+ bp=$BUILDPATH/$THISDIR
+
+fi
+
+tc=$TOP/$CURRENT
+
+#log "$DESTPATH/$THISDIR"
+if [ $BUILDFLAG = 0 ] ; then
+    tc=$TOPPATH/$CURRENT
+    [ ! -d "$bp" ] && mkdir "$bp"
+    do_copies $bp $tc
+    [ -f Makefile ] || [ -f GNUmakefile ] || generate_gnumake $bp $TOPPATH
+fi
+
+do_copies $dp $tc
+[ -f Makefile ] || [ -f GNUmakefile ] || generate_gnumake $dp $TOP
+
+case "$PLATFORM" in
+    linux2.6 | falcon_linux2.6 | falcon_10g_linux2.6 | falcon_b0_linux2.6)
+        generate_linux26 $bp;;
+    *win7 | *wlh | *wnet | *wxp)
+        generate_wdk $bp;;
+esac
+
+true

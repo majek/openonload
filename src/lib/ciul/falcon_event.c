@@ -1,0 +1,323 @@
+/*
+** Copyright 2005-2012  Solarflare Communications Inc.
+**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
+** Copyright 2002-2005  Level 5 Networks Inc.
+**
+** This library is free software; you can redistribute it and/or
+** modify it under the terms of version 2.1 of the GNU Lesser General Public
+** License as published by the Free Software Foundation.
+**
+** This library is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+** Lesser General Public License for more details.
+*/
+
+/****************************************************************************
+ * Copyright 2002-2005: Level 5 Networks Inc.
+ * Copyright 2005-2008: Solarflare Communications Inc,
+ *                      9501 Jeronimo Road, Suite 250,
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/*
+ * \author  djr
+ *  \brief  Routine to poll event queues.
+ *   \date  2003/03/04
+ */
+
+/*! \cidoxg_lib_ef */
+#include "ef_vi_internal.h"
+
+
+
+#define EF_VI_EVENT_OFFSET(q, i)					\
+	(((q)->evq_state->evq_ptr + (i) * sizeof(ef_vi_qword)) & (q)->evq_mask)
+
+#define EF_VI_EVENT_PTR(q, i)                                           \
+	((ef_vi_qword*) ((q)->evq_base + EF_VI_EVENT_OFFSET((q), (i))))
+
+/* Test for presence of event must ensure that both halves have changed
+ * from the null.
+ */
+#define EF_VI_IS_EVENT(evp)						\
+	( (((evp)->u32[0] != (uint32_t)-1) &&				\
+	   ((evp)->u32[1] != (uint32_t)-1)) )
+
+
+#define INC_ERROR_STAT(vi, name)		\
+	do {					\
+		if ((vi)->vi_stats != NULL)	\
+			++(vi)->vi_stats->name;	\
+	} while (0)
+
+
+ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_qword* ev,
+					  ef_event** evs, int* evs_len,
+					  int q_label, int desc_i)
+{
+	ef_event* ev_out = (*evs)++;
+	--(*evs_len);
+	ev_out->rx.q_id = q_label;
+	ev_out->rx.rq_id = vi->vi_rxq.ids[desc_i];
+	vi->vi_rxq.ids[desc_i] = 0xffff;  /* ?? killme */
+	++vi->ep_state->rxq.removed;
+	if(likely( QWORD_TEST_BIT(RX_EV_PKT_OK, *ev) )) {
+	dont_discard:
+		ev_out->rx.len = QWORD_GET_U(RX_EV_BYTE_CNT, *ev);
+		ev_out->rx.type = EF_EVENT_TYPE_RX;
+		if( QWORD_TEST_BIT(RX_SOP, *ev) )
+			ev_out->rx.flags = EF_EVENT_FLAG_SOP;
+		else
+			ev_out->rx.flags = 0;
+		if( QWORD_TEST_BIT(RX_JUMBO_CONT, *ev) )
+			ev_out->rx.flags |= EF_EVENT_FLAG_CONT;
+		if( QWORD_TEST_BIT(RX_iSCSI_PKT_OK, *ev) )
+			ev_out->rx.flags |= EF_EVENT_FLAG_ISCSI_OK;
+		if( QWORD_TEST_BIT(RX_EV_MCAST_PKT, *ev) ) {
+			int match = QWORD_TEST_BIT(RX_EV_MCAST_HASH_MATCH,*ev);
+			ev_out->rx.flags |= EF_EVENT_FLAG_MULTICAST;
+			if(unlikely( ! match ))
+				goto discard;
+		}
+	}
+	else {
+	discard:
+		ev_out->rx_discard.len = QWORD_GET_U(RX_EV_BYTE_CNT, *ev);
+		ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
+		/* Order matters here: more fundamental errors first. */
+		if( QWORD_TEST_BIT(RX_EV_BUF_OWNER_ID_ERR, *ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_RIGHTS;
+		else if( QWORD_TEST_BIT(RX_EV_FRM_TRUNC, *ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_TRUNC;
+		else if( QWORD_TEST_BIT(RX_EV_ETH_CRC_ERR, *ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_CRC_BAD;
+		else if( QWORD_TEST_BIT(RX_EV_MCAST_PKT, *ev) &&
+			 ! QWORD_TEST_BIT(RX_EV_MCAST_HASH_MATCH,*ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_MCAST_MISMATCH;
+		else if( QWORD_TEST_BIT(RX_EV_IP_HDR_CHKSUM_ERR, *ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_CSUM_BAD;
+		else if( QWORD_TEST_BIT(RX_EV_TCP_UDP_CHKSUM_ERR, *ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_CSUM_BAD;
+		else if( QWORD_TEST_BIT(RX_EV_TOBE_DISC, *ev) )
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_OTHER;
+		else if( QWORD_TEST_BIT(RX_EV_IP_FRAG_ERR, *ev) )
+			goto dont_discard;
+		else
+			ev_out->rx_discard.subtype =
+				EF_EVENT_RX_DISCARD_OTHER;
+	}
+}
+
+
+static void falcon_rx_no_desc_trunc(ef_event** evs, int* evs_len, int q_label)
+{
+	ef_event* ev_out = (*evs)++;
+	--(*evs_len);
+	ev_out->rx_no_desc_trunc.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
+	ev_out->rx_no_desc_trunc.q_id = q_label;
+}
+
+
+static void falcon_rx_unexpected(ef_vi* vi, const ef_vi_qword* ev,
+				 ef_event** evs, int* evs_len,
+				 int q_label, int desc_i)
+{
+	ef_event* ev_out;
+	if (!((desc_i - 1 - vi->ep_state->rxq.removed) & vi->vi_rxq.mask)) {
+		/* One ahead of expected: previous RX notification lost. */
+		ev_out = (*evs)++;
+		--(*evs_len);
+		desc_i = (desc_i - 1) & vi->vi_rxq.mask;
+		ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
+		ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_EV_ERROR;
+		ev_out->rx_discard.q_id = q_label;
+		ev_out->rx_discard.rq_id = vi->vi_rxq.ids[desc_i];
+                ev_out->rx_discard.len = 0;
+		vi->vi_rxq.ids[desc_i] = 0xffff;
+		++vi->ep_state->rxq.removed;
+		INC_ERROR_STAT(vi, rx_ev_lost);
+		desc_i = (desc_i + 1) & vi->vi_rxq.mask;
+		/* Handle the current event. */
+		falcon_rx_desc_consumed(vi, ev, evs, evs_len, q_label, desc_i);
+	} else {
+		/* Misdirected? */
+		INC_ERROR_STAT(vi, rx_ev_bad_desc_i);
+	}
+}
+
+
+ef_vi_inline void falcon_rx_event(ef_vi* evq_vi, const ef_vi_qword* ev,
+				  ef_event** evs, int* evs_len)
+{
+	unsigned q_label = QWORD_GET_U(RX_EV_Q_LABEL, *ev);
+	unsigned desc_i, q_mask;
+	ef_vi *vi;
+
+	vi = evq_vi->vi_qs[q_label];
+	if (likely(vi != NULL)) {
+		q_mask = vi->vi_rxq.mask;
+		desc_i = ev->u32[0] & q_mask;
+		if (likely(desc_i == (vi->ep_state->rxq.removed & q_mask)))
+			falcon_rx_desc_consumed(vi, ev, evs, evs_len,
+						q_label, desc_i);
+		else if (!((desc_i + 1 - vi->ep_state->rxq.removed) & q_mask))
+			falcon_rx_no_desc_trunc(evs, evs_len, q_label);
+		else
+			falcon_rx_unexpected(vi, ev, evs, evs_len,
+					     q_label, desc_i);
+	} else {
+		INC_ERROR_STAT(evq_vi, rx_ev_bad_q_label);
+	}
+}
+
+
+ef_vi_inline void falcon_tx_event(ef_event* ev_out, const ef_vi_qword* ev)
+{
+	/* Danger danger!  No matter what we ask for wrt batching, we
+	** will get a batched event every 16 descriptors, and we also
+	** get dma-queue-empty events.  i.e. Duplicates are expected.
+	**
+	** In addition, if it's been requested in the descriptor, we
+	** get an event per descriptor.  (We don't currently request
+	** this).
+	*/
+	ev_out->tx.q_id = QWORD_GET_U(TX_EV_Q_LABEL, *ev);
+	ev_out->tx.desc_id = ev->u32[0] + 1;
+	if(likely( QWORD_TEST_BIT(TX_EV_COMP, *ev) )) {
+		ev_out->tx.type = EF_EVENT_TYPE_TX;
+	}
+	else {
+		ev_out->tx_error.type = EF_EVENT_TYPE_TX_ERROR;
+		if(likely( QWORD_TEST_BIT(TX_EV_BUF_OWNER_ID_ERR, *ev) ))
+			ev_out->tx_error.subtype = EF_EVENT_TX_ERROR_RIGHTS;
+		else if(likely( QWORD_TEST_BIT(TX_EV_WQ_FF_FULL, *ev) ))
+			ev_out->tx_error.subtype = EF_EVENT_TX_ERROR_OFLOW;
+		else if(likely( QWORD_TEST_BIT(TX_EV_PKT_TOO_BIG, *ev) ))
+			ev_out->tx_error.subtype = EF_EVENT_TX_ERROR_2BIG;
+		else if(likely( QWORD_TEST_BIT(TX_EV_PKT_ERR, *ev) ))
+			ev_out->tx_error.subtype = EF_EVENT_TX_ERROR_BUS;
+	}
+}
+
+
+int ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
+{
+	int evs_len_orig = evs_len;
+	ef_vi_qword *pev, ev;
+
+	BUG_ON(evs == NULL);
+	BUG_ON(evs_len < EF_VI_EVENT_POLL_MIN_EVS);
+
+	if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -1)) ))
+		goto overflow;
+
+not_empty:
+	/* Read the event out of the ring, then fiddle with copied version.
+	 * Reason is that the ring is likely to get pushed out of cache by
+	 * another event being delivered by hardware.
+	 */
+	pev = EF_VI_EVENT_PTR(evq, 0);
+	ev.u64[0] = cpu_to_le64 (pev->u64[0]);
+	if (!EF_VI_IS_EVENT(&ev))
+		goto empty;
+
+	do {
+		evq->evq_state->evq_ptr += sizeof(ef_vi_qword);
+		pev->u64[0] = (uint64_t)(int64_t) -1;
+
+		/* Ugly: Exploit the fact that event code lies in top bits
+		 * of event. */
+		BUG_ON(EV_CODE_LBN < 32u);
+		switch( ev.u32[1] >> (EV_CODE_LBN - 32u) ) {
+		case RX_IP_EV_DECODE:
+			falcon_rx_event(evq, &ev, &evs, &evs_len);
+			break;
+
+		case TX_IP_EV_DECODE:
+			falcon_tx_event(evs, &ev);
+			--evs_len;
+			++evs;
+			break;
+
+		default:
+			break;
+		}
+
+		if (evs_len < EF_VI_EVENT_POLL_MIN_EVS)
+			break;
+
+		pev = EF_VI_EVENT_PTR(evq, 0);
+		ev.u64[0] = cpu_to_le64 (pev->u64[0]);
+	} while (EF_VI_IS_EVENT(&ev));
+
+	return evs_len_orig - evs_len;
+
+
+    empty:
+	if (EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, 1))) {
+		smp_rmb();
+		if (!EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, 0))) {
+			/* No event in current slot, but there is one in
+			 * the next slot.  Has NIC failed to write event
+			 * somehow?
+			 */
+			evq->evq_state->evq_ptr += sizeof(ef_vi_qword);
+			INC_ERROR_STAT(evq, evq_gap);
+			goto not_empty;
+		}
+	}
+	return 0;
+
+ overflow:
+	evs->generic.type = EF_EVENT_TYPE_OFLOW;
+	return 1;
+}
+
+
+int ef_eventq_has_event(ef_vi* vi)
+{
+	return EF_VI_IS_EVENT(EF_VI_EVENT_PTR(vi, 0));
+}
+
+
+int ef_eventq_has_many_events(ef_vi* vi, int look_ahead)
+{
+	BUG_ON(look_ahead < 0);
+	return EF_VI_IS_EVENT(EF_VI_EVENT_PTR(vi, look_ahead));
+}
+
+
+void ef_eventq_prime(ef_vi* vi)
+{
+	unsigned ring_i = (ef_eventq_current(vi) & vi->evq_mask) / 8;
+	writel(ring_i << FRF_AZ_EVQ_RPTR_LBN, vi->evq_prime);
+}
+
+
+/*! \cidoxg_end */

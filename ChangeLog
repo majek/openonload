@@ -1,0 +1,551 @@
+
+openonload-201205
+-----------------
+
+- bug28090: Fix close and destructor functions for epoll.
+- bug28268: Fix command line arg handling in onload_tcpdump.
+- bug27932: RPM spec file dependency fix for MRG rt kernels.
+- bug27700: Validate options in kernel to protect against bad values.
+- TCP loopback acceleration (see release notes).
+- Don't disable interrupts when lock contention detected.
+- Improvements to TCP/UDP select/poll/epoll handling in kernel.
+- Do not grab stack lock when EF_POLL_ON_DEMAND=0.
+- bug27186: Fix sys-calls and interrupts with select + TCP-listener.
+- bug27102: Fix bugs relating to signal handling at process termination.
+- bug27329: Fix scaling of timers on SFN6x22F adapters.
+- TCP striping feature reinstated.
+- bug27530: Allow non-root to set EF_IRQ_CORE with EF_PACKET_BUFFER_MODE=1.
+- Put useful info in /proc/$pid/fd to identify Onload sockets and stacks.
+- Reduce ACK rate when streaming to increase TCP efficiency.
+- Fix epoll bug failing to report data arriving via kernel.
+- bug2641: Fix problems relating to handling of ARP.
+- New tool onload_fuser to identify processes using Onload.
+- bug27997: Fix bug that caused bad error code to be returned by close().
+- Added module options to set max size of control plane tables.
+- bug28096: Do not access user-space data under spinlock
+- bug28090: Fix close and dtor functions for epoll.
+- bug28228: getsockopt(udp_sock, IP_PKTOPTIONS) should return ENOPROTOOPT.
+- bug28268: Fix command line parsing bugs in onload_tcpdump.
+- bug28267: Use MAC and IP addresses to validate reinforcement requests.
+- Add end-of-batch flag ONLOAD_ZC_END_OF_BURST to onload_zc_callback.
+- New option EF_TCP_RST_DELAYED_CONN prevents delayed delivery.
+- bug28558: onload_zc_send() now respects O_NONBLOCK flag.
+- bug28556: Fix fstat() interception.
+- bug28691: Fix error path in pipe() call.
+- Include debug symbols in binaries by default.
+- bug28480: Fix process exit interception.
+- bug28598: Check untrusted values in ci_tcp_reset_untrusted()
+- bug27921: close synreq queue in linux way: no FIN or RST.
+- bug28622: Fix RPM build failure with version 3 kernels.
+- bug28923: Fix spinning in onload_zc_recv().
+- bug28955: bug28960: fix getsockopt(IP_PKTOPTIONS).
+- bug28205: Fix error path in onload_tcpdump.
+- bug29009: Fix timeout extension bugs.
+- bug28936: Fix SO_LINGER behaviour when references to a socket.
+- bug29073: Handle IPPROTO_IP sockopts for ip6 sockets.
+- bug28123: Allow dup2() onto fd with concurrent accept() to complete.
+- bug28974: Check for socket errors and OS receive in onload_zc_recv() spin.
+- bug29222: Correctly handle iov_len==0 cases.
+- bug27413: Handle interrupts in threads when EF_PACKET_BUFFER_MODE=1.
+- bug29322: Fix pipe + EPOLLET.
+- Get MTU from Linux route when it is available.
+- Avoid onload_install error if service config fails.
+- Support ioctls FIOASYNC and SIOCSPGRP.
+- Add further detail to stackdump output for sockets.
+- Support fcntls F_SETSIG and F_GETSIG.
+- Avoid unnecessary sys-calls with O_ASYNC is set but F_SETOWN is not.
+- bug29458: Properly limit number of pipe buffers.
+- bug29420: Various problems managing VFs fixed and/or worked-around.
+- bug29107: Fix bonding acceleration on recent kernels (3.x).
+- Fix stackdump output for pipes, which had byte counts reversed.
+- Fix bug in connect() with SO_SNDTIMEO timeout.
+- bug29357: Only allow VFs to be used with kernels.
+- bug29357: Avoid IOAPIC memory range in VF iova linear allocator.
+- Do not support SR-IOV (VFs, EF_PACKET_BUFFER_MODE=1) on 32-bit kernels.
+- ef_vi: Relicensed under the LGPL to permit distribution of proprietary apps.
+- ef_vi: Support receive-side scaling (RSS).
+- ef_vi: Fix kernel panic on failure to allocate an ef_vi_set.
+- ef_vi: Added protection domains and registered memory.
+- ef_vi: Option to use VFs, allowing more registered memory and lower latency.
+- ef_vi: Option to use physical addressing.
+- ef_vi: bug27821: Don't indicate RX_DISCARD for IP fragments.
+- ef_vi: Update samples to use registered memory.
+- ef_vi: The network interface is now a required arg to efpingpong.
+- ef_vi: Fix bug in efsink and dump out packet contents.
+
+
+openonload-201109-u2
+--------------------
+
+- Fix build errors with RHEL5.7 updates.
+- Support for recent Linux kernels including 3.2.
+- Workaround bug in gnumake on Fedora installs.
+- bug22279: Fix latency spike provoked by lock contention.
+- bug27605: Fix resource leak when epoll fd is closed.
+- bug27605: Fix deadlock when epoll_wait() interrupted by signal.
+- bug27566: Fix seg-fault with EPOLL_CTL_DEL with NULL events param.
+- Improve epoll performance with concurrent epoll_ctl() and epoll_wait().
+- bug27672: Fix for onload_zc_recv with fragmented-looped-back datagrams.
+- Added support for F_DUPFD_CLOEXEC.
+- bug27702: Tighten rules for stack sharing to prevent privilege escalation.
+- Added config option EF_SHARE_WITH to control sharing between users.
+- bug27763: Fix bug in ef_iobufset_remap() that broke ef_vi samples.
+- bug27834: Fix bug in onload_zc_recv() when receiving via kernel.
+- bug27788: Fix call stack corruption caused by receive filtering extension.
+- bug27905: Bug prevented incoming connections on unaccelerated bonded intf.
+- bug27742: Fix epoll bug preventing notification of receive via kernel.
+- bug27984: Fix pipe creation when pipe buffers are fragmented.
+- bug27986: Fix onload_tcpdump -i vlan_if.
+- bug27705: Fix kernel->user data leak.
+- bug27704: Fix security bug allowing user to write into kernel memory.
+- Remove bashism from onload_uninstall
+
+
+openonload-201109-u1
+--------------------
+
+- Prevent threads from exiting until they leave onload critical section.
+- Added support for SFN5322F and SFN6x22F adapters.
+- Improvements to onload_stackdump output.
+- Added option EF_DEFER_WORK_LIMIT to limit how much work can be deferred.
+- Support IOMMU pass-through mode with EF_PACKET_BUFFER_MODE=1.
+- Improve performance of epoll_wait() with unaccelerated file descriptors.
+- onload_tcpdump will no longer cause lock contention.
+- Replace EF_POLL_FAST_LOOPS with EF_POLL_FAST_USEC.
+- Replace EF_POLL_NONBLOCK_FAST_LOOPS with EF_POLL_NONBLOCK_FAST_USEC.
+- Added onload_thread_set_spin() extension for per-thread control of spinning.
+- Added pipe2() acceleration.
+- Improve implementation of EF_POLL_ON_DEMAND to reduce lock contention.
+- Reduce jitter in apps spin-blocking in select/poll/epoll.
+- Avoid unwanted interrupts when spinning.
+- Improve compatibility with kernel patch updates.
+- Return buffers of appropriate size in onload_zc_alloc_buffers() when known.
+- Expose all spin-related config options via "onload_stackdump opts".
+- ef_vi: Add version checking and reporting.
+- Reduce chances of lock contention jitter caused by timeout events.
+- sfc: Updated sfc net driver to v3_2_0_6040.
+- bug26154: Fix bug returning error from ioctl() call.
+- bug26245: Fix problem with SO_BINDTODEVICE when used to unbind.
+- bug26276: Handle same IP on multiple interfaces.
+- bug26338: Fix interrupt name when EF_PACKET_BUFFER_MODE=1 (linux 3.x).
+- bug26346: Fix panic when non-solarflare interface given to sfcaffinity_tool.
+- bug24690: Fix epoll_ctl(op=EPOLL_CTL_DEL, event=NULL).
+- bug22432: Support SOCK_CLOEXEC in socket() and accept4() calls.
+- bug26579: Handle IP fragments in zero-copy receive properly.
+- bug22432: Support SOCK_NONBLOCK in accept4() calls.
+- bug26620: Check and don't assert that socket is connected for zc_send().
+- bug26704: fix return codes for onload_zc_send().
+- bug26781: Fix data corruption with onload_zc_recv().
+- bug26828: Return error rather than -1 from onload_zc_recv().
+- bug26843: Correctly return status when ICMP error received in zc_recv().
+- bug26798: Fix race condition in pipe close.
+- bug26695: Fix reference counting bug when probing unknown file descriptor.
+- bug26798: Fix race condition in pipe close.
+- bug26997: Fix regression in sending of TCP out-of-band data.
+- bug26899: Restore EF_FORK_NETIF behaviour for unnamed stacks.
+- bug27052: Fix bugs in shutdown() behaviour.
+- Fix regression in the latency profile.  EF_TCP_FASTSTART_IDLE was not set.
+- bug27128: Set msg_namelen properly in UDP onload_zc_recv() via kernel.
+- bug22279: Fix wakeup race that could cause threads to block for too long.
+- bug27160: Re-accelerate bond after non-acceleratable port removed.
+- bug27181: ef_vi: Fix bugs when allocating ef_vi_set.
+- bug27186: Accelerated select treated TCP listener as kernel socket.
+- bug27180: Send SIGPIPE when return EPIPE from onload_zc_send.
+- bug27188: Fix bad warnings in sys-log with EF_UL_EPOLL=2.
+- bug22279: Fix bug causing multicast loopback delivery to fail to wake.
+- bug26541: Fix count-down timer interrupts on SFC9000 adapters.
+- Fixed bug that removed file on onload rpm upgrade.
+
+
+openonload-201109
+-----------------
+
+- Improved transmit latency for kernels pre-2.6.32 (includes RHEL5).
+- Scalable Packet Buffer Mode; increases max packet-buffers (see ReleaseNotes).
+- Zero-Copy API for TCP transmit and UDP receive (see ReleaseNotes).
+- New tool onload_tcpdump to capture accelerated packets.
+- Improved performance of epoll where the fd-set includes non accelerated fd's.
+- Improved performance for UDP and TCP listening sockets.
+- Improved resilience to termination via signal for apps sharing stacks.
+- Improved handling when short of packet buffers.
+- Added dynamic version of the Onload Extensions Library.
+- Option EF_IRQ_CORE and EF_IRQ_CHANNEL to affinitise Onload interrupts.
+- Spinning in TCP send now enabled with EF_POLL_USEC.
+- ef_filter_spec_set_unicast_all() and multicast_all() are now supported.
+- sfc: Updated to v3_1_0_4083
+- bug25527: correctly handle finding bond info for VLAN over bond.
+- bug25372: check bonding hash for multicast.
+- bug25037: SO_TIMESTAMP copes with server time going backwards.
+- bug25148: do not reset incoming connection when backlog is full.
+- task21712: defer process termination if shared stacks are locked.
+- bug24872: handover sockets if listen() or connect() fail with ENOBUFS.
+- bug24874: fix fcntl(F_GETFL) for pipe.
+- bug24690: allow NULL epoll_event when deleting fd from epoll set.
+- bug24566: drop socket lock before running pending signals.
+- bug23093: do not enter_lib before sendfile() syscall.
+- bug22392: When spinning in UL, check for postponed signals.
+- bug23968: fix gcc-4.6 warnings
+
+
+openonload-201104-u2
+--------------------
+
+- Avoid jitter caused by periodic timer.
+- Improvements to onload_stackdump statistics and output for pipes.
+- Avoid grabbing lock in interrupt handler if not needed.
+- Prevent unnecessary polling when interrupt driven.
+- Reduce wakeup latency when interrupt driven.
+- Don't poll for network events when polling accelerated pipes.
+- Improve performance of epoll with UDP sockets.
+- Fix timeout extension in epoll_wait() with spinning.
+- Added option EF_EPOLL_NONBLOCK_FAST_LOOPS.
+- Improve accuracy of timestamps (SO_TIMESTAMP[NS] and SIOCGSTAMP[NS]).
+- Added option EF_TCP_LISTEN_HANDOVER and EF_TCP_CONNECT_HANDOVER.
+- Use /bin/sh instead of bash in scripts.
+- Improved sfcaffinity_config spreading of interrupts.
+- Improved flexibility and handling of onload tuning profiles.
+- Fix race that could cause jitter when blocking and EF_INT_DRIVEN=0.
+- Added option EF_TX_QOS_CLASS.
+- Try to exit "memory pressure" condition more promptly.
+- ef_vi: Fix delayed RX doorbell when write-combining enabled.
+- bug24965: Fix bug that caused UDP send hang on concurrent sends with no arp.
+
+
+openonload-201104-u1
+--------------------
+
+- bug22781: Fix problem setting EF_FDTABLE_SIZE when non-root.
+- Build fixes for RHEL6.1, MRG2, 2.6.39, gcc 4.6.
+- Add Onload Extensions library.
+- bug23578: Copying too much data in getsockopt() when buffer supplied is big.
+- Add counter for handover to kernel in socket() calls.
+- bug23749: Fix bug in SO_TIMESTAMP and SO_TIMESTAMPNS.
+- Support TCP_QUICKACK socket option.
+- bug23833: Don't attempt to accelerate bond that has vlan interface as slave.
+- Ensure onload_tool works when /sbin is not on the PATH.
+- bug23878: Fix to software driverlink filtering.
+- Include some missing options in "onload_stackdump doc".
+- ef_vi: Add env vars EF_VI_EVQ_SIZE, EF_VI_TXQ_SIZE, EF_VI_RXQ_SIZE.
+- ef_vi: Choose appropriate size of event queue by default (instead of min).
+- ef_vi: Add EF_EVENT_RX_DISCARD_MCAST_MISMATCH.
+- Avoid further synchronisation costs when EF_FDS_MT_SAFE enabled.
+- Avoid syscall in ioctls SIOCGSTAMP and SIOCGSTAMPNS.
+- Fix SIOCGSTAMP(NS) when last receive was via kernel.
+- Avoid syscall in ioctl FIONREAD when datagram available at userlevel.
+- Avoid syscall in ioctl FIONREAD when kernel receives disabled.
+- sfc_affinity: Fix bug preventing filters from being added.
+- Support "-f hosts" option to mpiexec.
+- Pass through profile options when invoking onload on remote hosts.
+- Add some new counters to onload_stackdump, "lots" output extended.
+- bug22230: SO_BINDTODEVICE to vlan interface didn't work.
+- Added option EF_MCAST_JOIN_BINDTODEVICE.
+- Improve EF_PREFAULT_PACKETS to prefault RX rings and enable by default.
+- Only use atomic memory alloc for packet buffers when needed.
+- EF_MULTICAST option removed.  See new EF_MCAST_RECV option.
+- Added option EF_MCAST_JOIN_HANDOVER.
+- bug24121: Fix data corruption when receiving UDP datagram with large MTU.
+- bug24225: UDP receive queue did not respect SO_RCVBUF.
+- bug24227: Poor TX latency on second send with write-combining enabled.
+- Added EF_UDP_PORT_HANDOVER[23]_{MIN,MAX} options to add flexibility.
+
+
+openonload-201104
+-----------------
+
+- New epoll implementation with improved scalability (see ReleaseNotes).
+- New epoll also accelerates epoll_pwait().
+- Acceleration of anonymous pipes.
+- Partial implementation of SO_BINDTODEVICE socket option.
+- New extended API for controlling mapping between stacks and sockets.
+- onload_stackdump now works for non-root users.
+- Epoll optimisation to improve performance of epoll_ctl() calls.
+- Send performance improved in certain bonded configurations.
+- Improve performance and accuracy of SIOCGSTAMP ioctl.
+- Add suport for SO_TIMESTAMP, SO_TIMESTAMPNS, SIOCGSTAMPNS.
+- Improved interrupt avoidance in blocking poll/select/poll.
+- bug22046: Return from accept() if socket is shutdown().
+- bug22701: Fix kernel crash when Onload process killed by a signal.
+- bug22073: Always initialise revents for non-accelerated fds in poll().
+- bug19843: Fix selection of mac when sending multicast packet to default
+   route with gateway.
+- Improve performance when multiple threads call select(), poll(), epoll.
+- bug20328: Set cmsg msg_controllen to zero if not filling in any data.
+- bug22018: Fix race that could cause EAGAIN on TCP send after poll, select
+   or epoll says socket is readable.
+- bug22263: Do not mask out EPOLLERR and EPOLLHUP after EPOLL_CTL_MOD.
+- Added option EF_EPOLL_MT_SAFE to disable internal locking in epoll.
+- Record max depth of UDP recv queue (available in onload_stackdump).
+- Support larger max number of packet buffers per stack (limit was 32K).
+- bug22431: Do not clear fdsets when select() returns error.
+- bug22428: Fixed bug in select() where fdsets not cleared when non-blocking.
+- bug22332: Handle case where socket is handed to kernel stack when in epoll.
+- bug22400: Fix handling of restarting of calls on signal.
+- bug22635: Fix timeout and signal handling when spinning.
+- bug22636: Update select() timeout properly.
+- bug21464: Handle siginterrupt() properly.
+- EF_TX_PUSH is now enabled by default.
+- Support for recvmmsg() call (even when not present in libc or kernel).
+- Reduce cases where extra TCP ACKs are generated.  (Reduces TCP latency).
+- Add options EF_TCP_FASTSTART_{INIT,IDLE,LOSS} to prevent extra TCP ACKs.
+- Support SOCK_NONBLOCK flag.
+- Fix rpm spec bug that could confuse modprobe after upgrade.
+- Bugfix: Read EF_TCP_INITIAL_CWND and EF_TCP_LOSS_MIN_CWND options.
+- onload_tool script should now work with the ash shell.
+- onload_loaddrivers can now supply module parameters.
+- Several minor performance improvements in select().
+- Small latency improvements on receive path on all systems.
+- Substantial latency improvement on send using write combining (requires
+   kernel version >= 2.6.28).
+- Various improvements to onload_stackdump output.
+- EF_INT_DRIVEN=1 is enabled by default when spinning not enabled.
+- Intercept __read_chk() -- needed on recent glibc.
+- ef_vi: Add mac filtering.
+- ef_vi: Add receive-side scaling.
+- ef_vi: Add ef_iobufset_remap() to support forwarding.
+- ef_vi: New and improved sample apps.
+- bug23390: Fix infinite busy loop when run out of packet buffers.
+- Improve handling when few packet buffers available at startup.
+- Added options EF_RXQ_MIN and EF_MIN_FREE_PACKETS.
+- Added option EF_POLL_NONBLOCK_FAST_LOOPS to accelerate poll(..., timeout=0).
+- Added options EF_POLL_TCP_LISTEN_UL_ONLY and EF_POLL_UDP_UL_ONLY.
+- Install kernel module symbol info to well-known location.
+- sfc: Updated to v3_1_0_4041
+- sfc: TX push and write combining reduce latency
+- sfc: RX n-tuple support (use 'ethtool -U' or 'sfctool -U')
+- sfc: Runtime logging control (use 'ethtool -s ethX msglvl ...')
+- Onload driver build now requires CONFIG_NETFILTER.
+
+
+openonload-20101111-u1
+----------------------
+
+- More distributions supported by RPMs.
+- bug21384: Fixed bug in synchronisation with kernel control plane.
+- Performance improvement for UDP multicast sends.
+- bug21271: Fix handling of signals when waiting for memory.
+- bug21271: Fix handling of rare exception path in UDP send.
+- bug21309: Fix kernel driver livelock bug. 
+- bug19843: Fixed case where gateway mac was used instead of m'cast mac.
+- bug21509: Sometimes IP_ADD_MEMBERSHIP would fail to accelerate when
+   interface was chosen via route table.
+- bug18845: Improved handling when short of packet buffers.
+- Added canned configuration profiles.
+- New statistics added to "onload_stackdump stats".
+- EF_MAX_PACKETS is no longer rounded to a power of 2.
+- Use "onload_tool reload" to reload drivers.
+    onload_loaddrivers is deprecated.
+- No longer disable CPU low power states by default.
+    Use "onload_tool disable_cstates [persist]" to re-enable.
+- bug21634: Fix bug when multiple sockets subscribe to same multicast stream.
+- bug21643: Uncorking TCP socket would sometimes delay sending data.
+- Make ef_vi robust to certain errors in event notifications.
+- Minor change in ef_vi interface.
+- bug21103: Suppress constantly repeating error messages.
+- Support up to 6 accelerated network interfaces by default.
+- Fixed dimensioning of state when many accelerated interfaces supported.
+- Improve performance of send/recv etc. when file descriptor not accelerated.
+- Avoid unnecessary control plane sys-calls when ARP entries are static.
+- bug21575: Fix rare deadlock in kernel driver.
+- Update to v3_0_8_2221 sfc driver.
+
+
+openonload-20101111
+-------------------
+
+- Set EF_TX_PUSH=1 to knock 0.5us off TX latency.
+- Fixed bugs in handling of VLANs and bonds.
+- Fixed broken EPOLLET handling.
+- Improved epoll with TCP to more closely match Linux behaviour.
+- Fixed numerous bugs found in extended testing.
+- Fixed jumbo frame regression.
+- Added config file /etc/sysconfig/openonload to control access to Onload.
+
+
+openonload-20100923
+-------------------
+
+- See ReleaseNotes for details of new features and known problems.
+- Acceleration of 802.1Q VLAN interfaces.
+- Acceleration of bonded interfaces.
+- Acceleration of epoll system calls.
+- Small improvement in UDP send and receive latency.
+- Prevent high latency when doing non-blocking receive calls.
+- Many many minor enhancements and bug fixes.
+
+
+openonload-20100604-u3
+----------------------
+
+- Fix bug that caused UDP packets to get wrong TTL value.
+- Send log messages to syslog if STDERR is not a TTY.
+- Fix incompatibility with apps that call fork() during _init.
+- Support 2.6.34 and 2.6.35 kernels.
+- Fixed zero-window probe bug.
+- Avoid dependency on /usr for driver load.
+- Ensure that onload driver gets loaded at boot time.
+- Fix select() timeout behaviour when spinning.
+- Update to v3_0_6_2199 sfc driver.
+
+
+openonload-20100604-u2
+----------------------
+
+- Fix bugs in filter module that caused ports to be reused inappropriately.
+- "onload_install --newkernel" to install modules for a new kernel.
+- Allow "onload_install --listfiles" when Onload is already installed.
+- The rpm spec file (in src/onload_misc) should now work on RHEL5.
+- Adding and removing local IP addresses should now work properly.
+- Fix recursion bug in send path introduced in 20100604 properly.
+- Fix small per-stack memory leak.
+- Fix rare bug that could cause corruption of packet lists.
+
+
+openonload-20100604-u1
+----------------------
+
+- Zero-initialise UDP socket receive packet and byte counters.
+- Fix DMA error on systems using IOMMU and multiple Onloaded interfaces.
+- Fix recursion bug in send path introduced in 20100604 release.
+- Fix bug that caused kernel panic when Onload stack destroyed.
+- Fix warning due to memory allocated with interrupts disabled.
+- Fix lock corruption caused by signal race.
+- Fix kernel panic caused by logging ioctl.
+
+
+openonload-20100604
+-------------------
+
+- Added option EF_MAX_RX_PACKETS to limit RX path buffer usage.
+- Improved handling of situations where DMA buffers become scarce.
+- Send reset on TCP connections when stack freed with internal lock stuck.
+- Fix incompatibility that prevented 32-bit apps working on 64-bit RHEL5.
+- Fix bug in control plane: Caused accelerated traffic to go to wrong port.
+- Fixed build for certain realtime kernels and fedora 11 kernels.
+- Work-around unwanted intercept of signal() in SLES10 ksh.
+- Support for Fedora 12.
+- Install preload libraries setuid/setgid by default.
+- Quieten kernel log messages about RTA_PRIORITY.
+- Fix bad performance of UDP send with large datagrams.
+- Respect spin timeout in UDP send.
+- Fixed state corruption bug in TCP TX exception path.
+- Config option documentation available from "onload_stackdump doc".
+- Fixed bug that could cause multicast filter to install on wrong interface.
+- Fixed UDP send jitter at certain message sizes and rates.
+- Added EF_SEND_POLL_THRESH and EF_SEND_POLL_MAX_EVS options.
+- Improvements to data exported by onload_stackdump.
+- Cope with early calls into libonload.so before it is initialised.
+- Added option EF_DELACK_THRESH to disable delayed acknowledgements.
+- EF_LOAD_ENV now true by default.
+- Disable EF_CONG_AVOID_SCALE_BACK by default.
+- Improvements to interrupt handling, reducing interrupts when spinning.
+- Improvements to onload_install.
+- Put sfc.ko in updates directory so it overrides in-tree driver.
+- "onload_stackdump spin_poll" command.
+- Acceleration of UDP sockets in userlevel select().
+  (NB. poll() remains best performing multiplexor).
+- onload_install --listfiles option.
+- Limit time spent "buzzing" a lock by default.
+- Make slow start less conservative by default.
+- Added options EF_TCP_INITIAL_CWND and EF_TCP_LOSS_MIN_CWND.
+- "onload_stackdump describe_stats" gives documentation for internal stats.
+- Option --kernelver for onload_build and onload_install.
+- Improved EF_UDP_RECV_UL_ONLY so less likely to break applications.
+- Added option EF_UDP_RECV_MCAST_UL_ONLY.
+- Hand UDP sockets connected over non-Onload interface to kernel by default.
+- Turn on reporting of certain errors in syslog by default.
+- sfcirqaffinity script to help setup interrupt affinity.
+- Update to v3_0_3_2141 sfc driver.
+
+
+openonload-20100308-u2
+----------------------
+
+- Fixed build errors for various kernel versions, including SLES9, Ubuntu
+   and Fedora 12 kernels.
+- Fixed build errors for certain Ubuntu kernel versions.
+- Fixed kernel panic when certain interface is down.
+- Option to spin when waiting for packet buffers.
+- Fix for high latency when multiple threads spinning in TCP recv().
+- Update to v3_0_3_2123 sfc driver.
+
+
+openonload-20100308-u1
+----------------------
+
+- Fixed incorrect default SO_SNDBUF and SO_RCVBUF for TCP sockets.
+- Fixed potential race in UDP receive path.
+
+
+openonload-20100308
+-------------------
+
+- Support for recent Linux kernels, inc. 2.6.33
+- Unlocked UDP send path avoids lock contention.
+- Improved performance for UDP multicast sends.
+- Improved support for jumbo frames.
+- Improved UDP performance when traffic goes over non-accelerated
+  interfaces.
+- Improved performance for UDP with poll().
+- Fix to poll() timeout extension.
+- Option for apps to "share" an OpenOnload stack.
+- Option to loopback multicast to local receiver (when stack is shared).
+- Improved NUMA scaling: Onload DMA memory now allocated in local NUMA node.
+- Update to v3_0_2_2115 sfc driver.
+- Use appropriate temperature sensor limits.
+
+
+openonload-20091220
+-------------------
+
+- Update to v3_0_2_2064 sfc driver.
+- Support for SFC9000 controllers (SFN5122F).
+- bugfix: Failed connect() could cause connection to subsequently hang.
+- Fixes to signal handling.  Some calls returned EINTR instead of restarting.
+- Reduce cpu overhead when blocking and locks are contended.
+- Introduce more fine-grained control of when spinning is used.
+- Do not spin in TCP accept() by default.
+- "stackdump filters" output no longer goes to kernel log
+- Fixed bug in filtering code relating to multiple sockets in one stack.
+- Do not attempt the close() intercept on kernels where it doesn't work.
+- Added option to "buzz" internal locks.
+- bugfix: Fix out-of-bounds table lookup.
+- Reduce cost of "deferred work" path and fix race.
+- Do not hold stack lock while spinning in TCP recv().
+- Latency improvement when spinning and interrupts are also enabled.
+- Handover UDP sockets that are connected over the loopback interface.
+- Add option EF_UDP_CONNECT_HANDOVER.
+
+
+openonload-20091106
+-------------------
+
+- Update to v2_3_20_1086 sfc driver.
+- sfcaffinity_config: Fixed bug where irq affinity might not be set.
+- Increase the number of "kernel" sockets that user-level poll() will track.
+- sfcaffinity_config: Improve error messages.
+- Remove limitation in filter tables that limited us to 8 hops max.
+- Program hardware with minimum filter hops needed for current filters.
+- First steps towards spreading onload interrupts.
+- Improvements in install to support packaging up binaries, and making rpms.
+- Fix build and install problem on Debian systems.
+
+
+openonload-20090812
+-------------------
+
+- Support for using Onload with multiple NICs/ports.
+- The SFC affinity driver is now included with OpenOnload.
+- Various minor improvements to stackdump.
+- Performance improvement in TCP send and receive paths.
+- Scalability improvement in UDP recv() et al when spinning.
+- Export symbol "onload_version" from the preload library (can be used by
+  applications if they want to know whether onload is present, and what
+  version).
+- Various bug fixes.
+
+
+openonload-20090409.1
+---------------------
+
+- bug16011: Packet loss when IPG is very small.
+- Performance improvement for UDP recv() when spinning is enabled.

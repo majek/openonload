@@ -1,0 +1,122 @@
+
+ef_vi
+=====
+
+ ef_vi is an API that gives applications access to the network adapter's
+ datapath.  That is, it can be used to send and receive raw Ethernet frames
+ directly from user-level.  The advantage of using this interface is that
+ it incurs very little CPU overhead, and so yields the best possible
+ performance.
+
+ ef_vi is a zero-copy interface.  This means that the user gets direct
+ access to the buffers in memory that the hardware uses, avoiding a copy
+ that is usually incurred by higher-level interfaces.  Zero copy can be a
+ big win for applications that:
+
+   - have very high throughput requirements, or
+   - are filtering received data, or
+   - are forwarding data.
+
+ The downside of using ef_vi is that you have to implement the upper-layer
+ protocols yourself, including IP, UDP, TCP etc.  It is relatively
+ straighforward to use ef_vi for UDP, but much more difficult for TCP which
+ is very complex to implement from scratch.  (Best to leave that to
+ OpenOnload!).  ef_vi can be used in an application at the same time as
+ OpenOnload, so an application might use ef_vi for some especially
+ performance sensitive UDP traffic, and sockets with OpenOnload for TCP and
+ other traffic.
+
+ ef_vi is included in the OpenOnload distribution, and is used by the
+ OpenOnload user-level sockets library to access the hardware's datapath.
+
+
+Overview
+========
+
+ Users of ef_vi must first allocate a virtual interface (VI), encapsulated
+ by the type "ef_vi".  A VI includes:
+
+   - A receive descriptor ring.  (For receiving packets).
+   - A transmit descriptor ring.  (For sending packets).
+   - An event queue.
+
+ To transmit a packet, the application writes the packet contents
+ (including all headers) into one or more packet buffers, and calls
+ ef_vi_transmit().  One or more descriptors that describe the packet are
+ queued in the transmit ring, and a doorbell is "rung" to tell the NIC that
+ the transmit ring is ready.
+
+ To receive, descriptors (each identifying a buffer) are queued in the
+ receive ring by calling ef_vi_receive_init() and _post().  When packets
+ arrive at the network adapter and are directed to a VI, they are written
+ into the buffers in fifo order.
+
+ The event queue is a channel from the NIC to software which notifies
+ software when packets arrive from the network, and when transmits complete
+ (so that the buffers can be freed or reused).  The application retrieves
+ these events by calling ef_eventq_poll().
+
+ The buffers used for packet data are special: They must be pinned so that
+ they cannot be paged, and they must be registered for DMA.  There are two
+ ways to get memory suitable for DMA:
+
+ a) The preferred method is to register application memory using ef_memreg.
+    This approach is the more flexible option because you can use shared
+    memory and/or huge pages.
+
+ b) The type ef_iobufset provides an interface for allocating memory
+    suitable for DMA.  This interface is maintained for legacy
+    applications.
+
+ The NIC uses a special address space to identify locations in registered
+ memory, and such addresses are designated by the type "ef_addr".
+ Protection domains (ef_pd) provide an address space for registered memory.
+ All VIs allocated against a given protection domain can access any memory
+ registered within that protection domain.
+
+ Filters are the means by which the NIC decides where to deliver packets it
+ receives from the network.  By default all packets are delivered to the
+ kernel network stack.  Filters are added by the application to direct
+ received packets to a given VI.
+
+ You can request a protection domain be associated with an SR-IOV virtual
+ function (VF).  This yields lower latency and allows much more memory to
+ be registered.  See the Solarflare Server Adapter User's Guide for details
+ of how to enable SR-IOV.
+
+
+Documentation
+=============
+
+ At the time of writing, documentation of the ef_vi interface is limited to
+ this file, comments in the header files and the sample applications, which
+ are located at:
+
+   openonload/src/tests/ef_vi
+
+ If you've any questions please contact <support@solarflare.com>.
+
+
+Compiling and linking
+=====================
+
+ Applications or libraries using ef_vi will need to include the following
+ header files:
+
+   etherfabric/ef_vi.h
+   etherfabric/vi.h
+   etherfabric/iobufset.h
+   etherfabric/pd.h
+   etherfabric/memreg.h
+
+ The application will need to be linked with libciul1.a or libciul.so,
+ which can be found under the "build" directory after running
+ scripts/onload_build or scripts/onload_install.
+
+
+License
+=======
+
+ ef_vi is released under the GNU Lesser General Public License -- see the
+ LICENSE file for details.  If this license does not meet your needs,
+ please contact us at <support@solarflare.com> to discuss other options.
