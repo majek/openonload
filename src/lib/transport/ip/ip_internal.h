@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -231,14 +231,17 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
                         oo_sp             sock_id)
 {
   int rc;
-
+#ifdef __ci_driver__
+  int supress_hw_ops = ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT;
+#endif
   ci_assert(ni);
 
   LOG_TC(ci_log("%s: %d:%d", __FUNCTION__,
                 ni->state->stack_id, OO_SP_FMT(sock_id)));
 
 #ifdef __ci_driver__
-  rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id));
+  rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id),
+                                         supress_hw_ops);
 #else
   rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni), sock_id);
 #endif

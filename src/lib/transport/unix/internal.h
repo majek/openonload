@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -883,8 +883,9 @@ extern int    citp_environ_init(void) CI_HF;
  ** TCP/UDP common functionality
  */
 
-extern int apply_fcntl_to_os_sock(citp_sock_fdi* epi, int fd,
-                                  int cmd, long arg, int *fcntl_result) CI_HF;
+extern int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd, int cmd,
+                                   long arg, const char* cmd_str,
+                                   int* fcntl_result) CI_HF;
 
 /*! Handler for fcntl() cmds that are common across sockets.
  *

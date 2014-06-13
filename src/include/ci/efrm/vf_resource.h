@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -64,13 +64,17 @@ struct efrm_vf;
 
 struct efrm_vi;
 struct efrm_client;
+struct vi_resource_dimensions;
 
 /* Should we avoid atomic allocations when using VFs? */
 extern int efrm_vf_avoid_atomic_allocations;
 
 extern void
-efrm_vf_manager_params(unsigned *vi_base_out, unsigned *vi_scale_out,
-		       unsigned *vf_count_out);
+efrm_vf_nic_params(struct efhw_nic*, unsigned *vi_base_out,
+		   unsigned *vi_scale_out, unsigned *vf_count_out);
+extern void
+efrm_vf_init_nic_params(struct efhw_nic*,
+			const struct vi_resource_dimensions *);
 
 extern struct efrm_resource *
 efrm_vf_to_resource(struct efrm_vf *) __attribute__ ((__pure__));

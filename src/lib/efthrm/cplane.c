@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -7487,6 +7487,8 @@ cicpos_ipif_post_poll(cicpos_parse_state_t *session)
   if (!session->nosort)
     return;
 
+  CICP_LOCK_BEGIN(session->control_plane);
+
   for (rowid = 0; 
        rowid < ipift->rows_max && 
        cicp_ipif_row_allocated(&ipift->ipif[rowid]); 
@@ -7496,6 +7498,8 @@ cicpos_ipif_post_poll(cicpos_parse_state_t *session)
     }
   }
   (void)cicpos_ipif_compress(ipift);
+
+   CICP_LOCK_END;
 }
 
 

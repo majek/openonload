@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,6 +55,14 @@
 /* for ioctl32 conversion registration */
 # include <linux/ioctl32.h>
 #endif
+
+int phys_mode_gid = 0;
+module_param(phys_mode_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(phys_mode_gid,
+                 "Group id of ef_vi apps which may use physical buffer mode.  "
+                 "0 is default.  "
+		 "-1 means \"any user may use physical buffer mode\".  "
+		 "-2 means means \"physical buffer mode forbidden\".");
 
 
 MODULE_AUTHOR("Solarflare Communications");

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -154,7 +154,7 @@ ci_tcp_synrecv_set_retries_and_timeout(ci_netif* ni,
 void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 {
   ci_ni_dllist_link* l;
-  int max_retries, i;
+  int max_retries, i, synrecv_timeout = 0;
 
   ci_assert(netif);
   ci_assert(tls);
@@ -208,14 +208,20 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 	ci_tcp_synrecv_free(netif, tsr);
         CITP_STATS_NETIF(++netif->state->stats.synrecv_timeouts);
 
-	LOG_TC(log(LPF "SYNRECV retries %d exceeded %d,"
-		   " returned to listen",
-		   tsr->retries,
-		   NI_CONF(netif).listen_synack_retries));
+        LOG_TC(log(LPF "SYNRECV retries %d exceeded %d,"
+                   " returned to listen",
+                   tsr->retries,
+                   NI_CONF(netif).listen_synack_retries));
+
+        ++synrecv_timeout;
       }
     }
   }
   }
+  
+  if( synrecv_timeout )
+    NI_LOG(netif, CONN_DROP, "%s: [%d] %d half-open timeouts\n", __func__,
+           NI_ID(netif), synrecv_timeout);
 
   /* if still any pending connectings */
   if( tls->n_listenq > 0 &&

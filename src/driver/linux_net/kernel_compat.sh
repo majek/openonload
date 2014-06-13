@@ -116,9 +116,11 @@ EFX_NEED_SCHEDULE_TIMEOUT_INTERRUPTIBLE	nexport	schedule_timeout_interruptible		
 EFX_NEED_SCHEDULE_TIMEOUT_UNINTERRUPTIBLE	nexport	schedule_timeout_uninterruptible	include/linux/sched.h	kernel/timer.c
 EFX_NEED_SETUP_TIMER			nsymbol setup_timer		include/linux/timer.h
 EFX_NEED_SKB_HEADER_MACROS		nsymbol	skb_mac_header		include/linux/skbuff.h
+EFX_NEED_SKB_NETWORK_HEADER_LEN		nsymbol	skb_network_header_len	include/linux/skbuff.h
 EFX_NEED_SKB_CHECKSUM_START_OFFSET	nsymbol	skb_checksum_start_offset	include/linux/skbuff.h
 EFX_HAVE_CSUM_START			symbol	csum_start		include/linux/skbuff.h
 EFX_HAVE_SKB_SET_TRANSPORT_HEADER	symbol	skb_set_transport_header	include/linux/skbuff.h
+EFX_HAVE_OLD_SKB_HEADER_FIELDS		member	struct_sk_buff		h	include/linux/skbuff.h
 EFX_HAVE_OLD_SKB_LINEARIZE		nsymtype skb_linearize		include/linux/skbuff.h int(struct sk_buff *)
 EFX_HAVE_SKBTX_HW_TSTAMP		symbol	SKBTX_HW_TSTAMP		include/linux/skbuff.h
 EFX_NEED_TCP_HDR			nsymbol	tcp_hdr			include/linux/tcp.h

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -113,6 +113,18 @@ static inline bool efx_ssr_enabled(struct efx_nic *efx)
 	return efx->lro_enabled;
 #endif
 }
+
+#if defined(EFX_WITH_VMWARE_NETQ)
+static inline bool efx_channel_ssr_enabled(struct efx_channel *channel)
+{
+	return !!(channel->netq_flags & NETQ_USE_LRO);
+}
+#else
+static inline bool efx_channel_ssr_enabled(struct efx_channel *channel)
+{
+	return efx_ssr_enabled(channel->efx);
+}
+#endif
 
 extern int efx_ssr_init(struct efx_channel *channel, struct efx_nic *efx);
 extern void efx_ssr_fini(struct efx_channel *channel);

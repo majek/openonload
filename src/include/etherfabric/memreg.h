@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,6 +56,14 @@ struct ef_pd;
 
 
   /*! Register memory for use with ef_vi.
+  **
+  **  The physical addresses of this memory must not change, as they will
+  **  be used directly by the NIC.  In the case where an application forks
+  **  this can result in new pages being allocated.  If this memory is to be
+  **  used in an application that will fork, then the caller can use madvise,
+  **  setting the MADV_DONTFORK advice to prevent pages in this range being
+  **  available to the child after a fork, allowing the parent to maintain the
+  **  original pages.
   **
   **   \param vi The VI that these buffers will be used with
   **   \param size The size in bytes of each I/O buffer

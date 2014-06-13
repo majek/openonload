@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -112,6 +112,22 @@
 #define LOG_SV(x)       LOG_FL(CI_TP_LOG_SV, x)
 #define LOG_SSA(x)      LOG_E(x)
 #define LOG_W(x)        LOG_E(x)  /* ?? TODO: make this its own bit */
+
+
+/* Log level definitions to control how chatty Onload's
+ * informative/warning messages are
+ */
+#define EF_LOG_BANNER                 0
+#define EF_LOG_RESOURCE_WARNINGS      1
+#define EF_LOG_CONN_DROP              2
+#define EF_LOG_MAX                    3  /* Must be last */
+
+
+#define NI_LOG(ni, lg, fmt, ...)                                \
+  do {                                                          \
+    if( NI_OPTS(ni).log_category & 1 << (EF_LOG_ ## lg) )       \
+      ci_log(fmt, __VA_ARGS__);                                 \
+  } while( 0 );
 
 
 /**********************************************************************

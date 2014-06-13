@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -175,18 +175,14 @@ struct ci_netif_s {
   /* netif is a kernel-only stack and thus is trusted */
 # define CI_NETIF_FLAGS_IS_TRUSTED       0x4
                                       /* 0x8 free */
-  /* Use physical addressing mode */
-# define CI_NETIF_FLAGS_PHYS_ADDR_MODE   0x10
-  /* Use reserved iSCSI event/DMA queues */
-# define CI_NETIF_FLAGS_ISCSI            0x20
-  /* Use interrupting event queue */
-# define CI_NETIF_FLAGS_INTERRUPT        0x40
   /* Stack [k_ref_count] to be decremented when sockets close. */
 # define CI_NETIF_FLAGS_DROP_SOCK_REFS   0x80
   /* Don't use this stack for new sockets unless name says otherwise */
 # define CI_NETIF_FLAGS_DONT_USE_ANON    0x100
   /* Sending ONLOAD_MSG_WARM */
 # define CI_NETIF_FLAG_MSG_WARM           0x200
+  /* Currently being used from a driverlink context */
+# define CI_NETIF_FLAG_IN_DL_CONTEXT     0x400
 
 #ifndef __KERNEL__
   double    ci_ip_time_tick2ms;     /* time for 1 tick in ms */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,14 +63,15 @@
 
 struct efrm_vf_nic_params {
 	struct list_head free_list; /* List of free VFs */
-	int vf_count;               /* Number of already-discovered VFs */
+	int vfs_probed;             /* Number of already-discovered VFs */
+
+	unsigned vi_base;
+	unsigned vi_scale;
+	unsigned vf_count;          /* Total number of VFs */
 };
 struct efrm_vf_resource_manager {
 	struct efrm_resource_manager rm;
 	struct efrm_vf_nic_params nic[EFHW_MAX_NR_DEVS];
-
-	/* Fixme: move it to per-nic array */
-	unsigned vi_base, vi_scale, vf_count;
 };
 static struct efrm_vf_resource_manager *efrm_vf_manager;
 
@@ -85,16 +86,12 @@ static void efrm_vf_rm_dtor(struct efrm_resource_manager *rm)
 	EFRM_ASSERT(&efrm_vf_manager->rm == rm);
 }
 int
-efrm_create_vf_resource_manager(struct efrm_resource_manager **rm_out,
-				const struct vi_resource_dimensions *dims)
+efrm_create_vf_resource_manager(struct efrm_resource_manager **rm_out)
 {
 	int rc;
 	int nic_index;
 
 	EFRM_ASSERT(rm_out);
-
-	EFRM_NOTICE("vf_vi_base=%u vf_vi_scale=%u vf_count=%u",
-		    dims->vf_vi_base, dims->vf_vi_scale, dims->vf_count);
 
 	efrm_vf_manager = kzalloc(sizeof(*efrm_vf_manager), GFP_KERNEL);
 	if (efrm_vf_manager == NULL)
@@ -102,9 +99,6 @@ efrm_create_vf_resource_manager(struct efrm_resource_manager **rm_out,
 
 	for (nic_index = 0; nic_index < EFHW_MAX_NR_DEVS; ++nic_index)
 		INIT_LIST_HEAD(&efrm_vf_manager->nic[nic_index].free_list);
-	efrm_vf_manager->vi_base = dims->vf_vi_base;
-	efrm_vf_manager->vi_scale = dims->vf_vi_scale;
-	efrm_vf_manager->vf_count = dims->vf_count;
 
 	rc = efrm_resource_manager_ctor(&efrm_vf_manager->rm,
 					efrm_vf_rm_dtor, "VF",
@@ -122,12 +116,46 @@ fail1:
 }
 
 void
-efrm_vf_manager_params(unsigned *vi_base_out, unsigned *vi_scale_out,
-		       unsigned *vf_count_out)
+efrm_vf_init_nic_params(struct efhw_nic* nic,
+			const struct vi_resource_dimensions *res_dim)
 {
-	*vi_base_out = efrm_vf_manager->vi_base;
-	*vi_scale_out = efrm_vf_manager->vi_scale;
-	*vf_count_out = efrm_vf_manager->vf_count;
+	struct efrm_vf_nic_params *nic_params =
+		&efrm_vf_manager->nic[nic->index];
+
+#ifndef NDEBUG
+	int nic_index;
+
+	/* Sanity check the nic index to ensure it's been initialised before
+	 * we got here.
+	 */
+	for (nic_index = 0; nic_index < EFHW_MAX_NR_DEVS; ++nic_index)
+		if (efrm_nic_tablep->nic[nic_index] != NULL &&
+		    memcmp(efrm_nic_tablep->nic[nic_index]->mac_addr,
+			   nic->mac_addr, ETH_ALEN) == 0)
+			break;
+
+	EFRM_ASSERT(nic_index == nic->index);
+#endif
+
+	EFRM_TRACE("vf_vi_base=%u vf_vi_scale=%u vf_count=%u",
+		   res_dim->vf_vi_base, res_dim->vf_vi_scale,
+		   res_dim->vf_count);
+
+	nic_params->vi_base = res_dim->vf_vi_base;
+	nic_params->vi_scale = res_dim->vf_vi_scale;
+	nic_params->vf_count = res_dim->vf_count;
+}
+
+void
+efrm_vf_nic_params(struct efhw_nic* nic, unsigned *vi_base_out,
+		   unsigned *vi_scale_out, unsigned *vf_count_out)
+{
+	struct efrm_vf_nic_params *nic_params =
+		&efrm_vf_manager->nic[nic->index];
+
+	*vi_base_out = nic_params->vi_base;
+	*vi_scale_out = nic_params->vi_scale;
+	*vf_count_out = nic_params->vf_count;
 }
 
 /*********************************************************************
@@ -162,10 +190,10 @@ efrm_vf_resource_alloc(struct efrm_client *client,
 	int rc = 0;
 	struct efrm_pd_owner_ids *owner_ids;
 
-	if (efrm_vf_manager->vf_count != nic->vf_count) {
+	if (nic->vf_count != nic->vfs_probed) {
 		EFRM_ERR("%s: not all VFs for NIC %d are discovered yet: "
 			 "%d out of %d", __func__, client->nic->index, 
-			 nic->vf_count, efrm_vf_manager->vf_count);
+			 nic->vfs_probed, nic->vf_count);
 		return -EBUSY;
 	}
 
@@ -273,14 +301,14 @@ static void efrm_vf_enumerate(int nic_index)
 	struct efrm_vf_nic_params *nic = &efrm_vf_manager->nic[nic_index];
 	struct list_head *link;
 
-	EFRM_ASSERT(nic->vf_count == efrm_vf_manager->vf_count);
+	EFRM_ASSERT(nic->vfs_probed == nic->vf_count);
 
 	EFRM_NOTICE("All %d VFs for NIC %d are discovered",
-		    efrm_vf_manager->vf_count, nic_index);
+		    nic->vf_count, nic_index);
 
-	if (nic->vf_count == 1) {
+	if (nic->vfs_probed == 1) {
 		list_entry(nic->free_list.next, struct efrm_vf,
-			   link)->vi_base = efrm_vf_manager->vi_base;
+			   link)->vi_base = nic->vi_base;
 		return;
 	}
 
@@ -299,10 +327,10 @@ static void efrm_vf_enumerate(int nic_index)
 	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	list_for_each(link, &nic->free_list) {
 		struct efrm_vf *vf = list_entry(link, struct efrm_vf, link);
-		vf->vi_base = efrm_vf_manager->vi_base +
+		vf->vi_base = nic->vi_base +
 			(vf->pci_dev_fn - first_fn) /
 			(second_fn - first_fn) *
-			(1 << efrm_vf_manager->vi_scale);
+			(1 << nic->vi_scale);
 		EFRM_TRACE("NIC %d VF %d: VI instances %d-%d", nic_index,
 			   vf->pci_dev_fn, vf->vi_base,
 			   vf->vi_base + vf->vi_count);
@@ -313,8 +341,6 @@ static void efrm_vf_enumerate(int nic_index)
 int efrm_vf_probed(struct efrm_vf *vf)
 {
 	int nic_index;
-
-	EFRM_ASSERT(vf->vi_scale == efrm_vf_manager->vi_scale);
 	INIT_LIST_HEAD(&vf->link);
 
 	/* Find the NIC we are working with */
@@ -323,6 +349,9 @@ int efrm_vf_probed(struct efrm_vf *vf)
 		    memcmp(efrm_nic_tablep->nic[nic_index]->mac_addr,
 			   vf->mac_addr, ETH_ALEN) == 0)
 			break;
+
+	EFRM_ASSERT(vf->vi_scale == efrm_vf_manager->nic[nic_index].vi_scale);
+
 	if (nic_index == EFHW_MAX_NR_DEVS) {
 		EFRM_ERR("%s: no NIC with MAC "MAC_ADDR_FMT, __func__,
 			 MAC_ADDR_VAL(vf->mac_addr));
@@ -340,12 +369,12 @@ int efrm_vf_probed(struct efrm_vf *vf)
 	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	EFRM_ASSERT(vf->vi_count);
 	list_add(&vf->link, &efrm_vf_manager->nic[nic_index].free_list);
-	efrm_vf_manager->nic[nic_index].vf_count++;
+	efrm_vf_manager->nic[nic_index].vfs_probed++;
 	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 
 	/* If we've got the last VF, re-enumerate them and set vi_base */
-	if (efrm_vf_manager->nic[nic_index].vf_count ==
-	    efrm_vf_manager->vf_count) {
+	if (efrm_vf_manager->nic[nic_index].vfs_probed ==
+	    efrm_vf_manager->nic[nic_index].vf_count) {
 		efrm_vf_enumerate(nic_index);
 	}
 
@@ -356,7 +385,7 @@ void efrm_vf_removed(struct efrm_vf *vf)
 	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	list_del(&vf->link);
 	vf->vi_count = 0;
-	efrm_vf_manager->nic[vf->nic_index].vf_count--;
+	efrm_vf_manager->nic[vf->nic_index].vfs_probed--;
 	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 }
 

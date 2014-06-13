@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1383,6 +1383,10 @@ extern int cicp_raw_ip_send(const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex);
 /*! If ARP entry is STALE, force ARP request or confirm existing entry */
 extern void cicpos_arp_stale_update(ci_ip_addr_t dst, ci_ifid_t ifindex,
                                     int confirm);
+
+/*! Force full table sync. */
+extern void
+cicpos_sync_tables(cicp_handle_t *control_plane);
 
 #endif /* __KERNEL__ */
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -118,17 +118,17 @@ fail:
 }
 
 
-int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
-		      unsigned vi_props, struct efrm_vi_set **vi_set_out)
+int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
+		      struct efrm_vi_set **vi_set_out)
 {
 	struct efrm_client *client;
 	struct efrm_vi_set *vi_set;
 	struct efrm_nic *efrm_nic;
-	int rc;
+	int i, rc;
 
-	if (min_n_vis > 64) {
+	if (n_vis > 64) {
 		EFRM_ERR("%s: ERROR: set size=%d too big (max=64)",
-			 __FUNCTION__, min_n_vis);
+			 __FUNCTION__, n_vis);
 		return -EINVAL;
 	}
 
@@ -138,7 +138,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 	client = efrm_pd_to_resource(pd)->rs_client;
 	efrm_nic = container_of(client->nic, struct efrm_nic, efhw_nic);
 
-	rc = efrm_rss_context_alloc(client, vi_set, min_n_vis);
+	rc = efrm_rss_context_alloc(client, vi_set, n_vis);
 	/* If we failed to allocate an RSS context fall back to
 	 * using the netdriver's default context.
 	 *
@@ -150,11 +150,11 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 			EFRM_ERR("%s: WARNING: Failed to allocate RSS "
 				 "context of size %d (rc %d), falling "
 				 "back to default context.",
-				 __FUNCTION__, min_n_vis, rc);
+				 __FUNCTION__, n_vis, rc);
 		vi_set->rss_context = -1;
 	}
 
-	rc = efrm_vi_allocator_alloc_set(efrm_nic, vi_props, min_n_vis,
+	rc = efrm_vi_allocator_alloc_set(efrm_nic, vi_props, n_vis,
 					 vi_set->rss_context != -1 ? 1 : 0,
 					 -1, &vi_set->allocation);
 	if (rc == 0) {
@@ -163,8 +163,14 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 		efrm_client_add_resource(client, &vi_set->rs);
 		vi_set->pd = pd;
 		efrm_resource_ref(efrm_pd_to_resource(pd));
-		vi_set->free = (1 << (1 << vi_set->allocation.order)) - 1;
-		spin_lock_init(&vi_set->free_lock);
+		vi_set->free = 0;
+		for (i = 0; i < n_vis; ++i )
+			vi_set->free |= 1 << i;
+		spin_lock_init(&vi_set->allocation_lock);
+		vi_set->n_vis = n_vis;
+		init_completion(&vi_set->allocation_completion);
+		vi_set->n_vis_flushing = 0;
+		vi_set->n_flushing_waiters = 0;
 		*vi_set_out = vi_set;
 	}
 	else if (vi_set->rss_context != -1 ) {
@@ -187,6 +193,8 @@ EXPORT_SYMBOL(efrm_vi_set_release);
 void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 {
 	struct efrm_nic *efrm_nic;
+	int n_free;
+	uint64_t free = vi_set->free;
 	efrm_nic = container_of(vi_set->rs.rs_client->nic,
 				struct efrm_nic, efhw_nic);
 	if (vi_set->rss_context != -1)
@@ -195,14 +203,17 @@ void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 	efrm_vi_allocator_free_set(efrm_nic, &vi_set->allocation);
 	efrm_pd_release(vi_set->pd);
 	efrm_client_put(vi_set->rs.rs_client);
-	EFRM_ASSERT(vi_set->free == (1 << (1 << vi_set->allocation.order)) - 1);
+
+	for (n_free = 0; free; ++n_free)
+		free &= free - 1;
+	EFRM_ASSERT(n_free == vi_set->n_vis);
 	kfree(vi_set);
 }
 
 
 int efrm_vi_set_num_vis(struct efrm_vi_set *vi_set)
 {
-	return 1 << vi_set->allocation.order;
+	return vi_set->n_vis;
 }
 EXPORT_SYMBOL(efrm_vi_set_num_vis);
 

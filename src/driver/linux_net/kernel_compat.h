@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -715,6 +715,18 @@
 	#define skb_set_mac_header(skb, offset)			\
 		((skb)->mac.raw = (skb)->data + (offset))
 	#define skb_transport_header(skb) ((skb)->h.raw)
+
+	static inline int skb_transport_offset(const struct sk_buff *skb)
+	{
+		return skb->h.raw - skb->data;
+	}
+#endif
+
+#ifdef EFX_NEED_SKB_NETWORK_HEADER_LEN
+	static inline u32 skb_network_header_len(const struct sk_buff *skb)
+	{
+		return skb->h.raw - skb->nh.raw;
+	}
 #endif
 
 #ifdef EFX_NEED_SKB_RECORD_RX_QUEUE
@@ -1617,7 +1629,12 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #endif
 
 #ifdef EFX_NEED_SKB_TRANSPORT_HEADER_WAS_SET
-	#define skb_transport_header_was_set(skb) (!!(skb)->transport_header)
+	#ifdef EFX_HAVE_OLD_SKB_HEADER_FIELDS
+		#define skb_transport_header_was_set(skb) (!!(skb)->h.raw)
+	#else
+		#define skb_transport_header_was_set(skb)	\
+			(!!(skb)->transport_header)
+	#endif
 #endif
 
 /**************************************************************************

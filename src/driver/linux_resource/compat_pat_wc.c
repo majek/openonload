@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -93,10 +93,12 @@ static int write_pat(efx_qword_t* pat)
 }
 
 
+#ifdef CONFIG_SMP
 static void write_pat_on_cpu(efx_qword_t* pat)
 {
   write_pat(pat);
 }
+#endif
 
 
 static int write_pat_on_cpus(efx_qword_t* pat)
@@ -118,6 +120,7 @@ static int read_pat(efx_qword_t* pat)
 }
 
 
+#ifdef CONFIG_SMP
 static void read_pat_on_cpu(int* fail)
 {
   efx_qword_t pat;
@@ -129,6 +132,7 @@ static void read_pat_on_cpu(int* fail)
   if( pat.u64 != compat_pat_wc.original_pat.u64 )
     fail[1] = 1;
 }
+#endif
 
 
 static int read_pat_on_cpus(void)

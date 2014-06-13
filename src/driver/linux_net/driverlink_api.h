@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -50,7 +50,7 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 11
+#define EFX_DRIVERLINK_API_VERSION 12
 
 /**
  * enum efx_dl_ev_prio - Driverlink client's priority level for event handling
@@ -415,9 +415,22 @@ extern int efx_dl_filter_remove(struct efx_dl_device *efx_dev,
 extern int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 				  int filter_id, int rxq_i);
 
+
+/**
+ * enum efx_dl_filter_block_kernel_type
+ * @EFX_DL_FILTER_BLOCK_KERNEL_UCAST: Unicast
+ * @EFX_DL_FILTER_BLOCK_KERNEL_MCAST: Multicast
+ */
+enum efx_dl_filter_block_kernel_type {
+	EFX_DL_FILTER_BLOCK_KERNEL_UCAST = 0,
+	EFX_DL_FILTER_BLOCK_KERNEL_MCAST,
+	EFX_DL_FILTER_BLOCK_KERNEL_MAX,
+};
+
 /**
  * efx_dl_filter_block_kernel - Block the kernel from receiving packets
  * @dl_dev: Driverlink client device context
+ * @type: Type (unicast or multicast) of kernel block to insert
  *
  * This increments the kernel block count for the client.  So long as
  * any client has a non-zero count, all filters with priority HINT or
@@ -426,15 +439,20 @@ extern int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
  * explicit configuration (e.g. ethtool -U or PTP on Siena).  The net
  * driver's loopback self-test will also fail.
  */
-extern int efx_dl_filter_block_kernel(struct efx_dl_device *dl_dev);
+extern int efx_dl_filter_block_kernel(struct efx_dl_device *dl_dev,
+				      enum efx_dl_filter_block_kernel_type
+				      block);
 
 /**
  * efx_dl_filter_unblock_kernel - Reverse efx_filter_block_kernel()
  * @dl_dev: Driverlink client device context
+ * @type: Type (unicast or multicast) of kernel block to insert
  *
  * This decrements the kernel block count for the client.
  */
-extern void efx_dl_filter_unblock_kernel(struct efx_dl_device *dl_dev);
+extern void efx_dl_filter_unblock_kernel(struct efx_dl_device *dl_dev,
+					 enum efx_dl_filter_block_kernel_type
+					 type);
 
 /**
  * efx_dl_mcdi_rpc - Issue an MCDI command and wait for completion

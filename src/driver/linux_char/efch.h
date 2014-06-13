@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -109,6 +109,8 @@ typedef struct efch_resource_ops_s {
 struct efch_filter_list {
   spinlock_t lock;
   ci_dllist  filters;
+  int        next_id;
+  int        wrapped;
 };
 
 

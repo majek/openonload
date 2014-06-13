@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -203,20 +203,25 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
  * Clear all filters for an endpoint
  *
  * \param ep              endpoint kernel data structure
+ * \param supress_hw_ops  set to 1 if you know you are in a context 
+ *                        where hw ops are not safe
  *
  * \return                standard error codes
  *
  *--------------------------------------------------------------------*/
 
 int
-tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep)
+tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, 
+                                  int supress_hw_ops)
 {
   struct oo_file_ref* os_sock_ref;
 
-  OO_DEBUG_TCPH(ci_log("%s: [%d:%d] %s", __FUNCTION__, ep->thr->id,
-                       OO_SP_FMT(ep->id), in_atomic() ? "ATOMIC":""));
+  OO_DEBUG_TCPH(ci_log("%s: [%d:%d] %s %s", __FUNCTION__, ep->thr->id,
+                       OO_SP_FMT(ep->id), 
+                       in_atomic() ? "ATOMIC":"",
+                       supress_hw_ops ? "SUPRESS_HW":""));
 
-  if( in_atomic() ) {
+  if( in_atomic() || supress_hw_ops ) {
     /* Remove software filters immediately to ensure packets are not
      * delivered to this endpoint.  Defer oof_socket_del() if needed
      * to non-atomic context.
@@ -284,12 +289,12 @@ tcp_helper_endpoint_shutdown(tcp_helper_resource_t* thr, oo_sp ep_id,
                              int how, ci_uint32 old_state)
 {
   tcp_helper_endpoint_t * ep = ci_trs_ep_get(thr, ep_id);
-  int rc;
+  int rc, supress_hw_ops = thr->netif.flags & CI_NETIF_FLAG_IN_DL_CONTEXT;
 
   /* Calling shutdown on the socket unbinds it in most situations.
    * Since we must never have a filter configured for an unbound
    * socket, we clear the filters here. */
-  tcp_helper_endpoint_clear_filters(ep);
+  tcp_helper_endpoint_clear_filters(ep, supress_hw_ops);
 
   rc = efab_tcp_helper_shutdown_os_sock(ep, how);
 

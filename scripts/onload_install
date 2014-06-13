@@ -177,6 +177,27 @@ install_slib32() {
   fi
 }
 
+install_solar_clusterd() {
+  local pwd=$PWD
+  try $do cd "$bin/../src/tools/solar_clusterd"
+  local python_manifest=$(mktemp)
+  if [ -z "$i_prefix" ]; then
+    # Debian and Ubuntu mess up if --prefix=/usr is set.
+    ONLOAD_TREE="$bin/.." $do python setup.py install --record=$python_manifest
+  else
+    ONLOAD_TREE="$bin/.." $do python setup.py install --prefix="$i_prefix/usr"\
+                                                      --record=$python_manifest
+  fi
+
+  if [ $? != 0 ]; then
+    log "Could not install solar_clusterd python modules. "\
+        "(If using SLES10 you need the 'python-devel' pacakge)"
+  fi
+
+  manifest_combine $python_manifest
+  try $do cd $pwd
+}
+
 ######################################################################
 
 install_uninstall() {
@@ -208,6 +229,7 @@ install_userland() {
     install_x "$u64/tools/ip/onload_stackdump" "$i_usrbin/onload_stackdump"
     install_x "$u64/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
     install_x "$u64/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
+    install_solar_clusterd
     $affinity && {
       install_plib32 "$u32/lib/sfcaffinity/libsfcaffinity.so" \
                   "$i_lib32/libsfcaffinity.so"
@@ -623,14 +645,20 @@ if $fail32; then
       "See build log for further details."
   err
 fi
-if $sfccheck && /sbin/lsmod | grep -qw sfc; then
-  err
-  log "WARNING: An 'sfc' driver is already loaded.  You should"
-  log "WARNING: unload and reload (or reboot) to ensure you are"
-  log "WARNING: using the version supplied with OpenOnload."
-  err
-  log "WARNING: Try:   onload_tool reload"
-  err
+if $sfccheck; then
+  if /sbin/lsmod | grep -qw sfc; then
+    err
+    log "WARNING: An 'sfc' driver is already loaded.  You should"
+    log "WARNING: unload and reload (or reboot) to ensure you are"
+    log "WARNING: using the version supplied with OpenOnload."
+    err
+    log "WARNING: Try:   onload_tool reload"
+    err
+  else
+    echo
+    echo "$me: To load the newly installed drivers run:  onload_tool reload"
+    echo
+  fi
 fi
 
 exit 0

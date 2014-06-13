@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -3196,8 +3196,22 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     ts->t_last_recv_ack = ci_tcp_time_now(netif);
 
   /* Reconfirm ARP entry if necessary. */
-  if( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON )
-    check_rx_ip_cache_mac_update(netif, ts, pkt, 1);
+  if( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON ) {
+    /* If we can't be sure that the other end is getting our data then we
+     * need to compare our dest MAC with the source MAC of the incoming packet
+     * before confirming.
+     *
+     * If this is a pure new ACK then we're getting data through to the other
+     * end, so confirm MAC unconditionally.  This allows us to deal better
+     * with the cases where a virtual MAC address is in use (HSRP/VRRP) where
+     * the dest MAC for our outgoing packet (virtual router MAC) does not match
+     * the source MAC for the incoming packet (actual router MAC).
+     */
+    if( pkt->pf.tcp_rx.pay_len > 0 || SEQ_GE(tcp_snd_una(ts), rxp->ack) )
+      check_rx_ip_cache_mac_update(netif, ts, pkt, 1);
+    else
+      cicp_ip_cache_mac_update(netif, &ts->s.pkt, 1);
+  }
   
   /* Once you're synchronised rfc793 says all segments must have an ACK.
   ** So we don't even bother to check the ACK flag.  The worst that can

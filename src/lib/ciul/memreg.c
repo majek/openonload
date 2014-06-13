@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -46,6 +46,10 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
   mr->mr_dma_addrs = malloc(n_pages * sizeof(mr->mr_dma_addrs[0]));
   if( mr->mr_dma_addrs == NULL )
     return -ENOMEM;
+
+  /* For a pd in a cluster, use the handle from clusterd */
+  if( pd->pd_cluster_sock != -1 )
+    pd_dh = pd->pd_cluster_dh;
 
   memset(&ra, 0, sizeof(ra));
   strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));

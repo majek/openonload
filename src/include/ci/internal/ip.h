@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1309,8 +1309,6 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
 
 
 extern void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* netif) CI_HF;
-extern void ci_tcp_tx_prequeue(ci_netif*, ci_tcp_state*,
-                               ci_ip_pkt_fmt* fill_list)  CI_HF;
 extern void ci_tcp_tx_free_prequeue(ci_netif* ni, ci_tcp_state* ts,
                                     int netif_locked) CI_HF;
 extern void ci_tcp_send_rst(ci_netif* netif, ci_tcp_state* ts) CI_HF;
@@ -3265,7 +3263,12 @@ ci_inline void ci_tcp_set_initialcwnd(ci_netif* ni, ci_tcp_state* ts) {
 #endif
   }
   else {
-    ts->cwnd = NI_OPTS(ni).initial_cwnd;
+    if( NI_OPTS(ni).initial_cwnd < tcp_eff_mss(ts) ) {
+      /* issue a warning and set initial_cwnd to eff_mss */
+      ci_log("EF_TCP_INITIAL_CWND=%d is less than MSS value %d. Correcting.",
+             NI_OPTS(ni).initial_cwnd, tcp_eff_mss(ts));
+    }
+    ts->cwnd = CI_MAX(tcp_eff_mss(ts),NI_OPTS(ni).initial_cwnd);
   }
   ts->ssthresh = 65535;
 }

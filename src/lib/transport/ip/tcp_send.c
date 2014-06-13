@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1016,8 +1016,8 @@ static void ci_tcp_sendmsg_enqueue(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-void ci_tcp_tx_prequeue(ci_netif* ni, ci_tcp_state* ts,
-                        ci_ip_pkt_fmt* fill_list)
+static void ci_tcp_tx_prequeue(ci_netif* ni, ci_tcp_state* ts,
+                               ci_ip_pkt_fmt* fill_list)
 {
   ci_ip_pkt_fmt* next;
   ci_ip_pkt_fmt* pkt;
@@ -1033,6 +1033,7 @@ void ci_tcp_tx_prequeue(ci_netif* ni, ci_tcp_state* ts,
   }
 
   oo_atomic_add(&ts->send_prequeue_in, n_pkts);
+  ++ts->stats.tx_defer;
 
   /* Put [fill_list] onto the prequeue. */
   do
@@ -1690,7 +1691,6 @@ unroll_msg_warm(ci_netif* ni, ci_tcp_state* ts, struct tcp_send_info* sinf,
                 int is_zc_send)
 {
   ci_ip_pkt_fmt* pkt;
-  ++ts->stats.tx_msg_warm_try;
   ++ts->stats.tx_msg_warm;
   ni->flags &= ~CI_NETIF_FLAG_MSG_WARM;
   ci_ip_queue_init(&ts->send);
@@ -2006,7 +2006,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
        * that failed, then the buffer list should be empty.  As we are
        * not hitting the fast path, just return.
        */
-      ++ts->stats.tx_msg_warm_try;
+      ++ts->stats.tx_msg_warm_abort;
       ci_assert_equal(sinf.pf.alloc_pkt, NULL);
       if( sinf.stack_locked )
         ci_netif_unlock(ni);
@@ -2026,7 +2026,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
 
  not_synchronised:
   if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
-    ++ts->stats.tx_msg_warm_try;
+    ++ts->stats.tx_msg_warm_abort;
     if( sinf.stack_locked )
       ci_netif_unlock(ni);
     return 0;
@@ -2049,7 +2049,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
       sinf.old_tcp_snd_nxt = tcp_snd_nxt(ts);
       goto fast_path;
     }
-    ++ts->stats.tx_msg_warm_try;
+    ++ts->stats.tx_msg_warm_abort;
     if( sinf.stack_locked )
       ci_netif_unlock(ni);
     if( sinf.total_unsent >= tcp_eff_mss(ts) )
@@ -2124,9 +2124,8 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
    */
   if( sendq_space <= 0 || flags & ONLOAD_MSG_WARM ) {
     if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
-      if( ! can_do_msg_warm(ni, ts, &sinf, msg->msg.iov[0].iov_len,
-                            flags) ) {
-        ++ts->stats.tx_msg_warm_try;
+      if( ! can_do_msg_warm(ni, ts, &sinf, msg->msg.iov[0].iov_len, flags) ) {
+        ++ts->stats.tx_msg_warm_abort;
         if( sinf.stack_locked )
           ci_netif_unlock(ni);
         msg->rc = 0;
@@ -2291,7 +2290,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
 
  bad_buffer:
   if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
-    ++ts->stats.tx_msg_warm_try;
+    ++ts->stats.tx_msg_warm_abort;
     if( sinf.stack_locked )
       ci_netif_unlock(ni);
     msg->rc = -EINVAL;

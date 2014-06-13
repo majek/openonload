@@ -1,0 +1,307 @@
+#! /usr/bin/env python
+
+#****************************************************************************
+# Copyright (c) 2013, Solarflare Communications Inc,
+#
+# Maintained by Solarflare Communications
+#  <onload-dev@solarflare.com>
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation, incorporated herein by reference.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+#****************************************************************************
+
+import os, sys, optparse, socket, select, stat, signal, pwd, errno
+
+path = os.path.join(os.path.dirname(sys.argv[0]), '../../..', 'build',
+                    'gnu_x86_64', 'tools', 'solar_clusterd')
+if os.path.exists(path):
+    sys.path.append(path)
+    import daemonize, parse_config, logger, cluster_protocol as cp
+else:
+    import solar_clusterd.daemonize as daemonize, \
+        solar_clusterd.parse_config as parse_config, \
+        solar_clusterd.logger as logger, solar_clusterd.cluster_protocol as cp
+
+
+# TODO: Use standard python for sendfd
+
+# TODO: Should daemonize after all initialisation is done or else we
+# do not detect errors.  Or better way of seeing errors
+
+
+class Cluster(object):
+    def __init__(self, driver_fd, pd_id, vi_id, protectionmode):
+        self.driver_fd = driver_fd
+        self.pd_id = pd_id
+        self.vi_id = vi_id
+        self.protectionmode = protectionmode
+
+
+class Server(object):
+    def __init__(self, options, config):
+        super(Server, self).__init__()
+        self.options = options
+        self.config = config
+        self.listen_sock = None
+        self.clients = {} # sock -> buffered_data
+        self.clusters = {} # cluster_name -> Cluster
+
+
+    def init_vis(self):
+        for name, cluster in self.config.clusters.items():
+            n_vis = cluster['numchannels']
+            intf = cluster['captureinterface']
+            protectionmode = cluster['protectionmode']
+            sys.stdout.write('Cluster %s: %s, %d channels, %s\n' % (
+                    name, intf, n_vis, protectionmode))
+
+            if not protectionmode.startswith('EF_PD_'):
+                raise SyntaxError("Cluster '%s': invalid protectionmode: '%s'" %
+                                  (name, protectionmode))
+            try:
+                protectionmode = getattr(cp, cluster['protectionmode'])
+            except AttributeError:
+                raise AttributeError(
+                    "Cluster '%s': invalid protectionmode: '%s'" % (
+                        name, protectionmode))
+
+            driver_fd = cp.open_driver()
+            cp_vi_index, pd_id, vi_id = cp.vi_set_alloc(driver_fd, intf, n_vis,
+                                                  protectionmode)
+            for streams in cluster['streams'].values():
+                for stream in streams.capturestream:
+                    print stream
+                    cp.vi_set_add_stream(cp_vi_index, stream)
+            self.clusters[name] = Cluster(driver_fd, pd_id, vi_id,
+                                          protectionmode)
+
+
+    def run(self):
+        signal.signal(signal.SIGINT, self.on_exit)
+        signal.signal(signal.SIGTERM, self.on_exit)
+        if os.path.exists(self.options.socket_path):
+            os.unlink(self.options.socket_path)
+        self.listen_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listen_sock.bind(self.options.socket_path)
+        os.chmod(self.options.socket_path, stat.S_IRUSR | stat.S_IWUSR)
+        self.listen_sock.listen(5)
+        sys.stdout.write('Listening on %s\n' % self.options.socket_path)
+        self.main_loop()
+
+
+    def main_loop(self):
+        while True:
+            select_fds = [self.listen_sock] + self.clients.keys()
+            try:
+                readable, _, _ = select.select(select_fds, [], [])
+            except select.error:
+                break # on_exit deleted our socket
+            for fd in readable:
+                if fd is self.listen_sock:
+                    self.accept(fd)
+                elif fd in self.clients:
+                    self.do_recv(fd)
+                else:
+                    assert 0, 'unknown fd %d' % fd.fileno()
+
+
+    def accept(self, sock):
+        new_sock, _ = sock.accept()
+        sys.stdout.write('Client %d: connected\n' % new_sock.fileno())
+        self.clients[new_sock] = ''
+
+
+    def do_recv(self, sock):
+        try:
+            data = sock.recv(1024)
+            if not data:
+                raise socket.error('EOF')
+        except socket.error:
+            sys.stdout.write('Client %d: disconnected\n' % sock.fileno())
+            del self.clients[sock]
+        else:
+            self.clients[sock] += data
+            self.handle_request(sock)
+
+
+    def handle_request(self, sock):
+        if '\n' in self.clients[sock]:
+            req, self.clients[sock] = self.clients[sock].split('\n', 1)
+            if ' ' in req:
+                req_id, payload = req.split(' ', 1)
+            else:
+                req_id = req
+                payload = ''
+
+            if req_id.isdigit():
+                req_id = int(req_id)
+
+            handlers = {cp.CLUSTERD_VERSION_REQ: self.handle_version_req,
+                        cp.CLUSTERD_ALLOC_CLUSTER_REQ:
+                            self.handle_alloc_cluster_req,}
+            try:
+                handlers[req_id](sock, req_id, payload)
+            except KeyError:
+                self.handle_bad_req(sock, req_id, req)
+
+
+    def handle_bad_req(self, sock, req_id, req):
+        sys.stdout.write('Client %d: bad request %r\n' % (sock.fileno(), req))
+        sock.send('%d\n' % (cp.CLUSTERD_ERR_BAD_REQUEST))
+
+
+    def handle_version_req(self, sock, req_id, payload):
+        ver = payload
+        sys.stdout.write('Client %d: version request %r ' % (
+                sock.fileno(), ver))
+        if ver.isdigit() and \
+                int(ver) == cp.CLUSTERD_PROTOCOL_VERSION:
+            result = cp.CLUSTERD_ERR_SUCCESS
+            sys.stdout.write('(version match)\n')
+        else:
+            result = cp.CLUSTERD_ERR_FAIL
+            sys.stdout.write('(version mismatch)\n')
+        sock.send('%d %d\n' % (cp.CLUSTERD_VERSION_RESP, result))
+
+
+    def handle_alloc_cluster_req(self, sock, req_id, payload):
+        sys.stdout.write('Client %d: cluster request %r ' % (
+                sock.fileno(), payload))
+        (name, requested_pd_flags) = payload.split()
+        requested_pd_flags = int(requested_pd_flags)
+
+        if name not in self.clusters.keys():
+            sys.stdout.write('(%s: no such cluster)\n' % name)
+            sock.send('%d %d %d %d\n' % (
+                    cp.CLUSTERD_ALLOC_CLUSTER_RESP, cp.CLUSTERD_ERR_FAIL,
+                    errno.ENOENT, 0))
+            return
+
+        cluster = self.clusters[name]
+        if requested_pd_flags != cluster.protectionmode:
+            sys.stdout.write('(PD flags do not match req=%d cluster=%d)\n' % (
+                    requested_pd_flags, cluster.protectionmode))
+            sock.send('%d %d %d %d\n' % (
+                    cp.CLUSTERD_ALLOC_CLUSTER_RESP, cp.CLUSTERD_ERR_FAIL,
+                    errno.EINVAL, 0))
+            return
+
+        sys.stdout.write('Success: fd=%d, pd=%d, vi_set=%d, pd_flags=%d\n' % (
+                cluster.driver_fd, cluster.pd_id, cluster.vi_id,
+                cluster.protectionmode))
+        cp.sendfd(sock.fileno(), cluster.driver_fd, '%d %d %d %d\n' % (
+                cp.CLUSTERD_ALLOC_CLUSTER_RESP, cp.CLUSTERD_ERR_SUCCESS,
+                cluster.pd_id, cluster.vi_id))
+
+
+    def on_exit(self, _signal, frame):
+        sys.stdout.write('Received signal %s\n' % _signal)
+        if os.path.exists(self.options.socket_path):
+            sys.stdout.write('Deleting %s\n' % self.options.socket_path)
+            os.unlink(self.options.socket_path)
+        if not self.options.foreground:
+            if os.path.isfile(self.options.pidfile):
+                sys.stdout.write('Deleting %s\n' % self.options.pidfile)
+                os.unlink(self.options.pidfile)
+
+
+def main(config_file, options):
+    config = parse_config.Config(config_file)
+    daemonize.check_pidfile(options.pidfile)
+
+    log_targets = []
+    if options.logfile:
+        log_targets.append(file(options.logfile, 'a'))
+    if options.foreground:
+        log_targets.append(sys.stdout)
+
+    sys.stdout = logger.Logger(*log_targets)
+    sys.stdout.write(60 * '=' + '\n')
+    sys.stdout.write('solar_clusterd version: %s\n' % cp.ONLOAD_VERSION)
+
+    if not options.foreground:
+        daemonize.daemonize('solar_clusterd', options.pidfile, options.user,
+                            options.group)
+
+    server = Server(options, config)
+    server.init_vis()
+    server.run()
+
+
+def parse_cmdline():
+    default_path = os.path.join(
+        cp.DEFAULT_CLUSTERD_DIR + '<username>',
+        cp.DEFAULT_CLUSTERD_SOCK_NAME)
+
+    usage = 'usage: %prog [options] config-file'
+    parser = optparse.OptionParser(
+        version=cp.ONLOAD_VERSION, usage=usage)
+    parser.add_option('-l', '--logfile', help='Log to this file. '
+                      'Default is ' + default_path + '.log')
+    parser.add_option('-p', '--pidfile',
+                      help='Specify pidfile path. ' + 
+                      'Default is ' + default_path + '.pid')
+    parser.add_option('-s', '--socket',
+                      dest='socket_path',
+                      help='Domain socket path. '
+                      'Default is ' + default_path + '. ' +
+                      'If this is changed from the default, ' +
+                      'solar_capture must be invoked with environment ' +
+                      'variable EF_VI_CLUSTER_SOCKET set to the new socket ' +
+                      'path.')
+    parser.add_option('-f', '--foreground', help='Do not daemonize',
+                      action='store_true')
+    parser.add_option('-u', '--user', help='Drop privileges to this '
+                      'user after daemonizing', metavar='USER[:GROUP]')
+    options, args = parser.parse_args()
+
+    if len(args) != 1:
+        parser.print_usage()
+        sys.exit(1)
+    config_file = args[0]
+
+    options.group = None
+    if options.user:
+        if options.foreground:
+            sys.stderr.write(
+                'ERROR: --user is not supported in foreground mode\n')
+            sys.exit(1)
+        elif os.getuid() != 0:
+            sys.stderr.write(
+                'ERROR: --user only supported when running as root\n')
+            sys.exit(1)
+
+        if ':' in options.user:
+            options.user, options.group = options.user.split(':', 1)
+
+    username = options.user or pwd.getpwuid(os.getuid()).pw_name
+    clusterd_prefix = os.path.join(
+        cp.DEFAULT_CLUSTERD_DIR + username, cp.DEFAULT_CLUSTERD_SOCK_NAME)
+
+    if options.socket_path is None:
+        options.socket_path = clusterd_prefix
+    if options.pidfile is None:
+        options.pidfile = clusterd_prefix + '.pid'
+    if (not options.foreground) and options.logfile is None:
+        options.logfile = clusterd_prefix + '.log'
+
+    for f in [options.pidfile, options.socket_path, options.logfile]:
+        if f and not os.path.isdir(os.path.dirname(f)):
+            os.makedirs(os.path.dirname(f))
+
+    return config_file, options
+
+
+if __name__ == '__main__':
+    (config_file, options) = parse_cmdline()
+    main(config_file, options)

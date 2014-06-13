@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -289,6 +289,11 @@
 	(MC_CMD_DBI_WRITE_IN_DBIWROP_OFST +		\
 	 MC_CMD_DBIWROP_TYPEDEF_VALUE_OFST +		\
 	 (n) * MC_CMD_DBIWROP_TYPEDEF_LEN)
+
+/* This may be ORed with an EVB_PORT_ID_xxx constant to pass a non-default
+ * stack ID (which must be in the range 1-255) along with an EVB port ID.
+ */
+#define EVB_STACK_ID(n)  (((n) & 0xff) << 16)
 
 
 /* Version 2 adds an optional argument to error returns: the errno value
@@ -696,24 +701,30 @@
 
 /* MC_CMD_COPYCODE_IN msgrequest */
 #define    MC_CMD_COPYCODE_IN_LEN 16
-/* Source address */
-#define       MC_CMD_COPYCODE_IN_SRC_ADDR_OFST 0
-/* enum: The main image should be entered via a copy of a single word from and
- * to this address when none of the other magic behaviours are required.
+/* Source address
+ *
+ * The main image should be entered via a copy of a single word from and to a
+ * magic address, which controls various aspects of the boot. The magic address
+ * is a bitfield, with each bit as documented below.
  */
+#define       MC_CMD_COPYCODE_IN_SRC_ADDR_OFST 0
+/* enum: Deprecated; equivalent to setting BOOT_MAGIC_PRESENT (see below) */
 #define          MC_CMD_COPYCODE_HUNT_NO_MAGIC_ADDR 0x10000
-/* enum: Entering the main image via a copy of a single word from and to this
- * address indicates that it should not attempt to start the datapath CPUs.
- * This is useful for certain soft rebooting scenarios. (Huntington only)
+/* enum: Deprecated; equivalent to setting BOOT_MAGIC_PRESENT and
+ * BOOT_MAGIC_SATELLITE_CPUS_NOT_LOADED (see below)
  */
 #define          MC_CMD_COPYCODE_HUNT_NO_DATAPATH_MAGIC_ADDR 0x1d0d0
-/* enum: Entering the main image via a copy of a single word from and to this
- * address indicates that it should not attempt to parse any configuration from
- * flash. (In addition, the datapath CPUs will not be started, as for
- * MC_CMD_COPYCODE_HUNT_NO_DATAPATH_MAGIC_ADDR above.) This is useful for
- * certain soft rebooting scenarios. (Huntington only)
+/* enum: Deprecated; equivalent to setting BOOT_MAGIC_PRESENT,
+ * BOOT_MAGIC_SATELLITE_CPUS_NOT_LOADED and BOOT_MAGIC_IGNORE_CONFIG (see
+ * below)
  */
 #define          MC_CMD_COPYCODE_HUNT_IGNORE_CONFIG_MAGIC_ADDR 0x1badc
+#define        MC_CMD_COPYCODE_IN_BOOT_MAGIC_PRESENT_LBN 17
+#define        MC_CMD_COPYCODE_IN_BOOT_MAGIC_PRESENT_WIDTH 1
+#define        MC_CMD_COPYCODE_IN_BOOT_MAGIC_SATELLITE_CPUS_NOT_LOADED_LBN 2
+#define        MC_CMD_COPYCODE_IN_BOOT_MAGIC_SATELLITE_CPUS_NOT_LOADED_WIDTH 1
+#define        MC_CMD_COPYCODE_IN_BOOT_MAGIC_IGNORE_CONFIG_LBN 3
+#define        MC_CMD_COPYCODE_IN_BOOT_MAGIC_IGNORE_CONFIG_WIDTH 1
 /* Destination address */
 #define       MC_CMD_COPYCODE_IN_DEST_ADDR_OFST 4
 #define       MC_CMD_COPYCODE_IN_NUMWORDS_OFST 8
@@ -2836,14 +2847,14 @@
  * PM_AND_RXDP_COUNTERS capability only.
  */
 #define          MC_CMD_MAC_RXDP_STREAMING_PKTS  0x46
-/* enum: RXDP counter: Number of times an emergency descriptor fetch was
- * performed. Valid for EF10 with PM_AND_RXDP_COUNTERS capability only.
+/* enum: RXDP counter: Number of times an hlb descriptor fetch was performed.
+ * Valid for EF10 with PM_AND_RXDP_COUNTERS capability only.
  */
-#define          MC_CMD_MAC_RXDP_EMERGENCY_FETCH_CONDITIONS  0x47
+#define          MC_CMD_MAC_RXDP_HLB_FETCH_CONDITIONS  0x47
 /* enum: RXDP counter: Number of times the DPCPU waited for an existing
  * descriptor fetch. Valid for EF10 with PM_AND_RXDP_COUNTERS capability only.
  */
-#define          MC_CMD_MAC_RXDP_EMERGENCY_WAIT_CONDITIONS  0x48
+#define          MC_CMD_MAC_RXDP_HLB_WAIT_CONDITIONS  0x48
 /* enum: Start of GMAC stats buffer space, for Siena only. */
 #define          MC_CMD_GMAC_DMABUF_START  0x40
 /* enum: End of GMAC stats buffer space, for Siena only. */
@@ -3493,6 +3504,10 @@
 #define          MC_CMD_SENSOR_VDD08D_VSS08D_CSR_EXTADC  0x2c
 /* enum: Hotpoint temperature: degC */
 #define          MC_CMD_SENSOR_HOTPOINT_TEMP  0x2d
+/* enum: Port 0 PHY power switch over-current: bool */
+#define          MC_CMD_SENSOR_PHY_POWER_PORT0  0x2e
+/* enum: Port 1 PHY power switch over-current: bool */
+#define          MC_CMD_SENSOR_PHY_POWER_PORT1  0x2f
 /* MC_CMD_SENSOR_INFO_ENTRY_TYPEDEF */
 #define       MC_CMD_SENSOR_ENTRY_OFST 4
 #define       MC_CMD_SENSOR_ENTRY_LEN 8
@@ -5358,6 +5373,10 @@
 #define        MC_CMD_GET_CAPABILITIES_OUT_MCAST_FILTER_CHAINING_WIDTH 1
 #define        MC_CMD_GET_CAPABILITIES_OUT_PM_AND_RXDP_COUNTERS_LBN 27
 #define        MC_CMD_GET_CAPABILITIES_OUT_PM_AND_RXDP_COUNTERS_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_DISABLE_SCATTER_LBN 28
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_DISABLE_SCATTER_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_OUT_TX_MCAST_UDP_LOOPBACK_LBN 29
+#define        MC_CMD_GET_CAPABILITIES_OUT_TX_MCAST_UDP_LOOPBACK_WIDTH 1
 /* RxDPCPU firmware id. */
 #define       MC_CMD_GET_CAPABILITIES_OUT_RX_DPCPU_FW_ID_OFST 4
 #define       MC_CMD_GET_CAPABILITIES_OUT_RX_DPCPU_FW_ID_LEN 2
@@ -7917,6 +7936,73 @@
 #define          MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_MODE_RSS  0x1
 /* RSS context (for RX_MODE_RSS) */
 #define       MC_CMD_GET_PORT_SNIFF_CONFIG_OUT_RX_CONTEXT_OFST 12
+
+
+/***********************************/
+/* MC_CMD_SET_PARSER_DISP_CONFIG
+ * Change configuration related to the parser-dispatcher subsystem.
+ */
+#define MC_CMD_SET_PARSER_DISP_CONFIG 0xf9
+
+/* MC_CMD_SET_PARSER_DISP_CONFIG_IN msgrequest */
+#define    MC_CMD_SET_PARSER_DISP_CONFIG_IN_LENMIN 12
+#define    MC_CMD_SET_PARSER_DISP_CONFIG_IN_LENMAX 252
+#define    MC_CMD_SET_PARSER_DISP_CONFIG_IN_LEN(num) (8+4*(num))
+/* the type of configuration setting to change */
+#define       MC_CMD_SET_PARSER_DISP_CONFIG_IN_TYPE_OFST 0
+/* enum: Per-TXQ enable for multicast UDP destination lookup for possible
+ * internal loopback. (ENTITY is a queue handle, VALUE is a single boolean.)
+ */
+#define          MC_CMD_SET_PARSER_DISP_CONFIG_IN_TXQ_MCAST_UDP_DST_LOOKUP_EN  0x0
+/* enum: Per-v-adaptor enable for suppression of self-transmissions on the
+ * internal loopback path. (ENTITY is an EVB_PORT_ID, VALUE is a single
+ * boolean.)
+ */
+#define          MC_CMD_SET_PARSER_DISP_CONFIG_IN_VADAPTOR_SUPPRESS_SELF_TX  0x1
+/* handle for the entity to update: queue handle, EVB port ID, etc. depending
+ * on the type of configuration setting being changed
+ */
+#define       MC_CMD_SET_PARSER_DISP_CONFIG_IN_ENTITY_OFST 4
+/* new value: the details depend on the type of configuration setting being
+ * changed
+ */
+#define       MC_CMD_SET_PARSER_DISP_CONFIG_IN_VALUE_OFST 8
+#define       MC_CMD_SET_PARSER_DISP_CONFIG_IN_VALUE_LEN 4
+#define       MC_CMD_SET_PARSER_DISP_CONFIG_IN_VALUE_MINNUM 1
+#define       MC_CMD_SET_PARSER_DISP_CONFIG_IN_VALUE_MAXNUM 61
+
+/* MC_CMD_SET_PARSER_DISP_CONFIG_OUT msgresponse */
+#define    MC_CMD_SET_PARSER_DISP_CONFIG_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_GET_PARSER_DISP_CONFIG
+ * Read configuration related to the parser-dispatcher subsystem.
+ */
+#define MC_CMD_GET_PARSER_DISP_CONFIG 0xfa
+
+/* MC_CMD_GET_PARSER_DISP_CONFIG_IN msgrequest */
+#define    MC_CMD_GET_PARSER_DISP_CONFIG_IN_LEN 8
+/* the type of configuration setting to read */
+#define       MC_CMD_GET_PARSER_DISP_CONFIG_IN_TYPE_OFST 0
+/*            Enum values, see field(s): */
+/*               MC_CMD_SET_PARSER_DISP_CONFIG/MC_CMD_SET_PARSER_DISP_CONFIG_IN/TYPE */
+/* handle for the entity to query: queue handle, EVB port ID, etc. depending on
+ * the type of configuration setting being read
+ */
+#define       MC_CMD_GET_PARSER_DISP_CONFIG_IN_ENTITY_OFST 4
+
+/* MC_CMD_GET_PARSER_DISP_CONFIG_OUT msgresponse */
+#define    MC_CMD_GET_PARSER_DISP_CONFIG_OUT_LENMIN 4
+#define    MC_CMD_GET_PARSER_DISP_CONFIG_OUT_LENMAX 252
+#define    MC_CMD_GET_PARSER_DISP_CONFIG_OUT_LEN(num) (0+4*(num))
+/* current value: the details depend on the type of configuration setting being
+ * read
+ */
+#define       MC_CMD_GET_PARSER_DISP_CONFIG_OUT_VALUE_OFST 0
+#define       MC_CMD_GET_PARSER_DISP_CONFIG_OUT_VALUE_LEN 4
+#define       MC_CMD_GET_PARSER_DISP_CONFIG_OUT_VALUE_MINNUM 1
+#define       MC_CMD_GET_PARSER_DISP_CONFIG_OUT_VALUE_MAXNUM 63
 
 
 #endif /* MCDI_PCOL_H */

@@ -1,3 +1,56 @@
+OpenOnload-201310-u2 Release Notes
+==================================
+
+This is an update release that fixes bugs in openonload-201310 and
+adds a few enhancements.
+
+The accompanying ChangeLog file contains details of the changes made
+in this release.
+
+Please see ReleaseNotes-sfc for details of changes to the sfc net driver
+
+The Release Notes for the openonload-201310 and openonload-201310-u1
+releases are included at the end of this file.
+
+----------------------------------------
+New Configuration Options
+-------------------------
+
+EF_LOG
+
+This option is designed to control how "chatty" Onload's informative
+and warning messages are.  It takes a comma-separated list of message
+groups to enable and disable (if prefixed with a minus sign).
+
+Current valid message groups are:
+ banner (on by default) for the Onload copyright banner;
+ resource_warnings (on by default) for (e.g.) huge page allocation messages;
+ conn_drop (off by default) for (e.g.) connections dropped from listen queue;
+E.g. to enable conn_drop and disable resource_warnings set:
+EF_LOG=conn_drop,-resource_warnings
+
+Future releases will likely extend the set of messages controlled by
+each group and add more groups of log messages that can be controlled
+in this way.
+
+----------------------------------------
+New features
+------------
+
+ - solar_clusterd: this uses support for ef_vi application clustering
+ to allow SolarCapturePro to scale across many CPUs.  Application
+ clustering allows a stream of traffic to be split across many VIs so
+ that a cluster of applications can process it in parallel to increase
+ scalability.
+
+ - unicast-all and multicast-all ef_vi filters: the change in
+ semantics outlined below for openonload-201310-u1 has now been
+ resolved, such that unicast-all only blocks unicast traffic, and
+ multicast-all only blocks multicast traffic.
+
+ - phys_mod_gid module option to sfc_char: this controls the group ID
+ of ef_vi applications which are allowed to use physical buffer mode.
+
 
 OpenOnload-201310-u1 Release Notes
 ==================================

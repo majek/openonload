@@ -55,6 +55,12 @@ EFRM_HAVE_NETDEV_NOTIFIER_INFO	symbol	netdev_notifier_info_to_dev	include/linux/
 EFRM_HAVE_PGPROT_WRITECOMBINE	symtype	pgprot_writecombine 	include/linux/mm.h pgprot_t(pgprot_t)
 EFRM_HAVE_IOREMAP_WC		symbol	ioremap_wc		arch/$SRCARCH/include/asm/io.h include/asm-$SRCARCH/io.h include/asm-generic/io.h
 
+EFRM_HAVE_IOMMU_MAP_OLD	symtype	iommu_map	include/linux/iommu.h int(struct iommu_domain *, unsigned long, phys_addr_t, int, int)
+EFRM_HAVE_IOMMU_MAP	symtype	iommu_map	include/linux/iommu.h int(struct iommu_domain *, unsigned long, phys_addr_t, size_t, int)
+
+EFRM_HAVE_NETFILTER_INDIRECT_SKB		memtype	struct_nf_hook_ops	hook	include/linux/netfilter.h	unsigned int(*)(unsigned int, struct sk_buff **, const struct net_device *, const struct net_device *, int (*)(struct sk_buff *))
+EFRM_HAVE_NETFILTER_HOOK_OPS		memtype	struct_nf_hook_ops	hook	include/linux/netfilter.h	unsigned int(*)(const struct nf_hook_ops *, struct sk_buff *, const struct net_device *, const struct net_device *, int (*)(struct sk_buff *))
+
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }

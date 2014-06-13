@@ -109,6 +109,6 @@ Any questions?
 
 
 ==========
- version: openonload-201310-u1
-revision: 1289da18f744 (ool1310) openonload-201310-u1
-    date: Mon Dec  2 16:35:17 GMT 2013
+ version: openonload-201310-u2
+revision: b02e7bd28fe8 (ool1310) openonload-201310-u2-rc1
+    date: Thu Feb 13 10:54:05 GMT 2014

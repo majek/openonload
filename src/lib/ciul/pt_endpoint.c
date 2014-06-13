@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -111,11 +111,11 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 		  int index_in_vi_set, int ifindex, int evq_capacity,
 		  int rxq_capacity, int txq_capacity,
 		  ef_vi* evq, ef_driver_handle evq_dh,
-		  enum ef_vi_flags vi_flags)
+		  int vi_clustered, enum ef_vi_flags vi_flags)
 {
   struct ef_vi_nic_type nic_type;
   ci_resource_alloc_t ra;
-  char* mem_mmap_ptr;
+  char *mem_mmap_ptr_orig, *mem_mmap_ptr;
   ef_vi_state* state;
   char* io_mmap_ptr;
   int rc;
@@ -129,7 +129,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 
   /* Ensure ef_vi_free() only frees what we allocate. */
   io_mmap_ptr = NULL;
-  mem_mmap_ptr = NULL;
+  mem_mmap_ptr = mem_mmap_ptr_orig = NULL;
 
   if( evq == NULL )
     q_label = 0;
@@ -199,7 +199,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
       LOGVV(ef_log("%s: ci_resource_mmap (mem) %d", __FUNCTION__, rc));
       goto fail3;
     }
-    mem_mmap_ptr = (char*) p;
+    mem_mmap_ptr = mem_mmap_ptr_orig = (char*) p;
   }
 
   rc = ef_vi_arch_from_efhw_arch(ra.u.vi_out.nic_arch);
@@ -239,10 +239,11 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     ef_vi_init_txq(vi, txq_capacity, mem_mmap_ptr, ids);
 
   vi->vi_io_mmap_ptr = io_mmap_ptr;
-  vi->vi_mem_mmap_ptr = mem_mmap_ptr;
+  vi->vi_mem_mmap_ptr = mem_mmap_ptr_orig;
   vi->vi_io_mmap_bytes = ra.u.vi_out.io_mmap_bytes;
   vi->vi_mem_mmap_bytes = ra.u.vi_out.mem_mmap_bytes;
   vi->vi_resource_id = ra.out_id.index;
+  vi->vi_clustered = vi_clustered;
   ef_vi_init_state(vi);
   rc = ef_vi_add_queue(evq, vi);
   BUG_ON(rc != q_label);
@@ -268,13 +269,27 @@ int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
 			ef_vi* evq_opt, ef_driver_handle evq_dh,
 			enum ef_vi_flags flags)
 {
+	efch_resource_id_t res_id = efch_make_resource_id(pd->pd_resource_id);
+        int index_in_vi_set = 0;
+	int vi_clustered = 0;
+
 	if( pd->pd_flags & EF_PD_PHYS_MODE )
 		flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
-	return __ef_vi_alloc(vi, vi_dh,
-			     efch_make_resource_id(pd->pd_resource_id), pd_dh,
-			     0/*index_in_vi_set*/, -1/*ifindex*/,
-			     evq_capacity, rxq_capacity, txq_capacity,
-			     evq_opt, evq_dh, flags);
+	else
+		flags &= ~(EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR);
+
+	if( pd->pd_cluster_sock != -1 ) {
+		pd_dh = pd->pd_cluster_dh;
+		res_id = efch_make_resource_id(
+			pd->pd_cluster_viset_resource_id);
+                index_in_vi_set = -1;
+		vi_clustered = 1;
+	}
+	return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set,
+			     -1/*ifindex*/, evq_capacity, rxq_capacity,
+			     txq_capacity, evq_opt, evq_dh, vi_clustered,
+                             flags);
+			     
 }
 
 
@@ -287,12 +302,14 @@ int ef_vi_alloc_from_set(ef_vi* vi, ef_driver_handle vi_dh,
 {
 	if( vi_set->vis_pd->pd_flags & EF_PD_PHYS_MODE )
 		flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
+	else
+		flags &= ~(EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR);
 	return __ef_vi_alloc(vi, vi_dh,
 			     efch_make_resource_id(vi_set->vis_res_id),
 			     vi_set_dh, index_in_vi_set,
 			     -1/*ifindex*/,
 			     evq_capacity, rxq_capacity, txq_capacity,
-			     evq_opt, evq_dh, flags);
+			     evq_opt, evq_dh, 0, flags);
 }
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -114,7 +114,7 @@ struct vi_resource_dimensions {
 
 /*! Initialise resources */
 extern int
-efrm_resources_init(const struct vi_resource_dimensions *);
+efrm_resources_init(void);
 
 /*! Tear down resources */
 extern void efrm_resources_fini(void);

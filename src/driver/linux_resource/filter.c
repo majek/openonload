@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1980,16 +1980,44 @@ void efrm_filter_redirect(struct efrm_client *client, int filter_id, int rxq_i)
 EXPORT_SYMBOL(efrm_filter_redirect);
 
 
-int efrm_filter_block_kernel(struct efrm_client *client, bool block)
+int efrm_filter_block_kernel(struct efrm_client *client, int flags, bool block)
 {
 #if EFX_DRIVERLINK_API_VERSION > 10
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
 	int rc = 0;
-	if ( block ) 
+	if ( block ) {
+#if EFX_DRIVERLINK_API_VERSION > 11
+		if ( flags & EFRM_FILTER_BLOCK_UNICAST ) {
+			rc = efx_dl_filter_block_kernel(efx_dev,
+					EFX_DL_FILTER_BLOCK_KERNEL_UCAST);
+		}
+		if ( rc < 0 )
+			return rc;
+		if ( flags & EFRM_FILTER_BLOCK_MULTICAST ) {
+			rc = efx_dl_filter_block_kernel(efx_dev,
+					EFX_DL_FILTER_BLOCK_KERNEL_MCAST);
+		}
+		if ( rc < 0 )
+			goto unicast_unblock;
+#else
 		rc = efx_dl_filter_block_kernel(efx_dev);
-	else
+#endif
+	} else {
+#if EFX_DRIVERLINK_API_VERSION > 11
+		if ( flags & EFRM_FILTER_BLOCK_MULTICAST ) {
+			efx_dl_filter_unblock_kernel(efx_dev,
+					EFX_DL_FILTER_BLOCK_KERNEL_MCAST);
+		}
+unicast_unblock:
+		if ( flags & EFRM_FILTER_BLOCK_UNICAST ) {
+			efx_dl_filter_unblock_kernel(efx_dev,
+					EFX_DL_FILTER_BLOCK_KERNEL_UCAST);
+		}
+#else
 		efx_dl_filter_unblock_kernel(efx_dev);
+#endif
+	}
 	return rc;
 #else
 	return -EOPNOTSUPP;

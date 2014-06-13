@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -90,7 +90,7 @@ struct efx_ef10_filter_table {
 	int dev_uc_count;		/* negative for PROMISC */
 	int dev_mc_count;		/* negative for PROMISC/ALLMULTI */
 #ifdef EFX_NOT_UPSTREAM
-	bool kernel_blocked;
+	bool kernel_blocked[EFX_DL_FILTER_BLOCK_KERNEL_MAX];
 #endif
 };
 
@@ -318,8 +318,8 @@ static int efx_ef10_probe(struct efx_nic *efx)
 	else if (rc != -ENOSYS && rc != -ENOENT)
 		goto fail3;
 	netif_dbg(efx, probe, efx->net_dev,
-		   "workaround for bug 35388 is %sabled\n",
-		   nic_data->workaround_35388 ? "en" : "dis");
+		  "workaround for bug 35388 is %sabled\n",
+		  nic_data->workaround_35388 ? "en" : "dis");
 
 	rc = efx_mcdi_mon_probe(efx);
 	if (rc)
@@ -349,6 +349,7 @@ static int efx_ef10_free_vis(struct efx_nic *efx)
 	size_t outlen;
 	int rc = efx_mcdi_rpc_quiet(efx, MC_CMD_FREE_VIS, NULL, 0,
 				    outbuf, sizeof(outbuf), &outlen);
+
 	/* -EALREADY means nothing to free, so ignore */
 	if (rc == -EALREADY)
 		rc = 0;
@@ -566,8 +567,8 @@ static int efx_ef10_alloc_vis(struct efx_nic *efx,
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_ALLOC_VIS_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_ALLOC_VIS_OUT_LEN);
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
-	int rc;
 	size_t outlen;
+	int rc;
 
 	MCDI_SET_DWORD(inbuf, ALLOC_VIS_IN_MIN_VI_COUNT, min_vis);
 	MCDI_SET_DWORD(inbuf, ALLOC_VIS_IN_MAX_VI_COUNT, max_vis);
@@ -593,12 +594,12 @@ static int efx_ef10_alloc_vis(struct efx_nic *efx,
  */
 static int efx_ef10_dimension_resources(struct efx_nic *efx)
 {
-	int rc;
 	struct efx_dl_ef10_resources *res = &efx->ef10_resources;
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	unsigned int uc_mem_map_size, wc_mem_map_size;
 	unsigned int min_vis, pio_write_vi_base, max_vis;
 	void __iomem *membase;
+	int rc;
 
 	min_vis = max(efx->n_channels, efx->n_tx_channels * EFX_TXQ_TYPES);
 
@@ -854,8 +855,8 @@ static const struct efx_hw_stat_desc efx_ef10_stat_desc[EF10_STAT_COUNT] = {
 	EF10_DMA_STAT(rx_dp_q_disabled_packets, RXDP_Q_DISABLED_PKTS),
 	EF10_DMA_STAT(rx_dp_di_dropped_packets, RXDP_DI_DROPPED_PKTS),
 	EF10_DMA_STAT(rx_dp_streaming_packets, RXDP_STREAMING_PKTS),
-	EF10_DMA_STAT(rx_dp_hlb_fetch, RXDP_EMERGENCY_FETCH_CONDITIONS),
-	EF10_DMA_STAT(rx_dp_hlb_wait, RXDP_EMERGENCY_WAIT_CONDITIONS),
+	EF10_DMA_STAT(rx_dp_hlb_fetch, RXDP_HLB_FETCH_CONDITIONS),
+	EF10_DMA_STAT(rx_dp_hlb_wait, RXDP_HLB_WAIT_CONDITIONS),
 };
 
 #define HUNT_COMMON_STAT_MASK ((1ULL << EF10_STAT_tx_bytes) |		\
@@ -970,9 +971,9 @@ static int efx_ef10_try_update_nic_stats(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	DECLARE_BITMAP(mask, EF10_STAT_COUNT);
+	__le64 generation_start, generation_end;
 	u64 *stats = nic_data->stats;
 	__le64 *dma_stats;
-	__le64 generation_start, generation_end;
 
 	efx_ef10_get_stat_mask(efx, mask);
 
@@ -1227,8 +1228,8 @@ static irqreturn_t efx_ef10_legacy_interrupt(int irq, void *dev_id,
 {
 	struct efx_nic *efx = dev_id;
 	bool soft_enabled = ACCESS_ONCE(efx->irq_soft_enabled);
-	efx_dword_t reg;
 	struct efx_channel *channel;
+	efx_dword_t reg;
 	u32 queues;
 
 	/* Read the ISR which also ACKs the interrupts */
@@ -1280,7 +1281,7 @@ static int efx_ef10_tx_probe(struct efx_tx_queue *tx_queue)
 static inline void efx_ef10_push_tx_desc(struct efx_tx_queue *tx_queue,
 					 const efx_qword_t *txd)
 {
-	unsigned write_ptr;
+	unsigned int write_ptr;
 	efx_oword_t reg;
 
 	write_ptr = tx_queue->write_count & tx_queue->ptr_mask;
@@ -1292,17 +1293,17 @@ static inline void efx_ef10_push_tx_desc(struct efx_tx_queue *tx_queue,
 
 static void efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 {
-	struct efx_nic *efx = tx_queue->efx;
-	struct efx_channel *channel = tx_queue->channel;
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_INIT_TXQ_IN_LEN(EFX_MAX_DMAQ_SIZE * 8
-						       / EFX_BUF_SIZE));
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_INIT_TXQ_IN_LEN(EFX_MAX_DMAQ_SIZE * 8 /
+						       EFX_BUF_SIZE));
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_INIT_TXQ_OUT_LEN);
 	bool csum_offload = tx_queue->queue & EFX_TXQ_TYPE_OFFLOAD;
-	size_t inlen, outlen;
-	int rc;
 	size_t entries = tx_queue->txd.buf.len / EFX_BUF_SIZE;
+	struct efx_channel *channel = tx_queue->channel;
+	struct efx_nic *efx = tx_queue->efx;
+	size_t inlen, outlen;
 	dma_addr_t dma_addr;
 	efx_qword_t *txd;
+	int rc;
 	int i;
 
 	MCDI_SET_DWORD(inbuf, INIT_TXQ_IN_SIZE, tx_queue->ptr_mask + 1);
@@ -1360,9 +1361,9 @@ fail:
 
 static void efx_ef10_tx_fini(struct efx_tx_queue *tx_queue)
 {
-	struct efx_nic *efx = tx_queue->efx;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_FINI_TXQ_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_FINI_TXQ_OUT_LEN);
+	struct efx_nic *efx = tx_queue->efx;
 	size_t outlen;
 	int rc;
 
@@ -1390,7 +1391,7 @@ static void efx_ef10_tx_remove(struct efx_tx_queue *tx_queue)
 /* This writes to the TX_DESC_WPTR; write pointer for TX descriptor ring */
 static inline void efx_ef10_notify_tx_desc(struct efx_tx_queue *tx_queue)
 {
-	unsigned write_ptr;
+	unsigned int write_ptr;
 	efx_dword_t reg;
 
 	write_ptr = tx_queue->write_count & tx_queue->ptr_mask;
@@ -1401,10 +1402,10 @@ static inline void efx_ef10_notify_tx_desc(struct efx_tx_queue *tx_queue)
 
 static void efx_ef10_tx_write(struct efx_tx_queue *tx_queue)
 {
-	struct efx_tx_buffer *buffer;
-	efx_qword_t *txd;
-	unsigned write_ptr;
 	unsigned old_write_count = tx_queue->write_count;
+	struct efx_tx_buffer *buffer;
+	unsigned int write_ptr;
+	efx_qword_t *txd;
 
 	BUG_ON(tx_queue->write_count == tx_queue->insert_count);
 
@@ -1472,8 +1473,8 @@ static int efx_ef10_alloc_rss_context(struct efx_nic *efx, u32 *context)
 
 static void efx_ef10_free_rss_context(struct efx_nic *efx, u32 context)
 {
-	int rc;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_RSS_CONTEXT_FREE_IN_LEN);
+	int rc;
 
 	MCDI_SET_DWORD(inbuf, RSS_CONTEXT_FREE_IN_RSS_CONTEXT_ID,
 		       context);
@@ -1588,16 +1589,16 @@ static int efx_ef10_rx_probe(struct efx_rx_queue *rx_queue)
 
 static void efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
 {
-	struct efx_nic *efx = rx_queue->efx;
-	struct efx_channel *channel = efx_rx_queue_channel(rx_queue);
 	MCDI_DECLARE_BUF(inbuf,
-			 MC_CMD_INIT_RXQ_IN_LEN(EFX_MAX_DMAQ_SIZE * 8
-						/ EFX_BUF_SIZE));
+			 MC_CMD_INIT_RXQ_IN_LEN(EFX_MAX_DMAQ_SIZE * 8 /
+						EFX_BUF_SIZE));
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_INIT_RXQ_OUT_LEN);
-	size_t inlen, outlen;
-	int rc;
+	struct efx_channel *channel = efx_rx_queue_channel(rx_queue);
 	size_t entries = rx_queue->rxd.buf.len / EFX_BUF_SIZE;
+	struct efx_nic *efx = rx_queue->efx;
+	size_t inlen, outlen;
 	dma_addr_t dma_addr;
+	int rc;
 	int i;
 
 	INIT_WORK(&rx_queue->defer_refill_work, efx_ef10_do_defer_refill);
@@ -1637,9 +1638,9 @@ static void efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
 
 static void efx_ef10_rx_fini(struct efx_rx_queue *rx_queue)
 {
-	struct efx_nic *efx = rx_queue->efx;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_FINI_RXQ_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_FINI_RXQ_OUT_LEN);
+	struct efx_nic *efx = rx_queue->efx;
 	size_t outlen;
 	int rc;
 
@@ -1666,7 +1667,7 @@ static void efx_ef10_rx_remove(struct efx_rx_queue *rx_queue)
 
 /* This creates an entry in the RX descriptor queue */
 static inline void
-efx_ef10_build_rx_desc(struct efx_rx_queue *rx_queue, unsigned index)
+efx_ef10_build_rx_desc(struct efx_rx_queue *rx_queue, unsigned int index)
 {
 	struct efx_rx_buffer *rx_buf;
 	efx_qword_t *rxd;
@@ -1728,18 +1729,21 @@ static int efx_ef10_ev_probe(struct efx_channel *channel)
 
 static int efx_ef10_ev_init(struct efx_channel *channel)
 {
-	struct efx_nic *efx = channel->efx;
-	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	MCDI_DECLARE_BUF(inbuf,
-			 MC_CMD_INIT_EVQ_IN_LEN(EFX_MAX_EVQ_SIZE * 8
-						/ EFX_BUF_SIZE));
+			 MC_CMD_INIT_EVQ_IN_LEN(EFX_MAX_EVQ_SIZE * 8 /
+						EFX_BUF_SIZE));
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_INIT_EVQ_OUT_LEN);
-	size_t inlen, outlen;
-	int rc;
 	size_t entries = channel->eventq.buf.len / EFX_BUF_SIZE;
+	struct efx_nic *efx = channel->efx;
+	struct efx_ef10_nic_data *nic_data;
+	bool supports_rx_merge;
+	size_t inlen, outlen;
 	dma_addr_t dma_addr;
+	int rc;
 	int i;
-	bool supports_rx_merge =
+
+	nic_data = efx->nic_data;
+	supports_rx_merge =
 		!!(nic_data->datapath_caps &
 		   1 << MC_CMD_GET_CAPABILITIES_OUT_RX_BATCHING_LBN);
 
@@ -1779,9 +1783,9 @@ static int efx_ef10_ev_init(struct efx_channel *channel)
 
 static void efx_ef10_ev_fini(struct efx_channel *channel)
 {
-	struct efx_nic *efx = channel->efx;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_FINI_EVQ_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_FINI_EVQ_OUT_LEN);
+	struct efx_nic *efx = channel->efx;
 	size_t outlen;
 	int rc;
 
@@ -1833,9 +1837,10 @@ static void efx_ef10_generate_event(struct efx_nic *efx, unsigned int evq,
 }
 
 static void efx_ef10_handle_rx_wrong_queue(struct efx_rx_queue *rx_queue,
-					   unsigned rx_queue_label)
+					   unsigned int rx_queue_label)
 {
 	struct efx_nic *efx = rx_queue->efx;
+
 	netif_info(efx, hw, efx->net_dev,
 		   "rx event arrived on queue %d labeled as queue %u\n",
 		   efx_rx_queue_index(rx_queue), rx_queue_label);
@@ -1843,11 +1848,13 @@ static void efx_ef10_handle_rx_wrong_queue(struct efx_rx_queue *rx_queue,
 	efx_schedule_reset(efx, RESET_TYPE_DISABLE);
 }
 
-static void efx_ef10_handle_rx_bad_lbits(struct efx_rx_queue *rx_queue,
-					 unsigned actual, unsigned expected)
+static void
+efx_ef10_handle_rx_bad_lbits(struct efx_rx_queue *rx_queue,
+			     unsigned int actual, unsigned int expected)
 {
-	struct efx_nic *efx = rx_queue->efx;
 	unsigned dropped = (actual - expected) & rx_queue->ptr_mask;
+	struct efx_nic *efx = rx_queue->efx;
+
 	netif_info(efx, hw, efx->net_dev,
 		   "dropped %d events (index=%d expected=%d)\n",
 		   dropped, actual, expected);
@@ -1859,7 +1866,7 @@ static void efx_ef10_handle_rx_bad_lbits(struct efx_rx_queue *rx_queue,
 /* partially received RX was aborted. clean up. */
 static void efx_ef10_handle_rx_abort(struct efx_rx_queue *rx_queue)
 {
-	unsigned rx_desc_ptr;
+	unsigned int rx_desc_ptr;
 
 	netif_dbg(rx_queue->efx, hw, rx_queue->efx->net_dev,
 		  "scattered RX aborted (dropping %u buffers)\n",
@@ -1879,16 +1886,15 @@ static void efx_ef10_handle_rx_abort(struct efx_rx_queue *rx_queue)
 static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 				    const efx_qword_t *event)
 {
-	struct efx_rx_queue *rx_queue;
-	struct efx_nic *efx = channel->efx;
-	u16 flags = 0;
-	unsigned next_ptr_lbits, n_descs, n_packets, i;
-	unsigned rx_bytes;
-	unsigned rx_queue_label;
-	unsigned rx_mac_class;
+	unsigned int rx_bytes, next_ptr_lbits, rx_queue_label;
 	unsigned rx_eth_base_class, rx_eth_tag_class;
 	unsigned rx_l3_class, rx_l4_class;
+	unsigned int n_descs, n_packets, i;
+	struct efx_nic *efx = channel->efx;
+	struct efx_rx_queue *rx_queue;
+	unsigned rx_mac_class;
 	unsigned rx_cont;
+	u16 flags = 0;
 
 	if (unlikely(ACCESS_ONCE(efx->reset_pending)))
 		return 0;
@@ -2038,10 +2044,10 @@ static int efx_ef10_handle_rx_event(struct efx_channel *channel,
 static int
 efx_ef10_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 {
+	struct efx_nic *efx = channel->efx;
+	struct efx_tx_queue *tx_queue;
 	unsigned int tx_ev_desc_ptr;
 	unsigned int tx_ev_q_label;
-	struct efx_tx_queue *tx_queue;
-	struct efx_nic *efx = channel->efx;
 	int tx_descs = 0;
 
 	if (unlikely(ACCESS_ONCE(efx->reset_pending)))
@@ -2103,7 +2109,8 @@ static void efx_ef10_handle_driver_generated_event(struct efx_channel *channel,
 	case EFX_EF10_REFILL:
 		/* The queue must be empty, so we won't receive any rx
 		 * events, so efx_process_channel() won't refill the
-		 * queue. Refill it here */
+		 * queue. Refill it here
+		 */
 		efx_fast_push_rx_descriptors(&channel->rx_queue, true);
 		break;
 	default:
@@ -2118,8 +2125,8 @@ static void efx_ef10_handle_driver_generated_event(struct efx_channel *channel,
 static int efx_ef10_ev_process(struct efx_channel *channel, int quota)
 {
 	struct efx_nic *efx = channel->efx;
-	unsigned int read_ptr;
 	efx_qword_t event, *p_event;
+	unsigned int read_ptr;
 	int ev_code;
 	int tx_descs = 0;
 	int spent = 0;
@@ -2239,10 +2246,10 @@ void efx_ef10_handle_drain_event(struct efx_nic *efx)
 
 static int efx_ef10_fini_dmaq(struct efx_nic *efx)
 {
+	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	struct efx_channel *channel;
 	struct efx_tx_queue *tx_queue;
 	struct efx_rx_queue *rx_queue;
-	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	int pending;
 
 	/* If the MC has just rebooted, the TX/RX queues will have already been
@@ -2409,7 +2416,9 @@ static void efx_ef10_filter_push_prep(struct efx_nic *efx,
 		       MC_CMD_FILTER_OP_IN_RX_DEST_HOST);
 	MCDI_SET_DWORD(inbuf, FILTER_OP_IN_TX_DEST,
 		       MC_CMD_FILTER_OP_IN_TX_DEST_DEFAULT);
-	MCDI_SET_DWORD(inbuf, FILTER_OP_IN_RX_QUEUE, spec->dmaq_id);
+	MCDI_SET_DWORD(inbuf, FILTER_OP_IN_RX_QUEUE,
+		       spec->dmaq_id == EFX_FILTER_RX_DMAQ_ID_DROP ?
+		       0 : spec->dmaq_id);
 	MCDI_SET_DWORD(inbuf, FILTER_OP_IN_RX_MODE,
 		       (spec->flags & EFX_FILTER_FLAG_RX_RSS) ?
 		       MC_CMD_FILTER_OP_IN_RX_MODE_RSS :
@@ -2460,11 +2469,11 @@ static s32 efx_ef10_filter_insert(struct efx_nic *efx,
 	struct efx_ef10_filter_table *table = efx->filter_state;
 	DECLARE_BITMAP(mc_rem_map, EFX_EF10_FILTER_SEARCH_LIMIT);
 	struct efx_filter_spec *saved_spec;
-	unsigned int priv_flags;
-	DEFINE_WAIT(wait);
-	int ins_index = -1;
-	bool replacing = false;
 	unsigned int match_pri, hash;
+	unsigned int priv_flags;
+	bool replacing = false;
+	int ins_index = -1;
+	DEFINE_WAIT(wait);
 	bool is_mc_recip;
 	s32 rc;
 
@@ -2495,7 +2504,9 @@ static s32 efx_ef10_filter_insert(struct efx_nic *efx,
 
 #ifdef EFX_NOT_UPSTREAM
 		if (spec->priority <= EFX_FILTER_PRI_AUTO &&
-		    table->kernel_blocked) {
+		    table->kernel_blocked[is_mc_recip ?
+					  EFX_DL_FILTER_BLOCK_KERNEL_MCAST :
+					  EFX_DL_FILTER_BLOCK_KERNEL_UCAST]) {
 			rc = -EPERM;
 			goto out_unlock;
 		}
@@ -2694,12 +2705,12 @@ static int efx_ef10_filter_remove_internal(struct efx_nic *efx,
 					   unsigned int priority_mask,
 					   u32 filter_id, bool by_index)
 {
+	unsigned int filter_idx = filter_id % HUNT_FILTER_TBL_ROWS;
 	struct efx_ef10_filter_table *table = efx->filter_state;
 	MCDI_DECLARE_BUF(inbuf,
 			 MC_CMD_FILTER_OP_IN_HANDLE_OFST +
 			 MC_CMD_FILTER_OP_IN_HANDLE_LEN);
 	struct efx_filter_spec *spec;
-	unsigned int filter_idx = filter_id % HUNT_FILTER_TBL_ROWS;
 	DEFINE_WAIT(wait);
 	int rc;
 
@@ -2971,7 +2982,7 @@ static s32 efx_ef10_filter_rfs_insert(struct efx_nic *efx,
 	spin_lock_bh(&efx->filter_lock);
 
 #ifdef EFX_NOT_UPSTREAM
-	if (table->kernel_blocked) {
+	if (table->kernel_blocked[EFX_DL_FILTER_BLOCK_KERNEL_UCAST]) {
 		rc = -EPERM;
 		goto fail_unlock;
 	}
@@ -3059,8 +3070,8 @@ efx_ef10_filter_rfs_insert_complete(struct efx_nic *efx, unsigned long cookie,
 				    size_t outlen_actual)
 {
 	struct efx_ef10_filter_table *table = efx->filter_state;
-	struct efx_filter_spec *spec;
 	unsigned int ins_index, dmaq_id;
+	struct efx_filter_spec *spec;
 	bool replacing;
 
 	/* Unpack the cookie */
@@ -3176,10 +3187,10 @@ static int efx_ef10_filter_match_flags_from_mcdi(u32 mcdi_flags)
 
 static int efx_ef10_filter_table_probe(struct efx_nic *efx)
 {
-	struct efx_ef10_filter_table *table;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_GET_PARSER_DISP_INFO_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_GET_PARSER_DISP_INFO_OUT_LENMAX);
 	unsigned int pd_match_pri, pd_match_count;
+	struct efx_ef10_filter_table *table;
 	size_t outlen;
 	int rc;
 
@@ -3236,8 +3247,8 @@ fail:
 
 static void efx_ef10_filter_table_restore(struct efx_nic *efx)
 {
-	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	struct efx_ef10_filter_table *table = efx->filter_state;
+	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	struct efx_filter_spec *spec;
 	unsigned int filter_idx;
 	bool failed = false;
@@ -3283,8 +3294,8 @@ static void efx_ef10_filter_table_restore(struct efx_nic *efx)
 
 static void efx_ef10_filter_table_remove(struct efx_nic *efx)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_FILTER_OP_IN_LEN);
 	struct efx_ef10_filter_table *table = efx->filter_state;
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_FILTER_OP_IN_LEN);
 	struct efx_filter_spec *spec;
 	unsigned int filter_idx;
 	int rc;
@@ -3319,6 +3330,7 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 	struct efx_ef10_filter_table *table = efx->filter_state;
 	struct net_device *net_dev = efx->net_dev;
 	struct efx_filter_spec spec;
+	bool remove_failed = false;
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_UC)
 	struct netdev_hw_addr *uc;
 #else
@@ -3331,7 +3343,6 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 #endif
 	unsigned int filter_idx;
 	int i, n, rc;
-	bool remove_failed = false;
 
 	if (!efx_dev_registered(efx))
 		return;
@@ -3355,7 +3366,7 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 	 */
 	netif_addr_lock_bh(net_dev);
 #ifdef EFX_NOT_UPSTREAM
-	if (table->kernel_blocked)
+	if (table->kernel_blocked[EFX_DL_FILTER_BLOCK_KERNEL_UCAST])
 		table->dev_uc_count = 0;
 	else
 #endif
@@ -3379,7 +3390,7 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 		}
 	}
 #ifdef EFX_NOT_UPSTREAM
-	if (table->kernel_blocked)
+	if (table->kernel_blocked[EFX_DL_FILTER_BLOCK_KERNEL_MCAST])
 		table->dev_mc_count = 0;
 	else
 #endif
@@ -3492,25 +3503,32 @@ static void efx_ef10_filter_sync_rx_mode(struct efx_nic *efx)
 
 #ifdef EFX_NOT_UPSTREAM
 
-static int efx_ef10_filter_block_kernel(struct efx_nic *efx)
+static int efx_ef10_filter_block_kernel(struct efx_nic *efx,
+					enum efx_dl_filter_block_kernel_type
+					type)
 {
 	struct efx_ef10_filter_table *table = efx->filter_state;
 
 	spin_lock_bh(&efx->filter_lock);
-	table->kernel_blocked = true;
+	table->kernel_blocked[type] = true;
 	spin_unlock_bh(&efx->filter_lock);
 
 	efx_ef10_filter_sync_rx_mode(efx);
 
-	return efx_ef10_filter_clear_rx(efx, EFX_FILTER_PRI_HINT);
+	if (type == EFX_DL_FILTER_BLOCK_KERNEL_UCAST)
+		return efx_ef10_filter_clear_rx(efx, EFX_FILTER_PRI_HINT);
+	else
+		return 0;
 }
 
-static void efx_ef10_filter_unblock_kernel(struct efx_nic *efx)
+static void efx_ef10_filter_unblock_kernel(struct efx_nic *efx,
+					   enum efx_dl_filter_block_kernel_type
+					   type)
 {
 	struct efx_ef10_filter_table *table = efx->filter_state;
 
 	spin_lock_bh(&efx->filter_lock);
-	table->kernel_blocked = false;
+	table->kernel_blocked[type] = false;
 	spin_unlock_bh(&efx->filter_lock);
 
 	efx_ef10_filter_sync_rx_mode(efx);
@@ -3596,8 +3614,8 @@ efx_ef10_test_chip(struct efx_nic *efx, struct efx_self_tests *tests)
 	if (rc != 0)
 		goto out;
 
-	tests->memory = efx_ef10_run_bist(efx, MC_CMD_MC_MEM_BIST);
-	tests->registers = efx_ef10_run_bist(efx, MC_CMD_REG_BIST);
+	tests->memory = efx_ef10_run_bist(efx, MC_CMD_MC_MEM_BIST) ? -1 : 1;
+	tests->registers = efx_ef10_run_bist(efx, MC_CMD_REG_BIST) ? -1 : 1;
 
 	rc = efx_mcdi_reset(efx, RESET_TYPE_WORLD);
 

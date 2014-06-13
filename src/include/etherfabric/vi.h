@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -211,6 +211,8 @@ extern int ef_filter_spec_set_unicast_mismatch(ef_filter_spec *);
 extern int ef_filter_spec_set_multicast_mismatch(ef_filter_spec *);
 extern int ef_filter_spec_set_port_sniff(ef_filter_spec *, int promiscuous);
 extern int ef_filter_spec_set_block_kernel(ef_filter_spec *);
+extern int ef_filter_spec_set_block_kernel_multicast(ef_filter_spec *);
+extern int ef_filter_spec_set_block_kernel_unicast(ef_filter_spec *);
 
 extern int ef_vi_filter_add(ef_vi*, ef_driver_handle, const ef_filter_spec*,
 			    ef_filter_cookie *filter_cookie_out);
@@ -221,6 +223,7 @@ extern int ef_vi_set_filter_add(ef_vi_set*, ef_driver_handle,
 				ef_filter_cookie *filter_cookie_out);
 extern int ef_vi_set_filter_del(ef_vi_set*, ef_driver_handle,
 				ef_filter_cookie *);
+
 
 #ifdef __cplusplus
 }

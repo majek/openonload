@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -42,7 +42,7 @@ static int __ef_vi_set_alloc(ef_vi_set* viset, ef_driver_handle dh,
 	memset(&ra, 0, sizeof(ra));
 	strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));
 	ra.ra_type = EFRM_RESOURCE_VI_SET;
-	ra.u.vi_set.in_min_n_vis = n_vis;
+	ra.u.vi_set.in_n_vis = n_vis;
 	ra.u.vi_set.in_flags = 0;
 	if( pd != NULL ) {
 		ra.u.vi_set.in_pd_fd = pd_dh;
@@ -69,7 +69,16 @@ int ef_vi_set_alloc_from_pd(ef_vi_set* viset, ef_driver_handle dh,
 			    ef_pd* pd, ef_driver_handle pd_dh,
 			    int n_vis)
 {
-	int rc = __ef_vi_set_alloc(viset, dh, pd, pd_dh, -1, n_vis);
-	viset->vis_pd = pd;
-	return rc;
+	int rc;
+
+	if( pd->pd_cluster_sock == -1 ) {
+		rc = __ef_vi_set_alloc(viset, dh, pd, pd_dh, -1, n_vis);
+		viset->vis_pd = pd;
+		return rc;
+	}
+	else {
+		ef_log("%s: WARNING: Cannot create a vi_set on a cluster",
+                       __FUNCTION__);
+		return -EINVAL;
+	}
 }

@@ -33,6 +33,7 @@ LIB_SRCS	+=		\
 		vi_set.c	\
 		memreg.c	\
 		pd.c		\
+		ef_app_cluster.c	\
 		pio.c		\
 		falcon_evtimer.c\
 		ef10_evtimer.c  \

@@ -1,6 +1,6 @@
 Solarflare 4.0 Linux network driver
 ===================================
-Version:  4.0.2.6628
+Version:  4.0.2.6645
 
 
 Overview
@@ -94,6 +94,27 @@ Please contact your local Solarflare support representative or email
 
 Changelog
 ---------
+====================================
+### v4.0.2.6645 
+
+
+Issue 41295:
+  ~ Updates driver link filter_block_kernel API (used by onload and EFVI apps)
+    to have a unicast/multicast split, to allow for a closer match to previous
+    semantics.
+Issue 41279:
+  ~ Fix reporting of MC BIST results through ethtool
+  ~ Now 1=>pass, 0=>not run, <0 fail
+Issue 41055:
+  ~ Check for non-PTP or non-primary function in private clock ioctls
+  ~ In some cases this could cause a kernel NULL pointer dereference in
+    efx_ptp_ts_settime() when calling ioctl(SIOCSHWTSTAMP)
+Issue 41022:
+  ~ Fix kernel NULL pointer dereference in efx_hard_start_xmit() that could
+    be caused if hardware timestamping on raw sockets were enabled.
+Issue 40999:
+  ~ Expose ptp_caps on primary function, not all functions on port 0
+
 
 ### v4.0.2.6628 - Feature release
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2242,7 +2242,7 @@ OO_INTERCEPT(pid_t, __vfork_as_fork,
     if( rc ) { /* Parent.  Block till child exits */
       Log_V(log("fork() [in place of vfork()] = %d", rc));
       close(pipefd[1]);
-      read(pipefd[0], &buf, 1);
+      ci_sys_read(pipefd[0], &buf, 1);
       close(pipefd[0]);
     }
     else /* child.  pipefd[1] closed when child exits */

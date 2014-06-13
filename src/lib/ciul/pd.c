@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,10 +40,12 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
   int rc;
 
   if( (s = getenv("EF_VI_PD_FLAGS")) != NULL ) {
-    if( strstr(s, "vf") != NULL )
-      flags |= EF_PD_VF;
-    if( strstr(s, "phys") != NULL )
-      flags |= EF_PD_PHYS_MODE;
+    if( ! strcmp(s, "vf") )
+      flags = EF_PD_VF;
+    else if( ! strcmp(s, "phys") )
+      flags = EF_PD_PHYS_MODE;
+    else if( ! strcmp(s, "default") )
+      flags = 0;
   }
 
   if( flags & EF_PD_VF )
@@ -56,7 +58,7 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
   ra.u.pd.in_flags = 0;
   if( flags & EF_PD_VF )
     ra.u.pd.in_flags |= EFCH_PD_FLAG_VF;
-  if( (flags & EF_PD_VF) || (flags & EF_PD_PHYS_MODE) )
+  if( flags & EF_PD_PHYS_MODE )
     ra.u.pd.in_flags |= EFCH_PD_FLAG_PHYS_ADDR;
 
   rc = ci_resource_alloc(pd_dh, &ra);
@@ -67,12 +69,23 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
 
   pd->pd_flags = flags;
   pd->pd_resource_id = ra.out_id.index;
+
+  pd->pd_cluster_name = NULL;
+  pd->pd_cluster_sock = -1;
+  pd->pd_cluster_dh = 0;
+  pd->pd_cluster_viset_resource_id = 0;
+
   return 0;
 }
 
 
 int ef_pd_free(ef_pd* pd, ef_driver_handle pd_dh)
 {
-  EF_VI_DEBUG(memset(pd, 0, sizeof(*pd)));
-  return 0;
+  if( pd->pd_cluster_sock != -1 ) {
+    return ef_pd_cluster_free(pd, pd_dh);
+  }
+  else {
+    EF_VI_DEBUG(memset(pd, 0, sizeof(*pd)));
+    return 0;
+  }
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,7 +82,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.0.2.6628"
+#define EFX_DRIVER_VERSION	"4.0.2.6645"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -107,7 +107,7 @@
 #endif
 
 #if defined(EFX_NOT_UPSTREAM) && !defined(__VMKLNX__)
-#define EFX_RX_PAGE_RECYCLE	1
+#define EFX_RX_PAGE_SHARE	1
 #ifdef EFX_HAVE_VLAN_RX_PATH
 #define EFX_USE_FAKE_VLAN_RX_ACCEL 1
 #endif
@@ -141,10 +141,17 @@
 /* Maximum possible MTU the driver supports */
 #define EFX_MAX_MTU (9 * 1024)
 
+#if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
 /* Size of an RX scatter buffer.  Small enough to pack 2 into a 4K page,
  * and should be a multiple of the cache line size.
  */
 #define EFX_RX_USR_BUF_SIZE	(2048 - 256)
+#else
+/* Size of an RX scatter buffer. Page can't be shared on ESX, so use
+ * maximum aligned to cache line size.
+ */
+#define EFX_RX_USR_BUF_SIZE	(PAGE_SIZE - L1_CACHE_BYTES)
+#endif
 
 /* If possible, we should ensure cache line alignment at start and end
  * of every buffer.  Otherwise, we just need to ensure 4-byte
@@ -354,15 +361,8 @@ struct efx_tx_queue {
  */
 struct efx_rx_buffer {
 	dma_addr_t dma_addr;
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 	struct page *page;
 	u16 page_offset;
-#else
-	/* @skb: The associated socket buffer.
-	 * Will be %NULL if the buffer slot is currently free.
-	 */
-	struct sk_buff *skb;
-#endif
 	u16 len;
 	u16 flags;
 #if defined(EFX_NOT_UPSTREAM)
@@ -447,7 +447,7 @@ struct efx_rx_queue {
 	unsigned int removed_count;
 	unsigned int scatter_n;
 	unsigned int scatter_len;
-#if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_RECYCLE)
+#if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
 	struct page **page_ring;
 	unsigned int page_add;
 	unsigned int page_remove;
@@ -467,11 +467,9 @@ struct efx_rx_queue {
 	/* Statistics to supplement MAC stats */
 	unsigned long rx_packets;
 
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 #define SKB_CACHE_SIZE 8
 	struct sk_buff *skb_cache[SKB_CACHE_SIZE];
 	unsigned skb_cache_next_unused;
-#endif
 
 #ifdef CONFIG_SFC_DEBUGFS
 	efx_debugfs_entry *debug_dir;
@@ -570,6 +568,15 @@ enum efx_sync_events_state {
 	SYNC_EVENTS_REQUESTED,
 	SYNC_EVENTS_VALID,
 };
+#endif
+
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
+/* VMware netqueue use flags */
+#define NETQ_USE_DEFAULT	(0U)
+#define NETQ_USE_RX		(1U)
+#define NETQ_USE_TX		(2U)
+#define NETQ_USE_RSS		(4U)
+#define NETQ_USE_LRO		(8U)
 #endif
 
 /**
@@ -671,7 +678,7 @@ struct efx_channel {
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 	/** Used to track use by VMWare netqueue code. */
-	int netq_use;
+	unsigned netq_flags;
 	struct net_device_stats	netq_stats;
 	char irqid[IFNAMSIZ + 8];
 #endif
@@ -930,6 +937,7 @@ struct vfdi_status;
  * @reset_work: Scheduled reset workitem
  * @membase_phys: Memory BAR value as physical address
  * @membase: Memory BAR value
+ * @pf_count: Number of PFs. Only correct on EF10, else will be 1. VMware only.
  * @interrupt_mode: Interrupt mode
  * @timer_quantum_ns: Interrupt timer quantum, in nanoseconds
  * @irq_rx_adaptive: Adaptive IRQ moderation enabled for RX event queues
@@ -965,6 +973,7 @@ struct vfdi_status;
  * @n_wanted_channels: Number of interrupts efx_probe_interrupts() attempted
  *     to enable.
  * @n_rx_netqs: Number of receive NETQs including default (only in VMware port)
+ * @n_rx_netqs_no_rss: Number of receive NETQs without RSS (only in VMware port)
  * @rx_ip_align: RX DMA address offset to have IP header aligned in
  *	in accordance with NET_IP_ALIGN
  * @rx_dma_len: Current maximum RX DMA length
@@ -1122,16 +1131,15 @@ struct efx_nic {
 	unsigned n_wanted_channels;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 	unsigned int n_rx_netqs;
+	unsigned int n_rx_netqs_no_rss;
 #endif
 	unsigned int rx_ip_align;
 	unsigned int rx_dma_len;
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 	unsigned int rx_buffer_order;
 	unsigned int rx_buffer_truesize;
 	unsigned int rx_page_buf_step;
 	unsigned int rx_bufs_per_page;
 	unsigned int rx_pages_per_batch;
-#endif
 	unsigned int rx_prefix_size;
 	int rx_packet_hash_offset;
 	int rx_packet_len_offset;
@@ -1229,7 +1237,7 @@ struct efx_nic {
 /* Number of times Driverlink clients are blocking the kernel stack from
  * receiving packets
  */
-	unsigned int dl_block_kernel_count;
+	unsigned int dl_block_kernel_count[EFX_DL_FILTER_BLOCK_KERNEL_MAX];
 #endif
 
 #ifdef CONFIG_SFC_DEBUGFS
@@ -1547,9 +1555,11 @@ struct efx_nic_type {
 /* Block kernel from receiving packets except through explicit
  * configuration, i.e. remove and disable filters with priority < MANUAL
  */
-	int (*filter_block_kernel)(struct efx_nic *efx);
+	int (*filter_block_kernel)(struct efx_nic *efx,
+				   enum efx_dl_filter_block_kernel_type type);
 /* Unblock kernel, i.e. enable automatic and hint filters */
-	void (*filter_unblock_kernel)(struct efx_nic *efx);
+	void (*filter_unblock_kernel)(struct efx_nic *efx, enum
+				      efx_dl_filter_block_kernel_type type);
 #endif
 #ifdef CONFIG_SFC_MTD
 	int (*mtd_probe)(struct efx_nic *efx);
@@ -1747,9 +1757,13 @@ static inline struct efx_rx_buffer *efx_rx_buffer(struct efx_rx_queue *rx_queue,
 	static inline bool efx_xmit_with_hwtstamp(struct sk_buff *skb)
 	{
 		return (likely(skb->protocol == htons(ETH_P_IP)) &&
-		ip_hdr(skb)->protocol == IPPROTO_UDP &&
-		unlikely(udp_hdr(skb)->dest == htons(319) ||
-		 udp_hdr(skb)->dest == htons(320)));
+			skb_transport_header_was_set(skb) &&
+			skb_network_header_len(skb) >= sizeof(struct iphdr) &&
+			ip_hdr(skb)->protocol == IPPROTO_UDP &&
+			skb_headlen(skb) >=
+			skb_transport_offset(skb) + sizeof(struct udphdr) &&
+			unlikely(udp_hdr(skb)->dest == htons(319) ||
+				 udp_hdr(skb)->dest == htons(320)));
 
 	}
 	static inline void efx_xmit_hwtstamp_pending(struct sk_buff *skb)

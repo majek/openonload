@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1000,7 +1000,6 @@ static void efx_mcdi_ev_bist(struct efx_nic *efx)
 
 	spin_lock(&mcdi->iface_lock);
 	efx->mc_bist_for_other_fn = true;
-	wmb();
 	if (efx_mcdi_complete_sync(mcdi)) {
 		if (mcdi->mode == MCDI_MODE_EVENTS) {
 			mcdi->resprc = -EIO;

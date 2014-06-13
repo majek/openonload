@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -410,6 +410,16 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
 
   else if( ! strcmp("block-kernel", type) ) {
     TRY(ef_filter_spec_set_block_kernel(fs));
+    rc = 0;
+  }
+
+  else if( ! strcmp("block-kernel-unicast", type) ) {
+    TRY(ef_filter_spec_set_block_kernel_unicast(fs));
+    rc = 0;
+  }
+
+  else if( ! strcmp("block-kernel-multicast", type) ) {
+    TRY(ef_filter_spec_set_block_kernel_multicast(fs));
     rc = 0;
   }
 

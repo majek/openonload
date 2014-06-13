@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -132,7 +132,12 @@ static int oo_nf_skb_get_payload(struct sk_buff* skb, void** pdata, int* plen)
   }
 }
 
-static unsigned int oo_netfilter_arp(unsigned int hooknum,
+static unsigned int oo_netfilter_arp(
+#ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
+                                    const struct nf_hook_ops* ops,
+#else
+                                    unsigned int hooknum,
+#endif
 #ifdef EFX_HAVE_NETFILTER_INDIRECT_SKB
                                      struct sk_buff** pskb,
 #else
@@ -177,7 +182,12 @@ static struct nf_hook_ops oo_netfilter_arp_hook = {
   .hooknum = NF_ARP_IN,
 };
 
-static unsigned int oo_netfilter_ip(unsigned int hooknum,
+static unsigned int oo_netfilter_ip(
+#ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
+                                    const struct nf_hook_ops* ops,
+#else
+                                    unsigned int hooknum,
+#endif
 #ifdef EFX_HAVE_NETFILTER_INDIRECT_SKB
                                     struct sk_buff** pskb,
 #else

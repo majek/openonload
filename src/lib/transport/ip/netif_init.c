@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -21,6 +21,8 @@
 ** Description: Initialisation of network interface.
 ** </L5_PRIVATE>
 \**************************************************************************/
+
+#define _GNU_SOURCE
 
 #include "ip_internal.h"
 #include "uk_intf_ver.h"
@@ -495,6 +497,85 @@ void ci_netif_config_opts_rangecheck(ci_netif_config_opts* opts)
 
 #ifndef __KERNEL__
 
+struct string_to_bitmask {
+  int               stb_index;
+  const char*const  stb_str;
+  int               stb_default;
+};
+
+
+/* str is a ',' separated list of options.  Each option in str is
+ * compared against stb_str in each entry in opts.  stb_index'st bit
+ * in bitmask_out is set if stb_default in opts is set and no option
+ * in str turns it off by using '-' or some option in str enables it.
+ */
+static void convert_string_to_bitmask(const char* str,
+                                      const struct string_to_bitmask* opts,
+                                      int opts_len, ci_uint32* bitmask_out)
+{
+  int len, i, opt_found, negate;
+
+  /* Set defaults */
+  for( i = 0; i < opts_len; ++i )
+    if( opts[i].stb_default )
+      *bitmask_out |= 1 << opts[i].stb_index;
+
+  if( ! str )
+    return;
+
+  /* Parse the input string to add/remove bits */
+  while( 1 ) {
+    while( *str == ',' )
+      ++str;
+    len = strchrnul(str, ',') - str;
+    if( len == 0 )
+      break;
+
+    /* Check if we are removing an option */
+    if( *str == '-' ) {
+      negate = 1;
+      ++str;
+      --len;
+    }
+    else {
+      negate = 0;
+    }
+
+    /* Iterate opts looking for the parsed str */
+    opt_found = 0;
+    for( i = 0; i < opts_len; ++i )
+      if( ! strncmp(str, opts[i].stb_str, len) ) {
+        if( negate )
+          *bitmask_out &= ~(1 << opts[i].stb_index);
+        else
+          *bitmask_out |= 1 << opts[i].stb_index;
+        ++opt_found;
+        break;
+      }
+    if( ! opt_found ) {
+      char buf[128];
+      strncpy(buf, str, len);
+      buf[len] = '\0';
+      ci_log("Invalid option detected: %s", buf);
+    }
+    str += len;
+  }
+}
+
+
+static void ci_netif_config_opts_getenv_ef_log(ci_netif_config_opts* opts)
+{
+  struct string_to_bitmask options[EF_LOG_MAX] = {
+    {EF_LOG_BANNER, "banner", 1},
+    {EF_LOG_RESOURCE_WARNINGS, "resource_warnings", 1},
+    {EF_LOG_CONN_DROP, "conn_drop", 0},
+  };
+
+  convert_string_to_bitmask(getenv("EF_LOG"), options, EF_LOG_MAX,
+                            &opts->log_category);
+}
+
+
 void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 {
   const char* s;
@@ -646,6 +727,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->huge_pages = 0;
   }
 #endif
+  if ( (s = getenv("EF_SYNC_CPLANE_AT_CREATE")) ) {
+    opts->sync_cplane = atoi(s);
+  }
   if ( (s = getenv("EF_RXQ_SIZE")) )
     opts->rxq_size = atoi(s);
   if ( (s = getenv("EF_RXQ_LIMIT")) )
@@ -908,6 +992,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_RX_TIMESTAMPING")) )
     opts->rx_timestamping = atoi(s);
+
+  ci_netif_config_opts_getenv_ef_log(opts);
 }
 
 #endif
@@ -968,69 +1054,6 @@ void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
 
 #ifndef __KERNEL__
 
-static int netif_tcp_helper_mmap(ci_netif* ni)
-{
-  ci_netif_state* ns = ni->state;
-  void* p;
-  int rc;
-
-  /****************************************************************************
-   * Create the I/O mapping.
-   */
-  if( ns->io_mmap_bytes != 0 ) {
-    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
-                          CI_NETIF_MMAP_ID_IO, ns->io_mmap_bytes, &p);
-    if( rc < 0 ) {
-      LOG_NV(ci_log("%s: oo_resource_mmap io %d", __FUNCTION__, rc));
-      goto fail1;
-    }
-    ni->io_ptr = (char*) p;
-  }
-
-#if CI_CFG_PIO
-  /****************************************************************************
-   * Create the PIO mapping.
-   */
-  if( ns->pio_mmap_bytes != 0 ) {
-    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
-                          CI_NETIF_MMAP_ID_PIO, ns->pio_mmap_bytes, &p);
-    if( rc < 0 ) {
-      LOG_NV(ci_log("%s: oo_resource_mmap pio %d", __FUNCTION__, rc));
-      goto fail1;
-    }
-    ni->pio_ptr = (uint8_t*) p;
-  }
-#endif
-
-  /****************************************************************************
-   * Create the I/O buffer mapping.
-   */
-  if( ns->buf_mmap_bytes != 0 ) {
-    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
-                          CI_NETIF_MMAP_ID_IOBUFS, ns->buf_mmap_bytes, &p);
-    if( rc < 0 ) {
-      LOG_NV(ci_log("%s: oo_resource_mmap iobufs %d", __FUNCTION__, rc));
-      goto fail2;
-    }
-    ni->buf_ptr = (char*) p;
-  }
-#if CI_CFG_PKTS_AS_HUGE_PAGES
-  if( ns->buf_ofs == (ci_uint32)-1 )
-    ni->pkt_shm_id = NULL;
-  else
-    ni->pkt_shm_id = (void *)(ni->buf_ptr + ns->buf_ofs);
-#endif
-
-  return 0;
-
- fail2:
-  oo_resource_munmap(ci_netif_get_driver_handle(ni), ni->io_ptr,
-                     ns->io_mmap_bytes);
- fail1:
-  return rc;
-}
-
-
 static void netif_tcp_helper_munmap(ci_netif* ni)
 {
   int rc;
@@ -1057,25 +1080,99 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
       }
     }
   }
-  rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
-                          ni->buf_ptr, ni->state->buf_mmap_bytes);
-  if( rc < 0 )  LOG_NV(ci_log("%s: munmap bufs %d", __FUNCTION__, rc));
+  if( ni->buf_ptr != NULL ) {
+    rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
+                            ni->buf_ptr, ni->state->buf_mmap_bytes);
+    if( rc < 0 )  LOG_NV(ci_log("%s: munmap bufs %d", __FUNCTION__, rc));
+  }
 
 #if CI_CFG_PIO
-  if( ni->state->pio_mmap_bytes != 0 ) {
+  if( ni->state->pio_mmap_bytes != 0 && ni->pio_ptr != NULL ) {
     rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
                             ni->pio_ptr, ni->state->pio_mmap_bytes);
     if( rc < 0 )  LOG_NV(ci_log("%s: munmap pio %d", __FUNCTION__, rc));
   }
 #endif
 
-  rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
-                          ni->io_ptr, ni->state->io_mmap_bytes);
-  if( rc < 0 )  LOG_NV(ci_log("%s: munmap io %d", __FUNCTION__, rc));
+  if( ni->io_ptr != NULL ) {
+    rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
+                            ni->io_ptr, ni->state->io_mmap_bytes);
+    if( rc < 0 )  LOG_NV(ci_log("%s: munmap io %d", __FUNCTION__, rc));
+  }
 
   rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
                           ni->state, ni->mmap_bytes);
   if( rc < 0 )  LOG_NV(ci_log("%s: munmap shared state %d", __FUNCTION__, rc));
+}
+
+
+static int netif_tcp_helper_mmap(ci_netif* ni)
+{
+  ci_netif_state* ns = ni->state;
+  void* p;
+  int rc;
+
+  /* Initialise all mappings with NULL to roll back in case of error. */
+  ni->io_ptr = NULL;
+#if CI_CFG_PIO
+  ni->pio_ptr = NULL;
+#endif
+  ni->buf_ptr = NULL;
+
+  /****************************************************************************
+   * Create the I/O mapping.
+   */
+  if( ns->io_mmap_bytes != 0 ) {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          CI_NETIF_MMAP_ID_IO, ns->io_mmap_bytes, &p);
+    if( rc < 0 ) {
+      LOG_NV(ci_log("%s: oo_resource_mmap io %d", __FUNCTION__, rc));
+      goto fail1;
+    }
+    ni->io_ptr = (char*) p;
+  }
+
+#if CI_CFG_PIO
+  /****************************************************************************
+   * Create the PIO mapping.
+   */
+  if( ns->pio_mmap_bytes != 0 ) {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          CI_NETIF_MMAP_ID_PIO, ns->pio_mmap_bytes, &p);
+    if( rc < 0 ) {
+      LOG_NV(ci_log("%s: oo_resource_mmap pio %d", __FUNCTION__, rc));
+      goto fail2;
+    }
+    ni->pio_ptr = (uint8_t*) p;
+  }
+#endif
+
+  /****************************************************************************
+   * Create the I/O buffer mapping.
+   */
+  if( ns->buf_mmap_bytes != 0 ) {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          CI_NETIF_MMAP_ID_IOBUFS, ns->buf_mmap_bytes, &p);
+    if( rc < 0 ) {
+      LOG_NV(ci_log("%s: oo_resource_mmap iobufs %d", __FUNCTION__, rc));
+      goto fail2;
+    }
+    ni->buf_ptr = (char*) p;
+  }
+
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  if( ns->buf_ofs == (ci_uint32)-1 )
+    ni->pkt_shm_id = NULL;
+  else
+    ni->pkt_shm_id = (void *)(ni->buf_ptr + ns->buf_ofs);
+#endif
+
+  return 0;
+
+ fail2:
+  netif_tcp_helper_munmap(ni);
+ fail1:
+  return rc;
 }
 
 
@@ -1605,7 +1702,8 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   ni->flags = 0;
   ni->error_flags = 0;
 
-  ci_log("Using "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT" [%s]",
+  NI_LOG(ni, BANNER,
+         "Using "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT" [%s]",
          ni->state->pretty_name);
   return 0;
 }
@@ -1866,8 +1964,9 @@ int ci_netif_restore_name(ci_netif* ni, const char* name)
   if( (rc = ci_netif_restore(ni, fd, map_size)) < 0 )
     goto fail4;
   ef_onload_driver_close(fd2);
-  ci_log("Sharing "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT
-         " [%s]", ni->state->pretty_name);
+  NI_LOG(ni, BANNER,
+         "Sharing "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT " [%s]",
+         ni->state->pretty_name);
   return 0;
 
  fail4:

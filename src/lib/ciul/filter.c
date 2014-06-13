@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -41,6 +41,8 @@ enum ef_filter_type {
 	EF_FILTER_MISMATCH_MULTICAST  = 0x40,
 	EF_FILTER_PORT_SNIFF          = 0x80,
 	EF_FILTER_BLOCK_KERNEL        = 0x100,
+	EF_FILTER_BLOCK_KERNEL_UNICAST  = 0x200,
+	EF_FILTER_BLOCK_KERNEL_MULTICAST  = 0x400,
 };
 
 
@@ -168,6 +170,24 @@ int ef_filter_spec_set_block_kernel(ef_filter_spec *fs)
 }
 
 
+int ef_filter_spec_set_block_kernel_multicast(ef_filter_spec *fs)
+{
+	if (fs->type != 0)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_BLOCK_KERNEL_MULTICAST;
+	return 0;
+}
+
+
+int ef_filter_spec_set_block_kernel_unicast(ef_filter_spec *fs)
+{
+	if (fs->type != 0)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_BLOCK_KERNEL_UNICAST;
+	return 0;
+}
+
+
 /**********************************************************************
  * Add and remove filters.
  */
@@ -238,21 +258,25 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 		op.u.pt_sniff.promiscuous = fs->data[0];
 		break;
 	case EF_FILTER_BLOCK_KERNEL:
-		op.op = CI_RSOP_FILTER_BLOCK_KERNEL;
-		op.u.block_kernel.block = 1;
+		op.op = CI_RSOP_FILTER_ADD_BLOCK_KERNEL;
+		break;
+	case EF_FILTER_BLOCK_KERNEL_UNICAST:
+		op.op = CI_RSOP_FILTER_ADD_BLOCK_KERNEL_UNICAST;
+		break;
+	case EF_FILTER_BLOCK_KERNEL_MULTICAST:
+		op.op = CI_RSOP_FILTER_ADD_BLOCK_KERNEL_MULTICAST;
 		break;
 	default:
 		return -EINVAL;
 	}
 	rc = ci_resource_op(dh, &op);
 	if( rc == 0 && filter_cookie_out != NULL ) {
-		/* SNIFF and BLOCK filters do not return an ID.  The
-		 * filter_id field is ignored for them when removing,
+		/* SNIFF does not return an ID.  The
+		 * filter_id field is ignored when removing,
 		 * but let's set it to something that will not be
 		 * confused with a real ID
 		 */
-		if( fs->type == EF_FILTER_PORT_SNIFF ||
-		    fs->type == EF_FILTER_BLOCK_KERNEL )
+		if( fs->type == EF_FILTER_PORT_SNIFF )
 			filter_cookie_out->filter_id = -1;
 		else
 			filter_cookie_out->filter_id = 
@@ -273,11 +297,6 @@ static int ef_filter_del(ef_driver_handle dh, int resource_id,
 		op.id = efch_make_resource_id(resource_id);
 		op.u.pt_sniff.enable = 0;
 	}
-	else if( filter_cookie->filter_type == EF_FILTER_BLOCK_KERNEL ) {
-		op.op = CI_RSOP_FILTER_BLOCK_KERNEL;
-		op.id = efch_make_resource_id(resource_id);
-		op.u.block_kernel.block = 0;
-	}
 	else {
 		op.op = CI_RSOP_FILTER_DEL;
 		op.id = efch_make_resource_id(resource_id);
@@ -290,14 +309,21 @@ static int ef_filter_del(ef_driver_handle dh, int resource_id,
 int ef_vi_filter_add(ef_vi *vi, ef_driver_handle dh, const ef_filter_spec *fs,
 		     ef_filter_cookie *filter_cookie_out)
 {
-	return ef_filter_add(dh, vi->vi_resource_id, fs, filter_cookie_out);
+	if( ! vi->vi_clustered )
+		return ef_filter_add(dh, vi->vi_resource_id,
+				     fs, filter_cookie_out);
+        ef_log("%s: WARNING: Ignored attempt to set a filter on a cluster",
+               __FUNCTION__);
+	return 0;
 }
 
 
 int ef_vi_filter_del(ef_vi *vi, ef_driver_handle dh,
 		     ef_filter_cookie *filter_cookie)
 {
-	return ef_filter_del(dh, vi->vi_resource_id, filter_cookie);
+	if( ! vi->vi_clustered )
+		return ef_filter_del(dh, vi->vi_resource_id, filter_cookie);
+	return 0;
 }
 
 

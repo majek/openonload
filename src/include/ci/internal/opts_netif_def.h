@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -497,6 +497,20 @@ CI_CFG_OPT("EF_PIO", pio, ci_uint32,
 "not met DMA will be used, even in mode 2.",
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
+
+CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
+"When this option is set to 2 Onload will force a sync of control plane "
+"information from the kernel when a stack is created.  This can help to "
+"ensure up to date information is used where a stack is created immediately "
+"following interface configuration."
+"\n"
+"If this option is set to 1 then Onload will only force a sync for the first "
+"stack created.  This can be used if stack creation time for later stacks "
+"is time critical."
+"\n"
+"Setting this option to 0 will disable forced sync.  Synchronising data from "
+"the kernel will continue to happen periodically.",
+           2, , 2, 0, 2, oneof:never;first;always)
 
 CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
 "A bitmask specifying the TCP options to advertise in SYN segments.\n"
@@ -1078,6 +1092,16 @@ CI_CFG_OPT("EF_RX_TIMESTAMPING", rx_timestamping, ci_uint32,
 "  3 - request timestamping and fail if hardware is not capable or it"
 " does not succeed;\n",
            , , 0, 0, 3, count)
+
+CI_CFG_OPT("EF_LOG", log_category, ci_uint32,
+"Designed to control how chatty Onload's informative/warning messages are.  "
+"Specified as a comma seperated list of options to enable and disable "
+"(with a minus sign).  Valid options are 'banner' (on by default), "
+"'resource_warnings' (on by default), and 'conn_drop' (off by default).  "
+"E.g.: To enable conn_drop: EF_LOG=conn_drop.  E.g.: To enable conn_drop and "
+"turn off resource warnings: EF_LOG=conn_drop,-resource_warnings",
+           , , 0, 0, MAX, count)
+
 
 #ifdef CI_CFG_OPTGROUP
 /* define some categories - currently more as an example than as the final

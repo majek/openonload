@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -322,28 +322,10 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 	efrm_dev_show(dev, class_revision, &dev_type, ifindex, res_dim);
 
 	if (n_nics_probed == 0) {
-		rc = efrm_resources_init(res_dim);
+		rc = efrm_resources_init();
 		if (rc != 0)
 			goto failed;
 		resources_init = 1;
-	} else {
-#ifdef CONFIG_SFC_RESOURCE_VF
-		unsigned vi_base, vi_scale, vf_count;
-
-		/* VF check first, to set claim_vf properly */
-		efrm_vf_manager_params(&vi_base, &vi_scale, &vf_count);
-		if (res_dim->vf_vi_base != vi_base ||
-		    res_dim->vf_vi_scale != vi_scale ||
-		    res_dim->vf_count != vf_count) {
-			EFRM_ERR("%s: ERROR: incompatible VF parameters: "
-				 "vi_base %d vs %d, vi_scale %d vs %d, "
-				 "vf_count %d vs %d", __func__,
-				  res_dim->vf_vi_base, vi_base,
-				  res_dim->vf_vi_scale, vi_scale,
-				  res_dim->vf_count, vf_count);
-			claim_vf = 0;
-		}
-#endif
 	}
 
 	/* Allocate memory for the new adapter-structure. */
@@ -391,6 +373,14 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 		goto failed;
 	}
 	registered_nic = 1;
+
+	/* Tell the resource manager about the parameters for this nic.  This
+	 * must be done once the resource manager can identify the nic, ie
+	 * after it's been registered with the driver.
+	 */
+#ifdef CONFIG_SFC_RESOURCE_VF
+	efrm_vf_init_nic_params(&efrm_nic->efhw_nic, res_dim);
+#endif
 
 	/****************************************************/
 	/* hardware bringup                                 */

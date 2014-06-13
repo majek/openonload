@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,15 +49,15 @@ LIST_HEAD(efx_port_list);
  * @efx: efx_nic backing the driverlink device
  * @port_node: per-device list head
  * @driver_node: per-driver list head
- * @block_kernel_count: Number of times this client is blocking the kernel
- *	stack from receiving packets
+ * @block_kernel_count: Number of times client has requested each kernel block,
+ *     indexed by enum efx_dl_filter_block_kernel_type
  */
 struct efx_dl_handle {
 	struct efx_dl_device efx_dev;
 	struct efx_nic *efx;
 	struct list_head port_node;
 	struct list_head driver_node;
-	unsigned int block_kernel_count;
+	unsigned int block_kernel_count[EFX_DL_FILTER_BLOCK_KERNEL_MAX];
 };
 
 static struct efx_dl_handle *efx_dl_handle(struct efx_dl_device *efx_dev)
@@ -71,6 +71,7 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 {
 	struct efx_dl_handle *efx_handle = efx_dl_handle(efx_dev);
 	struct efx_nic *efx = efx_handle->efx;
+	unsigned int type;
 
 	netif_info(efx, drv, efx->net_dev,
 		   "%s driverlink client unregistering\n",
@@ -84,10 +85,13 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 
 	/* Remove this client's kernel blocks */
 	mutex_lock(&efx->dl_block_kernel_mutex);
-	if (efx_handle->block_kernel_count) {
-		efx->dl_block_kernel_count -= efx_handle->block_kernel_count;
-		if (efx->dl_block_kernel_count == 0)
-			efx->type->filter_unblock_kernel(efx);
+	for (type = 0; type < EFX_DL_FILTER_BLOCK_KERNEL_MAX; type++) {
+		if (efx_handle->block_kernel_count[type]) {
+			efx->dl_block_kernel_count[type] -=
+				efx_handle->block_kernel_count[type];
+			if (efx->dl_block_kernel_count[type] == 0)
+				efx->type->filter_unblock_kernel(efx, type);
+		}
 	}
 	mutex_unlock(&efx->dl_block_kernel_mutex);
 
@@ -362,7 +366,8 @@ int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
 }
 EXPORT_SYMBOL(efx_dl_mcdi_rpc);
 
-int efx_dl_filter_block_kernel(struct efx_dl_device *efx_dev)
+int efx_dl_filter_block_kernel(struct efx_dl_device *efx_dev,
+			       enum efx_dl_filter_block_kernel_type type)
 {
 	struct efx_dl_handle *handle = efx_dl_handle(efx_dev);
 	struct efx_nic *efx = handle->efx;
@@ -370,14 +375,13 @@ int efx_dl_filter_block_kernel(struct efx_dl_device *efx_dev)
 
 	mutex_lock(&efx->dl_block_kernel_mutex);
 
-	if (efx->dl_block_kernel_count == 0) {
-		rc = efx->type->filter_block_kernel(efx);
+	if (efx->dl_block_kernel_count[type] == 0) {
+		rc = efx->type->filter_block_kernel(efx, type);
 		if (rc)
 			goto unlock;
 	}
-
-	++handle->block_kernel_count;
-	++efx->dl_block_kernel_count;
+	++handle->block_kernel_count[type];
+	++efx->dl_block_kernel_count[type];
 
 unlock:
 	mutex_unlock(&efx->dl_block_kernel_mutex);
@@ -386,21 +390,22 @@ unlock:
 }
 EXPORT_SYMBOL(efx_dl_filter_block_kernel);
 
-void efx_dl_filter_unblock_kernel(struct efx_dl_device *efx_dev)
+void efx_dl_filter_unblock_kernel(struct efx_dl_device *efx_dev,
+				  enum efx_dl_filter_block_kernel_type type)
 {
 	struct efx_dl_handle *handle = efx_dl_handle(efx_dev);
 	struct efx_nic *efx = handle->efx;
 
 	mutex_lock(&efx->dl_block_kernel_mutex);
 
-	if (WARN_ON(handle->block_kernel_count == 0))
+	if (WARN_ON(handle->block_kernel_count[type] == 0))
 		goto unlock;
 
-	--handle->block_kernel_count;
-	--efx->dl_block_kernel_count;
+	--handle->block_kernel_count[type];
+	--efx->dl_block_kernel_count[type];
 
-	if (efx->dl_block_kernel_count == 0)
-		efx->type->filter_unblock_kernel(efx);
+	if (efx->dl_block_kernel_count[type] == 0)
+		efx->type->filter_unblock_kernel(efx, type);
 unlock:
 	mutex_unlock(&efx->dl_block_kernel_mutex);
 }

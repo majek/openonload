@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -46,6 +46,8 @@
 extern "C" {
 #endif
 
+/* src/tool/solar_clusterd will need updating if you change this
+ * enum */
 enum ef_pd_flags {
 	EF_PD_DEFAULT   = 0x0,
 	EF_PD_VF        = 0x1,
@@ -56,12 +58,22 @@ enum ef_pd_flags {
 typedef struct ef_pd {
 	enum ef_pd_flags pd_flags;
 	unsigned         pd_resource_id;
+
+	/* Support for application clusters */
+	char*            pd_cluster_name;
+	int              pd_cluster_sock;
+	ef_driver_handle pd_cluster_dh;
+	unsigned         pd_cluster_viset_resource_id;
 } ef_pd;
 
 
   /*! Allocate a protection domain. */
 extern int ef_pd_alloc(ef_pd*, ef_driver_handle, int ifindex,
 		       enum ef_pd_flags flags);
+
+extern int ef_pd_alloc_by_name(ef_pd*, ef_driver_handle,
+                               const char* cluster_or_intf_name,
+                               enum ef_pd_flags flags);
 
   /*! Unregister a memory region. */
 extern int ef_pd_free(ef_pd*, ef_driver_handle);

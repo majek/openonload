@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1613,7 +1613,8 @@ struct oo_tcp_socket_stats {
   ci_uint32  tx_stop_nagle;   /* TX stopped by nagle's algorithm   */
   ci_uint32  tx_stop_app;     /* TX stopped because TXQ empty      */
   ci_uint32  tx_nomac_defer;  /* Deferred send waiting for ARP     */
-  ci_uint32  tx_msg_warm_try; /* Number of MSG_WARM tried          */
+  ci_uint32  tx_defer;        /* Deferred send to avoid lock contention */
+  ci_uint32  tx_msg_warm_abort;/* Number of MSG_WARM aborted early */
   ci_uint32  tx_msg_warm;     /* Number of MSG_WARM done           */
   ci_uint32  tx_tmpl_alloc;   /* Number of tmpl_alloc() calls      */
   ci_uint32  tx_tmpl_send_fast;  /* Number of fast tmpl sends      */
@@ -1628,6 +1629,7 @@ struct oo_tcp_socket_stats {
   ci_uint32  rx_ack_seq_errs; /* out-of-seq ACKs dropped           */
   ci_uint32  rx_ooo_pkts;     /* out-of-order pkts recvd           */
   ci_uint32  rx_ooo_fill;     /* out-of-order events               */
+  ci_uint32  rx_isn;          /* initial sequence num              */
 };
 
 

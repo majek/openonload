@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -89,7 +89,7 @@ struct efch_vi_alloc_out {
 
 struct efch_vi_set_alloc {
   int32_t             in_ifindex;         /* only used if pd_fd < 0 */
-  int32_t             in_min_n_vis;
+  int32_t             in_n_vis;
   uint32_t            in_flags;
   int32_t             in_pd_fd;           /* -1 if not specified */
   efch_resource_id_t  in_pd_rs_id;
@@ -171,7 +171,11 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST_VLAN 0x76
 # define                CI_RSOP_VI_GET_RX_TS_CORRECTION            0x77
 # define                CI_RSOP_PT_SNIFF                0x78
+/* CI_RSOP_FILTER_BLOCK_KERNEL is legace, kept for backward compatibility */
 # define                CI_RSOP_FILTER_BLOCK_KERNEL     0x79
+# define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL 0x7A
+# define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL_UNICAST   0x7B
+# define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL_MULTICAST 0x7C
 
   union {
     struct {

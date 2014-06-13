@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -878,23 +878,11 @@ static int allocate_vi(tcp_helper_resource_t* trs,
   vi_flags = 0;
   in_flags = EFHW_VI_JUMBO_EN;
 
-  if( (alloc->in_flags & CI_NETIF_FLAGS_INTERRUPT) ) {
-    in_flags |= EFHW_VI_RM_WITH_INTERRUPT;
-    alloc->in_flags &= ~CI_NETIF_FLAGS_INTERRUPT;
-  }
   if( ! NI_OPTS(ni).tx_push )
     vi_flags |= EF_VI_TX_PUSH_DISABLE;
 
-  if( (alloc->in_flags & (CI_NETIF_FLAGS_PHYS_ADDR_MODE | CI_NETIF_FLAGS_ISCSI))
-      != (CI_NETIF_FLAGS_PHYS_ADDR_MODE | CI_NETIF_FLAGS_ISCSI) ) {
-    txq_capacity = NI_OPTS(ni).txq_size;
-    rxq_capacity = NI_OPTS(ni).rxq_size;
-    if( alloc->in_flags & CI_NETIF_FLAGS_PHYS_ADDR_MODE ) {
-      in_flags |= EFHW_VI_RX_PHYS_ADDR_EN | EFHW_VI_TX_PHYS_ADDR_EN;
-      vi_flags |= EF_VI_RX_PHYS_ADDR | EF_VI_TX_PHYS_ADDR;
-    }
-  }
-
+  txq_capacity = NI_OPTS(ni).txq_size;
+  rxq_capacity = NI_OPTS(ni).rxq_size;
   ns->vi_mem_mmap_offset = trs->buf_mmap_bytes;
   ns->vi_io_mmap_offset = trs->io_mmap_bytes;
 #if CI_CFG_PIO
@@ -960,13 +948,12 @@ static int allocate_vi(tcp_helper_resource_t* trs,
 #endif
 
     case CITP_PKTBUF_MODE_PHYS:
-      alloc->in_flags |= CI_NETIF_FLAGS_PHYS_ADDR_MODE;
-      in_flags |= EFHW_VI_RX_PHYS_ADDR_EN | EFHW_VI_TX_PHYS_ADDR_EN;
       vi_flags |= EF_VI_RX_PHYS_ADDR | EF_VI_TX_PHYS_ADDR;
+      break;
     }
 
     rc = efrm_pd_alloc(&pd, trs_nic->oo_nic->efrm_client, vf,
-                       !!(alloc->in_flags & CI_NETIF_FLAGS_PHYS_ADDR_MODE));
+                       !!(vi_flags & EF_VI_RX_PHYS_ADDR));
 #ifdef CONFIG_SFC_RESOURCE_VF
     if( vf != NULL )
       efrm_vf_resource_release(vf); /* pd keeps a ref to vf */
@@ -1331,12 +1318,6 @@ allocate_netif_hw_resources(ci_resource_onload_alloc_t* alloc,
   rc = allocate_vi(trs, evq_sz, alloc, ns + 1, ns->vi_state_bytes);
   if( rc < 0 )  goto fail1;
 
-  if( alloc->in_flags & CI_NETIF_FLAGS_ISCSI ) {
-    ci_log("%s: iscsi support requested but not configured", __FUNCTION__);
-    rc = -ENOENT;
-    goto fail2;
-  }
-
   if( NI_OPTS(ni).max_packets > max_packets_per_stack ) {
     OO_DEBUG_ERR(ci_log("WARNING: EF_MAX_PACKETS reduced from %d to %d due to "
                         "max_packets_per_stack module option",
@@ -1436,7 +1417,6 @@ allocate_netif_hw_resources(ci_resource_onload_alloc_t* alloc,
   ci_vfree(trs->pkt_shm_id);
  fail3:
 #endif
- fail2:
   release_vi(trs);
  fail1:
   return rc;
@@ -1703,7 +1683,7 @@ static void tcp_helper_do_non_atomic(struct work_struct *data)
     OO_DEBUG_TCPH(ci_log("%s: [%u:%d] aflags=%x", __FUNCTION__, trs->id,
                          OO_SP_FMT(ep->id), ep_aflags));
     if( ep_aflags & OO_THR_EP_AFLAG_CLEAR_FILTERS )
-      tcp_helper_endpoint_clear_filters(ep);
+      tcp_helper_endpoint_clear_filters(ep, 0);
     if( ep_aflags & OO_THR_EP_AFLAG_NEED_FREE )
       citp_waitable_obj_free_nnl(&trs->netif,
                                  SP_TO_WAITABLE(&trs->netif, ep->id));
@@ -1915,6 +1895,16 @@ static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
   if( rs->wq == NULL )
     goto fail6;
 
+  /* If there aren't any stacks yet force a sync of cplane information, to
+   * to help with the case where people create interfaces then immediately
+   * launch their app that uses them.
+   */
+  if( (NI_OPTS(ni).sync_cplane == 2) || ((NI_OPTS(ni).sync_cplane == 1)
+        && (ci_dllist_is_empty(&THR_TABLE.all_stacks))) ) {
+    cicpos_sync_tables(CICP_HANDLE(&rs->netif));
+  }
+
+
   /* We're about to expose this stack to other people.  So we should be
    * sufficiently initialised here that other people don't get upset.
    */
@@ -1984,14 +1974,6 @@ int tcp_helper_alloc_ul(ci_resource_onload_alloc_t* alloc,
 {
   ci_netif_config_opts* opts;
   int rc;
-
-  if( (alloc->in_flags & CI_NETIF_FLAGS_PHYS_ADDR_MODE))
-    /* User-level is not allowed to use physical address mode.
-     * VI-in-VF turns physicall address mode later. */
-    return -EPERM;
-  if( alloc->in_flags & CI_NETIF_FLAGS_ISCSI )
-    /* iSCSI options do not work at user-level. */
-    return -EPERM;
 
   if( (opts = kmalloc(sizeof(*opts), GFP_KERNEL)) == NULL )
     return -ENOMEM;
@@ -2522,10 +2504,6 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
     }
     netif_wedged = 1;
   }
-
-  if((netif->flags & CI_NETIF_FLAGS_ISCSI)!=0)
-    /* Freeing iSCSI netif, claim wedged */
-    netif_wedged=1;
 
   /* Grab the lock. */
   trs->netif.state->lock.lock = CI_EPLOCK_LOCKED;
@@ -3119,7 +3097,8 @@ efab_tcp_helper_iobufset_alloc(tcp_helper_resource_t* trs,
 #if CI_CFG_PKTS_AS_HUGE_PAGES
     if( (flags & OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED) &&
         !(ni->huge_pages_flag & OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED) ) {
-      ci_log("[%s]: unable to allocate huge page, using standard pages instead",
+      NI_LOG(ni, RESOURCE_WARNINGS,
+             "[%s]: unable to allocate huge page, using standard pages instead",
              ni->state->pretty_name);
       ni->huge_pages_flag = flags;
     }
@@ -3451,6 +3430,7 @@ static void tcp_helper_wakeup(tcp_helper_resource_t* trs, int intf_i)
   if( ci_netif_intf_has_event(ni, intf_i) ) {
     if( efab_tcp_helper_netif_try_lock(trs) ) {
       CITP_STATS_NETIF(++ni->state->stats.interrupt_polls);
+      ni->flags |= CI_NETIF_FLAG_IN_DL_CONTEXT;
       ni->state->poll_did_wake = 0;
       n = ci_netif_poll(ni);
       CITP_STATS_NETIF_ADD(ni, interrupt_evs, n);
@@ -3458,6 +3438,7 @@ static void tcp_helper_wakeup(tcp_helper_resource_t* trs, int intf_i)
         prime_async = 0;
         CITP_STATS_NETIF_INC(ni, interrupt_wakes);
       }
+      ni->flags &=~ CI_NETIF_FLAG_IN_DL_CONTEXT;
       efab_tcp_helper_netif_unlock(trs);
     }
     else {
@@ -3515,12 +3496,14 @@ static void tcp_helper_timeout(tcp_helper_resource_t* trs, int intf_i)
   if( ci_netif_intf_has_event(ni, intf_i) ) {
     if( efab_tcp_helper_netif_try_lock(trs) ) {
       CITP_STATS_NETIF(++ni->state->stats.timeout_interrupt_polls);
+      ni->flags |= CI_NETIF_FLAG_IN_DL_CONTEXT;
       ni->state->poll_did_wake = 0;
       if( (n = ci_netif_poll(ni)) ) {
         CITP_STATS_NETIF(ni->state->stats.timeout_interrupt_evs += n;
                          ni->state->stats.timeout_interrupt_wakes +=
                          ni->state->poll_did_wake);
       }
+      ni->flags &=~ CI_NETIF_FLAG_IN_DL_CONTEXT;
       efab_tcp_helper_netif_unlock(trs);
     }
     else {
@@ -3571,12 +3554,14 @@ static void oo_handle_wakeup_int_driven(void* context, int is_timeout,
     if( ci_netif_intf_has_event(ni, tcph_nic->intf_i) ) {
       if( efab_tcp_helper_netif_try_lock(trs) ) {
         CITP_STATS_NETIF(++ni->state->stats.interrupt_polls);
+        ni->flags |= CI_NETIF_FLAG_IN_DL_CONTEXT;
         ni->state->poll_did_wake = 0;
         n = ci_netif_poll(ni);
         CITP_STATS_NETIF_ADD(ni, interrupt_evs, n);
         if( ni->state->poll_did_wake )
           CITP_STATS_NETIF_INC(ni, interrupt_wakes);
         tcp_helper_request_wakeup_nic(trs, tcph_nic->intf_i);
+        ni->flags &=~ CI_NETIF_FLAG_IN_DL_CONTEXT;
         efab_tcp_helper_netif_unlock(trs);
         break;
       }

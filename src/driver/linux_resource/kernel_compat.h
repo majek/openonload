@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -134,19 +134,8 @@ out:
 /********* IOMMU mapping ********************/
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 /* iommu_map/iommu_unmap definition */
-#  if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34) || defined(RHEL_MAJOR)
-  static inline int iommu_map(struct iommu_domain *domain,
-			      unsigned long iova, phys_addr_t paddr,
-			      int size, int prot) {
-    return iommu_map_range(domain, iova, paddr, size, prot);
-  }
-
-  static inline int iommu_unmap(struct iommu_domain *domain,
-				unsigned long iova, int size) {
-    iommu_unmap_range(domain, iova, size);
-    return size;
-  }
-#  elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0) && \
+# ifdef EFRM_HAVE_IOMMU_MAP_OLD
+#  if LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0) && \
         LINUX_VERSION_CODE < KERNEL_VERSION(3,1,0) && defined(HPAGE_SIZE)
 	/* Yes, this is just crazy, but iommu_map does not
 	 * correctly map 2M (huge|compound) pages on SLES11
@@ -193,7 +182,7 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #    define iommu_map iommu_map_my
 #    define iommu_unmap iommu_unmap_my
 
-#  elif LINUX_VERSION_CODE < KERNEL_VERSION(3,3,0)
+#  else
    /* old API: get gfp_order, unmap returns 0 or -errno
     * new API: get size, unmap returns size */
 static inline int iommu_map_my(struct iommu_domain *domain,
@@ -214,6 +203,22 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #    define iommu_unmap iommu_unmap_my
 
 #  endif
+# elif !defined(EFRM_HAVE_IOMMU_MAP)
+  static inline int iommu_map(struct iommu_domain *domain,
+			      unsigned long iova, phys_addr_t paddr,
+			      int size, int prot) {
+    return iommu_map_range(domain, iova, paddr, size, prot);
+  }
+
+  static inline int iommu_unmap(struct iommu_domain *domain,
+				unsigned long iova, int size) {
+    iommu_unmap_range(domain, iova, size);
+    return size;
+  }
+# endif
+
+
+
 
 #  ifndef IOMMU_CACHE
 #    define IOMMU_CACHE 0

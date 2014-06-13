@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -833,8 +833,10 @@ extern bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 					    unsigned int index);
 #endif
 #ifdef EFX_NOT_UPSTREAM
-int efx_farch_filter_block_kernel(struct efx_nic *efx);
-void efx_farch_filter_unblock_kernel(struct efx_nic *efx);
+int efx_farch_filter_block_kernel(struct efx_nic *efx, enum
+				  efx_dl_filter_block_kernel_type type);
+void efx_farch_filter_unblock_kernel(struct efx_nic *efx, enum
+				     efx_dl_filter_block_kernel_type type);
 #endif
 extern void efx_farch_filter_sync_rx_mode(struct efx_nic *efx);
 

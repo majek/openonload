@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2323,10 +2323,12 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 		goto fail6;
 #endif
 
-	/* Only advertise ptp_caps for port 0 to avoid confusing older
-	 * sfptpd daemons. As EF10 uses ethtool APIs used to determine caps.
+	/* Only advertise ptp_caps for primary function, otherwise
+	 * older versions of sfptpd will try to synchronise multiple
+	 * net devices that share a clock.
 	 */
-	if (efx_port_num(efx) == 0) {
+	if (efx->mcdi->fn_flags &
+	    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY)) {
 		rc = device_create_file(&efx->pci_dev->dev,
 					&dev_attr_ptp_caps);
 		if (rc < 0)
@@ -2419,7 +2421,8 @@ void efx_ptp_remove(struct efx_nic *efx)
 	skb_queue_purge(&efx->ptp_data->rxq);
 	skb_queue_purge(&efx->ptp_data->txq);
 
-	if (efx_port_num(efx) == 0)
+	if (efx->mcdi->fn_flags &
+	    (1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_PRIMARY))
 		device_remove_file(&efx->pci_dev->dev, &dev_attr_ptp_caps);
 #ifdef CONFIG_SFC_DEBUGFS
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_ptp_stats);
@@ -2465,7 +2468,11 @@ bool efx_ptp_is_ptp_tx(struct efx_nic *efx, struct sk_buff *skb)
 		skb->len >= PTP_MIN_LENGTH &&
 		skb->len <= MC_CMD_PTP_IN_TRANSMIT_PACKET_MAXNUM &&
 		likely(skb->protocol == htons(ETH_P_IP)) &&
+		skb_transport_header_was_set(skb) &&
+		skb_network_header_len(skb) >= sizeof(struct iphdr) &&
 		ip_hdr(skb)->protocol == IPPROTO_UDP &&
+		skb_headlen(skb) >=
+		skb_transport_offset(skb) + sizeof(struct udphdr) &&
 		udp_hdr(skb)->dest == htons(PTP_EVENT_PORT);
 }
 
@@ -2817,9 +2824,13 @@ int efx_ptp_get_ts_config(struct efx_nic *efx, struct ifreq *ifr)
 #if defined(EFX_NOT_UPSTREAM)
 int efx_ptp_ts_settime(struct efx_nic *efx, struct efx_ts_settime *settime)
 {
+	struct efx_nic *primary = efx->primary;
 	int ret;
 	struct timespec ts;
 	s64 delta;
+
+	if (!efx->ptp_data || !primary || !primary->ptp_data)
+		return -ENOTTY;
 
 	ts.tv_sec = settime->ts.tv_sec;
 	ts.tv_nsec = settime->ts.tv_nsec;
@@ -2827,9 +2838,10 @@ int efx_ptp_ts_settime(struct efx_nic *efx, struct efx_ts_settime *settime)
 	if (settime->iswrite) {
 		delta = timespec_to_ns(&ts);
 
-		return efx_phc_adjtime(&efx->ptp_data->phc_clock_info, delta);
+		return efx_phc_adjtime(&primary->ptp_data->phc_clock_info,
+				       delta);
 	} else {
-		ret = efx_phc_gettime(&efx->ptp_data->phc_clock_info, &ts);
+		ret = efx_phc_gettime(&primary->ptp_data->phc_clock_info, &ts);
 		if (!ret) {
 			settime->ts.tv_sec = ts.tv_sec;
 			settime->ts.tv_nsec = ts.tv_nsec;
@@ -2840,12 +2852,18 @@ int efx_ptp_ts_settime(struct efx_nic *efx, struct efx_ts_settime *settime)
 
 int efx_ptp_ts_adjtime(struct efx_nic *efx, struct efx_ts_adjtime *adjtime)
 {
+	struct efx_nic *primary = efx->primary;
+
+	if (!efx->ptp_data || !primary || !primary->ptp_data)
+		return -ENOTTY;
+
 	if (adjtime->adjustment > MAX_PPB)
 		adjtime->adjustment = MAX_PPB;
 	else if (adjtime->adjustment < -MAX_PPB)
 		adjtime->adjustment = -MAX_PPB;
 
-	return efx_phc_adjfreq(&efx->ptp_data->phc_clock_info, adjtime->adjustment);
+	return efx_phc_adjfreq(&primary->ptp_data->phc_clock_info,
+			       adjtime->adjustment);
 }
 
 int efx_ptp_ts_sync(struct efx_nic *efx, struct efx_ts_sync *sync)

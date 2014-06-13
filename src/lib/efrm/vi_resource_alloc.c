@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -136,11 +136,13 @@ static int ci_ffs64(uint64_t x)
 #endif
 }
 
-static int efrm_vi_rm_alloc_instance_set(struct efrm_vi *virs,
-					 struct efrm_vi_set* vi_set,
-					 int instance)
+
+/* Returns -ve code on error and 0 on success. */
+static int efrm_vi_set_alloc_instance_try(struct efrm_vi *virs,
+					  struct efrm_vi_set* vi_set,
+					  int instance)
 {
-	int rc;
+	assert_spin_locked(&vi_set->allocation_lock);
 	if (instance != 0xff) {
 		if (instance >= (1 << vi_set->allocation.order) ) {
 			EFRM_ERR("%s: ERROR: vi_set instance=%d out-of-range "
@@ -149,29 +151,21 @@ static int efrm_vi_rm_alloc_instance_set(struct efrm_vi *virs,
 			return -EINVAL;
 		}
 	} else {
-		spin_lock(&vi_set->free_lock);
-		instance = ci_ffs64(vi_set->free) - 1;
-		if (instance < 0) {
-			EFRM_WARN("%s: ERROR: vi_set no free members",
+		if ((instance = ci_ffs64(vi_set->free) - 1) < 0) {
+			EFRM_TRACE("%s: ERROR: vi_set no free members",
 				  __FUNCTION__);
-			rc = -ENOSPC;
-			goto unlock_and_out;
+			return -ENOSPC;
 		}
 	}
 
-	if(! spin_is_locked(&vi_set->free_lock))
-		spin_lock(&vi_set->free_lock);
-
 	if(! (vi_set->free & ((uint64_t)1 << instance))) {
-		EFRM_ERR("%s: instance %d already allocated.", __FUNCTION__,
-			 instance);
-		rc = -EEXIST;
-		goto unlock_and_out;
+		EFRM_TRACE("%s: instance %d already allocated.", __FUNCTION__,
+			   instance);
+		return -EEXIST;
 	}
 
 	EFRM_ASSERT(vi_set->free & ((uint64_t)1 << instance));
 	vi_set->free &= ~((uint64_t)1 << instance);
-	spin_unlock(&vi_set->free_lock);
 
 	virs->allocation.instance = vi_set->allocation.instance + instance;
 	virs->allocation.allocator_id = -1;
@@ -179,9 +173,38 @@ static int efrm_vi_rm_alloc_instance_set(struct efrm_vi *virs,
 	virs->vi_set = vi_set;
 	efrm_resource_ref(efrm_vi_set_to_resource(vi_set));
 	return 0;
-unlock_and_out:
-	spin_unlock(&vi_set->free_lock);
-	return rc;
+}
+
+
+/* Try to allocate an instance out of the VIset.  If no free instances
+ * and some instances are flushing, block.  Else return error.
+ */
+static int efrm_vi_set_alloc_instance(struct efrm_vi *virs,
+				      struct efrm_vi_set* vi_set, int instance)
+{
+	int rc;
+	while (1) {
+		spin_lock(&vi_set->allocation_lock);
+		rc = efrm_vi_set_alloc_instance_try(virs, vi_set, instance);
+		EFRM_ASSERT(rc <= 0);
+		if ((rc == -ENOSPC || rc == -EEXIST) &&
+		    vi_set->n_vis_flushing > 0) {
+			++vi_set->n_flushing_waiters;
+			rc = 1;
+		}
+		spin_unlock(&vi_set->allocation_lock);
+		if (rc != 1)
+			return rc;
+		EFRM_TRACE("%s: %d waiting for flush", __FUNCTION__,
+			   current->pid);
+		rc = wait_for_completion_interruptible(
+			&vi_set->allocation_completion);
+		spin_lock(&vi_set->allocation_lock);
+		--vi_set->n_flushing_waiters;
+		spin_unlock(&vi_set->allocation_lock);
+		if (rc != 0)
+			return rc;
+	}
 }
 
 
@@ -197,8 +220,8 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 	int channel;
 
 	if (vi_attr->vi_set != NULL)
-		return efrm_vi_rm_alloc_instance_set(virs, vi_attr->vi_set,
-						     vi_attr->vi_set_instance);
+		return efrm_vi_set_alloc_instance(virs, vi_attr->vi_set,
+						  vi_attr->vi_set_instance);
 
 #ifdef CONFIG_SFC_RESOURCE_VF
 	vf = efrm_pd_get_vf(pd);
@@ -235,13 +258,19 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 static void efrm_vi_rm_free_instance(struct efrm_vi *virs)
 {
 	if (virs->vi_set != NULL) {
-		int si = (virs->allocation.instance
-			  - virs->vi_set->allocation.instance);
-		spin_lock(&virs->vi_set->free_lock);
-		EFRM_ASSERT((virs->vi_set->free & (1 << si)) == 0);
-		virs->vi_set->free |= 1 << si;
-		spin_unlock(&virs->vi_set->free_lock);
-		efrm_vi_set_release(virs->vi_set);
+		struct efrm_vi_set* vi_set = virs->vi_set;
+		int si = virs->allocation.instance -
+			vi_set->allocation.instance;
+		int need_complete;
+		spin_lock(&vi_set->allocation_lock);
+		EFRM_ASSERT((vi_set->free & (1 << si)) == 0);
+		vi_set->free |= 1 << si;
+		--vi_set->n_vis_flushing;
+		need_complete = vi_set->n_flushing_waiters > 0;
+		spin_unlock(&vi_set->allocation_lock);
+		efrm_vi_set_release(vi_set);
+		if (need_complete)
+			complete(&vi_set->allocation_completion);
 	}
 #ifdef CONFIG_SFC_RESOURCE_VF
 	else if (virs->allocation.vf != NULL) {
@@ -256,6 +285,12 @@ static void efrm_vi_rm_free_instance(struct efrm_vi *virs)
 }
 
 /*** Queue sizes *********************************************************/
+
+static int efrm_vi_is_phys(const struct efrm_vi* virs)
+{
+	return efrm_pd_owner_id(virs->pd) == 0;
+}
+
 
 uint32_t efrm_vi_rm_evq_bytes(struct efrm_vi *virs, int n_entries)
 {
@@ -288,7 +323,7 @@ static uint32_t efrm_vi_rm_rxq_bytes(struct efrm_vi *virs, int n_entries)
 	if (nic->devtype.arch == EFHW_ARCH_EF10)
 		bytes_per_desc = EF10_DMA_RX_DESC_BYTES;
 	else if (nic->devtype.arch == EFHW_ARCH_FALCON)
-		bytes_per_desc = (virs->flags & EFHW_VI_RX_PHYS_ADDR_EN)
+		bytes_per_desc = efrm_vi_is_phys(virs)
 			? FALCON_DMA_RX_PHYS_DESC_BYTES
 			: FALCON_DMA_RX_BUF_DESC_BYTES;
 	else {
@@ -360,8 +395,6 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 
 	switch (q_type) {
 	case EFHW_TXQ:
-		if (q_flags & EFRM_VI_PHYS_ADDR)
-			vi_flags |= EFHW_VI_TX_PHYS_ADDR_EN;
 		if (!(q_flags & EFRM_VI_IP_CSUM))
 			vi_flags |= EFHW_VI_TX_IP_CSUM_DIS;
 		if (!(q_flags & EFRM_VI_TCP_UDP_CSUM))
@@ -376,8 +409,6 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_TX_IP_FILTER_EN;
 		break;
 	case EFHW_RXQ:
-		if (q_flags & EFRM_VI_PHYS_ADDR)
-			vi_flags |= EFHW_VI_RX_PHYS_ADDR_EN;
 		if (!(q_flags & EFRM_VI_CONTIGUOUS))
 			vi_flags |= EFHW_VI_JUMBO_EN;
 		if (q_flags & EFRM_VI_RX_TIMESTAMPS)
@@ -401,8 +432,6 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 
 	switch (q_type) {
 	case EFHW_TXQ:
-		if (vi_flags & EFHW_VI_TX_PHYS_ADDR_EN)
-			q_flags |= EFRM_VI_PHYS_ADDR;
 		if (!(vi_flags & EFHW_VI_TX_IP_CSUM_DIS))
 			q_flags |= EFRM_VI_IP_CSUM;
 		if (!(vi_flags & EFHW_VI_TX_TCPUDP_CSUM_DIS))
@@ -417,8 +446,6 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_TCP_UDP_FILTER;
 		break;
 	case EFHW_RXQ:
-		if (vi_flags & EFHW_VI_RX_PHYS_ADDR_EN)
-			q_flags |= EFRM_VI_PHYS_ADDR;
 		if (!(vi_flags & EFHW_VI_JUMBO_EN))
 			q_flags |= EFRM_VI_CONTIGUOUS;
 		if (vi_flags & EFHW_VI_RX_TIMESTAMPS)
@@ -446,9 +473,12 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 	struct efrm_vi_q *q = &virs->q[queue_type];
 	struct efrm_nic* efrm_nic;
 	int instance, evq_instance, interrupting, wakeup_evq;
+	unsigned flags = virs->flags;
 
 	efrm_nic = efrm_nic(nic);
 	instance = virs->rs.rs_instance;
+	if (efrm_vi_is_phys(virs))
+		flags |= EFHW_VI_TX_PHYS_ADDR_EN | EFHW_VI_RX_PHYS_ADDR_EN;
 
 	switch (queue_type) {
 	case EFHW_TXQ:
@@ -460,7 +490,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 efrm_bt_allocation_base(&q->bt_alloc),
 			 q->dma_addrs,
 			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-			 virs->flags);
+			 flags);
 		break;
 	case EFHW_RXQ:
 		evq_instance = q->evq_ref->rs.rs_instance;
@@ -471,7 +501,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
                         efrm_bt_allocation_base(&q->bt_alloc),
                         q->dma_addrs,
                         (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-                        virs->flags);
+                        flags);
                 if( rc >= 0 ) {
                   virs->rx_prefix_len = rc;
                   rc = 0;
@@ -501,7 +531,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
 			 interrupting, 0 /* DOS protection */,
 			 wakeup_evq,
-			 (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0,
+			 (flags & EFHW_VI_RX_TIMESTAMPS) != 0,
 			 &virs->rx_ts_correction);
 		break;
 	default:
@@ -778,12 +808,6 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 	if (efrm_pd_get_vf(pd))
 		efrm_vf_vi_set_name(virs, name);
 #endif
-	if (efrm_pd_owner_id(pd) == 0) {
-		EFRM_ASSERT(vi_flags & EFHW_VI_RX_PHYS_ADDR_EN);
-		EFRM_ASSERT(vi_flags & EFHW_VI_TX_PHYS_ADDR_EN);
-		virs->flags |= EFHW_VI_RX_PHYS_ADDR_EN |
-				EFHW_VI_TX_PHYS_ADDR_EN;
-	}
 
 	/* We have to jump through some hoops here:
 	 * - EF10 needs the event queue allocated before rx and tx queues
@@ -988,8 +1012,6 @@ int  efrm_vi_alloc(struct efrm_client *client,
 		efrm_resource_ref(efrm_pd_to_resource(pd));
 		client = efrm_pd_to_resource(pd)->rs_client;
 	}
-	if (efrm_pd_owner_id(pd) == 0)
-		vi_flags |= EFHW_VI_TX_PHYS_ADDR_EN | EFHW_VI_RX_PHYS_ADDR_EN;
 
 	/* At this point we definitely have a valid [client] and a [pd]. */
 
@@ -1016,11 +1038,8 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	memset(virs, 0, sizeof(*virs));
 	EFRM_ASSERT(&virs->rs == (struct efrm_resource *) (virs));
 
+	efrm_vi_rm_salvage_flushed_vis(client->nic);
 	rc = efrm_vi_rm_alloc_instance(pd, virs, attr);
-	if (rc < 0) {
-		efrm_vi_rm_salvage_flushed_vis(client->nic);
-		rc = efrm_vi_rm_alloc_instance(pd, virs, attr);
-	}
 	if (rc < 0) {
 		EFRM_ERR("%s: Out of VI instances (%d)", __FUNCTION__, rc);
 		rc = -EBUSY;

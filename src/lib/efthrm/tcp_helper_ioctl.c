@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -411,7 +411,7 @@ efab_ep_filter_clear(ci_private_t *priv, void *arg)
   int rc = efab_ioctl_get_ep(priv, op->tcp_id, &ep);
   if (rc != 0)
     return rc;
-  return tcp_helper_endpoint_clear_filters(ep);
+  return tcp_helper_endpoint_clear_filters(ep, 0);
 }
 static int
 efab_ep_filter_mcast_add(ci_private_t *priv, void *arg)
@@ -1140,6 +1140,11 @@ static int efab_file_move_to_alien_stack(ci_private_t *priv,
   tcp_helper_endpoint_t *ep;
   struct oo_file_ref *os_socket;
   int rc;
+
+  /* Endpoints in epoll list should not be moved, because waitq is already
+   * in the epoll internal structures (bug 41152). */
+  if( !list_empty(&priv->_filp->f_ep_links) )
+    return -EBUSY;
 
   mid_ts = CI_ALLOC_OBJ(ci_tcp_state);
   if( mid_ts == NULL ) {

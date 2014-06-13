@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,6 +54,7 @@
  */
 
 #include <etherfabric/ef_vi.h>
+#include <etherfabric/pd.h>
 #include "sysdep.h"
 #include "ef_vi_falcon.h"
 #include "ef_vi_ef10.h"
@@ -215,5 +216,6 @@ extern void ef10_ef_eventq_timer_run(ef_vi*, unsigned v);
 extern void ef10_ef_eventq_timer_clear(ef_vi*);
 extern void ef10_ef_eventq_timer_zero(ef_vi*);
 
+extern int ef_pd_cluster_free(ef_pd*, ef_driver_handle);
 
 #endif  /* __CI_EF_VI_INTERNAL_H__ */

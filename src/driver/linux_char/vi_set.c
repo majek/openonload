@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,7 +69,7 @@ vi_set_rm_alloc(ci_resource_alloc_t* alloc_,
   }
 
   vi_props = 0;
-  rc = efrm_vi_set_alloc(pd, alloc->in_min_n_vis, vi_props, &vi_set);
+  rc = efrm_vi_set_alloc(pd, alloc->in_n_vis, vi_props, &vi_set);
   if( rc != 0 )
     goto fail3;
 

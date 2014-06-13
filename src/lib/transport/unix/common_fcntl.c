@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,34 +35,48 @@
 #define VERB(x)
 
 
-int apply_fcntl_to_os_sock(citp_sock_fdi* epi, int fd,
-                           int cmd, long arg, int *fcntl_result)
+
+int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd,
+                            int cmd, long arg, const char* cmd_str,
+                            int *fcntl_result)
 {
-  /* If we have an OS sock associated with this socket, then apply
-  ** fcntl() to it and return the result in fcntl_result.  The rc of
-  ** the function is the os_sock or error.
-  */
-  int rc;
+  /* If we have an OS sock associated with this socket, then apply fcntl()
+   * to it and return the result in fcntl_result.  The rc of the function
+   * is 0 or error.
+   */
+  int dummy;
+  int os_sock;
+
+  if( fcntl_result == NULL )
+    fcntl_result = &dummy;
+  *fcntl_result = 0;
 
   if( (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) &&
-      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) )
+      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
+    /* This socket doesn't have an OS socket. */
     return 0;
+  }
 
-  rc = ci_get_os_sock_fd(&epi->sock, fd);
-  if( CI_IS_VALID_SOCKET(rc)) {
-    *fcntl_result = ci_sys_fcntl(rc, cmd, arg);
-    ci_rel_os_sock_fd(rc);
-  }
-  else {
+  os_sock = ci_get_os_sock_fd(&epi->sock, fd);
+  if( ! CI_IS_VALID_SOCKET(os_sock) ) {
     /* Only errors that are possible are:
-     *   i) There is no OS socket (handled above)
+     *   i) There is no OS socket (handled above, (impossible))
      *  ii) There are no more file-descriptors available (ENFILE)
-     * We wouldn't expect ii normally, though i can happen on some apps
      */
-    ci_assert_equal(rc, -ENFILE);
+    ci_log("%s: ERROR: could not get fd for OS sock (fd=%d cmd=%s error=%d)",
+           __func__, fd, cmd_str, -os_sock);
+    ci_assert_equal(os_sock, -ENFILE);
+    return os_sock;
   }
-  return rc;
+
+  *fcntl_result = ci_sys_fcntl(os_sock, cmd, arg);
+  ci_rel_os_sock_fd(os_sock);
+  if( *fcntl_result < 0 )
+    ci_log("%s: ERROR: fcntl on OS sock failed (fd=%d cmd=%s error=%d)",
+           __func__, fd, cmd_str, -(*fcntl_result));
+  return 0;
 }
+
 
 
 static unsigned fd_flags_to_sbflags(int fd_flags)
@@ -90,7 +104,7 @@ static int sbflags_to_fd_flags(unsigned sbflags)
 int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
 {
   ci_sock_cmn* s = epi->sock.s;
-  int rc = 0, fcntl_result;
+  int rc = 0;
 
   Log_VSC(log("%s("EF_FMT", %#x, %#lx)", __FUNCTION__, EF_PRI_ARGS(epi,fd),
               (unsigned)cmd, (unsigned long)arg));
@@ -127,15 +141,7 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
       long os_arg = arg;
       if( s->b.state == CI_TCP_LISTEN )
         os_arg |= O_NONBLOCK | O_NDELAY;
-      rc = apply_fcntl_to_os_sock(epi, fd, cmd, os_arg, &fcntl_result);
-      if( rc < 0 || fcntl_result < 0 ) {
-        /* We have no way to back off ci_sys_fcntl(fd) above, so
-         * let's complain to user and go on. */
-        ci_log("Failed to promote fcntl(%d, F_SETFL) to OS socket: "
-               "%d, OS rc=%d",
-               fd, rc, fcntl_result);
-      }
-      rc = 0;
+      citp_sock_fcntl_os_sock(epi, fd, cmd, os_arg, "F_SETFL", NULL);
     }
 
 
@@ -154,16 +160,10 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
   case F_SETOWN:
     /* On Solaris, fcntl(fd, F_SETOWN, arg) returns error
      * for non-socket fd's */
-    rc = ci_sys_fcntl(fd, cmd, arg);
-    if( rc != 0 )
+    if( (rc = ci_sys_fcntl(fd, cmd, arg)) != 0 )
         break;
     s->b.sigown = arg;
-    /* Keep O/S socket up-to-date. */
-    rc = apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
-    if( rc < 0 || fcntl_result < 0 )
-      ci_log("%s: failed to pass F_SETOWN to OS socket: %d %d (errno=%d)",
-             __func__, rc, fcntl_result, errno);
-    rc = 0;
+    citp_sock_fcntl_os_sock(epi, fd, cmd, arg, "F_SETOWN", NULL);
     if( s->b.sigown && (s->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
       ci_bit_set(&s->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
     break;
@@ -191,12 +191,7 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
     else
 # endif
       s->b.sigown = own->pid;
-    /* Keep O/S socket up-to-date. */
-    rc = apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
-    if( rc < 0 || fcntl_result < 0 )
-      ci_log("%s: failed to pass F_SETOWN to OS socket: %d %d (errno=%d)",
-             __func__, rc, fcntl_result, errno);
-    rc = 0;
+    citp_sock_fcntl_os_sock(epi, fd, cmd, arg, "F_SETOWN_EX", NULL);
     if( s->b.sigown && (s->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
       ci_bit_set(&s->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
     break;
@@ -210,11 +205,7 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
   case F_SETSIG:
     if( (rc = ci_sys_fcntl(fd, cmd, arg)) != 0 )
       break;
-    rc = apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
-    if( rc < 0 || fcntl_result < 0 )
-      ci_log("%s: failed to pass F_SETSIG to OS socket: %d %d (errno=%d)",
-             __func__, rc, fcntl_result, errno);
-    rc = 0;
+    citp_sock_fcntl_os_sock(epi, fd, cmd, arg, "F_SETSIG", NULL);
     break;
 
   case F_DUPFD:

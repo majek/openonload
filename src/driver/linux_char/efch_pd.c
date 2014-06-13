@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,23 +43,25 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
                                      1 /* iommu on */,
                                      &vf)) < 0 &&
         !(alloc->in_flags & EFCH_PD_FLAG_VF_OPTIONAL)) {
-      EFCH_NOTICE("%s: could not allocate VF", __FUNCTION__);
+      EFCH_NOTICE("%s: could not allocate VF (%d)", __FUNCTION__, rc);
       goto out;
     }
   }
 #else
   if (alloc->in_flags & EFCH_PD_FLAG_VF) {
+    EFCH_NOTICE("%s: VF requested, but support not compiled in", __FUNCTION__);
     rc = -ENODEV;
     goto out;
   }
 #endif
-  if ((alloc->in_flags & EFCH_PD_FLAG_PHYS_ADDR) && vf == NULL &&
-      ci_geteuid() != 0) {
+  phys_mode = (alloc->in_flags & EFCH_PD_FLAG_PHYS_ADDR) != 0;
+  if (phys_mode && vf == NULL &&
+      (phys_mode_gid == -2 || (phys_mode_gid != -1 &&
+			       ci_getgid() != phys_mode_gid))) {
     EFCH_ERR("%s: ERROR: not permitted to use phys mode", __FUNCTION__);
     rc = -EPERM;
     goto out;
   }
-  phys_mode = (alloc->in_flags & EFCH_PD_FLAG_PHYS_ADDR) != 0;
 
   rc = efrm_pd_alloc(&pd_rs, client, vf, phys_mode);
  out:

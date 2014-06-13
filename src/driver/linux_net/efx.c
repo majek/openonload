@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -199,6 +199,28 @@ static unsigned int num_rx_netqs;
 module_param(num_rx_netqs, uint, 0444);
 MODULE_PARM_DESC(num_rx_netqs,
 		 "The number of receive NETQs to allocate");
+
+/*
+ * Number of RX netqs with RSS support
+ */
+#if EFX_VMKLNX_DDI_VERSION < EFX_VMKLNX_DDI_VERSION_ESX_5_1
+#define NUM_RSS_NETQS_DEF	0
+#else
+#define NUM_RSS_NETQS_DEF	1
+#endif
+static int num_rss_netqs = NUM_RSS_NETQS_DEF;
+module_param(num_rss_netqs, int, 0444);
+MODULE_PARM_DESC(num_rss_netqs,
+	"The number of receive NETQs with RSS support (negative means all)");
+
+/*
+ * Maximum number of RSS channels per NETQ.
+ */
+static unsigned max_netq_rss_channels = 4;
+module_param(max_netq_rss_channels, int, 0444);
+MODULE_PARM_DESC(max_netq_rss_channels,
+		 "Maximum number of RSS channels per NETQ (zero to have no "
+		 "artificial limit)");
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_TX_MQ)
 /*
@@ -754,7 +776,6 @@ static void efx_start_datapath(struct efx_nic *efx)
 	efx->rx_dma_len = (efx->rx_prefix_size +
 			   EFX_MAX_FRAME_LEN(efx->net_dev->mtu) +
 			   efx->type->rx_buffer_padding);
-#if !defined(EFX_NOT_UPSTREAM) || !defined(EFX_RX_BUF_SKB)
 	rx_buf_len = (sizeof(struct efx_rx_page_state) +
 		      efx->rx_ip_align + efx->rx_dma_len);
 	if (rx_buf_len <= PAGE_SIZE) {
@@ -788,9 +809,6 @@ static void efx_start_datapath(struct efx_nic *efx)
 			  "RX buf len=%u step=%u bpp=%u; page batch=%u\n",
 			  efx->rx_dma_len, efx->rx_page_buf_step,
 			  efx->rx_bufs_per_page, efx->rx_pages_per_batch);
-#else
-	(void)rx_buf_len;
-#endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 #if defined(EFX_HAVE_NDO_SET_FEATURES)
@@ -1722,6 +1740,11 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 	unsigned int channels;
 	unsigned int remaining_channels = max_channels;
 	unsigned int n_groups;
+/* If number of netqs is unspecified, do not allocate a large number of them */
+#define DEFAULT_MAX_NETQS	4U
+	unsigned int num_netqs_def = min(parallelism, DEFAULT_MAX_NETQS);
+	unsigned int n_rss_pools;
+	unsigned int remaining_parallelism_for_rss;
 
 	/* allocate 1 channel to RX and TX if necessary before
 	 * allocating further */
@@ -1740,17 +1763,21 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 		remaining_channels -= extra_channels;
 
 	/* then allocate netqs, beginning with a single channel each */
-	channels = min((num_rx_netqs >= 1U ? num_rx_netqs : parallelism) - 1,
+	channels = min((num_rx_netqs >= 1U ? num_rx_netqs : num_netqs_def) - 1,
 		       remaining_channels);
 	remaining_channels -= channels;
 	efx->n_rx_netqs += channels;
+	efx->n_rx_netqs_no_rss = num_rss_netqs < 0 ? 0 :
+		(unsigned)num_rss_netqs > efx->n_rx_netqs ? 0 :
+		(efx->n_rx_netqs - (unsigned)num_rss_netqs);
+	n_rss_pools = efx->n_rx_netqs - efx->n_rx_netqs_no_rss;
 	n_groups = efx->n_rx_netqs;
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_TX_MQ)
 	/* then allocate extra tx channels */
 	if (dedicated_tx_channels > 0) {
 		channels = min((num_tx_channels >= 1U ? num_tx_channels
-						      : parallelism) - 1,
+						      : num_netqs_def) - 1,
 			       remaining_channels);
 		dedicated_tx_channels += channels;
 		remaining_channels -= channels;
@@ -1759,7 +1786,7 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 		/* Tx share channels with Rx. n_groups Rx channels are
 		 * allocated. Allocate more from remaining if required. */
 		efx->n_tx_channels = min(num_tx_channels >= 1U ? num_tx_channels
-							       : parallelism,
+							       : num_netqs_def,
 					 remaining_channels + n_groups);
 		/* More Tx channels than already allocated Rx */
 		if (efx->n_tx_channels > n_groups) {
@@ -1774,15 +1801,34 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 		efx->n_tx_channels = 1;
 #endif
 	efx->n_rss_channels = 1;
-	/* When using netq the rss channels per queue must be a power of 2 */
-	while (remaining_channels >= n_groups * efx->n_rss_channels &&
-	       efx->n_rss_channels < parallelism) {
-		remaining_channels -= efx->n_rss_channels * n_groups;
-		efx->n_rss_channels *= 2;
+	if (n_rss_pools > 0) {
+		remaining_parallelism_for_rss =
+			parallelism <= efx->n_rx_netqs ? 0 :
+				(parallelism - efx->n_rx_netqs);
+
+		/* Falcon B0 / Siena implements RSS as:
+		 *   rx_qid = filter_rx_base_qid | rx_qid_offset
+		 * So, n_rss_channels (step of base queue ID) must be a power
+		 * of 2, but real number of used RSS channel (rss_spread) may
+		 * be any less or equal to n_rss_channels.
+		 * EF10 uses addition instead of bitwise 'or' and allocation
+		 * may be done more efficient (if required in the future). */
+		while (remaining_channels >= n_groups * efx->n_rss_channels &&
+		       remaining_parallelism_for_rss >=
+			       efx->n_rss_channels * n_rss_pools &&
+		       (max_netq_rss_channels == 0 ||
+			efx->n_rss_channels < max_netq_rss_channels)) {
+			remaining_channels -= efx->n_rss_channels * n_groups;
+			remaining_parallelism_for_rss -=
+				efx->n_rss_channels * n_rss_pools;
+			efx->n_rss_channels *= 2;
+		}
 	}
 
 	efx->n_rx_channels = efx->n_rx_netqs * efx->n_rss_channels;
-	efx->rss_spread = min(efx->n_rss_channels, parallelism);
+	efx->rss_spread = (max_netq_rss_channels == 0) ?
+				efx->n_rss_channels :
+				min(efx->n_rss_channels, max_netq_rss_channels);
 	efx->n_channels =
 		n_groups * efx->n_rss_channels + dedicated_tx_channels;
 	if (dedicated_tx_channels > 0) {
@@ -1794,11 +1840,9 @@ static unsigned int efx_allocate_msix_channels(struct efx_nic *efx,
 	}
 
 	netif_info(efx, drv, efx->net_dev,
-		   "Allocating %u rss channels, %u dedicated TX channels\n",
+		   "Allocating %u RX netqs (%u with RSS, %u channels each), %u dedicated TX channels\n",
+		   efx->n_rx_netqs, efx->n_rx_netqs - efx->n_rx_netqs_no_rss,
 		   efx->n_rss_channels, dedicated_tx_channels);
-	netif_info(efx, drv, efx->net_dev,
-		   "Also allocating %u RX netqs\n",
-		   efx->n_rx_netqs - 1);
 
 	return efx->n_channels;
 }
@@ -1916,6 +1960,7 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 		efx->n_wanted_channels = 1;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 		efx->n_rx_netqs = 1;
+		efx->n_rx_netqs_no_rss = 1;
 #endif
 		rc = pci_enable_msi(efx->pci_dev);
 		if (rc == 0) {
@@ -1939,6 +1984,7 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 		efx->n_wanted_channels = efx->n_channels;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 		efx->n_rx_netqs = 1;
+		efx->n_rx_netqs_no_rss = 1;
 #endif
 		efx->legacy_irq = efx->pci_dev->irq;
 	}
@@ -4453,9 +4499,12 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 	if (lro)
 		net_dev->features |= NETIF_F_GRO;
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO) && defined(NETIF_F_LRO)
-	if (lro)
-		net_dev->features |= NETIF_F_LRO;
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
+	if (lro) {
+#if defined(NETIF_F_LRO)
+ 		net_dev->features |= NETIF_F_LRO;
+#endif
+	}
 #endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	net_dev->features |= NETIF_F_HW_VLAN_RX;

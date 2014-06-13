@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,7 +57,7 @@ struct efrm_pd;
 
 
 extern int
-efrm_vi_set_alloc(struct efrm_pd *, int min_n_vis, unsigned vi_props,
+efrm_vi_set_alloc(struct efrm_pd *, int n_vis, unsigned vi_props,
 		  struct efrm_vi_set **vi_set_out);
 
 extern void

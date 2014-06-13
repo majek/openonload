@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -760,16 +760,14 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
       pf, stats.tx_stop_rwnd, stats.tx_stop_cwnd, stats.tx_stop_nagle,
       stats.tx_stop_more, stats.tx_stop_app);
 
-  log("%s  rcv: nxt-max=%08x-%08x  current=%08x %s%s", pf,
+  log("%s  rcv: nxt-max=%08x-%08x wnd adv=%d cur=%d %s%s", pf,
       tcp_rcv_nxt(ts), tcp_rcv_wnd_right_edge_sent(ts),
-      tcp_rcv_nxt(ts) + tcp_rcv_wnd_current(ts),
+      tcp_rcv_wnd_advertised(ts), tcp_rcv_wnd_current(ts),
       ci_tcp_is_in_faststart(ts) ? " FASTSTART":"",
       ci_tcp_can_use_fast_path(ts) ? " FAST":"");
-  log("%s  rcv: rob_n=%d recv1_n=%d recv2_n=%d wnd adv=%d cur=%d usr=%d",
-      pf,
-      ts->rob.num, ts->recv1.num,
-      ts->recv2.num, tcp_rcv_wnd_advertised(ts),
-      tcp_rcv_wnd_current(ts), tcp_rcv_usr(ts));
+  log("%s  rcv: bytes=%d rob_pkts=%d q_pkts=%d+%d usr=%d",
+      pf, ts->rcv_added - stats.rx_isn, ts->rob.num, ts->recv1.num,
+      ts->recv2.num, tcp_rcv_usr(ts));
 
   log("%s  eff_mss=%d smss=%d amss=%d  used_bufs=%d uid=%d"CI_DEBUG(" pid=%d")
       " wscl s=%d r=%d", pf, ts->eff_mss, ts->smss, ts->amss,
@@ -782,8 +780,9 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
       "ooo=%d", pf, ts->retransmits, ts->dup_acks, stats.rtos,
       stats.fast_recovers, stats.rx_seq_errs, stats.rx_ack_seq_errs,
       stats.rx_ooo_pkts, stats.rx_ooo_fill);
-  log("%s  tx_nomac=%u tx_msg_warm_try=%u tx_msg_warm=%u", pf,
-      stats.tx_nomac_defer, stats.tx_msg_warm_try, stats.tx_msg_warm);
+  log("%s  tx: defer=%d nomac=%u warm=%u warm_aborted=%u", pf,
+      stats.tx_defer, stats.tx_nomac_defer, stats.tx_msg_warm,
+      stats.tx_msg_warm_abort);
   log("%s  tmpl: alloc=%u send_fast=%u send_slow=%u active=%u", pf,
       stats.tx_tmpl_alloc, stats.tx_tmpl_send_fast, stats.tx_tmpl_send_slow,
       stats.tx_tmpl_active);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -373,6 +373,7 @@ typedef struct ef_vi {
 	int                           vi_mem_mmap_bytes;
 	char*			      vi_io_mmap_ptr;
 	int                           vi_io_mmap_bytes;
+	int                           vi_clustered;
 
 	ef_vi_ioaddr_t                io;
 

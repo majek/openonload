@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2123,7 +2123,7 @@ struct efx_farch_filter_table {
 struct efx_farch_filter_state {
 	struct efx_farch_filter_table table[EFX_FARCH_FILTER_TABLE_COUNT];
 #ifdef EFX_NOT_UPSTREAM
-	bool		kernel_blocked;
+	bool		kernel_blocked[EFX_DL_FILTER_BLOCK_KERNEL_MAX];
 #endif
 };
 
@@ -2737,7 +2737,9 @@ s32 efx_farch_filter_insert(struct efx_nic *efx,
 
 #ifdef EFX_NOT_UPSTREAM
 		if (spec.priority <= EFX_FILTER_PRI_AUTO &&
-		    state->kernel_blocked) {
+		    state->kernel_blocked[efx_filter_is_mc_recipient(gen_spec) ?
+					  EFX_DL_FILTER_BLOCK_KERNEL_MCAST :
+					  EFX_DL_FILTER_BLOCK_KERNEL_UCAST]) {
 			rc = -EPERM;
 			goto out;
 		}
@@ -3276,12 +3278,13 @@ bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 
 #ifdef EFX_NOT_UPSTREAM
 
-int efx_farch_filter_block_kernel(struct efx_nic *efx)
+int efx_farch_filter_block_kernel(struct efx_nic *efx,
+				  enum efx_dl_filter_block_kernel_type type)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
 	struct efx_farch_filter_table *table;
 	struct efx_farch_filter_spec *spec;
-	unsigned int i;
+	enum efx_farch_filter_index index;
 
 	/* On Falcon, unmatched packets always go to queue 0 (with
 	 * optional RSS offset), so we can't drop them
@@ -3291,52 +3294,58 @@ int efx_farch_filter_block_kernel(struct efx_nic *efx)
 
 	spin_lock_bh(&efx->filter_lock);
 
-	state->kernel_blocked = true;
+	state->kernel_blocked[type] = true;
 
 	/* On Siena, the default filters always exist, so we point
 	 * them at the drop queue unless they are already steered
 	 */
 	table = &state->table[EFX_FARCH_FILTER_TABLE_RX_DEF];
-	for (i = 0; i < EFX_FARCH_FILTER_SIZE_RX_DEF; i++) {
-		spec = &table->spec[i];
-		if (!(spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO)) {
-			spec->flags = EFX_FILTER_FLAG_RX; /* no RSS */
-			spec->dmaq_id = EFX_FILTER_RX_DMAQ_ID_DROP;
-		}
+	index = (type == EFX_DL_FILTER_BLOCK_KERNEL_MCAST) ?
+		EFX_FARCH_FILTER_INDEX_MC_DEF : EFX_FARCH_FILTER_INDEX_UC_DEF;
+	spec = &table->spec[index];
+
+	if (!(spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO)) {
+		spec->flags = EFX_FILTER_FLAG_RX; /* no RSS */
+		spec->dmaq_id = EFX_FILTER_RX_DMAQ_ID_DROP;
 	}
 	efx_farch_filter_push_rx_config(efx);
 
 	spin_unlock_bh(&efx->filter_lock);
 
-	/* Remove all HINT filters */
-	efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_IP,
-				     EFX_FILTER_PRI_HINT);
-	efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_MAC,
-				     EFX_FILTER_PRI_HINT);
+	/* Remove all HINT filters for unicast blocks */
+	if (type == EFX_DL_FILTER_BLOCK_KERNEL_UCAST) {
+		efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_IP,
+					     EFX_FILTER_PRI_HINT);
+		efx_farch_filter_table_clear(efx, EFX_FARCH_FILTER_TABLE_RX_MAC,
+					     EFX_FILTER_PRI_HINT);
+	}
 
 	return 0;
 }
 
-void efx_farch_filter_unblock_kernel(struct efx_nic *efx)
+void efx_farch_filter_unblock_kernel(struct efx_nic *efx,
+				     enum efx_dl_filter_block_kernel_type type)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
 	struct efx_farch_filter_table *table =
 		&state->table[EFX_FARCH_FILTER_TABLE_RX_DEF];
 	struct efx_farch_filter_spec *spec;
-	unsigned int i;
+	enum efx_farch_filter_index index;
 
 	WARN_ON(table->size == 0);
 
 	spin_lock_bh(&efx->filter_lock);
 
-	state->kernel_blocked = false;
+	state->kernel_blocked[type] = false;
 
 	/* Restore default filters */
-	for (i = 0; i < EFX_FARCH_FILTER_SIZE_RX_DEF; i++) {
-		spec = &table->spec[i];
-		if (!(spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO))
-			efx_farch_filter_init_rx_auto(efx, spec);
-	}
+	index = (type == EFX_DL_FILTER_BLOCK_KERNEL_MCAST) ?
+		EFX_FARCH_FILTER_INDEX_MC_DEF : EFX_FARCH_FILTER_INDEX_UC_DEF;
+	spec = &table->spec[index];
+
+	if (!(spec->flags & EFX_FILTER_FLAG_RX_OVER_AUTO))
+		efx_farch_filter_init_rx_auto(efx, spec);
+
 	efx_farch_filter_push_rx_config(efx);
 
 	spin_unlock_bh(&efx->filter_lock);

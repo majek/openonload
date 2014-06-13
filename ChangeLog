@@ -1,3 +1,31 @@
+openonload-201310-u2
+--------------------
+
+Updated net driver and firmware (v4_0_2_6645)
+
+task39845: add solar_clusterd for SolarCapturePro application clustering
+task41317: introduce separate block kernel unicast and multicast filters
+task37488: add ability to control Onload log verbosity using EF_LOG
+task41567: add phys_mod_gid module option to sfc_char
+task41905: allow use of VFs in ef_vi even when not root
+task8595:  Improve onload_stackdump TCP socket stats (add tx_defer and rx_isn)
+
+bug39578: Improve ARP confirmation where virtual MAC addresses are in use
+bug41219: Fix unmapping incorrect memory in ef_vi_free()
+bug41165: squash log for EOPNOTSUPP in efch_resource_alloc
+bug41304: fix netif_tcp_helper_mmap error path to undo PIO mapping when failure
+bug39592: use ci_sys_read to avoid inline failure during build with gcc 4.7
+bug41391: raise default TX push threshold to improve latency when firmware batches
+bug41193: keep VF state per nic to allow mix of new and old NICs using VFs to work
+bug41351: do not allow allocating extra VIs when non-power-of-2 VI set requested
+bug41627: fix compilation error in JNI wrapper
+bug40844: sync control plane state with kernel when stack is first created
+bug41152: forbid socket move for tcp loopback and handover when in epoll set
+bug41751: fix problems with application of fcntl() to OS socket
+bug41830: RHEL7 beta kernel compatibility build fixes
+bug41542: Avoid bogus unused function build warning on non-smp kernels
+bug39111: protect against bad values for EF_TCP_INITIAL_CWND (when cwnd < mss)
+
 openonload-201310-u1
 --------------------
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,6 +57,13 @@ struct efx_dl_device;
 struct efx_filter_spec;
 struct device;
 
+enum efrm_filter_block_flags {
+	EFRM_FILTER_BLOCK_UNICAST = 1,
+	EFRM_FILTER_BLOCK_MULTICAST = 2,
+	EFRM_FILTER_BLOCK_ALL = EFRM_FILTER_BLOCK_UNICAST |
+				EFRM_FILTER_BLOCK_MULTICAST,
+};
+
 
 extern int  efrm_filter_insert(struct efrm_client *,
 			       struct efx_filter_spec *spec,
@@ -64,7 +71,8 @@ extern int  efrm_filter_insert(struct efrm_client *,
 extern void efrm_filter_remove(struct efrm_client *, int filter_id);
 extern void efrm_filter_redirect(struct efrm_client *,
 				 int filter_id, int rxq_i);
-extern int efrm_filter_block_kernel(struct efrm_client *client, bool block);
+extern int efrm_filter_block_kernel(struct efrm_client *client, int flags,
+                                    bool block);
 
 extern void efrm_filter_shutdown(void);
 extern void efrm_filter_init(void);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -198,15 +198,6 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
              alloc_in->rxq_capacity);
 
   efrm_vi_attr_init(&attr);
-
-  /* Validate the request. */
-  if( (rt->access & CI_CAP_PHYS) == 0 ) {
-    if( (alloc_in->flags & (EFHW_VI_RX_PHYS_ADDR_EN |
-                            EFHW_VI_TX_PHYS_ADDR_EN)) != 0 ) {
-      EFCH_ERR("%s: ERROR: not permitted to use phys mode", __FUNCTION__);
-      return -EPERM;
-    }
-  }
 
   if ((rc = efch_vi_rm_find(alloc_in->evq_fd, alloc_in->evq_rs_id,
                             EFRM_RESOURCE_VI, &evq)) < 0) {

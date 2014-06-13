@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201310-u1
+%define pkgversion 201310-u2
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -140,9 +140,9 @@ Source0		: openonload-%{pkgversion}.tgz
 BuildRoot   	: %{_builddir}/%{name}-root
 AutoReqProv	: no
 %if %{redhat}
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel}
+BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel} python-devel
 %else
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} %{kernelsource} = %{kverrel} glibc-devel glibc %{libpcap_devel}
+BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} %{kernelsource} = %{kverrel} glibc-devel glibc %{libpcap_devel} python-devel
 %ifarch x86_64
 %if %{build32}
 BuildRequires   : glibc-devel-32bit

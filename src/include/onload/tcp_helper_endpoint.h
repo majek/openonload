@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -96,13 +96,16 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
  * Clear all filters for an endpoint
  *
  * \param ep              endpoint kernel data structure 
+ * \param supress_hw_ops  set to 1 if you know you are in a context 
+ *                        where hw ops are not safe
  *
  * \return                standard error codes
  *
  *--------------------------------------------------------------------*/
 
 extern int
-tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep);
+tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, 
+                                  int supress_hw_ops);
 
 /*--------------------------------------------------------------------
  *!

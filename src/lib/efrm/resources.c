@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,7 +59,7 @@
 
 
 int
-efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
+efrm_resources_init(void)
 {
 	int i, rc;
 
@@ -77,7 +77,7 @@ efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
 			break;
 #ifdef CONFIG_SFC_RESOURCE_VF
 		case EFRM_RESOURCE_VF:
-			rc = efrm_create_vf_resource_manager(rmp, vi_res_dim);
+			rc = efrm_create_vf_resource_manager(rmp);
 			break;
 #endif
 		case EFRM_RESOURCE_PD:

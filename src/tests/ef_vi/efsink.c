@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -283,7 +283,7 @@ static void usage(void)
   fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");
   fprintf(stderr, "  {unicast-mis,multicast-mis}:[vid=<vlan>]\n");
   fprintf(stderr, "  {sniff}:[promisc|no-promisc]\n");
-  fprintf(stderr, "  {block-kernel}\n");
+  fprintf(stderr, "  {block-kernel|block-kernel-unicast|block-kernel-multicast}\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "options:\n");
   fprintf(stderr, "  -d     hexdump received packet\n");

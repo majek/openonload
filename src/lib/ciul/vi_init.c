@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -258,7 +258,10 @@ void ef_vi_init_txq(struct ef_vi* vi, int ring_size, void* descriptors,
 	vi->vi_txq.mask = ring_size - 1;
 	vi->vi_txq.descriptors = descriptors;
 	vi->vi_txq.ids = ids;
-	vi->tx_push_thresh = 1;
+        if( vi->nic_type.arch == EF_VI_ARCH_FALCON )
+          vi->tx_push_thresh = 1;
+        else
+          vi->tx_push_thresh = 16;
 	if( vi->vi_flags & EF_VI_TX_PUSH_DISABLE )
 		vi->tx_push_thresh = 0;
 	if( (vi->vi_flags & EF_VI_TX_PUSH_ALWAYS) && 

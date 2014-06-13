@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2013  Solarflare Communications Inc.
+** Copyright 2005-2014  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,6 +58,7 @@
 #include <ci/efrm/vf_resource.h>
 #include "efrm_internal.h"
 #include "efrm_vi.h"
+#include "efrm_vi_set.h"
 
 
 /* Workqueue item to postpone processing of "flush complete" event. */
@@ -538,7 +539,7 @@ efrm_handle_dmaq_flushed_schedule(struct efhw_nic *flush_nic,
 		return 0;
 
 #ifdef CONFIG_SFC_RESOURCE_VF
-	efrm_vf_manager_params(&vi_base, &vi_scale, &vf_count);
+	efrm_vf_nic_params(flush_nic, &vi_base, &vi_scale, &vf_count);
 #else
 	vi_base = 0;
 	vi_scale = 0;
@@ -618,6 +619,12 @@ void efrm_vi_rm_salvage_flushed_vis(struct efhw_nic *nic)
 
 void efrm_vi_resource_free(struct efrm_vi *virs)
 {
+	if (virs->vi_set != NULL) {
+		struct efrm_vi_set* vi_set = virs->vi_set;
+		spin_lock(&vi_set->allocation_lock);
+		++vi_set->n_vis_flushing;
+		spin_unlock(&vi_set->allocation_lock);
+	}
 	efrm_vi_register_flush_callback(virs, NULL, NULL);
 	virs->flags |= EFRM_VI_RELEASED;
 	efrm_pt_flush(virs);
