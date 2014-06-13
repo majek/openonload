@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,6 +54,7 @@
 #include <ci/efrm/driver_private.h>
 #include <ci/efrm/kernel_proc.h>
 #include <linux/proc_fs.h>
+#include "kernel_compat.h"
 
 /** Top level directory for sfc specific stats **/
 static struct proc_dir_entry *efrm_proc_root = NULL;
@@ -82,13 +83,6 @@ static DEFINE_MUTEX(efrm_pd_mutex);
  * /proc/drivers/sfc/ethX/
  *
  ****************************************************************************/
-
-void efrm_pd_set_owner( struct proc_dir_entry* dir_entry )
-{
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30)
-	dir_entry->owner = THIS_MODULE;
-#endif
-}
 
 efrm_pd_handle efrm_proc_dir_get(char const* dirname)
 {
@@ -173,8 +167,8 @@ int efrm_proc_dir_put(efrm_pd_handle pd_handle)
 				}
 				/* Delete the directory and table entry*/
 				/* TODO: Warn if it still has files in it */
-				remove_proc_entry(procdir->efrm_pd_dir->name,
-						procdir->efrm_pd_dir->parent);
+				remove_proc_entry(procdir->efrm_pd_name,
+						  efrm_proc_root);
 				kfree( procdir );
 			}
 			rval = 0;
@@ -191,7 +185,7 @@ int efrm_proc_dir_put(efrm_pd_handle pd_handle)
 
 efrm_pd_handle
 efrm_proc_create_file( char const* name, mode_t mode, efrm_pd_handle parent,
-                       read_proc_t* read_proc, write_proc_t* write_proc,
+                       const struct file_operations *fops,
                        void* context )
 {
 	/* Tracking the files within a /proc/ directory. */
@@ -217,17 +211,13 @@ efrm_proc_create_file( char const* name, mode_t mode, efrm_pd_handle parent,
 	strlcpy( rval->efrm_pf_name, name, IFNAMSIZ );
 	rval->efrm_pf_next = handle ? handle->efrm_pd_child : NULL;
 	
-	entry = create_proc_entry( name, mode, root );
+	entry = proc_create_data( name, mode, root, fops, context );
 	if ( !entry ) {
 		EFRM_WARN("%s: Unable to create procfile %s", __func__, name);
 		kfree( rval );
 		rval = NULL;
 	}
 	else {
-		entry->data = context;
-		entry->read_proc = read_proc;
-		entry->write_proc = write_proc;
-		efrm_pd_set_owner(entry);
 		rval->efrm_pf_file = entry;
 		if ( handle ) {
 			rval->efrm_pf_next = handle->efrm_pd_child;
@@ -251,7 +241,9 @@ efrm_proc_remove_file( efrm_pd_handle handle )
 
 	if ( entry && entry->efrm_pf_file ) {
 		remove_proc_entry( entry->efrm_pf_name,
-		                   entry->efrm_pf_file->parent );
+				   entry->efrm_pf_parent ?
+				   entry->efrm_pf_parent->efrm_pd_dir :
+				   efrm_proc_root);
 		parent = entry->efrm_pf_parent;
 		if ( parent ) {
 			/* remove ourselves from the list of children */
@@ -292,8 +284,7 @@ static int efrm_proc_dir_check_all_removed(void)
 		rval = 0;
 		/* Which is worse, to leak these, or to destroy them while
 		   somthing is holding a handle? */
-		remove_proc_entry(procdir->efrm_pd_dir->name,
-		                  procdir->efrm_pd_dir->parent);
+		remove_proc_entry(procdir->efrm_pd_name, efrm_proc_root);
 		/* Delete the table entry*/
 		kfree( procdir );
 		procdir = next;
@@ -311,9 +302,7 @@ static int efrm_proc_dir_check_all_removed(void)
  ****************************************************************************/
 
 
-static int
-efrm_resource_read_proc(char *buf, char **start, off_t offset, int count,
-			int *eof, void *data);
+static const struct file_operations efrm_resource_fops_proc;
 
 int efrm_install_proc_entries(void)
 {
@@ -326,14 +315,10 @@ int efrm_install_proc_entries(void)
 			rc = -ENOMEM;
 		}
 		else {
-			efrm_pd_set_owner(efrm_proc_root);
-			efrm_proc_resources = create_proc_read_entry(
+			efrm_proc_resources = proc_create(
 					"resources", 0, efrm_proc_root,
-					efrm_resource_read_proc, 0);
-			if ( efrm_proc_resources ) {
-				efrm_pd_set_owner(efrm_proc_resources);
-			}
-			else {
+					&efrm_resource_fops_proc);
+			if ( !efrm_proc_resources ) {
 				EFRM_WARN("%s: Unable to create /proc/drivers/"
 					  "sfc_resource/resources", __func__);
 			}
@@ -359,10 +344,10 @@ int efrm_uninstall_proc_entries(void)
 	}
 
 	if ( efrm_proc_resources )
-		remove_proc_entry(efrm_proc_resources->name, efrm_proc_root);
+		remove_proc_entry("resources", efrm_proc_root);
 	efrm_proc_resources = NULL;
 	if ( efrm_proc_root )
-		remove_proc_entry(efrm_proc_root->name, efrm_proc_root->parent);
+		remove_proc_entry("driver/sfc_resource", NULL);
 	efrm_proc_root = NULL;
 
 done_efrm_uninstall_proc_entries:
@@ -376,18 +361,9 @@ done_efrm_uninstall_proc_entries:
  *
  ****************************************************************************/
 
-#define EFRM_PROC_PRINTF(buf, len, fmt, ...)				\
-	do {								\
-		if (count - len > 0)					\
-			len += snprintf(buf+len, count-len, (fmt),	\
-					__VA_ARGS__);			\
-	} while (0)
-
 static int
-efrm_resource_read_proc(char *buf, char **start, off_t offset, int count,
-			int *eof, void *data)
+efrm_resource_read_proc(struct seq_file *seq, void *s)
 {
-	int len = 0;
 	int type;
 	struct efrm_resource_manager *rm;
 
@@ -396,15 +372,26 @@ efrm_resource_read_proc(char *buf, char **start, off_t offset, int count,
 		if (rm == NULL)
 			continue;
 
-		EFRM_PROC_PRINTF(buf, len, "*** %s ***\n", rm->rm_name);
+		seq_printf(seq, "*** %s ***\n", rm->rm_name);
 
 		spin_lock_bh(&rm->rm_lock);
-		EFRM_PROC_PRINTF(buf, len, "current = %u\n", rm->rm_resources);
-		EFRM_PROC_PRINTF(buf, len, "    max = %u\n\n",
+		seq_printf(seq, "current = %u\n", rm->rm_resources);
+		seq_printf(seq, "    max = %u\n\n",
 				 rm->rm_resources_hiwat);
 		spin_unlock_bh(&rm->rm_lock);
 	}
 
-	return count ? strlen(buf) : 0;
+	return 0;
 }
+static int efrm_resource_open_proc(struct inode *inode, struct file *file)
+{
+	return single_open(file, efrm_resource_read_proc, PDE_DATA(inode));
+}
+static const struct file_operations efrm_resource_fops_proc = {
+	.owner		= THIS_MODULE,
+	.open		= efrm_resource_open_proc,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 

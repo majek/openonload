@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2007-2011 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -615,19 +615,19 @@ tenxpress_get_settings(struct efx_nic *efx, struct ethtool_cmd *ecmd)
 		lpa |= ADVERTISED_10000baseT_Full;
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_MDIO45_FLOW_CONTROL_HACKS)
-	/* Old versions of the intree mdio45 layer don't set the pause
-	 * capabilities in the ecmd structure properly */
-	{
-		const struct mdio_if_info *mdio = &efx->mdio;
-		u32 reg;
-
-		reg = mdio->mdio_read(mdio->dev, mdio->prtad, MDIO_MMD_AN,
-				      MDIO_AN_ADVERTISE);
-		if (reg & ADVERTISE_PAUSE_CAP)
-			adv |= ADVERTISED_Pause;
-		if (reg & ADVERTISE_PAUSE_ASYM)
-			adv |= ADVERTISED_Asym_Pause;
-	}
+	/* Old versions of the in-tree mdio45 layer don't cover the
+	 * pause advertising flags.
+	 */
+	reg = efx_mdio_read(efx, MDIO_MMD_AN, MDIO_AN_ADVERTISE);
+	if (reg & ADVERTISE_PAUSE_CAP)
+		adv |= ADVERTISED_Pause;
+	if (reg & ADVERTISE_PAUSE_ASYM)
+		adv |= ADVERTISED_Asym_Pause;
+	reg = efx_mdio_read(efx, MDIO_MMD_AN, MDIO_AN_LPA);
+	if (reg & ADVERTISE_PAUSE_CAP)
+		lpa |= ADVERTISED_Pause;
+	if (reg & ADVERTISE_PAUSE_ASYM)
+		lpa |= ADVERTISED_Asym_Pause;
 #endif
 
 	mdio45_ethtool_gset_npage(&efx->mdio, ecmd, adv, lpa);

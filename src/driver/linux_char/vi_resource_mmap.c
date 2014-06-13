@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
 
 #include <ci/driver/internal.h>
 #include <ci/driver/efab/hardware.h>
+#include <ci/driver/resource/linux_efhw_nic.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <etherfabric/ef_vi.h> /* For VI_MAPPING_* macros, vi_mappings type */
 #include <ci/efrm/efrm_client.h>
@@ -51,30 +52,81 @@ efab_vi_rm_mmap_io(struct efrm_vi *virs,
   int rc;
   int len;
   int instance;
+  int base;
   struct efhw_nic *nic;
 
   nic = efrm_client_get_nic(virs->rs.rs_client);
 
   instance = virs->rs.rs_instance;
 
-  /* Map the control page. */
   len = CI_MIN(*bytes, CI_PAGE_SIZE);
   *bytes -=len;
 
   /* Make sure we can get away with a single page here. */
-  ci_assert_lt(falcon_tx_dma_page_offset(instance), CI_PAGE_SIZE);
-  ci_assert_lt(falcon_rx_dma_page_offset(instance), CI_PAGE_SIZE);
-  ci_assert_lt(falcon_timer_page_offset(instance), CI_PAGE_SIZE);
-  ci_assert_equal(falcon_tx_dma_page_base(instance),
-                  falcon_rx_dma_page_base(instance));
-  rc =  ci_mmap_bar(nic, falcon_tx_dma_page_base(instance), len, opaque,
-                    map_num, offset);
+  switch (nic->devtype.arch) {
+  case EFHW_ARCH_FALCON:
+    ci_assert_lt(falcon_tx_dma_page_offset(instance), CI_PAGE_SIZE);
+    ci_assert_lt(falcon_rx_dma_page_offset(instance), CI_PAGE_SIZE);
+    ci_assert_lt(falcon_timer_page_offset(instance), CI_PAGE_SIZE);
+    ci_assert_equal(falcon_tx_dma_page_base(instance),
+                    falcon_rx_dma_page_base(instance));
+    base = falcon_tx_dma_page_base(instance);
+    break;
+
+  case EFHW_ARCH_EF10:
+    ci_assert_lt(ef10_tx_dma_page_offset(instance), CI_PAGE_SIZE);
+    ci_assert_lt(ef10_rx_dma_page_offset(instance), CI_PAGE_SIZE);
+    ci_assert_lt(ef10_timer_page_offset(instance), CI_PAGE_SIZE);
+    ci_assert_equal(ef10_tx_dma_page_base(instance),
+                    ef10_rx_dma_page_base(instance));
+    base = ef10_tx_dma_page_base(instance);
+    break;
+
+  default:
+    EFCH_ERR("%s: ERROR: unknown nic type (%d)", __FUNCTION__,
+	     nic->devtype.arch);
+    base = 0; /* To quiet the compiler */
+    BUG();
+  }
+
+  rc = ci_mmap_bar(nic, base, len, opaque, map_num, offset, 0);
   if (rc < 0 ) {
     EFCH_ERR("%s: ERROR: ci_mmap_bar failed rc=%d", __FUNCTION__, rc);
     return rc;
   }
 
   return 0;
+}
+
+static int
+efab_vi_rm_mmap_pio(struct efrm_vi *virs,
+		    unsigned long *bytes, void *opaque,
+		    int *map_num, unsigned long *offset)
+{
+  int rc;
+  int len;
+  int instance;
+  struct efhw_nic *nic;
+
+  nic = efrm_client_get_nic(virs->rs.rs_client);
+
+  if( nic->devtype.arch != EFHW_ARCH_EF10 ) {
+    EFRM_ERR("%s: Only ef10 supports PIO."
+	     "  Expected arch=%d but got %d\n", __FUNCTION__,
+	     EFHW_ARCH_EF10, nic->devtype.arch);
+    return -EINVAL;
+  }
+
+  instance = virs->rs.rs_instance;
+
+  /* Map the control page. */
+  len = CI_MIN(*bytes, CI_PAGE_SIZE);
+  *bytes -= len;
+  rc = ci_mmap_bar(nic, ef10_tx_dma_page_base(instance) + CI_PAGE_SIZE, len,
+                   opaque, map_num, offset, 1);
+  if( rc < 0 )
+    EFCH_ERR("%s: ERROR: ci_mmap_bar failed rc=%d", __FUNCTION__, rc);
+  return rc;
 }
 
 static int 
@@ -124,9 +176,14 @@ int efab_vi_resource_mmap(struct efrm_vi *virs, unsigned long *bytes,
   if( index == 0 )
     /* This is the IO mapping. */
     rc = efab_vi_rm_mmap_io(virs, bytes, opaque, map_num, offset);
-  else
+  else if( index == 1 )
     /* This is the memory mapping. */
     rc = efab_vi_rm_mmap_mem(virs, bytes, opaque, map_num, offset);
+  else {
+    /* This is the PIO mapping. */
+    ci_assert_equal(index, 2);
+    rc = efab_vi_rm_mmap_pio(virs, bytes, opaque, map_num, offset);
+  }
 
   return rc;
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -381,7 +381,6 @@ CI_CFG_OPT("EF_FDTABLE_SIZE", fdtable_size, ci_uint32,
 
 #define CI_UL_LOG_EP    0x400          /* EP caching */
 
-#define CI_UL_LOG_SIG   0x1000         /* signal interception */
 #define CI_UL_LOG_LIB   0x2000         /* library enter/exit */
 #define CI_UL_LOG_CALL  0x4000         /* log call arguments */
 #define CI_UL_LOG_CLUT  0x8000         /* context lookup */
@@ -489,6 +488,22 @@ CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
 "to call network functions.",
         ,, (1 << (SIGBUS-1)) | (1 << (SIGSEGV-1) | (1 << (SIGPROF-1))),
         0, (ci_uint64)(-1), bitmask)
+
+# define CITP_VFORK_USE_FORK           0
+# define CITP_VFORK_USE_FORK_WITH_PIPE 1
+# define CITP_VFORK_USE_VFORK          2
+CI_CFG_OPT("EF_VFORK_MODE", vfork_mode, ci_uint32,
+"This option dictates how vfork() intercept should work.  "
+"After a vfork(), parent and child still share address space but not "
+"file descriptors.  We have to be careful about making changes in the child "
+"that can be seen in the parent.  We offer three options here.  Different "
+"apps may require different options depending on their use of vfork().  "
+"If using EF_VFORK_MODE=2, it is not safe to create sockets or pipes in the "
+"child before calling exec().\n"
+"  0 - Old behavior.  Replace vfork() with fork()"
+"  1 - Replace vfork() with fork() and block parent till child exits/execs"
+"  2 - Replace vfork() with vfork()",
+           2, , 1, 0, 2, level)
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

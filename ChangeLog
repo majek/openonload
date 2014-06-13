@@ -1,18 +1,112 @@
 
-openonload-201210-u3
---------------------
+openonload-201310
+-----------------
 
-Updated sfc net driver to v3_3_3_6329
-bug37899, bug23309: Fix EPOLLET and EPOLLONESHOT issues.
-bug38714: Fix range check when allocating a VI from a set.
+Updated sfc net driver and firmware to v4_0_0_6585.
+Add support for SFN7122F (Torino).
+Add support for recent Linux kernels (up to 3.11).
+Add support for recent enterprise distributions.
+Include efpio test application for measuring latency of ef_vi layer with PIO.
+Add MSG_WARM TCP send feature.
+Add JNI wrapper for onload extensions API.
+Add support for SO_TIMESTAMP on TCP sockets.
+
+task35946: Accept rx_usr_buf_size that is not larger than expected.
+task24106: Added extension API to set onload stack options at runtime.
+task31321: Added extension API to save and restore current stack name.
+task19643: Added dup3() support.
+task32188: Added option EF_TCP_SNDBUF_MODE to limit pkt bufs used on transmit.
+task35980: Added ef_vi_receive_prefix_len() and ef_vi_receive_buffer_len().
+task33560: Improved onload_stackdump 'processes', 'threads' and 'env' output.
+task32790: Add EF_VFORK_MODE option to solve vfork()/java problems.
+task38715: Improved the efrm_filter_insert() interface.
+task38715: Add option to allocate any VI from an efrm_vi_set or ef_vi_set.
+
+bug39673: Use netdev notifier to update iptables when interface name is changed
+bug39681: fix zero-copy receive from OS to correctly set iov_len
+bug39569: fix compilation warnings and problems with gcc-4.8
+bug38389: increase range of values that EF_TCP_BACKLOG_MAX can be set to
+bug38304: implement EF_RETRANSMIT_THRESHOLD_SYNACK
 bug38900: Fix Onload RPM build on Oracle Server distro.
-bug39730: Fix crash when ef_vi_set_alloc_from_pd is used with phys-mode.
+task8595: Fix return code from some invalid uses of dup2() and dup3().
+task8595: Fix bug in oo_trusted_lock_drop().
+bug38422: Fix interaction between shutdown() and MSG_CORK
+bug38425: Fix leak of socket buffer when out of fds in accept().
+bug38142: Avoid double-lock of fd table 
+bug37962: Fix EF_TCP_BACKLOG_MAX usage
 bug37995: Fix sfcaffinity_config when bonded interfaces present
-bug41751: Fix bogus error message due to uninitialised variable.
-bug40844: Force a sync of cplane state from kernel when first stack is created.
-task40782: Disable interrupt DoS protection, as possibly causing bad perf.
-cleanup: Fix n_async_pkts counter in stackdump going up constantly.
-cleanup: EF_DEFER_WORK_LIMIT was not logged in stackdump.  Is now.
+bug38053: Use #!/bin/bash for libc_compat.sh
+bug34768: Kill bogus warnings about unexpected flush events.	
+bug36102: Return proper errno when ioctl(FIOASYNC) fails
+bug36693: Silence spurious warning about smp_processor_id() in sfc_affinity
+bug37998: Fix vi_set (RSS) in ef_vi using filters
+bug34708: Make efrss filtering capability more flexible
+bug37899, bug23309: Fix EPOLLET and EPOLLONESHOT issues
+bug37946: Use Linux workqueue as per-stack workqueue
+bug37908: Detect sendmmsg presence via standard "nm $libc_path"
+bug36102: Make FASYNC code work with OS socket properly
+bug37608: bug36582: fix SA_ONESHOT support to use in-kernel copy
+bug36095: F_SETFL should be propogated to OS
+bug37611: Ensure consistent ordering of event and interrupt delivery by hardware
+bug37637: Detach iommu domain when unbinding from PCI VF
+bug37722: Destroy huge page packet set from workqueue
+bug36095: Check ci_sys_fcntl(F_SETFL) return code
+bug37232: Remove init and python scripts when uninstalling
+bug36582: Keep in-kernel copy of signal states
+bug35341: Move all per-stack postponed jobs into per-stack workqueue
+bug34301: Fix race condition in efab_vi_rm_eventq_wait()
+cleanup:  SLES11 uses obsolete F_OWNER_GID instead of F_OWNER_PGRP, cope with that
+bug37380: Do not complain about RTAX_REORDERING
+bug37336, bug36181: fix UDP FIONREAD calculation
+bug37412, bug36181: fix UDP receive queue accounting
+bug37300: Downgrade MSS limit message if we've also logged a statistic count for it
+bug36402: Avoid probing sockets before they're fully initialised
+bug36402: Don't set fdtable entry to unknown until after we've closed fd.
+bug36683: Fix assertion failures in onload_zc_send, onload_zc_alloc_buf
+bug36181: Improve tcpdump for loopback packets: set zero mac addresses
+bug37210: Prevent shmem access problems when stack is shared
+bug37208: Fix onload_tcpdump detach from wedged stack
+bug36181: Pass bad packets to onload_tcpdump
+bug36228: Drop postponed file references from workqueue
+bug34790: Properly retransmit SYN-ACK if it was lost
+bug36641: Use new iommu API for linux >=3.3
+bug34383: improve UDP PMTU discovery on kernels >= 3.6
+bug34617: Fix delayed free of sockets stuck in the non-atomic queue
+bug34383: fix crash in pmtu when net interface goes down
+bug38750: build fix with CI_CFG_MMAP_EACH_PKTSET=0
+bug38750: build fix with CI_CFG_PKTS_AS_HUGE_PAGES=0
+bug37217: avoid long task duration of "flush complete" event handling
+bug38511: Fixes spurious unlock on fd table
+bug38649: avoid double-free of packets race when dropping UDP receive queue
+bug37471: Fix stack receiving multiple copies of single packet for multicast on VLANs
+bug36712: Fix multicast acceleration/replication
+bug34448: Fix possible race condition between epoll and handover.
+bug37090: Increase max number of stacks handled in process termination code.
+bug36558: Shut down ep->fasync_queue at handover.
+bug36139: gcc 4.7 build fix.
+cleanup:  Suppress unwanted IFA_CACHEINFO messages.
+cleanup:  Fix installation of sfcaffinity.py for Debian based distros.
+bug35662: Fix connection getting stuck when SO_RCVBUF is very small.
+bug35926: Add support for F_SETOWN_EX/F_GETOWN_EX.
+bug35907, bug35662: don't decrease receive buffer if already less than MSS.
+bug35662: Get rid of lower limit on SO_RCVBUF.
+bug30266: Fix dropped O_NONBLOCK when socket in epoll set handed to kernel.
+bug30266: Ignore local cached routes to fix loopback acceleration.
+bug34222: Fix kernel warning provoked when stack fails to initialise.
+bug33004: Fix bug handling IP_MTU_DISCOVER socket option.
+bug34124: Fix bug using EF_PACKET_BUFFER_MODE=1 with IOMMU and multiple NICs.
+bug30031: Respect EF_SHARE_WITH when accelerating TCP loopback.
+bug27621: Fix error returned by unknown ioctl() on recent kernel versions.
+bug33820: Fix kernel memory leak in Onload control plane.
+bug33817: Fix IP length field in ICMP packets sent by Onload.
+bug33654: Do not postpone SIGPROF signal by default.
+bug33494: Fix race between stack creation and NIC reset.
+bug32168: Fix TCP recv() blocking behaviour when reading to buffer of length 0.
+bug33198: Update TCP_DEFER_ACCEPT to match recent Linux behaviour.
+bug21474: Added option EF_FORCE_TCP_NODELAY to force TCP_NODELAY option on.
+bug32488: Keep calling oo_timesync_update till cpu_khz is stablized.
+bug32281: Added option EF_FREE_PACKETS_LOW_WATERMARK.
+bug31766: Improve handling of siginfo_t when postponing signals.
 
 
 openonload-201210-u2
@@ -51,7 +145,7 @@ bug34466: Fix bug in dup() in case that the syscall fails.
           Fix "sfcaffinity_config auto" when sfc_ib driver is loaded.
           Ignore copyright header when making ef_vi api hash.
 
-	
+
 openonload-201210-u1
 --------------------
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,7 +30,7 @@
 
 
 ci_inline int do_copy_from_user(void* to, const void* from, int n_bytes
-                      CI_KERNEL_ARG_UNIX(ci_addr_spc_t addr_spc))
+                      CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
 # ifdef __KERNEL__
   if( addr_spc != CI_ADDR_SPC_KERNEL )
@@ -43,7 +43,7 @@ ci_inline int do_copy_from_user(void* to, const void* from, int n_bytes
 
 int __ci_copy_iovec_to_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                            ci_iovec_ptr* piov
-                           CI_KERNEL_ARG_UNIX(ci_addr_spc_t addr_spc))
+                           CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
   int n, total;
   char* dest;
@@ -60,15 +60,15 @@ int __ci_copy_iovec_to_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     n = oo_offbuf_left(&pkt->buf);
     n = CI_MIN(n, (int)CI_IOVEC_LEN(&piov->io));
     if(CI_UNLIKELY( do_copy_from_user(dest, CI_IOVEC_BASE(&piov->io), n
-                                      CI_KERNEL_ARG_UNIX(addr_spc)) ))
+                                      CI_KERNEL_ARG(addr_spc)) ))
       return -EFAULT;
 
     /* TODO this isn't correct unless (n_buffers == 1) - it needs this
      * code to be updated to increment buf_len on current and
-     * tx_pkt_len on first pkt in frag_next chain
+     * pay_len on first pkt in frag_next chain
      */
     pkt->buf_len += n;
-    pkt->tx_pkt_len += n;
+    pkt->pay_len += n;
 
     total += n;
     ci_iovec_ptr_advance(piov, n);
@@ -97,17 +97,10 @@ done:
 #ifdef __KERNEL__
 ssize_t
 __ci_ip_copy_pkt_to_user(ci_netif* ni, ci_iovec* iov, ci_ip_pkt_fmt* pkt,
-                         int peek_off, ci_addr_spc_t addr_spc)
+                         int peek_off)
 {
-  int len, total;
+  int len;
 
-  if( addr_spc == CI_ADDR_SPC_INVALID ) {
-    /* I want to know about this for now... */
-    ci_log("%s: %d invalid address space", __FUNCTION__, NI_ID(ni));
-    return -EFAULT;
-  }
-
-  if( addr_spc == CI_ADDR_SPC_CURRENT ) {
     len = CI_MIN(oo_offbuf_left(&pkt->buf) - peek_off, iov->iov_len);
     if( copy_to_user(CI_IOVEC_BASE(iov),
                      oo_offbuf_ptr(&pkt->buf) + peek_off, len) ) {
@@ -118,42 +111,6 @@ __ci_ip_copy_pkt_to_user(ci_netif* ni, ci_iovec* iov, ci_ip_pkt_fmt* pkt,
     CI_IOVEC_BASE(iov) = (char *)CI_IOVEC_BASE(iov) + len;
     CI_IOVEC_LEN(iov) -= len;
     return len;
-  }
-
-  total = 0;
-  while (oo_offbuf_left(&pkt->buf) != 0 && CI_IOVEC_LEN(iov) != 0) {
-    struct page *page;
-    char        *dest;
-    int         offset;
-
-    page = ci_follow_page(addr_spc, CI_IOVEC_BASE(iov));
-    if (page == NULL)
-      break;
-
-    dest = ci_kmap_in_atomic(page);
-    ci_assert(dest);
-
-    offset = CI_PTR_OFFSET(CI_IOVEC_BASE(iov), CI_PAGE_SIZE);
-    len = CI_MIN(CI_IOVEC_LEN(iov), CI_PAGE_SIZE - offset);
-
-    len = CI_MIN(oo_offbuf_left(&pkt->buf), len);
-    memcpy(dest + offset, oo_offbuf_ptr(&pkt->buf), len);
-
-    ci_kunmap_in_atomic(page, dest);
-    put_page(page);
-
-    oo_offbuf_advance(&pkt->buf, len);
-    CI_IOVEC_BASE(iov) = (char *)CI_IOVEC_BASE(iov) + len;
-    CI_IOVEC_LEN(iov) -= len;
-
-    ci_assert(oo_offbuf_left(&pkt->buf) == 0 ||
-              CI_IOVEC_LEN(iov) == 0 ||
-              CI_PTR_OFFSET(iov->iov_base, CI_PAGE_SIZE) == 0);
-
-    total += len;
-  }
-
-  return total;
 }
 
 #else /* ifdef __KERNEL__ ... else */

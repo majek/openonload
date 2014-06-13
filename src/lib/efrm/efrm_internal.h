@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,7 +27,10 @@ struct efrm_resource;
 
 struct efrm_client {
 	void *user_data;
+	/* Used to assemble list of clients in an efrm_nic */
 	struct list_head link;
+	/* Used to assemble list of clients needing post_reset callback */
+	struct list_head reset_link;
 	struct efrm_client_callbacks *callbacks;
 	struct efhw_nic *nic;
 	int ref_count;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -24,11 +24,11 @@ struct efrm_vi;
 struct efch_resource_ops_s;
 
 
-extern struct efch_resource_ops_s efch_iobufset_ops;
 extern struct efch_resource_ops_s efch_vi_ops;
 extern struct efch_resource_ops_s efch_vi_set_ops;
 extern struct efch_resource_ops_s efch_memreg_ops;
 extern struct efch_resource_ops_s efch_pd_ops;
+extern struct efch_resource_ops_s efch_pio_ops;
 
 extern struct file_operations ci_char_fops;
 

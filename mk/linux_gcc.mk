@@ -66,7 +66,11 @@ MMAKE_CFLAGS_DLL := -fPIC
 MMAKE_CFLAGS_LIB := -fPIC
 
 ifndef CFLAGS
+ifeq ($(findstring /opt/at6.0,$(CC)),)
 CFLAGS		:= -O2
+else
+CFLAGS 		:= -O3
+endif
 ifndef NO_DEBUG_INFO
 CFLAGS		+= -g
 endif

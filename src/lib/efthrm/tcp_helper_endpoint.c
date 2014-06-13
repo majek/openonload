@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,6 +30,7 @@
 #include <onload/oof_interface.h>
 #include <onload/drv/dump_to_user.h>
 #include "tcp_filters_internal.h"
+#include "oof_impl.h"
 
 
 /************************************************************************** \
@@ -58,18 +59,9 @@ tcp_helper_endpoint_ctor(tcp_helper_endpoint_t *ep,
   ep->os_socket = NULL;
   ep->wakeup_next = 0;
   ep->fasync_queue = NULL;
-
-  if( thr->netif.flags & CI_NETIF_FLAGS_IS_TRUSTED )
-    /* Trusted stacks are kernel-only, so any pointers are in the kernel's
-    ** address space. */
-    ep->addr_spc = CI_ADDR_SPC_KERNEL;
-  else
-    ep->addr_spc = CI_ADDR_SPC_INVALID;
-
-  ep->aflags = 0;
+  ep->ep_aflags = 0;
 
   oof_socket_ctor(&ep->oofilter);
-
 }
 
 /*--------------------------------------------------------------------*/
@@ -142,6 +134,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   struct oo_file_ref* os_sock_ref;
   ci_netif* ni = &ep->thr->netif;
   ci_sock_cmn* s = SP_TO_SOCK(ni, ep->id);
+  tcp_helper_endpoint_t* listen_ep = NULL;
   unsigned laddr, raddr;
   int protocol, lport, rport;
   int rc;
@@ -153,10 +146,13 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
    * opened TCP connection.
    */
   ci_irqlock_lock(&ep->thr->lock, &lock_flags);
-  if( OO_SP_NOT_NULL(from_tcp_id) )
-    os_sock_ref = ci_trs_get_valid_ep(ep->thr, from_tcp_id)->os_socket;
-  else
+  if( OO_SP_NOT_NULL(from_tcp_id) ) {
+    listen_ep = ci_trs_get_valid_ep(ep->thr, from_tcp_id);
+    os_sock_ref = listen_ep->os_socket;
+  }
+  else {
     os_sock_ref = ep->os_socket;
+  }
   if( os_sock_ref != NULL )
     os_sock_ref = oo_file_ref_add(os_sock_ref);
   ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
@@ -173,17 +169,6 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   rport = sock_rport_be16(s);
   protocol = sock_protocol(s);
 
-  /* For bind(224.0.0.1), insert a multicast filter. */
-  if( protocol == IPPROTO_UDP && laddr == CI_IP_ALL_HOSTS ) {
-    int intf_i;
-    OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
-      oof_socket_mcast_add(efab_tcp_driver.filter_manager,
-                           &ep->oofilter, CI_IP_ALL_HOSTS, CI_IFID_ALL);
-    }
-    /* Ignore rc - possibly, we've already called IP_ADD_MEMBERSHIP, and
-     * the filter is already here. */
-  }
-
   if( ep->oofilter.sf_local_port != NULL ) {
     /* we already have a filter; and we also have a reference of OS socket. */
     ci_assert(ep->os_port_keeper);
@@ -196,8 +181,13 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
     }
     oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
   }
-  rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
-                      protocol, laddr, lport, raddr, rport);
+
+  if( OO_SP_NOT_NULL(from_tcp_id) )
+    rc = oof_socket_share(efab_tcp_driver.filter_manager, &ep->oofilter,
+                          &listen_ep->oofilter, laddr, raddr, rport);
+  else
+    rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
+                        protocol, laddr, lport, raddr, rport);
 
  set_os_port_keeper_and_out:
   if( os_sock_ref != NULL && rc == 0 )
@@ -219,14 +209,33 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
  *--------------------------------------------------------------------*/
 
 int
-tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, int no_sw)
+tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep)
 {
   struct oo_file_ref* os_sock_ref;
 
-  oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
-  os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
-  if( os_sock_ref != NULL )
-    oo_file_ref_drop(os_sock_ref);
+  OO_DEBUG_TCPH(ci_log("%s: [%d:%d] %s", __FUNCTION__, ep->thr->id,
+                       OO_SP_FMT(ep->id), in_atomic() ? "ATOMIC":""));
+
+  if( in_atomic() ) {
+    /* Remove software filters immediately to ensure packets are not
+     * delivered to this endpoint.  Defer oof_socket_del() if needed
+     * to non-atomic context.
+     */
+    if( oof_socket_del_sw(efab_tcp_driver.filter_manager, &ep->oofilter) )
+      tcp_helper_endpoint_queue_non_atomic(ep, OO_THR_EP_AFLAG_CLEAR_FILTERS);
+    else {
+      os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
+      ci_assert(os_sock_ref);
+      oo_file_ref_drop(os_sock_ref);
+    }
+  }
+  else {
+    oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
+    oof_socket_mcast_del_all(efab_tcp_driver.filter_manager, &ep->oofilter);
+    os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
+    if( os_sock_ref != NULL )
+      oo_file_ref_drop(os_sock_ref);
+  }
   return 0;
 }
 
@@ -280,8 +289,7 @@ tcp_helper_endpoint_shutdown(tcp_helper_resource_t* thr, oo_sp ep_id,
   /* Calling shutdown on the socket unbinds it in most situations.
    * Since we must never have a filter configured for an unbound
    * socket, we clear the filters here. */
-  tcp_helper_endpoint_clear_filters(ep, 0);
-  oof_socket_mcast_del_all(efab_tcp_driver.filter_manager, &ep->oofilter);
+  tcp_helper_endpoint_clear_filters(ep);
 
   rc = efab_tcp_helper_shutdown_os_sock(ep, how);
 

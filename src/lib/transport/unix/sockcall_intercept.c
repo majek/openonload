@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -99,7 +99,8 @@
 /* Bug 22074: we use address space for purposes which application do not
  * expect.  Add following value to RLIMIT_AS:
  *
- * CI_PAGE_SIZE << ci_cfg_opts.netif_opts.max_ep_bufs_ln2 - endpoint space.
+ * CI_PAGE_SIZE << ci_log2_le(ci_cfg_opts.netif_opts.max_ep_bufs) -
+ * endpoint space.
  * sizeof(ci_netif) - ignore.
  * citp_fdtable.size * sizeof(citp_fdtable_entry) - citp_fdtable.
  * CI_CFG_PKT_BUF_SIZE * max_packets - packet buffers.
@@ -110,17 +111,17 @@
  */
 #define OO_RLIMIT_AS_FIX(user_rlim, oo_rlim, rlim_inf, kind, format, \
                          format_cast) \
-  do {                                                              \
-    oo_rlim = user_rlim +                                           \
-        citp_fdtable.size * sizeof(citp_fdtable_entry) +            \
-        (CI_PAGE_SIZE << ci_cfg_opts.netif_opts.max_ep_bufs_ln2) +  \
-        CI_CFG_PKT_BUF_SIZE * ci_cfg_opts.netif_opts.max_packets;   \
-    if( oo_rlim < user_rlim ) /* Check for overflow */              \
-      oo_rlim = rlim_inf;                                           \
-    ci_log("%s: RLIMIT_AS: "kind" limit requested "format           \
-           ", but set to "format, __FUNCTION__,                     \
-           (format_cast)user_rlim, (format_cast)oo_rlim);           \
-    user_rlim = oo_rlim;                                            \
+  do {                                                                  \
+    oo_rlim = user_rlim +                                               \
+      citp_fdtable.size * sizeof(citp_fdtable_entry) +                  \
+      (CI_PAGE_SIZE << ci_log2_le(ci_cfg_opts.netif_opts.max_ep_bufs)) + \
+      CI_CFG_PKT_BUF_SIZE * ci_cfg_opts.netif_opts.max_packets;         \
+    if( oo_rlim < user_rlim ) /* Check for overflow */                  \
+      oo_rlim = rlim_inf;                                               \
+    ci_log("%s: RLIMIT_AS: "kind" limit requested "format               \
+           ", but set to "format, __FUNCTION__,                         \
+           (format_cast)user_rlim, (format_cast)oo_rlim);               \
+    user_rlim = oo_rlim;                                                \
   } while(0)
 
 OO_INTERCEPT(int, setrlimit,
@@ -343,6 +344,42 @@ OO_INTERCEPT(int, listen,
 }
 
 
+static void oo_accept_os_hack_inheritance(int lfd, int afd)
+{
+  /* the following accept() inheritance options, which are provided   */
+  /* in our library, also need to be emulated in the system socket    */
+  /* calls - for consistency                                          */
+#if !CI_CFG_ACCEPT_INHERITS_NONBLOCK
+  if (CITP_OPTS.accept_force_inherit_nonblock) {
+    int pflags = ci_sys_fcntl(lfd, F_GETFL);
+    int flags = ((pflags & O_NONBLOCK) ? O_NONBLOCK : 0) |
+                ((pflags & O_NDELAY) ? O_NDELAY : 0);
+    int tmp = ci_sys_fcntl(afd, F_GETFL);
+
+    if ((tmp & flags) == 0)
+      CI_TRY(ci_sys_fcntl(afd, F_SETFL, tmp | flags));
+  }
+#endif
+
+  /* No-delay */
+#if !CI_CFG_ACCEPT_INHERITS_NODELAY
+  /* no-delay will not have been inherited so we may need to turn it on */
+  if (CITP_OPTS.accept_force_inherit_nodelay) {
+    int nodelay;
+    int size;
+
+    CI_TRY(ci_sys_getsockopt(lfd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
+                             &size));
+    CI_TEST(size == sizeof(nodelay));
+
+    if (nodelay != 0)
+      CI_TRY(ci_sys_setsockopt(afd, IPPROTO_TCP, TCP_NODELAY,
+                               &nodelay, size));
+  }
+#endif
+
+}
+
 OO_INTERCEPT(int, accept,
              (int fd, struct sockaddr* sa, socklen_t* p_sa_len))
 {
@@ -369,39 +406,7 @@ OO_INTERCEPT(int, accept,
     citp_reenter_lib(&lib_context);
     if( rc >= 0 ) {
       citp_fdtable_passthru(rc, 0);
-      /* the following accept() inheritance options, which are provided   */
-      /* in our library, also need to be emulated in the system socket    */
-      /* calls - for consistency                                          */
-#if !CI_CFG_ACCEPT_INHERITS_NONBLOCK
-      if (CITP_OPTS.accept_force_inherit_nonblock) {
-        int pflags = ci_sys_fcntl(fd, F_GETFL);
-        int flags = ((pflags & O_NONBLOCK) ? O_NONBLOCK : 0) |
-                    ((pflags & O_NDELAY) ? O_NDELAY : 0);
-        int tmp = ci_sys_fcntl(rc, F_GETFL);
-
-        if ((tmp & flags) == 0)
-          ci_sys_fcntl(rc, F_SETFL, tmp | flags);
-      }
-#endif
-
-      /* No-delay */
-#if !CI_CFG_ACCEPT_INHERITS_NODELAY
-      /* no-delay will not have been inherited so we may need to turn it on */
-      if (CITP_OPTS.accept_force_inherit_nodelay) {
-        int nodelay;
-        int size;
-
-        CI_TRY(ci_sys_getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
-                                 &size));
-        CI_TEST(size == sizeof(nodelay));
-
-        if (nodelay != 0)
-          ci_sys_setsockopt(rc, IPPROTO_TCP, TCP_NODELAY, &nodelay, size);
-      }
-#endif
-
-
-
+      oo_accept_os_hack_inheritance(fd, rc);
     }
     Log_PT(log("PT: sys_accept(%d, , ) = %d", fd, rc >= 0));
   }
@@ -440,39 +445,7 @@ OO_INTERCEPT(int, accept4,
     citp_reenter_lib(&lib_context);
     if( rc >= 0 ) {
       citp_fdtable_passthru(rc, 0);
-      /* the following accept() inheritance options, which are provided   */
-      /* in our library, also need to be emulated in the system socket    */
-      /* calls - for consistency                                          */
-#if !CI_CFG_ACCEPT_INHERITS_NONBLOCK
-      if (CITP_OPTS.accept_force_inherit_nonblock) {
-        int pflags = ci_sys_fcntl(fd, F_GETFL);
-        int flags = ((pflags & O_NONBLOCK) ? O_NONBLOCK : 0) |
-                    ((pflags & O_NDELAY) ? O_NDELAY : 0);
-        int tmp = ci_sys_fcntl(rc, F_GETFL);
-
-        if ((tmp & flags) == 0)
-          ci_sys_fcntl(rc, F_SETFL, tmp | flags);
-      }
-#endif
-
-      /* No-delay */
-#if !CI_CFG_ACCEPT_INHERITS_NODELAY
-      /* no-delay will not have been inherited so we may need to turn it on */
-      if (CITP_OPTS.accept_force_inherit_nodelay) {
-        int nodelay;
-        int size;
-
-        CI_TRY(ci_sys_getsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
-                                 &size));
-        CI_TEST(size == sizeof(nodelay));
-
-        if (nodelay != 0)
-          ci_sys_setsockopt(rc, IPPROTO_TCP, TCP_NODELAY, &nodelay, size);
-      }
-#endif
-
-
-
+      oo_accept_os_hack_inheritance(fd, rc);
     }
     Log_PT(log("PT: sys_accept(%d, , ) = %d", fd, rc >= 0));
   }
@@ -2134,11 +2107,18 @@ OO_INTERCEPT(int, dup2,
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_dup2(oldfd, newfd);
   }
+  if( oldfd < 0 || newfd < 0 ) {
+    CI_SET_ERROR(rc, EBADF);
+    return rc;
+  }
+  if( oldfd == newfd )
+    /* fixme: This is the wrong thing to do because oldfd might be bad. */
+    return oldfd;
 
   citp_enter_lib(&lib_context);
   Log_CALL(ci_log("%s(%d,%d)", __FUNCTION__, oldfd, newfd));
 
-  rc = citp_ep_dup2(oldfd, newfd);
+  rc = citp_ep_dup3(oldfd, newfd, 0);
   Log_V(log("dup2(%d, %d) = %d", oldfd, newfd, rc));
 
   FDTABLE_ASSERT_VALID();
@@ -2148,7 +2128,58 @@ OO_INTERCEPT(int, dup2,
 }
 
 
-OO_INTERCEPT(pid_t, vfork,
+#if CI_LIBC_HAS_dup3
+OO_INTERCEPT(int, dup3,
+             (int oldfd, int newfd, int flags))
+{
+  int rc;
+  citp_lib_context_t lib_context;
+
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
+    citp_do_init(CITP_INIT_SYSCALLS);
+    return ci_sys_dup3(oldfd, newfd, flags);
+  }
+  if( oldfd < 0 || newfd < 0 ) {
+    CI_SET_ERROR(rc, oldfd == newfd ? EINVAL : EBADF);
+    return rc;
+  }
+  if( (flags & ~O_CLOEXEC) != 0 || oldfd == newfd ) {
+    CI_SET_ERROR(rc, EINVAL);
+    return rc;
+  }
+
+  citp_enter_lib(&lib_context);
+  Log_CALL(ci_log("%s(%d,%d,%x)", __FUNCTION__, oldfd, newfd, flags));
+
+  rc = citp_ep_dup3(oldfd, newfd, flags);
+  Log_V(log("dup3(%d, %d, %x) = %d", oldfd, newfd, flags, rc));
+
+  FDTABLE_ASSERT_VALID();
+  citp_exit_lib(&lib_context, rc >= 0);
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+#endif
+
+void *onload___vfork_rtaddr = NULL;
+#ifdef __i386__
+ci_uint32 onload___vfork_ebx = 0;
+#endif
+#ifdef __powerpc__
+#ifdef __powerpc64__
+ci_uint64 onload___vfork_r31 = 0;
+#else
+ci_uint32 onload___vfork_r31 = 0;
+ci_uint32 onload___vfork_r3  = 0;
+#endif
+#endif
+
+OO_INTERCEPT(int, __vfork_is_vfork, (void))
+{
+  return CITP_OPTS.vfork_mode == 2;
+}
+
+OO_INTERCEPT(pid_t, __vfork_as_fork,
              (void))
 {
   int rc;
@@ -2158,12 +2189,64 @@ OO_INTERCEPT(pid_t, vfork,
 
   Log_CALL(ci_log("%s()", __FUNCTION__));
 
-  /* Treat vfork() as fork() to solve problems with applications
-  ** that call intercepted library functions (usually close()) 
-  ** in the vfork() child before calling execv() or _exit().
-  */
-  rc = fork();
-  Log_V(if( rc )  log("fork() [in place of vfork()] = %d", rc));
+  ci_assert_nequal( CITP_OPTS.vfork_mode, 2 ); 
+  if( CITP_OPTS.vfork_mode == 1 ) {
+    int pipefd[2];
+    uint8_t buf;
+
+#if defined(SYS_pipe2) && CI_LIBC_HAS_pipe2
+    rc = ci_sys_pipe2(pipefd, O_CLOEXEC);
+    if( rc ) {
+      Log_V(log("Warning: Calling pipe2() in vfork() failed (%d).  "
+                "Trying pipe().", rc));
+    }
+    else
+      goto fork;
+#endif
+
+    /* Pipe is less prefered because we race to open the pipe and set
+     * FD_CLOEXEC on the fd.  There isn't anything we can do about
+     * this race.
+     */
+    rc = ci_sys_pipe(pipefd);
+    if( rc ) {
+      log("ERROR: Calling pipe() in vfork() failed (%d)", rc);
+      return rc;
+    }
+
+    rc = ci_sys_fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+    if( rc ) {
+      log("ERROR: Calling fcntl() in vfork() failed (%d)", rc);
+      close(pipefd[0]);
+      close(pipefd[1]);
+      return rc;
+    }
+
+#if defined(SYS_pipe2) && CI_LIBC_HAS_pipe2
+  fork:
+#endif
+    rc = fork();
+    if( rc == -1 ) {
+      log("ERROR: Calling fork() in vfork() failed (%d)", rc);
+      close(pipefd[0]);
+      close(pipefd[1]);
+      return rc;
+    }
+
+    if( rc ) { /* Parent.  Block till child exits */
+      Log_V(log("fork() [in place of vfork()] = %d", rc));
+      close(pipefd[1]);
+      read(pipefd[0], &buf, 1);
+      close(pipefd[0]);
+    }
+    else /* child.  pipefd[1] closed when child exits */
+      close(pipefd[0]);
+  }
+  else {
+    ci_assert_equal(CITP_OPTS.vfork_mode, 0);
+    rc = fork();
+    Log_V(if( rc )  log("fork() [in place of vfork()] = %d", rc));
+  }
   return rc;
 }
 
@@ -2442,14 +2525,16 @@ OO_INTERCEPT(int, __fxstat,
     if( fdi != &citp_the_closed_fd ) {
       stat_buf->st_mode &= ~S_IFMT;
 #if CI_CFG_USERSPACE_PIPE
-      if( fdi->protocol->type == CITP_PIPE_FD )
+      if( fdi->protocol->type == CITP_PIPE_FD ) {
         stat_buf->st_mode |= S_IFIFO;
+        stat_buf->st_mode &= ~0177;
+      }
       else
 #endif
 #if CI_CFG_USERSPACE_EPOLL
       if( fdi->protocol->type == CITP_EPOLLB_FD ||
           fdi->protocol->type == CITP_EPOLL_FD )
-        stat_buf->st_mode = 0;
+        stat_buf->st_mode = 0600;
       else
 #endif
         stat_buf->st_mode |= S_IFSOCK;
@@ -2483,14 +2568,16 @@ OO_INTERCEPT(int, __fxstat64,
     if( fdi != &citp_the_closed_fd ) {
       stat_buf->st_mode &= ~S_IFMT;
 #if CI_CFG_USERSPACE_PIPE
-      if( fdi->protocol->type == CITP_PIPE_FD )
+      if( fdi->protocol->type == CITP_PIPE_FD ) {
         stat_buf->st_mode |= S_IFIFO;
+        stat_buf->st_mode &= ~0177;
+      }
       else
 #endif
 #if CI_CFG_USERSPACE_EPOLL
       if( fdi->protocol->type == CITP_EPOLLB_FD ||
           fdi->protocol->type == CITP_EPOLL_FD )
-        stat_buf->st_mode = 0;
+        stat_buf->st_mode = 0600;
       else
 #endif
         stat_buf->st_mode |= S_IFSOCK;

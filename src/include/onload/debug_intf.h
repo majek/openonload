@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -165,7 +165,6 @@ typedef struct {
 #define __CI_DEBUG_OP_DUMP_INODE__	(1)
 #define __CI_DEBUG_OP_TRAMPOLINE__	(2)
 #define __CI_DEBUG_OP_FDS_DUMP__	(3)
-#define __CI_DEBUG_OP_ON_INSTALL_RESOURCE__ (4)
 #define __CI_DEBUG_OP_DUMP_STACK__	(5)
 #define __CI_DEBUG_OP_KILL_STACK__	(6)
 
@@ -175,7 +174,6 @@ typedef struct {
     ci_uint32			fd;
     ci_uintptr_t		tramp_debug;	/* ci_debug_trampoline */
     ci_uint32			fds_dump_pid;
-    ci_uint32			install_id;
     struct {
       ci_uint32			stack_id;
       ci_uint32                 orphan_only;

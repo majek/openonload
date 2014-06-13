@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,7 @@
 #include "ip_internal.h"
 #include "netif_tx.h"
 #include <ci/tools/pktdump.h>
+#include <ci/internal/pio_buddy.h>
 
 
 static void __ci_netif_dmaq_shove(ci_netif* ni, int intf_i)
@@ -37,8 +38,6 @@ static void __ci_netif_dmaq_shove(ci_netif* ni, int intf_i)
   ef_vi* vi = &ni->nic_hw[intf_i].vi;
   ci_ip_pkt_fmt* pkt;
   int rc;
-
-  ci_assert(oo_pktq_not_empty(dmaq));
 
   do {
     pkt = PKT_CHK(ni, dmaq->head);
@@ -87,10 +86,15 @@ void ci_netif_dmaq_shove2(ci_netif* ni, int intf_i)
 
 void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
 {
-  int intf_i;
+  int intf_i, rc;
   oo_pktq* dmaq;
   ef_vi* vi;
   ef_iovec iov[CI_IP_PKT_SEGMENTS_MAX];
+#if CI_CFG_PIO
+  ci_uint8 order;
+  ci_int32 offset;
+  ci_pio_buddy_allocator* buddy;
+#endif
 
   ci_assert(netif);
   ci_assert(pkt);
@@ -101,7 +105,7 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
 
   LOG_NT(log("%s: id=%d nseg=%d 0:["EF_ADDR_FMT":%d] dhost="
              CI_MAC_PRINTF_FORMAT, __FUNCTION__, OO_PKT_FMT(pkt),
-             pkt->n_buffers, pkt->base_addr[pkt->intf_i], pkt->buf_len,
+             pkt->n_buffers, pkt->dma_addr[pkt->intf_i], pkt->buf_len,
              CI_MAC_PRINTF_ARGS(oo_ether_dhost(pkt))));
 
   ci_check( ! ci_eth_addr_is_zero((ci_uint8 *)oo_ether_dhost(pkt)));
@@ -121,18 +125,58 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
   /* Check that the VI we're given matches the pkt's intf_i */
   ci_assert_equal(vi, &netif->nic_hw[pkt->intf_i].vi);
 
-  if( oo_pktq_is_empty(dmaq) &&
-      (ci_netif_pkt_to_iovec(netif, pkt, iov,
-                             sizeof(iov) / sizeof(iov[0])), 1) && 
-      ef_vi_transmitv(vi, iov, pkt->n_buffers, OO_PKT_ID(pkt)) == 0 ) {
-    CITP_STATS_NETIF_INC(netif, tx_dma_doorbells);
-    LOG_AT(ci_analyse_pkt(oo_ether_hdr(pkt), pkt->buf_len));
-    LOG_DT(ci_hex_dump(ci_log_fn, oo_ether_hdr(pkt), pkt->buf_len, 0));
+  if( oo_pktq_is_empty(dmaq) ) {
+#if CI_CFG_PIO
+    /* pio_thresh is set to zero if PIO disabled on this stack, so don't
+     * need to check NI_OPTS().pio here
+     */
+    order = ci_log2_ge(pkt->pay_len, CI_CFG_MIN_PIO_BLOCK_ORDER);
+    buddy = &netif->state->nic[intf_i].pio_buddy;
+    if( (netif->state->nic[intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) && 
+        (ef_vi_transmit_fill_level(vi) == 0) &&
+        (NI_OPTS(netif).pio_thresh >= pkt->pay_len) &&
+        /* Must be last check */
+        ((offset = ci_pio_buddy_alloc(netif, buddy, order)) >= 0) ) {
+      ci_netif_pkt_to_pio(netif, pkt, offset);
+      rc = ef_vi_transmit_pio(vi, offset, pkt->pay_len, OO_PKT_ID(pkt));
+      /* XXX: Should free up the pio region when we see the associated
+       * TX completion.  However, we are safe as long as we only try
+       * to access the PIO if the TX ring is empty.
+       */
+      ci_pio_buddy_free(netif, buddy, offset, order);
+      if( rc == 0 ) {
+        CITP_STATS_NETIF_INC(netif, pio_pkts);
+        goto done;
+      }
+      else
+        CITP_STATS_NETIF_INC(netif, no_pio_err);
+    }
+# ifndef NDEBUG
+    else if( (netif->state->nic[intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) == 0 )
+      CITP_STATS_NETIF_INC(netif, no_pio_flags);
+    else if( ef_vi_transmit_fill_level(vi) != 0 )
+      CITP_STATS_NETIF_INC(netif, no_pio_fill_level);
+    else if( NI_OPTS(netif).pio_thresh < pkt->pay_len )
+      CITP_STATS_NETIF_INC(netif, no_pio_pkt_len);
+# endif
+#endif
+    ci_netif_pkt_to_iovec(netif, pkt, iov,
+                          sizeof(iov) / sizeof(iov[0]));
+    if( (rc = ef_vi_transmitv(vi, iov, pkt->n_buffers, OO_PKT_ID(pkt))) == 0 ) {
+      CITP_STATS_NETIF_INC(netif, tx_dma_doorbells);
+      LOG_AT(ci_analyse_pkt(oo_ether_hdr(pkt), pkt->buf_len));
+      LOG_DT(ci_hex_dump(ci_log_fn, oo_ether_hdr(pkt), pkt->buf_len, 0));
+      goto done;
+    }
   }
-  else {
-    LOG_NT(log("%s: ENQ id=%d", __FUNCTION__, OO_PKT_FMT(pkt)));
-    __ci_netif_dmaq_put(netif, dmaq, pkt);
-  }
+  
+  /* drop to here if any of the above methods to send directly failed
+   * - put it on the DMA queue instead 
+   */
+  LOG_NT(log("%s: ENQ id=%d", __FUNCTION__, OO_PKT_FMT(pkt)));
+  __ci_netif_dmaq_put(netif, dmaq, pkt);
+
+ done:
 
   /* Poll every now and then to ensure we keep up with completions.  If we
    * don't do this then we can ignore completions for so long that we start

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -75,7 +75,6 @@ static ci_dllist mm_hash_tbl[MM_HASH_SIZE];
  */
 DEFINE_RWLOCK(ci_mm_tbl_lock);
 
-
 /* Function to hash an 'mm' pointer */
 static inline unsigned int
 hash_mm (struct mm_struct *mm) {
@@ -149,10 +148,6 @@ efch_create_mm_entry (struct mm_struct *mm) {
  */
 static int efch_add_mm_ref (struct mm_struct *mm) {
 
-#if defined(__PPC__)		/* TEMP ONLY until trampoline system is supported */
-  return 0;
-#endif
-
   int rc = 0;
   struct mm_hash *p;
 
@@ -186,10 +181,6 @@ exit:
  * Must be called with the lock NOT held
  */
 static void efch_del_mm_ref (struct mm_struct *mm) {
-
-#if defined(__PPC__)		/* TEMP ONLY until trampoline system is supported */
-  return;
-#endif
 
   struct mm_hash *p;
 

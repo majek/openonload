@@ -7,16 +7,18 @@
 ############################
 
 RESOURCE_SRCS	:= resource_driver.c \
-	iopage.c driverlink_new.c kernel_proc.c vf_driver.c filter.c
+	iopage.c driverlink_new.c kernel_proc.c vf_driver.c filter.c \
+	bt_stats.c compat_pat_wc.c
 
-EFHW_SRCS	:= nic.c eventq.c falcon.c
+EFHW_SRCS	:= nic.c eventq.c falcon.c ef10.c
+
+EFHW_HDRS	:= ef10_mcdi.h
 
 EFRM_SRCS	:=			\
 		assert_valid.c		\
-		buffer_table.c		\
 		efrm_vi_set.c		\
 		efrm_pd.c		\
-		iobufset_resource.c	\
+		efrm_pio.c		\
 		resource_manager.c	\
 		resources.c		\
 		vi_resource_alloc.c	\
@@ -28,13 +30,15 @@ EFRM_SRCS	:=			\
 		vf_resource.c		\
 		buddy.c			\
 		kfifo.c			\
+		bt_manager.c		\
 		driver_object.c
 
 EFRM_HDRS	:= efrm_internal.h efrm_vi.h efrm_vi_set.h efrm_vf.h \
-		efrm_iobufset.h efrm_pd.h
+		efrm_pd.h efrm_pio.h bt_manager.h
 
 
 IMPORT		:= $(EFHW_SRCS:%=../../lib/efhw/%) \
+		   $(EFHW_HDRS:%=../../lib/efhw/%) \
 		   $(EFRM_SRCS:%=../../lib/efrm/%) \
 		   $(EFRM_HDRS:%=../../lib/efrm/%)
 

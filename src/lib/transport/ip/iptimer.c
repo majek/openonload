@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -307,9 +307,6 @@ static void ci_ip_timer_docallback(ci_netif *netif, ci_ip_timer* ts)
     break;
   case CI_IP_TIMER_PMTU_DISCOVER:
     ci_pmtu_timeout_pmtu(netif, SP_TO_TCP(netif, ts->param1));
-    break;
-  case CI_IP_TIMER_PMTU_DISCOVER_2:
-    ci_pmtu_timeout_pmtu_2(netif, SP_TO_UDP(netif, ts->param1));
     break;
 #if CI_CFG_TAIL_DROP_PROBE
   case CI_IP_TIMER_TCP_TAIL_DROP:

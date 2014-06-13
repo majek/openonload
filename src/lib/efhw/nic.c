@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,6 +48,7 @@
 #include <ci/efhw/debug.h>
 #include <ci/driver/efab/hardware.h>
 #include <ci/efhw/falcon.h>
+#include <ci/efhw/ef10.h>
 #include <ci/efhw/nic.h>
 #include <ci/efhw/eventq.h>
 
@@ -92,12 +93,10 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 	case 0x0770:
 		dt->arch = EFHW_ARCH_FALCON;
 		dt->variant = 'C';
-		dt->in_fpga = 1;
 		break;
 	case 0x7777:
 		dt->arch = EFHW_ARCH_FALCON;
 		dt->variant = 'C';
-		dt->in_fpga = 1;
 		switch (class_revision) {
 		case 0:
 			dt->revision = 0;
@@ -110,7 +109,6 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 	case 0x7778:
 		dt->arch = EFHW_ARCH_FALCON;
 		dt->variant = 'C';
-		dt->in_cosim = 1;
 		dt->revision = 0;
 		if (class_revision > 0xf)
 			return 0;
@@ -122,19 +120,23 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 		switch (class_revision) {
 		case 0: /* ASIC */
 			dt->revision = 0;
-			dt->in_fpga = 0;
 			break;
 
 		case 1:
 		case 2: /* 20/Oct/08 indicates DBI has been alt initialized */
                 case 3: /* 30/Sep/08 indicates DBI has been initialized */
 			dt->revision = 0;
-			dt->in_fpga = 1;
 			break;
 
 		default:
 			return 0;
 		}
+		break;
+        case 0x0903:
+        case 0x0901:
+		dt->arch = EFHW_ARCH_EF10;
+		dt->variant = 'A';
+		dt->revision = class_revision;
 		break;
 	default:
 		return 0;
@@ -155,9 +157,10 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 ** config space to find out what hardware we have
 */
 void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
-		   struct efhw_device_type dev_type)
+		   struct efhw_device_type *dev_type, unsigned map_min,
+		   unsigned map_max, unsigned vi_base)
 {
-	nic->devtype = dev_type;
+	nic->devtype = *dev_type;
 	nic->flags = flags;
 	nic->resetting = 0;
 	nic->options = options;
@@ -167,11 +170,17 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 	nic->mtu = 1500 + ETH_HLEN; /* ? + ETH_VLAN_HLEN */
 	/* Default: this will get overwritten if better value is known */
 	nic->timer_quantum_ns = 4968; 
+	/* This will get set via driverlink for Falcon */
+	nic->rx_prefix_len = 0;
+	nic->vi_min = map_min;
+	nic->vi_lim = map_max;
 
 	switch (nic->devtype.arch) {
 	case EFHW_ARCH_FALCON:
+		/* 32768 is not supported by current approach to buftable
+		 * allocation: 32768 entries = 256Kb = 2 buftable blocks */
 		nic->q_sizes[EFHW_EVQ] = 512 | 1024 | 2048 | 4096 | 8192 |
-			16384 | 32768;
+			16384 /*| 32768*/;
 		nic->q_sizes[EFHW_TXQ] = 512 | 1024 | 2048 | 4096;
 		nic->q_sizes[EFHW_RXQ] = 512 | 1024 | 2048 | 4096;
 		nic->efhw_func = &falcon_char_functional_units;
@@ -198,6 +207,24 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 			break;
 		}
 		break;
+	case EFHW_ARCH_EF10:
+		nic->q_sizes[EFHW_EVQ] = 512 | 1024 | 2048 | 4096 | 8192 |
+			16384 | 32768;
+		nic->q_sizes[EFHW_TXQ] = 512 | 1024 | 2048 | 4096;
+		nic->q_sizes[EFHW_RXQ] = 512 | 1024 | 2048 | 4096;
+
+		nic->ctr_ap_bar = EF10_P_CTR_AP_BAR;
+		nic->num_evqs   = 1024;
+		nic->num_dmaqs  = 1024;
+		nic->num_timers = 1024;
+		/* For EF10 we map VIs on demand.  We don't need mappings
+		 * for any other reason as all control ops go via the net
+		 * driver and MCDI.
+		 */
+		nic->ctr_ap_bytes = 0;
+		nic->efhw_func = &ef10_char_functional_units;
+		nic->vi_base = vi_base;
+		break;
 	default:
 		EFHW_ASSERT(0);
 		break;
@@ -211,25 +238,21 @@ void efhw_nic_dtor(struct efhw_nic *nic)
 	/* Check that we have functional units because the software only
 	 * driver doesn't initialise anything hardware related any more */
 
-#ifndef __ci_ul_driver__
-	/* close interrupts is called first because the act of deregistering
-	   the driver could cause this driver to change from master to slave
-	   and hence the implicit interrupt mappings would be wrong */
-
-	EFHW_TRACE("%s: functional units ... ", __FUNCTION__);
-
-	if (efhw_nic_have_functional_units(nic)) {
-		efhw_nic_close_hardware(nic);
-	}
-	EFHW_TRACE("%s: functional units ... done", __FUNCTION__);
-#endif
-
 	/* destroy event queues */
 	EFHW_TRACE("%s: event queues ... ", __FUNCTION__);
 
 #ifndef __ci_ul_driver__
 	if (nic->non_interrupting_evq.evq_mask)
 		efhw_keventq_dtor(nic, &nic->non_interrupting_evq);
+
+
+	/* close_hardware destroys buffer table manager on Falcon/Siena. */
+	EFHW_TRACE("%s: functional units ... ", __FUNCTION__);
+
+	if (efhw_nic_have_functional_units(nic)) {
+		efhw_nic_close_hardware(nic);
+	}
+	EFHW_TRACE("%s: functional units ... done", __FUNCTION__);
 #endif
 
 	EFHW_TRACE("%s: event queues ... done", __FUNCTION__);

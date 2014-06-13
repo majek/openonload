@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -121,17 +121,12 @@
 #include <ci/tools/istack.h>
 
 
-typedef char *cicp_bufset_t;
+#define CICPPL_PKTBUF_SIZE                                      \
+  (sizeof(struct cicp_bufpool_pkt) + CI_MAX_ETH_FRAME_LEN)
 
-#define cicp_bufset_ptr(ref_bufset, unused_rs, id) \
+
+#define cicp_bufset_ptr(ref_bufset, id) \
         ((char *)(*(ref_bufset)) + (CICPPL_PKTBUF_SIZE * (id)))
-/* can't provide cicp_buffset_addr() without using IO bufsets */
-#define cicp_bufset_alloc(out_bufset, unused_rs, ev_rs,                \
-			  phys_addr, count, size)		       \
-        (  *out_bufset = ci_vmalloc((count) * (size)),                 \
-           *out_bufset==NULL? -ENOMEM: 0                               \
-	)
-#define cicp_bufset_free(pool) (ci_vfree((pool)->bufmem), 0)
 
 
 
@@ -146,45 +141,18 @@ typedef struct {
 
 struct cicp_bufpool_s
 {  cicp_pktbuf_istack_t freebufs;
-   cicp_bufset_t bufmem;
+   char* bufmem;
 } /* cicp_bufpool_t */;
 
 
-
-#define CICPPL_PKTBUF_SIZE (PKT_START_OFF() + CI_MAX_ETH_FRAME_LEN)
-
-
-extern ci_ip_pkt_fmt *
+struct cicp_bufpool_pkt *
 cicppl_pktbuf_pkt(cicp_bufpool_t *pool, int id) 
-{   if (CI_LIKELY(cicppl_pktbuf_is_valid_id(id)))
-       return (ci_ip_pkt_fmt *)cicp_bufset_ptr(&pool->bufmem, NULL, id);
-    else
-       return (ci_ip_pkt_fmt *)NULL;
+{
+  if( cicppl_pktbuf_is_valid_id(pool, id) )
+    return (void*) (pool->bufmem + id * CICPPL_PKTBUF_SIZE);
+  else
+    return NULL;
 }
-
-
-
-#ifdef cicp_bufset_addr
-extern ci_uintptr_t
-_cicppl_pktbuf_addr(cicp_bufpool_t *pool, int id) 
-{   if (CI_LIKELY(cicppl_pktbuf_is_valid_id(id)))
-       return (ci_uintptr_t)cicp_bufset_addr(&pool->bufmem, id);
-    else
-       return 0;
-}
-#endif
-
-
-
-ci_inline int
-cicppl_pktbuf_has_buf(cicp_bufpool_t *pool)
-{   return !ci_istack_empty(&pool->freebufs);
-}
-
-
-
-
-
 
 
 /*  This function requires the control plane to be locked but does not
@@ -196,174 +164,101 @@ cicppl_pktbuf_alloc(cicp_bufpool_t *pool)
     
     CICP_BUFPOOL_CHECK_LOCKED(pool);
 
-    if (pool != NULL && cicppl_pktbuf_has_buf(pool))
-    {   ci_ip_pkt_fmt *pkt;
-
-	id = ci_istack_pop(&pool->freebufs);
-
-	ci_assert(cicppl_pktbuf_is_valid_id(id));
-	pkt = cicppl_pktbuf_pkt(pool, id);
-	ci_assert(pkt);
-
-	ci_assert_equal(pkt->refcount, 0);
-	pkt->refcount = 1;
-
-	/* Packets in pending pool must be prepared for flat transmission */
-	ci_assert_equal(pkt->n_buffers, 1);
+    if (pool != NULL && !ci_istack_empty(&pool->freebufs))
+    {   id = ci_istack_pop(&pool->freebufs);
+	ci_assert(cicppl_pktbuf_is_valid_id(pool, id));
     }
 
     return id;
 }
 
 
-
-
-extern void
-cicppl_pktbuf_free(cicp_bufpool_t *pool, int id)
+void cicppl_pktbuf_free(cicp_bufpool_t *pool, int id)
 {
-  ci_ip_pkt_fmt *arp_pkt = cicppl_pktbuf_pkt(pool, id);
-  
-  CICP_BUFPOOL_CHECK_LOCKED(pool);
+  ci_assert(!ci_istack_full(&pool->freebufs));
+  ci_istack_push(&pool->freebufs, (ci_int16) id);
+}
 
-  ci_assert_gt(arp_pkt->refcount, 0);
-  if( (--arp_pkt->refcount) == 0 ) {
-    /* Packets in pending pool always consist of 1 segment */
-    ci_assert_equal(arp_pkt->n_buffers, 1);
 
-    ci_assert(!ci_istack_full(&pool->freebufs));
-    ci_istack_push(&pool->freebufs, (ci_uint16)id);
+
+
+int cicppl_pktbuf_ctor(cicp_bufpool_t** out_pool)
+{
+  struct cicp_bufpool_pkt *pkt;
+  cicp_bufpool_t* pool;
+  int i;
+
+  *out_pool = NULL;
+  if( (pool = (cicp_bufpool_t *) ci_alloc(sizeof(*pool))) == NULL ) {
+    ci_log(CODEID": ERROR - failed to allocate memory for buffer pool");
+    return -ENOMEM;
   }
+  pool->bufmem = ci_vmalloc(CICPPL_PKTBUF_COUNT * CICPPL_PKTBUF_SIZE);
+  if( pool->bufmem == NULL ) {
+    ci_log(CODEID": ERROR - failed to allocate %ldKB of memory for "
+           "%d packets awaiting MAC resolution",
+           (long)(CICPPL_PKTBUF_SIZE*CICPPL_PKTBUF_COUNT/1024),
+           CICPPL_PKTBUF_COUNT);
+    ci_free(pool);
+    return -ENOMEM;
+  }
+  ci_istack_init(&pool->freebufs, CICPPL_PKTBUF_COUNT);
+  for( i = 0; i < CICPPL_PKTBUF_COUNT; ++i ) {
+    pkt = cicppl_pktbuf_pkt(pool, i);
+    pkt->id = i;
+    cicppl_pktbuf_free(pool, i);
+  }
+  *out_pool = pool;
+  return 0;
 }
 
 
-
-
-static void
-cicppl_pktbuf_init(cicp_bufpool_t *pool)
-{   ci_ip_pkt_fmt *pkt;
-    int i;
-
-    ci_istack_init(&pool->freebufs, CICPPL_PKTBUF_COUNT);
-
-    for (i = 0; i < CICPPL_PKTBUF_COUNT; i++)
-    {   pkt = cicppl_pktbuf_pkt(pool, i);
-
-        OO_PKT_PP_INIT(pkt, i);
-	pkt->refcount = 0;
-
-	/* Prepare templates for flat pending packets - 1 segment and fixed 
-	 * length.
-	 * 'iov_base' is not used, since virtual memory addresses of the data
-	 * are required (instead of addresses understood by hardware).
-	 */
-        pkt->n_buffers = 1;
-
-	ci_istack_push(&pool->freebufs, (ci_uint16)i);
-    }
-}
-
-
-
-
-
-
-
-
-
-
-/** Initialize memory to hold deferred packets awaiting MAC resolution */
-extern int
-cicppl_pktbuf_ctor(cicp_bufpool_t **out_pool, struct efrm_vi *evq_rs)
-{   int rc;
-    /* allocate this memory from non-pageable memory so that it can be
-       accessed when the application is swapped out */
-    cicp_bufpool_t *pool = (cicp_bufpool_t *)
-			   ci_vmalloc(sizeof(cicp_bufpool_t));
-    
-    if (NULL == pool)
-    {   ci_log(CODEID": ERROR - failed to allocate memory for buffer pool");
-	rc = -ENOMEM;
-    } else
-    {   rc = cicp_bufset_alloc(&pool->bufmem, NULL,
-			       evq_rs, CI_FALSE, CICPPL_PKTBUF_COUNT, 
-			       CICPPL_PKTBUF_SIZE);
-
-	if (CI_UNLIKELY(0 != rc))
-	{   ci_log(CODEID": ERROR - failed to allocate %ldKB of memory for "
-			    "%d packets awaiting MAC resolution - rc %d",
-		   (long)(CICPPL_PKTBUF_SIZE*CICPPL_PKTBUF_COUNT/1024),
-		   CICPPL_PKTBUF_COUNT, -rc);
-	    ci_vfree(pool);
-	    pool = NULL;
-	} else
-	{   OO_DEBUG_ARP(DPRINTF(CODEID": allocated %ldKB of memory for "
-			      "%d packets awaiting MAC resolution",
-			      (long)(CICPPL_PKTBUF_SIZE*
-				     CICPPL_PKTBUF_COUNT/1024),
-			      CICPPL_PKTBUF_COUNT));
-
-	    /* initialise the deferred packet freebuffer pool */
-	    cicppl_pktbuf_init(pool);
-	    rc = 0;
-	}
-    }
-    
-    *out_pool = pool;
-    return rc;
-}
-
-
-
-
-
-/** Free any memory used to hold deferred packets awaiting MAC resolution */
-extern void
-cicppl_pktbuf_dtor(cicp_bufpool_t **ref_pool)
-{   if (NULL != *ref_pool)
-    {   cicp_bufset_free(*ref_pool);
-        ci_vfree(*ref_pool);
-	*ref_pool = NULL;
-    }
+void cicppl_pktbuf_dtor(cicp_bufpool_t **ref_pool)
+{
+  cicp_bufpool_t* pool = *ref_pool;
+  if( pool != NULL ) {
+    ci_vfree(pool->bufmem);
+    ci_free(pool);
+    *ref_pool = NULL;
+  }
 }
 
 
 
 static int pkt_chain_copy(ci_netif* ni, ci_ip_pkt_fmt* src_head,
-                          ci_ip_pkt_fmt* dst)
+                          struct cicp_bufpool_pkt* dst)
 {
   ci_ip_pkt_fmt* src_pkt = src_head;
   int n, n_seg, bytes_copied, seg_i;
-  char* dst_ptr = PKT_START(dst);
+  char* dst_ptr = (void*) (dst + 1);
+  const char* src_ptr;
 
   ci_assert_equal(oo_ether_type_get(src_head), CI_ETHERTYPE_IP);
   ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(src_head)), sizeof(ci_ip4_hdr));
   n_seg = CI_MIN(src_head->n_buffers, CI_IP_PKT_SEGMENTS_MAX);
+
   bytes_copied = 0;
   seg_i = 0;
+  /* Start copying from the IP header. */
+  n = src_pkt->buf_len - oo_ether_hdr_size(src_pkt);
+  src_ptr = PKT_START(src_pkt) + oo_ether_hdr_size(src_pkt);
 
   while( 1 ) {
-    n = src_pkt->buf_len;
-
-    /* Protect against corrupted packet. */
     if( bytes_copied + n > CI_MAX_ETH_FRAME_LEN )
+      /* Protect against corrupted packet. */
       break;
-
-    memcpy(dst_ptr, PKT_START(src_pkt), n);
+    memcpy(dst_ptr, src_ptr, n);
     dst_ptr += n;
     bytes_copied += n;
     ++seg_i;
-
     if( OO_PP_IS_NULL(src_pkt->frag_next) || seg_i == n_seg )
       break;
-
     src_pkt = PKT_CHK(ni, src_pkt->frag_next);
+    n = src_pkt->buf_len;
+    src_ptr = PKT_START(src_pkt);
   }
 
-  dst->buf_len = dst->tx_pkt_len = bytes_copied;
-  dst->n_buffers = 1;
-  ci_assert_equal(oo_ether_type_get(dst), CI_ETHERTYPE_IP);
-  ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(dst)), sizeof(ci_ip4_hdr));
-
+  dst->len = bytes_copied;
   return bytes_copied;
 }
 
@@ -386,12 +281,11 @@ static int pkt_chain_copy(ci_netif* ni, ci_ip_pkt_fmt* src_head,
  *
  * This operation assumes that \c dst is from contiguous vm_alloc()'ed memory
  */
-extern int
-cicppl_ip_pkt_flatten_copy(ci_netif* ni, oo_pkt_p src_pktid, ci_ip_pkt_fmt*dst)
+int cicppl_ip_pkt_flatten_copy(ci_netif* ni, oo_pkt_p src_pktid,
+                               struct cicp_bufpool_pkt* dst)
 {
   ci_ip_pkt_fmt *pkt = PKT(ni, src_pktid);  
 
-  oo_pkt_layout_set(dst, pkt->pkt_layout);
 #ifndef NDEBUG
   ci_assert(ni);
   ci_assert(pkt);
@@ -407,592 +301,6 @@ cicppl_ip_pkt_flatten_copy(ci_netif* ni, oo_pkt_p src_pktid, ci_ip_pkt_fmt*dst)
 
   return pkt_chain_copy(ni, pkt, dst);
 }
-
-
-
-
-
-
-
-
-/*****************************************************************************
- *                                                                           *
- *          Protocol Transmission - Transmission Channel                     *
- *          ============================================                     *
- *                                                                           *
- *****************************************************************************/
-
-
-
-
-
-
-#ifdef CICPPL_USE_TRANSMITTER
-
-
-#include <etherfabric/vi.h>   /* for ef_vi */
-
-
-
-typedef struct
-{   efhw_nic_t    *handle;              /*< handle for this NIC */
-    ef_eventq_state evq_state;
-    ef_vi          evq;			/*< queue of events comming from NIC */
-    struct efrm_vi* evq_rs;              /*< Resource of [evq] */
-    ef_vi          interface;		/*< "virtual interface" to the NIC */
-    struct efrm_vi* interface_rs;      /*< Resource of [interface] */
-    ef_vi_state *  vi_state;            /*< state needed for a VI */
-} cicp_transmitter_nic_t;
-
-
-struct cicp_transmitter_s
-{   const cicp_mac_mib_t *mact;         /*< IP-MAC resolution table */
-    struct efrm_vi *evq_rs;              /*< resource representing all NICs */
-    ci_uint32 evq_mmap_bytes;           /*< memory mapped bytes for event q */
-    cicp_transmitter_nic_t nic[CI_CFG_MAX_REGISTER_INTERFACES];
-} /*cicp_transmitter_t*/; 
-
-
-
-
-ci_inline int /* rc */
-cicp_nic_open(cicp_transmitter_t *txer, ef_driver_handle *ref_nic, int nicno)
-{   ef_driver_handle nic = ci_driver.nic[nicno];
-    int rc = 0;
-
-    if (NULL == nic)
-    {   rc = -ENODEV;
-	*ref_nic = NULL;
-	OO_DEBUG_ARP(DPRINTF(CODEID": (NIC %d) not present - rc %d",
-			  nicno, rc););
-    } else
-    if (NULL == nic->efhw_func || 0 == EFHW_KVA(nic))
-    {   rc = -ENXIO;
-	*ref_nic = NULL;
-	OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d) hardware uninitialized - "
-                	  "deferring initialization",
-	                  nicno););
-    } else
-    if (NULL == txer->evq_rs)
-    {
-	{   struct efrm_vi *evq_rs; /* resource for event queue to use */
-            ci_uint32 evq_mmap_bytes;
-	    
-            /* safe to open an event queue resource on this NIC */
-
-            /* ?? FIXME: This is broken as we need an efrm_client, and a VI
-             * per NIC.  At time of writing, this code is not used, hence
-             * not fixed.
-             */
-            rc = efrm_vi_resource_alloc(fixme_efrm_client, NULL, 0, 256, 0, 0,
-                                        0, 0,&evq_rs,
-                                        NULL, &evq_mmap_bytes, NULL, NULL);
-	    if (0 == rc)
-	    {   txer->evq_rs = evq_rs;
-		txer->evq_mmap_bytes = evq_mmap_bytes;
-	        *ref_nic = nic;
-	    } else
-	    {   *ref_nic = NULL; /* try again next time */
-		OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d) can't open event queue "
-		                  "resource - rc %d",
-		                  nicno, -rc););
-	    }
-	}
-    } else
-	/* already opened? */
-	*ref_nic = nic;
-    
-    /*in user mode: rc = ef_onload_driver_open(ref_nic);*/
-    IGNORE(DPRINTF(CODEID": open NIC %d - rc %d", nicno, rc););
-    return rc;
-}
-
-
-ci_inline int
-cicp_vi_alloc(ef_vi* ep, efhw_nic_t* nic, cicp_transmitter_nic_t* nicinfo)
-{
-  ci_uint32 nic_index = nic->index;
-  int rc;
-  char vi_data[VI_MAPPINGS_SIZE]; /* buffer for ef_vi_init() */
-
-  ci_assert(ep);
-  ci_assert(nicinfo);
-  CI_ASSERT_DRIVER_VALID();
-
-  /* using arbitrary transmit and received ID's for queues */
-  /*   mnemonic: deferred from: (De)fF, defferred to: (De)f2   */
-  rc = efab_vi_resource_alloc(nicinfo->evq_rs, 0, 0,
-                              FALCON_DMA_Q_DEFAULT_TX_SIZE,
-                              FALCON_DMA_Q_DEFAULT_RX_SIZE,
-                              0xf2, 0xfF, &nicinfo->interface_rs,
-                              NULL, NULL, NULL, NULL);
-  
-  if( rc != 0 ) {
-    IGNORE(DPRINTF("%s: efab_vi_resource_alloc VI rc %d",
-		   __FUNCTION__, rc));
-    ci_assert(nicinfo->interface_rs == NULL);
-    return rc;
-  } else {
-
-    efrm_vi_resource_mappings(nicinfo->interface_rs, vi_data);
-    ef_vi_init(ep, vi_data, nicinfo->vi_state, NULL, /*flags*/0);
-    ef_vi_state_init(ep);
-
-    return 0;
-  }
-}
-
-
-/*! if necessary, initialize NIC-specific area in transmitter, and return it */
-static cicp_transmitter_nic_t *
-cicp_transmitter_nic(cicp_transmitter_t *txer, int nicno)
-{   cicp_transmitter_nic_t *nicinfo = &txer->nic[nicno];
-    int /*bool*/ ok = FALSE;
-    ef_driver_handle nic;
-
-    /* see if we are up yet - try to open the default NIC */
-    if (0 == cicp_nic_open(txer, &nic, CI_DEFAULT_NIC))
-    {   nic = nicinfo->handle;
-
-	ok = (NULL != nic);
-	if (!ok) /* perhaps this NIC was late - try again */
-	{   int rc = 0;
-
-	    IGNORE(DPRINTF(CODEID" init NIC %d eventq", nicno););
-	    nic = ci_driver.nic[nicno];
-	    
-	    if (NULL == nic)
-		rc = -ENODEV; /* this NIC is not known yet */
-	    
-            /* ensure we have this NIC's version of the event queue set up */
-	    if (rc == 0)
-		rc = ef_eventq_initialize_for_one_nic(txer->evq_rs,
-						      txer->evq_mmap_bytes,
-						      &nicinfo->evq, nicno,
-						      &nicinfo->evq_state);
-	    if (0 != rc)
-	    {   OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d%s) can't initialize "
-				  "event queue - rc %d",
-				  nicno, NULL==nic?" - absent":"", -rc););
-	    } else
-	    {
-		size_t state_size = EF_VI_STATE_BYTES;
-
-		/* get the event q resource for this NIC */
-		nicinfo->evq_rs = txer->evq_rs;
-
-		nicinfo->vi_state = (ef_vi_state *)ci_vmalloc(state_size);
-
-		if (NULL == nicinfo->vi_state)
-		{   rc = -ENOMEM;
-		    OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d) failed to allocate"
-                                      " virtual interface state - rc %d",
-				      nicno, rc););
-		} else
-		{   /* make a virtual interface from event queue */
-		    ef_vi     *ref_vi    = &nicinfo->interface;
-
-		    rc = cicp_vi_alloc(ref_vi, nic, nicinfo);
-		    /* TODO: do we have to use flag EF_VI_RX_SCATTER for
-		             transmitting jumbo frames? */
-		    if (0 != rc)
-		    {   OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d) failed to "
-					  "allocate deferred transmit "
-					  "virtual interface - rc %d",
-					  nicno, rc););
-		    } else
-		    {   IGNORE(ci_log(CODEID": (NIC %d) initialized",  nicno);)
-			ok = TRUE;
-		    }
-
-		    if (0 == rc)
-			/* setting this means we won't try to initialize
-			   again */
-	                nicinfo->handle = nic;
-		    else
-		    {   ci_free(nicinfo->vi_state);
-			nicinfo->vi_state = NULL;
-		    }
-		}
-	    } 
-	}
-    }
-
-    return ok? nicinfo: NULL;
-}
-    
-
-
-
-
-
-/* Allocate the resources necessary for subsequent transmission on given NIC */
-ci_inline int /* rc */
-cicp_transmitter_nic_ctor(cicp_transmitter_t *txer, int nicno)
-{   /* Actually, we can't allocate any resources really - each port needs
-       a virtual interface, each virtual interface needs an event queue,
-       each interface event queue needs our event queue resource,  our event
-       queue resource should not be initialized until we know a PCI bus scan
-       has taken place - and that sometimes hasn't happened yet.
-       So we do most of our initialization work in the call-on-demand function
-       cicp_transmitter_nic (above)
-    */
-    cicp_transmitter_nic_t *nicinfo = &txer->nic[nicno];
-    int rc = 0; /* succeed by default */
-    nicinfo->handle    = NULL;
-    /* leave event queue uninitialized until we have a event queue resource */
-    /* leave virutal interface uninitialized until we have an event queue */
-    /* leave ports uninitialized until we have a virtual interface */
-    return rc;
-}
-
-
-
-
-
-/*! Handle an event returning from a previous transmission
- *
- *  The control plane lock is used as the lock for this datastructure
- *  - the control plane is expected to be locked
- */
-ci_inline void
-handle_ev_tx(ef_vi *interface, ef_event event)
-{   ef_request_id dma_ids[EF_VI_TRANSMIT_BATCH];
-    int i, idcount;
-
-    /* if this TX event is OK it should carry a DMA identifier that was
-       set to be the ID of the buffer used for the transmission */
-    idcount = ef_vi_transmit_unbundle(interface, &event, dma_ids);
-    for( i = 0; i < idcount; ++i )
-    {   if (cicppl_pktbuf_is_valid_id(dma_ids[i]))
-        {   /*! @TODO: which is the correct control plane to use?? if there
-	               were more than one?
-	    */
-	    cicp_handle_t *control_plane = &CI_GLOBAL_CPLANE;
-	    cicp_bufpool_t *pool = cicppl_transmitter_pool(control_plane);
-	    ci_ip_pkt_fmt *pkt = cicppl_pktbuf_pkt(pool, dma_ids[i]);
-	    /* free space in DMA transmit queue */
-            cicppl_pktbuf_free(pool, dma_ids[i]);
-        } else
-        {   /* NB: messsage is logged whilst locked */
-	    OO_DEBUG_ERR(DPRINTF(CODEID": deferred transmission of illegal "
-			      "buffer number #%d", dma_ids[i]););
-	}
-    }
-}
-
-
-
-
-
-
-/*! Read and deal with returning events from previous transmissions 
- *
- *  The control plane lock is used as the lock for this datastructure
- *  - the control plane is expected to be locked
- */
-ci_inline void
-cicp_transmitter_doevents(cicp_transmitter_t *txer)
-{   int nicno;
-    
-    for (nicno=0; nicno < CI_CFG_MAX_REGISTER_INTERFACES; nicno++)
-	/* read events only from NICs that are initialized */
-	if (NULL != txer->nic[nicno].handle)
-	{   int eventcount = 0;
-
-	    do
-	    {   ef_event event_in[EF_VI_EVENT_POLL_MIN_EVS];
-		eventcount = ef_eventq_poll(&txer->nic[nicno].evq, &event_in,
-                                      sizeof(event_in) / sizeof(event_in[0]));
-
-            fixme: need to cope with eventcount > 1;
-		if (eventcount > 0)
-		{   OO_DEBUG_CPTX(DPRINTF(CODEID": (NIC %d) event "EF_EVENT_FMT,
-				    nicno, EF_EVENT_PRI_ARG(event_in)););
-
-		    if (EF_EVENT_TYPE_TX == EF_EVENT_TYPE(event_in))
-			/* we expect only transmit events on this DMA queue */
-			handle_ev_tx(&txer->nic[nicno].interface, event_in);
-		    else
-                    {   /* messsage is logged whilst locked - remove later? */
-			OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d) unexpected "
-			                  "non-transmit event type in "
-					  EF_EVENT_FMT,
-					  nicno, EF_EVENT_PRI_ARG(event_in)););
-		    }
-		}
-	    } while (eventcount > 0);
-	}
-}
-
-
-
-
-
-
-
-
-
-/*! Transmit the identified IP packet using the provided transmitter resources
- *  to the given next hop IP address via the NIC/port provided (from the
- *  link layer access point identified by \c ifindex)
- *
- *  This function will take ownership of the packet (e.g. to return it to
- *  the pool) whether or not transmission is successful
- *
- *  This function requires the control plane to be locked but does not itself
- *  lock it.
- */
-extern int /* rc */
-cicp_transmitter_tx(cicp_transmitter_t *txer, ci_hwport_id_t hwport,
-		    cicp_bufpool_t *pool, int pktbuf_id,
-		    const ci_mac_addr_t *ref_source_mac,
-		    const ci_mac_addr_t *ref_nexthop_mac)
-{   int rc;
-    cicp_transmitter_nic_t *nicinfo =
-	cicp_transmitter_nic(txer, ci_hwport_get_nic(hwport));
-
-    if (nicinfo == NULL)
-	rc = -ENODEV;
-    else
-    {	ci_ip_pkt_fmt *pkt = cicppl_pktbuf_pkt(pool, pktbuf_id);
-	/* address of buffer visible on the NIC */
-	int port = ci_hwport_get_portno(hwport);
-	ef_iovec iov[CICPOSPL_MAC_TXBUF_PAGEMAX];
-	int seg_space, left;
-	int offset = 0;
-	int vec_idx = 0;
-
-        cicp_transmitter_doevents(txer);  /* consume incomming events */
- 
-        ci_assert( ! (pkt->flags & CI_PKT_FLAG_TX_PENDING));
-
-        /* fill in packet details */
-	pkt->netif.tx.port_i = ci_hwport_get_portno(hwport);
-	pkt->netif.tx.nic_i = ci_hwport_get_nic(hwport);
-        ci_assert_ge(pkt->netif.tx.port_i, 0);
-	
-        /* fill in the MAC-layer header */
-	CI_MAC_ADDR_SET(&pkt->ether_shost, ref_source_mac);
-	CI_MAC_ADDR_SET(&pkt->ether_dhost, ref_nexthop_mac);
-	
-	/* the packet should be flattened */
-	ci_assert_equal(pkt->n_buffers, 1);
-
-	/* We need to deal with buffers that traverse page boundaries
-	   because each DMA request must contain no addresses from more
-	   than one page
-	 */
-
-	iov[0].iov_base = cicppl_pktbuf_addr(pool, pktbuf_id) +
-			  CI_MEMBER_OFFSET(ci_ip_pkt_fmt, ether_dhost);
-        left = pkt->buf_len;
-	seg_space = (ci_uint32)(CI_PTR_ALIGN_NEEDED(iov[0].iov_base,
-						    CI_PAGE_SIZE));
-
-	while (left > 0 && vec_idx < CICPOSPL_MAC_TXBUF_PAGEMAX) {
-	    int n = CI_MIN(left, seg_space);
-
-	    iov[vec_idx].iov_base = iov[0].iov_base + offset;
-	    iov[vec_idx].iov_len = n;
-
-	    /* we know the packet is flattened */
-	    seg_space = CI_PAGE_SIZE;
-
-	    offset += n;
-	    left   -= n;
-	    vec_idx++;
-	}
-
-	ci_assert_equal(left, 0);
-
-	if (vec_idx > 0) {
-            rc = ef_vi_transmitv(&nicinfo->interface, port,
-                                 iov, vec_idx, pktbuf_id); 
-	    /* This buffer is now in use by the hardware, it will become
-	       available for use again once an event signalling the end
-	       of the DMA is received - by handle_ev_tx() - e.g. called
-	       above in cicp_transmitter_doevents().
-	    */
-	    if (0 != rc)
-	    {   /* messsage is logged whilst locked - remove later? */
-		OO_DEBUG_ERR(DPRINTF(CODEID
-                                     ": (NIC %d) tx %d bytes [in %d segs] "
-                                     "to port %d failed rc %d",
-                                     ci_hwport_get_nic(hwport),
-                                     pkt->buf_len, vec_idx,
-                                     ci_hwport_get_portno(hwport), rc););
-	    } else
-	    {   OO_DEBUG_CPTX(DPRINTF(CODEID": (NIC %d) tx %d bytes "
-                                      "[in %d segs] on port %d to "
-                                      CI_MAC_PRINTF_FORMAT,
-                                      ci_hwport_get_nic(hwport),
-                                      pkt->buf_len, vec_idx,
-                                      ci_hwport_get_portno(hwport),
-                                      CI_MAC_PRINTF_ARGS(ref_nexthop_mac)););
-		LOG_AT(ci_analyse_pkt(pkt->ether_dhost, pkt->buf_len));
-		LOG_DT(ci_hex_dump(ci_log_fn, pkt->ether_dhost,
-				   pkt->buf_len, 0));
-		OO_DEBUG_CPTX(
-		    /* DPRINTF(CODEID": sent to TX DMAQ %d",
-			       ref_port->p_ep->ep_dma_tx_q.dmaq); */
-		    )
-		/* unfortunately we don't have access to an option that
-		   would allow us to determine whether we should be
-		   capturing these packets (for debug) here */
-	    }
-	} else
-	{   OO_DEBUG_ERR(DPRINTF(CODEID": (NIC %d) tx %d bytes "
-                                 "on port %d: divided into %d bits",
-                                 ci_hwport_get_nic(hwport),
-                                 pkt->buf_len,
-                                 ci_hwport_get_portno(hwport),
-                                 vec_idx););
-	    /* rc is zero, force packet to be returned */
-	    cicppl_pktbuf_free(pool, pktbuf_id);
-	    rc = 0;
-	}
-    }
-    if (0 != rc)
-	/* pool is locked under the control plane lock */
-        cicppl_pktbuf_free(pool, pktbuf_id); /* drop it if not transmitted */
-    
-    return rc;
-}
-
-
-
-
-
-
-
-/*! Obtain a packet buffer from the pool - consuming transmit events if
- *  necessary in order to free additional resources
- *
- *  This function requires the control plane to be locked and locks it
- *  itself.  (The control plane should not be locked when calling this.)
- */
-extern int /* packet ID or negative if none available */
-cicp_transmitter_pktbuf_alloc(cicp_transmitter_t *txer, cicp_bufpool_t *pool) 
-{   int pktid = -1;
-    
-    CICP_BUFPOOL_LOCK(pool, pktid = cicppl_pktbuf_alloc(pool));
-
-    if (pktid < 0)
-    {   OO_DEBUG_CPTX(DPRINTF(CODEID": processing DMA events to free "
-			"up packet buffers"););
-	CICP_BUFPOOL_LOCK(pool, 
-	    cicp_transmitter_doevents(txer);
-	    /* consume events - with any luck returning buffers */
-	    pktid = cicppl_pktbuf_alloc(pool);
-	);
-    }
-
-    return pktid;
-}
-
-
-
-
-
-
-/*! Allocate the resources necessary for subsequent transmission */
-static int /* rc */
-cicp_transmitter_alloc(cicp_transmitter_t **ref_txer,
-		       cicp_handle_t *control_plane)
-{   /* @TODO: we allocate this data structure from dispatch mode in Windows
-              so we want this memory to be from the nonpaged pool.
-	      Unfortunately we don't have an O/S independent way to
-	      ask for this - windows has ci_alloc_nonpaged() but the
-	      other operating systems do not
-    */
-    cicp_transmitter_t *txer = CI_ALLOC_OBJ(cicp_transmitter_t);
-    int overall_rc;
-
-    if (txer == NULL)
-	overall_rc = -ENOMEM;
-    else
-    {	int nicno;
-	int rc;
-	ef_driver_handle nic;
-        const cicp_mac_mib_t *mact = control_plane->user.mac_utable;
-
-	overall_rc = 0;
-	txer->mact = mact;
-	txer->evq_rs = NULL;      /* resource repr'ing event Q on all NICs */
-	txer->evq_mmap_bytes = 0; /* memory mapped bytes for our event Q */
-
-	for (nicno=0; nicno < CI_CFG_MAX_REGISTER_INTERFACES; nicno++)
-	{   rc = cicp_transmitter_nic_ctor(txer, nicno);
-
-	    if (0 != rc && 0 == overall_rc)
-		overall_rc = rc;
-	}
-
-	/* Assumption: if the default NIC is present all the NIC's we're
-		       interested in are present
-	*/
-	rc = cicp_nic_open(txer, &nic, CI_DEFAULT_NIC);
-
-	/* We ignore this return code - 
-	   unfortunately the hardware registers for the NIC have not always
-	   been set up when this function is called - so it is likely that
-	   this initialization will be deferred until first transmission
-	   when cicp_transmitter_nic() will be called again
-	*/
-    }
-    
-    *ref_txer = txer;
-    return overall_rc;
-}
-
-
-
-
-/*! Free the resources contained in the transmitter provided */
-static void
-cicp_transmitter_free(cicp_transmitter_t **ref_txer)
-{   cicp_transmitter_t *txer = *ref_txer;
-
-    if (NULL != txer)
-    {	int nicno;
-
-        for (nicno=0; nicno < CI_CFG_MAX_REGISTER_INTERFACES; nicno++)
-	{   cicp_transmitter_nic_t *nicinfo = &txer->nic[nicno];
-	    ef_driver_handle nic = nicinfo->handle;
-
-	    if (0 != nic)
-	    {   ef_driver_handle *ref_nic   = &nicinfo->handle;
-
-		if (NULL != nicinfo->interface_rs)
-		    efab_vi_resource_release(nicinfo->interface_rs);
-		if (NULL != nicinfo->vi_state)
-		    ci_free(nicinfo->vi_state);
-		/*ef_driver_close(nic); - in user mode*/
-		*ref_nic = 0;
-		/* no action needed to close the event queue */
-	    }
-	}
-	if (NULL != txer->evq_rs)
-	    efab_vi_resource_release(txer->evq_rs);
-
-	ci_free(txer);
-	*ref_txer = (cicp_transmitter_t *)NULL;
-    }
-}
-
-
-
-
-
-
-
-#endif /* CICPPL_USE_TRANSMITTER */
-
-
-
-
-
 
 
 

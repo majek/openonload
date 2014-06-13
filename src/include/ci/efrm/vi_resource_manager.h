@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,7 @@
 #include <ci/efhw/common.h>
 #include <ci/efrm/vi_resource.h>
 #include <ci/efrm/vi_allocation.h>
+#include <ci/efrm/buffer_table.h>
 
 
 #define EFRM_VI_RM_DMA_QUEUE_COUNT 2
@@ -92,7 +93,7 @@ struct efrm_vi_q {
 	int                                  bytes;
 	int                                  page_order;
 	struct efhw_iopages                  pages;
-	struct efhw_buffer_table_allocation  buf_tbl_alloc;
+	struct efrm_buffer_table_allocation  bt_alloc;
 	dma_addr_t                           dma_addrs[EFRM_VI_MAX_DMA_ADDR];
 	/* The following fields are used for DMA queues only. */
 	int                                  tag;
@@ -111,8 +112,12 @@ struct efrm_vi {
 
 	struct efrm_pd *pd;
 
+	struct efrm_pio *pio; /*!< Only set if linked to a pio. */
+
 	struct efrm_vi_allocation allocation;
 	unsigned mem_mmap_bytes;
+
+	unsigned rx_prefix_len;
 
 	/*! EFHW_VI_* flags or EFRM_VI_RELEASED */
 	unsigned flags;
@@ -128,7 +133,17 @@ struct efrm_vi {
 				 struct efhw_nic *nic);
 	void *evq_callback_arg;
 	struct efrm_vi_set *vi_set;
+	struct efrm_bt_manager bt_manager;
 	struct efrm_vi_q q[EFHW_N_Q_TYPES];
+
+	int net_drv_wakeup_channel;
+
+	/* A memory mapping onto the IO page for this VI mapped into the
+	 * kernel address space.  For Falcon this just points into the
+	 * mapping stored in efhw_nic.  For EF10 this mapping is private to
+	 * this efrm_vi.
+	 */
+	volatile char __iomem *io_page;
 };
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
 #define __CI_DRIVER_EFAB_TCP_HELPER_FNS_H__
 
 #include <ci/efrm/vi_resource.h>
+#include <ci/efrm/pio.h>
 #include <onload/common.h>
 #include <onload/fd_private.h>
 #include <onload/tcp_helper.h>
@@ -67,8 +68,10 @@ extern unsigned long tcp_helper_rm_nopage(tcp_helper_resource_t* trs,
 extern void tcp_helper_rm_dump(int fd_type, oo_sp sock_id,
                                tcp_helper_resource_t* trs,
                                const char *line_prefix);
-#define THR_PRIV_DUMP(priv, line_prefix) \
-    tcp_helper_rm_dump(priv->fd_type, priv->sock_id, priv->thr, line_prefix)
+
+#define THR_PRIV_DUMP(priv, line_prefix)                \
+  tcp_helper_rm_dump((priv)->fd_type, (priv)->sock_id,  \
+                     (priv)->thr, line_prefix)
 
 extern unsigned efab_tcp_helper_netif_lock_callback(eplock_helper_t*,
                                                     ci_uint32 lock_val);
@@ -170,9 +173,6 @@ extern void efab_thr_release(tcp_helper_resource_t *thr);
 
 
 
-
-extern int efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
-                                        oo_sp, ci_uint16* p_mask_out);
 
 extern int efab_tcp_helper_sock_sleep(tcp_helper_resource_t*,
 				      oo_tcp_sock_sleep_t* op
@@ -289,27 +289,6 @@ efab_tcp_helper_k_ref_count_inc(tcp_helper_resource_t* trs)
 extern int
 efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*);
 
-/*--------------------------------------------------------------------
- *!
- * Called by kernel code to get the shared user/kernel mode netif
- * lock This obtains the kernel netif "lock" first so we can deduce
- * who owns the eplock.  If it can't get both locks it sets the
- * supplied flags on the lock that it can't obtain
- *
- * \param trs             TCP helper resource
- * \param trusted_flags   Flags to set on the kernel netif lock
- * \param untrusted_flags Flags to set on the shared netif lock
- *
- * \return                non-zero if callee succeeded in obtaining 
- *                        the netif locks, or zero if it set flags instead
- *
- *--------------------------------------------------------------------*/
-
-extern int
-efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs, 
-                                        unsigned trusted_flags,
-                                        unsigned untrusted_flags);
-
 
 /*--------------------------------------------------------------------
  *!
@@ -322,18 +301,6 @@ efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs,
 
 extern void
 efab_tcp_helper_netif_unlock(tcp_helper_resource_t*);
-
-
-/*--------------------------------------------------------------------
- *!
- * Sets the thread context in the TCP helper resource     
- *    - this is the thread used for APC scheduling 
- *
- * \param trs             tcp helper resource manager
- * \param thread          new context thread
- *
- *--------------------------------------------------------------------*/
-
 
 
 
@@ -355,8 +322,9 @@ ci_inline void
 tcp_helper_request_wakeup_nic(tcp_helper_resource_t* trs, int intf_i) {
   /* This assertion is good, but fails on linux so currently disabled */
   /* ci_assert(ci_bit_test(&trs->netif.state->evq_primed, nic_i)); */
-  efrm_eventq_request_wakeup(trs->nic[intf_i].vi_rs,
-                             ef_eventq_current(&trs->netif.nic_hw[intf_i].vi));
+  unsigned current_i =
+    ef_eventq_current(&trs->netif.nic_hw[intf_i].vi) / sizeof(efhw_event_t);
+  efrm_eventq_request_wakeup(trs->nic[intf_i].vi_rs, current_i);
 }
 
 
@@ -371,13 +339,6 @@ ci_inline void tcp_helper_request_wakeup(tcp_helper_resource_t* trs) {
 
 extern void generic_tcp_helper_close(ci_private_t* priv);
 
-extern int efab_tcp_helper_sock_callback_arm(tcp_helper_resource_t*,
-                                             oo_sp, void* arg);
-extern int efab_tcp_helper_sock_callback_disarm(tcp_helper_resource_t*, oo_sp);
-
-extern int efab_tcp_helper_sock_callback_set(tcp_helper_resource_t*,
-                                             void (*fn)(void* arg, int why));
-
 
 
 extern
@@ -390,10 +351,6 @@ int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,
 extern int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd);
 
 extern int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode);
-
-extern unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file*,
-						   tcp_helper_resource_t*,
-						   oo_sp, poll_table*);
 
 /* UDP fd poll function, timout should be NULL in case sleep is unlimited */
 extern int efab_tcp_helper_poll_udp(struct file *filp, int *mask, s64 *timeout);
@@ -416,10 +373,16 @@ efab_get_os_settings(ci_netif_config_opts *opts)
   if (opts->inited)
     return;
 
-  opts->tcp_sndbuf_min = sysctl_tcp_wmem[0];
+  /* The default of the MIN value is actually hardcoded. sysctl_tcp_rmem[0]
+  ** stores SK_MEM_QUANTUM that is not the same as minimum value. It is the
+  ** amount of _memory_ that will be allocated regardless of the state of
+  ** the system and other factors that usually affect linux kernel
+  ** logic. The RCVBUF can safely go beyong thyis value. */
+  opts->tcp_sndbuf_min = CI_CFG_TCP_SNDBUF_MIN;
   opts->tcp_sndbuf_def = sysctl_tcp_wmem[1];
   opts->tcp_sndbuf_max = sysctl_tcp_wmem[2];
-  opts->tcp_rcvbuf_min = CI_MAX(sysctl_tcp_rmem[0], CI_CFG_TCP_RCVBUF_MIN);
+
+  opts->tcp_rcvbuf_min = CI_CFG_TCP_RCVBUF_MIN;
   opts->tcp_rcvbuf_def = sysctl_tcp_rmem[1];
   opts->tcp_rcvbuf_max = sysctl_tcp_rmem[2];
 #ifdef LINUX_HAS_SYSCTL_MEM_MAX

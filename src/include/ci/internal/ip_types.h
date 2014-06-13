@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,6 +53,9 @@
 */
 typedef struct ci_netif_nic_s {
   ef_vi                      vi;
+#if CI_CFG_PIO
+  ef_pio                     pio;
+#endif // CI_CFG_PIO
 #ifdef __KERNEL__
   struct oo_iobufset** pkt_rs;
 #endif
@@ -87,6 +90,9 @@ struct ci_netif_s {
   ef_driver_handle     driver_handle;
   unsigned             mmap_bytes;
   char*                io_ptr;
+#if CI_CFG_PIO
+  uint8_t*             pio_ptr;
+#endif
   char*                buf_ptr;
 #endif
 
@@ -129,13 +135,11 @@ struct ci_netif_s {
 # if CI_CFG_PKTS_AS_HUGE_PAGES
   int                   huge_pages_flag;
 # endif
-#elif CI_CFG_MMAP_EACH_PKTSET
+#else
 # if CI_CFG_PKTS_AS_HUGE_PAGES
   ci_int32             *pkt_shm_id;
 # endif
   char**                pkt_sets; /* array of mmaped pkt sets */
-#else
-  char*                 pkt_sets; /* one area for all packets */
 #endif
 
 #ifdef __ci_driver__
@@ -161,6 +165,8 @@ struct ci_netif_s {
 #endif /* __ci_driver__ */
 
   /* General flags */  
+  /* This field must be protected by the netif lock.
+   */
   unsigned             flags;
   /* netif was once (and maybe still is) shared between multiple processes */
 # define CI_NETIF_FLAGS_SHARED           0x1
@@ -168,8 +174,7 @@ struct ci_netif_s {
 # define CI_NETIF_FLAGS_DTOR_PROTECTED   0x2
   /* netif is a kernel-only stack and thus is trusted */
 # define CI_NETIF_FLAGS_IS_TRUSTED       0x4
-  /* netif state is broken */
-# define CI_NETIF_FLAGS_IS_BROKEN        0x8
+                                      /* 0x8 free */
   /* Use physical addressing mode */
 # define CI_NETIF_FLAGS_PHYS_ADDR_MODE   0x10
   /* Use reserved iSCSI event/DMA queues */
@@ -180,7 +185,8 @@ struct ci_netif_s {
 # define CI_NETIF_FLAGS_DROP_SOCK_REFS   0x80
   /* Don't use this stack for new sockets unless name says otherwise */
 # define CI_NETIF_FLAGS_DONT_USE_ANON    0x100
-
+  /* Sending ONLOAD_MSG_WARM */
+# define CI_NETIF_FLAG_MSG_WARM           0x200
 
 #ifndef __KERNEL__
   double    ci_ip_time_tick2ms;     /* time for 1 tick in ms */
@@ -226,9 +232,6 @@ typedef struct ci_tcp_recvmsg_args {
   ci_tcp_state*  ts;
   struct msghdr* msg;
   int            flags;
-#ifdef __KERNEL__
-  ci_addr_spc_t  addr_spc;
-#endif
 } ci_tcp_recvmsg_args;
 
 /* Arguments to ci_udp_sendmsg and ci_udp_recvmsg */

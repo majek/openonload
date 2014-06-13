@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -335,7 +335,14 @@ static void monitor(struct global* global)
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
-  fprintf(stderr, "  efrss <num-threads> <intf1>...\n");
+  fprintf(stderr, "  efrss <num-threads> <# of intfs> <intf0> ... <intf(n-1)> "
+          "<filter-spec>...\n");
+  fprintf(stderr, "\n");
+  fprintf(stderr, "filter-spec:\n");
+  fprintf(stderr, "  {udp|tcp}:[vid=<vlan>,]<local-host>:<local-port>"
+          "[,<remote-host>:<remote-port>]\n");
+  fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
+  fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");
   exit(1);
 }
 
@@ -344,9 +351,10 @@ int main(int argc, char* argv[])
 {
   struct global* global;
   int n_threads;
-  int i;
+  int n_intfs;
+  int i, j;
 
-  if( argc < 3 )
+  if( argc < 4 )
     usage();
   ++argv;
   --argc;
@@ -354,11 +362,16 @@ int main(int argc, char* argv[])
   n_threads = atoi(argv[0]);
   ++argv;
   --argc;
-  global = global_alloc(n_threads, argc);
+  n_intfs = atoi(argv[0]);
+  ++argv;
+  --argc;
+  global = global_alloc(n_threads, n_intfs);
 
   /* Allocate per-interface state. */
-  for( i = 0; i < argc; ++i )
+  for( i = 0; i < n_intfs; ++i )
     global_add_net_if(global, net_if_alloc(i, argv[i], global->threads_n));
+  argv += n_intfs;
+  argc -= n_intfs;
 
   /* Allocate per-thread state and start worker threads. */
   for( i = 0; i < global->threads_n; ++i ) {
@@ -378,17 +391,17 @@ int main(int argc, char* argv[])
       pthread_cond_wait(&global->condvar, &global->mutex);
   TEST(pthread_mutex_unlock(&global->mutex) == 0);
 
-  /* Add filters so we get *all* traffic on these interfaces. */
+  /* Add filters as per cmdline args. */
   for( i = 0; i < global->net_ifs_n; ++i ) {
     struct net_if* net_if = global->net_ifs[i];
-    ef_filter_spec filter_spec;
-
-    ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
-    TRY(ef_filter_spec_set_unicast_all(&filter_spec));
-    TRY(ef_vi_set_filter_add(&net_if->vi_set, net_if->dh, &filter_spec, NULL));
-    ef_filter_spec_init(&filter_spec, EF_FILTER_FLAG_NONE);
-    TRY(ef_filter_spec_set_multicast_all(&filter_spec));
-    TRY(ef_vi_set_filter_add(&net_if->vi_set, net_if->dh, &filter_spec, NULL));
+    ef_filter_spec fs;
+    for( j = 0; j < argc; ++j ) {
+      if( filter_parse(&fs, argv[j]) ) {
+        LOGE(fprintf(stderr, "ERROR: Bad filter spec '%s'\n", argv[j]));
+        exit(1);
+      }
+      TRY(ef_vi_set_filter_add(&net_if->vi_set, net_if->dh, &fs, NULL));
+    }
   }
 
   monitor(global);

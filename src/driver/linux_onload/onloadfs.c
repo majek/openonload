@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -340,7 +340,7 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
 #endif
                     S_IRWXUGO;
   else
-    inode->i_mode = S_IFIFO | S_IRWXUGO;
+    inode->i_mode = S_IFIFO | S_IRUSR | S_IWUSR;
   inode->i_uid = current_fsuid();
   inode->i_gid = current_fsgid();
   priv = &container_of(inode, struct onload_inode, vfs_inode)->priv;
@@ -483,7 +483,8 @@ int
 onloadfs_get_dev_t(ci_private_t* priv, void* arg)
 {
   ci_uint32 *p_dev = arg;
-  *p_dev = onload_mnt->mnt_sb->s_dev;
+  *p_dev = (ci_uint32)onload_mnt->mnt_sb->s_dev;
+
   return 0;
 }
 

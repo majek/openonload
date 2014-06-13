@@ -41,6 +41,7 @@
     ioctl;
     dup;
     dup2;
+    dup3;
     fork;
     vfork;
     open;
@@ -91,6 +92,10 @@
     onload_fd_stat;
     onload_is_present;
     onload_set_stackname;
+    onload_stackname_save;
+    onload_stackname_restore;
+    onload_stack_opt_set_int;
+    onload_stack_opt_reset;
     onload_version;
     onload_lib_ext_version;
     onload_zc_recv;
@@ -100,6 +105,9 @@
     onload_set_recv_filter;
     onload_recvmsg_kernel;
     onload_thread_set_spin;
+    onload_msg_template_alloc;
+    onload_msg_template_update;
+    onload_msg_template_abort;
   local:
     /* everything else must not be in the dynamic symbol table */
     *;

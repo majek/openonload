@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,7 +61,7 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
   if( ts->s.b.state & CI_TCP_STATE_SYNCHRONISED ) {
     /* normal send: */
     if( (ts->s.b.state & CI_TCP_STATE_CAN_FIN) && 
-        ci_tcp_tx_advertise_space(ts) )
+        ci_tcp_tx_advertise_space(ni, ts) )
       revents |= POLLOUT | POLLWRNORM;
 
     /* urg */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -19,18 +19,8 @@
 #include <ci/tools.h>  /* for CI_HAVE_OS_NOPAGE */
 
 
-struct iobufset_resource;
 struct efrm_vi;
 
-
-extern int
-efab_iobufset_resource_mmap(struct iobufset_resource *iobrs,
-                            unsigned long* bytes, void* opaque, int* map_num,
-                            unsigned long* offset, int index);
-
-extern unsigned long
-efab_iobufset_resource_nopage(struct iobufset_resource* iobrs, void* opaque, 
-                              unsigned long offset, unsigned long map_size);
 
 extern int
 efab_vi_resource_mmap(struct efrm_vi *virs, unsigned long *bytes, void *opaque,

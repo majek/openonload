@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -107,7 +107,7 @@ eventq_wait__on_wakeup(ci_waiter_t* waiter, void* opaque_evdata,
       rc = CI_WAITER_CONTINUE_TO_WAIT;
 
       evdata->evq_wait_current = next_i;
-      efhw_nic_wakeup_request(nic, next_i, instance);
+      efrm_eventq_request_wakeup(virs, next_i);
     }
   }
 
@@ -169,12 +169,19 @@ efab_vi_rm_eventq_wait(struct efrm_vi* virs, unsigned current_ptr,
   if (rc < 0)
     goto clear_callback;
 
+  /* Check if we've missed the event before ci_waiter_exclusive_pre() was
+   * called */
+  if( evdata->evq_wait_current == evdata->evq_wait_request ) {
+    ci_waiter_dont_wait(&waiter, &evdata->evq_waitable);
+    goto clear_callback;
+  }
+
   bit = test_and_set_bit(VI_RESOURCE_EVQ_STATE_WAKEUP_PENDING, &cb_info->state);
   if (!bit) {
     evdata->evq_wait_current = next_i;
     evdata->evq_wait_request = next_i;
     /* Ask hardware to set wakeup bit / or wake us straight away. */
-    efhw_nic_wakeup_request(nic, next_i, virs->rs.rs_instance);
+    efrm_eventq_request_wakeup(virs, next_i);
   } else {
     /* There's a pending wakeup.  Just go to sleep.  When the wakeup
      * occurs, we'll check to see whether it's the one we wanted.  */

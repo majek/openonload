@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -138,6 +138,18 @@ ci_inline void ci_tcp_tx_maybe_do_striping(ci_ip_pkt_fmt* pkt,
 ci_inline void ci_tcp_tx_checksum_finish(const ci_ip4_hdr* ip, ci_tcp_hdr* tcp)
 {
   tcp->tcp_check_be16 = 0;
+}
+
+
+/* Returns the number of additional packet buffers that this socket is
+ * permitted to queue on its send queue.
+ */
+ci_inline int ci_tcp_tx_send_space(ci_netif* ni, ci_tcp_state* ts)
+{
+  if( NI_OPTS(ni).tcp_sndbuf_mode )
+    return ts->so_sndbuf_pkts - (ci_tcp_sendq_n_pkts(ts) + ts->retrans.num);
+  else
+    return ts->so_sndbuf_pkts - ci_tcp_sendq_n_pkts(ts);
 }
 
 #endif  /* __TCP_TX_H__ */

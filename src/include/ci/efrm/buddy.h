@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -66,12 +66,6 @@ struct efrm_buddy_allocator {
 	 ** smallest available order that is big enough.
 	 */
 };
-
-  /*! Returns total size of managed space. */
-static inline unsigned long efrm_buddy_size(struct efrm_buddy_allocator *b)
-{
-	return 1ul << b->order;
-}
 
 extern int efrm_buddy_ctor(struct efrm_buddy_allocator *b, unsigned order);
 extern int efrm_buddy_range_ctor(struct efrm_buddy_allocator *b,

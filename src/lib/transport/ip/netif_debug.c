@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,7 +92,7 @@ static void ci_netif_state_assert_valid(ci_netif* ni,
 
   { /* Check the allocated endpoint IDs. */
     unsigned id;
-    verify(nis->n_ep_bufs <= ci_pow2(NI_OPTS(ni).max_ep_bufs_ln2));
+    verify(nis->n_ep_bufs <= NI_OPTS(ni).max_ep_bufs);
     for( id = 0; id < nis->n_ep_bufs; ++id )
     if( oo_sock_id_is_waitable(ni, id) )
     {
@@ -523,9 +523,10 @@ void ci_netif_dump_extra(ci_netif* ni)
       ns->poll_did_wake);
   log("  rx_defrag_head=%d rx_defrag_tail=%d",
       OO_PP_FMT(ns->rx_defrag_head), OO_PP_FMT(ns->rx_defrag_tail));
-  log("  tx_may_alloc=%d can=%d nonb_pool=%d send_may_poll=%d is_spinner=%d",
+  log("  tx_may_alloc=%d can=%d nonb_pool=%d send_may_poll=%d is_spinner=%d,%d",
       ci_netif_pkt_tx_may_alloc(ni), ci_netif_pkt_tx_can_alloc_now(ni),
-      ci_netif_pkt_nonb_pool_not_empty(ni), ns->send_may_poll, ns->is_spinner);
+      ci_netif_pkt_nonb_pool_not_empty(ni), ns->send_may_poll,
+      (int) ns->is_spinner, ns->n_spinners);
   log("  hwport_to_intf_i=%s intf_i_to_hwport=%s", hp2i, i2hp);
   log("  uk_intf_ver=%s", OO_UK_INTF_VER);
   log("  deferred count %d/%d", ns->defer_work_count, NI_OPTS(ni).defer_work_limit);
@@ -544,9 +545,10 @@ void ci_netif_dump_vi(ci_netif* ni, int intf_i)
     return;
   }
 
-  log("%s: stack=%d intf=%d vi=%d dev=%s hw=%d%c%d", __FUNCTION__,
-      NI_ID(ni), intf_i, ef_vi_instance(vi), nic->pci_dev, (int) nic->vi_arch,
-      nic->vi_variant, (int) nic->vi_revision);
+  log("%s: stack=%d intf=%d dev=%s hw=%d%c%d(%x)", __FUNCTION__,
+      NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
+      nic->vi_variant, (int) nic->vi_revision, nic->vi_hw_flags);
+  log("  vi=%d pd_owner=%d", ef_vi_instance(vi), nic->pd_owner);
   log("  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
       ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
       ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
@@ -588,8 +590,8 @@ void ci_netif_dump(ci_netif* ni)
   log("  lock=%x "CI_NETIF_LOCK_FMT"  nics=%x primed=%x", tmp,
       CI_NETIF_LOCK_PRI_ARG(tmp), ni->nic_set.nics, ns->evq_primed);
 
-  log("  sock_bufs: max=%lu n_allocated=%u",
-      ci_pow2(NI_OPTS(ni).max_ep_bufs_ln2), ns->n_ep_bufs);
+  log("  sock_bufs: max=%u n_allocated=%u", NI_OPTS(ni).max_ep_bufs,
+      ns->n_ep_bufs);
   ci_netif_dump_pkt_summary(ni);
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,6 +60,7 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
    *  syscall.
    */
   if( os_socket_exists && request != FIONREAD && request != SIOCATMARK &&
+      request != FIOASYNC &&
       ( s->b.state != CI_TCP_LISTEN || request != (int) FIONBIO ) ) {
     rc = oo_os_sock_ioctl(netif, s->b.bufid, request, arg, NULL);
     if( rc < 0 )
@@ -134,6 +135,8 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
     break;
 
   case SIOCSPGRP:
+    if( !CI_IOCTL_ARG_OK(int, arg) )
+      goto fail_fault;
     /* Need to apply this to [fd] to get signal delivery to work.  However,
      * SIOCSPGRP is only supported on sockets, so we need to convert to
      * fcntl().
@@ -155,7 +158,7 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
   /* Successful handling */
 
 
-  return 0;
+  return rc;
 
  fail_inval:
   LOG_SC(ci_log("%s: "NSS_FMT" unhandled req %d/%#x arg %ld/%#lx (EINVAL)", 

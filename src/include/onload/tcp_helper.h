@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,6 +45,10 @@ struct tcp_helper_nic {
   struct oo_nic*       oo_nic;
   struct efrm_vi*      vi_rs;
   unsigned             vi_mem_mmap_bytes;
+#if CI_CFG_PIO
+  struct efrm_pio*     pio_rs;
+  unsigned             pio_io_mmap_bytes;
+#endif
 };
 
 
@@ -106,28 +110,23 @@ typedef struct tcp_helper_resource_s {
   int n_ep_closing_refs;
 
   /*! this is used so we can schedule destruction at task time */
-  ci_workitem_t work_item;
+  ci_workitem_t work_item_dtor;
+
+  /* For deferring work to a non-atomic context. */
+  char wq_name[11 + CI_CFG_STACK_NAME_LEN];
+  struct workqueue_struct *wq;
+  struct work_struct non_atomic_work;
+  /* List of endpoints requiring work in non-atomic context. */
+  ci_sllist     non_atomic_list;
 
 #ifdef  __KERNEL__
   /*! clear to indicate that timer should not restart itself */
   atomic_t                 timer_running;
-  /*! timer "process" data: tasklet or workqueue */
-  union {
-#ifdef CONFIG_SFC_RESOURCE_VF
-    /*! timer is workqueue */
-    struct {
-      struct workqueue_struct *wq;
-      struct delayed_work      work;
-      /*! onload:pretty_name-timer */
-      char                     name[7 + CI_CFG_STACK_NAME_LEN+8 + 7];
-    } wq;
-#endif
-    /*! timer is tasklet */
-    struct {
-      struct tasklet_struct  tasklet;
-      struct timer_list      timer;
-    } bh;
-  } timer;
+  /*! timer tasklet */
+  struct tasklet_struct  tasklet;
+  /*! timer tasklet timer */
+  struct timer_list      timer;
+
 #  if HZ < 100
 #   error FIXME: Not able to cope with low HZ at the moment.
 #  endif
@@ -144,8 +143,15 @@ typedef struct tcp_helper_resource_s {
    */
   ci_sllist             ep_tobe_closed;
 
+  volatile ci_uint32    trs_aflags;
+  /* We've deferred locks to non-atomic handler.  Must close endpoints. */
+# define OO_THR_AFLAG_CLOSE_ENDPOINTS     0x1
+  /* Defer efab_tcp_helper_rm_free_locked() to non-atomic handler. */
+# define OO_THR_AFLAG_RM_FREE             0x2
+
   /*! Spinlock.  Protects:
    *    - ep_tobe_closed
+   *    - non_atomic_list
    *    - wakeup_list
    *    - n_ep_closing_refs
    *    - intfs_to_reset 
@@ -158,21 +164,23 @@ typedef struct tcp_helper_resource_s {
   unsigned              mem_mmap_bytes;
   unsigned              io_mmap_bytes;
   unsigned              buf_mmap_bytes;
+#if CI_CFG_PIO
+  /* Length of the PIO mapping.  There is typically a page for each VI */
+  unsigned              pio_mmap_bytes;
+#endif
 
   /* Used to block threads that are waiting for free pkt buffers. */
   ci_waitq_t            pkt_waitq;
   
-  /* Callback used (atm) to notify of asynchronous reads */
-#define CI_TCP_HELPER_CALLBACK_RX_DATA  1  /* calling due to rx data avail */
-#define CI_TCP_HELPER_CALLBACK_CLOSED   2  /* calling due to conn closing  */
-  void (*callback_fn)(void *arg, int why);
-
   struct tcp_helper_nic      nic[CI_CFG_MAX_INTERFACES];
 
 #if CI_CFG_PKTS_AS_HUGE_PAGES
   /* shmid of packet set */
   ci_int32             *pkt_shm_id;
 #endif
+
+  /* bool: avoid packet allocations when in atomic mode */
+  int avoid_atomic_allocations;
 } tcp_helper_resource_t;
 
 
@@ -219,6 +227,9 @@ struct tcp_helper_endpoint_s {
   /*! link so we can be in the list of endpoints to be closed in the future */
   ci_sllink tobe_closed;
 
+  /* Link field when queued for non-atomic work. */
+  ci_sllink non_atomic_link;
+
   /*! Links of the list with endpoints with pinned pages */
   ci_dllink ep_with_pinned_pages;
   /*! List of pinned pages */
@@ -245,15 +256,13 @@ struct tcp_helper_endpoint_s {
   */
   tcp_helper_endpoint_t* wakeup_next;
 
-  /*! The address space that pointers in this socket lie within.  Initially
-  ** CI_ADDR_SPC_INVALID.  May be CI_ADDR_SPC_KERNEL in trusted stacks
-  ** only. */
-  ci_addr_spc_t addr_spc;
-
   /*! Atomic endpoint flags not visible for UL. */
-  volatile ci_uint32 aflags;
-#define OO_THR_EP_AFLAG_ATTACHED    0x1
-#define OO_THR_EP_AFLAG_PEER_CLOSED 0x2 /*!< Used for pipe .*/
+  volatile ci_uint32 ep_aflags;
+#define OO_THR_EP_AFLAG_ATTACHED       0x1
+#define OO_THR_EP_AFLAG_PEER_CLOSED    0x2  /* Used for pipe */
+#define OO_THR_EP_AFLAG_NON_ATOMIC     0x4  /* On the non-atomic list */
+#define OO_THR_EP_AFLAG_CLEAR_FILTERS  0x8  /* Needs filters clearing */
+#define OO_THR_EP_AFLAG_NEED_FREE      0x10 /* Endpoint to be freed */
 
 
 

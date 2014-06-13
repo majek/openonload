@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,7 +52,7 @@
 static void __ef_log(const char* msg);
 
 void (*ef_log_fn)(const char* msg) = __ef_log;
-int    ef_log_level                = 1; /*Critical*/
+int    ef_log_level                = 0; /*Critical*/
 int    ef_log_options		   = 0;
 
 /* ****************************************************************************

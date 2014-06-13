@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,8 +14,8 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
- * Copyright 2006-2010 Solarflare Communications Inc.
+ * Driver for Solarflare network controllers and boards
+ * Copyright 2006-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -490,7 +490,7 @@ static int qt202x_phy_get_module_info(struct efx_nic *efx,
 static int qt202x_phy_get_module_eeprom(struct efx_nic *efx,
 					struct ethtool_eeprom *ee, u8 *data)
 {
-	int mmd, reg_base, rc, i;		
+	int mmd, reg_base, rc, i;
 
 	if (efx->phy_type == PHY_TYPE_QT2025C) {
 		mmd = MDIO_MMD_PCS;

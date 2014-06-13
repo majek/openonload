@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -113,7 +113,7 @@ extern void list_all_stacks2(stackfilter_t *filter,
                              stack_ni_fn_t *pre_detach,
                              oo_fd *p_fd);
 extern int stack_attach(unsigned id);
-extern void stack_detach(netif_t* n);
+extern void stack_detach(netif_t* n, int locked);
 extern void stacks_detach_all(void);
 extern netif_t* stack_attached(int id);
 
@@ -155,7 +155,7 @@ extern int /*rc*/ libstack_init(sa_sigaction_t* signal_handlers);
 extern void libstack_stack_mapping_print(void);
 extern void libstack_pid_mapping_print(void);
 extern int libstack_env_print(void);
-extern int libstack_affinities_print(void);
+extern int libstack_threads_print(void);
 extern void libstack_end(void);
 extern int libstack_netif_lock(ci_netif* ni);
 extern void libstack_netif_unlock(ci_netif* ni);

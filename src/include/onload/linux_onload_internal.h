@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -41,6 +41,7 @@
 
 extern int phys_mode_gid;
 
+extern struct rw_semaphore handover_rwlock;
 
 /*--------------------------------------------------------------------
  *
@@ -81,6 +82,30 @@ linux_tcp_helper_fop_sendpage(struct file*, struct page*, int offset,
                               size_t size, loff_t* ppos, int more);
 
 extern int efab_fds_dump(unsigned pid);
+
+/* Decide whether a file descriptor is ours or not */
+/* Check if file is our endpoint */
+#define FILE_IS_ENDPOINT_SOCK(f) \
+    ( (f)->f_op == &linux_tcp_helper_fops_tcp || \
+      (f)->f_op == &linux_tcp_helper_fops_udp )
+#if CI_CFG_USERSPACE_PIPE
+#define FILE_IS_ENDPOINT_PIPE(f) \
+    ( (f)->f_op == &linux_tcp_helper_fops_pipe_reader || \
+      (f)->f_op == &linux_tcp_helper_fops_pipe_writer )
+#else
+#define FILE_IS_ENDPOINT_PIPE(f) 0
+#endif
+#if CI_CFG_USERSPACE_EPOLL
+#define FILE_IS_ENDPOINT_EPOLL(f) \
+    ( (f)->f_op == &oo_epoll_fops )
+#else
+#define FILE_IS_ENDPOINT_EPOLL(f) 0
+#endif
+
+#define FILE_IS_ENDPOINT(f) \
+    ( FILE_IS_ENDPOINT_SOCK(f) || FILE_IS_ENDPOINT_PIPE(f) || \
+      FILE_IS_ENDPOINT_EPOLL(f))
+
 
 
 #endif  /* __LINUX_ONLOAD_INTERNAL__ */

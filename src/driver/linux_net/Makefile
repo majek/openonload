@@ -24,6 +24,7 @@ export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
 export CONFIG_SFC_PPS := y
+export CONFIG_SFC_TRACING :=
 endif
 
 ifdef KSRCDIR
@@ -86,6 +87,11 @@ override CONFIG_SFC_SRIOV :=
 $(warning => SR-IOV functionality will be disabled)
 endif
 endif
+ifdef CONFIG_SFC_TRACING
+ifndef CONFIG_EVENT_TRACING
+$(error Kernel does not support EVENT_TRACING)
+endif
+endif
 endif # CONFIG_NET
 
 else # !KERNELRELEASE ###### The following is for the standalone Makefile case
@@ -111,10 +117,10 @@ endif # KPATH
 KVERPARTS = $(subst -, ,$(subst ., ,$(KVER)))
 ifeq ($(word 1,$(KVERPARTS)),2)
 ifneq ($(word 2,$(KVERPARTS)),6)
-$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
+$(error Kernel version $(KVER) is not supported; minimum version is 2.6.16)
 endif
-ifneq ($(filter 0 1 2 3 4 5 6 7 8,$(word 3,$(KVERPARTS))),)
-$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
+ifneq ($(filter 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15,$(word 3,$(KVERPARTS))),)
+$(error Kernel version $(KVER) is not supported; minimum version is 2.6.16)
 endif
 endif
 
@@ -122,36 +128,29 @@ endif # export-srpm
 
 endif # !KERNELRELEASE
 
-ifneq ($(MAKECMDGOALS),export-srpm)
-KVERPARTS = $(subst -, ,$(subst ., ,$(KERNELRELEASE)))
-ifeq ($(word 1,$(KVERPARTS)),2)
-ifneq ($(word 2,$(KVERPARTS)),6)
-$(error Kernel version $(KERNELRELEASE) is not supported\; minimum version is 2.6.9)
-endif
-ifneq ($(filter 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15,$(word 3,$(KVERPARTS))),)
-$(warning  Current kernel $(KERNELRELEASE) is < 2.6.16 hence does not support PTP)
-override CONFIG_SFC_PTP :=
-override CONFIG_SFC_PPS :=
-endif # KVERPARTS 2.6.0-15
-endif # KVERPARTS 2
-endif # export-srpm
-
 endif # !EFX_UPSTREAM
 
-sfc-y			+= efx.o nic.o falcon.o siena.o tx.o rx.o filter.o \
-			   falcon_xmac.o mcdi_mac.o selftest.o \
+sfc-y			+= efx.o nic.o farch.o falcon.o siena.o ef10.o \
+			   tx.o rx.o selftest.o \
 			   driverlink.o ethtool.o qt202x_phy.o mdio_10g.o \
 			   tenxpress.o txc43128_phy.o falcon_boards.o mcdi.o \
-			   mcdi_phy.o mcdi_mon.o ioctl.o
+			   mcdi_port.o mcdi_mon.o ptp.o
 sfc-$(CONFIG_SFC_MTD)	+= mtd.o
 sfc-$(CONFIG_SFC_SRIOV)	+= siena_sriov.o
-sfc-$(CONFIG_SFC_PTP)	+= ptp.o
-sfc-$(CONFIG_SFC_AOE)	+= aoe.o
-ifndef EFX_UPSTREAM
-sfc-$(CONFIG_SFC_DEBUGFS) += debugfs.o
+ifndef EFX_NO_KCOMPAT
 ifneq ($(MAKECMDGOALS),export)
-sfc-y			+= kernel_compat.o linux_mdio.o
+sfc-y			+= ioctl.o kernel_compat.o
+endif
+endif # !EFX_NO_KCOMPAT
+ifndef EFX_UPSTREAM
+ifeq ($(filter export export-xen,$(MAKECMDGOALS)),)
+sfc-y			+= linux_mdio.o
+sfc-$(CONFIG_SFC_AOE)	+= aoe.o
+sfc-$(CONFIG_SFC_DEBUGFS) += debugfs.o
 sfc-$(CONFIG_SFC_HWMON)	+= lm87.o lm90.o
+ifndef CONFIG_SFC_PTP
+sfc-y			:= $(filter-out ptp.o,$(sfc-y))
+endif
 endif
 endif # !EFX_UPSTREAM
 
@@ -163,7 +162,10 @@ sfc_tune-y		+= tweak.o idle.o
 obj-$(CONFIG_SFC_TUNE)	+= sfc_tune.o
 
 # Compiler flags
-EXTRA_CFLAGS += -I$(src) -Wall -Wno-unused-label -Wno-deprecated-declarations -DEFX_NOT_UPSTREAM=1 -DEFX_USE_KCOMPAT=1
+EXTRA_CFLAGS += -I$(src) -Wall -Wno-unused-label -Wno-deprecated-declarations -DEFX_NOT_UPSTREAM=1 -DEFX_USE_KCOMPAT=1 -DWITH_MCDI_V2
+ifdef KMP_RELEASE
+EXTRA_CFLAGS += -DKMP_RELEASE
+endif
 
 
 ifndef EFX_DISABLE_GRO
@@ -203,9 +205,15 @@ endif
 # However, there is nothing stopping the user compiling on multiple
 # machines in the same directory. The .kpath target provides a simple
 # dependency check for this.
+#
+# Module(s).symvers also depends on the kernel compiled against, but
+# can simply be deleted here.  However mmake does some more complicated
+# management of Module.symvers and does not allow changing the kernel
+# path, so don't touch it when invoked from an mmake tree.
 $(obj)/.kpath: FORCE
-	@if ! [ -f $@ ] || [ $$(cat $@) != $(objtree) ]; then	\
-		echo $(objtree) >$@;				\
+	@if ! [ -f $@ ] || [ $$(cat $@) != $(objtree) ]; then		\
+		echo $(objtree) >$@;					\
+		$(if $(MMAKE_IN_KBUILD),,rm -f $(obj)/*.symvers;)	\
 	fi
 
 define filechk_autocompat.h
@@ -217,7 +225,7 @@ $(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
 	@touch $@
 
 define filechk_config.h
-	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
+	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS SFC_TRACING,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
 endef
 
 $(obj)/config.h: $(src)/Makefile FORCE
@@ -253,14 +261,20 @@ endif
 ifneq ($(CC),)
 EXTRA_MAKEFLAGS += CC=$(CC)
 endif
+ifdef KMP_RELEASE
+EXTRA_MAKEFLAGS += KMP_RELEASE=1
+endif
 
 ifeq ($(INSTALL_MOD_DIR),)
 INSTALL_MOD_DIR := updates
 endif
 
-default : modules
+default : all
 
 all : modules
+ifneq ($(findstring $(shell uname -p),x86_64 i686),)
+	! [ -d unittest ] || $(MAKE) -C unittest
+endif
 
 modules :
 	$(MAKE) -C $(KPATH) $(EXTRA_MAKEFLAGS) M=$$(pwd)
@@ -276,7 +290,10 @@ modules_install :
 	mkdir -p $(INSTALL_MOD_PATH)/lib/modules/$(KVER)/$(INSTALL_MOD_DIR)
 	$(MAKE) -C $(KPATH) $(EXTRA_MAKEFLAGS) M=$$(pwd) INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) modules_install
 
-clean : clean_modules
+clean : clean_modules clean_tests
+
+clean_tests:
+	! [ -d unittest ] || $(MAKE) -C unittest clean
 
 clean_modules :
 	rm -f *.o *.s *.ko *.mod.c *.symvers config.h autocompat.h .kpath
@@ -287,16 +304,16 @@ clean_modules :
 
 # Export into kernel tree
 export:
-	./export.sh $(KPATH) $(sfc-y:%.o=%.c)
+	./export.sh $(KPATH) $(sfc-y:%.o=%.c) trace/events/sfc.h
 
 # Export into a Xen kernel tree
 export-xen:
-	./export.sh -k -kk $(KPATH) $(sfc-y:%.o=%.c) kernel_compat.c
+	./export.sh -k -kk $(KPATH) $(sfc-y:%.o=%.c) trace/events/sfc.h
 
 # Export for SRPM
 export-srpm:
 	mkdir -p $(KPATH)/mtd
-	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c) $(sfc_tune-y:%.o=%.c) mtd/mtd-abi.h kernel_compat.sh
+	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c)  $(sfc_tune-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh
 
 .PHONY : intranet doc clean_doc util clean_util export export-xen export-srpm
 

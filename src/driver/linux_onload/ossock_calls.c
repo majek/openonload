@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,6 +38,9 @@
 #include "onload_kernel_compat.h"
 
 #if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+
+DECLARE_RWSEM(handover_rwlock);
+
 static int oo_fop_release_nothing(struct inode *inode, struct file *file)
 {
   return 0;
@@ -62,7 +65,17 @@ static void oo_fd_handover_overwrite(struct file* oo_file, struct file* os_file)
   oo_file->f_op = os_file->f_op;
   oo_file->f_dentry = os_file->f_dentry;
   oo_file->f_vfsmnt = os_file->f_vfsmnt;
-  oo_file->f_owner = os_file->f_owner;
+  oo_file->f_owner.pid = os_file->f_owner.pid;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,19)
+  oo_file->f_owner.pid_type = os_file->f_owner.pid_type;
+#endif
+  oo_file->f_owner.uid = os_file->f_owner.uid;
+  oo_file->f_owner.euid = os_file->f_owner.euid;
+  oo_file->f_owner.signum = os_file->f_owner.signum;
+  oo_file->f_flags = os_file->f_flags;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0)
+  oo_file->f_inode = os_file->f_inode;
+#endif
 
   /* socket is now referencing the oo_file.
    * We never handover anything except socket! */
@@ -139,19 +152,72 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     goto unexpected_error;
   }
 
+  /* shut down fasync */
+  if( ep->fasync_queue )
+    fasync_helper(-1, oo_file, 0, &ep->fasync_queue);
+
   os_file = ep->os_socket->file;
   rc = efab_fd_handover_replace(oo_file, os_file, fd);
   if( rc != 0 ) {
     LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: handover failed due to race",
                  __FUNCTION__, ep->thr->id, ep->id, fd));
+    fput(oo_file);
     return rc;
   }
+
+
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+  if( file_count(oo_file) == 1
+#ifdef NDEBUG /* we really want to test this code, so turn it on in DEBUG build */
+      && ! list_empty(&oo_file->f_ep_links)
+    /* This socket is a member of an epoll set.  To avoid dropping the
+     * socket out of the epoll set, we overwrite oo_file with fields from
+     * os_file and put oo_file back in the fdtable. */
+#endif
+      ) {
+    ci_private_t *priv = (ci_private_t *) oo_file->private_data;
+
+    down_write(&handover_rwlock);
+    spin_lock(&current->files->file_lock);
+    if( file_count(oo_file) == 1 && fcheck(fd) == os_file ) {
+      oo_fd_handover_overwrite(oo_file, os_file);
+      ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, oo_file);
+    }
+    else {
+      spin_unlock(&current->files->file_lock);
+      up_write(&handover_rwlock);
+      LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: epoll handover failed; socket "
+                   "likely dropped from epoll set",
+                   __FUNCTION__, ep->thr->id, ep->id, fd));
+      goto non_epoll;
+    }
+    spin_unlock(&current->files->file_lock);
+    up_write(&handover_rwlock);
+
+    /* Release the onload resources after we overwrite oo_file.
+     * This needs to be done outside of spinlock. */
+    generic_tcp_helper_close(priv);
+    efab_thr_release(priv->thr);
+
+    /* We are going to drop the old ref to os_file from fdtable. */
+    ci_assert_equal(file_count(os_file), 1);
+    /* simple fput(os_file) will drop socketfs inode - we do not want it! */
+    os_file->f_op = &oo_fop_do_nothing;
+    fput(os_file);
+    return 0;
+  }
+
+non_epoll:
+#endif
 
   /* If others have reference to our oo_file, they are lost for us.
    * file_count is incremented by:
    * - dup/dup2/... - another fd points to oo_file;
    * - fork - same fd in another process points to oo_file;
    * - syscall from another thread.
+   *
+   * This does not change anything for this file instance:
+   * we complete our handover in normal manner; just warn DEBUG users.
    */
   if( file_count(oo_file) != 1 ) {
     LOG_E(ci_log("%s: ERROR: handover of %d:%d fd=%d duplicated by dup or fork "
@@ -160,42 +226,10 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     /* fixme: implement "handover endpoint", so we can pass all socket
      * operations via our oo_file */
   }
-#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
-  else if( ! list_empty(&oo_file->f_ep_links) ) {
-    /* This socket is a member of an epoll set.  To avoid dropping the
-     * socket out of the epoll set, we overwrite oo_file with fields from
-     * os_file and put oo_file back in the fdtable.
-     *
-     * First release the onload resources before we overwrite oo_file.
-     * This needs to be done outside of spinlock.  Also need to grab ref to
-     * os_file, as ref via oo_file is going away, and it could also have
-     * been dropped from the fdtable.
-     */
-    int did_swap = 0;
-    get_file(os_file);
-    oo_file->f_op->release(oo_file->f_dentry->d_inode, oo_file);
-    oo_file->f_op = &oo_fop_do_nothing;
-    spin_lock(&current->files->file_lock);
-    if( fcheck(fd) == os_file ) {
-      oo_fd_handover_overwrite(oo_file, os_file);
-      get_file(oo_file);
-      ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, oo_file);
-      did_swap = 1;
-    }
-    else {
-      LOG_E(ci_log("%s: ERROR: %d:%d fd=%d: epoll handover failed; socket "
-                   "likely dropped from epoll set",
-                   __FUNCTION__, ep->thr->id, ep->id, fd));
-    }
-    spin_unlock(&current->files->file_lock);
-    fput(os_file);
-    if( did_swap )
-      fput(os_file);
-  }
-#endif
 
+  /* drop the last reference to the onload file */
   fput(oo_file);
-  return rc;
+  return 0;
 
 
  unexpected_error:
@@ -270,6 +304,26 @@ int oo_install_file_to_fd(struct file *file, int flags)
     efx_set_close_on_exec(fd, fdt);
   spin_unlock(&files->file_lock);
 
+  return fd;
+}
+
+#endif
+
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+
+int sock_map_fd(struct socket *sock, int flags)
+{
+  struct file *file;
+  int fd;
+
+  if( (fd = get_unused_fd_flags(flags)) < 0 )
+    return fd;
+  if( IS_ERR(file = sock_alloc_file(sock, flags, NULL)) ) {
+    put_unused_fd(fd);
+    return PTR_ERR(file);
+  }
+  fd_install(fd, file);
   return fd;
 }
 
@@ -355,7 +409,7 @@ get_linux_socket(tcp_helper_endpoint_t* ep)
 
   ci_assert(S_ISSOCK(inode->i_mode));
   sock = SOCKET_I(inode);
-  ci_assert (sock->file == socketp);
+  ci_assert_equal(sock->file, socketp);
   return sock;
 }
 
@@ -728,70 +782,105 @@ extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t *ep,
   return rc;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19) && !defined(RHEL_MAJOR)
+static int kernel_accept(struct socket *sock, struct socket **newsock, int flags)
+{
+	struct sock *sk = sock->sk;
+	int err;
+
+	err = sock_create_lite(sk->sk_family, sk->sk_type, sk->sk_protocol,
+			       newsock);
+	if (err < 0)
+		return err;
+
+	err = sock->ops->accept(sock, *newsock, flags);
+	if (err < 0) {
+		sock_release(*newsock);
+		*newsock = NULL;
+		return err;
+	}
+
+	(*newsock)->ops = sock->ops;
+	__module_get((*newsock)->ops->owner);
+	return 0;
+}
+#endif
+
 extern int
 efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
 {
   oo_os_sock_accept_t *op = arg;
   tcp_helper_endpoint_t *ep = ci_trs_get_valid_ep(priv->thr, op->sock_id);
   ci_sock_cmn *s = SP_TO_SOCK(&ep->thr->netif, ep->id);
-  int fd;
+  struct socket *sock = get_linux_socket(ep);
+  struct socket *newsock;
+  int rc;
 
-  fd = get_os_fd_from_ep(ep);
-
-  /* In theory, we can call sock->ops->accept(), but next we should somehow
-   * set up file.  There are a lot of non-exported functions in the way
-   * (such as sock_alloc_fd(), sock_attach_fd()), so let's go easy way
-   * and call sys_accept. */
-  op->rc = efab_linux_sys_accept4(fd, CI_USER_PTR_GET(op->addr),
-                                  CI_USER_PTR_GET(op->addrlen),
-                                  CI_USER_PTR_GET(op->socketcall_args),
-                                  op->flags);
+  rc = kernel_accept(sock, &newsock, op->flags);
 
   /* Clear OS RX flag if we've got everything  */
   oo_os_sock_status_bit_clear(s, OO_OS_STATUS_RX,
                  ep->os_socket->file->f_op->poll(ep->os_socket->file,
                                                  NULL) & POLLIN);
 
-  efab_linux_sys_close(fd);
+  if( rc != 0 )
+    return rc;
+  newsock->type = sock->type;
 
-  if( op->rc >= 0 ) {
-    struct file *filp = fget(op->rc);
+  if( CI_USER_PTR_GET(op->addr) != NULL ) {
+    char address[sizeof(struct sockaddr_in6)];
+    int len, ulen;
 
-    /* This is 'off' on linux, unless set via environment */
-    if( NI_OPTS(&ep->thr->netif).accept_inherit_nonblock) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-      spin_lock(&filp->f_lock);
-#else
-      lock_kernel();
-#endif
-      if( s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK )
-        filp->f_flags |= O_NONBLOCK;
-      else
-        filp->f_flags &= ~O_NONBLOCK;
-      if( s->b.sb_aflags & CI_SB_AFLAG_O_NDELAY )
-        filp->f_flags |= O_NDELAY;
-      else
-        filp->f_flags &= ~O_NDELAY;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-      spin_unlock(&filp->f_lock);
-#else
-      unlock_kernel();
-#endif
+    rc = newsock->ops->getname(newsock, (struct sockaddr *)address, &len, 2);
+    if( rc != 0 )
+      return -ECONNABORTED;
+    rc = get_user(ulen, (int *)CI_USER_PTR_GET(op->addrlen));
+    if( rc != 0 )
+      return rc;
+    if( ulen < 0 )
+      return -EINVAL;
+    if( ulen ) {
+      if( copy_to_user(CI_USER_PTR_GET(op->addr), address,
+                       min(ulen, len)) )
+        return -EFAULT;
     }
 
-    /* This is 'on' on linux, unless set via environment */
-    if( NI_OPTS(&ep->thr->netif).accept_inherit_nodelay &&
-        (s->s_aflags & CI_SOCK_AFLAG_NODELAY) ) {
-      int nodelay = 1;
-      struct socket *sock = SOCKET_I(filp->f_dentry->d_inode);
-      sock->ops->setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
-                            (char *)&nodelay, sizeof(nodelay));
-      /* yes, we ignore rc */
-    }
-    fput(filp);
+    __put_user(len, (int *)CI_USER_PTR_GET(op->addrlen));
   }
 
-  return op->rc >= 0 ? 0 : op->rc;
+
+#ifdef SOCK_TYPE_MASK
+  /* This is 'off' on linux, unless set via environment */
+  if( NI_OPTS(&ep->thr->netif).accept_inherit_nonblock && op->flags == 0 &&
+      s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK)
+    op->flags |= SOCK_NONBLOCK;
+  op->rc = sock_map_fd(newsock, op->flags);
+#else
+  op->rc = sock_map_fd(newsock);
+#endif
+  if( op->rc < 0 ) {
+    sock_release(newsock);
+    return op->rc;
+  }
+
+#ifndef SOCK_TYPE_MASK
+  /* This is 'off' on linux, unless set via environment */
+  if( NI_OPTS(&ep->thr->netif).accept_inherit_nonblock) {
+    /* We can not use newsock, because it may be already closed by another
+     * thread. */
+    struct file *file = fget(op->rc);
+    if( file == NULL )
+      return 0;
+    lock_kernel();
+    if( s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK )
+      file->f_flags |= O_NONBLOCK;
+    if( s->b.sb_aflags & CI_SB_AFLAG_O_NDELAY )
+      file->f_flags |= O_NDELAY;
+    unlock_kernel();
+  }
+#endif
+
+  return 0;
 }
 
 
@@ -831,35 +920,6 @@ extern int efab_tcp_helper_connect_os_sock(ci_private_t *priv, void *arg)
   }
 
   return rc;
-}
-
-int
-efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
-                             oo_sp sock_id, ci_uint16* p_mask_out)
-{
-  /* TODO: This should be moved into afonload. */
-
-  tcp_helper_endpoint_t* ep;
-  ci_netif* ni = &trs->netif;
-  struct file *file;
-
-  ci_assert(trs);
-  ci_assert(p_mask_out);
-
-  if( ! IS_VALID_SOCK_P(ni, sock_id) )  return -EINVAL;
-
-  ep = ci_trs_get_valid_ep(trs, sock_id);
-  if( oo_os_sock_get_from_ep(ep, &file) == 0 ) {
-    ci_assert(file->f_op != NULL);
-    ci_assert(file->f_op->poll != NULL);
-    *p_mask_out = file->f_op->poll(file, 0);
-    fput(file);
-    return 0;
-  }
-
-  OO_DEBUG_ERR(ci_log("%s: ERROR: %d:%d no O/S socket", __FUNCTION__,
-                      NI_ID(ni), OO_SP_FMT(sock_id)));
-  return -ENOENT;
 }
 
 

@@ -1,237 +1,153 @@
 
-OpenOnload 201210-u3 Release Notes
-==================================
-
- This is an update release that fixes bugs in openonload-201210-u2.
-
- Please see the ChangeLog file for details of the changes in this release.
- See ReleaseNotes-sfc for details of changes to the sfc net driver.
-
- The release notes for the openonload-201210-u1 release are included below.
-
-
-----------------------------------------
-Linux 3.10 support
-------------------
-
- This release is known not to compile cleanly with Linux 3.10 series
- kernels.  A patch to add support for 3.10 has been prepared but this
- was not available in time to be tested as part of this release.
- Please contact support@solarflare.com if you need access to this.
-
-----------------------------------------
-MRG2u3 support
----------------
-
- Although this release includes support for the RedHat MRG 2 update 3
- distribution and kernel (3.6.11-rt) we do not recommend using SR-IOV
- or IOMMU with Onload on these systems due to a number of problems
- found in the kernel support for these features during testing.  This
- means the following should not be used on MRG2u3:
-
- - Scalable packet buffer mode (EF_PACKET_BUFFER_MODE=1)
- - ef_vi with VFs
-
-----------------------------------------
-Known bugs
-----------
-
- Bug37923: The "onload_stackdump affinities" command may seg fault
-
-Kieran Mansley
-2013/07/19
-
-
-
-OpenOnload 201210-u1 Release Notes
-==================================
-
- This is an update release that fixes bugs in openonload-201210 and adds a
- few enhancements.
-
- Please see the ChangeLog file for details of the changes in this release.
- See ReleaseNotes-sfc for details of changes to the sfc net driver.
-
-
-----------------------------------------
-Configuration options
----------------------
-
- The following new configuration options have been added:
-
- EF_SIGNALS_NOPOSTPONE
- - Onload intercepts signals in order to prevent deadlocks due to signal
-   handlers reentering the Onload stack.  This option provides a way to
-   stop Onload from intercepting certain signals.  By default SIGBUS,
-   SIGSEGV and SIGPROF are not intercepted.
-
-   For more information on the circumstances under which this option is
-   useful, please see the Onload User Guide.
-
-
-----------------------------------------
-IP_ADD_SOURCE_MEMBERSHIP etc.
------------------------------
-
- This release adds support for the following socket options (when Onload is
- built on distributions that support them):
-
-   IP_ADD_SOURCE_MEMBERSHIP
-   IP_DROP_SOURCE_MEMBERSHIP
-   MCAST_JOIN_SOURCE_GROUP
-   MCAST_LEAVE_SOURCE_GROUP
-
- Note that the behaviour of these options differs from that of the Linux
- kernel stack in that Onload does not prevent datagrams with different
- source addresses from being delivered to the socket if they arrive at the
- network interface.  However, these options are still useful with Onload
- because they can take advantage of source-specific IGMPv3.
-
- We will address this limitation in a future release of Onload.
-
-
-----------------------------------------
-Red Hat Enterprise 6.4
-----------------------
-
- This release has been tested on the beta of RHEL6.4.  We will test
- RHEL6.4-final when it is released.
-
-
-David Riddoch
-2013/01/31
-
-
-
-Below are the release notes from the openonload-201210 release:
-
-
-OpenOnload 201210 Release Notes
+OpenOnload-201310 Release Notes
 ===============================
 
- This is a major release that adds new features to OpenOnload.
+This is a major update release that adds new features to OpenOnload.
 
- Below is a brief summary of the major new features and limitations that we
- are aware of.  See the ChangeLog for further details and bugs fixed.
+Below is a brief summary of the new features and limitations that we
+are aware of.  See the ChangeLog for further details and bugs fixed.
 
 
 ----------------------------------------
-New features
+New features 
 ------------
 
-- Use huge pages for Onload packet buffers (EF_USE_HUGE_PAGES).
+This release adds the following new features.  Please see the user
+guide for full details.
 
-- Improvements to onload_stackdump default output and new commands.
+- Support for the Solarflare 7000-series adapters including the SFN7122F.
+New features of 7000-series adapters include hardware multicast
+replication, large buffer table support, reduced latency and the templated
+sends API (see below).
 
-- Performance improvements in epoll_wait() and poll().
+- MSG_WARM, a new flag which when used on TCP send calls will exercise
+the send path to keep it warm and improve the latency of subsequent
+sends.
 
-- Physical addressing mode (EF_PACKET_BUFFER_MODE=2 or 3).
+- Support for the PowerPC architecture.
 
-- Option to put TCP loopback connections in a separate stack.
+- A JNI wrapper for the onload extensions API is now included.
 
-- sendmmsg() support for accelerated UDP sockets, whether or not GLIBC
-  and/or the kernel support this call.
+- SO_TIMESTAMP[NS] is now supported for accelerated TCP sockets
 
-- Net driver: VLAN insertion and stripping support.
+- Added extension API (onload_stack_opt_set_int()) to set onload stack
+options at runtime.
 
-- Firewalling including Iptables integration (BETA).
+- Added extension API (onload_stackname_save(),
+onload_stackname_restore()) to save and restore current stack name.
 
 
 ----------------------------------------
-Configuration options
+Configuration Options 
 ---------------------
 
- The following new configuration options have been added:
+The following new configuration options have been added:
 
- EF_PACKET_BUFFER_MODE
- - New options 2 and 3 enable physical addressing mode.  Physical
-   addressing mode is insecure in that the user-level application can
-   provoke the network adapter to read and write arbitrary addresses in
-   memory.  See also phys_mode_gid below.
+EF_PIO
+ - Control of whether the Programmed I/O (PIO) latency optimisation is used
+ on SFN7122F adapters.
 
-  EF_TCP_CLIENT_LOOPBACK=4
-  - New option 4 causes TCP loopback connections to be placed in a separate
-    Onload stack.  This can improve performance by reducing contention
-    between resources.
+EF_PIO_THRESHOLD
+ - Set the maximum packet size that will use PIO.
 
-  EF_USE_HUGE_PAGES
-  - Enable use of huge pages for packet buffers.
+EF_VFORK_MODE
+ - Control how vfork() interception works.
 
-  EF_VALIDATE_ENV
-  - Warn about any obsolete or misspelled options in the environment.
+EF_TCP_SNDBUF_MODE
+ - Control whether send buffer limit applies to just the TCP send queue, or
+ to the sum of the TCP send and retransmit queues.
 
-
-----------------------------------------
-Module options
---------------
-
- The following module options have been added:
-
- epoll2_max_stacks (onload module)
- - Controls the maximum number of stacks that an epoll fd can handle when
-   EF_UL_EPOLL=2.
-
- phys_mode_gid (onload module)
- - Set this option to enable physical addressing mode and restrict which
-   users can use it.
-
- shared_buffer_table (sfc_resource module)
- - This module option needs to be set to enable legacy ef_vi applications
-   that use the ef_iobufset API.  For example, setting
-   shared_buffer_table=10000 makes 10000 buffer table entries available for
-   use with ef_iobufset.
-
-
- The following module options have been removed:
-
- unsafe_sriov_without_iommu (sfc_resource module)
- - Obsoleted by the new physical addressing modes and phys_mode_gid.
-
- buffer_table_min (sfc_resource module)
- buffer_table_max
- - These options existed because previous versions of the sfc_resource
-   driver required uniform resources across all network adapters.  That
-   caused problems when different types of adapter were placed together in
-   one host.  That limitation is no longer present, so these module options
-   are not needed.
+The sfc_resource module option "shared_buffer_table" has been removed
+(see discussion of ef_iobufset below).
 
 
 ----------------------------------------
-Iptables and firewalling
-------------------------
+Known Issues
+------------
 
- This release adds a BETA of support for iptables integration.  This
- feature allows the administrator to place limits on which flows are
- permitted to bypass the kernel stack.  Flows that are not permitted to
- bypass the kernel stack are therefore subject to iptables rules (if
- enabled) in the normal way.
+- The PIO feature that reduces latency can only be used for a single
+outstanding send at a time, so applications doing a number of sends in
+quick succession are likely to get the performance advantage only for the
+first send.  This limitation will addressed in an update in the near
+future.
 
- This feature does not perform iptables rules checking on the adapter
- itself.
+- 32 bit application binaries are known not to work correctly with
+OpenOnload on PowerPC architectures.  This issue only affects PowerPC.
 
- The onload_iptables script provides a way to configure the Onload firewall
- automatically so that a subset of iptables rules will be respected when
- using Onload.  The script should tell you about any iptables rules that
- are incompatible with Onload acceleration.
+- SRIOV is not supported in this release on PowerPC architectures.  We
+recommend using EF_PACKET_BUFFER_MODE=0 or 2, but not 1 or 3.
+
+- PowerPC architectures do not currently support the new PIO method
+for reducing transmit latency (EF_PIO).  We recommend setting EF_PIO=0.
+
+- EEH error injection tests on PowerPC systems have been seen to cause
+the NIC to be disabled by the hypervisor.  This can be recovered by
+resetting the system.
+
+- Some SLES11 kernels exhibit a bug when running OpenOnload with SRIOV
+and Intel IOMMUs.  This is typically seen when loading drivers.  This
+bug has been fixed in more recent kernels (introduced in 3.1, fixed in
+3.6 and 3.2.stable).
+
+- When switching between "low-latency" and "full-featured" firmware
+variants it is necessary to reload drivers afterwards for the change
+to fully take effect.
+
+- On 7122f NICs, the ef_vi support for multicast-all and unicast-all
+filters does not work.  Attempts to install such filters will return
+an error.  (Support will be added at a later date).
+
+- On 7122f NICs, we currently only support 1 physical function per NIC
+port.
+
+- Reloading drivers on 7122f NICs on SLES10 OS using MSI-X has been
+seen to result in the driver failing to obtain an interrupt and
+reporting MCDI request timeouts.  This can be worked around by setting
+interrupt_mode=0 module option for the sfc driver to force MSI
+interrupts.
+
+- In rare circumstances the combination of a zero-copy send and the
+accelerated TCP loopback feature causes a connection to get
+stuck/corrupted.  (In DEBUG builds an assertion is triggered).  This is not
+a regression, and affects earlier releases in the same way.
+
+- There is a small difference in semantics of ef_vi_filter_add() on
+7122f and Siena NICs.  On Siena, if you try to insert a MAC filter,
+and there is already an existing matching MAC filter, it will fail.
+On 7122f this is also the case for explicit MAC filters, but an
+existing implicit MAC filter will get replaced and the new filter will
+succeed.
+
+- This release removes support for the ef_iobufset API.  ef_vi
+applications that use this will not work with this release, and ef_vi
+binaries compiled against EnterpriseOnload 2.0 and OpenOnload 201109
+and earlier will not work with this release.  ef_vi applications
+should be updated to use the ef_memreg API instead.
 
 
 ----------------------------------------
-ef_iobufset is deprecated
--------------------------
+Templated send API
+------------------
 
- The ef_iobufset interface in ef_vi is deprecated and will be removed in a
- future release.  We recommend you migrate ef_vi applications to the
- ef_memreg interface instead.
+This release includes a preview of the "Templated Send API" for 7000-series
+adapters.  See /usr/include/onload/extensions_zc.h for details.
 
+WARNING: The implementation in this release has a number of known bugs, and
+has not yet been fully performance optimised.
 
-----------------------------------------
-Known bugs
-----------
+This API provides a way to reduce the latency of TCP sends by providing a
+template for a message in advance of the critical path.  This allows Onload
+to perform a number of steps ahead of the critical path, including copying
+the message payload to the adapter.  On the critical path the application
+can optionally update the message, and then send it.
 
- - bug31498: sendmmsg() returns error code incorrectly.
+This implementation has a number of bugs in the handling of changes to the
+control plane.  In particular, if the route to the socket's peer changes so
+that packets are routed to a different layer-2 interface then the packet
+may be routed via the wrong interface.
 
- - bug31280: Build failure with gcc 4.7.1 due to string concatenation.
+This implementation only allows a single message template to be outstanding
+at a time.
 
-
-David Riddoch
-2012/10/09
+The above mentioned limitation and bugs will be addressed in an update in
+the near future.

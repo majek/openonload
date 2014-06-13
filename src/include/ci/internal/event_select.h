@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -108,7 +108,7 @@ ci_inline unsigned ci_tcp_state_get_write_event_mask(ci_netif* ni,
   /* Are we connected? */
   if (ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) {
     /* Any write space? (ignoring shutdown) */
-    if (ci_tcp_tx_advertise_space(ts))
+    if (ci_tcp_tx_advertise_space(ni, ts))
       mask = (CI_EV_CONNECT | CI_EV_WRITE);
     else
       mask = CI_EV_CONNECT;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -93,7 +93,8 @@
 #define __EFHW_BUILD_ASSERT_NAME(_x) __EFHW_BUILD_ASSERT_ILOATHECPP(_x)
 #define __EFHW_BUILD_ASSERT_ILOATHECPP(_x)  __EFHW_BUILD_ASSERT__ ##_x
 #define EFHW_BUILD_ASSERT(e) \
-	{ typedef char __EFHW_BUILD_ASSERT_NAME(__LINE__)[(e) ? 1 : -1]; }
+	{ typedef char __EFHW_BUILD_ASSERT_NAME(__LINE__)[(e) ? 1 : -1] \
+		__attribute__((unused)); }
 #endif
 
 #endif /* __CI_EFHW_DEBUG_LINUX_H__ */

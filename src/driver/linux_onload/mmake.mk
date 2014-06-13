@@ -31,15 +31,30 @@ endif
 # Build host
 CPPFLAGS += -DCI_BUILD_HOST=$(HOSTNAME)
 
-IMPORT		:= $(EFAB_SRCS:%=../efab/%) ../linux/linux_trampoline_asm.S \
+IMPORT		:= $(EFAB_SRCS:%=../efab/%) \
 		$(EFTHRM_SRCS:%=../../lib/efthrm/%) \
 		$(EFTHRM_HDRS:%=../../lib/efthrm/%)
 
 IP_TARGET      := onload.o
 IP_TARGET_SRCS := $(EFAB_SRCS) $(ONLOAD_SRCS) $(EFTHRM_SRCS)
-IP_TARGET_SRCS += linux_trampoline_asm.o
 
 TARGETS		:= $(IP_TARGET)
+
+# Need to import this here, because IMPORT is processed before we know 
+# (easily) which architecture we are actually building for.
+IMPORT         	   += linux_trampoline_asm_x86.S 
+
+x86_TARGET_SRCS    := x86_linux_trampoline.o linux_trampoline_asm_x86.o
+
+i386_TARGET_SRCS    := $(x86_TARGET_SRCS)
+
+x86_64_TARGET_SRCS := $(x86_TARGET_SRCS)
+
+ia64_TARGET_SRCS := $(x86_TARGET_SRCS)
+
+powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
+			ppc64_linux_trampoline.o ppc64_linux_trampoline_internal.o
+
 
 ######################################################
 # linux kbuild support
@@ -66,8 +81,14 @@ ifdef MMAKE_IN_KBUILD
 
 obj-m := $(IP_TARGET)
 
+ifeq ($(ARCH),powerpc)
+# RHEL5/PPC requires you to pass this, because by default its userspace
+# is 32-bit, but its kernel was built with a 64-bit compiler!
+EXTRA_CFLAGS+= -m64
+endif
+
 ifeq ($(strip $(CI_PREBUILT_IPDRV)),)
-onload-objs  := $(IP_TARGET_SRCS:%.c=%.o)
+onload-objs  := $(IP_TARGET_SRCS:%.c=%.o) $($(ARCH)_TARGET_SRCS:%.c=%.o)
 onload-objs  += $(BUILD)/lib/transport/ip/lib.a	\
 		$(BUILD)/lib/citools/lib.a	\
 		$(BUILD)/lib/efabcfg/lib.a \

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,7 +54,6 @@
    Barriers to enforce ordering with respect to:
 
    normal memory use: ci_wmb, ci_rmb, ci_wmb
-   IO bus access use: ci_wiob, ci_riob, ci_iob
 */
 #if defined(__x86_64__)
 # define ci_x86_mb() __asm__ __volatile__ ("lock; addl $0,0(%%rsp)":::"memory")
@@ -100,20 +99,12 @@
 #if CI_CPU_HAS_SSE2
 # define ci_rmb()	ci_x86_lfence()
 # define ci_mb()	ci_x86_mfence()
-# define ci_riob()	ci_x86_lfence()
-# define ci_wiob()	ci_x86_sfence()
-# define ci_iob()	ci_x86_mfence()
 #else
-# if CI_CPU_HAS_SSE
-#  define ci_wiob()	ci_x86_sfence()
-# else
-#  define ci_wiob()	ci_x86_mb()
-# endif
 # define ci_rmb()	ci_x86_mb()
 # define ci_mb()   	ci_x86_mb()
-# define ci_riob()  	ci_x86_mb()
-# define ci_iob()  	ci_x86_mb()
 #endif
+
+#define ci_ul_iowb() ((void)0)
 
 typedef unsigned long   ci_phys_addr_t;
 #define ci_phys_addr_fmt  "%lx"

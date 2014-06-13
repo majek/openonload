@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,18 +40,10 @@ extern int efab_tcp_driver_ctor(unsigned max_macs,
                                 unsigned max_routes);
 extern void efab_tcp_driver_dtor(void);
 
-ci_inline int
-IS_EP_ADDR_SPC_VALID(tcp_helper_endpoint_t * ep)
-{
-    return ( (ep->addr_spc != CI_ADDR_SPC_INVALID)  &&
-             (ep->addr_spc != CI_ADDR_SPC_KERNEL) );
-}
-
-
-ci_inline struct efrm_vi* tcp_helper_rx_vi_rs(tcp_helper_resource_t* thr,
-                                                  int intf_i) {
-  return thr->nic[intf_i].vi_rs;
-}
+/* Return the instance number of the VI associated with the named hwport,
+ * or -1 if we don't have a VI for that hwport.
+ */
+extern int tcp_helper_rx_vi_id(tcp_helper_resource_t*, int hwport);
 
 
 /*--------------------------------------------------------------------
@@ -110,7 +102,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
  *--------------------------------------------------------------------*/
 
 extern int
-tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, int no_sw);
+tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep);
 
 /*--------------------------------------------------------------------
  *!
@@ -146,6 +138,39 @@ tcp_helper_endpoint_shutdown(tcp_helper_resource_t*, oo_sp, int how,
 
 extern void
 tcp_helper_endpoint_wakeup(tcp_helper_resource_t*, tcp_helper_endpoint_t*);
+
+extern void
+tcp_helper_endpoint_queue_non_atomic(tcp_helper_endpoint_t* ep,
+                                     unsigned ep_aflag);
+
+
+/*
+ * Set atomic flags.  Returns the previous value of [ep->ep_aflags].
+ */
+ci_inline unsigned tcp_helper_endpoint_set_aflags(tcp_helper_endpoint_t* ep,
+                                                  unsigned set_aflags)
+{
+  unsigned ep_aflags;
+  do
+    ep_aflags = ep->ep_aflags;
+  while( (ep_aflags & set_aflags) != set_aflags &&
+         ci_cas32u_fail(&ep->ep_aflags, ep_aflags, ep_aflags | set_aflags) );
+  return ep_aflags;
+}
+
+
+/*
+ * Clear atomic flags.
+ */
+ci_inline void tcp_helper_endpoint_clear_aflags(tcp_helper_endpoint_t* ep,
+                                                unsigned clear_aflags)
+{
+  unsigned ep_aflags;
+  do
+    ep_aflags = ep->ep_aflags;
+  while( (ep_aflags & clear_aflags) != 0 &&
+         ci_cas32u_fail(&ep->ep_aflags, ep_aflags, ep_aflags & ~clear_aflags) );
+}
 
 
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_ENDPOINT_H__ */

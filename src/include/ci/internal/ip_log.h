@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,7 +59,7 @@
 #define CI_TP_LOG_TO	0x8000000	/* TCP out of order */
 #define CI_TP_LOG_ARPV	0x10000000	/* ARP verbose */
 #define CI_TP_LOG_IDO	0x20000000	/* iSCSI digest offload (Falcon) */
-                     /* 0x40000000 available */
+#define CI_TP_LOG_SIG	0x40000000	/* Signals */
 #define CI_TP_LOG_URG	0x80000000	/* TCP urgent data */
 
 #define CI_TP_LOG_SC   (CI_TP_LOG_TC|CI_TP_LOG_UC) /* socket control */
@@ -106,6 +106,7 @@
 #define LOG_TO(x)	LOG_FL(CI_TP_LOG_TO, x)
 #define LOG_ARPV(x)	LOG_FL(CI_TP_LOG_ARPV, x)
 #define LOG_IDO(x)	LOG_FL(CI_TP_LOG_IDO, x)
+#define LOG_SIG(x)	LOG_FL(CI_TP_LOG_SIG, x)
 #define LOG_URG(x)	LOG_FL(CI_TP_LOG_URG, x)
 #define LOG_SC(x)       LOG_FL(CI_TP_LOG_SC, x)
 #define LOG_SV(x)       LOG_FL(CI_TP_LOG_SV, x)
@@ -182,23 +183,26 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":"")
 
 
-#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
-#define CI_SOCK_FLAGS_PRI_ARG(s)                                \
-  ((s)->s_aflags & CI_SOCK_AFLAG_NODELAY  ? "TCP_NODELAY ":""), \
-  ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),        \
-  ((s)->s_flags & CI_SOCK_FLAG_REUSEADDR  ? "REUSE ":""),       \
-  ((s)->s_flags & CI_SOCK_FLAG_KALIVE     ? "KALIVE ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_BROADCAST  ? "BCAST ":""),       \
-  ((s)->s_flags & CI_SOCK_FLAG_OOBINLINE  ? "OOBIN ":""),       \
-  ((s)->s_flags & CI_SOCK_FLAG_LINGER     ? "LINGER ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_DONTROUTE  ? "DONTROUTE ":""),   \
-  ((s)->s_flags & CI_SOCK_FLAG_FILTER     ? "FILTER ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_BOUND      ? "BOUND ":""),       \
-  ((s)->s_flags & CI_SOCK_FLAG_ADDR_BOUND ? "ABOUND ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_PORT_BOUND ? "PBOUND ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_SET_SNDBUF ? "SNDBUF ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_SET_RCVBUF ? "RCVBUF ":""),      \
-  ((s)->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL ? "SW_FILTER_FULL ":""),\
+#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SOCK_FLAGS_PRI_ARG(s)                                        \
+  ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),                \
+  ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_RD ? "SHUTRD ":""),          \
+  ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_WR ? "SHUTWR ":""),          \
+  ((s)->s_aflags & CI_SOCK_AFLAG_NODELAY  ? "TCP_NODELAY ":""),         \
+  ((s)->s_aflags & CI_SOCK_AFLAG_NEED_ACK ? "ACK ":""),                 \
+  ((s)->s_flags & CI_SOCK_FLAG_REUSEADDR  ? "REUSE ":""),               \
+  ((s)->s_flags & CI_SOCK_FLAG_KALIVE     ? "KALIVE ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_BROADCAST  ? "BCAST ":""),               \
+  ((s)->s_flags & CI_SOCK_FLAG_OOBINLINE  ? "OOBIN ":""),               \
+  ((s)->s_flags & CI_SOCK_FLAG_LINGER     ? "LINGER ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_DONTROUTE  ? "DONTROUTE ":""),           \
+  ((s)->s_flags & CI_SOCK_FLAG_FILTER     ? "FILTER ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_BOUND      ? "BOUND ":""),               \
+  ((s)->s_flags & CI_SOCK_FLAG_ADDR_BOUND ? "ABOUND ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_PORT_BOUND ? "PBOUND ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_SET_SNDBUF ? "SNDBUF ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_SET_RCVBUF ? "RCVBUF ":""),              \
+  ((s)->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL ? "SW_FILTER_FULL ":""),  \
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 

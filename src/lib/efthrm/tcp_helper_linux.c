@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,7 @@
 #include <ci/internal/ip.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/linux_onload_internal.h>
+#include <onload/tcp_helper_endpoint.h>
 #include <onload/tcp_poll.h>
 #include <linux/fs.h>
 #include <linux/poll.h>
@@ -55,7 +56,7 @@ efab_fop_poll__poll_if_needed(tcp_helper_resource_t* trs, citp_waitable* w)
   ci_netif* ni = &trs->netif;
 
   if(CI_UNLIKELY( ! (w->sb_aflags & CI_SB_AFLAG_AVOID_INTERRUPTS) &&
-                  ! ni->state->is_spinner && ci_netif_not_primed(ni) )) {
+                  ! ci_netif_is_spinner(ni) && ci_netif_not_primed(ni) )) {
     /* No-one is spinning, and interrupts are not primed.  So (a) we need
      * to bring this stack up-to-date and (b) we should enable interrupts
      * if we're going to block.
@@ -111,7 +112,7 @@ static ssize_t linux_tcp_helper_fop_read_pipe(struct file *filp, char *buf,
   iov[0].iov_len = len;
 
   return ci_pipe_read(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
-                      iov, 1, CI_ADDR_SPC_CURRENT);
+                      iov, 1);
 }
 
 #ifdef fop_has_readv
@@ -131,7 +132,7 @@ static ssize_t linux_tcp_helper_fop_aio_read_pipe(struct kiocb *iocb,
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
 
   return ci_pipe_read(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
-                      iov, iovlen, CI_ADDR_SPC_CURRENT);
+                      iov, iovlen);
 }
 
 static ssize_t linux_tcp_helper_fop_read_notsupp(struct file *filp, char *buf,
@@ -164,7 +165,7 @@ static ssize_t linux_tcp_helper_fop_write_pipe(struct file *filp,
   iov[0].iov_len = len;
 
   return ci_pipe_write(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
-                       iov, 1, CI_ADDR_SPC_CURRENT);
+                       iov, 1);
 }
 
 #ifdef fop_has_readv
@@ -184,7 +185,7 @@ static ssize_t linux_tcp_helper_fop_aio_write_pipe(struct kiocb *iocb,
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
 
   return ci_pipe_write(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
-                       iov, iovlen, CI_ADDR_SPC_CURRENT);
+                       iov, iovlen);
 }
 
 static ssize_t linux_tcp_helper_fop_write_notsupp(struct file *filp,
@@ -234,7 +235,7 @@ static unsigned linux_tcp_helper_fop_poll_pipe_writer(struct file* filp,
 #endif
 
 
-unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file* filp,
+static unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file* filp,
 					    tcp_helper_resource_t* trs,
 					    oo_sp id,
 					    poll_table* wait)
@@ -292,19 +293,34 @@ unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file* filp,
   return mask;
 }
 
+
 static unsigned linux_tcp_helper_fop_poll_tcp(struct file* filp,
                                               poll_table* wait)
 {
-  ci_private_t *priv = filp->private_data;
+  ci_private_t *priv;
+  int rc = POLLERR;
 
-  return efab_linux_tcp_helper_fop_poll_tcp(filp, efab_priv_to_thr(priv), 
+  /* bug34448: we should check f_op AFTER getting private data
+   * to ensure it is our file.  Also, epoll does not increment refcount,
+   * so we should lock here to prevent handover process from endpoint
+   * desruction. */
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+  down_read(&handover_rwlock);
+#endif
+  priv = filp->private_data;
+  if( filp->f_op == &linux_tcp_helper_fops_tcp)
+    rc = efab_linux_tcp_helper_fop_poll_tcp(filp, efab_priv_to_thr(priv), 
 					    priv->sock_id, wait);
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+  up_read(&handover_rwlock);
+#endif
+  return rc;
 }
 
 static unsigned linux_tcp_helper_fop_poll_udp(struct file* filp,
                                               poll_table* wait)
 {
-  ci_private_t* priv = filp->private_data;
+  ci_private_t* priv;
   tcp_helper_endpoint_t* tep_p;
   tcp_helper_resource_t* trs;
   int enable_interrupts;
@@ -312,6 +328,18 @@ static unsigned linux_tcp_helper_fop_poll_udp(struct file* filp,
   ci_netif* ni;
   unsigned mask;
   oo_sp id;
+
+  /* bug34448: see comments in linux_tcp_helper_fop_poll_tcp */
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+  down_read(&handover_rwlock);
+#endif
+  priv = filp->private_data;
+  if( filp->f_op != &linux_tcp_helper_fops_udp) {
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+    up_read(&handover_rwlock);
+#endif
+    return POLLERR;
+  }
 
   trs = efab_priv_to_thr(priv);
   ni = &trs->netif;
@@ -359,6 +387,10 @@ static unsigned linux_tcp_helper_fop_poll_udp(struct file* filp,
   mask = ci_udp_poll_events(ni, us);
   efab_fop_poll__prime_if_needed(trs, tep_p, UDP_POLL_MASK_CAN_BLOCK(mask),
                                  enable_interrupts);
+
+#if CI_CFG_EPOLL_HANDOVER_WORKAROUND
+  up_read(&handover_rwlock);
+#endif
   return mask;
 }
 
@@ -368,10 +400,9 @@ static int linux_tcp_helper_fop_close(struct inode* inode, struct file* filp)
   ci_private_t* priv = filp->private_data;
   int rc;
   OO_DEBUG_TCPH(ci_log("%s:", __FUNCTION__));
-  OO_DEBUG_TCPH(THR_PRIV_DUMP(priv, ""));
   generic_tcp_helper_close(priv);
   rc = oo_fop_release(inode, filp);
-  OO_DEBUG_TCPH(ci_log("%s: rc=%d", __FUNCTION__, rc));
+  OO_DEBUG_TCPH(ci_log("%s: done", __FUNCTION__));
   return rc;
 }
 
@@ -382,46 +413,38 @@ static int linux_tcp_helper_fop_close_pipe(struct inode* inode,
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
   tcp_helper_endpoint_t* ep = ci_trs_ep_get(trs, priv->sock_id);
+  unsigned ep_aflags;
   int rc;
-  ci_uint32 ep_aflags;
 
   OO_DEBUG_TCPH(ci_log("%s:", __FUNCTION__));
-  OO_DEBUG_TCPH(THR_PRIV_DUMP(priv, ""));
   ci_assert_equal(SP_TO_WAITABLE(&trs->netif, ep->id)->state,
                   CI_TCP_STATE_PIPE);
 
-  /* If peer is alive, let's signal it */
-  if( ~ep->aflags & OO_THR_EP_AFLAG_PEER_CLOSED ) {
-    struct oo_pipe* p = SP_TO_PIPE(&trs->netif, ep->id);
+  /* Set flag to indicate that we've closed one end of the pipe. */
+  ep_aflags = tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_PEER_CLOSED);
 
+  if( ! (ep_aflags & OO_THR_EP_AFLAG_PEER_CLOSED) ) {
+    /* Other end is still open -- signal it. */
+    struct oo_pipe* p = SP_TO_PIPE(&trs->netif, ep->id);
     ci_atomic32_or(&p->aflags,
                    CI_PFD_AFLAG_CLOSED <<
                    (priv->fd_type == CI_PRIV_TYPE_PIPE_READER ?
                     CI_PFD_AFLAG_READER_SHIFT : CI_PFD_AFLAG_WRITER_SHIFT));
     oo_pipe_wake_peer(&trs->netif, p, CI_SB_FLAG_WAKE_RX | CI_SB_FLAG_WAKE_TX);
   }
-
-  /* Set the flag: pipe is partially closed now */
-  do {
-    ep_aflags = ep->aflags;
-  } while ((~ep_aflags & OO_THR_EP_AFLAG_PEER_CLOSED) &&
-           ci_cas32u_fail(&ep->aflags, ep_aflags,
-                          ep_aflags | OO_THR_EP_AFLAG_PEER_CLOSED));
-
-  /* If the flag was not set by us (i.e. if we are closing the second end
-   * of the pipe), remove all the pipe structure. */
-  if( ep_aflags & OO_THR_EP_AFLAG_PEER_CLOSED )
+  else {
+    /* Both ends now closed. */
+    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_PEER_CLOSED);
     generic_tcp_helper_close(priv);
+  }
 
-  /* release in any case */
   rc = oo_fop_release(inode, filp);
   OO_DEBUG_TCPH(ci_log("%s: rc=%d", __FUNCTION__, rc));
-
   return rc;
 }
 #endif
 
-int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode)
+int linux_tcp_helper_fop_fasync_no_os(int fd, struct file *filp, int mode)
 {
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
@@ -441,6 +464,27 @@ int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode)
     ci_bit_set(&w->wake_request, CI_SB_FLAG_WAKE_RX_B);
 
   rc = fasync_helper(fd, filp, mode, &ep->fasync_queue);
+
+  return rc < 0 ? rc : 0;
+}
+
+int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode)
+{
+  ci_private_t* priv = filp->private_data;
+  tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
+  tcp_helper_endpoint_t* ep = ci_trs_ep_get(trs, priv->sock_id);
+  int rc;
+
+  OO_DEBUG_ASYNC(ci_log("%s: %d:%d fd=%d mode=%d sigown=%d", __FUNCTION__,
+                        N_PRI_ARGS(&trs->netif), ep->id, fd, mode,
+                        SP_TO_WAITABLE(&trs->netif, ep->id)->sigown));
+
+  rc = linux_tcp_helper_fop_fasync_no_os(fd, filp, mode);
+  if( rc == 0 && ep->os_socket != NULL) {
+    rc = ep->os_socket->file->f_op->fasync(fd, ep->os_socket->file, mode);
+    if( rc != 0 )
+      linux_tcp_helper_fop_fasync_no_os(fd, filp, !mode);
+  }
   return rc < 0 ? rc : 0;
 }
 
@@ -493,8 +537,7 @@ static ssize_t linux_tcp_helper_fop_write_tcp(struct file *filp, const char *buf
 
   if( s->b.state != CI_TCP_LISTEN )
     return ci_tcp_sendmsg(&trs->netif, SOCK_TO_TCP(s), &m,
-                          (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK)
-                          CI_ARG_WIN(0),
+                          (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK),
                           CI_ADDR_SPC_CURRENT);
 
   CI_SET_ERROR(rc, s->tx_errno);
@@ -545,8 +588,7 @@ static ssize_t linux_tcp_helper_fop_aio_write_tcp(struct kiocb *iocb,
 
   if( s->b.state != CI_TCP_LISTEN )
     return ci_tcp_sendmsg(&trs->netif, SOCK_TO_TCP(s), &m,
-                          (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK)
-                          CI_ARG_WIN(0),
+                          (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK),
                           CI_ADDR_SPC_CURRENT);
 
   CI_SET_ERROR(rc, s->tx_errno);
@@ -667,8 +709,7 @@ static ssize_t linux_tcp_helper_fop_read_tcp(struct file *filp, char *buf,
      * checked in a build assert above.
      */
     a.flags = s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK;
-    ci_tcp_recvmsg_args_init(&a, &trs->netif, SOCK_TO_TCP(s), &m,
-                             a.flags, CI_ADDR_SPC_CURRENT);
+    ci_tcp_recvmsg_args_init(&a, &trs->netif, SOCK_TO_TCP(s), &m, a.flags);
     return ci_tcp_recvmsg(&a);
   }
 
@@ -724,8 +765,7 @@ static ssize_t linux_tcp_helper_fop_aio_read_tcp(struct kiocb *iocb,
      * checked in a build assert above.
      */
     a.flags = s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK;
-    ci_tcp_recvmsg_args_init(&a, &trs->netif, SOCK_TO_TCP(s), &m,
-                             a.flags, CI_ADDR_SPC_CURRENT);
+    ci_tcp_recvmsg_args_init(&a, &trs->netif, SOCK_TO_TCP(s), &m, a.flags);
     return ci_tcp_recvmsg(&a);
   }
 
@@ -766,8 +806,7 @@ static ssize_t linux_tcp_helper_fop_read_udp(struct file *filp, char *buf,
   a.us = SOCK_TO_UDP(s);
   a.filp = filp;
 
-  return ci_udp_recvmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK),
-                        CI_ADDR_SPC_CURRENT);
+  return ci_udp_recvmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK));
 }
 
 #ifdef fop_has_readv
@@ -806,8 +845,7 @@ static ssize_t linux_tcp_helper_fop_aio_read_udp(struct kiocb *iocb,
   a.us = SOCK_TO_UDP(s);
   a.filp = filp;
 
-  return ci_udp_recvmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK),
-                        CI_ADDR_SPC_CURRENT);
+  return ci_udp_recvmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK));
 }
 
 
@@ -897,6 +935,7 @@ struct file_operations linux_tcp_helper_fops_pipe_reader =
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release,  linux_tcp_helper_fop_close_pipe),
+  CI_STRUCT_MBR(fasync, linux_tcp_helper_fop_fasync),
 };
 
 struct file_operations linux_tcp_helper_fops_pipe_writer =
@@ -923,6 +962,7 @@ struct file_operations linux_tcp_helper_fops_pipe_writer =
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release,  linux_tcp_helper_fop_close_pipe),
+  CI_STRUCT_MBR(fasync, linux_tcp_helper_fop_fasync),
 };
 #endif
 
@@ -1157,6 +1197,8 @@ void oo_file_ref_drop(struct oo_file_ref* fr)
     fr->next = efab_tcp_driver.file_refs_to_drop;
     efab_tcp_driver.file_refs_to_drop = fr;
     ci_irqlock_unlock(&efab_tcp_driver.thr_table.lock, &lock_flags);
+    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE,
+                     &efab_tcp_driver.file_refs_work_item);
   }
 }
 
@@ -1175,8 +1217,9 @@ int oo_file_ref_lookup(struct file* file, struct oo_file_ref** fr_out)
 }
 
 
-void oo_file_ref_drop_list_now(struct oo_file_ref* fr_next)
+void oo_file_ref_drop_list_now(void *context)
 {
+  struct oo_file_ref* fr_next = context;
   struct oo_file_ref* fr;
 
   ci_assert(! in_interrupt());

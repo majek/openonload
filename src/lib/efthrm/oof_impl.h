@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -98,9 +98,11 @@ struct oof_local_port {
 
 
 struct oof_local_interface {
-  ci_dllink li_addr_link;
 
-  unsigned li_ifindex;
+  ci_dllink li_active_ifs_link;
+
+  unsigned  li_ifindex;
+
 };
 
 
@@ -117,9 +119,45 @@ struct oof_local_addr {
 };
 
 
+enum oof_cplane_update_type {
+  OOF_CU_ADDR_ADD,
+  OOF_CU_ADDR_DEL,
+  OOF_CU_UPDATE_FILTERS,
+};
+
+
+struct oof_cplane_update {
+
+  ci_dllink cu_cplane_updates_link;
+
+  enum oof_cplane_update_type cu_type;
+
+  unsigned  cu_addr;
+
+  unsigned  cu_ifindex;
+
+};
+
+
 struct oof_manager {
 
-  ci_irqlock_t fm_lock;
+  /* Pointer to state belonging to the code module using this module. */
+  void*        fm_owner_private;
+
+  /* Protects all state not protected by fm_cplane_updates_lock. */
+  spinlock_t   fm_inner_lock;
+
+  /* Used together with [fm_inner_lock] to ensure that calls to modify
+   * hardware filters are serialised with respect to everything else.
+   *
+   * Hardware filter updates cannot be done in atomic context (hence
+   * mutex).  But other state in this module does need to be accessed in
+   * atomic context (hence spinlock).
+   */
+  struct mutex fm_outer_lock;
+
+  /* Protects state associated with control plane updates. */
+  spinlock_t   fm_cplane_updates_lock;
 
   int          fm_local_addr_n;
 
@@ -132,11 +170,52 @@ struct oof_manager {
 
   ci_dllist    fm_mcast_laddr_socks;
 
+  /* This mask tracks which hwports are up.  Unicast filters are usually
+   * installed on all interfaces that are up and mapped into the
+   * corresponding stack and not unavailable (see below).
+   */
+  unsigned     fm_hwports_up;
+
+  /* This mask tracks which hwports are unavailable because they are
+   * members of an unacceleratable bond.  ie. Filters should not be used
+   * with unavailable hwports because traffic arriving on them goes via the
+   * kernel stack.
+   */
+  unsigned     fm_hwports_available;
+
+  /* This mask tracks which hwports are capable of multicast replication.
+   */
+  unsigned     fm_hwports_mcast_replicate_capable;
+
+  /* This mask tracks which hwports can by used with filters specifying a
+   * VLAN.
+   */
+  unsigned     fm_hwports_vlan_filters;
+
+
+  /* New values of the above masks, staged here in order to resolve the
+   * lock order requirements.
+   *
+   * Protected by [fm_cplane_updates_lock].
+   */
+  unsigned     fm_hwports_up_new;
+  unsigned     fm_hwports_available_new;
+  unsigned     fm_hwports_mcast_replicate_capable_new;
+  unsigned     fm_hwports_vlan_filters_new;
+
+  /* Queue of oof_cplane_update objects representing changes to control
+   * plane.  They are queued temporarily to be applied in a workitem in
+   * order to get locking order right.
+   *
+   * Protected by [fm_cplane_updates_lock].
+   */
+  ci_dllist    fm_cplane_updates;
+
 };
 
 
 /* A multicast filter.  Shared by all sockets in a stack that have
- * subscribed to a particular {maddr, port}.
+ * subscribed to a particular {maddr, port, vlan}.
  */
 struct oof_mcast_filter {
 
@@ -151,6 +230,8 @@ struct oof_mcast_filter {
   ci_dllink           mf_lp_link;
 
   ci_dllist           mf_memberships;
+
+  ci_uint16           mf_vlan_id;
 
 };
 
@@ -182,6 +263,9 @@ struct oof_mcast_member {
 
   /* Link for [struct oof_mcast_filter::mf_memberships]. */
   ci_dllink                mm_filter_link;
+
+  /* The vlan id of [mm_ifindex]. */
+  ci_uint16                mm_vlan_id;
 
 };
 

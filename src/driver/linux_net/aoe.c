@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,8 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
- * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2012 Solarflare Communications Inc.
+ * Driver for Solarflare network controllers and boards
+ * Copyright 2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -88,7 +87,7 @@ bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event)
 
 int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld)
 {
-	u8 inbuf[MC_CMD_AOE_IN_CPLD_REPROGRAM_LEN];
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_AOE_IN_CPLD_REPROGRAM_LEN);
 	int rc;
 	unsigned int err;
 	struct efx_aoe_data *aoe = efx->aoe_data;
@@ -116,7 +115,7 @@ int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld)
 	/* Check for pending signals */
 	if (err == -ERESTARTSYS)
 		return -EINTR;
-	
+
 	if (aoe->last_status != 0)
 		return -EIO;
 
@@ -127,8 +126,8 @@ int efx_aoe_update_keys(struct efx_nic *efx,
 			struct efx_update_license *key_stats)
 {
 	int rc;
-	u8 inbuf[MC_CMD_FC_IN_LICENSE_LEN];
-	u8 outbuf[MC_CMD_FC_OUT_LICENSE_LEN];
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_FC_IN_LICENSE_LEN);
+	MCDI_DECLARE_BUF(outbuf, MC_CMD_FC_OUT_LICENSE_LEN);
 
 	if (!efx->aoe_data)
 		return -ENOSYS;
@@ -167,7 +166,7 @@ int efx_aoe_update_keys(struct efx_nic *efx,
 int efx_aoe_reset_aoe(struct efx_nic *efx,
 			struct efx_aoe_reset *reset_flags)
 {
-	u8 inbuf[MC_CMD_AOE_IN_FC_LEN];
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_AOE_IN_FC_LEN);
 	int rc;
 	struct efx_aoe_data *aoe = efx->aoe_data;
 

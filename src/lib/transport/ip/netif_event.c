@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,16 +92,19 @@ static int ci_tcp_csum_correct(ci_ip_pkt_fmt* pkt, int ip_paylen)
 
 static void ci_parse_rx_vlan(ci_ip_pkt_fmt* pkt)
 {
-  const ci_uint8* type_ptr = pkt->ether_base + 2 * ETH_ALEN;
-  ci_assert_equal(pkt->pkt_layout, CI_PKT_LAYOUT_INVALID);
-  if( *((const ci_uint16*)type_ptr) != CI_ETHERTYPE_8021Q ) {
-    pkt->pkt_layout = CI_PKT_LAYOUT_RX_SIMPLE;
+  uint16_t* p_ether_type;
+
+  ci_assert_nequal((ci_uint8) pkt->pkt_start_off, 0xff);
+  ci_assert_equal(pkt->pkt_eth_payload_off, 0xff);
+
+  p_ether_type = &(oo_ether_hdr(pkt)->ether_type);
+  if( *p_ether_type != CI_ETHERTYPE_8021Q ) {
+    pkt->pkt_eth_payload_off = pkt->pkt_start_off + ETH_HLEN;
     pkt->vlan = 0;
   }
   else {
-    const ci_uint8* vlan_ptr = pkt->ether_base + ETH_HLEN;
-    pkt->pkt_layout = CI_PKT_LAYOUT_RX_VLAN;
-    pkt->vlan = CI_BSWAP_BE16(*((const ci_uint16*)vlan_ptr)) & 0xfff;
+    pkt->pkt_eth_payload_off = pkt->pkt_start_off + ETH_HLEN + ETH_VLAN_HLEN;
+    pkt->vlan = CI_BSWAP_BE16(p_ether_type[1]) & 0xfff;
   }
 }
 
@@ -117,9 +120,8 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
   int not_fast, ip_paylen, ip_tot_len;
   ci_ip4_hdr *ip;
 
-  ci_assert_nequal(pkt->pkt_layout, CI_PKT_LAYOUT_INVALID);
-  ci_assert(pkt->pkt_layout == CI_PKT_LAYOUT_RX_SIMPLE ||
-            pkt->pkt_layout == CI_PKT_LAYOUT_RX_VLAN);
+  ci_assert_nequal(pkt->pkt_eth_payload_off, 0xff);
+
   ip = oo_ip_hdr(pkt);
   LOG_NR(log(LPF "RX id=%d ether_type=0x%04x ip_proto=0x%x", OO_PKT_FMT(pkt),
              (unsigned) CI_BSWAP_BE16(oo_ether_type_get(pkt)),
@@ -165,7 +167,6 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
       /* This will go negative if the ip_tot_len was too small even
       ** for the IP header.  The ULP is expected to notice...
       */
-      pkt->pay_len = ip_paylen;
 
       /* Demux to appropriate protocol. */
       if( ip->ip_protocol == IPPROTO_TCP ) {
@@ -226,7 +227,7 @@ static void handle_rx_scatter(ci_netif* ni, struct oo_rx_state* s,
     ci_assert(s->frag_pkt == NULL);
     ci_assert_le(frame_bytes,
                  (int) (CI_CFG_PKT_BUF_SIZE -
-                        CI_MEMBER_OFFSET(ci_ip_pkt_fmt, ether_base)));
+                        CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start)));
     s->frag_pkt = pkt;
     pkt->buf_len = s->frag_bytes = frame_bytes;
     oo_offbuf_init(&pkt->buf, PKT_START(pkt), s->frag_bytes);
@@ -236,8 +237,7 @@ static void handle_rx_scatter(ci_netif* ni, struct oo_rx_state* s,
     ci_assert_gt(s->frag_bytes, 0);
     ci_assert_gt(frame_bytes, s->frag_bytes);
     pkt->buf_len = frame_bytes - s->frag_bytes;
-    oo_offbuf_init(&pkt->buf, pkt->ether_base - (CI_CFG_RSS_HASH * 16),
-                   pkt->buf_len);
+    oo_offbuf_init(&pkt->buf, pkt->dma_start, pkt->buf_len);
     s->frag_bytes = frame_bytes;
     CI_DEBUG(pkt->pay_len = -1);
     if( flags & EF_EVENT_FLAG_CONT ) {
@@ -257,18 +257,19 @@ static void handle_rx_scatter(ci_netif* ni, struct oo_rx_state* s,
         if( OO_PP_IS_NULL(next_p) )
           break;
         pkt = s->frag_pkt;
-        s->frag_pkt = PKT_CHK(ni, next_p);
+        s->frag_pkt = PKT(ni, next_p);
       }
       s->rx_pkt = s->frag_pkt;
       s->rx_pkt->pay_len = s->frag_bytes;
       s->frag_pkt = NULL;
+      ASSERT_VALID_PKT(ni, s->rx_pkt);
     }
   }
 }
 
 
-static void handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
-                               ci_ip_pkt_fmt* pkt, int frame_len)
+static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
+                              ci_ip_pkt_fmt* pkt, int frame_len)
 {
   ci_ip4_hdr *ip;
   int ip_paylen;
@@ -295,7 +296,7 @@ static void handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
     else if( ip->ip_protocol == IPPROTO_TCP ) {
       if( ci_tcp_csum_correct(pkt, ip_paylen) ) {
         handle_rx_pkt(ni, ps, pkt);
-        return;
+        return 1;
       }
       else {
         LOG_U(log(FN_FMT "BAD TCP CHECKSUM %04x "PKT_DBG_FMT, FN_PRI_ARGS(ni),
@@ -308,13 +309,13 @@ static void handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
     else if( ip->ip_protocol == IPPROTO_UDP ) {
       if( ci_udp_csum_correct(pkt, PKT_UDP_HDR(pkt)) ) {
         handle_rx_pkt(ni, ps, pkt);
-        return;
+        return 1;
       }
       else {
         CI_UDP_STATS_INC_IN_ERRS(ni);
         LOG_U(log(FN_FMT "BAD UDP CHECKSUM %04x", FN_PRI_ARGS(ni),
                   (unsigned) PKT_UDP_HDR(pkt)->udp_check_be16));
-        LOG_U(ci_hex_dump(ci_log_fn, PKT_START(pkt), frame_len, 0));
+        LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), frame_len, 0));
       }
     }
 #endif
@@ -327,15 +328,17 @@ static void handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
 
   LOG_NR(log(LPF "DROP"));
   LOG_DR(ci_hex_dump(ci_log_fn, pkt, 40, 0));
-  ci_netif_pkt_release_rx_1ref(ni, pkt);
+  return 0;
 }
 
 
 static void handle_rx_no_desc_trunc(ci_netif* ni,
                                     struct ci_netif_poll_state* ps,
+                                    int intf_i,
                                     struct oo_rx_state* s, ef_event ev)
 {
-  LOG_U(log(LPF "RX_NO_DESC_TRUNC "EF_EVENT_FMT, EF_EVENT_PRI_ARG(ev)));
+  LOG_U(log(LPF "[%d] intf %d RX_NO_DESC_TRUNC "EF_EVENT_FMT,
+            NI_ID(ni), intf_i, EF_EVENT_PRI_ARG(ev)));
 
   if( s->rx_pkt != NULL ) {
     ci_parse_rx_vlan(s->rx_pkt);
@@ -356,8 +359,11 @@ static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
   int discard_type = EF_EVENT_RX_DISCARD_TYPE(ev), is_frag;
   ci_ip_pkt_fmt* pkt;
   oo_pkt_p pp;
+  int handled = 0;
+  int frame_len;
 
-  LOG_U(log(LPF "RX_DISCARD %d "EF_EVENT_FMT,
+  LOG_U(log(LPF "[%d] intf %d RX_DISCARD %d "EF_EVENT_FMT,
+            NI_ID(ni), intf_i,
             (int) discard_type, EF_EVENT_PRI_ARG(ev)));
 
   if( s->rx_pkt != NULL ) {
@@ -379,13 +385,14 @@ static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
 
   OO_PP_INIT(ni, pp, EF_EVENT_RX_DISCARD_RQ_ID(ev));
   pkt = PKT_CHK(ni, pp);
+
+  frame_len = EF_EVENT_RX_DISCARD_BYTES(ev) - 
+    ni->nic_hw[intf_i].vi.rx_prefix_len;
+
   if( EF_EVENT_RX_DISCARD_TYPE(ev) == EF_EVENT_RX_DISCARD_CSUM_BAD && 
       !is_frag )
-    handle_rx_csum_bad(ni, ps, pkt,
-                       EF_EVENT_RX_DISCARD_BYTES(ev) - (CI_CFG_RSS_HASH * 16));
-  else
-    ci_netif_pkt_release_rx_1ref(ni, pkt);
-
+    handled = handle_rx_csum_bad(ni, ps, pkt, frame_len);
+  
   switch( discard_type ) {
   case EF_EVENT_RX_DISCARD_CSUM_BAD:
     CITP_STATS_NETIF_INC(ni, rx_discard_csum_bad);
@@ -405,6 +412,19 @@ static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
   case EF_EVENT_RX_DISCARD_OTHER:
     CITP_STATS_NETIF_INC(ni, rx_discard_other);
     break;
+  }
+
+  if( !handled ) {
+    if( (discard_type == EF_EVENT_RX_DISCARD_CSUM_BAD ||
+         discard_type == EF_EVENT_RX_DISCARD_MCAST_MISMATCH ||
+         discard_type == EF_EVENT_RX_DISCARD_CRC_BAD ||
+         discard_type == EF_EVENT_RX_DISCARD_TRUNC) &&
+        oo_tcpdump_check(ni, pkt, pkt->intf_i) ) {
+        pkt->pay_len = frame_len;
+        oo_tcpdump_dump_pkt(ni, pkt);
+    }
+
+    ci_netif_pkt_release_rx_1ref(ni, pkt);
   }
 }
 
@@ -582,7 +602,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
         CITP_STATS_NETIF_INC(ni, rx_evs);
         OO_PP_INIT(ni, pp, EF_EVENT_RX_RQ_ID(ev[i]));
         pkt = PKT_CHK(ni, pp);
-        ci_prefetch(pkt->ether_base);
+        ci_prefetch(pkt->dma_start);
         ci_prefetch(pkt);
         ci_assert_equal(pkt->intf_i, intf_i);
         if( s.rx_pkt != NULL ) {
@@ -592,13 +612,13 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
         if( (ev[i].rx.flags & (EF_EVENT_FLAG_SOP | EF_EVENT_FLAG_CONT))
                                                        == EF_EVENT_FLAG_SOP ) {
           /* Whole packet in a single buffer. */
-          pkt->pay_len = EF_EVENT_RX_BYTES(ev[i]) - (CI_CFG_RSS_HASH * 16);
+          pkt->pay_len = EF_EVENT_RX_BYTES(ev[i]) - evq->rx_prefix_len;
           oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
           s.rx_pkt = pkt;
         }
         else {
           handle_rx_scatter(ni, &s, pkt,
-                            EF_EVENT_RX_BYTES(ev[i]) - (CI_CFG_RSS_HASH * 16),
+                            EF_EVENT_RX_BYTES(ev[i]) - evq->rx_prefix_len,
                             ev[i].rx.flags);
         }
       }
@@ -624,7 +644,7 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_NO_DESC_TRUNC ) {
-        handle_rx_no_desc_trunc(ni, ps, &s, ev[i]);
+        handle_rx_no_desc_trunc(ni, ps, intf_i, &s, ev[i]);
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_DISCARD ) {
@@ -632,7 +652,8 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
       }
 
       else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_TX_ERROR ) {
-        LOG_U(log(LPF "TX_ERROR %d "EF_EVENT_FMT,
+        LOG_U(log(LPF "[%d] intf %d TX_ERROR %d "EF_EVENT_FMT,
+                  NI_ID(ni), intf_i,
                   (int) EF_EVENT_TX_ERROR_TYPE(ev[i]),
                   EF_EVENT_PRI_ARG(ev[i])));
         CITP_STATS_NETIF_INC(ni, tx_error_events);
@@ -686,7 +707,7 @@ static void ci_netif_tx_progress(ci_netif* ni, int intf_i)
                       ci_ni_dllist_head(ni, &nic->tx_ready_list));
     LOG_TT(ci_log(FNT_FMT, FNT_PRI_ARGS(ni, ts)));
     ci_tcp_tx_advance(ts, ni);
-    if( ci_tcp_tx_advertise_space(ts) )
+    if( ci_tcp_tx_advertise_space(ni, ts) )
       ci_tcp_wake_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
     if( ci_ni_dllist_is_empty(ni, &nic->tx_ready_list) )
       break;
@@ -773,6 +794,13 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
   int i = 0;
 #endif
 
+  CI_BUILD_ASSERT(
+    CI_MEMBER_OFFSET(ci_ip_pkt_fmt_prefix, tcp_tx.lo.rx_sock) ==
+    CI_MEMBER_OFFSET(ci_ip_pkt_fmt_prefix, tcp_rx.lo.rx_sock) );
+  CI_BUILD_ASSERT(
+    CI_MEMBER_OFFSET(ci_ip_pkt_fmt_prefix, tcp_tx.lo.tx_sock) ==
+    CI_MEMBER_OFFSET(ci_ip_pkt_fmt_prefix, tcp_rx.lo.tx_sock) );
+
   while( OO_PP_NOT_NULL(ni->state->looppkts) ) {
 #ifdef __KERNEL__
     if(CI_UNLIKELY( i++ > ni->pkt_sets_n * PKTS_PER_SET )) {
@@ -792,12 +820,11 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
 
     LOG_NR(ci_log(N_FMT "loopback RX pkt %d: %d->%d", N_PRI_ARGS(ni),
                   OO_PKT_FMT(pkt),
-                  OO_SP_FMT(pkt->pf.lo.tx_sock),
-                  OO_SP_FMT(pkt->pf.lo.rx_sock)));
+                  OO_SP_FMT(pkt->pf.tcp_tx.lo.tx_sock),
+                  OO_SP_FMT(pkt->pf.tcp_tx.lo.rx_sock)));
 
     ip = oo_ip_hdr(pkt);
     oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->buf_len);
-    pkt->pay_len = CI_BSWAP_BE16(ip->ip_tot_len_be16) - sizeof(ci_ip4_hdr);
     pkt->intf_i = OO_INTF_I_LOOPBACK;
     pkt->flags &= CI_PKT_FLAG_NONB_POOL;
     pkt->flags |= CI_PKT_FLAG_RX;
@@ -806,7 +833,8 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
     pkt->next = OO_PP_NULL;
     /* ci_tcp_handle_rx will decrease n_rx_pkts, so increase it here */
     ++ni->state->n_rx_pkts;
-    ci_tcp_handle_rx(ni, NULL, pkt, (ci_tcp_hdr*)(ip + 1), pkt->pay_len);
+    ci_tcp_handle_rx(ni, NULL, pkt, (ci_tcp_hdr*)(ip + 1),
+                     CI_BSWAP_BE16(ip->ip_tot_len_be16) - sizeof(ci_ip4_hdr));
   }
 }
 

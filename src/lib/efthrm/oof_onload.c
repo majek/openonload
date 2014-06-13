@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,9 +61,12 @@ int
 oof_onload_ctor(efab_tcp_driver_t* on_drv, unsigned local_addr_max)
 {
   ci_assert(on_drv->filter_manager == NULL);
-  on_drv->filter_manager = oof_manager_alloc(local_addr_max);
+  on_drv->filter_manager = oof_manager_alloc(local_addr_max, on_drv);
   if( on_drv->filter_manager == NULL )
     return -ENOMEM;
+  ci_workitem_init(&on_drv->filter_work_item,
+                   (CI_WITEM_ROUTINE) oof_do_deferred_work,
+                   on_drv->filter_manager);
 
   on_drv->filter_manager_cp_handle =
     cicpos_ipif_callback_register(&on_drv->cplane_handle,
@@ -169,13 +172,9 @@ oof_dl_filter_set(struct oo_hw_filter* filter, int stack_id, int protocol,
 {
   if( filter->dlfilter_handle != EFX_DLFILTER_HANDLE_BAD )
     efx_dlfilter_remove(efab_tcp_driver.dlfilter, filter->dlfilter_handle);
-  if( protocol == IPPROTO_TCP ) {
-    /* Do not set dlfilter for UDP!  ICMP is handled by OS in UDP case. */
-    efx_dlfilter_add(efab_tcp_driver.dlfilter, protocol,
-                     daddr, dport, saddr, sport,
-                     stack_id, &filter->dlfilter_handle);
-  } else
-    filter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
+  efx_dlfilter_add(efab_tcp_driver.dlfilter, protocol,
+                   daddr, dport, saddr, sport,
+                   stack_id, &filter->dlfilter_handle);
 }
 
 
@@ -188,27 +187,40 @@ oof_dl_filter_del(struct oo_hw_filter* filter)
   }
 }
 
+
 /* These two must really be the same as we compare a value that is set
  * CI_IFID_ALL with the OO_IFID_ALL constant
  */
 CI_BUILD_ASSERT(CI_IFID_ALL == OO_IFID_ALL);
 
+
 int 
 oof_cb_get_hwport_mask(int ifindex, unsigned *hwport_mask)
 {
-  return cicp_get_active_hwport_mask(&CI_GLOBAL_CPLANE, ifindex, hwport_mask);
+  ci_irqlock_state_t lock_flags;
+  int rc;
+  cicp_lock(&CI_GLOBAL_CPLANE, &lock_flags);
+  rc = cicp_get_active_hwport_mask(&CI_GLOBAL_CPLANE, ifindex, hwport_mask);
+  cicp_unlock(&CI_GLOBAL_CPLANE, &lock_flags);
+  return rc;
+}
+
+
+int
+oof_cb_get_vlan_id(int ifindex, unsigned short *vlan_id)
+{
+  cicp_encap_t encap;
+  int rc = cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, ifindex, &encap);
+  if( rc == 0 )
+    *vlan_id = encap.vlan_id;
+
+  return rc;
 }
 
 
 void
-oof_cb_cicp_lock(ci_irqlock_state_t *lock_state)
+oof_cb_defer_work(void* owner_private)
 {
-  cicp_lock(&CI_GLOBAL_CPLANE, lock_state);
-}
-
-
-void
-oof_cb_cicp_unlock(ci_irqlock_state_t *lock_state)
-{
-  cicp_unlock(&CI_GLOBAL_CPLANE, lock_state);
+  efab_tcp_driver_t* on_drv = owner_private;
+  ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &on_drv->filter_work_item);
 }

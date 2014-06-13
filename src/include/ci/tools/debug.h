@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,7 +56,8 @@
 #define __CI_BUILD_ASSERT_NAME(_x) __CI_BUILD_ASSERT_ILOATHECPP(_x)
 #define __CI_BUILD_ASSERT_ILOATHECPP(_x)  __CI_BUILD_ASSERT__ ##_x
 #define CI_BUILD_ASSERT(e)\
- typedef char  __CI_BUILD_ASSERT_NAME(__LINE__)[(e)?1:-1]
+ typedef char  __CI_BUILD_ASSERT_NAME(__LINE__)[(e)?1:-1] \
+    __attribute__((unused))
 #endif
 
 
@@ -104,17 +105,17 @@
 
 #elif defined(NDEBUG)
 
-# define _ci_check(exp, file, line)
-# define _ci_assert2(e, x, y, file, line)
-# define _ci_assert(exp, file, line)
-# define _ci_assert_equal(exp1, exp2, file, line)
-# define _ci_assert_equiv(exp1, exp2, file, line)
-# define _ci_assert_nequal(exp1, exp2, file, line)
-# define _ci_assert_le(exp1, exp2, file, line)
-# define _ci_assert_lt(exp1, exp2, file, line)
-# define _ci_assert_ge(exp1, exp2, file, line)
-# define _ci_assert_gt(exp1, exp2, file, line)
-# define _ci_assert_impl(exp1, exp2, file, line)
+# define _ci_check(exp, file, line)                  do{}while(0)
+# define _ci_assert2(e, x, y, file, line)            do{}while(0)
+# define _ci_assert(exp, file, line)                 do{}while(0)
+# define _ci_assert_equal(exp1, exp2, file, line)    do{}while(0)
+# define _ci_assert_equiv(exp1, exp2, file, line)    do{}while(0)
+# define _ci_assert_nequal(exp1, exp2, file, line)   do{}while(0)
+# define _ci_assert_le(exp1, exp2, file, line)       do{}while(0)
+# define _ci_assert_lt(exp1, exp2, file, line)       do{}while(0)
+# define _ci_assert_ge(exp1, exp2, file, line)       do{}while(0)
+# define _ci_assert_gt(exp1, exp2, file, line)       do{}while(0)
+# define _ci_assert_impl(exp1, exp2, file, line)     do{}while(0)
 
 # define _ci_verify(exp, file, line) \
   do { \

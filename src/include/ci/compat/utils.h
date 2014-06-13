@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -136,6 +136,7 @@
                            (((v) & 0x00ff0000) >> 8u)  |        \
                            (((v) & 0x0000ff00) << 8u)  |        \
                            (((v) & 0x000000ff) << 24u))
+#if defined(__powerpc64__)
 #define CI_BSWAPC_64(v)   ((((v) & 0xff00000000000000) >> 56u) |        \
                            (((v) & 0x00ff000000000000) >> 40u) |        \
                            (((v) & 0x0000ff0000000000) >> 24u) |        \
@@ -144,6 +145,18 @@
                            (((v) & 0x0000000000ff0000) << 24u) |        \
                            (((v) & 0x000000000000ff00) << 40u) |        \
                            (((v) & 0x00000000000000ff) << 56u))
+#else
+/* Need to be a bit more cunning to avoid constant overflow */
+#define CI_BSWAPC_64(v)   ((((v) & 0xff00000000000000LL) >> 56u) |        \
+                           (((v) & 0x00ff000000000000LL) >> 40u) |      \
+                           (((v) & 0x0000ff0000000000LL) >> 24u) |        \
+                           (((v) & 0x000000ff00000000LL) >> 8u)  |        \
+                           (((v) & 0x00000000ff000000LL) << 8u)  |        \
+                           (((v) & 0x0000000000ff0000LL) << 24u) |        \
+                           (((v) & 0x000000000000ff00LL) << 40u) |        \
+                           (((v) & 0x00000000000000ffLL) << 56u))
+#endif
+
 
 #if (CI_MY_BYTE_ORDER == CI_LITTLE_ENDIAN)
 # define CI_BSWAPC_BE16(v)   CI_BSWAPC_16(v)
@@ -221,12 +234,6 @@
 #else
 #define CI_KERNEL_ARG(x)
 #endif
-
-# define CI_KERNEL_ARG_WIN(x)
-# define CI_ARG_WIN(x) 
-
-# define CI_KERNEL_ARG_UNIX(x) CI_KERNEL_ARG(x)
-# define CI_ARG_UNIX(x) ,x
 
 # define CI_KERNEL_ARG_LINUX(x) CI_KERNEL_ARG(x)
 # define CI_ARG_LINUX(x) ,x

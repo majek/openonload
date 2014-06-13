@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,6 +47,8 @@
 #define __EFRM_PD_H__
 
 
+#define OWNER_ID_PHYS_MODE       0
+
 struct efrm_pd;
 struct efrm_resource_manager;
 
@@ -57,5 +59,16 @@ efrm_create_pd_resource_manager(struct efrm_resource_manager **);
 extern void
 efrm_pd_free(struct efrm_pd *);
 
+
+/* API to OS-dependent part (proc files in Linux case) */
+
+void *
+efrm_pd_os_stats_ctor(struct efrm_pd *pd);
+
+void
+efrm_pd_os_stats_dtor(struct efrm_pd *pd, void *os_data);
+
+struct efrm_bt_manager *
+efrm_pd_bt_manager_next(struct efrm_pd *pd, struct efrm_bt_manager *prev);
 
 #endif  /* __EFRM_PD_H__ */

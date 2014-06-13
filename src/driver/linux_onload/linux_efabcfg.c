@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,8 +82,10 @@ extern ci_cfg_uid_t ci_cfg_uid_get(void)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,28)
   return (current->euid);
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
   return current_euid();
+#else
+  return __kuid_val(current_euid());
 #endif
 }
 

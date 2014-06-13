@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,9 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2010 Solarflare Communications Inc.
+ * Copyright 2006-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -472,7 +472,7 @@ static struct efx_debugfs_parameter efx_debugfs_port_parameters[] = {
 			    bool, efx_debugfs_read_bool),
 	EFX_NAMED_PARAMETER(link_speed, struct efx_nic, link_state.speed,
 			    unsigned int, efx_debugfs_read_uint),
-	EFX_BOOL_PARAMETER(struct efx_nic, promiscuous),
+	EFX_BOOL_PARAMETER(struct efx_nic, unicast_filter),
 	EFX_U64_PARAMETER(struct efx_nic, loopback_modes),
 	EFX_LOOPBACK_MODE_PARAMETER(struct efx_nic, loopback_mode),
 	EFX_UINT_PARAMETER(struct efx_nic, phy_type),
@@ -666,16 +666,17 @@ static void efx_fini_debugfs_tx_queue(struct efx_tx_queue *tx_queue)
 
 /* Per-RX-queue parameters */
 static struct efx_debugfs_parameter efx_debugfs_rx_queue_parameters[] = {
-	EFX_INT_PARAMETER(struct efx_rx_queue, added_count),
-	EFX_INT_PARAMETER(struct efx_rx_queue, removed_count),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, added_count),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, removed_count),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, max_fill),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, fast_fill_trigger),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, min_fill),
-	EFX_UINT_PARAMETER(struct efx_rx_queue, alloc_page_count),
-	EFX_UINT_PARAMETER(struct efx_rx_queue, alloc_skb_count),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, recycle_count),
-	EFX_UINT_PARAMETER(struct efx_rx_queue, resurrect_count),
-	EFX_UINT_PARAMETER(struct efx_rx_queue, resurrect_failed_count),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, page_add),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, page_remove),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, page_recycle_count),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, page_recycle_failed),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, page_recycle_full),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, slow_fill_count),
 	{NULL},
 };
@@ -769,14 +770,9 @@ static struct efx_debugfs_parameter efx_debugfs_channel_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_mcast_mismatch),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_frm_trunc),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_overlength),
+	EFX_UINT_PARAMETER(struct efx_channel, n_rx_nodesc_trunc),
 	EFX_UINT_PARAMETER(struct efx_channel, n_skbuff_leaks),
-	EFX_INT_PARAMETER(struct efx_channel, rx_alloc_level),
-	EFX_BOOL_PARAMETER(struct efx_channel, rx_alloc_push_pages),
-#ifdef EFX_NOT_UPSTREAM
-	EFX_U64_PARAMETER(struct efx_channel, rx_bytes),
-	EFX_UINT_PARAMETER(struct efx_channel, rx_packets),
-#if defined(EFX_USE_SFC_LRO)
-	EFX_INT_PARAMETER(struct efx_channel, rx_alloc_pop_pages),
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 	EFX_UINT_PARAMETER(struct efx_channel, ssr.n_merges),
 	EFX_UINT_PARAMETER(struct efx_channel, ssr.n_bursts),
 	EFX_UINT_PARAMETER(struct efx_channel, ssr.n_slow_start),
@@ -785,7 +781,6 @@ static struct efx_debugfs_parameter efx_debugfs_channel_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_channel, ssr.n_new_stream),
 	EFX_UINT_PARAMETER(struct efx_channel, ssr.n_drop_idle),
 	EFX_UINT_PARAMETER(struct efx_channel, ssr.n_drop_closed),
-#endif
 #endif
 	{NULL},
 };
@@ -854,9 +849,28 @@ static void efx_fini_debugfs_channel(struct efx_channel *channel)
 static int efx_nic_debugfs_read_desc(struct seq_file *file, void *data)
 {
 	struct efx_nic *efx = data;
+	const char *rev_name;
 
-	return seq_printf(file, "%s %s board\n",
-			  efx->type->dl_revision, efx->phy_name);
+	switch (efx_nic_rev(efx)) {
+	case EFX_REV_FALCON_A1:
+		rev_name = "Falcon rev A1";
+		break;
+	case EFX_REV_FALCON_B0:
+		rev_name = "Falcon rev B0";
+		break;
+	case EFX_REV_SIENA_A0:
+		rev_name = "Siena rev A0";
+		break;
+	case EFX_REV_HUNT_A0:
+		rev_name = "Huntington rev A0";
+		break;
+	default:
+		WARN_ON(1);
+		rev_name = "???";
+		break;
+	}
+
+	return seq_printf(file, "%s %s board\n", rev_name, efx->phy_name);
 }
 
 /* Per-NIC parameters */
@@ -867,7 +881,9 @@ static struct efx_debugfs_parameter efx_debugfs_nic_parameters[] = {
 	EFX_NAMED_PARAMETER(n_rx_queues, struct efx_nic, n_rx_channels,
 			    unsigned int, efx_debugfs_read_int),
 	EFX_UINT_PARAMETER(struct efx_nic, n_tx_channels),
-	EFX_UINT_PARAMETER(struct efx_nic, rx_buffer_len),
+	EFX_UINT_PARAMETER(struct efx_nic, rx_dma_len),
+	EFX_UINT_PARAMETER(struct efx_nic, rx_buffer_order),
+	EFX_UINT_PARAMETER(struct efx_nic, rx_buffer_truesize),
 	EFX_INT_MODE_PARAMETER(struct efx_nic, interrupt_mode),
 	EFX_NIC_STATE_PARAMETER(struct efx_nic, state),
 	{.name = "hardware_desc",

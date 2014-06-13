@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -181,7 +181,7 @@ static void stack_dump_on(ci_netif *ni)
                ni->state->stack_id, ni->state->name);
         /* Detach just now, but if we are dumping every
          * stack, we will attach again and again. */
-        stack_detach(stack_attached(ni->state->stack_id));
+        stack_detach(stack_attached(ni->state->stack_id), 1);
         return;
       }
     }
@@ -282,20 +282,20 @@ static void stack_dump(ci_netif *ni)
 
     ci_assert_gt(pkt->refcount, 0);
 
-    paylen = CI_BSWAP_BE16(oo_ip_hdr(pkt)->ip_tot_len_be16);
+    paylen = pkt->pay_len;
 
     /* Check interface: since intf_i is already checked, we should
      * check VLAN id only (and strip it). */
     if( strip_vlan ) {
-      if( cfg_dump_os && pkt->intf_i == OO_INTF_I_SEND_VIA_OS )
-        paylen += ETH_HLEN;
-      else if( pkt->vlan != cfg_encap.vlan_id )
+      if( pkt->vlan != cfg_encap.vlan_id )
         continue;
       else
-        paylen += ETH_HLEN;
+        paylen -= ETH_HLEN;
     }
-    else
-      paylen += oo_ether_hdr_size(pkt);
+
+    /* For loopback, ensure that ethernet header is correct */
+    if( pkt->intf_i == OO_INTF_I_LOOPBACK )
+      memset(oo_ether_hdr(pkt), 0, 2 * ETH_ALEN);
 
     hdr.caplen = CI_MIN(cfg_snaplen, paylen);
     fraglen = hdr.caplen;
@@ -333,7 +333,7 @@ static void stack_dump(ci_netif *ni)
         hdr.caplen -= fraglen;
         fraglen = CI_MIN(hdr.caplen, frag->buf_len);
         if( fraglen > 0 )
-          dump_data(&pkt->ether_base, fraglen);
+          dump_data(pkt->dma_start, fraglen);
         if( OO_PP_IS_NULL(frag->frag_next) )
           break;
         frag = PKT_CHK_NNL(ni, frag->frag_next);
@@ -353,8 +353,6 @@ static void stack_pre_detach(ci_netif *ni)
   stack_dump(ni);
   ci_log("Onload stack [%d,%s] is now unused: stop dumping",
          ni->state->stack_id, ni->state->name);
-  /* we have cfg_lock=1, so stack_detach expects locked stack */
-  libstack_netif_lock(ni);
 }
 
 /* Used in stack_verify_used: help to check if there are any stacks */
@@ -382,7 +380,7 @@ static void stack_verify_used(ci_netif *ni)
     int have_attached;
     LOG_DUMP(ci_log("We are the only user of stack %d", info.ni_index));
     stack_pre_detach(ni);
-    stack_detach(stack_attached(info.ni_index));
+    stack_detach(stack_attached(info.ni_index), 0);
 
     /* Check that we have attached stacks */
     have_attached = 0;

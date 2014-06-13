@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,7 +59,6 @@ extern unsigned citp_log_level CI_HV;
 #define Log_VSS(x)    Log_FL(CI_UL_LOG_VSS, x)
 #define Log_VSC(x)    Log_FL(CI_UL_LOG_VSC, x)
 #define Log_EP(x)     Log_FL(CI_UL_LOG_EP, x)
-#define Log_SIG(x)    Log_FL(CI_UL_LOG_SIG, x)
 #define Log_LIB(x)    Log_FL(CI_UL_LOG_LIB, x)
 #define Log_CALL(x)   Log_FL(CI_UL_LOG_CALL, x)
 #define Log_CLUT(x)   Log_FL(CI_UL_LOG_CLUT, x)

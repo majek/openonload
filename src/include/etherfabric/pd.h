@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,6 +47,7 @@ extern "C" {
 #endif
 
 enum ef_pd_flags {
+	EF_PD_DEFAULT   = 0x0,
 	EF_PD_VF        = 0x1,
 	EF_PD_PHYS_MODE = 0x2,
 };

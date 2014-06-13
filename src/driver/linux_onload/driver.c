@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -94,9 +94,6 @@ unsigned ci_tp_log = 0xf;
 module_param(ci_tp_log, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ci_tp_log, "Onload transport log level");
 
-int ci_cpu_speed;
-EXPORT_SYMBOL(ci_cpu_speed);
-
 int oo_igmp_on_failover = 0;
 module_param(oo_igmp_on_failover, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(oo_igmp_on_failover,
@@ -162,22 +159,6 @@ MODULE_PARM_DESC(max_neighs,
 /* Extern declaration of iSCSI functions defined in iscsi_support.c */
 extern void efab_prepare_for_iscsi(void);
 extern void efab_cleanup_in_iscsi(void);
-
-
-/* set cpu speed - only needed for kernel-created netifs */
-
-int ci_set_cpu_khz(unsigned cpu_khz)
-{
-	if (cpu_khz > 0) {
-		ci_cpu_speed = (int)cpu_khz / 1000;
-		return 0;
-	} else {
-		ci_log("%s: ERROR: cant get CPU speed: cpu_khz=0",
-		       __FUNCTION__);
-		return -EINVAL;
-	}
-}
-EXPORT_SYMBOL(ci_set_cpu_khz);
 
 
 /**************************************************************************** 
@@ -375,9 +356,17 @@ long oo_fop_unlocked_ioctl(struct file* filp, unsigned cmd, unsigned long arg)
      * Next is FIONREAD(0x541B), which we can support, but do not do this.
      * The only ioctl which was really seen in the real life is TIOCGPGRP.
      */
+
+#if ! defined (__PPC__)
     BUILD_BUG_ON(_IOC_TYPE(TIOCSSOFTCAR) != _IOC_TYPE(TCGETS));
     if( _IOC_TYPE(cmd) != _IOC_TYPE(TCGETS) ||
         _IOC_NR(cmd) > _IOC_NR(TIOCSSOFTCAR) ) {
+#else 
+    /* On PPC TTY ioctls are organized in a complicated way, so for now
+     * we just shut up warnings for a few known ioctl codes
+     */
+    if( cmd != TCGETS && cmd != TIOCGPGRP) {
+#endif 
       OO_DEBUG_ERR(ci_log("%s: bad cmd=%x type=%d(%d) nr=%d(%d)",
                           __FUNCTION__, cmd, _IOC_TYPE(cmd), OO_LINUX_IOC_BASE,
                           ioc_nr, OO_OP_END));
@@ -520,12 +509,13 @@ ci_chrdev_dtor(const char* name)
 
 static int onload_sanity_checks(void)
 {
-  if( FALCON_RX_USR_BUF_SIZE + PKT_START_OFF() > CI_CFG_PKT_BUF_SIZE ) {
-    ci_log("ERROR: FALCON_RX_USR_BUF_SIZE=%d PKT_START_OFF=%d BUF_SIZE=%d",
-           FALCON_RX_USR_BUF_SIZE, PKT_START_OFF(), CI_CFG_PKT_BUF_SIZE);
+  const int dma_start_off = CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
+  if( FALCON_RX_USR_BUF_SIZE + dma_start_off > CI_CFG_PKT_BUF_SIZE ) {
+    ci_log("ERROR: FALCON_RX_USR_BUF_SIZE=%d dma_start_off=%d BUF_SIZE=%d",
+           FALCON_RX_USR_BUF_SIZE, dma_start_off, CI_CFG_PKT_BUF_SIZE);
     return -EINVAL;
   }
-  if( FALCON_RX_USR_BUF_SIZE + PKT_START_OFF() < CI_CFG_PKT_BUF_SIZE - 64)
+  if( FALCON_RX_USR_BUF_SIZE + dma_start_off < CI_CFG_PKT_BUF_SIZE - 64 )
     ci_log("WARNING: FALCON_RX_USR_BUF_SIZE=%d could be bigger",
            FALCON_RX_USR_BUF_SIZE);
   return 0;
@@ -545,8 +535,6 @@ static int __init onload_module_init(void)
   ci_set_log_prefix("[onload] ");
   ci_log("%s %s", ONLOAD_PRODUCT, ONLOAD_VERSION);
   ci_log("%s", ONLOAD_COPYRIGHT);
-
-  ci_cpu_speed = cpu_khz / 1000;
 
   /* In library, .owner is not initialised correctly.
    * So, repeat it here. */
@@ -677,37 +665,8 @@ static void onload_module_exit(void)
 module_exit(onload_module_exit);
 
 
-EXPORT_SYMBOL(efab_tcp_helper_close_endpoint);
-EXPORT_SYMBOL(efab_linux_tcp_helper_fop_poll_tcp);
+/* Placeholders: in-kernel versions of ci_netif_ctor/dtor are not used,
+ * but David asked to not kill them. */
 EXPORT_SYMBOL(ci_netif_ctor);
-EXPORT_SYMBOL(ci_tcp_sendmsg);
-EXPORT_SYMBOL(ci_netif_poll_n);
-EXPORT_SYMBOL(ci_tcp_close);
 EXPORT_SYMBOL(ci_netif_dtor);
-EXPORT_SYMBOL(ci_tcp_recvmsg);
-EXPORT_SYMBOL(__ef_eplock_lock_slow);
-EXPORT_SYMBOL(ci_sock_lock_slow);
-EXPORT_SYMBOL(ci_sock_unlock_slow);
-EXPORT_SYMBOL(efab_tcp_helper_sock_callback_arm);
-EXPORT_SYMBOL(efab_tcp_helper_sock_callback_disarm);
-EXPORT_SYMBOL(efab_tcp_helper_sock_callback_set);
-EXPORT_SYMBOL(ci_tcp_recvmsg_get);
-EXPORT_SYMBOL(ip_addr_str);
-EXPORT_SYMBOL(ci_netif_send);
-EXPORT_SYMBOL(ci_netif_pkt_alloc_slow);
-EXPORT_SYMBOL(__ci_copy_iovec_to_pkt);
-EXPORT_SYMBOL(ci_netif_pkt_wait);
-EXPORT_SYMBOL(efab_linux_sys_close);
-EXPORT_SYMBOL(ef_eventq_has_event);
-#if CI_CFG_BUILD_DUMP_CODE_IN_KERNEL
-EXPORT_SYMBOL(ci_netif_dump);
-EXPORT_SYMBOL(ci_netif_dump_sockets);
-#endif
 
-/* For af_onload. */
-EXPORT_SYMBOL(ci_sock_sleep);
-EXPORT_SYMBOL(ci_assert_valid_pkt);
-EXPORT_SYMBOL(ci_tcp_tx_advance);
-EXPORT_SYMBOL(efab_tcp_helper_poll_os_sock);
-EXPORT_SYMBOL(ci_tp_log);
-EXPORT_SYMBOL(efab_tcp_driver);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -287,27 +287,25 @@ ci_inline char* pipe_get_point(struct oo_pipe *p, ci_netif* ni,
 }
 
 
-ci_inline int do_copy_read(void* to, const void* from, int n_bytes
-                           CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+ci_inline int do_copy_read(void* to, const void* from, int n_bytes)
 {
 #ifdef __KERNEL__
-  if( addr_spc != CI_ADDR_SPC_KERNEL )
-    return copy_to_user(to, from, n_bytes) != 0;
-#endif
+  return copy_to_user(to, from, n_bytes) != 0;
+#else
   memcpy(to, from, n_bytes);
   return 0;
+#endif
 }
 
 
-ci_inline int do_copy_write(void* to, const void* from, int n_bytes
-                            CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+ci_inline int do_copy_write(void* to, const void* from, int n_bytes)
 {
 #ifdef __KERNEL__
-  if( addr_spc != CI_ADDR_SPC_KERNEL )
-    return copy_from_user(to, from, n_bytes) != 0;
-#endif
+  return copy_from_user(to, from, n_bytes) != 0;
+#else
   memcpy(to, from, n_bytes);
   return 0;
+#endif
 }
 
 
@@ -384,8 +382,7 @@ static int oo_pipe_read_wait(ci_netif* ni, struct oo_pipe* p)
 
 
 int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
-                 const struct iovec *iov, size_t iovlen
-                 CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+                 const struct iovec *iov, size_t iovlen)
 {
   int bytes_available;
   int rc;
@@ -402,17 +399,6 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
 
   bytes_available = oo_pipe_data_len(p);
   if( bytes_available == 0 ) {
-    /* Do not block if read called with count=0 */
-    int count_is_zero = 1;
-    for( i = 0; i < iovlen; ++i ) {
-      if( iov[i].iov_len != 0 ) {
-        count_is_zero = 0;
-        break;
-      }
-    }
-    if( count_is_zero )
-      return 0;
-
     if( (rc = oo_pipe_read_wait(ni, p)) != 1 )
       goto out;
     bytes_available = oo_pipe_data_len(p);
@@ -434,8 +420,7 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
       int burst = CI_MIN(OO_PIPE_BUF_SIZE - p->read_ptr.offset,
                          end - start);
       burst = CI_MIN(burst, bytes_available - rc);
-      if(CI_UNLIKELY( do_copy_read(start, read_point, burst
-                                   CI_KERNEL_ARG(addr_spc)) != 0 )) {
+      if(CI_UNLIKELY( do_copy_read(start, read_point, burst) != 0 )) {
         rc = -EFAULT;
         goto wake_and_unlock_out;
       }
@@ -582,7 +567,7 @@ static int oo_pipe_maybe_claim_buffers(ci_netif* ni, struct oo_pipe* p,
 
 int ci_pipe_write(ci_netif* ni, struct oo_pipe* p,
                   const struct iovec *iov,
-                  size_t iovlen CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+                  size_t iovlen)
 {
   int total_bytes = 0, rc;
   int i;
@@ -664,8 +649,7 @@ rewrite:
                (int)(end - start),
                (int)(oo_pipe_space(p) - add) - OO_PIPE_BUF_SIZE);
       if( burst ) {
-        if(CI_UNLIKELY( do_copy_write(write_point, start, burst
-                                      CI_KERNEL_ARG(addr_spc)) != 0 )) {
+        if(CI_UNLIKELY( do_copy_write(write_point, start, burst) != 0 )) {
           rc = -EFAULT;
           goto wake_and_unlock_out;
         }

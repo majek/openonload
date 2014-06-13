@@ -26,6 +26,9 @@
 # If your distribution does not provide a dist macro (e.g. CentOS) which is used
 # to differentiate the filename, you may overrise it:
 #    --define 'dist .el5'
+#
+# For PPC platform you can use IBM Advanced Toolchain. For this you should
+# --define 'ppc_at </opt cc path>
 
 # TODO:
 # RHEL and SLES have their own smart systems of kernel packaging. They are
@@ -38,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201210-u3
+%define pkgversion 201310
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -114,7 +117,7 @@
 %define kvariantsuffix_dash %( KVAR='%{kvariantsuffix}'; [[ -n "${KVAR}" ]] && echo -"${KVAR}" || echo "")
 %define kernel_cut   %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; echo ${KVER%%%${KNOWNVARS}} | sed "s/-$//; s/_$//")
 # some distros like to add architecture to the kernel name (Fedora)
-%define kverrel        %(shopt -s extglob; KVER=%{kernel_cut}; echo ${KVER%%@(.i386|.i586|.i686|.x86_64)})
+%define kverrel        %(shopt -s extglob; KVER=%{kernel_cut}; echo ${KVER%%@(.i386|.i586|.i686|.x86_64|.ppc64)})
 
 %{echo: %{target_cpu}}
 
@@ -148,7 +151,7 @@ BuildRequires   : glibc-devel-32bit
 
 %endif                          # else redhat
 #BuildArch	: x86_64
-ExclusiveArch	: i386 i586 i686 x86_64
+ExclusiveArch	: i386 i586 i686 x86_64 ppc64
 
 %description
 OpenOnload is a high performance user-level network stack.  Please see
@@ -166,6 +169,9 @@ Group       	: System Environment/Kernel
 
 #RHEL5 PAE kernel dependencies only have PAE at the end of the kernel version
 #RHEL4 hughemem and smp kernels and MRG kernels have dependencies with the variant included in the name (e.g. kernel-rt-x86_64 = ...)
+%ifarch ppc64
+Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
+%else
 %if %( ! echo %{kvariantsuffix} | grep PAE &> /dev/null; echo $? )
 Requires	: openonload = %{version}-%{release}, kernel-%{target_cpu} = %{kverrel}%{kvariantsuffix}
 %else
@@ -173,6 +179,7 @@ Requires	: openonload = %{version}-%{release}, kernel-%{target_cpu} = %{kverrel}
 Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
 %else
 Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash}-%{target_cpu} = %{kverrel}
+%endif
 %endif
 %endif
 
@@ -203,11 +210,16 @@ This package comprises the kernel module components of OpenOnload.
 
 %build
 export KPATH=%{kpath}
-%ifarch x86_64
+%ifarch x86_64 
 ./scripts/onload_build --kernelver "%{kernel}" %{?debug:--debug}
 %else
+%ifarch ppc64
+# Don't try to build 32-bit userland on PPC
+./scripts/onload_build --kernelver "%{kernel}" --kernel --user64 %{?debug:--debug} %{?ppc_at:--ppc-at %ppc_at}
+%else
 # Don't try to build 64-bit userland in case of 32-bit userland
-./scripts/onload_build --kernelver "%{kernel}" --kernel --user32 %{?debug:--debug}
+./scripts/onload_build --kernelver "%{kernel}" --kernel --user32 %{?debug:--debug} %{?ppc_at:--ppc-at %ppc_at}
+%endif
 %endif
 
 %install

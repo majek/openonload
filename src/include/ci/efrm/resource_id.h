@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,21 +53,21 @@
  * Resource type codes
  ***********************************************************************/
 
-#define EFRM_RESOURCE_IOBUFSET          0x0
 #define EFRM_RESOURCE_VI                0x1
 #define EFRM_RESOURCE_VI_SET            0x2
 #define EFRM_RESOURCE_VF                0x3
 #define EFRM_RESOURCE_MEMREG            0x4
 #define EFRM_RESOURCE_PD                0x5
-#define EFRM_RESOURCE_NUM               0x6	/* This isn't a resource! */
+#define EFRM_RESOURCE_PIO               0x6
+#define EFRM_RESOURCE_NUM               0x7	/* This isn't a resource! */
 
 #define	EFRM_RESOURCE_NAME(type) \
-	((type) == EFRM_RESOURCE_IOBUFSET?	"IOBUFSET"	: \
 	 (type) == EFRM_RESOURCE_VI?		"VI"		: \
 	 (type) == EFRM_RESOURCE_VI_SET?	"VI_SET"	: \
 	 (type) == EFRM_RESOURCE_VF?		"VF"		: \
 	 (type) == EFRM_RESOURCE_MEMREG?	"MEMREG"	: \
 	 (type) == EFRM_RESOURCE_PD?		"PD"		: \
+	 (type) == EFRM_RESOURCE_PIO?		"PIO"		: \
 						"<invalid>")
 
 

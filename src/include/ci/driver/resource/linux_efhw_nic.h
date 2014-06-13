@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -81,5 +81,7 @@ struct linux_efhw_nic {
 
 #define linux_efhw_nic(_efhw_nic)					\
   container_of(_efhw_nic, struct linux_efhw_nic, efrm_nic.efhw_nic)
+
+int efrm_is_pio_enabled(void);
 
 #endif /* __CI_DRIVER_RESOURCE_LINUX_RESOURCE__ */

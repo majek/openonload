@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -85,7 +85,7 @@ static void ci_tcp_state_connected_opts_init(ci_netif* netif, ci_tcp_state* ts)
   ci_ip_queue_init(&ts->rob);
   /* Send queue max length will be set in ci_tcp_set_eff_mss() using
    * so.sndbuf value. */
-  ts->send_max = 0;
+  ts->so_sndbuf_pkts = 0;
   ci_ip_queue_init(&ts->send);
   /* Retransmit queue is limited by peer window. */
   ci_ip_queue_init(&ts->retrans);
@@ -161,6 +161,7 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
   tcp_enq_nxt(ts) = tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_snd_up(ts) = 0;
   ts->snd_max = tcp_snd_nxt(ts) + 1;
   /* ?? snd_nxt, snd_max, should be set as SYN is sent */
+
   /* WSCL option variables RFC1323 */
   ts->snd_wscl = 0;
   CI_IP_SOCK_STATS_VAL_TXWSCL( ts, ts->snd_wscl);
@@ -237,6 +238,12 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
 #endif
   tcp_urg_data(ts) = 0;
 
+  if (NI_OPTS(netif).tcp_force_nodelay == 1)
+    ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
+
+  ts->tmpl_head = OO_PP_NULL;
+  ts->tmpl_nic_reset = 0;
+
   memset(&ts->stats, 0, sizeof(ts->stats));
 }
 
@@ -256,6 +263,8 @@ void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts)
 
   /* Initialise the lower level. */
   ci_sock_cmn_init(netif, &ts->s);
+  ci_pmtu_state_init(netif, &ts->s, &ts->pmtus, CI_IP_TIMER_PMTU_DISCOVER);
+
   /* Initialise this level. */
   ci_tcp_state_tcb_init_fixed(netif, ts);
   ci_tcp_state_tcb_reinit(netif, ts);
@@ -271,6 +280,7 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
 
   /* Reinitialise the lower level. */
   ci_sock_cmn_reinit(netif, &ts->s);
+  ci_pmtu_state_reinit(netif, &ts->s, &ts->pmtus);
   /* Reinitialise this level. */
   ci_tcp_state_tcb_reinit(netif, ts);
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -227,6 +227,8 @@ typedef struct cicp_route_kmib_s cicp_route_kmib_t;
 /* #define CICP_ROUTE_ROWID_BAD ... */
 
 typedef struct {
+    ci_mtu_t           route_mtu;
+    ci_mtu_t           pmtu;
     cicpos_route_row_t sync;  /*< synchronization support information */
 } cicp_route_kernrow_t;
 
@@ -442,6 +444,40 @@ struct cicp_ipif_kmib_s
 
 
 /*----------------------------------------------------------------------------
+ * Path MTU MIB
+ *---------------------------------------------------------------------------*/
+
+/* The details of these data structures are not public - please do not
+   refer to their content directly - use/define functions in
+   <onload/cplane.h>
+*/
+typedef struct cicp_pmtu_row_s {
+  ci_ip_addr_net_t net_ip;
+  long             timestamp;
+} cicp_pmtu_row_t;
+
+/*! emulating an "allocated" field in a pmtu row: set it to "unallocated" */
+ci_inline void
+cicp_pmtu_row_free(cicp_pmtu_row_t *row)
+{
+ row->net_ip = INADDR_ANY;
+}
+
+/*! emulating an "allocated" field in a pmtu row: read whether allocated */
+ci_inline int /* bool */
+cicp_pmtu_row_allocated(const cicp_pmtu_row_t *row)
+{
+   return row->net_ip != INADDR_ANY;
+}
+
+typedef struct cicp_pmtu_kmib_s {
+  cicp_pmtu_row_t *entries;
+  ci_uint16 used_rows_max;
+  ci_uint16 rows_max;
+} cicp_pmtu_kmib_t;
+
+
+/*----------------------------------------------------------------------------
  * kernel hardware port MIB
  *---------------------------------------------------------------------------*/
 
@@ -469,15 +505,8 @@ cicp_hwport_row_allocated(const cicp_hwport_row_t *row)
 {   return (row->max_mtu > 0);
 }
 
-
-typedef struct 
-{   ci_mtu_t          mtu; /* what's this for?? */
-    cicp_hwport_row_t port;
-} cicp_hwdev_row_t;
-
-
 struct cicp_hwport_kmib_s
-{   cicp_hwdev_row_t nic[CI_HWPORT_ID_MAX + 1];
+{   cicp_hwport_row_t nic[CI_HWPORT_ID_MAX + 1];
 } /* cicp_hwport_kmib_t */;
 
 
@@ -502,6 +531,7 @@ struct cicp_mibs_kern_s
     cicp_ipif_kmib_t   *ipif_table;       /*< IP interfaces MIB cache */
     cicp_llap_kmib_t   *llap_table;       /*< Link Access Point MIB cache */
     cicp_hwport_kmib_t *hwport_table;     /*< Hardware port MIB */
+    cicp_pmtu_kmib_t   *pmtu_table;       /*< PMTU cache */
     cicp_stat_t         stat;             /*< control Plane Statistics */
 } /* cicp_mibs_kern_t */;
 

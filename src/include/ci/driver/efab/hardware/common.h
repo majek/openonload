@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,37 +53,5 @@
  * EtherFabric constants
  *
  *---------------------------------------------------------------------------*/
-
-#define EFHW_1K		0x00000400u
-#define EFHW_2K		0x00000800u
-#define EFHW_4K		0x00001000u
-#define EFHW_8K		0x00002000u
-#define EFHW_16K	0x00004000u
-#define EFHW_32K	0x00008000u
-#define EFHW_64K	0x00010000u
-#define EFHW_128K	0x00020000u
-#define EFHW_256K	0x00040000u
-#define EFHW_512K	0x00080000u
-#define EFHW_1M		0x00100000u
-#define EFHW_2M		0x00200000u
-#define EFHW_4M		0x00400000u
-#define EFHW_8M		0x00800000u
-#define EFHW_16M	0x01000000u
-#define EFHW_32M	0x02000000u
-#define EFHW_48M	0x03000000u
-#define EFHW_64M	0x04000000u
-#define EFHW_128M	0x08000000u
-#define EFHW_256M	0x10000000u
-#define EFHW_512M	0x20000000u
-#define EFHW_1G 	0x40000000u
-#define EFHW_2G		0x80000000u
-#define EFHW_4G		0x100000000ULL
-#define EFHW_8G		0x200000000ULL
-
-/* --- DMA --- */
-#define EFHW_DMA_ADDRMASK		(0xffffffffffffffffULL)
-
-#define EFHW_IP_FILTER_NUM		8192
-#define EFHW_MAX_PAGE_SIZE	        (EFHW_8K)
 
 #endif /* __CI_DRIVER_EFAB_HARDWARE_COMMON_H__ */

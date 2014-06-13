@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -50,15 +50,13 @@
 #include "tcp_filters_internal.h"
 #include "oo_hw_filter.h"
 #include <driver/linux_net/driverlink_api.h>
-#include <ci/driver/resource/linux_efhw_nic.h>
 #include <onload/nic.h>
 
-static struct efx_dl_device* dl_device(tcp_helper_resource_t* trs,
-                                       int intf_i)
+
+static struct efrm_client* get_client(int hwport)
 {
-  struct efhw_nic* efhw_nic;
-  efhw_nic = efrm_client_get_nic(trs->nic[intf_i].oo_nic->efrm_client);
-  return linux_efhw_nic(efhw_nic)->dl_device;
+  ci_assert((unsigned) hwport < CI_CFG_MAX_REGISTER_INTERFACES);
+  return oo_nics[hwport].efrm_client;
 }
 
 
@@ -67,71 +65,79 @@ void oo_hw_filter_init(struct oo_hw_filter* oofilter)
   int i;
   oofilter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
   oofilter->trs = NULL;
-  for( i = 0; i < CI_CFG_MAX_INTERFACES; ++i )
+  for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
     oofilter->filter_id[i] = -1;
+}
+
+
+static void oo_hw_filter_clear_hwport(struct oo_hw_filter* oofilter,
+                                      int hwport)
+{
+  ci_assert((unsigned) hwport < CI_CFG_MAX_REGISTER_INTERFACES);
+  if( oofilter->filter_id[hwport] >= 0 ) {
+    efrm_filter_remove(get_client(hwport), oofilter->filter_id[hwport]);
+    oofilter->filter_id[hwport] = -1;
+  }
 }
 
 
 void oo_hw_filter_clear(struct oo_hw_filter* oofilter)
 {
-  int intf_i;
+  int hwport;
 
-  if( oofilter->trs == NULL )
-    return;
-
-  for( intf_i = 0; intf_i < CI_CFG_MAX_INTERFACES; ++intf_i )
-    if( oofilter->filter_id[intf_i] >= 0 ) {
-      efx_dl_filter_remove(dl_device(oofilter->trs, intf_i),
-                           oofilter->filter_id[intf_i]);
-      oofilter->filter_id[intf_i] = -1;
-    }
-  oofilter->trs = NULL;
+  if( oofilter->trs != NULL ) {
+    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+      oo_hw_filter_clear_hwport(oofilter, hwport);
+    oofilter->trs = NULL;
+  }
+  else {
+    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+      ci_assert(oofilter->filter_id[hwport] < 0);
+  }
 }
 
 
 void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
                                 unsigned hwport_mask)
 {
-  int intf_i, hwport;
+  int hwport;
 
   if( oofilter->trs != NULL )
-    for( intf_i = 0; intf_i < CI_CFG_MAX_INTERFACES; ++intf_i ) {
-      hwport = oofilter->trs->netif.intf_i_to_hwport[intf_i];
-      if( oofilter->filter_id[intf_i] >= 0 &&
-          (hwport < 0 || (hwport_mask & (1u << hwport))) ) {
-        efx_dl_filter_remove(dl_device(oofilter->trs, intf_i),
-                             oofilter->filter_id[intf_i]);
-        oofilter->filter_id[intf_i] = -1;
-      }
-    }
+    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+      if( hwport_mask & (1 << hwport) )
+        oo_hw_filter_clear_hwport(oofilter, hwport);
 }
 
 
-static int oo_hw_filter_set_intf(struct oo_hw_filter* oofilter, int intf_i,
-                                 int protocol,
-                                 unsigned saddr, int sport,
-                                 unsigned daddr, int dport)
+static int oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
+                                   int protocol,
+                                   unsigned saddr, int sport,
+                                   unsigned daddr, int dport,
+                                   ci_uint16 vlan_id)
 {
   struct efx_filter_spec spec;
-  struct efrm_vi* efrm_vi;
-  int rc;
+  int rc = 0, vi_id;
 
-  ci_assert(oofilter->filter_id[intf_i] < 0);
+  ci_assert(oofilter->filter_id[hwport] < 0);
 
-  efrm_vi = tcp_helper_rx_vi_rs(oofilter->trs, intf_i);
-  efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
-                     EFX_FILTER_FLAG_RX_SCATTER,
-                     EFAB_VI_RESOURCE_INSTANCE(efrm_vi));
-  if( saddr != 0 )
-    rc = efx_filter_set_ipv4_full(&spec, protocol, daddr, dport,
-                                  saddr, sport);
-  else
-    rc = efx_filter_set_ipv4_local(&spec, protocol, daddr, dport);
-  ci_assert_equal(rc, 0);
-  rc = efrm_filter_insert(dl_device(oofilter->trs, intf_i), &spec, false);
-  if( rc >= 0 ) {
-    oofilter->filter_id[intf_i] = rc;
-    rc = 0;
+  if( (vi_id = tcp_helper_rx_vi_id(oofilter->trs, hwport)) >= 0 ) {
+    efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
+                       EFX_FILTER_FLAG_RX_SCATTER, vi_id);
+    if( saddr != 0 )
+      rc = efx_filter_set_ipv4_full(&spec, protocol, daddr, dport,
+                                    saddr, sport);
+    else
+      rc = efx_filter_set_ipv4_local(&spec, protocol, daddr, dport);
+    ci_assert_equal(rc, 0);
+    if( vlan_id != OO_HW_VLAN_UNSPEC ) {
+      rc = efx_filter_set_eth_local(&spec, vlan_id, NULL);
+      ci_assert_equal(rc, 0);
+    }
+    rc = efrm_filter_insert(get_client(hwport), &spec, false);
+    if( rc >= 0 ) {
+      oofilter->filter_id[hwport] = rc;
+      rc = 0;
+    }
   }
   return rc;
 }
@@ -141,21 +147,25 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                              int protocol,
                              unsigned saddr, int sport,
                              unsigned daddr, int dport,
+                             ci_uint16 vlan_id, unsigned set_vlan_mask,
                              unsigned hwport_mask)
 {
-  tcp_helper_resource_t* trs = oofilter->trs;
-  int rc = 0, intf_i;
-  int ok_seen = 0;
+  int rc1, rc = 0, ok_seen = 0, hwport;
+  uint16_t set_vlan_id;
 
-  ci_assert(trs != NULL);
+  ci_assert(oofilter->trs != NULL);
 
-  OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i)
-    if( (hwport_mask & (1u << trs->netif.intf_i_to_hwport[intf_i])) &&
-        oofilter->filter_id[intf_i] < 0 ) {
-      int rc1 = oo_hw_filter_set_intf(oofilter, intf_i, protocol, saddr, sport,
-                                      daddr, dport);
+  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    if( (hwport_mask & (1u << hwport)) && oofilter->filter_id[hwport] < 0 ) {
+      /* If we've been told to set the vlan when installing the filter on this
+       * port then use provided vlan_id, otherwise use OO_HW_VLAN_UNSPEC.
+       */
+      set_vlan_id = (set_vlan_mask & (1u << hwport)) ?
+        vlan_id : OO_HW_VLAN_UNSPEC;
+      rc1 = oo_hw_filter_set_hwport(oofilter, hwport, protocol,
+                                    saddr, sport, daddr, dport, set_vlan_id);
       /* Need to know if any interfaces are ok */
-      if( !rc1 )
+      if( ! rc1 )
         ok_seen = 1;
       /* Preserve the most severe error seen - other errors are more severe
        * then firewall denial, and it is more severe than no error.
@@ -177,52 +187,18 @@ int oo_hw_filter_set(struct oo_hw_filter* oofilter,
                      tcp_helper_resource_t* trs, int protocol,
                      unsigned saddr, int sport,
                      unsigned daddr, int dport,
+                     ci_uint16 vlan_id, unsigned set_vlan_mask,
                      unsigned hwport_mask)
 {
   int rc;
 
-  if( oofilter->trs )
-    oo_hw_filter_clear(oofilter);
-
+  oo_hw_filter_clear(oofilter);
   oofilter->trs = trs;
-  rc = oo_hw_filter_add_hwports(oofilter, protocol, saddr, sport,
-                                daddr, dport, hwport_mask);
+  rc = oo_hw_filter_add_hwports(oofilter, protocol, saddr, sport, daddr, dport,
+                                vlan_id, set_vlan_mask, hwport_mask);
   if( rc < 0 )
     oo_hw_filter_clear(oofilter);
   return rc;
-}
-
-
-static void oo_hw_filter_redirect(struct oo_hw_filter* oofilter,
-                                  struct tcp_helper_resource_s* new_stack,
-                                  int protocol,
-                                  unsigned saddr, int sport,
-                                  unsigned daddr, int dport,
-                                  unsigned hwport_mask)
-{
-  tcp_helper_resource_t* old_stack = oofilter->trs;
-  int new_filter_id[CI_CFG_MAX_INTERFACES];
-  int i, old_intf_i, new_intf_i, hwport;
-  struct efrm_vi* efrm_vi;
-
-  /* For each filter pointing at old stack, redirect to new stack. */
-  for( i = 0; i < CI_CFG_MAX_INTERFACES; ++i )
-    new_filter_id[i] = -1;
-  for( old_intf_i = 0; old_intf_i < CI_CFG_MAX_INTERFACES; ++old_intf_i )
-    if( oofilter->filter_id[old_intf_i] >= 0 &&
-        (hwport = old_stack->netif.intf_i_to_hwport[old_intf_i]) >= 0 &&
-        (new_intf_i = new_stack->netif.hwport_to_intf_i[hwport]) >= 0 &&
-        (hwport_mask & (1u << hwport)) ) {
-      efrm_vi = tcp_helper_rx_vi_rs(new_stack, new_intf_i);
-      efx_dl_filter_redirect(dl_device(old_stack, old_intf_i),
-                             oofilter->filter_id[old_intf_i],
-                             EFAB_VI_RESOURCE_INSTANCE(efrm_vi));
-      new_filter_id[new_intf_i] = oofilter->filter_id[old_intf_i];
-      oofilter->filter_id[old_intf_i] = -1;
-    }
-  oo_hw_filter_clear_hwports(oofilter, OO_HW_PORT_ALL);
-  memcpy(oofilter->filter_id, new_filter_id, sizeof(oofilter->filter_id));
-  oofilter->trs = new_stack;
 }
 
 
@@ -231,35 +207,67 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                         int protocol,
                         unsigned saddr, int sport,
                         unsigned daddr, int dport,
+                        ci_uint16 vlan_id, unsigned set_vlan_mask,
                         unsigned hwport_mask)
 {
-  if( oofilter->trs != NULL ) {
-    /* Clear filters we don't want any more, and if redirecting to a
-     * different stack, then redirect filters on interfaces we want to
-     * keep.
-     */
-    if( new_stack != oofilter->trs )
-      oo_hw_filter_redirect(oofilter, new_stack, protocol, saddr, sport,
-                            daddr, dport, hwport_mask);
-    else
-      oo_hw_filter_clear_hwports(oofilter, ~hwport_mask);
-  }
-  oofilter->trs = new_stack;
+  unsigned add_hwports = 0u;
+  int hwport, vi_id;
+
+  oo_hw_filter_clear_hwports(oofilter, ~hwport_mask);
+
+  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    if( hwport_mask & (1 << hwport) ) {
+      if( (vi_id = tcp_helper_rx_vi_id(new_stack, hwport)) >= 0 ) {
+        if( oofilter->filter_id[hwport] >= 0 ) {
+          efrm_filter_redirect(get_client(hwport), oofilter->filter_id[hwport],
+                               vi_id);
+        }
+        else {
+          add_hwports |= 1 << hwport;
+        }
+      }
+      else {
+        oo_hw_filter_clear_hwport(oofilter, hwport);
+      }
+    }
 
   /* Insert new filters for any other interfaces in hwport_mask. */
+  oofilter->trs = new_stack;
   return oo_hw_filter_add_hwports(oofilter, protocol, saddr, sport,
-                                  daddr, dport, hwport_mask);
+                                  daddr, dport, vlan_id, set_vlan_mask,
+                                  add_hwports);
+}
+
+
+void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
+                           struct oo_hw_filter* oofilter_new,
+                           unsigned hwport_mask)
+{
+  int hwport;
+
+  if( oofilter_old->trs == NULL )
+    return;
+
+  ci_assert_equal(oofilter_old->trs, oofilter_new->trs);
+
+  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    if( (hwport_mask & (1u << hwport)) &&
+        oofilter_old->filter_id[hwport] >= 0 ) {
+      ci_assert(oofilter_new->filter_id[hwport] < 0);
+      oofilter_new->filter_id[hwport] = oofilter_old->filter_id[hwport];
+      oofilter_old->filter_id[hwport] = -1;
+    }
 }
 
 
 unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter)
 {
-  tcp_helper_resource_t* trs = oofilter->trs;
   unsigned hwport_mask = 0;
-  int intf_i;
-  if( trs != NULL )
-    OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i)
-      if( oofilter->filter_id[intf_i] >= 0 )
-        hwport_mask |= 1 << trs->netif.intf_i_to_hwport[intf_i];
+  int hwport;
+
+  if( oofilter->trs != NULL )
+    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+      if( oofilter->filter_id[hwport] >= 0 )
+        hwport_mask |= 1 << hwport;
   return hwport_mask;
 }

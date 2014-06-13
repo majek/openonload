@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -90,15 +90,8 @@
 #include <linux/sysfs.h>
 
 #include "kernel_compat.h"
-#ifndef EFX_HAVE_OLD_DEVICE_ATTRIBUTE
 #include <linux/hwmon-sysfs.h>
-#endif
-#ifdef EFX_HAVE_HWMON_H
 #include <linux/hwmon.h>
-#endif
-#ifdef EFX_HAVE_I2C_SENSOR_H
-#include <linux/i2c-sensor.h>
-#endif
 
 #ifdef EFX_NEED_LM90_DRIVER
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2007-2010 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -73,7 +73,7 @@ DEFINE_PER_CPU(struct work_struct, efx_idle_cpu_work);
 #if IDLE_DEBUG
 
 DEFINE_PER_CPU(int, idle_cpu_state) = -1;
-#define idle_set_state(CPU,STATE) \
+#define idle_set_state(CPU, STATE) \
 	per_cpu(idle_cpu_state, (CPU)) = (STATE)
 
 static DEFINE_MUTEX(efx_idle_debug_mutex);
@@ -81,8 +81,8 @@ static cpumask_t efx_idle_debug_cpumask;
 
 #else
 
-#define idle_set_state(CPU,STATE) \
-	do { } while(0)
+#define idle_set_state(CPU, STATE) \
+	do { } while (0)
 
 #endif
 
@@ -119,10 +119,10 @@ static void efx_pm_idle(void)
 		/* If other CPUs in this group are busy then let this
 		 * CPU go idle.  We mustn't let the number of busy
 		 * CPUs drop below 1. */
-		if ( busy_cpus > 1 &&
-		     old_pm_idle != NULL &&
-		     ( atomic_cmpxchg(busy_cpus_ptr, busy_cpus,
-				      busy_cpus-1) == busy_cpus ) ) {
+		if (busy_cpus > 1 &&
+		    old_pm_idle != NULL &&
+		    (atomic_cmpxchg(busy_cpus_ptr, busy_cpus,
+				    busy_cpus - 1) == busy_cpus)) {
 			local_irq_disable();
 			idle_set_state(cpu, 3);
 			/* This check might not be necessary, but it
@@ -191,13 +191,13 @@ static ssize_t show_cpus_in_state(char *buf, long state)
 
 	mutex_lock(&efx_idle_debug_mutex);
 	cpus_clear(efx_idle_debug_cpumask);
-	on_each_cpu(&show_cpus_in_state_smp_call, (void*)state, 1);
+	on_each_cpu(&show_cpus_in_state_smp_call, (void *)state, 1);
 	res = cpumask_scnprintf(buf, PAGE_SIZE-2, efx_idle_debug_cpumask);
 	mutex_unlock(&efx_idle_debug_mutex);
 
 	buf[res++] = '\n';
 	buf[res] = 0;
-	
+
 	return res;
 }
 
@@ -254,7 +254,7 @@ static int efx_idle_cpu_group(int cpu)
 	int other_cpu;
 	int group;
 
-	switch(idle_mode) {
+	switch (idle_mode) {
 	default:
 	case 0:
 		/* Keep one hyperthread busy per hyperthread. */
@@ -363,8 +363,8 @@ static int efx_idle_cpu_notify(struct notifier_block *self,
 			       unsigned long action, void *hcpu)
 {
 	int cpu = (long)hcpu;
-	
-	switch(action) {
+
+	switch (action) {
 #ifdef CPU_ONLINE_FROZEN
 	case CPU_ONLINE_FROZEN:
 #endif
@@ -402,7 +402,7 @@ static struct notifier_block efx_idle_cpu_nb = {
 
 static void efx_idle_ensure_init(void)
 {
-	BUG_ON (old_pm_idle != NULL);
+	BUG_ON(old_pm_idle != NULL);
 
 	/* Atomically update pm_idle to &efx_pm_idle.  The old value
 	 * is stored in old_pm_idle before installing the new
@@ -434,7 +434,7 @@ void efx_idle_fini(void)
 		efx_idle_del_cpu(cpu);
 
 	mutex_unlock(&efx_idle_startup_mutex);
-	
+
 	/* Our handler may still be executing on other CPUs.
 	 * Schedule this thread on all CPUs to make sure all
 	 * idle threads get interrupted. */

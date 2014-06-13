@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,7 @@
 #include <ci/internal/ip.h>
 #include "libstack.h"
 #include <ci/app.h>
+#include <onload/extensions.h>
 
 
 static ci_cfg_desc cfg_opts[] = {
@@ -182,7 +183,7 @@ static void usage(const char* msg)
   ci_log(" ");
   ci_log("misc commands:");
   ci_log("  doc");
-  ci_log("  affinities         Show thread affinities of onload processes");
+  ci_log("  threads            Show thread information of onload processes");
   ci_log("  env                Show onload related environment of processes");
   ci_log("  processes          Show list of onloaded processes");
 
@@ -336,6 +337,12 @@ int main(int argc, char* argv[])
 
   ci_app_usage = usage;
 
+  /* onload onload_stackdump check */
+  if ( onload_is_present() ) {
+    ci_log("onload_stackdump should not itself be run under onload acceleration.");
+    return -1;
+  }
+
   ci_app_getopt("[stack-index]", &argc, argv, cfg_opts, N_CFG_OPTS);
   --argc; ++argv;
   CI_TRY(libstack_init(NULL));
@@ -406,10 +413,10 @@ int main(int argc, char* argv[])
       print_docs(argc, argv);
       break;
     }
-    else if( ! strcmp(argv[0], "affinities") ) {
+    else if( ! strcmp(argv[0], "threads") ) {
       if( doing_sockets || doing_stacks )
         ci_app_usage("Cannot mix doc with other commands");
-      CI_TRY(libstack_affinities_print());
+      CI_TRY(libstack_threads_print());
     }
     else if( ! strcmp(argv[0], "env") ) {
       if( doing_sockets || doing_stacks )

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -426,15 +426,15 @@ typedef struct {
 } ci_scope_t;
 
 #define ci_scope_set_global(ref_scope) \
-{   (ref_scope)->is_ownaddr = 0;       \
+do {   (ref_scope)->is_ownaddr = 0;    \
     (ref_scope)->tracking_llap = 0;    \
-}
+} while(0)
 #define ci_scope_set_host(ref_scope)   \
-{   (ref_scope)->is_ownaddr = 1;       \
+do {   (ref_scope)->is_ownaddr = 1;    \
     (ref_scope)->tracking_llap = 1;    \
-}
+} while(0)
 #define ci_scope_set(ref_scope1, ref_scope2) \
-   { *(ref_scope1) = *(ref_scope2); }
+   do { *(ref_scope1) = *(ref_scope2); } while(0)
 #define ci_scope_eq(ref_scope1, ref_scope2)                         \
    ((ref_scope1)->is_ownaddr == (ref_scope2)->is_ownaddr        &&  \
     (ref_scope1)->tracking_llap == (ref_scope2)->tracking_llap)     \

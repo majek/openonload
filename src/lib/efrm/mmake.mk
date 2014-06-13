@@ -6,6 +6,7 @@ LIB_SRCS	:= assert_valid.c \
 		   buffer_table.c \
 		   efrm_vi_set.c \
 		   efrm_pd.c \
+		   efrm_pio.c \
 		   iobufset_resource.c \
 		   resource_manager.c \
 		   resources.c \

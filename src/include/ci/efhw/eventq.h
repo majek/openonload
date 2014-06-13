@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -64,24 +64,24 @@ extern int efhw_keventq_poll(struct efhw_nic *, struct efhw_keventq *);
 struct efhw_ev_handler {
 	void (*wakeup_fn)(struct efhw_nic *nic, unsigned);
 	void (*timeout_fn)(struct efhw_nic *nic, unsigned);
-	void (*dmaq_flushed_fn) (struct efhw_nic *, unsigned, int, int);
+	int (*dmaq_flushed_fn) (struct efhw_nic *, unsigned, int, int);
 };
 
 extern int efhw_keventq_ctor(struct efhw_nic *, int instance,
 			     struct efhw_keventq *, struct efhw_ev_handler *);
 extern void efhw_keventq_dtor(struct efhw_nic *, struct efhw_keventq *);
 
-extern void efhw_handle_txdmaq_flushed(struct efhw_nic *,
+extern int efhw_handle_txdmaq_flushed(struct efhw_nic *,
 				       struct efhw_ev_handler *,
-				       efhw_event_t *);
-extern void efhw_handle_rxdmaq_flushed(struct efhw_nic *,
+				       unsigned);
+extern int efhw_handle_rxdmaq_flushed(struct efhw_nic *,
 				       struct efhw_ev_handler *,
-				       efhw_event_t *);
-extern void efhw_handle_wakeup_event(struct efhw_nic *,
+				       unsigned, int);
+extern void efhw_handle_wakeup_event(struct efhw_nic *, 
 				     struct efhw_ev_handler *,
-				     efhw_event_t *);
+				     unsigned);
 extern void efhw_handle_timeout_event(struct efhw_nic *,
-				      struct efhw_ev_handler *,
-				      efhw_event_t *);
+				      struct efhw_ev_handler *, 
+				      unsigned);
 
 #endif /* __CI_EFHW_EVENTQ_H__ */

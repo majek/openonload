@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,7 +25,7 @@
 /*! \cidoxg_lib_transport_ip */
 #include "ip_internal.h"
 
-#if CI_CFG_MMAP_EACH_PKTSET && ! defined(__KERNEL__)
+#if !defined(__KERNEL__)
 #include <onload/mmap.h>
 #include <sys/shm.h>
 
@@ -37,6 +37,8 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
   ci_ip_pkt_fmt* pkt = 0;
   unsigned setid = id >> CI_CFG_PKTS_PER_SET_S;
   void *p;
+
+  ci_assert(id != (unsigned)(-1));
 
   pthread_mutex_lock(&citp_pkt_map_lock);
   /* Recheck the condition now we have the lock */
@@ -113,7 +115,9 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx)
 
   while( ni->state->pkt_sets_n < ni->state->pkt_sets_max ) {
     int old_n_freepkts = ni->state->n_freepkts;
-    ci_tcp_helper_more_bufs(ni);
+    int rc = ci_tcp_helper_more_bufs(ni);
+    if( rc != 0 )
+      break;
     CHECK_FREEPKTS(ni);
     if( old_n_freepkts == ni->state->n_freepkts )
       ci_assert_equal(ni->state->pkt_sets_n, ni->state->pkt_sets_max);

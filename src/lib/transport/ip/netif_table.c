@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -237,11 +237,8 @@ int ci_netif_filter_insert(ci_netif* netif, oo_sp tcp_id,
     /* A socket can only have multiple entries in the filter table if each
      * entry has a different [laddr].
      */
-    if( (entry->id == OO_SP_TO_INT(tcp_id)) && (laddr == entry->laddr) ) {
-      /* Multicast 224.0.0.1 is added for all interfaces when necessary. */
-      ci_assert_equal(laddr, CI_IP_ALL_HOSTS);
-      return 0;
-    }
+    ci_assert(
+      !((entry->id == OO_SP_TO_INT(tcp_id)) && (laddr == entry->laddr)) );
 
     hash1 = (hash1 + hash2) & tbl->table_size_mask;
 
@@ -355,19 +352,11 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp sock_p,
         break;
     }
     else if( entry->id == EMPTY ) {
-      if( laddr != CI_IP_ALL_HOSTS) {
-        /* See ci_netif_filter_insert() comment for CI_IP_ALL_HOSTS.
-         * With CI_IP_ALL_HOSTS we can't unbind from one interface only,
-         * so we are just removing all filters. */
-        LOG_E(ci_log("%s: ERROR: [%d:%d] REMOVE %s %s:%u->%s:%u NOT FOUND",
-                     __FUNCTION__, NI_ID(netif), OO_SP_FMT(sock_p),
-                     CI_IP_PROTOCOL_STR(protocol),
-                     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
-                     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport)));
-      }
+      /* We allow multiple removes of the same filter -- helps avoid some
+       * complexity in the filter module.
+       */
       return;
     }
-    ci_assert(entry->route_count > 0);
     tbl_i = (tbl_i + hash2) & tbl->table_size_mask;
     ++hops;
     if( tbl_i == first ) {
@@ -376,7 +365,7 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp sock_p,
                    CI_IP_PROTOCOL_STR(protocol),
                    ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
                    ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport)));
-      return /*-ENOENT*/;
+      return;
     }
   }
 

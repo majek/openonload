@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -131,43 +131,6 @@ static inline int efhw_page_is_valid(struct efhw_page *p)
 static inline void efhw_page_init_from_va(struct efhw_page *p, void *va)
 {
 	p->kva = (unsigned long)va;
-}
-
-/*--------------------------------------------------------------------
- *
- * struct efhw_iopage: A single page of memory.  Directly mapped in the driver,
- * and can be mapped to userlevel.  Can also be accessed by the NIC.
- *
- *--------------------------------------------------------------------*/
-
-struct efhw_iopage {
-	void *kva;
-	dma_addr_t dma_addr;
-};
-
-
-static inline char* efhw_iopage_ptr(struct efhw_iopage *p)
-{
-	return p->kva;
-}
-
-static inline dma_addr_t efhw_iopage_dma_addr(struct efhw_iopage *p)
-{
-	return p->dma_addr;
-}
-
-static inline unsigned long efhw_iopage_pfn(struct efhw_iopage *p)
-{
-	return __pa(p->kva) >> PAGE_SHIFT;
-}
-
-/* Copy IO page from one efhw_iopage to another.
- * It is invalid to free the original IO page while the copied structure is
- * in use. */
-static inline void
-efhw_iopage_copy(struct efhw_iopage *new, struct efhw_iopage *orig)
-{
-	new->kva = orig->kva;
 }
 
 /*--------------------------------------------------------------------

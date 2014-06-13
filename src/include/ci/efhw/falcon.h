@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -71,47 +71,11 @@
 
 
 extern struct efhw_func_ops falcon_char_functional_units;
-
-/*! specify a pace value for a TX DMA Queue */
-extern void falcon_nic_pace(struct efhw_nic *nic, uint dmaq, int pace);
-
-/*! configure the pace engine */
-extern void falcon_nic_pace_cfg(struct efhw_nic *nic, int fb_base,
-				int bin_thresh);
-
-/*! Apply standard tweaks to hardware, e.g. after init or reset */
-extern void falcon_nic_tweak_hardware(struct efhw_nic *nic);
-
-/*! Set wakeup mask.  Falcon B0 and later. */
 extern void falcon_nic_wakeup_mask_set(struct efhw_nic *nic, unsigned mask);
 
 /*! confirm buffer table updates - should be used for items where
    loss of data would be unacceptable. E.g for the buffers that back
    an event or DMA queue */
 extern void falcon_nic_buffer_table_confirm(struct efhw_nic *nic);
-
-/*! Reset the all the TX DMA queue pointers. */
-extern void falcon_clobber_tx_dma_ptrs(struct efhw_nic *nic, uint dmaq);
-
-extern int
-falcon_handle_char_event(struct efhw_nic *nic,
-			 struct efhw_ev_handler *h, efhw_event_t *evp);
-
-/*! Acknowledge to HW that processing is complete on a given event queue */
-extern void falcon_nic_evq_ack(struct efhw_nic *nic, uint evq,	/* evq id */
-			       uint rptr	/* new read pointer update */);
-
-extern void
-falcon_nic_buffer_table_set_n(struct efhw_nic *nic, int buffer_id,
-			      dma_addr_t dma_addr, uint region,
-			      int n_pages, int own_id);
-
-extern void
-falcon_nic_buffer_table_set(struct efhw_nic *nic, dma_addr_t dma_addr,
-			    uint region,
-			    int own_id, int buffer_id);
-
-extern int falcon_nic_filter_ctor(struct efhw_nic *nic);
-
 
 #endif /* __CI_EFHW_FALCON_H__ */

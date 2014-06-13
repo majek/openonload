@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -32,11 +32,11 @@
 
 
 enum ef_filter_type {
-	EF_FILTER_UNSPEC,
-	EF_FILTER_MAC,
-	EF_FILTER_IP4,
-	EF_FILTER_ALL_UNICAST,
-	EF_FILTER_ALL_MULTICAST,
+	EF_FILTER_MAC            = 1,
+	EF_FILTER_IP4            = 2,
+	EF_FILTER_ALL_UNICAST    = 4,
+	EF_FILTER_ALL_MULTICAST  = 8,
+        EF_FILTER_VLAN           = 16,
 };
 
 
@@ -47,7 +47,7 @@ enum ef_filter_type {
 void ef_filter_spec_init(ef_filter_spec *fs,
 			 enum ef_filter_flags flags)
 {
-	fs->type = EF_FILTER_UNSPEC;
+	fs->type = 0;
 	fs->flags = flags;
 }
 
@@ -55,9 +55,9 @@ void ef_filter_spec_init(ef_filter_spec *fs,
 int ef_filter_spec_set_ip4_local(ef_filter_spec *fs, int protocol,
 				 unsigned host_be32, int port_be16)
 {
-	if (fs->type != EF_FILTER_UNSPEC)
+	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
 		return -EPROTONOSUPPORT;
-	fs->type = EF_FILTER_IP4;
+	fs->type |= EF_FILTER_IP4;
 	fs->data[0] = protocol;
 	fs->data[1] = host_be32;
 	fs->data[2] = port_be16;
@@ -71,9 +71,9 @@ int ef_filter_spec_set_ip4_full(ef_filter_spec *fs, int protocol,
 				unsigned host_be32, int port_be16,
 				unsigned rhost_be32, int rport_be16)
 {
-	if (fs->type != EF_FILTER_UNSPEC)
+	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
 		return -EPROTONOSUPPORT;
-	fs->type = EF_FILTER_IP4;
+	fs->type |= EF_FILTER_IP4;
 	fs->data[0] = protocol;
 	fs->data[1] = host_be32;
 	fs->data[2] = port_be16;
@@ -83,10 +83,22 @@ int ef_filter_spec_set_ip4_full(ef_filter_spec *fs, int protocol,
 }
 
 
+int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id)
+{
+	if (fs->type != 0 && fs->type != EF_FILTER_IP4 &&
+	    fs->type != EF_FILTER_ALL_MULTICAST &&
+	    fs->type != EF_FILTER_ALL_UNICAST)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_VLAN;
+	fs->data[5] = vlan_id;
+	return 0;
+}
+
+
 int ef_filter_spec_set_eth_local(ef_filter_spec *fs, int vlan_id,
 				 const void *mac)
 {
-	if (fs->type != EF_FILTER_UNSPEC)
+	if (fs->type != 0)
 		return -EPROTONOSUPPORT;
 	fs->type = EF_FILTER_MAC;
 	fs->data[0] = vlan_id;
@@ -97,18 +109,18 @@ int ef_filter_spec_set_eth_local(ef_filter_spec *fs, int vlan_id,
 
 int ef_filter_spec_set_unicast_all(ef_filter_spec *fs)
 {
-	if (fs->type != EF_FILTER_UNSPEC)
+	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
 		return -EPROTONOSUPPORT;
-	fs->type = EF_FILTER_ALL_UNICAST;
+	fs->type |= EF_FILTER_ALL_UNICAST;
 	return 0;
 }
 
 
 int ef_filter_spec_set_multicast_all(ef_filter_spec *fs)
 {
-	if (fs->type != EF_FILTER_UNSPEC)
+	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
 		return -EPROTONOSUPPORT;
-	fs->type = EF_FILTER_ALL_MULTICAST;
+	fs->type |= EF_FILTER_ALL_MULTICAST;
 	return 0;
 }
 
@@ -127,6 +139,15 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 	op.id = efch_make_resource_id(resource_id);
 	op.u.filter_add.replace = (fs->flags & EF_FILTER_FLAG_REPLACE) ? 1 : 0;
 	switch (fs->type) {
+	case EF_FILTER_IP4 | EF_FILTER_VLAN:
+		op.op = CI_RSOP_FILTER_ADD_IP4_VLAN;
+		op.u.filter_add.ip4.protocol = fs->data[0];
+		op.u.filter_add.ip4.host_be32 = fs->data[1];
+		op.u.filter_add.ip4.port_be16 = fs->data[2];
+		op.u.filter_add.ip4.rhost_be32 = fs->data[3];
+		op.u.filter_add.ip4.rport_be16 = fs->data[4];
+		op.u.filter_add.mac.vlan_id = fs->data[5];
+		break;
 	case EF_FILTER_IP4:
 		op.op = CI_RSOP_FILTER_ADD_IP4;
 		op.u.filter_add.ip4.protocol = fs->data[0];
@@ -140,8 +161,16 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 		op.u.filter_add.mac.vlan_id = fs->data[0];
 		memcpy(op.u.filter_add.mac.mac, &fs->data[1], 6);
 		break;
+	case EF_FILTER_ALL_UNICAST | EF_FILTER_VLAN:
+		op.op = CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN;
+		op.u.filter_add.mac.vlan_id = fs->data[5];
+		break;
 	case EF_FILTER_ALL_UNICAST:
 		op.op = CI_RSOP_FILTER_ADD_ALL_UNICAST;
+		break;
+	case EF_FILTER_ALL_MULTICAST | EF_FILTER_VLAN:
+		op.op = CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN;
+		op.u.filter_add.mac.vlan_id = fs->data[5];
 		break;
 	case EF_FILTER_ALL_MULTICAST:
 		op.op = CI_RSOP_FILTER_ADD_ALL_MULTICAST;

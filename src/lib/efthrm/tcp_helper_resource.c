@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,7 +36,6 @@
 #include <onload/driverlink_filter.h>
 #include <onload/version.h>
 
-
 #include <etherfabric/timer.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/vf_resource.h>
@@ -45,12 +44,27 @@
 #include <onload/oof_onload.h>
 #include <onload/oof_interface.h>
 #include <onload/nic.h>
+#include <ci/internal/pio_buddy.h>
+#include <onload/tmpl.h>
 
 
 #ifdef NDEBUG
 # define DEBUG_STR  ""
 #else
 # define DEBUG_STR  " debug"
+#endif
+
+#if CI_CFG_PKT_BUF_SIZE == EFHW_NIC_PAGE_SIZE
+#define HW_PAGES_PER_SET_S CI_CFG_PKTS_PER_SET_S
+#define PKTS_PER_HW_PAGE 1
+#elif CI_CFG_PKT_BUF_SIZE * 2 == EFHW_NIC_PAGE_SIZE
+#define HW_PAGES_PER_SET_S (CI_CFG_PKTS_PER_SET_S - 1)
+#define PKTS_PER_HW_PAGE 2
+#elif CI_CFG_PKT_BUF_SIZE * 4 == EFHW_NIC_PAGE_SIZE
+#define HW_PAGES_PER_SET_S (CI_CFG_PKTS_PER_SET_S - 2)
+#define PKTS_PER_HW_PAGE 4
+#else
+#error "Unkinown value for CI_CFG_PKT_BUF_SIZE"
 #endif
 
 
@@ -85,6 +99,8 @@ static void oo_handle_wakeup_int_driven(void*, int is_timeout,
 
 static void
 efab_tcp_helper_rm_free_locked(tcp_helper_resource_t*, int can_destroy_now);
+static void
+efab_tcp_helper_rm_schedule_free(tcp_helper_resource_t*);
 
 static void
 oo_handle_wakeup_or_timeout(void*, int is_timeout, struct efhw_nic*);
@@ -92,6 +108,191 @@ static void
 tcp_helper_initialize_and_start_periodic_timer(tcp_helper_resource_t*);
 static void
 tcp_helper_stop_periodic_timer(tcp_helper_resource_t*);
+
+static int
+efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs, 
+                                        unsigned trusted_flags,
+                                        unsigned untrusted_flags);
+
+static void
+tcp_helper_close_pending_endpoints(tcp_helper_resource_t*);
+
+
+/*----------------------------------------------------------------------------
+ *
+ * oo_trusted_lock
+ *
+ *---------------------------------------------------------------------------*/
+
+ci_inline int
+oo_trusted_lock_is_locked(tcp_helper_resource_t* trs)
+{
+  return trs->trusted_lock & OO_TRUSTED_LOCK_LOCKED;
+}
+
+
+static int
+oo_trusted_lock_try_lock(tcp_helper_resource_t* trs)
+{
+  return trs->trusted_lock == OO_TRUSTED_LOCK_UNLOCKED &&
+         ci_cas32u_succeed(&trs->trusted_lock, OO_TRUSTED_LOCK_UNLOCKED, 
+                           OO_TRUSTED_LOCK_LOCKED);
+}
+
+
+static void
+oo_trusted_lock_drop(tcp_helper_resource_t* trs)
+{
+  unsigned l, new_l, sl_flags;
+
+ again:
+  l = trs->trusted_lock;
+  ci_assert(l & OO_TRUSTED_LOCK_LOCKED);
+
+  if(CI_UNLIKELY( l & OO_TRUSTED_LOCK_AWAITING_FREE )) {
+    /* We may be called from the stack workqueue, so postpone destruction
+     * to the point where wq may be flushed */
+    efab_tcp_helper_rm_schedule_free(trs);
+    return;
+  }
+
+  if( l == OO_TRUSTED_LOCK_LOCKED ) {
+    if( ci_cas32_fail(&trs->trusted_lock, l, OO_TRUSTED_LOCK_UNLOCKED) )
+      goto again;
+    return;
+  }
+
+  if( l & OO_TRUSTED_LOCK_CLOSE_ENDPOINT ) {
+    new_l = l & ~OO_TRUSTED_LOCK_CLOSE_ENDPOINT;
+    if( ci_cas32_fail(&trs->trusted_lock, l, new_l) )
+      goto again;
+    if( ef_eplock_lock_or_set_flag(&trs->netif.state->lock,
+                                   CI_EPLOCK_NETIF_CLOSE_ENDPOINT) ) {
+      /* We've got both locks.  If in non-atomic context, do the work, else
+       * defer work and locks to workitem.
+       */
+      if( in_atomic() ) {
+        OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to workitem",
+                             __FUNCTION__, trs->id));
+        ci_atomic32_or(&trs->trs_aflags, OO_THR_AFLAG_CLOSE_ENDPOINTS);
+        queue_work(trs->wq, &trs->non_atomic_work);
+        return;
+      }
+      OO_DEBUG_TCPH(ci_log("%s: [%u] CLOSE_ENDPOINT now",
+                           __FUNCTION__, trs->id));
+      tcp_helper_close_pending_endpoints(trs);
+      ci_netif_unlock(&trs->netif);
+    }
+    else {
+      /* Untrusted lock holder now responsible for invoking non-atomic work. */
+      OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to trusted lock",
+                           __FUNCTION__, trs->id));
+    }
+    goto again;
+  }
+
+  sl_flags = 0;
+  if( l & OO_TRUSTED_LOCK_NEED_POLL_PRIME )
+    sl_flags |= CI_EPLOCK_NETIF_NEED_PRIME | CI_EPLOCK_NETIF_NEED_POLL;
+  if( l & OO_TRUSTED_LOCK_RESET_STACK )
+    sl_flags |= CI_EPLOCK_NETIF_RESET_STACK;
+  ci_assert(sl_flags != 0);
+  if( ci_cas32_succeed(&trs->trusted_lock, l, OO_TRUSTED_LOCK_LOCKED) &&
+      ef_eplock_trylock_and_set_flags(&trs->netif.state->lock, sl_flags) )
+    ci_netif_unlock(&trs->netif);
+  goto again;
+}
+
+
+/* Returns true if flags were set, or false if the lock was not locked.
+ * NB. We ignore flags if AWAITING_FREE.
+ */
+static int
+oo_trusted_lock_set_flags_if_locked(tcp_helper_resource_t* trs, unsigned flags)
+{
+  unsigned l;
+
+  do {
+    l = trs->trusted_lock;
+    if( ! (l & OO_TRUSTED_LOCK_LOCKED) )
+      return 0;
+    if( l & OO_TRUSTED_LOCK_AWAITING_FREE )
+      /* We must not set flags when AWAITING_FREE. */
+      return 1;
+  } while( ci_cas32_fail(&trs->trusted_lock, l, l | flags) );
+
+  return 1;
+}
+
+
+/* Returns true if the lock is obtained, or false otherwise.  In the latter
+ * case the flags will be set (unless AWAITING_FREE).
+ */
+static int
+oo_trusted_lock_lock_or_set_flags(tcp_helper_resource_t* trs, unsigned flags)
+{
+  unsigned l, new_l;
+
+  do {
+    l = trs->trusted_lock;
+    if( l == OO_TRUSTED_LOCK_UNLOCKED )
+      new_l = OO_TRUSTED_LOCK_LOCKED;
+    else if( l & OO_TRUSTED_LOCK_AWAITING_FREE )
+      return 0;
+    else
+      new_l = l | flags;
+  } while( ci_cas32_fail(&trs->trusted_lock, l, new_l) );
+
+  return l == OO_TRUSTED_LOCK_UNLOCKED;
+}
+
+
+/*----------------------------------------------------------------------------
+ *
+ * efab_tcp_helper_netif_try_lock() etc.
+ *
+ *---------------------------------------------------------------------------*/
+
+int
+efab_tcp_helper_netif_try_lock(tcp_helper_resource_t* trs) 
+{
+  if( oo_trusted_lock_try_lock(trs) ) {
+    if( ci_netif_trylock(&trs->netif) )
+      return 1;
+    oo_trusted_lock_drop(trs);
+  }
+  return 0;
+}
+
+
+void
+efab_tcp_helper_netif_unlock(tcp_helper_resource_t* trs)
+{
+  ci_netif_unlock(&trs->netif);
+  oo_trusted_lock_drop(trs);
+}
+
+
+/* Returns 1 if the locks are held, or 0 if not and the flags are set. 
+ *   
+ * NB if trusted lock has OO_TRUSTED_LOCK_AWAITING_FREE this function
+ * will return 0, but the flags will not be set 
+ */
+static int
+efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs, 
+                                        unsigned trusted_flags,
+                                        unsigned untrusted_flags)
+{
+  do {
+    if( efab_tcp_helper_netif_try_lock(trs) )
+      return 1;
+    if( ef_eplock_set_flags_if_locked(&trs->netif.state->lock, 
+                                      untrusted_flags) )
+      return 0;
+    if( oo_trusted_lock_set_flags_if_locked(trs, trusted_flags) )
+       return 0;
+  } while( 1 );
+}
 
 
 /*----------------------------------------------------------------------------
@@ -103,6 +304,7 @@ tcp_helper_stop_periodic_timer(tcp_helper_resource_t*);
 static int thr_table_ctor(tcp_helpers_table_t *table)
 {
   ci_dllist_init(&table->all_stacks);
+  ci_dllist_init(&table->started_stacks);
   ci_irqlock_ctor(&table->lock);
   ci_id_pool_ctor(&table->instances, EFAB_THR_MAX_NUM_INSTANCES,
                   /* initial size */ 8);
@@ -167,42 +369,23 @@ static void thr_table_dtor(tcp_helpers_table_t *table)
 }
 
 
-static
-void efab_thr_table_insert(tcp_helper_resource_t* thr)
-{
-  tcp_helpers_table_t* table = &THR_TABLE;
-  ci_irqlock_state_t lock_flags;
-  ci_irqlock_lock(&table->lock, &lock_flags);
-  ci_dllist_push(&table->all_stacks, &thr->all_stacks_link);
-  ci_irqlock_unlock(&table->lock, &lock_flags);
-}
-
 
 static
-int efab_thr_table_insert_name(tcp_helper_resource_t* thr, const char* name)
+int efab_thr_table_check_name(const char* name)
 {
-  /* Insert stack into the table provided there is not already a stack with
-   * the same name.
+  /* Check that there is no name collision with already-existing stacks.
    */
   tcp_helpers_table_t* table = &THR_TABLE;
-  ci_irqlock_state_t lock_flags;
   tcp_helper_resource_t *thr2;
   ci_dllink *link;
-  int rc = 0;
 
-  ci_irqlock_lock(&table->lock, &lock_flags);
   CI_DLLIST_FOR_EACH(link, &table->all_stacks) {
     thr2 = CI_CONTAINER(tcp_helper_resource_t, all_stacks_link, link);
     if( strncmp(thr2->netif.state->name, name, CI_CFG_STACK_NAME_LEN) == 0 &&
-        (thr2->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) == 0 ) {
-      rc = -EEXIST;
-      break;
-    }
+        (thr2->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) == 0 )
+      return -EEXIST;
   }
-  if( rc == 0 )
-    ci_dllist_push(&THR_TABLE.all_stacks, &thr->all_stacks_link);
-  ci_irqlock_unlock(&table->lock, &lock_flags);
-  return rc;
+  return 0;
 }
 
 
@@ -402,7 +585,7 @@ static unsigned rescale(unsigned v, unsigned new_scale, unsigned old_scale)
 
 static void tcp_helper_reduce_max_packets(ci_netif* ni, int new_max_packets)
 {
-  ci_assert(new_max_packets < NI_OPTS(ni).max_packets);
+  ci_assert_lt(new_max_packets, NI_OPTS(ni).max_packets);
   NI_OPTS(ni).max_rx_packets = rescale(NI_OPTS(ni).max_rx_packets,
                                      new_max_packets, NI_OPTS(ni).max_packets);
   NI_OPTS(ni).max_tx_packets = rescale(NI_OPTS(ni).max_tx_packets,
@@ -472,6 +655,156 @@ tcp_helper_resource_assert_valid(tcp_helper_resource_t* thr, int rc_is_zero,
 }
 
 
+int tcp_helper_rx_vi_id(tcp_helper_resource_t* trs, int hwport)
+{
+  int intf_i;
+  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_REGISTER_INTERFACES);
+  if( (intf_i = trs->netif.hwport_to_intf_i[hwport]) >= 0 )
+    return EFAB_VI_RESOURCE_INSTANCE(trs->nic[intf_i].vi_rs);
+  else
+    return -1;
+}
+
+
+#if CI_CFG_PIO
+
+# if defined(__PPC__)
+
+/* Although PPC seems to support ioremap_wc(), it's lacking
+ * pgprot_writecombine() which is needed later.  So for now just
+ * disable altogether on PPC 
+ */ 
+static int allocate_pio(tcp_helper_resource_t* trs, int intf_i, 
+                        struct efrm_pd *pd, struct efhw_nic* nic,
+                        unsigned *pio_buf_offset)
+{
+  ci_netif* ni = &trs->netif;
+  int rc;
+  static int printed = 0;
+
+  if( NI_OPTS(ni).pio == 1 ) {
+    if( !printed ) {
+      ci_log("PIO not supported on this system, will continue without it");
+      printed = 1;
+    }
+    rc = 0;
+  }
+  else {
+    /* EF_PIO == 2 => fail if no PIO */
+    ci_log("[%s] ERROR: PIO not supported on this system", 
+           ni->state->pretty_name);
+    rc = -EINVAL;
+  }
+
+  efrm_pd_release(pd);
+  return rc;
+}
+
+# else
+
+static int allocate_pio(tcp_helper_resource_t* trs, int intf_i, 
+                        struct efrm_pd *pd, struct efhw_nic* nic,
+                        unsigned *pio_buf_offset)
+{
+  ci_netif* ni = &trs->netif;
+  ci_netif_state* ns = ni->state;
+  ci_netif_state_nic_t* nsn = &ns->nic[intf_i];
+  ci_netif_nic_t *netif_nic = &trs->netif.nic_hw[intf_i];
+  struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
+  int rc = 0;
+
+  if( trs_nic->pio_rs == NULL ) {
+    rc = efrm_pio_alloc(pd, &trs_nic->pio_rs);
+    efrm_pd_release(pd); /* vi and pio keep a ref to pd */
+    
+    if( rc < 0 ) {
+      if( NI_OPTS(ni).pio == 1 ) {
+        if( rc == -ENOSPC ) {
+          ci_log("[%s]: WARNING: all PIO bufs allocated to other stacks. "
+                 "Continuing without PIO.  Use EF_PIO to control this.",
+                 ns->pretty_name);
+          return 0;
+        }
+        else {
+          ci_log("[%s]: Unable to alloc PIO (%d), will continue without it",
+                 ns->pretty_name, rc);
+          return 0;
+        }
+      }
+      else {
+        OO_DEBUG_VM (ci_log ("%s: ERROR: efrm_pio_alloc(%d) failed %d",
+                             __FUNCTION__, intf_i, rc));
+        return rc;
+      }
+    }
+  }
+
+  /* efrm_pio_alloc() success */
+  rc = efrm_pio_link_vi(trs_nic->pio_rs, trs_nic->vi_rs);
+  if( rc < 0 ) {
+    efrm_pio_release(trs_nic->pio_rs);
+    trs_nic->pio_rs = NULL;
+    if( NI_OPTS(ni).pio == 1 ) {
+      ci_log("[%s]: Unable to link PIO (%d), will continue without it", 
+             ns->pretty_name, rc);
+      return 0;
+    }
+    else {
+      OO_DEBUG_VM (ci_log ("%s: ERROR: efrm_pio_link_vi(%d) failed %d",
+                           __FUNCTION__, intf_i, rc));
+      return rc;
+    }
+  }
+   
+  /* efrm_pio_link_vi() success */
+  rc = efrm_pio_map_kernel(nic, trs_nic->vi_rs, 
+                           (void**)&netif_nic->pio.pio_io);
+  if( rc < 0 ) {
+    efrm_pio_unlink_vi(trs_nic->pio_rs, trs_nic->vi_rs);
+    efrm_pio_release(trs_nic->pio_rs);
+    trs_nic->pio_rs = NULL;
+    if( NI_OPTS(ni).pio == 1 ) {
+      ci_log("[%s]: Unable to kmap PIO (%d), will continue without it", 
+             ns->pretty_name, rc);
+      return 0;
+    }
+    else {
+      OO_DEBUG_VM(ci_log("%s: ERROR: efrm_pio_map_kernel(%d) failed %d",
+                         __FUNCTION__, intf_i, rc));
+      return rc;
+    }
+  } 
+
+  /* efrm_pio_map_kernel() success */
+  /* Set up the pio struct so we can call ef_vi_pio_memcpy */
+  netif_nic->pio.pio_buffer = 
+    (uint8_t*)ns + ns->pio_bufs_ofs + *pio_buf_offset;
+  netif_nic->pio.pio_len = efrm_pio_get_size(trs_nic->pio_rs);
+  /* Advertise that PIO can be used on this VI */
+  nsn->oo_vi_flags |= OO_VI_FLAGS_PIO_EN;
+  /* Advertise how should be mapped for this VI */
+  ci_assert_le(netif_nic->pio.pio_len, CI_PAGE_SIZE);
+  nsn->pio_io_mmap_bytes = CI_PAGE_SIZE;
+  /* and how much of that mapping is usable */
+  nsn->pio_io_len = netif_nic->pio.pio_len;
+  /* and record a copy that UL can't modify */
+  trs_nic->pio_io_mmap_bytes = nsn->pio_io_mmap_bytes;
+  netif_nic->vi.linked_pio = &netif_nic->pio;
+  trs->pio_mmap_bytes += CI_PAGE_SIZE;
+  *pio_buf_offset += efrm_pio_get_size(trs_nic->pio_rs);
+  /* Drop original ref to PIO region as linked VI now holds it */ 
+  efrm_pio_release(trs_nic->pio_rs);
+  /* Initialise the buddy allocator for the PIO region. */
+  ci_pio_buddy_ctor(ni, &nsn->pio_buddy);
+
+  return 0;
+}
+
+# endif /* PPC */
+
+#endif /* CI_CFG_PIO */
+
+
 static int allocate_vi(tcp_helper_resource_t* trs,
                        unsigned evq_sz, ci_resource_onload_alloc_t* alloc,
                        void* vi_state, unsigned vi_state_bytes)
@@ -488,6 +821,9 @@ static int allocate_vi(tcp_helper_resource_t* trs,
   const char* pci_dev_name;
 #ifdef CONFIG_SFC_RESOURCE_VF
   struct efrm_vf *first_vf = NULL;
+#endif
+#if CI_CFG_PIO
+  unsigned pio_buf_offset = 0;
 #endif
 
   /* The array of nic_hw is potentially sparse, but the memory mapping
@@ -516,14 +852,23 @@ static int allocate_vi(tcp_helper_resource_t* trs,
 
   ns->vi_mem_mmap_offset = trs->buf_mmap_bytes;
   ns->vi_io_mmap_offset = trs->io_mmap_bytes;
+#if CI_CFG_PIO
+  ns->pio_io_mmap_offset = trs->pio_mmap_bytes;
+#endif
 
-  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
     trs->nic[intf_i].vi_rs = NULL;
+    trs->nic[intf_i].vi_mem_mmap_bytes = 0;
+#if CI_CFG_PIO
+    trs->nic[intf_i].pio_rs = NULL;
+    trs->nic[intf_i].pio_io_mmap_bytes = 0;
+#endif
+  }
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
     struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
     ci_netif_state_nic_t* nsn = &ns->nic[intf_i];
-    struct efhw_nic* nic;
+    struct efhw_nic* nic = efrm_client_get_nic(trs_nic->oo_nic->efrm_client);
     struct efrm_vf *vf = NULL;
     struct efrm_pd *pd = NULL;
 
@@ -535,6 +880,11 @@ static int allocate_vi(tcp_helper_resource_t* trs,
              ns->pretty_name, intf_i);
 
     switch( NI_OPTS(ni).packet_buffer_mode ) {
+    case 0:
+      if( nic->devtype.arch == EFHW_ARCH_EF10 )
+        trs->avoid_atomic_allocations = 1;
+      break;
+
     case CITP_PKTBUF_MODE_VF:
     case CITP_PKTBUF_MODE_VF | CITP_PKTBUF_MODE_PHYS:
 #ifndef CONFIG_SFC_RESOURCE_VF
@@ -552,8 +902,10 @@ static int allocate_vi(tcp_helper_resource_t* trs,
       }
       ci_assert(vf);
 
-      if( first_vf == NULL )
+      if( first_vf == NULL ) {
         first_vf = vf;
+        trs->avoid_atomic_allocations = efrm_vf_avoid_atomic_allocations;
+      }
 
       /* FALLTHROUGH - all VF modes are phys modes from the internal
        * point of view */
@@ -584,22 +936,38 @@ static int allocate_vi(tcp_helper_resource_t* trs,
                                 NI_OPTS(ni).irq_core, NI_OPTS(ni).irq_channel,
                                 &trs_nic->vi_rs, &nsn->vi_io_mmap_bytes,
                                 &nsn->vi_mem_mmap_bytes, NULL, NULL);
-    efrm_pd_release(pd); /* vi keeps a ref to pd */
     if( rc < 0 ) {
       OO_DEBUG_VM (ci_log ("%s: ERROR: efrm_vi_resource_alloc(%d) failed %d",
                            __FUNCTION__, intf_i, rc));
+      efrm_pd_release(pd);
       goto error_out;
     }
+
+    nsn->pd_owner = efrm_pd_owner_id(pd);
+    nsn->oo_vi_flags = 0;
+
+#if CI_CFG_PIO
+    if( NI_OPTS(ni).pio && (nic->devtype.arch == EFHW_ARCH_EF10) ) {
+      rc = allocate_pio(trs, intf_i, pd, nic, &pio_buf_offset);
+      if( rc < 0 ) 
+        goto error_out;
+    }
+    else
+      efrm_pd_release(pd); /* vi keeps a ref to pd */
+#else
+    efrm_pd_release(pd); /* vi keeps a ref to pd */
+#endif
 
     pci_dev_name = pci_name(efrm_vi_get_pci_dev(trs_nic->vi_rs));
     strncpy(nsn->pci_dev, pci_dev_name, sizeof(nsn->pci_dev));
     nsn->pci_dev[sizeof(nsn->pci_dev) - 1] = '\0';
     trs_nic->vi_mem_mmap_bytes = nsn->vi_mem_mmap_bytes;
     nsn->vi_instance = (ci_uint16) EFAB_VI_RESOURCE_INSTANCE(trs_nic->vi_rs);
-    nic = efrm_client_get_nic(trs_nic->oo_nic->efrm_client);
     nsn->vi_arch = (ci_uint8) nic->devtype.arch;
     nsn->vi_variant = (ci_uint8) nic->devtype.variant;
     nsn->vi_revision = (ci_uint8) nic->devtype.revision;
+    nsn->vi_hw_flags = (ci_uint8) (nic->flags & NIC_FLAG_BUG35388_WORKAROUND) ?
+                                   EF_VI_NIC_FLAG_BUG35388_WORKAROUND : 0;
 
     efrm_vi_resource_mappings(trs_nic->vi_rs, ni->vi_data);
     ef_vi_init(&ni->nic_hw[intf_i].vi, ni->vi_data, (ef_vi_state*) vi_state,
@@ -616,6 +984,7 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     nsn->vi_txq_size = (ci_uint16) NI_OPTS(ni).txq_size;
     nsn->evq_timer_offset = efrm_vi_timer_page_offset(trs_nic->vi_rs);
     nsn->timer_quantum_ns = nic->timer_quantum_ns;
+    nsn->rx_prefix_len = ni->nic_hw[intf_i].vi.rx_prefix_len;
     trs->buf_mmap_bytes += efab_vi_resource_mmap_bytes(trs_nic->vi_rs, 1);
     trs->io_mmap_bytes += efab_vi_resource_mmap_bytes(trs_nic->vi_rs, 0);
 
@@ -629,8 +998,6 @@ static int allocate_vi(tcp_helper_resource_t* trs,
                             num_online_cpus()));
     }
   }
-
-  ns->vi_state_bytes = vi_state_bytes;
 
   OO_DEBUG_RES(ci_log("%s: done", __FUNCTION__));
 
@@ -657,6 +1024,18 @@ static void release_vi(tcp_helper_resource_t* trs)
   struct completion flush_completion[CI_CFG_MAX_INTERFACES];
 
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
+#if CI_CFG_PIO
+    struct tcp_helper_nic* trs_nic = &trs->nic[intf_i];
+    ci_netif_nic_t *netif_nic = &trs->netif.nic_hw[intf_i];
+    if( NI_OPTS(&trs->netif).pio &&
+        (efrm_client_get_nic(trs_nic->oo_nic->efrm_client)->devtype.arch ==
+         EFHW_ARCH_EF10) && 
+        (trs_nic->pio_io_mmap_bytes != 0) ) {
+      efrm_pio_unmap_kernel(trs_nic->vi_rs, (void*)netif_nic->pio.pio_io);
+      ci_pio_buddy_dtor(&trs->netif, &trs->netif.state->nic[intf_i].pio_buddy);
+    }
+
+#endif
     init_completion(&flush_completion[intf_i]);
     efrm_vi_register_flush_callback(trs->nic[intf_i].vi_rs,
                                     &vi_complete,
@@ -674,35 +1053,46 @@ static int
 allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
                          tcp_helper_resource_t* trs)
 {
-  ci_netif* ni;
+  ci_netif* ni = &trs->netif;
   ci_netif_state* ns;
   int i, sz, rc, no_table_entries, synrecv_ofs;
-  int intf_i;
   unsigned vi_state_bytes;
-  unsigned rxq_sz, txq_sz, evq_sz, evq_min;
+#if CI_CFG_PIO
+  unsigned pio_bufs_ofs = 0;
+#endif
 
-  ni = &trs->netif;
+  OO_DEBUG_SHM(ci_log("%s:", __func__));
 
   trs->mem_mmap_bytes = 0;
   trs->io_mmap_bytes = 0;
+#if CI_CFG_PIO
+  trs->pio_mmap_bytes = 0;
+#endif
   trs->buf_mmap_bytes = 0;
 
-  no_table_entries = ci_pow2(NI_OPTS(ni).max_ep_bufs_ln2) * 2;
+  no_table_entries = NI_OPTS(ni).max_ep_bufs * 2;
 
-  /* Choose DMA queue sizes, and calculate suitable size for EVQ. */
-  rxq_sz = NI_OPTS(ni).rxq_size;
-  txq_sz = NI_OPTS(ni).txq_size;
-  vi_state_bytes = ef_vi_calc_state_bytes(rxq_sz, txq_sz);
-  evq_min = rxq_sz + txq_sz;
-  for( evq_sz = 512; evq_sz <= evq_min; evq_sz *= 2 )
-    ;
+  /* Find size of netif state to allocate. */
+  vi_state_bytes = ef_vi_calc_state_bytes(NI_OPTS(ni).rxq_size,
+                                          NI_OPTS(ni).txq_size);
 
   /* allocate shmbuf for netif state */
-  ci_assert_le(NI_OPTS(ni).max_ep_bufs_ln2, 
-               CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT_MAX);
+  ci_assert_le(NI_OPTS(ni).max_ep_bufs, CI_CFG_NETIF_MAX_ENDPOINTS_MAX);
   sz = sizeof(ci_netif_state) + vi_state_bytes * trs->netif.nic_n +
     sizeof(ci_netif_filter_table) +
     sizeof(ci_netif_filter_table_entry) * (no_table_entries - 1);
+
+#if CI_CFG_PIO
+  /* Allocate shmbuf for pio regions.  We haven't tried to allocate
+   * PIOs yet and we don't know how many ef10s we have.  So just
+   * reserve space for each available interface and waste the
+   * remainder of the memory.
+   */
+  if( NI_OPTS(ni).pio ) {
+    pio_bufs_ofs = sz;
+    sz += 2048 * oo_stack_intf_max(ni);
+  }
+#endif
 
   /* Allocate the synrecv buffs */
   synrecv_ofs = sz;
@@ -719,16 +1109,15 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
          ci_contig_shmbuf_size(&ni->state_buf));
 
 #ifdef CI_HAVE_OS_NOPAGE
-  i = (ci_pow2(NI_OPTS(ni).max_ep_bufs_ln2) + EP_BUF_PER_PAGE - 1)
-    / EP_BUF_PER_PAGE * CI_PAGE_SIZE;
+  i = (NI_OPTS(ni).max_ep_bufs + EP_BUF_PER_PAGE - 1) / EP_BUF_PER_PAGE *
+    CI_PAGE_SIZE;
   rc = ci_shmbuf_alloc(&ni->pages_buf, i);
   if( rc < 0 ) {
     OO_DEBUG_ERR(ci_log("tcp_helper_alloc: failed to alloc pages buf (%d)", rc));
     goto fail2;
   }
 #else
-  i = (ci_pow2(NI_OPTS(ni).max_ep_bufs_ln2) + EP_BUF_BLOCKNUM-1) 
-    >> EP_BUF_BLOCKSHIFT; 
+  i = (NI_OPTS(ni).max_ep_bufs + EP_BUF_BLOCKNUM-1) >> EP_BUF_BLOCKSHIFT; 
   ni->k_shmbufs = ci_alloc(sizeof(ci_shmbuf_t *) * i);
   if( ! ni->k_shmbufs ) {
     OO_DEBUG_ERR(ci_log("%s: out of memory at %d", __FUNCTION__, __LINE__));
@@ -753,6 +1142,9 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
 
   ns->stack_id = trs->id;
   ns->ep_ofs = ni->ep_ofs = sz;
+#if CI_CFG_PIO
+  ns->pio_bufs_ofs = pio_bufs_ofs;
+#endif
   ns->synrecv_ofs = synrecv_ofs;
   ns->n_ep_bufs = 0;
   ns->nic_n = trs->netif.nic_n;
@@ -772,6 +1164,8 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   ns->blacklist_length = ni->blacklist_length;
 
   ns->table_ofs = sizeof(ci_netif_state) + vi_state_bytes * trs->netif.nic_n;
+  ns->vi_state_bytes = vi_state_bytes;
+
   ni->filter_table = (void*) ((char*) ns + ns->table_ofs);
 
   /* Initialize the free list of synrecv bufs */
@@ -797,13 +1191,68 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
     snprintf(ns->pretty_name, sizeof(ns->pretty_name), "%d,%s",
              ns->stack_id, trs->name);
 
-  rc = allocate_vi(trs, evq_sz, alloc, ns + 1, vi_state_bytes);
-  if( rc < 0 )  goto fail3;
+  /* Allocate an eplock resource. */
+  rc = eplock_ctor(ni);
+  if( rc < 0 ) {
+    OO_DEBUG_ERR(ci_log("tcp_helper_alloc: failed to allocate EPLOCK (%d)", rc));
+    goto fail3;
+  }
+  ni->state->lock.lock = CI_EPLOCK_LOCKED;
+
+  /* Get the initial IP ID range */
+  rc = ci_ipid_ctor(ni, (ci_fd_t)-1);
+  if (rc < 0) {
+    goto fail4;
+  }
+
+  ci_waitq_ctor(&trs->pkt_waitq);
+
+  return 0;
+
+ fail4:
+  eplock_dtor(ni);
+ fail3:
+#ifdef CI_HAVE_OS_NOPAGE
+  ci_shmbuf_free(&ni->pages_buf);
+#else
+  /* Can we have allocated these yet?  Let's try to free things anyway */
+  for( i = 0; i < (int)ni->k_shmbufs_n; ++i ) {
+    ci_shmbuf_free(ni->k_shmbufs[i]);
+    ci_free(ni->k_shmbufs[i]);
+  }
+  ci_free(ni->k_shmbufs);
+#endif
+ fail2:
+  ci_contig_shmbuf_free(&ni->state_buf);
+ fail1:
+  LOG_NC(ci_log("failed to allocate tcp_helper resources (%d)", rc));
+  return rc;
+}
+
+static int
+allocate_netif_hw_resources(ci_resource_onload_alloc_t* alloc,
+                            tcp_helper_resource_t* trs)
+{
+  ci_netif* ni = &trs->netif;
+  ci_netif_state* ns = ni->state;
+  int sz, rc;
+  int intf_i;
+  unsigned evq_min, evq_sz;
+
+  OO_DEBUG_SHM(ci_log("%s:", __func__));
+
+  /* Choose DMA queue sizes, and calculate suitable size for EVQ. */
+  evq_min = NI_OPTS(ni).rxq_size + NI_OPTS(ni).txq_size;
+  for( evq_sz = 512; evq_sz <= evq_min; evq_sz *= 2 )
+    ;
+
+  rc = allocate_vi(trs, evq_sz, alloc, ns + 1, ns->vi_state_bytes);
+  if( rc < 0 )  goto fail1;
 
   if( alloc->in_flags & CI_NETIF_FLAGS_ISCSI ) {
     ci_log("%s: iscsi support requested but not configured", __FUNCTION__);
     rc = -ENOENT;
-    goto fail4;
+    goto fail2;
   }
 
   if( NI_OPTS(ni).max_packets > max_packets_per_stack ) {
@@ -831,7 +1280,7 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   trs->pkt_shm_id = ci_vmalloc(sz);
   if( trs->pkt_shm_id == NULL ) {
     OO_DEBUG_ERR(ci_log("tcp_helper_alloc: failed to allocate pkt_shm_id"));
-    goto fail5;
+    goto fail3;
   }
   memset(trs->pkt_shm_id, 0xff, sz);
 #elif CI_CFG_PKTS_AS_HUGE_PAGES
@@ -840,19 +1289,11 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   trs->pkt_shm_id = NULL;
 #endif
 
-  /* Allocate an eplock resource. */
-  rc = eplock_ctor(ni);
-  if( rc < 0 ) {
-    OO_DEBUG_ERR(ci_log("tcp_helper_alloc: failed to allocate EPLOCK (%d)", rc));
-    goto fail6;
-  }
-
-
   sz = sizeof(struct oo_iobufset*) * ni->pkt_sets_max;
   if( (ni->buf_pages = ci_alloc(sz)) == NULL ) {
     OO_DEBUG_ERR(ci_log("tcp_helper_alloc: failed to allocate iobufset table"));
     rc = -ENOMEM;
-    goto fail7;
+    goto fail4;
   }
   memset(ni->buf_pages, 0, sz);
 
@@ -863,7 +1304,7 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
     if( (ni->nic_hw[intf_i].pkt_rs = ci_alloc(sz)) == NULL ) {
       OO_DEBUG_ERR(ci_log("%s: failed to allocate iobufset tables",
                           __FUNCTION__));
-      goto fail8;
+      goto fail5;
     }
     memset(ni->nic_hw[intf_i].pkt_rs, 0, sz);
   }
@@ -883,6 +1324,9 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   /* Advertise the size of the IO and buf mmap that needs to be performed. */
   ns->io_mmap_bytes = trs->io_mmap_bytes;
   ns->buf_mmap_bytes = trs->buf_mmap_bytes;
+#if CI_CFG_PIO
+  ns->pio_mmap_bytes = trs->pio_mmap_bytes;
+#endif
 
   OO_DEBUG_MEMSIZE(ci_log("helper=%u map_bytes=%u (0x%x)",
                           trs->id,
@@ -890,53 +1334,29 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     LOG_NC(ci_log("VI=%d", ef_vi_instance(&ni->nic_hw[intf_i].vi)));
 
-  /* Get the initial IP ID range */
-  rc = ci_ipid_ctor(ni, (ci_fd_t)-1);
-  if (rc < 0) {
-    goto fail8;
-  }
-
-  ci_waitq_ctor(&trs->pkt_waitq);
-
   /* Apply pacing value. */
   if( NI_OPTS(ni).tx_min_ipg_cntl != 0 )
     tcp_helper_pace(trs, NI_OPTS(ni).tx_min_ipg_cntl);
 
-  /* This is needed because release_netif_resources() tries to free the ep
+  /* This is needed because release_netif_hw_resources() tries to free the ep
   ** table. */
   ni->ep_tbl = 0;
 
   return 0;
 
- fail8:
+ fail5:
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     if( ni->nic_hw[intf_i].pkt_rs )
       ci_free(ni->nic_hw[intf_i].pkt_rs);
   ci_free(ni->buf_pages);
- fail7:
-  eplock_dtor(ni);
- fail6:
+ fail4:
 #ifdef OO_DO_HUGE_PAGES
   ci_vfree(trs->pkt_shm_id);
- fail5:
-#endif
- fail4:
-  release_vi(trs);
  fail3:
-#ifdef CI_HAVE_OS_NOPAGE
-  ci_shmbuf_free(&ni->pages_buf);
-#else
-  /* Can we have allocated these yet?  Let's try to free things anyway */
-  for( i = 0; i < (int)ni->k_shmbufs_n; ++i ) {
-    ci_shmbuf_free(ni->k_shmbufs[i]);
-    ci_free(ni->k_shmbufs[i]);
-  }
-  ci_free(ni->k_shmbufs);
 #endif
  fail2:
-  ci_contig_shmbuf_free(&ni->state_buf);
+  release_vi(trs);
  fail1:
-  LOG_NC(ci_log("failed to allocate tcp_helper resources (%d)", rc));
   return rc;
 }
 
@@ -968,34 +1388,13 @@ static void
 release_netif_resources(tcp_helper_resource_t* trs)
 {
   ci_netif* ni = &trs->netif;
-  unsigned i;
-  int intf_i;
 
-  OO_DEBUG_SHM(ci_log("release_netif_resources:"));
-
-  /* do this first because we currently we may find filters still installed
-   * - leaving them install doesn't only leak resources, it leaves the NET
-   *   driver software filtering open to duplicates
-   * - for now we deinstall the filters in the destructor of the TCP EP
-   */
-  release_ep_tbl(trs);
-
-  ci_ipid_dtor(ni, (ci_fd_t)-1);
-  
-  eplock_dtor(ni);
-  release_vi(trs);
+  OO_DEBUG_SHM(ci_log("%s:", __func__));
 
   ci_waitq_dtor(&trs->pkt_waitq);
+  ci_ipid_dtor(ni, (ci_fd_t)-1);
+  eplock_dtor(ni);
 
-  for (i = 0; i < ni->pkt_sets_n; i++) {
-    ci_assert(ni->buf_pages[i]);
-    OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-      oo_iobufset_resource_release(ni->nic_hw[intf_i].pkt_rs[i]);
-    oo_iobufset_pages_release(ni->buf_pages[i]);
-  }
-  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-    ci_free(ni->nic_hw[intf_i].pkt_rs);
-  ci_free(ni->buf_pages);
 #ifdef CI_HAVE_OS_NOPAGE
   ci_shmbuf_free(&ni->pages_buf);
 #else
@@ -1005,10 +1404,42 @@ release_netif_resources(tcp_helper_resource_t* trs)
   }
   ci_free(ni->k_shmbufs);
 #endif
+  ci_contig_shmbuf_free(&ni->state_buf);
+}
+static void
+release_netif_hw_resources(tcp_helper_resource_t* trs)
+{
+  ci_netif* ni = &trs->netif;
+  unsigned i;
+  int intf_i;
+
+  OO_DEBUG_SHM(ci_log("%s:", __func__));
+
+  /* do this first because we currently we may find filters still installed
+   * - leaving them install doesn't only leak resources, it leaves the NET
+   *   driver software filtering open to duplicates
+   * - for now we deinstall the filters in the destructor of the TCP EP
+   */
+  release_ep_tbl(trs);
+
+  /* Release packets */
+  for (i = 0; i < ni->pkt_sets_n; i++) {
+    ci_assert(ni->buf_pages[i]);
+    OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+      oo_iobufset_resource_release(ni->nic_hw[intf_i].pkt_rs[i]);
+    oo_iobufset_pages_release(ni->buf_pages[i]);
+  }
+
+  /* Now release everything allocated in allocate_netif_hw_resources. */
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+    ci_free(ni->nic_hw[intf_i].pkt_rs);
+  ci_free(ni->buf_pages);
+
 #ifdef OO_DO_HUGE_PAGES
   ci_vfree(trs->pkt_shm_id);
 #endif
-  ci_contig_shmbuf_free(&ni->state_buf);
+
+  release_vi(trs);
 }
 
 
@@ -1119,6 +1550,157 @@ ci_inline void efab_notify_stacklist_change(tcp_helper_resource_t *thr)
   ci_waitq_wakeup(&efab_tcp_driver.stack_list_wq);
 }
 
+
+static void tcp_helper_more_bufs_work(void* context)
+{
+  tcp_helper_resource_t* trs = context;
+  ci_netif* ni = &trs->netif;
+
+  OO_DEBUG_TCPH(ci_log("%s: [%u]", __FUNCTION__, trs->id));
+
+  if( ci_netif_trylock(ni) ) {
+    if( trs->netif.state->n_freepkts <=
+        NI_OPTS(&trs->netif).free_packets_low )
+      efab_tcp_helper_more_bufs(trs);
+    ci_netif_unlock(ni);
+    return;
+  }
+
+  /* Lock is busy. Are we really out of packets? */
+  if( ni->state->n_freepkts > NI_OPTS(ni).free_packets_low / 2 )
+    return;
+
+  /* Avoid deadlock with tcp_helper_stop: do not wait forever.
+   * From the other side, we must wait for some time, because the atomic
+   * process spawned us may be still active and holding the lock.
+   * And we can not easily use CI_EPLOCK_NETIF_ flag because a lot of netif
+   * unlocks happen in atomic context. */
+  if( efab_eplock_lock_timeout(ni, msecs_to_jiffies(10)) == 0 ) {
+    if( trs->netif.state->n_freepkts <= NI_OPTS(ni).free_packets_low )
+      efab_tcp_helper_more_bufs(trs);
+    ci_netif_unlock(ni);
+  }
+}
+
+
+static void tcp_helper_do_non_atomic(struct work_struct *data)
+{
+  tcp_helper_resource_t* trs = container_of(data, tcp_helper_resource_t,
+                                            non_atomic_work);
+  const unsigned handled_aflags = (OO_THR_EP_AFLAG_CLEAR_FILTERS |
+                                   OO_THR_EP_AFLAG_NEED_FREE);
+  ci_irqlock_state_t lock_flags;
+  tcp_helper_endpoint_t* ep;
+  unsigned ep_aflags, new_aflags;
+  ci_sllist list;
+  ci_sllink* link;
+
+  OO_DEBUG_TCPH(ci_log("%s: [%u]", __FUNCTION__, trs->id));
+
+  ci_assert(! in_atomic());
+
+  /* Allocate packets in non-atomic mode */
+  if( trs->avoid_atomic_allocations &&
+      trs->netif.state->n_freepkts <= NI_OPTS(&trs->netif).free_packets_low &&
+      NI_OPTS(&trs->netif).max_packets <
+      (trs->netif.pkt_sets_n << CI_CFG_PKTS_PER_SET_S))
+    tcp_helper_more_bufs_work(trs);
+
+  /* Handle endpoints that have work queued. */
+  ci_irqlock_lock(&trs->lock, &lock_flags);
+  list = trs->non_atomic_list;
+  ci_sllist_init(&trs->non_atomic_list);
+  ci_irqlock_unlock(&trs->lock, &lock_flags);
+  while( (link = ci_sllist_try_pop(&list)) != NULL ) {
+    ep = CI_CONTAINER(tcp_helper_endpoint_t, non_atomic_link , link);
+  again:
+    do {  /* grab and clear flags telling us what to do */
+      ep_aflags = ep->ep_aflags;
+      new_aflags = ep_aflags & ~handled_aflags;
+    } while( ci_cas32_fail(&ep->ep_aflags, ep_aflags, new_aflags) );
+    OO_DEBUG_TCPH(ci_log("%s: [%u:%d] aflags=%x", __FUNCTION__, trs->id,
+                         OO_SP_FMT(ep->id), ep_aflags));
+    if( ep_aflags & OO_THR_EP_AFLAG_CLEAR_FILTERS )
+      tcp_helper_endpoint_clear_filters(ep);
+    if( ep_aflags & OO_THR_EP_AFLAG_NEED_FREE )
+      citp_waitable_obj_free_nnl(&trs->netif,
+                                 SP_TO_WAITABLE(&trs->netif, ep->id));
+    /* Clear the NON_ATOMIC flag while checking to see if more work has
+     * been requested.  (Done this way to avoid race with
+     * citp_waitable_obj_free().
+     */
+    do {
+      if( (ep_aflags = ep->ep_aflags) & handled_aflags )
+        goto again;
+      new_aflags = ep_aflags & ~OO_THR_EP_AFLAG_NON_ATOMIC;
+    } while( ci_cas32_fail(&ep->ep_aflags, ep_aflags, new_aflags) );
+  }
+
+  /* Handle the deferred close path. */
+  if( trs->trs_aflags & OO_THR_AFLAG_CLOSE_ENDPOINTS ) {
+    OO_DEBUG_TCPH(ci_log("%s: [%u] CLOSE_ENDPOINTS", __FUNCTION__, trs->id));
+    ci_assert(ci_netif_is_locked(&trs->netif));
+    ci_assert(oo_trusted_lock_is_locked(trs));
+    ci_atomic32_and(&trs->trs_aflags, ~OO_THR_AFLAG_CLOSE_ENDPOINTS);
+    tcp_helper_close_pending_endpoints(trs);
+    efab_tcp_helper_netif_unlock(trs);
+  }
+}
+
+
+void tcp_helper_endpoint_queue_non_atomic(tcp_helper_endpoint_t* ep,
+                                          unsigned why_aflag)
+{
+  ci_irqlock_state_t lock_flags;
+  unsigned prev_aflags;
+
+  why_aflag |= OO_THR_EP_AFLAG_NON_ATOMIC;
+  ci_irqlock_lock(&ep->thr->lock, &lock_flags);
+  prev_aflags = tcp_helper_endpoint_set_aflags(ep, why_aflag);
+  if( ! (prev_aflags & OO_THR_EP_AFLAG_NON_ATOMIC) ) {
+    ci_sllist_push(&ep->thr->non_atomic_list, &ep->non_atomic_link);
+    queue_work(ep->thr->wq, &ep->thr->non_atomic_work);
+  }
+  ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
+}
+
+/* Woritem routine to handle postponed stack destruction. */
+static void
+tcp_helper_destroy_work(void *context)
+{
+  tcp_helper_resource_t *trs = context;
+
+  if( TCP_HELPER_K_RC_REFS(trs->k_ref_count) == 0 ) {
+    tcp_helper_dtor(trs);
+    return;
+  }
+
+  ci_assert(trs->trs_aflags & OO_THR_AFLAG_RM_FREE);
+  ci_atomic32_and(&trs->trs_aflags, ~OO_THR_AFLAG_RM_FREE);
+  efab_tcp_helper_rm_free_locked(trs, 1);
+}
+
+
+ci_inline void tcp_helper_init_max_mss(tcp_helper_resource_t* rs)
+{
+  /* Falcon uses 16, EF10 uses shorter prefixes */
+  const int max_prefix = 16;
+  int intf_i, min_rx_usr_buf_size;
+  ci_netif* ni = &rs->netif;
+  struct efhw_nic *nic;
+
+  min_rx_usr_buf_size = FALCON_RX_USR_BUF_SIZE;
+
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
+    nic = efrm_client_get_nic(rs->nic[intf_i].oo_nic->efrm_client);
+    if( nic->rx_usr_buf_size < min_rx_usr_buf_size )
+     min_rx_usr_buf_size = nic->rx_usr_buf_size;
+  }
+  ni->state->max_mss = min_rx_usr_buf_size - max_prefix - ETH_HLEN - 
+    ETH_VLAN_HLEN - sizeof(ci_ip4_hdr) - sizeof(ci_tcp_hdr);
+}
+
+
 static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
                                const ci_netif_config_opts* opts,
                                const int* ifindices, int ifindices_len,
@@ -1137,6 +1719,8 @@ static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
   rc = oo_version_check(alloc);
   if( rc < 0 )
     goto fail1;
+
+  oo_timesync_wait_for_cpu_khz_to_stabilize();
 
   if( (opts->packet_buffer_mode & CITP_PKTBUF_MODE_PHYS) &&
       (phys_mode_gid == -2 ||
@@ -1173,91 +1757,100 @@ static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
     goto fail3;
   }
 
-  rs->trusted_lock = OO_TRUSTED_LOCK_UNLOCKED;
+  rs->trusted_lock = OO_TRUSTED_LOCK_LOCKED;
   rs->k_ref_count = 1;          /* 1 reference for userland */
   rs->n_ep_closing_refs = 0;
   rs->intfs_to_reset = 0;
+  rs->avoid_atomic_allocations = 0;
   alloc->in_name[CI_CFG_STACK_NAME_LEN] = '\0';
   strcpy(rs->name, alloc->in_name);
 
   ni->opts = *opts;
   ci_netif_config_opts_rangecheck(&ni->opts);
 
-  /* Allocate buffers for shared state, hardware resources etc. */
+  /* Allocate buffers for shared state, etc. */
   rc = allocate_netif_resources(alloc, rs);
   if( rc < 0 ) goto fail4;
 
+  /* Create this lock before adding the stack to started_stacks list,
+   * because it is used in reset function. */
+  ci_irqlock_ctor(&rs->lock);
+
+  ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+  ci_dllist_push(&THR_TABLE.started_stacks, &rs->all_stacks_link);
+  ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+
+  /* Allocate hardware resources */
+  rc = allocate_netif_hw_resources(alloc, rs);
+  if( rc < 0 ) goto fail5;
+
   /* Prepare per-socket data structures, and allocate the first few socket
   ** buffers. */
-  ni->ep_tbl_max = ci_pow2(NI_OPTS(ni).max_ep_bufs_ln2);
+  ni->ep_tbl_max = NI_OPTS(ni).max_ep_bufs;
   ni->ep_tbl_n = 0;
   ni->ep_tbl = CI_VMALLOC_ARRAY(tcp_helper_endpoint_t*, ni->ep_tbl_max);
   if( ni->ep_tbl == 0 ) {
     OO_DEBUG_ERR(ci_log("tcp_helper_rm_alloc: failed to allocate ep_tbl"));
     rc = -ENOMEM;
-    goto fail5;
+    goto fail6;
   }
 #if CI_CFG_USERSPACE_PIPE
   CI_ZERO_ARRAY(ni->ep_tbl, ni->ep_tbl_max);
 #endif
 
-  ci_irqlock_ctor(&rs->lock);
+  INIT_WORK(&rs->non_atomic_work, tcp_helper_do_non_atomic);
+  ci_workitem_init(&rs->work_item_dtor, tcp_helper_destroy_work, rs);
+  ci_sllist_init(&rs->non_atomic_list);
   ci_sllist_init(&rs->ep_tobe_closed);
-  rs->callback_fn = NULL;
+  rs->trs_aflags = 0;
   ni->flags = alloc->in_flags;
   ni->uid = ci_getuid();
   ni->euid = ci_geteuid();
   ni->error_flags = 0;
-  ci_netif_state_init(&rs->netif, alloc->in_cpu_khz, alloc->in_name);
+  ci_netif_state_init(&rs->netif, oo_timesync_cpu_khz, alloc->in_name);
   OO_STACK_FOR_EACH_INTF_I(&rs->netif, intf_i) {
     nic = efrm_client_get_nic(rs->nic[intf_i].oo_nic->efrm_client);
     if( nic->flags & NIC_FLAG_ONLOAD_UNSUPPORTED )
       ni->state->flags |= CI_NETIF_FLAG_ONLOAD_UNSUPPORTED;
   }
-#ifndef NDEBUG
-  ni->state->lock.lock = CI_EPLOCK_LOCKED;
-#endif
+
+  tcp_helper_init_max_mss(rs);
+
   efab_tcp_helper_more_socks(rs);
-#ifndef NDEBUG
-  ni->state->lock.lock = 0;
-#endif
 
   /* At this point, we are certain that construction of the netif will not
    * fail, so we move out of "Uninitialised" and into "Locked".
    */
-  ci_assert_equal(ni->state->lock.lock, CI_EPLOCK_UNINITIALISED);
-  ni->state->lock.lock = CI_EPLOCK_LOCKED;
   CI_MAGIC_SET(ni, NETIF_MAGIC);
 
   if( (rc = ci_netif_init_fill_rx_rings(ni)) != 0 )
-    goto fail5;
+    goto fail6;
 
-  /* If there aren't any stacks yet force a sync of cplane information, to
-   * to help with the case where people create interfaces then immediately
-   * launch their app that uses them.
-   */
-  if( (NI_OPTS(ni).sync_cplane == 2) || ((NI_OPTS(ni).sync_cplane == 1)
-        && (ci_dllist_is_empty(&THR_TABLE.all_stacks))) ) {
-    cicpos_sync_tables(CICP_HANDLE(&rs->netif));
-  }
-
+  /* "onload-wq:pretty_name workqueue for non-atomic works */
+  snprintf(rs->wq_name, sizeof(rs->wq_name), "onload-wq:%s",
+           ni->state->pretty_name);
+  rs->wq = create_singlethread_workqueue(rs->wq_name);
+  if( rs->wq == NULL )
+    goto fail6;
 
   /* We're about to expose this stack to other people.  So we should be
    * sufficiently initialised here that other people don't get upset.
    */
+  ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+  ci_dllist_remove_safe(&rs->all_stacks_link);
   if( alloc->in_name[0] ) {
-    rc = efab_thr_table_insert_name(rs, alloc->in_name);
-    if( rc != 0 )
-      goto fail5;
+    rc = efab_thr_table_check_name(alloc->in_name);
+    if( rc != 0 ) {
+      ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+      goto fail7;
+    }
   }
-  else
-    efab_thr_table_insert(rs);
-  /* Now other people can see this stack, so don't assume we have exclusive
-   * access.  (But we do still have the lock).
-   */
-  efab_notify_stacklist_change(rs);
+  ci_dllist_push(&THR_TABLE.all_stacks, &rs->all_stacks_link);
+  ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
 
-  ci_netif_unlock(ni);
+  efab_tcp_helper_netif_unlock(rs);
+
+  efab_notify_stacklist_change(rs);
 
   /* We deliberately avoid starting periodic timer and callback until now,
    * so we don't have to worry about stopping them if we bomb out early.
@@ -1282,7 +1875,15 @@ static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
   OO_DEBUG_RES(ci_log("tcp_helper_rm_alloc: allocated %u", rs->id));
   return 0;
 
+ fail7:
+  destroy_workqueue(rs->wq);
+ fail6:
+  release_netif_hw_resources(rs);
  fail5:
+  ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+  ci_dllist_remove(&rs->all_stacks_link);
+  ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+
   release_netif_resources(rs);
  fail4:
   ci_id_pool_free(&THR_TABLE.instances, rs->id, &THR_TABLE.lock);
@@ -1375,13 +1976,28 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
   ci_netif* ni = &thr->netif;
   ef_vi* vi;
   struct thr_reset_stack_tx_cb_state cb_state;
+  uint64_t *hw_addrs;
+#if CI_CFG_PIO
+  int rc;
+  struct efhw_nic* nic;
+#endif
 
   pkt_sets_n = ni->pkt_sets_n;
+
+  hw_addrs = ci_alloc(sizeof(uint64_t) * (1 << HW_PAGES_PER_SET_S));
+  if( hw_addrs == NULL ) {
+    ci_log("%s: [%d] out of memory", __func__, thr->id);
+    return;
+  }
 
   ci_irqlock_lock(&thr->lock, &lock_flags);
   intfs_to_reset = thr->intfs_to_reset;
   thr->intfs_to_reset = 0;
   ci_irqlock_unlock(&thr->lock, &lock_flags);
+
+#if CI_CFG_PIO
+  ci_tcp_tmpl_handle_nic_reset(ni);
+#endif
 
   for( intf_i = 0; intf_i < CI_CFG_MAX_INTERFACES; ++intf_i ) {
     if( intfs_to_reset & (1 << intf_i) ) {
@@ -1389,6 +2005,35 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
              __FUNCTION__, thr->id, intf_i, intfs_to_reset);
 
       vi = &ni->nic_hw[intf_i].vi;
+
+#if CI_CFG_PIO
+      nic = efrm_client_get_nic(thr->nic[intf_i].oo_nic->efrm_client);
+      if( NI_OPTS(ni).pio &&
+          (nic->devtype.arch == EFHW_ARCH_EF10) && 
+          (thr->nic[intf_i].pio_io_mmap_bytes != 0) ) {
+        struct efrm_pd *pd = efrm_vi_get_pd(thr->nic[intf_i].vi_rs);
+        OO_DEBUG_TCPH(ci_log("%s: realloc PIO", __FUNCTION__));
+        /* Now try to recreate and link the PIO region */
+        rc = efrm_pio_realloc(pd, thr->nic[intf_i].pio_rs, 
+                              thr->nic[intf_i].vi_rs);
+        if( rc < 0 ) {
+          OO_DEBUG_TCPH(ci_log("%s: [%d:%d] pio_realloc failed %d, "
+                               "removing PIO capability", 
+                               __FUNCTION__, thr->id, intf_i, rc));
+          thr->nic[intf_i].pio_io_mmap_bytes = 0;
+          /* Expose failure to user-level */
+          thr->netif.nic_hw[intf_i].pio.pio_buffer = NULL;
+          thr->netif.nic_hw[intf_i].pio.pio_len = 0;
+          ni->state->nic[intf_i].oo_vi_flags &=~ OO_VI_FLAGS_PIO_EN;
+          ni->state->nic[intf_i].pio_io_mmap_bytes = 0;
+          ni->state->nic[intf_i].pio_io_len = 0;
+          /* Leave efrm references in place as we can't remove them
+           * now - they will get removed as normal when stack
+           * destroyed
+           */
+        }
+      }
+#endif
 
       /* Reset sw queues */
       ef_vi_evq_reinit(vi);
@@ -1403,9 +2048,9 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
       /* Reset hw queues.  This must be done after resetting the sw
          queues as the hw will start delivering events after being
          reset. */
+      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_EVQ);
       efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_TXQ);
       efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_RXQ);
-      efrm_vi_q_reinit(thr->nic[intf_i].vi_rs, EFHW_EVQ);
 
       if( cb_state.ps.tx_pkt_free_list_n )
         ci_netif_poll_free_pkts(ni, &cb_state.ps);
@@ -1416,8 +2061,38 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
         ci_netif_pkt_release(ni, pkt);
       }
 
-      for( i = 0; i < pkt_sets_n; ++i )
-        oo_iobufset_resource_remap_bt(ni->nic_hw[intf_i].pkt_rs[i]);
+      for( i = 0; i < pkt_sets_n; ++i ) {
+        int j, rc;
+
+        rc = oo_iobufset_resource_remap_bt(ni->nic_hw[intf_i].pkt_rs[i],
+                                          hw_addrs);
+        if( rc == -ENOSYS ) {
+          /* This PD does not use buffer table; do not update anything and
+           * go away. */
+          ci_assert_equal(i, 0);
+          break;
+        }
+
+        if( rc != 0 ) {
+          /* The stack is running, but packet mapping is invalidated.
+           * We have no good solution.  Just let's reset all hardware
+           * addresses and wait for user to kill the app. */
+          ci_log("ERROR [%d]: failed to remap packets after NIC reset",
+                 thr->id);
+          memset(hw_addrs, 0, sizeof(uint64_t) * (1 << HW_PAGES_PER_SET_S));
+        }
+
+        for( j = 0; j < PKTS_PER_SET; j++ ) {
+          ci_ip_pkt_fmt* pkt;
+          int id = (i * PKTS_PER_SET) + j;
+          oo_pkt_p pp;
+          OO_PP_INIT(ni, pp, id);
+          pkt = __PKT(ni, pp);
+          pkt->dma_addr[intf_i] = hw_addrs[j / PKTS_PER_HW_PAGE] +
+            CI_CFG_PKT_BUF_SIZE * (j % PKTS_PER_HW_PAGE) +
+            CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
+        }
+      }
 
       if( NI_OPTS(ni).timer_usec != 0 ) 
         ef_eventq_timer_prime(vi, NI_OPTS(ni).timer_usec);
@@ -1426,6 +2101,7 @@ static void tcp_helper_reset_stack_locked(tcp_helper_resource_t* thr)
       tcp_helper_request_wakeup_nic(thr, intf_i);
     }
   }
+  ci_free(hw_addrs);
 }
 
 
@@ -1468,7 +2144,6 @@ void tcp_helper_reset_stack(ci_netif* ni, int intf_i)
 static void
 tcp_helper_rm_free(tcp_helper_resource_t* trs)
 {
-  int safe_to_destroy;
   unsigned l, new_l;
 
   TCP_HELPER_RESOURCE_ASSERT_VALID(trs, 1);
@@ -1488,8 +2163,7 @@ tcp_helper_rm_free(tcp_helper_resource_t* trs)
     /* Lock holder will call efab_tcp_helper_rm_free_locked(). */
     return;
 
-  safe_to_destroy = 1;
-  efab_tcp_helper_rm_free_locked(trs, safe_to_destroy);
+  efab_tcp_helper_rm_free_locked(trs, 1);
   OO_DEBUG_TCPH(ci_log("%s: [%u] done", __FUNCTION__, trs->id));
 }
 
@@ -1524,7 +2198,6 @@ efab_thr_release(tcp_helper_resource_t *thr)
     tcp_helper_rm_free(thr);
 }
 
-
 /*--------------------------------------------------------------------
  *!
  * Enqueues a work-item to call tcp_helper_dtor() at a safe time.
@@ -1537,11 +2210,8 @@ static void
 tcp_helper_dtor_schedule(tcp_helper_resource_t * trs)
 {
   OO_DEBUG_TCPH(ci_log("%s [%u]: starting", __FUNCTION__, trs->id));
-
-  ci_workitem_init(&trs->work_item,
-                   (CI_WITEM_ROUTINE)(tcp_helper_dtor), trs);
-  ci_verify( ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &trs->work_item) == 0);
-
+  ci_verify( ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &trs->work_item_dtor)
+             == 0);
 }
 
 
@@ -1643,6 +2313,9 @@ tcp_helper_close_pending_endpoints(tcp_helper_resource_t* trs)
 
   OO_DEBUG_TCPH(ci_log("%s: [%d]", __FUNCTION__, trs->id));
 
+  ci_assert(ci_netif_is_locked(&trs->netif));
+  ci_assert(! in_atomic());
+
   /* Ensure we're up-to-date so we get an ordered response to all packets.
   ** (eg. ANVL tcp_core 9.18).  Do it once here rather than per-socket.
   ** Also ensure all local packets are delivered before endpoint release.
@@ -1660,18 +2333,17 @@ tcp_helper_close_pending_endpoints(tcp_helper_resource_t* trs)
     ci_assert( ci_sllist_not_empty(&trs->ep_tobe_closed) );
     if( ci_sllist_is_empty(&trs->ep_tobe_closed) ) {
       ci_irqlock_unlock(&trs->lock, &lock_flags);
-      ci_log("%s: stack %d lock corrupted", __func__, trs->id);
+      ci_log("%s: [%d] ERROR: stack lock corrupted", __func__, trs->id);
       break;
     }
     link = ci_sllist_pop(&trs->ep_tobe_closed);
     ci_irqlock_unlock(&trs->lock, &lock_flags);
 
     ep = CI_CONTAINER(tcp_helper_endpoint_t, tobe_closed , link);
-    OO_DEBUG_TCPH(ci_log("%s: %p [%u]: closing %d",
-                         __FUNCTION__, trs, trs->id, OO_SP_FMT(ep->id)));
-    oof_socket_mcast_del_all(efab_tcp_driver.filter_manager, &ep->oofilter);
+    OO_DEBUG_TCPH(ci_log("%s: [%u:%d] closing",
+                         __FUNCTION__, trs->id, OO_SP_FMT(ep->id)));
+    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
     citp_waitable_all_fds_gone(&trs->netif, ep->id);
-    ep->aflags = 0;
   }
 }
 
@@ -1702,6 +2374,13 @@ efab_tcp_helper_rm_reset_untrusted(tcp_helper_resource_t* trs)
   }
 }
 
+static void
+efab_tcp_helper_rm_schedule_free(tcp_helper_resource_t* trs)
+{
+  OO_DEBUG_TCPH(ci_log("%s [%u]: defer", __FUNCTION__, trs->id));
+  ci_atomic32_or(&trs->trs_aflags, OO_THR_AFLAG_RM_FREE);
+  ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &trs->work_item_dtor);
+}
 
 /*--------------------------------------------------------------------
  *!
@@ -1718,7 +2397,7 @@ efab_tcp_helper_rm_reset_untrusted(tcp_helper_resource_t* trs)
  *
  *--------------------------------------------------------------------*/
 
-void
+static void
 efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
                                int safe_destroy_now)
 {
@@ -1731,6 +2410,13 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
   ci_assert(NULL != trs);
   ci_assert(trs->trusted_lock == (OO_TRUSTED_LOCK_LOCKED |
                                   OO_TRUSTED_LOCK_AWAITING_FREE));
+
+  if( in_atomic() ) {
+    efab_tcp_helper_rm_schedule_free(trs);
+    return;
+  }
+  /* Make sure all postponed actions are done and endpoints freed */
+  flush_workqueue(trs->wq);
 
   netif = &trs->netif;
 
@@ -1763,7 +2449,6 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
    *  \TODO: for now just clear in_poll flag
    */
   netif->state->in_poll = 0;
-
 
   /* If netif is wedged then for now instead of getting netif in
      a valid state we instead try never to touch it again */
@@ -1877,100 +2562,6 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
 }
 
 
-static void
-oo_trusted_lock_drop(tcp_helper_resource_t* trs)
-{
-  unsigned l, sl_flags;
-
-  do {
-    l = trs->trusted_lock;
-    ci_assert(l & OO_TRUSTED_LOCK_LOCKED);
-
-    if( l & OO_TRUSTED_LOCK_AWAITING_FREE ) {
-      efab_tcp_helper_rm_free_locked(trs, 0);
-      return;
-    }
-    else if( l & ~OO_TRUSTED_LOCK_LOCKED ) {
-      sl_flags = 0;
-      if( l & OO_TRUSTED_LOCK_NEED_POLL_PRIME )
-        sl_flags |= CI_EPLOCK_NETIF_NEED_PRIME | CI_EPLOCK_NETIF_NEED_POLL;
-      if( l & OO_TRUSTED_LOCK_CLOSE_ENDPOINT )
-        sl_flags |= CI_EPLOCK_NETIF_CLOSE_ENDPOINT;
-      if( l & OO_TRUSTED_LOCK_RESET_STACK )
-        sl_flags |= CI_EPLOCK_NETIF_RESET_STACK;
-      if( ef_eplock_trylock_and_set_flags(&trs->netif.state->lock, sl_flags) )
-        ci_netif_unlock(&trs->netif);
-    }
-  } while( ci_cas32_fail(&trs->trusted_lock, l, OO_TRUSTED_LOCK_UNLOCKED) );
-}
-
-
-/* Returns true if flags were set, or false if the lock was not locked.
- * NB. We ignore flags if AWAITING_FREE.
- */
-static int
-oo_trusted_lock_set_flags_if_locked(tcp_helper_resource_t* trs, unsigned flags)
-{
-  unsigned l;
-
-  do {
-    l = trs->trusted_lock;
-    if( ! (l & OO_TRUSTED_LOCK_LOCKED) )
-      return 0;
-    if( l & OO_TRUSTED_LOCK_AWAITING_FREE )
-      /* We must not set flags when AWAITING_FREE. */
-      return 1;
-  } while( ci_cas32_fail(&trs->trusted_lock, l, l | flags) );
-
-  return 1;
-}
-
-
-int
-efab_tcp_helper_netif_try_lock(tcp_helper_resource_t* trs) 
-{
-  if( trs->trusted_lock == OO_TRUSTED_LOCK_UNLOCKED &&
-      ci_cas32u_succeed(&trs->trusted_lock, OO_TRUSTED_LOCK_UNLOCKED, 
-                        OO_TRUSTED_LOCK_LOCKED) ) {
-    if( ci_netif_trylock(&trs->netif) ) {
-      return 1;
-    }
-    oo_trusted_lock_drop(trs);
-  }
-  return 0;
-}
-
-
-/* Returns 1 if the locks are held, or 0 if not and the flags are set. 
- *   
- * NB if trusted lock has OO_TRUSTED_LOCK_AWAITING_FREE this function
- * will return 0, but the flags will not be set 
- */
-int
-efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs, 
-                                        unsigned trusted_flags,
-                                        unsigned untrusted_flags)
-{
-  do {
-    if( efab_tcp_helper_netif_try_lock(trs) )
-      return 1;
-    if( ef_eplock_set_flags_if_locked(&trs->netif.state->lock, 
-                                      untrusted_flags) )
-      return 0;
-    if( oo_trusted_lock_set_flags_if_locked(trs, trusted_flags) )
-       return 0;
-  } while( 1 );
-}
-
-
-void
-efab_tcp_helper_netif_unlock(tcp_helper_resource_t* trs)
-{
-  ci_netif_unlock(&trs->netif);
-  oo_trusted_lock_drop(trs);
-}
-
-
 /*--------------------------------------------------------------------
  *!
  * This function stops any async callbacks into the TCP helper resource
@@ -1995,8 +2586,13 @@ tcp_helper_stop(tcp_helper_resource_t* trs)
 
   /* stop callbacks from the event queue
         - wait for any running callback to complete */
-  OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i)
+  OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
+    ef_eventq_timer_clear(&(trs->netif.nic_hw[intf_i].vi));
     efrm_eventq_kill_callback(trs->nic[intf_i].vi_rs);
+  }
+
+  /* stop postponed packet allocations */
+  destroy_workqueue(trs->wq);
 
   OO_DEBUG_TCPH(ci_log("%s [%d]: finished --- all async processes finished",
                        __FUNCTION__, trs->id));
@@ -2052,6 +2648,7 @@ tcp_helper_dtor(tcp_helper_resource_t* trs)
   }
 #endif
 
+  release_netif_hw_resources(trs);
   release_netif_resources(trs);
 
   rc = ci_id_pool_free(&THR_TABLE.instances, trs->id, &THR_TABLE.lock);
@@ -2088,7 +2685,7 @@ efab_tcp_driver_ctor(unsigned max_macs, unsigned max_layer2_interfaces,
   }
 
   /* Create work queue */
-  if ((rc = ci_workqueue_ctor(&CI_GLOBAL_WORKQUEUE)) < 0)
+  if ((rc = ci_workqueue_ctor(&CI_GLOBAL_WORKQUEUE, "onload-wqueue")) < 0)
     goto fail_wq;
   
   /* Create TCP helpers table */
@@ -2106,7 +2703,6 @@ efab_tcp_driver_ctor(unsigned max_macs, unsigned max_layer2_interfaces,
   /* Construct the IP ID allocator */
   efab_ipid_ctor(&efab_tcp_driver.ipid);
 
-
   ci_atomic_set(&efab_tcp_driver.sendpage_pinpages_n, 0);
   /* This is was (EFHW_BUFFER_TBL_NUM >> 1), but the size is no longer
   ** known at compile time.  But the pinned-page stuff is on its way out,
@@ -2114,6 +2710,8 @@ efab_tcp_driver_ctor(unsigned max_macs, unsigned max_layer2_interfaces,
   efab_tcp_driver.sendpage_pinpages_max = 4096;
 
   efab_tcp_driver.file_refs_to_drop = NULL;
+  ci_workitem_init(&efab_tcp_driver.file_refs_work_item,
+                   oo_file_ref_drop_list_now, NULL);
 
   efab_tcp_driver.stack_list_seq = 0;
   ci_waitq_ctor(&efab_tcp_driver.stack_list_wq);
@@ -2155,7 +2753,6 @@ efab_tcp_driver_dtor(void)
            __FUNCTION__, ci_atomic_read(&efab_tcp_driver.sendpage_pinpages_n));
   }
 #endif
-
 
   efab_ipid_dtor(&efab_tcp_driver.ipid);
   oof_onload_dtor(&efab_tcp_driver);
@@ -2407,7 +3004,8 @@ efab_tcp_helper_more_bufs_failed(tcp_helper_resource_t* trs, int rc)
 static int 
 efab_tcp_helper_iobufset_alloc(tcp_helper_resource_t* trs,
                                struct oo_iobufset** all_out,
-                               struct oo_buffer_pages** pages_out)
+                               struct oo_buffer_pages** pages_out,
+                               uint64_t* hw_addrs)
 {
   ci_netif* ni = &trs->netif;
   int rc, intf_i;
@@ -2421,26 +3019,24 @@ efab_tcp_helper_iobufset_alloc(tcp_helper_resource_t* trs,
   *pages_out = NULL;
 
 #ifdef OO_DO_HUGE_PAGES
-  BUILD_BUG_ON(CI_CFG_PKTS_PER_SET_S - ((CI_CFG_PKT_BUF_SIZE == PAGE_SIZE) ? 0 : 1)
-               != HPAGE_SHIFT - PAGE_SHIFT);
+  BUILD_BUG_ON(HW_PAGES_PER_SET_S != HPAGE_SHIFT - PAGE_SHIFT);
 #endif
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-  flags = ni->huge_pages_flag;
-#else
-  flags = 0;
+  if( ci_geteuid() == ni->euid )
+    flags = ni->huge_pages_flag;
+  else
 #endif
-  rc = oo_iobufset_pages_alloc(CI_CFG_PKTS_PER_SET_S -
-                               ((CI_CFG_PKT_BUF_SIZE == PAGE_SIZE) ? 0 : 1),
-                               &flags, &pages);
+  flags = 0;
+  rc = oo_iobufset_pages_alloc(HW_PAGES_PER_SET_S, &flags, &pages);
   if( rc != 0 )
     return rc;
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-    if( (flags ^ ni->huge_pages_flag) ==
-        OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED ) {
+    if( (flags & OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED) &&
+        !(ni->huge_pages_flag & OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED) ) {
       ci_log("[%s]: unable to allocate huge page, using standard pages instead",
              ni->state->pretty_name);
+      ni->huge_pages_flag = flags;
     }
-    ni->huge_pages_flag = flags;
 #endif
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
@@ -2451,10 +3047,13 @@ efab_tcp_helper_iobufset_alloc(tcp_helper_resource_t* trs,
       ci_assert(first_iobuf);
       all_out[intf_i] = first_iobuf;
       o_iobufset_resource_ref(first_iobuf);
+      memcpy(&hw_addrs[intf_i * (1 << HW_PAGES_PER_SET_S)], hw_addrs,
+             sizeof(hw_addrs[0]) * (1 << HW_PAGES_PER_SET_S));
       continue;
     }
 
-    rc = oo_iobufset_resource_alloc(pages, pd, &iobuf);
+    rc = oo_iobufset_resource_alloc(pages, pd, &iobuf,
+                        &hw_addrs[intf_i * (1 << HW_PAGES_PER_SET_S)]);
     if( rc < 0 ) {
       OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
         if( all_out[intf_i] != NULL )
@@ -2479,12 +3078,29 @@ efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs)
 {
   struct oo_iobufset* iobrs[CI_CFG_MAX_INTERFACES];
   struct oo_buffer_pages* pages;
+  uint64_t *hw_addrs;
   ci_irqlock_state_t lock_flags;
   ci_netif* ni = &trs->netif;
   ci_netif_state* ns = ni->state;
   int i, rc, bufset_id, intf_i;
 
-  rc = efab_tcp_helper_iobufset_alloc(trs, iobrs, &pages);
+  ci_assert(ci_netif_is_locked(ni));
+
+  if( in_atomic() && trs->avoid_atomic_allocations ) {
+    /* this work item may be already in this workqueue,
+     * so do not check rc */
+    queue_work(trs->wq, &trs->non_atomic_work);
+    return -EBUSY;
+  }
+
+  hw_addrs = ci_alloc(sizeof(uint64_t) * (1 << HW_PAGES_PER_SET_S) *
+                      CI_CFG_MAX_INTERFACES);
+  if( hw_addrs == NULL ) {
+    ci_log("%s: [%d] out of memory", __func__, trs->id);
+    return -ENOMEM;
+  }
+
+  rc = efab_tcp_helper_iobufset_alloc(trs, iobrs, &pages, hw_addrs);
   if(CI_UNLIKELY( rc < 0 )) {
     /* Fixme: with highly fragmented memory, iobufset_alloc may fail in
      * atomic context but succeed later in non-atomic context.
@@ -2493,6 +3109,7 @@ efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs)
      * entries).
      * */
     efab_tcp_helper_more_bufs_failed(trs, rc);
+    ci_free(hw_addrs);
     return rc;
   }
   /* check we get the size we are expecting */
@@ -2510,6 +3127,7 @@ efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs)
       OO_DEBUG_ERR(ci_log("%s: weirdness n=%d max=%d freepkts=%d", __FUNCTION__,
                           ni->pkt_sets_n, ni->pkt_sets_max,
                           OO_PP_FMT(ni->state->freepkts)));
+      ci_free(hw_addrs);
       return -EIO;
     }
 
@@ -2539,24 +3157,22 @@ efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs)
     pkt = __PKT(ni, pp);
     OO_PKT_PP_INIT(pkt, id);
 
-    pkt->refcount = 0;
-    pkt->n_buffers = 1;
     pkt->flags = 0;
-    pkt->frag_next = OO_PP_NULL;
+    __ci_netif_pkt_clean(pkt);
+    pkt->refcount = 0;
     pkt->stack_id = trs->id;
-
     OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
-      pkt->base_addr[intf_i] =
-          oo_iobufset_hw_addr(iobrs[intf_i],
-                              i * CI_CFG_PKT_BUF_SIZE + PKT_START_OFF());
+      pkt->dma_addr[intf_i] = hw_addrs[(intf_i) * (1 << HW_PAGES_PER_SET_S) +
+                                       i / PKTS_PER_HW_PAGE] +
+        CI_CFG_PKT_BUF_SIZE * (i % PKTS_PER_HW_PAGE) +
+        CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
     }
-    pkt->base_offset = 0;
-
 
     pkt->next = ni->state->freepkts;
     ns->freepkts = OO_PKT_P(pkt);
     ++ns->n_freepkts;
   }
+  ci_free(hw_addrs);
 
   CHECK_FREEPKTS(ni);
   return 0;
@@ -2606,12 +3222,8 @@ tcp_helper_rm_nopage_pkts(tcp_helper_resource_t* trs, void* opaque,
   ci_netif* ni = &trs->netif;
 
   if( ! ni->buf_pages[bufset_id] ) {
-#if !CI_CFG_MMAP_EACH_PKTSET
-    /* Linux walks VMAs on core dump, suppress the message */
-    if( ~current->flags & PF_DUMPCORE )
-#endif
-      OO_DEBUG_ERR(ci_log("%s: %u BAD offset=%lx bufset_id=%d",
-	__FUNCTION__, trs->id, offset, bufset_id));
+    OO_DEBUG_ERR(ci_log("%s: %u BAD offset=%lx bufset_id=%d",
+                        __FUNCTION__, trs->id, offset, bufset_id));
     return (unsigned) -1;
   }
 
@@ -2633,22 +3245,15 @@ tcp_helper_rm_nopage(tcp_helper_resource_t* trs, void* opaque,
       return tcp_helper_rm_nopage_mem(trs, opaque, offset);
     case CI_NETIF_MMAP_ID_IOBUFS:
       return tcp_helper_rm_nopage_iobuf(trs, opaque, offset);
-#if !CI_CFG_MMAP_EACH_PKTSET
-    case CI_NETIF_MMAP_ID_PKTS:
-      return tcp_helper_rm_nopage_pkts(trs, opaque, offset);
-
     case CI_NETIF_MMAP_ID_IO:
-    default:
       ci_log("%s: map_id:%d", __FUNCTION__, map_id);
       ci_assert(0);
       return (unsigned) -1;
-#else
     default:
       return tcp_helper_rm_nopage_pkts(trs, opaque,
                                        offset +
                                        (map_id - CI_NETIF_MMAP_ID_PKTS) *
                                        CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET);
-#endif
   }
 
   /* We currently provide no nopage support for dynamic ep_bufs or
@@ -2735,29 +3340,6 @@ tcp_helper_rm_dump(int fd_type, oo_sp sock_id,
 
 /*--------------------------------------------------------------------
  *!
- * We have the lock - run the stack
- *
- *--------------------------------------------------------------------*/
-
-
-
-/*--------------------------------------------------------------------
- *!
- * Eventq get lock, do callback
- *    - try and get lock and if we can poll the stack
- *
- * \param rs            TCP helper resource
- * \param prime_async   request wakeup?
- *
- * \return              > 0 - stack polled
- *                      = 0 - stack not polled
- *                      < 0 - quit eventq_callback will complete later
- *
- *--------------------------------------------------------------------*/
-
-
-/*--------------------------------------------------------------------
- *!
  * Eventq callback
  *    - call OS dependent code to try and poll the stack
  *    - reprime timer and/of request wakeup if needed
@@ -2777,7 +3359,7 @@ static void tcp_helper_wakeup(tcp_helper_resource_t* trs, int intf_i)
   ci_bit_clear(&ni->state->evq_primed, intf_i);
 
   /* Don't reprime if someone is spinning -- let them poll the stack. */
-  prime_async = ! ni->state->is_spinner;
+  prime_async = ! ci_netif_is_spinner(ni);
 
   if( ci_netif_intf_has_event(ni, intf_i) ) {
     if( efab_tcp_helper_netif_try_lock(trs) ) {
@@ -2941,22 +3523,7 @@ static void oo_handle_wakeup_int_driven(void* context, int is_timeout,
  *--------------------------------------------------------------------*/
 
 /*** Linux ***/
-/* We can't use tasklet as timer if efrm_vf_use_threaded_irq=1,
- * since this tasklet does the same work as irq hanlder. */
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-static int 
-linux_set_periodic_timer_wq(tcp_helper_resource_t* rs) 
-{
-  unsigned long t = net_random() % CI_TCP_HELPER_PERIODIC_FLOAT_T;
-
-  if (atomic_read(&rs->timer_running) == 0) 
-    return 0;
-
-  return queue_delayed_work(rs->timer.wq.wq, &rs->timer.wq.work,
-                            (CI_TCP_HELPER_PERIODIC_BASE_T) + t);
-}
-#endif
 
 static int 
 linux_set_periodic_timer_tasklet(tcp_helper_resource_t* rs) 
@@ -2966,7 +3533,7 @@ linux_set_periodic_timer_tasklet(tcp_helper_resource_t* rs)
   if (atomic_read(&rs->timer_running) == 0) 
     return 0;
 
-  return mod_timer(&rs->timer.bh.timer,
+  return mod_timer(&rs->timer,
                    jiffies + (CI_TCP_HELPER_PERIODIC_BASE_T) + t);
 }
 
@@ -3000,6 +3567,13 @@ linux_tcp_timer_do(tcp_helper_resource_t* rs)
       CITP_STATS_NETIF_INC(ni, periodic_lock_contends);
     }
   }
+
+  /* Monitor number of free packets  */
+  if( rs->avoid_atomic_allocations &&
+      NI_OPTS(ni).max_packets > (ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S) &&
+      ni->state->n_freepkts < NI_OPTS(ni).free_packets_low /2 ) {
+    queue_work(rs->wq, &rs->non_atomic_work);
+  }
 }
 
 static void
@@ -3008,22 +3582,6 @@ linux_tcp_timer_tasklet(unsigned long l)
   tcp_helper_resource_t* rs = (tcp_helper_resource_t*)l;
   linux_tcp_timer_do(rs);
 }
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-static void
-linux_tcp_timer_wq(struct work_struct *work)
-{
-#if !defined(EFX_NEED_WORK_API_WRAPPERS)
-  tcp_helper_resource_t* rs = container_of(work, tcp_helper_resource_t,
-                                           timer.wq.work.work);
-#else
-  tcp_helper_resource_t* rs = container_of(work, tcp_helper_resource_t,
-                                           timer.wq.work);
-#endif
-  linux_tcp_timer_do(rs);
-  linux_set_periodic_timer_wq(rs);
-}
-#endif
 
 static void
 linux_tcp_helper_periodic_timer(unsigned long l)
@@ -3034,7 +3592,7 @@ linux_tcp_helper_periodic_timer(unsigned long l)
 
   OO_DEBUG_VERB(ci_log("linux_tcp_helper_periodic_timer: fired"));
 
-  tasklet_schedule(&rs->timer.bh.tasklet);
+  tasklet_schedule(&rs->tasklet);
   linux_set_periodic_timer_tasklet(rs);
 }
 
@@ -3043,27 +3601,13 @@ tcp_helper_initialize_and_start_periodic_timer(tcp_helper_resource_t* rs)
 {
   atomic_set(&rs->timer_running, 1);
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-  if( efrm_vf_use_threaded_irq &&
-      NI_OPTS(&rs->netif).packet_buffer_mode == CITP_PKTBUF_MODE_VF ) {
-    snprintf(rs->timer.wq.name, sizeof(rs->timer.wq.name), "onload:%s-timer",
-             rs->netif.state->pretty_name);
-    rs->timer.wq.wq = create_singlethread_workqueue(rs->timer.wq.name);
-    INIT_DELAYED_WORK(&rs->timer.wq.work, &linux_tcp_timer_wq);
+  init_timer(&rs->timer);
+  rs->timer.function = &linux_tcp_helper_periodic_timer;
+  rs->timer.data = (unsigned long) rs;
+  tasklet_init(&rs->tasklet, &linux_tcp_timer_tasklet,
+               (unsigned long)rs);
 
-    linux_set_periodic_timer_wq(rs);
-  }
-  else
-#endif
-  {
-    init_timer(&rs->timer.bh.timer);
-    rs->timer.bh.timer.function = &linux_tcp_helper_periodic_timer;
-    rs->timer.bh.timer.data = (unsigned long) rs;
-    tasklet_init(&rs->timer.bh.tasklet, &linux_tcp_timer_tasklet,
-                 (unsigned long)rs);
-
-    linux_set_periodic_timer_tasklet(rs);
-  }
+  linux_set_periodic_timer_tasklet(rs);
 }
 
 
@@ -3072,22 +3616,8 @@ tcp_helper_stop_periodic_timer(tcp_helper_resource_t* rs)
 {
   atomic_set(&rs->timer_running, 0);
 
-#ifdef CONFIG_SFC_RESOURCE_VF
-  if( efrm_vf_use_threaded_irq &&
-      NI_OPTS(&rs->netif).packet_buffer_mode == CITP_PKTBUF_MODE_VF ) {
-    /* See Bug30934 for why two flushes are needed */
-    flush_workqueue(rs->timer.wq.wq); /* it may re-spawn the work item */
-    cancel_delayed_work(&rs->timer.wq.work);
-    flush_workqueue(rs->timer.wq.wq); /* can't re-spawn since timer_running=0 */
-
-    destroy_workqueue(rs->timer.wq.wq);
-  }
-  else
-#endif
-  {
-    del_timer_sync(&rs->timer.bh.timer);
-    tasklet_kill(&rs->timer.bh.tasklet);
-  }
+  del_timer_sync(&rs->timer);
+  tasklet_kill(&rs->tasklet);
 }
 
 /*--------------------------------------------------------------------*/
@@ -3111,10 +3641,11 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
   ni = &trs->netif;
   tep_p = ci_trs_ep_get(trs, ep_id);
 
-  OO_DEBUG_TCPH(ci_log("%s: [%u] ep %d, trs k_ref_count %d", __FUNCTION__,
+  OO_DEBUG_TCPH(ci_log("%s: [%d:%d] k_ref_count=%d", __FUNCTION__,
                        trs->id, OO_SP_FMT(ep_id), trs->k_ref_count));
 
   ci_assert(!(SP_TO_WAITABLE(ni, ep_id)->sb_aflags & CI_SB_AFLAG_ORPHAN));
+  ci_assert(! in_atomic());
 
   /* Drop ref to the OS socket.  Won't necessarily be the last reference to it;
    * there may also be one from the filter, and others from dup'd or forked
@@ -3149,22 +3680,19 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
 
   /* set flag in eplock to signify callback needed when netif unlocked */
 
-  while( 1 )
-    if( efab_tcp_helper_netif_try_lock(trs) ) {
-      OO_DEBUG_TCPH( ci_log("%s [%u]: closing ep %d",
-                            __FUNCTION__, trs->id, OO_SP_FMT(ep_id)) );
-      tcp_helper_close_pending_endpoints(trs);
-      efab_tcp_helper_netif_unlock(trs);
-      break;
-    }
-    else if( ef_eplock_set_flag_if_locked(&ni->state->lock,
-                                          CI_EPLOCK_NETIF_CLOSE_ENDPOINT) ) {
-      break;
-    }
-    else if( oo_trusted_lock_set_flags_if_locked(trs,
-                                           OO_TRUSTED_LOCK_CLOSE_ENDPOINT) ) {
-      break;
-    }
+  if( efab_tcp_helper_netif_lock_or_set_flags(trs,
+                                            OO_TRUSTED_LOCK_CLOSE_ENDPOINT,
+                                            CI_EPLOCK_NETIF_CLOSE_ENDPOINT) ) {
+    OO_DEBUG_TCPH(ci_log("%s: [%d:%d] closing now",
+                         __FUNCTION__, trs->id, OO_SP_FMT(ep_id)));
+    ci_assert(! in_atomic());
+    tcp_helper_close_pending_endpoints(trs);
+    efab_tcp_helper_netif_unlock(trs);
+  }
+  else {
+    OO_DEBUG_TCPH(ci_log("%s: [%d:%d] closing deferred to lock holder",
+                         __FUNCTION__, trs->id, OO_SP_FMT(ep_id)));
+  }
 
   if( efab_tcp_driver.file_refs_to_drop != NULL )
     oo_file_ref_drop_list_now(NULL);
@@ -3186,8 +3714,7 @@ void generic_tcp_helper_close(ci_private_t* priv)
     linux_tcp_helper_fop_fasync(-1, ci_privf(priv), 0);
   }
 
-
-   efab_tcp_helper_close_endpoint(trs, ep->id);
+ efab_tcp_helper_close_endpoint(trs, ep->id);
 }
 
 
@@ -3223,7 +3750,7 @@ efab_attach_os_socket(tcp_helper_endpoint_t* ep, struct file* os_file)
                         os_file));
     return -EBUSY;
   }
-
+  
   ep->os_socket = os_socket;
   if( SP_TO_WAITABLE(&ep->thr->netif, ep->id)->state == CI_TCP_STATE_UDP )
     efab_tcp_helper_os_pollwait_register(ep);
@@ -3235,37 +3762,6 @@ efab_attach_os_socket(tcp_helper_endpoint_t* ep, struct file* os_file)
 /**********************************************************************
 ***************** Wakeups, callbacks, signals, events. ****************
 **********************************************************************/
-
-static void do_netif_callback(tcp_helper_resource_t* thr,
-			      tcp_helper_endpoint_t* ep)
-{
-  citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(&thr->netif, ep->id);
-  void (*fn)(void* arg, int why) = thr->callback_fn;
-
-  if( fn == NULL )
-    return;
-
-  if( wo->waitable.callback_armed ) {
-    /* Callbacks are only armed on TCP sockets. */
-    if( tcp_rcv_usr(&wo->tcp) > (unsigned) wo->sock.so.rcvlowat ) {
-      wo->waitable.callback_armed = CI_FALSE; /* deregister */
-      fn(CI_USER_PTR_GET(wo->waitable.callback_arg),
-         CI_TCP_HELPER_CALLBACK_RX_DATA);
-    }
-    else if( (wo->waitable.state & CI_TCP_STATE_ACCEPT_DATA) == 0 ) {
-      wo->waitable.callback_armed = CI_FALSE; /* deregister */
-      fn(CI_USER_PTR_GET(wo->waitable.callback_arg),
-         CI_TCP_HELPER_CALLBACK_CLOSED);
-      ci_assert(!wo->waitable.callback_armed);
-    }
-    else {
-      /* Not enough data yet - ensure we keep getting notified. */
-      ci_bit_set(&wo->waitable.wake_request, CI_SB_FLAG_WAKE_RX_B);
-      tcp_helper_request_wakeup(thr);
-    }
-  }
-}
-
 
 void tcp_helper_endpoint_wakeup(tcp_helper_resource_t* thr,
                                 tcp_helper_endpoint_t* ep)
@@ -3285,17 +3781,15 @@ void tcp_helper_endpoint_wakeup(tcp_helper_resource_t* thr,
   w->sb_flags = 0;
   /* Check to see if application has requested ASYNC notification */
   if( ep->fasync_queue ) {
-    LOG_TV(ci_log(NWS_FMT "async notification sig=%d sigown=%d",
-                  NWS_PRI_ARGS(&thr->netif, w), w->sigsig, w->sigown));
-    kill_fasync(&ep->fasync_queue, w->sigsig ? w->sigsig : SIGIO, POLL_IN);
+    LOG_TV(ci_log(NWS_FMT "async notification sigown=%d",
+                  NWS_PRI_ARGS(&thr->netif, w), w->sigown));
+    kill_fasync(&ep->fasync_queue, SIGIO, POLL_IN);
     CITP_STATS_NETIF_INC(&thr->netif, sock_wakes_signal);
     if( w->sigown )
       /* Ensure we keep getting notified. */
       ci_bit_set(&w->wake_request, CI_SB_FLAG_WAKE_RX_B);
   }
 }
-
-
 
 
 static void
@@ -3319,8 +3813,6 @@ wakeup_post_poll_list(tcp_helper_resource_t* thr)
     ci_ni_dllist_remove_safe(ni, &w->post_poll_link);
     ep = ci_netif_get_valid_ep(ni, W_SP(w));
     tcp_helper_endpoint_wakeup(thr, ep);
-    if( thr->callback_fn )
-      do_netif_callback(thr, ep);
   }
 }
 
@@ -3350,6 +3842,8 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint32 lock_val)
 {
   tcp_helper_resource_t* thr = CI_CONTAINER(tcp_helper_resource_t,
                                             netif.eplock_helper, epl);
+  const unsigned all_after_unlock_flags = (CI_EPLOCK_NETIF_NEED_PRIME |
+                                           CI_EPLOCK_NETIF_PKT_WAKE);
   ci_netif* ni = &thr->netif;
   unsigned flags_set, clear_flags;
   unsigned after_unlock_flags = 0;
@@ -3394,13 +3888,37 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint32 lock_val)
       CITP_STATS_NETIF(++ni->state->stats.unlock_slow_wake);
     }
 
-    if( flags_set & CI_EPLOCK_NETIF_CLOSE_ENDPOINT ) {
-      tcp_helper_close_pending_endpoints(thr);
-      CITP_STATS_NETIF(++ni->state->stats.unlock_slow_close);
-    }
-
     if( flags_set & CI_EPLOCK_NETIF_RESET_STACK )
       tcp_helper_reset_stack_locked(thr);
+
+    if( flags_set & CI_EPLOCK_NETIF_CLOSE_ENDPOINT ) {
+      if( oo_trusted_lock_lock_or_set_flags(thr,
+                                            OO_TRUSTED_LOCK_CLOSE_ENDPOINT) ) {
+        /* We've got both locks.  If in non-atomic context, do the work,
+         * else defer work and locks to workitem.
+         */
+        if( in_atomic() ) {
+          OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to workitem",
+                               __FUNCTION__, thr->id));
+          ci_atomic32_or(&thr->trs_aflags, OO_THR_AFLAG_CLOSE_ENDPOINTS);
+          queue_work(thr->wq, &thr->non_atomic_work);
+          if( after_unlock_flags & all_after_unlock_flags )
+            ef_eplock_holder_set_flags(&ni->state->lock,
+                                 after_unlock_flags & all_after_unlock_flags);
+          return 0;
+        }
+        OO_DEBUG_TCPH(ci_log("%s: [%u] CLOSE_ENDPOINT now",
+                             __FUNCTION__, thr->id));
+        tcp_helper_close_pending_endpoints(thr);
+        oo_trusted_lock_drop(thr);
+        CITP_STATS_NETIF(++ni->state->stats.unlock_slow_close);
+      }
+      else {
+        /* Trusted lock holder now responsible for non-atomic work. */
+        OO_DEBUG_TCPH(ci_log("%s: [%u] defer CLOSE_ENDPOINT to trusted lock",
+                             __FUNCTION__, thr->id));
+      }
+    }
 
   } while ( !ef_eplock_try_unlock(&ni->state->lock, &lock_val,
                                   CI_EPLOCK_NETIF_KERNEL_FLAGS |
@@ -3411,7 +3929,6 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint32 lock_val)
    * forever!
    */
   ni->state->defer_work_count = 0;
-
 
   if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME ) {
     if( NI_OPTS(ni).int_driven ) {
@@ -3431,6 +3948,10 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint32 lock_val)
     CITP_STATS_NETIF_INC(&thr->netif, pkt_wakes);
     ci_waitq_wakeup(&thr->pkt_waitq);
   }
+
+  /* ALERT!  If [after_unlock_flags] is used for any more flags, they must
+   * be included in all_after_unlock_flags above!
+   */
 
   return lock_val;
 }

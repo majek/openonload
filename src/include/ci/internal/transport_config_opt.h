@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,9 +60,9 @@
 #define CI_CFG_MAX_BLACKLIST_INTERFACES 4
 
 /* Some defaults.  These can be overridden at runtime. */
-#define CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT 10
+#define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<10)
 /* The real max for endpoint order */
-#define CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT_MAX 15
+#define CI_CFG_NETIF_MAX_ENDPOINTS_MAX (1<<15)
 
 /* ANVL assumes the 2MSL time is 60 secs. Set slightly smaller */
 #define CI_CFG_TCP_TCONST_MSL		25
@@ -302,11 +302,6 @@
 /* Implement socket pointers as actual pointers. */
 #define CI_CFG_SOCKP_IS_PTR             0
 
-# define CI_CFG_CHIMNEY                 0
-
-/* Set to 1 if falcon is configured to deliver the RSS hash. */
-#define CI_CFG_RSS_HASH                1
-
 /* Enable invariant checking on entry/exit to library (sockcall intercept) */
 #define CI_CFG_FDTABLE_CHECKS          0
 
@@ -338,21 +333,32 @@
 #define CI_CFG_UDP_SNDBUF_MAX		131071
 #define CI_CFG_UDP_RCVBUF_MAX		131071
 
-#ifdef SOCK_MIN_SNDBUF
-# define CI_CFG_UDP_SNDBUF_MIN		SOCK_MIN_SNDBUF
-#else
-#  define CI_CFG_UDP_SNDBUF_MIN		2048
-#endif
+/*
+**These values are chosen to match the Linux definition of 
+**SOCK_MIN_SNDBUF and SOCK_MIN_RCVBUF
+*/
+# ifndef SOCK_MIN_SNDBUF
+#  define CI_SOCK_MIN_SNDBUF               2048
+# else
+#  define CI_SOCK_MIN_SNDBUF               SOCK_MIN_SNDBUF
+# endif
+# ifndef SOCK_MIN_RCVBUF
+#  define CI_SOCK_MIN_RCVBUF               256
+# else
+#  define CI_SOCK_MIN_RCVBUF               SOCK_MIN_RCVBUF
+# endif
 
-# define CI_CFG_UDP_RCVBUF_MIN		256
+
+#define CI_CFG_UDP_SNDBUF_MIN	        CI_SOCK_MIN_SNDBUF
+#define CI_CFG_UDP_RCVBUF_MIN		CI_SOCK_MIN_RCVBUF
 
 /* TCP sndbuf */
-#define CI_CFG_TCP_SNDBUF_MIN		0
+#define CI_CFG_TCP_SNDBUF_MIN	        CI_SOCK_MIN_SNDBUF
 # define CI_CFG_TCP_SNDBUF_DEFAULT	65535
 #define CI_CFG_TCP_SNDBUF_MAX		65535
 
-/* Receive buffer should be large enough to keep one jumbo frame */
-#define CI_CFG_TCP_RCVBUF_MIN		10240
+#define CI_CFG_TCP_RCVBUF_MIN           CI_SOCK_MIN_RCVBUF
+
 # define CI_CFG_TCP_RCVBUF_DEFAULT	65535
 #define CI_CFG_TCP_RCVBUF_MAX		65535
 
@@ -640,9 +646,6 @@
 /* Teaming support in OpenOnload */
 #define CI_CFG_TEAMING 1
 
-/* Time (usecs) between calling clock_gettime() to resync SO_TIMESTAMP clock */
-#define CI_CFG_TIMESTAMP_RESYNC_TIME 1000000
-
 /* Allow the TCP RX path to assume it holds the only reference to packets. */
 #define CI_CFG_TCP_RX_1REF  0
 
@@ -667,33 +670,10 @@
 /* Support for reducing ACK rate at high throughput to improve efficiency */
 #define CI_CFG_DYNAMIC_ACK_RATE 1
 
-/* Mmap each packet set from kernel to userspace separately.
- * CI_CFG_MMAP_EACH_PKTSET=0 is going to be removed sooner or later.
- *
- * In Linux, this is necessary for huge pages, since huge pages
- * should be mmaped separately.  If you are not going to use huge pages,
- * feel set this to 0 to speed up non-huge mappings.
- *
- * Solaris needs this to 1.
- */
-#define CI_CFG_MMAP_EACH_PKTSET 1
-
 /* Allocate packets in huge pages when possible */
-#if defined(__linux__) && CI_CFG_MMAP_EACH_PKTSET
 /* Can be turned off.  Does not really work unless your kernel has
- * CONFIG_HUGETLB_PAGE on and your kernel is 64-bit. */
+ * CONFIG_HUGETLB_PAGE on and your kernel is x86_64. */
 #define CI_CFG_PKTS_AS_HUGE_PAGES 1
-#else
-/* Huge pages are not supported on non-linux or
- * with CI_CFG_MMAP_EACH_PKTSET=0 */
-#define CI_CFG_PKTS_AS_HUGE_PAGES 0
-#endif
-
-/* Compatibility check */
-#if CI_CFG_PKTS_AS_HUGE_PAGES && \
-    (!defined(__linux__) || !CI_CFG_MMAP_EACH_PKTSET)
-#error "Incompatible CI_CFG settings"
-#endif
 
 
 /* Page=4KiB=2pkts; huge page=2MiB=2^10pkts.
@@ -715,9 +695,9 @@
 #define CI_CFG_MAX_PKT_SETS 1024
 #endif
 
-
-
-
+/* Whether to include code to transmit small packets via PIO */
+#define CI_CFG_PIO 1
+#define CI_CFG_MIN_PIO_BLOCK_ORDER 7
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */

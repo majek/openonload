@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,8 +28,10 @@
  * - CI_NETIF_MMAP_ID_IOBUFS
  *   VI resource: queues
  *   + if CI_CFG_PKTS_AS_HUGE_PAGES=1, mmap pkt_shm_id array
+ * - CI_NETIF_MMAP_ID_PIO
+ *   VI resource: PIO IO BAR
  * - CI_NETIF_MMAP_ID_PKTS + packet set id
- *   packet sets, see CI_CFG_MMAP_EACH_PKTSET for details
+ *   packet sets
  *
  * Offset for each area is CI_NETIF_MMAP_ID_* << CI_NETIF_MMAP_ID_SHIFT
  * In Linux, area size may be larger than 1<<CI_NETIF_MMAP_ID_SHIFT,
@@ -39,10 +41,11 @@
 #define CI_NETIF_MMAP_ID_STATE    0
 #define CI_NETIF_MMAP_ID_IO       1
 #define CI_NETIF_MMAP_ID_IOBUFS   2
-#define CI_NETIF_MMAP_ID_PKTS     3
-#if CI_CFG_MMAP_EACH_PKTSET
-#define CI_NETIF_MMAP_ID_PKTSET(id) (CI_NETIF_MMAP_ID_PKTS+(id))
+#if CI_CFG_PIO
+#define CI_NETIF_MMAP_ID_PIO      3
 #endif
+#define CI_NETIF_MMAP_ID_PKTS     4
+#define CI_NETIF_MMAP_ID_PKTSET(id) (CI_NETIF_MMAP_ID_PKTS+(id))
 
 /* Mmap start should be aligned by page, so
  * CI_NETIF_MMAP_ID_SHIFT >= CI_PAGE_SHIFT.

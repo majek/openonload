@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,6 +77,7 @@
 #include <linux/inetdevice.h>
 /* Compat just for RHEL4 clock_t_to_jiffies() */
 #include <linux/times.h>
+#include "../linux_resource/kernel_compat.h"
 
 
 
@@ -85,9 +86,8 @@
 #define FALSE 0
 #endif
 
-
 /* Buffer size for netlink messages.  Largest tables are neighbour and
- *  * route cache, and it will be nice to fit these tables into the buffer. */
+ * route cache, and it will be nice to fit these tables into the buffer. */
 #define NL_BUFSIZE 16384
 
 
@@ -116,6 +116,7 @@
 #define CICPOS_PROCFS_FILE_IPIF    "mib-ipif"
 #define CICPOS_PROCFS_FILE_FWDINFO "mib-fwd"
 #define CICPOS_PROCFS_FILE_BONDINFO "mib-bond"
+#define CICPOS_PROCFS_FILE_PMTU    "mib-pmtu"
 
 
 
@@ -259,7 +260,7 @@ void cicp_raw_sock_dtor(struct socket *raw_sock)
 
 
 int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32, 
-                       const char *buf, unsigned int size)
+                       const void* buf, unsigned int size)
 {
   struct msghdr msg;
   struct iovec iov;
@@ -280,7 +281,7 @@ int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
   msg.msg_controllen = 0;
   msg.msg_flags = MSG_DONTWAIT;
 
-  iov.iov_base=(void *)buf;
+  iov.iov_base = (void*) buf;
   iov.iov_len=size;
 
   oldfs = get_fs(); 
@@ -295,7 +296,7 @@ int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
 
 int cicp_raw_sock_send_bindtodev(int ifindex, char *ifname, 
                                  ci_ip_addr_t ip_be32,
-                                 const char *buf, unsigned int size)
+                                 const void* buf, unsigned int size)
 {
   static int last_ifindex = -1;
   struct net_device *dev = NULL;
@@ -364,7 +365,7 @@ static cicp_bufpool_t *cicppl_pktpool = NULL;
 static int 
 cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
 {
-  ci_ip_pkt_fmt *dst_pkt;
+  struct cicp_bufpool_pkt* dst_pkt;
   int dst_pktid;
   int rc;
 
@@ -377,7 +378,7 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
   if(dst_pktid < 0) {
     return -ENOBUFS;
   }
-  ci_assert(cicppl_pktbuf_is_valid_id(dst_pktid));
+  ci_assert(cicppl_pktbuf_is_valid_id(cicppl_pktpool, dst_pktid));
 
   /* copy packet from the netif to arp table */
   dst_pkt = cicppl_pktbuf_pkt(cicppl_pktpool, dst_pktid);
@@ -392,10 +393,8 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
 }
 
 
-int
-cicp_raw_ip_send(ci_ip4_hdr* ip, ci_ifid_t ifindex)
+int cicp_raw_ip_send(const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex)
 {
-  int ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
   void* ip_data = (char*) ip + CI_IP4_IHL(ip);
   ci_tcp_hdr* tcp;
   ci_udp_hdr* udp;
@@ -423,10 +422,9 @@ cicp_raw_ip_send(ci_ip4_hdr* ip, ci_ifid_t ifindex)
 
   if( ifindex != CI_IFID_BAD )
     return cicp_raw_sock_send_bindtodev(ifindex, NULL, ip->ip_daddr_be32, 
-                                            (char *)ip, ip_len);
+                                        ip, len);
   else 
-    return cicp_raw_sock_send(cicp_raw_sock, ip->ip_daddr_be32, (char *)ip,
-                              ip_len);
+    return cicp_raw_sock_send(cicp_raw_sock, ip->ip_daddr_be32, ip, len);
 }
 
 
@@ -442,7 +440,7 @@ static void
 cicppl_arp_pkt_tx_queue(void *context)
 {
   struct cicp_raw_sock_work_parcel *wp = context;
-  ci_ip_pkt_fmt *pkt;
+  struct cicp_bufpool_pkt* pkt;
   ci_ip4_hdr* ip;
   int rc;
 
@@ -450,23 +448,16 @@ cicppl_arp_pkt_tx_queue(void *context)
    * if the IP packet that caused the transaction isn't given */
   if (wp->pktid < 0) goto out;
   
-  ci_assert(cicppl_pktbuf_is_valid_id(wp->pktid));
+  ci_assert(cicppl_pktbuf_is_valid_id(cicppl_pktpool, wp->pktid));
 
   pkt = cicppl_pktbuf_pkt(cicppl_pktpool, wp->pktid);
   if (CI_UNLIKELY(pkt == 0)) {
     ci_log("%s: BAD packet %d", __FUNCTION__, wp->pktid);
     goto out;
   }
-  ip = oo_tx_ip_hdr(pkt);
+  ip = (void*) (pkt + 1);
 
-  ci_assert_equal(pkt->n_buffers, 1);
-  ci_assert_gt(pkt->buf_len, ETH_HLEN);
-
-  OO_DEBUG_ARP(ci_log("%s: id=%d, mac=" CI_MAC_PRINTF_FORMAT,
-                  __FUNCTION__, wp->pktid,
-                  CI_MAC_PRINTF_ARGS(oo_ether_dhost(pkt))));
-
-  rc = cicp_raw_ip_send(ip, wp->ifindex);
+  rc = cicp_raw_ip_send(ip, pkt->len, wp->ifindex);
   OO_DEBUG_ARP(ci_log("%s: send packet to "CI_IP_PRINTF_FORMAT" via raw "
                       "socket, rc=%d", __FUNCTION__,
                       CI_IP_PRINTF_ARGS(&ip->ip_daddr_be32), rc));
@@ -559,7 +550,7 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
       cicp_handle_t *control_plane = CICP_HANDLE(netif);
       
       /* from this point onwards, pendable_pktid is an ARP buffer ID */
-      ci_assert(cicppl_pktbuf_is_valid_id(pendable_pktid));
+      ci_assert(cicppl_pktbuf_is_valid_id(cicppl_pktpool, pendable_pktid));
 
       /* now we have a cicp_bufpool_t buffer ID we can call this: */
       *ref_os_rc = cicpplos_pktbuf_defer_send(control_plane, ip,
@@ -595,7 +586,7 @@ cicpplos_ctor(cicp_mibs_kern_t *control_plane)
   int rc;
     
   /* construct ARP table buffers (event queue unused in Linux) */
-  rc = cicppl_pktbuf_ctor(&cicppl_pktpool, /*evq*/NULL);
+  rc = cicppl_pktbuf_ctor(&cicppl_pktpool);
   if (CI_UNLIKELY(rc < 0)) {
     ci_log(CODEID": ERROR - couldn't construct ARP table buffers, rc=%d",
            -rc);
@@ -787,24 +778,17 @@ ci_route_scope_str(int scope) {
 }
 
 
-extern int 
-cicp_stat_read_proc(char *buf, char **start, off_t offset, int count,
-		    int *eof, void *caller_info)
-{   int len=0;
-    cicp_stat_t *statp = &(procfs_control_plane(caller_info)->stat);
+static int 
+cicp_stat_read_proc(struct seq_file *seq, void *s)
+{
+    cicp_stat_t *statp = &(procfs_control_plane(seq->private)->stat);
     ci_assert(statp);
 
-    (void)start;       /* unused */
-    (void)caller_info; /* unused */
 
-    if (offset != 0)
-	buf[0]='\0';
-    else
-    {
 #define CICP_READ_PROC_PRINT_CTR(counter) \
-  len += snprintf(buf+len, count-len, "%14s = %u\n", #counter, statp->counter)
+  seq_printf(seq, "%14s = %u\n", #counter, statp->counter)
 #define CICP_READ_PROC_PRINT_TIME(timer) \
-  len += snprintf(buf+len, count-len, "%17s = %u\n", #timer, statp->timer)
+  seq_printf(seq, "%17s = %u\n", #timer, statp->timer)
 	/* using snprintf instead of sprintf will fix bug1584 */
 
 	/* Dump the counters */
@@ -826,85 +810,75 @@ cicp_stat_read_proc(char *buf, char **start, off_t offset, int count,
 	CICP_READ_PROC_PRINT_TIME(last_poll_bgn);
 	CICP_READ_PROC_PRINT_TIME(last_poll_end);
 	CICP_READ_PROC_PRINT_TIME(pkt_last_recv);
-	len += snprintf(buf+len, count-len, "%17s = %lu (%dHz)\n",
-			"Time Now", jiffies, HZ);
-    }    
-    return strlen(buf);
+	seq_printf(seq, "%17s = %lu (%dHz)\n", "Time Now", jiffies, HZ);
+    return 0;
 }
-
+static int cicp_stat_open_proc(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicp_stat_read_proc, PDE_DATA(inode));
+}
+const struct file_operations cicp_stat_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicp_stat_open_proc,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 
 
 static int
-cicpos_hwport_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
-                   void *caller_info)
-{   cicp_mibs_kern_t *control_plane = procfs_control_plane(caller_info);
+cicpos_hwport_read(struct seq_file *seq, void *s)
+{   cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
     const cicp_hwport_kmib_t *hwportt = control_plane->hwport_table;
-    int len = 0;
 
-    (void)start;       /* unused */
-    (void)caller_info; /* unused */
-
-    if (offset != 0)
-	buf[0]='\0';
-    else
-    {
 	if (NULL == hwportt)
-	    len += snprintf(buf+len, bufsz-len,
-			    "hardware port table unallocated\n");
+	    seq_printf(seq, "hardware port table unallocated\n");
 	else
 	{   int n = 0;
 	    int nicid;
 
 	    for (nicid = 0; nicid <= CI_HWPORT_ID_MAX; nicid++)
-	    {   const cicp_hwdev_row_t *port_row = &hwportt->nic[nicid];
-		const cicp_hwport_row_t *row = &port_row->port;
+	    {   const cicp_hwport_row_t *row = &hwportt->nic[nicid];
 
-		if (cicp_hwport_row_allocated(row) && len < bufsz)
+		if (cicp_hwport_row_allocated(row))
 		{   CICP_LOCK_BEGIN(control_plane)
 			/* better to use a read lock really */
-			len += snprintf(buf+len, bufsz-len,
-					"nic %02d: max mtu %d\n",
-					nicid, row->max_mtu);
+			seq_printf(seq, "nic %02d: max mtu %d\n",
+				   nicid, row->max_mtu);
 			CICP_LOCK_END
 			n++;
 		}
 	    }
 
-	    if (len < bufsz)
-		len += snprintf(buf+len, bufsz-len, "%d (of %d) allocated\n",
-                                n, CI_HWPORT_ID_MAX+1);
+	    seq_printf(seq, "%d (of %d) allocated\n",
+                       n, CI_HWPORT_ID_MAX+1);
 	}
-    }
-    *eof = TRUE;
-    buf[bufsz-2]='\n'; /* end neatly even if we overran */
-    buf[bufsz-1]='\0';
-    return strlen(buf);
+    return 0;
 }
-
-
+static int cicpos_hwport_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_hwport_read, PDE_DATA(inode));
+}
+static const struct file_operations cicpos_hwport_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_hwport_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 
 static int
-cicpos_llap_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
-                 void *caller_info)
-{   cicp_mibs_kern_t *control_plane = procfs_control_plane(caller_info);
+cicpos_llap_read(struct seq_file *seq, void *s)
+{   cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
 
     const cicp_llap_kmib_t *llapt = control_plane->llap_table;
-    int len = 0;
-	
-    (void)start;       /* unused */
-    (void)caller_info; /* unused */
 
-    if (offset != 0)
-	buf[0]='\0';
-    else
-    {
 	if (NULL == llapt)
-	    len += snprintf(buf+len, bufsz-len,
-			    "link layer access point table unallocated\n");
+	    seq_printf(seq, "link layer access point table unallocated\n");
 	else
 	{   cicp_llap_rowid_t llap_index;
 	    int n = 0;
@@ -914,240 +888,185 @@ cicpos_llap_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
 		 llap_index++)
 	    {   const cicp_llap_row_t *row = &llapt->llap[llap_index];
 
-		if (cicp_llap_row_allocated(row) && len < bufsz)
+		if (cicp_llap_row_allocated(row))
 		{   CICP_LOCK_BEGIN(control_plane)
 			/* better to use a read lock really */
 
-			len += snprintf(buf+len, bufsz-len,
-					"%02d: llap %02d %4s %4s port ",
-					llap_index, row->ifindex, row->name,
-					row->up? "UP ": "DOWN");
+			seq_printf(seq, "%02d: llap %02d %4s %4s port ",
+				   llap_index, row->ifindex, row->name,
+				   row->up? "UP ": "DOWN");
                         if (cicp_llap_row_hasnic(&control_plane->user, row))
-			{   len += 
-                            snprintf(buf+len, bufsz-len, "%1d ", row->hwport);
-			    len += snprintf(buf+len, bufsz-len,
-					    "mac "CI_MAC_PRINTF_FORMAT
-					    " mtu %d",
-					    CI_MAC_PRINTF_ARGS(&row->mac),
-					    row->mtu);
+			{
+                            seq_printf(seq, "%1d ", row->hwport);
+			    seq_printf(seq, "mac "CI_MAC_PRINTF_FORMAT
+				       " mtu %d",
+				       CI_MAC_PRINTF_ARGS(&row->mac),
+				       row->mtu);
 			} else
-			{   len += snprintf(buf+len, bufsz-len,
-					    "X ");
+			{   seq_printf(seq, "X ");
 			}
 			if (row->encapsulation.type & CICP_LLAP_TYPE_VLAN) {
-			    len += snprintf(buf+len, bufsz-len, " VLAN %d",
-					    row->encapsulation.vlan_id);
+			    seq_printf(seq, " VLAN %d",
+				       row->encapsulation.vlan_id);
 			}
 			if (row->encapsulation.type & CICP_LLAP_TYPE_BOND) {
-			    len += snprintf(buf+len, bufsz-len, " BOND HW%d ROW%d",
-					    row->hwport, row->bond_rowid);
+			    seq_printf(seq, " BOND HW%d ROW%d",
+				       row->hwport, row->bond_rowid);
 			}
 			if (row->encapsulation.type & 
 			    CICP_LLAP_TYPE_USES_HASH) {
-			    len += snprintf(buf+len, bufsz-len, " HASH");
+			    seq_printf(seq, " HASH");
 			    if (row->encapsulation.type & 
 				CICP_LLAP_TYPE_XMIT_HASH_LAYER4) {
-				len += snprintf(buf+len, bufsz-len, "-L4");
+				seq_printf(seq, "-L4");
 			    }
 			}
 
-			len += snprintf(buf+len, bufsz-len, "\n");
+			seq_printf(seq, "\n");
 
 		    CICP_LOCK_END
 		    n++;
 		}
 	    }
 
-	    if (len < bufsz)
-		len += snprintf(buf+len, bufsz-len, "%d (of %d) allocated\n",
-                                n, llapt->rows_max);
+	    seq_printf(seq, "%d (of %d) allocated\n", n, llapt->rows_max);
 	}
-    }
-    *eof = TRUE;
-    buf[bufsz-2]='\n'; /* end neatly even if we overran */
-    buf[bufsz-1]='\0';
-    return strlen(buf);
+    return 0;
 }
-
-
-/*
- * Attention: MAC_STR_LENGTH should be more than total length
- *            returned by snprintfs.
- */
-static int
-cicpos_mac_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
-                void *caller_info)
+static int cicpos_llap_open(struct inode *inode, struct file *file)
 {
-    cicp_mibs_kern_t *control_plane = procfs_control_plane(caller_info);
+    return single_open(file, cicpos_llap_read, PDE_DATA(inode));
+}
+static const struct file_operations cicpos_llap_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_llap_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
+
+static void *cicpos_mac_read_start(struct seq_file *seq, loff_t *pos)
+{
+    cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
+    const cicp_mac_mib_t *umact = control_plane->user.mac_utable;
+    if (umact == NULL)
+      return NULL;
+    return (*pos <= cicp_mac_mib_rows(umact)) ? pos : NULL;
+}
+static void *cicpos_mac_read_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+    (*pos)++;
+    return cicpos_mac_read_start(seq, pos);
+}
+static void cicpos_mac_read_stop(struct seq_file *seq, void *s)
+{
+}
+static int
+cicpos_mac_read(struct seq_file *seq, void *s)
+{
+    cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
     const cicp_mac_mib_t *umact = control_plane->user.mac_utable;
     const cicp_mac_kmib_t *kmact = control_plane->mac_table;
+    cicp_mac_rowid_t mac_index = *(loff_t *)s;
 
-    /*const cicp_mac_kmib_t *kmact = control_plane->mac_table;*/
-
-    int len = 0;
-    int entries;
-    int str_end;
-    int n = 0;
-    off_t offset_orig = offset;
-
-    cicp_mac_rowid_t mac_index = 0;
-
-    (void)caller_info; /* unused */
-
-    memset(buf, ' ', bufsz);
-
-#ifdef MAC_STR_LENGTH
-#undef MAC_STR_LENGTH
-#endif
-#define MAC_STR_LENGTH    160
-
-#ifdef MAC_STR_LAST_POS
-#undef MAC_STR_LAST_POS
-#endif
-#define MAC_STR_LAST_POS  (MAC_STR_LENGTH - 1)
-
-    entries = bufsz / MAC_STR_LENGTH;
-
-    if (entries == 0)
+    if (NULL == umact)
     {
-        /* Provided bufsz is insufficient to retrieve whole mac entry */
+        seq_printf(seq, "user address resolution table unallocated\n");
     }
-    else if (NULL == umact)
+    else if (mac_index == cicp_mac_mib_rows(umact))
     {
-        if (offset_orig == 0)
-            len += snprintf(buf+len, bufsz-len,
-                            "user address resolution table unallocated\n");
-        *eof = TRUE;
-    }
-    else
-    {
-        for (mac_index = 0;
-             mac_index < cicp_mac_mib_rows(umact);
+        int n = 0;
+        for (mac_index = 0; mac_index < cicp_mac_mib_rows(umact);
              mac_index++)
-        {
-            const cicp_mac_row_t *row = &umact->ipmac[mac_index];
-            const cicp_mac_kernrow_t *krow = &kmact->entry[mac_index];
-            const cicpos_mac_row_t *sync = &krow->sync;
-
-            if (cicp_mac_row_allocated(row) && len < bufsz)
-            {
-                if (offset >= MAC_STR_LENGTH)
-                {
-                    offset -= MAC_STR_LENGTH;
-                    continue;
-                }
-
-                CICP_LOCK_BEGIN(control_plane)
-		    /* better to use a read lock really */
-
-                    str_end = len + MAC_STR_LAST_POS;
-                    /* user-visible args */
-                    len += snprintf(buf+len, bufsz-len,
-                                    "#%04x: llap %02d %4s"
-                                    " ip "CI_IP_PRINTF_FORMAT
-                                    " mac "CI_MAC_PRINTF_FORMAT
-                                    " on %3d%s%s",
-                                     mac_index, row->ifindex,
-				    _cicp_llap_get_name(control_plane,
-							row->ifindex),
-                                     CI_IP_PRINTF_ARGS(&row->ip_addr),
-                                     CI_MAC_PRINTF_ARGS(&row->mac_addr),
-                                     cicp_mac_row_usecount(row),
-                                     cicp_mac_row_enter_requested(row)?
-                                     " !service!": "",
-                row->need_update == CICP_MAC_ROW_NEED_UPDATE_STALE ?
-                " STALE" :
-                row->need_update == CICP_MAC_ROW_NEED_UPDATE_SOON ?
-                " almost-STALE" : "");
-                    /* O/S synch args */
-                    len += snprintf(buf+len, bufsz-len,
-                                    " [u %08x up %08x ref %d "
-                                    "%s%s%s%s%s%s%s%s%s%02X "
-                                    "%03d %s%s%s]",
-                                    sync->os.used, sync->os.updated,
-                                    sync->os.refcnt,
-                                    0 == sync->os.state? "NONE ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_INCOMPLETE)?
-                                          "INCOMPLETE ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_REACHABLE)?
-                                          "REACHABLE ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_STALE)?
-                                          "STALE ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_DELAY)?
-                                          "DELAY ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_PROBE)?
-                                          "PROBE ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_FAILED)?
-                                          "FAILED ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_NOARP)?
-                                          "NOARP ":"",
-                                    0 != (sync->os.state &
-                                          CICPOS_IPMAC_PERMANENT)?
-                                          "PERMANENT ":"",
-                                    sync->os.flags, sync->os.family,
-                                    0 != sync->source_sync? "S": "s",
-                                    0 != sync->source_prot? "P": "p",
-                                    0 != sync->recent_sync? "R": "r");
-                    len += snprintf(buf+len, bufsz-len, " v%d rc %d",
-                                    row->version, (ci_int16)row->rc);
-                    *(buf + len) = ' ';
-                    len = str_end;
-                    *(buf + len) = '\n';
-                    len++;
-
-                CICP_LOCK_END
-
+            if (cicp_mac_row_allocated(&umact->ipmac[mac_index]))
                 n++;
-                entries--;
-                if (entries == 0)
-                    break;
-            }
-        }
+        seq_printf(seq, "%d (of %d) allocated\n",
+                   n, cicp_mac_mib_rows(umact));
+    }
+    else if (cicp_mac_row_allocated(&umact->ipmac[mac_index]))
+    {
+        const cicp_mac_row_t *row = &umact->ipmac[mac_index];
+        const cicp_mac_kernrow_t *krow = &kmact->entry[mac_index];
+        const cicpos_mac_row_t *sync = &krow->sync;
 
-        if ((n == 0) && (offset_orig == 0) && (umact != NULL))
-            len += snprintf(buf+len, bufsz-len, "%d (of %d) allocated\n", 
-                            n, cicp_mac_mib_rows(umact));
+        CICP_LOCK_BEGIN(control_plane)
+        /* better to use a read lock really */
 
-        *start = (char *)((ci_ptr_arith_t)len);
+        /* user-visible args */
+        seq_printf(seq, "#%04x: llap %02d %4s ip "CI_IP_PRINTF_FORMAT
+                   " mac "CI_MAC_PRINTF_FORMAT" on %3d%s%s",
+                   mac_index, row->ifindex,
+                   _cicp_llap_get_name(control_plane, row->ifindex),
+                   CI_IP_PRINTF_ARGS(&row->ip_addr),
+                   CI_MAC_PRINTF_ARGS(&row->mac_addr),
+                   cicp_mac_row_usecount(row),
+                   cicp_mac_row_enter_requested(row) ? " !service!": "",
+                   row->need_update == CICP_MAC_ROW_NEED_UPDATE_STALE ?
+                        " STALE" :
+                        row->need_update == CICP_MAC_ROW_NEED_UPDATE_SOON ?
+                        " almost-STALE" : "");
+        /* O/S synch args */
+        seq_printf(seq, " [u %08x up %08x ref %d %s%s%s%s%s%s%s%s%s%02X "
+                   "%03d %s%s%s]",
+                   sync->os.used, sync->os.updated, sync->os.refcnt,
+                   0 == sync->os.state? "NONE ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_INCOMPLETE)?
+                            "INCOMPLETE ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_REACHABLE)?
+                            "REACHABLE ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_STALE) ? "STALE ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_DELAY) ? "DELAY ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_PROBE) ? "PROBE ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_FAILED) ?
+                            "FAILED ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_NOARP)?  "NOARP ":"",
+                   0 != (sync->os.state & CICPOS_IPMAC_PERMANENT)?
+                            "PERMANENT ":"",
+                   sync->os.flags, sync->os.family,
+                   0 != sync->source_sync? "S": "s",
+                   0 != sync->source_prot? "P": "p",
+                   0 != sync->recent_sync? "R": "r");
+        seq_printf(seq, " v%d rc %d\n", row->version, (ci_int16)row->rc);
+
+        CICP_LOCK_END
     }
 
-    if (mac_index == cicp_mac_mib_rows(umact))
-        *eof = TRUE;
-
-    return len;
-
-#undef MAC_STR_LENGTH
-#undef MAC_STR_LAST_POS
+    return 0;
 }
+static struct seq_operations cicpos_mac_seq_ops = {
+    .start = cicpos_mac_read_start,
+    .next  = cicpos_mac_read_next,
+    .stop  = cicpos_mac_read_stop,
+    .show  = cicpos_mac_read,
+};
+static int cicpos_mac_open(struct inode *inode, struct file *file)
+{
+    int rc;
+    rc = seq_open(file, &cicpos_mac_seq_ops);
+    if (rc != 0)
+        ((struct seq_file *)file->private_data)->private = PDE_DATA(inode);
+    return rc;
+}
+static const struct file_operations cicpos_mac_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_mac_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = seq_release,
+};
 
 
 
 
 
 static int
-cicpos_ipif_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
-                 void *caller_info)
-{   cicp_mibs_kern_t *control_plane = procfs_control_plane(caller_info);
+cicpos_ipif_read(struct seq_file *seq, void *s)
+{   cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
     const cicp_ipif_kmib_t *ipift = control_plane->ipif_table;
-    int len = 0;
-	
-    (void)start;       /* unused */
-    (void)caller_info; /* unused */
     
-    if (offset != 0)
-	buf[0]='\0';
-    else
-    {
 	if (NULL == ipift)
-	    len += snprintf(buf+len, bufsz-len,
-			    "IP interface table unallocated\n");
+	    seq_printf(seq, "IP interface table unallocated\n");
 	else
 	{   cicp_ipif_rowid_t ipif_index;
 	    int n = 0;
@@ -1157,11 +1076,10 @@ cicpos_ipif_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
 		 ipif_index++)
 	    {   const cicp_ipif_row_t *row = &ipift->ipif[ipif_index];
 
-		if (cicp_ipif_row_allocated(row) && len < bufsz)
+		if (cicp_ipif_row_allocated(row))
 		{   CICP_LOCK_BEGIN(control_plane)
 			/* better to use a read lock really */
-			len += snprintf(buf+len, bufsz-len,
-					"%02d: llap %02d %4s "
+			seq_printf(seq, "%02d: llap %02d %4s "
 					CI_IP_PRINTF_FORMAT
 					"/%d\t bcast "CI_IP_PRINTF_FORMAT
 					" scope %s\n",
@@ -1179,46 +1097,44 @@ cicpos_ipif_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
 		}
 	    }
 
-	    if (len < bufsz)
-		len += snprintf(buf+len, bufsz-len, "%d (of %d) allocated\n",
-                                n, ipift->rows_max);
+	    seq_printf(seq, "%d (of %d) allocated\n", n, ipift->rows_max);
 	}
-    }
-    *eof = TRUE;
-    buf[bufsz-2]='\n'; /* end neatly even if we overran */
-    buf[bufsz-1]='\0';
-    return strlen(buf);
+    return 0;
 }
+static int cicpos_ipif_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_ipif_read, PDE_DATA(inode));
+}
+static const struct file_operations cicpos_ipif_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_ipif_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 static int 
-cicpos_bond_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
-                 void *caller_info)
+cicpos_bond_read(struct seq_file *seq, void *s)
 {
-  cicp_mibs_kern_t *control_plane = procfs_control_plane(caller_info);
+  cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
   const cicp_bondinfo_t *bondt;
-  int len = 0;
   int n = 0;
   int i;
   
   bondt = control_plane->user.bondinfo_utable;
   
-  memset(buf, ' ', bufsz);
 
-  if( offset != 0 )
-    buf[0]='\0';
-  else {
     if( bondt == NULL )
-      len += snprintf(buf+len, bufsz-len, "bond table unallocated\n");
+      seq_printf(seq, "bond table unallocated\n");
     else {
       for( i = 0; i < bondt->rows_max; i++ ) {
         const cicp_bond_row_t *row = &bondt->bond[i];
-        if( cicp_bond_row_allocated(row) && len < bufsz) {
+        if( cicp_bond_row_allocated(row) ) {
           CICP_LOCK_BEGIN(control_plane);
 
           if( row->type == CICP_BOND_ROW_TYPE_MASTER ) 
-            len += snprintf(buf+len, bufsz-len, 
-                            "Row %d: MST if %d, next %d, "
+            seq_printf(seq, "Row %d: MST if %d, next %d, "
                             "mode %d, hash %d, slaves %d, actv_slaves %d, "
                             "actv_hwport %d\n",
                             i, row->ifid, row->next, 
@@ -1227,188 +1143,167 @@ cicpos_bond_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
                             row->master.n_active_slaves,
                             row->master.active_hwport);
           else if( row->type == CICP_BOND_ROW_TYPE_SLAVE )
-            len += snprintf(buf+len, bufsz-len,
-                            "Row %d: SLV if %d, next %d, "
+            seq_printf(seq, "Row %d: SLV if %d, next %d, "
                             "hwport %d, flags %d (%s)\n",
                             i, row->ifid, row->next, row->slave.hwport,
                             row->slave.flags, 
                             row->slave.flags & CICP_BOND_ROW_FLAG_ACTIVE ?
                             "Active" : "Inactive");
           else
-            len += snprintf(buf+len, bufsz-len, "Bond row %d: BAD type %d\n", 
+            seq_printf(seq, "Bond row %d: BAD type %d\n", 
                             i, row->type);
           CICP_LOCK_END;
 
           ++n;
         }
       }
-      if (len < bufsz)
-        len += snprintf(buf+len, bufsz-len, "%d (of %d) allocated\n", 
-                        n, bondt->rows_max);
+      seq_printf(seq, "%d (of %d) allocated\n", n, bondt->rows_max);
     }
-  }
 
-  *eof = TRUE;
-  buf[bufsz-2]='\n'; /* end neatly even if we overran */
-  buf[bufsz-1]='\0';
-  return strlen(buf);
+  return 0;
 }
+static int cicpos_bond_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_bond_read, PDE_DATA(inode));
+}
+static const struct file_operations cicpos_bond_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_bond_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 
+static void *cicpos_fwd_read_start(struct seq_file *seq, loff_t *pos)
+{
+    cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
+    const cicp_fwdinfo_t *fwdt = control_plane->user.fwdinfo_utable;
+    if (fwdt == NULL)
+      return NULL;
+    return (*pos <= fwdt->rows_max) ? pos : NULL;
+}
+static void *cicpos_fwd_read_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+    (*pos)++;
+    return cicpos_fwd_read_start(seq, pos);
+}
+static void cicpos_fwd_read_stop(struct seq_file *seq, void *s)
+{
+}
 /*
- * FWD info retrieves series of blocks of an equal length.
- * Block consists of 3 strings. The strings in the block have the equal
- * length.
- * ATTENTION: The length of string returned by appropriate snprintf
- *            should not exceed FWD_STR_LENGTH.
+ * FWD info retrieves series of blocks.  Block consists of 3 strings.
  */
 static int
-cicpos_fwd_read(char *buf, char **start, off_t offset, int bufsz, int *eof,
-                void *caller_info)
-{   cicp_mibs_kern_t *control_plane = procfs_control_plane(caller_info);
-    const cicp_fwdinfo_t *fwdt;
-    int len = 0;
-    int str_end = 0;
-    int entries;
-    int n = 0;
-    off_t offset_orig = offset;
-    cicp_fwd_rowid_t fwd_index = 0;
+cicpos_fwd_read(struct seq_file *seq, void *s)
+{   cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
+    const cicp_fwdinfo_t *fwdt = control_plane->user.fwdinfo_utable;
+    cicp_fwd_rowid_t fwd_index = *(loff_t *)s;
 
-    (void)caller_info; /* unused */
-
-    fwdt = control_plane->user.fwdinfo_utable;
-
-    memset(buf, ' ', bufsz);
-
-#ifdef FWD_TAB
-#undef FWD_TAB
-#endif
-#define FWD_TAB          8
-
-#ifdef FWD_STR_LENGTH
-#undef FWD_STR_LENGTH
-#endif
-#define FWD_STR_LENGTH   80
-
-#ifdef FWD_STR_LAST_POS
-#undef FWD_STR_LAST_POS
-#endif
-#define FWD_STR_LAST_POS  (FWD_STR_LENGTH - 1)
-
-#ifdef FWD_ENTRY_LENGTH
-#undef FWD_ENTRY_LENGTH
-#endif
-#define FWD_ENTRY_LENGTH  (FWD_STR_LENGTH * 3)
-
-    entries = bufsz / FWD_ENTRY_LENGTH;
-
-    if (entries == 0)
+    if (NULL == fwdt)
     {
-        /* Provided bufsz is insufficient to retrive whole fwd entry */
+        seq_printf(seq, "user forwarding information unallocated\n");
     }
-    else if (NULL == fwdt)
+    else if (fwd_index == fwdt->rows_max) {
+      int n = 0;
+      for (fwd_index = 0; fwd_index < fwdt->rows_max; fwd_index++)
+          if (cicp_fwd_row_allocated(&fwdt->path[fwd_index]))
+              n++;
+      seq_printf(seq, "%d (of %d) allocated\n", n, fwdt->rows_max);
+    }
+    else if (cicp_fwd_row_allocated(&fwdt->path[fwd_index]))
     {
-        if (offset_orig == 0)
-        len += snprintf(buf+len, bufsz-len,
-                        "user forwarding information unallocated\n");
-        *eof = TRUE;
-    }
-    else
-    {
-        for (fwd_index = 0; fwd_index < fwdt->rows_max; fwd_index++)
-        {
-            const cicp_fwd_row_t *row = &fwdt->path[fwd_index];
-
-            if (cicp_fwd_row_allocated(row) && len < bufsz)
-            {
-                if (offset >= FWD_ENTRY_LENGTH)
-                {
-                    offset -= FWD_ENTRY_LENGTH;
-                    continue;
-                }
-
-                /* better to use a read lock really */
-                CICP_LOCK_BEGIN(control_plane)
-                    /* first string */
-                    str_end = len + FWD_STR_LAST_POS;
-                    len += snprintf(buf+len, bufsz-len,
-                                    CI_IP_PRINTF_FORMAT"/%u -> "
-                                    CI_IP_PRINTF_FORMAT
-                                    " llap %d %4s port ",
-                                    CI_IP_PRINTF_ARGS(&row->destnet_ip),
-                                    row->destnet_ipset,
-                                    CI_IP_PRINTF_ARGS(&row->first_hop),
-                                    row->dest_ifindex,
-                                    _cicp_llap_get_name(control_plane,
-							row->dest_ifindex));
-                    if (cicp_fwd_row_hasnic(&control_plane->user, row))
-                        len += 
-                          snprintf(buf+len, bufsz-len,
-                                   "%1d encap " CICP_ENCAP_NAME_FMT,
-                                   row->hwport,
-                                   cicp_encap_name(row->encap.type));
-                    else
-                        len += snprintf(buf+len, bufsz-len,
-                                        "X");
-                    *(buf + len) = ' ';
-                    len = str_end;
-                    *(buf + len) = '\n';
-                    len++;
-                    /* second string */
-                    str_end = len + FWD_STR_LAST_POS;
-                    len += FWD_TAB;
-                    len += snprintf(buf+len, bufsz-len,
-                                    "dst "CI_IP_PRINTF_FORMAT
-                                    "/%d bcast "
-                                    CI_IP_PRINTF_FORMAT" mtu %d"
-                                    " tos %d metric %d",
-                                    CI_IP_PRINTF_ARGS(&row->net_ip),
-                                    row->net_ipset,
-                                    CI_IP_PRINTF_ARGS(&row->net_bcast),
-                                    row->mtu,
-                                    row->tos, row->metric);
-                    *(buf + len) = ' ';
-                    len = str_end;
-                    *(buf + len) = '\n';
-                    len++;
-                    /* third string */
-                    str_end = len + FWD_STR_LAST_POS;
-                    len += FWD_TAB;
-                    len += snprintf(buf+len, bufsz-len,
-                                    "src ip "CI_IP_PRINTF_FORMAT
-                                    " mac "CI_MAC_PRINTF_FORMAT,
-                                    CI_IP_PRINTF_ARGS(&row->pref_source),
-                                    CI_MAC_PRINTF_ARGS(&row->
-                                                           pref_src_mac));
-                    *(buf + len) = ' ';
-                    len = str_end;
-                    *(buf + len) = '\n';
-                    len++;
-                CICP_LOCK_END
-                n++;
-                entries--;
-                if (entries == 0)
-                    break;
-            }
-        }
-
-	*start = (char *)((ci_ptr_arith_t)len);
+        const cicp_fwd_row_t *row = &fwdt->path[fwd_index];
+        /* better to use a read lock really */
+        CICP_LOCK_BEGIN(control_plane)
+        /* first string */
+        seq_printf(seq, CI_IP_PRINTF_FORMAT"/%u -> "CI_IP_PRINTF_FORMAT
+                   " llap %d %4s port ",
+                   CI_IP_PRINTF_ARGS(&row->destnet_ip),
+                   row->destnet_ipset,
+                   CI_IP_PRINTF_ARGS(&row->first_hop),
+                   row->dest_ifindex,
+                   _cicp_llap_get_name(control_plane, row->dest_ifindex));
+        if (cicp_fwd_row_hasnic(&control_plane->user, row))
+            seq_printf(seq, "%1d encap " CICP_ENCAP_NAME_FMT,
+                       row->hwport, cicp_encap_name(row->encap.type));
+        else
+            seq_printf(seq, "X");
+        seq_printf(seq, "\n");
+        /* second string */
+        seq_printf(seq, "\tdst "CI_IP_PRINTF_FORMAT"/%d "
+                   "bcast "CI_IP_PRINTF_FORMAT" mtu %d tos %d metric %d",
+                   CI_IP_PRINTF_ARGS(&row->net_ip), row->net_ipset,
+                   CI_IP_PRINTF_ARGS(&row->net_bcast),
+                   row->mtu, row->tos, row->metric);
+        seq_printf(seq, "\n");
+        /* third string */
+        seq_printf(seq, "\tsrc ip "CI_IP_PRINTF_FORMAT
+                   " mac "CI_MAC_PRINTF_FORMAT"\n",
+                   CI_IP_PRINTF_ARGS(&row->pref_source),
+                   CI_MAC_PRINTF_ARGS(&row->pref_src_mac));
+        CICP_LOCK_END
     }
 
-    if (fwd_index == fwdt->rows_max) {
-        if( fwdt != NULL && len < bufsz )
-          len += snprintf(buf+len, bufsz-len, "%d (of %d) allocated\n", 
-                          n, fwdt->rows_max);
-        *eof = TRUE;
-    }
-
-    return len;
-#undef FWD_TAB
-#undef FWD_STR_LENGTH
-#undef FWD_STR_LAST_POS
-#undef FWD_ENTRY_LENGTH
+    return 0;
 }
+static struct seq_operations cicpos_fwd_seq_ops = {
+    .start = cicpos_fwd_read_start,
+    .next  = cicpos_fwd_read_next,
+    .stop  = cicpos_fwd_read_stop,
+    .show  = cicpos_fwd_read,
+};
+static int cicpos_fwd_open(struct inode *inode, struct file *file)
+{
+    int rc;
+    rc = seq_open(file, &cicpos_fwd_seq_ops);
+    if (rc != 0)
+        ((struct seq_file *)file->private_data)->private = PDE_DATA(inode);
+    return rc;
+}
+static const struct file_operations cicpos_fwd_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_fwd_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = seq_release,
+};
+
+
+static int 
+cicpos_pmtu_read(struct seq_file *seq, void *s)
+{
+  cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
+  cicp_pmtu_kmib_t *pmtu_table = control_plane->pmtu_table;
+  int i, n = 0;
+
+  for( i = 0; i < pmtu_table->used_rows_max; i++ ) {
+    cicp_pmtu_row_t *row = &pmtu_table->entries[i];
+    CICP_LOCK_BEGIN(control_plane)
+    if( cicp_pmtu_row_allocated(row) ) {
+      seq_printf(seq, "%d: "CI_IP_PRINTF_FORMAT" timestamp=0x%lx\n",
+                 i, CI_IP_PRINTF_ARGS(&row->net_ip), row->timestamp);
+      n++;
+    }
+    CICP_LOCK_END;
+  }
+
+  seq_printf(seq, "%d (of %d) allocated, with maximum %d\n",
+             n, pmtu_table->rows_max, pmtu_table->used_rows_max);
+  return 0;
+}
+static int cicpos_pmtu_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_pmtu_read, PDE_DATA(inode));
+}
+static const struct file_operations cicpos_pmtu_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_pmtu_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 static void
@@ -1426,18 +1321,20 @@ cicpos_procfs_ctor(cicp_mibs_kern_t *control_plane)
     {
 	ci_assert(NULL != oo_proc_root);
 
-	create_proc_read_entry(CICPOS_PROCFS_FILE_HWPORT, 0, oo_proc_root,
-			       &cicpos_hwport_read, caller_info);
-	create_proc_read_entry(CICPOS_PROCFS_FILE_LLAP, 0, oo_proc_root,
-			       &cicpos_llap_read, caller_info);
-	create_proc_read_entry(CICPOS_PROCFS_FILE_MAC, 0, oo_proc_root,
-			       &cicpos_mac_read, caller_info);
-	create_proc_read_entry(CICPOS_PROCFS_FILE_IPIF, 0, oo_proc_root,
-			       &cicpos_ipif_read,  caller_info);
-	create_proc_read_entry(CICPOS_PROCFS_FILE_FWDINFO, 0, oo_proc_root,
-			       &cicpos_fwd_read,  caller_info);
-	create_proc_read_entry(CICPOS_PROCFS_FILE_BONDINFO, 0, oo_proc_root,
-			       &cicpos_bond_read,  caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_HWPORT, 0, oo_proc_root,
+			 &cicpos_hwport_fops, caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_LLAP, 0, oo_proc_root,
+			 &cicpos_llap_fops, caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_MAC, 0, oo_proc_root,
+			 &cicpos_mac_fops, caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_IPIF, 0, oo_proc_root,
+			 &cicpos_ipif_fops,  caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_FWDINFO, 0, oo_proc_root,
+			 &cicpos_fwd_fops,  caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_BONDINFO, 0, oo_proc_root,
+			 &cicpos_bond_fops,  caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_PMTU, 0, oo_proc_root,
+			 &cicpos_pmtu_fops,  caller_info);
     }
 }
 
@@ -1454,6 +1351,7 @@ cicpos_procfs_dtor(cicp_mibs_kern_t *control_plane)
         remove_proc_entry(CICPOS_PROCFS_FILE_IPIF, oo_proc_root);
         remove_proc_entry(CICPOS_PROCFS_FILE_FWDINFO, oo_proc_root);
         remove_proc_entry(CICPOS_PROCFS_FILE_BONDINFO, oo_proc_root);
+        remove_proc_entry(CICPOS_PROCFS_FILE_PMTU, oo_proc_root);
     }
 }
 
@@ -1532,13 +1430,9 @@ static int
 cicpos_handle_rtnl_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr);
 
 static void
-cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only,
-                   char *buf);
+cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only);
 
-typedef struct {
-  struct socket *sock;
-  __u32 seq;
-} cicp_nlsock_t;
+
 
 
 
@@ -1661,21 +1555,30 @@ error:
 
 
 
-/*! Request the contents of the IP-MAC mapping (ARP) table
+/*! This function is NOT re-entrant!
+ *  Request the contents of the IP-MAC mapping (ARP) table, route table,
+ *  link or address table
  */
 static int 
-request_table(cicp_nlsock_t *nlsock, int nlmsg_type, char* buf)
+request_table(struct socket *sock, __u32 seq, int nlmsg_type, int rtm_flags)
 {
   struct msghdr msg;
   struct iovec iov;
+  static char buf[NL_BUFSIZE];
   struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
+  struct rtmsg *rtm = (void *)(nlhdr+1);
   int ret;
 
-  memset(buf, 0, NL_BUFSIZE);
-  nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
+  memset(buf, 0, sizeof(buf));
+  if( nlmsg_type == RTM_GETROUTE )
+    nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+  else
+    nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
   nlhdr->nlmsg_type = nlmsg_type; /* RTM_GET* */
-  nlhdr->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
-  nlhdr->nlmsg_seq = ++nlsock->seq;
+  nlhdr->nlmsg_flags = NLM_F_ROOT | NLM_F_REQUEST;
+  nlhdr->nlmsg_seq = seq;
+  rtm->rtm_family = AF_INET;
+  rtm->rtm_flags = rtm_flags;
 
   iov.iov_base = (void*)buf;
   iov.iov_len = nlhdr->nlmsg_len;
@@ -1686,7 +1589,7 @@ request_table(cicp_nlsock_t *nlsock, int nlmsg_type, char* buf)
   msg.msg_iov=&iov;
   msg.msg_iovlen=1;
 
-  ret = sock_sendmsg(nlsock->sock, &msg, nlhdr->nlmsg_len);
+  ret = sock_sendmsg(sock, &msg, nlhdr->nlmsg_len);
   
   if (ret < 0) {
     ci_log("%s():sock_sendmsg failed, err=%d", __FUNCTION__, ret);
@@ -1756,11 +1659,12 @@ netlink_read(struct socket *sock, char *buf, size_t count,
 
 
 static int 
-read_nl_msg(struct socket *sock, char *buf, int blocking, int retry)
+read_nl_msg(struct socket *sock, char (*buf)[NL_BUFSIZE], int blocking,
+            int retry)
 {   int bytes;
 
-    memset(buf, 0, NL_BUFSIZE);
-    bytes = netlink_read(sock, buf, NL_BUFSIZE, blocking, retry);
+    memset(buf, 0, sizeof(*buf));
+    bytes = netlink_read(sock, (char *) buf, sizeof(*buf), blocking, retry);
     if (bytes < 0)
     {   DEBUGNETLINK(
 	    if (bytes != -EAGAIN)
@@ -1784,28 +1688,28 @@ read_nl_msg(struct socket *sock, char *buf, int blocking, int retry)
 /*! read a netlink neighbor packet from socket 'sock'
  */
 static int 
-read_rtnl_response(cicp_nlsock_t *nlsock, ci_rtnl_msg_handler_t *hf,
+read_rtnl_response(struct socket *sock, __u32 seq, ci_rtnl_msg_handler_t *hf,
                    cicpos_parse_state_t *session,
-		   ci_post_handling_fn_t *post_handling_fn,
-                   char* buf)
+		   ci_post_handling_fn_t *post_handling_fn)
 {
   int rc, bytes;
+  static char buf[NL_BUFSIZE];
   struct nlmsghdr *nlhdr;
 
   do {
 
     /* read an rtnetlink packet in non-blocking mode with retries */
-    rc = bytes = read_nl_msg(nlsock->sock, buf, 0, 1);
+    rc = bytes = read_nl_msg(sock, &buf, 0, 1);
     if (rc < 0) 
       return rc;
     else
     {	nlhdr = (struct nlmsghdr *)buf;
 	while (NLMSG_OK(nlhdr, bytes)) {
 
-	  if (nlhdr->nlmsg_seq != nlsock->seq) {
+	  if (nlhdr->nlmsg_seq != seq) {
 	    /* ignore unsolicited packets */
 	    ci_log("%s: Unsolicited netlink msg, msg_seq=%d, expected_seq=%d",
-		   __FUNCTION__, nlhdr->nlmsg_seq, nlsock->seq);
+		   __FUNCTION__, nlhdr->nlmsg_seq, seq);
 
 	  } else if (nlhdr->nlmsg_type == NLMSG_DONE) {
 	    /* NLMSG_DONE marks the end of a dump */
@@ -1851,13 +1755,14 @@ done:
  */
 ci_inline int
 rtnl_poll(struct socket *sock, ci_rtnl_msg_handler_t *hf,
-	  cicpos_parse_state_t *session, char* buf)
+	  cicpos_parse_state_t *session)
 {
   int rc, bytes;
+  static char buf[NL_BUFSIZE];
   struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
 
   /* read an rtnetlink packet in non-blocking mode without retries */
-  rc = bytes = read_nl_msg(sock, buf, 0, 0);
+  rc = bytes = read_nl_msg(sock, &buf, 0, 0);
   if (rc < 0) {
     if (rc != -ERESTART && rc != -EAGAIN)
       ci_log(CODEID": failed to read netlink message during poll, rc=%d", -rc);
@@ -1952,7 +1857,7 @@ int cicpos_running = 0;
 /*! Warning: this function is NOT re-entrant
  */
 static int
-efab_netlink_poll_for_updates(cicp_handle_t *control_plane, char* buf)
+efab_netlink_poll_for_updates(cicp_handle_t *control_plane)
 {   
   int rc;
   cicpos_parse_state_t *session = cicpos_parse_state_alloc(control_plane);
@@ -1963,7 +1868,7 @@ efab_netlink_poll_for_updates(cicp_handle_t *control_plane, char* buf)
     cicpos_parse_init(session, control_plane);
 
     do
-      rc = rtnl_poll(NL_SOCKET, &cicpos_handle_rtnl_msg, session, buf);
+      rc = rtnl_poll(NL_SOCKET, &cicpos_handle_rtnl_msg, session);
     while( rc == 0 );
 
     cicpos_parse_state_free(session);
@@ -1979,13 +1884,12 @@ static void
 cicpos_worker(void *context_cplane)
 {
     static unsigned int count = 0;
-    static char buf[NL_BUFSIZE];
 
     if (cicpos_running)
     {	cicp_handle_t *control_plane = (cicp_handle_t *)context_cplane;
-        efab_netlink_poll_for_updates(control_plane, buf);
+        efab_netlink_poll_for_updates(control_plane);
 	if (count % 2 == 0)
-	    cicpos_dump_tables(control_plane, count%20, buf);
+	    cicpos_dump_tables(control_plane, count%20);
 	count++;
     }
 }
@@ -2190,6 +2094,7 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
     cicp_metric_t   metric = 1; /* default */
     ci_ip_tos_t     tos = 0;
     ci_mtu_t        mtu = 0;
+    int             ignore = 0;
 
     static int unsupported_print_once = 0;
     static int unsupported_metrics_print_once = 0;
@@ -2205,8 +2110,8 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 	return 0;
     }
 
-    /* Only look at the main table for now,
-       ignore local & other tables */
+    /* Only look at the main and local tables for now,
+       ignore other tables */
     if (rtmsg->rtm_table != RT_TABLE_MAIN &&
         rtmsg->rtm_table != RT_TABLE_LOCAL)
 	return 0;
@@ -2230,7 +2135,6 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 		       rtmsg->rtm_dst_len); */
 		break;
 
-
 	    case RTA_OIF:
 		ifindex = *((int *)RTA_DATA(attr));
 		/* ci_log("oif=%d", ifindex); */
@@ -2244,6 +2148,10 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 		break;
 
 	    case RTA_PRIORITY:
+		break;
+
+	    case RTA_SRC:
+		ci_assert(rtmsg->rtm_flags & RTM_F_CLONED);
 		break;
 
 	    case RTA_PREFSRC:
@@ -2261,7 +2169,6 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 			case RTAX_MTU:
 			    mtu = *((ci_uint32 *)RTA_DATA(rta));
 			    break;
-
 #define RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(rtax) \
             case rtax:                                                  \
                 if( ~unsupported_metrics_print_once & (1 << rtax) ) {   \
@@ -2272,13 +2179,6 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_UNSPEC);
 			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_LOCK);
 			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_WINDOW);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_RTT);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_RTTVAR);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_SSTHRESH);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_CWND);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_ADVMSS);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_REORDERING);
-			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_HOPLIMIT);
 			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_INITCWND);
 			RTAX_UNSUPPORTED_METRICS_PRINT_ONCE(RTAX_FEATURES);
 #ifdef RTAX_RTO_MIN
@@ -2291,6 +2191,18 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 		break;
 	}
 
+            case RTA_CACHEINFO: {
+                /* Silently ignore: we are not interested */
+                break;
+            }
+
+            case RTA_IIF: {
+                /* Route with input interface:
+                 * not interested in such route. */
+                ignore = 1;
+                break;
+            }
+
 #define RTA_UNSUPPORTED_PRINT_ONCE(rta) \
             case rta:                                           \
                 if( ~unsupported_print_once & (1 << rta) ) {    \
@@ -2299,12 +2211,9 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
                 }                                               \
                 break
 
-            RTA_UNSUPPORTED_PRINT_ONCE(RTA_SRC);
-            RTA_UNSUPPORTED_PRINT_ONCE(RTA_IIF);
             RTA_UNSUPPORTED_PRINT_ONCE(RTA_MULTIPATH);
             RTA_UNSUPPORTED_PRINT_ONCE(RTA_PROTOINFO);
             RTA_UNSUPPORTED_PRINT_ONCE(RTA_FLOW);
-            RTA_UNSUPPORTED_PRINT_ONCE(RTA_CACHEINFO);
 #undef RTA_UNSUPPORTED_PRINT_ONCE
 
 	    default:
@@ -2322,15 +2231,22 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
      * RTN_LOCAL entries. We assume that the 32 bit netmask
      * local routes will be route for the loopback addresses
      */
-    if (CI_UNLIKELY(rtmsg->rtm_type != RTN_UNICAST &&
+    if (ignore ||
+        (rtmsg->rtm_type == RTN_LOCAL && (rtmsg->rtm_flags & RTM_F_CLONED))
+        ) {
+      /* silently ignore local ip cache routes: we need route cache for
+       * pmtu only */
+    }
+    else if (CI_UNLIKELY(rtmsg->rtm_type != RTN_UNICAST &&
                     !(rtmsg->rtm_type == RTN_LOCAL &&
                       dest_ipset == 32)))
-    {   /* don't complain for local table routes */
-        if (rtmsg->rtm_table != RT_TABLE_LOCAL)
+    {   /* don't complain for local table routes and cached entries */
+        if (rtmsg->rtm_table != RT_TABLE_LOCAL &&
+            !(rtmsg->rtm_flags & RTM_F_CLONED))
         {
             ci_log("%s: We only support unicast entries. "
-	           "Ignoring route entry:",
-	           __FUNCTION__);
+	           "Ignoring route entry (table %d, type %d flags %x):",
+	           __FUNCTION__, rtmsg->rtm_table, rtmsg->rtm_type, rtmsg->rtm_flags);
 	    ci_log("dst=" CI_IP_PRINTF_FORMAT "/%u"
 	           " gw="  CI_IP_PRINTF_FORMAT
 	           " src=" CI_IP_PRINTF_FORMAT
@@ -2341,53 +2257,60 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 	           tos, ifindex);
         }
     } else
-    {	int /* bool */ add =
-	    (nlhdr->nlmsg_type == RTM_NEWROUTE);
+    {   /* route table update */
+	cicpos_route_row_t sync;
+	ci_scope_t         scope;
 
-	/* route table update */
-	{   cicpos_route_row_t sync;
-	    ci_scope_t         scope;
+	memset(&sync, 0, sizeof(sync)); /* for now */
 
-	    memset(&sync, 0, sizeof(sync)); /* for now */
+	if (rtmsg->rtm_scope == RT_SCOPE_HOST)
+	    ci_scope_set_host(&scope);
+	else
+	    ci_scope_set_global(&scope);
 
-	    if (rtmsg->rtm_scope == RT_SCOPE_HOST)
-	    {   ci_scope_set_host(&scope);
-	    } else
-		ci_scope_set_global(&scope);
+        if( (rtmsg->rtm_flags & RTM_F_CLONED) ) {
+            int rowid;
+            ci_assert_equal(dest_ipset, 32);
+            ci_assert_equal(nlhdr->nlmsg_type, RTM_NEWROUTE);
+            rowid = cicpos_pmtu_check(session->control_plane,
+                                      dest_ip, ifindex, mtu);
+            if( rowid != -1 )
+              ci_bitset_add(CI_BITSET_REF(session->imported_pmtu), rowid);
+            else
+              ignore = 1;
+        }
 
-	    if (add)
-	    {   cicp_route_rowid_t rowid;
-		rc = cicpos_route_import(session->
-					   control_plane,
-					 &rowid,
-					 dest_ip, dest_ipset,
-					 scope, next_hop_ip,
-					 tos, metric,
-					 pref_source,
-					 ifindex, mtu, &sync, 
-                                         session->nosort);
-		/* remember we've seen this route */
-		if (0 == rc)
-		{   ci_assert(CICP_ROUTE_ROWID_BAD != rowid);
-		    ci_assert(rowid >= 0);
-		    ci_bitset_add(
-			CI_BITSET_REF(session->imported_route),
-			rowid);
-		}
-                else {
-                  DEBUGNETLINK
+	if (nlhdr->nlmsg_type == RTM_NEWROUTE && !ignore)
+	{   cicp_route_rowid_t rowid;
+
+	    rc = cicpos_route_import(session-> control_plane, &rowid,
+				     dest_ip, dest_ipset, scope,
+				     next_hop_ip, tos, metric,
+				     pref_source, ifindex, mtu,
+                                     mtu != 0 &&
+                                        !(rtmsg->rtm_flags & RTM_F_CLONED) ?
+                                        CICP_FLAG_ROUTE_MTU : 0,
+                                     &sync, session->nosort);
+	    /* remember we've seen this route */
+	    if (0 == rc)
+	    {   ci_assert(CICP_ROUTE_ROWID_BAD != rowid);
+		ci_assert(rowid >= 0);
+		ci_bitset_add(CI_BITSET_REF(session->imported_route),
+			      rowid);
+	    }
+            else {
+                DEBUGNETLINK
                     (ci_log(CODEID": cicpos_route_import failed, rc=%d ", rc));
-                }
-	    } else /* assume delete if not add */ {
-		cicpos_route_delete(session->control_plane, 
-                                    dest_ip, dest_ipset);
-                if (session->nosort) {
-                    session->nosort = CI_FALSE;
-                    DEBUGNETLINK(ci_log("%s: delete route when dumping",
-                                   __FUNCTION__));
-                    /* \todo we should re-read the table in
-                     * this case. */
-                }
+            }
+
+	}
+	if( nlhdr->nlmsg_type == RTM_DELROUTE ) {
+	    cicpos_route_delete(session->control_plane, dest_ip, dest_ipset);
+            if (session->nosort) {
+                session->nosort = CI_FALSE;
+                DEBUGNETLINK(ci_log("%s: delete route when dumping",
+                                    __FUNCTION__));
+                /* \todo we should re-read the table in this case. */
             }
 	}
     }
@@ -2400,22 +2323,24 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 
 
+/* You MUST call cicpos_dump_route_cache() with the same session
+ * after successfull call to this function, to get
+ * cicpos_route_post_poll() called. */
 ci_inline int /* rc */
-cicpos_dump_routet(cicp_nlsock_t *nlsock,
-		   cicpos_parse_state_t *session, char *buf)
+cicpos_dump_routet(struct socket *sock, ci_uint32 seq,
+		   cicpos_parse_state_t *session)
 {   int rc;
 
     /* request the route table */
-    if ((rc = request_table(nlsock, RTM_GETROUTE, buf)) < 0 ) 
+    if ((rc = request_table(sock, seq, RTM_GETROUTE, 0)) < 0 ) 
 	ci_log(CODEID": route table request "
 	       "failed, rc %d", -rc);
 
     /* listen for reply */
-    else if ((rc = read_rtnl_response(nlsock,
+    else if ((rc = read_rtnl_response(sock, seq,
 				      &cicpos_handle_route_msg,
 				      session,
-				      &cicpos_route_post_poll,
-                                      buf))
+				      NULL))
 	     < 0)
 	ci_log(CODEID": failed to read route table from "
 	       "rtnetlink, rc %d", -rc);
@@ -2423,10 +2348,93 @@ cicpos_dump_routet(cicp_nlsock_t *nlsock,
     return rc;
 }
 
+/* This function should not be necessary, because cicpos_dump_pmtu_cache()
+ * dumps all interesting routes.  But Linux route cache is a mess, we
+ * get incorrect mtu values when asking for a route to the given address. */
+ci_inline int /* rc */
+cicpos_dump_route_cache(struct socket *sock, ci_uint32 seq,
+			cicpos_parse_state_t *session)
+{   int rc;
+
+    /* request the route table */
+    if ((rc = request_table(sock, seq, RTM_GETROUTE, RTM_F_CLONED)) < 0 ) 
+	ci_log(CODEID": route cache table request "
+	       "failed, rc %d", -rc);
+
+    /* listen for reply */
+    else if ((rc = read_rtnl_response(sock, seq,
+				      &cicpos_handle_route_msg,
+				      session,
+				      NULL))
+	     < 0)
+	ci_log(CODEID": failed to read route cache table from "
+	       "rtnetlink, rc %d", -rc);
+
+    return rc;
+}
 
 
 
+ci_inline void
+cicpos_dump_pmtu_row(struct socket *sock, ci_uint32 seq, int rowid,
+		     cicpos_parse_state_t *session)
+{
+  int rc;
+  struct msghdr msg;
+  struct iovec iov;
+  static char buf[NL_BUFSIZE];
+  ci_ip_addr_net_t net_ip = CICP_MIBS(session->control_plane)->
+                                pmtu_table->entries[rowid].net_ip;
+  struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
+  struct rtmsg *rtm = (void *)(nlhdr+1);
+  struct rtattr *rta;
 
+  if( net_ip == INADDR_ANY )
+    return;
+
+  memset(buf, 0, sizeof(buf));
+  nlhdr->nlmsg_type = RTM_GETROUTE;
+  nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+  nlhdr->nlmsg_flags = NLM_F_REQUEST;
+  nlhdr->nlmsg_seq = seq;
+  rtm->rtm_family = AF_INET;
+  rtm->rtm_flags = RTM_F_CLONED;
+  rta = (void *)(rtm+1);
+  rta->rta_type = RTA_DST;
+  rta->rta_len = RTA_LENGTH(4);
+  memcpy(RTA_DATA(rta), &net_ip, 4);
+  rtm->rtm_dst_len = 32;
+  nlhdr->nlmsg_len = NLMSG_ALIGN(nlhdr->nlmsg_len) + RTA_LENGTH(4);
+
+  iov.iov_base = (void*)buf;
+  iov.iov_len = nlhdr->nlmsg_len;
+  msg.msg_name=NULL;
+  msg.msg_namelen=0;
+  msg.msg_controllen=0;
+  msg.msg_flags=0;
+  msg.msg_iov=&iov;
+  msg.msg_iovlen=1;
+
+  rc = sock_sendmsg(sock, &msg, nlhdr->nlmsg_len);
+  if( rc < 0 )
+    return;
+
+  rc = read_rtnl_response(sock, seq, &cicpos_handle_route_msg, session, NULL);
+}
+
+ci_inline void
+cicpos_dump_pmtu_cache(struct socket *sock, ci_uint32 seq,
+			cicpos_parse_state_t *session)
+{
+  cicp_pmtu_kmib_t *pmtu_table =
+                CICP_MIBS(session->control_plane)->pmtu_table;
+  int i;
+  for( i = 0; i < pmtu_table->used_rows_max; i++)
+    if( cicp_pmtu_row_allocated(&pmtu_table->entries[i]) ) {
+      seq++;
+      cicpos_dump_pmtu_row(sock, seq++, i, session);
+    }
+}
 
 #endif /* CICPOS_USE_NETLINK */
 
@@ -2766,21 +2774,20 @@ cicpos_mac_post_poll(cicpos_parse_state_t *session)
 
 
 ci_inline int /* rc */
-cicpos_dump_mact(cicp_nlsock_t *nlsock,
-		 cicpos_parse_state_t *session, char *buf)
+cicpos_dump_mact(struct socket *sock, ci_uint32 seq,
+		 cicpos_parse_state_t *session)
 {   int rc;
 
     if (cicpos_mact_open(session->control_plane))
     {   /* request the ARP table */
-	if ((rc = request_table(nlsock, RTM_GETNEIGH, buf)) < 0) 
+	if ((rc = request_table(sock, seq, RTM_GETNEIGH, 0)) < 0) 
 	    ci_log(CODEID": arp table request failed, rc %d", rc);
 
 	/* listen for reply */
-	else if ((rc = read_rtnl_response(nlsock,
+	else if ((rc = read_rtnl_response(sock, seq,
 					  &cicpos_handle_mac_msg,
 					  session,
-					  &cicpos_mac_post_poll,
-                                          buf)) < 0)
+					  &cicpos_mac_post_poll)) < 0)
 	{   DEBUGNETLINK(DPRINTF(CODEID": reading of arp table from "
 				 "rtnetlink failed, rc %d", -rc));
 	}
@@ -2948,21 +2955,20 @@ cicpos_handle_llap_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 
 ci_inline int /* rc */
-cicpos_dump_llapt(cicp_nlsock_t *nlsock,
-		  cicpos_parse_state_t *session, char *buf)
+cicpos_dump_llapt(struct socket *sock, ci_uint32 seq,
+		  cicpos_parse_state_t *session)
 {   int rc;
 
     /* request the LLAP table */
-    if ((rc = request_table(nlsock, RTM_GETLINK, buf)) < 0 )
+    if ((rc = request_table(sock, seq, RTM_GETLINK, 0)) < 0 )
 	ci_log(CODEID": route table request "
 	       "failed, rc %d", -rc);
 
     /* listen for reply */
-    else if ((rc = read_rtnl_response(nlsock,
+    else if ((rc = read_rtnl_response(sock, seq,
 				      &cicpos_handle_llap_msg,
 				      session,
-				      &cicpos_llap_post_poll,
-                                      buf))
+				      &cicpos_llap_post_poll))
 	     < 0)
 	ci_log(CODEID": failed to read links table from "
 	       "rtnetlink, rc %d", -rc);
@@ -3072,7 +3078,6 @@ cicpos_handle_ipif_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 		 * the dmesg for certain users so silently ignoring
 		 * it.
 		 */
-		//ci_log("Ignoring IFA_CACHEINFO");
 		break;
 
 	    default:
@@ -3119,21 +3124,20 @@ cicpos_handle_ipif_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 
 ci_inline int /* rc */
-cicpos_dump_ipift(cicp_nlsock_t *nlsock,
-		  cicpos_parse_state_t *session, char *buf)
+cicpos_dump_ipift(struct socket *sock, ci_uint32 seq,
+		  cicpos_parse_state_t *session)
 {   int rc;
 
     /* request the list of ip interfaces */
-    if ((rc = request_table(nlsock, RTM_GETADDR, buf)) < 0 ) 
+    if ((rc = request_table(sock, seq, RTM_GETADDR, 0)) < 0 ) 
 	ci_log(CODEID": ip interface list request "
 	       "failed, rc %d", -rc);
 	
     /* listen for reply */
-    else if ((rc = read_rtnl_response(nlsock,
+    else if ((rc = read_rtnl_response(sock, seq,
 				      &cicpos_handle_ipif_msg,
 				      session,
-				      &cicpos_ipif_post_poll,
-                                      buf)) < 0)
+				      &cicpos_ipif_post_poll)) < 0)
     ci_log(CODEID": reading of IP i/f list from rtnetlink "
 	   "failed, rc %d",  -rc);
 
@@ -3222,14 +3226,11 @@ cicpos_handle_rtnl_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
  *  If mac_only is set then only do an IP-MAC mapping update
  */
 static void
-cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only,
-                   char *buf)
+cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only)
 {   int rc;
     cicpos_parse_state_t *session;
-    cicp_nlsock_t nlsock = {
-        .sock = NULL,
-        .seq = 1
-    };
+    struct socket *sock = NULL;
+    static __u32 seq = 1;
 
     session = cicpos_parse_state_alloc(control_plane);
 
@@ -3243,7 +3244,7 @@ cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only,
     CICPOS_MAC_STAT_SET_POLLER_LAST_START(control_plane);
 
     /* setup socket */
-    if ((rc = create_netlink_socket(&nlsock.sock)) < 0 )
+    if ((rc = create_netlink_socket(&sock)) < 0 )
     {   ci_log(CODEID": failed to create netlink socket rc %d", rc);
 	kfree(session);
 	return;
@@ -3252,19 +3253,30 @@ cicpos_dump_tables(cicp_handle_t *control_plane, int /*bool*/ mac_only,
     /* We do address resolution updates more often than than route/llap
        etc. updates. */
     if (!mac_only) 
-    {   session->nosort = CI_TRUE;
+    {   seq++;
+        session->nosort = CI_TRUE;
 	/* Ignore rc: if we failed to parse one table, it is not
          * the end of the world. */
-	cicpos_dump_ipift(&nlsock, session, buf);
-	cicpos_dump_routet(&nlsock, session, buf);
-	cicpos_dump_llapt(&nlsock, session, buf);
+	cicpos_dump_ipift(sock, seq, session);
+	seq++;
+	cicpos_dump_llapt(sock, seq, session);
+	seq++;
+	cicpos_dump_routet(sock, seq, session);
     }
+
+    /* pmtu overwrites some route entries - do it next */
+    seq++;
+    cicpos_dump_pmtu_cache(sock, seq, session);
+    seq++;
+    cicpos_dump_route_cache(sock, seq, session);
+    cicpos_route_post_poll(session);
 
     /* MAC table is the largest one, and if we fail to read the full
      * answer we spoil all the next tables.  So, read it the last. */
-    cicpos_dump_mact(&nlsock, session, buf);
+    seq++;
+    cicpos_dump_mact(sock, seq, session);
 
-    sock_release(nlsock.sock);
+    sock_release(sock);
 
     CICPOS_MAC_STAT_SET_POLLER_LAST_END(control_plane);
 
@@ -3313,25 +3325,7 @@ cicpos_dtor(cicp_mibs_kern_t *control_plane)
 
 
 
-extern void
-cicpos_sync_tables(cicp_handle_t *control_plane)
-{
-    char *buf;
-    /* This function is called in process context, but wants to use a kernel
-     * buffer for a socket call, so we need to set use of kernel address
-     * space.
-     */
-    mm_segment_t fs = get_fs();
-    set_fs(get_ds());
 
-    buf = ci_alloc(NL_BUFSIZE);
 
-    if( buf ) {
-        /* sync all tables */
-        cicpos_dump_tables(control_plane, 0, buf);
-        ci_free(buf);
-    }
 
-    set_fs(fs);
-}
 

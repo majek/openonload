@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,6 +40,16 @@
 #include <ci/internal/cplane_handle.h>
 #endif
 #include <ci/internal/cplane_ops.h>
+
+
+#ifdef __KERNEL__
+/* These types of messages can only be sent in user space and will
+ * never be queued up to be sent at a later point or potentially by
+ * the driver.  However, the driver compiles code that uses this
+ * definition so just define it to 0.
+ */
+#define ONLOAD_MSG_WARM 0
+#endif
 
 
 /**********************************************************************
@@ -111,6 +121,14 @@ ci_inline void ci_tcp_update_rtt(ci_netif* netif, ci_tcp_state* ts, int m)
 	        S_FMT(ts), ts->sa, ts->sv,
 	        tcp_srtt(ts), tcp_rttvar(ts), ts->rto));
 }
+
+/*
+** Turn timestamps into cmsg entries.
+*/
+void ip_cmsg_recv_timestamp(ci_netif *ni, ci_uint64 timestamp, 
+                                      struct cmsg_state *cmsg_state);
+void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp, 
+                                        struct cmsg_state *cmsg_state);
 
 
 /**********************************************************************
@@ -207,8 +225,7 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
 
 ci_inline int
 ci_tcp_ep_clear_filters(ci_netif*         ni,
-                        oo_sp             sock_id,
-                        int               no_sw)
+                        oo_sp             sock_id)
 {
   int rc;
 
@@ -218,11 +235,9 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
                 ni->state->stack_id, OO_SP_FMT(sock_id)));
 
 #ifdef __ci_driver__
-  rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id),
-                                         no_sw);
+  rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id));
 #else
-  rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni),
-                                      sock_id, no_sw);
+  rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni), sock_id);
 #endif
 
   LOG_TC( if (rc < 0)

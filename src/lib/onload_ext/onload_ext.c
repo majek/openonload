@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,30 @@ int onload_set_stackname(enum onload_stackname_who who,
 }
 
 __attribute__((weak))
+int onload_stackname_save(void)
+{
+  return 0;
+}
+
+__attribute__((weak))
+int onload_stackname_restore(void)
+{
+  return 0;
+}
+
+__attribute__((weak))
+int onload_stack_opt_set_int(const char* opt, int64_t val)
+{
+  return 0;
+}
+
+__attribute__((weak))
+int onload_stack_opt_reset(void)
+{
+  return 0;
+}
+
+__attribute__((weak))
 int onload_is_present(void)
 {
   return 0;
@@ -110,22 +134,22 @@ int onload_set_recv_filter(int fd, onload_zc_recv_filter_callback filter,
 /**************************************************************************/
 
 __attribute__((weak))
-int onload_msg_template_set(int fd, struct iovec* base_pkt, int blen, 
-                            onload_template_handle* handle)
+int onload_msg_template_alloc(int fd, struct iovec* initial_msg, int mlen,
+                              onload_template_handle* handle, unsigned flags)
 {
   return -ENOSYS;
 }
 
 __attribute__((weak))
-int onload_msg_template_update(onload_template_handle handle,
-                               struct onload_msg_update* updates, 
-                               int ulen, int complete)
+int onload_msg_template_update(int fd, onload_template_handle handle,
+                               struct onload_template_msg_update_iovec* updates,
+                               int ulen, unsigned flags)
 {
   return -ENOSYS;
 }
 
 __attribute__((weak))
-int onload_msg_template_release(onload_template_handle handle)
+int onload_msg_template_abort(int fd, onload_template_handle handle)
 {
   return -ENOSYS;
 }

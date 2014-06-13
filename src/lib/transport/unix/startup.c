@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -372,6 +372,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_SA_ONSTACK_INTERCEPT",	sa_onstack_intercept);
   GET_ENV_OPT_INT("EF_ACCEPT_INHERIT_NONBLOCK",	accept_force_inherit_nonblock);
   GET_ENV_OPT_INT("EF_ACCEPT_INHERIT_NODELAY",	accept_force_inherit_nodelay);
+  GET_ENV_OPT_INT("EF_VFORK_MODE",	vfork_mode);
 #if CI_CFG_USERSPACE_PIPE
   GET_ENV_OPT_INT("EF_PIPE",        ul_pipe);
 #endif

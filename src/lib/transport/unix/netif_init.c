@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,6 +54,13 @@ static struct oo_stackname_state stackname_config_across_fork;
 /* Storage for library context across fork() */
 static citp_lib_context_t citp_lib_context_across_fork;
 
+/*! Handles user-level netif internals pre fork() */
+static void citp_netif_pre_fork_hook(void);
+/*! Handles user-level netif internals post fork() in the parent */
+static void citp_netif_parent_fork_hook(void);
+/* Handles user-level netif internals post fork() in the child */
+static void citp_netif_child_fork_hook(void);
+
 /* I do not understand why, but __register_atfork seems to work better than
  * __libc_atfork */
 extern int __register_atfork(void (*prepare)(void), void (*parent)(void), 
@@ -69,7 +76,7 @@ int ci_setup_fork(void)
 
 
 /* Handles user-level netif internals pre fork() */
-void citp_netif_pre_fork_hook(void)
+static void citp_netif_pre_fork_hook(void)
 {
   struct oo_stackname_state *stackname_state;
 
@@ -111,7 +118,7 @@ void citp_netif_pre_fork_hook(void)
 }
 
 /* Handles user-level netif internals post fork() in the parent */
-void citp_netif_parent_fork_hook(void)
+static void citp_netif_parent_fork_hook(void)
 {
   /* If we have not inited fork hook, how can we get here in the first
    * place? */
@@ -140,7 +147,7 @@ unlock_fork:
 }
 
 /* Handles user-level netif internals post fork() in the child */
-void citp_netif_child_fork_hook(void)
+static void citp_netif_child_fork_hook(void)
 {
   ci_netif* ni;
 
@@ -207,6 +214,20 @@ setup_fdtable:
   pthread_mutex_unlock(&citp_dup_lock);
 }
 
+/* Should be called in child branch after vfork syscall */
+void citp_netif_child_vfork_hook(void)
+{
+  Log_CALL(ci_log("%s()", __func__));
+  oo_per_thread_get()->in_vfork_child = 1;
+}
+
+/* Should be called in parent branch after vfork syscall */
+void citp_netif_parent_vfork_hook(void)
+{
+  Log_CALL(ci_log("%s()", __func__));
+  oo_per_thread_get()->in_vfork_child = 0;
+}
+
 /* Handles user-level netif internals pre bproc_move() */
 void citp_netif_pre_bproc_move_hook(void)
 {
@@ -249,22 +270,20 @@ static int __citp_netif_move_fd(ef_driver_handle* fd)
 }
 
 
-static dev_t onloadfs_dev_t = 0;
+static ci_uint32 onloadfs_dev_t = 0;
 dev_t citp_onloadfs_dev_t(void)
 {
   if( onloadfs_dev_t == 0 ) {
     int fd;
-    if( fdtable_strict() )  CITP_FDTABLE_LOCK();
+    if( fdtable_strict() )  { CITP_FDTABLE_ASSERT_LOCKED(1); }
     if( ef_onload_driver_open(&fd, 1) != 0 ) {
       Log_E(log("%s: Failed to open /dev/onload", __FUNCTION__));
-      if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
       return 0;
     }
     if( ci_sys_ioctl(fd, OO_IOC_GET_ONLOADFS_DEV, &onloadfs_dev_t) != 0 ) {
       Log_E(log("%s: Failed to find onloadfs dev_t", __FUNCTION__));
     }
     ci_sys_close(fd);
-    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
   }
   return onloadfs_dev_t;
 }
@@ -272,6 +291,7 @@ dev_t citp_onloadfs_dev_t(void)
 /* Platform specific code, called after netif construction */
 void  citp_netif_ctor_hook(ci_netif* ni, int realloc)
 {
+
   if (!realloc) {
     /* Don't want netifs on fds 0..3 - move it elsewhere.
      * TODO: This is kind of sucks -- not exactly elegant.

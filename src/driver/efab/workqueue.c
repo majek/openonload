@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -103,7 +103,7 @@ ci_workqueue_selfdestruct(ci_workqueue_t * wqueue)
  *--------------------------------------------------------------------*/
 
 int 
-ci_workqueue_ctor(ci_workqueue_t * wqueue)
+ci_workqueue_ctor(ci_workqueue_t * wqueue, const char *name)
 {
   int rc;
   DEBUGWQ( ci_log("%s: ", __FUNCTION__) );
@@ -121,7 +121,7 @@ ci_workqueue_ctor(ci_workqueue_t * wqueue)
 #endif
 
   rc = cithread_create(&wqueue->thread, ci_workqueue_thread, wqueue,
-                       "onload-wqueue");
+                       name);
   if (rc < 0) {
     /* stop events being added to this queue */
     wqueue->state = CI_WQ_DEAD;

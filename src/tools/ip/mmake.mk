@@ -14,6 +14,7 @@ ifeq ($(GNU),1)
 APPS	+= istack \
            iifdump \
            routedump \
+           pio_buddy_test \
            locktest
 endif
 
@@ -31,6 +32,7 @@ istack		:= $(patsubst %,$(AppPattern),istack)
 istack5		:= $(patsubst %,$(AppPattern),istack5)
 onload_tcpdump.bin := $(patsubst %,$(AppPattern),onload_tcpdump.bin)
 onload_fuser	:= $(patsubst %,$(AppPattern),onload_fuser)
+pio_buddy_test	:= $(patsubst %,$(AppPattern),pio_buddy_test)
 
 MMAKE_LIBS	:= $(LINK_CIIP_LIB) $(LINK_CIAPP_LIB) \
 		   $(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB)
@@ -39,6 +41,8 @@ MMAKE_LIB_DEPS	:= $(CIIP_LIB_DEPEND) $(CIAPP_LIB_DEPEND) \
 
 MMAKE_FTL_LIBS  := $(LINK_FTL_LIB)
 MMAKE_FTL_LIB_DEPS := $(FTL_LIB_DEPEND)
+MMAKE_STACKDUMP_LIBS := $(LINK_ONLOAD_EXT_LIB)
+MMAKE_STACKDUMP_DEPS := $(ONLOAD_EXT_LIB_DEPEND)
 
 # By default the Level 5 version of istack is identical to the distributed one
 MMAKE_L5_FTL_LIBS     := $(LINK_L5_FTL_LIB)
@@ -60,8 +64,8 @@ endif
 
 all: $(TARGETS)
 
-$(onload_stackdump): stackdump.o libstack.o $(MMAKE_LIB_DEPS)
-	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
+$(onload_stackdump): stackdump.o libstack.o $(MMAKE_LIB_DEPS) $(MMAKE_STACKDUMP_DEPS)
+	(libs="$(MMAKE_LIBS) $(MMAKE_STACKDUMP_LIBS)"; $(MMakeLinkCApp))
 
 $(istack): istack.o libstack.o $(MMAKE_LIB_DEPS) $(MMAKE_FTL_LIB_DEPS)
 	(libs="$(MMAKE_LIBS) $(MMAKE_FTL_LIBS)"; $(MMakeLinkCApp))
@@ -73,6 +77,9 @@ $(onload_tcpdump.bin): tcpdump_bin.o libstack.o $(MMAKE_LIB_DEPS)
 	(libs="$(MMAKE_LIBS) $(MMAKE_LIBS_LIBPCAP)"; $(MMakeLinkCApp))
 
 $(onload_fuser): fuser.o $(MMAKE_LIB_DEPS)
+	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
+
+$(pio_buddy_test): pio_buddy_test.o libstack.o $(MMAKE_LIB_DEPS)
 	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
 
 # These rules may generate a version that uses gnu readline.  We must not

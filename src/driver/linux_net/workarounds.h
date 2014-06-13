@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,8 +14,8 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
- * Copyright 2006-2010 Solarflare Communications Inc.
+ * Driver for Solarflare network controllers and boards
+ * Copyright 2006-2013 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -30,34 +30,23 @@
  * Bug numbers are from Solarflare's Bugzilla.
  */
 
-#define EFX_WORKAROUND_ALWAYS(efx) 1
+#define EFX_WORKAROUND_FARCH(efx) (efx_nic_rev(efx) <= EFX_REV_SIENA_A0)
 #define EFX_WORKAROUND_FALCON_A(efx) (efx_nic_rev(efx) <= EFX_REV_FALCON_A1)
 #define EFX_WORKAROUND_FALCON_B(efx) (efx_nic_rev(efx) == EFX_REV_FALCON_B0)
 #define EFX_WORKAROUND_FALCON_AB(efx) (efx_nic_rev(efx) <= EFX_REV_FALCON_B0)
 #define EFX_WORKAROUND_SIENA(efx) (efx_nic_rev(efx) == EFX_REV_SIENA_A0)
 #define EFX_WORKAROUND_10G(efx) 1
 
-/* XAUI resets if link not detected */
-#define EFX_WORKAROUND_5147 EFX_WORKAROUND_ALWAYS
 /* Reprog PCIe ACK timer to workaround issue in PCIe IP block */
 #define EFX_WORKAROUND_6943 EFX_WORKAROUND_FALCON_B
-/* RX PCIe double split performance issue */
-#define EFX_WORKAROUND_7575 EFX_WORKAROUND_ALWAYS
 /* Bit-bashed I2C reads cause performance drop */
 #define EFX_WORKAROUND_7884 EFX_WORKAROUND_10G
 /* Selftests need to be retried */
-#define EFX_WORKAROUND_8568 EFX_WORKAROUND_ALWAYS
+#define EFX_WORKAROUND_8568 EFX_WORKAROUND_FARCH
 /* Queued ACKs aren't flushed before L1 entry */
 #define EFX_WORKAROUND_9096 EFX_WORKAROUND_FALCON_B
-/* TX_EV_PKT_ERR can be caused by a dangling TX descriptor
- * or a PCIe error (bug 11028) */
-#define EFX_WORKAROUND_10727 EFX_WORKAROUND_ALWAYS
-/* Transmit flow control may get disabled */
-#define EFX_WORKAROUND_11482 EFX_WORKAROUND_FALCON_AB
 /* Truncated IPv4 packets can confuse the TX packet parser */
 #define EFX_WORKAROUND_15592 EFX_WORKAROUND_FALCON_AB
-/* Legacy ISR read can return zero once */
-#define EFX_WORKAROUND_15783 EFX_WORKAROUND_ALWAYS
 /* Legacy interrupt storm when interrupt fifo fills */
 #define EFX_WORKAROUND_17213 EFX_WORKAROUND_SIENA
 
@@ -80,5 +69,11 @@
 
 /* Invalid BAR accesses may not be completed, leading to NMI */
 #define EFX_WORKAROUND_11368 EFX_WORKAROUND_FALCON_B
+
+/* Lockup when writing event block registers at gen2/gen3 */
+#define EFX_EF10_WORKAROUND_35388(efx)					\
+	((struct efx_ef10_nic_data *)efx->nic_data)->workaround_35388
+#define EFX_WORKAROUND_35388(efx)					\
+	(efx_nic_rev(efx) == EFX_REV_HUNT_A0 && EFX_EF10_WORKAROUND_35388(efx))
 
 #endif /* EFX_WORKAROUNDS_H */

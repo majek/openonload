@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,7 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include "udp_internal.h"
 #include <ci/internal/cplane_ops.h> /* for ip.h ci_ip_cache_init */
 
 
@@ -98,10 +99,6 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   us->udpflags = CI_UDPF_MCAST_LOOP;
   us->stamp = 0;
   memset(&us->stats, 0, sizeof(us->stats));
-
-  /* initialise the emphemeral ip cache */
-  ci_pmtu_state_init(netif, &us->s, &us->ephemeral_pkt.pmtus,
-                     CI_IP_TIMER_PMTU_DISCOVER_2);
 }
 
 
@@ -266,10 +263,11 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf)
       CI_UDP_STATE_FLAGS_PRI_ARG(us));
 
   /* Receive path. */
-  log("%s  rcv: q_bytes=%d q_pkts=%d reap=%d tot_bytes=%u tot_pkts=%u", pf,
-      ci_udp_recv_q_bytes(&us->recv_q), ci_udp_recv_q_pkts(&us->recv_q),
-      ci_udp_recv_q_reapable(&us->recv_q),
-      (unsigned) us->recv_q.bytes_added, rx_added);
+  log("%s  rcv: q_bytes=%d q_depth=%d q_pkts=%d reap=%d tot_bytes=%u"
+      " tot_pkts=%u", pf, ci_udp_recv_q_bytes(&us->recv_q),
+      RECVQ_DEPTH(us, 0), ci_udp_recv_q_pkts(&us->recv_q),
+      ci_udp_recv_q_reapable(&us->recv_q), (unsigned) us->recv_q.bytes_added,
+      rx_added);
 #if CI_CFG_ZC_RECV_FILTER
   log("%s  rcv: filtered=%d unfiltered=%d tot_filt_rej=%d tot_filt_pass=%d ", pf,
       us->recv_q.pkts_filter_passed - us->recv_q.pkts_delivered,

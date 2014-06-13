@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,7 +38,6 @@ void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
   s->rx_errno = ENOTCONN;
   s->pkt.ether_type = CI_ETHERTYPE_IP;
   ci_ip_cache_init(&s->pkt);
-  ci_pmtu_state_reinit(ni, s, &s->pkt.pmtus);
 }
 
 
@@ -68,7 +67,7 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
   oo_sock_cplane_init(&s->cp);
   s->local_peer = OO_SP_NULL;
 
-  s->s_flags = CI_SOCK_FLAG_CONNECT_MUST_BIND;
+  s->s_flags = CI_SOCK_FLAG_CONNECT_MUST_BIND | CI_SOCK_FLAG_PMTU_DO;
   s->s_aflags = 0u;
 
   ci_assert_equal( 0, CI_IP_DFLT_TOS );
@@ -94,7 +93,6 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
 
 
   ci_sock_cmn_reinit(ni, s);
-  ci_pmtu_state_init(ni, s, &s->pkt.pmtus, CI_IP_TIMER_PMTU_DISCOVER);
 
   sp = oo_sockp_to_statep(ni, SC_SP(s));
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_sock_cmn, reap_link));
@@ -113,10 +111,9 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf)
       s->so.rcvbuf, s->so.sndbuf, s->cp.so_bindtodevice,
       s->rx_bind2dev_ifindex, s->rx_bind2dev_base_ifindex,
       s->rx_bind2dev_vlan, s->cp.ip_ttl);
-  /* ?? TODO: sigsig should really be dumped from citp_waitable_dump2(). */
-  log("%s  rcvtimeo_ms=%d sndtimeo_ms=%d sigown=%d sig=%d "
+  log("%s  rcvtimeo_ms=%d sndtimeo_ms=%d sigown=%d "
       "cmsg="OO_CMSG_FLAGS_FMT"%s",
-      pf, s->so.rcvtimeo_msec, s->so.sndtimeo_msec, s->b.sigown, s->b.sigsig,
+      pf, s->so.rcvtimeo_msec, s->so.sndtimeo_msec, s->b.sigown,
       OO_CMSG_FLAGS_PRI_ARG(s->cmsg_flags),
       (s->cp.sock_cp_flags & OO_SCP_NO_MULTICAST) ? " NO_MCAST_TX":"");
   log("%s  rx_errno=%x tx_errno=%x so_error=%d os_sock=%u%s%s", pf,

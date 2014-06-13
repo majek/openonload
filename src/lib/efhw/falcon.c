@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,6 +51,8 @@
 #include <ci/efhw/nic.h>
 #include <ci/efhw/eventq.h>
 #include <ci/efhw/checks.h>
+#include <ci/efhw/efhw_buftable.h>
+#include <driver/linux_net/driverlink_api.h>
 
 
 /*----------------------------------------------------------------------------
@@ -222,10 +224,11 @@ static inline uint falcon_dma_tx_q_size_index(uint dmaq_size)
 	return i;
 }
 
-static void
+static int
 falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 		      uint dmaq, uint evq_id, uint own_id,
-		      uint tag, uint dmaq_size, uint buf_idx, uint flags)
+		      uint tag, uint dmaq_size, uint buf_idx,
+		      dma_addr_t *dma_addrs, int n_dma_addrs, uint flags)
 {
 	FALCON_LOCK_DECL;
 	uint index, desc_type;
@@ -351,7 +354,7 @@ falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 		mmiowb();
 	}
 	FALCON_LOCK_UNLOCK(nic);
-	return;
+	return 0;
 }
 
 static inline ulong
@@ -361,10 +364,11 @@ falcon_dma_rx_q_offset(struct efhw_nic *nic, unsigned dmaq)
 	return FR_AZ_RX_DESC_PTR_TBL_OFST + dmaq * FALCON_REGISTER128;
 }
 
-static void
+static int
 falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 		      uint dmaq, uint evq_id, uint own_id,
-		      uint tag, uint dmaq_size, uint buf_idx, uint flags)
+		      uint tag, uint dmaq_size, uint buf_idx,
+		      dma_addr_t *dma_addrs, int n_dma_addrs, uint flags)
 {
 	FALCON_LOCK_DECL;
 	uint i, desc_type = 1;
@@ -452,7 +456,8 @@ falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 		mmiowb();
 	}
 	FALCON_LOCK_UNLOCK(nic);
-	return;
+
+	return nic->rx_prefix_len;
 }
 
 static void falcon_dmaq_tx_q_disable(struct efhw_nic *nic, uint dmaq)
@@ -638,13 +643,13 @@ _falcon_nic_buffer_table_set64(struct efhw_nic *nic,
 				return;
 			count--;
 #ifdef BUG_14512_WA
-                        if (count2-- <= 0 ) {
-                          EFHW_ERR("%s: WARNING MAX_BUF_TBL_READS exceeded "
-                                   "at ID %d (offset 0x%x)",
-                                   __FUNCTION__, buffer_id,
-                                   (unsigned)(offset - efhw_kva));
-                          count2 = MAX_BUF_TBL_READS;
-                        }
+			if (count2-- <= 0 ) {
+			  EFHW_ERR("%s: WARNING MAX_BUF_TBL_READS exceeded "
+				   "at ID %d (offset 0x%x)",
+				   __FUNCTION__, buffer_id,
+				   (unsigned)(offset - efhw_kva));
+			  count2 = MAX_BUF_TBL_READS;
+			}
 #endif
 			if (count <= 0) {
 				EFHW_ERR("%s: poll Timeout waiting at ID %d "
@@ -658,6 +663,7 @@ _falcon_nic_buffer_table_set64(struct efhw_nic *nic,
 			udelay(1);
 		}
 	}
+    mmiowb();
 }
 
 #define _falcon_nic_buffer_table_set _falcon_nic_buffer_table_set64
@@ -681,11 +687,6 @@ static inline void _falcon_nic_buffer_table_commit(struct efhw_nic *nic)
 
 	nic->buf_commit_outstanding++;
 	EFHW_TRACE("COMMIT REQ out=%d", nic->buf_commit_outstanding);
-}
-
-static void falcon_nic_buffer_table_commit(struct efhw_nic *nic)
-{
-	/* nothing to do */
 }
 
 static inline void
@@ -834,28 +835,6 @@ falcon_nic_evq_ptr_tbl(struct efhw_nic *nic,
 	return;
 }
 
-void
-falcon_nic_evq_ack(struct efhw_nic *nic,
-		   uint evq,	/* evq id */
-		   uint rptr	/* new read pointer update */)
-{
-	volatile char __iomem *efhw_kva = EFHW_KVA(nic);
-	unsigned offset;
-
-	EFHW_ASSERT(evq < nic->num_evqs);
-
-	__DWCHCK(FRF_AZ_EVQ_RPTR);
-	__RANGECHCK(rptr, FRF_AZ_EVQ_RPTR_WIDTH);
-
-	/* No nead to check nic->resetting here as this is equivalent
-	 * to something a client (with no visibility of
-	 * nic->resetting) could do anyway */
-
-	offset = FR_AZ_EVQ_RPTR_REG_OFST + evq * FALCON_REGISTER128;
-	writel(rptr << FRF_AZ_EVQ_RPTR_LBN, efhw_kva + offset);
-	mmiowb();
-}
-
 /*---------------------------------------------------------------------------*/
 
 static inline void
@@ -973,7 +952,7 @@ siena_timer_tbl_set(struct efhw_nic *nic,
  * Rate pacing - Low level interface
  *
  *--------------------------------------------------------------------*/
-void falcon_nic_pace(struct efhw_nic *nic, uint dmaq, int pace)
+static int falcon_nic_pace(struct efhw_nic *nic, uint dmaq, int pace)
 {
 	/* The pace delay imposed is (2^pace)*100ns unless the pace
 	   value is zero in which case the delay is zero.  If the
@@ -1028,6 +1007,8 @@ void falcon_nic_pace(struct efhw_nic *nic, uint dmaq, int pace)
 
 	EFHW_TRACE("%s: txq %d offset=%lx pace=2^%x",
 		   __FUNCTION__, dmaq, offset, pace);
+
+	return 0;
 }
 
 
@@ -1061,17 +1042,19 @@ void falcon_nic_wakeup_mask_set(struct efhw_nic *nic, unsigned mask)
 		}
 		falcon_write_qq(EFHW_KVA(nic) + FR_AZ_EVQ_CTL_REG_OFST, 
 				q0, q1);
+		mmiowb();
 	}
 	FALCON_LOCK_UNLOCK(nic);
 }
 
+#if EFX_DRIVERLINK_API_VERSION < 8
 /*--------------------------------------------------------------------
  *
  * RXDP - low level interface
  *
  *--------------------------------------------------------------------*/
 
-void
+static void
 falcon_nic_set_rx_usr_buf_size(struct efhw_nic *nic, int usr_buf_bytes)
 {
 	FALCON_LOCK_DECL;
@@ -1119,7 +1102,7 @@ falcon_nic_set_rx_usr_buf_size(struct efhw_nic *nic, int usr_buf_bytes)
 	}
 	FALCON_LOCK_UNLOCK(nic);
 }
-EXPORT_SYMBOL(falcon_nic_set_rx_usr_buf_size);
+#endif
 
 
 /*--------------------------------------------------------------------
@@ -1165,7 +1148,8 @@ _DEBUG_SYM_ void falcon_nic_tx_cfg(struct efhw_nic *nic, int unlocked)
  *
  *--------------------------------------------------------------------*/
 
-void falcon_nic_pace_cfg(struct efhw_nic *nic, int fb_base, int bin_thresh)
+static void falcon_nic_pace_cfg(struct efhw_nic *nic, int fb_base, 
+				int bin_thresh)
 {
 	FALCON_LOCK_DECL;
 	volatile char __iomem *efhw_kva = EFHW_KVA(nic);
@@ -1210,11 +1194,46 @@ void falcon_nic_pace_cfg(struct efhw_nic *nic, int fb_base, int bin_thresh)
  *
  *---------------------------------------------------------------------------*/
 
+static int falcon_buffer_table_ctor(struct efhw_nic *nic,
+				    int bt_min, int bt_lim)
+{
+	int i;
+	struct efhw_buffer_table_block *block;
+	struct efhw_buffer_table_block *blocks;
+
+	bt_min = (bt_min - 1) / EFHW_BUFFER_TABLE_BLOCK_SIZE + 1;
+	bt_lim = (bt_lim - 1) / EFHW_BUFFER_TABLE_BLOCK_SIZE + 1;
+	blocks = vmalloc(sizeof(struct efhw_buffer_table_block) *
+			 (bt_lim - bt_min));
+	if (blocks == NULL)
+		return -ENOMEM;
+	nic->bt_blocks_memory = blocks;
+	nic->bt_free_block = NULL;
+
+	for (i = bt_min; i < bt_lim; i++) {
+		block = blocks++;
+		block->btb_next = nic->bt_free_block;
+		block->btb_vaddr = i * EFHW_BUFFER_TABLE_BLOCK_SIZE *
+					EFHW_NIC_PAGE_SIZE;
+		block->btb_hw.falcon.owner = 0;
+		nic->bt_free_block = block;
+	}
+
+	return 0;
+}
+
+static void falcon_buffer_table_dtor(struct efhw_nic *nic)
+{
+	vfree(nic->bt_blocks_memory);
+}
+
+
 static void falcon_nic_close_hardware(struct efhw_nic *nic)
 {
 	/* check we are in possession of some hardware */
 	if (!efhw_nic_have_hw(nic))
 		return;
+	falcon_buffer_table_dtor(nic);
 }
 
 #ifndef __ci_ul_driver__
@@ -1222,26 +1241,12 @@ static
 #endif
 int falcon_nic_get_mac_config(struct efhw_nic *nic)
 {
-	switch (nic->devtype.variant) {
-	case 'A':
-	case 'B':
-        {
-         	volatile char __iomem *efhw_kva = nic->bar_ioaddr;
-                uint32_t altera;
-                altera = readl(efhw_kva + FR_AZ_ALTERA_BUILD_REG_OFST);
-		nic->devtype.in_fpga = (altera != 0);
-		break;
-        }
-	default:
-		break;
-	}
-
 	nic->flags |= NIC_FLAG_10G;
 	return 0;
 }
 
 
-void
+static void
 falcon_nic_tweak_hardware(struct efhw_nic *nic)
 {
 	/* RXDP tweaks */
@@ -1249,6 +1254,7 @@ falcon_nic_tweak_hardware(struct efhw_nic *nic)
 	/* ?? bug2396 rx_cfg should be ok so long as the net driver
 	 * always pushes buffers big enough for the link MTU */
 
+#if EFX_DRIVERLINK_API_VERSION < 8
 	/* set the RX buffer cutoff size to be the same as PAGE_SIZE.
 	 * Use this value when we think that there will be a lot of
 	 * jumbo frames.
@@ -1256,7 +1262,8 @@ falcon_nic_tweak_hardware(struct efhw_nic *nic)
 	 * The default value 1600 is useful when packets are small,
 	 * but would means that jumbo frame RX queues would need more
 	 * descriptors pushing */
-	falcon_nic_set_rx_usr_buf_size(nic, FALCON_RX_USR_BUF_SIZE);
+	falcon_nic_set_rx_usr_buf_size(nic, nic->rx_usr_buf_size);
+#endif
 
 	/* TXDP tweaks */
 	/* ?? bug2396 looks ok */
@@ -1268,9 +1275,11 @@ falcon_nic_tweak_hardware(struct efhw_nic *nic)
 static int
 falcon_nic_init_hardware(struct efhw_nic *nic,
 			 struct efhw_ev_handler *ev_handlers,
-			 const uint8_t *mac_addr, int non_irq_evq)
+			 const uint8_t *mac_addr, int non_irq_evq,
+			 int bt_min, int bt_lim)
 {
 	int rc;
+	int capacity;
 
 	/* header sanity checks */
 	FALCON_ASSERT_VALID();
@@ -1298,11 +1307,34 @@ falcon_nic_init_hardware(struct efhw_nic *nic,
 
 	falcon_nic_tweak_hardware(nic);
 
+	rc = falcon_buffer_table_ctor(nic, bt_min, bt_lim);
+	if (rc < 0) {
+		EFHW_ERR("%s: efhw_buffer_table_init() failed (%d)",
+			 __FUNCTION__, rc);
+		return rc;
+	}
+
+	/* Choose queue size. */
+	for (capacity = 8192; capacity <= nic->q_sizes[EFHW_EVQ];
+	     capacity <<= 1) {
+		if (capacity > nic->q_sizes[EFHW_EVQ]) {
+			EFHW_ERR
+			    ("%s: Unable to choose EVQ size (supported=%x)",
+			     __func__, nic->q_sizes[EFHW_EVQ]);
+			return -E2BIG;
+		} else if (capacity & nic->q_sizes[EFHW_EVQ])
+			break;
+	}
+
+	nic->non_interrupting_evq.hw.capacity = capacity;
+	nic->non_interrupting_evq.hw.bt_block = NULL;
+
 	rc = efhw_keventq_ctor(nic, non_irq_evq,
 			       &nic->non_interrupting_evq, NULL);
 	if (rc < 0) {
 		EFHW_ERR("%s: efhw_keventq_ctor() failed (%d) evq=%d",
 			 __FUNCTION__, rc, non_irq_evq);
+		falcon_buffer_table_dtor(nic);
 		return rc;
 	}
 
@@ -1311,32 +1343,15 @@ falcon_nic_init_hardware(struct efhw_nic *nic,
 
 /*--------------------------------------------------------------------
  *
- * Interrupt
- *
- *--------------------------------------------------------------------*/
-
-static void
-falcon_nic_set_interrupt_moderation(struct efhw_nic *nic, int evq,
-				    uint32_t val)
-{
-	EFHW_ASSERT(evq >= 0);
-
-	if (nic->devtype.variant < 'C')
-		falcon_ab_timer_tbl_set(nic, evq, FFE_AB_TIMER_MODE_INT_HLDOFF, val / 5);
-	else
-		siena_timer_tbl_set(nic, evq, 1/*enable*/, 1/*interrupting*/,
-				    FFE_CZ_TIMER_MODE_INT_HLDOFF, val*10/61);
-}
-
-/*--------------------------------------------------------------------
- *
  * Event Management - and SW event posting
  *
  *--------------------------------------------------------------------*/
 
-static void
+static int
 falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
-			      uint buf_base_id, int interrupting, int enable_dos_p)
+			      uint buf_base_id, dma_addr_t *dma_addrs, 
+			      uint n_pages, int interrupting, int enable_dos_p,
+			      int wakeup_evq /* ef10 only */)
 {
 	EFHW_ASSERT(nic);
 
@@ -1352,31 +1367,37 @@ falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 
 	falcon_nic_evq_ptr_tbl(nic, evq, 1, buf_base_id, evq_size, enable_dos_p);
 	EFHW_TRACE("%s: enable evq %u size %u", __FUNCTION__, evq, evq_size);
+        return 0;
 }
 
 static void
-falcon_nic_event_queue_disable(struct efhw_nic *nic, uint evq, int timer_only)
+falcon_nic_event_queue_disable(struct efhw_nic *nic, uint evq)
 {
 	EFHW_ASSERT(nic);
 
 	if (nic->devtype.variant < 'C')
 		falcon_ab_timer_tbl_set(nic, evq, 0 /* disable */ , 0);
 	else
-		siena_timer_tbl_set(nic, evq, timer_only /* enable */,
+		siena_timer_tbl_set(nic, evq, 0 /* enable */,
 				    0 /* interrupting */,
 				    FFE_CZ_TIMER_MODE_DIS, 0);
 
-	if (!timer_only)
-		falcon_nic_evq_ptr_tbl(nic, evq, 0, 0, 0, 0);
+	falcon_nic_evq_ptr_tbl(nic, evq, 0, 0, 0, 0);
 	EFHW_TRACE("%s: disenable evq %u", __FUNCTION__, evq);
 }
 
 static void
-falcon_nic_wakeup_request(struct efhw_nic *nic, int next_i, int evq)
+falcon_nic_wakeup_request(struct efhw_nic *nic, volatile void __iomem* io_page,
+			  int rptr)
 {
-	EFHW_ASSERT(evq >= 0);
-	falcon_nic_evq_ack(nic, evq, next_i);
-	EFHW_TRACE("%s: evq %d next_i %d", __FUNCTION__, evq, next_i);
+	__DWCHCK(FRF_AZ_EVQ_RPTR);
+	__RANGECHCK(rptr, FRF_AZ_EVQ_RPTR_WIDTH);
+
+	writel(rptr << FRF_AZ_EVQ_RPTR_LBN,
+	       io_page + FR_BZ_EVQ_RPTR_REGP0_OFST);
+	mmiowb();
+
+	EFHW_TRACE("%s: io_page %p rptr %d", __FUNCTION__, io_page, rptr);
 }
 
 static void falcon_nic_sw_event(struct efhw_nic *nic, int data, int evq)
@@ -1515,59 +1536,101 @@ void falcon_nic_buffer_table_confirm(struct efhw_nic *nic)
  * Buffer table - API
  *
  *--------------------------------------------------------------------*/
+static const int __falcon_nic_buffer_table_orders[] = {0};
+
+static int
+falcon_nic_buffer_table_alloc(struct efhw_nic *nic, int owner, int order,
+			      struct efhw_buffer_table_block **block_out)
+{
+	struct efhw_buffer_table_block *block;
+	FALCON_LOCK_DECL;
+
+	EFHW_ASSERT(order == 0);
+
+	FALCON_LOCK_LOCK(nic);
+	block = nic->bt_free_block;
+	if (block == NULL) {
+		FALCON_LOCK_UNLOCK(nic);
+		return -ENOMEM;
+	}
+	nic->bt_free_block = block->btb_next;
+	FALCON_LOCK_UNLOCK(nic);
+
+	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block);)
+	block->btb_hw.falcon.owner = owner;
+	*block_out = block;
+	return 0;
+}
+static int
+falcon_nic_buffer_table_realloc(struct efhw_nic *nic, int owner, int order,
+			        struct efhw_buffer_table_block *block)
+{
+	/* do nothing: allocation does not change accross reset */
+	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block);)
+	EFHW_ASSERT(order == 0);
+	return 0;
+}
 
 static void
-falcon_nic_buffer_table_clear(struct efhw_nic *nic, int buffer_id, int num)
+falcon_nic_buffer_table_free(struct efhw_nic *nic,
+			      struct efhw_buffer_table_block *block)
 {
 	FALCON_LOCK_DECL;
+
+	block->btb_hw.falcon.owner = 0;
+	EFHW_DO_DEBUG(efhw_buffer_table_free_debug(block);)
 	FALCON_LOCK_LOCK(nic);
-	if (!nic->resetting)
-		_falcon_nic_buffer_table_clear(nic, buffer_id, num);
+	block->btb_next = nic->bt_free_block;
+	nic->bt_free_block = block;
 	FALCON_LOCK_UNLOCK(nic);
 }
 
-void
-falcon_nic_buffer_table_set(struct efhw_nic *nic, dma_addr_t dma_addr,
-			    uint region,
-			    int own_id, int buffer_id)
+static void
+falcon_nic_buffer_table_clear(struct efhw_nic *nic,
+			      struct efhw_buffer_table_block *block,
+			      int first_entry, int n_entries)
 {
 	FALCON_LOCK_DECL;
-
-	EFHW_ASSERT(region < FALCON_REGION_NUM);
-
-	falcon_nic_buffer_table_update_poll(nic);
 	FALCON_LOCK_LOCK(nic);
+	EFHW_DO_DEBUG(efhw_buffer_table_clear_debug(block, first_entry,
+						    n_entries);)
 	if (!nic->resetting) {
-		_falcon_nic_buffer_table_set(nic, dma_addr, EFHW_NIC_PAGE_SIZE,
-					     region, own_id, buffer_id);
-		falcon_nic_buffer_table_lazy_commit(nic);
+		_falcon_nic_buffer_table_clear(
+			nic,
+			(block->btb_vaddr >> EFHW_NIC_PAGE_SHIFT) +
+							first_entry,
+			n_entries);
 	}
 	FALCON_LOCK_UNLOCK(nic);
 }
 
-void
-falcon_nic_buffer_table_set_n(struct efhw_nic *nic, int buffer_id,
-			      dma_addr_t dma_addr, uint region,
-			      int n_pages, int own_id)
+static void
+falcon_nic_buffer_table_set(struct efhw_nic *nic,
+			    struct efhw_buffer_table_block *block,
+			    int first_entry, int n_entries,
+			    dma_addr_t *dma_addrs)
 {
-	/* used to set up a contiguous range of buffers */
+	int buffer_id = (block->btb_vaddr >> EFHW_NIC_PAGE_SHIFT) + first_entry;
 	FALCON_LOCK_DECL;
 
-	EFHW_ASSERT(region < FALCON_REGION_NUM);
+#ifndef NDEBUG
+	FALCON_LOCK_LOCK(nic);
+	efhw_buffer_table_set_debug(block, first_entry, n_entries);
+	FALCON_LOCK_UNLOCK(nic);
+#endif
 
-	while (n_pages--) {
+	while (n_entries--) {
 		falcon_nic_buffer_table_update_poll(nic);
 		FALCON_LOCK_LOCK(nic);
 		if (!nic->resetting) {
-			_falcon_nic_buffer_table_set(nic, dma_addr, 
-						     EFHW_NIC_PAGE_SIZE,
-						     region, own_id, 
-						     buffer_id);
+			_falcon_nic_buffer_table_set(
+					nic, *dma_addrs, EFHW_NIC_PAGE_SIZE,
+					0, block->btb_hw.falcon.owner, 
+					buffer_id);
 			falcon_nic_buffer_table_lazy_commit(nic);
 		}
 		FALCON_LOCK_UNLOCK(nic);
-		buffer_id++;
-		dma_addr += EFHW_NIC_PAGE_SIZE;
+		dma_addrs++; buffer_id++;
 	}
 }
 
@@ -1698,62 +1761,74 @@ static int falcon_flush_rx_dma_channel(struct efhw_nic *nic, uint dmaq)
  *
  *--------------------------------------------------------------------*/
 
-int
-falcon_handle_char_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			 efhw_event_t *ev)
+static int
+falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
+		    efhw_event_t *ev)
 {
+	unsigned q;
+
 	EFHW_TRACE("DRIVER EVENT: "FALCON_EVENT_FMT,
 		   FALCON_EVENT_PRI_ARG(*ev));
+
+	if (FALCON_EVENT_CODE(ev) != FALCON_EVENT_CODE_CHAR) {
+		EFHW_TRACE("%s: unknown event type=%x", __FUNCTION__,
+			   (unsigned)FALCON_EVENT_CODE(ev));
+		return 0;
+	}
 
 	switch (FALCON_EVENT_DRIVER_SUBCODE(ev)) {
 
 	case TX_DESCQ_FLS_DONE_EV_DECODE:
-		EFHW_TRACE("TX[%d] flushed",
-			   (int)FALCON_EVENT_TX_FLUSH_Q_ID(ev));
+		q = FALCON_EVENT_TX_FLUSH_Q_ID(ev);
+		EFHW_TRACE("TX[%d] flushed", q);
 #if !defined(__ci_ul_driver__)
-		efhw_handle_txdmaq_flushed(nic, h, ev);
+		return efhw_handle_txdmaq_flushed(nic, h, q);
+#else
+		return 1;
 #endif
-		break;
 
 	case RX_DESCQ_FLS_DONE_EV_DECODE:
-		EFHW_TRACE("RX[%d] flushed",
-			   (int)FALCON_EVENT_TX_FLUSH_Q_ID(ev));
+		q = FALCON_EVENT_TX_FLUSH_Q_ID(ev);
+		EFHW_TRACE("RX[%d] flushed", q);
 #if !defined(__ci_ul_driver__)
-		efhw_handle_rxdmaq_flushed(nic, h, ev);
+		return efhw_handle_rxdmaq_flushed(nic, h, q, 
+			FALCON_EVENT_RX_FLUSH_FAIL(ev));
+#else
+		return 1;
 #endif
-		break;
 
 	case SRM_UPD_DONE_EV_DECODE:
 		nic->buf_commit_outstanding =
 		    max(0, nic->buf_commit_outstanding - 1);
 		EFHW_TRACE("COMMIT DONE %d", nic->buf_commit_outstanding);
-		break;
+		return 1;
 
 	case EVQ_INIT_DONE_EV_DECODE:
 		EFHW_TRACE("%sEVQ INIT", "");
-		break;
+		return 1;
 
 	case WAKE_UP_EV_DECODE:
 		EFHW_TRACE("%sWAKE UP", "");
-		efhw_handle_wakeup_event(nic, h, ev);
-		break;
+		efhw_handle_wakeup_event(nic, h,
+					 FALCON_EVENT_WAKE_EVQ_ID(ev));
+		return 1;
 
 	case TIMER_EV_DECODE:
 		EFHW_TRACE("%sTIMER", "");
-		efhw_handle_timeout_event(nic, h, ev);
-		break;
+		efhw_handle_timeout_event(nic, h, 
+					  FALCON_EVENT_WAKE_EVQ_ID(ev));
+		return 1;
 
 	case RX_DESCQ_FLSFF_OVFL_EV_DECODE:
 		/* This shouldn't happen. */
 		EFHW_ERR("%s: RX flush fifo overflowed", __FUNCTION__);
-		return -EINVAL;
+		return 0;
 
 	default:
 		EFHW_TRACE("UNKOWN DRIVER EVENT: " FALCON_EVENT_FMT,
 			   FALCON_EVENT_PRI_ARG(*ev));
-		break;
+		return 0;
 	}
-	return 0;
 }
 
 
@@ -1767,19 +1842,24 @@ struct efhw_func_ops falcon_char_functional_units = {
 	falcon_nic_close_hardware,
 	falcon_nic_init_hardware,
 	falcon_nic_tweak_hardware,
-	falcon_nic_set_interrupt_moderation,
 	falcon_nic_event_queue_enable,
 	falcon_nic_event_queue_disable,
 	falcon_nic_wakeup_request,
 	falcon_nic_sw_event,
+	falcon_handle_event,
 	falcon_dmaq_tx_q_init,
 	falcon_dmaq_rx_q_init,
 	falcon_dmaq_tx_q_disable,
 	falcon_dmaq_rx_q_disable,
 	falcon_flush_tx_dma_channel,
 	falcon_flush_rx_dma_channel,
+	falcon_nic_pace,
+	__falcon_nic_buffer_table_orders,
+	sizeof(__falcon_nic_buffer_table_orders) /
+		sizeof(__falcon_nic_buffer_table_orders[0]),
+	falcon_nic_buffer_table_alloc,
+	falcon_nic_buffer_table_realloc,
+	falcon_nic_buffer_table_free,
 	falcon_nic_buffer_table_set,
-	falcon_nic_buffer_table_set_n,
 	falcon_nic_buffer_table_clear,
-	falcon_nic_buffer_table_commit,
 };

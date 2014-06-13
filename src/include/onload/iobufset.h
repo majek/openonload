@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,11 +51,12 @@
 #ifndef __CI_EFRM_IOBUFSET_H__
 #define __CI_EFRM_IOBUFSET_H__
 
-#include <ci/efhw/common.h>
-#include <ci/efhw/efhw_types.h>
+#include <ci/efrm/buffer_table.h>
+#include <ci/efrm/sysdep.h>
 #include <onload/common.h>
 #include <onload/linux_onload.h>
 #include <onload/atomics.h>
+#include <ci/driver/efab/workqueue.h>
 
 /********************************************************************
  *
@@ -67,16 +68,7 @@
  * compound pages, so we should not try. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
 #define OO_HAVE_COMPOUND_PAGES
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
-/* Old kernels do not have compound_order() function, but we need it for
- * huge pages (and only for huge pages). */
-#ifdef CONFIG_HUGETLB_PAGE
-#define compound_order(page) (PageCompound(page) ? (HPAGE_SHIFT - PAGE_SHIFT) : 0)
-#else
-#define compound_order(page) 0
 #endif
-#endif
-
 
 struct efrm_pd;
 
@@ -99,26 +91,19 @@ struct oo_buffer_pages {
   int shmid;
 #ifdef CLONE_NEWIPC
   struct ipc_namespace *ipc_ns;
+  ci_workitem_t wi;
 #endif
 #endif
   struct page **pages;     /*!< array of Linux compound pages */
-};
-
-/*! Mapping parameters for one page */
-struct oo_hwpage {
-  dma_addr_t   dma_addr;    /*!< DMA address */
-  uint64_t     addr;        /*!< address to be used with NIC */
 };
 
 /*! Iobufset resource structture. */
 struct oo_iobufset {
   struct efrm_pd *pd;
   oo_atomic_t ref_count;
-  struct efhw_buffer_table_allocation buf_tbl_alloc;
+  struct efrm_buffer_table_allocation buf_tbl_alloc;
   struct oo_buffer_pages *pages;   /*!< allocated memory */
-  short flags;
-#define OO_BUFSET_FLAG_VMALLOC 0x1 /*!< this structure was vmalloced */
-  struct oo_hwpage bufs[1];        /*!< array of pages->n_buf entries */
+  dma_addr_t *dma_addrs;            /*!< array of pages->n_buf entries */
 };
 
 
@@ -155,16 +140,6 @@ ci_inline unsigned long oo_iobufset_pfn(struct oo_buffer_pages *pages, int offse
 }
 
 
-/************** Find hw buffer addresses ****************/
-
-/*! Find HW address to use with nic for this buffer offset. */
-ci_inline uint64_t oo_iobufset_hw_addr(struct oo_iobufset *iobrs, int offset)
-{
-  int order = compound_order(iobrs->pages->pages[0]);
-  return iobrs->bufs[offset >> PAGE_SHIFT >> order].addr +
-      (offset & ((PAGE_SIZE << order) - 1));
-}
-
 ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
 {
   oo_atomic_inc(&iobrs->ref_count);
@@ -188,9 +163,14 @@ ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
  * \param pages_out  pointer to return the allocated pages
  *
  * \return           status code; if non-zero, pages_out is unchanged
+ *
+ * \note \p order is not the OS page order, but the order assuming
+ * EFHW_NIC_PAGE_SIZE has order=0.  It is important difference for the case
+ * EFHW_NIC_PAGE_SIZE != PAGE_SIZE, as on PPC.
  */
 extern int
-oo_iobufset_pages_alloc(int order, int *flags, struct oo_buffer_pages **pages_out);
+oo_iobufset_pages_alloc(int nic_order, int *flags,
+                        struct oo_buffer_pages **pages_out);
 extern void oo_iobufset_pages_release(struct oo_buffer_pages *);
 
 /*!
@@ -200,15 +180,17 @@ extern void oo_iobufset_pages_release(struct oo_buffer_pages *);
  * \param pd         PD that "owns" these buffers. Grabs a reference
  *                   on success.
  * \param iobrs_out  pointer to return the new IO buffer set
+ * \param hw_addrs   array to store hw addresses
  *
  * \return           status code; if non-zero, iobrs_out is unchanged
  */
 extern int
 oo_iobufset_resource_alloc(struct oo_buffer_pages *pages, struct efrm_pd *pd,
-			   struct oo_iobufset **iobrs_out);
+                           struct oo_iobufset **iobrs_out, uint64_t *hw_addrs);
 
 extern void oo_iobufset_resource_release(struct oo_iobufset *);
 
-extern int oo_iobufset_resource_remap_bt(struct oo_iobufset *iobrs);
+extern int oo_iobufset_resource_remap_bt(struct oo_iobufset *iobrs,
+                                         uint64_t *hw_addrs);
 
 #endif /* __CI_EFRM_IOBUFSET_H__ */

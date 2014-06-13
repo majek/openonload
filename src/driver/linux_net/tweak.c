@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2006-2010 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -30,7 +30,6 @@
 # include "kernel_compat.h"
 #endif
 
-#include "driverlink_api.h"
 #include "idle.h"
 #include "efx.h"
 
@@ -109,7 +108,7 @@ static int disable_bridge_read_coalesce = PARAM_AUTO;
 /*
  * Force the PCIe settings to be tweaked
  */
-static unsigned int tweak_pcie = 0;
+static bool tweak_pcie = false;
 
 /*****************************************************************************/
 
@@ -141,8 +140,7 @@ static void efx_pcie_check_tweaks(struct pci_dev *dev,
 
 	pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
 	if (pos <= 0) {
-		printk(KERN_INFO "Couldn't find PCIe capabilities of %s\n",
-		       pci_name(dev));
+		dev_info(&dev->dev, "Couldn't find PCIe capabilities\n");
 		tweaks->max_read_request_size = -1;
 		goto err_out;
 	}
@@ -150,8 +148,7 @@ static void efx_pcie_check_tweaks(struct pci_dev *dev,
 	/* Check the PCIe device/port type. */
 	rc = pci_read_config_word(dev, pos + PCI_EXP_FLAGS, &dev_flags);
 	if (rc) {
-		printk(KERN_ERR "%s Error %d reading PCIe flags\n",
-		       pci_name(dev), rc);
+		dev_err(&dev->dev, "Error %d reading PCIe flags\n", rc);
 		goto err_out;
 	}
 
@@ -168,9 +165,9 @@ static void efx_pcie_check_tweaks(struct pci_dev *dev,
 		tweaks->bridge_vendor = dev->vendor;
 		tweaks->bridge_devid = dev->device;
 		if (dev_type != PCI_EXP_TYPE_ROOT_PORT) {
-			printk(KERN_ERR
-			       "PCIe port %s is not a root port (type %d)\n",
-				pci_name(dev), dev_type);
+			dev_err(&dev->dev,
+				"PCIe port is not a root port (type %d)\n",
+				dev_type);
 			goto err_out;
 		}
 		efx_pcie_check_coalesce(tweaks);
@@ -183,9 +180,9 @@ static void efx_pcie_check_tweaks(struct pci_dev *dev,
 		 * particular function. */
 		if (dev_type != PCI_EXP_TYPE_ENDPOINT &&
 		    dev_type != PCI_EXP_TYPE_LEG_END) {
-			printk(KERN_ERR
-			       "%s PCIe device is not an endpoint (type %d)\n",
-				pci_name(dev), dev_type);
+			dev_err(&dev->dev,
+				"PCIe device is not an endpoint (type %d)\n",
+				dev_type);
 			goto err_out;
 		}
 
@@ -193,16 +190,14 @@ static void efx_pcie_check_tweaks(struct pci_dev *dev,
 		/* This is a function on a different slot.  This means
 		 * there's something strange with the topology.  I
 		 * thought PCIe was point-to-point. */
-		printk(KERN_ERR "%s Can't tune performance of device\n",
-			pci_name(dev));
+		dev_err(&dev->dev, "Can't tune performance of device\n");
 		goto err_out;
 	}
 
 	/* Query the allowable maximum payload. */
 	rc = pci_read_config_dword(dev, pos + PCI_EXP_DEVCAP, &dev_cap);
 	if (rc) {
-		printk(KERN_ERR "%s Error %d reading PCIe capabilities\n",
-			pci_name(dev), rc);
+		dev_err(&dev->dev, "Error %d reading PCIe capabilities\n", rc);
 		goto err_out;
 	}
 
@@ -236,8 +231,7 @@ static void efx_pcie_perform_tweaks(struct pci_dev *dev,
 
 	pos = pci_find_capability(dev, PCI_CAP_ID_EXP);
 	if (pos <= 0) {
-		printk(KERN_INFO "Couldn't find PCIe capabilities of %s\n",
-			 pci_name(dev));
+		dev_info(&dev->dev, "Couldn't find PCIe capabilities\n");
 		goto err_out;
 	}
 
@@ -256,8 +250,8 @@ static void efx_pcie_perform_tweaks(struct pci_dev *dev,
 					     &read_merge);
 			read_merge2 = read_merge;
 			read_merge2 &= ~(1 << PCI_5000_READ_MERGE_BIT);
-			printk(KERN_INFO "Changing PCIe read merging of %s "
-				 "from 0x%x to 0x%x\n", pci_name(dev),
+			dev_info(&dev->dev, "Changing PCIe read merging "
+				 "from 0x%x to 0x%x\n",
 				 read_merge, read_merge2);
 			pci_write_config_word(dev, PCI_5000_READ_MERGE_REG,
 					      read_merge2);
@@ -269,8 +263,8 @@ static void efx_pcie_perform_tweaks(struct pci_dev *dev,
 		 * max read request.  Only adjust this on the device
 		 * and not on the root port. */
 		if (tweaks->max_read_request_size != -1) {
-			printk(KERN_INFO "Setting PCIe max read request size"
-				 " on %s to %d\n", pci_name(dev),
+			dev_info(&dev->dev,
+				 "Setting PCIe max read request size to %d\n",
 				 128 << tweaks->max_read_request_size);
 			max_read_request_size = tweaks->max_read_request_size;
 		}
@@ -279,14 +273,14 @@ static void efx_pcie_perform_tweaks(struct pci_dev *dev,
 		/* This indicates a strange topology - we're not alone
 		   on the bus. */
 		if (tweaks->max_payload_size != -1)
-			printk(KERN_ERR "%s Can't tune performance\n",
-				pci_name(dev));
+			dev_err(&dev->dev, "Can't tune performance\n");
 		goto err_out;
 	}
 
 	if (tweaks->max_payload_size != -1) {
-		printk(KERN_INFO "Setting PCIe max payload size on %s to %d\n",
-			 pci_name(dev), 128 << tweaks->max_payload_size);
+		dev_info(&dev->dev,
+			 "Setting PCIe max payload size to %d\n",
+			 128 << tweaks->max_payload_size);
 		max_payload_size = tweaks->max_payload_size;
 	}
 
@@ -294,8 +288,7 @@ static void efx_pcie_perform_tweaks(struct pci_dev *dev,
 	 * because there's no locking. */
 	rc = pci_read_config_word(dev, pos + PCI_EXP_DEVCTL, &dev_ctl_orig);
 	if (rc) {
-		printk(KERN_ERR "%s Error %d reading PCIe control\n",
-		       pci_name(dev), rc);
+		dev_err(&dev->dev, "Error %d reading PCIe control\n", rc);
 		goto err_out;
 	}
 	dev_ctl = dev_ctl_orig;
@@ -313,8 +306,8 @@ static void efx_pcie_perform_tweaks(struct pci_dev *dev,
 	if (dev_ctl != dev_ctl_orig) {
 		rc = pci_write_config_word(dev, pos + PCI_EXP_DEVCTL, dev_ctl);
 		if (rc) {
-			printk(KERN_ERR "%s Error %d writing PCIe control\n",
-				pci_name(dev), rc);
+			dev_err(&dev->dev, "Error %d writing PCIe control\n",
+				rc);
 			goto err_out;
 		}
 	}
@@ -325,13 +318,12 @@ err_out:
 	/* If something went wrong setting the payload size, the
 	 * payload sizes on the bus will be inconsistent. */
 	if (tweaks->max_payload_size != -1)
-		printk(KERN_ERR "%s Performance tuning went wrong."
-		       "  Expect badness.\n", pci_name(dev));
+		dev_err(&dev->dev, "Performance tuning went wrong."
+			"  Expect badness.\n");
 }
 
 
-static void efx_pcie_tweak_performance(struct efx_dl_device *efx_dev,
-				       const char *name)
+static void efx_pcie_tweak_performance(struct pci_dev *efx_pci_dev)
 {
 	/* Traverse the PCI bus looking for registers to tweak. */
 	struct efx_pcie_tweaks tweaks;
@@ -351,8 +343,8 @@ static void efx_pcie_tweak_performance(struct efx_dl_device *efx_dev,
 	case 2048:       tweaks.max_payload_size = 4;  break;
 	case 4096:       tweaks.max_payload_size = 5;  break;
 	default:
-		printk(KERN_ERR "%s Invalid pcie_max_payload_size %d.\n",
-			name, mpl);
+		dev_err(&efx_pci_dev->dev,
+			"Invalid pcie_max_payload_size %d.\n", mpl);
 		tweaks.max_payload_size = -1;
 		break;
 	}
@@ -366,8 +358,8 @@ static void efx_pcie_tweak_performance(struct efx_dl_device *efx_dev,
 	case 2048:      tweaks.max_read_request_size = 4;  break;
 	case 4096:      tweaks.max_read_request_size = 5;  break;
 	default:
-		printk(KERN_ERR "%s Invalid pcie_max_read_request_size %d.\n",
-			name, mrr);
+		dev_err(&efx_pci_dev->dev,
+			"Invalid pcie_max_read_request_size %d.\n", mrr);
 		tweaks.max_read_request_size = -1;
 		break;
 	}
@@ -377,12 +369,11 @@ static void efx_pcie_tweak_performance(struct efx_dl_device *efx_dev,
 
 	tweaks.bridge_vendor = -1;
 	tweaks.bridge_devid = -1;
-	tweaks.bus = efx_dev->pci_dev->bus;
-	tweaks.slot = PCI_SLOT(efx_dev->pci_dev->devfn);
+	tweaks.bus = efx_pci_dev->bus;
+	tweaks.slot = PCI_SLOT(efx_pci_dev->devfn);
 	root_dev = tweaks.bus->self;
 	if (!root_dev) {
-		printk(KERN_ERR "%s PCI bus '%s' has no root port.\n",
-			name, tweaks.bus->name);
+		dev_err(&efx_pci_dev->dev, "PCI bus has no root port.\n");
 		return;
 	}
 
@@ -423,7 +414,7 @@ static void efx_pcie_tweak_performance(struct efx_dl_device *efx_dev,
 	/* Enable the enhanced idle loop on Intel PCIe chipsets. */
 	if (!xen_domain() &&
 	    root_dev->vendor == 0x8086 &&
-	    (efx_dev->pci_dev->device == PCI_DEVICE_ID_SOLARFLARE_SFC4000A_0))
+	    efx_pci_dev->device == PCI_DEVICE_ID_SOLARFLARE_SFC4000A_0)
 		efx_idle_enhance();
 #endif
 }
@@ -431,28 +422,19 @@ static void efx_pcie_tweak_performance(struct efx_dl_device *efx_dev,
 
 /*****************************************************************************/
 
-static int efx_tweak_probe(struct efx_dl_device *efx_dev,
-			   const struct net_device *net_dev,
-			   const struct efx_dl_device_info *dev_info,
-			   const char *silicon_rev)
-{
-	if ((efx_dev->pci_dev->device == PCI_DEVICE_ID_SOLARFLARE_SFC4000A_0) ||
-	    tweak_pcie)
-		efx_pcie_tweak_performance(efx_dev, net_dev->name);
-
-	return 0;
-}
-
-/*****************************************************************************/
-
-static struct efx_dl_driver efx_tweak_driver = {
-	.name = "sfc_tune",
-	.priority = EFX_DL_EV_LOW,
-	.probe = efx_tweak_probe,
-};
-
 static int __init efx_tweak_init_module(void)
 {
+	static const struct {
+		u16 device_id;
+		bool always_tweak;
+	} device_info[] = {
+		{ PCI_DEVICE_ID_SOLARFLARE_SFC4000A_0,	true },
+		{ PCI_DEVICE_ID_SOLARFLARE_SFC4000B,	false },
+		{ 0x0803,				false },
+		{ 0x0813,				false },
+	};
+	struct pci_dev *pci_dev;
+	int i;
 #ifdef EFX_HAVE_PM_IDLE
 	int rc;
 
@@ -460,12 +442,25 @@ static int __init efx_tweak_init_module(void)
 		return rc;
 #endif
 
-	return efx_dl_register_driver(&efx_tweak_driver);
+	for (i = 0; i < ARRAY_SIZE(device_info); i++) {
+		if (!device_info[i].always_tweak && !tweak_pcie)
+			continue;
+		pci_dev = NULL;
+		while (1) {
+			pci_dev = pci_get_device(PCI_VENDOR_ID_SOLARFLARE,
+						 device_info[i].device_id,
+						 pci_dev);
+			if (!pci_dev)
+				break;
+			efx_pcie_tweak_performance(pci_dev);
+		}
+	}
+
+	return 0;
 }
 
 static void __exit efx_tweak_exit_module(void)
 {
-	efx_dl_unregister_driver(&efx_tweak_driver);
 #ifdef EFX_HAVE_PM_IDLE
 	efx_idle_fini();
 #endif
@@ -478,7 +473,7 @@ MODULE_AUTHOR("Solarflare Communications");
 MODULE_DESCRIPTION("System tuning for high performance of SFC4000");
 MODULE_LICENSE("GPL");
 
-module_param(tweak_pcie, uint, 0644);
+module_param(tweak_pcie, bool, 0644);
 MODULE_PARM_DESC(tweak_pcie, "Force PCIe settings to be tuned");
 
 module_param(pcie_max_payload_size, int, 0444);

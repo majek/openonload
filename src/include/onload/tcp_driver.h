@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,6 +45,9 @@ typedef struct {
   /*! List of all stacks (orphaned or not). */
   ci_dllist     all_stacks;
 
+  /*! List of not-yet-created stacks: used to reset them when necessary. */
+  ci_dllist     started_stacks;
+
   /*! Lock */
   ci_irqlock_t  lock;
 } tcp_helpers_table_t;
@@ -75,6 +78,7 @@ typedef struct efab_tcp_driver_s {
   /*! Management of RX demux -- s/w and h/w filters. */
   struct oof_manager*           filter_manager;
   cicpos_ipif_callback_handle_t filter_manager_cp_handle;
+  ci_workitem_t                 filter_work_item;
 
   /*! work queue */
   ci_workqueue_t          workqueue;
@@ -88,6 +92,7 @@ typedef struct efab_tcp_driver_s {
   struct efx_dlfilt_cb_s* dlfilter;
 
   struct oo_file_ref*     file_refs_to_drop;
+  ci_workitem_t           file_refs_work_item;
 
   /* Dynamic stack list update: flag and wait queue.  Used by tcpdump */
   ci_uint32         stack_list_seq;

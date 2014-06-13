@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,8 +52,9 @@ struct efrm_pd;
 struct efrm_vf;
 struct efrm_resource;
 struct efrm_client;
-struct efhw_buffer_table_allocation;
+struct efrm_buffer_table_allocation;
 struct page;
+struct efrm_pd_owner_ids;
 
 
 /* Allocate a protection domain.
@@ -78,6 +79,28 @@ efrm_pd_to_resource(struct efrm_pd *);
 extern struct efrm_pd *
 efrm_pd_from_resource(struct efrm_resource *);
 
+/* Allocate a block of owner ids.  This must be called to create an owner id
+ * block for a function before any protection domains are created for that
+ * function.
+ *
+ * The block is large enough to contain n owner ids.  The owner ids themselves
+ * will be based on base.  This allows the shared owner id space on siena to
+ * be split up, by basing the owner id block for a function on the base VI ID
+ * for that function.
+ *
+ * To release the block call efrm_pd_owner_ids_dtor.
+ *
+ * Returns NULL if a block could not be allocated.
+ */
+extern struct efrm_pd_owner_ids *
+efrm_pd_owner_ids_ctor(int base, int n);
+
+/* Release a block of owner ids that have been previously allocated through
+ * efrm_pd_owner_ids_ctor.
+ */
+extern void
+efrm_pd_owner_ids_dtor(struct efrm_pd_owner_ids* owner_ids);
+
 /* Return the owner-id associated with this PD.  If the protection domain
  * uses physical addressing, then this function returns 0.
  */
@@ -100,18 +123,52 @@ struct pci_dev *efrm_pd_get_pci_dev(struct efrm_pd *pd);
  */
 int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1);
 
+
+/*************************************************************************
+ * Common conventions for the efrm_pd_dma_* functions
+ *
+ * pages and dma_addrs "arrays" has n_pages length.
+ * Each (compound, with order "gfp_order") page is mapped to corresponding
+ * PCI device, and dma address in stored in dma_addrs "array".
+ *
+ * user_addrs "array" keeps the NIC addresses (buffer table addresses for
+ * non-physical mode and dma addresses for physical mode).
+ * Buffer table "page size" is EFHW_NIC_PAGE_SIZE, which is not equal to
+ * PAGE_SIZE on some architectures.
+ * user_addrs "array" should be long enaugh to store hardware addresses
+ * for all hardware pages of EFHW_NIC_PAGE_SIZE size.
+ */
+
+/* Map pages of order gfp_order to hardware.
+ * In: pd, n_pages, gfp_order, pages.
+ * Out: dma_addrs, user_addrs. */
 extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages, int gfp_order,
 			   struct page **pages, int pages_stride,
 			   void *dma_addrs, int dma_addrs_stride,
 			   uint64_t *user_addrs, int user_addrs_stride,
 			   void (*user_addr_put)(uint64_t, uint64_t *),
-			   struct efhw_buffer_table_allocation *);
+			   struct efrm_buffer_table_allocation *);
 
+/* Unmap pages previously mapped by efrm_pd_dma_map(). */
 extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int gfp_order,
 			      void *dma_addrs, int dma_addrs_stride,
-			      struct efhw_buffer_table_allocation *);
+			      struct efrm_buffer_table_allocation *);
 
+/* Re-map pages already mapped by efrm_pd_dma_map() after NIC reset.
+ * In: pd, n_pages, gfp_order, pages, dma_addrs.
+ *     dma_addrs should be the same as returned by efrm_pd_dma_map().
+ * Out: user_addrs.
+ *      On EF10, buffer table addresses change across NIC reset.
+ *
+ * Return codes:
+ * 0 - remap OK; new hw addresses are in user_addrs array.
+ * -ENOSYS - no remapping is necessary, user_addrs is not changed, old
+ *  adresses may be used.
+ * -errno - error; the mapping is invalidated; user should kill himself.
+ */
 extern int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
-                                dma_addr_t *pci_addrs, int pci_addrs_stride,
-                                struct efhw_buffer_table_allocation *bt_alloc);
+				dma_addr_t *pci_addrs, int pci_addrs_stride,
+				uint64_t *user_addrs, int user_addrs_stride,
+				void (*user_addr_put)(uint64_t, uint64_t *),
+                                struct efrm_buffer_table_allocation *bt_alloc);
 #endif /* __CI_EFRM_PD_H__ */

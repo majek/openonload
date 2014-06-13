@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,12 +58,11 @@
 #define MAX_NET_IFS          8
 
 
-/* Hardware delivers at most 1824 bytes to each buffer, and for best
- * performance buffers should be aligned on a 64-byte boundary.  Also, RX
- * DMA will not cross a 4K boundary.  And if using physical addressing
- * (including VFs) the I/O address space may be discontiguous at 4K
- * boundaries.  So best thing to do is to make buffers always be 2K in
- * size.
+/* Hardware delivers at most ef_vi_receive_buffer_len() bytes to each
+ * buffer (default 1792), and for best performance buffers should be
+ * aligned on a 64-byte boundary.  Also, RX DMA will not cross a 4K
+ * boundary.  The I/O address space may be discontiguous at 4K boundaries.
+ * So easiest thing to do is to make buffers always be 2K in size.
  */
 #define PKT_BUF_SIZE         2048
 
@@ -144,10 +143,10 @@ struct pkt_buf {
   } while( 0 )
 
 
-/* Align address where data is delivered onto a 64-byte boundary, because
- * that gives best performance.
+/* Align address where data is delivered onto EF_VI_DMA_ALIGN boundary,
+ * because that gives best performance.
  */
-#define RX_DMA_OFF     ROUND_UP(sizeof(struct pkt_buf), 64)
+#define RX_DMA_OFF     ROUND_UP(sizeof(struct pkt_buf), EF_VI_DMA_ALIGN)
 
 /* Where does a received packet start?  The hardware usually puts a
  * meta-data prefix in front of the packet data.
@@ -182,6 +181,9 @@ pkt_buf_release(struct pkt_buf* pkt_buf);
 
 extern void
 vi_refill_rx_ring(struct vi* vi);
+
+extern int
+filter_parse(ef_filter_spec* fs, const char* s_in);
 
 extern struct vi*
 vi_alloc(int id, struct net_if*);

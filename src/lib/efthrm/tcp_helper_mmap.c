@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,6 +92,32 @@ static int tcp_helper_rm_mmap_io(tcp_helper_resource_t* trs,
 }
 
 
+#if CI_CFG_PIO
+static int tcp_helper_rm_mmap_pio(tcp_helper_resource_t* trs,
+                                  unsigned long* bytes,
+                                  void* opaque, int* map_num,
+                                  unsigned long* offset)
+{
+  int rc, intf_i;
+
+  OO_DEBUG_SHM(ci_log("mmap pio %lx", *offset));
+  OO_DEBUG_VM(ci_log("tcp_helper_rm_mmap_pio: %u "
+                     "map_num=%d bytes=0x%lx offset=0x%lx",
+                     trs->id, *map_num, *bytes, *offset));
+
+  OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
+    if( trs->nic[intf_i].pio_io_mmap_bytes != 0 ) {
+      rc = efab_vi_resource_mmap(trs->nic[intf_i].vi_rs, bytes, opaque,
+                                 map_num, offset, 2);
+      if( rc < 0 )
+        return rc;
+    }
+  }
+  return 0;
+}
+#endif
+
+
 static int tcp_helper_rm_mmap_buf(tcp_helper_resource_t* trs,
                                   unsigned long* bytes,
                                   void* opaque, int* map_num,
@@ -112,8 +138,8 @@ static int tcp_helper_rm_mmap_buf(tcp_helper_resource_t* trs,
     if( rc < 0 )  return rc;
   }
 #ifdef OO_DO_HUGE_PAGES
-  *bytes -= (((ni->pkt_sets_max * sizeof(trs->pkt_shm_id[0])) >> PAGE_SHIFT)
-                                                        + 1) << PAGE_SHIFT;
+  *bytes -= (ni->pkt_sets_max * sizeof(trs->pkt_shm_id[0]) + PAGE_SIZE - 1)
+             & ~(PAGE_SIZE - 1);
 #endif
   return 0;
 }
@@ -132,19 +158,16 @@ static int tcp_helper_rm_mmap_pkts(tcp_helper_resource_t* trs,
   ci_assert(ns);
 
   /* Reserve space for packet buffers */
-#if !CI_CFG_MMAP_EACH_PKTSET
-  n = CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET * ns->pkt_sets_max;
-#else
   {
     int bufid = map_id - CI_NETIF_MMAP_ID_PKTS;
-    if( bufid < 0 || bufid > ns->pkt_sets_max || ni->buf_pages[bufid] == NULL ) {
+    if( bufid < 0 || bufid > ns->pkt_sets_max ||
+        ni->buf_pages[bufid] == NULL ) {
       OO_DEBUG_ERR(ci_log("%s: %u BAD bufset_id=%d", __FUNCTION__,
                           trs->id, bufid));
       return -EINVAL;
     }
   }
   n = CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET;
-#endif
   n = CI_MIN(n, *bytes);
   *bytes -= n;
 
@@ -211,20 +234,17 @@ int efab_tcp_helper_rm_mmap(tcp_helper_resource_t* trs, unsigned long* bytes,
     case CI_NETIF_MMAP_ID_IO:
       rc = tcp_helper_rm_mmap_io(trs, bytes, opaque, map_num, offset);
       break;
+#if CI_CFG_PIO
+    case CI_NETIF_MMAP_ID_PIO:
+      rc = tcp_helper_rm_mmap_pio(trs, bytes, opaque, map_num, offset);
+      break;
+#endif
     case CI_NETIF_MMAP_ID_IOBUFS:
       rc = tcp_helper_rm_mmap_buf(trs, bytes, opaque, map_num, offset);
       break;
-#if !CI_CFG_MMAP_EACH_PKTSET
-    case CI_NETIF_MMAP_ID_PKTS:
-      rc = tcp_helper_rm_mmap_pkts(trs, bytes, opaque, map_id, offset);
-      break;
     default:
-      rc = -EINVAL;
-      break;
-#else
-    default:
+      /* CI_NETIF_MMAP_ID_PKTS + set_id */
       rc = tcp_helper_rm_mmap_pkts(trs, bytes, opaque, map_id, offset);
-#endif
   }
 
   if( rc == 0 )  return 0;

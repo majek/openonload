@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -98,6 +98,16 @@ extern
 int citp_epoll_zc_recv_filter(citp_fdinfo* fdi,
                               onload_zc_recv_filter_callback filter,
                               void* cb_arg, int flags);
+extern
+int citp_epoll_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+                          int mlen, struct oo_msg_template** omt_pp,
+                          unsigned flags);
+extern
+int citp_epoll_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
+                           struct onload_template_msg_update_iovec* updates,
+                           int ulen, unsigned flags);
+extern
+int citp_epoll_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt);
 
 
 static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)

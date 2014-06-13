@@ -69,7 +69,13 @@ ifneq ($(CC),)
 EXTRA_MAKEFLAGS += CC=$(CC)
 endif
 
-all:	kbuild Module.symvers $(DRIVER_SUBDIRS)
+DRIVER_SUBDIRS :=
+ifneq ($(findstring $(shell uname -p),x86_64 i686),)
+DRIVER_SUBDIRS += unittest
+endif
+
+all:	kbuild Module.symvers
+	+@$(MakeSubdirs)
 
 unexport NDEBUG
 
@@ -82,8 +88,12 @@ kbuild:
 		echo "  UPD     mtd";					\
 		ln -sf $(SRCPATH)/driver/linux_net/mtd $(CURDIR)/mtd;	\
 	fi
+	@if ! [ -h $(CURDIR)/trace ]; then				\
+		echo "  UPD     trace";					\
+		ln -sf $(SRCPATH)/driver/linux_net/trace $(CURDIR)/trace; \
+	fi
 	$(MMAKE_KBUILD_PRE_COMMAND)
-	$(MAKE) $(EXTRA_MAKEFLAGS) $(MMAKE_KBUILD_ARGS) M=$(CURDIR) NDEBUG=$(NDEBUG)
+	$(MAKE) $(EXTRA_MAKEFLAGS) $(MMAKE_KBUILD_ARGS) M=$(CURDIR) NDEBUG=$(NDEBUG) MMAKE_IN_KBUILD=1
 	$(MMAKE_KBUILD_POST_COMMAND)
 	cp -f $(SFC_MODULES) $(DESTPATH)/driver/linux
 
@@ -110,7 +120,7 @@ all:
 clean:
 	@$(MakeClean)
 
-SUBDIRS := 
+SUBDIRS :=
 
 ifeq ($(LINUX),1)
 SUBDIRS += util

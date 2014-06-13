@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -90,6 +90,18 @@ ci_inline void ef_eplock_holder_set_flag(ci_eplock_t* l, int flag) {
     ci_assert(v & CI_EPLOCK_LOCKED);
     if( v & flag )  break;
   } while( ci_cas32_fail(&l->lock, v, v | flag) );
+}
+
+  /*! Only call this if you hold the lock. */
+ci_inline void ef_eplock_holder_set_flags(ci_eplock_t* l, unsigned flags) {
+  unsigned v;
+  ci_assert((flags & 0xf0000000) == 0u);
+  do {
+    v = l->lock;
+    ci_assert(v & CI_EPLOCK_LOCKED);
+    if( (v & flags) == flags )
+      break;
+  } while( ci_cas32_fail(&l->lock, v, v | flags) );
 }
 
   /*! Clear the specified lock flags. */

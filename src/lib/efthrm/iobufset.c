@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,14 +53,22 @@
 #include <ci/efhw/iopage.h>
 #include <ci/driver/efab/hardware.h>
 #include <ci/efrm/resource.h>
-#include <ci/efrm/buffer_table.h>
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/pd.h>
 #include <onload/iobufset.h>
 #include <onload/debug.h>
+#include <onload/tcp_driver.h>
 
 
 /************** IO page operations ****************/
+
+static void oo_iobufset_kfree(struct oo_buffer_pages *pages)
+{
+
+  if( (void *)(pages + 1) != (void *)pages->pages )
+    kfree(pages->pages);
+  kfree(pages);
+}
 
 #ifdef OO_DO_HUGE_PAGES
 
@@ -235,7 +243,11 @@ static void oo_bufpage_huge_free(struct oo_buffer_pages *p)
   ci_assert(p->shmid >= 0);
   ci_assert(current);
 #ifdef CLONE_NEWIPC
-  if( CI_UNLIKELY( current->nsproxy->ipc_ns != p->ipc_ns ) ) {
+  if( current->nsproxy == NULL ) {
+    ci_workitem_init(&p->wi, (CI_WITEM_ROUTINE)oo_bufpage_huge_free, p);
+    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &p->wi);
+  }
+  else if( CI_UNLIKELY( current->nsproxy->ipc_ns != p->ipc_ns ) ) {
     /* Ideally, we'd like to call switch_task_namespaces() to get old
      * namespace - but it is not exported.
      * Moreover, it may be destroyed - (get|put)_ipc_ns() are not exported
@@ -243,12 +255,15 @@ static void oo_bufpage_huge_free(struct oo_buffer_pages *p)
     ci_log("Onload does not support applications which use CLONE_NEWIPC "
            "together with huge pages.");
     ci_log("Leaking 1 huge page.");
+    put_page(p->pages[0]);
+    oo_iobufset_kfree(p);
   }
   else
 #endif
   {
     put_page(p->pages[0]);
     efab_linux_sys_shmctl(p->shmid, IPC_RMID, NULL);
+    oo_iobufset_kfree(p);
   }
 }
 #endif
@@ -268,11 +283,8 @@ static void oo_iobufset_free_pages(struct oo_buffer_pages *pages)
 
     for (i = 0; i < pages->n_bufs; ++i)
       __free_pages(pages->pages[i], compound_order(pages->pages[i]));
+    oo_iobufset_kfree(pages);
   }
-
-  if( (void *)(pages + 1) != (void *)pages->pages )
-    kfree(pages->pages);
-  kfree(pages);
 }
 
 static int oo_bufpage_alloc(struct oo_buffer_pages **pages_out,
@@ -360,10 +372,12 @@ void oo_iobufset_pages_release(struct oo_buffer_pages *pages)
 }
 
 int
-oo_iobufset_pages_alloc(int order, int *flags, struct oo_buffer_pages **pages_out)
+oo_iobufset_pages_alloc(int nic_order, int *flags,
+                        struct oo_buffer_pages **pages_out)
 {
   int rc;
   int gfp_flag = (in_atomic() || in_interrupt()) ? GFP_ATOMIC : GFP_KERNEL;
+  int order = nic_order - fls(EFHW_NIC_PAGES_IN_OS_PAGE) + 1;
 
   ci_assert(pages_out);
 
@@ -374,19 +388,24 @@ oo_iobufset_pages_alloc(int order, int *flags, struct oo_buffer_pages **pages_ou
 # else
     rc = -ENOMEM;
 # endif
+  } else
 #endif
-  } else {
+  {
 #ifdef OO_HAVE_COMPOUND_PAGES
     int low_order = order;
     do {
       /* It is better to allocate high-order pages for many reasons:
-       * - in theory, access to continious memery is faster;
-       * - with high-order pages, we get small size for bufs array
+       * - in theory, access to continious memory is faster;
+       * - with high-order pages, we get small size for dma_addrs array
        *   and it fits into one or two pages.
        *
        * So, if one-compound-page-for-all failed, we try lower order in
-       * hope to keep both bufs array and the packet buffers themselves
+       * hope to keep both dma_addrs array and the packet buffers themselves
        * to use not-very-high-order allocations.
+       *
+       * TODO: it may be useful to go through EF10 page orders:
+       * x86: 9(hugepage),8,4,0
+       * ppc: 4(max,=9nic),3(=8nic),0(=5nic)
        */
       rc = oo_bufpage_alloc(pages_out, order, low_order, flags, gfp_flag);
       if( rc == 0 || low_order == 0 )
@@ -395,15 +414,15 @@ oo_iobufset_pages_alloc(int order, int *flags, struct oo_buffer_pages **pages_ou
       if( low_order < 0 )
         low_order = 0;
     } while( 1 );
-#else
-#ifdef OO_DO_HUGE_PAGES
+#elif defined(OO_DO_HUGE_PAGES) && CI_CFG_PKTS_AS_HUGE_PAGES
     rc = -ENOMEM;
     if( *flags & (OO_IOBUFSET_FLAG_TRY_HUGE_PAGE |
                  OO_IOBUFSET_FLAG_FORCE_HUGE_PAGE) )
       rc = oo_bufpage_alloc(pages_out, order, order, flags, gfp_flag);
     if( rc != 0 )
-#endif
       rc = oo_bufpage_alloc(pages_out, order, 0, flags, gfp_flag);
+#else
+    rc = oo_bufpage_alloc(pages_out, order, 0, flags, gfp_flag);
 #endif
   }
 
@@ -414,21 +433,25 @@ oo_iobufset_pages_alloc(int order, int *flags, struct oo_buffer_pages **pages_ou
 
 /************** Alloc/free iobufset structure ****************/
 
+static void oo_iobufset_free_memory(struct oo_iobufset *rs)
+{
+  if( (void *)rs->dma_addrs != (void *)(rs + 1) )
+    kfree(rs->dma_addrs);
+  kfree(rs);
+
+}
 static void oo_iobufset_resource_free(struct oo_iobufset *rs)
 {
   efrm_pd_dma_unmap(rs->pd, rs->pages->n_bufs,
                     compound_order(rs->pages->pages[0]),
-                    &rs->bufs[0].dma_addr, sizeof(rs->bufs[0]),
+                    &rs->dma_addrs[0], sizeof(rs->dma_addrs[0]),
                     &rs->buf_tbl_alloc);
 
   if (rs->pd != NULL)
     efrm_pd_release(rs->pd);
   oo_iobufset_pages_release(rs->pages);
 
-  if( rs->flags & OO_BUFSET_FLAG_VMALLOC )
-    vfree(rs);
-  else
-    kfree(rs);
+  oo_iobufset_free_memory(rs);
 }
 
 
@@ -445,76 +468,70 @@ static void put_user_fake(uint64_t v, uint64_t *p)
 
 int
 oo_iobufset_resource_alloc(struct oo_buffer_pages * pages, struct efrm_pd *pd,
-                           struct oo_iobufset **iobrs_out)
+                           struct oo_iobufset **iobrs_out, uint64_t *hw_addrs)
 {
   struct oo_iobufset *iobrs;
   int rc;
   int gfp_flag = (in_atomic() || in_interrupt()) ? GFP_ATOMIC : GFP_KERNEL;
-  int size = offsetof(struct oo_iobufset, bufs) +
-             pages->n_bufs * sizeof(struct oo_hwpage);
-  short flags;
+  int size = sizeof(struct oo_iobufset) + pages->n_bufs * sizeof(dma_addr_t);
 
   ci_assert(iobrs_out);
   ci_assert(pd);
 
-  /* Allocate the resource data structure.
-   * High-order memory allocations tend to fail.
-   * If size > PAGE_SIZE, kmalloc(size) is high-order allocation;
-   * moreover, we get large size here if high-order allocation in
-   * oo_bufpage_alloc failed.
-   */
-
-  if( (gfp_flag & GFP_ATOMIC) || size <= PAGE_SIZE ) {
+  if( size <= PAGE_SIZE ) {
     iobrs = kmalloc(size, gfp_flag);
-    flags = 0;
+    if( iobrs == NULL )
+      return -ENOMEM;
+    iobrs->dma_addrs = (void *)(iobrs + 1);
   }
   else {
-    iobrs = vmalloc(size);
-    flags = OO_BUFSET_FLAG_VMALLOC;
+    /* Avoid multi-page allocations */
+    iobrs = kmalloc(sizeof(struct oo_iobufset), gfp_flag);
+    if( iobrs == NULL )
+      return -ENOMEM;
+    ci_assert_le(pages->n_bufs * sizeof(dma_addr_t), PAGE_SIZE);
+    iobrs->dma_addrs = kmalloc(pages->n_bufs * sizeof(dma_addr_t), gfp_flag);
+    if( iobrs->dma_addrs == NULL ) {
+      kfree(iobrs);
+      return -ENOMEM;
+    }
+
   }
-  if (iobrs == NULL) {
-    rc = -ENOMEM;
-    goto fail1;
-  }
-  iobrs->flags = flags;
+
   oo_atomic_set(&iobrs->ref_count, 1);
   iobrs->pd = pd;
   iobrs->pages = pages;
-  iobrs->buf_tbl_alloc.base = (unsigned) -1;
+  iobrs->buf_tbl_alloc.bta_blocks = NULL;
 
   rc = efrm_pd_dma_map(iobrs->pd, pages->n_bufs,
                        compound_order(pages->pages[0]),
                        &pages->pages[0], sizeof(pages->pages[0]),
-                       &iobrs->bufs[0].dma_addr, sizeof(iobrs->bufs[0]),
-                       &iobrs->bufs[0].addr, sizeof(iobrs->bufs[0]),
+                       &iobrs->dma_addrs[0], sizeof(iobrs->dma_addrs[0]),
+                       hw_addrs, sizeof(hw_addrs[0]),
                        put_user_fake, &iobrs->buf_tbl_alloc);
   if( rc < 0 )
-    goto fail2;
+    goto fail;
 
-  OO_DEBUG_VERB(ci_log("%s: [%p] %d pages @ "
-                       EFHW_BUFFER_ADDR_FMT, __FUNCTION__,
-                       iobrs, iobrs->pages->n_bufs,
-                       EFHW_BUFFER_ADDR(iobrs->buf_tbl_alloc.base, 0)));
+  OO_DEBUG_VERB(ci_log("%s: [%p] %d pages", __FUNCTION__,
+                       iobrs, iobrs->pages->n_bufs));
 
   efrm_resource_ref(efrm_pd_to_resource(pd));
   oo_atomic_inc(&pages->ref_count);
   *iobrs_out = iobrs;
   return 0;
 
-fail2:
-  if( iobrs->flags & OO_BUFSET_FLAG_VMALLOC )
-    vfree(iobrs);
-  else
-    kfree(iobrs);
-fail1:
+fail:
+  oo_iobufset_free_memory(iobrs);
   return rc;
 }
 
 
-int oo_iobufset_resource_remap_bt(struct oo_iobufset *iobrs)
+int oo_iobufset_resource_remap_bt(struct oo_iobufset *iobrs, uint64_t *hw_addrs)
 {
   return efrm_pd_dma_remap_bt(iobrs->pd, iobrs->pages->n_bufs,
                               compound_order(iobrs->pages->pages[0]),
-                              &iobrs->bufs[0].dma_addr, sizeof(iobrs->bufs[0]),
+                              &iobrs->dma_addrs[0], sizeof(iobrs->dma_addrs[0]),
+                              hw_addrs, sizeof(hw_addrs[0]),
+                              put_user_fake,
                               &iobrs->buf_tbl_alloc);
 }

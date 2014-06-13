@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,9 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2009 Solarflare Communications Inc.
+ * Copyright 2006-2013 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -54,6 +54,10 @@
 /* Lowest bit numbers and widths */
 #define EFX_DUMMY_FIELD_LBN 0
 #define EFX_DUMMY_FIELD_WIDTH 0
+#define EFX_WORD_0_LBN 0
+#define EFX_WORD_0_WIDTH 16
+#define EFX_WORD_1_LBN 16
+#define EFX_WORD_1_WIDTH 16
 #define EFX_DWORD_0_LBN 0
 #define EFX_DWORD_0_WIDTH 32
 #define EFX_DWORD_1_LBN 32
@@ -95,7 +99,7 @@
 	 (((((u32) 1) << (width))) - 1))
 
 typedef struct {
-        __le64 b, a;
+	__le64 b, a;
 } efx_le_128  __attribute__((aligned(16)));
 
 /* A doubleword (i.e. 4 byte) datatype - little-endian in HW */

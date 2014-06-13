@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -262,6 +262,17 @@ citp_fdtable_probe_restore(int fd, ci_ep_info_t * info, int print_banner)
   else
     citp_netif_add_ref(ni);
 
+  /* There is a race condition where the fd can have been created, but it has
+   * not yet been initialised, as we can't put a busy marker in the right place
+   * in the fdtable until we know what the fd is.  In this case we don't want
+   * to probe this new info, so return the closed fd.
+   */
+  if( SP_TO_WAITABLE(ni, info->sock_id)->sb_aflags & CI_SB_AFLAG_NOT_READY ) {
+    citp_fdtable_busy_clear(fd, fdip_unknown, 1);
+    fdi = &citp_the_closed_fd;
+    citp_fdinfo_ref(fdi);
+    return fdi;
+  }
 
   if (c_sock_fdi) {
     citp_sock_fdi* sock_fdi;
@@ -364,7 +375,7 @@ citp_fdinfo * citp_fdtable_probe_locked(unsigned fd, int print_banner)
       Log_V(log("%s: fd=%d %s restore", __FUNCTION__, fd,
 		info.fd_type == CI_PRIV_TYPE_TCP_EP ? "TCP":
 #if CI_CFG_USERSPACE_PIPE
-                info.fd_type == CI_PRIV_TYPE_UDP_EP ? "PIPE" :
+                info.fd_type != CI_PRIV_TYPE_UDP_EP ? "PIPE" :
 #endif
                 "UDP"));
       fdi = citp_fdtable_probe_restore(fd, &info, print_banner);
@@ -382,17 +393,19 @@ citp_fdinfo * citp_fdtable_probe_locked(unsigned fd, int print_banner)
       citp_fdinfo_ref(fdi);
       goto exit;
 
-    default:
-      /* This can potentially happen if (a) a thread gets at an fd we've
-      ** just created, but before it's been specialised.  It can also
-      ** happen if (b) we're running an app that wants to access our
-      ** driver!  So we should pass-through in this case.
-      **
-      ** In either case setting to passthru should be fine.
-      */
-      Log_V(log("%s: fd=%d type=%d passthru", __FUNCTION__,fd,info.fd_type));
+    case CI_PRIV_TYPE_NONE:
+      /* This happens if a thread gets at an onload driver fd that has just
+       * been created, but not yet specialised.  On Linux I think this
+       * means it will shortly be a new netif internal fd.  (fds associated
+       * with sockets and pipes are never unspecialised).
+       */
+      Log_V(log("%s: fd=%d TYPE_NONE", __FUNCTION__, fd));
       citp_fdtable_busy_clear(fd, fdip_passthru, 1);
       goto exit;
+
+    default:
+      CI_TEST(0);
+      break;
     }
   }
   else if( ci_major(st.st_rdev) == citp_onload_epoll_dev_major() ) {
@@ -433,7 +446,8 @@ citp_fdtable_probe(unsigned fd)
 
   ci_assert(fd < citp_fdtable.size);
 
-  if( ! CITP_OPTS.probe )  return NULL;
+  if( ! CITP_OPTS.probe || oo_per_thread_get()->in_vfork_child )
+    return NULL;
 
   saved_errno = errno;
   CITP_FDTABLE_LOCK();
@@ -707,9 +721,12 @@ void __citp_fdinfo_ref_count_zero(citp_fdinfo* fdi, int fdt_locked)
   switch( fdi->on_ref_count_zero ) {
   case FDI_ON_RCZ_CLOSE:
     if( ! fdt_locked && fdtable_strict() )  CITP_FDTABLE_LOCK();
+    ci_tcp_helper_close_no_trampoline(fdi->fd);
+    /* The swap must occur after the close, otherwise another thread could
+     * cause a probe of the old endpoint info, which is about be freed.
+     */
     fdtable_swap(fdi->fd, fdip_closing, fdip_unknown,
 		 fdt_locked | fdtable_strict());
-    ci_tcp_helper_close_no_trampoline(fdi->fd);
     citp_fdinfo_get_ops(fdi)->dtor(fdi, fdt_locked | fdtable_strict());
     if( ! fdt_locked && fdtable_strict() )  CITP_FDTABLE_UNLOCK();
     citp_fdinfo_free(fdi);
@@ -1057,11 +1074,13 @@ int citp_ep_dup(unsigned oldfd, int (*syscall)(int oldfd, long arg),
   volatile citp_fdinfo_p* p_oldfdip;
   citp_fdinfo_p oldfdip;
   citp_fdinfo* newfdi = 0;
+  citp_fdinfo* oldfdi;
   int newfd;
 
   Log_V(log("%s(%d)", __FUNCTION__, oldfd));
 
-  if(CI_UNLIKELY( citp.init_level < CITP_INIT_FDTABLE ))
+  if(CI_UNLIKELY( citp.init_level < CITP_INIT_FDTABLE ||
+                  oo_per_thread_get()->in_vfork_child ))
     /* Lib not initialised, so no U/L state, and therefore system dup()
     ** will do just fine. */
     return syscall(oldfd, arg);
@@ -1085,19 +1104,11 @@ int citp_ep_dup(unsigned oldfd, int (*syscall)(int oldfd, long arg),
     errno = EBADF;
     return -1;
   }
-  if( fdip_cas_fail(p_oldfdip, oldfdip, fdip_busy) )  goto again;
+  if( fdip_cas_fail(p_oldfdip, oldfdip, fdip_busy) )
+    goto again;
 
-  if( fdip_is_passthru(oldfdip) | fdip_is_unknown(oldfdip) ) {
-    if( fdtable_strict() )  CITP_FDTABLE_LOCK();
-    newfd = syscall(oldfd, arg);
-    if( newfd >= 0 && newfd < citp_fdtable.inited_count )
-      citp_fdtable_new_fd_set(newfd, oldfdip, fdtable_strict());
-    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
-    /* If outside inited_count then if someone wants it they'll probe it. */
-  }
-  else {
-    citp_fdinfo* oldfdi = fdip_to_fdi(oldfdip);
-
+  if( fdip_is_normal(oldfdip) &&
+      (((oldfdi = fdip_to_fdi(oldfdip))->protocol->type) == CITP_EPOLL_FD) ) {
     newfdi = citp_fdinfo_get_ops(oldfdi)->dup(oldfdi);
     if( ! newfdi ) {
       citp_fdtable_busy_clear(oldfd, oldfdip, 0);
@@ -1115,6 +1126,22 @@ int citp_ep_dup(unsigned oldfd, int (*syscall)(int oldfd, long arg),
       newfdi = 0;
     }
   }
+  else {
+    if( fdtable_strict() )  CITP_FDTABLE_LOCK();
+    newfd = syscall(oldfd, arg);
+    if( newfd >= 0 && newfd < citp_fdtable.inited_count ) {
+      /* Mark newfd as unknown.  When used, it'll get probed.
+       *
+       * We are not just being lazy here: Setting to unknown rather than
+       * installing a proper fdi (when oldfd is accelerated) is essential to
+       * vfork()+dup()+exec() working properly.  Reason is that child and
+       * parent share address space, so child is modifying the parent's
+       * fdtable.  Setting an entry to unknown is safe.
+       */
+      citp_fdtable_new_fd_set(newfd, fdip_unknown, fdtable_strict());
+    }
+    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+  }
 
   citp_fdtable_busy_clear(oldfd, oldfdip, 0);
   if( newfdi )  citp_fdinfo_free(newfdi);
@@ -1126,16 +1153,20 @@ static void dup2_complete(citp_fdinfo* prev_tofdi,
 			  citp_fdinfo_p prev_tofdip, int fdt_locked)
 {
   volatile citp_fdinfo_p *p_fromfdip;
-  unsigned fromfd = prev_tofdi->on_rcz.dup2_fd;
+  unsigned fromfd = prev_tofdi->on_rcz.dup3_args.fd;
   unsigned tofd = prev_tofdi->fd;
   citp_fdinfo_p fromfdip;
   int rc;
+#if CI_LIBC_HAS_dup3 || !defined(NDEBUG)
+  int flags = prev_tofdi->on_rcz.dup3_args.flags;
+#endif
 
 #ifndef NDEBUG
   volatile citp_fdinfo_p* p_tofdip;
   p_tofdip = &citp_fdtable.table[tofd].fdip;
   ci_assert(fdip_is_busy(*p_tofdip));
 #endif
+  citp_fdinfo* fromfdi;
 
   p_fromfdip = &citp_fdtable.table[fromfd].fdip;
  lock_fromfdip_again:
@@ -1152,7 +1183,12 @@ static void dup2_complete(citp_fdinfo* prev_tofdi,
     goto lock_fromfdip_again;
 
   oo_rwlock_lock_write(&citp_dup2_lock);
+#if CI_LIBC_HAS_dup3
+  rc = ci_sys_dup3(fromfd, tofd, flags);
+#else
+  ci_assert_equal(flags, 0);
   rc = ci_sys_dup2(fromfd, tofd);
+#endif
   oo_rwlock_unlock_write(&citp_dup2_lock);
   if( rc < 0 ) {
     citp_fdtable_busy_clear(fromfd, fromfdip, fdt_locked);
@@ -1165,20 +1201,33 @@ static void dup2_complete(citp_fdinfo* prev_tofdi,
   ci_assert(fdip_is_normal(fromfdip) | fdip_is_passthru(fromfdip) |
 	    fdip_is_unknown(fromfdip));
 
-  if( fdip_is_normal(fromfdip) ) {
-    citp_fdinfo* fromfdi = fdip_to_fdi(fromfdip);
+  if( fdip_is_normal(fromfdip) &&
+     (((fromfdi = fdip_to_fdi(fromfdip))->protocol->type) == CITP_EPOLL_FD) ) {
     citp_fdinfo* newfdi = citp_fdinfo_get_ops(fromfdi)->dup(fromfdi);
     if( newfdi ) {
       citp_fdinfo_init(newfdi, fdip_to_fdi(fromfdip)->protocol);
       citp_fdtable_insert(newfdi, tofd, fdt_locked);
     }
-    else
-      /* Out of memory.  Let's hope we have more memory when this gets
-      ** probed! */
-      citp_fdtable_busy_clear(tofd, fdip_unknown, fdt_locked);
+    else {
+      /* Out of memory.  Can't probe epoll1 fd later on, so fail. */
+      citp_fdtable_busy_clear(fromfd, fromfdip, fdt_locked);
+      prev_tofdi->on_rcz.dup2_result = -ENOMEM;
+      ci_wmb();
+      prev_tofdi->on_ref_count_zero = FDI_ON_RCZ_DONE;
+      return;
+    }
   }
-  else
-    citp_fdtable_busy_clear(tofd, fromfdip, fdt_locked);
+  else {
+    /* Mark newfd as unknown.  When used, it'll get probed.
+     *
+     * We are not just being lazy here: Setting to unknown rather than
+     * installing a proper fdi (when oldfd is accelerated) is essential to
+     * vfork()+dup2()+exec() working properly.  Reason is that child and
+     * parent share address space, so child is modifying the parent's
+     * fdtable.  Setting an entry to unknown is safe.
+     */
+    citp_fdtable_busy_clear(tofd, fdip_unknown, fdt_locked);
+  }
 
   citp_fdtable_busy_clear(fromfd, fromfdip, fdt_locked);
   prev_tofdi->on_rcz.dup2_result = tofd;
@@ -1188,7 +1237,7 @@ static void dup2_complete(citp_fdinfo* prev_tofdi,
 
 pthread_mutex_t citp_dup_lock = PTHREAD_MUTEX_INITIALIZER;
 
-int citp_ep_dup2(unsigned fromfd, unsigned tofd)
+int citp_ep_dup3(unsigned fromfd, unsigned tofd, int flags)
 {
   volatile citp_fdinfo_p* p_tofdip;
   citp_fdinfo_p tofdip;
@@ -1196,21 +1245,15 @@ int citp_ep_dup2(unsigned fromfd, unsigned tofd)
 
   Log_V(log("%s(%d, %d)", __FUNCTION__, fromfd, tofd));
 
-  if( fromfd == tofd )
-    /* Nothing to do here.  Moreover, we'd better not even try, since when
-    ** we try to add "tofd" the fdtable we'll be surprised to see
-    ** something already there! */
-    return 0;
+  /* Must be checked by callers. */
+  ci_assert(fromfd != tofd);
 
   /* Hack: if [tofd] is the fd we're using for logging, we'd better choose
   ** a different one!
   */
   if( tofd == citp.log_fd )  citp_log_change_fd();
 
-  if(CI_UNLIKELY( citp.init_level < CITP_INIT_FDTABLE ))
-    /* Lib not initialised, so no U/L state, and therefore system dup2()
-    ** will do just fine. */
-    return ci_sys_dup2(fromfd, tofd);
+  ci_assert(citp.init_level >= CITP_INIT_FDTABLE);
 
   max = CI_MAX(fromfd, tofd);
   if( max >= citp_fdtable.inited_count ) {
@@ -1256,7 +1299,8 @@ int citp_ep_dup2(unsigned fromfd, unsigned tofd)
     ci_verify(citp_fdinfo_get_ops(tofdi)->close(tofdi, 0) != 1);
     ci_assert_equal(tofdi->on_ref_count_zero, FDI_ON_RCZ_NONE);
     tofdi->on_ref_count_zero = FDI_ON_RCZ_DUP2;
-    tofdi->on_rcz.dup2_fd = fromfd;
+    tofdi->on_rcz.dup3_args.fd = fromfd;
+    tofdi->on_rcz.dup3_args.flags = flags;
     citp_fdinfo_release_ref(tofdi, 0);
     {
       int i = 0;
@@ -1300,7 +1344,8 @@ int citp_ep_dup2(unsigned fromfd, unsigned tofd)
     */
     citp_fdinfo fdi;
     fdi.fd = tofd;
-    fdi.on_rcz.dup2_fd = fromfd;
+    fdi.on_rcz.dup3_args.fd = fromfd;
+    fdi.on_rcz.dup3_args.flags = flags;
     dup2_complete(&fdi, tofdip, 0);
     if( fdi.on_rcz.dup2_result < 0 ) {
       errno = -fdi.on_rcz.dup2_result;
@@ -1326,6 +1371,10 @@ int citp_ep_close(unsigned fd)
   volatile citp_fdinfo_p* p_fdip;
   citp_fdinfo_p fdip;
   int rc, got_lock;
+
+  /* Do not touch shared fdtable when in vfork child. */
+  if( oo_per_thread_get()->in_vfork_child )
+    return ci_tcp_helper_close_no_trampoline(fd);
 
   /* Interlock against other closes, against the fdtable being extended,
   ** and against select and poll.

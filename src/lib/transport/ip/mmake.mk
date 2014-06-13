@@ -45,6 +45,7 @@ LIB_SRCS	:=		\
 		udp_send.c	\
 		os_sock.c	\
 		pkt_filler.c	\
+		pio_buddy.c	\
 		pipe.c
 
 ifneq ($(DRIVER),1)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -39,6 +39,7 @@
 #include "libstack.h"
 #include <ci/internal/ip_signal.h>
 #include <dirent.h>
+#include <ctype.h>
 
 #undef DO
 #undef IGNORE
@@ -455,13 +456,18 @@ netif_t *stack_attached(int id)
 
 int libstack_init_signals(int fd)
 {
+  /* Trampoline is not yet supported on PPC */
+#if ! defined (__PPC__)
   ci_tramp_reg_args_t args;
   int rc, i;
 
+  memset(&args, '\0', sizeof(ci_tramp_reg_args_t));
+
   CI_USER_PTR_SET (args.trampoline_entry, NULL);
+  CI_USER_PTR_SET( args.trampoline_toc, NULL );
+  CI_USER_PTR_SET( args.trampoline_user_fixup, NULL );
   args.max_signum = NSIG;
-  CI_USER_PTR_SET(args.signal_handler_postpone1, citp_signal_intercept_1);
-  CI_USER_PTR_SET(args.signal_handler_postpone3, citp_signal_intercept_3);
+  CI_USER_PTR_SET(args.signal_handler_postpone, citp_signal_intercept);
   for( i = 0; i <= OO_SIGHANGLER_DFL_MAX; i++ )
     CI_USER_PTR_SET(args.signal_handlers[i], libstack_signal_handlers[i]);
   CI_USER_PTR_SET(args.signal_data, citp_signal_data);
@@ -471,7 +477,11 @@ int libstack_init_signals(int fd)
 
   if(rc == -1)
     ci_log ("Error %d registering trampoline handler", errno);
+
   return rc;
+#else
+  return 0;
+#endif
 }
 
 
@@ -762,10 +772,95 @@ void libstack_pid_mapping_print(void)
           printf("%c", buf[i]);
       }
     }
+    close(cmdline);
     printf("\n");
 
     pm = pm->next;
   }
+}
+
+
+static int get_int_from_tok_str(char * str, const char tok, int i, long * res)
+{
+  char * p;
+
+  str = strtok_r(str, &tok, &p);
+  while( str && i ) {
+    str = strtok_r(NULL, &tok, &p);
+    --i;
+  }
+
+  if(str) {
+    *res = atol(str);
+    return 1;
+  }
+  return 0;
+}
+
+
+int libstack_threads_print(void)
+{
+  char task_path[256];
+
+  if( ! pid_mappings )
+    return 0;
+
+  struct pid_mapping* pm = pid_mappings;
+
+  printf("#pid thread affinity priority realtime\n");
+
+  while( pm ) {
+    snprintf(task_path, 256, "/proc/%d/task", pm->pid);
+    DIR* task_dir = opendir(task_path);
+
+    struct dirent* ent;
+    while( (ent = readdir(task_dir)) ) {
+      if( ent->d_name[0] == '.' )
+        continue;
+
+      printf("%d %s ", pm->pid, ent->d_name);
+
+      /* task affinity */
+      char file_path[256];
+      snprintf(file_path, 256, "/proc/%d/task/%s/status", pm->pid, ent->d_name);
+      FILE* status = fopen(file_path, "r");
+      char buf[1000];
+      char* c;
+      do {
+        c = fgets(buf, 256, status);
+      } while( c && strncmp(buf, "Cpus_allowed:", strlen("Cpus_allowed:")) );
+      char* ptr = strchr(buf, ':');
+      ++ptr;
+      while( isspace(*ptr) )
+        ++ptr;
+      char* newline = strchr(ptr, '\n');
+      *newline = '\0';
+      printf("%s ", ptr);
+      fclose(status);
+
+      snprintf(file_path, 256, "/proc/%d/task/%s/stat", pm->pid, ent->d_name);
+      int stat = open(file_path, O_RDONLY);
+      long cnt = read(stat, buf, 1000);
+      close(stat);
+      while( cnt && (buf[cnt-1] != ')') ) {
+        cnt--;
+      }
+      if( get_int_from_tok_str(&buf[cnt], ' ', 15, &cnt) ) {
+        if( cnt < 0 )
+          printf("%ld 1\n", (-cnt)-1);
+        else
+          printf("%ld 0\n", cnt-20);
+      }
+      else
+        printf("N/A N/A");
+
+      if( pm->next )
+        printf("\n");
+    }
+    pm = pm->next;
+    closedir(task_dir);
+  }
+  return 0;
 }
 
 
@@ -787,72 +882,9 @@ static int get_file_size(const char* path)
 }
 
 
-static void print_threads_info(pid_t pid)
-{
-  char task_path[256];
-  snprintf(task_path, 256, "/proc/%d/task", pid);
-  DIR* task_dir = opendir(task_path);
-
-  struct dirent* ent;
-  while( (ent = readdir(task_dir)) ) {
-    if( ent->d_name[0] == '.' )
-      continue;
-    char status_path[256];
-    snprintf(status_path, 256, "/proc/%d/task/%s/status", pid, ent->d_name);
-    FILE* status = fopen(status_path, "r");
-    char buf[256];
-    while( fgets(buf, 256, status) ) {
-      if( strncmp(buf, "Cpus_allowed:", strlen("Cpus_allowed:")) )
-        continue;
-      char* ptr = strchr(buf, ':');
-      ++ptr;
-      while( *ptr == '\t' )
-        ++ptr;
-      char* newline = strchr(ptr, '\n');
-      *newline = '\0';
-      printf("task%s: %s\n", ent->d_name, ptr);
-    }
-  }
-
-  closedir(task_dir);
-}
-
-
-int libstack_affinities_print(void)
-{
-  int i, cnt;
-
-  if( ! pid_mappings )
-    return 0;
-
-  struct pid_mapping* pm = pid_mappings;
-  while( pm ) {
-    printf("--------------------------------------------\n");
-    printf("pid=%d\n", pm->pid);
-    printf("cmdline=");
-    char cmdline_path[256];
-    snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
-    int cmdline = open(cmdline_path, O_RDONLY);
-    char cmdline_buf[256];
-    while( (cnt = read(cmdline, cmdline_buf, 256)) > 0 ) {
-      for( i = 0; i < cnt; ++i ) {
-        if( cmdline_buf[i] == '\0' )
-          printf(" ");
-        else
-          printf("%c", cmdline_buf[i]);
-      }
-    }
-    printf("\n");
-    print_threads_info(pm->pid);
-    pm = pm->next;
-  }
-  printf("--------------------------------------------\n");
-  return 0;
-}
-
-
 int libstack_env_print(void)
 {
+  int i, cnt;
   if( ! pid_mappings )
     return 0;
 
@@ -865,8 +897,14 @@ int libstack_env_print(void)
     snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
     int cmdline = open(cmdline_path, O_RDONLY);
     char cmdline_buf[256];
-    while( read(cmdline, cmdline_buf, 256) )
-      printf("%s", cmdline_buf);
+    while( (cnt = read(cmdline, cmdline_buf, 256)) > 0 ) {
+      for( i = 0; i < cnt; ++i ) {
+        if( cmdline_buf[i] == '\0' )
+          printf(" ");
+        else
+          printf("%c", cmdline_buf[i]);
+      }
+    }
     printf("\n");
     char env_path[256];
     snprintf(env_path, 256, "/proc/%d/environ", pm->pid);
@@ -890,6 +928,10 @@ int libstack_env_print(void)
     char* var = buf;
     while( var ) {
       if( ! strncmp(var, "EF_", strlen("EF_")) )
+        printf("env: %s\n", var);
+      if( ! strncmp(var, "LD_PRELOAD", strlen("LD_PRELOAD")) )
+        printf("env: %s\n", var);
+      if( ! strncmp(var, "TP_LOG", strlen("TP_LOG")) )
         printf("env: %s\n", var);
       while( *var != '\0' )
         ++var;
@@ -938,11 +980,11 @@ int stack_attach(unsigned id)
   return 1;
 }
 
-void stack_detach(netif_t* n)
+void stack_detach(netif_t* n, int locked)
 {
   IGNORE(ci_log("detaching netif %d at %p (given %p)\n",
 		NI_ID(&n->ni), &n->ni, n););
-  if( cfg_lock )  libstack_netif_unlock(&n->ni);
+  if( locked )  libstack_netif_unlock(&n->ni);
   ci_dllist_remove_safe(&n->link); /* take off stacks_list, if present */
 
   if( ! cfg_zombie ) {
@@ -1021,7 +1063,7 @@ void list_all_stacks2(stackfilter_t *filter,
           IGNORE(ci_log("We are the only user of stack %d", i));
           if( pre_detach )
             pre_detach(&stacks[i]->ni);
-          stack_detach(stacks[i]);
+          stack_detach(stacks[i], 0);
         }
       }
       else if( filter == NULL || filter(&info) ){
@@ -1069,7 +1111,7 @@ void stacks_detach_all(void)
 
   while (ci_dllist_not_empty(&stacks_list)) {
     n = CI_CONTAINER(netif_t, link, ci_dllist_start(&stacks_list));
-    stack_detach(n);
+    stack_detach(n, cfg_lock);
   }
 }
 
@@ -1609,7 +1651,7 @@ static void stack_analyse(ci_netif* ni)
       ++primed_all;
     if( ni->state->evq_primed != 0 )
       ++primed_any;
-    if( ni->state->is_spinner )
+    if( ci_netif_is_spinner(ni) )
       ++spinner;
   }
 
@@ -2082,7 +2124,7 @@ static void stack_segments(ci_netif* ni)
     buf = OO_PKT_P(pkt);
     for( i = 0; i < pkt->n_buffers; ++i ) {
       ci_ip_pkt_fmt* apkt = PKT_CHK(ni, buf);
-      ci_log("  %d: "EF_ADDR_FMT":%d", i, apkt->base_addr[pkt->intf_i],
+      ci_log("  %d: "EF_ADDR_FMT":%d", i, apkt->dma_addr[pkt->intf_i],
              apkt->buf_len);
       buf = apkt->frag_next;
     }
@@ -2478,14 +2520,14 @@ static void socket_set_mss(ci_netif* ni, ci_tcp_state* ts)
 
 static void socket_set_pmtu(ci_netif* ni, ci_tcp_state* ts)
 {
-  ts->s.pkt.pmtus.pmtu = arg_u[0];
+  ts->pmtus.pmtu = arg_u[0];
   ci_tcp_tx_change_mss(ni, ts); 
 }
 
 static void socket_set_sndbuf(ci_netif* ni, ci_tcp_state* ts)
 {
   ts->s.so.sndbuf = arg_u[0];
-  ci_tcp_set_sndbuf(ts);
+  ci_tcp_set_sndbuf(ni, ts);
 }
 
 static void socket_set_rcvbuf(ci_netif* ni, ci_tcp_state* ts)
@@ -2534,7 +2576,7 @@ static void socket_recv(ci_netif* ni, ci_tcp_state* ts) {
   /* ?? NB. Blocking currently broken due to signal deferral stuff
   ** requiring us to have registered thread data.
   */
-  ci_tcp_recvmsg_args_init(&args, ni, ts, &msg, MSG_DONTWAIT, addr_spc_ign);
+  ci_tcp_recvmsg_args_init(&args, ni, ts, &msg, MSG_DONTWAIT);
   rc = ci_tcp_recvmsg(&args);
   ci_log("recvmsg(%d:%d, %d, 0) = %d",
 	 NI_ID(ni), S_SP(ts), (int) CI_IOVEC_LEN(&iov), rc);

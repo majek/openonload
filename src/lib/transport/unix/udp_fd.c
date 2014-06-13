@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -136,6 +136,8 @@ static int citp_udp_socket(int domain, int type, int protocol)
   CI_DEBUG(epi->sock.s->pid = getpid());
 
   /* We're ready.  Unleash us onto the world! */
+  ci_assert(epi->sock.s->b.sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_atomic32_and(&epi->sock.s->b.sb_aflags, ~CI_SB_AFLAG_NOT_READY);
   citp_fdtable_insert(fdi, fd, 0);
 
   Log_VSS(log(LPF "socket(%d, %d, %d) = "EF_FMT, domain, type, protocol,
@@ -586,6 +588,28 @@ static int citp_udp_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr* msg,
 }
 
 
+int citp_udp_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+                        int mlen, struct oo_msg_template** omt_pp,
+                        unsigned flags)
+{
+  return -EOPNOTSUPP;
+}
+
+
+int citp_udp_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
+                         struct onload_template_msg_update_iovec* updates,
+                         int ulen, unsigned flags)
+{
+  return -EOPNOTSUPP;
+}
+
+
+int citp_udp_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
+{
+  return -EOPNOTSUPP;
+}
+
+
 citp_protocol_impl citp_udp_protocol_impl = {
   .type        = CITP_UDP_SOCKET,
   .ops         = {
@@ -626,6 +650,9 @@ citp_protocol_impl citp_udp_protocol_impl = {
     .zc_recv     = citp_udp_zc_recv,
     .zc_recv_filter = citp_udp_zc_recv_filter,
     .recvmsg_kernel = citp_udp_recvmsg_kernel,
+    .tmpl_alloc     = citp_udp_tmpl_alloc,
+    .tmpl_update    = citp_udp_tmpl_update,
+    .tmpl_abort     = citp_udp_tmpl_abort,
   }
 };
 

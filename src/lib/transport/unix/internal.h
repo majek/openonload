@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -183,6 +183,12 @@ typedef struct {
   int  (*zc_recv_filter)(citp_fdinfo*, onload_zc_recv_filter_callback,
                          void*, int);
   int  (*recvmsg_kernel)(citp_fdinfo*, struct msghdr*, int);
+  int  (*tmpl_alloc)(citp_fdinfo*, struct iovec*, int, struct oo_msg_template**,
+                     unsigned);
+  int  (*tmpl_update)(citp_fdinfo*, struct oo_msg_template*,
+                      struct onload_template_msg_update_iovec*, int,
+                      unsigned);
+  int  (*tmpl_abort)(citp_fdinfo*, struct oo_msg_template*);
 } citp_fdops;
 
 
@@ -264,7 +270,10 @@ struct citp_fdinfo_s {
   oo_atomic_t          ref_count;
 
   union {
-    unsigned           dup2_fd;
+    struct {
+      unsigned           fd;
+      int                flags;
+    } dup3_args;
     int                dup2_result;
     int                handover_nonb_switch;
   } on_rcz;
@@ -437,7 +446,7 @@ extern int citp_ep_dup_fcntl_dup(int oldfd, long arg) CI_HF;
 extern int citp_ep_dup_fcntl_dup_cloexec(int oldfd, long arg) CI_HF;
 #endif
 
-extern int citp_ep_dup2(unsigned oldfd, unsigned newfd) CI_HF;
+extern int citp_ep_dup3(unsigned oldfd, unsigned newfd, int flags) CI_HF;
 extern int citp_ep_close(unsigned fd) CI_HF;
 
 extern void citp_fdtable_dump(void)  CI_HF;
@@ -502,12 +511,6 @@ extern int citp_netif_init_ctor(void) CI_HF;
 
 /* Set up fork handling at start-of-day */
 extern int ci_setup_fork(void);
-/*! Handles user-level netif internals pre fork() */
-extern void citp_netif_pre_fork_hook(void) CI_HF;
-/*! Handles user-level netif internals post fork() in the parent */
-extern void citp_netif_parent_fork_hook(void) CI_HF;
-/* Handles user-level netif internals post fork() in the child */
-extern void citp_netif_child_fork_hook(void) CI_HF;
 
 /*! Handles user-level netif internals pre bproc_move() */
 extern void citp_netif_pre_bproc_move_hook(void) CI_HF;
@@ -699,7 +702,8 @@ ci_inline void __citp_fdtable_extend(unsigned fd) {
 
 /*! Marks an fdtable entry as pass-through. */
 ci_inline void citp_fdtable_passthru(int fd, int fdt_locked) {
-  if( fd >= 0 && fd < citp_fdtable.inited_count )
+  if( fd >= 0 && fd < citp_fdtable.inited_count &&
+      !oo_per_thread_get()->in_vfork_child )
     citp_fdtable_new_fd_set(fd, fdip_passthru, fdt_locked);
 }
 
@@ -880,7 +884,7 @@ extern int    citp_environ_init(void) CI_HF;
  */
 
 extern int apply_fcntl_to_os_sock(citp_sock_fdi* epi, int fd,
-                                  int cmd, int arg, int *fcntl_result) CI_HF;
+                                  int cmd, long arg, int *fcntl_result) CI_HF;
 
 /*! Handler for fcntl() cmds that are common across sockets.
  *

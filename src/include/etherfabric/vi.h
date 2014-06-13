@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,12 +65,6 @@ struct ef_pd;
   **   \return          >= 0 iff successful otherwise a negative error code
   **                    On success value is Q_ID.
   */
-extern int ef_vi_alloc(ef_vi* vi, ef_driver_handle nic,
-                       int ifindex, int evq_capacity,
-                       int rxq_capacity, int txq_capacity,
-		       ef_vi* evq_opt, ef_driver_handle evq_dh,
-		       enum ef_vi_flags flags);
-
 extern int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
 			       struct ef_pd* pd, ef_driver_handle pd_dh,
 			       int evq_capacity, int rxq_capacity,
@@ -151,16 +145,6 @@ typedef struct {
 
 
   /*
-  ** Allocate a set of virtual interfaces.
-  **
-  ** A VI set is usually used for the purposes of spreading the load of
-  ** handling received packets.  This sometimes called "receive-side
-  ** scaling" or RSS.
-  */
-extern int ef_vi_set_alloc(ef_vi_set*, ef_driver_handle, int ifindex,
-			   int n_vis);
-
-  /*
   ** Allocate a set of virtual interfaces in a PD.
   **
   ** A VI set is usually used for the purposes of spreading the load of
@@ -174,6 +158,10 @@ extern int ef_vi_set_alloc_from_pd(ef_vi_set*, ef_driver_handle,
   /*
   ** Initialise a VI that forms part of a set of VIs.  This is analogous to
   ** ef_vi_alloc().
+  **
+  ** [index_in_vi_set] identifies the VI within the set, so should be in
+  ** the range [0, n_vis).  Alternatively it can be -1, in which case any
+  ** unused VI is allocated.
   */
 extern int ef_vi_alloc_from_set(ef_vi* vi, ef_driver_handle vi_dh,
 				ef_vi_set* vi_set, ef_driver_handle vi_set_dh,
@@ -195,7 +183,7 @@ enum ef_filter_flags {
 typedef struct {
 	unsigned type;
 	unsigned flags;
-	unsigned data[5];
+	unsigned data[6];
 } ef_filter_spec;
 
 enum {
@@ -213,6 +201,7 @@ extern int ef_filter_spec_set_ip4_local(ef_filter_spec *, int protocol,
 extern int ef_filter_spec_set_ip4_full(ef_filter_spec *, int protocol,
 				       unsigned host_be32, int port_be16,
 				       unsigned rhost_be32, int rport_be16);
+extern int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id);
 extern int ef_filter_spec_set_eth_local(ef_filter_spec *, int vlan_id,
 					const void *mac);
 extern int ef_filter_spec_set_unicast_all(ef_filter_spec *);

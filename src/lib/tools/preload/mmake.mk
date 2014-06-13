@@ -11,6 +11,22 @@ VALGRIND_H	:= $(VALGRIND_INCLUDE)/valgrind.h
 ifeq ($(shell ls $(VALGRIND_H) 2>/dev/null), $(VALGRIND_H))
 TARGETS += libvg_IOPort_access.so
 MMAKE_INCLUDE += -I $(VALGRIND_INCLUDE)
+else
+
+# Try system valgrind
+VALGRIND_H	:= /usr/include/valgrind/valgrind.h
+VALGRIND_MAJOR	:= $(shell grep -e '\#define\s*__VALGRIND_MAJOR__' $(VALGRIND_H) |awk '{print $$3}')
+VALGRIND_MAJOR	:= $(shell grep -e '\#define\s*__VALGRIND_MAJOR__' $(VALGRIND_H) |awk '{print $$3}')
+VALGRIND_MINOR	:= $(shell grep -e '\#define\s*__VALGRIND_MINOR__' $(VALGRIND_H) |awk '{print $$3}')
+ifeq ($(shell ls $(VALGRIND_H) 2>/dev/null), $(VALGRIND_H))
+ifeq ($(VALGRIND_MAJOR), 3)
+ifeq ($(shell test "$(VALGRIND_MINOR)" -ge 2 && echo ok), ok)
+TARGETS += libvg_IOPort_access.so
+MMAKE_INCLUDE += -I /usr/include/valgrind
+endif
+endif
+endif
+
 endif
 endif
 

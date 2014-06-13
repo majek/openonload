@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -140,6 +140,11 @@ ci_inline void ci_atomic32_add(volatile ci_uint32* p, ci_uint32 v)
 
 ci_inline void ci_atomic32_inc(volatile ci_uint32* p)
 { __asm__ __volatile__("lock; incl %0" : "+m" (*p) :: "memory"); }
+
+
+ci_inline void ci_atomic32_dec(volatile ci_uint32* p)
+{ __asm__ __volatile__("lock; decl %0" : "+m" (*p) :: "memory"); }
+
 
 ci_inline int ci_atomic32_dec_and_test(volatile ci_uint32* p) {
   char r;
@@ -492,6 +497,9 @@ ci_inline ci_uint32 ci_bswap32(ci_uint32 v) {
 #define ci_prefetch(addr)  do{}while(0)
 
 
-#endif  /* __CI_TOOLS_GCC_X86_H__ */
+/* TODO: Evaluate whether this helps at all on x86 systems. */
+#define ci_clflush(addr)   do{}while(0)
 
+
+#endif  /* __CI_TOOLS_GCC_X86_H__ */
 /*! \cidoxg_end */

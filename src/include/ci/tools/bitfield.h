@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -377,7 +377,7 @@ typedef union ci_oword_u {
     	_field7, _value7, _field8, _value8, _field9, _value9,		\
 	_field10, _value10)						\
   do {									\
-    (_dword).u32[0] = CI_BITFIELD_INSERT_FIELDS64(0, 31,		\
+    (_dword).u32[0] = CI_BITFIELD_INSERT_FIELDS32(0, 31,		\
    	_field1, _value1, _field2, _value2, _field3, _value3,		\
 	_field4, _value4, _field5, _value5, _field6, _value6,		\
 	_field7, _value7, _field8, _value8, _field9, _value9,		\

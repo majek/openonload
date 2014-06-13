@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,18 +59,30 @@ int efrm_vi_allocator_ctor(struct efrm_nic *efrm_nic,
 			   const struct vi_resource_dimensions *dims)
 {
 	struct efrm_vi_allocator *va;
-	unsigned dmaq_min, dmaq_lim;
+	int i, rc, va_n = 0;
 	unsigned timer_min, timer_lim;
 	unsigned int_min, int_lim;
-	int i, rc, va_n = 0;
 
-	dmaq_min = max(dims->rxq_min, dims->txq_min);
-	dmaq_lim = min(dims->rxq_lim, dims->txq_lim);
-	timer_min = max(dmaq_min, dims->evq_timer_min);
-	timer_lim = min(dmaq_lim, dims->evq_timer_lim);
-	int_min = max(dmaq_min, dims->evq_int_min);
-	int_lim = min(dmaq_lim, dims->evq_int_lim);
-	int_lim = max(int_lim, int_min);
+	if (efrm_nic->efhw_nic.devtype.arch == EFHW_ARCH_EF10) {
+		int_min = timer_min = dims->vi_min; 
+		int_lim = timer_lim = dims->vi_lim;
+	}
+	else if (efrm_nic->efhw_nic.devtype.arch == EFHW_ARCH_FALCON) {
+		unsigned dmaq_min, dmaq_lim;
+		
+		dmaq_min = max(dims->rxq_min, dims->txq_min);
+		dmaq_lim = min(dims->rxq_lim, dims->txq_lim);
+		timer_min = max(dmaq_min, dims->evq_timer_min);
+		timer_lim = min(dmaq_lim, dims->evq_timer_lim);
+		int_min = max(dmaq_min, dims->evq_int_min);
+		int_lim = min(dmaq_lim, dims->evq_int_lim);
+		int_lim = max(int_lim, int_min);
+	} else {
+		rc = -EINVAL;
+		EFRM_ERR("%s: unknown efhw device architecture %u",
+			 __FUNCTION__, efrm_nic->efhw_nic.devtype.arch);
+		goto fail;
+	}
 
 	for (i = 0; i < EFRM_NIC_N_VI_ALLOCATORS; ++i)
 		efrm_nic->vi_allocators[i].props = 0;

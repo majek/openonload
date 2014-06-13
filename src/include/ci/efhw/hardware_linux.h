@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -83,6 +83,18 @@
 			#define ia64_mfa() asm volatile ("mf.a" ::: "memory")
 		#endif
 	#define mmiowb ia64_mfa
+	#elif defined(__PPC32__)
+		#define mmiowb
+	#elif defined(__PPC64__)
+/* On PPC mmwiob is defined as an inline function, not as a macro,
+ * so the ifdef test fails, and thus we rely on kernel version.
+ * The function definition cannot be backported to earlier kernels here,
+ * because it uses a field in paca_struct that does not exist there either,
+ * so we just use a plain write memory barrier and hope for the best
+ */
+	#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
+	#define mmiowb() __asm__ __volatile__ ("sync" ::: "memory")
+	#endif
 	#else
 	#error "Need definition for mmiowb()"
 	#endif
@@ -93,7 +105,12 @@ static inline uint64_t __readq(volatile void __iomem *addr)
 {
 	return *(volatile uint64_t *)addr;
 }
-#define readq(x) __readq(x)
+static inline uint64_t readq(volatile void __iomem *addr)
+{
+	uint64_t x = __readq(addr);
+	return le64_to_cpu(x);
+}
+
 #endif
 
 #ifndef writeq
@@ -101,7 +118,7 @@ static inline void __writeq(uint64_t v, volatile void __iomem *addr)
 {
 	*(volatile uint64_t *)addr = v;
 }
-#define writeq(val, addr) __writeq((val), (addr))
+#define writeq(val, addr) __writeq(cpu_to_le64(val), (addr))
 #endif
 
 #endif /* __CI_EFHW_HARDWARE_LINUX_H__ */

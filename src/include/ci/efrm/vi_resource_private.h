@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -67,9 +67,12 @@ extern void efrm_handle_wakeup_event(struct efhw_nic *nic, unsigned id);
 /*! Timeout handler */
 extern void efrm_handle_timeout_event(struct efhw_nic *nic, unsigned id);
 
-/*! DMA flush handler */
+/*! DMA flush handlers: in-place and postponed */
 extern void efrm_handle_dmaq_flushed(struct efhw_nic *nic, unsigned id,
-				   int rx_flush, int failed);
+				     int rx_flush, int failed);
+extern int efrm_handle_dmaq_flushed_schedule(struct efhw_nic *nic,
+					      unsigned id,
+					      int rx_flush, int failed);
 
 /*! SRAM update handler */
 extern void efrm_handle_sram_event(struct efhw_nic *nic);

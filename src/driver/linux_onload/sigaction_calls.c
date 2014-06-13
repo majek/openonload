@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,14 +51,14 @@ efab_signal_handler_type(int sig, __sighandler_t user_handler)
 /* Substitute signal handler by our variant. */
 static int
 efab_signal_substitute(int sig, struct sigaction *new_act,
-                       const struct mm_signal_data *tramp_data)
+                       struct mm_signal_data *tramp_data)
 {
   int rc;
   __sighandler_t handler;
   struct k_sigaction *k;
   int type;
   __user struct oo_sigaction *user_data;
-  struct oo_sigaction signal_data;
+  struct oo_sigaction *signal_data = &(tramp_data->signal_data[sig - 1]);
   ci_int32 old_type;
   ci_int32 seq;
 
@@ -66,17 +66,20 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
                  (CI_USER_PTR_GET(tramp_data->user_data)))[sig - 1]);
   if( !access_ok(VERIFY_WRITE, user_data, sizeof(struct oo_sigaction) ) )
     return -EFAULT;
-  rc = __get_user(old_type, &user_data->type);
-  if( rc != 0 )
-    return rc;
-  seq = (old_type & OO_SIGHANGLER_SEQ_MASK) + (1 << OO_SIGHANGLER_SEQ_SHIFT);
+
+  do {
+    old_type = signal_data->type;
+    seq = (old_type & OO_SIGHANGLER_SEQ_MASK) + (1 << OO_SIGHANGLER_SEQ_SHIFT);
+  } while( ci_cas32_fail(&signal_data->type, old_type,
+                         OO_SIGHANGLER_BUSY | seq) );
 
   /* We are going to change signal handler: UL should wait until we've
    * finished */
-  signal_data.type = OO_SIGHANGLER_BUSY | seq;
-  rc = __put_user(signal_data.type, &user_data->type);
-  if( rc != 0 )
+  rc = __put_user(signal_data->type, &user_data->type);
+  if( rc != 0 ) {
+    signal_data->type = old_type;
     return -EFAULT;
+  }
 
   spin_lock_irq(&current->sighand->siglock);
   k = &current->sighand->action[sig - 1];
@@ -89,44 +92,65 @@ efab_signal_substitute(int sig, struct sigaction *new_act,
   /* We do not handle this signal: */
   if( type != OO_SIGHANGLER_USER && handler == NULL ) {
     spin_unlock_irq(&current->sighand->siglock);
-    ci_verify(__put_user(old_type | OO_SIGHANGLER_IGN_BIT | seq,
+    signal_data->type = old_type | OO_SIGHANGLER_IGN_BIT | seq;
+    ci_verify(__put_user(signal_data->type,
                          &user_data->type) == 0);
 
     return 0;
   }
 
-  OO_DEBUG_SIGNAL(ci_log("%s: change sig=%d handler %p flags %lx restorer %p",
-                         __func__, sig, k->sa.sa_handler,
-                         k->sa.sa_flags, k->sa.sa_restorer));
-  signal_data.flags = k->sa.sa_flags;
+  OO_DEBUG_SIGNAL(ci_log("%s: %d change sig=%d handler %p flags %lx "
+                         "restorer %p type %d", __func__,
+                         current->pid, sig, k->sa.sa_handler,
+                         k->sa.sa_flags, k->sa.sa_restorer, type));
+  signal_data->flags = k->sa.sa_flags;
+  k->sa.sa_flags |= SA_SIGINFO;
   if( type == OO_SIGHANGLER_USER )
-    CI_USER_PTR_SET(signal_data.handler, k->sa.sa_handler);
+    CI_USER_PTR_SET(signal_data->handler, k->sa.sa_handler);
   else {
-    CI_USER_PTR_SET(signal_data.handler, handler);
-    k->sa.sa_flags |= SA_SIGINFO;
+    CI_USER_PTR_SET(signal_data->handler, handler);
     if( tramp_data->sarestorer ) {
       k->sa.sa_flags |= SA_RESTORER;
       k->sa.sa_restorer = tramp_data->sarestorer;
     }
   }
-  if( k->sa.sa_flags & SA_SIGINFO )
-    k->sa.sa_handler = tramp_data->handler_postpone3;
-  else
-    k->sa.sa_handler = tramp_data->handler_postpone1;
+  k->sa.sa_handler = tramp_data->handler_postpone;
   spin_unlock_irq(&current->sighand->siglock);
 
-  OO_DEBUG_SIGNAL(ci_log("%s: set sig=%d handler %p flags %lx restorer %p",
-                         __func__, sig, k->sa.sa_handler,
+  OO_DEBUG_SIGNAL(ci_log("%s: %d set sig=%d handler %p flags %lx restorer %p",
+                         __func__, current->pid, sig, k->sa.sa_handler,
                          k->sa.sa_flags, k->sa.sa_restorer));
 
   /* Copy signal_data to UL; type BUSY */
-  rc = __copy_to_user(user_data, &signal_data, sizeof(signal_data));
+  rc = __copy_to_user(user_data, signal_data, sizeof(*signal_data));
+  signal_data->type = type | seq;
   if( rc != 0 )
     return -EFAULT;
   /* Fill in the real type */
-  ci_verify(__put_user(type | seq, &user_data->type) == 0);
+  ci_verify(__put_user(signal_data->type, &user_data->type) == 0);
 
   return 0;
+}
+
+static void
+efab_signal_recheck(int sig, const struct mm_signal_data *tramp_data)
+{
+  const struct oo_sigaction *signal_data = &(tramp_data->signal_data[sig - 1]);
+  struct k_sigaction *k;
+
+  if( (signal_data->type & (OO_SIGHANGLER_TYPE_MASK | OO_SIGHANGLER_IGN_BIT)) !=
+      OO_SIGHANGLER_USER )
+    return;
+
+  spin_lock_irq(&current->sighand->siglock);
+  k = &current->sighand->action[sig - 1];
+  if( k->sa.sa_handler == NULL ) {
+    k->sa.sa_flags = SA_SIGINFO;
+    k->sa.sa_handler = tramp_data->handler_postpone;
+    OO_DEBUG_SIGNAL(ci_log("%s: fix sig=%d; probable SA_ONESHOT",
+                           __func__, sig));
+  }
+  spin_unlock_irq(&current->sighand->siglock);
 }
 
 int efab_signal_mm_init(const ci_tramp_reg_args_t *args, struct mm_hash *p)
@@ -136,10 +160,8 @@ int efab_signal_mm_init(const ci_tramp_reg_args_t *args, struct mm_hash *p)
   if( args->max_signum < _NSIG )
     return -E2BIG;
 
-  p->signal_data.handler_postpone1 =
-                    CI_USER_PTR_GET(args->signal_handler_postpone1);
-  p->signal_data.handler_postpone3 =
-                    CI_USER_PTR_GET(args->signal_handler_postpone3);
+  p->signal_data.handler_postpone =
+                    CI_USER_PTR_GET(args->signal_handler_postpone);
   p->signal_data.sarestorer = CI_USER_PTR_GET(args->signal_sarestorer);
 
   for( i = 0; i <= OO_SIGHANGLER_DFL_MAX; i++ )
@@ -151,9 +173,10 @@ int efab_signal_mm_init(const ci_tramp_reg_args_t *args, struct mm_hash *p)
   return 0;
 }
 
-void efab_signal_process_init(const struct mm_signal_data *tramp_data)
+void efab_signal_process_init(struct mm_signal_data *tramp_data)
 {
   int sig;
+  int rc;
 
   OO_DEBUG_SIGNAL(ci_log("%s(%p) pid %d",
                          __func__, tramp_data, current->pid));
@@ -162,6 +185,10 @@ void efab_signal_process_init(const struct mm_signal_data *tramp_data)
    * and deadly SIG_DFL */
   for( sig = 1; sig <= _NSIG; sig++ ) {
     struct k_sigaction *k;
+
+    tramp_data->signal_data[sig - 1].type = OO_SIGHANGLER_USER |
+                                            OO_SIGHANGLER_IGN_BIT;
+    CI_USER_PTR_SET(tramp_data->signal_data[sig - 1].handler, NULL);
 
     /* Never, never intercept SIGKILL. You'll get deadlock since exit_group
      * sends SIGKILL to all other threads. */
@@ -173,11 +200,16 @@ void efab_signal_process_init(const struct mm_signal_data *tramp_data)
      * created, etc. */
     spin_lock_irq(&current->sighand->siglock);
     k = &current->sighand->action[sig - 1];
-    if( k->sa.sa_handler == tramp_data->handler_postpone3 ||
-        k->sa.sa_handler == tramp_data->handler_postpone1 ) {
+    if( k->sa.sa_handler == tramp_data->handler_postpone ) {
       spin_unlock_irq(&current->sighand->siglock);
       OO_DEBUG_SIGNAL(ci_log("%s: double init pid=%d",
                              __func__, current->pid));
+      rc = copy_from_user(tramp_data->signal_data,
+                          CI_USER_PTR_GET(tramp_data->user_data),
+                          sizeof(tramp_data->signal_data));
+      if( rc != 0 )
+        ci_log("%s: ERROR: failed to copy signal data (%d)", __func__, rc);
+
       break;
     }
     spin_unlock_irq(&current->sighand->siglock);
@@ -185,6 +217,8 @@ void efab_signal_process_init(const struct mm_signal_data *tramp_data)
     /* Ignore any errors */
     (void) efab_signal_substitute(sig, NULL, tramp_data);
   }
+
+  tramp_data->kernel_sighand = current->sighand;
 }
 
 /* Change substituted sigaction to the structure really meant by user.
@@ -192,31 +226,24 @@ void efab_signal_process_init(const struct mm_signal_data *tramp_data)
  * If sa==NULL, substitute in-place. */
 static int
 efab_signal_report_sigaction(int sig, struct sigaction *sa,
-                             const struct mm_signal_data *tramp_data)
+                             struct mm_signal_data *tramp_data)
 {
-  struct oo_sigaction signal_data;
+  struct oo_sigaction *signal_data = &(tramp_data->signal_data[sig - 1]);
   ci_int32 type;
-  __user struct oo_sigaction *user_data = &(((struct oo_sigaction *)
-                   (CI_USER_PTR_GET(tramp_data->user_data)))[sig - 1]);
-  int rc;
 #define MAX_TRIES_BUSY 1000
   int tried_busy = 0;
   int tried_changed = 0;
   int sa_provided = (sa != NULL);
 
-  if( !access_ok(VERIFY_WRITE, user_data, sizeof(struct oo_sigaction) ) )
-    return -EFAULT;
-
 re_read_data:
   do {
-    rc = __copy_from_user(&signal_data, user_data, sizeof(signal_data));
-    if( rc != 0 )
-      return -EFAULT;
     tried_busy++;
-  } while( (signal_data.type & OO_SIGHANGLER_TYPE_MASK) ==
-           OO_SIGHANGLER_BUSY && tried_busy <= MAX_TRIES_BUSY );
+    type = signal_data->type;
+  } while( (type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_BUSY &&
+           tried_busy <= MAX_TRIES_BUSY );
   if( tried_busy > MAX_TRIES_BUSY ) {
-    ci_log("%s: signal() or sigaction() runs for too long", __func__);
+    ci_log("%s(%d): pid %d signal() or sigaction() runs for too long",
+           __func__, sig, current->pid);
     return -EBUSY;
   }
 
@@ -225,44 +252,41 @@ report:
   if( sa_provided )
     *sa = current->sighand->action[sig - 1].sa;
   else
-    sa = &current->sighand->action[sig-1].sa;
+    sa = &current->sighand->action[sig - 1].sa;
 
-  if( sa->sa_handler != tramp_data->handler_postpone3 &&
-      sa->sa_handler != tramp_data->handler_postpone1 ) {
+  if( sa->sa_handler != tramp_data->handler_postpone ) {
     spin_unlock_irq(&current->sighand->siglock);
     return 0;
   }
 
-  OO_DEBUG_SIGNAL(ci_log("%s: process sig=%d handler %p flags %lx restorer %p",
-                         __func__, sig, sa->sa_handler,
+  OO_DEBUG_SIGNAL(ci_log("%s: %d process sig=%d type %d handler %p "
+                         "flags %lx restorer %p", __func__, current->pid,
+                         sig, type & OO_SIGHANGLER_TYPE_MASK, sa->sa_handler,
                          sa->sa_flags, sa->sa_restorer));
-  if( (signal_data.type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_USER)
-    sa->sa_handler = CI_USER_PTR_GET(signal_data.handler);
-  else if( ! (signal_data.type & OO_SIGHANGLER_IGN_BIT) ) {
+  if( (signal_data->type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_USER)
+    sa->sa_handler = CI_USER_PTR_GET(signal_data->handler);
+  else if( ! (signal_data->type & OO_SIGHANGLER_IGN_BIT) ) {
     sa->sa_handler = SIG_DFL;
     sa->sa_flags &= ~SA_RESTORER;
-    if( ! (signal_data.flags & SA_SIGINFO) )
+    if( ! (signal_data->flags & SA_SIGINFO) )
       sa->sa_flags &= ~SA_SIGINFO;
     sa->sa_restorer = NULL;
   }
-  OO_DEBUG_SIGNAL(ci_log("%s: to user sig=%d handler %p flags %lx restorer %p",
-                         __func__, sig, sa->sa_handler,
+  OO_DEBUG_SIGNAL(ci_log("%s: %d to user sig=%d handler %p flags %lx "
+                         "restorer %p", __func__,
+                         current->pid, sig, sa->sa_handler,
                          sa->sa_flags, sa->sa_restorer));
 
   spin_unlock_irq(&current->sighand->siglock);
 
   /* Re-check that UL have not changed signal_data. */
-  type = signal_data.type;
-  rc = __copy_from_user(&signal_data, user_data, sizeof(signal_data));
-  if( rc != 0 )
-    return rc;
-  if( type != signal_data.type ) {
+  if( type != signal_data->type ) {
     tried_changed++;
     if( tried_changed > MAX_TRIES_BUSY ) {
       ci_log("%s: signal() or sigaction() called too fast", __func__);
       return -EBUSY;
     }
-    if( (signal_data.type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_BUSY ) {
+    if( (signal_data->type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_BUSY ) {
       tried_busy = 0;
       goto re_read_data;
     }
@@ -273,7 +297,7 @@ report:
   return 0;
 }
 
-void efab_signal_process_fini(const struct mm_signal_data *tramp_data)
+void efab_signal_process_fini(struct mm_signal_data *tramp_data)
 {
   int sig;
 
@@ -296,8 +320,11 @@ void efab_signal_process_fini(const struct mm_signal_data *tramp_data)
   for( sig = 1; sig <= _NSIG; sig++ ) {
     if( sig_kernel_only(sig) )
       continue;
-    if( efab_signal_report_sigaction(sig, NULL, tramp_data) != 0 )
-      break;
+    if( efab_signal_report_sigaction(sig, NULL, tramp_data) != 0 ) {
+      ci_log("%s: ERROR: pid %d failed to back off signal %d handler",
+             __func__, current->pid, sig);
+      continue;
+    }
   }
 }
 
@@ -308,7 +335,7 @@ void efab_signal_process_fini(const struct mm_signal_data *tramp_data)
 static int
 efab_signal_do_sigaction(int sig, struct sigaction *act,
                          struct sigaction *oact,
-                         const struct mm_signal_data *tramp_data,
+                         struct mm_signal_data *tramp_data,
                          int *out_pass_to_kernel)
 {
   int rc = 0;
@@ -336,27 +363,44 @@ efab_signal_do_sigaction(int sig, struct sigaction *act,
     else
       rc = efab_signal_substitute(sig, act, tramp_data);
   }
+  else
+    efab_signal_recheck(sig, tramp_data);
 
   return rc;
 }
 
 static int
-efab_signal_get_tramp_data(struct mm_signal_data *tramp_data)
+efab_signal_get_tramp_data(struct mm_signal_data **tramp_data)
 {
-  const struct mm_hash *p;
+  struct mm_hash *p;
 
   read_lock (&oo_mm_tbl_lock);
   p = oo_mm_tbl_lookup(current->mm);
-  if( p == NULL ) {
+  if( p == NULL || CI_USER_PTR_GET(p->signal_data.user_data) == NULL) {
     read_unlock (&oo_mm_tbl_lock);
     return -ENOSYS;
   }
-  *tramp_data = p->signal_data;
+  efab_get_mm_hash_locked(p);
+  *tramp_data = &p->signal_data;
+
   read_unlock (&oo_mm_tbl_lock);
 
-  if( CI_USER_PTR_GET(tramp_data->user_data) == NULL )
-    return -ENOSYS;
   return 0;
+}
+
+
+void
+efab_signal_put_tramp_data(struct mm_signal_data *tramp_data)
+{
+  struct mm_hash *p = container_of(tramp_data, struct mm_hash, signal_data);
+  int do_free = 0;
+
+  write_lock (&oo_mm_tbl_lock);
+  efab_put_mm_hash_locked(p);
+  write_unlock (&oo_mm_tbl_lock);
+
+  if( do_free )
+    efab_free_mm_hash(p);
 }
 
 asmlinkage long
@@ -365,7 +409,7 @@ efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
 {
   int rc = 0;
   struct sigaction old, new;
-  struct mm_signal_data tramp_data;
+  struct mm_signal_data *tramp_data;
   int pass_to_kernel = 0;
 
   efab_syscall_enter();
@@ -383,16 +427,26 @@ efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
   }
 
   if( act != NULL ) {
-    rc = copy_from_user(&new, act, sizeof(new));
-    if( rc != 0 ) {
-      efab_syscall_exit();
-      return -EFAULT;
+    /* If we are in vfork child, we have the same mm but different sighand.
+     * We should not change parent UL structure in this case, se we'd
+     * better off from this signal while running in the child. */
+    if( tramp_data->kernel_sighand != current->sighand )
+      pass_to_kernel = 1;
+    else {
+      rc = copy_from_user(&new, act, sizeof(new));
+      if( rc != 0 ) {
+        efab_signal_put_tramp_data(tramp_data);
+        efab_syscall_exit();
+        return -EFAULT;
+      }
     }
   }
 
-  rc = efab_signal_do_sigaction(sig, act ? &new : NULL,
-                                oact ? &old : NULL, &tramp_data,
+  rc = efab_signal_do_sigaction(sig,
+                                (act && !pass_to_kernel) ? &new : NULL,
+                                oact ? &old : NULL, tramp_data,
                                 &pass_to_kernel);
+  efab_signal_put_tramp_data(tramp_data);
 
   if( pass_to_kernel )
     efab_linux_sys_sigaction(sig, act, NULL);
@@ -414,6 +468,8 @@ static inline compat_uptr_t ptr_to_compat(void __user *uptr)
 { return (u32)(unsigned long)uptr; }
 #endif
 
+/* On PPC there is no 32-bit sigaction - or rather, all sigaction calls are 32-bit.
+ */
 asmlinkage int
 efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
                                   struct sigaction32 *oact32,
@@ -422,7 +478,7 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
   struct sigaction act, oact;
   compat_sigset_t set32;
   int rc;
-  struct mm_signal_data tramp_data;
+  struct mm_signal_data *tramp_data;
   int pass_to_kernel = 0;
 
   efab_syscall_enter();
@@ -439,7 +495,11 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
     return rc;
   }
 
-  if( act32 != NULL ) {
+  /* Do not change UL data if we are in vfork child */
+  if( act32 != NULL && tramp_data->kernel_sighand != current->sighand )
+    pass_to_kernel = 1;
+
+  if( act32 != NULL && !pass_to_kernel ) {
     compat_uptr_t handler, restorer;
 
     if( !access_ok(VERIFY_READ, act32, sizeof(*act32)) ||
@@ -447,6 +507,7 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
         __get_user(act.sa_flags, &act32->sa_flags) ||
         __get_user(restorer, &act32->sa_restorer) ||
         __copy_from_user(&set32, &act32->sa_mask, sizeof(compat_sigset_t)) ) {
+      efab_signal_put_tramp_data(tramp_data);
       efab_syscall_exit();
       return -EFAULT;
     }
@@ -462,9 +523,11 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
     }
   }
 
-  rc = efab_signal_do_sigaction(sig, act32 ? &act : NULL,
-                                oact32 ? &oact : NULL, &tramp_data,
+  rc = efab_signal_do_sigaction(sig,
+                                (act32 && !pass_to_kernel) ? &act : NULL,
+                                oact32 ? &oact : NULL, tramp_data,
                                 &pass_to_kernel);
+  efab_signal_put_tramp_data(tramp_data);
   if( pass_to_kernel )
     efab_linux_sys_sigaction32(sig, act32, NULL);
 
@@ -497,5 +560,5 @@ efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
   efab_syscall_exit();
   return rc;
 }
-#endif
 
+#endif

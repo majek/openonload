@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -85,10 +85,10 @@ struct efrm_vf_vi {
 
 	/* VI-in-VF specific data: */
 	u32 irq_usec;
-	struct efrm_threaded_irq threaded_irq;
 };
 
 /* VF itself */
+struct efrm_pd_owner_ids;
 struct efrm_vf {
 	struct efrm_resource rs;
 	struct list_head link;
@@ -104,6 +104,9 @@ struct efrm_vf {
 	u8 vi_count; /* Real number of VIs: rxq+txq+evq */
 
 	struct pci_dev *pci_dev;
+
+	/* state for pd allocations */
+	struct efrm_pd_owner_ids *owner_ids;
 
 	/* state for IOMMU mappings */
 	efhw_iommu_domain *iommu_domain;

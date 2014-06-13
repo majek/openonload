@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -158,6 +158,28 @@ int citp_epoll_zc_recv_filter(citp_fdinfo* fdi,
   return -ENOSYS;
 # endif
 }
+
+int citp_epoll_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+                         int mlen, struct oo_msg_template** omt_pp,
+                         unsigned flags)
+{
+  return -EOPNOTSUPP;
+}
+
+
+int citp_epoll_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
+                          struct onload_template_msg_update_iovec* updates,
+                          int ulen, unsigned flags)
+{
+  return -EOPNOTSUPP;
+}
+
+
+int citp_epoll_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
+{
+  return -EOPNOTSUPP;
+}
+
 #endif /* CI_CFG_USERSPACE_EPOLL */
 
 

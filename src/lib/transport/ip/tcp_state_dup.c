@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -94,7 +94,6 @@ int ci_tcp_move_state(ci_netif* netif_in, ci_tcp_state* ts_in,
 
   ts->s.pkt.ip.ip_tos = ts_in->s.pkt.ip.ip_tos;
   ts->s.pkt.ip.ip_ttl = ts_in->s.pkt.ip.ip_ttl;
-  ts->s.pkt.pmtus.state = ts_in->s.pkt.pmtus.state; /* IP_MTU_DISCOVER */
   /* Linux specific (TCP), although should not hurt other OS's */
   ts->s.cmsg_flags = ts_in->s.cmsg_flags;
 

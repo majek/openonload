@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,12 +29,12 @@ ci_inline void ci_netif_pkt_tx_assert_len(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   int i, t = 0;
   for( i = 0; ; ) {
     t += pkt->buf_len;
-    ci_assert_le(t, first->tx_pkt_len);
+    ci_assert_le(t, first->pay_len);
     if( ++i == n )
       break;
     pkt = PKT_CHK(ni, pkt->frag_next);
   }
-  ci_assert_equal(t, first->tx_pkt_len);
+  ci_assert_equal(t, first->pay_len);
 #endif
 }
 
@@ -56,13 +56,35 @@ ci_inline void ci_netif_pkt_to_iovec(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_netif_pkt_tx_assert_len(ni, pkt, n);
 
   for( i = 0; ; ) {
-    iov[i].iov_base = pkt->base_addr[intf_i] + pkt->base_offset;
+    iov[i].iov_base = pkt->dma_addr[intf_i] + pkt->pkt_start_off;
     iov[i].iov_len = pkt->buf_len;
     if( ++i == n )
       return;
     pkt = PKT_CHK(ni, pkt->frag_next);
   }
 }
+
+
+#if CI_CFG_PIO
+ci_inline void ci_netif_pkt_to_pio(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                                   ci_int32 offset)
+{
+  int i = 0, intf_i = pkt->intf_i;
+  unsigned n = pkt->n_buffers;
+
+  ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
+  ci_assert_ge(2048 /* PIO region size */, pkt->pay_len);
+
+  while( 1 ) {
+    ef_pio_memcpy(&ni->nic_hw[intf_i].vi, PKT_START(pkt), offset, pkt->buf_len);
+    if( ++i == n )
+      return;
+    offset += pkt->buf_len;
+    pkt = PKT_CHK(ni, pkt->frag_next);
+  } 
+}
+#endif
+
 
 /**********************************************************************
  * DMA queues.
@@ -112,6 +134,17 @@ ci_inline void ci_netif_dmaq_and_vi_for_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     (ni)->state->nic[(pkt)->intf_i].tx_bytes_added+=TX_PKT_LEN(pkt);    \
     if( oo_tcpdump_check(ni, pkt, (pkt)->intf_i) )                      \
       oo_tcpdump_dump_pkt(ni, pkt);                                     \
+  } while(0)
+
+
+#define __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, offset, pkt)       \
+  do {                                                                  \
+    (pkt)->flags &=~ CI_PKT_FLAG_TX_PENDING;                            \
+    ci_pio_buddy_free(ni, &(ni)->state->nic[(pkt)->intf_i].pio_buddy,   \
+                      offset, order);                                   \
+    --(ni)->state->nic[(pkt)->intf_i].tx_dmaq_insert_seq;               \
+    (ni)->state->nic[(pkt)->intf_i].tx_bytes_added-=TX_PKT_LEN(pkt);    \
+    ci_netif_pkt_release(ni, pkt);                                      \
   } while(0)
 
 

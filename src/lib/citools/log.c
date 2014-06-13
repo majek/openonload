@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,7 +125,7 @@ void ci_vlog(const char* fmt, va_list args)
     if( ci_log_options & CI_LOG_PID )
       n += ci_sprintf(line + n, "%d ", (int) getpid());
     if( ci_log_options & CI_LOG_TID )
-      n += ci_sprintf(line + n, "%d ", (int) pthread_self());
+      n += ci_sprintf(line + n, "%lx ", (long) pthread_self());
 #endif
 #ifdef CI_HAVE_FRC64
     if( ci_log_options & CI_LOG_TIME )

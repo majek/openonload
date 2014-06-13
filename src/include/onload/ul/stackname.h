@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,7 +31,16 @@
 #include <onload/extensions.h>
 
 
+struct saved_stacks {
+  struct saved_stacks* next;
+  enum onload_stackname_who who;
+  enum onload_stackname_scope context;
+  char stackname[CI_CFG_STACK_NAME_LEN];
+};
+
+
 struct oo_stackname_state {
+  struct saved_stacks* saved_stacks_head;
   enum onload_stackname_who who;
   enum onload_stackname_scope context;
   char stackname[CI_CFG_STACK_NAME_LEN];

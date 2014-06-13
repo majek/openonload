@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,6 +57,36 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
   if( vi_flags & EF_VI_TX_FILTER_MASK_1  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_0;
   if( vi_flags & EF_VI_TX_FILTER_MASK_2  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_1;
   return efab_flags;
+}
+
+
+static unsigned efab_flags_to_nic_flags(unsigned efab_flags)
+{
+  return (efab_flags & EFHW_VI_NIC_BUG35388_WORKAROUND) ?
+          EF_VI_NIC_FLAG_BUG35388_WORKAROUND : 0;
+}
+
+
+/* Certain VI functionalities are only supported on certain NIC types.
+ * This function validates that the requested functionality is present
+ * on the selected NIC. */
+static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
+{
+  switch (ef_vi_arch) {
+  case EFHW_ARCH_FALCON:
+    if (vi_flags & EF_VI_TX_PUSH_ALWAYS) {
+      LOGVV(ef_log("%s: ERROR: TX PUSH ALWAYS flag not supported"
+                   " on FALCON architecture", __FUNCTION__));
+      return -EINVAL;
+    }
+    return 0;
+    
+  case EFHW_ARCH_EF10:
+    return 0;
+    
+  default:
+    return -EINVAL;
+  }
 }
 
 
@@ -166,6 +196,11 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   nic_type.arch = (unsigned char) rc;
   nic_type.variant = ra.u.vi_out.nic_variant;
   nic_type.revision = ra.u.vi_out.nic_revision;
+  nic_type.flags = efab_flags_to_nic_flags(ra.u.vi_out.nic_flags);
+
+  rc = check_nic_compatibility(vi_flags, nic_type.arch);
+  if( rc != 0 )
+    goto fail3;
 
   memset(vi_data, 0, sizeof(vi_data));
 
@@ -173,7 +208,9 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     ef_vi_init_mapping_evq(vi_data, nic_type, instance, io_mmap_ptr,
                            ra.u.vi_out.evq_capacity * sizeof(efhw_event_t),
                            mem_mmap_ptr, NULL, 0);
-    mem_mmap_ptr += ra.u.vi_out.evq_capacity * sizeof(efhw_event_t);
+    /* we should align the pointer */
+    mem_mmap_ptr += ((ra.u.vi_out.evq_capacity * sizeof(efhw_event_t))
+                     + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
     vi->ep_state = state;
   }
 
@@ -181,8 +218,9 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     ef_vi_init_mapping_vi(vi_data, nic_type,
                           ra.u.vi_out.rxq_capacity,
                           ra.u.vi_out.txq_capacity,
-                          instance, io_mmap_ptr, mem_mmap_ptr, mem_mmap_ptr,
-                          vi_flags);
+                          instance, io_mmap_ptr,
+                          mem_mmap_ptr, mem_mmap_ptr,
+                          vi_flags, ra.u.vi_out.rx_prefix_len);
 
   ef_vi_init(vi, vi_data, state, &state->evq, vi_flags);
   ef_vi_add_queue(evq, vi);
@@ -203,19 +241,6 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
  fail1:
   --evq->vi_qs_n;
   return rc;
-}
-
-
-int ef_vi_alloc(ef_vi* vi, ef_driver_handle fd, int ifindex,
-                int evq_capacity, int rxq_capacity, int txq_capacity,
-		ef_vi* evq_opt, ef_driver_handle evq_dh,
-		enum ef_vi_flags flags)
-{
-	return __ef_vi_alloc(vi, fd, efch_make_resource_id(0),
-			     -1/*pd_or_vi_set_dh*/,
-			     0/*index_in_vi_set*/, ifindex,
-			     evq_capacity, rxq_capacity, txq_capacity,
-			     evq_opt, evq_dh, flags);
 }
 
 
@@ -352,6 +377,8 @@ int ef_vi_arch_from_efhw_arch(int efhw_arch)
   switch( efhw_arch ) {
   case EFHW_ARCH_FALCON:
     return EF_VI_ARCH_FALCON;
+  case EFHW_ARCH_EF10:
+    return EF_VI_ARCH_EF10;
   default:
     return -1;
   }

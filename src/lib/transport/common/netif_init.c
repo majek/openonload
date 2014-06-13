@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -115,6 +115,7 @@ static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
   int rc;
   ci_netif* ni;
   int realloc = 0;
+
 
   ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
 

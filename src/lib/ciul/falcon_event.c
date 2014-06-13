@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,20 +47,20 @@
 /*! \cidoxg_lib_ef */
 #include "ef_vi_internal.h"
 
-
+typedef ci_qword_t ef_vi_event;
 
 #define EF_VI_EVENT_OFFSET(q, i)					\
-	(((q)->evq_state->evq_ptr + (i) * sizeof(ef_vi_qword)) & (q)->evq_mask)
+	(((q)->evq_state->evq_ptr + (i) * sizeof(ef_vi_event)) & (q)->evq_mask)
 
 #define EF_VI_EVENT_PTR(q, i)                                           \
-	((ef_vi_qword*) ((q)->evq_base + EF_VI_EVENT_OFFSET((q), (i))))
+	((ef_vi_event*) ((q)->evq_base + EF_VI_EVENT_OFFSET((q), (i))))
 
 /* Test for presence of event must ensure that both halves have changed
  * from the null.
  */
 #define EF_VI_IS_EVENT(evp)						\
-	( (((evp)->u32[0] != (uint32_t)-1) &&				\
-	   ((evp)->u32[1] != (uint32_t)-1)) )
+	(!(CI_DWORD_IS_ALL_ONES((evp)->dword[0]) |			\
+	   CI_DWORD_IS_ALL_ONES((evp)->dword[1])))
 
 
 #define INC_ERROR_STAT(vi, name)		\
@@ -70,7 +70,7 @@
 	} while (0)
 
 
-ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_qword* ev,
+ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 					  ef_event** evs, int* evs_len,
 					  int q_label, int desc_i)
 {
@@ -145,7 +145,7 @@ static void falcon_rx_no_desc_trunc(ef_event** evs, int* evs_len, int q_label)
 }
 
 
-static void falcon_rx_unexpected(ef_vi* vi, const ef_vi_qword* ev,
+static void falcon_rx_unexpected(ef_vi* vi, const ef_vi_event* ev,
 				 ef_event** evs, int* evs_len,
 				 int q_label, int desc_i)
 {
@@ -173,7 +173,7 @@ static void falcon_rx_unexpected(ef_vi* vi, const ef_vi_qword* ev,
 }
 
 
-ef_vi_inline void falcon_rx_event(ef_vi* evq_vi, const ef_vi_qword* ev,
+ef_vi_inline void falcon_rx_event(ef_vi* evq_vi, const ef_vi_event* ev,
 				  ef_event** evs, int* evs_len)
 {
 	unsigned q_label = QWORD_GET_U(RX_EV_Q_LABEL, *ev);
@@ -183,7 +183,7 @@ ef_vi_inline void falcon_rx_event(ef_vi* evq_vi, const ef_vi_qword* ev,
 	vi = evq_vi->vi_qs[q_label];
 	if (likely(vi != NULL)) {
 		q_mask = vi->vi_rxq.mask;
-		desc_i = ev->u32[0] & q_mask;
+		desc_i = q_mask & CI_QWORD_FIELD(*ev, RX_EV_DESC_PTR);
 		if (likely(desc_i == (vi->ep_state->rxq.removed & q_mask)))
 			falcon_rx_desc_consumed(vi, ev, evs, evs_len,
 						q_label, desc_i);
@@ -198,7 +198,7 @@ ef_vi_inline void falcon_rx_event(ef_vi* evq_vi, const ef_vi_qword* ev,
 }
 
 
-ef_vi_inline void falcon_tx_event(ef_event* ev_out, const ef_vi_qword* ev)
+ef_vi_inline void falcon_tx_event(ef_event* ev_out, const ef_vi_event* ev)
 {
 	/* Danger danger!  No matter what we ask for wrt batching, we
 	** will get a batched event every 16 descriptors, and we also
@@ -209,7 +209,7 @@ ef_vi_inline void falcon_tx_event(ef_event* ev_out, const ef_vi_qword* ev)
 	** this).
 	*/
 	ev_out->tx.q_id = QWORD_GET_U(TX_EV_Q_LABEL, *ev);
-	ev_out->tx.desc_id = ev->u32[0] + 1;
+	ev_out->tx.desc_id = QWORD_GET_U(TX_EV_DESC_PTR, *ev) + 1;
 	if(likely( QWORD_TEST_BIT(TX_EV_COMP, *ev) )) {
 		ev_out->tx.type = EF_EVENT_TYPE_TX;
 	}
@@ -227,16 +227,21 @@ ef_vi_inline void falcon_tx_event(ef_event* ev_out, const ef_vi_qword* ev)
 }
 
 
-int ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
+int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 {
 	int evs_len_orig = evs_len;
-	ef_vi_qword *pev, ev;
+	ef_vi_event *pev, ev;
 
 	EF_VI_BUG_ON(evs == NULL);
 	EF_VI_BUG_ON(evs_len < EF_VI_EVENT_POLL_MIN_EVS);
 
+#ifdef __powerpc__
+	if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -17)) ))
+		goto overflow;
+#else
 	if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -1)) ))
 		goto overflow;
+#endif
 
 not_empty:
 	/* Read the event out of the ring, then fiddle with copied version.
@@ -244,18 +249,22 @@ not_empty:
 	 * another event being delivered by hardware.
 	 */
 	pev = EF_VI_EVENT_PTR(evq, 0);
-	ev.u64[0] = cpu_to_le64 (pev->u64[0]);
+	ev = *pev;
 	if (!EF_VI_IS_EVENT(&ev))
 		goto empty;
 
 	do {
-		evq->evq_state->evq_ptr += sizeof(ef_vi_qword);
-		pev->u64[0] = (uint64_t)(int64_t) -1;
+#ifdef __powerpc__
+		CI_SET_QWORD(*EF_VI_EVENT_PTR(evq, -16));
+#else
+		CI_SET_QWORD(*pev);
+#endif
+		evq->evq_state->evq_ptr += sizeof(ef_vi_event);
 
 		/* Ugly: Exploit the fact that event code lies in top bits
 		 * of event. */
 		EF_VI_BUG_ON(EV_CODE_LBN < 32u);
-		switch( ev.u32[1] >> (EV_CODE_LBN - 32u) ) {
+		switch( CI_QWORD_FIELD(ev, EV_CODE) ) {
 		case RX_IP_EV_DECODE:
 			falcon_rx_event(evq, &ev, &evs, &evs_len);
 			break;
@@ -274,7 +283,7 @@ not_empty:
 			break;
 
 		pev = EF_VI_EVENT_PTR(evq, 0);
-		ev.u64[0] = cpu_to_le64 (pev->u64[0]);
+		ev = *pev;
 	} while (EF_VI_IS_EVENT(&ev));
 
 	return evs_len_orig - evs_len;
@@ -288,7 +297,7 @@ not_empty:
 			 * the next slot.  Has NIC failed to write event
 			 * somehow?
 			 */
-			evq->evq_state->evq_ptr += sizeof(ef_vi_qword);
+			evq->evq_state->evq_ptr += sizeof(ef_vi_event);
 			INC_ERROR_STAT(evq, evq_gap);
 			goto not_empty;
 		}
@@ -314,10 +323,11 @@ int ef_eventq_has_many_events(ef_vi* vi, int look_ahead)
 }
 
 
-void ef_eventq_prime(ef_vi* vi)
+void falcon_ef_eventq_prime(ef_vi* vi)
 {
 	unsigned ring_i = (ef_eventq_current(vi) & vi->evq_mask) / 8;
 	writel(ring_i << FRF_AZ_EVQ_RPTR_LBN, vi->evq_prime);
+	mmiowb();
 }
 
 

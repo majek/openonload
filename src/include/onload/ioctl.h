@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -89,6 +89,7 @@ enum {
 #define OO_IOC_CLONE_FD         OO_IOC_RW(CLONE_FD, ci_clone_fd_t)
   OO_OP_KILL_SELF_SIGPIPE,      /*< Send a signal to self */
 #define OO_IOC_KILL_SELF_SIGPIPE    OO_IOC_NONE(KILL_SELF_SIGPIPE)
+
   OO_OP_IOCTL_TRAMP_REG,       /*< Register tramp handler;
                               ci_tramp_reg_args_t in */
 #define OO_IOC_IOCTL_TRAMP_REG  OO_IOC_W(IOCTL_TRAMP_REG, ci_tramp_reg_args_t)
@@ -154,6 +155,9 @@ enum {
   OO_OP_STACK_ATTACH,
 #define OO_IOC_STACK_ATTACH         OO_IOC_RW(STACK_ATTACH, \
                                               oo_stack_attach_t)
+  OO_OP_INSTALL_STACK_BY_ID,
+#define OO_IOC_INSTALL_STACK_BY_ID  OO_IOC_W(INSTALL_STACK_BY_ID, ci_uint32)
+
   OO_OP_SOCK_ATTACH,
 #define OO_IOC_SOCK_ATTACH          OO_IOC_RW(SOCK_ATTACH, \
                                               oo_sock_attach_t)

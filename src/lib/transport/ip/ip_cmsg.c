@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -99,7 +99,7 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
   ci_uint32 addr;
   int hwport;
 
-  addr = oo_ip_hdr(pkt)->ip_daddr_be32;
+  addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
   info.ipi_addr.s_addr = addr;
 
   /* Set the ifindex the pkt was received at. */
@@ -136,7 +136,7 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
 ci_inline void ip_cmsg_recv_ttl(const ci_ip_pkt_fmt *pkt, 
                                 struct cmsg_state *cmsg_state)
 {
-  int ttl = oo_ip_hdr(pkt)->ip_ttl;
+  int ttl = oo_ip_hdr_const(pkt)->ip_ttl;
 
   ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_TTL, sizeof(ttl), &ttl);
 }
@@ -147,7 +147,7 @@ ci_inline void ip_cmsg_recv_ttl(const ci_ip_pkt_fmt *pkt,
 ci_inline void ip_cmsg_recv_tos(const ci_ip_pkt_fmt *pkt, 
                                 struct cmsg_state *cmsg_state)
 {
-  int tos = oo_ip_hdr(pkt)->ip_tos;
+  int tos = oo_ip_hdr_const(pkt)->ip_tos;
 
   ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_TOS, sizeof(tos), &tos);
 }
@@ -155,13 +155,13 @@ ci_inline void ip_cmsg_recv_tos(const ci_ip_pkt_fmt *pkt,
 /**
  * Put a SO_TIMESTAMP control message into msg ancillary data buffer.
  */
-ci_inline void ip_cmsg_recv_timestamp(ci_netif *ni, const ci_ip_pkt_fmt *pkt, 
+void ip_cmsg_recv_timestamp(ci_netif *ni, ci_uint64 timestamp, 
                                       struct cmsg_state *cmsg_state)
 {
   struct timespec ts;
   struct timeval tv;
 
-  ci_udp_compute_stamp(ni, pkt->pf.udp.rx_stamp, &ts);
+  ci_udp_compute_stamp(ni, timestamp, &ts);
   tv.tv_sec = ts.tv_sec;
   tv.tv_usec = ts.tv_nsec / 1000;
 
@@ -171,12 +171,12 @@ ci_inline void ip_cmsg_recv_timestamp(ci_netif *ni, const ci_ip_pkt_fmt *pkt,
 /**
  * Put a SO_TIMESTAMPNS control message into msg ancillary data buffer.
  */
-ci_inline void ip_cmsg_recv_timestampns(ci_netif *ni, const ci_ip_pkt_fmt *pkt, 
+void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp, 
                                         struct cmsg_state *cmsg_state)
 {
   struct timespec ts;
 
-  ci_udp_compute_stamp(ni, pkt->pf.udp.rx_stamp, &ts);
+  ci_udp_compute_stamp(ni, timestamp, &ts);
 
   ci_put_cmsg(cmsg_state, SOL_SOCKET, SO_TIMESTAMPNS, sizeof(ts), &ts);
 }
@@ -211,10 +211,10 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
     ip_cmsg_recv_tos(pkt, &cmsg_state);
 
   if( flags & CI_IP_CMSG_TIMESTAMP )
-    ip_cmsg_recv_timestamp(ni, pkt, &cmsg_state);
+    ip_cmsg_recv_timestamp(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
 
   if( flags & CI_IP_CMSG_TIMESTAMPNS )
-    ip_cmsg_recv_timestampns(ni, pkt, &cmsg_state);
+    ip_cmsg_recv_timestampns(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
 
   msg->msg_controllen = cmsg_state.cmsg_bytes_used;
 }

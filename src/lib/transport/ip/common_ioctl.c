@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,14 +52,14 @@ int ci_cmn_ioctl(ci_netif* netif, ci_sock_cmn* s, int request,
   case SIOCGPGRP:
     /* get the process ID/group that is receiving signals for this fd */
     if( !CI_IOCTL_ARG_OK(int, arg) )
-      goto fail_inval;  /* ?? fail_fault */
+      goto fail_fault;
     CI_IOCTL_SETARG( ((int*)arg), s->b.sigown);
     break;
 
   case SIOCSPGRP:
     /* set the process ID/group that is receiving signals for this fd */
     if( !CI_IOCTL_ARG_OK(int, arg) )
-      goto fail_inval;  /* fail_efault */
+      goto fail_fault;
     s->b.sigown = CI_IOCTL_GETARG(int,arg);
     if( s->b.sigown && (s->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
       ci_bit_set(&s->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
@@ -71,7 +71,7 @@ int ci_cmn_ioctl(ci_netif* netif, ci_sock_cmn* s, int request,
 
   default:
     if (!os_socket_exists)
-      RET_WITH_ERRNO(EINVAL);
+      RET_WITH_ERRNO(ENOTTY);
     /* Assumes that errno is unchanged from the OS call, or that [os_rc] == 0 */
     return os_rc;
   }
@@ -79,9 +79,9 @@ int ci_cmn_ioctl(ci_netif* netif, ci_sock_cmn* s, int request,
   /* Successful conclusion */
   return 0;
 
- fail_inval:
+ fail_fault:
   LOG_SC( ci_log("%s: "NS_FMT" req %d/%#x arg %ld/%#lx unhandled (EINVAL)", 
 		 __FUNCTION__, NS_PRI_ARGS(netif, s),
 		 request, request, (long)arg, (long)arg));
-  RET_WITH_ERRNO(EINVAL);
+  RET_WITH_ERRNO(EFAULT);
 }

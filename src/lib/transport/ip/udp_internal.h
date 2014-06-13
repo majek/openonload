@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,12 @@
 #define OO_UDP_RX_PER_PKT_OVERHEAD  350
 
 
+# define RECVQ_DEPTH(us, payload)                                       \
+  ((payload) + ci_udp_recv_q_bytes(&(us)->recv_q) +                     \
+   ci_udp_recv_q_pkts(&(us)->recv_q) * OO_UDP_RX_PER_PKT_OVERHEAD)
+# define WILL_OVERFLOW_RECVQ(us, depth) ((depth) > (us)->s.so.rcvbuf)
+
+
 struct ci_udp_rx_deliver_state {
   ci_netif*      ni;
   ci_ip_pkt_fmt* pkt;
@@ -49,12 +55,13 @@ ci_mcast_ipcache_set_mac(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
                          unsigned daddr_be32)
 {
   char *dhost = ci_ip_cache_ether_dhost(ipcache);
+  unsigned daddr = CI_BSWAP_BE32(daddr);
   dhost[0] = 1;
   dhost[1] = 0;
   dhost[2] = 0x5e;
-  dhost[3] = (daddr_be32 >> 8) & 0x7f;
-  dhost[4] = (daddr_be32 >> 16) & 0xff;
-  dhost[5] = (daddr_be32 >> 24) & 0xff;
+  dhost[3] = (daddr >> 16) & 0x7f;
+  dhost[4] = (daddr >>  8) & 0xff;
+  dhost[5] =  daddr        & 0xff;
   cicp_mac_set_mostly_valid(CICP_MIBS(CICP_HANDLE(ni))->user.mac_utable,
                             &ipcache->mac_integrity);
 }

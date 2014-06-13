@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,6 +84,13 @@ typedef long long           int64_t;
 #else
 # error Unknown compiler
 #endif
+
+#if defined(__powerpc64__) || defined(__powerpc__)
+# define EF_VI_DMA_ALIGN  128
+#else
+# define EF_VI_DMA_ALIGN  64
+#endif
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -281,16 +288,21 @@ enum ef_vi_flags {
 	EF_VI_TX_FILTER_MASK_2  = 0x2000,             /* Siena only */
 	EF_VI_TX_FILTER_MASK_3  = (0x1000 | 0x2000),  /* Siena only */
 	EF_VI_TX_PUSH_DISABLE   = 0x4000,
+	EF_VI_TX_PUSH_ALWAYS    = 0x8000,             /* ef10 only */
 };
 
 typedef struct {
+	uint32_t  previous;
 	uint32_t  added;
 	uint32_t  removed;
 } ef_vi_txq_state;
 
 typedef struct {
+	uint32_t  prev_added;
 	uint32_t  added;
 	uint32_t  removed;
+	uint32_t  in_jumbo;                           /* ef10 only */
+	uint32_t  bytes_acc;                          /* ef10 only */
 } ef_vi_rxq_state;
 
 typedef struct {
@@ -323,13 +335,23 @@ typedef struct {
 
 enum ef_vi_arch {
 	EF_VI_ARCH_FALCON,
+	EF_VI_ARCH_EF10,
+};
+
+enum ef_vi_nic_flags {
+	EF_VI_NIC_FLAG_BUG35388_WORKAROUND = 0x1,
 };
 
 struct ef_vi_nic_type {
 	unsigned char  arch;
 	char           variant;
 	unsigned char  revision;
+	unsigned char  flags;
 };
+
+
+struct ef_pio;
+
 
 /*! \i_ef_vi  A virtual interface.
 **
@@ -342,10 +364,15 @@ typedef struct ef_vi {
 	unsigned                      vi_resource_id;
 	unsigned                      vi_i;
 
+	unsigned                      rx_buffer_len;
+	unsigned                      rx_prefix_len;
+
 	char*				vi_mem_mmap_ptr;
 	int                           vi_mem_mmap_bytes;
 	char*				vi_io_mmap_ptr;
 	int                           vi_io_mmap_bytes;
+
+	struct ef_pio*                linked_pio;
 
 	ef_eventq_state*              evq_state;
 	char*                         evq_base;
@@ -364,6 +391,26 @@ typedef struct ef_vi {
 	int                           vi_qs_n;
 
 	struct ef_vi_nic_type	      nic_type;
+
+	struct ops {
+		int (*transmit)(struct ef_vi*, ef_addr base, int len,
+				ef_request_id);
+		int (*transmitv)(struct ef_vi*, const ef_iovec*, int iov_len,
+				 ef_request_id);
+		int (*transmitv_init)(struct ef_vi*, const ef_iovec*,
+				      int iov_len, ef_request_id);
+		void (*transmit_push)(struct ef_vi*);
+		int (*transmit_pio)(struct ef_vi*, ef_addr offset, int len,
+				    ef_request_id dma_id);
+		int (*receive_init)(struct ef_vi*, ef_addr, ef_request_id);
+		void (*receive_push)(struct ef_vi*);
+		int (*eventq_poll)(struct ef_vi*, ef_event*, int evs_len);
+		void (*eventq_prime)(struct ef_vi*);
+		void (*eventq_timer_prime)(struct ef_vi*, unsigned v);
+		void (*eventq_timer_run)(struct ef_vi*, unsigned v);
+		void (*eventq_timer_clear)(struct ef_vi*);
+		void (*eventq_timer_zero)(struct ef_vi*);
+	} ops;
 } ef_vi;
 
 
@@ -372,7 +419,7 @@ typedef struct ef_vi {
  */
 struct vi_mappings {
 	uint32_t         signature;
-# define VI_MAPPING_VERSION   0x02  /*Byte: Increment me if struct altered*/
+# define VI_MAPPING_VERSION   0x05  /*Byte: Increment me if struct altered*/
 # define VI_MAPPING_SIGNATURE (0xBA1150 + VI_MAPPING_VERSION)
 
 	struct ef_vi_nic_type nic_type;
@@ -382,16 +429,20 @@ struct vi_mappings {
 	unsigned         evq_bytes;
 	char*            evq_base;
 	ef_vi_ioaddr_t   evq_timer_reg;
+
 	unsigned         timer_quantum_ns;
 
 	unsigned         rx_queue_capacity;
 	ef_vi_ioaddr_t   rx_dma_ef1;
 	char*            rx_dma_falcon;
+	char*            rx_dma_ef10;
 	ef_vi_ioaddr_t   rx_bell;
+	unsigned         rx_prefix_len;
 
 	unsigned         tx_queue_capacity;
 	ef_vi_ioaddr_t   tx_dma_ef1;
 	char*            tx_dma_falcon;
+	char*            tx_dma_ef10;
 	ef_vi_ioaddr_t   tx_bell;
 
 	ef_vi_ioaddr_t   evq_prime;
@@ -428,7 +479,8 @@ extern void ef_vi_init_mapping_vi(void* data_area, struct ef_vi_nic_type,
                                   unsigned rxq_capacity,
                                   unsigned txq_capacity, int instance,
                                   void* io_mmap, void* iobuf_mmap_rx,
-                                  void* iobuf_mmap_tx, enum ef_vi_flags);
+                                  void* iobuf_mmap_tx, enum ef_vi_flags,
+				  unsigned rx_prefix_len);
 
 
 extern void ef_vi_init_mapping_evq(void* data_area, struct ef_vi_nic_type,
@@ -460,7 +512,25 @@ ef_vi_inline enum ef_vi_flags ef_vi_flags(ef_vi* vi)
 ** When a large packet is received that is scattered over multiple packet
 ** buffers, the prefix is only present in the first buffer.
 */
-extern int ef_vi_receive_prefix_len(ef_vi* vi);
+ef_vi_inline int ef_vi_receive_prefix_len(ef_vi* vi)
+{
+	return vi->rx_prefix_len;
+}
+
+
+/*! \i_ef_vi Returns the length of a receive buffer.
+**
+** When a packet arrives that does not fit within a single receive buffer
+** it is spread over multiple buffers.
+**
+** The application should ensure that receive buffers are at least as large
+** as the value returned by this function, else there is a risk that a DMA
+** may overrun the buffer.
+*/
+ef_vi_inline int ef_vi_receive_buffer_len(ef_vi* vi)
+{
+	return vi->rx_buffer_len;
+}
 
 
 /*! \i_ef_vi Returns the amount of space in the RX descriptor ring.
@@ -492,10 +562,11 @@ ef_vi_inline int ef_vi_receive_capacity(ef_vi* vi)
 
 
 /*! \i_ef_vi  Form a receive descriptor. */
-extern int ef_vi_receive_init(ef_vi* vi, ef_addr addr, ef_request_id dma_id);
+#define ef_vi_receive_init(vi, addr, dma_id) \
+	(vi)->ops.receive_init((vi), (addr), (dma_id))
 
 /*! \i_ef_vi  Submit initialised receive descriptors to the NIC. */
-extern void ef_vi_receive_push(ef_vi* vi);
+#define ef_vi_receive_push(vi) (vi)->ops.receive_push((vi))
 
 /*! \i_ef_vi  Post a buffer on the receive queue.
 **
@@ -545,7 +616,8 @@ ef_vi_inline int ef_vi_transmit_capacity(ef_vi* vi)
 **
 **   \return -EAGAIN if the transmit queue is full, or 0 on success
 */
-extern int ef_vi_transmit(ef_vi*, ef_addr, int bytes, ef_request_id dma_id);
+#define ef_vi_transmit(vi, base, len, dma_id) \
+	(vi)->ops.transmit((vi), (base), (len), (dma_id))
 
 /*! \i_ef_vi  Transmit a packet using a gather list.
 **
@@ -554,8 +626,8 @@ extern int ef_vi_transmit(ef_vi*, ef_addr, int bytes, ef_request_id dma_id);
 **
 **   \return -EAGAIN if the queue is full, or 0 on success
 */
-extern int ef_vi_transmitv(ef_vi*, const ef_iovec* iov, int iov_len,
-                           ef_request_id dma_id);
+#define ef_vi_transmitv(vi, iov, iov_len, dma_id) \
+	(vi)->ops.transmitv((vi), (iov), (iov_len), (dma_id))
 
 /*! \i_ef_vi  Initialise a DMA request.
 **
@@ -568,15 +640,19 @@ extern int ef_vi_transmit_init(ef_vi*, ef_addr, int bytes,
 **
 ** \return -EAGAIN if the queue is full, or 0 on success
 */
-extern int ef_vi_transmitv_init(ef_vi*, const ef_iovec*, int iov_len,
-                                ef_request_id dma_id);
+#define ef_vi_transmitv_init(vi, iov, iov_len, dma_id) \
+	(vi)->ops.transmitv_init((vi), (iov), (iov_len), (dma_id))
 
 /*! \i_ef_vi  Submit DMA requests to the NIC.
 **
-** The DMA requests must have been initialised using
-** ef_vi_transmit_init() or ef_vi_transmitv_init().
-*/
-extern void ef_vi_transmit_push(ef_vi*);
+** This may be called at most once after DMA requests have been
+** initialised using ef_vi_transmit_init() or
+** ef_vi_transmitv_init(). */
+#define ef_vi_transmit_push(vi) (vi)->ops.transmit_push((vi))
+
+
+#define ef_vi_transmit_pio(vi, offset, len, dma_id) \
+	(vi)->ops.transmit_pio((vi), (offset), (len), (dma_id))
 
 
 /*! \i_ef_vi Maximum number of transmit completions per transmit event. */
@@ -605,7 +681,7 @@ extern int ef_eventq_has_event(ef_vi* vi);
 */
 extern int ef_eventq_has_many_events(ef_vi* evq, int look_ahead);
 
-extern void ef_eventq_prime(ef_vi* vi);
+#define ef_eventq_prime(vi) (vi)->ops.eventq_prime((vi))
 
 /*! \i_ef_event Retrieve event notifications from the event queue.
 **
@@ -613,7 +689,8 @@ extern void ef_eventq_prime(ef_vi* vi);
 **
 ** [evs_len] must be >= EF_VI_EVENT_POLL_MIN_EVS.
 */
-extern int ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len);
+#define ef_eventq_poll(evq, evs, evs_len) \
+	(evq)->ops.eventq_poll((evq), (evs), (evs_len))
 
 /*! \i_ef_event Returns the capacity of an event queue. */
 ef_vi_inline int ef_eventq_capacity(ef_vi* vi) 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -123,7 +123,7 @@ ci_icmp_send(ci_netif *ni, ci_ip_pkt_fmt *tx_pkt,
       + sizeof(ci_icmp_hdr) + 4 + data_len );
   tx_ip->ip_check_be16 = (ci_uint16)ci_ip_checksum(tx_ip);
   
-  tx_pkt->buf_len = tx_pkt->tx_pkt_len = 
+  tx_pkt->buf_len = tx_pkt->pay_len = 
     CI_BSWAP_BE16(tx_ip->ip_tot_len_be16) + oo_ether_hdr_size(tx_pkt);
 
   /* ?? FIXME: This will lookup the dest IP in the route table to choose
@@ -212,14 +212,12 @@ extern int __ci_icmp_send_error(ci_netif *ni,
 				   rx_ip->ip_tot_len_be16 );
       ci_icmp_hdr *icmp;
 
-      oo_pkt_layout_set(tx_pkt, CI_PKT_LAYOUT_TX_SIMPLE);
+      oo_tx_pkt_layout_init(tx_pkt);
       oo_tx_ether_type_set(tx_pkt, CI_ETHERTYPE_IP);
       icmp = (ci_icmp_hdr*) (oo_tx_ip_hdr(tx_pkt) + 1);
 
       *(ci_uint32*)&icmp[1] = 0;
-      rx_ip->ip_tot_len_be16 = CI_BSWAP_BE16(rx_ip->ip_tot_len_be16);
       memcpy( &icmp[2], rx_ip, data_len );
-      rx_ip->ip_tot_len_be16 = CI_BSWAP_BE16(rx_ip->ip_tot_len_be16);
       
       return ci_icmp_send(ni, tx_pkt,
 			  /*ip_src*/&rx_ip->ip_daddr_be32,

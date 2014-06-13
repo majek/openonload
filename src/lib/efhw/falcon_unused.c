@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -111,7 +111,7 @@ static void _falcon_nic_mbox_w(efhw_nic_t * nic, uint idx, uint val)
 	}
 
 	falcon_write_qq(handle, efhw_kva, val, FALCON_ATOMIC_DRIVER_REG);
-	ci_wiob();
+	ci_ul_iowb();
 	FALCON_LOCK_UNLOCK(nic);
 	return;
 }
@@ -265,7 +265,7 @@ static inline void _falcon_nic_interrupt_char(efhw_nic_t * nic)
 	       val);
 
 	falcon_write_qq(handle, offset, val, FALCON_ATOMIC_INT_EN_REG);
-	ci_wiob();
+	ci_ul_iowb();
 	FALCON_LOCK_UNLOCK(nic);
 }
 
@@ -295,7 +295,7 @@ static inline void _falcon_nic_interrupt_net(efhw_nic_t * nic)
 	       val);
 
 	falcon_write_qq(handle, offset, val, FALCON_ATOMIC_INT_EN_REG);
-	ci_wiob();
+	ci_ul_iowb();
 	FALCON_LOCK_UNLOCK(nic);
 }
 
@@ -356,7 +356,7 @@ falcon_mac_wrapper_gmii_rw(int mac_1G, ci_iohandle_t handle,
 		ci_put32(handle, efhw_kva + MD_PHY_ADR_REG_OFST, phy_addr);
 
 	FALCON_MAC_WRAPPER_PAD(handle, efhw_kva + MD_PHY_ADR_REG_OFST);
-	ci_wiob();
+	ci_ul_iowb();
 
 #if FALCON_PHY_ADDR_FIXED
 	/* TODO - board with latest modification (8/24/05) */
@@ -371,18 +371,18 @@ falcon_mac_wrapper_gmii_rw(int mac_1G, ci_iohandle_t handle,
 
 	ci_put32(handle, efhw_kva + MD_ID_REG_OFST, reg);
 	FALCON_MAC_WRAPPER_PAD(handle, efhw_kva + MD_ID_REG_OFST);
-	ci_wiob();
+	ci_ul_iowb();
 
 	if (wr) {
 		ci_put32(handle, efhw_kva + MD_TXD_REG_OFST, dat);
 		FALCON_MAC_WRAPPER_PAD(handle, efhw_kva + MD_TXD_REG_OFST);
-		ci_wiob();
+		ci_ul_iowb();
 
 		cs |= (1 << MD_WRC_LBN);
 
 		ci_put32(handle, efhw_kva + MD_CS_REG_OFST, cs);
 		FALCON_MAC_WRAPPER_PAD(handle, efhw_kva + MD_CS_REG_OFST);
-		ci_wiob();
+		ci_ul_iowb();
 	} else {
 		if (mac_1G)
 			cs |= (1 << MD_RIC_LBN);
@@ -391,7 +391,7 @@ falcon_mac_wrapper_gmii_rw(int mac_1G, ci_iohandle_t handle,
 
 		ci_put32(handle, efhw_kva + MD_CS_REG_OFST, cs);
 		FALCON_MAC_WRAPPER_PAD(handle, efhw_kva + MD_CS_REG_OFST);
-		ci_wiob();
+		ci_ul_iowb();
 	}
 	for (i = 0; i < 1000; i++) {
 
@@ -414,7 +414,7 @@ falcon_mac_wrapper_gmii_rw(int mac_1G, ci_iohandle_t handle,
 
 		ci_put32(handle, efhw_kva + MD_CS_REG_OFST, cs);
 		FALCON_MAC_WRAPPER_PAD(handle, efhw_kva + MD_CS_REG_OFST);
-		ci_wiob();
+		ci_ul_iowb();
 		return -ENODATA;
 	}
 
@@ -473,7 +473,7 @@ falcon_mac_wrapper_stats(int mac_1G, ci_iohandle_t handle,
 	/* Request DMA of statistics */
 	ci_put64(handle, efhw_kva, cmd);
 	ci_put64(handle, efhw_kva + 8, FALCON_ATOMIC_MAC_STAT_REG);
-	ci_wiob();
+	ci_ul_iowb();
 	return 0;
 }
 

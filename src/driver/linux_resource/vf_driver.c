@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,7 +51,6 @@
 
 #include <ci/efrm/config.h>
 
-#ifdef CONFIG_SFC_RESOURCE_VF
 
 #include <linux/init.h>
 #include "linux_resource_internal.h"
@@ -62,6 +61,9 @@
 #endif
 
 #include <ci/efrm/nic_table.h>
+
+#ifdef CONFIG_SFC_RESOURCE_VF
+
 #include <ci/efhw/iopage.h>
 #include <ci/efrm/vi_resource_private.h>
 #include <ci/efrm/vf_resource_private.h>
@@ -69,7 +71,11 @@
 #define EFX_USE_KCOMPAT
 #include <driver/linux_net/efx.h> /* for various definitions */
 #include "vfdi.h"
+#if EFX_DRIVERLINK_API_VERSION >= 9
+#include <driver/linux_net/farch_regs.h> /* for FR_CZ_USR_EV */
+#else
 #include <driver/linux_net/regs.h> /* for FR_CZ_USR_EV */
+#endif
 #define EFX_IRQ_MOD_RESOLUTION 5
 #include "kernel_compat.h"
 
@@ -78,9 +84,14 @@
 #endif
 
 
+struct dma_page {
+	void *mem;
+	dma_addr_t dma_addr;
+};
+
 struct vf_init_status {
-	struct efhw_iopage req;
-	struct efhw_iopage status;
+	struct dma_page req;
+	struct dma_page status;
 	unsigned int req_seq;
 	char *bar;
 	struct efrm_vf *vf;
@@ -89,16 +100,8 @@ struct vf_init_status {
 
 extern int claim_vf;
 
-static int use_threaded_irq = 2;
-module_param(use_threaded_irq, int, S_IRUGO);
-MODULE_PARM_DESC(use_threaded_irq,
-"Use threaded IRQ for PCI virtual functions.  It is necessary when "
-"AMD IOMMU is in use, but threaded IRQs are bad for latency.  "
-"Set this to 2(default) to get this detected automatically.");
-/* efrm_vf_use_threaded_irq =
- *       use_threaded_irq==2 ? autodetect() : use_threaded_irq */
-int efrm_vf_use_threaded_irq = -1;
-EXPORT_SYMBOL(efrm_vf_use_threaded_irq);
+int efrm_vf_avoid_atomic_allocations = 0;
+EXPORT_SYMBOL(efrm_vf_avoid_atomic_allocations);
 
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 #define IOMMU_TYPE_UNKNOWN 0
@@ -273,7 +276,7 @@ fail:
  *********************************************************************/
 static int vf_vfdi_req(struct vf_init_status *vf_ini)
 {
-	struct vfdi_req *req = vf_ini->req.kva;
+	struct vfdi_req *req = vf_ini->req.mem;
 	unsigned int op = req->op;
 	unsigned data, type;
 	efx_dword_t dword;
@@ -331,7 +334,7 @@ static int vf_vfdi_req(struct vf_init_status *vf_ini)
 /* Read the status page in an atomic fashion */
 static int vf_refresh_status(struct vf_init_status *vf_ini)
 {
-	struct vfdi_status *status = vf_ini->status.kva;
+	struct vfdi_status *status = vf_ini->status.mem;
 	struct efrm_vf *vf = vf_ini->vf;
 	u32 generation_start, generation_end;
 	unsigned int retry;
@@ -378,7 +381,7 @@ done:
 
 static void vf_fini_status(struct vf_init_status *vf_ini)
 {
-	struct vfdi_req *req = vf_ini->req.kva;
+	struct vfdi_req *req = vf_ini->req.mem;
 	req->op = VFDI_OP_CLEAR_STATUS_PAGE;
 	vf_vfdi_req(vf_ini);
 }
@@ -386,7 +389,7 @@ static void vf_fini_status(struct vf_init_status *vf_ini)
 static int vf_init_status(struct vf_init_status *vf_ini)
 {
 	struct efrm_vf *vf = vf_ini->vf;
-	struct vfdi_req *req = vf_ini->req.kva;
+	struct vfdi_req *req = vf_ini->req.mem;
 	int rc;
 
 	req->op = VFDI_OP_SET_STATUS_PAGE;
@@ -425,7 +428,7 @@ fail1:
 
 static int vf_alloc_page(struct vf_init_status *vf_ini,
                          const char *type,
-                         struct efhw_iopage *map)
+			 struct dma_page *map)
 {
 	struct pci_dev *pci_dev = vf_ini->vf->pci_dev;
 	int rc = 0;
@@ -438,10 +441,10 @@ static int vf_alloc_page(struct vf_init_status *vf_ini,
 				 pci_name(pci_dev), __func__, type);
 			return -ENOMEM;
 		}
-		map->kva = page_address(page);
+		map->mem = page_address(page);
 		map->dma_addr = efrm_vf_alloc_ioaddrs(vf, 1, NULL);
 		rc = iommu_map(vf->iommu_domain, map->dma_addr,
-			       page_to_phys(page), 0,
+			       page_to_phys(page), PAGE_SIZE,
 			       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
 		if (rc) {
 			EFRM_ERR("%s %s: failed IOMMU mapping VFDI %s page: %d",
@@ -452,9 +455,9 @@ static int vf_alloc_page(struct vf_init_status *vf_ini,
 	} else
 #endif
 	{
-		map->kva = pci_alloc_consistent(pci_dev, PAGE_SIZE,
+		map->mem = pci_alloc_consistent(pci_dev, PAGE_SIZE,
 						&map->dma_addr);
-		if (map->kva == NULL) {
+		if (map->mem == NULL) {
 			EFRM_ERR("%s %s: failed allocate VFDI %s page: %d",
 				 pci_name(pci_dev), __func__, type, rc);
 			return -ENOMEM;
@@ -465,7 +468,7 @@ static int vf_alloc_page(struct vf_init_status *vf_ini,
 
 
 static void vf_free_page(struct vf_init_status *vf_ini,
-                         struct efhw_iopage *map)
+				   struct dma_page *map)
 {
 	struct pci_dev *pci_dev = vf_ini->vf->pci_dev;
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
@@ -473,13 +476,13 @@ static void vf_free_page(struct vf_init_status *vf_ini,
 		int rc;
 		mutex_lock(&efrm_iommu_mutex);
 		rc = iommu_unmap(vf_ini->vf->iommu_domain,
-				 map->dma_addr, 0);
+				 map->dma_addr, PAGE_SIZE);
 		mutex_unlock(&efrm_iommu_mutex);
-		EFRM_ASSERT(rc == 0);
-		free_page((unsigned long)map->kva);
+		EFRM_ASSERT(rc == PAGE_SIZE);
+		free_page((unsigned long)map->mem);
 	} else
 #endif
-	pci_free_consistent(pci_dev, PAGE_SIZE, map->kva, map->dma_addr);
+	pci_free_consistent(pci_dev, PAGE_SIZE, map->mem, map->dma_addr);
 }
 
 
@@ -535,30 +538,6 @@ static int find_iommu_type(struct pci_dev *pci_dev)
 		       pci_name(pci_dev));
 	return IOMMU_TYPE_UNKNOWN;
 }
-
-/* Returns the value for efrm_vf_use_threaded_irq. */
-static int check_threaded_irq(struct pci_dev *pci_dev)
-{
-	if (use_threaded_irq == 1)
-		return 1;
-
-	if (!iommu_present(pci_dev->dev.bus))
-		return 0;
-
-	EFRM_ASSERT(iommu_type != IOMMU_TYPE_UNKNOWN);
-	if (iommu_type != IOMMU_TYPE_AMD)
-		return 0;
-
-	/* We see IOMMU used and AMD IOMMU present.  Non-threaded IRQ
-	 * will not work properly. */
-	if (use_threaded_irq == 2)
-		return 1;
-
-	EFRM_WARN("Forcing non-threaded IRQ despite AMD IOMMU "
-		  "presence.  If unsure, use use_threaded_irq=2 "
-		  "module parameter for %s.", THIS_MODULE->name);
-	return 0;
-}
 #endif
 
 
@@ -590,21 +569,13 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 		if (!may_rebind_vf)
 			return -ENODEV;
 
+		if (iommu_type == IOMMU_TYPE_AMD)
+			efrm_vf_avoid_atomic_allocations = 1;
 	}
 	else
 #endif
 		EFRM_WARN_ONCE("Using VFs (e.g. %s) but without "
 			       "IOMMU protection", pci_name(pci_dev));
-
-	/* AMD IOMMU hack: init efrm_vf_use_threaded_irq */
-	if (efrm_vf_use_threaded_irq == -1) {
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-		efrm_vf_use_threaded_irq = check_threaded_irq(pci_dev);
-#else
-		efrm_vf_use_threaded_irq =
-			use_threaded_irq == 2 ? 0 : use_threaded_irq;
-#endif
-	}
 
 
 	vf = kzalloc(sizeof(*vf), GFP_KERNEL);
@@ -1005,35 +976,7 @@ out1:
 }
 
 
-#if defined(CONFIG_KALLSYMS) && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-
-/* Fixme: export efrm_find_ksym and use it in onload module */
-#include <linux/kallsyms.h>
-struct efrm_ksym_name {
-	const char *name;
-	void *addr;
-};
-static int efrm_check_ksym(void *data, const char *name, struct module *mod,
-			  unsigned long addr)
-{
-	struct efrm_ksym_name *t = data;
-	if( strcmp(t->name, name) == 0 ) {
-		t->addr = (void *)addr;
-		return 1;
-	}
-	return 0;
-}
-static void *efrm_find_ksym(const char *name)
-{
-	struct efrm_ksym_name t;
-        
-	t.name = name;
-	t.addr = NULL;
-	kallsyms_on_each_symbol(efrm_check_ksym, &t);
-	if (t.addr == NULL)
-		EFRM_ERR("%s: Can't find symbol %s", __func__, t.name);
-	return t.addr;
-}
+#ifdef EFRM_HAS_FIND_KSYM
 
 int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu)
 {
@@ -1186,26 +1129,9 @@ static irqreturn_t vf_vi_interrupt(int irq, void *dev_id
 	)
 {
 	struct efrm_vf_vi *vi = dev_id;
-	if (efrm_vf_use_threaded_irq)
-#ifdef EXF_HAVE_THREADED_IRQ
-		vf_vi_call_evq_callback(vi);
-#else
-		queue_work(vi->threaded_irq.irq_wq,
-			   &vi->threaded_irq.irq_work);
-#endif
-	else
-		tasklet_schedule(&vi->tasklet);
+	tasklet_schedule(&vi->tasklet);
 	return IRQ_HANDLED;
 }
-
-#ifndef EXF_HAVE_THREADED_IRQ
-static void ef_vi_irq_work(struct work_struct *data)
-{
-	struct efrm_vf_vi *vi = container_of(data, struct efrm_vf_vi,
-					     threaded_irq.irq_work);
-	vf_vi_call_evq_callback(vi);
-}
-#endif
 
 /* When eventq callback was registered, enable interrupts */
 int efrm_vf_eventq_callback_registered(struct efrm_vi *virs)
@@ -1220,24 +1146,9 @@ int efrm_vf_eventq_callback_registered(struct efrm_vi *virs)
 	EFRM_ASSERT(vi->virs == virs);
 
 	/* Enable interrupts */
-	if (efrm_vf_use_threaded_irq) {
-#ifdef EXF_HAVE_THREADED_IRQ
-		rc = request_threaded_irq(vi->irq, NULL, vf_vi_interrupt,
-					  IRQF_SAMPLE_RANDOM, vi->name, vi);
-#else
-		INIT_WORK(&vi->threaded_irq.irq_work, ef_vi_irq_work);
-		vi->threaded_irq.irq_wq =
-			create_singlethread_workqueue(vi->name);
-		rc = request_irq(vi->irq, vf_vi_interrupt,
-				 IRQF_SAMPLE_RANDOM, vi->name, vi);
-#endif
-	}
-	else {
-		tasklet_init(&vi->tasklet, &efrm_vf_tasklet,
-			     (unsigned long)vi);
-		rc = request_irq(vi->irq, vf_vi_interrupt,
-				 IRQF_SAMPLE_RANDOM, vi->name, vi);
-	}
+	tasklet_init(&vi->tasklet, &efrm_vf_tasklet, (unsigned long)vi);
+	rc = request_irq(vi->irq, vf_vi_interrupt,
+			 IRQF_SAMPLE_RANDOM, vi->name, vi);
 	if (rc) {
 		EFRM_ERR("%s: failed to request IRQ %d for VI %d",
 			 pci_name(vf->pci_dev), vi->irq, vi->index);
@@ -1264,12 +1175,7 @@ void efrm_vf_eventq_callback_kill(struct efrm_vi *virs)
 	irq_set_affinity_hint(vi->irq, NULL);
 #endif
 	free_irq(vi->irq, vi);
-#ifndef EXF_HAVE_THREADED_IRQ
-	if (efrm_vf_use_threaded_irq)
-		destroy_workqueue(vi->threaded_irq.irq_wq);
-	else
-#endif
-		tasklet_kill(&vi->tasklet);
+	tasklet_kill(&vi->tasklet);
 	vi->virs->evq_callback_fn = NULL;
 }
 
@@ -1299,3 +1205,36 @@ void efrm_vf_driver_fini(void)
 }
 
 #endif /* CONFIG_SFC_RESOURCE_VF */
+
+#ifdef EFRM_HAS_FIND_KSYM
+
+struct efrm_ksym_name {
+	const char *name;
+	void *addr;
+};
+static int efrm_check_ksym(void *data, const char *name, struct module *mod,
+			  unsigned long addr)
+{
+	struct efrm_ksym_name *t = data;
+	if( strcmp(t->name, name) == 0 ) {
+		t->addr = (void *)addr;
+		return 1;
+	}
+	return 0;
+}
+void *efrm_find_ksym(const char *name)
+{
+	struct efrm_ksym_name t;
+        
+	t.name = name;
+	t.addr = NULL;
+	kallsyms_on_each_symbol(efrm_check_ksym, &t);
+	if (t.addr == NULL)
+		EFRM_ERR("%s: Can't find symbol %s", __func__, t.name);
+	return t.addr;
+}
+EXPORT_SYMBOL(efrm_find_ksym);
+
+#endif  /* EFRM_HAS_FIND_KSYM */
+
+

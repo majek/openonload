@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,11 +45,9 @@
 
 #include <ci/efrm/nic_table.h>
 #include <ci/driver/efab/hardware.h>
-#include <ci/efhw/falcon.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_set.h>
-#include <ci/efrm/buffer_table.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/pd.h>
 #include "efrm_internal.h"
@@ -67,6 +65,12 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 	struct efrm_nic *efrm_nic;
 	int rc;
 
+	if (min_n_vis > 64) {
+		EFRM_ERR("%s: ERROR: set size=%d too big (max=64)",
+			 __FUNCTION__, min_n_vis);
+		return -EINVAL;
+	}
+
 	if ((vi_set = kmalloc(sizeof(*vi_set), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
 
@@ -80,6 +84,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int min_n_vis,
 		efrm_client_add_resource(client, &vi_set->rs);
 		vi_set->pd = pd;
 		efrm_resource_ref(efrm_pd_to_resource(pd));
+		vi_set->free = (1 << (1 << vi_set->allocation.order)) - 1;
 		*vi_set_out = vi_set;
 	}
 	return rc;
@@ -92,6 +97,7 @@ void efrm_vi_set_release(struct efrm_vi_set *vi_set)
 	if (__efrm_resource_release(&vi_set->rs))
 		efrm_vi_set_free(vi_set);
 }
+EXPORT_SYMBOL(efrm_vi_set_release);
 
 
 void efrm_vi_set_free(struct efrm_vi_set *vi_set)
@@ -102,6 +108,7 @@ void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 	efrm_vi_allocator_free_set(efrm_nic, &vi_set->allocation);
 	efrm_pd_release(vi_set->pd);
 	efrm_client_put(vi_set->rs.rs_client);
+	EFRM_ASSERT(vi_set->free == (1 << (1 << vi_set->allocation.order)) - 1);
 	kfree(vi_set);
 }
 
@@ -111,6 +118,13 @@ int efrm_vi_set_num_vis(struct efrm_vi_set *vi_set)
 	return 1 << vi_set->allocation.order;
 }
 EXPORT_SYMBOL(efrm_vi_set_num_vis);
+
+
+int efrm_vi_set_get_base(struct efrm_vi_set *vi_set)
+{
+	return vi_set->allocation.instance;
+}
+EXPORT_SYMBOL(efrm_vi_set_get_base);
 
 
 struct efrm_resource * efrm_vi_set_to_resource(struct efrm_vi_set *vi_set)

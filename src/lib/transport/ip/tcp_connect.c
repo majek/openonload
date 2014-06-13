@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -260,23 +260,24 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts,
    * Note, even these values are speculative since the real MTU
    * could change between now and passing the packet to the lower layers
    */
-  ts->amss = ts->s.pkt.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
+  ts->amss = CI_MIN(ts->s.so.rcvbuf,
+                    ts->s.pkt.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr));
 #if CI_CFG_LIMIT_AMSS
-  ts->amss = ci_tcp_limit_mss(ts->amss, ni->state, __FUNCTION__);
+  ts->amss = ci_tcp_limit_mss(ts->amss, ni, __FUNCTION__);
 #endif
 
   /* Default smss until discovered by MSS option in SYN - RFC1122 4.2.2.6 */
   ts->smss = 536;
 
   /* set pmtu, eff_mss, snd_buf and adjust windows */
-  ci_pmtu_set(ni, &ts->s.pkt.pmtus, ts->s.pkt.mtu);
+  ci_pmtu_set(ni, &ts->pmtus, ts->s.pkt.mtu);
   ci_tcp_set_eff_mss(ni, ts);
   ci_tcp_set_initialcwnd(ni, ts);
 
   /* Send buffer adjusted by ci_tcp_set_eff_mss(), but we want it to stay
    * zero until the connection is established.
    */
-  ts->send_max = 0;
+  ts->so_sndbuf_pkts = 0;
 
   /* 
    * 3. State and address are OK. It's address routed through our NIC.
@@ -908,6 +909,9 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   if (c->tcpflags & CI_TCPT_FLAG_WAS_ESTAB)
     RET_WITH_ERRNO( EINVAL );
 
+  if( my_addr->sa_family != s->domain )
+    RET_WITH_ERRNO( s->domain == PF_INET ? EAFNOSUPPORT : EINVAL );
+
   /* Bug 4884: Windows regularly uses addrlen > sizeof(struct sockaddr_in) 
    * Linux is also relaxed about overlength data areas. */
   if (s->domain == PF_INET && addrlen < sizeof(struct sockaddr_in))
@@ -1091,7 +1095,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
 #endif
   if ( rc < 0 ) {
     /* clear the filter we've just set */
-    ci_tcp_ep_clear_filters(netif, S_SP(tls), 0);
+    ci_tcp_ep_clear_filters(netif, S_SP(tls));
     goto listen_fail;
   }
   return 0;
@@ -1125,7 +1129,7 @@ static int ci_tcp_shutdown_listen(citp_socket* ep, int how, ci_fd_t fd)
     ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
     int flags = ci_sys_fcntl(os_sock, F_GETFL);
     flags &= (~O_NONBLOCK);
-    ci_sys_fcntl(os_sock, F_SETFL, flags); 
+    CI_TRY(ci_sys_fcntl(os_sock, F_SETFL, flags));
     ci_rel_os_sock_fd(os_sock);
   }
   ci_netif_unlock(ep->netif);
@@ -1137,18 +1141,43 @@ static int ci_tcp_shutdown_listen(citp_socket* ep, int how, ci_fd_t fd)
 /* NOTE: in the kernel version [fd] is assumed to be unused */
 int ci_tcp_shutdown(citp_socket* ep, int how, ci_fd_t fd)
 {
+  ci_sock_cmn* s = ep->s;
   int rc;
 
-  if( ep->s->b.state == CI_TCP_LISTEN )
+  if( s->b.state == CI_TCP_LISTEN )
     return ci_tcp_shutdown_listen(ep, how, fd);
 
-  ci_netif_lock(ep->netif);
-  /* Poll to get up-to-date.  This is slightly spurious but done to ensure
-   * ordered response to all packets preceding this FIN (e.g. ANVL tcp_core
-   * 9.18)
-   */
-  ci_netif_poll(ep->netif);
-  rc = __ci_tcp_shutdown(ep->netif, SOCK_TO_TCP(ep->s), how, 1);
+  if( ! ci_netif_trylock(ep->netif) ) {
+    /* Can't get lock, so try to defer shutdown to the lock holder. */
+    unsigned flags = 0;
+    switch( s->b.state ) {
+    case CI_TCP_CLOSED:
+    case CI_TCP_TIME_WAIT:
+      CI_SET_ERROR(rc, ENOTCONN);
+      return rc;
+    }
+    if( how == SHUT_RD || how == SHUT_RDWR )
+      flags |= CI_SOCK_AFLAG_NEED_SHUT_RD;
+    if( how == SHUT_WR || how == SHUT_RDWR )
+      flags |= CI_SOCK_AFLAG_NEED_SHUT_WR;
+    ci_atomic32_or(&s->s_aflags, flags);
+    if( ! ci_netif_lock_or_defer_work(ep->netif, &s->b) )
+      return 0;
+    ci_atomic32_and(&s->s_aflags, ~flags);
+  }
+
+  if( 0 ) {
+    /* Poll to get up-to-date.  This is slightly spurious but done to ensure
+     * ordered response to all packets preceding this FIN (e.g. ANVL tcp_core
+     * 9.18)
+     *
+     * DJR: I've disabled this because it can hurt performance for
+     * high-connection-rate apps.  May consider adding back (as option?) if
+     * needed.
+     */
+    ci_netif_poll(ep->netif);
+  }
+  rc = __ci_tcp_shutdown(ep->netif, SOCK_TO_TCP(s), how, 1);
   if( rc < 0 )
     CI_SET_ERROR(rc, -rc);
   ci_netif_unlock(ep->netif);
@@ -1221,60 +1250,6 @@ int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
   return rc;
 }
 
-
-
-/* Abort a TCP connection.  Semantics are:
- * - must be called with the netif lock held
- * - send a reset
- * - call ci_tcp_drop()  (move to closed, free resources)
- * - does not block to take any locks
- * - after returning, we guarantee that data sent on this socket will never be
- *   referenced by the stack again (i.e. it's safe to unmap zerocopy data
- *   segments)
- * Implemented for, and currently only used by, iSCSI abort.
- */
-int ci_tcp_abort(citp_socket* ep)
-{
-  int rc;
-  ci_tcp_state *ts;
-  unsigned i;
-  ci_uint32 dma_seq[CI_CFG_MAX_INTERFACES];
-  ci_boolean_t done;
-
-  CHECK_TEP(ep);
-  ts = SOCK_TO_TCP(ep->s);
-
-  /* Closing with the linger timeout set to 0 does exactly what we want. */
-  ts->s.s_flags |= CI_SOCK_FLAG_LINGER;
-  ts->s.so.linger = 0;
-  rc = ci_tcp_close(ep->netif, ts, 0);
-
-  if( rc < 0 ) {
-    CI_SET_ERROR(rc, -rc);
-    return rc;
-  }
-
-  /* We must wait for the hardware to drain the DMA queue (on all ports).
-   * We're definitely safe once the "done" sequence number reaches the current
-   * "insert" sequence number (which is just after the RST we just sent, or
-   * possibly beyond).
-   *
-   * There's no provision for blocking while waiting for this.  So we just
-   * busy-wait: these aborts should be a rare occurence.
-   */
-  for( i = 0; i < CI_CFG_MAX_INTERFACES; i++ )
-    dma_seq[i] = ep->netif->state->nic[i].tx_dmaq_insert_seq;
-
-  do {
-    done = CI_TRUE;
-    ci_netif_poll(ep->netif);
-    for( i = 0; i < CI_CFG_MAX_INTERFACES; i++ )
-      if( SEQ_LT(ep->netif->state->nic[i].tx_dmaq_done_seq, dma_seq[i]) )
-        done = CI_FALSE;
-  } while( ! done );
-
-  return 0;
-}
 
 #endif
 

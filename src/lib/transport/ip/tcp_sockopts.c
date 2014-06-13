@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -68,12 +68,11 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* info)
   /* info->tcpi_reordering = 0; */
   /* info->tcpi_last_ack_sent = 0; */
   /* info->tcpi_last_ack_recv = 0; */
-  if( cicp_ip_cache_is_valid(CICP_HANDLE(netif), &s->pkt) )
-    info->tcpi_pmtu       = s->pkt.pmtus.pmtu;
 
   if( s->b.state != CI_TCP_LISTEN ) {
     ci_tcp_state* ts = SOCK_TO_TCP(s);
 
+    info->tcpi_pmtu       = ts->pmtus.pmtu;
     info->tcpi_ca_state = sock_congstate_linux_map[ts->congstate];
     info->tcpi_retransmits = ts->retransmits;
     info->tcpi_probes = ts->ka_probes;
@@ -242,8 +241,6 @@ int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
 }
 
 
-
-
 static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
 				int optname, const void* optval,
 				socklen_t optlen )
@@ -405,6 +402,14 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
   RET_WITH_ERRNO(-rc);
 }
 
+/* We want to override kernels idea of a valid option for timestamping. */
+ci_inline int ci_tcp_validtimestampopt( int level, int optname,
+                                        socklen_t optlen )
+{
+  return ( level == SOL_SOCKET) &&
+         ( optname == SO_TIMESTAMP || optname == SO_TIMESTAMPNS ) &&
+         ( optlen >= sizeof(int) );
+}
 
 /* Setsockopt() handler called by appropriate Unix/Windows intercepts.
  * \param ep       Context
@@ -466,7 +471,8 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
     {
       rc = ci_khelper_setsockopt(ni, SC_SP(s), level, optname, __optval, optlen);
 #endif
-      if( rc < 0 )  return rc;
+      if( rc < 0 && !ci_tcp_validtimestampopt(level, optname, optlen) )
+        return rc;
     }
   }
 
@@ -504,6 +510,8 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
       goto success;
 # endif
     case TCP_NODELAY:
+      if( NI_OPTS(ni).tcp_force_nodelay )
+        goto success;
       if( *(unsigned*) optval ) {
 	ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
 

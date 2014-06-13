@@ -10,20 +10,22 @@ MMAKE_TYPE	:= LIB
 # Standalone subset for descriptor munging only.
 EFVI_SRCS	:=		\
 		pt_tx.c		\
+		pt_rx.c		\
 		falcon_event.c	\
 		vi_init.c	\
-		falcon_vi.c
+		falcon_vi.c	\
+		ef10_event.c	\
+		ef10_vi.c
 
 LIB_SRCS	:=		\
 		$(EFVI_SRCS)	\
-		resource_init.c	\
-		evtimer.c	\
+		falcon_evtimer.c	\
+		ef10_evtimer.c	\
 		logging.c
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\
 		open.c		\
-		iobuffers.c	\
 		event_q.c	\
 		event_q_put.c	\
 		pt_endpoint.c	\
@@ -31,7 +33,9 @@ LIB_SRCS	+=		\
 		vi_set.c	\
 		memreg.c	\
 		pd.c		\
-		evtimer.c
+		pio.c		\
+		falcon_evtimer.c\
+		ef10_evtimer.c
 endif
 
 

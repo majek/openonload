@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -41,7 +41,6 @@ ci_pmtu_state_init(ci_netif* ni, ci_sock_cmn *s, ci_pmtu_state_t* pmtus,
 {
   pmtus->tid.param1 = SC_SP(s);
   pmtus->tid.fn = (ci_iptime_callback_fn_t)func_code;
-  pmtus->state = CI_PMTU_DISCOVER_ENABLE;
 
   ci_pmtu_state_reinit(ni, s, pmtus);
 }
@@ -53,7 +52,6 @@ ci_pmtu_state_reinit(ci_netif* ni, ci_sock_cmn *s, ci_pmtu_state_t* pmtus)
   sp = oo_sockp_to_statep(ni, SC_SP(s));
   OO_P_ADD(sp, (char*) &pmtus->tid - (char*) s);
   ci_ip_timer_init(ni, &pmtus->tid, sp, "pmtu");
-  pmtus->traffic = 0;
 }
 
 /*! Update the PMTU value for an endpoint, range limited to valid values.
@@ -79,10 +77,9 @@ extern void ci_pmtu_set(ci_netif *ni, ci_pmtu_state_t *pmtus, unsigned pmtu)
 }
 
 
-ci_inline void __ci_pmtu_timeout_handler(ci_netif* ni,
-                                         ci_ip_cached_hdrs *ipcache, int is_tcp)
+ci_inline void __ci_pmtu_timeout_handler(ci_netif* ni, ci_pmtu_state_t *pmtus,
+                                         ci_ip_cached_hdrs *ipcache)
 {
-  ci_pmtu_state_t *pmtus = &ipcache->pmtus;
   ci_assert_le(pmtus->pmtu, CI_PMTU_MAX_MTU);
   ci_assert_le(ipcache->mtu, CI_PMTU_MAX_MTU);
 
@@ -96,12 +93,12 @@ ci_inline void __ci_pmtu_timeout_handler(ci_netif* ni,
     pmtus->pmtu = ipcache->mtu;
     pmtus->plateau_id--;
     CI_PMTU_TIMER_KILL(ni, pmtus);
-    LOG_PMTU(ci_log("%s: (%s) reached interface MTU, killed timer, mtu=%d",
-                    __FUNCTION__, is_tcp ? "TCP" : "UDP", pmtus->pmtu));
+    LOG_PMTU(ci_log("%s: (TCP) reached interface MTU, killed timer, mtu=%d",
+                    __FUNCTION__, pmtus->pmtu));
   } else {
     CI_PMTU_TIMER_SET_FAST(ni, pmtus);
-    LOG_PMTU(ci_log("%s: (%s) climbed a plateau, set fast timer, mtu=%d",
-                    __FUNCTION__, is_tcp ? "TCP" : "UDP", pmtus->pmtu));
+    LOG_PMTU(ci_log("%s: (TCP) climbed a plateau, set fast timer, mtu=%d",
+                    __FUNCTION__, pmtus->pmtu));
   }
 #undef TRAFFIC_TCP
 #undef TRAFFIC_UDP
@@ -112,17 +109,8 @@ ci_inline void __ci_pmtu_timeout_handler(ci_netif* ni,
  * both TCP and UDP sockets */
 void ci_pmtu_timeout_pmtu(ci_netif* ni, ci_tcp_state *ts)
 {
-  int is_tcp = (tcp_protocol(ts) == IPPROTO_TCP);
-  __ci_pmtu_timeout_handler(ni, &ts->s.pkt, is_tcp);
-  if (is_tcp) ci_tcp_tx_change_mss(ni, ts);
-}
-
-
-/* Called when a ephemeral PMTU timer fires. Only called for ephemeral UDP
- * paths. */
-void ci_pmtu_timeout_pmtu_2(ci_netif* ni, ci_udp_state *ts)
-{
-  __ci_pmtu_timeout_handler(ni, &ts->ephemeral_pkt, 0);
+  __ci_pmtu_timeout_handler(ni, &ts->pmtus, &ts->s.pkt);
+  ci_tcp_tx_change_mss(ni, ts);
 }
 
 
@@ -130,10 +118,10 @@ void ci_pmtu_timeout_pmtu_2(ci_netif* ni, ci_udp_state *ts)
  * appropriate. The timer is set, if the pmtu value is less than
  * the outgoing interface MTU value.
  */
-void ci_pmtu_update_slow(ci_netif* ni, ci_ip_cached_hdrs *ipcache,
+void ci_pmtu_update_slow(ci_netif* ni, ci_pmtu_state_t *pmtus,
+                         ci_ip_cached_hdrs *ipcache,
                          unsigned pmtu)
 {
-  ci_pmtu_state_t *pmtus = &ipcache->pmtus;
   ci_assert_ge(pmtu, CI_CFG_TCP_MINIMUM_MSS);
   ci_assert_le(pmtu, CI_PMTU_MAX_MTU);
   ci_assert_le(pmtu, ipcache->mtu);
@@ -153,10 +141,10 @@ void ci_pmtu_update_slow(ci_netif* ni, ci_ip_cached_hdrs *ipcache,
  * appropriate. The timer is set, if the pmtu value is less than
  * the outgoing interface MTU value.
  */
-void ci_pmtu_update_fast(ci_netif* ni, ci_ip_cached_hdrs *ipcache,
+void ci_pmtu_update_fast(ci_netif* ni, ci_pmtu_state_t *pmtus,
+                         ci_ip_cached_hdrs *ipcache,
                          unsigned pmtu)
 {
-  ci_pmtu_state_t *pmtus = &ipcache->pmtus;
   ci_assert_ge(pmtu, CI_CFG_TCP_MINIMUM_MSS);
   ci_assert_le(pmtu, CI_PMTU_MAX_MTU);
   ci_assert_le(pmtu, ipcache->mtu);

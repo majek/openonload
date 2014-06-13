@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,8 +52,8 @@ int ef_onload_driver_open(ef_driver_handle* pfd, int cloexec)
     static int o_cloexec_fails = -1;
     if( cloexec && o_cloexec_fails < 0 ) {
       int arg;
-      ci_sys_fcntl(*(int *)pfd, F_GETFD, &arg);
-      if( arg & FD_CLOEXEC )
+      rc = ci_sys_fcntl(*(int *)pfd, F_GETFD, &arg);
+      if( rc == 0 && (arg & FD_CLOEXEC) )
         o_cloexec_fails = 0;
       else
         o_cloexec_fails = 1;
@@ -62,7 +62,7 @@ int ef_onload_driver_open(ef_driver_handle* pfd, int cloexec)
     static const int o_cloexec_fails = 1;
 #endif
     if( cloexec && o_cloexec_fails)
-      ci_sys_fcntl(*(int *)pfd, F_SETFD, FD_CLOEXEC);
+      CI_DEBUG_TRY(ci_sys_fcntl(*(int *)pfd, F_SETFD, FD_CLOEXEC));
     return 0;
   }
 

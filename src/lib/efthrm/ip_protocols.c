@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,6 +30,7 @@
 #include <ci/internal/ip.h>
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
+#include <onload/cplane.h>
 
 #ifndef NDEBUG
 # define __ENTRY OO_DEBUG_IPP(ci_log("-> %s", __FUNCTION__))
@@ -309,14 +310,14 @@ typedef struct {
                                                                                   
 
 static void 
-ci_ipp_pmtu_rx(ci_netif *netif, ci_ip_cached_hdrs *ipcache,
-               efab_ipp_addr* addr, ci_uint32 traffic)
+ci_ipp_pmtu_rx(ci_netif *netif, ci_pmtu_state_t *pmtus,
+               ci_ip_cached_hdrs *ipcache,
+               efab_ipp_addr* addr)
 {
   const ci_uint16 plateau[] = CI_PMTU_PLATEAU_ENTRIES;
   ci_ip4_hdr* ip;        /* hdr of failing packet */
   ci_uint16 len;         /* length of failing packet */
   ci_icmp_too_big_t *tb = (ci_icmp_too_big_t*)addr->icmp;
-  ci_pmtu_state_t *pmtus = &ipcache->pmtus;
   int ctr;
 
   if( ipcache->ip.ip_daddr_be32 != addr->saddr_be32 ) {
@@ -326,13 +327,6 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_ip_cached_hdrs *ipcache,
     return;
   }
   
-  if ( pmtus->state == CI_PMTU_DISCOVER_DISABLE ) {
-    DEBUGPMTU(ci_log("%s: "CI_PMTU_PRINTF_SOCKET_FORMAT
-                     " pmtu discovery disabled",
-                     __FUNCTION__, CI_PMTU_PRINTF_SOCKET_ARGS(addr)));
-    return;
-  }
-
   /* rfc1191 provides for this icmp message to have zero in the field
    * as defined in rfc792 */
   len = CI_BSWAP_BE16(tb->next_hop_mtu_be16);
@@ -393,7 +387,7 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_ip_cached_hdrs *ipcache,
     return;
   }
 
-  ci_pmtu_update_slow(netif, ipcache, len);
+  ci_pmtu_update_slow(netif, pmtus, ipcache, len);
 
 #if CI_CFG_FAST_RECOVER_PMTU_AT_MIN
   if( CI_UNLIKELY(s->pmtus.pmtu == plateau[0]) ) {
@@ -402,9 +396,6 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_ip_cached_hdrs *ipcache,
                            &thr->netif.tconst_pmtu_discover_recover);
   }
 #endif
-  
-  /* record last_tx, so we can detect TCP progress from now on */
-  pmtus->traffic = traffic;
 }
 
 
@@ -433,23 +424,28 @@ ci_ipp_pmtu_rx_tcp(tcp_helper_resource_t* thr,
     return;
   }
 
-  ci_ipp_pmtu_rx(&thr->netif, &ts->s.pkt, addr, tcp_snd_nxt(ts));
+  ci_ipp_pmtu_rx(&thr->netif, &ts->pmtus, &ts->s.pkt, addr);
 
   DEBUGPMTU(ci_log("%s: set eff_mss & change tx q to match", __FUNCTION__));
   ci_tcp_tx_change_mss(&thr->netif, ts);
 }
 
-
-/* ci_ipp_pmtu_rx_tcp -
- * handler for the receipt of "datagram too big" icmp messages - 
- * just extracts the most likely plateau to use.
+/* ci_ipp_pmtu_rx_udp -
+ * handler for the receipt of "datagram too big" icmp messages
  */
 static void 
 ci_ipp_pmtu_rx_udp(tcp_helper_resource_t* thr, 
                    ci_udp_state* us, efab_ipp_addr* addr)
 {
+  cicpos_pmtu_add(&CI_GLOBAL_CPLANE, addr->saddr_be32);
+  /* todo: install pmtu=
+   * CI_BSWAP_BE16((ci_icmp_too_big_t*)addr->icmp)->next_hop_mtu_be16 */
+  if (addr->saddr_be32 == sock_raddr_be32(&us->s)) {
+    ci_ip_cache_invalidate(&us->s.pkt);
+  }
+  else if (addr->saddr_be32 == us->ephemeral_pkt.ip.ip_daddr_be32)
+    ci_ip_cache_invalidate(&us->ephemeral_pkt);
 }
-
 
 /* efab_ipp_icmp_for_thr -
  * Is this ICMP message destined for this netif 
@@ -501,27 +497,23 @@ efab_ipp_icmp_qpkt(tcp_helper_resource_t* thr,
   if ((icmp_type == CI_ICMP_DEST_UNREACH) && 
        (icmp_code == CI_ICMP_DU_FRAG_NEEDED))
   {
-    if (addr->protocol == IPPROTO_UDP)
-      ci_ipp_pmtu_rx_udp(thr, SOCK_TO_UDP(s), addr);
-    else {
-      ci_assert_equal(addr->protocol, IPPROTO_TCP);
+    if (addr->protocol == IPPROTO_TCP)
       ci_ipp_pmtu_rx_tcp(thr, SOCK_TO_TCP(s), addr);
-    }
-    
-    if (s->pkt.pmtus.state == CI_PMTU_DISCOVER_DISABLE) return;
+    else
+      ci_ipp_pmtu_rx_udp(thr, SOCK_TO_UDP(s), addr);
   }
 
-  /* \TODO: should I write into connected socket error queue for ephemeral tx */
-  
-  get_errno(icmp_type, icmp_code, &err, &hard);
-
-  /* We handle ICMP for TCP only. */
+  /* UDP is interested in PMTU only */
+  if (addr->protocol == IPPROTO_UDP)
+    return;
   ci_assert_equal(addr->protocol, IPPROTO_TCP);
+
   if( s->b.state == CI_TCP_SYN_SENT ) 
       /* \todo we should handle tsr from listening sockets as well */
   {
     ci_tcp_state* ts = SOCK_TO_TCP(s);
 
+    get_errno(icmp_type, icmp_code, &err, &hard);
     OO_DEBUG_IPP(ci_log("%s: TCP", __FUNCTION__));
 
     s->so_error = err;

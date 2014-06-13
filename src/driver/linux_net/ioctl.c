@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,7 +18,7 @@
  *           (including support for SFE4001 10GBT NIC)
  *
  * Copyright 2005-2006: Fen Systems Ltd.
- * Copyright 2005-2010: Solarflare Communications Inc,
+ * Copyright 2005-2012: Solarflare Communications Inc,
  *                      9501 Jeronimo Road, Suite 250,
  *                      Irvine, CA 92618, USA
  *
@@ -39,9 +39,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  ****************************************************************************
  */
-#ifdef EFX_NOT_UPSTREAM
 #define EFX_DRIVER_NAME "sfc_control"
-#endif
 #include "net_driver.h"
 #include "efx.h"
 #include "efx_ioctl.h"
@@ -49,8 +47,6 @@
 #include "mcdi.h"
 #include "mcdi_pcol.h"
 #include "aoe.h"
-
-#ifdef EFX_NOT_UPSTREAM
 
 #include <linux/module.h>
 #include <linux/skbuff.h>
@@ -63,15 +59,27 @@ static int major;
 module_param(major, int, 0444);
 MODULE_PARM_DESC(major, "char device major number to use");
 
-#endif /* EFX_NOT_UPSTREAM */
+static void efx_ioctl_mcdi_complete_reset(struct efx_nic *efx,
+					  unsigned int cmd, int rc)
+{
+	/* efx_mcdi_rpc() will not schedule a reset if MC_CMD_REBOOT causes
+	 * a reboot. But from the user's POV, they're triggering a reboot
+	 * 'externally', and want both ports to recover. So schedule the
+	 * reset here.
+	 */
+	if (cmd == MC_CMD_REBOOT && rc == -EIO) {
+		netif_err(efx, drv, efx->net_dev, "MC fatal error %d\n", -rc);
+		efx_schedule_reset(efx, RESET_TYPE_MC_FAILURE);
+	}
+}
 
-static int efx_ioctl_do_mcdi(struct efx_nic *efx, union efx_ioctl_data *data)
+static int efx_ioctl_do_mcdi_old(struct efx_nic *efx, union efx_ioctl_data *data)
 {
 	struct efx_mcdi_request *req = &data->mcdi_request;
 	size_t outlen;
 	int rc;
 
-	if (req->len > sizeof(req->payload) || req->len & 3) {
+	if (req->len > sizeof(req->payload)) {
 		netif_err(efx, drv, efx->net_dev, "inlen is too long");
 		return -EINVAL;
 	}
@@ -82,24 +90,74 @@ static int efx_ioctl_do_mcdi(struct efx_nic *efx, union efx_ioctl_data *data)
 		return -ENOTSUPP;
 	}
 
-	rc = efx_mcdi_rpc(efx, req->cmd, (const u8 *)req->payload,
-			  req->len, (u8 *)req->payload,
-			  sizeof(req->payload), &outlen);
+	rc = efx_mcdi_rpc_quiet(efx, req->cmd,
+				(const efx_dword_t *)req->payload,
+				req->len, (efx_dword_t *)req->payload,
+				sizeof(req->payload), &outlen);
+	efx_ioctl_mcdi_complete_reset(efx, req->cmd, rc);
 
-	/* efx_mcdi_rpc() will not schedule a reset if MC_CMD_PAYLOAD causes
-	 * a reboot. But from the user's POV, they're triggering a reboot
-	 * 'externally', and want both ports to recover. So schedule the
-	 * reset here */
-	if (req->cmd == MC_CMD_REBOOT && rc == -EIO) {
-		netif_err(efx, drv, efx->net_dev, "MC fatal error %d\n", -rc);
-		efx_schedule_reset(efx, RESET_TYPE_MC_FAILURE);
-	}
-
-	/* No distinction is made between RPC failures (driver timeouts) and
-	 * MCDI failures (timeouts, reboots etc) */
 	req->rc = -rc;
 	req->len = (__u8)outlen;
 	return 0;
+}
+
+static int efx_ioctl_do_mcdi(struct efx_nic *efx,
+			     struct efx_mcdi_request2 __user *user_req)
+{
+	struct efx_mcdi_request2 req;
+	size_t outlen_actual;
+	efx_dword_t *buf;
+	size_t buf_len;
+	int rc;
+
+	if (copy_from_user(&req, user_req, sizeof(req)))
+		return -EFAULT;
+
+	/* No input flags are defined yet */
+	if (req.flags != 0)
+		return -EINVAL;
+
+	/* efx_mcdi_rpc() will check the length anyway, but this avoids
+	 * trying to allocate an extreme amount of memory.
+	 */
+	if (req.inlen > MCDI_CTL_SDU_LEN_MAX_V2 ||
+	    req.outlen > MCDI_CTL_SDU_LEN_MAX_V2)
+		return -EINVAL;
+
+	buf_len = ALIGN(max(req.inlen, req.outlen), 4);
+	buf = kmalloc(buf_len, GFP_USER);
+	if (!buf)
+		return -ENOMEM;
+
+	if (copy_from_user(buf, &user_req->payload, req.inlen)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+	rc = efx_mcdi_rpc_quiet(efx, req.cmd, buf, req.inlen,
+				buf, req.outlen, &outlen_actual);
+	efx_ioctl_mcdi_complete_reset(efx, req.cmd, rc);
+
+	if (rc) {
+		if (outlen_actual) {
+			/* Error was reported by the MC */
+			req.flags |= EFX_MCDI_REQUEST_ERROR;
+			req.host_errno = -rc;
+			rc = 0;
+		} else {
+			/* Communication failure */
+			goto out_free;
+		}
+	}
+	req.outlen = outlen_actual;
+
+	if (copy_to_user(user_req, &req, sizeof(req)) ||
+	    copy_to_user(&user_req->payload, buf, outlen_actual))
+		rc = -EFAULT;
+
+out_free:
+	kfree(buf);
+	return rc;
 }
 
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RESET)
@@ -280,7 +338,7 @@ efx_ioctl_ts_read(struct efx_nic *efx, union efx_ioctl_data *data)
 
 #endif
 
-#if defined(EFX_NOT_UPSTREAM)
+#ifdef EFX_NOT_UPSTREAM
 static int
 efx_ioctl_ts_settime(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -317,9 +375,10 @@ efx_ioctl_ts_set_domain_filter(struct efx_nic *efx, union efx_ioctl_data *data)
 	return efx_ptp_ts_set_domain_filter(efx, &data->ts_domain_filter);
 }
 #endif
+
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
+#ifdef CONFIG_SFC_PPS
 static int
 efx_ioctl_get_pps_event(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -333,7 +392,7 @@ efx_ioctl_hw_pps_enable(struct efx_nic *efx, union efx_ioctl_data *data)
 }
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+#ifdef CONFIG_SFC_AOE
 static int
 efx_ioctl_update_cpld(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -341,7 +400,7 @@ efx_ioctl_update_cpld(struct efx_nic *efx, union efx_ioctl_data *data)
 }
 
 static int
-efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
+efx_ioctl_update_license_old(struct efx_nic *efx, union efx_ioctl_data *data)
 {
 	return efx_aoe_update_keys(efx, &data->key_stats);
 }
@@ -419,6 +478,56 @@ efx_ioctl_get_mod_info(struct efx_nic *efx, union efx_ioctl_data *data)
 	return efx_ethtool_get_module_info(efx->net_dev, &data->modinfo.info);
 }
 
+static int
+efx_ioctl_get_device_ids(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	struct efx_device_ids *ids = &data->device_ids;
+
+	ids->vendor_id = efx->pci_dev->vendor;
+	ids->device_id = efx->pci_dev->device;
+	ids->subsys_vendor_id = efx->pci_dev->subsystem_vendor;
+	ids->subsys_device_id = efx->pci_dev->subsystem_device;
+	ids->phy_type = efx->phy_type;
+	ids->port_num = efx_port_num(efx);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
+	memcpy(ids->perm_addr, efx->net_dev->perm_addr, ETH_ALEN);
+#else
+	memcpy(ids->perm_addr, efx->perm_addr, ETH_ALEN);
+#endif
+	return 0;
+}
+
+static int
+efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	struct efx_update_license2 *stats = &data->key_stats2;
+	int rc;
+
+	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0) {
+		rc = efx_ef10_update_keys(efx, stats);
+		if (rc)
+			return rc;
+	} else {
+		memset(stats, 0, sizeof(*stats));
+	}
+
+#ifdef CONFIG_SFC_AOE
+	if (efx->aoe_data) {
+		struct efx_update_license aoe_stats;
+
+		rc = efx_aoe_update_keys(efx, &aoe_stats);
+		if (rc)
+			return rc;
+
+		stats->valid_keys += aoe_stats.valid_keys;
+		stats->invalid_keys += aoe_stats.invalid_keys;
+		stats->blacklisted_keys += aoe_stats.blacklisted_keys;
+	}
+#endif
+
+	return 0;
+}
+
 /*****************************************************************************/
 
 int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
@@ -435,8 +544,11 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	switch (cmd) {
 	case EFX_MCDI_REQUEST:
 		size = sizeof(data.mcdi_request);
-		op = efx_ioctl_do_mcdi;
+		op = efx_ioctl_do_mcdi_old;
 		break;
+	case EFX_MCDI_REQUEST2:
+		/* This command has variable length */
+		return efx_ioctl_do_mcdi(efx, &user_data->mcdi_request2);
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RESET)
 	case EFX_RESET_FLAGS:
 		size = sizeof(data.reset_flags);
@@ -492,7 +604,7 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		break;
 #endif
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
+#ifdef CONFIG_SFC_PPS
 	case EFX_TS_GET_PPS:
 		size = sizeof(data.pps_event);
 		op = efx_ioctl_get_pps_event;
@@ -502,14 +614,14 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		op = efx_ioctl_hw_pps_enable;
 		break;
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
+#ifdef CONFIG_SFC_AOE
 	case EFX_UPDATE_CPLD:
 		size = sizeof(data.cpld);
 		op = efx_ioctl_update_cpld;
 		break;
 	case EFX_LICENSE_UPDATE:
 		size = sizeof(data.key_stats);
-		op = efx_ioctl_update_license;
+		op = efx_ioctl_update_license_old;
 		break;
 	case EFX_RESET_AOE:
 		size = sizeof(data.aoe_reset);
@@ -522,6 +634,14 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	case EFX_GMODULEINFO:
 		size = sizeof(data.modinfo);
 		op = efx_ioctl_get_mod_info;
+		break;
+	case EFX_GET_DEVICE_IDS:
+		size = sizeof(data.device_ids);
+		op = efx_ioctl_get_device_ids;
+		break;
+	case EFX_LICENSE_UPDATE2:
+		size = sizeof(data.key_stats2);
+		op = efx_ioctl_update_license;
 		break;
 	default:
 		netif_err(efx, drv, efx->net_dev,
@@ -538,8 +658,6 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		return -EFAULT;
 	return 0;
 }
-
-#ifdef EFX_NOT_UPSTREAM
 
 static long
 control_ioctl(struct file *filp, unsigned int req, unsigned long arg)
@@ -621,5 +739,3 @@ void efx_control_fini(void)
 	printk(KERN_INFO "Unregistering device %d from " EFX_DRIVER_NAME "\n", major);
 	unregister_chrdev(major, EFX_DRIVER_NAME);
 }
-
-#endif /* EFX_NOT_UPSTREAM */

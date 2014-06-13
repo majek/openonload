@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -79,9 +79,11 @@ struct efch_vi_alloc_out {
   uint8_t             nic_arch;
   uint8_t             nic_variant;
   uint8_t             nic_revision;
+  uint8_t             nic_flags;
   uint32_t            mem_mmap_bytes;
   uint32_t            io_mmap_bytes;
   int32_t             instance;
+  uint32_t            rx_prefix_len;
 };
 
 
@@ -94,18 +96,6 @@ struct efch_vi_set_alloc {
 };
 
 
-struct efch_iobufset_alloc {
-  int32_t             in_linked_fd;
-  efch_resource_id_t  in_linked_rs_id;
-  int32_t             in_n_pages;
-  int32_t             in_pd_or_vi_fd;
-  efch_resource_id_t  in_pd_or_vi_rs_id;
-  int32_t             in_phys_addr_mode;
-  uint32_t            out_bufaddr;
-  uint32_t            out_mmap_bytes;
-};
-
-
 struct efch_memreg_alloc {
   int32_t             in_vi_or_pd_fd;
   efch_resource_id_t  in_vi_or_pd_id;
@@ -113,6 +103,12 @@ struct efch_memreg_alloc {
   uint64_t            in_mem_bytes;
   uint64_t            in_addrs_out_ptr;
   int                 in_addrs_out_stride;
+};
+
+
+struct efch_pio_alloc {
+  int32_t             in_pd_fd;
+  efch_resource_id_t  in_pd_id;
 };
 
 
@@ -135,9 +131,9 @@ typedef struct ci_resource_alloc_s {
     struct efch_vi_alloc_in    vi_in;
     struct efch_vi_alloc_out   vi_out;
     struct efch_vi_set_alloc   vi_set;
-    struct efch_iobufset_alloc iobufset;
     struct efch_memreg_alloc   memreg;
     struct efch_pd_alloc       pd;
+    struct efch_pio_alloc      pio;
   } u;
 } ci_resource_alloc_t;
 
@@ -164,6 +160,11 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_ALL_UNICAST  0x65
 # define                CI_RSOP_FILTER_ADD_ALL_MULTICAST 0x66
 # define                CI_RSOP_FILTER_DEL              0x67
+# define                CI_RSOP_PIO_LINK_VI             0x68
+# define                CI_RSOP_PIO_UNLINK_VI           0x69
+# define                CI_RSOP_FILTER_ADD_IP4_VLAN     0x70
+# define                CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN   0x71
+# define                CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN 0x72
 
   union {
     struct {
@@ -184,12 +185,22 @@ typedef struct ci_resource_op_s {
       int32_t           pace;
     } pt;
     struct {
+      int32_t            in_vi_fd;
+      efch_resource_id_t in_vi_id;
+    } pio_link_vi;
+    struct {
+      int32_t            in_vi_fd;
+      efch_resource_id_t in_vi_id;
+    } pio_unlink_vi;
+    struct {
       struct {
         uint8_t         protocol;
         ci_int16        port_be16;
         ci_int16        rport_be16;
         uint32_t        host_be32;
         uint32_t        rhost_be32;
+        /* On NICs that require VLAN field as well, we use the field
+         * from struct mac below. */
       } ip4;
       struct {
         ci_int16        vlan_id;

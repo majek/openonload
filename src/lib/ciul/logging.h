@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -32,7 +32,8 @@
 #if !defined(NDEBUG) && !defined(__KERNEL__)
 extern int ef_log_level;
 #endif
-extern void ef_log(const char* fmt, ...);
+
+extern __printf(1, 2) void ef_log(const char* fmt, ...);
 
 #ifdef __KERNEL__
 # define EF_VI_LOG(l,x)

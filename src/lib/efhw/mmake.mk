@@ -8,7 +8,8 @@ LIB_SRCS	:= nic.c \
 		   falcon.c \
 		   falcon_mac.c \
 		   falcon_iscsi.c \
-		   falcon_spi.c
+		   falcon_spi.c \
+		   ef10.c
 
 ifndef MMAKE_NO_RULES
 

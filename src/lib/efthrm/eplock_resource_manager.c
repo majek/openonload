@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -102,6 +102,13 @@ int
 efab_eplock_unlock_and_wake(ci_netif *ni)
 {
   int l = ni->state->lock.lock;
+  tcp_helper_resource_t *rs = netif2tcp_helper_resource(ni);
+
+  /* Allocate more packets if necessary. */
+  if( !in_atomic() && rs->avoid_atomic_allocations &&
+      ni->state->n_freepkts <= NI_OPTS(ni).free_packets_low &&
+      NI_OPTS(ni).max_packets < (ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S) )
+    efab_tcp_helper_more_bufs(rs);
 
  again:
 

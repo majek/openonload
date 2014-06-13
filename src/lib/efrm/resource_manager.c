@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,16 +57,16 @@
 #include <ci/efrm/private.h>
 #include "efrm_internal.h"
 #include "efrm_vi_set.h"
-#include "efrm_iobufset.h"
 #include "efrm_vi.h"
 #include "efrm_vf.h"
 #include "efrm_pd.h"
+#include "efrm_pio.h"
 
-#include <ci/efrm/iobufset.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/pd.h>
+#include <ci/efrm/pio.h>
 
 
 /**********************************************************************
@@ -190,9 +190,6 @@ void efrm_resource_release(struct efrm_resource *rs)
 	if (__efrm_resource_release(rs) == 0)
 		return;
 	switch (rs->rs_type) {
-	case EFRM_RESOURCE_IOBUFSET:
-		efrm_iobufset_resource_free(iobufset_resource(rs));
-		break;
 	case EFRM_RESOURCE_VI:
 		efrm_vi_resource_free(efrm_vi(rs));
 		break;
@@ -206,6 +203,9 @@ void efrm_resource_release(struct efrm_resource *rs)
 #endif
 	case EFRM_RESOURCE_PD:
 		efrm_pd_free(efrm_pd_from_resource(rs));
+		break;
+	case EFRM_RESOURCE_PIO:
+		efrm_pio_free(efrm_pio_from_resource(rs));
 		break;
 	default:
 		EFRM_ASSERT(0);

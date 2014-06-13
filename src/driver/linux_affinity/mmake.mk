@@ -12,7 +12,10 @@ IMPORT		:= ../linux_net/driverlink_api.h
 # linux kbuild support
 #
 
-all: $(BUILDPATH)/driver/linux_affinity/Module.symvers
+$(BUILDPATH)/driver/linux_affinity/autocompat.h: kernel_compat.sh
+	./kernel_compat.sh -k $(KPATH) $(if $(filter 1,$(V)),-v,-q) >$@
+
+all: $(BUILDPATH)/driver/linux_affinity/Module.symvers $(BUILDPATH)/driver/linux_affinity/autocompat.h
 	$(MMAKE_KBUILD_PRE_COMMAND)
 	$(MAKE) $(MMAKE_KBUILD_ARGS) M=$(CURDIR)
 	$(MMAKE_KBUILD_POST_COMMAND)

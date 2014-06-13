@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -235,7 +235,12 @@ extern int efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 			   int n_q_entries, int q_tag_in, unsigned vi_flags,
 			   struct efrm_vi *evq);
 
-
+/**
+ * Sanitize the size of the requested queue, as a precursor to allocating it.
+ */
+extern int
+efrm_vi_q_alloc_sanitize_size(struct efrm_vi *virs, enum efhw_q_type q_type,
+			      int n_q_entries);
 
 struct pci_dev;
 extern struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *);

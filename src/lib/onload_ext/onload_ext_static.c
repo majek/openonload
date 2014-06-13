@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -104,6 +104,18 @@ wrap(int, onload_set_stackname, (enum onload_stackname_who who,
                                  const char* stackname),
      (who, context, stackname), 0)
 
+wrap(int, onload_stackname_save, (void),
+     (), 0)
+
+wrap(int, onload_stackname_restore, (void),
+     (), 0)
+
+wrap(int, onload_stack_opt_set_int, (const char* opt, int64_t val),
+     (opt, val), 0)
+
+wrap(int, onload_stack_opt_reset, (void),
+     (), 0)
+
 wrap(int, onload_is_present, (void),
      (), 0)
 
@@ -130,18 +142,20 @@ wrap(int, onload_set_recv_filter, (int fd, onload_zc_recv_filter_callback filter
      (fd, filter, cb_arg, flags), -ENOSYS)
 
 
-wrap(int, onload_msg_template_set, (int fd, struct iovec* base_pkt, int blen, 
-                                    onload_template_handle* handle),
-     (fd, base_pkt, blen, handle), -ENOSYS)
+wrap(int, onload_msg_template_alloc, (int fd, struct iovec* initial_msg,
+                                      int mlen, onload_template_handle* handle,
+                                      unsigned flags),
+     (fd, initial_msg, mlen, handle, flags), -ENOSYS)
 
 
-wrap(int, onload_msg_template_update, (onload_template_handle handle,
-                                       struct onload_msg_update* updates, 
-                                       int ulen, int complete),
-     (handle, updates, ulen, complete), -ENOSYS)
+wrap(int, onload_msg_template_update,
+     (int fd, onload_template_handle handle,
+      struct onload_template_msg_update_iovec* updates, int ulen,
+      unsigned flags),
+     (fd, handle, updates, ulen, flags), -ENOSYS)
 
-wrap(int, onload_msg_template_release, (onload_template_handle handle),
-     (handle), -ENOSYS)
+wrap(int, onload_msg_template_abort, (int fd, onload_template_handle handle),
+     (fd, handle), -ENOSYS)
 
 wrap(int, onload_recvmsg_kernel, (int fd, struct msghdr* msg, int flags),
      (fd, msg, flags), -ENOSYS)

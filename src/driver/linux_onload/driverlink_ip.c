@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,6 +38,8 @@
 #include <onload/oof_interface.h>
 #include <ci/efrm/efrm_client.h>
 #include "onload_internal.h"
+#include "onload_kernel_compat.h"
+#include <ci/driver/efab/hardware.h>
 
 
 static int oo_use_vlans = 1;
@@ -223,12 +225,34 @@ static struct nf_hook_ops oo_netfilter_ip_hook = {
 static void oo_efrm_reset_callback(struct efrm_client* client, void* arg)
 {
   struct oo_nic* onic;
-  ci_netif* ni = NULL;
+  ci_netif* ni;
   int hwport, intf_i;
   int ifindex = efrm_client_get_ifindex(client);
+  ci_irqlock_state_t lock_flags;
+  ci_dllink *link;
 
   if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
     hwport = onic - oo_nics;
+
+    /* First of all, reset non-fully-created stacks.
+     * Possibly, we'll reset them twice: here and later, when they are
+     * created and moved to all_stacks list.
+     * There is almost no harm except for bug 33496, which is present
+     * regardless of our behaviour here.
+     */
+    ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+    CI_DLLIST_FOR_EACH(link, &THR_TABLE.started_stacks) {
+      tcp_helper_resource_t *thr;
+      thr = CI_CONTAINER(tcp_helper_resource_t, all_stacks_link, link);
+      ni = &thr->netif;
+      /* We call tcp_helper_reset_stack, but it surely fails to get lock,
+       * so we just set up flags here. */
+      if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
+        tcp_helper_reset_stack(ni, intf_i);
+    }
+    ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+
+    ni = NULL;
     while( iterate_netifs_unlocked(&ni) == 0 )
       if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
         tcp_helper_reset_stack(ni, intf_i);
@@ -256,6 +280,7 @@ static struct efrm_client_callbacks oo_efrm_client_callbacks = {
 static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
 {
   struct efrm_client* efrm_client;
+  struct efhw_nic* efhw_nic; 
   struct oo_nic* onic;
   int rc;
 
@@ -277,8 +302,12 @@ static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
     }
   }
 
-  if( net_dev->flags & IFF_UP )
-    oof_hwport_up_down(oo_nic_hwport(onic), 1);
+  if( net_dev->flags & IFF_UP ) {
+    efhw_nic = efrm_client_get_nic(onic->efrm_client);
+    oof_hwport_up_down(oo_nic_hwport(onic), 1,
+                       efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
+                       efhw_nic->flags & NIC_FLAG_VLAN_FILTERS);
+  }
 
   return onic;
 
@@ -303,6 +332,20 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
                        const char* silicon_rev)
 {
   struct oo_nic* onic = NULL;
+
+#if EFX_DRIVERLINK_API_VERSION >= 8
+  struct efx_dl_falcon_resources *res;
+
+  efx_dl_for_each_device_info_matching(dev_info, EFX_DL_FALCON_RESOURCES,
+                                       struct efx_dl_falcon_resources,
+                                       hdr, res) {
+    if( res->rx_usr_buf_size > FALCON_RX_USR_BUF_SIZE ) {
+      ci_log("%s: ERROR: Net driver rx_usr_buf_size %u > %u", __func__,
+             res->rx_usr_buf_size, FALCON_RX_USR_BUF_SIZE);
+      return -1;
+    }
+  }
+#endif
 
   if( netif_running(net_dev) ) {
     onic = oo_netdev_may_add(net_dev);
@@ -465,7 +508,7 @@ static void oo_netdev_going_down(struct net_device* netdev)
 
   onic = oo_nic_find_ifindex(netdev->ifindex);
   if( onic != NULL ) {
-      oof_hwport_up_down(oo_nic_hwport(onic), 0);
+      oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0);
       ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
       if( ci_dllist_is_empty(&THR_TABLE.all_stacks) )
         oo_netdev_remove(onic);
@@ -500,7 +543,7 @@ static void oo_netdev_going_down(struct net_device* netdev)
 static int oo_netdev_event(struct notifier_block *this,
                            unsigned long event, void *ptr)
 {
-  struct net_device *netdev = ptr;
+  struct net_device *netdev = netdev_notifier_info_to_dev(ptr);
 
   switch( event ) {
   case NETDEV_UP:
@@ -536,6 +579,9 @@ static struct notifier_block oo_netdev_notifier = {
 
 static struct efx_dl_driver oo_dl_driver = {
   .name = "onload",
+#if EFX_DRIVERLINK_API_VERSION >= 8
+  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE,
+#endif
   .probe = oo_dl_probe,
   .remove = oo_dl_remove,
   .reset_suspend = oo_dl_reset_suspend,

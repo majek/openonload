@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -146,10 +146,6 @@ efab_create_mm_entry (struct mm_struct *mm) {
  */
 static int efab_add_mm_ref (struct mm_struct *mm) {
 
-#if defined(__PPC__)		/* TEMP ONLY until trampoline system is supported */
-  return 0;
-#endif
-
   int rc = 0;
   struct mm_hash *p;
 
@@ -176,6 +172,33 @@ exit:
 }
 
 /* Decrements a reference on an item in the MM hash-table.
+ * Hash table lock must be held in write mode by caller.
+ * Returns with the lock still held.
+ * Returns 1 if the entry was removed and should be freed.
+ */
+int efab_put_mm_hash_locked(struct mm_hash *p)
+{
+  if (!--p->ref) {
+    OO_DEBUG_TRAMP(ci_log("Deleting mm_hash %p", p));
+    ci_dllist_remove (&p->link);
+    return 1;
+  }
+  return 0;
+}
+
+/* Free MM hash table entry after efab_put_mm_hash_locked have
+ * returned 1.
+ * No locks should be held.
+ */
+void efab_free_mm_hash(struct mm_hash *p)
+{
+  ci_assert_equal(p->ref, 0);
+  if( safe_signals_and_exit )
+    efab_signal_process_fini(&p->signal_data);
+  kfree (p);
+}
+
+/* Decrements a reference on an item in the MM hash-table.
  * 'mm' must be in the table at the time of calling.
  * If the reference count decrements to zero, the item is removed from the
  * table (and its associated storage freed).
@@ -183,11 +206,6 @@ exit:
  * Must be called with the lock NOT held
  */
 static void efab_del_mm_ref (struct mm_struct *mm) {
-
-#if defined(__PPC__)		/* TEMP ONLY until trampoline system is supported */
-  return;
-#endif
-
   struct mm_hash *p;
   int do_free = 0;
 
@@ -197,20 +215,12 @@ static void efab_del_mm_ref (struct mm_struct *mm) {
   ci_assert (p);
   ci_assert (p->mm == mm);
 
-  if (!--p->ref) {
-    OO_DEBUG_TRAMP(ci_log("Deleting mm_hash %p for mm %p", p, mm));
-    ci_dllist_remove (&p->link);
-    do_free = 1;
-  }
+  do_free = efab_put_mm_hash_locked(p);
 
   write_unlock (&oo_mm_tbl_lock);
 
-  if( do_free ) {
-    if( safe_signals_and_exit )
-      efab_signal_process_fini(&p->signal_data);
-    kfree (p);
-  }
-
+  if( do_free )
+    efab_free_mm_hash(p);
 }
 
 
@@ -317,11 +327,12 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 static int vm_op_fault(struct vm_area_struct *vma, struct vm_fault *vmf) {
-  struct page* ret;
+  struct page* page;
 
-  ret = vm_op_nopage(vma, (long int)vmf->virtual_address, NULL);
-  vmf->page = ret;
-  return (ret==NOPAGE_SIGBUS) ? VM_FAULT_SIGBUS : 0; 
+  page = vm_op_nopage(vma, (long int)vmf->virtual_address, NULL);
+  vmf->page = page;
+
+  return ( page == NULL ) ? VM_FAULT_SIGBUS : 0; 
 }
 #endif
 

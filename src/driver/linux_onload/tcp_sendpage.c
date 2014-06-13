@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,8 +49,7 @@ ci_inline int sendpage_copy(ci_netif* ni, ci_tcp_state* ts, struct page* page,
 
   rc = ci_tcp_sendmsg(ni, ts, &m,
                       (ts->s.b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK) |
-                      (more ? MSG_MORE : 0) 
-		      CI_ARG_WIN(0), CI_ADDR_SPC_KERNEL);
+                      (more ? MSG_MORE : 0), CI_ADDR_SPC_KERNEL);
 
   kunmap(page);
   return rc;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,6 +18,7 @@
 #include "linux_char_internal.h"
 #include "char_internal.h"
 #include <driver/linux_resource/kernel_compat.h>
+#include <driver/linux_resource/compat_pat_wc.h>
 
 
 /****************************************************************************
@@ -28,7 +29,7 @@
 
 int 
 ci_mmap_bar(struct efhw_nic* nic, off_t base, size_t len, void* opaque,
-	    int* map_num, unsigned long* offset)
+	    int* map_num, unsigned long* offset, int set_wc)
 {
   struct vm_area_struct* vma = (struct vm_area_struct*) opaque;
 
@@ -44,8 +45,29 @@ ci_mmap_bar(struct efhw_nic* nic, off_t base, size_t len, void* opaque,
   ci_assert(*map_num == 0 || *offset > 0);
 
   vma->vm_flags |= EFRM_VM_IO_FLAGS;
-  
-  pgprot_val(vma->vm_page_prot) |= CI_PAGE_DISABLE_CACHE;
+
+  if( set_wc ) {
+#ifdef CONFIG_FORCE_PIO_NON_CACHED
+    EFCH_WARN("%s: mapping PIO in non cached mode", __FUNCTION__);
+    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+#elif defined EFRM_HAVE_PGPROT_WRITECOMBINE 
+    vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+#elif defined HAS_COMPAT_PAT_WC
+    if( !compat_pat_wc_is_initialized() ) {
+      EFCH_WARN("%s: ERROR: write combining compatibility module not initialized",
+         __FUNCTION__);
+      return -EINVAL;
+    }
+    else
+      vma->vm_page_prot = compat_pat_wc_pgprot_writecombine(vma->vm_page_prot);
+#else
+    EFCH_WARN("%s: ERROR: This kernel version does not support writecombining",
+              __FUNCTION__);
+    return -EINVAL;
+#endif
+  }
+  else
+    vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
   EFCH_TRACE("%s: pages=%d offset=0x%x phys=0x%llx prot=0x%lx",
              __FUNCTION__, (int) (len >> CI_PAGE_SHIFT),
@@ -56,25 +78,9 @@ ci_mmap_bar(struct efhw_nic* nic, off_t base, size_t len, void* opaque,
   ++*map_num;
   *offset += len;
 
-  return ci_remap_page_range(vma, vma->vm_start + *offset - len,
-			     nic->ctr_ap_dma_addr + base, len,
-                             vma->vm_page_prot);
-}
-
-
-void ci_mmap_iopage(struct efhw_iopage* p, void* opaque, int* map_num,
-                    unsigned long* offset)
-{
-  ci_assert(opaque);
-  ci_assert(map_num);
-  ci_assert(offset);
-  ci_assert((*offset &~ PAGE_MASK) == 0);
-  ci_assert(*map_num == 0 || *offset > 0);
-
-  EFCH_TRACE("%s: offset=0x%lx kva=%p",
-             __FUNCTION__, *offset, efhw_iopage_ptr(p));
-  ++*map_num;
-  *offset += CI_PAGE_SIZE;
+  return ci_io_remap_pfn_range(vma, vma->vm_start + *offset - len,
+			       (nic->ctr_ap_dma_addr + base) >> PAGE_SHIFT, len,
+			       vma->vm_page_prot);
 }
 
 

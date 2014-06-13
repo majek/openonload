@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,6 +40,7 @@
 #ifndef __EFAB_MEMREG_H__
 #define __EFAB_MEMREG_H__
 
+#include <ci/efhw/common.h>
 #include <etherfabric/base.h>
 
 #ifdef __cplusplus
@@ -77,7 +78,8 @@ extern int ef_memreg_free(ef_memreg*, ef_driver_handle);
    */
 ef_vi_inline ef_addr ef_memreg_dma_addr(ef_memreg* mr, int offset)
 {
-	return mr->mr_dma_addrs[offset >> 12u] | (offset & 0xfff);
+	return mr->mr_dma_addrs[offset >> EFHW_NIC_PAGE_SHIFT] |
+		(offset & (EFHW_NIC_PAGE_SIZE - 1));
 }
 
 #ifdef __cplusplus

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -292,6 +292,20 @@ OO_STAT("Number of UDP packets dropped because no socket matched.",
         ci_uint32, udp_rx_no_match_drops, count)
 OO_STAT("Number times inserting filter into software table failed.",
         ci_uint32, sw_filter_insert_table_full, count)
+#if CI_CFG_PIO
+OO_STAT("Number of times PIO has been used to send a packet",
+        ci_uint32, pio_pkts, count)
+# ifndef NDEBUG
+OO_STAT("Number of times PIO was not used due to txq fill level",
+        ci_uint32, no_pio_fill_level, count)
+OO_STAT("Number of times PIO was not used due to packet length",
+        ci_uint32, no_pio_pkt_len, count)
+OO_STAT("Number of times PIO was not used due to flags",
+        ci_uint32, no_pio_flags, count)
+# endif
+OO_STAT("Number of times PIO was not used due to an error",
+        ci_uint32, no_pio_err, count)
+#endif
 #if CI_CFG_SENDFILE
 OO_STAT("Number of calls to tcp file-op sendpage().",
         ci_uint32, tcp_sendpages, count)

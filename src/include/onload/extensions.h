@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,6 +65,27 @@ extern "C" {
 #endif
 
 
+/* Use ONLOAD_MSG_WARM in the flags field of send(), sendto(), sendmsg(),
+ * and onload_zc_send() to do 'fake' sends to keep the send path warm.
+ *
+ * This is advantageous because code paths that have not run recently
+ * execute slowly.  ie. A send() call will take much longer if the previous
+ * send was 1s ago than if it was 1ms ago, and the reason is because cached
+ * state in the processor is lost over time.  This flag exercises Onload's
+ * send path so that a subsequent performance critical send() will be
+ * faster.
+ *
+ * WARNING!!! Note that if you use this flag with unaccelerated sockets,
+ * then the message may actually be transmitted.  Therefore, we recommend
+ * that before using this flag on a socket, you verify that the socket is
+ * indeed accelerated by using onload_fd_stat().
+ *
+ * This flag corresponds to MSG_SYN in the kernel sources, which appears to
+ * not be used.
+ */
+#define ONLOAD_MSG_WARM 0x400
+
+
 extern int onload_is_present(void);
 
 
@@ -88,6 +109,15 @@ enum onload_stackname_who {
 extern int onload_set_stackname(enum onload_stackname_who who,
                                 enum onload_stackname_scope scope, 
                                 const char* stackname);
+
+extern int onload_stackname_save(void);
+
+extern int onload_stackname_restore(void);
+
+extern int onload_stack_opt_set_int(const char* opt, int64_t val);
+
+extern int onload_stack_opt_reset(void);
+
 
 struct onload_stat {
   int32_t   stack_id;

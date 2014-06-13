@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -19,12 +19,14 @@
 #include <ci/efrm/pd.h>
 #include <ci/efrm/buffer_table.h>
 #include "char_internal.h"
+#include <ci/efrm/sysdep.h>
 
 
 struct efch_memreg {
-  struct efhw_buffer_table_allocation buf_tbl_alloc;
+  struct efrm_buffer_table_allocation buf_tbl_alloc;
   struct efrm_pd                     *pd;
   int                                 n_pages;
+  int                                 order;
   bool                                mapped;
   struct page                       **pages;
   dma_addr_t                         *dma_addrs;
@@ -35,7 +37,7 @@ static void efch_memreg_free(struct efch_memreg *mr)
 {
   int i;
   if (mr->mapped)
-    efrm_pd_dma_unmap(mr->pd, mr->n_pages, 0,
+    efrm_pd_dma_unmap(mr->pd, mr->n_pages >> mr->order, mr->order,
                       mr->dma_addrs, sizeof(mr->dma_addrs[0]),
                       &mr->buf_tbl_alloc);
   for (i = 0; i < mr->n_pages; ++i)
@@ -48,7 +50,7 @@ static void efch_memreg_free(struct efch_memreg *mr)
 }
 
 
-static struct efch_memreg *efch_memreg_alloc(int max_pages)
+static struct efch_memreg *efch_memreg_alloc(int n_pages)
 {
   struct efch_memreg *mr = NULL;
   int bytes;
@@ -56,10 +58,10 @@ static struct efch_memreg *efch_memreg_alloc(int max_pages)
   if ((mr = kmalloc(sizeof(*mr), GFP_KERNEL)) == NULL)
     goto fail1;
   memset(mr, 0, sizeof(*mr));
-  bytes = max_pages * sizeof(mr->pages[0]);
+  bytes = n_pages * sizeof(mr->pages[0]);
   if ((mr->pages = kmalloc(bytes, GFP_KERNEL)) == NULL)
     goto fail2;
-  bytes = max_pages * sizeof(mr->dma_addrs[0]);
+  bytes = n_pages * sizeof(mr->dma_addrs[0]);
   if ((mr->dma_addrs = kmalloc(bytes, GFP_KERNEL)) == NULL)
     goto fail3;
   return mr;
@@ -117,7 +119,8 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
 
   max_pages = DIV_ROUND_UP(alloc->in_mem_bytes, PAGE_SIZE);
   if ((mr = efch_memreg_alloc(max_pages)) == NULL) {
-    EFCH_ERR("%s: ERROR: out of mem (max_pages=%d)", __FUNCTION__, max_pages);
+    EFCH_ERR("%s: ERROR: out of mem (max_pages=%d)",
+             __FUNCTION__, max_pages);
     rc = -ENOMEM;
     goto fail2;
   }
@@ -141,8 +144,21 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     goto fail3;
   }
 
-  rc = efrm_pd_dma_map(pd, mr->n_pages, 0,
-                       mr->pages, sizeof(mr->pages[0]),
+  mr->order = compound_order(mr->pages[0]);
+  if (mr->order != 0 && (mr->n_pages & (((1 << mr->order) - 1))) != 0)
+    mr->order = 0;
+  if (mr->order != 0) {
+    int i;
+    for (i = 0; i < mr->n_pages >> mr->order; i += 1 << mr->order) {
+      if (compound_order(mr->pages[i << mr->order]) != mr->order) {
+        mr->order = 0;
+        break;
+      }
+    }
+  }
+
+  rc = efrm_pd_dma_map(pd, mr->n_pages >> mr->order, mr->order,
+                       mr->pages, sizeof(mr->pages[0]) << mr->order,
                        mr->dma_addrs, sizeof(mr->dma_addrs[0]),
                        (void *)(ci_uintptr_t)alloc->in_addrs_out_ptr,
                        alloc->in_addrs_out_stride,

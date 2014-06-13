@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,6 +25,14 @@ struct tcp_helper_resource_s;
  */
 #define OO_HW_PORT_ALL ((unsigned) -1)
 
+/* Use when no vlan should be specified for this filter.
+ */
+#define OO_HW_VLAN_UNSPEC ((ci_uint16) -1)
+
+/* The default vlan.
+ */
+#define OO_HW_VLAN_DEFAULT (0)
+
 
 /* Initialise filter object. */
 extern void oo_hw_filter_init(struct oo_hw_filter* oofilter);
@@ -48,11 +56,15 @@ extern void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
  * encountered, or 0 if all were okay.  On error, use
  * oo_hw_filter_hwports() to determine which interfaces have filters in
  * case of error.
+ *
+ * A filter specifying vlan_id is used for filters on ports in both hwport_mask
+ * and set_vlan_mask.
  */
 extern int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                                     int protocol,
                                     unsigned saddr, int sport,
                                     unsigned daddr, int dport,
+                                    ci_uint16 vlan_id, unsigned set_vlan_mask,
                                     unsigned hwport_mask);
 
 /* Clear existing filter, if any.  The insert new filters and associate
@@ -64,6 +76,7 @@ extern int oo_hw_filter_set(struct oo_hw_filter* oofilter,
                             struct tcp_helper_resource_s* trs, int protocol,
                             unsigned saddr, int sport,
                             unsigned daddr, int dport,
+                            ci_uint16 vlan_id, unsigned set_vlan_mask,
                             unsigned hwport_mask);
 
 /* Redirect filter to direct packets to a different stack.  This is similar
@@ -76,7 +89,18 @@ extern int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                                int protocol,
                                unsigned saddr, int sport,
                                unsigned daddr, int dport,
+                               ci_uint16 vlan_id, unsigned set_vlan_mask,
                                unsigned hwport_mask);
+
+
+/* Transfer filters on ports in hwport_mask from oofilter_old to oofilter_new.
+ * Both oofilter_old and oofilter_new must point to the same stack - this
+ * function simply transfers the filters, it does not update them in any way.
+ */
+extern void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
+                              struct oo_hw_filter* oofilter_new,
+                              unsigned hwport_mask);
+
 
 /* Return the set of hwports that this filter is installed on.
  *

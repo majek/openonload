@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,18 +52,13 @@
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/vf_resource_private.h>
 #include "efrm_internal.h"
+#include "bt_manager.h"
 #include "efrm_pd.h"
 
 
-/* NB. Code below requires that N_OWNER_IDS be an exact multiple of
- * N_OWNER_IDS_PER_WORD.
- */
-#define N_OWNER_IDS           	 1024
 #define N_OWNER_IDS_PER_WORD  	 (sizeof(unsigned long) * 8)
-#define N_OWNER_ID_WORDS      	 (N_OWNER_IDS / N_OWNER_IDS_PER_WORD)
 #define OWNER_ID_WORD_ALLOCATED  ((unsigned long) -1)
 
-#define OWNER_ID_PHYS_MODE       0
 #define OWNER_ID_ALLOC_FAIL      -1
 
 
@@ -81,6 +76,14 @@ struct efrm_pd {
 	/* If the protection domain is a VF, then [vf] will be non-null. */
 	struct efrm_vf *vf;
 #endif
+
+	/* OS-specific data */
+	void *os_data;
+
+	/* Buffer table manager.  Needed iff vf==NULL.
+	 * For Huntington, we'll need separate managers for different
+	 * page orders.*/
+	struct efrm_bt_manager bt_managers[0];
 };
 
 
@@ -88,8 +91,20 @@ struct efrm_pd_manager {
 	struct efrm_resource_manager rm;
 	/* TODO: ensure this doesn't wrap */
 	unsigned next_instance;
-	/* TODO: this can and should be per-nic */
-	unsigned long used_owner_ids[N_OWNER_ID_WORDS];
+};
+
+
+struct efrm_pd_owner_ids {
+	/* An owner id block allows allocation of n owner_ids.  The absolute
+	 * value of the owner_id is relative to value base.  This allows
+	 * a single owner_id space to be shared across pds on siena by basing
+	 * owner_ids on base VI ID.  On ef10 all owner_ids are 0 based as they
+	 * are function relative. */
+	int base, n;
+	unsigned long used_ids[1];
+	/* When allocating an owner id block enough memory is allocated to
+	 * continue the used_ids array sufficiently to contain n owner ids.
+	 */
 };
 
 
@@ -99,27 +114,58 @@ static struct efrm_pd_manager *pd_manager;
 #define efrm_pd(rs1)  container_of((rs1), struct efrm_pd, rs)
 
 
-static int efrm_pd_owner_id_alloc(void)
+static int efrm_pd_owner_id_alloc(struct efrm_pd_owner_ids* owner_ids)
 {
 	/* Must hold pd_manager lock. */
 	int i;
-	for (i = 0; i < N_OWNER_ID_WORDS; ++i)
-		if (pd_manager->used_owner_ids[i] != OWNER_ID_WORD_ALLOCATED) {
+	int n_owner_id_words = DIV_ROUND_UP(owner_ids->n, N_OWNER_IDS_PER_WORD);
+	for (i = 0; i < n_owner_id_words; ++i)
+		if (owner_ids->used_ids[i] != OWNER_ID_WORD_ALLOCATED) {
 			i *= N_OWNER_IDS_PER_WORD;
-			while (test_bit(i, pd_manager->used_owner_ids))
+			while (test_bit(i, owner_ids->used_ids))
 				++i;
-			__set_bit(i, pd_manager->used_owner_ids);
-			return i;
+			if( i < owner_ids->n ) {
+				__set_bit(i, owner_ids->used_ids);
+				return i + owner_ids->base;
+			}
+			else {
+				return OWNER_ID_ALLOC_FAIL;
+			}
 		}
 	return OWNER_ID_ALLOC_FAIL;
 }
 
 
-static void efrm_pd_owner_id_free(int owner_id)
+static void efrm_pd_owner_id_free(struct efrm_pd_owner_ids* owner_ids,
+				  int owner_id)
 {
 	/* Must hold pd_manager lock. */
-	EFRM_ASSERT(test_bit(owner_id, pd_manager->used_owner_ids));
-	__clear_bit(owner_id, pd_manager->used_owner_ids);
+	EFRM_ASSERT(test_bit(owner_id - owner_ids->base, owner_ids->used_ids));
+	__clear_bit(owner_id - owner_ids->base, owner_ids->used_ids);
+}
+
+
+struct efrm_pd_owner_ids *efrm_pd_owner_ids_ctor(int base, int n)
+{
+	int extra_words = DIV_ROUND_UP(n, N_OWNER_IDS_PER_WORD) - 1;
+	struct efrm_pd_owner_ids *owner_ids = kmalloc(
+		sizeof(*owner_ids) + (extra_words * sizeof(owner_ids[0])),
+		GFP_KERNEL);
+
+	if( owner_ids ) {
+		memset(owner_ids, 0, sizeof(*owner_ids) +
+					(extra_words * sizeof(owner_ids[0])));
+		owner_ids->n = n;
+		owner_ids->base = base;
+	}
+
+	return owner_ids;
+}
+
+
+void efrm_pd_owner_ids_dtor(struct efrm_pd_owner_ids* owner_ids)
+{
+	kfree(owner_ids);
 }
 
 /***********************************************************************/
@@ -129,20 +175,41 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 {
 	struct efrm_pd *pd;
 	int rc, instance;
+	struct efrm_pd_owner_ids *owner_ids;
+	int orders_num = 0;
+
 
 	EFRM_ASSERT((client_opt != NULL) || (vf_opt != NULL));
 
-	if ((pd = kmalloc(sizeof(*pd), GFP_KERNEL)) == NULL) {
+	if (!phys_addr_mode) {
+		orders_num = efhw_nic_buffer_table_orders_num(
+						client_opt->nic);
+		EFRM_ASSERT(orders_num);
+		EFRM_ASSERT(efhw_nic_buffer_table_orders(
+						client_opt->nic)[0] == 0);
+	}
+	pd = kmalloc(sizeof(*pd) + orders_num * sizeof(pd->bt_managers[0]),
+		     GFP_KERNEL);
+	if (pd == NULL) {
 		rc = -ENOMEM;
 		goto fail1;
 	}
 
 	spin_lock_bh(&pd_manager->rm.rm_lock);
 	instance = pd_manager->next_instance++;
-	if (phys_addr_mode)
+	if (phys_addr_mode) {
 		pd->owner_id = OWNER_ID_PHYS_MODE;
-	else
-		pd->owner_id = efrm_pd_owner_id_alloc();
+	}
+	else {
+#ifdef CONFIG_SFC_RESOURCE_VF
+		if (vf_opt != NULL)
+			owner_ids = vf_opt->owner_ids;
+		else
+#endif
+		owner_ids = efrm_nic_from_client(client_opt)->owner_ids;
+		EFRM_ASSERT(owner_ids != NULL);
+		pd->owner_id = efrm_pd_owner_id_alloc(owner_ids);
+	}
 	spin_unlock_bh(&pd_manager->rm.rm_lock);
 	if (pd->owner_id == OWNER_ID_ALLOC_FAIL) {
 		rc = -EBUSY;
@@ -156,8 +223,21 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		client_opt = vfrs->rs_client;
 	}
 #endif
+	if (!phys_addr_mode) {
+		int ord;
+		for (ord = 0; ord < orders_num; ord++) {
+			efrm_bt_manager_ctor(
+				&pd->bt_managers[ord], pd->owner_id,
+				efhw_nic_buffer_table_orders(
+						client_opt->nic)[ord]
+				);
+		}
+	}
 	efrm_resource_init(&pd->rs, EFRM_RESOURCE_PD, instance);
 	efrm_client_add_resource(client_opt, &pd->rs);
+
+	pd->os_data = efrm_pd_os_stats_ctor(pd);
+
 	*pd_out = pd;
 	return 0;
 
@@ -180,14 +260,34 @@ EXPORT_SYMBOL(efrm_pd_release);
 
 void efrm_pd_free(struct efrm_pd *pd)
 {
+	struct efrm_pd_owner_ids *owner_ids;
+
+	efrm_pd_os_stats_dtor(pd, pd->os_data);
+
 	spin_lock_bh(&pd_manager->rm.rm_lock);
-	if (pd->owner_id != OWNER_ID_PHYS_MODE)
-		efrm_pd_owner_id_free(pd->owner_id);
+	if (pd->owner_id != OWNER_ID_PHYS_MODE) {
+#ifdef CONFIG_SFC_RESOURCE_VF
+		if (pd->vf)
+			owner_ids = pd->vf->owner_ids;
+		else
+#endif
+		owner_ids = efrm_nic_from_rs(&pd->rs)->owner_ids;
+		EFRM_ASSERT(owner_ids != NULL);
+		efrm_pd_owner_id_free(owner_ids, pd->owner_id);
+	}
 	spin_unlock_bh(&pd_manager->rm.rm_lock);
 #ifdef CONFIG_SFC_RESOURCE_VF
 	if (pd->vf != NULL)
 		efrm_vf_resource_release(pd->vf);
 #endif
+	if (pd->owner_id != OWNER_ID_PHYS_MODE) {
+		int ord;
+		for (ord = 0;
+		     ord < efhw_nic_buffer_table_orders_num(
+					pd->rs.rs_client->nic);
+		     ord++)
+			efrm_bt_manager_dtor(&pd->bt_managers[ord]);
+	}
 	efrm_client_put(pd->rs.rs_client);
 	kfree(pd);
 }
@@ -315,7 +415,7 @@ static void efrm_pd_dma_unmap_iommu(efhw_iommu_domain *iommu_domain,
 {
 	while (--n_pages >= 0) {
 		mutex_lock(&efrm_iommu_mutex);
-		iommu_unmap(iommu_domain, *pci_addrs, gfp_order);
+		iommu_unmap(iommu_domain, *pci_addrs, PAGE_SIZE << gfp_order);
 		mutex_unlock(&efrm_iommu_mutex);
 		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
 	}
@@ -333,25 +433,8 @@ static int efrm_pd_dma_map_iommu(efhw_iommu_domain *iommu_domain,
 	int i, rc;
 
 	for (i = 0; i < n_pages; ++i) {
-#ifdef HPAGE_SHIFT
-		/* Yes, this is just crazy, but iommu_map does not
-		 * correctly map 2M (huge|compound) pages on SLES11
-		 * linux-3.0 Intel IOMMU. */
-		if (gfp_order == HPAGE_SHIFT - PAGE_SHIFT) {
-			unsigned long shift = 1 << (HPAGE_SHIFT - 1);
-			rc = iommu_map(iommu_domain, iovaddr,
-				       page_to_phys(*pages), gfp_order - 1,
-				       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
-			if (rc >= 0)
-				rc = iommu_map(iommu_domain, iovaddr + shift,
-					       page_to_phys(*pages) + shift,
-					       gfp_order - 1,
-					       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
-		}
-		else
-#endif
 		rc = iommu_map(iommu_domain, iovaddr,
-			       page_to_phys(*pages), gfp_order,
+			       page_to_phys(*pages), PAGE_SIZE << gfp_order,
 			       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
 		if (rc < 0) {
 			EFRM_ERR("%s: ERROR: iommu_map failed (%d)",
@@ -439,81 +522,191 @@ static int efrm_pd_dma_map_nic(struct efrm_pd *pd,
 }
 
 
-static void efrm_pd_dma_unmap_bt(struct efrm_pd *pd, int n_pages,
-				 dma_addr_t *pci_addrs, int pci_addrs_stride,
-				 struct efhw_buffer_table_allocation *bt_alloc)
+static inline int efrm_pd_bt_find_order_idx(struct efrm_pd *pd,
+					    int max_order)
 {
-	struct efhw_nic *nic = efrm_client_get_nic(pd->rs.rs_client);
-	efrm_nic_buffer_table_free(efrm_nic(nic), bt_alloc);
+	int ord_idx;
+
+	ord_idx = efhw_nic_buffer_table_orders_num(pd->rs.rs_client->nic) - 1;
+	while (pd->bt_managers[ord_idx].order > max_order) {
+		ord_idx--;
+		EFRM_ASSERT(ord_idx >= 0);
+	}
+
+	return ord_idx;
+}
+
+static void efrm_pd_dma_unmap_bt(struct efrm_pd *pd,
+				 struct efrm_buffer_table_allocation *bt_alloc)
+{
+	int ord_idx = efrm_pd_bt_find_order_idx(pd, bt_alloc->bta_order);
+
+	efrm_bt_manager_free(efrm_client_get_nic(pd->rs.rs_client),
+			     &pd->bt_managers[ord_idx], bt_alloc);
 }
 
 
-static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
-			      struct page **pages, int pages_stride,
-			      dma_addr_t *pci_addrs, int pci_addrs_stride,
-			      uint64_t *user_addrs, int user_addrs_stride,
-			      void (*user_addr_put)(uint64_t, uint64_t *),
-			      struct efhw_buffer_table_allocation *bt_alloc)
+static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int gfp_order,
+			  dma_addr_t *pci_addrs, int pci_addrs_stride,
+			  uint64_t *user_addrs, int user_addrs_stride,
+			  void (*user_addr_put)(uint64_t, uint64_t *),
+			  struct efrm_buffer_table_allocation *bt_alloc)
 {
-	struct efhw_nic *nic = efrm_client_get_nic(pd->rs.rs_client);
+	int i, j, n, first;
+	dma_addr_t *dma_addrs;
+	dma_addr_t base_dma_addr;
 	uint64_t user_addr;
-	int i, rc;
+	struct efhw_buffer_table_block *block;
+	int nic_sub_order = EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order) -
+						bt_alloc->bta_order;
 
-	rc = efrm_nic_buffer_table_alloc(efrm_nic(nic),
-			fls(n_pages * (1 << gfp_order) - 1),
-			bt_alloc);
-	if (rc < 0) {
-		EFRM_ERR("%s: ERROR: out of buffer table (%d pages)",
-			 __FUNCTION__, n_pages);
-		return rc;
-	}
-	user_addr = bt_alloc->base << 12u;
+	if (pd->owner_id == OWNER_ID_PHYS_MODE) 
+		return 0;
+
+	dma_addrs = kmalloc((n_pages << nic_sub_order) * sizeof(dma_addr_t),
+			    GFP_ATOMIC);
+	if (dma_addrs == NULL)
+		return -ENOMEM;
 	for (i = 0; i < n_pages; ++i) {
-		efrm_buffer_table_set_n(bt_alloc, nic, 1 << gfp_order,
-				        i << gfp_order, *pci_addrs, pd->owner_id);
+		base_dma_addr = *pci_addrs;
+		for (j = 0; j < (1 << nic_sub_order); j++) {
+			dma_addrs[(i << nic_sub_order) + j] = base_dma_addr;
+			base_dma_addr += EFHW_NIC_PAGE_SIZE <<
+							bt_alloc->bta_order;
+		}
 		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
-		pages = (void *)((char *)pages + pages_stride);
-		user_addr_put(user_addr, user_addrs);
-		user_addrs = (void *)((char *)user_addrs + user_addrs_stride);
-		user_addr += 4096 << gfp_order;
 	}
-	efrm_buffer_table_commit(nic);
+	efrm_bt_nic_set(efrm_client_get_nic(pd->rs.rs_client),
+			bt_alloc, dma_addrs);
+	kfree(dma_addrs);
+
+	block = bt_alloc->bta_blocks;
+	n = bt_alloc->bta_size;
+	first = bt_alloc->bta_first_entry_offset;
+	do {
+		user_addr = block->btb_vaddr +
+			(first << (EFHW_NIC_PAGE_SHIFT + bt_alloc->bta_order));
+		first = 0;
+		for (i = 0;
+		     i < min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE) <<
+						bt_alloc->bta_order;
+		     i++) {
+			user_addr_put(user_addr, user_addrs);
+			user_addrs = (void *)((char *)user_addrs +
+							user_addrs_stride);
+			user_addr += EFHW_NIC_PAGE_SIZE;
+		}
+		block = block->btb_next;
+		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
+	} while (n > 0);
 	return 0;
 }
 
+/* Check that PCI addresses are properly aligned for the buffer table
+ * pages we have selected. */
+static inline int
+efrm_pd_nic_order_fixup(struct efrm_pd *pd, int ord_idx, int n_pages,
+			dma_addr_t *pci_addrs, int pci_addrs_stride)
+{
+	dma_addr_t pci_addr_or = 0;
+	int i;
 
-static void efrm_pd_copy_user_addrs(struct efrm_pd *pd, int n_pages,
+	if (ord_idx == 0)
+		return 0;
+
+	for (i =0; i < n_pages; i++) {
+		pci_addr_or |= *pci_addrs;
+		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
+	}
+	EFRM_ASSERT((pci_addr_or & (EFHW_NIC_PAGE_SIZE - 1)) == 0);
+	pci_addr_or >>= EFHW_NIC_PAGE_SHIFT;
+
+	if (pci_addr_or & ((1 << pd->bt_managers[ord_idx].order) - 1))
+		return efrm_pd_bt_find_order_idx(pd, __ffs(pci_addr_or));
+
+	return ord_idx;
+}
+
+static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
+			      dma_addr_t *pci_addrs, int pci_addrs_stride,
+			      uint64_t *user_addrs, int user_addrs_stride,
+			      void (*user_addr_put)(uint64_t, uint64_t *),
+			      struct efrm_buffer_table_allocation *bt_alloc)
+{
+	int rc;
+	int ord_idx;
+	int nic_order = EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order);
+
+	ord_idx = efrm_pd_bt_find_order_idx(pd, nic_order);
+	ord_idx = efrm_pd_nic_order_fixup(pd, ord_idx, n_pages,
+					  pci_addrs, pci_addrs_stride);
+
+	rc = efrm_bt_manager_alloc(
+			efrm_client_get_nic(pd->rs.rs_client),
+			&pd->bt_managers[ord_idx],
+			n_pages << (EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order)
+				    - pd->bt_managers[ord_idx].order),
+			bt_alloc);
+	if (rc < 0) {
+		EFRM_ERR("%s: ERROR: out of buffer table (%d pages order %d)",
+			 __FUNCTION__, n_pages, gfp_order);
+		return rc;
+	}
+
+	return efrm_pd_bt_map(pd, n_pages, gfp_order,
+			      pci_addrs, pci_addrs_stride,
+			      user_addrs, user_addrs_stride,
+			      user_addr_put, bt_alloc);
+}
+
+
+static void efrm_pd_copy_user_addrs(struct efrm_pd *pd,
+			    int n_pages, int gfp_order,
 			    dma_addr_t *pci_addrs, int pci_addrs_stride,
 			    uint64_t *user_addrs, int user_addrs_stride,
 			    void (*user_addr_put)(uint64_t, uint64_t *))
 {
-	int i;
+	int i, j, k;
+
+	/* user_addrs is for pages of size EFHW_NIC_PAGE_SIZE, always.
+	 * PAGE_SIZE >= EFHW_NIC_PAGE_SIZE */
 	for (i = 0; i < n_pages; ++i) {
-		user_addr_put(*pci_addrs, user_addrs);
+		for (j = 0; j < 1 << gfp_order; j++)
+		for (k = 0; k < PAGE_SIZE / EFHW_NIC_PAGE_SIZE; k++) {
+			user_addr_put(*pci_addrs + PAGE_SIZE * j +
+				      EFHW_NIC_PAGE_SIZE * k, user_addrs);
+			user_addrs = (void *)((char *)user_addrs +
+					      user_addrs_stride);
+		}
 		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
-		user_addrs = (void *)((char *)user_addrs + user_addrs_stride);
 	}
 }
 
 
 int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 			 dma_addr_t *pci_addrs, int pci_addrs_stride,
-			 struct efhw_buffer_table_allocation *bt_alloc)
+			 uint64_t *user_addrs, int user_addrs_stride,
+			 void (*user_addr_put)(uint64_t, uint64_t *),
+			 struct efrm_buffer_table_allocation *bt_alloc)
 {
-	struct efhw_nic *nic = efrm_client_get_nic(pd->rs.rs_client);
-	int i;
+	int rc;
+	int ord_idx = efrm_pd_bt_find_order_idx(pd, bt_alloc->bta_order);
 
-	if (pd->owner_id == OWNER_ID_PHYS_MODE) 
-		return 0;
+	if (pd->owner_id == OWNER_ID_PHYS_MODE)
+		return -ENOSYS;
 
-	for (i = 0; i < n_pages; ++i) {
-		efrm_buffer_table_set_n(bt_alloc, nic, 1 << gfp_order,
-					i << gfp_order, *pci_addrs, pd->owner_id);
-		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
+	rc = efrm_bt_manager_realloc(efrm_client_get_nic(pd->rs.rs_client),
+				     &pd->bt_managers[ord_idx], bt_alloc);
+	if (rc < 0) {
+		EFRM_ERR("%s: ERROR: out of buffer table (%d pages)",
+			 __FUNCTION__, n_pages);
+		return rc;
 	}
-	efrm_buffer_table_commit(nic);
 
-	return 0;
+	return efrm_pd_bt_map(pd, n_pages, gfp_order,
+			      pci_addrs, pci_addrs_stride,
+			      user_addrs, user_addrs_stride,
+			      user_addr_put, bt_alloc);
 }
 EXPORT_SYMBOL(efrm_pd_dma_remap_bt);
 
@@ -523,7 +716,7 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 		    void *p_pci_addrs, int pci_addrs_stride,
 		    uint64_t *user_addrs, int user_addrs_stride,
 		    void (*user_addr_put)(uint64_t, uint64_t *),
-		    struct efhw_buffer_table_allocation *bt_alloc)
+		    struct efrm_buffer_table_allocation *bt_alloc)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	int rc;
@@ -543,14 +736,13 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 
 	if (pd->owner_id != OWNER_ID_PHYS_MODE) {
 		rc = efrm_pd_dma_map_bt(pd, n_pages, gfp_order,
-					pages, pages_stride,
 					pci_addrs, pci_addrs_stride,
 					user_addrs, user_addrs_stride,
 					user_addr_put, bt_alloc);
 		if (rc < 0)
 			goto fail2;
 	} else {
-		efrm_pd_copy_user_addrs(pd, n_pages,
+		efrm_pd_copy_user_addrs(pd, n_pages, gfp_order,
 					pci_addrs, pci_addrs_stride,
 					user_addrs, user_addrs_stride,
 					user_addr_put);
@@ -575,12 +767,11 @@ EXPORT_SYMBOL(efrm_pd_dma_map);
 
 void efrm_pd_dma_unmap(struct efrm_pd *pd, int n_pages, int gfp_order,
 		       void *p_pci_addrs, int pci_addrs_stride,
-		       struct efhw_buffer_table_allocation *bt_alloc)
+		       struct efrm_buffer_table_allocation *bt_alloc)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	if (pd->owner_id != OWNER_ID_PHYS_MODE)
-		efrm_pd_dma_unmap_bt(pd, n_pages, pci_addrs, pci_addrs_stride,
-				     bt_alloc);
+		efrm_pd_dma_unmap_bt(pd, bt_alloc);
 #ifdef CONFIG_SFC_RESOURCE_VF
 	if (pd->vf != NULL)
 		efrm_pd_dma_unmap_vf(pd, n_pages, gfp_order,
@@ -610,9 +801,6 @@ efrm_create_pd_resource_manager(struct efrm_resource_manager **rm_out)
 		return -ENOMEM;
 	memset(rm, 0, sizeof(*rm));
 
-	/* Owner-ID 0 is special.  We must not allocate it to users. */
-	__set_bit(0, rm->used_owner_ids);
-
 	rc = efrm_resource_manager_ctor(&rm->rm, efrm_pd_rm_dtor,
 					"PD", EFRM_RESOURCE_PD);
 	if (rc < 0)
@@ -626,3 +814,23 @@ fail1:
 	kfree(rm);
 	return rc;
 }
+
+
+struct efrm_bt_manager *
+efrm_pd_bt_manager_next(struct efrm_pd *pd, struct efrm_bt_manager *prev)
+{
+	int i;
+
+	if (prev == NULL)
+		return &pd->bt_managers[0];
+
+	for (i = 0;
+	     i < efhw_nic_buffer_table_orders_num(pd->rs.rs_client->nic) - 1;
+	     i++) {
+		if (prev == &pd->bt_managers[i])
+			return &pd->bt_managers[i+1];
+	}
+
+	return NULL;
+}
+

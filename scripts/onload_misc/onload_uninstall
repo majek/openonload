@@ -29,6 +29,7 @@ PATH="$PATH:/sbin"; export PATH
 
 libexec=/usr/libexec/onload
 manifest="$libexec/uninstall_manifest"
+i_include=$i_prefix/usr/include/onload
 
 [ -f "$manifest" ] ||
   fail "ERROR: Uninstall manifest not found at '$manifest'"
@@ -41,6 +42,17 @@ rm -f "$manifest" || {
   fail "ERROR: You need to be 'root' to run this script."
 }
 
+log "Removing init scripts..."
+if [ -x /usr/lib/lsb/remove_initd ]; then
+  /usr/lib/lsb/remove_initd /etc/init.d/openonload;
+elif which chkconfig &>/dev/null; then
+  chkconfig --del openonload;
+elif which update-rc.d &>/dev/null; then
+  update-rc.d -f openonload remove;
+else
+  rm -f /etc/rc.d/rc*.d/*openonload;
+fi
+
 log "Removing OpenOnload files..."
 cd /
 exec 5<"$m" || exit
@@ -48,6 +60,9 @@ while read -r f <&5; do
   rm -rf "$f"
 done
 exec 5<&-
+
+rmdir $i_include &> /dev/null || \
+    log "Leaving $i_include directoy as it's not empty."
 
 ldconfig -n /usr/lib /usr/lib64
 
@@ -63,5 +78,8 @@ grep "^/lib/modules/" "$m" | sed 's+/lib/modules/\([^/]*\)/.*+\1+' |
     /sbin/depmod "$kver"
   done
 
+log "Removing temporary files..."
 rm -f "$m"
+
 log "Done."
+

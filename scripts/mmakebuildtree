@@ -59,7 +59,7 @@ check_platform_exists () {
   [ -f "$TOP/mk/platform/$1.mk" ] && return 0
   pwd
   log "$p: Platform '$1' not known"
-  log "    (cannot find file '\$TOP/mk/platform/$1.mk')"
+  log "    (cannot find file '$TOP/mk/platform/$1.mk')"
   log
   usage
 }

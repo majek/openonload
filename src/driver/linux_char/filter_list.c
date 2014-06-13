@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -39,10 +39,8 @@ void efch_filter_list_init(struct efch_filter_list *fl)
 
 static void __efch_filter_list_del(struct efrm_resource *rs, struct filter *f)
 {
-  struct efhw_nic* nic;
   ci_dllist_remove(&f->link);
-  nic = efrm_client_get_nic(rs->rs_client);
-  efx_dl_filter_remove(linux_efhw_nic(nic)->dl_device, f->filter_id);
+  efrm_filter_remove(rs->rs_client, f->filter_id);
   ci_free(f);
 }
 
@@ -63,7 +61,6 @@ static int efch_filter_list_add(struct efrm_resource *rs,
                                 struct efx_filter_spec *spec,
                                 ci_resource_op_t* op, bool replace)
 {
-  struct efhw_nic* nic;
   struct filter* f;
   int rc;
 
@@ -72,9 +69,8 @@ static int efch_filter_list_add(struct efrm_resource *rs,
 
   if( (f = ci_alloc(sizeof(*f))) == NULL )
     return -ENOMEM;
-  nic = efrm_client_get_nic(rs->rs_client);
- 
-  rc = efrm_filter_insert (linux_efhw_nic(nic)->dl_device, spec, replace);
+
+  rc = efrm_filter_insert(rs->rs_client, spec, replace);
   if( rc < 0 ) {
     ci_free(f);
     return rc;
@@ -94,7 +90,6 @@ int efch_filter_list_add_ip4(struct efrm_resource *rs,
 {
   struct efx_filter_spec spec;
   int rc;
-
   efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
                      EFX_FILTER_FLAG_RX_SCATTER | efx_filter_flags,
                      rs->rs_instance);
@@ -108,6 +103,33 @@ int efch_filter_list_add_ip4(struct efrm_resource *rs,
     rc = efx_filter_set_ipv4_local(&spec, op->u.filter_add.ip4.protocol,
                                    op->u.filter_add.ip4.host_be32,
                                    op->u.filter_add.ip4.port_be16);
+  return (rc < 0) ? rc : efch_filter_list_add(rs, fl, &spec, op, false);
+}
+
+
+int efch_filter_list_add_ip4_vlan(struct efrm_resource *rs,
+				  struct efch_filter_list *fl,
+				  ci_resource_op_t* op,
+				  unsigned efx_filter_flags)
+{
+  struct efx_filter_spec spec;
+  int rc;
+  efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
+                     EFX_FILTER_FLAG_RX_SCATTER | efx_filter_flags,
+                     rs->rs_instance);
+  if( op->u.filter_add.ip4.rhost_be32 )
+    rc = efx_filter_set_ipv4_full(&spec, op->u.filter_add.ip4.protocol,
+                                  op->u.filter_add.ip4.host_be32,
+                                  op->u.filter_add.ip4.port_be16,
+                                  op->u.filter_add.ip4.rhost_be32,
+                                  op->u.filter_add.ip4.rport_be16);
+  else
+    rc = efx_filter_set_ipv4_local(&spec, op->u.filter_add.ip4.protocol,
+                                   op->u.filter_add.ip4.host_be32,
+                                   op->u.filter_add.ip4.port_be16);
+  if( rc < 0 )
+    return rc;
+  rc = efx_filter_set_eth_local(&spec, op->u.filter_add.mac.vlan_id, NULL);
   return (rc < 0) ? rc : efch_filter_list_add(rs, fl, &spec, op, false);
 }
 
@@ -146,9 +168,40 @@ int efch_filter_list_add_all_unicast(struct efrm_resource *rs,
 #else
   ci_log("%s: Unicast-default filter not supported by this sfc driver",
          __FUNCTION__);
-  rc = ENOPROTOOPT;
+  rc = -ENOPROTOOPT;
 #endif
   return (rc < 0) ? rc : efch_filter_list_add(rs, fl, &spec, op, true);
+}
+
+
+int efch_filter_list_add_all_unicast_vlan(struct efrm_resource *rs,
+                                          struct efch_filter_list *fl,
+                                          ci_resource_op_t* op,
+                                          unsigned efx_filter_flags)
+{
+  struct efx_filter_spec spec;
+  int rc;
+
+  efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
+                     EFX_FILTER_FLAG_RX_SCATTER | efx_filter_flags,
+                     rs->rs_instance);
+
+#if EFX_DRIVERLINK_API_VERSION >= 5
+  if( capable(CAP_NET_ADMIN) ) {
+    rc = efx_filter_set_uc_def(&spec);
+    if( rc < 0 )
+      return rc;
+    rc = efx_filter_set_eth_local(&spec, op->u.filter_add.mac.vlan_id, NULL);
+    if( rc < 0 )
+      return rc;
+    return efch_filter_list_add(rs, fl, &spec, op, true);
+  }
+  return -EPERM;
+#else
+  ci_log("%s: Unicast-default filter not supported by this sfc driver",
+         __FUNCTION__);
+  return -ENOPROTOOPT;
+#endif
 }
 
 
@@ -168,9 +221,40 @@ int efch_filter_list_add_all_multicast(struct efrm_resource *rs,
 #else
   ci_log("%s: Multicast-default filter not supported by this sfc driver",
          __FUNCTION__);
-  rc = ENOPROTOOPT;
+  rc = -ENOPROTOOPT;
 #endif
   return (rc < 0) ? rc : efch_filter_list_add(rs, fl, &spec, op, true);
+}
+
+
+int efch_filter_list_add_all_multicast_vlan(struct efrm_resource *rs,
+                                            struct efch_filter_list *fl,
+                                            ci_resource_op_t* op,
+                                            unsigned efx_filter_flags)
+{
+  struct efx_filter_spec spec;
+  int rc;
+
+  efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
+                     EFX_FILTER_FLAG_RX_SCATTER | efx_filter_flags,
+                     rs->rs_instance);
+
+#if EFX_DRIVERLINK_API_VERSION >= 5
+  if( capable(CAP_NET_ADMIN) ) {
+    rc = efx_filter_set_mc_def(&spec);
+    if( rc != 0 )
+      return rc;
+    rc = efx_filter_set_eth_local(&spec, op->u.filter_add.mac.vlan_id, NULL);
+    if( rc != 0 )
+      return rc;
+    return efch_filter_list_add(rs, fl, &spec, op, true);
+  }
+  return -EPERM;
+#else
+  ci_log("%s: Multicast-default filter not supported by this sfc driver",
+         __FUNCTION__);
+  return -ENOPROTOOPT;
+#endif
 }
 
 
@@ -203,6 +287,10 @@ int efch_filter_list_op(struct efrm_resource *rs, struct efch_filter_list *fl,
     rc = efch_filter_list_add_ip4(rs, fl, op, efx_filter_flags);
     *copy_out = 1;
     break;
+  case CI_RSOP_FILTER_ADD_IP4_VLAN:
+    rc = efch_filter_list_add_ip4_vlan(rs, fl, op, efx_filter_flags);
+    *copy_out = 1;
+    break;
   case CI_RSOP_FILTER_ADD_MAC:
     rc = efch_filter_list_add_mac(rs, fl, op, efx_filter_flags);
     *copy_out = 1;
@@ -211,8 +299,16 @@ int efch_filter_list_op(struct efrm_resource *rs, struct efch_filter_list *fl,
     rc = efch_filter_list_add_all_unicast(rs, fl, op, efx_filter_flags);
     *copy_out = 1;
     break;
+  case CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN:
+    rc = efch_filter_list_add_all_unicast_vlan(rs, fl, op, efx_filter_flags);
+    *copy_out = 1;
+    break;
   case CI_RSOP_FILTER_ADD_ALL_MULTICAST:
     rc = efch_filter_list_add_all_multicast(rs, fl, op, efx_filter_flags);
+    *copy_out = 1;
+    break;
+  case CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN:
+    rc = efch_filter_list_add_all_multicast_vlan(rs, fl, op, efx_filter_flags);
     *copy_out = 1;
     break;
   case CI_RSOP_FILTER_DEL:

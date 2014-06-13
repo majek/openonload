@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -99,6 +99,11 @@ struct efrm_resource {
 /*! Factory for resources of a specific type */
 struct efrm_resource_manager {
 	const char *rm_name;	/*!< human readable only */
+	/** 
+	 * This lock exists to protect the linked lists (including
+	 * some in other data structures such as the flush-related
+	 * lists) and associated state
+	 */
 	spinlock_t rm_lock;
 #ifndef NDEBUG
 	unsigned rm_type;

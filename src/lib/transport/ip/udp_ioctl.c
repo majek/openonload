@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -165,7 +165,8 @@ static int ci_udp_ioctl_slow(ci_netif* ni, ci_udp_state* us,
   /* Keep the O/S socket in sync.  Also checks that this is a valid ioctl()
    * for a UDP socket on this kernel.
    */
-  if( (os_rc = oo_os_sock_ioctl(ni, us->s.b.bufid, request, arg, NULL)) < 0 )
+  if( request != FIOASYNC &&
+      (os_rc = oo_os_sock_ioctl(ni, us->s.b.bufid, request, arg, NULL)) < 0 )
     return os_rc;
 
   switch( request ) {
@@ -177,14 +178,15 @@ static int ci_udp_ioctl_slow(ci_netif* ni, ci_udp_state* us,
     break;
 
   case FIOASYNC:
-    /* Need to apply this to [fd] as well as the OS socket so that our
-     * fasync file-op will be invoked.
+    /* Need to apply this to [fd] so that our fasync file-op will be invoked.
      */
     rc = ci_sys_ioctl(fd, request, arg);
-    if( rc < 0 )
+    if( rc < 0 ) {
       /* This is very unexpected, as it worked on the OS socket. */
       LOG_E(ci_log("%s: ERROR: FIOASYNC failed on fd=%d rc=%d errno=%d",
                    __FUNCTION__, fd, rc, errno));
+      rc = -errno;
+    }
     break;
 
   case SIOCSPGRP:
@@ -244,7 +246,7 @@ static int ci_udp_ioctl_locked(ci_netif* ni, ci_udp_state* us,
             OO_PP_NOT_NULL(pkt->next) )
           pkt = PKT_CHK(ni, pkt->next);
         if( !(pkt->pf.udp.rx_flags & CI_IP_PKT_FMT_PREFIX_UDP_RX_CONSUMED) ) {
-          *(int*) arg = pkt->pay_len;
+          *(int*) arg = pkt->pf.udp.pay_len;
           return 0;
         }
       }

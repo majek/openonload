@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,6 +58,7 @@ static inline void efab_syscall_exit(void)
 #ifdef CONFIG_PREEMPT
   preempt_check_resched(); /* try to be more safe: better resched now */
 #endif
+
   atomic_dec(&efab_syscall_used);
 }
 
@@ -100,7 +101,21 @@ extern asmlinkage long
 efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oact, size_t sigsetsize);
 #ifdef CONFIG_COMPAT
+#if ! defined (__PPC__)
 #include <asm/ia32.h>
+#else
+#include <linux/compat.h>
+/* sigaction32 is not public on PPC, extracted from arch/powerpc/kernel/ppc32.h */
+/* It shall not be a problem, since it's kernel-to-userspace interface which 
+ * unlikely to change
+ */
+struct sigaction32 {
+       compat_uptr_t  sa_handler;       /* Really a pointer, but need to deal with 32 bits */
+       unsigned int sa_flags;
+       compat_uptr_t sa_restorer;       /* Another 32 bit pointer */
+       compat_sigset_t sa_mask;         /* A 32 bit mask */
+};
+#endif
 extern asmlinkage int
 efab_linux_trampoline_sigaction32(int sig, const struct sigaction32 *act32,
                                   struct sigaction32 *oact32,
@@ -112,9 +127,10 @@ struct mm_hash;
 struct mm_signal_data;
 extern int efab_signal_mm_init(const ci_tramp_reg_args_t *args,
                                struct mm_hash *p);
-extern void efab_signal_process_init(const struct mm_signal_data *tramp_data);
-extern void efab_signal_process_fini(const struct mm_signal_data *tramp_data);
+extern void efab_signal_process_init(struct mm_signal_data *tramp_data);
+extern void efab_signal_process_fini(struct mm_signal_data *tramp_data);
 extern int efab_signal_die(ci_private_t *priv_unused, void *arg);
+extern void efab_signal_put_tramp_data(struct mm_signal_data *tramp_data);
 
 #endif
 /*! \cidoxg_end */

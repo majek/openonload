@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,9 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2010 Solarflare Communications Inc.
+ * Copyright 2006-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -517,16 +517,7 @@ static int efx_begin_loopback(struct efx_tx_queue *tx_queue)
 static int efx_poll_loopback(struct efx_nic *efx)
 {
 	struct efx_loopback_state *state = efx->loopback_selftest;
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD_NAPI)
-	struct efx_channel *channel;
 
-	/* NAPI polling is not enabled, so process channels
-	 * synchronously */
-	efx_for_each_channel(channel, efx) {
-		if (channel->work_pending)
-			efx_process_channel_now(channel);
-	}
-#endif
 	return atomic_read(&state->rx_good) == state->packet_count;
 }
 
@@ -658,12 +649,6 @@ static int efx_wait_for_link(struct efx_nic *efx)
 			mutex_lock(&efx->mac_lock);
 			efx->type->monitor(efx);
 			mutex_unlock(&efx->mac_lock);
-		} else {
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD_NAPI)
-			struct efx_channel *channel = efx_get_channel(efx, 0);
-			if (channel->work_pending)
-				efx_process_channel_now(channel);
-#endif
 		}
 
 		mutex_lock(&efx->mac_lock);
@@ -688,7 +673,8 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct efx_self_tests *tests,
 {
 	enum efx_loopback_mode mode;
 	struct efx_loopback_state *state;
-	struct efx_channel *channel = efx_get_channel(efx, 0);
+	struct efx_channel *channel =
+		efx_get_channel(efx, efx->tx_channel_offset);
 	struct efx_tx_queue *tx_queue;
 	int rc = 0;
 	bool retry;
@@ -883,6 +869,7 @@ void efx_selftest_async_cancel(struct efx_nic *efx)
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
 	cancel_delayed_work_sync(&efx->selftest_work);
 #else
+	cancel_delayed_work(&efx->selftest_work);
 	flush_workqueue(efx_workqueue);
 #endif
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,69 +55,61 @@
 #define __CI_EFRM_BUFFER_TABLE_H__
 
 #include <ci/efhw/efhw_types.h>
+#include <ci/efrm/debug.h>
 
 
-struct efrm_nic;
-struct efhw_buffer_table_allocation;
+struct efrm_buffer_table_allocation {
+	/* list of blocks, not null-terminated */
+	struct efhw_buffer_table_block *bta_blocks;
 
+	/* first used entry in the first block */
+	int bta_first_entry_offset;
 
-/*--------------------------------------------------------------------
- *
- * NIC's buffer table.
- *
- *--------------------------------------------------------------------*/
+	/* number of buffer table entries */
+	int bta_size;
 
-/*! Managed interface. */
+	/* order of each bt entry */
+	int bta_order;
+};
 
-/*! construct a managed buffer table object, allocated over a region of
- *  the NICs buffer table space
- */
-extern int efrm_buffer_table_ctor(unsigned low, unsigned high);
-/*! destructor for above */
-extern void efrm_buffer_table_dtor(void);
+/* Manager to keep together similar buffer table allocations.
+ * All blocks should have same nic, owner and order.
+ * User is also responsible for locking. */
+struct efrm_bt_manager {
+	/* Block with some free entries */
+	struct efhw_buffer_table_block *btm_block;
 
-/*! allocate a contiguous region of buffer table space */
-extern int efrm_buffer_table_alloc(unsigned order,
-				   struct efhw_buffer_table_allocation *a);
+	/* Owner for all buftable entries we manage */
+	int owner;
 
-/* Return the [min,max) buffer table entries that may be returned
- * by efrm_buffer_table_alloc() */
-extern void efrm_buffer_table_limits(int *low, int *high);
+	/* Order for all buftable entries we manage */
+	int order;
 
+	/* Lock to protect btm_block buffer from being released and
+	 * btb_free_mask inside shared blocks.
+	 * Do not include any efhw operations into protected area,
+	 * because efhw ops may sleep. */
+	spinlock_t btm_lock;
 
-/* Initialise per-nic buffer table allocator. */
-extern int efrm_nic_buffer_table_ctor(struct efrm_nic *,
-				      int bt_min, int bt_lim);
+	/* Number of blocks allocated under this manager */
+	atomic_t btm_blocks;
+	/* Number of entries allocated under this manager */
+	atomic_t btm_entries;
+};
 
-/* Destroy per-nic buffer table allocator. */
-extern void efrm_nic_buffer_table_dtor(struct efrm_nic *);
-
-/* Allocate buffer table entries for use with single NIC. */
-extern int efrm_nic_buffer_table_alloc(struct efrm_nic *, unsigned order,
-				       struct efhw_buffer_table_allocation *);
-
-/* Free buffer table entries allocated with efrm_nic_buffer_table_alloc. */
-extern void efrm_nic_buffer_table_free(struct efrm_nic *,
-				       struct efhw_buffer_table_allocation *);
-
-
-/*--------------------------------------------------------------------
- *
- * buffer table operations through the HW independent API
- *
- *--------------------------------------------------------------------*/
-
-/*! free a previously allocated region of buffer table space */
-extern void efrm_buffer_table_free(struct efhw_buffer_table_allocation *a);
-
-extern void efrm_buffer_table_commit(struct efhw_nic*);
-
-extern void efrm_buffer_table_set(struct efhw_buffer_table_allocation *,
-				  struct efhw_nic *,
-				  unsigned i, dma_addr_t dma_addr, int owner);
-extern void efrm_buffer_table_set_n(struct efhw_buffer_table_allocation *a,
-				    struct efhw_nic *nic, int n_pages,
-				    unsigned i, dma_addr_t dma_addr, int owner);
-
+/* This function is used for queue-backed bt entries, i.e. for
+ * falcon/siena only. */
+static inline int
+efrm_bt_allocation_base(struct efrm_buffer_table_allocation *a)
+{
+	EFRM_ASSERT(a->bta_order == 0);
+	if (a->bta_size == 0)
+		return 0;
+	EFRM_ASSERT(a->bta_size <= EFHW_BUFFER_TABLE_BLOCK_SIZE);
+	EFRM_ASSERT(a->bta_size + a->bta_first_entry_offset  <=
+		    EFHW_BUFFER_TABLE_BLOCK_SIZE);
+	return a->bta_first_entry_offset +
+		(a->bta_blocks->btb_vaddr >> EFHW_NIC_PAGE_SHIFT);
+}
 
 #endif /* __CI_EFRM_BUFFER_TABLE_H__ */

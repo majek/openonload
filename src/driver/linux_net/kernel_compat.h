@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,9 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2011 Solarflare Communications Inc.
+ * Copyright 2006-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -51,6 +51,16 @@
 #include <linux/vmalloc.h>
 #include <linux/if_vlan.h>
 #include <linux/time.h>
+#include <linux/bitops.h>
+#include <linux/jhash.h>
+#ifdef CONFIG_SFC_MTD
+/* This is conditional because Onload also includes kernel_compat.h
+ * and the RHEL 4 workaround of a local <mtd/mtd-abi.h> doesn't work
+ * for it due to differing header search paths.
+ */
+#include "linux_mtd_mtd.h"
+#endif
+#include <asm/byteorder.h>
 #include <net/ip.h>
 
 /**************************************************************************
@@ -60,6 +70,10 @@
  **************************************************************************/
 
 #include "autocompat.h"
+
+#ifdef KMP_RELEASE
+#include "kabi_compat.h"
+#endif
 
 /**************************************************************************
  *
@@ -107,8 +121,8 @@
 	#define EFX_NEED_NETIF_DEVICE_DETACH_ATTACH_MQ yes
 #endif
 
-#if defined(EFX_USE_IOCTL_RESET_FLAGS) && defined(EFX_HAVE_LINUX_MDIO_H)
-	/* mdio module has some bugs in pause frame advertising */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,33) && defined(EFX_HAVE_LINUX_MDIO_H)
+	/* mdio module lacks pause frame advertising */
 	#define EFX_NEED_MDIO45_FLOW_CONTROL_HACKS yes
 #endif
 
@@ -118,8 +132,8 @@
 	#define EFX_NEED_SAVE_MSIX_MESSAGES yes
 #endif
 
-#ifdef CONFIG_PPC64
-	/* __raw_writel and friends are broken on ppc64 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20) && defined(CONFIG_PPC_ISERIES)
+	/* __raw_writel and friends were broken on iSeries */
 	#define EFX_NEED_RAW_READ_AND_WRITE_FIX yes
 #endif
 
@@ -173,7 +187,7 @@
  * version: Linux 3.0+ or RHEL 6 with backported RX NFC and ARFS
  * support.
  */
-#if !defined(NETIF_F_NTUPLE) || (LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0) && RHEL_MAJOR != 6)
+#if !defined(NETIF_F_NTUPLE) || (LINUX_VERSION_CODE < KERNEL_VERSION(3,0,0) && !(defined(RHEL_MAJOR) && RHEL_MAJOR == 6))
 	#undef NETIF_F_NTUPLE
 	#define NETIF_F_NTUPLE 0
 	#undef ETH_FLAG_NTUPLE
@@ -210,10 +224,6 @@
 
 #ifndef __iomem
 	#define __iomem
-#endif
-
-#ifndef NET_IP_ALIGN
-	#define NET_IP_ALIGN 2
 #endif
 
 #ifndef PCI_EXP_FLAGS
@@ -258,17 +268,9 @@
 	#define __force
 #endif
 
-#if ! defined(for_each_cpu_mask) && ! defined(CONFIG_SMP)
+#if !defined(for_each_cpu_mask) && !defined(CONFIG_SMP)
 	#define for_each_cpu_mask(cpu, mask)            \
 		for ((cpu) = 0; (cpu) < 1; (cpu)++, (void)mask)
-#endif
-
-#ifndef IRQF_PROBE_SHARED
-	#ifdef SA_PROBEIRQ
-		#define IRQF_PROBE_SHARED  SA_PROBEIRQ
-	#else
-		#define IRQF_PROBE_SHARED  0
-	#endif
 #endif
 
 #ifndef IRQF_SHARED
@@ -304,12 +306,16 @@
 	#define __packed __attribute__((packed))
 #endif
 
+#if defined(__GNUC__) && !defined(__aligned)
+	#define __aligned(x) __attribute__((aligned(x)))
+#endif
+
 #ifndef DIV_ROUND_UP
-	#define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
+	#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #endif
 
 #ifndef __ATTR
-	#define __ATTR(_name,_mode,_show,_store) {			\
+	#define __ATTR(_name, _mode, _show, _store) {			\
 		.attr = {.name = __stringify(_name), .mode = _mode },	\
 		.show   = _show,					\
 		.store  = _store,					\
@@ -323,7 +329,7 @@
 #endif
 
 #ifndef sysfs_attr_init
-	#define sysfs_attr_init(attr) do {} while(0)
+	#define sysfs_attr_init(attr) do {} while (0)
 #endif
 
 #ifndef to_i2c_adapter
@@ -424,7 +430,7 @@
 		 * ETH_RESET_SHARED_SHIFT to reset a shared component of the
 		 * same type.
 		 */
-	  	ETH_RESET_MGMT		= 1 << 0,	/* Management processor */
+		ETH_RESET_MGMT		= 1 << 0,	/* Management processor */
 		ETH_RESET_IRQ		= 1 << 1,	/* Interrupt requester */
 		ETH_RESET_DMA		= 1 << 2,	/* DMA engine */
 		ETH_RESET_FILTER	= 1 << 3,	/* Filtering/flow direction */
@@ -797,7 +803,7 @@
 	{
 		void *buf = kmalloc(size, flags);
 		if (buf)
-			memset(buf, 0,size);
+			memset(buf, 0, size);
 		return buf;
 	}
 #endif
@@ -822,7 +828,7 @@
 #endif
 
 #ifdef EFX_NEED_SETUP_TIMER
-	static inline void setup_timer(struct timer_list * timer,
+	static inline void setup_timer(struct timer_list *timer,
 				       void (*function)(unsigned long),
 				       unsigned long data)
 	{
@@ -845,7 +851,7 @@
 	#undef mutex_init
 	#define mutex_init efx_mutex_init
 
-	#define efx_mutex_destroy(x) do { } while(0)
+	#define efx_mutex_destroy(x) do { } while (0)
 	#undef mutex_destroy
 	#define mutex_destroy efx_mutex_destroy
 
@@ -869,7 +875,7 @@
 	{
 		/* NB. This is quite inefficient, but it's the best we
 		 * can do with the semaphore API. */
-		if ( down_trylock(m) )
+		if (down_trylock(m))
 			return 1;
 		/* Undo the effect of down_trylock. */
 		up(m);
@@ -923,13 +929,35 @@
 	#endif
 #endif
 
+#ifndef netdev_for_each_uc_addr
+	#if defined(EFX_HAVE_NET_DEVICE_UC)
+		#define netdev_for_each_uc_addr(uclist, dev)		\
+			list_for_each_entry(uclist, &(dev)->uc.list, list)
+		#define netdev_uc_count(dev) (dev)->uc.count
+	#elif defined(EFX_HAVE_NET_DEVICE_UC_LIST)
+		#define netdev_for_each_uc_addr(uclist, dev)		\
+			for (uclist = (dev)->uc_list;			\
+			     uclist;					\
+			     uclist = uclist->next)
+		#define netdev_uc_count(dev) (dev)->uc_count
+	#else
+		struct dev_addr_list { void *da_addr; };
+		#define netdev_for_each_uc_addr(uclist, dev) while (0)
+		#define netdev_uc_count(dev) 0
+	#endif
+#endif
+
 #ifndef netdev_for_each_mc_addr
 	#define netdev_for_each_mc_addr(mclist, dev) \
-		for (mclist = dev->mc_list; mclist; mclist = mclist->next)
+		for (mclist = (dev)->mc_list; mclist; mclist = mclist->next)
+#endif
+
+#ifndef netdev_mc_count
+	#define netdev_mc_count(dev) (dev)->mc_count
 #endif
 
 #ifdef EFX_NEED_ALLOC_ETHERDEV_MQ
-	#define alloc_etherdev_mq(sizeof_priv, queue_count) 		\
+	#define alloc_etherdev_mq(sizeof_priv, queue_count)		\
 		({							\
 			BUILD_BUG_ON((queue_count) != 1);		\
 			alloc_etherdev(sizeof_priv);			\
@@ -1031,14 +1059,6 @@
 	}
 #endif
 
-#ifdef EFX_NEED_DEV_GET_STATS
-	static inline const struct net_device_stats *
-	dev_get_stats(struct net_device *dev)
-	{
-		return dev->get_stats(dev);
-	}
-#endif
-
 #ifdef EFX_HAVE_OLD_IP_FAST_CSUM
 	#include <net/checksum.h>
 	#define ip_fast_csum(iph, ihl) ip_fast_csum((unsigned char *)iph, ihl)
@@ -1089,6 +1109,13 @@
 
 #ifdef EFX_NEED_RESOURCE_SIZE_T
 	typedef unsigned long resource_size_t;
+#endif
+
+#ifdef EFX_NEED_RESOURCE_SIZE
+	static inline resource_size_t resource_size(struct resource *res)
+	{
+		return res->end - res->start + 1;
+	}
 #endif
 
 #ifdef EFX_USE_I2C_LEGACY
@@ -1157,7 +1184,7 @@
 	static inline int
 	efx_dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
 	{
-        	return dma_mapping_error(dma_addr);
+		return dma_mapping_error(dma_addr);
 	}
 	#undef dma_mapping_error
 	#define dma_mapping_error efx_dma_mapping_error
@@ -1249,7 +1276,7 @@ extern struct i2c_driver efx_lm90_driver;
 			   netdev_name(netdev), ##args)
 
 	#define netif_printk(priv, type, level, dev, fmt, args...)	\
-	do {					  			\
+	do {								\
 		if (netif_msg_##type(priv))				\
 			netdev_printk(level, (dev), fmt, ##args);	\
 	} while (0)
@@ -1315,6 +1342,10 @@ extern struct i2c_driver efx_lm90_driver;
 		printk(KERN_WARNING fmt, ##arg)
 #endif
 
+/* __maybe_unused may be defined wrongly */
+#undef __maybe_unused
+#define __maybe_unused __attribute__((unused))
+
 #ifndef __always_unused
 	#define __always_unused __attribute__((unused))
 #endif
@@ -1329,14 +1360,14 @@ extern struct i2c_driver efx_lm90_driver;
 #ifdef EFX_NEED_IS_BROADCAST_ETHER_ADDR
 	static inline int is_broadcast_ether_addr(const u8 *addr)
 	{
-        	return (addr[0] & addr[1] & addr[2] & addr[3] & addr[4] & addr[5]) == 0xff;
+		return (addr[0] & addr[1] & addr[2] & addr[3] & addr[4] & addr[5]) == 0xff;
 	}
 #endif
 
 #ifdef EFX_NEED_IS_MULTICAST_ETHER_ADDR
 	static inline int is_multicast_ether_addr(const u8 *addr)
 	{
-        	return addr[0] & 0x01;
+		return addr[0] & 0x01;
 	}
 #endif
 
@@ -1344,11 +1375,11 @@ extern struct i2c_driver efx_lm90_driver;
 	static inline unsigned
 	compare_ether_addr(const u8 *addr1, const u8 *addr2)
 	{
-	        const u16 *a = (const u16 *) addr1;
-	        const u16 *b = (const u16 *) addr2;
+		const u16 *a = (const u16 *) addr1;
+		const u16 *b = (const u16 *) addr2;
 
-	        BUILD_BUG_ON(ETH_ALEN != 6);
-	        return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2])) != 0;
+		BUILD_BUG_ON(ETH_ALEN != 6);
+		return ((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2])) != 0;
 	}
 #endif
 
@@ -1356,6 +1387,20 @@ extern struct i2c_driver efx_lm90_driver;
 	static inline bool ether_addr_equal(const u8 *addr1, const u8 *addr2)
 	{
 		return !compare_ether_addr(addr1, addr2);
+	}
+#endif
+
+#ifdef EFX_NEED_ETH_BROADCAST_ADDR
+	static inline void eth_broadcast_addr(u8 *addr)
+	{
+		memset(addr, 0xff, ETH_ALEN);
+	}
+#endif
+
+#ifdef EFX_NEED_IPV4_IS_MULTICAST
+	static inline bool ipv4_is_multicast(__be32 addr)
+	{
+		return (addr & htonl(0xf0000000)) == htonl(0xe0000000);
 	}
 #endif
 
@@ -1394,10 +1439,24 @@ extern struct i2c_driver efx_lm90_driver;
 	}
 #endif
 
+#ifdef EFX_NEED_SKB_FRAG_ADDRESS
+	static inline void *skb_frag_address(const skb_frag_t *frag)
+	{
+		return page_address(frag->page) + frag->page_offset;
+	}
+#endif
+
 #ifdef EFX_NEED_SKB_FRAG_SIZE
 	static inline unsigned int skb_frag_size(const skb_frag_t *frag)
 	{
 		return frag->size;
+	}
+#endif
+
+#ifdef EFX_NEED_SKB_FRAG_PAGE
+	static inline struct page *skb_frag_page(const skb_frag_t *frag)
+	{
+		return frag->page;
 	}
 #endif
 
@@ -1464,6 +1523,78 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 
 #ifndef NETIF_F_HW_VLAN_CTAG_TX
 	#define NETIF_F_HW_VLAN_CTAG_TX NETIF_F_HW_VLAN_TX
+#endif
+
+#ifdef EFX_NEED___SET_BIT_LE
+	/* Depending on kernel version, BITOP_LE_SWIZZLE may be
+	 * defined the way we want or unconditionally as the
+	 * big-endian value (or not at all).  Use our own name.
+	 */
+	#if defined(__LITTLE_ENDIAN)
+	#define EFX_BITOP_LE_SWIZZLE        0
+	#elif defined(__BIG_ENDIAN)
+	#define EFX_BITOP_LE_SWIZZLE        ((BITS_PER_LONG-1) & ~0x7)
+	#endif
+
+	/* __set_bit_le() and __clear_bit_le() may already be defined
+	 * as macros with the wrong effective parameter type (volatile
+	 * unsigned long *), so use brute force to replace them.
+	 */
+
+	static inline void efx__set_bit_le(int nr, void *addr)
+	{
+		__set_bit(nr ^ EFX_BITOP_LE_SWIZZLE, addr);
+	}
+	#undef __set_bit_le
+	#define __set_bit_le efx__set_bit_le
+
+	static inline void efx__clear_bit_le(int nr, void *addr)
+	{
+		__clear_bit(nr ^ EFX_BITOP_LE_SWIZZLE, addr);
+	}
+	#undef __clear_bit_le
+	#define __clear_bit_le efx__clear_bit_le
+#endif
+
+#ifdef CONFIG_SFC_MTD
+#ifdef EFX_NEED_MTD_DEVICE_REGISTER
+	struct mtd_partition;
+
+	static inline int
+	mtd_device_register(struct mtd_info *master,
+			    const struct mtd_partition *parts,
+			    int nr_parts)
+	{
+		BUG_ON(parts);
+		return add_mtd_device(master);
+	}
+
+	static inline int mtd_device_unregister(struct mtd_info *master)
+	{
+		return del_mtd_device(master);
+	}
+#endif
+#endif
+
+#ifndef for_each_set_bit
+	#define for_each_set_bit(bit, addr, size)			\
+		for ((bit) = find_first_bit((addr), (size));		\
+		     (bit) < (size);					\
+		     (bit) = find_next_bit((addr), (size), (bit) + 1))
+#endif
+
+#ifndef EFX_HAVE_IOREMAP_WC
+	/* This should never be called */
+	static inline void *
+	ioremap_wc(resource_size_t offset, resource_size_t size)
+	{
+		WARN_ON(1);
+		return NULL;
+	}
+#endif
+
+#ifdef EFX_NEED_SKB_TRANSPORT_HEADER_WAS_SET
+	#define skb_transport_header_was_set(skb) (!!(skb)->transport_header)
 #endif
 
 /**************************************************************************
@@ -1540,27 +1671,33 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 
 #if defined(EFX_NEED_NEW_CPUMASK_API)
 
-	static inline void cpumask_clear(cpumask_t *dstp)
+	#define cpumask_clear efx_cpumask_clear
+	static inline void efx_cpumask_clear(cpumask_t *dstp)
 	{
 		cpus_clear(*dstp);
 	}
 
-	static inline void cpumask_copy(cpumask_t *dstp, const cpumask_t *srcp)
+	#define cpumask_copy efx_cpumask_copy
+	static inline void efx_cpumask_copy(cpumask_t *dstp, const cpumask_t *srcp)
 	{
 		*dstp = *srcp;
 	}
 
+	#undef cpumask_test_cpu
 	#define cpumask_test_cpu(cpu, mask) cpu_isset(cpu, *(mask))
 
+	#undef cpumask_set_cpu
 	#define cpumask_set_cpu(cpu, mask) cpu_set(cpu, *(mask))
 
-	static inline void cpumask_or(cpumask_t *dstp, const cpumask_t *src1p,
+	#define cpumask_or efx_cpumask_or
+	static inline void efx_cpumask_or(cpumask_t *dstp, const cpumask_t *src1p,
 				      const cpumask_t *src2p)
 	{
 		cpus_or(*dstp, *src1p, *src2p);
 	}
 
-	static inline unsigned int cpumask_weight(const cpumask_t *srcp)
+	#define cpumask_weight efx_cpumask_weight
+	static inline unsigned int efx_cpumask_weight(const cpumask_t *srcp)
 	{
 		return cpus_weight(*srcp);
 	}
@@ -1572,20 +1709,24 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	#define for_each_possible_cpu(CPU)			\
 		for_each_cpu_mask((CPU), cpu_possible_map)
 
-	typedef cpumask_t cpumask_var_t[1];
+	#define cpumask_var_t efx_cpumask_var_t
+	typedef cpumask_t efx_cpumask_var_t[1];
 
-	static inline bool alloc_cpumask_var(cpumask_var_t *mask, gfp_t flags)
+	#define alloc_cpumask_var efx_alloc_cpumask_var
+	static inline bool efx_alloc_cpumask_var(cpumask_var_t *mask, gfp_t flags)
 	{
 		return true;
 	}
 
-	static inline bool zalloc_cpumask_var(cpumask_var_t *mask, gfp_t flags)
+	#define zalloc_cpumask_var efx_zalloc_cpumask_var
+	static inline bool efx_zalloc_cpumask_var(cpumask_var_t *mask, gfp_t flags)
 	{
 		cpumask_clear(*mask);
 		return true;
 	}
 
-	static inline void free_cpumask_var(cpumask_t *mask) {}
+	#define free_cpumask_var efx_free_cpumask_var
+	static inline void efx_free_cpumask_var(cpumask_t *mask) {}
 
 	#ifdef topology_core_siblings
 		#define topology_core_cpumask(cpu)		\
@@ -1653,7 +1794,7 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 			return -EINVAL;
 		return 0;
 	#else
-       		return set_cpus_allowed(p, *new_mask);
+		return set_cpus_allowed(p, *new_mask);
 	#endif
 	}
 #endif
@@ -1662,7 +1803,7 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	#define kobject_init_and_add efx_kobject_init_and_add
 	extern int
 	efx_kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
-	 			 struct kobject *parent, const char *fmt, ...);
+				 struct kobject *parent, const char *fmt, ...);
 #endif
 
 #ifdef EFX_NEED_KOBJECT_SET_NAME_VARGS
@@ -1712,7 +1853,7 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 			PREPARE_WORK((_work),				\
 				     (efx_old_work_func_t) (_func),	\
 				     (_work));				\
-	                init_timer(&(_work)->timer);                    \
+			init_timer(&(_work)->timer);                    \
 		} while (0)
 #endif
 
@@ -1760,7 +1901,7 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	static inline void netif_napi_del(struct napi_struct *napi)
 	{
 	#ifdef CONFIG_NETPOLL
-        	list_del(&napi->dev_list);
+		list_del(&napi->dev_list);
 	#endif
 	}
 #endif
@@ -1814,108 +1955,9 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #endif
 
 #ifdef EFX_NEED_HEX_DUMP_CONST_FIX
-	#define print_hex_dump(v,s,t,r,g,b,l,a) \
-		print_hex_dump((v),(s),(t),(r),(g),(void*)(b),(l),(a))
+	#define print_hex_dump(v, s, t, r, g, b, l, a) \
+		print_hex_dump((v), (s), (t), (r), (g), (void *)(b), (l), (a))
 #endif
-
-#ifndef EFX_HAVE_HWMON_H
-	static inline struct device *hwmon_device_register(struct device *dev)
-	{
-		return dev;
-	}
-	static inline void hwmon_device_unregister(struct device *cdev)
-	{
-	}
-#endif
-
-#ifdef EFX_NEED_HWMON_VID
-	#include <linux/i2c-vid.h>
-	static inline u8 efx_vid_which_vrm(void)
-	{
-		/* we don't use i2c on the cpu */
-		return 0;
-	}
-	#define vid_which_vrm efx_vid_which_vrm
-#endif
-
-#ifdef EFX_HAVE_OLD_DEVICE_ATTRIBUTE
-	/*
-	 * show and store methods do not receive a pointer to the
-	 * device_attribute.  We have to add wrapper functions.
-	 */
-
-	#undef DEVICE_ATTR
-	#define DEVICE_ATTR(_name, _mode, _show, _store)		\
-		/*static*/ ssize_t __##_name##_##show(struct device *dev, \
-						      char *buf)	\
-		{							\
-			ssize_t (*fn)(struct device *dev,		\
-				      struct device_attribute *attr,	\
-				      char *buf) = _show;		\
-			return fn ? fn(dev, NULL, buf) : 0;		\
-		}							\
-		static ssize_t __##_name##_##store(struct device *dev,	\
-						   const char *buf,	\
-						   size_t count)	\
-		{							\
-			ssize_t (*fn)(struct device *dev,		\
-				      struct device_attribute *attr,	\
-				      const char *buf,			\
-				      size_t count) = _store;		\
-			return fn ? fn(dev, NULL, buf, count) : 0;	\
-		}							\
-		static struct device_attribute dev_attr_##_name =	\
-			__ATTR(_name, _mode, __##_name##_##show,	\
-			       __##_name##_##store)
-
-	struct sensor_device_attribute {
-		struct device_attribute dev_attr;
-		int index;
-	};
-
-	#define SENSOR_ATTR(_name, _mode, _show, _store, _index)        \
-	{ .dev_attr = __ATTR(_name, _mode, _show, _store),		\
-	  .index = _index }
-
-	#define SENSOR_DEVICE_ATTR(_name, _mode, _show,	\
-				   _store, _index)			\
-		/*static*/ ssize_t __##_name##_show_##_index(struct device *dev, \
-							     char *buf)	\
-		{							\
-			struct sensor_device_attribute attr;		\
-			attr.index = _index;				\
-			return _show(dev, &attr.dev_attr, buf);		\
-		}							\
-		static ssize_t __##_name##_store_##_index(struct device *dev, \
-							  const char *buf, \
-							  size_t count)	\
-		{							\
-			ssize_t (*fn)(struct device *dev,		\
-				      struct device_attribute *attr,	\
-				      const char *buf,			\
-				      size_t count) = _store;		\
-			struct sensor_device_attribute attr;		\
-			attr.index = _index;				\
-			return fn(dev, &attr.dev_attr, buf, count);	\
-		}							\
-		static ssize_t __##_name##_store_##_index(struct device *, \
-							  const char *, size_t) \
-			__attribute__((unused));			\
-		static struct sensor_device_attribute			\
-			sensor_dev_attr_##_name =			\
-			SENSOR_ATTR(_name, _mode,			\
-				    __##_name##_show_##_index,		\
-				    __builtin_choose_expr		\
-				    (__builtin_constant_p(_store) && _store == NULL, \
-				     NULL, __##_name##_store_##_index), \
-				    _index)
-
-	#define to_sensor_dev_attr(_dev_attr) \
-		container_of(_dev_attr, struct sensor_device_attribute,	\
-			     dev_attr)
-
-#endif
-
 
 #ifdef EFX_NEED_SCSI_SGLIST
 	#include <scsi/scsi.h>
@@ -1964,7 +2006,7 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #ifdef EFX_NEED_VMALLOC_TO_PFN
 	static inline unsigned long vmalloc_to_pfn(const void *addr)
 	{
-		return page_to_pfn(vmalloc_to_page((void*)addr));
+		return page_to_pfn(vmalloc_to_page((void *)addr));
 	}
 #endif
 
@@ -2069,7 +2111,12 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 
 #ifdef EFX_NEED_LIST_FIRST_ENTRY
 	#define list_first_entry(ptr, type, member) \
- 		list_entry((ptr)->next, type, member)
+		list_entry((ptr)->next, type, member)
+#endif
+
+#ifndef list_first_entry_or_null
+	#define list_first_entry_or_null(ptr, type, member) \
+		(!list_empty(ptr) ? list_first_entry(ptr, type, member) : NULL)
 #endif
 
 #ifdef EFX_NEED_SKB_COPY_FROM_LINEAR_DATA
@@ -2090,11 +2137,11 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	typedef union {
 		s64	tv64;
 	#if BITS_PER_LONG != 64
-	        struct {
+		struct {
 	# ifdef __BIG_ENDIAN
-	        s32	sec, nsec;
+		s32	sec, nsec;
 	# else
-	        s32	nsec, sec;
+		s32	nsec, sec;
 	# endif
 		} tv;
 	#endif
@@ -2105,7 +2152,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	static inline ktime_t
 	ktime_set(const long secs, const unsigned long nsecs)
 	{
-        	return (ktime_t) { .tv64 = ((s64)secs * NSEC_PER_SEC +
+		return (ktime_t) { .tv64 = ((s64)secs * NSEC_PER_SEC +
 					    (s64)nsecs) };
 	}
 
@@ -2113,7 +2160,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 		({ (ktime_t){ .tv64 = (lhs).tv64 - (rhs).tv64 }; })
 
 	#define ktime_add(lhs, rhs)					\
-                ({ (ktime_t){ .tv64 = (lhs).tv64 + (rhs).tv64 }; })
+		({ (ktime_t){ .tv64 = (lhs).tv64 + (rhs).tv64 }; })
 
 	#define ktime_to_timespec(kt)		ns_to_timespec((kt).tv64)
 
@@ -2124,28 +2171,28 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	static inline ktime_t
 	ktime_set(const long secs, const unsigned long nsecs)
 	{
-        	return (ktime_t) { .tv = { .sec = secs, .nsec = nsecs } };
+		return (ktime_t) { .tv = { .sec = secs, .nsec = nsecs } };
 	}
 
 	static inline ktime_t ktime_sub(const ktime_t lhs, const ktime_t rhs)
 	{
-        	ktime_t res;
+		ktime_t res;
 
-	        res.tv64 = lhs.tv64 - rhs.tv64;
-        	if (res.tv.nsec < 0)
-                	res.tv.nsec += NSEC_PER_SEC;
+		res.tv64 = lhs.tv64 - rhs.tv64;
+		if (res.tv.nsec < 0)
+			res.tv.nsec += NSEC_PER_SEC;
 
-	        return res;
+		return res;
 	}
 
 	static inline ktime_t ktime_add(const ktime_t add1, const ktime_t add2)
 	{
-        	ktime_t res;
+		ktime_t res;
 
-	        res.tv64 = add1.tv64 + add2.tv64;
-	        /*
-	         * performance trick: the (u32) -NSEC gives 0x00000000Fxxxxxxx
-	         * so we subtract NSEC_PER_SEC and add 1 to the upper 32 bit.
+		res.tv64 = add1.tv64 + add2.tv64;
+		/*
+		 * performance trick: the (u32) -NSEC gives 0x00000000Fxxxxxxx
+		 * so we subtract NSEC_PER_SEC and add 1 to the upper 32 bit.
 		 *
 		 * it's equivalent to:
 		 *   tv.nsec -= NSEC_PER_SEC
@@ -2159,13 +2206,13 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 
 	static inline struct timespec ktime_to_timespec(const ktime_t kt)
 	{
-        	return (struct timespec) { .tv_sec = (time_t) kt.tv.sec,
-                	                   .tv_nsec = (long) kt.tv.nsec };
+		return (struct timespec) { .tv_sec = (time_t) kt.tv.sec,
+					   .tv_nsec = (long) kt.tv.nsec };
 	}
 
 	static inline u64 ktime_to_ns(const ktime_t kt)
 	{
-        	return (u64) kt.tv.sec * NSEC_PER_SEC + kt.tv.nsec;
+		return (u64) kt.tv.sec * NSEC_PER_SEC + kt.tv.nsec;
 	}
 
 	#endif /* BITS_PER_LONG */
@@ -2187,7 +2234,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 		ktime_t	syststamp;
 	};
 
-	static inline struct skb_shared_hwtstamps * skb_hwtstamps(struct sk_buff *skb)
+	static inline struct skb_shared_hwtstamps *skb_hwtstamps(struct sk_buff *skb)
 	{
 		return (struct skb_shared_hwtstamps *) skb->cb;
 	}
@@ -2197,15 +2244,41 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	static inline void timespec_add_ns(struct timespec *a, u64 ns)
 	{
 		ns += a->tv_nsec;
-		while(unlikely(ns >= NSEC_PER_SEC)) {
+		while (unlikely(ns >= NSEC_PER_SEC)) {
 			ns -= NSEC_PER_SEC;
 			a->tv_sec++;
 		}
 		a->tv_nsec = ns;
 	}
 #endif
-#ifdef EFX_NEED_TIMESPEC_SUB
-	static inline struct timespec timespec_sub(struct timespec lhs,
+
+#ifdef EFX_NEED_SET_NORMALIZED_TIMESPEC
+	/* set_normalized_timespec() might be defined by the kernel
+	 * but not exported.  Define it under our own name.
+	 */
+	static inline void
+	efx_set_normalized_timespec(struct timespec *ts, time_t sec, long nsec)
+	{
+		while (nsec >= NSEC_PER_SEC) {
+			nsec -= NSEC_PER_SEC;
+			++sec;
+		}
+		while (nsec < 0) {
+			nsec += NSEC_PER_SEC;
+			--sec;
+		}
+		ts->tv_sec = sec;
+		ts->tv_nsec = nsec;
+	}
+	#define set_normalized_timespec efx_set_normalized_timespec
+#endif
+
+#if defined(EFX_NEED_TIMESPEC_SUB) || defined(EFX_NEED_SET_NORMALIZED_TIMESPEC)
+	/* timespec_sub() may need to be redefined because of
+	 * set_normalized_timespec() not being exported.  Define it
+	 * under our own name.
+	 */
+	static inline struct timespec efx_timespec_sub(struct timespec lhs,
 		struct timespec rhs)
 	{
 		struct timespec ts_delta;
@@ -2213,7 +2286,7 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 		lhs.tv_nsec - rhs.tv_nsec);
 		return ts_delta;
 	}
-
+	#define timespec_sub efx_timespec_sub
 #endif
 
 #ifdef EFX_NEED_TIMESPEC_COMPARE
@@ -2254,6 +2327,11 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 		return skb_checksum_help(&skb, 0);
 	}
 	#define skb_checksum_help efx_skb_checksum_help
+#endif
+
+#if defined(CONFIG_X86) && NET_IP_ALIGN != 0
+	#undef NET_IP_ALIGN
+	#define NET_IP_ALIGN 0
 #endif
 
 #ifndef EFX_HAVE_FDTABLE
@@ -2484,15 +2562,8 @@ static inline unsigned long efx_get_open_fds(unsigned long fd, const struct fdta
 #include <asm/system.h>
 #endif
 
-#ifdef EFX_NEED_SKB_FRAG_ADDRESS
-static inline void *skb_frag_address(const skb_frag_t *frag)
-{
-	return page_address(frag->page) + frag->page_offset;
-}
-#endif
-
 #ifdef EFX_HAVE_PPS_KERNEL
-        #include <linux/pps_kernel.h>
+	#include <linux/pps_kernel.h>
 #endif
 
 #ifdef EFX_NEED_PPS_EVENT_TIME
@@ -2584,16 +2655,24 @@ static inline void *skb_frag_address(const skb_frag_t *frag)
 #define PTP_CLOCK_PPSUSR (PTP_CLOCK_PPS + 1)
 #endif
 
-#ifdef EFX_NEED_LE_BIT_OPS
-static inline void set_bit_le(unsigned nr, unsigned char *addr)
-{
-	addr[nr / 8] |= (1 << (nr % 8));
-}
-
-static inline void clear_bit_le(unsigned nr, unsigned char *addr)
-{
-	addr[nr / 8] &= ~(1 << (nr % 8));
-}
+#ifdef EFX_HAVE_NON_CONST_JHASH2
+	static inline u32 efx_jhash2(const u32 *k, u32 length, u32 initval)
+	{
+		return jhash2((u32 *)k, length, initval);
+	}
+	#define jhash2 efx_jhash2
 #endif
+
+#ifndef EFX_HAVE_IOMMU_PRESENT
+#ifndef EFX_HAVE_PHYS_ADDR_T
+typedef resource_size_t phys_addr_t;
+#endif
+#ifdef EFX_HAVE_IOMMU_FOUND
+#include <linux/iommu.h>
+#define iommu_present(b) iommu_found()
+#else
+#define iommu_present(b) 0
+#endif /* EFX_HAVE_IOMMU_FOUND */
+#endif /* !EFX_HAVE_IOMMU_PRESENT */
 
 #endif /* EFX_KERNEL_COMPAT_H */

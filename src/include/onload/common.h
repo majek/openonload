@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,7 +84,6 @@ enum { CI_CHSUM_STR_LEN = 32 };
  */
 typedef struct ci_resource_onload_alloc_s {
   ci_user_ptr_t           in_opts  CI_ALIGN(8);
-  ci_uint32               in_cpu_khz;
   ci_uint16               in_flags;
   char                    in_version[OO_VER_STR_LEN + 1];
   char                    in_uk_intf_ver[CI_CHSUM_STR_LEN + 1];
@@ -134,8 +133,7 @@ typedef struct {
 } oo_tcp_filter_set_t;
 
 typedef struct {
-  oo_sp         tcp_id;
-  ci_int32      no_sw;
+  oo_sp             tcp_id;
 } oo_tcp_filter_clear_t;
 
 typedef struct {
@@ -242,7 +240,6 @@ typedef struct {
   ci_int32      sock_id;
   ci_user_ptr_t addr;
   ci_user_ptr_t addrlen;
-  ci_user_ptr_t socketcall_args;
   ci_int32      flags;
   ci_int32      rc;
 } oo_os_sock_accept_t;
@@ -403,9 +400,6 @@ typedef struct {
 #if CI_CFG_USERSPACE_PIPE
 # define CI_PRIV_TYPE_PIPE_READER 4
 # define CI_PRIV_TYPE_PIPE_WRITER 5
-# define  CI_PRIV_TYPE_MAX       6
-#else
-# define  CI_PRIV_TYPE_MAX       4
 #endif
 #if CI_CFG_USERSPACE_PIPE
 # define CI_PRIV_TYPE_IS_ENDPOINT(t)                                  \
@@ -480,13 +474,18 @@ typedef struct ci_tramp_reg_args {
   ci_user_ptr_t trampoline_exclude;
   ci_user_ptr_t trampoline_ul_fail;
 
-  ci_user_ptr_t signal_handler_postpone1;
-  ci_user_ptr_t signal_handler_postpone3;
+  ci_user_ptr_t signal_handler_postpone;
   ci_user_ptr_t signal_handlers[OO_SIGHANGLER_DFL_MAX+1];
   ci_user_ptr_t signal_sarestorer;
   ci_user_ptr_t signal_data;
   ci_int32 max_signum;
   ci_int32/*bool*/ sa_onstack_intercept;
+
+   /* Used by PPC64 and other architectures for TOC and
+    *  user fixup pointers.
+    */
+  ci_user_ptr_t trampoline_toc;
+  ci_user_ptr_t trampoline_user_fixup;
 } ci_tramp_reg_args_t;
 
 

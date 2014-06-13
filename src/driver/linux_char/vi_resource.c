@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -89,10 +89,10 @@ static void efch_vi_rm_dump(struct efrm_resource* rs, ci_resource_table_t *rt,
   ci_log("%s  buffer table: tx_base=0x%x tx_order=0x%x "
          "rx_base=0x%x rx_order=0x%x",
          line_prefix,
-         virs->q[EFHW_TXQ].buf_tbl_alloc.base,
-         virs->q[EFHW_TXQ].buf_tbl_alloc.order,
-         virs->q[EFHW_RXQ].buf_tbl_alloc.base,
-         virs->q[EFHW_RXQ].buf_tbl_alloc.order);
+         efrm_bt_allocation_base(&virs->q[EFHW_TXQ].bt_alloc),
+         virs->q[EFHW_TXQ].page_order,
+         efrm_bt_allocation_base(&virs->q[EFHW_RXQ].bt_alloc),
+         virs->q[EFHW_RXQ].page_order);
 
   efch_vi_rm_dump_nic(virs, line_prefix);
 }
@@ -109,39 +109,56 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
                   int tx_q_tag, int rx_q_tag,
                   struct efrm_vi **virs_out)
 {
-	struct efrm_vi *virs;
-	int rc;
+  struct efrm_vi *virs;
+  int rc;
 
-	if (vi_flags & EFHW_VI_RM_WITH_INTERRUPT)
-		efrm_vi_attr_set_with_interrupt(attr, 1);
+  if (vi_flags & EFHW_VI_RM_WITH_INTERRUPT)
+    efrm_vi_attr_set_with_interrupt(attr, 1);
 
-	if ((rc = efrm_vi_alloc(client, attr, &virs)) < 0)
-		goto fail_vi_alloc;
-	if ((rc = efrm_vi_q_alloc(virs, EFHW_TXQ, txq_capacity,
-				  tx_q_tag, vi_flags, evq_virs)) < 0)
-		goto fail_q_alloc;
-	if ((rc = efrm_vi_q_alloc(virs, EFHW_RXQ, rxq_capacity,
-				  rx_q_tag, vi_flags, evq_virs)) < 0)
-		goto fail_q_alloc;
+  if ((rc = efrm_vi_alloc(client, attr, &virs)) < 0)
+    goto fail_vi_alloc;
 
-	if (evq_virs == NULL && evq_capacity < 0) {
-		evq_capacity = (virs->q[EFHW_RXQ].capacity +
-				virs->q[EFHW_TXQ].capacity);
-		if (evq_capacity == 0)
-			evq_capacity = -1;
-	}
+  /* We have to jump through some hoops here:
+   * - EF10 needs the event queue allocated before rx and tx queues
+   * - Event queue needs to know the size of the rx and tx queues
+   *
+   * So we first work out the sizes, then create the evq, then create
+   * the rx and tx queues.
+   */
 
-	if ((rc = efrm_vi_q_alloc(virs, EFHW_EVQ, evq_capacity,
-				  0, vi_flags, NULL)) < 0)
-		goto fail_q_alloc;
-	*virs_out = virs;
-	return 0;
+  rc = efrm_vi_q_alloc_sanitize_size(virs, EFHW_TXQ, txq_capacity);
+  if( rc < 0 )
+    goto fail_q_alloc;
+  txq_capacity = rc;
+
+  rc = efrm_vi_q_alloc_sanitize_size(virs, EFHW_RXQ, rxq_capacity);
+  if( rc < 0 )
+    goto fail_q_alloc;
+  rxq_capacity = rc;
+
+  if (evq_virs == NULL && evq_capacity < 0) {
+    evq_capacity = rxq_capacity + txq_capacity;
+    if (evq_capacity == 0)
+      evq_capacity = -1;
+  }
+  if ((rc = efrm_vi_q_alloc(virs, EFHW_EVQ, evq_capacity,
+                            0, vi_flags, NULL)) < 0)
+    goto fail_q_alloc;
+  if ((rc = efrm_vi_q_alloc(virs, EFHW_TXQ, txq_capacity,
+                            tx_q_tag, vi_flags, evq_virs)) < 0)
+    goto fail_q_alloc;
+  if ((rc = efrm_vi_q_alloc(virs, EFHW_RXQ, rxq_capacity,
+                            rx_q_tag, vi_flags, evq_virs)) < 0)
+    goto fail_q_alloc;
+
+  *virs_out = virs;
+  return 0;
 
 
-fail_q_alloc:
-	efrm_vi_resource_release(virs);
-fail_vi_alloc:
-	return rc;
+ fail_q_alloc:
+  efrm_vi_resource_release(virs);
+ fail_vi_alloc:
+  return rc;
 }
 
 
@@ -263,8 +280,11 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   alloc_out->nic_arch = nic->devtype.arch;
   alloc_out->nic_variant = nic->devtype.variant;
   alloc_out->nic_revision = nic->devtype.revision;
+  alloc_out->nic_flags = (nic->flags & NIC_FLAG_BUG35388_WORKAROUND) ?
+                          EFHW_VI_NIC_BUG35388_WORKAROUND : 0;
   alloc_out->io_mmap_bytes = 4096;
   alloc_out->mem_mmap_bytes = virs->mem_mmap_bytes;
+  alloc_out->rx_prefix_len = virs->rx_prefix_len;
 
   rs->rs_base = &virs->rs;
   EFCH_TRACE("%s: Allocated "EFRM_RESOURCE_FMT" rc=%d", __FUNCTION__,

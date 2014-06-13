@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,7 +48,6 @@
 #include "efch_intf_ver.h"
 #include <onload/version.h>
 
-
 #define EF_VI_STATE_BYTES(rxq_sz, txq_sz)			\
 	(sizeof(ef_vi_state) + (rxq_sz) * sizeof(uint32_t)	\
 	 + (txq_sz) * sizeof(uint32_t))
@@ -88,8 +87,10 @@ void ef_vi_state_init(ef_vi* vi)
 	ef_vi_state* state = vi->ep_state;
 	unsigned i;
 
-	state->txq.added = state->txq.removed = 0;
-	state->rxq.added = state->rxq.removed = 0;
+	state->txq.previous = state->txq.added = state->txq.removed = 0;
+	state->rxq.added = state->rxq.removed = state->rxq.prev_added = 0;
+	state->rxq.in_jumbo = 0;
+	state->rxq.bytes_acc = 0;
 
 	if( vi->vi_rxq.mask )
 		for( i = 0; i <= vi->vi_rxq.mask; ++i )
@@ -114,7 +115,20 @@ void ef_vi_init_mapping_evq(void* data_area, struct ef_vi_nic_type nic_type,
 	vm->evq_base = base;
 	vm->evq_timer_reg = timer_reg;
         vm->timer_quantum_ns = timer_quantum_ns;
-	vm->evq_prime = (char*) io_mmap + (FR_BZ_EVQ_RPTR_REGP0_OFST & 4095);
+
+	switch( nic_type.arch ) {
+	case EF_VI_ARCH_FALCON:
+		vm->evq_prime = (char*) io_mmap +
+			(FR_BZ_EVQ_RPTR_REGP0_OFST & (EF_VI_PAGE_SIZE - 1));
+		break;
+	case EF_VI_ARCH_EF10:
+		vm->evq_prime = (char*) io_mmap + ER_DZ_EVQ_RPTR_REG;
+		break;
+	default:
+		/* ?? TODO: We should return an error code. */
+		EF_VI_BUG_ON(1);
+		break;
+	}
 }
 
 
@@ -133,6 +147,9 @@ void ef_vi_init(ef_vi* vi, void* vvis, ef_vi_state* state,
 	switch( vm->nic_type.arch ) {
 	case EF_VI_ARCH_FALCON:
 		falcon_vi_init(vi, vvis);
+		break;
+	case EF_VI_ARCH_EF10:
+		ef10_vi_init(vi, vvis);
 		break;
 	default:
 		/* ?? TODO: We should return an error code. */
@@ -169,7 +186,7 @@ void ef_vi_init_mapping_vi(void* data_area, struct ef_vi_nic_type nic_type,
                            unsigned rxq_capacity, unsigned txq_capacity,
                            int instance, void* io_mmap,
                            void* iobuf_mmap_rx, void* iobuf_mmap_tx,
-                           enum ef_vi_flags vi_flags)
+                           enum ef_vi_flags vi_flags, unsigned rx_prefix_len)
 {
 	struct vi_mappings* vm = (struct vi_mappings*) data_area;
 	int rx_desc_bytes, rxq_bytes;
@@ -182,19 +199,40 @@ void ef_vi_init_mapping_vi(void* data_area, struct ef_vi_nic_type nic_type,
 	vm->vi_instance = instance;
 	vm->nic_type = nic_type;
 
-	rx_desc_bytes = (vi_flags & EF_VI_RX_PHYS_ADDR) ? 8 : 4;
+	if( vm->nic_type.arch == EF_VI_ARCH_EF10 )
+		rx_desc_bytes = 8;
+	else
+		rx_desc_bytes = (vi_flags & EF_VI_RX_PHYS_ADDR) ? 8 : 4;
 	rxq_bytes = rxq_capacity * rx_desc_bytes;
 	rxq_bytes = (rxq_bytes + EF_VI_PAGE_SIZE - 1) & ~(EF_VI_PAGE_SIZE - 1);
+	rxq_bytes = (rxq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
 
 	if( iobuf_mmap_rx == iobuf_mmap_tx )
 		iobuf_mmap_tx = (char*) iobuf_mmap_rx + rxq_bytes;
 
 	vm->rx_queue_capacity = rxq_capacity;
-	vm->rx_dma_falcon = iobuf_mmap_rx;
-	vm->rx_bell       = (char*) io_mmap + (FR_BZ_RX_DESC_UPD_REGP0_OFST & 4095);
+	vm->rx_dma_ef10 = vm->rx_dma_falcon = iobuf_mmap_rx;
 	vm->tx_queue_capacity = txq_capacity;
-	vm->tx_dma_falcon = iobuf_mmap_tx;
-	vm->tx_bell       = (char*) io_mmap + (FR_BZ_TX_DESC_UPD_REGP0_OFST & 4095);
+	vm->tx_dma_ef10 = vm->tx_dma_falcon = iobuf_mmap_tx;
+
+	vm->rx_prefix_len = rx_prefix_len;
+
+	switch( vm->nic_type.arch ) {
+	case EF_VI_ARCH_FALCON:
+		vm->rx_bell = (char*) io_mmap +
+			(FR_BZ_RX_DESC_UPD_REGP0_OFST & (EF_VI_PAGE_SIZE - 1));
+		vm->tx_bell = (char*) io_mmap +
+			(FR_BZ_TX_DESC_UPD_REGP0_OFST & (EF_VI_PAGE_SIZE - 1));
+		break;
+	case EF_VI_ARCH_EF10:
+		vm->rx_bell = (char*) io_mmap + ER_DZ_RX_DESC_UPD_REG;
+		vm->tx_bell = (char*) io_mmap + ER_DZ_TX_DESC_UPD_REG;
+		break;
+	default:
+		/* ?? TODO: We should return an error code. */
+		EF_VI_BUG_ON(1);
+		break;
+	}
 }
 
 
@@ -241,7 +279,9 @@ int ef_vi_rxq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
     ++state->rxq.removed;
   }
 
-  state->rxq.added = state->rxq.removed = 0;
+  state->rxq.added = state->rxq.removed = state->rxq.prev_added = 0;
+  state->rxq.in_jumbo = 0;
+  state->rxq.bytes_acc = 0;
 
   return 0;
 }
@@ -260,7 +300,7 @@ int ef_vi_txq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
     ++state->txq.removed;
   }
 
-  state->txq.added = state->txq.removed = 0;
+  state->txq.previous = state->txq.added = state->txq.removed = 0;
 
   return 0;
 }

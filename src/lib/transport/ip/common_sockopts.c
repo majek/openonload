@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -312,24 +312,49 @@ int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
     break;
 
   case IP_MTU:
+    if( s->b.state == CI_TCP_STATE_UDP ) {
+      if( sock_raddr_be32(s) != 0 ) {
+        ci_ip_cache_invalidate(&s->pkt);
+        cicp_user_retrieve(ep->netif, &s->pkt, &s->cp);
+        if( cicp_ip_cache_is_valid(CICP_HANDLE(ep->netif), &s->pkt) ) {
+          u = s->pkt.mtu;
+          break;
+        }
+      }
+      return ci_get_os_sockopt(ep, fd, IPPROTO_IP, optname, optval, optlen);
+    }
     /* gets the current known path MTU of the current socket */
     /*! \todo Can we improve on the flagging here (other than
      * purging udp_state with extreme prejudice :-) ) */
-    if( ((s->b.state & CI_TCP_STATE_TCP) &&
-         ((s->b.state < CI_TCP_ESTABLISHED) ||
-         (s->b.state >= CI_TCP_TIME_WAIT))) ||
-        (s->b.state == CI_TCP_STATE_UDP &&
-	 /*??fixme*/
-         sock_raddr_be32(s) == 0) )  {
+    else if( s->b.state <= CI_TCP_LISTEN || 
+             s->b.state >= CI_TCP_TIME_WAIT )  {
       /* The socket is not connected */
       RET_WITH_ERRNO(ENOTCONN);
     }
-    u = s->pkt.pmtus.pmtu;
+    u = SOCK_TO_TCP(s)->pmtus.pmtu;
     break;
 
   case IP_MTU_DISCOVER:
     /* gets the status of Path MTU discovery on this socket */
-    u = s->pkt.pmtus.state;
+    switch( s->s_flags & (CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF) ) {
+      case CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF:
+        u = IP_PMTUDISC_DO;
+        break;
+      case CI_SOCK_FLAG_PMTU_DO:
+        u = IP_PMTUDISC_WANT;
+        break;
+      case CI_SOCK_FLAG_ALWAYS_DF:
+#ifdef IP_PMTUDISC_PROBE
+        u = IP_PMTUDISC_PROBE;
+#else
+        ci_assert(0);
+        u = IP_PMTUDISC_DO;
+#endif
+        break;
+      case 0:
+        u = IP_PMTUDISC_DONT;
+        break;
+    }
     break;
 
   case IP_RECVTOS:
@@ -622,6 +647,14 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     goto u_out;
 
 
+  case SO_TIMESTAMP:
+    u = !!(s->cmsg_flags & CI_IP_CMSG_TIMESTAMP);
+    goto u_out;
+
+  case SO_TIMESTAMPNS:
+    u = !!(s->cmsg_flags & CI_IP_CMSG_TIMESTAMPNS);
+    goto u_out;
+
   default: /* Unexpected & known invalid options end up here */
     goto fail_noopt;
   }
@@ -747,13 +780,35 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
       goto fail_fault;
     val = ci_get_optval(optval, optlen);
 
-    if(val < CI_PMTU_DISCOVER_DISABLE ||
-       val > CI_PMTU_DISCOVER_ENABLE_AND_CHECK_SENDS) {
+    if( val < IP_PMTUDISC_DONT ||
+#ifdef IP_PMTUDISC_PROBE
+        val > IP_PMTUDISC_PROBE
+#else
+        val > IP_PMTUDISC_DO
+#endif
+      ) {
       rc = -EINVAL;
       goto fail_fault;
     }
 
-    s->pkt.pmtus.state = val;
+    switch( val ) {
+      case IP_PMTUDISC_DONT:
+        s->s_flags &= ~(CI_SOCK_FLAG_ALWAYS_DF | CI_SOCK_FLAG_PMTU_DO);
+        break;
+      case IP_PMTUDISC_DO:
+        s->s_flags |= CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF;
+        break;
+      case IP_PMTUDISC_WANT:
+        s->s_flags |= CI_SOCK_FLAG_PMTU_DO;
+        s->s_flags &= ~CI_SOCK_FLAG_ALWAYS_DF;
+        break;
+#ifdef IP_PMTUDISC_PROBE
+      case IP_PMTUDISC_PROBE:
+        s->s_flags |= CI_SOCK_FLAG_ALWAYS_DF;
+        s->s_flags &= ~CI_SOCK_FLAG_PMTU_DO;
+        break;
+#endif
+    }
     break;
   }
 
@@ -984,20 +1039,18 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       goto fail_inval;
     v = *(int*) optval;
     if( s->b.state & CI_TCP_STATE_TCP ) {
-      v = CI_MAX(v, (int) NI_OPTS(netif).tcp_sndbuf_min);
       v = CI_MIN(v, (int) NI_OPTS(netif).tcp_sndbuf_max);
-      s->so.sndbuf = oo_adjust_SO_XBUF(v);
+      s->so.sndbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_sndbuf_min);
       /* only recalculate sndbuf, if the socket is already connected, if not,
        * then eff_mss is probably rubbish and we also know that the sndbuf
        * will have to be set when the socket is promoted to established
        */
       if( ! (s->b.state & CI_TCP_STATE_NOT_CONNECTED) )
-        ci_tcp_set_sndbuf(SOCK_TO_TCP(s));
+        ci_tcp_set_sndbuf(netif, SOCK_TO_TCP(s));
     }
     else {
-      v = CI_MAX(v, (int) NI_OPTS(netif).udp_sndbuf_min);
       v = CI_MIN(v, (int) NI_OPTS(netif).udp_sndbuf_max);
-      s->so.sndbuf = oo_adjust_SO_XBUF(v);
+      s->so.sndbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).udp_sndbuf_min);
     }
     s->s_flags |= CI_SOCK_FLAG_SET_SNDBUF;
     break;
@@ -1008,14 +1061,13 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       goto fail_inval;
     v = *(int*) optval;
     if( s->b.state & CI_TCP_STATE_TCP ) {
-      v = CI_MAX(v, (int) NI_OPTS(netif).tcp_rcvbuf_min);
       v = CI_MIN(v, (int) NI_OPTS(netif).tcp_rcvbuf_max);
+      s->so.rcvbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_rcvbuf_min);
     }
     else {
-      v = CI_MAX(v, (int) NI_OPTS(netif).udp_rcvbuf_min);
       v = CI_MIN(v, (int) NI_OPTS(netif).udp_rcvbuf_max);
+      s->so.rcvbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).udp_rcvbuf_min);
     }
-    s->so.rcvbuf = oo_adjust_SO_XBUF(v);
     s->s_flags |= CI_SOCK_FLAG_SET_RCVBUF;
     break;
 
@@ -1064,6 +1116,24 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       s->so.so_debug &= ~CI_SOCKOPT_FLAG_SO_DEBUG;
     break;
 
+
+  case SO_TIMESTAMP:
+    if( (rc = opt_not_ok(optval, optlen, char)) )
+      goto fail_inval;
+    if( ci_get_optval(optval, optlen) )
+      s->cmsg_flags |= CI_IP_CMSG_TIMESTAMP;
+    else
+      s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMP;
+    break;
+
+  case SO_TIMESTAMPNS:
+    if( (rc = opt_not_ok(optval, optlen, char)) )
+      goto fail_inval;
+    if( ci_get_optval(optval, optlen) )
+      s->cmsg_flags |= CI_IP_CMSG_TIMESTAMPNS;
+    else
+      s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPNS;
+    break;
 
   default:
     /* SOL_SOCKET options that are defined to fail with ENOPROTOOPT:

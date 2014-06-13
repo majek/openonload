@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,9 +65,8 @@ struct efrm_vf;
 struct efrm_vi;
 struct efrm_client;
 
-/* Do we use threaded IRQ for VFs?
- * See use_threaded_irq resource module parameter. */
-extern int efrm_vf_use_threaded_irq;
+/* Should we avoid atomic allocations when using VFs? */
+extern int efrm_vf_avoid_atomic_allocations;
 
 extern void
 efrm_vf_manager_params(unsigned *vi_base_out, unsigned *vi_scale_out,

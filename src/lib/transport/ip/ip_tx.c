@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -115,7 +115,7 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
 
   if( ts->s.pkt.status == retrrc_success ) {
     if( ts->s.pkt.mtu != prev_mtu )
-      CI_PMTU_TIMER_NOW(ni, &ts->s.pkt.pmtus);
+      CI_PMTU_TIMER_NOW(ni, &ts->pmtus);
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     ci_netif_send(ni, pkt);
     return;

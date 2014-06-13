@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -23,7 +23,7 @@ struct tcp_helper_resource_s;
 struct oo_hw_filter {
   struct tcp_helper_resource_s* trs;
   unsigned dlfilter_handle;
-  int filter_id[CI_CFG_MAX_INTERFACES];
+  int filter_id[CI_CFG_MAX_REGISTER_INTERFACES];
 };
 
 

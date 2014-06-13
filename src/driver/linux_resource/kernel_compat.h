@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,6 +65,10 @@
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 # include <linux/iommu.h>
 #endif
+#include <driver/linux_affinity/kernel_compat.h>
+#ifdef EFRM_HAVE_NSPROXY
+#include <linux/nsproxy.h>
+#endif
 
 /********* wait_for_completion_timeout() ********************/
 
@@ -129,19 +133,88 @@ out:
 
 /********* IOMMU mapping ********************/
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
+/* iommu_map/iommu_unmap definition */
 #  if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,34) || defined(RHEL_MAJOR)
   static inline int iommu_map(struct iommu_domain *domain,
 			      unsigned long iova, phys_addr_t paddr,
-			      int gfp_order, int prot) {
-    return iommu_map_range(domain, iova, paddr, PAGE_SIZE << gfp_order, prot);
+			      int size, int prot) {
+    return iommu_map_range(domain, iova, paddr, size, prot);
   }
 
   static inline int iommu_unmap(struct iommu_domain *domain,
-				unsigned long iova, int gfp_order) {
-    iommu_unmap_range(domain, iova, PAGE_SIZE << gfp_order);
-    return 0;
+				unsigned long iova, int size) {
+    iommu_unmap_range(domain, iova, size);
+    return size;
   }
+#  elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,0,0) && \
+        LINUX_VERSION_CODE < KERNEL_VERSION(3,1,0) && defined(HPAGE_SIZE)
+	/* Yes, this is just crazy, but iommu_map does not
+	 * correctly map 2M (huge|compound) pages on SLES11
+	 * linux-3.0 Intel IOMMU.  See bug 31783. */
+static inline int iommu_map_my(struct iommu_domain *domain,
+			       unsigned long iova,
+			       phys_addr_t paddr, size_t size, int prot)
+{
+	if (size <= HPAGE_SIZE / 2 )
+		return iommu_map(domain, iova, paddr, get_order(size), prot);
+	else {
+		int rc = iommu_map(domain, iova, paddr,
+				   HPAGE_SHIFT - PAGE_SHIFT - 1, prot);
+		if (rc < 0)
+			return rc;
+		rc = iommu_map(domain, iova + HPAGE_SIZE / 2,
+			       paddr + HPAGE_SIZE / 2,
+			       HPAGE_SHIFT - PAGE_SHIFT - 1, prot);
+		if (rc < 0)
+			iommu_unmap(domain, iova, HPAGE_SHIFT - 1);
+		return rc;
+	}
+}
+static inline int iommu_unmap_my(struct iommu_domain *domain,
+				 unsigned long iova, size_t size)
+{
+	int rc;
+	if (size <= HPAGE_SIZE / 2 ) {
+		rc = iommu_unmap(domain, iova, get_order(size));
+		if (rc < 0)
+			return rc;
+		return size;
+	} else {
+		rc = iommu_unmap(domain, iova, HPAGE_SHIFT - PAGE_SHIFT - 1);
+		if (rc < 0)
+			return rc;
+		rc = iommu_unmap(domain, iova + (1 << (HPAGE_SHIFT - 1)),
+				 HPAGE_SHIFT - PAGE_SHIFT - 1);
+		if (rc < 0)
+			return rc;
+		return size;
+	}
+}
+#    define iommu_map iommu_map_my
+#    define iommu_unmap iommu_unmap_my
+
+#  elif LINUX_VERSION_CODE < KERNEL_VERSION(3,3,0)
+   /* old API: get gfp_order, unmap returns 0 or -errno
+    * new API: get size, unmap returns size */
+static inline int iommu_map_my(struct iommu_domain *domain,
+			       unsigned long iova,
+			       phys_addr_t paddr, size_t size, int prot)
+{
+	return iommu_map(domain, iova, paddr, get_order(size), prot);
+}
+static inline int iommu_unmap_my(struct iommu_domain *domain,
+				 unsigned long iova, size_t size)
+{
+	int rc = iommu_unmap(domain, iova, get_order(size));
+	if (rc == 0)
+		return size;
+	return rc;
+}
+#    define iommu_map iommu_map_my
+#    define iommu_unmap iommu_unmap_my
+
 #  endif
+
 #  ifndef IOMMU_CACHE
 #    define IOMMU_CACHE 0
 #  endif
@@ -188,6 +261,14 @@ static inline void efrm_pci_disable_msi(struct pci_dev *dev) {}
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
 # define f_vfsmnt f_path.mnt
+#endif
+
+#ifdef EFRM_OLD_DEV_BY_IDX
+#define __dev_get_by_index(net_ns, ifindex) __dev_get_by_index(ifindex)
+#endif
+
+#ifndef EFRM_HAVE_NETDEV_NOTIFIER_INFO
+#define netdev_notifier_info_to_dev(info) (info)
 #endif
 
 #endif /* DRIVER_LINUX_RESOURCE_KERNEL_COMPAT_H */

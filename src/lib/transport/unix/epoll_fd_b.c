@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -246,6 +246,9 @@ citp_protocol_impl citp_epollb_protocol_impl = {
     .zc_recv     = citp_epoll_zc_recv,
     .zc_recv_filter = citp_epoll_zc_recv_filter,
     .recvmsg_kernel = citp_epoll_recvmsg_kernel,
+    .tmpl_alloc     = citp_epoll_tmpl_alloc,
+    .tmpl_update    = citp_epoll_tmpl_update,
+    .tmpl_abort     = citp_epoll_tmpl_abort,
   }
 };
 

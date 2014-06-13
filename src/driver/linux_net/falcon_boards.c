@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,8 +14,8 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
- * Copyright 2007-2010 Solarflare Communications Inc.
+ * Driver for Solarflare network controllers and boards
+ * Copyright 2007-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -777,26 +777,6 @@ static const struct falcon_board_type board_types[] = {
 		.monitor	= sfn4112f_check_hw,
 	},
 };
-
-#ifdef EFX_NOT_UPSTREAM
-static void
-efx_port_dummy_op_set_id_led(struct efx_nic *efx, enum efx_led_mode mode)
-{
-}
-
-static const struct falcon_board_type falcon_dummy_board = {
-	.init		= efx_port_dummy_op_int,
-	.init_phy	= efx_port_dummy_op_void,
-	.fini		= efx_port_dummy_op_void,
-	.set_id_led	= efx_port_dummy_op_set_id_led,
-	.monitor	= efx_port_dummy_op_int,
-};
-
-void falcon_probe_dummy_board(struct efx_nic *efx)
-{
-	falcon_board(efx)->type = &falcon_dummy_board;
-}
-#endif
 
 int falcon_probe_board(struct efx_nic *efx, u16 revision_info)
 {

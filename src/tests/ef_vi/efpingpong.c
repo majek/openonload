@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,7 +53,6 @@
 #define _GNU_SOURCE 1
 
 #include <etherfabric/vi.h>
-#include <etherfabric/iobufset.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/memreg.h>
 #include <ci/tools.h>
@@ -77,21 +76,24 @@
 */
 #define DEFAULT_PAYLOAD_SIZE  28
 
-#define CACHE_LINE_SIZE       64
-#define CACHE_ALIGN           __attribute__((aligned(CACHE_LINE_SIZE)))
+#define CACHE_ALIGN           __attribute__((aligned(EF_VI_DMA_ALIGN)))
 
 
 static int              cfg_iter = 100000;
 static unsigned		cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
 static int		cfg_wait = 0;
-static int              cfg_use_iobufset;
 static int              cfg_use_vf;
 static int              cfg_phys_mode;
 static int              cfg_disable_tx_push;
+static int              cfg_tx_align;
+static int              cfg_rx_align;
 
 
 #define N_RX_BUFS	16u
-#define RX_BUF_SIZE     2048
+#define N_TX_BUFS	1u
+#define N_BUFS          (N_RX_BUFS + N_TX_BUFS)
+#define FIRST_TX_BUF    N_RX_BUFS
+#define BUF_SIZE        2048
 #define MAX_UDP_PAYLEN	(1500 - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr))
 
 
@@ -124,15 +126,14 @@ struct pkt_buf {
   struct pkt_buf* next;
   ef_addr         dma_buf_addr;
   int             id;
-  unsigned        dma_buf[1] CACHE_ALIGN;
+  uint8_t         dma_buf[1] CACHE_ALIGN;
 };
 
 
 static ef_driver_handle  driver_handle;
 static ef_vi		 vi;
 
-struct pkt_buf*          pkt_bufs[N_RX_BUFS + 1];
-static ef_iobufset       iobufset;
+struct pkt_buf*          pkt_bufs[N_BUFS];
 static ef_pd             pd;
 static ef_memreg         memreg;
 static unsigned          rx_posted, rx_completed;
@@ -142,14 +143,20 @@ static uint8_t            remote_mac[6];
 static struct sockaddr_in sa_local, sa_remote;
 
 
-static void rx_post(void)
+static void rx_post_8(void)
 {
   struct pkt_buf* pb;
-  unsigned buf_i = rx_posted % N_RX_BUFS;
-  TEST(rx_posted - rx_completed < N_RX_BUFS);
-  pb = pkt_bufs[buf_i];
-  TRY(ef_vi_receive_post(&vi, pb->dma_buf_addr, pb->id));
-  ++rx_posted;
+  int i;
+  unsigned buf_i;
+
+  for( i = 0; i < 8; ++i ) {
+    buf_i = rx_posted % N_RX_BUFS;
+    TEST(rx_posted - rx_completed < N_RX_BUFS);
+    pb = pkt_bufs[buf_i];
+    TRY(ef_vi_receive_init(&vi, pb->dma_buf_addr, pb->id));
+    ++rx_posted;
+  }
+  ef_vi_receive_push(&vi);
 }
 
 
@@ -194,7 +201,7 @@ static void rx_wait(void)
 
 static void tx_send(void)
 {
-  struct pkt_buf* pb = pkt_bufs[N_RX_BUFS];
+  struct pkt_buf* pb = pkt_bufs[FIRST_TX_BUF];
   ef_vi_transmit(&vi, pb->dma_buf_addr, tx_frame_len, 0);
 }
 
@@ -204,15 +211,13 @@ static void pong_test(void)
 {
   int i;
 
-  rx_post();
-  rx_post();
-  rx_post();
-  rx_post();
+  rx_post_8();
 
   for( i = 0; i < cfg_iter; ++i ) {
     rx_wait();
     tx_send();
-    rx_post();
+    if( i % 8 == 0 )
+      rx_post_8();
   }
 }
 
@@ -222,21 +227,20 @@ static void ping_test(void)
   struct timeval start, end;
   int i, usec;
 
-  rx_post();
-  rx_post();
-  rx_post();
+  rx_post_8();
 
   gettimeofday(&start, NULL);
   for( i = 0; i < cfg_iter; ++i ) {
     tx_send();
-    rx_post();
+    if( i % 8 == 0 )
+      rx_post_8();
     rx_wait();
   }
   gettimeofday(&end, NULL);
 
   usec = (end.tv_sec - start.tv_sec) * 1000000;
   usec += end.tv_usec - start.tv_usec;
-  printf("round-trip time: %0.2f usec\n", (double) usec / cfg_iter);
+  printf("round-trip time: %0.3f usec\n", (double) usec / cfg_iter);
 }
 
 
@@ -281,7 +285,7 @@ int init_udp_pkt(void* pkt_buf, int paylen)
 
 static void do_init(int ifindex)
 {
-  enum ef_pd_flags pd_flags = 0;
+  enum ef_pd_flags pd_flags = EF_PD_DEFAULT;
   ef_filter_spec filter_spec;
   struct pkt_buf* pb;
   enum ef_vi_flags vi_flags = 0;
@@ -306,33 +310,27 @@ static void do_init(int ifindex)
                                    sa_local.sin_port));
   TRY(ef_vi_filter_add(&vi, driver_handle, &filter_spec, NULL));
 
-  if( cfg_use_iobufset ) {
-    TRY(ef_iobufset_alloc(&iobufset, driver_handle, &vi, driver_handle,
-                          0, 2048, N_RX_BUFS + 1, CACHE_LINE_SIZE, 0));
-    for( i = 0; i <= N_RX_BUFS; ++i ) {
-      pkt_bufs[i] = (void*) ef_iobufset_ptr(&iobufset, i);
-      pkt_bufs[i]->dma_buf_addr = ef_iobufset_addr(&iobufset, i);
-    }
-  }
-  else {
-    int bytes = (N_RX_BUFS + 1) * RX_BUF_SIZE;
+  {
+    int bytes = N_BUFS * BUF_SIZE;
     void* p;
-    TEST(posix_memalign(&p, 4096, bytes) == 0);
+    TEST(posix_memalign(&p, CI_PAGE_SIZE, bytes) == 0);
     TRY(ef_memreg_alloc(&memreg, driver_handle, &pd, driver_handle, p, bytes));
-    for( i = 0; i <= N_RX_BUFS; ++i ) {
-      pkt_bufs[i] = (void*) ((char*) p + i * RX_BUF_SIZE);
-      pkt_bufs[i]->dma_buf_addr = ef_memreg_dma_addr(&memreg, i * RX_BUF_SIZE);
+    for( i = 0; i < N_BUFS; ++i ) {
+      pb = (void*) ((char*) p + i * BUF_SIZE);
+      pb->id = i;
+      pb->dma_buf_addr = ef_memreg_dma_addr(&memreg, i * BUF_SIZE);
+      pb->dma_buf_addr += MEMBER_OFFSET(struct pkt_buf, dma_buf);
+      pkt_bufs[i] = pb;
     }
   }
 
-  for( i = 0; i <= N_RX_BUFS; ++i ) {
-    pb = pkt_bufs[i];
-    pb->id = i;
-    pb->dma_buf_addr += MEMBER_OFFSET(struct pkt_buf, dma_buf);
-  }
+  for( i = 0; i < N_RX_BUFS; ++i )
+    pkt_bufs[i]->dma_buf_addr += cfg_rx_align;
+  for( i = FIRST_TX_BUF; i < N_BUFS; ++i )
+    pkt_bufs[i]->dma_buf_addr += cfg_tx_align;
 
-  pb = pkt_bufs[N_RX_BUFS];
-  tx_frame_len = init_udp_pkt(pb->dma_buf, cfg_payload_len);
+  pb = pkt_bufs[FIRST_TX_BUF];
+  tx_frame_len = init_udp_pkt(pb->dma_buf + cfg_tx_align, cfg_payload_len);
 }
 
 
@@ -399,7 +397,6 @@ static void usage(void)
   fprintf(stderr, "  -n <iterations>         - set number of iterations\n");
   fprintf(stderr, "  -s <message-size>       - set udp payload size\n");
   fprintf(stderr, "  -w                      - sleep instead of busy wait\n");
-  fprintf(stderr, "  -b                      - use ef_iobufset\n");
   fprintf(stderr, "  -v                      - use a VF\n");
   fprintf(stderr, "  -p                      - physical address mode\n");
   fprintf(stderr, "  -t                      - disable TX push\n");
@@ -423,7 +420,7 @@ int main(int argc, char* argv[])
 
   printf("# ef_vi_version_str: %s\n", ef_vi_version_str());
 
-  while( (c = getopt (argc, argv, "n:s:wbvpt")) != -1 )
+  while( (c = getopt (argc, argv, "n:s:wbvpta:A:")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -434,9 +431,6 @@ int main(int argc, char* argv[])
     case 'w':
       cfg_wait = 1;
       break;
-    case 'b':
-      cfg_use_iobufset = 1;
-      break;
     case 'v':
       cfg_use_vf = 1;
       break;
@@ -445,6 +439,12 @@ int main(int argc, char* argv[])
       break;
     case 't':
       cfg_disable_tx_push = 1;
+      break;
+    case 'a':
+      cfg_tx_align = atoi(optarg);
+      break;
+    case 'A':
+      cfg_rx_align = atoi(optarg);
       break;
     case '?':
       usage();
@@ -455,7 +455,6 @@ int main(int argc, char* argv[])
   argc -= optind;
   argv += optind;
 
-  printf("%d\n", argc);
   if( argc != 7 )
     usage();
   CL_CHK(parse_interface(argv[1], &ifindex));
@@ -480,6 +479,8 @@ int main(int argc, char* argv[])
   printf("# iterations: %d\n", cfg_iter);
   do_init(ifindex);
   printf("# frame len: %d\n", tx_frame_len);
+  printf("# rx align: %d\n", cfg_rx_align);
+  printf("# tx align: %d\n", cfg_tx_align);
   t->fn();
 
   return 0;

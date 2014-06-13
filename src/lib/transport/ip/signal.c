@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,10 +30,12 @@
 #include <ci/internal/ip_signal.h>
 #include <ci/internal/ip_log.h>
 #include <linux/version.h>
+#include <ci/internal/transport_common.h>
 #include <ci/internal/efabcfg.h>
 
-/*! \TODO - remove (useful for debugging though) */
-#define LOG_SIG(x)
+#ifdef __KERNEL__
+#error "Non-kernel file"
+#endif
 
 /*! Signal handlers storage.  Indexed by signum-1.
  * Read by UL, written by kernel only. */
@@ -55,6 +57,7 @@ citp_signal_run_app_handler(int sig, siginfo_t *info, void *context)
   struct oo_sigaction act;
   ci_int32 type1, type2;
   int ret;
+  sa_sigaction_t handler;
 
   do {
     type1 = p_data->type;
@@ -71,30 +74,41 @@ citp_signal_run_app_handler(int sig, siginfo_t *info, void *context)
    * We just run old handler in this case, so we drop
    * OO_SIGHANGLER_IGN_BIT.
    */
-  act.type &= OO_SIGHANGLER_TYPE_MASK;
 
   ret = act.flags & SA_RESTART;
   LOG_SIG(log("%s: signal %d type %d run handler %p flags %x",
               __FUNCTION__, sig, act.type, CI_USER_PTR_GET(act.handler),
               act.flags));
 
-  if( act.type != OO_SIGHANGLER_USER || (act.flags & SA_SIGINFO) ) {
-    /* All non-user hadnlers are installed with SA_SIGINFO;
-     * act.flags is used to store user value in this case */
-    sa_sigaction_t handler = CI_USER_PTR_GET(act.handler);
-    ci_assert(handler);
-    ci_assert(info);
-    ci_assert(context);
-    ci_assert_nequal(handler, citp_signal_intercept_3);
+  handler = CI_USER_PTR_GET(act.handler);
+  ci_assert(handler);
+  ci_assert_nequal(handler, citp_signal_intercept);
+  ci_assert(info);
+  ci_assert(context);
+
+  if( (act.type & OO_SIGHANGLER_TYPE_MASK) != OO_SIGHANGLER_USER ||
+      (act.flags & SA_SIGINFO) ) {
     (*handler)(sig, info, context);
   } else {
-    __sighandler_t handler = CI_USER_PTR_GET(act.handler);
-    ci_assert_nequal(handler, citp_signal_intercept_1);
-    ci_assert(handler);
-    (*handler)(sig);
+    __sighandler_t handler1 = (void *)handler;
+    (*handler1)(sig);
   }
   LOG_SIG(log("%s: returned from handler for signal %d: ret=%x", __FUNCTION__,
               sig, ret));
+
+  /* If sighandler was reset because of SA_ONESHOT, we should properly
+   * handle termination.
+   * Also, signal flags possibly differs from the time when kernel was
+   * running the sighandler: so, we should ensure that ONESHOT shoots
+   * only once. */
+  if( (act.flags & SA_ONESHOT) &&
+      act.type == citp_signal_data[sig-1].type ) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sigaction(sig, &sa, NULL);
+    LOG_SIG(log("%s: SA_ONESHOT fixup", __func__));
+  }
 
   return ret;
 }
@@ -166,10 +180,17 @@ ci_inline void citp_signal_set_pending(int signum, siginfo_t *info,
     if( ci_cas32_fail(&our_info->signals[i].signum, 0, signum) )
       continue;
     LOG_SIG(log("%s: signal %d pending", __FUNCTION__, signum));
-    ci_assert_equiv(info, context);
-    if( info != NULL )
-      memcpy(&our_info->signals[i].saved_info, info, sizeof(siginfo_t));
+    ci_assert(info);
+    ci_assert(context);
+    memcpy(&our_info->signals[i].saved_info, info, sizeof(siginfo_t));
     our_info->signals[i].saved_context = context;
+
+    /* Hack: in case of SA_ONESHOT, make sure that we intercept
+     * the signal.  At the end of citp_signal_run_app_handler,
+     * we will reset the signal handler properly. */
+    if( citp_signal_data[signum-1].flags & SA_ONESHOT )
+      sigaction(signum, NULL, NULL);
+
     ci_wmb();
     our_info->run_pending = 1;
     return;
@@ -214,9 +235,10 @@ ci_inline void citp_signal_run_now(int signum, siginfo_t *info,
 ** \param  info     Additional information passed in by the kernel
 ** \param  context  Context passed in by the kernel
 */
-void citp_signal_intercept_3(int signum, siginfo_t *info, void *context)
+void citp_signal_intercept(int signum, siginfo_t *info, void *context)
 {
   citp_signal_info *our_info = citp_signal_get_specific_inited();
+  LOG_SIG(log("%s(%d, %p, %p)", __func__, signum, info, context));
   /* Note: our thread-specific data is initialised on the way in to the our
    * library if necessary, so if our_info is NULL, we can assume that this
    * thread is not currently running inside the library.  (This can happen
@@ -231,16 +253,7 @@ void citp_signal_intercept_3(int signum, siginfo_t *info, void *context)
     citp_signal_run_now(signum, info, context, our_info);
 }
 
-/*! Handler we register for sigaction() sa_sigaction interception
-** \param  signum   Signal number
-*/
-void citp_signal_intercept_1(int signum)
-{
-  citp_signal_intercept_3(signum, NULL, NULL);
-}
-
 /* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
 /* SIG_DFL simulator for signals like SIGINT, SIGTERM: it is postponed
  * properly to safe shared stacks. */
 static void citp_signal_terminate(int signum, siginfo_t *info, void *context)
@@ -258,7 +271,6 @@ static void citp_signal_terminate(int signum, siginfo_t *info, void *context)
   else
     _exit(128 + signum);
 }
-#endif
 
 /*! sa_restorer used by libc (SA_SIGINFO case!) */
 static void *citp_signal_sarestorer;
@@ -278,13 +290,11 @@ void *citp_signal_sarestorer_get(void)
   if( citp_signal_sarestorer_inited )
     return citp_signal_sarestorer;
 
-  LOG_SIG(log("%s: citp_signal_intercept_1=%p, citp_signal_intercept_3=%p",
-              __func__, citp_signal_intercept_1, citp_signal_intercept_3));
+  LOG_SIG(log("%s: citp_signal_intercept=%p",
+              __func__, citp_signal_intercept));
   /* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
   LOG_SIG(log("%s: citp_signal_terminate=%p", __func__, 
               citp_signal_terminate));
-#endif
   for( sig = 1; sig < _NSIG; sig++ ) {
     LOG_SIG(log("find sa_restorer via signal %d", sig));
     /* If the handler was already set by libc, we get sa_restorer just now */
@@ -329,16 +339,11 @@ void *citp_signal_sarestorer_get(void)
 /*! Our signal handlers for various interception types */
 sa_sigaction_t citp_signal_handlers[OO_SIGHANGLER_DFL_MAX+1] = {
 /* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
   citp_signal_terminate  /*OO_SIGHANGLER_TERM*/,
-#else
-  NULL,
-#endif
-NULL, NULL /*OO_SIGHANGLER_STOP, OO_SIGHANGLER_CORE - TODO */
+  NULL, NULL /*OO_SIGHANGLER_STOP, OO_SIGHANGLER_CORE - TODO */
 };
 
 
-#ifndef __KERNEL__
 
 int oo_spinloop_run_pending_sigs(ci_netif* ni, citp_waitable* w,
                                  citp_signal_info* si, int have_timeout)
@@ -362,8 +367,6 @@ int oo_spinloop_run_pending_sigs(ci_netif* ni, citp_waitable* w,
     return -EINTR;
   return 0;
 }
-
-#endif
 
 
 /*! \cidoxg_end */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1275,6 +1275,10 @@ cicp_ni_build(cicp_ni_t *control, const cicp_ns_mmap_info_t *shared,
 /*----------------------------------------------------------------------------
  * Timesync state
  *---------------------------------------------------------------------------*/
+
+extern unsigned oo_timesync_cpu_khz;
+
+extern void oo_timesync_wait_for_cpu_khz_to_stabilize(void);
 
 ci_inline struct oo_timesync* oo_timesync_state(cicp_handle_t* cplane)
 {

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,7 +69,6 @@ extern "C" {
  *  - allow application to signal that fd table checks aren't necessary
  *  - forwarding: zero-copy receive into a buffer, app can then do a
  *    zero-copy send on the same buffer.
- *  - templates: allow app to pre-send portions of a packet
  */
  
 
@@ -331,7 +330,8 @@ extern int onload_recvmsg_kernel(int fd, struct msghdr *msg, int flags);
 #define ONLOAD_MSG_NOSIGNAL MSG_NOSIGNAL
 
 /* Mask for supported flags */
-#define ONLOAD_ZC_SEND_FLAGS_MASK (ONLOAD_MSG_MORE | ONLOAD_MSG_NOSIGNAL)
+#define ONLOAD_ZC_SEND_FLAGS_MASK (ONLOAD_MSG_MORE | ONLOAD_MSG_NOSIGNAL | \
+                                   ONLOAD_MSG_WARM)
 
 /* Subset of flags that are passed through to the kernel when
  * handling non-onloaded datagrams
@@ -392,38 +392,60 @@ extern int onload_set_recv_filter(int fd,
  * when the complete packet contents are known.  If the updates are
  * relatively small this should result in a lower latency send.
  *
- * 
- * onload_msg_template_set takes an array of iovecs to specify the
- * bulk of the packet data. On success, the onload_template_handle
- * pointer is updated to contain the (opaque) handle used to refer to
- * this template in subsequent operations.
+ * onload_msg_template_alloc takes an array of iovecs to specify the
+ * initial bulk of the packet data. On success, the
+ * onload_template_handle pointer is updated to contain the (opaque)
+ * handle used to refer to this template in subsequent operations.
  *
+ * onload_msg_template_update takes an array of
+ * onload_template_msg_update_iovec to describe changes to the base
+ * packet given in onload_msg_template_alloc.  Each of the update
+ * iovec should describe a single change, and contain:
  *
- * onload_msg_template_update takes an array of iovecs to describe
- * changes to the base packet given in onload_msg_template_set.  Each
- * of the update iovecs should describe a single change, and contain:
+ *  - otmu_base set to the start of the new data.
  *
- *  - iov_base set to the start of the new data.
+ *  - otmu_len set to the length of the update.
  *
- *  - iov_len set to the length of the update.
- *
- *  - iov_offset set to the offset within the template to update
+ *  - otmu_offset set to the offset within the template to update
  *
  * ulen is the length of the updates array (i.e. the number of changes)
- * 
- * complete can optionally be set to 1 to indicate that the packet can
- * now be sent.  To complete and send a template without further
- * updates, set updates=NULL and ulen=0
  *
- * onload_msg_template_update can be called multiple times and
- * updates are cumulative but after completing a template the
- * ownership of the template transfer to onload and it must not be
- * used further by the application.
+ * Currently, the only supported operations with
+ * onload_msg_template_update is to either overwrite existing contents
+ * or to send by using ONLOAD_TEMPLATE_FLAGS_SEND_NOW flag.
  *
- * To abort or release a template without sending it call
- * onload_msg_template_release.
+ * To send without overwriting, simply call onload_msg_template_update
+ * with updates=NULL, ulen=0, and flags=ONLOAD_TEMPLATE_FLAGS_SEND_NOW.
+ *
+ * After onload_msg_template_update has been called with
+ * flags=ONLOAD_TEMPLATE_FLAGS_SEND_NOW, the ownership of the template
+ * passes to Onload.
+ *
+ * Templated sends will still respect the TCP state machinery and do a
+ * normal send if the state machinery does not allow it (e.g. the send
+ * queue is not empty).  In such scenarios, it is possible that the
+ * converted normal send can block.  ONLOAD_TEMPLATE_FLAGS_DONTWAIT
+ * flag provides the same behavior as MSG_DONTWAIT in such scenarios.
+ *
+ * onload_msg_template_update can be called multiple times and updates
+ * are cumulative.
+ *
+ * onload_msg_template_abort can be used to abort a templated send
+ * without sending.
  * 
  * All functions return zero on success, or <0 to indicate an error.
+ *
+ * If the associated socket with allocated templates is shutdown or
+ * closed, then the allocated templates are freed.  Subsequent calls
+ * to access them will return an error.
+ *
+ * Currently, when the NIC is reset, any socket with some allocated
+ * templated sends will get marked as not being able to do any further
+ * templated sends.  This is a limitation of the current
+ * implementation and will be removed in future.
+ *
+ * This implementation has known functional and performance
+ * limitations that will be resolved in future releases.
  *
  * These functions can only be used with accelerated sockets (those
  * being handled by Onload).  If a socket has been handed over to the
@@ -435,27 +457,32 @@ extern int onload_set_recv_filter(int fd,
 struct oo_msg_template;
 typedef struct oo_msg_template* onload_template_handle;
 
-enum onload_update_flags {
-  ONLOAD_UPDATE_OVERWRITE = 0x1,
-};
-
 /* An update_iovec describes a single template update */
-struct onload_msg_update {
-  void* base;                     /* Pointer to new data */
-  size_t len;                     /* Length of update */
-  off_t offset;                   /* Offset within template to update */ 
-  enum onload_update_flags flags; /* Overwrite only currently */
+struct onload_template_msg_update_iovec {
+  void*    otmu_base;         /* Pointer to new data */
+  size_t   otmu_len;          /* Length of new data */
+  off_t    otmu_offset;       /* Offset within template to update */ 
+  unsigned otmu_flags;        /* For future use.  Must be set to 0. */
 };
 
-extern int onload_msg_template_set(int fd, struct iovec* base_pkt, 
-                                   int blen, onload_template_handle* handle);
+/* Flags for use with onload_msg_template_update */
+enum onload_template_flags {
+  ONLOAD_TEMPLATE_FLAGS_SEND_NOW = 0x1, /* Send the packet now */
+  ONLOAD_TEMPLATE_FLAGS_DONTWAIT = MSG_DONTWAIT, /* Don't block */
+};
 
-extern int onload_msg_template_update(onload_template_handle handle, 
-                                      struct onload_msg_update* updates, 
-                                      int ulen, int complete);
+/* flags field is for future use and must be set to 0. */
+extern int onload_msg_template_alloc(int fd, struct iovec* initial_msg, 
+                                     int mlen, onload_template_handle* handle,
+                                     unsigned flags);
 
-extern int onload_msg_template_release(onload_template_handle handle);
 
+extern int
+onload_msg_template_update(int fd, onload_template_handle handle,
+                           struct onload_template_msg_update_iovec* updates, 
+                           int ulen, unsigned flags);
+
+extern int onload_msg_template_abort(int fd, onload_template_handle handle);
 
 #ifdef __cplusplus
 }

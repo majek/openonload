@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -34,7 +34,6 @@ void citp_waitable_reinit(ci_netif* ni, citp_waitable* w)
   /* Reinitialise fields between separate uses. */
   w->sleep_seq.all = 0;
   w->sigown = 0;
-  w->sigsig = 0;
 }
 
 
@@ -50,7 +49,7 @@ void citp_waitable_init(ci_netif* ni, citp_waitable* w, int id)
   w->bufid = OO_SP_FROM_INT(ni, id);
 #endif
   w->sb_flags = 0;
-  w->sb_aflags = CI_SB_AFLAG_ORPHAN;
+  w->sb_aflags = CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY;
 
   sp = oo_sockp_to_statep(ni, W_SP(w));
   OO_P_ADD(sp, CI_MEMBER_OFFSET(citp_waitable, post_poll_link));
@@ -60,8 +59,6 @@ void citp_waitable_init(ci_netif* ni, citp_waitable* w, int id)
   w->lock.wl_val = 0;
   CI_DEBUG(w->wt_next = OO_SP_NULL);
   CI_DEBUG(w->next_id = CI_ILL_END);
-  CI_USER_PTR_SET(w->callback_arg, NULL);
-  w->callback_armed = CI_FALSE;
 
   citp_waitable_reinit(ni, w);
 }
@@ -74,40 +71,32 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
   ci_assert(netif);
   ci_assert(ci_netif_is_locked(netif));
 
-  if( OO_SP_IS_NULL(netif->state->free_eps_head) ) {
-    /* Check to see if there are any that have had their free deferred */
-    if( netif->state->deferred_free_eps_head != CI_ILL_END ) {
-      ci_uint32 link;
-      ci_tcp_state *ts;
-
-      /* Pull the whole list atomically in one go */
-      do
-        link = netif->state->deferred_free_eps_head;
-      while( ci_cas32u_fail(&netif->state->deferred_free_eps_head,
-                            link, CI_ILL_END));
-
-      /* Iterate over local list and free them. TODO could probably
-         make this more efficient by just dumping the head on
-         free_eps_head without marking its link as free */
-      while( link != CI_ILL_END ) {
-        oo_sp sockp;
-        sockp = OO_SP_FROM_INT(netif, link);
-        ts = SP_TO_TCP(netif, sockp);
-        link = ts->s.b.next_id;
-        CI_DEBUG(ts->s.b.next_id = CI_ILL_END);
-        citp_waitable_obj_free(netif, &ts->s.b);
-      }
+  if( netif->state->deferred_free_eps_head != CI_ILL_END ) {
+    ci_uint32 link;
+    do
+      link = netif->state->deferred_free_eps_head;
+    while( ci_cas32_fail(&netif->state->deferred_free_eps_head,
+                         link, CI_ILL_END));
+    while( link != CI_ILL_END ) {
+      citp_waitable* w = ID_TO_WAITABLE(netif, link);
+      link = w->next_id;
+      CI_DEBUG(w->next_id = CI_ILL_END);
+      ci_assert(w->state == CI_TCP_STATE_FREE);
+      ci_assert(OO_SP_IS_NULL(w->wt_next));
+      w->wt_next = netif->state->free_eps_head;
+      netif->state->free_eps_head = W_SP(w);
     }
+  }
 
-    if( OO_SP_IS_NULL(netif->state->free_eps_head) )
-      ci_tcp_helper_more_socks(netif);
-
-    if( OO_SP_IS_NULL(netif->state->free_eps_head) )
-      ci_netif_timeout_reap(netif);
+  if( OO_SP_IS_NULL(netif->state->free_eps_head) ) {
+    ci_tcp_helper_more_socks(netif);
 
     if( OO_SP_IS_NULL(netif->state->free_eps_head) &&
         OO_SP_NOT_NULL(netif->state->free_pipe_bufs) )
       ci_tcp_helper_pipebufs_to_socks(netif);
+
+    if( OO_SP_IS_NULL(netif->state->free_eps_head) )
+      ci_netif_timeout_reap(netif);
   }
 
   if( OO_SP_IS_NULL(netif->state->free_eps_head) )
@@ -124,9 +113,9 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
   wo = SP_TO_WAITABLE_OBJ(netif, netif->state->free_eps_head);
 
   ci_assert(OO_SP_EQ(W_SP(&wo->waitable), netif->state->free_eps_head));
-  ci_assert(wo->waitable.state == CI_TCP_STATE_FREE);
-  ci_assert(wo->waitable.sb_aflags == CI_SB_AFLAG_ORPHAN);
-  ci_assert(wo->waitable.lock.wl_val == 0);
+  ci_assert_equal(wo->waitable.state, CI_TCP_STATE_FREE);
+  ci_assert_equal(wo->waitable.sb_aflags, (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY));
+  ci_assert_equal(wo->waitable.lock.wl_val, 0);
 
   netif->state->free_eps_head = wo->waitable.wt_next;
   CI_DEBUG(wo->waitable.wt_next = OO_SP_NULL);
@@ -168,41 +157,61 @@ static void ci_drop_orphan(ci_netif * ni)
 #endif
 
 
-void citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
+static void __citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
 {
-  int was_orphan = (w->sb_aflags & CI_SB_AFLAG_ORPHAN) != 0;
-
-#if defined(__KERNEL__) && ! defined(NDEBUG)
-  if( ! was_orphan ) {
-    /* DJR: The assert below implies that this is possible, but I can't
-     * imagine how it could be desirable.
-     */
-    ci_log("%s: UNEXPECTED: [%d:%d] not orphan", __FUNCTION__,
-           NI_ID(ni), W_FMT(w));
-    dump_stack();
-  }
-#endif
-
-  ci_assert(ci_netif_is_locked(ni));
-  ci_assert((w->sb_aflags & CI_SB_AFLAG_ORPHAN) || w->lock.wl_val == 0);
+  ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
   ci_assert(w->state != CI_TCP_STATE_FREE);
   ci_assert(ci_ni_dllist_is_self_linked(ni, &w->post_poll_link));
   ci_assert(OO_SP_IS_NULL(w->wt_next));
 
-  w->callback_armed = CI_FALSE;
-  CI_USER_PTR_SET(w->callback_arg, NULL);
-
   w->wake_request = 0;
   w->sb_flags = 0;
-  w->sb_aflags = CI_SB_AFLAG_ORPHAN;
+  w->sb_aflags = CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY;
   w->state = CI_TCP_STATE_FREE;
   w->lock.wl_val = 0;
+}
 
+
+void citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
+{
+  ci_assert(ci_netif_is_locked(ni));
+
+#ifdef __KERNEL__
+  {
+    /* Avoid racing with tcp_helper_do_non_atomic(). */
+    tcp_helper_endpoint_t* ep = ci_netif_get_valid_ep(ni, w->bufid);
+    unsigned ep_aflags;
+  again:
+    if( (ep_aflags = ep->ep_aflags) & OO_THR_EP_AFLAG_NON_ATOMIC ) {
+      ci_assert(!(ep_aflags & OO_THR_EP_AFLAG_NEED_FREE));
+      if( ci_cas32_fail(&ep->ep_aflags, ep_aflags,
+                        ep_aflags | OO_THR_EP_AFLAG_NEED_FREE) )
+        goto again;
+      return;
+    }
+    ci_rmb();
+  }
+#endif
+
+  __citp_waitable_obj_free(ni, w);
   w->wt_next = ni->state->free_eps_head;
   ni->state->free_eps_head = W_SP(w);
+  /* Must be last, as may result in stack going away. */
+  ci_drop_orphan(ni);
+}
 
-  if( was_orphan )
-    ci_drop_orphan(ni);
+
+void citp_waitable_obj_free_nnl(ci_netif* ni, citp_waitable* w)
+{
+  /* Stack lock is probably not held (but not guaranteed). */
+
+  __citp_waitable_obj_free(ni, w);
+  do
+    w->next_id = ni->state->deferred_free_eps_head;
+  while( ci_cas32_fail(&ni->state->deferred_free_eps_head,
+                       w->next_id, OO_SP_TO_INT(W_SP(w))) );
+  /* Must be last, as may result in stack going away. */
+  ci_drop_orphan(ni);
 }
 
 
@@ -246,8 +255,10 @@ void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
    */
   ci_ni_dllist_remove_safe(ni, &wo->waitable.post_poll_link);
 
-  if( wo->waitable.state & CI_TCP_STATE_TCP )
-    ci_tcp_all_fds_gone(ni, &wo->sock);
+  if( wo->waitable.state == CI_TCP_LISTEN )
+    ci_tcp_listen_all_fds_gone(ni, &wo->tcp_listen);
+  else if( wo->waitable.state & CI_TCP_STATE_TCP )
+    ci_tcp_all_fds_gone(ni, &wo->tcp);
 #if CI_CFG_UDP
   else if( wo->waitable.state == CI_TCP_STATE_UDP )
     ci_udp_all_fds_gone(ni, w_id);

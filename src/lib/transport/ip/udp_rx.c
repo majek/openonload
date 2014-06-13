@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,7 +55,7 @@ void ci_udp_recv_q_drop(ci_netif* ni, ci_udp_recv_q* q)
   while( OO_PP_NOT_NULL(q->head) ) {
     pkt = PKT_CHK(ni, q->head);
     q->head = pkt->next;
-    ci_netif_pkt_release_rx(ni, pkt);
+    ci_netif_pkt_release_check_keep(ni, pkt);
   }
 }
 
@@ -71,7 +71,7 @@ int ci_udp_csum_correct(ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp)
   udp_len = CI_BSWAP_BE16(udp->udp_len_be16);
 
   /* Caller should have checked this. */
-  ci_assert_ge(pkt->pay_len, oo_ether_hdr_size(pkt) + ip_len);
+  ci_assert_ge(pkt->pf.udp.pay_len, oo_ether_hdr_size(pkt) + ip_len);
 
   if( udp_len > ip_paylen )
     return 0;
@@ -94,18 +94,6 @@ int ci_udp_csum_correct(ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp)
 
 
 
-# if CI_CFG_ZC_RECV_FILTER
-#  define RECVQ_DEPTH(us, pkt)                                          \
-  ((pkt)->pay_len + ci_udp_recv_q_bytes(&(us)->recv_q) +                \
-   ci_udp_recv_q_pkts(&(us)->recv_q) * OO_UDP_RX_PER_PKT_OVERHEAD)
-# else
-#  define RECVQ_DEPTH(us, pkt)                                          \
-  ((pkt)->pay_len + ci_udp_recv_q_bytes(&(us)->recv_q)                  \
-   + ci_udp_recv_q_pkts(&(us)->recv_q) * OO_UDP_RX_PER_PKT_OVERHEAD)
-# endif
-# define WILL_OVERFLOW_RECVQ(us, depth) ((depth) > (us)->s.so.rcvbuf)
-
-
 int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
 {
   /* Deliver a received packet to a socket. */
@@ -115,11 +103,11 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   ci_ip_pkt_fmt* q_pkt;
   ci_udp_state* us = SOCK_TO_UDP(s);
   ci_netif* ni = state->ni;
-  int recvq_depth = RECVQ_DEPTH(us, pkt);
+  int recvq_depth = RECVQ_DEPTH(us, pkt->pf.udp.pay_len);
 
   LOG_UV(log("%s: "NS_FMT "pay_len=%d "CI_IP_PRINTF_FORMAT" -> "
              CI_IP_PRINTF_FORMAT, __FUNCTION__,
-             NS_PRI_ARGS(ni, s), pkt->pay_len,
+             NS_PRI_ARGS(ni, s), pkt->pf.udp.pay_len,
              CI_IP_PRINTF_ARGS(&oo_ip_hdr(pkt)->ip_saddr_be32),
              CI_IP_PRINTF_ARGS(&oo_ip_hdr(pkt)->ip_daddr_be32)));
 
@@ -143,7 +131,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
           (q_pkt = ci_netif_pkt_alloc(ni)) == NULL )
         goto drop;
       ++ni->state->n_rx_pkts;
-      q_pkt->pay_len = pkt->pay_len;
+      q_pkt->pf.udp.pay_len = pkt->pf.udp.pay_len;
       q_pkt->pf.udp.rx_stamp = pkt->pf.udp.rx_stamp;
       oo_offbuf_init(&q_pkt->buf, PKT_START(q_pkt), 0);
       q_pkt->flags = (CI_PKT_FLAG_RX_INDIRECT | CI_PKT_FLAG_UDP |
@@ -174,12 +162,12 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
  drop:
   if( WILL_OVERFLOW_RECVQ(us, recvq_depth) ) {
     LOG_UR(log(FNS_FMT "OVERFLOW pay_len=%d",
-               FNS_PRI_ARGS(ni, s), pkt->pay_len));
+               FNS_PRI_ARGS(ni, s), pkt->pf.udp.pay_len));
     ++us->stats.n_rx_overflow;
   }
   else {
     LOG_UR(log(FNS_FMT "DROP (memory pressure) pay_len=%d",
-               FNS_PRI_ARGS(ni, s), pkt->pay_len));
+               FNS_PRI_ARGS(ni, s), pkt->pf.udp.pay_len));
     CITP_STATS_NETIF_INC(ni, memory_pressure_drops);
     ++us->stats.n_rx_mem_drop;
   }
@@ -199,17 +187,18 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
   ASSERT_VALID_PKT(ni, pkt);
   ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
   ci_assert(oo_offbuf_ptr(&pkt->buf) == PKT_START(pkt));
-  ci_assert_ge(pkt->pay_len, ip_paylen);
+  ci_assert_gt(pkt->pay_len, ip_paylen);
 
   pkt->pf.udp.rx_stamp = IPTIMER_STATE(ni)->frc;
 
   LOG_UV( log( LPF "handle_rx: UDP:%p IP:%p", udp, oo_ip_hdr(pkt)));
 
   /* Check for bad length. */
-  pkt->pay_len = CI_BSWAP_BE16(udp->udp_len_be16);
-  if( (pkt->pay_len < sizeof(ci_udp_hdr)) | (pkt->pay_len > ip_paylen) )
+  pkt->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16);
+  if( (pkt->pf.udp.pay_len < sizeof(ci_udp_hdr)) |
+      (pkt->pf.udp.pay_len > ip_paylen) )
     goto length_error;
-  pkt->pay_len -= sizeof(ci_udp_hdr);
+  pkt->pf.udp.pay_len -= sizeof(ci_udp_hdr);
 
   oo_offbuf_set_start(&pkt->buf, udp + 1);
   CI_UDP_STATS_INC_IN_DGRAMS(ni);
@@ -255,7 +244,7 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
  length_error:
   CI_UDP_STATS_INC_IN_ERRS(ni);
   LOG_U(log("%s: ip_paylen=%d udp_len=%d",
-            __FUNCTION__, ip_paylen, pkt->pay_len));
+            __FUNCTION__, ip_paylen, pkt->pf.udp.pay_len));
   goto drop_out;
 
  drop_out:

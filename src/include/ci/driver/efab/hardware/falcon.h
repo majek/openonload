@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -71,10 +71,6 @@
 
 /* ---- efhw_event_t helpers --- */
 
-#ifndef EFHW_IS_LITTLE_ENDIAN
-#error This needs lots of cpu_to_le64s() in
-#endif
-
 /*!\ TODO look at whether there is an efficiency gain to be had by
   treating the event codes to 32bit masks as is done for EF1
 
@@ -101,23 +97,26 @@
 
 #define FALCON_EVENT_FMT         "[ev:%x:%08x:%08x]"
 #define FALCON_EVENT_PRI_ARG(e) \
-	((unsigned)(((e).u64 & FALCON_EVENT_CODE_MASK) >> EV_CODE_LBN)), \
-	((unsigned)((e).u64 >> 32)), ((unsigned)((e).u64 & 0xFFFFFFFF))
+	((unsigned)(((le64_to_cpu((e).u64)) & FALCON_EVENT_CODE_MASK) >> EV_CODE_LBN)), \
+    ((unsigned)((le64_to_cpu((e).u64)) >> 32)),                         \
+    ((unsigned)(((le64_to_cpu((e).u64)) & 0xFFFFFFFF)))
 
-#define FALCON_EVENT_CODE(evp)		((evp)->u64 & FALCON_EVENT_CODE_MASK)
+#define FALCON_EVENT_CODE(evp)		(le64_to_cpu((evp)->u64) &      \
+                                   FALCON_EVENT_CODE_MASK)
 #define FALCON_EVENT_WAKE_EVQ_ID(evp) \
-	(((evp)->u64 & FALCON_EVENT_EV_Q_ID_MASK) >> DRIVER_EV_EVQ_ID_LBN)
+	((le64_to_cpu((evp)->u64) &                       \
+    FALCON_EVENT_EV_Q_ID_MASK) >> DRIVER_EV_EVQ_ID_LBN)
 #define FALCON_EVENT_TX_FLUSH_Q_ID(evp) \
-	(((evp)->u64 & FALCON_EVENT_TX_FLUSH_Q_ID_MASK) >> \
+	((le64_to_cpu((evp)->u64) & FALCON_EVENT_TX_FLUSH_Q_ID_MASK) >> \
 	 DRIVER_EV_TX_DESCQ_ID_LBN)
 #define FALCON_EVENT_RX_FLUSH_Q_ID(evp) \
-	(((evp)->u64 & FALCON_EVENT_RX_FLUSH_Q_ID_MASK) >> \
+	((le64_to_cpu((evp)->u64) & FALCON_EVENT_RX_FLUSH_Q_ID_MASK) >> \
 	 DRIVER_EV_RX_DESCQ_ID_LBN)
 #define FALCON_EVENT_RX_FLUSH_FAIL(evp) \
-	(((evp)->u64 & FALCON_EVENT_RX_FLUSH_FAIL_MASK) >> \
+	((le64_to_cpu((evp)->u64) & FALCON_EVENT_RX_FLUSH_FAIL_MASK) >> \
 	 DRIVER_EV_RX_FLUSH_FAIL_LBN)
 #define FALCON_EVENT_DRIVER_SUBCODE(evp) \
-	(((evp)->u64 & FALCON_EVENT_DRV_SUBCODE_MASK) >> \
+	(((le64_to_cpu((evp)->u64)) & FALCON_EVENT_DRV_SUBCODE_MASK) >> \
 	 DRIVER_EV_SUB_CODE_LBN)
 
 #define FALCON_EVENT_CODE_CHAR	((uint64_t)DRIVER_EV_DECODE << EV_CODE_LBN)
@@ -188,7 +187,7 @@
  * This value has been chosen for the onload stack.  i.e. 2k - meta-data
  * prefix size.
  */
-#define FALCON_RX_USR_BUF_SIZE		1824
+#define FALCON_RX_USR_BUF_SIZE		(2048 - 256)
 
 #define FALCON_EVQ_RPTR_REG_P0		0x400
 
@@ -205,8 +204,9 @@
  *---------------------------------------------------------------------------*/
 
 /* A union to allow writting 64bit values as 32bit values, without
- * hitting the compilers aliasing rules. We hope the compiler optimises
- * away the copy's anyway */
+ * hitting the compilers aliasing rules. We hope the compiler
+ * optimises away the copy's anyway.  Note that this definition is
+ * also being used by ef10.h.  Maybe move it to another file? */
 union __u64to32 {
 	uint64_t u64;
 	struct {

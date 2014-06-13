@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,20 +56,6 @@ struct timeval;
 /**********************************************************************
  * ef_vi **************************************************************
  **********************************************************************/
-
-  /*! \i_ef_event Allocate an event queue for a singe NIC.
-  **
-  ** The NIC supports a limited range of capacities.  The actually capacity
-  ** of the queue will may be larger than that requested, or may be smaller
-  ** if the capacity requested is larger than the maximum supported.
-  **
-  */
-extern int ef_eventq_alloc(ef_vi* evq, ef_driver_handle nic,
-                           unsigned capacity);
-
-  /*! \i_ef_event Free an event queue. This function is deeply flawed
-   when talking about multiple NICs. */
-extern int ef_eventq_free(ef_vi*, ef_driver_handle nic);
 
   /*! \i_ef_event Block until the event queue is non-empty.
   **

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -132,19 +132,16 @@ int ci_tcp_helper_ep_set_filters(ci_fd_t           fd,
  *
  * \param fd              File descriptor of tcp_helper
  * \param ep              TCP control block id
- * \param no_sw           non-zero if the s/w filter has already been removed
- *                        (e.g. if the EP was cached)
  *
  * \return                standard error codes
  *
  *--------------------------------------------------------------------*/
-int ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp ep, int no_sw)
+int ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp ep)
 {
   oo_tcp_filter_clear_t op;
   int rc;
 
   op.tcp_id       = ep;
-  op.no_sw        = no_sw;
 
   VERB(ci_log("%s: id=%d", __FUNCTION__, ep));
   rc = oo_resource_op(fd, OO_IOC_EP_FILTER_CLEAR, &op);

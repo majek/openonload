@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -89,6 +89,8 @@ citp_tcp_socket(int domain, int type, int protocol)
   CI_DEBUG(epi->sock.s->pid = getpid());
 
   /* We're ready.  Unleash us onto the world! */
+  ci_assert(epi->sock.s->b.sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_atomic32_and(&epi->sock.s->b.sb_aflags, ~CI_SB_AFLAG_NOT_READY);
   citp_fdtable_insert(fdi, fd, 0);
 
   Log_VSS(ci_log(LPF "socket(%d, %d, %d) = "EF_FMT, domain,
@@ -259,7 +261,7 @@ static int citp_tcp_accept_os(citp_sock_fdi* epi, int fd,
   Log_VSS(ci_log(LPF "accept("EF_FMT", sa, %d) = SYSTEM FD %d",
                  EF_PRI_ARGS(epi,fd), p_sa_len ? *p_sa_len:-1, rc));
   if( rc >= 0 )
-    citp_fdtable_passthru(rc, 1);
+    citp_fdtable_passthru(rc, 0);
   else
     CI_SET_ERROR(rc, -rc);
   return rc;
@@ -375,6 +377,8 @@ static int citp_tcp_accept_alien(ci_netif* ni, ci_tcp_socket_listen* listener,
   newepi->sock.netif = ani;
 
   /* get new file descriptor into table */
+  ci_assert(newepi->sock.s->b.sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_atomic32_and(&newepi->sock.s->b.sb_aflags, ~CI_SB_AFLAG_NOT_READY);
   citp_fdtable_insert(newfdi, newfd, 0);
   return citp_tcp_accept_complete(ni, sa, p_sa_len, listener, ts, newfd);
 
@@ -524,6 +528,11 @@ static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
       Log_E(ci_log(LPF "%s: ci_tcp_helper_sock_attach %d",
                    __FUNCTION__, newfd));
       if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+      ci_sock_lock(ni, &listener->s.b);
+      ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+      ci_tcp_acceptq_put_back(ni, listener, &ts->s.b);
+      CITP_STATS_TCP_LISTEN(++listener->stats.n_accept_no_fd);
+      ci_sock_unlock(ni, &listener->s.b);
       return -1;
     }
     citp_fdtable_new_fd_set(newfd, fdip_busy, fdtable_strict());
@@ -553,6 +562,8 @@ static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
   citp_netif_add_ref(ni);
 
   /* get new file descriptor into table */
+  ci_assert(newepi->sock.s->b.sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_atomic32_and(&newepi->sock.s->b.sb_aflags, ~CI_SB_AFLAG_NOT_READY);
   citp_fdtable_insert(newfdi, newfd, 0);
 
   return citp_tcp_accept_complete(ni, sa, p_sa_len, listener, ts, newfd);
@@ -1101,7 +1112,7 @@ static int citp_tcp_setsockopt(citp_fdinfo* fdinfo, int level,
     if( epi->sock.s->b.state == CI_TCP_LISTEN ) {
       ci_tcp_helper_ep_clear_filters(
                             ci_netif_get_driver_handle(epi->sock.netif),
-                            SC_SP(epi->sock.s), 0);
+                            SC_SP(epi->sock.s));
       citp_fdinfo_release_ref(fdinfo, 0);
       return 0;
     }
@@ -1149,7 +1160,7 @@ static int citp_tcp_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags)
     if (msg->msg_iovlen == 0 || msg->msg_iov == NULL)
       return 0;
     ci_tcp_recvmsg_args_init(&a, epi->sock.netif, SOCK_TO_TCP(epi->sock.s),
-                             msg, flags, addr_spc_ignored);
+                             msg, flags);
     rc = ci_tcp_recvmsg(&a);
     Log_V(ci_log(LPF "recv("EF_FMT") = %d", EF_PRI_ARGS(epi, fdinfo->fd), rc));
     return rc;
@@ -1292,7 +1303,7 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
         FD_SET(fdi->fd, ss->rdu);
         ++*n;
     }
-    if( wr && ci_tcp_tx_advertise_space(SOCK_TO_TCP(s)) ) {
+    if( wr && ci_tcp_tx_advertise_space(ni, SOCK_TO_TCP(s)) ) {
         FD_SET(fdi->fd, ss->wru);
         ++*n;
     }
@@ -1479,6 +1490,43 @@ static int citp_tcp_zc_recv_filter(citp_fdinfo* fdi,
 }
 
 
+int citp_tcp_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+                        int mlen, struct oo_msg_template** omt_pp,
+                        unsigned flags)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
+  ci_tcp_state* ts = SOCK_TO_TCP(epi->sock.s);
+  ci_netif* ni = epi->sock.netif;
+
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+  return ci_tcp_tmpl_alloc(ni, ts, omt_pp, initial_msg, mlen, flags);
+}
+
+
+int citp_tcp_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
+                         struct onload_template_msg_update_iovec* updates,
+                         int ulen, unsigned flags)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
+  ci_tcp_state* ts = SOCK_TO_TCP(epi->sock.s);
+  ci_netif* ni = epi->sock.netif;
+
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+  return ci_tcp_tmpl_update(ni, ts, omt, updates, ulen, flags);
+}
+
+
+int citp_tcp_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
+{
+  citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
+  ci_tcp_state* ts = SOCK_TO_TCP(epi->sock.s);
+  ci_netif* ni = epi->sock.netif;
+
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+  return ci_tcp_tmpl_abort(ni, ts, omt);
+}
+
+
 citp_protocol_impl citp_tcp_protocol_impl = {
   .type        = CITP_TCP_SOCKET,
   .ops         = {
@@ -1519,6 +1567,9 @@ citp_protocol_impl citp_tcp_protocol_impl = {
     .zc_recv            = citp_tcp_zc_recv,
     .zc_recv_filter     = citp_tcp_zc_recv_filter,
     .recvmsg_kernel     = citp_tcp_recvmsg_kernel,
+    .tmpl_alloc         = citp_tcp_tmpl_alloc,
+    .tmpl_update        = citp_tcp_tmpl_update,
+    .tmpl_abort         = citp_tcp_tmpl_abort,
   }
 };
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,8 +54,9 @@ typedef uint64_t ef_vi_dma_addr_t;
  * Compiler/processor dependencies.
  */
 
+#define __printf(fmt, arg)  __attribute__((format(printf, fmt, arg)))
+
 #if defined(__GNUC__)
-# include <sys/io.h>
 
 # if __GNUC__ >= 3 || (__GNUC__ == 2 && __GNUC_MINOR__ > 91)
 #  define likely(t)    __builtin_expect((t), 1)
@@ -69,10 +70,12 @@ typedef uint64_t ef_vi_dma_addr_t;
 
 # if defined(__i386__) || defined(__x86_64__)  /* GCC x86/x64 */
 #  define wmb()     __asm__ __volatile__("": : :"memory")
+#  define mmiowb()  ((void)0)
 #  define smp_rmb() __asm__ __volatile__("lfence": : :"memory")
 
 # elif defined(__PPC__)
-#  define wmb()     __asm__ __volatile__("eieio" : : :"memory")
+#  define wmb()     __asm__ __volatile__("sync" : : :"memory")
+#  define mmiowb()     __asm__ __volatile__("sync" : : :"memory")
 #  define smp_rmb() __asm__ __volatile__("lwsync": : :"memory")
 
 # else
@@ -99,46 +102,66 @@ typedef uint64_t ef_vi_dma_addr_t;
 
 #if EF_VI_LITTLE_ENDIAN
 # define cpu_to_le32(v)   (v)
+# define le32_to_cpu(v)   (v)
 #else
 # define cpu_to_le32(v)   (((v) >> 24)               |  \
 	                   (((v) & 0x00ff0000) >> 8) |	\
 			   (((v) & 0x0000ff00) << 8) |	\
 			   ((v) << 24))
+#define le32_to_cpu(v) (cpu_to_le32(v))
 #endif
 
 #if EF_VI_LITTLE_ENDIAN
 # define cpu_to_le64(v)    (v)
+# define le64_to_cpu(v)    (v)
 #else
 # define cpu_to_le64(v)     (((v) >> 56)                        |	\
-	                     (((v) & 0x00ff000000000000) >> 40) |	\
-	                     (((v) & 0x0000ff0000000000) >> 24) |	\
-		             (((v) & 0x000000ff00000000) >> 8)  |	\
-			     (((v) & 0x00000000ff000000) << 8)  |	\
-			     (((v) & 0x0000000000ff0000) << 24) |	\
-			     (((v) & 0x000000000000ff00) << 40) |	\
+	                     (((v) & 0x00ff000000000000ull) >> 40) |	\
+	                     (((v) & 0x0000ff0000000000ull) >> 24) |	\
+		             (((v) & 0x000000ff00000000ull) >> 8)  |	\
+			     (((v) & 0x00000000ff000000ull) << 8)  |	\
+			     (((v) & 0x0000000000ff0000ull) << 24) |	\
+			     (((v) & 0x000000000000ff00ull) << 40) |	\
 			     ((v) << 56))
+# define le64_to_cpu(v) (cpu_to_le64(v))
 #endif
 
-
 #if defined(__PPC__)
+
+ef_vi_inline void __nosync_writel(uint32_t data, uint32_t *addr)
+{
+	__asm__ __volatile__("stwbrx %1,0,%2" : "=m" (*addr) :
+			     "r" (data), "r" (addr));
+}
+
+
+ef_vi_inline void __nosync_writed(uint64_t data, uint64_t *addr)
+{
+	__asm__ __volatile__("stdbrx %1,0,%2" : "=m" (*addr) :
+			     "r" (data), "r" (addr));
+}
 
 ef_vi_inline void writel(uint32_t data, ef_vi_ioaddr_t addr)
 {
 	__asm__ __volatile__("sync; stwbrx %1,0,%2" : "=m" (*addr) :
-			     "r" (val), "r" (addr));
+			     "r" (data), "r" (addr));
 }
 
 #else
 
+ef_vi_inline void __raw_writel(uint32_t data, ef_vi_ioaddr_t addr)
+{
+	*((volatile uint32_t *) addr) = data;
+}
+
 ef_vi_inline void writel(uint32_t data, ef_vi_ioaddr_t addr)
 {
-	*((volatile uint32_t *) addr) = cpu_to_le32(data);
+	__raw_writel(cpu_to_le32(data), addr);
 }
 
 #endif
 
 
 #define BUG_ON(exp)  assert(!(exp))
-
 
 #endif  /* __CI_CIUL_SYSDEP_UNIX_H__ */

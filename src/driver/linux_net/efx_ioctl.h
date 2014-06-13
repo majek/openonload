@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,7 +18,7 @@
  *           (including support for SFE4001 10GBT NIC)
  *
  * Copyright 2005-2006: Fen Systems Ltd.
- * Copyright 2006-2010: Solarflare Communications Inc,
+ * Copyright 2006-2012: Solarflare Communications Inc,
  *                      9501 Jeronimo Road, Suite 250,
  *                      Irvine, CA 92618, USA
  *
@@ -57,6 +57,29 @@
 #include <linux/sockios.h>
 #include <linux/ethtool.h>
 
+/**
+ * DOC: sfc driver private ioctl
+ *
+ * Various driver features can be controlled through a private ioctl,
+ * which has multiple sub-commands.
+ *
+ * Most of these features are also available through the ethtool API
+ * or other standard kernel API on a sufficiently recent kernel
+ * version.  Userland tools should generally use the standard API
+ * first and fall back to the private ioctl in case of an error code
+ * indicating the standard API is not implemented (e.g. %EOPNOTSUPP,
+ * %ENOSYS, or %ENOTTY).
+ *
+ * A few features are intended for driver debugging and are not
+ * included in the production driver.
+ *
+ * The private ioctl is numbered %SIOCEFX and is implemented on
+ * both sockets and a char device (/dev/sfc_control).  Sockets are
+ * more reliable as they do not depend on a device node being
+ * created on disk.  However, on VMware ESX only char ioctls will
+ * work.
+ */
+
 /* Efx private ioctl number */
 /* We do not use the first 3 private ioctls because some utilities expect
  * them to be the old MDIO ioctls. */
@@ -67,13 +90,68 @@
  */
 
 /* For talking MCDI to siena ************************************************/
+
+/* Deprecated */
 #define EFX_MCDI_REQUEST 0xef0c
+/**
+ * struct efx_mcdi_request - Parameters for %EFX_MCDI_REQUEST sub-command
+ * @payload: On entry, the MCDI command parameters.  On return, if
+ *	@rc == 0, this is the response.
+ * @cmd: MCDI command type number.
+ * @len: On entry, the length of command parameters, in bytes.  On
+ *	return, if @rc == 0, this is the length of the response.
+ * @rc: Linux error code for the request.  This may be based on an
+ *	error code reported by the MC or a communication failure
+ *	detected by the driver.
+ *
+ * If the driver detects invalid parameters, e.g. @len is out of
+ * range, the ioctl() call will return -1, errno will be set
+ * accordingly, and none of the fields will be valid.  All other
+ * errors are reported by setting @rc.
+ *
+ * %EFX_MCDI_REQUEST does not support the larger command type numbers,
+ * error codes and payload lengths of MCDIv2.
+ */
 struct efx_mcdi_request {
 	__u32 payload[63];
 	__u8 cmd;
-	__u8 len; /* In and out */
+	__u8 len;
 	__u8 rc;
 };
+
+#define EFX_MCDI_REQUEST2 0xef21
+/**
+ * struct efx_mcdi_request2 - Parameters for %EFX_MCDI_REQUEST2 sub-command
+ * @cmd: MCDI command type number.
+ * @inlen: The length of command parameters, in bytes.
+ * @outlen: On entry, the length available for the response, in bytes.
+ *	On return, the length used for the response, in bytes.
+ * @flags: Flags for the command or response.  The only flag defined
+ *	at present is %EFX_MCDI_REQUEST_ERROR.  If this is set on return,
+ *	the MC reported an error.
+ * @host_errno: On return, if %EFX_MCDI_REQUEST_ERROR is included in @flags,
+ *	the suggested Linux error code for the error.
+ * @payload: On entry, the MCDI command parameters.  On return, the response.
+ *
+ * If the driver detects invalid parameters or a communication failure
+ * with the MC, the ioctl() call will return -1, errno will be set
+ * accordingly, and none of the fields will be valid.  If the MC reports
+ * an error, the ioctl() call will return 0 but @flags will include the
+ * %EFX_MCDI_REQUEST_ERROR flag.  The MC error code can then be found in
+ * @payload (if @outlen was sufficiently large) and a suggested Linux
+ * error code can be found in @host_errno.
+ *
+ * %EFX_MCDI_REQUEST2 fully supports both MCDIv1 and v2.
+ */
+struct efx_mcdi_request2 {
+	__u16 cmd;
+	__u16 inlen;
+	__u16 outlen;
+	__u16 flags;
+	__u32 host_errno;
+	__u32 payload[0];
+};
+#define EFX_MCDI_REQUEST_ERROR	0x0001
 
 /* Reset selected components, like ETHTOOL_RESET ****************************/
 #define EFX_RESET_FLAGS 0xef0d
@@ -298,7 +376,7 @@ struct efx_get_module_info {
 /* Set the VLAN tags for PTP receive packet filtering ***********************/
 #define EFX_TS_SET_VLAN_FILTER 0xef19
 struct efx_ts_set_vlan_filter {
-        #define TS_MAX_VLAN_TAGS 3           /* Maximum supported VLAN tags */
+#define TS_MAX_VLAN_TAGS 3                   /* Maximum supported VLAN tags */
 	__u32 num_vlan_tags;                 /* Number of VLAN tags */
 	__u16 vlan_tags[TS_MAX_VLAN_TAGS];   /* VLAN tag list */
 };
@@ -320,7 +398,7 @@ struct efx_ts_set_domain_filter {
 /* Return a PPS timestamp ***************************************************/
 #define EFX_TS_GET_PPS 0xef1c
 struct efx_ts_get_pps {
-	__u32 sequence;          	 	/* seq. num. of assert event */
+	__u32 sequence;				/* seq. num. of assert event */
 	__u32 timeout;
 	struct efx_timespec sys_assert;		/* time of assert in system time */
 	struct efx_timespec nic_assert;		/* time of assert in nic time */
@@ -338,12 +416,23 @@ struct efx_update_cpld {
 	__u32 update;
 };
 
-/* License key operations on AOE NIC ****************************************/
+/* License key operations on AOE or EF10 NIC ********************************/
+
+/* Deprecated - only supports AOE */
 #define EFX_LICENSE_UPDATE 0xef1f
 struct efx_update_license {
 	__u32 valid_keys;
 	__u32 invalid_keys;
 	__u32 blacklisted_keys;
+};
+
+#define EFX_LICENSE_UPDATE2 0xef23
+struct efx_update_license2 {
+	__u32 valid_keys;
+	__u32 invalid_keys;
+	__u32 blacklisted_keys;
+	__u32 unverifiable_keys;
+	__u32 wrong_node_keys;
 };
 
 /* Reset the AOE application and controller *********************************/
@@ -352,12 +441,23 @@ struct efx_aoe_reset {
 	__u32 flags;
 };
 
-/* Next available cmd number is 0xef21 */
+/* Get device identity ******************************************************/
+#define EFX_GET_DEVICE_IDS 0xef22
+struct efx_device_ids {
+	__u16 vendor_id, device_id;		/* PCI device ID */
+	__u16 subsys_vendor_id, subsys_device_id; /* PCI subsystem ID */
+	__u32 phy_type;				/* PHY type code */
+	__u8 port_num;				/* port number (0-based) */
+	__u8 perm_addr[6];			/* non-volatile MAC address */
+};
+
+/* Next available cmd number is 0xef24 */
 
 /* Efx private ioctl command structures *************************************/
 
 union efx_ioctl_data {
 	struct efx_mcdi_request mcdi_request;
+	struct efx_mcdi_request2 mcdi_request2;
 	struct efx_reset_flags reset_flags;
 	struct efx_ethtool_rxnfc rxnfc;
 	struct efx_rxfh_indir rxfh_indir;
@@ -377,10 +477,30 @@ union efx_ioctl_data {
 	struct efx_ts_hw_pps pps_enable;
 	struct efx_update_cpld cpld;
 	struct efx_update_license key_stats;
+	struct efx_update_license2 key_stats2;
 	struct efx_aoe_reset aoe_reset;
+	struct efx_device_ids device_ids;
 };
 
-#ifdef EFX_NOT_UPSTREAM
+/**
+ * struct efx_ioctl - Parameters for sfc private ioctl on char device
+ * @if_name: Name of the net device to control
+ * @cmd: Command number
+ * @u: Command-specific parameters
+ *
+ * Usage:
+ *     struct efx_ioctl efx;
+ *
+ *     fd = open("/dev/sfc_control", %O_RDWR);
+ *
+ *     strncpy(efx.if_name, if_name, %IFNAMSIZ);
+ *
+ *     efx.cmd = %EFX_FROBNOSTICATE;
+ *
+ *     efx.u.frobnosticate.magic = 42;
+ *
+ *     ret = ioctl(fd, %SIOCEFX, & efx);
+ */
 struct efx_ioctl {
 	char if_name[IFNAMSIZ];
 	/* Command to run */
@@ -388,8 +508,29 @@ struct efx_ioctl {
 	/* Parameters */
 	union efx_ioctl_data u;
 } __attribute__ ((packed));
-#endif
 
+/**
+ * struct efx_sock_ioctl - Parameters for sfc private ioctl on socket
+ * @cmd: Command number
+ * @u: Command-specific parameters
+ *
+ * Usage:
+ *     struct ifreq ifr;
+ *
+ *     struct efx_sock_ioctl efx;
+ *
+ *     fd = socket(%AF_INET, %SOCK_STREAM, 0);
+ *
+ *     strncpy(ifr.ifr_name, if_name, %IFNAMSIZ);
+ *
+ *     ifr.ifr_data = (caddr_t) & efx;
+ *
+ *     efx.cmd = %EFX_FROBNOSTICATE;
+ *
+ *     efx.u.frobnosticate.magic = 42;
+ *
+ *     ret = ioctl(fd, %SIOCEFX, & ifr);
+ */
 struct efx_sock_ioctl {
 	/* Command to run */
 	__u16 cmd;
@@ -401,10 +542,8 @@ struct efx_sock_ioctl {
 #ifdef __KERNEL__
 extern int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 			     union efx_ioctl_data __user *data);
-#ifdef EFX_NOT_UPSTREAM
 extern int efx_control_init(void);
 extern void efx_control_fini(void);
-#endif
 #endif
 
 #endif /* EFX_IOCTL_H */

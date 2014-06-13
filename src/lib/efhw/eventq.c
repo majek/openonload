@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,8 +48,8 @@
 #include <ci/efhw/iopage.h>
 #include <ci/driver/efab/hardware.h>
 #include <ci/efhw/eventq.h>
-#include <ci/efhw/falcon.h>
 #include <ci/efhw/nic.h>
+#include <ci/efhw/falcon.h> /*for falcon_nic_buffer_table_confirm*/
 
 #define KEVENTQ_MAGIC 0x07111974
 
@@ -58,20 +58,20 @@
  *
  * \param rm        Event-queue resource manager
  * \param instance  Event-queue instance (index)
- * \param buf_bytes Requested size of eventq
+ * \param dma_addrs Array to populate with addrs of allocated pages
+ * \param page_order Requested size of eventq
  * \return          < 0 if iobuffer allocation fails
  */
-int
+static int
 efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 				    struct eventq_resource_hardware *h,
-				    int evq_instance, unsigned buf_bytes)
+				    int evq_instance, 
+				    dma_addr_t *dma_addrs,
+				    unsigned int page_order)
 {
-	unsigned int page_order;
-	int i, rc;
+	int i, j, rc;
 
 	/* Allocate an iobuffer. */
-	page_order = get_order(buf_bytes);
-
 	EFHW_TRACE("allocating eventq size %x",
 		   1u << (page_order + PAGE_SHIFT));
 	rc = efhw_iopages_alloc(nic->pci_dev, &h->iobuff, page_order, NULL,
@@ -94,13 +94,26 @@ efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 	 * PAGE event queues can be expected to allocate even when the host's
 	 * physical memory is fragmented */
 	EFHW_ASSERT(efhw_nic_have_hw(nic));
-	EFHW_ASSERT(page_order <= h->buf_tbl_alloc.order);
+	EFHW_ASSERT(1 << EFHW_GFP_ORDER_TO_NIC_ORDER(page_order) <=
+		    EFHW_BUFFER_TABLE_BLOCK_SIZE);
 
 	/* Initialise the buffer table entries. */
-	for (i = 0; i < (1 << page_order); ++i)
-		falcon_nic_buffer_table_set(nic,
-					efhw_iopages_dma_addr(&h->iobuff, i),
-					0, 0, h->buf_tbl_alloc.base + i);
+	rc = efhw_nic_buffer_table_alloc(nic, 0, 0, &h->bt_block);
+	if (rc < 0) {
+		EFHW_WARN("%s: failed to allocate buffer table block",
+			  __FUNCTION__);
+		efhw_iopages_free(nic->pci_dev, &h->iobuff, NULL);
+		return rc;
+	}
+	for (i = 0; i < (1 << page_order); ++i) {
+		for (j = 0; j < EFHW_NIC_PAGES_IN_OS_PAGE; ++j) {
+			dma_addrs[i * EFHW_NIC_PAGES_IN_OS_PAGE + j] =
+				efhw_iopages_dma_addr(&h->iobuff, i);
+		}
+	}
+	efhw_nic_buffer_table_set(nic, h->bt_block, 0,
+				  1 << EFHW_GFP_ORDER_TO_NIC_ORDER(page_order),
+				  dma_addrs);
 	falcon_nic_buffer_table_confirm(nic);
 	return 0;
 }
@@ -119,24 +132,35 @@ efhw_keventq_ctor(struct efhw_nic *nic, int instance,
 		  struct efhw_keventq *evq,
 		  struct efhw_ev_handler *ev_handlers)
 {
+	unsigned int page_order;
 	int rc;
+	dma_addr_t dma_addrs[EFHW_BUFFER_TABLE_BLOCK_SIZE];
 	unsigned buf_bytes = evq->hw.capacity * sizeof(efhw_event_t);
+
+	EFHW_ASSERT(nic->devtype.arch == EFHW_ARCH_FALCON);
+
+	EFHW_ASSERT(buf_bytes);
+	page_order = get_order(buf_bytes);
 
 	evq->instance = instance;
 	evq->ev_handlers = ev_handlers;
 
 	/* allocate an IObuffer for the eventq */
 	rc = efhw_nic_event_queue_alloc_iobuffer(nic, &evq->hw, evq->instance,
-						 buf_bytes);
+						 dma_addrs, page_order);
 	if (rc < 0)
 		return rc;
 
 	/* Zero the timer-value for this queue.
 	   AND Tell the nic about the event queue. */
 	efhw_nic_event_queue_enable(nic, evq->instance, evq->hw.capacity,
-				    evq->hw.buf_tbl_alloc.base,
+				    evq->hw.bt_block->btb_vaddr >>
+					EFHW_NIC_PAGE_SHIFT,
+				    dma_addrs, 
+				    1 << page_order,
 				    ev_handlers != NULL /* interrupting */,
-				    1 /* dos protection enable*/);
+				    1 /* dos protection enable*/,
+				    0 /* not used on falcon */);
 
 	evq->lock = KEVQ_UNLOCKED;
 	evq->evq_base = efhw_iopages_ptr(&evq->hw.iobuff);
@@ -151,55 +175,57 @@ efhw_keventq_ctor(struct efhw_nic *nic, int instance,
 
 void efhw_keventq_dtor(struct efhw_nic *nic, struct efhw_keventq *evq)
 {
+	int order = EFHW_GFP_ORDER_TO_NIC_ORDER(get_order(evq->hw.capacity *
+							  sizeof(efhw_event_t)));
 	EFHW_ASSERT(evq);
 
 	EFHW_TRACE("%s: [%d]", __FUNCTION__, evq->instance);
 
 	/* Zero the timer-value for this queue.
 	   And Tell NIC to stop using this event queue. */
-	efhw_nic_event_queue_disable(nic, evq->instance, 0);
+	efhw_nic_event_queue_disable(nic, evq->instance);
+
+	/* Free buftable entries */
+	efhw_nic_buffer_table_clear(nic, evq->hw.bt_block, 0,
+                              1 << order);
+	efhw_nic_buffer_table_free(nic, evq->hw.bt_block);
 
 	/* free the pages used by the eventq itself */
 	efhw_iopages_free(nic->pci_dev, &evq->hw.iobuff, NULL);
 }
 
-void
+int
 efhw_handle_txdmaq_flushed(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			   efhw_event_t *evp)
+			   unsigned instance)
 {
-	int instance = (int)FALCON_EVENT_TX_FLUSH_Q_ID(evp);
 	EFHW_TRACE("%s: instance=%d", __FUNCTION__, instance);
 
 	if (!h->dmaq_flushed_fn) {
 		EFHW_WARN("%s: no handler registered", __FUNCTION__);
-		return;
+		return 0;
 	}
 
-	h->dmaq_flushed_fn(nic, instance, false, false);
+	return h->dmaq_flushed_fn(nic, instance, false, false);
 }
 
-void
+int
 efhw_handle_rxdmaq_flushed(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			   efhw_event_t *evp)
+			   unsigned instance, int failed)
 {
-	unsigned instance = (unsigned)FALCON_EVENT_RX_FLUSH_Q_ID(evp);
-	unsigned failed = (int)FALCON_EVENT_RX_FLUSH_FAIL(evp);
 	EFHW_TRACE("%s: instance=%d", __FUNCTION__, instance);
 
 	if (!h->dmaq_flushed_fn) {
 		EFHW_WARN("%s: no handler registered", __FUNCTION__);
-		return;
+		return 0;
 	}
 
-	h->dmaq_flushed_fn(nic, instance, true, failed);
+	return h->dmaq_flushed_fn(nic, instance, true, failed);
 }
 
 void
 efhw_handle_wakeup_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			 efhw_event_t *evp)
+			 unsigned instance)
 {
-	unsigned instance = (unsigned)FALCON_EVENT_WAKE_EVQ_ID(evp);
-
 	if (!h->wakeup_fn) {
 		EFHW_WARN("%s: no handler registered", __FUNCTION__);
 		return;
@@ -210,10 +236,8 @@ efhw_handle_wakeup_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 
 void
 efhw_handle_timeout_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			  efhw_event_t *evp)
+			  unsigned instance)
 {
-	unsigned instance = (unsigned)FALCON_EVENT_WAKE_EVQ_ID(evp);
-
 	if (!h->timeout_fn) {
 		EFHW_WARN("%s: no handler registered", __FUNCTION__);
 		return;
@@ -234,6 +258,7 @@ int efhw_keventq_poll(struct efhw_nic *nic, struct efhw_keventq *q)
 	EFHW_ASSERT(nic);
 	EFHW_ASSERT(q);
 	EFHW_ASSERT(q->ev_handlers);
+	EFHW_ASSERT(nic->devtype.arch == EFHW_ARCH_FALCON);
 
 	/* Acquire the lock, or mark the queue as needing re-checking. */
 	for (;;) {
@@ -262,24 +287,18 @@ int efhw_keventq_poll(struct efhw_nic *nic, struct efhw_keventq *q)
 
 	for (;;) {
 		/* Convention for return codes for handlers is:
-		 **   0   - no error, event consumed
-		 **   1   - no error, event not consumed
+		 **   1   - no error, event consumed
+		 **   0   - no error, event not consumed
 		 **   -ve - error,    event not consumed
 		 */
 		if (likely(EFHW_IS_EVENT(ev))) {
 			count++;
 
-			switch (FALCON_EVENT_CODE(ev)) {
-			case FALCON_EVENT_CODE_CHAR:
-				falcon_handle_char_event(nic, q->ev_handlers,
-							 ev);
-				break;
-			default:
+			if (efhw_nic_handle_event(nic, q->ev_handlers, ev) < 1)
 				EFHW_ERR("efhw_keventq_poll: [%d] UNEXPECTED "
 					 "EVENT:"FALCON_EVENT_FMT,
 					 q->instance,
 					 FALCON_EVENT_PRI_ARG(*ev));
-			}
 
 			EFHW_CLEAR_EVENT(ev);
 			EFHW_EVENTQ_NEXT(q);

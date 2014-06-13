@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -24,11 +24,11 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/in.h>
-#include <linux/proc_fs.h>
 #include <linux/ctype.h>
 #include <ci/efhw/efhw_types.h>
 #include <ci/driver/efab/hardware.h>
 #include <driver/linux_net/driverlink_api.h>
+#include "kernel_compat.h"
 
 
 #define T(x)  x
@@ -37,6 +37,7 @@
 
 MODULE_AUTHOR("Solarflare Communications");
 MODULE_LICENSE("GPL");
+
 
 #ifndef NIPQUAD
 # define NIPQUAD(addr) \
@@ -98,60 +99,78 @@ static long strtol(const char *s, char **p_end, unsigned int base)
 }
 
 
-static int aff_proc_read_int(char *page, char **start, off_t off, int count, 
-			     int *eof, void *data)
+static int aff_proc_read_int(struct seq_file *seq, void *s)
 {
-	int *pint = data;
-	int n = 0;
-	n += snprintf(page + n, count - n, "%d\n", *pint);
-	*eof = 1;
-	return n;
+	int *pint = seq->private;
+	seq_printf(seq, "%d\n", *pint);
+	return 0;
 }
+static int aff_proc_open_int(struct inode *inode, struct file *file)
+{
+	return single_open(file, aff_proc_read_int, PDE_DATA(inode));
+}
+static const struct file_operations aff_proc_fops_int = {
+	.owner		= THIS_MODULE,
+	.open		= aff_proc_open_int,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 
-static int aff_proc_read_cpu2rxq(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
+static int aff_proc_read_cpu2rxq(struct seq_file *seq, void *s)
 {
 	/* ?? fixme: this really needs to grab [lock] */
-	struct aff_interface *intf = data;
+	struct aff_interface *intf = seq->private;
 	int n_cpus = num_online_cpus();
-	int i, n = 0;
+	int i;
 	spin_lock(&lock);
 	for (i = 0; i < n_cpus; ++i)
-		n += snprintf(page + n, count - n, "%s%d",
-			      i == 0 ? "":" ", intf->cpu_to_q[i]);
+		seq_printf(seq, "%s%d", i == 0 ? "":" ", intf->cpu_to_q[i]);
 	spin_unlock(&lock);
-	n += snprintf(page + n, count - n, "\n");
-	*eof = 1;
-	return n;
+	seq_printf(seq, "\n");
+	return 0;
 }
-
-
-static int aff_proc_read_filters(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
+static int aff_proc_open_cpu2rxq(struct inode *inode, struct file *file)
 {
-	struct aff_interface *intf = data;
+	return single_open(file, aff_proc_read_cpu2rxq, PDE_DATA(inode));
+}
+static const struct file_operations aff_proc_fops_cpu2rxq = {
+	.owner		= THIS_MODULE,
+	.open		= aff_proc_open_cpu2rxq,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+
+static int aff_proc_read_filters(struct seq_file *seq, void *s)
+{
+	struct aff_interface *intf = seq->private;
 	struct aff_filter *f;
-	int i, n = 0;
-	*start = (char*)(unsigned long) 1;
 	spin_lock(&lock);
-	i = 0;
 	list_for_each_entry(f, &intf->filters, intf_filters_link) {
-		if (i++ == off) {
-			n += snprintf(page + n, count - n,
-				      "%s "NIPP_FMT" "NIPP_FMT" %d %d %d\n",
-				      f->protocol == IPPROTO_TCP ? "tcp":"udp",
-				      NIPP(f->daddr, f->dport),
-				      NIPP(f->saddr, f->sport),
-				      f->rq_cpu, f->rq_rxq, f->rxq);
-			break;
-		}
+		seq_printf(seq, 
+			   "%s "NIPP_FMT" "NIPP_FMT" %d %d %d\n",
+			   f->protocol == IPPROTO_TCP ? "tcp":"udp",
+			   NIPP(f->daddr, f->dport),
+			   NIPP(f->saddr, f->sport),
+			   f->rq_cpu, f->rq_rxq, f->rxq);
 	}
 	spin_unlock(&lock);
-	if (n == 0)
-		*eof = 1;
-	return n;
+	return 0;
 }
+static int aff_proc_open_filters(struct inode *inode, struct file *file)
+{
+	return single_open(file, aff_proc_read_filters, PDE_DATA(inode));
+}
+static const struct file_operations aff_proc_fops_filters = {
+	.owner		= THIS_MODULE,
+	.open		= aff_proc_open_filters,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 
 static struct aff_interface *__interface_find(int ifindex)
@@ -175,21 +194,16 @@ static struct aff_interface *interface_find(int ifindex)
 
 static void interface_add_proc(struct aff_interface *intf,
 			       const char *name, void *data,
-			       int (*read_proc)(char *, char **, off_t, int, 
-						int *, void *))
+			       const struct file_operations *proc_fops)
 {
-	struct proc_dir_entry *pde;
-	if ((pde = create_proc_entry(name, 0444, intf->proc_dir))) {
-		pde->data = data;
-		pde->read_proc = read_proc;
-	}
+	proc_create_data(name, 0444, intf->proc_dir, proc_fops, data);
 }
 
 
 static void interface_add_proc_int(struct aff_interface *intf,
 				   const char *name, int *data)
 {
-	interface_add_proc(intf, name, data, aff_proc_read_int);
+	interface_add_proc(intf, name, data, &aff_proc_fops_int);
 }
 
 
@@ -200,9 +214,9 @@ static void interface_add_proc_entries(struct aff_interface *intf)
 		interface_add_proc_int(intf, "ifindex", &intf->ifindex);
 		interface_add_proc_int(intf, "n_rxqs", &intf->n_rxqs);
 		interface_add_proc(intf, "cpu2rxq", intf,
-				   aff_proc_read_cpu2rxq);
+				   &aff_proc_fops_cpu2rxq);
 		interface_add_proc(intf, "filters", intf,
-				   aff_proc_read_filters);
+				   &aff_proc_fops_filters);
 	}
 }
 
@@ -425,7 +439,15 @@ static int filter_add(struct aff_fd *aff, int cpu, int rxq, int ifindex,
 		goto fail1;
 	}
 	if (cpu < 0) {
-		cpu = smp_processor_id();
+		/* Using smp_processor_id() generates false positives
+		 * on preemptable kernels because right after doing
+		 * this the application thread can move to a different
+		 * core.  That is something that the application has
+		 * to deal with with with proper affinitisation.  So
+		 * we use raw_smp_processor_id() to silence the
+		 * warning.
+		 */
+		cpu = raw_smp_processor_id();
 	} else if (cpu >= num_possible_cpus()) {
 		printk("sfc_affinity: bad cpu=%d (0-%d)\n", cpu,
 		       (int)num_possible_cpus() - 1);
@@ -560,9 +582,9 @@ static int filter_del(struct aff_fd *aff, int ifindex, int protocol,
 }
 
 
-static int aff_proc_write_new_interface(struct file *file,
-					const char __user *buffer,
-					unsigned long count, void *data)
+static ssize_t aff_proc_write_new_interface(struct file *file,
+					    const char __user *buffer,
+					    size_t count, loff_t *ppos)
 {
 	int max_cpus = num_possible_cpus();
 	int i, rc, ifindex, n_rxqs;
@@ -604,6 +626,10 @@ fail2:
 fail1:
 	return rc;
 }
+static const struct file_operations aff_proc_fops_new_interface = {
+	.owner		= THIS_MODULE,
+	.write		= aff_proc_write_new_interface,
+};
 
 
 static int aff_proc_init(void)
@@ -615,18 +641,12 @@ static int aff_proc_init(void)
 	if (aff_proc_root == NULL)
 		goto fail1;
 
-	pde = create_proc_entry("new_interface", 0644, aff_proc_root);
+	pde = proc_create("new_interface", 0644, aff_proc_root,
+			&aff_proc_fops_new_interface);
 	if (pde == NULL)
-		goto fail2;
-	pde->data = NULL;
-	pde->write_proc = aff_proc_write_new_interface;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,30)
-	pde->owner = THIS_MODULE;
-#endif
+		goto fail1;
 	return 0;
 
-fail2:
-	remove_proc_entry("driver/sfc_affinity", NULL);
 fail1:
 	return rc;
 }
@@ -772,6 +792,12 @@ static struct efx_dl_driver dl_driver = {
 #if EFX_DRIVERLINK_API_VERSION >= 7
   .priority = EFX_DL_EV_LOW,
 #endif
+#if EFX_DRIVERLINK_API_VERSION >= 8
+  /* This flag is required to for the driver to register with the net
+   * driver however this driver will never receive packets so it will
+   * not be doing any actual checking. */
+  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE,
+#endif
   .probe  = dl_probe,
   .remove = dl_remove,
 };
@@ -846,16 +872,3 @@ int sfc_affinity_cpu_to_channel(int ifindex, int cpu)
 	return rc;
 }
 EXPORT_SYMBOL(sfc_affinity_cpu_to_channel);
-
-
-int sfc_affinity_num_queues(int ifindex)
-{
-	struct aff_interface *intf;
-	int rc = -1;
-	spin_lock(&lock);
-	if ((intf = interface_find(ifindex)) != NULL)
-		rc = intf->n_rxqs;
-	spin_unlock(&lock);
-	return rc;
-}
-EXPORT_SYMBOL(sfc_affinity_num_queues);

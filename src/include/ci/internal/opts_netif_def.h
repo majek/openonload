@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -215,7 +215,6 @@ MULTICAST_LIMITATIONS_NOTE,
            1, , 1, 0, 1, yesno)
 #endif
 
-
 CI_CFG_OPT("EF_TCP_LISTEN_HANDOVER", tcp_listen_handover, ci_uint32,
 "When an accelerated TCP socket calls listen(), hand it over to the kernel "
 "stack.  This option disables acceleration of TCP listening sockets and "
@@ -235,6 +234,16 @@ CI_CFG_OPT("EF_UDP_CONNECT_HANDOVER", udp_connect_handover, ci_uint32,
 "OpenOnload.  This may be worthwhile because the socket may subsequently be "
 "re-connected to an IP address that can be accelerated.",
            1, , 1, 0, 1, yesno)
+
+CI_CFG_OPT("EF_FORCE_TCP_NODELAY", tcp_force_nodelay, ci_uint32,
+"This option allows the user to override the use of TCP_NODELAY. "
+"This may be useful in cases where 3rd-party software is (not) "
+"setting this value and the user would like to control its "
+"behaviour:\n"
+"  0 - do not override"
+"  1 - always set TCP_NODELAY"
+"  2 - never set TCP_NODELAY",
+           2, , 0, 0, 2, level)
 
 #if CI_CFG_UDP
 # if CI_CFG_UDP_SEND_UNLOCK_OPT
@@ -357,6 +366,13 @@ CI_CFG_OPT("EF_TCP_RST_DELAYED_CONN", rst_delayed_conn, ci_uint32,
 "if ACK packets are dropped in the network.",
           1, , 0, 0, 1, yesno)
 
+CI_CFG_OPT("EF_TCP_SNDBUF_MODE", tcp_sndbuf_mode, ci_uint32,
+           "This option controls how the SO_SNDBUF limit is applied to TCP "
+           "sockets.  In the default mode the limit applies only to the send "
+           "queue.  When this option is set to 1, the limit applies to the "
+           "size of the send queue and retransmit queue combined.",
+           1, , 0, 0, 1, yesno)
+
 /**********************************************************************
  * Narrow fields (few bits).
  */
@@ -466,19 +482,21 @@ CI_CFG_OPT("EF_USE_HUGE_PAGES", huge_pages, ci_uint32,
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
 
-CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
-"When this option is set to 2 Onload will force a sync of control plane "
-"information from the kernel when a stack is created.  This can help to "
-"ensure up to date information is used where a stack is created immediately "
-"following interface configuration."
-"\n"
-"If this option is set to 1 then Onload will only force a sync for the first "
-"stack created.  This can be used if stack creation time for later stacks "
-"is time critical."
-"\n"
-"Setting this option to 0 will disable forced sync.  Synchronising data from "
-"the kernel will continue to happen periodically.",
-           2, , 2, 0, 2, oneof:never;first;always)
+#if CI_CFG_PIO
+CI_CFG_OPT("EF_PIO", pio, ci_uint32,
+"Control of whether Programmed I/O is used instead of DMA for small packets:\n"
+"  0 - no (use DMA);\n"
+"  1 - use PIO for small packets if available (default);\n"
+"  2 - use PIO for small packets and fail if PIO is not available.\n"
+"Mode 1 will fall back to DMA if PIO is not currently available.\n"
+"Mode 2 will fail to create the stack if the hardware supports PIO but "
+"PIO is not currently available.  On hardware that does not support PIO "
+"there is no difference between mode 1 and mode 2\n"
+"In all cases, PIO will only be used for small packets (see EF_PIO_THRESHOLD) "
+"and if the VI's transmit queue is currently empty.  If these conditions are "
+"not met DMA will be used, even in mode 2.",
+           2, , 1, 0, 2, oneof:no;try;always)
+#endif
 
 CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
 "A bitmask specifying the TCP options to advertise in SYN segments.\n"
@@ -532,8 +550,8 @@ CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD_SYNACK", retransmit_threshold_synack,
            ci_int32,
 "Number of times a SYN-ACK will be retransmitted before an embryonic "
 "connection will be aborted.",
-           8,  retransmit_threshold, CI_TCP_RETRANSMIT_THRESHOLD_SYN, 0, SMAX,
-           count)
+           8,  retransmit_threshold_synack, CI_TCP_LISTEN_SYNACK_RETRIES, 0,
+           SMAX, count)
 
 /*****************************************************************/
 
@@ -833,7 +851,7 @@ CI_CFG_OPT("EF_PREFAULT_PACKETS", prefault_packets, ci_int32,
            , , 1, 0, 1000000000, count)
 
 /* Max is currently 32k EPs */
-CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs_ln2, ci_uint32,
+CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs, ci_uint32,
 "This option places an upper limit on the number of accelerated endpoints "
 "(sockets, pipes etc.) in an Onload stack.  This option should be set to a "
 "power of two between 1 and 32,768."
@@ -844,8 +862,8 @@ CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs_ln2, ci_uint32,
 "accelerated."
 "\n"
 "Note: Multiple endpoint buffers are consumed by each accelerated pipe.",
-           , , CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT, 0,
-           CI_CFG_NETIF_MAX_ENDPOINTS_SHIFT_MAX, count)
+           , , CI_CFG_NETIF_MAX_ENDPOINTS, 0, CI_CFG_NETIF_MAX_ENDPOINTS_MAX,
+           count)
 
 CI_CFG_OPT("", tcp_sndbuf_min, ci_uint32,
 "Minimum value for SO_SNDBUF for TCP sockets.  Set via O/S interface.",
@@ -915,7 +933,7 @@ CI_CFG_OPT("EF_UDP_RCVBUF", udp_rcvbuf_user, ci_uint32,
 "double the amount requested, mimicking the behavior of the Linux kernel.)",
            ,  udp_rcvbuf, 0, MIN, MAX, bincount)
 
-CI_CFG_OPT("EF_TCP_BACKLOG_MAX", tcp_backlog_max, ci_uint16,
+CI_CFG_OPT("EF_TCP_BACKLOG_MAX", tcp_backlog_max, ci_uint32,
 "Places an upper limit on the number of embryonic (half-open) connections in "
 "an OpenOnload stack.",
            , , CI_TCP_LISTENQ_MAX, MIN, MAX, bincount)
@@ -990,10 +1008,6 @@ CI_CFG_OPT("EF_KEEPALIVE_PROBES", keepalive_probes, ci_uint32,
 "Default number of keepalive probes to try before aborting the connection.",
            , , CI_TCP_KEEPALIVE_PROBES, MIN, MAX, count)
 
-CI_CFG_OPT("EF_SO_TIMESTAMP_RESYNC_TIME", timestamp_resync_usec, ci_uint32,
-"Time between resyncing SO_TIMESTAMP clock to the system clock, in usecs",
-           , , CI_CFG_TIMESTAMP_RESYNC_TIME, MIN, MAX, time:usec)
-
 #ifndef NDEBUG
 CI_CFG_OPT("EF_TCP_MAX_SEQERR_MSGS", tcp_max_seqerr_msg, ci_uint32,
 "Maximum number of unacceptable sequence error messages to emit, per socket.",
@@ -1029,6 +1043,22 @@ CI_CFG_OPT("EF_MAX_EP_PINNED_PAGES", max_ep_pinned_pages, ci_uint32,
 "Not currently used.",
            , , CI_CFG_SENDFILE_MAX_PAGES_PER_EP, MIN, MAX, bincount)
 #endif
+
+CI_CFG_OPT("EF_FREE_PACKETS_LOW_WATERMARK", free_packets_low, ci_uint16,
+"Keep free packets number to be at least this value.  EF_MIN_FREE_PACKETS "
+"defines initialisation behaviour; this value is about normal application "
+"runtime.  This value is used if we can not allocate more packets "
+"at any time, i.e. in case of AMD IOMMU only.",
+           , , 100, MIN, MAX, count)
+
+#if CI_CFG_PIO
+CI_CFG_OPT("EF_PIO_THRESHOLD", pio_thresh, ci_uint16,
+"Sets a threshold for the size of packet that will use PIO, if turned on "
+"using EF_PIO.  Packets up to the threshold will use PIO.  Larger packets "
+"will not.",
+           , , 1514, 0, MAX, count)
+#endif
+
 
 #ifdef CI_CFG_OPTGROUP
 /* define some categories - currently more as an example than as the final

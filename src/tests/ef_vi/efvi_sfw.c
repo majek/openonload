@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,6 +53,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <netdb.h>
 
 
 struct pkt_buf* pkt_buf_from_id(struct vi* vi, int pkt_buf_i)
@@ -192,6 +193,157 @@ int vi_send(struct vi* vi, struct pkt_buf* pkt_buf, int off, int len)
 
 /**********************************************************************/
 
+
+static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
+{
+  struct addrinfo hints;
+  struct addrinfo* ai;
+  const char* host;
+  const char* port;
+  char *s, *p;
+  int rc = -EINVAL;
+
+  p = s = strdup(s_in);
+  host = strtok(p, ":");
+  port = strtok(NULL, "");
+  if( host == NULL || port == NULL )
+    goto out;
+
+  hints.ai_flags = AI_NUMERICSERV;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = 0;
+  hints.ai_protocol = 0;
+  hints.ai_addrlen = 0;
+  hints.ai_addr = NULL;
+  hints.ai_canonname = NULL;
+  hints.ai_next = NULL;
+  rc = getaddrinfo(host, port, &hints, &ai);
+  if( rc == 0 ) {
+    TEST(ai->ai_addrlen == sizeof(*sin));
+    memcpy(sin, ai->ai_addr, ai->ai_addrlen);
+  }
+  else {
+    fprintf(stderr, "ERROR: getaddrinfo(\"%s\", \"%s\") returned %d %s\n",
+            host, port, rc, gai_strerror(rc));
+    rc = -EINVAL;
+  }
+ out:
+  free(s);
+  return rc;
+}
+
+
+int filter_parse(ef_filter_spec* fs, const char* s_in)
+{
+  struct sockaddr_in lsin, rsin;
+  const char* type;
+  const char* hostport;
+  char* vlan;
+  char* remainder;
+  char *s;
+  int rc = -EINVAL;
+  int protocol;
+  int i;
+
+  ef_filter_spec_init(fs, EF_FILTER_FLAG_NONE);
+
+  s = strdup(s_in);
+
+  if( (type = strtok(s, ":")) == NULL )
+    goto out;
+
+  if( ! strcmp("udp", type) || ! strcmp("tcp", type) ) {
+    protocol = strcasecmp(type, "tcp") ? IPPROTO_UDP : IPPROTO_TCP;
+
+    remainder = strtok(NULL, "");
+    if( ! strncmp("vid=", remainder, strlen("vid=")) ) {
+      vlan = strtok(remainder, ",");
+      remainder = strtok(NULL, "");
+      if( ! vlan )
+        goto out;
+      vlan = strchr(vlan, '=');
+      ++vlan;
+      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
+    }
+
+    if( strchr(remainder, ',') ) {
+      hostport = strtok(remainder, ",");
+      remainder = strtok(NULL, "");
+      TRY(hostport_parse(&lsin, hostport));
+      TRY(hostport_parse(&rsin, remainder));
+      TRY(ef_filter_spec_set_ip4_full(fs, protocol, lsin.sin_addr.s_addr,
+                                      lsin.sin_port, rsin.sin_addr.s_addr,
+                                      rsin.sin_port));
+      rc = 0;
+    }
+    else {
+      TRY(hostport_parse(&lsin, strtok(remainder, ",")));
+      TRY(ef_filter_spec_set_ip4_local(fs, protocol, lsin.sin_addr.s_addr,
+                                       lsin.sin_port));
+      rc = 0;
+    }
+  }
+
+  else if( ! strcmp("eth", type) ) {
+    uint8_t mac[6];
+    int vlan_id = EF_FILTER_VLAN_ID_ANY;
+    vlan = strtok(NULL, ",");
+    remainder = strtok(NULL, "");
+    if( remainder == '\0' ) /* No vlan */
+      remainder = vlan;
+    else {
+      if( strncmp("vid=", vlan, strlen("vid=")) )
+        goto out;
+      vlan = strchr(vlan, '=');
+      ++vlan;
+      vlan_id = atoi(vlan);
+    }
+    for( i = 0; i < 6; ++i ) {
+      mac[i] = strtol(remainder, &remainder, 16);
+      if( i != 5 ) {
+        if( *remainder != ':' )
+          goto out;
+        ++remainder;
+        if( ! strlen(remainder) )
+          goto out;
+      }
+    }
+    if( strlen(remainder) )
+      goto out;
+    TRY(ef_filter_spec_set_eth_local(fs, vlan_id, mac));
+    rc = 0;
+  }
+
+  else if( ! strcmp("multicast-all", type) ) {
+    TRY(ef_filter_spec_set_multicast_all(fs));
+    if( strlen(type) != strlen(s_in) ) {
+      remainder = strtok(NULL, "");
+      if( ! (vlan = strchr(remainder, '=')) )
+        goto out;
+      ++vlan;
+      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
+    }
+    rc = 0;
+  }
+
+  else if( ! strcmp("unicast-all", type) ) {
+    TRY(ef_filter_spec_set_unicast_all(fs));
+    if( strlen(type) != strlen(s_in) ) {
+      remainder = strtok(NULL, "");
+      if( ! (vlan = strchr(remainder, '=')) )
+        goto out;
+      ++vlan;
+      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
+    }
+    rc = 0;
+  }
+
+ out:
+  free(s);
+  return rc;
+}
+
+
 struct net_if* net_if_alloc(int net_if_id, const char* name, int rss_set_size)
 {
   struct net_if* net_if = malloc(sizeof(*net_if));
@@ -207,7 +359,7 @@ struct net_if* net_if_alloc(int net_if_id, const char* name, int rss_set_size)
   net_if->ifindex = ifindex;
   if( ef_driver_open(&net_if->dh) < 0 )
     goto fail1;
-  if( ef_pd_alloc(&net_if->pd, net_if->dh, net_if->ifindex, 0) < 0 )
+  if( ef_pd_alloc(&net_if->pd, net_if->dh, net_if->ifindex, EF_PD_DEFAULT) < 0 )
     goto fail2;
   net_if->vi_set_size = rss_set_size;
   if( rss_set_size > 0 )

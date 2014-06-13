@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,14 +57,19 @@
 
 #define ARP_REINFORCE_ON_SYN
 
+static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
+			   ciip_tcp_rx_pkt* rxp);
 
-ci_inline ci_ip_pkt_fmt* ci_netif_pkt_rx_to_tx(ci_netif* ni,
-                                               ci_ip_pkt_fmt* pkt) 
+
+ci_ip_pkt_fmt* __ci_netif_pkt_rx_to_tx(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                                       const char* caller)
 {
   if( pkt->refcount == 1 ) {
     ci_assert(pkt->flags & CI_PKT_FLAG_RX);
     pkt->flags &= ~CI_PKT_FLAG_RX;
     --ni->state->n_rx_pkts;
+    CI_DEBUG(pkt->pkt_start_off = 0xff;
+             pkt->pkt_eth_payload_off = 0xff);
   }
   else {
     ci_netif_pkt_release(ni, pkt);
@@ -75,13 +80,14 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_rx_to_tx(ci_netif* ni,
       --ni->state->n_async_pkts;
     }
     if( pkt == NULL ) {
-      LOG_U(ci_log("%s: can't allocate reply packet", __FUNCTION__));
+      LOG_U(ci_log("%s: can't allocate reply packet", caller));
       CITP_STATS_NETIF_INC(ni, poll_no_pkt);
       return NULL;
     }
   }
   return pkt;
 }
+
 
 ci_inline void ci_tcp_rx_update_state_on_add(ci_tcp_state* ts, int recvd)
 {
@@ -132,7 +138,6 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
                   oo_offbuf_left(&pkt->buf));
 
   tcp_rcv_nxt(ts) = pkt->pf.tcp_rx.end_seq;
-
 
   bytes = oo_offbuf_left(&pkt->buf);
   ci_ip_queue_enqueue(netif, rxq, pkt);
@@ -637,7 +642,7 @@ void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
 static void ci_tcp_rx_dupack(ci_tcp_state* ts, ci_netif* netif,
                              ciip_tcp_rx_pkt* rxp)
 {
-  ci_assert(rxp->pkt->pay_len == 0);
+  ci_assert(rxp->pkt->pf.tcp_rx.pay_len == 0);
   ci_assert(SEQ_EQ(tcp_snd_una(ts), rxp->ack));
 
   ts->dup_acks++;
@@ -1456,12 +1461,12 @@ static int ci_tcp_rx_deliver_rob(ci_netif* netif, ci_tcp_state* ts)
   while( 1 ) {
     LOG_TV(log(LPF "%d ROB deliver packet %d: %x-%x, last_seq = %x, "
                "pay_len = %d", S_FMT(ts), OO_PP_FMT(id), seq,
-               pkt->pf.tcp_rx.end_seq, last_seq, pkt->pay_len));
+               pkt->pf.tcp_rx.end_seq, last_seq, pkt->pf.tcp_rx.pay_len));
     ci_assert(SEQ_LE(seq, last_seq));
     ci_assert(SEQ_LT(last_seq, pkt->pf.tcp_rx.end_seq));
     oo_offbuf_init(&pkt->buf,
                    CI_TCP_PAYLOAD(tcp) + (last_seq - seq),
-                   pkt->pay_len - (last_seq - seq));
+                   pkt->pf.tcp_rx.pay_len - (last_seq - seq));
 
 
     if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_FIN) ) {
@@ -1560,9 +1565,9 @@ ci_inline int ci_tcp_rx_deliver_to_recvq(ci_tcp_state* ts, ci_netif* netif,
   */
   /* NB SEQ_LE rather than SEQ_EQ as may have partial duplicate */
   ci_assert(SEQ_LE(rxp->seq, tcp_rcv_nxt(ts)));
-  ci_assert(pkt->pay_len);
+  ci_assert(pkt->pf.tcp_rx.pay_len);
 
-  oo_offbuf_init(&pkt->buf, CI_TCP_PAYLOAD(tcp), pkt->pay_len);
+  oo_offbuf_init(&pkt->buf, CI_TCP_PAYLOAD(tcp), pkt->pf.tcp_rx.pay_len);
 
   /* Handle the case that this packet is a partial duplicate. */
   oo_offbuf_advance(&pkt->buf, SEQ_SUB(tcp_rcv_nxt(ts), rxp->seq));
@@ -1884,9 +1889,9 @@ static void handle_rx_listen_rst(ci_netif* ni, ci_tcp_socket_listen* tls,
   ** that this might be used to give reason for RST (but I don't think this
   ** is widely [or at all] implemented).
   */
-  if( pkt->pay_len ) {
+  if( pkt->pf.tcp_rx.pay_len ) {
     LOG_U(log(LPF "%d RST with data (%d bytes)",
-              S_FMT(tls), pkt->pay_len));
+              S_FMT(tls), pkt->pf.tcp_rx.pay_len));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
                        oo_ether_hdr_size(pkt) +
 		       CI_BSWAP_BE16(ip->ip_tot_len_be16), 0));
@@ -1961,9 +1966,9 @@ static void handle_rx_rst(ci_tcp_state* ts, ci_netif* netif,
   ** that this might be used to give reason for RST (but I don't think this
   ** is widely [or at all] implemented).
   */
-  if( pkt->pay_len ) {
+  if( pkt->pf.tcp_rx.pay_len ) {
     LOG_U(log(LPF "%d RST with data (%d bytes)",
-              S_FMT(ts), pkt->pay_len));
+              S_FMT(ts), pkt->pf.tcp_rx.pay_len));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
                        oo_ether_hdr_size(pkt) +
                        CI_BSWAP_BE16(oo_ip_hdr(pkt)->ip_tot_len_be16), 0));
@@ -2064,6 +2069,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_tcp_hdr* tcp = rxp->tcp;
   unsigned tsr_rcv_wnd = CI_MIN(tcp_rcv_buff(tls), CI_CFG_TCP_MAX_WINDOW);
+  ci_tcp_state* ts;
 
   ci_assert(netif);
   ci_assert(tls);
@@ -2103,7 +2109,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
               CI_TCP_HDR_FLAGS_PRI_ARG(tcp),
               tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd));
     /* ?? fixme CI_IP_SOCK_STATS_INC_BADSYNSEQ( ts );*/
-    goto send_ack;
+    goto retransmit_synack;
   }
 
   /* RST handled elsewhere; see handle_rx_rst. */
@@ -2135,7 +2141,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
                 "rcv=%08x-%08x", LNT_PRI_ARGS(netif, tls),
                 rxp->seq, pkt->pf.tcp_rx.end_seq,
                 tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd));
-      goto send_ack;
+      goto retransmit_synack;
     }
     /* update latest packet timestamp */
     tsr->tspeer = rxp->timestamp;
@@ -2158,35 +2164,39 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
     goto reset_out;
   }
 
-  /*! \TODO ?? Packet could contain data.  We currently bin it, so it
-  ** should get retransmitted eventually.  But this might be a common
-  ** case if the remote stack supports queueing data on a socket before
-  ** its connected.
-  ** We enqueue non-SYN data (when TCP_DEFER_ACCEPT is used).
-  */
-  LOG_TC(if( pkt->pf.tcp_rx.end_seq != rxp->seq &&
-                (tcp->tcp_flags & CI_TCP_FLAG_SYN))
-           log(LNT_FMT "SYNRECV (ESTABLISHED) ack had data "
-               "pkt=%08x-%08x BINNED", LNT_PRI_ARGS(netif, tls),
-               rxp->seq, pkt->pf.tcp_rx.end_seq));
-
   /* ACK is for our SYNACK so promote the socket */
-  if( ci_tcp_listenq_try_promote(netif, tls, tsr, rxp, ipcache) < 0 ) {
+  tsr->acked = 1;
+  if( (tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) &&
+      SEQ_EQ(rxp->seq, pkt->pf.tcp_rx.end_seq) &&
+      tsr->retries < tls->c.tcp_defer_accept ) {
+    CITP_STATS_TCP_LISTEN(++netif->state->stats.accepts_deferred);
+  }
+  else if( ci_tcp_listenq_try_promote(netif, tls, tsr, ipcache, &ts) < 0 ) {
     CI_TCP_EXT_STATS_INC_LISTEN_DROPS( netif );
     LOG_U(log(LNT_FMT "SYNRECV failed to promote to acceptq, seq=%08x",
               LNT_PRI_ARGS(netif, tls), rxp->seq));
+    ci_netif_pkt_release_rx(netif, pkt);
   }
-
-  /*! \TODO enter the close-wait state if FIN received (rfc793 p75) */
-
+  else {
+    /* Make packet length re-calculation correct */
+    pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp) - ts->incoming_tcp_hdr_len;
+    /* handle_rx_slow does not see that new data was ACKed, because
+     * retransmit queue if empty. */
+    if( ts->tcpflags & CI_TCPT_FLAG_TSO )
+      ci_tcp_update_rtt(netif, ts,
+                        ci_tcp_time_now(netif) - rxp->timestamp_echo);
+    /* Do not defer ACK in TCP_DEFER_ACCEPT case
+     * to avoid unnecessary retransmits. */
+    if( tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF &&
+        tsr->retries < tls->c.tcp_defer_accept )
+      TCP_FORCE_ACK(ts);
+    /* Now handle ACK and data */
+    handle_rx_slow(ts, netif, rxp);
+  }
+  return;
 
  freepkt_out:
   ci_netif_pkt_release_rx(netif, pkt);
-  return;
- send_ack:
-  pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
-  if( pkt != NULL )
-    ci_tcp_synrecv_send(netif, tls, tsr, pkt, CI_TCP_FLAG_ACK, NULL);
   return;
  retransmit_synack:
   pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
@@ -2232,12 +2242,12 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   ci_netif_put_on_post_poll(netif, &tls->s.b);
 
   if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
-    local_peer = pkt->pf.lo.tx_sock;
-    ci_assert_equal(pkt->pf.lo.rx_sock, tls->s.b.bufid);
+    local_peer = pkt->pf.tcp_rx.lo.tx_sock;
+    ci_assert_equal(pkt->pf.tcp_rx.lo.rx_sock, tls->s.b.bufid);
   }
   pkt->pf.tcp_rx.window = CI_BSWAP_BE16(tcp->tcp_window_be16);
-  pkt->pay_len -= CI_TCP_HDR_LEN(tcp);
-  pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pay_len;
+  pkt->pf.tcp_rx.pay_len -= CI_TCP_HDR_LEN(tcp);
+  pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pf.tcp_rx.pay_len;
   pkt->pf.tcp_rx.end_seq +=
     (tcp->tcp_flags & CI_TCP_FLAG_SYN) >> CI_TCP_FLAG_SYN_BIT;
   pkt->pf.tcp_rx.end_seq +=
@@ -2246,7 +2256,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   /* The checksum already checked this... ?? But what about when h/w
   ** does the checksum?  Will h/w detect this error?
   */
-  ci_assert_ge(pkt->pay_len, 0);
+  ci_assert_ge(pkt->pf.tcp_rx.pay_len, 0);
 
   if( CI_TCP_HDR_LEN(tcp) < sizeof(ci_tcp_hdr) ) {
     ci_netif_pkt_release_rx(netif, pkt);
@@ -2342,7 +2352,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 #if CI_CFG_LIMIT_AMSS
   {
     int amss = ipcache.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
-    amss = ci_tcp_limit_mss(amss, netif->state, __FUNCTION__);
+    amss = ci_tcp_limit_mss(amss, netif, __FUNCTION__);
     ipcache.mtu = amss + sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr);
   }
 #endif
@@ -2437,8 +2447,9 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   ** the data because it provides a simple way to do a DOS.  So we bin the
   ** data, and the other end can retransmit it.
   */
-  if( pkt->pay_len ) {
-    LOG_U(log(LPF "%d LISTEN SYN with data", S_FMT(tls)));
+  if( pkt->pf.tcp_rx.pay_len ) {
+    LOG_U(log(LPF "%d LISTEN SYN with data (%d bytes)", S_FMT(tls),
+          pkt->pf.tcp_rx.pay_len));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
                        ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
 		       0));
@@ -2514,18 +2525,21 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
                         CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, &ipcache);
 
   if( OO_SP_NOT_NULL(tsr->local_peer) ) {
-    /* Normally, ci_tcp_listenq_try_promote() is called with ACK packet
-     * to our SYN-ACK.  With loopback connection, we call
-     * ci_tcp_listenq_try_promote() with SYN packet, so let's increase seq
-     * number to handle TCP_DEFER_ACCEPT properly. */
-    if( tcp->tcp_flags & CI_TCP_FLAG_SYN )
-      rxp->seq++;
+    ci_tcp_state *ts = NULL;
+    ci_tcp_state* peer = ID_TO_TCP(netif, tsr->local_peer);
 
-    if( ci_tcp_listenq_try_promote(netif, tls, tsr, rxp, &ipcache) < 0 ) {
+    if( (tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) &&
+        SEQ_EQ(rxp->seq + 1, pkt->pf.tcp_rx.end_seq) ) {
+      CITP_STATS_TCP_LISTEN(++netif->state->stats.accepts_deferred);
+      peer->tcpflags |= CI_TCPT_FLAG_LOOP_DEFERRED;
+      LOG_TC(log(LNT_FMT "loopback connection deferred",
+                 LNT_PRI_ARGS(netif, peer)));
+    }
+    else if( ci_tcp_listenq_try_promote(netif, tls, tsr, &ipcache, &ts) < 0 ) {
       CI_TCP_EXT_STATS_INC_LISTEN_DROPS( netif );
       LOG_U(log(LNT_FMT "SYNRECV failed to promote local connection "
                 "to acceptq", LNT_PRI_ARGS(netif, tls)));
-      ci_tcp_drop(netif, ID_TO_TCP(netif, tsr->local_peer), EBUSY);
+      ci_tcp_drop(netif, peer, EBUSY);
     }
     ci_netif_pkt_release(netif, pkt);
   }
@@ -2622,7 +2636,7 @@ static int handle_syn_sent_opts(ci_netif* netif, ci_tcp_state* ts,
   if (ts->c.user_mss && ts->c.user_mss < ts->smss)
     ts->smss = ts->c.user_mss;
 #if CI_CFG_LIMIT_SMSS
-  ts->smss = ci_tcp_limit_mss(ts->smss, netif->state, __FUNCTION__);
+  ts->smss = ci_tcp_limit_mss(ts->smss, netif, __FUNCTION__);
 #endif
   ci_assert_gt(ts->smss, 0);
   ci_tcp_set_eff_mss(netif, ts);
@@ -2741,7 +2755,7 @@ set_isn:
   ci_assert(CI_TCP_HDR_LEN(TS_TCP(ts)) ==
             sizeof(ci_tcp_hdr) + tcp_outgoing_opts_len(ts));
   ci_tcp_set_initialcwnd(netif, ts);
-  ci_assert(tcp_rcv_buff(ts)>0);
+  ci_assert_gt(tcp_rcv_buff(ts),0);
   ci_tcp_init_rcv_wnd(ts, "SYN SENT");
 
   LOG_TC(log(LPF "%d SYN-SENT->ESTABLISHED " RCV_WND_FMT " snd=%08x-%08x-%08x"
@@ -2788,7 +2802,7 @@ static void handle_rx_close_wait(ci_tcp_state* ts, ci_netif* netif,
     LOG_U(log(LPF "%d CLOSE-WAIT data after FIN " TCP_RX_FMT,
               S_FMT(ts), TCP_RX_ARGS(pkt, ts)));
   }
-  else if( pkt->pay_len ) {
+  else if( pkt->pf.tcp_rx.pay_len ) {
     LOG_TR(log(LPF "%d CLOSE-WAIT duplicate data " TCP_RX_FMT,
                S_FMT(ts), TCP_RX_ARGS(pkt, ts)));
   }
@@ -2817,7 +2831,6 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
     LOG_U(log(LPF "%d %s saw SYN!", S_FMT(ts), state_str(ts)));
 #endif
 
-
   /* If our txq is empty, then our FIN has been ACKed, and we can go home. */
 
   if( SEQ_EQ(tcp_snd_una(ts), tcp_enq_nxt(ts)) ) {
@@ -2832,7 +2845,7 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
     /* We've each seen each other's FINs, so there's no way he should be
     ** sending any data...
     */
-    if( pkt->pay_len ) {
+    if( pkt->pf.tcp_rx.pay_len ) {
       LOG_U(log(LPF "%d %s bad data " TCP_RX_FMT,
                 S_FMT(ts), state_str(ts), TCP_RX_ARGS(pkt, ts)));
     }
@@ -2871,7 +2884,7 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
       LOG_U(log(LPF "%d %s data after " TCP_RX_FMT,
                 S_FMT(ts), state_str(ts), TCP_RX_ARGS(pkt, ts)));
     }
-    else if( pkt->pay_len ) {
+    else if( pkt->pf.tcp_rx.pay_len ) {
       LOG_TR(log(LPF "%d %s duplicate data " TCP_RX_FMT,
                  S_FMT(ts), state_str(ts), TCP_RX_ARGS(pkt, ts)));
     }
@@ -2974,8 +2987,8 @@ static void explain_why_on_slow_path(ci_netif* netif, ci_tcp_state* ts,
          RCV_WND_ARGS(ts), pkt->pf.tcp_rx.end_seq);
   if( tcp_snd_una(ts) - rxp->ack )
      log("\tnew_ack(una=%08x ack=%08x)", tcp_snd_una(ts), rxp->ack);
-  if( pkt->pay_len <= 0 )
-     log("\tshort(pay_len=%d)", pkt->pay_len);
+  if( pkt->pf.tcp_rx.pay_len <= 0 )
+     log("\tshort(pay_len=%d)", pkt->pf.tcp_rx.pay_len);
 }
 #endif
 
@@ -3110,8 +3123,8 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
   /* We may have gotten these wrong in [ci_tcp_handle_rx()], 'cos we
   ** assumed the fast path.
   */
-  pkt->pay_len -= CI_TCP_HDR_LEN(tcp) - ts->incoming_tcp_hdr_len;
-  pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pay_len;
+  pkt->pf.tcp_rx.pay_len -= CI_TCP_HDR_LEN(tcp) - ts->incoming_tcp_hdr_len;
+  pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pf.tcp_rx.pay_len;
   pkt->pf.tcp_rx.end_seq +=
     (tcp->tcp_flags & CI_TCP_FLAG_SYN) >> CI_TCP_FLAG_SYN_BIT;
   pkt->pf.tcp_rx.end_seq +=
@@ -3121,7 +3134,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
   /* The checksum already checked this... ?? But what about when h/w does
   ** the checksum?  Will h/w detect this error?
   */
-  ci_assert_ge(pkt->pay_len, 0);
+  ci_assert_ge(pkt->pf.tcp_rx.pay_len, 0);
 
   if(CI_UNLIKELY( CI_TCP_HDR_LEN(tcp) < sizeof(ci_tcp_hdr) ))
     goto bad_pkt;
@@ -3177,7 +3190,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
    * and heuristics to send ACKs if gap that may have caused sender to
    * validate its congestion window
    */
-  if( pkt->pay_len )
+  if( pkt->pf.tcp_rx.pay_len )
     ts->t_last_recv_payload = ci_tcp_time_now(netif);
   else
     ts->t_last_recv_ack = ci_tcp_time_now(netif);
@@ -3300,7 +3313,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     /* Delivering data needs to be the last thing we do, 'cos we may not
     ** have access to [pkt] after (it may have been freed already).
     */
-    if( pkt->pay_len ) {
+    if( pkt->pf.tcp_rx.pay_len ) {
       if( CI_UNLIKELY(ts->s.rx_errno) )
         /* If the socket will never read again then send reset See
         ** Steven's p238 or rfc1122 4.2.2.13.
@@ -3335,7 +3348,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
                   S_FMT(ts), state_str(ts), n, TCP_RX_ARGS(pkt, ts)));
         ci_assert( OO_SP_IS_NULL(ts->s.local_peer) );
         pkt->pf.tcp_rx.end_seq -= n;
-        pkt->pay_len -= n;
+        pkt->pf.tcp_rx.pay_len -= n;
         if( SEQ_LE(pkt->pf.tcp_rx.end_seq, tcp_rcv_nxt(ts)) ) {
           /* There's nothing left that overlaps our window. */
           pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
@@ -3410,7 +3423,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     }
     else if( CI_UNLIKELY(tcp->tcp_flags & CI_TCP_FLAG_FIN) ) {
       /* should be a pure FIN */
-      ci_assert(!pkt->pay_len);
+      ci_assert(!pkt->pf.tcp_rx.pay_len);
 
       if(SEQ_EQ(rxp->seq, tcp_rcv_nxt(ts))) {
         /* No payload, so rcv_nxt won't get updated by packet delivery. */
@@ -3428,7 +3441,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     else {
       /* only a pure ACK should get here (or could be a duplicate SYN
        * that we ignored above and removed the SYN flag for) */
-      ci_assert(!pkt->pay_len);
+      ci_assert(!pkt->pf.tcp_rx.pay_len);
       ci_assert((tcp->tcp_flags & ~CI_TCP_FLAG_ACK) == 0);
       ci_netif_pkt_release_rx(netif, pkt);
     }
@@ -3521,10 +3534,10 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
           tls = SP_TO_TCP_LISTEN(netif,
                          CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, filter_id));
           ci_assert(tls->s.b.state == CI_TCP_LISTEN);
-          /* handle_rx_listen() expects pkt->pay_len to not be munged,
+          /* handle_rx_listen() expects pf.tcp_rx.pay_len to not be munged,
            * so undo the change we have made 
            */
-          pkt->pay_len += CI_TCP_HDR_LEN(tcp);
+          pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp);
           handle_rx_listen(netif, tls, rxp, 1);
           return;
         }
@@ -3651,7 +3664,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
   return;
 
  mem_pressure:
-  if( pkt->pay_len <= 0 )
+  if( pkt->pf.tcp_rx.pay_len <= 0 )
     /* Process segments without payload, as they'll be freed immediately. */
     goto continue_mem_pressure;
   CITP_STATS_NETIF_INC(netif, memory_pressure_drops);
@@ -3733,8 +3746,8 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
   }
 
   if( reset ) {
-    pkt->pay_len -= CI_TCP_HDR_LEN(tcp);
-    pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pay_len;
+    pkt->pf.tcp_rx.pay_len -= CI_TCP_HDR_LEN(tcp);
+    pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pf.tcp_rx.pay_len;
     pkt->pf.tcp_rx.end_seq +=
       (tcp->tcp_flags & CI_TCP_FLAG_SYN) >> CI_TCP_FLAG_SYN_BIT;
     CITP_STATS_NETIF_INC(ni, rst_sent_no_match);
@@ -3767,7 +3780,7 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
    */
   ci_netif_put_on_post_poll(ni, &ts->s.b);
 
-  CI_IP_SOCK_STATS_ADD_RXBYTE( ts, pkt->pay_len );
+  CI_IP_SOCK_STATS_ADD_RXBYTE( ts, pkt->pf.tcp_rx.pay_len );
 
   LOG_TR(log(LNTS_FMT RCV_WND_FMT " snd=%08x-%08x-%08x",
              LNTS_PRI_ARGS(ni, ts), RCV_WND_ARGS(ts),
@@ -3775,12 +3788,12 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
          log(LNT_FMT "["CI_TCP_FLAGS_FMT"] id=%d s=%08x-%08x a=%08x "
              "w=%u(%u) hlen=%d paylen=%d", LNT_PRI_ARGS(ni, ts),
              CI_TCP_HDR_FLAGS_PRI_ARG(tcp), OO_PKT_FMT(pkt), rxp->seq,
-             rxp->seq + pkt->pay_len - CI_TCP_HDR_LEN(tcp),
+             rxp->seq + pkt->pf.tcp_rx.pay_len - CI_TCP_HDR_LEN(tcp),
              rxp->ack,
              (unsigned)(CI_BSWAP_BE16(tcp->tcp_window_be16)),
              ci_tcp_wnd_from_hdr(tcp, ts->snd_wscl),
              CI_TCP_HDR_LEN(tcp),
-             pkt->pay_len - CI_TCP_HDR_LEN(tcp)));
+             pkt->pf.tcp_rx.pay_len - CI_TCP_HDR_LEN(tcp)));
 
   { /* Parse the options.  For the fastest path we expect to see a
      * timestamp option, and we expect it to be aligned in the obvious way.
@@ -3800,8 +3813,8 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
   /* These calculations assume the fast path.  We'll fix them up later if
    * we can't use the fast path.
    */
-  pkt->pay_len -= ts->incoming_tcp_hdr_len;
-  pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pay_len;
+  pkt->pf.tcp_rx.pay_len -= ts->incoming_tcp_hdr_len;
+  pkt->pf.tcp_rx.end_seq = rxp->seq + pkt->pf.tcp_rx.pay_len;
 
 #if CI_CFG_BURST_CONTROL
   ts->burst_window = 0;
@@ -3823,7 +3836,7 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
               /* nothing new ACKed? */
               (tcp_snd_una(ts) - rxp->ack) |
               /* fits in the IP datagram and has data? */
-              (pkt->pay_len <= 0) |
+              (pkt->pf.tcp_rx.pay_len <= 0) |
               /* we're suffering from memory pressure */
               (ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL));
 
@@ -3886,9 +3899,8 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
     ci_tcp_wake(ni, ts, CI_SB_FLAG_WAKE_RX);
 
     oo_offbuf_init(&pkt->buf, (char*) tcp + ts->incoming_tcp_hdr_len,
-                   pkt->pay_len);
+                   pkt->pf.tcp_rx.pay_len);
     ci_tcp_rx_enqueue_packet(ni, ts, pkt);
-
 
     if( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON )
       check_rx_ip_cache_mac_update(ni, ts, pkt, 1);
@@ -3943,14 +3955,16 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
   rxp.poll_state = ps;
   rxp.pkt = pkt;
   rxp.tcp = tcp;
-  ci_assert_equal(pkt->pay_len, ip_paylen);
+  ci_assert_gt(pkt->pay_len, ip_paylen);
+  pkt->pf.tcp_rx.pay_len = ip_paylen;
+  pkt->pf.tcp_rx.rx_stamp = IPTIMER_STATE(netif)->frc;
 
   rxp.seq = CI_BSWAP_BE32(tcp->tcp_seq_be32);
   rxp.ack = CI_BSWAP_BE32(tcp->tcp_ack_be32);
 
   if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
-    ci_sock_cmn *s = ID_TO_SOCK_CMN(netif, pkt->pf.lo.rx_sock);
-    ci_sock_cmn *sender = ID_TO_SOCK_CMN(netif, pkt->pf.lo.tx_sock);
+    ci_sock_cmn *s = ID_TO_SOCK_CMN(netif, pkt->pf.tcp_rx.lo.rx_sock);
+    ci_sock_cmn *sender = ID_TO_SOCK_CMN(netif, pkt->pf.tcp_rx.lo.tx_sock);
     int bad_recipient = (s == NULL) ||
         (~s->b.state & CI_TCP_STATE_TCP) ||
         (tcp->tcp_dest_be16 != S_TCP_HDR(s)->tcp_source_be16);
@@ -3958,8 +3972,8 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
     /* Fast path: these sockets are connected */
     if( !bad_recipient && sender != NULL &&
         (sender->b.state & CI_TCP_STATE_TCP) &&
-        sender->local_peer == pkt->pf.lo.rx_sock &&
-        s->local_peer == pkt->pf.lo.tx_sock ) {
+        sender->local_peer == pkt->pf.tcp_rx.lo.rx_sock &&
+        s->local_peer == pkt->pf.tcp_rx.lo.tx_sock ) {
       ci_tcp_rx_deliver_to_conn(s, &rxp);
       return;
     }
@@ -3991,7 +4005,8 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
     }
     else {
       ci_log(FN_FMT "loopback packet to destroyed socket: %d -> %d",
-             FN_PRI_ARGS(netif), pkt->pf.lo.tx_sock, pkt->pf.lo.rx_sock);
+             FN_PRI_ARGS(netif), pkt->pf.tcp_rx.lo.tx_sock,
+             pkt->pf.tcp_rx.lo.rx_sock);
       if( (sender->b.state & CI_TCP_STATE_TCP_CONN) &&
           sender->b.state != CI_TCP_TIME_WAIT &&
           ip->ip_daddr_be32 == sender->pkt.ip.ip_daddr_be32 &&

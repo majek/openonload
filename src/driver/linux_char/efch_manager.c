@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,12 +45,13 @@ static const char* supported_intf_vers[] = {
 
 
 efch_resource_ops *efch_ops_table[] = {
-  &efch_iobufset_ops,
+  NULL,
   &efch_vi_ops,
   &efch_vi_set_ops,
   NULL,
   &efch_memreg_ops,
   &efch_pd_ops,
+  &efch_pio_ops,
 };
 
 

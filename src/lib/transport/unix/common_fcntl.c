@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,7 +36,7 @@
 
 
 int apply_fcntl_to_os_sock(citp_sock_fdi* epi, int fd,
-                           int cmd, int arg, int *fcntl_result)
+                           int cmd, long arg, int *fcntl_result)
 {
   /* If we have an OS sock associated with this socket, then apply
   ** fcntl() to it and return the result in fcntl_result.  The rc of
@@ -45,10 +45,8 @@ int apply_fcntl_to_os_sock(citp_sock_fdi* epi, int fd,
   int rc;
 
   if( (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) &&
-      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
-    *fcntl_result = 0;
+      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) )
     return 0;
-  }
 
   rc = ci_get_os_sock_fd(&epi->sock, fd);
   if( CI_IS_VALID_SOCKET(rc)) {
@@ -109,21 +107,42 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
     ** (linux only) can be set.  O_DIRECT provokes EINVAL, whereas other
     ** flags are ignored silently.
     */
-    ci_uint32 mask = (CI_SB_AFLAG_O_APPEND | CI_SB_AFLAG_O_NONBLOCK |
-                      CI_SB_AFLAG_O_NDELAY);
-    mask |= CI_SB_AFLAG_O_ASYNC;
+    ci_uint32 mask;
+
     if( arg & O_DIRECT ) {
       CI_SET_ERROR(rc, EINVAL);
       break;
     }
-    ci_atomic32_merge(&s->b.sb_aflags, fd_flags_to_sbflags(arg), mask);
-    /* Apply to this fd and also the OS socket.  NB. Listening OS socket
-     * must always be non-blocking.
+
+    /* Apply to this fd and also the OS socket.
+     * NB. Listening OS socket must always be non-blocking.
+     * FASYNC should be set to our fd first, because our in-kernel code
+     * pushes it to OS socket with correct fd.
      */
-    ci_sys_fcntl(fd, cmd, arg);
-    if( s->b.state == CI_TCP_LISTEN )
-      arg |= O_NONBLOCK | O_NDELAY;
-    apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
+    rc = ci_sys_fcntl(fd, cmd, arg);
+    if( rc < 0 )
+      break;
+
+    {
+      long os_arg = arg;
+      if( s->b.state == CI_TCP_LISTEN )
+        os_arg |= O_NONBLOCK | O_NDELAY;
+      rc = apply_fcntl_to_os_sock(epi, fd, cmd, os_arg, &fcntl_result);
+      if( rc < 0 || fcntl_result < 0 ) {
+        /* We have no way to back off ci_sys_fcntl(fd) above, so
+         * let's complain to user and go on. */
+        ci_log("Failed to promote fcntl(%d, F_SETFL) to OS socket: "
+               "%d, OS rc=%d",
+               fd, rc, fcntl_result);
+      }
+      rc = 0;
+    }
+
+
+    mask = (CI_SB_AFLAG_O_APPEND | CI_SB_AFLAG_O_NONBLOCK |
+            CI_SB_AFLAG_O_NDELAY);
+    mask |= CI_SB_AFLAG_O_ASYNC;
+    ci_atomic32_merge(&s->b.sb_aflags, fd_flags_to_sbflags(arg), mask);
     break;
   }
 
@@ -140,20 +159,62 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
         break;
     s->b.sigown = arg;
     /* Keep O/S socket up-to-date. */
-    apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
+    rc = apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
+    if( rc < 0 || fcntl_result < 0 )
+      ci_log("%s: failed to pass F_SETOWN to OS socket: %d %d (errno=%d)",
+             __func__, rc, fcntl_result, errno);
+    rc = 0;
     if( s->b.sigown && (s->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
       ci_bit_set(&s->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
     break;
 
+/* F_GETOWN_EX/F_SETOWN_EX are not supported on all platforms */
+#ifdef F_GETOWN_EX
+  case F_GETOWN_EX:
+    /* Grab the owner from the kernel so we don't have to remember the owner
+     * type.
+     */
+    rc = ci_sys_fcntl(fd, cmd, arg);
+    break;
+#endif
+
+#ifdef F_SETOWN_EX
+  case F_SETOWN_EX: {
+    struct f_owner_ex* own;
+    rc = ci_sys_fcntl(fd, cmd, arg);
+    if( rc != 0 )
+      break;
+    own = (struct f_owner_ex*)arg;
+# ifdef F_OWNER_PGRP
+    if( own->type == F_OWNER_PGRP )
+      s->b.sigown = -(own->pid);
+    else
+# endif
+      s->b.sigown = own->pid;
+    /* Keep O/S socket up-to-date. */
+    rc = apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
+    if( rc < 0 || fcntl_result < 0 )
+      ci_log("%s: failed to pass F_SETOWN to OS socket: %d %d (errno=%d)",
+             __func__, rc, fcntl_result, errno);
+    rc = 0;
+    if( s->b.sigown && (s->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
+      ci_bit_set(&s->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
+    break;
+  }
+#endif
+
   case F_GETSIG:
-    rc = s->b.sigsig;
+    rc = ci_sys_fcntl(fd, cmd, arg);
     break;
 
   case F_SETSIG:
     if( (rc = ci_sys_fcntl(fd, cmd, arg)) != 0 )
       break;
-    s->b.sigsig = arg;
-    apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
+    rc = apply_fcntl_to_os_sock(epi, fd, cmd, arg, &fcntl_result);
+    if( rc < 0 || fcntl_result < 0 )
+      ci_log("%s: failed to pass F_SETSIG to OS socket: %d %d (errno=%d)",
+             __func__, rc, fcntl_result, errno);
+    rc = 0;
     break;
 
   case F_DUPFD:

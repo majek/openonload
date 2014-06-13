@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -98,16 +98,21 @@ cicpplos_pktbuf_defer_send(const cicp_handle_t *control_plane,
  * Pooled packet buffer support Operations
  *---------------------------------------------------------------------------*/
 
+struct cicp_bufpool_pkt {
+  int id;
+  int len;
+};
+
 typedef struct cicp_bufpool_s cicp_bufpool_t;
 
 /*! Check that a packet buffer ID is valid */
 ci_inline int /* bool */
-cicppl_pktbuf_is_valid_id(int id)
+cicppl_pktbuf_is_valid_id(cicp_bufpool_t *pool, int id)
 {   return (id >= 0 && id < CICPPL_PKTBUF_COUNT);
 }
 
 /*! Return address of the packet referred to by a packet buffer ID  */
-extern ci_ip_pkt_fmt *
+extern struct cicp_bufpool_pkt *
 cicppl_pktbuf_pkt(cicp_bufpool_t *pool, int id);
 
 /*! Return EtherFabric visible address of a packet buffer ID
@@ -131,7 +136,7 @@ cicppl_pktbuf_free(cicp_bufpool_t *pool, int id);
  *
  * \param netif             owner of the source packet
  * \param netif_ip_pktid    Netif packet ID of the source packet
- * \param dst               destination packet from ARP table poll
+ * \param dst               destination packet from ARP table pool
  *
  * \retval 0                Success
  * \retval -EFAULT          Failed to convert efab address to kernel
@@ -145,16 +150,15 @@ cicppl_pktbuf_free(cicp_bufpool_t *pool, int id);
  * This operation assumes that \c dst is from contiguous vm_alloc()'ed memory
  */
 extern int
-cicppl_ip_pkt_flatten_copy(ci_netif *ni, 
-                           oo_pkt_p src_pktid, 
-                           ci_ip_pkt_fmt *dst);
+cicppl_ip_pkt_flatten_copy(ci_netif *ni, oo_pkt_p src_pktid,
+                           struct cicp_bufpool_pkt* dst);
 
 struct efrm_vi; /* defined in ci/driver/efab/vi_resource_manager.h -
                        which we don't want to include here*/
 
 /*! Initialize memory to hold deferred packets awaiting MAC resolution */
 extern int
-cicppl_pktbuf_ctor(cicp_bufpool_t **out_pool, struct efrm_vi* evq_rs);
+cicppl_pktbuf_ctor(cicp_bufpool_t **out_pool);
 
 /*! Free any memory used to hold deferred packets awaiting MAC resolution */
 extern void

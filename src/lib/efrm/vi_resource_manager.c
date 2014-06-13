@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,7 +52,6 @@
 
 #include <ci/efrm/nic_table.h>
 #include <ci/driver/efab/hardware.h>
-#include <ci/efhw/falcon.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_resource_private.h>
 #include "efrm_internal.h"
@@ -96,11 +95,12 @@ void efrm_nic_vi_dtor(struct efrm_nic_vi *nvi)
 
 int efrm_pt_pace(struct efrm_vi *virs, int val)
 {
+	int rc;
 	struct efhw_nic *nic = virs->rs.rs_client->nic;
 	EFRM_RESOURCE_ASSERT_VALID(&virs->rs, 0);
-	falcon_nic_pace(nic, virs->rs.rs_instance, val);
+	rc = efhw_nic_pace(nic, virs->rs.rs_instance, val);
 	EFRM_TRACE("%s[%d]=%d DONE", __FUNCTION__, virs->rs.rs_instance, val);
-	return 0;
+	return rc;
 }
 EXPORT_SYMBOL(efrm_pt_pace);
 
@@ -112,7 +112,6 @@ static void efrm_vi_rm_dtor(struct efrm_resource_manager *rm);
 static int
 efrm_create_or_destroy_vi_resource_manager(
 				struct efrm_resource_manager **rm_in_out,
-				const struct vi_resource_dimensions *dims,
 				bool destroy)
 {
 	int rc;
@@ -169,13 +168,12 @@ fail_alloc:
 }
 
 int
-efrm_create_vi_resource_manager(struct efrm_resource_manager **rm_out,
-				const struct vi_resource_dimensions *dims)
+efrm_create_vi_resource_manager(struct efrm_resource_manager **rm_out)
 {
-	return efrm_create_or_destroy_vi_resource_manager(rm_out, dims, false);
+	return efrm_create_or_destroy_vi_resource_manager(rm_out, false);
 }
 
 static void efrm_vi_rm_dtor(struct efrm_resource_manager *rm)
 {
-	efrm_create_or_destroy_vi_resource_manager(&rm, NULL, true);
+	efrm_create_or_destroy_vi_resource_manager(&rm, true);
 }

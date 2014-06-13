@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,7 @@
 #include <net/udp.h>
 #include <linux/proc_fs.h>
 #include <linux/module.h>
+#include "../linux_resource/kernel_compat.h"
 
 
 
@@ -83,20 +84,9 @@ struct proc_dir_entry *oo_proc_root = NULL;
  *
  *--------------------------------------------------------------------*/
 
-
-static int
-efab_version_read_proc(char* buf, char** start, off_t offset, int count, 
-                       int* eof, void* data);
-static int 
-efabcfg_raw_read_proc(char *buf, char **start, off_t offset, int count, 
-                      int *eof, void *data);
-static int 
-efab_workq_read_proc(char *buf, char **start, off_t offset, int count, 
-		     int *eof, void *data);
-static int
-efab_dlfilters_read_proc(char* buf, char** start, off_t offset, int count, 
-                         int* eof, void* data);
-
+static const struct file_operations efab_workq_fops;
+static const struct file_operations efab_version_fops;
+static const struct file_operations efab_dlfilters_fops;
 
 /*--------------------------------------------------------------------
  *
@@ -106,16 +96,14 @@ efab_dlfilters_read_proc(char* buf, char** start, off_t offset, int count,
 
 /* Entries under /proc/drivers/sfc */
 typedef struct ci_proc_efab_entry_s {
-  char        *name;             /**< Entry name */
-  read_proc_t *read_proc;        /**< Entry read_proc handler */
+  char                          *name;  /**< Entry name */
+  const struct file_operations  *fops;  /**< Proc file operations */
 } ci_proc_efab_entry_t;
 static ci_proc_efab_entry_t ci_proc_efab_table[] = {
-    {"cplane",         cicp_stat_read_proc}, 
-    {"onloadcfg_raw",  efabcfg_raw_read_proc}, 
-    {"workqueue",    efab_workq_read_proc},
-//    {"efabcfg_opts", efabcfg_opts_read_proc}, 
-    {"version",      efab_version_read_proc},
-    {"dlfilters",    efab_dlfilters_read_proc},
+    {"cplane",        &cicp_stat_fops}, 
+    {"workqueue",     &efab_workq_fops},
+    {"version",       &efab_version_fops},
+    {"dlfilters",     &efab_dlfilters_fops},
 };
 
 #define CI_PROC_EFAB_TABLE_SIZE \
@@ -142,94 +130,44 @@ EXPORT_SYMBOL(ci_ip_stats_update_global);
 
 /****************************************************************************
  *
- * /proc/drivers/onload/onloadcfg_raw
- *
- ****************************************************************************/
-
-static int 
-efabcfg_raw_read_proc(char *buf, char **start, off_t offset, int count, 
-                      int *eof, void *data)
-{
-  ci_cfg_hdr_t *hdr;
-  int how_much, rc;
-
-  while (ci_cfg_rd_trylock() != 0) {
-    set_current_state(TASK_INTERRUPTIBLE);
-    schedule_timeout(0);
-  }
-  
-  hdr = ci_cfg_get();
- 
-  /* do we have a database installed? */
-  if (hdr == 0) {
-    rc = -ENODATA;
-    goto error;
-  }
-
-  /* have we reached or exceeded the end? */
-  if (offset >= hdr->len) {
-    rc = -EINVAL;
-    goto error;
-  }
-
-  /* number of bytes to copy */
-  how_much = CI_MIN(count, hdr->len - offset);
-  ci_assert_ge(how_much, 0);
-
-  /* copy the data */
-  memcpy(buf, (char*)hdr + offset, how_much);
-
-  ci_cfg_rd_unlock();
-
-  return how_much;
-
-error:
-  ci_cfg_rd_unlock();
-  return rc;
-}
-
-
-
-
-/****************************************************************************
- *
  * /proc/drivers/onload/workqueue
  *
  ****************************************************************************/
 
-#define PROC_PRINTF(fmt, ...)					\
-  if( count - len > 0 )						\
-    len += snprintf(buf+len, count-len, (fmt), __VA_ARGS__)
-#define EFAB_WORKQ_READ_PROC_PRINT(v)			\
-  PROC_PRINTF("%14s = %u\n", #v, wqueue->stats.v)
-#define PROC_PUT(str)					\
-  if( count - len > 0 )					\
-    len += snprintf(buf+len, count-len, "%s", (str))
-
 static int 
-efab_workq_read_proc(char *buf, char **start, off_t offset, int count, 
-		     int *eof, void *data)
+efab_workq_read_proc(struct seq_file *seq, void *s)
 {
-  int len = 0;
-#ifndef __USE_LINUX_WORKQUEUE
   ci_irqlock_state_t lock_flags;
   ci_workqueue_t *wqueue;
   wqueue = &CI_GLOBAL_WORKQUEUE;
   ci_irqlock_lock(&wqueue->lock, &lock_flags);
   if (wqueue->state == CI_WQ_ALIVE) {
+#define EFAB_WORKQ_READ_PROC_PRINT(v)			\
+  seq_printf(seq, "%14s = %u\n", #v, wqueue->stats.v)
       EFAB_WORKQ_READ_PROC_PRINT(working);
       EFAB_WORKQ_READ_PROC_PRINT(iter);
       EFAB_WORKQ_READ_PROC_PRINT(backlog);
       EFAB_WORKQ_READ_PROC_PRINT(started);
+#undef EFAB_WORKQ_READ_PROC_PRINT
   }
   else {	
-    PROC_PUT("The workqueue is not running.\n");
+    seq_printf(seq, "The workqueue is not running.\n");
   }
   ci_irqlock_unlock(&wqueue->lock, &lock_flags);
-#endif
 
-  return count ? strlen(buf) : 0;
+  return 0;
 }
+static int efab_workq_open_proc(struct inode *inode, struct file *file)
+{
+    return single_open(file, efab_workq_read_proc, 0);
+}
+static const struct file_operations efab_workq_fops = {
+    .owner   = THIS_MODULE,
+    .open    = efab_workq_open_proc,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 /****************************************************************************
@@ -324,15 +262,24 @@ static struct file_operations efab_stacks_seq_fops = {
  ****************************************************************************/
 
 static int 
-efab_version_read_proc(char* buf, char** start, off_t offset, int count, 
-                       int* eof, void* data)
+efab_version_read_proc(struct seq_file *seq, void *s)
 {
-  int len = 0; 
-  PROC_PRINTF("onload_product: %s\n", ONLOAD_PRODUCT);
-  PROC_PRINTF("onload_version: %s\n", ONLOAD_VERSION);
-  PROC_PRINTF("uk_intf_ver: %s\n", oo_uk_intf_ver);
-  return count ? strlen(buf) : 0;
+  seq_printf(seq, "onload_product: %s\n", ONLOAD_PRODUCT);
+  seq_printf(seq, "onload_version: %s\n", ONLOAD_VERSION);
+  seq_printf(seq, "uk_intf_ver: %s\n", oo_uk_intf_ver);
+  return 0;
 }
+static int efab_version_open_proc(struct inode *inode, struct file *file)
+{
+    return single_open(file, efab_version_read_proc, 0);
+}
+static const struct file_operations efab_version_fops = {
+    .owner   = THIS_MODULE,
+    .open    = efab_version_open_proc,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 /****************************************************************************
@@ -342,28 +289,37 @@ efab_version_read_proc(char* buf, char** start, off_t offset, int count,
  ****************************************************************************/
 
 static int 
-efab_dlfilters_read_proc(char* buf, char** start, off_t offset, int count, 
-                         int* eof, void* data)
+efab_dlfilters_read_proc(struct seq_file *seq, void *s)
 {
-  int len = 0; 
   int no_empty, no_tomb, no_used;
 
   efx_dlfilter_count_stats(efab_tcp_driver.dlfilter,
                            &no_empty, &no_tomb, &no_used);
-  PROC_PRINTF("dlfilters: empty=%d, tomb=%d, used=%d\n",
-              no_empty, no_tomb, no_used);
-  return count ? strlen(buf) : 0;
+  seq_printf(seq, "dlfilters: empty=%d, tomb=%d, used=%d\n",
+             no_empty, no_tomb, no_used);
+  return 0;
 }
+static int efab_dlfilters_open_proc(struct inode *inode, struct file *file)
+{
+    return single_open(file, efab_dlfilters_read_proc, 0);
+}
+static const struct file_operations efab_dlfilters_fops = {
+    .owner   = THIS_MODULE,
+    .open    = efab_dlfilters_open_proc,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
 
 
 /****************************************************************************
  *
- * Install new proc entries, substitute existing proc entries
+ * Install new proc entries
  *
  ****************************************************************************/
 /**
- * Install read-only files into /proc/drivers/sfc as requested by the table
- * in the argument.
+ * Install read-only files into /proc/drivers/onload as requested
+ * by the table in the argument.
  */
 static void
 ci_proc_files_install(struct proc_dir_entry *root, char *root_name,
@@ -376,13 +332,13 @@ ci_proc_files_install(struct proc_dir_entry *root, char *root_name,
     ci_proc_efab_entry_t  *efab_entry = &entries[entry_no];
 
     OO_DEBUG_STATS(ci_log("Create %s/%s: read_proc=%p",
-                      root_name, efab_entry->name, efab_entry->read_proc));
+                      root_name, efab_entry->name, efab_entry->fops));
 
-    if (create_proc_read_entry(efab_entry->name, 0, root, 
-                               efab_entry->read_proc, 0) == NULL) {
+    if (proc_create(efab_entry->name, 0, root, efab_entry->fops)
+        == NULL) {
 
-      ci_log("Unable to create %s/%s: read_proc=%p",
-             root_name, efab_entry->name, efab_entry->read_proc);
+      ci_log("Unable to create %s/%s: fops=%p",
+             root_name, efab_entry->name, efab_entry->fops);
 
       /* we're not registering any methods off the proc entry so if we
          fail outcome is just that our entry doesn't get put into /proc
@@ -422,12 +378,7 @@ ci_install_proc_entries(void)
 
 
 #if CI_CFG_STATS_NETIF
-  {
-    struct proc_dir_entry *entry;
-    entry = create_proc_entry("stacks", 0, oo_proc_root);
-    if( entry )
-      entry->proc_fops = &efab_stacks_seq_fops;
-  }
+  proc_create("stacks", 0, oo_proc_root, &efab_stacks_seq_fops);
 #endif
 
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
@@ -461,6 +412,6 @@ void ci_uninstall_proc_entries(void)
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
   remove_proc_entry("mem", oo_proc_root);
 #endif
-  remove_proc_entry(oo_proc_root->name, oo_proc_root->parent);
+  remove_proc_entry("driver/onload", NULL);
   oo_proc_root = NULL;
 }

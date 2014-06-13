@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,6 +58,26 @@ typedef dma_addr_t ef_vi_dma_addr_t;
 
 #define EF_VI_HF __attribute__((visibility("hidden")))
 #define EF_VI_HV __attribute__((visibility("hidden")))
+
+#if defined(__PPC__)
+#if defined(__KERNEL__)
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,18)
+#define mmiowb() wmb()
+#endif
+#else
+#define mmiowb() wmb()
+#endif
+#else
+#if !defined(mmiowb)
+#define mmiowb() ((void)0)
+#endif
+#endif
+
+
+#ifndef __printf
+# define __printf(fmt, arg)  __attribute__((format(printf, fmt, arg)))
+#endif
 
 
 #endif  /* __CI_CIUL_SYSDEP_LINUX_H__ */

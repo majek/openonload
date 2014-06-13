@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,6 +69,8 @@ extern int efab_eplock_unlock_and_wake(ci_netif *ni);
 extern int efab_eplock_lock_wait(ci_netif* ni
 				 CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t bc));
 
+extern int
+efab_eplock_lock_timeout(ci_netif* ni, signed long timeout_jiffies);
 
 #endif /* __ONLOAD_EPLOCK_REOSURCE_H__ */
 /*! \cidoxg_end */

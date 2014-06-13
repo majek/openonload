@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -22,11 +22,13 @@
  *
  ********************************************************************/
 #ifdef CONFIG_PCI_IOV
+#if !defined(__powerpc__)
 #define CONFIG_SFC_RESOURCE_VF
 #ifdef CONFIG_IOMMU_API
 #define CONFIG_SFC_RESOURCE_VF_IOMMU
 #endif
-#endif
+#endif /* __powerpc__ */
+#endif /* CONFIG_PCI_IOV */
 
 
 #endif /* __CI_EFRM_CONFIG_H__ */

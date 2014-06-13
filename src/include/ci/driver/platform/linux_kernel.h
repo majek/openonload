@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -72,7 +72,11 @@
 #include <net/sock.h>   
 #include <asm/io.h>
 #include <asm/irq.h>
+/* XXX: PPC_HACK: This file doesn't seem to exist on PPC.  What are
+   the implications of not including it */
+#if ! defined (__PPC__)
 #include <asm/segment.h>
+#endif
 #include <asm/bitops.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
@@ -160,12 +164,16 @@ typedef struct mm_struct* ci_addr_spc_t;
 #define copy_from_user_ret(to,from,n,retval) \
     do{ if (copy_from_user(to,from,n)) return retval; }while(0)
 
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
-# define ci_remap_page_range(vma, from, to, size, prot) \
-   remap_page_range((vma), (from), (to), (size), (prot))
+# define ci_io_remap_pfn_range(vma, vaddr, pfn, size, prot)          \
+   io_remap_page_range((vma), (vaddr), (pfn) << PAGE_SHIFT, (size), (prot))
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+# define ci_io_remap_pfn_range(vma, vaddr, pfn, size, prot)          \
+   io_remap_pfn_range((vma), (vaddr), (pfn), (size), (prot))
 #else
-# define ci_remap_page_range(vma, from, to, size, prot) \
-   remap_pfn_range((vma), (from), (to) >> PAGE_SHIFT, (size), (prot))
+# define ci_io_remap_pfn_range(vma, vaddr, pfn, size, prot)          \
+   io_remap_pfn_range((vma), (vaddr), (pfn), (size), (prot))
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
@@ -544,32 +552,6 @@ ci_inline unsigned ci_contig_shmbuf_nopage(ci_contig_shmbuf_t* kus,
   ci_assert(offset < kus->bytes);
   return ci_va_to_pfn(kus->p + offset);
 }
-
-
-/**********************************************************************
- * Platform dependencies.
- */
-
-#if defined(__i386__) | defined(__x86_64__)
-  /*! see linux/drivers/char/mem.c:pgprot_noncached() */
-# define CI_PAGE_DISABLE_CACHE		(_PAGE_PCD | _PAGE_PWT)
-
-#elif defined(__PPC__)
-
-  /*! see /usr/include/asm/io.h in  pgprot_noncached() */
-# define CI_PAGE_DISABLE_CACHE		(_PAGE_NO_CACHE | _PAGE_GUARDED)
-
-# define CI_DENSE_PCI(addr)	0
-# define CI_DENSE_KVA(addr)	0
-
-#elif defined(__ia64__)
-
-# define CI_PAGE_DISABLE_CACHE (0)
-# define CI_PAGE_DISABLE_CACHE (0)
-
-#else
-# error "Unknown processor type."
-#endif 
 
 
 /*--------------------------------------------------------------------

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,31 +45,15 @@
  */
 
 /*! \cidoxg_lib_ef */
+#include <etherfabric/pio.h>
 #include "ef_vi_internal.h"
+#include "logging.h"
 
 
 int ef_vi_transmit_init(ef_vi* vi, ef_addr base, int len, ef_request_id dma_id)
 {
 	ef_iovec iov = { base, len };
 	return ef_vi_transmitv_init(vi, &iov, 1, dma_id);
-}
-
-
-int ef_vi_transmit(ef_vi* vi, ef_addr base, int len, ef_request_id dma_id)
-{
-	ef_iovec iov = { base, len };
-	int rc = ef_vi_transmitv_init(vi, &iov, 1, dma_id);
-	if( rc == 0 )  ef_vi_transmit_push(vi);
-	return rc;
-}
-
-
-int ef_vi_transmitv(ef_vi* vi, const ef_iovec* iov, int iov_len,
-                    ef_request_id dma_id)
-{
-	int rc = ef_vi_transmitv_init(vi, iov, iov_len, dma_id);
-	if( rc == 0 )  ef_vi_transmit_push(vi);
-	return rc;
 }
 
 
@@ -99,6 +83,37 @@ int ef_vi_transmit_unbundle(ef_vi* vi, const ef_event* ev,
 
 	EF_VI_BUG_ON(ids - ids_in > EF_VI_TRANSMIT_BATCH);
 	return (int) (ids - ids_in);
+}
+
+
+int ef_pio_memcpy(ef_vi* vi, const void* base, int offset, int len)
+{
+	/* PIO region on NIC is write only and has some alignment
+	   requirements. */
+	ef_pio* pio = vi->linked_pio;
+	uint64_t *src, *dst;
+
+	if( offset + len > pio->pio_len ) {
+		LOGVV(ef_log("%s: offset(%d) + len(%d) > pio_len(%u)", 
+			     __FUNCTION__, offset, len, pio->pio_len));
+		return -EINVAL;
+	}
+
+	memcpy(pio->pio_buffer + offset, base, len);
+
+	len += CI_OFFSET(offset, 8);
+	offset = CI_ROUND_DOWN(offset, 8);
+	len = CI_ROUND_UP(len, 8);
+
+	/* This loop is doing the following, but guarantees word access:
+	 * memcpy(pio->pio_io + offset, pio->pio_buffer + offset, len); 
+	 */
+	dst=(uint64_t*)(pio->pio_io + offset);
+	src=(uint64_t*)(pio->pio_buffer + offset);
+	for( ; src < (uint64_t*)(pio->pio_buffer + offset + len); ++src,++dst )
+		*dst = *src;
+  
+	return 0;
 }
 
 /*! \cidoxg_end */

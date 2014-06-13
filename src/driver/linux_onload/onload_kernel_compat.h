@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,6 +17,7 @@
 #define __ONLOAD_KERNEL_COMPAT_H__
 
 #include <driver/linux_net/kernel_compat.h>
+#include <driver/linux_affinity/autocompat.h>
 
 #ifndef current_fsuid
 #define current_fsuid() current->fsuid
@@ -81,5 +82,9 @@
 # define f_vfsmnt f_path.mnt
 #endif
 
+
+#ifndef EFRM_HAVE_NETDEV_NOTIFIER_INFO
+#define netdev_notifier_info_to_dev(info) (info)
+#endif
 
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

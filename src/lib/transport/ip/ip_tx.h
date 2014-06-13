@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -72,12 +72,12 @@ ci_inline void ci_ip_local_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                                 ci_sock_cmn *s, oo_sp dst)
 {
   ci_assert(ci_netif_is_locked(ni));
-  pkt->pf.lo.tx_sock = SC_SP(s);
-  pkt->pf.lo.rx_sock = OO_SP_IS_NULL(dst) ? s->local_peer : dst;
-  if( OO_SP_IS_NULL(pkt->pf.lo.rx_sock) )
+  pkt->pf.tcp_tx.lo.tx_sock = SC_SP(s);
+  pkt->pf.tcp_tx.lo.rx_sock = OO_SP_IS_NULL(dst) ? s->local_peer : dst;
+  if( OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock) )
     return;
   LOG_NT(ci_log(NS_FMT "loopback TX pkt %d to %d", NS_PRI_ARGS(ni, s),
-                OO_PKT_FMT(pkt), OO_SP_FMT(pkt->pf.lo.rx_sock)));
+                OO_PKT_FMT(pkt), OO_SP_FMT(pkt->pf.tcp_tx.lo.rx_sock)));
   ci_netif_pkt_hold(ni, pkt);
   pkt->next = ni->state->looppkts;
   ni->state->looppkts = OO_PKT_P(pkt);
@@ -89,12 +89,9 @@ ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
                        ci_ip_pkt_fmt* pkt)
 {
   ci_assert_equal(ipcache->ether_type, CI_ETHERTYPE_IP);
-  if (ipcache->ether_offset)
-    oo_pkt_layout_set(pkt, CI_PKT_LAYOUT_TX_SIMPLE);
-  else
-    oo_pkt_layout_set(pkt, CI_PKT_LAYOUT_TX_VLAN);
-  memcpy(oo_ether_dhost(pkt), ci_ip_cache_ether_hdr(ipcache),
-         ETH_HLEN + ETH_VLAN_HLEN - ipcache->ether_offset);
+  oo_tx_pkt_layout_update(pkt, ipcache->ether_offset);
+  memcpy(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
+         oo_ether_hdr_size(pkt));
   pkt->intf_i = ipcache->intf_i;
 #if CI_CFG_PORT_STRIPING
   /* ?? FIXME: This code assumes that the two ports we're striping over

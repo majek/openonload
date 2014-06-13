@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,6 +84,11 @@ oo_priv_lookup_and_attach_stack(ci_private_t* priv, const char* name,
   return rc;
 }
 
+static int
+efab_tcp_helper_lookup_and_attach_stack(ci_private_t* priv, void *arg)
+{
+  return oo_priv_lookup_and_attach_stack(priv, NULL, *(ci_uint32 *)arg);
+}
 
 static int
 efab_tcp_helper_stack_attach(ci_private_t* priv, void *arg)
@@ -147,7 +152,8 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
     return -EINVAL;
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
-  if( ci_cas32u_fail(&ep->aflags, 0, OO_THR_EP_AFLAG_ATTACHED ) )
+  if( tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
+      OO_THR_EP_AFLAG_ATTACHED )
     return -EBUSY;
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
 
@@ -160,7 +166,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
     if( rc < 0 ) {
       LOG_E(ci_log("%s: ERROR: sock_create(%d, %d, 0) failed (%d)",
                    __FUNCTION__, op->domain, type, rc));
-      ep->aflags = 0;
+      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
       return rc;
     }
     os_file = sock_alloc_file(sock, flags, NULL);
@@ -168,7 +174,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
       LOG_E(ci_log("%s: ERROR: sock_alloc_file failed (%ld)",
                    __FUNCTION__, PTR_ERR(os_file)));
       sock_release(sock);
-      ep->aflags = 0;
+      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
       return PTR_ERR(os_file);
     }
     rc = efab_attach_os_socket(ep, os_file);
@@ -176,12 +182,16 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
       LOG_E(ci_log("%s: ERROR: efab_attach_os_socket failed (%d)",
                    __FUNCTION__, rc));
       /* NB. efab_attach_os_socket() consumes [os_file] even on error. */
-      ep->aflags = 0;
+      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
       return rc;
     }
     wo->sock.domain = op->domain;
     wo->sock.ino = ep->os_socket->file->f_dentry->d_inode->i_ino;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
     wo->sock.uid = ep->os_socket->file->f_dentry->d_inode->i_uid;
+#else
+    wo->sock.uid = __kuid_val(ep->os_socket->file->f_dentry->d_inode->i_uid);
+#endif
   }
 
   /* Create a new file descriptor to attach the stack to. */
@@ -199,7 +209,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
     ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
     if( os_socket != NULL )
       oo_file_ref_drop(os_socket);
-    ep->aflags = 0;
+    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
     return rc;
   }
 
@@ -234,12 +244,13 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
     return -EINVAL;
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
-  if( ci_cas32u_fail(&ep->aflags, 0, OO_THR_EP_AFLAG_ATTACHED ) )
+  if( tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
+      OO_THR_EP_AFLAG_ATTACHED )
     return -EBUSY;
 
   rc = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_READER);
   if( rc < 0 ) {
-    ep->aflags = 0;
+    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
     return rc;
   }
   op->rfd = rc;
@@ -247,7 +258,7 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   rc = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_WRITER);
   if( rc < 0 ) {
     efab_linux_sys_close(op->rfd);
-    ep->aflags = 0;
+    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
     return rc;
   }
   op->wfd = rc;
@@ -290,7 +301,6 @@ efab_tcp_helper_move_state(ci_private_t* priv, void *arg)
                        "new_ep_id=%u", __FUNCTION__, priv->thr, priv->thr->id,
                        priv, OO_SP_FMT(op->ep_id), op->new_trs_id,
                        OO_SP_FMT(op->new_ep_id)));
-  OO_DEBUG_TCPH(THR_PRIV_DUMP(priv, ""));
 
   do {
     /* check that the existing id is valid */
@@ -348,10 +358,8 @@ efab_tcp_helper_move_state(ci_private_t* priv, void *arg)
 
     OO_DEBUG_TCPH(ci_log("%s: set epid %u", __FUNCTION__,
                          OO_SP_FMT(priv->sock_id)));
-    OO_DEBUG_TCPH(THR_PRIV_DUMP(priv, ""));
     
     /* copy across any necessary state */
-
 
     ci_assert_equal(new_ep->os_socket, NULL);
     new_ep->os_socket = ep->os_socket;
@@ -403,8 +411,7 @@ efab_ep_filter_clear(ci_private_t *priv, void *arg)
   int rc = efab_ioctl_get_ep(priv, op->tcp_id, &ep);
   if (rc != 0)
     return rc;
-
-  return tcp_helper_endpoint_clear_filters(ep, op->no_sw);
+  return tcp_helper_endpoint_clear_filters(ep);
 }
 static int
 efab_ep_filter_mcast_add(ci_private_t *priv, void *arg)
@@ -541,7 +548,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
         }
         else if( wo->waitable.state & CI_TCP_STATE_TCP_CONN ) {
           ci_tcp_state* ts = &wo->tcp;
-          info->u.ni_endpoint.tx_pkts_max = ts->send_max;
+          info->u.ni_endpoint.tx_pkts_max = ts->so_sndbuf_pkts;
           info->u.ni_endpoint.tx_pkts_num = ts->send.num;
         }
         if( wo->waitable.state & CI_TCP_STATE_SOCKET ) {
@@ -970,7 +977,9 @@ efab_install_stack(ci_private_t *priv, void *arg)
 static int
 thr_priv_dump(ci_private_t *priv, void *unused)
 {
+  ci_log("OO_IOC_RSOP_DUMP:");
   THR_PRIV_DUMP(priv, "");
+  ci_log("OO_IOC_RSOP_DUMP: done");
   return 0;
 }
 static int
@@ -985,12 +994,6 @@ oo_ioctl_debug_op(ci_private_t *priv, void *arg)
 {
   ci_debug_onload_op_t *op = arg;
   int rc;
-
-  /* First handle ops that can be done without superuser permissions.
-   * oo_priv_lookup_and_attach_stack() does its own user ID checking 
-   */
-  if( op->what == __CI_DEBUG_OP_ON_INSTALL_RESOURCE__ )
-    return oo_priv_lookup_and_attach_stack(priv, NULL, op->u.install_id);
 
   if( !ci_is_sysadmin() )  return -EPERM;
 
@@ -1169,7 +1172,8 @@ static int efab_file_move_to_alien_stack(ci_private_t *priv,
   if( ep->os_socket != NULL )
     os_socket = oo_file_ref_add(ep->os_socket);
   ep = ci_trs_ep_get(new_thr, new_ts->s.b.bufid);
-  if( ci_cas32u_fail(&ep->aflags, 0, OO_THR_EP_AFLAG_ATTACHED ) ) {
+  if( tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
+      OO_THR_EP_AFLAG_ATTACHED ) {
     ci_tcp_state_free(alien_ni, new_ts);
     ci_netif_unlock(alien_ni);
     if( os_socket != NULL )
@@ -1194,7 +1198,7 @@ static int efab_file_move_to_alien_stack(ci_private_t *priv,
   CI_DEBUG(new_ts->s.pid = mid_ts->s.pid);
   new_ts->s.ino = mid_ts->s.ino;
   new_ts->s.cmsg_flags = mid_ts->s.cmsg_flags;
-  ci_pmtu_state_init(alien_ni, &new_ts->s, &new_ts->s.pkt.pmtus,
+  ci_pmtu_state_init(alien_ni, &new_ts->s, &new_ts->pmtus,
                      CI_IP_TIMER_PMTU_DISCOVER);
   new_ts->s.so = mid_ts->s.so;
   new_ts->s.so_priority = mid_ts->s.so_priority;
@@ -1304,7 +1308,6 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 
         /* create new stack
          * todo: no hardware interfaces are necessary */
-        alloc.in_cpu_khz = IPTIMER_STATE(&priv->thr->netif)->khz;
         strcpy(alloc.in_version, ONLOAD_VERSION);
         strcpy(alloc.in_uk_intf_ver, oo_uk_intf_ver);
         alloc.in_name[0] = '\0';
@@ -1436,6 +1439,7 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_EP_INFO,               ioctl_ep_info),
   op(OO_IOC_CLONE_FD,              ioctl_clone_fd),
   op(OO_IOC_KILL_SELF_SIGPIPE,     ioctl_kill_self),
+
   op(OO_IOC_IOCTL_TRAMP_REG,       efab_linux_trampoline_register),
   op(OO_IOC_DIE_SIGNAL,            efab_signal_die),
 
@@ -1466,6 +1470,7 @@ oo_operations_table_t oo_operations[] = {
 #endif
 
   op(OO_IOC_STACK_ATTACH,      efab_tcp_helper_stack_attach ),
+  op(OO_IOC_INSTALL_STACK_BY_ID, efab_tcp_helper_lookup_and_attach_stack),
   op(OO_IOC_SOCK_ATTACH,       efab_tcp_helper_sock_attach ),
 #if CI_CFG_USERSPACE_PIPE
   op(OO_IOC_PIPE_ATTACH,       efab_tcp_helper_pipe_attach ),

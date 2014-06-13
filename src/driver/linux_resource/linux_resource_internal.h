@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,11 +63,12 @@ extern int  efrm_driverlink_register(void);
 extern void efrm_driverlink_unregister(void);
 
 extern int
-efrm_nic_add(struct pci_dev *dev, unsigned int opts, const uint8_t *mac_addr,
+efrm_nic_add(struct efx_dl_device *dl_device, unsigned int opts,
+	     const uint8_t *mac_addr,
 	     struct linux_efhw_nic **lnic_out, spinlock_t *reg_lock,
-	     int bt_min, int bt_max, int non_irq_evq,
 	     const struct vi_resource_dimensions *, int ifindex,
-             unsigned timer_quantum_ns);
+	     unsigned timer_quantum_ns, unsigned rx_prefix_len,
+	     unsigned rx_usr_buf_size);
 extern void efrm_nic_del(struct linux_efhw_nic *);
 
 extern int efrm_install_proc_entries(void);

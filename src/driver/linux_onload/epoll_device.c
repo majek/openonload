@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,7 @@
 #include <linux/eventpoll.h>
 #include <linux/unistd.h> /* for __NR_epoll_pwait */
 #include "onload_internal.h"
+#include <ci/internal/cplane_ops.h> /* for oo_timesync_cpu_khz */
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,29)
 /* Normal Linux epoll depth check does not work for us.
@@ -336,6 +337,11 @@ static int oo_epoll2_apply_ctl(struct oo_epoll2_private *priv,
 static void oo_epoll2_wait(struct oo_epoll2_private *priv,
                            struct oo_epoll2_action_arg *op)
 {
+  /* This function uses oo_timesync_cpu_khz but we do not want to
+   * block here for it to stabilize.  So we already blocked in
+   * oo_epoll_fop_open().
+   */
+
   ci_uint64 start_frc = 0, now_frc = 0; /* =0 to make gcc happy */
   tcp_helper_resource_t* thr;
   ci_netif* ni;
@@ -348,8 +354,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
 
   /* Declare that we are spinning - even if we are just polling */
   OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni)
-    if( ! ni->state->is_spinner )
-      ni->state->is_spinner = 1;
+    ci_atomic32_inc(&ni->state->n_spinners);
 
   /* Poll each stack for events */
   op->rc = -ENOEXEC; /* impossible value */
@@ -376,6 +381,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
   /* Do we have anything to do? */
   if( op->rc == -ENOEXEC ) {
     /* never called sys_epoll_wait() - do it! */
+
     op->rc = efab_linux_sys_epoll_wait(op->kepfd, CI_USER_PTR_GET(op->events),
                                        op->maxevents, 0);
   }
@@ -394,7 +400,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
     ci_assert(start_frc);
 
     if( timeout > 0) {
-      ci_uint64 max_timeout_spin = (ci_uint64)timeout * cpu_khz;
+      ci_uint64 max_timeout_spin = (ci_uint64)timeout * oo_timesync_cpu_khz;
       if( max_timeout_spin <= max_spin ) {
         max_spin = max_timeout_spin;
         spin_limited_by_timeout = 1;
@@ -409,16 +415,13 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
         goto do_exit;
       }
 
-      OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
+      OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni)
         if( ci_netif_may_poll(ni) &&
             ci_netif_need_poll_spinning(ni, now_frc) &&
             ci_netif_trylock(ni) ) {
           ci_netif_poll(ni);
           ci_netif_unlock(ni);
         }
-        else if( ! ni->state->is_spinner )
-          ni->state->is_spinner = 1;
-      }
 
       op->rc = efab_linux_sys_epoll_wait(op->kepfd, CI_USER_PTR_GET(op->events),
                                          op->maxevents, 0);
@@ -426,7 +429,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
         goto do_exit;
 
       ci_frc64(&now_frc);
-      if(unlikely( now_frc - schedule_frc > cpu_khz )) {
+      if(unlikely( now_frc - schedule_frc > oo_timesync_cpu_khz )) {
         schedule(); /* schedule() every 1ms */
         schedule_frc = now_frc;
       }
@@ -445,7 +448,7 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
     if( ! op->spin_cycles )
       ci_frc64(&now_frc); /* In spin case, re-use now_frc value */
     spend_ms = now_frc - start_frc;
-    do_div(spend_ms, cpu_khz);
+    do_div(spend_ms, oo_timesync_cpu_khz);
     ci_assert_ge((int)spend_ms, 0);
     if( timeout > (int)spend_ms ) {
       timeout -= spend_ms;
@@ -456,21 +459,19 @@ static void oo_epoll2_wait(struct oo_epoll2_private *priv,
 
   /* Going to block: enable interrupts; reset spinner flag */
   OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
-    if( ni->state->is_spinner )
-      ni->state->is_spinner = 0;
+    ci_atomic32_dec(&ni->state->n_spinners);
     tcp_helper_request_wakeup(thr);
   }
 
   /* Block */
+
   op->rc = efab_linux_sys_epoll_wait(op->kepfd, CI_USER_PTR_GET(op->events),
                                      op->maxevents, timeout);
   return;
 
 do_exit:
-  OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
-    if( ni->state->is_spinner )
-      ni->state->is_spinner = 0;
-  }
+  OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni)
+    ci_atomic32_dec(&ni->state->n_spinners);
   return;
 }
 
@@ -662,6 +663,7 @@ static int oo_epoll1_mmap(struct oo_epoll1_private* priv,
 #endif
 
   /* Create epoll fd */
+
   priv->sh->epfd = efab_linux_sys_epoll_create1(EPOLL_CLOEXEC);
   if( (int)priv->sh->epfd < 0 ) {
     rc = priv->sh->epfd;
@@ -719,9 +721,10 @@ static int oo_epoll1_action(struct oo_epoll1_private *priv,
       rc = efab_linux_sys_epoll_ctl(op->epfd, item[i].op,
                                     item[i].fd, &item_u[i].event);
       /* It's valid to have already added the fd to the os epoll set. */
-      if( rc == 0 || rc == -EEXIST )
+      if( rc == 0 || rc == -EEXIST ) {
         rc = efab_linux_sys_epoll_ctl(priv->sh->epfd, item[i].op,
                                       item[i].fd, &item_u[i].event);
+      }
 
       oo_epoll_warn_postpone_error(op->epoll_ctl_n, item[i].fd, i, rc,
                                    op->maxevents);
@@ -822,6 +825,11 @@ int oo_epoll_fop_ioctl(struct inode* inode, struct file *filp,
 static int oo_epoll_fop_open(struct inode* inode, struct file* filp)
 {
   struct oo_epoll_file_private *priv = kmalloc(sizeof(*priv), GFP_KERNEL);
+
+  /* oo_epoll2_wait() uses the definition of oo_timesync_cpu_khz.  We
+     don't want to block on it to stablize there on the fast path so
+     we block here. */
+  oo_timesync_wait_for_cpu_khz_to_stabilize();
 
   if(unlikely( priv == NULL ))
     return -ENOMEM;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,7 +60,6 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <netdb.h>
 #include <string.h>
 #include <strings.h>
 #include <assert.h>
@@ -226,105 +225,16 @@ static void* monitor_fn(void* arg)
 }
 
 
-static char* my_strtok(char** s, char delim)
-{
-  char* tok = *s;
-  if( **s == '\0' )
-    return NULL;
-  while( **s != '\0' && **s != delim )
-    ++(*s);
-  if( **s != '\0' ) {
-    **s = '\0';
-    ++(*s);
-  }
-  return tok;
-}
-
-
-static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
-{
-  struct addrinfo hints;
-  struct addrinfo* ai;
-  const char* host;
-  const char* port;
-  char *s, *p;
-  int rc = -EINVAL;
-
-  p = s = strdup(s_in);
-  host = my_strtok(&p, ':');
-  port = my_strtok(&p, '\0');
-  if( port == NULL )
-    goto out;
-
-  hints.ai_flags = AI_NUMERICSERV;
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = 0;
-  hints.ai_protocol = 0;
-  hints.ai_addrlen = 0;
-  hints.ai_addr = NULL;
-  hints.ai_canonname = NULL;
-  hints.ai_next = NULL;
-  rc = getaddrinfo(host, port, &hints, &ai);
-  if( rc == 0 ) {
-    TEST(ai->ai_addrlen == sizeof(*sin));
-    memcpy(sin, ai->ai_addr, ai->ai_addrlen);
-  }
-  else {
-    LOGE(fprintf(stderr, "ERROR: getaddrinfo(\"%s\", \"%s\") returned %d %s\n",
-                 host, port, rc, gai_strerror(rc)));
-    rc = -EINVAL;
-  }
- out:
-  free(s);
-  return rc;
-}
-
-
-static int filter_parse(ef_filter_spec* fs, const char* s_in)
-{
-  struct sockaddr_in sin;
-  const char* type;
-  const char* hostport;
-  char *s, *p;
-  int rc = -EINVAL;
-  int protocol;
-
-  ef_filter_spec_init(fs, EF_FILTER_FLAG_NONE);
-
-  p = s = strdup(s_in);
-  if( (type = my_strtok(&p, ':')) == NULL )
-    goto out;
-  if( ! strcasecmp(type, "tcp") || ! strcasecmp(type, "udp") ) {
-    protocol = strcasecmp(type, "tcp") ? IPPROTO_UDP : IPPROTO_TCP;
-    if( (hostport = my_strtok(&p, '\0')) == NULL )
-      goto out;
-    if( (rc = hostport_parse(&sin, hostport)) != 0 )
-      goto out;
-    ef_filter_spec_set_ip4_local(fs, protocol, sin.sin_addr.s_addr,
-                                 sin.sin_port);
-  }
-  else if( ! strcasecmp(type, "unicast") || ! strcasecmp(type, "ucast") ) {
-    ef_filter_spec_set_unicast_all(fs);
-    rc = 0;
-  }
-  else if( ! strcasecmp(type, "multicast") || ! strcasecmp(type, "mcast") ) {
-    ef_filter_spec_set_multicast_all(fs);
-    rc = 0;
-  }
-
- out:
-  free(s);
-  return rc;
-}
-
-
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
   fprintf(stderr, "  efsink <interface> <filter-spec>...\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "filter-spec:\n");
-  fprintf(stderr, "  {udp|tcp}:<local-host-or-ip>:<local-port>\n");
+  fprintf(stderr, "  {udp|tcp}:[vid=<vlan>,]<local-host>:<local-port>"
+          "[,<remote-host>:<remote-port>]\n");
+  fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
+  fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");
   exit(1);
 }
 

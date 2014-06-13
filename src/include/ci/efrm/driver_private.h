@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -80,7 +80,6 @@ extern void efrm_driver_ctor(void);
 extern void efrm_driver_stop(void);
 extern void efrm_driver_dtor(void);
 extern int  efrm_nic_ctor(struct efrm_nic *, int ifindex,
-			  int bt_min, int bt_lim,
 			  const struct vi_resource_dimensions *);
 extern void efrm_nic_dtor(struct efrm_nic *);
 extern int  efrm_driver_register_nic(struct efrm_nic *);
@@ -94,12 +93,20 @@ extern void efrm_driver_unregister_nic(struct efrm_nic *);
  *--------------------------------------------------------------------*/
 
 struct vi_resource_dimensions {
+	/* Falcon Only */
 	unsigned evq_int_min, evq_int_lim;
 	unsigned evq_timer_min, evq_timer_lim;
 	unsigned rxq_min, rxq_lim;
 	unsigned txq_min, txq_lim;
+	unsigned bt_min, bt_lim;
+
+	unsigned non_irq_evq;
 	unsigned rss_channel_count;
 
+	/* EF10 Only */
+	unsigned vi_min, vi_lim, vi_base;
+
+	/* SRIOV Only */
 	unsigned vf_vi_base;
 	unsigned vf_vi_scale;
 	unsigned vf_count;

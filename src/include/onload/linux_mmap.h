@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -39,12 +39,13 @@
  * (if a process is using our stack, if must have mapped the mm)
  */
 struct mm_signal_data {
-  __sighandler_t    handler_postpone1;
-  __sighandler_t    handler_postpone3;
+  __sighandler_t    handler_postpone;
   void             *sarestorer;
   __sighandler_t    handlers[OO_SIGHANGLER_DFL_MAX+1];
-  ci_user_ptr_t     user_data;
   ci_uint32/*bool*/ sa_onstack_intercept;
+  ci_user_ptr_t     user_data;
+  void             *kernel_sighand; /* used as opaque pointer only */
+  struct oo_sigaction signal_data[_NSIG];
 };
 
 
@@ -54,6 +55,13 @@ struct mm_hash {
 
   ci_user_ptr_t     trampoline_entry;
   ci_user_ptr_t     trampoline_exclude;
+
+  /* Used on PPC (and others) to restore the TOC pointer; unnecessary 
+   *  for x86 and x64
+   */
+  ci_user_ptr_t   trampoline_toc;
+  ci_user_ptr_t trampoline_user_fixup;
+
   CI_DEBUG(ci_user_ptr_t trampoline_ul_fail;)
 
   struct mm_signal_data signal_data;
@@ -71,6 +79,10 @@ extern rwlock_t oo_mm_tbl_lock;
 extern void oo_mm_tbl_init(void);
 
 extern struct mm_hash* oo_mm_tbl_lookup(struct mm_struct*);
+extern int efab_put_mm_hash_locked(struct mm_hash *p);
+static inline void efab_get_mm_hash_locked(struct mm_hash *p)
+{ p->ref++; }
+extern void efab_free_mm_hash(struct mm_hash *p);
 
 int oo_fop_mmap(struct file* file, struct vm_area_struct* vma);
 

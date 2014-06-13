@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -50,7 +50,7 @@
 
       CI_SMP_SYNC
 
-      "1:     lwarx   %0,0,%2     \n"	
+      "1:     lwarx   %0,0,%2,1     \n"	
       "       cmpw    0,%0,%3     \n"
       "       bne-    2f          \n"
       "       stwcx.  %4,0,%2     \n"

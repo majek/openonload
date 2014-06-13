@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,8 +43,8 @@ void ci_tcp_tx_pkt_assert_valid(ci_netif* ni, ci_tcp_state* ts,
   verify(pkt->refcount > 0);
 
   /* Check TCP header is where we think it should be. */
-  verify(pkt->pkt_layout == CI_PKT_LAYOUT_TX_SIMPLE ||
-         pkt->pkt_layout == CI_PKT_LAYOUT_TX_VLAN);
+  verify(pkt->pkt_eth_payload_off == ETH_HLEN);
+  verify(pkt->pkt_start_off == 0 || pkt->pkt_start_off == -ETH_VLAN_HLEN);
   verify(CI_IP4_IHL(oo_tx_ip_hdr(pkt)) == sizeof(ci_ip4_hdr));
   tcp = TX_PKT_TCP(pkt);
   verify(tcp == PKT_TCP_HDR(pkt));
@@ -79,12 +79,12 @@ void ci_tcp_tx_pkt_assert_valid(ci_netif* ni, ci_tcp_state* ts,
   }
   verify(len == paylen + CI_TCP_HDR_LEN(tcp) +
          CI_IP4_IHL(oo_tx_ip_hdr(pkt)) + oo_ether_hdr_size(pkt));
-  verify(len == pkt->tx_pkt_len);
+  verify(len == pkt->pay_len);
 
   verify(oo_offbuf_ptr(&pkt->buf) ==
-         oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + paylen);
+         (char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + paylen);
   verify(oo_offbuf_end(&pkt->buf) ==
-         oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + ts->eff_mss);
+         (char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + ts->eff_mss);
   verify(oo_offbuf_end(&pkt->buf) <= (char*) pkt + CI_CFG_PKT_BUF_SIZE);
 }
 
@@ -420,7 +420,7 @@ void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
   chk(delack_tid);
   chk(zwin_tid);
   chk(kalive_tid);
-  chk(s.pkt.pmtus.tid);
+  chk(pmtus.tid);
 # undef chk
 
   verify(SEQ_LE(tcp_snd_una(ts), tcp_snd_nxt(ts)));
@@ -563,7 +563,7 @@ void ci_tcp_pkt_dump(ci_netif *ni, ci_ip_pkt_fmt* pkt, int is_recv, int dump)
     for( i = 0; i < pkt->n_buffers; ++i ) {
       ci_ip_pkt_fmt* apkt = PKT_CHK(ni, buf);
       log("      : "EF_ADDR_FMT":%d", 
-          apkt->base_addr[pkt->intf_i], apkt->buf_len);
+          apkt->dma_addr[pkt->intf_i], apkt->buf_len);
       buf = apkt->frag_next;
     }
     if( dump & 1 )
@@ -683,9 +683,8 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
 
   log("%s  listenq: max=%d n=%d", pf, 
       ci_tcp_listenq_max(ni), tls->n_listenq);
-  log("%s  acceptq: max=%d n=%d  get=%d put=%d total=%d", pf, 
-      tls->acceptq_max, ci_tcp_acceptq_n(tls), OO_SP_FMT(tls->acceptq_get),
-      tls->acceptq_put, tls->acceptq_n_in);
+  log("%s  acceptq: max=%d n=%d accepted=%d", pf,
+      tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
   log("%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
 #if CI_CFG_FD_CACHING
   log("%s  epcache: n=%d cache=%s pending=%s", pf, ni->state->epcache_n,
@@ -695,10 +694,11 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
 #if CI_CFG_STATS_TCP_LISTEN
   {
     ci_tcp_socket_listen_stats* s = &tls->stats;
-    log("%s  l_overflow=%d l_no_synrecv=%d a_overflow=%d a_no_sock=%d "
-        "a_loop2_closed=%d ack_rsts=%d os=%d",
+    log("%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d",
 	pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
-	s->n_acceptq_overflow, s->n_acceptq_no_sock, s->n_accept_loop2_closed,
+	s->n_acceptq_overflow, s->n_acceptq_no_sock);
+    log("%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d",
+	pf, s->n_accept_loop2_closed, s->n_accept_no_fd,
 	s->n_acks_reset, s->n_accept_os);
   }
 #endif
@@ -782,7 +782,11 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
       "ooo=%d", pf, ts->retransmits, ts->dup_acks, stats.rtos,
       stats.fast_recovers, stats.rx_seq_errs, stats.rx_ack_seq_errs,
       stats.rx_ooo_pkts, stats.rx_ooo_fill);
-  log("%s  tx_nomac=%u", pf, stats.tx_nomac_defer);
+  log("%s  tx_nomac=%u tx_msg_warm_try=%u tx_msg_warm=%u", pf,
+      stats.tx_nomac_defer, stats.tx_msg_warm_try, stats.tx_msg_warm);
+  log("%s  tmpl: alloc=%u send_fast=%u send_slow=%u active=%u", pf,
+      stats.tx_tmpl_alloc, stats.tx_tmpl_send_fast, stats.tx_tmpl_send_slow,
+      stats.tx_tmpl_active);
 
 #ifndef __KERNEL__
 # define fmt_timer(_b, _l, _n, name, field)                             \
@@ -804,7 +808,7 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   fmt_timer(buf, LINE_LEN, n, delack, delack_tid);
   fmt_timer(buf, LINE_LEN, n, zwin, zwin_tid);
   fmt_timer(buf, LINE_LEN, n, kalive, kalive_tid);
-  fmt_timer(buf, LINE_LEN, n, pmtu, s.pkt.pmtus.tid);
+  fmt_timer(buf, LINE_LEN, n, pmtu, pmtus.tid);
   log("%s", buf);
 }
 

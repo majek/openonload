@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,12 +58,12 @@ ci_inline int try_get_hz(const char* line, unsigned* cpu_khz_out)
 
 ci_inline int try_get_hz(const char* line, unsigned* cpu_khz_out)
 {
-  float f;
+  long l;
 
-  if( sscanf(line, "clock           : %f", &f) != 1 )  
+  if( sscanf(line, "timebase           : %lu", &l) != 1 )  
   	return 0;
 
-  *cpu_khz_out = (unsigned) (f * 1000.0);
+  *cpu_khz_out = (unsigned) (l / 1000);
   return 1;
 }
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -136,7 +136,7 @@ static void ci_udp_clr_filters(citp_socket* ep)
 {
   ci_udp_state* us = SOCK_TO_UDP(ep->s);
   if( UDP_GET_FLAG(us, CI_UDPF_FILTERED) ) {
-    ci_tcp_ep_clear_filters(ep->netif, S_SP(us), 0 );
+    ci_tcp_ep_clear_filters(ep->netif, S_SP(us));
     UDP_CLR_FLAG(us, CI_UDPF_FILTERED);
   }
 }
@@ -287,8 +287,7 @@ static void ci_udp_set_raddr(ci_udp_state* us, unsigned raddr_be32,
 
 
 static int
-ci_udp_disconnect(citp_socket* ep, ci_udp_state* us, ci_fd_t os_sock
-                  CI_ARG_WIN( const struct sockaddr_in* sin ) )
+ci_udp_disconnect(citp_socket* ep, ci_udp_state* us, ci_fd_t os_sock)
 {
   int rc;
 
@@ -330,12 +329,11 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
   CHECK_UEP(ep);
 
   UDP_CLR_FLAG(us, CI_UDPF_EF_SEND);
-  CI_PMTU_TIMER_KILL(ep->netif, &us->s.pkt.pmtus);
   us->s.rx_errno = 0;
   us->s.tx_errno = 0;           
 
   if( IS_DISCONNECTING(serv_sin) ) {
-    rc = ci_udp_disconnect(ep, us, os_sock CI_ARG_WIN(serv_sin) );
+    rc = ci_udp_disconnect(ep, us, os_sock);
     goto out;
   }
 #if CI_CFG_FAKE_IPV6
@@ -371,8 +369,6 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
     }
     break;
   }
-
-  ci_pmtu_set(ep->netif, &us->s.pkt.pmtus, us->s.pkt.mtu);
 
   if( dst_be32 == INADDR_ANY_BE32 || serv_sin->sin_port == 0 ) {
     LOG_UC(log(FNT_FMT "%s:%d - route via OS socket",
@@ -596,11 +592,9 @@ void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id)
   LOG_UC(ci_log("ci_udp_all_fds_gone: "NTS_FMT, 
 		NTS_PRI_ARGS(netif, us)));
 
-  ci_ip_timer_clear(netif, &us->s.pkt.pmtus.tid);
-  ci_ip_timer_clear(netif, &us->ephemeral_pkt.pmtus.tid);
   if( UDP_GET_FLAG(us, CI_UDPF_FILTERED) ) {
     UDP_CLR_FLAG(us, CI_UDPF_FILTERED);
-    ci_tcp_ep_clear_filters(netif, S_SP(us), 0);
+    ci_tcp_ep_clear_filters(netif, S_SP(us));
   }
   ci_udp_recv_q_drop(netif, &us->recv_q);
   ci_ni_dllist_remove(netif, &us->s.reap_link);

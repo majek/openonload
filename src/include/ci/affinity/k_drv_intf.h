@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,11 +56,6 @@
  * core-to-queue mapping has not been initialised.
  */
 extern int sfc_affinity_cpu_to_channel(int ifindex, int cpu);
-
-/* Returns the number of queues available on the given interface.  Returns
- * -1 if ifindex is not known to sfc_affinity.
- */
-extern int sfc_affinity_num_queues(int ifindex);
 
 
 #endif  /* __CI_AFFINITY_K_DRV_INTF_H__ */

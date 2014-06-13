@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -193,6 +193,43 @@ int onload_set_stackname(enum onload_stackname_who who,
   }
 
   CITP_UNLOCK(&citp_ul_lock);
+  return 0;
+}
+
+
+int onload_stackname_save(void)
+{
+  struct oo_stackname_state* state = oo_stackname_thread_get();
+  struct saved_stacks* ss = calloc(1, sizeof(*ss));
+  if( ! ss )
+    return -ENOMEM;
+
+  ss->who = state->who;
+  ss->context = state->context;
+  memcpy(ss->stackname, state->stackname, CI_CFG_STACK_NAME_LEN);
+  ss->next = state->saved_stacks_head;
+  state->saved_stacks_head = ss;
+
+  return 0;
+}
+
+
+int onload_stackname_restore(void)
+{
+  int rc;
+  struct oo_stackname_state* state = oo_stackname_thread_get();
+
+  if( state->saved_stacks_head == NULL )
+    return -EINVAL;
+
+  if( ! (rc = onload_set_stackname(state->saved_stacks_head->who,
+                                   state->saved_stacks_head->context,
+                                   state->saved_stacks_head->stackname)) )
+    return rc;
+
+  struct saved_stacks* to_del = state->saved_stacks_head;
+  state->saved_stacks_head = state->saved_stacks_head->next;
+  free(to_del);
   return 0;
 }
 

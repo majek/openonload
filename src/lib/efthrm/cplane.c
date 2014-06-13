@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -162,8 +162,8 @@
 #undef DO
 #endif
 
-#define DO(_x) _x
-#define IGNORE(_x)
+#define DO(_x...) _x
+#define IGNORE(_x...)
 
 /* To turn on compile time debugging uncomment one or more of these defines */
 
@@ -2646,7 +2646,7 @@ cicp_hwport_kmib_ctor(cicp_hwport_kmib_t **out_hwportt)
 	    
 	for (hwport=0; hwport < CI_HWPORT_ID_MAX; hwport++)
 	{
-	    cicp_hwport_row_t *row = &hwportt->nic[hwport].port;
+	    cicp_hwport_row_t *row = &hwportt->nic[hwport];
 	    memset(&hwportt->nic[hwport], 0, sizeof(hwportt->nic[hwport]));
 	    cicp_hwport_row_free(row);
 	}
@@ -2698,7 +2698,7 @@ cicp_hwport_add_nic(cicp_handle_t *control_plane, ci_hwport_id_t hwport)
 
     CICP_LOCK_BEGIN(control_plane)
 	
-	hwportt->nic[hwport].port.max_mtu = max_mtu;
+	hwportt->nic[hwport].max_mtu = max_mtu;
 
         /* update the forwarding cache correspondingly */
         cicp_fwdinfo_hwport_add_nic(control_plane, hwport, max_mtu);
@@ -2734,7 +2734,7 @@ cicp_hwport_remove_nic(cicp_handle_t *control_plane, ci_hwport_id_t hwport)
 
     CICP_LOCK_BEGIN(control_plane);
     
-    cicp_hwport_row_free(&hwportt->nic[hwport].port);
+    cicp_hwport_row_free(&hwportt->nic[hwport]);
     
     /* update the forwarding cache correspondingly */
     cicp_fwdinfo_hwport_remove_nic(control_plane, hwport);
@@ -2750,12 +2750,209 @@ cicp_hwport_remove_nic(cicp_handle_t *control_plane, ci_hwport_id_t hwport)
 
 
 /*****************************************************************************
+ *          PMTU MIB                                                *
+ *****************************************************************************/
+
+int cicp_pmtu_kmib_ctor(cicp_pmtu_kmib_t **p_pmtu_table, int rows_max)
+{
+  cicp_pmtu_kmib_t *pmtu_table = kmalloc(sizeof(*pmtu_table), GFP_KERNEL);
+  if( pmtu_table == NULL )
+    return -ENOMEM;
+  pmtu_table->entries = vmalloc(rows_max * sizeof(cicp_pmtu_row_t));
+  if( pmtu_table->entries == NULL ) {
+    kfree(pmtu_table);
+    return -ENOMEM;
+  }
+
+  memset(pmtu_table->entries, 0, rows_max * sizeof(cicp_pmtu_row_t));
+  pmtu_table->rows_max = rows_max;
+  pmtu_table->used_rows_max = 0;
+  *p_pmtu_table = pmtu_table;
+  return 0;
+}
+void
+cicp_pmtu_kmib_dtor(cicp_mibs_kern_t *cp, cicp_pmtu_kmib_t **p_pmtu_table)
+{
+  cicp_pmtu_kmib_t *pmtu_table = *p_pmtu_table;
+  vfree(pmtu_table->entries);
+  kfree(pmtu_table);
+  *p_pmtu_table = NULL;
+}
+
+
+/*****************************************************************************
  *          oo_timesync state                                                *
  *****************************************************************************/
 
 #ifdef __KERNEL__
 /* Onload module parameter:  jiffies between synchronisation times */
 extern int timesync_period;
+
+
+/* Maintains an estimate of cpu frequency.  WARNING!!! You need to use
+ * oo_timesync_wait_for_cpu_khz_to_stabilize() before reading this.
+ * Note that this can take a long time to stabilize (order of ms).
+ * Note that it is probably not a good idea to block on it too early
+ * e.g. at module initialisation.
+ */
+unsigned oo_timesync_cpu_khz;
+
+
+ci_workitem_t stabilize_cpu_khz_wi;
+
+/* Internal, do not use!  Use
+ *  oo_timesync_wait_for_cpu_khz_to_stabilize() instead.  Signal sent
+ *  when equal to 2. */
+static int signal_cpu_khz_stabilized = 0;
+static struct timer_list timer_node;
+
+
+DECLARE_COMPLETION(cpu_khz_stabilized_completion);
+
+
+/* Look at comments above oo_timesync_cpu_khz */
+void oo_timesync_wait_for_cpu_khz_to_stabilize(void)
+{
+  wait_for_completion(&cpu_khz_stabilized_completion);
+}
+
+
+#if BITS_PER_LONG != 64
+/* The following division functions are a simplied version of the
+ * algorithm found in
+ * http://www.hackersdelight.org/HDcode/newCode/divDouble.c.txt */
+
+/* Divide 64 bits dividend and 32 bits divisor and return 32 bits
+ * quotient */
+static ci_uint32 div_64dd_32ds_32qt(ci_uint64 dividend, ci_uint32 divisor)
+{
+  ci_uint32 low, high, quotient = 0, c = 32;
+  ci_uint64 d = (ci_uint64)divisor << 31;
+
+  low = dividend & 0xffffffff;
+  high = dividend >> 32;
+
+  while( dividend > 0xffffffff ) {
+    quotient <<= 1;
+    if( dividend >= d ) {
+      dividend -= d;
+      quotient |= 1;
+    }
+    d >>= 1;
+    c--;
+  }
+  quotient <<= c;
+  if( ! dividend )
+    return quotient;
+  low = dividend;
+  return quotient | (low / divisor);
+}
+
+
+/* Divide 64 bits dividend and 32 bits divisor and return 64 bits
+ * quotient */
+static ci_uint64 div_64dd_32ds_64qt(ci_uint64 dividend, ci_uint32 divisor)
+{
+  ci_uint32 low, high, high1;
+
+  low = dividend & 0xffffffff;
+  high = dividend >> 32;
+
+  if( ! high )
+    return low / divisor;
+
+  high1 = high % divisor;
+  high /= divisor;
+  low = div_64dd_32ds_32qt((ci_uint64)high1 << 32 | low, divisor);
+
+  return (ci_uint64)high << 32 | low;
+}
+#endif
+
+
+/* Divide 64 bits dividend and 64 bits divisor and return 64 bits
+ * quotient */
+static ci_uint64 div_64dd_64ds_64qt(ci_uint64 dividend, ci_uint64 divisor)
+{
+#if BITS_PER_LONG == 64
+  return dividend / divisor;
+#else
+  ci_uint32 high;
+  ci_uint64 quotient;
+  int n;
+
+  high = divisor >> 32;
+  if( ! high )
+    return div_64dd_32ds_64qt(dividend, divisor);
+
+  n = 1 + fls(high);
+  quotient = div_64dd_32ds_64qt(dividend >> n, divisor >> n);
+
+  if( quotient != 0 )
+    quotient--;
+  if( (dividend - quotient * divisor) >= divisor )
+    quotient++;
+  return quotient;
+#endif
+}
+
+
+static void oo_timesync_stabilize_cpu_khz(struct oo_timesync* oo_ts)
+{
+  static int cpu_khz_warned = 0;
+
+  /* Want at least two data points in oo_ts (oo_timesync_update called
+   * twice) before computing cpu_khz */
+  if( signal_cpu_khz_stabilized == 0 ) {
+    ++signal_cpu_khz_stabilized;
+    return;
+  }
+
+  /* Current oo_timesync implementation guarantees smoothed_ns <
+   * 16*(10**10).  uint64 will give us at least 10**18.  If
+   * smoothed_ticks is in same order as smoothed_ns, then we can
+   * multiply by 10**6 without dange of overflow.  This is better than
+   * dividing first as that can introduce large errors when
+   * smoothed_ticks is in the same order as smoothed_ns.  Note: we
+   * cannot use doubles in kernel. */
+  oo_timesync_cpu_khz = div_64dd_64ds_64qt((ci_uint64)oo_ts->smoothed_ticks *
+                                           1000000, oo_ts->smoothed_ns);
+
+  /* Warn if the oo_timesync_cpu_khz computation over or under flowed. */
+  if( oo_timesync_cpu_khz < 400000 || oo_timesync_cpu_khz > 10000000 )
+    if( ! cpu_khz_warned ) {
+      cpu_khz_warned = 1;
+      ci_log("WARNING: cpu_khz computed to be %d which may not be correct\n",
+             oo_timesync_cpu_khz);
+    }
+
+  if( signal_cpu_khz_stabilized == 1 ) {
+    complete_all(&cpu_khz_stabilized_completion);
+    ++signal_cpu_khz_stabilized;
+  }
+}
+
+
+static void stabilize_cpu_khz_wi_fn_cont(unsigned long unused)
+{
+  oo_timesync_update(&CI_GLOBAL_CPLANE);
+  /* If oo_timesync_update called too soon.  Start timer again. */
+  if( signal_cpu_khz_stabilized != 2 )
+    mod_timer(&timer_node, jiffies + HZ / 2);
+}
+
+
+static void stabilize_cpu_khz_wi_fn(void* unused)
+{
+  /* Need two data points sufficiently (0.5 sec) far apart. */
+  oo_timesync_update(&CI_GLOBAL_CPLANE);
+  init_timer(&timer_node);
+  timer_node.expires = jiffies + HZ / 2;
+  timer_node.data = 0;
+  timer_node.function = &stabilize_cpu_khz_wi_fn_cont;
+  add_timer(&timer_node);
+}
+
 
 static int oo_timesync_ctor(cicp_mibs_kern_t *mibs)
 {
@@ -2783,6 +2980,9 @@ static int oo_timesync_ctor(cicp_mibs_kern_t *mibs)
     oo_ts->update_jiffies = jiffies - 1;
 
     umibs->oo_timesync = oo_ts;
+
+    ci_workitem_init(&stabilize_cpu_khz_wi, stabilize_cpu_khz_wi_fn, NULL);
+    ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &stabilize_cpu_khz_wi);
     return 0;
   } 
   else
@@ -2896,6 +3096,8 @@ void oo_timesync_update(cicp_handle_t* control_plane)
         ++oo_ts->generation_count;
     }
     CICP_LOCK_END;
+
+    oo_timesync_stabilize_cpu_khz(oo_ts);
   }
 }
 #endif
@@ -3620,6 +3822,7 @@ cicp_ctor(cicp_mibs_kern_t *cp, unsigned max_macs,
     int rc_llap     = cicp_llap_kmib_ctor(&cp->llap_table, 
                                           max_layer2_interfaces);
     int rc_hwport   = cicp_hwport_kmib_ctor(&cp->hwport_table);
+    int rc_pmtu     = cicp_pmtu_kmib_ctor(&cp->pmtu_table, max_routes);
     int rc_sync     = cicpos_ctor(cp);
     int rc_prot     = cicppl_ctor(cp);
 
@@ -3650,6 +3853,9 @@ cicp_ctor(cicp_mibs_kern_t *cp, unsigned max_macs,
     } else if (0 != rc_hwport) {
       rc = rc_hwport;
       where = "kernel-mode Hardware Port MIB";
+    } else if (0 != rc_pmtu) {
+      rc = rc_pmtu;
+      where = "kernel-mode PMTU MIB";
     } else if (0 != rc_sync) {
       rc = rc_sync;
       where = "O/S Synchronization module";
@@ -3697,6 +3903,7 @@ cicp_dtor(cicp_mibs_kern_t *cp)
     cicppl_dtor(cp);
 	
     /* destroy kernel-mode information */
+    cicp_pmtu_kmib_dtor(cp, &cp->pmtu_table);
     cicp_mac_kmib_dtor(cp, &cp->mac_table, cp->user.mac_utable);
     cicp_route_kmib_dtor(&cp->route_table);
     cicp_ipif_kmib_dtor(&cp->ipif_table);
@@ -3712,7 +3919,10 @@ cicp_dtor(cicp_mibs_kern_t *cp)
     /* no more locking from now on */
     cicp_lock_dtor(cp);
 
-    /* just making sure... this shouldn't be needed */
+    /* ensure the timer is gone */
+    signal_cpu_khz_stabilized = 2;
+    ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+    del_timer(&timer_node);
     ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
 }
 
@@ -3786,10 +3996,11 @@ cicpos_mac_set(cicp_handle_t *control_plane,
 	       "before initialization");
 	return ENOMEM;
     } else
-    {   typedef enum {
-	    do_nothing, do_update, do_set, do_reject, do_fail
-        } debug_cases_t;
+    {
 	DEBUGMIBMAC(
+	    typedef enum {
+		do_nothing, do_update, do_set, do_reject, do_fail
+	    } debug_cases_t;
 	    debug_cases_t what = do_nothing;
 	    int kept = /*false*/0;
 	    int row_rc = 0;
@@ -4925,6 +5136,7 @@ cicpos_route_update(cicp_handle_t      *control_plane,
                     ci_ip_addr_t        pref_source,
                     ci_ifid_t           ifindex,
 		    ci_mtu_t            mtu,
+                    ci_uint32           flags,
 		    cicpos_route_row_t *ref_sync)
 {   cicp_fwd_row_t *row;
     cicp_route_kernrow_t *krow;
@@ -4964,14 +5176,21 @@ cicpos_route_update(cicp_handle_t      *control_plane,
 	    changed = TRUE;
 	}
 	row->flags ^= CICP_FLAG_ROUTE_MTU;
+	if (mtu != 0)
+	    row->mtu = mtu;
     }
-    else if ( (row->flags & CICP_FLAG_ROUTE_MTU) && mtu != row->mtu)
+    /* Fixme: we should use mtu != row->mtu, but in this case UDP PMTU
+     * discovery does not work for linux < 3.6.  Route cache has incorrect
+     * entries with large mtu on such old kernels. */
+    else if ( (row->flags & CICP_FLAG_ROUTE_MTU) && mtu != row->mtu &&
+              (mtu < row->mtu || (flags & CICP_FLAG_ROUTE_MTU)) )
     {   if (!changed)
 	{   ci_verlock_write_start(&routet->version);
 	    changed = TRUE;
 	}
 	row->mtu = mtu;
     }
+
 
     if (!ci_scope_eq(&row->scope, &scope))
     {   if (!changed)
@@ -5035,6 +5254,7 @@ cicpos_route_import(cicp_handle_t      *control_plane,
 		    ci_ip_addr_t        pref_source,
 		    ci_ifid_t           ifindex,
 		    ci_mtu_t            mtu,
+		    ci_uint32           flags,
 		    cicpos_route_row_t *ref_sync,
                     int /* bool */      nosort)
 {   const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
@@ -5104,7 +5324,7 @@ cicpos_route_import(cicp_handle_t      *control_plane,
 					      routet, kroutet, rowid,
                                               scope, next_hop_ip, tos, metric, 
                                               pref_source, ifindex, mtu,
-                                              ref_sync);
+                                              flags, ref_sync);
             if (changed)
 	      cicpos_fwdinfo_route_import(control_plane, dest_ipset, dest_ip,
 	                                  &next_hop_ip, &pref_source);
@@ -5184,6 +5404,7 @@ cicp_route_import(cicp_handle_t      *control_plane,
     return cicpos_route_import(control_plane, out_rowid, dest_ip, dest_ipset,
 			       scope, next_hop_ip, tos, metric, pref_source,
 			       ifindex, mtu,
+			       mtu == 0 ? 0 : CICP_FLAG_ROUTE_MTU,
 			       /*sync*/ NULL, /*nosort*/CI_FALSE);
 }
 
@@ -5282,6 +5503,92 @@ cicpos_route_delete(cicp_handle_t     *control_plane,
 
 
 
+/*----------------------------------------------------------------------------
+ * PMTU MIB
+ *---------------------------------------------------------------------------*/
+
+
+static void
+cicpos_pmtu_remove_locked(cicp_handle_t *control_plane,
+                          ci_ip_addr_net_t net_ip)
+{
+  const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
+  cicp_pmtu_kmib_t *pmtu_table = mibs->pmtu_table;
+  int i;
+
+  for( i = 0; i < pmtu_table->used_rows_max; i++ )
+    if( pmtu_table->entries[i].net_ip == net_ip )
+      cicp_pmtu_row_free(&pmtu_table->entries[i]);
+}
+
+void
+cicpos_pmtu_remove(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip)
+{
+  CICP_LOCK_BEGIN(control_plane)
+    cicpos_pmtu_remove_locked(control_plane, net_ip);
+  CICP_LOCK_END
+}
+
+void
+cicpos_pmtu_add(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip)
+{
+  const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
+  cicp_pmtu_kmib_t *pmtu_table = mibs->pmtu_table;
+  int i, free = -1;
+
+  CICP_LOCK_BEGIN(control_plane)
+
+    for( i = 0; i < pmtu_table->rows_max; i++ ) {
+      if( pmtu_table->entries[i].net_ip == net_ip )
+        goto unlock;
+      if( free == -1 && !cicp_pmtu_row_allocated(&pmtu_table->entries[i]) )
+        free = i;
+    }
+
+    if( free != -1 ) {
+      pmtu_table->entries[free].net_ip= net_ip;
+      pmtu_table->entries[free].timestamp = jiffies;
+      if( free >= pmtu_table->used_rows_max )
+        pmtu_table->used_rows_max = free + 1;
+    }
+    else {
+      OO_DEBUG_FWD(DPRINTF(CODEID": no space in pmtu table: %d rows, "
+                           "can't add "CI_IP_PRINTF_FORMAT,
+                           pmtu_table->rows_max,
+                           CI_IP_PRINTF_ARGS(&net_ip)));
+    }
+
+unlock:
+    ;
+  CICP_LOCK_END
+}
+
+
+int
+cicpos_pmtu_check(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip,
+                  ci_ifid_t ifindex, ci_mtu_t pmtu)
+{
+  int rc = -1;
+  const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
+  cicp_pmtu_kmib_t *pmtu_table = mibs->pmtu_table;
+  cicp_llap_row_t *llap_row;
+
+  CICP_LOCK_BEGIN(control_plane)
+    llap_row = cicp_llap_find_ifid(mibs->llap_table, ifindex);
+    if( pmtu != 0 && llap_row != NULL && pmtu < llap_row->mtu ) {
+      int i;
+      for( i = 0; i < pmtu_table->used_rows_max; i++ )
+        if( pmtu_table->entries[i].net_ip == net_ip ) {
+          rc = i;
+          break;
+        }
+      if( i == pmtu_table->rows_max )
+        rc = -1;
+    }
+  CICP_LOCK_END
+
+  return rc;
+}
 
 
 
@@ -6773,6 +7080,14 @@ cicpos_llap_update(cicp_llap_kmib_t *llapt,
     
     ci_assert(NULL != llapt);
     
+    /* RFC 1191: A host MUST never reduce its estimate of the Path MTU
+     * below 68 octets.
+     * Linux uses 68 in inetdev_valid_mtu(). */
+    if (mtu < 68)
+    {   up = FALSE;
+        mtu = 68;
+    }
+
     if (newrow->mtu != mtu)
     {   change = TRUE;
 	newrow->mtu = mtu;
@@ -6974,7 +7289,7 @@ cicpos_hwport_update(cicp_handle_t *control_plane,
     
     CICP_LOCK_BEGIN(control_plane)
 	
-	hwportt->nic[hwport].port.max_mtu = max_mtu;
+	hwportt->nic[hwport].max_mtu = max_mtu;
 
         /* update the forwarding cache correspondingly */
         cicpos_fwdinfo_hwport_update(control_plane, hwport, max_mtu);
@@ -7039,8 +7354,16 @@ cicpos_parse_state_alloc(cicp_handle_t *control_plane)
   if( session->imported_llap == NULL ) 
     goto out3;
 
+  session->imported_pmtu = 
+    kmalloc(CI_BITSET_SIZE(CICP_MIBS(control_plane)->pmtu_table->rows_max),
+            GFP_ATOMIC);
+  if( session->imported_pmtu == NULL ) 
+    goto out4;
+
   return session;
 
+ out4:
+  kfree(session->imported_pmtu);
  out3:
   kfree(session->imported_ipif);
  out2:
@@ -7056,6 +7379,7 @@ cicpos_parse_state_free(cicpos_parse_state_t *session)
   kfree(session->imported_route);
   kfree(session->imported_ipif);
   kfree(session->imported_llap);
+  kfree(session->imported_pmtu);
   kfree(session);
 }
 
@@ -7063,15 +7387,37 @@ extern void
 cicpos_parse_init(cicpos_parse_state_t *session, cicp_handle_t *control_plane)
 {
     session->control_plane = control_plane;
+    session->start_timestamp = jiffies;
     ci_bitset_clear(CI_BITSET_REF(session->imported_route),
 		    CICP_MIBS(control_plane)->route_table->rows_max);
     ci_bitset_clear(CI_BITSET_REF(session->imported_ipif),
 		    CICP_MIBS(control_plane)->ipif_table->rows_max);
     ci_bitset_clear(CI_BITSET_REF(session->imported_llap),
 		    CICP_MIBS(control_plane)->llap_table->rows_max);
+    ci_bitset_clear(CI_BITSET_REF(session->imported_pmtu),
+		    CICP_MIBS(control_plane)->pmtu_table->rows_max);
     session->nosort = CI_FALSE;
     IGNORE(ci_log(CODEID": parse structure given %d entries for MAC table",
 	          cicp_mac_mib_rows(mact));)
+}
+
+static void
+cicpos_pmtu_post_poll(cicpos_parse_state_t *session)
+{
+  const cicp_mibs_kern_t *mibs = CICP_MIBS(session->control_plane);
+  int i;
+  cicp_pmtu_kmib_t *pmtu_table = mibs->pmtu_table;
+  for( i = 0; i < pmtu_table->rows_max; i++ ) {
+    if( cicp_pmtu_row_allocated(&pmtu_table->entries[i]) &&
+        !ci_bitset_in(CI_BITSET_REF(session->imported_pmtu), i) ) {
+      if( pmtu_table->entries[i].timestamp - session->start_timestamp < 0 )
+        cicp_pmtu_row_free(&pmtu_table->entries[i]);
+      else {
+        /* make sure we have turned around: make timestamp fresh */
+        pmtu_table->entries[i].timestamp = session->start_timestamp;
+      }
+    }
+  }
 }
 
 extern void 
@@ -7082,11 +7428,14 @@ cicpos_route_post_poll(cicpos_parse_state_t *session)
   cicp_route_kmib_t *kroutet = mibs->route_table;
   cicp_route_rowid_t rowid;
 
+  CICP_LOCK_BEGIN(session->control_plane);
+
+  cicpos_pmtu_post_poll(session);
+
   if (!session->nosort) {
     /* May be, we added some routes with nosort and removed nosort
      * afterwards. In this case, we should sort all routes */
-    (void)cicp_route_sort(routet, kroutet, /*changed*/TRUE);
-    return;
+    goto sort;
   }
 
   for (rowid = 0; 
@@ -7098,7 +7447,9 @@ cicpos_route_post_poll(cicpos_parse_state_t *session)
     }
   }
   (void)cicpos_route_compress(routet, kroutet, /*changed*/TRUE);
+sort:
   (void)cicp_route_sort(routet, kroutet, /*changed*/TRUE);
+  CICP_LOCK_END;
 }
 
 extern void 
@@ -7136,8 +7487,6 @@ cicpos_ipif_post_poll(cicpos_parse_state_t *session)
   if (!session->nosort)
     return;
 
-  CICP_LOCK_BEGIN(session->control_plane);
-
   for (rowid = 0; 
        rowid < ipift->rows_max && 
        cicp_ipif_row_allocated(&ipift->ipif[rowid]); 
@@ -7147,8 +7496,6 @@ cicpos_ipif_post_poll(cicpos_parse_state_t *session)
     }
   }
   (void)cicpos_ipif_compress(ipift);
-
-  CICP_LOCK_END;
 }
 
 

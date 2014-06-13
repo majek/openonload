@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,6 +36,8 @@
 
 #include <ci/efhw/checks.h>
 
+/* fixme kostik: proper place should be selected */
+#include "bitfield.h"
 
 /*----------------------------------------------------------------------------
  * Falcon bug workarounds
@@ -184,20 +186,10 @@ static inline uint64_t ci_dma_addr_to_u46(uint64_t src_dma_addr)
 
 
 /* TX descriptor for both physical and virtual packet transfers */
-typedef union {
-	ci_uint32 dword[2];
-#if defined(CI_HAVE_INT64) && CI_MY_BYTE_ORDER == CI_LITTLE_ENDIAN
-	/* NB. Not an endian-friendly way of doing things. */
-	ci_uint64 qword[1];
-#endif
-} falcon_dma_tx_buf_desc;
-
+typedef ci_qword_t falcon_dma_tx_buf_desc;
 
 /* RX descriptor for virtual packet transfers */
-typedef struct {
-	ci_uint32 dword[1];
-} falcon_dma_rx_buf_desc;
-
+typedef ci_dword_t falcon_dma_rx_buf_desc;
 
 /*----------------------------------------------------------------------------
  *
@@ -206,7 +198,7 @@ typedef struct {
  *---------------------------------------------------------------------------*/
 
 #ifndef CI_DMA_TX_DEBUG_REG_ACCESS
-#define CI_DMA_TX_DEBUG_REG_ACCESS(x)
+#define CI_DMA_TX_DEBUG_REG_ACCESS(x) x
 #endif
 
 
@@ -218,8 +210,8 @@ __falcon_dma_tx_calc_ip_buf(unsigned buf_id,
 			    int port, int frag, falcon_dma_tx_buf_desc * desc)
 {
 
-	CI_DMA_TX_DEBUG_REG_ACCESS(ci_log("dma_tx_calc_ip_buf: %x:%x %d:%d:%d",
-					  buf_id, buf_ofs, bytes, port, frag));
+	CI_DMA_TX_DEBUG_REG_ACCESS(ci_log("ul: dma_tx_calc_ip_buf: %x:%x %d:%d:%d",
+                                    buf_id, buf_ofs, bytes, port, frag));
 
 	__DW2CHCK(TX_USR_PORT);
 	__DW2CHCK(TX_USR_CONT);
@@ -235,15 +227,15 @@ __falcon_dma_tx_calc_ip_buf(unsigned buf_id,
 
 	ci_assert(desc);
 
-	desc->dword[1] = ((port << __DW2(TX_USR_PORT_LBN)) |
-			  (frag << __DW2(TX_USR_CONT_LBN)) |
-			  (bytes << __DW2(TX_USR_BYTE_CNT_LBN)) |
-			  (__HIGH(buf_id, TX_USR_BUF_ID)));
-	desc->dword[0] = ((__LOW(buf_id, TX_USR_BUF_ID)) |
-			  (buf_ofs << TX_USR_BYTE_OFS_LBN));
+	CI_POPULATE_QWORD_5(*desc,
+			    TX_USR_PORT, port,
+			    TX_USR_CONT, frag,
+			    TX_USR_BYTE_CNT, bytes,
+			    TX_USR_BUF_ID, buf_id,
+			    TX_USR_BYTE_OFS, buf_ofs);
 
-	CI_DMA_TX_DEBUG_REG_ACCESS(ci_log("dma_tx_calc_ip_buf: %08x %08x",
-					  desc->dword[1], desc->dword[0]));
+	CI_DMA_TX_DEBUG_REG_ACCESS(ci_log("ul dma_tx_calc_ip_buf: "CI_QWORD_FMT,
+                                    CI_QWORD_VAL(*desc)));
 }
 
 static inline void
@@ -311,16 +303,15 @@ falcon_dma_tx_calc_ip_phys(dma_addr_t src_dma_addr,
 
 	ci_assert(desc);
 
-	desc->dword[1] = ((port << __DW2(TX_KER_PORT_LBN)) |
-			  (frag << __DW2(TX_KER_CONT_LBN)) |
-			  (bytes << __DW2(TX_KER_BYTE_CNT_LBN)) |
-			  (region << __DW2(TX_KER_BUF_REGION_LBN)) |
-			  (__HIGH(src, TX_KER_BUF_ADR)));
+	CI_POPULATE_QWORD_5(*desc,
+			    TX_KER_PORT, port,
+			    TX_KER_CONT, frag,
+			    TX_KER_BYTE_CNT, bytes,
+			    TX_KER_BUF_REGION, region,
+			    TX_KER_BUF_ADR, src);
 
-	desc->dword[0] = __LOW(src, TX_KER_BUF_ADR);
-
-	CI_DMA_TX_DEBUG_REG_ACCESS(ci_log("dma_tx_calc_ip_phys: %08x %08x",
-					  desc->dword[1], desc->dword[0]));
+	CI_DMA_TX_DEBUG_REG_ACCESS(ci_log("ul: dma_tx_calc_ip_phys: "CI_QWORD_FMT,
+                                    CI_QWORD_VAL(*desc)));
 
 }
 
@@ -332,7 +323,7 @@ falcon_dma_tx_calc_ip_phys(dma_addr_t src_dma_addr,
  *---------------------------------------------------------------------------*/
 
 #ifndef CI_DMA_RX_DEBUG_REG_ACCESS
-#define CI_DMA_RX_DEBUG_REG_ACCESS(x)
+#define CI_DMA_RX_DEBUG_REG_ACCESS(x) x
 #endif
 
 
@@ -341,8 +332,8 @@ static inline void
 __falcon_dma_rx_calc_ip_buf(unsigned buf_id, unsigned buf_ofs,
 			    falcon_dma_rx_buf_desc * desc)
 {
-	CI_DMA_RX_DEBUG_REG_ACCESS(ci_log("dma_rx_calc_ip_buf: %x:%x",
-					  buf_id, buf_ofs));
+	CI_DMA_RX_DEBUG_REG_ACCESS(ci_log("ul: dma_rx_calc_ip_buf: %x:%x",
+                                    buf_id, buf_ofs));
 
 	/* check alignment of buffer offset and pack */
 	ci_assert((buf_ofs & 0x1) == 0);
@@ -356,11 +347,12 @@ __falcon_dma_rx_calc_ip_buf(unsigned buf_id, unsigned buf_ofs,
 
 	ci_assert(desc);
 
-	desc->dword[0] = ((buf_ofs << RX_USR_2BYTE_OFS_LBN) |
-			  (buf_id << RX_USR_BUF_ID_LBN));
+	CI_POPULATE_DWORD_2(*desc,
+			   RX_USR_2BYTE_OFS, buf_ofs,
+			   RX_USR_BUF_ID, buf_id);
 
-	CI_DMA_RX_DEBUG_REG_ACCESS(ci_log("dma_rx_calc_ip_buf: %08x",
-					  desc->dword[0]));
+	CI_DMA_RX_DEBUG_REG_ACCESS(ci_log("ul: dma_rx_calc_ip_buf: "CI_DWORD_FMT,
+                                    CI_DWORD_VAL(*desc)));
 }
 
 static inline void

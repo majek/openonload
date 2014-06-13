@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,7 @@
 #include "efrm_internal.h"
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/vf_resource_private.h>
+#include <ci/efrm/pd.h>
 
 struct efrm_vf_nic_params {
 	struct list_head free_list; /* List of free VFs */
@@ -159,6 +160,7 @@ efrm_vf_resource_alloc(struct efrm_client *client,
 		&efrm_vf_manager->nic[client->nic->index];
 	struct efrm_vf *vf;
 	int rc = 0;
+	struct efrm_pd_owner_ids *owner_ids;
 
 	if (efrm_vf_manager->vf_count != nic->vf_count) {
 		EFRM_ERR("%s: not all VFs for NIC %d are discovered yet: "
@@ -208,6 +210,16 @@ efrm_vf_resource_alloc(struct efrm_client *client,
 
 	efrm_client_add_resource(client, &vf->rs);
 
+	owner_ids = efrm_pd_owner_ids_ctor(
+		/* On falcon owner_ids are global, so base this block on the
+		 * base vi id to avoid overlap.
+		 */
+		client->nic->devtype.arch == EFHW_ARCH_EF10 ? 1 : vf->vi_base,
+		(1 << vf->vi_scale));
+	if (!owner_ids)
+		return -ENOMEM;
+	vf->owner_ids = owner_ids;
+
 	EFRM_TRACE("NIC %d VF %d allocated",
 		   client->nic->index, vf->pci_dev_fn);
 	*vf_out = vf;
@@ -228,6 +240,7 @@ efrm_vf_resource_free(struct efrm_vf *vf)
 	list_add(&vf->link, &efrm_vf_manager->nic[vf->nic_index].free_list);
 	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 	efrm_client_put(vf->rs.rs_client);
+	efrm_pd_owner_ids_dtor(vf->owner_ids);
 }
 
 void efrm_vf_resource_release(struct efrm_vf *vf)

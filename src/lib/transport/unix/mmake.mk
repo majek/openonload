@@ -23,7 +23,9 @@ LIB_SRCS	:=			\
 		sockcall_intercept.c	\
 		onload_ext_intercept.c	\
 		zc_intercept.c          \
+		tmpl_intercept.c	\
 		stackname.c		\
+		stackopt.c		\
 		fdtable.c		\
 		protocol_manager.c	\
 		closed_fd.c		\
@@ -40,11 +42,11 @@ LIB_SRCS	:=			\
 		trampoline.c		\
 		wqlock.c		\
 		poll_select.c		\
-		debug.c
-
+		debug.c                 
 
 MMAKE_OBJ_PREFIX := ci_tp_unix_
 LIB_OBJS	:= $(LIB_SRCS:%.c=$(MMAKE_OBJ_PREFIX)%.o)
+LIB_OBJS	+= $(MMAKE_OBJ_PREFIX)vfork_intercept.o
 
 ifneq ($(NO_TRAMPOLINE),1)
 LIB_OBJS	+= $(MMAKE_OBJ_PREFIX)trampoline_asm.o

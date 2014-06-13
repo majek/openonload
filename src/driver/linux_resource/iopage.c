@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -50,84 +50,6 @@
 #include <ci/efhw/common_sysdep.h> /* for dma_addr_t */
 #include <ci/efrm/debug.h>
 
-int efhw_iopage_alloc(struct efhw_iopage *p)
-{
-	struct page *page;
-
-	/* In non-VF case, we sometimes call this from atomic context. */
-	page = alloc_pages_node(numa_node_id(),
-				(in_atomic() || in_interrupt()) ?
-				GFP_ATOMIC : GFP_KERNEL,
-				0);
-	if (page == NULL)
-		return -ENOMEM;
-	p->kva = (char *)page_address(page);
-
-
-	memset(p->kva, 0, PAGE_SIZE);
-	return 0;
-}
-
-
-void efhw_iopage_free(struct efhw_iopage *p)
-{
-	free_page((unsigned long)p->kva);
-}
-
-
-int efhw_iopage_map(struct pci_dev *pci_dev, struct efhw_iopage *p,
-		    efhw_iommu_domain *vf_domain, unsigned long iova_base)
-{
-	struct device *dev = &pci_dev->dev;
-	struct page *page;
-
-	page = virt_to_page(p->kva);
-
-	if (!vf_domain) {
-		p->dma_addr = dma_map_page(dev, page, 0, PAGE_SIZE,
-					   DMA_BIDIRECTIONAL);
-		if (dma_mapping_error(dev, p->dma_addr)) {
-			EFHW_ERR("%s: ERROR dma_map_page failed", __FUNCTION__);
-			return -ENOMEM;
-		}
-	} else
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-	{
-		int rc;
-
-		p->dma_addr = iova_base;
-		rc = iommu_map(vf_domain, p->dma_addr, page_to_phys(page), 0,
-			       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
-		if (rc) {
-			EFHW_ERR("%s: ERROR iommu_map_page failed (%d)",
-				 __FUNCTION__, rc);
-			return rc;
-		}
-	}
-#else
-	EFRM_ASSERT(0);
-#endif
-	return 0;
-}
-
-void efhw_iopage_unmap(struct pci_dev *pci_dev, struct efhw_iopage *p,
-		       efhw_iommu_domain *vf_domain)
-{
-	struct device *dev = &pci_dev->dev;
-
-	if (!vf_domain)
-		dma_unmap_page(dev, p->dma_addr, PAGE_SIZE, DMA_BIDIRECTIONAL);
-	else {
-#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-		/* NB IOVA is not reused */
-		mutex_lock(&efrm_iommu_mutex);
-		iommu_unmap(vf_domain, p->dma_addr, 0);
-		mutex_unlock(&efrm_iommu_mutex);
-#else
-		EFRM_ASSERT(0);
-#endif
-	}
-}
 
 
 int
@@ -174,10 +96,10 @@ efhw_iopages_alloc(struct pci_dev *pci_dev, struct efhw_iopages *p,
 
 			p->dma_addrs[i] = iova_base;
 			rc = iommu_map(vf_domain, p->dma_addrs[i],
-				       page_to_phys(page), 0,
+				       page_to_phys(page), PAGE_SIZE,
 				       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
 			if (rc) {
-				EFHW_ERR("%s: ERROR iommu_map_page failed (%d)",
+				EFHW_ERR("%s: ERROR iommu_map failed (%d)",
 					 __FUNCTION__, rc);
 				goto fail3;
 			}
@@ -197,7 +119,7 @@ fail3:
 		} else {
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 			mutex_lock(&efrm_iommu_mutex);
-			iommu_unmap(vf_domain, iova_base, 0);
+			iommu_unmap(vf_domain, iova_base, PAGE_SIZE);
 			mutex_unlock(&efrm_iommu_mutex);
 #endif
 		}
@@ -220,7 +142,7 @@ void efhw_iopages_free(struct pci_dev *pci_dev, struct efhw_iopages *p,
 		else {
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 			mutex_lock(&efrm_iommu_mutex);
-			iommu_unmap(vf_domain, p->dma_addrs[i], 0);
+			iommu_unmap(vf_domain, p->dma_addrs[i], PAGE_SIZE);
 			mutex_unlock(&efrm_iommu_mutex);
 #else
 			EFRM_ASSERT(0);

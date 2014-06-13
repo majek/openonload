@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,8 +38,8 @@
 #ifdef OO_CAN_HANDLE_TERMINATION
 
 /* Max number of stacks we can handle in process termination code.
- * Should not exceed 32, because we use uint32 to keep bitmap. */
-#define TERMINATE_STACKS_NUM     16
+ * Should not exceed 64, because we use uint64 to keep bitmap. */
+#define TERMINATE_STACKS_NUM     64
 
 #  define TERM_DEBUG(x...) (void)0
 
@@ -111,8 +111,6 @@ static void efab_zap_other_threads(struct task_struct *p)
 
 static void (*efab_my_zap_other_threads)(struct task_struct *p);
 
-int
-efab_eplock_lock_timeout(ci_netif* ni, signed long timeout_jiffies);
 
 /* Find all stacks in multithreaded application.
  * Should be used together with efab_terminate_(un)lock_all_stacks() */
@@ -189,7 +187,7 @@ efab_terminate_lock_all_stacks(tcp_helper_resource_t *stacks[],
                                int stacks_num)
 {
   int i, tries = 0, found_locked;
-  ci_uint32 get_lock = 0;
+  ci_uint64 get_lock = 0;
   static DEFINE_MUTEX(exit_netifs_lock);
 
   TERM_DEBUG("%s: pid=%d, stacks_num=%d, stacks[0]=%d", __func__,
@@ -211,7 +209,7 @@ efab_terminate_lock_all_stacks(tcp_helper_resource_t *stacks[],
 
   /* Maximum number of tries for all stacks is (MAX_ADD_TRIES + stacks_num).
    * I.e. we try to get lock for each stack, and after that we have 10
-   * additional tries to get locks which were unavalailable at the first
+   * additional tries to get locks which were unavailable at the first
    * pass. */
 #define MAX_ADD_TRIES 10
 
@@ -226,13 +224,13 @@ efab_terminate_lock_all_stacks(tcp_helper_resource_t *stacks[],
   do {
     found_locked = 0;
 
-    TERM_DEBUG("%s: %d get_lock=%x", __FUNCTION__, current->pid, get_lock);
+    TERM_DEBUG("%s: %d get_lock=%llx", __FUNCTION__, current->pid, get_lock);
     for( i = 0; i < stacks_num; i++ ) {
-      /* We try to get lock for 50 ms, <=16 stacks, <=26 tries: <=1.3s. */
+      /* We try to get lock for 50 ms, <=64 stacks, <=74 tries: <=3.7s. */
       tcp_helper_resource_t* thr = stacks[i];
       int rc;
 
-      if( get_lock & (1 << i) )
+      if( get_lock & ((ci_uint64)1 << i) )
         continue;
 
       ++tries;
@@ -254,7 +252,7 @@ efab_terminate_lock_all_stacks(tcp_helper_resource_t *stacks[],
       }
       else {
         ci_assert(ci_netif_is_locked(&thr->netif));
-        get_lock |= 1 << i;
+        get_lock |= (ci_uint64)1 << i;
         TERM_DEBUG("%s: %d lock stack %d", __FUNCTION__, current->pid, thr->id);
       }
     }
@@ -275,7 +273,7 @@ efab_terminate_unlock_all_stacks(tcp_helper_resource_t *stacks[],
     if( stacks[i] == NULL )
       continue;
     ci_netif_unlock(&stacks[i]->netif);
-    TERM_DEBUG("%s: %d unlock stack %d", __func__, current->pid, thr->id);
+    TERM_DEBUG("%s: %d unlock stack %d", __func__, current->pid, stacks[i]->id);
     efab_thr_release(stacks[i]);
   }
 }
@@ -356,7 +354,7 @@ efab_linux_trampoline_exit_group(int status)
 
   efab_syscall_enter();
 
-  BUILD_BUG_ON(sizeof(ci_uint32) * 8 < TERMINATE_STACKS_NUM);
+  BUILD_BUG_ON(sizeof(ci_uint64) * 8 < TERMINATE_STACKS_NUM);
   stacks_num = efab_terminate_find_all_stacks(stacks, TERMINATE_STACKS_NUM);
 
   /* die in the most appropriate way */
@@ -379,6 +377,7 @@ efab_linux_trampoline_exit_group(int status)
   }
   else {
     efab_syscall_exit();
+    /* XXX: PPC_HACK: doesn't handle trampoline */
     return efab_linux_sys_exit_group(status);
   }
 }
@@ -391,15 +390,11 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
   tcp_helper_resource_t *stacks[TERMINATE_STACKS_NUM];
   ci_uint32 stacks_num = 0;
 
-  efab_syscall_enter();
-
   if( sig_kernel_only(sig) || sig_kernel_ignore(sig) ||
-      sig_kernel_stop(sig) || sig_kernel_coredump(sig) ) {
-    efab_syscall_exit();
+      sig_kernel_stop(sig) || sig_kernel_coredump(sig) )
     return -EINVAL;
-  }
 
-  BUILD_BUG_ON(sizeof(ci_uint32) * 8 < TERMINATE_STACKS_NUM);
+  BUILD_BUG_ON(sizeof(ci_uint64) * 8 < TERMINATE_STACKS_NUM);
   stacks_num = efab_terminate_find_all_stacks(stacks, TERMINATE_STACKS_NUM);
 
   if( stacks_num ) {
@@ -418,63 +413,25 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
   spin_lock_irq(&current->sighand->siglock);
   current->sighand->action[sig-1].sa.sa_handler = SIG_DFL;
   spin_unlock_irq(&current->sighand->siglock);
-  efab_syscall_exit();
 
   send_sig(sig, current, 0);
   /*UNREACHABLE*/
   return 0;
 }
 
-#ifdef CONFIG_KALLSYMS
-#include <linux/kallsyms.h>
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-#define KALLSYMS_ON_EACH_SYMBOL_EXPORTED
-#endif
-#endif
-
-#ifdef KALLSYMS_ON_EACH_SYMBOL_EXPORTED
-struct efab_ksym_name {
-  char *name;
-  void *addr;
-};
-static int efab_find_ksym(void *data, const char *name, struct module *mod,
-                          unsigned long addr)
-{
-  struct efab_ksym_name *t = data;
-  if( strcmp(t->name, name) == 0 ) {
-    t->addr = (void *)addr;
-    return 1;
-  }
-  return 0;
-}
-#endif
 
 void efab_linux_termination_ctor(void)
 {
-#ifdef KALLSYMS_ON_EACH_SYMBOL_EXPORTED
-    struct efab_ksym_name t;
-    t.name = "zap_other_threads";
-    t.addr = NULL;
-    kallsyms_on_each_symbol(efab_find_ksym, &t);
-    if( t.addr ) {
-      efab_my_zap_other_threads = t.addr;
-      TERM_DEBUG("Find zap_other_threads via kallsyms at %p", t.addr);
-    }
-    else
-#elif defined(KALLSYMS_LOOKUP_NAME_EXPORTED)
-    efab_my_zap_other_threads =
-        (void *)kallsyms_lookup_name("zap_other_threads");
-    if( efab_my_zap_other_threads != NULL ) {
-      TERM_DEBUG("Find zap_other_threads via kallsyms at %p",
-                 efab_my_zap_other_threads);
-    }
-    else
+#ifdef EFRM_HAS_FIND_KSYM
+  efab_my_zap_other_threads = efrm_find_ksym("zap_other_threads");
+  TERM_DEBUG("Find zap_other_threads via kallsyms at %p", t.addr);
+
+  if( efab_my_zap_other_threads == NULL )
 #endif
-    {
-      efab_my_zap_other_threads = efab_zap_other_threads;
-      TERM_DEBUG("Using our zap_other_threads implementation");
-    }
+  {
+    efab_my_zap_other_threads = efab_zap_other_threads;
+    TERM_DEBUG("Using our zap_other_threads implementation");
+  }
 
 }
 

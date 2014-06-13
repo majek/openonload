@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,7 +35,6 @@
 
 
 
-
 /* CVS history for all these functions is in tcp_tx.c v1.382 
 ** A unit testbench for this code is available in 
 **   tests/ip/unit/tcp_split_coalesce 
@@ -54,8 +53,8 @@ static int ci_tcp_tx_merge_segment(ci_netif* ni, ci_ip_pkt_fmt* dest_pkt,
 {
   int n;
   char *src, *dest;
-  int src_off = (int)(src_seg->iov_base - (src_pkt->base_addr[src_pkt->intf_i] +
-                                           src_pkt->base_offset));
+  int src_off = (int)(src_seg->iov_base - (src_pkt->dma_addr[src_pkt->intf_i] +
+                                           src_pkt->pkt_start_off));
 
   /* [dest_pkt] must have space to put stuff in, and [src_seg] must point
   ** to some data to put there!
@@ -83,7 +82,7 @@ static int ci_tcp_tx_merge_segment(ci_netif* ni, ci_ip_pkt_fmt* dest_pkt,
   }
 
   dest_pkt->buf_len += n;
-  dest_pkt->tx_pkt_len += n;
+  dest_pkt->pay_len += n;
   oo_offbuf_advance(&dest_pkt->buf, n);
   dest_pkt->pf.tcp_tx.end_seq += n;
   src_seg->iov_base += n;
@@ -101,15 +100,17 @@ static ci_ip_pkt_fmt* ci_tcp_tx_allocate_pkt(ci_netif* ni, ci_tcp_state* ts,
 
   next = ci_netif_pkt_tx_tcp_alloc(ni);
   if( ! next )  return NULL;
+  oo_tx_pkt_layout_init(next);
   ci_pkt_init_from_ipcache_len(next, &ts->s.pkt, hdrlen);
 
   /* Initially make a buffer large enough to fit all the data in, since we
   ** may have to put more than [eff_mss] into [next].
   */
-  oo_offbuf_init(&next->buf, oo_tx_ether_data(next) + hdrlen, old_len);
+  oo_offbuf_init(&next->buf, (uint8_t*) oo_tx_ether_data(next) + hdrlen,
+                 old_len);
 
   /* ?? todo: put pkt hdr initialisation in an inline fn shared w tcp_send */
-  next->buf_len = next->tx_pkt_len = hdrlen + oo_ether_hdr_size(next);
+  next->buf_len = next->pay_len = hdrlen + oo_ether_hdr_size(next);
   ci_assert_equal(next->n_buffers, 1);
   /* Initialise headers, and set the sequence numbers. */
   pkt->pf.tcp_tx.end_seq    = pkt->pf.tcp_tx.start_seq + new_paylen;
@@ -185,7 +186,7 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
   ef_iovec_ptr_advance(&segs, n);
   old_last_seg_size = pkt->buf_len;
   pkt->buf_len = n;
-  pkt->tx_pkt_len -= (old_last_seg_size - n);
+  pkt->pay_len -= (old_last_seg_size - n);
 
   while( ! ef_iovec_ptr_is_empty_proper(&segs) ) {
 #ifndef NDEBUG
@@ -203,7 +204,7 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
   ci_tcp_tx_pkt_set_end(ts, next);
 
   pkt->buf.off =
-    (ci_uint32)(oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len
+    (ci_uint32)((char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len
                 + new_paylen - (char*) &pkt->buf);
 
   ci_tcp_tx_add_to_queue(qu, pkt, next);
@@ -256,7 +257,7 @@ static void ci_tcp_tx_chomp(ci_netif* ni, ci_tcp_state* ts,
     ci_assert_gt(segs.io.iov_len, 0);
   } while( bytes );
 
-  pkt->buf_len = pkt->tx_pkt_len = 
+  pkt->buf_len = pkt->pay_len = 
     ts->outgoing_hdrs_len + oo_ether_hdr_size(pkt);
   pkt->pf.tcp_tx.end_seq = pkt->pf.tcp_tx.start_seq;
 
@@ -421,7 +422,7 @@ void ci_tcp_tx_insert_option_space(ci_netif* ni, ci_tcp_state* ts,
   ef_iovec_ptr_advance(&segs, hdrlen);
 
   /* Reset the packet to include only the old header plus the extra space. */
-  pkt->buf_len = pkt->tx_pkt_len = hdrlen + extra_opts;
+  pkt->buf_len = pkt->pay_len = hdrlen + extra_opts;
   pkt->pf.tcp_tx.end_seq = pkt->pf.tcp_tx.start_seq;
 
   /* We need to initialise an over large buffer here, because the size of

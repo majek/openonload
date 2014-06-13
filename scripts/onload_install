@@ -33,6 +33,10 @@ usage() {
   err "  --debug            - Build debug binaries"
   err "  --no-debug-info    - Omit debug info from binaries"
   err "  --strict           - Compiler warnings are errors"
+  if is_ppc ; then
+    err "  --ppc-at=<cc path> - Compile with IBM AT and -O3, "
+    err "                       give AT CC path, should be in /opt"
+  fi
   err "  --userfiles        - Only install user-level components"
   err "  --kernelfiles      - Only install kernel driver components"
   err "  --modprobe         - Only install modprobe configuration"
@@ -55,6 +59,12 @@ is_rhel4() {
   grep -qi "Red Hat Enterprise.*release 4" /etc/redhat-release 2>/dev/null
 }
 
+is_ppc () {
+  local platform="$(uname -m)"
+
+  [ "$platform" = "ppc64" -o "$platform" = "ppc32" ] && return 0
+  return 1
+}
 
 manifest_add() {
   if [ -n "$manifest" ] && ! $test; then
@@ -66,6 +76,19 @@ manifest_add() {
   return 0
 }
 
+manifest_combine() {
+  if [ -f "$1" ]; then
+    if [ -n "$manifest" ] && ! $test; then
+      cat "$1" >>"$manifest"
+    fi
+    if $listfiles; then
+      cat "$1"
+    fi
+    try $do rm $1
+    return 0
+  fi
+  return 1
+}
 
 # Install a file (non executable).
 install_f() {
@@ -170,8 +193,8 @@ install_uninstall() {
 install_userland() {
   # Install libraries and tools.
   try $do cd "$bin/../build"
-  u32="gnu"
-  u64="gnu_x86_64"
+  u32="$(mmaketool --userbuild_base32)"
+  u64="gnu_$(mmaketool --userarch)"
   if [ -d "$u64" ]; then
     # Tolerate lack of 32-bit transport library on 64-bit systems.
     install_plib32 "$u32/lib/transport/unix/libcitransport0.so" \
@@ -236,10 +259,21 @@ install_userland() {
 
   # Install python components.
   try $do cd "$bin/../scripts"
+  python_manifest=$(mktemp)
   [ -f setup.py ] || try $do cp onload_misc/setup.py .
-  $do python setup.py install --prefix="$i_prefix/usr" || log \
-      "Could not Openonload python modules. "\
-      "(If using SLES10 you need the 'python-devel' pacakge)"
+  if [ -z "$i_prefix" ]; then
+    # Debian and Ubuntu mess up if --prefix=/usr is set.
+    $do python setup.py install --record=$python_manifest
+  else
+    $do python setup.py install --prefix="$i_prefix/usr"\
+                                --record=$python_manifest
+  fi
+  manifest_combine $python_manifest
+
+  if [ $? != 0 ]; then
+    log "Could not Openonload python modules. "\
+        "(If using SLES10 you need the 'python-devel' pacakge)"
+  fi
 
   # Install header files.
   try $do cd "$bin/../src/include"
@@ -498,6 +532,7 @@ while [ $# -gt 0 ]; do
   --debug)	buildargs="$buildargs $1";;
   --no-debug-info)buildargs="$buildargs $1";;
   --strict)	buildargs="$buildargs $1";;
+  --ppc-at=*) is_ppc || usage ; buildargs="$buildargs $1 ${1#--ppc-at}" ;;
   --userfiles)	all=false; userfiles=true;;
   --ldconfig)	all=false; ldconfig=true;;
   --kernelfiles)all=false; kernelfiles=true;;

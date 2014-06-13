@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,8 +53,8 @@
 #ifndef __CI_EFRM_KERNEL_PROC_H__
 #define __CI_EFRM_KERNEL_PROC_H__
 
-/* For read_proc and write_proc */
-#include <linux/proc_fs.h>
+/* For file_operations */
+#include <linux/fs.h>
 
 typedef void* efrm_pd_handle;
 
@@ -63,7 +63,7 @@ extern int efrm_proc_dir_put(efrm_pd_handle handle);
 
 efrm_pd_handle
 efrm_proc_create_file( char const* name, mode_t mode, efrm_pd_handle parent,
-                       read_proc_t* read_proc, write_proc_t* write_proc,
+                       const struct file_operations *fops,
                        void* context );
 extern void efrm_proc_remove_file( efrm_pd_handle handle );
 

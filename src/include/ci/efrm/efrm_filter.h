@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,9 +57,13 @@ struct efx_dl_device;
 struct efx_filter_spec;
 struct device;
 
-extern int efrm_filter_insert(struct efx_dl_device *efx_dev,
+
+extern int  efrm_filter_insert(struct efrm_client *,
                               struct efx_filter_spec *spec,
-                              bool replace);
+                              bool replace_equal);
+extern void efrm_filter_remove(struct efrm_client *, int filter_id);
+extern void efrm_filter_redirect(struct efrm_client *,
+				 int filter_id, int rxq_i);
 
 extern void efrm_filter_shutdown(void);
 extern void efrm_filter_init(void);
@@ -69,12 +73,7 @@ extern void efrm_filter_remove_proc_entries(void);
 
 extern void efrm_init_resource_filter(struct device *dev, int ifindex);
 extern void efrm_shutdown_resource_filter(struct device *dev);
-
-/* Access fucntions for /proc/ */
-extern int
-efrm_read_rules(char *buffer,
-		char **buffer_location,
-		off_t offset, int buffer_length, int *eof, void *data);
-
+extern int efrm_filter_rename( struct efhw_nic *nic,
+                               struct net_device *net_dev );
 
 #endif /* __CI_EFRM_FILTER_H__ */

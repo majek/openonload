@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,8 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include "tcp_tx.h"
+#include "ip_tx.h"
 
 #if !defined(__KERNEL__)
 #include <sys/socket.h>
@@ -34,6 +36,8 @@
 #endif
 #include <onload/pkt_filler.h>
 #include <onload/sleep.h>
+#include <onload/tmpl.h>
+#include <ci/internal/pio_buddy.h>
 
 
 #define LPF "TCP SEND "
@@ -59,6 +63,10 @@
 struct tcp_send_info {
   int rc;
   ci_uint32 timeout;
+  ci_uint32 old_tcp_snd_nxt;
+#if CI_CFG_BURST_CONTROL
+  ci_uint32 old_burst_window;
+#endif
   ci_uint64 start_frc;
   int set_errno;
   int stack_locked;
@@ -92,9 +100,12 @@ static void ci_tcp_tx_advance_nagle(ci_netif* ni, ci_tcp_state* ts)
     /* NB. We call advance() before poll() to get best latency. */
     ci_ip_time_resync(IPTIMER_STATE(ni));
     ci_tcp_tx_advance(ts, ni);
+    if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM ))
+      return;
     goto poll_and_out;
   }
 
+  ci_assert(! (ni->flags & CI_NETIF_FLAG_MSG_WARM));
   /* There can't be a SYN, because connection is established, so the SYN
   ** must already be acked.  There can't be a FIN, because if there was
   ** tx_errno would be non zero, and we would not have attempted to
@@ -144,7 +155,8 @@ int ci_tcp_sendmsg_fill_pkt(ci_netif* ni, struct tcp_send_info* sinf,
 
   ci_assert(! ci_iovec_ptr_is_empty_proper(piov));
   ci_tcp_tx_pkt_init(pkt, hdrlen, maxlen);
-  oo_pkt_filler_init(&sinf->pf, pkt, oo_tx_ether_data(pkt) + hdrlen);
+  oo_pkt_filler_init(&sinf->pf, pkt,
+                     (uint8_t*) oo_tx_ether_data(pkt) + hdrlen);
 
 #ifndef NDEBUG
   ci_assert_equal(pkt->n_buffers, 1);
@@ -201,9 +213,9 @@ int ci_tcp_sendmsg_fill_pkt(ci_netif* ni, struct tcp_send_info* sinf,
 }
 
 
-int ci_tcp_fill_stolen_buffer(ci_netif* ni, ci_ip_pkt_fmt* pkt,
-                              ci_iovec_ptr* piov 
-                              CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
+static int ci_tcp_fill_stolen_buffer(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                                     ci_iovec_ptr* piov 
+                                     CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
   /* Fill a single packet, which must be initialised already (and may
   ** contain data), from an iovec.  Used for the "stolen packet" case.
@@ -324,11 +336,627 @@ ci_inline void ci_tcp_sendmsg_prep_pkt(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-void ci_tcp_sendmsg_prep_pkt_ool(ci_netif* ni, ci_tcp_state* ts,
-                                 ci_ip_pkt_fmt* pkt, unsigned seq)
+#if CI_CFG_PIO
+
+static int ci_tcp_tmpl_offset(void)
 {
-  ci_tcp_sendmsg_prep_pkt(ni, ts, pkt, seq);
+  return CI_CFG_PKT_BUF_SIZE - sizeof(struct tcp_send_info) -
+    sizeof(struct oo_msg_template);
 }
+
+
+static struct oo_msg_template* ci_tcp_tmpl_pkt_to_omt(ci_ip_pkt_fmt* pkt)
+{
+  return (void*) ((char*) pkt + ci_tcp_tmpl_offset());
+}
+
+
+static struct oo_msg_template* ci_tcp_tmpl_pkt_id_to_omt(ci_netif* ni,
+                                                         oo_pkt_p pktp)
+{
+  ci_assert(pktp != OO_PP_NULL);
+  return ci_tcp_tmpl_pkt_to_omt(PKT_CHK(ni, pktp));
+}
+
+
+static ci_ip_pkt_fmt* ci_tcp_tmpl_omt_to_pkt(struct oo_msg_template* omt)
+{
+  return (void*) ((char*) omt - ci_tcp_tmpl_offset());
+}
+
+
+static void __ci_tcp_tmpl_handle_nic_reset(ci_netif* ni, ci_tcp_state* ts)
+{
+  /* For now, simply disallow use of templated sends completely on
+   * this socket indefinitely.
+   */
+  ts->tmpl_nic_reset = 1;
+}
+
+
+/* Iterate over all the sockets on this netif to handle ongoing
+ * templated sends that can be impacted due to the NIC reset.
+ */
+void ci_tcp_tmpl_handle_nic_reset(ci_netif* ni)
+{
+  unsigned i;
+
+  for( i = 0; i < ni->state->n_ep_bufs; ++i )
+    if( oo_sock_id_is_waitable(ni, i) ) {
+      citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, i);
+      citp_waitable* w = &wo->waitable;
+      if( (w->state & CI_TCP_STATE_TCP_CONN) || w->state == CI_TCP_CLOSED ) {
+        ci_tcp_state* ts = &wo->tcp;
+        if( ts->tmpl_head != OO_PP_NULL )
+          __ci_tcp_tmpl_handle_nic_reset(ni, ts);
+      }
+    }
+}
+
+
+/* Must be called with netif lock held.  Common code to free up
+ * templated send state.  Can be used after a successful send, abort,
+ * or socket closure.
+ */
+static void __ci_tcp_tmpl_free(ci_netif* ni, ci_tcp_state* ts,
+                               struct oo_msg_template* omt, int free_pkt_buf)
+{
+  struct oo_msg_template *walk, *prev;
+  ci_ip_pkt_fmt* pkt;
+  int intf_i = omt->oomt_intf_i;
+
+  ci_assert(ni);
+  ci_assert(ts);
+  ci_assert(ci_netif_is_locked(ni));
+
+  ci_pio_buddy_free(ni, &ni->state->nic[intf_i].pio_buddy,
+                    omt->oomt_pio_offset, omt->oomt_pio_order);
+
+  --ts->stats.tx_tmpl_active;
+
+  /* Maybe only set these in a debug build */
+  omt->oomt_sock_id = OO_SP_NULL;
+  omt->oomt_pio_offset = -1;
+  CI_DEBUG(omt->oomt_pio_order = -1);
+  CI_DEBUG(omt->oomt_intf_i = -1);
+
+  /* Free the omt stored in the ci_tcp_state.
+   *
+   * TODO: This could be much simpler with a pointer-to-pointer (oo_pkt_p*).
+   */
+  prev = NULL;
+  ci_assert(ts->tmpl_head != OO_PP_NULL);
+  walk = ci_tcp_tmpl_pkt_id_to_omt(ni, ts->tmpl_head);
+  while( 1 ) {
+    if( walk == omt ) {
+      if( prev )
+        prev->oomt_next_pkt_id = walk->oomt_next_pkt_id;
+      else
+        ts->tmpl_head = walk->oomt_next_pkt_id;
+
+      /* Free pkt buffer.  Must be done after we stop touching the pkt
+       * buffer.
+       */
+      if( free_pkt_buf ) {
+        pkt = ci_tcp_tmpl_omt_to_pkt(omt);
+        --ni->state->n_async_pkts;
+        ci_netif_pkt_release_1ref(ni, pkt);
+      }
+      return;
+    }
+
+    prev = walk;
+    ci_assert(walk->oomt_next_pkt_id != OO_PP_NULL);
+    walk = ci_tcp_tmpl_pkt_id_to_omt(ni, walk->oomt_next_pkt_id);
+  }
+}
+
+
+/* Must be called with netif lock held.  Drops all allocated templated
+ * sends on the connection. */
+void ci_tcp_tmpl_free_all(ci_netif* ni, ci_tcp_state* ts)
+{
+  ci_assert(ni);
+  ci_assert(ts);
+  ci_assert(ci_netif_is_locked(ni));
+  while( ts->tmpl_head != OO_PP_NULL ) {
+    struct oo_msg_template* omt = ci_tcp_tmpl_pkt_id_to_omt(ni, ts->tmpl_head);
+    __ci_tcp_tmpl_free(ni, ts, omt, 1);
+  }
+}
+
+#ifndef __KERNEL__
+
+static struct tcp_send_info*
+  ci_tcp_tmpl_omt_to_sinf(struct oo_msg_template* omt)
+{
+  return (void*) (omt + 1);
+}
+
+
+/* This function is used to convert a templated send into a normal
+ * one.  This is needed when we are unable to do a templated send for
+ * example when the sendq is not empty.
+ *
+ * This function expects the netif to be locked and will release the
+ * lock before returning.  It has to release the lock to call
+ * ci_tcp_sendmsg().  This function can block if ci_tcp_sendmsg()
+ * blocks.  It returns the errno returned by ci_tcp_sendmsg().
+ */
+static int __ci_tcp_tmpl_normal_send(ci_netif* ni, ci_tcp_state* ts,
+                                     struct oo_msg_template* omt,
+                                     ci_ip_pkt_fmt* pkt,
+                                     struct tcp_send_info* sinf, unsigned flags)
+{
+  ci_assert(ci_netif_is_locked(ni));
+#define CI_NOT_NULL     ((void *)-1)
+
+  /* The memcpy below is to avoid having to grab the netif lock
+   * again to free up resources.  Maybe this can be cleaned up
+   * somehow.
+   */
+  char buf[2048];
+  struct iovec iov[1];
+  struct msghdr msg;
+  memcpy(buf, (void*)CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)), sinf->total_unsent);
+  iov[0].iov_base = buf;
+  iov[0].iov_len = sinf->total_unsent;
+  CI_DEBUG(msg.msg_name = CI_NOT_NULL);
+  msg.msg_namelen = 0;
+  msg.msg_iov = iov;
+  msg.msg_iovlen = 1;
+  CI_DEBUG(msg.msg_control = CI_NOT_NULL);
+  msg.msg_controllen = 0;
+  /* msg_flags is output only */
+
+  ++ts->stats.tx_tmpl_send_slow;
+  __ci_tcp_tmpl_free(ni, ts, omt, 1);
+
+  /* Drop the netif lock as ci_tcp_sendmsg() expects it to not be
+   * held. */
+  ci_netif_unlock(ni);
+  return ci_tcp_sendmsg(ni, ts, &msg, flags & ~ONLOAD_TEMPLATE_FLAGS_SEND_NOW);
+}
+
+
+int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
+                      struct oo_msg_template** omt_pp,
+                      struct iovec* initial_msg, int mlen, unsigned flags)
+{
+  int i, rc, max_payload;
+  size_t total_unsent = 0;
+  ci_ip_cached_hdrs* ipcache = &ts->s.pkt;
+  int intf_i, pio_offset, pio_order;
+  ci_ip_pkt_fmt* pkt;
+  ci_iovec_ptr piov;
+  ci_tcp_hdr* tcp;
+  ci_ip4_hdr* ip;
+  ef_vi* vi;
+  struct oo_msg_template* omt;
+  struct tcp_send_info* sinf;
+
+  /* Templated sends currently require two data structures both of
+   * which are stored on the packet buffer to avoid memory
+   * allocations.  They are placed at the end of the packet buffer.
+  */
+
+  /* This is needed to ensure that an app written to a later version of the
+   * API gets an error if they try to use a flag we don't understand.
+   */
+  if(CI_UNLIKELY( flags != 0 )) {
+    LOG_E(ci_log("%s: flags=%x", __FUNCTION__, flags));
+    return -EINVAL;
+  }
+
+  ci_netif_lock(ni);
+
+  if( ipcache->flags & CI_IP_CACHE_IS_LOCALROUTE ) {
+    LOG_U(ci_log("%s: templated sends not supported on loopback connections",
+                 __FUNCTION__));
+    rc = -ENOSYS;
+    goto out;
+  }
+
+  if(CI_UNLIKELY( (~ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) )) {
+    /* Only handling connected connections.
+     */
+    LOG_U(ci_log("ci_tcp_tmpl_alloc: not synchronized\n"));
+    rc = -ENOTCONN;
+    goto out;
+  }
+  ci_assert_equal(ts->s.tx_errno, 0);
+
+  /* Check for valid cplane information.
+   */
+  if(CI_UNLIKELY( ! cicp_ip_cache_is_valid(CICP_HANDLE(ni), ipcache) )) {
+    cicp_user_retrieve(ni, ipcache, &ts->s.cp);
+    switch( ipcache->status ) {
+    case retrrc_success:
+      /* Successfully validated cplane info on the socket.  We will copy
+       * it into the packet later in this function.
+       */
+      break;
+
+    case retrrc_nomac:
+      /* We could not validate cplane info on the socket.  We will
+       * copy incorrect MAC info to the packet later in this function.
+       * But it doesn't matter as we will do additional testing in
+       * tmpl_update() to ensure that we only send with valid cplane
+       * info.
+       *
+       * TODO: Maybe we want to request an arp at this point
+       */
+      break;
+
+    default:
+      LOG_U(ci_log("%s: cplane status=%d", __FUNCTION__, ipcache->status));
+      rc = -EHOSTUNREACH;
+      goto out;
+    }
+  }
+
+  if(CI_UNLIKELY( ts->tmpl_nic_reset )) {
+    LOG_U(ci_log("%s: Not handling NIC resets yet", __FUNCTION__));
+    rc = -ENONET;
+    goto out;
+  }
+
+  intf_i = ipcache->intf_i;
+  vi = &ni->nic_hw[intf_i].vi;
+
+  if( ! (ni->state->nic[intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) ) {
+    /* We don't have a pio either because wrong NIC or out of PIO regions.
+     *
+     * TODO: Move this check to 
+     */
+    rc = -ENOBUFS;
+    goto out;
+  }
+
+  /* We can only send if the block of PIO region we want to send is
+   * not being sent already.
+   */
+  /* XXX: This check is too harsh.  Instead, we should be freeing up
+   * the PIO region when we get TX events.
+   */
+  if( ef_vi_transmit_fill_level(vi) != 0 ) {
+    /* Poll to drain the TXQ in hopes that we might be able to send.
+     */
+    if( ci_netif_may_poll(ni) && ci_netif_has_event(ni) )
+      ci_netif_poll(ni);
+    if( ef_vi_transmit_fill_level(vi) != 0 ) {
+      rc = -EBUSY;
+      goto out;
+    }
+  }
+
+  /* Compute total msg size
+   */
+  for( i = 0; i < mlen; ++i ) {
+#ifndef NDEBUG
+    if( initial_msg[i].iov_base == NULL ) {
+      rc = -EFAULT;
+      goto out;
+    }
+#endif
+    total_unsent += initial_msg[i].iov_len;
+  }
+
+  {
+    /* Maximum size of message is minimum of the Effective MSS and the
+     * usable bit of the PIO region.  The usable bit is the size of
+     * the PIO region minus the size of the headers.
+     *
+     * We also assume that effective MSS plus the meta data for
+     * templated sends (sizeof(struct tcp_send_info) and
+     * sizeof(struct oo_msg_template)) fit in the packet buffer.
+     *
+     * XXX: maybe add a assertion to the effect of the above comment.
+     */
+    int max_pio_pkt, max_buf_pkt;
+    /* FIXME: magic number */
+    max_pio_pkt = 2048 /* Max PIO region size */ - ETH_VLAN_HLEN;
+    max_buf_pkt =
+      CI_CFG_PKT_BUF_SIZE - CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
+    max_payload = CI_MIN(max_buf_pkt, max_pio_pkt);
+    max_payload -= ts->outgoing_hdrs_len + ETH_HLEN;
+    max_payload -= sizeof(struct tcp_send_info);
+    max_payload -= sizeof(struct oo_msg_template);
+  }
+  if( total_unsent > max_payload ) {
+    rc = -E2BIG;
+    goto out;
+  }
+
+  /* We allocate enough space to incorporate a vlan tag.  This is done
+   * so if the route changes from no-vlan to vlan, we are guaranteed
+   * to have enough space in the PIO region.
+   */
+  /* TODO: Use fls here. */
+  pio_order = ci_log2_ge(ts->outgoing_hdrs_len + ETH_HLEN + ETH_VLAN_HLEN
+                         + total_unsent, CI_CFG_MIN_PIO_BLOCK_ORDER);
+  pio_offset = ci_pio_buddy_alloc(ni, &ni->state->nic[intf_i].pio_buddy,
+                                  pio_order);
+  if( pio_offset < 0 ) {
+    rc = -ENOMEM;
+    goto out;
+  }
+
+  ci_iovec_ptr_init_nz(&piov, initial_msg, mlen);
+
+  /* TODO: have flag to control whether to block waiting for buffer. */
+  if( (pkt = ci_netif_pkt_tx_tcp_alloc(ni)) == NULL ) {
+    ci_pio_buddy_free(ni, &ni->state->nic[intf_i].pio_buddy, pio_offset,
+                      pio_order);
+    rc = -EBUSY;
+    goto out;
+  }
+  ++ni->state->n_async_pkts;
+
+  omt = ci_tcp_tmpl_pkt_to_omt(pkt);
+  *omt_pp = omt;
+  omt->oomt_intf_i = intf_i;
+  omt->oomt_pio_offset = pio_offset;
+  omt->oomt_pio_order = pio_order;
+  omt->oomt_next_pkt_id = OO_PP_NULL;
+  omt->oomt_sock_id = S_SP(ts);
+  omt->oomt_next_pkt_id = ts->tmpl_head;
+  ts->tmpl_head = OO_PKT_P(pkt);
+
+  sinf = ci_tcp_tmpl_omt_to_sinf(omt);
+  sinf->n_needed = 1;
+  sinf->total_unsent = total_unsent;
+  sinf->total_sent = 0;
+  sinf->pf.alloc_pkt = NULL;
+  sinf->fill_list = 0;
+  sinf->fill_list_bytes = 0;
+  sinf->n_filled = 0;
+  oo_pkt_filler_add_pkt(&sinf->pf, pkt);
+
+  /* XXX: Do I have to worry about MSG_CORK? */
+  /* TODO: look at this sinf stuff */
+  sinf->fill_list_bytes +=
+    ci_tcp_sendmsg_fill_pkt(ni, sinf, &piov, ts->outgoing_hdrs_len,
+                            tcp_eff_mss(ts));
+  ++sinf->n_filled;
+  CI_USER_PTR_SET(sinf->pf.pkt->pf.tcp_tx.next, sinf->fill_list);
+  sinf->fill_list = sinf->pf.pkt;
+  ci_tcp_sendmsg_prep_pkt(ni, ts, pkt, tcp_enq_nxt(ts));
+
+  TX_PKT_TCP(sinf->fill_list)->tcp_flags =
+    CI_TCP_FLAG_PSH | CI_TCP_FLAG_ACK;
+
+  ip = oo_tx_ip_hdr(pkt);
+  tcp = TX_PKT_TCP(pkt);
+
+  ci_tcp_tx_finish(ni, ts, pkt);
+  ci_tcp_ip_hdr_init(ip, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
+  ip->ip_check_be16 = 0;
+  tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
+  tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+  ci_tcp_tx_checksum_finish(ip, tcp);
+
+  /* XXX: Do I need to ci_tcp_tx_set_urg_ptr(ts, ni, tcp);
+   *
+   * DJR: TODO: I think right thing to do is document that this feature is
+   * not compatible with urgent data, and add an assertion that there is no
+   * urgent data pending.
+   */
+  ci_ip_set_mac_and_port(ni, ipcache, pkt);
+
+  rc = ef_pio_memcpy(&ni->nic_hw[intf_i].vi, PKT_START(pkt),
+                     omt->oomt_pio_offset, pkt->buf_len);
+  ci_assert(rc == 0);
+
+  ++ts->stats.tx_tmpl_alloc;
+  ++ts->stats.tx_tmpl_active;
+
+ out:
+  ci_netif_unlock(ni);
+  return rc;
+}
+
+
+int ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
+                       struct oo_msg_template* omt,
+                       struct onload_template_msg_update_iovec* updates,
+                       int ulen, unsigned flags)
+{
+  /* XXX: In fast path, check if need to update ack.  If send next is
+   * what we expect it to be, we are in fast path.  We should save
+   * send next somewhere in the pkt buffer.  We will not not check if
+   * the ip cache is valid in the fast path.  We need to think about
+   * how we handle timestamping efficiently.  Not straightforward.
+   */
+
+  int i, diff, rc, cplane_is_valid;
+
+  ci_netif_lock(ni);
+
+  ci_ip_cached_hdrs* ipcache = &ts->s.pkt;
+  ci_ip_pkt_fmt* pkt = ci_tcp_tmpl_omt_to_pkt(omt);
+  ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);;
+  ef_vi* vi = &ni->nic_hw[omt->oomt_intf_i].vi;
+  ci_uint8* tcp_opts = CI_TCP_HDR_OPTS(tcp);
+  struct tcp_send_info* sinf = ci_tcp_tmpl_omt_to_sinf(omt);
+
+  if(CI_UNLIKELY( omt->oomt_sock_id != S_SP(ts) )) {
+    rc = -EINVAL;
+    __ci_tcp_tmpl_free(ni, ts, omt, 1);
+    goto out;
+  }
+  if(CI_UNLIKELY( ts->tmpl_nic_reset )) {
+    LOG_U(ci_log("%s: Not handling NIC resets yet", __FUNCTION__));
+    rc = -ENOSYS;
+    __ci_tcp_tmpl_free(ni, ts, omt, 1);
+    goto out;
+  }
+  if(CI_UNLIKELY( ts->s.so_error )) {
+    rc = -ci_get_so_error(&ts->s);
+    if( rc < 0 ) {
+      __ci_tcp_tmpl_free(ni, ts, omt, 1);
+      goto out;
+    }
+  }
+  if(CI_UNLIKELY( ts->s.tx_errno )) {
+    rc = -ts->s.tx_errno;
+    __ci_tcp_tmpl_free(ni, ts, omt, 1);
+    goto out;
+  }
+
+  /* Apply requested updates.
+   */
+  for( i = 0; i < ulen; ++i ) {
+    /* TODO: Think about what checks we want at runtime. */
+    if( updates[i].otmu_len == 0 ||
+        updates[i].otmu_offset < 0 ||
+#ifndef NDEBUG
+        updates[i].otmu_base == NULL ||
+#endif
+        updates[i].otmu_offset + updates[i].otmu_len > sinf->total_unsent ) {
+      rc = -EINVAL;
+      goto out;
+    }
+    ci_assert((CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) - PKT_START(pkt)) +
+           updates[i].otmu_offset >= 0);
+
+    rc = ef_pio_memcpy(vi, updates[i].otmu_base,
+                       omt->oomt_pio_offset + (ci_uint32)
+                       (CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) - PKT_START(pkt)) +
+                       updates[i].otmu_offset,
+                       updates[i].otmu_len);
+    ci_assert(rc == 0);
+    memcpy((char*)CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) + updates[i].otmu_offset,
+           updates[i].otmu_base, updates[i].otmu_len);
+  }
+
+  if( ! (flags & ONLOAD_TEMPLATE_FLAGS_SEND_NOW) ) {
+    /* Just update tempated send and return. */
+    /* XXX: Should we also consider updating seq nums, acks and other
+     * bits of the header?
+     */
+    /* XXX: Should we poll the stack or something similar right now */
+    rc = 0;
+    goto out;
+  }
+
+  cplane_is_valid = cicp_ip_cache_is_valid(CICP_HANDLE(ni), ipcache);
+  if( cplane_is_valid &&
+      ! memcmp(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
+               oo_ether_hdr_size(pkt)) &&
+      (pkt->pkt_start_off == ipcache->ether_offset) ) {
+    /* Socket has valid cplane info and same info is on the pkt, so
+     * send. */
+  }
+  else if( cplane_is_valid ) {
+    /* The pkt doesn't have the right cplane info but the socket does.
+     * So update the pkt with the latest information.  This can cause
+     * the pkt size to change if the route changed from one with vlan
+     * to one without or vice versa.  We allocated enough PIO region
+     * to accomodate a vlan tag so if pkt size has changed, we simply
+     * copy the entire pkt.
+     */
+    ci_ip_set_mac_and_port(ni, ipcache, pkt);
+    if( pkt->pkt_start_off == ipcache->ether_offset )
+      /* TODO: we need to copy just the ethernet header here. */
+      rc = ef_pio_memcpy(vi, PKT_START(pkt), omt->oomt_pio_offset,
+                         (char*)PKT_TCP_HDR(pkt) - PKT_START(pkt));
+    else
+      rc = ef_pio_memcpy(vi, PKT_START(pkt), omt->oomt_pio_offset,
+                         pkt->buf_len);
+    ci_assert(rc == 0);
+  }
+  else {
+    /* We could not get mac info, do a normal send.
+     * __ci_tcp_tmpl_normal_send() releases the lock. */
+    rc = __ci_tcp_tmpl_normal_send(ni, ts, omt, pkt, sinf, flags);
+    return rc > 0 ? 0 : rc;
+  }
+
+  if( ci_ip_queue_is_empty(&ts->send) && ef_vi_transmit_space(vi) > 0 &&
+      ci_tcp_inflight(ts) + ts->smss < CI_MIN(ts->cwnd, tcp_snd_wnd(ts)) ) {
+    /* Sendq is empty, TXQ is not full, and send window allows us to
+     * send the requested amount of data, so go ahead and send
+     */
+
+    if( CI_BSWAP_BE32(tcp->tcp_seq_be32) != tcp_enq_nxt(ts) ) {
+      /* Sequence number do not match maybe because of interim sends.
+       * But we can still send after updating them.
+       */
+      diff = tcp_enq_nxt(ts) - CI_BSWAP_BE32(tcp->tcp_seq_be32);
+      pkt->pf.tcp_tx.end_seq += diff;
+      pkt->pf.tcp_tx.start_seq += diff;
+      tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_enq_nxt(ts));
+    }
+
+    /* Update ack and window on the pkt */
+    tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
+    tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
+
+    /* Update TCP timestamp */
+    if( ts->tcpflags & CI_TCPT_FLAG_TSO ) {
+      unsigned now = ci_tcp_time_now(ni);
+      ci_tcp_tx_opt_tso(&tcp_opts, now, ts->tsrecent);
+    }
+
+    __ci_netif_dmaq_insert_prep_pkt(ni, pkt);
+
+    /* Update the PIO region */
+    /* XXX: Currently, updating the entire TCP header.  Should only
+     * update the affected portion and only if necessary */
+    rc = ef_pio_memcpy(vi, TX_PKT_TCP(pkt),
+                       omt->oomt_pio_offset + (char*)TX_PKT_TCP(pkt) -
+                       PKT_START(pkt), CI_TCP_PAYLOAD(PKT_TCP_HDR(pkt)) -
+                       (char*)TX_PKT_TCP(pkt));
+    ci_assert(rc == 0);
+
+    /* Send packet */
+    rc = ef_vi_transmit_pio(vi, omt->oomt_pio_offset, pkt->pay_len,
+                            OO_PKT_ID(pkt));
+    ci_assert(rc == 0);
+
+    /* Update tcp state machinery state */
+    tcp_snd_nxt(ts) = pkt->pf.tcp_tx.end_seq;
+    tcp_enq_nxt(ts) = pkt->pf.tcp_tx.end_seq;
+    pkt->pf.tcp_tx.block_end = OO_PP_NULL;
+    ci_ip_queue_enqueue(ni, &ts->retrans, pkt);
+
+    /* Free templated state */
+    ++ts->stats.tx_tmpl_send_fast;
+    --ni->state->n_async_pkts;
+    __ci_tcp_tmpl_free(ni, ts, omt, 0);
+  }
+  else {
+    /* Sendq is not empty or TXQ is full so must enqueue so just call
+     * normal send.  __ci_tcp_tmpl_normal_send() releases the lock.
+     */
+    rc = __ci_tcp_tmpl_normal_send(ni, ts, omt, pkt, sinf, flags);
+    return rc > 0 ? 0 : rc;
+  }
+
+ out:
+  ci_netif_unlock(ni);
+  return rc;
+}
+
+
+int ci_tcp_tmpl_abort(ci_netif* ni, ci_tcp_state* ts,
+                      struct oo_msg_template* omt)
+{
+  int rc = 0;
+  ci_netif_lock(ni);
+  if( omt->oomt_sock_id != S_SP(ts) ) {
+    rc = -EINVAL;
+    goto out;
+  }
+  __ci_tcp_tmpl_free(ni, ts, omt, 1);
+ out:
+  ci_netif_unlock(ni);
+  return rc;
+}
+
+#endif /* __KERNEL__ */
+#endif /* CI_CFG_PIO */
 
 
 static void ci_tcp_sendmsg_enqueue(ci_netif* ni, ci_tcp_state* ts,
@@ -433,7 +1061,7 @@ void ci_tcp_sendmsg_enqueue_prequeue(ci_netif* ni, ci_tcp_state* ts)
   /* Prep each packet. */
   while( 1 ) {
     bytes = pkt->pf.tcp_tx.end_seq;
-    ci_tcp_sendmsg_prep_pkt_ool(ni, ts, pkt, tcp_enq_nxt(ts));
+    ci_tcp_sendmsg_prep_pkt(ni, ts, pkt, tcp_enq_nxt(ts));
     if( pkt->flags & CI_PKT_FLAG_TX_PSH )
       TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
     tcp_enq_nxt(ts) += bytes;
@@ -568,7 +1196,7 @@ void ci_tcp_sendmsg_enqueue_prequeue_deferred(ci_netif* ni, ci_tcp_state* ts)
     */
     LOG_TC(log("%s: "NTS_FMT "tx_errno=%d", __FUNCTION__,
                NTS_PRI_ARGS(ni, ts), ts->s.tx_errno));
-    ci_tcp_tx_free_prequeue(ni, ts, CI_MSG_NETIF_LOCKED);
+    ci_tcp_tx_free_prequeue(ni, ts, 1/*netif_locked*/);
     return;
   }
 
@@ -582,7 +1210,7 @@ void ci_tcp_sendmsg_enqueue_prequeue_deferred(ci_netif* ni, ci_tcp_state* ts)
 
     /* This may have freed space in the send queue, so we may need to wake a
     ** sender. */
-    if( ci_tcp_tx_advertise_space(ts) )
+    if( ci_tcp_tx_advertise_space(ni, ts) )
       ci_tcp_wake_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
   }
 }
@@ -851,7 +1479,7 @@ ci_inline int ci_tcp_sendmsg_spin(ci_netif* ni, ci_tcp_state* ts,
     if( ci_netif_may_poll(ni) ) {
       if( ci_netif_need_poll_spinning(ni, now_frc) && si_trylock(ni, sinf) ) {
         ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
-        sinf->n_needed = ts->send_max - ci_tcp_sendq_n_pkts(ts);
+        sinf->n_needed = ci_tcp_tx_send_space(ni, ts);
         if( sinf->n_needed > 0 ) {
           ni->state->is_spinner = 0;
           return 0;
@@ -913,7 +1541,7 @@ static int ci_tcp_sendmsg_block(ci_netif* ni, ci_tcp_state* ts,
    */
   sleep_seq = ts->s.b.sleep_seq.all;
   ci_rmb();
-  if( ts->send_max - ci_tcp_sendq_n_pkts(ts) > 0 )
+  if( ci_tcp_tx_send_space(ni, ts) > 0 )
     return 0;
   if( ts->s.tx_errno ) {
     ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, sinf);
@@ -921,7 +1549,6 @@ static int ci_tcp_sendmsg_block(ci_netif* ni, ci_tcp_state* ts,
   }
 
   CI_IP_SOCK_STATS_INC_TXSLEEP( ts );
-
 
   sinf->rc = 
     ci_sock_sleep(ni, &ts->s.b, CI_SB_FLAG_WAKE_TX,
@@ -1019,8 +1646,60 @@ static int ci_tcp_sendmsg_slowpath(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-/*! \todo Confirm */
+static int can_do_msg_warm(ci_netif* ni, ci_tcp_state* ts,
+                           struct tcp_send_info* sinf, int total_unsent,
+                           int flags)
+{
+  /* Check all conditions that put us on the slow path for a normal
+   * sends or unsupported conditions for ONLOAD_MSG_WARM.
+   *
+   * For normal sends, sinf holds total_unsent but it doesn't for
+   * zc_send() so we explicitly pass it.
+   *
+   * Not implemented for port striping or loopback yet, we can
+   * consider doing that in the future if we suspect that msg_warm can
+   * help with them.
+   */
+  return si_trylock(ni, sinf) &&
+    ci_ip_queue_is_empty(&ts->send) &&
+    ci_ip_queue_is_empty(&ts->retrans) &&
+    ! (flags & MSG_MORE) &&
+    total_unsent < tcp_eff_mss(ts) &&
+    ! (ts->s.s_aflags & CI_SOCK_AFLAG_CORK) &&
+    ! ts->s.tx_errno &&
+    SEQ_LE(tcp_enq_nxt(ts) + total_unsent, ts->snd_max) &&
+#if CI_CFG_PORT_STRIPING
+    ! (ts->tcpflags & CI_TCPT_FLAG_STRIPE) &&
+#endif
+    ! (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE);
+}
 
+
+static __attribute__ ((__noinline__)) void
+unroll_msg_warm(ci_netif* ni, ci_tcp_state* ts, struct tcp_send_info* sinf,
+                int is_zc_send)
+{
+  ci_ip_pkt_fmt* pkt;
+  ++ts->stats.tx_msg_warm_try;
+  ++ts->stats.tx_msg_warm;
+  ni->flags &= ~CI_NETIF_FLAG_MSG_WARM;
+  ci_ip_queue_init(&ts->send);
+  ts->send_in = 0;
+  tcp_enq_nxt(ts) -= sinf->fill_list_bytes;
+#if CI_CFG_BURST_CONTROL
+  ts->burst_window = sinf->old_burst_window;
+#endif
+  tcp_snd_nxt(ts) = sinf->old_tcp_snd_nxt;
+  --ts->stats.tx_stop_app;
+  if( ! is_zc_send ) {
+    pkt = PKT_CHK(ni, ts->send.tail);
+    ci_netif_pkt_release_1ref(ni, pkt);
+  }
+}
+
+
+/* It is not safe to call this function while holding the netif lock */
+/*! \todo Confirm */
 int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
                    int flags 
                    CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
@@ -1039,9 +1718,6 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
   ci_assert(ts->s.b.state != CI_TCP_LISTEN);
 
   sinf.rc = 0;
-  /* This signifies if this function has the lock, not whether the
-   * lock is held (as caller may hold it)
-   */
   sinf.stack_locked = 0;
   sinf.total_unsent = 0;
   sinf.total_sent = 0;
@@ -1072,16 +1748,19 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
     }
   }
 
-  if(CI_UNLIKELY( ! sinf.total_unsent || (flags & MSG_OOB) ))  goto slow_path;
+  if(CI_UNLIKELY( ! sinf.total_unsent ||
+                  (flags & (MSG_OOB | ONLOAD_MSG_WARM)) ))
+    goto slow_path;
 
+ fast_path:
   ci_iovec_ptr_init_nz(&piov, msg->msg_iov, msg->msg_iovlen);
-
 
   eff_mss = tcp_eff_mss(ts);
   ci_assert(eff_mss <=
             CI_MAX_ETH_DATA_LEN - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr));
 
   if( si_trylock(ni, &sinf) && ci_ip_queue_not_empty(sendq) ) {
+    ci_assert(! (flags & ONLOAD_MSG_WARM));
     /* Usually, non-empty sendq means we do not have any window to
      * send more data.  However, there is another case:
      * MSG_MORE/TCP_CORK.  In this case, we should really send some
@@ -1126,7 +1805,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
     ci_assert(! ci_iovec_ptr_is_empty_proper(&piov));
 
     /* How much space is there in the send queue? */
-    m = ts->send_max - ci_tcp_sendq_n_pkts(ts);
+    m = ci_tcp_tx_send_space(ni, ts);
     if( m <= 0 )  goto send_q_full;
 
     sinf.n_needed = ci_tcp_tx_n_pkts_needed(eff_mss, sinf.total_unsent, 
@@ -1172,6 +1851,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
      */
     if( si_trylock(ni, &sinf) ) {
       if( ts->s.tx_errno ) {
+        ci_assert(! (flags & ONLOAD_MSG_WARM));
         ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
         if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
         return sinf.rc;
@@ -1193,6 +1873,8 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
           TX_PKT_TCP(sinf.fill_list)->tcp_flags = 
             CI_TCP_FLAG_PSH | CI_TCP_FLAG_ACK;
         ci_tcp_tx_advance_nagle(ni, ts);
+        if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM ))
+          unroll_msg_warm(ni, ts, &sinf, 0);
         /* Assert that there's no need to free unused packets */
         ci_assert_equal(sinf.pf.alloc_pkt, NULL);
         if( sinf.stack_locked ) ci_netif_unlock(ni);
@@ -1200,6 +1882,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
       }
 
       /* Stuff left to do -- push out what we've got first. */
+      ci_assert(! (flags & ONLOAD_MSG_WARM));
       if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) )
         ci_netif_poll(ni);
       sinf.fill_list = 0;
@@ -1254,6 +1937,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
 
  send_q_full:
   /* We jump into here when the send queue (including prequeue) is full. */
+  ci_assert(! (flags & ONLOAD_MSG_WARM));
   ci_assert(sinf.total_unsent > 0);
   sinf.fill_list = 0;
 
@@ -1265,7 +1949,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
       if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
       return sinf.rc;
     }
-    sinf.n_needed = ts->send_max - ci_tcp_sendq_n_pkts(ts);
+    sinf.n_needed = ci_tcp_tx_send_space(ni, ts);
     if( sinf.n_needed > 0 )  goto try_again;
   }
 
@@ -1307,6 +1991,17 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
  no_pkt_buf:
   {
     int rc;
+    if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
+      /* ONLOAD_MSG_WARM should only try to allocate 1 buffer and if
+       * that failed, then the buffer list should be empty.  As we are
+       * not hitting the fast path, just return.
+       */
+      ++ts->stats.tx_msg_warm_try;
+      ci_assert_equal(sinf.pf.alloc_pkt, NULL);
+      if( sinf.stack_locked )
+        ci_netif_unlock(ni);
+      return 0;
+    }
     rc = ci_tcp_sendmsg_no_pkt_buf(ni, ts, flags, &sinf);
     if( rc == 0 )
       goto got_pkt_buf;
@@ -1320,6 +2015,13 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
   }
 
  not_synchronised:
+  if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
+    ++ts->stats.tx_msg_warm_try;
+    if( sinf.stack_locked )
+      ci_netif_unlock(ni);
+    return 0;
+  }
+
   if( ci_tcp_sendmsg_notsynchronised(ni, ts, flags, &sinf) == -1 ) {
     ci_tcp_sendmsg_handle_rc_or_tx_errno(ni, ts, flags, &sinf);
     if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
@@ -1328,6 +2030,22 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
   goto is_sync;
 
  slow_path:
+  if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
+    if( can_do_msg_warm(ni, ts, &sinf, sinf.total_unsent, flags) ) {
+      ni->flags |= CI_NETIF_FLAG_MSG_WARM;
+#if CI_CFG_BURST_CONTROL
+      sinf.old_burst_window = ts->burst_window;
+#endif
+      sinf.old_tcp_snd_nxt = tcp_snd_nxt(ts);
+      goto fast_path;
+    }
+    ++ts->stats.tx_msg_warm_try;
+    if( sinf.stack_locked )
+      ci_netif_unlock(ni);
+    if( sinf.total_unsent >= tcp_eff_mss(ts) )
+      return -EINVAL;
+    return 0;
+  }
   if( ci_tcp_sendmsg_slowpath(ni, ts, msg, flags, &sinf 
                               CI_KERNEL_ARG(addr_spc)) == -1 ) {
     ci_tcp_sendmsg_handle_rc_or_tx_errno(ni, ts, flags, &sinf);
@@ -1390,9 +2108,32 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
   j = 0;
 
  try_again:
-  sendq_space = ts->send_max - ci_tcp_sendq_n_pkts(ts);
-  if( sendq_space <= 0 )
-    goto send_q_full;
+  sendq_space = ci_tcp_tx_send_space(ni, ts);
+  /* Combine sendq_space and ONLOAD_MSG_WARM checking to reduce
+   * branches in fast path.
+   */
+  if( sendq_space <= 0 || flags & ONLOAD_MSG_WARM ) {
+    if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
+      if( ! can_do_msg_warm(ni, ts, &sinf, msg->msg.iov[0].iov_len,
+                            flags) ) {
+        ++ts->stats.tx_msg_warm_try;
+        if( sinf.stack_locked )
+          ci_netif_unlock(ni);
+        msg->rc = 0;
+        if( msg->msg.iov[0].iov_len >= tcp_eff_mss(ts) )
+          msg->rc = -EINVAL;
+        return 1;
+      }
+      ni->flags |= CI_NETIF_FLAG_MSG_WARM;
+#if CI_CFG_BURST_CONTROL
+      sinf.old_burst_window = ts->burst_window;
+#endif
+      sinf.old_tcp_snd_nxt = tcp_snd_nxt(ts);
+    }
+    else {
+      goto send_q_full;
+    }
+  }
   
  send_q_not_full:
   while( j < msg->msg.msghdr.msg_iovlen ) {
@@ -1417,11 +2158,11 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
         ((char*)pkt) + CI_CFG_PKT_BUF_SIZE )
       goto bad_buffer;
 
-    ci_tcp_tx_pkt_init(pkt, (char*)msg->msg.iov[j].iov_base - 
-                       oo_tx_ether_data(pkt), eff_mss);
+    __ci_tcp_tx_pkt_init(pkt, ((uint8_t*) msg->msg.iov[j].iov_base - 
+                               (uint8_t*) oo_tx_ether_data(pkt)), eff_mss);
     pkt->n_buffers = 1;
     pkt->buf_len += msg->msg.iov[j].iov_len;
-    pkt->tx_pkt_len += msg->msg.iov[j].iov_len;
+    pkt->pay_len += msg->msg.iov[j].iov_len;
     oo_offbuf_advance(&pkt->buf, msg->msg.iov[j].iov_len);
     pkt->pf.tcp_tx.end_seq = msg->msg.iov[j].iov_len;
 
@@ -1457,6 +2198,9 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
     else
       TX_PKT_TCP(sinf.fill_list)->tcp_flags = CI_TCP_FLAG_PSH|CI_TCP_FLAG_ACK;
     ci_tcp_tx_advance_nagle(ni, ts);
+    if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
+      unroll_msg_warm(ni, ts, &sinf, 1);
+    }
     ci_netif_unlock(ni);
 
     return 1;
@@ -1491,7 +2235,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
     ci_netif_poll(ni);
     if( ts->s.tx_errno )
       goto tx_errno;
-    sendq_space = ts->send_max - ci_tcp_sendq_n_pkts(ts);
+    sendq_space = ci_tcp_tx_send_space(ni, ts);
     if( sendq_space > 0 )
       goto send_q_not_full;
   }
@@ -1536,6 +2280,13 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
 
 
  bad_buffer:
+  if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
+    ++ts->stats.tx_msg_warm_try;
+    if( sinf.stack_locked )
+      ci_netif_unlock(ni);
+    msg->rc = -EINVAL;
+    return 1;
+  }
   /* First make sure we've got rid of the fill list */
   if( sinf.fill_list ) {
     if( si_trylock(ni, &sinf) ) {

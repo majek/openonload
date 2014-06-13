@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,21 +69,6 @@ static inline int efhw_nic_have_hw(struct efhw_nic *nic)
 {
 	return efhw_nic_have_functional_units(nic) && (EFHW_KVA(nic) != 0);
 }
-
-/*! Helper function to allocate the iobuffer needed by an eventq
- *   - it ensures the eventq has the correct alignment for the NIC
- *
- * \param rm        Event-queue resource manager
- * \param instance  Event-queue instance (index)
- * \param buf_bytes Requested size of eventq
- * \return          < 0 if iobuffer allocation fails
- */
-int efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
-					struct eventq_resource_hardware *h,
-					int evq_instance, unsigned buf_bytes);
-
-extern void falcon_nic_set_rx_usr_buf_size(struct efhw_nic *,
-					   int rx_usr_buf_size);
 
 
 #endif /* __CI_EFHW_PUBLIC_H__ */

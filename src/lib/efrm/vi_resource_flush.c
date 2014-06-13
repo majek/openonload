@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,14 +52,22 @@
 
 #include <ci/efrm/nic_table.h>
 #include <ci/driver/efab/hardware.h>
-#include <ci/efhw/falcon.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/sysdep.h>
-#include <ci/efrm/buffer_table.h>
 #include <ci/efrm/vi_resource_private.h>
+#include <ci/efrm/vf_resource.h>
 #include "efrm_internal.h"
 #include "efrm_vi.h"
 
+
+/* Workqueue item to postpone processing of "flush complete" event. */
+struct efrm_flushed_req {
+	struct efhw_nic *flush_nic;
+	unsigned instance;
+	int rx_flush;
+	int failed;
+	struct work_struct work;
+};
 
 static const int flush_fifo_hwm = 8 /* TODO should be a HW specific const */ ;
 
@@ -137,9 +145,14 @@ efrm_vi_resource_issue_rx_flush(struct efrm_vi *virs, bool *completed)
 		mod_timer(&nvi->flush_timer, jiffies + HZ);
 	}
 
+	/* Drop spin lock as efhw_nic_* calls can block */
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
+
 	EFRM_TRACE("%s: rx queue %d flush requested for nic %d",
 		   __FUNCTION__, instance, efrm_nic->efhw_nic.index);
 	efhw_nic_flush_rx_dma_channel(&efrm_nic->efhw_nic, instance);
+
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 }
 
 static void
@@ -162,11 +175,16 @@ efrm_vi_resource_issue_tx_flush(struct efrm_vi *virs, bool *completed)
 		mod_timer(&nvi->flush_timer, jiffies + HZ);
 	}
 
+	/* Drop spin lock as efhw_nic_* calls can block */
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
+
 	EFRM_TRACE("%s: tx queue %d flush requested for nic %d",
 		   __FUNCTION__, instance, efrm_nic->efhw_nic.index);
 	rc = efhw_nic_flush_tx_dma_channel(&efrm_nic->efhw_nic, instance);
 	if (rc == -EAGAIN)
 		efrm_vi_resource_tx_flush_done(virs, completed);
+
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 }
 
 static void efrm_vi_resource_process_flushes(struct efrm_nic *efrm_nic,
@@ -426,6 +444,11 @@ efrm_handle_rx_dmaq_flushed(struct efhw_nic *nic, int instance,
 
 		if (instance == virs->rs.rs_instance) {
 			if (failed) {
+				/* With EF10, efhw_nic_* can block, so we
+				 * should drop spinlocks when calling them.
+				 * However, failed=TRUE is siena-specific. */
+				EFRM_ASSERT(nic->devtype.arch ==
+					    EFHW_ARCH_FALCON);
 				rc = efhw_nic_flush_rx_dma_channel(nic,
 								   instance);
 				EFRM_ASSERT(rc == 0);
@@ -492,6 +515,59 @@ efrm_handle_dmaq_flushed(struct efhw_nic *flush_nic, unsigned instance,
 	if (completed)
 		queue_work(efrm_vi_manager->workqueue, &nvi->work_item);
 }
+
+
+static void efrm_handle_dmaq_flushed_work(struct work_struct *data)
+{
+	struct efrm_flushed_req *req = container_of(data,
+					struct efrm_flushed_req, work);
+
+	efrm_handle_dmaq_flushed(req->flush_nic, req->instance,
+				 req->rx_flush, req->failed);
+	kfree(req);
+}
+
+int
+efrm_handle_dmaq_flushed_schedule(struct efhw_nic *flush_nic,
+				  unsigned instance,
+				  int rx_flush, int failed)
+{
+	struct efrm_flushed_req *req = kmalloc(sizeof(*req), GFP_ATOMIC);
+	unsigned vi_base, vi_scale, vf_count;
+
+	/* Failed kmalloc complains to syslog, so we shouldn't. */
+	if (req == NULL)
+		return 0;
+
+#ifdef CONFIG_SFC_RESOURCE_VF
+	efrm_vf_manager_params(&vi_base, &vi_scale, &vf_count);
+#else
+	vi_base = 0;
+	vi_scale = 0;
+	vf_count = 0;
+#endif
+
+	/* PF vi range [flush_nic->vi_min, flush_nic->vi_lim)
+	 * VF vi range [vi_base, vi_base + (1 << vi_scale) * vf_count)
+	 */
+	if( ((instance >= flush_nic->vi_min) &&
+	     (instance < flush_nic->vi_lim)) ||
+	    ((instance >= vi_base) &&
+	     (instance < vi_base + ((1 << vi_scale) * vf_count))) ) {
+		req->flush_nic = flush_nic;
+		req->instance = instance;
+		req->rx_flush = rx_flush;
+		req->failed = failed;
+
+		INIT_WORK(&req->work, efrm_handle_dmaq_flushed_work);
+		queue_work(efrm_vi_manager->workqueue, &req->work);
+		return 1;
+	}
+	else {
+		return 0;
+	}
+}
+
 
 static void
 efrm_vi_rm_reinit_dmaqs(struct efrm_vi *virs)

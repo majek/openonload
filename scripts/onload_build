@@ -25,6 +25,10 @@ usage() {
   err "  --keep             - Keep the existing build tree"
   err "  --debug            - Build debug binaries"
   err "  --strict           - Compiler warnings are errors"
+  if is_ppc ; then
+    err "  --ppc-at <CC-path> - Build with IBM Advanced Toolchain, opt value "
+    err "                       should point to CC location in /opt/"
+  fi
   err
   exit 1
 }
@@ -34,6 +38,24 @@ have_64bit_userland() {
   echo | gcc -m64 -x c -c -o /dev/null - >/dev/null 2>&1
 }
 
+is_ppc () {
+  local platform="$(uname -m)"
+
+  [ "$platform" = "ppc64" -o "$platform" = "ppc32" ] && return 0
+  return 1
+}
+
+gnu_32bit_platform () {
+  local userplatform
+
+  if is_ppc ; then
+    userplatform=gnu_ppc32
+  else
+    userplatform=gnu
+  fi
+
+  echo $userplatform
+}
 
 ######################################################################
 # main
@@ -47,6 +69,7 @@ user32=false
 user64=false
 all=true
 keepbuild=false
+cc_opt=
 NDEBUG=1; export NDEBUG
 
 while [ $# -gt 0 ]; do
@@ -60,6 +83,7 @@ while [ $# -gt 0 ]; do
   --keep)       keepbuild=true;;
   --debug)	unset NDEBUG;;
   --strict)     strict=true;;
+  --ppc-at)     is_ppc || usage ; cc_opt="CC=$2" ; shift ;;
   -*)           usage;;
   *)            break;;
   esac
@@ -72,8 +96,10 @@ done
 # looks like it has a 64-bit userland.
 if $user64 || have_64bit_userland; then
   is64=true
+  userplatform=gnu_$(mmaketool --userarch)
 else
   is64=false
+  userplatform=$(gnu_32bit_platform)
 fi
 
 if [ -n "$ONLOAD_BUILD_STRICT" ] || $strict; then
@@ -109,13 +135,13 @@ fi
 if $all || $user || $user64; then
   if $is64; then
     # 64-bit user-level drivers and tools.
-    if [ -d "gnu_x86_64" ]; then
+    if [ -d "$userplatform" ]; then
       nodeps=
     else
-      try mmakebuildtree "gnu_x86_64"
+      try mmakebuildtree "$userplatform"
       nodeps=MMAKE_NO_DEPS=1
     fi
-    make -j4 -C "gnu_x86_64" ONLOAD_ONLY=1 $nodeps ||
+    make $cc_opt -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
       fail "ERROR: Failed to build 64-bit user-level components."
   fi
 fi
@@ -125,10 +151,10 @@ if $all || $user || $user32; then
   if [ -d "gnu" ]; then
     nodeps=
   else
-    try mmakebuildtree "gnu"
+    try mmakebuildtree "$(gnu_32bit_platform)"
     nodeps=MMAKE_NO_DEPS=1
   fi
-  make -j4 -C "gnu" ONLOAD_ONLY=1 $nodeps || {
+  make $cc_opt -j4 -C "$(gnu_32bit_platform)" ONLOAD_ONLY=1 $nodeps || {
     if $is64; then
       err
       log "WARNING: Failed to build 32-bit user-level components."

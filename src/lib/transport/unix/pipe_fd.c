@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -231,8 +231,6 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
   struct oo_pipe* p = epi->pipe;
 
   switch ( cmd ) {
-    /* question kostik: do we need to call ci_sys_fcntl() to propogate
-     * flags changes to the kernel */
   case F_GETFL: {
     ci_uint32 flag_nonb = CI_PFD_AFLAG_NONBLOCK;
     if( ! fdi_is_reader(fdinfo) ) {
@@ -245,10 +243,15 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
     break;
   }
   case F_SETFL: {
-    ci_uint32 bit = CI_PFD_AFLAG_NONBLOCK <<
-                      (fdi_is_reader(fdinfo) ? CI_PFD_AFLAG_READER_SHIFT :
-                       CI_PFD_AFLAG_WRITER_SHIFT);
+    ci_uint32 bit;
 
+    rc = ci_sys_fcntl(fdinfo->fd, cmd, arg);
+    if( rc < 0 )
+      break;
+
+    bit = CI_PFD_AFLAG_NONBLOCK <<
+                (fdi_is_reader(fdinfo) ? CI_PFD_AFLAG_READER_SHIFT :
+                 CI_PFD_AFLAG_WRITER_SHIFT);
     if( arg & (O_NONBLOCK | O_NDELAY) )
       ci_bit_mask_set(&p->aflags, bit);
     else
@@ -278,7 +281,18 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
     break;
   case F_GETOWN:
   case F_SETOWN:
+#ifdef F_GETOWN_EX
+  case F_GETOWN_EX:
+#endif
+#ifdef F_SETOWN_EX
+  case F_SETOWN_EX:
+#endif
     rc = ci_sys_fcntl(fdinfo->fd, cmd, arg);
+    if( rc != 0 )
+        break;
+    p->b.sigown = arg;
+    if( p->b.sigown && (p->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
+      ci_bit_set(&p->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
     break;
   default:
     /* fixme kostik: logging should include some pipe identification */
@@ -449,6 +463,28 @@ static int citp_pipe_zc_recv_filter(citp_fdinfo* fdi,
 }
 
 
+int citp_pipe_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+                         int mlen, struct oo_msg_template** omt_pp,
+                         unsigned flags)
+{
+  return -EOPNOTSUPP;
+}
+
+
+int citp_pipe_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
+                          struct onload_template_msg_update_iovec* updates,
+                          int ulen, unsigned flags)
+{
+  return -EOPNOTSUPP;
+}
+
+
+int citp_pipe_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
+{
+  return -EOPNOTSUPP;
+}
+
+
 /* Read and write ends of the pipe have different protocol implementations in the same
  * manner as they have them separate in linux kernel. All io-unrelated hooks are common,
  * reader has no write/send support of any kind, writer has no read/recv support.
@@ -494,6 +530,9 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     /* qustion kostik: will we ever ever need this??? */
     .sendfile_post_hook = NULL,
 #endif
+    .tmpl_alloc    = citp_pipe_tmpl_alloc,
+    .tmpl_update   = citp_pipe_tmpl_update,
+    .tmpl_abort    = citp_pipe_tmpl_abort,
   }
 };
 
@@ -538,6 +577,9 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     /* qustion kostik: will we ever ever need this??? */
     .sendfile_post_hook = NULL,
 #endif
+    .tmpl_alloc    = citp_pipe_tmpl_alloc,
+    .tmpl_update   = citp_pipe_tmpl_update,
+    .tmpl_abort    = citp_pipe_tmpl_abort,
   }
 };
 
@@ -714,6 +756,10 @@ int citp_pipe_create(int fds[2], int flags)
   epi_write->pipe = p;
 
   /* We're ready.  Unleash us onto the world! */
+  ci_assert(epi_read->pipe->b.sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_assert(epi_write->pipe->b.sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_atomic32_and(&epi_read->pipe->b.sb_aflags, ~CI_SB_AFLAG_NOT_READY);
+  ci_atomic32_and(&epi_read->pipe->b.sb_aflags, ~CI_SB_AFLAG_NOT_READY);
   citp_fdtable_insert(&epi_read->fdinfo, fds[0], 0);
   citp_fdtable_insert(&epi_write->fdinfo, fds[1], 0);
 

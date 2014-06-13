@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,6 +125,7 @@
 
 #endif
 #include <ci/driver/efab/hardware/falcon.h>
+#include <ci/driver/efab/hardware/ef10.h>
 
 #ifndef __KERNEL__
 #include <ci/driver/efab/hardware/falcon_ul.h>
@@ -140,41 +141,51 @@
 #define efhw_nic_close_hardware(nic) \
 	((nic)->efhw_func->close_hardware(nic))
 
-#define efhw_nic_init_hardware(nic, ev_handlers, mac_addr, non_irq_evq) \
-	((nic)->efhw_func->init_hardware((nic), (ev_handlers), (mac_addr), \
-					 (non_irq_evq)))
+#define efhw_nic_init_hardware(nic, ev_handlers, mac_addr, non_irq_evq,     \
+			       bt_min, bt_lim)                              \
+	((nic)->efhw_func->init_hardware((nic), (ev_handlers), (mac_addr),  \
+					 (non_irq_evq), (bt_min), (bt_lim)))
 #define efhw_nic_post_reset(nic) \
 	((nic)->efhw_func->post_reset((nic)))
-/*-------------- Interrupt support  ------------ */
-
-#define efhw_nic_set_interrupt_moderation(nic, evq, val)                 \
-	((nic)->efhw_func->set_interrupt_moderation(nic, evq, val))
 
 /*-------------- Event support  ------------ */
 
-#define efhw_nic_event_queue_enable(nic, evq, size, buf_base, interrupting, dos_p) \
-	((nic)->efhw_func->event_queue_enable((nic), (evq), (size),     \
-					      (buf_base), (interrupting), (dos_p)))
+#define efhw_nic_event_queue_enable(nic, evq, size, buf_base, dma_addrs, \
+				    n_pages, interrupting, dos_p, wakeup_evq) \
+	((nic)->efhw_func->event_queue_enable((nic), (evq), (size),      \
+					    (buf_base), (dma_addrs),     \
+                                            (n_pages), (interrupting),   \
+                                            (dos_p), (wakeup_evq)))
 
-#define efhw_nic_event_queue_disable(nic, evq, timer_only) \
-	((nic)->efhw_func->event_queue_disable(nic, evq, timer_only))
+#define efhw_nic_event_queue_disable(nic, evq)                  \
+	((nic)->efhw_func->event_queue_disable(nic, evq))
 
-#define efhw_nic_wakeup_request(nic, rd_ptr, evq)                       \
-	((nic)->efhw_func->wakeup_request((nic), (rd_ptr), (evq)))
+#define efhw_nic_wakeup_request(nic, iopage, rd_ptr)                    \
+	((nic)->efhw_func->wakeup_request((nic), (iopage), (rd_ptr)))
+
+#define efhw_nic_wakeup_mask_set(nic, mask)                       \
+	((nic)->efhw_func->wakeup_mask_set((nic), (mask)))
 
 #define efhw_nic_sw_event(nic, data, ev) \
 	((nic)->efhw_func->sw_event(nic, data, ev))
 
+#define efhw_nic_handle_event(nic, handler, ev) \
+	((nic)->efhw_func->handle_event((nic), (handler), (ev)))
+
 /*-------------- DMA support  ------------ */
 #define efhw_nic_dmaq_tx_q_init(nic, dmaq, evq, owner, tag,		\
-				dmaq_size, index, flags)		\
+				dmaq_size, index, dma_addrs, n_dma_addrs, \
+                                flags)                                  \
 	((nic)->efhw_func->dmaq_tx_q_init(nic, dmaq, evq, owner, tag,	\
-					  dmaq_size, index, flags))
+					  dmaq_size, index, dma_addrs,  \
+                                          n_dma_addrs, flags))
 
 #define efhw_nic_dmaq_rx_q_init(nic, dmaq, evq, owner, tag,		\
-				dmaq_size, index, flags) \
+				dmaq_size, index, dma_addrs, n_dma_addrs, \
+                                flags)                                  \
 	((nic)->efhw_func->dmaq_rx_q_init(nic, dmaq, evq, owner, tag,	\
-					  dmaq_size, index, flags))
+					  dmaq_size, index, dma_addrs,  \
+                                          n_dma_addrs, flags))
 
 #define efhw_nic_dmaq_tx_q_disable(nic, dmaq) \
 	((nic)->efhw_func->dmaq_tx_q_disable(nic, dmaq))
@@ -188,24 +199,31 @@
 #define efhw_nic_flush_rx_dma_channel(nic, dmaq) \
 	((nic)->efhw_func->flush_rx_dma_channel(nic, dmaq))
 
+#define efhw_nic_pace(nic, dmaq, pace) \
+	((nic)->efhw_func->tx_q_pace((nic), (dmaq), (pace)))
+
 /*-------------- MAC Low level interface ---- */
 #define efhw_gmac_get_mac_addr(nic) \
 	((nic)->gmac->get_mac_addr((nic)->gmac))
 
 /*-------------- Buffer table -------------- */
-#define efhw_nic_buffer_table_set(nic, addr, region, own_id, buf_id)    \
-	((nic)->efhw_func->buffer_table_set(nic, addr, region, own_id, buf_id))
-
-#define efhw_nic_buffer_table_set_n(nic, buf_id, addr,                  \
-				    region, n_pages, own_id)            \
-	((nic)->efhw_func->buffer_table_set_n(nic, buf_id, addr,	\
-					      region, n_pages, own_id))
-
-#define efhw_nic_buffer_table_clear(nic, id, num) \
-	((nic)->efhw_func->buffer_table_clear(nic, id, num))
-
-#define efhw_nic_buffer_table_commit(nic) \
-	((nic)->efhw_func->buffer_table_commit(nic))
+#define efhw_nic_buffer_table_orders(nic)                               \
+	((nic)->efhw_func->buffer_table_orders)
+#define efhw_nic_buffer_table_orders_num(nic)                           \
+	((nic)->efhw_func->buffer_table_orders_num)
+#define efhw_nic_buffer_table_alloc(nic, owner, order, block_out)       \
+	((nic)->efhw_func->buffer_table_alloc(nic, owner, order, block_out))
+#define efhw_nic_buffer_table_realloc(nic, owner, order, block)         \
+	((nic)->efhw_func->buffer_table_realloc(nic, owner, order, block))
+#define efhw_nic_buffer_table_free(nic, block)                          \
+	((nic)->efhw_func->buffer_table_free(nic, block))
+#define efhw_nic_buffer_table_set(nic, block, first_entry, n_entries,   \
+				  addrs)                                \
+	((nic)->efhw_func->buffer_table_set(nic, block, first_entry,    \
+					    n_entries, addrs))
+#define efhw_nic_buffer_table_clear(nic, block, first_entry, n_entries) \
+	((nic)->efhw_func->buffer_table_clear(nic, block, first_entry,  \
+					      n_entries))
 
 
 /*----------------------------------------------------------------------------
@@ -221,10 +239,3 @@
 #define EFHW_BUFFER_ADDR		FALCON_BUFFER_4K_ADDR
 #define EFHW_BUFFER_PAGE		FALCON_BUFFER_4K_PAGE
 #define EFHW_BUFFER_OFF			FALCON_BUFFER_4K_OFF
-
-#if PAGE_SIZE <= EFHW_MAX_PAGE_SIZE
-#define EFHW_NIC_PAGE_SIZE PAGE_SIZE
-#else
-#define EFHW_NIC_PAGE_SIZE EFHW_MAX_PAGE_SIZE
-#endif
-#define EFHW_NIC_PAGE_MASK (~(EFHW_NIC_PAGE_SIZE-1))

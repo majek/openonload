@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,11 +55,7 @@ extern int ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma);
 
 extern int
 ci_mmap_bar(struct efhw_nic* nic, off_t base, size_t len, void* opaque,
-            int* map_num, unsigned long* offset);
-
-extern void
-ci_mmap_iopage(struct efhw_iopage* p, void* opaque, int* map_num,
-	       unsigned long* offset);
+            int* map_num, unsigned long* offset, int set_wc);
 
 extern void
 ci_mmap_iopages(struct efhw_iopages* p, unsigned offset, unsigned max_bytes,

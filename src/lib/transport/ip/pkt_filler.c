@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -97,7 +97,7 @@ int oo_pkt_fill(ci_netif* ni, int* p_netif_locked,
       return -EFAULT;
 
     pf->buf_start += n;
-    pf->pkt->tx_pkt_len += n;
+    pf->pkt->pay_len += n;
     ci_iovec_ptr_advance(piov, n);
 
     if( n == bytes_to_copy )
@@ -123,6 +123,7 @@ int oo_pkt_fill(ci_netif* ni, int* p_netif_locked,
           return -ERESTARTSYS;
 #endif
       }
+      oo_tx_pkt_layout_init(next_pkt);
       ++pf->pkt->n_buffers;
 
       pf->last_pkt->frag_next = OO_PKT_P(next_pkt);

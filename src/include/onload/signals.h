@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,7 +30,7 @@
 /* Signal handler state: filled in kernel by OO_IOC_SIGACTION, used in UL */
 struct oo_sigaction {
   ci_user_ptr_t handler; /*!< UL function pointer */
-  ci_int32      flags;   /*!< SA_RESTART and SA_SIGINFO only */
+  ci_int32      flags;   /*!< SA_RESTART, SA_SIGINFO and SA_ONESHOT */
   volatile ci_int32  type;    /*!< Type of signal handler */
   /*! SIG_DFL handlers should start from 0 */
 #define OO_SIGHANGLER_TERM 0 /*!< SIG_DFL: teminate */
@@ -74,12 +74,11 @@ typedef struct citp_signal_state_s {
   siginfo_t         saved_info;     /*!< Saved parameter for sa_sigaction */
 } citp_signal_state_t;
 
-typedef void (*sa_sigaction_t)(int, struct siginfo *, void *);
+typedef void (*sa_sigaction_t)(int, siginfo_t *, void *);
 
 /* signal data for trampoline */
 struct oo_sigaction citp_signal_data[NSIG];
-void citp_signal_intercept_1(int signum);
-void citp_signal_intercept_3(int signum, siginfo_t *info, void *context);
+void citp_signal_intercept(int signum, siginfo_t *info, void *context);
 extern void *citp_signal_sarestorer_get(void);
 extern sa_sigaction_t citp_signal_handlers[OO_SIGHANGLER_DFL_MAX+1];
 

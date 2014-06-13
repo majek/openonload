@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -176,7 +176,7 @@ get_ts_from_cache (ci_netif *netif,
        */
       switch_filter = 1;
       LOG_EP (ci_log ("changed interface of cached EP, uncaching filters"));
-      rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 1);
+      rc = ci_tcp_ep_clear_filters(netif, S_SP(ts));
       if (rc < 0) {
         LOG_E (ci_log ("Failed to clear filter on cache switch! (%d)", rc));
         return NULL;
@@ -198,6 +198,10 @@ get_ts_from_cache (ci_netif *netif,
     rport = tcp_rport_be16(ts);
 
     ci_sock_cmn_init(netif, &ts->s);
+    ci_pmtu_state_init(netif, &ts->s, &ts->pmtus, CI_IP_TIMER_PMTU_DISCOVER);
+	
+    if (NI_OPTS(netif).tcp_force_nodelay == 1)
+      ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
 
     if (switch_filter) {
       LOG_EP (ci_log ("Resetting filters for cached EP"));
@@ -251,7 +255,7 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
   ts->s.rx_bind2dev_ifindex = s->rx_bind2dev_ifindex;
   ts->s.rx_bind2dev_base_ifindex = s->rx_bind2dev_base_ifindex;
   ts->s.rx_bind2dev_vlan = s->rx_bind2dev_vlan;
-  ci_tcp_set_sndbuf(ts);      /* eff_mss must be valid */
+  ci_tcp_set_sndbuf(ni, ts);      /* eff_mss must be valid */
 
   {
     /* NB. We have exclusive access to [ts], so it is safe to manipulate
@@ -262,6 +266,9 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
     if( NI_OPTS(ni).accept_inherit_nonblock )
       inherited_sbflags |= CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY;
 
+    if( NI_OPTS(ni).tcp_force_nodelay == 1 )
+      ci_bit_clear(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
+
     if( NI_OPTS(ni).accept_inherit_nodelay )
       inherited_sflags |= CI_SOCK_AFLAG_NODELAY;
 
@@ -271,7 +278,9 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
     ci_assert((ts->s.b.sb_aflags & inherited_sbflags) == 0);
     ci_atomic32_or(&ts->s.b.sb_aflags, s->b.sb_aflags & inherited_sbflags);
 
-    ci_assert((ts->s.s_flags & CI_SOCK_FLAG_TCP_INHERITED) == 0);
+    ci_assert_equal((ts->s.s_flags & CI_SOCK_FLAG_TCP_INHERITED),
+                    CI_SOCK_FLAG_PMTU_DO);
+    ts->s.s_flags &= ~CI_SOCK_FLAG_PMTU_DO;
     ts->s.s_flags |= s->s_flags & CI_SOCK_FLAG_TCP_INHERITED;
   }
 
@@ -283,8 +292,6 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
   ts->c.t_ka_intvl         = c->t_ka_intvl;
   ts->c.t_ka_intvl_in_secs = c->t_ka_intvl_in_secs;
   ts->c.ka_probe_th        = c->ka_probe_th;
-  /* IP_TOS, IP_TTL, IP_MTU_DISCOVER */
-  ts->s.pkt.pmtus.state    = s->pkt.pmtus.state;
   ci_ip_hdr_init_fixed(&ts->s.pkt.ip, IPPROTO_TCP,
                         s->pkt.ip.ip_ttl,
                         s->pkt.ip.ip_tos);
@@ -316,29 +323,16 @@ static void ci_tcp_inherit_accept_options(ci_netif* ni,
 ** tcp_state structure due to memory pressure or the like
 */
 int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
-                               ci_tcp_state_synrecv* tsr, ciip_tcp_rx_pkt* rxp,
-                               ci_ip_cached_hdrs* ipcache)
+                               ci_tcp_state_synrecv* tsr,
+                               ci_ip_cached_hdrs* ipcache,
+                               ci_tcp_state** ts_out)
 {
-  ci_ip_pkt_fmt* pkt = rxp->pkt;
-  ci_tcp_hdr* tcp = rxp->tcp;
   int rc = 0;
   
   ci_assert(netif);
   ci_assert(tls);
   ci_assert(tls->s.b.state == CI_TCP_LISTEN);
   ci_assert(tsr);
-  ci_assert(pkt);
-
-  if( (tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) &&
-      SEQ_EQ(rxp->seq, pkt->pf.tcp_rx.end_seq) ) {
-    CITP_STATS_TCP_LISTEN(++netif->state->stats.accepts_deferred);
-    if( OO_SP_NOT_NULL(tsr->local_peer) ) {
-      ci_tcp_state *ts = ID_TO_TCP(netif, tsr->local_peer);
-      ts->tcpflags |= CI_TCPT_FLAG_LOOP_DEFERRED;
-      LOG_TC(log(LNT_FMT "loopback connection deferred", LNT_PRI_ARGS(netif, ts)));
-    }
-    return 0;
-  }
 
   if( (int) ci_tcp_acceptq_n(tls) < tls->acceptq_max ) {
     ci_tcp_state* ts;
@@ -404,9 +398,9 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->s.domain = tls->s.domain;
 
     cicp_ip_cache_update_from(netif, &ts->s.pkt, ipcache);
-    ci_pmtu_state_init(netif, &ts->s, &ts->s.pkt.pmtus,
+    ci_pmtu_state_init(netif, &ts->s, &ts->pmtus,
                        CI_IP_TIMER_PMTU_DISCOVER);
-    ci_pmtu_set(netif, &ts->s.pkt.pmtus,
+    ci_pmtu_set(netif, &ts->pmtus,
                 CI_MIN(ts->s.pkt.mtu,
                        tsr->tcpopts.smss + sizeof(ci_tcp_hdr)
                          + sizeof(ci_ip4_hdr)));
@@ -420,10 +414,15 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     /* Now that we know the outgoing the outgoing route, set the MTU related
      * values. Note, even these values are speculative since the real MTU
      * could change between now and passing the packet to the lower layers
+     *
+     * If we have a rcvbuf smaller than the mss we would advertise, then
+     * limit amss to that.  Note that we take size from the listening socket
+     * as our new socket hasn't been fully setup yet.
      */
-    ts->amss = ts->s.pkt.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
+    ts->amss = CI_MIN(tls->s.so.rcvbuf,
+                      ts->s.pkt.mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr));
 #if CI_CFG_LIMIT_AMSS
-    ts->amss = ci_tcp_limit_mss(ts->amss, netif->state, __FUNCTION__);
+    ts->amss = ci_tcp_limit_mss(ts->amss, netif, __FUNCTION__);
 #endif
 
     /* options and flags */
@@ -434,8 +433,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     if( ts->tcpflags & CI_TCPT_FLAG_WSCL ) {
       ts->snd_wscl = tsr->tcpopts.wscl_shft;
       ts->rcv_wscl = tsr->rcv_wscl;
-      /* Fixup window, as no scaling has been applied yet. */
-      pkt->pf.tcp_rx.window = ci_tcp_wnd_from_hdr(tcp, ts->snd_wscl);
     } else {
       ts->snd_wscl = ts->rcv_wscl = 0u;
     }
@@ -445,7 +442,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     /* Send and receive sequence numbers */
     tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) =
       tsr->snd_isn + 1;
-    ci_tcp_set_snd_max(ts, rxp->seq, rxp->ack, pkt->pf.tcp_rx.window);
+    ci_tcp_set_snd_max(ts, tsr->rcv_nxt, tcp_snd_una(ts), 0);
     ci_tcp_rx_set_isn(ts, tsr->rcv_nxt);
     tcp_rcv_up(ts) = SEQ_SUB(tcp_rcv_nxt(ts), 1);
 
@@ -455,9 +452,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
       ts->tspaws = ci_tcp_time_now(netif);
       ts->tsrecent = tsr->tspeer;
       ts->tslastack = tsr->rcv_nxt;
-
-      ci_tcp_update_rtt(netif, ts,
-                        ci_tcp_time_now(netif) - rxp->timestamp_echo);
     }
     else {
       /* Must be after initialising snd_una. */
@@ -473,7 +467,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     if (ts->c.user_mss && ts->c.user_mss < ts->smss)
       ts->smss = ts->c.user_mss;
 #if CI_CFG_LIMIT_SMSS
-    ts->smss = ci_tcp_limit_mss(ts->smss, netif->state, __FUNCTION__);
+    ts->smss = ci_tcp_limit_mss(ts->smss, netif, __FUNCTION__);
 #endif
     ci_assert(ts->smss>0);
     ci_tcp_set_eff_mss(netif, ts);
@@ -495,33 +489,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ci_tcp_kalive_restart(netif, ts, ci_tcp_kalive_idle_get(ts));
     ci_tcp_set_flags(ts, CI_TCP_FLAG_ACK);
 
-    if( ! SEQ_EQ(rxp->seq, pkt->pf.tcp_rx.end_seq) ) {
-      /* NB. Can't contain a SYN here (see handle_rx_synrecv_ack()).
-      **
-      ** Packet contains some payload or possibly a FIN.  One approach is
-      ** to bin the payload and let the other guy retransmit.  But that
-      ** could have a pretty bad effect on performance for short-lived
-      ** connections, so we want to enqueue this data in the common case.
-      */
-      ci_assert(! (tcp->tcp_flags & CI_TCP_FLAG_SYN));
-      if( SEQ_EQ(rxp->seq, tcp_rcv_nxt(ts)) &&
-          ! (tcp->tcp_flags & CI_TCP_FLAG_FIN) ) {
-        /* Packet contains some payload and no FIN, so enqueue it. */
-        LOG_TC(log(LNT_FMT "SYN-RCVD ["CI_TCP_FLAGS_FMT"] paylen=%d enqueued",
-                   LNT_PRI_ARGS(netif, ts),
-                   CI_TCP_HDR_FLAGS_PRI_ARG(tcp), pkt->pay_len));
-        ci_tcp_rx_deliver2(ts, netif, rxp);
-        ci_netif_pkt_hold(netif, pkt);
-      }
-      else
-        /* Packet is out-of-order or contains a FIN...bin it.  They can
-        ** retransmit.
-        */
-        LOG_U(log(LNT_FMT "SYN-RCVD ["CI_TCP_FLAGS_FMT"] paylen=%d BINNED",
-                  LNT_PRI_ARGS(netif, ts),
-                  CI_TCP_HDR_FLAGS_PRI_ARG(tcp), pkt->pay_len));
-    }
-
     /* Remove the synrecv structure from the listen queue, and free the
     ** buffer. */
     ci_tcp_listenq_remove(netif, tls, tsr);
@@ -529,15 +496,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
 
     ci_bit_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
     ci_tcp_acceptq_put(netif, tls, &ts->s.b);
-
-    /* Start zero window probes if necessary.
-    ** Usually it is done from ci_tcp_rx_handle_ack, but with passive
-    ** open this ACK will not go through the usual datapath.
-    **/
-    if( pkt->pf.tcp_rx.window < tcp_eff_mss(ts) ) {
-      ci_tcp_zwin_set(netif, ts);
-      CI_IP_SOCK_STATS_INC_ZWIN( ts );
-    }
 
     LOG_TC(log(LNT_FMT "new ts=%d SYN-RECV->ESTABLISHED flags=0x%x",
                LNT_PRI_ARGS(netif, tls), S_FMT(ts), ts->tcpflags);
@@ -547,6 +505,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
                tcp_snd_nxt(ts), ts->snd_max, tcp_enq_nxt(ts)));
 
     citp_waitable_wake(netif, &tls->s.b, CI_SB_FLAG_WAKE_RX);
+    *ts_out = ts;
     return 0;
   }
   CI_TCP_EXT_STATS_INC_LISTEN_OVERFLOWS( netif );

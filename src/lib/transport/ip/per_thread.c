@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,7 +30,11 @@
 
 #ifdef HAVE_CC__THREAD
 
+#ifdef __powerpc__
+__thread struct oo_per_thread oo_per_thread __attribute__((tls_model("local-dynamic")));
+#else
 __thread struct oo_per_thread oo_per_thread;
+#endif
 
 #else
 
@@ -62,6 +66,7 @@ void oo_per_thread_init_thread(void)
   if( init_thread_callback ) {
     init_thread_callback(&oo_per_thread);
     oo_per_thread.initialised = 1;
+    oo_per_thread.in_vfork_child = 0;
   }
 }
 
@@ -79,6 +84,7 @@ struct oo_per_thread* oo_per_thread_init_and_get(void)
   if( init_thread_callback ) {
     init_thread_callback(pt);
     pt->initialised = 1;
+    pt->in_vfork_child = 0;
   }
   return pt;
 }

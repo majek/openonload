@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -138,7 +138,7 @@ typedef struct ci_workqueue_s
  *--------------------------------------------------------------------*/
 
 
-extern int ci_workqueue_ctor(ci_workqueue_t * wqueue);
+extern int ci_workqueue_ctor(ci_workqueue_t * wqueue, const char *name);
 extern void ci_workqueue_dtor(ci_workqueue_t * wqueue);
 
 ci_inline void

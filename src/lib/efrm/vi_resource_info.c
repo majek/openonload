@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,7 +43,6 @@ falcon_pt_attach_doorbells(volatile char __iomem *bar_ioaddr,
 
 static void falcon_vi_get_mappings(struct efrm_vi* vi_rs,
 				   struct efhw_nic* nic,
-                                   volatile char __iomem *bar_ioaddr, 
                                    int instance, void *out)
 {
   struct vi_mappings* vm = (struct vi_mappings*)out;
@@ -74,8 +73,10 @@ static void falcon_vi_get_mappings(struct efrm_vi* vi_rs,
 	    efhw_iopages_ptr(&vi_rs->q[EFHW_RXQ].pages);
 
     vm->rx_bell = (ef_vi_ioaddr_t)
-      falcon_pt_attach_doorbells(bar_ioaddr, /*is_tx*/0, instance);
+      falcon_pt_attach_doorbells(nic->bar_ioaddr, /*is_tx*/0, instance);
   }
+  vm->rx_prefix_len = vi_rs->rx_prefix_len;
+  EFRM_ASSERT(vm->rx_prefix_len == nic->rx_prefix_len);
 
   vm->tx_queue_capacity = vi_rs->q[EFHW_TXQ].capacity;
   vm->tx_dma_falcon = NULL;
@@ -85,7 +86,51 @@ static void falcon_vi_get_mappings(struct efrm_vi* vi_rs,
 	    efhw_iopages_ptr(&vi_rs->q[EFHW_TXQ].pages);
 
     vm->tx_bell = (ef_vi_ioaddr_t)
-      falcon_pt_attach_doorbells(bar_ioaddr, /*is_tx*/1, instance);
+      falcon_pt_attach_doorbells(nic->bar_ioaddr, /*is_tx*/1, instance);
+  }
+}
+
+
+static void ef10_vi_get_mappings(struct efrm_vi* vi_rs,
+				 struct efhw_nic* nic,
+				 int instance, void *out)
+{
+  struct vi_mappings* vm = (struct vi_mappings*)out;
+
+  memset(vm, 0, sizeof(*vm));
+  vm->signature = VI_MAPPING_SIGNATURE;
+
+  vm->nic_type.arch = EF_VI_ARCH_EF10;
+  vm->nic_type.variant = nic->devtype.variant;
+  vm->nic_type.revision = (unsigned char) nic->devtype.revision;
+  vm->nic_type.flags = (nic->flags & NIC_FLAG_BUG35388_WORKAROUND) ?
+                       EF_VI_NIC_FLAG_BUG35388_WORKAROUND : 0;
+
+  vm->evq_bytes = efrm_vi_rm_evq_bytes(vi_rs, -1);
+  vm->evq_base = NULL;
+  vm->evq_timer_reg = NULL;
+  if( vm->evq_bytes != 0 ) {
+    vm->evq_base = efhw_iopages_ptr(&vi_rs->q[EFHW_EVQ].pages);
+    vm->evq_timer_reg = (ef_vi_ioaddr_t) (vi_rs->io_page + ER_DZ_EVQ_TMR_REG);
+  }
+  vm->timer_quantum_ns = nic->timer_quantum_ns;
+
+  vm->vi_instance = instance;
+  vm->rx_queue_capacity = vi_rs->q[EFHW_RXQ].capacity;
+  vm->rx_dma_ef10 = NULL;
+  vm->rx_bell = NULL;
+  if( vm->rx_queue_capacity != 0 ) {
+    vm->rx_dma_ef10 = efhw_iopages_ptr(&vi_rs->q[EFHW_RXQ].pages);
+    vm->rx_bell = (ef_vi_ioaddr_t) (vi_rs->io_page + ER_DZ_RX_DESC_UPD_REG);
+  }
+  vm->rx_prefix_len = vi_rs->rx_prefix_len;
+
+  vm->tx_queue_capacity = vi_rs->q[EFHW_TXQ].capacity;
+  vm->tx_dma_ef10 = NULL;
+  vm->tx_bell = NULL;
+  if( vm->tx_queue_capacity != 0 ) {
+    vm->tx_dma_ef10 = efhw_iopages_ptr(&vi_rs->q[EFHW_TXQ].pages);
+    vm->tx_bell = (ef_vi_ioaddr_t) (vi_rs->io_page + ER_DZ_TX_DESC_UPD_REG);
   }
 }
 
@@ -99,8 +144,10 @@ void efrm_vi_resource_mappings(struct efrm_vi* vi, void* out_vi_data)
 
   switch( nic->devtype.arch ) {
   case EFHW_ARCH_FALCON:
-    falcon_vi_get_mappings(vi, nic, nic->bar_ioaddr,
-			   vi->rs.rs_instance, out_vi_data);
+    falcon_vi_get_mappings(vi, nic, vi->rs.rs_instance, out_vi_data);
+    break;
+  case EFHW_ARCH_EF10:
+    ef10_vi_get_mappings(vi, nic, vi->rs.rs_instance, out_vi_data);
     break;
   default:
     EFRM_ASSERT(0);
@@ -119,6 +166,9 @@ int efrm_vi_timer_page_offset(struct efrm_vi* vi)
   switch( nic->devtype.arch ) {
   case EFHW_ARCH_FALCON:
     return falcon_timer_page_offset(vi->rs.rs_instance);
+    break;
+  case EFHW_ARCH_EF10:
+    return ef10_timer_page_offset(vi->rs.rs_instance);
     break;
   default:
     EFRM_ASSERT(0);

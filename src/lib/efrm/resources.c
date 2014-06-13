@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,48 +51,17 @@
  */
 
 #include <ci/efrm/private.h>
-#include <ci/efrm/buffer_table.h>
 #include "efrm_vi.h"
 #include "efrm_vi_set.h"
-#include "efrm_iobufset.h"
 #include "efrm_vf.h"
 #include "efrm_pd.h"
-
-
-static char *shared_buffer_table;
-module_param(shared_buffer_table, charp, 0444);
-MODULE_PARM_DESC(shared_buffer_table, "Set number of buffer table entries"
-		 "that can be used across all network ports.  This is "
-		 "needed for legacy ef_vi applications that use the "
-		 "ef_iobufset interface.");
+#include "efrm_pio.h"
 
 
 int
 efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
 {
-	unsigned bt_shd_low = 0, bt_shd_high = 0;
 	int i, rc;
-
-	if (shared_buffer_table != NULL) {
-		char dummy;
-		rc = sscanf(shared_buffer_table, "%u%c", &bt_shd_high, &dummy);
-		if (rc == 1) {
-			bt_shd_low = 5000;
-			bt_shd_high += bt_shd_low;
-		} else {
-			rc = sscanf(shared_buffer_table, "%u-%u%c",
-				    &bt_shd_low, &bt_shd_high, &dummy);
-		}
-		if (rc < 1 || rc > 2 || bt_shd_low >= bt_shd_high) {
-			EFRM_ERR("%s: ERROR: bad shared_buffer_table module "
-				 "parameter '%s'",
-				 __FUNCTION__, shared_buffer_table);
-			bt_shd_low = bt_shd_high = 0;
-		}
-	}
-	rc = efrm_buffer_table_ctor(bt_shd_low, bt_shd_high);
-	if (rc != 0)
-		return rc;
 
 	/* Create resources in the correct order */
 	for (i = 0; i < EFRM_RESOURCE_NUM; ++i) {
@@ -101,11 +70,7 @@ efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
 		EFRM_ASSERT(*rmp == NULL);
 		switch (i) {
 		case EFRM_RESOURCE_VI:
-			rc = efrm_create_vi_resource_manager(rmp,
-							     vi_res_dim);
-			break;
-		case EFRM_RESOURCE_IOBUFSET:
-			rc = efrm_create_iobufset_resource_manager(rmp);
+			rc = efrm_create_vi_resource_manager(rmp);
 			break;
 		case EFRM_RESOURCE_VI_SET:
 			rc = efrm_create_vi_set_resource_manager(rmp);
@@ -118,6 +83,9 @@ efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
 		case EFRM_RESOURCE_PD:
 			rc = efrm_create_pd_resource_manager(rmp);
 			break;
+		case EFRM_RESOURCE_PIO:
+			rc = efrm_create_pio_resource_manager(rmp);
+			break;
 		default:
 			rc = 0;
 			break;
@@ -126,7 +94,6 @@ efrm_resources_init(const struct vi_resource_dimensions *vi_res_dim)
 		if (rc < 0) {
 			EFRM_ERR("%s: failed type=%d (%d)",
 				 __FUNCTION__, i, rc);
-			efrm_buffer_table_dtor();
 			return rc;
 		}
 	}
@@ -143,6 +110,4 @@ void efrm_resources_fini(void)
 			efrm_resource_manager_dtor(efrm_rm_table[i]);
 			efrm_rm_table[i] = NULL;
 		}
-
-	efrm_buffer_table_dtor();
 }

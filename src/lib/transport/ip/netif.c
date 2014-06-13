@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -23,7 +23,6 @@
 \**************************************************************************/
 
 #include "ip_internal.h"
-
 
 #define LPF "NETIF "
 
@@ -285,7 +284,6 @@ int ci_netif_timewait_try_to_free_filter(ci_netif* ni)
  *
  *--------------------------------------------------------------------*/
 
-
 /*! add a state to the fin timeout list */
 void ci_netif_fin_timeout_enter(ci_netif* ni, ci_tcp_state* ts)
 {
@@ -528,14 +526,6 @@ int ci_netif_mem_pressure_try_exit(ci_netif* ni)
  *
  *--------------------------------------------------------------------*/
 
-/* TODO modify this to use pkt->base_addr */
-#if CI_CFG_RSS_HASH
-# define PKT_RX_DMA_BASE(pkt)  ((pkt)->base_addr[(pkt)->intf_i] - 16)
-#else
-# define PKT_RX_DMA_BASE(pkt)  ((pkt)->base_addr[(pkt)->intf_i])
-#endif
-
-
 static void __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i, int max)
 {
   ci_ip_pkt_fmt* pkt;
@@ -557,7 +547,30 @@ static void __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i, int max)
       pkt->refcount = 1;
       pkt->flags |= CI_PKT_FLAG_RX;
       pkt->intf_i = intf_i;
-      ef_vi_receive_init(vi, PKT_RX_DMA_BASE(pkt), OO_PKT_ID(pkt));
+      pkt->pkt_start_off = ef_vi_receive_prefix_len(vi);
+      ef_vi_receive_init(vi, pkt->dma_addr[pkt->intf_i], OO_PKT_ID(pkt));
+#ifdef __powerpc__
+      {
+        /* Flush RX buffer from cache.  This saves significant latency when
+         * data is DMAed into the buffer (on ppc at least).
+         *
+         * TODO: I think the reason we're seeing dirty buffers is because
+         * TX buffers are being recycled into the RX ring.  Might be better
+         * to segregate buffers so that doesn't happen so much.
+         *
+         * TODO: See if any benefit/downside to enabling on x86.  (Likely
+         * to be less important on systems with DDIO).
+         */
+        int off;
+        for( off = 0; off < pkt->buf_len; off += EF_VI_DMA_ALIGN )
+          ci_clflush(pkt->dma_start + off);
+        /* This seems like a good idea (only flush buffer if it was last
+         * used for TX) but it seems to make latency worse by around 30ns:
+         *
+         *   pkt->buf_len = 0;
+         */
+      }
+#endif
     }
     ni->state->n_freepkts -= CI_CFG_RX_DESC_BATCH;
     ni->state->n_rx_pkts  += CI_CFG_RX_DESC_BATCH;
@@ -645,8 +658,30 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
   while( netif->state->pkt_sets_n < netif->state->pkt_sets_max ) {
     int old_n_freepkts = netif->state->n_freepkts;
     ci_tcp_helper_more_bufs(netif);
-    if( old_n_freepkts == netif->state->n_freepkts )
+    if( old_n_freepkts == netif->state->n_freepkts ) {
+#ifndef __KERNEL__
       ci_assert_equal(netif->state->pkt_sets_n, netif->state->pkt_sets_max);
+#else
+      /* Probably, we are in atomic context and can not allocate more
+       * buffers just now. */
+      tcp_helper_resource_t *trs = netif2tcp_helper_resource(netif);
+      if( netif->state->pkt_sets_n ==  netif->state->pkt_sets_max )
+        break;
+      ci_assert(in_atomic());
+      ci_assert(trs->avoid_atomic_allocations);
+      if( netif->state->n_freepkts >= CI_CFG_RX_DESC_BATCH &&
+          netif->state->n_freepkts >=
+            CI_MIN(4 * CI_CFG_RX_DESC_BATCH, NI_OPTS(netif).free_packets_low)
+        ) {
+        if( netif->state->n_freepkts < NI_OPTS(netif).free_packets_low )
+          queue_work(trs->wq, &trs->non_atomic_work);
+        max_n_to_post = netif->state->n_freepkts;
+        goto enough_pkts;
+      }
+      queue_work(trs->wq, &trs->non_atomic_work);
+      return;
+#endif
+    }
     if( netif->state->n_freepkts >= max_n_to_post )
       goto enough_pkts;
   }
@@ -805,7 +840,6 @@ static void ci_netif_unlock_slow(ci_netif* ni)
       return;
 
 #endif
-
 
   {
     int rc;

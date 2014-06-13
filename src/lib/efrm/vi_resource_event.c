@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,6 +57,7 @@
 #include <ci/efrm/vi_resource_private.h>
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/efrm_nic.h>
+#include <ci/efrm/buffer_table.h>
 #include "efrm_internal.h"
 
 
@@ -67,37 +68,45 @@ efrm_eventq_base(struct efrm_vi *virs)
 }
 
 
-void
-efrm_eventq_request_wakeup(struct efrm_vi *virs, unsigned current_ptr)
+void efrm_eventq_request_wakeup(struct efrm_vi *virs, unsigned current_ptr)
 {
 	struct efhw_nic *nic = virs->rs.rs_client->nic;
 	int next_i;
-	next_i = ((current_ptr / sizeof(efhw_event_t)) &
-		  (virs->q[EFHW_EVQ].capacity - 1));
-
-	efhw_nic_wakeup_request(nic, next_i, virs->rs.rs_instance);
+	next_i = current_ptr & (virs->q[EFHW_EVQ].capacity - 1);
+	efhw_nic_wakeup_request(nic, virs->io_page, next_i);
 }
 EXPORT_SYMBOL(efrm_eventq_request_wakeup);
+
 
 void efrm_eventq_reset(struct efrm_vi *virs)
 {
 	struct efhw_nic *nic = virs->rs.rs_client->nic;
+	struct efrm_nic *efrm_nic = container_of(nic, struct efrm_nic,
+						 efhw_nic);
 	int instance = virs->rs.rs_instance;
+	int wakeup_evq;
 
 	EFRM_ASSERT(virs->q[EFHW_EVQ].capacity != 0);
 
 	/* FIXME: Protect against concurrent resets. */
 
-	efhw_nic_event_queue_disable(nic, instance, 0);
+	efhw_nic_event_queue_disable(nic, instance);
 
+	wakeup_evq = virs->net_drv_wakeup_channel >= 0?
+		virs->net_drv_wakeup_channel:
+		efrm_nic->rss_channel_count == 0?
+		0:
+		instance % efrm_nic->rss_channel_count;
 	memset(efrm_eventq_base(virs), EFHW_CLEAR_EVENT_VALUE,
 	       efrm_vi_rm_evq_bytes(virs, -1));
 	efhw_nic_event_queue_enable(nic, instance, virs->q[EFHW_EVQ].capacity,
-				    virs->q[EFHW_EVQ].buf_tbl_alloc.base,
+			efrm_bt_allocation_base(&virs->q[EFHW_EVQ].bt_alloc),
+			virs->q[EFHW_EVQ].dma_addrs, 
+			1 << virs->q[EFHW_EVQ].page_order,
 				    /* make siena look like falcon for now */
 				    instance < 64, 
 				    /* make dos protection enable by default */
-				    1);
+				    1, wakeup_evq);
 	EFRM_TRACE("%s: " EFRM_RESOURCE_FMT, __FUNCTION__,
 		   EFRM_RESOURCE_PRI_ARG(&virs->rs));
 }
@@ -166,10 +175,6 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	instance = virs->rs.rs_instance;
 	cb_info = &efrm_nic(virs->rs.rs_client->nic)->vis[instance];
 	cb_info->vi = NULL;
-
-	/* Disable the timer. */
-	efhw_nic_event_queue_disable(virs->rs.rs_client->nic,
-				     instance, /*timer_only */ 1);
 
 	/* Disable the callback. */
 	bit = test_and_clear_bit(VI_RESOURCE_EVQ_STATE_CALLBACK_REGISTERED,

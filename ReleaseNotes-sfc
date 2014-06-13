@@ -1,6 +1,6 @@
 Solarflare 3.3 Linux network driver
 ===================================
-Version:  3.3.0.6309
+Version:  3.3.0.6246
 
 
 Overview
@@ -17,16 +17,12 @@ adapters:
 - Solarflare Onload Server Adapters:
   - Solarflare SFN6122F Dual Port SFP+ Server Adapter
   - Solarflare SFN6322F Precision Time Synchronization Server Adapter
-  - Solarflare SFN6832F SFP+ Mezzanine Adapter
   - Solarflare SFN5322F Precision Time Synchronization Server Adapter
   - Solarflare SFN5122F Dual Port SFP+ Server Adapter
   - Solarflare SFN5121T Dual Port 10GBASE-T Server Adapter
   - Solarflare SFN5802K Mezzanine Adapter (for HP BladeSystem c-Class)
   - Solarflare SFN5812H/SFN5814H Mezzanine Adapter (for IBM BladeCenter)
   
-- Solarflare AOE Adapters:
-  - Solarflare SFA6902F SFP+ AOE Adapter
-
 - Solarflare Performant Server Adapters:
   - Solarflare SFN5151T 10GBASE-T Server Adapter
   - Solarflare SFN5152F SFP+ Server Adapter
@@ -44,7 +40,7 @@ To build a binary RPM for the running kernel type
 Driver updates
 --------------
 The latest version of this driver can always be downloaded from
-<https://support.solarflare.com/>.
+<http://download.solarflare.com/>.
 
 
 Documentation
@@ -52,7 +48,7 @@ Documentation
 For detailed instructions of how to install and configure the Linux driver 
 please refer to the "Solarflare Server Adapter User's Guide"
 (part number SF-103837-CD) which is available as a PDF from
-<https://support.solarflare.com/>.
+<http://download.solarflare.com/>.
 
 
 Linux distribution support for Solarflare Adapters
@@ -72,64 +68,6 @@ Please contact your local Solarflare support representative or email
 
 Changelog
 ---------
-
-### v3.3.0.6309
-
-Issue 34948:
-  ~ Fix CPU soft-lockup on interrupted self-test
-Issue 34511:
-  ~ Fix kernel panic when VLAN group rapidly created/destroyed
-Issue 30759:
-  ~ Changes to max buffer table and VI advertised via driverlink
-  ~ Respect num_vis setting even if it exceeds the heuristic limit
-Issue 35637:
-  ~ Fix kernel panic on RX completion with unexpected index
-Issue 35644:
-  ~ Use hardware checksum offload under circumstances when we previously didn't
-    (specifically, packets not aggregated by LRO and not passed into GRO)
-Issue 35774:
-  ~ Remove sfc_tune from RPM builds and disable CONFIG_SFC_TUNE
-Issue 36530:
-  ~ Kernel compat fix for getnstime_raw_and_real() on 2.6.26.8
-Issue 37257:
-  ~ Build fixes for Linux 3.10: VLAN API, I2C API
-Issue 37256:
-  ~ Remove write permission from phy_type attribute (Linux 3.10 compatibility)
-Issue 37280:
-  ~ Update netdev notifier function for API change in Linux 3.11
-Issue 37110:
-  ~ Always store port number in private data, not net_device::dev_id
-
-Issue 35400:
-  ~ PTP: Fix incorrect filter address for PTP Peer Delay Multicast
-Issue 
-  ~ PTP: Fix crash if PTP hardware clock cannot be registered
-Issue 37248:
-  ~ PTP: mask out PCP and DEI fields in VLAN matching
-
-### v3.3.0.6262
-
-Issue 31533: 
-  ~ Fix sync of RX DMA buffer when it is not the last in the page (non issue on x86 servers) 
-Issue 31533: 
-  ~ Fix efx_rx_buf_offset() in the presence of swiotlb (used on 32bit systems with >3Gb RAM)
-Issue 33851:
-  ~ Fix very rare data corruption - use TX push only with a single descriptor 
-
-Issue
-  ~ AOE: Expose FC partition for use by sfupdate
-
-Issue 33711:
-  ~ PTP: Fix for MC statistics.
-Issue 33719:
-  ~ PTP: Check that PTP is enabled in the kernel before compiling PHC support
-Issue 34355:
-  ~ PTP: Guard against using PPS ioctl API on non-PTP adapters
-Issue 34356: 
-  ~ PTP: Improve accuracy of PPS timestamps
-Issue 34482:
-  ~ PTP: Fix to SO_TIMESTAMPING system timestamps (in conversion of hwardware timestamps)
-
 
 ### v3.3.0.6246
 
@@ -569,5 +507,5 @@ Issue 19951
 
 Copyright
 ---------
-Copyright 2009-2013 Solarflare Communications Inc.  All rights reserved.
+Copyright 2009-2012 Solarflare Communications Inc.  All rights reserved.
 Use is subject to license terms.

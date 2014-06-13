@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -126,21 +126,26 @@ static inline struct list_head *list_pop_tail(struct list_head *list)
 
 /********************************************************************
  *
- * Threaded IRQ support
+ * kallsyms hack: find any non-exported function
  *
  ********************************************************************/
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-#define EXF_HAVE_THREADED_IRQ
+
+#if defined(CONFIG_KALLSYMS) && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
+#define EFRM_HAS_FIND_KSYM
+#include <linux/kallsyms.h>
+/*! Find (non-exported) symbol with name @p name. */
+extern void *efrm_find_ksym(const char *name);
 #endif
 
-#ifdef EXF_HAVE_THREADED_IRQ
-struct efrm_threaded_irq {};
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
+/* Old kernels do not have compound_order() function, but we need it for
+ * huge pages (and only for huge pages). */
+#ifdef CONFIG_HUGETLB_PAGE
+#define compound_order(page) \
+	(PageCompound(page) ? (HPAGE_SHIFT - PAGE_SHIFT) : 0)
 #else
-struct efrm_threaded_irq {
-	struct workqueue_struct *irq_wq;
-	struct work_struct irq_work;
-};
+#define compound_order(page) 0
 #endif
-
+#endif
 
 #endif /* __CI_EFRM_SYSDEP_LINUX_H__ */

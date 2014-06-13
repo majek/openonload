@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -159,14 +159,8 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
   ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
 
-  /* Mark the fact that there was traffic sent on this socket (pmtu
-   * related).
-   */
-  ipcache->pmtus.traffic = 1;
-
   cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt), 
                        ipcache->ifindex);
-
 
   /* Update size of transmit queue now, because we do not have any callback
    * when the packet will go out or dropped.
@@ -193,7 +187,7 @@ static int ci_udp_sendmsg_loop(ci_sock_cmn* s, void* opaque_arg)
     frag_head = state->pkt;
     udp = (ci_udp_hdr*) (oo_ip_hdr(frag_head) + 1);
     frag_head->pf.udp.rx_stamp  = IPTIMER_STATE(state->ni)->frc;
-    frag_head->pay_len = CI_BSWAP_BE16(udp->udp_len_be16) - sizeof(*udp);
+    frag_head->pf.udp.pay_len = CI_BSWAP_BE16(udp->udp_len_be16) - sizeof(*udp);
     buf_pkt = frag_head;
     seg_i = 0;
     while( 1 ) {
@@ -366,7 +360,7 @@ ci_inline int ci_udp_sendmsg_os(ci_netif* ni, ci_udp_state* us,
 
   ++us->stats.n_tx_os;
 
-#ifdef __i386__
+#if defined(__i386__) || (defined(__powerpc__) && !defined(__powerpc64__))
   /* We do not handle compat cmsg in normal oo_os_sock_sendmsg */
   if( msg->msg_controllen != 0 )
     rc = oo_os_sock_sendmsg_raw(ni, S_SP(us), msg, flags);
@@ -1028,7 +1022,7 @@ ci_inline ci_ip4_hdr* eth_ip_init(ci_netif* ni, ci_udp_state* us,
  */
 static
 int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
-                        int pmtu, ci_iovec_ptr* piov, int bytes_to_send,
+                        ci_iovec_ptr* piov, int bytes_to_send,
                         struct oo_pkt_filler* pf,
                         struct udp_send_info* sinf)
 {
@@ -1038,6 +1032,7 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
   int bytes_left, frag_off;
   ci_uint16 ip_id;
   ci_ip4_hdr* ip;
+  int pmtu = sinf->ipcache.mtu;
 
   ci_assert(pmtu > 0);
 
@@ -1054,7 +1049,7 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
   first_pkt = ci_netif_pkt_alloc_block(ni, &sinf->stack_locked);
   if(CI_UNLIKELY( ci_netif_pkt_alloc_block_was_interrupted(first_pkt) ))
     return -ERESTARTSYS;
-  oo_pkt_layout_set(first_pkt, CI_PKT_LAYOUT_TX_SIMPLE);
+  oo_tx_pkt_layout_init(first_pkt);
 
   ip_id = NEXT_IP_ID(ni);
   ip_id = CI_BSWAP_BE16(ip_id);
@@ -1062,9 +1057,9 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
   udp_init(us, first_pkt, bytes_to_send);
 
   oo_pkt_filler_init(pf, first_pkt,
-                     oo_tx_ip_data(first_pkt) + sizeof(ci_udp_hdr));
-  first_pkt->tx_pkt_len = 
-    (oo_tx_ip_data(first_pkt) + sizeof(ci_udp_hdr)) - PKT_START(first_pkt);
+                     (uint8_t*) oo_tx_ip_data(first_pkt) + sizeof(ci_udp_hdr));
+  first_pkt->pay_len = ((char*) oo_tx_ip_data(first_pkt)
+                           + sizeof(ci_udp_hdr) - PKT_START(first_pkt));
 
   payload_bytes = pmtu - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr);
   if( payload_bytes >= bytes_left ) {
@@ -1087,6 +1082,11 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
     ip->ip_frag_off_be16 = CI_BSWAP_BE16(ip->ip_frag_off_be16);
     if( bytes_left > 0 )
       ip->ip_frag_off_be16 |= CI_IP4_FRAG_MORE;
+    else if( us->s.s_flags & CI_SOCK_FLAG_ALWAYS_DF ||
+             ( us->s.s_flags & CI_SOCK_FLAG_PMTU_DO &&
+               pf->pkt == first_pkt ) ) {
+      ip->ip_frag_off_be16 = CI_IP4_FRAG_DONT;
+    }
     frag_off += frag_bytes;
     ip->ip_id_be16 = ip_id;
 
@@ -1106,12 +1106,12 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
       rc = -ERESTARTSYS;
       goto fill_failed;
     }
-    oo_pkt_layout_set(new_pkt, CI_PKT_LAYOUT_TX_SIMPLE);
+    oo_tx_pkt_layout_init(new_pkt);
 
     pf->pkt->next = OO_PKT_P(new_pkt);
     pf->last_pkt->frag_next = OO_PKT_P(new_pkt);
     oo_pkt_filler_init(pf, new_pkt, oo_tx_ip_data(new_pkt));
-    new_pkt->tx_pkt_len = oo_tx_ip_data(new_pkt) - PKT_START(new_pkt);
+    new_pkt->pay_len = (char*) oo_tx_ip_data(new_pkt) - PKT_START(new_pkt);
 
     payload_bytes = UDP_PAYLOAD2_SPACE_PMTU(pmtu);
     payload_bytes = CI_MIN(payload_bytes, bytes_left);
@@ -1198,8 +1198,19 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
 
  back_to_fast_path:
   was_locked = sinf->stack_locked;
-  rc = ci_udp_sendmsg_fill(ni, us, sinf->ipcache.mtu, &piov,
-                           bytes_to_send, &pf, sinf);
+  if( bytes_to_send > sinf->ipcache.mtu - sizeof(ci_ip4_hdr) -
+      sizeof(ci_udp_hdr) &&
+      (us->s.s_flags & CI_SOCK_FLAG_ALWAYS_DF) ) {
+    /* Linux does not set SO_ERROR if non-connected && !IP_RECVERR */
+    if( msg->msg_namelen == 0 ||
+        (us->s.so.so_debug & CI_SOCKOPT_FLAG_IP_RECVERR) )
+      us->s.so_error = EMSGSIZE;
+    sinf->rc = -EMSGSIZE;
+    if( sinf->stack_locked )
+      ci_netif_unlock(ni);
+    return;
+  }
+  rc = ci_udp_sendmsg_fill(ni, us, &piov, bytes_to_send, &pf, sinf);
   if( sinf->stack_locked && ! was_locked )
     ++us->stats.n_tx_lock_pkt;
   if(CI_LIKELY( rc >= 0 )) {

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,6 +76,7 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
           if( (citp_fdinfo_get_type(fdi) == CITP_TCP_SOCKET) &&
               (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) ) {
             ci_tcp_state* ts = SOCK_TO_TCP(epi->sock.s);
+            oo_tx_pkt_layout_init(pkt);
             iovecs[i].iov_base = ((char *)oo_tx_ip_hdr(pkt)) + 
               ts->outgoing_hdrs_len;
             max_len = tcp_eff_mss(ts);
@@ -84,11 +85,16 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
             /* Best guess.  We can fix it up later.  Magic 12 leaves
              * space for time stamp option (common case)
              */
-            iovecs[i].iov_base = oo_tx_ip_data(pkt) + sizeof(ci_tcp_hdr) + 12;
+            oo_tx_pkt_layout_init(pkt);
+            iovecs[i].iov_base =
+              (uint8_t*) oo_tx_ip_data(pkt) + sizeof(ci_tcp_hdr) + 12;
           }
         }
-        else if( flags & ONLOAD_ZC_BUFFER_HDR_UDP )
-          iovecs[i].iov_base = oo_tx_ip_data(pkt) + sizeof(ci_udp_hdr);
+        else if( flags & ONLOAD_ZC_BUFFER_HDR_UDP ) {
+          oo_tx_pkt_layout_init(pkt);
+          iovecs[i].iov_base =
+            (uint8_t*) oo_tx_ip_data(pkt) + sizeof(ci_udp_hdr);
+        }
         else 
           iovecs[i].iov_base = PKT_START(pkt);
         iovecs[i].iov_len = CI_CFG_PKT_BUF_SIZE - 

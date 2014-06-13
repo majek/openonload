@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,7 +49,7 @@ struct ef_vi;
   ** \param v Initial value for timer (specified in us)
   ** \return Nothing
   */
-extern void ef_eventq_timer_prime(struct ef_vi* q, unsigned v);
+#define ef_eventq_timer_prime(q, v) (q)->ops.eventq_timer_prime(q, v)
 
   /*! Start an event queue timer running.
   **
@@ -62,7 +62,7 @@ extern void ef_eventq_timer_prime(struct ef_vi* q, unsigned v);
   ** \param q Pointer to ef_vi structure for the event queue
   ** \param v Initial value for timer (specified in us)
   */
-extern void ef_eventq_timer_run(struct ef_vi* q, unsigned v);
+#define ef_eventq_timer_run(q, v) (q)->ops.eventq_timer_run(q, v)
 
   /*! Stop the event-queue timer.
   **
@@ -73,7 +73,7 @@ extern void ef_eventq_timer_run(struct ef_vi* q, unsigned v);
   ** \param q Pointer to ef_vi structure for the event queue
   ** \return Nothing
   */
-extern void ef_eventq_timer_clear(struct ef_vi* q);
+#define ef_eventq_timer_clear(q) (q)->ops.eventq_timer_clear(q)
 
   /*! Prime the event-queue timer for immediate expiration.
   **
@@ -83,7 +83,7 @@ extern void ef_eventq_timer_clear(struct ef_vi* q);
   ** \param q Pointer to ef_vi structure for the event queue
   ** \return Nothing
   */
-extern void ef_eventq_timer_zero(struct ef_vi* q);
+#define ef_eventq_timer_zero(q) (q)->ops.eventq_timer_zero(q)
 
 #ifdef __cplusplus
 }

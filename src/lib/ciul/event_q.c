@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,18 +29,6 @@
 #include "ef_vi_internal.h"
 #include "driver_access.h"
 #include "logging.h"
-
-
-int ef_eventq_alloc(ef_vi* evq, ef_driver_handle fd, unsigned capacity)
-{
-  return ef_vi_alloc(evq, fd, -1, capacity ? capacity : -1, 0, 0, NULL, -1, 0);
-}
-
-
-int ef_eventq_free(ef_vi* evq, ef_driver_handle fd)
-{
-  return ef_vi_free(evq, fd);
-}
 
 
 int ef_eventq_wait(ef_vi* evq, ef_driver_handle fd,

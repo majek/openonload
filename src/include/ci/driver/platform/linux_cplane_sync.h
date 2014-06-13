@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -201,9 +201,7 @@ typedef struct
  * /proc statistics
  *---------------------------------------------------------------------------*/
 
-extern int 
-cicp_stat_read_proc(char *buf, char **start, off_t offset, int count, int *eof,
-                    void *data);
+extern const struct file_operations cicp_stat_fops;
 
 
 /*----------------------------------------------------------------------------

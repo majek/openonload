@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,11 +54,6 @@ extern asmlinkage int
 efab_linux_sys_close(int fd);
 
 extern asmlinkage int
-efab_linux_sys_accept4(int fd, struct sockaddr __user* addr,
-                       int __user* addrlen,
-                       unsigned long __user* socketcall_args, int flags);
-
-extern asmlinkage int
 efab_linux_sys_sendmsg(int fd, struct msghdr __user* msg,
                        unsigned long __user* socketcall_args, unsigned flags);
 
@@ -88,11 +83,19 @@ asmlinkage int efab_linux_sys_sigaction(int signum,
                                         const struct sigaction *act,
                                         struct sigaction *oact);
 #ifdef CONFIG_COMPAT
+
+/* XXX: PPC_HACK: asm/ia32 is intel specific and not present on ppc.
+   The function also seems to be intel specific. */
+#if ! defined (__PPC__)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0)
 # include <linux/compat.h>
 # define sigaction32 compat_sigaction
 #else
 # include <asm/ia32.h>
+#endif
+#else
+# include <linux/compat.h>
+struct sigaction32;
 #endif
 asmlinkage int efab_linux_sys_sigaction32(int signum,
                                           const struct sigaction32 *act,
@@ -111,11 +114,6 @@ asmlinkage int efab_linux_sys_shmdt(char __user *addr);
 asmlinkage int efab_linux_sys_shmctl(int shmid, int cmd,
                                      struct shmid_ds __user *buf);
 #endif
-
-
-
-/* set cpu speed - needed only for kernel-created netifs */
-extern int ci_set_cpu_khz(unsigned cpu_khz);
 
 
 #endif  /* __CI_DRIVER_EFAB_LINUX_ONLOAD__ */

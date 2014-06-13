@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,9 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2005      Fen Systems Ltd.
- * Copyright 2005-2010 Solarflare Communications Inc.
+ * Copyright 2005-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -104,8 +104,7 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 	INIT_LIST_HEAD(&efx_handle->port_node);
 	INIT_LIST_HEAD(&efx_handle->driver_node);
 
-	rc = driver->probe(efx_dev, efx->net_dev,
-			   efx->dl_info, efx->type->dl_revision);
+	rc = driver->probe(efx_dev, efx->net_dev, efx->dl_info, "");
 	if (rc)
 		goto fail;
 
@@ -165,6 +164,12 @@ EXPORT_SYMBOL(efx_dl_unregister_driver);
 int efx_dl_register_driver(struct efx_dl_driver *driver)
 {
 	struct efx_nic *efx;
+
+	if (!(driver->flags & EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE)) {
+		pr_err("Efx driverlink: %s did not promise to check rx_usr_buf_size\n",
+		       driver->name);
+		return -EPERM;
+	}
 
 	printk(KERN_INFO "Efx driverlink registering %s driver\n",
 		 driver->name);
@@ -288,12 +293,6 @@ bool efx_dl_handle_event(struct efx_nic *efx, void *event)
 	return false;
 }
 
-EXPORT_SYMBOL(efx_filter_set_ipv4_local);
-EXPORT_SYMBOL(efx_filter_set_ipv4_full);
-EXPORT_SYMBOL(efx_filter_set_eth_local);
-EXPORT_SYMBOL(efx_filter_set_uc_def);
-EXPORT_SYMBOL(efx_filter_set_mc_def);
-
 /* We additionally include priority in the filter ID so that we
  * can pass it back into efx_filter_remove_id_safe().
  */
@@ -337,7 +336,15 @@ int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
 		    size_t inlen, size_t outlen, size_t *outlen_actual,
 		    const u8 *inbuf, u8 *outbuf)
 {
-        return efx_mcdi_rpc(efx_dl_handle(efx_dev)->efx, cmd, inbuf, inlen,
-                            outbuf, outlen, outlen_actual);
+	/* FIXME: Buffer parameter types should be changed to __le32 *
+	 * so we can reasonably assume they are properly padded even
+	 * if the lengths are not multiples of 4.
+	 */
+	if (WARN_ON(inlen & 3 || outlen & 3))
+		return -EINVAL;
+
+	return efx_mcdi_rpc(efx_dl_handle(efx_dev)->efx, cmd,
+			    (const efx_dword_t *)inbuf, inlen,
+			    (efx_dword_t *)outbuf, outlen, outlen_actual);
 }
 EXPORT_SYMBOL(efx_dl_mcdi_rpc);

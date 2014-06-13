@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -91,7 +91,6 @@ void ci_tcp_timer_init(ci_netif* netif)
   NI_CONF(netif).tconst_rto_max = 
     ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).rto_max);
 
-
   NI_CONF(netif).tconst_delack = 
     ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_DELACK);
 
@@ -108,7 +107,8 @@ void ci_tcp_timer_init(ci_netif* netif)
 
   NI_CONF(netif).tconst_listen_time = 
     ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_LISTEN_TIME);
-  NI_CONF(netif).listen_synack_retries = CI_TCP_LISTEN_SYNACK_RETRIES;
+  NI_CONF(netif).listen_synack_retries =
+    NI_OPTS(netif).retransmit_threshold_synack;
   
   NI_CONF(netif).tconst_paws_idle = 
     ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_PAWS_IDLE);
@@ -183,8 +183,10 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 
     if( TIME_LT(tsr->timeout, ci_tcp_time_now(netif)) ) {      
       if( tsr->retries < max_retries ) {
-        int rc = ci_tcp_synrecv_send(netif, tls, tsr, 0,
-                                     CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
+        int rc = 0;
+        if( !tsr->acked || tsr->retries == max_retries - 1 )
+          rc = ci_tcp_synrecv_send(netif, tls, tsr, 0,
+                                   CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
         ci_tcp_synrecv_set_retries_and_timeout(netif, tls, tsr);
         if( rc == 0 ) {
           CITP_STATS_NETIF(++netif->state->stats.synrecv_retransmits);
@@ -195,6 +197,11 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
           LOG_U(ci_log("%s: no return route exists "CI_IP_PRINTF_FORMAT,
                        __FUNCTION__, CI_IP_PRINTF_ARGS(&tsr->r_addr)));
         }
+      }
+      else if( tsr->acked ) {
+        tsr->acked = 0;
+        ci_tcp_synrecv_send(netif, tls, tsr, 0,
+                            CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
       }
       else {
 	ci_tcp_listenq_remove(netif, tls, tsr);
@@ -314,7 +321,6 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
   LOG_TT(log(LNTS_FMT "ZWIN: now=0x%x rto=%u snd_wnd=%d probes=%d,%d",
 	     LNTS_PRI_ARGS(netif, ts), ci_tcp_time_now(netif), ts->rto,
 	     tcp_snd_wnd(ts), ts->zwin_probes, ts->zwin_acks));
-
 
   if( CI_UNLIKELY(tcp_snd_wnd(ts) > 0) ) {
     /* We consider window < eff_mss to be zero, but it is not always

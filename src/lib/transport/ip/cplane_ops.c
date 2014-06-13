@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1160,12 +1160,13 @@ ci_ip_cache_init_mcast_mac(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
                            unsigned daddr_be32)
 {
   ci_uint8* dhost = ci_ip_cache_ether_dhost(ipcache);
+  unsigned daddr = CI_BSWAP_BE32(daddr_be32);
   dhost[0] = 1;
   dhost[1] = 0;
   dhost[2] = 0x5e;
-  dhost[3] = (daddr_be32 >> 8) & 0x7f;
-  dhost[4] = (daddr_be32 >> 16) & 0xff;
-  dhost[5] = (daddr_be32 >> 24) & 0xff;
+  dhost[3] = (daddr >> 16) & 0x7f;
+  dhost[4] = (daddr >>  8) & 0xff;
+  dhost[5] =  daddr        & 0xff;
   cicp_mac_set_mostly_valid(CICP_MIBS(CICP_HANDLE(ni))->user.mac_utable,
                             &ipcache->mac_integrity);
   ipcache->nexthop = 0;

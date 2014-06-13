@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,9 +14,9 @@
 */
 
 /****************************************************************************
- * Driver for Solarflare Solarstorm network controllers and boards
+ * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2010 Solarflare Communications Inc.
+ * Copyright 2006-2012 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -66,114 +66,114 @@ void efx_compound_page_destructor(struct page *page)
  */
 
 #define hex_asc(x)	"0123456789abcdef"[x]
-#define isascii(c) (((unsigned char)(c))<=0x7f)
+#define isascii(c) (((unsigned char)(c)) <= 0x7f)
 
 static void hex_dump_to_buffer(const void *buf, size_t len, int rowsize,
 			       int groupsize, char *linebuf, size_t linebuflen,
 			       int ascii)
 {
-        const u8 *ptr = buf;
-        u8 ch;
-        int j, lx = 0;
-        int ascii_column;
+	const u8 *ptr = buf;
+	u8 ch;
+	int j, lx = 0;
+	int ascii_column;
 
-        if (rowsize != 16 && rowsize != 32)
-                rowsize = 16;
+	if (rowsize != 16 && rowsize != 32)
+		rowsize = 16;
 
-        if (!len)
-                goto nil;
-        if (len > rowsize)              /* limit to one line at a time */
-                len = rowsize;
-        if ((len % groupsize) != 0)     /* no mixed size output */
-                groupsize = 1;
+	if (!len)
+		goto nil;
+	if (len > rowsize)              /* limit to one line at a time */
+		len = rowsize;
+	if ((len % groupsize) != 0)     /* no mixed size output */
+		groupsize = 1;
 
-        switch (groupsize) {
-        case 8: {
-                const u64 *ptr8 = buf;
-                int ngroups = len / groupsize;
+	switch (groupsize) {
+	case 8: {
+		const u64 *ptr8 = buf;
+		int ngroups = len / groupsize;
 
-                for (j = 0; j < ngroups; j++)
-                        lx += scnprintf(linebuf + lx, linebuflen - lx,
+		for (j = 0; j < ngroups; j++)
+			lx += scnprintf(linebuf + lx, linebuflen - lx,
 				"%16.16llx ", (unsigned long long)*(ptr8 + j));
-                ascii_column = 17 * ngroups + 2;
-                break;
-        }
+		ascii_column = 17 * ngroups + 2;
+		break;
+	}
 
-        case 4: {
-                const u32 *ptr4 = buf;
-                int ngroups = len / groupsize;
+	case 4: {
+		const u32 *ptr4 = buf;
+		int ngroups = len / groupsize;
 
-                for (j = 0; j < ngroups; j++)
-                        lx += scnprintf(linebuf + lx, linebuflen - lx,
+		for (j = 0; j < ngroups; j++)
+			lx += scnprintf(linebuf + lx, linebuflen - lx,
 				"%8.8x ", *(ptr4 + j));
-                ascii_column = 9 * ngroups + 2;
-                break;
-        }
+		ascii_column = 9 * ngroups + 2;
+		break;
+	}
 
-        case 2: {
-                const u16 *ptr2 = buf;
-                int ngroups = len / groupsize;
+	case 2: {
+		const u16 *ptr2 = buf;
+		int ngroups = len / groupsize;
 
-                for (j = 0; j < ngroups; j++)
-                        lx += scnprintf(linebuf + lx, linebuflen - lx,
+		for (j = 0; j < ngroups; j++)
+			lx += scnprintf(linebuf + lx, linebuflen - lx,
 				"%4.4x ", *(ptr2 + j));
-                ascii_column = 5 * ngroups + 2;
-                break;
-        }
+		ascii_column = 5 * ngroups + 2;
+		break;
+	}
 
-        default:
-                for (j = 0; (j < rowsize) && (j < len) && (lx + 4) < linebuflen;
-                     j++) {
-                        ch = ptr[j];
-                        linebuf[lx++] = hex_asc(ch >> 4);
-                        linebuf[lx++] = hex_asc(ch & 0x0f);
-                        linebuf[lx++] = ' ';
-                }
-                ascii_column = 3 * rowsize + 2;
-                break;
-        }
-        if (!ascii)
-                goto nil;
+	default:
+		for (j = 0; (j < rowsize) && (j < len) && (lx + 4) < linebuflen;
+		     j++) {
+			ch = ptr[j];
+			linebuf[lx++] = hex_asc(ch >> 4);
+			linebuf[lx++] = hex_asc(ch & 0x0f);
+			linebuf[lx++] = ' ';
+		}
+		ascii_column = 3 * rowsize + 2;
+		break;
+	}
+	if (!ascii)
+		goto nil;
 
-        while (lx < (linebuflen - 1) && lx < (ascii_column - 1))
-                linebuf[lx++] = ' ';
+	while (lx < (linebuflen - 1) && lx < (ascii_column - 1))
+		linebuf[lx++] = ' ';
 	/* Removed is_print() check */
-        for (j = 0; (j < rowsize) && (j < len) && (lx + 2) < linebuflen; j++)
-                linebuf[lx++] = isascii(ptr[j]) ? ptr[j] : '.';
+	for (j = 0; (j < rowsize) && (j < len) && (lx + 2) < linebuflen; j++)
+		linebuf[lx++] = isascii(ptr[j]) ? ptr[j] : '.';
 nil:
-        linebuf[lx++] = '\0';
+	linebuf[lx++] = '\0';
 }
 
 void print_hex_dump(const char *level, const char *prefix_str, int prefix_type,
 		    int rowsize, int groupsize,
 		    const void *buf, size_t len, int ascii)
 {
-        const u8 *ptr = buf;
-        int i, linelen, remaining = len;
-        char linebuf[200];
+	const u8 *ptr = buf;
+	int i, linelen, remaining = len;
+	char linebuf[200];
 
-        if (rowsize != 16 && rowsize != 32)
-                rowsize = 16;
+	if (rowsize != 16 && rowsize != 32)
+		rowsize = 16;
 
-        for (i = 0; i < len; i += rowsize) {
-                linelen = min(remaining, rowsize);
-                remaining -= rowsize;
-                hex_dump_to_buffer(ptr + i, linelen, rowsize, groupsize,
+	for (i = 0; i < len; i += rowsize) {
+		linelen = min(remaining, rowsize);
+		remaining -= rowsize;
+		hex_dump_to_buffer(ptr + i, linelen, rowsize, groupsize,
 				   linebuf, sizeof(linebuf), ascii);
 
-                switch (prefix_type) {
-                case DUMP_PREFIX_ADDRESS:
-                        printk("%s%s%*p: %s\n", level, prefix_str,
+		switch (prefix_type) {
+		case DUMP_PREFIX_ADDRESS:
+			printk("%s%s%*p: %s\n", level, prefix_str,
 			       (int)(2 * sizeof(void *)), ptr + i, linebuf);
-                        break;
-                case DUMP_PREFIX_OFFSET:
-                        printk("%s%s%.8x: %s\n", level, prefix_str, i, linebuf);
-                        break;
-                default:
-                        printk("%s%s%s\n", level, prefix_str, linebuf);
-                        break;
-                }
-        }
+			break;
+		case DUMP_PREFIX_OFFSET:
+			printk("%s%s%.8x: %s\n", level, prefix_str, i, linebuf);
+			break;
+		default:
+			printk("%s%s%s\n", level, prefix_str, linebuf);
+			break;
+		}
+	}
 }
 
 #endif /* EFX_NEED_HEX_DUMP */
@@ -188,21 +188,21 @@ void print_hex_dump(const char *level, const char *prefix_str, int prefix_type,
 #ifdef EFX_NEED_PRINT_MAC
 char *print_mac(char *buf, const u8 *addr)
 {
-        sprintf(buf, "%02x:%02x:%02x:%02x:%02x:%02x",
-                addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-        return buf;
+	sprintf(buf, "%02x:%02x:%02x:%02x:%02x:%02x",
+		addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+	return buf;
 }
 #endif /* EFX_NEED_PRINT_MAC */
 
 #ifdef EFX_NEED_CSUM_TCPUDP_NOFOLD
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
 __wsum
-csum_tcpudp_nofold (__be32 saddr, __be32 daddr, unsigned short len,
-		    unsigned short proto, __wsum sum)
+csum_tcpudp_nofold(__be32 saddr, __be32 daddr, unsigned short len,
+		   unsigned short proto, __wsum sum)
 #else
 __wsum
-csum_tcpudp_nofold (unsigned long saddr, unsigned long daddr,
-		    unsigned short len, unsigned short proto, __wsum sum)
+csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr,
+		   unsigned short len, unsigned short proto, __wsum sum)
 #endif
 {
 	unsigned long result;
@@ -505,23 +505,6 @@ struct timespec ns_to_timespec(const s64 nsec)
 
 #endif /* EFX_NEED_NS_TO_TIMESPEC */
 
-#ifdef EFX_NEED_SET_NORMALIZED_TIMESPEC
-void set_normalized_timespec(struct timespec *ts, time_t sec, long nsec)
-{
-	while (nsec >= NSEC_PER_SEC) {
-		nsec -= NSEC_PER_SEC;
-		++sec;
-	}
-	while (nsec < 0) {
-		nsec += NSEC_PER_SEC;
-		--sec;
-	}
-	ts->tv_sec = sec;
-	ts->tv_nsec = nsec;
-}
-EXPORT_SYMBOL(set_normalized_timespec);
-#endif
-
 #ifdef EFX_HAVE_PARAM_BOOL_INT
 
 int efx_param_set_bool(const char *val, struct kernel_param *kp)
@@ -633,15 +616,15 @@ int efx_kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list va
 	need = vsnprintf(NULL, 0, fmt, vargs);
 	va_end(cvargs);
 
-	/* 
-	 * Need more space? Allocate it and try again 
+	/*
+	 * Need more space? Allocate it and try again
 	 */
 	limit = need + 1;
-	name = kmalloc(limit,GFP_KERNEL);
+	name = kmalloc(limit, GFP_KERNEL);
 	if (!name)
 		return -ENOMEM;
 
-	vsnprintf(name,limit,fmt,vargs);
+	vsnprintf(name, limit, fmt, vargs);
 
 	/* ewww... some of these buggers have '/' in the name ... */
 	while ((s = strchr(name, '/')))

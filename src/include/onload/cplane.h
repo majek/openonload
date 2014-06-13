@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -89,7 +89,10 @@ typedef struct
   ci_uint32 *imported_route;
   ci_uint32 *imported_ipif;
   ci_uint32 *imported_llap;
+  ci_uint32 *imported_pmtu;
  
+  long start_timestamp;
+
   int /* bool */  nosort;
 } cicpos_parse_state_t;
 
@@ -173,6 +176,10 @@ cicpos_route_kmib_row_update(cicpos_route_row_t *syn_oldrow,
  *       IP address sets (masks) - but since it is the home IP address that
  *       we need this creates no ambiguity
  *
+ * If \c flags & CICP_FLAG_ROUTE_MTU, than mtu is trusted and should be set
+ * without any checks; untrusted mtu is used only if it is smaller than
+ * currently-known mtu.
+ *
  * If \c nosort parameter is set, user should sort route table himself
  * after all additions are done.
  *
@@ -193,6 +200,7 @@ cicpos_route_import(cicp_handle_t      *control_plane,
 		    ci_ip_addr_t        pref_source,
 		    ci_ifid_t           ifindex,
 		    ci_mtu_t            mtu,
+		    ci_uint32           flags,
 		    cicpos_route_row_t *ref_sync,
 		    int /* bool */      nosort);
 
@@ -277,6 +285,21 @@ cicpos_route_purge(cicp_fwdinfo_t    *routet,
 		   ci_bitset_ref_t    keep_set,
 		   int /*bool*/       changes_made);
 
+
+
+/*----------------------------------------------------------------------------
+ * PMTU MIB
+ *---------------------------------------------------------------------------*/
+
+extern void
+cicpos_pmtu_remove(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip);
+
+extern void
+cicpos_pmtu_add(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip);
+
+extern int /* bool */
+cicpos_pmtu_check(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip,
+                  ci_ifid_t ifindex, ci_mtu_t pmtu);
 
 
 /*----------------------------------------------------------------------------
@@ -1350,20 +1373,16 @@ extern void cicp_raw_sock_dtor(struct socket *raw_sock);
  *  layer 4 checksum 
  */
 extern int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32, 
-                              const char *buf, unsigned int size);
+                              const void* buf, unsigned int size);
 extern int cicp_raw_sock_send_bindtodev(int ifindex, char *ifname, 
                                         ci_ip_addr_t ip_be32,
-                                        const char *buf, unsigned int size);
+                                        const void* buf, unsigned int size);
 /*! Send IP packet via RAW socket.  Computes TCP/UDP checksum if possible */
-extern int cicp_raw_ip_send(ci_ip4_hdr* ip, ci_ifid_t ifindex);
+extern int cicp_raw_ip_send(const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex);
 
 /*! If ARP entry is STALE, force ARP request or confirm existing entry */
 extern void cicpos_arp_stale_update(ci_ip_addr_t dst, ci_ifid_t ifindex,
                                     int confirm);
-
-/*! Force full table sync. */
-extern void
-cicpos_sync_tables(cicp_handle_t *control_plane);
 
 #endif /* __KERNEL__ */
 

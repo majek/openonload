@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -126,7 +126,7 @@ static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
     return NI_OPTS(ni).mcast_join_handover ? CI_SOCKET_HANDOVER : 0;
 
   rc = ci_tcp_ep_mcast_add_del(ni, S_SP(us), ifindex, maddr, add);
-  if( rc != 0 && maddr != CI_IP_ALL_HOSTS ) {
+  if( rc != 0 ) {
     /* NB. We ignore the error because the kernel stack will handle it. */
     LOG_E(log(FNS_FMT "%s ifindex=%d maddr="CI_IP_PRINTF_FORMAT" failed "
               "(%d,%d)", FNS_PRI_ARGS(ni, &us->s), add ? "ADD" : "DROP",
@@ -211,14 +211,6 @@ int ci_udp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
         ci_rel_os_sock_fd( os_sock );
       }
       goto u_out;
-    }
-    else if( optname == SO_TIMESTAMP ) {
-      u = (us->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP) != 0;
-      goto u_out_char;
-    }
-    else if( optname == SO_TIMESTAMPNS ) {
-      u = (us->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPNS) != 0;
-      goto u_out_char;
     }
     else {
       /* Common SOL_SOCKET option handler */
@@ -347,45 +339,24 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       break;
 
     case SO_TIMESTAMP:
-      if( (rc = opt_not_ok(optval, optlen, char)) )
-        goto fail_inval;
-      if( ci_get_optval(optval, optlen) ) {
-        if( (us->s.cmsg_flags & 
-             (CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMP)) == 0 ) {
-          /* Make sure the siocgstamp returns correct value until
-           * SO_TIMESTAMP[NS] is turned off again
-           */
-          us->stamp_pre_sots = us->stamp;
-        }
-        us->s.cmsg_flags |= CI_IP_CMSG_TIMESTAMP;
-      }
-      else {
-        us->s.cmsg_flags &= ~CI_IP_CMSG_TIMESTAMP;
-        if( (us->s.cmsg_flags & 
-             (CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMP)) == 0 )
-          us->stamp = us->stamp_pre_sots;
-      }
-      break;
-
     case SO_TIMESTAMPNS:
+      /* Make sure the siocgstamp returns correct value until
+       * SO_TIMESTAMP[NS] is turned off again
+       */
       if( (rc = opt_not_ok(optval, optlen, char)) )
         goto fail_inval;
-      if( ci_get_optval(optval, optlen) ) {
-        if( (us->s.cmsg_flags & 
-             (CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMP)) == 0 ) {
+      if( (us->s.cmsg_flags & 
+          (CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMP)) == 0 ) {
           /* Make sure the siocgstamp returns correct value until
            * SO_TIMESTAMP[NS] is turned off again
            */
-          us->stamp_pre_sots = us->stamp;
-        }
-        us->s.cmsg_flags |= CI_IP_CMSG_TIMESTAMPNS;
+          if( ci_get_optval(optval, optlen) )
+            us->stamp_pre_sots = us->stamp;
+          else
+            us->stamp = us->stamp_pre_sots;
       }
-      else {
-        us->s.cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPNS;
-        if( (us->s.cmsg_flags & 
-             (CI_IP_CMSG_TIMESTAMPNS | CI_IP_CMSG_TIMESTAMP)) == 0 )
-          us->stamp = us->stamp_pre_sots;
-      }
+      /* Then use the common path */
+      return ci_set_sol_socket(netif, &us->s, optname, optval, optlen);
       break;
 
     default:

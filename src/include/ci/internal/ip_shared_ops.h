@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -64,19 +64,6 @@ extern void ci_netif_unlock(ci_netif*) CI_HF;
                                                   SC_SP((epi)->sock.s))
 #define ci_netif_unlock_fdi(epi) ci_netif_unlock((epi)->sock.netif)
 
-/* Use of this macro indicates code that needs to be fixed!  ie. In-kernel
- * callers of ci_netif_lock() that are not checking the return value.
- */
-#define ci_netif_lock_fixme(ni)                                         \
-  do {                                                                  \
-    int rc = ci_netif_lock(ni);                                         \
-    if( rc != 0 ) {                                                     \
-      LOG_E(ci_log("%s: ERROR: failed to grab stack lock", __FUNCTION__)); \
-      LOG_E(ci_log("FIXME: file=%s line=%d", __FILE__, __LINE__));      \
-    }                                                                   \
-  } while( 0 )
-
-
 /* ci_netif_lock_count()
 **
 ** Just like ci_netif_lock(), but increments the specified ci_netif_stats
@@ -114,7 +101,8 @@ extern int no_shared_state_panic;
 
 # define ci_ss_assertfl2(ni, e, x, y, file, line)  do {                 \
     if(CI_UNLIKELY( ! (e) )) {                                          \
-      (ni)->state->flags |= CI_NETIF_FLAGS_IS_BROKEN;                   \
+      (ni)->error_flags |= CI_NETIF_ERROR_ASSERT;                       \
+      (ni)->state->error_flags |= CI_NETIF_ERROR_ASSERT;                \
       LOG_SSA(ci_log("ci_ss_assert(%s)\nwhere [%s=%"CI_PRIx64"] "       \
                      "[%s=%"CI_PRIx64"]\nat %s:%d\nfrom %s:%d", #e      \
                      , #x, (ci_uint64)(ci_uintptr_t)(x)                 \
@@ -148,7 +136,8 @@ extern int no_shared_state_panic;
 #if defined(__KERNEL__) && ! defined(NDEBUG)
 # define ci_ss_assertfl(ni, x, file, line)  do {                        \
     if(CI_UNLIKELY( ! (x) )) {                                          \
-      (ni)->state->flags |= CI_NETIF_FLAGS_IS_BROKEN;                   \
+      (ni)->error_flags |= CI_NETIF_ERROR_ASSERT;                       \
+      (ni)->state->error_flags |= CI_NETIF_ERROR_ASSERT;                \
       LOG_SSA(ci_log("ci_ss_assert(%s)\nat %s:%d\nfrom %s:%d", #x,      \
                      __FILE__, __LINE__, (file), (line)));              \
       if( no_shared_state_panic == 0 )       \
@@ -279,8 +268,11 @@ ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
 ** fit in a page at compile-time, but that ain't easy.  So it is hard coded
 ** here, and checked in ci_netif_ctor() to ensure it is sensible.
 */
-#define EP_BUF_PER_PAGE    4u
-#define EP_BUF_SIZE	   (CI_PAGE_SIZE / EP_BUF_PER_PAGE)
+#define EP_BUF_SIZE 1024 /* MUST be 2^n, with n<=12 */
+#if (CI_PAGE_SIZE % EP_BUF_SIZE != 0)
+#error "EP_BUF_SIZE *must* be a divisor of PAGE_SIZE, and it's not"
+#endif
+#define EP_BUF_PER_PAGE    (CI_PAGE_SIZE / EP_BUF_SIZE)
 
 #ifndef CI_HAVE_OS_NOPAGE
 /* For platforms that have multiple mmaps() for socket buffers, these
@@ -498,13 +490,10 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 # define __PKT_BUF(ni, id)                                          \
   oo_iobufset_ptr((ni)->buf_pages[(id) >> CI_CFG_PKTS_PER_SET_S],   \
                   ((id) & PKTS_PER_SET_M) * CI_CFG_PKT_BUF_SIZE)
-#elif CI_CFG_MMAP_EACH_PKTSET
+#else
 # define __PKT_BUF(ni, id)                                      \
   ((ni)->pkt_sets[(id) >> CI_CFG_PKTS_PER_SET_S] +              \
             ((id) & PKTS_PER_SET_M) * CI_CFG_PKT_BUF_SIZE)
-#else
-# define __PKT_BUF(ni, id)                                      \
-  ((ni)->pkt_sets + id * CI_CFG_PKT_BUF_SIZE)
 #endif
 
 /* __PKT(ni, pp)
@@ -517,7 +506,7 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 /* ?? this cast should not be necessary!!!!!!!!!!! */
 # define __PKT(ni, pp)  ((ci_ip_pkt_fmt*) (pp))
 
-#elif defined(__KERNEL__) || !CI_CFG_MMAP_EACH_PKTSET
+#elif defined(__KERNEL__)
 
   /* Buffer will already be mmaped, or faulted in on demand. */
 # define __PKT(ni, pp)  ((ci_ip_pkt_fmt*) __PKT_BUF((ni),OO_PP_ID(pp)))
@@ -572,113 +561,122 @@ ci_inline ci_ip_pkt_fmt* __ci_pkt_chk(ci_netif* ni, oo_pkt_p pp, int ni_locked,
 #define PKT_CHK_NML(ni, id, ni_locked)                    \
   __ci_pkt_chk((ni), (id), (ni_locked), __FILE__, __LINE__)
 
+
 /*********************************************************************
 ********************* Ethernet header access *************************
 *********************************************************************/
 
-/* Performance note: oo_ether_*() functions are used almost exclusively in
- * TX path, so there is no need to implement more simple version
- * oo_rx_ether() which does not use pkt_layout. */
-#define PKT_ETHER_SHIFT(pkt) \
-    ((pkt)->pkt_layout == CI_PKT_LAYOUT_TX_SIMPLE ? 4 : 0)
-
-ci_inline char *oo_ether_dhost(const struct ci_ip_pkt_fmt_s *pkt)
+ci_inline struct oo_eth_hdr* oo_ether_hdr(ci_ip_pkt_fmt* pkt)
 {
-  return (char *)&pkt->ether_base + PKT_ETHER_SHIFT(pkt);
-}
-#define oo_ether_hdr(pkt) ((struct oo_eth_hdr *)oo_ether_dhost(pkt))
-ci_inline char *oo_ether_shost(const struct ci_ip_pkt_fmt_s *pkt)
-{
-  return (char *)&pkt->ether_base + ETH_ALEN + PKT_ETHER_SHIFT(pkt);
-}
-#undef PKT_ETHER_SHIFT
-
-/* Performance note: since CI_PKT_LAYOUT_TX_VLAN == CI_PKT_LAYOUT_RX_VLAN,
- * compiler will optimize this code to one comparision. */
-ci_inline int oo_ether_hdr_size(const struct ci_ip_pkt_fmt_s *pkt)
-{
-  return ETH_HLEN +
-      ((pkt->pkt_layout == CI_PKT_LAYOUT_TX_VLAN ||
-        pkt->pkt_layout == CI_PKT_LAYOUT_RX_VLAN) ?  ETH_VLAN_HLEN : 0);
+  return (void*) (pkt->dma_start + pkt->pkt_start_off);
 }
 
+ci_inline uint8_t* oo_ether_dhost(ci_ip_pkt_fmt* pkt)
+{
+  return oo_ether_hdr(pkt)->ether_dhost;
+}
 
+ci_inline uint8_t* oo_ether_shost(ci_ip_pkt_fmt* pkt)
+{
+  return oo_ether_hdr(pkt)->ether_shost;
+}
+
+ci_inline void* oo_ether_data(ci_ip_pkt_fmt* pkt)
+{
+  return pkt->dma_start + pkt->pkt_eth_payload_off;
+}
+
+ci_inline int oo_ether_hdr_size(const ci_ip_pkt_fmt* pkt)
+{
+  return pkt->pkt_eth_payload_off - pkt->pkt_start_off;
+}
+
+ci_inline uint16_t oo_ether_type_get(const ci_ip_pkt_fmt* pkt)
+{
+  const uint16_t* p = (const void*) oo_ether_data((ci_ip_pkt_fmt*) pkt);
+  return p[-1];
+}
 
 
 /*********************************************************************
 ************************ IP header access ****************************
 *********************************************************************/
 
-/* NB. This is *not* always the start of the IP header.  See
- * PKT_IP_HDR_START() and oo_tx_ip_hdr().
+ci_inline ci_ip4_hdr* oo_ip_hdr(ci_ip_pkt_fmt* pkt)
+{
+  return (ci_ip4_hdr*) oo_ether_data(pkt);
+}
+
+ci_inline const ci_ip4_hdr* oo_ip_hdr_const(const ci_ip_pkt_fmt* pkt)
+{
+  return (const ci_ip4_hdr*) oo_ether_data((ci_ip_pkt_fmt*) pkt);
+}
+
+ci_inline void* oo_ip_data(ci_ip_pkt_fmt* pkt)
+{
+  const ci_ip4_hdr* ip = oo_ip_hdr(pkt);
+  return (uint8_t*) ip + CI_IP4_IHL(ip);
+}
+
+
+/**********************************************************************
+ * Transmit packet layout.
+ *
+ * When we initialise the layer-3 (and above) parts of a packet we don't
+ * yet know what the layer-2 encapsulation will be, so we have to leave
+ * space for the worst case.  So we place the IP header at a fixed offset,
+ * and the start of the Ethernet header varies.
  */
-#define PKT_IP_BASE(pkt)                                        \
-  ((ci_uint32*) ((pkt)->ether_base + ETH_HLEN + ETH_VLAN_HLEN))
 
-/* Performance note: for TX, IP header offset is constant, so we have an
- * optimized version for most of these functions for TX path. */
-#define PKT_IP_HDR_START(pkt)                                           \
-  (PKT_IP_BASE(pkt) + ((pkt)->pkt_layout == CI_PKT_LAYOUT_RX_SIMPLE ? -1 : 0))
-
-/* Ether type is not part of IP, but it is calculated from the IP header
- * offset instead of ether offset. */
-ci_inline ci_uint16 oo_ether_type_get(const struct ci_ip_pkt_fmt_s *pkt)
+ci_inline void oo_tx_pkt_layout_init(ci_ip_pkt_fmt* pkt)
 {
-  char* tmp = (char*) PKT_IP_HDR_START(pkt);
-  tmp = tmp - sizeof(ci_uint16);
-  return *(ci_uint16 *)tmp;
-}
-ci_inline void oo_tx_ether_type_set(struct ci_ip_pkt_fmt_s *pkt,
-                                    ci_uint16 type)
-{
-  char* tmp = (char*) PKT_IP_BASE(pkt);
-  tmp = tmp - sizeof(ci_uint16);
-  *(ci_uint16 *)tmp = type;
+  ci_assert_equal((ci_uint8) pkt->pkt_start_off, 0xff);
+  ci_assert_equal(pkt->pkt_eth_payload_off, 0xff);
+  pkt->pkt_start_off = 0;
+  pkt->pkt_eth_payload_off = ETH_HLEN;
 }
 
-ci_inline ci_ip4_hdr *oo_ip_hdr(const struct ci_ip_pkt_fmt_s *pkt)
+ci_inline void oo_tx_pkt_layout_update(ci_ip_pkt_fmt* pkt, int ether_offset)
 {
-  return (ci_ip4_hdr *)PKT_IP_HDR_START(pkt);
+  int delta;
+  ci_assert(ether_offset == 0 || ether_offset == ETH_VLAN_HLEN);
+  ci_assert_equal(pkt->pkt_eth_payload_off, ETH_HLEN);
+  ci_assert(pkt->pkt_start_off == 0 || pkt->pkt_start_off == -ETH_VLAN_HLEN);
+  ether_offset -= ETH_VLAN_HLEN;
+  delta = (int) pkt->pkt_start_off - ether_offset;
+  ci_assert(delta == 0 || delta == ETH_VLAN_HLEN || delta == -ETH_VLAN_HLEN);
+  pkt->buf_len += delta;
+  pkt->pay_len += delta;
+  pkt->pkt_start_off = ether_offset;
 }
 
-ci_inline ci_ip4_hdr *oo_tx_ip_hdr(const struct ci_ip_pkt_fmt_s *pkt)
+ci_inline struct oo_eth_hdr* oo_tx_ether_hdr(ci_ip_pkt_fmt* pkt)
 {
-  return (ci_ip4_hdr*) PKT_IP_BASE(pkt);
+  return oo_ether_hdr(pkt);
 }
 
-ci_inline char *oo_tx_ip_data(const struct ci_ip_pkt_fmt_s *pkt)
+ci_inline void* oo_tx_ether_data(ci_ip_pkt_fmt* pkt)
 {
-  return (char *)(oo_tx_ip_hdr(pkt) + 1);
+  ci_assert_equal(pkt->pkt_eth_payload_off, ETH_HLEN);
+  return pkt->dma_start + ETH_HLEN;
 }
 
-ci_inline char *oo_ether_data(const struct ci_ip_pkt_fmt_s *pkt)
+ci_inline void oo_tx_ether_type_set(ci_ip_pkt_fmt* pkt, uint16_t ether_type)
 {
-  return (char *)PKT_IP_HDR_START(pkt);
-}
-ci_inline char *oo_tx_ether_data(const struct ci_ip_pkt_fmt_s *pkt)
-{
-  return (char*) PKT_IP_BASE(pkt);
+  uint16_t* p = oo_tx_ether_data(pkt);
+  p[-1] = ether_type;
 }
 
-#undef PKT_IP_HDR_START
-
-ci_inline void oo_pkt_layout_set(struct ci_ip_pkt_fmt_s *pkt,
-                                 ci_uint8 new_layout)
+ci_inline ci_ip4_hdr* oo_tx_ip_hdr(ci_ip_pkt_fmt* pkt)
 {
-  if (new_layout == pkt->pkt_layout)
-    return;
-  if (new_layout == CI_PKT_LAYOUT_TX_SIMPLE) {
-    pkt->base_offset = ETH_VLAN_HLEN;
-    pkt->buf_len -= ETH_VLAN_HLEN;
-    pkt->tx_pkt_len -= ETH_VLAN_HLEN;
-  }
-  else if (pkt->pkt_layout == CI_PKT_LAYOUT_TX_SIMPLE) {
-    pkt->base_offset = 0;
-    pkt->buf_len += ETH_VLAN_HLEN;
-    pkt->tx_pkt_len += ETH_VLAN_HLEN;
-  }
-  pkt->pkt_layout = new_layout;
+  return (ci_ip4_hdr*) oo_tx_ether_data(pkt);
 }
+
+ci_inline void* oo_tx_ip_data(ci_ip_pkt_fmt* pkt)
+{
+  return oo_tx_ip_hdr(pkt) + 1;
+}
+
 
 /*********************************************************************
 **************** access to cached IP header fields *******************

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,7 +56,7 @@
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/efrm_nic.h>
 #include <ci/efrm/driver_private.h>
-#include <ci/efrm/buffer_table.h>
+#include <ci/efrm/pd.h>
 #include "efrm_internal.h"
 
 
@@ -116,15 +116,26 @@ void efrm_driver_dtor(void)
 
 
 int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
-		  int bt_min, int bt_lim,
 		  const struct vi_resource_dimensions *res_dim)
 {
 	unsigned max_vis;
 	int rc;
 
-	max_vis = max(res_dim->evq_int_lim, res_dim->evq_timer_lim);
-	max_vis = min(max_vis, res_dim->txq_lim);
-	max_vis = min(max_vis, res_dim->rxq_lim);
+	if (efrm_nic->efhw_nic.devtype.arch == EFHW_ARCH_EF10) {
+		max_vis = res_dim->vi_lim;
+	}
+	else if (efrm_nic->efhw_nic.devtype.arch == EFHW_ARCH_FALCON) {
+		max_vis = max(res_dim->evq_int_lim, res_dim->evq_timer_lim);
+		max_vis = min(max_vis, res_dim->txq_lim);
+		max_vis = min(max_vis, res_dim->rxq_lim);
+	}
+	else {
+		EFRM_ERR("%s: unknown efhw device architecture %u)",
+			 __FUNCTION__, efrm_nic->efhw_nic.devtype.arch);
+		rc = -EINVAL;
+		goto fail1;
+	}
+
 	efrm_nic->vis = vmalloc(max_vis * sizeof(efrm_nic->vis[0]));
 	if (efrm_nic->vis == NULL) {
 		EFRM_ERR("%s: Out of memory (max_vis=%u)",
@@ -141,10 +152,16 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 		goto fail2;
 	}
 
-	rc = efrm_nic_buffer_table_ctor(efrm_nic, bt_min, bt_lim);
-	if (rc < 0) {
-		EFRM_ERR("%s: efrm_nic_buffer_table_ctor(%d, %d) failed (%d)",
-			 __FUNCTION__, bt_min, bt_lim, rc);
+	/* We request ids based on 1, as we use a 0 owner_id within Onload to 
+	 * show we're using physical addressing mode.  On ef10 0 is part of
+	 * our available owner id space, so we will map owner id back to 0
+	 * based before passing through MCDI.
+	 */
+	efrm_nic->owner_ids = efrm_pd_owner_ids_ctor(1, max_vis);
+	if (efrm_nic->owner_ids == NULL) {
+		EFRM_ERR("%s: Out of memory (max_vis=%u)",
+			 __FUNCTION__, max_vis);
+		rc = -ENOMEM;
 		goto fail3;
 	}
 
@@ -155,6 +172,7 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 
 fail3:
 	efrm_vi_allocator_dtor(efrm_nic);
+	
 fail2:
 	vfree(efrm_nic->vis);
 fail1:
@@ -167,7 +185,7 @@ void efrm_nic_dtor(struct efrm_nic *efrm_nic)
 	/* Things have gone very wrong if there are any driver clients */
 	EFRM_ASSERT(list_empty(&efrm_nic->clients));
 
-	efrm_nic_buffer_table_dtor(efrm_nic);
+	efrm_pd_owner_ids_dtor(efrm_nic->owner_ids);
 	efrm_vi_allocator_dtor(efrm_nic);
 	vfree(efrm_nic->vis);
 
@@ -231,7 +249,6 @@ void efrm_driver_unregister_nic(struct efrm_nic *rnic)
 	spin_unlock_bh(&efrm_nic_tablep->lock);
 }
 
-
 #ifdef __KERNEL__
 
 
@@ -240,16 +257,31 @@ int efrm_nic_post_reset(struct efhw_nic *nic)
 	struct efrm_nic *rnic = efrm_nic(nic);
 	struct efrm_client *client;
 	struct list_head *client_link;
+	struct list_head reset_list;
+
+	INIT_LIST_HEAD(&reset_list);
 
 	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each(client_link, &rnic->clients) {
 		client = container_of(client_link, struct efrm_client, link);
-		EFRM_ERR("%s: client %p", __FUNCTION__, client);
-		if (client->callbacks->post_reset)
-			client->callbacks->post_reset(client, 
-						      client->user_data);
+		/* can't call post_reset directly as we're holding a
+		 * spin lock and it may block (on EF10).  So just take
+		 * a reference and call post_reset below 
+		 */
+		if (client->callbacks->post_reset) {
+			++client->ref_count;
+			list_add(&client->reset_link, &reset_list);
+		}
 	}
 	spin_unlock_bh(&efrm_nic_tablep->lock);
+
+	while (!list_empty(&reset_list)) {
+		client = list_entry(list_pop(&reset_list), struct efrm_client, 
+				    reset_link);
+		client->callbacks->post_reset(client, client->user_data);
+		/* drop reference we took above */
+		efrm_client_put(client);
+	}
 
 	return 0;
 }
@@ -264,6 +296,14 @@ static struct efrm_client_callbacks efrm_null_callbacks = {
 	efrm_client_nullcb
 };
 
+static void efrm_client_init_from_nic(struct efrm_nic *rnic,
+				      struct efrm_client *client)
+{
+	client->nic = &rnic->efhw_nic;
+	client->ref_count = 1;
+	INIT_LIST_HEAD(&client->resources);
+	list_add(&client->link, &rnic->clients);
+}
 
 int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 		    void *user_data, struct efrm_client **client_out)
@@ -290,10 +330,7 @@ int efrm_client_get(int ifindex, struct efrm_client_callbacks *callbacks,
 	if (rnic) {
 		client->user_data = user_data;
 		client->callbacks = callbacks;
-		client->nic = &rnic->efhw_nic;
-		client->ref_count = 1;
-		INIT_LIST_HEAD(&client->resources);
-		list_add(&client->link, &rnic->clients);
+		efrm_client_init_from_nic(rnic, client);
 	}
 	spin_unlock_bh(&efrm_nic_tablep->lock);
 
@@ -363,5 +400,6 @@ int efrm_nic_present(int ifindex)
 	return rc;
 }
 EXPORT_SYMBOL(efrm_nic_present);
+
 
 #endif  /* __KERNEL__ */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,80 +25,6 @@
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/signals.h>
-
-
-int efab_tcp_helper_sock_callback_arm(tcp_helper_resource_t* trs,
-                                      oo_sp sock_id, void *arg)
-{
-  ci_netif* ni = &trs->netif;
-  ci_tcp_state* ts;
-  citp_waitable* w;
-
-  ci_assert(ci_netif_is_locked(ni));
-
-  if( ! IS_VALID_SOCK_P(ni, sock_id) ) {
-    CI_DEBUG(ci_log("%s: bad sock_id=%d", __FUNCTION__, OO_SP_FMT(sock_id)));
-    return -EINVAL;
-  }
-  ts = SP_TO_TCP(ni, sock_id);
-  w = &ts->s.b;
-
-  /* Maybe poll the netif.  We assume is that it has been polled
-   * recently, so the timers don't need to be checked. */
-  if (ci_netif_has_event(ni)) {
-    ci_netif_poll(ni);
-  }
-
-  if (tcp_rcv_usr(ts) > (unsigned)ts->s.so.rcvlowat) {
-    return -EALREADY;
-  }
-
-  if ( (ts->s.b.state & CI_TCP_STATE_ACCEPT_DATA) == 0 )
-    return -ENOTCONN;
-
-  CI_USER_PTR_SET(w->callback_arg, arg);
-  w->callback_armed = CI_TRUE;
-
-  ci_bit_set(&w->wake_request, CI_SB_FLAG_WAKE_RX_B);
-  tcp_helper_request_wakeup(trs);
-
-  return 0;
-}
-
-
-int efab_tcp_helper_sock_callback_disarm(tcp_helper_resource_t *trs,
-                                         oo_sp sock_id)
-{
-  ci_netif* ni = &trs->netif;
-  ci_tcp_state* ts;
-  citp_waitable* w;
-
-  ci_assert(ci_netif_is_locked(ni));
-
-  if( ! IS_VALID_SOCK_P(ni, sock_id) ) {
-    CI_DEBUG(ci_log("%s: bad sock_id=%d", __FUNCTION__, OO_SP_FMT(sock_id)));
-    return -EINVAL;
-  }
-  ts = SP_TO_TCP(ni, sock_id);
-  w = &ts->s.b;
-
-  w->callback_armed = CI_FALSE;
-  
-  return 0;
-}
-
-
-int efab_tcp_helper_sock_callback_set(tcp_helper_resource_t *trs,
-                                      void (*fn)(void *arg, int why))
-{
-  ci_assert(ci_netif_is_locked(&trs->netif));
-  
-  /* check is trusted stack ? */
-
-  trs->callback_fn = fn;
-
-  return 0;
-}
 
 
 /**********************************************************************
@@ -214,7 +140,7 @@ efab_tcp_helper_sock_sleep(tcp_helper_resource_t* trs,
 
   ci_waitable_init_timeout_from_ms(&timeout, op->timeout_ms);
 
-  if( ! ni->state->is_spinner ) {
+  if( ! ci_netif_is_spinner(ni) ) {
     CITP_STATS_NETIF(++trs->netif.state->stats.sock_sleep_primes);
     tcp_helper_request_wakeup(trs);
     ci_frc64(&ni->state->last_sleep_frc);

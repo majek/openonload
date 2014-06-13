@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2013  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -64,12 +64,10 @@ ci_inline void ci_tcp_rx_post_poll(ci_netif* ni, ci_tcp_state* ts)
 
   ts->s.b.sb_flags &=~ CI_SB_FLAG_TCP_POST_POLL;
 
-
-  if( ci_tcp_sendq_not_empty(ts) ) {
+  if( ci_tcp_sendq_not_empty(ts) )
     ci_tcp_tx_advance(ts, ni);
-    if( ci_tcp_tx_advertise_space(ts) )
-      ci_tcp_wake(ni, ts, CI_SB_FLAG_WAKE_TX);
-  }
+  if( ci_tcp_tx_advertise_space(ni, ts) )
+    ci_tcp_wake(ni, ts, CI_SB_FLAG_WAKE_TX);
 
 #if CI_CFG_TCP_FASTSTART
   if( ci_tcp_time_now(ni) - ts->t_prev_recv_payload > NI_CONF(ni).tconst_idle )
