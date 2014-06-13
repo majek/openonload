@@ -864,13 +864,17 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     /* No accelerated fds or invalid parameters). */
     CITP_EPOLL_EP_UNLOCK(ep, 0);
     citp_exit_lib(lib_context, FALSE);
+    if( timeout )
+      ep->blocking = 1;
     Log_POLL(ci_log("%s(%d, ..): passthrough", __FUNCTION__, fdi->fd));
 #if CI_LIBC_HAS_epoll_pwait
     if( sigmask != NULL )
-      return ci_sys_epoll_pwait(fdi->fd, events, maxevents, timeout, sigmask);
+      rc = ci_sys_epoll_pwait(fdi->fd, events, maxevents, timeout, sigmask);
     else
 #endif
-      return ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
+      rc = ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
+    ep->blocking = 0;
+    return rc;
   }
 
   /* Set up epoll state */

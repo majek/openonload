@@ -47,7 +47,7 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/mmap.h>
 #include <onload/linux_trampoline.h>
-#include "../linux_resource/kernel_compat.h"
+#include <driver/linux_resource/kernel_compat.h>
 
 
 /* All valid mm_hash structures have their 'magic' member set to this */

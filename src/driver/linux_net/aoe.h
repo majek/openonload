@@ -41,10 +41,10 @@ int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld);
 int efx_aoe_update_keys(struct efx_nic *efx,
 			struct efx_update_license *key_stats);
 #else
-bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return false; };
-int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld) { return -ENOSYS; }
-int efx_aoe_update_keys(struct efx_nic *efx,
-			struct efx_update_license *key_stats) {
+static inline bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return false; }
+static inline int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld) { return -ENOSYS; }
+static inline int efx_aoe_update_keys(struct efx_nic *efx,
+				      struct efx_update_license *key_stats) {
 	return -ENOSYS;
 }
 #endif

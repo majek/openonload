@@ -2587,8 +2587,8 @@ static int efx_ioctl(struct net_device *net_dev, struct ifreq *ifr, int cmd)
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct mii_ioctl_data *data = if_mii(ifr);
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_HACKS)
-	if (in_interrupt())
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_SETTINGS_WORKAROUND)
+	if (in_atomic())
 		/* We can't execute mdio requests from an atomic context
 		 * on Siena. Luckily, the bonding driver falls back to
 		 * the ethtool API if this command fails. */
@@ -3066,7 +3066,7 @@ static struct notifier_block efx_netdev_notifier = {
 	.notifier_call = efx_netdev_event,
 };
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_HACKS)
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_MTU_WORKAROUND)
 /* Prior to Linux 2.6.24, the bonding driver may call change_mtu()
  * without holding the RTNL, unlike all other callers.  We try to
  * mitigate the risk of a race with other reconfiguration using
