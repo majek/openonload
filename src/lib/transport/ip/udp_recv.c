@@ -1182,6 +1182,15 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
     } 
   }
 
+  if( cb_flags & ONLOAD_ZC_END_OF_BURST ) {
+    /* If we've advertised an end of burst, we should return to match
+     * receive-via-Onload behaviour.  Note this assumes that setting
+     * ONLOAD_ZC_TERMINATE clears ONLOAD_ZC_CONTINUE
+     */
+    (*cb_rc) |= ONLOAD_ZC_TERMINATE;
+    ci_assert(((*cb_rc) & ONLOAD_ZC_CONTINUE) == 0);
+  }
+
   return 0;
 }
 

@@ -662,6 +662,7 @@ connect_ul_start:
 static void ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
 {
   int i;
+  oo_p sp;
 
   tls->acceptq_n_in = tls->acceptq_n_out = 0;
   tls->acceptq_put = CI_ILL_END;
@@ -672,10 +673,24 @@ static void ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
 
   /* Initialise the listenQ. */
   for( i = 0; i < CI_CFG_TCP_LISTENQ_BUCKETS; ++i ) {
-    oo_p sp = TS_OFF(ni, tls);
+    sp = TS_OFF(ni, tls);
     OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, listenq[i]));
     ci_ni_dllist_init(ni, &tls->listenq[i], sp, "lstq");
   }
+
+  /* Initialize the cache and pending lists for the EP-cache.
+   * See comment at definition for details
+   */
+  LOG_EP (log ("Initialise cache and pending list for id %d",
+	       S_FMT(tls)));
+
+  sp = TS_OFF(ni, tls);
+  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_cache));
+  ci_ni_dllist_init(ni, &tls->epcache_cache, sp, "epch");
+
+  sp = TS_OFF(ni, tls);
+  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_pending));
+  ci_ni_dllist_init(ni, &tls->epcache_pending, sp, "eppd");
 }
 
 #ifdef __KERNEL__
@@ -1028,20 +1043,6 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
     tls->listenq_tid.param1 = S_SP(tls);
     tls->listenq_tid.fn = CI_IP_TIMER_TCP_LISTEN;
   }
-
-  /* Initialize the cache and pending lists for the EP-cache.
-   * See comment at definition for details
-   */
-  LOG_EP (log ("Initialise cache and pending list for id %d",
-	       S_FMT(tls)));
-
-  sp = TS_OFF(netif, tls);
-  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_cache));
-  ci_ni_dllist_init(netif, &tls->epcache_cache, sp, "epch");
-
-  sp = TS_OFF(netif, tls);
-  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_pending));
-  ci_ni_dllist_init(netif, &tls->epcache_pending, sp, "eppd");
 
   /* install all the filters needed for this connection 
    *    - tcp_laddr_be32(ts) = 0 for IPADDR_ANY

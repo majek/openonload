@@ -155,6 +155,8 @@ def irq_get_name(irq):
 
 
 def irq_get_pid(irq):
+    """Returns the pid of the kernel thread handling the given IRQ.
+    Returns -1 if no such thread is found."""
     # The name of the thread used to handle an interrupt has changed over
     # time...
     pid = try_get_pid('^IRQ-%d$' % int(irq))
@@ -410,53 +412,59 @@ def get_close_cores(topology, core):
     addcores(unused_cores)
     return cc
 
+######################################################################
+
+def outl(x):
+    import sys
+    sys.stdout.write("%s\n" % x)
+
 
 def dump_topology(top):
-    print "                 id2core:", top.id2core
-    print "                core_ids:", top.core_ids
-    print "              real_cores:", top.real_cores
-    print "           real_core_ids:", top.real_core_ids
-    print "                packages:", top.id2package
-    print "             package_ids:", top.package_ids
-    print "           shared_caches:", top.shared_caches
+    outl("                 id2core: %s" % top.id2core)
+    outl("                core_ids: %s" % top.core_ids)
+    outl("              real_cores: %s" % top.real_cores)
+    outl("           real_core_ids: %s" % top.real_core_ids)
+    outl("                packages: %s" % top.id2package)
+    outl("             package_ids: %s" % top.package_ids)
+    outl("           shared_caches: %s" % top.shared_caches)
 
     for core in top.get_cores():
-        print core
-        print "               real_core:", core.real_core
-        print "    thread_siblings_list:", core.thread_siblings_list
-        print " thread_siblings_ex_list:", core.thread_siblings_ex_list
-        print "      core_siblings_list:", core.core_siblings_list
-        print "   core_siblings_ex_list:", core.core_siblings_ex_list
-        print "           shared_caches:", core.shared_caches
+        outl("%s" % core)
+        outl("               real_core: %s" % core.real_core)
+        outl("    thread_siblings_list: %s" % core.thread_siblings_list)
+        outl(" thread_siblings_ex_list: %s" % core.thread_siblings_ex_list)
+        outl("      core_siblings_list: %s" % core.core_siblings_list)
+        outl("   core_siblings_ex_list: %s" % core.core_siblings_ex_list)
+        outl("           shared_caches: %s" % core.shared_caches)
 
     for pkg_i in top.package_ids:
         pkg = top.id2package[pkg_i]
-        print pkg
-        print "           cores:", pkg.core_ids
+        outl("%s" % pkg)
+        outl("           cores: %s" % pkg.core_ids)
 
 
 def dump_irqs():
-    print "irq_get_name2vec_map():"
+    outl("irq_get_name2vec_map():")
     for irq_name, vector in irq_get_name2vec_map().items():
-        print "%20s: %d" % (irq_name, vector)
-    print "irq_get_vec2names_map():"
+        outl("%20s: %d" % (irq_name, vector))
+    outl("irq_get_vec2names_map():")
     v2n = irq_get_vec2names_map()
     vectors = v2n.keys()
     vectors.sort()
     for v in vectors:
-        print "%20d: %s" % (v, v2n[v])
+        outl("%20d: %s" % (v, v2n[v]))
 
 
 def dump_all(top):
-    print '=' * 78
+    outl('=' * 78)
     dump_topology(top)
-    print '=' * 78
+    outl('=' * 78)
     dump_irqs()
-    print '=' * 78
+    outl('=' * 78)
     if 0:
-        print '=' * 78
+        outl('=' * 78)
         dump_topology(get_topology(0x3))
-        print '=' * 78
+        outl('=' * 78)
         dump_topology(get_topology(0x5))
 
 
@@ -466,4 +474,4 @@ if __name__ == '__main__':
     if len(sys.argv) == 1 or sys.argv[1] == 'dump':
         dump_all(top)
     elif sys.argv[1] == 'close_cores':
-        print get_close_cores(top, int(sys.argv[2]))
+        outl(get_close_cores(top, int(sys.argv[2])))

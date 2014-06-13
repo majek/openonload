@@ -134,35 +134,35 @@ def out(x, file=sys.stdout):
     try:
         file.write(x)
     except:
-        print repr(x)
+        sys.stderr.write("INTERNAL ERROR: out: repr(x)=%s\n" % repr(x))
         raise
 
 
 def log(x, file=sys.stdout, loglevel=LL_ALWAYS):
     if global_options.loglevel >= loglevel:
-        x = top_and_tail(x, "%s: " % me)
+        x = top_and_tail(x, pre=("%s: " % me))
         out(x, file=file)
 
 
 def debug(x):
-    x = top_and_tail(x, "DEBUG: ")
+    x = top_and_tail(x, pre="DEBUG: ")
     log(x, file=sys.stderr, loglevel=LL_DEBUG)
 
 
 def info(x):
-    x = top_and_tail(x, "INFO: ")
+    x = top_and_tail(x, pre="INFO: ")
     log(x, file=sys.stderr, loglevel=LL_INFO)
 
 
 def err(x):
-    x = top_and_tail(x, "ERROR: ")
+    x = top_and_tail(x, pre="ERROR: ")
     log(x, file=sys.stderr, loglevel=LL_ERROR)
 
 
 warnings_emitted = []
 
 def warn(x):
-    x = top_and_tail(x, "WARNING: ")
+    x = top_and_tail(x, pre="WARNING: ")
     if x in warnings_emitted:
         return
     warnings_emitted.append(x)
@@ -445,9 +445,8 @@ def rxq_set_affinity(ethx, rxq, cpumask):
             err("  irq=%d affinity=%s" % (irq, cscm))
     # See if there is a kernel thread handling the irq (i.e. we have a
     # realtime kernel).
-    try:
-        irq_pid = affinity.irq_get_pid(irq)
-    except:
+    irq_pid = affinity.irq_get_pid(irq)
+    if irq_pid < 0:
         return
     current_cpumask = pid_get_cpumask(irq_pid)
     if cpumask != current_cpumask:
@@ -485,9 +484,8 @@ def rxq_check_affinity(ethx, rxq):
         affinity_warning()
 
     # Check irq affinity and irq thread affinity are consistent.
-    try:
-        irq_pid = affinity.irq_get_pid(irq)
-    except:
+    irq_pid = affinity.irq_get_pid(irq)
+    if irq_pid < 0:
         return ok
     irq_pid_m = pid_get_cpumask(irq_pid)
     if irq_pid_m != irq_m:
@@ -504,15 +502,15 @@ def rxq_show(ethx, rxq):
     irq = rxq_get_irq(ethx, rxq)
     irq_m = irq_get_cpumask(irq)
     irq_cscm = mask.int_to_comma_sep_hex(irq_m, minlen=True)
-    try:
-        irq_pid = affinity.irq_get_pid(irq)
+    irq_pid = affinity.irq_get_pid(irq)
+    if irq_pid > 0:
         irq_pid_m = pid_get_cpumask(irq_pid)
         irq_pid_cscm = mask.int_to_comma_sep_hex(irq_pid_m, minlen=True)
-        print "%s rxq%d irq=%d irqaffinity=%s pid=%d pidaffinity=%s" % \
-              (ethx, rxq, irq, irq_cscm, irq_pid, irq_pid_cscm)
-    except:
-        print "%s rxq%d irq=%d irqaffinity=%s" % \
-              (ethx, rxq, irq, irq_cscm)
+        out("%s rxq%d irq=%d irqaffinity=%s pid=%d pidaffinity=%s" %
+            (ethx, rxq, irq, irq_cscm, irq_pid, irq_pid_cscm))
+    else:
+        out("%s rxq%d irq=%d irqaffinity=%s" %
+            (ethx, rxq, irq, irq_cscm))
 
 
 def interface_bind_rxqs(ethx, q_to_cpu):
@@ -524,17 +522,17 @@ def interface_bind_rxqs(ethx, q_to_cpu):
 
 
 def interface_show(ethx):
-    print "%s ifindex=%d" % (ethx, ethx.ifindex())
+    out("%s ifindex=%d" % (ethx, ethx.ifindex()))
     if ethx.driver() != 'sfc':
         return
-    print "%s n_rxqs=%d" % (ethx, ethx.n_rxqs())
+    out("%s n_rxqs=%d" % (ethx, ethx.n_rxqs()))
     for rxq in range(ethx.n_rxqs()):
         rxq_show(ethx, rxq)
     if sfc_affinity_ifindex_is_registered(ethx.ifindex()):
         cpu2rxq = sfc_affinity_get_cpu2rxq(ethx)
-        print "%s cpu2rxq=%s" % (ethx, ','.join([str(x) for x in cpu2rxq]))
+        out("%s cpu2rxq=%s" % (ethx, ','.join([str(x) for x in cpu2rxq])))
     else:
-        print "%s not registered with sfc_affinity" % ethx
+        out("%s not registered with sfc_affinity" % ethx)
 
 
 def my_min(seq, key=None):
@@ -697,7 +695,15 @@ def interface_check(ethx):
         info("%s is registered with sfc_affinity" % ethx)
     except:
         err("%s is not registered with sfc_affinity" % ethx)
-        return False
+        ok = False
+    if ok:
+        cpu2rxq = sfc_affinity_get_cpu2rxq(ethx)
+        if len([x for x in cpu2rxq if x < 0]) == 0:
+            info("%s is configured" % ethx)
+        else:
+            err("%s is not configured" % ethx)
+            ok = False
+    # check entries in cpu2rxq are in range of num cpus
     # check cpu2rxq2cpu mapping self consistent
     # check sfc_affinity does not think there are more rxqs than there are
     # warn if sfc_affinity thinkgs there are too few rxqs
