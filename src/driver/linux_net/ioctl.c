@@ -345,6 +345,12 @@ efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
 {
 	return efx_aoe_update_keys(efx, &data->key_stats);
 }
+
+static int
+efx_ioctl_reset_aoe(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_aoe_reset_aoe(efx, &data->aoe_reset);
+}
 #endif
 
 
@@ -504,6 +510,10 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	case EFX_LICENSE_UPDATE:
 		size = sizeof(data.key_stats);
 		op = efx_ioctl_update_license;
+		break;
+	case EFX_RESET_AOE:
+		size = sizeof(data.aoe_reset);
+		op = efx_ioctl_reset_aoe;
 		break;
 #endif
 	case EFX_MODULEEEPROM:

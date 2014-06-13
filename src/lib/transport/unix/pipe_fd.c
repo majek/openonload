@@ -674,9 +674,17 @@ int citp_pipe_create(int fds[2], int flags)
   }
   CITP_UNLOCK(&citp_ul_lock);
 
-  if( citp_netif_alloc_and_init(&fd, &ni) )
+  rc = citp_netif_alloc_and_init(&fd, &ni);
+  if( rc != 0 ) {
+    if( rc == CI_SOCKET_HANDOVER ) {
+      /* This implies EF_DONT_ACCELERATE is set, so we handover
+       * regardless of CITP_OPTS.no_fail */
+      return CITP_NOT_HANDLED;
+    }
     /* may be lib mismatch - errno will be ELIBACC */
     goto fail1;
+  }
+  rc = -1;
 
   CI_MAGIC_CHECK(ni, NETIF_MAGIC);
 

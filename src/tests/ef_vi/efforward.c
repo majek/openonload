@@ -227,6 +227,7 @@ int main(int argc, char* argv[])
   struct vi* vis[2];
   struct vi* fwd_map[2];
   struct thread* thread;
+  struct net_if* net_if;
   int i, j;
 
   if( argc != 3 )
@@ -240,7 +241,11 @@ int main(int argc, char* argv[])
   thread->fwd_map = fwd_map;
 
   for( i = 0; i < thread->vis_n; ++i ) {
-    struct net_if* net_if = net_if_alloc(i, argv[i], 0);
+    if( (net_if = net_if_alloc(i, argv[i], 0)) == NULL ) {
+      LOGE(fprintf(stderr, "ERROR: Bad interface '%s' or unable to allocate "
+                   "resources\n", argv[i]));
+      exit(1);
+    }
     vis[i] = vi_alloc(i, net_if);
   }
   for( i = 0; i < thread->vis_n; ++i )

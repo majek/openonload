@@ -101,6 +101,7 @@ class EthInterface(object):
         self.name = name
         self.__ifindex = -1
         self.__driver = None
+        self.__type = None
         assert self.__driver is None
         self.__n_rxqs = -1
 
@@ -122,6 +123,11 @@ class EthInterface(object):
             except:
                 self.__driver = ""
         return self.__driver
+
+    def is_ethernet(self):
+        if self.__type is None:
+            self.__type = file_get_int('/sys/class/net/%s/type' % self.name)
+        return self.__type == 1
 
     def n_rxqs(self):
         if self.__n_rxqs < 0:
@@ -288,6 +294,8 @@ def get_interfaces(sfc_only=False, names=False):
     interfaces = []
     for ethname in os.listdir(sys_net):
         ethx = EthInterface(ethname)
+        if not ethx.is_ethernet():
+            continue
         if sfc_only and ethx.driver() != 'sfc':
             continue
         if names:

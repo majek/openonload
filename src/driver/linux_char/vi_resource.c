@@ -226,7 +226,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   }
 
   rc = vi_resource_alloc(&attr, client, evq ? efrm_vi(evq) : NULL,
-                         alloc_in->flags,
+                         alloc_in->flags | EFHW_VI_JUMBO_EN,
                          alloc_in->evq_capacity,
                          alloc_in->txq_capacity, alloc_in->rxq_capacity,
                          alloc_in->tx_q_tag, alloc_in->rx_q_tag,

@@ -3058,7 +3058,12 @@ cicpos_handle_ipif_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 		break;
 
 	    case IFA_CACHEINFO:
-		ci_log("Ignoring IFA_CACHEINFO");
+		/* From linux-3.1.3/net/ipv6/addrconf.c: This define
+		 * is only used for IPv6 and this warning tends to spam
+		 * the dmesg for certain users so silently ignoring
+		 * it.
+		 */
+		//ci_log("Ignoring IFA_CACHEINFO");
 		break;
 
 	    default:

@@ -154,7 +154,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   /* create OS socket */
   if( op->domain != AF_UNSPEC ) {
     struct socket *sock;
-    int sock_fd;
+    struct file *os_file;
 
     rc = sock_create(op->domain, type, 0, &sock);
     if( rc < 0 ) {
@@ -163,22 +163,19 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
       ep->aflags = 0;
       return rc;
     }
-#ifdef SOCK_TYPE_MASK
-    sock_fd = sock_map_fd(sock, flags | SOCK_CLOEXEC);
-#else
-    sock_fd = sock_map_fd(sock);
-#endif
-    if( sock_fd < 0 ) {
-      LOG_E(ci_log("%s: ERROR: sock_map_fd failed (%d)",
-                   __FUNCTION__, sock_fd));
+    os_file = sock_alloc_file(sock, flags, NULL);
+    if( IS_ERR(os_file) ) {
+      LOG_E(ci_log("%s: ERROR: sock_alloc_file failed (%ld)",
+                   __FUNCTION__, PTR_ERR(os_file)));
+      sock_release(sock);
       ep->aflags = 0;
-      return sock_fd;
+      return PTR_ERR(os_file);
     }
-    rc = efab_attach_os_socket(ep, sock_fd);
+    rc = efab_attach_os_socket(ep, os_file);
     if( rc < 0 ) {
       LOG_E(ci_log("%s: ERROR: efab_attach_os_socket failed (%d)",
                    __FUNCTION__, rc));
-      efab_linux_sys_close(sock_fd);
+      /* NB. efab_attach_os_socket() consumes [os_file] even on error. */
       ep->aflags = 0;
       return rc;
     }
@@ -195,12 +192,13 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
                     CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP);
   if( rc < 0 ) {
     ci_irqlock_state_t lock_flags;
+    struct oo_file_ref* os_socket;
     ci_irqlock_lock(&ep->thr->lock, &lock_flags);
-    if( ep->os_socket != NULL ) {
-      oo_file_ref_drop(ep->os_socket);
-      ep->os_socket = NULL;
-    }
+    os_socket = ep->os_socket;
+    ep->os_socket = NULL;
     ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
+    if( os_socket != NULL )
+      oo_file_ref_drop(os_socket);
     ep->aflags = 0;
     return rc;
   }

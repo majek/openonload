@@ -205,13 +205,21 @@ struct net_if* net_if_alloc(int net_if_id, const char* name, int rss_set_size)
   TEST(net_if_id >= 0 && net_if_id < MAX_NET_IFS);
   net_if->id = net_if_id;
   net_if->ifindex = ifindex;
-  TRY(ef_driver_open(&net_if->dh));
-  TRY(ef_pd_alloc(&net_if->pd, net_if->dh, net_if->ifindex, 0));
+  if( ef_driver_open(&net_if->dh) < 0 )
+    goto fail1;
+  if( ef_pd_alloc(&net_if->pd, net_if->dh, net_if->ifindex, 0) < 0 )
+    goto fail2;
   net_if->vi_set_size = rss_set_size;
   if( rss_set_size > 0 )
     TRY(ef_vi_set_alloc_from_pd(&net_if->vi_set, net_if->dh,
                                 &net_if->pd, net_if->dh, rss_set_size));
   return net_if;
+
+ fail2:
+  ef_driver_close(net_if->dh);
+ fail1:
+  free(net_if);
+  return NULL;
 }
 
 

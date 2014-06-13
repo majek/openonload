@@ -142,9 +142,13 @@
 #define	PTP_MIN_LENGTH		63
 
 #define PTP_PRIMARY_ADDRESS	0xe0000181	/* 224.0.1.129 */
-#define PTP_PEER_DELAY_ADDRESS	0xe000016B	/* 224.0.1.107 */
+#define PTP_PEER_DELAY_ADDRESS	0xe000006B	/* 224.0.0.107 */
 #define PTP_EVENT_PORT		319
 #define PTP_GENERAL_PORT	320
+
+/* Mask of VLAN tag in bytes 2 and 3 of 802.1Q header
+ */
+#define VLAN_TAG_MASK           0x0fff
 
 /* Annoyingly the format of the version numbers are different between
  * versions 1 and 2 so it isn't possible to simply look for 1 or 2.
@@ -286,7 +290,7 @@ struct efx_pps_data {
 	struct efx_ptp_data *ptp;
 	struct kobject kobj;
 	wait_queue_head_t read_data;
-	struct pps_event_time s_assert;
+	struct timespec s_assert;
 	struct efx_ptp_event_ts n_assert;
 	struct timespec s_delta;
 	struct work_struct hw_pps_work;
@@ -320,6 +324,7 @@ struct efx_pps_dev_attr {
  * @evt_list: List of MC receive events awaiting packets
  * @evt_free_list: List of free events
  * @evt_lock: Lock for manipulating evt_list and evt_free_list
+ * @evt_overflow: Boolean indicating that event list has overflowed
  * @rx_evts: Instantiated events (on evt_list and evt_free_list)
  * @workwq: Work queue for processing pending PTP operations
  * @work: Work task
@@ -381,6 +386,7 @@ struct efx_ptp_data {
 	struct list_head evt_list;
 	struct list_head evt_free_list;
 	spinlock_t evt_lock;
+	bool evt_overflow;
 	struct efx_ptp_event_rx rx_evts[MAX_RECEIVE_EVENTS];
 	struct workqueue_struct *workwq;
 	struct work_struct work;
@@ -631,7 +637,7 @@ static int ptp_read_mc_int(struct seq_file *file, void *data)
 	struct efx_ptp_data *ptp =
 		container_of(data, struct efx_ptp_data, mc_stats[pos]);
 
-	rc = ptp_read_stat(ptp, pos, &value);
+	rc = ptp_read_stat(ptp, pos * sizeof(u32), &value);
 
 	if (rc)
 		return rc;
@@ -827,13 +833,10 @@ static int efx_ptp_process_times(struct efx_nic *efx, u8 *synch_buf,
 	unsigned number_readings = (response_length /
 			       MC_CMD_PTP_OUT_SYNCHRONIZE_TIMESET_LEN);
 	unsigned i;
-	unsigned min;
-	unsigned min_set = 0;
 	unsigned total;
 	unsigned ngood = 0;
 	unsigned last_good = 0;
 	struct efx_ptp_data *ptp = efx->ptp_data;
-	bool min_valid = false;
 	u32 last_sec;
 	u32 start_sec;
 	struct timespec delta;
@@ -843,45 +846,26 @@ static int efx_ptp_process_times(struct efx_nic *efx, u8 *synch_buf,
 	if (number_readings == 0)
 		return -EAGAIN;
 
-	/* Find minimum value in this set of results, discarding clearly
-	 * erroneous results.
+	/* Read the set of results and increment stats for any results that
+	 * appera to be erroneous.
 	 */
 	for (i = 0; i < number_readings; i++) {
 		efx_ptp_read_timeset(synch_buf, &ptp->timeset[i]);
 		synch_buf += MC_CMD_PTP_OUT_SYNCHRONIZE_TIMESET_LEN;
-		if (ptp->timeset[i].window > SYNCHRONISATION_GRANULARITY_NS) {
-			if (min_valid) {
-				if (ptp->timeset[i].window < min_set)
-					min_set = ptp->timeset[i].window;
-			} else {
-				min_valid = true;
-				min_set = ptp->timeset[i].window;
-			}
-		}
 #ifdef CONFIG_SFC_DEBUGFS
-		else {
+		if (ptp->timeset[i].window <= SYNCHRONISATION_GRANULARITY_NS) {
 			/* The apparent time for the operation is below
 			 * the expected bound.  This is most likely to be
 			 * as a consequence of the host's time being adjusted.
-			 * Ignore this reading.
 			 */
 			EFX_PTP_INC_DEBUG_VAR(ptp->bad_sync_durations);
 		}
 #endif
 	}
 
-	if (min_valid) {
-		if (ptp->base_sync_valid && (min_set > ptp->base_sync_ns))
-			min = ptp->base_sync_ns;
-		else
-			min = min_set;
-	} else {
-		min = SYNCHRONISATION_GRANULARITY_NS;
-	}
-
-	/* Discard excessively long synchronise durations.  The MC times
-	 * when it finishes reading the host time so the corrected window
-	 * time should be fairly constant for a given platform.
+	/* Find the last good host-MC synchronization result. The MC times
+	 * when it finishes reading the host time so the corrected window time
+	 * should be fairly constant for a given platform.
 	 */
 	total = 0;
 	for (i = 0; i < number_readings; i++)
@@ -899,8 +883,8 @@ static int efx_ptp_process_times(struct efx_nic *efx, u8 *synch_buf,
 
 	if (ngood == 0) {
 		netif_warn(efx, drv, efx->net_dev,
-			   "PTP no suitable synchronisations %dns %dns\n",
-			   ptp->base_sync_ns, min_set);
+			   "PTP no suitable synchronisations %dns\n",
+			   ptp->base_sync_ns);
 		return -EAGAIN;
 	}
 
@@ -1017,7 +1001,7 @@ static bool efx_ptp_get_host_time(struct efx_nic *efx,
 {
 	if (efx->ptp_data->base_sync_valid) {
 		ktime_t diff = timespec_to_ktime(efx->ptp_data->last_delta);
-		timestamps->syststamp = ktime_add(timestamps->hwtstamp, diff);
+		timestamps->syststamp = ktime_sub(timestamps->hwtstamp, diff);
 	}
 
 	return efx->ptp_data->base_sync_valid;
@@ -1053,7 +1037,8 @@ static int efx_ptp_xmit_skb(struct efx_nic *efx, struct sk_buff *skb)
 	
 #if defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
 	if (vlan_tx_tag_present(skb)) {
-		skb = __vlan_put_tag(skb, vlan_tx_tag_get(skb));
+		skb = __vlan_put_tag(skb, htons(ETH_P_8021Q),
+				     vlan_tx_tag_get(skb));
 		if (unlikely(!skb))
 			return NETDEV_TX_OK;
 	}
@@ -1077,10 +1062,15 @@ static int efx_ptp_xmit_skb(struct efx_nic *efx, struct sk_buff *skb)
 		MCDI_DWORD(txtime, PTP_OUT_TRANSMIT_SECONDS),
 		MCDI_DWORD(txtime, PTP_OUT_TRANSMIT_NANOSECONDS));
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NET_TSTAMP)
-	efx->ptp_data->tx_ts_valid = 1;
-	efx->ptp_data->tx_ts = timestamps;
+	if (efx_ptp_get_host_time(efx, &timestamps)) {
+		efx->ptp_data->tx_ts_valid = 1;
+		efx->ptp_data->tx_ts = timestamps;
+	}
 #else
-	skb_tstamp_tx(skb, &timestamps);
+#if defined(EFX_NOT_UPSTREAM) && !defined(EFX_HAVE_PHC_SUPPORT)
+	if (efx_ptp_get_host_time(efx, &timestamps))
+#endif
+		skb_tstamp_tx(skb, &timestamps);
 #endif
 	/* Success even if hardware timestamping failed */
 	rc = 0;
@@ -1112,6 +1102,11 @@ static void efx_ptp_drop_time_expired_events(struct efx_nic *efx)
 			}
 		}
 	}
+	/* If the event overflow flag is set and the event list is now empty
+	 * clear the flag to re-enable the overflow warning message.
+	 */
+	if (ptp->evt_overflow && list_empty(&ptp->evt_list))
+		ptp->evt_overflow = false;
 	spin_unlock_bh(&ptp->evt_lock);
 }
 
@@ -1153,6 +1148,11 @@ static enum ptp_packet_state efx_ptp_match_rx(struct efx_nic *efx,
 			break;
 		}
 	}
+	/* If the event overflow flag is set and the event list is now empty
+	 * clear the flag to re-enable the overflow warning message.
+	 */
+	if (ptp->evt_overflow && list_empty(&ptp->evt_list))
+		ptp->evt_overflow = false;
 	spin_unlock_bh(&ptp->evt_lock);
 
 	return rc;
@@ -1454,6 +1454,7 @@ static int efx_ptp_stop(struct efx_nic *efx)
 	list_for_each_safe(cursor, next, &efx->ptp_data->evt_list) {
 		list_move(cursor, &efx->ptp_data->evt_free_list);
 	}
+	ptp->evt_overflow = false;
 	spin_unlock_bh(&efx->ptp_data->evt_lock);
 
 	return rc;
@@ -1480,10 +1481,19 @@ static void efx_ptp_pps_worker(struct work_struct *work)
 int efx_ptp_pps_get_event(struct efx_nic *efx, struct efx_ts_get_pps *event)
 {
 	struct timespec nic_time;
-	struct efx_pps_data *pps_data = efx->ptp_data->pps_data;
+	struct efx_pps_data *pps_data;
 	unsigned int ev;
 	unsigned int err;
-	unsigned int timeout = msecs_to_jiffies(event->timeout);
+	unsigned int timeout;
+
+	if (!efx->ptp_data)
+		return -ENOTTY;
+
+	if (!efx->ptp_data->pps_data)
+		return -ENOTTY;
+
+	pps_data = efx->ptp_data->pps_data;
+	timeout = msecs_to_jiffies(event->timeout);
 
 	ev = pps_data->last_ev_taken;
 
@@ -1504,8 +1514,8 @@ int efx_ptp_pps_get_event(struct efx_nic *efx, struct efx_ts_get_pps *event)
 	event->nic_assert.tv_sec = nic_time.tv_sec;
 	event->nic_assert.tv_nsec = nic_time.tv_nsec;
 
-	event->sys_assert.tv_sec = pps_data->s_assert.ts_real.tv_sec;
-	event->sys_assert.tv_nsec = pps_data->s_assert.ts_real.tv_nsec;
+	event->sys_assert.tv_sec = pps_data->s_assert.tv_sec;
+	event->sys_assert.tv_nsec = pps_data->s_assert.tv_nsec;
 
 	event->delta.tv_sec = pps_data->s_delta.tv_sec;
 	event->delta.tv_nsec = pps_data->s_delta.tv_nsec;
@@ -1529,7 +1539,9 @@ static void efx_ptp_hw_pps_worker(struct work_struct *work)
 	 * check against the last one, if new then add
 	 * to queue */
 
-	pps->s_assert = pps->ptp->host_time_pps;
+	pps->s_assert = timespec_sub(ktime_to_timespec(
+					pps->n_assert.hwtimestamp),
+				     pps->ptp->last_delta);
 	pps->s_delta = pps->ptp->last_delta;
 	pps->last_ev++;
 
@@ -1539,10 +1551,21 @@ static void efx_ptp_hw_pps_worker(struct work_struct *work)
 
 int efx_ptp_hw_pps_enable(struct efx_nic *efx, struct efx_ts_hw_pps *data)
 {
-	struct efx_ptp_data *ptp_data = efx->ptp_data;
-	struct efx_pps_data *pps_data = ptp_data->pps_data;
+	struct efx_pps_data *pps_data;
 	u8 inbuf[MC_CMD_PTP_IN_PPS_ENABLE_LEN];
 	int rc;
+
+	if (!efx->ptp_data)
+		return -ENOTTY;
+
+	if (!efx->ptp_data->pps_data)
+		return -ENOTTY;
+
+	if (!data) {
+		return -EINVAL;
+	}	
+
+	pps_data = efx->ptp_data->pps_data;
 
 	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_PPS_ENABLE);
 	MCDI_SET_DWORD(inbuf, PTP_IN_PPS_ENABLE_OP,
@@ -1722,6 +1745,7 @@ static int efx_ptp_probe_channel(struct efx_channel *channel)
 	spin_lock_init(&ptp->evt_lock);
 	for (pos = 0; pos < MAX_RECEIVE_EVENTS; pos++)
 		list_add(&ptp->rx_evts[pos].link, &ptp->evt_free_list);
+	ptp->evt_overflow = false;
 
 	ptp->phc_clock_info.owner = THIS_MODULE;
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
@@ -1743,8 +1767,10 @@ static int efx_ptp_probe_channel(struct efx_channel *channel)
 
 	ptp->phc_clock = ptp_clock_register(&ptp->phc_clock_info,
 					    &efx->pci_dev->dev);
-	if (!ptp->phc_clock)
+	if (IS_ERR(ptp->phc_clock)) {
+		rc = PTR_ERR(ptp->phc_clock);
 		goto fail3;
+	}
 
 	INIT_WORK(&ptp->pps_work, efx_ptp_pps_worker);
 	ptp->pps_workwq = create_singlethread_workqueue("sfc_pps");
@@ -1971,7 +1997,8 @@ static bool efx_ptp_rx(struct efx_channel *channel, struct sk_buff *skb)
 
 		if ((rx_buff->flags & EFX_RX_BUF_VLAN_XTAG) &&
 		    ((ptp->vlan_filter.num_vlan_tags == 0) ||
-		     (ptp->vlan_filter.vlan_tags[0] != rx_buff->vlan_tci))) {
+		     (ptp->vlan_filter.vlan_tags[0] !=
+		      (rx_buff->vlan_tci & VLAN_TAG_MASK)))) {
 			return false;
 		}
 #endif
@@ -2421,8 +2448,13 @@ static void ptp_event_rx(struct efx_nic *efx, struct efx_ptp_data *ptp)
 		list_add_tail(&evt->link, &ptp->evt_list);
 
 		queue_work(ptp->workwq, &ptp->work);
-	} else {
-		netif_err(efx, rx_err, efx->net_dev, "No free PTP event");
+	} else if (!ptp->evt_overflow) {
+		/* Log a warning message and set the event overflow flag.
+		 * The message won't be logged again until the event queue
+		 * becomes empty.
+		 */
+		netif_err(efx, rx_err, efx->net_dev, "PTP event queue overflow\n");
+		ptp->evt_overflow = true;
 	}
 	spin_unlock_bh(&ptp->evt_lock);
 }
@@ -2598,7 +2630,7 @@ static int efx_phc_settime(struct ptp_clock_info *ptp,
 
 	delta = timespec_sub(*e_ts, time_now);
 
-	efx_phc_adjtime(ptp, timespec_to_ns(&delta));
+	rc = efx_phc_adjtime(ptp, timespec_to_ns(&delta));
 	if (rc != 0)
 		return rc;
 

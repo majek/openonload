@@ -48,6 +48,20 @@ ifdef EFX_NOT_EXPORTED
 EXTRA_MAKEFLAGS += EFX_NOT_EXPORTED=1
 endif
 
+KVERPARTS = $(subst -, ,$(subst ., ,$(KVER)))
+ifeq ($(word 1,$(KVERPARTS)),2)
+ifneq ($(word 2,$(KVERPARTS)),6)
+$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
+endif
+ifneq ($(filter 0 1 2 3 4 5 6 7 8,$(word 3,$(KVERPARTS))),)
+$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
+endif
+ifneq ($(filter 9 10 11 12 13 14 15,$(word 3,$(KVERPARTS))),)
+$(warning Kernel <=2.6.15 does not support PTP)
+override CONFIG_SFC_PTP :=
+override CONFIG_SFC_PPS :=
+endif
+endif
 
 SFC_MODULES := $(subst .o,.ko, $(TARGETS))
 

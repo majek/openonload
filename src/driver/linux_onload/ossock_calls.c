@@ -227,7 +227,31 @@ static int copy_compat_iovec_from_user(struct iovec* iovec,
 
 #endif
 
-int oo_install_file_to_fd_cloexec(struct file *file)
+
+/* 3.7 has get_unused_fd_flags exported! Hoorray!
+ * 2.6.29 has get_unused_fd_flags macro to alloc_fd,
+ *        alloc_fd non-exported
+ * 2.6.24-26 has get_unused_fd_flags function, non-exported
+ * 2.6.18 has no O_CLOEXEC
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+
+int oo_install_file_to_fd(struct file *file, int flags)
+{
+  int fd = get_unused_fd_flags(flags);
+
+  if(unlikely( fd < 0 ))
+    return fd;
+
+  get_file(file);
+  fd_install(fd, file);
+
+  return fd;
+}
+
+#else  /* LINUX_VERSION_CODE < KERNEL_VERSION(3,7,0) */
+
+int oo_install_file_to_fd(struct file *file, int flags)
 {
   int fd = get_unused_fd();
   struct files_struct *files = current->files;
@@ -238,24 +262,43 @@ int oo_install_file_to_fd_cloexec(struct file *file)
 
   get_file(file);
 
-
   /* This is almost the copy of fd_install, but with close_on_exec. */
   spin_lock(&files->file_lock);
   fdt = files_fdtable(files);
   rcu_assign_pointer(fdt->fd[fd], file);
-  efx_set_close_on_exec(fd, fdt);
+  if( flags & O_CLOEXEC)
+    efx_set_close_on_exec(fd, fdt);
   spin_unlock(&files->file_lock);
 
   return fd;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
-int sock_map_fd(struct socket *sock, int flags)
+#endif
+
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,7,0)
+/* Implement sock_alloc_file() in terms of sock_map_fd() since the latter
+ * is exported.
+ */
+struct file *sock_alloc_file(struct socket *sock, int flags, void *unused)
 {
-  struct file *file = sock_alloc_file(sock, flags, NULL);
-  if( file == NULL )
-    return PTR_ERR(file);
-  return oo_install_file_to_fd_cloexec(file);
+  int fd;
+  struct file *file;
+
+#ifdef SOCK_TYPE_MASK
+  fd = sock_map_fd(sock, flags | SOCK_CLOEXEC);
+#else
+  fd = sock_map_fd(sock);
+#endif
+  if( fd < 0 )
+    return ERR_PTR(fd);
+  file = fget(fd);
+  if( file == NULL ) {
+    ci_log("%s: fd=%d closed under feet!", __func__, fd);
+    return ERR_PTR(-EFAULT);
+  }
+  efab_linux_sys_close(fd);
+  return file;
 }
 #endif
 
@@ -266,7 +309,7 @@ static int get_os_fd_from_ep(tcp_helper_endpoint_t *ep)
   if( oo_os_sock_get_from_ep(ep, &os_file) != 0 )
     return -EINVAL;
 
-  return oo_install_file_to_fd_cloexec(os_file);
+  return oo_install_file_to_fd(os_file, O_CLOEXEC);
 }
 
 /* This really sucks, but sometimes we can't get at the kernel state that we
@@ -732,7 +775,7 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
       spin_unlock(&filp->f_lock);
 #else
-      lock_kernel();
+      unlock_kernel();
 #endif
     }
 
@@ -806,8 +849,7 @@ efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
   if( ! IS_VALID_SOCK_P(ni, sock_id) )  return -EINVAL;
 
   ep = ci_trs_get_valid_ep(trs, sock_id);
-  oo_os_sock_get_from_ep(ep, &file);
-  if( file != NULL ) {
+  if( oo_os_sock_get_from_ep(ep, &file) == 0 ) {
     ci_assert(file->f_op != NULL);
     ci_assert(file->f_op->poll != NULL);
     *p_mask_out = file->f_op->poll(file, 0);
@@ -815,7 +857,7 @@ efab_tcp_helper_poll_os_sock(tcp_helper_resource_t* trs,
     return 0;
   }
 
-  OO_DEBUG_ERR(ci_log("%s: %d:%d no O/S socket", __FUNCTION__,
+  OO_DEBUG_ERR(ci_log("%s: ERROR: %d:%d no O/S socket", __FUNCTION__,
                       NI_ID(ni), OO_SP_FMT(sock_id)));
   return -ENOENT;
 }

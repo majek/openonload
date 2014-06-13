@@ -509,8 +509,10 @@ static int is_onloaded(pid_t pid, int** ret_stacks_ids)
     snprintf(fd_path, 256, "%s/%s", fd_dir_path, ent->d_name);
     char sym_buf[256];
     ssize_t rc = readlink(fd_path, sym_buf, 256);
-    if( rc == -1 )
+    if( rc == -1 ) {
+      closedir(fd_dir);
       return rc;
+    }
     sym_buf[rc] = '\0';
     if( ! strncmp(sym_buf, "onload", strlen("onload")) &&
         ! strstr(sym_buf, "stack") ) {
@@ -530,6 +532,7 @@ static int is_onloaded(pid_t pid, int** ret_stacks_ids)
       }
     }
   }
+  closedir(fd_dir);
   *ret_stacks_ids = stack_ids;
   return n_stacks;
 }
@@ -572,6 +575,7 @@ static int libstack_mappings_init(void)
        * ENOENT: process have died while we were running here */
       if( errno == EACCES || errno == ENOENT )
         continue;
+      closedir(proc);
       return -1;
     }
 
@@ -641,6 +645,7 @@ static int libstack_mappings_init(void)
     pm = pm->next;
   }
 
+  closedir(proc);
   return 0;
 }
 
@@ -808,6 +813,8 @@ static void print_threads_info(pid_t pid)
       printf("task%s: %s\n", ent->d_name, ptr);
     }
   }
+
+  closedir(task_dir);
 }
 
 

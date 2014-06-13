@@ -32,6 +32,8 @@
  *
  *--------------------------------------------------------------------*/
 
+#include "onload_kernel_compat.h"
+
 #include <onload/linux_onload_internal.h>
 #include <onload/linux_trampoline.h>
 #include <onload/linux_mmap.h>

@@ -437,7 +437,6 @@ static int siena_dimension_resources(struct efx_nic *efx)
 	 */
 	unsigned sram_lim_qw = FR_CZ_BUF_FULL_TBL_ROWS / 2;
 	struct efx_dl_falcon_resources *res = &efx->resources;
-	struct siena_nic_data *nic_data = efx->nic_data;
 	struct efx_dl_device_info *end_res;
 	u8 outbuf[MC_CMD_GET_RESOURCE_LIMITS_OUT_LEN];
 	size_t outlen;
@@ -475,7 +474,7 @@ static int siena_dimension_resources(struct efx_nic *efx)
 
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_AOE)
 	/* If the board is AOE enabled */
-	if (nic_data && (aoe_enabled(nic_data))) {
+	if (efx->nic_data && (aoe_enabled(efx->nic_data))) {
 		/* Number of MACs is hardcoded for now */
 		efx->aoe_resources.internal_macs = 2;
 		efx->aoe_resources.external_macs = 2;
@@ -531,11 +530,7 @@ static int siena_probe_nic(struct efx_nic *efx)
 	}
 
 	efx_reado(efx, &reg, FR_AZ_CS_DEBUG);
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_DEV_ID)
-	efx->net_dev->dev_id = EFX_OWORD_FIELD(reg, FRF_CZ_CS_PORT_NUM) - 1;
-#else
 	efx->port_num = EFX_OWORD_FIELD(reg, FRF_CZ_CS_PORT_NUM) - 1;
-#endif
 
 	efx_mcdi_init(efx);
 

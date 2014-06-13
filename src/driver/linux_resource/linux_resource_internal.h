@@ -74,8 +74,8 @@ extern int efrm_install_proc_entries(void);
 extern void efrm_uninstall_proc_entries(void);
 
 #ifdef CONFIG_SFC_RESOURCE_VF
-extern void __devinit efrm_vf_driver_init(void);
-extern void __devinit efrm_vf_driver_fini(void);
+extern void efrm_vf_driver_init(void);
+extern void efrm_vf_driver_fini(void);
 #endif
 
 #endif  /* __LINUX_RESOURCE_INTERNAL__ */

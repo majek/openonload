@@ -163,3 +163,22 @@ int efx_aoe_update_keys(struct efx_nic *efx,
 
 	return 0;
 }
+
+int efx_aoe_reset_aoe(struct efx_nic *efx,
+			struct efx_aoe_reset *reset_flags)
+{
+	u8 inbuf[MC_CMD_AOE_IN_FC_LEN];
+	int rc;
+	struct efx_aoe_data *aoe = efx->aoe_data;
+
+	if (!aoe)
+		return -ENOSYS;
+
+	MCDI_SET_DWORD(inbuf, AOE_IN_CMD, MC_CMD_AOE_OP_FC);
+
+	rc  = efx_mcdi_rpc(efx, MC_CMD_AOE, inbuf, sizeof(inbuf),
+			NULL, 0, NULL);
+
+	return rc;
+}
+

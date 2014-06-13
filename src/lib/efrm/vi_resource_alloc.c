@@ -277,12 +277,12 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_TX_ETH_FILTER_EN;
 		if (q_flags & EFRM_VI_TCP_UDP_FILTER)
 			vi_flags |= EFHW_VI_TX_IP_FILTER_EN;
-		if (!(q_flags & EFRM_VI_CONTIGUOUS))
-			vi_flags |= EFHW_VI_JUMBO_EN;
 		break;
 	case EFHW_RXQ:
 		if (q_flags & EFRM_VI_PHYS_ADDR)
 			vi_flags |= EFHW_VI_RX_PHYS_ADDR_EN;
+		if (!(q_flags & EFRM_VI_CONTIGUOUS))
+			vi_flags |= EFHW_VI_JUMBO_EN;
 		break;
 	default:
 		break;
@@ -312,12 +312,12 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_ETH_FILTER;
 		if (vi_flags & EFHW_VI_TX_IP_FILTER_EN)
 			q_flags |= EFRM_VI_TCP_UDP_FILTER;
-		if (!(vi_flags & EFHW_VI_JUMBO_EN))
-			q_flags |= EFRM_VI_CONTIGUOUS;
 		break;
 	case EFHW_RXQ:
 		if (vi_flags & EFHW_VI_RX_PHYS_ADDR_EN)
 			q_flags |= EFRM_VI_PHYS_ADDR;
+		if (!(vi_flags & EFHW_VI_JUMBO_EN))
+			q_flags |= EFRM_VI_CONTIGUOUS;
 		break;
 	default:
 		break;

@@ -356,7 +356,11 @@ int main(int argc, char* argv[])
   interface = argv[0];
   ++argv; --argc;
 
-  net_if = net_if_alloc(0, interface, 0);
+  if( (net_if = net_if_alloc(0, interface, 0)) == NULL ) {
+    LOGE(fprintf(stderr, "ERROR: Bad interface '%s' or unable to allocate "
+                 "resources\n", interface));
+    exit(1);
+  }
   vi = vi_alloc(0, net_if);
   printf("rxq_size=%d\n", ef_vi_receive_capacity(&vi->vi));
   printf("evq_size=%d\n", ef_eventq_capacity(&vi->vi));

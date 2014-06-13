@@ -43,7 +43,7 @@ extern int __init oo_epoll_chrdev_ctor(void);
 extern void oo_epoll_chrdev_dtor(void);
 
 struct file;
-extern int oo_install_file_to_fd_cloexec(struct file *file);
+extern int oo_install_file_to_fd(struct file *file, int flags);
 
 extern int __init onloadfs_init(void);
 extern void onloadfs_fini(void);

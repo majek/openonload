@@ -1090,7 +1090,7 @@ int citp_ep_dup(unsigned oldfd, int (*syscall)(int oldfd, long arg),
   if( fdip_is_passthru(oldfdip) | fdip_is_unknown(oldfdip) ) {
     if( fdtable_strict() )  CITP_FDTABLE_LOCK();
     newfd = syscall(oldfd, arg);
-    if( newfd < citp_fdtable.inited_count )
+    if( newfd >= 0 && newfd < citp_fdtable.inited_count )
       citp_fdtable_new_fd_set(newfd, oldfdip, fdtable_strict());
     if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
     /* If outside inited_count then if someone wants it they'll probe it. */
@@ -1274,6 +1274,7 @@ int citp_ep_dup2(unsigned fromfd, unsigned tofd)
         ci_spinloop_pause();
         i++;
       }
+      ci_rmb();
     }
     if( tofdi->on_rcz.dup2_result < 0 ) {
       errno = -tofdi->on_rcz.dup2_result;

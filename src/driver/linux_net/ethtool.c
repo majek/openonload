@@ -255,8 +255,8 @@ static int efx_ethtool_get_settings(struct net_device *net_dev,
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_link_state *link_state = &efx->link_state;
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_SETTINGS_WORKAROUND)
-	if (in_atomic()) {
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_HACKS)
+	if (in_interrupt()) {
 		memset(ecmd, 0, sizeof(*ecmd));
 		ecmd->speed = link_state->speed;
 		ecmd->duplex = link_state->fd ? DUPLEX_FULL : DUPLEX_HALF;

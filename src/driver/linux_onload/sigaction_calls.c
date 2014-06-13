@@ -24,11 +24,12 @@
 *//*
 \**************************************************************************/
 
+#include "onload_kernel_compat.h"
+
 #include <onload/linux_onload_internal.h>
 #include <onload/linux_onload.h>
 #include <onload/linux_trampoline.h>
 #include <onload/linux_mmap.h>
-#include "onload_kernel_compat.h"
 
 static int
 efab_signal_handler_type(int sig, __sighandler_t user_handler)

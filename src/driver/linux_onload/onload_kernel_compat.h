@@ -76,4 +76,10 @@
 # define __NFDBITS BITS_PER_LONG
 #endif
 
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
+# define f_vfsmnt f_path.mnt
+#endif
+
+
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

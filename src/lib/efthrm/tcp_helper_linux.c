@@ -1161,23 +1161,17 @@ void oo_file_ref_drop(struct oo_file_ref* fr)
 }
 
 
-int oo_file_ref_lookup(int fd, struct oo_file_ref** fr_out)
+int oo_file_ref_lookup(struct file* file, struct oo_file_ref** fr_out)
 {
   struct oo_file_ref* fr;
 
+  ci_assert(file);
   fr = kmalloc(sizeof(*fr), (in_atomic() || in_interrupt()) ? GFP_ATOMIC : 0);
   if( fr == NULL )
     return -ENOMEM;
-  fr->file = fget(fd);
-  if( fr->file != NULL ) {
-    *fr_out = fr;
-    return 0;
-  }
-  else {
-    kfree(fr);
-    *fr_out = NULL;
-    return -EBADF;
-  }
+  fr->file = file;
+  *fr_out = fr;
+  return 0;
 }
 
 

@@ -1,4 +1,40 @@
+openonload-201210-u2
+--------------------
 
+Updated sfc net driver to v3_3_0_6309
+Add ptp to modprobe'd modules when loading net driver.
+Add support for recent Linux kernels (up to 3.9)
+
+bug37783: fix counting error in async packets counter for onload_stackdump
+bug34571: Handle EF_DONT_ACCELERATE + EF_NO_FAIL=0 in pipe().
+bug37610: EF_EPOLL_CTL_FAST=1: check if fd was reused before postponing epoll_ctl.
+task8595: Reorder code to avoid having to defer drop of file reference.
+bug36423: fix compatibility issues with sigaction on linux-3.9 kernels.
+bug36423: Remove re-definition of sigaction32.
+bug37129: Initialise epoll blocking flag on create.
+bug37129: allow EEXIST when handing over fd to OS epoll set.
+bug37187: Fix ef_vi_alloc* not returning q_ids.
+bug36665: Fix 32-bit app on 64-bit kernel due to citp_opts misalignment.
+bug36697: Reduce open fds in Onload tools by calling closedir.
+bug36423: Fix linux-3.9 kernel compilation.
+bug35968: Store memory mapping sizes as unsigned values to double usuable sizes.
+task28435: Fixes to get working in-tree build again.
+bug36170: Fix double lock_kernel use. 
+bug35910: Fix EF_UL_EPOLL=1 when EF_EPOLL_CTL_FAST=1 and no accelerated fds.
+bug34910: Only use tx push if exactly one descriptor.
+bug35028: Remove __devinit usage from Onload drivers (linux-3.8 compatibility).
+task17899: Repond sensibly if a bad interface is passed to efsink.
+task8595: Fix caller of oo_os_sock_get_from_ep() not checking return value
+bug35232: Avoid leaking fds in linux-3.7 kernels.
+bug33759: Fix sock_map_fd/sock_alloc_file implementation for linux-3.7.
+bug34730: Replaced deprecated file check operator in onload_tool for Ubuntu.
+bug35119: Fix ef_vi receive of jumbo frames.
+bug34467: Add missing read barrier when waiting for dup2 newfd to close.
+bug34466: Fix bug in dup() in case that the syscall fails.
+          Fix "sfcaffinity_config auto" when sfc_ib driver is loaded.
+          Ignore copyright header when making ef_vi api hash.
+
+	
 openonload-201210-u1
 --------------------
 

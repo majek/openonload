@@ -3112,6 +3112,7 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
    */
   if( tep_p->os_socket != NULL ) {
     ci_irqlock_state_t lock_flags;
+    struct oo_file_ref* os_socket;
 
     /* Shutdown() the os_socket.  This needs to be done in a blocking
      * context.
@@ -3121,9 +3122,11 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
     efab_tcp_helper_os_pollwait_unregister(tep_p);
 
     ci_irqlock_lock(&trs->lock, &lock_flags);
-    oo_file_ref_drop(tep_p->os_socket);
+    os_socket = tep_p->os_socket;
     tep_p->os_socket = NULL;
     ci_irqlock_unlock(&trs->lock, &lock_flags);
+    if( os_socket != NULL )
+      oo_file_ref_drop(os_socket);
   }
 
   /*! Add ep to the list in tcp_helper_resource_t for closing
@@ -3183,34 +3186,34 @@ void generic_tcp_helper_close(ci_private_t* priv)
  */
 
 int
-efab_attach_os_socket(tcp_helper_endpoint_t* ep, int os_sock_fd)
+efab_attach_os_socket(tcp_helper_endpoint_t* ep, struct file* os_file)
 {
   int rc;
   struct oo_file_ref* os_socket;
 
   ci_assert(ep);
-  ci_assert(IS_VALID_DESCRIPTOR(os_sock_fd));
+  ci_assert(os_file);
   ci_assert_equal(ep->os_socket, NULL);
 
-  rc = oo_file_ref_lookup(os_sock_fd, &os_socket);
+  rc = oo_file_ref_lookup(os_file, &os_socket);
   if( rc < 0 ) {
-    OO_DEBUG_ERR(ci_log("%s: %d:%d fd="DESCRIPTOR_FMT" lookup failed (%d)",
+    fput(os_file);
+    OO_DEBUG_ERR(ci_log("%s: %d:%d os_file=%p lookup failed (%d)",
                         __FUNCTION__, ep->thr->id, OO_SP_FMT(ep->id),
-                        DESCRIPTOR_PRI_ARG(os_sock_fd), rc));
+                        os_file, rc));
     return rc;
   }
 
   /* Check that this os_socket is really a socket. */
-  if( !S_ISSOCK(os_socket->file->f_dentry->d_inode->i_mode) ||
-      SOCKET_I(os_socket->file->f_dentry->d_inode)->file != os_socket->file) {
+  if( !S_ISSOCK(os_file->f_dentry->d_inode->i_mode) ||
+      SOCKET_I(os_file->f_dentry->d_inode)->file != os_file) {
     oo_file_ref_drop(os_socket);
-    OO_DEBUG_ERR(ci_log("%s: %d:%d fd="DESCRIPTOR_FMT" is not a socket",
+    OO_DEBUG_ERR(ci_log("%s: %d:%d os_file=%p is not a socket",
                         __FUNCTION__, ep->thr->id, OO_SP_FMT(ep->id),
-                        DESCRIPTOR_PRI_ARG(os_sock_fd)));
+                        os_file));
     return -EBUSY;
   }
 
-  efab_linux_sys_close(os_sock_fd);
   ep->os_socket = os_socket;
   if( SP_TO_WAITABLE(&ep->thr->netif, ep->id)->state == CI_TCP_STATE_UDP )
     efab_tcp_helper_os_pollwait_register(ep);

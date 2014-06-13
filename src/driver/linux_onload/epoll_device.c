@@ -487,7 +487,7 @@ static int oo_epoll2_action(struct oo_epoll2_private *priv,
 
   /* Restore kepfd if necessary */
   if(unlikely( op->kepfd == -1 )) {
-    op->kepfd = oo_install_file_to_fd_cloexec(priv->kepo);
+    op->kepfd = oo_install_file_to_fd(priv->kepo, O_CLOEXEC);
     if( op->kepfd < 0 )
       return op->kepfd;
     /* We've restored kepfd.  Now we should return 0! */
@@ -718,7 +718,8 @@ static int oo_epoll1_action(struct oo_epoll1_private *priv,
     for( i = 0; i < op->epoll_ctl_n; i++ ) {
       rc = efab_linux_sys_epoll_ctl(op->epfd, item[i].op,
                                     item[i].fd, &item_u[i].event);
-      if( rc == 0 )
+      /* It's valid to have already added the fd to the os epoll set. */
+      if( rc == 0 || rc == -EEXIST )
         rc = efab_linux_sys_epoll_ctl(priv->sh->epfd, item[i].op,
                                       item[i].fd, &item_u[i].event);
 

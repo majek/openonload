@@ -886,8 +886,8 @@ struct ci_netif_state_s {
   ci_uint64             timer_prime_cycles  CI_ALIGN(8);
   ci_uint64             timestamp_resync_cycles CI_ALIGN(8);
 
-  CI_ULCONST ci_int32   io_mmap_bytes;
-  CI_ULCONST ci_int32   buf_mmap_bytes;
+  CI_ULCONST ci_uint32  io_mmap_bytes;
+  CI_ULCONST ci_uint32  buf_mmap_bytes;
 
   /* Set to true when endpoints are woken. */
   CI_ULCONST

@@ -215,8 +215,8 @@ extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t* ep,
 
 extern int efab_tcp_helper_connect_os_sock (ci_private_t *priv, void *arg);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
-extern int sock_map_fd(struct socket *sock, int flags);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,7,0)
+struct file *sock_alloc_file(struct socket *sock, int flags, void *unused);
 #endif
 
 
@@ -399,7 +399,7 @@ extern unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file*,
 extern int efab_tcp_helper_poll_udp(struct file *filp, int *mask, s64 *timeout);
 
 
-extern int efab_attach_os_socket(tcp_helper_endpoint_t*, int os_sock_fd);
+extern int efab_attach_os_socket(tcp_helper_endpoint_t*, struct file*);
 
 
 extern int oo_create_fd(tcp_helper_endpoint_t* ep, int flags, int fd_type);

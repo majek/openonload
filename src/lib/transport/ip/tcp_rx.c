@@ -70,8 +70,10 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_rx_to_tx(ci_netif* ni,
     ci_netif_pkt_release(ni, pkt);
     if(CI_LIKELY( OO_PP_NOT_NULL(ni->state->freepkts) ))
       pkt = ci_netif_pkt_get(ni);
-    else
+    else {
       pkt = ci_netif_pkt_alloc_nonb(ni);
+      --ni->state->n_async_pkts;
+    }
     if( pkt == NULL ) {
       LOG_U(ci_log("%s: can't allocate reply packet", __FUNCTION__));
       CITP_STATS_NETIF_INC(ni, poll_no_pkt);

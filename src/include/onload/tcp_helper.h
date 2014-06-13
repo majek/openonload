@@ -155,9 +155,9 @@ typedef struct tcp_helper_resource_s {
   /* Bit mask of intf_i that need resetting by the lock holder */
   unsigned              intfs_to_reset;
 
-  int                   mem_mmap_bytes;
-  int                   io_mmap_bytes;
-  int                   buf_mmap_bytes;
+  unsigned              mem_mmap_bytes;
+  unsigned              io_mmap_bytes;
+  unsigned              buf_mmap_bytes;
 
   /* Used to block threads that are waiting for free pkt buffers. */
   ci_waitq_t            pkt_waitq;

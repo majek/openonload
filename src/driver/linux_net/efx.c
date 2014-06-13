@@ -799,14 +799,17 @@ static void efx_start_datapath(struct efx_nic *efx)
 
 	/* Initialise the channels */
 	efx_for_each_channel(channel, efx) {
-		efx_for_each_channel_tx_queue(tx_queue, channel)
+		efx_for_each_channel_tx_queue(tx_queue, channel) {
 			efx_init_tx_queue(tx_queue);
+			atomic_inc(&efx->active_queues);
+		}
 
 		/* The rx buffer allocation strategy is MTU dependent */
 		efx_rx_strategy(channel);
 
 		efx_for_each_channel_rx_queue(rx_queue, channel) {
 			efx_init_rx_queue(rx_queue);
+			atomic_inc(&efx->active_queues);
 			efx_nic_generate_fill_event(rx_queue);
 		}
 
@@ -2587,8 +2590,8 @@ static int efx_ioctl(struct net_device *net_dev, struct ifreq *ifr, int cmd)
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct mii_ioctl_data *data = if_mii(ifr);
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_SETTINGS_WORKAROUND)
-	if (in_atomic())
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_HACKS)
+	if (in_interrupt())
 		/* We can't execute mdio requests from an atomic context
 		 * on Siena. Luckily, the bonding driver falls back to
 		 * the ethtool API if this command fails. */
@@ -2962,7 +2965,22 @@ static void
 efx_vlan_rx_register(struct net_device *dev, struct vlan_group *vlan_group)
 {
 	struct efx_nic *efx = netdev_priv(dev);
+	struct efx_channel *channel;
+
+	/* Before changing efx_nic::vlan_group to null, we must flush
+	 * out all VLAN-tagged skbs currently in the software RX
+	 * pipeline.  Changing it to non-null might be safe, but we
+	 * conservatively pause the RX path in both cases.
+	 */
+	efx_for_each_channel(channel, efx)
+		if (efx_channel_has_rx_queue(channel))
+			efx_stop_eventq(channel);
+
 	efx->vlan_group = vlan_group;
+
+	efx_for_each_channel(channel, efx)
+		if (efx_channel_has_rx_queue(channel))
+			efx_start_eventq(channel);
 }
 
 #ifdef EFX_USE_VLAN_RX_KILL_VID
@@ -3049,7 +3067,12 @@ EXPORT_SYMBOL(efx_dl_netdev_is_ours);
 static int efx_netdev_event(struct notifier_block *this,
 			    unsigned long event, void *ptr)
 {
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_NETDEV_NOTIFIER_NETDEV_PTR)
 	struct net_device *net_dev = ptr;
+#else
+	struct netdev_notifier_info *info = ptr;
+	struct net_device *net_dev = info->dev;
+#endif
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_OPS)
 	if (net_dev->netdev_ops == &efx_netdev_ops &&
@@ -3066,7 +3089,7 @@ static struct notifier_block efx_netdev_notifier = {
 	.notifier_call = efx_netdev_event,
 };
 
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_MTU_WORKAROUND)
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_BONDING_HACKS)
 /* Prior to Linux 2.6.24, the bonding driver may call change_mtu()
  * without holding the RTNL, unlike all other callers.  We try to
  * mitigate the risk of a race with other reconfiguration using
@@ -3116,7 +3139,7 @@ show_phy_type(struct device *dev, struct device_attribute *attr, char *buf)
 	struct efx_nic *efx = pci_get_drvdata(to_pci_dev(dev));
 	return sprintf(buf, "%d\n", efx->phy_type);
 }
-static DEVICE_ATTR(phy_type, 0644, show_phy_type, NULL);
+static DEVICE_ATTR(phy_type, 0444, show_phy_type, NULL);
 
 static int efx_register_netdev(struct efx_nic *efx)
 {
@@ -4097,8 +4120,8 @@ static int efx_pci_probe_main(struct efx_nic *efx)
  * transmission; this is left to the first time one of the network
  * interfaces is brought up (i.e. efx_net_open).
  */
-static int __devinit efx_pci_probe(struct pci_dev *pci_dev,
-				   const struct pci_device_id *entry)
+static int efx_pci_probe(struct pci_dev *pci_dev,
+			 const struct pci_device_id *entry)
 {
 	struct net_device *net_dev;
 	struct efx_nic *efx;
@@ -4128,7 +4151,7 @@ static int __devinit efx_pci_probe(struct pci_dev *pci_dev,
 #endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
 	if (!EFX_WORKAROUND_15592(efx))
-		net_dev->features |= NETIF_F_HW_VLAN_TX;
+		net_dev->features |= NETIF_F_HW_VLAN_CTAG_TX;
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_VLAN_FEATURES)
 	/* Mask for features that also apply to VLAN devices */

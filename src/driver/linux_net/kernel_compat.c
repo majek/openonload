@@ -617,7 +617,7 @@ int efx_pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
 #endif /* EFX_NEED_PCI_VPD_LRDT */
 
 #ifdef EFX_NEED_KOBJECT_SET_NAME_VARGS
-int kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs)
+int efx_kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs)
 {
 	char *s;
 	int need;
@@ -683,86 +683,5 @@ int efx_kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype,
 	kobj->parent = parent;
 	return kobject_add(kobj);
 }
-EXPORT_SYMBOL(kobject_init_and_add);
 
 #endif /* EFX_NEED_KOBJECT_INIT_AND_ADD */
-
-#ifdef EFX_NEED_ROOT_DEVICE_REGISTER
-struct root_device {
-        struct device dev;
-        struct module *owner;
-};
-
-int dev_set_name(struct device *dev, const char *fmt, ...)
-{
-	va_list vargs;
-	int err;
-
-	va_start(vargs, fmt);
-	err = kobject_set_name_vargs(&dev->kobj, fmt, vargs);
-	va_end(vargs);
-	return err;
-}
-
-inline struct root_device *to_root_device(struct device *d)
-{
-	return container_of(d, struct root_device, dev);
-}
-
-static void root_device_release(struct device *dev)
-{
-	kfree(to_root_device(dev));
-}
-
-struct device * __root_device_register(const char *name, struct module *owner)
-{
-	struct root_device *root;
-	int err = -ENOMEM;
-
-	root = kzalloc(sizeof(struct root_device), GFP_KERNEL);
-	if (!root)
-		return ERR_PTR(err);
-
-	err = dev_set_name(&root->dev, "%s", name);
-	if (err) {
-		kfree(root);
-		return ERR_PTR(err);
-	}
-
-	root->dev.release = root_device_release;
-
-	err = device_register(&root->dev);
-	if (err) {
-		put_device(&root->dev);
-		return ERR_PTR(err);
-	}
-
-#ifdef CONFIG_MODULES   /* gotta find a "cleaner" way to do this */
-	if (owner) {
-#ifdef EFX_HAVE_OLD_STRUCT_MODULE_MKOBJ_PTR
-		struct module_kobject *mk =  owner->mkobj;
-#else
-		struct module_kobject *mk = &owner->mkobj;
-#endif
-		err = sysfs_create_link(&root->dev.kobj, &mk->kobj, "module");
-		if (err) {
-			device_unregister(&root->dev);
-			return ERR_PTR(err);
-		}
-		root->owner = owner;
-	}
-#endif
-
-	return &root->dev;
-}
-
-void root_device_unregister(struct device *dev)
-{
-	struct root_device *root = to_root_device(dev);
-
-	if (root->owner)
-		sysfs_remove_link(&root->dev.kobj, "module");
-
-	device_unregister(dev);
-}
-#endif /* EFX_NEED_ROOT_DEVICE_REGISTER */

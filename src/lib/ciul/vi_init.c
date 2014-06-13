@@ -88,7 +88,7 @@ void ef_vi_state_init(ef_vi* vi)
 	ef_vi_state* state = vi->ep_state;
 	unsigned i;
 
-	state->txq.previous = state->txq.added = state->txq.removed = 0;
+	state->txq.added = state->txq.removed = 0;
 	state->rxq.added = state->rxq.removed = 0;
 
 	if( vi->vi_rxq.mask )
@@ -260,7 +260,7 @@ int ef_vi_txq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
     ++state->txq.removed;
   }
 
-  state->txq.previous = state->txq.added = state->txq.removed = 0;
+  state->txq.added = state->txq.removed = 0;
 
   return 0;
 }

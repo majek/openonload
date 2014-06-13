@@ -185,4 +185,9 @@ static inline void efrm_pci_disable_msi(struct pci_dev *dev) {}
 #define EFRM_VM_IO_FLAGS (VM_IO | VM_DONTDUMP | VM_DONTEXPAND)
 #endif
 
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0))
+# define f_vfsmnt f_path.mnt
+#endif
+
 #endif /* DRIVER_LINUX_RESOURCE_KERNEL_COMPAT_H */

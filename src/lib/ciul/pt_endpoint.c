@@ -192,7 +192,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   if( rxq_capacity || txq_capacity )
     ef_vi_state_init(vi);
 
-  return 0;
+  return q_label;
 
 
  fail3:

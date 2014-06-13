@@ -1,3 +1,46 @@
+OpenOnload 201210-u2 Release Notes
+==================================
+
+ This is an update release that fixes bugs in openonload-201210-u1 and adds a
+ few enhancements.
+
+ Please see the ChangeLog file for details of the changes in this release.
+ See ReleaseNotes-sfc for details of changes to the sfc net driver.
+
+ The release notes for the openonload-201210-u1 release are included below.
+
+----------------------------------------
+Linux 3.10 support
+------------------
+
+ This release is known not to compile cleanly with Linux 3.10 series
+ kernels.  A patch to add support for 3.10 has been prepared but this
+ was not available in time to be tested as part of this release.
+ Please contact support@solarflare.com if you need access to this.
+
+----------------------------------------
+MRG2u3 support
+---------------
+
+ Although this release includes support for the RedHat MRG 2 update 3
+ distribution and kernel (3.6.11-rt) we do not recommend using SR-IOV
+ or IOMMU with Onload on these systems due to a number of problems
+ found in the kernel support for these features during testing.  This
+ means the following should not be used on MRG2u3:
+
+ - Scalable packet buffer mode (EF_PACKET_BUFFER_MODE=1)
+ - ef_vi with VFs
+
+----------------------------------------
+Known bugs
+----------
+
+ Bug37923: The "onload_stackdump affinities" command may seg fault
+
+Kieran Mansley
+2013/07/19
+
+
 
 OpenOnload 201210-u1 Release Notes
 ==================================

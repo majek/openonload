@@ -1459,6 +1459,10 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 	#define __read_mostly
 #endif
 
+#ifndef NETIF_F_HW_VLAN_CTAG_TX
+	#define NETIF_F_HW_VLAN_CTAG_TX NETIF_F_HW_VLAN_TX
+#endif
+
 /**************************************************************************
  *
  * Missing functions provided by kernel_compat.c
@@ -1659,8 +1663,9 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 #endif
 
 #ifdef EFX_NEED_KOBJECT_SET_NAME_VARGS
+	#define kobject_set_name_vargs efx_kobject_set_name_vargs
 	extern int
-	kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs);
+	efx_kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs);
 #endif
 
 
@@ -2278,6 +2283,16 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	#define param_check_bool(name, p) __param_check(name, p, bool)
 #endif
 
+#ifdef EFX_HAVE_OLD___VLAN_PUT_TAG
+	static inline struct sk_buff *
+	efx___vlan_put_tag(struct sk_buff *skb, __be16 vlan_proto, u16 vlan_tci)
+	{
+		WARN_ON(vlan_proto != htons(ETH_P_8021Q));
+		return __vlan_put_tag(skb, vlan_tci);
+	}
+	#define __vlan_put_tag efx___vlan_put_tag
+#endif
+
 #ifdef EFX_NEED_PCI_VPD_LRDT
 
 #define PCI_VPD_LRDT                    0x80    /* Large Resource Data Type */
@@ -2473,6 +2488,10 @@ static inline void *skb_frag_address(const skb_frag_t *frag)
 }
 #endif
 
+#ifdef EFX_HAVE_PPS_KERNEL
+        #include <linux/pps_kernel.h>
+#endif
+
 #ifdef EFX_NEED_PPS_EVENT_TIME
 	struct pps_event_time {
 	#ifdef CONFIG_NTP_PPS
@@ -2480,27 +2499,23 @@ static inline void *skb_frag_address(const skb_frag_t *frag)
 	#endif /* CONFIG_NTP_PPS */
 		struct timespec ts_real;
 	};
+#endif
 
-	#ifdef CONFIG_NTP_PPS
+#ifdef EFX_NEED_PPS_GET_TS
+#ifdef CONFIG_NTP_PPS
 	static inline void pps_get_ts(struct pps_event_time *ts)
 	{
 		getnstime_raw_and_real(&ts->ts_raw, &ts->ts_real);
 	}
-
-	#else /* CONFIG_NTP_PPS */
-
+#else /* CONFIG_NTP_PPS */
 	static inline void pps_get_ts(struct pps_event_time *ts)
 	{
 		getnstimeofday(&ts->ts_real);
 	}
-
-	#endif /* CONFIG_NTP_PPS */
+#endif /* CONFIG_NTP_PPS */
 #endif
 
 #ifdef EFX_NEED_PPS_SUB_TS
-#ifdef EFX_HAVE_PPS_KERNEL
-	#include <linux/pps_kernel.h>
-#endif
 	static inline void pps_sub_ts(struct pps_event_time *ts, struct timespec delta)
 	{
 		ts->ts_real = timespec_sub(ts->ts_real, delta);
@@ -2577,17 +2592,5 @@ static inline void clear_bit_le(unsigned nr, unsigned char *addr)
 	addr[nr / 8] &= ~(1 << (nr % 8));
 }
 #endif
-
-#ifdef EFX_NEED_ROOT_DEVICE_REGISTER
-#define root_device_register(_name) \
-	__root_device_register(_name, THIS_MODULE)
-
-extern struct device * __root_device_register(const char *name, struct module *owner);
-
-void root_device_unregister(struct device *dev);
-
-extern void device_destroy(struct class *class, dev_t devt);
-
-#endif /* EFX_NEED_ROOT_DEVICE_REGISTER */
 
 #endif /* EFX_KERNEL_COMPAT_H */

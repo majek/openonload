@@ -1865,7 +1865,7 @@ static int falcon_probe_nic(struct efx_nic *efx)
 
 fail5:
 #ifdef CONFIG_SFC_I2C
-	BUG_ON(i2c_del_adapter(&board->i2c_adap));
+	i2c_del_adapter(&board->i2c_adap);
 	memset(&board->i2c_adap, 0, sizeof(board->i2c_adap));
 #endif
 fail4:
@@ -2144,17 +2144,13 @@ static void falcon_remove_nic(struct efx_nic *efx)
 {
 	struct falcon_nic_data *nic_data = efx->nic_data;
 	struct falcon_board *board = falcon_board(efx);
-	int rc;
 
 	board->type->fini(efx);
 
 #ifdef CONFIG_SFC_I2C
 	/* Remove I2C adapter and clear it in preparation for a retry */
-	rc = i2c_del_adapter(&board->i2c_adap);
-	BUG_ON(rc);
+	i2c_del_adapter(&board->i2c_adap);
 	memset(&board->i2c_adap, 0, sizeof(board->i2c_adap));
-#else
-	(void)rc;
 #endif
 
 	efx_nic_free_buffer(efx, &efx->irq_status);

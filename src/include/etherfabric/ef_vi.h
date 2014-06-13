@@ -284,7 +284,6 @@ enum ef_vi_flags {
 };
 
 typedef struct {
-	uint32_t  previous;
 	uint32_t  added;
 	uint32_t  removed;
 } ef_vi_txq_state;

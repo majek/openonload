@@ -88,12 +88,9 @@ endif
 endif
 endif # CONFIG_NET
 
-else # !KERNELRELEASE
+else # !KERNELRELEASE ###### The following is for the standalone Makefile case
 
-ifeq ($(MAKECMDGOALS),export-srpm)
-
-else # !export-srpm
-
+ifneq ($(MAKECMDGOALS),export-srpm)
 # Get kernel version and source directory.  Either may be specified and
 # we work out the other automatically.  If neither is specified then we
 # assume the current kernel version.
@@ -119,16 +116,26 @@ endif
 ifneq ($(filter 0 1 2 3 4 5 6 7 8,$(word 3,$(KVERPARTS))),)
 $(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
 endif
-ifneq ($(filter 9 10 11 12 13 14 15,$(word 3,$(KVERPARTS))),)
-$(warning Kernel <=2.6.15 does not support PTP)
-override CONFIG_SFC_PTP :=
-override CONFIG_SFC_PPS :=
-endif
 endif
 
 endif # export-srpm
 
 endif # !KERNELRELEASE
+
+ifneq ($(MAKECMDGOALS),export-srpm)
+KVERPARTS = $(subst -, ,$(subst ., ,$(KERNELRELEASE)))
+ifeq ($(word 1,$(KVERPARTS)),2)
+ifneq ($(word 2,$(KVERPARTS)),6)
+$(error Kernel version $(KERNELRELEASE) is not supported\; minimum version is 2.6.9)
+endif
+ifneq ($(filter 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15,$(word 3,$(KVERPARTS))),)
+$(warning  Current kernel $(KERNELRELEASE) is < 2.6.16 hence does not support PTP)
+override CONFIG_SFC_PTP :=
+override CONFIG_SFC_PPS :=
+endif # KVERPARTS 2.6.0-15
+endif # KVERPARTS 2
+endif # export-srpm
+
 endif # !EFX_UPSTREAM
 
 sfc-y			+= efx.o nic.o falcon.o siena.o tx.o rx.o filter.o \
@@ -247,6 +254,10 @@ ifneq ($(CC),)
 EXTRA_MAKEFLAGS += CC=$(CC)
 endif
 
+ifeq ($(INSTALL_MOD_DIR),)
+INSTALL_MOD_DIR := updates
+endif
+
 default : modules
 
 all : modules
@@ -259,15 +270,11 @@ ifndef DEBUG
 endif
 
 modules_install :
+  # See bug 35865 for discussion on updates vs. extra location
 	echo INSTALL_MOD_PATH=$(INSTALL_MOD_PATH)
-# sfc.ko must be installed in updates so that it overrides any in-tree
-# version.  All modules should be installed consistently with Onload,
-# which installs the others in extra.
-	mkdir -p $(INSTALL_MOD_PATH)/lib/modules/$(KVER)/extra \
-		$(INSTALL_MOD_PATH)/lib/modules/$(KVER)/updates
-	$(MAKE) -C $(KPATH) $(EXTRA_MAKEFLAGS) M=$$(pwd) INSTALL_MOD_DIR=extra modules_install
-	mv $(INSTALL_MOD_PATH)/lib/modules/$(KVER)/extra/sfc.ko \
-		$(INSTALL_MOD_PATH)/lib/modules/$(KVER)/updates/
+	echo INSTALL_MOD_DIR=$(INSTALL_MOD_DIR)
+	mkdir -p $(INSTALL_MOD_PATH)/lib/modules/$(KVER)/$(INSTALL_MOD_DIR)
+	$(MAKE) -C $(KPATH) $(EXTRA_MAKEFLAGS) M=$$(pwd) INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) modules_install
 
 clean : clean_modules
 

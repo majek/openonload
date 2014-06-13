@@ -73,14 +73,6 @@
 #define EFX_IRQ_MOD_RESOLUTION 5
 #include "kernel_compat.h"
 
-#ifndef __devinitconst
-# ifdef __devinitdata
-#  define __devinitconst __devinitdata
-# else
-#  define __devinitconst
-# endif
-#endif
-
 #ifndef IRQF_SAMPLE_RANDOM
 #define IRQF_SAMPLE_RANDOM 0
 #endif
@@ -145,7 +137,7 @@ MODULE_DEVICE_TABLE(pci, efrm_pci_vf_table);
 
 
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-static const char  __devinitconst iommu_err3[] = \
+static const char  iommu_err3[] = \
 "Due to issues observed in testing on systems using the intel_iommu driver,\n"\
 EFRM_PRINTK_PREFIX\
 "rebinding to VFs (often due to a driver reload) has been prevented. Hence\n"\
@@ -279,7 +271,7 @@ fail:
  * We should move this to lib/efrm, since VFDI interface is OS-independent.
  *
  *********************************************************************/
-static int __devinit vf_vfdi_req(struct vf_init_status *vf_ini)
+static int vf_vfdi_req(struct vf_init_status *vf_ini)
 {
 	struct vfdi_req *req = vf_ini->req.kva;
 	unsigned int op = req->op;
@@ -337,7 +329,7 @@ static int __devinit vf_vfdi_req(struct vf_init_status *vf_ini)
 }
 
 /* Read the status page in an atomic fashion */
-static int __devinit vf_refresh_status(struct vf_init_status *vf_ini)
+static int vf_refresh_status(struct vf_init_status *vf_ini)
 {
 	struct vfdi_status *status = vf_ini->status.kva;
 	struct efrm_vf *vf = vf_ini->vf;
@@ -384,14 +376,14 @@ done:
 	return 0;
 }
 
-static void __devinit vf_fini_status(struct vf_init_status *vf_ini)
+static void vf_fini_status(struct vf_init_status *vf_ini)
 {
 	struct vfdi_req *req = vf_ini->req.kva;
 	req->op = VFDI_OP_CLEAR_STATUS_PAGE;
 	vf_vfdi_req(vf_ini);
 }
 
-static int __devinit vf_init_status(struct vf_init_status *vf_ini)
+static int vf_init_status(struct vf_init_status *vf_ini)
 {
 	struct efrm_vf *vf = vf_ini->vf;
 	struct vfdi_req *req = vf_ini->req.kva;
@@ -431,9 +423,9 @@ fail1:
  ****************************************************************************/
 
 
-static int __devinit vf_alloc_page(struct vf_init_status *vf_ini,
-				   const char *type,
-				   struct efhw_iopage *map)
+static int vf_alloc_page(struct vf_init_status *vf_ini,
+                         const char *type,
+                         struct efhw_iopage *map)
 {
 	struct pci_dev *pci_dev = vf_ini->vf->pci_dev;
 	int rc = 0;
@@ -472,8 +464,8 @@ static int __devinit vf_alloc_page(struct vf_init_status *vf_ini,
 }
 
 
-static void __devinit vf_free_page(struct vf_init_status *vf_ini,
-				   struct efhw_iopage *map)
+static void vf_free_page(struct vf_init_status *vf_ini,
+                         struct efhw_iopage *map)
 {
 	struct pci_dev *pci_dev = vf_ini->vf->pci_dev;
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
@@ -492,7 +484,7 @@ static void __devinit vf_free_page(struct vf_init_status *vf_ini,
 
 
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-static int __devinit check_intel_iommu_bind_once(void)
+static int check_intel_iommu_bind_once(void)
 {
 	struct file *file;
 
@@ -520,7 +512,7 @@ static int __devinit check_intel_iommu_bind_once(void)
 	return 1;
 }
 
-static int __devinit find_iommu_type(struct pci_dev *pci_dev)
+static int find_iommu_type(struct pci_dev *pci_dev)
 {
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
 	struct acpi_table_header *acpi_tbl;
@@ -545,7 +537,7 @@ static int __devinit find_iommu_type(struct pci_dev *pci_dev)
 }
 
 /* Returns the value for efrm_vf_use_threaded_irq. */
-static int __devinit check_threaded_irq(struct pci_dev *pci_dev)
+static int check_threaded_irq(struct pci_dev *pci_dev)
 {
 	if (use_threaded_irq == 1)
 		return 1;
@@ -570,8 +562,8 @@ static int __devinit check_threaded_irq(struct pci_dev *pci_dev)
 #endif
 
 
-static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
-				       const struct pci_device_id *entry)
+static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
+                             const struct pci_device_id *entry)
 {
 	int rc;
 	struct efrm_vf *vf;
@@ -714,7 +706,7 @@ fail2:
 	return rc;
 }
 
-static void __devinit efrm_pci_vf_remove(struct pci_dev *pci_dev)
+static void efrm_pci_vf_remove(struct pci_dev *pci_dev)
 {
 	struct efrm_vf *vf = pci_get_drvdata(pci_dev);
 	int live_remove = 0;
@@ -1289,7 +1281,7 @@ static struct pci_driver efrm_pci_vf_driver = {
 };
 
 
-void __devinit efrm_vf_driver_init(void)
+void efrm_vf_driver_init(void)
 {
 	if (pci_register_driver(&efrm_pci_vf_driver) < 0) {
 		EFRM_WARN("%s: failed to register PCI driver "

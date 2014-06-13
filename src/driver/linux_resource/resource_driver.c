@@ -488,7 +488,7 @@ void efrm_nic_del(struct linux_efhw_nic *lnic)
  * init_module: register as a PCI driver.
  *
  ****************************************************************************/
-static int __devinit init_sfc_resource(void)
+static int init_sfc_resource(void)
 {
 	int rc = 0;
 
@@ -531,7 +531,7 @@ failed_driverlink:
  * cleanup_module: module-removal entry-point
  *
  ****************************************************************************/
-static void __devinit cleanup_sfc_resource(void)
+static void cleanup_sfc_resource(void)
 {
 #ifdef CONFIG_SFC_RESOURCE_VF
 	efrm_vf_driver_fini();

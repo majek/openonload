@@ -593,7 +593,8 @@ efx_may_push_tx_desc(struct efx_tx_queue *tx_queue, unsigned int write_count)
 		return false;
 
 	tx_queue->empty_read_count = 0;
-	return ((empty_read_count ^ write_count) & ~EFX_EMPTY_COUNT_VALID) == 0;
+	return ((empty_read_count ^ write_count) & ~EFX_EMPTY_COUNT_VALID) == 0
+		&& tx_queue->write_count - write_count == 1;
 }
 
 /* For each entry inserted into the software descriptor ring, create a
@@ -899,7 +900,7 @@ static bool efx_flush_wake(struct efx_nic *efx)
 	/* Ensure that all updates are visible to efx_nic_flush_queues() */
 	smp_mb();
 
-	return (atomic_read(&efx->drain_pending) == 0 ||
+	return (atomic_read(&efx->active_queues) == 0 ||
 		(atomic_read(&efx->rxq_flush_outstanding) < EFX_RX_FLUSH_COUNT
 		 && atomic_read(&efx->rxq_flush_pending) > 0));
 }
@@ -914,7 +915,7 @@ static int efx_nic_flush_queues_wait(struct efx_nic *efx, unsigned timeout)
 	struct efx_rx_queue *rx_queue;
 	int rc = 0;
 
-	while (timeout && atomic_read(&efx->drain_pending) > 0) {
+	while (timeout && atomic_read(&efx->active_queues) > 0) {
 		/* If SRIOV is enabled, then offload receive queue flushing to
 		 * the firmware (though we will still have to poll for
 		 * completion). If that fails, fall back to the old scheme.
@@ -979,7 +980,7 @@ static bool efx_check_tx_flush_complete(struct efx_nic *efx)
 				netif_dbg(efx, hw, efx->net_dev,
 					  "flush complete on TXQ %d, so drain "
 					  "the queue\n", tx_queue->queue);
-				/* Don't need to increment drain_pending as it
+				/* Don't need to increment active_queues as it
 				 * has already been incremented for the queues
 				 * which did not drain
 				 */
@@ -1007,11 +1008,9 @@ int efx_nic_flush_queues(struct efx_nic *efx)
 
 	efx_for_each_channel(channel, efx) {
 		efx_for_each_channel_tx_queue(tx_queue, channel) {
-			atomic_inc(&efx->drain_pending);
 			efx_flush_tx_queue(tx_queue);
 		}
 		efx_for_each_channel_rx_queue(rx_queue, channel) {
-			atomic_inc(&efx->drain_pending);
 			rx_queue->flush_pending = true;
 			atomic_inc(&efx->rxq_flush_pending);
 		}
@@ -1019,15 +1018,15 @@ int efx_nic_flush_queues(struct efx_nic *efx)
 
 	rc = efx_nic_flush_queues_wait(efx, timeout);
 
-	if (rc == 0 && atomic_read(&efx->drain_pending) &&
+	if (rc == 0 && atomic_read(&efx->active_queues) &&
 	    !efx_check_tx_flush_complete(efx)) {
 		netif_err(efx, hw, efx->net_dev, "failed to flush %d queues "
-			  "(rx %d+%d)\n", atomic_read(&efx->drain_pending),
+			  "(rx %d+%d)\n", atomic_read(&efx->active_queues),
 			  atomic_read(&efx->rxq_flush_outstanding),
 			  atomic_read(&efx->rxq_flush_pending));
 		rc = -ETIMEDOUT;
 
-		atomic_set(&efx->drain_pending, 0);
+		atomic_set(&efx->active_queues, 0);
 		atomic_set(&efx->rxq_flush_pending, 0);
 		atomic_set(&efx->rxq_flush_outstanding, 0);
 	}
@@ -1274,8 +1273,10 @@ efx_handle_rx_event(struct efx_channel *channel, const efx_qword_t *event)
 
 	rx_ev_desc_ptr = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_DESC_PTR);
 	expected_ptr = rx_queue->removed_count & rx_queue->ptr_mask;
-	if (unlikely(rx_ev_desc_ptr != expected_ptr))
+	if (unlikely(rx_ev_desc_ptr != expected_ptr)) {
 		efx_handle_rx_bad_index(rx_queue, rx_ev_desc_ptr);
+		return;
+	}
 
 	if (likely(rx_ev_pkt_ok)) {
 		/* If packet is marked as OK and packet type is TCP/IP or
@@ -1314,8 +1315,8 @@ efx_handle_drain_event(struct efx_channel *channel)
 {
 	struct efx_nic *efx = channel->efx;
 
-	WARN_ON(atomic_read(&efx->drain_pending) == 0);
-	atomic_dec(&efx->drain_pending);
+	WARN_ON(atomic_read(&efx->active_queues) == 0);
+	atomic_dec(&efx->active_queues);
 	if (efx_flush_wake(efx))
 		wake_up(&efx->flush_wq);
 }
@@ -2014,6 +2015,7 @@ int efx_nic_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	struct efx_dl_falcon_resources *res = &efx->resources;
 	unsigned vi_dc_entries, vi_count, buftbl_free;
 	unsigned entries_per_vf, entries_per_vnic, vnic_limit;
+	unsigned min_entries_per_vnic;
 
 	efx->sram_lim_qw = sram_lim_qw;
 
@@ -2053,16 +2055,20 @@ int efx_nic_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	entries_per_vf = 0;
 #endif
 
-	/* VNICs exported through driverlink use an additional 512 entries per
-	 * VI for buffer table entries backing descriptors. */
-	entries_per_vnic = vi_dc_entries + 512 +
+	/* Each VNIC requires at least descriptor cache and buffer table
+	 * entries for the rings. */
+	min_entries_per_vnic = vi_dc_entries +
 		((2 * EFX_MAX_DMAQ_SIZE + EFX_MAX_EVQ_SIZE) *
 		 sizeof(efx_qword_t) / EFX_BUF_SIZE);
+
+	/* VNICs exported through driverlink typically use an additional
+	 * 512 entries per VI for buffer table entries backing descriptors. */
+	entries_per_vnic = min_entries_per_vnic + 512;
 
 #ifdef EFX_NOT_UPSTREAM
 	if (target_num_vis) {
 		unsigned vnic_count = target_num_vis;
-		unsigned vnic_limit = min(buftbl_free / entries_per_vnic,
+		unsigned vnic_limit = min(buftbl_free / min_entries_per_vnic,
 					  res->evq_timer_lim - vi_count);
 
 		if (vnic_count > vnic_limit) {
@@ -2072,7 +2078,7 @@ int efx_nic_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 			vnic_count = vnic_limit;
 		}
 		vi_count += vnic_count;
-		buftbl_free -= vnic_count * entries_per_vnic;
+		buftbl_free -= vnic_count * min_entries_per_vnic;
 	}
 
 #endif

@@ -387,7 +387,7 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 {
 	ef_vi_txq* q = &vi->vi_txq;
 	ef_vi_txq_state* qs = &vi->ep_state->txq;
-	unsigned di = qs->previous & q->mask;
+	unsigned di = qs->removed & q->mask;
 	ef_vi_falcon_dma_tx_buf_desc* dp = 
 		(ef_vi_falcon_dma_tx_buf_desc*) q->descriptors + di;
 	union u128 d;
@@ -428,12 +428,15 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 void ef_vi_transmit_push(ef_vi* vi)
 {
 	ef_vi_txq_state* qs = &vi->ep_state->txq;
-	if( qs->removed == qs->previous &&
+        /* If added is one bigger than removed, then we have exactly
+         * one descriptor to push and the queue was otherwise empty,
+         * so we can use TX push 
+         */
+	if( (qs->removed+1 == qs->added) &&
 	    ! (vi->vi_flags & EF_VI_TX_PUSH_DISABLE) )
 		ef_vi_transmit_push_desc(vi);
 	else
 		ef_vi_transmit_push_doorbell(vi);
-	qs->previous = qs->added;
 }
 
 int ef_vi_receive_init(ef_vi* vi, ef_addr addr, ef_request_id dma_id)

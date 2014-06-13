@@ -346,7 +346,13 @@ struct efx_update_license {
 	__u32 blacklisted_keys;
 };
 
-/* Next available cmd number is 0xef20 */
+/* Reset the AOE application and controller *********************************/
+#define EFX_RESET_AOE 0xef20
+struct efx_aoe_reset {
+	__u32 flags;
+};
+
+/* Next available cmd number is 0xef21 */
 
 /* Efx private ioctl command structures *************************************/
 
@@ -371,6 +377,7 @@ union efx_ioctl_data {
 	struct efx_ts_hw_pps pps_enable;
 	struct efx_update_cpld cpld;
 	struct efx_update_license key_stats;
+	struct efx_aoe_reset aoe_reset;
 };
 
 #ifdef EFX_NOT_UPSTREAM

@@ -302,10 +302,10 @@ EXPORT_SYMBOL(efx_filter_set_mc_def);
 
 int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 			 struct efx_filter_spec *spec,
-			 bool replace)
+			 bool replace_equal)
 {
 	s32 filter_id = efx_filter_insert_filter(efx_dl_handle(efx_dev)->efx,
-						 spec, replace);
+						 spec, replace_equal);
 	if (filter_id >= 0) {
 		EFX_BUG_ON_PARANOID(filter_id & ~EFX_FILTER_ID_MASK);
 		filter_id |= spec->priority << EFX_FILTER_PRI_SHIFT;

@@ -336,7 +336,7 @@ extern void efx_dl_schedule_reset(struct efx_dl_device *efx_dev);
 
 extern int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 				struct efx_filter_spec *spec,
-				bool replace);
+				bool replace_equal);
 extern void efx_dl_filter_remove(struct efx_dl_device *efx_dev,
 				 int filter_id);
 extern void efx_dl_filter_redirect(struct efx_dl_device *efx_dev,

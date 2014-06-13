@@ -28,11 +28,12 @@
  
 #include <ci/internal/transport_config_opt.h>
 
+#include "onload_kernel_compat.h"
+
 #include <onload/linux_onload_internal.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/linux_onload.h>
 #include <onload/linux_trampoline.h>
-#include "onload_kernel_compat.h"
 
 #ifdef OO_CAN_HANDLE_TERMINATION
 

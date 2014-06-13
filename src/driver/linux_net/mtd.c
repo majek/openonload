@@ -713,6 +713,7 @@ static const struct siena_nvram_type_info siena_nvram_types[] = {
 	[MC_CMD_NVRAM_TYPE_PHY_PORT1]		= { 1, "sfc_phy_fw" },
 	[MC_CMD_NVRAM_TYPE_FPGA]    		= { 0, "sfc_fpga" },
 	[MC_CMD_NVRAM_TYPE_FPGA_BACKUP]    	= { 0, "sfc_fpgadiag" },
+	[MC_CMD_NVRAM_TYPE_FC_FW]		= { 0, "sfc_fcfw" },
 	[MC_CMD_NVRAM_TYPE_CPLD]		= { 0, "sfc_cpld" },
 	[MC_CMD_NVRAM_TYPE_LICENSE]		= { 0, "sfc_license" },
 };

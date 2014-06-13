@@ -77,7 +77,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"3.3.0.6246"
+#define EFX_DRIVER_VERSION	"3.3.0.6309"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -291,6 +291,7 @@ struct efx_tx_queue {
  *	Will be %NULL if the buffer slot is currently free.
  * @page: The associated page buffer. Valif iff @flags & %EFX_RX_BUF_PAGE.
  *	Will be %NULL if the buffer slot is currently free.
+ * @page_offset: Offset within page. Valid iff @flags & %EFX_RX_BUF_PAGE.
  * @len: Buffer length, in bytes.
  * @flags: Flags for buffer and packet state.
  */
@@ -300,7 +301,8 @@ struct efx_rx_buffer {
 		struct sk_buff *skb;
 		struct page *page;
 	} u;
-	unsigned int len;
+	u16 page_offset;
+	u16 len;
 	u16 flags;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
 	/* VLAN tag in host byte order.  Iff the EFX_RX_PKT_VLAN_XTAG
@@ -984,7 +986,7 @@ struct vfdi_status;
  * @debug_symlink: NIC debugfs sym-link (nic_eth\%d)
  * @debug_port_dir: Port debugfs directory
  * @debug_port_symlink: Port debugfs sym-link (if_eth\%d)
- * @drain_pending: Count of RX and TX queues that haven't been flushed and drained.
+ * @active_queues: Count of RX and TX queues that haven't been flushed and drained.
  * @rxq_flush_pending: Count of number of receive queues that need to be flushed.
  *	Decremented when the efx_flush_rx_queue() is called.
  * @rxq_flush_outstanding: Count of number of RX flushes started but not yet
@@ -1023,9 +1025,7 @@ struct efx_nic {
 
 	char name[IFNAMSIZ];
 	struct pci_dev *pci_dev;
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_NETDEV_DEV_ID)
-	unsigned port_num;
-#endif
+	unsigned int port_num;
 	const struct efx_nic_type *type;
 	int legacy_irq;
 	bool legacy_irq_enabled;
@@ -1161,7 +1161,7 @@ struct efx_nic {
 	u8 vlan_rss_mask[4096/8];
 #endif
 
-	atomic_t drain_pending;
+	atomic_t active_queues;
 	atomic_t rxq_flush_pending;
 	atomic_t rxq_flush_outstanding;
 	wait_queue_head_t flush_wq;
@@ -1211,11 +1211,7 @@ static inline int efx_dev_registered(struct efx_nic *efx)
 
 static inline unsigned int efx_port_num(struct efx_nic *efx)
 {
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_DEV_ID)
-	return efx->net_dev->dev_id;
-#else
 	return efx->port_num;
-#endif
 }
 
 struct efx_nic_register_mask;

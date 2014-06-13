@@ -36,17 +36,16 @@
 #include "efx_ioctl.h"
 
 #if defined(EFX_NOT_UPSTREAM) && defined( CONFIG_SFC_AOE)
+#include "mcdi_pcol_aoe.h"
+
 bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event);
 int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld);
 int efx_aoe_update_keys(struct efx_nic *efx,
 			struct efx_update_license *key_stats);
+int efx_aoe_reset_aoe(struct efx_nic *efx,
+			struct efx_aoe_reset *reset_flags);
 #else
-static inline bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return false; }
-static inline int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld) { return -ENOSYS; }
-static inline int efx_aoe_update_keys(struct efx_nic *efx,
-				      struct efx_update_license *key_stats) {
-	return -ENOSYS;
-}
+static inline bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return false; };
 #endif
 
 #endif /* EFX_AOE_H */

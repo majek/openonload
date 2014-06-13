@@ -31,6 +31,7 @@ function usage()
     err "                     By default will look in KPATH and /boot"
     err "  -q              -- Quieten the checks"
     err "  -v              -- Verbose output"
+    err "  -s              -- Symbol list to use"
     err "  <symbol>        -- Symbol to evaluate."
     err "                     By default every symbol is evaluated"
 
@@ -51,7 +52,7 @@ EFX_USE_GSO_SIZE_FOR_MSS		kver	>=	2.6.19
 EFX_USE_FASTCALL			kver	<	2.6.20
 EFX_USE_VLAN_RX_KILL_VID		kver	<	2.6.22
 EFX_NEED___CPU_TO_LE32_CONSTANT_FIX	kver	<	2.6.22
-EFX_NEED_BONDING_MTU_WORKAROUND		kver	<	2.6.24
+EFX_NEED_BONDING_HACKS			kver	<	2.6.24
 EFX_NEED_DEV_CLOSE_HACK			kver	<	2.6.25
 EFX_HAVE_VLAN_NETWORK_HEADER_BUG	kver	<	2.6.27
 EFX_NEED_LM87_DRIVER			kver	<	2.6.28
@@ -63,7 +64,6 @@ EFX_HAVE_PARAM_BOOL_INT			kver	<	2.6.31
 EFX_HAVE_MTD_TABLE			kver	<	2.6.35
 EFX_HAVE_VMALLOC_REG_DUMP_BUF		kver	>=	2.6.37
 EFX_USE_ETHTOOL_OP_GET_LINK		kver	>=	2.6.38
-EFX_NEED_BONDING_SETTINGS_WORKAROUND		kver	<	3.9
 EFX_HAVE_OLD_NAPI			nsymbol napi_schedule		include/linux/netdevice.h
 EFX_HAVE_OLD_CSUM			nsymbol __sum16			include/linux/types.h
 EFX_HAVE_OLD_IP_FAST_CSUM		custom
@@ -136,7 +136,6 @@ EFX_NEED_MMIOWB				custom
 EFX_USE_LINUX_UACCESS_H			file				include/linux/uaccess.h
 EFX_USE_MTD_WRITESIZE			symbol	writesize		include/linux/mtd/mtd.h
 EFX_USE_NETDEV_DEV			member	struct_net_device	dev	include/linux/netdevice.h
-EFX_USE_NETDEV_DEV_ID			member	struct_net_device	dev_id	include/linux/netdevice.h
 EFX_USE_NETDEV_STATS			custom
 EFX_USE_NETDEV_STATS64			member	struct_net_device_ops	ndo_get_stats64 include/linux/netdevice.h
 EFX_USE_PCI_DEV_REVISION		symbol	revision		include/linux/pci.h
@@ -220,8 +219,9 @@ EFX_HAVE_CPU_RMAP			file				include/linux/cpu_rmap.h
 EFX_NEED_KTIME				nfile				include/linux/ktime.h
 EFX_HAVE_NET_TSTAMP			file				include/linux/net_tstamp.h include/uapi/linux/net_tstamp.h
 EFX_NEED_PPS_SUB_TS			nsymbol pps_sub_ts		include/linux/pps_kernel.h
-EFX_HAVE_PHC_SUPPORT			symbol	PTP_CLOCK_PPSUSR	include/linux/ptp_clock_kernel.h
+EFX_HAVE_PHC_SUPPORT			custom
 EFX_NEED_PPS_EVENT_TIME			nsymbol	pps_event_time		include/linux/pps_kernel.h
+EFX_NEED_PPS_GET_TS			nsymbol	pps_get_ts		include/linux/pps_kernel.h
 EFX_HAVE_PPS_KERNEL			file				include/linux/pps_kernel.h
 EFX_HAVE_DIV_S64_REM			symbol	div_s64_rem		include/linux/math64.h
 EFX_NEED_IP_IS_FRAGMENT			nsymbol	ip_is_fragment		include/net/ip.h
@@ -242,9 +242,11 @@ EFX_NEED_SKB_CHECKSUM_NONE_ASSERT	nsymbol	skb_checksum_none_assert	include/linux
 EFX_NEED_SKB_HEADER_CLONED		nsymbol	skb_header_cloned	include/linux/skbuff.h
 EFX_HAVE_NON_CONST_KERNEL_PARAM		symtype	param_set_uint		include/linux/moduleparam.h	int (const char *, struct kernel_param *)
 EFX_HAVE_KERNEL_PARAM_OPS		symbol kernel_param_ops		include/linux/moduleparam.h
-EFX_NEED_KOBJECT_INIT_AND_ADD		nsymbol	kobject_init_and_add	include/linux/kobject.h
+EFX_NEED_KOBJECT_INIT_AND_ADD		nsymbol kobject_init_and_add	include/linux/kobject.h
 EFX_NEED_KOBJECT_SET_NAME_VARGS		nsymbol kobject_set_name_vargs	include/linux/kobject.h
 EFX_USE_ETHTOOL_OPS_EXT			symbol	ethtool_ops_ext		include/linux/ethtool.h
+EFX_HAVE_OLD___VLAN_PUT_TAG		symtype	__vlan_put_tag		include/linux/if_vlan.h	struct sk_buff *(struct sk_buff *, u16)
+EFX_HAVE_NETDEV_NOTIFIER_NETDEV_PTR	nsymbol	netdev_notifier_info	include/linux/netdevice.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
@@ -568,7 +570,7 @@ function test_compile()
 $makefile_prefix
 obj-m := test.o
 EOF
-    make -C $KPATH $EXTRA_MAKEFLAGS M=$dir >$dir/log 2>&1
+    make -C $KPATH M=$dir >$dir/log 2>&1
     rc=$?
 
     if [ $verbose = true ]; then
@@ -885,8 +887,11 @@ function do_EFX_HAVE_ETHTOOL_RESET
 	defer_test_memtype pos struct_ethtool_ops reset include/linux/ethtool.h void
 }
 
-######################################################################
-# main()
+function do_EFX_HAVE_PHC_SUPPORT
+{
+    test_symbol PTP_CLOCK_PPSUSR include/linux/ptp_clock_kernel.h && \
+        egrep -q -e "CONFIG_PTP_1588_CLOCK=[y,m]" $KBUILD_SRC/.config
+}
 
 quiet=false
 verbose=false
@@ -898,6 +903,7 @@ unset ARCH  # avoid exporting ARCH during initial checks
 ARCH=
 MAP=
 EXTRA_MAKEFLAGS=
+kompat_symbols=
 
 # These variables from an outer build will interfere with our test builds
 unset KBUILD_EXTMOD
@@ -931,6 +937,7 @@ while [ $# -gt 0 ]; do
 	-q) quiet=true;;
 	-m) MAP=$2; shift;;
 	-v) verbose=true;;
+	-s) kompat_symbols="$2"; shift;;
 	-*) usage; exit -1;;
 	*)  [ -z $FILTER ] && FILTER=$1 || FILTER="$FILTER|$1";;
 	*)  break;
@@ -1031,7 +1038,9 @@ if [ -z "$MAP" ]; then
     fi
 fi
 
-kompat_symbols="$(generate_kompat_symbols)"
+if [ "$kompat_symbols" == "" ]; then
+    kompat_symbols="$(generate_kompat_symbols)"
+fi
 
 # filter the available symbols
 if [ -n "$FILTER" ]; then

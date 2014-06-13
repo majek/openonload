@@ -38,13 +38,15 @@
 
 int oo_os_sock_get_from_ep(tcp_helper_endpoint_t* ep, oo_os_file* os_sock_out)
 {
-  if( ep->os_socket == NULL )
-    return -EINVAL;
-  ci_assert(ep->os_socket->file);
-
-  *os_sock_out = ep->os_socket->file;
-  return 0;
+  if( ep->os_socket != NULL ) {
+    *os_sock_out = ep->os_socket->file;
+    ci_assert(*os_sock_out != NULL);
+    return 0;
+  }
+  *os_sock_out = NULL;
+  return -EINVAL;
 }
+
 
 int oo_os_sock_get(ci_netif* ni, oo_sp sock_p, oo_os_file* os_sock_out)
 {
@@ -52,20 +54,18 @@ int oo_os_sock_get(ci_netif* ni, oo_sp sock_p, oo_os_file* os_sock_out)
   tcp_helper_endpoint_t* ep;
 
   if( sock_id != TRUSTED_SOCK_ID(ni, sock_id) ) {
-    LOG_E(ci_log("%s: [%d] bad sock_id=%d", __FUNCTION__, NI_ID(ni), sock_id));
+    LOG_E(ci_log("%s: ERROR: %d:%d bad sock_id",
+                 __FUNCTION__, NI_ID(ni), sock_id));
     return -EINVAL;
   }
   ep = ci_netif_ep_get(ni, sock_p);
-  ci_assert(ep != NULL);
-  if( ep->os_socket == NULL ) {
-    LOG_E(ci_log("%s: %d:%d has no O/S socket",
-                 __FUNCTION__, NI_ID(ni), sock_id));
-    return -ENOENT;
-  }
+  if( oo_os_sock_get_from_ep(ep, os_sock_out) == 0 )
+    return 0;
 
-  return oo_os_sock_get_from_ep(ep, os_sock_out);
+  LOG_E(ci_log("%s: ERROR: %d:%d has no O/S socket",
+               __FUNCTION__, NI_ID(ni), sock_id));
+  return -ENOENT;
 }
-
 
 #else
 

@@ -88,7 +88,12 @@ asmlinkage int efab_linux_sys_sigaction(int signum,
                                         const struct sigaction *act,
                                         struct sigaction *oact);
 #ifdef CONFIG_COMPAT
-#include <asm/ia32.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0)
+# include <linux/compat.h>
+# define sigaction32 compat_sigaction
+#else
+# include <asm/ia32.h>
+#endif
 asmlinkage int efab_linux_sys_sigaction32(int signum,
                                           const struct sigaction32 *act,
                                           struct sigaction32 *oact);

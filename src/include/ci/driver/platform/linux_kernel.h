@@ -623,7 +623,7 @@ ci_inline unsigned ci_contig_shmbuf_nopage(ci_contig_shmbuf_t* kus,
 
 /* These functions are exported, but declared in "private" pci.h */
 extern unsigned char pci_max_busnr(void);
-struct pci_bus * __devinit pci_add_new_bus(struct pci_bus *parent, struct pci_dev *dev, int busnr);
+struct pci_bus * pci_add_new_bus(struct pci_bus *parent, struct pci_dev *dev, int busnr);
 
 /*--------------------------------------------------------------------
  *

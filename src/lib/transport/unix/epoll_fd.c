@@ -293,6 +293,7 @@ int citp_epoll_create(int size, int flags)
   ci_dllist_init(&ep->dead_sockets);
   oo_atomic_set(&ep->refcount, 1);
   ep->epfd_syncs_needed = 0;
+  ep->blocking = 0;
   citp_fdtable_insert(fdi, fd, 0);
   Log_POLL(ci_log("%s: fd=%d driver_fd=%d epfd=%d", __FUNCTION__,
                   fd, ep->epfd_os, (int) ep->shared->epfd));
@@ -723,6 +724,29 @@ static void citp_ul_epoll_ctl_sync_fd(int epfd,
     eitem->epfd_event.events |= EPOLL_SYNC_ALWAYS;
 }
 
+static inline citp_fdinfo * 
+citp_ul_epoll_member_to_fdi(struct citp_epoll_member* eitem)
+{
+  citp_fdinfo* fdi = NULL;
+  do {
+    citp_fdinfo_p fdip = citp_fdtable.table[eitem->fd].fdip;
+    if( fdip_is_busy(fdip) ) {
+      /* Wait: We cannot draw any conclusion about a busy entry.  (NB. We
+       * cannot call citp_fdtable_busy_wait() because we're holding the
+       * fdtable lock).
+       */
+      ci_spinloop_pause();
+      continue;
+    }
+    if( !fdip_is_normal(fdip) )
+      return NULL;
+    fdi = fdip_to_fdi(fdip);
+    if( fdi->seq != eitem->fdi_seq )
+      return NULL;
+    break;
+  } while(1);
+  return fdi;
+}
 
 static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
 {
@@ -731,21 +755,28 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
 
   while( ci_dllist_not_empty(&ep->dead_sockets) ) {
     eitem = EITEM_FROM_DLLINK(ci_dllist_pop(&ep->dead_sockets));
-    Log_POLL(ci_log("%s(%d): DEL %d", __FUNCTION__, epfd, eitem->fd));
-    rc = ci_sys_epoll_ctl(epfd, EPOLL_CTL_DEL, eitem->fd, &eitem->epoll_data);
-    if( rc < 0 )
-      Log_E(ci_log("%s: ERROR: sys_epoll_ctl(%d, DEL, %d) failed (%d,%d)",
-                   __FUNCTION__, epfd, eitem->fd, rc, errno));
+
+    /* Check that this fd was not replaced by another file */
+    if( citp_ul_epoll_member_to_fdi(eitem) ) {
+      Log_POLL(ci_log("%s(%d): DEL %d", __FUNCTION__, epfd, eitem->fd));
+      rc = ci_sys_epoll_ctl(epfd, EPOLL_CTL_DEL,
+                            eitem->fd, &eitem->epoll_data);
+      if( rc < 0 )
+        Log_E(ci_log("%s: ERROR: sys_epoll_ctl(%d, DEL, %d) failed (%d,%d)",
+                     __FUNCTION__, epfd, eitem->fd, rc, errno));
+    }
     CI_FREE_OBJ(eitem);
-    if( --ep->epfd_syncs_needed == 0 )
-      /* This early exit may help us avoid iterating over the whole list. */
-      break;
   }
 
   CI_DLLIST_FOR_EACH2(struct citp_epoll_member, eitem,
                       dllink, &ep->oo_sockets)
     if( ! citp_eitem_is_synced(eitem) ) {
-      citp_ul_epoll_ctl_sync_fd(epfd, eitem);
+      if( citp_ul_epoll_member_to_fdi(eitem) )
+        citp_ul_epoll_ctl_sync_fd(epfd, eitem);
+      else {
+        ci_dllist_remove(&eitem->dllink);
+        CI_FREE_OBJ(eitem);
+      }
       if( --ep->epfd_syncs_needed == 0 )
         /* This early exit may help us avoid iterating over the whole list. */
         break;
@@ -761,25 +792,15 @@ static void citp_ul_epoll_ctl_sync(struct citp_epoll_fd* ep, int epfd)
 static void citp_ul_epoll_one(struct oo_ul_epoll_state*__restrict__ eps,
                               struct citp_epoll_member*__restrict__ eitem)
 {
-  citp_fdinfo_p fdip;
   citp_fdinfo* fdi = NULL;
 
   ci_assert_lt(eitem->fd, citp_fdtable.inited_count);
 
-  do {
-    if(CI_LIKELY( fdip_is_normal(fdip = citp_fdtable.table[eitem->fd].fdip) &&
-                  (fdi = fdip_to_fdi(fdip))->seq == eitem->fdi_seq )) {
-      if( (eitem->epoll_data.events & OO_EPOLL_ALL_EVENTS) != 0 )
-        citp_fdinfo_get_ops(fdi)->epoll(fdi, eitem, eps);
-      return;
-    }
-
-    /* Wait: We cannot draw any conclusion about a busy entry.  (NB. We
-     * cannot call citp_fdtable_busy_wait() because we're holding the
-     * fdtable lock).
-     */
-    ci_spinloop_pause();
-  } while( fdip_is_busy(fdip) );
+  if(CI_LIKELY( (fdi = citp_ul_epoll_member_to_fdi(eitem)) != NULL )) {
+    if( (eitem->epoll_data.events & OO_EPOLL_ALL_EVENTS) != 0 )
+      citp_fdinfo_get_ops(fdi)->epoll(fdi, eitem, eps);
+    return;
+  }
 
   /* [fdip] is special, or the seq check failed, so this fd has changed
    * identity.  Best we can do at userlevel is assume the file descriptor
