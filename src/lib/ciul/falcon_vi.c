@@ -258,7 +258,7 @@ falcon_dma_tx_calc_ip_phys(ef_vi_dma_addr_t src_dma_addr, unsigned bytes,
 void falcon_vi_init(ef_vi* vi, void* vvis)
 {
 	struct vi_mappings *vm = (struct vi_mappings*)vvis;
-	uint16_t* ids;
+	uint32_t* ids;
 
 	BUG_ON(vm->signature != VI_MAPPING_SIGNATURE);
 	BUG_ON(vm->nic_type.arch != EF_VI_ARCH_FALCON);
@@ -272,7 +272,7 @@ void falcon_vi_init(ef_vi* vi, void* vvis)
 	** without DMA queues. */
 	vi->vi_rxq.doorbell = vi->vi_txq.doorbell = (ef_vi_ioaddr_t)0xdb;
 
-	ids = (uint16_t*) (vi->ep_state + 1);
+	ids = (uint32_t*) (vi->ep_state + 1);
 
 	if( vm->tx_queue_capacity ) {
 		vi->vi_txq.mask = vm->tx_queue_capacity - 1;
@@ -371,7 +371,8 @@ int ef_vi_transmitv_init(ef_vi* vi, const ef_iovec* iov, int iov_len,
 		}
 	}
 
-	q->ids[di] = (uint16_t) dma_id;
+	BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
+	q->ids[di] = dma_id;
 	return 0;
 }
 
@@ -443,8 +444,8 @@ int ef_vi_receive_init(ef_vi* vi, ef_addr addr, ef_request_id dma_id)
 
 	if( ef_vi_receive_space(vi) ) {
 		di = qs->added++ & q->mask;
-		BUG_ON(q->ids[di] != 0xffff);
-		q->ids[di] = (uint16_t) dma_id;
+		BUG_ON(q->ids[di] != EF_REQUEST_ID_MASK);
+		q->ids[di] = dma_id;
 
 		if( ! (vi->vi_flags & EF_VI_RX_PHYS_ADDR) ) {
 			ef_vi_falcon_dma_rx_buf_desc* dp;

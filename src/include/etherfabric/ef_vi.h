@@ -124,8 +124,7 @@ typedef union {
 } ef_vi_qword;
 
 
-#define EF_REQUEST_ID_BITS      16u
-#define EF_REQUEST_ID_MASK      ((1u << EF_REQUEST_ID_BITS) - 1u)
+#define EF_REQUEST_ID_MASK      0xffffffff
 
 
 /*! \i_ef_event An [ef_event] is a token that identifies something that
@@ -139,14 +138,14 @@ typedef union {
 	struct {
 		unsigned       type       :16;
 		unsigned       q_id       :16;
-		unsigned       rq_id      :16;
+		unsigned       rq_id      :32;
 		unsigned       len        :16;
 		unsigned       flags      :16;
 	} rx;
 	struct {  /* This *must* have same initial layout as [rx]. */
 		unsigned       type       :16;
 		unsigned       q_id       :16;
-		unsigned       rq_id      :16;
+		unsigned       rq_id      :32;
 		unsigned       len        :16;
 		unsigned       subtype    :16;
 	} rx_discard;
@@ -293,14 +292,14 @@ typedef struct {
 	uint32_t         mask;
 	void*            doorbell;
 	void*            descriptors;
-	uint16_t*        ids;
+	uint32_t*        ids;
 } ef_vi_txq;
 
 typedef struct {
 	uint32_t         mask;
 	void*            doorbell;
 	void*            descriptors;
-	uint16_t*        ids;
+	uint32_t*        ids;
 } ef_vi_rxq;
 
 typedef struct {

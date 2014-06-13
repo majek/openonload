@@ -2018,10 +2018,12 @@ efab_tcp_helper_more_bufs_failed(tcp_helper_resource_t* trs, int rc)
   int new_max_packets = ni->pkt_sets_n << PKTS_PER_SET_S;
   ni->pkt_sets_max = ni->pkt_sets_n;
   ni->state->pkt_sets_max = ni->pkt_sets_max;
-  NI_OPTS(ni).max_rx_packets =
-    NI_OPTS(ni).max_rx_packets * new_max_packets / NI_OPTS(ni).max_packets;
-  NI_OPTS(ni).max_tx_packets =
-    NI_OPTS(ni).max_tx_packets * new_max_packets / NI_OPTS(ni).max_packets;
+  NI_OPTS(ni).max_rx_packets = (ci_int32)
+    ((uint64_t) NI_OPTS(ni).max_rx_packets * new_max_packets /
+     NI_OPTS(ni).max_packets);
+  NI_OPTS(ni).max_tx_packets = (ci_int32)
+    ((uint64_t) NI_OPTS(ni).max_tx_packets * new_max_packets /
+     NI_OPTS(ni).max_packets);
   NI_OPTS(ni).max_packets = new_max_packets;
   ci_netif_set_rxq_limit(ni);
 

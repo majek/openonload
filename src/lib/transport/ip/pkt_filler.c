@@ -47,23 +47,34 @@ int oo_pkt_filler_alloc_pkts(ci_netif* ni, int* p_netif_locked,
 void oo_pkt_filler_free_unused_pkts(ci_netif* ni, int* p_netif_locked,
                                     struct oo_pkt_filler* pf)
 {
-  int n_pkts = 0;
-  if( pf->alloc_pkt != NULL ) {
-    if( *p_netif_locked == 0 && ci_netif_lock(ni) )
-      *p_netif_locked = 1;
-    if( *p_netif_locked ) {
-      oo_pkt_p next = OO_PKT_P(pf->alloc_pkt);
-      while( OO_PP_NOT_NULL(next) ) {
-        ci_ip_pkt_fmt *p = PKT_CHK(ni, next);
-        next = p->next;
-        ci_netif_pkt_release(ni, p);
-        ++n_pkts;
+  ci_ip_pkt_fmt* pkt;
+  oo_pkt_p next;
+
+  if( pf->alloc_pkt == NULL )
+    return;
+
+  next = OO_PKT_P(pf->alloc_pkt);
+  pf->alloc_pkt = NULL;
+
+  do {
+    pkt = PKT_CHK_NML(ni, next, *p_netif_locked);
+    next = pkt->next;
+    if( ! (pkt->flags & CI_PKT_FLAG_NONB_POOL) ) {
+      if( *p_netif_locked || (*p_netif_locked = ci_netif_trylock(ni)) ) {
+        ci_netif_pkt_release_1ref(ni, pkt);
+        --ni->state->n_async_pkts;
+        continue;
       }
-      ni->state->n_async_pkts -= n_pkts;
+      /* Couldn't get the lock without blocking, so just free it to the
+       * nonblocking pool.  (We mustn't block here, as there may be a
+       * signal pending).  Next time it is used it should get recycled back
+       * into the normal pool again.
+       */
     }
-    else 
-      LOG_U(ci_log("%s: pkts leaked due to lock failure", __FUNCTION__));
-  }
+    pkt->refcount = 0;
+    __ci_netif_pkt_clean(pkt);
+    ci_netif_pkt_free_nonb_list(ni, OO_PKT_P(pkt), pkt);
+  } while( OO_PP_NOT_NULL(next) );
 }
 
 

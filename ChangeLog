@@ -1,4 +1,16 @@
 
+openonload-201205-p2
+--------------------
+
+- bug30110: Fix sfcaffinity_config regression and support newer kernels.
+- bug29929: Return from onload_zc_recv on END_OF_BURST during recv via OS.
+- bug30108: Fix kernel panic caused by TCP loopback acceleration.
+- bug30429: Fix bug causing misbehaviour when >64K packet buffers used.
+- bug30429: Fix integer overflow when run out of buffer table space.
+- bug30417: Fix bug in TCP send() path leading to app seg-fault.
+- bug30445: Fix bug in TCP send() path leading to stack lock getting stuck.
+
+
 openonload-201205
 -----------------
 

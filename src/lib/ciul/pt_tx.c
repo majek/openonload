@@ -92,9 +92,9 @@ int ef_vi_transmit_unbundle(ef_vi* vi, const ef_event* ev,
                qs->added - qs->removed);
 
 	for( i = qs->removed & q->mask; i != stop; i = ++qs->removed & q->mask )
-		if( q->ids[i] != 0xffff ) {
+		if( q->ids[i] != EF_REQUEST_ID_MASK ) {
 			*ids++ = q->ids[i];
-			q->ids[i] = 0xffff;
+			q->ids[i] = EF_REQUEST_ID_MASK;
 		}
 
 	BUG_ON(ids - ids_in > EF_VI_TRANSMIT_BATCH);

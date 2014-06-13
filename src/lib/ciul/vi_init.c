@@ -50,8 +50,8 @@
 
 
 #define EF_VI_STATE_BYTES(rxq_sz, txq_sz)			\
-	(sizeof(ef_vi_state) + (rxq_sz) * sizeof(uint16_t)	\
-	 + (txq_sz) * sizeof(uint16_t))
+	(sizeof(ef_vi_state) + (rxq_sz) * sizeof(uint32_t)	\
+	 + (txq_sz) * sizeof(uint32_t))
 
 int ef_vi_calc_state_bytes(int rxq_sz, int txq_sz)
 {
@@ -93,10 +93,10 @@ void ef_vi_state_init(ef_vi* vi)
 
 	if( vi->vi_rxq.mask )
 		for( i = 0; i <= vi->vi_rxq.mask; ++i )
-			vi->vi_rxq.ids[i] = (uint16_t) -1;
+			vi->vi_rxq.ids[i] = EF_REQUEST_ID_MASK;
 	if( vi->vi_txq.mask )
 		for( i = 0; i <= vi->vi_txq.mask; ++i )
-			vi->vi_txq.ids[i] = (uint16_t) -1;
+			vi->vi_txq.ids[i] = EF_REQUEST_ID_MASK;
 }
 
 

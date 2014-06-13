@@ -727,7 +727,7 @@ static int ci_tcp_sendmsg_no_pkt_buf(ci_netif* ni, ci_tcp_state* ts,
 {
   ci_ip_pkt_fmt* pkt;
   do {
-    pkt = ci_netif_pkt_alloc_nonb(ni, CI_FALSE);
+    pkt = ci_netif_pkt_alloc_nonb(ni, sinf->stack_locked);
     if( pkt ) 
       oo_pkt_filler_add_pkt(&sinf->pf, pkt);
     else
@@ -758,6 +758,7 @@ static int ci_tcp_sendmsg_no_pkt_buf(ci_netif* ni, ci_tcp_state* ts,
       ci_netif_poll(ni);
     
     while( 1 ) {
+      ci_assert(ci_netif_is_locked(ni));
       do {
         pkt = ci_netif_pkt_tx_tcp_alloc(ni);
         if( pkt ) {
@@ -795,9 +796,24 @@ static int ci_tcp_sendmsg_no_pkt_buf(ci_netif* ni, ci_tcp_state* ts,
         else
           break;
       } while( --sinf->n_needed > 0 );
+
       if( ts->s.tx_errno ) {
         ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, sinf);
         return -1;
+      }
+
+      if( sinf->n_needed == 0 )
+        return 0;
+
+      /* Start of loop expects lock to be held */
+      ci_assert(sinf->stack_locked == 0);
+      if( !si_trylock(ni, sinf) ) {
+        if( (sinf->rc = ci_netif_lock(ni)) != 0 ) {
+          ci_tcp_sendmsg_handle_sent_or_rc(ni, ts, flags, sinf);
+          return -1;
+        }
+        sinf->stack_locked = 1;
+        CITP_STATS_NETIF_INC(ni, tcp_send_ni_lock_contends);
       }
     }
   }

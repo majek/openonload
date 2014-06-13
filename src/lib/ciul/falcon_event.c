@@ -78,7 +78,7 @@ ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_qword* ev,
 	--(*evs_len);
 	ev_out->rx.q_id = q_label;
 	ev_out->rx.rq_id = vi->vi_rxq.ids[desc_i];
-	vi->vi_rxq.ids[desc_i] = 0xffff;  /* ?? killme */
+	vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;  /* ?? killme */
 	++vi->ep_state->rxq.removed;
 	if(likely( QWORD_TEST_BIT(RX_EV_PKT_OK, *ev) )) {
 	dont_discard:
@@ -159,7 +159,7 @@ static void falcon_rx_unexpected(ef_vi* vi, const ef_vi_qword* ev,
 		ev_out->rx_discard.q_id = q_label;
 		ev_out->rx_discard.rq_id = vi->vi_rxq.ids[desc_i];
                 ev_out->rx_discard.len = 0;
-		vi->vi_rxq.ids[desc_i] = 0xffff;
+		vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;/* ?? killme */
 		++vi->ep_state->rxq.removed;
 		INC_ERROR_STAT(vi, rx_ev_lost);
 		desc_i = (desc_i + 1) & vi->vi_rxq.mask;
