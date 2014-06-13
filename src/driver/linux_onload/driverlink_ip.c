@@ -78,13 +78,6 @@ static inline u16 vlan_dev_vlan_id(const struct net_device *dev)
 #endif
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,2,0)
-static inline void *skb_frag_address(const skb_frag_t *frag)
-{
-  return page_address(frag->page) + frag->page_offset;
-}
-#endif
-
 
 #if CI_CFG_TEAMING
 # ifdef IFF_BONDING
@@ -562,12 +555,12 @@ void oo_driverlink_unregister_nf(void)
 {
   nf_unregister_hook(&oo_netfilter_ip_hook);
   nf_unregister_hook(&oo_netfilter_arp_hook);
+  unregister_netdevice_notifier(&oo_netdev_notifier);
 }
 
 void oo_driverlink_unregister_dl(void)
 {
   efx_dl_unregister_driver(&oo_dl_driver);
-  unregister_netdevice_notifier(&oo_netdev_notifier);
 }
 
 

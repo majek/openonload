@@ -7,6 +7,12 @@
 import re
 
 
+# python 3 compat
+import sys
+if sys.version_info >= (3,0):
+    long = int
+
+
 class BadMask(Exception):
     def __init__(self, msg):
         self.msg = msg
@@ -76,7 +82,7 @@ def int_list_to_int(mask):
 
 def comma_sep_hex_to_int(cshm):
     assert type(cshm) is str
-    mask = 0L
+    mask = 0
     for i in cshm.split(','):
         mask <<= 32
         mask |= int(i, 16)
@@ -142,7 +148,7 @@ def to_int(mask):
     elif is_comma_sep_list(mask):
         return comma_sep_list_to_int(mask)
     else:
-        raise BadMask, mask
+        raise BadMask(mask)
 
 
 def to_comma_sep_hex(mask):
@@ -187,7 +193,9 @@ def selftest():
             i = to_int(mask)
             csl = to_comma_sep_list(mask)
             cshm = to_comma_sep_hex(mask)
-            print "%s: hex(%x) csl(%s) cshm(%s)" % (mask, i, csl, cshm)
+            import sys
+            sys.stdout.write("%s: hex(%x) csl(%s) cshm(%s)\n" % \
+                                 (mask, i, csl, cshm))
 
 
 if __name__ == '__main__':

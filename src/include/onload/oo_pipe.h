@@ -37,31 +37,10 @@
   ( (_p)->bytes_added - (_p)->bytes_removed <   \
     OO_PIPE_BUF_SIZE * ((_p)->bufs_num - 1) )
 
-ci_inline void oo_pipe_wake_peer(struct oo_pipe* p, ci_netif* ni,
-                                 unsigned wake)
-{
-  if( ! (p->b.wake_request & wake) ) {
-    /* we increment sleep_seq. This is done to avoid race
-     * condition with other end which may go to sleep moments
-     * after we've called wake and will sleep forever. But! with
-     * sleep_seq incremented it will notice that wake had just
-     * occured and waiter_dont_wait function will wake us!
-     */
-    /* fixme: do we need this mb here? */
-    ci_wmb();
-    if( wake & CI_SB_FLAG_WAKE_RX )
-      ++p->b.sleep_seq.rw.rx;
-    if( wake & CI_SB_FLAG_WAKE_TX )
-      ++p->b.sleep_seq.rw.tx;
-    ci_mb();
-  }
 
-  if((p->b.wake_request & wake) ) {
-    ci_netif_lock(ni);
-    ci_assert_equal(ni->state->in_poll, 0);
-    citp_waitable_wake_not_in_poll(ni, &p->b, wake);
-    ci_netif_unlock(ni);
-  }
-}
+#ifdef __KERNEL__
+void oo_pipe_wake_peer(ci_netif* ni, struct oo_pipe* p, unsigned wake);
+#endif
+
 
 #endif /* __ONLOAD_OO_PIPE_H__ */

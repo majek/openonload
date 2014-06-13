@@ -202,7 +202,7 @@ void ci_buddy_reserve(ci_buddy_allocator *b, unsigned addr, unsigned size)
 #if CI_DEBUG_BUDDY_ALLOCATOR
 void ci_buddy_validate(ci_buddy_allocator* b)
 {
-  unsigned int l_addr, order, addr;
+  unsigned int order, addr;
   ci_dllink* l;
 
   /* Check that free lists and IS_BUSY()ness match up, and that all free
@@ -223,10 +223,8 @@ void ci_buddy_validate(ci_buddy_allocator* b)
   /* iterate over the free lists */
   for(order = 0; order <= b->order; ++order) {
       CI_DLLIST_FOR_EACH(l, FL(b, order)){
-	l_addr = LINK_TO_ADDR(b, l);
-
 	/* ?? do something useful here */
-	ci_assert(!IS_BUSY(b, l_addr));
+	ci_assert(!IS_BUSY(b, LINK_TO_ADDR(b, l)));
       }
   }
 }

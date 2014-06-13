@@ -287,6 +287,7 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
 
   oo_stackname_get(&stackname);
   if( stackname == NULL ) {
+    /* This implies EF_DONT_ACCELERATE is set */
     CITP_UNLOCK(&citp_ul_lock);
     return CI_SOCKET_HANDOVER;
   }

@@ -353,7 +353,8 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 		efhw_nic_event_queue_enable(nic, instance, q->capacity,
 					    q->buf_tbl_alloc.base,
 					    /* make siena look like falcon */
-					    instance < 64,
+					    instance < 64 ||
+					    efrm_pd_get_vf(virs->pd),
 					    1 /* DOS protection */);
 		break;
 	default:

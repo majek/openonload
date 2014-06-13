@@ -72,7 +72,6 @@
 #include <net/sock.h>   
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/pgtable.h>
@@ -107,7 +106,7 @@
 
 #include <linux/init.h>     /* module_init/module_exit */
 
-
+#include <driver/linux_net/kernel_compat.h>
 
 typedef int socklen_t;
 
@@ -688,7 +687,7 @@ ci_inline int oo_clone_fd(struct file* filp, struct file** new_filp_out,
         spin_lock(&files->file_lock);
         fdt = ci_files_fdtable(files);
         rcu_assign_pointer(fdt->fd[new_fd], new_filp);
-        FD_SET(new_fd, fdt->close_on_exec);
+        efx_set_close_on_exec(new_fd, fdt);
         spin_unlock(&files->file_lock);
 
       } else

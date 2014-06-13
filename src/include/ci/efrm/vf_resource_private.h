@@ -75,6 +75,7 @@ struct efrm_vf_vi {
 	/* Filled at VF PCI probe time: */
 	int index;                      /* instance number of this VI */
 	u32 irq;                        /* IRQ vector */
+	struct tasklet_struct tasklet;  /* IRQ tasklet */
 
 	/* Filled at allocation time: */
 	char name[EFRM_VF_NAME_LEN];    /* human-readable name */
@@ -91,6 +92,8 @@ struct efrm_vf {
 	struct list_head link;
 	int nic_index;
 
+	struct efrm_vf *linked;
+
 	/* Number of this VF and VIs */
 	int pci_dev_fn;
 	int vi_base;
@@ -98,12 +101,11 @@ struct efrm_vf {
 
 	struct pci_dev *pci_dev;
 
-	void *bar; /* BAR0 */
-
 	/* state for IOMMU mappings */
 	efhw_iommu_domain *iommu_domain;
 	int iommu_prot;
 	unsigned long iova_base;
+	unsigned long *iova_basep;
 
 	/* Data from the status page: */
 	u8 vi_scale;
@@ -123,7 +125,8 @@ extern int efrm_vf_probed(struct efrm_vf *vf);
 extern void efrm_vf_removed(struct efrm_vf *vf);
 
 /* driver OS-dependent functions called from library */
-extern int efrm_vf_interrupts_probe(struct efrm_vf *vf);
+extern void efrm_vf_free_reset(struct efrm_vf *vf);
+extern int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked);
 
 
 #endif /* __CI_EFRM_VF_RESOURCE_INTERNAL_H__ */

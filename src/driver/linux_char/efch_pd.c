@@ -15,8 +15,7 @@
 
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/vf_resource.h>
-#include <ci/driver/efab/efch.h>
-#include <ci/driver/efab/debug.h>
+#include "efch.h"
 #include <ci/efch/op_types.h>
 #include <ci/efrm/pd.h>
 #include "char_internal.h"
@@ -33,20 +32,20 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
   int rc, phys_mode;
 
   if ((rc = efrm_client_get(alloc->in_ifindex, NULL, NULL, &client)) < 0) {
-    DEBUGERR(ci_log("%s: ERROR: ifindex=%d rc=%d", __FUNCTION__,
-                    alloc->in_ifindex, rc));
+    EFCH_ERR("%s: ERROR: ifindex=%d rc=%d", __FUNCTION__,
+             alloc->in_ifindex, rc);
     goto out;
   }
   if (alloc->in_flags & (EFCH_PD_FLAG_VF | EFCH_PD_FLAG_VF_OPTIONAL)) {
-    if ((rc = efrm_vf_resource_alloc(client, &vf)) < 0 &&
+    if ((rc = efrm_vf_resource_alloc(client, NULL, &vf)) < 0 &&
         !(alloc->in_flags & EFCH_PD_FLAG_VF_OPTIONAL)) {
-      DEBUGERR(ci_log("%s: ERROR: could not allocate VF", __FUNCTION__));
+      EFCH_NOTICE("%s: could not allocate VF", __FUNCTION__);
       goto out;
     }
   }
   if ((alloc->in_flags & EFCH_PD_FLAG_PHYS_ADDR) && vf == NULL &&
       ci_geteuid() != 0) {
-    DEBUGERR(ci_log("%s: ERROR: phys mode requires root", __FUNCTION__));
+    EFCH_ERR("%s: ERROR: not permitted to use phys mode", __FUNCTION__);
     rc = -EPERM;
     goto out;
   }

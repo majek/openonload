@@ -36,6 +36,14 @@
 #define __ONLOAD_EPLOCK_H__
 
 
+#define OO_MUST_CHECK_RET  __attribute__((warn_unused_result))
+#ifdef __KERNEL__
+# define OO_MUST_CHECK_RET_IN_KERNEL  OO_MUST_CHECK_RET
+#else
+# define OO_MUST_CHECK_RET_IN_KERNEL
+#endif
+
+
 /* Internal!  Do not call. */
 extern int __ef_eplock_lock_slow(ci_netif *) CI_HF;
 
@@ -50,13 +58,25 @@ ci_inline int ef_eplock_trylock(ci_eplock_t* l) {
 		    v, (v &~ CI_EPLOCK_UNLOCKED) | CI_EPLOCK_LOCKED);
 }
 
-  /*! Lock an eplock. */
+  /* Always returns 0 (success) at userland.  Returns -EINTR if interrupted
+   * when invoked in kernel.  So return value *must* be checked when
+   * invoked in kernel, else risk of proceeding without the lock held.
+   */
+ci_inline int ef_eplock_lock(ci_netif *ni) OO_MUST_CHECK_RET_IN_KERNEL;
 ci_inline int ef_eplock_lock(ci_netif *ni) {
   int rc = 0;
   if( ci_cas32_fail(&ni->state->lock.lock,
                     CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
     rc = __ef_eplock_lock_slow(ni);
+#ifdef __KERNEL__
   return rc;
+#else
+  /* Ensure the compiler knows we're returning zero, so it can optimise out
+   * any code conditional on the return value.
+   */
+  (void) rc;
+  return 0;
+#endif
 }
 
   /*! Only call this if you hold the lock.  [flag] must have exactly one

@@ -42,6 +42,7 @@ static CI_DLLIST_DECLARE(dgram_protocols);
 
 void citp_protocol_impl_assert_valid(citp_protocol_impl* p)
 {
+#ifndef NDEBUG
   citp_fdops* o;
   ci_assert(p);
 
@@ -59,6 +60,7 @@ void citp_protocol_impl_assert_valid(citp_protocol_impl* p)
   ci_assert(o->setsockopt);
   ci_assert(o->recv);
   ci_assert(o->send);
+#endif
 }
 
 
@@ -127,7 +129,7 @@ int citp_protocol_manager_create_socket(int domain, int type, int protocol)
    * then don't try to handle it as we haven't implemented support
    */
   if( type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC | SOCK_TYPE_MASK) )
-    goto out_not_handled;
+    return CITP_NOT_HANDLED;
   type_no_flags = type & SOCK_TYPE_MASK;
 #endif
 
@@ -138,7 +140,7 @@ int citp_protocol_manager_create_socket(int domain, int type, int protocol)
            (protocol == 0 || protocol == IPPROTO_UDP))
     proto_list = &dgram_protocols;
   else
-    goto out_not_handled;
+    return CITP_NOT_HANDLED;
 
 #if CI_CFG_LOG_SOCKET_USERS
   citp_log_socket_user(domain, type, protocol);
@@ -149,14 +151,11 @@ int citp_protocol_manager_create_socket(int domain, int type, int protocol)
     if( rc >= 0 || rc == -1 )
       return rc;
   }
-
- out_not_handled:
-  if( CITP_OPTS.no_fail )
-    return CITP_NOT_HANDLED;
-  else {
-    errno = EPROTONOSUPPORT;
-    return -1;
-  }
+  /* We'll get here if the protocol op returned CI_SOCKET_HANDOVER.
+   * It should already have checked CITP_OPTS.no_fail and acted
+   * accordingly, so we can just map it to CITP_NOT_HANDLED
+   */
+  return CITP_NOT_HANDLED;
 }
 
 

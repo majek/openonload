@@ -85,6 +85,9 @@ typedef long long           int64_t;
 # error Unknown compiler
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**********************************************************************
  * Types **************************************************************
@@ -147,6 +150,7 @@ typedef union {
 		unsigned       q_id       :16;
 		unsigned       rq_id      :32;
 		unsigned       len        :16;
+		unsigned       flags      :16;
 		unsigned       subtype    :16;
 	} rx_discard;
 	struct {
@@ -204,6 +208,8 @@ enum {
 
 #define EF_EVENT_RX_DISCARD_Q_ID(e)  ((e).rx_discard.q_id)
 #define EF_EVENT_RX_DISCARD_RQ_ID(e) ((e).rx_discard.rq_id)
+#define EF_EVENT_RX_DISCARD_CONT(e)  ((e).rx_discard.flags&EF_EVENT_FLAG_CONT)
+#define EF_EVENT_RX_DISCARD_SOP(e)   ((e).rx_discard.flags&EF_EVENT_FLAG_SOP)
 #define EF_EVENT_RX_DISCARD_TYPE(e)  ((e).rx_discard.subtype)
 #define EF_EVENT_RX_DISCARD_BYTES(e) ((e).rx_discard.len)
 enum {
@@ -680,5 +686,8 @@ extern const char* ef_vi_version_str(void);
  */
 extern const char* ef_vi_driver_interface_str(void);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __EFAB_EF_VI_H__ */

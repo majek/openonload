@@ -32,6 +32,7 @@
 #include <ci/tools/pktdump.h>
 #include <onload/osfile.h>
 #include <onload/pkt_filler.h>
+#include <onload/sleep.h>
 
 
 #define VERB(x)
@@ -77,6 +78,79 @@ struct udp_send_info {
 };
 
 
+ci_noinline void ci_udp_sendmsg_chksum(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                                       ci_ip4_hdr* first_ip)
+{
+  /* 1400*50 = 70000, i.e. in normal situation there are <50 fragments */
+#define MAX_IP_FRAGMENTS 50
+  struct iovec iov[MAX_IP_FRAGMENTS];
+  int n = -1;
+  ci_udp_hdr* udp = TX_PKT_UDP(pkt);
+  ci_ip_pkt_fmt* p = pkt;
+  int first_frag = 1;
+
+  /* iterate all IP fragments */
+  while( OO_PP_NOT_NULL(p->next) ) {
+    int frag_len;
+    char *frag_start;
+    int max_sg_len;
+
+    /* When too many fragments, let's send it without checksum */
+    if( ++n == MAX_IP_FRAGMENTS )
+      return;
+
+    if( first_frag ) {
+      frag_start = (char *)(udp + 1);
+      frag_len = CI_BSWAP_BE16(first_ip->ip_tot_len_be16) -
+        CI_IP4_IHL(first_ip) - sizeof(ci_udp_hdr);
+      first_frag = 0;
+    }
+    else {
+      ci_ip4_hdr *p_ip;
+      p = PKT_CHK(ni, p->next);
+      p_ip = oo_tx_ip_hdr(p);
+      frag_len = CI_BSWAP_BE16(p_ip->ip_tot_len_be16) - CI_IP4_IHL(p_ip);
+      frag_start = (char *)(p_ip + 1);
+    }
+
+    iov[n].iov_base = frag_start;
+    iov[n].iov_len = frag_len;
+    max_sg_len = CI_PTR_ALIGN_FWD(PKT_START(p), CI_CFG_PKT_BUF_SIZE) -
+        frag_start;
+    if( frag_len > max_sg_len ) {
+      iov[n].iov_len = max_sg_len;
+      frag_len -= max_sg_len;
+    }
+
+    /* do we have scatte-gather for this IP fragment? */
+    if( p->frag_next != p->next ) {
+      ci_ip_pkt_fmt* sg_pkt = p;
+      while( sg_pkt->frag_next != p->next ) {
+        ci_assert(frag_len);
+        sg_pkt = PKT_CHK(ni, sg_pkt->frag_next);
+        ++n;
+        ci_assert_le(n, MAX_IP_FRAGMENTS);
+
+        iov[n].iov_base = PKT_START(sg_pkt);
+        iov[n].iov_len = frag_len;
+        max_sg_len = CI_PTR_ALIGN_FWD(PKT_START(sg_pkt),
+                                      CI_CFG_PKT_BUF_SIZE) -
+                     PKT_START(sg_pkt);
+        if( frag_len > max_sg_len ) {
+          iov[n].iov_len = max_sg_len;
+          frag_len -= max_sg_len;
+        }
+        else
+          frag_len = 0;
+      }
+      ci_assert_equal(frag_len, 0);
+    }
+  }
+  
+  udp->udp_check_be16 = ci_udp_checksum(first_ip, udp, iov, n+1);
+}
+
+
 static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                                 ci_ip_cached_hdrs* ipcache)
 {
@@ -90,7 +164,8 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
    */
   ipcache->pmtus.traffic = 1;
 
-  cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt));
+  cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt), 
+                       ipcache->ifindex);
 
 
   /* Update size of transmit queue now, because we do not have any callback
@@ -159,6 +234,15 @@ static void ci_udp_sendmsg_mcast(ci_netif* ni, ci_udp_state* us,
                                  ci_ip_cached_hdrs* ipcache,
                                  ci_ip_pkt_fmt* pkt)
 {
+  /* NB. We don't deliver multicast packets directly to local sockets if
+   * sending via the control plane (below) as they'll get there via the
+   * OS socket.
+   *
+   * FIXME: Problem is, they'll get there even if IP_MULTICAST_LOOP is
+   * disabled.  Fix would be to send via the OS socket instead of the
+   * control plane route and find an alternative way to keep neighbour
+   * entries alive.
+   */
   struct ci_udp_rx_deliver_state state;
   const ci_udp_hdr* udp;
 
@@ -212,79 +296,10 @@ ci_inline void prep_send_pkt(ci_netif* ni, ci_udp_state* us,
   pkt->pf.udp.tx_sock_id = S_SP(us);
   CI_UDP_STATS_INC_OUT_DGRAMS( ni );
 
-  /* First fragmented chunk: calculate UDP checksum */
-  if( (ip->ip_frag_off_be16 & CI_IP4_FRAG_MORE) &&
-      (ip->ip_frag_off_be16 & CI_IP4_OFFSET_MASK) == 0 ) {
-    /* 1400*50 = 70000, i.e. in normal situation there are <50 fragments */
-#define MAX_IP_FRAGMENTS 50
-    ci_iovec iov[MAX_IP_FRAGMENTS];
-    int n = -1;
-    ci_udp_hdr* udp = TX_PKT_UDP(pkt);
-    ci_ip_pkt_fmt* p = pkt;
-    int first_frag = 1;
-
-    /* iterate all IP fragments */
-    while( OO_PP_NOT_NULL(p->next) ) {
-      int frag_len;
-      char *frag_start;
-      int max_sg_len;
-
-      /* When too many fragments, let's send it without checksum */
-      if( ++n == MAX_IP_FRAGMENTS )
-        return;
-
-      if( first_frag ) {
-        frag_start = (char *)(udp + 1);
-        frag_len = CI_BSWAP_BE16(ip->ip_tot_len_be16) - CI_IP4_IHL(ip) -
-            sizeof(ci_udp_hdr);
-        first_frag = 0;
-      }
-      else {
-        ci_ip4_hdr *p_ip;
-        p = PKT_CHK(ni, p->next);
-        p_ip = oo_tx_ip_hdr(p);
-        frag_len = CI_BSWAP_BE16(p_ip->ip_tot_len_be16) - CI_IP4_IHL(p_ip);
-        frag_start = (char *)(p_ip + 1);
-      }
-
-      iov[n].iov_base = frag_start;
-      iov[n].iov_len = frag_len;
-      max_sg_len = CI_PTR_ALIGN_FWD(PKT_START(p), CI_CFG_PKT_BUF_SIZE) -
-          frag_start;
-      if( frag_len > max_sg_len ) {
-        iov[n].iov_len = max_sg_len;
-        frag_len -= max_sg_len;
-      }
-
-      /* do we have scatte-gather for this IP fragment? */
-      if( p->frag_next != p->next ) {
-        ci_ip_pkt_fmt* sg_pkt = p;
-
-        while( sg_pkt->frag_next != p->next ) {
-          ci_assert(frag_len);
-          sg_pkt = PKT_CHK(ni, sg_pkt->frag_next);
-
-          ++n;
-          ci_assert_le(n, MAX_IP_FRAGMENTS);
-
-          iov[n].iov_base = PKT_START(sg_pkt);
-          iov[n].iov_len = frag_len;
-          max_sg_len = CI_PTR_ALIGN_FWD(PKT_START(sg_pkt),
-                                        CI_CFG_PKT_BUF_SIZE) -
-                       PKT_START(sg_pkt);
-          if( frag_len > max_sg_len ) {
-            iov[n].iov_len = max_sg_len;
-            frag_len -= max_sg_len;
-          }
-          else
-            frag_len = 0;
-        }
-        ci_assert_equal(frag_len, 0);
-      }
-    }
-    
-    udp->udp_check_be16 = ci_udp_checksum(ip, udp, iov, n+1);
-  }
+  if( (ip->ip_frag_off_be16 & (CI_IP4_FRAG_MORE | CI_IP4_OFFSET_MASK))
+      == CI_IP4_FRAG_MORE )
+    /* First fragmented chunk: calculate UDP checksum. */
+    ci_udp_sendmsg_chksum(ni, pkt, ip);
 }
 
 
@@ -660,65 +675,48 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
   ci_assert_equal(ni->state->send_may_poll, 0);
   ni->state->send_may_poll = ci_netif_may_poll(ni);
 
-  if(CI_LIKELY( ipcache_onloadable )) {
-    /* TODO: Hit the doorbell just once. */
-    while( 1 ) {
-      prep_send_pkt(ni, us, pkt, ipcache);
-      ci_netif_send(ni, pkt);
-      if( OO_PP_IS_NULL(pkt->next) )
-        break;
-      pkt = PKT_CHK(ni, pkt->next);
-    }
-    cicp_ip_cache_mac_update(ni, ipcache, flags & MSG_CONFIRM);
+  if( ipcache->ip.ip_ttl ) {
+    if(CI_LIKELY( ipcache_onloadable )) {
+      /* TODO: Hit the doorbell just once. */
+      while( 1 ) {
+        prep_send_pkt(ni, us, pkt, ipcache);
+        ci_netif_send(ni, pkt);
+        if( OO_PP_IS_NULL(pkt->next) )
+          break;
+        pkt = PKT_CHK(ni, pkt->next);
+      }
+      cicp_ip_cache_mac_update(ni, ipcache, flags & MSG_CONFIRM);
 
-    /* NB. We don't deliver multicast packets directly to local sockets if
-     * sending via the control plane (below) as they'll get there via the
-     * OS socket.
-     *
-     * FIXME: Problem is, they'll get there even if IP_MULTICAST_LOOP is
-     * disabled.  Fix would be to send via the OS socket instead of the
-     * control plane route and find an alternative way to keep neighbour
-     * entries alive.
-     */
-    if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) )
-      ci_udp_sendmsg_mcast(ni, us, ipcache, first_pkt);
-  }
-  else {
-    /* Packet should go via an onload interface, but ipcache is not valid.
-     * Could be that we don't have a mac, or could be that we need to drop
-     * into the kernel to keep the mac entry alive.
-     *
-     * ?? FIXME: Currently this will end up sending the packet via the
-     * kernel stack.  This is very bad because it can result in
-     * out-of-orderness (which, although technically allowed for unreliable
-     * datagram sockets, is undesirable as it provokes some apps to perform
-     * poorly or even misbehave).  If mac exists, we need to ensure we send
-     * via onload.  (And make sure we get the multicast case right).
-     */
-    ci_uint64 now_frc;
-    ci_frc64(&now_frc);
-    /* We should not send a stream of packets via RAW socket.
-     * Our performance is 10 Gbit/sec ~= 1000 pkt/msec,
-     * ARP roundtrip is ~100usec.
-     * For now, let's slow down when sending more than 1pkt/msec */
-    if( us->slow_send_timestamp != 0 &&
-        now_frc - us->slow_send_timestamp >
-        1 /*msec*/ * (ci_uint64)(IPTIMER_STATE(ni)->khz)) {
-      /* ?? Eh? This is not likely to pause you for very long, so hard to
-       * believe it will have any measurable effect.
+      if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) )
+        ci_udp_sendmsg_mcast(ni, us, ipcache, first_pkt);
+    }
+     else {
+      /* Packet should go via an onload interface, but ipcache is not valid.
+       * Could be that we don't have a mac, or could be that we need to drop
+       * into the kernel to keep the mac entry alive.
+       *
+       * ?? FIXME: Currently this will end up sending the packet via the
+       * kernel stack.  This is very bad because it can result in
+       * out-of-orderness (which, although technically allowed for unreliable
+       * datagram sockets, is undesirable as it provokes some apps to perform
+       * poorly or even misbehave).  If mac exists, we need to ensure we send
+       * via onload.  (And make sure we get the multicast case right).
        */
-      ci_spinloop_pause();
-    }
-    ++us->stats.n_tx_cp_no_mac;
-    while( 1 ) {
-      us->slow_send_timestamp = now_frc;
-      prep_send_pkt(ni, us, pkt, ipcache);
-      ci_ip_send_udp_slow(ni, pkt, ipcache);
-      if( OO_PP_IS_NULL(pkt->next) )
-        break;
-      pkt = PKT_CHK(ni, pkt->next);
+      ++us->stats.n_tx_cp_no_mac;
+      while( 1 ) {
+        prep_send_pkt(ni, us, pkt, ipcache);
+        ci_ip_send_udp_slow(ni, pkt, ipcache);
+        if( OO_PP_IS_NULL(pkt->next) )
+          break;
+        pkt = PKT_CHK(ni, pkt->next);
+      }
     }
   }
+  else if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) )
+    ci_udp_sendmsg_mcast(ni, us, ipcache, first_pkt);
+  else
+    LOG_U(ci_log("%s: do not send UDP packet because IP TTL = 0",
+                 __FUNCTION__));
 
   ni->state->send_may_poll = 0;
   return;
@@ -949,11 +947,13 @@ static int ci_udp_sendmsg_wait(ci_netif* ni, ci_udp_state* us,
           ci_netif_unlock(ni);
           sinf->stack_locked = 0;
         }
-        rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc,
+        rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc,
                                              us->s.so.sndtimeo_msec,
                                              NULL, si);
-        if( rc != 0 )
+        if( rc != 0 ) {
+          ni->state->is_spinner = 0;
           return rc;
+        }
       }
       else if( spin_limit_by_so ) {
         ++us->stats.n_tx_eagain;
@@ -983,10 +983,6 @@ static int ci_udp_sendmsg_wait(ci_netif* ni, ci_udp_state* us,
  so_error:
   if( udp_send_spin )
     ni->state->is_spinner = 0;
-  if( ! sinf->stack_locked ) {
-    ci_netif_lock(ni);
-    sinf->stack_locked = 1;
-  }
   if( rc == 0 )
     rc = -us->s.tx_errno;
   if( rc == 0 )
@@ -1231,7 +1227,7 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
 
   /* *********************** */
  efault:
-  CI_SET_ERROR(sinf->rc, EFAULT);
+  sinf->rc = -EFAULT;
   return;
 
  no_space_or_too_big:
@@ -1239,7 +1235,7 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
    * CI_UDP_MAX_PAYLOAD_BYTES depending on them.
    */
   if( bytes_to_send > CI_UDP_MAX_PAYLOAD_BYTES ) {
-    CI_SET_ERROR(sinf->rc, EMSGSIZE);
+    sinf->rc = -EMSGSIZE;
     return;
   }
 
@@ -1446,6 +1442,8 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
 
   ci_assert_gt(sinf.ipcache.mtu, 0);
   ci_udp_sendmsg_onload(ni, us, msg, flags, &sinf);
+  if( sinf.rc < 0 )
+      CI_SET_ERROR(sinf.rc, -sinf.rc);
   return sinf.rc;
 
  so_error:

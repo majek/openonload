@@ -81,6 +81,16 @@ LL_DEBUG = 10
 
 ######################################################################
 
+def read_file(fname):
+    "Read a small ascii file with a single read() call."
+    # Looks like overkill?  Reason for this obfuscation is to get something
+    # that works on python 2.x and 3.x.
+    fd = os.open(fname, os.O_RDONLY)
+    bytes = os.read(fd, 8192)
+    return str(bytes.decode('ascii'))
+
+######################################################################
+
 class Bucket(object):
     pass
 
@@ -211,19 +221,18 @@ def count_bits(mask):
 
 
 def file_get_int(fname):
-    f = open(fname)
-    return int(f.read())
+    f = read_file(fname)
+    return int(f.strip())
 
 
 def file_get_int_list(fname):
-    f = open(fname)
-    l = f.read().strip()
+    l = read_file(fname).strip()
     return [int(x) for x in l.split()]
 
 
 def file_get_cpumask(fname):
-    cscm = open(fname).read()
-    return mask.comma_sep_hex_to_int(cscm.strip())
+    cscm = read_file(fname).strip()
+    return mask.comma_sep_hex_to_int(cscm)
 
 
 def get_topology():
@@ -238,11 +247,13 @@ def get_topology():
             cores = [c.id for c in topology.get_cores()
                      if c.pkg.id in packages]
             topology = affinity.get_topology(cores=cores)
-    except affinity.NoCores, inst:
+    except affinity.NoCores:
         fail("No cores left after applying filters.")
-    except affinity.BadCoreId, inst:
+    except affinity.BadCoreId:
+        inst = sys.exc_info()[1]
         fail("Bad core id %d" % inst.core_id)
-    except mask.BadMask, inst:
+    except mask.BadMask:
+        inst = sys.exc_info()[1]
         fail("Bad mask in --%s=%s" % (opt, inst.msg))
     return topology
 
@@ -299,7 +310,7 @@ proc_interrupts_rxq_fmts = ['\<%s-rx-', '\<%s-']
 def __interface_n_rxqs(ethname, fmt):
     match = fmt % ethname
     f = do_popen("grep '\<%s[0-9]' /proc/interrupts | wc -l" % match)
-    return int(f.read())
+    return int(f.read().strip())
 
 def interface_n_rxqs(ethname):
     for fmt in proc_interrupts_rxq_fmts:
@@ -313,7 +324,7 @@ def sfc_interface_n_rxqs(ethname):
         dir = "/proc/driver/sfc/nic_%s" % ethname
         cmd = "cd %s 2>/dev/null && /bin/ls -d rxq[0-9]* | wc -w" % dir
         f = do_popen(cmd)
-        return int(f.read())
+        return int(f.read().strip())
     except:
         warn(["%s is missing." % dir,
               "Is debugfs mounted?"])
@@ -324,7 +335,7 @@ def num_cpus():
     # Or alternatively get cpu topology at start of day and use
     # that info here.
     f = do_popen("grep 'core id' /proc/cpuinfo | wc -l")
-    return int(f.read())
+    return int(f.read().strip())
 
 
 def module_loaded(modname):
@@ -423,7 +434,7 @@ def rxq_get_irq(ethx, rxq):
     assert n_rxqs > 0
     match = fmt % ethx + str(rxq) + '\>'
     f = do_popen("grep '%s' /proc/interrupts | awk -F: '{print $1}'" % match)
-    return int(f.read())
+    return int(f.read().strip())
 
 
 def rxq_set_affinity(ethx, rxq, cpumask):

@@ -17,7 +17,7 @@
 #define __ONLOAD_IOCTL_H__
 
 #include <ci/internal/transport_config_opt.h>
-
+#include <linux/version.h>
 
 
 #define ONLOADFS_MAGIC 0xefab010d
@@ -92,6 +92,8 @@ enum {
   OO_OP_IOCTL_TRAMP_REG,       /*< Register tramp handler;
                               ci_tramp_reg_args_t in */
 #define OO_IOC_IOCTL_TRAMP_REG  OO_IOC_W(IOCTL_TRAMP_REG, ci_tramp_reg_args_t)
+
+/* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
   OO_OP_DIE_SIGNAL,           /*< Die because unhandled signal is received */
 #define OO_IOC_DIE_SIGNAL       OO_IOC_W(DIE_SIGNAL, ci_int32)
 
@@ -103,6 +105,8 @@ enum {
   /* TCP helper operations */
   OO_OP_TCP_SOCK_SLEEP,
 #define OO_IOC_TCP_SOCK_SLEEP   OO_IOC_RW(TCP_SOCK_SLEEP, oo_tcp_sock_sleep_t)
+  OO_OP_WAITABLE_WAKE,
+#define OO_IOC_WAITABLE_WAKE    OO_IOC_W(WAITABLE_WAKE, oo_waitable_wake_t)
   OO_OP_TCP_CAN_CACHE_FD,
 #define OO_IOC_TCP_CAN_CACHE_FD OO_IOC_W(TCP_CAN_CACHE_FD, ci_uint32)
 

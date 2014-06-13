@@ -116,7 +116,6 @@ static ci_udp_state* ci_udp_get_state_buf(ci_netif* netif)
     ci_udp_state_init(netif, &wo->udp);
     return &wo->udp;
   }
-  LOG_E(ci_log("Failed to alloc UDP state buffer"));
   return NULL;
 }
 
@@ -139,6 +138,7 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   us = ci_udp_get_state_buf(netif);
   if (!us) {
     ci_netif_unlock(netif);
+    LOG_E(ci_log("%s: [%d] out of socket buffers", __FUNCTION__,NI_ID(netif)));
     return -ENOMEM;
   }
 

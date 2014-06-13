@@ -31,6 +31,9 @@
 #include <etherfabric/ef_vi.h>
 #include <etherfabric/base.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct ef_pd;
 
@@ -129,6 +132,13 @@ extern unsigned ef_vi_mtu(ef_vi* vi, ef_driver_handle);
   */
 extern int ef_vi_get_mac(ef_vi*, ef_driver_handle, void* mac_out);
 
+  /*! Send a software-generated event to an event queue.
+  **
+  ** Right now you only get 16 bits to play with.
+  */
+extern int ef_eventq_put(unsigned resource_id,
+                         ef_driver_handle, unsigned ev_bits);
+
 
 /**********************************************************************
  * ef_vi_set **********************************************************
@@ -217,6 +227,9 @@ extern int ef_vi_set_filter_add(ef_vi_set*, ef_driver_handle,
 extern int ef_vi_set_filter_del(ef_vi_set*, ef_driver_handle,
 				ef_filter_cookie *);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __EFAB_VI_H__ */
 /*! \cidoxg_end */

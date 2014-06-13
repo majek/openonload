@@ -267,10 +267,8 @@ void efrm_handle_sram_event(struct efhw_nic *nic)
 
 int efrm_vi_irq_moderate(struct efrm_vi *vi, int usec)
 {
-	if (vi->allocation.vf) {
-		efrm_vf_vi_qmoderate(vi, usec);
-		return 0;
-	}
+	if (vi->allocation.vf)
+		return efrm_vf_vi_qmoderate(vi, usec);
 	return -EINVAL;
 }
 EXPORT_SYMBOL(efrm_vi_irq_moderate);

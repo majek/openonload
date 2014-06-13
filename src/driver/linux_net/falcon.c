@@ -41,8 +41,11 @@
 #include "phy.h"
 #include "driverlink.h"
 #include "workarounds.h"
+#include "selftest.h"
 
 /* Hardware control for SFC4000 (aka Falcon). */
+
+static int falcon_reset_hw(struct efx_nic *efx, enum reset_type method);
 
 /*
  * Override EEPROM/flash type from non-volatile configuration or GPIO;
@@ -1200,16 +1203,41 @@ static const struct efx_nic_table_test falcon_b0_table_tests[] = {
 	  EFX_OWORD32(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x000003FF) },
 	{ FR_BZ_RX_DESC_PTR_TBL, FR_BZ_RX_DESC_PTR_TBL_STEP,
 	  FR_BB_RX_DESC_PTR_TBL_ROWS,
-	  EFX_OWORD32(0xFFFFFFFF, 0x0FFFFFFF, 0x01800000, 0x00000000) },
+	  EFX_OWORD32(0xFFFFFFFE, 0x0FFFFFFF, 0x01800000, 0x00000000) },
 	{ FR_BZ_TX_DESC_PTR_TBL, FR_BZ_TX_DESC_PTR_TBL_STEP,
 	  FR_BB_TX_DESC_PTR_TBL_ROWS,
 	  EFX_OWORD32(0xFFFFFFFE, 0x0FFFFFFF, 0x0C000000, 0x00000000) },
 };
 
-static int falcon_b0_test_registers(struct efx_nic *efx)
+static int
+falcon_b0_test_chip(struct efx_nic *efx, struct efx_self_tests *tests)
 {
-	return efx_nic_test_registers(efx, falcon_b0_register_tests,
-				      ARRAY_SIZE(falcon_b0_register_tests));
+	enum reset_type reset_method = RESET_TYPE_INVISIBLE;
+	int rc, rc2;
+
+	mutex_lock(&efx->mac_lock);
+	if (efx->loopback_modes) {
+		/* We need the 312 clock from the PHY to test the XMAC
+		 * registers, so move into XGMII loopback if available */
+		if (efx->loopback_modes & (1 << LOOPBACK_XGMII))
+			efx->loopback_mode = LOOPBACK_XGMII;
+		else
+			efx->loopback_mode = __ffs(efx->loopback_modes);
+	}
+	__efx_reconfigure_port(efx);
+	mutex_unlock(&efx->mac_lock);
+
+	efx_reset_down(efx, reset_method);
+
+	tests->memory = efx_test_memory(efx) ? -1 : 1;
+	tests->registers =
+		efx_nic_test_registers(efx, falcon_b0_register_tests,
+				       ARRAY_SIZE(falcon_b0_register_tests))
+		? -1 : 1;
+
+	rc = falcon_reset_hw(efx, reset_method);
+	rc2 = efx_reset_up(efx, reset_method, rc == 0);
+	return rc ? rc : rc2;
 }
 
 static int
@@ -2309,7 +2337,7 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.get_wol = falcon_get_wol,
 	.set_wol = falcon_set_wol,
 	.resume_wol = efx_port_dummy_op_void,
-	.test_registers = falcon_b0_test_registers,
+	.test_chip = falcon_b0_test_chip,
 	.test_memory = falcon_b0_test_memory,
 	.test_nvram = falcon_test_nvram,
 

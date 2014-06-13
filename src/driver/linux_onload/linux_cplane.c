@@ -215,7 +215,7 @@
 
 
 static struct socket *cicp_raw_sock;
-struct socket *cicp_bond_raw_sock;
+static struct socket *cicp_bindtodev_raw_sock;
 
 
 
@@ -289,6 +289,47 @@ int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
 
 
 
+int cicp_raw_sock_send_bindtodev(int ifindex, char *ifname, 
+                                 ci_ip_addr_t ip_be32,
+                                 const char *buf, unsigned int size)
+{
+  static int last_ifindex = -1;
+  struct net_device *dev = NULL;
+  mm_segment_t oldfs;
+  int rc;
+
+  if( ifindex != last_ifindex ) {
+    if( ifname == NULL ) {
+      dev = dev_get_by_index(&init_net, ifindex);
+      if( dev != NULL ) 
+        ifname = dev->name;
+      else {
+        OO_DEBUG_ARP(ci_log("%s: bad net device index %d", __FUNCTION__,
+                            ifindex));
+        return -EINVAL;
+      }
+    }
+
+    oldfs = get_fs();
+    set_fs(KERNEL_DS);
+    rc = sock_setsockopt(cicp_bindtodev_raw_sock, SOL_SOCKET, SO_BINDTODEVICE, 
+                         ifname, strlen(ifname));
+    set_fs(oldfs);
+
+    if( dev != NULL )
+      dev_put(dev);
+
+    if( rc != 0 ) {
+      OO_DEBUG_ARP(ci_log("%s: failed to BINDTODEVICE %d", __FUNCTION__, rc));
+      return rc;
+    }
+
+    last_ifindex = ifindex;
+  }
+
+  return cicp_raw_sock_send(cicp_bindtodev_raw_sock, ip_be32, buf, size);
+}
+
 
 
 /*****************************************************************************
@@ -348,7 +389,7 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
 
 
 int
-cicp_raw_ip_send(ci_ip4_hdr* ip)
+cicp_raw_ip_send(ci_ip4_hdr* ip, ci_ifid_t ifindex)
 {
   int ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
   void* ip_data = (char*) ip + CI_IP4_IHL(ip);
@@ -375,8 +416,13 @@ cicp_raw_ip_send(ci_ip4_hdr* ip)
     break;
   }
   }
-  return cicp_raw_sock_send(cicp_raw_sock, ip->ip_daddr_be32, 
-                            (char *)ip, ip_len);
+
+  if( ifindex != CI_IFID_BAD )
+    return cicp_raw_sock_send_bindtodev(ifindex, NULL, ip->ip_daddr_be32, 
+                                            (char *)ip, ip_len);
+  else 
+    return cicp_raw_sock_send(cicp_raw_sock, ip->ip_daddr_be32, (char *)ip,
+                              ip_len);
 }
 
 
@@ -384,6 +430,7 @@ struct cicp_raw_sock_work_parcel {
   ci_workitem_t wqi;
   int pktid;
   const cicp_handle_t *control_plane;
+  ci_ifid_t ifindex;
 };
 
 
@@ -397,14 +444,14 @@ cicppl_arp_pkt_tx_queue(void *context)
 
   /* Now that we use raw sockets, we don't support sending an ARP requests
    * if the IP packet that caused the transaction isn't given */
-  if (wp->pktid < 0) return;
+  if (wp->pktid < 0) goto out;
   
   ci_assert(cicppl_pktbuf_is_valid_id(wp->pktid));
 
   pkt = cicppl_pktbuf_pkt(cicppl_pktpool, wp->pktid);
   if (CI_UNLIKELY(pkt == 0)) {
     ci_log("%s: BAD packet %d", __FUNCTION__, wp->pktid);
-    return;
+    goto out;
   }
   ip = oo_tx_ip_hdr(pkt);
 
@@ -415,7 +462,7 @@ cicppl_arp_pkt_tx_queue(void *context)
                   __FUNCTION__, wp->pktid,
                   CI_MAC_PRINTF_ARGS(oo_ether_dhost(pkt))));
 
-  rc = cicp_raw_ip_send(ip);
+  rc = cicp_raw_ip_send(ip, wp->ifindex);
   OO_DEBUG_ARP(ci_log("%s: send packet to "CI_IP_PRINTF_FORMAT" via raw "
                       "socket, rc=%d", __FUNCTION__,
                       CI_IP_PRINTF_ARGS(&ip->ip_daddr_be32), rc));
@@ -431,7 +478,7 @@ cicppl_arp_pkt_tx_queue(void *context)
   /* release the ARP module buffer */
   CICP_BUFPOOL_LOCK(cicppl_pktpool,
 	            cicppl_pktbuf_free(cicppl_pktpool, wp->pktid));
-
+ out:
   /* free the work parcel */
   ci_free(wp);
 }
@@ -446,7 +493,8 @@ cicppl_arp_pkt_tx_queue(void *context)
  */
 extern int /*rc*/
 cicpplos_pktbuf_defer_send(const cicp_handle_t *control_plane,
-			   ci_ip_addr_t ip, int pendable_pktid)
+                           ci_ip_addr_t ip, int pendable_pktid, 
+                           ci_ifid_t ifindex)
 /* schedule a workqueue task to send IP packet using the raw socket */
 {
   struct cicp_raw_sock_work_parcel *wp = ci_atomic_alloc(sizeof(*wp));
@@ -454,6 +502,7 @@ cicpplos_pktbuf_defer_send(const cicp_handle_t *control_plane,
   if (CI_LIKELY(wp != NULL)) {
     wp->pktid = pendable_pktid;
     wp->control_plane = control_plane;
+    wp->ifindex = ifindex;
     ci_workitem_init(&wp->wqi, cicppl_arp_pkt_tx_queue, wp);
     ci_verify(ci_workqueue_add(&CI_GLOBAL_WORKQUEUE, &wp->wqi) == 0);
     return 0;
@@ -471,7 +520,7 @@ cicpplos_pktbuf_defer_send(const cicp_handle_t *control_plane,
  */
 extern int /* bool */
 cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
-		      ci_ip_addr_t ip, oo_pkt_p ip_pktid)
+		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex)
 { int pendable_pktid;
   
   OO_DEBUG_ARP(ci_log(CODEID": ni %p (ID:%d) ip "CI_IP_PRINTF_FORMAT" pkt ID %d",
@@ -510,7 +559,7 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
 
       /* now we have a cicp_bufpool_t buffer ID we can call this: */
       *ref_os_rc = cicpplos_pktbuf_defer_send(control_plane, ip,
-					      pendable_pktid);
+					      pendable_pktid, ifindex);
 
       return (*ref_os_rc == 0);
     }
@@ -558,7 +607,7 @@ cicpplos_ctor(cicp_mibs_kern_t *control_plane)
   } 
   
   /* construct raw socket */
-  if (CI_UNLIKELY((rc = cicp_raw_sock_ctor(&cicp_bond_raw_sock)) < 0)) {
+  if (CI_UNLIKELY((rc = cicp_raw_sock_ctor(&cicp_bindtodev_raw_sock)) < 0)) {
     ci_log(CODEID": ERROR - couldn't construct raw socket module, rc=%d",
            -rc);
     cicp_raw_sock_dtor(cicp_raw_sock);
@@ -614,7 +663,7 @@ void cicpos_arp_stale_update(ci_ip_addr_t dst, ci_ifid_t ifindex, int confirm)
 extern void
 cicpplos_dtor(cicp_mibs_kern_t *control_plane)
 {   
-  cicp_raw_sock_dtor(cicp_bond_raw_sock);
+  cicp_raw_sock_dtor(cicp_bindtodev_raw_sock);
   cicp_raw_sock_dtor(cicp_raw_sock);
   cicppl_pktbuf_dtor(&cicppl_pktpool);
 }
@@ -1609,7 +1658,7 @@ request_table(struct socket *sock, __u32 seq, int nlmsg_type)
   int ret;
 
   memset(buf, 0, sizeof(buf));
-  nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct ndmsg));
+  nlhdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtgenmsg));
   nlhdr->nlmsg_type = nlmsg_type; /* RTM_GET* */
   nlhdr->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
   nlhdr->nlmsg_seq = seq;
@@ -2022,10 +2071,18 @@ cicpos_sync_dtor(cicp_handle_t *control_plane)
 
 	/* delete the arp poll timer synchronously */
 	DEBUGNETLINK(DPRINTF("Deleting synchronizer timer"));
-	del_timer_sync(&cicpos_timer_node);
 
 	/* flush the workqueue to make sure there are no pending ARP
-	   work items */
+         * work items:
+	 * - flush workqueue; it may re-enable timer if cicpos_timer()
+	 *   started before cicpos_timer_data.stop was set to 1;
+	 * - disable timer;
+	 * - flush workqueue; now cicpos_timer() can not restart.
+         * 
+         * See Bug30934 for full details of why two flushes are needed
+         */
+	ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
+	del_timer_sync(&cicpos_timer_node);
 	ci_verify(ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE) == 0);
 
 	/* destroy the persistent netlink socket */
@@ -2432,80 +2489,45 @@ extern int /* bool */
 cicpos_mac_kmib_row_update(cicp_handle_t *control_plane,
 			   cicpos_mac_row_t *sync_row, cicp_mac_row_t *row,
 			   const cicpos_mac_row_sync_t *os,
-			   const ci_mac_addr_t *unused_mac,
+			   const ci_mac_addr_t *mac,
 			   int /* bool */ alteration,
 			   int /* bool */ *out_ignore_clash)
-{   int do_update = 0;
+{
+    int newly_valid = alteration;
 
     ci_assert(NULL != sync_row);
     *out_ignore_clash = 0;
 
-    if (sync_row->source_sync) /* had O/S info in it */
-    {   if (CI_UNLIKELY(0 != (sync_row->os.state & CICPOS_IPMAC_PERMANENT))
-	    ||
-	    CI_UNLIKELY(0 != (sync_row->os.state & CICPOS_IPMAC_NOARP)))
-        {
-            *out_ignore_clash = 1;
-            /* not a proper clash if we know it had a rubbish MAC address
-	       anyway */
-	}
-    }
-    if (NULL != os) /* has O/S info to come */
-    {   if (CI_UNLIKELY(0 != (os->state & CICPOS_IPMAC_PERMANENT))
-	    /* a permanent entry - can clash with existing entry */
-	    ||
-	    CI_UNLIKELY(0 != (os->state & CICPOS_IPMAC_NOARP))
-	    /* not an ARP entry - can clash with existing entry */)
-	{   *out_ignore_clash = 1;
-	}
-    }
-	
-    if (sync_row->source_sync) /* had O/S info in it */
-    {   /* this entry already has valid information from the O/S */
-	if (os == NULL) /* protocol update */
-	{   if (CI_LIKELY(0 == (sync_row->os.state & CICPOS_IPMAC_PERMANENT))
-	        /* not a permanent entry - don't update permanent entries */
-		&&
-		CI_LIKELY(0 == (sync_row->os.state & CICPOS_IPMAC_NOARP))
-		/* not an ARP entry - don't update entries that don't store
-		   proper ARP information */)
-	    {   do_update = 1;
-	    }
-	} else
-	{   /* previous O/S info, system update */
-	    if (CI_LIKELY(0 == (os->state & CICPOS_IPMAC_INCOMPLETE))
-		/* not an incomplete entry */
-	        && CI_LIKELY(os->state != CICPOS_IPMAC_NONE))
-		/* a none entry - linux sometimes gives us one these... */
-	    {   do_update = 1;
-	    }
-	}
-    } else /* never had O/S info */
-    if (os == NULL) /* no previous O/S info, protocol update */
-    {   /* accept the newer protocol update */
-	do_update = 1;
-    } else /* no previous O/S info, O/S update */
-    {   /* overwrite last protocol information */
-	ci_assert(sync_row->source_prot); /* info must have be from protocol */
-	if (CI_LIKELY(0 == (os->state & CICPOS_IPMAC_INCOMPLETE))
-	    /* not an incomplete entry */
-	    && CI_LIKELY(os->state != CICPOS_IPMAC_NONE))
-	    /* a none entry - linux sometimes gives us one these... */
-	{   do_update = 1;
-	}
-    }
 
-    if (do_update)
-    {   int newly_valid = alteration;
-	
+    /* We do not accept:
+     * - OS update with incomplete or none status:
+     *   we are not interested
+     * - Protocol update for a valid OS entry:
+     *   we already have a valid OS entry, no need in unnecessary hacks.
+     * - Protocol update for protocol entry:
+     *   someone is playing nasty games unless we are adding new row
+     */
+    if (os != NULL &&
+        (os->state == CICPOS_IPMAC_INCOMPLETE ||
+         os->state == CICPOS_IPMAC_NONE))
+        return 0;
+    if (sync_row->source_sync && sync_row->os.state != CICPOS_IPMAC_FAILED &&
+        os == NULL)
+        return 0;
+    if (os == NULL && !sync_row->source_sync && alteration &&
+        !CI_MAC_ADDR_EQ(&row->mac_addr, mac))
+        return 0;
+
+    /* We ignore clash when it is internal OS behaviour */
+    if (os != NULL && sync_row->source_sync)
+        *out_ignore_clash = 1;
+
+
+	/* keep indentation for hg annotate */
 	if (os != NULL)
 	{   ci_uint16 orig_state = sync_row->os.state;
             memcpy(&sync_row->os, os, sizeof(sync_row->os));
 	    sync_row->source_sync = 1;
-	    /* Not really a permanent error: 
-	    if (CI_UNLIKELY(0!=(sync_row->os.state & CICPOS_IPMAC_INCOMPLETE)))
-	        row->rc = -ENOTCONN;
-	    */
 	    if (CI_UNLIKELY(0!=(sync_row->os.state & CICPOS_IPMAC_NOARP)))
 	        row->rc = -EINVAL;
 	    if (CI_UNLIKELY(0!=(sync_row->os.state & CICPOS_IPMAC_FAILED)))
@@ -2546,9 +2568,8 @@ cicpos_mac_kmib_row_update(cicp_handle_t *control_plane,
 	{   sync_row->mapping_set = jiffies;
             /* record time when mapping last set/re-established */
 	}
-    }
 
-    return do_update && alteration;
+    return alteration;
 }
 
 

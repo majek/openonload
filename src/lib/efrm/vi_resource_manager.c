@@ -75,17 +75,21 @@ void efrm_nic_vi_ctor(struct efrm_nic_vi *nvi)
 
 void efrm_nic_vi_dtor(struct efrm_nic_vi *nvi)
 {
-	irq_flags_t lock_flags;
 	atomic_set(&nvi->flush_timer_running, 0);
+
+        /* See Bug30934 for why two flushes are needed */
+	flush_workqueue(efrm_vi_manager->workqueue);
 	del_timer_sync(&nvi->flush_timer);
+	flush_workqueue(efrm_vi_manager->workqueue);
+
 	/* Now that workqueue and flush timer have gone check that there
 	 * aren't any pending flushes. NIC removal should have seen to
 	 * this.
 	 */
-	spin_lock_irqsave(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 	EFRM_ASSERT(nvi->rx_flush_outstanding_count == 0);
 	EFRM_ASSERT(list_empty(&nvi->tx_flush_outstanding_list));
-	spin_unlock_irqrestore(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 	EFRM_ASSERT(list_empty(&nvi->close_pending));
 }
 

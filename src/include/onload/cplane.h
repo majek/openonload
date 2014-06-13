@@ -1351,11 +1351,11 @@ extern void cicp_raw_sock_dtor(struct socket *raw_sock);
  */
 extern int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32, 
                               const char *buf, unsigned int size);
-
+extern int cicp_raw_sock_send_bindtodev(int ifindex, char *ifname, 
+                                        ci_ip_addr_t ip_be32,
+                                        const char *buf, unsigned int size);
 /*! Send IP packet via RAW socket.  Computes TCP/UDP checksum if possible */
-extern int cicp_raw_ip_send(ci_ip4_hdr* ip);
-
-extern struct socket *cicp_bond_raw_sock;
+extern int cicp_raw_ip_send(ci_ip4_hdr* ip, ci_ifid_t ifindex);
 
 /*! If ARP entry is STALE, force ARP request or confirm existing entry */
 extern void cicpos_arp_stale_update(ci_ip_addr_t dst, ci_ifid_t ifindex,

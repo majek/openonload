@@ -1,10 +1,13 @@
 
-OpenOnload 201205 Release Notes
-===============================
+OpenOnload 201205-u1 Release Notes
+==================================
 
- This is a major release of OpenOnload that includes new features and bug
- fixes.  Please see the ChangeLog for the full list of changes.  These
- release notes give further details about the more significant changes.
+ This is an update release of OpenOnload that includes fixes for a number
+ of bugs found during testing.  Please see the ChangeLog for the full list
+ of changes.
+
+ There are no major new features in this release, so the notes below detail
+ features added in the openonload-201205 release.
 
 
 ----------------------------------------
@@ -39,7 +42,7 @@ New configuration options
 
  EF_TCP_RST_DELAYED_CONN
  - Set this option to prevent data being delivered late by TCP due to
-   retransmits.  Useful for trading application where delivering the data
+   retransmits.  Useful for trading applications where delivering the data
    late is worse than not delivering it at all.
 
  EF_DYNAMIC_ACK_THRESH
@@ -124,4 +127,4 @@ Scalable packet buffer mode
 
 
 David Riddoch
-2012/05/02
+2012/07/05

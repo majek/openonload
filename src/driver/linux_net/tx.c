@@ -30,6 +30,7 @@
 #include <linux/ipv6.h>
 #include <linux/slab.h>
 #include <net/ipv6.h>
+#include <net/tcp.h>
 #include <linux/if_ether.h>
 #if !defined(EFX_USE_KCOMPAT)
 #include <linux/highmem.h>
@@ -132,6 +133,25 @@ efx_max_tx_len(struct efx_nic *efx, dma_addr_t dma_addr)
 		len = min_t(unsigned, len, 512 - (dma_addr & 0xf));
 
 	return len;
+}
+
+unsigned int efx_tx_max_skb_descs(struct efx_nic *efx)
+{
+	/* Header and payload descriptor for each output segment, plus
+	 * one for every input fragment boundary within a segment
+	 */
+	unsigned int max_descs = TCP_MAX_GSO_SEGS * 2 + MAX_SKB_FRAGS;
+
+	/* Possibly one more per segment for the alignment workaround */
+	if (EFX_WORKAROUND_5391(efx))
+		max_descs += TCP_MAX_GSO_SEGS;
+
+	/* Possibly more for PCIe page boundaries within input fragments */
+	if (PAGE_SIZE > EFX_PAGE_SIZE)
+		max_descs += max_t(unsigned int, MAX_SKB_FRAGS,
+				   DIV_ROUND_UP(GSO_MAX_SIZE, EFX_PAGE_SIZE));
+
+	return max_descs;
 }
 
 /*
@@ -1103,6 +1123,23 @@ static int efx_enqueue_skb_tso(struct efx_tx_queue *tx_queue,
 	struct efx_nic *efx = tx_queue->efx;
 	int frag_i, rc, rc2 = NETDEV_TX_OK;
 	struct tso_state state;
+
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_TSO_SEGS_LIMIT)
+	/* Since the TCP does not limit the number of segments per
+	 * skb, we must do so.  Otherwise an attacker may be able to
+	 * make the TCP produce skbs that will never fit in our TX
+	 * queue, causing repeated resets.
+	 */
+	if (unlikely(skb_shinfo(skb)->gso_segs > TCP_MAX_GSO_SEGS)) {
+		unsigned int excess =
+			(skb_shinfo(skb)->gso_segs - TCP_MAX_GSO_SEGS) *
+			skb_shinfo(skb)->gso_size;
+		if (__pskb_trim(skb, skb->len - excess)) {
+			dev_kfree_skb_any(skb);
+			return NETDEV_TX_OK;
+		}
+	}
+#endif
 
 	prefetch(skb->data);
 

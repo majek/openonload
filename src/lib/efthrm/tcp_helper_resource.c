@@ -28,7 +28,7 @@
 # include <onload/linux_onload.h>
 # include <onload/linux_ip_protocols.h>
 # include <onload/linux_sock_ops.h>
-#include <ci/driver/efab/efrm_mmap.h>
+#include <ci/efch/mmap.h>
 #include <onload/cplane.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/tcp_helper_fns.h>
@@ -279,7 +279,7 @@ int efab_thr_table_lookup(const char* name, unsigned id, int check_user,
 }
 
 
-int tcp_helper_dump_stack(unsigned id)
+int tcp_helper_dump_stack(unsigned id, unsigned orphan_only)
 {
   tcp_helpers_table_t* table = &THR_TABLE;
   ci_irqlock_state_t lock_flags;
@@ -291,6 +291,8 @@ int tcp_helper_dump_stack(unsigned id)
   CI_DLLIST_FOR_EACH(link, &table->all_stacks) {
     thr = CI_CONTAINER(tcp_helper_resource_t, all_stacks_link, link);
     if( thr->id == id ) {
+      if( orphan_only && !(thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) )
+        break;
       rc = efab_tcp_helper_k_ref_count_inc(thr);
       break;
     }
@@ -308,6 +310,77 @@ int tcp_helper_dump_stack(unsigned id)
   return rc;
 }
 
+
+static unsigned rescale(unsigned v, unsigned new_scale, unsigned old_scale)
+{
+  /* What we want:
+   *   return (v * new_scale) / old_scale;
+   *
+   * Unfortunately we can overflow 32-bits, and 64-bit division is not
+   * available in 32-bit x86 kernels.
+   */
+  while( fls(v) + fls(new_scale) > 32 ) {
+    new_scale /= 2;
+    old_scale /= 2;
+  }
+  if( old_scale == 0 )
+    /* Breaks assumptions, so don't care that result is dumb. */
+    old_scale = 1;
+  return v * new_scale / old_scale;
+}
+
+
+static void tcp_helper_reduce_max_packets(ci_netif* ni, int new_max_packets)
+{
+  ci_assert(new_max_packets < NI_OPTS(ni).max_packets);
+  NI_OPTS(ni).max_rx_packets = rescale(NI_OPTS(ni).max_rx_packets,
+                                     new_max_packets, NI_OPTS(ni).max_packets);
+  NI_OPTS(ni).max_tx_packets = rescale(NI_OPTS(ni).max_tx_packets,
+                                     new_max_packets, NI_OPTS(ni).max_packets);
+  NI_OPTS(ni).max_packets = new_max_packets;
+  ni->state->opts.max_packets = NI_OPTS(ni).max_packets;
+  ni->state->opts.max_rx_packets = NI_OPTS(ni).max_rx_packets;
+  ni->state->opts.max_tx_packets = NI_OPTS(ni).max_tx_packets;
+}
+
+
+int tcp_helper_kill_stack(unsigned id)
+{
+  tcp_helpers_table_t* table = &THR_TABLE;
+  ci_irqlock_state_t lock_flags;
+  tcp_helper_resource_t *thr = NULL;
+  ci_dllink *link;
+  int rc = -ENODEV, n_dec_needed = 0;
+
+  ci_irqlock_lock(&table->lock, &lock_flags);
+  CI_DLLIST_FOR_EACH(link, &table->all_stacks) {
+    thr = CI_CONTAINER(tcp_helper_resource_t, all_stacks_link, link);
+    if( thr->id == id ) {
+      if( !(thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) )
+        break;
+      rc = efab_tcp_helper_k_ref_count_inc(thr);
+      break;
+    }
+  }
+  ci_irqlock_unlock(&table->lock, &lock_flags);
+  
+  if( rc == 0 ) {
+    ci_irqlock_lock(&thr->lock, &lock_flags);
+    n_dec_needed = thr->n_ep_closing_refs;
+    thr->n_ep_closing_refs = 0;
+    ci_irqlock_unlock(&thr->lock, &lock_flags);
+
+    ci_assert_ge(n_dec_needed, 0);
+
+    for( ; n_dec_needed > 0; --n_dec_needed )
+      efab_tcp_helper_k_ref_count_dec(thr, 0);
+
+    /* Remove reference we took in this function */
+    efab_tcp_helper_k_ref_count_dec(thr, 1);
+  }
+
+  return rc;
+}
 
 void
 tcp_helper_resource_assert_valid(tcp_helper_resource_t* thr, int rc_is_zero,
@@ -340,9 +413,10 @@ static int allocate_vi(tcp_helper_resource_t* trs,
   ci_netif_state* ns = ni->state;
   enum ef_vi_flags vi_flags;
   ci_uint16 in_flags;
-  int rc, intf_i, vf_mode = -1;
+  int rc, intf_i;
   ci_uint32 txq_capacity = 0, rxq_capacity = 0;
   const char* pci_dev_name;
+  struct efrm_vf *first_vf = NULL;
 
   /* The array of nic_hw is potentially sparse, but the memory mapping
    * is not, so we keep a count to calculate offsets rather than use
@@ -392,14 +466,16 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     snprintf(vf_name, sizeof(vf_name), "onload:%s-%d",
              ns->pretty_name, intf_i);
 
-    if( NI_OPTS(ni).packet_buffer_mode == 1 || vf_mode == 1 ) {
-try_sriov:
-      rc = efrm_vf_resource_alloc(trs_nic->oo_nic->efrm_client, &vf);
+    if( NI_OPTS(ni).packet_buffer_mode ) {
+      rc = efrm_vf_resource_alloc(trs_nic->oo_nic->efrm_client, first_vf, &vf);
       if( rc < 0 ) {
         OO_DEBUG_VM (ci_log ("%s: ERROR: efrm_vf_resource_alloc(%d) failed %d",
                              __FUNCTION__, intf_i, rc));
         goto error_out;
       }
+
+      if( first_vf == NULL )
+        first_vf = vf;
 
       /* With PCI VF, we are forced to use phys addr mode. */
       ci_assert(vf);
@@ -413,16 +489,8 @@ try_sriov:
                                 NI_OPTS(ni).irq_core, NI_OPTS(ni).irq_channel,
                                 &trs_nic->vi_rs, &nsn->vi_io_mmap_bytes,
                                 &nsn->vi_mem_mmap_bytes, NULL, NULL);
-    if( rc < 0 && vf == NULL && 
-        NI_OPTS(ni).packet_buffer_mode == 2 && vf_mode != 0 )
-      goto try_sriov;
-    if( vf != NULL ) {
+    if( vf != NULL )
       efrm_vf_resource_release(vf); /* vi_rs keeps a ref */
-      vf_mode = 1;
-    }
-    else {
-      vf_mode = 0;
-    }
     if( rc < 0 ) {
       OO_DEBUG_VM (ci_log ("%s: ERROR: efrm_vi_resource_alloc(%d) failed %d",
                            __FUNCTION__, intf_i, rc));
@@ -458,7 +526,7 @@ try_sriov:
     trs->io_mmap_bytes += efab_vi_resource_mmap_bytes(trs_nic->vi_rs, 0);
 
     efrm_vi_irq_moderate(trs_nic->vi_rs, NI_OPTS(ni).irq_usec);
-    if( NI_OPTS(ni).irq_core >= 0 && vf_mode == 1 ) {
+    if( NI_OPTS(ni).irq_core >= 0 && NI_OPTS(ni).packet_buffer_mode ) {
       rc = efrm_vi_irq_affinity(trs_nic->vi_rs, NI_OPTS(ni).irq_core);
       if( rc < 0 )
         OO_DEBUG_ERR(ci_log("%s: ERROR: failed to set irq affinity to %d",
@@ -639,12 +707,15 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
     goto fail4;
   }
 
+  if( NI_OPTS(ni).max_packets > max_packets_per_stack )
+    tcp_helper_reduce_max_packets(ni, max_packets_per_stack);
+
   sz = ci_pkt_dimension_iobufset(NULL);
   ci_assert_lt(sz, 1<<16);
   sz <<= CI_PAGE_SHIFT;
   ni->pkt_sets_n = 0;
 
-  ni->pkt_sets_max = (CI_MIN(NI_OPTS(ni).max_packets, max_packets_per_stack) + 
+  ni->pkt_sets_max = (NI_OPTS(ni).max_packets + 
                       PKTS_PER_SET - 1) >> PKTS_PER_SET_S;
   ns->pkt_sets_max = ni->pkt_sets_max;
   ns->pkt_sets_n = 0;
@@ -982,6 +1053,7 @@ static int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
 
   rs->trusted_lock = OO_TRUSTED_LOCK_UNLOCKED;
   rs->k_ref_count = 1;          /* 1 reference for userland */
+  rs->n_ep_closing_refs = 0;
   alloc->in_name[CI_CFG_STACK_NAME_LEN] = '\0';
   strcpy(rs->name, alloc->in_name);
 
@@ -1490,6 +1562,7 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
                        trs->id, n_ep_closing));
 
   if( n_ep_closing ) {
+    ci_irqlock_state_t lock_flags;
     /* Add in a ref to the stack for each of the closing sockets.  Set
      * CI_NETIF_FLAGS_DROP_SOCK_REFS so that the extra refs are dropped
      * when the sockets close.
@@ -1498,6 +1571,14 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
       krc_old = trs->k_ref_count;
       krc_new = krc_old + n_ep_closing;
     } while( ci_cas32_fail(&trs->k_ref_count, krc_old, krc_new) );
+
+    ci_irqlock_lock(&trs->lock, &lock_flags);
+
+    ci_assert_equal(trs->n_ep_closing_refs, 0);
+    trs->n_ep_closing_refs = n_ep_closing;
+
+    ci_irqlock_unlock(&trs->lock, &lock_flags);
+
     netif->flags |= CI_NETIF_FLAGS_DROP_SOCK_REFS;
   }
 
@@ -2018,13 +2099,7 @@ efab_tcp_helper_more_bufs_failed(tcp_helper_resource_t* trs, int rc)
   int new_max_packets = ni->pkt_sets_n << PKTS_PER_SET_S;
   ni->pkt_sets_max = ni->pkt_sets_n;
   ni->state->pkt_sets_max = ni->pkt_sets_max;
-  NI_OPTS(ni).max_rx_packets = (ci_int32)
-    ((uint64_t) NI_OPTS(ni).max_rx_packets * new_max_packets /
-     NI_OPTS(ni).max_packets);
-  NI_OPTS(ni).max_tx_packets = (ci_int32)
-    ((uint64_t) NI_OPTS(ni).max_tx_packets * new_max_packets /
-     NI_OPTS(ni).max_packets);
-  NI_OPTS(ni).max_packets = new_max_packets;
+  tcp_helper_reduce_max_packets(&trs->netif, new_max_packets);
   ci_netif_set_rxq_limit(ni);
 
   if( ++ni->state->stats.bufset_alloc_fails == 1 )
@@ -2529,28 +2604,36 @@ static void oo_handle_wakeup_int_driven(void* context, int is_timeout,
  *--------------------------------------------------------------------*/
 
 /*** Linux ***/
+/* We can't use tasklet as timer if efrm_vf_use_threaded_irq=1,
+ * since this tasklet does the same work as irq hanlder. */
+
 static int 
-linux_set_periodic_timer(tcp_helper_resource_t* rs) 
+linux_set_periodic_timer_wq(tcp_helper_resource_t* rs) 
 {
   unsigned long t = net_random() % CI_TCP_HELPER_PERIODIC_FLOAT_T;
 
   if (atomic_read(&rs->timer_running) == 0) 
     return 0;
 
-  return queue_delayed_work(rs->timer_wq, &rs->timer_work,
+  return queue_delayed_work(rs->timer.wq.wq, &rs->timer.wq.work,
                             (CI_TCP_HELPER_PERIODIC_BASE_T) + t);
 }
 
-static void
-linux_tcp_timer_do(struct work_struct *work)
+static int 
+linux_set_periodic_timer_tasklet(tcp_helper_resource_t* rs) 
 {
-#if !defined(EFX_NEED_WORK_API_WRAPPERS)
-  tcp_helper_resource_t* rs = container_of(work, tcp_helper_resource_t,
-                                           timer_work.work);
-#else
-  tcp_helper_resource_t* rs = container_of(work, tcp_helper_resource_t,
-                                           timer_work);
-#endif
+  unsigned long t = net_random() % CI_TCP_HELPER_PERIODIC_FLOAT_T;
+
+  if (atomic_read(&rs->timer_running) == 0) 
+    return 0;
+
+  return mod_timer(&rs->timer.bh.timer,
+                   jiffies + (CI_TCP_HELPER_PERIODIC_BASE_T) + t);
+}
+
+static void
+linux_tcp_timer_do(tcp_helper_resource_t* rs)
+{
   ci_netif* ni = &rs->netif;
   ci_uint64 now_frc;
   int rc;
@@ -2578,19 +2661,65 @@ linux_tcp_timer_do(struct work_struct *work)
       CITP_STATS_NETIF_INC(ni, periodic_lock_contends);
     }
   }
+}
 
-  linux_set_periodic_timer(rs);
+static void
+linux_tcp_timer_tasklet(unsigned long l)
+{
+  tcp_helper_resource_t* rs = (tcp_helper_resource_t*)l;
+  linux_tcp_timer_do(rs);
+}
+
+static void
+linux_tcp_timer_wq(struct work_struct *work)
+{
+#if !defined(EFX_NEED_WORK_API_WRAPPERS)
+  tcp_helper_resource_t* rs = container_of(work, tcp_helper_resource_t,
+                                           timer.wq.work.work);
+#else
+  tcp_helper_resource_t* rs = container_of(work, tcp_helper_resource_t,
+                                           timer.wq.work);
+#endif
+  linux_tcp_timer_do(rs);
+  linux_set_periodic_timer_wq(rs);
+}
+
+static void
+linux_tcp_helper_periodic_timer(unsigned long l)
+{
+  tcp_helper_resource_t* rs = (tcp_helper_resource_t*)l;
+
+  ci_assert(NULL != rs);
+
+  OO_DEBUG_VERB(ci_log("linux_tcp_helper_periodic_timer: fired"));
+
+  tasklet_schedule(&rs->timer.bh.tasklet);
+  linux_set_periodic_timer_tasklet(rs);
 }
 
 static void
 tcp_helper_initialize_and_start_periodic_timer(tcp_helper_resource_t* rs)
 {
-  snprintf(rs->timer_wq_name, sizeof(rs->timer_wq_name), "onload:%s-timer",
-           rs->netif.state->pretty_name);
-  rs->timer_wq = create_singlethread_workqueue(rs->timer_wq_name);
-  INIT_DELAYED_WORK(&rs->timer_work, &linux_tcp_timer_do);
   atomic_set(&rs->timer_running, 1);
-  linux_set_periodic_timer(rs);
+
+  if( efrm_vf_use_threaded_irq &&
+      NI_OPTS(&rs->netif).packet_buffer_mode == 1 ) {
+    snprintf(rs->timer.wq.name, sizeof(rs->timer.wq.name), "onload:%s-timer",
+             rs->netif.state->pretty_name);
+    rs->timer.wq.wq = create_singlethread_workqueue(rs->timer.wq.name);
+    INIT_DELAYED_WORK(&rs->timer.wq.work, &linux_tcp_timer_wq);
+
+    linux_set_periodic_timer_wq(rs);
+  }
+  else {
+    init_timer(&rs->timer.bh.timer);
+    rs->timer.bh.timer.function = &linux_tcp_helper_periodic_timer;
+    rs->timer.bh.timer.data = (unsigned long) rs;
+    tasklet_init(&rs->timer.bh.tasklet, &linux_tcp_timer_tasklet,
+                 (unsigned long)rs);
+
+    linux_set_periodic_timer_tasklet(rs);
+  }
 }
 
 
@@ -2599,11 +2728,19 @@ tcp_helper_stop_periodic_timer(tcp_helper_resource_t* rs)
 {
   atomic_set(&rs->timer_running, 0);
 
-  flush_workqueue(rs->timer_wq); /* it may re-spawn work */
-  cancel_delayed_work(&rs->timer_work);
-  flush_workqueue(rs->timer_wq); /* can't re-spawn since timer_running=0 */
+  if( efrm_vf_use_threaded_irq &&
+      NI_OPTS(&rs->netif).packet_buffer_mode == 1 ) {
+    /* See Bug30934 for why two flushes are needed */
+    flush_workqueue(rs->timer.wq.wq); /* it may re-spawn the work item */
+    cancel_delayed_work(&rs->timer.wq.work);
+    flush_workqueue(rs->timer.wq.wq); /* can't re-spawn since timer_running=0 */
 
-  destroy_workqueue(rs->timer_wq);
+    destroy_workqueue(rs->timer.wq.wq);
+  }
+  else {
+    del_timer_sync(&rs->timer.bh.timer);
+    tasklet_kill(&rs->timer.bh.tasklet);
+  }
 }
 
 /*--------------------------------------------------------------------*/
@@ -2651,7 +2788,7 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
       if( tls->acceptq_n_alien == 0 )
         efab_tcp_helper_shutdown_os_sock(tep_p, SHUT_RDWR);
       else {
-        ci_netif_lock(&trs->netif);
+        ci_netif_lock_fixme(&trs->netif);
         ci_bit_set(&tls->s.b.sb_aflags, CI_SB_AFLAG_ORPHAN_BIT);
         tcp_helper_endpoint_shutdown(trs, ep_id, SHUT_RDWR, CI_TCP_LISTEN);
         ci_netif_unlock(&trs->netif);
@@ -2903,7 +3040,6 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint32 lock_val)
     ** [flags_set], and must not touch [lock_val].  If any flags
     ** subsequently get re-set, then we'll come round the loop again.
     */
-
 
     if( flags_set & CI_EPLOCK_NETIF_NEED_POLL ) {
       CITP_STATS_NETIF(++ni->state->stats.deferred_polls);

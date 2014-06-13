@@ -61,7 +61,8 @@ int ci_tcp_move_state(ci_netif* netif_in, ci_tcp_state* ts_in,
   /* Get a new tcp state struct */
   ts = ci_tcp_get_state_buf(netif_out);
   if( ts == NULL ) {
-    LOG_E(log("Failed to allocate TCP state for dup"));
+    LOG_E(ci_log("%s: [%d] out of socket buffers",
+                 __FUNCTION__, NI_ID(netif_out)));
     return -ENOMEM;
   }
 

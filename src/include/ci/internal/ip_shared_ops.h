@@ -49,28 +49,32 @@
 
 #define ci_netif_is_locked(ni)        ef_eplock_is_locked(&(ni)->state->lock)
 
-/*! Returns 0 on success.  When called at userlevel, this is the only
- * possible outcome.  In the kernel, it will return -EINTR if interrupted
- * by a signal.
+extern void ci_netif_unlock(ci_netif*) CI_HF;
+
+
+/*! Blocking calls that grab the stack lock return 0 on success.  When
+ * called at userlevel, this is the only possible outcome.  In the kernel,
+ * they return -EINTR if interrupted by a signal.
  */
-#define __ci_netif_lock(ni) ef_eplock_lock(ni)
-
-
-extern void ci_netif_unlock_slow(ci_netif*);
-extern void __ci_netif_unlock(ci_netif*) CI_HF;
-
-
-/************************* Wrappers and other definitions ***********/
-
-#define ci_netif_lock(ni)       __ci_netif_lock(ni)
-#define ci_netif_lock_id(ni,id) __ci_netif_lock(ni)
-#define ci_netif_unlock(ni)     __ci_netif_unlock(ni)
-#define ci_netif_trylock(ni)    ef_eplock_trylock(&(ni)->state->lock)
-
+#define ci_netif_lock(ni)        ef_eplock_lock(ni)
+#define ci_netif_lock_id(ni,id)  ef_eplock_lock(ni)
+#define ci_netif_trylock(ni)     ef_eplock_trylock(&(ni)->state->lock)
 
 #define ci_netif_lock_fdi(epi)   ci_netif_lock_id((epi)->sock.netif,    \
                                                   SC_SP((epi)->sock.s))
 #define ci_netif_unlock_fdi(epi) ci_netif_unlock((epi)->sock.netif)
+
+/* Use of this macro indicates code that needs to be fixed!  ie. In-kernel
+ * callers of ci_netif_lock() that are not checking the return value.
+ */
+#define ci_netif_lock_fixme(ni)                                         \
+  do {                                                                  \
+    int rc = ci_netif_lock(ni);                                         \
+    if( rc != 0 ) {                                                     \
+      LOG_E(ci_log("%s: ERROR: failed to grab stack lock", __FUNCTION__)); \
+      LOG_E(ci_log("FIXME: file=%s line=%d", __FILE__, __LINE__));      \
+    }                                                                   \
+  } while( 0 )
 
 
 /* ci_netif_lock_count()

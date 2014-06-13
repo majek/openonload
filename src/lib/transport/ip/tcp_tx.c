@@ -27,9 +27,10 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include <onload/sleep.h>
 #include "ip_tx.h"
 #if defined(__ci_driver__) && defined(__linux__)
-# include "onload/cplane.h"
+# include <onload/cplane.h>
 #endif
 #include "tcp_tx.h"
 
@@ -734,8 +735,7 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
    * sent in any case.
    */
 
-  ci_ip_hdr_init(netif, iphdr,
-		 sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
+  ci_tcp_ip_hdr_init(iphdr, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
   CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
 
   iphdr->ip_check_be16 = 0;
@@ -818,7 +818,7 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
   tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
 
-  ci_ip_hdr_init(netif, iphdr, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
+  ci_tcp_ip_hdr_init(iphdr, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
   iphdr->ip_check_be16 = 0;
 
   ci_tcp_tx_checksum_finish(iphdr, tcp);
@@ -1164,14 +1164,17 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
       if( !ci_tcp_inflight(ts) ) {
         ci_assert(ci_ip_queue_is_empty(&ts->retrans));
         ci_assert(!(ts->s.b.state & CI_TCP_STATE_NO_TIMERS));
-        /* If we have TCP_CORK, timer may be running by previus send.
-         * Check and restart if necessary. */
+        /* If we have TCP_CORK, timer may be running by previous send.
+         * Check and restart if necessary.  We use double the delack
+         * time (50ms) to get roughly what we need once granularity of
+         * periodic timer is taken into account
+         */
         if( ci_ip_timer_pending(ni, &ts->cork_tid) )
           ci_ip_timer_modify(ni, &ts->cork_tid, ci_tcp_time_now(ni) +
-                             NI_CONF(ni).tconst_delack);
+                             (NI_CONF(ni).tconst_delack << 1));
         else {
           ci_ip_timer_set(ni, &ts->cork_tid, ci_tcp_time_now(ni) +
-                          NI_CONF(ni).tconst_delack);
+                          (NI_CONF(ni).tconst_delack << 1));
         }
       }
       /* Next time we should not block the transmission. */
@@ -1198,7 +1201,7 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
     ci_tcp_tx_finish(ni, ts, pkt);
 
     /* Finish-off the IP header. */
-    ci_ip_hdr_init(ni, ip, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
+    ci_tcp_ip_hdr_init(ip, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
     ip->ip_check_be16 = 0;
 
     /* set the urgent pointer */
@@ -1331,8 +1334,7 @@ void ci_tcp_send_rst(ci_netif* netif, ci_tcp_state* ts)
   }
 
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
-  ci_ip_hdr_init(netif, oo_tx_ip_hdr(pkt),
-                 sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
+  ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt), sizeof(ci_ip4_hdr)+sizeof(ci_tcp_hdr));
 
   tcp = TX_PKT_TCP(pkt);
   tcp->tcp_urg_ptr_be16 = 0;
@@ -1404,7 +1406,7 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
                CI_BSWAP_BE16(tcp->tcp_source_be16),
                CI_IP_PRINTF_ARGS(&ip->ip_daddr_be32),
                CI_BSWAP_BE16(tcp->tcp_dest_be16)));
-  rc = cicp_raw_ip_send(ip);
+  rc = cicp_raw_ip_send(ip, ts->s.cp.so_bindtodevice);
   ci_free(ip);
   return rc;
 }
@@ -1475,7 +1477,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   }
   CI_TCP_HDR_SET_LEN(tcp, sizeof(*tcp));
   tcp->tcp_window_be16 = 0;
-  ci_ip_hdr_init(netif, ip, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
+  ci_tcp_ip_hdr_init(ip, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
 
   ip->ip_check_be16 = 0;
   tcp->tcp_check_be16 = 0;
@@ -1546,8 +1548,8 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 
   /* send seq with snd_una-1, to trigger an ack for unacceptable seq */
   tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_una(ts)-1);
-  ci_ip_hdr_init(netif, oo_tx_ip_hdr(pkt),
-                 sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
+  ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt),
+                     sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
   pkt->buf_len = pkt->tx_pkt_len = 
     oo_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen;
 
@@ -1682,8 +1684,8 @@ void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
   ci_tcp_tx_set_urg_ptr(ts, netif, tcp);
 
   /* Rest of packet creation */
-  ci_ip_hdr_init(netif, oo_tx_ip_hdr(pkt),
-                 sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
+  ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt),
+                     sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
   oo_tx_ip_hdr(pkt)->ip_check_be16 = 0;
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
   tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;

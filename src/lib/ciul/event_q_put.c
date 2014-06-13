@@ -25,13 +25,12 @@
 \**************************************************************************/
 
 /*! \cidoxg_lib_ef */
-#include <ci/driver/efab/os_intf.h>
-#include <ci/efch/op_types.h>
 #include "ef_vi_internal.h"
-#include <etherfabric/misc.h>
+#include "driver_access.h"
+#include <etherfabric/vi.h>
 
 
-int ef_eventq_put(efch_resource_id_t evq_id, ef_driver_handle fd, unsigned ev)
+int ef_eventq_put(unsigned evq_id, ef_driver_handle fd, unsigned ev)
 {
   ci_resource_op_t  op;
   int64_t ev64;
@@ -41,7 +40,7 @@ int ef_eventq_put(efch_resource_id_t evq_id, ef_driver_handle fd, unsigned ev)
   ev64 |= (uint64_t) DRV_GEN_EV_DECODE << EV_CODE_LBN;
 
   op.op = CI_RSOP_EVENTQ_PUT;
-  op.id = evq_id;
-  op.u.evq_put.ev.u64 = cpu_to_le64(ev64);
+  op.id = efch_make_resource_id(evq_id);
+  op.u.evq_put.ev = cpu_to_le64(ev64);
   return ci_resource_op(fd, &op);
 }

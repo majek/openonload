@@ -27,9 +27,8 @@
 /*! \cidoxg_lib_ef */
 #include <etherfabric/base.h>
 #include <etherfabric/iobufset.h>
-#include <ci/driver/efab/os_intf.h>
-#include <ci/efch/op_types.h>
 #include "ef_vi_internal.h"
+#include "driver_access.h"
 #include "logging.h"
 #include "efch_intf_ver.h"
 

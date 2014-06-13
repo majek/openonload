@@ -286,6 +286,9 @@ int ci_tcp_recvmsg_get(const ci_tcp_recvmsg_args* a, ci_iovec_ptr* piov)
 }
 
 
+/* Returns >0 if socket is readable.  Returns 0 if spin times-out.  Returns
+ * -ve error code otherwise.
+ */
 static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
                                ci_uint64 start_frc)
 {
@@ -294,9 +297,8 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
 #ifndef __KERNEL__
   citp_signal_info* si = citp_signal_get_specific_inited();
 #endif
-  int rc = 0;
   ci_uint64 max_spin = ni->state->spin_cycles;
-  int spin_limit_by_so = 0;
+  int rc, spin_limit_by_so = 0;
 
   if( ts->s.so.rcvtimeo_msec ) {
     ci_uint64 max_so_spin = (ci_uint64)ts->s.so.rcvtimeo_msec *
@@ -321,22 +323,19 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
         ni->state->is_spinner = 1;
     }
     if( tcp_rcv_usr(ts) || TCP_RX_DONE(ts) ) {
-      rc = 1;
-      break;
+      ni->state->is_spinner = 0;
+      return 1;
     }
     ci_frc64(&now_frc);
-    rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc, 
-                                         ts->s.so.rcvtimeo_msec,
-                                         &ts->s.b, si);
+    rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
+                                         ts->s.so.rcvtimeo_msec, &ts->s.b, si);
     if( rc != 0 )
-      return rc;
+      goto out;
   } while( now_frc - start_frc < max_spin );
 
+  rc = spin_limit_by_so ? -EAGAIN : 0;
+ out:
   ni->state->is_spinner = 0;
-
-  /* Check if we timed out */
-  if( spin_limit_by_so && now_frc - start_frc >= max_spin )
-    return -EAGAIN;
   return rc;
 }
 
@@ -489,7 +488,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 
     if( (rc2 = ci_tcp_recvmsg_spin(ni, ts, start_frc)) ) {
       if( rc2 < 0 ) {
-        /* -ERESTARTSYS or -EAGAIN */
+        /* -ERESTARTSYS, -EINTR or -EAGAIN */
         CI_SET_ERROR(rc, -rc2);
         goto unlock_out;
       }
@@ -649,7 +648,7 @@ static int ci_tcp_recvmsg_urg(ci_netif* ni, ci_tcp_state* ts,
   int can_write;
   int rc = 0;
 
-  ci_netif_lock_id(ni, S_SP(ts));
+  ci_netif_lock_fixme(ni);
   CHECK_TS(ni, ts);
 
   LOG_URG(ci_log(TCP_URG_FMT, TCP_URG_ARGS(ts)));
@@ -809,7 +808,7 @@ static int ci_tcp_recvmsg_recv2_peek(const ci_tcp_recvmsg_args* a,
   int skip, stop_at_mark;
   unsigned rd_nxt_seq;
 
-  ci_netif_lock_id(ni, S_SP(ts));
+  ci_netif_lock_fixme(ni);
 
   pkt = PKT_CHK(ni, recv2->head);
   rd_nxt_seq = PKT_RX_BUF_SEQ(pkt);
@@ -862,7 +861,7 @@ static int ci_tcp_recvmsg_handle_race(const ci_tcp_recvmsg_args* a,
   */
   ci_netif_unlock(a->ni);
   *bytes_so_far += ci_tcp_recvmsg_get(a, piov);
-  ci_netif_lock_id(a->ni, S_SP(a->ts));
+  ci_netif_lock_fixme(a->ni);
   /* NB. No more data can have arrived in recv1, because once we start
   ** using recv2 we stick with it until the consumer switches back to
   ** recv1.  Which we haven't.
@@ -902,7 +901,7 @@ static int ci_tcp_recvmsg_recv2(const ci_tcp_recvmsg_args* a,
 		 __FUNCTION__, *bytes_so_far));
   
   ci_assert(ci_sock_is_locked(ni, &ts->s.b));
-  ci_netif_lock_id(ni, S_SP(ts));
+  ci_netif_lock_fixme(ni);
   CHECK_TS(ni, ts);
 
 

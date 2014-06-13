@@ -158,7 +158,7 @@
 #define ci_fifo2_rd_i(f)     CI_FIFO2_M((f), (f)->fifo_rd_i)
 #define ci_fifo2_wr_i(f)     CI_FIFO2_M((f), (f)->fifo_wr_i)
 
-#define ci_fifo2_valid(f)  ((f) && (f)->fifo                       &&   \
+#define ci_fifo2_valid(f)  ((f)->fifo                              &&   \
                             CI_IS_POW2((f)->fifo_mask+1u)          &&   \
                             (int) ci_fifo2_num(f) >= 0             &&   \
                             (int) ci_fifo2_num(f) <= ci_fifo2_capacity(f))

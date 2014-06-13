@@ -166,7 +166,7 @@
  * Format various flags fields etc.
  */
 
-#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s"
+#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_TCP_SOCKET_FLAGS_PRI_ARG(ts)                                \
   ((ts)->tcpflags & CI_TCPT_FLAG_TSO    ? "TSO " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_WSCL   ? "WSCL ":""),                 \
@@ -177,7 +177,9 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_WAS_ESTAB        ? "ESTAB "     :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT ? "NONBCON "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_TMP_SRC_IP       ? "TMP_SRC "   :""), \
-  ((ts)->tcpflags & CI_TCPT_FLAG_CONNECT_FAILED   ? "CON_FAIL "  :"")
+  ((ts)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED   ? "PASSIVE "   :""), \
+  ((ts)->tcpflags & CI_TCPT_FLAG_NO_ARP           ? "ARP_FAIL "  :""), \
+  ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":"")
 
 
 #define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
@@ -288,7 +290,7 @@ extern unsigned ci_tp_log CI_HV;
   ((flags) & CI_PKT_FLAG_RX              ? "Rx ":"")
 
 
-#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s"
 #define CI_NETIF_LOCK_PRI_ARG(v)                                        \
   ((v) & CI_EPLOCK_UNLOCKED              ? "UNLOCKED ":""),             \
   ((v) & CI_EPLOCK_LOCKED                ? "LOCKED ":""),               \
@@ -298,7 +300,6 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_EPLOCK_NETIF_CLOSE_ENDPOINT  ? "CLOSE_EP ":""),             \
   ((v) & CI_EPLOCK_NETIF_NEED_WAKE       ? "WAKE ":""),                 \
   ((v) & CI_EPLOCK_NETIF_PKT_WAKE        ? "PKT_WAKE ":""),             \
-  ((v) & CI_EPLOCK_NETIF_WRONG_ADDR_SPC  ? "WRONG_ADDR_SPC ":""),       \
   ((v) & CI_EPLOCK_NETIF_IS_PKT_WAITER   ? "PKT_WAIT ":""),             \
   ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":"")
 

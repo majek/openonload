@@ -492,7 +492,7 @@ asmlinkage int efab_linux_sys_epoll_create1(int flags)
     struct fdtable *fdt;
     spin_lock(&files->file_lock);
     fdt = files_fdtable(files);
-    FD_SET(rc, fdt->close_on_exec);
+    efx_set_close_on_exec(rc, fdt);
     spin_unlock(&files->file_lock);
   }
 

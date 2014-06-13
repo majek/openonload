@@ -76,7 +76,8 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     ci_netif_send(ni, pkt);
     return 0;
   case retrrc_nomac:
-    cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt));
+    cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt),
+                         ipcache->ifindex);
     return 0;
   case retrrc_noroute:
     return -EHOSTUNREACH;
@@ -143,7 +144,8 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
         return;
       }
     }
-    cicp_user_defer_send(ni, retrrc_nomac, &rc, OO_PKT_P(pkt));
+    cicp_user_defer_send(ni, retrrc_nomac, &rc, OO_PKT_P(pkt), 
+                         ts->s.pkt.ifindex);
     return;
   case retrrc_noroute:
     rc = -EHOSTUNREACH;

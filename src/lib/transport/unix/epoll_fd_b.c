@@ -239,6 +239,10 @@ citp_protocol_impl citp_epollb_protocol_impl = {
 #endif
     .send        = citp_epoll_send,
     .ioctl       = citp_epollb_ioctl,
+    .zc_send     = citp_epoll_zc_send,
+    .zc_recv     = citp_epoll_zc_recv,
+    .zc_recv_filter = citp_epoll_zc_recv_filter,
+    .recvmsg_kernel = citp_epoll_recvmsg_kernel,
   }
 };
 
@@ -364,7 +368,8 @@ static int citp_epollb_postpone(citp_epollb_fdi *epi, citp_fdinfo *fd_fdi,
         if( fd_fdi )
           epi->postponed[i].fdi_seq = fd_fdi->seq;
         epi->postponed[i].op = eop;
-        epi->postponed[i].event = *event;
+        if( eop != EPOLL_CTL_DEL )
+          epi->postponed[i].event = *event;
         return 0;
       }
       if( eop == EPOLL_CTL_ADD ) {
@@ -408,7 +413,7 @@ static int citp_epollb_postpone(citp_epollb_fdi *epi, citp_fdinfo *fd_fdi,
     if( fd_fdi )
       epi->postponed[empty_idx].fdi_seq = fd_fdi->seq;
     epi->postponed[empty_idx].op = eop;
-    if( event )
+    if( eop != EPOLL_CTL_DEL )
       epi->postponed[empty_idx].event = *event;
     epi->have_postponed = 1;
     if( op && empty_idx >= op->epoll_ctl_n )
@@ -465,7 +470,8 @@ static int citp_epollb_ctl_do(citp_fdinfo* fdi, citp_fdinfo *fd_fdi,
     struct oo_epoll_item item;
     item.fd = fd;
     item.op = eop;
-    item.event = *event;
+    if( eop != EPOLL_CTL_DEL )
+      item.event = *event;
     CI_USER_PTR_SET(op.epoll_ctl, &item);
     op.epoll_ctl_n = 1;
     rc = ci_sys_ioctl(fdi->fd, OO_EPOLL2_IOC_ACTION, &op);

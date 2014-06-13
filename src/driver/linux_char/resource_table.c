@@ -13,9 +13,7 @@
 ** GNU General Public License for more details.
 */
 
-
-#include <ci/driver/efab/debug.h>
-#include <ci/driver/efab/efch.h>
+#include "efch.h"
 
 
 #ifdef __KERNEL__
@@ -24,7 +22,7 @@ extern int
 efch_resource_id_lookup(efch_resource_id_t id, ci_resource_table_t *rt,
                         efch_resource_t **out)
 {
-  ci_uint32 index = id.index;
+  uint32_t index = id.index;
   efch_resource_t *rs;
 
   ci_assert(rt);

@@ -42,6 +42,9 @@
 
 #include <etherfabric/base.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum ef_pd_flags {
 	EF_PD_VF        = 0x1,
@@ -62,5 +65,8 @@ extern int ef_pd_alloc(ef_pd*, ef_driver_handle, int ifindex,
   /*! Unregister a memory region. */
 extern int ef_pd_free(ef_pd*, ef_driver_handle);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __EFAB_PD_H__ */

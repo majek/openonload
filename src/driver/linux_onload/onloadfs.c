@@ -168,13 +168,20 @@ struct dentry_operations onloadfs_dentry_operations = {
 #endif
 };
 
+#if LINUX_VERSION_CODE == KERNEL_VERSION(2,6,37)
+#define EFX_OLD_MOUNT_PSEUDO
+#endif
+
 #ifdef EFX_FSTYPE_HAS_MOUNT
 static struct dentry *
 onloadfs_mount(struct file_system_type *fs_type, int flags,
                const char *dev_name, void *data)
 {
   return mount_pseudo(fs_type, "onload:", &onloadfs_ops,
-    &onloadfs_dentry_operations, ONLOADFS_MAGIC);
+#ifndef EFX_OLD_MOUNT_PSEUDO
+                      &onloadfs_dentry_operations,
+#endif
+                      ONLOADFS_MAGIC);
 }
 #else
 static
@@ -224,10 +231,10 @@ static void init_once(
   struct onload_inode *ei = (struct onload_inode *)foo;
 #if defined(EFX_HAVE_KMEM_CACHE_DTOR) || defined(EFX_HAVE_KMEM_CACHE_FLAGS)
 # ifdef SLAB_CTOR_VERIFY
-  if( (flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
-      SLAB_CTOR_CONSTRUCTOR )
-# else
-  if(flags & SLAB_CTOR_CONSTRUCTOR)
+    if((flags & SLAB_CTOR_VERIFY) == 0)
+#endif
+# ifdef SLAB_CTOR_CONSTRUCTOR
+    if(flags & SLAB_CTOR_CONSTRUCTOR)
 # endif
 #endif
   inode_init_once(&ei->vfs_inode);
@@ -365,7 +372,7 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
     iput(inode);
     return -ENOMEM;
   }
-#ifndef EFX_FSTYPE_HAS_MOUNT
+#if !defined(EFX_FSTYPE_HAS_MOUNT) || defined(EFX_OLD_MOUNT_PSEUDO)
   my_dentry->d_op = &onloadfs_dentry_operations;
 #if !defined(EFX_HAVE_STRUCT_PATH) && defined(EFX_HAVE_D_DNAME)
   my_dentry->d_flags &= ~DCACHE_UNHASHED;
@@ -405,7 +412,7 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
     spin_lock(&files->file_lock);
     fdt = files_fdtable(files);
     rcu_assign_pointer(fdt->fd[fd], file);
-    FD_SET(fd, fdt->close_on_exec);
+    efx_set_close_on_exec(fd, fdt);
     spin_unlock(&files->file_lock);
   } else
     fd_install(fd, file);

@@ -87,12 +87,6 @@ module_param(buffer_table_max, int, S_IRUGO);
 MODULE_PARM_DESC(buffer_table_max, "Set max top for buffer table");
 
 #ifdef CONFIG_PCI_IOV
-int unsafe_sriov_without_iommu = 0;
-module_param(unsafe_sriov_without_iommu, int, S_IRUGO);
-MODULE_PARM_DESC(unsafe_sriov_without_iommu,
-"Enable PCI SRIOV support even if there is no IOMMU.  INSECURE!  "
-"Enable this only if you trust all applications run with onload.");
-
 int claim_vf = 1;
 module_param(claim_vf, int, S_IRUGO);
 MODULE_PARM_DESC(claim_vf, "Do not claim PCI virtual functions ownership");

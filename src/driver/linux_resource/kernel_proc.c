@@ -101,7 +101,6 @@ static int
 efrm_resource_read_proc(char *buf, char **start, off_t offset, int count,
 			int *eof, void *data)
 {
-	irq_flags_t lock_flags;
 	int len = 0;
 	int type;
 	struct efrm_resource_manager *rm;
@@ -113,11 +112,11 @@ efrm_resource_read_proc(char *buf, char **start, off_t offset, int count,
 
 		EFRM_PROC_PRINTF(buf, len, "*** %s ***\n", rm->rm_name);
 
-		spin_lock_irqsave(&rm->rm_lock, lock_flags);
+		spin_lock_bh(&rm->rm_lock);
 		EFRM_PROC_PRINTF(buf, len, "current = %u\n", rm->rm_resources);
 		EFRM_PROC_PRINTF(buf, len, "    max = %u\n\n",
 				 rm->rm_resources_hiwat);
-		spin_unlock_irqrestore(&rm->rm_lock, lock_flags);
+		spin_unlock_bh(&rm->rm_lock);
 	}
 
 	return count ? strlen(buf) : 0;

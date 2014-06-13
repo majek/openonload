@@ -257,9 +257,9 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	struct efrm_nic_vi *nvi;
 	struct efrm_nic *efrm_nic;
 	struct list_head *pos, *temp;
-	irq_flags_t lock_flags;
 	struct efrm_vi *virs;
 	bool completed;
+	bool found = false;
 
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(&efrm_vi_manager->rm);
 
@@ -268,7 +268,7 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	nvi = container_of(data, struct efrm_nic_vi, flush_work_item);
 	efrm_nic = container_of(nvi, struct efrm_nic, nvi);
 
-	spin_lock_irqsave(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 
 	if (!efrm_vi_rm_flushes_pending(efrm_nic))
 		goto out;
@@ -285,6 +285,7 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			EFRM_WARN("%s: rx flush outstanding after 1 second\n",
 				  __FUNCTION__);
 			efrm_vi_resource_rx_flush_done(virs, &completed);
+			found = true;
 		}
 		else 
 			break;
@@ -301,6 +302,7 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			EFRM_WARN("%s: tx flush outstanding after 1 second\n",
 				  __FUNCTION__);
 			efrm_vi_resource_tx_flush_done(virs, &completed);
+			found = true;
 		}
 		else 
 			break;
@@ -308,9 +310,11 @@ void efrm_vi_check_flushes(struct work_struct *data)
 
 	efrm_vi_resource_process_flushes(efrm_nic, &completed);
 	efrm_vi_rm_may_complete_flushes(efrm_nic);
+	if (found)
+		queue_work(efrm_vi_manager->workqueue, &nvi->work_item);
 
  out:
-	spin_unlock_irqrestore(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 }
 
 
@@ -318,12 +322,11 @@ void efrm_vi_wait_nic_complete_flushes(struct efhw_nic *nic)
 {
 	struct efrm_nic *efrm_nic = efrm_nic_from_efhw_nic(nic);
 #ifndef NDEBUG
-	irq_flags_t lock_flags;
-	spin_lock_irqsave(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 	/* flushes pending implies flush timer running */
 	EFRM_ASSERT(!efrm_vi_rm_flushes_pending_nic(nic) || 
 		    atomic_read(&efrm_nic->nvi.flush_timer_running));
-	spin_unlock_irqrestore(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 #endif
 	wait_event(flush_wq, !efrm_vi_rm_flushes_pending_nic(nic));
 
@@ -354,7 +357,6 @@ EXPORT_SYMBOL(efrm_vi_register_flush_callback);
 void efrm_pt_flush(struct efrm_vi *virs)
 {
 	struct efrm_nic_vi *nvi = nvi_from_virs(virs);
-	irq_flags_t lock_flags;
 	bool completed = false;
 
 	EFRM_ASSERT(virs->q[EFHW_RXQ].flushing == 0);
@@ -367,7 +369,7 @@ void efrm_pt_flush(struct efrm_vi *virs)
 		   virs->q[EFHW_TXQ].capacity,
 		   virs->q[EFHW_RXQ].capacity);
 
-	spin_lock_irqsave(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 
 	if (virs->q[EFHW_RXQ].capacity != 0)
 		virs->q[EFHW_RXQ].flushing = 1;
@@ -401,7 +403,7 @@ void efrm_pt_flush(struct efrm_vi *virs)
 
 	virs->flush_time = get_jiffies_64();
 
-	spin_unlock_irqrestore(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 
 	if (completed)
 		queue_work(efrm_vi_manager->workqueue, &nvi->work_item);
@@ -471,14 +473,13 @@ efrm_handle_dmaq_flushed(struct efhw_nic *flush_nic, unsigned instance,
 {
 	struct efrm_nic *efrm_nic = efrm_nic_from_efhw_nic(flush_nic);
 	struct efrm_nic_vi *nvi = &efrm_nic->nvi;
-	irq_flags_t lock_flags;
 	bool completed = false;
 
 	EFRM_TRACE("%s: nic_i=%d  instance=%d  rx_flush=%d failed=%d",
 		   __FUNCTION__, flush_nic->index, instance, rx_flush,
 		   failed);
 
-	spin_lock_irqsave(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 
 	if (rx_flush)
 		efrm_handle_rx_dmaq_flushed(flush_nic, instance, &completed,
@@ -486,7 +487,7 @@ efrm_handle_dmaq_flushed(struct efhw_nic *flush_nic, unsigned instance,
 	else
 		efrm_handle_tx_dmaq_flushed(flush_nic, instance, &completed);
 
-	spin_unlock_irqrestore(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 
 	if (completed)
 		queue_work(efrm_vi_manager->workqueue, &nvi->work_item);
@@ -507,16 +508,15 @@ efrm_vi_rm_reinit_dmaqs(struct efrm_vi *virs)
 void efrm_vi_rm_delayed_free(struct work_struct *data)
 {
 	struct efrm_nic_vi *nvi;
-	irq_flags_t lock_flags;
 	struct list_head close_pending;
 	struct efrm_vi *virs;
 
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(&efrm_vi_manager->rm);
 
 	nvi = container_of(data, struct efrm_nic_vi, work_item);
-	spin_lock_irqsave(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 	list_replace_init(&nvi->close_pending, &close_pending);
-	spin_unlock_irqrestore(&efrm_vi_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 
 	EFRM_TRACE("%s: %p", __FUNCTION__, efrm_vi_manager);
 	while (!list_empty(&close_pending)) {

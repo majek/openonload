@@ -25,10 +25,9 @@
 \**************************************************************************/
   
 /*! \cidoxg_lib_ef */
-#include <ci/driver/efab/os_intf.h>
 #include <etherfabric/vi.h>
-#include <ci/efch/op_types.h>
 #include "ef_vi_internal.h"
+#include "driver_access.h"
 #include "logging.h"
 
 
@@ -75,14 +74,9 @@ int ef_eventq_wait(ef_vi* evq, ef_driver_handle fd,
 
   LOGVVV(ef_log("ef_eventq_wait: current_ptr=%x next_i=%u",
 		(unsigned) current_ptr,
-		(unsigned) ((current_ptr & evq->evq_mask)
-			    / sizeof(efhw_event_t))));
+		(unsigned) ((current_ptr & evq->evq_mask) / 8)));
 
-  /* ?? FIXME: This cast of [timeout] looks dodgy.  (NB. Only used on
-  ** windows).
-  */
-  return ci_resource_op_blocking(fd, &op, (const ci_timeval_t*) timeout,
-                                 NULL);
+  return ci_resource_op(fd, &op);
 }
 
 /*! \cidoxg_end */

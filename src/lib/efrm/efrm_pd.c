@@ -126,7 +126,6 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		  struct efrm_vf *vf_opt, int phys_addr_mode)
 {
 	struct efrm_pd *pd;
-	irq_flags_t lock_flags;
 	int rc, instance;
 
 	EFRM_ASSERT((client_opt != NULL) || (vf_opt != NULL));
@@ -136,13 +135,13 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		goto fail1;
 	}
 
-	spin_lock_irqsave(&pd_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&pd_manager->rm.rm_lock);
 	instance = pd_manager->next_instance++;
 	if (phys_addr_mode)
 		pd->owner_id = OWNER_ID_PHYS_MODE;
 	else
 		pd->owner_id = efrm_pd_owner_id_alloc();
-	spin_unlock_irqrestore(&pd_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&pd_manager->rm.rm_lock);
 	if (pd->owner_id == OWNER_ID_ALLOC_FAIL) {
 		rc = -EBUSY;
 		goto fail2;
@@ -177,11 +176,10 @@ EXPORT_SYMBOL(efrm_pd_release);
 
 void efrm_pd_free(struct efrm_pd *pd)
 {
-	irq_flags_t lock_flags;
-	spin_lock_irqsave(&pd_manager->rm.rm_lock, lock_flags);
+	spin_lock_bh(&pd_manager->rm.rm_lock);
 	if (pd->owner_id != OWNER_ID_PHYS_MODE)
 		efrm_pd_owner_id_free(pd->owner_id);
-	spin_unlock_irqrestore(&pd_manager->rm.rm_lock, lock_flags);
+	spin_unlock_bh(&pd_manager->rm.rm_lock);
 	if (pd->vf != NULL)
 		efrm_vf_resource_release(pd->vf);
 	efrm_client_put(pd->rs.rs_client);
@@ -235,7 +233,9 @@ static void efrm_pd_dma_unmap_vf(struct efrm_pd *pd, int n_pages,
 	efrm_vf_alloc_ioaddrs(pd->vf, 0, &iommu_domain);
 	while (--n_pages >= 0) {
 #ifdef CONFIG_IOMMU_API
+		mutex_lock(&efrm_iommu_mutex);
 		iommu_unmap(iommu_domain, *pci_addrs, 0);
+		mutex_unlock(&efrm_iommu_mutex);
 #else
 		EFRM_ASSERT(0);
 #endif

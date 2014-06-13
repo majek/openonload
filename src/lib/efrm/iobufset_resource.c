@@ -106,23 +106,20 @@ void efrm_iobufset_resource_free(struct iobufset_resource *rs)
 	linked = rs->linked;
 
 	iommu_domain = get_iommu_domain(rs);
-	if (linked) {
+	for (i = 0; i < rs->n_bufs; ++i)
+		efhw_iopage_unmap(rs->pci_dev, &rs->bufs[i], iommu_domain);
+	if (!linked) {
 		for (i = 0; i < rs->n_bufs; ++i)
-			efhw_iopage_unmap(rs->pci_dev,
-					  &linked->bufs[i], &rs->bufs[i],
-					  iommu_domain);
-	} else {
-		for (i = 0; i < rs->n_bufs; ++i)
-			efhw_iopage_free(rs->pci_dev,
-					 &rs->bufs[i], iommu_domain);
+			efhw_iopage_free(&rs->bufs[i]);
 	}
 
 	/* free the instance number */
 	id = rs->rs.rs_instance;
-	EFRM_VERIFY_EQ(kfifo_in_locked(&efrm_iobufset_manager->free_ids,
-                                       (unsigned char *)&id, sizeof(id),
-                                       &efrm_iobufset_manager->rm.rm_lock),
-                       sizeof(id));
+	spin_lock_bh(&efrm_iobufset_manager->rm.rm_lock);
+	EFRM_VERIFY_EQ(kfifo_in(&efrm_iobufset_manager->free_ids,
+				(unsigned char *)&id, sizeof(id)),
+		       sizeof(id));
+	spin_unlock_bh(&efrm_iobufset_manager->rm.rm_lock);
 
 	if (rs->pd != NULL)
 		efrm_pd_release(rs->pd);
@@ -176,6 +173,24 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 	if (linked && linked->linked)
 		linked = linked->linked;
 
+	/* In many cases, DMA mapping is the same for 2 PCI functions.
+	 * In Linux, the cases are:
+	 * - no iommu or swiotlb (i.e. nommu_dma_ops used);
+	 * - swiotlb, low physical address;
+	 * - 2 virtual functions, same iommu domain.
+	 * The last can be easily detected, so we do not allocate 
+	 * a separate iobufset resource, also saving iommu space.
+	 * We use pd of the first VF - but it should be OK,
+	 * since it holds iommu domain.
+	 */
+	if (linked && iommu_domain != NULL &&
+	    iommu_domain ==
+	    efrm_vf_get_iommu_domain(efrm_pd_get_vf(linked->pd))) {
+		efrm_resource_ref(&linked->rs);
+		*iobrs_out = linked;
+		return 0;
+	}
+
 	if (linked) {
 		/* This instance will share memory with another.  This is
 		 * usually used to map the buffers into another protection
@@ -211,9 +226,10 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 	}
 
 	/* Allocate an instance number. */
-	rc = kfifo_out_locked(&efrm_iobufset_manager->free_ids,
-                              (unsigned char *)&instance, sizeof(instance),
-                              &efrm_iobufset_manager->rm.rm_lock);
+	spin_lock_bh(&efrm_iobufset_manager->rm.rm_lock);
+	rc = kfifo_out(&efrm_iobufset_manager->free_ids,
+		       (unsigned char *)&instance, sizeof(instance));
+	spin_unlock_bh(&efrm_iobufset_manager->rm.rm_lock);
 	if (rc != sizeof(instance)) {
 		EFRM_WARN_LIMITED("%s: out of instances", __FUNCTION__);
 		EFRM_ASSERT(rc == 0);
@@ -233,32 +249,29 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 		   EFRM_RESOURCE_PRI_ARG(&iobrs->rs), iobrs->n_bufs);
 
 	/* Allocate or map the iobuffers. */
+	memset(iobrs->bufs, 0, iobrs->n_bufs * sizeof(iobrs->bufs[0]));
 	if (linked) {
-		memset(iobrs->bufs, 0, iobrs->n_bufs * sizeof(iobrs->bufs[0]));
-		for (i = 0; i < iobrs->n_bufs; ++i) {
-			unsigned long iova_base;
-			iova_base = vf ? efrm_vf_alloc_ioaddrs(vf, 1, NULL) : 0;
-			rc = efhw_iopage_map(iobrs->pci_dev,
-					     &linked->bufs[i], &iobrs->bufs[i],
-					     iommu_domain, iova_base);
-			if (rc < 0) {
-				EFRM_WARN("%s: failed (rc %d) to map "
-					  "page (i=%u)", __FUNCTION__, rc, i);
-				goto fail4;
-			}
-		}
+		for (i = 0; i < iobrs->n_bufs; ++i)
+			efhw_iopage_copy(&iobrs->bufs[i], &linked->bufs[i]);
 	} else {
-		memset(iobrs->bufs, 0, iobrs->n_bufs * sizeof(iobrs->bufs[0]));
 		for (i = 0; i < iobrs->n_bufs; ++i) {
-			unsigned long iova_base;
-			iova_base = vf ? efrm_vf_alloc_ioaddrs(vf, 1, NULL) : 0;
-			rc = efhw_iopage_alloc(iobrs->pci_dev,
-				&iobrs->bufs[i], iommu_domain, iova_base);
+			rc = efhw_iopage_alloc(&iobrs->bufs[i]);
 			if (rc < 0) {
 				EFRM_WARN("%s: failed (rc %d) to allocate "
 					  "page (i=%u)", __FUNCTION__, rc, i);
 				goto fail4;
 			}
+		}
+	}
+	for (i = 0; i < iobrs->n_bufs; ++i) {
+		unsigned long iova_base;
+		iova_base = vf ? efrm_vf_alloc_ioaddrs(vf, 1, NULL) : 0;
+		rc = efhw_iopage_map(iobrs->pci_dev, &iobrs->bufs[i],
+				     iommu_domain, iova_base);
+		if (rc < 0) {
+			EFRM_WARN("%s: failed (rc %d) to map "
+				  "page (i=%u)", __FUNCTION__, rc, i);
+			goto fail5;
 		}
 	}
 
@@ -273,7 +286,7 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 				EFRM_WARN("%s: failed (%d) to alloc %d buffer "
 					  "table entries", __FUNCTION__, rc,
 					  iobrs->n_bufs);
-				goto fail5;
+				goto fail6;
 			}
 			EFRM_ASSERT(((unsigned)1 << iobrs->buf_tbl_alloc.order)
 				    >= (unsigned) iobrs->n_bufs);
@@ -306,22 +319,18 @@ efrm_iobufset_resource_alloc(int n_pages, struct efrm_pd *pd,
 	*iobrs_out = iobrs;
 	return 0;
 
+fail6:
+	i = iobrs->n_bufs;
 fail5:
+	while (i--) {
+		efhw_iopage_unmap(efrm_pd_get_pci_dev(pd),
+				  &iobrs->bufs[i], iommu_domain);
+	}
 	i = iobrs->n_bufs;
 fail4:
-	if (linked) {
-		while (i--) {
-			const struct efhw_iopage *orig = &linked->bufs[i];
-			struct efhw_iopage *page = &iobrs->bufs[i];
-			efhw_iopage_unmap(efrm_pd_get_pci_dev(pd),
-					  orig, page, iommu_domain);
-		}
-	} else {
-		while (i--) {
-			struct efhw_iopage *page = &iobrs->bufs[i];
-			efhw_iopage_free(efrm_pd_get_pci_dev(pd), page,
-					 iommu_domain);
-		}
+	if (!linked) {
+		while (i--)
+			efhw_iopage_free(&iobrs->bufs[i]);
 	}
 fail3:
 	if (object_size < PAGE_SIZE)

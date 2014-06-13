@@ -42,9 +42,7 @@
  *
  *--------------------------------------------------------------------*/
 
-#include <ci/driver/efab/hardware.h>
-#include <ci/driver/efab/linux_char_internal.h>
-#include <ci/driver/efab/debug.h>
+#include "linux_char_internal.h"
 #include <ci/efhw/public.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efch/op_types.h>
@@ -63,9 +61,6 @@ MODULE_AUTHOR("Solarflare Communications");
 MODULE_LICENSE("GPL");
 
 
-static int debug_bits = __CI_DEBUGERR__;	  /* run-time debug options */
-module_param(debug_bits, int, S_IRUGO);
-MODULE_PARM_DESC(debug_bits, "Debug bits -- see debug.h");
 
 
 /*--------------------------------------------------------------------
@@ -73,9 +68,6 @@ MODULE_PARM_DESC(debug_bits, "Debug bits -- see debug.h");
  * Driver log/debug settings, exported to dependent modules (ip, iscsi)
  *
  *--------------------------------------------------------------------*/
-
-int ci_driver_debug_bits;
-EXPORT_SYMBOL(ci_driver_debug_bits);
 
 
 /************************************
@@ -148,7 +140,7 @@ ci_char_fop_open(struct inode *inode, struct file *filp)
 {
   ci_private_char_t *priv;
 
-  DEBUGVERB(ci_log("%s:", __FUNCTION__));
+  EFCH_TRACE("%s:", __FUNCTION__);
 
   if ((priv = CI_ALLOC_OBJ(ci_private_char_t)) == NULL)
     return -ENOMEM;
@@ -169,7 +161,7 @@ ci_char_fop_close(struct inode *inode, struct file *filp)
 {  
   ci_private_char_t *priv = (ci_private_char_t *) filp->private_data;
 
-  DEBUGVERB(ci_log("ci_char_fop_close"));
+  EFCH_TRACE("%s:", __FUNCTION__);
 
   /* cleanup private state */
   filp->private_data = 0;
@@ -214,8 +206,6 @@ static int init_etherfabric_char(void)
   int major = 0; /* specify default major number here */
 
   ci_set_log_prefix("[sfc_char_debug] ");
-
-  ci_driver_debug_bits = debug_bits;
 
   ci_mm_tbl_init();
 

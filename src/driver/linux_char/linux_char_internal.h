@@ -26,10 +26,10 @@
 
 /*! \cidoxg_include_ci_internal */
 
-#ifndef __CI_DRIVER_EFAB_LINUX_CHAR_INTERNAL_H__
-#define __CI_DRIVER_EFAB_LINUX_CHAR_INTERNAL_H__
+#ifndef __LINUX_CHAR_INTERNAL_H__
+#define __LINUX_CHAR_INTERNAL_H__
 
-#include <ci/driver/efab/efch.h>
+#include "efch.h"
 #include <linux/mm.h>
 #include <linux/fs.h>
 
@@ -53,5 +53,18 @@ extern void ci_mm_tbl_init(void);
 
 extern int ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma);
 
+extern int
+ci_mmap_bar(struct efhw_nic* nic, off_t base, size_t len, void* opaque,
+            int* map_num, unsigned long* offset);
 
-#endif /* __CI_DRIVER_EFAB_LINUX_CHAR_INTERNAL_H__ */
+extern void
+ci_mmap_iopage(struct efhw_iopage* p, void* opaque, int* map_num,
+	       unsigned long* offset);
+
+extern void
+ci_mmap_iopages(struct efhw_iopages* p, unsigned offset, unsigned max_bytes,
+		unsigned long* bytes, void* opaque,
+		int* map_num, unsigned long* p_offset);
+
+
+#endif /* __LINUX_CHAR_INTERNAL_H__ */

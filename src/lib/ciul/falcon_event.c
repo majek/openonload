@@ -80,16 +80,17 @@ ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_qword* ev,
 	ev_out->rx.rq_id = vi->vi_rxq.ids[desc_i];
 	vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;  /* ?? killme */
 	++vi->ep_state->rxq.removed;
+	if( QWORD_TEST_BIT(RX_SOP, *ev) )
+		ev_out->rx.flags = EF_EVENT_FLAG_SOP;
+	else
+		ev_out->rx.flags = 0;
+	if( QWORD_TEST_BIT(RX_JUMBO_CONT, *ev) )
+		ev_out->rx.flags |= EF_EVENT_FLAG_CONT;
+
 	if(likely( QWORD_TEST_BIT(RX_EV_PKT_OK, *ev) )) {
 	dont_discard:
 		ev_out->rx.len = QWORD_GET_U(RX_EV_BYTE_CNT, *ev);
 		ev_out->rx.type = EF_EVENT_TYPE_RX;
-		if( QWORD_TEST_BIT(RX_SOP, *ev) )
-			ev_out->rx.flags = EF_EVENT_FLAG_SOP;
-		else
-			ev_out->rx.flags = 0;
-		if( QWORD_TEST_BIT(RX_JUMBO_CONT, *ev) )
-			ev_out->rx.flags |= EF_EVENT_FLAG_CONT;
 		if( QWORD_TEST_BIT(RX_iSCSI_PKT_OK, *ev) )
 			ev_out->rx.flags |= EF_EVENT_FLAG_ISCSI_OK;
 		if( QWORD_TEST_BIT(RX_EV_MCAST_PKT, *ev) ) {

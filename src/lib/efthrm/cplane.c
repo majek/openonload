@@ -4067,48 +4067,50 @@ cicp_mac_set_rc(cicp_handle_t *control_plane,
  */
 extern int /* bool */
 cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
-		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id)
+		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id,
+                     ci_ifid_t ifindex)
 {
-    /* TODO: Perform any service request implied by retrieve_rc:
-       
-             Split cicp_user_service to return kernel requests and
-	     then to call cicpos_mac_reconfirm on the result
-	     
-	     Use the first half of this function prior to this call and
-	     pass the kernel requests and the version handle in to
-	     cicp_user_defer_send then call cicpos_mac_reconfirm here
-     */
+  /* TODO: Perform any service request implied by retrieve_rc:
+   *    
+   * Split cicp_user_service to return kernel requests and then to
+   * call cicpos_mac_reconfirm on the result
+   *
+   * Use the first half of this function prior to this call and pass
+   * the kernel requests and the version handle in to
+   * cicp_user_defer_send then call cicpos_mac_reconfirm here
+   */
 
-    switch (CICPOS_RETRRC_RC(retrieve_rc))
-    {	case retrrc_success:
-            return FALSE;
+  switch (CICPOS_RETRRC_RC(retrieve_rc)) {
+  case retrrc_success:
+    return FALSE;
 	      
-        case retrrc_nomac:
-	    /* The ARP table didn't have an appropriate entry readily
-	     * available. We must queue the packet until the ARP protocol
-	     * either resolves the address or it times out. */
-	    IGNORE(ci_log(CODEID": defer this send, pending ARP"););
-	    return cicppl_mac_defer_send(netif, ref_os_rc,
-				oo_tx_ip_hdr(PKT(netif, pkt_id))->ip_daddr_be32,
-			        pkt_id);
+  case retrrc_nomac:
+    /* The ARP table didn't have an appropriate entry readily
+     * available. We must queue the packet until the ARP protocol
+     * either resolves the address or it times out.
+     */
+    IGNORE(ci_log(CODEID": defer this send, pending ARP"););
+    return cicppl_mac_defer_send(netif, ref_os_rc,
+                                 oo_tx_ip_hdr(PKT(netif,pkt_id))->ip_daddr_be32,
+                                 pkt_id, ifindex);
 
-	case retrrc_noroute:
-	    CI_IPV4_STATS_INC_OUT_NO_ROUTES(netif);
-	    *ref_os_rc = -ENETUNREACH;
-	    return FALSE;
+  case retrrc_noroute:
+    CI_IPV4_STATS_INC_OUT_NO_ROUTES(netif);
+    *ref_os_rc = -ENETUNREACH;
+    return FALSE;
 
-	case retrrc_alienroute:
-	    /* if the route isn't going out of a L5 i/f, then don't send it */
-            CITP_STATS_NETIF_INC(netif, tx_discard_alien_route);
-	    *ref_os_rc = -ENETUNREACH;
-	    return FALSE;
+  case retrrc_alienroute:
+    /* if the route isn't going out of a L5 i/f, then don't send it */
+    CITP_STATS_NETIF_INC(netif, tx_discard_alien_route);
+    *ref_os_rc = -ENETUNREACH;
+    return FALSE;
 
-	default:
-	    ci_log(CODEID ": unknown code returned by cicp_user_retrieve(), "
-		   "retrieve_rc=0x%x", retrieve_rc);
-	    *ref_os_rc = -EHOSTUNREACH;
-	    return FALSE;
-    }
+  default:
+    ci_log(CODEID ": unknown code returned by cicp_user_retrieve(), "
+           "retrieve_rc=0x%x", retrieve_rc);
+    *ref_os_rc = -EHOSTUNREACH;
+    return FALSE;
+  }
 }
 
 

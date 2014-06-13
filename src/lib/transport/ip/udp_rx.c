@@ -28,6 +28,7 @@
   
 #include "ip_internal.h"
 #include "udp_internal.h"
+#include <onload/sleep.h>
 
 
 #define LPF "ci_udp_"

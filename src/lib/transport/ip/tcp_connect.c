@@ -29,6 +29,7 @@
   
 #include "ip_internal.h"
 #include <onload/common.h>
+#include <onload/sleep.h>
 
 
 #define VERB(x)
@@ -538,7 +539,6 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
   }
 
   if( s->b.state != CI_TCP_CLOSED ) {
-    ts->tcpflags |= CI_TCPT_FLAG_CONNECT_FAILED;
     /* see if progress can be made on this socket before
     ** determining status  (e.g. non-blocking connect and connect poll)*/
     if( s->b.state & CI_TCP_STATE_SYNCHRONISED ) {
@@ -723,6 +723,7 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
   ts = ci_tcp_get_state_buf(c_ni);
   if( ts == NULL ) {
     ci_netif_unlock(c_ni);
+    LOG_E(ci_log("%s: [%d] out of socket buffers", __FUNCTION__, NI_ID(c_ni)));
     return -ENOMEM;
   }
 
@@ -759,14 +760,14 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
     rc = ci_tcp_connect_ul_syn_sent(c_ni, ts);
 
   ci_netif_unlock(c_ni);
-  ci_sock_lock(c_ni, &tls->s.b);
+  ci_sock_lock_fixme(c_ni, &tls->s.b);
 
   /* Accept as from tls */
   if( !ci_tcp_acceptq_not_empty(tls) ) {
     /* it is possible, for example, if ci_tcp_listenq_try_promote() failed
      * because there are no endpoints */
     ci_sock_unlock(c_ni, &tls->s.b);
-    ci_netif_lock(c_ni);
+    ci_netif_lock_fixme(c_ni);
     citp_waitable_obj_free(c_ni, &tls->s.b);
     ci_netif_unlock(c_ni);
     return -EBUSY;
@@ -789,7 +790,7 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
    * shutdown.
    */
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
-  ci_netif_lock(c_ni);
+  ci_netif_lock_fixme(c_ni);
   citp_waitable_obj_free(c_ni, &tls->s.b);
   ci_netif_unlock(c_ni);
 
@@ -813,7 +814,7 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
     }
     else {
       ci_irqlock_unlock(&l_ep->thr->lock, &lock_flags);
-      ci_netif_lock(c_ni);
+      ci_netif_lock_fixme(c_ni);
       ci_tcp_drop(c_ni, ts, EBUSY);
       ci_bit_clear(&w->sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
       ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
@@ -825,14 +826,14 @@ int ci_tcp_connect_alien(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
 
   /* lock l_ni: Check that l_id is the same socket it used to be */
   /* create ref-sock in l_ni, put it into acc q */
-  ci_netif_lock(l_ni);
+  ci_netif_lock_fixme(l_ni);
   if( alien_tls->s.b.state != CI_TCP_LISTEN ||
       (alien_tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ||
       S_TCP_HDR(&alien_tls->s)->tcp_source_be16 != TS_TCP(ts)->tcp_dest_be16 ||
       (alien_tls->s.pkt.ip.ip_saddr_be32 != INADDR_ANY &&
        alien_tls->s.pkt.ip.ip_saddr_be32 != ts->s.pkt.ip.ip_daddr_be32) ) {
     ci_netif_unlock(l_ni);
-    ci_netif_lock(c_ni);
+    ci_netif_lock_fixme(c_ni);
     ci_tcp_drop(c_ni, ts, EBUSY);
     ci_bit_clear(&w->sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
     ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
@@ -1106,8 +1107,8 @@ static int ci_tcp_shutdown_listen(citp_socket* ep, int how, ci_fd_t fd)
   if( how == SHUT_WR )
     return 0;
 
-  ci_sock_lock(ep->netif, &tls->s.b);
-  ci_netif_lock(ep->netif);
+  ci_sock_lock_fixme(ep->netif, &tls->s.b);
+  ci_netif_lock_fixme(ep->netif);
   LOG_TC(ci_log(SK_FMT" shutdown(SHUT_RD)", SK_PRI_ARGS(ep)));
   __ci_tcp_listen_shutdown(ep->netif, tls, fd);
   __ci_tcp_listen_to_normal(ep->netif, tls);
@@ -1134,7 +1135,7 @@ int ci_tcp_shutdown(citp_socket* ep, int how, ci_fd_t fd)
   if( ep->s->b.state == CI_TCP_LISTEN )
     return ci_tcp_shutdown_listen(ep, how, fd);
 
-  ci_netif_lock(ep->netif);
+  ci_netif_lock_fixme(ep->netif);
   /* Poll to get up-to-date.  This is slightly spurious but done to ensure
    * ordered response to all packets preceding this FIN (e.g. ANVL tcp_core
    * 9.18)
@@ -1179,7 +1180,7 @@ void ci_tcp_linger(ci_netif* ni, ci_tcp_state* ts)
   }
 
   if( ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) ) {
-    ci_netif_lock(ni);
+    ci_netif_lock_fixme(ni);
     /* check we are working with the same socket, and it was not closed and
      * dropped under our feet. */
     if( ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) &&

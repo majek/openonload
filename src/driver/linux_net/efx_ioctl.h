@@ -266,7 +266,34 @@ struct efx_ts_sync {
 	struct efx_timespec ts;
 };
 
-/* Next available cmd number is 0xef17 */
+/* Get pluging module eeprom if not availble via ethtool ********************/
+#define EFX_MODULEEEPROM 0xef17
+#define EFX_GMODULEINFO 0xef18
+#ifndef ETHTOOL_GMODULEEEPROM
+	struct ethtool_modinfo {
+		__u32   cmd;
+		__u32   type;
+		__u32   eeprom_len;
+		__u32   reserved[8];
+	};
+
+	#define ETH_MODULE_SFF_8079     0x1
+	#define ETH_MODULE_SFF_8079_LEN 256
+	#define ETH_MODULE_SFF_8472     0x2
+	#define ETH_MODULE_SFF_8472_LEN 512
+
+	#define ETHTOOL_GMODULEINFO     0x00000042
+	#define ETHTOOL_GMODULEEEPROM   0x00000043
+#endif
+struct efx_get_module_eeprom {
+	struct ethtool_eeprom ee;
+};
+
+struct efx_get_module_info {
+	struct ethtool_modinfo info;
+};
+
+/* Next available cmd number is 0xef19 */
 
 /* Efx private ioctl command structures *************************************/
 
@@ -282,6 +309,8 @@ union efx_ioctl_data {
 	struct efx_ts_settime ts_settime;
 	struct efx_ts_adjtime ts_adjtime;
 	struct efx_ts_sync ts_sync;
+	struct efx_get_module_eeprom eeprom;
+	struct efx_get_module_info modinfo;
 };
 
 #ifdef EFX_NOT_UPSTREAM

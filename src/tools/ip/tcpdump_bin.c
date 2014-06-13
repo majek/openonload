@@ -278,7 +278,7 @@ static void stack_dump(ci_netif *ni)
     id = ni->state->dump_queue[ni->state->dump_read_i % CI_CFG_DUMPQUEUE_LEN];
     if( id == OO_PP_NULL )
       continue;
-    pkt = PKT_CHK(ni, id);
+    pkt = PKT_CHK_NNL(ni, id);
 
     ci_assert_gt(pkt->refcount, 0);
 
@@ -328,7 +328,7 @@ static void stack_dump(ci_netif *ni)
 
     /* Dump all scatter-gather chain */
     if( pkt->n_buffers  > 1 ) {
-      ci_ip_pkt_fmt *frag = PKT_CHK(ni, pkt->frag_next);
+      ci_ip_pkt_fmt *frag = PKT_CHK_NNL(ni, pkt->frag_next);
       do {
         hdr.caplen -= fraglen;
         fraglen = CI_MIN(hdr.caplen, frag->buf_len);
@@ -336,7 +336,7 @@ static void stack_dump(ci_netif *ni)
           dump_data(&pkt->ether_base, fraglen);
         if( OO_PP_IS_NULL(frag->frag_next) )
           break;
-        frag = PKT_CHK(ni, frag->frag_next);
+        frag = PKT_CHK_NNL(ni, frag->frag_next);
       } while( frag != NULL );
     }
 
@@ -372,7 +372,8 @@ static void stack_verify_used(ci_netif *ni)
   info.ni_exists = 0;
 
   info.ni_index = ni->state->stack_id;
-  info.ni_subop = CI_DBG_NETIF_INFO_GET_ENDPOINT_STATE;
+  info.ni_orphan = 0;
+  info.ni_subop = CI_DBG_NETIF_INFO_NOOP;
   CI_TRY(oo_ioctl(onload_fd, OO_IOC_DBG_GET_STACK_INFO, &info));
 
   ci_assert(info.ni_exists);

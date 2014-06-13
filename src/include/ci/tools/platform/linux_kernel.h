@@ -183,7 +183,9 @@ ci_inline void  __ci_vfree(void* p)    { return vfree(p);   }
  *
  */
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,36)
 #define CI_KM_SLOT KM_SOFTIRQ0
+#endif
 
 
 typedef struct semaphore ci_semaphore_t;
@@ -228,7 +230,11 @@ ci_inline void* ci_kmap_in_atomic(struct page *page)
      and in a context that can't sleep, so we need to check that
      too */
   if(ci_in_interrupt() || ci_irqs_disabled())
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,36)
+    return kmap_atomic(page);
+#else
     return kmap_atomic(page, CI_KM_SLOT);
+#endif
   else
     return kmap(page);
 }
@@ -241,7 +247,11 @@ ci_inline void ci_kunmap_in_atomic(struct page *page, void* kaddr)
      and in a context that can't sleep, so we need to check that
      too */
   if(ci_in_interrupt() || ci_irqs_disabled())
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,36)
+    kunmap_atomic(kaddr);
+#else
     kunmap_atomic(kaddr, CI_KM_SLOT);
+#endif
   else
     kunmap(page);
 }

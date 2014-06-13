@@ -29,7 +29,7 @@
 #include "ip_internal.h"
 #include <ci/internal/ip_signal.h>
 #include <ci/internal/ip_log.h>
-
+#include <linux/version.h>
 
 /*! \TODO - remove (useful for debugging though) */
 #define LOG_SIG(x)
@@ -214,7 +214,8 @@ void citp_signal_intercept_1(int signum)
   citp_signal_intercept_3(signum, NULL, NULL);
 }
 
-
+/* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
 /* SIG_DFL simulator for signals like SIGINT, SIGTERM: it is postponed
  * properly to safe shared stacks. */
 static void citp_signal_terminate(int signum, siginfo_t *info, void *context)
@@ -232,6 +233,7 @@ static void citp_signal_terminate(int signum, siginfo_t *info, void *context)
   else
     _exit(128 + signum);
 }
+#endif
 
 /*! sa_restorer used by libc (SA_SIGINFO case!) */
 static void *citp_signal_sarestorer;
@@ -298,9 +300,42 @@ void *citp_signal_sarestorer_get(void)
 
 /*! Our signal handlers for various interception types */
 sa_sigaction_t citp_signal_handlers[OO_SIGHANGLER_DFL_MAX+1] = {
-citp_signal_terminate  /*OO_SIGHANGLER_TERM*/,
+/* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
+  citp_signal_terminate  /*OO_SIGHANGLER_TERM*/,
+#else
+  NULL,
+#endif
 NULL, NULL /*OO_SIGHANGLER_STOP, OO_SIGHANGLER_CORE - TODO */
 };
+
+
+#ifndef __KERNEL__
+
+int oo_spinloop_run_pending_sigs(ci_netif* ni, citp_waitable* w,
+                                 citp_signal_info* si, int have_timeout)
+{
+  int inside_lib;
+  ci_assert_gt(si->inside_lib, 0);
+  if( have_timeout )
+    return -EINTR;
+  if( w )
+    ci_sock_unlock(ni, w);
+  inside_lib = si->inside_lib;
+  si->inside_lib = 0;
+  ci_compiler_barrier();
+  citp_signal_run_pending(si);
+  si->inside_lib = inside_lib;
+  ci_compiler_barrier();
+  if( w )
+    ci_sock_lock(ni, w);
+  if( ! si->need_restart )
+    /* handler sets need_restart, exit if no restart is necessary */
+    return -EINTR;
+  return 0;
+}
+
+#endif
 
 
 /*! \cidoxg_end */

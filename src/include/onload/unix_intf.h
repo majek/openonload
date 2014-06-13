@@ -121,7 +121,6 @@ oo_resource_op_blocking(ci_fd_t fp, ci_uint32 cmd, void* io,
                         ci_uint32 timeout_ms_in_unused,
                         ci_uint32 *timeout_ms_out_unused)
 {
-  /* In Win32 ci_resource_op and ci_resource_op_blocking differ. Not here. */
   return oo_resource_op(fp, cmd, io);
 }
 

@@ -691,27 +691,6 @@ static int ci_bonding_get_mcast_subs(int ifindex, ci_dllist* subscriptions)
 }
 
 
-static int ci_bonding_raw_send(char *ifname, ci_uint32 ip_daddr_be32,
-                               char *buf, int len)
-{
-  int rc;
-  mm_segment_t oldfs = get_fs();
-
-  set_fs(KERNEL_DS);
-  rc = sock_setsockopt(cicp_bond_raw_sock, SOL_SOCKET, SO_BINDTODEVICE, 
-                       ifname, strlen(ifname));
-  set_fs(oldfs);
-
-  if( rc != 0 )
-    OO_DEBUG_BONDING(ci_log("%s: failed to BINDTODEVICE %d",
-                            __FUNCTION__, rc));
-  else 
-    rc = cicp_raw_sock_send(cicp_bond_raw_sock, ip_daddr_be32, buf, len);
-
-  return rc;
-}
-
-
 struct igmp_v3_report {
   ci_uint8 type;
   ci_uint8 reserved1;
@@ -734,7 +713,7 @@ struct ip_router_alert_option {
   ci_uint16 value;
 };
 
-static int ci_bonding_send_igmp_report(char *netdev_name,
+static int ci_bonding_send_igmp_report(struct net_device *netdev,
                                        ci_uint32 maddr, 
                                        ci_ip_addr_net_t src)
 {
@@ -786,7 +765,8 @@ static int ci_bonding_send_igmp_report(char *netdev_name,
   csum_partial += (csum_partial >> 16u);
   report_pkt->checksum = ~csum_partial & 0xffff;
 
-  rc = ci_bonding_raw_send(netdev_name, ip->ip_daddr_be32, (char *)ip, len);
+  rc = cicp_raw_sock_send_bindtodev(netdev->ifindex, netdev->name, 
+                                    ip->ip_daddr_be32, (char *)ip, len);
 
   kfree(ip);
 
@@ -899,7 +879,7 @@ static void ci_bonding_failover(struct net_device *net_dev,
           if( cicpos_ipif_get_ifindex_ipaddr(&CI_GLOBAL_CPLANE, 
                                              net_dev->ifindex,
                                              &src) == 0 )
-            ci_bonding_send_igmp_report(net_dev->name, sub->maddr, src);
+            ci_bonding_send_igmp_report(net_dev, sub->maddr, src);
           kfree(sub);
         }
       }
@@ -1329,6 +1309,8 @@ void ci_bonding_fini(void)
 {
 #if CI_CFG_TEAMING
   atomic_set(&timer_running, 0);
+  /* See Bug30934 for why two flushes are needed */
+  ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE);
   del_timer_sync(&bonding_timer);
   ci_workqueue_flush(&CI_GLOBAL_WORKQUEUE);
 #endif

@@ -772,7 +772,7 @@ unsigned ci_netif_purge_deferred_socket_list(ci_netif* ni)
 }
 
 
-void ci_netif_unlock_slow(ci_netif* ni)
+static void ci_netif_unlock_slow(ci_netif* ni)
 {
 #ifndef __KERNEL__
   /* All we are doing here is seeing if we can avoid a syscall.  Everything
@@ -828,7 +828,7 @@ void ci_netif_unlock_slow(ci_netif* ni)
 }
 
 
-void __ci_netif_unlock(ci_netif* ni)
+void ci_netif_unlock(ci_netif* ni)
 {
   ci_assert_equal(ni->state->in_poll, 0);
   if( ni->state->lock.lock == CI_EPLOCK_LOCKED &&

@@ -27,12 +27,12 @@
 /*! \cidoxg_driver_efab */
 
 #include <ci/driver/internal.h>
-#include <ci/driver/efab/debug.h>
-#include <ci/driver/efab/mmap_iopage.h>
 #include <ci/driver/efab/hardware.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <etherfabric/ef_vi.h> /* For VI_MAPPING_* macros, vi_mappings type */
 #include <ci/efrm/efrm_client.h>
+#include "linux_char_internal.h"
+#include "char_internal.h"
 
 
 #ifndef NDEBUG
@@ -70,8 +70,7 @@ efab_vi_rm_mmap_io(struct efrm_vi *virs,
   rc =  ci_mmap_bar(nic, falcon_tx_dma_page_base(instance), len, opaque,
                     map_num, offset);
   if (rc < 0 ) {
-    DEBUGERR(ci_log("%s: Falcon control page mapping failed: %d",
-                    __FUNCTION__, rc));
+    EFCH_ERR("%s: ERROR: ci_mmap_bar failed rc=%d", __FUNCTION__, rc);
     return rc;
   }
 
@@ -83,20 +82,15 @@ efab_vi_rm_mmap_mem(struct efrm_vi *virs,
                     unsigned long *bytes, void *opaque,
                     int *map_num, unsigned long *offset)
 {
-  int rc, queue_type;
-  ci_uint32 len;
+  int queue_type;
+  uint32_t len;
 
   if( virs->q[EFHW_EVQ].capacity != 0 ) {
     len = efhw_iopages_size(&virs->q[EFHW_EVQ].pages);
     len = CI_MIN(len, *bytes);
     ci_assert_gt(len, 0);
-    rc = ci_mmap_iopages(&virs->q[EFHW_EVQ].pages, 0,
-                         len, bytes, opaque, map_num, offset);
-    if (rc < 0) {
-      DEBUGERR(ci_log("%s: Event queue mapping failed: %d",
-                      __FUNCTION__, rc));
-      return rc;
-    }
+    ci_mmap_iopages(&virs->q[EFHW_EVQ].pages, 0,
+                    len, bytes, opaque, map_num, offset);
     if(*bytes == 0)
       return 0;
   }
@@ -108,13 +102,8 @@ efab_vi_rm_mmap_mem(struct efrm_vi *virs,
       len = efhw_iopages_size(&virs->q[queue_type].pages);
       len = CI_MIN(len, *bytes);
       ci_assert_gt(len, 0);
-      rc = ci_mmap_iopages(&virs->q[queue_type].pages, 0,
-                           len, bytes, opaque, map_num, offset);
-      if (rc < 0) {
-        DEBUGERR(ci_log("%s: %s mapping failed: %d", __FUNCTION__,
-                        q_names[queue_type], rc));
-        return rc;
-      }
+      ci_mmap_iopages(&virs->q[queue_type].pages, 0,
+                      len, bytes, opaque, map_num, offset);
       if(*bytes == 0)
         return 0;
     }
@@ -182,7 +171,7 @@ efab_vi_rm_nopage_nic(struct efrm_vi *virs, unsigned *pfn_ptr,
     if( offset < len ) {
       *pfn_ptr = efhw_iopages_pfn(&virs->q[EFHW_EVQ].pages,
                                   offset >> PAGE_SHIFT);
-      DEBUGVM(ci_log("%s: Matched the EVQ", __FUNCTION__));
+      EFCH_TRACE("%s: Matched the EVQ", __FUNCTION__);
       return CI_TRUE;
     }
     offset -= len;
@@ -195,7 +184,7 @@ efab_vi_rm_nopage_nic(struct efrm_vi *virs, unsigned *pfn_ptr,
     if( offset < len ) {
       *pfn_ptr = efhw_iopages_pfn(&virs->q[queue_type].pages,
                                   offset >> PAGE_SHIFT);
-      DEBUGVM(ci_log("%s: Matched the %s", __FUNCTION__, q_names[queue_type]));
+      EFCH_TRACE("%s: Matched the %s", __FUNCTION__, q_names[queue_type]);
       return CI_TRUE;
     }
     offset -= len;

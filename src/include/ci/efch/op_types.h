@@ -17,81 +17,101 @@
 *//*! \file
 ** <L5_PRIVATE L5_HEADER >
 ** \author  djr
-**  \brief  Char driver operations API.
+**  \brief  Interface between sfc_char driver and userland.
 **   \date  2010/09/01
 **    \cop  (c) Solarflare Communications, Inc.
 ** </L5_PRIVATE>
 *//*
 \**************************************************************************/
 
-/*! \cidoxg_include_ci_efrm  */
+/*
+** README!!!!
+**
+** This header defines a stable interface between userlevel code and the
+** sfc_char driver.  DO NOT make any changes that break backwards
+** compatibility.
+*/
 
 #ifndef __CI_EFCH_OP_TYPES_H__
 #define __CI_EFCH_OP_TYPES_H__
 
+#include <ci/efch/resource_id.h>
 
-/* We use an md5sum over certain headers to ensure that userland and kernel
+
+/* We use an md5sum over certain headers to check that userland and kernel
  * drivers are built against a compatible interface.
  */
 enum { EFCH_INTF_VER_LEN = 32 };
 
 
+struct efch_timeval {
+  int32_t tv_sec;
+  int32_t tv_usec;
+};
+
+
+/**********************************************************************
+ *
+ * Allocating resources.
+ *
+ */
+
 struct efch_vi_alloc_in {
-  ci_int32            ifindex;            /* only used if no pd or vi_set */
-  ci_int32            pd_or_vi_set_fd;    /* -1 if not specified */
+  int32_t             ifindex;            /* only used if no pd or vi_set */
+  int32_t             pd_or_vi_set_fd;    /* -1 if not specified */
   efch_resource_id_t  pd_or_vi_set_rs_id;
-  ci_int32            vi_set_instance;
-  ci_int32            evq_fd;
+  int32_t             vi_set_instance;
+  int32_t             evq_fd;
   efch_resource_id_t  evq_rs_id;
-  ci_int32            evq_capacity;
-  ci_int32            txq_capacity;
-  ci_int32            rxq_capacity;
-  ci_uint32           flags;  /* EFAB_VI_* flags */
-  ci_uint8            tx_q_tag;
-  ci_uint8            rx_q_tag;
+  int32_t             evq_capacity;
+  int32_t             txq_capacity;
+  int32_t             rxq_capacity;
+  uint32_t            flags;  /* EFAB_VI_* flags */
+  uint8_t             tx_q_tag;
+  uint8_t             rx_q_tag;
 };
 
 
 struct efch_vi_alloc_out {
-  ci_int32            evq_capacity;
-  ci_int32            txq_capacity;
-  ci_int32            rxq_capacity;
-  ci_uint8            nic_arch;
-  ci_uint8            nic_variant;
-  ci_uint8            nic_revision;
-  ci_uint32           mem_mmap_bytes;
-  ci_uint32           io_mmap_bytes;
-  ci_int32            instance;
+  int32_t             evq_capacity;
+  int32_t             txq_capacity;
+  int32_t             rxq_capacity;
+  uint8_t             nic_arch;
+  uint8_t             nic_variant;
+  uint8_t             nic_revision;
+  uint32_t            mem_mmap_bytes;
+  uint32_t            io_mmap_bytes;
+  int32_t             instance;
 };
 
 
 struct efch_vi_set_alloc {
-  ci_int32            in_ifindex;         /* only used if pd_fd < 0 */
-  ci_int32            in_min_n_vis;
-  ci_uint32           in_flags;
-  ci_int32            in_pd_fd;           /* -1 if not specified */
+  int32_t             in_ifindex;         /* only used if pd_fd < 0 */
+  int32_t             in_min_n_vis;
+  uint32_t            in_flags;
+  int32_t             in_pd_fd;           /* -1 if not specified */
   efch_resource_id_t  in_pd_rs_id;
 };
 
 
 struct efch_iobufset_alloc {
-  ci_int32            in_linked_fd;
+  int32_t             in_linked_fd;
   efch_resource_id_t  in_linked_rs_id;
-  ci_int32            in_n_pages;
-  ci_int32            in_pd_or_vi_fd;
+  int32_t             in_n_pages;
+  int32_t             in_pd_or_vi_fd;
   efch_resource_id_t  in_pd_or_vi_rs_id;
-  ci_boolean_t        in_phys_addr_mode;
-  efhw_buffer_addr_t  out_bufaddr;
-  ci_uint32           out_mmap_bytes;
+  int32_t             in_phys_addr_mode;
+  uint32_t            out_bufaddr;
+  uint32_t            out_mmap_bytes;
 };
 
 
 struct efch_memreg_alloc {
-  ci_int32            in_vi_or_pd_fd;
+  int32_t             in_vi_or_pd_fd;
   efch_resource_id_t  in_vi_or_pd_id;
-  ci_uint64           in_mem_ptr;
-  ci_uint64           in_mem_bytes;
-  ci_uint64           in_addrs_out_ptr;
+  uint64_t            in_mem_ptr;
+  uint64_t            in_mem_bytes;
+  uint64_t            in_addrs_out_ptr;
   int                 in_addrs_out_stride;
 };
 
@@ -102,14 +122,14 @@ struct efch_memreg_alloc {
 
 
 struct efch_pd_alloc {
-  ci_int32            in_ifindex;
-  ci_uint32           in_flags;
+  int32_t             in_ifindex;
+  uint32_t            in_flags;
 };
 
 
 typedef struct ci_resource_alloc_s {
   char               intf_ver[EFCH_INTF_VER_LEN];
-  ci_uint32          ra_type;
+  uint32_t           ra_type;
   efch_resource_id_t out_id;
   union {
     struct efch_vi_alloc_in    vi_in;
@@ -122,9 +142,15 @@ typedef struct ci_resource_alloc_s {
 } ci_resource_alloc_t;
 
 
+/**********************************************************************
+ *
+ * Resource OPs.
+ *
+ */
+
 typedef struct ci_resource_op_s {
   efch_resource_id_t    id;
-  ci_uint32             op;
+  uint32_t              op;
 # define                CI_RSOP_VI_GET_MAC              0x49
 # define                CI_RSOP_EVENTQ_PUT              0x51
 # define                CI_RSOP_EVENTQ_WAIT             0x54
@@ -141,42 +167,82 @@ typedef struct ci_resource_op_s {
 
   union {
     struct {
-      ci_uint32         current_ptr;
-      ci_timeval_t      timeout;
-      ci_uint32         nic_index;
+      uint32_t          current_ptr;
+      struct efch_timeval timeout;
+      uint32_t          nic_index;
     } evq_wait;
     struct {
-      efhw_event_t      ev;     /* 32 + 32 bits */
+      uint64_t          ev;
     } evq_put;
     struct {
       ci_uint16         out_mtu;
     } vi_get_mtu;
     struct {
-      ci_uint8          out_mac[6];
+      uint8_t           out_mac[6];
     } vi_get_mac;
     struct {
-      ci_int32          pace;
+      int32_t           pace;
     } pt;
     struct {
       struct {
-        ci_uint8        protocol;
+        uint8_t         protocol;
         ci_int16        port_be16;
         ci_int16        rport_be16;
-        ci_uint32       host_be32;
-        ci_uint32       rhost_be32;
+        uint32_t        host_be32;
+        uint32_t        rhost_be32;
       } ip4;
       struct {
         ci_int16        vlan_id;
-        ci_uint8        mac[6];
+        uint8_t         mac[6];
       } mac;
       int               replace;
-      ci_int32          out_filter_id;
+      int32_t           out_filter_id;
     } filter_add;
     struct {
-      ci_int32          filter_id;
+      int32_t           filter_id;
     } filter_del;
   } u CI_ALIGN(8);
 } ci_resource_op_t;
+
+
+#define CI_IOC_CHAR_BASE       81
+
+#define CI_RESOURCE_OP      (CI_IOC_CHAR_BASE+ 0)  /* ioctls for resources */
+#define CI_RESOURCE_ALLOC   (CI_IOC_CHAR_BASE+ 1)  /* allocate resources   */
+#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 2)
+
+
+/**********************************************************************
+ *
+ * Memory mappings.
+ *
+ */
+
+/* mmap offsets must be page aligned, hence the bottom PAGE_SHIFT bits must
+** be zero.  To be conservative we should assume 8k pages and 32-bit
+** offset.  That leaves is with 19 bits to play with.  We current use 5 for
+** the resource id, and 12 for the map_id (total 17).
+*/
+#define EFAB_MMAP_OFFSET_MAP_ID_BITS  (19u - EFRM_RESOURCE_MAX_PER_FD_BITS)
+#define EFAB_MMAP_OFFSET_MAP_ID_MASK  ((1u << EFAB_MMAP_OFFSET_MAP_ID_BITS)-1u)
+#define EFAB_MMAP_OFFSET_ID_MASK      (EFRM_RESOURCE_MAX_PER_FD - 1u)
+
+static inline off_t
+EFAB_MMAP_OFFSET_MAKE(efch_resource_id_t id, unsigned map_id) {
+  return (id.index | (map_id << EFRM_RESOURCE_MAX_PER_FD_BITS))
+         << CI_PAGE_SHIFT;
+}
+
+static inline efch_resource_id_t
+EFAB_MMAP_OFFSET_TO_RESOURCE_ID(off_t offset) {
+  efch_resource_id_t id;
+  id.index = (offset >> CI_PAGE_SHIFT) & EFAB_MMAP_OFFSET_ID_MASK;
+  return id;
+}
+
+static inline unsigned
+EFAB_MMAP_OFFSET_TO_MAP_ID(off_t offset)
+{ return offset >> (CI_PAGE_SHIFT + EFRM_RESOURCE_MAX_PER_FD_BITS); }
 
 
 #endif  /* __CI_EFCH_OP_TYPES_H__ */

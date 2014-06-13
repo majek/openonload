@@ -218,6 +218,41 @@ static int citp_closedfd_poll(citp_fdinfo* fdinfo, struct pollfd* pfd,
 #endif
 
 
+static int citp_closedfd_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg, 
+                                 int flags)
+{
+  msg->rc = -EBADF;
+  return 1;
+}
+
+
+static int citp_closedfd_zc_recv(citp_fdinfo* fdi, 
+                                 struct onload_zc_recv_args* args)
+{
+  return -EBADF;
+}
+
+
+static int citp_closedfd_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg, 
+                                        int flags)
+{
+  return -EBADF;
+}
+
+
+static int citp_closedfd_zc_recv_filter(citp_fdinfo* fdi, 
+                                        onload_zc_recv_filter_callback filter,
+                                        void* cb_arg, int flags)
+{
+#if CI_CFG_ZC_RECV_FILTER
+  return -EBADF;
+#else
+  return -ENOSYS;
+#endif
+}
+
+
+
 citp_protocol_impl citp_closed_protocol_impl = {
   .type        = -1,
   .ops         = {
@@ -244,6 +279,10 @@ citp_protocol_impl citp_closed_protocol_impl = {
     .select	 = citp_closedfd_select,
     .poll	 = citp_closedfd_poll,
 #endif
+    .zc_send     = citp_closedfd_zc_send,
+    .zc_recv     = citp_closedfd_zc_recv,
+    .zc_recv_filter = citp_closedfd_zc_recv_filter,
+    .recvmsg_kernel = citp_closedfd_recvmsg_kernel,
   }
 };
 

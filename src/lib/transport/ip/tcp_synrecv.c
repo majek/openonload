@@ -357,6 +357,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
           }
         }
         if( ts == NULL ) {
+          LOG_TV(ci_log("%s: [%d] out of socket buffers",
+                        __FUNCTION__, NI_ID(netif)));
 	  CITP_STATS_TCP_LISTEN(++tls->stats.n_acceptq_no_sock);
           return -ENOMEM;
 	}

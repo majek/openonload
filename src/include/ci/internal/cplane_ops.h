@@ -1031,10 +1031,8 @@ cicp_ip_cache_mac_update(ci_netif* ni, ci_ip_cached_hdrs *ipcache,
         (confirm && (ipcache->flags & CI_IP_CACHE_NEED_UPDATE_SOON))) {
         ipcache->flags &= ~(CI_IP_CACHE_NEED_UPDATE_STALE |
                             CI_IP_CACHE_NEED_UPDATE_SOON);
-        cicp_mac_update(ni, &ipcache->mac_integrity, 
-                        ipcache->ip.ip_daddr_be32,
-                        ci_ip_cache_ether_dhost(ipcache),
-                        confirm);
+        cicp_mac_update(ni, &ipcache->mac_integrity, ipcache->nexthop,
+                        ci_ip_cache_ether_dhost(ipcache), confirm);
     }
 }
 
@@ -1071,13 +1069,15 @@ cicp_ip_cache_mac_update(ci_netif* ni, ci_ip_cached_hdrs *ipcache,
  */
 CICP_SYSCALL int /* bool */
 cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
-		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id)
+		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id,
+                     ci_ifid_t ifindex)
 CICP_SYSBODY(
     cp_user_defer_send_t op;
 
     op.retrieve_rc = retrieve_rc;
     op.os_rc       = *ref_os_rc;
     op.pkt         = pkt_id;
+    op.ifindex     = ifindex;
 
     oo_resource_op(CICP_DRIVER_HANDLE(netif),
                    OO_IOC_CP_USER_DEFER_SEND, &op);

@@ -16,6 +16,7 @@
 #ifndef __TCP_RX_H__
 #define __TCP_RX_H__
 
+#include <onload/sleep.h>
 
 
 ci_inline void ci_tcp_rx_set_isn(ci_tcp_state* ts, unsigned isn)

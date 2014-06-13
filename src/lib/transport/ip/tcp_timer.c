@@ -281,9 +281,16 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
   ci_assert(ts);
   ci_assert(ts->s.b.state != CI_TCP_CLOSED);
 
-  /* Window has opened up, so stop probing. */
+  /* Either 
+   * - Window has opened up;
+   * - TCP is in state where we won't send anything;
+   * - Retrans queue is not empty (and so retransmissions will be
+   *   forcing ACKs)
+   * so we can stop probing.  If retrans queue goes empty they will be
+   * restarted
+   */
   if( tcp_snd_wnd(ts) >= tcp_eff_mss(ts) ||
-      ! (ts->s.b.state & CI_TCP_STATE_CAN_FIN) ||
+      ! (ts->s.b.state & CI_TCP_STATE_TXQ_ACTIVE) ||
       ci_ip_queue_not_empty(&ts->retrans) ) {
     ts->zwin_probes = 0;
     ts->zwin_acks = 0;

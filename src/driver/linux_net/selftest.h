@@ -67,5 +67,6 @@ extern int efx_selftest(struct efx_nic *efx,
 extern void efx_selftest_async_start(struct efx_nic *efx);
 extern void efx_selftest_async_cancel(struct efx_nic *efx);
 extern void efx_selftest_async_work(struct work_struct *data);
+extern int efx_test_memory(struct efx_nic *efx);
 
 #endif /* EFX_SELFTEST_H */

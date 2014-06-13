@@ -29,7 +29,9 @@
 #define __EF_VI_LOGGING_H__
 
 
-extern int ef_log_level EF_VI_HV;
+#if !defined(NDEBUG) && !defined(__KERNEL__)
+extern int ef_log_level;
+#endif
 extern void ef_log(const char* fmt, ...);
 
 #ifdef __KERNEL__

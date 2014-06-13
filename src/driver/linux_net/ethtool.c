@@ -926,21 +926,27 @@ static int efx_ethtool_set_ringparam(struct net_device *net_dev,
 				     struct ethtool_ringparam *ring)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
+	u32 txq_entries;
 
 	if (ring->rx_mini_pending || ring->rx_jumbo_pending ||
 	    ring->rx_pending > EFX_MAX_DMAQ_SIZE ||
 	    ring->tx_pending > EFX_MAX_DMAQ_SIZE)
 		return -EINVAL;
 
-	if (ring->rx_pending < EFX_MIN_RING_SIZE ||
-	    ring->tx_pending < EFX_MIN_RING_SIZE) {
+	if (ring->rx_pending < EFX_RXQ_MIN_ENT) {
 		netif_err(efx, drv, efx->net_dev,
-			  "TX and RX queues cannot be smaller than %ld\n",
-			  EFX_MIN_RING_SIZE);
+			  "RX queues cannot be smaller than %u\n",
+			  EFX_RXQ_MIN_ENT);
 		return -EINVAL;
 	}
 
-	return efx_realloc_channels(efx, ring->rx_pending, ring->tx_pending);
+	txq_entries = max(ring->tx_pending, EFX_TXQ_MIN_ENT(efx));
+	if (txq_entries != ring->tx_pending)
+		netif_warn(efx, drv, efx->net_dev,
+			   "increasing TX queue size to minimum of %u\n",
+			   txq_entries);
+
+	return efx_realloc_channels(efx, ring->rx_pending, txq_entries);
 }
 
 static int efx_ethtool_set_pauseparam(struct net_device *net_dev,
@@ -1448,6 +1454,50 @@ static int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 }
 #endif
 
+#ifdef EFX_USE_KCOMPAT
+int efx_ethtool_get_module_eeprom(struct net_device *net_dev,
+				  struct ethtool_eeprom *ee,
+				  u8 *data)
+#else
+static int efx_ethtool_get_module_eeprom(struct net_device *net_dev,
+					 struct ethtool_eeprom *ee,
+					 u8 *data)
+#endif
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+	int ret;
+
+	if (!efx->phy_op || !efx->phy_op->get_module_eeprom)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->mac_lock);
+	ret = efx->phy_op->get_module_eeprom(efx, ee, data);
+	mutex_unlock(&efx->mac_lock);
+
+	return ret;
+}
+
+#ifdef EFX_USE_KCOMPAT
+int efx_ethtool_get_module_info(struct net_device *net_dev,
+				struct ethtool_modinfo *modinfo)
+#else
+static int efx_ethtool_get_module_info(struct net_device *net_dev,
+				       struct ethtool_modinfo *modinfo)
+#endif
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+	int ret;
+
+	if (!efx->phy_op || !efx->phy_op->get_module_info)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->mac_lock);
+	ret = efx->phy_op->get_module_info(efx, modinfo);
+	mutex_unlock(&efx->mac_lock);
+
+	return ret;
+}
+
 const struct ethtool_ops efx_ethtool_ops = {
 	.get_settings		= efx_ethtool_get_settings,
 	.set_settings		= efx_ethtool_set_settings,
@@ -1530,5 +1580,9 @@ const struct ethtool_ops efx_ethtool_ops = {
 	.get_rxfh_indir		= efx_ethtool_old_get_rxfh_indir,
 	.set_rxfh_indir		= efx_ethtool_old_set_rxfh_indir,
 #endif
+#endif
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_ETHTOOL_GMODULEEEPROM)
+	.get_module_info	= efx_ethtool_get_module_info,
+	.get_module_eeprom	= efx_ethtool_get_module_eeprom,
 #endif
 };

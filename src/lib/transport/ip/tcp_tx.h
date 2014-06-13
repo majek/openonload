@@ -77,12 +77,11 @@ ci_inline void ci_tcp_tx_finish(ci_netif* netif, ci_tcp_state* ts,
 }
 
 
-ci_inline void ci_ip_hdr_init(ci_netif* netif, ci_ip4_hdr* ip, unsigned len)
+ci_inline void ci_tcp_ip_hdr_init(ci_ip4_hdr* ip, unsigned len)
 {
   ci_assert_equal(CI_IP4_IHL(ip), sizeof(ci_ip4_hdr));
-
   ip->ip_tot_len_be16 = CI_BSWAP_BE16((ci_uint16) len);
-  ip->ip_id_be16 = NEXT_IP_ID(netif);
+  ip->ip_id_be16 = 0;
 }
 
 

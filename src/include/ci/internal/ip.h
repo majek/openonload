@@ -1476,17 +1476,6 @@ extern void ci_tcp_state_assert_valid(ci_netif*, ci_tcp_state* ts,
                                       const char* file, int line) CI_HF;
 extern void ci_tcp_state_listen_assert_valid(ci_netif*, ci_tcp_socket_listen*,
 					     const char* file, int line) CI_HF;
-extern void ci_tcp_state_retrans_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                              const char* file, int ln) CI_HF;
-extern void ci_tcp_state_send_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                           const char* file, int line) CI_HF;
-extern void ci_tcp_state_recv_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-					   int sock_locked,
-                                           const char* file, int line) CI_HF;
-extern void ci_tcp_state_rob_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                          const char* file, int line) CI_HF;
-extern void ci_tcp_state_cong_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                           const char* file, int line) CI_HF;
 extern void ci_tcp_ep_assert_valid(citp_socket*, const char*, int ln) CI_HF;
 
 
@@ -3564,12 +3553,39 @@ ci_inline int ci_sock_trylock(ci_netif* ni, citp_waitable* w)
     ci_cas32u_succeed(&w->lock.wl_val, l, l | OO_WAITABLE_LK_LOCKED);
 }
 
+/* Always returns 0 (success) at userland.  Returns -ERESTARTSYS if
+ * interrupted when invoked in kernel.  (TODO: Check that is right --
+ * possibly EINTR?).  Return value *must* be checked when invoked in
+ * kernel, else risk of proceeding without the lock held.
+ */
+ci_inline int ci_sock_lock(ci_netif*, citp_waitable*)
+  OO_MUST_CHECK_RET_IN_KERNEL;
 ci_inline int ci_sock_lock(ci_netif* ni, citp_waitable* w)
 {
   if(CI_LIKELY( ci_cas32u_succeed(&w->lock.wl_val, 0, OO_WAITABLE_LK_LOCKED) ))
     return 0;
+#ifdef __KERNEL__
   return ci_sock_lock_slow(ni, w);
+#else
+  /* Ensure the compiler knows we're returning zero, so it can optimise out
+   * any code conditional on the return value.
+   */
+  (void) ci_sock_lock_slow(ni, w);
+  return 0;
+#endif
 }
+
+/* Use of this macro indicates code that needs to be fixed!  ie. In-kernel
+ * callers of ci_sock_lock() that are not checking the return value.
+ */
+#define ci_sock_lock_fixme(ni, w)                                       \
+  do {                                                                  \
+    int rc = ci_sock_lock((ni), (w));                                   \
+    if( rc != 0 ) {                                                     \
+      LOG_E(ci_log("%s: ERROR: failed to grab sock lock", __FUNCTION__)); \
+      LOG_E(ci_log("FIXME: file=%s line=%d", __FILE__, __LINE__));      \
+    }                                                                   \
+  } while( 0 )
 
 ci_inline void ci_sock_unlock(ci_netif* ni, citp_waitable* w)
 {
@@ -3678,69 +3694,6 @@ ci_inline void ci_netif_put_on_post_poll(ci_netif* ni, citp_waitable* sb)
   ci_ni_dllist_put(ni, &ni->state->post_poll_list, &sb->post_poll_link);
 }
 
-
-ci_inline void citp_waitable_wake(ci_netif* ni, citp_waitable* sb,
-				  unsigned what)
-{
-  ci_assert(what);
-  ci_assert((what & ~(CI_SB_FLAG_WAKE_RX|CI_SB_FLAG_WAKE_TX)) == 0u);
-  ci_assert(ni->state->in_poll);
-  sb->sb_flags |= what;
-}
-
-
-ci_inline void citp_waitable_wake_not_in_poll(ci_netif* ni,
-                                              citp_waitable* sb, unsigned what)
-{
-  ci_assert(what);
-  ci_assert((what & ~(CI_SB_FLAG_WAKE_RX|CI_SB_FLAG_WAKE_TX)) == 0u);
-  ci_assert(!ni->state->in_poll);
-  ci_wmb();
-  if( what & CI_SB_FLAG_WAKE_RX )
-    ++sb->sleep_seq.rw.rx;
-  if( what & CI_SB_FLAG_WAKE_TX )
-    ++sb->sleep_seq.rw.tx;
-  ci_mb();
-  if( what & sb->wake_request ) {
-    sb->sb_flags |= what;
-    ci_netif_put_on_post_poll(ni, sb);
-    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
-  }
-}
-
-
-ci_inline void citp_waitable_wake_possibly_not_in_poll(ci_netif* ni,
-						       citp_waitable* sb,
-						       unsigned what)
-{
-  if( ni->state->in_poll )
-    citp_waitable_wake(ni, sb, what);
-  else
-    citp_waitable_wake_not_in_poll(ni, sb, what);
-}
-
-
-extern int citp_waitable_force_wake(ci_netif*, citp_waitable*) CI_HF;
-
-
-ci_inline void ci_tcp_wake(ci_netif* ni, ci_tcp_state* ts, unsigned what)
-{ citp_waitable_wake(ni, &ts->s.b, what); }
-
-ci_inline void ci_tcp_wake_not_in_poll(ci_netif* ni, ci_tcp_state* ts,
-                                       unsigned what)
-{ citp_waitable_wake_not_in_poll(ni, &ts->s.b, what); }
-
-ci_inline void ci_tcp_wake_possibly_not_in_poll(ci_netif* ni, ci_tcp_state* ts,
-                                                unsigned what)
-{ citp_waitable_wake_possibly_not_in_poll(ni, &ts->s.b, what); }
-
-
-ci_inline void ci_udp_wake(ci_netif* ni, ci_udp_state* us, unsigned what)
-{ citp_waitable_wake(ni, &us->s.b, what); }
-
-ci_inline void ci_udp_wake_possibly_not_in_poll(ci_netif* ni, ci_udp_state* us,
-                                                unsigned what)
-{ citp_waitable_wake_possibly_not_in_poll(ni, &us->s.b, what); }
 
 ci_inline int citp_shutdown_how_is_valid(int how)
 {

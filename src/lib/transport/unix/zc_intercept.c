@@ -47,6 +47,9 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
   ci_ip_pkt_fmt *pkt;
   unsigned max_len;
 
+  Log_CALL(ci_log("%s(%d, %p, %d, %x)", __FUNCTION__, fd, iovecs,
+                  iovecs_len, flags));
+
   citp_enter_lib(&lib_context);
 
   if( (fdi = citp_fdtable_lookup(fd)) != NULL ) {
@@ -71,7 +74,7 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
         iovecs[i].buf = (struct oo_zc_buf *)pkt;
         if( flags & ONLOAD_ZC_BUFFER_HDR_TCP ) {
           if( (citp_fdinfo_get_type(fdi) == CITP_TCP_SOCKET) &&
-              (epi->sock.s->b.state != CI_TCP_LISTEN) ) {
+              (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) ) {
             ci_tcp_state* ts = SOCK_TO_TCP(epi->sock.s);
             iovecs[i].iov_base = ((char *)oo_tx_ip_hdr(pkt)) + 
               ts->outgoing_hdrs_len;
@@ -120,6 +123,7 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
 
  out:
   citp_exit_lib(&lib_context, TRUE);
+  Log_CALL_RESULT(rc);
   return rc;
 }
 
@@ -132,6 +136,8 @@ int onload_zc_release_buffers(int fd, onload_zc_handle* bufs, int bufs_len)
   citp_fdinfo* fdi;
   citp_sock_fdi* epi;
   ci_netif* ni;
+
+  Log_CALL(ci_log("%s(%d, %p, %d)", __FUNCTION__, fd, bufs, bufs_len));
 
   citp_enter_lib(&lib_context);
 
@@ -170,6 +176,7 @@ int onload_zc_release_buffers(int fd, onload_zc_handle* bufs, int bufs_len)
   }
 
   citp_exit_lib(&lib_context, TRUE);
+  Log_CALL_RESULT(rc);
 
   return rc;
 }
@@ -182,6 +189,8 @@ int onload_zc_recv(int fd, struct onload_zc_recv_args* args)
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
 
+  Log_CALL(ci_log("%s(%d, %p(flags=%x))", __FUNCTION__, fd, args, args->flags));
+
   if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
     rc = citp_fdinfo_get_ops(fdi)->zc_recv(fdi, args);
     citp_fdinfo_release_ref_fast(fdi);
@@ -191,6 +200,7 @@ int onload_zc_recv(int fd, struct onload_zc_recv_args* args)
     rc = -ESOCKTNOSUPPORT;
   }
 
+  Log_CALL_RESULT(rc);
   return rc;
 }
 
@@ -198,9 +208,11 @@ int onload_zc_recv(int fd, struct onload_zc_recv_args* args)
 
 int onload_zc_send(struct onload_zc_mmsg* msgs, int mlen, int flags)
 {
-  int rc, done = 0, last_fd = -1, i;
+  int done = 0, last_fd = -1, i;
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi = NULL;
+
+  Log_CALL(ci_log("%s(%p, %d, %x)", __FUNCTION__, msgs, mlen, flags));
 
   citp_enter_lib(&lib_context);
 
@@ -217,11 +229,10 @@ int onload_zc_send(struct onload_zc_mmsg* msgs, int mlen, int flags)
       last_fd = msgs[i].fd;
     }
 
-    rc = citp_fdinfo_get_ops(fdi)->zc_send(fdi, &msgs[i], flags);
+    CI_TRY_EQ( citp_fdinfo_get_ops(fdi)->zc_send(fdi, &msgs[i], flags), 1);
     /* If we got an error, return the number of msgs that have had
      * rc set and exit.  fd_op should have updated msgs.rc appropriately
      */
-    ci_assert_equal(rc, 1);
     ++done;
     if( msgs[i].rc < 0 )
       goto out;
@@ -237,6 +248,7 @@ int onload_zc_send(struct onload_zc_mmsg* msgs, int mlen, int flags)
   ci_assert_gt(done, 0);
   ci_assert_le(done, mlen);
 
+  Log_CALL_RESULT(done);
   return done;
 }
 
@@ -248,6 +260,9 @@ int onload_set_recv_filter(int fd, onload_zc_recv_filter_callback filter,
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
 
+  Log_CALL(ci_log("%s(%d, %p, %p, %x)", __FUNCTION__, fd, filter,
+                  cb_arg, flags));
+
   if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
     rc = citp_fdinfo_get_ops(fdi)->zc_recv_filter(fdi, filter, cb_arg, flags);
     citp_fdinfo_release_ref_fast(fdi);
@@ -257,6 +272,7 @@ int onload_set_recv_filter(int fd, onload_zc_recv_filter_callback filter,
     rc = -ESOCKTNOSUPPORT;
   }
 
+  Log_CALL_RESULT(rc);
   return rc;
 }
 
@@ -267,6 +283,8 @@ int onload_recvmsg_kernel(int fd, struct msghdr *msg, int flags)
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
 
+  Log_CALL(ci_log("%s(%d, %p, %x)", __FUNCTION__, fd, msg, flags));
+
   if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
     rc = citp_fdinfo_get_ops(fdi)->recvmsg_kernel(fdi, msg, flags);
     citp_fdinfo_release_ref_fast(fdi);
@@ -276,5 +294,6 @@ int onload_recvmsg_kernel(int fd, struct msghdr *msg, int flags)
     rc = -ESOCKTNOSUPPORT;
   }
 
+  Log_CALL_RESULT(rc);
   return rc; 
 }

@@ -51,7 +51,6 @@ citp_tcp_socket(int domain, int type, int protocol)
   citp_fdinfo* fdi;
   citp_sock_fdi* epi;
   int fd, rc;
-  ci_sock_cmn* s;
   ci_netif* ni;
 
   Log_VSS(ci_log(LPF "socket(%d, %d, %d)", domain, type, protocol));
@@ -68,6 +67,8 @@ citp_tcp_socket(int domain, int type, int protocol)
   rc = citp_netif_alloc_and_init(&fd, &ni);
   if( rc != 0 ) {
     if( rc == CI_SOCKET_HANDOVER ) {
+      /* This implies EF_DONT_ACCELERATE is set, so we handover
+       * regardless of CITP_OPTS.no_fail */
       CI_FREE_OBJ(fdi);
       return rc;
     }
@@ -85,8 +86,7 @@ citp_tcp_socket(int domain, int type, int protocol)
   citp_fdtable_new_fd_set(fd, fdip_busy, fdtable_strict());
   if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
 
-  s = epi->sock.s;
-  CI_DEBUG(s->pid = getpid());
+  CI_DEBUG(epi->sock.s->pid = getpid());
 
   /* We're ready.  Unleash us onto the world! */
   citp_fdtable_insert(fdi, fd, 0);
@@ -556,6 +556,7 @@ check_ul_accept_q:
           }
           rc = citp_tcp_accept_ul(fdinfo, ni, listener, sa, p_sa_len, flags);
           if( rc < 0 && errno != EMFILE ) {
+            CITP_STATS_TCP_LISTEN(++listener->stats.n_accept_loop2_closed);
             ci_log("%s: failed to accept connection: errno=%d",
                    __FUNCTION__, errno);
             ci_log("See limitations of EF_TCP_*_LOOPBACK=2 mode");

@@ -2278,24 +2278,27 @@ static int efx_probe_all(struct efx_nic *efx)
 	}
 
 	efx->rxq_entries = rx_ring;
-	efx->txq_entries = tx_ring;
+	efx->txq_entries = max(tx_ring, EFX_TXQ_MIN_ENT(efx));
 
-	if (efx->rxq_entries < EFX_MIN_RING_SIZE ||
+	if (efx->rxq_entries < EFX_RXQ_MIN_ENT ||
 	    efx->rxq_entries > EFX_MAX_DMAQ_SIZE) {
 		netif_err(efx, drv, efx->net_dev,
-			  "rx_ring parameter must be between %ld and %ld",
-			  EFX_MIN_RING_SIZE, EFX_MAX_DMAQ_SIZE);
+			  "rx_ring parameter must be between %u and %lu",
+			  EFX_RXQ_MIN_ENT, EFX_MAX_DMAQ_SIZE);
 		rc = -EINVAL;
 		goto fail3;
 	}
-	if (efx->txq_entries < EFX_MIN_RING_SIZE ||
-	    efx->txq_entries > EFX_MAX_DMAQ_SIZE) {
+	if (efx->txq_entries > EFX_MAX_DMAQ_SIZE) {
 		netif_err(efx, drv, efx->net_dev,
-			  "tx_ring parameter must be between %ld and %ld",
-			  EFX_MIN_RING_SIZE, EFX_MAX_DMAQ_SIZE);
+			  "tx_ring parameter must be no greater than %lu",
+			  EFX_MAX_DMAQ_SIZE);
 		rc = -EINVAL;
 		goto fail3;
 	}
+	if (efx->txq_entries != tx_ring)
+		netif_warn(efx, drv, efx->net_dev,
+			   "increasing TX queue size to minimum of %u\n",
+			   efx->txq_entries);
 
 #ifdef EFX_NOT_UPSTREAM
 	if (!rx_hash_insert) {
@@ -2648,7 +2651,9 @@ static int efx_ioctl(struct net_device *net_dev, struct ifreq *ifr, int cmd)
 		return efx_ptp_ioctl(efx, ifr, cmd);
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) || (defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RESET))
+#if defined(EFX_NOT_UPSTREAM) || (defined(EFX_USE_KCOMPAT) &&  \
+				  (!defined(EFX_HAVE_ETHTOOL_RESET) || \
+				   !defined(EFX_HAVE_ETHTOOL_GMODULEEEPROM)))
 	if (cmd == SIOCEFX) {
 		struct efx_sock_ioctl __user *user_data =
 			(struct efx_sock_ioctl __user *)ifr->ifr_data;

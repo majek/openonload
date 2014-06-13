@@ -294,6 +294,70 @@ efx_ioctl_ts_sync(struct efx_nic *efx, union efx_ioctl_data *data)
 
 #endif
 
+static int
+efx_ioctl_get_mod_eeprom(struct efx_nic *efx,
+			 union efx_ioctl_data __user *useraddr)
+{
+	struct ethtool_eeprom eeprom;
+	struct ethtool_modinfo modinfo;
+	void __user *userbuf = ((void *)&useraddr->eeprom.ee) + sizeof(eeprom);
+	void __user *userbufptr = userbuf;
+	u32 bytes_remaining;
+	u32 total_len;
+	u8 *data;
+	int ret = 0;
+
+	if (efx_ethtool_get_module_info(efx->net_dev, &modinfo))
+		return -EINVAL;
+
+	total_len = modinfo.eeprom_len;
+
+	if (copy_from_user(&eeprom, &useraddr->eeprom.ee, sizeof(eeprom)))
+		return -EFAULT;
+
+	/* Check for wrap and zero */
+	if (eeprom.offset + eeprom.len <= eeprom.offset)
+		return -EINVAL;
+
+	/* Check for exceeding total eeprom len */
+	if (eeprom.offset + eeprom.len > total_len)
+		return -EINVAL;
+
+	data = kmalloc(PAGE_SIZE, GFP_USER);
+	if (!data)
+		return -ENOMEM;
+
+	bytes_remaining = eeprom.len;
+	while (bytes_remaining > 0) {
+		eeprom.len = min(bytes_remaining, (u32)PAGE_SIZE);
+
+		ret = efx_ethtool_get_module_eeprom(efx->net_dev, &eeprom, data);
+		if (ret)
+			break;
+		if (copy_to_user(userbuf, data, eeprom.len)) {
+			ret = -EFAULT;
+			break;
+		}
+		userbuf += eeprom.len;
+		eeprom.offset += eeprom.len;
+		bytes_remaining -= eeprom.len;
+	}
+
+	eeprom.len = userbuf - userbufptr;
+	eeprom.offset -= eeprom.len;
+	if (copy_to_user(&useraddr->eeprom.ee, &eeprom, sizeof(eeprom)))
+		ret = -EFAULT;
+
+	kfree(data);
+	return ret;
+}
+
+static int
+efx_ioctl_get_mod_info(struct efx_nic *efx, union efx_ioctl_data *data)
+{
+	return efx_ethtool_get_module_info(efx->net_dev, &data->modinfo.info);
+}
+
 /*****************************************************************************/
 
 int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
@@ -355,6 +419,13 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		op = efx_ioctl_ts_sync;
 		break;
 #endif
+	case EFX_MODULEEEPROM:
+		return efx_ioctl_get_mod_eeprom(efx, user_data);
+
+	case EFX_GMODULEINFO:
+		size = sizeof(data.modinfo);
+		op = efx_ioctl_get_mod_info;
+		break;
 	default:
 		netif_err(efx, drv, efx->net_dev,
 			  "unknown private ioctl cmd %x\n", cmd);

@@ -77,6 +77,11 @@
 # endif
 #endif
 
+#ifdef CONFIG_IOMMU_API
+/* bugs 30703, 30644: for Intel IOMMU, we serialise attach/detach calls.
+ * bug 30725: for AMD IOMMU, we serialise unmap/detach calls. */
+DEFINE_MUTEX(efrm_iommu_mutex);
+#endif
 
 #ifdef CONFIG_PCI_IOV
 
@@ -84,12 +89,39 @@ struct vf_init_status {
 	struct efhw_iopage req;
 	struct efhw_iopage status;
 	unsigned int req_seq;
+	char *bar;
 	struct efrm_vf *vf;
 };
 
-extern int unsafe_sriov_without_iommu;
+
 extern int claim_vf;
+
+static int unsafe_sriov_without_iommu = 0;
+module_param(unsafe_sriov_without_iommu, int, S_IRUGO);
+MODULE_PARM_DESC(unsafe_sriov_without_iommu,
+"Enable PCI SRIOV support even if there is no IOMMU.  INSECURE!  "
+"Enable this only if you trust all applications run with onload.");
+
+static int use_threaded_irq = 2;
+module_param(use_threaded_irq, int, S_IRUGO);
+MODULE_PARM_DESC(use_threaded_irq,
+"Use threaded IRQ for PCI virtual functions.  It is necessary when "
+"AMD IOMMU is in use, but threaded IRQs are bad for latency.  "
+"Set this to 2(default) to get this detected automatically.");
+/* efrm_vf_use_threaded_irq =
+ *       use_threaded_irq==2 ? autodetect() : use_threaded_irq */
+int efrm_vf_use_threaded_irq = -1;
+EXPORT_SYMBOL(efrm_vf_use_threaded_irq);
+
 #if defined(CONFIG_IOMMU_API)
+#define IOMMU_TYPE_UNKNOWN 0
+#define IOMMU_TYPE_INTEL   1
+#define IOMMU_TYPE_AMD     2
+static int iommu_type = IOMMU_TYPE_UNKNOWN;
+module_param(iommu_type, int, S_IRUGO);
+MODULE_PARM_DESC(iommu_type,
+"1 to assume Intel IOMMU, 2 to assume AMD IOMMU, 0 to autodetect if possible");
+
 static int checked_vfs_bound;
 static const char *sfc_resource_vfs_bound = "/dev/shm/sfc_resource_vfs_bound";
 #endif
@@ -126,7 +158,7 @@ EFRM_PRINTK_PREFIX\
  * Map BAR
  *
  ****************************************************************************/
-static int __devinit vf_map_bar(struct efrm_vf *vf)
+static int vf_map_bar(struct efrm_vf *vf, char **bar_ptr)
 {
 	int rc = -ENOTSUPP;
 	uint64_t dma_mask;
@@ -162,20 +194,17 @@ static int __devinit vf_map_bar(struct efrm_vf *vf)
 		pci_release_region(vf->pci_dev, 0);
 		return -ENOMEM;
 	}
-	vf->bar = ptr;
-	EFRM_TRACE("%s: map BAR0 %p", pci_name(vf->pci_dev), vf->bar);
+	*bar_ptr = ptr;
+	EFRM_TRACE("%s: map BAR0 %p", pci_name(vf->pci_dev), ptr);
 
 	return 0;
 }
 
-static void vf_unmap_bar(struct efrm_vf *vf)
+static void vf_unmap_bar(struct efrm_vf *vf, void *bar)
 {
-	if (vf->bar) {
-		iounmap(vf->bar);
-		vf->bar = NULL;
-
-		pci_release_region(vf->pci_dev, 0);
-	}
+	EFRM_ASSERT(bar);
+	iounmap(bar);
+	pci_release_region(vf->pci_dev, 0);
 }
 
 /****************************************************************************
@@ -187,7 +216,7 @@ static void vf_unmap_bar(struct efrm_vf *vf)
  * Let's keep in the middle: enable once, but only when necessary.
  *
  ****************************************************************************/
-int efrm_vf_interrupts_probe(struct efrm_vf *vf)
+static int efrm_vf_interrupts_probe(struct efrm_vf *vf)
 {
 	struct pci_dev *pci_dev = vf->pci_dev;
 	struct msix_entry *msix;
@@ -243,7 +272,6 @@ fail:
  *
  * VFDI
  * We should move this to lib/efrm, since VFDI interface is OS-independent.
- * However, it is currently defined in driver/linux_net/vfdi.h, so no luck.
  *
  *********************************************************************/
 static int __devinit vf_vfdi_req(struct vf_init_status *vf_ini)
@@ -264,7 +292,7 @@ static int __devinit vf_vfdi_req(struct vf_init_status *vf_ini)
 				     VFDI_EV_SEQ, vf_ini->req_seq & 0xff,
 				     VFDI_EV_TYPE, type,
 				     VFDI_EV_DATA, data & 0xffff);
-		writel(dword.u32[0], vf_ini->vf->bar + FR_CZ_USR_EV);
+		writel(dword.u32[0], vf_ini->bar + FR_CZ_USR_EV);
 		wmb();
 		vf_ini->req_seq++;
 	}
@@ -423,22 +451,22 @@ static inline int use_iommu(struct pci_dev *pci_dev) {
 
 static int __devinit vf_alloc_page(struct vf_init_status *vf_ini,
 				   const char *type,
-				   struct efhw_iopage *iommu_mapping)
+				   struct efhw_iopage *map)
 {
 	struct pci_dev *pci_dev = vf_ini->vf->pci_dev;
 	int rc = 0;
 #ifdef CONFIG_IOMMU_API
 	struct efrm_vf *vf = vf_ini->vf;
-	if (use_iommu(pci_dev)) {
+	if (vf_ini->vf->iommu_domain) {
 		struct page *page = alloc_page(GFP_KERNEL);
 		if (!page) {
 			EFRM_ERR("%s %s: failed to allocate VFDI %s page",
 				 pci_name(pci_dev), __func__, type);
 			return -ENOMEM;
 		}
-		iommu_mapping->kva = page_address(page);
-		iommu_mapping->dma_addr = efrm_vf_alloc_ioaddrs(vf, 1, NULL);
-		rc = iommu_map(vf->iommu_domain, iommu_mapping->dma_addr,
+		map->kva = page_address(page);
+		map->dma_addr = efrm_vf_alloc_ioaddrs(vf, 1, NULL);
+		rc = iommu_map(vf->iommu_domain, map->dma_addr,
 			       page_to_phys(page), 0, vf->iommu_prot);
 		if (rc) {
 			EFRM_ERR("%s %s: failed IOMMU mapping VFDI %s page: %d",
@@ -449,10 +477,9 @@ static int __devinit vf_alloc_page(struct vf_init_status *vf_ini,
 	} else
 #endif
 	{
-		iommu_mapping->kva =
-			pci_alloc_consistent(pci_dev, PAGE_SIZE,
-					     &iommu_mapping->dma_addr);
-		if (iommu_mapping->kva == NULL) {
+		map->kva = pci_alloc_consistent(pci_dev, PAGE_SIZE,
+						&map->dma_addr);
+		if (map->kva == NULL) {
 			EFRM_ERR("%s %s: failed allocate VFDI %s page: %d",
 				 pci_name(pci_dev), __func__, type, rc);
 			return -ENOMEM;
@@ -463,37 +490,29 @@ static int __devinit vf_alloc_page(struct vf_init_status *vf_ini,
 
 
 static void __devinit vf_free_page(struct vf_init_status *vf_ini,
-				   struct efhw_iopage *iommu_mapping)
+				   struct efhw_iopage *map)
 {
 	struct pci_dev *pci_dev = vf_ini->vf->pci_dev;
 #ifdef CONFIG_IOMMU_API
-	if (use_iommu(pci_dev)) {
+	if (vf_ini->vf->iommu_domain) {
 		int rc;
+		mutex_lock(&efrm_iommu_mutex);
 		rc = iommu_unmap(vf_ini->vf->iommu_domain,
-				 iommu_mapping->dma_addr, 0);
+				 map->dma_addr, 0);
+		mutex_unlock(&efrm_iommu_mutex);
 		EFRM_ASSERT(rc == 0);
-		free_page((unsigned long)iommu_mapping->kva);
+		free_page((unsigned long)map->kva);
 	} else
 #endif
-        {
-	pci_free_consistent(pci_dev, PAGE_SIZE, iommu_mapping->kva,
-			    iommu_mapping->dma_addr);
-	}
+	pci_free_consistent(pci_dev, PAGE_SIZE, map->kva, map->dma_addr);
 }
 
 
 #ifdef CONFIG_IOMMU_API
 static int __devinit check_intel_iommu_bind_once(void)
 {
-# if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,21)
-	struct acpi_table_header *acpi_dmar;
-
-	/* "intel_iommu_enabled" symbol not always available */
-	if (ACPI_FAILURE(acpi_get_table("DMAR", 0, &acpi_dmar)))
+	if (iommu_type != IOMMU_TYPE_INTEL)
 		return 0;
-# else
-	/* Cannot detect if Intel IOMMU is in use; hence assume yes */
-# endif
 
 	/*
 	 * SFC bug 27457: the intel-iommu driver is often seen to fault after
@@ -519,8 +538,61 @@ static int __devinit check_intel_iommu_bind_once(void)
 	}
 	return 0;
 }
+
+static int __devinit find_iommu_type(struct pci_dev *pci_dev)
+{
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
+	struct acpi_table_header *acpi_tbl;
 #endif
 
+	if (!iommu_present(pci_dev->dev.bus))
+		return IOMMU_TYPE_UNKNOWN;
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,18)
+	/* !RHEL5 */
+	if (!ACPI_FAILURE(acpi_get_table("IVRS", 0, &acpi_tbl)))
+		return IOMMU_TYPE_AMD;
+	/* "intel_iommu_enabled" symbol not always available */
+	if (!ACPI_FAILURE(acpi_get_table("DMAR", 0, &acpi_tbl)))
+		return IOMMU_TYPE_INTEL;
+#endif
+
+	EFRM_WARN_ONCE("Can not detect IOMMU type: "
+		       "do not bind to PCI VFs such as %s",
+		       pci_name(pci_dev));
+	return IOMMU_TYPE_UNKNOWN;
+}
+
+/* Returns the value for efrm_vf_use_threaded_irq. */
+static int __devinit check_threaded_irq(struct pci_dev *pci_dev)
+{
+	if (use_threaded_irq == 1)
+		return 1;
+
+	if (!iommu_present(pci_dev->dev.bus))
+		return 0;
+
+	EFRM_ASSERT(iommu_type != IOMMU_TYPE_UNKNOWN);
+	if (iommu_type != IOMMU_TYPE_AMD)
+		return 0;
+
+	/* We see IOMMU used and AMD IOMMU present.  Non-threaded IRQ
+	 * will not work properly. */
+	if (use_threaded_irq == 2)
+		return 1;
+
+	EFRM_WARN("Forcing non-threaded IRQ despite AMD IOMMU "
+		  "presence.  If unsure, use use_threaded_irq=2 "
+		  "module parameter for %s.", THIS_MODULE->name);
+	return 0;
+}
+
+static int efrm_vf_alloc_init_iommu(struct efrm_vf *vf,
+				    struct efrm_vf *linked);
+#endif
+
+
+void efrm_vf_free_reset(struct efrm_vf *vf);
 
 static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
 				       const struct pci_device_id *entry)
@@ -532,6 +604,20 @@ static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	/* Check if we really want to bind to this VF */
 	if (!claim_vf)
 		return -ENODEV;
+
+	/* Check our environment when the first VF is probed */
+	if (efrm_vf_use_threaded_irq == -1) {
+#ifdef CONFIG_IOMMU_API
+		if (iommu_type == IOMMU_TYPE_UNKNOWN)
+			iommu_type = find_iommu_type(pci_dev);
+		if (iommu_type == IOMMU_TYPE_UNKNOWN)
+			return -ENODEV;
+		efrm_vf_use_threaded_irq = check_threaded_irq(pci_dev);
+#else
+		efrm_vf_use_threaded_irq =
+			use_threaded_irq == 2 ? 0 : use_threaded_irq;
+#endif
+	}
 
 #ifdef CONFIG_IOMMU_API
 	if (!unsafe_sriov_without_iommu) {
@@ -576,36 +662,10 @@ static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	vf->pci_dev_fn = pci_dev->devfn;
 
 #ifdef CONFIG_IOMMU_API
-	if (use_iommu(pci_dev)) {
-		vf->iommu_domain = iommu_domain_alloc(pci_dev->dev.bus);
-		if (!vf->iommu_domain) {
-			EFRM_ERR("%s %s: failed to allocate IOMMU domain",
-				 pci_name(pci_dev), __func__);
-			rc = -ENOMEM;
-			goto fail1;
-		}
-
-		vf->iommu_prot = IOMMU_READ | IOMMU_WRITE;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-		if (iommu_domain_has_cap(vf->iommu_domain,
-					 IOMMU_CAP_CACHE_COHERENCY))
-			vf->iommu_prot |= IOMMU_CACHE;
-#elif defined(RHEL_MAJOR) && defined(IOMMU_CACHE)
-		/*
-		 * Missing from the RHEL5 IOMMU API although present in .h
-		 * Only the intel-iommu driver is sensitive to this flag
-		 * Set IOMMU_CACHE to be most consistent across distros
-		 */
-		vf->iommu_prot |= IOMMU_CACHE;
-#endif
-
-		rc = iommu_attach_device(vf->iommu_domain, &pci_dev->dev);
-		if (rc != 0) {
-			EFRM_ERR("%s %s: failed to attach to IOMMU domain",
-				 pci_name(pci_dev), __func__);
-			goto fail2;
-		}
+	if (use_iommu(pci_dev) && iommu_type == IOMMU_TYPE_AMD) {
+		efrm_vf_alloc_init_iommu(vf, NULL);
+		vf->iova_base = 0;
+		vf->iova_basep = &vf->iova_base;
 	}
 #endif
 
@@ -619,7 +679,7 @@ static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	pci_set_master(pci_dev);
 
 	/* Map the BAR */
-	rc = vf_map_bar(vf);
+	rc = vf_map_bar(vf, &vf_ini.bar);
 	if (rc != 0) {
 		EFRM_ERR("%s %s: failed to map PCI BAR for VF: %d",
 			pci_name(pci_dev), __func__, rc);
@@ -651,7 +711,9 @@ static int __devinit efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	vf_fini_status(&vf_ini);
 	vf_free_page(&vf_ini, &vf_ini.status);
 	vf_free_page(&vf_ini, &vf_ini.req);
+	vf_unmap_bar(vf, vf_ini.bar);
 
+	efrm_vf_free_reset(vf);
 
 	rc = efrm_vf_probed(vf);
 	if (rc != 0) {
@@ -668,19 +730,11 @@ fail7:
 fail6:
 	vf_free_page(&vf_ini, &vf_ini.req);
 fail5:
-	vf_unmap_bar(vf);
+	vf_unmap_bar(vf, vf_ini.bar);
 fail4:
 	/* pci_clear_master is called from pci_disable_device */
 	pci_disable_device(pci_dev);
 fail3:
-#ifdef CONFIG_IOMMU_API
-	if (use_iommu(pci_dev))
-		iommu_detach_device(vf->iommu_domain, &pci_dev->dev);
-fail2:
-	if (use_iommu(pci_dev))
-		iommu_domain_free(vf->iommu_domain);
-fail1:
-#endif
 	kfree(vf);
 	return rc;
 }
@@ -711,24 +765,138 @@ static void __devinit efrm_pci_vf_remove(struct pci_dev *pci_dev)
 	pci_disable_msix(pci_dev);
 	pci_set_drvdata(pci_dev, NULL);
 
-	vf_unmap_bar(vf);
 	/* pci_clear_master is called from pci_disable_device */
 	pci_disable_device(pci_dev);
 
-#ifdef CONFIG_IOMMU_API
-	/*
-	 * If not using kernel params "intel_iommu=on,strict" OR
-	 * "amd_iommu=on,fullflush" this may lazily flush the IOTLB; but
-	 * considering that the VF device has been disabled above this is safe
-	 */
-	if (use_iommu(pci_dev)) {
-		iommu_detach_device(vf->iommu_domain, &pci_dev->dev);
-		iommu_domain_free(vf->iommu_domain);
-	}
-#endif
 	kfree(vf);
 }
 
+
+#ifdef CONFIG_IOMMU_API
+static int efrm_vf_iommu_alloc(struct efrm_vf *vf)
+{
+	struct pci_dev *pci_dev = vf->pci_dev;
+
+	vf->iommu_domain = iommu_domain_alloc(pci_dev->dev.bus);
+	if (!vf->iommu_domain) {
+		EFRM_ERR("%s %s: failed to allocate IOMMU domain",
+			 pci_name(pci_dev), __func__);
+		return -ENOMEM;
+	}
+
+	vf->iommu_prot = IOMMU_READ | IOMMU_WRITE;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
+	if (iommu_domain_has_cap(vf->iommu_domain,
+				 IOMMU_CAP_CACHE_COHERENCY))
+		vf->iommu_prot |= IOMMU_CACHE;
+#elif defined(RHEL_MAJOR) && defined(IOMMU_CACHE)
+	/*
+	 * Missing from the RHEL5 IOMMU API although present in .h
+	 * Only the intel-iommu driver is sensitive to this flag
+	 * Set IOMMU_CACHE to be most consistent across distros
+	 */
+	vf->iommu_prot |= IOMMU_CACHE;
+#endif
+
+	/* VFDI assumes 0 to be req address; avoid it. */
+	vf->iova_base = PAGE_SIZE;
+	vf->iova_basep = &vf->iova_base;
+	return 0;
+}
+
+static void efrm_vf_iommu_share(struct efrm_vf *vf, struct efrm_vf *linked)
+{
+	EFRM_ASSERT(iommu_present(linked->pci_dev->dev.bus));
+	EFRM_ASSERT(linked->iommu_domain);
+	EFRM_ASSERT(linked->pci_dev->dev.bus == vf->pci_dev->dev.bus);
+	vf->iommu_domain = linked->iommu_domain;
+	vf->iommu_prot = linked->iommu_prot;
+	vf->iova_basep = &linked->iova_base;
+	vf->linked = linked;
+	efrm_resource_ref(&linked->rs);
+}
+
+static int efrm_vf_alloc_init_iommu(struct efrm_vf *vf,
+				    struct efrm_vf *linked)
+{
+	int rc;
+
+	EFRM_TRACE("%s(%p, %p): %s", __func__, vf, linked,
+		   pci_name(vf->pci_dev));
+	if (linked)
+		efrm_vf_iommu_share(vf, linked);
+	else {
+		rc = efrm_vf_iommu_alloc(vf);
+		if (rc != 0) {
+			/* Error was already printed */
+			return rc;
+		}
+	}
+
+	mutex_lock(&efrm_iommu_mutex);
+	rc = iommu_attach_device(vf->iommu_domain, &vf->pci_dev->dev);
+	mutex_unlock(&efrm_iommu_mutex);
+	if (rc != 0) {
+		EFRM_ERR("%s %s: failed to attach to IOMMU domain: %d",
+			 pci_name(vf->pci_dev), __func__, rc);
+		if (linked)
+			efrm_vf_resource_release(vf->linked);
+		else
+			iommu_domain_free(vf->iommu_domain);
+		return rc;
+	}
+
+	return 0;
+}
+#endif
+
+void efrm_vf_free_reset(struct efrm_vf *vf)
+{
+#ifdef CONFIG_IOMMU_API
+	if (vf->iommu_domain) {
+		/* On RHEL6 2.6.32-131.0.15.el6.x86_64 intel_iommu,
+		 * things do not work if you call iommu_detach_device().
+		 * You'll see the problem when VF is re-used next time.
+		 * In theory, iommu_detach_device is
+		 * domain_remove_one_dev_info, while iommu_domain_free is
+		 * vm_domain_remove_all_dev_info, so ther should not be any
+		 * difference.
+		 * From the other side, iommu_domain_free must do its work
+		 * even without iommu_detach_device .
+		 * But it does not on AMD. */
+		if (vf->linked || iommu_type != IOMMU_TYPE_INTEL) {
+			mutex_lock(&efrm_iommu_mutex);
+			iommu_detach_device(vf->iommu_domain,
+					    &vf->pci_dev->dev);
+			mutex_unlock(&efrm_iommu_mutex);
+		}
+
+		if (vf->linked)
+			efrm_vf_resource_release(vf->linked);
+		else
+			iommu_domain_free(vf->iommu_domain);
+	}
+#endif
+}
+
+int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked)
+{
+	int rc = 0;
+
+	/* Probe interrupts if it is our first time */
+	if (vf->irq_count == 0 && (rc = efrm_vf_interrupts_probe(vf)) != 0) {
+		return rc;
+	}
+	EFRM_ASSERT(vf->vi_count);
+
+#ifdef CONFIG_IOMMU_API
+	if (use_iommu(vf->pci_dev))
+		return efrm_vf_alloc_init_iommu(vf, linked);
+#endif
+
+	return 0;
+}
 
 /*********************************************************************
  *
@@ -939,17 +1107,25 @@ int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu)
  *
  *********************************************************************/
 
-void efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
+int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
 {
 	struct efrm_vf *vf = virs->allocation.vf;
 	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
 					vf->vi_base];
 	unsigned int ticks, mode;
 	efx_dword_t cmd;
+	char *bar;
+	int rc;
 
 	if (vi->irq_usec == usec)
-		return;
+		return 0;
 	vi->irq_usec = usec;
+
+	/* This is the only place where we use PCI bar.
+	 * If we need it in other place, we should store it in vf and unmap
+	 * from efrm_vf_free_reset */
+	if ((rc = vf_map_bar(vf, &bar)) != 0)
+		return rc;
 
 	if (usec <= 0) {
 		ticks = 0;
@@ -966,11 +1142,15 @@ void efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
 			     FRF_CZ_TC_TIMER_MODE, mode,
 			     FRF_CZ_TC_TIMER_VAL, ticks);
 	writel(cmd.u32[0],
-	       vf->bar + FR_BZ_TIMER_COMMAND_P0 +
+	       bar + FR_BZ_TIMER_COMMAND_P0 +
 	       (vi->index << (PAGE_SHIFT + 1)));
+
+	vf_unmap_bar(vf, bar);
 
 	EFRM_TRACE("%s: VI %d/%d IRQ moderation %d", pci_name(vf->pci_dev),
 		   vi->index, virs->allocation.instance, vi->irq_usec);
+
+	return 0;
 }
 
 
@@ -987,18 +1167,28 @@ static void vf_vi_call_evq_callback(struct efrm_vf_vi *vi)
 			      efrm_nic_tablep->nic[vf->nic_index]);
 }
 
+static void efrm_vf_tasklet(unsigned long l)
+{
+	struct efrm_vf_vi *vi = (void *)l;
+	vf_vi_call_evq_callback(vi);
+}
+
 static irqreturn_t vf_vi_interrupt(int irq, void *dev_id
 #if defined(EFX_HAVE_IRQ_HANDLER_REGS)
 	, struct pt_regs *regs __attribute__ ((unused))
 #endif
 	)
 {
-#ifdef EXF_HAVE_THREADED_IRQ
-	vf_vi_call_evq_callback(dev_id);
-#else
 	struct efrm_vf_vi *vi = dev_id;
-	queue_work(vi->threaded_irq.irq_wq, &vi->threaded_irq.irq_work);
+	if (efrm_vf_use_threaded_irq)
+#ifdef EXF_HAVE_THREADED_IRQ
+		vf_vi_call_evq_callback(vi);
+#else
+		queue_work(vi->threaded_irq.irq_wq,
+			   &vi->threaded_irq.irq_work);
 #endif
+	else
+		tasklet_schedule(&vi->tasklet);
 	return IRQ_HANDLED;
 }
 
@@ -1024,15 +1214,24 @@ int efrm_vf_eventq_callback_registered(struct efrm_vi *virs)
 	EFRM_ASSERT(vi->virs == virs);
 
 	/* Enable interrupts */
+	if (efrm_vf_use_threaded_irq) {
 #ifdef EXF_HAVE_THREADED_IRQ
-	rc = request_threaded_irq(vi->irq, NULL, vf_vi_interrupt,
-				  IRQF_SAMPLE_RANDOM, vi->name, vi);
+		rc = request_threaded_irq(vi->irq, NULL, vf_vi_interrupt,
+					  IRQF_SAMPLE_RANDOM, vi->name, vi);
 #else
-	INIT_WORK(&vi->threaded_irq.irq_work, ef_vi_irq_work);
-	vi->threaded_irq.irq_wq = create_singlethread_workqueue(vi->name);
-	rc = request_irq(vi->irq, vf_vi_interrupt,
-			 IRQF_SAMPLE_RANDOM, vi->name, vi);
+		INIT_WORK(&vi->threaded_irq.irq_work, ef_vi_irq_work);
+		vi->threaded_irq.irq_wq =
+			create_singlethread_workqueue(vi->name);
+		rc = request_irq(vi->irq, vf_vi_interrupt,
+				 IRQF_SAMPLE_RANDOM, vi->name, vi);
 #endif
+	}
+	else {
+		tasklet_init(&vi->tasklet, &efrm_vf_tasklet,
+			     (unsigned long)vi);
+		rc = request_irq(vi->irq, vf_vi_interrupt,
+				 IRQF_SAMPLE_RANDOM, vi->name, vi);
+	}
 	if (rc) {
 		EFRM_ERR("%s: failed to request IRQ %d for VI %d",
 			 pci_name(vf->pci_dev), vi->irq, vi->index);
@@ -1057,8 +1256,11 @@ void efrm_vf_eventq_callback_kill(struct efrm_vi *virs)
 
 	free_irq(vi->irq, vi);
 #ifndef EXF_HAVE_THREADED_IRQ
-	destroy_workqueue(vi->threaded_irq.irq_wq);
+	if (efrm_vf_use_threaded_irq)
+		destroy_workqueue(vi->threaded_irq.irq_wq);
+	else
 #endif
+		tasklet_kill(&vi->tasklet);
 	vi->virs->evq_callback_fn = NULL;
 }
 
@@ -1085,6 +1287,9 @@ void efrm_vf_driver_fini(void)
 
 #else /* CONFIG_PCI_IOV */
 
+int efrm_vf_use_threaded_irq = 0;
+EXPORT_SYMBOL(efrm_vf_use_threaded_irq);
+
 /* Fake implementation of VF-related functions */
 void efrm_vf_eventq_callback_kill(struct efrm_vi *virs)
 {
@@ -1099,14 +1304,19 @@ void efrm_vf_vi_drop(struct efrm_vi *virs)
 {
 	EFRM_ASSERT(0);
 }
-int efrm_vf_interrupts_probe(struct efrm_vf *vf)
+int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked)
 {
 	EFRM_ASSERT(0);
 	return -EINVAL;
 }
-void efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
+void efrm_vf_free_reset(struct efrm_vf *vf)
 {
 	EFRM_ASSERT(0);
+}
+int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
+{
+	EFRM_ASSERT(0);
+	return -EINVAL;
 }
 int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu)
 {

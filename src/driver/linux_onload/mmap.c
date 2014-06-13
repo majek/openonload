@@ -46,7 +46,7 @@
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/common.h> /* for EFAB_MMAP_OFFSET_TO_MAP_ID */
-#include <ci/driver/efab/efrm_mmap.h>
+#include <ci/efch/mmap.h>
 #include <onload/linux_trampoline.h>
 
 

@@ -164,6 +164,10 @@ CI_CFG_OPT("EF_FDS_MT_SAFE", fds_mt_safe, ci_uint32,
 "calls that do not change the object underlying the file descriptor remain "
 "safe."
 "\n"
+"Calls to bind(), connect(), listen() may change underlying object.  "
+"If you call such functions in one thread while accessing the same file "
+"descriptor from the other thread, this option is also unsafe."
+"\n"
 "Also concurrent calls may happen from signal handlers, so set this to 0 "
 "if your signal handlers may close sockets",
            1, , 1, 0, 1, yesno)

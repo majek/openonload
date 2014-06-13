@@ -97,7 +97,6 @@ static int citp_udp_socket(int domain, int type, int protocol)
   citp_sock_fdi* epi;
   ef_driver_handle fd;
   int rc;
-  ci_sock_cmn* s;
   ci_netif* ni;
 
   Log_V(log(LPF "socket(%d, %d, %d)", domain, type, protocol));
@@ -114,6 +113,8 @@ static int citp_udp_socket(int domain, int type, int protocol)
   rc = citp_netif_alloc_and_init(&fd, &ni);
   if( rc != 0 ) {
     if( rc == CI_SOCKET_HANDOVER ) {
+      /* This implies EF_DONT_ACCELERATE is set, so we handover
+       * regardless of CITP_OPTS.no_fail */
       CI_FREE_OBJ(epi);
       return rc;
     }
@@ -132,8 +133,7 @@ static int citp_udp_socket(int domain, int type, int protocol)
   citp_fdtable_new_fd_set(fd, fdip_busy, fdtable_strict());
   if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
 
-  s = epi->sock.s;
-  CI_DEBUG(s->pid = getpid());
+  CI_DEBUG(epi->sock.s->pid = getpid());
 
   /* We're ready.  Unleash us onto the world! */
   citp_fdtable_insert(fdi, fd, 0);
@@ -154,7 +154,7 @@ static int citp_udp_socket(int domain, int type, int protocol)
    * driver/library mismatch */
   if( CITP_OPTS.no_fail && errno != ELIBACC ) {
     Log_U(ci_log("%s: failed (errno:%d) - PASSING TO OS", __FUNCTION__, errno));
-    return CITP_NOT_HANDLED;
+    return CI_SOCKET_HANDOVER;
   }
   return -1;
 }

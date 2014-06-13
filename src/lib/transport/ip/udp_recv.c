@@ -763,7 +763,7 @@ ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
     rc = efab_tcp_helper_poll_udp(a->filp, &mask, &t);
     if( rc == 0 ) {
       if( mask ) {
-        ci_sock_lock(ni, &us->s.b);
+        ci_sock_lock_fixme(ni, &us->s.b);
         return 0;
       }
       else
@@ -771,7 +771,7 @@ ci_udp_recvmsg_socklocked_block(ci_udp_iomsg_args* a,
     }
     else if( rc == -ERESTARTSYS &&  us->s.so.rcvtimeo_msec )
       rc = -EINTR;
-    ci_sock_lock(ni, &us->s.b);
+    ci_sock_lock_fixme(ni, &us->s.b);
   }
   return rc;
 #endif /* __KERNEL__ */
@@ -802,11 +802,11 @@ ci_udp_recvmsg_socklocked_spin(ci_udp_iomsg_args* a,
           ci_netif_poll(ni);
           ci_netif_unlock(ni);
         }
+      if( ! ni->state->is_spinner )
+        ni->state->is_spinner = 1;
     }
-    if( ! ni->state->is_spinner )
-      ni->state->is_spinner = 1;
     return OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, 
-                                           spin_state->schedule_frc,
+                                           &spin_state->schedule_frc,
                                            us->s.so.rcvtimeo_msec,
                                            &us->s.b, spin_state->si);
   }
@@ -1158,7 +1158,8 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
   args->msg.msghdr.msg_flags = msg.msg_flags;
 
   cb_flags = 0;
-  if( (us->s.os_sock_status & OO_OS_STATUS_RX) == 0 )
+  if( (ci_udp_recv_q_pkts(&us->recv_q) == 0) && 
+      (us->s.os_sock_status & OO_OS_STATUS_RX) == 0 )
     cb_flags |= ONLOAD_ZC_END_OF_BURST;
 
   *cb_rc = (*args->cb)(args, cb_flags);
@@ -1185,7 +1186,8 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
   if( cb_flags & ONLOAD_ZC_END_OF_BURST ) {
     /* If we've advertised an end of burst, we should return to match
      * receive-via-Onload behaviour.  Note this assumes that setting
-     * ONLOAD_ZC_TERMINATE clears ONLOAD_ZC_CONTINUE
+     * ONLOAD_ZC_TERMINATE clears ONLOAD_ZC_CONTINUE, and that
+     * done_big_poll = 1 and done_kernel_poll = 1 in calling function
      */
     (*cb_rc) |= ONLOAD_ZC_TERMINATE;
     ci_assert(((*cb_rc) & ONLOAD_ZC_CONTINUE) == 0);
@@ -1197,7 +1199,7 @@ static int ci_udp_zc_recv_from_os(ci_netif* ni, ci_udp_state* us,
 
 int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
 {
-  int rc, done_big_poll = 0;
+  int rc, done_big_poll = 0, done_kernel_poll = 0, done_callback = 0;
   ci_netif* ni = a->ni;
   ci_udp_state* us = a->us;
   enum onload_zc_callback_rc cb_rc = ONLOAD_ZC_CONTINUE;
@@ -1279,7 +1281,8 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
     
       cb_flags = CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ? 
         ONLOAD_ZC_MSG_SHARED : 0;
-      if( ci_udp_recv_q_pkts(&us->recv_q) == 1 )
+      if( (ci_udp_recv_q_pkts(&us->recv_q) == 1) &&
+          ((us->s.os_sock_status & OO_OS_STATUS_RX) == 0) )
         cb_flags |= ONLOAD_ZC_END_OF_BURST;
       cb_rc = (*args->cb)(args, cb_flags);
 
@@ -1297,12 +1300,14 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
       ++us->recv_q.pkts_filter_passed;
 #endif
 
-      if( (cb_rc & ONLOAD_ZC_TERMINATE) ||
-          (cb_flags & ONLOAD_ZC_END_OF_BURST) )
+      done_callback = 1;
+
+      if( cb_rc & ONLOAD_ZC_TERMINATE )
         goto out;
     }
 
-    if( done_big_poll )
+    if( done_big_poll && done_kernel_poll && 
+        (cb_flags & ONLOAD_ZC_END_OF_BURST) )
       goto out;
 
     goto empty;
@@ -1321,14 +1326,22 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
   if( ci_netif_may_poll(ni) &&
       ci_netif_need_poll_spinning(ni, spin_state.start_frc) && 
       ci_netif_trylock(ni) ) {
-    ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
+    /* If only a few events, we don't need to bother with the full poll */
+    if( ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll) < 
+        NI_OPTS(ni).evs_per_poll )
+      done_big_poll = 1;
+
+    /* If polling a few events didn't get us anything, do a full poll */
     if( !done_big_poll && ci_udp_recv_q_is_empty(us) ) {
       done_big_poll = 1;
       ci_netif_poll(ni);
     }
+
     ci_netif_unlock(ni);
+
     if( ci_udp_recv_q_not_empty(us) )
       goto not_empty;
+
   } else 
     done_big_poll = 1; /* pretend we did if we can't poll */
 
@@ -1346,22 +1359,41 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
     }
   }
 
+  done_kernel_poll = 1;
   if( us->s.os_sock_status & OO_OS_STATUS_RX ) {
     if( args->flags & ONLOAD_MSG_RECV_OS_INLINE ) {
-      /* Restore these just in case they are needed */
-      args->msg.msghdr.msg_controllen = supplied_controllen;
-      args->msg.msghdr.msg_control = supplied_control;
-      args->msg.msghdr.msg_name = supplied_name;
-      args->msg.msghdr.msg_namelen = supplied_namelen;
-      rc = ci_udp_zc_recv_from_os(ni, us, args, &cb_rc);
-      if( rc != 0 || cb_rc & ONLOAD_ZC_TERMINATE )
-        goto out;
+      do {
+        /* Restore these just in case they are needed */
+        args->msg.msghdr.msg_controllen = supplied_controllen;
+        args->msg.msghdr.msg_control = supplied_control;
+        args->msg.msghdr.msg_name = supplied_name;
+        args->msg.msghdr.msg_namelen = supplied_namelen;
+        rc = ci_udp_zc_recv_from_os(ni, us, args, &cb_rc);
+        done_callback = 1;
+        if( rc != 0 || cb_rc & ONLOAD_ZC_TERMINATE ) {
+          ci_assert(done_big_poll);
+          goto out;
+        }
+        if( ci_udp_recv_q_not_empty(us) )
+          goto not_empty;
+      } while( us->s.os_sock_status & OO_OS_STATUS_RX );
     }
     else {
       /* Return error */
       rc = -ENOTEMPTY;
       goto out;
     }
+  }
+
+  /* If we've done some callbacks, and checked everywhere for data,
+   * we're at the end of a burst and should return without spinning
+   * and blocking
+   */
+  if( done_callback ) {
+    ci_assert(done_big_poll);
+    ci_assert(done_kernel_poll);
+    rc = 0;
+    goto out;
   }
 
   if( ((args->flags | us->s.b.sb_aflags) & MSG_DONTWAIT)) {

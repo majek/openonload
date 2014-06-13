@@ -32,7 +32,7 @@ def out(x, file=sys.stdout):
     try:
         file.write(x)
     except:
-        print repr(x)
+        sys.stderr.write("ERROR: repr(x) = %s\n" % repr(x))
         raise
 
 
@@ -105,11 +105,13 @@ def do_irqpattern_corespec(irq_name_pattern, cores_args):
             cores = [c.id for c in topology.get_cores()
                      if c.pkg.id in packages]
             topology = affinity.get_topology(cores=cores)
-    except affinity.NoCores, inst:
+    except affinity.NoCores:
         fail("No cores left after applying filters.")
-    except affinity.BadCoreId, inst:
+    except affinity.BadCoreId:
+        inst = sys.exc_info()[1]
         fail("Bad core id %d" % inst.core_id)
-    except mask.BadMask, inst:
+    except mask.BadMask:
+        inst = sys.exc_info()[1]
         fail("Bad mask in --%s=%s" % (opt, inst.msg))
 
     caches = topology.get_top_level_shared_caches()

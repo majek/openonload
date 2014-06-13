@@ -191,6 +191,10 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
 #endif
   ts->t_last_recv = ci_tcp_time_now(netif);
 
+  ts->eff_mss = 0;
+  ts->amss = 0;
+  ts->ssthresh = 0;
+
   /* PAWs RFC1323, connections always start idle */
   ts->tspaws = ci_tcp_time_now(netif) - (NI_CONF(netif).tconst_paws_idle+1);
   ts->tsrecent = 0;
@@ -274,9 +278,8 @@ ci_tcp_state* ci_tcp_get_state_buf(ci_netif* netif)
 
   wo = citp_waitable_obj_alloc(netif);
   if( ! wo )  {
-    /* Log at TV because this can fail in normal operation, but get reaped later */
-    LOG_TV (ci_log ("Failed to alloc state buffer"));
-    return 0;
+    LOG_TV(ci_log("%s: [%d] out of socket buffers",__FUNCTION__,NI_ID(netif)));
+    return NULL;
   }
 
   ci_tcp_state_init(netif, &wo->tcp);

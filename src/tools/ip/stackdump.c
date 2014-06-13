@@ -41,23 +41,21 @@ static ci_cfg_desc cfg_opts[] = {
   {   0, "msec",      CI_CFG_UINT, &cfg_watch_msec,"set other interval"     },
   {   0, "samples",   CI_CFG_UINT, &cfg_samples, "number of samples"        },
   { 't', "notable",   CI_CFG_FLAG, &cfg_notable, "toggle table mode"},
-  { 'z', "zombie",    CI_CFG_FLAG, &cfg_zombie, "force dump of a zombie stack"},
+  { 'z', "zombie",    CI_CFG_FLAG, &cfg_zombie,  "force dump of orphan stacks"},
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
 static void do_stack_ops(int argc, char* argv[])
 {
-  void (*fn)(ci_netif*);
   const stack_op_t* op;
   char dummy;
 
   if( argc == 0 ) {
-    if( cfg_zombie )
-      for_each_stack_id(&stack_zombie, NULL);
-    else {
-      op = get_stack_op("dump");
-      for_each_stack(op->fn, 0);
-    }
+    op = get_stack_op("dump");
+    if( op->flags & FL_ID )
+      for_each_stack_id(op->id_fn, NULL);
+    else
+      for_each_stack(op->fn, op->flags & FL_ONCE); 
   }
 
   for( ; argc; --argc, ++argv ) {
@@ -67,12 +65,6 @@ static void do_stack_ops(int argc, char* argv[])
       continue;
     }
 
-    if( cfg_zombie ) {
-      ci_log("Can't do command %s for zombie stack", op->name);
-      continue;
-    }
-
-    fn = op->fn;
     if( op->flags & FL_ARG_U ) {
       if( sscanf(argv[1], " %u %c", &arg_u[0], &dummy) != 1 ) {
         ci_log("Bad argument to '%s' (expected unsigned)", op->name);
@@ -104,7 +96,10 @@ static void do_stack_ops(int argc, char* argv[])
       --argc;  ++argv;
     }
 
-    for_each_stack(fn, op->flags & FL_ONCE);
+    if( op->flags & FL_ID )
+      for_each_stack_id(op->id_fn, NULL);
+    else
+      for_each_stack(op->fn, op->flags & FL_ONCE);
   }
 }
 
@@ -165,11 +160,11 @@ static void do_socket_ops(int argc, char* argv[])
 **********************************************************************/
 
 static void enum_stack_op_log(const stack_op_t *op, void *arg)
-{ ci_log("  %s\t%s", op->name, op->args ? op->args : "");
+{ ci_log("  %s\t%s\t%s", op->name, op->args ? op->args : "", op->help);
 }
 
 static void enum_socket_op_log(const socket_op_t *op, void *arg)
-{ ci_log("  %s\t%s", op->name, op->args ? op->args : "");
+{ ci_log("  %s\t%s\t%s", op->name, op->args ? op->args : "", op->help);
 }
 
 static void usage(const char* msg)
@@ -334,6 +329,7 @@ int main(int argc, char* argv[])
   char dummy;
   int doing_stacks = 0;
   int doing_sockets = 0;
+  int no_args = (argc == 1);
 
   ci_app_usage = usage;
 
@@ -341,7 +337,10 @@ int main(int argc, char* argv[])
   --argc; ++argv;
   CI_TRY(libstack_init(NULL));
 
-  if( argc == 0 ) {
+  /* Special case for onload_stackdump called with no arguments 
+   * - just list stacks and return
+   */
+  if( no_args ) {
     list_all_stacks(0);
     return 0;
   }
@@ -349,8 +348,9 @@ int main(int argc, char* argv[])
   /* Ensure we clean-up nicely when we exit. */
   atexit(atexit_fn);
 
-  /* Which stack(s) are we doing this to? */
-
+  /* Which stack(s) are we doing this to?  If no stack specified then
+   * attach to all stacks 
+   */
   if( argc == 0 ) {
     list_all_stacks(1);
     doing_stacks = 1;
@@ -401,6 +401,10 @@ int main(int argc, char* argv[])
         ci_app_usage("Cannot mix doc with other commands");
       }
       print_docs(argc, argv);
+      break;
+    }
+    else if( ! cfg_zombie && ! strcmp(argv[0], "kill") ) {
+      ci_app_usage("Cannot use kill without -z");
       break;
     }
     else {

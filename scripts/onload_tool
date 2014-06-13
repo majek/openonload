@@ -126,6 +126,8 @@ do_unload() {
   tryunload sfc_mtd
   tryunload sfc_control
   tryunload sfc
+  grep -q sfc/sfc.ko /lib/modules/$(uname -r)/modules.dep && \
+      log "WARNING: sfc driver may reload due to an in-distro driver"
   return $rc
 }
 

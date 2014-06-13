@@ -53,11 +53,14 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
 
   /* Keep the os socket in sync.  If this is a "get" request then the
    * return will be based on our support, not the os's (except for EFAULT
-   * handling which we get for free).  The only exception is listening
-   * OS-socket -- it should be non-blocking.
+   * handling which we get for free).
+   * Exceptions:
+   *  - listening OS-socket should be non-blocking;
+   *  - FIONREAD and SIOCATMARK are useless on OS socket, let's avoid
+   *  syscall.
    */
-  if( os_socket_exists && ( s->b.state != CI_TCP_LISTEN ||
-                            request != (int) FIONBIO ) ) {
+  if( os_socket_exists && request != FIONREAD && request != SIOCATMARK &&
+      ( s->b.state != CI_TCP_LISTEN || request != (int) FIONBIO ) ) {
     rc = oo_os_sock_ioctl(netif, s->b.bufid, request, arg, NULL);
     if( rc < 0 )
       return rc;
@@ -101,8 +104,8 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
 
   case SIOCATMARK:
     {
-      if( !CI_IOCTL_ARG_OK(int, arg) )
-	goto fail_inval; /* ?? fail_fault; */
+     if( !CI_IOCTL_ARG_OK(int, arg) )
+       goto fail_fault;
 
       /* return true, if we are at the out-of-band byte */
       CI_IOCTL_SETARG((int*)arg, 0);
@@ -199,7 +202,7 @@ int ci_tcp_ioctl(citp_socket* ep, ci_fd_t fd, int request, void* arg)
     return -EFAULT;
   }
 
-  ci_netif_lock_id(ep->netif, SC_SP(ep->s));
+  ci_netif_lock_fixme(ep->netif);
   rc = ci_tcp_ioctl_lk(ep, fd, request, arg);
   ci_netif_unlock(ep->netif);
   return rc;

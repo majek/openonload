@@ -13,15 +13,12 @@
 ** GNU General Public License for more details.
 */
 
-
-#ifndef __CI_DRIVER_EFAB_EFRM_CHAR_H__
-#define __CI_DRIVER_EFAB_EFRM_CHAR_H__
+#ifndef __EFCH_H__
+#define __EFCH_H__
 
 #include <ci/efrm/resource.h>
-#include <ci/driver/efab/operations.h>
-#include <ci/driver/efab/efrm_mmap.h>
 #include <ci/driver/internal.h>
-#include <ci/driver/efab/efch_id.h>
+#include <ci/efch/resource_id.h>
 
 
 /*--------------------------------------------------------------------
@@ -155,8 +152,8 @@ struct ci_resource_table_s {
   efch_resource_t*   resource_table_static[CI_DEFAULT_RESOURCE_TABLE_SIZE];
 
   /* highwater is next index to allocate; table is only ever added to */
-  volatile ci_uint32 resource_table_highwater;
-  volatile ci_uint32 resource_table_size;
+  volatile uint32_t resource_table_highwater;
+  volatile uint32_t resource_table_size;
   efch_resource_t**volatile resource_table;
 } /* ci_resource_table_t */ ;
 
@@ -185,4 +182,4 @@ extern int efch_resource_id_lookup(efch_resource_id_t id,
 				   efch_resource_t **out);
 
 
-#endif /* __CI_DRIVER_EFAB_EFRM_CHAR_H__ */
+#endif /* __EFCH_H__ */

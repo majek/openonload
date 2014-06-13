@@ -31,6 +31,7 @@
 
 # include <onload/unix_intf.h>
 
+
 /*! dump inode for a file descriptor */
 ci_inline int
 oo_debug_dump_inode(ci_fd_t fp, int fd) 
@@ -70,17 +71,28 @@ oo_debug_fds_dump(ci_fd_t fp, ci_uint32 pid)
 
 /*! dump inode for a file descriptor */
 ci_inline int
-oo_debug_dump_stack(ci_fd_t fp, int stack_id) 
+oo_debug_dump_stack(ci_fd_t fp, int stack_id, int orphan_only) 
 {
   int rc;
   ci_debug_onload_op_t op;
   op.what = __CI_DEBUG_OP_DUMP_STACK__;
-  op.u.stack_id = stack_id;
+  op.u.dump_stack.stack_id = stack_id;
+  op.u.dump_stack.orphan_only = orphan_only;
   rc = oo_debug_op(fp, &op);
   return rc;
 }
 
 
+ci_inline int
+oo_debug_kill_stack(ci_fd_t fp, int stack_id) 
+{
+  int rc;
+  ci_debug_onload_op_t op;
+  op.what = __CI_DEBUG_OP_KILL_STACK__;
+  op.u.stack_id = stack_id;
+  rc = oo_debug_op(fp, &op);
+  return rc;
+}
 
 #endif  /* __ONLOAD_DEBUG_OPS_H__ */
 /*! \cidoxg_end */

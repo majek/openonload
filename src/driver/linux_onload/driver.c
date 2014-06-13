@@ -68,6 +68,11 @@ MODULE_VERSION(ONLOAD_VERSION);
  *
  *--------------------------------------------------------------------*/
 
+/* This is legacy and used by macros in ci/driver/efab/debug.h, but
+ * currently there is no code that sets it to a non-default value.
+ */
+int ci_driver_debug_bits;
+
 static int no_ct = 0;
 
 CI_DEBUG(int no_shared_state_panic;)
@@ -377,16 +382,23 @@ long oo_fop_unlocked_ioctl(struct file* filp, unsigned cmd, unsigned long arg)
   if( efab_tcp_driver.file_refs_to_drop != NULL )
     oo_file_ref_drop_list_now(NULL);
 
-  /* If libc is used on our sockets, sometimes it may call this ioctl to
-   * determine whether the file is a tty.  Return non-zero (we're not!)
-   */
-  if (CI_UNLIKELY(cmd == TCGETS))
-    return 1;
-
   if( ioc_nr >= OO_OP_END || _IOC_TYPE(cmd) != OO_LINUX_IOC_BASE ) {
-    OO_DEBUG_ERR(ci_log("%s: bad cmd=%x type=%d(%d) nr=%d(%d)",
-                        __FUNCTION__, cmd, _IOC_TYPE(cmd), OO_LINUX_IOC_BASE,
-                        ioc_nr, OO_OP_END));
+    /* If libc is used on our sockets, sometimes it may call TCGETS ioctl to
+     * determine whether the file is a tty.
+     * tc* functions (tcgetpgrp, tcflush, etc) use direct ioctl syscalls,
+     * so TIOC* ioctl go around onload library even if it is used.
+     * So, we do not print scary warning for 0x5401(TCGETS)
+     * - 0x541A(TIOCSSOFTCAR).
+     * Next is FIONREAD(0x541B), which we can support, but do not do this.
+     * The only ioctl which was really seen in the real life is TIOCGPGRP.
+     */
+    BUILD_BUG_ON(_IOC_TYPE(TIOCSSOFTCAR) != _IOC_TYPE(TCGETS));
+    if( _IOC_TYPE(cmd) != _IOC_TYPE(TCGETS) ||
+        _IOC_NR(cmd) > _IOC_NR(TIOCSSOFTCAR) ) {
+      OO_DEBUG_ERR(ci_log("%s: bad cmd=%x type=%d(%d) nr=%d(%d)",
+                          __FUNCTION__, cmd, _IOC_TYPE(cmd), OO_LINUX_IOC_BASE,
+                          ioc_nr, OO_OP_END));
+    }
     return -EINVAL;
   }
   op = &oo_operations[ioc_nr];
@@ -686,7 +698,6 @@ EXPORT_SYMBOL(efab_tcp_helper_close_endpoint);
 EXPORT_SYMBOL(efab_linux_tcp_helper_fop_poll_tcp);
 EXPORT_SYMBOL(ci_netif_ctor);
 EXPORT_SYMBOL(ci_tcp_sendmsg);
-EXPORT_SYMBOL(__ci_netif_unlock);
 EXPORT_SYMBOL(ci_netif_poll_n);
 EXPORT_SYMBOL(ci_tcp_close);
 EXPORT_SYMBOL(ci_tcp_shutdown);

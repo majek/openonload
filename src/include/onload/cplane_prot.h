@@ -92,7 +92,7 @@ cicpplos_dtor(cicp_mibs_kern_t *control_plane);
  */
 extern int /*rc*/
 cicpplos_pktbuf_defer_send(const cicp_handle_t *control_plane, 
-			   ci_ip_addr_t ip, int buf_pktid);
+			   ci_ip_addr_t ip, int buf_pktid, ci_ifid_t ifindex);
 
 /*----------------------------------------------------------------------------
  * Pooled packet buffer support Operations
@@ -246,7 +246,7 @@ cicppl_handle_arp_pkt(cicp_handle_t *control_plane,
  */
 extern int /*bool*/
 cicppl_mac_defer_send(ci_netif *netif, int *out_os_rc,
-		      ci_ip_addr_t ip, oo_pkt_p ip_pktid);
+		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex);
 
 
 /*----------------------------------------------------------------------------

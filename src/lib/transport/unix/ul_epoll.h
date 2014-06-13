@@ -81,6 +81,20 @@ int citp_nosock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
                          const struct timespec *timeout);
 #endif
 
+extern
+int citp_epoll_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg, 
+                       int flags);
+extern
+int citp_epoll_zc_recv(citp_fdinfo* fdi, 
+                       struct onload_zc_recv_args* args);
+extern
+int citp_epoll_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg, 
+                              int flags);
+extern 
+int citp_epoll_zc_recv_filter(citp_fdinfo* fdi, 
+                              onload_zc_recv_filter_callback filter,
+                              void* cb_arg, int flags);
+
 
 static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
 {

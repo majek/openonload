@@ -42,10 +42,10 @@
  *
  *--------------------------------------------------------------------*/
 
-#include <ci/driver/efab/linux_char_internal.h>
-#include <ci/driver/efab/efch.h>
-#include <ci/driver/efab/debug.h>
+#include "linux_char_internal.h"
+#include "efch.h"
 #include <ci/efhw/public.h>
+#include <ci/efch/op_types.h>
 #include <ci/tools/dllist.h>
 #include "char_internal.h"
 
@@ -126,7 +126,7 @@ efch_create_mm_entry (struct mm_struct *mm) {
 
   p = kmalloc (sizeof *p, 0);
   if (p) {
-    DEBUGVM(ci_log("Made mm_hash %p for mm %p", p, mm));
+    EFCH_TRACE("%s: made mm_hash %p for mm %p", __FUNCTION__, p, mm);
     p->magic = MM_ENTRY_MAGIC;
     p->mm = mm;
     p->ref = 0;               // Will be inc-ed by caller
@@ -199,7 +199,7 @@ static void efch_del_mm_ref (struct mm_struct *mm) {
   ci_assert (p->mm == mm);
 
   if (!--p->ref) {
-    DEBUGVM(ci_log("Deleting mm_hash %p for mm %p", p, mm));
+    EFCH_TRACE("%s: deleting mm_hash %p for mm %p", __FUNCTION__, p, mm);
     ci_dllist_remove (&p->link);
     kfree (p);
   }
@@ -228,8 +228,8 @@ static void vm_op_open(struct vm_area_struct* vma)
 
   EFRM_RESOURCE_ASSERT_VALID(rs, 0);
 
-  DEBUGVM(ci_log("vm_op_open: "EFRM_RESOURCE_FMT" vma=%p",
-		 EFRM_RESOURCE_PRI_ARG(rs), vma));
+  EFCH_TRACE("%s: "EFRM_RESOURCE_FMT" vma=%p",
+             __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs), vma);
 
   efch_add_mm_ref (vma->vm_mm); /* Shit -- what if we ENOMEM? */
   efrm_resource_ref(rs);
@@ -240,8 +240,8 @@ static void vm_op_close(struct vm_area_struct* vma)
 {
   struct efrm_resource *rs = vma->vm_private_data;
 
-  DEBUGVM(ci_log("vm_op_close: "EFRM_RESOURCE_FMT" vma=%p",
-		 EFRM_RESOURCE_PRI_ARG(rs), vma));
+  EFCH_TRACE("%s: "EFRM_RESOURCE_FMT" vma=%p",
+             __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs), vma);
 
   efch_del_mm_ref(vma->vm_mm);
   EFRM_RESOURCE_ASSERT_VALID(rs, 0);
@@ -292,12 +292,11 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 
       if( type )  *type = VM_FAULT_MINOR;
 
-      DEBUGVM(ci_log("%s: "EFRM_RESOURCE_FMT" vma=%p sz=%lx pageoff=%lx id=%d pfn=%x",
-		     __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs),
-		     vma, vma->vm_end - vma->vm_start,
-		     (address - vma->vm_start) >> CI_PAGE_SHIFT,
-                     EFAB_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn));
-
+      EFCH_TRACE("%s: "EFRM_RESOURCE_FMT" vma=%p sz=%lx pageoff=%lx id=%d "
+                 "pfn=%x", __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs),
+                 vma, vma->vm_end - vma->vm_start,
+                 (address - vma->vm_start) >> CI_PAGE_SHIFT,
+                 EFAB_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn);
       return pg;
     }
   }
@@ -390,13 +389,12 @@ ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma)
   vma->vm_private_data = rs->rs_base;
   efrm_resource_ref(rs->rs_base);
 
-  DEBUGVM(ci_log("mmap: "EFCH_RESOURCE_ID_FMT " -> " EFRM_RESOURCE_FMT 
-		 " %d pages offset=0x%lx "
-                 "vma=%p ptr=0x%lx-%lx", 
-		 EFCH_RESOURCE_ID_PRI_ARG(rsid),
-		 EFRM_RESOURCE_PRI_ARG(rs->rs_base),
-		 (int) (bytes >> CI_PAGE_SHIFT), offset, 
-		 vma, vma->vm_start, vma->vm_end));
+  EFCH_TRACE("%s: "EFCH_RESOURCE_ID_FMT " -> " EFRM_RESOURCE_FMT 
+             " %d pages offset=0x%lx vma=%p ptr=0x%lx-%lx", 
+             __FUNCTION__, EFCH_RESOURCE_ID_PRI_ARG(rsid),
+             EFRM_RESOURCE_PRI_ARG(rs->rs_base),
+             (int) (bytes >> CI_PAGE_SHIFT), offset, 
+             vma, vma->vm_start, vma->vm_end);
 
   map_offset = map_num = 0;
 

@@ -28,6 +28,9 @@
 #ifndef __ETHERFABRIC_TOOLS_H__
 #define __ETHERFABRIC_TOOLS_H__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct ef_vi;
 
@@ -82,6 +85,9 @@ extern void ef_eventq_timer_clear(struct ef_vi* q);
   */
 extern void ef_eventq_timer_zero(struct ef_vi* q);
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __ETHERFABRIC_TOOLS_H__ */
 /*! \cidoxg_end */

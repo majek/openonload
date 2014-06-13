@@ -138,14 +138,30 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
 #ifdef __KERNEL__
 static void ci_drop_orphan(ci_netif * ni)
 {
+  ci_irqlock_state_t lock_flags;
+  tcp_helper_resource_t* trs;
+  int dec_needed; 
+
   /* Called when connection closes AFTER the file descriptor closes
    *  - in kernel mode, if user mode has gone away, we call
    *    efab_tcp_helper_k_ref_count_dec() to decrement count
    *    of such connections so we can free the stack when
    *    they've all gone away.
    */
-  if( ni->flags & CI_NETIF_FLAGS_DROP_SOCK_REFS )
-    efab_tcp_helper_k_ref_count_dec(netif2tcp_helper_resource(ni), 0);
+  if( ni->flags & CI_NETIF_FLAGS_DROP_SOCK_REFS ) {
+    trs = netif2tcp_helper_resource(ni);
+    dec_needed = 0;
+
+    ci_irqlock_lock(&trs->lock, &lock_flags);
+    if( trs->n_ep_closing_refs > 0 ) {
+      --trs->n_ep_closing_refs;
+      dec_needed = 1;
+    }
+    ci_irqlock_unlock(&trs->lock, &lock_flags);
+
+    if( dec_needed )
+      efab_tcp_helper_k_ref_count_dec(trs, 0);
+  }
 }
 #else
 # define ci_drop_orphan(ni)  do{}while(0)
@@ -317,5 +333,18 @@ void citp_waitable_dump(ci_netif* ni, citp_waitable* w, const char* pf)
     oo_pipe_dump(ni, &wo->pipe, pf);
 #endif
 }
+
+
+#ifndef __KERNEL__
+
+void citp_waitable_wakeup(ci_netif* ni, citp_waitable* w)
+{
+  oo_waitable_wake_t op;
+  op.sock_id = w->bufid;
+  oo_resource_op(ci_netif_get_driver_handle(ni),
+                 OO_IOC_WAITABLE_WAKE, &op);
+}
+
+#endif
 
 /*! \cidoxg_end */

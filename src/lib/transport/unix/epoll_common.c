@@ -130,6 +130,32 @@ int citp_epoll_send(citp_fdinfo* fdinfo, const struct msghdr* msg, int flags)
 {
   return ci_sys_sendmsg(fdinfo->fd, msg, flags);
 }
+int citp_epoll_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg, 
+                       int flags)
+{
+  msg->rc = -ENOTSOCK;
+  return 1;
+}
+int citp_epoll_zc_recv(citp_fdinfo* fdi, 
+                       struct onload_zc_recv_args* args)
+{
+  return -ENOTSOCK;
+}
+int citp_epoll_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg, 
+                              int flags)
+{
+  return -ENOTSOCK;
+}
+int citp_epoll_zc_recv_filter(citp_fdinfo* fdi, 
+                              onload_zc_recv_filter_callback filter,
+                              void* cb_arg, int flags)
+{
+# if CI_CFG_ZC_RECV_FILTER
+  return -ENOTSOCK;
+# else
+  return -ENOSYS;
+# endif
+}
 #endif /* CI_CFG_USERSPACE_EPOLL */
 
 

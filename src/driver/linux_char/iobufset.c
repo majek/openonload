@@ -13,15 +13,13 @@
 ** GNU General Public License for more details.
 */
 
-
-#include <ci/driver/efab/debug.h>
 #include <ci/driver/efab/hardware.h>
-#include <ci/driver/efab/efch.h>
-#include <ci/driver/efab/mmap_iopage.h>
+#include "efch.h"
 #include <ci/efrm/iobufset.h>
 #include <ci/efrm/vi_resource.h>
 #include <ci/efrm/pd.h>
 #include <ci/efch/op_types.h>
+#include "linux_char_internal.h"
 #include "char_internal.h"
 
 
@@ -58,12 +56,10 @@ iobufset_rm_alloc(ci_resource_alloc_t* alloc_,
   int rc;
 
   /* Check sensible-ness of incoming args. */
-  if (alloc->in_linked_fd < 0) {
-    if (alloc->in_n_pages < 1) {
-      DEBUGERR(ci_log("%s: bad number of pages %d", __FUNCTION__, 
-                      alloc->in_n_pages));
-      return -EINVAL;
-    }
+  if (alloc->in_linked_fd < 0 && alloc->in_n_pages < 1) {
+    EFCH_ERR("%s: ERROR: bad number of pages %d",
+             __FUNCTION__, alloc->in_n_pages);
+    return -EINVAL;
   }
 
   if ((rc = efch_lookup_rs(alloc->in_pd_or_vi_fd, alloc->in_pd_or_vi_rs_id,
@@ -74,9 +70,9 @@ iobufset_rm_alloc(ci_resource_alloc_t* alloc_,
 
   rc = iobufset_lookup_linked(alloc, &linked_iobs);
   if (rc < 0) {
-    DEBUGERR(ci_log("%s: ERROR: linked_fd=%d linked_id="EFCH_RESOURCE_ID_FMT
-                    " (%d)", __FUNCTION__, alloc->in_linked_fd,
-                    EFCH_RESOURCE_ID_PRI_ARG(alloc->in_linked_rs_id), rc));
+    EFCH_ERR("%s: ERROR: linked_fd=%d linked_id="EFCH_RESOURCE_ID_FMT" (%d)",
+             __FUNCTION__, alloc->in_linked_fd,
+             EFCH_RESOURCE_ID_PRI_ARG(alloc->in_linked_rs_id), rc);
     goto fail2;
   }
 
@@ -123,34 +119,24 @@ efab_iobufset_resource_mmap(struct iobufset_resource *iobrs, unsigned long* byte
 {
   unsigned long n;
   unsigned i;
-  int rc = 0;
 
   EFRM_RESOURCE_ASSERT_VALID(&iobrs->rs, 0);
   ci_assert((*bytes &~ CI_PAGE_MASK) == 0);
 
-  DEBUGVM(ci_log("%s: "EFRM_RESOURCE_FMT" bytes=0x%lx mapped=0x%x",
-                 __FUNCTION__, EFRM_RESOURCE_PRI_ARG(&iobrs->rs), *bytes,
-		 (unsigned)
-		   CI_MIN((signed)*bytes, iobrs->n_bufs << CI_PAGE_SHIFT)));
+  EFCH_TRACE("%s: "EFRM_RESOURCE_FMT" bytes=0x%lx mapped=0x%x",
+             __FUNCTION__, EFRM_RESOURCE_PRI_ARG(&iobrs->rs), *bytes,
+             (unsigned)
+               CI_MIN((signed)*bytes, iobrs->n_bufs << CI_PAGE_SHIFT));
 
   n = (unsigned long)iobrs->n_bufs << CI_PAGE_SHIFT;
   n = CI_MIN(n, *bytes);
   *bytes -= n;
   n >>= CI_PAGE_SHIFT;
   ci_assert_le((unsigned int)n, iobrs->n_bufs);
-  
-  for( i = 0; i < n; ++i ) {
-    rc = ci_mmap_iopage(&iobrs->bufs[i], opaque, map_num, offset);
-    if( rc < 0 ) {
-      DEBUGERR(ci_log("%s: "EFRM_RESOURCE_FMT" failed at buffer %d",
-                      __FUNCTION__, EFRM_RESOURCE_PRI_ARG(&iobrs->rs), i));
-/*XXX shouldn't this unmap any done so far? */
 
-      break;
-    }
-  }
-
-  return rc;
+  for( i = 0; i < n; ++i )
+    ci_mmap_iopage(&iobrs->bufs[i], opaque, map_num, offset);
+  return 0;
 }
 EXPORT_SYMBOL(efab_iobufset_resource_mmap);
 

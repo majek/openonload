@@ -147,7 +147,8 @@ efrm_vf_to_resource(struct efrm_vf *vf)
 
 
 int
-efrm_vf_resource_alloc(struct efrm_client *client, struct efrm_vf **vf_out)
+efrm_vf_resource_alloc(struct efrm_client *client, 
+		       struct efrm_vf *linked, struct efrm_vf **vf_out)
 {
 	struct efrm_vf_nic_params *nic =
 		&efrm_vf_manager->nic[client->nic->index];
@@ -161,31 +162,20 @@ efrm_vf_resource_alloc(struct efrm_client *client, struct efrm_vf **vf_out)
 		return -EBUSY;
 	}
 
-	while (1) {
-		spin_lock(&efrm_vf_manager->rm.rm_lock);
+	do {
+		spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 		if (list_empty(&nic->free_list)) {
-			spin_unlock(&efrm_vf_manager->rm.rm_lock);
+			spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 			return rc == 0 ? -ENOBUFS : rc;
 		}
 		vf = list_entry(nic->free_list.next, struct efrm_vf, link);
 		list_del(&vf->link);
-		spin_unlock(&efrm_vf_manager->rm.rm_lock);
+		spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 
-		if (vf->irq_count != 0) {
-			EFRM_ASSERT(vf->vi_count);
-			break;
-		}
-
-		/* Probe interrupts.  Do not put VF back to the list
+		/* Re-init VF.  Do not put VF back to the list
 		 * in case of failure - probably, BIOS does not
 		 * support so many VFs. */
-		rc = efrm_vf_interrupts_probe(vf);
-		if (rc != 0)
-			continue;
-
-		/* Interrupts are OK - go out! */
-		break;
-	}
+	} while (efrm_vf_alloc_init(vf, linked));
 
 	EFRM_ASSERT(vf);
 	EFRM_ASSERT(vf->irq_count);
@@ -197,10 +187,10 @@ efrm_vf_resource_alloc(struct efrm_client *client, struct efrm_vf **vf_out)
 		EFRM_ERR("NIC %d VF %d: efrm_buddy_range_ctor(%d, %d) failed",
 			 client->nic->index, vf->pci_dev_fn,
 			 vf->vi_base, vf->vi_base + vf->vi_count);
-		spin_lock(&efrm_vf_manager->rm.rm_lock);
+		spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 		list_add(&vf->link,
 			 &efrm_vf_manager->nic[vf->nic_index].free_list);
-		spin_unlock(&efrm_vf_manager->rm.rm_lock);
+		spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 		return -ENOMEM;
 	}
 
@@ -223,9 +213,11 @@ efrm_vf_resource_free(struct efrm_vf *vf)
 		   vf->rs.rs_client->nic->index, vf->pci_dev_fn);
 	EFRM_ASSERT(vf->rs.rs_ref_count == 0);
 	efrm_buddy_dtor(&vf->vi_instances);
-	spin_lock(&efrm_vf_manager->rm.rm_lock);
+	efrm_vf_free_reset(vf);
+
+	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	list_add(&vf->link, &efrm_vf_manager->nic[vf->nic_index].free_list);
-	spin_unlock(&efrm_vf_manager->rm.rm_lock);
+	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 	efrm_client_put(vf->rs.rs_client);
 }
 
@@ -282,7 +274,7 @@ static void efrm_vf_enumerate(int nic_index)
 	}
 
 	/* Next, calculate vi_base for each VF */
-	spin_lock(&efrm_vf_manager->rm.rm_lock);
+	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	list_for_each(link, &nic->free_list) {
 		struct efrm_vf *vf = list_entry(link, struct efrm_vf, link);
 		vf->vi_base = efrm_vf_manager->vi_base +
@@ -293,7 +285,7 @@ static void efrm_vf_enumerate(int nic_index)
 			   vf->pci_dev_fn, vf->vi_base,
 			   vf->vi_base + vf->vi_count);
 	}
-	spin_unlock(&efrm_vf_manager->rm.rm_lock);
+	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 }
 
 int efrm_vf_probed(struct efrm_vf *vf)
@@ -323,11 +315,11 @@ int efrm_vf_probed(struct efrm_vf *vf)
 	}
 
 	vf->nic_index = nic_index;
-	spin_lock(&efrm_vf_manager->rm.rm_lock);
+	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	EFRM_ASSERT(vf->vi_count);
 	list_add(&vf->link, &efrm_vf_manager->nic[nic_index].free_list);
 	efrm_vf_manager->nic[nic_index].vf_count++;
-	spin_unlock(&efrm_vf_manager->rm.rm_lock);
+	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 
 	/* If we've got the last VF, re-enumerate them and set vi_base */
 	if (efrm_vf_manager->nic[nic_index].vf_count ==
@@ -339,13 +331,13 @@ int efrm_vf_probed(struct efrm_vf *vf)
 }
 void efrm_vf_removed(struct efrm_vf *vf)
 {
-	spin_lock(&efrm_vf_manager->rm.rm_lock);
+	spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
 	if (vf->vi_count) {
 		list_del(&vf->link);
 		vf->vi_count = 0;
 	}
 	efrm_vf_manager->nic[vf->nic_index].vf_count--;
-	spin_unlock(&efrm_vf_manager->rm.rm_lock);
+	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 }
 
 /*********************************************************************
@@ -421,30 +413,32 @@ efrm_vf_free_vi_set(struct efrm_vi_allocation *set)
 unsigned long efrm_vf_alloc_ioaddrs(struct efrm_vf *vf, int n_pages,
 				    efhw_iommu_domain **iommu_domain_out)
 {
-	irq_flags_t lock_flags;
-	unsigned long iova = 0;
+	unsigned long iova;
 	size_t size;
 
 	EFRM_ASSERT(vf);
+	if (vf->iova_basep == NULL) {
+		if (iommu_domain_out)
+			*iommu_domain_out = NULL;
+		return 0;
+	}
 
+	iova = *vf->iova_basep;
 	size = n_pages * PAGE_SIZE;
 	if (size > 0) {
-		spin_lock_irqsave(&efrm_vf_manager->rm.rm_lock, lock_flags);
-		if ((vf->iova_base <= IOAPIC_RANGE_END) &&
-		    ((vf->iova_base + size) > IOAPIC_RANGE_START))
+		spin_lock_bh(&efrm_vf_manager->rm.rm_lock);
+		if ((iova <= IOAPIC_RANGE_END) &&
+		    ((iova + size) > IOAPIC_RANGE_START))
 			iova = IOAPIC_RANGE_END + 1;
-		else if (vf->iova_base <= vf->pci_dev->resource[0].end &&
-			 vf->iova_base + size > vf->pci_dev->resource[0].start)
+		else if (iova <= vf->pci_dev->resource[0].end &&
+			 iova + size > vf->pci_dev->resource[0].start)
 			iova = vf->pci_dev->resource[0].end + 1;
-		else if (vf->iova_base <= vf->pci_dev->resource[2].end &&
-			 vf->iova_base + size > vf->pci_dev->resource[2].start)
+		else if (iova <= vf->pci_dev->resource[2].end &&
+			 iova + size > vf->pci_dev->resource[2].start)
 			iova = vf->pci_dev->resource[2].end + 1;
-		else
-			iova = vf->iova_base;
 
-		vf->iova_base = iova + size;
-		spin_unlock_irqrestore(&efrm_vf_manager->rm.rm_lock,
-				       lock_flags);
+		*vf->iova_basep = iova + size;
+		spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
 	}
 
 	if (iommu_domain_out)

@@ -1241,12 +1241,13 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
   if( SEQ_SUB(ts->snd_max, rxp->ack) < tcp_eff_mss(ts) &&
       ci_ip_queue_is_empty(&ts->retrans) ) {
     /* Zero window: need to start probes.
-     *
      * (We treat a window less than MSS as a zero window, as we don't want
      * to split packets).
      *
-     * If we have already sent a FIN (e.g. we are in FIN_WAIT_1) then the
-     * zero window will not actually be sent by the timeout handler.
+     * If we are in a state that has an active TXQ, zero-ish window,
+     * and the retrans queue is empty then zwin timer should be
+     * running.  The zwin timer may not send anything when it expires
+     * (e.g. if sendq is empty)
      */
     if( ci_ip_timer_pending(netif, &ts->zwin_tid) ) {
       if( ts->zwin_probes > 0 ) {
@@ -2219,7 +2220,6 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   ci_tcp_state_synrecv* tsr;
   ci_ip_cached_hdrs ipcache;
   struct oo_sock_cplane sock_cp;
-  unsigned tsr_rcv_wnd;
   oo_sp local_peer = OO_SP_NULL;
 
   ci_assert(tls);
@@ -2330,7 +2330,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_U(ci_log("%s: no return route to %s exists, dropping listen response pkt",
 		 __FUNCTION__, ip_addr_str(ip->ip_saddr_be32)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       CI_BSWAP_BE16(ip_pkt_dump_len(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
 		       0));
     /*! \TODO: which counter do I increment here?  Also improve these log
      * messages.
@@ -2389,7 +2389,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_U(log(LNT_FMT "LISTEN got packet without SYN, will drop",
               LNT_PRI_ARGS(netif, tls)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       CI_BSWAP_BE16(ip_pkt_dump_len(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
 		       0));
     /* shouldn't get here but silence is response, rfc793 p66 */
     goto freepkt_out;
@@ -2400,7 +2400,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_U(log(LNT_FMT "LISTEN got SYN with other flags",
               LNT_PRI_ARGS(netif, tls)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       CI_BSWAP_BE16(ip_pkt_dump_len(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
 		       0));
   }
 
@@ -2439,7 +2439,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   if( pkt->pay_len ) {
     LOG_U(log(LPF "%d LISTEN SYN with data", S_FMT(tls)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
-                       CI_BSWAP_BE16(ip_pkt_dump_len(ip->ip_tot_len_be16)),
+                       ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
 		       0));
   }
 
@@ -2492,7 +2492,6 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   tsr->snd_isn = ci_tcp_initial_seqno(netif);
 
   tsr->rcv_wscl = (ci_uint8) ci_tcp_wscl_by_buff(netif, tcp_rcv_buff(tls));
-  tsr_rcv_wnd = CI_MIN(tcp_rcv_buff(tls), CI_CFG_TCP_MAX_WINDOW);
 
   /* Insert synrecv into the listen queue. */
   ci_tcp_listenq_insert(netif, tls, tsr);
@@ -2500,7 +2499,8 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   LOG_TC(log(LNT_FMT "SYN-RECV rcv=%08x-%08x snd=%08x-%08x",
              LNT_PRI_ARGS(netif, tls),
-             tsr->rcv_nxt, tsr->rcv_nxt + tsr_rcv_wnd,
+             tsr->rcv_nxt, tsr->rcv_nxt +
+             CI_MIN(tcp_rcv_buff(tls), CI_CFG_TCP_MAX_WINDOW),
              tsr->snd_isn, tsr->snd_isn + pkt->pf.tcp_rx.window));
 
   /* send SYN-ACK packet */

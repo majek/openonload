@@ -13,11 +13,8 @@
 ** GNU General Public License for more details.
 */
 
-
 #include <ci/efrm/efrm_client.h>
-#include <ci/driver/efab/debug.h>
-#include <ci/driver/efab/hardware.h>
-#include <ci/driver/efab/efch.h>
+#include "efch.h"
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/vi_allocation.h>
 #include <ci/efrm/pd.h>
@@ -45,9 +42,9 @@ vi_set_rm_alloc(ci_resource_alloc_t* alloc_,
     rc = efch_lookup_rs(alloc->in_pd_fd, alloc->in_pd_rs_id,
                         EFRM_RESOURCE_PD, &rs);
     if( rc < 0 ) {
-      DEBUGERR(ci_log("%s: ERROR: could not find PD %d/"EFCH_RESOURCE_ID_FMT
-                      " (rc=%d)", __FUNCTION__, alloc->in_pd_fd,
-                      EFCH_RESOURCE_ID_PRI_ARG(alloc->in_pd_rs_id), rc));
+      EFCH_ERR("%s: ERROR: could not find PD fd=%d id="EFCH_RESOURCE_ID_FMT
+               " rc=%d", __FUNCTION__, alloc->in_pd_fd,
+               EFCH_RESOURCE_ID_PRI_ARG(alloc->in_pd_rs_id), rc);
       goto fail1;
     }
     pd = efrm_pd_from_resource(rs);
@@ -57,14 +54,14 @@ vi_set_rm_alloc(ci_resource_alloc_t* alloc_,
   else {
     rc = efrm_client_get(alloc->in_ifindex, NULL, NULL, &client);
     if( rc != 0 ) {
-      DEBUGERR(ci_log("%s: ERROR: efrm_client_get(%d) failed (%d)",
-                      __FUNCTION__, alloc->in_ifindex, rc));
+      EFCH_ERR("%s: ERROR: ifindex=%d not found rc=%d",
+               __FUNCTION__, alloc->in_ifindex, rc);
       goto fail1;
     }
     rc = efrm_pd_alloc(&pd, client, NULL/*vf_opt*/, 0/*phys_addr_mode*/);
     if( rc != 0 ) {
-      DEBUGERR(ci_log("%s: ERROR: efrm_pd_alloc(ifindex=%d) failed (rc=%d)",
-                      __FUNCTION__, alloc->in_ifindex, rc));
+      EFCH_ERR("%s: ERROR: efrm_pd_alloc(ifindex=%d) failed (rc=%d)",
+               __FUNCTION__, alloc->in_ifindex, rc);
       goto fail2;
     }
   }

@@ -78,7 +78,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"3.2.1.6090"
+#define EFX_DRIVER_VERSION	"3.2.1.6099"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -138,6 +138,8 @@ struct netq_hw_filter;
 
 /* Forward declare structure used in the Precision Time Protocol (PTP) support. */
 struct efx_ptp_data;
+
+struct efx_self_tests;
 
 /**
  * struct efx_special_buffer - An Efx special buffer
@@ -750,6 +752,11 @@ struct efx_phy_operations {
 	int (*test_alive) (struct efx_nic *efx);
 	const char *(*test_name) (struct efx_nic *efx, unsigned int index);
 	int (*run_tests) (struct efx_nic *efx, int *results, unsigned flags);
+	int (*get_module_eeprom) (struct efx_nic *efx,
+				  struct ethtool_eeprom *ee,
+				  u8 *data);
+	int (*get_module_info) (struct efx_nic *efx,
+				struct ethtool_modinfo *modinfo);
 };
 
 /**
@@ -1231,7 +1238,8 @@ struct efx_nic_table_mask;
  * @get_wol: Get WoL configuration from driver state
  * @set_wol: Push WoL configuration to the NIC
  * @resume_wol: Synchronise WoL state between driver and MC (e.g. after resume)
- * @test_registers: Test read/write functionality of control registers
+ * @test_chip: Test registers and memory.  Should use efx_test_memory()
+ *	and efx_nic_test_registers(), and is expected to reset the NIC.
  * @test_memory: Test read/write functionality of memory blocks, using
  *	the given test pattern generator
  * @test_nvram: Test validity of NVRAM contents
@@ -1281,7 +1289,7 @@ struct efx_nic_type {
 	void (*get_wol)(struct efx_nic *efx, struct ethtool_wolinfo *wol);
 	int (*set_wol)(struct efx_nic *efx, u32 type);
 	void (*resume_wol)(struct efx_nic *efx);
-	int (*test_registers)(struct efx_nic *efx);
+	int (*test_chip)(struct efx_nic *efx, struct efx_self_tests *tests);
 	int (*test_memory)(struct efx_nic *efx,
 			   void (*pattern)(unsigned, efx_qword_t *, int, int),
 			   int a, int b);

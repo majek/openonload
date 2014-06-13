@@ -58,7 +58,7 @@ struct mmsghdr {
 };
 #endif
 
-#ifdef CI_LIBC_HAS___read_chk
+#if CI_LIBC_HAS___read_chk
 extern ssize_t __read_chk (int fd, void *buf, size_t nbytes, size_t buflen);
 #endif
 

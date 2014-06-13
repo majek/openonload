@@ -31,6 +31,8 @@
 #if defined(__linux__) && defined(__KERNEL__)
 # include <onload/linux_onload.h>
 #endif
+#include <onload/sleep.h>
+
 
 #define LPF "tcp_close: "
 
@@ -142,7 +144,6 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts,
     case CI_TCP_SYN_SENT:
       ci_tcp_drop(netif, ts, ECONNRESET);
       ts->s.rx_errno = ENOTCONN;
-      ts->tcpflags |= CI_TCPT_FLAG_CONNECT_FAILED;
       return 0;
 
     case CI_TCP_CLOSING:
@@ -423,7 +424,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
       ats = SP_TO_TCP(ani, sp);
 
       ci_netif_unlock(netif);
-      ci_netif_lock(ani);
+      ci_netif_lock_fixme(ani);
     }
     else {
       ani = netif;
@@ -455,7 +456,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
       ci_netif_unlock(ani);
       /* release the ref taken by efab_thr_table_lookup */
       efab_thr_release(thr);
-      ci_netif_lock(netif);
+      ci_netif_lock_fixme(netif);
     }
   }
 

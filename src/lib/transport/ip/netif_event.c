@@ -445,8 +445,7 @@ static void process_post_poll_list(ci_netif* ni)
 #ifdef __KERNEL__
       if( (sb->sb_flags & sb->wake_request) ) {
         sb->wake_request = 0;
-        tcp_helper_endpoint_wakeup(netif2tcp_helper_resource(ni),
-                                   ci_netif_get_valid_ep(ni, sb->bufid));
+        citp_waitable_wakeup(ni, sb);
       }
       sb->sb_flags = 0;
 #else

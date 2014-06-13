@@ -35,7 +35,7 @@
 #include <onload/debug_ops.h>
 #include <onload/ul/tcp_helper.h>
 #include <ci/app.h>
-#include <etherfabric/misc.h>
+#include <etherfabric/vi.h>
 #include "libstack.h"
 #include <ci/internal/ip_signal.h>
 
@@ -516,9 +516,10 @@ void list_all_stacks(int attach)
 
   while( i >= 0 ) {
     info.ni_index = i;
+    info.ni_orphan = cfg_zombie;
     info.ni_subop = CI_DBG_NETIF_INFO_GET_NEXT_NETIF;
     CI_TRY(oo_ioctl(fd, OO_IOC_DBG_GET_STACK_INFO, &info));
-    if( info.ni_exists ) {
+    if( info.ni_exists && (!cfg_zombie || info.ni_orphan) ) {
       if( attach )
 	stack_attach(i);
       else
@@ -552,6 +553,7 @@ void list_all_stacks2(stackfilter_t *filter,
 
   while( i >= 0 ) {
     info.ni_index = i;
+    info.ni_orphan = 0;
     info.ni_subop = CI_DBG_NETIF_INFO_GET_NEXT_NETIF;
     CI_TRY(oo_ioctl(fd, OO_IOC_DBG_GET_STACK_INFO, &info));
 
@@ -968,15 +970,35 @@ unsigned arg_u[1];
 const char* arg_s[1];
 
 
-void stack_zombie(int id, void *arg)
+void zombie_stack_dump(int id, void *arg)
 {
+  int rc;
   oo_fd fd;
   
   CI_TRY(oo_fd_open(&fd));
-  oo_debug_dump_stack(fd, id);
+  rc = oo_debug_dump_stack(fd, id, 1);
   CI_TRY(oo_fd_close(fd));
   
-  ci_log("Zombie stack %d state dumped to syslog", id);
+  if( rc == 0 )
+    ci_log("Orphan stack %d state dumped to syslog", id);
+  else
+    ci_log("No such orphan stack %d\n", id);
+}
+
+
+void zombie_stack_kill(int id, void *arg)
+{
+  int rc;
+  oo_fd fd;
+  
+  CI_TRY(oo_fd_open(&fd));
+  rc = oo_debug_kill_stack(fd, id);
+  CI_TRY(oo_fd_close(fd));
+  
+  if( rc == 0 )
+    ci_log("Orphan stack %d state killed", id);
+  else
+    ci_log("No such orphan stack %d\n", id);
 }
 
 
@@ -1612,7 +1634,7 @@ static void stack_segments(ci_netif* ni)
 
 static void stack_ev(ci_netif* ni)
 {
-  int rc = ef_eventq_put(ef_eventq_id(&ni->nic_hw[0].vi), 
+  int rc = ef_eventq_put(ef_vi_resource_id(&ni->nic_hw[0].vi), 
 			 ci_netif_get_driver_handle(ni), 0xff);
   ci_log("%d: ef_eventq_put: rc=%d", NI_ID(ni), rc);
 }
@@ -1798,12 +1820,23 @@ static void stack_hwport_to_base_ifindex(ci_netif* ni)
 **********************************************************************/
 
 #define STACK_OP_A(nm, help, args, fl)          \
-  { (#nm), (stack_##nm), (help), (args), (fl) }
+  { (#nm), (stack_##nm), (NULL), (help), (args), (fl) }
 
 #define STACK_OP_AU(nm, h, ah)    STACK_OP_A(nm, (h), (ah), FL_ARG_U)
 #define STACK_OP_AX(nm, h, ah)    STACK_OP_A(nm, (h), (ah), FL_ARG_X)
 #define STACK_OP_F(nm, help, fl)  STACK_OP_A(nm, (help), NULL, (fl))
 #define STACK_OP(nm, help)        STACK_OP_A(nm, (help), NULL, 0)
+
+#define ZOMBIE_STACK_OP(nm, help)           \
+  { (#nm), (NULL), (zombie_stack_##nm), (help), (NULL), (FL_ID) }
+
+static const stack_op_t zombie_stack_ops[] = {
+  ZOMBIE_STACK_OP(dump, "[requires -z] show core state stack and sockets"),
+  ZOMBIE_STACK_OP(kill, "[requires -z] terminate orphan/zombie stack"),
+};
+
+#define N_ZOMBIE_STACK_OPS                                     \
+  (sizeof(zombie_stack_ops) / sizeof(zombie_stack_ops[0]))
 
 static const stack_op_t stack_ops[] = {
   STACK_OP(dump,               "show core state of stack and sockets"),
@@ -1885,13 +1918,17 @@ static const stack_op_t stack_ops[] = {
              FL_ARG_S),
   STACK_OP(hwport_to_base_ifindex,"dump hwport_to_base_ifindex table"),
 };
-#define N_STACK_OPTS	(sizeof(stack_ops) / sizeof(stack_ops[0]))
+#define N_STACK_OPS	(sizeof(stack_ops) / sizeof(stack_ops[0]))
 
 
-void for_each_stack_op(void(*fn)(const stack_op_t* op, void* arg), void* arg)
+void for_each_stack_op(stackop_fn_t* fn, void* arg)
 {
   const stack_op_t* op;
-  for( op = stack_ops; op < stack_ops + N_STACK_OPTS; ++op )
+  for( op = stack_ops; op < stack_ops + N_STACK_OPS; ++op )
+    (*fn)(op, arg);
+  for( op = zombie_stack_ops; 
+       op < zombie_stack_ops + N_ZOMBIE_STACK_OPS;
+       ++op )
     (*fn)(op, arg);
 }
 
@@ -1899,7 +1936,17 @@ void for_each_stack_op(void(*fn)(const stack_op_t* op, void* arg), void* arg)
 const stack_op_t* get_stack_op(const char* name)
 {
   const stack_op_t* op;
-  for( op = stack_ops; op < stack_ops + N_STACK_OPTS || (op = NULL); ++op )
+  const stack_op_t* ops;
+  int n;
+  if( cfg_zombie ) {
+    n = N_ZOMBIE_STACK_OPS;
+    ops = zombie_stack_ops;
+  } 
+  else {
+    n = N_STACK_OPS;
+    ops = stack_ops;
+  }
+  for( op = ops; op < ops + n || (op = NULL); ++op )
     if( ! strcmp(op->name, name) )
       break;
   return op;

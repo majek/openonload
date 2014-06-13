@@ -48,6 +48,9 @@
 
 #include <etherfabric/base.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*! \i_ef_bufs An [ef_iobufset] is a set of I/O buffers that are suitable
  *  for DMA.
@@ -144,5 +147,8 @@ ef_vi_inline void ef_iobufset_offset_ptrs(ef_iobufset* bs, int offset)
 #endif
 }
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __EFAB_IOBUFSET_H__ */

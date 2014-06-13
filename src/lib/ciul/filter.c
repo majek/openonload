@@ -25,10 +25,9 @@
 \**************************************************************************/
   
 /*! \cidoxg_lib_ef */
-#include <ci/driver/efab/os_intf.h>
 #include <etherfabric/vi.h>
-#include <ci/efch/op_types.h>
 #include "ef_vi_internal.h"
+#include "driver_access.h"
 #include "logging.h"
 
 

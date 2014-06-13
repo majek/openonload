@@ -100,10 +100,10 @@ endif # KPATH
 KVERPARTS = $(subst -, ,$(subst ., ,$(KVER)))
 ifeq ($(word 1,$(KVERPARTS)),2)
 ifneq ($(word 2,$(KVERPARTS)),6)
-$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.5)
+$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
 endif
-ifneq ($(filter 0 1 2 3 4,$(word 3,$(KVERPARTS))),)
-$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.5)
+ifneq ($(filter 0 1 2 3 4 5 6 7 8,$(word 3,$(KVERPARTS))),)
+$(error Kernel version $(KVER) is not supported\; minimum version is 2.6.9)
 endif
 endif
 

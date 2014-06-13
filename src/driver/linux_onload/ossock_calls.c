@@ -34,6 +34,8 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/linux_onload.h>
 
+#include "onload_kernel_compat.h"
+
 #if CI_CFG_EPOLL_HANDOVER_WORKAROUND
 static int oo_fop_release_nothing(struct inode *inode, struct file *file)
 {
@@ -167,7 +169,7 @@ int oo_install_file_to_fd_cloexec(struct file *file)
   spin_lock(&files->file_lock);
   fdt = files_fdtable(files);
   rcu_assign_pointer(fdt->fd[fd], file);
-  FD_SET(fd, fdt->close_on_exec);
+  efx_set_close_on_exec(fd, fdt);
   spin_unlock(&files->file_lock);
 
   return fd;

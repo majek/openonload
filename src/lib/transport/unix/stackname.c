@@ -73,15 +73,13 @@ static void
 oo_stackname_rescope_local(struct oo_stackname_state *state)
 {
   char suffix[CI_CFG_STACK_NAME_LEN];
-  int rc;
 
   if( oo_stackname_global.stackname[0] == 1 ) {
     /* Don't accelerate, so don't try and append suffix */
     state->scoped_stackname[0] = 1;
   }
   else {
-    rc = oo_stackname_get_suffix(state->context, suffix);
-    ci_assert(rc == 0);
+    CI_TRY( oo_stackname_get_suffix(state->context, suffix) );
 
     strncpy(state->scoped_stackname, 
             oo_stackname_global.stackname,
@@ -243,7 +241,6 @@ oo_stackname_update_local_suffix(struct oo_stackname_state *state,
                                      enum onload_stackname_scope context)
 {
   char suffix[CI_CFG_STACK_NAME_LEN];
-  int rc;
 
   /* First obtain the appropriate base stackname */
   if( state->who == ONLOAD_THIS_THREAD ) {
@@ -258,8 +255,7 @@ oo_stackname_update_local_suffix(struct oo_stackname_state *state,
     
   /* Only append suffix if it's not the special "don't accelerate" name */
   if( state->scoped_stackname[0] != 1 ) {
-    rc = oo_stackname_get_suffix(context, suffix);
-    ci_assert(rc == 0);
+    CI_TRY( oo_stackname_get_suffix(context, suffix) );
 
     strncat(state->scoped_stackname, suffix, 
             CI_CFG_STACK_NAME_LEN - strlen(state->scoped_stackname) - 1);

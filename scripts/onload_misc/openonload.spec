@@ -38,7 +38,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201205-p4
+%define pkgversion 201205-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -47,7 +47,7 @@
 
 %define have_lsb %( ! which lsb_release > /dev/null 2>&1; echo $? )
 
-%define knownvariants '@(BOOT|PAE|@(big|huge)mem|debug|enterprise|kdump|?(big|large)smp|uml|xen[0U]?(-PAE)|xen|rt|default|big|pae)'
+%define knownvariants '@(BOOT|PAE|@(big|huge)mem|debug|enterprise|kdump|?(big|large)smp|uml|xen[0U]?(-PAE)|xen|rt?(-trace|-vanilla)|default|big|pae|vanilla|trace|timing)'
 %define knownvariants2 '%{knownvariants}'?(_'%{knownvariants}')
 
 # Determine distro
@@ -69,7 +69,7 @@
 
 %define kernel_pkg %( rpm -q --whatprovides /lib/modules/%{kernel} | grep -v source | grep -v base) 
 # form a fake kernel name in known format 2.6.32-0.41-rt
-%define kernel_long %( echo %{kernel_pkg} | sed "s/kernel-\\([a-zA-Z_]*\\)[-\.]\\([2-9].[0-9].*\\)/\\2-\\1/; s/kernel-//")
+%define kernel_long %( echo %{kernel_pkg} | sed "s/kernel-\\([a-zA-Z_-]*\\)[-\.]\\([2-9].[0-9].*\\)/\\2-\\1/; s/kernel-//")
 
 %else
 
@@ -95,6 +95,15 @@
 %define libpcap_devel %( [ %{thisdist} -ge 5 ] && echo libpcap-devel || echo libpcap )
 %else
 %define libpcap_devel libpcap-devel
+%endif
+
+# On SLES11 source packages for RT kernels are called kernel-source-rt
+# rather than kernel-source.
+%define rtkernel %( echo %{kernel} | grep -q -- -rt && echo 1 || echo 0 )
+%if 0%{?sles_version} >= 11 && %{rtkernel}
+%define kernelsource  kernel-source-rt
+%else
+%define kernelsource  kernel-source
 %endif
 
 # kmodtool doesn't count 'rt' as a variant.  So I've stolen the bash
@@ -128,9 +137,9 @@ Source0		: openonload-%{pkgversion}.tgz
 BuildRoot   	: %{_builddir}/%{name}-root
 AutoReqProv	: no
 %if %{redhat}
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel}, kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel}
+BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel}
 %else
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel}, kernel-source = %{kverrel} glibc-devel glibc %{libpcap_devel}
+BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} %{kernelsource} = %{kverrel} glibc-devel glibc %{libpcap_devel}
 %ifarch x86_64
 %if %{build32}
 BuildRequires   : glibc-devel-32bit
@@ -160,8 +169,12 @@ Group       	: System Environment/Kernel
 %if %( ! echo %{kvariantsuffix} | grep PAE &> /dev/null; echo $? )
 Requires	: openonload = %{version}-%{release}, kernel-%{target_cpu} = %{kverrel}%{kvariantsuffix}
 %else
+%if %( ! echo %{kvariantsuffix} | grep -E trace\|vanilla &> /dev/null; echo $? )
+Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
+%else
 Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash}-%{target_cpu} = %{kverrel}
-%endif       
+%endif
+%endif
 
 %else
 Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
@@ -280,6 +293,9 @@ rm -fR $RPM_BUILD_ROOT
 /usr/libexec/onload/modules
 
 %changelog
+* Mon May 14 2012 Mark Spender <mspender@solarflare.com> 201205
+- Added fix for MRG trace and vanilla kernel variants
+
 * Mon Feb 13 2012 Mark Spender <mspender@solarflare.com> 201202
 - Added depenency fix for MRG rt kernels and RHEL 4 kernel variants  
 

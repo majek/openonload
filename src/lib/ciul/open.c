@@ -29,6 +29,7 @@
 #include "ef_vi_internal.h"
 #include "logging.h"
 #include <fcntl.h>
+#include <unistd.h>
 
 
 int ef_driver_open(ef_driver_handle* pfd)
@@ -40,6 +41,12 @@ int ef_driver_open(ef_driver_handle* pfd)
     return 0;
   }
   return -errno;
+}
+
+
+int ef_driver_close(ef_driver_handle dh)
+{
+  return close(dh);
 }
 
 /*! \cidoxg_end */

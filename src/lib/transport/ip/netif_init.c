@@ -647,6 +647,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->msl_seconds = atoi(s);
   if( (s = getenv("EF_TCP_FIN_TIMEOUT")) )
     opts->fin_timeout = atoi(s);
+  if( (s = getenv("EF_TCP_ADV_WIN_SCALE_MAX")) )
+    opts->tcp_adv_win_scale_max = atoi(s);
 
   if( (s = getenv("EF_TCP_SYN_OPTS")) ) {
     unsigned v;
@@ -663,10 +665,16 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->max_rx_packets = opts->max_packets * 3 / 4;
     opts->max_tx_packets = opts->max_packets * 3 / 4;
   }
-  if ( (s = getenv("EF_MAX_RX_PACKETS")) )
+  if ( (s = getenv("EF_MAX_RX_PACKETS")) ) {
     opts->max_rx_packets = atoi(s);
-  if ( (s = getenv("EF_MAX_TX_PACKETS")) )
+    if( opts->max_rx_packets > opts->max_packets )
+      opts->max_rx_packets = opts->max_packets;
+  }
+  if ( (s = getenv("EF_MAX_TX_PACKETS")) ) {
     opts->max_tx_packets = atoi(s);
+    if( opts->max_tx_packets > opts->max_packets )
+      opts->max_tx_packets = opts->max_packets;
+  }
   if ( (s = getenv("EF_RXQ_MIN")) )
     opts->rxq_min = atoi(s);
   if ( (s = getenv("EF_MIN_FREE_PACKETS")) )
@@ -1662,7 +1670,8 @@ int ci_netif_set_rxq_limit(ci_netif* ni)
     if( fill_limit < rxq_cap )
       LOG_W(ci_log("WARNING: "N_FMT "RX ring fill level reduced from %d to %d",
                    N_PRI_ARGS(ni), NI_OPTS(ni).rxq_limit, fill_limit));
-    NI_OPTS(ni).rxq_limit = fill_limit;
+    ni->opts.rxq_limit = fill_limit;
+    ni->state->opts.rxq_limit = fill_limit;
   }
   if( NI_OPTS(ni).rxq_limit <= 2 * CI_CFG_RX_DESC_BATCH ) {
     /* Do not allow user to create a stack that is too severely

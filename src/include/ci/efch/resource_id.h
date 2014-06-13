@@ -14,16 +14,12 @@
 */
 
 
-#ifndef __CI_DRIVER_EFCH_RESOURCE_ID_H__
-#define __CI_DRIVER_EFCH_RESOURCE_ID_H__
+#ifndef __CI_EFCH_RESOURCE_ID_H__
+#define __CI_EFCH_RESOURCE_ID_H__
 
 #include <ci/compat.h>
 
-/*! \TODO: This should be a small number, but currently some code (notably
-** ptloop and dma) rely on it being large.
-**
-** This *must* be a power of two.
-*/
+
 #define EFRM_RESOURCE_MAX_PER_FD_BITS    9
 #define EFRM_RESOURCE_MAX_PER_FD         (1u << EFRM_RESOURCE_MAX_PER_FD_BITS)
 
@@ -72,4 +68,4 @@ ci_inline int efch_resource_id_equality(efch_resource_id_t x,
 }
 				      
 
-#endif /* __CI_DRIVER_EFCH_RESOURCE_ID_H__ */
+#endif /* __CI_EFCH_RESOURCE_ID_H__ */

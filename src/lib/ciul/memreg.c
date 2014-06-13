@@ -27,9 +27,8 @@
 #include <etherfabric/base.h>
 #include <etherfabric/memreg.h>
 #include <etherfabric/pd.h>
-#include <ci/driver/efab/os_intf.h>
-#include <ci/efch/op_types.h>
 #include "ef_vi_internal.h"
+#include "driver_access.h"
 #include "logging.h"
 #include "efch_intf_ver.h"
 

@@ -336,10 +336,17 @@ static int efx_mtd_probe_device(struct efx_nic *efx, struct efx_mtd *efx_mtd)
 		part->mtd.owner = THIS_MODULE;
 		part->mtd.priv = efx_mtd;
 		part->mtd.name = part->name;
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_MTD_DIRECT_ACCESS)
 		part->mtd.erase = efx_mtd_erase;
-		part->mtd.read = efx_mtd->ops->read;
-		part->mtd.write = efx_mtd->ops->write;
-		part->mtd.sync = efx_mtd_sync;
+                part->mtd.read = efx_mtd->ops->read;
+                part->mtd.write = efx_mtd->ops->write;
+                part->mtd.sync = efx_mtd_sync;
+#else
+		part->mtd._erase = efx_mtd_erase;
+		part->mtd._read = efx_mtd->ops->read;
+		part->mtd._write = efx_mtd->ops->write;
+		part->mtd._sync = efx_mtd_sync;
+#endif
 
 		if (mtd_device_register(&part->mtd, NULL, 0))
 			goto fail;

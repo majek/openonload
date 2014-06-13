@@ -13,15 +13,13 @@
 ** GNU General Public License for more details.
 */
 
-
-#include <ci/driver/efab/debug.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/pd.h>
-#include <ci/driver/efab/efch.h>
+#include "efch.h"
 #include <ci/driver/efab/hardware.h>
-#include <ci/driver/efab/efrm_mmap.h>
+#include <ci/efch/mmap.h>
 #include <ci/efch/op_types.h>
 #include <driver/linux_resource/kernel_compat.h>
 #include "char_internal.h"
@@ -176,10 +174,9 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
 
   alloc_in = &alloc->u.vi_in;
 
-  DEBUGRES(ci_log("%s: evq=%d txq=%d rxq=%d", __FUNCTION__,
-                   alloc_in->evq_capacity,
-                   alloc_in->txq_capacity,
-                   alloc_in->rxq_capacity));
+  EFCH_TRACE("%s: evq=%d txq=%d rxq=%d",
+             __FUNCTION__, alloc_in->evq_capacity, alloc_in->txq_capacity,
+             alloc_in->rxq_capacity);
 
   efrm_vi_attr_init(&attr);
 
@@ -187,22 +184,28 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   if( (rt->access & CI_CAP_PHYS) == 0 ) {
     if( (alloc_in->flags & (EFHW_VI_RX_PHYS_ADDR_EN |
                             EFHW_VI_TX_PHYS_ADDR_EN)) != 0 ) {
-      DEBUGERR(ci_log("%s: Not permitted to create phys-addr resource",
-                      __FUNCTION__));
+      EFCH_ERR("%s: ERROR: not permitted to use phys mode", __FUNCTION__);
       return -EPERM;
     }
   }
 
   if ((rc = efch_vi_rm_find(alloc_in->evq_fd, alloc_in->evq_rs_id,
-                            EFRM_RESOURCE_VI, &evq)) < 0)
+                            EFRM_RESOURCE_VI, &evq)) < 0) {
+    EFCH_ERR("%s: ERROR: EVQ not found fd=%d id=%d rc=%d", __FUNCTION__,
+             alloc_in->evq_fd, alloc_in->evq_rs_id.index, rc);
     goto fail1;
+  }
   if ((rc = efch_vi_rm_find(alloc_in->pd_or_vi_set_fd,
                             alloc_in->pd_or_vi_set_rs_id,
                             EFRM_RESOURCE_PD, &pd)) < 0)
     if ((rc = efch_vi_rm_find(alloc_in->pd_or_vi_set_fd,
                               alloc_in->pd_or_vi_set_rs_id,
-                              EFRM_RESOURCE_VI_SET, &vi_set)) < 0)
+                              EFRM_RESOURCE_VI_SET, &vi_set)) < 0) {
+      EFCH_ERR("%s: ERROR: PD or VI_SET not found fd=%d id=%d rc=%d",
+               __FUNCTION__, alloc_in->pd_or_vi_set_fd,
+               alloc_in->pd_or_vi_set_rs_id.index, rc);
       goto fail2;
+    }
 
   if( vi_set != NULL ) {
     client = NULL;
@@ -216,8 +219,8 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   else {
     rc = efrm_client_get(alloc_in->ifindex, NULL, NULL, &client);
     if( rc != 0 ) {
-      DEBUGERR(ci_log("%s: efrm_client_get(%d) failed (%d)",
-                      __FUNCTION__, alloc_in->ifindex, rc));
+      EFCH_ERR("%s: ERROR: ifindex=%d not known rc=%d",
+               __FUNCTION__, alloc_in->ifindex, rc);
       goto fail3;
     }
   }
@@ -264,10 +267,8 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   alloc_out->mem_mmap_bytes = virs->mem_mmap_bytes;
 
   rs->rs_base = &virs->rs;
-  DEBUGRES(ci_log("%s: Allocated "EFRM_RESOURCE_FMT, __FUNCTION__,
-                   EFRM_RESOURCE_PRI_ARG(&virs->rs)));
-  DEBUGRES(efch_vi_rm_dump(&virs->rs, rt, ""));
-  DEBUGRES(ci_log("%s: Returning rc %d", __FUNCTION__, rc));
+  EFCH_TRACE("%s: Allocated "EFRM_RESOURCE_FMT" rc=%d", __FUNCTION__,
+             EFRM_RESOURCE_PRI_ARG(&virs->rs), rc);
   return 0;
 
  fail3:
@@ -295,14 +296,13 @@ static void
 efrm_eventq_put(struct efrm_vi* virs, ci_resource_op_t* op)
 {
   struct efhw_nic *nic;
+  efhw_event_t ev;
   nic = efrm_client_get_nic(virs->rs.rs_client);
 
-  DEBUGVERB(ci_log("efrm_eventq_put: nic "EFRM_RESOURCE_FMT" "
-		   FALCON_EVENT_FMT,
-		   EFRM_RESOURCE_PRI_ARG(&virs->rs),
-                   FALCON_EVENT_PRI_ARG(op->u.evq_put.ev)));
-
-  efhw_nic_sw_event(nic, op->u.evq_put.ev.opaque.a, virs->rs.rs_instance);
+  ev.u64 = op->u.evq_put.ev;
+  EFCH_TRACE("efrm_eventq_put: nic "EFRM_RESOURCE_FMT" "FALCON_EVENT_FMT,
+             EFRM_RESOURCE_PRI_ARG(&virs->rs), FALCON_EVENT_PRI_ARG(ev));
+  efhw_nic_sw_event(nic, ev.opaque.a, virs->rs.rs_instance);
 }
 
 
@@ -337,6 +337,7 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
 {
   struct efrm_vi *virs = efrm_vi(rs->rs_base);
   struct completion flush_completion;
+  ci_timeval_t tv;
 
   int rc;
   switch(op->op) {
@@ -346,9 +347,13 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       break;
 
     case CI_RSOP_EVENTQ_WAIT:
+      tv.tv_sec = op->u.evq_wait.timeout.tv_sec;
+      tv.tv_usec = op->u.evq_wait.timeout.tv_usec;
       rc = efab_vi_rm_eventq_wait(virs, op->u.evq_wait.current_ptr,
-                                  &op->u.evq_wait.timeout
+                                  &tv
                                   CI_BLOCKING_CTX_ARG(bc));
+      op->u.evq_wait.timeout.tv_sec = tv.tv_sec;
+      op->u.evq_wait.timeout.tv_usec = tv.tv_usec;
       *copy_out = 1;
       break;
 

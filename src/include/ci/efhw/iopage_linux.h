@@ -84,6 +84,7 @@ struct efhw_page {
 
 #ifdef CONFIG_IOMMU_API
 typedef struct iommu_domain efhw_iommu_domain;
+extern struct mutex efrm_iommu_mutex;
 #else
 typedef unsigned int efhw_iommu_domain;
 #endif
@@ -169,6 +170,14 @@ static inline int efhw_iopage_is_valid(struct efhw_iopage *p)
 	return p->kva != NULL;
 }
 
+/* Copy IO page from one efhw_iopage to another.
+ * It is invalid to free the original IO page while the copied structure is
+ * in use. */
+static inline void
+efhw_iopage_copy(struct efhw_iopage *new, struct efhw_iopage *orig)
+{
+	new->kva = orig->kva;
+}
 
 /*--------------------------------------------------------------------
  *

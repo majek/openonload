@@ -28,6 +28,9 @@
 #ifndef __ETHERFABRIC_IOVEC_PTR_H__
 #define __ETHERFABRIC_IOVEC_PTR_H__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
   /*! \i_ef_base [ef_iovec_ptr] provides a convenient means to iterate
   ** through an ef_iovec non-destructively.
@@ -88,6 +91,9 @@ ef_vi_inline void ef_iovec_ptr_next(ef_iovec_ptr* p) {
   --p->iovlen;
 }
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __ETHERFABRIC_IOVEC_PTR_H__ */
 /*! \cidoxg_end */

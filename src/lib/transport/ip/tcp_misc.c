@@ -27,6 +27,7 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include <onload/sleep.h>
 
 
 #define LPF "TCP MISC "
@@ -419,7 +420,6 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
   ** SYN segment, in which case we call this a second time to get the SYN
   ** options.  In this case [topts] will be non-null.
   */
-  ci_ip_pkt_fmt* pkt;
   ci_tcp_hdr* tcp;
   ci_uint8* opt;
   int i, bytes;
@@ -429,14 +429,13 @@ int ci_tcp_parse_options(ci_netif* ni, ciip_tcp_rx_pkt* rxp,
   ci_assert(rxp->tcp);
   ci_assert(rxp->tcp == PKT_TCP_HDR(rxp->pkt));
 
-  pkt = rxp->pkt;
   tcp = rxp->tcp;
   opt = CI_TCP_HDR_OPTS(tcp);
   bytes = CI_TCP_HDR_OPT_LEN(tcp);
   rxp->flags = 0;
 
   LOG_TV(log(LPF "parsing options packet %d, optlen %d",
-             OO_PKT_FMT(pkt), bytes));
+             OO_PKT_FMT(rxp->pkt), bytes));
 
   /* parse valid TCP options */
   while( bytes > 0 ) {
@@ -705,7 +704,6 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
     }
 
     if (ts->s.b.state == CI_TCP_SYN_SENT) {
-      ts->tcpflags |= CI_TCPT_FLAG_CONNECT_FAILED;
       ts->retransmits = 0;
       ts->tcpflags &= ~CI_TCPT_FLAG_NO_ARP;
     }

@@ -31,6 +31,7 @@
 
 #include <onload/common.h>
 #include <onload/oo_pipe.h>
+#include <onload/sleep.h>
 
 #define LPF "ci_pipe_"
 #define LPFIN "-> " LPF
@@ -219,13 +220,8 @@ static int oo_pipe_unlock(ci_netif* ni, struct oo_pipe* p, int lock, int wake)
   oo_pipe_is_locked(_ni, _p, OO_WAITABLE_LK_PIPE_TX)
 
 #else  /* OO_PIPE_LOCKLESS */
-/* this should be updated to separate locks */
-#define oo_pipe_lock_read(_ni, _p) ci_sock_lock(_ni, &(_p)->b)
-#define oo_pipe_unlock_read(_ni, _p) ci_sock_unlock(_ni, &(_p)->b)
-#define oo_pipe_is_read_locked(_ni, _p) ci_sock_is_locked(_ni, &(_p)->b)
 
-#define oo_pipe_lock_write(_ni, _p)  ci_sock_lock(_ni, &(_p)->b)
-#define oo_pipe_unlock_write(_ni, _p) ci_sock_unlock(_ni, &(_p)->b)
+#define oo_pipe_is_read_locked(_ni, _p) ci_sock_is_locked(_ni, &(_p)->b)
 #define oo_pipe_is_write_locked(_ni, _p) ci_sock_is_locked(_ni, &(_p)->b)
 
 #endif /* OO_PIPE_LOCKLESS */
@@ -248,6 +244,28 @@ static int oo_pipe_unlock(ci_netif* ni, struct oo_pipe* p, int lock, int wake)
   } while (0)
 
 
+ci_inline void __oo_pipe_wake_peer(ci_netif* ni, struct oo_pipe* p,
+                                   unsigned wake)
+{
+  ci_wmb();
+  if( wake & CI_SB_FLAG_WAKE_RX )
+    ++p->b.sleep_seq.rw.rx;
+  if( wake & CI_SB_FLAG_WAKE_TX )
+    ++p->b.sleep_seq.rw.tx;
+  ci_mb();
+  if( p->b.wake_request & wake )
+    citp_waitable_wakeup(ni, &p->b);
+}
+
+
+#ifdef __KERNEL__
+void oo_pipe_wake_peer(ci_netif* ni, struct oo_pipe* p, unsigned wake)
+{
+  __oo_pipe_wake_peer(ni, p, wake);
+}
+#endif
+
+
 ci_inline char* pipe_get_point(struct oo_pipe *p, ci_netif* ni,
                                ci_uint32 bufid, ci_uint32 offset)
 {
@@ -266,7 +284,7 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
                  const struct iovec *iov,
                  size_t iovlen CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
-  int rc = 0;
+  int rc;
   int i;
 
   ci_assert(p);
@@ -284,10 +302,11 @@ reread:
   if( ! oo_pipe_data_len(p) ) {
     if( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_WRITER_SHIFT) ) {
       /* double-check to avoid a race as we have no locks */
-      if ( oo_pipe_data_len(p) )
+      ci_mb();
+      if( oo_pipe_data_len(p) )
         goto data;
-      else
-        goto out;
+      rc = 0;
+      goto out;
     }
 
     LOG_PIPE("%s: not enough data in the pipe",
@@ -309,10 +328,12 @@ reread:
         /* call spinloop_pause first couple of times */
         schedule_frc = now_frc;
         do {
-          rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc, 
+          rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
                                                false, NULL, si);
-          if( rc != 0 )
+          if( rc < 0 ) {
+            CI_SET_ERROR(rc, -rc);
             goto out;
+          }
 
           if ( oo_pipe_data_len(p) )
             goto data;
@@ -349,7 +370,7 @@ reread:
                  p->b.bufid, rc, (int)oo_pipe_data_len(p));
         if( rc < 0 ) {
           LOG_PIPE("%s: sleep rc = %d", __FUNCTION__, rc);
-          CI_SET_ERROR(rc, rc);
+          CI_SET_ERROR(rc, -rc);
           return -1;
         }
         if( oo_pipe_data_len(p) )
@@ -365,8 +386,13 @@ reread:
   }
 
 data:
-  oo_pipe_lock_read(ni, p);
+  rc = ci_sock_lock(ni, &p->b);
+#ifdef __KERNEL__
+  if( rc < 0 )
+    return -ERESTARTSYS;
+#endif
 
+  rc = 0;
   for( i = 0; i < iovlen; i++ ) {
     char* start = iov[i].iov_base;
     char* end = start + iov[i].iov_len;
@@ -390,15 +416,10 @@ data:
 read:
   ci_wmb();
   p->bytes_removed += rc;
-
-  /* may be we need to wake up our oponent */
-  oo_pipe_wake_peer(p, ni, CI_SB_FLAG_WAKE_TX);
-
-  oo_pipe_unlock_read(ni, p);
+  __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_TX);
+  ci_sock_unlock(ni, &p->b);
 out:
-
   LOG_PIPE("%s[%u]: EXIT", __FUNCTION__, p->b.bufid);
-
   return rc;
 }
 
@@ -467,7 +488,7 @@ static int oo_pipe_wait_write(ci_netif* ni, struct oo_pipe* p)
 
     if( rc < 0 ) {
       LOG_PIPE("%s: sleep rc = %d", __FUNCTION__, rc);
-      CI_SET_ERROR(rc, rc);
+      CI_SET_ERROR(rc, -rc);
       return rc;
     }
   } while( ! oo_pipe_is_writable(p) );
@@ -477,28 +498,39 @@ static int oo_pipe_wait_write(ci_netif* ni, struct oo_pipe* p)
 }
 
 
-/* Warning! Takes netif lock! */
-ci_inline int oo_pipe_maybe_claim_buffers(ci_netif* ni,
-                                          struct oo_pipe* p,
+/* Called when we want more space to write data into.  Returns >0 if more
+ * space was allocated, 0 if we've already got the max and -ENOMEM if we
+ * can't get more memory.
+ *
+ * When called in kernel may return -EINTR or -ERESTARTSYS if interrupted
+ * while waiting for a lock.
+ *
+ * Warning!  Grabs the stack lock and possibly socket lock).
+ */
+ci_inline int oo_pipe_maybe_claim_buffers(ci_netif* ni, struct oo_pipe* p,
                                           int pipe_lock_required)
 {
-  int rc = -1;
+  int rc;
 
   LOG_PIPE("%s: called for ni=%d p=%d lock_req=%d wr=%d rd=%d",
            __FUNCTION__, ni->state->stack_id, p->b.bufid,
            pipe_lock_required, p->write_ptr.bufid, p->read_ptr.bufid);
 
+  if( p->bufs_num >= OO_PIPE_MAX_BUFS )
+    return 0;
+  if( pipe_lock_required && (rc = ci_sock_lock(ni, &p->b)) < 0 )
+    return rc;
+  rc = 0;
   if( p->bufs_num < OO_PIPE_MAX_BUFS ) {
-    if( pipe_lock_required )
-      ci_sock_lock(ni, &p->b);
-    ci_netif_lock(ni);
-    if( p->bufs_num < OO_PIPE_MAX_BUFS )
+    if( (rc = ci_netif_lock(ni)) == 0 ) {
       rc = oo_pipe_alloc_bufs(ni, p, CI_MIN(OO_PIPE_BURST_BUFS,
                                             OO_PIPE_MAX_BUFS - p->bufs_num));
-    ci_netif_unlock(ni);
-    if( pipe_lock_required )
-      ci_sock_unlock(ni, &p->b);
+      rc = (rc < 0) ? -ENOMEM : 1;
+      ci_netif_unlock(ni);
+    }
   }
+  if( pipe_lock_required )
+    ci_sock_unlock(ni, &p->b);
   return rc;
 }
 
@@ -539,9 +571,14 @@ rewrite:
 
   /* fast exit in case of problems */
   if( ! oo_pipe_is_writable(p) ) {
-    if( oo_pipe_maybe_claim_buffers(ni, p, 1) == 0 )
+    rc = oo_pipe_maybe_claim_buffers(ni, p, 1);
+    if( rc > 0 )
       goto rewrite;
-
+#ifdef __KERNEL__
+    else if( rc == -ERESTARTSYS || rc == -EINTR )
+      return -ERESTARTSYS;
+#endif
+    /* We didn't allocate more buffer space. */
     if( p->aflags & (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_WRITER_SHIFT)) {
       LOG_PIPE("%s: O_NONBLOCK is set so exit", __FUNCTION__);
       CI_SET_ERROR(rc, EAGAIN);
@@ -554,7 +591,11 @@ rewrite:
     }
   }
 
-  oo_pipe_lock_write(ni, p);
+  rc = ci_sock_lock(ni, &p->b);
+#ifdef __KERNEL__
+  if( rc < 0 )
+    return -ERESTARTSYS;
+#endif
 
   for( i = 0; i < iovlen; i++ ) {
     char* start = iov[i].iov_base;
@@ -590,21 +631,31 @@ rewrite:
                burst, add, oo_pipe_space(p));
       }
 
-      /* written everything! cool! */
-      if( ! ( end - start ) )
+      if( ! ( end - start ) ) {
+        /* written all of this segment */
         break;
-      /* probably have space available! */
-      else if( burst && oo_pipe_is_writable(p) )
-        continue;
-      /* we have no space but still have data */
-      else if( oo_pipe_maybe_claim_buffers(ni, p, 0) == 0 ) {
-        /* don't update bytes_added/removed as reader may note
-         * this and we're pretending that we're atomic */
+      }
+      else if( burst && oo_pipe_is_writable(p) ) {
+        /* still more space available */
         continue;
       }
+      else if( (rc = oo_pipe_maybe_claim_buffers(ni, p, 0)) > 0 ) {
+        /* allocated more space -- keep trying */
+        continue;
+      }
+#ifdef __KERNEL__
+      else if( rc == -ERESTARTSYS || rc == -EINTR ) {
+        /* interrupted while waiting for lock */
+        if( total_bytes + add )
+          goto sent_locked;
+        ci_sock_unlock(ni, &p->b);
+        rc = -ERESTARTSYS;
+        goto out;
+      }
+#endif
       else if( p->aflags &
                (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_WRITER_SHIFT) ) {
-        goto sent;
+        goto sent_locked;
       }
 
       /* loosers! no space and have plenty of data to write! */
@@ -613,37 +664,44 @@ rewrite:
       p->bytes_added += add;
       add = 0;
 
-      oo_pipe_unlock_write(ni, p);
+      ci_sock_unlock(ni, &p->b);
       rc = oo_pipe_wait_write(ni, p);
       if (rc != 0) {
-        /* this should not happen in normal life */
-        LOG_PIPE("Waiting for write buffer to be ready failed!");
-        /* no lock */
+        if( total_bytes ) {
+          goto sent_not_locked;
+        }
         goto out;
       }
-      oo_pipe_lock_write(ni, p);
+      rc = ci_sock_lock(ni, &p->b);
+#ifdef __KERNEL__
+      if( rc < 0 ) {
+        if( total_bytes )
+          goto sent_not_locked;
+        else
+          return -ERESTARTSYS;
+      }
+#endif
     }
   }
 
- sent:
-  /* great! we've sent something */
+ sent_locked:
   total_bytes += add;
   ci_wmb();
   p->bytes_added += add;
-  oo_pipe_wake_peer(p, ni, CI_SB_FLAG_WAKE_RX);
-  oo_pipe_unlock_write(ni, p);
-
-  LOG_PIPE("%s[%u]: EXIT return %d", __FUNCTION__,
-           p->b.bufid, total_bytes);
-
-  return total_bytes;
+  __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_RX);
+  ci_sock_unlock(ni, &p->b);
+  rc = total_bytes;
+  goto out;
 
 out:
-
   LOG_PIPE("%s[%u]: EXIT return %d", __FUNCTION__,
            p->b.bufid, total_bytes);
-
   return rc;
+
+ sent_not_locked:
+  __oo_pipe_wake_peer(ni, p, CI_SB_FLAG_WAKE_RX);
+  rc = total_bytes;
+  goto out;
 }
 
 

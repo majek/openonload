@@ -27,7 +27,7 @@
 #include <onload/cplane.h>
 #include <ci/internal/cplane_handle.h>
 #include <onload/tcp_helper.h>
-#include <ci/driver/efab/efrm_mmap.h>
+#include <ci/efch/mmap.h>
 
 
 

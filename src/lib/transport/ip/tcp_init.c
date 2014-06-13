@@ -45,6 +45,7 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   ts = ci_tcp_get_state_buf(netif);
   if( ts == NULL ) {
     ci_netif_unlock(netif);
+    LOG_E(ci_log("%s: [%d] out of socket buffers", __FUNCTION__,NI_ID(netif)));
     return -ENOMEM;
   }
 

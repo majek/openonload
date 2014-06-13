@@ -463,7 +463,7 @@ typedef struct {
   ci_iptime_t tconst_rto_max;
 
   /* default constants (in ms) for the above time constants */
-# define CI_TCP_TCONST_RTO_INITIAL (3000)     /* The RTO constants are   */
+# define CI_TCP_TCONST_RTO_INITIAL (1000)     /* The RTO constants are   */
 # define CI_TCP_TCONST_RTO_MIN     (1000/5)   /* inspired by the choices */
 # define CI_TCP_TCONST_RTO_MAX     (120*1000) /* of linux, not the RFCs! */
 
@@ -473,7 +473,7 @@ typedef struct {
   ** periodic timer has fairly course granularity.  We still get most of
   ** the benefit. */
   ci_iptime_t tconst_delack;
-#define CI_TCP_TCONST_DELACK      90    /* milliseconds                 */
+#define CI_TCP_TCONST_DELACK      50    /* milliseconds                 */
 
   /* TCP keepalive configuration */
   ci_iptime_t tconst_keepalive_time;  /* time before probes */
@@ -650,8 +650,6 @@ typedef struct {
 # define CI_EPLOCK_NETIF_NEED_WAKE         0x08000000
   /* need to wake someone waiting for free packet buffers */
 # define CI_EPLOCK_NETIF_PKT_WAKE          0x00100000
-  /* need to switch into a different address space */
-# define CI_EPLOCK_NETIF_WRONG_ADDR_SPC    0x00400000
   /* mask for the above flags */
 # define CI_EPLOCK_NETIF_KERNEL_FLAGS      0x0f700000
   /* someone's waiting for free packet buffers */
@@ -1273,7 +1271,7 @@ struct ci_sock_cmn_s {
 
   ci_uint64             ino CI_ALIGN(8);  /**< Inode of the O/S socket */
   ci_uint32             uid;              /**< who made this socket    */
-  CI_DEBUG(ci_int32     pid;)
+  ci_int32		pid;
 
 
   /* Address space that "owns" this socket. */
@@ -1431,8 +1429,6 @@ struct  ci_udp_state_s {
 
   ci_udp_socket_stats stats;
 
-  ci_uint64 slow_send_timestamp CI_ALIGN(8); /*!< Timestamp of the last
-                                              *   slow send */
 };
 
 
@@ -1598,14 +1594,13 @@ struct ci_tcp_state_s {
   /* TCP socket state flags */
 # define CI_TCPT_FLAG_ADVANCE_NEEDED    0x80  /* used for sendfile   */
 # define CI_TCPT_FLAG_WAS_ESTAB         0x100
-  /* Has socket ever been ESTABLISHED? */
+  /* Has socket ever been ESTABLISHED?  Simulates SS_CONNECTED state in
+   * Linux (more or less). */
 # define CI_TCPT_FLAG_NONBLOCK_CONNECT  0x200
   /* Second connect on socket in non-blocked mode or with interrupted
-   * connect. */
+   * connect.  Equal to SS_CONNECTING state in Linux. */
 # define CI_TCPT_FLAG_TMP_SRC_IP        0x400
   /* Using temporary source IP addr. */
-# define CI_TCPT_FLAG_CONNECT_FAILED    0x40000
-  /* connect() failed on this socket */
 #define CI_TCPT_FLAG_PASSIVE_OPENED     0x80000  /* was passively opened */
 #define CI_TCPT_FLAG_NO_ARP             0x100000 /* there was a failed ARP */
 #define CI_TCPT_FLAG_NO_TX_ADVANCE      0x200000 /* don't tx_advance */
@@ -1843,6 +1838,7 @@ typedef struct {
   ci_uint32            n_acks_reset;
   ci_uint32            n_acceptq_overflow;
   ci_uint32            n_acceptq_no_sock;
+  ci_uint32            n_accept_loop2_closed;
   ci_uint32            n_accept_os;
 } ci_tcp_socket_listen_stats;
 

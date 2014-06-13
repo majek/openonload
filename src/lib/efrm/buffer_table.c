@@ -193,33 +193,6 @@ void efrm_buffer_table_limits(int *low, int *high)
 
 /**********************************************************************/
 
-int
-efrm_page_register(struct efhw_nic *nic, dma_addr_t dma_addr, int owner,
-		   efhw_buffer_addr_t *buf_addr_out)
-{
-	struct efhw_buffer_table_allocation alloc;
-	int rc;
-
-	rc = efrm_buffer_table_alloc(0, &alloc);
-	if (rc == 0) {
-		efrm_buffer_table_set(&alloc, nic, 0, dma_addr, owner);
-		efrm_buffer_table_commit();
-		*buf_addr_out = EFHW_BUFFER_ADDR(alloc.base, 0);
-	}
-	return rc;
-}
-EXPORT_SYMBOL(efrm_page_register);
-
-void efrm_page_unregister(efhw_buffer_addr_t buf_addr)
-{
-	struct efhw_buffer_table_allocation alloc;
-
-	alloc.order = 0;
-	alloc.base = EFHW_BUFFER_PAGE(buf_addr);
-	efrm_buffer_table_free(&alloc);
-}
-EXPORT_SYMBOL(efrm_page_unregister);
-
 void efrm_buffer_table_commit(void)
 {
 	irq_flags_t lock_flags;

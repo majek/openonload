@@ -398,8 +398,7 @@ static int linux_tcp_helper_fop_close_pipe(struct inode* inode,
                    CI_PFD_AFLAG_CLOSED <<
                    (priv->fd_type == CI_PRIV_TYPE_PIPE_READER ?
                     CI_PFD_AFLAG_READER_SHIFT : CI_PFD_AFLAG_WRITER_SHIFT));
-    oo_pipe_wake_peer(p, &trs->netif,
-                      CI_SB_FLAG_WAKE_RX | CI_SB_FLAG_WAKE_TX);
+    oo_pipe_wake_peer(&trs->netif, p, CI_SB_FLAG_WAKE_RX | CI_SB_FLAG_WAKE_TX);
   }
 
   /* Set the flag: pipe is partially closed now */
@@ -1034,8 +1033,8 @@ ci_xfer_cached(struct task_struct *t, int other_fd,
    * mutually and concurrently xfer cached FDs from each other)
    */
   ci_fdtable_set_fd(fdt, other_fd, NULL);
-  FD_CLR(other_fd, fdt->close_on_exec);
-  __FD_CLR(other_fd, fdt->open_fds);
+  efx_clear_close_on_exec(other_fd, fdt);
+  efx_clear_open_fd(other_fd, fdt);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,17)
   if (other_fd < fdt->next_fd)

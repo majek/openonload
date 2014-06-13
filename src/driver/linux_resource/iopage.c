@@ -50,16 +50,9 @@
 #include <ci/efhw/common_sysdep.h> /* for dma_addr_t */
 #include <ci/efrm/debug.h>
 
-int efhw_iopage_alloc(struct pci_dev *pci_dev, struct efhw_iopage *p,
-		      efhw_iommu_domain *vf_domain, unsigned long iova_base)
+int efhw_iopage_alloc(struct efhw_iopage *p)
 {
-	/* dma_alloc_coherent() is really the right interface to use here.
-	 * However, it allocates memory "close" to the device, but we want
-	 * memory on the current numa node.
-	 */
-	struct device *dev = &pci_dev->dev;
 	struct page *page;
-	int rc = -ENOMEM;
 
 	/* In non-VF case, we sometimes call this from atomic context. */
 	page = alloc_pages_node(numa_node_id(),
@@ -67,91 +60,40 @@ int efhw_iopage_alloc(struct pci_dev *pci_dev, struct efhw_iopage *p,
 				GFP_ATOMIC : GFP_KERNEL,
 				0);
 	if (page == NULL)
-		goto fail1;
+		return -ENOMEM;
 	p->kva = (char *)page_address(page);
 
-	if (!vf_domain) {
-		p->dma_addr = dma_map_page(dev, page, 0, PAGE_SIZE,
-					   DMA_BIDIRECTIONAL);
-		if (dma_mapping_error(dev, p->dma_addr)) {
-			EFHW_ERR("%s: ERROR dma_map_page failed", __FUNCTION__);
-			goto fail2;
-		}
-	} else
-#ifdef CONFIG_IOMMU_API
-	{
-		EFRM_ASSERT(!in_atomic() && !in_interrupt());
-
-		p->dma_addr = iova_base;
-		rc = iommu_map(vf_domain, p->dma_addr, page_to_phys(page), 0,
-			       IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE);
-		if (rc) {
-			EFHW_ERR("%s: ERROR iommu_map_page failed (%d)",
-				 __FUNCTION__, rc);
-			goto fail2;
-		}
-	}
-#else
-	EFRM_ASSERT(0);
-#endif
 
 	memset(p->kva, 0, PAGE_SIZE);
 	return 0;
-
-fail2:
-	free_page((unsigned long)page_address(page));
-fail1:
-	return rc;
 }
 
 
-void efhw_iopage_free(struct pci_dev *pci_dev, struct efhw_iopage *p,
-		      efhw_iommu_domain *vf_domain)
+void efhw_iopage_free(struct efhw_iopage *p)
 {
-	struct device *dev = &pci_dev->dev;
-
-	if (!vf_domain)
-		dma_unmap_page(dev, p->dma_addr, PAGE_SIZE, DMA_BIDIRECTIONAL);
-	else {
-#ifdef CONFIG_IOMMU_API
-		EFRM_ASSERT(!in_atomic() && !in_interrupt());
-
-		iommu_unmap(vf_domain, p->dma_addr, 0);
-#else
-		EFRM_ASSERT(0);
-#endif
-	}
-
 	free_page((unsigned long)p->kva);
 }
 
 
-int efhw_iopage_map(struct pci_dev *pci_dev,
-		    const struct efhw_iopage *orig,
-		    struct efhw_iopage *p, efhw_iommu_domain *vf_domain,
-		    unsigned long iova_base)
+int efhw_iopage_map(struct pci_dev *pci_dev, struct efhw_iopage *p,
+		    efhw_iommu_domain *vf_domain, unsigned long iova_base)
 {
 	struct device *dev = &pci_dev->dev;
-	char *kva;
 	struct page *page;
-	int rc;
 
-	kva = orig->kva;
-	p->kva = kva;
-	page = virt_to_page(kva);
+	page = virt_to_page(p->kva);
 
 	if (!vf_domain) {
 		p->dma_addr = dma_map_page(dev, page, 0, PAGE_SIZE,
 					   DMA_BIDIRECTIONAL);
 		if (dma_mapping_error(dev, p->dma_addr)) {
 			EFHW_ERR("%s: ERROR dma_map_page failed", __FUNCTION__);
-			rc = -ENOMEM;
-			goto fail1;
+			return -ENOMEM;
 		}
 	} else
 #ifdef CONFIG_IOMMU_API
 	{
-		EFRM_ASSERT(!in_atomic() && !in_interrupt());
+        int rc;
 
 		p->dma_addr = iova_base;
 		rc = iommu_map(vf_domain, p->dma_addr, page_to_phys(page), 0,
@@ -159,34 +101,28 @@ int efhw_iopage_map(struct pci_dev *pci_dev,
 		if (rc) {
 			EFHW_ERR("%s: ERROR iommu_map_page failed (%d)",
 				 __FUNCTION__, rc);
-			goto fail1;
+			return rc;
 		}
 	}
 #else
 	EFRM_ASSERT(0);
 #endif
 	return 0;
-
-fail1:
-	return rc;
 }
 
-void efhw_iopage_unmap(struct pci_dev *pci_dev,
-		       const struct efhw_iopage *orig,
-		       struct efhw_iopage *p,
+void efhw_iopage_unmap(struct pci_dev *pci_dev, struct efhw_iopage *p,
 		       efhw_iommu_domain *vf_domain)
 {
 	struct device *dev = &pci_dev->dev;
-
-	EFHW_ASSERT(p->kva == orig->kva);
 
 	if (!vf_domain)
 		dma_unmap_page(dev, p->dma_addr, PAGE_SIZE, DMA_BIDIRECTIONAL);
 	else {
 #ifdef CONFIG_IOMMU_API
-		EFRM_ASSERT(!in_atomic() && !in_interrupt());
 		/* NB IOVA is not reused */
+		mutex_lock(&efrm_iommu_mutex);
 		iommu_unmap(vf_domain, p->dma_addr, 0);
+		mutex_unlock(&efrm_iommu_mutex);
 #else
 		EFRM_ASSERT(0);
 #endif
@@ -236,8 +172,6 @@ efhw_iopages_alloc(struct pci_dev *pci_dev, struct efhw_iopages *p,
 		{
 			int rc;
 
-			EFRM_ASSERT(!in_atomic() && !in_interrupt());
-
 			p->dma_addrs[i] = iova_base;
 			rc = iommu_map(vf_domain, p->dma_addrs[i],
 				       page_to_phys(page), 0,
@@ -260,10 +194,13 @@ fail3:
 		if (!vf_domain) {
 			dma_unmap_page(dev, p->dma_addrs[i],
 				       PAGE_SIZE, DMA_BIDIRECTIONAL);
-		} else
+		} else {
 #ifdef CONFIG_IOMMU_API
+			mutex_lock(&efrm_iommu_mutex);
 			iommu_unmap(vf_domain, iova_base, 0);
+			mutex_unlock(&efrm_iommu_mutex);
 #endif
+		}
 fail2:
 	kfree(p->dma_addrs);
 fail1:
@@ -282,9 +219,9 @@ void efhw_iopages_free(struct pci_dev *pci_dev, struct efhw_iopages *p,
 				       PAGE_SIZE, DMA_BIDIRECTIONAL);
 		else {
 #ifdef CONFIG_IOMMU_API
-			EFRM_ASSERT(!in_atomic() && !in_interrupt());
-
+			mutex_lock(&efrm_iommu_mutex);
 			iommu_unmap(vf_domain, p->dma_addrs[i], 0);
+			mutex_unlock(&efrm_iommu_mutex);
 #else
 			EFRM_ASSERT(0);
 #endif

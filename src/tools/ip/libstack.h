@@ -49,6 +49,7 @@ extern "C" {
 #define FL_UDP                  0x80      /* UDP socket needed      */
 #define FL_ONCE                 0x100     /* only apply to first stack */
 #define FL_ARG_S                0x200     /* args: string           */
+#define FL_ID                   0x400     /* op takes ID instead of netif */
 
 #define MAX_TS		32
 
@@ -95,7 +96,8 @@ typedef int stackfilter_t(ci_netif_info_t *info);
     
 struct stack_op_s {
   const char*	name;
-  stack_ni_fn_t*fn;
+  stack_ni_fn_t*fn;   /* used when !(flags & FL_ID) */
+  stackid_fn_t *id_fn; /* used when  (flags & FL_ID) */
   const char*   help;
   const char*   args;
   unsigned	flags;
@@ -114,15 +116,6 @@ extern int stack_attach(unsigned id);
 extern void stack_detach(netif_t* n);
 extern void stacks_detach_all(void);
 extern netif_t* stack_attached(int id);
-
-/* Dump state of zombie stack to syslog.
- *
- * It would make sense for this to be a stackid_fn_t stack-op but
- * currently all stack-ops are stack_ni_fn_t, so make this a special
- * case for now
- */
-extern void stack_zombie(int id, void *arg);
-
 
 /**********************************************************************
 ********************** sockets ****************************************

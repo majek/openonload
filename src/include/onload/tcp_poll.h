@@ -47,12 +47,15 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
 
   /* Shutdown: */
   if( !(ts->s.b.state & CI_TCP_STATE_CAN_FIN) &&
-      !(ts->tcpflags & CI_TCPT_FLAG_CONNECT_FAILED))
-    revents |= POLLOUT; /* SHUT_WR && !CONNECT_FAILED */
+      !(ts->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT) )
+    revents |= POLLOUT; /* SHUT_WR && !NONBLOCK_CONNECT */
   if( (TCP_RX_DONE(ts) & CI_SHUT_RD) )
     revents |= POLLIN; /* SHUT_RD */
   if( !(ts->s.b.state & CI_TCP_STATE_CAN_FIN) && TCP_RX_DONE(ts) )
     revents |= POLLHUP; /* SHUT_RDWR */
+  /* Errors */
+  if( ts->s.so_error )
+    revents |= POLLERR;
 
   /* synchronised: !CLOSED !SYN_SENT */
   if( ts->s.b.state & CI_TCP_STATE_SYNCHRONISED ) {
@@ -70,15 +73,9 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
         ci_tcp_recv_not_blocked(ts) )
       revents |= POLLIN | POLLRDNORM;
 
-    /* Errors */
-    if( TCP_RX_ERRNO(ts) )
-      revents |= POLLERR;
   }
   else if( ts->s.b.state == CI_TCP_SYN_SENT )
     revents = 0;
-  else if( ts->tcpflags &
-           (CI_TCPT_FLAG_WAS_ESTAB | CI_TCPT_FLAG_CONNECT_FAILED) )
-    revents |= POLLERR;
 
   return revents;
 }

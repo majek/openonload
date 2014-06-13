@@ -30,6 +30,10 @@
 
 #include <etherfabric/ef_vi.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /* This must die. It is used where we don't yet know how to find the 
  * right NIC to use in a multiple NIC system. */
@@ -88,8 +92,14 @@ extern int ef_eventq_wait(ef_vi*, ef_driver_handle nic,
  **********************************************************************/
 
   /*! \i_ef_base Obtain a driver handle. */
-extern int ef_driver_open(ef_driver_handle* nic_out);
+extern int ef_driver_open(ef_driver_handle* dh_out);
 
+  /*! \i_ef_base Close a driver handle. */
+extern int ef_driver_close(ef_driver_handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __EFAB_BASE_H__ */
 /*! \cidoxg_end */

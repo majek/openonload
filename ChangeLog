@@ -1,4 +1,53 @@
 
+openonload-201205-u1
+--------------------
+
+- Various workarounds for IOMMU-related kernel bugs.
+- Compatibility with RHEL6.3 and linux-3.4.0.
+- Use IP ID of zero with TCP.
+- bug29724: Do not accept unsolicited ARPs that change MAC associated with IP.
+- bug29870: Share iommu domain between VFs in a single Onload stack.
+- Fix previously ignored option EF_TCP_ADV_WIN_SCALE_MAX.
+- bug29996: Do not send packets with IP TTL=0.
+- bug27919: Fix poll() after nonblocking connect on TCP socket.
+- bug27932: Fix RPM dependency bugs.
+- Improve error messages when out of socket buffers.
+- Reduce cost of waking other threads for loopback and pipes.
+- bug30140: Fix bugs in error handling in pipe read/write.
+- bug30140: Fix race with pipes between close() of write-fd and read().
+- Various improvements and minor bug fixes to spin-loops.
+- bug30199: Fix python3 compatibility bug in affinity scripts.
+- bug30214: Return 0 rather than EAGAIN on onload_zc_recv() if called callback.
+- bug23968: Fix warnings from recent gcc versions.
+- bug30218: Fix getsockopt(TCP_INFO) on new socket.
+- bug30219: Do not print scary warning when tcgetpgrp() is called.
+- bug29929: Ensure we always drain OS path in UDP onload_zc_recv().
+- Avoid syscall in ioctl(SIOCATMARK).
+- bug30260: Fix RTNL message length for RTM_GETLINK request.
+- bug30173: Do not wait forever for flush to complete -- it may fail.
+- bug30251: Don't return error with EF_NO_FAIL=0 if socket type not onloadable.
+- bug27042: Reduce delayed-ack time to avoid spurious retransmits.
+- bug26090: Fix send to host with no route and SO_BINDTODEVICE.
+- Fix minor memory leak in cicppl_arp_pkt_tx_queue.
+- bug26089: Fix packets sent via kernel w SO_BINDTODEVICE going to wrong intf.
+- Fix error return code from udp send interrupted by signal.
+- bug30359: Fix error code returned from sigaction and exit_group syscalls.
+- Avoid polling the stack when EF_POLL_ON_DEMAND=0.
+- Improve onload_stackdump's handling of zombie stacks.
+- Add "onload_stackdump -z kill" to terminate stacks lingering after exit.
+- bug30218: Reduce initial RTO to 1s from 3d to match Linux.
+- bug30516: Fix interrupts with scalable packet buffer mode.
+- bug30633: Fix kernel panic on driver reload.
+- License ef_vi samples as BSD so users can cut-and-paste.
+- bug27835: Added extern "C" to ef_vi headers to ease use from C++.
+- bug21349: Keep zwin timer running in FIN-WAIT-1.
+- bug30863: Fix for ARP confirmation when using a gateway.
+- bug30892: Fix inconsistency in locking operations.
+- sfc: Updated sfc net driver to v3_2_1_6099.
+- bug30711: ef_vi: Make SOP/CONT flags available in RX_DISCARD events.
+- bug31026: Fix seg-fault in epoll_ctl(DEL) with EF_UL_EPOLL=0|2.
+
+
 openonload-201205-p4
 --------------------
 

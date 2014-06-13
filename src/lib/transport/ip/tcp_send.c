@@ -32,8 +32,9 @@
 #include <sys/socket.h>
 #include <onload/extensions_zc.h>
 #endif
-
 #include <onload/pkt_filler.h>
+#include <onload/sleep.h>
+
 
 #define LPF "TCP SEND "
 
@@ -750,10 +751,10 @@ static int ci_tcp_sendmsg_no_pkt_buf(ci_netif* ni, ci_tcp_state* ts,
     }
     ci_assert(ci_netif_is_locked(ni));
 
-    if( ! ci_netif_pkt_tx_may_alloc(ni) )
-      /* Bring us up-to-date before calling
-       * ci_netif_pkt_alloc_slow() else it might be provoked to
-       * allocate more memory when none is needed.
+    if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) &&
+        ! ci_netif_pkt_tx_may_alloc(ni) )
+      /* Bring us up-to-date before calling ci_netif_pkt_alloc_slow() else
+       * it might be provoked to allocate more memory when none is needed.
        */
       ci_netif_poll(ni);
     
@@ -869,7 +870,7 @@ ci_inline int ci_tcp_sendmsg_spin(ci_netif* ni, ci_tcp_state* ts,
       sinf->stack_locked = 0;
     }
     ci_frc64(&now_frc);
-    sinf->rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc, 
+    sinf->rc = OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, &schedule_frc, 
                                                ts->s.so.sndtimeo_msec,
                                                NULL, si);
     if( sinf->rc != 0 ) {
@@ -973,8 +974,9 @@ static int ci_tcp_sendmsg_slowpath(ci_netif* ni, ci_tcp_state* ts,
   }
   
   /* Poll first, so we have an accurate view of space in the send queue. */
-  ci_netif_poll(ni);
-  
+  if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) )
+    ci_netif_poll(ni);
+
   /* Set the urgent pointer on the assumption that we're going to send
    * everything.  Also save the current enq_nxt; we need it below.  I
    * think this is only necessary to deal with the case where there
@@ -1198,7 +1200,8 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts, const struct msghdr* msg,
       }
 
       /* Stuff left to do -- push out what we've got first. */
-      ci_netif_poll(ni);
+      if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) )
+        ci_netif_poll(ni);
       sinf.fill_list = 0;
       if( ts->s.tx_errno ) {
         ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);

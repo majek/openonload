@@ -38,7 +38,6 @@
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
 #include <linux/percpu.h>
-#include <linux/sysdev.h>
 #include <asm/atomic.h>
 #include <linux/node.h>
 

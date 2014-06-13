@@ -13,8 +13,6 @@
 ** GNU General Public License for more details.
 */
 
-
-#include <ci/driver/efab/debug.h>
 #include <ci/efrm/vi_resource_manager.h>
 #include <ci/efrm/efrm_nic.h>
 #include <ci/efrm/efrm_client.h>
@@ -142,7 +140,7 @@ efab_vi_rm_eventq_wait(struct efrm_vi* virs, unsigned current_ptr,
   EFRM_RESOURCE_ASSERT_VALID(&virs->rs, 0);
 
   if ( virs->q[EFHW_EVQ].capacity == 0 ) {
-    DEBUGERR(ci_log("%s: No event queue for wait request", __FUNCTION__));
+    EFCH_ERR("%s: ERROR: no on this VI", __FUNCTION__);
     return -EINVAL;
   }
 
@@ -178,12 +176,11 @@ efab_vi_rm_eventq_wait(struct efrm_vi* virs, unsigned current_ptr,
     /* Ask hardware to set wakeup bit / or wake us straight away. */
     efhw_nic_wakeup_request(nic, next_i, virs->rs.rs_instance);
   } else {
-
     /* There's a pending wakeup.  Just go to sleep.  When the wakeup
      * occurs, we'll check to see whether it's the one we wanted.  */
     if ( evdata->evq_wait_current != next_i )
-      DEBUGVERB(ci_log("Resuming wakeup: evq_wait_current=%d next_i=%d",
-                       evdata->evq_wait_current, next_i));
+      EFCH_TRACE("%s: resuming wakeup: evq_wait_current=%d next_i=%d",
+                 __FUNCTION__, evdata->evq_wait_current, next_i);
     evdata->evq_wait_request = next_i;
   }
 

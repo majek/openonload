@@ -42,6 +42,9 @@
 
 #include <etherfabric/base.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct ef_memreg {
 	unsigned mr_resource_id;
@@ -77,5 +80,8 @@ ef_vi_inline ef_addr ef_memreg_dma_addr(ef_memreg* mr, int offset)
 	return mr->mr_dma_addrs[offset >> 12u] | (offset & 0xfff);
 }
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* __EFAB_MEMREG_H__ */

@@ -117,9 +117,9 @@ void ci_tcp_state_listen_assert_valid(ci_netif* netif,
               tsl->acceptq_max));
 }
 
-
-void ci_tcp_state_retrans_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                       const char* file, int line)
+#ifndef NDEBUG
+static void ci_tcp_state_retrans_assert_valid(ci_netif* ni, ci_tcp_state* ts,
+                                              const char* file, int line)
 {
   ci_ip_pkt_queue* rtq = &ts->retrans;
   ci_ip_pkt_fmt *pkt = NULL, *end, *prev_pkt;
@@ -181,8 +181,8 @@ void ci_tcp_state_retrans_assert_valid(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-void ci_tcp_state_send_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                    const char* file, int line)
+static void ci_tcp_state_send_assert_valid(ci_netif* ni, ci_tcp_state* ts,
+                                           const char* file, int line)
 {
   ci_ip_pkt_queue* sendq = &ts->send;
   ci_ip_pkt_fmt *pkt;
@@ -206,8 +206,8 @@ void ci_tcp_state_send_assert_valid(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-void ci_tcp_state_cong_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                    const char* file, int line)
+static void ci_tcp_state_cong_assert_valid(ci_netif* ni, ci_tcp_state* ts,
+                                           const char* file, int line)
 {
   ci_ip_pkt_fmt* pkt;
 
@@ -239,9 +239,9 @@ void ci_tcp_state_cong_assert_valid(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-void ci_tcp_state_recv_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-				    int got_sock_lock,
-                                    const char* file, int line)
+static void ci_tcp_state_recv_assert_valid(ci_netif* ni, ci_tcp_state* ts,
+                                           int got_sock_lock,
+                                           const char* file, int line)
 {
   ci_ip_pkt_queue* q;
   int extract_points_in_recv1 = 0;
@@ -338,8 +338,8 @@ void ci_tcp_state_recv_assert_valid(ci_netif* ni, ci_tcp_state* ts,
 }
 
 
-void ci_tcp_state_rob_assert_valid(ci_netif* ni, ci_tcp_state* ts,
-                                   const char* file, int line)
+static void ci_tcp_state_rob_assert_valid(ci_netif* ni, ci_tcp_state* ts,
+                                          const char* file, int line)
 {
   ci_ip_pkt_queue* rob = &ts->rob;
   ci_ip_pkt_fmt *block, *pkt, *prev_pkt;
@@ -376,11 +376,13 @@ void ci_tcp_state_rob_assert_valid(ci_netif* ni, ci_tcp_state* ts,
 
   verify(rob->num == num);
 }
+#endif
 
 
 void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
                                const char* file, int line)
 {
+#ifndef NDEBUG
   ci_ip_pkt_fmt *pkt, *prev_pkt;
   int sack_points_in_rob;
   int num, need_unlock;
@@ -502,6 +504,7 @@ void ci_tcp_state_assert_valid(ci_netif* netif, ci_tcp_state* ts,
   }
 
   if( need_unlock )  ci_netif_unlock(netif);
+#endif
 }
 
 
@@ -691,9 +694,9 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
   {
     ci_tcp_socket_listen_stats* s = &tls->stats;
     log("%s  l_overflow=%d l_no_synrecv=%d a_overflow=%d a_no_sock=%d "
-        "ack_rsts=%d os=%d",
+        "a_loop2_closed=%d ack_rsts=%d os=%d",
 	pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
-	s->n_acceptq_overflow, s->n_acceptq_no_sock,
+	s->n_acceptq_overflow, s->n_acceptq_no_sock, s->n_accept_loop2_closed,
 	s->n_acks_reset, s->n_accept_os);
   }
 #endif

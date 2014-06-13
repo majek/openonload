@@ -60,15 +60,11 @@ ci_inline void rwlock_internal_dtor(oo_rwlock* l)
    * these ops to fail if the rwlock has been used accourding to our rules
    * (specifically, don't destroy one that a thread maybe waiting on)/
    */
-  int r;
-  r = pthread_mutex_destroy(&l->m);
-  ci_assert(!r);
+  CI_TRY(pthread_mutex_destroy(&l->m));
 
-  r = pthread_cond_destroy(&l->read_cond);
-  ci_assert(!r);
+  CI_TRY(pthread_cond_destroy(&l->read_cond));
 
-  r = pthread_cond_destroy(&l->write_cond);
-  ci_assert(!r);
+  CI_TRY(pthread_cond_destroy(&l->write_cond));
 }
 
 ci_inline int rwlock_internal_cond_wait(rwlock_cond_t* cond, oo_rwlock* l)
@@ -161,12 +157,11 @@ oo_rwlock_cond_destroy (oo_rwlock_cond *cond)
  */
 int
 oo_rwlock_cond_wait (oo_rwlock_cond *cond, oo_rwlock *l) {
-  int r, rc;
+  int rc;
 
   ci_assert(l);
   ci_assert(oo_rwlock_is_locked (l, CI_RWLOCK_WRITE));
-  r = rwlock_internal_mutex_lock(l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_lock(l));
 
   /* Let the lock go.  From this point on other threads will be able to take
    * the lock.  This is OK, but we must be careful to guard against lost
@@ -184,8 +179,7 @@ oo_rwlock_cond_wait (oo_rwlock_cond *cond, oo_rwlock *l) {
    */
   __oo_rwlock_lock_write_slow (l, 1);
 
-  r = rwlock_internal_mutex_unlock (l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_unlock (l));
 
   return rc;
 }
@@ -194,7 +188,7 @@ oo_rwlock_cond_wait (oo_rwlock_cond *cond, oo_rwlock *l) {
 int oo_rwlock_cond_signal (oo_rwlock_cond *cond, oo_rwlock *l,
 			   int l_is_locked)
 {
-  int r, rc;
+  int rc;
   ci_assert(! l_is_locked || oo_rwlock_is_locked (l, CI_RWLOCK_WRITE));
 
   /* Race breaker. */
@@ -204,10 +198,8 @@ int oo_rwlock_cond_signal (oo_rwlock_cond *cond, oo_rwlock *l,
     oo_rwlock_unlock_write(l);
   }
 
-  r = rwlock_internal_mutex_lock (l);
-  ci_assert(!r);
-  r = rwlock_internal_mutex_unlock (l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_lock (l));
+  CI_TRY(rwlock_internal_mutex_unlock (l));
 
   rc = rwlock_internal_signal_writer (&cond->c);
 
@@ -218,7 +210,7 @@ int oo_rwlock_cond_signal (oo_rwlock_cond *cond, oo_rwlock *l,
 int oo_rwlock_cond_broadcast (oo_rwlock_cond *cond, oo_rwlock *l,
 			      int l_is_locked)
 {
-  int r, rc;
+  int rc;
   ci_assert(! l_is_locked || oo_rwlock_is_locked (l, CI_RWLOCK_WRITE));
 
   /* Race breaker. */
@@ -228,10 +220,8 @@ int oo_rwlock_cond_broadcast (oo_rwlock_cond *cond, oo_rwlock *l,
     oo_rwlock_unlock_write(l);
   }
 
-  r = rwlock_internal_mutex_lock (l);
-  ci_assert(!r);
-  r = rwlock_internal_mutex_unlock (l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_lock (l));
+  CI_TRY(rwlock_internal_mutex_unlock (l));
 
   rc = rwlock_internal_broadcast_writer (&cond->c);
 
@@ -255,7 +245,6 @@ int oo_rwlock_cond_broadcast (oo_rwlock_cond *cond, oo_rwlock *l,
 void
 __oo_rwlock_lock_read_slow (oo_rwlock *l) {
   union rw_lock_state old_state, new_state;
-  int r;
 
   ci_assert(l);
 
@@ -263,8 +252,7 @@ __oo_rwlock_lock_read_slow (oo_rwlock *l) {
   ci_atomic_inc(&l->n_lock_read_contends);
 #endif
 
-  r = rwlock_internal_mutex_lock (l);
-  ci_assert(!r); /* We can't cope if this fails! */
+  CI_TRY(rwlock_internal_mutex_lock (l));
 
   do {
     old_state = new_state = l->state;
@@ -288,13 +276,10 @@ __oo_rwlock_lock_read_slow (oo_rwlock *l) {
    * our interest in it.  Wait until it becomes taken in read mode.
    */
   ci_assert(new_state.s.n_readers);  /* Either have it or waiting for it */
-  while (l->state.s.n_readers < 0) {
-    r = rwlock_internal_cond_wait (&l->read_cond, l);
-    ci_assert(!r);
-  }
+  while (l->state.s.n_readers < 0)
+    CI_TRY(rwlock_internal_cond_wait (&l->read_cond, l));
 
-  r = rwlock_internal_mutex_unlock (l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_unlock (l));
 }
 
 
@@ -311,7 +296,6 @@ void
 __oo_rwlock_unlock_read_slow (oo_rwlock *l) {
   int do_wake;
   union rw_lock_state old_state, new_state;
-  int r;
   
   ci_assert(l);
 
@@ -319,8 +303,7 @@ __oo_rwlock_unlock_read_slow (oo_rwlock *l) {
   ci_atomic_inc(&l->n_unlock_read_contends);
 #endif
 
-  r = rwlock_internal_mutex_lock (l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_lock(l));
 
   do {
     do_wake = 0;
@@ -339,20 +322,17 @@ __oo_rwlock_unlock_read_slow (oo_rwlock *l) {
   }
   while (ef_vi_cas32_fail (&l->state.val, old_state.val, new_state.val));
 
-  r = rwlock_internal_mutex_unlock (l);
-  ci_assert(!r);
+  CI_TRY(rwlock_internal_mutex_unlock(l));
 
-  if (do_wake) {
-    r = rwlock_internal_signal_writer (&l->write_cond);
-    ci_assert(!r);
-  }
+  if (do_wake)
+    CI_TRY(rwlock_internal_signal_writer (&l->write_cond));
 }
 
 
 void __oo_rwlock_lock_write_slow(oo_rwlock* l, int mutex_held)
 {
   union rw_lock_state old_state, new_state;
-  int r, got_it, waiting = 0;
+  int got_it, waiting = 0;
 
   ci_assert(l);
 
@@ -360,10 +340,8 @@ void __oo_rwlock_lock_write_slow(oo_rwlock* l, int mutex_held)
   ci_atomic_inc(&l->n_lock_write_contends);
 #endif
 
-  if (!mutex_held) {
-    r = rwlock_internal_mutex_lock (l);
-    ci_assert(!r);
-  }
+  if (!mutex_held)
+    CI_TRY(rwlock_internal_mutex_lock(l));
 
   while( 1 ) {
     do {
@@ -394,17 +372,14 @@ void __oo_rwlock_lock_write_slow(oo_rwlock* l, int mutex_held)
       /* We successfully took the lock */
       ci_assert(l->state.s.write_held);
       ci_assert_le(l->state.s.n_readers, 0);
-      if( ! mutex_held ) {
-        r = rwlock_internal_mutex_unlock (l);
-        ci_assert (!r);
-      }
+      if( ! mutex_held )
+        CI_TRY(rwlock_internal_mutex_unlock (l));
       return;
     }
 
     /* If we get here we didn't get the lock; wait */
     waiting = 1;
-    r = rwlock_internal_cond_wait (&l->write_cond, l);
-    ci_assert(!r);
+    CI_TRY(rwlock_internal_cond_wait (&l->write_cond, l));
   }
 }
 
@@ -412,7 +387,7 @@ void __oo_rwlock_lock_write_slow(oo_rwlock* l, int mutex_held)
 void
 __oo_rwlock_unlock_write_slow (oo_rwlock *l, int mutex_held) {
   union rw_lock_state old_state, new_state;
-  int r, wake_readers, wake_writers;
+  int wake_readers, wake_writers;
 
   ci_assert(l);
 
@@ -427,8 +402,7 @@ __oo_rwlock_unlock_write_slow (oo_rwlock *l, int mutex_held) {
      * write mode, and there can only be one of those.  Keep things simple
      * for now however...
      */
-    r = rwlock_internal_mutex_lock (l);
-    ci_assert(!r);
+    CI_TRY(rwlock_internal_mutex_lock(l));
   }
 
   do {
@@ -458,20 +432,14 @@ __oo_rwlock_unlock_write_slow (oo_rwlock *l, int mutex_held) {
   } 
   while (ef_vi_cas32_fail (&l->state.val, old_state.val, new_state.val));
     
-  if (!mutex_held) {
-    r = rwlock_internal_mutex_unlock (l);
-    ci_assert(!r);
-  }
+  if (!mutex_held)
+    CI_TRY(rwlock_internal_mutex_unlock (l));
 
   ci_assert(!(wake_writers && wake_readers));
-  if (wake_writers) {
-    r = rwlock_internal_signal_writer (&l->write_cond);
-    ci_assert(!r);
-  }
-  if (wake_readers) {
-    r = rwlock_internal_signal_readers (&l->read_cond);
-    ci_assert(!r);
-  }
+  if (wake_writers)
+    CI_TRY(rwlock_internal_signal_writer (&l->write_cond));
+  if (wake_readers)
+    CI_TRY(rwlock_internal_signal_readers (&l->read_cond));
 }
 
 

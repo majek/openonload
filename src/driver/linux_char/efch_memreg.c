@@ -13,8 +13,7 @@
 ** GNU General Public License for more details.
 */
 
-#include <ci/driver/efab/debug.h>
-#include <ci/driver/efab/efch.h>
+#include "efch.h"
 #include <ci/efrm/vi_resource.h>
 #include <ci/efch/op_types.h>
 #include <ci/efrm/pd.h>
@@ -99,9 +98,9 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     rc = efch_lookup_rs(alloc->in_vi_or_pd_fd, alloc->in_vi_or_pd_id,
                         EFRM_RESOURCE_PD, &vi_or_pd);
   if (rc < 0) {
-    DEBUGERR(ci_log("%s: ERROR: fd=%d id="EFCH_RESOURCE_ID_FMT" (%d)",
-                    __FUNCTION__, alloc->in_vi_or_pd_fd,
-                    EFCH_RESOURCE_ID_PRI_ARG(alloc->in_vi_or_pd_id), rc));
+    EFCH_ERR("%s: ERROR: fd=%d id="EFCH_RESOURCE_ID_FMT" (%d)",
+             __FUNCTION__, alloc->in_vi_or_pd_fd,
+             EFCH_RESOURCE_ID_PRI_ARG(alloc->in_vi_or_pd_id), rc);
     goto fail1;
   }
 
@@ -118,8 +117,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
 
   max_pages = DIV_ROUND_UP(alloc->in_mem_bytes, PAGE_SIZE);
   if ((mr = efch_memreg_alloc(max_pages)) == NULL) {
-    DEBUGERR(ci_log("%s: ERROR: out of mem (max_pages=%d)",
-                    __FUNCTION__, max_pages));
+    EFCH_ERR("%s: ERROR: out of mem (max_pages=%d)", __FUNCTION__, max_pages);
     rc = -ENOMEM;
     goto fail2;
   }
@@ -131,8 +129,8 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
                         max_pages - mr->n_pages, 1, 0,
                         mr->pages + mr->n_pages, NULL);
     if (rc <= 0) {
-      DEBUGERR(ci_log("%s: ERROR: get_user_pages(%d) returned %d",
-                      __FUNCTION__, max_pages - mr->n_pages, rc));
+      EFCH_ERR("%s: ERROR: get_user_pages(%d) returned %d",
+               __FUNCTION__, max_pages - mr->n_pages, rc);
       break;
     }
   }
@@ -150,8 +148,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
                        alloc->in_addrs_out_stride,
                        put_user_64, &mr->buf_tbl_alloc);
   if (rc < 0) {
-    DEBUGERR(ci_log("%s: ERROR: efrm_pd_dma_map failed (%d)",
-                    __FUNCTION__, rc));
+    EFCH_ERR("%s: ERROR: efrm_pd_dma_map failed (%d)", __FUNCTION__, rc);
     goto fail4;
   }
   mr->mapped = true;

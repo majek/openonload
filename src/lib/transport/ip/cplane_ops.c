@@ -337,7 +337,7 @@ cicpos_mac_find_ip(const cicp_mac_mib_t *mact, ci_ifid_t ifindex,
     /* record initial version - before we use it */
 
     /* Single initial test to optimize hoped-for best case */
-    if (cicp_mac_row_allocated(row = &ipmac[rowid]) &&
+    if (cicp_mac_row_allocated(row) &&
 	row->ifindex == ifindex &&
 	CI_IP_ADDR_EQ(&row->ip_addr, &ip))
 	return rowid;
@@ -1311,7 +1311,9 @@ cicp_user_retrieve(ci_netif*                    ni,
   }
   else {
     ipcache->ip.ip_ttl = sock_cp->ip_ttl;
-    if( row != NULL && row->first_hop != 0 ) {
+    if( row != NULL && row->first_hop != 0 && 
+        (sock_cp->so_bindtodevice == CI_IFID_BAD || 
+         ipcache->ifindex == row->dest_ifindex) ) {
       ipcache->nexthop = row->first_hop;
     }
     else {

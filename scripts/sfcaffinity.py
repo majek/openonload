@@ -126,12 +126,22 @@ def cmp_irq_name(a, b):
     try:
         a_pre, a_suf = a.rsplit('-', 1)
         b_pre, b_suf = b.rsplit('-', 1)
-        c = cmp(a_pre, b_pre)
+        c = a_pre < b_pre
         if c:
             return c
-        return cmp(int(a_suf), int(b_suf))
+        return int(a_suf) < int(b_suf)
     except:
-        return cmp(a, b)
+        return a < b
+
+
+# Python 3 compat.  They really shouldn't have killed cmp.
+def sort_irq_names(irq_names):
+    import sys
+    if sys.version_info >= (3,0):
+        import functools
+        irq_names.sort(key=functools.cmp_to_key(cmp_irq_name))
+    else:
+        irq_names.sort(cmp=cmp_irq_name)
 
 
 def irq_names_matching_pattern(pattern):
@@ -139,7 +149,7 @@ def irq_names_matching_pattern(pattern):
     list is sorted nicely."""
     n2v = irq_get_name2vec_map()
     irq_names = [n for n in n2v.keys() if re.match(pattern, n)]
-    irq_names.sort(cmp=cmp_irq_name)
+    sort_irq_names(irq_names)
     return irq_names
 
 
@@ -252,12 +262,12 @@ class Cache(object):
 
 class Topology(object):
     def get_cores(self):
-        return self.id2core.values()
+        return list(self.id2core.values())
     def get_packages(self):
-        return self.id2package.values()
+        return list(self.id2package.values())
     def get_cache_levels(self):
         if self.shared_caches:
-            return self.shared_caches.keys()
+            return list(self.shared_caches.keys())
         else:
             return []
     def get_top_level_shared_caches(self):
@@ -337,14 +347,14 @@ def __build_topology(all_cores):
         cs = core_id_to_core_siblings[core_id] & cores_mask
         top.id2core[core_id] = Core(top, core_id, pkg, ts, cs)
 
-    top.core_ids = top.id2core.keys()
+    top.core_ids = list(top.id2core.keys())
     top.core_ids.sort()
     top.cores_mask = mask.to_int(top.core_ids)
-    top.package_ids = top.id2package.keys()
+    top.package_ids = list(top.id2package.keys())
     top.package_ids.sort()
     top.real_cores = dict([(c.id, c) for c in top.id2core.values()
                            if c.id == c.real_core])
-    top.real_core_ids = top.real_cores.keys()
+    top.real_core_ids = list(top.real_cores.keys())
     top.real_core_ids.sort()
     top.real_cores_mask = mask.to_int(top.real_core_ids)
 
@@ -449,7 +459,7 @@ def dump_irqs():
         outl("%20s: %d" % (irq_name, vector))
     outl("irq_get_vec2names_map():")
     v2n = irq_get_vec2names_map()
-    vectors = v2n.keys()
+    vectors = list(v2n.keys())
     vectors.sort()
     for v in vectors:
         outl("%20d: %s" % (v, v2n[v]))

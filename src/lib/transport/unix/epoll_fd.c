@@ -199,7 +199,6 @@ static int citp_epoll_ioctl(citp_fdinfo *fdi, int cmd, void *arg)
 }
 
 
-
 citp_protocol_impl citp_epoll_protocol_impl = {
   .type     = CITP_EPOLL_FD,
   .ops      = {
@@ -230,6 +229,10 @@ citp_protocol_impl citp_epoll_protocol_impl = {
 #endif
     .send        = citp_epoll_send,
     .ioctl       = citp_epoll_ioctl,
+    .zc_send     = citp_epoll_zc_send,
+    .zc_recv     = citp_epoll_zc_recv,
+    .zc_recv_filter = citp_epoll_zc_recv_filter,
+    .recvmsg_kernel = citp_epoll_recvmsg_kernel,
   }
 };
 

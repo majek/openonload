@@ -627,77 +627,55 @@ ci_inline ssize_t ci_get_msg_len( const struct msghdr* msg )
 # define oo_adjust_SO_XBUF(v)  ((v) * 2)
 
 
-/* Spinloop pause + check for signals.
- * If waitable is not NULL, unlock it before running signal handlers. */
-#ifndef __KERNEL__
-#include "ci/internal/ip_signal.h"
-#endif
+/**********************************************************************
+ * OO_SPINLOOP_PAUSE_CHECK_SIGNALS()
+ */
+
+#ifdef __KERNEL__
+
 ci_inline int
 oo_spinloop_pause_check_signals(ci_netif* ni, ci_uint64 now_frc,
-                                ci_uint64 schedule_frc, int have_timeout
-#ifndef __KERNEL__
-                                , citp_waitable *w, citp_signal_info *si
-#endif
-                                )
+                                ci_uint64* schedule_frc, int have_timeout)
 {
-#ifdef __KERNEL__
-  if( signal_pending(current) ) {
-    ni->state->is_spinner = 0;
-      if( have_timeout )
-        return -EINTR;
-      else
-        return -ERESTARTSYS;
-  }
-#endif
-  if( now_frc - schedule_frc > IPTIMER_STATE(ni)->khz ) {
-#ifdef __KERNEL__
-    schedule(); /* schedule() every 1ms */
-#else
-    /* Check if we should interrupt by signal, every 1ms */
-    if(CI_UNLIKELY( si->run_pending )) {
-#if !CI_CFG_CITP_INSIDE_LIB_IS_FLAG
-      int inside_lib;
-#endif
-      if( have_timeout )
-        return -EINTR;
-
-      /* call the real handler: exit lib, call signal handler, enter lib */
-      if( w ) ci_sock_unlock(ni, w);
-#if !CI_CFG_CITP_INSIDE_LIB_IS_FLAG
-      inside_lib = si->inside_lib;
-      ci_assert_gt(inside_lib, 0);
-#endif
-      si->inside_lib = 0;
-      ci_compiler_barrier();
-      citp_signal_run_pending(si);
-#if CI_CFG_CITP_INSIDE_LIB_IS_FLAG
-      si->inside_lib = 1;
-#else
-      si->inside_lib = inside_lib;
-#endif
-      ci_compiler_barrier();
-      if( w ) ci_sock_lock(ni, w);
-      /* handler sets need_restart, exit if no restart is necessary */
-      if( !si->need_restart )
-        return -EINTR;
-    }
-    else
-      ci_spinloop_pause();
-#endif
-    schedule_frc = now_frc;
+  if(CI_UNLIKELY( signal_pending(current) ))
+    return have_timeout ? -EINTR : -ERESTARTSYS;
+  if( now_frc - *schedule_frc > IPTIMER_STATE(ni)->khz ) {
+    schedule();                  /* schedule() every 1ms */
+    *schedule_frc = now_frc;
   }
   return 0;
 }
-#ifdef __KERNEL__
+
 #define OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc,      \
                                         have_timeout, w, si)            \
   oo_spinloop_pause_check_signals(ni, now_frc, schedule_frc, have_timeout)
+
 #else
+
+#include "ci/internal/ip_signal.h"
+extern int oo_spinloop_run_pending_sigs(ci_netif*, citp_waitable*,
+                                        citp_signal_info*, int) CI_HF;
+
+ci_inline int
+oo_spinloop_pause_check_signals(ci_netif* ni, ci_uint64 now_frc,
+                                ci_uint64* schedule_frc /*unused*/,
+                                int have_timeout,
+                                citp_waitable* w, citp_signal_info* si)
+{
+  if(CI_LIKELY( ! si->run_pending )) {
+    ci_spinloop_pause();
+    return 0;
+  }
+  return oo_spinloop_run_pending_sigs(ni, w, si, have_timeout);
+}
+
 #define OO_SPINLOOP_PAUSE_CHECK_SIGNALS(ni, now_frc, schedule_frc,      \
                                         have_timeout, w, si)            \
   oo_spinloop_pause_check_signals(ni, now_frc, schedule_frc,            \
                                   have_timeout, w, si)
+
 #endif
+
 
 /*********************************************************************
  ******************************** Per-Thread *************************

@@ -99,16 +99,32 @@ typedef struct tcp_helper_resource_s {
 # define TCP_HELPER_K_RC_DEAD           0x20000000
 # define TCP_HELPER_K_RC_REFS(krc)      ((krc) & 0xffffff)
 
+  /* A count of the refs added to k_ref_count for closing endpoints in
+   * efab_tcp_helper_rm_free_locked().  Protected by thr->lock *not*
+   * ci_netif lock */
+  int n_ep_closing_refs;
+
   /*! this is used so we can schedule destruction at task time */
   ci_workitem_t work_item;
 
 #ifdef  __KERNEL__
-  /*!< clear to indicate that timer should not restart itself */
+  /*! clear to indicate that timer should not restart itself */
   atomic_t                 timer_running;
-  struct workqueue_struct *timer_wq;
-  struct delayed_work      timer_work;
-  /*!< onload:pretty_name-timer */
-  char                     timer_wq_name[7 + CI_CFG_STACK_NAME_LEN+8 + 7];
+  /*! timer "process" data: tasklet or workqueue */
+  union {
+    /*! timer is workqueue */
+    struct {
+      struct workqueue_struct *wq;
+      struct delayed_work      work;
+      /*! onload:pretty_name-timer */
+      char                     name[7 + CI_CFG_STACK_NAME_LEN+8 + 7];
+    } wq;
+    /*! timer is tasklet */
+    struct {
+      struct tasklet_struct  tasklet;
+      struct timer_list      timer;
+    } bh;
+  } timer;
 #  if HZ < 100
 #   error FIXME: Not able to cope with low HZ at the moment.
 #  endif
@@ -126,9 +142,10 @@ typedef struct tcp_helper_resource_s {
   ci_sllist             ep_tobe_closed;
 
   /*! Spinlock.  Protects:
-  **    - ep_tobe_closed
-  **    - wakeup_list
-  */
+   *    - ep_tobe_closed
+   *    - wakeup_list
+   *    - n_ep_closing_refs
+   */
   ci_irqlock_t          lock;
 
   int                   mem_mmap_bytes;

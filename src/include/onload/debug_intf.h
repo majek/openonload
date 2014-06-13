@@ -84,12 +84,15 @@ typedef struct {
 #define CI_DBG_NETIF_INFO_MAX_ENDPOINTS 40
   /*! IN:   index of netif */
   ci_uint32             ni_index;              
+  /*! IN/OUT: orphans should be included, stack is an orphan */
+  ci_uint32             ni_orphan;
   /*! OUT:  does netif exist at this index? */
   ci_int32              ni_exists; 
   ci_uint32		mmap_bytes;
   ci_int32		k_ref_count;
   ci_int32		rs_ref_count;
 
+#define CI_DBG_NETIF_INFO_NOOP                    0
 #define CI_DBG_NETIF_INFO_GET_NEXT_NETIF          1
 #define CI_DBG_NETIF_INFO_GET_ENDPOINT_STATE      2
           
@@ -155,6 +158,7 @@ typedef struct {
 #define __CI_DEBUG_OP_FDS_DUMP__	(3)
 #define __CI_DEBUG_OP_ON_INSTALL_RESOURCE__ (4)
 #define __CI_DEBUG_OP_DUMP_STACK__	(5)
+#define __CI_DEBUG_OP_KILL_STACK__	(6)
 
   ci_uint32			what;		/* which operation */
 
@@ -163,7 +167,11 @@ typedef struct {
     ci_uintptr_t		tramp_debug;	/* ci_debug_trampoline */
     ci_uint32			fds_dump_pid;
     ci_uint32			install_id;
-    ci_uint32			stack_id;
+    struct {
+      ci_uint32			stack_id;
+      ci_uint32                 orphan_only;
+    } dump_stack;
+    ci_uint32                   stack_id;       /* kill stack */
   } u CI_ALIGN(8);
 } ci_debug_onload_op_t;
 

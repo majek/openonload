@@ -52,7 +52,6 @@ EFX_USE_FASTCALL			kver	<	2.6.20
 EFX_USE_VLAN_RX_KILL_VID		kver	<	2.6.22
 EFX_NEED_BONDING_HACKS			kver	<	2.6.24
 EFX_NEED_DEV_CLOSE_HACK			kver	<	2.6.25
-EFX_NEED_PCI_VPD_ATTR			kver	<	2.6.26
 EFX_NEED_LM87_DRIVER			kver	<	2.6.28
 EFX_NEED_LM90_DRIVER			kver	<	2.6.28
 EFX_USE_NET_DEVICE_LAST_RX		kver	<	2.6.29
@@ -94,6 +93,7 @@ EFX_NEED_MSLEEP				nexport	msleep			include/linux/delay.h	kernel/timer.c
 EFX_NEED_SSLEEP				nsymbol	ssleep			include/linux/delay.h
 EFX_NEED_MTD_DEVICE_REGISTER		nsymbol	mtd_device_register	include/linux/mtd/mtd.h
 EFX_NEED_MTD_ERASE_CALLBACK		nsymbol	mtd_erase_callback	include/linux/mtd/mtd.h
+EFX_HAVE_MTD_DIRECT_ACCESS              member  struct_mtd_info erase   include/linux/mtd/mtd.h
 EFX_NEED_MUTEX				nsymbol	mutex_is_locked		include/linux/mutex.h
 EFX_NEED_NETDEV_ALLOC_SKB		nsymbol	netdev_alloc_skb	include/linux/skbuff.h
 EFX_NEED_SKB_COPY_FROM_LINEAR_DATA	nsymbol skb_copy_from_linear_data	include/linux/skbuff.h
@@ -172,6 +172,7 @@ EFX_USE_ETHTOOL_GET_SSET_COUNT		symbol	get_sset_count		include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_RESET			member  struct_ethtool_ops	reset	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_SET_PHYS_ID		symbol	set_phys_id		include/linux/ethtool.h
 EFX_NEED_ETHTOOL_CMD_SPEED		nsymbol	ethtool_cmd_speed	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_GMODULEEEPROM		symbol	get_module_eeprom	include/linux/ethtool.h
 EFX_NEED_I2C_LOCK_ADAPTER		nsymbol	i2c_lock_adapter	include/linux/i2c.h
 EFX_USE_I2C_BUS_SEMAPHORE		custom
 EFX_HAVE_OLD_PCI_DMA_MAPPING_ERROR	custom
@@ -193,6 +194,8 @@ EFX_NEED_UNMASK_MSIX_VECTORS		nsymbol	masked			include/linux/msi.h
 EFX_HAVE_PM_IDLE			export	pm_idle			include/linux/pm.h arch/$SRCARCH/kernel/process.c
 EFX_HAVE_SKB_RECORD_RX_QUEUE		symbol	skb_record_rx_queue	include/linux/skbuff.h
 EFX_HAVE_XEN_XEN_H			file				include/xen/xen.h
+EFX_HAVE_SYSDEV_H			file				include/linux/sysdev.h
+EFX_HAVE_ASM_SYSTEM_H			file				asm/system.h
 EFX_HAVE_XEN_START_INFO			custom
 EFX_HAVE_CPUMASK_OF_NODE		symbol	cpumask_of_node		include/asm/topology.h	arch/$SRCARCH/include/asm/topology.h
 EFX_NEED_SET_CPUS_ALLOWED_PTR		nexport set_cpus_allowed_ptr	include/linux/sched.h		kernel/sched.c
@@ -214,6 +217,8 @@ EFX_NEED_TIMESPEC_ADD_NS		nsymbol	timespec_add_ns		include/linux/time.h
 EFX_NEED_TIMESPEC_SUB			nsymbol	timespec_sub		include/linux/time.h
 EFX_NEED_TIMESPEC_COMPARE		nsymbol	timespec_compare	include/linux/time.h
 EFX_NEED_NS_TO_TIMESPEC			nexport ns_to_timespec		include/linux/time.h	kernel/time.c
+EFX_HAVE_FDTABLE_ACCESSORS		symbol	__set_close_on_exec	include/linux/fdtable.h
+EFX_HAVE_FDTABLE_H			file				include/linux/fdtable.h
 EFX_NEED_SET_NORMALIZED_TIMESPEC	custom
 EFX_HAVE_PROCFS_DELETED			symbol	deleted			include/linux/proc_fs.h
 EFX_HAVE_VLAN_RX_PATH			symbol	vlan_hwaccel_receive_skb include/linux/if_vlan.h
@@ -226,11 +231,14 @@ EFX_HAVE_DIV_S64_REM			symbol	div_s64_rem		include/linux/math64.h
 EFX_NEED_NETDEV_FEATURES_T		nsymbol	netdev_features_t	include/linux/netdevice.h
 EFX_NEED_SKB_FILL_PAGE_DESC		nsymbol	skb_fill_page_desc	include/linux/skbuff.h
 EFX_NEED_SKB_FRAG_DMA_MAP		nsymbol	skb_frag_dma_map	include/linux/skbuff.h
+EFX_NEED_SKB_FRAG_ADDRESS		nsymbol	skb_frag_address	include/linux/skbuff.h
 EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR		custom
 EFX_NEED_ETHTOOL_RXFH_INDIR_DEFAULT	nsymbol	ethtool_rxfh_indir_default	include/linux/ethtool.h
 EFX_NEED_IS_COMPAT_TASK			custom
 EFX_NEED_COMPAT_U64			nsymbol	compat_u64		include/asm/compat.h arch/$SRCARCH/include/asm/compat.h include/asm-$SRCARCH/compat.h
 EFX_USE_IRQ_SET_AFFINITY_HINT		symbol	irq_set_affinity_hint	include/linux/interrupt.h
+EFX_HAVE_TSO_SEGS_LIMIT			symbol	TCP_MAX_GSO_SEGS	include/net/tcp.h
+EFX_NEED_PCI_VPD_ATTR			nsymbol	pci_vpd			include/linux/pci.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
@@ -254,10 +262,13 @@ EFX_HAVE_STRUCT_PATH			symtype	alloc_file		include/linux/file.h struct file *(st
 EFX_HAVE_CONST_D_OP			memtype	struct_dentry_operations d_op	include/linux/dcache.h	const struct dentry_operations *
 EFX_FSTYPE_HAS_MOUNT			member	struct_file_system_type	mount	include/linux/fs.h
 EFX_NEED_VFSMOUNT_PARAM_IN_GET_SB	memtype	struct_file_system_type	get_sb	include/linux/fs.h	int (*)(struct file_system_type *, int, const char *, void *, struct vfsmount *)
-EFX_HAVE_KMEM_CACHE_S			symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache_s *(const char *, size_t, size_t, unsigned long, void (*ctor)(void*, struct kmem_cache_s *, unsigned long), void (*dtor)(void*, kmem_cache_t *, unsigned long))
+
+# Note this is the only place where the first test is needed to perform the subsequent kcompat tests
+EFX_HAVE_KMEM_CACHE_S			custom
 EFX_HAVE_KMEM_CACHE_DTOR		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(void*, struct kmem_cache *, unsigned long), void (*dtor)(void*, struct kmem_cache *, unsigned long))
 EFX_HAVE_KMEM_CACHE_FLAGS		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(void*, struct kmem_cache *, unsigned long))
 EFX_HAVE_KMEM_CACHE_CACHEP		symtype	kmem_cache_create	include/linux/slab.h struct kmem_cache *(const char *, size_t, size_t, unsigned long, void (*ctor)(struct kmem_cache *, void*))
+
 EFX_HAVE_ALLOC_FILE			symbol	alloc_file	include/linux/file.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
@@ -419,6 +430,12 @@ function defer_test_symtype()
 
     defer_test_compile $sense "
 #include <${file:8}>
+
+#include \"_autocompat.h\"
+#if defined(EFX_HAVE_KMEM_CACHE_S)
+  #define kmem_cache kmem_cache_s
+#endif
+
 __typeof($type) *kernel_compat_dummy = &$symbol;
 "
 }
@@ -814,6 +831,20 @@ int test(void) { return is_compat_task(); }
 "
 }
 
+function do_EFX_HAVE_KMEM_CACHE_S
+{
+    # This uses test_compile such that the subsquent defer_test_compile
+    # based tests can consume from _autocompat.h
+    test_compile "
+#include <linux/slab.h>
+
+__typeof(struct kmem_cache_s *(const char *, size_t, size_t, unsigned long, \
+void (*ctor)(void*, struct kmem_cache_s *, unsigned long), \
+void (*dtor)(void*, kmem_cache_t *, unsigned long))) *kernel_compat_dummy = \
+&kmem_cache_create;
+"
+}
+
 ######################################################################
 # main()
 
@@ -971,11 +1002,15 @@ echo >"$compile_dir/Makefile" "$makefile_prefix"
 deferred_pos=
 deferred_neg=
 
+# Note that for deferred tests this runs after the Makefile has run all tests
 function do_one_symbol() {
     local key=$1
     shift
+    # NB work is in the following if clause "do_${method}"
     if "$@"; then
 	echo "#define $key yes"
+	# So that future compile tests can consume this
+	echo "#define $key yes" >> "${compile_dir}/_autocompat.h"
     elif [ $? -ne $DEFERRED ]; then
 	echo "// #define $key"
     fi
@@ -1004,6 +1039,7 @@ if [ $verbose = true ]; then
     sed >&2 's/^/    /' "$compile_dir/log"
 fi
 for key in $deferred_pos; do
+    # Use existence of object file as evidence of compile without warning/errors
     do_one_symbol $key test -f "$compile_dir/test_$key.o"
 done
 for key in $deferred_neg; do

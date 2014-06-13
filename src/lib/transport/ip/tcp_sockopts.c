@@ -68,7 +68,8 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* info)
   /* info->tcpi_reordering = 0; */
   /* info->tcpi_last_ack_sent = 0; */
   /* info->tcpi_last_ack_recv = 0; */
-  info->tcpi_pmtu       = s->pkt.pmtus.pmtu;
+  if( cicp_ip_cache_is_valid(CICP_HANDLE(netif), &s->pkt) )
+    info->tcpi_pmtu       = s->pkt.pmtus.pmtu;
 
   if( s->b.state != CI_TCP_LISTEN ) {
     ci_tcp_state* ts = SOCK_TO_TCP(s);
@@ -108,9 +109,15 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* info)
     
     info->tcpi_rtt = ci_ip_time_ticks2ms(netif, ts->sa) * 1000 / 8;
     info->tcpi_rttvar = ci_ip_time_ticks2ms(netif, ts->sv) * 1000 / 4;
-    info->tcpi_snd_ssthresh = ts->ssthresh / tcp_eff_mss(ts);
     info->tcpi_rcv_ssthresh = ts->ssthresh;
-    info->tcpi_snd_cwnd   = ts->cwnd / tcp_eff_mss(ts);
+    if( tcp_eff_mss(ts) != 0 ) {
+      info->tcpi_snd_ssthresh = ts->ssthresh / tcp_eff_mss(ts);
+      info->tcpi_snd_cwnd     = ts->cwnd / tcp_eff_mss(ts);
+    }
+    else { /* non-initialised connection */
+      info->tcpi_snd_ssthresh = 0;
+      info->tcpi_snd_cwnd     = 0;
+    }
     info->tcpi_advmss     = ts->amss;
   }
 
@@ -484,7 +491,7 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
 	if( s->b.state != CI_TCP_LISTEN ) {
 	  ci_tcp_state* ts = SOCK_TO_TCP(s);
 	  if( ts->send.num == 1 ) {
-	    ci_netif_lock(ni);
+	    ci_netif_lock_fixme(ni);
 	    if( ts->send.num == 1 ) {
               TX_PKT_TCP(PKT_CHK(ni, ts->send.head))->tcp_flags |=
                                                     CI_TCP_FLAG_PSH;
@@ -511,7 +518,7 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
             if( (cork = (s->s_aflags & CI_SOCK_AFLAG_CORK)) )
               ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
 
-            ci_netif_lock_id(ni, SC_SP(s));
+            ci_netif_lock_fixme(ni);
             if( ci_ip_queue_not_empty(&ts->send) )
               ci_tcp_tx_advance(ts, ni);
 	    ci_netif_unlock(ni);

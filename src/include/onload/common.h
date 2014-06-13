@@ -125,6 +125,10 @@ typedef struct {
 } oo_tcp_sock_sleep_t;
 
 typedef struct {
+  oo_sp         sock_id;
+} oo_waitable_wake_t;
+
+typedef struct {
   oo_sp             tcp_id;
   oo_sp             from_tcp_id;
   ci_ifid_t         bindto_ifindex;
@@ -295,6 +299,7 @@ typedef struct {
   ci_uint32	retrieve_rc;
   ci_uerr_t	os_rc;
   ci_uerr_t	rc;
+  ci_ifid_t     ifindex;
 } cp_user_defer_send_t;
 
 typedef struct {

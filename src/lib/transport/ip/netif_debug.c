@@ -26,6 +26,7 @@
 #include "ip_internal.h"
 #include "uk_intf_ver.h"
 #include <onload/version.h>
+#include <onload/sleep.h>
 
 
 /**********************************************************************
@@ -362,7 +363,7 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
 }
 
 
-int citp_waitable_force_wake(ci_netif* ni, citp_waitable* sb)
+static int citp_waitable_force_wake(ci_netif* ni, citp_waitable* sb)
 {
   int rc = sb->wake_request != 0;
   log("%s: %d:%d ", __FUNCTION__, NI_ID(ni), W_FMT(sb));

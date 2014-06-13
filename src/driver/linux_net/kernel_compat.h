@@ -92,7 +92,7 @@
 #include "kernel_compat_vmware.h"
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,5)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9)
 	#error "This kernel version is now unsupported"
 #endif
 
@@ -594,6 +594,25 @@
 	}
 #endif
 
+#ifdef ETHTOOL_GMODULEEEPROM
+	#define EFX_HAVE_ETHTOOL_GMODULEEEPROM yes
+#else
+	struct ethtool_modinfo {
+		__u32   cmd;
+		__u32   type;
+		__u32   eeprom_len;
+		__u32   reserved[8];
+	};
+
+	#define ETH_MODULE_SFF_8079     0x1
+	#define ETH_MODULE_SFF_8079_LEN 256
+	#define ETH_MODULE_SFF_8472     0x2
+	#define ETH_MODULE_SFF_8472_LEN 512
+
+	#define ETHTOOL_GMODULEINFO     0x00000042
+	#define ETHTOOL_GMODULEEEPROM   0x00000043
+#endif
+
 #ifndef FLOW_CTRL_TX
 	#define FLOW_CTRL_TX		0x01
 	#define FLOW_CTRL_RX		0x02
@@ -870,6 +889,14 @@
 	#define efx_gso_segs tso_segs
 	#undef gso_segs
 	#define gso_segs efx_gso_segs
+#endif
+
+#ifndef EFX_HAVE_TSO_SEGS_LIMIT
+	#define TCP_MAX_GSO_SEGS 100
+#endif
+
+#ifndef GSO_MAX_SIZE
+	#define GSO_MAX_SIZE 65536
 #endif
 
 #ifdef EFX_NEED_NETDEV_ALLOC_SKB
@@ -2360,6 +2387,95 @@ int efx_pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
 ssize_t efx_pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, void *buf);
 #undef pci_read_vpd
 #define pci_read_vpd efx_pci_read_vpd
+#endif
+
+#ifdef EFX_HAVE_FDTABLE_ACCESSORS
+#include <linux/fdtable.h>
+static inline void efx_set_close_on_exec(int fd, struct fdtable *fdt)
+{
+	__set_close_on_exec(fd, fdt);
+}
+
+static inline void efx_clear_close_on_exec(int fd, struct fdtable *fdt)
+{
+	__clear_close_on_exec(fd, fdt);
+}
+
+static inline bool efx_close_on_exec(int fd, const struct fdtable *fdt)
+{
+	return close_on_exec(fd, fdt);
+}
+
+static inline void efx_set_open_fd(int fd, struct fdtable *fdt)
+{
+	__set_open_fd(fd, fdt);
+}
+
+static inline void efx_clear_open_fd(int fd, struct fdtable *fdt)
+{
+	__clear_open_fd(fd, fdt);
+}
+
+static inline bool efx_fd_is_open(int fd, const struct fdtable *fdt)
+{
+	return fd_is_open(fd, fdt);
+}
+
+static inline unsigned long efx_get_open_fds(int fd, const struct fdtable *fdt)
+{
+	return fdt->open_fds[fd];
+}
+#else
+#ifdef EFX_HAVE_FDTABLE_H
+#include <linux/fdtable.h>
+#else
+#include <linux/file.h>
+#endif
+static inline void efx_set_close_on_exec(unsigned long fd, struct fdtable *fdt)
+{
+	FD_SET(fd, fdt->close_on_exec);
+}
+
+static inline void efx_clear_close_on_exec(unsigned long fd, struct fdtable *fdt)
+{
+	FD_CLR(fd, fdt->close_on_exec);
+}
+
+static inline bool efx_close_on_exec(unsigned long fd, const struct fdtable *fdt)
+{
+	return FD_ISSET(fd, fdt->close_on_exec);
+}
+
+static inline void efx_set_open_fd(unsigned long fd, struct fdtable *fdt)
+{
+	FD_SET(fd, fdt->open_fds);
+}
+
+static inline void efx_clear_open_fd(unsigned long fd, struct fdtable *fdt)
+{
+	FD_CLR(fd, fdt->open_fds);
+}
+
+static inline bool efx_fd_is_open(unsigned long fd, const struct fdtable *fdt)
+{
+	return FD_ISSET(fd, fdt->open_fds);
+}
+
+static inline unsigned long efx_get_open_fds(unsigned long fd, const struct fdtable *fdt)
+{
+	return fdt->open_fds->fds_bits[fd];
+}
+#endif
+
+#ifdef EFX_HAVE_ASM_SYSTEM_H
+#include <asm/system.h>
+#endif
+
+#ifdef EFX_NEED_SKB_FRAG_ADDRESS
+static inline void *skb_frag_address(const skb_frag_t *frag)
+{
+	return page_address(frag->page) + frag->page_offset;
+}
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

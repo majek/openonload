@@ -142,7 +142,7 @@ efab_terminate_find_all_stacks(tcp_helper_resource_t *stacks[],
     if( i >= fdt->max_fds )
       goto unlock;
 
-    set = fdt->open_fds->fds_bits[j++];
+    set = efx_get_open_fds(j++, fdt);
 
     while( set ) {
       if( set & 1 ) {
@@ -347,7 +347,7 @@ static void efab_exit_group(int *status_p)
 }
 
 
-asmlinkage int
+asmlinkage long
 efab_linux_trampoline_exit_group(int status)
 {
   tcp_helper_resource_t *stacks[TERMINATE_STACKS_NUM];
@@ -386,6 +386,7 @@ efab_linux_trampoline_exit_group(int status)
 int
 efab_signal_die(ci_private_t *priv_unused, void *arg)
 {
+#ifdef OO_CAN_HANDLE_TERMINATION
   ci_int32 sig = *(ci_int32 *)arg;
   tcp_helper_resource_t *stacks[TERMINATE_STACKS_NUM];
   ci_uint32 stacks_num = 0;
@@ -421,6 +422,7 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
 
   send_sig(sig, current, 0);
   /*UNREACHABLE*/
+#endif
   return 0;
 }
 

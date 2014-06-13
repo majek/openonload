@@ -647,14 +647,16 @@ citp_fdinfo* citp_fdtable_lookup_noprobe(unsigned fd)
 
 static void citp_fdinfo_do_handover(citp_fdinfo* fdi, int fdt_locked)
 {
+#ifndef NDEBUG
   /* Yuk: does for UDP too. */
   volatile citp_fdinfo_p* p_fdip;
+  p_fdip = &citp_fdtable.table[fdi->fd].fdip;
+  ci_assert(fdip_is_busy(*p_fdip));
+#endif
+
 
   Log_V(ci_log("%s: fd=%d nonb_switch=%d", __FUNCTION__, fdi->fd,
 	       fdi->on_rcz.handover_nonb_switch));
-
-  p_fdip = &citp_fdtable.table[fdi->fd].fdip;
-  ci_assert(fdip_is_busy(*p_fdip));
 
   if( fdi->epoll_fd >= 0 )
     citp_epollb_on_handover(fdi);
@@ -1093,14 +1095,17 @@ int citp_ep_dup(unsigned oldfd, int (*syscall)(int oldfd, long arg),
 static void dup2_complete(citp_fdinfo* prev_tofdi,
 			  citp_fdinfo_p prev_tofdip, int fdt_locked)
 {
-  volatile citp_fdinfo_p *p_fromfdip, *p_tofdip;
+  volatile citp_fdinfo_p *p_fromfdip;
   unsigned fromfd = prev_tofdi->on_rcz.dup2_fd;
   unsigned tofd = prev_tofdi->fd;
   citp_fdinfo_p fromfdip;
   int rc;
 
+#ifndef NDEBUG
+  volatile citp_fdinfo_p* p_tofdip;
   p_tofdip = &citp_fdtable.table[tofd].fdip;
   ci_assert(fdip_is_busy(*p_tofdip));
+#endif
 
   p_fromfdip = &citp_fdtable.table[fromfd].fdip;
  lock_fromfdip_again:

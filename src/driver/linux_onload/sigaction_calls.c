@@ -352,7 +352,7 @@ efab_signal_get_tramp_data(struct mm_signal_data *tramp_data)
   return 0;
 }
 
-asmlinkage int
+asmlinkage long
 efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oact, size_t sigsetsize)
 {

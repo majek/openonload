@@ -461,6 +461,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
   int index, rc=0;
   tcp_helper_resource_t* thr = NULL;
   ci_netif* ni = NULL;
+  int check_user = EFAB_THR_TABLE_LOOKUP_CHECK_USER;
 
 #if CI_CFG_EFAB_EPLOCK_RECORD_CONTENTIONS
   int j;
@@ -468,9 +469,13 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
 #endif
 
   info->ni_exists = 0;
-  if (efab_thr_table_lookup(NULL, info->ni_index,
-                            EFAB_THR_TABLE_LOOKUP_CHECK_USER, &thr) == 0) {
+  if( info->ni_orphan ) {
+    check_user |= EFAB_THR_TABLE_LOOKUP_NO_UL;
+    info->ni_orphan = 0;
+  }
+  if( efab_thr_table_lookup(NULL, info->ni_index, check_user, &thr) == 0 ) {
     info->ni_exists = 1;
+    info->ni_orphan = (thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND);
     ni = &thr->netif;
     info->mmap_bytes = thr->mem_mmap_bytes;
     info->k_ref_count = thr->k_ref_count;
@@ -487,13 +492,18 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
     for( index = info->ni_index + 1;
          index < 10000 /* FIXME: magic! */;
          ++index )
-      if( (rc = efab_thr_table_lookup(NULL, index,
-                                      EFAB_THR_TABLE_LOOKUP_CHECK_USER,
+      if( (rc = efab_thr_table_lookup(NULL, index, check_user,
                                       &next_thr)) == 0 ) {
-        efab_thr_release(next_thr);
+        if( next_thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )
+          efab_tcp_helper_k_ref_count_dec(next_thr, 1);
+        else
+          efab_thr_release(next_thr);
         info->u.ni_next_ni.index = index;
         break;
       }
+    rc = 0;
+  }
+  else if( info->ni_subop == CI_DBG_NETIF_INFO_NOOP ) {
     rc = 0;
   }
 
@@ -541,13 +551,23 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
       /* If the current netif is found, we need to succeed */
       break;
 
+    case CI_DBG_NETIF_INFO_NOOP:
+      /* Always succeeds, rc already set */
+      break;
+
     default:
       rc = -EINVAL;
       break;
   }
-  if (thr)
-    efab_thr_release(thr);
-
+  if( thr ) {
+    /* Lookup needs a matching efab_thr_release() in case of ordinary
+     * stack but just a ref_count_dec in case of orphan
+     */
+    if( thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )
+      efab_tcp_helper_k_ref_count_dec(thr, 1);
+    else
+      efab_thr_release(thr);
+  }
   return rc;
 }
 
@@ -578,6 +598,18 @@ efab_tcp_helper_sock_sleep_rsop(ci_private_t* priv, void *op)
     return -EINVAL;
   return efab_tcp_helper_sock_sleep(priv->thr, (oo_tcp_sock_sleep_t *)op);
 }
+
+static int
+efab_tcp_helper_waitable_wake_rsop(ci_private_t* priv, void* arg)
+{
+  oo_waitable_wake_t* op = arg;
+  if( priv->thr == NULL )
+    return -EINVAL;
+  tcp_helper_endpoint_wakeup(priv->thr,
+                             ci_trs_get_valid_ep(priv->thr, op->sock_id));
+  return 0;
+}
+
 static int
 efab_tcp_helper_bind_os_sock_rsop(ci_private_t* priv, void *arg)
 {
@@ -749,7 +781,7 @@ cicp_user_defer_send_rsop(ci_private_t *priv, void *arg)
   if (priv->thr == NULL)
     return -EINVAL;
   op->rc = cicp_user_defer_send(&priv->thr->netif, op->retrieve_rc,
-                                &op->os_rc, op->pkt);
+                                &op->os_rc, op->pkt, op->ifindex);
   /* We ALWAYS want os_rc in the UL, so we always return 0 and ioctl handler
    * copies os_rc to UL. */
   return 0;
@@ -965,7 +997,11 @@ oo_ioctl_debug_op(ci_private_t *priv, void *arg)
     rc = efab_fds_dump(op->u.fds_dump_pid);
     break;
   case __CI_DEBUG_OP_DUMP_STACK__:
-    rc = tcp_helper_dump_stack(op->u.stack_id);
+    rc = tcp_helper_dump_stack(op->u.dump_stack.stack_id, 
+                               op->u.dump_stack.orphan_only);
+    break;
+  case __CI_DEBUG_OP_KILL_STACK__:
+    rc = tcp_helper_kill_stack(op->u.stack_id);
     break;
   default:
     rc = -EINVAL;
@@ -1149,7 +1185,7 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         ci_netif_unlock(&old_thr->netif);
 
         /* Allocate a socket in the alien_ni stack */
-        ci_netif_lock(alien_ni);
+        ci_netif_lock_fixme(alien_ni);
         new_ts = ci_tcp_get_state_buf(alien_ni);
         ci_netif_unlock(alien_ni);
         if( new_ts == NULL ) {
@@ -1162,7 +1198,7 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 
         /* From now on, we can't fail:
          * hack fd to point to the new endpoint. */
-        ci_netif_lock(&old_thr->netif);
+        ci_netif_lock_fixme(&old_thr->netif);
 
         ep->os_socket = NULL;
         ci_bit_set(&old_ts->s.b.sb_aflags, CI_SB_AFLAG_ORPHAN_BIT);
@@ -1175,7 +1211,7 @@ efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         efab_thr_release(old_thr);
 
         /* do not copy old_ts->s.b.bufid! */
-        ci_netif_lock(alien_ni);
+        ci_netif_lock_fixme(alien_ni);
         ci_trs_ep_get(priv->thr, priv->sock_id)->os_socket = os_socket;
         new_ts->c = mid_ts->c;
         new_ts->tcpflags = mid_ts->tcpflags;
@@ -1247,7 +1283,7 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
 
   /* copy from ci_tcp_listen_shutdown_queues() */
   ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-  ci_netif_lock(&thr->netif);
+  ci_netif_lock_fixme(&thr->netif);
   ci_bit_clear(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
   /* We have no way to close this connection from the other side:
    * there was no RST from peer. */
@@ -1299,6 +1335,7 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_ISCSI_CONTROL_OP, ioctl_iscsi_control_op),
 
   op(OO_IOC_TCP_SOCK_SLEEP,   efab_tcp_helper_sock_sleep_rsop),
+  op(OO_IOC_WAITABLE_WAKE,    efab_tcp_helper_waitable_wake_rsop),
   op(OO_IOC_TCP_CAN_CACHE_FD, efab_tcp_helper_can_cache_fd),
 
   op(OO_IOC_EP_FILTER_SET,       efab_ep_filter_set),

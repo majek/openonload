@@ -293,9 +293,6 @@ int efx_nic_test_registers(struct efx_nic *efx,
 	unsigned address = 0, i, j;
 	efx_oword_t mask, imask, original, reg, buf;
 
-	/* Falcon should be in loopback to isolate the XMAC from the PHY */
-	WARN_ON(!LOOPBACK_INTERNAL(efx));
-
 	for (i = 0; i < n_regs; ++i) {
 		address = regs[i].address;
 		mask = imask = regs[i].mask;
@@ -2053,7 +2050,7 @@ int efx_nic_dimension_resources(struct efx_nic *efx, size_t sram_size)
 			netif_err(efx, probe, efx->net_dev,
 				  "Reducing VF count from from %d to %d. "
 				  "Reduce rx_desc_cache_size, "
-				  "tx_desc_cache_size and/or target_num_vis\n",
+				  "tx_desc_cache_size and/or num_vis\n",
 				  efx->vf_count, vf_limit);
 			efx->vf_count = vf_limit;
 		}

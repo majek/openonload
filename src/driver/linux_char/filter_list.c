@@ -16,7 +16,7 @@
 
 #include <ci/efrm/resource.h>
 #include <ci/efrm/efrm_client.h>
-#include <ci/driver/efab/efch.h>
+#include "efch.h"
 #include <ci/efch/op_types.h>
 #include <ci/driver/resource/linux_efhw_nic.h>
 #include "filter_list.h"

@@ -123,8 +123,10 @@ extern int efab_thr_table_lookup(const char* name, unsigned id,
 
 
 /*! Dump a stack's netif state to syslog */
-extern int tcp_helper_dump_stack(unsigned id);
+extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only);
 
+/*! Try to kill an orphan/zombie stack */
+extern int tcp_helper_kill_stack(unsigned id);
 
 ci_inline void
 efab_thr_ref(tcp_helper_resource_t *thr)
