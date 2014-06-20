@@ -19,7 +19,7 @@ export CONFIG_SFC_MCDI_MON := y
 export CONFIG_SFC_SFE4001 := y
 export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
-export CONFIG_SFC_TUNE := m
+export CONFIG_SFC_TUNE := n
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
@@ -316,7 +316,7 @@ export-xen:
 # Export for SRPM
 export-srpm:
 	mkdir -p $(KPATH)/mtd
-	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c)  $(sfc_tune-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh
+	./export.sh -o $(KPATH) $(sfc-y:%.o=%.c) mtd/mtd-abi.h trace/events/sfc.h kernel_compat.sh
 
 .PHONY : intranet doc clean_doc util clean_util export export-xen export-srpm
 

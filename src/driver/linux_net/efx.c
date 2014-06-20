@@ -1,18 +1,3 @@
-/*
-** Copyright 2005-2013  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
-*/
-
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
@@ -3947,52 +3932,6 @@ static void efx_fini_struct(struct efx_nic *efx)
 		kfree(efx->vpd_sn);
 }
 
-#if defined(EFX_NOT_UPSTREAM)
-
-/**************************************************************************
- *
- * Automatic loading of the sfc_tune driver
- *
- **************************************************************************/
-
-static void efx_probe_tune(struct work_struct *data)
-{
-	if (request_module("sfc_tune"))
-		printk(KERN_ERR "Unable to autoprobe sfc_tune driver. "
-		       "Expect reduced performance on Falcon/A1\n");
-}
-
-static struct work_struct probe_tune;
-enum {
-	PROBE_TUNE_WANT,
-	PROBE_TUNE_ENABLE,
-};
-
-static void efx_schedule_probe_tune(int what)
-{
-	static bool wanted;
-	static bool enabled;
-	bool kick;
-
-	rtnl_lock();
-	if (what == PROBE_TUNE_WANT) {
-		kick = enabled && !wanted;
-		wanted = true;
-	} else {
-		kick = wanted;
-		enabled = true;
-	}
-	rtnl_unlock();
-
-	if (!kick)
-		return;
-
-	INIT_WORK(&probe_tune, efx_probe_tune);
-	schedule_work(&probe_tune);
-}
-
-#endif
-
 /**************************************************************************
  *
  * PCI interface
@@ -4369,14 +4308,6 @@ static int efx_pci_probe_main(struct efx_nic *efx)
 	rc = efx_probe_all(efx);
 	if (rc)
 		goto fail1;
-
-#if defined(EFX_NOT_UPSTREAM)
-	if (efx_nic_rev(efx) < EFX_REV_FALCON_B0) {
-		/* Try and auto-probe the sfc_tune driver, so by default
-		 * users see high performance on A1 cards */
-		efx_schedule_probe_tune(PROBE_TUNE_WANT);
-	}
-#endif
 
 	rc = efx_init_napi(efx);
 	if (rc)
@@ -4970,10 +4901,6 @@ static int __init efx_init_module(void)
 	rc = pci_register_driver(&efx_pci_driver);
 	if (rc < 0)
 		goto err_pci;
-
-#ifdef EFX_NOT_UPSTREAM
-	efx_schedule_probe_tune(PROBE_TUNE_ENABLE);
-#endif
 
 	return 0;
 
