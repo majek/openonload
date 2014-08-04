@@ -72,6 +72,10 @@ oof_socket_cluster_add(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
                        int protocol, int lport);
 
 extern void
+oof_socket_set_early_lp(struct oof_manager* fm, struct oof_socket* skf,
+                        int protocol, int lport);
+
+extern void
 oof_socket_cluster_del(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
                        int protocol, int lport);
 

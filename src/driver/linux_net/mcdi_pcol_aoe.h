@@ -1872,6 +1872,15 @@
 /* Results of status command (only) */
 #define       MC_CMD_AOE_OUT_CPLD_REPROGRAM_STATUS_OFST 0
 
+/* MC_CMD_AOE_OUT_POWER_OFF msgresponse */
+#define    MC_CMD_AOE_OUT_POWER_OFF_LEN 0
+
+/* MC_CMD_AOE_OUT_POWER_ON msgresponse */
+#define    MC_CMD_AOE_OUT_POWER_ON_LEN 0
+
+/* MC_CMD_AOE_OUT_LOAD msgresponse */
+#define    MC_CMD_AOE_OUT_LOAD_LEN 0
+
 /* MC_CMD_AOE_OUT_MAC_STATS_DMA msgresponse */
 #define    MC_CMD_AOE_OUT_MAC_STATS_DMA_LEN 0
 
@@ -1924,6 +1933,8 @@
 #define        MC_CMD_AOE_OUT_DDR_POWERED_WIDTH 1
 #define        MC_CMD_AOE_OUT_DDR_OPERATIONAL_LBN 2
 #define        MC_CMD_AOE_OUT_DDR_OPERATIONAL_WIDTH 1
+#define        MC_CMD_AOE_OUT_DDR_NOT_REACHABLE_LBN 3
+#define        MC_CMD_AOE_OUT_DDR_NOT_REACHABLE_WIDTH 1
 /* Memory size, in MB. */
 #define       MC_CMD_AOE_OUT_DDR_CAPACITY_OFST 4
 /* The memory type, as reported from SPD information */
@@ -1935,6 +1946,9 @@
 #define       MC_CMD_AOE_OUT_DDR_SPD_LEN 1
 #define       MC_CMD_AOE_OUT_DDR_SPD_MINNUM 1
 #define       MC_CMD_AOE_OUT_DDR_SPD_MAXNUM 236
+
+/* MC_CMD_AOE_OUT_SET_MTU_OFFSET msgresponse */
+#define    MC_CMD_AOE_OUT_SET_MTU_OFFSET_LEN 0
 
 /* MC_CMD_AOE_OUT_LINK_STATE msgresponse */
 #define    MC_CMD_AOE_OUT_LINK_STATE_LEN 0

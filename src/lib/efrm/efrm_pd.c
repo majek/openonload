@@ -80,6 +80,10 @@ struct efrm_pd {
 	/* OS-specific data */
 	void *os_data;
 
+	/* This is the minimun alignment that all packet buffers to be
+	 * mapped in should meet. */
+	int min_nic_order;
+
 	/* Buffer table manager.  Needed iff vf==NULL.
 	 * For Huntington, we'll need separate managers for different
 	 * page orders.*/
@@ -237,6 +241,7 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 	efrm_client_add_resource(client_opt, &pd->rs);
 
 	pd->os_data = efrm_pd_os_stats_ctor(pd);
+	pd->min_nic_order = 0;
 
 	*pd_out = pd;
 	return 0;
@@ -312,6 +317,20 @@ int efrm_pd_owner_id(struct efrm_pd *pd)
 	return pd->owner_id;
 }
 EXPORT_SYMBOL(efrm_pd_owner_id);
+
+
+void efrm_pd_set_min_align(struct efrm_pd *pd, int alignment)
+{
+	pd->min_nic_order = __ffs((alignment) >> EFHW_NIC_PAGE_SHIFT);
+}
+EXPORT_SYMBOL(efrm_pd_set_min_align);
+
+
+int efrm_pd_get_min_align(struct efrm_pd *pd)
+{
+	return ((1 << pd->min_nic_order) << EFHW_NIC_PAGE_SHIFT);
+}
+EXPORT_SYMBOL(efrm_pd_get_min_align);
 
 
 struct efrm_vf *efrm_pd_get_vf(struct efrm_pd *pd)
@@ -574,16 +593,24 @@ static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 
 	dma_size = 0;
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		if (bt_alloc->allocs[bt_num].bta_size == 0)
+			break;
 		if (dma_size < bt_alloc->allocs[bt_num].bta_size)
 			dma_size = bt_alloc->allocs[bt_num].bta_size;
 	}
 	dma_addrs = kmalloc(dma_size * sizeof(dma_addr_t), GFP_ATOMIC);
+	/* We should not get this far without setting up at least one
+	 * buffer table allocation.
+	 */
+	EFRM_ASSERT(dma_size != 0);
 	if (dma_addrs == NULL)
 		return -ENOMEM;
 
 	/* Program dma address for the buffer table entries. */
 	page_offset = 0;
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		if (bt_alloc->allocs[bt_num].bta_size == 0)
+			break;
 		for (i = 0; i < bt_alloc->allocs[bt_num].bta_size; i++) {
 			dma_addrs[i] = *pci_addrs + page_offset;
 			page_offset +=
@@ -601,6 +628,8 @@ static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 
 	/* Copy buftable addresses to user. */
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
+		if (bt_alloc->allocs[bt_num].bta_size == 0)
+			break;
 		block = bt_alloc->allocs[bt_num].bta_blocks;
 		n = bt_alloc->allocs[bt_num].bta_size;
 		first = bt_alloc->allocs[bt_num].bta_first_entry_offset;
@@ -710,12 +739,16 @@ efrm_pd_dma_map_bt_unaligned(struct efrm_pd *pd, int n_pages, int gfp_order,
 			rc = efrm_pd_bt_alloc(
 				pd, PAGE_SIZE << gfp_order, ord_idx,
 				&bt_alloc->allocs[bt_num++]);
+			if( rc != 0 )
+				break;
 		}
 		else if ((*pci_addrs & mask_mid) == 0) {
 			/* Aligned page, smaller order: map it */
 			rc = efrm_pd_bt_alloc(pd, PAGE_SIZE << gfp_order,
 					      ord_idx_mid,
 					      &bt_alloc->allocs[bt_num++]);
+			if( rc != 0 )
+				break;
 		}
 		else {
 			/* Non-aligned page: map non-aligned pieces
@@ -743,6 +776,7 @@ efrm_pd_dma_map_bt_unaligned(struct efrm_pd *pd, int n_pages, int gfp_order,
 				break;
 		}
 		EFRM_ASSERT(bt_num <= bt_alloc->num_allocs);
+		pci_addrs = (void *)((char *)pci_addrs + pci_addrs_stride);
 	}
 
 	if (rc != 0)
@@ -763,6 +797,13 @@ static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 	ord_idx = efrm_pd_bt_find_order_idx(pd, nic_order);
 	ord_idx_min = efrm_pd_nic_order_fixup(pd, ord_idx, n_pages,
 					      pci_addrs, pci_addrs_stride);
+
+	if (pd->min_nic_order > pd->bt_managers[ord_idx_min].order) {
+		EFRM_ERR("%s: ERROR: insufficient DMA mapping alignment "
+			 "(required=%d got=%d)", __FUNCTION__,
+			 pd->min_nic_order, pd->bt_managers[ord_idx_min].order);
+		return -ENOSPC;
+	}
 
 	if (ord_idx == ord_idx_min) {
 		bt_alloc->num_allocs = 1;
@@ -792,6 +833,31 @@ static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 			      pci_addrs, pci_addrs_stride,
 			      user_addrs, user_addrs_stride,
 			      user_addr_put, bt_alloc);
+}
+
+
+static int efrm_pd_check_pci_addr_alignment(struct efrm_pd *pd,
+					    dma_addr_t *pci_addrs,
+					    int pci_addrs_stride, int n_pages)
+{
+	dma_addr_t pci_addr_or = 0;
+	int pci_addr_ord;
+	int i;
+
+	for (i = 0; i < n_pages; i++) {
+		pci_addr_or |= *pci_addrs;
+		pci_addrs = (void*)((char*)pci_addrs + pci_addrs_stride);
+	}
+	EFRM_ASSERT((pci_addr_or & (EFHW_NIC_PAGE_SIZE - 1)) == 0);
+	pci_addr_ord = __ffs(pci_addr_or >> EFHW_NIC_PAGE_SHIFT);
+
+	if (pd->min_nic_order > pci_addr_ord) {
+		EFRM_ERR("%s: ERROR: insufficient DMA mapping alignment "
+			 "(required=%d got=%d)", __FUNCTION__,
+			 pd->min_nic_order, pci_addr_ord);
+		return -EPROTO;
+	}
+	return 0;
 }
 
 
@@ -831,7 +897,10 @@ int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
 		return -ENOSYS;
 
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
-		int ord_idx = efrm_pd_bt_find_order_idx(
+		int ord_idx;
+		if (bt_alloc->allocs[bt_num].bta_size == 0)
+			break;
+		ord_idx = efrm_pd_bt_find_order_idx(
 				pd, bt_alloc->allocs[bt_num].bta_order);
 		rc = efrm_bt_manager_realloc(
 				efrm_client_get_nic(pd->rs.rs_client),
@@ -853,14 +922,27 @@ EXPORT_SYMBOL(efrm_pd_dma_remap_bt);
 
 
 int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int gfp_order,
-		    struct page **pages, int pages_stride,
-		    void *p_pci_addrs, int pci_addrs_stride,
-		    uint64_t *user_addrs, int user_addrs_stride,
+		    struct page **pages, int pages_stride, void *p_pci_addrs,
+		    int pci_addrs_stride, uint64_t *user_addrs,
+		    int user_addrs_stride,
 		    void (*user_addr_put)(uint64_t, uint64_t *),
 		    struct efrm_bt_collection *bt_alloc)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	int rc;
+
+	/* This checks that physical memory meets the alignment
+	 * requirement.  We also check that the DMA addresses meet the
+	 * alignment requirements further below: in
+	 * efrm_pd_dma_map_bt() and efrm_pd_check_pci_addr_alignment().
+	 */
+	if (pd->min_nic_order > EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order)) {
+		EFRM_ERR("%s: ERROR: min_nic_order(%d) > "
+			 "EFHW_GFP_ORDER_TO_NIC_ORDER(%d)=%d",
+			 __FUNCTION__, pd->min_nic_order, gfp_order,
+			 EFHW_GFP_ORDER_TO_NIC_ORDER(gfp_order));
+		return -EPROTO;
+	}
 
 #ifdef CONFIG_SFC_RESOURCE_VF
 	if (pd->vf != NULL)
@@ -876,13 +958,17 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int gfp_order,
 		goto fail1;
 
 	if (pd->owner_id != OWNER_ID_PHYS_MODE) {
-		rc = efrm_pd_dma_map_bt(pd, n_pages, gfp_order,
-					pci_addrs, pci_addrs_stride,
-					user_addrs, user_addrs_stride,
-					user_addr_put, bt_alloc);
+		rc = efrm_pd_dma_map_bt(pd, n_pages, gfp_order, pci_addrs,
+					pci_addrs_stride, user_addrs,
+					user_addrs_stride, user_addr_put,
+					bt_alloc);
 		if (rc < 0)
 			goto fail2;
 	} else {
+		rc = efrm_pd_check_pci_addr_alignment(
+			pd, pci_addrs, pci_addrs_stride, n_pages);
+		if (rc < 0)
+			goto fail2;
 		efrm_pd_copy_user_addrs(pd, n_pages, gfp_order,
 					pci_addrs, pci_addrs_stride,
 					user_addrs, user_addrs_stride,

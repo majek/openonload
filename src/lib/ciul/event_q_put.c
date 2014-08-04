@@ -37,7 +37,6 @@ int ef_eventq_put(unsigned evq_id, ef_driver_handle fd, unsigned ev)
 
   EF_VI_BUG_ON((ev & EFVI_FALCON_EVENT_SW_DATA_MASK) != ev);
   ev64 = ev;
-  ev64 |= (uint64_t) DRV_GEN_EV_DECODE << EV_CODE_LBN;
 
   op.op = CI_RSOP_EVENTQ_PUT;
   op.id = efch_make_resource_id(evq_id);

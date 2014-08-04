@@ -49,15 +49,17 @@ extern "C" {
 /* src/tool/solar_clusterd will need updating if you change this
  * enum */
 enum ef_pd_flags {
-	EF_PD_DEFAULT   = 0x0,
-	EF_PD_VF        = 0x1,
-	EF_PD_PHYS_MODE = 0x2,
+	EF_PD_DEFAULT          = 0x0,
+	EF_PD_VF               = 0x1,
+	EF_PD_PHYS_MODE        = 0x2,
+	EF_PD_RX_PACKED_STREAM = 0x4,  /* ef10 only */
 };
 
 
 typedef struct ef_pd {
 	enum ef_pd_flags pd_flags;
 	unsigned         pd_resource_id;
+	char*            pd_intf_name;
 
 	/* Support for application clusters */
 	char*            pd_cluster_name;
@@ -74,6 +76,8 @@ extern int ef_pd_alloc(ef_pd*, ef_driver_handle, int ifindex,
 extern int ef_pd_alloc_by_name(ef_pd*, ef_driver_handle,
                                const char* cluster_or_intf_name,
                                enum ef_pd_flags flags);
+
+extern const char* ef_pd_interface_name(ef_pd*);
 
   /*! Unregister a memory region. */
 extern int ef_pd_free(ef_pd*, ef_driver_handle);

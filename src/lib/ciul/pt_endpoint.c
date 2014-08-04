@@ -34,7 +34,6 @@
 #include "efch_intf_ver.h"
 #include <etherfabric/init.h>
 
-
 /* ****************************************************************************
  * This set of functions provides the equivalent functionality of the
  * kernel vi resource manager.  They fully resolve the base addresses of
@@ -59,6 +58,8 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
   if( vi_flags & EF_VI_TX_FILTER_MASK_2  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_1;
   if( vi_flags & EF_VI_RX_TIMESTAMPS     ) efab_flags |= EFHW_VI_RX_TIMESTAMPS;
   if( vi_flags & EF_VI_TX_TIMESTAMPS     ) efab_flags |= EFHW_VI_TX_TIMESTAMPS;
+  if( vi_flags & EF_VI_RX_PACKED_STREAM  ) efab_flags |= (EFHW_VI_RX_PACKED_STREAM |
+                                                          EFHW_VI_NO_CUT_THROUGH);
   return efab_flags;
 }
 
@@ -122,8 +123,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   struct ef_vi_nic_type nic_type;
   ci_resource_alloc_t ra;
   char *mem_mmap_ptr_orig, *mem_mmap_ptr;
+  char *io_mmap_ptr, *io_mmap_base;
   ef_vi_state* state;
-  char* io_mmap_ptr;
   int rc;
   const char* s;
   uint32_t* ids;
@@ -135,6 +136,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 
   /* Ensure ef_vi_free() only frees what we allocate. */
   io_mmap_ptr = NULL;
+  io_mmap_base = NULL;
   mem_mmap_ptr = mem_mmap_ptr_orig = NULL;
 
   if( evq == NULL )
@@ -195,7 +197,17 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
       LOGVV(ef_log("%s: ci_resource_mmap (io) %d", __FUNCTION__, rc));
       goto fail2;
     }
-    io_mmap_ptr = (char*) p;
+    { /* On systems with large pages, multiple VI windows are mapped into
+       * each system page.  Therefore the VI window may not appear at the
+       * start of the I/O mapping.
+       */
+      int inst_in_iopage = 0;
+      int vi_windows_per_page = CI_PAGE_SIZE / 8192;
+      if( vi_windows_per_page > 1 )
+	      inst_in_iopage = ra.u.vi_out.instance & (vi_windows_per_page - 1);
+      io_mmap_base = (char*) p;
+      io_mmap_ptr = io_mmap_base + inst_in_iopage * 8192;
+    }
   }
 
   if( ra.u.vi_out.mem_mmap_bytes ) {
@@ -246,7 +258,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   if( txq_capacity )
     ef_vi_init_txq(vi, txq_capacity, mem_mmap_ptr, ids);
 
-  vi->vi_io_mmap_ptr = io_mmap_ptr;
+  vi->vi_io_mmap_ptr = io_mmap_base;
   vi->vi_mem_mmap_ptr = mem_mmap_ptr_orig;
   vi->vi_io_mmap_bytes = ra.u.vi_out.io_mmap_bytes;
   vi->vi_mem_mmap_bytes = ra.u.vi_out.mem_mmap_bytes;
@@ -255,14 +267,19 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   ef_vi_init_state(vi);
   rc = ef_vi_add_queue(evq, vi);
   BUG_ON(rc != q_label);
+  vi->vi_is_packed_stream = !! (vi_flags & EF_VI_RX_PACKED_STREAM);
+
+  if( vi->vi_is_packed_stream )
+    ef_vi_packed_stream_update_credit(vi);
+
   return q_label;
 
  fail4:
   if( mem_mmap_ptr != NULL )
     ci_resource_munmap(vi_dh, mem_mmap_ptr, ra.u.vi_out.mem_mmap_bytes);
  fail3:
-  if( io_mmap_ptr != NULL )
-    ci_resource_munmap(vi_dh, io_mmap_ptr, ra.u.vi_out.io_mmap_bytes);
+  if( io_mmap_base != NULL )
+    ci_resource_munmap(vi_dh, io_mmap_base, ra.u.vi_out.io_mmap_bytes);
  fail2:
   free(state);
  fail1:

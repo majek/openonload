@@ -58,10 +58,14 @@
 static int clusterd_connect(int* sock_out)
 {
   struct sockaddr_un sockaddr;
-  struct passwd *passwd;
+  struct passwd passwd;
   const char* user;
+  const int buf_size = 96;
+  char buf[buf_size];
+  struct passwd* result;
   uid_t uid;
   char* sock_path;
+  int rc;
 
   if( (*sock_out = socket(AF_UNIX, SOCK_STREAM, 0)) < 0 )
     return -errno;
@@ -74,10 +78,19 @@ static int clusterd_connect(int* sock_out)
   }
   else {
     uid = getuid();
-    passwd = getpwuid(uid);
-    user = passwd->pw_name;
-    if( asprintf(&sock_path, "%s%s/%s", DEFAULT_CLUSTERD_DIR, user,
-                 DEFAULT_CLUSTERD_SOCK_NAME) < 0 )
+    rc = getpwuid_r(uid, &passwd, buf, buf_size, &result);
+    if( rc == 0 ) {
+      if( result != NULL )
+        user = passwd.pw_name;
+      else
+        return -ENOENT;
+    }
+    else {
+      return -rc;
+    }
+    rc = asprintf(&sock_path, "%s%s/%s", DEFAULT_CLUSTERD_DIR, user,
+                  DEFAULT_CLUSTERD_SOCK_NAME);
+    if( rc < 0 )
       return -errno;
     strncpy(sockaddr.sun_path, sock_path, sizeof(sockaddr.sun_path) - 1);
     free(sock_path);
@@ -183,11 +196,13 @@ static int clusterd_alloc_cluster(int sock, const char* cluster_name,
                                   enum ef_pd_flags pd_flags,
                                   ef_driver_handle* cluster_dh_out,
                                   unsigned* pd_res_id_out,
-                                  unsigned* viset_res_id_out)
+                                  unsigned* viset_res_id_out,
+                                  char* intf_name_out)
 {
   char *req_buf = NULL;
   int req_len;
   char resp_buf[128];
+  char intf_name[128];
   int nargs, r0, r1, r2, r3;
   int rc;
 
@@ -212,12 +227,14 @@ static int clusterd_alloc_cluster(int sock, const char* cluster_name,
     return rc;
   }
 
-  nargs = sscanf(resp_buf, "%d %d %d %d", &r0, &r1, &r2, &r3);
-  if( nargs == 4 ) {
+  nargs = sscanf(resp_buf, "%d %d %d %d %s", &r0, &r1, &r2, &r3, intf_name);
+  if( nargs == 5 ) {
     if( r0 == CLUSTERD_ALLOC_CLUSTER_RESP ) {
       if( r1 == CLUSTERD_ERR_SUCCESS ) {
         *pd_res_id_out = r2;
         *viset_res_id_out = r3;
+        strncpy(intf_name_out, intf_name, IF_NAMESIZE);
+        intf_name_out[IF_NAMESIZE] = '\0';
         return 0;
       }
       else if( r1 == CLUSTERD_ERR_FAIL ) {
@@ -225,7 +242,7 @@ static int clusterd_alloc_cluster(int sock, const char* cluster_name,
       }
     }
   }
-  LOG(ef_log("%s: ERROR: Unexpected reponse from daemon.  Wanted 4, got %d",
+  LOG(ef_log("%s: ERROR: Unexpected reponse from daemon.  Wanted 5, got %d",
              __FUNCTION__, nargs));
   return -EIO;
 }
@@ -250,6 +267,12 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
   if( flags & EF_PD_VF )
     flags |= EF_PD_PHYS_MODE;
 
+  pd->pd_intf_name = malloc(IF_NAMESIZE);
+  if( pd->pd_intf_name == NULL ) {
+    LOGVV(ef_log("%s: malloc failed", __FUNCTION__));
+    goto alloc_locally;
+  }
+
   if( (rc = clusterd_connect(&sock)) < 0 ) {
     LOGV(ef_log("%s: solar_clusterd not present.  Trying ef_pd_alloc()",
                 __FUNCTION__));
@@ -259,17 +282,20 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
   if( (rc = clusterd_check_version(sock, CLUSTERD_PROTOCOL_VERSION)) < 0 ) {
     LOG(ef_log("%s: ERROR: clusterd_check_version() failed: %d",
                __FUNCTION__, rc));
+    close(sock);
     return rc;
   }
 
   if( (rc = clusterd_alloc_cluster(sock, cluster_or_intf_name, flags,
-                                   &cluster_dh, &pd_id, &viset_id)) < 0 ) {
+                                   &cluster_dh, &pd_id, &viset_id,
+                                   pd->pd_intf_name)) < 0 ) {
     close(sock);
     if( rc == -ENOENT ) {
       LOGV(ef_log("%s: cluster '%s' does not exist.  Trying ef_pd_alloc()",
                   __FUNCTION__, cluster_or_intf_name));
       goto alloc_locally;
     }
+    free(pd->pd_intf_name);
     LOG(ef_log("%s: ERROR: clusterd_alloc_cluster() failed: %d", __FUNCTION__,
                rc));
     return rc;
@@ -284,6 +310,8 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
   return 0;
 
  alloc_locally:
+  if( pd->pd_intf_name )
+    free(pd->pd_intf_name);
   ifindex = if_nametoindex(cluster_or_intf_name);
   if( ifindex == 0 )
     return -errno;

@@ -69,7 +69,7 @@ int ef_vi_transmit_unbundle(ef_vi* vi, const ef_event* ev,
 		     EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_TX_ERROR);
 
 	/* Shouldn't be batching more than 128 descriptors, and should not go
-	** backwards. */
+	** backwards. See comment 7 on bug 44002. */
 	EF_VI_BUG_ON(((ev->tx.desc_id - qs->removed) & q->mask) > 128);
 	/* Should not complete more than we've posted. */
 	EF_VI_BUG_ON(((ev->tx.desc_id - qs->removed) & q->mask) >
@@ -81,6 +81,8 @@ int ef_vi_transmit_unbundle(ef_vi* vi, const ef_event* ev,
 			q->ids[i] = EF_REQUEST_ID_MASK;
 		}
 
+	/* This is a count of packets, not descriptors. Again, see comment 7 on
+	 * bug 44002. */
 	EF_VI_BUG_ON(ids - ids_in > EF_VI_TRANSMIT_BATCH);
 	return (int) (ids - ids_in);
 }

@@ -61,6 +61,9 @@
 #include "efrm_internal.h"
 
 
+static DEFINE_MUTEX(register_evq_cb_mutex);
+
+
 static inline efhw_event_t *
 efrm_eventq_base(struct efrm_vi *virs)
 {
@@ -112,6 +115,8 @@ void efrm_eventq_reset(struct efrm_vi *virs)
 				    (virs->flags &
 				     (EFHW_VI_RX_TIMESTAMPS |
 				      EFHW_VI_TX_TIMESTAMPS)) != 0,
+				    (virs->flags &
+				     EFHW_VI_NO_CUT_THROUGH) == 0,
 				    &virs->rx_ts_correction,
 				    &virs->out_flags);
 }
@@ -126,36 +131,39 @@ efrm_eventq_register_callback(struct efrm_vi *virs,
 	struct efrm_nic_per_vi *cb_info;
 	int instance;
 	int bit;
+	int rc = 0;
 
 	EFRM_RESOURCE_ASSERT_VALID(&virs->rs, 0);
 	EFRM_ASSERT(virs->q[EFHW_EVQ].capacity != 0);
 	EFRM_ASSERT(handler != NULL);
 
-	/* ?? TODO: Get rid of this test when client is compulsory. */
-	if (virs->rs.rs_client == NULL) {
-		EFRM_ERR("%s: no client", __FUNCTION__);
-		return -EINVAL;
+	mutex_lock(&register_evq_cb_mutex);
+	if (virs->evq_callback_fn != NULL) {
+		rc = -EBUSY;
+		goto unlock_and_out;
 	}
 
 	virs->evq_callback_arg = arg;
 	virs->evq_callback_fn = handler;
 
 #ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf)
-		return efrm_vf_eventq_callback_registered(virs);
+	if (virs->allocation.vf) {
+		rc = efrm_vf_eventq_callback_registered(virs);
+		if (rc != 0)
+			virs->evq_callback_fn = NULL;
+		goto unlock_and_out;
+	}
 #endif
 
 	instance = virs->rs.rs_instance;
 	cb_info = &efrm_nic(virs->rs.rs_client->nic)->vis[instance];
-
-	/* The handler can be set only once. */
+	cb_info->vi = virs;
 	bit = test_and_set_bit(VI_RESOURCE_EVQ_STATE_CALLBACK_REGISTERED,
 			       &cb_info->state);
-	if (bit)
-		return -EBUSY;
-	cb_info->vi = virs;
-
-	return 0;
+	EFRM_ASSERT(bit == 0);
+unlock_and_out:
+	mutex_unlock(&register_evq_cb_mutex);
+	return rc;
 }
 EXPORT_SYMBOL(efrm_eventq_register_callback);
 
@@ -170,9 +178,12 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	EFRM_ASSERT(virs->q[EFHW_EVQ].capacity != 0);
 	EFRM_ASSERT(virs->rs.rs_client != NULL);
 
+	mutex_lock(&register_evq_cb_mutex);
+
 #ifdef CONFIG_SFC_RESOURCE_VF
 	if (virs->allocation.vf) {
 		efrm_vf_eventq_callback_kill(virs);
+		mutex_unlock(&register_evq_cb_mutex);
 		return;
 	}
 #endif
@@ -186,6 +197,10 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 				 &cb_info->state);
 	EFRM_ASSERT(bit);	/* do not call me twice! */
 
+	/* If the vi had been primed, unset it. */
+	test_and_clear_bit(VI_RESOURCE_EVQ_STATE_WAKEUP_PENDING,
+			   &cb_info->state);
+
 	/* Spin until the callback is complete. */
 	do {
 		rmb();
@@ -195,6 +210,7 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	} while ((evq_state & VI_RESOURCE_EVQ_STATE(BUSY)));
 
 	virs->evq_callback_fn = NULL;
+	mutex_unlock(&register_evq_cb_mutex);
 }
 EXPORT_SYMBOL(efrm_eventq_kill_callback);
 

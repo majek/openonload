@@ -69,16 +69,26 @@ oo_debug_fds_dump(ci_fd_t fp, ci_uint32 pid)
   return rc;				
 }
 
+
+typedef struct {
+  ci_fd_t fp;
+  int stack_id;
+  int orphan_only;
+} dump_stack_args;
+
 /*! dump inode for a file descriptor */
 ci_inline int
-oo_debug_dump_stack(ci_fd_t fp, int stack_id, int orphan_only) 
+oo_debug_dump_stack(void* opaque, void* buf, int buf_len)
 {
   int rc;
+  dump_stack_args* args = opaque;
   ci_debug_onload_op_t op;
   op.what = __CI_DEBUG_OP_DUMP_STACK__;
-  op.u.dump_stack.stack_id = stack_id;
-  op.u.dump_stack.orphan_only = orphan_only;
-  rc = oo_debug_op(fp, &op);
+  op.u.dump_stack.stack_id = args->stack_id;
+  op.u.dump_stack.orphan_only = args->orphan_only;
+  CI_USER_PTR_SET(op.u.dump_stack.user_buf, buf);
+  op.u.dump_stack.user_buf_len = buf_len;
+  rc = oo_debug_op(args->fp, &op);
   return rc;
 }
 

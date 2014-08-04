@@ -56,7 +56,7 @@
 
 #define CI_PAGE_SIZE		4096
 #define CI_PAGE_SHIFT		12
-#define CI_PAGE_MASK		(~(CI_PAGE_SIZE - 1))
+#define CI_PAGE_MASK		(~((ci_uintptr_t) CI_PAGE_SIZE - 1))
 
 #define CI_CPU_HAS_SSE		1	/* SSE extensions supported */
 

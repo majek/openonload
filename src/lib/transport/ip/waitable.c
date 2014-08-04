@@ -296,58 +296,67 @@ const char* citp_waitable_type_str(citp_waitable* w)
 }
 
 
-void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf)
+static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
+                                oo_dump_log_fn_t logger, void* log_arg)
 {
   unsigned tmp;
 
   if( w->state & CI_TCP_STATE_SOCKET ) {
     ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
-    log("%s%s "NT_FMT"lcl="OOF_IP4PORT" rmt="OOF_IP4PORT" %s", pf,
-	citp_waitable_type_str(w), NI_ID(ni), W_FMT(w),
-        OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
-        OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
-	ci_tcp_state_str(w->state));
+    logger(log_arg, "%s%s "NT_FMT"lcl="OOF_IP4PORT" rmt="OOF_IP4PORT" %s",
+           pf, citp_waitable_type_str(w), NI_ID(ni), W_FMT(w),
+           OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
+           OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)),
+           ci_tcp_state_str(w->state));
   }
   else
-    log("%s%s "NT_FMT, pf,
-	citp_waitable_type_str(w), NI_ID(ni), W_FMT(w));
+    logger(log_arg, "%s%s "NT_FMT, pf,
+           citp_waitable_type_str(w), NI_ID(ni), W_FMT(w));
 
   if( w->state == CI_TCP_STATE_FREE )
     return;
 
   tmp = w->lock.wl_val;
-  log("%s  lock: %x %s%s", pf, tmp,
-      (tmp & OO_WAITABLE_LK_LOCKED) ? "LOCKED" : "",
-      (tmp & OO_WAITABLE_LK_NEED_WAKE) ? " CONTENDED": "");
+  logger(log_arg, "%s  lock: %x %s%s", pf, tmp,
+         (tmp & OO_WAITABLE_LK_LOCKED) ? "LOCKED" : "",
+         (tmp & OO_WAITABLE_LK_NEED_WAKE) ? " CONTENDED": "");
 
-  log("%s  rx_wake=%08x%s tx_wake=%08x%s flags: "CI_SB_FLAGS_FMT, pf,
-      w->sleep_seq.rw.rx,
-      ci_bit_test(&w->wake_request, CI_SB_FLAG_WAKE_RX_B) ? "(RQ)":"    ",
-      w->sleep_seq.rw.tx,
-      ci_bit_test(&w->wake_request, CI_SB_FLAG_WAKE_TX_B) ? "(RQ)":"    ",
-      CI_SB_FLAGS_PRI_ARG(w));
+  logger(log_arg, "%s  rx_wake=%08x%s tx_wake=%08x%s flags: "CI_SB_FLAGS_FMT,
+         pf,
+         w->sleep_seq.rw.rx,
+         ci_bit_test(&w->wake_request, CI_SB_FLAG_WAKE_RX_B) ? "(RQ)":"    ",
+         w->sleep_seq.rw.tx,
+         ci_bit_test(&w->wake_request, CI_SB_FLAG_WAKE_TX_B) ? "(RQ)":"    ",
+         CI_SB_FLAGS_PRI_ARG(w));
 }
 
 
 void citp_waitable_dump(ci_netif* ni, citp_waitable* w, const char* pf)
 {
+  citp_waitable_dump_to_logger(ni, w, pf, ci_log_dump_fn, NULL);
+}
+
+void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
+                                  const char* pf,
+                                  oo_dump_log_fn_t logger, void* log_arg)
+{
   citp_waitable_obj* wo = CI_CONTAINER(citp_waitable_obj, waitable, w);
 
-  citp_waitable_dump2(ni, w, pf);
+  citp_waitable_dump2(ni, w, pf, logger, log_arg);
   if( w->state & CI_TCP_STATE_SOCKET ) {
-    ci_sock_cmn_dump(ni, &wo->sock, pf);
+    ci_sock_cmn_dump(ni, &wo->sock, pf, logger, log_arg);
     if( w->state == CI_TCP_LISTEN )
-      ci_tcp_socket_listen_dump(ni, &wo->tcp_listen, pf);
+      ci_tcp_socket_listen_dump(ni, &wo->tcp_listen, pf, logger, log_arg);
     else if( w->state & CI_TCP_STATE_TCP )
-      ci_tcp_state_dump(ni, &wo->tcp, pf);
+      ci_tcp_state_dump(ni, &wo->tcp, pf, logger, log_arg);
 #if CI_CFG_UDP
     else if( w->state == CI_TCP_STATE_UDP )
-      ci_udp_state_dump(ni, &wo->udp, pf);
+      ci_udp_state_dump(ni, &wo->udp, pf, logger, log_arg);
 #endif
   }
 #if CI_CFG_USERSPACE_PIPE
   else if( w->state == CI_TCP_STATE_PIPE )
-    oo_pipe_dump(ni, &wo->pipe, pf);
+    oo_pipe_dump(ni, &wo->pipe, pf, logger, log_arg);
 #endif
 }
 

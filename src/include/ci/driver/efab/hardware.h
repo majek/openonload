@@ -153,12 +153,14 @@
 #define efhw_nic_event_queue_enable(nic, evq, size, buf_base, dma_addrs, \
 				    n_pages, interrupting, dos_p, wakeup_evq, \
                                     enable_time_sync_events,            \
+                                    enable_cut_through,                 \
                                     rx_ts_correction_out, flags_out)    \
   ((nic)->efhw_func->event_queue_enable((nic), (evq), (size),           \
                                         (buf_base), (dma_addrs),        \
                                         (n_pages), (interrupting),      \
                                         (dos_p), (wakeup_evq),          \
                                         (enable_time_sync_events),      \
+                                        (enable_cut_through),           \
                                         (rx_ts_correction_out),         \
 					(flags_out)))
 
@@ -235,6 +237,10 @@
 	((nic)->efhw_func->set_port_sniff((nic), (instance), (enable),      \
 					  (promiscuous), (handle)))
 
+#define efhw_nic_set_tx_port_sniff(nic, instance, enable, handle)         \
+	((nic)->efhw_func->set_tx_port_sniff((nic), (instance), (enable), \
+					     (handle)))
+
 /*-------------- RSS ------------ */
 #define efhw_nic_rss_context_alloc(nic, num_qs, shared, handle_out)     \
         ((nic)->efhw_func->rss_context_alloc((nic), (num_qs), (shared), \
@@ -254,6 +260,10 @@
 	((nic)->efhw_func->license_challenge(nic, feature, challenge, expiry,  \
                                              signature))
 
+/*-------------- Stats ---------------- */
+#define efhw_nic_get_rx_error_stats(nic, instance, data, data_len, do_reset) \
+	((nic)->efhw_func->get_rx_error_stats(nic, instance, data, data_len, \
+                                              do_reset))
 
 /*----------------------------------------------------------------------------
  * Hardware specific portability macros for performance critical code.

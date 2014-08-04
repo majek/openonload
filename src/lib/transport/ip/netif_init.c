@@ -986,6 +986,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if ( (s = getenv("EF_FREE_PACKETS_LOW_WATERMARK")) )
     opts->free_packets_low = atoi(s);
+  if( opts->free_packets_low == 0 )
+    opts->free_packets_low = opts->rxq_size / 2;
 
 #if CI_CFG_SENDFILE
   if ( (s = getenv("EF_MAX_EP_PINNED_PAGES")) )
@@ -1011,6 +1013,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_TCP_SYNCOOKIES")) )
     opts->tcp_syncookies = atoi(s);
+
+  if( (s = getenv("EF_CLUSTER_IGNORE")) )
+    opts->cluster_ignore = atoi(s);
 
   ci_netif_config_opts_getenv_ef_log(opts);
 
@@ -1466,9 +1471,11 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
        */
       break;
     case -ENODEV:
-      LOG_E(ci_log("%s: This error can occur if no Solarflare network "
-		   "interfaces are active/UP. Please check your config with "
-		   "ip addr or ifconfig", __FUNCTION__));
+      LOG_E(ci_log("%s: ENODEV.\n"
+                   "This error can occur if no Solarflare network interfaces\n"
+                   "are active/UP, or they are all running packed stream\n"
+                   "firmware.  Please check your configuration.",
+                   __FUNCTION__));
       break;
     default:
       LOG_E(ci_log("%s: ERROR: Failed to allocate stack (rc=%d)",
@@ -1707,6 +1714,13 @@ static int check_pio(ci_netif_config_opts* opts)
   return 0;
 }
 #endif
+
+
+void ci_netif_cluster_prefault(ci_netif* ni)
+{
+  ci_netif_pkt_prefault(ni);
+  ci_netif_pkt_prefault_reserve(ni);
+}
 
 
 int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,

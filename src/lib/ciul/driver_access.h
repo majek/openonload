@@ -95,5 +95,15 @@ ci_resource_op(int fp, struct ci_resource_op_s* io)
 }
 
 
+/*! \i_efab_unix */
+ci_inline int
+ci_resource_prime(int fp, struct ci_resource_prime_op_s* io)
+{
+  int r;
+  if( (r = ioctl(fp, CI_RESOURCE_PRIME, io)) < 0 )  return -errno;
+  return r;
+}
+
+
 #endif  /* _CI_DRIVER_UNIX_INTF_H_ */
 /*! \cidoxg_end */

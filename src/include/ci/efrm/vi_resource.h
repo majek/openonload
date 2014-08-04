@@ -120,6 +120,10 @@ enum efrm_vi_q_flags {
 	EFRM_VI_TX_LOOPBACK           = 0x400,
 	/** RXQ: Enable support to receive from loopback datapath beside MAC */
 	EFRM_VI_RX_LOOPBACK           = 0x800,
+	/** RXQ: Disable cut-through. This is necessary to allow RX event batching */
+	EFRM_VI_NO_CUT_THROUGH        = 0x1000,
+	/** RXQ: Enable packed stream mode */
+	EFRM_VI_RX_PACKED_STREAM      = 0x2000,
 };
 
 
@@ -157,6 +161,11 @@ extern void efrm_vi_attr_set_pd(struct efrm_vi_attr *attr,
 /** Allocate a VI that has an associated interrupt. */
 extern void efrm_vi_attr_set_with_interrupt(struct efrm_vi_attr *attr,
 					    int with_interrupt);
+
+
+/** Allocate a VI that supports packed stream mode. */
+extern void efrm_vi_attr_set_packed_stream(struct efrm_vi_attr *attr,
+					   int packed_stream);
 
 /** Allocate a VI that has an associated timer. */
 extern void efrm_vi_attr_set_with_timer(struct efrm_vi_attr *attr,

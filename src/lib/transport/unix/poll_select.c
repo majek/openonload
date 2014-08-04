@@ -223,7 +223,8 @@ ci_inline int citp_ul_select(struct oo_ul_select_state*__restrict__ s)
 
 /* Generic select/pselect implementation. */
 int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
-                      ci_uint64 *timeout_ms, citp_lib_context_t *lib_context,
+                      ci_uint64 timeout_ms, ci_uint64 *used_ms,
+                      citp_lib_context_t *lib_context,
                       const sigset_t *sigmask, sigset_t *sigsaved)
 {
   /* Sorry, but we're relying somewhat on how GLIBC arranges its fd_set.
@@ -242,7 +243,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
   int sigmask_set = 0;
 
   Log_FL(CI_UL_LOG_CALL | CI_UL_LOG_SEL,
-         log_select("enter", nfds, rds, wrs, exs, *timeout_ms));
+         log_select("enter", nfds, rds, wrs, exs, timeout_ms));
 
   /* Cope with some apps just passing a really big number in [nfds]
   ** Split between ul/kern and kern only handling at nfds_split
@@ -336,16 +337,16 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
     }
    
     /* We spin for a while if we've got any U/L sockets. */
-    if( *timeout_ms != 0 ) {
+    if( timeout_ms != 0 ) {
       if( s.is_ul_fd && 
           KEEP_POLLING(s.ul_select_spin, s.now_frc, poll_start_frc) ) {
-        if( s.now_frc - poll_start_frc >= *timeout_ms * ci_cpu_khz ) {
+        if( s.now_frc - poll_start_frc >= timeout_ms * ci_cpu_khz ) {
           /* Timeout while spinning */
           select_zero(rds, wrs, exs, n_words);
           n = 0;
-          *timeout_ms = 0;
+          *used_ms = timeout_ms;
           Log_SEL(log_select("spin_timeout", nfds, rds, wrs, exs,
-                             *timeout_ms));
+                             timeout_ms));
           goto out;
         }
    
@@ -403,7 +404,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
 
     if( ! s.is_kernel_fd ) {
       select_zero(rds, wrs, exs, n_words);
-      Log_SEL(log_select("ul_only_nonb_0", nfds, rds, wrs, exs, *timeout_ms));
+      Log_SEL(log_select("ul_only_nonb_0", nfds, rds, wrs, exs, timeout_ms));
       n = 0;
       goto out;
     }
@@ -467,7 +468,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
           if (split)
             memcpy((char *)exs+n_bytes_bs, (char *)s.exk+n_bytes_bs, n_bytes_as);
         }
-        Log_SEL(log_select("merge_out", nfds, rds, wrs, exs, *timeout_ms));
+        Log_SEL(log_select("merge_out", nfds, rds, wrs, exs, timeout_ms));
         goto out;
       }
       else
@@ -488,16 +489,12 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
       memcpy(exs, s.exu, n_bytes_bs);
       if (split) memset((char *)exs+n_bytes_bs, 0, n_bytes_as);
     }
-    Log_SEL(log_select("ul_out", nfds, rds, wrs, exs, *timeout_ms));
+    Log_SEL(log_select("ul_out", nfds, rds, wrs, exs, timeout_ms));
   } /* End of block that declares [bits]. */
 
  out:
   /* Calculate new timeout */
-  if( *timeout_ms > 0 ) {
-    *timeout_ms -= (s.now_frc - poll_start_frc) / ci_cpu_khz;
-    if( *timeout_ms < 0 )
-      *timeout_ms = 0;
-  }
+  *used_ms = (s.now_frc - poll_start_frc) / ci_cpu_khz;
 
   /* Exit library, and protect signals if necessary */
   if( sigmask_set ) {
@@ -509,7 +506,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
     citp_exit_lib(lib_context, n >= 0);
 
   if( n == CI_SOCKET_HANDOVER )
-    Log_SEL(log_select("pass_through", nfds, rds, wrs, exs, *timeout_ms));
+    Log_SEL(log_select("pass_through", nfds, rds, wrs, exs, timeout_ms));
 
   return n;
 
@@ -518,7 +515,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
   if( rds )  memcpy(rds, s.rdk, n_words * sizeof(ci_fd_mask));
   if( wrs )  memcpy(wrs, s.wrk, n_words * sizeof(ci_fd_mask));
   if( exs )  memcpy(exs, s.exk, n_words * sizeof(ci_fd_mask));
-  Log_SEL(log_select("k_out", nfds, rds, wrs, exs, *timeout_ms));
+  Log_SEL(log_select("k_out", nfds, rds, wrs, exs, timeout_ms));
   goto out;
 }
 
@@ -594,7 +591,8 @@ static void citp_ul_poll_merge_kfds(struct oo_ul_poll_state*__restrict__ ps)
 
 /* Generic poll/ppoll implementation. */
 int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
-                    int *timeout_ms, citp_lib_context_t *lib_context)
+                    ci_uint64 timeout_ms, ci_uint64 *used_ms,
+                    citp_lib_context_t *lib_context)
 {
   struct oo_ul_poll_state ps;
   int rc, i, n, polled_kfds = 0;
@@ -628,22 +626,22 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
   /* Prioritise ul fds over kernel fds and keep semantics of only
    * kernel fds in poll set same as not using onload
    */
-  if( ps.n_ul_fds != 0 && *timeout_ms == 0 &&
+  if( ps.n_ul_fds != 0 && timeout_ms == 0 &&
       ps.this_poll_frc - lib_context->thread->poll_nonblock_fast_frc < 
       citp.poll_nonblock_fast_cycles)
     return 0;
 
   if( ps.n_ul_fds != 0 ) {
     /* We have some userlevel fds. */
-    if( *timeout_ms ) {
+    if( timeout_ms ) {
       /* Blocking.  Shall we spin? */
       if( KEEP_POLLING(ps.ul_poll_spin, ps.this_poll_frc, poll_start_frc) ) {
         /* Timeout while spinning? */
-        if( *timeout_ms > 0 && (ps.this_poll_frc - poll_start_frc >=
-                               (ci_uint64) (*timeout_ms) * ci_cpu_khz) ) {
+        if( timeout_ms > 0 && (ps.this_poll_frc - poll_start_frc >=
+                               timeout_ms * ci_cpu_khz) ) {
           for( i = 0; i < ps.nkfds; ++i )
             fds[ps.kfd_map[i]].revents = 0;
-          *timeout_ms = 0;
+          *used_ms = timeout_ms;
           return 0;
         }
         if( ps.this_poll_frc - poll_fast_frc > citp.poll_fast_cycles ) {
@@ -704,12 +702,8 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
   /* We only have kernel fds, or we want to block; so pass through. */
 
  out_block:
-  if( *timeout_ms > 0 ) {
-     *timeout_ms -= (ps.this_poll_frc - poll_start_frc) / ci_cpu_khz;
-    if( *timeout_ms < 0 )
-      *timeout_ms = 0;
-  }
-  if( *timeout_ms == 0 ) {
+  *used_ms = (ps.this_poll_frc - poll_start_frc) / ci_cpu_khz;
+  if( timeout_ms == *used_ms ) {
     lib_context->thread->poll_nonblock_fast_frc = ps.this_poll_frc;
     return ci_sys_poll(fds, nfds, 0);
   }

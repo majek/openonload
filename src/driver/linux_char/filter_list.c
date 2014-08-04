@@ -64,11 +64,11 @@ static int efch_filter_flags_to_efrm(int flags)
 static void efch_filter_destruct(struct efrm_resource *rs,
                                  struct filter *f)
 {
+    if( f->flags & FILTER_FLAGS_USES_EFRM_FILTER )
+      efrm_filter_remove(rs->rs_client, f->efrm_filter_id);
     if( f->flags & FILTER_FLAGS_BLOCK_MASK )
       efrm_filter_block_kernel(rs->rs_client,
                                efch_filter_flags_to_efrm(f->flags), false);
-    if( f->flags & FILTER_FLAGS_USES_EFRM_FILTER )
-      efrm_filter_remove(rs->rs_client, f->efrm_filter_id);
 }
 
 
@@ -176,24 +176,12 @@ static int efch_filter_list_add(struct efrm_resource *rs,
 
   f->flags = 0;
 
-  if( ! is_op_block_kernel_only(op->op) ) {
-    rc = efrm_filter_insert(rs->rs_client, spec, replace);
-    if( rc < 0 ) {
-      efch_filter_delete(rs, f);
-      return rc;
-    }
-    f->efrm_filter_id = rc;
-    f->flags |= FILTER_FLAGS_USES_EFRM_FILTER;
-  }
-
   if( op->op == CI_RSOP_FILTER_ADD_BLOCK_KERNEL )
     block_flags = FILTER_FLAGS_BLOCK_ALL;
   else if( op->op == CI_RSOP_FILTER_ADD_ALL_UNICAST ||
-           op->op == CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN ||
            op->op == CI_RSOP_FILTER_ADD_BLOCK_KERNEL_UNICAST )
     block_flags = FILTER_FLAGS_BLOCK_UNICAST;
   else if( op->op == CI_RSOP_FILTER_ADD_ALL_MULTICAST ||
-           op->op == CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN ||
            op->op == CI_RSOP_FILTER_ADD_BLOCK_KERNEL_MULTICAST )
     block_flags = FILTER_FLAGS_BLOCK_MULTICAST;
 
@@ -210,6 +198,16 @@ static int efch_filter_list_add(struct efrm_resource *rs,
       efch_filter_delete(rs, f);
       return rc;
     }
+  }
+
+  if( ! is_op_block_kernel_only(op->op) ) {
+    rc = efrm_filter_insert(rs->rs_client, spec, replace);
+    if( rc < 0 ) {
+      efch_filter_delete(rs, f);
+      return rc;
+    }
+    f->efrm_filter_id = rc;
+    f->flags |= FILTER_FLAGS_USES_EFRM_FILTER;
   }
 
   spin_lock(&fl->lock);
@@ -360,17 +358,9 @@ int efch_filter_list_op_add(struct efrm_resource *rs,
     rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_uc_def, -1,
                                    &replace);
     break;
-  case CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN:
-    rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_uc_def,
-                                   op->u.filter_add.mac.vlan_id, &replace);
-    break;
   case CI_RSOP_FILTER_ADD_ALL_MULTICAST:
     rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_mc_def, -1,
                                    &replace);
-    break;
-  case CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN:
-    rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_mc_def,
-                                   op->u.filter_add.mac.vlan_id, &replace);
     break;
 #if EFX_DRIVERLINK_API_VERSION == 10
   case CI_RSOP_FILTER_ADD_MISMATCH_UNICAST:
@@ -405,6 +395,7 @@ int efch_filter_list_op_add(struct efrm_resource *rs,
   case CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST_VLAN:
     rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_mc_def,
                                    op->u.filter_add.mac.vlan_id, &replace);
+    break;
   case CI_RSOP_FILTER_ADD_BLOCK_KERNEL:
   case CI_RSOP_FILTER_ADD_BLOCK_KERNEL_UNICAST:
   case CI_RSOP_FILTER_ADD_BLOCK_KERNEL_MULTICAST:

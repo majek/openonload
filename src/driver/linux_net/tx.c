@@ -608,7 +608,12 @@ int efx_sarfs_init(struct efx_nic *efx)
 	 * It also won't work unless we have TX steering functionality.
 	 */
 	if (sarfs_sample_rate && sarfs_table_size) {
-		if (efx->tx_channel_offset) {
+		if (!(efx->net_dev->features & NETIF_F_NTUPLE)) {
+			netif_info(efx, drv, efx->net_dev, "notice: SARFS is "
+				   "enabled but could not be activated because "
+				   "the filters are not supported in this "
+				   "firmware variant\n");
+		} else if (efx->tx_channel_offset) {
 			netif_info(efx, drv, efx->net_dev, "notice: SARFS is "
 				   "enabled but could not be activated because "
 				   "TX and RX channels are separate\n");
@@ -656,10 +661,7 @@ static int efx_sarfs_filter_insert(struct efx_nic *efx,
 	efx_filter_init_rx(&spec, EFX_FILTER_PRI_SARFS,
 			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
 			   rxq_id);
-	spec.match_flags =
-		EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO |
-		EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_LOC_PORT |
-		EFX_FILTER_MATCH_REM_HOST | EFX_FILTER_MATCH_REM_PORT;
+	spec.match_flags = EFX_FILTER_MATCH_FLAGS_RFS;
 	spec.ether_type = htons(ETH_P_IP);
 	spec.ip_proto = IPPROTO_TCP;
 	spec.rem_host[0] = key->raddr;

@@ -44,8 +44,11 @@
  *
  *--------------------------------------------------------------------*/
 
-typedef struct {
-  ci_resource_table_t   rt;
+typedef struct ci_private_char_s {
+  ci_resource_table_t  rt;
+  struct efrm_vi*      cpcp_vi;
+  int                  cpcp_readable;
+  wait_queue_head_t    cpcp_poll_queue;
 } ci_private_char_t;
 
 

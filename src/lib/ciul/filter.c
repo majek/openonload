@@ -43,6 +43,7 @@ enum ef_filter_type {
 	EF_FILTER_BLOCK_KERNEL        = 0x100,
 	EF_FILTER_BLOCK_KERNEL_UNICAST  = 0x200,
 	EF_FILTER_BLOCK_KERNEL_MULTICAST  = 0x400,
+	EF_FILTER_TX_PORT_SNIFF       = 0x800,
 };
 
 
@@ -92,8 +93,6 @@ int ef_filter_spec_set_ip4_full(ef_filter_spec *fs, int protocol,
 int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id)
 {
 	if (fs->type != 0 && fs->type != EF_FILTER_IP4 &&
-	    fs->type != EF_FILTER_ALL_MULTICAST &&
-	    fs->type != EF_FILTER_ALL_UNICAST &&
 	    fs->type != EF_FILTER_MISMATCH_MULTICAST &&
 	    fs->type != EF_FILTER_MISMATCH_UNICAST)
 		return -EPROTONOSUPPORT;
@@ -117,7 +116,7 @@ int ef_filter_spec_set_eth_local(ef_filter_spec *fs, int vlan_id,
 
 int ef_filter_spec_set_unicast_all(ef_filter_spec *fs)
 {
-	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
+	if (fs->type != 0 )
 		return -EPROTONOSUPPORT;
 	fs->type |= EF_FILTER_ALL_UNICAST;
 	return 0;
@@ -126,7 +125,7 @@ int ef_filter_spec_set_unicast_all(ef_filter_spec *fs)
 
 int ef_filter_spec_set_multicast_all(ef_filter_spec *fs)
 {
-	if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
+	if (fs->type != 0 )
 		return -EPROTONOSUPPORT;
 	fs->type |= EF_FILTER_ALL_MULTICAST;
 	return 0;
@@ -157,6 +156,15 @@ int ef_filter_spec_set_port_sniff(ef_filter_spec *fs, int promiscuous)
 		return -EPROTONOSUPPORT;
 	fs->type |= EF_FILTER_PORT_SNIFF;
 	fs->data[0] = promiscuous;
+	return 0;
+}
+
+
+int ef_filter_spec_set_tx_port_sniff(ef_filter_spec *fs)
+{
+	if (fs->type != 0)
+		return -EPROTONOSUPPORT;
+	fs->type |= EF_FILTER_TX_PORT_SNIFF;
 	return 0;
 }
 
@@ -228,16 +236,8 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 		op.u.filter_add.mac.vlan_id = fs->data[0];
 		memcpy(op.u.filter_add.mac.mac, &fs->data[1], 6);
 		break;
-	case EF_FILTER_ALL_UNICAST | EF_FILTER_VLAN:
-		op.op = CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN;
-		op.u.filter_add.mac.vlan_id = fs->data[5];
-		break;
 	case EF_FILTER_ALL_UNICAST:
 		op.op = CI_RSOP_FILTER_ADD_ALL_UNICAST;
-		break;
-	case EF_FILTER_ALL_MULTICAST | EF_FILTER_VLAN:
-		op.op = CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN;
-		op.u.filter_add.mac.vlan_id = fs->data[5];
 		break;
 	case EF_FILTER_ALL_MULTICAST:
 		op.op = CI_RSOP_FILTER_ADD_ALL_MULTICAST;
@@ -261,6 +261,10 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 		op.u.pt_sniff.enable = 1;
 		op.u.pt_sniff.promiscuous = fs->data[0];
 		break;
+	case EF_FILTER_TX_PORT_SNIFF:
+		op.op = CI_RSOP_TX_PT_SNIFF;
+		op.u.tx_pt_sniff.enable = 1;
+		break;
 	case EF_FILTER_BLOCK_KERNEL:
 		op.op = CI_RSOP_FILTER_ADD_BLOCK_KERNEL;
 		break;
@@ -280,7 +284,8 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 		 * but let's set it to something that will not be
 		 * confused with a real ID
 		 */
-		if( fs->type == EF_FILTER_PORT_SNIFF )
+		if( fs->type == EF_FILTER_PORT_SNIFF ||
+                    fs->type == EF_FILTER_TX_PORT_SNIFF )
 			filter_cookie_out->filter_id = -1;
 		else
 			filter_cookie_out->filter_id = 
@@ -300,6 +305,11 @@ static int ef_filter_del(ef_driver_handle dh, int resource_id,
 		op.op = CI_RSOP_PT_SNIFF;
 		op.id = efch_make_resource_id(resource_id);
 		op.u.pt_sniff.enable = 0;
+	}
+	if( filter_cookie->filter_type == EF_FILTER_TX_PORT_SNIFF ) {
+		op.op = CI_RSOP_TX_PT_SNIFF;
+		op.id = efch_make_resource_id(resource_id);
+		op.u.tx_pt_sniff.enable = 0;
 	}
 	else {
 		op.op = CI_RSOP_FILTER_DEL;

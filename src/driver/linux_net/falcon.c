@@ -572,7 +572,7 @@ static irqreturn_t falcon_legacy_interrupt_a1(int irq, void *dev_id,
  **************************************************************************
  */
 
-static void falcon_b0_rx_push_rss_config(struct efx_nic *efx)
+static int falcon_b0_rx_push_rss_config(struct efx_nic *efx)
 {
 	efx_oword_t temp;
 
@@ -581,6 +581,7 @@ static void falcon_b0_rx_push_rss_config(struct efx_nic *efx)
 	efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
 
 	efx_farch_rx_push_indir_table(efx);
+	return 0;
 }
 
 /**************************************************************************
@@ -3215,7 +3216,7 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.tx_init = efx_farch_tx_init,
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
-	.rx_push_rss_config = efx_port_dummy_op_void,
+	.rx_push_rss_config = efx_port_dummy_op_int,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
 	.rx_remove = efx_farch_rx_remove,

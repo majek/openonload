@@ -228,6 +228,16 @@ ef_vi_inline void falcon_tx_event(ef_event* ev_out, const ef_vi_event* ev)
 }
 
 
+static void falcon_drv_gen_event(ef_vi* evq_vi, const ef_vi_event* ev,
+				  ef_event** evs, int* evs_len)
+{
+	ef_event* ev_out = (*evs)++;
+	--(*evs_len);
+	ev_out->sw.type = EF_EVENT_TYPE_SW;
+	ev_out->sw.data = CI_DWORD_VAL(*ev);
+}
+
+
 int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 {
 	int evs_len_orig = evs_len;
@@ -274,6 +284,10 @@ not_empty:
 			falcon_tx_event(evs, &ev);
 			--evs_len;
 			++evs;
+			break;
+
+		case DRV_GEN_EV_DECODE:
+			falcon_drv_gen_event(evq, &ev, &evs, &evs_len);
 			break;
 
 		default:

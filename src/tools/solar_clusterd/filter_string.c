@@ -465,7 +465,7 @@ static int sc_stream_add(struct sc_stream* s, void* vi_or_set,
     TRY(ef_vi_set_filter_add(vi_or_set, dh, &spec, cookie_out));
     break;
   default:
-    fprintf(stderr, "sc_vi[_set]_add_stream_string: "
+    fprintf(stderr, "ERROR: sc_vi[_set]_add_stream_string: "
             "unsupported combination of fields (0x%x)\n", s->fields);
     return -EINVAL;
   }

@@ -101,6 +101,8 @@ typedef union {
 #define EFHW_VI_TX_TIMESTAMPS      0x40000  /*! TX timestamping */
 #define EFHW_VI_TX_LOOPBACK        0x80000  /*! loopback outgoing traffic */
 #define EFHW_VI_RX_LOOPBACK        0x100000  /*! receive loopback traffic */
+#define EFHW_VI_NO_CUT_THROUGH     0x200000  /*! Disable cut-through */
+#define EFHW_VI_RX_PACKED_STREAM   0x400000  /*! Packed stream mode */
 
 /* Flags indicating effective setings determined at
  * queue allocation/enabling */

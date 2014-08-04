@@ -38,13 +38,29 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
 		    ef_pd* pd, ef_driver_handle pd_dh,
 		    void* p_mem, int len_bytes)
 {
+  /* Note: At time of writing the driver rounds the registered region to
+   * whole system pages.  It then writes a DMA address for each 4K page
+   * within the system-aligned region.  This means that on PPC (where
+   * system page size is 64K) we potentially get a bunch of DMA addresses
+   * for 4K pages before the region we're registering.
+   */
+  int n_nic_pages, rc;
   ci_resource_alloc_t ra;
-  int n_pages;
-  int rc;
+  char* p_mem_sys_base;
+  char* p_end;
+  size_t sys_len;
 
-  n_pages = (len_bytes + EFHW_NIC_PAGE_SIZE - 1) >> EFHW_NIC_PAGE_SHIFT;
-  mr->mr_dma_addrs = malloc(n_pages * sizeof(mr->mr_dma_addrs[0]));
-  if( mr->mr_dma_addrs == NULL )
+  /* The memory region must be aligned on a 4K boundary. */
+  if( ((uintptr_t) p_mem & (EFHW_NIC_PAGE_SIZE - 1)) != 0 )
+    return -EINVAL;
+
+  p_mem_sys_base = (void*) ((uintptr_t) p_mem & CI_PAGE_MASK);
+  p_end = (char*) p_mem + len_bytes;
+  sys_len = CI_PTR_ALIGN_FWD(p_end, CI_PAGE_SIZE) - p_mem_sys_base;
+  n_nic_pages = sys_len >> EFHW_NIC_PAGE_SHIFT;
+
+  mr->mr_dma_addrs_base = malloc(n_nic_pages * sizeof(mr->mr_dma_addrs[0]));
+  if( mr->mr_dma_addrs_base == NULL )
     return -ENOMEM;
 
   /* For a pd in a cluster, use the handle from clusterd */
@@ -56,18 +72,21 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
   ra.ra_type = EFRM_RESOURCE_MEMREG;
   ra.u.memreg.in_vi_or_pd_id = efch_make_resource_id(pd->pd_resource_id);
   ra.u.memreg.in_vi_or_pd_fd = pd_dh;
-  ra.u.memreg.in_mem_ptr = (uintptr_t) p_mem;
-  ra.u.memreg.in_mem_bytes = len_bytes;
-  ra.u.memreg.in_addrs_out_ptr = (uintptr_t) mr->mr_dma_addrs;
-  ra.u.memreg.in_addrs_out_stride = sizeof(mr->mr_dma_addrs[0]);
+  ra.u.memreg.in_mem_ptr = (uintptr_t) p_mem_sys_base;
+  ra.u.memreg.in_mem_bytes = sys_len;
+  ra.u.memreg.in_addrs_out_ptr = (uintptr_t) mr->mr_dma_addrs_base;
+  ra.u.memreg.in_addrs_out_stride = sizeof(mr->mr_dma_addrs_base[0]);
 
   rc = ci_resource_alloc(mr_dh, &ra);
   if( rc < 0 ) {
 	  LOGVV(ef_log("ef_memreg_alloc: ci_resource_alloc %d", rc));
-	  free(mr->mr_dma_addrs);
+	  free(mr->mr_dma_addrs_base);
 	  return rc;
   }
 
+  mr->mr_dma_addrs = mr->mr_dma_addrs_base;
+  mr->mr_dma_addrs +=
+    ((char*) p_mem - p_mem_sys_base) >> EFHW_NIC_PAGE_SHIFT;
   mr->mr_resource_id = ra.out_id.index;
   return 0;
 }
@@ -75,7 +94,7 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
 
 int ef_memreg_free(ef_memreg* mr, ef_driver_handle mr_dh)
 {
-  free(mr->mr_dma_addrs);
+  free(mr->mr_dma_addrs_base);
   EF_VI_DEBUG(memset(mr, 0, sizeof(*mr)));
   return 0;
 }

@@ -100,6 +100,7 @@ struct stack_op_s {
   stackid_fn_t *id_fn; /* used when  (flags & FL_ID) */
   const char*   help;
   const char*   args;
+  int           n_args;
   unsigned	flags;
 } /* stack_op_t */;
 
@@ -131,6 +132,7 @@ struct socket_op_s {
   socket_ni_fn_t*fn;
   const char*   help;
   const char*   args;
+  int           n_args;
   unsigned	flags;
 } /* socket_op_t */;
 

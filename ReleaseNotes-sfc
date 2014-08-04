@@ -1,6 +1,6 @@
-Solarflare 4.0 Linux network driver
+Solarflare 4.1 Linux network driver
 ===================================
-Version:  4.0.2.6645
+Version:  4.1.2.1003
 
 
 Overview
@@ -57,7 +57,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.0.2.6628
+   version: 4.1.2.1003
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -95,6 +95,37 @@ Please contact your local Solarflare support representative or email
 Changelog
 ---------
 ====================================
+### v4.1.2.1003 -- Feature release
+
+New features to support the SolarCapture 1.3 release:
+   ~ New forward_fcs attribute in sysfs which when enabled, causes the driver to 
+     not strip CRCs on ingress path. When enabled frames with bad CRCs are not 
+     discarded. Changing forward_fcs requires reconfiguring the adapter's MAC
+   ~ Disable ARFS if the required adapter filter flags are not supported
+   ~ Disable RSS on Packed Stream firmware variant
+Other new features:
+   ~ Add sysfs entry to control MCDI tracing
+   ~ Add module parameter to enable MCDI logging on new functions
+
+
+Issue 44095:
+   ~ change EFX_BUG_ON_PARANOID on mcdi failure in ptp_synchronize to a proper
+     error path.
+Issue 43849:
+   ~ recheck mcdi->state after timeout in efx_mcdi_await_completion 
+Issue 42806:
+   ~ handle nonlinear SKBs in efx_filter_rfs() 
+Issue 45444:
+   ~ fix calling of free_irq with already free vector 
+Issue 40785:
+   ~ add module option "underreport_skb_truesize" to falsify skb->truesize for 
+     LRO packets 
+Issue 43391:
+   ~ use __GFP_NOWARN when allocating RX pages from atomic context.
+Issue 44829:
+   ~ don't BUG_ON efx->max_channels == 0 in probe
+
+
 ### v4.0.2.6645 
 
 

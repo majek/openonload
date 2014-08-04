@@ -157,8 +157,8 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     }
   }
 
-  rc = efrm_pd_dma_map(pd, mr->n_pages >> mr->order, mr->order,
-                       mr->pages, sizeof(mr->pages[0]) << mr->order,
+  rc = efrm_pd_dma_map(pd, mr->n_pages >> mr->order, mr->order, mr->pages,
+                       sizeof(mr->pages[0]) << mr->order,
                        mr->dma_addrs, sizeof(mr->dma_addrs[0]),
                        (void *)(ci_uintptr_t)alloc->in_addrs_out_ptr,
                        alloc->in_addrs_out_stride,

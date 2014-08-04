@@ -145,7 +145,6 @@ static int citp_udp_socket(int domain, int type, int protocol)
   return fd;
 
  fail3:
-  ef_onload_driver_close(fd);
   if( CITP_OPTS.no_fail && errno != ELIBACC )
     CITP_STATS_NETIF(++ni->state->stats.udp_handover_socket);
   citp_netif_release_ref(ni, 0);
@@ -189,6 +188,7 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
       fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE);
       epi = fdi_to_sock_fdi(fdinfo);
       ep = &epi->sock;
+      ci_netif_cluster_prefault(ep->netif);
     }
     else {
       goto done;

@@ -59,7 +59,7 @@
 	printk(KERN_ERR "%s-(%d): " fmt, __func__, ECHECK(entry), ## args)
 #endif
 
-#define AOE_DRIVER_VERSION	"4.1.0.6734"
+#define AOE_DRIVER_VERSION	"4.1.2.1003"
 
 /* Number of Connections that are allowed to be over the 10G
  * inteface */

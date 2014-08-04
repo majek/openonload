@@ -15,36 +15,26 @@
 
 /**************************************************************************\
 *//*! \file
-** <L5_PRIVATE L5_HEADER >
-** \author  stg
-**  \brief  System dependent support for ef vi lib
-**   \date  2007/05/10
-**    \cop  (c) Solarflare Communications Inc.
+** <L5_PRIVATE L5_SOURCE>
+** \author  Akhi Singhania <asinghania@solarflare.com>
+**  \brief  FD priming support
+**   \date  2014/05/19
+**    \cop  (c) Level 5 Networks Limited.
 ** </L5_PRIVATE>
 *//*
 \**************************************************************************/
 
-/*! \cidoxg_include_ci_ul */
-#ifndef __CI_CIUL_SYSDEP_H__
-#define __CI_CIUL_SYSDEP_H__
+#include "ef_vi_internal.h"
+#include "driver_access.h"
+#include "logging.h"
+#include "efch_intf_ver.h"
+#include <poll.h>
 
 
-#if defined(__unix__) && !defined(__KERNEL__)
-# include "sysdep_unix.h"
-#else
-# include "sysdep_linux.h"
-#endif
-
-#include "bitfield.h"
-
-
-#if defined(__x86_64__) || defined(__i386__)
-# define EF_VI_CACHE_LINE_SIZE       64
-#elif defined(__PPC__)
-# define EF_VI_CACHE_LINE_SIZE       128
-#else
-# error "Need to define EF_VI_CACHE_LINE_SIZE"
-#endif
-
-
-#endif  /* __CI_CIUL_SYSDEP_H__ */
+int ef_vi_prime(ef_vi* vi, ef_driver_handle dh, unsigned current_ptr)
+{
+  ci_resource_prime_op_t  op;
+  op.crp_id = efch_make_resource_id(vi->vi_resource_id);
+  op.crp_current_ptr = current_ptr;
+  return ci_resource_prime(dh, &op);
+}

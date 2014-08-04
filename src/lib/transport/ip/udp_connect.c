@@ -317,7 +317,8 @@ int ci_udp_reuseport_bind(citp_socket* ep, ci_fd_t fd,
    *
    * Legacy reuseport: This could still change before bind conclusion.
    */
-  if( ci_udp_should_handover(ep, sa, lport_be16) ) {
+  if( (ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) &&
+      ci_udp_should_handover(ep, sa, lport_be16) ) {
     LOG_U(ci_log("%s: Binding would result in handover, which is not supported"
                  " on kernels that do not support SO_REUSEPORT", __FUNCTION__));
     RET_WITH_ERRNO(ENOSYS);

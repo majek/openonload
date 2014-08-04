@@ -203,9 +203,6 @@ typedef struct tcp_helper_resource_s {
   ci_int32             *pkt_shm_id;
 #endif
 
-  /* bool: avoid packet allocations when in atomic mode */
-  int avoid_atomic_allocations;
-
   /* The cluster this stack is associated with if any */
   tcp_helper_cluster_t*         thc;
   /* TID of thread that created this stack within the cluster */

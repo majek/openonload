@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201405
+%define pkgversion 201405-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -74,24 +74,26 @@
 # form a fake kernel name in known format 2.6.32-0.41-rt
 %define kernel_long %( echo %{kernel_pkg} | sed "s/kernel-\\([a-zA-Z_-]*\\)[-\.]\\([2-9].[0-9].*\\)/\\2-\\1/; s/kernel-//")
 
+# kmodtool doesn't count 'rt' as a variant.  So I've stolen the bash
+# regexp.  Only faffing with this because rpmbuild BuildRequires doesn't
+# agree that kernel-rt provides 'kernel = blah-rt' !
+# also some kernels have 2 parts in the variant
+%define kvariantsuffix %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; VAR=${KVER##${KVER%%%${KNOWNVARS}}}; [[ -n "$VAR" ]] && echo $VAR)
+%define kvariantsuffix_dash %( KVAR='%{kvariantsuffix}'; [[ -n "${KVAR}" ]] && echo -"${KVAR}" || echo "")
+%define kernel_cut   %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; echo ${KVER%%%${KNOWNVARS}} | sed "s/-$//; s/_$//")
+# some distros like to add architecture to the kernel name (Fedora)
+%define kverrel        %(shopt -s extglob; KVER=%{kernel_cut}; echo ${KVER%%@(.i386|.i586|.i686|.x86_64|.ppc64)})
+
 %else
 
 # kernel for which you're trying to build is not installed on this particular host.
-# we'll try to guess something and make some magic afterwards
+# We will assume that you provided us with a sensible name.
 
-# kmodtool is not present in RHEL 4
-%define have_kmodtool %( ! [ -e /usr/lib/rpm/redhat/kmodtool ]; echo $? )
+%define kvariantsuffix %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel}; VAR=${KVER##${KVER%%%${KNOWNVARS}}}; [[ -n "$VAR" ]] && echo $VAR)
+%define kvariantsuffix_dash %( KVAR='%{kvariantsuffix}'; [[ -n "${KVAR}" ]] && echo -"${KVAR}" || echo "")
+%define kverrel %( echo %{kernel})
 
-%if %{redhat} && %{have_kmodtool}
-%define kmodtool sh /usr/lib/rpm/redhat/kmodtool
-%define kernel_long %(%{kmodtool} verrel %{?kernel} 2>/dev/null | sed "s/-$//")
-# Unfortunately kmodtool does not support some variant-suffix values
-%else
-# no kmodtool on SLES or old RHEL
-%define kernel_long %{kernel}
-%endif				# rhel
-
-%endif				# magic
+%endif	# kernel_installed
 
 # Pre RHEL5 the headers are present in the same package
 %if %{redhat} && %{have_lsb}
@@ -108,16 +110,6 @@
 %else
 %define kernelsource  kernel-source
 %endif
-
-# kmodtool doesn't count 'rt' as a variant.  So I've stolen the bash
-# regexp.  Only faffing with this because rpmbuild BuildRequires doesn't
-# agree that kernel-rt provides 'kernel = blah-rt' !
-# also some kernels have 2 parts in the variant
-%define kvariantsuffix %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; VAR=${KVER##${KVER%%%${KNOWNVARS}}}; [[ -n "$VAR" ]] && echo $VAR)
-%define kvariantsuffix_dash %( KVAR='%{kvariantsuffix}'; [[ -n "${KVAR}" ]] && echo -"${KVAR}" || echo "")
-%define kernel_cut   %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; echo ${KVER%%%${KNOWNVARS}} | sed "s/-$//; s/_$//")
-# some distros like to add architecture to the kernel name (Fedora)
-%define kverrel        %(shopt -s extglob; KVER=%{kernel_cut}; echo ${KVER%%@(.i386|.i586|.i686|.x86_64|.ppc64)})
 
 %{echo: %{target_cpu}}
 

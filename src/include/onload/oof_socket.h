@@ -30,6 +30,10 @@ struct oof_socket {
   /* If NULL then no packets are filtered to this socket. */
   struct oof_local_port* sf_local_port;
 
+  /* Sometimes the socket has a local port associated with it before the rest
+   * of the filtering apparatus is set up. */
+  struct oof_local_port* sf_early_lp;
+
   /* List of [struct oof_mcast_member]s. */
   ci_dllist sf_mcast_memberships;
 

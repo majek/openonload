@@ -168,6 +168,8 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 	spin_lock_init(&efrm_nic->lock);
 	efrm_nic->efhw_nic.ifindex = ifindex;
 	INIT_LIST_HEAD(&efrm_nic->clients);
+	efrm_nic->rx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
+	efrm_nic->tx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
 	return 0;
 
 fail3:

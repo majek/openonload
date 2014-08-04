@@ -198,8 +198,10 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
     goto fail3;
   }
 
+  down_read(&current->mm->mmap_sem);
   rc = get_user_pages(current, current->mm, (unsigned long)uaddr, 1,
                       1/*write*/, 0/*force*/, &(p->pages[0]), NULL);
+  up_read(&current->mm->mmap_sem);
   if (rc < 0)
     goto fail2;
   rc = efab_linux_sys_shmdt((char __user *)uaddr);

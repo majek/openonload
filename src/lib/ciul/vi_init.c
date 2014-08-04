@@ -315,6 +315,8 @@ void ef_vi_reset_rxq(struct ef_vi* vi)
 	qs->removed = 0;
 	qs->in_jumbo = 0;
 	qs->bytes_acc = 0;
+	qs->rx_ps_pkt_count = 0xF;
+	qs->rx_ps_credit_avail = 1;
 	if( vi->vi_rxq.mask ) {
 		int i;
 		for( i = 0; i <= vi->vi_rxq.mask; ++i )

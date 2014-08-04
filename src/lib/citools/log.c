@@ -180,6 +180,16 @@ void ci_log(const char* fmt, ...)
   va_end(args);
 }
 
+/* Wrapper to make ci_log conform to the signature of an oo_dump_log_fn_t. */
+void ci_log_dump_fn(void* unused, const char* fmt, ...)
+{
+  va_list args;
+
+  va_start(args, fmt);
+  ci_vlog(fmt, args);
+  va_end(args);
+}
+
 
 void ci_set_log_prefix(const char* prefix)
 {

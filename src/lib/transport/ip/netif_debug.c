@@ -241,6 +241,12 @@ void ci_assert_valid_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 
 void ci_netif_dump_sockets(ci_netif* ni)
 {
+  ci_netif_dump_sockets_to_logger(ni, ci_log_dump_fn, NULL);
+}
+
+void ci_netif_dump_sockets_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
+                                     void *log_arg)
+{
   ci_netif_state* ns = ni->state;
   unsigned id;
 
@@ -249,8 +255,9 @@ void ci_netif_dump_sockets(ci_netif* ni)
       citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
       if( wo->waitable.state != CI_TCP_STATE_FREE &&
           wo->waitable.state != CI_TCP_CLOSED ) {
-        citp_waitable_dump(ni, &wo->waitable, "");
-        log("------------------------------------------------------------");
+        citp_waitable_dump_to_logger(ni, &wo->waitable, "", logger, log_arg);
+        logger(log_arg,
+               "------------------------------------------------------------");
       }
     }
 }
@@ -274,7 +281,8 @@ void ci_netif_print_sockets(ci_netif* ni)
 }
 
 
-void ci_netif_dump_pkt_summary(ci_netif* ni)
+static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
+                                      void* log_arg)
 {
   int intf_i, rx_ring = 0, tx_ring = 0, tx_oflow = 0, used, rx_queued;
   ci_netif_state* ns = ni->state;
@@ -289,16 +297,16 @@ void ci_netif_dump_pkt_summary(ci_netif* ni)
   used = ns->n_pkts_allocated - ns->n_freepkts - ns->n_async_pkts;
   rx_queued = ns->n_rx_pkts - rx_ring - ns->mem_pressure_pkt_pool_n;
 
-  log("  pkt_bufs: size=%d max=%d alloc=%d free=%d async=%d%s",
-      CI_CFG_PKT_BUF_SIZE, ns->pkt_sets_max * PKTS_PER_SET,
-      ns->n_pkts_allocated, ns->n_freepkts, ns->n_async_pkts,
-      (ns->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ? " CRITICAL":
-      (ns->mem_pressure ? " LOW":""));
-  log("  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d pressure_pool=%d",
-      ns->n_rx_pkts, rx_ring, rx_queued, ns->mem_pressure_pkt_pool_n);
-  log("  pkt_bufs: tx=%d tx_ring=%d tx_oflow=%d tx_other=%d",
-      (used - ns->n_rx_pkts), tx_ring, tx_oflow,
-      (used - ns->n_rx_pkts - tx_ring - tx_oflow));
+  logger(log_arg, "  pkt_bufs: size=%d max=%d alloc=%d free=%d async=%d%s",
+         CI_CFG_PKT_BUF_SIZE, ns->pkt_sets_max * PKTS_PER_SET,
+         ns->n_pkts_allocated, ns->n_freepkts, ns->n_async_pkts,
+         (ns->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ? " CRITICAL":
+         (ns->mem_pressure ? " LOW":""));
+  logger(log_arg, "  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d pressure_pool=%d",
+         ns->n_rx_pkts, rx_ring, rx_queued, ns->mem_pressure_pkt_pool_n);
+  logger(log_arg, "  pkt_bufs: tx=%d tx_ring=%d tx_oflow=%d tx_other=%d",
+         (used - ns->n_rx_pkts), tx_ring, tx_oflow,
+         (used - ns->n_rx_pkts - tx_ring - tx_oflow));
 }
 
 
@@ -322,7 +330,7 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
   log("%s: id=%d  "CI_DEBUG("uid=%d pid=%d"), __FUNCTION__, NI_ID(ni)
       CI_DEBUG_ARG((int) ns->uid) CI_DEBUG_ARG((int) ns->pid));
 
-  ci_netif_dump_pkt_summary(ni);
+  ci_netif_dump_pkt_summary(ni, ci_log_dump_fn, NULL);
 
   alloc = CI_ALLOC_ARRAY(ci_buffer_alloc_info_t, MAX_NO_DIFF_ALLOCS);
   if( alloc == NULL ) {
@@ -552,39 +560,46 @@ void ci_netif_dump_extra(ci_netif* ni)
 }
 
 
-void ci_netif_dump_vi(ci_netif* ni, int intf_i)
+static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
+                             void* log_arg)
 {
   ci_netif_state_nic_t* nic = &ni->state->nic[intf_i];
   ef_vi* vi = &ni->nic_hw[intf_i].vi;
 
   if( intf_i < 0 || intf_i >= CI_CFG_MAX_INTERFACES ||
       ! efrm_nic_set_read(&ni->nic_set, intf_i) ) {
-    log("%s: stack=%d intf=%d ***BAD***", __FUNCTION__, NI_ID(ni), intf_i);
+    logger(log_arg, "%s: stack=%d intf=%d ***BAD***",
+           __FUNCTION__, NI_ID(ni), intf_i);
     return;
   }
 
-  log("%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
-      NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
-      nic->vi_variant, (int) nic->vi_revision);
-  log("  vi=%d pd_owner=%d", ef_vi_instance(vi), nic->pd_owner);
-  log("  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
-      ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
-      ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
-  log("  rxq: cap=%d lim=%d spc=%d level=%d total_desc=%d",
-      ef_vi_receive_capacity(vi), ni->state->rxq_limit,
-      ci_netif_rx_vi_space(ni, vi), ef_vi_receive_fill_level(vi),
-      vi->ep_state->rxq.removed);
-  log("  txq: cap=%d lim=%d spc=%d level=%d pkts=%d oflow_pkts=%d",
-      ef_vi_transmit_capacity(vi), ef_vi_transmit_capacity(vi),
-      ef_vi_transmit_space(vi), ef_vi_transmit_fill_level(vi),
-      nic->tx_dmaq_insert_seq - nic->tx_dmaq_done_seq - nic->dmaq.num,
-      nic->dmaq.num);
-  log("  txq: tot_pkts=%d bytes=%d",
-      nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
+  logger(log_arg, "%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
+         NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
+         nic->vi_variant, (int) nic->vi_revision);
+  logger(log_arg, "  vi=%d pd_owner=%d", ef_vi_instance(vi), nic->pd_owner);
+  logger(log_arg, "  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
+         ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
+         ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
+  logger(log_arg, "  rxq: cap=%d lim=%d spc=%d level=%d total_desc=%d",
+         ef_vi_receive_capacity(vi), ni->state->rxq_limit,
+         ci_netif_rx_vi_space(ni, vi), ef_vi_receive_fill_level(vi),
+         vi->ep_state->rxq.removed);
+  logger(log_arg, "  txq: cap=%d lim=%d spc=%d level=%d pkts=%d oflow_pkts=%d",
+         ef_vi_transmit_capacity(vi), ef_vi_transmit_capacity(vi),
+         ef_vi_transmit_space(vi), ef_vi_transmit_fill_level(vi),
+         nic->tx_dmaq_insert_seq - nic->tx_dmaq_done_seq - nic->dmaq.num,
+         nic->dmaq.num);
+  logger(log_arg, "  txq: tot_pkts=%d bytes=%d",
+         nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
 }
 
-
 void ci_netif_dump(ci_netif* ni)
+{
+  ci_netif_dump_to_logger(ni, ci_log_dump_fn, NULL);
+}
+
+void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
+                             void* log_arg)
 {
   ci_netif_state* ns = ni->state;
 #ifdef __KERNEL__
@@ -597,20 +612,21 @@ void ci_netif_dump(ci_netif* ni)
   long diff;
   int intf_i;
 
-  log("%s: stack=%d name=%s", __FUNCTION__, NI_ID(ni), ni->state->name);
-  log("  ver=%s uid=%d pid=%d %s", ONLOAD_VERSION
+  logger(log_arg, "%s: stack=%d name=%s", __FUNCTION__, NI_ID(ni),
+         ni->state->name);
+  logger(log_arg, "  ver=%s uid=%d pid=%d %s", ONLOAD_VERSION
       , (int) ns->uid, (int) ns->pid
       , (ns->flags & CI_NETIF_FLAG_ONLOAD_UNSUPPORTED)
           ? "ONLOAD_UNSUPPORTED" : ""
       );
 
   tmp = ni->state->lock.lock;
-  log("  lock=%x "CI_NETIF_LOCK_FMT"  nics=%x primed=%x", tmp,
-      CI_NETIF_LOCK_PRI_ARG(tmp), ni->nic_set.nics, ns->evq_primed);
+  logger(log_arg, "  lock=%x "CI_NETIF_LOCK_FMT"  nics=%x primed=%x", tmp,
+         CI_NETIF_LOCK_PRI_ARG(tmp), ni->nic_set.nics, ns->evq_primed);
 
-  log("  sock_bufs: max=%u n_allocated=%u", NI_OPTS(ni).max_ep_bufs,
-      ns->n_ep_bufs);
-  ci_netif_dump_pkt_summary(ni);
+  logger(log_arg, "  sock_bufs: max=%u n_allocated=%u",
+         NI_OPTS(ni).max_ep_bufs, ns->n_ep_bufs);
+  ci_netif_dump_pkt_summary(ni, logger, log_arg);
 
 
   its = *IPTIMER_STATE(ni);
@@ -618,18 +634,18 @@ void ci_netif_dump(ci_netif* ni)
   diff = its.ci_ip_time_real_ticks - ci_ip_time_now(ni);
   diff = ci_ip_time_ticks2ms(ni, diff);
 
-  log("  time: netif=%x poll=%x now=%x (diff=%ld.%03ldsec)%s",
-      (unsigned) ci_ip_time_now(ni),
-      (unsigned) IPTIMER_STATE(ni)->sched_ticks,
-      (unsigned) its.ci_ip_time_real_ticks, diff / 1000, diff % 1000,
-      diff > 5000 ? " !! STUCK !!":"");
+  logger(log_arg, "  time: netif=%x poll=%x now=%x (diff=%ld.%03ldsec)%s",
+         (unsigned) ci_ip_time_now(ni),
+         (unsigned) IPTIMER_STATE(ni)->sched_ticks,
+         (unsigned) its.ci_ip_time_real_ticks, diff / 1000, diff % 1000,
+         diff > 5000 ? " !! STUCK !!":"");
 
   if( ns->error_flags )
-    log("  ERRORS: "CI_NETIF_ERRORS_FMT,
-        CI_NETIF_ERRORS_PRI_ARG(ns->error_flags));
+    logger(log_arg, "  ERRORS: "CI_NETIF_ERRORS_FMT,
+           CI_NETIF_ERRORS_PRI_ARG(ns->error_flags));
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-    ci_netif_dump_vi(ni, intf_i);
+    ci_netif_dump_vi(ni, intf_i, logger, log_arg);
 }
 #endif /* __KERNEL__ */
 

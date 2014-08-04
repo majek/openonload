@@ -98,6 +98,38 @@ tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
 }
 
 
+static int
+tcp_helper_endpoint_reuseaddr_cleanup(ci_netif* ni, ci_sock_cmn* s)
+{
+  int i;
+
+  if( (~s->b.state & CI_TCP_STATE_TCP) || s->b.state == CI_TCP_LISTEN )
+    return 0;
+
+  for( i = 0; i < (int)ni->state->n_ep_bufs; ++i )
+#if CI_CFG_USERSPACE_PIPE
+  if( oo_bit_array_get(ni->state->ep_buf_is_ep, i) )
+#endif
+  {
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, i);
+    
+    if( wo->waitable.state != CI_TCP_TIME_WAIT )
+      continue;
+
+    if( sock_raddr_be32(s) != sock_raddr_be32(&wo->sock) ||
+        sock_rport_be16(s) != sock_rport_be16(&wo->sock) ||
+        sock_laddr_be32(s) != sock_laddr_be32(&wo->sock) ||
+        sock_lport_be16(s) != sock_lport_be16(&wo->sock) )
+      continue;
+
+    /* We've found something to drop! */
+    ci_tcp_drop(ni, SOCK_TO_TCP(&wo->sock), 0);
+    return 1;
+  }
+
+  return 0;
+}
+
 /*--------------------------------------------------------------------
  *!
  * Called by TCP/IP stack to setup all the filters needed for a
@@ -185,9 +217,15 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   if( OO_SP_NOT_NULL(from_tcp_id) )
     rc = oof_socket_share(efab_tcp_driver.filter_manager, &ep->oofilter,
                           &listen_ep->oofilter, laddr, raddr, rport);
-  else
+  else {
     rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
                         protocol, laddr, lport, raddr, rport);
+    if( rc != 0 && (s->s_flags & CI_SOCK_FLAG_REUSEADDR) &&
+        tcp_helper_endpoint_reuseaddr_cleanup(&ep->thr->netif, s) ) {
+      rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
+                          protocol, laddr, lport, raddr, rport);
+    }
+  }
 
  set_os_port_keeper_and_out:
   if( os_sock_ref != NULL && rc == 0 )

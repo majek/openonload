@@ -72,6 +72,13 @@ static int efx_mcdi_drv_attach(struct efx_nic *efx, bool driver_operating,
 static bool efx_mcdi_poll_once(struct efx_nic *efx);
 static void efx_mcdi_abandon(struct efx_nic *efx);
 
+#ifdef CONFIG_SFC_MCDI_LOGGING
+static bool mcdi_logging_default;
+module_param(mcdi_logging_default, bool, 0644);
+MODULE_PARM_DESC(mcdi_logging_default,
+		 "Enable MCDI logging on newly-probed functions");
+#endif
+
 int efx_mcdi_init(struct efx_nic *efx)
 {
 	struct efx_mcdi_iface *mcdi;
@@ -84,6 +91,9 @@ int efx_mcdi_init(struct efx_nic *efx)
 
 	mcdi = efx_mcdi(efx);
 	mcdi->efx = efx;
+#ifdef CONFIG_SFC_MCDI_LOGGING
+	mcdi->logging_enabled = mcdi_logging_default;
+#endif
 	init_waitqueue_head(&mcdi->wq);
 	spin_lock_init(&mcdi->iface_lock);
 	atomic_set(&mcdi->state, MCDI_STATE_QUIESCENT);
@@ -183,6 +193,31 @@ static void efx_mcdi_send_request(struct efx_nic *efx, unsigned cmd,
 		hdr_len = 8;
 	}
 
+#ifdef CONFIG_SFC_MCDI_LOGGING
+	if (mcdi->logging_enabled && !WARN_ON_ONCE(!buf)) {
+		int bytes = 0;
+		int i;
+		/* Lengths should always be a whole number of dwords, so scream
+		 * if they're not.
+		 */
+		WARN_ON_ONCE(hdr_len % 4);
+		WARN_ON_ONCE(inlen % 4);
+
+		/* We own the logging buffer, as only one MCDI can be in
+		 * progress on a NIC at any one time.  So no need for locking.
+		 */
+		for (i = 0; i < hdr_len / 4 && bytes < PAGE_SIZE; i++)
+			bytes += snprintf(buf + bytes, PAGE_SIZE - bytes,
+					  " %08x", le32_to_cpu(hdr[i].u32[0]));
+
+		for (i = 0; i < inlen / 4 && bytes < PAGE_SIZE; i++)
+			bytes += snprintf(buf + bytes, PAGE_SIZE - bytes,
+					  " %08x", le32_to_cpu(inbuf[i].u32[0]));
+
+		netif_info(efx, hw, efx->net_dev, "MCDI RPC REQ:%s\n", buf);
+	}
+#endif
+
 	efx->type->mcdi_request(efx, hdr, hdr_len, inbuf, inlen);
 
 	mcdi->new_epoch = false;
@@ -241,6 +276,40 @@ static void efx_mcdi_read_response_header(struct efx_nic *efx)
 		mcdi->resp_data_len =
 			EFX_DWORD_FIELD(hdr, MC_CMD_V2_EXTN_IN_ACTUAL_LEN);
 	}
+
+#ifdef CONFIG_SFC_MCDI_LOGGING
+	if (mcdi->logging_enabled && !WARN_ON_ONCE(!buf)) {
+		size_t hdr_len, data_len;
+		int bytes = 0;
+		int i;
+
+		/* Convert length from bytes to dwords.  Lengths should always
+		 * be a whole number of dwords, so scream if they're not.
+		 */
+		WARN_ON_ONCE(mcdi->resp_hdr_len % 4);
+		hdr_len = mcdi->resp_hdr_len / 4;
+		WARN_ON_ONCE(mcdi->resp_data_len % 4);
+		data_len = mcdi->resp_data_len / 4;
+
+		/* We own the logging buffer, as only one MCDI can be in
+		 * progress on a NIC at any one time.  So no need for locking.
+		 */
+		for (i = 0; i < hdr_len && bytes < PAGE_SIZE; i++) {
+			efx->type->mcdi_read_response(efx, &hdr, (i * 4), 4);
+			bytes += snprintf(buf + bytes, PAGE_SIZE - bytes,
+					  " %08x", le32_to_cpu(hdr.u32[0]));
+		}
+
+		for (i = 0; i < data_len && bytes < PAGE_SIZE; i++) {
+			efx->type->mcdi_read_response(efx, &hdr,
+					mcdi->resp_hdr_len + (i * 4), 4);
+			bytes += snprintf(buf + bytes, PAGE_SIZE - bytes,
+					  " %08x", le32_to_cpu(hdr.u32[0]));
+		}
+
+		netif_info(efx, hw, efx->net_dev, "MCDI RPC RESP:%s\n", buf);
+	}
+#endif
 
 	if (error && mcdi->resp_data_len == 0) {
 		netif_err(efx, hw, efx->net_dev, "MC rebooted\n");
@@ -358,8 +427,20 @@ static int efx_mcdi_await_completion(struct efx_nic *efx)
 	if (wait_event_timeout(
 		    mcdi->wq,
 		    atomic_read(&mcdi->state) == MCDI_STATE_COMPLETED,
-		    MCDI_RPC_TIMEOUT) == 0)
-		return -ETIMEDOUT;
+		    MCDI_RPC_TIMEOUT) == 0) {
+		/* We might time out due to an overloaded system never
+		 * scheduling our workqueue even though wake_up was called.
+		 * So check the condition once more, since we've been woken up
+		 * _anyway_ by the timeout.
+		 */
+		if (atomic_read(&mcdi->state) == MCDI_STATE_COMPLETED) {
+			if (net_ratelimit())
+				netif_warn(efx, drv, efx->net_dev,
+					   "MCDI completion wasn't processed in a timely manner\n");
+		} else {
+			return -ETIMEDOUT;
+		}
+	}
 
 	/* Check if efx_mcdi_set_mode() switched us back to polled completions.
 	 * In which case, poll for completions directly. If efx_mcdi_ev_cpl()

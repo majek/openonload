@@ -250,10 +250,16 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 					unsigned* capabitlity_flags,
 					const char* caller)
 {
-	size_t out_size;
+	/* Initialise out_size so that we can pass it to check_response even
+	 * when the MCDI command fails without upsetting the compiler. */
+	size_t out_size = 0;
+	size_t ver_out_size;
 	unsigned flags;
+	char ver_buf[32];
+	const __le16 *ver_words;
 	int rc;
 
+	EFHW_MCDI_DECLARE_BUF(ver_out, MC_CMD_GET_VERSION_OUT_LEN);
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_CAPABILITIES_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_OUT_LEN);
 
@@ -271,6 +277,34 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	if (flags & (1u <<
 		     MC_CMD_GET_CAPABILITIES_OUT_TX_MCAST_UDP_LOOPBACK_LBN))
 		*capabitlity_flags |= NIC_FLAG_MCAST_LOOP_HW;
+	if (flags & (1u <<
+		     MC_CMD_GET_CAPABILITIES_OUT_RX_PACKED_STREAM_LBN)) {
+		rc = ef10_mcdi_rpc(nic, MC_CMD_GET_VERSION, 0, sizeof(ver_out),
+				   &ver_out_size, NULL, (char*)&ver_out);
+		if (rc == 0 && ver_out_size == MC_CMD_GET_VERSION_OUT_LEN) {
+			ver_words = (__le16*)EFHW_MCDI_PTR(
+				ver_out, GET_VERSION_OUT_VERSION);
+			snprintf(ver_buf, 32, "%u.%u.%u.%u",
+				 le16_to_cpu(ver_words[0]),
+				 le16_to_cpu(ver_words[1]),
+				 le16_to_cpu(ver_words[2]),
+				 le16_to_cpu(ver_words[3]));
+			if (!strcmp(ver_buf, "4.1.1.1022"))
+				EFHW_ERR("%s: Error: Due to a known firmware "
+					 "bug, packed stream mode is disabled "
+					 "on version %s.  Please upgrade "
+					 "firmware to use packed stream.",
+					 __FUNCTION__, ver_buf);
+			else
+				*capabitlity_flags |= NIC_FLAG_PACKED_STREAM;
+		}
+		else {
+			*capabitlity_flags |= NIC_FLAG_PACKED_STREAM;
+		}
+	}
+	if (flags & (1u <<
+		     MC_CMD_GET_CAPABILITIES_OUT_RX_RSS_LIMITED_LBN))
+		*capabitlity_flags |= NIC_FLAG_RX_RSS_LIMITED;
 	return rc;
 }
 
@@ -385,6 +419,7 @@ _ef10_mcdi_cmd_event_queue_enable(struct efhw_nic *nic,
 				  uint n_pages,
 				  uint interrupting,
 				  uint enable_dos_p,
+				  uint enable_cut_through,
 				  int wakeup_evq)
 {
 	int rc, i;
@@ -408,7 +443,7 @@ _ef10_mcdi_cmd_event_queue_enable(struct efhw_nic *nic,
 	EFHW_MCDI_POPULATE_DWORD_5(in, INIT_EVQ_IN_FLAGS,
 		INIT_EVQ_IN_FLAG_INTERRUPTING, interrupting ? 1 : 0,
 		INIT_EVQ_IN_FLAG_RPTR_DOS, enable_dos_p ? 1 : 0,
-		INIT_EVQ_IN_FLAG_CUT_THRU, 1,
+		INIT_EVQ_IN_FLAG_CUT_THRU, enable_cut_through ? 1 : 0,
 		INIT_EVQ_IN_FLAG_RX_MERGE, 1,
 		INIT_EVQ_IN_FLAG_TX_MERGE, 1);
 
@@ -547,12 +582,14 @@ ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			    uint buf_base_id, dma_addr_t *dma_addrs,
 			    uint n_pages, int interrupting, int enable_dos_p,
 			    int wakeup_evq, int enable_time_sync_events,
-			    int *rx_ts_correction_out, int* flags_out)
+			    int enable_cut_through, int *rx_ts_correction_out,
+			    int* flags_out)
 {
         int rc;
 	rc = _ef10_mcdi_cmd_event_queue_enable(nic, evq, evq_size, dma_addrs, 
                                                n_pages, interrupting, 
-                                               enable_dos_p, wakeup_evq);
+                                               enable_dos_p, enable_cut_through,
+                                               wakeup_evq);
 
 	EFHW_TRACE("%s: enable evq %u size %u rc %d", __FUNCTION__, evq,
 		   evq_size, rc);
@@ -635,6 +672,8 @@ static void ef10_nic_sw_event(struct efhw_nic *nic, int data, int evq)
 
 	ev_data &= ~EF10_EVENT_CODE_MASK;
 	ev_data |= EF10_EVENT_CODE_SW;
+
+	/* No MCDI event code is set for a sw event so it is implicitly 0 */
 
 	_ef10_mcdi_cmd_driver_event(nic, ev_data, evq);
 	EFHW_NOTICE("%s: evq[%d]->%x", __FUNCTION__, evq, data);
@@ -812,12 +851,22 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 			int n_dma_addrs, uint32_t port_id, uint32_t owner_id,
 			int crc_mode, int flag_timestamp, int flag_hdr_split,
 			int flag_buff_mode, int flag_rx_prefix,
-			uint32_t instance, uint32_t label,
-			uint32_t target_evq, uint32_t numentries)
+			int flag_packed_stream, uint32_t instance,
+			uint32_t label, uint32_t target_evq,
+			uint32_t numentries)
 {
 	int i, rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_RXQ_IN_LEN(n_dma_addrs));
+
+	/* Bug45759: This should really be checked in the fw or 2048
+	 * should be exposed via mcdi headers. */
+	if (flag_packed_stream && numentries > 2048) {
+		EFHW_ERR("%s: ERROR: rxq_size=%d > 2048 in packed stream mode",
+			 __FUNCTION__, numentries);
+		return -EINVAL;
+	}
+
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_IN_SIZE, numentries);
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_IN_TARGET_EVQ, target_evq);
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_IN_LABEL, label);
@@ -825,12 +874,15 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_IN_OWNER_ID, owner_id);
 	EFHW_MCDI_SET_DWORD(in, INIT_RXQ_IN_PORT_ID, port_id);
 
-	EFHW_MCDI_POPULATE_DWORD_5(in, INIT_RXQ_IN_FLAGS,
+	EFHW_MCDI_POPULATE_DWORD_6(in, INIT_RXQ_IN_FLAGS,
 		INIT_RXQ_IN_FLAG_BUFF_MODE, flag_buff_mode ? 1 : 0,
 		INIT_RXQ_IN_FLAG_HDR_SPLIT, flag_hdr_split ? 1 : 0,
 		INIT_RXQ_IN_FLAG_TIMESTAMP, flag_timestamp ? 1 : 0,
 		INIT_RXQ_IN_FLAG_PREFIX, flag_rx_prefix ? 1 : 0,
-		INIT_RXQ_IN_CRC_MODE, crc_mode);
+		INIT_RXQ_IN_CRC_MODE, crc_mode,
+		INIT_RXQ_IN_DMA_MODE, flag_packed_stream ?
+			MC_CMD_INIT_RXQ_IN_PACKED_STREAM :
+			MC_CMD_INIT_RXQ_IN_SINGLE_PACKET);
 
 	for (i = 0; i < n_dma_addrs; ++i)
 		EFHW_MCDI_SET_ARRAY_QWORD(in, INIT_RXQ_IN_DMA_ADDR, i, 
@@ -901,6 +953,8 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 		 flag_tcp_udp_only, flag_tcp_csum_dis, flag_ip_csum_dis,
 		 flag_buff_mode, flag_pacer_bypass,
 		 dmaq, tag, evq_id, dmaq_size);
+	if (rc == -EOPNOTSUPP)
+		rc = -ENOKEY;
 
 	return rc;
 }
@@ -918,14 +972,19 @@ ef10_dmaq_rx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 	int flag_timestamp = (flags & EFHW_VI_RX_TIMESTAMPS) != 0;
 	int flag_hdr_split = (flags & EFHW_VI_RX_HDR_SPLIT) != 0;
 	int flag_buff_mode = (flags & EFHW_VI_RX_PHYS_ADDR_EN) == 0;
+	int flag_packed_stream = (flags & EFHW_VI_RX_PACKED_STREAM) != 0;
+
+	if (flag_packed_stream && !(nic->flags & NIC_FLAG_PACKED_STREAM))
+		return -EOPNOTSUPP;
+
 	if (stack_id)
 		port_id = ef10_gen_port_id(nic, stack_id);
 
 	rc = _ef10_mcdi_cmd_init_rxq
 		(nic, dma_addrs, n_dma_addrs, port_id,
 		 REAL_OWNER_ID(own_id), QUEUE_CRC_MODE_NONE, flag_timestamp,
-		 flag_hdr_split, flag_buff_mode, flag_rx_prefix, dmaq, tag,
-		 evq_id, dmaq_size);
+		 flag_hdr_split, flag_buff_mode, flag_rx_prefix,
+		 flag_packed_stream, dmaq, tag, evq_id, dmaq_size);
 	return rc == 0 ?
 		flag_rx_prefix ? nic->rx_prefix_len : 0 :
 		rc;
@@ -1482,6 +1541,39 @@ int ef10_nic_rss_context_set_key(struct efhw_nic *nic, int handle,
  *--------------------------------------------------------------------*/
 
 static int
+_ef10_mcdi_cmd_set_tx_port_sniff(struct efhw_nic *nic, int instance, int enable,
+				 int rss_context)
+{
+	int rc;
+	size_t out_size;
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_TX_PORT_SNIFF_CONFIG_IN_LEN);
+
+	EFHW_MCDI_SET_DWORD(in, SET_TX_PORT_SNIFF_CONFIG_IN_RX_CONTEXT,
+			    rss_context);
+	EFHW_MCDI_SET_DWORD(in, SET_TX_PORT_SNIFF_CONFIG_IN_RX_MODE,
+		rss_context == -1 ?
+		MC_CMD_SET_TX_PORT_SNIFF_CONFIG_IN_RX_MODE_SIMPLE :
+		MC_CMD_SET_TX_PORT_SNIFF_CONFIG_IN_RX_MODE_RSS);
+	EFHW_MCDI_SET_DWORD(in, SET_TX_PORT_SNIFF_CONFIG_IN_RX_QUEUE, instance);
+	EFHW_MCDI_POPULATE_DWORD_1(in, SET_TX_PORT_SNIFF_CONFIG_IN_FLAGS,
+		SET_TX_PORT_SNIFF_CONFIG_IN_ENABLE, enable ? 1 : 0);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_SET_TX_PORT_SNIFF_CONFIG,
+			   sizeof(in), 0, &out_size,
+			   (const char*)&in, NULL);
+	return rc;
+}
+
+
+int ef10_nic_set_tx_port_sniff(struct efhw_nic *nic, int instance, int enable,
+			       int rss_context)
+{
+	return _ef10_mcdi_cmd_set_tx_port_sniff(nic, instance, enable,
+						rss_context);
+}
+
+
+static int
 _ef10_mcdi_cmd_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
 			      int promiscuous, int rss_context)
 {
@@ -1508,10 +1600,42 @@ _ef10_mcdi_cmd_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
 
 
 int ef10_nic_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
-			    int promiscuous, int rss_context)
+                            int promiscuous, int rss_context)
 {
 	return _ef10_mcdi_cmd_set_port_sniff(nic, instance, enable,
 					     promiscuous, rss_context);
+}
+
+
+/*--------------------------------------------------------------------
+ *
+ * Port Sniff
+ *
+ *--------------------------------------------------------------------*/
+
+int ef10_get_rx_error_stats(struct efhw_nic *nic, int instance,
+                            void *data, int data_len, int do_reset)
+{
+	int rc;
+	size_t out_size;
+	int flags = 0;
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RMON_STATS_RX_ERRORS_IN_LEN);
+
+	if (data_len != DIV_ROUND_UP(MC_CMD_RMON_STATS_RX_ERRORS_OUT_LEN, 4))
+		return -EINVAL;
+
+	EFHW_MCDI_SET_DWORD(in, RMON_STATS_RX_ERRORS_IN_RX_QUEUE, instance);
+	if (do_reset) {
+		flags = 1 << MC_CMD_RMON_STATS_RX_ERRORS_IN_RST_LBN;
+	}
+	EFHW_MCDI_SET_DWORD(in, RMON_STATS_RX_ERRORS_IN_FLAGS, flags);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_RMON_STATS_RX_ERRORS, sizeof(in), 
+			   data_len, &out_size, (const char*)&in, 
+			   (char*)data);
+	EFHW_ASSERT(data_len == out_size);
+
+	return rc;
 }
 
 
@@ -1546,11 +1670,13 @@ struct efhw_func_ops ef10_char_functional_units = {
 	ef10_nic_buffer_table_set,
 	ef10_nic_buffer_table_clear,
 	ef10_nic_set_port_sniff,
+	ef10_nic_set_tx_port_sniff,
 	ef10_nic_rss_context_alloc,
 	ef10_nic_rss_context_free,
 	ef10_nic_rss_context_set_table,
 	ef10_nic_rss_context_set_key,
         ef10_nic_license_challenge,
+	ef10_get_rx_error_stats,
 };
 
 #else /* #if EFX_DRIVERLINK_API_VERSION >= 9 */

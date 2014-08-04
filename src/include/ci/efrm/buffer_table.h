@@ -59,6 +59,11 @@
 
 struct efrm_bt_collection {
 	struct efrm_buffer_table_allocation *allocs;
+	/* Number of efrm_buffer_table_allocations we have allocated memory
+	 * for - these are not necessarily populated with an actual buffer
+	 * table allocation. Whether a particular entry contains actual buffer
+	 * table entries can be determined by bta_size.
+	 */
 	int num_allocs;
 };
 

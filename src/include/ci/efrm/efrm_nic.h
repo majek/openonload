@@ -80,6 +80,14 @@ struct efrm_nic {
 	const struct efx_dl_device_info *dl_dev_info;
 	unsigned stack_id_usage[(EFRM_MAX_STACK_ID + sizeof(unsigned) * 8)
 				/ (sizeof(unsigned) * 8)];
+
+	/* We store the RXQ at which any sniff filter is directed, so we can
+         * check that a) a sniff filter isn't already in place when someone
+         * tries to add a new one, and b) the remover of the sniff filter is
+         * the same as the adder.
+	 */
+	int32_t rx_sniff_rxq;
+	int32_t tx_sniff_rxq;
 };
 
 

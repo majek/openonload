@@ -80,7 +80,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.1.0.6734"
+#define EFX_DRIVER_VERSION	"4.1.2.1003"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -1243,6 +1243,7 @@ struct vfdi_status;
  * @stats_lock: Statistics update lock. Must be held when calling
  *	efx_nic_type::{update,start,stop}_stats.
  * @n_rx_noskb_drops: Count of RX packets dropped due to failure to allocate an skb
+ * @forward_fcs: Flag to enable appending of 4-byte Frame Checksum to Rx packet
  *
  * This is stored in the private area of the &struct net_device.
  */
@@ -1464,6 +1465,7 @@ struct efx_nic {
 	spinlock_t stats_lock;
 	atomic_t n_rx_noskb_drops;
 	char *vpd_sn;
+	bool forward_fcs;
 };
 
 static inline int efx_dev_registered(struct efx_nic *efx)
@@ -1701,7 +1703,7 @@ struct efx_nic_type {
 	void (*tx_init)(struct efx_tx_queue *tx_queue);
 	void (*tx_remove)(struct efx_tx_queue *tx_queue);
 	void (*tx_write)(struct efx_tx_queue *tx_queue);
-	void (*rx_push_rss_config)(struct efx_nic *efx);
+	int (*rx_push_rss_config)(struct efx_nic *efx);
 	int (*rx_probe)(struct efx_rx_queue *rx_queue);
 	void (*rx_init)(struct efx_rx_queue *rx_queue);
 	void (*rx_remove)(struct efx_rx_queue *rx_queue);

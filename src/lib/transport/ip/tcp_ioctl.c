@@ -56,11 +56,11 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
    * handling which we get for free).
    * Exceptions:
    *  - listening OS-socket should be non-blocking;
-   *  - FIONREAD and SIOCATMARK are useless on OS socket, let's avoid
-   *  syscall.
+   *  - FIONREAD, TIOCOUTQ, SIOCOUTQNSD and SIOCATMARK are useless on OS
+   *    socket, let's avoid syscall.
    */
   if( os_socket_exists && request != FIONREAD && request != SIOCATMARK &&
-      request != FIOASYNC &&
+      request != FIOASYNC && request != TIOCOUTQ && request != SIOCOUTQNSD &&
       ( s->b.state != CI_TCP_LISTEN || request != (int) FIONBIO ) ) {
     rc = oo_os_sock_ioctl(netif, s->b.bufid, request, arg, NULL);
     if( rc < 0 )
@@ -100,6 +100,29 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
 
       }
       CI_IOCTL_SETARG((int*)arg, bytes_in_rxq);
+    }
+    break;
+
+  case TIOCOUTQ: /* synonym of SIOCOUTQ */
+  case SIOCOUTQNSD:
+    {
+    CI_BUILD_ASSERT(TIOCOUTQ == SIOCOUTQ);
+    int outq_bytes = 0;
+
+    if( !CI_IOCTL_ARG_OK(int, arg) )
+      goto fail_fault;
+    if( s->b.state == CI_TCP_LISTEN )
+      goto fail_inval;
+
+    if( s->b.state != CI_TCP_SYN_SENT ) {
+
+      /* TIOCOUTQ counts all unacknowledged data, so includes retrans queue. */
+      if( request == TIOCOUTQ )
+        outq_bytes = SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_una(ts));
+      else
+        outq_bytes = SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts));
+    }
+    CI_IOCTL_SETARG((int*)arg, outq_bytes);
     }
     break;
 

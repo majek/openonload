@@ -422,8 +422,8 @@ static void falcon_ef_vi_transmit_push(ef_vi* vi)
 		ef_vi_transmit_push_desc(vi);
 	else
 		ef_vi_transmit_push_doorbell(vi);
-	EF_VI_BUG_ON(qs->previous == qs->added);
-	EF_VI_DEBUG(qs->previous = qs->added);
+	EF_VI_DEBUG(BUG_ON(qs->previous == qs->added);
+	            qs->previous = qs->added);
 }
 
 

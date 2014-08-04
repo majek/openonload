@@ -594,6 +594,12 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   char name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
   int rc, rc1;
 
+  if( NI_OPTS(ni).cluster_ignore == 1 ) {
+    LOG_NV(ci_log("%s: Ignored attempt to use clusters due to "
+                  "EF_CLUSTER_IGNORE option.", __FUNCTION__));
+    return 0;
+  }
+
   if( ci_netif_is_locked(ni) ) {
     ci_log("%s: This function can only be used with an unlocked netif.",
            __FUNCTION__);
@@ -758,8 +764,15 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   rc = efab_file_move_to_alien_stack(priv, &thr->netif);
   if( rc != 0 )
     efab_thr_release(thr);
-  else
+  else {
     ci_netif_unlock(&thr->netif);
+
+    /* Now that the socket's in the clustered stack, set its clustering filter
+     * state. */
+    oof_socket_set_early_lp(efab_tcp_driver.filter_manager,
+                            &ci_trs_ep_get(thr, priv->sock_id)->oofilter,
+                            protocol, trb->port_be16);
+  }
 
   /* If this fails we leave the socket in the new stack to avoid a complex
    * error path.

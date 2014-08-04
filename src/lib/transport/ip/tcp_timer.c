@@ -181,6 +181,11 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
     /* move to next link as code below can remove this link from the list */
     ci_ni_dllist_iter(netif, l);
 
+    /* a. There is no need to drop loopback connection in such a way.
+     * b. Do not send loopback packets from the timer code. */
+    if( OO_SP_NOT_NULL(tsr->local_peer) )
+      continue;
+
     if( TIME_LT(tsr->timeout, ci_tcp_time_now(netif)) ) {      
       if( tsr->retries < max_retries ) {
         int rc = 0;
@@ -266,12 +271,15 @@ void ci_tcp_timeout_kalive(ci_netif* netif, ci_tcp_state* ts)
     return;
   }
 
+  ci_assert(ci_ip_queue_is_empty(&ts->retrans));
 
-#ifndef NDEBUG
-  /* Might want to assert this, just log for now */
-  if (!ci_ip_queue_is_empty(&ts->retrans))
-    LOG_U(log(LPF "%d KALIVE with unacknowledged data", S_FMT(ts)));
-#endif
+  /* TCP loopback does not have ACKs, so we just check the other side. */
+  if( OO_SP_NOT_NULL(ts->s.local_peer) ) {
+    citp_waitable* peer = ID_TO_WAITABLE(netif, ts->s.local_peer);
+    if( ~peer->state & CI_TCP_STATE_TCP_CONN )
+      ci_tcp_drop(netif, ts, ETIMEDOUT);
+    return;
+  }
 
   LOG_TL(log(LPF "%d KALIVE: 0x%x rto:%u\n",
 	     S_FMT(ts), ci_tcp_time_now(netif), ts->rto));
@@ -339,10 +347,12 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
      * Some IP stacks (Linux) accept such packet.  Others will reject and
      * re-send the correct window, so we'll fix our window back.
      */
-    if( CI_UNLIKELY(tcp_snd_wnd(ts) >=
+    if( CI_UNLIKELY(tcp_snd_wnd(ts) + (1 << ts->snd_wscl) >=
                     PKT_TCP_TX_SEQ_SPACE(PKT_CHK(netif, ts->send.head))) ) {
       /* Really unlikely, but could happen as a result of various race
-       * conditions. */
+       * conditions.
+       * Peer just shifts the window value, meaning "give me 1 mss" but we
+       * read "give me less than 1 mss" because of window scaling. */
       ci_tcp_tx_advance(ts, netif);
       return;
     }

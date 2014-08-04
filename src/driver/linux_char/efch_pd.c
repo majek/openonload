@@ -19,6 +19,7 @@
 #include <ci/efch/op_types.h>
 #include <ci/efrm/pd.h>
 #include "char_internal.h"
+#include <ci/efhw/efhw_types.h>
 
 
 static int
@@ -27,6 +28,7 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
 {
   struct efch_pd_alloc *alloc = &alloc_->u.pd;
   struct efrm_client *client = NULL;
+  struct efhw_nic* nic;
   struct efrm_vf *vf = NULL;
   struct efrm_pd *pd_rs;
   int rc, phys_mode;
@@ -36,6 +38,16 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
              alloc->in_ifindex, rc);
     goto out;
   }
+
+  nic = efrm_client_get_nic(client);
+  if ((alloc->in_flags & EFCH_PD_FLAG_RX_PACKED_STREAM) &&
+      !(nic->flags & NIC_FLAG_PACKED_STREAM)) {
+    EFCH_TRACE("%s: ERROR: Packed stream mode not available on ifindex=%d",
+                __FUNCTION__, alloc->in_ifindex);
+    rc = -EOPNOTSUPP;
+    goto out;
+  }
+
 #ifdef CONFIG_SFC_RESOURCE_VF
   if (alloc->in_flags & (EFCH_PD_FLAG_VF | EFCH_PD_FLAG_VF_OPTIONAL)) {
     if ((rc = efrm_vf_resource_alloc(client,
@@ -71,8 +83,11 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
   if (vf != NULL)
     efrm_vf_resource_release(vf);
 #endif
-  if (rc == 0)
+  if (rc == 0) {
+    if ((alloc->in_flags & EFCH_PD_FLAG_RX_PACKED_STREAM) != 0)
+      efrm_pd_set_min_align(pd_rs, EFRM_PD_RX_PACKED_STREAM_MEMORY_ALIGNMENT);
     ch_rs->rs_base = efrm_pd_to_resource(pd_rs);
+  }
   return rc;
 }
 

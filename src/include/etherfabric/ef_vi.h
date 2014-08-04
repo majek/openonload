@@ -186,6 +186,19 @@ typedef union {
 	} rx_no_desc_trunc;
 	struct {
 		unsigned       type       :16;
+		unsigned       q_id       :16;
+		unsigned       flags      :16;
+		unsigned       n_pkts     :16;
+	} rx_packed_stream;
+	struct {
+		unsigned       type       :16;
+		unsigned       q_id       :16;
+		unsigned       flags      :16;
+		unsigned       n_pkts     :16;
+		unsigned       subtype    :16;
+	} rx_packed_stream_discard;
+	struct {
+		unsigned       type       :16;
 		unsigned       data;
 	} sw;
 } ef_event;
@@ -209,18 +222,25 @@ enum {
 	EF_EVENT_TYPE_OFLOW,
 	/** TX timestamp event. */
 	EF_EVENT_TYPE_TX_WITH_TIMESTAMP,
+	/** A batch of packets was received in a packed stream. */
+	EF_EVENT_TYPE_RX_PACKED_STREAM,
+	/** A batch of packets was received in a packed stream. */
+	EF_EVENT_TYPE_RX_PACKED_STREAM_DISCARD,
 };
 
-#define EF_EVENT_RX_BYTES(e)    ((e).rx.len)
-#define EF_EVENT_RX_Q_ID(e)     ((e).rx.q_id)
-#define EF_EVENT_RX_RQ_ID(e)    ((e).rx.rq_id)
-#define EF_EVENT_RX_CONT(e)     ((e).rx.flags & EF_EVENT_FLAG_CONT)
-#define EF_EVENT_RX_SOP(e)      ((e).rx.flags & EF_EVENT_FLAG_SOP)
-#define EF_EVENT_RX_ISCSI_OKAY(e) ((e).rx.flags & EF_EVENT_FLAG_ISCSI_OK)
-#define EF_EVENT_FLAG_SOP       0x1
-#define EF_EVENT_FLAG_CONT      0x2
-#define EF_EVENT_FLAG_ISCSI_OK  0x4
-#define EF_EVENT_FLAG_MULTICAST 0x8
+#define EF_EVENT_RX_BYTES(e)            ((e).rx.len)
+#define EF_EVENT_RX_Q_ID(e)             ((e).rx.q_id)
+#define EF_EVENT_RX_RQ_ID(e)            ((e).rx.rq_id)
+#define EF_EVENT_RX_CONT(e)             ((e).rx.flags & EF_EVENT_FLAG_CONT)
+#define EF_EVENT_RX_SOP(e)              ((e).rx.flags & EF_EVENT_FLAG_SOP)
+#define EF_EVENT_RX_PS_NEXT_BUFFER(e)   ((e).rx_packed_stream.flags &	\
+						EF_EVENT_FLAG_PS_NEXT_BUFFER)
+#define EF_EVENT_RX_ISCSI_OKAY(e)       ((e).rx.flags & EF_EVENT_FLAG_ISCSI_OK)
+#define EF_EVENT_FLAG_SOP             0x1
+#define EF_EVENT_FLAG_CONT            0x2
+#define EF_EVENT_FLAG_ISCSI_OK        0x4
+#define EF_EVENT_FLAG_MULTICAST       0x8
+#define EF_EVENT_FLAG_PS_NEXT_BUFFER  0x10
 
 #define EF_EVENT_TX_Q_ID(e)     ((e).tx.q_id)
 
@@ -230,6 +250,8 @@ enum {
 #define EF_EVENT_RX_DISCARD_SOP(e)   ((e).rx_discard.flags&EF_EVENT_FLAG_SOP)
 #define EF_EVENT_RX_DISCARD_TYPE(e)  ((e).rx_discard.subtype)
 #define EF_EVENT_RX_DISCARD_BYTES(e) ((e).rx_discard.len)
+#define EF_EVENT_RX_PS_DISCARD_TYPE(e)  ((e).rx_packed_stream_discard.subtype)
+
 enum {
 	EF_EVENT_RX_DISCARD_CSUM_BAD,
 	EF_EVENT_RX_DISCARD_MCAST_MISMATCH,
@@ -280,6 +302,15 @@ typedef struct {
 } ef_eventq_state;
 
 
+typedef struct {
+	uint32_t ts_sec;
+	uint32_t ts_nsec;
+	uint16_t cap_len;
+	uint16_t orig_len;
+	void*    buf_addr;
+} ef_packed_stream_packet;
+
+
 /*! \i_ef_base [ef_iovec] is similar the standard [struct iovec].  An
 ** array of these is used to designate a scatter/gather list of I/O
 ** buffers.
@@ -288,6 +319,7 @@ typedef struct {
 	ef_addr                       iov_base EF_VI_ALIGN(8);
 	unsigned                      iov_len;
 } ef_iovec;
+
 
 /* Falcon constants */
 #define TX_EV_DESC_PTR_LBN 0
@@ -318,6 +350,7 @@ enum ef_vi_flags {
 	EF_VI_RX_TIMESTAMPS     = 0x10000,            /* ef10 only */
 	EF_VI_TX_TIMESTAMPS     = 0x20000,            /* ef10 only */
 	EF_VI_TX_LOOPBACK       = 0x40000,            /* ef10 only */
+	EF_VI_RX_PACKED_STREAM  = 0x80000,            /* ef10 only */
 };
 
 enum ef_vi_out_flags {
@@ -337,6 +370,8 @@ typedef struct {
 	uint32_t  removed;
 	uint32_t  in_jumbo;                           /* ef10 only */
 	uint32_t  bytes_acc;                          /* ef10 only */
+	uint16_t  rx_ps_pkt_count;                    /* ef10 only */
+	uint16_t  rx_ps_credit_avail;                 /* ef10 only */
 } ef_vi_rxq_state;
 
 typedef struct {
@@ -395,12 +430,12 @@ typedef struct ef_vi {
 	unsigned                      rx_buffer_len;
 	unsigned                      rx_prefix_len;
 	int                           rx_ts_correction;
-
 	char*			      vi_mem_mmap_ptr;
 	int                           vi_mem_mmap_bytes;
 	char*			      vi_io_mmap_ptr;
 	int                           vi_io_mmap_bytes;
 	int                           vi_clustered;
+	int                           vi_is_packed_stream;
 
 	ef_vi_ioaddr_t                io;
 
@@ -633,6 +668,9 @@ extern int ef_vi_transmit_init(ef_vi*, ef_addr, int bytes,
 /*! \i_ef_vi Maximum number of transmit completions per transmit event. */
 #define EF_VI_TRANSMIT_BATCH  64
 
+/*! \i_ef_vi Maximum number of packets per packed stream rx event. */
+#define EF_VI_PACKED_STREAM_BATCH  8
+
 /*! \i_ef_vi Determine the set of [ef_request_id]s for each DMA request
 **           which has been completed by a given transmit completion
 **           event.
@@ -643,6 +681,23 @@ extern int ef_vi_transmit_init(ef_vi*, ef_addr, int bytes,
 extern int ef_vi_transmit_unbundle(ef_vi* ep, const ef_event*,
                                    ef_request_id* ids);
 
+/*! \i_ef_vi Retrieve packet information from a packed stream rx event.
+**
+** \return 0 on success.
+*/
+extern int ef_vi_packed_stream_unbundle(ef_vi* vi, int n_pkts,
+                                        void** buf_addr,
+                                        ef_packed_stream_packet* pkts_out);
+
+
+/*! \i_ef_vi Retrieve packet information from a packed stream rx event.
+**           Per packet information is put in an ef_packed_stream_pkt
+**           commencing 64 bytes before each packet.
+** \return 0 on success.
+*/
+extern int ef_vi_packed_stream_unbundle_inline(ef_vi* vi, int n_pkts,
+					       void** buf_addr,
+					       int* bytes_unpacked_out);
 
 /*! \i_ef_event Returns true if ef_eventq_poll() will return event(s). */
 extern int ef_eventq_has_event(ef_vi* vi);
@@ -774,34 +829,36 @@ extern int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 				       struct timespec* ts_out);
 
 
- /*! Retrieve the UTC timestamp associated with a received packet as well as
-  * clock sync status flags.
-  *
-  * Returns 0 on success filling ts_out and flags_out fields. flags_out contains
-  * the following flags:
-  *
-  * In case of success these flags are present:
-  * - EF_VI_SYNC_FLAG_CLOCK_SET
-  *   indicates whether adapter clock has ever been set (in sync with system)
-  * - EF_VI_SYNC_FLAG_CLOCK_IN_SYNC
-  *   indicates whether adapter clock is in sync with external clock (ptp)
-  * 
-  * In case of error the function will return one of the following values:
-  * - ENOMSG - synchronization with adapter has not been achieved yet.
-  *            (It may time short after vi is created before it is achieved).
-  * - ENODATA - packet has arrived without timestamp (e.g. a HW multicast
-  *             loopback packet)
-  * - EL2NSYNC - sync with adapter has been lost
+ /*! Retrieve the UTC timestamp associated with a received packet as well
+  * as clock sync status flags.
   *
   * This function must be called after retrieving the associated RX event
   * via ef_eventq_poll(), and before calling ef_eventq_poll() again.
   *
-  * If the VI does not have RX timestamps enabled then this function may
-  * fail, or it may return an invalid timestamp.
+  * You should not invoke this function on a VI that does not have RX
+  * timestamps enabled.  (Behaviour is undefined).
   *
-  * This function will also fail if the VI has not yet synchronised with
-  * the adapter clock.  This can take from a few hundred milliseconds up to
-  * several seconds from when the vi is allocated.
+  * Returns 0 on success filling ts_out and flags_out fields. flags_out
+  * contains the following flags:
+  *
+  * - EF_VI_SYNC_FLAG_CLOCK_SET
+  *   indicates whether adapter clock has ever been set (in sync with system)
+  *
+  * - EF_VI_SYNC_FLAG_CLOCK_IN_SYNC
+  *   indicates whether adapter clock is in sync with external clock (ptp)
+  * 
+  * In case of error the timestamp result (*ts_out) is set to zero and the
+  * return value will be one of:
+  *
+  * - ENOMSG   - Synchronisation with adapter has not been achieved yet.
+  *              (NB. This only happens with old firmware.)
+  *
+  * - ENODATA  - Packet does not have a timestamp.  On current Solarflare
+  *              adapters packets that are switched from TX to RX do not get
+  *              timestamped.
+  *
+  * - EL2NSYNC - Synchronisation with adapter has been lost.  This should
+  *              never happen!
   */
 extern int
 ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi,

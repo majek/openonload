@@ -56,7 +56,9 @@ static inline void efab_syscall_exit(void)
    * For CONFIG_PREEMPT, we'd like to preempt_disable() for the next few
    * instructions.  Unluckily, we have no way to do this. */
 #ifdef CONFIG_PREEMPT
+#ifdef preempt_check_resched
   preempt_check_resched(); /* try to be more safe: better resched now */
+#endif
 #endif
 
   atomic_dec(&efab_syscall_used);

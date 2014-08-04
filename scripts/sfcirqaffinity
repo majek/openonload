@@ -11,8 +11,6 @@ import sfcmask as mask
 
 me = os.path.basename(sys.argv[0])
 
-usage_str = """%prog <irq-match> [cores]"""
-
 opt_parser = None
 options = None
 
@@ -183,7 +181,16 @@ def main2(args):
 
 def main():
     import optparse
-    op = optparse.OptionParser(usage=usage_str)
+    usage_str = "%prog <irq-match> [cores]"
+    irq_str = ""
+    irq_str += "Required:\n"
+    irq_str += "  <irq-match>           Either an interface name (eg eth4) or an RSS queue\n"
+    irq_str += "                        identifier (eg eth4-0).\n"
+    irq_str += "                        The number of RSS queues assigned to an interface\n"
+    irq_str += "                        can be found by inspection of /proc/interrupts or\n"
+    irq_str += "                        by reference to the sfc module parameter rss_cpus."
+
+    op = optparse.OptionParser(usage=usage_str + "\n\n" + irq_str)
 
     op.add_option("-p", "--packages", dest='packages',
                   action="store",

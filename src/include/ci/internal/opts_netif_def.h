@@ -326,6 +326,43 @@ CI_CFG_OPT("EF_USE_DSACK", use_dsack, ci_uint32,
 "Whether or not to use DSACK (duplicate SACK).",
            1, , CI_CFG_TCP_DSACK, 0, 1, yesno)
 
+#define CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC 1
+CI_CFG_OPT("EF_TIMESTAMPING_REPORTING", timestamping_reporting, ci_uint32,
+"Controls timestamp reporting, possible values:\n"
+" 0: report translated timestamps only when the NIC clock has been set;\n"
+" 1: report translated timestamps only when the NIC clock is synchronised "
+"(e.g. using ptpd)\n"
+"If the above conditions are not met Onload will only report raw "
+"(not translated) timestamps.\n",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_RX_TIMESTAMPING", rx_timestamping, ci_uint32,
+"Control of hardware timestamping of received packets, possible values:\n"
+"  0 - do not do timestamping (default);\n"
+"  1 - request timestamping but continue if hardware is not capable or it"
+" does not succeed;\n"
+"  2 - request timestamping and fail if hardware is capable and it does"
+" not succeed;\n"
+"  3 - request timestamping and fail if hardware is not capable or it"
+" does not succeed;\n",
+           2, , 0, 0, 3, count)
+
+CI_CFG_OPT("EF_TX_TIMESTAMPING", tx_timestamping, ci_uint32,
+"Control of hardware timestamping of transmitted packets, possible values:\n"
+"  0 - do not do timestamping (default);\n"
+"  1 - request timestamping but continue if hardware is not capable or it"
+" does not succeed;\n"
+"  2 - request timestamping and fail if hardware is capable and it does"
+" not succeed;\n"
+"  3 - request timestamping and fail if hardware is not capable or it"
+" does not succeed;\n",
+           2, , 0, 0, 3, count)
+
+CI_CFG_OPT("EF_CLUSTER_IGNORE", cluster_ignore, ci_uint32,
+"When set, this option instructs Onload to ignore attempts to use clusters and "
+"effectively ignore attempts to set SO_REUSEPORT.",
+           1, , 0, 0, 1, count)
+
 #if CI_CFG_TAIL_DROP_PROBE
 CI_CFG_OPT("EF_TAIL_DROP_PROBE", tail_drop_probe, ci_uint32,
 /* FIXME: when shoudl one use this? */
@@ -1099,9 +1136,10 @@ CI_CFG_OPT("EF_MAX_EP_PINNED_PAGES", max_ep_pinned_pages, ci_uint32,
 CI_CFG_OPT("EF_FREE_PACKETS_LOW_WATERMARK", free_packets_low, ci_uint16,
 "Keep free packets number to be at least this value.  EF_MIN_FREE_PACKETS "
 "defines initialisation behaviour; this value is about normal application "
-"runtime.  This value is used if we can not allocate more packets "
-"at any time, i.e. in case of AMD IOMMU only.",
-           , , 100, MIN, MAX, count)
+"runtime.  In some combinations of hardware and software, Onload is not "
+"able allocate packets at any context, so it makes sense to keep some "
+"spare packets.  Default value 0 is interpreted as EF_RXQ_SIZE/2",
+           , , 0, MIN, MAX, count)
 
 #if CI_CFG_PIO
 CI_CFG_OPT("EF_PIO_THRESHOLD", pio_thresh, ci_uint16,
@@ -1117,38 +1155,6 @@ CI_CFG_OPT("EF_TX_PUSH_THRESHOLD", tx_push_thresh, ci_uint16,
 "threshold is ignored, and assumed to be 1, on pre-SFN7000-series "
 "hardware. It makes sense to set this value similar to EF_SEND_POLL_THRESH",
            , , 100, 1, MAX, count)
-
-CI_CFG_OPT("EF_RX_TIMESTAMPING", rx_timestamping, ci_uint32,
-"Control of hardware timestamping of received packets, possible values:\n"
-"  0 - do not do timestamping (default);\n"
-"  1 - request timestamping but continue if hardware is not capable or it"
-" does not succeed;\n"
-"  2 - request timestamping and fail if hardware is capable and it does"
-" not succeed;\n"
-"  3 - request timestamping and fail if hardware is not capable or it"
-" does not succeed;\n",
-           , , 0, 0, 3, count)
-
-CI_CFG_OPT("EF_TX_TIMESTAMPING", tx_timestamping, ci_uint32,
-"Control of hardware timestamping of transmitted packets, possible values:\n"
-"  0 - do not do timestamping (default);\n"
-"  1 - request timestamping but continue if hardware is not capable or it"
-" does not succeed;\n"
-"  2 - request timestamping and fail if hardware is capable and it does"
-" not succeed;\n"
-"  3 - request timestamping and fail if hardware is not capable or it"
-" does not succeed;\n",
-           , , 0, 0, 3, count)
-
-#define CITP_TIMESTAMPING_RECORDING_FLAG_CHECK_SYNC 1
-CI_CFG_OPT("EF_TIMESTAMPING_REPORTING", timestamping_reporting, ci_uint32,
-"Controls timestamp reporting, possible values:\n"
-" 0: report translated timestamps only when the NIC clock has been set;\n"
-" 1: report translated timestamps only when the NIC clock is synchronised "
-"(e.g. using ptpd)\n"
-"If the above conditions are not met Onload will only report raw "
-"(not translated) timestamps.\n",
-           1, , 0, 0, 1, yesno)
 
 #define CI_EF_LOG_DEFAULT ((1 << EF_LOG_BANNER) | (1 << EF_LOG_RESOURCE_WARNINGS))
 CI_CFG_OPT("EF_LOG", log_category, ci_uint32,

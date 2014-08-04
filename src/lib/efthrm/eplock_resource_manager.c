@@ -99,16 +99,19 @@ efab_eplock_record_pid(ci_netif *ni)
  */
 
 int
-efab_eplock_unlock_and_wake(ci_netif *ni)
+efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context)
 {
   int l = ni->state->lock.lock;
   tcp_helper_resource_t *rs = netif2tcp_helper_resource(ni);
 
   /* Allocate more packets if necessary. */
-  if( !in_atomic() && rs->avoid_atomic_allocations &&
-      ni->state->n_freepkts <= NI_OPTS(ni).free_packets_low &&
-      NI_OPTS(ni).max_packets < (ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S) )
+  if( !in_dl_context && OO_STACK_NEEDS_MORE_PACKETS(ni) )
     efab_tcp_helper_more_bufs(rs);
+
+  /* We use in_dl_context from now on, and we should remove
+   * CI_NETIF_FLAG_IN_DL_CONTEXT under the stack lock. */
+  if( in_dl_context )
+    ni->flags &= ~CI_NETIF_FLAG_IN_DL_CONTEXT;
 
  again:
 
@@ -116,6 +119,7 @@ efab_eplock_unlock_and_wake(ci_netif *ni)
   if( (~l & CI_EPLOCK_LOCKED) || (l & CI_EPLOCK_UNLOCKED) ) {
     OO_DEBUG_ERR(ci_log("efab_eplock_unlock_and_wake:  corrupt"
 		    " (value is %x)", (unsigned) l));
+    OO_DEBUG_ERR(dump_stack());
     return -EIO;
   }
 #endif
@@ -127,7 +131,7 @@ efab_eplock_unlock_and_wake(ci_netif *ni)
     **    the lock value prior to unlocking, OR
     **  - keeping the eplock locked and returning CI_EPLOCK_LOCKED
     */
-    l = efab_tcp_helper_netif_lock_callback(&ni->eplock_helper, l);
+    l = efab_tcp_helper_netif_lock_callback(&ni->eplock_helper, l, in_dl_context);
   }
   else if( ci_cas32_fail(&ni->state->lock.lock, l, CI_EPLOCK_UNLOCKED) ) {
     /* Someone (probably) set a flag when we tried to unlock, so we'd

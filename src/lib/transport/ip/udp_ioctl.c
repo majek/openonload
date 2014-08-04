@@ -260,6 +260,13 @@ static int ci_udp_ioctl_locked(ci_netif* ni, ci_udp_state* us,
     }
     goto sys_ioctl;
 
+  case TIOCOUTQ: /* synonym of SIOCOUTQ */
+    if( ! CI_IOCTL_ARG_OK(int, arg) )
+      return -EFAULT;
+
+    *(int*)arg = us->tx_count + oo_atomic_read(&us->tx_async_q_level);
+    return 0;
+
   case SIOCGSTAMP:
 #if defined( __linux__) && defined(__KERNEL__)
 /* The following code assumes the width of the timespec and timeval fields */

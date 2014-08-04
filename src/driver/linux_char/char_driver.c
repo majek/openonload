@@ -120,6 +120,14 @@ ioctl_license_challenge (ci_private_char_t *priv, ulong arg)
   return rc;
 }
 
+ci_noinline int
+ioctl_resource_prime (ci_private_char_t *priv, ulong arg)
+{
+  ci_resource_prime_op_t local;
+  copy_from_user_ret(&local, (caddr_t) arg, sizeof(local), -EFAULT);
+  return efch_vi_prime(priv, local.crp_id, local.crp_current_ptr);
+}
+
 
 static long
 ci_char_fop_ioctl(struct file *filp, uint cmd, ulong arg) 
@@ -135,6 +143,9 @@ ci_char_fop_ioctl(struct file *filp, uint cmd, ulong arg)
 
   case CI_LICENSE_CHALLENGE:
     return ioctl_license_challenge (priv, arg);
+
+  case CI_RESOURCE_PRIME:
+    return ioctl_resource_prime (priv, arg);
 
   default:
     ci_log("unknown ioctl (%u)", cmd);
@@ -169,6 +180,8 @@ ci_char_fop_open(struct inode *inode, struct file *filp)
   if ((priv = CI_ALLOC_OBJ(ci_private_char_t)) == NULL)
     return -ENOMEM;
   CI_ZERO(priv);
+  /* priv->cpcp_vi = NULL; */
+  init_waitqueue_head(&priv->cpcp_poll_queue);
   ci_resource_table_ctor(&priv->rt,
             ci_is_sysadmin() ? CI_CAP_BAR | CI_CAP_PHYS | CI_CAP_DRV : 0);
   filp->private_data = (void*) priv;
@@ -196,6 +209,13 @@ ci_char_fop_close(struct inode *inode, struct file *filp)
 } 
 
 
+static unsigned ci_char_fop_poll(struct file* filp, poll_table* wait)
+{
+  ci_private_char_t *priv = (ci_private_char_t *) filp->private_data;
+  return efch_vi_poll(priv, filp, wait);
+}
+
+
 /*--------------------------------------------------------------------
  *
  * char device interface
@@ -215,6 +235,7 @@ struct file_operations ci_char_fops = {
   .mmap = ci_char_fop_mmap,
   .open = ci_char_fop_open,
   .release = ci_char_fop_close,
+  .poll = ci_char_fop_poll,
 };
 
 static int ci_char_major = 0;

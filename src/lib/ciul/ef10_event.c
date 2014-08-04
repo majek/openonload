@@ -49,7 +49,9 @@
 #include "logging.h"
 #include "mcdi_pcol.h"
 
+
 typedef ci_qword_t ef_vi_event;
+
 
 #define EF_VI_EVENT_OFFSET(q, i)					\
 	(((q)->ep_state->evq.evq_ptr + (i) * sizeof(ef_vi_qword)) &	\
@@ -57,8 +59,6 @@ typedef ci_qword_t ef_vi_event;
 
 #define EF_VI_EVENT_PTR(q, i)                                           \
 	((ef_vi_event*) ((q)->evq_base + EF_VI_EVENT_OFFSET((q), (i))))
-
-
 
 /* Due to crazy chipsets, we see the event words being written in
 ** arbitrary order (bug4539).  So test for presence of event must ensure
@@ -74,6 +74,37 @@ typedef ci_qword_t ef_vi_event;
 		if ((vi)->vi_stats != NULL)	\
 			++(vi)->vi_stats->name;	\
 	} while (0)
+
+/* The gap left after each packet in a packed stream buffer. */
+#define EF_VI_PS_PACKET_GAP             64
+
+/* The negative offset from the start of each packet for placing packet metadata
+** when performing inline unbundling. The firmware only leaves a gap after each
+** packet, so it is up to the client to ensure that the DMA start address for
+** each buffer is set such that space is available before the first packet in a
+** buffer.
+*/
+#define EF_VI_PS_NEGATIVE_SPACE          64
+
+/* Doxbox SF-112241-TC
+** One credit is consumed on crossing a 64KB boundary in buffer space.
+*/
+#define EF_VI_PS_SPACE_PER_CREDIT        0x10000
+
+#define EF_VI_PS_ALIGNMENT               64
+
+/* The space occupied by a minimum sized (60 byte) packet. */
+#define EF_VI_PS_MIN_PKT_SPACE						  \
+	(EF_VI_ALIGN_FWD(						  \
+		(EF_VI_PS_NEGATIVE_SPACE + ES_DZ_PS_RX_PREFIX_SIZE + 60), \
+		EF_VI_PS_ALIGNMENT))
+
+/* When allocating credit, we take into account the worst case event count
+** per credit. This is when we get no event batching for minumum sized packets.
+*/
+#define EF_VI_PS_MAX_EVENTS_PER_CREDIT			\
+	(EF_VI_PS_SPACE_PER_CREDIT / EF_VI_PS_MIN_PKT_SPACE)
+
 
 
 ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
@@ -124,7 +155,7 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 	 * should have been set but wasn't - i.e. it's a frame
 	 * trunc 
 	 */
-	if(likely( ! ((ev->u32[0] & discard_mask) || (rx_bytes == 0)) )) {
+ 	if(likely( ! ((ev->u32[0] & discard_mask) || (rx_bytes == 0)) )) {
 		++vi->ep_state->rxq.removed;
 		return;
 	}
@@ -149,6 +180,75 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 		ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CSUM_BAD;
 
 	++vi->ep_state->rxq.removed;
+}
+
+
+ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
+					      const ef_vi_event* ev,
+                                              ef_event** evs, int* evs_len)
+{
+	unsigned q_label = QWORD_GET_U(ESF_DZ_RX_QLABEL, *ev);
+	unsigned short_pc = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
+	unsigned pkt_count_range = (1 << ESF_DZ_RX_DSC_PTR_LBITS_WIDTH);
+
+	const ci_uint32 discard_mask =
+		CI_BSWAPC_LE32(1 << ESF_DZ_RX_ECC_ERR_LBN |
+			       1 << ESF_DZ_RX_CRC1_ERR_LBN |
+			       1 << ESF_DZ_RX_CRC0_ERR_LBN |
+			       1 << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN |
+			       1 << ESF_DZ_RX_IPCKSUM_ERR_LBN |
+			       1 << ESF_DZ_RX_ECRC_ERR_LBN);
+
+	ef_vi* vi = evq_vi->vi_qs[q_label];
+
+	ef_event* ev_out = (*evs)++;
+	--(*evs_len);
+	ev_out->rx_packed_stream.type = EF_EVENT_TYPE_RX_PACKED_STREAM;
+	ev_out->rx_packed_stream.q_id = q_label;
+
+	ev_out->rx_packed_stream.n_pkts =
+		(pkt_count_range + short_pc -
+		 vi->ep_state->rxq.rx_ps_pkt_count) % pkt_count_range;
+
+	ev_out->rx_packed_stream.flags = 0;
+	if( QWORD_GET_U(ESF_DZ_RX_MAC_CLASS, *ev) == ESE_DZ_MAC_CLASS_MCAST) {
+		ev_out->rx_packed_stream.flags |= EF_EVENT_FLAG_MULTICAST;
+	}
+
+	vi->ep_state->rxq.rx_ps_pkt_count = short_pc;
+
+	if( unlikely(QWORD_GET_U(ESF_DZ_RX_EV_ROTATE, *ev)) ) {
+		unsigned desc_id;
+		desc_id = evq_vi->ep_state->rxq.removed & vi->vi_rxq.mask;
+		vi->vi_rxq.ids[desc_id] = EF_REQUEST_ID_MASK;
+		++evq_vi->ep_state->rxq.removed;
+		EF_VI_ASSERT(vi->ep_state->rxq.rx_ps_credit_avail > 0);
+		--vi->ep_state->rxq.rx_ps_credit_avail;
+		ev_out->rx_packed_stream.flags |= EF_EVENT_FLAG_PS_NEXT_BUFFER;
+	}
+
+	EF_VI_ASSERT(ev_out->rx_packed_stream.n_pkts <=
+		EF_VI_PACKED_STREAM_BATCH);
+	EF_VI_ASSERT(ev_out->rx_packed_stream.n_pkts > 0 ||
+		QWORD_GET_U(ESF_DZ_RX_CONT, *ev));
+
+	if(likely( ! ((ev->u32[0] & discard_mask) )))
+		return;
+
+	ev_out->rx_packed_stream_discard.type =
+		EF_EVENT_TYPE_RX_PACKED_STREAM_DISCARD;
+
+	if( QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev) |
+	    QWORD_GET_U(ESF_DZ_RX_CRC1_ERR, *ev) |
+	    QWORD_GET_U(ESF_DZ_RX_CRC1_ERR, *ev) |
+	    QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev) )
+		ev_out->rx_packed_stream_discard.subtype =
+			EF_EVENT_RX_DISCARD_CRC_BAD;
+	else
+		/* TCPUDP_CKSUM or IPCKSUM error
+		 */
+		ev_out->rx_packed_stream_discard.subtype =
+			EF_EVENT_RX_DISCARD_CSUM_BAD;
 }
 
 
@@ -201,7 +301,10 @@ static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
 	else if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
 		TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO) {
 		ef_vi_txq_state* qs = &evq->ep_state->txq;
-		EF_VI_BUG_ON(qs->ts_nsec != EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
+		EF_VI_DEBUG(
+			EF_VI_BUG_ON(qs->ts_nsec !=
+			             EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID)
+			);
 		qs->ts_nsec =
 			(((((uint64_t)timestamp_extract(*ev)) *
 			   1000000000UL) >> 29) << 2) |
@@ -215,7 +318,10 @@ static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
 		--(*evs_len);
 		ev_out->tx_timestamp.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
 		ev_out->tx.type = EF_EVENT_TYPE_TX_WITH_TIMESTAMP;
-		EF_VI_BUG_ON(qs->ts_nsec == EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
+		EF_VI_DEBUG(
+			EF_VI_BUG_ON(qs->ts_nsec ==
+			             EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID)
+			);
 		ev_out->tx_timestamp.ts_nsec = qs->ts_nsec;
 		EF_VI_DEBUG(qs->ts_nsec = EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
 		ev_out->tx_timestamp.ts_sec = timestamp_extract(*ev);
@@ -263,9 +369,8 @@ ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
 	}
 }
 
-
-int
-ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
+ef_vi_inline int
+ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
 					    struct timespec* ts_out,
 				            unsigned* flags_out)
 {
@@ -302,14 +407,14 @@ ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
                                       ES_DZ_RX_PREFIX_TSTAMP_OFST);
 	/* pkt_minor contains 27 bits of ns */
 	uint32_t pkt_minor_raw = CI_BSWAPC_LE32(*data);
-	uint32_t pkt_minor =
-		( pkt_minor_raw + vi->rx_ts_correction) & 0x7FFFFFF;
 	uint32_t diff;
 
 	EF_VI_ASSERT(vi->vi_flags & EF_VI_RX_TIMESTAMPS);
 
 	if( evqs->sync_timestamp_synchronised &&
 	    (pkt_minor_raw & FLAG_NO_TIMESTAMP) == 0 ) {
+		uint32_t pkt_minor =
+			( pkt_minor_raw + vi->rx_ts_correction) & 0x7FFFFFF;
 		ts_out->tv_nsec = ((uint64_t) pkt_minor * 1000000000) >> 27;
 		diff = (pkt_minor - evqs->sync_timestamp_minor) & (ONE_SEC - 1);
 		if (diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) +
@@ -343,9 +448,20 @@ ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
 			evqs->sync_timestamp_synchronised = 0;
 		}
 	}
+	ts_out->tv_sec = 0;
+	ts_out->tv_nsec = 0;
         if( (pkt_minor_raw & FLAG_NO_TIMESTAMP) != 0 )
           return -ENODATA;
 	return (evqs->sync_timestamp_major == ~0u) ? -ENOMSG : -EL2NSYNC;
+}
+
+int
+ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
+					    struct timespec* ts_out,
+				            unsigned* flags_out)
+{
+  return ef10_receive_get_timestamp_with_sync_flags(vi, pkt, ts_out,
+		flags_out);
 }
 
 
@@ -354,7 +470,7 @@ ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 			    struct timespec* ts_out)
 {
 	unsigned flags_out;
-	int rc = ef_vi_receive_get_timestamp_with_sync_flags
+	int rc = ef10_receive_get_timestamp_with_sync_flags
 		(vi, pkt, ts_out, &flags_out);
 	return rc < 0 ? -1 : 0;
 }
@@ -371,7 +487,8 @@ static void ef10_major_tick(ef_vi* vi, unsigned major, unsigned minor,
 }
 
 
-static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev)
+static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev,
+			    ef_event** evs, int* evs_len)
 {
 	int code = QWORD_GET_U(MCDI_EVENT_CODE, *ev);
 	uint32_t major, minor;
@@ -392,6 +509,16 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev)
 				EF_VI_SYNC_FLAG_CLOCK_IN_SYNC: 0);
 		ef10_major_tick(evq, major, minor, sync_flags);
 		break;
+	case 0: {
+		/* MCDI event code 0 indicates a software event
+		 * generated using ef10_nic_sw_event.
+		 * TODO: event code 0 should be added to MCDI headers */
+		ef_event* ev_out = (*evs)++;
+		--(*evs_len);
+		ev_out->sw.type = EF_EVENT_TYPE_SW;
+		ev_out->sw.data = CI_DWORD_VAL(*ev);
+		break;
+	}
 	default:
 		ef_log("%s: ERROR: Unhandled mcdi event code=%u", __FUNCTION__,
 		       code);
@@ -431,7 +558,11 @@ not_empty:
 		BUG_ON(ESF_DZ_EV_CODE_LBN < 32u);
 		switch( CI_QWORD_FIELD(ev, ESF_DZ_EV_CODE) ) {
 		case ESE_DZ_EV_CODE_RX_EV:
-			ef10_rx_event(evq, &ev, &evs, &evs_len);
+			if( !evq->vi_is_packed_stream )
+				ef10_rx_event(evq, &ev, &evs, &evs_len);
+			else
+				ef10_packed_stream_rx_event(evq, &ev,
+							    &evs, &evs_len);
 			break;
 
 		case ESE_DZ_EV_CODE_TX_EV:
@@ -444,7 +575,7 @@ not_empty:
 			 * app */
 			if (evs_len != evs_len_orig)
 				goto out;
-			ef10_mcdi_event(evq, &ev);
+			ef10_mcdi_event(evq, &ev, &evs, &evs_len);
 			break;
 
 		case ESE_DZ_EV_CODE_DRIVER_EV:
@@ -514,5 +645,145 @@ void ef10_ef_eventq_prime(ef_vi* vi)
 	mmiowb();
 }
 
+
+ef_vi_inline int ef10_unbundle_one_packet(ef_vi* vi, ci_uintptr_t* buf_addr,
+				ef_packed_stream_packet* pkt_out)
+{
+	uint16_t* pkt_len_ptr;
+	uint16_t pkt_len, orig_len;
+	uint16_t* orig_len_ptr;
+	unsigned ts_flags;
+	int offset, rc;
+	struct timespec ts;
+
+	pkt_len_ptr =	 (uint16_t*)(*buf_addr +
+		ES_DZ_PS_RX_PREFIX_CAP_LEN_OFST);
+	pkt_len = CI_BSWAPC_LE16(*pkt_len_ptr);
+	orig_len_ptr =	(uint16_t*)(*buf_addr +
+		ES_DZ_PS_RX_PREFIX_ORIG_LEN_OFST);
+	orig_len = CI_BSWAPC_LE16(*orig_len_ptr);
+	pkt_out->cap_len = pkt_len;
+	pkt_out->orig_len = orig_len;
+	pkt_out->buf_addr = (void*)(*buf_addr + ES_DZ_PS_RX_PREFIX_SIZE);
+	rc = ef10_receive_get_timestamp_with_sync_flags
+		(vi, (void*)(*buf_addr +
+			     (ES_DZ_PS_RX_PREFIX_TSTAMP_OFST -
+			      ES_DZ_RX_PREFIX_TSTAMP_OFST)),
+		 &ts, &ts_flags);
+	pkt_out->ts_sec	= ts.tv_sec;
+	pkt_out->ts_nsec = ts.tv_nsec;
+	offset = EF_VI_ALIGN_FWD(pkt_len + ES_DZ_PS_RX_PREFIX_SIZE,
+				 (ci_uintptr_t) EF_VI_PS_ALIGNMENT) +
+		EF_VI_PS_PACKET_GAP;
+	*buf_addr += offset;
+	return rc;
+}
+
+
+ef_vi_inline int ef_ps_max_credits(ef_vi* vi)
+{
+	return ef_eventq_capacity(vi) / EF_VI_PS_MAX_EVENTS_PER_CREDIT - 1;
+}
+
+
+ef_vi_inline void ef_vi_packed_stream_alloc_credits(ef_vi* vi, int n_credits)
+{
+	ef_vi_rxq_state* qs = &vi->ep_state->rxq;
+	uint32_t* doorbell = (void*) (vi->io + ER_DZ_RX_DESC_UPD_REG);
+	qs->rx_ps_credit_avail += n_credits;
+	EF_VI_ASSERT(qs->rx_ps_credit_avail < 128);
+	wmb();
+	writel(ES_DZ_PS_MAGIC_DOORBELL_CREDIT | n_credits, doorbell);
+	mmiowb();
+}
+
+
+void ef_vi_packed_stream_update_credit(ef_vi* vi)
+{
+	ef_vi_rxq_state* qs = &vi->ep_state->rxq;
+	EF_VI_ASSERT(qs->rx_ps_credit_avail < 128);
+	EF_VI_ASSERT(qs->rx_ps_credit_avail <= ef_ps_max_credits(vi));
+
+	if( qs->rx_ps_credit_avail < ef_ps_max_credits(vi) )
+		ef_vi_packed_stream_alloc_credits(vi, ef_ps_max_credits(vi) -
+			qs->rx_ps_credit_avail);
+}
+
+
+ef_vi_inline void ef10_update_credit(ef_vi* vi,
+				     ci_uintptr_t start_addr,
+				     ci_uintptr_t end_addr)
+{
+	int credits_consumed = 0;
+	/* Can consume at most two credits per event */
+	if( (start_addr ^ end_addr) &
+			(ci_uintptr_t)EF_VI_PS_SPACE_PER_CREDIT )
+		credits_consumed = 1;
+	else if ( (start_addr ^ end_addr) &
+			(ci_uintptr_t)(EF_VI_PS_SPACE_PER_CREDIT << 1) )
+		credits_consumed = 2;
+
+	EF_VI_ASSERT( vi->ep_state->rxq.rx_ps_credit_avail >= credits_consumed);
+	vi->ep_state->rxq.rx_ps_credit_avail -= credits_consumed;
+
+	ef_vi_packed_stream_update_credit(vi);
+}
+
+
+int ef_vi_packed_stream_unbundle(ef_vi* vi, int n_pkts, void** buf_addr,
+				ef_packed_stream_packet* pkts_out)
+{
+	int i, rc;
+	ci_uintptr_t cur_buf_addr;
+	int ts_rc;
+
+	EF_VI_ASSERT(pkts_out);
+	EF_VI_ASSERT(*buf_addr);
+	EF_VI_ASSERT((ci_uintptr_t)(*buf_addr) %
+			(ci_uintptr_t)EF_VI_PS_ALIGNMENT == 0);
+
+	rc = 0;
+	cur_buf_addr = (ci_uintptr_t)*buf_addr;
+	for( i=0 ; i < n_pkts ; i++ ) {
+		ts_rc = ef10_unbundle_one_packet(vi, &cur_buf_addr,
+						 &pkts_out[i]);
+		rc = ( rc == 0 ) ? ts_rc : rc;
+	}
+	ef10_update_credit(vi, (ci_uintptr_t)*buf_addr, cur_buf_addr);
+
+	*buf_addr = (void*)cur_buf_addr;
+	return rc;
+}
+
+
+int ef_vi_packed_stream_unbundle_inline(ef_vi* vi, int n_pkts, void** buf_addr,
+					int* bytes_unpacked_out)
+{
+	ef_packed_stream_packet* pkt_out;
+	ci_uintptr_t cur_buf_addr;
+	int i, rc, ts_rc, bytes_unpacked;
+
+	EF_VI_ASSERT(*buf_addr);
+	EF_VI_ASSERT(bytes_unpacked_out);
+	EF_VI_ASSERT((ci_uintptr_t)(*buf_addr) %
+			(ci_uintptr_t)EF_VI_PS_ALIGNMENT == 0);
+
+	rc = 0;
+	bytes_unpacked = 0;
+	cur_buf_addr = (ci_uintptr_t)*buf_addr;
+	for( i=0 ; i < n_pkts ; i++ ) {
+		pkt_out = (ef_packed_stream_packet*)(cur_buf_addr -
+				(ci_uintptr_t)EF_VI_PS_NEGATIVE_SPACE);
+		ts_rc = ef10_unbundle_one_packet(vi, &cur_buf_addr, pkt_out);
+		bytes_unpacked += pkt_out->cap_len;
+		rc = ( rc == 0 ) ? ts_rc : rc;
+	}
+
+	ef10_update_credit(vi, (ci_uintptr_t)*buf_addr, cur_buf_addr);
+
+	*buf_addr = (void*)cur_buf_addr;
+	*bytes_unpacked_out = bytes_unpacked;
+	return rc;
+}
 
 /*! \cidoxg_end */

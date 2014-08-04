@@ -32,6 +32,9 @@
 
 # define SIOCINQ  FIONREAD
 # define SIOCOUTQ TIOCOUTQ
+# ifndef SIOCOUTQNSD
+#  define SIOCOUTQNSD 0x894b
+# endif
 # ifndef SIOCGSTAMPNS
 #  define SIOCGSTAMPNS 0x8907
 # endif

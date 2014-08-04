@@ -1310,28 +1310,31 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 	ACCESS_ONCE(*start) = 0;
 	rc = efx_mcdi_rpc_start(efx, MC_CMD_PTP, synch_buf,
 				MC_CMD_PTP_IN_SYNCHRONIZE_LEN);
-	EFX_BUG_ON_PARANOID(rc);
 
-	/* Wait for start from MCDI (or timeout) */
-	timeout = jiffies + msecs_to_jiffies(MAX_SYNCHRONISE_WAIT_MS);
-	while (!ACCESS_ONCE(*start) && (time_before(jiffies, timeout))) {
-		udelay(20);	/* Usually start MCDI execution quickly */
-		loops++;
+	if (rc == 0) {
+		/* Wait for start from MCDI (or timeout) */
+		timeout = jiffies + msecs_to_jiffies(MAX_SYNCHRONISE_WAIT_MS);
+		while (!ACCESS_ONCE(*start) &&
+		       (time_before(jiffies, timeout))) {
+			udelay(20); /* Usually start MCDI execution quickly */
+			loops++;
+		}
+
+		if (loops <= 1)
+			++ptp->fast_syncs;
+		if (!time_before(jiffies, timeout))
+			++ptp->sync_timeouts;
+
+		if (ACCESS_ONCE(*start))
+			efx_ptp_send_times(efx, &last_time);
+
+		/* Collect results */
+		rc = efx_mcdi_rpc_finish(efx, MC_CMD_PTP,
+					 MC_CMD_PTP_IN_SYNCHRONIZE_LEN,
+					 synch_buf, sizeof(synch_buf),
+					 &response_length);
 	}
 
-	if (loops <= 1)
-		++ptp->fast_syncs;
-	if (!time_before(jiffies, timeout))
-		++ptp->sync_timeouts;
-
-	if (ACCESS_ONCE(*start))
-		efx_ptp_send_times(efx, &last_time);
-
-	/* Collect results */
-	rc = efx_mcdi_rpc_finish(efx, MC_CMD_PTP,
-				 MC_CMD_PTP_IN_SYNCHRONIZE_LEN,
-				 synch_buf, sizeof(synch_buf),
-				 &response_length);
 	if (rc == 0) {
 		rc = efx_ptp_process_times(efx, synch_buf, response_length,
 					   &last_time);

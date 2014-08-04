@@ -26,6 +26,7 @@
 #include <driver/linux_resource/kernel_compat.h>
 #include "char_internal.h"
 #include "filter_list.h"
+#include "linux_char_internal.h"
 
 
 static const char *q_names[EFHW_N_Q_TYPES] = { "TXQ", "RXQ", "EVQ" };
@@ -116,6 +117,9 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
 
   if (vi_flags & EFHW_VI_RM_WITH_INTERRUPT)
     efrm_vi_attr_set_with_interrupt(attr, 1);
+
+  if (vi_flags & EFHW_VI_RX_PACKED_STREAM)
+    efrm_vi_attr_set_packed_stream(attr, 1);
 
   if ((rc = efrm_vi_alloc(client, attr, &virs)) < 0)
     goto fail_vi_alloc;
@@ -270,6 +274,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
     goto fail3;
 
   efch_filter_list_init(&rs->vi.fl);
+  rs->vi.sniff_flags = 0;
 
   /* Initialise the outputs. */
   alloc_out = &alloc->u.vi_out;
@@ -310,9 +315,15 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
 
 void efch_vi_rm_free(efch_resource_t *rs)
 {
+  struct efrm_vi *virs = efrm_vi(rs->rs_base);
+  if( virs->evq_callback_fn != NULL )
+    efrm_eventq_kill_callback(virs);
   efch_filter_list_free(rs->rs_base, &rs->vi.fl);
   /* Remove any sniff config we may have set up. */
-  efrm_port_sniff(rs->rs_base, 0, 0, -1);
+  if( rs->vi.sniff_flags & EFCH_RX_SNIFF )
+    efrm_port_sniff(rs->rs_base, 0, 0, -1);
+  if( rs->vi.sniff_flags & EFCH_TX_SNIFF )
+    efrm_tx_port_sniff(rs->rs_base, 0, -1);
 }
 
 
@@ -355,6 +366,17 @@ static int efch_vi_get_rx_ts_correction(struct efrm_vi* virs,
 {
   *rx_ts_correction_out = virs->rx_ts_correction;
   return 0;
+}
+
+
+static int efch_vi_get_rx_error_stats(struct efrm_vi* virs,
+                                      void* data, int data_len,
+                                      int do_reset)
+{
+  struct efhw_nic *nic;
+  nic = efrm_client_get_nic(virs->rs.rs_client);
+  return efhw_nic_get_rx_error_stats(nic, virs->rs.rs_instance,
+                                     data, data_len, do_reset);
 }
 
 
@@ -427,6 +449,21 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
     case CI_RSOP_PT_SNIFF:
       rc = efrm_port_sniff(rs->rs_base, op->u.pt_sniff.enable,
                            op->u.pt_sniff.promiscuous, -1);
+      if( rc == 0 && op->u.pt_sniff.enable )
+        rs->vi.sniff_flags |= EFCH_RX_SNIFF;
+      else if( rc == 0 && !op->u.pt_sniff.enable )
+        rs->vi.sniff_flags &= ~EFCH_RX_SNIFF;
+      break;
+
+    case CI_RSOP_TX_PT_SNIFF:
+      {
+        int enable = op->u.tx_pt_sniff.enable & EFCH_TX_SNIFF_ENABLE;
+        rc = efrm_tx_port_sniff(rs->rs_base, enable, -1);
+        if( rc == 0 && enable )
+          rs->vi.sniff_flags |= EFCH_TX_SNIFF;
+        else if( rc == 0 && !enable )
+          rs->vi.sniff_flags &= ~EFCH_TX_SNIFF;
+      }
       break;
 
     case CI_RSOP_FILTER_BLOCK_KERNEL:
@@ -436,6 +473,24 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
     case CI_RSOP_FILTER_DEL:
       rc = efch_filter_list_op_del(rs->rs_base, &rs->vi.fl, op);
       break;
+
+    case CI_RSOP_VI_GET_RX_ERROR_STATS:
+      {
+        int data_len = op->u.vi_stats.data_len;
+        void *user_data = (void *)(unsigned long)op->u.vi_stats.data_ptr;
+        void *data = kmalloc(data_len, GFP_KERNEL);
+    
+        if( data == NULL )
+          return -ENOMEM;
+        memset(data, 0, data_len);
+        rc = efch_vi_get_rx_error_stats(virs, data, data_len,
+                                        op->u.vi_stats.do_reset);
+        if( rc != 0 )
+          break;
+        if( copy_to_user(user_data, data, data_len) )
+          rc = -EFAULT;
+        break;
+      }
 
     default:
       rc = efch_filter_list_op_add(rs->rs_base, &rs->vi.fl, op, copy_out, 0u,

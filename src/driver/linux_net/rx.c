@@ -76,6 +76,14 @@ MODULE_PARM_DESC(rx_recycle_ring_size,
 #define rx_recycle_ring_size	0
 #endif
 
+#ifdef EFX_NOT_UPSTREAM
+static bool underreport_skb_truesize;
+module_param(underreport_skb_truesize, bool, 0444);
+MODULE_PARM_DESC(underreport_skb_truesize, "Give false skb truesizes. "
+			"Debug option to restore previous driver behaviour.");
+#endif
+
+
 /* Size of buffer allocated for skb header area. */
 #define EFX_SKB_HEADERS  128u
 
@@ -247,8 +255,14 @@ static int efx_init_rx_buffers(struct efx_rx_queue *rx_queue, bool atomic)
 		else
 			page = efx_reuse_page(rx_queue);
 		if (page == NULL) {
+			/* GFP_ATOMIC may fail because of various reasons,
+			 * and we re-schedule rx_fill from non-atomic
+			 * context in such a case.  So, use __GFP_NO_WARN
+			 * in case of atomic. */
 			page = alloc_pages(__GFP_COLD | __GFP_COMP |
-					   (atomic ? GFP_ATOMIC : GFP_KERNEL),
+					   (atomic ?
+					    (GFP_ATOMIC | __GFP_NOWARN)
+					    : GFP_KERNEL),
 					   efx->rx_buffer_order);
 			if (unlikely(page == NULL))
 				return -ENOMEM;
@@ -1331,7 +1345,15 @@ static void efx_ssr_deliver(struct efx_ssr_state *st, struct efx_ssr_conn *c)
 		c_th = (struct tcphdr *)(iph + 1);
 	}
 
+#ifdef EFX_NOT_UPSTREAM
+	if (underreport_skb_truesize) {
+		struct ethhdr *c_eh = eth_hdr(c->skb);
+		int len = c->skb->len + ((u8 *)c->skb->data - (u8 *)c_eh);
+		c->skb->truesize = len + sizeof(struct sk_buff);
+	} else
+#endif
 	c->skb->truesize += c->skb->data_len;
+
 	c->skb->ip_summed = CHECKSUM_UNNECESSARY;
 
 	c_th->window = c->th_last->window;
@@ -1783,6 +1805,14 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	struct efx_nic *efx = netdev_priv(net_dev);
 	struct efx_channel *channel;
 	struct efx_filter_spec spec;
+	/* 60 octets is the maximum length of an IPv4 header (all IPv6 headers
+	 * are 40 octets), and we pull 4 more to get the port numbers
+	 */
+	#define EFX_RFS_HEADER_LENGTH	(sizeof(struct vlan_hdr) + 60 + 4)
+	unsigned char header[EFX_RFS_HEADER_LENGTH];
+	int headlen = min_t(int, EFX_RFS_HEADER_LENGTH, skb->len);
+	#undef EFX_RFS_HEADER_LENGTH
+	void *hptr;
 	const __be16 *ports;
 	__be16 ether_type;
 	int nhoff;
@@ -1791,20 +1821,19 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	if (flow_id == RPS_FLOW_ID_INVALID)
 		return -EINVAL;
 
-	/* The core RPS/RFS code has already parsed and validated
-	 * VLAN, IP and transport headers.  We assume they are in the
-	 * header area.
-	 */
+	hptr = skb_header_pointer(skb, 0, headlen, header);
+	if (!hptr)
+		return -EINVAL;
 
 	if (skb->protocol == htons(ETH_P_8021Q)) {
-		const struct vlan_hdr *vh =
-			(const struct vlan_hdr *)skb->data;
+		const struct vlan_hdr *vh = hptr;
 
 		/* We can't filter on the IP 5-tuple and the vlan
 		 * together, so just strip the vlan header and filter
 		 * on the IP part.
 		 */
-		EFX_BUG_ON_PARANOID(skb_headlen(skb) < sizeof(*vh));
+		if (headlen < sizeof(*vh))
+			return -EINVAL;
 		ether_type = vh->h_vlan_encapsulated_proto;
 		nhoff = sizeof(struct vlan_hdr);
 	} else {
@@ -1818,30 +1847,27 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	efx_filter_init_rx(&spec, EFX_FILTER_PRI_HINT,
 			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
 			   rxq_index);
-	spec.match_flags =
-		EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO |
-		EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_LOC_PORT |
-		EFX_FILTER_MATCH_REM_HOST | EFX_FILTER_MATCH_REM_PORT;
+	spec.match_flags = EFX_FILTER_MATCH_FLAGS_RFS;
 	spec.ether_type = ether_type;
 
 	if (ether_type == htons(ETH_P_IP)) {
-		const struct iphdr *ip =
-			(const struct iphdr *)(skb->data + nhoff);
+		const struct iphdr *ip = hptr + nhoff;
 
-		EFX_BUG_ON_PARANOID(skb_headlen(skb) < nhoff + sizeof(*ip));
+		if (headlen < nhoff + sizeof(*ip))
+			return -EINVAL;
 		if (ip_is_fragment(ip))
 			return -EPROTONOSUPPORT;
 		spec.ip_proto = ip->protocol;
 		spec.rem_host[0] = ip->saddr;
 		spec.loc_host[0] = ip->daddr;
-		EFX_BUG_ON_PARANOID(skb_headlen(skb) < nhoff + 4 * ip->ihl + 4);
-		ports = (const __be16 *)(skb->data + nhoff + 4 * ip->ihl);
+		if (headlen < nhoff + 4 * ip->ihl + 4)
+			return -EINVAL;
+		ports = (const __be16 *)(hptr + nhoff + 4 * ip->ihl);
 	} else {
-		const struct ipv6hdr *ip6 =
-			(const struct ipv6hdr *)(skb->data + nhoff);
+		const struct ipv6hdr *ip6 = (hptr + nhoff);
 
-		EFX_BUG_ON_PARANOID(skb_headlen(skb) <
-				    nhoff + sizeof(*ip6) + 4);
+		if (headlen < nhoff + sizeof(*ip6) + 4)
+			return -EINVAL;
 		spec.ip_proto = ip6->nexthdr;
 		memcpy(spec.rem_host, &ip6->saddr, sizeof(ip6->saddr));
 		memcpy(spec.loc_host, &ip6->daddr, sizeof(ip6->daddr));

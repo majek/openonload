@@ -900,8 +900,6 @@ int oo_pipe_alloc_bufs(ci_netif* ni, struct oo_pipe* p, ci_uint32 num)
 }
 
 
-#ifdef __ci_driver__
-
 /* Current implementation assumes that we free a sequence of
  * buffers (OO_PIPE_BUFS number of them). */
 static void oo_pipe_free_bufs(ci_netif* ni, struct oo_pipe* p)
@@ -958,18 +956,16 @@ void ci_pipe_all_fds_gone(ci_netif* ni, struct oo_pipe* p, int do_free)
 }
 
 
-#endif /* __ci_driver__ */
-
-
-void oo_pipe_dump(ci_netif* ni, struct oo_pipe* p, const char* pf)
+void oo_pipe_dump(ci_netif* ni, struct oo_pipe* p, const char* pf,
+                  oo_dump_log_fn_t logger, void* log_arg)
 {
-  log("%s  read_p=%u:%u bytes=%u flags=%x", pf,
-      p->read_ptr.bufid, p->read_ptr.offset, p->bytes_removed,
-      (p->aflags & CI_PFD_AFLAG_READER_MASK ) >> CI_PFD_AFLAG_READER_SHIFT);
-  log("%s  writ_p=%u:%u bytes=%u flags=%x", pf,
-      p->write_ptr.bufid, p->write_ptr.offset, p->bytes_added,
-      (p->aflags & CI_PFD_AFLAG_WRITER_MASK ) >> CI_PFD_AFLAG_WRITER_SHIFT);
-  log("%s  num_bufs=%d", pf, p->bufs_num);
+  logger(log_arg, "%s  read_p=%u:%u bytes=%u flags=%x", pf,
+         p->read_ptr.bufid, p->read_ptr.offset, p->bytes_removed,
+         (p->aflags & CI_PFD_AFLAG_READER_MASK ) >> CI_PFD_AFLAG_READER_SHIFT);
+  logger(log_arg, "%s  writ_p=%u:%u bytes=%u flags=%x", pf,
+         p->write_ptr.bufid, p->write_ptr.offset, p->bytes_added,
+         (p->aflags & CI_PFD_AFLAG_WRITER_MASK ) >> CI_PFD_AFLAG_WRITER_SHIFT);
+  logger(log_arg, "%s  num_bufs=%d", pf, p->bufs_num);
 }
 
 #endif /* CI_CFG_USERSPACE_PIPE */

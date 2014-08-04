@@ -385,7 +385,7 @@ falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 	int iscsi_ddig_en = ((flags & EFHW_VI_ISCSI_RX_DDIG_EN) != 0);
 	int hdr_split_en = ((flags & EFHW_VI_RX_HDR_SPLIT) != 0);
 
-	if (flags & EFHW_VI_RX_TIMESTAMPS)
+	if (flags & (EFHW_VI_RX_TIMESTAMPS | EFHW_VI_RX_PACKED_STREAM))
 		return -EOPNOTSUPP;
 
 	/* initialise the TX descriptor queue pointer table */
@@ -1359,6 +1359,7 @@ falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			      uint n_pages, int interrupting, int enable_dos_p,
 			      int wakeup_evq /* ef10 only */,
 			      int enable_time_sync_events /* ef10 only */,
+			      int enable_cut_through /* ef10 only */,
 			      int *rx_ts_correction_out /* ef10 only */,
 			      int* flags_out /* ef10 only */)
 {
@@ -1814,6 +1815,11 @@ int falcon_nic_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
 {
         return -EOPNOTSUPP;
 }
+int falcon_nic_set_tx_port_sniff(struct efhw_nic *nic, int instance,
+				 int enable, int rss_context_handle)
+{
+        return -EOPNOTSUPP;
+}
 
 
 /*--------------------------------------------------------------------
@@ -1830,6 +1836,20 @@ static int falcon_license_challenge(struct efhw_nic *nic,
 {
 	return -EOPNOTSUPP;
 }
+
+
+/*--------------------------------------------------------------------
+ *
+ * Stats
+ *
+ *--------------------------------------------------------------------*/
+
+static int falcon_get_rx_error_stats(struct efhw_nic *nic, int instance,
+                                     void *data, int data_len, int do_reset)
+{
+	return -EOPNOTSUPP;
+}
+
 
 /*--------------------------------------------------------------------
  *
@@ -1939,9 +1959,11 @@ struct efhw_func_ops falcon_char_functional_units = {
 	falcon_nic_buffer_table_set,
 	falcon_nic_buffer_table_clear,
 	falcon_nic_set_port_sniff,
+	falcon_nic_set_tx_port_sniff,
 	falcon_nic_rss_context_alloc,
 	falcon_nic_rss_context_free,
 	falcon_nic_rss_context_set_table,
 	falcon_nic_rss_context_set_key,
 	falcon_license_challenge,
+	falcon_get_rx_error_stats,
 };

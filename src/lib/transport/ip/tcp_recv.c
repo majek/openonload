@@ -87,16 +87,14 @@ ci_tcp_recv_fill_msgname(ci_tcp_state* ts, struct sockaddr *name,
 
 int ci_tcp_send_wnd_update(ci_netif* ni, ci_tcp_state* ts)
 {
-  int max_window;
-
   ci_assert(ci_netif_is_locked(ni));
 
-  max_window = CI_MIN(tcp_rcv_buff(ts), (0xffff << ts->rcv_wscl));
-  
   if(CI_UNLIKELY( ! (ts->s.b.state & CI_TCP_STATE_ACCEPT_DATA) ))
     return 0;
 
-  if( SEQ_SUB(ts->rcv_delivered + max_window,
+  ci_assert_lt(ci_tcp_ack_trigger_delta(ts), ci_tcp_max_rcv_window(ts));
+
+  if( SEQ_SUB(ts->rcv_delivered + ci_tcp_max_rcv_window(ts),
               tcp_rcv_wnd_right_edge_sent(ts))
       >= ci_tcp_ack_trigger_delta(ts) ) {
     ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);

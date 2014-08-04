@@ -965,7 +965,8 @@ efab_eplock_unlock_and_wake_rsop(ci_private_t *priv, void *unused)
 {
   if (priv->thr == NULL)
     return -EINVAL;
-  return efab_eplock_unlock_and_wake(&priv->thr->netif);
+  ci_assert_equal(priv->thr->netif.flags & CI_NETIF_FLAG_IN_DL_CONTEXT, 0);
+  return efab_eplock_unlock_and_wake(&priv->thr->netif, 0);
 }
 static int
 efab_eplock_lock_wait_rsop(ci_private_t *priv, void *unused)
@@ -1016,7 +1017,9 @@ oo_ioctl_debug_op(ci_private_t *priv, void *arg)
     break;
   case __CI_DEBUG_OP_DUMP_STACK__:
     rc = tcp_helper_dump_stack(op->u.dump_stack.stack_id, 
-                               op->u.dump_stack.orphan_only);
+                               op->u.dump_stack.orphan_only,
+                               CI_USER_PTR_GET(op->u.dump_stack.user_buf),
+                               op->u.dump_stack.user_buf_len);
     break;
   case __CI_DEBUG_OP_KILL_STACK__:
     rc = tcp_helper_kill_stack_by_id(op->u.stack_id);

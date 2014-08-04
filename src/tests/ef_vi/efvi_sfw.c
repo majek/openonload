@@ -350,26 +350,16 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
   }
 
   else if( ! strcmp("multicast-all", type) ) {
+    if( strlen(type) != strlen(s_in) )
+      goto out;
     TRY(ef_filter_spec_set_multicast_all(fs));
-    if( strlen(type) != strlen(s_in) ) {
-      remainder = strtok(NULL, "");
-      if( ! (vlan = strchr(remainder, '=')) )
-        goto out;
-      ++vlan;
-      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
-    }
     rc = 0;
   }
 
   else if( ! strcmp("unicast-all", type) ) {
+    if( strlen(type) != strlen(s_in) )
+      goto out;
     TRY(ef_filter_spec_set_unicast_all(fs));
-    if( strlen(type) != strlen(s_in) ) {
-      remainder = strtok(NULL, "");
-      if( ! (vlan = strchr(remainder, '=')) )
-        goto out;
-      ++vlan;
-      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
-    }
     rc = 0;
   }
 
@@ -410,6 +400,11 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
       else
         TRY(-EINVAL);
     }
+    rc = 0;
+  }
+
+  else if( ! strcmp("tx-sniff", type) ) {
+    TRY(ef_filter_spec_set_tx_port_sniff(fs));
     rc = 0;
   }
 

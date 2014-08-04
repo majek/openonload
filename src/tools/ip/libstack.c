@@ -671,11 +671,13 @@ static int libstack_mappings_init(void)
 
 void libstack_stack_mapping_print_pids(int stack_id)
 {
-  const int buf_len = 1024;
+  const int buf_len = 61;
   char buf[buf_len];
   int i, consumed = 0;
   struct stack_mapping* sm = stack_mappings;
-
+  int ilen = 0;
+  int pid = 0;
+  
   while( sm && sm->stack_id != stack_id )
     sm = sm->next;
   if( sm == NULL ) {
@@ -685,6 +687,25 @@ void libstack_stack_mapping_print_pids(int stack_id)
 
   consumed += snprintf(&buf[consumed], buf_len - consumed, "pids: ");
   for( i = 0; i < sm->n_pids; ++i ) {
+    /*
+     * check if adding another pid hits/exceeds line length: if so,
+     * print line, reset counters & buffer, add indentation
+     * ilen initialised to 2 as PID + , will always be length >= 2
+     */
+    pid = sm->pids[i];
+    ilen = 2;
+    while( pid > 9 ) {
+      pid = pid / 10;
+      ++ilen;
+    }
+
+    if( (ilen + consumed) > buf_len ) {
+      ci_log("%s", buf);
+      bzero(buf, buf_len);
+      consumed = 0;
+      consumed += snprintf(&buf[consumed], buf_len - consumed, "      ");
+    }
+
     if( i == sm->n_pids - 1 )
       consumed += snprintf(&buf[consumed], buf_len - consumed, "%d",
                            sm->pids[i]);
@@ -1430,50 +1451,40 @@ void socket_add_all_all(void)
 ***********************************************************************
 **********************************************************************/
 
-static void cluster_dump(ci_netif* ni)
-{
-  int buf_len = 8192;
-  char* buf;
-  int rc;
-  while( 1 ) {
-    if( (buf = malloc(buf_len)) == NULL ) {
-      ci_log("%s: Out of memory", __FUNCTION__);
-      break;
-    }
-    rc = ci_tcp_helper_cluster_dump(ci_netif_get_driver_handle(ni), buf,
-                                    buf_len);
-    if( rc >= 0 && rc <= buf_len )
-      printf("%s", buf);
-    free(buf);
-    if( rc < 0 )
-      ci_log("%s: failed (%d)", __FUNCTION__, -rc);
-    if( rc <= buf_len )
-      break;
-    buf_len = rc;
-  }
-}
+/* Wrapper for the various state-dumping ioctls: keeps trying with
+ * larger buffers until it gets the whole output.
+ */
 
-static void filter_dump(ci_netif* ni, oo_sp sock_id)
+#define DVB_LOG_FAILURE  1
+typedef int (*oo_dump_request_fn_t)(void* args, void* buf, int buf_len);
+
+static int dump_via_buffers(oo_dump_request_fn_t dump_req_fn, void* arg,
+                            unsigned flags)
 {
   int buf_len = 8192;
   char* buf;
   int rc;
   while( 1 ) {
     if( (buf = malloc(buf_len)) == NULL ) {
-      ci_log("%s: Out of memory", __FUNCTION__);
-      break;
+      if( flags & DVB_LOG_FAILURE )
+        ci_log("%s: Out of memory", __FUNCTION__);
+      return -ENOMEM;
     }
-    rc = ci_tcp_helper_ep_filter_dump(ci_netif_get_driver_handle(ni),
-                                      sock_id, buf, buf_len);
+    rc = dump_req_fn(arg, buf, buf_len);
     if( rc >= 0 && rc <= buf_len )
       printf("%s", buf);
     free(buf);
-    if( rc < 0 )
-      ci_log("%s: failed (%d)", __FUNCTION__, -rc);
+    if( rc < 0 ) {
+      if( flags & DVB_LOG_FAILURE )
+        ci_log("%s: failed (%d)", __FUNCTION__, -rc);
+      return rc;
+    }
     if( rc <= buf_len )
       break;
     buf_len = rc;
   }
+
+  return 0;
 }
 
 /**********************************************************************
@@ -1508,16 +1519,28 @@ const char* arg_s[1];
 void zombie_stack_dump(int id, void *arg)
 {
   int rc;
-  oo_fd fd;
+  dump_stack_args args;
+
+  args.stack_id = id;
+  args.orphan_only = 1;
   
-  CI_TRY(oo_fd_open(&fd));
-  rc = oo_debug_dump_stack(fd, id, 1);
-  CI_TRY(oo_fd_close(fd));
+  CI_TRY(oo_fd_open(&args.fp));
+  rc = dump_via_buffers(oo_debug_dump_stack, &args, 0);
+  CI_TRY(oo_fd_close(args.fp));
   
-  if( rc == 0 )
-    ci_log("Orphan stack %d state dumped to syslog", id);
-  else
-    ci_log("No such orphan stack %d\n", id);
+  switch( -rc ) {
+  case 0:
+    /* Success. */
+    break;
+  case EPERM:
+    ci_log("Permission denied - please run as root to access orphan stacks");
+    break;
+  case ENOMEM:
+    ci_log("Out of memory.");
+    break;
+  default:
+    ci_log("No such orphan stack %d (error %d).", id, -rc);
+  }
 }
 
 
@@ -1530,10 +1553,17 @@ void zombie_stack_kill(int id, void *arg)
   rc = oo_debug_kill_stack(fd, id);
   CI_TRY(oo_fd_close(fd));
   
-  if( rc == 0 )
+  switch( -rc ) {
+  case 0:
+    /* Success. */
     ci_log("Orphan stack %d state killed", id);
-  else
-    ci_log("No such orphan stack %d\n", id);
+    break;
+  case EPERM:
+    ci_log("Permission denied - please run as root to access orphan stacks");
+    break;
+  default:
+    ci_log("No such orphan stack %d (error %d)\n", id, -rc);
+  }
 }
 
 
@@ -1746,12 +1776,14 @@ static void stack_filter_table(ci_netif* ni)
 
 static void stack_filters(ci_netif* ni)
 {
-  filter_dump(ni, OO_SP_NULL);
+  filter_dump_args args = {ci_netif_get_driver_handle(ni), OO_SP_NULL};
+  dump_via_buffers(ci_tcp_helper_ep_filter_dump, &args, DVB_LOG_FAILURE);
 }
 
 static void stack_clusters(ci_netif* ni)
 {
-  cluster_dump(ni);
+  cluster_dump_args args = {ci_netif_get_driver_handle(ni)};
+  dump_via_buffers(ci_tcp_helper_cluster_dump, &args, DVB_LOG_FAILURE);
 }
 
 static void stack_qs(ci_netif* ni)
@@ -2358,16 +2390,16 @@ static void stack_hwport_to_base_ifindex(ci_netif* ni)
 ***********************************************************************
 **********************************************************************/
 
-#define STACK_OP_A(nm, help, args, fl)          \
-  { (#nm), (stack_##nm), (NULL), (help), (args), (fl) }
+#define STACK_OP_A(nm, help, args, n_args, fl)          \
+  { (#nm), (stack_##nm), (NULL), (help), (args), (n_args), (fl) }
 
-#define STACK_OP_AU(nm, h, ah)    STACK_OP_A(nm, (h), (ah), FL_ARG_U)
-#define STACK_OP_AX(nm, h, ah)    STACK_OP_A(nm, (h), (ah), FL_ARG_X)
-#define STACK_OP_F(nm, help, fl)  STACK_OP_A(nm, (help), NULL, (fl))
-#define STACK_OP(nm, help)        STACK_OP_A(nm, (help), NULL, 0)
+#define STACK_OP_AU(nm, h, ah)    STACK_OP_A(nm, (h), (ah), 1, FL_ARG_U)
+#define STACK_OP_AX(nm, h, ah)    STACK_OP_A(nm, (h), (ah), 1, FL_ARG_X)
+#define STACK_OP_F(nm, help, fl)  STACK_OP_A(nm, (help), NULL, 0, (fl))
+#define STACK_OP(nm, help)        STACK_OP_A(nm, (help), NULL, 0, 0)
 
 #define ZOMBIE_STACK_OP(nm, help)           \
-  { (#nm), (NULL), (zombie_stack_##nm), (help), (NULL), (FL_ID) }
+  { (#nm), (NULL), (zombie_stack_##nm), (help), (NULL), 0, (FL_ID) }
 
 static const stack_op_t zombie_stack_ops[] = {
   ZOMBIE_STACK_OP(dump, "[requires -z] show core state stack and sockets"),
@@ -2447,14 +2479,15 @@ static const stack_op_t stack_ops[] = {
 #endif
   STACK_OP_AX(tcp_rx_checks,   "set reception check bitmap option", "<mask>"),
   STACK_OP_AX(tcp_rx_log_flags,"set reception logging bitmap option","<mask>"),
-  STACK_OP_A(set_opt,          "set stack option", "<name> <val>", FL_ARG_SU),
-  STACK_OP_A(get_opt,          "get stack option", "<name>", FL_ARG_S),
+  STACK_OP_A(set_opt,          "set stack option", "<name> <val>", 2,
+             FL_ARG_SU),
+  STACK_OP_A(get_opt,          "get stack option", "<name>", 1, FL_ARG_S),
   STACK_OP_AU(set_rxq_limit,   "set the rxq_limit", "<limit>"),
   STACK_OP(lots,               "dump state, opts, stats"),
   STACK_OP(reap_list,          "dump list of sockets on the reap_list"),
   STACK_OP(reap_list_verbose,  "dump sockets on the reap_list"),
   STACK_OP(pkt_reap,           "reap packet buffers from sockets"),
-  STACK_OP_A(cicp_user_find_home,"invoke cicp_user_find_home", "<ip>",
+  STACK_OP_A(cicp_user_find_home,"invoke cicp_user_find_home", "<ip>", 1,
              FL_ARG_S),
   STACK_OP(hwport_to_base_ifindex,"dump hwport_to_base_ifindex table"),
 };
@@ -2519,7 +2552,10 @@ static void socket_trylock(ci_netif* ni, ci_tcp_state* ts) {
 }
 
 static void socket_filters(ci_netif* ni, ci_tcp_state* ts)
-{ filter_dump(ni, S_SP(ts)); }
+{
+  filter_dump_args args = {ci_netif_get_driver_handle(ni), S_SP(ts)};
+  dump_via_buffers(ci_tcp_helper_ep_filter_dump, &args, DVB_LOG_FAILURE);
+}
 
 static void socket_nodelay(ci_netif* ni, ci_tcp_state* ts)
 { ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT); }
@@ -2797,14 +2833,16 @@ void sockets_watch(void)
 ***********************************************************************
 **********************************************************************/
 
-#define SOCK_OP_A(nm, fl, help, args)  \
-  { #nm, socket_##nm, help, args, (fl) }
+#define SOCK_OP_A(nm, fl, help, args, n_args)     \
+  { #nm, socket_##nm, help, args, n_args, (fl) }
 
-#define SOCK_OP_F(nm, fl, help)        SOCK_OP_A(nm, fl, help, NULL)
-#define SOCK_OP(nm, help)              SOCK_OP_A(nm, 0,  help, NULL)
+#define SOCK_OP_F(nm, fl, help)        SOCK_OP_A(nm, fl, help, NULL, 0)
+#define SOCK_OP(nm, help)              SOCK_OP_A(nm, 0,  help, NULL, 0)
 
-#define TCPC_OP_A(nm, fl, help, args)  SOCK_OP_A(nm, (fl)|FL_TCPC, help, args)
-#define TCPC_OP(nm, help)              SOCK_OP_A(nm, FL_TCPC, help, "")
+#define TCPC_OP_A(nm, fl, help, args, n_args)     \
+    SOCK_OP_A(nm, (fl)|FL_TCPC, help, args, n_args)
+#define TCPC_OP_AU(nm, help, args)     TCPC_OP_A(nm, FL_ARG_U, help, args, 1)
+#define TCPC_OP(nm, help)              SOCK_OP_A(nm, FL_TCPC, help, "", 0)
 
 
 static const socket_op_t socket_ops[] = {
@@ -2833,19 +2871,19 @@ static const socket_op_t socket_ops[] = {
   TCPC_OP   (ack,
              "send ACK"),
   TCPC_OP   (rst,	 "send RST"),
-  TCPC_OP_A (set_mss, FL_ARG_U,
+  TCPC_OP_AU(set_mss,
              "set TCP socket maximum segment size", "<mss>"),
-  TCPC_OP_A (set_pmtu, FL_ARG_U,
+  TCPC_OP_AU(set_pmtu,
              "set TCP path MTU state", "<pmtu>"),
-  TCPC_OP_A (set_sndbuf, FL_ARG_U,
+  TCPC_OP_AU(set_sndbuf,
              "set socket SO_SNDBUF", "<sndbuf>"),
-  TCPC_OP_A (set_rcvbuf, FL_ARG_U,
+  TCPC_OP_AU(set_rcvbuf,
              "set socket SO_RCVBUF", "<rcvbuf>"),
-  TCPC_OP_A (set_cwnd, FL_ARG_U,
+  TCPC_OP_AU(set_cwnd,
              "set congestion window size", "<cwnd>"),
-  TCPC_OP_A (send, FL_ARG_U,
+  TCPC_OP_AU(send,
              "transmit bytes on socket", "<bytes>"),
-  TCPC_OP_A (recv, FL_ARG_U,
+  TCPC_OP_AU(recv,
              "receive bytes on TCP socket", "<bytes>"),
   TCPC_OP   (ppl_corrupt_loop,
              "corrupt post-poll-list with a loop"),

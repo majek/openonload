@@ -98,9 +98,12 @@ ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts)
 
   /* Check that the right window edge moves forward by at least the AMSS,
    * as required by RFC1122 silly window avoidance.
+   *
+   * Do not apply silly window avoidance when we have nothing to read:
+   * probably, rcvbuff is too small.
    */
-  if(CI_LIKELY( SEQ_GE(new_rhs, ts->rcv_wnd_right_edge_sent + ts->amss))
-     ) {
+  if( CI_LIKELY( SEQ_GE(new_rhs, ts->rcv_wnd_right_edge_sent + ts->amss) )
+      || tcp_rcv_usr(ts) == 0 ) {
     /* We are ready to move on the window right edge. */
     new_window = SEQ_SUB(new_rhs, tcp_rcv_nxt(ts));
     ci_assert_ge(new_window, 0);

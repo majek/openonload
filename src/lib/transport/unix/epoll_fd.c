@@ -914,9 +914,11 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
 
   CITP_EPOLL_EP_LOCK(ep);
 
-  if( (ci_dllist_is_empty(&ep->oo_sockets) && !ep->epfd_syncs_needed) ||
+  if( ci_dllist_is_empty(&ep->oo_sockets) ||
       maxevents <= 0 || timeout < -1 || events == NULL ) {
     /* No accelerated fds or invalid parameters). */
+    if( ep->epfd_syncs_needed )
+      citp_ul_epoll_ctl_sync(ep, fdi->fd);
     CITP_EPOLL_EP_UNLOCK(ep, 0);
     citp_exit_lib(lib_context, FALSE);
     if( timeout )
@@ -1163,6 +1165,9 @@ void citp_epoll_on_handover(citp_fdinfo* fd_fdi, int fdt_locked)
                       __FUNCTION__, fd_fdi->epoll_fd, fd_fdi->fd));
       CITP_EPOLL_EP_UNLOCK(ep, fdt_locked);
     }
+    if( ep->epfd_syncs_needed )
+      citp_ul_epoll_ctl_sync(ep, epoll_fdi->fd);
+
   }
   else {
     Log_POLL(ci_log("%s: epoll_fd=%d changed (type=%d seq=%llx,%llx fd=%d)",

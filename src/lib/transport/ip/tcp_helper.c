@@ -162,12 +162,13 @@ int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
  * TODO
  *
  *--------------------------------------------------------------------*/
-int ci_tcp_helper_cluster_dump(ci_fd_t fd, void* buf, int buf_len)
+int ci_tcp_helper_cluster_dump(void* opaque, void* buf, int buf_len)
 {
+  cluster_dump_args* args = opaque;
   oo_cluster_dump_t op;
   CI_USER_PTR_SET(op.buf, buf);
   op.buf_len = buf_len;
-  return oo_resource_op(fd, OO_IOC_CLUSTER_DUMP, &op);
+  return oo_resource_op(args->fd, OO_IOC_CLUSTER_DUMP, &op);
 }
 
 
@@ -209,14 +210,14 @@ int ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp ep)
  * \return                standard error codes
  *
  *--------------------------------------------------------------------*/
-int ci_tcp_helper_ep_filter_dump(ci_fd_t fd, oo_sp sock_id,
-                                 void* buf, int buf_len)
+int ci_tcp_helper_ep_filter_dump(void* opaque, void* buf, int buf_len)
 {
+  filter_dump_args* args = opaque;
   oo_tcp_filter_dump_t op;
-  op.sock_id = sock_id;
+  op.sock_id = args->sock_id;
   CI_USER_PTR_SET(op.buf, buf);
   op.buf_len = buf_len;
-  return oo_resource_op(fd, OO_IOC_EP_FILTER_DUMP, &op);
+  return oo_resource_op(args->fd, OO_IOC_EP_FILTER_DUMP, &op);
 }
 
 

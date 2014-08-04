@@ -257,6 +257,12 @@ static void do_mcast(struct configuration* cfg, int sock)
  * that's only supported on reasonably recent versions
  *
  * Option: --ioctl ethX
+ *
+ * NOTE:
+ * Usage of the ioctl call is discouraged. A better method, if using
+ * hardware timestamping, would be to use sfptpd as it will effectively
+ * make the ioctl call for you.
+ *
  */
 static void do_ioctl(struct configuration* cfg, int sock)
 {
@@ -264,7 +270,6 @@ static void do_ioctl(struct configuration* cfg, int sock)
   struct ifreq ifr;
   struct hwtstamp_config hwc;
   int ok;
-  int s = 0;
 #endif
 
   if(cfg->cfg_ioctl == NULL)
@@ -285,8 +290,8 @@ static void do_ioctl(struct configuration* cfg, int sock)
    * interface 
    */
   if ( cfg->cfg_protocol == IPPROTO_TCP ) {
-    s = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    TEST(s != -1);
+    sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    TEST(sock != -1);
   }
 
   ok = ioctl(sock, SIOCSHWTSTAMP, &ifr);
@@ -298,7 +303,7 @@ static void do_ioctl(struct configuration* cfg, int sock)
   }
 
   if ( cfg->cfg_protocol == IPPROTO_TCP )
-    close(s);
+    close(sock);
 
   return;
 #else
@@ -408,7 +413,7 @@ static void handle_time(struct msghdr* msg)
     switch(cmsg->cmsg_type) {
     case ONLOAD_SCM_TIMESTAMPING_STREAM:
       tcp_tx_stamps = (struct onload_scm_timestamping_stream*)CMSG_DATA(cmsg);
-      printf("Timestamp for %d bytes:\n", tcp_tx_stamps->len);
+      printf("Timestamp for %d bytes:\n", (int)tcp_tx_stamps->len);
       print_time("First sent", &tcp_tx_stamps->first_sent);
       print_time("Last sent", &tcp_tx_stamps->last_sent);
       break;

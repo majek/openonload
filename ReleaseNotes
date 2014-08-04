@@ -1,3 +1,160 @@
+
+OpenOnload-201405-u1 Release Notes
+==================================
+
+This is an update release that fixes bugs in the openonload-201405
+release and adds a few enhancements that are needed to support
+SolarCapture 1.3.
+
+The accompanying ChangeLog file contains details of the changes made
+in this release.
+
+Please see ReleaseNotes-sfc for details of the changes to the SFC net
+driver included with this release.
+
+The Release Notes for the openonload-201405 release are included at the
+end of this file.
+
+
+----------------------------------------
+New Configuration Options
+-------------------------
+
+EF_CLUSTER_IGNORE
+-----------------
+
+When set, this option instructs Onload to ignore attempts to use
+clusters and effectively ignore attempts to set SO_REUSEPORT.  This
+may be useful if third-party software is setting SO_REUSEPORT but is
+hitting one of the limitations set out in the openonload-201405
+release notes below.
+
+
+----------------------------------------
+New features
+------------
+
+SIOCOUTQ/SIOCOUTQNSD
+--------------------
+
+Onload now supports the above ioctls for TCP sockets, returning the
+amount of data not yet acknowledged and the amount of data not yet sent
+respectively.
+
+ef_vi API changes
+-----------------
+
+This release adds two new functions to the ef_vi API:
+
+ef_pd_interface_name()
+ - returns the interface name used by this ef_pd.  This can be useful
+   when an ef_pd is allocated using ef_pd_alloc_by_name() as the caller
+   may not know which interface the ef_pd is associated with.
+
+ef_vi_prime()
+ - prime interrupts on this VI.
+
+   The ef_vi layer now supports blocking on a fd until it has events
+   ready.  This feature provides the functionality that is already
+   provided by ef_eventq_wait() with the added benefit that as you are
+   blocking on a fd, you can block for events on an VI along with
+   other fds at the same time.
+
+   The fd to use for blocking is the driver handle that was used to
+   allocate the VI.
+
+   Before you can block on the fd, you need to prime interrupts on the
+   VI.  This is done by calling ef_vi_prime().  When this function is
+   called, you must tell it how many events you've read from the
+   eventq which can be retrieved by using ef_eventq_current().  Then
+   you can simply block on the fd becoming readable by using select(),
+   poll(), epoll(), etc.  When the fd is returned as reablable, you
+   can then get the associated events by polling the eventq in the
+   normal way.  Note that at this point, you must call ef_vi_prime()
+   again (with the current value from ef_eventq_current()) before
+   blocking on the fd again.
+
+   The efpingpong example code has been updated to offer a simple
+   example.
+
+This release also adds a new filter type to sniff TX traffic.  This
+filter allows an ef_vi application to get a copy of all traffic being
+sent out on an interface.
+
+SO_REUSEADDR
+------------
+
+This release improves support for the SO_REUSEADDR socket option for
+TCP active open sockets that are sharing a stack.  Previously, whether
+this worked depended on the state of other sockets in the stack.
+Sockets trying to share a local address in different Onload stacks will
+still get an error on bind() despite setting SO_REUSEADDR.
+
+
+----------------------------------------
+Packed stream firmware
+----------------------
+
+Solarflare has created a new firmware variant for the 7000-series
+(Flareon) NICs to allow SolarCapture to capture at higher packet
+rates.  This variant is called "packed stream firmware".  Due to
+limitations in the filter types supported by this firmware Onload will
+not accelerate traffic over NICs running this firmware type.  It is
+still possible to use ef_vi applications (including SolarCapture) with
+this firmware variant, but depending on the applications' use of
+hardware filters you may not be able to insert all the required filter
+types.
+
+
+----------------------------------------
+Performance
+-----------
+
+The throughput performance regression in the OpenOnload-201405 release
+(see Release Notes below) for interrupt-driven small messages has been
+largely addressed by fixes in this release.
+
+
+----------------------------------------
+New Known Issues
+----------------
+
+ - The Onload extension API function onload_move_fd() introduced in
+openonload-201405 does not check that the destination stack is capable
+of RX or TX hardware timestamping before moving the socket.  Sockets
+using SO_TIMESTAMPING should therefore use this function with care.
+We aim to address this in a future release.
+
+ - Users of ef_vi or SolarCapture running two applications that both
+attempt to install a unicast-all filter will find that the second one
+succeeds instead of getting an error.  The second application to
+install the filter will receive all the matching traffic and the first
+will stop receiving matching traffic.  The same is true for the
+multicast-all filter.  This will be fixed in a future release.
+
+ - "onload_tool reload" on RHEL7 when used with multiple VFs configured
+may return errors from modprobe and mknod about files in /dev already
+existing:
+
+    onload_tool: /sbin/modprobe onload
+    mknod: '/dev/sfc_affinity': File exists
+    onload_tool: FAILED: mknod -m 666 /dev/sfc_affinity c 246 0
+    modprobe: ERROR: Error running install command for sfc_affinity
+    modprobe: ERROR: could not insert 'onload': Operation not permitted
+
+These errors appear to be harmless - it is repeating the operation to
+create the /dev files on discovering the additional VFs - and the
+modules are all loaded correctly but we are investigating how this can
+be avoided on this OS.
+
+ - This release makes a change to the way that the ef_vi function
+ef_memreg_alloc() validates the memory regions it is passed.
+Previously it did not check that the start of the region was 4KB
+aligned.  Now it does, and returns -EINVAL if the memory region is
+not suitably aligned.
+
+
+
 OpenOnload-201405 Release Notes
 ===============================
 

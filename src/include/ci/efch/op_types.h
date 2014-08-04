@@ -116,6 +116,7 @@ struct efch_pio_alloc {
 #define EFCH_PD_FLAG_VF               0x1
 #define EFCH_PD_FLAG_VF_OPTIONAL      0x2
 #define EFCH_PD_FLAG_PHYS_ADDR        0x4
+#define EFCH_PD_FLAG_RX_PACKED_STREAM 0x8
 
 
 struct efch_pd_alloc {
@@ -164,8 +165,7 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_PIO_LINK_VI             0x68
 # define                CI_RSOP_PIO_UNLINK_VI           0x69
 # define                CI_RSOP_FILTER_ADD_IP4_VLAN     0x70
-# define                CI_RSOP_FILTER_ADD_ALL_UNICAST_VLAN   0x71
-# define                CI_RSOP_FILTER_ADD_ALL_MULTICAST_VLAN 0x72
+/* 0x71 and 0x72 removed - do not reuse */
 # define                CI_RSOP_FILTER_ADD_MISMATCH_UNICAST        0x73
 # define                CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST      0x74
 # define                CI_RSOP_FILTER_ADD_MISMATCH_UNICAST_VLAN   0x75
@@ -177,6 +177,8 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL 0x7A
 # define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL_UNICAST   0x7B
 # define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL_MULTICAST 0x7C
+# define                CI_RSOP_TX_PT_SNIFF             0x7D
+# define                CI_RSOP_VI_GET_RX_ERROR_STATS   0x7E
 
   union {
     struct {
@@ -234,8 +236,20 @@ typedef struct ci_resource_op_s {
       uint8_t           promiscuous;
     } pt_sniff;
     struct {
+      /* MCDI op has 32 bit flags field, of which enable is the bottom one,
+       * so make this pass all 32 bits for future compatibility, even if we
+       * only ever set enable at the moment.
+       */
+      uint32_t          enable;
+    } tx_pt_sniff;
+    struct {
       uint8_t           block;
     } block_kernel;
+    struct {
+      uint64_t          data_ptr;
+      uint32_t          data_len;
+      uint8_t           do_reset;
+    } vi_stats;
   } u CI_ALIGN(8);
 } ci_resource_op_t;
 
@@ -257,18 +271,32 @@ typedef struct ci_license_challenge_op_s {
   ci_int16          feature;
 /* SolarCapture Pro feature id. Well known. */
 #define CI_LCOP_CHALLENGE_FEATURE_SCPRO     (4)
+#define CI_LCOP_CHALLENGE_FEATURE_SCLIVE    (32)
 
   uint32_t          expiry;
   uint8_t           challenge[CI_LCOP_CHALLENGE_CHALLENGE_LEN];
   uint8_t           signature[CI_LCOP_CHALLENGE_SIGNATURE_LEN];
 } ci_license_challenge_op_t;
 
+
+/**********************************************************************
+ *
+ * Priming resources
+ *
+ */
+typedef struct ci_resource_prime_op_s {
+  efch_resource_id_t crp_id;
+  uint32_t           crp_current_ptr;
+} ci_resource_prime_op_t;
+
+
 #define CI_IOC_CHAR_BASE       81
 
 #define CI_RESOURCE_OP      (CI_IOC_CHAR_BASE+ 0)  /* ioctls for resources */
 #define CI_RESOURCE_ALLOC   (CI_IOC_CHAR_BASE+ 1)  /* allocate resources   */
 #define CI_LICENSE_CHALLENGE (CI_IOC_CHAR_BASE+ 2) /* license challenge   */
-#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 3)
+#define CI_RESOURCE_PRIME   (CI_IOC_CHAR_BASE+ 3)  /* prime resource */
+#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 4)
 
 
 /**********************************************************************

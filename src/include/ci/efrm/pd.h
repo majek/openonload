@@ -57,6 +57,21 @@ struct page;
 struct efrm_pd_owner_ids;
 
 
+/* Packed stream fw requires that all buffers have 1MB alignment.
+ *
+ * However: On PPC we currently have to use a modified firmware that uses a
+ * 64KB buffer size because we can't get large aligned DMA mappings on PPC,
+ * which are needed for packed stream.  We just have to hope that the
+ * correct firmware is being used, because right now we have no way to
+ * check or configure the packed stream buffer size.
+ */
+#ifdef __PPC__
+# define EFRM_PD_RX_PACKED_STREAM_MEMORY_ALIGNMENT  (1u << 16)
+#else
+# define EFRM_PD_RX_PACKED_STREAM_MEMORY_ALIGNMENT  (1u << 20)
+#endif
+
+
 /* Allocate a protection domain.
  *
  * If [vf_opt] is NULL, then [client_opt] must not be NULL.  If [vf_opt] is
@@ -106,6 +121,18 @@ efrm_pd_owner_ids_dtor(struct efrm_pd_owner_ids* owner_ids);
  */
 extern int
 efrm_pd_owner_id(struct efrm_pd *);
+
+/* Set minimum buffer alignment.  All buffers mapped into this pd must
+ * meet this requirement.
+ */
+extern void
+efrm_pd_set_min_align(struct efrm_pd *pd, int alignment);
+
+
+/* Get minimum buffer alignment.
+ */
+extern int
+efrm_pd_get_min_align(struct efrm_pd *pd);
 
 /* Returns a borrowed reference, or NULL.  Reference remains valid as long
  * as the reference to the pd is held.

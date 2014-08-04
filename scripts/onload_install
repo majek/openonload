@@ -179,14 +179,16 @@ install_slib32() {
 
 install_solar_clusterd() {
   local pwd=$PWD
-  try $do cd "$bin/../src/tools/solar_clusterd"
+  try $do cd "$TOP/src/tools/solar_clusterd"
   local python_manifest=$(mktemp)
   if [ -z "$i_prefix" ]; then
     # Debian and Ubuntu mess up if --prefix=/usr is set.
-    ONLOAD_TREE="$bin/.." $do python setup.py install --record=$python_manifest
+    ONLOAD_TREE="$TOP" ONLOAD_BUILD="$TOP/build/$u64" \
+      $do python setup.py install --record=$python_manifest
   else
-    ONLOAD_TREE="$bin/.." $do python setup.py install --prefix="$i_prefix/usr"\
-                                                      --record=$python_manifest
+    ONLOAD_TREE="$TOP" ONLOAD_BUILD="$TOP/build/$u64" \
+      $do python setup.py install --prefix="$i_prefix/usr" \
+                                  --record=$python_manifest
   fi
 
   if [ $? != 0 ]; then
@@ -205,7 +207,7 @@ install_uninstall() {
   # install fails part way through.
   manifest="$i_usrlibexec/uninstall_manifest"
   install_dir "$i_usrlibexec"
-  try $do cd "$bin/../scripts"
+  try $do cd "$TOP/scripts"
   install_x onload_misc/onload_uninstall "$i_usrsbin/onload_uninstall"
   manifest_add /dev/onload
 }
@@ -213,7 +215,7 @@ install_uninstall() {
 
 install_userland() {
   # Install libraries and tools.
-  try $do cd "$bin/../build"
+  try $do cd "$TOP/build"
   u32="$(mmaketool --userbuild_base32)"
   u64="gnu_$(mmaketool --userarch)"
   if [ -d "$u64" ]; then
@@ -255,7 +257,7 @@ install_userland() {
   fi
 
   # Install scripts.
-  try $do cd "$bin/../scripts"
+  try $do cd "$TOP/scripts"
   install_x onload_tool "$i_sbin/onload_tool"
   install_x onload "$i_usrbin/onload"
   install_x sfcirqaffinity "$i_usrsbin/sfcirqaffinity"
@@ -268,19 +270,19 @@ install_userland() {
     install_x sfcaffinity "$i_usrbin/sfcaffinity"
   }
   install_dir "$i_usrlibexec/apps"
-  try cd "$bin/../scripts/onload_apps"
+  try cd "$TOP/scripts/onload_apps"
   /bin/ls |
     while read -r f; do
       install_f "$f" "$i_usrlibexec/apps/$f"
     done
-  try cd "$bin/../scripts/onload_profiles"
+  try cd "$TOP/scripts/onload_profiles"
   /bin/ls |
     while read -r f; do
       install_f "$f" "$i_usrlibexec/profiles/$f"
     done
 
   # Install python components.
-  try $do cd "$bin/../scripts"
+  try $do cd "$TOP/scripts"
   python_manifest=$(mktemp)
   [ -f setup.py ] || try $do cp onload_misc/setup.py .
   if [ -z "$i_prefix" ]; then
@@ -298,16 +300,16 @@ install_userland() {
   fi
 
   # Install header files.
-  try $do cd "$bin/../src/include"
+  try $do cd "$TOP/src/include"
   install_f onload/extensions.h "$i_include/onload/extensions.h"
   install_f onload/extensions_zc.h "$i_include/onload/extensions_zc.h"
 
   # Install aoe header files
-  try $do cd "$bin/../src/include"
+  try $do cd "$TOP/src/include"
   if [ -e aoe/amm_streams.h ]; then
     install_f aoe/amm_streams.h "$i_include/aoe/amm_streams.h"
   fi
-  try $do cd "$bin/../src/driver"
+  try $do cd "$TOP/src/driver"
   if [ -e  linux_aoe/aoe_ioctl.h ]; then
     install_f linux_aoe/aoe_ioctl.h "$i_include/aoe/aoe_ioctl.h"
   fi
@@ -324,13 +326,13 @@ install_ldconfig() {
 install_kernel_modules() {
   # Install kernel drivers.
   did="$i_prefix/lib/modules/$KVER/extra"
-  try $do cd "$bin/../build"
+  try $do cd "$TOP/build"
   d=$(mmaketool --driverbuild)
   if ! $test; then
     try [ -n "$d" ]
     try [ -d "$d" ]
   fi
-  try $do cd "$bin/../build/$d/driver/linux"
+  try $do cd "$TOP/build/$d/driver/linux"
   install_f sfc.ko "$did/sfc.ko"
   install_f sfc_resource.ko "$did/sfc_resource.ko"
   install_f sfc_char.ko "$did/sfc_char.ko"
@@ -349,7 +351,7 @@ install_kernel_modules() {
   fi
 
   # Install driver meta-data.
-  try $do cd "$bin/../build/$d/driver"
+  try $do cd "$TOP/build/$d/driver"
   local mid="$i_usrlibexec/modules/$KVER"
   install_f linux_net/Module.symvers "$mid/sfc/Module.symvers"
   install_f linux_resource/Module.symvers "$mid/sfc_resource/Module.symvers"
@@ -377,7 +379,7 @@ rhel4_modprobe_fixup() {
 
 
 install_modprobe_conf() {
-  try $do cd "$bin/../scripts"
+  try $do cd "$TOP/scripts"
 
   install_f onload_misc/onload_modprobe.conf "$i_etc/modprobe.d/onload.conf"
   install_f onload_misc/sfc_aoe_modprobe.conf "$i_etc/modprobe.d/sfc_aoe.conf"
@@ -518,6 +520,7 @@ do_rpm_post() {
 # main
 
 PATH="$bin:$PATH:/usr/sbin:/sbin"; export PATH
+TOP=$(cd "$bin/.." && /bin/pwd)
 
 buildargs=
 build=true

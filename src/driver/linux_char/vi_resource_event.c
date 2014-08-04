@@ -20,6 +20,10 @@
 #include <ci/driver/internal.h>
 #include <ci/efrm/driver_private.h> /* FIXME for efrm_rm_table */
 #include "char_internal.h"
+#include "linux_char_internal.h"
+
+
+static DEFINE_MUTEX(efch_mutex);
 
 
 /* The waittable plugin for efrm_vi */
@@ -127,7 +131,6 @@ efab_vi_rm_eventq_wait(struct efrm_vi* virs, unsigned current_ptr,
   ** with the write pointer.  If they match, it sets the wakeup bit.
   ** Otherwise it sends us a wakeup event straight-away.
   */
-  unsigned mask;
   unsigned next_i;
   ci_waiter_t waiter;
   ci_waitable_timeout_t timeout;
@@ -150,8 +153,7 @@ efab_vi_rm_eventq_wait(struct efrm_vi* virs, unsigned current_ptr,
   if (rc < 0)
     return rc;
 
-  mask = virs->q[EFHW_EVQ].capacity - 1;
-  next_i = (current_ptr / sizeof(efhw_event_t)) & mask;
+  next_i = current_ptr / sizeof(efhw_event_t);
 
   ci_waitable_init_timeout(&timeout, timeout_tv);
 
@@ -171,7 +173,7 @@ efab_vi_rm_eventq_wait(struct efrm_vi* virs, unsigned current_ptr,
 
   /* Check if we've missed the event before ci_waiter_exclusive_pre() was
    * called */
-  if( evdata->evq_wait_current == evdata->evq_wait_request ) {
+  if( evdata->evq_wait_current != evdata->evq_wait_request ) {
     ci_waiter_dont_wait(&waiter, &evdata->evq_waitable);
     goto clear_callback;
   }
@@ -202,3 +204,64 @@ clear_evdata:
 }
 
 
+static void efab_vi_rm_prime_cb(void *arg, int is_timeout, struct efhw_nic *nic)
+{
+  ci_private_char_t* priv = arg;
+  priv->cpcp_readable = 1;
+  wake_up_interruptible(&priv->cpcp_poll_queue);
+}
+
+
+static int efab_vi_rm_prime(struct efrm_vi* virs, ci_private_char_t* priv,
+                            unsigned current_ptr)
+{
+  struct efhw_nic* nic = efrm_client_get_nic(virs->rs.rs_client);
+  struct efrm_nic_per_vi* cb_info = &efrm_nic(nic)->vis[virs->rs.rs_instance];
+  int bit;
+
+  priv->cpcp_readable = 0;
+  bit = test_and_set_bit(VI_RESOURCE_EVQ_STATE_WAKEUP_PENDING, &cb_info->state);
+  if( ! bit )
+    efrm_eventq_request_wakeup(virs, current_ptr / sizeof(efhw_event_t));
+  return 0;
+}
+
+
+int efch_vi_prime(ci_private_char_t* priv, efch_resource_id_t vi_rs_id,
+                  unsigned current_ptr)
+{
+  int rc = 0;
+
+  if( priv->cpcp_vi == NULL ) {
+    /* First time: Find the VI object. */
+    mutex_lock(&efch_mutex);
+    if( priv->cpcp_vi == NULL ) {
+      efch_resource_t* rs;
+      rc = efch_resource_id_lookup(vi_rs_id, &priv->rt, &rs);
+      if( rc == 0 ) {
+        if( rs->rs_base->rs_type == EFRM_RESOURCE_VI ) {
+          struct efrm_vi* virs = efrm_vi(rs->rs_base);
+          rc = efrm_eventq_register_callback(virs, efab_vi_rm_prime_cb, priv);
+          if( rc == 0 )
+            priv->cpcp_vi = virs;
+        }
+        else {
+          rc = -EOPNOTSUPP;
+        }
+      }
+    }
+    mutex_unlock(&efch_mutex);
+  }
+  if( rc < 0 )
+    return rc;
+
+  return efab_vi_rm_prime(priv->cpcp_vi, priv, current_ptr);
+}
+
+
+unsigned efch_vi_poll(ci_private_char_t* priv, struct file* filp,
+                      poll_table* wait)
+{
+  poll_wait(filp, &priv->cpcp_poll_queue, wait);
+  return priv->cpcp_readable ? POLLIN | POLLRDNORM : 0;
+}

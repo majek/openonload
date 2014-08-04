@@ -696,18 +696,18 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
       tcp_helper_resource_t *trs = netif2tcp_helper_resource(netif);
       if( netif->state->pkt_sets_n ==  netif->state->pkt_sets_max )
         break;
-      ci_assert(in_atomic());
-      ci_assert(trs->avoid_atomic_allocations);
+      ci_assert(netif->flags & CI_NETIF_FLAG_IN_DL_CONTEXT);
+      ci_assert(netif->flags & CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION);
+      if( OO_STACK_NEEDS_MORE_PACKETS(netif) )
+        queue_work(trs->wq, &trs->non_atomic_work);
       if( netif->state->n_freepkts >= CI_CFG_RX_DESC_BATCH &&
           netif->state->n_freepkts >=
-            CI_MIN(4 * CI_CFG_RX_DESC_BATCH, NI_OPTS(netif).free_packets_low)
+            CI_MIN(4 * CI_CFG_RX_DESC_BATCH,
+                   NI_OPTS(netif).free_packets_low / 2)
         ) {
-        if( netif->state->n_freepkts < NI_OPTS(netif).free_packets_low )
-          queue_work(trs->wq, &trs->non_atomic_work);
         max_n_to_post = netif->state->n_freepkts;
         goto enough_pkts;
       }
-      queue_work(trs->wq, &trs->non_atomic_work);
       return;
 #endif
     }
@@ -843,8 +843,15 @@ unsigned ci_netif_purge_deferred_socket_list(ci_netif* ni)
   return l;
 }
 
+#ifdef __KERNEL__
+#define KERNEL_DL_CONTEXT_DECL , int in_dl_context
+#define KERNEL_DL_CONTEXT , in_dl_context
+#else
+#define KERNEL_DL_CONTEXT_DECL
+#define KERNEL_DL_CONTEXT
+#endif
 
-static void ci_netif_unlock_slow(ci_netif* ni)
+static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
 {
 #ifndef __KERNEL__
   /* All we are doing here is seeing if we can avoid a syscall.  Everything
@@ -933,7 +940,7 @@ static void ci_netif_unlock_slow(ci_netif* ni)
     rc = oo_resource_op(ci_netif_get_driver_handle(ni),
                         OO_IOC_EPLOCK_WAKE, NULL);
 #else
-    rc = efab_eplock_unlock_and_wake(ni);
+    rc = efab_eplock_unlock_and_wake(ni, in_dl_context);
 #endif
 
     if( rc < 0 )  LOG_NV(ci_log("%s: rc=%d", __FUNCTION__, rc));
@@ -943,13 +950,19 @@ static void ci_netif_unlock_slow(ci_netif* ni)
 
 void ci_netif_unlock(ci_netif* ni)
 {
+#ifdef __KERNEL__
+  int in_dl_context = ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT;
+
+  ni->flags &= ~CI_NETIF_FLAG_IN_DL_CONTEXT;
+#endif
+
   ci_assert_equal(ni->state->in_poll, 0);
   if(CI_LIKELY( ni->state->lock.lock == CI_EPLOCK_LOCKED &&
                 ci_cas32_succeed(&ni->state->lock.lock,
                                  CI_EPLOCK_LOCKED, CI_EPLOCK_UNLOCKED) ))
     return;
   CITP_STATS_NETIF_INC(ni, unlock_slow);
-  ci_netif_unlock_slow(ni);
+  ci_netif_unlock_slow(ni KERNEL_DL_CONTEXT);
 }
 
 

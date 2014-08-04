@@ -47,6 +47,7 @@
  *
  *--------------------------------------------------------------------*/
 
+struct ci_private_char_s;
 struct ci_resource_alloc_s;
 struct ci_resource_op_s;
 struct ci_resource_table_s;
@@ -117,15 +118,22 @@ struct efch_filter_list {
 struct efch_memreg;
 
 
+/* Flags to enable us to determine which sniff filters we have installed */
+#define EFCH_RX_SNIFF 0x01
+#define EFCH_TX_SNIFF 0x02
+/* TX sniff enable bit */
+#define EFCH_TX_SNIFF_ENABLE 0x01
 typedef struct efch_resource_s {
   struct efrm_resource  *rs_base;
   efch_resource_ops     *rs_ops;
   union {
     struct {
       struct efch_filter_list fl;
+      unsigned sniff_flags;
     } vi;
     struct {
       struct efch_filter_list fl;
+      unsigned sniff_flags;
     } vi_set;
     struct efch_memreg *memreg;
   };
@@ -175,6 +183,11 @@ extern int efch_resource_op(ci_resource_table_t* rt,
                             struct ci_resource_op_s*, int* copy_out
                             CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t));
 
+extern int efch_vi_prime(struct ci_private_char_s* priv,
+                         efch_resource_id_t, unsigned current_ptr);
+
+extern unsigned efch_vi_poll(struct ci_private_char_s* priv,
+                             struct file* filp, poll_table* wait);
 
 /*! retrieve the resource referred to by the given resource ID in the (per-FD)
  *  private state provided
@@ -182,7 +195,6 @@ extern int efch_resource_op(ci_resource_table_t* rt,
 extern int efch_resource_id_lookup(efch_resource_id_t id, 
 				   ci_resource_table_t *rt,
 				   efch_resource_t **out);
-
 
 /*--------------------------------------------------------------------
  * licensing

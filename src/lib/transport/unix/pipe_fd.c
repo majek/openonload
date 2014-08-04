@@ -562,8 +562,7 @@ static int oo_pipe_ctor(ci_netif* netif, struct oo_pipe** out_pipe,
   p = oo_pipe_buf_get(netif);
   if( !p ) {
     rc = -1;
-    /* in fact it's ENOSPC, but pipe specification allows only EFAULT */
-    errno = EFAULT;
+    errno = ENOMEM;
     goto out;
   }
 
@@ -577,8 +576,9 @@ static int oo_pipe_ctor(ci_netif* netif, struct oo_pipe** out_pipe,
                                  W_SP(&p->b), flags, fds);
   if( rc < 0 ) {
     LOG_E(ci_log("%s: ci_tcp_helper_pipe_attach %d", __FUNCTION__, rc));
-    /* fixme kostik: cleanup */
-    CI_TEST(0);
+    ci_pipe_all_fds_gone(netif, p, 1);
+    errno = -rc;
+    rc = -1;
     goto out;
   }
 

@@ -222,4 +222,6 @@ extern void ef10_ef_eventq_timer_zero(ef_vi*);
 
 extern int ef_pd_cluster_free(ef_pd*, ef_driver_handle);
 
+extern void ef_vi_packed_stream_update_credit(ef_vi* vi);
+
 #endif  /* __CI_EF_VI_INTERNAL_H__ */

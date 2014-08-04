@@ -244,7 +244,8 @@ percent (uint64_t a, unsigned b)
 #endif
 }
 
-void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf)
+void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
+                      oo_dump_log_fn_t logger, void* log_arg)
 {
   ci_udp_socket_stats uss = us->stats;
   unsigned rx_added = us->recv_q.pkts_added;
@@ -258,75 +259,86 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf)
   (void) tx_total;
 
   /* General. */
-  log("%s  udpflags: "CI_UDP_STATE_FLAGS_FMT, pf,
-      CI_UDP_STATE_FLAGS_PRI_ARG(us));
+  logger(log_arg, "%s  udpflags: "CI_UDP_STATE_FLAGS_FMT, pf,
+         CI_UDP_STATE_FLAGS_PRI_ARG(us));
 
   /* Receive path. */
-  log("%s  rcv: q_bytes=%d q_depth=%d q_pkts=%d reap=%d tot_bytes=%u"
-      " tot_pkts=%u", pf, ci_udp_recv_q_bytes(&us->recv_q),
-      RECVQ_DEPTH(us, 0), ci_udp_recv_q_pkts(&us->recv_q),
-      ci_udp_recv_q_reapable(&us->recv_q), (unsigned) us->recv_q.bytes_added,
-      rx_added);
+  logger(log_arg,
+         "%s  rcv: q_bytes=%d q_depth=%d q_pkts=%d reap=%d tot_bytes=%u"
+         " tot_pkts=%u", pf, ci_udp_recv_q_bytes(&us->recv_q),
+         RECVQ_DEPTH(us, 0), ci_udp_recv_q_pkts(&us->recv_q),
+         ci_udp_recv_q_reapable(&us->recv_q),
+         (unsigned) us->recv_q.bytes_added, rx_added);
 #if CI_CFG_ZC_RECV_FILTER
-  log("%s  rcv: filtered=%d unfiltered=%d tot_filt_rej=%d tot_filt_pass=%d ", pf,
-      us->recv_q.pkts_filter_passed - us->recv_q.pkts_delivered,
-      us->recv_q.pkts_added - us->recv_q.pkts_filter_passed - 
-      us->recv_q.pkts_filter_dropped,
-      us->recv_q.pkts_filter_dropped, us->recv_q.pkts_filter_passed);
+  logger(log_arg,
+         "%s  rcv: filtered=%d unfiltered=%d "
+         "tot_filt_rej=%d tot_filt_pass=%d ",
+         pf,
+         us->recv_q.pkts_filter_passed - us->recv_q.pkts_delivered,
+         us->recv_q.pkts_added - us->recv_q.pkts_filter_passed - 
+         us->recv_q.pkts_filter_dropped,
+         us->recv_q.pkts_filter_dropped, us->recv_q.pkts_filter_passed);
 #endif
-  log("%s  rcv: oflow_drop=%u(%u%%) mem_drop=%u eagain=%u pktinfo=%u "
-      "q_max=%u", pf, uss.n_rx_overflow, percent(uss.n_rx_overflow, rx_total),
-      uss.n_rx_mem_drop, uss.n_rx_eagain, uss.n_rx_pktinfo, 
-      uss.max_recvq_depth);
-  log("%s  rcv: os=%u(%u%%) os_slow=%u os_error=%u", pf,
-      rx_os, percent(rx_os, rx_total), uss.n_rx_os_slow, uss.n_rx_os_error);
+  logger(log_arg,
+         "%s  rcv: oflow_drop=%u(%u%%) mem_drop=%u eagain=%u pktinfo=%u "
+         "q_max=%u", pf, uss.n_rx_overflow,
+         percent(uss.n_rx_overflow, rx_total),
+         uss.n_rx_mem_drop, uss.n_rx_eagain, uss.n_rx_pktinfo, 
+         uss.max_recvq_depth);
+  logger(log_arg, "%s  rcv: os=%u(%u%%) os_slow=%u os_error=%u", pf,
+         rx_os, percent(rx_os, rx_total), uss.n_rx_os_slow, uss.n_rx_os_error);
 
   /* Send path. */
-  log("%s  snd: q=%u+%u ul=%u os=%u(%u%%)", pf,
-      us->tx_count, oo_atomic_read(&us->tx_async_q_level),
-      n_tx_onload, uss.n_tx_os, percent(uss.n_tx_os, tx_total));
-  log("%s  snd: LOCK cp=%u(%u%%) pkt=%u(%u%%) snd=%u(%u%%) poll=%u(%u%%) "
-      "defer=%u(%u%%)", pf,
-      uss.n_tx_lock_cp,  percent(uss.n_tx_lock_cp,  n_tx_onload),
-      uss.n_tx_lock_pkt,  percent(uss.n_tx_lock_pkt,  n_tx_onload),
-      uss.n_tx_lock_snd,  percent(uss.n_tx_lock_snd,  n_tx_onload),
-      uss.n_tx_lock_poll, percent(uss.n_tx_lock_poll, n_tx_onload),
-      uss.n_tx_lock_defer, percent(uss.n_tx_lock_defer, n_tx_onload));
+  logger(log_arg, "%s  snd: q=%u+%u ul=%u os=%u(%u%%)", pf,
+         us->tx_count, oo_atomic_read(&us->tx_async_q_level),
+         n_tx_onload, uss.n_tx_os, percent(uss.n_tx_os, tx_total));
+  logger(log_arg,
+         "%s  snd: LOCK cp=%u(%u%%) pkt=%u(%u%%) snd=%u(%u%%) poll=%u(%u%%) "
+         "defer=%u(%u%%)", pf,
+         uss.n_tx_lock_cp,  percent(uss.n_tx_lock_cp,  n_tx_onload),
+         uss.n_tx_lock_pkt,  percent(uss.n_tx_lock_pkt,  n_tx_onload),
+         uss.n_tx_lock_snd,  percent(uss.n_tx_lock_snd,  n_tx_onload),
+         uss.n_tx_lock_poll, percent(uss.n_tx_lock_poll, n_tx_onload),
+         uss.n_tx_lock_defer, percent(uss.n_tx_lock_defer, n_tx_onload));
 
-  log("%s  snd: MCAST if=%d src="OOF_IP4" ttl=%d", pf,
-      us->s.cp.ip_multicast_if,
-      OOFA_IP4(us->s.cp.ip_multicast_if_laddr_be32),
-      (int) us->s.cp.ip_mcast_ttl);
+  logger(log_arg, "%s  snd: MCAST if=%d src="OOF_IP4" ttl=%d", pf,
+         us->s.cp.ip_multicast_if,
+         OOFA_IP4(us->s.cp.ip_multicast_if_laddr_be32),
+         (int) us->s.cp.ip_mcast_ttl);
 
   /* State relating to unconnected sends. */
   ipcache = &us->ephemeral_pkt;
-  log("%s  snd: TO n=%u match=%u(%u%%) lookup=%u+%u(%u%%) "OOF_IPCACHE_STATE,
-      pf, uss.n_tx_onload_uc,
-      uss.n_tx_cp_match, percent(uss.n_tx_cp_match, uss.n_tx_onload_uc),
-      uss.n_tx_cp_uc_lookup, uss.n_tx_cp_a_lookup,
-      percent(uss.n_tx_cp_uc_lookup + uss.n_tx_cp_a_lookup,
-              uss.n_tx_onload_uc),
-      OOFA_IPCACHE_STATE(ni, ipcache));
-  log("%s  snd: TO "OOF_IPCACHE_DETAIL, pf,
-      OOFA_IPCACHE_DETAIL(ipcache));
-  log("%s  snd: TO "OOF_IP4PORT" => "OOF_IP4PORT, pf,
-      OOFA_IP4PORT(ipcache->ip_saddr_be32, udp_lport_be16(us)),
-      OOFA_IP4PORT(ipcache->ip.ip_daddr_be32, ipcache->dport_be16));
-
+  logger(log_arg,
+         "%s  snd: TO n=%u match=%u(%u%%) "
+         "lookup=%u+%u(%u%%) "OOF_IPCACHE_STATE,
+         pf, uss.n_tx_onload_uc,
+         uss.n_tx_cp_match, percent(uss.n_tx_cp_match, uss.n_tx_onload_uc),
+         uss.n_tx_cp_uc_lookup, uss.n_tx_cp_a_lookup,
+         percent(uss.n_tx_cp_uc_lookup + uss.n_tx_cp_a_lookup,
+                 uss.n_tx_onload_uc),
+         OOFA_IPCACHE_STATE(ni, ipcache));
+  logger(log_arg, "%s  snd: TO "OOF_IPCACHE_DETAIL, pf,
+         OOFA_IPCACHE_DETAIL(ipcache));
+  logger(log_arg, "%s  snd: TO "OOF_IP4PORT" => "OOF_IP4PORT, pf,
+         OOFA_IP4PORT(ipcache->ip_saddr_be32, udp_lport_be16(us)),
+         OOFA_IP4PORT(ipcache->ip.ip_daddr_be32, ipcache->dport_be16));
+   
   /* State relating to connected sends. */
   ipcache = &us->s.pkt;
-  log("%s  snd: CON n=%d lookup=%d "OOF_IPCACHE_STATE, pf,
-      uss.n_tx_onload_c, uss.n_tx_cp_c_lookup, OOFA_IPCACHE_STATE(ni,ipcache));
-  log("%s  snd: CON "OOF_IPCACHE_DETAIL, pf,
-      OOFA_IPCACHE_DETAIL(ipcache));
+  logger(log_arg, "%s  snd: CON n=%d lookup=%d "OOF_IPCACHE_STATE, pf,
+         uss.n_tx_onload_c, uss.n_tx_cp_c_lookup,
+         OOFA_IPCACHE_STATE(ni,ipcache));
+  logger(log_arg, "%s  snd: CON "OOF_IPCACHE_DETAIL, pf,
+         OOFA_IPCACHE_DETAIL(ipcache));
 
-  log("%s  snd: eagain=%d spin=%d block=%d", pf,
-      uss.n_tx_eagain, uss.n_tx_spin, uss.n_tx_block);
-  log("%s  snd: poll_avoids_full=%d fragments=%d confirm=%d", pf,
-      uss.n_tx_poll_avoids_full, uss.n_tx_fragments, uss.n_tx_msg_confirm);
-  log("%s  snd: os_slow=%d os_late=%d unconnect_late=%d nomac=%u(%u%%)", pf,
-      uss.n_tx_os_slow, uss.n_tx_os_late, uss.n_tx_unconnect_late,
-      uss.n_tx_cp_no_mac, percent(uss.n_tx_cp_no_mac, tx_total));
+  logger(log_arg, "%s  snd: eagain=%d spin=%d block=%d", pf,
+         uss.n_tx_eagain, uss.n_tx_spin, uss.n_tx_block);
+  logger(log_arg, "%s  snd: poll_avoids_full=%d fragments=%d confirm=%d", pf,
+         uss.n_tx_poll_avoids_full, uss.n_tx_fragments, uss.n_tx_msg_confirm);
+  logger(log_arg,
+         "%s  snd: os_slow=%d os_late=%d unconnect_late=%d nomac=%u(%u%%)", pf,
+         uss.n_tx_os_slow, uss.n_tx_os_late, uss.n_tx_unconnect_late,
+         uss.n_tx_cp_no_mac, percent(uss.n_tx_cp_no_mac, tx_total));
 }
 
 /*! \cidoxg_end */

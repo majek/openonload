@@ -81,6 +81,7 @@ struct vi_attr {
 	int8_t              with_interrupt;
 	int16_t             hw_stack_id;
 	int8_t              with_timer;
+	int8_t              packed_stream;
 };
 
 
@@ -431,12 +432,16 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_RX_PREFIX | EFHW_VI_RX_TIMESTAMPS;
 		if (q_flags & EFRM_VI_RX_LOOPBACK)
 			vi_flags |= EFHW_VI_RX_LOOPBACK;
+		if (q_flags & EFRM_VI_RX_PACKED_STREAM)
+			vi_flags |= EFHW_VI_RX_PACKED_STREAM;
 		break;
 	case EFHW_EVQ:
 		if (q_flags & EFRM_VI_RX_TIMESTAMPS)
 			vi_flags |= EFHW_VI_RX_TIMESTAMPS;
 		if (q_flags & EFRM_VI_TX_TIMESTAMPS)
 			vi_flags |= EFHW_VI_TX_TIMESTAMPS;
+		if (q_flags & EFRM_VI_NO_CUT_THROUGH)
+			vi_flags |= EFHW_VI_NO_CUT_THROUGH;
 		break;
 	default:
 		break;
@@ -476,12 +481,16 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_RX_TIMESTAMPS;
 		if (vi_flags & EFHW_VI_RX_LOOPBACK)
 			q_flags |= EFRM_VI_RX_LOOPBACK;
+		if (vi_flags & EFHW_VI_RX_PACKED_STREAM)
+			q_flags |= EFRM_VI_RX_PACKED_STREAM;
 		break;
 	case EFHW_EVQ:
 		if (vi_flags & EFHW_VI_RX_TIMESTAMPS)
 			q_flags |= EFRM_VI_RX_TIMESTAMPS;
 		if (vi_flags & EFHW_VI_TX_TIMESTAMPS)
 			q_flags |= EFRM_VI_TX_TIMESTAMPS;
+		if (vi_flags & EFHW_VI_NO_CUT_THROUGH)
+			q_flags |= EFRM_VI_NO_CUT_THROUGH;
 		break;
 	default:
 		break;
@@ -563,6 +572,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 wakeup_evq,
 			 (flags & (EFHW_VI_RX_TIMESTAMPS |
 			           EFHW_VI_TX_TIMESTAMPS)) != 0,
+			 (flags & EFHW_VI_NO_CUT_THROUGH) == 0,
 			 &virs->rx_ts_correction,
 			 &virs->out_flags);
 		break;
@@ -962,6 +972,7 @@ int __efrm_vi_attr_init(struct efrm_client *client_obsolete,
 	a->interrupt_core = -1;
 	a->channel = -1;
 	a->hw_stack_id = 0;
+	a->packed_stream = 0;
 	return 0;
 }
 EXPORT_SYMBOL(__efrm_vi_attr_init);
@@ -982,6 +993,15 @@ void efrm_vi_attr_set_with_interrupt(struct efrm_vi_attr *attr,
 	a->with_interrupt = with_interrupt;
 }
 EXPORT_SYMBOL(efrm_vi_attr_set_with_interrupt);
+
+
+void efrm_vi_attr_set_packed_stream(struct efrm_vi_attr *attr,
+				    int packed_stream)
+{
+	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
+	a->packed_stream = packed_stream;
+}
+EXPORT_SYMBOL(efrm_vi_attr_set_packed_stream);
 
 
 void efrm_vi_attr_set_with_timer(struct efrm_vi_attr *attr, int with_timer)
@@ -1091,6 +1111,13 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	/* At this point we definitely have a valid [client] and a [pd]. */
 
 	rc = -EINVAL;
+	if (attr->packed_stream &&
+	    (efrm_pd_get_min_align(pd) <
+	     EFRM_PD_RX_PACKED_STREAM_MEMORY_ALIGNMENT)) {
+		EFRM_ERR("%s: ERROR: Packed stream VI requested on non-packed "
+			 "stream PD", __FUNCTION__);
+		goto fail_checks;
+	}
 	if (attr->with_interrupt && attr->with_timer)
 		goto fail_checks;
 	if (attr->hw_stack_id > EFRM_MAX_STACK_ID)

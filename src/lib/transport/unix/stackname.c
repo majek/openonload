@@ -219,13 +219,25 @@ int onload_stackname_restore(void)
   int rc;
   struct oo_stackname_state* state = oo_stackname_thread_get();
   struct saved_stacks* to_del;
+  char *stackname;
 
   if( state->saved_stacks_head == NULL )
     return -EINVAL;
 
-  if( ! (rc = onload_set_stackname(state->saved_stacks_head->who,
-                                   state->saved_stacks_head->context,
-                                   state->saved_stacks_head->stackname)) )
+  /* stackname[0] == 1 is a special value used to represent
+   * ONLOAD_DONT_ACCELERATE internally.  We don't expect users to set
+   * this in the name when calling onload_set_stackname(), but
+   * onload_stackname_restore() can result in this, so we need to
+   * handle it.
+   */ 
+  if( state->saved_stacks_head->stackname[0] == 1 )
+    stackname = ONLOAD_DONT_ACCELERATE;
+  else
+    stackname = state->saved_stacks_head->stackname;
+
+  if( (rc = onload_set_stackname(state->saved_stacks_head->who,
+                                 state->saved_stacks_head->context,
+                                 stackname)) < 0 )
     return rc;
 
   to_del = state->saved_stacks_head;

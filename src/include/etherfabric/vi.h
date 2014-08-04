@@ -211,6 +211,7 @@ extern int ef_filter_spec_set_multicast_all(ef_filter_spec *);
 extern int ef_filter_spec_set_unicast_mismatch(ef_filter_spec *);
 extern int ef_filter_spec_set_multicast_mismatch(ef_filter_spec *);
 extern int ef_filter_spec_set_port_sniff(ef_filter_spec *, int promiscuous);
+extern int ef_filter_spec_set_tx_port_sniff(ef_filter_spec *);
 extern int ef_filter_spec_set_block_kernel(ef_filter_spec *);
 extern int ef_filter_spec_set_block_kernel_multicast(ef_filter_spec *);
 extern int ef_filter_spec_set_block_kernel_unicast(ef_filter_spec *);
@@ -225,6 +226,43 @@ extern int ef_vi_set_filter_add(ef_vi_set*, ef_driver_handle,
 extern int ef_vi_set_filter_del(ef_vi_set*, ef_driver_handle,
 				ef_filter_cookie *);
 
+
+extern int ef_vi_prime(ef_vi* vi, ef_driver_handle dh, unsigned current_ptr);
+
+
+/**********************************************************************
+ * Get VI stats *******************************************************
+ **********************************************************************/
+
+typedef struct {
+	char* evsfl_name;
+	int   evsfl_offset;
+	int   evsfl_size;
+} ef_vi_stats_field_layout;
+
+typedef struct {
+	int                      evsl_data_size;
+	int                      evsl_fields_num;
+	ef_vi_stats_field_layout evsl_fields[];
+} ef_vi_stats_layout;
+
+/* Retrieve layout for available statistics. */
+extern int
+ef_vi_stats_query_layout(ef_vi* vi,
+                         const ef_vi_stats_layout**const layout_out);
+
+/* Retrieve a set of statistic values.
+ *
+ * The data size should be equal to evsl_data_bytes from
+ * the layout description.
+ *
+ * If do_reset reset is true, the statistics is reset after reading.
+ *
+ * Data is provided in little-endian.
+ */
+extern int
+ef_vi_stats_query(ef_vi* vi, ef_driver_handle dh,
+                  void* data, int do_reset);
 
 #ifdef __cplusplus
 }

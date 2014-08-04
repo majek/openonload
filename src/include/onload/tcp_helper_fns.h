@@ -82,7 +82,8 @@ extern void tcp_helper_rm_dump(int fd_type, oo_sp sock_id,
                      (priv)->thr, line_prefix)
 
 extern unsigned efab_tcp_helper_netif_lock_callback(eplock_helper_t*,
-                                                    ci_uint32 lock_val);
+                                                    ci_uint32 lock_val,
+                                                    int in_dl_context);
 
 extern int efab_ioctl_get_ep(ci_private_t*, oo_sp,
                              tcp_helper_endpoint_t** ep_out);
@@ -155,8 +156,9 @@ extern int efab_thr_table_lookup(const char* name, unsigned id, int flags,
                                  tcp_helper_resource_t** stack_out);
 
 
-/*! Dump a stack's netif state to syslog */
-extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only);
+/*! Dump a stack's netif state to a buffer or (if NULL) to syslog */
+extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only,
+                                 void* user_buf, int user_buf_len);
 
 /*! Try to kill an orphan/zombie stack */
 extern int tcp_helper_kill_stack_by_id(unsigned id);

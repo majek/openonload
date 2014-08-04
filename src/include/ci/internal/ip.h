@@ -72,6 +72,7 @@
 #include <ci/internal/ip_stats_ops.h>
 #include <onload/pktq.h>
 #include <onload/atomics.h>
+#include <onload/drv/dump_to_user.h>
 #endif
 
 
@@ -435,6 +436,7 @@ extern int  ci_netif_ctor(ci_netif**, const ci_netif_config_opts*,
 #else
 extern int  ci_netif_ctor(ci_netif*, ef_driver_handle, const char* name,
                           unsigned flags) CI_HF;
+extern void ci_netif_cluster_prefault(ci_netif* ni) CI_HF;
 #endif
 extern int  ci_netif_restore_id(ci_netif*, unsigned stack_id) CI_HF;
 extern int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni) CI_HF;
@@ -474,13 +476,17 @@ extern int  ci_netif_timewait_try_to_free_filter(ci_netif* ni) CI_HF;
 extern void ci_netif_fin_timeout_enter(ci_netif* ni, ci_tcp_state* ts) CI_HF;
 
 extern void ci_netif_dump(ci_netif* ni) CI_HF;
+extern void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
+                                    void* log_arg) CI_HF;
 extern void ci_netif_dump_extra(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_sockets(ci_netif* ni) CI_HF;
+extern void ci_netif_dump_sockets_to_logger(ci_netif* ni,
+                                            oo_dump_log_fn_t logger,
+                                            void *log_arg) CI_HF;
 extern void ci_netif_print_sockets(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_dmaq(ci_netif* ni, int dump) CI_HF;
 extern void ci_netif_dump_timeoutq(ci_netif* ni) CI_HF;
 extern void ci_netif_dump_reap_list(ci_netif* ni, int verbose) CI_HF;
-extern void ci_netif_dump_vi(ci_netif*, int intf_i) CI_HF;
 extern void ci_netif_config_opts_dump(ci_netif_config_opts* opts);
 extern void ci_netif_pkt_dump_all(ci_netif* ni) CI_HF;
 extern void ci_netif_pkt_queue_dump(ci_netif* ni, ci_ip_pkt_queue* q,
@@ -650,7 +656,8 @@ extern void ci_ipid_dtor( ci_netif* ni, ci_fd_t fd ) CI_HF;
 extern void oo_sock_cplane_init(struct oo_sock_cplane*) CI_HF;
 extern void ci_sock_cmn_init(ci_netif*, ci_sock_cmn*) CI_HF;
 extern void ci_sock_cmn_reinit(ci_netif*, ci_sock_cmn*) CI_HF;
-extern void ci_sock_cmn_dump(ci_netif*, ci_sock_cmn*, const char* pf) CI_HF;
+extern void ci_sock_cmn_dump(ci_netif*, ci_sock_cmn*, const char* pf,
+                             oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 extern void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_sock_cmn* s) CI_HF;
 extern void ci_sock_cmn_timestamp_q_drop(ci_netif* netif, ci_sock_cmn* s) CI_HF;
 extern void ci_sock_cmn_timestamp_q_enqueue(ci_netif* ni, ci_sock_cmn* s,
@@ -764,7 +771,8 @@ extern int __ci_icmp_send_error(ci_netif* ni, ci_ip4_hdr* rx_ip,
 
 /***  udp.c  ***/
 
-extern void ci_udp_state_dump(ci_netif*, ci_udp_state*, const char* pf) CI_HF;
+extern void ci_udp_state_dump(ci_netif*, ci_udp_state*, const char* pf,
+                              oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 
 /* Set the source IP address & UDP port */
 extern void ci_udp_set_laddr(citp_socket*, unsigned laddr_be32, 
@@ -910,7 +918,8 @@ extern int ci_pipe_read(ci_netif*, struct oo_pipe*, const struct iovec*,
 extern int ci_pipe_write(ci_netif*, struct oo_pipe*, const struct iovec*,
                   size_t iovlen) CI_HF;
 extern int oo_pipe_alloc_bufs(ci_netif*, struct oo_pipe*, ci_uint32 num) CI_HF;
-extern void oo_pipe_dump(ci_netif*, struct oo_pipe*, const char* pf) CI_HF;
+extern void oo_pipe_dump(ci_netif*, struct oo_pipe*, const char* pf,
+                         oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 #endif
 
 
@@ -1210,8 +1219,8 @@ extern void ci_tcp_all_fds_gone(ci_netif* netif, ci_tcp_state*,
 extern void ci_tcp_uncache_ep(ci_netif* ni, ci_tcp_state* ts);
 extern void ci_tcp_rx_reap_rxq_bufs(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 
-extern void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state*,
-			      const char *line_prefix) CI_HF;
+extern void ci_tcp_state_dump(ci_netif*, ci_tcp_state*, const char *pf,
+                              oo_dump_log_fn_t logger, void* log_arg) CI_HF;
 extern void ci_tcp_state_dump_id(ci_netif* ni, int ep_id) CI_HF;
 extern void ci_tcp_state_dump_qs(ci_netif*, int ep_id, int hex_dump) CI_HF;
 extern void ci_tcp_state_dump_rob(ci_netif* ni, ci_tcp_state* ts) CI_HF;
@@ -1220,7 +1229,9 @@ extern void ci_tcp_state_dump_retrans(ci_netif* ni, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_pkt_dump(ci_netif* ni, ci_ip_pkt_fmt* pkt, int is_recv, 
                             int dump) CI_HF;
 extern void ci_tcp_socket_listen_dump(ci_netif*, ci_tcp_socket_listen*,
-				      const char* pf) CI_HF;
+                                      const char* pf,
+                                      oo_dump_log_fn_t logger,
+                                      void* log_arg) CI_HF;
 
 /* Create a new tcp state in the context of [netif_out] and then
  * copy the important fields, to the newly created tcp state struct 
@@ -1271,6 +1282,9 @@ extern void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo,
                                   int do_free);
 #endif
 extern void citp_waitable_dump(ci_netif*, citp_waitable*, const char*) CI_HF;
+extern void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
+                                         const char* pf, oo_dump_log_fn_t logger,
+                                         void* log_arg) CI_HF;
 extern void citp_waitable_print(citp_waitable*) CI_HF;
 
 
@@ -3096,6 +3110,7 @@ ci_inline void ci_tcp_zwin_set(ci_netif* netif, ci_tcp_state* ts)
 {
   ci_iptime_t t;
   ci_assert( ! (ts->s.b.state & CI_TCP_STATE_NO_TIMERS) );
+  ci_assert( OO_SP_IS_NULL(ts->s.local_peer) );
   if( ts->zwin_probes == 0 )
     t = ts->rto << ts->zwin_acks;
   else
@@ -3210,9 +3225,12 @@ ci_inline void ci_tcp_set_peer(ci_tcp_state* ts, unsigned addr, unsigned port){
 }
 
 
+ci_inline int ci_tcp_max_rcv_window(ci_tcp_state* ts)
+{ return CI_MIN(tcp_rcv_buff(ts), (0xffff << ts->rcv_wscl)); }
+
 /* We'll send window updates whenever the window increases by this much. */
 ci_inline int ci_tcp_ack_trigger_delta(ci_tcp_state* ts)
-{ return tcp_rcv_buff(ts) >> 3; }
+{ return ci_tcp_max_rcv_window(ts) >> 3; }
 
 
 #if CI_CFG_TCP_FASTSTART
@@ -3879,6 +3897,17 @@ oo_os_sock_status_bit_set(ci_sock_cmn *s, ci_int32 bits)
                           (tmp + (1 << OO_OS_STATUS_SEQ_SHIFT)) &   \
                           ~(bits)) );                               \
   } while(0)
+
+
+#ifdef __KERNEL__
+
+#define OO_STACK_NEEDS_MORE_PACKETS(ni) \
+  ( ( (ni)->flags & CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION ) &&   \
+    ( (ni)->state->n_freepkts <= NI_OPTS(ni).free_packets_low || \
+      ((ni)->flags & CI_NETIF_FLAG_NO_PACKET_BUFFERS) ) &&       \
+    (ni)->pkt_sets_n < (ni)->pkt_sets_max )
+
+#endif
 
 
 #endif  /* __CI_INTERNAL_IP_H__ */

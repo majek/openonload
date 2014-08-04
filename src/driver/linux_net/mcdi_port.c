@@ -1049,6 +1049,9 @@ int efx_mcdi_set_mac(struct efx_nic *efx)
 	MCDI_POPULATE_DWORD_1(cmdbytes, SET_MAC_IN_REJECT,
 			      SET_MAC_IN_REJECT_UNCST, efx->unicast_filter);
 
+	MCDI_POPULATE_DWORD_1(cmdbytes, SET_MAC_IN_FLAGS,
+			      SET_MAC_IN_FLAG_INCLUDE_FCS, efx->forward_fcs);
+
 	switch (efx->wanted_fc) {
 	case EFX_FC_RX | EFX_FC_TX:
 		fcntl = MC_CMD_FCNTL_BIDIR;

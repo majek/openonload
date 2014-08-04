@@ -602,7 +602,7 @@ fail1:
 	return rc;
 }
 
-static void siena_rx_push_rss_config(struct efx_nic *efx)
+static int siena_rx_push_rss_config(struct efx_nic *efx)
 {
 	efx_oword_t temp;
 
@@ -625,6 +625,7 @@ static void siena_rx_push_rss_config(struct efx_nic *efx)
 	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG3);
 
 	efx_farch_rx_push_indir_table(efx);
+	return 0;
 }
 
 /* This call performs hardware-specific global initialisation, such as

@@ -190,26 +190,28 @@ void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_sock_cmn* s)
 
 
 
-void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf)
+void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
+                      oo_dump_log_fn_t logger, void* log_arg)
 {
   int ts_q_reapable = ci_sock_cmn_timestamp_q_reapable(ni, s);
-  log("%s  s_flags: "CI_SOCK_FLAGS_FMT, pf,
-      CI_SOCK_FLAGS_PRI_ARG(s));
-  log("%s  rcvbuf=%d sndbuf=%d bindtodev=%d(%d,%d:%d) ttl=%d", pf,
-      s->so.rcvbuf, s->so.sndbuf, s->cp.so_bindtodevice,
-      s->rx_bind2dev_ifindex, s->rx_bind2dev_base_ifindex,
-      s->rx_bind2dev_vlan, s->cp.ip_ttl);
-  log("%s  rcvtimeo_ms=%d sndtimeo_ms=%d sigown=%d "
-      "cmsg="OO_CMSG_FLAGS_FMT"%s",
-      pf, s->so.rcvtimeo_msec, s->so.sndtimeo_msec, s->b.sigown,
-      OO_CMSG_FLAGS_PRI_ARG(s->cmsg_flags),
-      (s->cp.sock_cp_flags & OO_SCP_NO_MULTICAST) ? " NO_MCAST_TX":"");
-  log("%s  rx_errno=%x tx_errno=%x so_error=%d os_sock=%u%s%s", pf,
-      s->rx_errno, s->tx_errno, s->so_error,
-      s->os_sock_status >> OO_OS_STATUS_SEQ_SHIFT,
-      (s->os_sock_status & OO_OS_STATUS_RX) ? ",RX":"",
-      (s->os_sock_status & OO_OS_STATUS_TX) ? ",TX":"");
+  logger(log_arg, "%s  s_flags: "CI_SOCK_FLAGS_FMT, pf,
+         CI_SOCK_FLAGS_PRI_ARG(s));
+  logger(log_arg, "%s  rcvbuf=%d sndbuf=%d bindtodev=%d(%d,%d:%d) ttl=%d", pf,
+         s->so.rcvbuf, s->so.sndbuf, s->cp.so_bindtodevice,
+         s->rx_bind2dev_ifindex, s->rx_bind2dev_base_ifindex,
+         s->rx_bind2dev_vlan, s->cp.ip_ttl);
+  logger(log_arg, "%s  rcvtimeo_ms=%d sndtimeo_ms=%d sigown=%d "
+         "cmsg="OO_CMSG_FLAGS_FMT"%s",
+         pf, s->so.rcvtimeo_msec, s->so.sndtimeo_msec, s->b.sigown,
+         OO_CMSG_FLAGS_PRI_ARG(s->cmsg_flags),
+         (s->cp.sock_cp_flags & OO_SCP_NO_MULTICAST) ? " NO_MCAST_TX":"");
+  logger(log_arg, "%s  rx_errno=%x tx_errno=%x so_error=%d os_sock=%u%s%s", pf,
+         s->rx_errno, s->tx_errno, s->so_error,
+         s->os_sock_status >> OO_OS_STATUS_SEQ_SHIFT,
+         (s->os_sock_status & OO_OS_STATUS_RX) ? ",RX":"",
+         (s->os_sock_status & OO_OS_STATUS_TX) ? ",TX":"");
   if( s->timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
-    log("%s  TX timestamping queue: packets %d reap %d extract %d", pf, 
-        s->timestamp_q.num - ts_q_reapable, ts_q_reapable, OO_PP_ID(s->timestamp_q_extract));
+    logger(log_arg, "%s  TX timestamping queue: packets %d reap %d extract %d",
+           pf, s->timestamp_q.num - ts_q_reapable, ts_q_reapable,
+           OO_PP_ID(s->timestamp_q_extract));
 }

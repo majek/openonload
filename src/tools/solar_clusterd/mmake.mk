@@ -31,10 +31,12 @@ OBJS := $(patsubst %,%.o,$(SRCS))
 # as the system is missing the required 32 bits python libraries so we
 # disallow building on 32 bits all together.
 buildplatform=$(shell mmaketool --buildplatform)
+BUILD_SC := 0
 ifeq ($(buildplatform),gnu_x86_64)
 BUILD_SC := 1
-else
-BUILD_SC := 0
+endif
+ifeq ($(buildplatform),gnu_ppc64)
+BUILD_SC := 1
 endif
 
 # Don't build cluster_protocol.so if python-devel is not present.  The

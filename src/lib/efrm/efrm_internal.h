@@ -97,5 +97,8 @@ extern int  efrm_vi_allocator_alloc_set(struct efrm_nic *, unsigned vi_props,
 extern void efrm_vi_allocator_free_set(struct efrm_nic *,
 				       struct efrm_vi_allocation *);
 
+#define EFRM_PORT_SNIFF_NO_OWNER -1
+#define EFRM_PORT_SNIFF_OP_IN_PROGRESS -2
+
 
 #endif  /* __EFRM_INTERNAL_H__ */

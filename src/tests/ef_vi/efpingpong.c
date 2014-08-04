@@ -69,6 +69,7 @@
 #include <string.h>
 #include <net/if.h>
 #include <netdb.h>
+#include <poll.h>
 
 
 /* This gives a frame len of 70, which is the same as:
@@ -81,7 +82,8 @@
 
 static int              cfg_iter = 100000;
 static unsigned		cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
-static int		cfg_wait = 0;
+static int		cfg_eventq_wait;
+static int		cfg_fd_wait;
 static int              cfg_use_vf;
 static int              cfg_phys_mode;
 static int              cfg_disable_tx_push;
@@ -168,7 +170,7 @@ static void rx_wait(void)
 
   while( 1 ) {
     n_ev = ef_eventq_poll(&vi, evs, sizeof(evs) / sizeof(evs[0]));
-    if( n_ev > 0 )
+    if( n_ev > 0 ) {
       for( i = 0; i < n_ev; ++i )
         switch( EF_EVENT_TYPE(evs[i]) ) {
         case EF_EVENT_TYPE_RX:
@@ -193,8 +195,19 @@ static void rx_wait(void)
                   EF_EVENT_PRI_ARG(evs[i]));
           break;
         }
-    else if( cfg_wait )
+    }
+    else if( cfg_eventq_wait ) {
       TRY(ef_eventq_wait(&vi, driver_handle, ef_eventq_current(&vi), 0));
+    }
+    else if( cfg_fd_wait ) {
+      TRY(ef_vi_prime(&vi, driver_handle, ef_eventq_current(&vi)));
+      struct pollfd pollfd = {
+        .fd      = driver_handle,
+        .events  = POLLIN,
+        .revents = 0,
+      };
+      TRY(poll(&pollfd, 1, -1));
+    }
   }
 }
 
@@ -394,12 +407,13 @@ static void usage(void)
                   "            <local-ip-intf> <local-port>\n"
                   "            <remote-mac> <remote-ip-intf> <remote-port>\n");
   fprintf(stderr, "\noptions:\n");
-  fprintf(stderr, "  -n <iterations>         - set number of iterations\n");
-  fprintf(stderr, "  -s <message-size>       - set udp payload size\n");
-  fprintf(stderr, "  -w                      - sleep instead of busy wait\n");
-  fprintf(stderr, "  -v                      - use a VF\n");
-  fprintf(stderr, "  -p                      - physical address mode\n");
-  fprintf(stderr, "  -t                      - disable TX push\n");
+  fprintf(stderr, "  -n <iterations> - set number of iterations\n");
+  fprintf(stderr, "  -s <msg-size>   - set udp payload size\n");
+  fprintf(stderr, "  -w              - block on eventq instead of busy wait\n");
+  fprintf(stderr, "  -f              - block on fd instead of busy wait\n");
+  fprintf(stderr, "  -v              - use a VF\n");
+  fprintf(stderr, "  -p              - physical address mode\n");
+  fprintf(stderr, "  -t              - disable TX push\n");
   fprintf(stderr, "\n");
   exit(1);
 }
@@ -420,7 +434,7 @@ int main(int argc, char* argv[])
 
   printf("# ef_vi_version_str: %s\n", ef_vi_version_str());
 
-  while( (c = getopt (argc, argv, "n:s:wbvpta:A:")) != -1 )
+  while( (c = getopt (argc, argv, "n:s:wfbvpta:A:")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -429,7 +443,10 @@ int main(int argc, char* argv[])
       cfg_payload_len = atoi(optarg);
       break;
     case 'w':
-      cfg_wait = 1;
+      cfg_eventq_wait = 1;
+      break;
+    case 'f':
+      cfg_fd_wait = 1;
       break;
     case 'v':
       cfg_use_vf = 1;

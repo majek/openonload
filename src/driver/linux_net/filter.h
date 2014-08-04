@@ -71,6 +71,13 @@ enum efx_filter_match_flags {
 	EFX_FILTER_MATCH_LOC_MAC_IG =	0x0400,
 };
 
+#define EFX_FILTER_MATCH_FLAGS_RFS (EFX_FILTER_MATCH_ETHER_TYPE | \
+				    EFX_FILTER_MATCH_IP_PROTO |	  \
+				    EFX_FILTER_MATCH_LOC_HOST |	  \
+				    EFX_FILTER_MATCH_LOC_PORT |	  \
+				    EFX_FILTER_MATCH_REM_HOST |	  \
+				    EFX_FILTER_MATCH_REM_PORT)
+
 /**
  * enum efx_filter_priority - priority of a hardware filter specification
  * @EFX_FILTER_PRI_SARFS: Driver inserted performance hint

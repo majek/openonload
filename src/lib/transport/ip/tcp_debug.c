@@ -669,43 +669,47 @@ void ci_tcp_state_dump_retrans(ci_netif* ni, ci_tcp_state* ts)
 #endif
 
 
-void ci_tcp_socket_cmn_dump(ci_netif* ni, ci_tcp_socket_cmn* tsc,
-			    const char* pf)
+static void ci_tcp_socket_cmn_dump(ci_netif* ni, ci_tcp_socket_cmn* tsc,
+                                   const char* pf,
+                                   oo_dump_log_fn_t logger, void* log_arg)
 {
   /* fixme: dump tsc fields */
 }
 
 
 void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
-			       const char* pf)
+			       const char* pf,
+                               oo_dump_log_fn_t logger, void* log_arg)
 {
-  ci_tcp_socket_cmn_dump(ni, &tls->c, pf);
+  ci_tcp_socket_cmn_dump(ni, &tls->c, pf, logger, log_arg);
 
-  log("%s  listenq: max=%d n=%d", pf, 
-      ci_tcp_listenq_max(ni), tls->n_listenq);
-  log("%s  acceptq: max=%d n=%d accepted=%d", pf,
-      tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
-  log("%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
+  logger(log_arg, "%s  listenq: max=%d n=%d", pf, 
+         ci_tcp_listenq_max(ni), tls->n_listenq);
+  logger(log_arg, "%s  acceptq: max=%d n=%d accepted=%d", pf,
+         tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
+  logger(log_arg, "%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
 #if CI_CFG_FD_CACHING
-  log("%s  epcache: n=%d cache=%s pending=%s", pf, ni->state->epcache_n,
-      ci_ni_dllist_is_empty(ni, &tls->epcache_cache) ? "EMPTY":"yes",
-      ci_ni_dllist_is_empty(ni, &tls->epcache_pending) ? "EMPTY":"yes");
+  logger(log_arg, "%s  epcache: n=%d cache=%s pending=%s",
+         pf, ni->state->epcache_n,
+         ci_ni_dllist_is_empty(ni, &tls->epcache_cache) ? "EMPTY":"yes",
+         ci_ni_dllist_is_empty(ni, &tls->epcache_pending) ? "EMPTY":"yes");
 #endif
 #if CI_CFG_STATS_TCP_LISTEN
   {
     ci_tcp_socket_listen_stats* s = &tls->stats;
-    log("%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d",
-	pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
-	s->n_acceptq_overflow, s->n_acceptq_no_sock);
-    log("%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d",
-	pf, s->n_accept_loop2_closed, s->n_accept_no_fd,
-	s->n_acks_reset, s->n_accept_os);
+    logger(log_arg,
+           "%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d",
+           pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
+           s->n_acceptq_overflow, s->n_acceptq_no_sock);
+    logger(log_arg, "%s  a_loop2_closed=%d a_no_fd=%d ack_rsts=%d os=%d",
+           pf, s->n_accept_loop2_closed, s->n_accept_no_fd,
+           s->n_acks_reset, s->n_accept_os);
     if( NI_OPTS(ni).tcp_syncookies ) {
-      log("%s  syncookies: syn_recv=%d ack_recv=%d ack_answ=%d",
-          pf, s->n_syncookie_syn, s->n_syncookie_ack_recv,
-          s->n_syncookie_ack_answ);
-      log("%s  syncookies rejected: timestamp=%d crypto_hash=%d",
-          pf, s->n_syncookie_ack_ts_rej, s->n_syncookie_ack_hash_rej);
+      logger(log_arg, "%s  syncookies: syn_recv=%d ack_recv=%d ack_answ=%d",
+             pf, s->n_syncookie_syn, s->n_syncookie_ack_recv,
+             s->n_syncookie_ack_answ);
+      logger(log_arg, "%s  syncookies rejected: timestamp=%d crypto_hash=%d",
+             pf, s->n_syncookie_ack_ts_rej, s->n_syncookie_ack_hash_rej);
     }
   }
 #endif
@@ -713,13 +717,14 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
 
 static int line_fmt_timer(char *buf, int len, int pos,
                          const char *fmt, ci_iptime_t delta,
-                          ci_iptime_t t)
+                          ci_iptime_t t,
+                          oo_dump_log_fn_t logger, void* log_arg)
 {
   int avail = len - pos;
   int n;
   if ( (n = ci_snprintf(buf + pos, avail, fmt, delta, t)) >= avail) {
     buf[pos] = '\0';
-    log("%s", buf);
+    logger(log_arg, "%s", buf);
     pos = 0;
     n = ci_snprintf(buf, avail, fmt, delta, t);
   }
@@ -736,78 +741,86 @@ static int line_fmt_timer(char *buf, int len, int pos,
 
 #define LINE_LEN (79)
 void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts, 
-		       const char *pf)
+		       const char *pf,
+                       oo_dump_log_fn_t logger, void* log_arg)
 {
   struct oo_tcp_socket_stats stats = ts->stats;
   ci_iptime_t now = ci_ip_time_now(ni);
   char buf[LINE_LEN + 1];
   int n;
 
-  ci_tcp_socket_cmn_dump(ni, &ts->c, pf);
+  ci_tcp_socket_cmn_dump(ni, &ts->c, pf, logger, log_arg);
 
-  log("%s  tcpflags: "CI_TCP_SOCKET_FLAGS_FMT" local_peer: %d",
-      pf, CI_TCP_SOCKET_FLAGS_PRI_ARG(ts), ts->s.local_peer);
+  logger(log_arg, "%s  tcpflags: "CI_TCP_SOCKET_FLAGS_FMT" local_peer: %d",
+         pf, CI_TCP_SOCKET_FLAGS_PRI_ARG(ts), ts->s.local_peer);
 
-  log("%s  snd: up=%08x una-nxt-max=%08x-%08x-%08x enq=%08x%s",
-      pf,
-      tcp_snd_up(ts), tcp_snd_una(ts), tcp_snd_nxt(ts), ts->snd_max,
-      tcp_enq_nxt(ts), SEQ_LT(tcp_snd_nxt(ts), tcp_snd_up(ts)) ? " URG":"");
-  log("%s  snd: send=%d(%d) send+pre=%d inflight=%d(%d) wnd=%d unused=%d", pf,
-      SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts)), ts->send.num,
-      ci_tcp_sendq_n_pkts(ts),
-      ci_tcp_inflight(ts), ts->retrans.num, tcp_snd_wnd(ts),
-      SEQ_SUB(ts->snd_max, tcp_snd_nxt(ts)));
-  log("%s  snd: cwnd=%d+%d used=%d ssthresh=%d bytes_acked=%d %s",
-      pf, ts->cwnd, ts->cwnd_extra, tcp_cwnd_used(ts),
-      ts->ssthresh, ts->bytes_acked, congstate_str(ts));
-  log("%s  snd: "OOF_IPCACHE_STATE" "OOF_IPCACHE_DETAIL,
-      pf, OOFA_IPCACHE_STATE(ni, &ts->s.pkt),
-      OOFA_IPCACHE_DETAIL(&ts->s.pkt));
-  log("%s  snd: limited rwnd=%d cwnd=%d nagle=%d more=%d app=%d",
-      pf, stats.tx_stop_rwnd, stats.tx_stop_cwnd, stats.tx_stop_nagle,
-      stats.tx_stop_more, stats.tx_stop_app);
+  logger(log_arg, "%s  snd: up=%08x una-nxt-max=%08x-%08x-%08x enq=%08x%s",
+         pf,
+         tcp_snd_up(ts), tcp_snd_una(ts), tcp_snd_nxt(ts), ts->snd_max,
+         tcp_enq_nxt(ts), SEQ_LT(tcp_snd_nxt(ts), tcp_snd_up(ts)) ? " URG":"");
+  logger(log_arg,
+         "%s  snd: send=%d(%d) send+pre=%d inflight=%d(%d) wnd=%d unused=%d",
+         pf, SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts)), ts->send.num,
+         ci_tcp_sendq_n_pkts(ts),
+         ci_tcp_inflight(ts), ts->retrans.num, tcp_snd_wnd(ts),
+         SEQ_SUB(ts->snd_max, tcp_snd_nxt(ts)));
+  logger(log_arg, "%s  snd: cwnd=%d+%d used=%d ssthresh=%d bytes_acked=%d %s",
+         pf, ts->cwnd, ts->cwnd_extra, tcp_cwnd_used(ts),
+         ts->ssthresh, ts->bytes_acked, congstate_str(ts));
+  logger(log_arg, "%s  snd: "OOF_IPCACHE_STATE" "OOF_IPCACHE_DETAIL,
+         pf, OOFA_IPCACHE_STATE(ni, &ts->s.pkt),
+         OOFA_IPCACHE_DETAIL(&ts->s.pkt));
+  logger(log_arg, "%s  snd: limited rwnd=%d cwnd=%d nagle=%d more=%d app=%d",
+         pf, stats.tx_stop_rwnd, stats.tx_stop_cwnd, stats.tx_stop_nagle,
+         stats.tx_stop_more, stats.tx_stop_app);
 
-  log("%s  rcv: nxt-max=%08x-%08x wnd adv=%d cur=%d %s%s", pf,
-      tcp_rcv_nxt(ts), tcp_rcv_wnd_right_edge_sent(ts),
-      tcp_rcv_wnd_advertised(ts), tcp_rcv_wnd_current(ts),
-      ci_tcp_is_in_faststart(ts) ? " FASTSTART":"",
-      ci_tcp_can_use_fast_path(ts) ? " FAST":"");
-  log("%s  rcv: bytes=%d rob_pkts=%d q_pkts=%d+%d usr=%d",
-      pf, ts->rcv_added - stats.rx_isn, ts->rob.num, ts->recv1.num,
-      ts->recv2.num, tcp_rcv_usr(ts));
+  logger(log_arg, "%s  rcv: nxt-max=%08x-%08x wnd adv=%d cur=%d %s%s", pf,
+         tcp_rcv_nxt(ts), tcp_rcv_wnd_right_edge_sent(ts),
+         tcp_rcv_wnd_advertised(ts), tcp_rcv_wnd_current(ts),
+         ci_tcp_is_in_faststart(ts) ? " FASTSTART":"",
+         ci_tcp_can_use_fast_path(ts) ? " FAST":"");
+  logger(log_arg, "%s  rcv: bytes=%d rob_pkts=%d q_pkts=%d+%d usr=%d",
+         pf, ts->rcv_added - stats.rx_isn, ts->rob.num, ts->recv1.num,
+         ts->recv2.num, tcp_rcv_usr(ts));
 
-  log("%s  eff_mss=%d smss=%d amss=%d  used_bufs=%d uid=%d"CI_DEBUG(" pid=%d")
-      " wscl s=%d r=%d", pf, ts->eff_mss, ts->smss, ts->amss,
-      ts->send.num + ts->retrans.num + ts->rob.num+ts->recv1.num
-      + ts->recv2.num, (int) ts->s.uid CI_DEBUG_ARG((int)ts->s.pid),
-      ts->snd_wscl, ts->rcv_wscl);
-  log("%s  srtt=%02d rttvar=%03d rto=%d zwins=%u,%u", pf,
-      tcp_srtt(ts), tcp_rttvar(ts), ts->rto, ts->zwin_probes, ts->zwin_acks);
-  log("%s  retrans=%d dupacks=%u rtos=%u frecs=%u seqerr=%u,%u ooo_pkts=%d "
-      "ooo=%d", pf, ts->retransmits, ts->dup_acks, stats.rtos,
-      stats.fast_recovers, stats.rx_seq_errs, stats.rx_ack_seq_errs,
-      stats.rx_ooo_pkts, stats.rx_ooo_fill);
-  log("%s  tx: defer=%d nomac=%u warm=%u warm_aborted=%u", pf,
-      stats.tx_defer, stats.tx_nomac_defer, stats.tx_msg_warm,
-      stats.tx_msg_warm_abort);
-  log("%s  tmpl: alloc=%u send_fast=%u send_slow=%u active=%u", pf,
-      stats.tx_tmpl_alloc, stats.tx_tmpl_send_fast, stats.tx_tmpl_send_slow,
-      stats.tx_tmpl_active);
+  logger(log_arg,
+         "%s  eff_mss=%d smss=%d amss=%d  used_bufs=%d uid=%d"
+         CI_DEBUG(" pid=%d")" wscl s=%d r=%d",
+         pf, ts->eff_mss, ts->smss, ts->amss,
+         ts->send.num + ts->retrans.num + ts->rob.num+ts->recv1.num
+         + ts->recv2.num, (int) ts->s.uid CI_DEBUG_ARG((int)ts->s.pid),
+         ts->snd_wscl, ts->rcv_wscl);
+  logger(log_arg, "%s  srtt=%02d rttvar=%03d rto=%d zwins=%u,%u", pf,
+         tcp_srtt(ts), tcp_rttvar(ts), ts->rto, ts->zwin_probes,
+         ts->zwin_acks);
+  logger(log_arg,
+         "%s  retrans=%d dupacks=%u rtos=%u frecs=%u seqerr=%u,%u ooo_pkts=%d "
+         "ooo=%d", pf, ts->retransmits, ts->dup_acks, stats.rtos,
+         stats.fast_recovers, stats.rx_seq_errs, stats.rx_ack_seq_errs,
+         stats.rx_ooo_pkts, stats.rx_ooo_fill);
+  logger(log_arg, "%s  tx: defer=%d nomac=%u warm=%u warm_aborted=%u", pf,
+         stats.tx_defer, stats.tx_nomac_defer, stats.tx_msg_warm,
+         stats.tx_msg_warm_abort);
+  logger(log_arg, "%s  tmpl: alloc=%u send_fast=%u send_slow=%u active=%u", pf,
+         stats.tx_tmpl_alloc, stats.tx_tmpl_send_fast, stats.tx_tmpl_send_slow,
+         stats.tx_tmpl_active);
 
 #ifndef __KERNEL__
 # define fmt_timer(_b, _l, _n, name, field)                             \
   if( ci_ip_timer_pending(ni, &ts->field) )                             \
     _n = line_fmt_timer(_b, _l, _n, #name"(%ums[%x]) ",                 \
                         ci_ip_time_ticks2ms(ni, ts->field.time-now),    \
-                        ts->field.time)
+                        ts->field.time,                                 \
+                        logger, log_arg)
 #else
 # define fmt_timer(_b, _l, _n, name, field)                     \
   if( ci_ip_timer_pending(ni, &ts->field) )                     \
     _n = line_fmt_timer(_b, _l, _n,  #name"(%uticks[%x]) ",     \
-                        ts->field.time-now, ts->field.time)
+                        ts->field.time-now, ts->field.time,     \
+                        ci_log_dump_fn, NULL)
 #endif
 
-  log("%s  timers: ", pf);
+  logger(log_arg, "%s  timers: ", pf);
   n = 0;
   buf[0] = '\0';
   fmt_timer(buf, LINE_LEN, n, rto, rto_tid);
@@ -815,7 +828,7 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   fmt_timer(buf, LINE_LEN, n, zwin, zwin_tid);
   fmt_timer(buf, LINE_LEN, n, kalive, kalive_tid);
   fmt_timer(buf, LINE_LEN, n, pmtu, pmtus.tid);
-  log("%s", buf);
+  logger(log_arg, "%s", buf);
 }
 
 
@@ -826,7 +839,7 @@ void ci_tcp_state_dump_id(ci_netif* ni, int ep_id)
     return;
   }
 
-  ci_tcp_state_dump(ni, ID_TO_TCP(ni, ep_id), "");
+  ci_tcp_state_dump(ni, ID_TO_TCP(ni, ep_id), "", ci_log_dump_fn, NULL);
 }
 
 

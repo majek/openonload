@@ -73,8 +73,11 @@ int efrm_rss_context_alloc(struct efrm_client *client,
 
 	/* If the number of queues needed is a power of 2 we can simply use
 	 * one of the shared contexts.
+	 * If nic reports RX_RSS_LIMITED, shared rss contexts do not exist,
+	 * so we must allocate an exclusive one.
 	 */
-	if ( !(num_qs & (num_qs - 1)) ) {
+	if ( !(num_qs & (num_qs - 1)) &&
+		!(efrm_client_get_nic(client)->flags & NIC_FLAG_RX_RSS_LIMITED) ) {
 		/* Shared rss contexts are only valid up to 64 queues - we
 		 * don't allow min_n_vis any bigger anyway, so this has already
 		 * been checked.
@@ -125,6 +128,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 	struct efrm_vi_set *vi_set;
 	struct efrm_nic *efrm_nic;
 	int i, rc;
+	int rss_limited;
 
 	if (n_vis > 64) {
 		EFRM_ERR("%s: ERROR: set size=%d too big (max=64)",
@@ -137,8 +141,10 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 
 	client = efrm_pd_to_resource(pd)->rs_client;
 	efrm_nic = container_of(client->nic, struct efrm_nic, efhw_nic);
+	rss_limited =
+		efrm_client_get_nic(client)->flags & NIC_FLAG_RX_RSS_LIMITED;
 
-	if( n_vis > 1 ) {
+	if (n_vis > 1 || rss_limited) {
 		rc = efrm_rss_context_alloc(client, vi_set, n_vis);
 		/* If we failed to allocate an RSS context fall back to
 		* using the netdriver's default context.
@@ -147,6 +153,12 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 		* RSS context, or if it's out of contexts.
 	 	*/
 		if (rc != 0) {
+			/* If RX_RSS_LIMITED is set, the netdriver will not
+			 * have allocated a default context.
+			 */
+			if (rss_limited)
+				return rc;
+
 			if (rc != -EOPNOTSUPP)
 				EFRM_ERR("%s: WARNING: Failed to allocate RSS "
 					 "context of size %d (rc %d), falling "
@@ -205,6 +217,7 @@ void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 	uint64_t free = vi_set->free;
 	efrm_nic = container_of(vi_set->rs.rs_client->nic,
 				struct efrm_nic, efhw_nic);
+
 	if (vi_set->rss_context != -1)
 		efhw_nic_rss_context_free(vi_set->rs.rs_client->nic,
 					  vi_set->rss_context);

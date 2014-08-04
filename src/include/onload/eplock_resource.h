@@ -63,7 +63,7 @@ extern int eplock_ctor(ci_netif *ni);
 extern void eplock_dtor(ci_netif *ni);
 
 /*! Comment? */
-extern int efab_eplock_unlock_and_wake(ci_netif *ni);
+extern int efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context);
 
 /*! Comment? */
 extern int efab_eplock_lock_wait(ci_netif* ni

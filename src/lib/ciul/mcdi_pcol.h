@@ -719,6 +719,12 @@
 /* enum: Fatal. */
 #define          MUM_EVENT_LEVEL_FATAL 0x3
 #define       MUM_EVENT_DATA_OFST 0
+#define        MUM_EVENT_SENSOR_ID_LBN 0
+#define        MUM_EVENT_SENSOR_ID_WIDTH 8
+/*             Enum values, see field(s): */
+/*                MC_CMD_SENSOR_INFO/MC_CMD_SENSOR_INFO_OUT/MASK */
+#define        MUM_EVENT_SENSOR_STATE_LBN 8
+#define        MUM_EVENT_SENSOR_STATE_WIDTH 8
 #define       MUM_EVENT_DATA_LBN 0
 #define       MUM_EVENT_DATA_WIDTH 32
 #define       MUM_EVENT_SRC_LBN 36
@@ -733,14 +739,9 @@
 #define          MUM_EVENT_CODE_ASSERT 0x2
 /* enum: Sensor failure. */
 #define          MUM_EVENT_CODE_SENSOR 0x3
-#define       MUM_EVENT_SENSOR_ID_LBN 36
-#define       MUM_EVENT_SENSOR_ID_WIDTH 8
-#define          MUM_EVENT_SENSOR_ID_FAN_TC664E 0x1 /* enum */
-#define          MUM_EVENT_SENSOR_ID_FPGA_POWER_LTC3880 0x2 /* enum */
-#define       MUM_EVENT_SENSOR_ERROR_OFST 0
-#define          MUM_EVENT_SENSOR_ERROR_INIT_FAILED 0x1 /* enum */
-#define       MUM_EVENT_SENSOR_ERROR_LBN 0
-#define       MUM_EVENT_SENSOR_ERROR_WIDTH 32
+#define       MUM_EVENT_SENSOR_DATA_OFST 0
+#define       MUM_EVENT_SENSOR_DATA_LBN 0
+#define       MUM_EVENT_SENSOR_DATA_WIDTH 32
 
 
 /***********************************/
@@ -2033,8 +2034,10 @@
 #define          MC_CMD_FW_FULL_FEATURED 0x0
 /* enum: Prefer to use firmware with fewer features but lower latency */
 #define          MC_CMD_FW_LOW_LATENCY 0x1
-/* enum: Prefer to use firmware with RX coalescing (for SolarCapture) */
-#define          MC_CMD_FW_PKT_COALESCE 0x2
+/* enum: Prefer to use firmware for SolarCapture packed stream mode */
+#define          MC_CMD_FW_PACKED_STREAM 0x2
+/* enum: Only this option is allowed for non-admin functions */
+#define          MC_CMD_FW_DONT_CARE  0xffffffff
 
 /* MC_CMD_DRV_ATTACH_OUT msgresponse */
 #define    MC_CMD_DRV_ATTACH_OUT_LEN 4
@@ -2729,7 +2732,7 @@
 #define MC_CMD_SET_MAC 0x2c
 
 /* MC_CMD_SET_MAC_IN msgrequest */
-#define    MC_CMD_SET_MAC_IN_LEN 24
+#define    MC_CMD_SET_MAC_IN_LEN 28
 /* The MTU is the MTU programmed directly into the XMAC/GMAC (inclusive of
  * EtherII, VLAN, bug16011 padding).
  */
@@ -2755,6 +2758,9 @@
 #define          MC_CMD_FCNTL_AUTO 0x3
 /* enum: Priority flow control (eftest builds only). */
 #define          MC_CMD_FCNTL_QBB 0x4
+#define       MC_CMD_SET_MAC_IN_FLAGS_OFST 24
+#define        MC_CMD_SET_MAC_IN_FLAG_INCLUDE_FCS_LBN 0
+#define        MC_CMD_SET_MAC_IN_FLAG_INCLUDE_FCS_WIDTH 1
 
 /* MC_CMD_SET_MAC_OUT msgresponse */
 #define    MC_CMD_SET_MAC_OUT_LEN 0
@@ -3691,6 +3697,38 @@
 #define          MC_CMD_SENSOR_CCOM_AVREG_1V8_SUPPLY  0x39
 /* enum: CCOM AVREG 1v8 supply (external ADC): mV */
 #define          MC_CMD_SENSOR_CCOM_AVREG_1V8_SUPPLY_EXTADC  0x3a
+/* enum: Not a sensor: reserved for the next page flag */
+#define          MC_CMD_SENSOR_PAGE1_NEXT  0x3f
+/* enum: controller internal temperature sensor voltage on master core
+ * (internal ADC): mV
+ */
+#define          MC_CMD_SENSOR_CONTROLLER_MASTER_VPTAT  0x40
+/* enum: controller internal temperature on master core (internal ADC): degC */
+#define          MC_CMD_SENSOR_CONTROLLER_MASTER_INTERNAL_TEMP  0x41
+/* enum: controller internal temperature sensor voltage on master core
+ * (external ADC): mV
+ */
+#define          MC_CMD_SENSOR_CONTROLLER_MASTER_VPTAT_EXTADC  0x42
+/* enum: controller internal temperature on master core (external ADC): degC */
+#define          MC_CMD_SENSOR_CONTROLLER_MASTER_INTERNAL_TEMP_EXTADC  0x43
+/* enum: controller internal temperature on slave core sensor voltage (internal
+ * ADC): mV
+ */
+#define          MC_CMD_SENSOR_CONTROLLER_SLAVE_VPTAT  0x44
+/* enum: controller internal temperature on slave core (internal ADC): degC */
+#define          MC_CMD_SENSOR_CONTROLLER_SLAVE_INTERNAL_TEMP  0x45
+/* enum: controller internal temperature on slave core sensor voltage (external
+ * ADC): mV
+ */
+#define          MC_CMD_SENSOR_CONTROLLER_SLAVE_VPTAT_EXTADC  0x46
+/* enum: controller internal temperature on slave core (external ADC): degC */
+#define          MC_CMD_SENSOR_CONTROLLER_SLAVE_INTERNAL_TEMP_EXTADC  0x47
+/* enum: Voltage supplied to the SODIMMs from their power supply: mV */
+#define          MC_CMD_SENSOR_SODIMM_VOUT  0x49
+/* enum: Temperature of SODIMM 0 (if installed): degC */
+#define          MC_CMD_SENSOR_SODIMM_0_TEMP  0x4a
+/* enum: Temperature of SODIMM 1 (if installed): degC */
+#define          MC_CMD_SENSOR_SODIMM_1_TEMP  0x4b
 /* MC_CMD_SENSOR_INFO_ENTRY_TYPEDEF */
 #define       MC_CMD_SENSOR_ENTRY_OFST 4
 #define       MC_CMD_SENSOR_ENTRY_LEN 8
@@ -3797,6 +3835,8 @@
 #define          MC_CMD_SENSOR_STATE_BROKEN  0x3
 /* enum: Sensor is working but does not currently have a reading. */
 #define          MC_CMD_SENSOR_STATE_NO_READING  0x4
+/* enum: Sensor initialisation failed. */
+#define          MC_CMD_SENSOR_STATE_INIT_FAILED  0x5
 #define       MC_CMD_SENSOR_VALUE_ENTRY_TYPEDEF_STATE_LBN 16
 #define       MC_CMD_SENSOR_VALUE_ENTRY_TYPEDEF_STATE_WIDTH 8
 #define       MC_CMD_SENSOR_VALUE_ENTRY_TYPEDEF_TYPE_OFST 3
@@ -3961,6 +4001,11 @@
 #define          MC_CMD_WORKAROUND_BUG35388 0x2
 /* enum: Bug35017 workaround (A64 tables must be identity map) */
 #define          MC_CMD_WORKAROUND_BUG35017 0x3
+/* enum: Bug 41750 present (MC_CMD_TRIGGER_INTERRUPT won't work) */
+#define          MC_CMD_WORKAROUND_BUG41750 0x4
+/* 0 = disable the workaround indicated by TYPE; any non-zero value = enable
+ * the workaround
+ */
 #define       MC_CMD_WORKAROUND_IN_ENABLED_OFST 4
 
 /* MC_CMD_WORKAROUND_OUT msgresponse */
@@ -4294,6 +4339,16 @@
 #define          MC_CMD_MUM_OP_LOG 0x6
 /* enum: Operations on MUM GPIO lines */
 #define          MC_CMD_MUM_OP_GPIO 0x7
+/* enum: Get sensor readings from MUM */
+#define          MC_CMD_MUM_OP_READ_SENSORS 0x8
+/* enum: Initiate clock programming on the MUM */
+#define          MC_CMD_MUM_OP_PROGRAM_CLOCKS 0x9
+/* enum: Initiate FPGA load from flash on the MUM */
+#define          MC_CMD_MUM_OP_FPGA_LOAD 0xa
+/* enum: Request sensor reading from MUM ADC resulting from earlier request via
+ * MUM ATB
+ */
+#define          MC_CMD_MUM_OP_READ_ATB_SENSOR 0xb
 
 /* MC_CMD_MUM_IN_NULL msgrequest */
 #define    MC_CMD_MUM_IN_NULL_LEN 4
@@ -4454,6 +4509,35 @@
 #define        MC_CMD_MUM_IN_GPIO_OP_OUT_ENABLE_ENABLEBIT_LBN 24
 #define        MC_CMD_MUM_IN_GPIO_OP_OUT_ENABLE_ENABLEBIT_WIDTH 8
 
+/* MC_CMD_MUM_IN_READ_SENSORS msgrequest */
+#define    MC_CMD_MUM_IN_READ_SENSORS_LEN 8
+/* MUM cmd header */
+/*            MC_CMD_MUM_IN_CMD_OFST 0 */
+#define       MC_CMD_MUM_IN_READ_SENSORS_PARAMS_OFST 4
+#define        MC_CMD_MUM_IN_READ_SENSORS_SENSOR_ID_LBN 0
+#define        MC_CMD_MUM_IN_READ_SENSORS_SENSOR_ID_WIDTH 8
+#define        MC_CMD_MUM_IN_READ_SENSORS_NUM_SENSORS_LBN 8
+#define        MC_CMD_MUM_IN_READ_SENSORS_NUM_SENSORS_WIDTH 8
+
+/* MC_CMD_MUM_IN_PROGRAM_CLOCKS msgrequest */
+#define    MC_CMD_MUM_IN_PROGRAM_CLOCKS_LEN 8
+/* MUM cmd header */
+/*            MC_CMD_MUM_IN_CMD_OFST 0 */
+/* Bit-mask of clocks to be programmed */
+#define       MC_CMD_MUM_IN_PROGRAM_CLOCKS_MASK_OFST 4
+#define          MC_CMD_MUM_CLOCK_ID_FPGA 0x0 /* enum */
+#define          MC_CMD_MUM_CLOCK_ID_DDR 0x1 /* enum */
+
+/* MC_CMD_MUM_IN_FPGA_LOAD msgrequest */
+#define    MC_CMD_MUM_IN_FPGA_LOAD_LEN 4
+/* MUM cmd header */
+/*            MC_CMD_MUM_IN_CMD_OFST 0 */
+
+/* MC_CMD_MUM_IN_READ_ATB_SENSOR msgrequest */
+#define    MC_CMD_MUM_IN_READ_ATB_SENSOR_LEN 4
+/* MUM cmd header */
+/*            MC_CMD_MUM_IN_CMD_OFST 0 */
+
 /* MC_CMD_MUM_OUT msgresponse */
 #define    MC_CMD_MUM_OUT_LEN 0
 
@@ -4499,9 +4583,9 @@
 /* MC_CMD_MUM_OUT_GPIO_IN_READ msgresponse */
 #define    MC_CMD_MUM_OUT_GPIO_IN_READ_LEN 8
 /* The first 32-bit word read from the GPIO IN register. */
-#define       MC_CMD_MUM_OUT_GPIO_IN_READ_WORD1_OFST 0
+#define       MC_CMD_MUM_OUT_GPIO_IN_READ_GPIOMASK1_OFST 0
 /* The second 32-bit word read from the GPIO IN register. */
-#define       MC_CMD_MUM_OUT_GPIO_IN_READ_WORD2_OFST 4
+#define       MC_CMD_MUM_OUT_GPIO_IN_READ_GPIOMASK2_OFST 4
 
 /* MC_CMD_MUM_OUT_GPIO_OUT_WRITE msgresponse */
 #define    MC_CMD_MUM_OUT_GPIO_OUT_WRITE_LEN 0
@@ -4509,30 +4593,50 @@
 /* MC_CMD_MUM_OUT_GPIO_OUT_READ msgresponse */
 #define    MC_CMD_MUM_OUT_GPIO_OUT_READ_LEN 8
 /* The first 32-bit word read from the GPIO OUT register. */
-#define       MC_CMD_MUM_OUT_GPIO_OUT_READ_WORD1_OFST 0
+#define       MC_CMD_MUM_OUT_GPIO_OUT_READ_GPIOMASK1_OFST 0
 /* The second 32-bit word read from the GPIO OUT register. */
-#define       MC_CMD_MUM_OUT_GPIO_OUT_READ_WORD2_OFST 4
+#define       MC_CMD_MUM_OUT_GPIO_OUT_READ_GPIOMASK2_OFST 4
 
 /* MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_WRITE msgresponse */
 #define    MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_WRITE_LEN 0
 
 /* MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_READ msgresponse */
 #define    MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_READ_LEN 8
-#define       MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_READ_WORD1_OFST 0
-#define       MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_READ_WORD2_OFST 4
+#define       MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_READ_GPIOMASK1_OFST 0
+#define       MC_CMD_MUM_OUT_GPIO_OUT_ENABLE_READ_GPIOMASK2_OFST 4
 
-/* MC_CMD_MUM_OUT_GPIO_OUT_OP_READ msgresponse */
-#define    MC_CMD_MUM_OUT_GPIO_OUT_OP_READ_LEN 4
-#define       MC_CMD_MUM_OUT_GPIO_OUT_OP_READ_BIT_READ_OFST 0
+/* MC_CMD_MUM_OUT_GPIO_OP_OUT_READ msgresponse */
+#define    MC_CMD_MUM_OUT_GPIO_OP_OUT_READ_LEN 4
+#define       MC_CMD_MUM_OUT_GPIO_OP_OUT_READ_BIT_READ_OFST 0
 
-/* MC_CMD_MUM_OUT_GPIO_OUT_OP_WRITE msgresponse */
-#define    MC_CMD_MUM_OUT_GPIO_OUT_OP_WRITE_LEN 0
+/* MC_CMD_MUM_OUT_GPIO_OP_OUT_WRITE msgresponse */
+#define    MC_CMD_MUM_OUT_GPIO_OP_OUT_WRITE_LEN 0
 
-/* MC_CMD_MUM_OUT_GPIO_OUT_OP_CONFIG msgresponse */
-#define    MC_CMD_MUM_OUT_GPIO_OUT_OP_CONFIG_LEN 0
+/* MC_CMD_MUM_OUT_GPIO_OP_OUT_CONFIG msgresponse */
+#define    MC_CMD_MUM_OUT_GPIO_OP_OUT_CONFIG_LEN 0
 
-/* MC_CMD_MUM_OUT_GPIO_OUT_OP_ENABLE msgresponse */
-#define    MC_CMD_MUM_OUT_GPIO_OUT_OP_ENABLE_LEN 0
+/* MC_CMD_MUM_OUT_GPIO_OP_OUT_ENABLE msgresponse */
+#define    MC_CMD_MUM_OUT_GPIO_OP_OUT_ENABLE_LEN 0
+
+/* MC_CMD_MUM_OUT_READ_SENSORS msgresponse */
+#define    MC_CMD_MUM_OUT_READ_SENSORS_LENMIN 2
+#define    MC_CMD_MUM_OUT_READ_SENSORS_LENMAX 252
+#define    MC_CMD_MUM_OUT_READ_SENSORS_LEN(num) (0+2*(num))
+#define       MC_CMD_MUM_OUT_READ_SENSORS_READINGS_OFST 0
+#define       MC_CMD_MUM_OUT_READ_SENSORS_READINGS_LEN 2
+#define       MC_CMD_MUM_OUT_READ_SENSORS_READINGS_MINNUM 1
+#define       MC_CMD_MUM_OUT_READ_SENSORS_READINGS_MAXNUM 126
+
+/* MC_CMD_MUM_OUT_PROGRAM_CLOCKS msgresponse */
+#define    MC_CMD_MUM_OUT_PROGRAM_CLOCKS_LEN 4
+#define       MC_CMD_MUM_OUT_PROGRAM_CLOCKS_OK_MASK_OFST 0
+
+/* MC_CMD_MUM_OUT_FPGA_LOAD msgresponse */
+#define    MC_CMD_MUM_OUT_FPGA_LOAD_LEN 0
+
+/* MC_CMD_MUM_OUT_READ_ATB_SENSOR msgresponse */
+#define    MC_CMD_MUM_OUT_READ_ATB_SENSOR_LEN 4
+#define       MC_CMD_MUM_OUT_READ_ATB_SENSOR_RESULT_OFST 0
 
 /* MC_CMD_RESOURCE_SPECIFIER enum */
 /* enum: Any */
@@ -4651,11 +4755,17 @@
 #define    LICENSED_APP_ID_LEN 4
 #define       LICENSED_APP_ID_ID_OFST 0
 /* enum: OpenOnload */
-#define          LICENSED_APP_ID_ONLOAD            0x1
+#define          LICENSED_APP_ID_ONLOAD             0x1
 /* enum: PTP timestamping */
-#define          LICENSED_APP_ID_PTP               0x2
+#define          LICENSED_APP_ID_PTP                0x2
 /* enum: SolarCapture Pro */
-#define          LICENSED_APP_ID_SOLARCAPTURE_PRO  0x4
+#define          LICENSED_APP_ID_SOLARCAPTURE_PRO   0x4
+/* enum: SolarSecure filter engine */
+#define          LICENSED_APP_ID_SOLARSECURE        0x8
+/* enum: Performance monitor */
+#define          LICENSED_APP_ID_PERF_MONITOR       0x10
+/* enum: SolarCapture Live */
+#define          LICENSED_APP_ID_SOLARCAPTURE_LIVE  0x20
 #define       LICENSED_APP_ID_ID_LBN 0
 #define       LICENSED_APP_ID_ID_WIDTH 32
 
@@ -4854,6 +4964,14 @@
 #define       MC_CMD_INIT_RXQ_IN_DMA_ADDR_HI_OFST 32
 #define       MC_CMD_INIT_RXQ_IN_DMA_ADDR_MINNUM 1
 #define       MC_CMD_INIT_RXQ_IN_DMA_ADDR_MAXNUM 28
+
+/* Packed Stream extension */
+#define       MC_CMD_INIT_RXQ_IN_DMA_MODE_LBN 10
+#define       MC_CMD_INIT_RXQ_IN_DMA_MODE_WIDTH 4
+#define       MC_CMD_INIT_RXQ_IN_SINGLE_PACKET  0x0
+#define       MC_CMD_INIT_RXQ_IN_PACKED_STREAM  0x1
+#define       MC_CMD_INIT_RXQ_IN_FLAG_SNAPSHOT_MODE_LBN 14
+#define       MC_CMD_INIT_RXQ_IN_FLAG_SNAPSHOT_MODE_WIDTH 1
 
 /* MC_CMD_INIT_RXQ_OUT msgresponse */
 #define    MC_CMD_INIT_RXQ_OUT_LEN 0
@@ -5962,6 +6080,12 @@
 #define    MC_CMD_GET_CAPABILITIES_OUT_LEN 20
 /* First word of flags. */
 #define       MC_CMD_GET_CAPABILITIES_OUT_FLAGS1_OFST 0
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_RSS_LIMITED_LBN 16
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_RSS_LIMITED_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_PACKED_STREAM_LBN 17
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_PACKED_STREAM_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_INCLUDE_FCS_LBN 18
+#define        MC_CMD_GET_CAPABILITIES_OUT_RX_INCLUDE_FCS_WIDTH 1
 #define        MC_CMD_GET_CAPABILITIES_OUT_TX_VLAN_INSERTION_LBN 19
 #define        MC_CMD_GET_CAPABILITIES_OUT_TX_VLAN_INSERTION_WIDTH 1
 #define        MC_CMD_GET_CAPABILITIES_OUT_RX_VLAN_STRIPPING_LBN 20
@@ -5991,6 +6115,8 @@
 #define          MC_CMD_GET_CAPABILITIES_OUT_RXDP  0x0
 /* enum: Low latency RXDP firmware */
 #define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_LOW_LATENCY  0x1
+/* enum: Packed stream RXDP firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_PACKED_STREAM  0x2
 /* enum: RXDP Test firmware image 1 */
 #define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_TEST_FW_TO_MC_CUT_THROUGH  0x101
 /* enum: RXDP Test firmware image 2 */
@@ -7791,6 +7917,8 @@
 #define       MC_CMD_LICENSED_APP_OP_IN_OP_OFST 4
 /* enum: validate application */
 #define          MC_CMD_LICENSED_APP_OP_IN_OP_VALIDATE  0x0
+/* enum: mask application */
+#define          MC_CMD_LICENSED_APP_OP_IN_OP_MASK  0x1
 /* arguments specific to this particular operation */
 #define       MC_CMD_LICENSED_APP_OP_IN_ARGS_OFST 8
 #define       MC_CMD_LICENSED_APP_OP_IN_ARGS_LEN 4
@@ -7824,6 +7952,18 @@
 /* validation response */
 #define       MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_RESPONSE_OFST 4
 #define       MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_RESPONSE_LEN 64
+
+/* MC_CMD_LICENSED_APP_OP_MASK_IN msgrequest */
+#define    MC_CMD_LICENSED_APP_OP_MASK_IN_LEN 12
+/* application ID */
+#define       MC_CMD_LICENSED_APP_OP_MASK_IN_APP_ID_OFST 0
+/* the type of operation requested */
+#define       MC_CMD_LICENSED_APP_OP_MASK_IN_OP_OFST 4
+/* flag */
+#define       MC_CMD_LICENSED_APP_OP_MASK_IN_FLAG_OFST 8
+
+/* MC_CMD_LICENSED_APP_OP_MASK_OUT msgresponse */
+#define    MC_CMD_LICENSED_APP_OP_MASK_OUT_LEN 0
 
 
 /***********************************/
@@ -8115,6 +8255,27 @@
 
 
 /***********************************/
+/* MC_CMD_GET_WORKAROUNDS
+ * Read the list of all implemented and all currently enabled workarounds. The
+ * enums here must correspond with those in MC_CMD_WORKAROUND.
+ */
+#define MC_CMD_GET_WORKAROUNDS 0x59
+
+/* MC_CMD_GET_WORKAROUNDS_OUT msgresponse */
+#define    MC_CMD_GET_WORKAROUNDS_OUT_LEN 8
+/* Each workaround is represented by a single bit according to the enums below.
+ */
+#define       MC_CMD_GET_WORKAROUNDS_OUT_IMPLEMENTED_OFST 0
+#define       MC_CMD_GET_WORKAROUNDS_OUT_ENABLED_OFST 4
+/* enum: Bug 17230 work around. */
+#define          MC_CMD_GET_WORKAROUNDS_OUT_BUG17230 0x2
+/* enum: Bug 35388 work around (unsafe EVQ writes). */
+#define          MC_CMD_GET_WORKAROUNDS_OUT_BUG35388 0x4
+/* enum: Bug35017 workaround (A64 tables must be identity map) */
+#define          MC_CMD_GET_WORKAROUNDS_OUT_BUG35017 0x8
+
+
+/***********************************/
 /* MC_CMD_PRIVILEGE_MASK
  * Read/set privileges of an arbitrary PCIe function
  */
@@ -8137,9 +8298,8 @@
 #define       MC_CMD_PRIVILEGE_MASK_IN_NEW_MASK_OFST 4
 #define          MC_CMD_PRIVILEGE_MASK_IN_GRP_ADMIN        0x1 /* enum */
 #define          MC_CMD_PRIVILEGE_MASK_IN_GRP_LINK         0x2 /* enum */
-#define          MC_CMD_PRIVILEGE_MASK_IN_GRP_RSS          0x4 /* enum */
-#define          MC_CMD_PRIVILEGE_MASK_IN_GRP_ONLOAD       0x8 /* enum */
-#define          MC_CMD_PRIVILEGE_MASK_IN_GRP_PTP          0x10 /* enum */
+#define          MC_CMD_PRIVILEGE_MASK_IN_GRP_ONLOAD       0x4 /* enum */
+#define          MC_CMD_PRIVILEGE_MASK_IN_GRP_PTP          0x8 /* enum */
 /* enum: Set this bit to indicate that a new privilege mask is to be set,
  * otherwise the command will only read the existing mask.
  */
@@ -8148,6 +8308,51 @@
 /* MC_CMD_PRIVILEGE_MASK_OUT msgresponse */
 #define    MC_CMD_PRIVILEGE_MASK_OUT_LEN 4
 #define       MC_CMD_PRIVILEGE_MASK_OUT_OLD_MASK_OFST 0
+
+
+/***********************************/
+/* MC_CMD_SET_PACKED_STREAM_CONFIG
+ * Configure packed stream mode for the physical port associated with the
+ * calling function. Only a privileged function may change this configuration.
+ */
+#define MC_CMD_SET_PACKED_STREAM_CONFIG 0x101
+
+/* MC_CMD_SET_PACKED_STREAM_CONFIG_IN msgrequest */
+#define    MC_CMD_SET_PACKED_STREAM_CONFIG_IN_LEN 12
+/* configuration flags */
+#define       MC_CMD_SET_PACKED_STREAM_CONFIG_IN_FLAGS_OFST 0
+#define        MC_CMD_SET_PACKED_STREAM_CONFIG_IN_ENABLE_LBN 0
+#define        MC_CMD_SET_PACKED_STREAM_CONFIG_IN_ENABLE_WIDTH 1
+/* Base queue ID */
+#define       MC_CMD_SET_PACKED_STREAM_CONFIG_IN_RX_QUEUE_BASE_OFST 4
+/* Maximum amount of data which will be received for each packet. */
+#define       MC_CMD_SET_PACKED_STREAM_CONFIG_IN_RX_SNAPLEN_OFST 8
+
+/* MC_CMD_SET_PACKED_STREAM_CONFIG_OUT msgresponse */
+#define    MC_CMD_SET_PACKED_STREAM_CONFIG_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_GET_PACKED_STREAM_CONFIG
+ * Obtain the current RX packed stream mode configuration for the physical port
+ * associated with the calling function. Only a privileged function may read
+ * the configuration.
+ */
+#define MC_CMD_GET_PACKED_STREAM_CONFIG 0x102
+
+/* MC_CMD_GET_PACKED_STREAM_CONFIG_IN msgrequest */
+#define    MC_CMD_GET_PACKED_STREAM_CONFIG_IN_LEN 0
+
+/* MC_CMD_GET_PACKED_STREAM_CONFIG_OUT msgresponse */
+#define    MC_CMD_GET_PACKED_STREAM_CONFIG_OUT_LEN 12
+/* configuration flags */
+#define       MC_CMD_GET_PACKED_STREAM_CONFIG_OUT_FLAGS_OFST 0
+#define        MC_CMD_GET_PACKED_STREAM_CONFIG_OUT_ENABLE_LBN 0
+#define        MC_CMD_GET_PACKED_STREAM_CONFIG_OUT_ENABLE_WIDTH 1
+/* Base queue ID */
+#define       MC_CMD_GET_PACKED_STREAM_CONFIG_OUT_RX_QUEUE_BASE_OFST 4
+/* Maximum amount of data which will be received for each packet. */
+#define       MC_CMD_GET_PACKED_STREAM_CONFIG_OUT_RX_SNAPLEN_OFST 8
 
 
 #endif /* MCDI_PCOL_H */

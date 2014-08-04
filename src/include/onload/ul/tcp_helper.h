@@ -161,19 +161,31 @@ ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp) CI_HF;
 
 /*--------------------------------------------------------------------
  *!
- * Dump filter state.  If oo_sp is OO_SP_NULL, then dump all filters.
+ * Dump filter or clustering state.  For the former, if oo_sp is
+ * OO_SP_NULL, then dump all filters.
  *
  * If return is -ve, then error, don't try again.  Otherwise > 0 and
  * gives length of buffer required.  If <= buf_len, then you're good,
  * otherwise try again with a bigger buffer.
  *
+ * The functions' signatures must match that of oo_dump_request_fn_t.
+ *
  *--------------------------------------------------------------------*/
 
-extern int
-ci_tcp_helper_ep_filter_dump(ci_fd_t fd, oo_sp, void* buf, int buf_len) CI_HF;
+typedef struct {
+  ci_fd_t fd;
+  oo_sp   sock_id;
+} filter_dump_args;
 
 extern int
-ci_tcp_helper_cluster_dump(ci_fd_t fd, void* buf, int buf_len) CI_HF;
+ci_tcp_helper_ep_filter_dump(void* opaque, void* buf, int buf_len) CI_HF;
+
+typedef struct {
+  ci_fd_t fd;
+} cluster_dump_args;
+
+extern int
+ci_tcp_helper_cluster_dump(void* opaque, void* buf, int buf_len) CI_HF;
 
 /*--------------------------------------------------------------------
  *!

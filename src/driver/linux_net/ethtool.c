@@ -1337,8 +1337,7 @@ static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
 	struct efx_nic *efx = netdev_priv(net_dev);
 
 	memcpy(efx->rx_indir_table, indir, sizeof(efx->rx_indir_table));
-	efx->type->rx_push_rss_config(efx);
-	return 0;
+	return efx->type->rx_push_rss_config(efx);
 }
 
 #if defined(EFX_USE_KCOMPAT) && (!defined(EFX_HAVE_ETHTOOL_RXFH_INDIR) || defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR))

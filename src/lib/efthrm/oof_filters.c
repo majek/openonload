@@ -483,6 +483,7 @@ void
 oof_socket_ctor(struct oof_socket* skf)
 {
   skf->sf_local_port = NULL;
+  skf->sf_early_lp = NULL;
   oo_hw_filter_init(&skf->sf_full_match_filter);
   ci_dllist_init(&skf->sf_mcast_memberships);
 }
@@ -492,6 +493,7 @@ void
 oof_socket_dtor(struct oof_socket* skf)
 {
   ci_assert(skf->sf_local_port == NULL);
+  ci_assert(skf->sf_early_lp == NULL);
   ci_assert(skf->sf_full_match_filter.trs == NULL);
   ci_assert(ci_dllist_is_empty(&skf->sf_mcast_memberships));
 }
@@ -1579,7 +1581,7 @@ int oof_local_port_thc_search(struct oof_manager* fm, int protocol, int lport,
     rc = 0;
   }
   else if( lp->lp_thcf == NULL ) {
-    rc = -EEXIST;
+    rc = -EADDRINUSE;
   }
   else {
     rc = 1;
@@ -1675,6 +1677,25 @@ void oof_socket_cluster_del(struct oof_manager* fm,
 }
 
 
+/* This function should be called on a clustered socket once it's been moved
+ * into a clustered stack in order to set the clustering per-socket filter
+ * state. */
+void oof_socket_set_early_lp(struct oof_manager* fm, struct oof_socket* skf,
+                             int protocol, int lport)
+{
+  struct oof_local_port* lp = oof_local_port_get(fm, protocol, lport);
+
+  mutex_lock(&fm->fm_outer_lock);
+  spin_lock_bh(&fm->fm_inner_lock);
+
+  ci_assert(oof_is_clustered(lp));
+  skf->sf_early_lp = lp;
+
+  spin_unlock_bh(&fm->fm_inner_lock);
+  mutex_unlock(&fm->fm_outer_lock);
+}
+
+
 int
 oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
                int protocol, unsigned laddr, int lport,
@@ -1689,7 +1710,8 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
   IPF_LOG(FSK_FMT QUIN_FMT, FSK_PRI_ARGS(skf),
           QUIN_ARGS(protocol, laddr, lport, raddr, rport));
 
-  lp = oof_local_port_get(fm, protocol, lport);
+  lp = (skf->sf_early_lp != NULL) ? skf->sf_early_lp :
+                                    oof_local_port_get(fm, protocol, lport);
   if( lp == NULL ) {
     ERR_LOG(FSK_FMT "ERROR: out of memory", FSK_PRI_ARGS(skf));
     return -ENOMEM;
@@ -1747,6 +1769,7 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
     skf->sf_local_port = NULL;
     goto fail0;
   }
+  skf->sf_early_lp = NULL;
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
   if( ci_dllist_not_empty(&skf->sf_mcast_memberships) )
@@ -1757,10 +1780,10 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
   if( remove_thc_filters_on_error == 1 )
     oof_thc_remove_filters(fm, lp);
  fail1:
-  if( --lp->lp_refs == 0 )
-    ci_dllist_remove(&lp->lp_manager_link);
-  else
+  if( --lp->lp_refs > 0 || (skf->sf_early_lp != NULL) )
     lp = NULL;
+  else
+    ci_dllist_remove(&lp->lp_manager_link);
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
   if( lp != NULL )
@@ -1965,10 +1988,19 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
         oof_local_port_fixup_wild(fm, skf->sf_local_port, fuw_del_wild);
     }
 
+    skf->sf_local_port = NULL;
+  }
+  else {
+    lp = skf->sf_early_lp;
+    skf->sf_early_lp = NULL;
+  }
+
+  /* The remainder of the cleanup must be performed for a local port even if
+   * filters haven't been installed yet. */
+  if( lp != NULL ) {
     if( oof_is_clustered(lp) )
       oof_thc_del(fm, lp);
 
-    skf->sf_local_port = NULL;
     ci_assert(lp->lp_refs > 0);
     if( --lp->lp_refs == 0 )
       ci_dllist_remove(&lp->lp_manager_link);
@@ -2025,10 +2057,15 @@ oof_socket_del_sw(struct oof_manager* fm, struct oof_socket* skf)
           /* If this endpoint only sharing SW filters and is not the
            * last one to be removed, it is safe to remove the filters
            * in an atomic context.
+           *
+           * We can't do this if the socket is clustered, as we still need to
+           * drop the cluster ref, which is not safe where we have to avoid
+           * hw ops.
            */
         if( skf->sf_full_match_filter.trs == NULL &&
             lp->lp_refs > 1 &&
-            lpa->lpa_n_full_sharers > 1 ) {
+            lpa->lpa_n_full_sharers > 1 &&
+            ! oof_is_clustered(lp) ) {
           ci_dllist_remove(&skf->sf_lp_link);
           ci_assert(la->la_sockets > 0);
           --la->la_sockets;

@@ -66,6 +66,12 @@ static void do_stack_ops(int argc, char* argv[])
       continue;
     }
 
+    if( argc <= op->n_args ) {
+        ci_log("Missing argument to '%s' (found %d, expected %d: %s)",
+               op->name, argc - 1, op->n_args, op->args);
+        ci_app_usage(0);
+    }
+
     if( op->flags & FL_ARG_U ) {
       if( sscanf(argv[1], " %u %c", &arg_u[0], &dummy) != 1 ) {
         ci_log("Bad argument to '%s' (expected unsigned)", op->name);
@@ -143,8 +149,14 @@ static void do_socket_ops(int argc, char* argv[])
       ci_app_usage(0);
     }
 
+    if( argc <= op->n_args ) {
+        ci_log("Missing argument to '%s' (found %d, expected %d: %s)",
+               op->name, argc - 1, op->n_args, op->args);
+        ci_app_usage(0);
+    }
+
     if( op->flags & FL_ARG_U ) {
-      if( argc < 2 || sscanf(argv[1], " %u %c", &arg_u[0], &dummy) != 1 ) {
+      if( sscanf(argv[1], " %u %c", &arg_u[0], &dummy) != 1 ) {
 	ci_log("Expected <int> for command %s", op->name);
 	ci_app_usage(0);
       }

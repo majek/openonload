@@ -158,6 +158,7 @@ efrm_bt_manager_alloc(struct efhw_nic *nic,
 	rc = efrm_bt_blocks_alloc(nic, manager, a);
 	if (rc != 0) {
 		atomic_sub(a->bta_size, &manager->btm_entries);
+		a->bta_size = 0;
 		return rc;
 	}
 

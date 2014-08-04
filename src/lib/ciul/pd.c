@@ -31,6 +31,8 @@
 #include "logging.h"
 #include "efch_intf_ver.h"
 
+#include <net/if.h>
+
 
 int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
 		int ifindex, enum ef_pd_flags flags)
@@ -60,6 +62,8 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
     ra.u.pd.in_flags |= EFCH_PD_FLAG_VF;
   if( flags & EF_PD_PHYS_MODE )
     ra.u.pd.in_flags |= EFCH_PD_FLAG_PHYS_ADDR;
+  if( flags & EF_PD_RX_PACKED_STREAM )
+    ra.u.pd.in_flags |= EFCH_PD_FLAG_RX_PACKED_STREAM;
 
   rc = ci_resource_alloc(pd_dh, &ra);
   if( rc < 0 ) {
@@ -70,6 +74,17 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
   pd->pd_flags = flags;
   pd->pd_resource_id = ra.out_id.index;
 
+  pd->pd_intf_name = malloc(IF_NAMESIZE);
+  if( pd->pd_intf_name == NULL ) {
+    LOGVV(ef_log("ef_pd_alloc: malloc failed"));
+    return -ENOMEM;
+  }
+  if( if_indextoname(ifindex, pd->pd_intf_name) == NULL ) {
+    free(pd->pd_intf_name);
+    LOGVV(ef_log("ef_pd_alloc: if_indextoname failed %d", errno));
+    return -errno;
+  }
+
   pd->pd_cluster_name = NULL;
   pd->pd_cluster_sock = -1;
   pd->pd_cluster_dh = 0;
@@ -79,8 +94,15 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
 }
 
 
+const char* ef_pd_interface_name(ef_pd* pd)
+{
+  return pd->pd_intf_name;
+}
+
+
 int ef_pd_free(ef_pd* pd, ef_driver_handle pd_dh)
 {
+  free(pd->pd_intf_name);
   if( pd->pd_cluster_sock != -1 ) {
     return ef_pd_cluster_free(pd, pd_dh);
   }

@@ -294,6 +294,8 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts, int can_block)
 
   if( ts->s.b.state == CI_TCP_CLOSED ) {
     LOG_TV(ci_log(LPF "%d CLOSE already closed", S_FMT(ts)));
+    /* Still must clear filters in case socket is clustered. */
+    ci_tcp_ep_clear_filters(netif, S_SP(ts));
     if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN )
       ci_tcp_state_free(netif, ts);
     return 0;

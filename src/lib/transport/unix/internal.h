@@ -949,7 +949,8 @@ extern int onload_close(int fd) CI_HF;
  * call for the specified timeout.
  */
 int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
-                    int *timeout_ms, citp_lib_context_t *lib_context);
+                    ci_uint64 timeout_ms, ci_uint64 *used_ms,
+                    citp_lib_context_t *lib_context);
 /* Generic select/pselect implementation.
  * This function is called after citp_enter_lib(), and it MUST NOT call
  * citp_exit_lib().
@@ -957,7 +958,8 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
  * call for the specified timeout.
  */
 int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
-                      ci_uint64 *timeout_ms, citp_lib_context_t *lib_context,
+                      ci_uint64 timeout_ms, ci_uint64 *used_ms,
+                      citp_lib_context_t *lib_context,
                       const sigset_t *sigmask, sigset_t *sigsaved);
 
 /* ppoll/pselect common code.

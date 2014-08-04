@@ -1029,6 +1029,9 @@ int ci_netif_poll_n(ci_netif* netif, int max_evs)
    * post-poll list.  So, poll timers after --in_poll. */
   ci_ip_timer_poll(netif);
 
+  /* Timers MUST NOT send via loopback. */
+  ci_assert(OO_PP_IS_NULL(netif->state->looppkts));
+
   if(CI_LIKELY( netif->state->rxq_low <= 1 ))
     netif->state->mem_pressure &= ~OO_MEM_PRESSURE_LOW;
   else

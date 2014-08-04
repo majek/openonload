@@ -76,6 +76,7 @@ vi_set_rm_alloc(ci_resource_alloc_t* alloc_,
   efrm_client_put(client);
   efrm_pd_release(pd);
   efch_filter_list_init(&rs->vi_set.fl);
+  rs->vi_set.sniff_flags = 0;
   rs->rs_base = efrm_vi_set_to_resource(vi_set);
   return 0;
 
@@ -95,7 +96,10 @@ static void vi_set_rm_free(efch_resource_t *rs)
 
   efch_filter_list_free(rs->rs_base, &rs->vi_set.fl);
   /* Remove any sniff config we may have set up. */
-  efrm_port_sniff(rs->rs_base, 0, 0, efrm_vi_set_get_rss_context(vi_set));
+  if( rs->vi_set.sniff_flags & EFCH_RX_SNIFF )
+    efrm_port_sniff(rs->rs_base, 0, 0, efrm_vi_set_get_rss_context(vi_set));
+  if( rs->vi_set.sniff_flags & EFCH_TX_SNIFF )
+    efrm_tx_port_sniff(rs->rs_base, 0, efrm_vi_set_get_rss_context(vi_set));
 }
 
 
@@ -130,6 +134,20 @@ vi_set_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
     case CI_RSOP_PT_SNIFF:
       rc = efrm_port_sniff(rs->rs_base, op->u.pt_sniff.enable,
                            op->u.pt_sniff.promiscuous, rss_context);
+      if( rc == 0 && op->u.pt_sniff.enable )
+        rs->vi_set.sniff_flags |= EFCH_RX_SNIFF;
+      else if( rc == 0 && !op->u.pt_sniff.enable )
+        rs->vi_set.sniff_flags &= ~EFCH_RX_SNIFF;
+      break;
+    case CI_RSOP_TX_PT_SNIFF:
+      {
+        int enable = op->u.pt_sniff.enable & EFCH_TX_SNIFF_ENABLE;
+        rc = efrm_tx_port_sniff(rs->rs_base, enable, rss_context);
+        if( rc == 0 && enable )
+          rs->vi_set.sniff_flags |= EFCH_TX_SNIFF;
+        else if( rc == 0 && !enable )
+          rs->vi_set.sniff_flags &= ~EFCH_TX_SNIFF;
+      }
       break;
     case CI_RSOP_FILTER_DEL:
       rc = efch_filter_list_op_del(rs->rs_base, &rs->vi_set.fl, op);

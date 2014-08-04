@@ -220,11 +220,16 @@ static int citp_tcp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
        * above as that is non-trivial.  We are still leaving the socket
        * in a working state albeit bound without reuseport set.
        */
-      if( (rc = ci_tcp_reuseport_bind(s, fdinfo->fd)) == 0 )
+      if( (rc = ci_tcp_reuseport_bind(s, fdinfo->fd)) == 0 ) {
         /* The socket has moved so need to reprobe the fd.  This will also
          * map the the new stack into user space of the executing process.
          */
         fdinfo = citp_fdtable_lookup(fdinfo->fd);
+        fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE);
+        epi = fdi_to_sock_fdi(fdinfo);
+        ep = &epi->sock;
+        ci_netif_cluster_prefault(ep->netif);
+      }
 
   citp_fdinfo_release_ref(fdinfo, 0);
   return rc;
@@ -1100,11 +1105,15 @@ static int citp_tcp_setsockopt(citp_fdinfo* fdinfo, int level,
      * before as that is non-trivial.  We are still leaving the socket
      * in a working state albeit bound without reuseport set.
      */
-    if( (rc = ci_tcp_reuseport_bind(epi->sock.s, fdinfo->fd)) == 0 )
+    if( (rc = ci_tcp_reuseport_bind(epi->sock.s, fdinfo->fd)) == 0 ) {
       /* The socket has moved so need to reprobe the fd.  This will also
        * map the the new stack into user space of the executing process.
        */
       fdinfo = citp_fdtable_lookup(fdinfo->fd);
+      fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE);
+      epi = fdi_to_sock_fdi(fdinfo);
+      ci_netif_cluster_prefault(epi->sock.netif);
+    }
 
   citp_fdinfo_release_ref(fdinfo, 0);
   return rc;

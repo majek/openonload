@@ -211,10 +211,17 @@ static void ci_ip_send_tcp_list_loopback(ci_netif* ni, ci_tcp_state* ts,
   } while( pkt != tail_pkt );
 
   /* really send all the packets */
-  if( CI_UNLIKELY(OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock)) )
+  if( CI_UNLIKELY(OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock)) ) {
     ci_tcp_drop(ni, ts, ECONNRESET);
-  else if( !ni->state->in_poll )
-    ci_netif_poll(ni);
+  }
+  else {
+    /* Normally, the packet contains ACK and window size.
+     * Loopback in-packet ACK value is ignored - deliver it now! */
+    if( SEQ_LE(ts->ack_trigger, ts->rcv_delivered) )
+      ci_tcp_send_ack_loopback(ni, ts);
+    if( !ni->state->in_poll )
+      ci_netif_poll(ni);
+  }
 }
 
 static void ci_ip_send_tcp_list(ci_netif* ni, ci_tcp_state* ts,
@@ -1601,6 +1608,7 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 
   ci_assert(netif);
   ci_assert(ci_ip_queue_is_empty(&ts->retrans));
+  ci_assert(OO_SP_IS_NULL(ts->s.local_peer));
 
   pkt = ci_netif_pkt_alloc(netif);
   if( ! pkt ) {

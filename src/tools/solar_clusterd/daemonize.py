@@ -17,64 +17,83 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #****************************************************************************
-import os, sys, pwd, grp
 
+import os, sys, pwd, grp, errno
+import fcntl
+import resource
+import signal
+import atexit
+import logging
+from logging import handlers
 
-def check_pidfile(pidfile):
-    if os.path.isfile(pidfile):
-        o = file(pidfile, 'r')
-        text = o.read().strip()
-        o.close()
-        if text.isdigit():
-            pid = int(text)
-            sys.stderr.write("Found existing pidfile %s containing %d\n" % (
-                    pidfile, pid))
-            if os.path.isdir(os.path.join('/proc/', str(pid))):
-                raise Exception("Daemon already running as PID %d" % pid)
-            else:
-                sys.stdout.write("PID %d has died; removing state pidfile\n" %
-                                 pid)
-                os.unlink(pidfile)
-        else:
-            os.unlink(pidfile) # unreadable pidfile
+def daemonize(directory, user=None, group=None, verbose=False):
+    pid = os.fork()
+    if pid < 0:
+        sys.stderr.write("Fork failed")
+        sys.exit(1)
+    if pid != 0:
+        sys.exit(0)
 
+    pid = os.setsid()
+    if pid == -1:
+        sys.stderr.write("setsid failed")
+        sys.exit(1)
 
-def _do_user(user, group):
-    if group:
-        os.setgid( grp.getgrnam(group).gr_gid )
-        os.setuid( pwd.getpwnam(user).pw_uid )
+    syslog = handlers.SysLogHandler('/dev/log')
+    if verbose:
+        syslog.setLevel(logging.DEBUG)
     else:
-        x = pwd.getpwnam(user)
-        os.setgid(x.pw_gid)
-        os.setuid(x.pw_uid)
+        syslog.setLevel(logging.INFO)
+    # Try to mimic to normal syslog messages.
+    formatter = logging.Formatter("%(asctime)s %(name)s: %(message)s",
+                                  "%b %e %H:%M:%S")
+    syslog.setFormatter(formatter)
+    logger = logging.getLogger('solar_clusterd')
+    logger.addHandler(syslog)
 
+    # This is the same as 027.  There is no compatible way to specify
+    # octals between 2.4, 2.6, 3.x so specifying in decimal.
+    os.umask(23)
+    os.chdir("/")
 
-def _do_fork(pidfile):
-    pid = os.fork()
-    if pid > 0:
-        sys.exit(0)
-
-    os.chdir('/')
-    os.setsid()
-    os.umask(002)
-
-    pid = os.fork()
-    if pid > 0:
-        open(pidfile, 'w').write('%d\n'%pid)
-        sys.exit(0)
-
-    sys.stdout.write("Running as a daemon, pid %d" % os.getpid())
-
-
-def daemonize(procname, pidfile, user=None, group=None):
-    # TODO: Set the process name to something more helpful than
-    # 'python'
-
-    _do_fork(pidfile)
-
+    if group:
+        try:
+            gid = grp.getgrnam(group).gr_gid
+        except KeyError:
+            sys.stderr.write("Group {0} not found".format(group))
+            sys.exit(1)
+        try:
+            os.setgid(gid)
+        except OSError:
+            sys.stderr.write("Unable to change gid.")
+            sys.exit(1)
     if user:
-        _do_user(user, group)
+        try:
+            uid = pwd.getpwnam(user).pw_uid
+        except KeyError:
+            sys.stderr.write("User {0} not found.".format(user))
+            sys.exit(1)
+        try:
+            os.setuid(uid)
+        except OSError:
+            sys.stderr.write("Unable to change uid.")
+            sys.exit(1)
 
-    null_fd = os.open('/dev/null', os.O_RDWR)
-    for fd in range(3):
-        os.dup2(null_fd, fd)
+    if os.path.exists(directory):
+        sys.stderr.write('ERROR: directory %s already exists.  Either '
+                         'another instance running or previous instance '
+                         'did not clean up properly.  If no other '
+                         'instance is running, please manually remove the '
+                         'directory\n' % directory)
+        sys.exit(1)
+    os.makedirs(directory)
+
+    os.close(0)
+    os.close(1)
+    os.close(2)
+    os.open('/dev/null', os.O_RDWR)
+    os.dup(0)
+    os.dup(0)
+
+    logger.warn("Starting daemon.")
+    return logger

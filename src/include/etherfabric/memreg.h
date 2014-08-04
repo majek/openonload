@@ -49,6 +49,7 @@ extern "C" {
 typedef struct ef_memreg {
 	unsigned mr_resource_id;
 	ef_addr* mr_dma_addrs;
+	ef_addr* mr_dma_addrs_base;
 } ef_memreg;
 
 
@@ -56,32 +57,52 @@ struct ef_pd;
 
 
   /*! Register memory for use with ef_vi.
-  **
-  **  The physical addresses of this memory must not change, as they will
-  **  be used directly by the NIC.  In the case where an application forks
-  **  this can result in new pages being allocated.  If this memory is to be
-  **  used in an application that will fork, then the caller can use madvise,
-  **  setting the MADV_DONTFORK advice to prevent pages in this range being
-  **  available to the child after a fork, allowing the parent to maintain the
-  **  original pages.
-  **
-  **   \param vi The VI that these buffers will be used with
-  **   \param size The size in bytes of each I/O buffer
-  **   \param num The number of buffers required
-  **   \param align The alignment requirement of the start of the buffer.
-  **          This must be 1, 2, 4 or 8.
-  **   \param offset The offset of the start of the I/O buffer
-  */
-extern int ef_memreg_alloc(ef_memreg*, ef_driver_handle,
-			   struct ef_pd*, ef_driver_handle pd_dh,
+   *
+   *   \param mr          The ef_memreg object to initialise
+   *   \param mr_dh       Driver handle for the ef_memreg
+   *   \param pd          Protection domain to register memory in
+   *   \param pd_dh       Driver handle for the protection domain
+   *   \param p_mem       Start of memory region to be registered
+   *   \param len_bytes   Length of memory region to be registered
+   *
+   * Use this function to register memory so that it can be used for DMA
+   * buffers.  ef_memreg_dma_addr() can then be used to obtain DMA
+   * addresses for buffers within the registered area.
+   *
+   * Registered memory is associated with a particular protection domain,
+   * and the DMA addresses can be used only with VIs that are associated
+   * with the same protection domain.  Memory can be registered with
+   * multiple protection domains so that a single pool of buffers can be
+   * used with multiple VIs.
+   *
+   * The start of the memory region (p_mem) must be aligned on a 4K
+   * boundary.
+   *
+   * Memory that is registered is pinned, and therefore it cannot be
+   * swapped out to disk.
+   *
+   * Note: If an application that has registered memory forks, then
+   * copy-on-write semantics can cause new pages to be allocated which are
+   * not registered.  This problem can be solved either by ensuring that
+   * the registered memory regions are shared by parent and child (eg. by
+   * using MAP_SHARED), or by using madvise(MADV_DONTFORK) to prevent the
+   * registered memory from being accessible in the child.
+   */
+extern int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
+			   struct ef_pd* pd, ef_driver_handle pd_dh,
 			   void* p_mem, int len_bytes);
 
-  /*! Unregister a memory region. */
+  /*! Unregister a memory region.  NB. The memory will only be unregistered
+   * when the driver handle is also closed.
+   */
 extern int ef_memreg_free(ef_memreg*, ef_driver_handle);
 
 
-  /*! Returns the [ef_addr] corresponding to the given offset within
+  /*! Returns the DMA address corresponding to the given offset within
    * registered region.
+   *
+   * Note that DMA addresses are only contiguous within each 4K block of a
+   * memory region.
    */
 ef_vi_inline ef_addr ef_memreg_dma_addr(ef_memreg* mr, int offset)
 {

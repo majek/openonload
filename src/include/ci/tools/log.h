@@ -66,6 +66,8 @@
 #ifndef __ci_storport__
 extern void ci_vlog(const char* fmt, va_list args)  CI_HF;
 extern void ci_log(const char* fmt, ...) CI_PRINTF_LIKE(1,2) CI_HF;
+extern void ci_log_dump_fn(void* unused, const char* fmt, ...)
+                           CI_PRINTF_LIKE(2,3) CI_HF;
 #endif
 
   /*! Set the prefix for log messages.

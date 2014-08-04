@@ -1255,7 +1255,8 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
   }
 
   if( SEQ_SUB(ts->snd_max, rxp->ack) < tcp_eff_mss(ts) &&
-      ci_ip_queue_is_empty(&ts->retrans) ) {
+      ci_ip_queue_is_empty(&ts->retrans) &&
+      OO_SP_IS_NULL(ts->s.local_peer) ) {
     /* Zero window: need to start probes.
      * (We treat a window less than MSS as a zero window, as we don't want
      * to split packets).
@@ -2825,6 +2826,7 @@ set_isn:
     ci_tcp_tx_advance(ts, netif);
   }
   else if ( OO_SP_NOT_NULL(ts->s.local_peer) ) {
+    ci_tcp_send_ack_loopback(netif, ts);
     ci_netif_pkt_release_rx(netif, pkt);
   }
   else {
@@ -2948,6 +2950,136 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
   }
 
   ci_netif_pkt_release_rx(netif, pkt);
+}
+
+
+ci_inline void handle_rx_fin_wait_1(ci_tcp_state* ts, ci_netif* netif)
+{
+  if( ci_tcp_sendq_is_empty(ts) &&
+      ci_ip_queue_is_empty(&ts->retrans) ) {
+
+    LOG_TC(log(LPF "%d FIN-WAIT1->FIN-WAIT2", S_FMT(ts)));
+    ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT2);
+
+    /* Windows: we have to be able to timeout in FIN_WAIT and remain
+     * tied to the socket for disconnectex etc. */
+    /* if not tied to an fd, make sure we leave this state at some point */
+    if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN )
+      ci_netif_fin_timeout_enter(netif, ts);
+  }
+}
+
+
+/* RX slow-path handler for states which either don't accept data, or which
+ * (besides their usual handling on the accepting-data path) might need to
+ * transition into another state as the result of an ACK that arrived in a
+ * zero-window probe. Returns non-zero if we did anything.
+ */
+static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
+                                      ciip_tcp_rx_pkt* rxp)
+{
+  ci_ip_pkt_fmt* pkt = rxp->pkt;
+  ci_tcp_hdr* tcp = rxp->tcp;
+
+  switch( ts->s.b.state ) {
+  case CI_TCP_SYN_SENT:
+    handle_rx_syn_sent(netif, ts, rxp);
+    break;
+  case CI_TCP_CLOSE_WAIT:
+    handle_rx_close_wait(ts, netif, rxp);
+    break;
+  case CI_TCP_LAST_ACK:
+    handle_rx_last_ack_or_closing(ts, netif, rxp, CI_TCP_CLOSED);
+    break;
+  case CI_TCP_CLOSING:
+    handle_rx_last_ack_or_closing(ts, netif, rxp, CI_TCP_TIME_WAIT);
+    break;
+  case CI_TCP_FIN_WAIT1:
+    /* Can only get here when rxp is a zero-window probe. Might need to
+     * transition to FIN_WAIT_2.
+     */
+    handle_rx_fin_wait_1(ts, netif);
+    ci_netif_pkt_release_rx(netif, rxp->pkt);
+    break;
+  case CI_TCP_TIME_WAIT:
+    /*! rfc1122 p88 4.2.2.13 reopening with SYN */
+    /* RFC 1122 allows us to re-open a connection in TIME-WAIT only if
+     * the sequence number on the incomming SYN is greater than the
+     * previous maximum sequence number.
+     * (Like Linux) we also allow the SYN if PAWS is in use and the SYN
+     * timestamp is newer than any previous one we've seen
+     */
+    if(tcp->tcp_flags & CI_TCP_FLAG_SYN) {
+      if (SEQ_LT(tcp_rcv_nxt(ts), rxp->seq) ||
+          ((ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO) &&
+           TIME_GE(rxp->timestamp, ts->tsrecent)) ){
+        int filter_id;
+        LOG_TV(
+            if (!SEQ_LT(tcp_rcv_nxt(ts), rxp->seq))
+              log(LPF "old SYN seq number accepted using timestamp %x >= %x",
+                  rxp->timestamp, ts->tsrecent);
+            );
+
+        /* There is an attempt to reopen a connection in TIME WAIT */
+        /* Remove this connection from TIME WAIT, lookup listening
+           socket, and pass to that for processing */
+
+        LOG_TV(log(LPF "SYN in TIME WAIT state, recycling connection"));
+        ci_netif_timeout_leave(netif, ts);
+
+        filter_id = ci_netif_filter_lookup(netif,
+                                           oo_ip_hdr(pkt)->ip_daddr_be32,
+                                           tcp->tcp_dest_be16, 0, 0,
+                                           IPPROTO_TCP);
+
+        if( filter_id >= 0 ) {
+          ci_tcp_socket_listen* tls;
+          tls = SP_TO_TCP_LISTEN(netif,
+                         CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, filter_id));
+          ci_assert(tls->s.b.state == CI_TCP_LISTEN);
+          /* handle_rx_listen() expects pf.tcp_rx.pay_len to not be munged,
+           * so undo the change we have made
+           */
+          pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp);
+          handle_rx_listen(netif, tls, rxp, 1);
+          break;
+        }
+        else
+          LOG_U(log(LPF "no matching listener for SYN in TIME_WAIT"));
+      }
+      else
+        LOG_U(log(LPF "SYN in TIME_WAIT has old SEQ - staying in TIME_WAIT"));
+    }
+    /* not normal, do nothing! (rfc793 p23) */
+    LOG_U(log(LPF "unexpected packet received while in TIME_WAIT"));
+    LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+    ci_netif_pkt_release_rx(netif, pkt);
+    break;
+  case CI_TCP_CLOSED:
+    /* For non-loopback connections:
+    ** If doing a s/w demux, then this can't happen, 'cos this connection
+    ** wouldn't be in the hash table.  If h/w does demux and identifies
+    ** connection for us, then it potentially can, since events can take a
+    ** while to arrive.
+    **
+    ** We are doing s/w demux, and I don't anticipate this changing any
+    ** time soon.  We shouldn't get here.
+    **
+    ** However, if we do, we'll cope gracefully by handling in the same way
+    ** as a loopback connection.
+    */
+    ci_assert(pkt->intf_i == OO_INTF_I_LOOPBACK);
+    if(!(pkt->intf_i == OO_INTF_I_LOOPBACK))
+      LOG_E(ci_log(LNT_FMT "ERROR demux to CLOSED socket",
+                   LNT_PRI_ARGS(netif, ts)));
+    CITP_STATS_NETIF_INC(netif, rst_sent_no_match);
+    ci_tcp_reply_with_rst(netif, rxp);
+    break;
+  default:
+    return 0;
+  }
+
+  return 1;
 }
 
 
@@ -3533,19 +3665,8 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     if( ts->s.b.state == CI_TCP_ESTABLISHED )
       return;
 
-    if( ts->s.b.state == CI_TCP_FIN_WAIT1 &&
-        ci_tcp_sendq_is_empty(ts) &&
-        ci_ip_queue_is_empty(&ts->retrans) ) {
-
-      LOG_TC(log(LPF "%d FIN-WAIT1->FIN-WAIT2", S_FMT(ts)));
-      ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT2);
-
-      /* Windows: we have to be able to timeout in FIN_WAIT and remain
-       * tied to the socket for disconnectex etc. */
-      /* if not tied to an fd, make sure we leave this state at some point */
-      if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN )
-        ci_netif_fin_timeout_enter(netif, ts);
-    }
+    if( ts->s.b.state == CI_TCP_FIN_WAIT1 )
+      handle_rx_fin_wait_1(ts, netif);
 
     return;
   }
@@ -3554,98 +3675,11 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     /* May need to advance TX. */
     ts->s.b.sb_flags |= CI_SB_FLAG_TCP_POST_POLL;
 
-  switch( ts->s.b.state ) {
-  case CI_TCP_SYN_SENT:
-    handle_rx_syn_sent(netif, ts, rxp);
-    break;
-  case CI_TCP_CLOSE_WAIT:
-    handle_rx_close_wait(ts, netif, rxp);
-    break;
-  case CI_TCP_LAST_ACK:
-    handle_rx_last_ack_or_closing(ts, netif, rxp, CI_TCP_CLOSED);
-    break;
-  case CI_TCP_CLOSING:
-    handle_rx_last_ack_or_closing(ts, netif, rxp, CI_TCP_TIME_WAIT);
-    break;
-  case CI_TCP_TIME_WAIT:
-    /*! rfc1122 p88 4.2.2.13 reopening with SYN */
-    /* RFC 1122 allows us to re-open a connection in TIME-WAIT only if
-     * the sequence number on the incomming SYN is greater than the
-     * previous maximum sequence number.
-     * (Like Linux) we also allow the SYN if PAWS is in use and the SYN
-     * timestamp is newer than any previous one we've seen
-     */
-    if(tcp->tcp_flags & CI_TCP_FLAG_SYN) {
-      if (SEQ_LT(tcp_rcv_nxt(ts), rxp->seq) ||
-          ((ts->tcpflags & rxp->flags & CI_TCPT_FLAG_TSO) && 
-           TIME_GE(rxp->timestamp, ts->tsrecent)) ){
-        int filter_id;
-        LOG_TV(
-            if (!SEQ_LT(tcp_rcv_nxt(ts), rxp->seq))
-              log(LPF "old SYN seq number accepted using timestamp %x >= %x",
-                  rxp->timestamp, ts->tsrecent);
-            );
-
-        /* There is an attempt to reopen a connection in TIME WAIT */
-        /* Remove this connection from TIME WAIT, lookup listening
-           socket, and pass to that for processing */
-
-        LOG_TV(log(LPF "SYN in TIME WAIT state, recycling connection"));
-        ci_netif_timeout_leave(netif, ts);
-
-        filter_id = ci_netif_filter_lookup(netif,
-                                           oo_ip_hdr(pkt)->ip_daddr_be32,
-                                           tcp->tcp_dest_be16, 0, 0,
-                                           IPPROTO_TCP);
-
-        if( filter_id >= 0 ) {
-          ci_tcp_socket_listen* tls;
-          tls = SP_TO_TCP_LISTEN(netif,
-                         CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, filter_id));
-          ci_assert(tls->s.b.state == CI_TCP_LISTEN);
-          /* handle_rx_listen() expects pf.tcp_rx.pay_len to not be munged,
-           * so undo the change we have made 
-           */
-          pkt->pf.tcp_rx.pay_len += CI_TCP_HDR_LEN(tcp);
-          handle_rx_listen(netif, tls, rxp, 1);
-          return;
-        }
-        else
-          LOG_U(log(LPF "no matching listener for SYN in TIME_WAIT"));
-      }
-      else
-        LOG_U(log(LPF "SYN in TIME_WAIT has old SEQ - staying in TIME_WAIT"));
-    }
-    /* not normal, do nothing! (rfc793 p23) */
-    LOG_U(log(LPF "unexpected packet received while in TIME_WAIT"));
-    LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+  if ( !handle_rx_minor_states(ts, netif, rxp) ) {
+    /* State not recognised: shouldn't happen here. */
+    ci_log("Unknown state %d ('%s')\n", ts->s.b.state, state_str(ts));
     ci_netif_pkt_release_rx(netif, pkt);
-    break;
-  case CI_TCP_CLOSED:
-    /* For non-loopback connections:
-    ** If doing a s/w demux, then this can't happen, 'cos this connection
-    ** wouldn't be in the hash table.  If h/w does demux and identifies
-    ** connection for us, then it potentially can, since events can take a
-    ** while to arrive.
-    **
-    ** We are doing s/w demux, and I don't anticipate this changing any
-    ** time soon.  We shouldn't get here.
-    **
-    ** However, if we do, we'll cope gracefully by handling in the same way
-    ** as a loopback connection.
-    */
-    ci_assert(pkt->intf_i == OO_INTF_I_LOOPBACK);
-    if(!(pkt->intf_i == OO_INTF_I_LOOPBACK))
-      LOG_E(ci_log(LNT_FMT "ERROR demux to CLOSED socket",
-                   LNT_PRI_ARGS(netif, ts)));
-    CITP_STATS_NETIF_INC(netif, rst_sent_no_match);
-    ci_tcp_reply_with_rst(netif, rxp);
-    return;
-  default:
-    /* should never get here */
-    ci_log ("Unknown state %d ('%s')\n", ts->s.b.state, state_str(ts));
     ci_assert(0);
-    break;
   }
 
   return;
@@ -3693,12 +3727,22 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         SEQ_GE(tcp_snd_nxt(ts), rxp->ack) && 
         SEQ_LE(tcp_snd_una(ts), rxp->ack) ) {
       ci_tcp_rx_handle_ack(ts, netif, rxp);
-      /* ACK may have allowed us to advance, do now rather than
-       * post-poll so we can send a pure ACK in response (for real
-       * ZWIN case) if no data to send */
+
+      /* handle_rx_minor_states might release a reference. */
+      ci_netif_pkt_hold(netif, pkt);
+
+      /* ACK may have allowed us to advance. We might need to make a state
+       * transition, so handle that. We also want to ensure that we advance the
+       * send queue if we can, so if we don't do that as a result of the usual
+       * state-handling, do it now rather than post-poll so we can send a pure
+       * ACK in response (for real ZWIN case) if no data to send.
+       */
+      if( !handle_rx_minor_states(ts, netif, rxp) )
+        ci_netif_pkt_release_rx(netif, pkt);
       if( ci_tcp_sendq_not_empty(ts) )
         ci_tcp_tx_advance(ts, netif);
     }
+
     snd_nxt_after = tcp_snd_nxt(ts);
     /* Only send a pure ACK if tx_advance did nothing */
     if( snd_nxt_before == snd_nxt_after ) {
@@ -3957,14 +4001,13 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
     }
 
 #if CI_CFG_NOTICE_WINDOW_SHRINKAGE
-    /* Here is fast-path version of condition from
-     * ci_tcp_rx_try_snd_wnd_inflate().
+    /* No need to do ci_tcp_rx_try_snd_wnd_inflate() on fast path - we
+     * know the payload is in order so just update the window directly 
      */
-    if( SEQ_LT(ts->snd_wl1, rxp->seq) )
-      ci_tcp_set_snd_max(ts, rxp->seq,
-                         rxp->ack, pkt->pf.tcp_rx.window);
+    ci_tcp_set_snd_max(ts, rxp->seq, rxp->ack, pkt->pf.tcp_rx.window);
 #else
-    ci_tcp_rx_try_snd_wnd_inflate(ts, rxp);
+    if( SEQ_LT(ts->snd_max, rxp->ack + pkt->pf.tcp_rx.window) )
+      ci_tcp_set_snd_max(ts, rxp->seq, rxp->ack, pkt->pf.tcp_rx.window);
 #endif
 
     TCP_NEED_ACK(ts);

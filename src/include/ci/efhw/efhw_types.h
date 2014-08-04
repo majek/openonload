@@ -200,6 +200,7 @@ struct efhw_func_ops {
 				    int enable_dos_p,
 				    int wakeup_evq,
 				    int enable_time_sync_events,
+				    int enable_cut_through,
 				    int *rx_ts_correction_out,
 				    int* flags_out);
 
@@ -294,6 +295,14 @@ struct efhw_func_ops {
 	int (*set_port_sniff) (struct efhw_nic *nic, int instance, int enable,
 			       int promiscuous, int rss_context_handle);
 
+	/*! Enable or disable tx port sniff.
+	 * If rss_context_handle is -1 instance is treated as a single RX
+	 * queue.  If rss_context_handle is a valid rss context handle then
+	 * instance is treated as a base queue and RSS is enabled.
+	 */
+	int (*set_tx_port_sniff) (struct efhw_nic *nic, int instance,
+				  int enable, int rss_context_handle);
+
   /*-------------- RSS Support ------------ */
 	/*! Allocate an RX RSS context */
 	int (*rss_context_alloc) (struct efhw_nic *nic, int num_qs, int shared,
@@ -317,6 +326,9 @@ struct efhw_func_ops {
 				   uint32_t* expiry,
 				   uint8_t* signature);
 
+  /*-------------- Stats ------------------------ */
+	int (*get_rx_error_stats) (struct efhw_nic *nic, int instance,
+				   void *data, int data_len, int do_reset);
 };
 
 
@@ -363,6 +375,8 @@ struct efhw_nic {
 # define NIC_FLAG_BUG35388_WORKAROUND   0x80
 # define NIC_FLAG_MCAST_LOOP_HW         0x100
 # define NIC_FLAG_14BYTE_PREFIX         0x200
+# define NIC_FLAG_PACKED_STREAM         0x400
+# define NIC_FLAG_RX_RSS_LIMITED        0x800
 
 	unsigned resetting;	/*!< NIC is currently being reset */
 

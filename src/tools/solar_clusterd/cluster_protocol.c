@@ -217,4 +217,5 @@ PyMODINIT_FUNC initcluster_protocol(void)
   MODULE_INT_CONST(module, EF_PD_DEFAULT);
   MODULE_INT_CONST(module, EF_PD_VF);
   MODULE_INT_CONST(module, EF_PD_PHYS_MODE);
+  MODULE_INT_CONST(module, EF_PD_RX_PACKED_STREAM);
 }

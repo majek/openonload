@@ -177,6 +177,8 @@ typedef struct {
     struct {
       ci_uint32			stack_id;
       ci_uint32                 orphan_only;
+      ci_user_ptr_t             user_buf;
+      ci_int32                  user_buf_len;
     } dump_stack;
     ci_uint32                   stack_id;       /* kill stack */
   } u CI_ALIGN(8);

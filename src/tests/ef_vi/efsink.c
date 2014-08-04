@@ -73,7 +73,7 @@
 
 struct thread {
   struct vi*  vi;
-  int         n_rx_pkts;
+  uint64_t    n_rx_pkts;
   uint64_t    n_rx_bytes;
 };
 
@@ -239,7 +239,7 @@ static void monitor(struct thread* thread)
   int prev_pkts, now_pkts;
   int ms, pkt_rate, mbps;
 
-  printf("# pkt-rate  bandwidth(Mbps)\n");
+  printf("# pkt-rate  bandwidth(Mbps)  pkts\n");
 
   prev_pkts = thread->n_rx_pkts;
   prev_bytes = thread->n_rx_bytes;
@@ -254,7 +254,7 @@ static void monitor(struct thread* thread)
     ms += (end.tv_usec - start.tv_usec) / 1000;
     pkt_rate = (int) ((int64_t) (now_pkts - prev_pkts) * 1000 / ms);
     mbps = (int) ((now_bytes - prev_bytes) * 8 / 1000 / ms);
-    printf("%10d %16d\n", pkt_rate, mbps);
+    printf("%10d %16d %16llu\n", pkt_rate, mbps, (unsigned long long) now_pkts);
     fflush(stdout);
     prev_pkts = now_pkts;
     prev_bytes = now_bytes;
@@ -280,9 +280,10 @@ static void usage(void)
   fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:<local-port>"
           "[,<remote-host>:<remote-port>]\n");
   fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
-  fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");
+  fprintf(stderr, "  {unicast-all,multicast-all}\n");
   fprintf(stderr, "  {unicast-mis,multicast-mis}:[vid=<vlan>]\n");
   fprintf(stderr, "  {sniff}:[promisc|no-promisc]\n");
+  fprintf(stderr, "  {tx-sniff}\n");
   fprintf(stderr, "  {block-kernel|block-kernel-unicast|block-kernel-multicast}\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "options:\n");

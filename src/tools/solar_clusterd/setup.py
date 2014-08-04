@@ -3,8 +3,10 @@ import os, sys
 
 
 onload_tree = os.getenv('ONLOAD_TREE')
-if not onload_tree:
-    sys.stderr.write('ONLOAD_TREE must be set to use this script\n')
+onload_build = os.getenv('ONLOAD_BUILD')
+if not onload_tree or not onload_build:
+    sys.stderr.write('ONLOAD_TREE and ONLOAD_BUILD must be set to use this ' +
+                     'script\n')
     sys.exit(1)
 
 
@@ -14,8 +16,7 @@ ext = Extension(
     include_dirs = [
         os.path.join(onload_tree, 'src', 'include'),
         os.path.join(onload_tree, 'src', 'tools', 'solar_clusterd')],
-    extra_objects = [os.path.join(onload_tree, 'build', 'gnu_x86_64', 'lib',
-                                  'ciul', 'libciul1.a')],
+    extra_objects = [os.path.join(onload_build, 'lib', 'ciul', 'libciul1.a')],
     )
 
 

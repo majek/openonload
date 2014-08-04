@@ -2056,9 +2056,6 @@ static int efx_probe_interrupts(struct efx_nic *efx)
 	efx->rss_spread = (efx->type->sriov_wanted(efx) && efx->rss_spread == 1) ?
 		efx_vf_size(efx) : efx->rss_spread;
 
-	netif_info(efx, drv, efx->net_dev, "RSS spread is %u channels\n",
-					efx->rss_spread);
-
 	return 0;
 }
 
@@ -2607,7 +2604,7 @@ static int efx_probe_filters(struct efx_nic *efx)
 		return rc;
 
 #ifdef CONFIG_RFS_ACCEL
-	if (efx->type->offload_features & NETIF_F_NTUPLE) {
+	if (efx->net_dev->features & NETIF_F_NTUPLE) {
 		int i;
 
 		efx->rps_flow_id = kcalloc(efx->type->max_rx_ip_filters,
@@ -3566,6 +3563,28 @@ show_phy_type(struct device *dev, struct device_attribute *attr, char *buf)
 }
 static DEVICE_ATTR(phy_type, 0444, show_phy_type, NULL);
 
+#ifdef CONFIG_SFC_MCDI_LOGGING
+static ssize_t show_mcdi_log(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	struct efx_nic *efx = pci_get_drvdata(to_pci_dev(dev));
+	struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", mcdi->logging_enabled);
+}
+static ssize_t set_mcdi_log(struct device *dev, struct device_attribute *attr,
+			    const char *buf, size_t count)
+{
+	struct efx_nic *efx = pci_get_drvdata(to_pci_dev(dev));
+	struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
+	bool enable = count > 0 && *buf != '0';
+
+	mcdi->logging_enabled = enable;
+	return count;
+}
+static DEVICE_ATTR(mcdi_logging, 0644, show_mcdi_log, set_mcdi_log);
+#endif
+
 static int efx_register_netdev(struct efx_nic *efx)
 {
 	struct net_device *net_dev = efx->net_dev;
@@ -3686,24 +3705,40 @@ static int efx_register_netdev(struct efx_nic *efx)
 	if (rc) {
 		netif_err(efx, drv, efx->net_dev,
 			  "failed to init net dev attributes\n");
-		goto fail_debugfs;
+		goto fail_attr_phy_type;
 	}
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 	rc = device_create_file(&efx->pci_dev->dev, &dev_attr_lro);
 	if (rc) {
 		netif_err(efx, drv, efx->net_dev,
 			  "failed to init net dev attributes\n");
-		goto fail_attr_phy_type;
+		goto fail_attr_lro;
+	}
+#endif
+#ifdef CONFIG_SFC_MCDI_LOGGING
+	rc = device_create_file(&efx->pci_dev->dev, &dev_attr_mcdi_logging);
+	if (rc) {
+		netif_err(efx, drv, efx->net_dev,
+			  "failed to init net dev attributes\n");
+		goto fail_attr_mcdi_logging;
 	}
 #endif
 
 	return 0;
 
+#ifdef CONFIG_SFC_MCDI_LOGGING
+fail_attr_mcdi_logging:
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
-fail_attr_phy_type:
+	device_remove_file(&efx->pci_dev->dev, &dev_attr_lro);
+#endif
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
+fail_attr_lro:
+	device_remove_file(&efx->pci_dev->dev, &dev_attr_phy_type);
+#elif defined(CONFIG_SFC_MCDI_LOGGING)
 	device_remove_file(&efx->pci_dev->dev, &dev_attr_phy_type);
 #endif
-fail_debugfs:
+fail_attr_phy_type:
 	efx_fini_debugfs_netdev(net_dev);
 fail_registered:
 	rtnl_lock();
@@ -3739,6 +3774,9 @@ static void efx_unregister_netdev(struct efx_nic *efx)
 #endif
 	if (efx_dev_registered(efx)) {
 		strlcpy(efx->name, pci_name(efx->pci_dev), sizeof(efx->name));
+#ifdef CONFIG_SFC_MCDI_LOGGING
+		device_remove_file(&efx->pci_dev->dev, &dev_attr_mcdi_logging);
+#endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 		device_remove_file(&efx->pci_dev->dev, &dev_attr_lro);
 #endif

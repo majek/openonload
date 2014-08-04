@@ -37,7 +37,9 @@ LIB_SRCS	+=		\
 		pio.c		\
 		falcon_evtimer.c\
 		ef10_evtimer.c  \
-		vi_layout.c
+		vi_layout.c	\
+		vi_stats.c	\
+		vi_prime.c
 endif
 
 

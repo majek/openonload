@@ -1095,12 +1095,79 @@ strong_alias(onload_sendmmsg, sendmmsg);
 
 #if CI_CFG_USERSPACE_SELECT
 
+/* Internal poll/select timeout is calculated in milliseconds,
+ * and in citp_ul_do_select/citp_ul_do_poll this value is multiplied by
+ * ci_cpu_khz, assuming it not to overflow.
+ * So we are dividing by 10GHz here.
+ * This does limit us to maximum timeout of about 58 years.
+ */
+#define MAX_POLL_SELECT_MILLISEC ((ci_uint64) -1 / 10000000)
+static inline ci_uint64
+timespec2ms(const struct timespec* tv)
+{
+  ci_uint64 ms;
+
+  if( tv == NULL )
+    return MAX_POLL_SELECT_MILLISEC;
+  ms = (ci_uint64)tv->tv_sec * 1000 +
+       (tv->tv_nsec + 500000) / 1000000;
+
+  /* If spinning is enabled, user expects us to spin a bit
+   * even with extra-small timeout. */
+  if( ms == 0 && tv->tv_nsec != 0 )
+    ms = 1;
+  if( ms >= MAX_POLL_SELECT_MILLISEC )
+    return MAX_POLL_SELECT_MILLISEC;
+  return ms;
+}
+static inline ci_uint64
+timeval2ms(const struct timeval* tv)
+{
+  ci_uint64 ms;
+
+  if( tv == NULL )
+    return MAX_POLL_SELECT_MILLISEC;
+  ms = (ci_uint64)tv->tv_sec * 1000 +
+    (tv->tv_usec + 500) / 1000;
+
+  /* If spinning is enabled, user expects us to spin a bit
+   * even with extra-small timeout. */
+  if( ms == 0 && tv->tv_usec != 0 )
+    ms = 1;
+  if( ms >= MAX_POLL_SELECT_MILLISEC )
+    return MAX_POLL_SELECT_MILLISEC;
+  return ms;
+}
+static inline void
+ms2timeval(ci_uint64 timeout, ci_uint64 spent, struct timeval* tv)
+{
+  if( timeout > spent ) {
+    tv->tv_sec = (timeout - spent) / 1000;
+    tv->tv_usec = ((timeout - spent) % 1000) * 1000;
+  }
+  else {
+    tv->tv_sec = tv->tv_usec = 0;
+  }
+}
+static inline void
+ms2timespec(ci_uint64 timeout, ci_uint64 spent, struct timespec* tv)
+{
+  if( timeout > spent ) {
+    tv->tv_sec = (timeout - spent) / 1000;
+    tv->tv_nsec = ((timeout - spent) % 1000) * 1000000;
+  }
+  else {
+    tv->tv_sec = tv->tv_nsec = 0;
+  }
+}
+
+
 OO_INTERCEPT(int, select,
              (int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
               struct timeval* timeout))
 {
   citp_lib_context_t lib_context;
-  ci_uint64 timeout_ms;
+  ci_uint64 timeout_ms, used_ms = 0;
   int rc;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
@@ -1120,30 +1187,21 @@ OO_INTERCEPT(int, select,
     goto out;
   }
 
-  if( timeout == NULL )
-    /* citp_ul_do_select() multiplies this value by ci_cpu_khz and
-     * expects it not to overflow.  So we are dividing by 10GHz here.
-     * This does limit us to maximum timeout of about 58 years. */
-    timeout_ms = (ci_uint64) -1 / 10000000;
-  else
-    timeout_ms = timeout->tv_sec * 1000 + timeout->tv_usec / 1000;
+  timeout_ms = timeval2ms(timeout);
 
   citp_enter_lib(&lib_context);
-  rc = citp_ul_do_select(nfds, rds, wrs, exs, &timeout_ms, &lib_context,
-                         NULL, NULL);
+  rc = citp_ul_do_select(nfds, rds, wrs, exs, timeout_ms, &used_ms,
+                         &lib_context, NULL, NULL);
 
-  if( rc == CI_SOCKET_HANDOVER ) {
-    if( timeout != NULL) {
-      timeout->tv_sec = timeout_ms / 1000;
-      timeout->tv_usec = (timeout_ms % 1000) * 1000;
-    }
+  /* Linux-specific behaviour: change timeout parameter. */
+  if( timeout != NULL && used_ms != 0 ) {
+    if( timeout_ms > used_ms )
+      ms2timeval(timeout_ms, used_ms, timeout);
+    else
+      timeout->tv_sec = timeout->tv_usec = 0;
+  }
+  if( rc == CI_SOCKET_HANDOVER )
     rc = ci_sys_select(nfds, rds, wrs, exs, timeout);
-  }
-  else if( timeout != NULL ) {
-    ci_assert_le(timeout_ms, timeout->tv_sec * 1000 + timeout->tv_usec / 1000);
-    timeout->tv_sec = timeout_ms / 1000;
-    timeout->tv_usec = (timeout_ms % 1000) * 1000;
-  }
 
 out:
   Log_CALL_RESULT(rc);
@@ -1156,7 +1214,7 @@ OO_INTERCEPT(int, pselect,
 {
   citp_lib_context_t lib_context;
   sigset_t sigsaved;
-  ci_uint64 timeout_ms;
+  ci_uint64 timeout_ms, used_ms = 0;
   int rc = 0;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
@@ -1177,30 +1235,22 @@ OO_INTERCEPT(int, pselect,
     goto out;
   }
 
-  /* Calculate timeout */
-  if( timeout_ts == NULL )
-    /* citp_ul_do_select() multiplies this value by ci_cpu_khz and
-     * expects it not to overflow.  So we are dividing by 10GHz here.
-     * This does limit us to maximum timeout of about 58 years. */
-    timeout_ms = (ci_uint64) -1 / 10000000;
-  else
-    timeout_ms = timeout_ts->tv_sec * 1000 + timeout_ts->tv_nsec / 1000000;
+  timeout_ms = timespec2ms(timeout_ts);
 
   /* Set up signal mask and spin */
   citp_enter_lib(&lib_context);
-  rc = citp_ul_do_select(nfds, rds, wrs, exs, &timeout_ms, &lib_context,
-                         sigmask, &sigsaved);
+  rc = citp_ul_do_select(nfds, rds, wrs, exs, timeout_ms, &used_ms,
+                         &lib_context, sigmask, &sigsaved);
 
   /* we should not return 0 without signal check; do it now: */
   if( rc == CI_SOCKET_HANDOVER || (rc == 0 && sigmask != NULL) ) {
-    if( timeout_ts != NULL) {
+    if( timeout_ts != NULL && used_ms != 0 ) {
       struct timespec ts;
-      ts.tv_sec = timeout_ms / 1000;
-      ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+      ms2timespec(timeout_ms, used_ms, &ts);
       rc = ci_sys_pselect(nfds, rds, wrs, exs, &ts, sigmask);
     }
     else
-      rc = ci_sys_pselect(nfds, rds, wrs, exs, NULL, sigmask);
+      rc = ci_sys_pselect(nfds, rds, wrs, exs, timeout_ts, sigmask);
   }
 
 out:
@@ -1209,29 +1259,30 @@ out:
 }
 
 OO_INTERCEPT(int, poll,
-             (struct pollfd*__restrict__ fds, nfds_t nfds, int timeout_ms))
+             (struct pollfd*__restrict__ fds, nfds_t nfds, int timeout))
 {
   citp_lib_context_t lib_context;
   int rc;
+  ci_uint64 used_ms = 0;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
-    return ci_sys_poll(fds, nfds, timeout_ms);
+    return ci_sys_poll(fds, nfds, timeout);
   }
 
   if( ! CITP_OPTS.ul_poll || nfds <= 0 )
-    return ci_sys_poll(fds, nfds, timeout_ms);
+    return ci_sys_poll(fds, nfds, timeout);
 
-  Log_CALL(ci_log("%s(%p, %ld, %d)", __FUNCTION__, fds, nfds, timeout_ms));
+  Log_CALL(ci_log("%s(%p, %ld, %d)", __FUNCTION__, fds, nfds, timeout));
 
   citp_enter_lib(&lib_context);
-  rc = citp_ul_do_poll(fds, nfds, &timeout_ms, &lib_context);
+  rc = citp_ul_do_poll(fds, nfds, timeout, &used_ms, &lib_context);
 
   /* fixme: signals may come after spin but before ci_sys_select(); we'll
    * handle them but do not return -1(EINTR). */
   citp_exit_lib(&lib_context, rc >= 0);
-  if( timeout_ms != 0 && rc == 0 )
-    rc = ci_sys_poll(fds, nfds, timeout_ms);
+  if( timeout != used_ms && rc == 0 )
+    rc = ci_sys_poll(fds, nfds, timeout - used_ms);
 
   Log_CALL_RESULT(rc);
   return rc;
@@ -1244,7 +1295,7 @@ OO_INTERCEPT(int, ppoll,
 {
   citp_lib_context_t lib_context;
   sigset_t sigsaved;
-  int timeout_ms;
+  ci_uint64 timeout_ms, used_ms = 0;
   int rc = 0;
   int was_spinning = 0;
 
@@ -1266,20 +1317,17 @@ OO_INTERCEPT(int, ppoll,
   }
 
   /* Non-blocking check: do we have anything ready? */
-  timeout_ms = 0;
   citp_enter_lib(&lib_context);
-  rc = citp_ul_do_poll(fds, nfds, &timeout_ms, &lib_context);
+  rc = citp_ul_do_poll(fds, nfds, 0, &used_ms, &lib_context);
   citp_exit_lib(&lib_context, rc >=0);
   if( rc != 0)
     goto out;
 
-  /* Calculate timeout */
-  if( timeout_ts == NULL )
-    timeout_ms = -1;
-  else
-    timeout_ms = timeout_ts->tv_sec * 1000 + timeout_ts->tv_nsec / 1000000;
+  timeout_ms = timespec2ms(timeout_ts);
 
   /* Set up signal mask and spin */
+  /* Fixme: move sigmask handling into citp_ul_do_poll, after we've
+   * checked if any socket is already available. */
   if( timeout_ms != 0 &&
       (oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_POLL)) ) {
     was_spinning = 1;
@@ -1289,7 +1337,7 @@ OO_INTERCEPT(int, ppoll,
       goto out;
     }
 
-    rc = citp_ul_do_poll(fds, nfds, &timeout_ms, &lib_context);
+    rc = citp_ul_do_poll(fds, nfds, timeout_ms, &used_ms, &lib_context);
 
     citp_ul_pwait_spin_done(&lib_context, &sigsaved, &rc);
     if( rc != 0 )
@@ -1297,13 +1345,14 @@ OO_INTERCEPT(int, ppoll,
   }
 
   /* Block in the OS */
-  if( (timeout_ms != 0 || !was_spinning)  && rc == 0 ) {
-    struct timespec ts;
-    if( timeout_ms >= 0 ) {
-      ts.tv_sec = timeout_ms / 1000;
-      ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+  if( (timeout_ms != used_ms || !was_spinning) && rc == 0 ) {
+    if( used_ms == 0 || timeout_ts == NULL )
+      rc = ci_sys_ppoll(fds, nfds, timeout_ts, sigmask);
+    else {
+      struct timespec ts;
+      ms2timespec(timeout_ms, used_ms, &ts);
+      rc = ci_sys_ppoll(fds, nfds, &ts, sigmask);
     }
-    rc = ci_sys_ppoll(fds, nfds, timeout_ms >= 0 ? &ts : NULL, sigmask);
   }
 
 out:

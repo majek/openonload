@@ -71,4 +71,17 @@ struct efrm_resource;
 extern int efrm_port_sniff(struct efrm_resource *rs, int enable,
                            int promiscuous, int rss_context);
 
+/*!
+ * Set tx port sniff.
+ *
+ * \param rs          Resource to receive sniffed traffic.
+ * \param enable      Whether to enable or disable tx port sniff.
+ * \param rss         The RSS context to use for sniffed traffic.  If this is
+ *                    -1 then the resource is treated as a single VI.  If not
+ *                    then the value is used as an RSS context handle, accross
+ *                    which the sniffed traffic should be spread.
+ */
+extern int efrm_tx_port_sniff(struct efrm_resource *rs, int enable,
+                              int rss_context);
+
 #endif /* __CI_EFRM_PORT_SNIFF_H__ */

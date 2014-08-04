@@ -179,8 +179,14 @@ struct ci_netif_s {
 # define CI_NETIF_FLAGS_DONT_USE_ANON    0x100
   /* Sending ONLOAD_MSG_WARM */
 # define CI_NETIF_FLAG_MSG_WARM           0x200
+#ifdef __KERNEL__
   /* Currently being used from a driverlink context */
 # define CI_NETIF_FLAG_IN_DL_CONTEXT     0x400
+  /* Should not allocate packets in atomic/driverlink context */
+# define CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION 0x800
+  /* Packet allocation postponed */
+#define CI_NETIF_FLAG_NO_PACKET_BUFFERS  0x1000
+#endif
 
 #ifndef __KERNEL__
   double    ci_ip_time_tick2ms;     /* time for 1 tick in ms */
