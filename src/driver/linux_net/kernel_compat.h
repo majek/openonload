@@ -1287,9 +1287,15 @@ extern struct i2c_driver efx_lm90_driver;
 	}
 
 	#define netdev_printk(level, netdev, format, args...)		\
-		dev_printk(level, EFX_GET_NETDEV_DEV(netdev),		\
-			   "%s: " format,				\
-			   netdev_name(netdev), ##args)
+		do {							\
+			static DEFINE_RATELIMIT_STATE(_rs,		\
+						      DEFAULT_RATELIMIT_INTERVAL, \
+						      DEFAULT_RATELIMIT_BURST);	\
+			if (__ratelimit(&_rs))				\
+				dev_printk(level, EFX_GET_NETDEV_DEV(netdev), \
+					   "%s: " format,		\
+					   netdev_name(netdev), ##args);\
+		} while (0)
 
 	#define netif_printk(priv, type, level, dev, fmt, args...)	\
 	do {								\
