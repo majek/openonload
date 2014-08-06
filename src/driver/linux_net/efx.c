@@ -24,6 +24,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/ratelimit.h>
 #include <linux/pci.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
