@@ -3398,8 +3398,10 @@ static const struct net_device_ops efx_farch_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= efx_netpoll,
 #endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_BUSY_POLL)
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	.ndo_busy_poll		= efx_busy_poll,
+#endif
 #endif
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NETDEV_RFS_INFO)
 #ifdef CONFIG_RFS_ACCEL
@@ -3438,8 +3440,10 @@ static const struct net_device_ops efx_ef10_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller	= efx_netpoll,
 #endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_BUSY_POLL)
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	.ndo_busy_poll		= efx_busy_poll,
+#endif
 #endif
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NETDEV_RFS_INFO)
 #ifdef CONFIG_RFS_ACCEL
@@ -3639,7 +3643,11 @@ static int efx_register_netdev(struct efx_nic *efx)
 	netdev_extended(net_dev)->rfs_data.ndo_rx_flow_steer = efx_filter_rfs;
 #endif
 #endif
+#if !defined(EFX_USE_KCOMPAT) || !defined(SET_ETHTOOL_OPS)
+	net_dev->ethtool_ops = &efx_ethtool_ops;
+#else
 	SET_ETHTOOL_OPS(net_dev, &efx_ethtool_ops);
+#endif
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_ETHTOOL_OPS_EXT)
 	set_ethtool_ops_ext(net_dev, &efx_ethtool_ops_ext);
 #endif
@@ -4725,9 +4733,11 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 #endif
 	}
 #endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES)
+#if !defined(EFX_USE_KCOMPAT)
+#if defined(EFX_HAVE_NDO_SET_FEATURES) && defined(EFX_HAVE_NETDEV_HW_FEATURES)
 	/* All offloads can be toggled */
 	net_dev->hw_features = net_dev->features & ~NETIF_F_HIGHDMA;
+#endif
 #endif
 	pci_set_drvdata(pci_dev, efx);
 	SET_NETDEV_DEV(net_dev, &pci_dev->dev);

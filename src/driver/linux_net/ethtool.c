@@ -1314,7 +1314,11 @@ static int efx_ethtool_set_rxnfc(struct net_device *net_dev,
 	}
 }
 
+#ifdef EFX_USE_KCOMPAT
+u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
+#else
 static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
+#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
@@ -1323,7 +1327,7 @@ static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
 		0 : ARRAY_SIZE(efx->rx_indir_table));
 }
 
-static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
+static int efx_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
@@ -1331,13 +1335,32 @@ static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
 	return 0;
 }
 
-static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
-				      const u32 *indir)
+#ifdef EFX_USE_KCOMPAT
+int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
+#else
+static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
+#endif
+{
+	return efx_ethtool_get_rxfh(net_dev, indir, NULL);
+}
+
+int efx_ethtool_set_rxfh(struct net_device *net_dev,
+				const u32 *indir, const u8 *key)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
 	memcpy(efx->rx_indir_table, indir, sizeof(efx->rx_indir_table));
 	return efx->type->rx_push_rss_config(efx);
+}
+
+#ifdef EFX_USE_KCOMPAT
+int efx_ethtool_set_rxfh_indir(struct net_device *net_dev, const u32 *indir)
+#else
+static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
+				     const u32 *indir)
+#endif
+{
+	return efx_ethtool_set_rxfh(net_dev, indir, NULL);
 }
 
 #if defined(EFX_USE_KCOMPAT) && (!defined(EFX_HAVE_ETHTOOL_RXFH_INDIR) || defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR))
@@ -1360,7 +1383,7 @@ static int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
 		return user_size == 0 ? 0 : -EINVAL;
 	}
 
-	return efx_ethtool_get_rxfh_indir(net_dev, indir->ring_index);
+	return efx_ethtool_get_rxfh(net_dev, indir->ring_index, NULL);
 }
 
 #ifndef EFX_HAVE_ETHTOOL_RXFH_INDIR
@@ -1386,7 +1409,7 @@ static int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 		if (indir->ring_index[i] >= efx->n_rx_channels)
 			return -EINVAL;
 
-	return efx_ethtool_set_rxfh_indir(net_dev, indir->ring_index);
+	return efx_ethtool_set_rxfh(net_dev, indir->ring_index, NULL);
 }
 #endif
 
@@ -1523,14 +1546,25 @@ const struct ethtool_ops_ext efx_ethtool_ops_ext = {
 	.set_phys_id		= efx_ethtool_phys_id,
 	/* Do not set ethtool_ops_ext::reset due to RH BZ 1008678 (SF bug 39031) */
 #endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR_SIZE)
 	.get_rxfh_indir_size	= efx_ethtool_get_rxfh_indir_size,
-	.get_rxfh_indir		= efx_ethtool_get_rxfh_indir,
-	.set_rxfh_indir		= efx_ethtool_set_rxfh_indir,
-#else
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH)
+	.get_rxfh		= efx_ethtool_get_rxfh,
+#elif defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
+#if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
 	.get_rxfh_indir		= efx_ethtool_old_get_rxfh_indir,
+#else
+	.get_rxfh_indir		= efx_ethtool_get_rxfh_indir,
+#endif
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_SET_RXFH)
+	.set_rxfh		= efx_ethtool_set_rxfh,
+#elif defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
+#if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
 	.set_rxfh_indir		= efx_ethtool_old_set_rxfh_indir,
+#else
+	.set_rxfh_indir		= efx_ethtool_set_rxfh_indir,
 #endif
 #endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) || defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
