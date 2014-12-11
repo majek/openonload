@@ -413,7 +413,11 @@ int aoe_dl_register(void)
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
 			memcpy(new_dev->perm_addr, mac, ETH_ALEN);
 #endif
+#if !defined(EFX_USE_KCOMPAT) || !defined(SET_ETHTOOL_OPS)
+                       net_dev->ethtool_ops = NULL;
+#else
 			SET_ETHTOOL_OPS(new_dev, NULL);
+#endif
 
 			if (register_netdev(new_dev)) {
 				printk(KERN_ERR "Failed to register fake net device\n");

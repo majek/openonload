@@ -1358,6 +1358,7 @@ static int efx_ptp_synchronize(struct efx_nic *efx, unsigned int num_readings)
 static bool efx_ptp_get_host_time(struct efx_nic *efx,
 				  struct skb_shared_hwtstamps *timestamps)
 {
+#ifdef EFX_HAVE_SKB_SYSTSTAMP
 	if (efx->ptp_data->last_delta_valid) {
 		ktime_t diff = timespec_to_ktime(efx->ptp_data->last_delta);
 		timestamps->syststamp = ktime_sub(timestamps->hwtstamp, diff);
@@ -1366,6 +1367,9 @@ static bool efx_ptp_get_host_time(struct efx_nic *efx,
 	}
 
 	return efx->ptp_data->last_delta_valid;
+#else
+	return false;
+#endif
 }
 #endif
 

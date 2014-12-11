@@ -1942,7 +1942,12 @@ int efx_siena_sriov_get_vf_config(struct net_device *net_dev, int vf_i,
 
 	ivi->vf = vf_i;
 	ether_addr_copy(ivi->mac, vf->addr.mac_addr);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_VF_INFO_MIN_TX_RATE)
+	ivi->min_tx_rate = 0;
+	ivi->max_tx_rate = 0;
+#else
 	ivi->tx_rate = 0;
+#endif
 	tci = ntohs(vf->addr.tci);
 	ivi->vlan = tci & VLAN_VID_MASK;
 	ivi->qos = (tci >> VLAN_PRIO_SHIFT) & 0x7;

@@ -344,7 +344,12 @@ static int aoe_setup_netdev(struct aoe_netdev *aoe_net)
 	net_dev->poll_controller = NULL;
 #endif
 #endif
-	SET_ETHTOOL_OPS(net_dev, &aoe_ethtool_ops);
+
+#if !defined(EFX_USE_KCOMPAT) || !defined(SET_ETHTOOL_OPS)
+	net_dev->ethtool_ops = &aoe_ethtool_ops;
+#else
+ 	SET_ETHTOOL_OPS(net_dev, &aoe_ethtool_ops);
+#endif
 
 	rc = register_netdev(net_dev);
 	netif_carrier_off(net_dev);
