@@ -1,3 +1,12 @@
+
+openonload-201405-u2
+--------------------
+
+Updated net driver to build on recent kernels (v4.1.2.1003b)
+SF-113792-KI/Bug49194: ef_vi avoid registering wrong pages when ef_memreg_alloc() page sizes vary
+SF-113764-KI/Bug48491: do not leak memory when querying status of LACP bond
+
+
 openonload-201405-u1
 --------------------
 

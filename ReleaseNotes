@@ -1,4 +1,30 @@
 
+OpenOnload-201405-u2 Release Notes
+==================================
+
+This is an update release that fixes two important bugs in the
+openonload-201405-u1 release.
+
+The first is in the ef_vi API included with Onload.  This concerns the
+way that memory is registered via the ef_vi API (it does not affect
+users who only use Onload) and can result in arbitrary memory on the
+system becoming corrupted.  Please see SF-113792-KI in the known
+issues database on https://support.solarflare.com/ for full details.
+
+The second is in the bonding code within Onload, and fixes a memory
+leak that occurs once an LACP 802.3ad bond is configured on the
+system.  Please see SF-113764-KI in the known issues database on
+https://support.solarflare.com/ for full details.
+
+In addition, an updated net driver is included to allow building on
+RHEL6.6 and other recent Linux kernel versions.
+
+Please see the ChangeLog file for details of the changes in this release.
+
+The Release Notes for the openonload-201405-u1 release are included at the
+end of this file.
+
+
 OpenOnload-201405-u1 Release Notes
 ==================================
 

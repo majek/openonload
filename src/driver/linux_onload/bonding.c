@@ -264,8 +264,10 @@ static int ci_bonding_get_hash_policy(char *bond_name, int *policy)
   len = strlen(bond_name) +
     SYSFS_BASE_STRLEN + SYSFS_HASHPOLICY_LEAF_STRLEN + 1;
   filename = kmalloc(len, GFP_KERNEL);
-  if ( filename == NULL )
+  if ( filename == NULL ) {
+    kfree(buffer);
     return -ENOMEM;
+  }
 
   sprintf(filename, SYSFS_BASE, bond_name, SYSFS_HASHPOLICY_LEAF);
 
@@ -591,7 +593,6 @@ ci_bonding_get_lacp_active_slaves_entry_fn(ci_dllist* active_slaves,
 static int ci_bonding_get_lacp_active_slave(char* bond_name, char* slave_name)
 {
   int len, rc;
-  char* buffer;
   char* filename;
   struct ci_read_proc_net_bonding_state state;
   ci_dllist active_slaves;
@@ -600,16 +601,10 @@ static int ci_bonding_get_lacp_active_slave(char* bond_name, char* slave_name)
   state.current_slave[0] = '\0';
   ci_dllist_init(&active_slaves);
 
-  buffer = kmalloc(SYSFS_READ_BLOCK_SIZE + 1, GFP_KERNEL);
-  if ( buffer == NULL )
-    return -ENOMEM;
-
   len = strlen(bond_name) + PROC_NET_BONDING_STRLEN + 1;
   filename = kmalloc(len, GFP_KERNEL);
-  if ( filename == NULL ) {
-    kfree(buffer);
+  if ( filename == NULL )
     return -ENOMEM;
-  }
 
   sprintf(filename, PROC_NET_BONDING_BASE, bond_name);
 

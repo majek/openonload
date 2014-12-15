@@ -144,13 +144,25 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     goto fail3;
   }
 
+  /* Take the order of the first page as our order to start with. */
   mr->order = compound_order(mr->pages[0]);
+
+  /* If the size of the memreg isn't a multiple of pages of mr->order we
+   * know there must be pages of a different order present.
+   */
   if (mr->order != 0 && (mr->n_pages & (((1 << mr->order) - 1))) != 0)
     mr->order = 0;
+
+  /* Check the rest of the pages, to ensure that they're all the right order,
+   * otherwise just use order 0.
+   */
   if (mr->order != 0) {
     int i;
-    for (i = 0; i < mr->n_pages >> mr->order; i += 1 << mr->order) {
-      if (compound_order(mr->pages[i << mr->order]) != mr->order) {
+    /* Here i indexes pages of size PAGE_SIZE.  We check the order for the first
+     * page in each compound page, incrementing i to skip the tail pages.
+     */
+    for (i = 0; i < mr->n_pages; i += 1 << mr->order) {
+      if (compound_order(mr->pages[i]) != mr->order) {
         mr->order = 0;
         break;
       }
