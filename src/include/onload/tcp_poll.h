@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,7 +29,8 @@
 ci_inline short
 ci_tcp_poll_events_listen(ci_netif *ni, ci_tcp_socket_listen *tls)
 {
-  if( ci_tcp_acceptq_n(tls) || (tls->s.os_sock_status & OO_OS_STATUS_RX) )
+  if( ci_tcp_acceptq_n(tls) || (tls->s.os_sock_status & OO_OS_STATUS_RX) ||
+      tls->s.so_error )
     return  POLLIN | POLLRDNORM;
   return 0;
 }

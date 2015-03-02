@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -481,7 +481,7 @@ enum onload_template_flags {
 };
 
 /* Valid options for flags are: ONLOAD_TEMPLATE_FLAGS_PIO_RETRY */
-extern int onload_msg_template_alloc(int fd, struct iovec* initial_msg, 
+extern int onload_msg_template_alloc(int fd, const struct iovec* initial_msg,
                                      int mlen, onload_template_handle* handle,
                                      unsigned flags);
 
@@ -491,7 +491,7 @@ extern int onload_msg_template_alloc(int fd, struct iovec* initial_msg,
  */
 extern int
 onload_msg_template_update(int fd, onload_template_handle handle,
-                           struct onload_template_msg_update_iovec* updates, 
+                           const struct onload_template_msg_update_iovec*,
                            int ulen, unsigned flags);
 
 extern int onload_msg_template_abort(int fd, onload_template_handle handle);

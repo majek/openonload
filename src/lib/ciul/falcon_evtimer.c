@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,8 +33,8 @@
 
 static void ef_eventq_timer_poke(ef_vi* vi, unsigned v)
 {
-	writel(v, vi->io + FR_BZ_TIMER_COMMAND_REGP0_OFST);
-	mmiowb();
+  writel(v, vi->io + FR_BZ_TIMER_COMMAND_REGP0_OFST);
+  mmiowb();
 }
 
 

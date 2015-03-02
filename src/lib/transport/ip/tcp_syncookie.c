@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -149,9 +149,9 @@ ci_tcp_syncookie_hash(ci_netif* netif, ci_tcp_socket_listen* tls,
   hash_data[11] = (tsr->r_addr & 0xff000000) >> 24;
   hash_data[12] = t << 3 | m;
 
-  ci_assert_equal(sizeof(netif->state->syncookie_salt),
+  ci_assert_equal(sizeof(netif->state->hash_salt),
                   2 * sizeof(ci_uint64));
-  return (ci_uint32)sip_hash((void *)netif->state->syncookie_salt,
+  return (ci_uint32)sip_hash((void *)netif->state->hash_salt,
                              hash_data, sizeof(hash_data));
 }
 
@@ -189,14 +189,14 @@ ci_tcp_syncookie_syn(ci_netif* netif, ci_tcp_socket_listen* tls,
       (ci_tcp_syncookie_hash(netif, tls, tsr, t, m) << 8);
 
   /* disable all TCP options or put the info into timestamp */
-  if( tsr->tcpopts.flags & CI_TCPT_FLAG_TSO ) {
+  if( tsr->tcpopts.flags & NI_OPTS(netif).syn_opts & CI_TCPT_FLAG_TSO ) {
     tsr->tcpopts.flags |= CI_TCPT_FLAG_SYNCOOKIE;
     tsr->timest &= ~0x1ff;
-    if( tsr->tcpopts.flags & CI_TCPT_FLAG_WSCL ) {
+    if( tsr->tcpopts.flags & NI_OPTS(netif).syn_opts & CI_TCPT_FLAG_WSCL ) {
       tsr->timest |= tsr->rcv_wscl;
       tsr->timest |= tsr->tcpopts.wscl_shft << 4;
     }
-    if( tsr->tcpopts.flags & CI_TCPT_FLAG_SACK )
+    if( tsr->tcpopts.flags & NI_OPTS(netif).syn_opts & CI_TCPT_FLAG_SACK )
       tsr->timest |= 1 << 8;
     tsr->tcpopts.flags &= ~CI_TCPT_FLAG_ECN;
 
@@ -257,6 +257,7 @@ ci_tcp_syncookie_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   *tsr_p = tsr;
 
   if( rxp->flags & CI_TCPT_FLAG_TSO ) {
+    tsr->timest = (rxp->timestamp_echo & ~0x1ff);
     if( rxp->timestamp_echo & 0xff ) {
       tsr->tcpopts.flags |= CI_TCPT_FLAG_WSCL;
       tsr->rcv_wscl = rxp->timestamp_echo & 0xf;

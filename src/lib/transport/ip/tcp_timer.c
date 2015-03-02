@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,11 +56,7 @@ static void ci_tcp_timer_dump_consts(ci_netif* netif)
       NI_CONF(netif).tconst_keepalive_intvl, NI_OPTS(netif).keepalive_intvl,
       NI_OPTS(netif).keepalive_probes,
       NI_CONF(netif).tconst_zwin_max, CI_TCP_TCONST_ZWIN_MAX);
-  log("  listen_time: %uticks (%ums)\n"
-      "  listen_synack_retries: %d\n"
-      "  paws_idle: %uticks (%ums)",
-      NI_CONF(netif).tconst_listen_time, CI_TCP_TCONST_LISTEN_TIME,
-      NI_CONF(netif).listen_synack_retries,
+  log("  paws_idle: %uticks (%ums)",
       NI_CONF(netif).tconst_paws_idle, CI_TCP_TCONST_PAWS_IDLE);
   log("  PMTU slow discover: %uticks (%ums)\n"
       "  PMTU fast discover: %uticks (%ums)\n"
@@ -86,8 +82,12 @@ void ci_tcp_timer_init(ci_netif* netif)
 {
   NI_CONF(netif).tconst_rto_initial = 
     ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).rto_initial);
+  /* When converting to ticks we will end up with a rounded down value.  This
+   * would result in an effective lower min, so add an extra tick to ensure
+   * that the minimum value does not fall below that requested.
+   */
   NI_CONF(netif).tconst_rto_min = 
-    ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).rto_min);
+    ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).rto_min) + 1;
   NI_CONF(netif).tconst_rto_max = 
     ci_tcp_time_ms2ticks(netif, NI_OPTS(netif).rto_max);
 
@@ -105,11 +105,6 @@ void ci_tcp_timer_init(ci_netif* netif)
   NI_CONF(netif).tconst_zwin_max = 
     ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_ZWIN_MAX);
 
-  NI_CONF(netif).tconst_listen_time = 
-    ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_LISTEN_TIME);
-  NI_CONF(netif).listen_synack_retries =
-    NI_OPTS(netif).retransmit_threshold_synack;
-  
   NI_CONF(netif).tconst_paws_idle = 
     ci_tcp_time_ms2ticks(netif, CI_TCP_TCONST_PAWS_IDLE);
 
@@ -137,24 +132,13 @@ void ci_tcp_timer_init(ci_netif* netif)
 }
 
 
-ci_inline void
-ci_tcp_synrecv_set_retries_and_timeout(ci_netif* ni,
-                                       ci_tcp_socket_listen* tls,
-                                       ci_tcp_state_synrecv* tsr)
-{
-  if( tsr->retries++ == 0 )
-    --tls->n_listenq_new;
-  tsr->timeout = NI_CONF(ni).tconst_rto_initial << tsr->retries;
-  tsr->timeout = CI_MIN(tsr->timeout, NI_CONF(ni).tconst_rto_max);
-  tsr->timeout += ci_tcp_time_now(ni);
-}
-
-
 /* Called as action on a listen timeout */
 void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 {
   ci_ni_dllist_link* l;
-  int max_retries, i, synrecv_timeout = 0;
+  int max_retries, retries, synrecv_timeout = 0;
+  int out_of_packets = 0;
+  ci_iptime_t next_timeout = ci_tcp_time_now(netif);
 
   ci_assert(netif);
   ci_assert(tls);
@@ -165,75 +149,168 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
   if( tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF )
     max_retries = tls->c.tcp_defer_accept;
   else
-    max_retries = NI_CONF(netif).listen_synack_retries;
+    max_retries = NI_OPTS(netif).retransmit_threshold_synack;
 
   /*
-  ** Trawl listen queue and for each SYNRECV block:
   **  - send any pending SYNACK retranmsits 
-  **  - delete connections which have exceeded X retries
   */
-  for( i = 0; i < CI_CFG_TCP_LISTENQ_BUCKETS; ++i ) {
-  l = ci_ni_dllist_start(netif, &tls->listenq[i]);
-  while ( l != ci_ni_dllist_end(netif, &tls->listenq[i]) ) {
+  for( retries = 0; retries < max_retries; ++retries ) {
+    ci_ni_dllist_t* list = &tls->listenq[retries];
+    ci_ni_dllist_link* last_l = NULL;
 
-    ci_tcp_state_synrecv* tsr = 
-          CI_CONTAINER(ci_tcp_state_synrecv, link, l);
-    /* move to next link as code below can remove this link from the list */
-    ci_ni_dllist_iter(netif, l);
+    for( l = ci_ni_dllist_start(netif, list);
+         l != ci_ni_dllist_end(netif, list);
+         ci_ni_dllist_iter(netif, l) ) {
+      ci_tcp_state_synrecv* tsr =  ci_tcp_link2synrecv(l);
 
-    /* a. There is no need to drop loopback connection in such a way.
-     * b. Do not send loopback packets from the timer code. */
-    if( OO_SP_NOT_NULL(tsr->local_peer) )
-      continue;
+      ci_assert( OO_SP_IS_NULL(tsr->local_peer) );
 
-    if( TIME_LT(tsr->timeout, ci_tcp_time_now(netif)) ) {      
-      if( tsr->retries < max_retries ) {
+      /* The list is time-ordered - break if timeout is ahead */
+      if( TIME_GT(tsr->timeout, ci_tcp_time_now(netif)) ) {
+        if( next_timeout == ci_tcp_time_now(netif) ||
+            TIME_LT(tsr->timeout, next_timeout) )
+          next_timeout = tsr->timeout;
+        break;
+      }
+
+      ci_assert_equal(tsr->retries & CI_FLAG_TSR_RETRIES_MASK, retries);
+      last_l = l;
+
+      /* We have to re-send our SYN-ACK if:
+       * - not acked: let's get an ACK!
+       * - acked, but TCP_DEFER_ACCEPT is off: probably, we've failed to
+       *   promote. Check that the peer is alive and try to promote
+       *   again.
+       */
+      if( (~tsr->retries & CI_FLAG_TSR_RETRIES_ACKED) ||
+          tls->c.tcp_defer_accept == OO_TCP_DEFER_ACCEPT_OFF ) {
         int rc = 0;
-        if( !tsr->acked || tsr->retries == max_retries - 1 )
-          rc = ci_tcp_synrecv_send(netif, tls, tsr, 0,
-                                   CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
-        ci_tcp_synrecv_set_retries_and_timeout(netif, tls, tsr);
+        ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
+
+        if( pkt == NULL )
+          goto out_of_packet;
+        rc = ci_tcp_synrecv_send(netif, tls, tsr, pkt,
+                                 CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
         if( rc == 0 ) {
           CITP_STATS_NETIF(++netif->state->stats.synrecv_retransmits);
-          LOG_TC(log(LPF "SYNRECV retransmited %d SYNACK\n" 
-                     "  next will be sent at %d", tsr->retries, tsr->timeout));
+          LOG_TC(log(LPF "SYNRECV retransmited %d SYNACK%s\n" 
+                     "  next will be sent at %d",
+                     tsr->retries & CI_FLAG_TSR_RETRIES_MASK,
+                     (tsr->retries & CI_FLAG_TSR_RETRIES_ACKED) ?
+                                                        " ACKed" : "",
+                     tsr->timeout));
         }
         else {
           LOG_U(ci_log("%s: no return route exists "CI_IP_PRINTF_FORMAT,
                        __FUNCTION__, CI_IP_PRINTF_ARGS(&tsr->r_addr)));
         }
       }
-      else if( tsr->acked ) {
-        tsr->acked = 0;
-        ci_tcp_synrecv_send(netif, tls, tsr, 0,
+
+      if( retries == 0 )
+        --tls->n_listenq_new;
+      tsr->retries++;
+      ci_assert_equal(tsr->retries & CI_FLAG_TSR_RETRIES_MASK, retries + 1);
+
+      tsr->timeout = NI_CONF(netif).tconst_rto_initial << (retries + 1);
+      tsr->timeout = CI_MIN(tsr->timeout, NI_CONF(netif).tconst_rto_max);
+      tsr->timeout += ci_tcp_time_now(netif);
+    }
+
+    /* Move the beginning of the processed listenq[retries] list
+     * to the end of listenq[retries + 1] list. */
+    if( last_l != NULL ) {
+      ci_ni_dllist_t* next_list = &tls->listenq[retries + 1];
+      ci_ni_dllist_link* start_l = ci_ni_dllist_start(netif, list);
+      ci_ni_dllist_link* link_to_l = ci_ni_dllist_start_last(netif, next_list);
+      ci_ni_dllist_link* unlink_from_l =
+                (ci_ni_dllist_link*) CI_NETIF_PTR(netif, last_l->next);
+
+      /* cut the beginning off the list: */
+      list->l.next = ci_ni_dllist_link_addr(netif, unlink_from_l);
+      unlink_from_l->prev = ci_ni_dllist_link_addr(netif, &list->l);
+
+      /* append the processed part of the old "list"
+       * to the end of the "next_list" */
+      start_l->prev = ci_ni_dllist_link_addr(netif, link_to_l);
+      link_to_l->next = ci_ni_dllist_link_addr(netif, start_l);
+      last_l->next = ci_ni_dllist_link_addr(netif, &next_list->l);
+      next_list->l.prev = ci_ni_dllist_link_addr(netif, last_l);
+    }
+  }
+
+  /*
+  **  - delete connections which have exceeded max_retries
+  */
+  for( retries = max_retries;
+       retries <= CI_CFG_TCP_SYNACK_RETRANS_MAX;
+       ++retries ) {
+    l = ci_ni_dllist_start(netif, &tls->listenq[retries]);
+    while ( l != ci_ni_dllist_end(netif, &tls->listenq[retries]) ) {
+      ci_tcp_state_synrecv* tsr =  ci_tcp_link2synrecv(l);
+
+      /* move to next link as code below can remove this link from the list */
+      ci_ni_dllist_iter(netif, l);
+
+      ci_assert( OO_SP_IS_NULL(tsr->local_peer) );
+
+      /* The list is time-ordered - break if timeout is ahead */
+      if( TIME_GT(tsr->timeout, ci_tcp_time_now(netif)) ) {
+        if( next_timeout == ci_tcp_time_now(netif) ||
+            TIME_LT(tsr->timeout, next_timeout) )
+          next_timeout = tsr->timeout;
+        break;
+      }
+
+      ci_assert_equal(tsr->retries & CI_FLAG_TSR_RETRIES_MASK, retries);
+
+      if( (tsr->retries & CI_FLAG_TSR_RETRIES_ACKED) &&
+          tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) {
+        ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
+        if( pkt == NULL )
+          goto out_of_packet;
+        tsr->retries &= ~CI_FLAG_TSR_RETRIES_ACKED;
+        ci_tcp_synrecv_send(netif, tls, tsr, pkt,
                             CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
       }
       else {
-	ci_tcp_listenq_remove(netif, tls, tsr);
+	ci_tcp_listenq_drop(netif, tls, tsr);
 	ci_tcp_synrecv_free(netif, tsr);
         CITP_STATS_NETIF(++netif->state->stats.synrecv_timeouts);
 
         LOG_TC(log(LPF "SYNRECV retries %d exceeded %d,"
                    " returned to listen",
-                   tsr->retries,
-                   NI_CONF(netif).listen_synack_retries));
+                   tsr->retries & CI_FLAG_TSR_RETRIES_MASK,
+                   NI_OPTS(netif).retransmit_threshold_synack));
 
         ++synrecv_timeout;
       }
     }
   }
-  }
-  
+
+out:
   if( synrecv_timeout )
     NI_LOG(netif, CONN_DROP, "%s: [%d] %d half-open timeouts\n", __func__,
            NI_ID(netif), synrecv_timeout);
 
   /* if still any pending connectings */
-  if( tls->n_listenq > 0 &&
-      (~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) ) {
+  if( next_timeout != ci_tcp_time_now(netif) ) {
+    /* If out-of-packets, we should return here soon to send the synacks
+     * we've failed to send now.  But not too soon - get a chance to
+     * fix the problem as time passes. */
     ci_ip_timer_set(netif, &tls->listenq_tid,
-		  ci_tcp_time_now(netif) + NI_CONF(netif).tconst_listen_time);
+                    out_of_packets ?
+                            ci_tcp_time_now(netif) + 1 : next_timeout);
   }
+  return;
+
+out_of_packet:
+  LOG_TV(ci_log(LNT_FMT"SYNRECV[retries=%d] no buffers, not re-sending synacks "
+                "for %d half-opened connections",
+                LNT_PRI_ARGS(netif, tls), retries,
+                tls->n_listenq - tls->n_listenq_new));
+  CITP_STATS_NETIF_INC(netif, tcp_listen_synack_retrans_no_buffer);
+  out_of_packets = 1;
+  goto out;
 }
 
 
@@ -274,8 +351,8 @@ void ci_tcp_timeout_kalive(ci_netif* netif, ci_tcp_state* ts)
   ci_assert(ci_ip_queue_is_empty(&ts->retrans));
 
   /* TCP loopback does not have ACKs, so we just check the other side. */
-  if( OO_SP_NOT_NULL(ts->s.local_peer) ) {
-    citp_waitable* peer = ID_TO_WAITABLE(netif, ts->s.local_peer);
+  if( OO_SP_NOT_NULL(ts->local_peer) ) {
+    citp_waitable* peer = ID_TO_WAITABLE(netif, ts->local_peer);
     if( ~peer->state & CI_TCP_STATE_TCP_CONN )
       ci_tcp_drop(netif, ts, ETIMEDOUT);
     return;
@@ -337,6 +414,7 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
 	     tcp_snd_wnd(ts), ts->zwin_probes, ts->zwin_acks));
 
   if( CI_UNLIKELY(tcp_snd_wnd(ts) > 0) ) {
+    ci_ip_pkt_fmt* first_pkt = PKT_CHK(netif, ts->send.head);
     /* We consider window < eff_mss to be zero, but it is not always
      * correct.  First, sometimes we have a short packet in the sendq.
      * Let's send it.  Next, we really should split the first packet (by
@@ -347,12 +425,15 @@ void ci_tcp_timeout_zwin(ci_netif* netif, ci_tcp_state* ts)
      * Some IP stacks (Linux) accept such packet.  Others will reject and
      * re-send the correct window, so we'll fix our window back.
      */
-    if( CI_UNLIKELY(tcp_snd_wnd(ts) + (1 << ts->snd_wscl) >=
-                    PKT_TCP_TX_SEQ_SPACE(PKT_CHK(netif, ts->send.head))) ) {
-      /* Really unlikely, but could happen as a result of various race
-       * conditions.
-       * Peer just shifts the window value, meaning "give me 1 mss" but we
-       * read "give me less than 1 mss" because of window scaling. */
+    if( CI_UNLIKELY(tcp_snd_wnd(ts) + ((1 << ts->snd_wscl) - 1) >=
+                    PKT_TCP_TX_SEQ_SPACE(first_pkt)) ) {
+      /* Window scaling might make the window a bit smaller than
+       * mss, when out peer wanted it to be mss exactly.
+       * We improve things by sending this packet
+       * when zwin timer fires.  If the peer disagree, it'll tell
+       * us in his ACK packet. */
+      if( SEQ_GT(first_pkt->pf.tcp_tx.end_seq, ts->snd_max) )
+        ts->snd_max += (1 << ts->snd_wscl) - 1;
       ci_tcp_tx_advance(ts, netif);
       return;
     }
@@ -394,7 +475,7 @@ void ci_tcp_timeout_delack(ci_netif* netif, ci_tcp_state* ts)
   if( pkt ) {
     CI_TCP_EXT_STATS_INC_DELAYED_ACK( netif );
     CITP_STATS_NETIF_INC(netif, acks_sent);
-    ci_tcp_send_ack(netif, ts, pkt);
+    ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
   }
   else {
     LOG_TR(log(LNT_FMT "DELACK now=%x acks_pending=%x NO BUFS (will retry)",

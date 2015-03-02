@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -93,18 +93,12 @@ efrm_vf_get_nic_index(struct efrm_vf *) __attribute__ ((__pure__));
 extern efhw_iommu_domain *
 efrm_vf_get_iommu_domain(struct efrm_vf *) __attribute__ ((__pure__));
 
-extern int
-efrm_vf_alloc_vi_set(struct efrm_vf *vf, int min_vis_in_set,
-		     struct efrm_vi_allocation *set_out);
-extern int
-efrm_vf_free_vi_set(struct efrm_vi_allocation *set);
 
-extern void efrm_vf_vi_set(struct efrm_vi *);
-extern void efrm_vf_vi_set_name(struct efrm_vi *, const char *name);
-extern void efrm_vf_vi_drop(struct efrm_vi *virs);
+extern int
+efrm_vf_vi_alloc(struct efrm_vf *vf, struct efrm_vi_allocation *allocation);
+extern void efrm_vf_vi_start(struct efrm_vi *, const char *name);
+extern void efrm_vf_vi_drop(struct efrm_vi_allocation *allocation);
 
-extern int efrm_vf_eventq_callback_registered(struct efrm_vi *virs);
-extern void efrm_vf_eventq_callback_kill(struct efrm_vi *virs);
 extern int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec);
 extern int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu);
 

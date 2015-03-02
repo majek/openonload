@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -175,7 +175,7 @@ int citp_nonsock_zc_recv_filter(citp_fdinfo* fdi,
 # endif
 }
 
-int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, const struct iovec* initial_msg,
                             int mlen, struct oo_msg_template** omt_pp,
                             unsigned flags)
 {
@@ -186,7 +186,7 @@ int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
 
 int
 citp_nonsock_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
-                         struct onload_template_msg_update_iovec* updates,
+                         const struct onload_template_msg_update_iovec* updates,
                          int ulen, unsigned flags)
 {
   Log_V(log(LPF "tmpl_update(%d)", fdi->fd));
@@ -210,11 +210,15 @@ int citp_nonsock_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
 }
 #endif
 
+int citp_nonsock_is_spinning(citp_fdinfo* fdi)
+{
+  return 0;
+}
 
 #if CI_CFG_RECVMMSG
 int citp_nonsock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
-                          unsigned vlen, int flags, 
-                          const struct timespec *timeout)
+                          unsigned vlen, int flags,
+                          ci_recvmmsg_timespec* timeout)
 {
   errno = ENOTSOCK;
   return -1;
@@ -227,6 +231,14 @@ int citp_nonsock_sendmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
 {
   errno = ENOTSOCK;
   return -1;
+}
+#endif
+
+#if CI_CFG_FD_CACHING
+int citp_nonsock_cache(citp_fdinfo* fdi)
+{
+  Log_V(log(LPF "cache(%d)", fdi->fd));
+  return -EOPNOTSUPP;
 }
 #endif
 

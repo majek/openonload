@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,6 +92,7 @@
 			   oneof:<S1>;..;<Sn>
 			                - enumeration where minimum==S1
 			   yesno        - same as oneof:no;yes
+			   filename     - name of a file
                       
 
    Finally it can contain an arbitrary number of
@@ -147,12 +148,6 @@ CI_CFG_OPT("EF_TX_PUSH", tx_push, ci_uint32,
  * not document this one here.
  */
 CI_CFG_OPT("", accept_inherit_nonblock, ci_uint32,
-           "", 1, , 0, 0, 1, yesno)
-
-/* Takes its value from EF_ACCEPT_INHERIT_NODELAY in opts_citp_def.  Do not
- * document this one here.
- */
-CI_CFG_OPT("", accept_inherit_nodelay, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_POLL_ON_DEMAND", poll_on_demand, ci_uint32,
@@ -363,17 +358,17 @@ CI_CFG_OPT("EF_CLUSTER_IGNORE", cluster_ignore, ci_uint32,
 "effectively ignore attempts to set SO_REUSEPORT.",
            1, , 0, 0, 1, count)
 
+CI_CFG_OPT("EF_VALIDATE_ENV", validate_env, ci_uint32,
+"When set this option validates Onload related environment "
+"variables (starting with EF_).",
+           1, , 1, 0, 1, level)
+
 #if CI_CFG_TAIL_DROP_PROBE
 CI_CFG_OPT("EF_TAIL_DROP_PROBE", tail_drop_probe, ci_uint32,
 /* FIXME: when shoudl one use this? */
 "Whether to probe if the tail of a TCP burst isn't ACKed quickly.",
            , , 1, 0, 1, yesno)
 #endif
-
-CI_CFG_OPT("EF_VALIDATE_ENV", validate_env, ci_uint32,
-"When set this option validates Onload related environment "
-"variables (starting with EF_).",
-           , , 1, 0, 1, level)
 
 /* These EF_*_SPIN options are only here so that the application defaults
  * set by environment variables get exposed through stackdump.  (Because
@@ -416,12 +411,19 @@ CI_CFG_OPT("EF_PIPE_RECV_SPIN", pipe_recv_spin, ci_uint32,
 
 CI_CFG_OPT("EF_PIPE_SEND_SPIN", pipe_send_spin, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_PIPE_SIZE", pipe_size, ci_uint32,
+           "", , , OO_PIPE_DEFAULT_SIZE, OO_PIPE_MIN_SIZE,
+           CI_CFG_MAX_PIPE_SIZE, count)
 #endif
 
 CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
+           "", 1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_RST_DELAYED_CONN", rst_delayed_conn, ci_uint32,
@@ -440,11 +442,32 @@ CI_CFG_OPT("EF_TCP_SNDBUF_MODE", tcp_sndbuf_mode, ci_uint32,
            "sockets.  In the default mode the limit applies only to the send "
            "queue.  When this option is set to 1, the limit applies to the "
            "size of the send queue and retransmit queue combined.",
-           1, , 0, 0, 1, yesno)
+           1, , 1, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_SYNCOOKIES", tcp_syncookies, ci_uint32,
 "Use TCP syncookies to protect from SYN flood attack",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_SEND_NONBLOCK_NO_PACKETS_MODE", 
+           tcp_nonblock_no_pkts_mode, ci_uint32,
+           "This option controls how a non-blocking TCP send() call should "
+           "behave if it is unable to allocate sufficient packet buffers.  By "
+           "default Onload will mimic Linux kernel stack behaviour and block "
+           "for packet buffers to be available.  If set to 1, this option will "
+           "cause Onload to return error ENOBUFS.  Note this option can cause "
+           "some applications (that assume that a socket that is writeable is "
+           "able to send without error) to malfunction.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_RCVBUF_STRICT", tcp_rcvbuf_strict, ci_uint32,
+"This option prevents TCP small segment attack.  With this option set, "
+"Onload limits the number of packets inside TCP receive queue and "
+"TCP reorder buffer.  In some cases, this option causes performance "
+"penalty.  You probably want this option if your application is "
+"connecting to unrtusted partner or over untrusted network.\n"
+"Off by default.",
+           1, , 0, 0, 1, yesno)
+
 /**********************************************************************
  * Narrow fields (few bits).
  */
@@ -531,7 +554,12 @@ CI_CFG_OPT("EF_TCP_CLIENT_LOOPBACK", tcp_client_loopback, ci_uint32,
 "  4  -  accelerate and move both connecting and accepted  sockets to the "
 "new stack (server should allow this via EF_TCP_SERVER_LOOPBACK=2).\n"
 "\n"
-"NOTE: Option 3 breaks some usecases with epoll, fork and dup calls.\n",
+"NOTES:\nOptions 3 and 4 break some applications using epoll, fork and "
+"dup calls.\n"
+"Options 2 and 4 makes accept() to misbehave if the client exist "
+"too early.\n"
+"Option 4 is not recommended on 32-bit systems because it can create "
+"a lot of additional Onload stacks eating a lot of low memory.",
            3, , CITP_TCP_LOOPBACK_OFF, 0, CITP_TCP_LOOPBACK_TO_NEWSTACK,
            oneof:no;samestack;toconn;tolist;nonew)
 
@@ -553,6 +581,14 @@ CI_CFG_OPT("EF_USE_HUGE_PAGES", huge_pages, ci_uint32,
 "free huge pages.",
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
+
+CI_CFG_OPT("EF_COMPOUND_PAGES_MODE", compound_pages, ci_uint32,
+"Debug option, not suitable for normal use.\n"
+"For packet buffers, allocate system pages in the following way:\n"
+"  0 - try to use compound pages if possible (default);\n"
+"  1 - do not use compound pages of high order;\n"
+"  2 - do not use compound pages at all.\n",
+          2, , 0, 0, 2, oneof:always;small;never)
 
 #if CI_CFG_PIO
 CI_CFG_OPT("EF_PIO", pio, ci_uint32,
@@ -603,7 +639,9 @@ CI_CFG_OPT("EF_TCP_TCONST_MSL", msl_seconds, ci_uint32,
            8, , CI_CFG_TCP_TCONST_MSL, MIN, MAX, time:sec)
 
 CI_CFG_OPT("EF_TCP_FIN_TIMEOUT", fin_timeout, ci_uint32,
-"Time in seconds to wait for a FIN in the TCP FIN_WAIT2 state.",
+"Time in seconds to wait for an orphaned connection to be closed properly "
+"by the network partner (e.g. FIN in the TCP FIN_WAIT2 state; zero window "
+"opening to send our FIN, etc).",
            8, , CI_CFG_TCP_FIN_TIMEOUT, MIN, MAX, time:sec /*?*/)
 
 CI_CFG_OPT("EF_TCP_RX_LOG_FLAGS", tcp_rx_log_flags, ci_uint32,
@@ -633,12 +671,13 @@ CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD_SYN", retransmit_threshold_syn, ci_int32,
            8,  retransmit_threshold, CI_TCP_RETRANSMIT_THRESHOLD_SYN,
            0, SMAX, count)
 
+#define CI_TCP_LISTEN_SYNACK_RETRIES 5   /* send 5 synacks by default */
 CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD_SYNACK", retransmit_threshold_synack,
            ci_int32,
 "Number of times a SYN-ACK will be retransmitted before an embryonic "
 "connection will be aborted.",
            8,  retransmit_threshold_synack, CI_TCP_LISTEN_SYNACK_RETRIES, 0,
-           SMAX, count)
+           CI_CFG_TCP_SYNACK_RETRANS_MAX, count)
 
 /*****************************************************************/
 
@@ -765,11 +804,18 @@ CI_CFG_OPT("EF_DYNAMIC_ACK_THRESH", dynack_thresh, ci_uint16,
 #endif
 
 #if CI_CFG_FD_CACHING
-CI_CFG_OPT("EF_EPCACHE_MAX", epcache_max, ci_uint16,
-"Sets the maximum number of TCP sockets to cache.  When set >0, OpenOnload "
-"will cache resources associated with sockets in order to improve "
-"connection set-up and tear-down performance.  This improves performance for "
-"applications that make new TCP connections at a high rate.",
+CI_CFG_OPT("EF_SOCKET_CACHE_MAX", sock_cache_max, ci_uint32,
+"Sets the maximum number of TCP sockets to cache for this stack.  When "
+"set > 0, OpenOnload will cache resources associated with sockets in order "
+"to improve connection set-up and tear-down performance.  This improves "
+"performance for applications that make new TCP connections at a high rate.",
+           , , 0, MIN, MAX, count)
+
+CI_CFG_OPT("EF_PER_SOCKET_CACHE_MAX", per_sock_cache_max, ci_uint32,
+"When socket caching is enabled, (i.e. when EF_SOCKET_CACHE_MAX > 0), this "
+"sets a further limit on the size of the cache for each socket. If set to "
+"zero, no limit is set beyond the global limit specified by "
+"EF_SOCKET_CACHE_MAX.",
            , , 0, MIN, MAX, count)
 #endif
 
@@ -914,12 +960,12 @@ CI_CFG_OPT("EF_RXQ_MIN", rxq_min, ci_uint16,
 "creation of the stack will fail.",
            , , 256, 2 * CI_CFG_RX_DESC_BATCH + 1, MAX, count)
 
-CI_CFG_OPT("EF_MIN_FREE_PACKETS", min_free_packets, ci_uint16,
+CI_CFG_OPT("EF_MIN_FREE_PACKETS", min_free_packets, ci_int32,
 "Minimum number of free packets to reserve for each stack at initialisation.  "
 "If Onload is not able to allocate sufficient packet buffers to fill the "
 "RX rings and fill the free pool with the given number of buffers, then "
 "creation of the stack will fail.",
-           , , 100, MIN, MAX, count)
+           , , 100, 0, 1000000000, count)
 
 CI_CFG_OPT("EF_PREFAULT_PACKETS", prefault_packets, ci_int32,
 "When set, this option causes the process to 'touch' the specified number of "
@@ -937,11 +983,11 @@ CI_CFG_OPT("EF_PREFAULT_PACKETS", prefault_packets, ci_int32,
 "reserved.  Set to 0 to prevent prefaulting.",
            , , 1, 0, 1000000000, count)
 
-/* Max is currently 32k EPs */
+/* Max is currently 2^21 EPs */
 CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs, ci_uint32,
 "This option places an upper limit on the number of accelerated endpoints "
 "(sockets, pipes etc.) in an Onload stack.  This option should be set to a "
-"power of two between 1 and 32,768."
+"power of two between 1 and 2^21."
 "\n"
 "When this limit is reached listening sockets are not able to accept new "
 "connections over accelerated interfaces.  New sockets and pipes created via "
@@ -951,6 +997,32 @@ CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs, ci_uint32,
 "Note: Multiple endpoint buffers are consumed by each accelerated pipe.",
            , , CI_CFG_NETIF_MAX_ENDPOINTS, 0, CI_CFG_NETIF_MAX_ENDPOINTS_MAX,
            count)
+
+CI_CFG_OPT("EF_TCP_SNDBUF_ESTABLISHED_DEFAULT", tcp_sndbuf_est_def, ci_uint32,
+"Default value for SO_SNDBUF for TCP sockets in the ESTABLISHED state. "
+"This value is used when the TCP connection transitions to ESTABLISHED "
+"state, to avoid confusion of some applications like netperf.\n"
+"If the OS default SO_SNDBUF value is less then this, then this "
+"value is used. "
+"If the OS default SO_SNDBUF value is more that 4 * this, then "
+"4 * this value is used.\n"
+"This variable overrides OS default SO_SNDBUF value only, it does not "
+"change SO_SNDBUF if the application explicitly sets it "
+"(see EF_TCP_SNDBUF variable which overrides application-supplied value).",
+           ,  , 128 * 1024, MIN, MAX, bincount)
+
+CI_CFG_OPT("EF_TCP_RCVBUF_ESTABLISHED_DEFAULT", tcp_rcvbuf_est_def, ci_uint32,
+"Default value for SO_RCVBUF for TCP sockets in the ESTABLISHED state.  "
+"This value is used when the TCP connection transitions to ESTABLISHED "
+"state, to avoid confusion of some applications like netperf.\n"
+"If the OS default SO_RCVBUF value is less then this, then this "
+"value is used. "
+"If the OS default SO_RCVBUF value is more that 4 * this, then "
+"4 * this value is used.\n"
+"This variable overrides OS default SO_RCVBUF value only, it does not "
+"change SO_RCVBUF if the application explicitly sets it "
+"(see EF_TCP_RCVBUF variable which overrides application-supplied value).",
+           ,  , 128 * 1024, MIN, MAX, bincount)
 
 CI_CFG_OPT("", tcp_sndbuf_min, ci_uint32,
 "Minimum value for SO_SNDBUF for TCP sockets.  Set via O/S interface.",
@@ -1156,14 +1228,22 @@ CI_CFG_OPT("EF_TX_PUSH_THRESHOLD", tx_push_thresh, ci_uint16,
 "hardware. It makes sense to set this value similar to EF_SEND_POLL_THRESH",
            , , 100, 1, MAX, count)
 
-#define CI_EF_LOG_DEFAULT ((1 << EF_LOG_BANNER) | (1 << EF_LOG_RESOURCE_WARNINGS))
+#ifdef ONLOAD_OFE
+CI_CFG_OPT("EF_OFE_ENGINE_SIZE", ofe_size, ci_uint32,
+"Size (in bytes) of Onload Filter Engine to be allocated "
+"when a new stack is created.",
+           , , 0, 0, MAX, bincount)
+#endif
+
+#define CI_EF_LOG_DEFAULT ((1 << EF_LOG_BANNER) | (1 << EF_LOG_RESOURCE_WARNINGS) | (1 << EF_LOG_CONFIG_WARNINGS))
 CI_CFG_OPT("EF_LOG", log_category, ci_uint32,
 "Designed to control how chatty Onload's informative/warning messages are.  "
 "Specified as a comma seperated list of options to enable and disable "
 "(with a minus sign).  Valid options are 'banner' (on by default), "
-"'resource_warnings' (on by default), and 'conn_drop' (off by default).  "
-"E.g.: To enable conn_drop: EF_LOG=conn_drop.  E.g.: To enable conn_drop and "
-"turn off resource warnings: EF_LOG=conn_drop,-resource_warnings",
+"'resource_warnings' (on by default), 'config_warnings' (on by default) and "
+"'conn_drop' (off by default).  E.g.: To enable conn_drop: EF_LOG=conn_drop.  "
+"E.g.: To enable conn_drop and turn off resource warnings: EF_LOG=conn_drop,"
+"-resource_warnings",
            , , CI_EF_LOG_DEFAULT, 0, MAX, count)
 
 

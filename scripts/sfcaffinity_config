@@ -19,7 +19,6 @@ usage_str = "%prog [options] <command> [args...]\n\n"
 usage_str += "commands:\n"
 usage_str += "  show [ethx]\n"
 usage_str += "  auto [ethx]...\n"
-usage_str += "  set [ethx] [rxq2cpu <cpu-list>] [cpu2rxq <rxq-list>]\n"
 usage_str += "  check [ethx]\n"
 usage_str += "  help [topic]\n"
 
@@ -34,13 +33,6 @@ help_auto = Template("""\
 $me auto [ethx]
 
 Configure sfc_affinity automatically
-
-""")
-
-help_set = Template("""\
-$me set [ethx] [rxq2cpu <cpu-list>] [cpu2rxq <rxq-list>]
-
-Configure sfc_affinity manually
 
 """)
 
@@ -693,10 +685,6 @@ def interface_auto(ethx, topology, interrupt_topology):
     return ret
 
 
-def interface_set(ethx, args):
-    pass
-
-
 def interface_check(ethx):
     ok = True
     if ethx.n_rxqs() == 0:
@@ -826,15 +814,6 @@ def cmd_auto(args):
             sfc_affinity_new_interface(ethx, b.core_to_q)
         if len(nrxq2b) > 1:
             warn("Not all interfaces have the same number of receive channels")
-
-
-def cmd_set(args):
-    fail("set: Not yet implemented.  My apologies.")
-    args, interfaces = choose_interfaces(args)
-    if not args:
-        usage("set: Missing parameters to set")
-    for ethx in interfaces:
-        interface_set(ethx, args)
 
 
 def cmd_check(args):

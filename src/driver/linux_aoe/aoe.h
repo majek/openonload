@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,7 +59,7 @@
 	printk(KERN_ERR "%s-(%d): " fmt, __func__, ECHECK(entry), ## args)
 #endif
 
-#define AOE_DRIVER_VERSION	"4.1.2.1003"
+#define AOE_DRIVER_VERSION	"4.4.1.1017"
 
 /* Number of Connections that are allowed to be over the 10G
  * inteface */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,10 @@
 
 #include "ip_internal.h"
 #include <ci/internal/cplane_ops.h>
+
+#ifndef __KERNEL__
+#include <ci/internal/efabcfg.h>
+#endif
 
 # include <netinet/udp.h>
 
@@ -127,11 +131,15 @@ static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
 
   rc = ci_tcp_ep_mcast_add_del(ni, S_SP(us), ifindex, maddr, add);
   if( rc != 0 ) {
-    /* NB. We ignore the error because the kernel stack will handle it. */
     LOG_E(log(FNS_FMT "%s ifindex=%d maddr="CI_IP_PRINTF_FORMAT" failed "
-              "(%d,%d)", FNS_PRI_ARGS(ni, &us->s), add ? "ADD" : "DROP",
-              (int) ifindex, CI_IP_PRINTF_ARGS(&maddr), rc, errno));
-    return 0;
+              "%d", FNS_PRI_ARGS(ni, &us->s), add ? "ADD" : "DROP",
+              (int) ifindex, CI_IP_PRINTF_ARGS(&maddr), rc));
+    if( CITP_OPTS.no_fail )
+      return 0;
+    else {
+      /* The caller is responsible for rolling back the OS socket state */
+      RET_WITH_ERRNO(-rc);
+    }
   }
 
   LOG_UC(log(FNS_FMT "ci_tcp_ep_mcast_add_del(%s, %d, "CI_IP_PRINTF_FORMAT")",
@@ -385,8 +393,13 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       }
       else
         RET_WITH_ERRNO(EFAULT);
-      if( rc )
+      if( rc ) {
+        if( optname == IP_ADD_MEMBERSHIP ) {
+          ci_sys_setsockopt(os_sock, SOL_IP, IP_DROP_MEMBERSHIP,
+                            optval, optlen);
+        }
         return rc;
+      }
       break;
     }
 
@@ -411,8 +424,13 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       }
       else
         RET_WITH_ERRNO(EFAULT);
-      if( rc )
+      if( rc ) {
+        if( optname == IP_ADD_SOURCE_MEMBERSHIP ) {
+          ci_sys_setsockopt(os_sock, SOL_IP, IP_DROP_SOURCE_MEMBERSHIP,
+                            optval, optlen);
+        }
         return rc;
+      }
       break;
     }
 #endif
@@ -430,8 +448,13 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       rc = ci_mcast_join_leave(netif, us, greq->gr_interface, 0,
                 CI_SIN(&greq->gr_group)->sin_addr.s_addr,
                 optname == MCAST_JOIN_GROUP);
-      if( rc )
+      if( rc ) {
+        if( optname == MCAST_JOIN_GROUP ) {
+          ci_sys_setsockopt(os_sock, SOL_IP, MCAST_LEAVE_GROUP,
+                            optval, optlen);
+        }
         return rc;
+      }
       break;
     }
 #endif
@@ -457,8 +480,13 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       rc = ci_mcast_join_leave(netif, us, gsreq->gsr_interface, 0,
                 CI_SIN(&gsreq->gsr_group)->sin_addr.s_addr,
                 optname == MCAST_JOIN_SOURCE_GROUP);
-      if( rc )
+      if( rc ) {
+        if( optname == MCAST_JOIN_SOURCE_GROUP ) {
+          ci_sys_setsockopt(os_sock, SOL_IP, MCAST_LEAVE_SOURCE_GROUP,
+                            optval, optlen);
+        }
         return rc;
+      }
       break;
     }
 #endif
@@ -555,19 +583,12 @@ int ci_udp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
   os_sock = ci_get_os_sock_fd(ep, fd);
   ci_assert(CI_IS_VALID_SOCKET(os_sock));
   rc = __set_socket_opt(ep, os_sock, level, optname, optval, optlen);
-  if( rc == CI_SOCKET_ERROR ) {
-    /* We support reuseport where the OS doesn't, so set a flag to say that's
-     * what we're doing, and hide the error.
-     */
-    if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) &&
-        errno == ENOPROTOOPT ) {
-      ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
-      rc = 0;
-    }
-    else {
-      goto out;
-    }
+  if( rc == CI_SOCKET_ERROR &&
+      ! ci_setsockopt_os_fail_ignore(ep->netif, ep->s, errno, level,
+                                     optname, optval, optlen) ) {
+    goto out;
   }
+  rc = 0;
 
   if( level == SOL_SOCKET ) {
     rc = ci_set_sol_socket_nolock(ep->netif, ep->s, optname, optval, optlen);

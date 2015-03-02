@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -116,8 +116,12 @@ static int ci_bonding_do_sysfs_read(struct ci_bonding_sysfs_read* state,
     rc = state->f->f_op->read(state->f, (__user char *)data, count,
                               &state->f->f_pos);
     /* See linux/drivers/net/bonding/bond_sysfs.c:
-     * if it can't get rtnl_lock, it exits with -ERESTARTNOINTR.
-     * I've never seen -ERESTARTSYS, but let's add it here. */
+     * if it can't get rtnl_lock, it exits with -ERESTARTNOINTR
+     * and sets TIF_SIGPENDING flag which we do not need. */
+    if( rc == -ERESTARTNOINTR )
+      clear_tsk_thread_flag(current, TIF_SIGPENDING);
+
+    /* I've never seen -ERESTARTSYS, but let's add it here. */
   } while( rc == -ERESTARTNOINTR || rc == -ERESTARTSYS );
   return rc;
 }
@@ -509,36 +513,6 @@ static int ci_bonding_get_slaves(char *bond_name, ci_dllist *slaves)
   kfree(filename);
 
   return rc;
-}
-
-
-void ci_bonding_get_xmit_policy_flags(void *arg, unsigned char *flags)
-{
-  struct net_device *net_dev = (struct net_device *)arg;
-  int hash_policy = CICP_BOND_XMIT_POLICY_NONE;
-  int mode;
-
-  if( ci_bonding_get_mode(net_dev->name, &mode) != 0 )
-    return;
-
-  if( mode == CICP_BOND_MODE_ACTIVE_BACKUP ||
-      mode == CICP_BOND_MODE_802_3AD ) {
-    if( mode == CICP_BOND_MODE_802_3AD )
-      if( ci_bonding_get_hash_policy(net_dev->name, &hash_policy) != 0 )
-        return;
-    
-    if( hash_policy == CICP_BOND_XMIT_POLICY_NONE )
-      (*flags) &=~ CICP_LLAP_TYPE_USES_HASH;
-    else
-      (*flags) |= CICP_LLAP_TYPE_USES_HASH;
-
-    if( hash_policy == CICP_BOND_XMIT_POLICY_LAYER34 )
-      (*flags) |= CICP_LLAP_TYPE_XMIT_HASH_LAYER4;
-    else
-      (*flags) &=~ CICP_LLAP_TYPE_XMIT_HASH_LAYER4;
-  }
-
-  return;
 }
 
 
@@ -1218,11 +1192,32 @@ static void ci_bonding_process_master(struct ci_bonding_ifname *master)
 }
 
 
+static atomic_t timer_running;
+static struct delayed_work bonding_workitem;
+
+static int timer_period;
+static int timer_occurences;
+
+extern int oo_bond_poll_base;
+
+static int ci_bonding_get_timer_period(void)
+{
+  if( timer_occurences > 0 ) {
+    if( (--timer_occurences) == 0 )
+      timer_period = oo_bond_poll_base;
+  }
+  return timer_period;
+}
+
+
 static void ci_bonding_workitem_fn(struct work_struct *data)
 {
   ci_dllist masters;
   struct ci_bonding_ifname* master;
   int rc;
+
+  if( atomic_read(&timer_running) == 0 )
+    return;
 
   ci_dllist_init(&masters);
   
@@ -1243,40 +1238,10 @@ static void ci_bonding_workitem_fn(struct work_struct *data)
     kfree(master);
   }
 
+  queue_delayed_work(CI_GLOBAL_WORKQUEUE, &bonding_workitem,
+                     ci_bonding_get_timer_period());
+
   return;
-}
-
-
-atomic_t timer_running;
-static struct timer_list bonding_timer;
-struct work_struct bonding_workitem;
-
-static int timer_period;
-static int timer_occurences;
-static unsigned long last_timer_jiffies;
-
-extern int oo_bond_poll_base;
-
-static int ci_bonding_get_timer_period(void)
-{
-  if( timer_occurences > 0 ) {
-    if( (--timer_occurences) == 0 )
-      timer_period = oo_bond_poll_base;
-  }
-  return timer_period;
-}
-
-
-static void ci_bonding_timer_fn(unsigned long l)
-{
-  if( atomic_read(&timer_running) == 0 )
-    return;
-
-  last_timer_jiffies = jiffies;
-
-  queue_work(CI_GLOBAL_WORKQUEUE, &bonding_workitem);
-
-  mod_timer(&bonding_timer, jiffies + ci_bonding_get_timer_period());
 }
 
 #endif /* CI_CFG_TEAMING */
@@ -1289,7 +1254,7 @@ void ci_bonding_set_timer_period(int period, int occurences)
   timer_occurences = occurences;
  
   if( atomic_read(&timer_running) )
-    mod_timer(&bonding_timer, last_timer_jiffies + period);
+    queue_delayed_work(CI_GLOBAL_WORKQUEUE, &bonding_workitem, period);
 #endif
 }
 
@@ -1297,13 +1262,8 @@ void ci_bonding_set_timer_period(int period, int occurences)
 int ci_bonding_init(void)
 {
 #if CI_CFG_TEAMING
-  INIT_WORK(&bonding_workitem, ci_bonding_workitem_fn);
-
-  init_timer(&bonding_timer);
-  bonding_timer.function = &ci_bonding_timer_fn;
-  bonding_timer.data = 0;
+  INIT_DELAYED_WORK(&bonding_workitem, ci_bonding_workitem_fn);
   atomic_set(&timer_running, 1);
-  last_timer_jiffies = jiffies;
   ci_bonding_set_timer_period(oo_bond_poll_base, 0);
 #endif
   return 0;
@@ -1314,10 +1274,15 @@ void ci_bonding_fini(void)
 {
 #if CI_CFG_TEAMING
   atomic_set(&timer_running, 0);
-  /* See Bug30934 for why two flushes are needed */
+#ifdef EFX_USE_CANCEL_DELAYED_WORK_SYNC
+  cancel_delayed_work_sync(&bonding_workitem);
+#else
+  cancel_delayed_work(&bonding_workitem);
+  /* Wait for the last update to finish */
   flush_workqueue(CI_GLOBAL_WORKQUEUE);
-  del_timer_sync(&bonding_timer);
-  flush_workqueue(CI_GLOBAL_WORKQUEUE);
+  /* Cancel again for the case we've rescheduled */
+  cancel_delayed_work(&bonding_workitem);
+#endif
 #endif
   return;
 }

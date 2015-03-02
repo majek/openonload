@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -26,17 +26,17 @@
 
 #include <onload/driveraccess.h>
 
-/* Onload open functions:
- * oo_fd_open - function to be used in tests and tool. It just opens the
- *              onload device
- * oo_open - internal function, should not be used
- * ef_onload_driver_open - function to be used in the preloaded library.
+extern const char* oo_device_name[];
+
+/* ef_onload_driver_open - function to be used in the preloaded library.
  *                         It correctly handles open() replacement and
  *                         chroot.
  */
 
-/*! Obtain a driver handle. */
-extern int ef_onload_driver_open(ef_driver_handle* nic_out, int cloexec) CI_HF;
+/*! Obtain a driver handle, with CLOEXEC. */
+extern int ef_onload_driver_open(ef_driver_handle* nic_out,
+                                 enum oo_device_type dev_type,
+                                 int do_cloexec) CI_HF;
 
 /*! Close a driver handle. */
 ci_inline int
@@ -46,7 +46,13 @@ ef_onload_driver_close(ef_driver_handle nic)
 }
 
 /*! Open and save a driver handle for later cloning. */
-extern int ef_driver_save_fd(void) CI_HF;
+extern void ef_driver_save_fd(void) CI_HF;
+
+/*! Get the cached value of "struct stat . st_rdev"  */
+extern unsigned long oo_get_st_rdev(enum oo_device_type dev_type);
+
+/* Get onloadfs dev_t value. */
+extern dev_t oo_onloadfs_dev_t(void);
 
 #endif /* __ONLOAD_UL_H__ */
 /*! \cidoxg_end */

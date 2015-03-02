@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -78,7 +78,7 @@ efrm_bt_manager_realloc(struct efhw_nic *nic,
 extern void
 efrm_bt_manager_free(struct efhw_nic *nic, struct efrm_bt_manager *manager,
 		     struct efrm_buffer_table_allocation *a);
-extern void
+extern int
 efrm_bt_nic_set(struct efhw_nic *nic, struct efrm_buffer_table_allocation *a,
 		dma_addr_t *dma_addrs);
 

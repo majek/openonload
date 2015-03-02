@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2013 Solarflare Communications Inc.
+ * Copyright 2005-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -58,7 +58,7 @@
  * less than 128 are fairly useless; values larger than EFX_PAGE_SIZE
  * or PAGE_SIZE would be harder to support.
  */
-#define TX_CB_ORDER_MIN	7
+#define TX_CB_ORDER_MIN	4
 #define TX_CB_ORDER_MAX	min(12, PAGE_SHIFT)
 #define TX_CB_ORDER_DEF	7
 static unsigned int tx_cb_order __read_mostly = TX_CB_ORDER_DEF;
@@ -79,6 +79,12 @@ tx_copybreak_set(const char *val, struct kernel_param *kp)
 	if (rc)
 		return rc;
 
+	/* If disabled, copy buffers are still needed for VLAN tag insertion */
+	if (!tx_cb_size) {
+		tx_cb_order = TX_CB_ORDER_MIN;
+		return 0;
+	}
+
 	tx_cb_order = order_base_2(tx_cb_size + NET_IP_ALIGN);
 	if (tx_cb_order < TX_CB_ORDER_MIN)
 		tx_cb_order = TX_CB_ORDER_MIN;
@@ -98,7 +104,7 @@ module_param_call(tx_copybreak, tx_copybreak_set, param_get_uint,
 		  &tx_cb_size, 0444);
 #endif
 MODULE_PARM_DESC(tx_copybreak,
-		 "Maximum size of packet that may be copied to a new buffer on transmit (uint)");
+		 "Maximum size of packet that may be copied to a new buffer on transmit, minimum is 16 bytes or 0 to disable (uint)");
 #endif /* EFX_NOT_UPSTREAM && !__VMKLNX__ */
 
 #ifdef EFX_USE_PIO
@@ -286,15 +292,6 @@ unsigned int efx_tx_max_skb_descs(struct efx_nic *efx)
 	return max_descs;
 }
 
-/* Get partner of a TX queue, seen as part of the same net core queue */
-static struct efx_tx_queue *efx_tx_queue_partner(struct efx_tx_queue *tx_queue)
-{
-	if (tx_queue->queue & EFX_TXQ_TYPE_OFFLOAD)
-		return tx_queue - EFX_TXQ_TYPE_OFFLOAD;
-	else
-		return tx_queue + EFX_TXQ_TYPE_OFFLOAD;
-}
-
 static void efx_tx_maybe_stop_queue(struct efx_tx_queue *txq1)
 {
 	/* We need to consider both queues that the net core sees as one */
@@ -374,17 +371,18 @@ struct efx_short_copy_buffer {
 };
 
 /* Copy in explicit 64-bit writes. */
-static void efx_memcpy_64(void *dest, void *src, size_t len)
+static void efx_memcpy_64(void __iomem *dest, void *src, size_t len)
 {
-	uint64_t *src64 = src, *dest64 = dest;
-	size_t i, l64 = len / 8;
+	u64 *src64 = src;
+	u64 __iomem *dest64 = dest;
+	size_t l64 = len / 8;
+	size_t i;
 
 	WARN_ON_ONCE(len % 8 != 0);
 	WARN_ON_ONCE(((u8 *)dest - (u8 *) 0) % 8 != 0);
-	BUILD_BUG_ON(sizeof(uint64_t) != 8);
 
-	for(i = 0; i < l64; ++i)
-		dest64[i] = src64[i];
+	for(i = 0; i < l64; i++)
+		writeq(src64[i], &dest64[i]);
 }
 
 /* Copy to PIO, respecting that writes to PIO buffers must be dword aligned.
@@ -551,7 +549,7 @@ static inline bool efx_nic_tx_is_empty(struct efx_tx_queue *tx_queue)
 }
 #endif /* EFX_USE_PIO */
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_XPS)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
 /* Whether to do XPS in the SFC driver, for use when kernel XPS is not enabled
  * or not configured
  */
@@ -588,6 +586,13 @@ MODULE_PARM_DESC(sarfs_sample_rate,
 	"Frequency which SARFS samples packets. "
 	"0 = disable, N = sample every N packets.");
 
+/* Use destination only filters. This is the local IP and Port from the point
+ * of view of the NIC */
+static bool sarfs_dest_only = false;
+module_param(sarfs_dest_only, bool, 0444);
+MODULE_PARM_DESC(sarfs_dest_only,
+	"Only insert SARFS filters that match on the destination IP and PORT");
+
 static bool efx_sarfs_keys_eq(struct efx_sarfs_key *a,
 				 struct efx_sarfs_key *b)
 {
@@ -618,7 +623,7 @@ int efx_sarfs_init(struct efx_nic *efx)
 				   "enabled but could not be activated because "
 				   "TX and RX channels are separate\n");
 		} else if (!xps_available) {
-			netif_info(efx, drv, efx->net_dev, "notice: SARFS is"
+			netif_info(efx, drv, efx->net_dev, "notice: SARFS is "
 				   "enabled but could not be activated because "
 				   "XPS is not available\n");
 		} else {
@@ -661,9 +666,12 @@ static int efx_sarfs_filter_insert(struct efx_nic *efx,
 	efx_filter_init_rx(&spec, EFX_FILTER_PRI_SARFS,
 			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
 			   rxq_id);
-	spec.match_flags = EFX_FILTER_MATCH_FLAGS_RFS;
+
 	spec.ether_type = htons(ETH_P_IP);
 	spec.ip_proto = IPPROTO_TCP;
+	spec.match_flags = sarfs_dest_only ?
+		EFX_FILTER_MATCH_FLAGS_RFS_DEST_ONLY :
+		EFX_FILTER_MATCH_FLAGS_RFS;
 	spec.rem_host[0] = key->raddr;
 	spec.loc_host[0] = key->laddr;
 	spec.rem_port = key->rport;
@@ -732,10 +740,14 @@ static void efx_sarfs_insert(struct efx_nic *efx,
 	}
 }
 
-static u32 efx_sarfs_hash(struct efx_sarfs_key *key)
+static u32 efx_sarfs_hash(struct efx_sarfs_key *key, bool partial)
 {
-	return (__force u32)ip_fast_csum(&key->laddr, 2) ^
-	       (__force u32)(key->lport ^ key->rport);
+	u32 part = (__force u32)ntohs(key->lport);
+
+	if (!partial)
+		part = (__force u32)(part ^ ntohs(key->rport));
+
+	return (__force u32)(ip_fast_csum(&key->laddr, 2) ^ part);
 }
 
 inline bool efx_sarfs_entry_in_holdoff(struct efx_sarfs_entry *entry)
@@ -748,7 +760,7 @@ static void efx_sarfs(struct efx_nic *efx,
 		      struct efx_tx_queue *txq,
 		      struct efx_sarfs_key *key)
 {
-	u32 index = efx_sarfs_hash(key) % sarfs_table_size;
+	u32 index = efx_sarfs_hash(key, sarfs_dest_only) % sarfs_table_size;
 	struct efx_sarfs_entry *entry = &efx->sarfs_state.conns[index];
 	int rxq_id = efx_rx_queue_index(efx_channel_get_rx_queue(txq->channel));
 	bool keys_eq = efx_sarfs_keys_eq(&entry->key, key);
@@ -774,8 +786,10 @@ static void efx_sarfs(struct efx_nic *efx,
 		if (jiffies - efx->sarfs_state.last_modified >=
 				msecs_to_jiffies(sarfs_global_holdoff_ms)) {
 			keys_eq = efx_sarfs_keys_eq(&entry->key, key);
-			if (EFX_SARFS_ENTRY_NEEDS_UPDATE)
+			if (EFX_SARFS_ENTRY_NEEDS_UPDATE) {
 				efx_sarfs_insert(efx,  entry, rxq_id, key);
+				++txq->sarfs_update;
+			}
 		}
 
 		spin_unlock_bh(&efx->sarfs_state.lock);
@@ -799,15 +813,15 @@ static void _efx_sarfs_skb(struct efx_nic *efx,
 			msecs_to_jiffies(sarfs_global_holdoff_ms))
 		return;
 
+
 	if (skb->protocol == htons(ETH_P_IP)) {
 		struct iphdr *iphdr = ip_hdr(skb);
 
 		if (iphdr->protocol == IPPROTO_TCP) {
 			struct tcphdr *tcphdr = tcp_hdr(skb);
+			if ((++txq->sarfs_sample_count == sarfs_sample_rate) ||
+				(tcphdr->syn)) {
 
-			if (tcphdr->syn ||
-			    (++txq->sarfs_sample_count ==
-					sarfs_sample_rate)) {
 				struct efx_sarfs_key key = {
 					.laddr = iphdr->saddr,
 					.raddr = iphdr->daddr,
@@ -815,8 +829,8 @@ static void _efx_sarfs_skb(struct efx_nic *efx,
 					.rport = tcphdr->dest
 				};
 
-				txq->sarfs_sample_count = 0;
 				efx_sarfs(efx, txq, &key);
+				txq->sarfs_sample_count = 0;
 			}
 		}
 	}
@@ -834,7 +848,7 @@ inline void efx_sarfs_skb(struct efx_nic *efx,
 }
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_XPS)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
 /* query smp_processor_id to try to match the skb to the TX queue the user
  * space process is running on.
  */
@@ -847,7 +861,7 @@ static int get_xps_queue(struct net_device *dev, struct sk_buff *skb)
 
 	if (sxps_enabled) {
 		struct efx_nic *efx = netdev_priv(dev);
-	        int cpu = smp_processor_id();
+		int cpu = smp_processor_id();
 
 		EFX_BUG_ON_PARANOID(cpu < 0);
 		EFX_BUG_ON_PARANOID(cpu >= num_possible_cpus());
@@ -858,7 +872,7 @@ static int get_xps_queue(struct net_device *dev, struct sk_buff *skb)
 	return -1;
 }
 
-u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb)
+static u16 efx_select_queue_int(struct net_device *dev, struct sk_buff *skb)
 {
 	int queue_index = -1;
 	/* counterintuitively, always allow out of order TCP, since this is
@@ -893,6 +907,31 @@ u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb)
 
 	return queue_index;
 }
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SELECT_QUEUE_FALLBACK)
+u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
+		     void *accel_priv __always_unused,
+		     select_queue_fallback_t fallback)
+{
+	if (!sxps_enabled)
+		return fallback(dev, skb);
+	return efx_select_queue_int(dev, skb);
+}
+#else
+#if defined(EFX_HAVE_NDO_SELECT_QUEUE_ACCEL_PRIV)
+u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
+		     void *accel_priv __always_unused)
+#else
+u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb)
+#endif
+{
+#if defined(EFX_HAVE_NETDEV_PICK_TX)
+	if (!sxps_enabled)
+		return __netdev_pick_tx(dev, skb);
+#endif
+	return efx_select_queue_int(dev, skb);
+}
+#endif
 #endif
 
 /*
@@ -925,11 +964,16 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 
 	EFX_BUG_ON_PARANOID(tx_queue->write_count != tx_queue->insert_count);
 
-	if (skb_shinfo(skb)->gso_size)
+	/* The use of likely() macros in this function are a hint to
+	 * the compiler to try and co-locate conditional blocks close to
+	 * the corresponding test towards the goal of reducing the
+	 * icache miss rate.
+	 */
+	if (likely(skb_shinfo(skb)->gso_size))
 		return efx_enqueue_skb_tso(tx_queue, skb);
 
 	/* Pad if necessary */
-	if (EFX_WORKAROUND_15592(efx) && skb->len <= 32) {
+	if (likely(EFX_WORKAROUND_15592(efx) && skb->len <= 32)) {
 		buffer = efx_enqueue_skb_copy(tx_queue, skb, 32 + 1);
 		if (unlikely(!buffer))
 			goto err;
@@ -959,11 +1003,11 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 		++tx_queue->insert_count;
 
 		/* Must copy header.  Try to minimise number of fragments. */
-		if (skb->len <= tx_cb_size - VLAN_HLEN && skb->data_len) {
+		if (skb->len + VLAN_HLEN <= tx_cb_size && skb->data_len) {
 			efx_skb_copy_insert_tag(skb, copy_buffer, skb->len);
 			buffer->len = skb->len + VLAN_HLEN;
 			goto finish_packet;
-		} else if (skb_headlen(skb) <= tx_cb_size - VLAN_HLEN) {
+		} else if (skb_headlen(skb) + VLAN_HLEN <= tx_cb_size) {
 			efx_skb_copy_insert_tag(skb, copy_buffer,
 						skb_headlen(skb));
 			buffer->len = skb_headlen(skb) + VLAN_HLEN;
@@ -978,7 +1022,7 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 				 & (L1_CACHE_BYTES - 1));
 			unsigned int copy_len;
 
-			if (align_len <= tx_cb_size - VLAN_HLEN)
+			if (align_len + VLAN_HLEN <= tx_cb_size)
 				copy_len = align_len;
 			else
 				copy_len = ETH_HLEN;
@@ -998,17 +1042,17 @@ begin_packet:
 
 	/* Consider using PIO for short packets */
 #ifdef EFX_USE_PIO
-	if (skb->len <= efx_piobuf_size && tx_queue->piobuf &&
-	    efx_nic_tx_is_empty(tx_queue) &&
-	    efx_nic_tx_is_empty(efx_tx_queue_partner(tx_queue))) {
+	if (likely((skb->len <= efx_piobuf_size && tx_queue->piobuf &&
+		    efx_nic_tx_is_empty(tx_queue) &&
+		    efx_nic_tx_is_empty(efx_tx_queue_partner(tx_queue))))) {
 		buffer = efx_enqueue_skb_pio(tx_queue, skb);
 		dma_flags = EFX_TX_BUF_OPTION;
 		goto finish_packet;
 	}
 #endif
 	/* Coalesce short fragmented packets */
-	if (skb->data_len && skb->len <= tx_cb_size &&
-	    !(NET_IP_ALIGN && EFX_WORKAROUND_5391(efx))) {
+	    if (likely(skb->data_len && skb->len <= tx_cb_size &&
+		       !(NET_IP_ALIGN && EFX_WORKAROUND_5391(efx)))) {
 		buffer = efx_enqueue_skb_copy(tx_queue, skb, 0);
 		if (unlikely(!buffer))
 			goto err;
@@ -1225,9 +1269,6 @@ void fastcall efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index)
 void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index)
 #endif
 {
-	unsigned fill_level;
-	struct efx_nic *efx = tx_queue->efx;
-	struct efx_tx_queue *txq2;
 	unsigned int pkts_compl = 0, bytes_compl = 0;
 
 	EFX_BUG_ON_PARANOID(index > tx_queue->ptr_mask);
@@ -1237,22 +1278,6 @@ void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index)
 
 	if (pkts_compl > 1)
 		++tx_queue->merge_events;
-
-	/* See if we need to restart the netif queue.  This memory
-	 * barrier ensures that we write read_count (inside
-	 * efx_dequeue_buffers()) before reading the queue status.
-	 */
-	smp_mb();
-	if (likely(tx_queue->core_txq) &&
-	    unlikely(netif_tx_queue_stopped(tx_queue->core_txq)) &&
-	    likely(efx->port_enabled) &&
-	    likely(netif_device_present(efx->net_dev))) {
-		txq2 = efx_tx_queue_partner(tx_queue);
-		fill_level = max(tx_queue->insert_count - tx_queue->read_count,
-				 txq2->insert_count - txq2->read_count);
-		if (fill_level <= efx->txq_wake_thresh)
-			netif_tx_wake_queue(tx_queue->core_txq);
-	}
 
 	/* Check whether the hardware queue is now empty */
 	if ((int)(tx_queue->read_count - tx_queue->old_write_count) >= 0) {

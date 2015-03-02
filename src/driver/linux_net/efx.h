@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2013 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -29,8 +29,41 @@
 #include "net_driver.h"
 #include "filter.h"
 
-/* All controllers use BAR 0 for I/O space and BAR 2(&3) for memory */
+/* All PFs use BAR 0 for I/O space and BAR 2(&3) for memory */
+/* All VFs use BAR 0/1 for memory */
 #define EFX_MEM_BAR 2
+#define EFX_MEM_VF_BAR 0
+
+/* netdevice_ops */
+int efx_ioctl(struct net_device *net_dev, struct ifreq *ifr, int cmd);
+#ifdef CONFIG_NET_POLL_CONTROLLER
+void efx_netpoll(struct net_device *net_dev);
+#endif
+int efx_net_open(struct net_device *net_dev);
+int efx_net_stop(struct net_device *net_dev);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_STATS64)
+struct rtnl_link_stats64 *efx_net_stats(struct net_device *net_dev,
+					struct rtnl_link_stats64 *stats);
+#else
+struct net_device_stats *efx_net_stats(struct net_device *net_dev);
+#endif
+void efx_watchdog(struct net_device *net_dev);
+int efx_change_mtu(struct net_device *net_dev, int new_mtu);
+int efx_set_mac_address(struct net_device *net_dev, void *data);
+void efx_set_rx_mode(struct net_device *net_dev);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
+netdev_features_t efx_fix_features(struct net_device *net_dev,
+				   netdev_features_t data);
+#endif
+int efx_set_features(struct net_device *net_dev, netdev_features_t data);
+#endif
+#ifdef CONFIG_NET_RX_BUSY_POLL
+int efx_busy_poll(struct napi_struct *napi);
+#endif
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+void efx_vlan_rx_register(struct net_device *dev, struct vlan_group *vlan_group);
+#endif
 
 /* TX */
 int efx_probe_tx_queue(struct efx_tx_queue *tx_queue);
@@ -40,8 +73,16 @@ void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue);
 void efx_fini_tx_queue(struct efx_tx_queue *tx_queue);
 netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 				struct net_device *net_dev);
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_XPS)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SELECT_QUEUE_FALLBACK)
+u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
+		     void *accel_priv, select_queue_fallback_t fallback);
+#elif defined(EFX_HAVE_NDO_SELECT_QUEUE_ACCEL_PRIV)
+u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
+		     void *accel_priv);
+#else
 u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb);
+#endif
 #endif
 netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
@@ -51,8 +92,10 @@ void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
 #endif
 unsigned int efx_tx_max_skb_descs(struct efx_nic *efx);
 extern unsigned int efx_piobuf_size;
+extern bool separate_tx_channels;
 
 /* RX */
+void efx_set_default_rx_indir_table(struct efx_nic *efx);
 void efx_rx_config_page_split(struct efx_nic *efx);
 int efx_probe_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_remove_rx_queue(struct efx_rx_queue *rx_queue);
@@ -76,7 +119,8 @@ static inline void efx_rx_flush_packet(struct efx_channel *channel)
 void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue);
 
 #define EFX_MAX_DMAQ_SIZE 4096UL
-#define EFX_DEFAULT_DMAQ_SIZE 1024UL
+#define EFX_DEFAULT_RX_DMAQ_SIZE 1024UL
+#define EFX_DEFAULT_TX_DMAQ_SIZE 1024UL
 #define EFX_MIN_DMAQ_SIZE 512UL
 
 #define EFX_MAX_EVQ_SIZE 16384UL
@@ -89,7 +133,7 @@ void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue);
  * is a bit arbitrary.  For TX, we must have space for at least 2
  * TSO skbs.
  */
-#define EFX_RXQ_MIN_ENT		128U
+#define EFX_RXQ_MIN_ENT		16U
 #define EFX_TXQ_MIN_ENT(efx)	(2 * efx_tx_max_skb_descs(efx))
 
 #define EFX_TXQ_MAX_ENT(efx)	(EFX_WORKAROUND_35388(efx) ? \
@@ -145,6 +189,8 @@ void efx_sarfs_fini(struct efx_nic *efx);
 
 /* Filters */
 
+void efx_mac_reconfigure(struct efx_nic *efx);
+
 /**
  * efx_filter_insert_filter - add or replace a filter
  * @efx: NIC in which to insert the filter
@@ -171,7 +217,7 @@ void efx_sarfs_fini(struct efx_nic *efx);
  * all be inserted with the same priority and @replace_equal = %false.
  */
 static inline s32 efx_filter_insert_filter(struct efx_nic *efx,
-					   struct efx_filter_spec *spec,
+					   const struct efx_filter_spec *spec,
 					   bool replace_equal)
 {
 	return efx->type->filter_insert(efx, spec, replace_equal);
@@ -316,7 +362,7 @@ int efx_init_irq_moderation(struct efx_nic *efx, unsigned int tx_usecs,
 			    bool rx_may_override_tx);
 void efx_get_irq_moderation(struct efx_nic *efx, unsigned int *tx_usecs,
 			    unsigned int *rx_usecs, bool *rx_adaptive);
-extern unsigned int efx_target_num_vis;
+extern int efx_target_num_vis;
 
 void efx_stop_eventq(struct efx_channel *channel);
 void efx_start_eventq(struct efx_channel *channel);
@@ -326,6 +372,7 @@ int efx_void_dummy_op_int(void);
 void efx_void_dummy_op_void(void);
 int efx_port_dummy_op_int(struct efx_nic *efx);
 void efx_port_dummy_op_void(struct efx_nic *efx);
+bool efx_port_dummy_op_poll(struct efx_nic *efx);
 
 /* Update the generic software stats in the passed stats array */
 void efx_update_sw_stats(struct efx_nic *efx, u64 *stats);
@@ -345,6 +392,13 @@ void efx_mtd_remove(struct efx_nic *efx);
 static inline int efx_mtd_probe(struct efx_nic *efx) { return 0; }
 static inline void efx_mtd_rename(struct efx_nic *efx) {}
 static inline void efx_mtd_remove(struct efx_nic *efx) {}
+#endif
+
+#ifdef CONFIG_SFC_SRIOV
+static inline unsigned int efx_vf_size(struct efx_nic *efx)
+{
+	return 1 << efx->vi_scale;
+}
 #endif
 
 static inline void efx_schedule_channel(struct efx_channel *channel)

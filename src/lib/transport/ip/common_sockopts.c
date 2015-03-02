@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -663,6 +663,17 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     u = !!(s->s_flags & CI_SOCK_FLAG_REUSEPORT);
     goto u_out;
 
+  case ONLOAD_SO_BUSY_POLL:
+  {
+    unsigned val = oo_cycles64_to_usec(netif, s->b.spin_cycles);
+
+    if( val > INT_MAX )
+      u = INT_MAX;
+    else
+      u = val;
+    goto u_out;
+  }
+
   default: /* Unexpected & known invalid options end up here */
     goto fail_noopt;
   }
@@ -1071,6 +1082,8 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
     if( s->b.state & CI_TCP_STATE_TCP ) {
       v = CI_MIN(v, (int) NI_OPTS(netif).tcp_rcvbuf_max);
       s->so.rcvbuf = CI_MAX(oo_adjust_SO_XBUF(v), (int) NI_OPTS(netif).tcp_rcvbuf_min);
+      if( ~s->b.state & CI_TCP_STATE_NOT_CONNECTED )
+        ci_tcp_set_rcvbuf(netif, SOCK_TO_TCP(s));
     }
     else {
       v = CI_MIN(v, (int) NI_OPTS(netif).udp_rcvbuf_max);
@@ -1152,6 +1165,21 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       s->s_flags &= ~CI_SOCK_FLAG_REUSEPORT;
     break;
 
+  case ONLOAD_SO_BUSY_POLL:
+  {
+    int val;
+    if( (rc = opt_not_ok(optval, optlen, unsigned)) )
+      goto fail_inval;
+    val = *(int*) optval;
+
+    if( val < 0 )
+      goto fail_inval;
+
+    s->b.spin_cycles = oo_usec_to_cycles64(netif,
+                                           val == INT_MAX ? -1 : val);
+    break;
+  }
+
   case ONLOAD_SO_TIMESTAMPING:
     if( (rc = opt_not_ok(optval, optlen, unsigned)) )
       goto fail_inval;
@@ -1169,7 +1197,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       int intf_i;
       int some_good = 0;
 
-      for( intf_i = 1; intf_i < oo_stack_intf_max(netif); ++intf_i ) {
+      OO_STACK_FOR_EACH_INTF_I(netif, intf_i) {
         if( netif->state->nic[intf_i].oo_vi_flags &
             OO_VI_FLAGS_TX_HW_TS_EN )
           some_good = 1;
@@ -1189,7 +1217,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
       int intf_i;
       int some_good = 0;
 
-      for( intf_i = 1; intf_i < oo_stack_intf_max(netif); ++intf_i ) {
+      OO_STACK_FOR_EACH_INTF_I(netif, intf_i) {
         if( netif->state->nic[intf_i].oo_vi_flags &
             OO_VI_FLAGS_RX_HW_TS_EN )
           some_good = 1;
@@ -1208,6 +1236,9 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
 
     rc = 0;
     s->timestamping_flags = v;
+    if ( (s->b.state & CI_TCP_STATE_TCP) &&
+         (~s->b.state & CI_TCP_STATE_NOT_CONNECTED) )
+      ci_tcp_set_sndbuf(netif, SOCK_TO_TCP(s));
 
     /* cmsg_flags is used for RX path only.  Set a flags in it: */
     if( v & (ONLOAD_SOF_TIMESTAMPING_RX_HARDWARE |
@@ -1252,6 +1283,31 @@ int ci_opt_is_setting_reuseport(int level, int optname, const void* optval,
   return 0;
 }
 
+int ci_setsockopt_os_fail_ignore(ci_netif* ni, ci_sock_cmn* s, int err,
+                                 int level, int optname,
+                                 const void* optval, socklen_t optlen)
+{
+  if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) ) {
+    if( err == ENOPROTOOPT ) {
+      /* We support reuseport where the OS doesn't, so set a flag to say
+       * that's what we're doing, and hide the error.
+       */
+      s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
+      return 1;
+    }
+    else
+      return 0;
+  }
+  else if( level == SOL_SOCKET && optname == ONLOAD_SO_BUSY_POLL &&
+           optlen >= sizeof(int) ) 
+    return 1;
+  else if( (s->b.state & CI_TCP_STATE_TCP) && level == SOL_SOCKET &&
+           ( optname == SO_TIMESTAMP || optname == SO_TIMESTAMPNS ||
+             optname == ONLOAD_SO_TIMESTAMPING ) &&
+           optlen >= sizeof(int) )
+    return 1;
+  return 0;
+}
 
 int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
 			     const void* optval, socklen_t optlen)

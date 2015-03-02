@@ -25,8 +25,7 @@ SUBDIRS              := lib tools tests
 endif
 
 ifeq ($(LINUX),1)
-# We need to go into linux_net early to generate the autocompat header
-DRIVER_SUBDIRS	     := driver/linux_net lib driver
+DRIVER_SUBDIRS	     := lib driver
 OTHER_DRIVER_SUBDIRS := tests
 endif
 
@@ -51,6 +50,14 @@ clean:    special_top_clean
 else
 
 all:
+ifeq ($(LINUX),1)
+ifneq ($(GNU),1)
+	# Build both autocompat.h files: linux_net and linux_affinity.
+	$(MAKE) -C driver/linux_net
+	$(MAKE) -C driver/linux_affinity \
+		$(BUILDPATH)/driver/linux_affinity/autocompat.h
+endif
+endif
 	+@$(MakeSubdirs)
 
 clean:

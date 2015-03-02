@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,5 +31,17 @@ typedef struct {
 #define fdi_to_pipe_fdi(_fdi) CI_CONTAINER(citp_pipe_fdi, fdinfo, (_fdi))
 
 extern int citp_pipe_create(int fds[2], int flags);
+
+extern int citp_splice_pipe_pipe(citp_pipe_fdi* in_pipe_fdi,
+                                 citp_pipe_fdi* out_pipe_fdi, size_t rlen,
+                                 int flags);
+extern int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd,
+                                  loff_t* alien_off,
+                                  size_t len, int flags,
+                                  citp_lib_context_t* lib_context);
+extern int citp_pipe_splice_read(citp_fdinfo* fdi, int alien_fd,
+                                 loff_t* alien_off,
+                                 size_t len, int flags,
+                                 citp_lib_context_t* lib_context);
 
 #endif  /* ul_pipe.h */

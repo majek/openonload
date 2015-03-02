@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
 
 #include <internal.h>
 #include <ci/internal/transport_config_opt.h>
+#include <ci/internal/efabcfg.h>
 #include <ci/tools/sllist.h>
 #include <onload/dup2_lock.h>
 
@@ -96,12 +97,17 @@ static void citp_netif_pre_fork_hook(void)
     return;
 
   citp_enter_lib(&citp_lib_context_across_fork);
-  CITP_LOCK(&citp_ul_lock);
+
+  CITP_FDTABLE_LOCK();
   oo_rwlock_lock_write(&citp_dup2_lock);
   pthread_mutex_lock(&citp_pkt_map_lock);
 
   if( citp.init_level < CITP_INIT_NETIF )
     return;
+
+#if CI_CFG_FD_CACHING
+  citp_netif_cache_warn_on_fork();
+#endif
 
   stackname_state = oo_stackname_thread_get();
   memcpy(&stackname_config_across_fork, stackname_state, 
@@ -140,7 +146,7 @@ static void citp_netif_parent_fork_hook(void)
     __citp_netif_mark_all_dont_use();
 
 unlock:
-  CITP_UNLOCK(&citp_ul_lock);
+  CITP_FDTABLE_UNLOCK();
   citp_exit_lib(&citp_lib_context_across_fork, 0);
 unlock_fork:
   pthread_mutex_unlock(&citp_dup_lock);
@@ -173,7 +179,7 @@ static void citp_netif_child_fork_hook(void)
    * So, we just follow this book recommendation.
    */
   pthread_mutex_init(&citp_dup_lock, NULL);
-  CITP_LOCK_CTOR(&citp_ul_lock);
+  oo_rwlock_ctor(&citp_ul_lock);
   oo_rwlock_ctor(&citp_dup2_lock);
   pthread_mutex_init(&citp_pkt_map_lock, NULL);
 
@@ -181,7 +187,7 @@ static void citp_netif_child_fork_hook(void)
     return;
 
   pthread_mutex_lock(&citp_dup_lock);
-  CITP_LOCK(&citp_ul_lock);
+  CITP_FDTABLE_LOCK();
 
   if( citp.init_level < CITP_INIT_NETIF)
     goto setup_fdtable;
@@ -203,13 +209,10 @@ static void citp_netif_child_fork_hook(void)
     __citp_netif_mark_all_dont_use();
 
 setup_fdtable:
-  /*
-  ** Ditch fds marked as cached endpoints. We only want them to remain
-  ** cached in the parent table.
-  */
-  citp_fdtable_close_cached();
+  /* Allow the fdtable to make itself safe across the fork(). */
+  citp_fdtable_fork_hook();
 
-  CITP_UNLOCK(&citp_ul_lock);
+  CITP_FDTABLE_UNLOCK();
   citp_exit_lib(&citp_lib_context_across_fork, 0);
   pthread_mutex_unlock(&citp_dup_lock);
 }
@@ -231,7 +234,7 @@ void citp_netif_parent_vfork_hook(void)
 /* Handles user-level netif internals pre bproc_move() */
 void citp_netif_pre_bproc_move_hook(void)
 {
-  CITP_LOCK(&citp_ul_lock);
+  CITP_FDTABLE_LOCK();
 
   /* Remove any user-level destruct protection from the active netifs,
    * also remove the reference given to each netif if netif
@@ -241,7 +244,7 @@ void citp_netif_pre_bproc_move_hook(void)
    */
   __citp_netif_unprotect_all();
   
-  CITP_UNLOCK(&citp_ul_lock);
+  CITP_FDTABLE_UNLOCK();
 }
 
 
@@ -270,23 +273,27 @@ static int __citp_netif_move_fd(ef_driver_handle* fd)
 }
 
 
-static ci_uint32 onloadfs_dev_t = 0;
-dev_t citp_onloadfs_dev_t(void)
+/* Checks that the stack config is sane, given the process config.
+ *
+ * Stack only config should already be checked in ci_netif_sanity_checks()
+ * on stack creation.
+ */
+static void ci_netif_check_process_config(ci_netif* ni)
 {
-  if( onloadfs_dev_t == 0 ) {
-    int fd;
-    if( fdtable_strict() )  { CITP_FDTABLE_ASSERT_LOCKED(1); }
-    if( ef_onload_driver_open(&fd, 1) != 0 ) {
-      Log_E(log("%s: Failed to open /dev/onload", __FUNCTION__));
-      return 0;
+#if CI_CFG_FD_CACHING
+  if( ni->state->opts.sock_cache_max > 0 ) {
+    if( citp_fdtable_not_mt_safe() ) {
+      NI_LOG(ni, CONFIG_WARNINGS, "Socket caching is not supported when "
+                                  "EF_FDS_MT_SAFE=0, and has been disabled");
+      citp_netif_cache_disable();
     }
-    if( ci_sys_ioctl(fd, OO_IOC_GET_ONLOADFS_DEV, &onloadfs_dev_t) != 0 ) {
-      Log_E(log("%s: Failed to find onloadfs dev_t", __FUNCTION__));
-    }
-    ci_sys_close(fd);
+    else if( CITP_OPTS.ul_epoll != 3 )
+      NI_LOG(ni, CONFIG_WARNINGS, "Sockets that are added to an epoll set can "
+                                  "only be cached if EF_UL_EPOLL=3");
   }
-  return onloadfs_dev_t;
+#endif
 }
+
 
 /* Platform specific code, called after netif construction */
 void  citp_netif_ctor_hook(ci_netif* ni, int realloc)
@@ -310,10 +317,7 @@ void  citp_netif_ctor_hook(ci_netif* ni, int realloc)
   /* Make sure the trampoline is registered. */
   CI_DEBUG_TRY(citp_init_trampoline(ci_netif_get_driver_handle(ni)));
 
-  /* Init onloadfs_dev_t if necessary */
-  if( onloadfs_dev_t == 0 )
-    ci_sys_ioctl(ci_netif_get_driver_handle(ni), OO_IOC_GET_ONLOADFS_DEV,
-                 &onloadfs_dev_t);
+  ci_netif_check_process_config(ni);
 }
 
 

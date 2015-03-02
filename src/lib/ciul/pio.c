@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,7 +29,6 @@
 #include "ef_vi_internal.h"
 #include "driver_access.h"
 #include "logging.h"
-#include "efch_intf_ver.h"
 
 
 #ifdef __x86_64__
@@ -48,7 +47,7 @@ int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
   }
 
   memset(&ra, 0, sizeof(ra));
-  strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));
+  ef_vi_set_intf_ver(ra.intf_ver, sizeof(ra.intf_ver));
   ra.ra_type = EFRM_RESOURCE_PIO;
   ra.u.pio.in_pd_fd = pd_dh;
   ra.u.pio.in_pd_id = efch_make_resource_id(pd->pd_resource_id);
@@ -95,7 +94,8 @@ int ef_pio_link_vi(ef_pio* pio, ef_driver_handle pio_dh, ef_vi* vi,
   }
 
   if( pio->pio_io == NULL ) {
-    rc = ci_resource_mmap(vi_dh, vi->vi_resource_id, 2, 4096, &p);
+    rc = ci_resource_mmap(vi_dh, vi->vi_resource_id, EFCH_VI_MMAP_PIO,
+                          4096, &p);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: ci_resource_mmap (pio) %d", __FUNCTION__, rc));
       return rc;

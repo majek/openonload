@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,7 @@
 
 #include <ci/driver/internal.h>
 #include <onload/linux_sock_ops.h>
+#include <onload/linux_onload.h>
 
 
 /**************************************************************************** 

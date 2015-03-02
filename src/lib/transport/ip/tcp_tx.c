@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -60,7 +60,8 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
   do {
     pkt = PKT_CHK(ni, pp);
     pp = pkt->next;
-    if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+    if( (ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE) &&
+        CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     __ci_netif_dmaq_insert_prep_pkt(ni, pkt);
@@ -80,14 +81,14 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
       (ni->state->nic[tail_pkt->intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN) ) {
     if( tail_pkt->pay_len <= NI_OPTS(ni).pio_thresh ) {
       if( (offset = ci_pio_buddy_alloc(ni, buddy, order)) >= 0 ) {
-        ci_netif_pkt_to_pio(ni, tail_pkt, offset);
         if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
           __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, tail_pkt);
           ci_pio_buddy_free(ni, &ni->state->nic[tail_pkt->intf_i].pio_buddy,
                             offset, order);
           return;
         }
-        rc = ef_vi_transmit_pio(vi, offset, tail_pkt->pay_len, OO_PKT_ID(pkt));
+        rc = ef_vi_transmit_copy_pio(vi, offset, PKT_START(tail_pkt),
+                                     tail_pkt->buf_len, OO_PKT_ID(pkt));
         if( rc == 0 ) {
           CITP_STATS_NETIF_INC(ni, pio_pkts);
           ci_assert(tail_pkt->pio_addr == -1);
@@ -138,7 +139,8 @@ static void ci_ip_tcp_list_to_dmaq_striping(ci_netif* ni, ci_tcp_state* ts,
   n = 0;
   do {
     pkt = PKT_CHK(ni, pp);
-    if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+    if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE &&
+        CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     pp = pkt->next;
@@ -199,13 +201,14 @@ static void ci_ip_send_tcp_list_loopback(ci_netif* ni, ci_tcp_state* ts,
     pkt = PKT_CHK(ni, pp);
     pp = pkt->next;
     pkt->pf.tcp_tx.lo.tx_sock = S_SP(ts);
-    pkt->pf.tcp_tx.lo.rx_sock = ts->s.local_peer;
+    pkt->pf.tcp_tx.lo.rx_sock = ts->local_peer;
     if( CI_UNLIKELY(OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock)) ) {
       ci_netif_pkt_release(ni, pkt);
       continue;
     }
     pkt->next = ni->state->looppkts;
     ni->state->looppkts = OO_PKT_ID(pkt);
+    ni->state->n_looppkts++;
     LOG_NT(ci_log(NS_FMT "loopback TX pkt %d to %d", NS_PRI_ARGS(ni, &ts->s),
                   OO_PKT_FMT(pkt), OO_SP_FMT(pkt->pf.tcp_tx.lo.rx_sock)));
   } while( pkt != tail_pkt );
@@ -218,7 +221,7 @@ static void ci_ip_send_tcp_list_loopback(ci_netif* ni, ci_tcp_state* ts,
     /* Normally, the packet contains ACK and window size.
      * Loopback in-packet ACK value is ignored - deliver it now! */
     if( SEQ_LE(ts->ack_trigger, ts->rcv_delivered) )
-      ci_tcp_send_ack_loopback(ni, ts);
+      ci_tcp_send_ack_loopback(ni, ts, CI_FALSE);
     if( !ni->state->in_poll )
       ci_netif_poll(ni);
   }
@@ -252,7 +255,8 @@ fast:
       pkt = PKT_CHK(ni, head_id);
       head_id = pkt->next;
 
-      if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+      if( (ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE) &&
+          CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
         pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
 
       ci_ip_send_tcp_slow(ni, ts, pkt);
@@ -269,8 +273,7 @@ fast:
  */
 void ci_tcp_init_rcv_wnd(ci_tcp_state* ts, const char* caller)
 {
-  tcp_rcv_wnd_right_edge_sent(ts) = tcp_rcv_nxt(ts) +
-    CI_MIN(tcp_rcv_buff(ts), CI_CFG_TCP_MAX_WINDOW << ts->rcv_wscl);
+  tcp_rcv_wnd_right_edge_sent(ts) = tcp_rcv_nxt(ts) + ts->rcv_window_max;
   ci_tcp_calc_rcv_wnd(ts, caller);
 }
 
@@ -751,18 +754,11 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
              "rcv=%08x-%08x", LNT_PRI_ARGS(netif, tls),
              CI_TCP_FLAGS_PRI_ARG(tcp_flags),
              tsr->snd_isn, tsr->rcv_nxt,
-             tsr->rcv_nxt + CI_MIN(tcp_rcv_buff(tls), CI_CFG_TCP_MAX_WINDOW)));
+             tsr->rcv_nxt +
+             ci_tcp_rcvbuf2window(tls->s.so.rcvbuf, tsr->amss,
+                                  tsr->rcv_wscl)));
 
-  if( ! pkt ) {
-    pkt = ci_netif_pkt_alloc(netif);
-    if( ! pkt ) {
-      LOG_U(log(LNT_FMT "SYNRECV ["CI_TCP_FLAGS_FMT"] no buffers"
-                ", not sending synack", LNT_PRI_ARGS(netif, tls),
-                CI_TCP_FLAGS_PRI_ARG(tcp_flags)));
-      CITP_STATS_NETIF(++netif->state->stats.synrecv_send_fails);
-      return 0;  /* not route problem, so return 0 */
-    }
-  }
+  ci_assert(pkt);
 
   /* hdrs for SYN-ACK */
   oo_tx_pkt_layout_init(pkt);
@@ -784,8 +780,6 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
   thdr->tcp_seq_be32    = CI_BSWAP_BE32(seq);
   thdr->tcp_ack_be32    = CI_BSWAP_BE32(tsr->rcv_nxt);
   thdr->tcp_flags       = tcp_flags;
-  thdr->tcp_window_be16 = CI_MIN(tcp_rcv_buff(tls), CI_CFG_TCP_MAX_WINDOW);
-  thdr->tcp_window_be16 = CI_BSWAP_BE16(thdr->tcp_window_be16);
 
   /* options */
   opt = CI_TCP_HDR_OPTS(thdr);
@@ -804,7 +798,7 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
   if( ipcache == NULL ) {
     ipcache = &ipcache_storage;
     ci_ip_send_pkt_lookup(netif, &tls->s.cp, pkt, ipcache);
-    if( tsr->retries > 0 )
+    if( (tsr->retries & CI_FLAG_TSR_RETRIES_MASK) > 0 )
       cicp_ip_cache_mac_update(netif, ipcache, 0);
   }
 
@@ -812,30 +806,31 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
       (ipcache->status == retrrc_success ||
        ipcache->status == retrrc_nomac ||
        OO_SP_NOT_NULL(tsr->local_peer)) ) {
-    int amss = CI_MIN(tls->s.so.rcvbuf,
-                      ipcache->mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr));
+    tsr->amss = ipcache->mtu - sizeof(ci_tcp_hdr) - sizeof(ci_ip4_hdr);
 #if CI_CFG_LIMIT_AMSS
-    amss = ci_tcp_limit_mss(amss, netif, __FUNCTION__);
+    tsr->amss = ci_tcp_limit_mss(tsr->amss, netif, __FUNCTION__);
 #endif
-    optlen += ci_tcp_tx_insert_syn_options(netif, amss, tsr->tcpopts.flags,
+    optlen += ci_tcp_tx_insert_syn_options(netif, tsr->amss,
+                                           tsr->tcpopts.flags,
                                            tsr->rcv_wscl, &opt);
   }
   /* NB. If [ipcache->status] has some other value, then packet won't be
    * sent in any case.
    */
 
-  ci_tcp_ip_hdr_init(iphdr, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
-  CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
+  thdr->tcp_window_be16 = ci_tcp_rcvbuf2window(tls->s.so.rcvbuf,
+                                               tsr->amss, tsr->rcv_wscl);
+  thdr->tcp_window_be16 = CI_BSWAP_BE16(thdr->tcp_window_be16);
 
   iphdr->ip_check_be16 = 0;
-  thdr->tcp_check_be16 = 0;
+  iphdr->ip_id_be16 = 0;
+  ci_tcp_ip_hdr_init(iphdr, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
+  CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
 
   pkt->buf_len = pkt->pay_len =
     oo_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen;
 
   if( OO_SP_NOT_NULL(tsr->local_peer) ) {
-    pkt->pf.tcp_tx.lo.tx_sock = tls->s.local_peer;
-    pkt->pf.tcp_tx.lo.rx_sock = tsr->local_peer;
     ci_ip_local_send(netif, pkt, &tls->s, tsr->local_peer);
     rc = 0;
   }
@@ -908,9 +903,6 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
   tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
 
   ci_tcp_ip_hdr_init(iphdr, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
-  iphdr->ip_check_be16 = 0;
-
-  ci_tcp_tx_checksum_finish(iphdr, tcp);
 
   LOG_TL(log(LNT_FMT "RETRANSMIT id=%d ["CI_TCP_FLAGS_FMT"] s=%08x-%08x "
              "paylen=%d", LNT_PRI_ARGS(netif,ts), OO_PKT_FMT(pkt),
@@ -1155,6 +1147,8 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
   unsigned cwnd_right_edge;
   int paylen, sent_num = 0;
   oo_pkt_p id;
+  int tx_space = ci_tcp_tx_advertise_space(ni, ts);
+  int tx_prequeue = oo_atomic_read(&ts->send_prequeue_in);
 
   ci_assert(ci_netif_is_locked(ni));
   ci_assert(ci_ip_queue_not_empty(sendq));
@@ -1179,7 +1173,7 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
       NI_OPTS(ni).burst_control_limit * tcp_eff_mss(ts);
 #endif
 
-  if( OO_SP_NOT_NULL(ts->s.local_peer) )
+  if( OO_SP_NOT_NULL(ts->local_peer) )
     cwnd_right_edge = ts->snd_max;
   else
     cwnd_right_edge = ts->snd_nxt + ts->cwnd + ts->cwnd_extra
@@ -1292,7 +1286,6 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
 
     /* Finish-off the IP header. */
     ci_tcp_ip_hdr_init(ip, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
-    ip->ip_check_be16 = 0;
 
     /* set the urgent pointer */
     ci_tcp_tx_set_urg_ptr(ts, ni, tcp);
@@ -1300,7 +1293,6 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
     /* Finish-off the TCP header (using latest ack and window). */
     tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
     tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
-    ci_tcp_tx_checksum_finish(ip, tcp);
     ci_tcp_tx_maybe_do_striping(pkt, ts);
 
     LOG_TT(log(LNTS_FMT RCV_WND_FMT " snd=%08x-%08x-%08x enq=%08x",
@@ -1354,13 +1346,22 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
       ci_assert_equiv(ci_ip_queue_not_empty(sendq),
                       OO_PP_NOT_NULL(sendq->head));
 
+      /* Wake up TX if necessary */
+      if ( ci_tcp_tx_advertise_space(ni, ts) &&
+           ( ! tx_space ||
+             tx_prequeue != oo_atomic_read(&ts->send_prequeue_in) ||
+             ( (ts->s.b.sb_aflags & CI_SB_AFLAG_IN_SO_LINGER) &&
+               ci_ip_queue_is_empty(&ts->send) &&
+               oo_atomic_read(&ts->send_prequeue_in) == 0 ) ) )
+          ci_tcp_wake_possibly_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
+
       if( ts->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED ) {
         ci_ip_pkt_fmt *pkt = PKT_CHK(ni, head);
         head = pkt->next;
-        ci_ip_local_send(ni, pkt, &ts->s, OO_SP_NULL);
+        ci_ip_local_send(ni, pkt, &ts->s, ts->local_peer);
 
         /* deliver this packet to listening socket, it will call
-         * ci_tcp_listenq_try_promote() and fix up ts->s.local_peer. */
+         * ci_tcp_listenq_try_promote() and fix up ts->local_peer. */
         ci_netif_poll(ni);
         ts->tcpflags &= ~CI_TCPT_FLAG_LOOP_DEFERRED;
 
@@ -1390,6 +1391,13 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
     }
     ci_ip_queue_move(ni, sendq, &ts->retrans, last_pkt, sent_num);
     ts->send_out += sent_num;
+
+    /* Wake up TX if necessary */
+    if( NI_OPTS(ni).tcp_sndbuf_mode == 0 &&
+        ci_tcp_tx_advertise_space(ni, ts) &&
+        ( ! tx_space ||
+          tx_prequeue != oo_atomic_read(&ts->send_prequeue_in) ) )
+      ci_tcp_wake_possibly_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
 
 #if CI_CFG_CONGESTION_WINDOW_VALIDATION
     ts->t_last_sent = ci_tcp_time_now(ni);
@@ -1445,14 +1453,11 @@ void ci_tcp_send_rst(ci_netif* netif, ci_tcp_state* ts)
 
   tcp = TX_PKT_TCP(pkt);
   tcp->tcp_urg_ptr_be16 = 0;
-  tcp->tcp_flags = CI_TCP_FLAG_RST;
-  tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts));
-  tcp->tcp_ack_be32 = 0;
+  tcp->tcp_flags = CI_TCP_FLAG_RST | CI_TCP_FLAG_ACK;
+  tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts) + ts->snd_delegated);
+  tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
   tcp->tcp_window_be16 = 0;
   CI_TCP_HDR_SET_LEN(tcp, sizeof(ci_tcp_hdr));
-
-  oo_tx_ip_hdr(pkt)->ip_check_be16 = 0;
-  tcp->tcp_check_be16 = 0;
 
   LOG_TV(log(LNT_FMT "RST %s:%u->%s:%u s=%08x a=%08x",
             LNT_PRI_ARGS(netif,ts),
@@ -1480,6 +1485,11 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
   ci_tcp_hdr *tcp;
   int rc, ip_len;
 
+  /* local_peer might be corrupted, but from the other side there is no
+   * need to send RST to the local peer. */
+  if( OO_SP_NOT_NULL(ts->local_peer) )
+    return 0;
+
   ip = ci_alloc(sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr));
   if( !ip )
     return -ENOMEM;
@@ -1495,8 +1505,8 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
   memcpy(ip, &ts->s.pkt.ip, sizeof(ci_ip4_hdr));
   ip_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
   ip->ip_tot_len_be16 = CI_BSWAP_BE16(ip_len);
-  /* NEXT_IP_ID is untrusted, but we can live with this */
-  ip->ip_id_be16 = NEXT_IP_ID(netif);
+  ci_assert_equal(ip->ip_check_be16, 0);
+  ci_assert_equal(ip->ip_id_be16, 0);
 
   tcp = (ci_tcp_hdr *)(ip + 1);
   tcp->tcp_urg_ptr_be16 = 0;
@@ -1507,6 +1517,7 @@ int ci_tcp_reset_untrusted(ci_netif *netif, ci_tcp_state *ts)
   tcp->tcp_dest_be16 = tcp_rport_be16(ts);
   tcp->tcp_window_be16 = 0;
   CI_TCP_HDR_SET_LEN(tcp, sizeof(ci_tcp_hdr));
+  tcp->tcp_check_be16 = 0;
 
   LOG_E(ci_log(NT_FMT CI_IP_PRINTF_FORMAT":%d->"CI_IP_PRINTF_FORMAT":%d RESET",
                NT_PRI_ARGS(netif, ts),
@@ -1572,10 +1583,10 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   }
   CI_TCP_HDR_SET_LEN(tcp, sizeof(*tcp));
   tcp->tcp_window_be16 = 0;
-  ci_tcp_ip_hdr_init(ip, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
-
   ip->ip_check_be16 = 0;
+  ip->ip_id_be16 = 0;
   tcp->tcp_check_be16 = 0;
+  ci_tcp_ip_hdr_init(ip, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
 
   LOG_U(log(LN_FMT "RSTACK %s:%u->%s:%u s=%08x a=%08x",
             LN_PRI_ARGS(netif), ip_addr_str(ip->ip_saddr_be32),
@@ -1608,7 +1619,7 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 
   ci_assert(netif);
   ci_assert(ci_ip_queue_is_empty(&ts->retrans));
-  ci_assert(OO_SP_IS_NULL(ts->s.local_peer));
+  ci_assert(OO_SP_IS_NULL(ts->local_peer));
 
   pkt = ci_netif_pkt_alloc(netif);
   if( ! pkt ) {
@@ -1647,12 +1658,9 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
   /* Update window (with silly window avoidance). */
   ci_tcp_calc_rcv_wnd(ts, "zwin_probe");
 
-  oo_tx_ip_hdr(pkt)->ip_check_be16 = 0;
   ci_tcp_tx_set_urg_ptr(ts, netif, tcp);
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
   tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
-
-  ci_tcp_tx_checksum_finish(oo_tx_ip_hdr(pkt), tcp);
 
   LOG_TT(log(LNT_FMT "ZWIN id=%i s=%08x a=%08x w=%u",
              LNT_PRI_ARGS(netif,ts), OO_PKT_FMT(pkt),
@@ -1668,14 +1676,14 @@ void ci_tcp_send_zwin_probe(ci_netif* netif, ci_tcp_state* ts)
 }
 
 
-void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts)
+void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts,
+                              int sock_locked)
 {
   ci_tcp_state* peer;
-  int advanced = 0;
   citp_waitable* w_peer;
 
-  ci_assert( OO_SP_NOT_NULL(ts->s.local_peer) );
-  w_peer = ID_TO_WAITABLE(netif, ts->s.local_peer);
+  ci_assert( OO_SP_NOT_NULL(ts->local_peer) );
+  w_peer = ID_TO_WAITABLE(netif, ts->local_peer);
 
   ts->acks_pending = 0;
 
@@ -1685,7 +1693,7 @@ void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts)
   if( ~w_peer->state & CI_TCP_STATE_TCP_CONN )
     return;
   peer = (ci_tcp_state *)w_peer;
-  if( peer->s.local_peer != S_SP(ts) )
+  if( peer->local_peer != S_SP(ts) )
     return;
 
   do {
@@ -1696,14 +1704,11 @@ void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts)
     peer->snd_una = tcp_rcv_nxt(ts);
     peer->snd_max = tcp_rcv_wnd_right_edge_sent(ts);
 
-    /* If peer has non-empty sendq, we should call ci_tcp_tx_advance() */
+    /* If peer has non-empty sendq, we should call ci_tcp_tx_advance().
+     * ci_tcp_tx_advance() also send TX wakeup if necessary. */
     if( ci_ip_queue_not_empty(&peer->send) )
       ci_tcp_tx_advance(peer, netif);
    } while( ts->acks_pending != 0 );
-
-  if( !advanced )
-    ci_tcp_wake_possibly_not_in_poll(netif, peer,
-                                     CI_SB_FLAG_WAKE_RX | CI_SB_FLAG_WAKE_TX);
 
   ci_assert_equal(ts->acks_pending, 0);
 
@@ -1720,7 +1725,8 @@ void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts)
 }
 
 /* this function will always output an acknowledgement */
-void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
+void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt,
+                     int sock_locked)
 {
   ci_tcp_hdr* tcp;
   ci_uint8* opt;
@@ -1729,11 +1735,16 @@ void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
   CITP_STATS_NETIF_INC(netif, acks_sent);
 
 
-  if( OO_SP_NOT_NULL(ts->s.local_peer) ) {
+  if( OO_SP_NOT_NULL(ts->local_peer) ) {
     ci_netif_pkt_release(netif, pkt);
-    ci_tcp_send_ack_loopback(netif, ts);
+    ci_tcp_send_ack_loopback(netif, ts, sock_locked);
     return;
   }
+
+  /* We can drop reorder buffer here, so let's call it before filling in
+   * the SACK option. */
+  if( ci_tcp_rcvbuf_abused(netif, ts) )
+    ci_tcp_rcvbuf_unabuse(netif, ts, sock_locked);
 
   ts->acks_pending = 0;
   ci_tcp_delack_clear(netif, ts);
@@ -1746,11 +1757,17 @@ void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
 
   oo_tx_pkt_layout_init(pkt);
   ci_pkt_init_from_ipcache(pkt, &ts->s.pkt);
+  ci_assert_equal(ts->s.pkt.ip.ip_check_be16, 0); 
+  ci_assert_equal(oo_tx_ip_hdr(pkt)->ip_check_be16, 0);
   tcp = TX_PKT_TCP(pkt);
+  ci_assert_equal(tcp->tcp_check_be16, 0);
   opt = CI_TCP_HDR_OPTS(tcp);
 
   /* Fixup the sequence number: We want snd_nxt, not enq_nxt. */
-  tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts));
+  /* Fixme: snd_delegated should be speculative, but here we use it in
+   * non-speculative way.  On the other side, if we do not add snd_delegated
+   * the peer will reject our ACK because of incorrect sequence number. */
+  tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts) + ts->snd_delegated);
 
   /* Decrement the faststart counter by the number of bytes acked */
   ci_tcp_reduce_faststart(ts, SEQ_SUB(tcp_rcv_nxt(ts), ts->tslastack));
@@ -1773,11 +1790,8 @@ void ci_tcp_send_ack(ci_netif* netif, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
   /* Rest of packet creation */
   ci_tcp_ip_hdr_init(oo_tx_ip_hdr(pkt),
                      sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen);
-  oo_tx_ip_hdr(pkt)->ip_check_be16 = 0;
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
   tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
-
-  ci_tcp_tx_checksum_finish(oo_tx_ip_hdr(pkt), tcp);
 
   LOG_TT(log(LNT_FMT "ACK id=%i s=%08x a=%08x w(unscaled)=%u w_cur=%u",
              LNT_PRI_ARGS(netif,ts), OO_PKT_FMT(pkt),

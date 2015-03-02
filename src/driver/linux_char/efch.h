@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,7 +82,7 @@ typedef struct efch_resource_ops_s {
    * ci_mmap_pages() etc. unmodified.
    */
   int  (*rm_mmap)(struct efrm_resource*, unsigned long* bytes, void* opaque,
-		  int* map_num, unsigned long* offset, int index);
+		  int index);
 
   /** No-page handler.  Returns page number or (unsigned) -1 if fails.
    *  Should only be defined if CI_HAVE_OS_NOPAGE, and the only current

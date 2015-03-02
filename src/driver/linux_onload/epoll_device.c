@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
 
 #if CI_CFG_USERSPACE_EPOLL
 
+#include "onload_kernel_compat.h"
 #include <onload/linux_onload_internal.h>
 #include <onload/linux_onload.h>
 #include <onload/tcp_helper_fns.h>
@@ -91,6 +92,9 @@ struct oo_epoll1_private {
   /* kernel epoll file */
   struct file *os_file;
 
+  tcp_helper_resource_t* home_stack;
+  int ready_list;
+  ci_waitable_t home_w;
 };
 
 /*************************************************************
@@ -410,13 +414,17 @@ static void oo_epoll2_wait(struct oo_epoll_private *priv,
         goto do_exit;
       }
 
-      OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni)
+      OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
+#if CI_CFG_SPIN_STATS
+        ni->state->stats.spin_epoll_kernel++;
+#endif
         if( ci_netif_may_poll(ni) &&
             ci_netif_need_poll_spinning(ni, now_frc) &&
             ci_netif_trylock(ni) ) {
           ci_netif_poll(ni);
           ci_netif_unlock(ni);
         }
+      }
 
       op->rc = efab_linux_sys_epoll_wait(op->kepfd, CI_USER_PTR_GET(op->events),
                                          op->maxevents, 0);
@@ -483,11 +491,14 @@ static int oo_epoll2_action(struct oo_epoll_private *priv,
 
   /* Restore kepfd if necessary */
   if(unlikely( op->kepfd == -1 )) {
-    op->kepfd = oo_install_file_to_fd(priv->p.p2.kepo, O_CLOEXEC);
+    op->kepfd = get_unused_fd_flags(O_CLOEXEC);
     if( op->kepfd < 0 )
       return op->kepfd;
     /* We've restored kepfd.  Now we should return 0! */
     return_zero = true;
+
+    get_file(priv->p.p2.kepo);
+    fd_install(op->kepfd, priv->p.p2.kepo);
   }
 
   /* Call all postponed epoll_ctl calls; ignore rc. */
@@ -730,6 +741,38 @@ static int oo_epoll1_wait(struct oo_epoll1_private *priv,
   return rc;
 }
 
+static void oo_epoll1_set_home_stack(struct oo_epoll1_private* priv,
+                                     tcp_helper_resource_t* thr, int ready_list)
+{
+  priv->home_stack = thr;
+  priv->ready_list = ready_list;
+  ci_atomic32_or(&thr->netif.state->ready_list_flags[ready_list],
+                 CI_NI_READY_LIST_FLAG_RESCAN);
+  ci_waitable_wakeup_all(&priv->home_w);
+}
+
+static unsigned oo_epoll1_poll(struct file* filp, poll_table* wait)
+{
+  struct oo_epoll_private *priv = filp->private_data;
+  tcp_helper_resource_t* thr = priv->p.p1.home_stack;
+  int ready_list = priv->p.p1.ready_list;
+  unsigned mask = 0;
+
+  if( thr ) {
+    ci_atomic32_or(&thr->netif.state->ready_list_flags[ready_list],
+                   CI_NI_READY_LIST_FLAG_WAKE);
+    poll_wait(filp, &thr->ready_list_waitqs[ready_list].wq, wait);
+
+    mask = efab_tcp_helper_ready_list_events(thr, ready_list);
+    if( !poll_does_not_wait(wait) && !mask )
+      tcp_helper_request_wakeup(thr);
+  }
+  else
+    poll_wait(filp, &priv->p.p1.home_w.wq, wait);
+
+  return mask;
+}
+
 /*************************************************************
  * Common /dev/onload_epoll code
  *************************************************************/
@@ -820,6 +863,38 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     break;
   }
 
+  case OO_EPOLL1_IOC_SET_HOME_STACK: {
+    struct oo_epoll1_set_home_arg local_arg;
+    struct file *sock_file;
+    ci_private_t *sock_priv;
+
+    ci_assert_equal(_IOC_SIZE(cmd), sizeof(local_arg));
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+
+    sock_file = fget(local_arg.sockfd);
+    if( sock_file->f_op != &linux_tcp_helper_fops_udp &&
+        sock_file->f_op != &linux_tcp_helper_fops_tcp ) {
+      fput(sock_file);
+      return -EINVAL;
+    }
+    sock_priv = sock_file->private_data;
+
+    rc = oo_epoll_add_stack(priv, sock_priv->thr);
+
+    /* rc > 0 => successfully added stack */
+    if( rc > 0 )
+      oo_epoll1_set_home_stack(&priv->p.p1, sock_priv->thr,
+                               local_arg.ready_list);
+    else
+      rc = -ENOSPC;
+
+    fput(sock_file);
+    break;
+  }
+
   case OO_EPOLL1_IOC_PRIME: {
     int i;
     tcp_helper_resource_t* thr;
@@ -830,6 +905,20 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     }
     rc = 0;
     break;
+  }
+
+  case OO_EPOLL_IOC_CLONE: {
+    ci_clone_fd_t local_arg;
+
+    if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+    local_arg.fd = oo_clone_fd(filp, local_arg.do_cloexec);
+
+    if( local_arg.fd < 0 )
+      return local_arg.fd;
+    if( copy_to_user(argp, &local_arg, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+    return 0;
   }
 
   default:
@@ -890,9 +979,12 @@ static unsigned oo_epoll_fop_poll(struct file* filp, poll_table* wait)
   struct oo_epoll_private *priv = filp->private_data;
 
   ci_assert(priv);
-  if( priv->type != OO_EPOLL_TYPE_2 )
+  if( priv->type == OO_EPOLL_TYPE_2 )
+    return oo_epoll2_poll(priv, wait);
+  else if( priv->type == OO_EPOLL_TYPE_1 )
+    return oo_epoll1_poll(filp, wait);
+  else
     return POLLNVAL;
-  return oo_epoll2_poll(priv, wait);
 }
 
 static int oo_epoll_fop_mmap(struct file* filp, struct vm_area_struct* vma)
@@ -913,6 +1005,8 @@ static int oo_epoll_fop_mmap(struct file* filp, struct vm_area_struct* vma)
     oo_epoll_release_common(priv);
     return rc;
   }
+
+  ci_waitable_ctor(&priv->p.p1.home_w);
 
   priv->type = OO_EPOLL_TYPE_1;
   return rc;

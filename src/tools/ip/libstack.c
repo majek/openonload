@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,6 +36,7 @@
 #include <onload/ul/tcp_helper.h>
 #include <ci/app.h>
 #include <etherfabric/vi.h>
+#include <etherfabric/internal/internal.h>
 #include "libstack.h"
 #include <ci/internal/ip_signal.h>
 #include <dirent.h>
@@ -48,12 +49,7 @@
 #define IGNORE(_x)
 
 
-#if CI_CFG_USERSPACE_PIPE
-# define CI_TCP_STATE_PIPE_BUF_NUM (CI_TCP_STATE_NUM(CI_TCP_STATE_PIPE)+1)
-# define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_PIPE) + 2)
-#else
-# define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_UDP) + 1)
-#endif
+#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_UDP) + 1)
 
 
 typedef struct {
@@ -178,8 +174,6 @@ static stat_desc_t more_stats_fields[] = {
   ss(TCP_STATE_UDP),
 #if CI_CFG_USERSPACE_PIPE
   ss(TCP_STATE_PIPE),
-  stat_desc_nm(more_stats_t, states[CI_TCP_STATE_PIPE_BUF_NUM],
-               "PIPE_BUFS", 0),
 #endif
   stat_desc_nm(more_stats_t, states[N_STATES], "BAD_STATE", 0),
   ns(sock_orphans),
@@ -394,25 +388,6 @@ int             cfg_notable;
 int             cfg_zombie = 0;
 
 
-ci_inline unsigned cycles64_to_usec(ci_uint64 cycles)
-{
-  static unsigned cpu_khz = -1;
-  if( cpu_khz == (unsigned) -1 )
-    CI_TRY(ci_get_cpu_khz(&cpu_khz));
-  return (unsigned) (cycles * 1000 / cpu_khz);
-}
-
-
-ci_inline ci_uint64 usec_to_cycles64(unsigned usec)
-{
-  static unsigned cpu_khz = -1;
-  if( usec == (unsigned) -1 )
-    return (ci_uint64) -1;
-  if( cpu_khz == (unsigned) -1 )
-    CI_TRY(ci_get_cpu_khz(&cpu_khz));
-  return (ci_uint64) usec * cpu_khz / 1000;
-}
-
 
 ci_inline void libstack_defer_signals(citp_signal_info* si)
 {
@@ -425,7 +400,7 @@ ci_inline void libstack_process_signals(citp_signal_info* si)
 {
   si->inside_lib = 0;
   ci_compiler_barrier();
-  if( si->run_pending )
+  if( si->aflags & OO_SIGNAL_FLAG_HAVE_PENDING )
     citp_signal_run_pending(si);
 }
 
@@ -524,8 +499,7 @@ static int is_onloaded(pid_t pid, int** ret_stacks_ids)
       return rc;
     }
     sym_buf[rc] = '\0';
-    if( ! strncmp(sym_buf, "onload", strlen("onload")) &&
-        ! strstr(sym_buf, "stack") ) {
+    if( ! strncmp(sym_buf, "onload", strlen("onload")) ) {
       char* ptr = strchr(sym_buf, '[');
       ptr = strchr(ptr, ':');
       ++ptr;
@@ -720,16 +694,22 @@ void libstack_stack_mapping_print_pids(int stack_id)
 void libstack_stack_mapping_print(void)
 {
   int i;
+  struct stack_mapping* sm;
+
   if( ! stack_mappings )
     return;
   printf("#stack-id stack-name      pids\n");
-  struct stack_mapping* sm = stack_mappings;
-  while( sm ) {
+
+  for( sm = stack_mappings; sm != NULL; sm = sm->next ) {
     printf("%-9d ", sm->stack_id);
 
     stack_attach(sm->stack_id);
     netif_t* netif = stack_attached(sm->stack_id);
 
+    if( netif == NULL ) {
+      printf("unaccessable\n");
+      continue;
+    }
     if( strlen(netif->ni.state->name) != 0 )
       printf("%-16s", netif->ni.state->name);
     else
@@ -745,7 +725,6 @@ void libstack_stack_mapping_print(void)
       }
       printf("\n");
     }
-    sm = sm->next;
   }
 }
 
@@ -1160,9 +1139,7 @@ static void do_socket_op(const socket_op_t* op, socket_t* s)
       ! __try_grab_stack_lock(&n->ni, &ni_unlock, op->name) )
     return;
 
-  if( s->id < (int) n->ni.state->n_ep_bufs )
-  if( oo_sock_id_is_waitable(&n->ni, s->id) )
-  {
+  if( s->id < (int) n->ni.state->n_ep_bufs ) {
     wo = SP_TO_WAITABLE_OBJ(&n->ni, s->id);
 
     if( (op->flags & FL_LOCK_SOCK) && ! cfg_nosklock &&
@@ -1221,9 +1198,7 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
 {
   unsigned i;
   memset(s, 0, sizeof(*s));
-  for( i = 0; i < ni->state->n_ep_bufs; ++i )
-  if( oo_sock_id_is_waitable(ni, i) )
-  {
+  for( i = 0; i < ni->state->n_ep_bufs; ++i ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, i);
     citp_waitable* w = &wo->waitable;
     unsigned state = w->state;
@@ -1283,10 +1258,7 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
       s->udp_tot_send_pkts_os += us->stats.n_tx_os;
     }
   }
-#if CI_CFG_USERSPACE_PIPE
-  else
-    ++s->states[CI_TCP_STATE_PIPE_BUF_NUM];
-#endif
+
   s->ef_vi_rx_ev_lost = ni->state->vi_stats.rx_ev_lost;
   s->ef_vi_rx_ev_bad_desc_i = ni->state->vi_stats.rx_ev_bad_desc_i;
   s->ef_vi_rx_ev_bad_q_label = ni->state->vi_stats.rx_ev_bad_q_label;
@@ -1307,9 +1279,20 @@ static void dump_stats(const stat_desc_t* stats_fields, int n_stats_fields,
 {
   const stat_desc_t* s;
   for( s = stats_fields; s < stats_fields + n_stats_fields; ++s ) {
-    ci_assert_equal(s->size, sizeof(ci_uint32));
-    ci_log("%s: %u", s->name,
-           *(const ci_uint32*) ((const char*) stats + s->offset));
+    switch( s->size ) {
+    case sizeof(ci_uint32):
+      ci_log("%s: %u", s->name,
+             *(const ci_uint32*) ((const char*) stats + s->offset));
+      break;
+    case sizeof(ci_uint64):
+      ci_log("%s: %llu", s->name,
+             (unsigned long long)(*(const ci_uint64*)
+                                  ((const char*) stats + s->offset)));
+      break;
+    default:
+      ci_log("%s: unknown",  s->name);
+      ci_assert(0);
+    }
     if( with_description && s->description )
       ci_log("  %s\n", s->description);
   }
@@ -1430,9 +1413,7 @@ void socket_add_all(int stack_id)
 
   if( ! n )  return;
 
-  for( i = 0; i < (int)n->ni.state->n_ep_bufs; ++i )
-  if( oo_sock_id_is_waitable(&n->ni, i) )
-  {
+  for( i = 0; i < (int)n->ni.state->n_ep_bufs; ++i ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(&n->ni, i);
     if( ! (wo->waitable.state & CI_TCP_STATE_SOCKET) )  continue;
     socket_add(stack_id, i);
@@ -1499,14 +1480,13 @@ static void for_each_tcp_socket(ci_netif* ni,
 				void (*fn)(ci_netif*, ci_tcp_state*))
 {
   int id;
-  for( id = 0; id < (int)ni->state->n_ep_bufs; ++id )
-  if( oo_sock_id_is_waitable(ni, id) )
-  {
+  for( id = 0; id < (int)ni->state->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, id);
     if( ! (wo->waitable.state & CI_TCP_STATE_TCP_CONN) )  continue;
     fn(ni, &wo->tcp);
   }
 }
+
 
 /**********************************************************************
 ***********************************************************************
@@ -2036,7 +2016,7 @@ static void stack_alloc_pkts_block(ci_netif* ni)
   oo_pkt_p pp = OO_PP_NULL;
   int i, locked = cfg_lock;
   for( i = 0; i < (int) arg_u[0]; ++i ) {
-    pkt = ci_netif_pkt_alloc_block(ni, &locked);
+    pkt = ci_netif_pkt_alloc_block(ni, NULL, &locked);
     if( pkt == NULL ) {
       ci_log("%d: allocated %d buffers", NI_ID(ni), i);
       break;
@@ -2210,8 +2190,18 @@ static void stack_ev(ci_netif* ni)
 
 static void stack_ul_poll(ci_netif* ni)
 {
+  int i;
+
   NI_OPTS(ni).spin_usec = arg_u[0];
-  ni->state->spin_cycles = usec_to_cycles64(NI_OPTS(ni).spin_usec);
+  ni->state->sock_spin_cycles =
+                    oo_usec_to_cycles64(ni, NI_OPTS(ni).spin_usec);
+
+  /* Update spin value for each socket */
+  for( i = 0; i < (int)ni->state->n_ep_bufs; ++i ) {
+    citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, i);
+    if( wo->waitable.state != CI_TCP_STATE_FREE )
+      wo->waitable.spin_cycles =  ni->state->sock_spin_cycles;
+  }
 }
 
 static void stack_timer_timeout(ci_netif* ni)
@@ -2223,7 +2213,7 @@ static void stack_timer_prime(ci_netif* ni)
 {
   NI_OPTS(ni).timer_prime_usec = arg_u[0];
   ni->state->timer_prime_cycles =
-    usec_to_cycles64(NI_OPTS(ni).timer_prime_usec);
+    oo_usec_to_cycles64(ni, NI_OPTS(ni).timer_prime_usec);
 }
 
 #if CI_CFG_RANDOM_DROP
@@ -2470,7 +2460,8 @@ static const stack_op_t stack_ops[] = {
   STACK_OP_AU(txpkt,           "show content of transmit packet", "<pkt-id>"),
   STACK_OP_AU(rxpkt,           "show content of receive packet", "<pkt-id>"),
   STACK_OP_AU(segments,        "show segments in packet", "<pkt-id>"),
-  STACK_OP_AU(ul_poll,         "set user level polling cycles option",
+  STACK_OP_AU(ul_poll,         "set user level polling cycles option "
+                                 "(overwrites SO_BUSY_POLL values)",
                                  "<cycles>"),
   STACK_OP_AU(timer_timeout,   "set timer timeout option", "<usec>"),
   STACK_OP_AU(timer_prime,     "set timer priming option", "<cycles>"),
@@ -2557,6 +2548,11 @@ static void socket_filters(ci_netif* ni, ci_tcp_state* ts)
   dump_via_buffers(ci_tcp_helper_ep_filter_dump, &args, DVB_LOG_FAILURE);
 }
 
+static void socket_ul_poll(ci_netif* ni, ci_tcp_state* ts)
+{
+  ts->s.b.spin_cycles = oo_usec_to_cycles64(ni, arg_u[0]);
+}
+
 static void socket_nodelay(ci_netif* ni, ci_tcp_state* ts)
 { ci_bit_set(&ts->s.s_aflags, CI_SOCK_AFLAG_NODELAY_BIT); }
 
@@ -2577,7 +2573,7 @@ static void socket_advance(ci_netif* ni, ci_tcp_state* ts) {
 static void socket_ack(ci_netif* ni, ci_tcp_state* ts) {
   ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
   if( pkt )
-    ci_tcp_send_ack(ni, ts, pkt);
+    ci_tcp_send_ack(ni, ts, pkt, CI_FALSE);
   else
     ci_log("%d:%d failed to allocate packet buffer", NI_ID(ni), S_SP(ts));
 }
@@ -2613,21 +2609,15 @@ static void socket_set_cwnd(ci_netif* ni, ci_tcp_state* ts)
 
 static void socket_send(ci_netif* ni, ci_tcp_state* ts) {
   ci_iovec iov;
-  struct msghdr msg;
   int rc;
 
   CI_IOVEC_LEN(&iov) = arg_u[0];
   CI_TEST(CI_IOVEC_BASE(&iov) = malloc(arg_u[0]));
 
-  CI_ZERO(&msg);
-  msg.msg_namelen = 0;
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-
   /* ?? NB. Blocking currently broken due to signal deferral stuff
   ** requiring us to have registered thread data.
   */
-  rc = ci_tcp_sendmsg(ni, ts, &msg, MSG_DONTWAIT);
+  rc = ci_tcp_sendmsg(ni, ts, &iov, 1, MSG_DONTWAIT);
   ci_log("sendmsg(%d:%d, %d, 0) = %d",
 	 NI_ID(ni), S_SP(ts), (int) CI_IOVEC_LEN(&iov), rc);
 }
@@ -2642,7 +2632,6 @@ static void socket_recv(ci_netif* ni, ci_tcp_state* ts) {
   CI_TEST(CI_IOVEC_BASE(&iov) = malloc(arg_u[0]));
 
   CI_ZERO(&msg);
-  msg.msg_namelen = 0;
   msg.msg_iov = &iov;
   msg.msg_iovlen = 1;
 
@@ -2858,6 +2847,8 @@ static const socket_op_t socket_ops[] = {
              "try to lock socket"),
   SOCK_OP_F (filters, FL_NO_LOCK,
              "show socket's filter info"),
+  SOCK_OP_A (ul_poll, FL_NO_LOCK | FL_ARG_U,
+             "set user level polling cycles option", "<ul_poll>", 1),
   TCPC_OP   (nodelay,
              "set socket option TCP_NODELAY"),
   TCPC_OP   (nagle,

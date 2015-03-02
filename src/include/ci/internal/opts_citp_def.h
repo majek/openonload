@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -100,14 +100,22 @@ CI_CFG_OPT("EF_POLL_FAST", ul_poll_fast, ci_uint32,
 #define CITP_EPOLL_KERNEL        0
 #define CITP_EPOLL_UL            1
 #define CITP_EPOLL_KERNEL_ACCEL  2
+#define CITP_EPOLL_UL_SCALE      3
 CI_CFG_OPT("EF_UL_EPOLL", ul_epoll, ci_uint32,
 "Choose epoll implementation.  The choices are:\n"
 "  0  -  kernel (unaccelerated)\n"
 "  1  -  user-level (accelerated, lowest latency)\n"
-"  2  -  kernel-accelerated (best when there are lots of sockets in the set)\n"
+"  2  -  kernel-accelerated (best when there are lots of sockets in the set"
+"        and mode 3 is not suitable)\n"
+"  3  -  user-level (accelerated, lowest latency, scalable, supports socket "
+"        caching)\n"
 "\n"
-"The default is the user-level implementation (1).",
-           2, , CITP_EPOLL_UL, 0, 2, oneof:kernel;ul;kernel_accel)
+"The default is the user-level implementation (1).  Mode 3 can offer benefits "
+"over mode 1, particularly with larger sets.  However, this mode has "
+"some restrictions.  It does not support epoll sets that exist across fork(). "
+"It does not support monitoring the readiness of the set's epoll fd via a "
+"another epoll/poll/select.",
+          2, , CITP_EPOLL_UL, 0, 2, oneof:kernel;ul;kernel_accel;ul_scale)
 
 CI_CFG_OPT("EF_EPOLL_SPIN", ul_epoll_spin, ci_uint32, 
 "Spin in epoll_wait() calls until an event is satisfied or the spin timeout "
@@ -121,16 +129,23 @@ CI_CFG_OPT("EF_EPOLL_CTL_FAST", ul_epoll_ctl_fast, ci_uint32,
 "some cases removed completely.  This option improves performance for "
 "applications that call epoll_ctl() frequently."
 "\n"
-"CAVEATS: This option has no effect when EF_UL_EPOLL=0.  Following dup(), "
-"dup2(), fork() or exec(), some changes to epoll sets may be lost.  If you "
-"monitor the epoll fd in another poll, select or epoll set, and the effects "
-"of epoll_ctl() are latency critical, then this option can cause latency "
-"spikes or even deadlock.",
+"CAVEATS:\n"
+"* This option has no effect when EF_UL_EPOLL=0.\n"
+"* Do not turn this option on if your application uses dup(), fork() or "
+"exec() in cojuction with epoll file descriptors or with the sockets "
+"monitored by epoll.\n"
+"* If you monitor the epoll fd in another poll, select or epoll set, "
+"and the effects of epoll_ctl() are latency critical, then this option can "
+"cause latency spikes or even deadlock.\n"
+"* With EF_UL_EPOLL=2, this option is harmful if you are calling "
+"epoll_wait() and epoll_ctl() simultaneously from different threads or "
+"processes.",
            1, , 1, 0, 1, yesno)
 
 CI_CFG_OPT("EF_EPOLL_CTL_HANDOFF", ul_epoll_ctl_handoff, ci_uint32,
 "Allow epoll_ctl() calls to be passed from one thread to another in order to "
-"avoid lock contention.  This optimisation is particularly important when "
+"avoid lock contention, in EF_UL_EPOLL=1 or 3 case.  This optimisation is "
+"particularly important when "
 "epoll_ctl() calls are made concurrently with epoll_wait() and spinning is "
 "enabled."
 "\n"
@@ -144,9 +159,11 @@ CI_CFG_OPT("EF_EPOLL_CTL_HANDOFF", ul_epoll_ctl_handoff, ci_uint32,
 CI_CFG_OPT("EF_EPOLL_MT_SAFE", ul_epoll_mt_safe, ci_uint32, 
 "This option disables concurrency control inside the accelerated epoll "
 "implementations, reducing CPU overhead.  It is safe to enable this option if,"
-" for each epoll set, all calls on the epoll set are concurrency safe."
+" for each epoll set, all calls on the epoll set and all calls that may modify"
+" a member of the epoll set are concurrency safe.  Calls that may modify a "
+"member are bind(), connect(), listen() and close()."
 "\n"
-"This option improves performance with EF_UL_EPOLL=1 and also with "
+"This option improves performance with EF_UL_EPOLL=1 or 3 and also with "
 "EF_UL_EPOLL=2 and EF_EPOLL_CTL_FAST=1.",
            1, , 0, 0, 1, yesno)
 #endif
@@ -167,10 +184,11 @@ CI_CFG_OPT("EF_FDS_MT_SAFE", fds_mt_safe, ci_uint32,
 "\n"
 "Calls to bind(), connect(), listen() may change underlying object.  "
 "If you call such functions in one thread while accessing the same file "
-"descriptor from the other thread, this option is also unsafe."
+"descriptor from the other thread, this option is also unsafe.  "
+"In some special cases, any functions may change underlying object."
 "\n"
 "Also concurrent calls may happen from signal handlers, so set this to 0 "
-"if your signal handlers may close sockets",
+"if your signal handlers call bind(), connect(), listen() or close()",
            1, , 1, 0, 1, yesno)
 
 CI_CFG_OPT("EF_FDTABLE_STRICT", fdtable_strict, ci_uint32,
@@ -209,12 +227,6 @@ CI_CFG_OPT("EF_ACCEPT_INHERIT_NONBLOCK", accept_force_inherit_nonblock,
 "If set to 1, TCP sockets accepted from a listening socket inherit the "
 "O_NONBLOCK flag from the listening socket.",
            1, , CI_CFG_ACCEPT_INHERITS_NONBLOCK, 0, 1, yesno)
-
-CI_CFG_OPT("EF_ACCEPT_INHERIT_NODELAY", accept_force_inherit_nodelay,
-           ci_uint32, 
-"If set to 1, TCP sockets accepted from a listening socket inherit the "
-"TCP_NODELAY socket option from the listening socket.",
-           1, , CI_CFG_ACCEPT_INHERITS_NODELAY, 0, 1, yesno)
 
 CI_CFG_OPT("EF_STACK_PER_THREAD", stack_per_thread, ci_uint32,
 "Create a separate Onload stack for the sockets created by each thread.",
@@ -285,6 +297,13 @@ CI_CFG_OPT("EF_PIPE_SEND_SPIN", pipe_send_spin, ci_uint32,
 "expires, enter the kernel and block.  The spin timeout is set by "
 "EF_SPIN_USEC or EF_POLL_USEC.",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_PIPE_SIZE", pipe_size, ci_int32,
+"Default size of the pipe in bytes. Actual pipe size will be rounded up "
+"to the size of packet buffer and subject to modifications by "
+"fcntl F_SETPIPE_SZ where supported.",
+           , , OO_PIPE_DEFAULT_SIZE, OO_PIPE_MIN_SIZE, CI_CFG_MAX_PIPE_SIZE,
+           count)
 #endif
 
 CI_CFG_OPT("EF_SOCK_LOCK_BUZZ", sock_lock_buzz, ci_uint32,
@@ -301,6 +320,19 @@ CI_CFG_OPT("EF_STACK_LOCK_BUZZ", stack_lock_buzz, ci_uint32,
 "enter the kernel and block.  The spin timeout is set by EF_BUZZ_USEC.\n"
 "This option reduces jitter caused by lock contention, but can reduce "
 "fairness between threads competing for the lock.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin, ci_uint32,
+"Spin poll,select and epoll in a Linux-like way: enable spinning only if "
+"a spinning soclet is preset in the poll/select/epoll set.  See Linux "
+"documentation on SO_BUSY_POLL socket option for details.\n"
+"You should also enable spinning via EF_{POLL,SELECT,EPOLL}_SPIN "
+"variable if you'd like to spin in poll,select or epoll correspondingly.  "
+"The spin duration is set via EF_SPIN_USEC, which is equivalent "
+"to the Linux sysctl.net.busy_poll value.  EF_POLL_USEC is all-in-one "
+"variable to set for all 4 variables mentioned here.\n"
+"Linux never spins in epoll, but Onload does.  This variable does not "
+"affect epoll behaviour if EF_UL_EPOLL=2.",
            1, , 0, 0, 1, yesno)
 
 #define CITP_NETIF_DTOR_NONE                0
@@ -474,6 +506,31 @@ CI_CFG_OPT("EF_POLL_NONBLOCK_FAST_USEC", ul_poll_nonblock_fast_usec, ci_uint32,
 "cause an application to misbehave.",
            , , 200, MIN, MAX, time:usec)
 
+CI_CFG_OPT("EF_SELECT_FAST_USEC", ul_select_fast_usec, ci_uint32,
+"When spinning in a select() call, causes accelerated sockets to be polled for N "
+"usecs before unaccelerated sockets are polled.  This reduces "
+"latency for accelerated sockets, possibly at the expense of latency on "
+"unaccelerated sockets.  Since accelerated sockets are typically the parts "
+"of the application which are most performance-sensitive this is typically a "
+"good tradeoff.",
+           , , 32, MIN, MAX, time:usec)
+
+CI_CFG_OPT("EF_SELECT_NONBLOCK_FAST_USEC", ul_select_nonblock_fast_usec,
+           ci_uint32,
+"When invoking select() with timeout==0 (non-blocking), this option "
+"causes non-accelerated sockets to be polled only every N usecs."
+"This reduces latency for accelerated sockets, possibly "
+"at the expense of latency on unaccelerated sockets.  Since accelerated "
+"sockets are typically the parts of the application which are most "
+"performance-sensitive this is often a good tradeoff."
+"\n"
+"Set this option to zero to disable, or to a higher value to further improve "
+"latency for accelerated sockets."
+"\n"
+"This option changes the behaviour of select() calls, so could potentially "
+"cause an application to misbehave.",
+           , , 200, MIN, MAX, time:usec)
+
 
 
 CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
@@ -535,6 +592,14 @@ CI_CFG_OPT("EF_UDP_FORCE_REUSEPORT", udp_reuseports, ci_uint64,
 "sockets that bind to those port numbers will have SO_REUSEPORT "
 "automatically applied to them.\n",
            A8, , 0, MIN, MAX, list)
+
+#if CI_CFG_FD_CACHING
+CI_CFG_OPT("EF_SOCKET_CACHE_PORTS", sock_cache_ports, ci_uint64,
+"This option specifies a comma-separated list of port numbers.  When set (and "
+"socket caching is enabled), only sockets bound to the specified ports will "
+"be eligible to be cached.\n",
+           A8, , 0, MIN, MAX, list)
+#endif
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,6 +33,10 @@
 #include <onload/osfile.h>
 #include <onload/pkt_filler.h>
 #include <onload/sleep.h>
+
+#ifdef ONLOAD_OFE
+#include "ofe/onload.h"
+#endif
 
 
 #define VERB(x)
@@ -265,13 +269,13 @@ static void ci_udp_sendmsg_mcast(ci_netif* ni, ci_udp_state* us,
                                  udp->udp_source_be16,
                                  IPPROTO_UDP, ipcache->intf_i,
                                  ipcache->encap.vlan_id,
-                                 ci_udp_sendmsg_loop, &state);
+                                 ci_udp_sendmsg_loop, &state, NULL);
   ci_netif_filter_for_each_match(ni,
                                  oo_ip_hdr(pkt)->ip_daddr_be32,
                                  udp->udp_dest_be16,
                                  0, 0, IPPROTO_UDP, ipcache->intf_i,
                                  ipcache->encap.vlan_id,
-                                 ci_udp_sendmsg_loop, &state);
+                                 ci_udp_sendmsg_loop, &state, NULL);
 }
 
 
@@ -306,7 +310,7 @@ ci_inline void prep_send_pkt(ci_netif* ni, ci_udp_state* us,
 #ifdef __KERNEL__
 
 static int do_sys_sendmsg(ci_sock_cmn *s, oo_os_file os_sock,
-                          const struct msghdr* msg,
+                          const ci_msghdr* msg,
                           int flags, int user_buffers, int atomic)
 {
   struct socket* sock;
@@ -341,7 +345,7 @@ static int do_sys_sendmsg(ci_sock_cmn *s, oo_os_file os_sock,
 }
 
 static int ci_udp_sendmsg_os(ci_netif* ni, ci_udp_state* us,
-                             const struct msghdr* msg, int flags,
+                             const ci_msghdr* msg, int flags,
                              int user_buffers, int atomic)
 {
   int rc;
@@ -459,6 +463,15 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
         (sa.sin_addr.s_addr == INADDR_ANY ||
          cicp_user_addr_is_local_efab(CICP_HANDLE(ni),&sa.sin_addr.s_addr)) ) {
       ci_assert( ! (us->udpflags & CI_UDPF_FILTERED) );
+
+#ifdef ONLOAD_OFE
+      if( ni->ofe != NULL )
+        us->s.ofe_code_start = ofe_socktbl_find(
+                        ni->ofe, OFE_SOCKTYPE_UDP,
+                        udp_laddr_be32(us), udp_raddr_be32(us),
+                        udp_lport_be16(us), udp_rport_be16(us));
+#endif
+
       rc = ci_tcp_ep_set_filters(ni, S_SP(us), us->s.cp.so_bindtodevice,
                                  OO_SP_NULL);
       if( rc ) {
@@ -494,7 +507,7 @@ static void ci_udp_sendmsg_send_pkt_via_os(ci_netif* ni, ci_udp_state* us,
 
 #ifndef __KERNEL__
   struct sockaddr_in sin;
-  struct msghdr m;
+  ci_msghdr m;
 
   if( oo_tx_ip_hdr(pkt)->ip_daddr_be32 != 0 ) {
     sin.sin_family = AF_INET;
@@ -594,6 +607,9 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
   ci_ip_pkt_fmt* first_pkt = pkt;
   ci_ip_cached_hdrs* ipcache;
   int ipcache_onloadable;
+#ifdef __KERNEL__
+  int i = 0;
+#endif
 
   ci_assert(ci_netif_is_locked(ni));
 
@@ -677,11 +693,18 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
     if(CI_LIKELY( ipcache_onloadable )) {
       /* TODO: Hit the doorbell just once. */
       while( 1 ) {
+        oo_pkt_p next = pkt->next;
         prep_send_pkt(ni, us, pkt, ipcache);
         ci_netif_send(ni, pkt);
-        if( OO_PP_IS_NULL(pkt->next) )
+        if( OO_PP_IS_NULL(next) )
           break;
-        pkt = PKT_CHK(ni, pkt->next);
+        pkt = PKT_CHK(ni, next);
+#ifdef __KERNEL__
+        if(CI_UNLIKELY( i++ > ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S )) {
+          ci_netif_error_detected(ni, CI_NETIF_ERROR_UDP_SEND_PKTS_LIST,
+                                  __FUNCTION__);
+        }
+#endif
       }
       cicp_ip_cache_mac_update(ni, ipcache, flags & MSG_CONFIRM);
 
@@ -702,11 +725,18 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
        */
       ++us->stats.n_tx_cp_no_mac;
       while( 1 ) {
+        oo_pkt_p next = pkt->next;
         prep_send_pkt(ni, us, pkt, ipcache);
         ci_ip_send_udp_slow(ni, pkt, ipcache);
-        if( OO_PP_IS_NULL(pkt->next) )
+        if( OO_PP_IS_NULL(next) )
           break;
-        pkt = PKT_CHK(ni, pkt->next);
+        pkt = PKT_CHK(ni, next);
+#ifdef __KERNEL__
+        if(CI_UNLIKELY( i++ > ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S )) {
+          ci_netif_error_detected(ni, CI_NETIF_ERROR_UDP_SEND_PKTS_LIST,
+                                  __FUNCTION__);
+        }
+#endif
       }
     }
   }
@@ -817,6 +847,7 @@ static void ci_udp_sendmsg_async_q_enqueue(ci_netif* ni, ci_udp_state* us,
 }
 
 
+#ifndef __KERNEL__
 /* Check if provided address struct/content is OK for us. */
 static int ci_udp_name_is_ok(ci_udp_state* us, const struct msghdr* msg)
 {
@@ -840,6 +871,7 @@ static int ci_udp_name_is_ok(ci_udp_state* us, const struct msghdr* msg)
   return msg->msg_namelen >= sizeof(struct sockaddr_in) && 
     CI_SIN(msg->msg_name)->sin_family == AF_INET;
 }
+#endif
 
 
 #define OO_TIMEVAL_UNINITIALISED  ((struct oo_timeval*) 1)
@@ -912,12 +944,12 @@ static int ci_udp_sendmsg_wait(ci_netif* ni, ci_udp_state* us,
     if( (flags & MSG_DONTWAIT) ||
         (us->s.b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK|CI_SB_AFLAG_O_NDELAY)) ) {
       ++us->stats.n_tx_eagain;
-      RET_WITH_ERRNO(EAGAIN);
+      return -EAGAIN;
     }
     if( first_time ) {
       first_time = 0;
       if( udp_send_spin ) {
-        max_spin = ni->state->spin_cycles;
+        max_spin = us->s.b.spin_cycles;
         if( us->s.so.sndtimeo_msec ) {
           ci_uint64 max_so_spin = sinf->timeout * IPTIMER_STATE(ni)->khz;
           if( max_so_spin <= max_spin ) {
@@ -933,6 +965,9 @@ static int ci_udp_sendmsg_wait(ci_netif* ni, ci_udp_state* us,
     }
     if( udp_send_spin ) {
       if( now_frc - start_frc < max_spin ) {
+#if CI_CFG_SPIN_STATS
+        ni->state->stats.spin_udp_send++;
+#endif
         if( ci_netif_may_poll(ni) ) {
           if( ci_netif_need_poll_spinning(ni, now_frc) ) {
             if( si_trylock(ni, sinf) )
@@ -955,7 +990,7 @@ static int ci_udp_sendmsg_wait(ci_netif* ni, ci_udp_state* us,
       }
       else if( spin_limit_by_so ) {
         ++us->stats.n_tx_eagain;
-        RET_WITH_ERRNO(EAGAIN);
+        return -EAGAIN;
       }
     }
     else {
@@ -965,7 +1000,7 @@ static int ci_udp_sendmsg_wait(ci_netif* ni, ci_udp_state* us,
           sinf->timeout -= spin_ms;
         else {
           ++us->stats.n_tx_eagain;
-          RET_WITH_ERRNO(EAGAIN);
+          return -EAGAIN;
         }
       }
       ++us->stats.n_tx_block;
@@ -1052,7 +1087,7 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
       ! sinf->stack_locked )
     sinf->stack_locked = ci_netif_trylock(ni);
 
-  first_pkt = ci_netif_pkt_alloc_block(ni, &sinf->stack_locked);
+  first_pkt = ci_netif_pkt_alloc_block(ni, &us->s, &sinf->stack_locked);
   if(CI_UNLIKELY( ci_netif_pkt_alloc_block_was_interrupted(first_pkt) ))
     return -ERESTARTSYS;
   oo_tx_pkt_layout_init(first_pkt);
@@ -1096,7 +1131,7 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
     frag_off += frag_bytes;
     ip->ip_id_be16 = ip_id;
 
-    rc = oo_pkt_fill(ni, &sinf->stack_locked, pf, piov,
+    rc = oo_pkt_fill(ni, &us->s, &sinf->stack_locked, pf, piov,
                      payload_bytes CI_KERNEL_ARG(CI_ADDR_SPC_CURRENT));
     if(CI_UNLIKELY( oo_pkt_fill_failed(rc) ))
       goto fill_failed;
@@ -1107,7 +1142,7 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
     /* This counts the number of fragments not including the first. */
     ++us->stats.n_tx_fragments;
 
-    new_pkt = ci_netif_pkt_alloc_block(ni, &sinf->stack_locked);
+    new_pkt = ci_netif_pkt_alloc_block(ni, &us->s, &sinf->stack_locked);
     if(CI_UNLIKELY( ci_netif_pkt_alloc_block_was_interrupted(new_pkt) )) {
       rc = -ERESTARTSYS;
       goto fill_failed;
@@ -1166,7 +1201,7 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
 
 static
 void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
-                           const struct msghdr* msg, int flags,
+                           const ci_msghdr* msg, int flags,
                            struct udp_send_info* sinf)
 {
   int rc, i, bytes_to_send;
@@ -1208,12 +1243,12 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
       sizeof(ci_udp_hdr) &&
       (us->s.s_flags & CI_SOCK_FLAG_ALWAYS_DF) ) {
     /* Linux does not set SO_ERROR if non-connected && !IP_RECVERR */
+#ifndef __KERNEL__
     if( msg->msg_namelen == 0 ||
         (us->s.so.so_debug & CI_SOCKOPT_FLAG_IP_RECVERR) )
+#endif
       us->s.so_error = EMSGSIZE;
     sinf->rc = -EMSGSIZE;
-    if( sinf->stack_locked )
-      ci_netif_unlock(ni);
     return;
   }
   rc = ci_udp_sendmsg_fill(ni, us, &piov, bytes_to_send, &pf, sinf);
@@ -1227,6 +1262,7 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
       ci_udp_sendmsg_send(ni, us, pf.pkt, flags, sinf);
       ci_netif_pkt_release(ni, pf.pkt);
       ci_netif_unlock(ni);
+      sinf->stack_locked = 0;
     }
     else {
       ci_udp_sendmsg_async_q_enqueue(ni, us, pf.pkt, flags);
@@ -1234,8 +1270,6 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
   }
   else {
     sinf->rc = rc;
-    if( sinf->stack_locked )
-      ci_netif_unlock(ni);
   }
   return;
 
@@ -1257,8 +1291,6 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
   /* There may be insufficient room in the sendq. */
   rc = ci_udp_sendmsg_wait(ni, us, bytes_to_send, flags, sinf);
   if(CI_UNLIKELY( rc != 0 )) {
-    if( sinf->stack_locked )
-      ci_netif_unlock(ni);
     sinf->rc = rc;
     return;
   }
@@ -1270,7 +1302,7 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
 
 
 int ci_udp_sendmsg(ci_udp_iomsg_args *a,
-                   const struct msghdr* msg, int flags)
+                   const ci_msghdr* msg, int flags)
 {
   ci_netif *ni = a->ni;
   ci_udp_state *us = a->us;
@@ -1286,11 +1318,14 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
   sinf.used_ipcache = 0;
   sinf.timeout = us->s.so.sndtimeo_msec;
 
+#if defined(__linux__) && !defined(__KERNEL__)
+  /* TODO: should be done for sun too? */
   if(CI_UNLIKELY( CMSG_FIRSTHDR(msg) != NULL )) {
     struct in_pktinfo* info = NULL;
     if( ci_ip_cmsg_send(msg, &info) != 0 || info != NULL )
       goto send_via_os;
   }
+#endif
 
   if(CI_UNLIKELY( flags & MSG_MORE )) {
     LOG_E(ci_log("%s: MSG_MORE not yet supported", __FUNCTION__));
@@ -1320,7 +1355,10 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
   }
 #endif
 
-  if( msg->msg_namelen == 0 ) {
+#ifndef __KERNEL__
+  if( msg->msg_namelen == 0 )
+#endif
+  {
     /**********************************************************************
      * Connected send.
      */
@@ -1360,6 +1398,7 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
     }
     sinf.ipcache.mtu = us->s.pkt.mtu;
   }
+#ifndef __KERNEL__
   else if(CI_UNLIKELY( msg->msg_name == NULL )) {
     rc = -EFAULT;
     goto error;
@@ -1454,9 +1493,12 @@ int ci_udp_sendmsg(ci_udp_iomsg_args *a,
         goto send_via_os;
     }
   }
+#endif
 
   ci_assert_gt(sinf.ipcache.mtu, 0);
   ci_udp_sendmsg_onload(ni, us, msg, flags, &sinf);
+  if( sinf.stack_locked )
+    ci_netif_unlock(ni);
   if( sinf.rc < 0 )
       CI_SET_ERROR(sinf.rc, -sinf.rc);
   return sinf.rc;

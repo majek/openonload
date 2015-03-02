@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,6 +55,9 @@
 ** ci_addr_spc_id_t.
 */
 
+#ifdef ONLOAD_OFE
+#include "ofe/types_onload.h"
+#endif
 
 
 /*********************************************************************
@@ -222,6 +225,12 @@ typedef union {
     oo_sp             tx_sock_id; /* The socket this pkt is tx'd on:  
                                    * used for tx completion action */
   } udp;
+#ifdef CI_CFG_USERSPACE_PIPE
+  struct {
+    ci_uint32         base;       /* Offset of start of data from dma_start. */
+    ci_uint32         pay_len;    /* This buffer's payload length. */
+  } pipe;
+#endif
 } ci_ip_pkt_fmt_prefix;
 
 
@@ -388,7 +397,6 @@ typedef struct {
 
 
 
-
 /*!
 ** ci_netif_ipid_cb_t
 **
@@ -438,7 +446,7 @@ typedef struct {
 */
 typedef struct {
 #undef OO_STAT
-#define OO_STAT(desc, type, name, kind)  type name;
+#define OO_STAT(desc, type, name, kind)  type name CI_ALIGN(sizeof(type));
 #include <ci/internal/stats_def.h>
 } ci_netif_stats;
 
@@ -449,8 +457,8 @@ typedef struct {
 ** The filter table that demuxes packets to sockets.
 */
 typedef struct {
-  ci_int16  id;
-  ci_int16  route_count;  /* how many lookups pass through this entry? */
+  ci_int32  id;
+  ci_int32  route_count;  /* how many lookups pass through this entry? */
   ci_uint32 laddr;
 } ci_netif_filter_table_entry;
 
@@ -507,12 +515,6 @@ typedef struct {
   /* zero window probe time */
   ci_iptime_t tconst_zwin_max; 
 #define CI_TCP_TCONST_ZWIN_MAX    CI_TCP_TCONST_RTO_MAX
-  
-  /* listen polling timer for retransmission and synrecv timeout */
-  ci_iptime_t tconst_listen_time;
-  ci_int32    listen_synack_retries;
-#define CI_TCP_TCONST_LISTEN_TIME 3000   /* every 3 seconds */
-#define CI_TCP_LISTEN_SYNACK_RETRIES 5   /* send 5 synacks  */
   
   /* PAWs idle timeout (RFC1323 pg22) */
   ci_iptime_t tconst_paws_idle;
@@ -641,7 +643,7 @@ typedef struct {
   ci_ni_dllist_t        free_lists[CI_PIO_BUDDY_MAX_ORDER+1];
   ci_ni_dllist_link     links[1ul<<CI_PIO_BUDDY_MAX_ORDER];
   ci_uint8              orders[1ul<<CI_PIO_BUDDY_MAX_ORDER];
-  int                   initialised;
+  ci_int32              initialised;
 } ci_pio_buddy_allocator;
 
 
@@ -677,10 +679,10 @@ typedef struct {
 # define CI_EPLOCK_NETIF_NEED_WAKE         0x08000000
   /* need to wake someone waiting for free packet buffers */
 # define CI_EPLOCK_NETIF_PKT_WAKE          0x00100000
-  /* need to reinitialise VIs after NIC reset */
-# define CI_EPLOCK_NETIF_RESET_STACK       0x00200000
+  /* need to process postponed sw filter updates */
+# define CI_EPLOCK_NETIF_SWF_UPDATE        0x00200000
   /* mask for the above flags that must be handled before dropping lock */
-# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0x0f700000
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0x0f300000
   /* someone's waiting for free packet buffers */
 # define CI_EPLOCK_NETIF_IS_PKT_WAITER     0x00800000
   /* these bits are the head of a linked list of sockets */
@@ -724,6 +726,7 @@ typedef struct {
   CI_ULCONST ci_uint8   vi_arch;
   CI_ULCONST ci_uint8   vi_variant;
   CI_ULCONST ci_uint8   vi_revision;
+  CI_ULCONST ci_uint8   vi_channel;
   CI_ULCONST char       pci_dev[20];
   /* Transmit overflow queue.  Packets here are ready to send. */
   oo_pktq               dmaq;
@@ -767,19 +770,22 @@ struct ci_netif_state_s {
   CI_ULCONST ci_uint32  max_mss;
 
   ci_uint32  flags;
-  /* The following flags may only be set during initialisation so need
-   * not be protected by the netif lock.
-   */
 # define CI_NETIF_FLAG_DEBUG              0x1 /* driver is debug build   */
 # define CI_NETIF_FLAG_ONLOAD_UNSUPPORTED 0x2 /* OOL unsupported on this h/w */
+#if CI_CFG_FD_CACHING
+# define CI_NETIF_FLAG_SOCKCACHE_FORKED   0x4 /* Post-fork w/ socket caching */
+#endif
 
   /* To give insight into runtime errors detected.  See also copy in
    * ci_netif.
    */
   ci_uint32             error_flags;
-# define CI_NETIF_ERROR_POST_POLL_LIST    0x1
-# define CI_NETIF_ERROR_LOOP_PKTS_LIST    0x2
-# define CI_NETIF_ERROR_ASSERT            0x4
+# define CI_NETIF_ERROR_POST_POLL_LIST      0x01
+# define CI_NETIF_ERROR_LOOP_PKTS_LIST      0x02
+# define CI_NETIF_ERROR_UDP_SEND_PKTS_LIST  0x04
+# define CI_NETIF_ERROR_ASSERT              0x08
+# define CI_NETIF_ERROR_REMAP               0x10
+# define CI_NETIF_ERROR_SYNRECV_TABLE       0x20
 
   /* The bits of this field are used for eventq-primed flags. */
 
@@ -817,6 +823,7 @@ struct ci_netif_state_s {
   /** List of packets sent via loopback in order of transmit;
    * it should be reverted when delivering to receiver. */
   oo_pkt_p              looppkts;
+  ci_int32              n_looppkts;
 
   /* Number of packets that are in use by the RX path.  This includes
   ** packets posted as RX descriptors, and those queued in socket
@@ -876,7 +883,10 @@ struct ci_netif_state_s {
   ci_ip_timer_state     iptimer_state CI_ALIGN(8);
 
   ci_ip_timer           timeout_tid CI_ALIGN(8); /**< time-out timer */
-  ci_ni_dllist_t        timeout_q;       /**< time-out queue */
+#define OO_TIMEOUT_Q_TIMEWAIT 0
+#define OO_TIMEOUT_Q_FINWAIT  1
+#define OO_TIMEOUT_Q_MAX      2
+  ci_ni_dllist_t        timeout_q[OO_TIMEOUT_Q_MAX]; /**< time-out queues */
 
   /* List of sockets that may have reapable buffers. */
   ci_ni_dllist_t        reap_list;
@@ -895,42 +905,37 @@ struct ci_netif_state_s {
   ci_int32              deferred_free_eps_head; /**< Endpoints that could be 
                                                    freed (atomic) */
 
-#if CI_CFG_USERSPACE_PIPE
-  oo_sp                 free_pipe_bufs;  /**< Free pipe buffer blocks */
-#endif
-
   /* Max number of ep bufs is CI_CFG_NETIF_MAX_ENDPOINTS_MAX */
   ci_uint32  max_ep_bufs;                /**< Upper limit of end points */
   CI_ULCONST ci_uint32  n_ep_bufs;       /**< Number of available endpoints */
-#if CI_CFG_USERSPACE_PIPE
-  /*< Bit array: ep_buf is endpoint?
-   * CI_CFG_NETIF_MAX_ENDPOINTS_MAX bits ==
-   * CI_CFG_NETIF_MAX_ENDPOINTS_MAX / 32 ci_uint32 ==
-   * 1024 ci_uint32 for CI_CFG_NETIF_MAX_ENDPOINTS_MAX=32k == 4K
-   */
-  ci_uint32  ep_buf_is_ep[CI_CFG_NETIF_MAX_ENDPOINTS_MAX / 32];
-#endif
+
+  ci_ni_dllist_t        ready_lists[CI_CFG_N_READY_LISTS];
+#define CI_NI_READY_LIST_FLAG_WAKE   1 /* Requiest wakeup when something happens */
+#define CI_NI_READY_LIST_FLAG_RESCAN 2 /* Re-scan for events */
+  ci_uint32             ready_list_flags[CI_CFG_N_READY_LISTS];
+  ci_uint32             ready_lists_in_use;
 
 #if CI_CFG_PIO
   CI_ULCONST ci_uint32  pio_bufs_ofs;    /**< Offset to pio_buffers */
 #endif
   CI_ULCONST ci_uint32  ep_ofs;          /**< Offset to endpoints array */
-  CI_ULCONST ci_uint32  synrecv_ofs;     /**< Offset to listenq array */
+  CI_ULCONST ci_uint32  aux_ofs;         /**< Offset to listenq array */
   
-  oo_p                  free_synrecvs;    /**< Free list of synrecv bufs. */
+  oo_p                  free_aux_mem;    /**< Free list of synrecv bufs. */
 
 #if CI_CFG_FD_CACHING
-  ci_int32              epcache_n;       /**< Num entries avail on ep-cache */
+  ci_uint32             cache_avail_stack; /**< Num entries avail on cache */
 #endif
 
   ci_netif_config       conf CI_ALIGN(8);
   ci_netif_config_opts  opts CI_ALIGN(8);
 
   /* Some config values derived from opts. */
-  ci_uint64             spin_cycles         CI_ALIGN(8);
+  ci_uint64             sock_spin_cycles    CI_ALIGN(8);
   ci_uint64             buzz_cycles         CI_ALIGN(8);
   ci_uint64             timer_prime_cycles  CI_ALIGN(8);
 
+  CI_ULCONST ci_uint32  cplane_bytes;
   CI_ULCONST ci_uint32  io_mmap_bytes;
   CI_ULCONST ci_uint32  buf_mmap_bytes;
 #if CI_CFG_PIO
@@ -959,7 +964,7 @@ struct ci_netif_state_s {
   
   ci_uint32             defer_work_count;
 
-  CI_ULCONST ci_uint8   syncookie_salt[16];
+  CI_ULCONST ci_uint8   hash_salt[16];
 
 #if CI_CFG_STATS_NETIF
   ci_netif_stats        stats;
@@ -993,10 +998,6 @@ struct oo_waitable_lock {
   volatile ci_uint32 wl_val;
 # define OO_WAITABLE_LK_LOCKED           0x10000000
 # define OO_WAITABLE_LK_NEED_WAKE        0x20000000
-#if CI_CFG_USERSPACE_PIPE
-# define OO_WAITABLE_LK_PIPE_RX          0x4000000
-# define OO_WAITABLE_LK_PIPE_TX          0x8000000
-#endif
 };
 
 
@@ -1033,6 +1034,9 @@ typedef struct {
   ** struct to ensure consistent alignement and padding on 64 and 32 bit
   */
   ci_sleep_seq_t sleep_seq CI_ALIGN(8);
+
+  /* Per-socket SO_BUSY_POLL settings */
+  ci_uint64             spin_cycles CI_ALIGN(8);
 
 #if CI_CFG_SOCKP_IS_PTR
   ci_int32              bufid;
@@ -1090,6 +1094,39 @@ typedef struct {
   /* Set when connected to a file descriptor, but not yet available for use. */
 #define CI_SB_AFLAG_NOT_READY           0x200
 #define CI_SB_AFLAG_NOT_READY_BIT       9u
+  /* Set when cached, so should not be freed */
+#define CI_SB_AFLAG_IN_CACHE            0x400
+#define CI_SB_AFLAG_IN_CACHE_BIT        10u
+  /* Set when in cache, but no longer attached to an fd */
+#define CI_SB_AFLAG_IN_CACHE_NO_FD      0x800
+#define CI_SB_AFLAG_IN_CACHE_NO_FD_BIT  11u
+  /* O_CLOEXEC -- this is only needed for cached sockets, to determine whether
+   * the old value is correct on re-use.  As such, it is only guaranteed to
+   * be correct for sockets which may be cached.
+   */
+#define CI_SB_AFLAG_O_CLOEXEC           0x1000
+#define CI_SB_AFLAG_O_CLOEXEC_BIT       12u
+
+  /* Handover or move_fd */
+#define CI_SB_AFLAG_MOVED_AWAY          0x2000
+#define CI_SB_AFLAG_MOVED_AWAY_BIT      13u
+  /* Handover or move_fd while in epoll set */
+#define CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL 0x4000
+#define CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT 14u
+
+#ifndef NDEBUG
+  /* Listening socket about to disappear but not yet orphaned */
+#define CI_SB_AFLAG_LISTEN_CLOSING      0x8000
+#define CI_SB_AFLAG_LISTEN_CLOSING_BIT  15u
+#endif
+
+#if CI_CFG_FD_CACHING
+  /* Flags which are preserved for a cached socket.  */
+#define CI_SB_AFLAG_CACHE_PRESERVE     (CI_SB_AFLAG_IN_CACHE | \
+                                        CI_SB_AFLAG_IN_CACHE_NO_FD | \
+                                        CI_SB_AFLAG_O_NONBLOCK | \
+                                        CI_SB_AFLAG_O_CLOEXEC)
+#endif
 
   /* Link field for [ci_netif_state::post_poll_list]. */
   ci_ni_dllist_link     post_poll_link;
@@ -1111,8 +1148,27 @@ typedef struct {
   **   - ci_netif_state::async_completion_q
   */
 
+  /* State for maintaining ci_netif_state::ready_eps_list[ready_list_id]
+   * - eitem and ready_list_id are owned by the epoll set, and only modified
+   *   via epoll during the socket's lifetime
+   * - eitem is ignored by the stack - this is a real pointer only valid in the
+   *   address space of the epoll using process.
+   * - eitem_pid is equivalent in usage restrictions to the eitem field, but is
+   *   used by the user level to ensure that the pointer is valid for it.
+   * - ready_list_id is used by the stack to identify the appropriate ready list
+   * - ready_link is shared between the stack and epoll, and may only be
+   *   modified with the stack lock held.
+   */
+  ci_ni_dllist_link     ready_link;
+  ci_int32              ready_list_id;
+  ci_user_ptr_t         eitem;
+  ci_int32              eitem_pid;
+
   ci_int32              sigown;  /** pid that receives signals from this */
 
+  ci_uint32             moved_to_stack_id;
+#define OO_STACK_ID_INVALID ((ci_uint32)(-1))
+  oo_sp                 moved_to_sock_id;
 } citp_waitable;
 
 
@@ -1209,8 +1265,6 @@ struct oo_sock_cplane {
 struct ci_sock_cmn_s {
   citp_waitable         b;
 
-  oo_sp                 local_peer; /**< Id of the local peer socket
-                                         in case of loopback connection */
   ci_uint32             s_flags CI_ALIGN(8);
 #define CI_SOCK_FLAG_REUSEADDR    0x00000001   /* socket SO_REUSEADDR option */
 #define CI_SOCK_FLAG_KALIVE       0x00000002   /* socket SO_KEEPALIVE option */
@@ -1262,7 +1316,8 @@ struct ci_sock_cmn_s {
   (CI_SOCK_FLAG_KALIVE | CI_SOCK_FLAG_OOBINLINE | CI_SOCK_FLAG_LINGER |     \
    CI_SOCK_FLAG_PMTU_DO | CI_SOCK_FLAG_ALWAYS_DF |                          \
    CI_SOCK_FLAG_BROADCAST | CI_SOCK_FLAG_SET_SNDBUF | CI_SOCK_FLAG_SET_RCVBUF)
-#define CI_SOCK_AFLAG_TCP_INHERITED CI_SOCK_AFLAG_CORK
+#define CI_SOCK_AFLAG_TCP_INHERITED \
+    (CI_SOCK_AFLAG_CORK | CI_SOCK_AFLAG_NODELAY)
 
   struct oo_sock_cplane cp;
 
@@ -1353,10 +1408,16 @@ struct ci_sock_cmn_s {
 
   ci_ni_dllist_link     reap_link;
 
-  ci_ip_pkt_queue       timestamp_q;
-  oo_pkt_p              timestamp_q_extract; 
+#ifdef ONLOAD_OFE
+  /* Start point for OFE engine */
+  ofe_addr ofe_code_start;
+#endif
 };
 
+typedef struct {
+  ci_ip_pkt_queue       queue;
+  oo_pkt_p              extract; 
+} ci_timestamp_q;
 
 
 /*********************************************************************
@@ -1476,6 +1537,8 @@ struct  ci_udp_state_s {
 #endif
   ci_udp_recv_q recv_q;
 
+  ci_timestamp_q timestamp_q;
+
   /*! A list of buffers to support receiving datagrams via kernel in zc API */ 
   oo_pkt_p zc_kernel_datagram;
   /*! Number of buffers present in zc_kernel_datagram list */
@@ -1512,30 +1575,31 @@ struct  ci_udp_state_s {
 ***************************** PIPEs  ********************************
 *********************************************************************/
 
-/* Structure represents pipe buffer when it's attached to free_pipe_bufs
- * list in netif state. Pipe buffers are allocated from the same memory as
- * socket buffers. They are allocated and freed in groups, so when free buffers
- * are added to the list only first buffer and it's id - all others go in
- * sequence of a given length. */
-struct oo_pipe_buf {
-  oo_sp id;              /*!< Id of the first buffer in free sequence */
-  oo_sp next;            /*!< Next sequence head (not next buffer
-                          * in this one!) */
-  ci_uint32  length;     /*!< Number of socket buffers in this chunk of
-                          * pipe buffers */
-};
+typedef struct oo_pipe_buf_list_s {
+  oo_pkt_p  pp;
+} oo_pipe_buf_list_t;
+
 
 struct oo_pipe {
   citp_waitable         b;
 
-  struct {
-    ci_uint32 bufid;
-    ci_uint32 offset;
-  } read_ptr;
+  /* The packet buffers for the pipe's data are kept in a list linked by
+   * pkt->next. The illusion that the list is circular is maintained by
+   * oo_pipe_next_buf. */
+  oo_pipe_buf_list_t    pipe_bufs;
 
+  /* The read pointer is protected by the socket lock. */
   struct {
-    ci_uint32 bufid;
+    oo_pkt_p  pp;
     ci_uint32 offset;
+  } read_ptr CI_ALIGN(256);
+
+  /* The write pointer does not have its own offset as the buffers store the
+   * lengths of their payloads. However, it does need to be able to to identify
+   * the case where the pipe is full: in this case we keep a pointer to the
+   * buffer into which we would like to advance. */
+  struct {
+    oo_pkt_p  pp, pp_wait;
   } write_ptr;
 
   /* These flags should be modified with atomic operations */
@@ -1552,19 +1616,24 @@ struct oo_pipe {
 #define CI_PFD_AFLAG_WRITER_SHIFT   4
 #define CI_PFD_AFLAG_WRITER_MASK    0x70
 
+  ci_uint32 bufs_num;
 
-  /* Initial number of pipe buffers to be allocated */
-#define OO_PIPE_INITIAL_BUFS 8
-  /* Amount of buffers by which total number of pipe buffers will
-   * be incremented in case of buffers shortage */
-#define OO_PIPE_BURST_BUFS   40
-  /* Maximum number of pipe buffers which can be allocated for
-   * a pipe */
-#define OO_PIPE_MAX_BUFS     128
-#define OO_PIPE_BUF_SIZE EP_BUF_SIZE
-  ci_int32 buffer_idxs [OO_PIPE_MAX_BUFS]; /*!< List of id's of buffers shared
-                                            * between userspace and kernel*/
-  ci_uint32 bufs_num;  /*!< Number of buffers in the pipe */
+  /* Maximum size of the pipe. It is not always enforced */
+  ci_uint32 bufs_max;
+
+#define OO_PIPE_BUF_DEFAULT_BASE   CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start)
+#define OO_PIPE_BUF_MAX_SIZE       (CI_CFG_PKT_BUF_SIZE - \
+                                    OO_PIPE_BUF_DEFAULT_BASE)
+#define OO_PIPE_SIZE_TO_BUFS(size) (((size) + OO_PIPE_BUF_MAX_SIZE - 1) / \
+                                    OO_PIPE_BUF_MAX_SIZE)
+
+/* Enough buffers to allow atomic PAGE_SIZE write (POSIX.1-2001),
+ * and additional buffer for reading */
+#define OO_PIPE_MIN_SIZE      CI_PAGE_SIZE
+#define OO_PIPE_MIN_BUFS      (OO_PIPE_SIZE_TO_BUFS(OO_PIPE_MIN_SIZE) + 1)
+#define OO_PIPE_MAX_BUFS      (OO_PIPE_SIZE_TO_BUFS(CI_CFG_MAX_PIPE_SIZE) + 1)
+#define OO_PIPE_DEFAULT_SIZE  (128 * OO_PIPE_BUF_MAX_SIZE)
+#define OO_PIPE_INITIAL_BUFS  OO_PIPE_MIN_BUFS
 
   /* in future pipe capacity may be up to 1048576 - define from linux kernel,
    * so 32-bits are enough, rolling over 0 is not a problem. */
@@ -1572,6 +1641,8 @@ struct oo_pipe {
   volatile ci_uint32 bytes_removed;         /*!< Total number of bytes removed
                                              * from the pipe */
 };
+
+
 #endif
 
 
@@ -1594,8 +1665,6 @@ typedef struct {
 ** accept queue.
 */
 typedef struct {
-  ci_ni_dllist_link    link;      /* Link into listenq[] or free_synrecvs */
-
   ci_uint16            r_port;    /* remote port                         */
   ci_uint32            l_addr;    /* local address                       */
   ci_uint32            r_addr;    /* remote address                      */
@@ -1605,7 +1674,9 @@ typedef struct {
   ci_uint32            snd_isn;   /* initial sequence number for SYN-ACK */
   ci_uint8             rcv_wscl;  /* advertised window scale in SYN-ACK  */
   ci_int8              retries;   /* number of times SYN-ACK sent        */
-  ci_int8              acked;     /* ACK received, TCP_DEFER_ACCEPT set  */
+#define CI_FLAG_TSR_RETRIES_ACKED 0x80 /* ACK have been received */
+#define CI_FLAG_TSR_RETRIES_MASK  0x7f
+  ci_uint16            amss;      /* Advertised mss */
 
   ci_tcp_options       tcpopts;   /* TCP options specific for SYN        */
   ci_uint32            tspeer;    /* Timestamp from peer                 */
@@ -1614,8 +1685,35 @@ typedef struct {
   ci_iptime_t          timeout;   /* timeout for resending SYN-ACK       */
 
   oo_sp                local_peer;/* id of the peer for lo connection    */
+
+  ci_uint32            hash;        /* hash value for lookup table       */
+  oo_p                 bucket_link; /* link used in hash buckets         */
 } ci_tcp_state_synrecv;
 
+/* Hash table for synrecv embrionic connections. */
+#define CI_TCP_LISTEN_BUCKET_S    4
+#define CI_TCP_LISTEN_BUCKET_SIZE (1 << CI_TCP_LISTEN_BUCKET_S)
+typedef struct {
+  oo_p bucket[CI_TCP_LISTEN_BUCKET_SIZE];
+} ci_tcp_listen_bucket;
+
+/* This chunk of memory should be exactly cacheline in size. */
+#define CI_AUX_MEM_SIZE 128
+typedef struct {
+  ci_ni_dllist_link    link; /* Link into free_aux_mem or into other lists */
+  ci_uint32            type; /* Type in the union */
+#define CI_TCP_AUX_TYPE_SYNRECV 1
+#define CI_TCP_AUX_TYPE_BUCKET  2
+
+  union {
+    ci_tcp_state_synrecv synrecv;
+    ci_tcp_listen_bucket bucket;
+  } u;
+
+  /* This is not a real member.  It just brings the sizeof(ci_ni_aux_mem)
+   * to the cacheline size. */
+  ci_uint8             align[0] CI_ALIGN(CI_AUX_MEM_SIZE);
+} ci_ni_aux_mem;
 
 
 /* TCP options which must survive when CLOSED endpoint (i.e. ci_tcp_state)
@@ -1667,6 +1765,9 @@ struct ci_tcp_state_s {
   ci_sock_cmn         s;
   ci_tcp_socket_cmn   c;
 
+  /* Id of the local peer socket in case of loopback connection */
+  oo_sp                 local_peer;
+
   /* List of allocated templated sends on this socket */
   oo_pkt_p            tmpl_head;
 
@@ -1704,6 +1805,9 @@ struct ci_tcp_state_s {
   /* SO_SNDBUF measured in packet buffers. */
   ci_int32            so_sndbuf_pkts;
 
+  /* the part of SO_RVCBUF used as window */
+  ci_uint32           rcv_window_max;
+
   ci_uint32           send_in;    /**< Packets added directly to send queue */
   ci_uint32           send_out;   /**< Packets removed from send queue */
   ci_ip_pkt_queue     send;       /**< Send queue. */
@@ -1729,6 +1833,8 @@ struct ci_tcp_state_s {
                                    * CI_ILL_END used for no second block;
                                    * CI_ILL_UNUSED when no DSACK present */
 
+  ci_timestamp_q      timestamp_q;/**< TX timestamp queue */
+
   /* Next field is needed to support PathMTU discovery functionality */
   ci_uint32            snd_check;   /* equal to snd_nxt at beginning of
                                        tested interval */
@@ -1740,6 +1846,7 @@ struct ci_tcp_state_s {
   ci_uint32            snd_wl1;     /* sequence number of received
                                      * segment that updated snd_max */
 #endif
+  ci_uint32            snd_delegated; /* bytes sent via delegated_send() */
 
   ci_uint32            fast_path_check;
   /* If in a state in which we can execute the TCP receive fast path, then
@@ -1775,10 +1882,10 @@ struct ci_tcp_state_s {
   ci_uint32            rcv_up;      /* receive urgent pointer, holds the
                                        seq num of the OOB byte            */
 
-  ci_uint32            rcv_wscl;    /* receive window scaling             */
-  ci_uint32            snd_wscl;    /* send window scaling                */
+  ci_uint8             rcv_wscl;    /* receive window scaling             */
+  ci_uint8             snd_wscl;    /* send window scaling                */
 
-  ci_uint32            congstate;   /* congestion status flag             */
+  ci_uint16            congstate;   /* congestion status flag             */
 # define CI_TCP_CONG_OPEN       0x0 /* opening congestion window          */
 # define CI_TCP_CONG_RTO        0x1 /* RTO timer has fired                */
 # define CI_TCP_CONG_RTO_RECOV  0x2 /* Recovery after RTO                 */
@@ -1913,8 +2020,9 @@ struct ci_tcp_state_s {
   /* Used to cache TCP-state and associated fds to improve accept performance */
   ci_int32             cached_on_fd;
   ci_int32             cached_on_pid;
-  /* Link into either the epcache_pending, the epcache_cache, the
-     epcache_acceptex, or none */
+  /* Link into either the epcache_pending, the epcache_cache, epcache_connected,
+   * or none 
+   */
   ci_ni_dllist_link    epcache_link;
 #endif
 
@@ -1945,6 +2053,9 @@ typedef struct {
   ci_uint32            n_syncookie_ack_ts_rej;
   ci_uint32            n_syncookie_ack_hash_rej;
   ci_uint32            n_syncookie_ack_answ;
+#if CI_CFG_FD_CACHING
+  ci_uint32            n_sockcache_hit;
+#endif
 } ci_tcp_socket_listen_stats;
 
 
@@ -1968,8 +2079,12 @@ struct ci_tcp_socket_listen_s {
    * fully fledged end-point.  We call this list the listenq
    */
   ci_int32             n_listenq;
-  ci_int32             n_listenq_new;
-  ci_ni_dllist_t       listenq[CI_CFG_TCP_LISTENQ_BUCKETS];
+  ci_int32             n_listenq_new; /* length of listenq[0] */
+  ci_ni_dllist_t       listenq[CI_CFG_TCP_SYNACK_RETRANS_MAX + 1];
+  /* index is the number of retransmit. */
+
+  /* Hash table for listenq lookup */
+  oo_p                 bucket;
 
 #if CI_CFG_FD_CACHING
   /* We cache EPs between close and accept to speed up passive opens.  See
@@ -1992,6 +2107,16 @@ struct ci_tcp_socket_listen_s {
    * make accept nice and quick.
    */
   ci_ni_dllist_t       epcache_pending;
+
+  /* We remember which EPs were accepted from this listening socket.  This is
+   * necessary to update the hw filter information if we close the listening
+   * socket.  We can't update the hw filter information on connection
+   * establishment as we need to avoid entering the kernel.
+   */
+  ci_ni_dllist_t       epcache_connected;
+
+  /* Number of available cache entries for this socket. */
+  ci_uint32            cache_avail_sock;
 #endif
 
   /* timer to poll the listen queue for retransmits */
@@ -2000,22 +2125,14 @@ struct ci_tcp_socket_listen_s {
 #if CI_CFG_STATS_TCP_LISTEN
   ci_tcp_socket_listen_stats  stats;
 #endif
+
+#ifdef ONLOAD_OFE
+  /* ofe_code_start for the new connections */
+  ofe_addr             ofe_promote;
+#endif
 };
 
 
-
-/*********************************************************************
-***************************** Alien  ********************************
-*********************************************************************/
-
-struct oo_alien_ep {
-  citp_waitable b;
-  ci_uint32 stack_id;
-#define OO_STACK_ID_INVALID ((ci_uint32)(-1))
-  oo_sp     sock_id;
-  ci_uint32 flags;
-#define OO_ALIEN_FLAGS_IN_EPOLL 1
-};
 
 /*!
 ** citp_waitable_obj
@@ -2034,7 +2151,6 @@ union citp_waitable_obj_u {
 #if CI_CFG_USERSPACE_PIPE
   struct oo_pipe        pipe;
 #endif
-  struct oo_alien_ep    alien;
 };
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -131,24 +131,142 @@ oof_cb_stack_id(struct tcp_helper_resource_s* stack)
 }
 
 
+void
+oof_cb_callback_set_filter(struct oof_socket* skf)
+{
+  SP_TO_SOCK_CMN(&oof_cb_socket_stack(skf)->netif,
+                 oof_cb_socket_id(skf))->s_flags |= CI_SOCK_FLAG_FILTER;
+}
+
+
+
+struct oof_cb_sw_filter_op {
+  struct oof_cb_sw_filter_op *next;
+  oo_sp sock_id;
+  unsigned laddr;
+  unsigned raddr;
+  int lport;
+  int rport;
+  int protocol;
+  enum {
+    OOF_CB_SW_FILTER_OP_ADD,
+    OOF_CB_SW_FILTER_OP_REMOVE
+  } op;
+};
+
+
+void
+oof_cb_sw_filter_apply(ci_netif* ni)
+{
+  struct oof_cb_sw_filter_op* op;
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  spin_lock_bh(&ni->swf_update_lock);
+  for( op = ni->swf_update_first; op != NULL; op = ni->swf_update_first) {
+
+    ni->swf_update_first = op->next;
+    if( op->next == NULL )
+      ni->swf_update_last = NULL;
+    spin_unlock_bh(&ni->swf_update_lock);
+
+    if( op->op == OOF_CB_SW_FILTER_OP_ADD ) {
+      ci_netif_filter_insert(ni, op->sock_id, op->laddr, op->lport,
+                             op->raddr, op->rport, op->protocol);
+    }
+    else {
+      ci_netif_filter_remove(ni, op->sock_id, op->laddr, op->lport,
+                             op->raddr, op->rport, op->protocol);
+    }
+
+    ci_free(op);
+    spin_lock_bh(&ni->swf_update_lock);
+  }
+  spin_unlock_bh(&ni->swf_update_lock);
+}
+
+static void
+oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
+                          unsigned raddr, int rport, int protocol, int op_op)
+{
+  ci_netif* ni = skf_to_ni(skf);
+  struct oof_cb_sw_filter_op* op = CI_ALLOC_OBJ(struct oof_cb_sw_filter_op);
+  
+  if( op == NULL ) {
+    /* Linux complains about failed allocations */
+    return;
+  }
+
+  op->sock_id = OO_SP_FROM_INT(ni, skf_to_ep(skf)->id);
+  op->laddr = laddr;
+  op->raddr = raddr;
+  op->lport = lport;
+  op->rport = rport;
+  op->protocol = protocol;
+  op->op = op_op;
+
+  op->next = NULL;
+
+  spin_lock_bh(&ni->swf_update_lock);
+  if( ni->swf_update_last == NULL )
+    ni->swf_update_first = op;
+  else
+    ni->swf_update_last->next = op;
+  ni->swf_update_last = op;
+  spin_unlock_bh(&ni->swf_update_lock);
+
+  if( ef_eplock_trylock_and_set_flags(&ni->state->lock,
+                                      CI_EPLOCK_NETIF_SWF_UPDATE) )
+    ci_netif_unlock(ni);
+}
+
 /* Fixme: most callers of oof_cb_sw_filter_insert do not check rc. */
 int
 oof_cb_sw_filter_insert(struct oof_socket* skf, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol)
+                        unsigned raddr, int rport, int protocol,
+                        int stack_locked)
 {
   ci_netif* ni = skf_to_ni(skf);
-  return ci_netif_filter_insert(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
+  int rc = 0;
+
+  ci_assert(!stack_locked || ci_netif_is_locked(ni));
+
+  if( stack_locked || ci_netif_trylock(ni) ) {
+    rc = ci_netif_filter_insert(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
                                 laddr, lport, raddr, rport, protocol);
+    if( ! stack_locked )
+      ci_netif_unlock(ni);
+  }
+  else
+    oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
+                              OOF_CB_SW_FILTER_OP_ADD);
+  return rc;
 }
 
 
 void
 oof_cb_sw_filter_remove(struct oof_socket* skf, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol)
+                        unsigned raddr, int rport, int protocol,
+                        int stack_locked)
 {
   ci_netif* ni = skf_to_ni(skf);
-  ci_netif_filter_remove(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
-                         laddr, lport, raddr, rport, protocol);
+
+  if( skf->sf_flags & OOF_SOCKET_SW_FILTER_WAS_REMOVED )
+    return;
+
+  /* We MAY call this function with incorrect stack_locked flag
+   * if OOF_SOCKET_SW_FILTER_WAS_REMOVED flag is set. */
+  ci_assert(!stack_locked || ci_netif_is_locked(ni));
+
+  if( stack_locked || ci_netif_trylock(ni) ) {
+    ci_netif_filter_remove(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
+                           laddr, lport, raddr, rport, protocol);
+    if( ! stack_locked )
+      ci_netif_unlock(ni);
+  }
+  else
+    oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
+                              OOF_CB_SW_FILTER_OP_REMOVE);
 }
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -78,7 +78,7 @@ void citp_log_fn_ul(const char* msg)
 void citp_log_fn_drv(const char* msg)
 {
   if( citp.log_fd < 0 ) {
-    if( ef_onload_driver_open(&citp.log_fd, 1) )  return;
+    if( ef_onload_driver_open(&citp.log_fd, OO_STACK_DEV, 1) )  return;
     if( citp_fdtable.table )
       citp_fdtable.table[citp.log_fd].fdip=fdi_to_fdip(&citp_the_reserved_fd);
     /* just to be sure: */

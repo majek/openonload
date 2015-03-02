@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -26,9 +26,6 @@
 
 #include "ef_vi_internal.h"
 #include "driver_access.h"
-#include "logging.h"
-#include "efch_intf_ver.h"
-#include <poll.h>
 
 
 int ef_vi_prime(ef_vi* vi, ef_driver_handle dh, unsigned current_ptr)

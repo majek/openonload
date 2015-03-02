@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -127,10 +127,9 @@ void citp_signal_run_pending(citp_signal_info *our_info)
   LOG_SIG(log("%s: start", __FUNCTION__));
   ci_wmb();
   ci_assert_equal(our_info->inside_lib, 0);
-  ci_assert(our_info->run_pending);
-    
-  our_info->run_pending = 0;
-  ci_wmb();
+  ci_assert(our_info->aflags & OO_SIGNAL_FLAG_HAVE_PENDING);
+
+  ci_atomic32_and(&our_info->aflags, ~OO_SIGNAL_FLAG_HAVE_PENDING);
   for( i = 0; i < OO_SIGNAL_MAX_PENDING; i++ ) {
     siginfo_t saved_info;
     void *saved_context;
@@ -144,14 +143,16 @@ void citp_signal_run_pending(citp_signal_info *our_info)
       memcpy(&saved_info, &our_info->signals[i].saved_info,
              sizeof(saved_info));
     signum = our_info->signals[i].signum;
-    ci_mb();
     if( ci_cas32_fail(&our_info->signals[i].signum, signum, 0) )
       break;
-    our_info->need_restart =
-        !!citp_signal_run_app_handler(
+
+    if( citp_signal_run_app_handler(
                 signum,
                 saved_context == NULL ? NULL : &saved_info,
-                saved_context);
+                saved_context) )
+      ci_atomic32_or(&our_info->aflags, OO_SIGNAL_FLAG_NEED_RESTART);
+    else
+      ci_atomic32_and(&our_info->aflags, ~OO_SIGNAL_FLAG_NEED_RESTART);
   }
   LOG_SIG(log("%s: end", __FUNCTION__));
   errno = old_errno;
@@ -191,8 +192,7 @@ ci_inline void citp_signal_set_pending(int signum, siginfo_t *info,
     if( citp_signal_data[signum-1].flags & SA_ONESHOT )
       sigaction(signum, NULL, NULL);
 
-    ci_wmb();
-    our_info->run_pending = 1;
+    ci_atomic32_or(&our_info->aflags, OO_SIGNAL_FLAG_HAVE_PENDING);
     return;
   }
 
@@ -215,7 +215,7 @@ ci_inline void citp_signal_run_now(int signum, siginfo_t *info,
 
   /* Try to keep order: old signals first, and need_restart is from the
    * last one */
-  if (our_info && our_info->run_pending)
+  if (our_info && (our_info->aflags & OO_SIGNAL_FLAG_HAVE_PENDING))
     citp_signal_run_pending(our_info);
 
   need_restart = citp_signal_run_app_handler(signum, info, context);
@@ -226,7 +226,10 @@ ci_inline void citp_signal_run_now(int signum, siginfo_t *info,
   if (our_info) {
     LOG_SIG(log("%s: SIGNAL %d - set need restart flag to %d", __FUNCTION__,
                 signum, need_restart));
-    our_info->need_restart = !!need_restart;
+    if( need_restart )
+      ci_atomic32_or(&our_info->aflags, OO_SIGNAL_FLAG_NEED_RESTART);
+    else
+      ci_atomic32_and(&our_info->aflags, ~OO_SIGNAL_FLAG_NEED_RESTART);
   }
 }
 
@@ -259,14 +262,15 @@ void citp_signal_intercept(int signum, siginfo_t *info, void *context)
 static void citp_signal_terminate(int signum, siginfo_t *info, void *context)
 {
   int fd;
+  int rc;
 
   /* get any Onload fd to call ioctl */
-  ef_onload_driver_open(&fd, 1);
+  rc = ef_onload_driver_open(&fd, OO_STACK_DEV, 1);
 
   /* Die now:
    * _exit sets incorrect status in waitpid(), so we should try to exit via
    * signal.  Use _exit() if there is no other way. */
-  if( fd >= 0 )
+  if( rc == 0 )
     oo_resource_op(fd, OO_IOC_DIE_SIGNAL, &signum);
   else
     _exit(128 + signum);
@@ -349,7 +353,6 @@ int oo_spinloop_run_pending_sigs(ci_netif* ni, citp_waitable* w,
                                  citp_signal_info* si, int have_timeout)
 {
   int inside_lib;
-  ci_assert_gt(si->inside_lib, 0);
   if( have_timeout )
     return -EINTR;
   if( w )
@@ -362,7 +365,7 @@ int oo_spinloop_run_pending_sigs(ci_netif* ni, citp_waitable* w,
   ci_compiler_barrier();
   if( w )
     ci_sock_lock(ni, w);
-  if( ! si->need_restart )
+  if( ~si->aflags & OO_SIGNAL_FLAG_NEED_RESTART )
     /* handler sets need_restart, exit if no restart is necessary */
     return -EINTR;
   return 0;

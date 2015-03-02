@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -616,76 +616,6 @@ struct pci_bus * pci_add_new_bus(struct pci_bus *parent, struct pci_dev *dev, in
 #define LINUX_DEVICE_REGISTER_EXPORTED
 #endif
 
-
-/*--------------------------------------------------------------------
- *
- * oo_clone_fd()
- *
- *--------------------------------------------------------------------*/
-
-/* Clone filp to a new fd.  As long as filp is one of ours, this is like
-** doing open ("/dev/efab0"), except you don't need access to /dev/efab0
-** (i.e. works independently of NIC, and works if you've been chroot-ed to
-** a place where you can't see /dev/).
-**
-** Returns a new fd that references the same kind of file object as filp
-** (though a distinct 'instance'), or negative error code on failure.  If
-** [new_filp_out] is not NULL, then it is filled.  The caller then owns a
-** reference to the new filp, and must ensure it is released.
-*/
-#ifndef O_CLOEXEC
-#define O_CLOEXEC 02000000
-#endif
-ci_inline int oo_clone_fd(struct file* filp, struct file** new_filp_out,
-                          int flags) {
-  /* dentry_open() will construct a new struct file given an appropriate
-  ** struct dentry and struct vfsmount: all we need to do is grab a
-  ** reference to the entries that the original filp points to.
-  */
-  int new_fd = get_unused_fd();
-
-  if( new_fd >= 0 ) {
-    struct file *new_filp;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)
-    new_filp = dentry_open(&filp->f_path, filp->f_flags, current_cred());
-#else
-    dget(filp->f_dentry);
-    mntget(filp->f_vfsmnt);
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29))
-    new_filp = dentry_open(filp->f_dentry, filp->f_vfsmnt, filp->f_flags);
-#else
-    new_filp = dentry_open(filp->f_dentry, filp->f_vfsmnt, filp->f_flags,
-                           current_cred());
-#endif /* linux-2.6.9 */
-    /* NB. If dentry_open() fails it drops the refs to f_dentry and
-    ** f_vfsmnt for us, so there's no leak here.  Move along.
-    */
-#endif /* linux-3.6 */
-    if( ! IS_ERR(new_filp) ) {
-      if( new_filp_out ) {
-	*new_filp_out = new_filp;
-	get_file(new_filp);
-      }
-      if( flags & O_CLOEXEC ) {
-        struct files_struct *files = current->files;
-        ci_fdtable *fdt;
-        spin_lock(&files->file_lock);
-        fdt = ci_files_fdtable(files);
-        rcu_assign_pointer(fdt->fd[new_fd], new_filp);
-        efx_set_close_on_exec(new_fd, fdt);
-        spin_unlock(&files->file_lock);
-
-      } else
-        fd_install(new_fd, new_filp);
-    }
-    else {
-      put_unused_fd(new_fd);
-      new_fd = -ENOMEM;
-    }
-  }
-
-  return new_fd;
-}
 
 #define ci_get_file get_file
 #define ci_fget     fget

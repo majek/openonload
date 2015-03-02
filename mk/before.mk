@@ -23,6 +23,7 @@ export ISDOING_DESTCLEAN
 export MAKE_SANITY_DONE
 export MAKEWORLD
 export INSTALLER
+export OFE_TREE
 
 # Ensure these environment variables are not inherited.
 cflags :=

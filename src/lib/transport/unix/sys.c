@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -138,24 +138,5 @@ citp_syscall_init(void)
 #include <sys/stat.h>
 # define ONLOAD_DEV       "/dev/onload"
 # define citp_major(dev) ((dev) & 0xff00)
-
-int citp_onload_dev_major(void)
-{
-  static int dev_major = -1;
-
-  if( dev_major == -1 ) {
-    struct stat st;
-    dev_major = -2;
-    if( stat(ONLOAD_DEV, &st) == 0 )
-      dev_major = citp_major(st.st_rdev);
-    else {
-      dev_major = -2;
-      Log_E(log("%s: ERROR: stats(%s) failed errno=%d",
-                __FUNCTION__, ONLOAD_DEV, errno));
-    }
-  }
-
-  return dev_major;
-}
 
 /*! \cidoxg_end */

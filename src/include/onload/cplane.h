@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -866,6 +866,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
 		   ci_ifid_t ifindex,
 		   ci_mtu_t mtu,
 		   ci_uint8 /* bool */ up,
+		   cicp_llap_type_t type,
 		   char *name,
 		   ci_mac_addr_t *ref_mac,
 		   cicpos_llap_row_t *ref_sync);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,15 @@
 #include "oo_hw_filter.h"
 #include <driver/linux_net/driverlink_api.h>
 #include <onload/nic.h>
+
+/*
+ * Module option to control whether getting an error (EBUSY) on some
+ * ports when adding a filter is fatal or not.
+ *
+ * We need this to support the case where we have >1 PF on a physical
+ * port
+ */
+int oof_all_ports_required = 1;
 
 
 static struct efrm_client* get_client(int hwport)
@@ -195,10 +204,13 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
       /* Preserve the most severe error seen - other errors are more severe
        * then firewall denial, and it is more severe than no error.
        */
-      if( rc1 && ( !rc || rc == -EACCES ) )
+      if( rc1 && ( !rc || rc == -EACCES ||
+                   (rc == -EBUSY && !oof_all_ports_required) ) )
         rc = rc1;
     }
-  if( ok_seen && rc == -EACCES ) {
+  if( ok_seen && 
+      ( ( rc == -EACCES ) || 
+        ( !oof_all_ports_required && ( rc == -EBUSY ) ) ) ) {
     /* If some interfaces, but not ALL interfaces, have blocked the filter
      *  then consider the filter added.
      */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -118,7 +118,7 @@ efab_tcp_helper_sock_sleep(tcp_helper_resource_t* trs,
   if( sts && my_get_user(&sts->inside_lib) ) {
     put_user(0, &sts->inside_lib);
     ci_compiler_barrier();
-    if( my_get_user(&sts->run_pending) )
+    if( my_get_user(&sts->aflags) & OO_SIGNAL_FLAG_HAVE_PENDING )
       return -EBUSY;
   }
 

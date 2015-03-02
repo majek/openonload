@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,6 +38,7 @@ static struct file_operations *oo_fops_by_type(int fd_type)
     case CI_PRIV_TYPE_TCP_EP: return &linux_tcp_helper_fops_tcp;
     case CI_PRIV_TYPE_UDP_EP: return &linux_tcp_helper_fops_udp;
     case CI_PRIV_TYPE_PASSTHROUGH_EP: return &linux_tcp_helper_fops_passthrough;
+    case CI_PRIV_TYPE_ALIEN_EP: return &linux_tcp_helper_fops_alien;
 #if CI_CFG_USERSPACE_PIPE
     case CI_PRIV_TYPE_PIPE_READER: return &linux_tcp_helper_fops_pipe_reader;
     case CI_PRIV_TYPE_PIPE_WRITER: return &linux_tcp_helper_fops_pipe_writer;
@@ -98,6 +99,7 @@ static const char *priv_type_to_str(char fd_type)
     case CI_PRIV_TYPE_TCP_EP: return "tcp";
     case CI_PRIV_TYPE_UDP_EP: return "udp";
     case CI_PRIV_TYPE_PASSTHROUGH_EP: return "os_sock";
+    case CI_PRIV_TYPE_ALIEN_EP: return "moved";
 #if CI_CFG_USERSPACE_PIPE
     case CI_PRIV_TYPE_PIPE_READER: return "piper";
     case CI_PRIV_TYPE_PIPE_WRITER: return "pipew";
@@ -302,9 +304,10 @@ static struct file *alloc_file(struct vfsmount *mnt, struct dentry *dentry,
   return file;
 }
 #endif
-static int
-onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
-                  int fd_type)
+
+int
+onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
+                  int flags, int fd_type, ci_private_t **priv_p)
 {
   struct qstr name = { .name = "" };
 #ifdef EFX_HAVE_STRUCT_PATH
@@ -315,7 +318,6 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
 #define my_dentry dentry
 #endif
   struct file *file;
-  int fd;
   struct inode *inode;
   ci_private_t *priv;
   struct file_operations *fops;
@@ -350,14 +352,6 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
   priv->sock_id = ep_id;
   priv->fd_type = fd_type;
 
-  fd = get_unused_fd();
-  if( fd < 0 ) {
-    iput(inode);
-    return fd;
-  }
-  /*ci_log("[%d]%s(%d:%d) return %d priv=%p", current->pid, __func__,
-         thr->id, ep_id, fd, priv);*/
-
 #ifdef EFX_FSTYPE_HAS_MOUNT
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,37)
   path.dentry = d_alloc(onload_mnt->mnt_sb->s_root, &name);
@@ -383,7 +377,6 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
 #endif /* EFX_FSTYPE_HAS_MOUNT */
 
   if( my_dentry == NULL ) {
-    put_unused_fd(fd);
     iput(inode);
     return -ENOMEM;
   }
@@ -413,7 +406,6 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
     dput(dentry);
     iput(inode);
 #endif
-    put_unused_fd(fd);
     return -ENFILE;
   }
 
@@ -422,20 +414,9 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id, int flags,
   file->f_pos = 0;
   file->private_data = priv;
 
-  if( flags & O_CLOEXEC ) {
-    struct files_struct *files = current->files;
-    struct fdtable *fdt;
-    spin_lock(&files->file_lock);
-    fdt = files_fdtable(files);
-    rcu_assign_pointer(fdt->fd[fd], file);
-    efx_set_close_on_exec(fd, fdt);
-    spin_unlock(&files->file_lock);
-  } else
-    fd_install(fd, file);
   try_module_get(THIS_MODULE);
-
-  ci_assert_equal(file->f_op, fops);
-  return fd;
+  *priv_p = priv;
+  return 0;
 }
 
 void onload_priv_free(ci_private_t *priv)
@@ -447,39 +428,29 @@ void onload_priv_free(ci_private_t *priv)
 
 
 int
-oo_create_fd(tcp_helper_endpoint_t* ep, int flags, int fd_type)
+oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type)
 {
-  int fd;
-  tcp_helper_resource_t *trs = ep->thr;
-  citp_waitable_obj *wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  int fd, rc;
+  ci_private_t *priv;
 
-  efab_thr_ref(trs);
-  fd = onload_alloc_file(trs, ep->id, flags, fd_type);
-  if( fd < 0 ) {
-    efab_thr_release(trs);
-    OO_DEBUG_ERR(ci_log("%s: onload_alloc_file failed (%d)", __FUNCTION__, fd));
+  fd = get_unused_fd_flags(flags);
+  if( fd < 0 )
     return fd;
+
+  rc = onload_alloc_file(thr, ep_id, flags, fd_type, &priv);
+  if( rc != 0 ) {
+    OO_DEBUG_ERR(ci_log("%s: ERROR: onload_alloc_file failed (%d) "
+                        "for [%d:%d]", __func__,
+                        rc, thr->id, ep_id));
+    put_unused_fd(fd);
+    return rc;
   }
-  ci_atomic32_and(&wo-> waitable.sb_aflags,
-                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
-
-  return fd;
-}
-
-int
-oo_create_stack_fd(tcp_helper_resource_t *thr)
-{
-  int fd;
 
   efab_thr_ref(thr);
-  fd = onload_alloc_file(thr, OO_SP_NULL, O_CLOEXEC, CI_PRIV_TYPE_NETIF);
-  if( fd < 0 ) {
-    efab_thr_release(thr);
-    OO_DEBUG_ERR(ci_log("%s: onload_alloc_file failed (%d)", __FUNCTION__, fd));
-    return fd;
-  }
+  fd_install(fd, priv->_filp);
   return fd;
 }
+
 
 int
 onloadfs_get_dev_t(ci_private_t* priv, void* arg)
@@ -490,14 +461,10 @@ onloadfs_get_dev_t(ci_private_t* priv, void* arg)
   return 0;
 }
 
-/* Re-target existing file to the new endpoint.
- * Caller is responsible for refcounts of the old and the new thr. */
+/* Update the d_name of this file after handover or move. */
 void
-oo_move_file(ci_private_t* priv, tcp_helper_resource_t *new_thr,
-             oo_sp new_sockid)
+oo_file_moved(ci_private_t* priv)
 {
-  priv->thr = new_thr;
-  priv->sock_id = new_sockid;
 #ifndef EFX_HAVE_D_DNAME
   {
     /* tell everybody that we've changed the name.

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,14 +49,6 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
     return -ENOMEM;
   }
 
-  /*
-   * It's required to set protocol before ci_tcp_helper_sock_attach()
-   * since it's used to determine TCP or UDP file operations should be
-   * attached to the file descriptor in kernel.
-   */
-  ts->s.pkt.ip.ip_ihl_version = CI_IP4_IHL_VERSION(sizeof(ci_ip4_hdr));
-  ts->s.pkt.ip.ip_protocol = IPPROTO_TCP;
-
   fd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(netif), S_SP(ts),
                                  domain, type);
   if( fd < 0 ) {
@@ -68,7 +60,6 @@ ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
       LOG_E(ci_log("%s: ci_tcp_helper_sock_attach" \
                    "(domain=%d, type=%d) failed %d",
                    __FUNCTION__, domain, type, fd));
-    ci_tcp_state_free(netif, ts);
   }
   else {
     ci_assert(~ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -369,14 +369,13 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
   ci_private_t* priv = (ci_private_t*) file->private_data;
   off_t offset = VMA_OFFSET(vma);
   unsigned long bytes = vma->vm_end - vma->vm_start;
-  unsigned long map_offset;
-  int rc, map_num;
+  int rc;
 
   if( !priv )  return -EBADF;
   if( !priv->thr ) return -ENODEV;
 
   if( bytes == 0 ) {
-    ci_log("ci_char_fop_mmap: bytes == 0");
+    ci_log("%s: bytes == 0", __func__);
     return -EINVAL;
   }
 
@@ -399,23 +398,15 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
 		 priv->thr->id, (int) (bytes >> CI_PAGE_SHIFT), offset, 
 		 vma, vma->vm_start, vma->vm_end));
 
-  map_offset = map_num = 0;
+  /* We never turn read-only mmaps into read-write.  Forbid it. */
+  if( ! (vma->vm_flags & VM_WRITE) )
+    vma->vm_flags &= ~VM_MAYWRITE;
 
-  rc = efab_tcp_helper_rm_mmap(priv->thr, &bytes, vma, &map_num, &map_offset,
-                               OO_MMAP_OFFSET_TO_MAP_ID(offset));
+  rc = efab_tcp_helper_rm_mmap(priv->thr, bytes, vma,
+                               OO_MMAP_OFFSET_TO_MAP_ID(offset),
+                               vma->vm_flags & VM_WRITE);
   if( rc < 0 )
     efab_del_mm_ref (vma->vm_mm);
-
-  /* the call to rm_mmap should have decremented bytes according to the
-     amount of memory it filled. If we've got any left, the user asked for
-     too much, which is worrying */
-#ifndef NDEBUG
-  if( bytes && rc == 0 )
-    ci_log("mmap: %u %d pages unmapped (offset=%lx "
-           "map_id=%d res_id=)",
-           priv->thr->id, (int) (bytes>>CI_PAGE_SHIFT),
-           (unsigned long) offset, (int) OO_MMAP_OFFSET_TO_MAP_ID(offset));
-#endif
 
   return rc;
 }

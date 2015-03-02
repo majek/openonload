@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -121,6 +121,11 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 		EFRM_TRACE("Using VI range %d+(%d-%d)", rd->vi_base, 
 			   rd->vi_min, rd->vi_lim);
 #endif
+#if EFX_DRIVERLINK_API_VERSION >= 18
+		rd->vport_id = ef10_res->vport_id;
+#else
+		rd->vport_id = EVB_PORT_ID_ASSIGNED;
+#endif
 	}
 	else {
 		rd->evq_timer_min = falcon_res->evq_timer_min;
@@ -195,7 +200,6 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 				  struct efx_dl_ef10_resources,
 				  hdr, ef10_res);
 	if (ef10_res != NULL) {
-		
 		timer_quantum_ns = ef10_res->timer_quantum_ns;
 
 		/* On EF10, the rx_prefix will get set by reading from
@@ -310,11 +314,19 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 		 */
 		EFRM_ASSERT(ef10_res != NULL);
 		if( nic->vi_base != ef10_res->vi_base ) {
-			EFRM_NOTICE("%s: vi_base changed from %d to %d\n",
-				    __FUNCTION__, nic->vi_base, 
-				    ef10_res->vi_base);
+			EFRM_TRACE("%s: vi_base changed from %d to %d\n",
+				   __FUNCTION__, nic->vi_base, 
+				   ef10_res->vi_base);
 			nic->vi_base = ef10_res->vi_base;
 		}
+#if EFX_DRIVERLINK_API_VERSION >= 18
+		if( nic->vport_id != ef10_res->vport_id ) {
+			EFRM_TRACE("%s: vport_id changed from %d to %d\n",
+				   __FUNCTION__, nic->vport_id, 
+				   ef10_res->vport_id);
+			nic->vport_id = ef10_res->vport_id;
+		}
+#endif
 	}
 #endif
 

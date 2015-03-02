@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,17 +51,21 @@ static void efab_ep_handover_setup(ci_private_t* priv, int* in_epoll_p)
    * 3. Do dup() but preserver flags.  This fd is now OK; other fd
    * referencing this file will reprobe the state.
    */
-  w->waitable.state = CI_TCP_STATE_ALIEN;
-  w->alien.stack_id = OO_STACK_ID_INVALID;
-  w->alien.flags = 0;
 
+  /* First, be sure that CI_PRIV_TYPE_TCP_EP does not meet anything
+   * unecpected in the shared state: */
   priv->fd_type = CI_PRIV_TYPE_PASSTHROUGH_EP;
   priv->_filp->f_op = &linux_tcp_helper_fops_passthrough;
-  oo_move_file(priv, priv->thr, priv->sock_id);
+  ci_wmb();
+  oo_file_moved(priv);
+
+  /* Second, update the shared state: */
+  ci_bit_set(&w->waitable.sb_aflags, CI_SB_AFLAG_MOVED_AWAY_BIT);
+  w->waitable.moved_to_stack_id = OO_STACK_ID_INVALID;
 
   *in_epoll_p = 0;
   if( ! list_empty(&priv->_filp->f_ep_links) ) {
-    w->alien.flags = OO_ALIEN_FLAGS_IN_EPOLL;
+    ci_bit_set(&w->waitable.sb_aflags, CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT);
     *in_epoll_p = 1;
   }
 }
@@ -69,13 +73,12 @@ static void efab_ep_handover_setup(ci_private_t* priv, int* in_epoll_p)
 /*! Replace [old_filp] with [new_filp] in the current process's fdtable.
 ** Fails if [fd] is bad, or doesn't currently resolve to [old_filp].
 */
-static int efab_fd_handover_replace(struct file* old_filp,
-                                    struct file* new_filp, int fd)
+int oo_fd_replace_file(struct file* old_filp, struct file* new_filp, int fd)
 {
   spin_lock(&current->files->file_lock);
   if( fcheck(fd) != old_filp ) {
     spin_unlock(&current->files->file_lock);
-    return 0;
+    return -EINVAL;
   }
 
   /* If others have reference to our oo_file, they can restore the file
@@ -92,6 +95,32 @@ static int efab_fd_handover_replace(struct file* old_filp,
   fput(old_filp);
 
   return 0;
+}
+
+int oo_file_moved_rsop(ci_private_t* priv, void *p_fd)
+{
+  tcp_helper_endpoint_t* ep;
+  int fd = *(ci_int32*) p_fd;
+
+  if( priv->fd_type != CI_PRIV_TYPE_PASSTHROUGH_EP &&
+      priv->fd_type != CI_PRIV_TYPE_ALIEN_EP)
+    return -EINVAL;
+
+  ci_assert(priv->thr);
+
+  ep = ci_trs_ep_get(priv->thr, priv->sock_id);
+
+  if( priv->fd_type == CI_PRIV_TYPE_PASSTHROUGH_EP ) {
+    ci_assert(ep->os_socket->file);
+    ci_assert_equal(priv->_filp->f_op, &linux_tcp_helper_fops_passthrough);
+    return oo_fd_replace_file(priv->_filp, ep->os_socket->file, fd);
+  }
+  else {
+    ci_assert(ep->alien_ref);
+    ci_assert_equal(priv->_filp->f_op, &linux_tcp_helper_fops_alien);
+    return oo_fd_replace_file(priv->_filp, ep->alien_ref->_filp, fd);
+  }
+  return 0; /* unreachable */
 }
 
 /* Handover the user-level socket to the OS one.  This means that the FD
@@ -117,12 +146,6 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
   if( priv->fd_type != CI_PRIV_TYPE_NETIF ) {
     line = __LINE__;
     goto unexpected_error;
-  }
-  /* Check fd is an Onload socket in the right stack with an OS socket. */
-  if( oo_file->f_op == &linux_tcp_helper_fops_passthrough ) {
-    fd_priv = oo_file->private_data;
-    ep = ci_trs_ep_get(fd_priv->thr, fd_priv->sock_id);
-    goto file_replace;
   }
   if( oo_file->f_op != &linux_tcp_helper_fops_tcp &&
       oo_file->f_op != &linux_tcp_helper_fops_udp ) {
@@ -167,8 +190,7 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     return -EBUSY;
   }
 
-file_replace:
-  rc = efab_fd_handover_replace(oo_file, ep->os_socket->file, fd);
+  rc = oo_fd_replace_file(oo_file, ep->os_socket->file, fd);
 
   /* drop the last reference to the onload file */
   fput(oo_file);
@@ -201,54 +223,6 @@ static int copy_compat_iovec_from_user(struct iovec* iovec,
     iovec[i].iov_len = (__kernel_size_t) iov_len;
   }
   return 0;
-}
-
-#endif
-
-
-/* 3.7 has get_unused_fd_flags exported! Hoorray!
- * 2.6.29 has get_unused_fd_flags macro to alloc_fd,
- *        alloc_fd non-exported
- * 2.6.24-26 has get_unused_fd_flags function, non-exported
- * 2.6.18 has no O_CLOEXEC
- */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
-
-int oo_install_file_to_fd(struct file *file, int flags)
-{
-  int fd = get_unused_fd_flags(flags);
-
-  if(unlikely( fd < 0 ))
-    return fd;
-
-  get_file(file);
-  fd_install(fd, file);
-
-  return fd;
-}
-
-#else  /* LINUX_VERSION_CODE < KERNEL_VERSION(3,7,0) */
-
-int oo_install_file_to_fd(struct file *file, int flags)
-{
-  int fd = get_unused_fd();
-  struct files_struct *files = current->files;
-  struct fdtable *fdt;
-
-  if(unlikely( fd < 0 ))
-    return fd;
-
-  get_file(file);
-
-  /* This is almost the copy of fd_install, but with close_on_exec. */
-  spin_lock(&files->file_lock);
-  fdt = files_fdtable(files);
-  rcu_assign_pointer(fdt->fd[fd], file);
-  if( flags & O_CLOEXEC)
-    efx_set_close_on_exec(fd, fdt);
-  spin_unlock(&files->file_lock);
-
-  return fd;
 }
 
 #endif
@@ -302,12 +276,21 @@ struct file *sock_alloc_file(struct socket *sock, int flags, void *unused)
 
 static int get_os_fd_from_ep(tcp_helper_endpoint_t *ep)
 {
+  int fd = get_unused_fd_flags(O_CLOEXEC);
   struct file *os_file;
 
-  if( oo_os_sock_get_from_ep(ep, &os_file) != 0 )
-    return -EINVAL;
+  if( fd < 0 )
+    return fd;
 
-  return oo_install_file_to_fd(os_file, O_CLOEXEC);
+  if( oo_os_sock_get_from_ep(ep, &os_file) != 0 ) {
+    put_unused_fd(fd);
+    return -EINVAL;
+  }
+
+  get_file(os_file);
+  fd_install(fd, os_file);
+
+  return fd;
 }
 
 /* This really sucks, but sometimes we can't get at the kernel state that we
@@ -370,6 +353,7 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
   tcp_helper_endpoint_t *ep;
   struct socket* sock;
   struct iovec local_iovec[UIO_FASTIOV];
+  struct iovec *p_iovec = local_iovec;
   int iovec_bytes = 0, total_bytes;
   struct sockaddr_storage addr;
   struct msghdr msg;
@@ -384,18 +368,37 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
     return  -EINVAL;
 
   rc = -EMSGSIZE;
-  msg.msg_iov = local_iovec;
-  msg.msg_iovlen = op->msg_iovlen;
-
   if( op->msg_iovlen > UIO_MAXIOV )
     goto out;
 
   iovec_bytes = op->msg_iovlen * sizeof(local_iovec[0]);
   rc = -ENOMEM;
   if( op->msg_iovlen > UIO_FASTIOV )
-    msg.msg_iov = sock_kmalloc(sock->sk, iovec_bytes, GFP_KERNEL);
-    if( msg.msg_iov == NULL )
+    p_iovec = sock_kmalloc(sock->sk, iovec_bytes, GFP_KERNEL);
+    if( p_iovec == NULL )
       goto out;
+
+  rc = -EFAULT;
+#ifdef CONFIG_COMPAT
+  if( op->sizeof_ptr != sizeof(void*) ) {
+    if( copy_compat_iovec_from_user(p_iovec, CI_USER_PTR_GET(op->msg_iov),
+                                    op->msg_iovlen) != 0 )
+      goto out;
+  }
+  else
+#endif
+    if( copy_from_user(p_iovec, CI_USER_PTR_GET(op->msg_iov),
+                       op->msg_iovlen * sizeof(p_iovec[0])) != 0 )
+      goto out;
+
+  total_bytes = 0;
+  for( i = 0; i < op->msg_iovlen; ++i )
+    total_bytes += p_iovec[i].iov_len;
+  rc = -EMSGSIZE;
+  if( total_bytes < 0 )
+    goto out;
+
+  oo_msg_iov_init(&msg, WRITE, p_iovec, op->msg_iovlen, total_bytes);
 
   if( op->msg_controllen ) {
 #ifdef CONFIG_COMPAT
@@ -443,26 +446,6 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
 
   msg.msg_flags = op->flags;
 
-  rc = -EFAULT;
-#ifdef CONFIG_COMPAT
-  if( op->sizeof_ptr != sizeof(void*) ) {
-    if( copy_compat_iovec_from_user(msg.msg_iov, CI_USER_PTR_GET(op->msg_iov),
-                                    op->msg_iovlen) != 0 )
-      goto out;
-  }
-  else
-#endif
-    if( copy_from_user(msg.msg_iov, CI_USER_PTR_GET(op->msg_iov),
-                       op->msg_iovlen * sizeof(msg.msg_iov[0])) != 0 )
-      goto out;
-
-  total_bytes = 0;
-  for( i = 0; i < op->msg_iovlen; ++i )
-    total_bytes += msg.msg_iov[i].iov_len;
-  rc = -EMSGSIZE;
-  if( total_bytes < 0 )
-    goto out;
-
   rc = sock_sendmsg(sock, &msg, total_bytes);
   /* Clear OS TX flag if necessary  */
   oo_os_sock_status_bit_clear(SP_TO_SOCK(&ep->thr->netif, ep->id),
@@ -471,8 +454,8 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
                                     ep->os_socket->file, NULL) & POLLOUT);
 
  out:
-  if( msg.msg_iov != local_iovec && msg.msg_iov != NULL)
-    sock_kfree_s(sock->sk, msg.msg_iov, iovec_bytes);
+  if( p_iovec != local_iovec && p_iovec != NULL)
+    sock_kfree_s(sock->sk, p_iovec, iovec_bytes);
   if( ctl_buf != local_ctl && ctl_buf != NULL)
     sock_kfree_s(sock->sk, ctl_buf, op->msg_controllen);
   return rc;
@@ -519,6 +502,7 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
   struct socket *sock;
   char sockaddr[sizeof(struct sockaddr_in6)];
   struct iovec local_iovec[UIO_FASTIOV];
+  struct iovec *p_iovec = local_iovec;
   int iovec_bytes = 0, total_bytes;
   struct msghdr msg;
   int i, rc;
@@ -529,20 +513,39 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
     return 0;
 
   rc = -EMSGSIZE;
-  msg.msg_iov = local_iovec;
-  msg.msg_iovlen = op->msg_iovlen;
-
   if( op->msg_iovlen > UIO_MAXIOV )
     goto out;
 
   iovec_bytes = op->msg_iovlen * sizeof(local_iovec[0]);
   rc = -ENOMEM;
   if( op->msg_iovlen > UIO_FASTIOV )
-    msg.msg_iov = sock_kmalloc(sock->sk, iovec_bytes, GFP_KERNEL);
-    if( msg.msg_iov == NULL )
+    p_iovec = sock_kmalloc(sock->sk, iovec_bytes, GFP_KERNEL);
+    if( p_iovec == NULL )
       goto out;
 
-  if( op->msg_namelen ) {
+  rc = -EFAULT;
+#ifdef CONFIG_COMPAT
+  if( op->sizeof_ptr != sizeof(void*) ) {
+    if( copy_compat_iovec_from_user(p_iovec, CI_USER_PTR_GET(op->msg_iov),
+                                    op->msg_iovlen) != 0 )
+      goto out;
+  }
+  else
+#endif
+    if( copy_from_user(p_iovec, CI_USER_PTR_GET(op->msg_iov),
+                       op->msg_iovlen * sizeof(p_iovec[0])) != 0 )
+      goto out;
+
+  total_bytes = 0;
+  for( i = 0; i < op->msg_iovlen; ++i )
+    total_bytes += p_iovec[i].iov_len;
+  rc = -EMSGSIZE;
+  if( total_bytes < 0 )
+    goto out;
+
+  oo_msg_iov_init(&msg, READ, p_iovec, op->msg_iovlen, total_bytes);
+
+  if(  CI_USER_PTR_GET(op->msg_name) ) {
     msg.msg_name = sockaddr;
     msg.msg_namelen = sizeof(sockaddr);
   }
@@ -567,26 +570,6 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
   msg.msg_flags |= op->flags & MSG_CMSG_CLOEXEC;
 #endif
 
-  rc = -EFAULT;
-#ifdef CONFIG_COMPAT
-  if( op->sizeof_ptr != sizeof(void*) ) {
-    if( copy_compat_iovec_from_user(msg.msg_iov, CI_USER_PTR_GET(op->msg_iov),
-                                    op->msg_iovlen) != 0 )
-      goto out;
-  }
-  else
-#endif
-    if( copy_from_user(msg.msg_iov, CI_USER_PTR_GET(op->msg_iov),
-                       op->msg_iovlen * sizeof(msg.msg_iov[0])) != 0 )
-      goto out;
-
-  total_bytes = 0;
-  for( i = 0; i < op->msg_iovlen; ++i )
-    total_bytes += msg.msg_iov[i].iov_len;
-  rc = -EMSGSIZE;
-  if( total_bytes < 0 )
-    goto out;
-
   if( sock->file->f_flags & O_NONBLOCK )
     op->flags |= MSG_DONTWAIT;
   rc = sock_recvmsg(sock, &msg, total_bytes, op->flags);
@@ -598,15 +581,12 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
   if( rc < 0 )
     goto out;
 
-  if(  CI_USER_PTR_GET(op->msg_name) ) {
-    if( op->msg_namelen > msg.msg_namelen )
-      op->msg_namelen = msg.msg_namelen;
-    if( copy_to_user(CI_USER_PTR_GET(op->msg_name),
-                     sockaddr, op->msg_namelen) != 0 )
-      rc = -EFAULT;
-    else
-      op->msg_namelen = msg.msg_namelen;
-  }
+  if( CI_USER_PTR_GET(op->msg_name) &&
+      copy_to_user(CI_USER_PTR_GET(op->msg_name),
+                   sockaddr, CI_MIN(op->msg_namelen, msg.msg_namelen)) != 0 )
+    rc = -EFAULT;
+  if( CI_USER_PTR_GET(op->msg_name) || op->msg_namelen )
+    op->msg_namelen = msg.msg_namelen;
   if( CI_USER_PTR_GET(op->msg_control) ) {
     op->msg_controllen = (unsigned long)msg.msg_control -
         (unsigned long)CI_USER_PTR_GET(op->msg_control);
@@ -622,8 +602,8 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
   op->flags = msg.msg_flags &~ MSG_CMSG_COMPAT;
 
  out:
-  if( msg.msg_iov != local_iovec && msg.msg_iov != NULL)
-    sock_kfree_s(sock->sk, msg.msg_iov, iovec_bytes);
+  if( p_iovec != local_iovec && p_iovec != NULL)
+    sock_kfree_s(sock->sk, p_iovec, iovec_bytes);
   op->rc = rc;
   return rc > 0 ? 0 : rc;
 }
@@ -824,7 +804,6 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
     __put_user(len, (int *)CI_USER_PTR_GET(op->addrlen));
   }
 
-
 #ifdef SOCK_TYPE_MASK
   /* This is 'off' on linux, unless set via environment */
   if( NI_OPTS(&ep->thr->netif).accept_inherit_nonblock && op->flags == 0 &&
@@ -956,3 +935,57 @@ extern int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs,
 
   return rc;
 }
+
+
+/*--------------------------------------------------------------------
+ *
+ * oo_clone_fd()
+ *
+ *--------------------------------------------------------------------*/
+
+/* Clone filp to a new fd.  As long as filp is one of ours, this is like
+** doing open ("/dev/efab0"), except you don't need access to /dev/efab0
+** (i.e. works independently of NIC, and works if you've been chroot-ed to
+** a place where you can't see /dev/).
+**
+** Returns a new fd that references the same kind of file object as filp
+** (though a distinct 'instance'), or negative error code on failure.
+** New file is marked with CLOEXEC.
+*/
+int oo_clone_fd(struct file* filp, int do_cloexec)
+{
+  /* dentry_open() will construct a new struct file given an appropriate
+  ** struct dentry and struct vfsmount: all we need to do is grab a
+  ** reference to the entries that the original filp points to.
+  */
+  int new_fd = get_unused_fd_flags(do_cloexec ? O_CLOEXEC : 0);
+
+  if( new_fd >= 0 ) {
+    struct file *new_filp;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,6,0)
+    new_filp = dentry_open(&filp->f_path, filp->f_flags, current_cred());
+#else
+    dget(filp->f_dentry);
+    mntget(filp->f_vfsmnt);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29))
+    new_filp = dentry_open(filp->f_dentry, filp->f_vfsmnt, filp->f_flags);
+#else
+    new_filp = dentry_open(filp->f_dentry, filp->f_vfsmnt, filp->f_flags,
+                           current_cred());
+#endif /* linux-2.6.9 */
+    /* NB. If dentry_open() fails it drops the refs to f_dentry and
+    ** f_vfsmnt for us, so there's no leak here.  Move along.
+    */
+#endif /* linux-3.6 */
+    if( ! IS_ERR(new_filp) ) {
+      fd_install(new_fd, new_filp);
+    }
+    else {
+      put_unused_fd(new_fd);
+      new_fd = -ENOMEM;
+    }
+  }
+
+  return new_fd;
+}
+

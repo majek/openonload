@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,13 +59,16 @@
  *
  *---------------------------------------------------------------------------*/
 
+enum oo_device_type {
+  OO_STACK_DEV,
+  OO_EPOLL_DEV,
+  OO_MAX_DEV /* not a device type */
+};
+
 
 # define EFAB_DEV_NAME  "onload"  
-# define EFAB_DEV       "/dev/" EFAB_DEV_NAME
 
 # define OO_EPOLL_DEV_NAME "onload_epoll"
-# define OO_EPOLL_DEV      "/dev/" OO_EPOLL_DEV_NAME
-
 
 
 /* Max length of version string used for version skew checking. */
@@ -142,6 +145,7 @@ typedef struct {
 
 typedef struct {
   oo_sp             tcp_id;
+  ci_int32          need_update;
 } oo_tcp_filter_clear_t;
 
 typedef struct {
@@ -261,6 +265,13 @@ typedef struct {
   ci_uint32 how;
   ci_uint32 old_state;
 } oo_tcp_endpoint_shutdown_t;
+
+#ifdef ONLOAD_OFE
+typedef struct {
+  ci_uint32 len;
+  ci_user_ptr_t str;
+} oo_ofe_config_t;
+#endif
 
 
 
@@ -411,14 +422,16 @@ typedef struct {
 # define CI_PRIV_TYPE_UDP_EP    2
 # define CI_PRIV_TYPE_NETIF     3
 # define CI_PRIV_TYPE_PASSTHROUGH_EP 4
+# define CI_PRIV_TYPE_ALIEN_EP   5
 #if CI_CFG_USERSPACE_PIPE
-# define CI_PRIV_TYPE_PIPE_READER 5
-# define CI_PRIV_TYPE_PIPE_WRITER 6
+# define CI_PRIV_TYPE_PIPE_READER 6
+# define CI_PRIV_TYPE_PIPE_WRITER 7
 #endif
 #if CI_CFG_USERSPACE_PIPE
 # define CI_PRIV_TYPE_IS_ENDPOINT(t)                                \
     ((t) == CI_PRIV_TYPE_TCP_EP || (t) == CI_PRIV_TYPE_UDP_EP ||    \
      (t) == CI_PRIV_TYPE_PASSTHROUGH_EP ||                          \
+     (t) == CI_PRIV_TYPE_ALIEN_EP ||                                \
      (t) == CI_PRIV_TYPE_PIPE_READER || (t) == CI_PRIV_TYPE_PIPE_WRITER)
 #else
 # define CI_PRIV_TYPE_IS_ENDPOINT(t)                                \
@@ -432,10 +445,9 @@ typedef struct {
 } ci_ep_info_t;
 
 typedef struct {
-  ci_uint64             flags; /* it's u8 really, but we need to be compat */
+  ci_uint64             do_cloexec; /* it's u8 really, but we need to be compat */
   ci_fixed_descriptor_t fd;
 } ci_clone_fd_t;
-
 
 typedef ci_uint32 ci_cfg_ioctl_desc_err_t;
 

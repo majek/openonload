@@ -36,3 +36,16 @@ SFC_CHAR_MODE=666
 SFC_AFFINITY_USER=root
 SFC_AFFINITY_GROUP=root
 SFC_AFFINITY_MODE=666
+
+
+# Onload whitelist and blacklist 
+#
+# The following control which interfaces are whitelisted and
+# blacklisted for Onload acceleration.  They each take a string of
+# space-separated interface names.  If an interface appears in the
+# blacklist then it will not be accelerated by Onload.  If the
+# whitelist is non-empty then only interfaces in the whitelist will be
+# accelerated.
+
+ONLOAD_WHITELIST=
+ONLOAD_BLACKLIST=

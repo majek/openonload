@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,6 +28,7 @@
 #include <onload/linux_onload.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/linux_mmap.h>
+#include <onload/nic.h>
 #include <ci/internal/ip.h>
 #include <onload/linux_trampoline.h>
 #include <onload/linux_onload_internal.h>
@@ -39,6 +40,9 @@
 #include "onload_internal.h"
 #include <onload/version.h>
 #include <onload/oof_interface.h>
+#ifdef ONLOAD_OFE
+#include "ofe/onload.h"
+#endif
 
 #if defined(__x86_64__) && LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)
 # define NEED_IOCTL32
@@ -115,6 +119,14 @@ MODULE_PARM_DESC(oof_shared_steal_thresh,
                  "the filter to persist even when a new wildcard socket needs "
                  "the filter.");
 
+module_param(oof_all_ports_required, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(oof_all_ports_required, 
+                 "When set Onload will generate an error if it is unable to "
+                 "install a filter on all the up interfaces it needs to. "
+                 "In some configurations - e.g. multiple PFs on a single "
+                 "physical port - this is not necessary, and setting to 0 will "
+                 "allow Onload to tolerate these filter errors.");
+
 int phys_mode_gid = -2;
 module_param(phys_mode_gid, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(phys_mode_gid,
@@ -122,6 +134,42 @@ MODULE_PARM_DESC(phys_mode_gid,
                  "-2 (default) means \"physical buffer mode forbidden\"; "
                  "-1 means \"any user may use physical buffer mode\".  "
                  "See EF_PACKET_BUFFER_MODE environment variable.");
+
+
+static int param_black_white_list_set(const char *val, struct kernel_param *kp)
+{
+  struct oo_nic_black_white_list* bwl = kp->arg;
+  return oo_nic_black_white_list_set(bwl, val);
+}
+
+
+static int param_black_white_list_get(char *buffer, struct kernel_param *kp)
+{
+  struct oo_nic_black_white_list* bwl = kp->arg;
+  /* 4096 documented in linux/moduleparam.h */
+  return oo_nic_black_white_list_get(bwl, buffer, 4096);
+}
+
+
+/* Note that module_param_call() is present but deprecated in 3.x
+ * kernels.  It is superceded by module_param_cb(). */
+module_param_call(intf_white_list, param_black_white_list_set,
+                  param_black_white_list_get, &oo_nic_white_list,
+                  S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(intf_white_list,
+                 "Control which interfaces are accelerated.  "
+                 "Can be used in parallel with intf_black_list.  "
+                 "Specified as '<intf0> <intf1> ...'.  "
+                 "Changes are not accumulative.  "
+                 "Specify an empty string to reset"
+                 "Putting the same interface in both lists is undefined.");
+module_param_call(intf_black_list, param_black_white_list_set,
+                  param_black_white_list_get, &oo_nic_black_list,
+                  S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(intf_black_list,
+                 "Control which interfaces are not accelerated.  "
+                 "See intf_white_list for more detail.");
+
 
 int timesync_period = 500;
 module_param(timesync_period, int, S_IRUGO | S_IWUSR);
@@ -585,6 +633,10 @@ static int __init onload_module_init(void)
   rc = oo_driverlink_register();
   if( rc < 0 )
     goto failed_driverlink;
+
+#ifdef ONLOAD_OFE
+  ofe_init(1);
+#endif
 
   /* Onloadfs should be created before the char dev */
   rc = onloadfs_init();

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -114,6 +114,8 @@ OO_STAT("Times interrupt priming provoked the unlock slow path.",
         ci_uint32, unlock_slow_need_prime, count)
 OO_STAT("Times the unlock slow path was taken to wake threads.",
         ci_uint32, unlock_slow_wake, count)
+OO_STAT("Times the unlock slow path was taken to update sw filters.",
+        ci_uint32, unlock_slow_swf_update, count)
 OO_STAT("Times the unlock slow path was taken to close sockets/pipes.",
         ci_uint32, unlock_slow_close, count)
 OO_STAT("Times a syscall was needed on the unlock slow path.",
@@ -282,6 +284,9 @@ OO_STAT("Number of sends that failed due to alien (i.e. Non-SFC) route.",
         ci_uint32, tx_discard_alien_route, count)
 OO_STAT("Number of attempts to allocate packet buffer set which have failed.",
         ci_uint32, bufset_alloc_fails, count)
+OO_STAT("Number of attempts to allocate packet buffer set which have failed "
+        "because of buffer table number limitation.",
+        ci_uint32, bufset_alloc_nospace, count)
 OO_STAT("Number of times MSS has been forcibly limited.",
         ci_uint32, mss_limitations, count)
 OO_STAT("Number of times stack has entered 'memory pressure' state.",
@@ -294,6 +299,8 @@ OO_STAT("Number of packets dropped due to 'memory pressure'.",
         ci_uint32, memory_pressure_drops, count)
 OO_STAT("Number of UDP packets dropped because no socket matched.",
         ci_uint32, udp_rx_no_match_drops, count)
+OO_STAT("Number of UDP sockets which were closed while TX queue is active.",
+        ci_uint32, udp_free_with_tx_active, count)
 OO_STAT("Number times inserting filter into software table failed.",
         ci_uint32, sw_filter_insert_table_full, count)
 #if CI_CFG_PIO
@@ -314,3 +321,70 @@ OO_STAT("Number of calls to tcp file-op sendpage().",
 #endif
 OO_STAT("Number of times when failed to allocate packet from stack poll",
         ci_uint32, poll_no_pkt, count)
+#if CI_CFG_SPIN_STATS
+OO_STAT("Number of loops spent in TCP recv() code while busy-waiting",
+        ci_uint64, spin_tcp_recv, count)
+OO_STAT("Number of loops spent in TCP send() code while busy-waiting",
+        ci_uint64, spin_tcp_send, count)
+OO_STAT("Number of loops spent in UDP send() code while busy-waiting",
+        ci_uint64, spin_udp_send, count)
+OO_STAT("Number of loops spent in UDP recv() code while busy-waiting",
+        ci_uint64, spin_udp_recv, count)
+OO_STAT("Number of loops spent in pipe read() code while busy-waiting",
+        ci_uint64, spin_pipe_read, count)
+OO_STAT("Number of loops spent in pipe write() code while busy-waiting",
+        ci_uint64, spin_pipe_write, count)
+OO_STAT("Number of loops spent in TCP accept() code while busy-waiting",
+        ci_uint64, spin_tcp_accept, count)
+OO_STAT("Number of loops spent in waiting for a free packet while busy-waiting",
+        ci_uint64, spin_pkt_wait, count)
+OO_STAT("Number of loops x sockets spent in select() busy-waiting",
+        ci_uint64, spin_select, count)
+OO_STAT("Number of loops x sockets spent in poll() busy-waiting",
+        ci_uint64, spin_poll, count)
+OO_STAT("Number of loops x sockets spent in epoll_wait() busy-waiting, "
+        "with EF_UL_EPOLL=1",
+        ci_uint64, spin_epoll, count)
+OO_STAT("Number of loops x sockets spent in epoll_wait() busy-waiting, "
+        "with EF_UL_EPOLL=2",
+        ci_uint64, spin_epoll_kernel, count)
+#endif
+#if CI_CFG_FD_CACHING
+OO_STAT("Number of sockets cached over lifetime of the stack",
+        ci_uint32, sockcache_cached, count)
+OO_STAT("Number of sockets not cached owing to lock contention",
+        ci_uint32, sockcache_contention, count)
+OO_STAT("Number of sockets not cached owing to stack limit",
+        ci_uint32, sockcache_stacklim, count)
+OO_STAT("Number of sockets not cached owing to per-socket limit",
+        ci_uint32, sockcache_socklim, count)
+OO_STAT("Number of socket-cache hits",
+        ci_uint32, sockcache_hit, count)
+OO_STAT("Number of socket-cache hits after reaping",
+        ci_uint32, sockcache_hit_reap, count)
+OO_STAT("Number of socket-cache misses due to mismatched interfaces",
+        ci_uint32, sockcache_miss_intmismatch, count)
+#endif
+OO_STAT("Number of times when TCP SO_RCVBUF value was found to be abused "
+        "by too small incoming segments",
+        ci_uint32, tcp_rcvbuf_abused, count)
+OO_STAT("Number of times when TCP reorder buffer used too many packets "
+        "compared to SO_RCVBUF value",
+        ci_uint32, tcp_rcvbuf_abused_rob_guilty, count)
+OO_STAT("Number of times when TCP receive queue was coalesced while "
+        "fighting with SO_RCVBUF abusement",
+        ci_uint32, tcp_rcvbuf_abused_recv_coalesced, count)
+OO_STAT("Number of times when TCP receive queue used too many packets "
+        "compared to SO_RCVBUF value",
+        ci_uint32, tcp_rcvbuf_abused_recv_guilty, count)
+OO_STAT("Number of times when TCP reorder buffer was dropped in a "
+        "desperate attempt to fight with SO_RCVBUF abusement",
+        ci_uint32, tcp_rcvbuf_abused_rob_desperate, count)
+OO_STAT("Number of times when TCP SO_RCVBUF value was found to be abused "
+        "by too small incoming segments even after taking measures "
+        "against it",
+        ci_uint32, tcp_rcvbuf_abused_badly, count)
+OO_STAT("Number of times when TCP listening socket failed to retransmit "
+        "SYNACK because it failed to allocate more packet buffers "
+        "(probably postponing packet buffers allocation).",
+        ci_uint32, tcp_listen_synack_retrans_no_buffer, count)

@@ -61,6 +61,35 @@ EFRM_HAVE_IOMMU_MAP	symtype	iommu_map	include/linux/iommu.h int(struct iommu_dom
 EFRM_HAVE_NETFILTER_INDIRECT_SKB		memtype	struct_nf_hook_ops	hook	include/linux/netfilter.h	unsigned int(*)(unsigned int, struct sk_buff **, const struct net_device *, const struct net_device *, int (*)(struct sk_buff *))
 EFRM_HAVE_NETFILTER_HOOK_OPS		memtype	struct_nf_hook_ops	hook	include/linux/netfilter.h	unsigned int(*)(const struct nf_hook_ops *, struct sk_buff *, const struct net_device *, const struct net_device *, int (*)(struct sk_buff *))
 
+EFRM_HAVE_KSTRTOUL	symbol	kstrtoul	include/linux/kernel.h
+EFRM_HAVE_IN4_PTON	symbol	in4_pton	include/linux/inet.h
+EFRM_HAVE_IN6_PTON	symbol	in6_pton	include/linux/inet.h
+EFRM_HAVE_STRCASECMP	symbol	strcasecmp	include/linux/string.h
+
+EFRM_HAVE_REINIT_COMPLETION	symbol	reinit_completion	include/linux/completion.h
+
+EFRM_HAVE_GET_UNUSED_FD_FLAGS	export	get_unused_fd_flags	include/linux/file.h	fs/file.c
+
+EFRM_HAVE_WQ_SYSFS	symbol	WQ_SYSFS	include/linux/workqueue.h
+
+EFRM_HAVE_POLL_REQUESTED_EVENTS	symbol	poll_requested_events	include/linux/poll.h
+
+ERFM_HAVE_NEW_KALLSYMS	symtype	kallsyms_on_each_symbol	include/linux/kallsyms.h int(int (*)(void *, const char *, struct module *, unsigned long), void *)
+
+EFRM_HAVE_TASK_NSPROXY	symbol	task_nsproxy	include/linux/nsproxy.h
+
+# RHEL5 kernel has iommu_domain_has_cap declared in linux/iommu.h,
+# but does not have it even defined, let alone exported.
+EFRM_HAVE_IOMMU_DOMAIN_HAS_CAP	export	iommu_domain_has_cap	include/linux/iommu.h
+EFRM_HAVE_IOMMU_CAPABLE	symbol	iommu_capable	include/linux/iommu.h
+
+# 2.6.18 has f_dentry as a field,
+# 2.6.32 - as a define,
+# 3.19 has nothing
+EFRM_HAVE_F_DENTRY	memtype	struct_file	f_dentry	include/linux/fs.h	struct dentry *
+
+EFRM_HAVE_MSG_ITER	memtype	struct_msghdr	msg_iter	include/linux/socket.h	struct iov_iter
+
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }

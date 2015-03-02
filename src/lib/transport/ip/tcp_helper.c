@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,40 +52,13 @@ int ci_tcp_helper_more_socks(ci_netif* ni)
                         OO_IOC_TCP_MORE_SOCKS, NULL);
 }
 
-#if CI_CFG_USERSPACE_PIPE
-int ci_tcp_helper_pipebufs_to_socks(ci_netif* ni)
+#if CI_CFG_FD_CACHING
+int ci_tcp_helper_clear_epcache(ci_netif* ni)
 {
   return oo_resource_op(ci_netif_get_driver_handle(ni),
-                        OO_IOC_TCP_PIPEBUFS_TO_SOCKS, NULL);
-}
-
-/* Allocate additional pipe buffers in netif pages_buf pages list.
- * Current implementation assumes that buffers are allocated in
- * continous manner which means that their 'id's are consecutive.*/
-int ci_tcp_helper_more_pipe_bufs(ci_netif* ni,
-                                 ci_uint32 bufs_num,
-                                 ci_uint32* bufs_start)
-{
-  oo_tcp_sock_more_pipe_bufs_t req;
-  int rc;
-
-  ci_assert(bufs_start);
-
-  req.bufs_num = bufs_num;
-
-  rc = oo_resource_op(ci_netif_get_driver_handle(ni),
-                      OO_IOC_TCP_MORE_PIPE_BUFS, (void* )&req);
-
-  if ( ! rc )
-    *bufs_start = req.bufs_start;
-  else
-    LOG_SV(ci_log("%s: failed for %u (rc=%d)", __FUNCTION__,
-                  (unsigned int)bufs_num, rc));
-
-  return rc;
+                        OO_IOC_TCP_CLEAR_EPCACHE, NULL);
 }
 #endif
-
 
 
 /*--------------------------------------------------------------------
@@ -178,16 +151,18 @@ int ci_tcp_helper_cluster_dump(void* opaque, void* buf, int buf_len)
  *
  * \param fd              File descriptor of tcp_helper
  * \param ep              TCP control block id
+ * \param need_update     Whether the filter info needs update before clear
  *
  * \return                standard error codes
  *
  *--------------------------------------------------------------------*/
-int ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp ep)
+int ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp ep, int need_update)
 {
   oo_tcp_filter_clear_t op;
   int rc;
 
   op.tcp_id       = ep;
+  op.need_update  = !!need_update;
 
   VERB(ci_log("%s: id=%d", __FUNCTION__, ep));
   rc = oo_resource_op(fd, OO_IOC_EP_FILTER_CLEAR, &op);
@@ -313,19 +288,6 @@ int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
   return rc;
 }
 
-#if defined(__unix__) && CI_CFG_FD_CACHING
-int ci_tcp_helper_xfer_cached(ci_fd_t fd, oo_sp ep_id,
-                              int other_pid, ci_fd_t other_fd)
-{
-  oo_tcp_xfer_t op;
-
-  op.ep_id = ep_id;
-  op.other_pid = other_pid;
-  op.other_fd  = other_fd;
-  return oo_resource_op(fd, OO_IOC_TCP_XFER, &op);
-}
-#endif
-
 int ci_tcp_helper_close_no_trampoline(int fd) {
   int res;
   int call_num = __NR_close;
@@ -403,6 +365,13 @@ int ci_tcp_helper_handover (ci_fd_t stack_fd, ci_fd_t sock_fd)
   ci_int32 io_fd = sock_fd;
   return oo_resource_op(stack_fd, OO_IOC_TCP_HANDOVER, &io_fd);
 }
+
+int ci_tcp_file_moved(ci_fd_t sock_fd)
+{
+  ci_int32 io_fd = sock_fd;
+  return oo_resource_op(sock_fd, OO_IOC_FILE_MOVED, &io_fd);
+}
+
 
 
 #include <onload/dup2_lock.h>

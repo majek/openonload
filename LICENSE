@@ -1,6 +1,6 @@
 
-The software in this package is Copyright Solarflare Communications, Inc.
-All rights reserved.
+The software in this package is Copyright 2006-2014 Solarflare 
+Communications Inc., 2002-2005 Level 5 Networks.  All rights reserved.
 
 Except as noted otherwise below, OpenOnload and EnterpriseOnload are
 licensed under the GNU General Public License version 2 (GPLv2).
@@ -15,12 +15,15 @@ Licence.
 The Etherfabric library (ef_vi) is licensed under the GNU Lesser General
 Public License version 2.1.
 
+The Jansson library is licensed under a BSD-style license.  Please see
+openonload/src/tools/jansson-2.7/LICENSE
 
 ======================================================================
 
 DISTRIBUTION AGREEMENT
 
-Copyright Solarflare Communications, Inc.  All rights reserved.
+Copyright 2006-2014 Solarflare Communications Inc., 2002-2005 Level 5 
+Networks.  All rights reserved.
 
 OpenOnload implements algorithms and hardware interface techniques which
 are the subject of Solarflare Communications, Inc. patents and patent

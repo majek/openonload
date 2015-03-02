@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -160,8 +160,8 @@ static int citp_closedfd_recv(citp_fdinfo* fdinfo,
 
 #if CI_CFG_RECVMMSG
 static int citp_closedfd_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
-                                  unsigned vlen, int flags, 
-                                  const struct timespec *timeout)
+                                  unsigned vlen, int flags,
+                                  ci_recvmmsg_timespec* timeout)
 {
   Log_V(log(LPF "recvmmsg(%d, msg, %d, 0x%x)", fdinfo->fd, vlen, 
             (unsigned) flags));
@@ -199,7 +199,7 @@ static int citp_closedfd_fcntl(citp_fdinfo *fdinfo, int cmd, long arg)
 }
 
 
-static int citp_closedfd_close(citp_fdinfo* fdinfo, int may_cache)
+static int citp_closedfd_close(citp_fdinfo* fdinfo)
 {
   Log_V(log(LPF "close(%d)", fdinfo->fd ));
   errno = EBADF;
@@ -265,6 +265,16 @@ static int citp_closedfd_zc_recv_filter(citp_fdinfo* fdi,
 #endif
 }
 
+#if CI_CFG_FD_CACHING
+static int citp_closedfd_cache(citp_fdinfo* fdi)
+{
+  /* This should only be called as we're deciding whether to actually close an
+   * fd - the closedfd doesn't really have an fd, so we shouldn't get here!
+   */
+  ci_assert(0);
+  return -EBADF;
+}
+#endif
 
 
 citp_protocol_impl citp_closed_protocol_impl = {
@@ -300,6 +310,9 @@ citp_protocol_impl citp_closed_protocol_impl = {
     .zc_recv     = citp_closedfd_zc_recv,
     .zc_recv_filter = citp_closedfd_zc_recv_filter,
     .recvmsg_kernel = citp_closedfd_recvmsg_kernel,
+#if CI_CFG_FD_CACHING
+    .cache       = citp_closedfd_cache,
+#endif
   }
 };
 

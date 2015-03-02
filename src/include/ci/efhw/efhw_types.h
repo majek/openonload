@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -226,14 +226,15 @@ struct efhw_func_ops {
 			       uint dmaq, uint evq, uint owner, uint tag,
 			       uint dmaq_size, uint buf_idx,
 			       dma_addr_t *dma_addrs, int n_dma_addrs,
-			       uint stack_id, uint flags);
+			       uint vport_id, uint stack_id, uint flags);
 
 	/*! Initialise NIC state for a given RX DMAQ */
 	int (*dmaq_rx_q_init) (struct efhw_nic *nic,
 			       uint dmaq, uint evq, uint owner, uint tag,
 			       uint dmaq_size, uint buf_idx,
 			       dma_addr_t *dma_addrs, int n_dma_addrs,
-			       uint stack_id, uint flags);
+			       uint vport_id, uint stack_id, 
+			       uint ps_buf_size, uint flags);
 
 	/*! Disable a given TX DMAQ */
 	void (*dmaq_tx_q_disable) (struct efhw_nic *nic, uint dmaq);
@@ -276,10 +277,10 @@ struct efhw_func_ops {
 				   struct efhw_buffer_table_block *block);
 
 	/*! Set/program buffer table page entries */
-	void (*buffer_table_set) (struct efhw_nic *nic,
-				  struct efhw_buffer_table_block *block,
-				  int first_entry, int n_entries,
-				  dma_addr_t* dma_addrs);
+	int (*buffer_table_set) (struct efhw_nic *nic,
+				 struct efhw_buffer_table_block *block,
+				 int first_entry, int n_entries,
+				 dma_addr_t* dma_addrs);
 
 	/*! Clear a block of buffer table pages */
 	void (*buffer_table_clear) (struct efhw_nic *nic,
@@ -305,8 +306,8 @@ struct efhw_func_ops {
 
   /*-------------- RSS Support ------------ */
 	/*! Allocate an RX RSS context */
-	int (*rss_context_alloc) (struct efhw_nic *nic, int num_qs, int shared,
-				  int *handle_out);
+	int (*rss_context_alloc) (struct efhw_nic *nic, uint vport_id,
+				  int num_qs, int shared, int *handle_out);
 
 	/*! Free an RX RSS context */
 	int (*rss_context_free) (struct efhw_nic *nic, int handle);
@@ -326,6 +327,9 @@ struct efhw_func_ops {
 				   uint32_t* expiry,
 				   uint8_t* signature);
 
+	int (*license_check) (struct efhw_nic *nic, const uint32_t feature,
+			      int* licensed);
+
   /*-------------- Stats ------------------------ */
 	int (*get_rx_error_stats) (struct efhw_nic *nic, int instance,
 				   void *data, int data_len, int do_reset);
@@ -338,10 +342,16 @@ struct efhw_func_ops {
  *
  *---------------------------------------------------------------------------*/
 
+enum efhw_function {
+	EFHW_FUNCTION_PF,
+	EFHW_FUNCTION_VF,
+};
+
 struct efhw_device_type {
 	int  arch;            /* enum efhw_arch */
 	char variant;         /* 'A', 'B', ... */
 	int  revision;        /* 0, 1, ... */
+	int  function;        /* enum efhw_function */
 };
 
 
@@ -377,6 +387,7 @@ struct efhw_nic {
 # define NIC_FLAG_14BYTE_PREFIX         0x200
 # define NIC_FLAG_PACKED_STREAM         0x400
 # define NIC_FLAG_RX_RSS_LIMITED        0x800
+# define NIC_FLAG_VAR_PACKED_STREAM     0x1000
 
 	unsigned resetting;	/*!< NIC is currently being reset */
 
@@ -443,6 +454,10 @@ struct efhw_nic {
 	 */
 	unsigned vi_min;
 	unsigned vi_lim;
+	/* Port ID to use when talking to firmware to match net
+	 * driver's configuration of vswitches etc. 
+	 */
+	unsigned vport_id;
 };
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -464,6 +464,10 @@ typedef struct {
    * to the value of @c TCP_LINGER2 socket option is set to some negative 
    * value */
   CI_IP_STATS_TYPE tcp_abort_on_linger;
+
+  /** the number of times socket was destroyed just after close operation due 
+   * to incomplete onload_delegated_send operation */
+  CI_IP_STATS_TYPE tcp_abort_on_delegated_send;
 
   /** the number of times sending RST segment from a socket being terminated
    * fails */

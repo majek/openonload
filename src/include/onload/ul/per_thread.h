@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,6 +37,7 @@ struct oo_per_thread {
   struct oo_sig_thread_state sig;
   struct oo_stackname_state  stackname;
   ci_uint64                  poll_nonblock_fast_frc;
+  ci_uint64                  select_nonblock_fast_frc;
   struct oo_timesync         timesync;
   unsigned                   spinstate; 
   int                        in_vfork_child;

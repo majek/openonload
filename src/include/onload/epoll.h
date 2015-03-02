@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,7 +31,8 @@
 
 #if CI_CFG_USERSPACE_EPOLL
 
-#include <onload/primitive_types.h>
+//#include <onload/primitive_types.h>
+#include <onload/common.h>
 #ifdef __KERNEL__
 #include <linux/eventpoll.h>
 #else
@@ -78,6 +79,15 @@ struct oo_epoll1_wait_arg {
   ci_int32              rc;        /**< OUT return code */
 };
 
+struct oo_epoll1_set_home_arg {
+  ci_fixed_descriptor_t sockfd;      /**< descriptor for fd in stack */
+  ci_int32              ready_list;  /**< id of ready list to use */
+  /* [unused_pad] is needed to ensure that oo_epoll_item is the same size
+   * in 32 and 64-bit builds.
+   */
+  ci_uint32             unused_pad;
+};
+
 struct oo_epoll1_shared {
   ci_fixed_descriptor_t epfd; /**< OS epoll fd; UL should use it for
                                    closing only */
@@ -106,6 +116,13 @@ enum {
   OO_EPOLL1_OP_PRIME,
 #define OO_EPOLL1_IOC_PRIME \
   _IO(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_PRIME)
+  OO_EPOLL_OP_CLONE,
+#define OO_EPOLL_IOC_CLONE \
+  _IOWR(OO_EPOLL_IOC_BASE, OO_EPOLL_OP_CLONE, ci_clone_fd_t)
+  OO_EPOLL1_OP_SET_HOME_STACK,
+#define OO_EPOLL1_IOC_SET_HOME_STACK \
+  _IOW(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_SET_HOME_STACK, \
+       struct oo_epoll1_set_home_arg)
 };
 
 #endif /* CI_CFG_USERSPACE_EPOLL */

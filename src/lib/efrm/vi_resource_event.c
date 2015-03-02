@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -124,9 +124,7 @@ EXPORT_SYMBOL(efrm_eventq_reset);
 
 int
 efrm_eventq_register_callback(struct efrm_vi *virs,
-			      void (*handler) (void *, int,
-					       struct efhw_nic *nic),
-			      void *arg)
+			      efrm_evq_callback_fn handler, void *arg)
 {
 	struct efrm_nic_per_vi *cb_info;
 	int instance;
@@ -144,16 +142,8 @@ efrm_eventq_register_callback(struct efrm_vi *virs,
 	}
 
 	virs->evq_callback_arg = arg;
+	wmb();
 	virs->evq_callback_fn = handler;
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf) {
-		rc = efrm_vf_eventq_callback_registered(virs);
-		if (rc != 0)
-			virs->evq_callback_fn = NULL;
-		goto unlock_and_out;
-	}
-#endif
 
 	instance = virs->rs.rs_instance;
 	cb_info = &efrm_nic(virs->rs.rs_client->nic)->vis[instance];
@@ -179,14 +169,6 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	EFRM_ASSERT(virs->rs.rs_client != NULL);
 
 	mutex_lock(&register_evq_cb_mutex);
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf) {
-		efrm_vf_eventq_callback_kill(virs);
-		mutex_unlock(&register_evq_cb_mutex);
-		return;
-	}
-#endif
 
 	instance = virs->rs.rs_instance;
 	cb_info = &efrm_nic(virs->rs.rs_client->nic)->vis[instance];
@@ -219,7 +201,7 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 			bool is_timeout)
 {
 	struct efrm_nic *rnic = efrm_nic(nic);
-	void (*handler) (void *, int is_timeout, struct efhw_nic *nic);
+	efrm_evq_callback_fn handler;
 	void *arg;
 	struct efrm_nic_per_vi *cb_info;
 	int32_t evq_state;
@@ -263,6 +245,7 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 
 	if (virs) {
 		handler = virs->evq_callback_fn;
+		rmb();
 		arg = virs->evq_callback_arg;
 		EFRM_ASSERT(handler != NULL);
 		handler(arg, is_timeout, nic);

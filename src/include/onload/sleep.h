@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,15 +54,30 @@ ci_inline void citp_waitable_wake_not_in_poll(ci_netif* ni,
   if( what & CI_SB_FLAG_WAKE_TX )
     ++sb->sleep_seq.rw.tx;
   ci_mb();
+
+  /* Object is ready, so bung it on its ready list. */
+  ci_ni_dllist_remove(ni, &sb->ready_link);
+  ci_ni_dllist_put(ni, &ni->state->ready_lists[sb->ready_list_id],
+                   &sb->ready_link);
 #ifdef __KERNEL__
   if( what & sb->wake_request ) {
     sb->sb_flags |= what;
     citp_waitable_wakeup(ni, sb);
   }
+
+  /* Wake the ready list too, if that's requested it. */
+  if( ni->state->ready_list_flags[sb->ready_list_id] &
+      CI_NI_READY_LIST_FLAG_WAKE )
+    efab_tcp_helper_ready_list_wakeup(netif2tcp_helper_resource(ni),
+                                      sb->ready_list_id);
 #else
   if( what & sb->wake_request ) {
     sb->sb_flags |= what;
     ci_netif_put_on_post_poll(ni, sb);
+    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
+  }
+  else if( ni->state->ready_list_flags[sb->ready_list_id] &
+           CI_NI_READY_LIST_FLAG_WAKE ) {
     ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
   }
 #endif

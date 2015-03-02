@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,12 +31,11 @@
 #include "ef_vi_internal.h"
 #include "driver_access.h"
 #include "logging.h"
-#include "efch_intf_ver.h"
 
 
 int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh, 
 		    ef_pd* pd, ef_driver_handle pd_dh,
-		    void* p_mem, int len_bytes)
+		    void* p_mem, size_t len_bytes)
 {
   /* Note: At time of writing the driver rounds the registered region to
    * whole system pages.  It then writes a DMA address for each 4K page
@@ -63,25 +62,27 @@ int ef_memreg_alloc(ef_memreg* mr, ef_driver_handle mr_dh,
   if( mr->mr_dma_addrs_base == NULL )
     return -ENOMEM;
 
+  len_bytes = CI_ALIGN_FWD(len_bytes, EFHW_NIC_PAGE_SIZE);
+
   /* For a pd in a cluster, use the handle from clusterd */
   if( pd->pd_cluster_sock != -1 )
     pd_dh = pd->pd_cluster_dh;
 
   memset(&ra, 0, sizeof(ra));
-  strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));
+  ef_vi_set_intf_ver(ra.intf_ver, sizeof(ra.intf_ver));
   ra.ra_type = EFRM_RESOURCE_MEMREG;
   ra.u.memreg.in_vi_or_pd_id = efch_make_resource_id(pd->pd_resource_id);
   ra.u.memreg.in_vi_or_pd_fd = pd_dh;
-  ra.u.memreg.in_mem_ptr = (uintptr_t) p_mem_sys_base;
-  ra.u.memreg.in_mem_bytes = sys_len;
+  ra.u.memreg.in_mem_ptr = (uintptr_t) p_mem;
+  ra.u.memreg.in_mem_bytes = len_bytes;
   ra.u.memreg.in_addrs_out_ptr = (uintptr_t) mr->mr_dma_addrs_base;
   ra.u.memreg.in_addrs_out_stride = sizeof(mr->mr_dma_addrs_base[0]);
 
   rc = ci_resource_alloc(mr_dh, &ra);
   if( rc < 0 ) {
-	  LOGVV(ef_log("ef_memreg_alloc: ci_resource_alloc %d", rc));
-	  free(mr->mr_dma_addrs_base);
-	  return rc;
+    LOGVV(ef_log("ef_memreg_alloc: ci_resource_alloc %d", rc));
+    free(mr->mr_dma_addrs_base);
+    return rc;
   }
 
   mr->mr_dma_addrs = mr->mr_dma_addrs_base;

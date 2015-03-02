@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -342,6 +342,12 @@ enum { /* icmp code field for type = CI_ICMP_TIME_EXCEEDED */
   CI_ICMP_TE_FRAG          = 1
 };
 
+
+/* Errno "some filters inserted, some failed".
+ * The errno value which must not clash with the real errors
+ * from filter code.
+ * Yes, it is ugly. */
+#define EFILTERSSOME EDQUOT
 
 #endif  /* __CI_NET_IPV4_H__ */
 

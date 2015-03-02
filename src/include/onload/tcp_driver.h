@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,11 +43,16 @@ typedef struct {
   /*! Instances of tcp helpers */
   ci_id_pool_t  instances;
 
-  /*! List of all stacks (orphaned or not). */
+  /*! List of all stacks (orphaned or not).
+   *  It does not include those being created or destroyed. */
   ci_dllist     all_stacks;
 
   /*! List of not-yet-created stacks: used to reset them when necessary. */
   ci_dllist     started_stacks;
+
+  /*! Tracks stack count from creation to destruction: used to prevent
+   *  interfaces from going down. */
+  ci_uint32     stack_count;
 
   /*! Lock */
   ci_irqlock_t  lock;

@@ -19,6 +19,7 @@ usage() {
   err "  $me reload                       - reload sfc/onload drivers"
   err "  $me mknod <driver-name>          - make /dev/<driver-name>"
   err "  $me mod_params <driver-name>     - return module parameters"
+  err "  $me configure_container <name>   - configure devices in container"
   err
   exit 1
 }
@@ -64,14 +65,34 @@ modusedby() {
   /sbin/lsmod | grep -q "^$mod\>.*\<$usedby\>"
 }
 
+check_node_device() {
+  local path="$1"
+  local major="$2"
+  local minor="$3"
+  local have=$(stat -c '%t %T' "$path" 2> /dev/null)
+  local want=$(printf '%x %x' "$major" "$minor")
+  [ "$have" == "$want" ]
+}
+
 domknod () {
   local path="$1"
   local major="$2"
   local minor="$3"
   local perm="$4"
 
+  # If several concurrent instances of this script run (which is quite possible
+  # as module initialisation can trigger further probe attempts), there are
+  # races between them. To ameliorate these, in the event of mknod failure we
+  # sleep briefly in the hope that a concurrent instance succeeds; then we
+  # check whether a suitable node has appeared and warn if not.
   try rm -f "$path"
-  try mknod -m "$perm" "$path" c "$major" "$minor"
+  if ! mknod -m "$perm" "$path" c "$major" "$minor" 2> /dev/null
+  then
+    sleep 5
+    check_node_device "$path" "$major" "$minor" ||
+      log "WARNING: Failed to create $path."
+  fi
+
   [ -x /sbin/restorecon ] && /sbin/restorecon "$path"
 }
 
@@ -89,7 +110,7 @@ mknod_for_dev() {
   eval group=\"\${${DEV}_GROUP:-root}\"
   eval perm=\"\${${DEV}_MODE:-666}\"
   domknod "/dev/$dev" "$major" 0 "$perm"
-  chown "$user:$group" "/dev/$dev"
+  chown "$user:$group" "/dev/$dev" 2> /dev/null
 }
 
 cmd_mknod() {
@@ -115,6 +136,65 @@ cmd_mknod() {
 cmd_mod_params() {
   #case "$1" in
   #esac
+  exit 0
+}
+
+######################################################################
+
+get_cgroup_field() {
+  local field=$1
+  shift
+  echo "$@" | cut -d ':' -f $field
+}
+
+cmd_configure_container() {
+  DOCKER=$(which docker 2> /dev/null) || \
+    fail "ERROR: Docker does not appear to be installed."
+
+  container=$1
+  pid=$($DOCKER inspect --format {{.State.Pid}} $container) || \
+    fail "ERROR: Could not retrieve PID for container '$container'."
+  [ $($DOCKER inspect --format {{.State.Running}} $container) == 'true' ] || \
+    fail "ERROR: Container '$container' is not running."
+
+  # /proc/<pid>/cgroup consists of lines with the following format:
+  #  hierarchy_id:controller1,controller2,...:cgroup_path
+  cgroup=
+  for cgroup_hierarchy in $(cat /proc/$pid/cgroup); do
+    if get_cgroup_field 2 $cgroup_hierarchy | grep -w devices > /dev/null; then
+      cgroup=$(get_cgroup_field 3 $cgroup_hierarchy)
+      break
+    fi
+  done
+
+  [ -n "$cgroup" ] ||
+    fail "ERROR: Could not find devices cgroup for container '$container'."
+
+  devices="onload onload_epoll sfc_char"
+  for device in $devices; do
+    cgset -r "devices.allow=c $(getmajor $device):0 rwm" $cgroup ||
+      fail "ERROR: Failed to set permissions for device '$device'."
+  done
+
+  # If we have nsenter, we can create nodes inside the container; otherwise,
+  # this will have to be done manually.
+  NSENTER=$(which nsenter 2> /dev/null)
+  if [ -x "$NSENTER" ]; then
+    for device in $devices; do
+      $NSENTER -t $pid -m -u -i -n -p -- env -i -- su -lc \
+        "onload_tool mknod onload $device" || \
+        fail "ERROR: Failed to create node for device '$device' in container" \
+             "'$container'."
+    done
+  else
+    log "nsenter is not available, and so device nodes have not been"
+    log "created. Either install nsenter and rerun this script, or execute"
+    log "the following commands inside the container:"
+    for device in $devices; do
+      log "  onload_tool mknod onload $device"
+    done
+  fi
+
   exit 0
 }
 
@@ -154,6 +234,8 @@ cmd_reload() {
   isloaded onload || fail "ERROR: onload module did not load"
   # NB. sfc_aoe not always installed; don't want to moan...
   /sbin/modprobe sfc_aoe >/dev/null 2>&1
+  echo "$ONLOAD_WHITELIST" >/sys/module/onload/parameters/intf_white_list
+  echo "$ONLOAD_BLACKLIST" >/sys/module/onload/parameters/intf_black_list
   exit 0
 }
 
@@ -187,6 +269,9 @@ case "$cmd" in
     ;;
   unload)
     cmd_unload "$@"
+    ;;
+  configure_container)
+    cmd_configure_container "$@"
     ;;
   *)
     usage

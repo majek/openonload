@@ -21,6 +21,15 @@ ifndef NDEBUG
 EXTRA_CFLAGS += -g
 endif
 
+ifdef OFE_TREE
+  EXTRA_CPPFLAGS	+= -I$(OFE_TREE)/include
+  # -DONLOAD_OFE is necessary for Onload code
+  #  (and may be renamed if needed)
+  # -DOFE_ONLOAD is necessary for OFE includes, do not rename it unless
+  #  you are fixing OFE tree also.
+  EXTRA_CPPFLAGS	+= -DONLOAD_OFE -DOFE_ONLOAD
+endif
+
 EXTRA_CFLAGS += $(MMAKE_CFLAGS) $(EXTRA_CPPFLAGS)
 EXTRA_AFLAGS += $(EXTRA_CPPFLAGS)
 

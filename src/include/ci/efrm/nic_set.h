@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,6 +53,7 @@
 #ifndef __CI_EFRM_NIC_SET_H__
 #define __CI_EFRM_NIC_SET_H__
 
+#include <ci/compat.h>
 #include <ci/efrm/debug.h>
 #include <ci/efhw/common_sysdep.h>
 #include <ci/efhw/efhw_config.h>
@@ -66,10 +67,10 @@
 /* Internal suructure of efrm_nic_set_t should not be referenced outside of
  * this file.  Add a new accessor if you should do it. */
 typedef struct {
-	uint32_t nics;
+	uint64_t nics CI_ALIGN(8);
 } efrm_nic_set_t;
 
-#if EFHW_MAX_NR_DEVS > 32
+#if EFHW_MAX_NR_DEVS > 64
 #error change efrm_nic_set to handle EFHW_MAX_NR_DEVS number of devices
 #endif
 
@@ -77,7 +78,7 @@ static inline bool
 efrm_nic_set_read(const efrm_nic_set_t *nic_set, unsigned index)
 {
 	EFRM_ASSERT(nic_set);
-	EFRM_ASSERT(index < EFHW_MAX_NR_DEVS && index < 32);
+	EFRM_ASSERT(index < EFHW_MAX_NR_DEVS && index < 64);
 	return (nic_set->nics & (1 << index)) ? true : false;
 }
 
@@ -85,7 +86,7 @@ static inline void
 efrm_nic_set_write(efrm_nic_set_t *nic_set, unsigned index, bool value)
 {
 	EFRM_ASSERT(nic_set);
-	EFRM_ASSERT(index < EFHW_MAX_NR_DEVS && index < 32);
+	EFRM_ASSERT(index < EFHW_MAX_NR_DEVS && index < 64);
 	EFRM_ASSERT(value == false || value == true);
 	nic_set->nics = (nic_set->nics & (~(1 << index))) + (value << index);
 }
@@ -97,7 +98,7 @@ static inline void efrm_nic_set_clear(efrm_nic_set_t *nic_set)
 
 static inline void efrm_nic_set_all(efrm_nic_set_t *nic_set)
 {
-	nic_set->nics = 0xffffffff;
+	nic_set->nics = (uint64_t)-1;
 }
 
 static inline bool efrm_nic_set_is_all_clear(efrm_nic_set_t *nic_set)
@@ -105,9 +106,9 @@ static inline bool efrm_nic_set_is_all_clear(efrm_nic_set_t *nic_set)
 	return nic_set->nics == 0 ? true : false;
 }
 
-#define EFRM_NIC_SET_FMT "%x"
+#define EFRM_NIC_SET_FMT CI_PRIx64
 
-static inline uint32_t efrm_nic_set_pri_arg(efrm_nic_set_t *nic_set)
+static inline uint64_t efrm_nic_set_pri_arg(efrm_nic_set_t *nic_set)
 {
 	return nic_set->nics;
 }

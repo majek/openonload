@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -167,6 +167,10 @@ extern void efrm_vi_attr_set_with_interrupt(struct efrm_vi_attr *attr,
 extern void efrm_vi_attr_set_packed_stream(struct efrm_vi_attr *attr,
 					   int packed_stream);
 
+/** Set buffer size for VI allocated in packed stream mode. */
+extern void efrm_vi_attr_set_ps_buffer_size(struct efrm_vi_attr *attr,
+					    int ps_buffer_size);
+
 /** Allocate a VI that has an associated timer. */
 extern void efrm_vi_attr_set_with_timer(struct efrm_vi_attr *attr,
 					int with_timer);
@@ -200,6 +204,11 @@ extern int efrm_vi_attr_set_hw_stack_id(struct efrm_vi_attr *,
 					   int hw_stack_id);
 
 
+extern struct efrm_vi *
+efrm_vi_from_resource(struct efrm_resource *);
+
+
+
 /**
  * Allocate a VI resource instance.
  *
@@ -211,6 +220,8 @@ extern int efrm_vi_attr_set_hw_stack_id(struct efrm_vi_attr *,
  */
 extern int  efrm_vi_alloc(struct efrm_client *client,
 			  const struct efrm_vi_attr *attr,
+			  int print_resource_warnings,
+			  const char *vi_name,
 			  struct efrm_vi **p_virs_out);
 
 /**
@@ -301,6 +312,8 @@ efrm_vi_q_alloc_sanitize_size(struct efrm_vi *virs, enum efhw_q_type q_type,
 struct pci_dev;
 extern struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *);
 
+extern int efrm_vi_get_channel(struct efrm_vi *);
+
 extern struct efrm_vf *efrm_vi_get_vf(struct efrm_vi *);
 
 
@@ -344,6 +357,7 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		       uint32_t *out_mem_mmap_bytes,
 		       uint32_t *out_txq_capacity,
 		       uint32_t *out_rxq_capacity,
+		       int print_resource_warnings,
 		       enum efrm_vi_alloc_failure *out_failure_reason);
 
 extern void efrm_vi_resource_release(struct efrm_vi *);
@@ -365,6 +379,10 @@ extern struct efrm_pd *efrm_vi_get_pd(struct efrm_vi *);
 /*! Reset an event queue and clear any associated timers */
 extern void efrm_eventq_reset(struct efrm_vi *virs);
 
+/*! Callback function provided by user */
+typedef void (*efrm_evq_callback_fn) (void *arg, int is_timeout,
+				      struct efhw_nic *nic);
+
 /*! Register a kernel-level handler for the event queue.  This function is
  * called whenever a timer expires, or whenever the event queue is woken
  * but no thread is blocked on it.
@@ -378,8 +396,7 @@ extern void efrm_eventq_reset(struct efrm_vi *virs);
  */
 extern int
 efrm_eventq_register_callback(struct efrm_vi *rs,
-			      void (*handler)(void *arg, int is_timeout,
-					      struct efhw_nic *nic),
+			      efrm_evq_callback_fn handler,
 			      void *arg);
 
 /*! Kill the kernel-level callback.
@@ -432,11 +449,6 @@ extern void efrm_vi_wait_nic_complete_flushes(struct efhw_nic *nic);
  * than 1 second old 
  */
 extern void efrm_vi_check_flushes(struct work_struct *data);
-
-/*!
- * Timer to call efrm_vi_check_flushes periodically
- */
-extern void efrm_vi_flush_timer_fn(unsigned long l);
 
 /*! Comment? */
 extern int efrm_pt_pace(struct efrm_vi*, int val);

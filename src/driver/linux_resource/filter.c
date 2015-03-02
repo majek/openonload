@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,6 +58,7 @@
 #include <ci/efrm/efrm_filter.h>
 #include <ci/efrm/kernel_proc.h>
 #include <ci/efrm/efrm_client.h>
+#include <ci/efhw/nic.h>
 
 
 /* ************************************* */
@@ -1912,7 +1913,7 @@ int efrm_filter_rename( struct efhw_nic *nic, struct net_device *net_dev )
 	}
 	
 	/* efhw_nic is the device, which has the real id */
-	dl_dev = linux_efhw_nic(nic)->dl_device;
+	dl_dev = efhw_nic_dl_device(nic);
 	if ( !dl_dev ) {
 		EFRM_ERR("%s:Internal error two %p", __func__, dl_dev );
 		return -EINVAL;
@@ -1950,7 +1951,7 @@ int efrm_filter_insert(struct efrm_client *client,
 		       bool replace)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
+	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
 	/* This should be called every time a driver wishes to insert a
 	   filter to the NIC, to check whether the firewall rules want to
 	   block it. */
@@ -1965,7 +1966,7 @@ EXPORT_SYMBOL(efrm_filter_insert);
 void efrm_filter_remove(struct efrm_client *client, int filter_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
+	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
 	efx_dl_filter_remove(efx_dev, filter_id);
 }
 EXPORT_SYMBOL(efrm_filter_remove);
@@ -1975,7 +1976,7 @@ void efrm_filter_redirect(struct efrm_client *client, int filter_id,
 			  int rxq_i, int stack_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
+	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
 #if EFX_DRIVERLINK_API_VERSION >= 16
 	efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
 #else
@@ -1989,7 +1990,7 @@ int efrm_filter_block_kernel(struct efrm_client *client, int flags, bool block)
 {
 #if EFX_DRIVERLINK_API_VERSION > 10
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = linux_efhw_nic(efhw_nic)->dl_device;
+	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
 	int rc = 0;
 	if ( block ) {
 #if EFX_DRIVERLINK_API_VERSION > 11

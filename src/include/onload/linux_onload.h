@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,12 +40,40 @@
 #include <linux/compat.h>
 #include <net/compat.h>
 #endif
+#include <linux/poll.h>
+#include <driver/linux_net/kernel_compat.h>
+#include <driver/linux_affinity/autocompat.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
 #define CI_LINUX_NO_MOVE_ADDR
 extern int efab_move_addr_to_kernel(void __user *uaddr, int ulen,
                                     struct sockaddr *kaddr);
 #define move_addr_to_kernel efab_move_addr_to_kernel
+#endif
+
+#ifndef EFRM_HAVE_POLL_REQUESTED_EVENTS
+static inline bool poll_does_not_wait(const poll_table *p)
+{
+  return p == NULL;
+}
+#endif
+
+#if ! defined(EFRM_HAVE_F_DENTRY) && ! defined f_dentry
+#define f_dentry f_path.dentry
+#endif
+
+#ifndef EFRM_HAVE_MSG_ITER
+static inline void __msg_iov_init(struct msghdr *msg, struct iovec *iov,
+                                  unsigned long iovlen)
+{
+  msg->msg_iov = iov;
+  msg->msg_iovlen = iovlen;
+}
+#define oo_msg_iov_init(msg, dir, iov, iovlen, bytes) \
+  __msg_iov_init(msg, iov, iovlen)
+#else
+#define oo_msg_iov_init(msg, dir, iov, iovlen, bytes) \
+  iov_iter_init(&(msg)->msg_iter, dir, iov, iovlen, bytes)
 #endif
 
 /*--------------------------------------------------------------------
@@ -125,5 +153,33 @@ asmlinkage int efab_linux_sys_shmctl(int shmid, int cmd,
                                      struct shmid_ds __user *buf);
 #endif
 
+#ifdef CONFIG_NAMESPACES
+#include <linux/nsproxy.h>
+#ifdef EFRM_HAVE_TASK_NSPROXY
+static inline struct nsproxy *
+task_nsproxy_start(struct task_struct *tsk)
+{
+  rcu_read_lock();
+  return task_nsproxy(tsk);
+}
+static inline void
+task_nsproxy_done(struct task_struct *tsk)
+{
+  rcu_read_unlock();
+}
+#else
+static inline struct nsproxy *
+task_nsproxy_start(struct task_struct *tsk)
+{
+  task_lock(tsk);
+  return tsk->nsproxy;
+}
+static inline void
+task_nsproxy_done(struct task_struct *tsk)
+{
+  task_unlock(tsk);
+}
+#endif
+#endif
 
 #endif  /* __CI_DRIVER_EFAB_LINUX_ONLOAD__ */

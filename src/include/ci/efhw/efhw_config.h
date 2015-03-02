@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,7 +57,7 @@
 /* TODO: This should really be in efrm.  (In fact we shouldn't really have
  * any limit at all).
  */
-#define EFHW_MAX_NR_DEVS   16
+#define EFHW_MAX_NR_DEVS   64
 
 
 #endif /* __CI_EFHW_EFAB_CONFIG_H__ */

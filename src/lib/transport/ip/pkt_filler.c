@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -73,7 +73,7 @@ ci_inline int oo_pkt_fill_copy(void* to, const void* from, int n_bytes
 }
 
 
-int oo_pkt_fill(ci_netif* ni, int* p_netif_locked,
+int oo_pkt_fill(ci_netif* ni, ci_sock_cmn* s, int* p_netif_locked,
                 struct oo_pkt_filler* pf, ci_iovec_ptr* piov,
                 int bytes_to_copy  CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
@@ -117,7 +117,7 @@ int oo_pkt_fill(ci_netif* ni, int* p_netif_locked,
 
       next_pkt = oo_pkt_filler_next_pkt(ni, pf, *p_netif_locked);
       if( next_pkt == NULL ) {
-        next_pkt = ci_netif_pkt_alloc_block(ni, p_netif_locked);
+        next_pkt = ci_netif_pkt_alloc_block(ni, s, p_netif_locked);
 #ifdef __KERNEL__
         if(CI_UNLIKELY( next_pkt == NULL ))
           return -ERESTARTSYS;

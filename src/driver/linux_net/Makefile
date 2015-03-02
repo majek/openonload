@@ -24,6 +24,7 @@ export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
 export CONFIG_SFC_PPS := y
 export CONFIG_SFC_TRACING :=
+export CONFIG_SFC_MCDI_LOGGING := y
 endif
 
 ifdef KSRCDIR
@@ -96,6 +97,9 @@ override CONFIG_SFC_DEBUGFS :=
 $(warning => Some diagnostic information will be unavailable)
 endif
 endif
+ifndef CONFIG_SFC_MCDI_LOGGING
+$(warning => MCDI tracing will not be supported)
+endif
 endif # CONFIG_NET
 
 else # !KERNELRELEASE ###### The following is for the standalone Makefile case
@@ -137,10 +141,10 @@ endif # !EFX_UPSTREAM
 sfc-y			+= efx.o nic.o farch.o falcon.o siena.o ef10.o tx.o \
 			   rx.o selftest.o ethtool.o qt202x_phy.o mdio_10g.o \
 			   tenxpress.o txc43128_phy.o falcon_boards.o \
-			   mcdi.o mcdi_port.o mcdi_mon.o ptp.o
-sfc-y			+= driverlink.o 
+			   mcdi.o mcdi_port.o mcdi_mon.o ptp.o \
+			   sriov.o siena_sriov.o ef10_sriov.o
+sfc-y			+= driverlink.o
 sfc-$(CONFIG_SFC_MTD)	+= mtd.o
-sfc-$(CONFIG_SFC_SRIOV)	+= siena_sriov.o
 ifndef EFX_NO_KCOMPAT
 ifneq ($(MAKECMDGOALS),export)
 sfc-y			+= ioctl.o kernel_compat.o
@@ -180,6 +184,10 @@ EXTRA_CFLAGS += -DEFX_ENABLE_SFC_XPS
 endif
 ifndef EFX_DISABLE_SARFS
 EXTRA_CFLAGS += -DEFX_ENABLE_SARFS
+endif
+ifndef EFX_DISABLE_MCDI_PROXY_AUTH
+sfc-y			+= proxy_auth.o mcdi_proxy.o
+EXTRA_CFLAGS += -DEFX_ENABLE_MCDI_PROXY_AUTH
 endif
 
 
@@ -232,7 +240,7 @@ $(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
 	@touch $@
 
 define filechk_config.h
-	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS SFC_TRACING,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
+	printf "$(foreach name,SFC_DEBUGFS SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS SFC_TRACING SFC_MCDI_LOGGING,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
 endef
 
 $(obj)/config.h: $(src)/Makefile FORCE

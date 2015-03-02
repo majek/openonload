@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -107,16 +107,14 @@ static int thc_thr_search_ip_port(tcp_helper_resource_t* thr, int protocol,
   ci_netif* netif = &thr->netif;
   unsigned id;
   for( id = 0; id < netif->state->n_ep_bufs; ++id ) {
-    if( oo_sock_id_is_waitable(netif, id) ) {
-      citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, id);
-      if( wo->waitable.state != CI_TCP_STATE_FREE ) {
-        citp_waitable* w = &wo->waitable;
-        ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
-        if( thc_get_sock_protocol(s) == protocol &&
-            sock_laddr_be32(s) == addr_be32 &&
-            sock_lport_be16(s) == port_be16 )
-          return 1;
-      }
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, id);
+    if( wo->waitable.state != CI_TCP_STATE_FREE ) {
+      citp_waitable* w = &wo->waitable;
+      ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+      if( thc_get_sock_protocol(s) == protocol &&
+          sock_laddr_be32(s) == addr_be32 &&
+          sock_lport_be16(s) == port_be16 )
+        return 1;
     }
   }
   return 0;
@@ -163,7 +161,7 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
                      uid_t euid, int cluster_size, int packet_buffer_mode,
                      tcp_helper_cluster_t** thc_out)
 {
-  int rc, i;
+  int rc, i, j=0;
   struct efrm_pd* pd;
   tcp_helper_cluster_t* thc = kmalloc(sizeof(*thc), GFP_KERNEL);
   if( thc == NULL )
@@ -175,17 +173,23 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
   thc->thc_cluster_size = cluster_size;
   thc->thc_euid = euid;
 
+  /* Needed to protect against oo_nics changes */
+  rtnl_lock();
+
   for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i ) {
-    if( oo_nics[i].efrm_client == NULL )
+    if( oo_nics[i].efrm_client == NULL ||
+        ! oo_check_nic_suitable_for_onload(&(oo_nics[i])) )
       continue;
     if( (rc = efrm_pd_alloc(&pd, oo_nics[i].efrm_client, NULL,
                             packet_buffer_mode != 0)) != 0 )
       goto fail;
-    rc = efrm_vi_set_alloc(pd, thc->thc_cluster_size, 0, &thc->thc_vi_set[i]);
+    rc = efrm_vi_set_alloc(pd, thc->thc_cluster_size, 0, &thc->thc_vi_set[j++]);
     efrm_pd_release(pd);
     if( rc != 0 )
       goto fail;
   }
+
+  rtnl_unlock();
 
   thc->thc_next = thc_head;
   thc_head = thc;
@@ -193,6 +197,7 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
   return 0;
 
  fail:
+  rtnl_unlock();
   for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
     if( thc->thc_vi_set[i] != NULL )
       efrm_vi_set_release(thc->thc_vi_set[i]);
@@ -257,7 +262,7 @@ static void thc_remove_thr(tcp_helper_cluster_t* thc,
  */
 static void thc_kill_an_orphan(tcp_helper_cluster_t* thc)
 {
-  tcp_helper_resource_t* thr;
+  tcp_helper_resource_t* thr = NULL;
   int rc;
 
   rc = thc_get_an_orphan(thc, &thr);
@@ -357,6 +362,7 @@ static int thc_get_or_alloc_thr(tcp_helper_cluster_t* thc,
   thr_walk->thc          = thc;
   thr_walk->thc_thr_next = thc->thc_thr_head;
   thc->thc_thr_head      = thr_walk;
+  oo_atomic_inc(&thc->thc_ref_count);
   *thr_out = thr_walk;
   return 0;
 }
@@ -400,6 +406,11 @@ static void thc_cluster_free(tcp_helper_cluster_t* thc)
 }
 
 
+void tcp_helper_cluster_ref(tcp_helper_cluster_t* thc)
+{
+  oo_atomic_inc(&thc->thc_ref_count);
+}
+
 /* Releases tcp_helper_resource_t on the tcp_helper_cluster_t.  If no
  * more tcp_helper_resource_t's, then frees it.
  *
@@ -409,8 +420,9 @@ void tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
                                 tcp_helper_resource_t* thr)
 {
   mutex_lock(&thc_mutex);
-  thc_remove_thr(thc, thr);
-  if( thc->thc_thr_head == NULL )
+  if( thr != NULL )
+    thc_remove_thr(thc, thr);
+  if( oo_atomic_dec_and_test(&thc->thc_ref_count) )
     thc_cluster_free(thc);
   mutex_unlock(&thc_mutex);
 }
@@ -587,7 +599,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   oo_tcp_reuseport_bind_t* trb = arg;
   ci_netif* ni = &priv->thr->netif;
   tcp_helper_cluster_t* thc;
-  tcp_helper_resource_t* thr;
+  tcp_helper_resource_t* thr = NULL;
   citp_waitable* waitable;
   ci_sock_cmn* sock = SP_TO_SOCK(ni, priv->sock_id);
   int protocol = thc_get_sock_protocol(sock);
@@ -598,12 +610,6 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     LOG_NV(ci_log("%s: Ignored attempt to use clusters due to "
                   "EF_CLUSTER_IGNORE option.", __FUNCTION__));
     return 0;
-  }
-
-  if( ci_netif_is_locked(ni) ) {
-    ci_log("%s: This function can only be used with an unlocked netif.",
-           __FUNCTION__);
-    return -EINVAL;
   }
 
   if( trb->port_be16 == 0 ) {
@@ -708,7 +714,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
       goto alloc_fail;
     if( rc == 1 ) {
       if( thc->thc_euid != ci_geteuid() ) {
-        rc = -EPERM;
+        rc = -EADDRINUSE;
         goto alloc_fail;
       }
       goto cont;
@@ -738,18 +744,20 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   /* Find a suitable stack within the cluster to use */
   rc = thc_get_or_alloc_thr(thc, trb->cluster_restart_opt, ni, protocol,
                             trb->addr_be32, trb->port_be16, &thr);
+
+  /* At this point, we hold a reference to the cluster via
+   * oof_socket_cluster_add(), so the cluster cannot go away.  We also
+   * will not be accessing state within the cluster anymore so we can
+   * drop the lock. */
+  mutex_unlock(&thc_mutex);
+
   if( rc != 0 ) {
-    if( thc->thc_thr_head == NULL )
-      thc_cluster_free(thc);
+    /* This will also drop the reference that we took in
+     * oof_socket_cluster_add() cleaning up the cluster if needed. */
     oof_socket_cluster_del(efab_tcp_driver.filter_manager, thc, protocol,
                            trb->port_be16);
-    goto alloc_fail;
+    goto alloc_fail_unlocked;
   }
-
-  /* At this point, we hold a reference to a stack within a cluster,
-   * so the stack and the cluster cannot go away.  We can drop the
-   * locks. */
-  mutex_unlock(&thc_mutex);
 
   /* Move the socket into the new stack */
   if( (rc = ci_netif_lock(ni)) != 0 )
@@ -769,17 +777,19 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
 
     /* Now that the socket's in the clustered stack, set its clustering filter
      * state. */
-    oof_socket_set_early_lp(efab_tcp_driver.filter_manager,
-                            &ci_trs_ep_get(thr, priv->sock_id)->oofilter,
-                            protocol, trb->port_be16);
-  }
+    oof_socket_set_early_lp(
+                    efab_tcp_driver.filter_manager,
+                    &ci_trs_ep_get(thr, sock->b.moved_to_sock_id)->oofilter,
+                    protocol, trb->port_be16);
 
-  /* If this fails we leave the socket in the new stack to avoid a complex
-   * error path.
-   */
-  if( sock->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY )
-    rc = thc_reuseport_bind_legacy(thc, thr, priv->sock_id, trb->addr_be32,
-                                   trb->port_be16, protocol);
+    /* If this fails we leave the socket in the new stack to avoid a complex
+     * error path.
+     */
+    if( sock->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY )
+      rc = thc_reuseport_bind_legacy(thc, thr, sock->b.moved_to_sock_id,
+                                     trb->addr_be32, trb->port_be16,
+                                     protocol);
+  }
 
  drop_and_done:
   if( rc != 0 )
@@ -792,6 +802,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
 
  alloc_fail:
   mutex_unlock(&thc_mutex);
+ alloc_fail_unlocked:
   mutex_unlock(&thc_init_mutex);
   return rc;
 }
@@ -824,21 +835,19 @@ static oo_sp thc_thr_legacy_sock(tcp_helper_resource_t* thr, int protocol,
   ci_netif* netif = &thr->netif;
   unsigned id;
   for( id = 0; id < netif->state->n_ep_bufs; ++id ) {
-    if( oo_sock_id_is_waitable(netif, id) ) {
-      citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, id);
-      if( wo->waitable.state != CI_TCP_STATE_FREE ) {
-        citp_waitable* w = &wo->waitable;
-        ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
-        if( thc_get_sock_protocol(s) == protocol &&
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, id);
+    if( wo->waitable.state != CI_TCP_STATE_FREE ) {
+      citp_waitable* w = &wo->waitable;
+      ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+      if( thc_get_sock_protocol(s) == protocol &&
 /* Legacy Cluster: Not currently supporting differing laddr
-            sock_laddr_be32(s) == addr_be32 &&
+          sock_laddr_be32(s) == addr_be32 &&
 */
-            sock_lport_be16(s) == port_be16 &&
-            sock_raddr_be32(s) == 0 &&
-            sock_rport_be16(s) == 0 &&
-            (s->b.state == CI_TCP_STATE_UDP || s->b.state == CI_TCP_LISTEN) )
-          return OO_SP_FROM_INT(netif, id);
-      }
+          sock_lport_be16(s) == port_be16 &&
+          sock_raddr_be32(s) == 0 &&
+          sock_rport_be16(s) == 0 &&
+          (s->b.state == CI_TCP_STATE_UDP || s->b.state == CI_TCP_LISTEN) )
+        return OO_SP_FROM_INT(netif, id);
     }
   }
   return OO_SP_INVALID;
@@ -970,34 +979,19 @@ Cluster dump functions
 *****************************************************************/
 
 
-static const char* citp_waitable_type_str(citp_waitable* w)
-{
-  if( w->state & CI_TCP_STATE_TCP )         return "TCP";
-  else if( w->state == CI_TCP_STATE_UDP )   return "UDP";
-  else if( w->state == CI_TCP_STATE_FREE )  return "FREE";
-  else if( w->state == CI_TCP_STATE_ALIEN ) return "ALIEN";
-#if CI_CFG_USERSPACE_PIPE
-  else if( w->state == CI_TCP_STATE_PIPE )  return "PIPE";
-#endif
-  else return "<unknown-citp_waitable-type>";
-}
-
-
 static void thc_dump_sockets(ci_netif* netif, oo_dump_log_fn_t log,
                              void* log_arg)
 {
   unsigned id;
   for( id = 0; id < netif->state->n_ep_bufs; ++id ) {
-    if( oo_sock_id_is_waitable(netif, id) ) {
-      citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, id);
-      if( wo->waitable.state != CI_TCP_STATE_FREE ) {
-        citp_waitable* w = &wo->waitable;
-        ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
-        log(log_arg, "    %s lcl="OOF_IP4PORT" rmt="OOF_IP4PORT,
-            citp_waitable_type_str(w),
-            OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
-            OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)));
-      }
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, id);
+    if( wo->waitable.state != CI_TCP_STATE_FREE ) {
+      citp_waitable* w = &wo->waitable;
+      ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+      log(log_arg, "    %s lcl="OOF_IP4PORT" rmt="OOF_IP4PORT,
+          citp_waitable_type_str(w),
+          OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
+          OOFA_IP4PORT(sock_raddr_be32(s), sock_rport_be16(s)));
     }
   }
 }

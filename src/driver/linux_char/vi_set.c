@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -94,7 +94,8 @@ static void vi_set_rm_free(efch_resource_t *rs)
 {
   struct efrm_vi_set *vi_set = efrm_vi_set_from_resource(rs->rs_base);
 
-  efch_filter_list_free(rs->rs_base, &rs->vi_set.fl);
+  efch_filter_list_free(rs->rs_base, efrm_vi_set_get_pd(vi_set),
+                        &rs->vi_set.fl);
   /* Remove any sniff config we may have set up. */
   if( rs->vi_set.sniff_flags & EFCH_RX_SNIFF )
     efrm_port_sniff(rs->rs_base, 0, 0, efrm_vi_set_get_rss_context(vi_set));
@@ -105,8 +106,7 @@ static void vi_set_rm_free(efch_resource_t *rs)
 
 static int
 vi_set_mmap_not_supported(struct efrm_resource* ors, unsigned long* bytes,
-                          void* opaque, int* map_num, unsigned long* offset,
-                          int index)
+                          void* opaque, int index)
 {
   return -EINVAL;
 }
@@ -124,10 +124,9 @@ vi_set_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
                 ci_resource_op_t* op, int* copy_out
                 CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t bc))
 {
-  unsigned flags = 0;
   struct efrm_vi_set *vi_set = efrm_vi_set_from_resource(rs->rs_base);
-  int rss = efrm_vi_set_num_vis(vi_set) > 1;
   int rss_context = efrm_vi_set_get_rss_context(vi_set);
+  unsigned flags;
 
   int rc;
   switch(op->op) {
@@ -150,17 +149,22 @@ vi_set_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
       }
       break;
     case CI_RSOP_FILTER_DEL:
-      rc = efch_filter_list_op_del(rs->rs_base, &rs->vi_set.fl, op);
+      rc = efch_filter_list_op_del(rs->rs_base, efrm_vi_set_get_pd(vi_set),
+                                   &rs->vi_set.fl, op);
       break;
     case CI_RSOP_FILTER_BLOCK_KERNEL:
-      rc = efch_filter_list_op_block(rs->rs_base, &rs->vi_set.fl, op);
+      rc = efch_filter_list_op_block(rs->rs_base, efrm_vi_set_get_pd(vi_set),
+                                     &rs->vi_set.fl, op);
       break;
     default:
-      if( rss )
+      flags = 0;
+      if( efrm_vi_set_num_vis(vi_set) > 1 )
         flags |= (unsigned) EFX_FILTER_FLAG_RX_RSS;
-      rc = efch_filter_list_op_add(rs->rs_base, &rs->vi_set.fl, op, copy_out,
-                                  flags, rss_context == -1 ?
-                                  EFX_FILTER_RSS_CONTEXT_DEFAULT : rss_context);
+      if( rss_context == -1 )
+        rss_context = EFX_FILTER_RSS_CONTEXT_DEFAULT;
+      rc = efch_filter_list_op_add(rs->rs_base, efrm_vi_set_get_pd(vi_set),
+                                   &rs->vi_set.fl, op, copy_out,
+                                   flags, rss_context);
   }
 
   return rc;

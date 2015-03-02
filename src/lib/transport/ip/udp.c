@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,7 +55,7 @@ static void ci_udp_hdrs_init(ci_ip_cached_hdrs* ipcache)
 ** There are no IP options, no destination addresses, no ports */
 static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
 {
-  ci_sock_cmn_init(netif, &us->s);
+  ci_sock_cmn_init(netif, &us->s, 1);
 
   /* IP_MULTICAST_LOOP is 1 by default, so we should not send multicast
    * unless specially permitted */
@@ -67,6 +67,8 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
 
   /*! \todo This should be part of sock_cmn reinit, but the comment to that
    * function suggests that it's possibly not a good plan to move it there */
+
+  ci_sock_cmn_timestamp_q_init(netif, &us->timestamp_q);
 
   /*! \todo These two should really be handled in ci_sock_cmn_init() */
 
@@ -149,7 +151,6 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   if( fd < 0 ) {
     LOG_E(ci_log("%s: ci_tcp_helper_sock_attach(domain=%d, type=%d) failed %d",
                  __FUNCTION__, domain, type, fd));
-    ci_udp_state_free(netif, us);
     ci_netif_unlock(netif);
     return fd;
   }
@@ -258,6 +259,9 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
   (void) rx_total;  /* unused on 32-bit builds in kernel */
   (void) tx_total;
 
+  if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+    ci_timestamp_q_dump(ni, &us->timestamp_q, pf, logger, log_arg);
+
   /* General. */
   logger(log_arg, "%s  udpflags: "CI_UDP_STATE_FLAGS_FMT, pf,
          CI_UDP_STATE_FLAGS_PRI_ARG(us));
@@ -266,7 +270,7 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
   logger(log_arg,
          "%s  rcv: q_bytes=%d q_depth=%d q_pkts=%d reap=%d tot_bytes=%u"
          " tot_pkts=%u", pf, ci_udp_recv_q_bytes(&us->recv_q),
-         RECVQ_DEPTH(us, 0), ci_udp_recv_q_pkts(&us->recv_q),
+         UDP_RECVQ_DEPTH(us), ci_udp_recv_q_pkts(&us->recv_q),
          ci_udp_recv_q_reapable(&us->recv_q),
          (unsigned) us->recv_q.bytes_added, rx_added);
 #if CI_CFG_ZC_RECV_FILTER

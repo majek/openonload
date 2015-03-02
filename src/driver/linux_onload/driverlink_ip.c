@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -456,20 +456,24 @@ static void oo_netdev_up(struct net_device* netdev)
         cicp_encap_t old_encap;
         ci_ifid_t master_ifindex;
 
+        /* To avoid deadlock, we should not call something like
+         * ci_bonding_check_mode().  Unset hash flags and hope
+         * they'll be set correctly during cplane update. */
+        encap.type &=~ (CICP_LLAP_TYPE_USES_HASH |
+                        CICP_LLAP_TYPE_XMIT_HASH_LAYER4);
         if( encap.type & CICP_LLAP_TYPE_VLAN ) {
           struct net_device *real_dev = vlan_dev_real_dev(netdev);
           master_ifindex = real_dev->ifindex;
-          ci_bonding_get_xmit_policy_flags(real_dev, &encap.type);
         } 
         else {
           master_ifindex = netdev->ifindex;
-          ci_bonding_get_xmit_policy_flags(netdev, &encap.type);
         }
 
         if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
                                         &old_encap) != 0 )
           cicpos_llap_import(&CI_GLOBAL_CPLANE, NULL, netdev->ifindex, 
-                             netdev->mtu, 1, netdev->name, NULL, NULL);
+                             netdev->mtu, 1, encap.type,
+                             netdev->name, NULL, NULL);
         else 
           OO_DEBUG_BONDING
             (ci_log("NETDEV_UP changing encap on %d from %d to %d", 
@@ -520,7 +524,7 @@ static void oo_netdev_going_down(struct net_device* netdev)
   if( onic != NULL ) {
       oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0);
       ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
-      if( ci_dllist_is_empty(&THR_TABLE.all_stacks) )
+      if( THR_TABLE.stack_count == 0 )
         oo_netdev_remove(onic);
       else
         ci_log("Unable to oo_nic_remove(ifindex=%d, hwport=%d) because of "
@@ -530,11 +534,14 @@ static void oo_netdev_going_down(struct net_device* netdev)
     else {
       if( (netdev->priv_flags & IFF_802_1Q_VLAN) ||
           NETDEV_IS_BOND_MASTER(netdev) ) {
+        cicp_encap_t encap;
         /* NB. I am deliberately not testing oo_use_vlans and
          * efrm_nic_present(real_dev_ifindex) as below.
          */
+        /* encap will be set correctly later */
+        encap.type = CICP_LLAP_TYPE_NONE;
         cicp_llap_set_hwport(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                             CI_HWPORT_ID_BAD, NULL);
+                             CI_HWPORT_ID_BAD, &encap);
       }
 
 #if CI_CFG_TEAMING

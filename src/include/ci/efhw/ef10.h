@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,6 +61,10 @@ extern int ef10_nic_piobuf_free(struct efhw_nic*, unsigned handle);
 extern int ef10_nic_piobuf_link(struct efhw_nic*, unsigned txq,
 				unsigned handle);
 extern int ef10_nic_piobuf_unlink(struct efhw_nic*, unsigned txq);
+
+extern int ef10_vport_alloc(struct efhw_nic *nic, int vlan_id,
+			    unsigned *vport_id_out);
+extern void ef10_vport_free(struct efhw_nic *nic, unsigned vport_id);
 
 
 #endif /* __CI_EFHW_EF10_H__ */

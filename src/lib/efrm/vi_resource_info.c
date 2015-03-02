@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -102,6 +102,15 @@ struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *virs)
 }
 EXPORT_SYMBOL(efrm_vi_get_pci_dev);
 
+int efrm_vi_get_channel(struct efrm_vi *virs)
+{
+	struct efrm_nic *nic = efrm_nic(virs->rs.rs_client->nic);
+	return virs->net_drv_wakeup_channel >= 0 ?
+		virs->net_drv_wakeup_channel :
+		nic->rss_channel_count == 0 ? 0 :
+		virs->rs.rs_instance % nic->rss_channel_count;
+}
+EXPORT_SYMBOL(efrm_vi_get_channel);
 
 struct efrm_vf *efrm_vi_get_vf(struct efrm_vi *virs)
 {

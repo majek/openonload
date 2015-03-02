@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -143,6 +143,10 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 # define CI_LIKELY(t)    __builtin_expect((t), 1)
 # define CI_UNLIKELY(t)  __builtin_expect((t), 0)
 #endif
+
+
+#define OO_ACCESS_ONCE(p) (*(volatile typeof(p) *)&(p))
+
 
 /**********************************************************************
  * Attributes

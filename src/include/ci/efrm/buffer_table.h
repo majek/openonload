@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -79,6 +79,11 @@ struct efrm_buffer_table_allocation {
 
 	/* order of each bt entry */
 	int bta_order;
+
+	/* flags */
+	int bta_flags;
+#define EFRM_BTA_FLAG_IN_RESET 0x1 /* recovering after NIC reset */
+#define EFRM_BTA_FLAG_FRAUD    0x2 /* allocation failed after reset */
 };
 
 /* Manager to keep together similar buffer table allocations.

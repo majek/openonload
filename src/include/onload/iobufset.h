@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -88,10 +88,6 @@ struct oo_buffer_pages {
   oo_atomic_t ref_count;
 #ifdef OO_DO_HUGE_PAGES
   int shmid;
-#ifdef CLONE_NEWIPC
-  struct ipc_namespace *ipc_ns;
-  struct work_struct wi;
-#endif
 #endif
   struct page **pages;     /*!< array of Linux compound pages */
 };
@@ -149,8 +145,12 @@ ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
 #if CI_CFG_PKTS_AS_HUGE_PAGES
 /* Flag is EF_USE_HUGE_PAGES value possibly or'ed with
  * OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED */
-#define OO_IOBUFSET_FLAG_TRY_HUGE_PAGE    1
-#define OO_IOBUFSET_FLAG_FORCE_HUGE_PAGE  2
+#define OO_IOBUFSET_FLAG_HUGE_PAGE_TRY    0x1 /* EF_USE_HUGE_PAGES=1 */
+#define OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE  0x2 /* EF_USE_HUGE_PAGES=2 */
+#define OO_IOBUFSET_FLAG_COMPOUND_PAGE_LIMIT 0x10 /* EF_COMPOUND_PAGES_MODE=1 */
+#define OO_IOBUFSET_FLAG_COMPOUND_PAGE_NONE  0x20 /* EF_COMPOUND_PAGES_MODE=2 */
+#define OO_IOBUFSET_FLAG_COMPOUND_SHIFT 4
+#define OO_IOBUFSET_FLAG_COMPOUND_MASK  0x30
 #define OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED 0x1000
 #endif
 

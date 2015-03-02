@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,6 +18,7 @@
 
 #include <driver/linux_net/kernel_compat.h>
 #include <driver/linux_affinity/autocompat.h>
+#include <linux/file.h>
 
 #ifndef current_fsuid
 #define current_fsuid() current->fsuid
@@ -85,6 +86,39 @@
 
 #ifndef EFRM_HAVE_NETDEV_NOTIFIER_INFO
 #define netdev_notifier_info_to_dev(info) (info)
+#endif
+
+#ifndef EFRM_HAVE_REINIT_COMPLETION
+#define reinit_completion(c) INIT_COMPLETION(*c)
+#endif
+
+#ifndef EFRM_HAVE_GET_UNUSED_FD_FLAGS
+#ifdef O_CLOEXEC
+static inline int
+efrm_get_unused_fd_flags(unsigned flags)
+{
+  int fd = get_unused_fd();
+  struct files_struct *files = current->files;
+  struct fdtable *fdt;
+
+  if( fd < 0 )
+    return fd;
+
+  spin_lock(&files->file_lock);
+  fdt = files_fdtable(files);
+  if( flags & O_CLOEXEC)
+    efx_set_close_on_exec(fd, fdt);
+  else
+    efx_clear_close_on_exec(fd, fdt);
+  spin_unlock(&files->file_lock);
+
+  return fd;
+}
+#undef get_unused_fd_flags
+#define get_unused_fd_flags(flags) efrm_get_unused_fd_flags(flags)
+#else /* ! O_CLOEXEC */
+#define get_unused_fd_flags(flags) get_unused_fd()
+#endif
 #endif
 
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

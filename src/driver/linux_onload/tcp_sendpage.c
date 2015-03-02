@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,19 +35,14 @@ ci_inline int sendpage_copy(ci_netif* ni, ci_tcp_state* ts, struct page* page,
                             int offset, size_t size, int flags)
 {
   struct iovec io;
-  struct msghdr m;
   int rc;
 
   CITP_STATS_NETIF(++ni->state->stats.tcp_sendpages);
 
   io.iov_base = (char*) kmap(page) + offset;
   io.iov_len = size;
-  m.msg_iov = &io;
-  m.msg_iovlen = 1;
-  m.msg_controllen = 0;
-  m.msg_namelen = 0;
 
-  rc = ci_tcp_sendmsg(ni, ts, &m,
+  rc = ci_tcp_sendmsg(ni, ts, &io, 1,
                       (ts->s.b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK) | flags,
                       CI_ADDR_SPC_KERNEL);
 

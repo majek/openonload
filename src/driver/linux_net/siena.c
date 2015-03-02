@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2013 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -40,6 +40,8 @@
 #include "mcdi.h"
 #include "mcdi_pcol.h"
 #include "selftest.h"
+#include "sriov.h"
+#include "siena_sriov.h"
 
 /* Hardware control for SFC9000 family including SFL9021 (aka Siena). */
 
@@ -496,6 +498,7 @@ static int siena_probe_nic(struct efx_nic *efx)
 	nic_data = kzalloc(sizeof(struct siena_nic_data), GFP_KERNEL);
 	if (!nic_data)
 		return -ENOMEM;
+	nic_data->efx = efx;
 	efx->nic_data = nic_data;
 
 	if (efx_farch_fpga_ver(efx) != 0) {
@@ -505,7 +508,7 @@ static int siena_probe_nic(struct efx_nic *efx)
 		goto fail1;
 	}
 
-	efx->max_channels = EFX_MAX_CHANNELS;
+	efx->max_channels = efx->max_tx_channels = EFX_MAX_CHANNELS;
 
 	efx_reado(efx, &reg, FR_AZ_CS_DEBUG);
 	efx->port_num = EFX_OWORD_FIELD(reg, FRF_CZ_CS_PORT_NUM) - 1;
@@ -579,6 +582,10 @@ static int siena_probe_nic(struct efx_nic *efx)
 	}
 #endif
 
+#ifdef CONFIG_SFC_SRIOV
+	efx_sriov_init_max_vfs(efx, efx->port_num);
+#endif
+
 	efx_siena_sriov_probe(efx);
 	efx_ptp_defer_probe_with_channel(efx);
 
@@ -602,7 +609,8 @@ fail1:
 	return rc;
 }
 
-static int siena_rx_push_rss_config(struct efx_nic *efx)
+static int siena_rx_push_rss_config(struct efx_nic *efx, bool user,
+				    const u32 *rx_indir_table)
 {
 	efx_oword_t temp;
 
@@ -624,6 +632,8 @@ static int siena_rx_push_rss_config(struct efx_nic *efx)
 	       FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8);
 	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG3);
 
+	memcpy(efx->rx_indir_table, rx_indir_table,
+		sizeof(efx->rx_indir_table));
 	efx_farch_rx_push_indir_table(efx);
 	return 0;
 }
@@ -669,7 +679,7 @@ static int siena_init_nic(struct efx_nic *efx)
 			    EFX_RX_USR_BUF_SIZE >> 5);
 	efx_writeo(efx, &temp, FR_AZ_RX_CFG);
 
-	siena_rx_push_rss_config(efx);
+	siena_rx_push_rss_config(efx, false, efx->rx_indir_table);
 
 	/* Enable event logging */
 	rc = efx_mcdi_log_ctrl(efx, true, false, 0);
@@ -1222,6 +1232,8 @@ fail:
  */
 
 const struct efx_nic_type siena_a0_nic_type = {
+	.is_vf = false,
+	.mem_bar = EFX_MEM_BAR,
 	.mem_map_size = siena_mem_map_size,
 	.probe = siena_probe_nic,
 	.dimension_resources = siena_dimension_resources,
@@ -1272,6 +1284,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.tx_init = efx_farch_tx_init,
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
+	.tx_notify = efx_farch_notify_tx_desc,
 	.rx_push_rss_config = siena_rx_push_rss_config,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
@@ -1309,6 +1322,8 @@ const struct efx_nic_type siena_a0_nic_type = {
 #ifdef EFX_NOT_UPSTREAM
 	.filter_block_kernel = efx_farch_filter_block_kernel,
 	.filter_unblock_kernel = efx_farch_filter_unblock_kernel,
+	.vport_filter_insert = efx_farch_vport_filter_insert,
+	.vport_filter_remove = efx_farch_vport_filter_remove,
 #endif
 #ifdef CONFIG_SFC_MTD
 	.mtd_probe = siena_mtd_probe,
@@ -1324,9 +1339,20 @@ const struct efx_nic_type siena_a0_nic_type = {
 #endif
 	.sriov_init = efx_siena_sriov_init,
 	.sriov_fini = efx_siena_sriov_fini,
-	.sriov_mac_address_changed = efx_siena_sriov_mac_address_changed,
 	.sriov_wanted = efx_siena_sriov_wanted,
 	.sriov_reset = efx_siena_sriov_reset,
+	.sriov_configure = efx_siena_sriov_configure,
+	.sriov_flr = efx_siena_sriov_flr,
+	.sriov_set_vf_mac = efx_siena_sriov_set_vf_mac,
+	.sriov_set_vf_vlan = efx_siena_sriov_set_vf_vlan,
+	.sriov_set_vf_spoofchk = efx_siena_sriov_set_vf_spoofchk,
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_MAC)
+	.sriov_get_vf_config = efx_siena_sriov_get_vf_config,
+#endif
+	.vswitching_probe = efx_port_dummy_op_int,
+	.vswitching_restore = efx_port_dummy_op_int,
+	.vswitching_remove = efx_port_dummy_op_void,
+	.set_mac_address = efx_siena_sriov_mac_address_changed,
 
 	.revision = EFX_REV_SIENA_A0,
 	.txd_ptr_tbl_base = FR_BZ_TX_DESC_PTR_TBL,
@@ -1340,6 +1366,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.rx_buffer_padding = 0,
 	.can_rx_scatter = true,
 	.option_descriptors = false,
+	.min_interrupt_mode = EFX_INT_MODE_LEGACY,
 	.max_interrupt_mode = EFX_INT_MODE_MSIX,
 	.timer_period_max = 1 << FRF_CZ_TC_TIMER_VAL_WIDTH,
 	.farch_resources = {

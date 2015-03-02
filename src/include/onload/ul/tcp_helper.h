@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,13 +29,6 @@
 /*! Comment? */
 extern int ci_tcp_helper_more_socks(struct ci_netif_s*) CI_HF;
 
-#if CI_CFG_USERSPACE_PIPE
-extern int ci_tcp_helper_pipebufs_to_socks(ci_netif* ni);
-extern int ci_tcp_helper_more_pipe_bufs(struct ci_netif_s*,
-                                        ci_uint32 bufs_num,
-                                        ci_uint32* bufs_start);
-#endif
-
                                
 /*! Comment? */
 extern int ci_tcp_helper_more_bufs(struct ci_netif_s* ni) CI_HF;
@@ -53,8 +46,7 @@ extern int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                      int flags, int fds[2]);
 
 #if CI_CFG_FD_CACHING
-extern int ci_tcp_helper_xfer_cached(ci_fd_t fd, oo_sp ep_id,
-                                     int other_pid, ci_fd_t other_fd) CI_HF;
+extern int ci_tcp_helper_clear_epcache(struct ci_netif_s*);
 #endif
 
 #if defined(__unix__) && ! defined(__ci_driver__)
@@ -62,6 +54,7 @@ extern int ci_tcp_helper_close_no_trampoline(int) CI_HF;
 extern void ci_tcp_helper_close_no_trampoline_retaddr(void) CI_HF;
 
 extern int ci_tcp_helper_handover(ci_fd_t stack_fd, ci_fd_t sock_fd) CI_HF;
+extern int ci_tcp_file_moved(ci_fd_t sock_fd) CI_HF;
 
 extern ci_fd_t ci_tcp_helper_get_sock_fd(ci_fd_t fd) CI_HF;
 
@@ -151,13 +144,16 @@ ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
  *
  * \param fd              File descriptor of tcp_helper
  * \param ep              TCP control block id
+ * \param need_update     Whether the filter details must be updated before
+ *                        removal (for sockets accepted from cache, which have
+ *                        outdated filter info)
  *
  * \return                standard error codes
  *
  *--------------------------------------------------------------------*/
 
 extern int
-ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp) CI_HF;
+ci_tcp_helper_ep_clear_filters(ci_fd_t fd, oo_sp, int need_update) CI_HF;
 
 /*--------------------------------------------------------------------
  *!

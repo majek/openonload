@@ -100,6 +100,11 @@ ifdef PCAP_SUPPORT
 MMAKE_CPPFLAGS	+= -DPCAP_SUPPORT
 endif
 
+ifdef OFE_TREE
+  MMAKE_INCLUDE	+= -I$(OFE_TREE)/include
+  MMAKE_CPPFLAGS	+= -DONLOAD_OFE -DOFE_ONLOAD
+endif
+
 ######################################################################
 # How to compile, link etc.
 #

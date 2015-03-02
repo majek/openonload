@@ -1,4 +1,139 @@
+openonload-201502
+-----------------
 
+Update net driver (v4.4.1.1017)
+Add support for recent Linux kernels (up to 3.19)
+Add official support for Ubuntu (12.04, 14.04, 14.10) and Debian (6, 7)
+Add initial preview of Onload Filter Engine
+Add VF and multi-PF capabilities to Onload on EF10 hardware
+Add support for Docker containers
+Add passive-open endpoint caching to increase achievable connection rate
+Add onload --profile=safe to make Onload replicate Linux behaviour as closely as possible
+Add white and black lists to allow user to select which interfaces are accelerated
+Improve scalability of accelerated epoll modes
+Support switching packets in the NIC between VIs
+Add experimental service to export stackdump-like statistics in JSON format over network
+Add new TCP "delegated sends" API 
+Add ef_vi API to programatically query drop/error counters for each VI
+
+Update some ef_vi samples to use ef_pd_alloc_by_name so they can use clustering
+Fix minor bug in calculation of UDP socket q_max statistic.
+task8595: Added ef_vi_receive_set_buffer_len()
+task41722: Change onload_stackdump -z to output to stdout instead of syslog
+task44092: improve TCP loopback to handle out of window data
+task41989: choose IRQ on current core by default
+task46656: Add sample packed stream ef_vi apps efsink_packed, efforward_packed
+task47559: convert pipes to use packet buffers instead of socket buffers for data
+task48269: Add and use ef_vi_transmit_copy_pio() to reduce PIO send latency
+bug37972: replace tasklets and internal workqueues with Linux workqueues
+bug42023: increase CI_CFG_NETIF_MAX_ENDPOINTS_MAX to 2^21
+bug43337: handle case when EF_UL_EPOLL=1 spinning on set with no Onload fds
+bug41922: support >4GB ef_memreg allocations
+bug44568: update msg_name and msg_namelen in recvfrom() even if length was 0
+bug44568: fix UDP recvmsg() via OS: copy msg_name with correct length
+bug44665: Support IPC namespaces and explicit huge page allocations working together
+bug40412: add onload_stack_opt_get_int() API call
+bug44732: add spinning statistics to stackdump
+bug44257: fix page size handling in ef_memreg_alloc() on PPC64 to avoid corruption 
+bug41975: add basic SO_BUSY_POLL support
+bug1684: correctly handle handover sockets in dup, fork, epoll
+bug41166: fix stack save and restore for ONLOAD_DONT_ACCELERATE
+bug45917: Avoid potential crash after a closed fd is removed from the epoll set.
+bug45910: add EF_TCP_SEND_NONBLOCK_NO_PACKETS_MODE to control onload blocking on non-blocking send
+bug45802: fix setsockopt(SO_REUSEPORT) to return -1 and set errno correctly
+bug46245: prevent use of packet state after packet has been sent
+bug46022: Segfault during send() of UDP datagram when HW RX timestamps are enabled
+bug46334: handle adding fd to two epoll sets followed by handover
+bug46654: Fix possible ef_vi misreport of CRC_BAD as CSUM_BAD on EF10 adapters
+bug43885: onload_stackdump reports PIDs attached to stacks	
+bug45091: handle buffer table set failures during reset.
+bug45162: postpone NIC reset processing to avoid scheduling in atomic
+bug46447: do not expect ef10_mcdi_rpc to work under reset: avoids assertion
+bug46493: fix error path causing hung kernel task if NIC reset during stack creation
+bug45166: remove assert which fires due to race at NIC reset
+bug45163: improve packet mapping to NIC under reset
+bug46130: allow Onload /dev files to be accessed after chroot
+bug46282: Avoid TCP retransmit timeout falling below specified minimum
+bug46783: fix incorrect assert in citp_sock_fcntl_os_sock()
+bug46821: fix accept() errno when interrupted by sighandler with shutdown()
+bug46212: Fix software-filter handling when connecting UDP multicast sockets
+bug34462: fix TCP RTO calculations in some corner cases
+bug46934: protect against syn flood: ci_tcp_synrecv_send() always gets non-NULL pkt
+bug47011: increase listening fd timer frequency to make syn-ack retrans less bursty
+bug46973: Handle failure to allocate new citp_sock_fdi on accept()
+bug47059: allow sendfile to make progress when small send buffer used
+bug47064: fix TCP behaviour with small window close to mss
+bug47112: give Onload same behaviour as Linux for negative backlog, ie. listen(sock, -1)
+bug47177: EF_RETRANSMIT_THRESHOLD[_SYN] was being ignored.
+bug39052: admit other flags in ACK of SYNACK during syncookie processing
+bug47027: more detail in stackdump about PIO allocation
+bug47341: Add missing unlock on UDP socket create failure with EF_FDTABLE_STRICT
+bug47372: ensure stack is unlocked after sending a message that is too big
+bug56776: expose onload workqueues via /sys/devices/virtual/workqueue/
+bug20561: interrupt accept if the fd is closed under feet by signal
+bug30185: use new Linux 3.4 poll API
+bug45935: intercept __sendmmsg system call to cope with libc calling it directly
+bug44192: improve behaviour when accept() fails due to lack of endpoint buffers
+bug47267: calculate TCP window scale factor based on the real SO_RCVBUF value
+bug47199: timeout TCP connection stuck in FIN_WAIT1 due to close() with zero window
+bug47249: fix software filter table to allow >64K endpoints
+bug39799: import local routes with non-32 bit net masks
+bug47007: implement EF_TCP_RCVBUF_STRICT=1 mode.
+bug47197: set EF_TCP_SNDBUF_MODE=1 by default
+bug34581: add EF_SELECT_FAST_USEC, EF_SELECT_NONBLOCK_FAST_USEC to mirror poll equivalents 
+bug46535: count packets from timestamp queue in SO_SNDBUF to avoid using all buffers
+bug41453: install headers and library needed for ef_vi app development
+bug47579: reap more buffers from receive queue when we can to reduce buffer use
+bug45243: Allow stack creation on setups where not all SFC NICs support Onload.
+bug47528: Add support for EF10 VFs to onload
+bug47614: use fstat64 instead of fstat to allow opening large file with 32-bit UL
+bug46651: do not TX timestamp TCP packets without data (SYN, FIN).
+bug45749: fail gracefully (no kernel panic) if active open from clustered socket
+bug47901: Fix potential crash when SO_REUSEPORT bind on OS that does not do SO_REUSEPORT
+bug47703: Fix panic when SO_REUSEPORT bind to multiple addresses/ports
+bug47704: return EADDRINUSE rather than EPERM when SO_REUSEPORT used between UIDs
+bug48002: set msg_controllen to zero if not returning cmsg or error from recvmsg()
+bug48073: improve recvmmsg performance by removing unnecessary check
+bug48103: fix packet length calculation for FIN with TX timestamp
+bug47569: Avoid kernel panic if EF_MAX_PACKETS set to negative value
+bug48274: initialize error_flags when sharing a stack
+bug48304: unlock fdtable when close() hangs because of SO_LINGER
+bug43800: prevent loop in ci_udp_sendmsg_send() if shared state corrupted
+bug48416: fix potential deadlock in sendfile()
+bug48179: update hash used in filter table to improve spreading with lots of connections
+bug32215: properly check for space in send queue when doing zc_send
+bug44858: return -1 (with errno=EINTR) from citp_epoll_ordered_wait() on signal
+bug38207: improve fairness of EF_FDS_MT_SAFE=0 locking mechanism between readers and writers
+bug48598: fix potential deadlock when bond is brought up
+bug48762: return errno=EAGAIN instead of EPERM when non-blocking UDP send fails
+bug48599: don't do full copy for templated send on VLAN interface
+bug47476: fix EF_FDTABLE_STRICT=1 mode for accelerated TCP loopback and epoll
+bug47426: do not ignore filter errors when EF_NO_FAIL=0
+bug47491: fix filter error "laddr=XXX not local" causing no acceleration
+bug49289: fix source IP using SO_BINDTODEVICE on intf with multiple IP addresses
+bug49445: fix warning on enabling timestamping with single interface up
+bug49471: remove verbose log message from ef_vi software event processing
+bug49739: increase EF_MIN_FREE_PACKETS to 32 bits
+bug48701: fix interrupt allocation with EF_PD_VF (EF_PACKET_BUFFER_MODE=3)
+bug49547: set ACK flag when dropping TCP connection with RST and undelivered data
+bug49697: improve accuracy of timeout calculations in epoll_wait
+bug49722: fix signal handling to allowing killing onloaded process when run out of fds
+bug50027: correctly handle more than one profile specified to onload command
+bug38605: improve accuracy of epoll/poll/select spinning timeout duration 
+bug50600: fix deadlock due to EF_*_FORCE_REUSEPORT=1 not releasing os_sock
+bug47359: fix loop in bonding work item on recent kernels - do not set SIGPENDING flag
+bug50539: reduce async packet count when unused zc_alloc buffers are released
+bug50827: roll back OS socket if IP_ADD_MEMBERSHIP failed to add filter
+bug43962: Ameliorate race causing "file exists" errors on onload_tool reload on RHEL7 Siena VFs
+bug50386: fix onload_tcpdump packet length when stripping VLAN tag
+bug51189: avoid segfault parsing invalid filter spec in ef_vi test apps
+bug45182: Fix behaviour when unicast-all/multicast-all filter installed multiple times
+SF-114094-KI/bug48294: fix error path in oo_bufpage_huge_alloc() to avoid put_page kernel panic
+SF-114095-KI/bug47204: fix kernel panic when using ef_memreg to allocate 2G region
+SF-114096-KI/bug48247: fix kernel panic with EF_CLUSTER_SIZE>=32
+SF-113950-KI/bug49565: Fix PIO send corruption due to memory ordering issue
+
+	
 openonload-201405-u2
 --------------------
 

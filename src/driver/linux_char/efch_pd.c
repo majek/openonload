@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,6 +76,18 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
   }
 
   rc = efrm_pd_alloc(&pd_rs, client, vf, phys_mode);
+  if (rc < 0)
+    goto out;
+
+  if (alloc->in_flags & EFCH_PD_FLAG_VPORT) {
+    if ((rc = efrm_pd_vport_alloc(pd_rs, alloc->in_vlan_id)) < 0) {
+      EFCH_ERR("%s: ERROR: failed to allocate vport on ifindex=%d",
+               __FUNCTION__, alloc->in_ifindex);
+      efrm_pd_release(pd_rs);
+      goto out;
+    }
+  }
+
  out:
   if (client != NULL)
     efrm_client_put(client);

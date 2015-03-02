@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -86,8 +86,13 @@ extern sa_sigaction_t citp_signal_handlers[OO_SIGHANGLER_DFL_MAX+1];
 
 struct oo_sig_thread_state {
   ci_int32  inside_lib;    /*!< >0 if inside library, so deferral needed */
-  ci_int32  run_pending;   /*!< 1 if pending signals need to be run */
-  ci_int32  need_restart;  /*!< Set to 0 when a non-SA_RESTART signal fires */
+
+  ci_uint32 aflags;
+#define OO_SIGNAL_FLAG_HAVE_PENDING   0x1  /* have deferred signals pending */
+#define OO_SIGNAL_FLAG_NEED_RESTART   0x2  /* SA_RESTART flag was set */
+#ifndef NDEBUG
+#define OO_SIGNAL_FLAG_FDTABLE_LOCKED 0x4  /* this thread owns fdtable lock */
+#endif
 
 #ifndef __KERNEL__
   /*! State of currently-pending signals; pure userland data. */

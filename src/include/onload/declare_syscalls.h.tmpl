@@ -50,6 +50,17 @@ CI_MK_DECL(int           , setsockopt , (int, int, int, const void*, socklen_t))
 CI_MK_DECL(ssize_t       , sendfile   , (int, int, off_t*, size_t));
 #endif
 
+#if CI_LIBC_HAS_splice
+# if CI_HAVE_SPLICE_RETURNS_SSIZE_T
+#  define ci_splice_return_type ssize_t
+# elif CI_HAVE_SPLICE_RETURNS_INT
+#  define ci_splice_return_type int
+# else
+#  error unknown splice prototype
+# endif
+CI_MK_DECL(ci_splice_return_type, splice, (int, loff_t*, int, loff_t*, size_t, unsigned int));
+#endif
+
 #ifdef __sun__
 CI_MK_DECL(ssize_t       , sendfilev  , (int, const struct sendfilevec *, int, size_t *));
 #endif
@@ -84,8 +95,13 @@ CI_MK_DECL(ssize_t       , __recvfrom_chk , (int, void*, size_t, size_t, int,
                                          struct sockaddr*, socklen_t*));
 #endif
 CI_MK_DECL(ssize_t       , recvmsg    , (int, struct msghdr*, int));
+#if CI_HAVE_RECVMMSG_CONST_TIMESPEC
+# define ci_recvmmsg_timespec    const struct timespec
+#else
+# define ci_recvmmsg_timespec    struct timespec
+#endif
 #if CI_CFG_RECVMMSG && ! defined(OO_RECVMMSG_NOT_IN_LIBC)
-CI_MK_DECL(int           , recvmmsg   , (int, struct mmsghdr*, unsigned, int, const struct timespec*));
+CI_MK_DECL(int           , recvmmsg   , (int, struct mmsghdr*, unsigned, int, ci_recvmmsg_timespec*));
 #endif
 CI_MK_DECL(ssize_t       , send       , (int, const void*, size_t, int));
 CI_MK_DECL(ssize_t       , sendto     , (int, const void*, size_t, int,

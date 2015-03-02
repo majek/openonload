@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,7 +17,7 @@
 #define __CI_EFCH_MMAP_H__
 
 #include <ci/tools.h>  /* for CI_HAVE_OS_NOPAGE */
-
+#include <ci/efch/mmap_id.h>
 
 struct efrm_vi;
 

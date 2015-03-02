@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,22 +37,6 @@
 #include <onload/ul/tcp_helper.h>
 #include <onload/epoll.h>
 #include "ul_epoll.h"
-
-int citp_onload_epoll_dev_major(void)
-{
-  static int dev_major = -1;
-
-  if( dev_major == -1 ) {
-    struct stat st;
-    dev_major = -2;
-    if( stat(OO_EPOLL_DEV, &st) == 0 )
-      dev_major = ci_major(st.st_rdev);
-    else
-      Log_E(log("%s: Failed to find major num of onload_epoll device",
-                __FUNCTION__));
-  }
-  return dev_major;
-}
 
 void oo_epollb_ctor(citp_epollb_fdi *epi)
 {
@@ -187,13 +171,15 @@ static void citp_epollb_dtor(citp_fdinfo* fdi, int fdt_locked)
   if( epi->not_mt_safe )
     pthread_mutex_destroy(&epi->lock_postponed);
   if( epi->kepfd != -1 ) {
-    CITP_FDTABLE_LOCK();
+    if( ! fdt_locked )
+      CITP_FDTABLE_LOCK();
     ci_tcp_helper_close_no_trampoline(epi->kepfd);
     __citp_fdtable_reserve(epi->kepfd, 0);
-    CITP_FDTABLE_UNLOCK();
+    if( ! fdt_locked )
+      CITP_FDTABLE_UNLOCK();
   }
 }
-static int citp_epollb_close(citp_fdinfo *fdi, int may_cache)
+static int citp_epollb_close(citp_fdinfo *fdi)
 {
   return 0;
 }
@@ -252,6 +238,10 @@ citp_protocol_impl citp_epollb_protocol_impl = {
 #if CI_CFG_USERSPACE_EPOLL
     .ordered_data   = citp_nonsock_ordered_data,
 #endif
+    .is_spinning    = citp_nonsock_is_spinning,
+#if CI_CFG_FD_CACHING
+    .cache          = citp_nonsock_cache,
+#endif
   }
 };
 
@@ -277,19 +267,18 @@ int citp_epollb_create(int size, int flags)
   if( fdtable_strict() )  CITP_FDTABLE_LOCK();
 
   /* get new file descriptor */
+  if( ef_onload_driver_open(&fd, OO_EPOLL_DEV,
 #ifdef EPOLL_CLOEXEC
-  fd = ci_sys_open(OO_EPOLL_DEV, O_RDWR | flags);
-  /* Even if the system knows O_CLOEXEC, there is no guarantee that kernel
-   * knows it as well.  So, be safe. */
-  if( (flags & EPOLL_CLOEXEC) )
-    ci_sys_fcntl(fd, F_SETFD, FD_CLOEXEC);
+                            flags & EPOLL_CLOEXEC
 #else
-  fd = ci_sys_open(OO_EPOLL_DEV, O_RDWR);
+                            0
 #endif
-
-  if( fd < 0 ) {
+                            ) < 0 ) {
+    Log_E(ci_log("%s: ERROR: failed to open onload epoll device errno=%d",
+                 __FUNCTION__, errno));
     rc = fd;
-    ci_log("%s: failed to open "OO_EPOLL_DEV, __func__);
+    ci_log("%s: failed to open(%s) errno=%d", __func__,
+           oo_device_name[OO_EPOLL_DEV], errno);
     if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
     goto fail2;
   }
@@ -338,11 +327,7 @@ fail3:
 fail2:
   CI_FREE_OBJ(epi);
 fail1:
-  if( CITP_OPTS.no_fail ) {
-    Log_U(ci_log("%s: failed (errno:%d) - PASSING TO OS", __FUNCTION__, errno));
-    return CI_SOCKET_HANDOVER;
-  }
-  return rc;
+  return -2;
 }
 
 
@@ -418,6 +403,22 @@ static int citp_epollb_postpone(citp_epollb_fdi *epi, citp_fdinfo *fd_fdi,
 
   /* empty_idx is the index of empty slot. */
   if( empty_idx != -1 ) {
+    if( fd_fdi && eop == EPOLL_CTL_ADD ) {
+      /* Remember that this fd has been added to this epoll set.  This
+       * is needed to handle accelerated fds being handed over to
+       * kernel.
+       */
+      if( fd_fdi->epoll_fd == -1 ) {
+        fd_fdi->epoll_fd = epi->fdinfo.fd;
+        fd_fdi->epoll_fd_seq = epi->fdinfo.seq;
+      }
+      else {
+        /* Already have a postponed add for this fd on another set, need to
+         * push this straight to the kernel.
+         */
+        return -ENOMEM;
+      }
+    }
     epi->postponed[empty_idx].fd = fd;
     if( fd_fdi )
       epi->postponed[empty_idx].fdi_seq = fd_fdi->seq;
@@ -427,14 +428,6 @@ static int citp_epollb_postpone(citp_epollb_fdi *epi, citp_fdinfo *fd_fdi,
     epi->have_postponed = 1;
     if( op && empty_idx >= op->epoll_ctl_n )
       op->epoll_ctl_n = empty_idx + 1;
-    if( fd_fdi && eop == EPOLL_CTL_ADD ) {
-      /* Remember that this fd has been added to this epoll set.  This
-       * is needed to handle accelerated fds being handed over to
-       * kernel.
-       */
-      fd_fdi->epoll_fd = epi->fdinfo.fd;
-      fd_fdi->epoll_fd_seq = epi->fdinfo.seq;
-    }
     return 0;
   }
 
@@ -533,6 +526,15 @@ int citp_epollb_ctl(citp_fdinfo* fdi, int eop, int fd,
 
   /* This is onload fd now. */
   epi->is_accel = 1;
+
+#if CI_CFG_FD_CACHING
+  /* fd_fdi->can_cache is only checked when all references to this fdi have
+   * gone away, and only transitions to 0, so no need to worry about other
+   * people fiddling with it as well.
+   */
+  if( eop == EPOLL_CTL_ADD )
+    fd_fdi->can_cache = 0;
+#endif
 
   /* If we postpone epoll_ctl calls, do it and exit */
   if( CITP_OPTS.ul_epoll_ctl_fast &&
@@ -643,24 +645,13 @@ out:
   return op.rc;
 }
 
-void citp_epollb_on_handover(citp_fdinfo* fd_fdi)
+void citp_epollb_on_handover(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi)
 {
   /* We've handed [fd_fdi->fd] over to the kernel, but it may be registered
    * in an epoll set.  We have a workaroung in-kernel, but before we should
    * push all postponed epoll_ctls.
    */
-  citp_fdinfo* epoll_fdi;
-
-  if( (epoll_fdi = citp_fdtable_lookup_noprobe(fd_fdi->epoll_fd)) == NULL ) {
-    Log_POLL(ci_log("%s: epoll_fd=%d not found (fd=%d)", __FUNCTION__,
-                    fd_fdi->epoll_fd, fd_fdi->fd));
-    return;
-  }
-
-  if( epoll_fdi->protocol->type == CITP_EPOLLB_FD &&
-      epoll_fdi->seq == fd_fdi->epoll_fd_seq )
-    citp_epollb_do_postponed_ctl(fdi_to_epollb_fdi(epoll_fdi), fd_fdi);
-  citp_fdinfo_release_ref(epoll_fdi, 0);
+  citp_epollb_do_postponed_ctl(fdi_to_epollb_fdi(epoll_fdi), fd_fdi);
 }
 
 #endif

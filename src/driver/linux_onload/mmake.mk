@@ -37,6 +37,9 @@ IMPORT		:= $(EFTHRM_SRCS:%=../../lib/efthrm/%) \
 
 IP_TARGET      := onload.o
 IP_TARGET_SRCS := $(ONLOAD_SRCS) $(EFTHRM_SRCS)
+ifdef OFE_TREE
+IP_TARGET_SRCS += ofe_sysdep.c
+endif
 
 TARGETS		:= $(IP_TARGET)
 
@@ -63,6 +66,11 @@ powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
 
 all: $(BUILDPATH)/driver/linux_onload/Module.symvers
 	$(MMAKE_KBUILD_PRE_COMMAND)
+ifdef OFE_TREE
+ifdef CONFIG_X86_64
+	cp $(OFE_TREE)/solsec_ofe/binary_k.o $(BUILDPATH)/driver/linux_onload/ofe.o
+endif
+endif
 	$(MAKE) $(MMAKE_KBUILD_ARGS) M=$(CURDIR) \
 		DO_EFAB_IP=1
 	$(MMAKE_KBUILD_POST_COMMAND)
@@ -93,6 +101,12 @@ onload-objs  += $(BUILD)/lib/transport/ip/lib.a	\
 		$(BUILD)/lib/citools/lib.a	\
 		$(BUILD)/lib/efabcfg/lib.a \
 		$(BUILD)/lib/ciul/lib.a
+
+ifdef OFE_TREE
+ifdef CONFIG_X86_64
+onload-objs += ofe.o
+endif
+endif
 
 else # CI_PREBUILT_IPDRV
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -131,7 +131,7 @@ efrm_create_or_destroy_vi_resource_manager(
 
 	memset(efrm_vi_manager, 0, sizeof(*efrm_vi_manager));
 
-	efrm_vi_manager->workqueue = create_singlethread_workqueue("sfc_vi");
+	efrm_vi_manager->workqueue = efrm_alloc_workqueue("sfc_vi");
 	if (efrm_vi_manager->workqueue == NULL) {
 		rc = -ENOMEM;
 		goto fail_create_workqueue;

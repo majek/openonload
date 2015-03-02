@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -104,9 +104,13 @@ typedef union {
 #define EFHW_VI_NO_CUT_THROUGH     0x200000  /*! Disable cut-through */
 #define EFHW_VI_RX_PACKED_STREAM   0x400000  /*! Packed stream mode */
 
-/* Flags indicating effective setings determined at
- * queue allocation/enabling */
+/* Flags indicating effective setings determined at queue
+ * allocation/enabling.  Unfortunately these flags are exposed through the
+ * userlevel/char interface, so there are flags here that really should not
+ * be...
+ */
 #define EFHW_VI_CLOCK_SYNC_STATUS  0x01  /*! sync status reporting */
+#define EFHW_VI_PS_BUF_SIZE_SET    0x02  /*! ps_buf_size field is set */
 
 /* Flags for hw features */
 #define EFHW_VI_NIC_BUG35388_WORKAROUND 0x01  /*! workaround for bug35388 */

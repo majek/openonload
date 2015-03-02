@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -71,6 +71,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           CI_NETIF_MMAP_ID_PKTSET(setid),
                           CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET,
+                          OO_MMAP_FLAG_DEFAULT,
                           &p);
     if( rc < 0 ) {
       ci_log("%s: oo_resource_mmap for pkt set %d failed (%d)",
@@ -136,6 +137,8 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx)
   }
 
   if( OO_PP_IS_NULL(ni->state->freepkts) ) {
+    ci_netif_try_to_reap(ni, 1);
+    if( OO_PP_IS_NULL(ni->state->freepkts) )
       return NULL;
   }
 
@@ -185,9 +188,10 @@ void ci_netif_pkt_free(ci_netif* ni, ci_ip_pkt_fmt* pkt)
 }
 
 
-void ci_netif_pkt_try_to_free(ci_netif* ni, int desperation)
+int ci_netif_pkt_try_to_free(ci_netif* ni, int desperation, int stop_once_freed_n)
 {
   unsigned id;
+  int freed = 0;
 
   ci_assert(ci_netif_is_locked(ni));
   ci_assert_ge(desperation, 0);
@@ -201,21 +205,23 @@ void ci_netif_pkt_try_to_free(ci_netif* ni, int desperation)
             == CI_NETIF_PKT_TRY_TO_FREE_MAX_DESP);
   CITP_STATS_NETIF(++(&ni->state->stats.pkt_scramble0)[desperation]);
 
-  for( id = 0; id < ni->state->n_ep_bufs; ++id )
-  if( oo_sock_id_is_waitable(ni, id) )
-  {
+  for( id = 0; id < ni->state->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
     if( wo->waitable.state & CI_TCP_STATE_TCP_CONN )
-      ci_tcp_try_to_free_pkts(ni, &wo->tcp, desperation);
+      freed += ci_tcp_try_to_free_pkts(ni, &wo->tcp, desperation);
 #if CI_CFG_UDP
     else if( wo->waitable.state == CI_TCP_STATE_UDP )
-      ci_udp_try_to_free_pkts(ni, &wo->udp, desperation);
+      freed += ci_udp_try_to_free_pkts(ni, &wo->udp, desperation);
 #endif
+    if( freed >= stop_once_freed_n )
+      return freed;
   }
+  return freed;
 }
 
 
-ci_ip_pkt_fmt* ci_netif_pkt_alloc_block(ci_netif* ni, int* p_netif_locked)
+ci_ip_pkt_fmt* ci_netif_pkt_alloc_block(ci_netif* ni, ci_sock_cmn* s,
+                                        int* p_netif_locked)
 {
   int was_locked = *p_netif_locked;
   ci_ip_pkt_fmt* pkt;
@@ -246,7 +252,7 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_block(ci_netif* ni, int* p_netif_locked)
   }
 
   *p_netif_locked = 0;
-  rc = ci_netif_pkt_wait(ni, CI_SLEEP_NETIF_LOCKED);
+  rc = ci_netif_pkt_wait(ni, s, CI_SLEEP_NETIF_LOCKED);
   if( ci_netif_pkt_wait_was_interrupted(rc) )
     return NULL;
   goto again;

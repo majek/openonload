@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,6 +57,7 @@
 #include <ci/efrm/efrm_nic.h>
 #include <ci/efrm/driver_private.h>
 #include <ci/efrm/pd.h>
+#include <ci/driver/resource/linux_efhw_nic.h>
 #include "efrm_internal.h"
 
 
@@ -402,6 +403,17 @@ int efrm_nic_present(int ifindex)
 	return rc;
 }
 EXPORT_SYMBOL(efrm_nic_present);
+
+
+/* Arguably this should be in lib/efhw.  However, right now this function
+ * is a layer violation because it assumes that the efhw_nic is embedded in
+ * a linux_efhw_nic.  That is only necessarily true in the resource driver.
+ */
+struct efx_dl_device* efhw_nic_dl_device(struct efhw_nic* efhw_nic)
+{
+	return linux_efhw_nic(efhw_nic)->dl_device;
+}
+EXPORT_SYMBOL(efhw_nic_dl_device);
 
 
 #endif  /* __KERNEL__ */

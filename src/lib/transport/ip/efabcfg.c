@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -106,13 +106,7 @@ int ci_cfg_query(char *proc_name_utf8, int *ref_cfgerr)
                                ? (strlen(proc_name_utf8)+1) : 0;
   q.opts = ci_cfg_opts;
 
-  rc = ef_onload_driver_open(&fd,
-#ifdef O_CLOEXEC
-                             O_CLOEXEC
-#else
-                             0
-#endif
-                             );
+  rc = ef_onload_driver_open(&fd, OO_STACK_DEV, 1);
   if( rc < 0 ) {
     LOG_E(ci_log("%s: ef_onload_driver_open() failed (rc=%d)",
                  __FUNCTION__, rc);

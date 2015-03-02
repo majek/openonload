@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -66,6 +66,28 @@ static inline int ci_sys_epoll_create_compat(int size, int flags, int cloexec)
   return fd;
 }
 
+ci_inline citp_fdinfo*
+citp_epoll_fdi_from_member(citp_fdinfo* fd_fdi, int fdt_locked)
+{
+  citp_fdinfo* epoll_fdi = citp_fdtable_lookup_noprobe(fd_fdi->epoll_fd);
+  if( epoll_fdi == NULL ) {
+    Log_POLL(ci_log("%s: epoll_fd=%d not found (fd=%d)", __FUNCTION__,
+                    fd_fdi->epoll_fd, fd_fdi->fd));
+    return NULL;
+  }
+  if( epoll_fdi->seq != fd_fdi->epoll_fd_seq ||
+      ( epoll_fdi->protocol->type != CITP_EPOLL_FD &&
+        epoll_fdi->protocol->type != CITP_EPOLLB_FD ) ) {
+    Log_POLL(ci_log("%s: epoll_fd=%d changed (type=%d seq=%llx,%llx fd=%d)",
+                    __FUNCTION__, fd_fdi->epoll_fd, epoll_fdi->protocol->type,
+                    (unsigned long long) epoll_fdi->seq,
+                    (unsigned long long) fd_fdi->epoll_fd_seq, fd_fdi->fd));
+    citp_fdinfo_release_ref(epoll_fdi, fdt_locked);
+    return NULL;
+  }
+
+  return epoll_fdi;
+}
 
 
 /*************************************************************************
@@ -80,6 +102,9 @@ CI_BUILD_ASSERT(EPOLLIN == POLLIN);
 /*! Per-fd structure to keep in epoll file. */
 struct citp_epoll_member {
   ci_dllink             dllink;     /*!< Double-linked list links */
+  ci_dllink             dead_stack_link; /*!< Link for dead stack list */
+  ci_dllist*            item_list;  /*!< The list this member belong on */
+  int                   ready_list_id;
   struct epoll_event    epoll_data;
   struct epoll_event    epfd_event; /*!< event synchronised to kernel */
   ci_uint64             fdi_seq;    /*!< fdi->seq */
@@ -88,6 +113,8 @@ struct citp_epoll_member {
 };
 
 
+#define EPOLL_STACK_EITEM 1
+#define EPOLL_NON_STACK_EITEM 2
 /*! Data associated with each epoll epfd.  */
 struct citp_epoll_fd {
   /* epoll_create() parameter */
@@ -103,12 +130,23 @@ struct citp_epoll_fd {
   struct oo_wqlock      lock;
   int                   not_mt_safe;
 
-  /* List of onload sockets (struct citp_epoll_member) */
+  /* Lock for and [dead_stack_sockets].  fdtable lock must be taken
+   * after this one to avoid deadlock.
+   */
+  struct oo_wqlock      dead_stack_lock;
+
+  /* List of onload sockets in home stack (struct citp_epoll_member) */
+  ci_dllist             oo_stack_sockets;
+  ci_dllist             oo_stack_not_ready_sockets;
+  int                   oo_stack_sockets_n;
+
+  /* List of onload sockets in non-home stack (struct citp_epoll_member) */
   ci_dllist             oo_sockets;
   int                   oo_sockets_n;
 
   /* List of deleted sockets (struct citp_epoll_member) */
   ci_dllist             dead_sockets;
+  ci_dllist             dead_stack_sockets;
 
   /* Refcount to increment at dup() time. */
   oo_atomic_t refcount;
@@ -124,6 +162,9 @@ struct citp_epoll_fd {
 
   /* Avoid spinning in next epoll_pwait call */
   int avoid_spin_once;
+
+  ci_netif* home_stack;
+  int ready_list;
 };
 
 
@@ -145,6 +186,7 @@ struct citp_ordering_info {
 struct citp_ordered_wait {
   struct citp_ordering_info* ordering_info;
   int poll_again;
+  int next_timeout;
 };
 
 /* Epoll state in user-land poll.  Copied from oo_ul_poll_state */
@@ -172,6 +214,11 @@ struct oo_ul_epoll_state {
   /* We have found some EPOLLET or EPOLLONESHOT events, and they can not be
    * dropped. */
   int                   has_epollet;
+
+#if CI_CFG_SPIN_STATS
+  /* Have we incremented statistics for this spin round? */
+  int stat_incremented;
+#endif
 };
 
 
@@ -182,7 +229,13 @@ extern int citp_epoll_wait(citp_fdinfo*, struct epoll_event*,
                            struct citp_ordered_wait* ordering,
                            int maxev, int timeout, const sigset_t *sigmask,
                            citp_lib_context_t*) CI_HF;
-extern void citp_epoll_on_handover(citp_fdinfo*, int fdt_locked) CI_HF;
+extern void citp_epoll_on_move(citp_fdinfo*, citp_fdinfo*, citp_fdinfo*,
+                               int fdt_locked) CI_HF;
+extern void citp_epoll_on_handover(citp_fdinfo*, citp_fdinfo*,
+                                   int fdt_locked) CI_HF;
+extern void citp_epoll_on_close(citp_fdinfo*, citp_fdinfo*,
+                                int fdt_locked) CI_HF;
+
 struct onload_ordered_epoll_event;
 extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                                    struct epoll_event*__restrict__ events,
@@ -190,6 +243,9 @@ extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                                    int maxevents, int timeout,
                                    const sigset_t *sigmask,
                                    citp_lib_context_t *lib_context);
+extern void citp_epoll_remove_if_not_ready(struct oo_ul_epoll_state* eps,
+                                           struct citp_epoll_member* eitem,
+                                           ci_netif* ni, citp_waitable* w);
 
 
 /* At time of writing, we never generate the following epoll events:
@@ -208,27 +264,39 @@ extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
 
 
 int
-citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
+citp_ul_epoll_find_events(struct oo_ul_epoll_state* eps,
                           struct citp_epoll_member*__restrict__ eitem,
-                          unsigned events, ci_uint64 sleep_seq);
+                          unsigned events, ci_uint64 sleep_seq,
+                          volatile ci_uint64* sleep_seq_p, int* seq_mismatch);
 
 /* Function to be called at the end of citp_protocol_impl->epoll()
  * function, when UL reports events "mask".
+ *
+ * sleep_seq should be the value of *sleep_seq_p taken _before_
+ * looking for events.
  *
  * Returns true if an event was stored, else false.
  */
 ci_inline int
 citp_ul_epoll_set_ul_events(struct oo_ul_epoll_state*__restrict__ eps,
                             struct citp_epoll_member*__restrict__ eitem,
-                            unsigned events, ci_uint64 sleep_seq)
+                            unsigned events, ci_uint64 sleep_seq,
+                            volatile ci_uint64* sleep_seq_p,
+                            int* seq_mismatch)
 {
-  Log_POLL(ci_log("%s: member=%llx mask=%x events=%x report=%x",
-                  __FUNCTION__, (long long) eitem->epoll_data.data.u64,
-                  eitem->epoll_data.events, events,
-                  eitem->epoll_data.events & events));
+  Log_POLL(
+    if( events )
+      ci_log("%s: member=%llx mask=%x events=%x report=%x",
+               __FUNCTION__, (long long) eitem->epoll_data.data.u64,
+                 eitem->epoll_data.events, events,
+                   eitem->epoll_data.events & events)
+          );
   events &= eitem->epoll_data.events;
-  return events ? citp_ul_epoll_find_events(eps, eitem, events, sleep_seq) : 0;
+  return events ?
+      citp_ul_epoll_find_events(eps, eitem, events,
+                                sleep_seq, sleep_seq_p, seq_mismatch) : 0;
 }
+
 
 
 /*************************************************************************
@@ -242,6 +310,6 @@ extern int citp_epollb_wait(citp_fdinfo* fdi, struct epoll_event *events,
                      int maxevents, int timeout, const sigset_t *sigmask,
                      citp_lib_context_t* lib_context) CI_HF;
 
-extern void citp_epollb_on_handover(citp_fdinfo* fd_fdi) CI_HF;
+extern void citp_epollb_on_handover(citp_fdinfo*, citp_fdinfo*) CI_HF;
 
 #endif /* __UNIX_UL_EPOLL_H__ */

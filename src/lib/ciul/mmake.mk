@@ -95,7 +95,6 @@ $(objd)efch_intf_ver.h: $(EFCH_INTF_HDRS)
 	echo "#define EFCH_INTF_VER  \"$$md5\"" >"$@"
 
 $(objd)$(MMAKE_OBJ_PREFIX)pt_endpoint.o: $(objd)efch_intf_ver.h
-$(objd)$(MMAKE_OBJ_PREFIX)vi_set.o: $(objd)efch_intf_ver.h
 $(objd)$(MMAKE_OBJ_PREFIX)vi_init.o: $(objd)efch_intf_ver.h
 
 

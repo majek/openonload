@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -6108,9 +6108,11 @@ cicpos_ipif_delete(cicp_handle_t *control_plane,
     if( CICP_IPIF_ROWID_BAD != rowid ) {
       cicp_ipif_row_t *row = &ipift->ipif[rowid];
       CI_IP_ADDR_SET(&net_bcast, &row->bcast_ip);
-      cicpos_ipif_callback_delete(control_plane, ipift, ifindex,
-                                  net_ip, net_ipset, net_bcast);
       cicp_ipif_row_free(row);
+      if( ! cicp_ipif_find_home(ipift, net_ip) ) {
+        cicpos_ipif_callback_delete(control_plane, ipift, ifindex,
+                                    net_ip, net_ipset, net_bcast);
+      }
       cicpos_ipif_compress(ipift);
       cicpos_fwdinfo_ipif_import(control_plane, &net_bcast, NULL);
     } 
@@ -6575,6 +6577,7 @@ cicpos_llap_add(cicp_llap_kmib_t *llapt,
     
     ci_assert(NULL != llapt);
     ci_assert(mtu != 0); /* otherwise the new row will not become allocated */
+    ci_assert(ref_encap);
     
     newrow = cicp_llap_find_free(llapt);
 
@@ -6593,13 +6596,8 @@ cicpos_llap_add(cicp_llap_kmib_t *llapt,
             newrow->bond_rowid = CICP_BOND_ROW_NEXT_BAD;
             newrow->vlan_rowid = CICP_BOND_ROW_NEXT_BAD;
 	    CI_MAC_ADDR_SET(&newrow->mac, ref_mac);
-	    if( ref_encap )
-		memcpy(&newrow->encapsulation, ref_encap,
-		       sizeof(newrow->encapsulation));
-	    else {
-		newrow->encapsulation.type = CICP_LLAP_TYPE_NONE;
-                newrow->encapsulation.vlan_id = 0;
-            }
+	    memcpy(&newrow->encapsulation, ref_encap,
+		   sizeof(newrow->encapsulation));
 	    if (NULL == ref_sync)
 		memset(&newrow->sync, 0, sizeof(newrow->sync));
 	    else
@@ -6609,24 +6607,15 @@ cicpos_llap_add(cicp_llap_kmib_t *llapt,
 	    rc = 0;
 	CI_VERLOCK_WRITE_END(llapt->version)
           
-        if( ref_encap )
-          OO_DEBUG_ARP(DPRINTF(CODEID": llap "CI_IFID_PRINTF_FORMAT" set "
-                               "%s %c "CI_MAC_PRINTF_FORMAT" %d "
-                               CICP_ENCAP_NAME_FMT,
-                               ifindex,
-                               (up) ? "UP" : "DOWN",
-                               (hwport == CI_HWPORT_ID_BAD) ? 'X' : 
-                               hwport + '0',
-                               CI_MAC_PRINTF_ARGS(ref_mac),
-                               mtu, cicp_encap_name(ref_encap->type)));
-        else
-          OO_DEBUG_ARP(DPRINTF(CODEID": llap "CI_IFID_PRINTF_FORMAT" set "
-                               "%s %c "CI_MAC_PRINTF_FORMAT" %d default",
-                               ifindex,
-                               (up) ? "UP" : "DOWN",
-                               (hwport == CI_HWPORT_ID_BAD) ? 'X' : 
-                               hwport + '0',
-                               CI_MAC_PRINTF_ARGS(ref_mac), mtu));
+        OO_DEBUG_ARP(DPRINTF(CODEID": llap "CI_IFID_PRINTF_FORMAT" set "
+                             "%s %c "CI_MAC_PRINTF_FORMAT" %d "
+                             CICP_ENCAP_NAME_FMT,
+                             ifindex,
+                             (up) ? "UP" : "DOWN",
+                             (hwport == CI_HWPORT_ID_BAD) ? 'X' : 
+                             hwport + '0',
+                             CI_MAC_PRINTF_ARGS(ref_mac),
+                             mtu, cicp_encap_name(ref_encap->type)));
     } else
     {   OO_DEBUG_ARP(DPRINTF(CODEID": no free link layer access point "
 			     "table entries"););
@@ -7129,6 +7118,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
 		   ci_ifid_t ifindex,
 		   ci_mtu_t mtu,
 		   ci_uint8 /* bool */ up,
+		   cicp_llap_type_t type,
 		   char *name,
 		   ci_mac_addr_t *ref_mac,
 		   cicpos_llap_row_t *ref_sync)
@@ -7155,8 +7145,14 @@ cicpos_llap_import(cicp_handle_t *control_plane,
         ipif_status_before = cicp_check_ipif_callback(mibs, ifindex);
 
 	if( CICP_LLAP_ROWID_BAD == rowid ) {
+          cicp_encap_t encap;
+          if( type == CICP_LLAP_TYPE_LOOP )
+            encap.type = CICP_LLAP_TYPE_LOOP;
+          else
+            encap.type = CICP_LLAP_TYPE_NONE;
+          encap.vlan_id = 0;
           rc = cicpos_llap_add(llapt, &rowid, ifindex, mtu, up, name, 
-                               CI_HWPORT_ID_BAD, ref_mac, NULL, ref_sync);
+                               CI_HWPORT_ID_BAD, ref_mac, &encap, ref_sync);
           OO_DEBUG_ARP(if (0 != rc)
                          DPRINTF(CODEID": adding access point failed rc=%d",
                                  rc););
@@ -7204,6 +7200,7 @@ cicp_llap_import(cicp_handle_t *control_plane,
 		 char *name,
 		 ci_mac_addr_t *ref_mac)
 {   return cicpos_llap_import(control_plane, out_rowid, ifindex, mtu, up,
+                              CICP_LLAP_TYPE_NONE,
 			      name, ref_mac, /*sync*/NULL);
 }
 

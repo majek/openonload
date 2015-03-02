@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -30,6 +30,10 @@
 #include "udp_internal.h"
 #include <onload/sleep.h>
 
+#ifdef ONLOAD_OFE
+#include "ofe/onload.h"
+#endif
+
 
 #define LPF "ci_udp_"
 #define LPFIN "-> " LPF
@@ -46,7 +50,17 @@ oo_pkt_p ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us,
 {
   oo_pkt_p frag_next = pkt->frag_next;
 
-  ci_sock_cmn_timestamp_q_enqueue(ni, &us->s, pkt);
+
+  /* Limit timistamp queue by SO_SNDBUF
+   * (or something like this - "CI_CFG_PKT_BUF_SIZE / 2" is just an
+   * arbitrary value) */
+  if( us->timestamp_q.queue.num * CI_CFG_PKT_BUF_SIZE / 2 > us->s.so.sndbuf )
+    return OO_PKT_P(pkt);
+
+  pkt->frag_next = OO_PP_NULL;
+  ci_sock_cmn_timestamp_q_enqueue(ni, &us->timestamp_q, pkt);
+  /* Tells post-poll loop to put socket on the [reap_list]. */
+  us->s.b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
 
   /* TODO is this necessary? - mirroring ci_udp_recv_q_put() */
   ci_wmb();
@@ -60,19 +74,20 @@ oo_pkt_p ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us,
    */
   if( OO_PP_IS_NULL(frag_next) )
     return OO_PP_NULL;
-  pkt->frag_next = OO_PP_NULL;
   return frag_next;
 }
 
 
-void ci_udp_recv_q_reap(ci_netif* ni, ci_udp_recv_q* q)
+int ci_udp_recv_q_reap(ci_netif* ni, ci_udp_recv_q* q)
 {
+  int freed = 0;
   while( ! OO_PP_EQ(q->head, q->extract) ) {
     ci_ip_pkt_fmt* pkt = PKT_CHK(ni, q->head);
     q->head = pkt->next;
-    ci_netif_pkt_release_check_keep(ni, pkt);
+    freed += ci_netif_pkt_release_check_keep(ni, pkt);
     ++q->pkts_reaped;
   }
+  return freed;
 }
 
 
@@ -127,7 +142,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   ci_ip_pkt_fmt* q_pkt;
   ci_udp_state* us = SOCK_TO_UDP(s);
   ci_netif* ni = state->ni;
-  int recvq_depth = RECVQ_DEPTH(us, pkt->pf.udp.pay_len);
+  int recvq_depth = UDP_RECVQ_DEPTH_NEXT(us, pkt->pf.udp.pay_len);
 
   LOG_UV(log("%s: "NS_FMT "pay_len=%d "CI_IP_PRINTF_FORMAT" -> "
              CI_IP_PRINTF_FORMAT, __FUNCTION__,
@@ -136,6 +151,17 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
              CI_IP_PRINTF_ARGS(&oo_ip_hdr(pkt)->ip_daddr_be32)));
 
   state->delivered = 1;
+
+#ifdef ONLOAD_OFE
+  if( ni->ofe != NULL && !OFE_ADDR_IS_NULL(ni->ofe, s->ofe_code_start) &&
+      ofe_process_packet(ni->ofe, s->ofe_code_start, ci_ip_time_now(ni),
+                         oo_ether_hdr(pkt), pkt->pay_len, pkt->vlan,
+                         CI_BSWAP_BE16(oo_ether_type_get(pkt)),
+                         oo_ip_hdr(pkt))
+      != OFE_ACCEPT ) {
+    return 0; /* deliver to other sockets if their rules allow */
+  }
+#endif
 
   if( (recvq_depth <= us->stats.max_recvq_depth) &&
       ! (ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ) {
@@ -238,12 +264,12 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
                                  oo_ip_hdr(pkt)->ip_saddr_be32,
                                  udp->udp_source_be16,
                                  IPPROTO_UDP, pkt->intf_i, pkt->vlan,
-                                 ci_udp_rx_deliver, &state);
+                                 ci_udp_rx_deliver, &state, NULL);
   ci_netif_filter_for_each_match(ni,
                                  oo_ip_hdr(pkt)->ip_daddr_be32,
                                  udp->udp_dest_be16,
                                  0, 0, IPPROTO_UDP, pkt->intf_i, pkt->vlan,
-                                 ci_udp_rx_deliver, &state);
+                                 ci_udp_rx_deliver, &state, NULL);
 
   if( state.queued ) {
     ci_assert_gt(pkt->refcount, 1);

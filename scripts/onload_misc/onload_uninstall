@@ -59,9 +59,9 @@ rm -f "$manifest" || {
 log "Removing init scripts..."
 if [ -x /usr/lib/lsb/remove_initd ]; then
   /usr/lib/lsb/remove_initd /etc/init.d/openonload;
-elif which chkconfig &>/dev/null; then
+elif command -v chkconfig >/dev/null 2>&1 ; then
   chkconfig --del openonload;
-elif which update-rc.d &>/dev/null; then
+elif command -v update-rc.d >/dev/null 2>&1 ; then
   update-rc.d -f openonload remove;
 else
   rm -f /etc/rc.d/rc*.d/*openonload;

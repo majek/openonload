@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,6 +84,8 @@
 #define          MC_CMD_FC_OP_TIMESTAMP 0x1c
 /* enum: Commands for SPI Flash interface */
 #define          MC_CMD_FC_OP_SPI 0x1d
+/* enum: Commands for diagnostic components */
+#define          MC_CMD_FC_OP_DIAG 0x1e
 /* enum: External AOE port. */
 #define          MC_CMD_FC_IN_PORT_EXT_OFST 0x0
 /* enum: Internal AOE port. */
@@ -288,18 +290,24 @@
 #define       MC_CMD_FC_IN_TRC_RX_WRITE_DATA_NUM 2
 
 /* MC_CMD_FC_IN_SFP msgrequest */
-#define    MC_CMD_FC_IN_SFP_LEN 24
+#define    MC_CMD_FC_IN_SFP_LEN 28
 /*            MC_CMD_FC_IN_CMD_OFST 0 */
-/* Link speed is 100, 1000, 10000 */
+/* Link speed is 100, 1000, 10000, 40000 */
 #define       MC_CMD_FC_IN_SFP_SPEED_OFST 4
-/* Length of copper cable - zero when not relevant */
+/* Length of copper cable - zero when not relevant (e.g. if cable is fibre) */
 #define       MC_CMD_FC_IN_SFP_COPPER_LEN_OFST 8
-/* True if a dual speed SFP+ module */
+/* Not relevant for cards with QSFP modules. For older cards, true if module is
+ * a dual speed SFP+ module.
+ */
 #define       MC_CMD_FC_IN_SFP_DUAL_SPEED_OFST 12
 /* True if an SFP Module is present (other fields valid when true) */
 #define       MC_CMD_FC_IN_SFP_PRESENT_OFST 16
-/* The type of the SFP+ Module */
+/* The type of the SFP+ Module. For later cards with QSFP modules, this field
+ * is unused and the type is communicated by other means.
+ */
 #define       MC_CMD_FC_IN_SFP_TYPE_OFST 20
+/* Capabilities corresponding to 1 bits. */
+#define       MC_CMD_FC_IN_SFP_CAPS_OFST 24
 
 /* MC_CMD_FC_IN_DDR_TEST msgrequest */
 #define    MC_CMD_FC_IN_DDR_TEST_LEN 8
@@ -453,6 +461,10 @@
 #define          MC_CMD_FC_OP_UHLINK_READ_RX_EYE_PLOT 0x5
 /* enum: Retune Rx settings */
 #define          MC_CMD_FC_OP_UHLINK_RX_TUNE 0x6
+/* enum: Set loopback mode on fpga port */
+#define          MC_CMD_FC_OP_UHLINK_LOOPBACK_SET 0x7
+/* enum: Get loopback mode config state on fpga port */
+#define          MC_CMD_FC_OP_UHLINK_LOOPBACK_GET 0x8
 #define        MC_CMD_FC_IN_UHLINK_PORT_TYPE_LBN 8
 #define        MC_CMD_FC_IN_UHLINK_PORT_TYPE_WIDTH 8
 #define        MC_CMD_FC_IN_UHLINK_PORT_IDX_LBN 16
@@ -503,6 +515,24 @@
 #define    MC_CMD_FC_OP_UHLINK_RX_TUNE_LEN 8
 /*            MC_CMD_FC_IN_CMD_OFST 0 */
 /*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+
+/* MC_CMD_FC_OP_UHLINK_LOOPBACK_SET msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_LOOPBACK_SET_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+#define       MC_CMD_FC_OP_UHLINK_LOOPBACK_SET_TYPE_OFST 8
+#define          MC_CMD_FC_UHLINK_LOOPBACK_TYPE_PCS_SERIAL 0x0 /* enum */
+#define          MC_CMD_FC_UHLINK_LOOPBACK_TYPE_PMA_PRE_CDR 0x1 /* enum */
+#define          MC_CMD_FC_UHLINK_LOOPBACK_TYPE_PMA_POST_CDR 0x2 /* enum */
+#define       MC_CMD_FC_OP_UHLINK_LOOPBACK_SET_STATE_OFST 12
+#define          MC_CMD_FC_UHLINK_LOOPBACK_STATE_OFF 0x0 /* enum */
+#define          MC_CMD_FC_UHLINK_LOOPBACK_STATE_ON 0x1 /* enum */
+
+/* MC_CMD_FC_OP_UHLINK_LOOPBACK_GET msgrequest */
+#define    MC_CMD_FC_OP_UHLINK_LOOPBACK_GET_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_UHLINK_HEADER_OFST 4 */
+#define       MC_CMD_FC_OP_UHLINK_LOOPBACK_GET_TYPE_OFST 8
 
 /* MC_CMD_FC_IN_SET_LINK msgrequest */
 #define    MC_CMD_FC_IN_SET_LINK_LEN 16
@@ -794,6 +824,149 @@
 #define       MC_CMD_FC_IN_SPI_ERASE_OP_OFST 4
 #define       MC_CMD_FC_IN_SPI_ERASE_ADDR_OFST 8
 #define       MC_CMD_FC_IN_SPI_ERASE_NUMBYTES_OFST 12
+
+/* MC_CMD_FC_IN_DIAG msgrequest */
+#define    MC_CMD_FC_IN_DIAG_LEN 8
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/* Operation code indicating component type */
+#define       MC_CMD_FC_IN_DIAG_OP_OFST 4
+/* enum: Power noise generator. */
+#define          MC_CMD_FC_IN_DIAG_POWER_NOISE 0x0
+/* enum: DDR soak test component. */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK 0x1
+/* enum: Diagnostics datapath control component. */
+#define          MC_CMD_FC_IN_DIAG_DATAPATH_CTRL 0x2
+
+/* MC_CMD_FC_IN_DIAG_POWER_NOISE msgrequest */
+#define    MC_CMD_FC_IN_DIAG_POWER_NOISE_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_OP_OFST 4
+/* Sub-opcode describing the operation to be carried out */
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_SUB_OP_OFST 8
+/* enum: Read the configuration (the 32-bit values in each of the clock enable
+ * count and toggle count registers)
+ */
+#define          MC_CMD_FC_IN_DIAG_POWER_NOISE_READ_CONFIG 0x0
+/* enum: Write a new configuration to the clock enable count and toggle count
+ * registers
+ */
+#define          MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG 0x1
+
+/* MC_CMD_FC_IN_DIAG_POWER_NOISE_READ_CONFIG msgrequest */
+#define    MC_CMD_FC_IN_DIAG_POWER_NOISE_READ_CONFIG_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_READ_CONFIG_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_READ_CONFIG_SUB_OP_OFST 8
+
+/* MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG msgrequest */
+#define    MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG_LEN 20
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG_SUB_OP_OFST 8
+/* The 32-bit value to be written to the toggle count register */
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG_TOGGLE_COUNT_OFST 12
+/* The 32-bit value to be written to the clock enable count register */
+#define       MC_CMD_FC_IN_DIAG_POWER_NOISE_WRITE_CONFIG_CLKEN_COUNT_OFST 16
+
+/* MC_CMD_FC_IN_DIAG_DDR_SOAK msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DDR_SOAK_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_OP_OFST 4
+/* Sub-opcode describing the operation to be carried out */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_SUB_OP_OFST 8
+/* enum: Starts DDR soak test on selected banks */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_START 0x0
+/* enum: Read status of DDR soak test */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_RESULT 0x1
+/* enum: Stop test */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_STOP 0x2
+/* enum: Set or clear bit that triggers fake errors. These cause subsequent
+ * tests to fail until the bit is cleared.
+ */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR 0x3
+
+/* MC_CMD_FC_IN_DIAG_DDR_SOAK_START msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DDR_SOAK_START_LEN 24
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_START_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_START_SUB_OP_OFST 8
+/* Mask of DDR banks to be tested */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_START_BANK_MASK_OFST 12
+/* Pattern to use in the soak test */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_START_TEST_PATTERN_OFST 16
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_START_ZEROS 0x0 /* enum */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_START_ONES 0x1 /* enum */
+/* Either multiple automatic tests until a STOP command is issued, or one
+ * single test
+ */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_START_TEST_TYPE_OFST 20
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_START_ONGOING_TEST 0x0 /* enum */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_START_SINGLE_TEST 0x1 /* enum */
+
+/* MC_CMD_FC_IN_DIAG_DDR_SOAK_RESULT msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DDR_SOAK_RESULT_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_RESULT_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_RESULT_SUB_OP_OFST 8
+/* DDR bank to read status from */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_RESULT_BANK_ID_OFST 12
+#define          MC_CMD_FC_DDR_BANK0 0x0 /* enum */
+#define          MC_CMD_FC_DDR_BANK1 0x1 /* enum */
+#define          MC_CMD_FC_DDR_BANK2 0x2 /* enum */
+#define          MC_CMD_FC_DDR_BANK3 0x3 /* enum */
+#define          MC_CMD_FC_DDR_AOEMEM_MAX_BANKS 0x4 /* enum */
+
+/* MC_CMD_FC_IN_DIAG_DDR_SOAK_STOP msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DDR_SOAK_STOP_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_STOP_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_STOP_SUB_OP_OFST 8
+/* Mask of DDR banks to be tested */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_STOP_BANK_MASK_OFST 12
+
+/* MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_LEN 20
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_SUB_OP_OFST 8
+/* Mask of DDR banks to set/clear error flag on */
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_BANK_MASK_OFST 12
+#define       MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_FLAG_ACTION_OFST 16
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_CLEAR 0x0 /* enum */
+#define          MC_CMD_FC_IN_DIAG_DDR_SOAK_ERROR_SET 0x1 /* enum */
+
+/* MC_CMD_FC_IN_DIAG_DATAPATH_CTRL msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_LEN 12
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_OP_OFST 4
+/* Sub-opcode describing the operation to be carried out */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SUB_OP_OFST 8
+/* enum: Set a known datapath configuration */
+#define          MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE 0x0
+/* enum: Apply raw config to datapath control registers */
+#define          MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG 0x1
+
+/* MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE_SUB_OP_OFST 8
+/* Datapath configuration identifier */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE_MODE_OFST 12
+#define          MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE_PASSTHROUGH 0x0 /* enum */
+#define          MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_SET_MODE_SNAKE 0x1 /* enum */
+
+/* MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG msgrequest */
+#define    MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG_LEN 24
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG_OP_OFST 4
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG_SUB_OP_OFST 8
+/* Value to write into control register 1 */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG_CONTROL1_OFST 12
+/* Value to write into control register 2 */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG_CONTROL2_OFST 16
+/* Value to write into control register 3 */
+#define       MC_CMD_FC_IN_DIAG_DATAPATH_CTRL_RAW_CONFIG_CONTROL3_OFST 20
 
 /* MC_CMD_FC_OUT msgresponse */
 #define    MC_CMD_FC_OUT_LEN 0
@@ -1325,6 +1498,13 @@
 /* MC_CMD_FC_OUT_UHLINK_RX_TUNE msgresponse */
 #define    MC_CMD_FC_OUT_UHLINK_RX_TUNE_LEN 0
 
+/* MC_CMD_FC_OUT_UHLINK_LOOPBACK_SET msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_LOOPBACK_SET_LEN 0
+
+/* MC_CMD_FC_OUT_UHLINK_LOOPBACK_GET msgresponse */
+#define    MC_CMD_FC_OUT_UHLINK_LOOPBACK_GET_LEN 4
+#define       MC_CMD_FC_OUT_UHLINK_LOOPBACK_GET_STATE_OFST 0
+
 /* MC_CMD_FC_OUT_UHLINK msgresponse */
 #define    MC_CMD_FC_OUT_UHLINK_LEN 0
 
@@ -1458,6 +1638,48 @@
 /* MC_CMD_FC_OUT_SPI_ERASE msgresponse */
 #define    MC_CMD_FC_OUT_SPI_ERASE_LEN 0
 
+/* MC_CMD_FC_OUT_DIAG_POWER_NOISE_READ_CONFIG msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_POWER_NOISE_READ_CONFIG_LEN 8
+/* The 32-bit value read from the toggle count register */
+#define       MC_CMD_FC_OUT_DIAG_POWER_NOISE_READ_CONFIG_TOGGLE_COUNT_OFST 0
+/* The 32-bit value read from the clock enable count register */
+#define       MC_CMD_FC_OUT_DIAG_POWER_NOISE_READ_CONFIG_CLKEN_COUNT_OFST 4
+
+/* MC_CMD_FC_OUT_DIAG_POWER_NOISE_WRITE_CONFIG msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_POWER_NOISE_WRITE_CONFIG_LEN 0
+
+/* MC_CMD_FC_OUT_DIAG_DDR_SOAK_START msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_DDR_SOAK_START_LEN 0
+
+/* MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_LEN 8
+/* DDR soak test status word; bits [4:0] are relevant. */
+#define       MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_STATUS_OFST 0
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_PASSED_LBN 0
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_PASSED_WIDTH 1
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_FAILED_LBN 1
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_FAILED_WIDTH 1
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_COMPLETED_LBN 2
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_COMPLETED_WIDTH 1
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_TIMEOUT_LBN 3
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_TIMEOUT_WIDTH 1
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_PNF_LBN 4
+#define        MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_PNF_WIDTH 1
+/* DDR soak test error count */
+#define       MC_CMD_FC_OUT_DIAG_DDR_SOAK_RESULT_ERR_COUNT_OFST 4
+
+/* MC_CMD_FC_OUT_DIAG_DDR_SOAK_STOP msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_DDR_SOAK_STOP_LEN 0
+
+/* MC_CMD_FC_OUT_DIAG_DDR_SOAK_ERROR msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_DDR_SOAK_ERROR_LEN 0
+
+/* MC_CMD_FC_OUT_DIAG_DATAPATH_CTRL_SET_MODE msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_DATAPATH_CTRL_SET_MODE_LEN 0
+
+/* MC_CMD_FC_OUT_DIAG_DATAPATH_CTRL_RAW_CONFIG msgresponse */
+#define    MC_CMD_FC_OUT_DIAG_DATAPATH_CTRL_RAW_CONFIG_LEN 0
+
 
 /***********************************/
 /* MC_CMD_AOE
@@ -1506,8 +1728,14 @@
 #define          MC_CMD_AOE_OP_SET_MTU_OFFSET 0x11
 /* enum: How link state is handled */
 #define          MC_CMD_AOE_OP_LINK_STATE 0x12
-/* enum: How Siena MAC statistics are reported */
+/* enum: How Siena MAC statistics are reported (deprecated - use
+ * MC_CMD_AOE_OP_ASIC_STATS)
+ */
 #define          MC_CMD_AOE_OP_SIENA_STATS 0x13
+/* enum: How native ASIC MAC statistics are reported - replaces the deprecated
+ * command MC_CMD_AOE_OP_SIENA_STATS
+ */
+#define          MC_CMD_AOE_OP_ASIC_STATS 0x13
 /* enum: DDR memory information */
 #define          MC_CMD_AOE_OP_DDR 0x14
 /* enum: FC control */
@@ -1707,6 +1935,16 @@
 /* enum: Statistics from AOE external ports */
 #define          MC_CMD_AOE_IN_SIENA_STATS_STATS_AOE  0x1
 
+/* MC_CMD_AOE_IN_ASIC_STATS msgrequest */
+#define    MC_CMD_AOE_IN_ASIC_STATS_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+/* How MAC statistics are reported */
+#define       MC_CMD_AOE_IN_ASIC_STATS_MODE_OFST 4
+/* enum: Statistics from the ASIC (default) */
+#define          MC_CMD_AOE_IN_ASIC_STATS_STATS_ASIC  0x0
+/* enum: Statistics from AOE external ports */
+#define          MC_CMD_AOE_IN_ASIC_STATS_STATS_AOE  0x1
+
 /* MC_CMD_AOE_IN_DDR msgrequest */
 #define    MC_CMD_AOE_IN_DDR_LEN 12
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
@@ -1841,7 +2079,8 @@
 #define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_OFST 0
 #define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_LEN 4
 #define       MC_CMD_AOE_OUT_TEMPERATURES_VALUES_NUM 10
-#define          MC_CMD_AOE_OUT_TEMPERATURES_MAIN_0 0x0 /* enum */
+/* enum: The first set of enum values are for Modena code. */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_MAIN_0 0x0
 #define          MC_CMD_AOE_OUT_TEMPERATURES_MAIN_1 0x1 /* enum */
 #define          MC_CMD_AOE_OUT_TEMPERATURES_IND_0 0x2 /* enum */
 #define          MC_CMD_AOE_OUT_TEMPERATURES_IND_1 0x3 /* enum */
@@ -1851,6 +2090,16 @@
 #define          MC_CMD_AOE_OUT_TEMPERATURES_PSU 0x7 /* enum */
 #define          MC_CMD_AOE_OUT_TEMPERATURES_FPGA 0x8 /* enum */
 #define          MC_CMD_AOE_OUT_TEMPERATURES_SIENA 0x9 /* enum */
+/* enum: The second set of enum values are for Sorrento code. */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_MAIN_0 0x0
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_MAIN_1 0x1 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_IND_0 0x2 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_IND_1 0x3 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_SODIMM_0 0x4 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_SODIMM_1 0x5 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_FPGA 0x6 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_PHY0 0x7 /* enum */
+#define          MC_CMD_AOE_OUT_TEMPERATURES_SORRENTO_PHY1 0x8 /* enum */
 
 /* MC_CMD_AOE_OUT_CPLD_READ msgresponse */
 #define    MC_CMD_AOE_OUT_CPLD_READ_LEN 4
@@ -1952,6 +2201,12 @@
 
 /* MC_CMD_AOE_OUT_LINK_STATE msgresponse */
 #define    MC_CMD_AOE_OUT_LINK_STATE_LEN 0
+
+/* MC_CMD_AOE_OUT_SIENA_STATS msgresponse */
+#define    MC_CMD_AOE_OUT_SIENA_STATS_LEN 0
+
+/* MC_CMD_AOE_OUT_ASIC_STATS msgresponse */
+#define    MC_CMD_AOE_OUT_ASIC_STATS_LEN 0
 
 /* MC_CMD_AOE_OUT_FC msgresponse */
 #define    MC_CMD_AOE_OUT_FC_LEN 0

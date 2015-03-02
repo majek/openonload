@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -71,6 +71,7 @@ extern struct file_operations linux_tcp_helper_fops_pipe_writer;
 extern struct file_operations oo_epoll_fops;
 #endif
 extern struct file_operations linux_tcp_helper_fops_passthrough;
+extern struct file_operations linux_tcp_helper_fops_alien;
 
 /*--------------------------------------------------------------------
  *

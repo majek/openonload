@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,5 +61,24 @@ int citp_oo_timespec_compare(const struct oo_timespec* a,
   return citp_timestamp_compare(a->tv_sec, a->tv_nsec, b->tv_sec, b->tv_nsec);
 }
 
+
+void citp_oo_get_cpu_khz(ci_uint32* cpu_khz)
+{
+  ef_driver_handle fd;
+
+  /* set up a constant value for the case everything goes wrong */
+  *cpu_khz = 1000;
+
+  if( ef_onload_driver_open(&fd, OO_STACK_DEV, 1) != 0 ) {
+    fprintf(stderr, "%s: Failed to open /dev/onload\n", __FUNCTION__);
+    ci_get_cpu_khz(cpu_khz);
+    return;
+  }
+  if( ci_sys_ioctl(fd, OO_IOC_GET_CPU_KHZ, cpu_khz) != 0 ) {
+    Log_E(log("%s: Failed to query cpu_khz", __FUNCTION__));
+    ci_get_cpu_khz(cpu_khz);
+  }
+  ef_onload_driver_close(fd);
+}
 
 /*! \cidoxg_end */

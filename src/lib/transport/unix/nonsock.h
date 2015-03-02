@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -67,7 +67,7 @@ int citp_nonsock_send(citp_fdinfo* fdinfo, const struct msghdr* msg,
 extern
 int citp_nonsock_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg,
                           unsigned vlen, int flags,
-                          const struct timespec *timeout);
+                          ci_recvmmsg_timespec* timeout);
 #endif
 #if CI_CFG_SENDMMSG
 extern
@@ -88,13 +88,13 @@ int citp_nonsock_zc_recv_filter(citp_fdinfo* fdi,
                                 onload_zc_recv_filter_callback filter,
                                 void* cb_arg, int flags);
 extern
-int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+int citp_nonsock_tmpl_alloc(citp_fdinfo* fdi, const struct iovec* initial_msg,
                             int mlen, struct oo_msg_template** omt_pp,
                             unsigned flags);
-extern
-int citp_nonsock_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
-                             struct onload_template_msg_update_iovec* updates,
-                             int ulen, unsigned flags);
+extern int
+citp_nonsock_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
+                         const struct onload_template_msg_update_iovec* updates,
+                         int ulen, unsigned flags);
 extern
 int citp_nonsock_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt);
 
@@ -102,6 +102,13 @@ int citp_nonsock_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt);
 extern
 int citp_nonsock_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
                               struct timespec* first_out, int* bytes_out);
+#endif
+extern
+int citp_nonsock_is_spinning(citp_fdinfo* fdi);
+
+#if CI_CFG_FD_CACHING
+extern
+int citp_nonsock_cache(citp_fdinfo* fdi);
 #endif
 
 #endif

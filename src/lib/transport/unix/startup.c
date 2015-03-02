@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -34,6 +34,9 @@
 #include <sys/types.h>  /* for mkdir() */
 #include <ci/internal/efabcfg.h>
 #include <onload/version.h>
+#ifdef ONLOAD_OFE
+#include "ofe/onload.h"
+#endif
 
 
 citp_globals_t citp = {
@@ -128,6 +131,8 @@ static void __oo_per_thread_init_thread(struct oo_per_thread* pt)
     pt->spinstate |= (1 << ONLOAD_SPIN_SOCK_LOCK);
   if( CITP_OPTS.stack_lock_buzz )
     pt->spinstate |= (1 << ONLOAD_SPIN_STACK_LOCK);
+  if( CITP_OPTS.so_busy_poll_spin )
+    pt->spinstate |= (1 << ONLOAD_SPIN_SO_BUSY_POLL);
 }
 
 
@@ -165,6 +170,8 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_POLL_FAST",		ul_poll_fast);
   DUMP_OPT_INT("EF_POLL_FAST_USEC",	ul_poll_fast_usec);
   DUMP_OPT_INT("EF_POLL_NONBLOCK_FAST_USEC", ul_poll_nonblock_fast_usec);
+  DUMP_OPT_INT("EF_SELECT_FAST_USEC",	ul_select_fast_usec);
+  DUMP_OPT_INT("EF_SELECT_NONBLOCK_FAST_USEC", ul_select_nonblock_fast_usec);
 #if CI_CFG_UDP
   DUMP_OPT_INT("EF_UDP_RECV_SPIN",      udp_recv_spin);
   DUMP_OPT_INT("EF_UDP_SEND_SPIN",      udp_send_spin);
@@ -176,9 +183,11 @@ static void citp_dump_opts(citp_opts_t *o)
 #if CI_CFG_USERSPACE_PIPE
   DUMP_OPT_INT("EF_PIPE_RECV_SPIN",     pipe_recv_spin);
   DUMP_OPT_INT("EF_PIPE_SEND_SPIN",     pipe_send_spin);
+  DUMP_OPT_INT("EF_PIPE_SIZE",          pipe_size);
 #endif
   DUMP_OPT_INT("EF_SOCK_LOCK_BUZZ",     sock_lock_buzz);
   DUMP_OPT_INT("EF_STACK_LOCK_BUZZ",    stack_lock_buzz);
+  DUMP_OPT_INT("EF_SO_BUSY_POLL_SPIN",  so_busy_poll_spin);
 #if CI_CFG_USERSPACE_EPOLL
   DUMP_OPT_INT("EF_UL_EPOLL",	        ul_epoll);
   DUMP_OPT_INT("EF_EPOLL_SPIN",	        ul_epoll_spin);
@@ -197,7 +206,6 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_NO_FAIL",		no_fail);
   DUMP_OPT_INT("EF_SA_ONSTACK_INTERCEPT",	sa_onstack_intercept);
   DUMP_OPT_INT("EF_ACCEPT_INHERIT_NONBLOCK", accept_force_inherit_nonblock);
-  DUMP_OPT_INT("EF_ACCEPT_INHERIT_NODELAY",  accept_force_inherit_nodelay);
 #if CI_CFG_USERSPACE_PIPE
   DUMP_OPT_INT("EF_PIPE", ul_pipe);
 #endif
@@ -403,6 +411,8 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_POLL_FAST",	ul_poll_fast);
   GET_ENV_OPT_INT("EF_POLL_FAST_USEC",  ul_poll_fast_usec);
   GET_ENV_OPT_INT("EF_POLL_NONBLOCK_FAST_USEC", ul_poll_nonblock_fast_usec);
+  GET_ENV_OPT_INT("EF_SELECT_FAST_USEC",  ul_select_fast_usec);
+  GET_ENV_OPT_INT("EF_SELECT_NONBLOCK_FAST_USEC", ul_select_nonblock_fast_usec);
 #if CI_CFG_UDP
   GET_ENV_OPT_INT("EF_UDP_RECV_SPIN",   udp_recv_spin);
   GET_ENV_OPT_INT("EF_UDP_SEND_SPIN",   udp_send_spin);
@@ -414,9 +424,11 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #if CI_CFG_USERSPACE_PIPE
   GET_ENV_OPT_INT("EF_PIPE_RECV_SPIN",  pipe_recv_spin);
   GET_ENV_OPT_INT("EF_PIPE_SEND_SPIN",  pipe_send_spin);
+  GET_ENV_OPT_INT("EF_PIPE_SIZE",       pipe_size);
 #endif
   GET_ENV_OPT_INT("EF_SOCK_LOCK_BUZZ",  sock_lock_buzz);
   GET_ENV_OPT_INT("EF_STACK_LOCK_BUZZ", stack_lock_buzz);
+  GET_ENV_OPT_INT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin);
 #if CI_CFG_USERSPACE_EPOLL
   GET_ENV_OPT_INT("EF_UL_EPOLL",        ul_epoll);
   GET_ENV_OPT_INT("EF_EPOLL_SPIN",      ul_epoll_spin);
@@ -433,7 +445,6 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_NO_FAIL",		no_fail);
   GET_ENV_OPT_INT("EF_SA_ONSTACK_INTERCEPT",	sa_onstack_intercept);
   GET_ENV_OPT_INT("EF_ACCEPT_INHERIT_NONBLOCK",	accept_force_inherit_nonblock);
-  GET_ENV_OPT_INT("EF_ACCEPT_INHERIT_NODELAY",	accept_force_inherit_nodelay);
   GET_ENV_OPT_INT("EF_VFORK_MODE",	vfork_mode);
 #if CI_CFG_USERSPACE_PIPE
   GET_ENV_OPT_INT("EF_PIPE",        ul_pipe);
@@ -470,6 +481,10 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_CLUSTER_RESTART",	cluster_restart_opt);
   get_env_opt_port_list(&opts->tcp_reuseports, "EF_TCP_FORCE_REUSEPORT");
   get_env_opt_port_list(&opts->udp_reuseports, "EF_UDP_FORCE_REUSEPORT");
+
+#if CI_CFG_FD_CACHING
+  get_env_opt_port_list(&opts->sock_cache_ports, "EF_SOCKET_CACHE_PORTS");
+#endif
 }
 
 
@@ -491,6 +506,7 @@ static void citp_opts_validate_env(void)
     "EF_NO_PRELOAD_RESTORE",
     "EF_LD_PRELOAD",
     "EF_CLUSTER_NAME",
+    "EF_OFE_CONFIG_FILE",
     NULL
   };
   char** env_name;
@@ -562,12 +578,16 @@ citp_transport_init(void)
     /* ?? ci_netif_config_opts_dump(&citp.netif_opts); */
   }
 
-  ci_get_cpu_khz(NULL);
-  citp.spin_cycles = ci_usec_to_cycles64(CITP_OPTS.ul_spin_usec);
+  citp_oo_get_cpu_khz(&citp.cpu_khz);
+  citp.spin_cycles = citp_usec_to_cycles64(CITP_OPTS.ul_spin_usec);
   citp.poll_nonblock_fast_cycles = 
-    ci_usec_to_cycles64(CITP_OPTS.ul_poll_nonblock_fast_usec);
+    citp_usec_to_cycles64(CITP_OPTS.ul_poll_nonblock_fast_usec);
   citp.poll_fast_cycles = 
-    ci_usec_to_cycles64(CITP_OPTS.ul_poll_fast_usec);
+    citp_usec_to_cycles64(CITP_OPTS.ul_poll_fast_usec);
+  citp.select_nonblock_fast_cycles = 
+    citp_usec_to_cycles64(CITP_OPTS.ul_select_nonblock_fast_usec);
+  citp.select_fast_cycles = 
+    citp_usec_to_cycles64(CITP_OPTS.ul_select_fast_usec);
   ci_tp_init(__oo_per_thread_init_thread);
   return 0;
 }
@@ -582,6 +602,16 @@ static int citp_transport_register(void)
   return 0;
 }
 
+#ifdef ONLOAD_OFE
+static int citp_ofe_ctor(void)
+{
+  /* We should init OFE even if EF_OFE_ENGINE_SIZE is not set,
+   * because we may attach stacks which already have
+   * the Onload Filter Engine. */
+  ofe_init(0);
+  return 0;
+}
+#endif
 
 int _citp_do_init_inprogress = 0;
 

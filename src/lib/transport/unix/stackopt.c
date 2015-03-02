@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,6 +25,33 @@
 \**************************************************************************/
 
 #include "internal.h"
+
+
+int onload_stack_opt_get_int(const char* opt_env, int64_t* opt_val)
+{
+  struct oo_per_thread* pt;
+  ci_netif_config_opts* opts;
+  
+  pt = oo_per_thread_get();
+  opts = pt->thread_local_netif_opts;
+
+  if( opts == NULL) {
+    opts = &ci_cfg_opts.netif_opts;
+  }
+
+  #undef CI_CFG_OPT
+  #define CI_CFG_OPT(env, name, p3, p4, p5, p6, p7, p8, p9, p10)    \
+    {                                                               \
+      if( ! strcmp(env, opt_env) ) {                                \
+        *opt_val = opts->name;                                      \
+        return 0;                                                   \
+      }                                                             \
+    }
+
+  #include <ci/internal/opts_netif_def.h>
+  LOG_E(ci_log("%s: Requested option %s not found", __FUNCTION__, opt_env));
+  return -EINVAL;
+}
 
 
 /* This API provides per thread ability to modify ci_netif_config_opts

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2012 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -67,6 +67,10 @@ struct efx_loopback_payload {
 /* Loopback test source MAC address */
 static const u8 payload_source[ETH_ALEN] __aligned(2) = {
 	0x00, 0x0f, 0x53, 0x1b, 0x1b, 0x1b,
+};
+/* Loopback test dest MAC address */
+static const u8 payload_dest[ETH_ALEN] __aligned(2) = {
+	0x00, 0x0f, 0x53, 0x1c, 0x1c, 0x1c,
 };
 
 static const char payload_msg[] =
@@ -121,7 +125,10 @@ static int efx_test_nvram(struct efx_nic *efx, struct efx_self_tests *tests)
 
 	if (efx->type->test_nvram) {
 		rc = efx->type->test_nvram(efx);
-		tests->nvram = rc ? -1 : 1;
+		if (rc == -EPERM)
+			rc = 0;
+		else
+			tests->nvram = rc ? -1 : 1;
 	}
 
 	return rc;
@@ -200,11 +207,19 @@ static int efx_test_interrupts(struct efx_nic *efx,
 {
 	unsigned long timeout, wait;
 	int cpu;
+	int rc;
 
 	netif_dbg(efx, drv, efx->net_dev, "testing interrupts\n");
 	tests->interrupt = -1;
 
-	efx_nic_irq_test_start(efx);
+	rc = efx_nic_irq_test_start(efx);
+	if (rc == -ENOTSUPP) {
+		netif_dbg(efx, drv, efx->net_dev,
+			  "direct interrupt testing not supported\n");
+		tests->interrupt = 1;
+		return 0;
+	}
+
 	timeout = jiffies + IRQ_TIMEOUT;
 	wait = 1;
 
@@ -321,8 +336,11 @@ static int efx_test_phy(struct efx_nic *efx, struct efx_self_tests *tests,
 	mutex_lock(&efx->mac_lock);
 	rc = efx->phy_op->run_tests(efx, tests->phy_ext, flags);
 	mutex_unlock(&efx->mac_lock);
-	netif_info(efx, drv, efx->net_dev,
-		   "%s phy selftest\n", rc ? "Failed" : "Passed");
+	if (rc == -EPERM)
+		rc = 0;
+	else
+		netif_info(efx, drv, efx->net_dev,
+			   "%s phy selftest\n", rc ? "Failed" : "Passed");
 	return rc;
 }
 
@@ -431,11 +449,10 @@ void efx_loopback_rx_packet(struct efx_nic *efx,
 static void efx_iterate_state(struct efx_nic *efx)
 {
 	struct efx_loopback_state *state = efx->loopback_selftest;
-	struct net_device *net_dev = efx->net_dev;
 	struct efx_loopback_payload *payload = &state->payload;
 
 	/* Initialise the layerII header */
-	ether_addr_copy((u8 *)&payload->header.h_dest, net_dev->dev_addr);
+	ether_addr_copy((u8 *)&payload->header.h_dest, payload_dest);
 	ether_addr_copy((u8 *)&payload->header.h_source, payload_source);
 	payload->header.h_proto = htons(ETH_P_IP);
 
@@ -677,6 +694,7 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct efx_self_tests *tests,
 	struct efx_tx_queue *tx_queue;
 	int rc = 0;
 	bool retry;
+	s32 temp_filter_id = -1;
 
 	/* Set the port loopback_selftest member. From this point on
 	 * all received packets will be dropped. Mark the state as
@@ -685,6 +703,21 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct efx_self_tests *tests,
 	if (state == NULL)
 		return -ENOMEM;
 	BUG_ON(efx->loopback_selftest);
+
+	if (loopback_modes) {
+		struct efx_filter_spec spec;
+
+		efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
+			EFX_FILTER_FLAG_RX_RSS | EFX_FILTER_FLAG_LOOPBACK,
+			0);
+		efx_filter_set_eth_local(&spec, EFX_FILTER_VID_UNSPEC,
+					 payload_dest);
+
+		temp_filter_id = efx_filter_insert_filter(efx, &spec, false);
+		if (temp_filter_id < 0)
+			return temp_filter_id;
+	}
+
 	state->flush = true;
 	efx->loopback_selftest = state;
 
@@ -749,11 +782,18 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct efx_self_tests *tests,
 	}
 
  out:
+	if (temp_filter_id >= 0)
+		efx_filter_remove_id_safe(efx, EFX_FILTER_PRI_REQUIRED,
+					  temp_filter_id);
+
 	/* Remove the flush. The caller will remove the loopback setting */
 	state->flush = true;
 	efx->loopback_selftest = NULL;
 	wmb();
 	kfree(state);
+
+	if (rc == -EPERM)
+		rc = 0;
 
 	return rc;
 }

@@ -24,6 +24,7 @@
     sendto;
     sendmsg;
     sendmmsg;
+    __sendmmsg;
     select;
     pselect;
     poll;
@@ -31,6 +32,7 @@
     sendfile;
     sendfile64;
     sendfilev;
+    splice;
     read;
     __read_chk;
     write;
@@ -94,6 +96,7 @@
     onload_set_stackname;
     onload_stackname_save;
     onload_stackname_restore;
+    onload_stack_opt_get_int;
     onload_stack_opt_set_int;
     onload_stack_opt_reset;
     onload_version;
@@ -111,6 +114,10 @@
     onload_move_fd;
     onload_fd_check_feature;
     onload_ordered_epoll_wait;
+    onload_delegated_send_prepare;
+    onload_delegated_send_complete;
+    onload_delegated_send_cancel;
+    oo_raw_send;
   local:
     /* everything else must not be in the dynamic symbol table */
     *;

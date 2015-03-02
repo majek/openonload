@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -73,7 +73,7 @@ ci_inline void ci_ip_local_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 {
   ci_assert(ci_netif_is_locked(ni));
   pkt->pf.tcp_tx.lo.tx_sock = SC_SP(s);
-  pkt->pf.tcp_tx.lo.rx_sock = OO_SP_IS_NULL(dst) ? s->local_peer : dst;
+  pkt->pf.tcp_tx.lo.rx_sock = dst;
   if( OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock) )
     return;
   LOG_NT(ci_log(NS_FMT "loopback TX pkt %d to %d", NS_PRI_ARGS(ni, s),
@@ -81,6 +81,7 @@ ci_inline void ci_ip_local_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_netif_pkt_hold(ni, pkt);
   pkt->next = ni->state->looppkts;
   ni->state->looppkts = OO_PKT_P(pkt);
+  ni->state->n_looppkts++;
   ni->state->poll_work_outstanding = 1;
 }
 
@@ -113,7 +114,7 @@ ci_inline void
 __ci_ip_send_tcp(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_tcp_state* ts)
 {
   if( ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ) {
-    ci_ip_local_send(ni, pkt, &ts->s, OO_SP_NULL);
+    ci_ip_local_send(ni, pkt, &ts->s, ts->local_peer);
     return;
   }
   ci_ip_cache_check(&ts->s.pkt);

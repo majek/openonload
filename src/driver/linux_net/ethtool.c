@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2013 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -251,9 +251,11 @@ static void efx_ethtool_get_drvinfo(struct net_device *net_dev,
 
 	strlcpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
 	strlcpy(info->version, EFX_DRIVER_VERSION, sizeof(info->version));
-	if (efx_nic_rev(efx) >= EFX_REV_SIENA_A0)
+	if (efx_nic_rev(efx) >= EFX_REV_SIENA_A0 && !in_interrupt())
 		efx_mcdi_print_fwver(efx, info->fw_version,
 				     sizeof(info->fw_version));
+	else
+		strlcpy(info->fw_version, "N/A", sizeof(info->fw_version));
 	strlcpy(info->bus_info, pci_name(efx->pci_dev), sizeof(info->bus_info));
 }
 
@@ -663,11 +665,11 @@ static int efx_ethtool_set_flags(struct net_device *net_dev, u32 data)
 #endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
-        /* soft VLAN acceleration cannot be disabled at runtime */
-        data |= NETIF_F_HW_VLAN_RX;
+	/* soft VLAN acceleration cannot be disabled at runtime */
+	data |= NETIF_F_HW_VLAN_RX;
 #endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
-        /* soft VLAN acceleration cannot be disabled at runtime */
+	/* soft VLAN acceleration cannot be disabled at runtime */
 	data |= NETIF_F_HW_VLAN_CTAG_TX;
 #endif
 
@@ -921,6 +923,8 @@ static int efx_ethtool_set_pauseparam(struct net_device *net_dev,
 			netif_err(efx, drv, efx->net_dev,
 				  "Unable to advertise requested flow "
 				  "control setting\n");
+			efx->link_advertising = old_adv;
+			efx->wanted_fc = old_fc;
 			goto out;
 		}
 	}
@@ -928,7 +932,7 @@ static int efx_ethtool_set_pauseparam(struct net_device *net_dev,
 	/* Reconfigure the MAC. The PHY *may* generate a link state change event
 	 * if the user just changed the advertised capabilities, but there's no
 	 * harm doing this twice */
-	efx->type->reconfigure_mac(efx);
+	efx_mac_reconfigure(efx);
 
 out:
 	mutex_unlock(&efx->mac_lock);
@@ -1314,11 +1318,8 @@ static int efx_ethtool_set_rxnfc(struct net_device *net_dev,
 	}
 }
 
-#ifdef EFX_USE_KCOMPAT
-u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
-#else
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_ETHTOOL_GET_RXFH_INDIR_SIZE)
 static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
-#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
@@ -1326,51 +1327,82 @@ static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
 		 efx->n_rx_channels == 1) ?
 		0 : ARRAY_SIZE(efx->rx_indir_table));
 }
+#endif
 
-static int efx_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) || !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
+static int efx_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key,
+				u8 *hfunc)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
-	memcpy(indir, efx->rx_indir_table, sizeof(efx->rx_indir_table));
+	if (hfunc)
+		*hfunc = ETH_RSS_HASH_TOP;
+	if (indir)
+		memcpy(indir, efx->rx_indir_table, sizeof(efx->rx_indir_table));
 	return 0;
 }
 
-#ifdef EFX_USE_KCOMPAT
-int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
-#else
-static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
-#endif
-{
-	return efx_ethtool_get_rxfh(net_dev, indir, NULL);
-}
-
-int efx_ethtool_set_rxfh(struct net_device *net_dev,
-				const u32 *indir, const u8 *key)
+static int efx_ethtool_set_rxfh(struct net_device *net_dev,
+			 const u32 *indir, const u8 *key, const u8 hfunc)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
-	memcpy(efx->rx_indir_table, indir, sizeof(efx->rx_indir_table));
-	return efx->type->rx_push_rss_config(efx);
-}
+	/* We do not allow change in unsupported parameters */
+	if (key ||
+	    (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP))
+		return -EOPNOTSUPP;
+	if (!indir)
+		return 0;
 
-#ifdef EFX_USE_KCOMPAT
-int efx_ethtool_set_rxfh_indir(struct net_device *net_dev, const u32 *indir)
-#else
-static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
-				     const u32 *indir)
+	return efx->type->rx_push_rss_config(efx, true, indir);
+}
 #endif
+
+#if defined(EFX_USE_KCOMPAT)
+#if defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) && !defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
+/* Wrappers that only set the indirection table, not the key. */
+static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
 {
-	return efx_ethtool_set_rxfh(net_dev, indir, NULL);
+	return efx_ethtool_get_rxfh(net_dev, indir, NULL, NULL);
 }
 
-#if defined(EFX_USE_KCOMPAT) && (!defined(EFX_HAVE_ETHTOOL_RXFH_INDIR) || defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR))
-#ifndef EFX_HAVE_ETHTOOL_RXFH_INDIR
-int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
-				   struct ethtool_rxfh_indir *indir)
-#else
-static int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
-					  struct ethtool_rxfh_indir *indir)
+static int efx_ethtool_set_rxfh_indir(struct net_device *net_dev,
+		const u32 *indir)
+{
+	return efx_ethtool_set_rxfh(net_dev, indir, NULL,
+			ETH_RSS_HASH_NO_CHANGE);
+}
 #endif
+
+#if defined(EFX_HAVE_ETHTOOL_GET_RXFH) && !defined(EFX_HAVE_CONFIGURABLE_RSS_HASH)
+/* Wrappers without hash function getting and setting. */
+static int efx_ethtool_get_rxfh_no_hfunc(struct net_device *net_dev, u32 *indir,
+		u8 *key)
+{
+	return efx_ethtool_get_rxfh(net_dev, indir, key, NULL);
+}
+
+# if defined(EFX_HAVE_ETHTOOL_SET_RXFH_NOCONST)
+/* RH backported version doesn't have const for arguments. */
+static int efx_ethtool_set_rxfh_no_hfunc(struct net_device *net_dev,
+		u32 *indir, u8 *key)
+{
+	return efx_ethtool_set_rxfh(net_dev, indir, key,
+			ETH_RSS_HASH_NO_CHANGE);
+}
+# else
+static int efx_ethtool_set_rxfh_no_hfunc(struct net_device *net_dev,
+		const u32 *indir, const u8 *key)
+{
+	return efx_ethtool_set_rxfh(net_dev, indir, key,
+			ETH_RSS_HASH_NO_CHANGE);
+}
+# endif
+#endif
+
+#if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR) || !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
+int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
+					  struct ethtool_rxfh_indir *indir)
 {
 	u32 user_size = indir->size, dev_size;
 
@@ -1383,16 +1415,11 @@ static int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
 		return user_size == 0 ? 0 : -EINVAL;
 	}
 
-	return efx_ethtool_get_rxfh(net_dev, indir->ring_index, NULL);
+	return efx_ethtool_get_rxfh(net_dev, indir->ring_index, NULL, NULL);
 }
 
-#ifndef EFX_HAVE_ETHTOOL_RXFH_INDIR
 int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
-				   const struct ethtool_rxfh_indir *indir)
-#else
-static int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 					  const struct ethtool_rxfh_indir *indir)
-#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 	u32 user_size = indir->size, dev_size, i;
@@ -1409,8 +1436,10 @@ static int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 		if (indir->ring_index[i] >= efx->n_rx_channels)
 			return -EINVAL;
 
-	return efx_ethtool_set_rxfh(net_dev, indir->ring_index, NULL);
+	return efx_ethtool_set_rxfh(net_dev, indir->ring_index, NULL,
+			ETH_RSS_HASH_NO_CHANGE);
 }
+#endif
 #endif
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) || defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
@@ -1546,27 +1575,29 @@ const struct ethtool_ops_ext efx_ethtool_ops_ext = {
 	.set_phys_id		= efx_ethtool_phys_id,
 	/* Do not set ethtool_ops_ext::reset due to RH BZ 1008678 (SF bug 39031) */
 #endif
+
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR_SIZE)
 	.get_rxfh_indir_size	= efx_ethtool_get_rxfh_indir_size,
 #endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH)
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CONFIGURABLE_RSS_HASH)
 	.get_rxfh		= efx_ethtool_get_rxfh,
-#elif defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
-#if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
-	.get_rxfh_indir		= efx_ethtool_old_get_rxfh_indir,
-#else
-	.get_rxfh_indir		= efx_ethtool_get_rxfh_indir,
-#endif
-#endif
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_SET_RXFH)
 	.set_rxfh		= efx_ethtool_set_rxfh,
-#elif defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
-#if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
+#elif defined(EFX_HAVE_ETHTOOL_GET_RXFH)
+	.get_rxfh		= efx_ethtool_get_rxfh_no_hfunc,
+	.set_rxfh		= efx_ethtool_set_rxfh_no_hfunc,
+#endif
+
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR)
+# if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
+	.get_rxfh_indir		= efx_ethtool_old_get_rxfh_indir,
 	.set_rxfh_indir		= efx_ethtool_old_set_rxfh_indir,
-#else
+# else
+	.get_rxfh_indir		= efx_ethtool_get_rxfh_indir,
 	.set_rxfh_indir		= efx_ethtool_set_rxfh_indir,
+# endif
 #endif
-#endif
+
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) || defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
 	.get_ts_info		= efx_ethtool_get_ts_info,
 #endif

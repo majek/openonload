@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -72,6 +72,7 @@
 #include <linux/completion.h>
 #include <linux/in.h>
 #include <driver/linux_net/kernel_compat.h>
+#include <driver/linux_affinity/autocompat.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
 /* get roundup_pow_of_two(), which was in kernel.h in early kernel versions */
@@ -130,8 +131,7 @@ static inline struct list_head *list_pop_tail(struct list_head *list)
  *
  ********************************************************************/
 
-#if defined(CONFIG_KALLSYMS) && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
-#define EFRM_HAS_FIND_KSYM
+#ifdef ERFM_HAVE_NEW_KALLSYMS
 #include <linux/kallsyms.h>
 /*! Find (non-exported) symbol with name @p name. */
 extern void *efrm_find_ksym(const char *name);
@@ -147,5 +147,18 @@ extern void *efrm_find_ksym(const char *name);
 #define compound_order(page) 0
 #endif
 #endif
+
+
+/* It should be macros, not inline functions.
+ * Otherwise, we get warnongs from lockdep because the "name" looks
+ * in the same way for the lockdep machinery. */
+#ifdef EFRM_HAVE_WQ_SYSFS
+#define efrm_alloc_workqueue(name) \
+  alloc_workqueue(name, WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS, 1);
+#else
+#define efrm_alloc_workqueue(name) \
+  create_singlethread_workqueue(name);
+#endif
+
 
 #endif /* __CI_EFRM_SYSDEP_LINUX_H__ */

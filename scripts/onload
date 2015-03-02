@@ -289,11 +289,19 @@ onload_set() {
   # This is used by config scripts and profile scripts.  Sets an
   # environment variable (a) if not already set, or (b) if --force-profiles
   # option is enabled.
-  if $profileforce || eval test -z "\"\$$1\""; then
-    vlog "onload_set: $1=$2"
-    eval "$1=$2"; export "$1"
+  if [ "$2" == "" ]; then
+    # it's not in onload_set x y form - try onload_set x=y
+    VAR=$(echo "$1" | cut -f1 -d=)
+    VAL=$(echo "$1" | cut -f2 -d=)
   else
-    eval vlog "\"onload_set: \$1=\$2 IGNORED (\$$1)\""
+    VAR=$1
+    VAL=$2
+  fi
+  if $profileforce || eval test -z "\"\$$VAR\""; then
+    vlog "onload_set: $VAR=$VAL"
+    eval "$VAR=$VAL"; export "$VAR"
+  else
+    eval vlog "\"onload_set: \$VAL=\$VAR IGNORED (\$$VAR)\""
   fi
 }
 
@@ -418,14 +426,14 @@ while [ $# -gt 0 ]; do
 	onload_args="$onload_args $1"
 	profile="${1#--profile=}"
 	[ -n "$profile" ] || sfc_usage
-	profiles="$profiles $(echo "$profile" | sed 's/,/ /')"
+	profiles="$profiles $(echo "$profile" | sed 's/,/ /g')"
 	;;
     --profile|-p)
 	onload_args="$onload_args $1 $2"
 	shift
 	profile="$1"
 	[ -n "$profile" ] || sfc_usage
-	profiles="$profiles $(echo "$profile" | sed 's/,/ /')"
+	profiles="$profiles $(echo "$profile" | sed 's/,/ /g')"
 	;;
     --force-profiles)
 	profileforce=true

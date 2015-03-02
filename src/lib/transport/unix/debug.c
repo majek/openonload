@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -261,9 +261,8 @@ static void ufd_fmt(int fd, char* buf, int* buf_n, int buf_len)
   fdi = fdip_to_fdi(fdip);
 
 #if CI_CFG_FD_CACHING
-  sprintf(s, "%s%s%s",
+  sprintf(s, "%s%s",
 	  fdi->is_special ? "Special":"",
-	  fdi->is_cached ? "Cached":"",
 	  fdi->can_cache ? "Cancache":"");
 #else
   sprintf(s, "%s",
@@ -291,11 +290,6 @@ static void ufd_fmt(int fd, char* buf, int* buf_n, int buf_len)
       citp_waitable_dump(u->sock.netif, &u->sock.s->b, "");
     bprintf("udp[%s]", s);
   }
-#if CI_CFG_FD_CACHING
-  else if( fdi->protocol == &citp_tcp_cached_protocol_impl ) {
-    bprintf("tcp_cached_fd[%s]", s);
-  }
-#endif
 #if CI_CFG_USERSPACE_EPOLL
   else if( fdi->protocol == &citp_epoll_protocol_impl ) {
     bprintf("epoll[%s]", s);

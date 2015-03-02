@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,7 +33,7 @@ struct tcp_helper_cluster_s;
 
 extern int oof_shared_keep_thresh;
 extern int oof_shared_steal_thresh;
-
+extern int oof_all_ports_required;
 
 extern struct oof_manager*
 oof_manager_alloc(unsigned local_addr_max, void* owner_private);
@@ -83,6 +83,10 @@ extern int
 oof_socket_add(struct oof_manager*, struct oof_socket*,
                int protocol, unsigned laddr, int lport,
                unsigned raddr, int rport);
+
+extern void
+oof_socket_update_sharer_details(struct oof_manager*, struct oof_socket*,
+                                 unsigned raddr, int rport);
 
 extern int
 oof_socket_share(struct oof_manager*, struct oof_socket* skf,
@@ -139,13 +143,21 @@ oof_cb_socket_id(struct oof_socket* skf);
 extern int
 oof_cb_stack_id(struct tcp_helper_resource_s*);
 
+extern void
+oof_cb_callback_set_filter(struct oof_socket* skf);
+
 extern int
 oof_cb_sw_filter_insert(struct oof_socket*, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol);
+                        unsigned raddr, int rport, int protocol,
+                        int stack_locked);
 
 extern void
 oof_cb_sw_filter_remove(struct oof_socket*, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol);
+                        unsigned raddr, int rport, int protocol,
+                        int stack_locked);
+
+struct ci_netif_s;
+extern void oof_cb_sw_filter_apply(struct ci_netif_s* ni);
 
 extern struct oof_socket*
 oof_cb_sw_filter_lookup(struct tcp_helper_resource_s*,

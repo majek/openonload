@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,13 +29,12 @@
 #include "ef_vi_internal.h"
 #include "driver_access.h"
 #include "logging.h"
-#include "efch_intf_ver.h"
 
 #include <net/if.h>
 
 
-int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
-		int ifindex, enum ef_pd_flags flags)
+static int __ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
+			 int ifindex, enum ef_pd_flags flags, int vlan_id)
 {
   ci_resource_alloc_t ra;
   const char* s;
@@ -54,7 +53,7 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
     flags |= EF_PD_PHYS_MODE;
 
   memset(&ra, 0, sizeof(ra));
-  strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));
+  ef_vi_set_intf_ver(ra.intf_ver, sizeof(ra.intf_ver));
   ra.ra_type = EFRM_RESOURCE_PD;
   ra.u.pd.in_ifindex = ifindex;
   ra.u.pd.in_flags = 0;
@@ -64,6 +63,9 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
     ra.u.pd.in_flags |= EFCH_PD_FLAG_PHYS_ADDR;
   if( flags & EF_PD_RX_PACKED_STREAM )
     ra.u.pd.in_flags |= EFCH_PD_FLAG_RX_PACKED_STREAM;
+  if( flags & EF_PD_VPORT )
+    ra.u.pd.in_flags |= EFCH_PD_FLAG_VPORT;
+  ra.u.pd.in_vlan_id = vlan_id;
 
   rc = ci_resource_alloc(pd_dh, &ra);
   if( rc < 0 ) {
@@ -91,6 +93,24 @@ int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
   pd->pd_cluster_viset_resource_id = 0;
 
   return 0;
+}
+
+
+int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
+		int ifindex, enum ef_pd_flags flags)
+{
+  return __ef_pd_alloc(pd, pd_dh, ifindex, flags, -1);
+}
+
+
+int ef_pd_alloc_with_vport(ef_pd* pd, ef_driver_handle pd_dh,
+			   const char* intf_name,
+			   enum ef_pd_flags flags, int vlan_id)
+{
+  int ifindex = if_nametoindex(intf_name);
+  if( ifindex == 0 )
+    return -errno;
+  return __ef_pd_alloc(pd, pd_dh, ifindex, flags | EF_PD_VPORT, vlan_id);
 }
 
 

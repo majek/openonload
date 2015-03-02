@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -62,8 +62,9 @@
 #define RSS_TABLE_LEN 128
 
 
-int efrm_rss_context_alloc(struct efrm_client *client,
-			   struct efrm_vi_set *vi_set, int num_qs)
+static int efrm_rss_context_alloc(struct efrm_pd *pd,
+				  struct efrm_client *client,
+				  struct efrm_vi_set *vi_set, int num_qs)
 {
 	int rc;
 	int shared = 0;
@@ -87,8 +88,8 @@ int efrm_rss_context_alloc(struct efrm_client *client,
 		shared = 1;
 	}
 
-	rc = efhw_nic_rss_context_alloc(client->nic, num_qs, shared,
-					&vi_set->rss_context);
+	rc = efhw_nic_rss_context_alloc(client->nic, efrm_pd_get_vport_id(pd),
+					num_qs, shared, &vi_set->rss_context);
 
 	if (rc < 0 || shared)
 		return rc;
@@ -145,7 +146,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 		efrm_client_get_nic(client)->flags & NIC_FLAG_RX_RSS_LIMITED;
 
 	if (n_vis > 1 || rss_limited) {
-		rc = efrm_rss_context_alloc(client, vi_set, n_vis);
+		rc = efrm_rss_context_alloc(pd, client, vi_set, n_vis);
 		/* If we failed to allocate an RSS context fall back to
 		* using the netdriver's default context.
 		*
@@ -185,7 +186,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 		efrm_resource_ref(efrm_pd_to_resource(pd));
 		vi_set->free = 0;
 		for (i = 0; i < n_vis; ++i )
-			vi_set->free |= 1 << i;
+			vi_set->free |= 1ULL << i;
 		spin_lock_init(&vi_set->allocation_lock);
 		vi_set->n_vis = n_vis;
 		init_completion(&vi_set->allocation_completion);

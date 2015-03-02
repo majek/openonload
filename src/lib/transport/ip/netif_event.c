@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -500,6 +500,7 @@ static void process_post_poll_list(ci_netif* ni)
   ci_ni_dllist_link* lnk;
   int i, need_wake = 0;
   citp_waitable* sb;
+  int lists_need_wake = 0;
 
   (void) i;  /* prevent warning; effectively unused at userlevel */
 
@@ -527,6 +528,8 @@ static void process_post_poll_list(ci_netif* ni)
       if( sb->sb_flags & CI_SB_FLAG_WAKE_TX )
         ++sb->sleep_seq.rw.tx;
       ci_mb();
+
+      lists_need_wake |= 1 << sb->ready_list_id;
 #ifdef __KERNEL__
       if( (sb->sb_flags & sb->wake_request) )
         citp_waitable_wakeup(ni, sb);
@@ -556,8 +559,38 @@ static void process_post_poll_list(ci_netif* ni)
 
   CHECK_NI(ni);
 
+#ifndef __KERNEL__
+  /* See if any of the ready lists need a wake.  We only bother checking if
+   * we're not going to do a wake anyway, and we don't check list 0, as that's
+   * just a dummy list, for things that aren't on a real one.
+   */
+  if( need_wake == 0 ) {
+    for( i = 1; i < CI_CFG_N_READY_LISTS; i++ ) {
+      if( (lists_need_wake & (1 << i)) &&
+          (ni->state->ready_list_flags[i] & CI_NI_READY_LIST_FLAG_WAKE) ) {
+        need_wake = 1;
+        break;
+      }
+    }
+  }
+#endif
+
   if( need_wake )
     ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
+
+  /* Shouldn't have had a wake for a list we don't think exists */
+  ci_assert_equal(lists_need_wake & ~((1 << (CI_CFG_N_READY_LISTS + 1))-1), 0);
+
+#ifdef __KERNEL__
+  /* Check whether any ready lists associated with a set need to be woken.
+   * We don't check ready list 0 as that is the dummy list, used for all socks
+   * that aren't associated with a specific set, so never needs a wakeup.
+   */
+  for( i = 1; i < CI_CFG_N_READY_LISTS; i++ )
+    if( (lists_need_wake & (1 << i)) &&
+        (ni->state->ready_list_flags[i] & CI_NI_READY_LIST_FLAG_WAKE) )
+      efab_tcp_helper_ready_list_wakeup(netif2tcp_helper_resource(ni), i);
+#endif
 }
 
 
@@ -574,6 +607,7 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 {
   ci_udp_state* us;
   oo_pkt_p frag_next;
+  int n_buffers = pkt->n_buffers;
 
   ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
 
@@ -583,6 +617,8 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
 
   if( ci_udp_tx_advertise_space(us) ) {
     if( ! (us->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ) {
+      /* Linux wakes up with event= POLLOUT on each TX,
+       * and we do the same. */
       ci_udp_wake_possibly_not_in_poll(netif, us, CI_SB_FLAG_WAKE_TX);
       ci_netif_put_on_post_poll(netif, &us->s.b);
     }
@@ -596,10 +632,9 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
    * If the outgoing packet has to be fragmented, then only the first
    * fragment is time stamped and returned to the sending socket. */
   if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
+    pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
     frag_next = ci_udp_timestamp_q_enqueue(netif, us, pkt);
-    if( OO_PP_IS_NULL(frag_next) )
-      return;
-    pkt = PKT_CHK(netif, frag_next);
+    goto next_fragment;
   }
 
   /* Free this packet and all the fragments if possible. */
@@ -607,6 +642,7 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
     if( pkt->refcount == 1 ) {
       frag_next = pkt->frag_next;
 
+      pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
       pkt->refcount = 0;
       if( pkt->flags & CI_PKT_FLAG_RX )
         --netif->state->n_rx_pkts;
@@ -621,9 +657,21 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
         netif->state->freepkts = OO_PKT_P(pkt);
         ++netif->state->n_freepkts;
       }
+
+next_fragment:
+      /* is there any next fragment? */
       if( OO_PP_IS_NULL(frag_next) )
         break;
       pkt = PKT_CHK(netif, frag_next);
+      /* Is it next IP fragment? */
+      if( n_buffers == 1 ) {
+        /* have we started with it? */
+        if( ~pkt->flags & CI_PKT_FLAG_TX_PENDING )
+          return;
+        n_buffers = pkt->n_buffers;
+      }
+      else
+        n_buffers--;
     }
     else {
       ci_assert_gt(pkt->refcount, 1);
@@ -643,7 +691,6 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
   ci_netif_state_nic_t* nic = &ni->state->nic[pkt->intf_i];
   /* debug check - take back ownership of buffer from NIC */
   ci_assert(pkt->flags & CI_PKT_FLAG_TX_PENDING);
-  pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
   nic->tx_bytes_removed += TX_PKT_LEN(pkt);
   ci_assert((int) (nic->tx_bytes_added - nic->tx_bytes_removed) >=0);
   if( pkt->pio_addr >= 0 ) {
@@ -684,7 +731,11 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
     ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
   else
 #endif
+  {
+    pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
     ci_netif_pkt_release(ni, pkt);
+  }
+
 }
 
 
@@ -849,8 +900,6 @@ static void ci_netif_tx_progress(ci_netif* ni, int intf_i)
                       ci_ni_dllist_head(ni, &nic->tx_ready_list));
     LOG_TT(ci_log(FNT_FMT, FNT_PRI_ARGS(ni, ts)));
     ci_tcp_tx_advance(ts, ni);
-    if( ci_tcp_tx_advertise_space(ni, ts) )
-      ci_tcp_wake_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
     if( ci_ni_dllist_is_empty(ni, &nic->tx_ready_list) )
       break;
   } while( nic->tx_bytes_added - nic->tx_bytes_removed
@@ -959,6 +1008,7 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
   while( OO_PP_NOT_NULL(send_list) ) {
     pkt = PKT_CHK(ni, send_list);
     send_list = pkt->next;
+    ni->state->n_looppkts--;
 
     LOG_NR(ci_log(N_FMT "loopback RX pkt %d: %d->%d", N_PRI_ARGS(ni),
                   OO_PKT_FMT(pkt),
@@ -969,12 +1019,9 @@ static void ci_netif_loopback_pkts_send(ci_netif* ni)
     oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->buf_len);
     pkt->intf_i = OO_INTF_I_LOOPBACK;
     pkt->flags &= CI_PKT_FLAG_NONB_POOL;
-    pkt->flags |= CI_PKT_FLAG_RX;
     if( oo_tcpdump_check(ni, pkt, OO_INTF_I_LOOPBACK) )
       oo_tcpdump_dump_pkt(ni, pkt);
     pkt->next = OO_PP_NULL;
-    /* ci_tcp_handle_rx will decrease n_rx_pkts, so increase it here */
-    ++ni->state->n_rx_pkts;
     ci_tcp_handle_rx(ni, NULL, pkt, (ci_tcp_hdr*)(ip + 1),
                      CI_BSWAP_BE16(ip->ip_tot_len_be16) - sizeof(ci_ip4_hdr));
   }
@@ -1023,6 +1070,7 @@ int ci_netif_poll_n(ci_netif* netif, int max_evs)
     ci_netif_loopback_pkts_send(netif);
     process_post_poll_list(netif);
   }
+  ci_assert_equal(netif->state->n_looppkts, 0);
   --netif->state->in_poll;
 
   /* Timer code can't use in-poll wakeup, since endpoints are out of

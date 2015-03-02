@@ -18,7 +18,7 @@ Introduction
 Supported platforms
 ===================
 
- Linux kernels from 2.6.16.  ia32 and amd64/em64t processor architectures.
+ Linux kernels from 2.6.18.  ia32 and amd64/em64t processor architectures.
 
  When using 64-bit kernels, both 32-bit and 64-bit applications are
  supported.
@@ -26,13 +26,14 @@ Supported platforms
  Onload supports Solarflare SFC4000 and SFC9000 network controller chips,
  including the following network adapters:
 
+   SFN7142Q
    SFN7122F, SFN7322F
    SFN5122F, SFN5322F
    SFN6122F, SFN6322F
    SFN5812H, SFN5814H
    SFN5802K
    SFN5121T
-   SFN4112F
+
 
  If you are interested in trying or buying Solarflare network adapters,
  please contact <sales@solarflare.com>.
@@ -109,6 +110,6 @@ Any questions?
 
 
 ==========
- version: openonload-201405-u2
-revision: 91fcd3b34791 (ool1405) openonload-201405-u2-rc3
-    date: Mon Dec  8 10:30:22 GMT 2014
+ version: openonload-201502
+revision: e710c66ff639 openonload-201502/openonload-201502-rc4
+    date: Fri 27 Feb 13:44:20 GMT 2015

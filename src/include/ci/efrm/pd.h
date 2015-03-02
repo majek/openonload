@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -150,12 +150,28 @@ struct pci_dev *efrm_pd_get_pci_dev(struct efrm_pd *pd);
  */
 int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1);
 
+/* Return true if this PD is using a non-default vport. */
+extern int
+efrm_pd_has_vport(struct efrm_pd *);
+
+/* Return the vport ID to use for this PD.  If efrm_pd_has_vport() is not
+ * true, we return the vport associated with the net driver.
+ */
+extern unsigned
+efrm_pd_get_vport_id(struct efrm_pd *);
+
+/* Allocate a new vport for a PD.  If vlan_id>=0 then vlan tags are
+ * inserted and stripped by the adapter.
+ */
+extern int
+efrm_pd_vport_alloc(struct efrm_pd *, int vlan_id);
+
 
 /*************************************************************************
  * Common conventions for the efrm_pd_dma_* functions
  *
- * pages and dma_addrs "arrays" has n_pages length.
- * Each (compound, with order "gfp_order") page is mapped to corresponding
+ * addrs and dma_addrs "arrays" has n_pages length.
+ * Each address (NIC page with order "nic_order") is mapped to corresponding
  * PCI device, and dma address in stored in dma_addrs "array".
  *
  * user_addrs "array" keeps the NIC addresses (buffer table addresses for
@@ -166,23 +182,23 @@ int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1);
  * for all hardware pages of EFHW_NIC_PAGE_SIZE size.
  */
 
-/* Map pages of order gfp_order to hardware.
- * In: pd, n_pages, gfp_order, pages.
+/* Map areas of NIC pages with order nic_order to hardware.
+ * In: pd, n_pages, nic_order, addrs.
  * Out: dma_addrs, user_addrs. */
-extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages, int gfp_order,
-			   struct page **pages, int pages_stride,
+extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages, int nic_order,
+			   void **addrs, int addrs_stride,
 			   void *dma_addrs, int dma_addrs_stride,
 			   uint64_t *user_addrs, int user_addrs_stride,
 			   void (*user_addr_put)(uint64_t, uint64_t *),
 			   struct efrm_bt_collection *);
 
 /* Unmap pages previously mapped by efrm_pd_dma_map(). */
-extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int gfp_order,
+extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int nic_order,
 			      void *dma_addrs, int dma_addrs_stride,
 			      struct efrm_bt_collection *);
 
 /* Re-map pages already mapped by efrm_pd_dma_map() after NIC reset.
- * In: pd, n_pages, gfp_order, pages, dma_addrs.
+ * In: pd, n_pages, nic_order, pages, dma_addrs.
  *     dma_addrs should be the same as returned by efrm_pd_dma_map().
  * Out: user_addrs.
  *      On EF10, buffer table addresses change across NIC reset.
@@ -193,7 +209,7 @@ extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int gfp_order,
  *  adresses may be used.
  * -errno - error; the mapping is invalidated; user should kill himself.
  */
-extern int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int gfp_order,
+extern int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 				dma_addr_t *pci_addrs, int pci_addrs_stride,
 				uint64_t *user_addrs, int user_addrs_stride,
 				void (*user_addr_put)(uint64_t, uint64_t *),

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,7 +61,8 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* info)
 
   info->tcpi_ato = 
     ci_ip_time_ticks2ms(netif, netif->state->conf.tconst_delack) * 1000;
-  info->tcpi_rcv_mss    = 536; /* no way to get the actual value */
+  info->tcpi_rcv_mss    = CI_CFG_TCP_DEFAULT_MSS;
+  /* no way to get the actual mss */
   /* info->tcpi_sacked     = 0; */ /* there is no way to get any of these */
   /* info->tcpi_lost       = 0; */
   /* info->tcpi_fackets    = 0; */
@@ -354,8 +355,11 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
         timeo = CI_MIN(timeo, NI_CONF(netif).tconst_rto_max);
         c->tcp_defer_accept = 0;
         while( timeo > ((int) NI_CONF(netif).tconst_rto_initial
-                        << c->tcp_defer_accept) )
+                        << c->tcp_defer_accept) &&
+               c->tcp_defer_accept <= CI_CFG_TCP_SYNACK_RETRANS_MAX )
           ++c->tcp_defer_accept;
+        if( c->tcp_defer_accept >= 1 )
+          c->tcp_defer_accept--;
       }
       else
         c->tcp_defer_accept = OO_TCP_DEFER_ACCEPT_OFF;
@@ -370,7 +374,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
             if( ts->acks_pending ) {
               ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
               if( CI_LIKELY(pkt != NULL) )
-                ci_tcp_send_ack(netif, ts, pkt);
+                ci_tcp_send_ack(netif, ts, pkt, CI_FALSE);
             }
           }
           else {
@@ -396,16 +400,6 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
   LOG_TC(log("%s: "NSS_FMT" option %i  bad param (EINVAL or EFAULT)",
 	     __FUNCTION__, NSS_PRI_ARGS(netif,s), optname));
   RET_WITH_ERRNO(-rc);
-}
-
-/* We want to override kernels idea of a valid option for timestamping. */
-ci_inline int ci_tcp_validtimestampopt( int level, int optname,
-                                        socklen_t optlen )
-{
-  return ( level == SOL_SOCKET) &&
-         ( optname == SO_TIMESTAMP || optname == SO_TIMESTAMPNS ||
-           optname == ONLOAD_SO_TIMESTAMPING ) &&
-         ( optlen >= sizeof(int) );
 }
 
 /* Setsockopt() handler called by appropriate Unix/Windows intercepts.
@@ -436,19 +430,13 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
     ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
     if( CI_IS_VALID_SOCKET(os_sock) ) {
       rc = ci_sys_setsockopt(os_sock, level, optname, optval, optlen);
-      if( rc != 0 && errno == ENOPROTOOPT ) {
-        /* We support reuseport where the OS doesn't, so set a flag to say
-         * that's what we're doing, and hide the error.
-         */
-        if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) ) {
-          s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
-          rc = 0;
-        }
-      }
-  
       ci_rel_os_sock_fd(os_sock);
-      if( rc < 0 && !ci_tcp_validtimestampopt(level, optname, optlen) )
+      if( rc != 0 &&
+          ! ci_setsockopt_os_fail_ignore(ni, s, errno, level, optname,
+                                         optval, optlen) ) {
         return rc;
+      }
+      rc = 0;
     }
   }
 

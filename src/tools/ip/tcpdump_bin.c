@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -255,6 +255,7 @@ static void dump_flush(void)
 static void stack_dump(ci_netif *ni)
 {
   int strip_vlan = cfg_encap.type & CICP_LLAP_TYPE_VLAN;
+  int do_strip_vlan = strip_vlan;
   ci_uint8 max_i = ni->state->dump_write_i;
   sigset_t sigset;
 
@@ -284,15 +285,24 @@ static void stack_dump(ci_netif *ni)
 
     paylen = pkt->pay_len;
 
-    /* Check interface: since intf_i is already checked, we should
-     * check VLAN id only. */
-    if( strip_vlan && pkt->vlan != cfg_encap.vlan_id )
-      continue;
+    /* If we are listening on a VLAN, take care of the additional header.
+     */
+    if( strip_vlan ) {
+      if( pkt->vlan != cfg_encap.vlan_id )
+        continue;
+
+      if( pkt->intf_i == OO_INTF_I_SEND_VIA_OS )
+        do_strip_vlan = 0;
+      else
+        do_strip_vlan = 1;
+    }
 
     /* For loopback, ensure that ethernet header is correct */
     if( pkt->intf_i == OO_INTF_I_LOOPBACK )
       memset(oo_ether_hdr(pkt), 0, 2 * ETH_ALEN);
 
+    if( do_strip_vlan )
+      paylen -= ETH_VLAN_HLEN;
     hdr.caplen = CI_MIN(cfg_snaplen, paylen);
     fraglen = hdr.caplen;
     if( pkt->n_buffers > 1 )
@@ -314,7 +324,7 @@ static void stack_dump(ci_netif *ni)
     pthread_sigmask(SIG_BLOCK, &sigset, NULL);
 
     dump_data(&hdr, sizeof(hdr));
-    if( strip_vlan && pkt->intf_i != OO_INTF_I_SEND_VIA_OS ) {
+    if( do_strip_vlan ) {
       dump_data(oo_ether_hdr(pkt), 2 * ETH_ALEN);
       dump_data((char *)oo_ether_hdr(pkt) + 2 * ETH_ALEN + ETH_VLAN_HLEN,
                 fraglen - 2 * ETH_ALEN);

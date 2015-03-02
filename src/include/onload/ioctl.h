@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -108,12 +108,6 @@ enum {
 #define OO_IOC_TCP_SOCK_SLEEP   OO_IOC_RW(TCP_SOCK_SLEEP, oo_tcp_sock_sleep_t)
   OO_OP_WAITABLE_WAKE,
 #define OO_IOC_WAITABLE_WAKE    OO_IOC_W(WAITABLE_WAKE, oo_waitable_wake_t)
-#if CI_CFG_FD_CACHING
-  OO_OP_TCP_CAN_CACHE_FD,
-#define OO_IOC_TCP_CAN_CACHE_FD OO_IOC_W(TCP_CAN_CACHE_FD, ci_uint32)
-  OO_OP_TCP_XFER,
-#define OO_IOC_TCP_XFER         OO_IOC_RW(TCP_XFER, oo_tcp_xfer_t)
-#endif
 
   /* Filter operations */
   OO_OP_EP_FILTER_SET,
@@ -144,12 +138,9 @@ enum {
   OO_OP_TCP_MORE_SOCKS,
 #define OO_IOC_TCP_MORE_SOCKS       OO_IOC_NONE(TCP_MORE_SOCKS)
 
-#if CI_CFG_USERSPACE_PIPE
-  OO_OP_TCP_PIPEBUFS_TO_SOCKS,
-#define OO_IOC_TCP_PIPEBUFS_TO_SOCKS OO_IOC_NONE(TCP_PIPEBUFS_TO_SOCKS)
-  OO_OP_TCP_MORE_PIPE_BUFS,
-#define OO_IOC_TCP_MORE_PIPE_BUFS   OO_IOC_RW(TCP_MORE_PIPE_BUFS, \
-                                              oo_tcp_sock_more_pipe_bufs_t)
+#if CI_CFG_FD_CACHING
+  OO_OP_TCP_CLEAR_EPCACHE,
+#define OO_IOC_TCP_CLEAR_EPCACHE  OO_IOC_NONE(TCP_CLEAR_EPCACHE)
 #endif
 
   OO_OP_STACK_ATTACH,
@@ -196,6 +187,9 @@ enum {
                                              oo_tcp_sockaddr_with_len_t)
   OO_OP_TCP_HANDOVER,
 #define OO_IOC_TCP_HANDOVER         OO_IOC_W(TCP_HANDOVER, ci_int32)
+
+  OO_OP_FILE_MOVED,
+#define OO_IOC_FILE_MOVED           OO_IOC_W(FILE_MOVED, ci_int32)
 
   OO_OP_TCP_CLOSE_OS_SOCK,
 #define OO_IOC_TCP_CLOSE_OS_SOCK    OO_IOC_W(TCP_CLOSE_OS_SOCK, oo_sp)
@@ -298,6 +292,18 @@ enum {
   OO_OP_CLUSTER_DUMP,
 #define OO_IOC_CLUSTER_DUMP       OO_IOC_W(CLUSTER_DUMP,            \
                                              oo_cluster_dump_t)
+#ifdef ONLOAD_OFE
+#define OO_IOC_OFE_CONFIG         OO_IOC_W(OFE_CONFIG, oo_ofe_config_t)
+  OO_OP_OFE_CONFIG,
+#define OO_IOC_OFE_CONFIG_DONE    OO_IOC_NONE(OFE_CONFIG_DONE)
+  OO_OP_OFE_CONFIG_DONE,
+#define OO_IOC_OFE_GET_LAST_ERROR OO_IOC_R(OFE_GET_LAST_ERROR, \
+                                           char[CI_LOG_MAX_LINE])
+  OO_OP_OFE_GET_LAST_ERROR,
+#endif
+
+  OO_OP_GET_CPU_KHZ,
+#define OO_IOC_GET_CPU_KHZ        OO_IOC_R(GET_CPU_KHZ, ci_uint32)
 
   OO_OP_END  /* This had better be last! */
 };

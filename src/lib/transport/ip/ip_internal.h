@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,9 +49,6 @@
  * definition so just define it to 0.
  */
 #define ONLOAD_MSG_WARM 0
-
-/* This should match with UL-only header onload/extensions.h */
-#define ONLOAD_SOF_TIMESTAMPING_STREAM (1 << 23)
 #endif
 
 
@@ -250,7 +247,8 @@ ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
 
 ci_inline int
 ci_tcp_ep_clear_filters(ci_netif*         ni,
-                        oo_sp             sock_id)
+                        oo_sp             sock_id,
+                        int               need_update)
 {
   int rc;
 #ifdef __ci_driver__
@@ -258,14 +256,16 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
 #endif
   ci_assert(ni);
 
-  LOG_TC(ci_log("%s: %d:%d", __FUNCTION__,
-                ni->state->stack_id, OO_SP_FMT(sock_id)));
+  LOG_TC(ci_log("%s: %d:%d (%d)", __FUNCTION__,
+                ni->state->stack_id, OO_SP_FMT(sock_id), need_update));
+  ci_assert(ci_netif_is_locked(ni));
 
 #ifdef __ci_driver__
   rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id),
-                                         supress_hw_ops);
+                                         supress_hw_ops, need_update);
 #else
-  rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni), sock_id);
+  rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni), sock_id,
+                                      need_update);
 #endif
 
   LOG_TC( if (rc < 0)
@@ -391,6 +391,11 @@ enum {
 	ONLOAD_SOF_TIMESTAMPING_MASK =
 	( (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE << 1) - 1 )
 };
+
+/* The following value needs to match its counterpart
+ * in kernel headers.
+ */
+#define ONLOAD_SO_BUSY_POLL 46
 
 /* check [ov] is a non-NULL ptr & [ol] indicates the right space for
  * type [ty] */
@@ -625,29 +630,6 @@ extern ci_ip_pkt_fmt* ci_pkt_alloc_n_nnl(ci_netif* ni, int n) CI_HF;
  ******************************** UDP ********************************
  *********************************************************************/
 
-/* How many bytes are there in the iovecs in this hdr? */
-ci_inline ssize_t ci_get_msg_len( const struct msghdr* msg )
-{
-  ci_iovec* iov;
-  size_t ctr;
-  ssize_t count = 0;
-
-  if( CI_LIKELY(msg && msg->msg_iov) )
-  {
-    ctr = msg->msg_iovlen;
-    iov = msg->msg_iov;
-    while( ctr-- ) {
-      if( CI_UNLIKELY( CI_IOVEC_BASE(&iov[ctr]) == NULL && 
-          CI_IOVEC_LEN(&iov[ctr]) > 0) ) {
-        count = -EFAULT;
-        break;
-      }
-      count += CI_IOVEC_LEN(&iov[ctr]);
-    }
-  }
-  return count;
-}
-
 /* The following two macros cope with Path MTU constraints and fragmentation
  * boundary requirements (multiple of 64 bits) */
 
@@ -701,7 +683,10 @@ oo_spinloop_pause_check_signals(ci_netif* ni, ci_uint64 now_frc,
                                 int have_timeout,
                                 citp_waitable* w, citp_signal_info* si)
 {
-  if(CI_LIKELY( ! si->run_pending )) {
+  ci_assert_gt(si->inside_lib, 0);
+  ci_assert(~si->aflags & OO_SIGNAL_FLAG_FDTABLE_LOCKED);
+
+  if(CI_LIKELY( ~si->aflags & OO_SIGNAL_FLAG_HAVE_PENDING )) {
     ci_spinloop_pause();
     return 0;
   }

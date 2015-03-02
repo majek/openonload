@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -13,34 +13,39 @@
 ** GNU General Public License for more details.
 */
 
-
 #include <ci/efrm/resource.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/efrm_filter.h>
+#include <ci/efrm/pd.h>
+#include <ci/efrm/vi_resource.h>
+#include <ci/efhw/nic.h>
 #include "efch.h"
 #include <ci/efch/op_types.h>
-#include <ci/driver/resource/linux_efhw_nic.h>
 #include "filter_list.h"
 #include <driver/linux_resource/linux_resource_internal.h>
 
+
 struct filter {
   ci_dllink  link;
+  uint64_t   efrm_filter_id;
   /* Special value for filter_id that marks this entry as a
    * block-kernel (and nothing else) filter,
    * This is only for legacy CI_RSOP_FILTER_BLOCK_KERNEL op, which does not
-   * carry filter_id */
+   * carry filter_id.
+   */
 #define FILTER_ID_INDEPENDENT_BLOCK (-1)
 #define FILTER_ID_WRAP INT_MAX
   int        filter_id;
-  int        efrm_filter_id;
-#define FILTER_FLAGS_BLOCK_UNICAST 1
-#define FILTER_FLAGS_BLOCK_MULTICAST 2
+#define FILTER_FLAGS_BLOCK_UNICAST       0x1
+#define FILTER_FLAGS_BLOCK_MULTICAST     0x2
 #define FILTER_FLAGS_BLOCK_MASK \
         (FILTER_FLAGS_BLOCK_UNICAST | FILTER_FLAGS_BLOCK_MULTICAST)
 #define FILTER_FLAGS_BLOCK_ALL \
         (FILTER_FLAGS_BLOCK_UNICAST | FILTER_FLAGS_BLOCK_MULTICAST)
-#define FILTER_FLAGS_USES_EFRM_FILTER 4
-  int        flags;
+#define FILTER_FLAGS_USES_EFRM_FILTER    0x4
+#define FILTER_FLAGS_VPORT               0x8
+#define FILTER_FLAGS_VPORT_IS_EXCLUSIVE  0x10
+  unsigned   flags;
 };
 
 
@@ -62,26 +67,36 @@ static int efch_filter_flags_to_efrm(int flags)
 
 
 static void efch_filter_destruct(struct efrm_resource *rs,
-                                 struct filter *f)
+                                 struct efrm_pd *pd, struct filter *f)
 {
-    if( f->flags & FILTER_FLAGS_USES_EFRM_FILTER )
+  if( f->flags & FILTER_FLAGS_USES_EFRM_FILTER ) {
+    if( f->flags & FILTER_FLAGS_VPORT ) {
+      struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
+      struct efx_dl_device* efx_dev = efhw_nic_dl_device(efhw_nic);
+      bool is_exclusive = !! (f->flags & FILTER_FLAGS_VPORT_IS_EXCLUSIVE);
+      efx_dl_vport_filter_remove(efx_dev, efrm_pd_get_vport_id(pd),
+                                 f->efrm_filter_id, is_exclusive);
+    }
+    else {
       efrm_filter_remove(rs->rs_client, f->efrm_filter_id);
-    if( f->flags & FILTER_FLAGS_BLOCK_MASK )
-      efrm_filter_block_kernel(rs->rs_client,
-                               efch_filter_flags_to_efrm(f->flags), false);
+    }
+  }
+  if( f->flags & FILTER_FLAGS_BLOCK_MASK )
+    efrm_filter_block_kernel(rs->rs_client,
+                             efch_filter_flags_to_efrm(f->flags), false);
 }
 
 
-static void efch_filter_delete(struct efrm_resource *rs,
-                                 struct filter *f)
+static void efch_filter_delete(struct efrm_resource *rs, struct efrm_pd *pd,
+                               struct filter *f)
 {
-  efch_filter_destruct(rs, f);
+  efch_filter_destruct(rs, pd, f);
   ci_free(f);
 }
 
 
-void efch_filter_list_free(struct efrm_resource *rs,
-                                  struct efch_filter_list *fl)
+void efch_filter_list_free(struct efrm_resource *rs, struct efrm_pd *pd,
+                           struct efch_filter_list *fl)
 {
   struct filter *f;
 
@@ -91,12 +106,13 @@ void efch_filter_list_free(struct efrm_resource *rs,
   while (ci_dllist_not_empty(&fl->filters)) {
     f = container_of(ci_dllist_head(&fl->filters), struct filter, link);
     ci_dllist_remove(&f->link);
-    efch_filter_delete(rs, f);
+    efch_filter_delete(rs, pd, f);
   }
 }
 
 
 static int efch_filter_list_add_block(struct efrm_resource *rs,
+                                      struct efrm_pd *pd,
                                       struct efch_filter_list *fl)
 {
   struct filter* f;
@@ -106,8 +122,8 @@ static int efch_filter_list_add_block(struct efrm_resource *rs,
 
   rc = efrm_filter_block_kernel(rs->rs_client, EFRM_FILTER_BLOCK_ALL, true);
   if( rc < 0 ) {
-      efch_filter_delete(rs, f);
-      return rc;
+    efch_filter_delete(rs, pd, f);
+    return rc;
   }
   f->flags = EFRM_FILTER_BLOCK_ALL;
   f->filter_id = FILTER_ID_INDEPENDENT_BLOCK;
@@ -159,7 +175,7 @@ int efch_filter_list_gen_id(struct efch_filter_list *fl)
 }
 
 
-static int efch_filter_list_add(struct efrm_resource *rs,
+static int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
                                 struct efch_filter_list *fl,
                                 struct efx_filter_spec *spec,
                                 ci_resource_op_t* op, bool replace)
@@ -167,9 +183,6 @@ static int efch_filter_list_add(struct efrm_resource *rs,
   struct filter* f;
   int rc;
   int block_flags = 0;
-
-  if( op->u.filter_add.flags & CI_RSOP_FILTER_ADD_FLAG_REPLACE )
-    replace = true;
 
   if( (f = ci_alloc(sizeof(*f))) == NULL )
     return -ENOMEM;
@@ -195,18 +208,32 @@ static int efch_filter_list_add(struct efrm_resource *rs,
     if( rc >= 0 )
         f->flags |= block_flags;
     else if( rc != -EOPNOTSUPP ) {
-      efch_filter_delete(rs, f);
+      efch_filter_delete(rs, pd, f);
       return rc;
     }
   }
 
   if( ! is_op_block_kernel_only(op->op) ) {
-    rc = efrm_filter_insert(rs->rs_client, spec, replace);
+    if( efrm_pd_has_vport(pd) ) {
+      struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
+      struct efx_dl_device* efx_dev = efhw_nic_dl_device(efhw_nic);
+      bool is_exclusive;
+      rc = efx_dl_vport_filter_insert(efx_dev, efrm_pd_get_vport_id(pd),
+                                      spec, &f->efrm_filter_id, &is_exclusive);
+      if( is_exclusive )
+        f->flags |= FILTER_FLAGS_VPORT_IS_EXCLUSIVE;
+    }
+    else {
+      rc = efrm_filter_insert(rs->rs_client, spec, replace);
+    }
     if( rc < 0 ) {
-      efch_filter_delete(rs, f);
+      efch_filter_delete(rs, pd, f);
       return rc;
     }
-    f->efrm_filter_id = rc;
+    if( efrm_pd_has_vport(pd) )
+      f->flags |= FILTER_FLAGS_VPORT;
+    else
+      f->efrm_filter_id = rc;
     f->flags |= FILTER_FLAGS_USES_EFRM_FILTER;
   }
 
@@ -219,7 +246,7 @@ static int efch_filter_list_add(struct efrm_resource *rs,
   spin_unlock(&fl->lock);
 
   if( rc < 0 ) {
-    efch_filter_delete(rs, f);
+    efch_filter_delete(rs, pd, f);
     return rc;
   }
 
@@ -279,7 +306,7 @@ int efch_filter_list_set_misc(struct efx_filter_spec* spec,
   int rc;
 
 #if EFX_DRIVERLINK_API_VERSION >= 5
-  *replace_out = true;
+  *replace_out = false;
   if( ! capable(CAP_NET_ADMIN) )
     return -EPERM;
   if( (rc = set_fn(spec)) < 0 )
@@ -295,7 +322,7 @@ int efch_filter_list_set_misc(struct efx_filter_spec* spec,
 }
 
 
-int efch_filter_list_del(struct efrm_resource *rs,
+int efch_filter_list_del(struct efrm_resource *rs, struct efrm_pd *pd,
                          struct efch_filter_list *fl,
                          int filter_id)
 {
@@ -314,13 +341,13 @@ int efch_filter_list_del(struct efrm_resource *rs,
 
   /* Now spinlock is released can call potentially blocking filter remove */
   if( rc == 0 )
-    efch_filter_delete(rs, f);
+    efch_filter_delete(rs, pd, f);
 
   return rc;
 }
 
 
-int efch_filter_list_op_add(struct efrm_resource *rs,
+int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
                             struct efch_filter_list *fl, ci_resource_op_t *op,
                             int *copy_out, unsigned efx_filter_flags,
                             int rss_context)
@@ -411,26 +438,26 @@ int efch_filter_list_op_add(struct efrm_resource *rs,
   }
 
   if( rc >= 0 )
-    rc = efch_filter_list_add(rs, fl, &spec, op, replace);
+    rc = efch_filter_list_add(rs, pd, fl, &spec, op, replace);
 
   return rc;
 }
 
-int efch_filter_list_op_del(struct efrm_resource *rs,
+int efch_filter_list_op_del(struct efrm_resource *rs, struct efrm_pd *pd,
                             struct efch_filter_list *fl, ci_resource_op_t *op)
 {
-    return efch_filter_list_del(rs, fl, op->u.filter_del.filter_id);
+  return efch_filter_list_del(rs, pd, fl, op->u.filter_del.filter_id);
 }
 
 
-int efch_filter_list_op_block(struct efrm_resource *rs,
-                                     struct efch_filter_list *fl,
-                                     ci_resource_op_t *op)
+int efch_filter_list_op_block(struct efrm_resource *rs, struct efrm_pd *pd,
+                              struct efch_filter_list *fl,
+                              ci_resource_op_t *op)
 {
   if( ! capable(CAP_NET_ADMIN) )
     return -EPERM;
   if( op->u.block_kernel.block)
-    return efch_filter_list_add_block(rs, fl);
+    return efch_filter_list_add_block(rs, pd, fl);
   else
-    return efch_filter_list_del(rs, fl, FILTER_ID_INDEPENDENT_BLOCK);
+    return efch_filter_list_del(rs, pd, fl, FILTER_ID_INDEPENDENT_BLOCK);
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -228,7 +228,8 @@ static int
 falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 		      uint dmaq, uint evq_id, uint own_id,
 		      uint tag, uint dmaq_size, uint buf_idx,
-		      dma_addr_t *dma_addrs, int n_dma_addrs, uint stack_id, uint flags)
+		      dma_addr_t *dma_addrs, int n_dma_addrs,
+		      uint vport_id, uint stack_id, uint flags)
 {
 	FALCON_LOCK_DECL;
 	uint index, desc_type;
@@ -371,7 +372,9 @@ static int
 falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 		      uint dmaq, uint evq_id, uint own_id,
 		      uint tag, uint dmaq_size, uint buf_idx,
-		      dma_addr_t *dma_addrs, int n_dma_addrs, uint stack_id, uint flags)
+		      dma_addr_t *dma_addrs, int n_dma_addrs,
+		      uint vport_id, uint stack_id,
+		      uint ps_buf_size /* ef10 only */, uint flags)
 {
 	FALCON_LOCK_DECL;
 	uint i, desc_type = 1;
@@ -1422,7 +1425,7 @@ static void falcon_nic_sw_event(struct efhw_nic *nic, int data, int evq)
 	ev_data |= FALCON_EVENT_CODE_SW;
 
 	falcon_drv_ev(nic, ev_data, evq);
-	EFHW_NOTICE("%s: evq[%d]->%x", __FUNCTION__, evq, data);
+	EFHW_TRACE("%s: evq[%d]->%x", __FUNCTION__, evq, data);
 }
 
 
@@ -1565,7 +1568,7 @@ falcon_nic_buffer_table_alloc(struct efhw_nic *nic, int owner, int order,
 	block = nic->bt_free_block;
 	if (block == NULL) {
 		FALCON_LOCK_UNLOCK(nic);
-		return -ENOMEM;
+		return -ENOSPC;
 	}
 	nic->bt_free_block = block->btb_next;
 	FALCON_LOCK_UNLOCK(nic);
@@ -1618,20 +1621,18 @@ falcon_nic_buffer_table_clear(struct efhw_nic *nic,
 	FALCON_LOCK_UNLOCK(nic);
 }
 
-static void
+static int
 falcon_nic_buffer_table_set(struct efhw_nic *nic,
 			    struct efhw_buffer_table_block *block,
 			    int first_entry, int n_entries,
 			    dma_addr_t *dma_addrs)
 {
 	int buffer_id = (block->btb_vaddr >> EFHW_NIC_PAGE_SHIFT) + first_entry;
-	FALCON_LOCK_DECL;
-
+	int rc = -EBUSY;
 #ifndef NDEBUG
-	FALCON_LOCK_LOCK(nic);
-	efhw_buffer_table_set_debug(block, first_entry, n_entries);
-	FALCON_LOCK_UNLOCK(nic);
+	int saved_n_entries = n_entries;
 #endif
+	FALCON_LOCK_DECL;
 
 	while (n_entries--) {
 		falcon_nic_buffer_table_update_poll(nic);
@@ -1642,10 +1643,21 @@ falcon_nic_buffer_table_set(struct efhw_nic *nic,
 					0, block->btb_hw.falcon.owner, 
 					buffer_id);
 			falcon_nic_buffer_table_lazy_commit(nic);
+			rc = 0;
 		}
 		FALCON_LOCK_UNLOCK(nic);
 		dma_addrs++; buffer_id++;
 	}
+
+#ifndef NDEBUG
+	if (rc == 0) {
+		FALCON_LOCK_LOCK(nic);
+		efhw_buffer_table_set_debug(block, first_entry, saved_n_entries);
+		FALCON_LOCK_UNLOCK(nic);
+	}
+#endif
+
+	return rc;
 }
 
 
@@ -1777,8 +1789,8 @@ static int falcon_flush_rx_dma_channel(struct efhw_nic *nic, uint dmaq)
  *
  *--------------------------------------------------------------------*/
 
-int falcon_nic_rss_context_alloc(struct efhw_nic *nic, int num_qs, int shared,
-				 int *handle_out)
+int falcon_nic_rss_context_alloc(struct efhw_nic *nic, uint vport_id,
+				 int num_qs, int shared, int *handle_out)
 {
         return -EOPNOTSUPP;
 }
@@ -1833,6 +1845,13 @@ static int falcon_license_challenge(struct efhw_nic *nic,
 				    const uint8_t* challenge, 
 				    uint32_t* expiry,
 				    uint8_t* signature) 
+{
+	return -EOPNOTSUPP;
+}
+
+
+static int falcon_license_check(struct efhw_nic *nic, const uint32_t feature,
+				int* licensed)
 {
 	return -EOPNOTSUPP;
 }
@@ -1965,5 +1984,6 @@ struct efhw_func_ops falcon_char_functional_units = {
 	falcon_nic_rss_context_set_table,
 	falcon_nic_rss_context_set_key,
 	falcon_license_challenge,
+	falcon_license_check,
 	falcon_get_rx_error_stats,
 };

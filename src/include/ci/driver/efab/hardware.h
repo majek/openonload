@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -183,17 +183,19 @@
 /*-------------- DMA support  ------------ */
 #define efhw_nic_dmaq_tx_q_init(nic, dmaq, evq, owner, tag,		\
 				dmaq_size, index, dma_addrs, n_dma_addrs, \
-                                stack_id, flags)                          \
+                                vport_id, stack_id, flags)              \
 	((nic)->efhw_func->dmaq_tx_q_init(nic, dmaq, evq, owner, tag,	\
 					  dmaq_size, index, dma_addrs,  \
-                                          n_dma_addrs, stack_id, flags))
+                                          n_dma_addrs, vport_id, stack_id, \
+                                          flags))
 
 #define efhw_nic_dmaq_rx_q_init(nic, dmaq, evq, owner, tag,		\
 				dmaq_size, index, dma_addrs, n_dma_addrs, \
-                                stack_id, flags)                          \
+                                vport_id, stack_id, ps_buf_size, flags) \
 	((nic)->efhw_func->dmaq_rx_q_init(nic, dmaq, evq, owner, tag,	\
 					  dmaq_size, index, dma_addrs,  \
-                                          n_dma_addrs, stack_id, flags))
+                                          n_dma_addrs, vport_id, stack_id, \
+                                          ps_buf_size, flags))
 
 #define efhw_nic_dmaq_tx_q_disable(nic, dmaq) \
 	((nic)->efhw_func->dmaq_tx_q_disable(nic, dmaq))
@@ -242,8 +244,8 @@
 					     (handle)))
 
 /*-------------- RSS ------------ */
-#define efhw_nic_rss_context_alloc(nic, num_qs, shared, handle_out)     \
-        ((nic)->efhw_func->rss_context_alloc((nic), (num_qs), (shared), \
+#define efhw_nic_rss_context_alloc(nic, vport_id, num_qs, shared, handle_out) \
+  ((nic)->efhw_func->rss_context_alloc((nic), (vport_id), (num_qs), (shared), \
                                              (handle_out)))
 
 #define efhw_nic_rss_context_free(nic, handle)                          \
@@ -259,6 +261,9 @@
 #define efhw_nic_license_challenge(nic, feature, challenge, expiry, signature) \
 	((nic)->efhw_func->license_challenge(nic, feature, challenge, expiry,  \
                                              signature))
+
+#define efhw_nic_license_check(nic, feature, licensed) \
+	((nic)->efhw_func->license_check(nic, feature, licensed))
 
 /*-------------- Stats ---------------- */
 #define efhw_nic_get_rx_error_stats(nic, instance, data, data_len, do_reset) \

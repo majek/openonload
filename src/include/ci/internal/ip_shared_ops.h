@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -406,7 +406,6 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 #define SP_TO_TCP(ni, sp)	   SP_TO_foo((ni), (sp), ci_tcp_state)
 #define SP_TO_TCP_LISTEN(ni, sp)   SP_TO_foo((ni), (sp), ci_tcp_socket_listen)
 #if CI_CFG_USERSPACE_PIPE
-#define SP_TO_PIPE_BUF(ni, sp) SP_TO_foo((ni), (sp), struct oo_pipe_buf)
 #define SP_TO_PIPE(ni, sp)     SP_TO_foo((ni), (sp), struct oo_pipe)
 #endif
 

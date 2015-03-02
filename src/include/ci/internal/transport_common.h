@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -85,70 +85,8 @@ ci_inline void citp_set_log_level(unsigned log_level) {
  ** Transport library user-level lock
  */
 
-
-/******************************************************************************
- * Even our carefully optimized lock operations and atomic ops are quite slow.
- * Specifically, this is caused by the presence of the LOCK prefix seems to
- * cost up to 100 cycles.  The glibc boys have apparently noticed the same
- * issues, and so keep a bit hanging of gs (at gs:0x10) that says whether the
- * current process is multithreaded.  We use this to determine whether or not
- * we need to assert the LOCK bit on the bus when doing atomic operations.
- * Note however that any atomic types in the shared state must assert the LOCK
- * bit regardless of whether the app is multithreaded -- it's only the state
- * private to the process for which we can play this game.
- */
-
 typedef oo_rwlock		citp_ul_lock_t;
 extern citp_ul_lock_t		citp_ul_lock CI_HV;
-
-#define CITP_LOCK_CTOR(l)	oo_rwlock_ctor((oo_rwlock*)(l))
-#define CITP_LOCK_DTOR(l)	oo_rwlock_dtor((oo_rwlock*)(l))
-
-#define CITP_LOCK(l) do {                    \
-    if (ci_is_multithreaded())               \
-      oo_rwlock_lock_write((oo_rwlock*)(l)); \
-  } while(0)
-
-ci_inline int CITP_TRY_LOCK(citp_ul_lock_t *l)
-{
-  int rc = 1;
-  if (ci_is_multithreaded())
-    rc = oo_rwlock_try_write(l);
-  return rc;
-}
-
-#define CITP_LOCK_RD(l) do {			\
-    if (ci_is_multithreaded())			\
-      oo_rwlock_lock_read((oo_rwlock *)(l));	\
-  } while(0)
-
-#define CITP_LOCK_TRY_RD(l)			\
-	( ci_is_multithreaded() ? 1, oo_rwlock_try_read((oo_rwlock *)l) )
-
-#define CITP_UNLOCK(l) do {			\
-    if (ci_is_multithreaded())			\
-      oo_rwlock_unlock((oo_rwlock*)(l));	\
-  } while(0)
-
-#define CITP_ISLOCKED_RD(l)			\
-	( !ci_is_multithreaded() ||		\
-	oo_rwlock_is_locked((oo_rwlock *)(l),CI_RWLOCK_READ) )
-
-#define CITP_ISLOCKED(l)			\
-	( !ci_is_multithreaded() ||		\
-	oo_rwlock_is_locked((oo_rwlock *)(l),CI_RWLOCK_WRITE) )
-
-/* \TODO Add specific unlock read and unlock write operations */
-
-/*! Safety wrapper used to ensure that we're not making a system API call
- * while holding the UL lock. */
-#ifndef NDEBUG
-#define CITP_ASSERT_SAFE_SYSCALL(x) do {        \
-  ci_assert( !CITP_ISLOCKED(&citp_ul_lock));    \
-  do { x; } while(0); } while(0)
-#else
-#define CITP_ASSERT_SAFE_SYSCALL(x) do{x;}while(0)
-#endif
 
 
 /**********************************************************************

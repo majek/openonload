@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2012 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -297,6 +297,18 @@
 	#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #endif
 
+#if !defined(round_up) && !defined(round_down) && !defined(__round_mask)
+/*
+ * This looks more complex than it should be. But we need to
+ * get the type for the ~ right in round_down (it needs to be
+ * as wide as the result!), and we want to evaluate the macro
+ * arguments just once each.
+ */
+#define __round_mask(x, y) ((__typeof__(x))((y)-1))
+#define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
+#define round_down(x, y) ((x) & ~__round_mask(x, y))
+#endif
+
 #ifndef __ATTR
 	#define __ATTR(_name, _mode, _show, _store) {			\
 		.attr = {.name = __stringify(_name), .mode = _mode },	\
@@ -360,6 +372,9 @@
 	#define KBUILD_MODNAME efx_kbuild_modname
 #endif
 
+#ifndef VLAN_PRIO_MASK
+	#define VLAN_PRIO_MASK          0xe000
+#endif
 #ifndef VLAN_PRIO_SHIFT
 	#define VLAN_PRIO_SHIFT         13
 #endif
@@ -595,6 +610,10 @@
 
 #ifdef ETHTOOL_GMODULEEEPROM
 	#define EFX_HAVE_ETHTOOL_GMODULEEEPROM yes
+	#ifndef ETH_MODULE_SFF_8436
+	#define ETH_MODULE_SFF_8436     0x3
+	#define ETH_MODULE_SFF_8436_LEN 640
+	#endif
 #else
 	struct ethtool_modinfo {
 		__u32   cmd;
@@ -607,6 +626,8 @@
 	#define ETH_MODULE_SFF_8079_LEN 256
 	#define ETH_MODULE_SFF_8472     0x2
 	#define ETH_MODULE_SFF_8472_LEN 512
+	#define ETH_MODULE_SFF_8436     0x3
+	#define ETH_MODULE_SFF_8436_LEN 640
 
 	#define ETHTOOL_GMODULEINFO     0x00000042
 	#define ETHTOOL_GMODULEEEPROM   0x00000043
@@ -926,7 +947,7 @@
 					 unsigned int length)
 	{
 		struct sk_buff *skb = alloc_skb(length + NET_SKB_PAD,
-						GFP_ATOMIC | __GFP_COLD);
+						GFP_ATOMIC);
 		if (likely(skb)) {
 			skb_reserve(skb, NET_SKB_PAD);
 			skb->dev = dev;
@@ -1423,6 +1444,13 @@ extern struct i2c_driver efx_lm90_driver;
 	}
 #endif
 
+#ifdef EFX_NEED_ETH_ZERO_ADDR
+	static inline void eth_zero_addr(u8 *addr)
+	{
+		memset(addr, 0x00, ETH_ALEN);
+	}
+#endif
+
 #ifdef EFX_NEED_ETH_BROADCAST_ADDR
 	static inline void eth_broadcast_addr(u8 *addr)
 	{
@@ -1716,6 +1744,17 @@ void usleep_range(unsigned long min, unsigned long max);
 		 * So just return ENOSYS and don't have FLR recovery.
 		 */
 		return -ENOSYS;
+	}
+#endif
+
+#ifdef EFX_NEED_SIGNED_NLA
+	#include <net/netlink.h>
+	/* We only actually use s32 */
+	#define NLA_S32 NLA_BINARY + 3
+	static inline int nla_put_s32(struct sk_buff *skb, int attrtype,
+				      s32 value)
+	{
+		return nla_put(skb, attrtype, sizeof(s32), &value);
 	}
 #endif
 
@@ -2167,6 +2206,12 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 #define order_base_2(x) fls((x) - 1)
 #endif
 
+#ifdef EFX_NEED_IS_POWER_OF_2
+static inline bool is_power_of_2(unsigned long n) {
+	return (n != 0 && ((n & (n - 1)) == 0));
+}
+#endif
+
 #ifdef EFX_NEED_ON_EACH_CPU_WRAPPER
 static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wait)
 {
@@ -2444,14 +2489,21 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 	#define param_check_bool(name, p) __param_check(name, p, bool)
 #endif
 
-#ifdef EFX_HAVE_OLD___VLAN_PUT_TAG
+#if defined(EFX_HAVE_OLD___VLAN_PUT_TAG)
 	static inline struct sk_buff *
 	efx___vlan_put_tag(struct sk_buff *skb, __be16 vlan_proto, u16 vlan_tci)
 	{
 		WARN_ON(vlan_proto != htons(ETH_P_8021Q));
 		return __vlan_put_tag(skb, vlan_tci);
 	}
-	#define __vlan_put_tag efx___vlan_put_tag
+	#define vlan_insert_tag_set_proto efx___vlan_put_tag
+#elif !defined(EFX_HAVE_VLAN_INSERT_TAG_SET_PROTO)
+	static inline struct sk_buff *
+	vlan_insert_tag_set_proto(struct sk_buff *skb, __be16 vlan_proto,
+			u16 vlan_tci)
+	{
+		return __vlan_put_tag(skb, vlan_proto, vlan_tci);
+	}
 #endif
 
 #ifdef EFX_NEED_PCI_VPD_LRDT
@@ -2730,24 +2782,52 @@ static inline unsigned long efx_get_open_fds(unsigned long fd, const struct fdta
 	#define jhash2 efx_jhash2
 #endif
 
-#ifndef EFX_HAVE_IOMMU_PRESENT
-#ifndef EFX_HAVE_PHYS_ADDR_T
-typedef resource_size_t phys_addr_t;
-#endif
-#ifdef EFX_HAVE_IOMMU_FOUND
-#include <linux/iommu.h>
-#define iommu_present(b) iommu_found()
-#else
-#define iommu_present(b) 0
-#endif /* EFX_HAVE_IOMMU_FOUND */
-#endif /* !EFX_HAVE_IOMMU_PRESENT */
-
 #ifdef EFX_NEED_RCU_ACCESS_POINTER
 #define rcu_access_pointer rcu_dereference
 #endif
 
 #ifdef EFX_NEED_CPU_ONLINE_MASK
 #define cpu_online_mask (&cpu_online_map)
+#endif
+
+#ifndef EFX_HAVE_PCI_VFS_ASSIGNED
+int pci_vfs_assigned(struct pci_dev *dev);
+#endif
+
+#ifdef EFX_NEED_KMALLOC_ARRAY
+#define kmalloc_array(n,s,f) kcalloc(n,s,f)
+#endif
+
+/* 3.19 renamed netdev_phys_port_id to netdev_phys_item_id */
+#ifndef MAX_PHYS_ITEM_ID_LEN
+#define MAX_PHYS_ITEM_ID_LEN MAX_PHYS_PORT_ID_LEN
+#define netdev_phys_item_id netdev_phys_port_id
+#endif
+
+#ifdef ETH_RSS_HASH_TOP
+#define EFX_HAVE_CONFIGURABLE_RSS_HASH
+#else
+#define ETH_RSS_HASH_NO_CHANGE 0
+#define ETH_RSS_HASH_TOP       1
+#endif
+
+/* Some functions appear in either net_device_ops or in net_device_ops_ext. The
+ * latter is used in RHEL for backported features. To simplify conditionals
+ * elsewhere, we merge them here.
+ */
+#if defined(EFX_HAVE_NDO_GET_PHYS_PORT_ID) || defined(EFX_HAVE_NET_DEVICE_OPS_EXT_GET_PHYS_PORT_ID)
+#define EFX_NEED_GET_PHYS_PORT_ID
+#endif
+
+/* get_rxfh_indir_size is used both directly via ethtool_ops and also via
+ * the old rxfh_indir implementation.
+ */
+#if defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR_SIZE) || !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR) || (defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) && defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR))
+#define EFX_NEED_ETHTOOL_GET_RXFH_INDIR_SIZE
+#endif
+
+#ifdef EFX_NEED_SKB_GSO_TCPV6
+#define SKB_GSO_TCPV6 0
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

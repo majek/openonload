@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,13 +35,8 @@ extern void ci_bonding_fini(void);
 
 extern void ci_bonding_set_timer_period(int period, int occurences);
 
-extern void ci_bonding_get_xmit_policy_flags(void *net_dev, unsigned char *flags);
-
 extern int __init oo_epoll_chrdev_ctor(void);
 extern void oo_epoll_chrdev_dtor(void);
-
-struct file;
-extern int oo_install_file_to_fd(struct file *file, int flags);
 
 extern int __init onloadfs_init(void);
 extern void onloadfs_fini(void);

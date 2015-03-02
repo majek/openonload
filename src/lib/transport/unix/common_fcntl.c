@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,7 +51,8 @@ int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd,
     fcntl_result = &dummy;
   *fcntl_result = 0;
 
-  if( (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) &&
+  if( (epi->sock.s->b.state & CI_TCP_STATE_TCP) &&
+      epi->sock.s->b.state != CI_TCP_LISTEN &&
       (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
     /* This socket doesn't have an OS socket. */
     return 0;
@@ -63,8 +64,10 @@ int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd,
      *   i) There is no OS socket (handled above, (impossible))
      *  ii) There are no more file-descriptors available (ENFILE)
      */
-    ci_log("%s: ERROR: could not get fd for OS sock (fd=%d cmd=%s error=%d)",
-           __func__, fd, cmd_str, -os_sock);
+    ci_log("%s: ERROR: could not get fd for OS sock "
+           "(fd=%d state=%s cmd=%s error=%d)",
+           __func__, fd, ci_tcp_state_str(epi->sock.s->b.state),
+           cmd_str, -os_sock);
     ci_assert_equal(os_sock, -ENFILE);
     return os_sock;
   }
@@ -220,6 +223,12 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
   case F_GETFD:
   case F_SETFD:
     rc = ci_sys_fcntl(fd, cmd, arg);
+    if( rc < 0 )
+      break;
+
+    ci_atomic32_merge(&s->b.sb_aflags,
+                      arg & FD_CLOEXEC ? CI_SB_AFLAG_O_CLOEXEC : 0,
+                      CI_SB_AFLAG_O_CLOEXEC);
     break;
 
   case F_GETLK:

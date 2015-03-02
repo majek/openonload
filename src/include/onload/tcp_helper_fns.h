@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,6 +38,10 @@
 #error "Kernel-only header!"
 #endif
 
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 02000000
+#endif
+
 /**********************************************************************
  */
 
@@ -65,9 +69,9 @@ extern void tcp_helper_dtor(tcp_helper_resource_t* trs);
 extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
 
 extern int efab_tcp_helper_rm_mmap(tcp_helper_resource_t*,
-                                   unsigned long* bytes,
-                                   void* opaque, int* map_num,
-                                   unsigned long* offset, int map_id);
+                                   unsigned long bytes,
+                                   void* opaque, int map_id,
+                                   int is_writable);
 
 extern unsigned long tcp_helper_rm_nopage(tcp_helper_resource_t* trs,
                                           void* opaque, int map_id, 
@@ -196,12 +200,6 @@ extern int efab_tcp_helper_sock_lock_slow(tcp_helper_resource_t*, oo_sp
 				  CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t));
 extern void efab_tcp_helper_sock_unlock_slow(tcp_helper_resource_t*, oo_sp);
 
-#if CI_CFG_FD_CACHING
-extern int efab_tcp_helper_can_cache_fd(ci_private_t *priv_ni, void *arg);
-extern int efab_tcp_helper_xfer_cached (ci_private_t *priv, void *arg);
-
-#endif
-
 
 extern int efab_tcp_helper_get_sock_fd(ci_private_t*, void*);
 
@@ -234,11 +232,8 @@ extern int efab_tcp_helper_more_bufs(tcp_helper_resource_t* trs);
 
 extern int efab_tcp_helper_more_socks(tcp_helper_resource_t* trs);
 
-#if CI_CFG_USERSPACE_PIPE
-extern int efab_tcp_helper_pipebufs_to_socks(tcp_helper_resource_t* trs);
-extern int efab_tcp_helper_more_pipe_bufs(ci_netif* ni,
-                                          ci_int32 bufs_num,
-                                          ci_int32* bufs_start);
+#if CI_CFG_FD_CACHING
+extern int efab_tcp_helper_clear_epcache(tcp_helper_resource_t* trs);
 #endif
 
 extern void efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs,
@@ -249,6 +244,8 @@ extern int efab_file_move_to_alien_stack(ci_private_t *priv,
 extern void
 tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
                            tcp_helper_resource_t* trs);
+extern void
+tcp_helper_cluster_ref(tcp_helper_cluster_t* thc);
 
 extern int
 tcp_helper_cluster_from_cluster(tcp_helper_resource_t* thr);
@@ -338,6 +335,12 @@ efab_tcp_helper_k_ref_count_inc(tcp_helper_resource_t* trs)
 extern int
 efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*, int in_dl_context);
 
+extern int
+efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs,
+                                        unsigned trusted_flags,
+                                        unsigned untrusted_flags,
+                                        int in_dl_context);
+
 
 /*--------------------------------------------------------------------
  *!
@@ -396,6 +399,7 @@ int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,
 
 
 extern int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd);
+extern int oo_file_moved_rsop(ci_private_t* priv, void *p_fd);
 
 extern int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode);
 
@@ -403,14 +407,62 @@ extern int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode);
 extern int efab_tcp_helper_poll_udp(struct file *filp, int *mask, s64 *timeout);
 
 
+
+/**********************************************************************
+*********************** Waiting for ready list  ***********************
+**********************************************************************/
+
+static inline void
+efab_tcp_helper_ready_list_wakeup(tcp_helper_resource_t* trs,
+                                  int ready_list)
+{
+  ci_atomic32_and(&trs->netif.state->ready_list_flags[ready_list],
+                  ~CI_NI_READY_LIST_FLAG_WAKE);
+  ci_waitable_wakeup_all(&trs->ready_list_waitqs[ready_list]);
+
+}
+
+static inline unsigned
+efab_tcp_helper_ready_list_events(tcp_helper_resource_t* trs,
+                                  int ready_list)
+{
+  if( trs->netif.state->ready_list_flags[ready_list] &
+      CI_NI_READY_LIST_FLAG_RESCAN ) {
+    return POLLIN;
+  }
+  else {
+    return
+        ci_ni_dllist_is_empty(&trs->netif,
+                              &trs->netif.state->ready_lists[ready_list])
+        ?  0 : POLLIN;
+  }
+}
+
+
 extern int efab_attach_os_socket(tcp_helper_endpoint_t*, struct file*);
 
 
-extern int oo_create_fd(tcp_helper_endpoint_t* ep, int flags, int fd_type);
-extern int oo_create_stack_fd(tcp_helper_resource_t *thr);
+extern int
+oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type);
+static inline int
+oo_create_ep_fd(tcp_helper_endpoint_t* ep, int flags, int fd_type)
+{
+  return oo_create_fd(ep->thr, ep->id, flags, fd_type);
+}
+static inline int
+oo_create_stack_fd(tcp_helper_resource_t *thr)
+{
+  return oo_create_fd(thr, OO_SP_NULL, O_CLOEXEC, CI_PRIV_TYPE_NETIF);
+}
+
 extern int onloadfs_get_dev_t(ci_private_t* priv, void* arg);
-extern void oo_move_file(ci_private_t* priv, tcp_helper_resource_t *new_thr,
-                         oo_sp new_sockid);
+extern void oo_file_moved(ci_private_t* priv);
+extern int onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
+                             int flags, int fd_type, ci_private_t **priv_p);
+extern int oo_fd_replace_file(struct file* old_filp, struct file* new_filp,
+                              int fd);
+
+extern int oo_clone_fd(struct file* filp, int do_cloexec);
 
 ci_inline void
 efab_get_os_settings(ci_netif_config_opts *opts)

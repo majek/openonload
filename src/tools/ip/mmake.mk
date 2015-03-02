@@ -2,24 +2,21 @@ APPS	:= onload_stackdump \
            onload_tcpdump.bin \
            onload_fuser
 
+ifdef OFE_TREE
+APPS	+= onload_fe
+endif
 
 ifneq ($(ONLOAD_ONLY),1)
 
 ifeq ($(WINDOWS),1)
-APPS	+= istack \
-           locktest           
+APPS	+= locktest           
 endif
 
 ifeq ($(GNU),1)
-APPS	+= istack \
-           iifdump \
+APPS	+= iifdump \
            routedump \
            pio_buddy_test \
            locktest
-endif
-
-ifeq ($(LINUX),1)
-APPS	+= istack5
 endif
 
 endif  # ONLOAD_ONLY
@@ -28,26 +25,20 @@ endif  # ONLOAD_ONLY
 TARGETS	:= $(APPS:%=$(AppPattern))
 
 onload_stackdump:= $(patsubst %,$(AppPattern),onload_stackdump)
-istack		:= $(patsubst %,$(AppPattern),istack)
-istack5		:= $(patsubst %,$(AppPattern),istack5)
 onload_tcpdump.bin := $(patsubst %,$(AppPattern),onload_tcpdump.bin)
 onload_fuser	:= $(patsubst %,$(AppPattern),onload_fuser)
 pio_buddy_test	:= $(patsubst %,$(AppPattern),pio_buddy_test)
+ifdef OFE_TREE
+onload_fe	:= $(patsubst %,$(AppPattern),onload_fe)
+endif
 
 MMAKE_LIBS	:= $(LINK_CIIP_LIB) $(LINK_CIAPP_LIB) \
 		   $(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB)
 MMAKE_LIB_DEPS	:= $(CIIP_LIB_DEPEND) $(CIAPP_LIB_DEPEND) \
 		   $(CIUL_LIB_DEPEND) $(CITOOLS_LIB_DEPEND)
 
-MMAKE_FTL_LIBS  := $(LINK_FTL_LIB)
-MMAKE_FTL_LIB_DEPS := $(FTL_LIB_DEPEND)
 MMAKE_STACKDUMP_LIBS := $(LINK_ONLOAD_EXT_LIB)
 MMAKE_STACKDUMP_DEPS := $(ONLOAD_EXT_LIB_DEPEND)
-
-# By default the Level 5 version of istack is identical to the distributed one
-MMAKE_L5_FTL_LIBS     := $(LINK_L5_FTL_LIB)
-MMAKE_L5_CPPFLAGS     :=
-MMAKE_L5_FTL_LIB_DEPS := $(MMAKE_FTL_LIB_DEPS)
 
 # we include readline only in the Level 5 library and only if the environment
 # variable USEREADLINE is set to 1 (this way, by default, builds on machines
@@ -67,12 +58,6 @@ all: $(TARGETS)
 $(onload_stackdump): stackdump.o libstack.o $(MMAKE_LIB_DEPS) $(MMAKE_STACKDUMP_DEPS)
 	(libs="$(MMAKE_LIBS) $(MMAKE_STACKDUMP_LIBS)"; $(MMakeLinkCApp))
 
-$(istack): istack.o libstack.o $(MMAKE_LIB_DEPS) $(MMAKE_FTL_LIB_DEPS)
-	(libs="$(MMAKE_LIBS) $(MMAKE_FTL_LIBS)"; $(MMakeLinkCApp))
-
-$(istack5): istack.o libstack.o $(MMAKE_LIB_DEPS) $(MMAKE_L5_FTL_LIB_DEPS)
-	(libs="$(MMAKE_LIBS) $(MMAKE_L5_FTL_LIBS)"; $(MMakeLinkCApp))
-
 $(onload_tcpdump.bin): tcpdump_bin.o libstack.o $(MMAKE_LIB_DEPS)
 	(libs="$(MMAKE_LIBS) $(MMAKE_LIBS_LIBPCAP)"; $(MMakeLinkCApp))
 
@@ -81,6 +66,11 @@ $(onload_fuser): fuser.o $(MMAKE_LIB_DEPS)
 
 $(pio_buddy_test): pio_buddy_test.o libstack.o $(MMAKE_LIB_DEPS)
 	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
+
+ifdef OFE_TREE
+$(onload_fe): ofe.o libstack.o  $(MMAKE_LIB_DEPS)
+	(libs="$(MMAKE_LIBS)"; $(MMakeLinkCApp))
+endif
 
 # These rules may generate a version that uses gnu readline.  We must not
 # distribute this because readline is licensed under GPL.

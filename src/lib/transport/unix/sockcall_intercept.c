@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,6 +40,7 @@
 #include <aio.h>
 #include <alloca.h>
 
+#include <onload/extensions_zc.h>
 
 /*
 ** Other stuff to think about: sockatmark()
@@ -358,23 +359,6 @@ static void oo_accept_os_hack_inheritance(int lfd, int afd)
 
     if ((tmp & flags) == 0)
       CI_TRY(ci_sys_fcntl(afd, F_SETFL, tmp | flags));
-  }
-#endif
-
-  /* No-delay */
-#if !CI_CFG_ACCEPT_INHERITS_NODELAY
-  /* no-delay will not have been inherited so we may need to turn it on */
-  if (CITP_OPTS.accept_force_inherit_nodelay) {
-    int nodelay;
-    int size;
-
-    CI_TRY(ci_sys_getsockopt(lfd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
-                             &size));
-    CI_TEST(size == sizeof(nodelay));
-
-    if (nodelay != 0)
-      CI_TRY(ci_sys_setsockopt(afd, IPPROTO_TCP, TCP_NODELAY,
-                               &nodelay, size));
   }
 #endif
 
@@ -855,11 +839,11 @@ int ci_sys_recvmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
 
 OO_INTERCEPT(int, recvmmsg, 
              (int fd, struct mmsghdr* msg, unsigned vlen,
-              int flags, const struct timespec* timeout))
+              int flags, ci_recvmmsg_timespec* timeout))
 {
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
-  int rc, i;
+  int rc;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
@@ -877,15 +861,8 @@ OO_INTERCEPT(int, recvmmsg,
       CI_SET_ERROR(rc, EINVAL);
     }
     else {
-      for( i = 0; i < vlen; ++i )
-        if(CI_UNLIKELY( msg[i].msg_hdr.msg_iov == NULL && 
-                        msg[i].msg_hdr.msg_iovlen != 0 )) {
-          CI_SET_ERROR(rc, EFAULT);
-          goto release_and_exit;
-        }
       rc = citp_fdinfo_get_ops(fdi)->recvmmsg(fdi, msg, vlen, flags, timeout);
     }
-  release_and_exit:
     citp_fdinfo_release_ref_fast(fdi);
     citp_exit_lib(&lib_context, rc >= 0);
   }
@@ -1090,6 +1067,7 @@ OO_INTERCEPT(int, sendmmsg,
 strong_alias(onload_sendmmsg, sendmmsg);
 # endif
 
+strong_alias(onload_sendmmsg, __sendmmsg);
 #endif /* CI_CFG_SENDMMSG */
 
 
@@ -1097,7 +1075,7 @@ strong_alias(onload_sendmmsg, sendmmsg);
 
 /* Internal poll/select timeout is calculated in milliseconds,
  * and in citp_ul_do_select/citp_ul_do_poll this value is multiplied by
- * ci_cpu_khz, assuming it not to overflow.
+ * citp.cpu_khz, assuming it not to overflow.
  * So we are dividing by 10GHz here.
  * This does limit us to maximum timeout of about 58 years.
  */
@@ -1149,17 +1127,6 @@ ms2timeval(ci_uint64 timeout, ci_uint64 spent, struct timeval* tv)
     tv->tv_sec = tv->tv_usec = 0;
   }
 }
-static inline void
-ms2timespec(ci_uint64 timeout, ci_uint64 spent, struct timespec* tv)
-{
-  if( timeout > spent ) {
-    tv->tv_sec = (timeout - spent) / 1000;
-    tv->tv_nsec = ((timeout - spent) % 1000) * 1000000;
-  }
-  else {
-    tv->tv_sec = tv->tv_nsec = 0;
-  }
-}
 
 
 OO_INTERCEPT(int, select,
@@ -1191,7 +1158,7 @@ OO_INTERCEPT(int, select,
 
   citp_enter_lib(&lib_context);
   rc = citp_ul_do_select(nfds, rds, wrs, exs, timeout_ms, &used_ms,
-                         &lib_context, NULL, NULL);
+                         &lib_context, NULL);
 
   /* Linux-specific behaviour: change timeout parameter. */
   if( timeout != NULL && used_ms != 0 ) {
@@ -1213,7 +1180,6 @@ OO_INTERCEPT(int, pselect,
               const struct timespec *timeout_ts, const sigset_t *sigmask))
 {
   citp_lib_context_t lib_context;
-  sigset_t sigsaved;
   ci_uint64 timeout_ms, used_ms = 0;
   int rc = 0;
 
@@ -1240,7 +1206,7 @@ OO_INTERCEPT(int, pselect,
   /* Set up signal mask and spin */
   citp_enter_lib(&lib_context);
   rc = citp_ul_do_select(nfds, rds, wrs, exs, timeout_ms, &used_ms,
-                         &lib_context, sigmask, &sigsaved);
+                         &lib_context, sigmask);
 
   /* we should not return 0 without signal check; do it now: */
   if( rc == CI_SOCKET_HANDOVER || (rc == 0 && sigmask != NULL) ) {
@@ -1276,11 +1242,8 @@ OO_INTERCEPT(int, poll,
   Log_CALL(ci_log("%s(%p, %ld, %d)", __FUNCTION__, fds, nfds, timeout));
 
   citp_enter_lib(&lib_context);
-  rc = citp_ul_do_poll(fds, nfds, timeout, &used_ms, &lib_context);
+  rc = citp_ul_do_poll(fds, nfds, timeout, &used_ms, &lib_context, NULL);
 
-  /* fixme: signals may come after spin but before ci_sys_select(); we'll
-   * handle them but do not return -1(EINTR). */
-  citp_exit_lib(&lib_context, rc >= 0);
   if( timeout != used_ms && rc == 0 )
     rc = ci_sys_poll(fds, nfds, timeout - used_ms);
 
@@ -1294,10 +1257,8 @@ OO_INTERCEPT(int, ppoll,
               const struct timespec *timeout_ts, const sigset_t *sigmask))
 {
   citp_lib_context_t lib_context;
-  sigset_t sigsaved;
   ci_uint64 timeout_ms, used_ms = 0;
   int rc = 0;
-  int was_spinning = 0;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
@@ -1316,36 +1277,15 @@ OO_INTERCEPT(int, ppoll,
     goto out;
   }
 
-  /* Non-blocking check: do we have anything ready? */
-  citp_enter_lib(&lib_context);
-  rc = citp_ul_do_poll(fds, nfds, 0, &used_ms, &lib_context);
-  citp_exit_lib(&lib_context, rc >=0);
-  if( rc != 0)
-    goto out;
-
   timeout_ms = timespec2ms(timeout_ts);
 
-  /* Set up signal mask and spin */
-  /* Fixme: move sigmask handling into citp_ul_do_poll, after we've
-   * checked if any socket is already available. */
-  if( timeout_ms != 0 &&
-      (oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_POLL)) ) {
-    was_spinning = 1;
-    rc = citp_ul_pwait_spin_pre(&lib_context, sigmask, &sigsaved);
-    if( rc < 0 ) {
-      citp_exit_lib(&lib_context, rc >=0);
-      goto out;
-    }
+  citp_enter_lib(&lib_context);
+  rc = citp_ul_do_poll(fds, nfds, timeout_ms, &used_ms, &lib_context,
+                       sigmask);
 
-    rc = citp_ul_do_poll(fds, nfds, timeout_ms, &used_ms, &lib_context);
-
-    citp_ul_pwait_spin_done(&lib_context, &sigsaved, &rc);
-    if( rc != 0 )
-      goto out;
-  }
-
-  /* Block in the OS */
-  if( (timeout_ms != used_ms || !was_spinning) && rc == 0 ) {
+  /* Block in the OS, check signals */
+  if( rc == 0 && ( timeout_ms != used_ms ||
+                   (used_ms == 0 && sigmask != NULL) ) ) {
     if( used_ms == 0 || timeout_ts == NULL )
       rc = ci_sys_ppoll(fds, nfds, timeout_ts, sigmask);
     else {
@@ -1382,10 +1322,10 @@ OO_INTERCEPT(int, epoll_create1,
   Log_CALL(ci_log("%s(%d)", __FUNCTION__, flags));
   if( ! CITP_OPTS.ul_epoll )
     goto pass_through;
-  if( CITP_OPTS.ul_epoll == 1 )
-    rc = citp_epoll_create(1, flags);
-  else
+  if( CITP_OPTS.ul_epoll == 2 )
     rc = citp_epollb_create(1, flags);
+  else
+    rc = citp_epoll_create(1, flags);
   if( rc == CITP_NOT_HANDLED )
     goto pass_through;
   FDTABLE_ASSERT_VALID();
@@ -1419,10 +1359,10 @@ OO_INTERCEPT(int, epoll_create,
   Log_CALL(ci_log("%s(%d)", __FUNCTION__, size));
   if( ! CITP_OPTS.ul_epoll )
     goto pass_through;
-  if( CITP_OPTS.ul_epoll == 1 )
-    rc = citp_epoll_create(size, 0);
-  else
+  if( CITP_OPTS.ul_epoll == 2 )
     rc = citp_epollb_create(size, 0);
+  else
+    rc = citp_epoll_create(size, 0);
   if( rc == CITP_NOT_HANDLED )
     goto pass_through;
   FDTABLE_ASSERT_VALID();
@@ -1498,27 +1438,26 @@ OO_INTERCEPT(int, epoll_wait,
                   maxevents, timeout));
 
   if( (fdi=citp_fdtable_lookup(epfd)) ) {
-    int rc;
-    if( fdi->protocol->type == CITP_EPOLL_FD )
+    int rc = CI_SOCKET_HANDOVER;
+    if( fdi->protocol->type == CITP_EPOLL_FD ) {
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
       rc = citp_epoll_wait(fdi, events, NULL, maxevents, timeout, NULL,
                            &lib_context);
+      citp_reenter_lib(&lib_context);
+    }
     else if (fdi->protocol->type == CITP_EPOLLB_FD ) {
       rc = citp_epollb_wait(fdi, events, maxevents, timeout, NULL,
                             &lib_context);
-      citp_exit_lib(&lib_context, rc >= 0);
-    }
-    else {
-      citp_fdinfo_release_ref(fdi, 0);
-      goto error;
     }
     citp_fdinfo_release_ref(fdi, 0);
+    citp_exit_lib(&lib_context, rc >= 0);
+    if( rc == CI_SOCKET_HANDOVER )
+      goto error;
     Log_CALL_RESULT(rc);
     return rc;
   }
 
 error:
-  citp_exit_lib(&lib_context, TRUE);
   Log_PT(log("PT: sys_epoll_wait(%d, %p, %d, %d)", epfd, events,
              maxevents, timeout));
  pass_through:
@@ -1545,28 +1484,26 @@ OO_INTERCEPT(int, epoll_pwait,
                   maxevents, timeout, sigmask));
 
   if( (fdi=citp_fdtable_lookup(epfd)) ) {
-    int rc;
+    int rc = CI_SOCKET_HANDOVER;
     if( fdi->protocol->type == CITP_EPOLL_FD ) {
       /* NB. citp_epoll_wait() calls citp_exit_lib(). */
       rc = citp_epoll_wait(fdi, events, NULL, maxevents, timeout, sigmask,
                            &lib_context);
+      citp_reenter_lib(&lib_context);
     }
     else if (fdi->protocol->type == CITP_EPOLLB_FD ) {
       rc = citp_epollb_wait(fdi, events, maxevents, timeout, sigmask,
                             &lib_context);
-      citp_exit_lib(&lib_context, rc >= 0);
-    }
-    else {
-      citp_fdinfo_release_ref(fdi, 0);
-      goto error;
     }
     citp_fdinfo_release_ref(fdi, 0);
+    citp_exit_lib(&lib_context, rc >= 0);
+    if( rc == CI_SOCKET_HANDOVER )
+      goto error;
     Log_CALL_RESULT(rc);
     return rc;
   }
 
 error:
-  citp_exit_lib(&lib_context, TRUE);
   Log_PT(log("PT: sys_epoll_pwait(%d, %p, %d, %d, %p)", epfd, events,
              maxevents, timeout, sigmask));
  pass_through:
@@ -1699,6 +1636,7 @@ OO_INTERCEPT(ssize_t, sendfile,
   ssize_t       rc;
   citp_fdinfo   *out_fdi;
   void          (*post_hook)(citp_fdinfo *);
+  citp_lib_context_t lib_context;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
@@ -1712,16 +1650,13 @@ OO_INTERCEPT(ssize_t, sendfile,
   /* NB: our code will be used inside this system call... */
   rc = ci_sys_sendfile(out_fd, in_fd, offset, count);
 
-  if( (out_fdi = citp_fdtable_lookup(out_fd)) ) {
+  if( (out_fdi = citp_fdtable_lookup_fast(&lib_context, out_fd)) ) {
     post_hook = citp_fdinfo_get_ops(out_fdi)->sendfile_post_hook;
-    if( post_hook ) {
-      citp_lib_context_t lib_context;
-      citp_enter_lib(&lib_context);
 
+    if( post_hook )
       post_hook(out_fdi);
-      citp_exit_lib(&lib_context, rc >= 0);
-    }
-    citp_fdinfo_release_ref(out_fdi, 0);
+    citp_fdinfo_release_ref_fast(out_fdi);
+    citp_exit_lib(&lib_context, rc >= 0);
   }
 
   Log_CALL_RESULT((int)rc);
@@ -1736,6 +1671,7 @@ OO_INTERCEPT(ssize_t, sendfile64,
   ssize_t       rc;
   citp_fdinfo   *out_fdi;
   void          (*post_hook)(citp_fdinfo *);
+  citp_lib_context_t lib_context;
 
   if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
     citp_do_init(CITP_INIT_SYSCALLS);
@@ -1750,16 +1686,12 @@ OO_INTERCEPT(ssize_t, sendfile64,
   /* NB: our code will be used inside this system call... */
   rc = ci_sys_sendfile64(out_fd, in_fd, offset, count);
 
-  if( (out_fdi = citp_fdtable_lookup(out_fd)) ) {
+  if( (out_fdi = citp_fdtable_lookup_fast(&lib_context, out_fd)) ) {
     post_hook = citp_fdinfo_get_ops(out_fdi)->sendfile_post_hook;
-    if( post_hook ) {
-      citp_lib_context_t lib_context;
-      citp_enter_lib(&lib_context);
-
+    if( post_hook )
       post_hook(out_fdi);
-      citp_exit_lib(&lib_context, rc >= 0);
-    }
-    citp_fdinfo_release_ref(out_fdi, 0);
+    citp_fdinfo_release_ref_fast(out_fdi);
+    citp_exit_lib(&lib_context, rc >= 0);
   }
 
   Log_CALL_RESULT((int)rc);
@@ -2018,6 +1950,81 @@ OO_INTERCEPT(ssize_t, writev,
   Log_CALL_RESULT(rc);
   return rc;
 }
+
+
+#if CI_LIBC_HAS_splice
+OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
+                                             int out_fd, loff_t* out_off,
+                                             size_t len, unsigned int flags))
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo *out_fdi, *in_fdi;
+  citp_pipe_fdi *in_pipe_fdi, *out_pipe_fdi;
+  int rc = 0, via_os = 0;
+
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) ) {
+    citp_do_init(CITP_INIT_SYSCALLS);
+    return ci_sys_splice(in_fd, in_off, out_fd, out_off, len, flags);
+  }
+
+  citp_enter_lib(&lib_context);
+  Log_CALL(ci_log("%s(%d, %p, %d, %p, %u, 0x%x)", __FUNCTION__,
+                  in_fd, in_off, out_fd, out_off, (unsigned)len, flags ));
+
+  in_fdi  = citp_fdtable_lookup(in_fd);
+  out_fdi = citp_fdtable_lookup(out_fd);
+
+  if( in_fdi && citp_fdinfo_get_type(in_fdi) == CITP_PIPE_FD &&
+      out_fdi && citp_fdinfo_get_type(out_fdi) == CITP_PIPE_FD &&
+      ((in_pipe_fdi = fdi_to_pipe_fdi(in_fdi))->ni ==
+       (out_pipe_fdi = fdi_to_pipe_fdi(out_fdi))->ni) ) {
+    if( in_off == NULL && out_off == NULL ) {
+      rc = citp_splice_pipe_pipe(in_pipe_fdi, out_pipe_fdi, len, flags);
+    }
+    else {
+      errno = ESPIPE;
+      rc = CI_SOCKET_ERROR;
+    }
+  }
+  else if( in_fdi && citp_fdinfo_get_type(in_fdi) == CITP_PIPE_FD ) {
+    if( in_off == NULL ) {
+      rc = citp_pipe_splice_read(in_fdi, out_fd, out_off, len, flags,
+                                 &lib_context);
+    }
+    else {
+      errno = ESPIPE;
+      rc = CI_SOCKET_ERROR;
+    }
+  }
+  else if( out_fdi && citp_fdinfo_get_type(out_fdi) == CITP_PIPE_FD ) {
+    if( out_off == NULL ) {
+      rc = citp_pipe_splice_write(out_fdi, in_fd, in_off, len, flags,
+                                  &lib_context);
+    }
+    else {
+      errno = ESPIPE;
+      rc = CI_SOCKET_ERROR;
+    }
+  }
+  else {
+    via_os = 1;
+  }
+
+  if( out_fdi )
+    citp_fdinfo_release_ref(out_fdi, 0);
+  if( in_fdi )
+    citp_fdinfo_release_ref(in_fdi, 0);
+  citp_exit_lib(&lib_context, rc >= 0);
+
+  if( via_os ) {
+    Log_PT(log("PT: sys_splice(%d, %p, %d, %p, %u, 0x%x)",
+               in_fd, in_off, out_fd, out_off, (unsigned) len, flags));
+    rc = ci_sys_splice(in_fd, in_off, out_fd, out_off, len, flags);
+  }
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+#endif
 
 
 OO_INTERCEPT(int, close,
@@ -2545,9 +2552,9 @@ OO_INTERCEPT(int, setuid, (uid_t uid))
   rc = ci_sys_setuid(uid);
   citp_enter_lib(&lib_context);
   if( rc == 0 ) {
-    CITP_LOCK(&citp_ul_lock);
+    CITP_FDTABLE_LOCK();
     oo_stackname_update(NULL);
-    CITP_UNLOCK(&citp_ul_lock);
+    CITP_FDTABLE_UNLOCK();
   }
   Log_PT(log("PT: setuid(%d) = %d", uid, rc));
   citp_exit_lib(&lib_context, rc >= 0);
@@ -2667,7 +2674,6 @@ OO_INTERCEPT(int, chroot,
   Log_CALL(ci_log("%s(\"%s\")", __FUNCTION__, path));
 
   Log_V(log("chroot intercepted"));
-  (void) citp_onload_dev_major();/* ensure the major dev ID has been cached */
   ci_setup_ipstack_params();     /* save values from /proc */
   ef_driver_save_fd();
   rc = ci_sys_chroot(path);
@@ -2833,7 +2839,7 @@ OO_INTERCEPT(int, bproc_move,
     /* Close and destruct any remaining netifs */
     citp_netif_pre_bproc_move_hook();
 
-    CITP_LOCK(&citp_ul_lock);
+    CITP_FDTABLE_LOCK();
 
     /* Stop the logging, we won't be abole to continue logging to a file
     ** descriptor after migration.
@@ -2847,7 +2853,7 @@ OO_INTERCEPT(int, bproc_move,
     /* Force the complete FD table space to be reprobed */
     citp_fdtable.inited_count = 0;
 
-    CITP_UNLOCK(&citp_ul_lock);
+    CITP_FDTABLE_UNLOCK();
 
     /* Close the old logging FD */
     if (old_citp_log_fd >= 0)

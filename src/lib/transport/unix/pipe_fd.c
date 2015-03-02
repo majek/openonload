@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,7 +57,7 @@ static void citp_pipe_dtor(citp_fdinfo* fdinfo, int fdt_locked)
   LOG_PIPE("%s: done", __FUNCTION__);
 }
 
-static int citp_pipe_close(citp_fdinfo *fdi, int may_cache)
+static int citp_pipe_close(citp_fdinfo *fdi)
 {
   return 0;
 }
@@ -107,6 +107,216 @@ static int citp_pipe_send(citp_fdinfo* fdinfo,
   return ci_pipe_write(epi->ni, epi->pipe, msg->msg_iov, msg->msg_iovlen);
 }
 
+
+#if CI_LIBC_HAS_splice
+
+int citp_splice_pipe_pipe(citp_pipe_fdi* in_pipe_fdi,
+                          citp_pipe_fdi* out_pipe_fdi, size_t rlen, int flags)
+{
+  int non_block = (flags & SPLICE_F_NONBLOCK) || (out_pipe_fdi->pipe->aflags &
+    (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_WRITER_SHIFT));
+  return ci_pipe_zc_move(in_pipe_fdi->ni, in_pipe_fdi->pipe,
+                         out_pipe_fdi->pipe, rlen,
+                         non_block ? MSG_DONTWAIT : 0);
+}
+
+
+/* Copies data from an alien descriptor to pipe
+ *
+ * Some observations on kernel implementation behaviour:
+ * * when alien fd is blocking, the call will block if a single byte cannot
+ *   be read
+ * * when pipe fd is blocking (and no F_NONBLOCK flag) the call will block
+ *   only if a single byte cannot be written
+ * otherwise the call will not block and typically moves
+ *  MIN(alien_fd_data_available, pipe_capacity) bytes...
+ * however read operation on kernel pipe might not always return all data
+ * so it seems there is no warranty all available data has been moved.
+ *
+ * For now we do just one iteration allocating all the necessary iovec memory
+ * to avoid potential block on readv.
+ *
+ * If we new we deal with socket we could use instead of readv with
+ * recvmsg and non-blocking flags.
+ */
+#define CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN 64
+int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
+                           size_t olen, int flags,
+                           citp_lib_context_t* lib_context)
+{
+  citp_pipe_fdi* epi = fdi_to_pipe_fdi(fdi);
+  int len_in_bufs = OO_PIPE_SIZE_TO_BUFS(olen);
+  struct iovec iov_on_stack[CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN];
+  struct iovec* iov = iov_on_stack;
+  int want_buf_count;
+  int rc;
+  int bytes_to_read;
+  int len = olen;
+  int no_more = 1; /* for now we only run single loop */
+  int written_total = 0;
+  int non_block = (flags & SPLICE_F_NONBLOCK) || (epi->pipe->aflags &
+      (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_WRITER_SHIFT));
+  if( fdi_is_reader(fdi) ) {
+    errno = EINVAL;
+    return -1;
+  }
+  if( alien_off ) {
+    /* TODO support this */
+    errno = ENOTSUP;
+    return -1;
+  }
+  do {
+    int count;
+    int iov_num;
+    int bytes_to_write;
+    struct ci_pipe_pkt_list pkts = {};
+    struct ci_pipe_pkt_list pkts2;
+    want_buf_count = len_in_bufs;
+    /* We might need to wait for buffers here on the first iteration */
+    rc = ci_pipe_zc_alloc_buffers(epi->ni, epi->pipe, want_buf_count,
+                                  MSG_NOSIGNAL | (non_block || written_total ?
+                                  MSG_DONTWAIT : 0),
+                                  &pkts);
+    if( rc < 0 && written_total ) {
+      /* whatever the error we need to report already written_bytes */
+      rc = written_total;
+      break;
+    }
+    else if( rc < 0 )
+      break;
+    else if( pkts.count == 0 && non_block ) {
+      errno = EAGAIN;
+      rc = -1;
+      break;
+    }
+    else
+      ci_assert_gt(pkts.count, 0);
+    count = pkts.count;
+
+    if( count > CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN ) {
+      void* niov = realloc(iov == iov_on_stack ? NULL : iov,
+                           sizeof(*iov) * len_in_bufs);
+      if( niov == NULL )
+        /* we can still move quite a few pkts */
+        count = CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN;
+      else
+        niov = iov;
+    }
+
+    ci_assert_ge(count, 1);
+
+    iov_num = count;
+    pkts2 = pkts;
+    bytes_to_read = ci_pipe_list_to_iovec(epi->ni, epi->pipe, iov, &iov_num,
+                                          &pkts2, len);
+
+    citp_exit_lib_if(lib_context, TRUE);
+    /* Note: the following call might be non-blocking as well as blocking */
+    rc = readv(alien_fd, iov, count);
+    citp_reenter_lib(lib_context);
+
+    if( rc > 0 ) {
+      bytes_to_write = rc;
+      written_total += bytes_to_write;
+      len -= bytes_to_write;
+      no_more |= bytes_to_write < bytes_to_read;
+    }
+    else {
+      bytes_to_write = 0;
+      no_more = 1;
+    }
+
+    {
+      /* pipe zc_write will write non_empty buffers and release the empty
+       * ones */
+      int rc2 = ci_pipe_zc_write(epi->ni, epi->pipe, &pkts, bytes_to_write,
+                  CI_PIPE_ZC_WRITE_FLAG_FORCE | MSG_DONTWAIT | MSG_NOSIGNAL);
+      (void) rc2;
+      ci_assert_equal(rc2, bytes_to_write);
+    }
+    /* for now we will not be doing second iteration, to allow for that
+     * we'd need to have guarantee that read will not block
+     * e.g. insight into type of fd and a nonblokcing operation
+     * (to name a valid case: socket, recvmsg) */
+  } while( ! no_more );
+
+  if( iov != iov_on_stack )
+    free(iov);
+  if( rc > 0 )
+    return written_total;
+  if( rc < 0 && errno == EPIPE && ! (flags & MSG_NOSIGNAL) ) {
+    ci_sys_ioctl(ci_netif_get_driver_handle(epi->ni),
+                 OO_IOC_KILL_SELF_SIGPIPE, NULL);
+  }
+  return rc;
+}
+
+
+struct oo_splice_read_context {
+  int alien_fd;
+  size_t len;
+  citp_lib_context_t* lib_context;
+};
+
+
+#define CITP_PIPE_SPLICE_READ_STACK_IOV_LEN 64
+static int oo_splice_read_cb(void* context, struct iovec* iov,
+                             int iov_num, int flags)
+{
+  struct oo_splice_read_context* ctx = context;
+  int rc;
+  citp_exit_lib_if(ctx->lib_context, TRUE);
+  rc = writev(ctx->alien_fd, iov, iov_num);
+  citp_enter_lib(ctx->lib_context);
+  return rc;
+}
+
+
+int citp_pipe_splice_read(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
+                          size_t len, int flags,
+                          citp_lib_context_t* lib_context)
+{
+  citp_pipe_fdi* epi = fdi_to_pipe_fdi(fdi);
+  int rc;
+  int read_len = 0;
+  int non_block = (flags & SPLICE_F_NONBLOCK) || (epi->pipe->aflags &
+       (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_READER_SHIFT));
+  if( ! fdi_is_reader(fdi) ) {
+    errno = EINVAL;
+    return -1;
+  }
+  if( alien_off ) {
+    /* TODO support this */
+    errno = ENOTSUP;
+    return -1;
+  }
+  if( len == 0 )
+    return 0;
+  do {
+    struct oo_splice_read_context ctx = {
+      .alien_fd = alien_fd,
+      .len = len,
+      .lib_context = lib_context
+    };
+    rc = ci_pipe_zc_read(epi->ni, epi->pipe, len,
+                         non_block ? MSG_DONTWAIT : 0,
+                         oo_splice_read_cb, &ctx);
+    if( rc > 0 )
+      read_len += rc;
+  } while(0);
+
+  if( rc < 0 && errno == EPIPE && ! (flags & MSG_NOSIGNAL) ) {
+    ci_sys_ioctl(ci_netif_get_driver_handle(epi->ni),
+                 OO_IOC_KILL_SELF_SIGPIPE, NULL);
+    return rc;
+  }
+  if( rc > 0 )
+    return read_len;
+  return rc;
+}
+#endif
+
+
 #if CI_CFG_USERSPACE_SELECT
 
 
@@ -120,6 +330,13 @@ static int citp_pipe_select_reader(citp_fdinfo* fdinfo, int* n,
 
   epi = fdi_to_pipe_fdi(fdinfo);
   p = epi->pipe;
+
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! ss->stat_incremented) ) {
+    epi->ni->state->stats.spin_select++;
+    ss->stat_incremented = 1;
+  }
+#endif
 
   /* set mask */
   mask = oo_pipe_poll_read_events(p);
@@ -143,6 +360,10 @@ static int citp_pipe_select_writer(citp_fdinfo* fdinfo, int* n,
   epi = fdi_to_pipe_fdi(fdinfo);
   p = epi->pipe;
 
+#if CI_CFG_SPIN_STATS
+  epi->ni->state->stats.spin_select++;
+#endif
+
   /* set mask */
   mask = oo_pipe_poll_write_events(p);
 
@@ -164,6 +385,13 @@ static int citp_pipe_poll_reader(citp_fdinfo* fdinfo, struct pollfd* pfd,
   epi = fdi_to_pipe_fdi(fdinfo);
   p = epi->pipe;
 
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! ps->stat_incremented) ) {
+    epi->ni->state->stats.spin_poll++;
+    ps->stat_incremented = 1;
+  }
+#endif
+
   /* set mask */
   mask = oo_pipe_poll_read_events(p);
 
@@ -184,6 +412,13 @@ static int citp_pipe_poll_writer(citp_fdinfo* fdinfo, struct pollfd* pfd,
   epi = fdi_to_pipe_fdi(fdinfo);
   p = epi->pipe;
 
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! ps->stat_incremented) ) {
+    epi->ni->state->stats.spin_poll++;
+    ps->stat_incremented = 1;
+  }
+#endif
+
   /* set mask */
   mask = oo_pipe_poll_write_events(p);
 
@@ -198,27 +433,56 @@ static int citp_pipe_poll_writer(citp_fdinfo* fdinfo, struct pollfd* pfd,
 
 #ifdef CI_CFG_USERSPACE_EPOLL
 
-static void citp_pipe_epoll_reader(citp_fdinfo* fdinfo,
-                                   struct citp_epoll_member* eitem,
-                                   struct oo_ul_epoll_state* eps)
+static int citp_pipe_epoll_reader(citp_fdinfo* fdinfo,
+                                  struct citp_epoll_member* eitem,
+                                  struct oo_ul_epoll_state* eps,
+                                  int* stored_event)
 {
   unsigned mask;
   struct oo_pipe* pipe = fdi_to_pipe_fdi(fdinfo)->pipe;
-  ci_uint64 sleep_seq = pipe->b.sleep_seq.all;
+  ci_uint64 sleep_seq;
+  int seq_mismatch = 0;
+
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! eps->stat_incremented) ) {
+    fdi_to_pipe_fdi(fdinfo)->ni->state->stats.spin_epoll++;
+    eps->stat_incremented = 1;
+  }
+#endif
+
+  sleep_seq = pipe->b.sleep_seq.all;
   mask = oo_pipe_poll_read_events(pipe);
-  citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+  *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
+                                              &pipe->b.sleep_seq.all,
+                                              &seq_mismatch);
+  return seq_mismatch;
 }
 
 
-static void citp_pipe_epoll_writer(citp_fdinfo* fdinfo,
-                                   struct citp_epoll_member* eitem,
-                                   struct oo_ul_epoll_state* eps)
+static int citp_pipe_epoll_writer(citp_fdinfo* fdinfo,
+                                  struct citp_epoll_member* eitem,
+                                  struct oo_ul_epoll_state* eps,
+                                  int* stored_event)
 {
   unsigned mask;
   struct oo_pipe* pipe = fdi_to_pipe_fdi(fdinfo)->pipe;
-  ci_uint64 sleep_seq = pipe->b.sleep_seq.all;
+  ci_uint64 sleep_seq;
+  int seq_mismatch = 0;
+
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! eps->stat_incremented) ) {
+    fdi_to_pipe_fdi(fdinfo)->ni->state->stats.spin_epoll++;
+    eps->stat_incremented = 1;
+  }
+#endif
+
+  sleep_seq = pipe->b.sleep_seq.all;
   mask = oo_pipe_poll_write_events(pipe);
-  citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+  *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
+                                              &pipe->b.sleep_seq.all,
+                                              &seq_mismatch);
+
+  return seq_mismatch;
 }
 
 #endif
@@ -294,6 +558,25 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
     if( p->b.sigown && (p->b.sb_aflags & CI_SB_AFLAG_O_ASYNC) )
       ci_bit_set(&p->b.wake_request, CI_SB_FLAG_WAKE_RX_B);
     break;
+#ifdef F_SETPIPE_SZ
+  case F_SETPIPE_SZ:
+    /* System pipe buf size is rounded up to power of two. We
+     * cannot replicate this.
+     */
+    rc = ci_pipe_set_size(epi->ni, p, arg);
+    if( rc < 0 ) {
+        errno = EINVAL;
+        rc = CI_SOCKET_ERROR;
+        break;
+    }
+    rc = 0;
+    break;
+#endif
+#ifdef F_GETPIPE_SZ
+  case F_GETPIPE_SZ:
+    rc = (p->bufs_max - 1) * OO_PIPE_BUF_MAX_SIZE;
+    break;
+#endif
   default:
     /* fixme kostik: logging should include some pipe identification */
     errno = ENOTSUP;
@@ -367,6 +650,10 @@ static int citp_pipe_ioctl(citp_fdinfo *fdinfo, int cmd, void *arg)
   return rc;
 }
 
+int citp_pipe_is_spinning(citp_fdinfo* fdinfo)
+{
+  return !!fdi_to_pipe_fdi(fdinfo)->pipe->b.spin_cycles;
+}
 
 
 
@@ -421,6 +708,10 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
 #if CI_CFG_USERSPACE_EPOLL
     .ordered_data   = citp_nonsock_ordered_data,
 #endif
+    .is_spinning   = citp_pipe_is_spinning,
+#if CI_CFG_FD_CACHING
+    .cache          = citp_nonsock_cache,
+#endif
   }
 };
 
@@ -474,6 +765,10 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
 #if CI_CFG_USERSPACE_EPOLL
     .ordered_data   = citp_nonsock_ordered_data,
 #endif
+    .is_spinning   = citp_pipe_is_spinning,
+#if CI_CFG_FD_CACHING
+    .cache          = citp_nonsock_cache,
+#endif
   }
 };
 
@@ -499,8 +794,6 @@ static citp_pipe_fdi *citp_pipe_epi_alloc(ci_netif *ni, int flags)
 /* Should be called when netif is locked */
 static int oo_pipe_init(ci_netif* ni, struct oo_pipe* p)
 {
-  int rc;
-
   ci_assert(ni);
   ci_assert(p);
 
@@ -512,21 +805,16 @@ static int oo_pipe_init(ci_netif* ni, struct oo_pipe* p)
   p->bytes_added = 0;
   p->bytes_removed = 0;
 
-  p->read_ptr.bufid = 0;
-  p->read_ptr.offset = 0;
-
-  p->write_ptr.bufid = 0;
-  p->write_ptr.offset = 0;
-
   p->aflags = 0;
 
-  /* will be set to proper value later */
+  oo_pipe_buf_clear_state(ni, p);
+
   p->bufs_num = 0;
 
-  rc = oo_pipe_alloc_bufs(ni, p, OO_PIPE_INITIAL_BUFS);
-  if( rc < 0 )
-    return -1;
-
+  /* We add extra buffer to ensure we can always fill the pipe to at least
+   * pipe_size bytes. This extra buffer is needed because the buffer
+   * under read_ptr can be blocked */
+  p->bufs_max = OO_PIPE_SIZE_TO_BUFS(CITP_OPTS.pipe_size) + 1;
 
   return 0;
 }
@@ -576,7 +864,6 @@ static int oo_pipe_ctor(ci_netif* netif, struct oo_pipe** out_pipe,
                                  W_SP(&p->b), flags, fds);
   if( rc < 0 ) {
     LOG_E(ci_log("%s: ci_tcp_helper_pipe_attach %d", __FUNCTION__, rc));
-    ci_pipe_all_fds_gone(netif, p, 1);
     errno = -rc;
     rc = -1;
     goto out;
@@ -602,13 +889,11 @@ int citp_pipe_create(int fds[2], int flags)
 
   Log_V(log(LPF "pipe()"));
 
-  CITP_LOCK(&citp_ul_lock);
+  /* citp_netif_exists() does not need citp_ul_lock here */
   if( CITP_OPTS.ul_pipe == CI_UNIX_PIPE_ACCELERATE_IF_NETIF &&
       ! citp_netif_exists() ) {
-    CITP_UNLOCK(&citp_ul_lock);
     return CITP_NOT_HANDLED;
   }
-  CITP_UNLOCK(&citp_ul_lock);
 
   rc = citp_netif_alloc_and_init(&fd, &ni);
   if( rc != 0 ) {

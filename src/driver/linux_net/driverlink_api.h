@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2012 Solarflare Communications Inc.
+ * Copyright 2005-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -50,7 +50,7 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 17
+#define EFX_DRIVERLINK_API_VERSION 21
 
 /**
  * enum efx_dl_ev_prio - Driverlink client's priority level for event handling
@@ -345,6 +345,7 @@ struct efx_dl_ef10_resources {
 	unsigned timer_quantum_ns;
 	unsigned rss_channel_count;
 	enum efx_dl_ef10_resource_flags flags;
+	unsigned int vport_id;
 };
 
 /**
@@ -414,10 +415,17 @@ efx_dl_dev_from_netdev(const struct net_device *net_dev,
 void efx_dl_schedule_reset(struct efx_dl_device *efx_dev);
 
 int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
-			 struct efx_filter_spec *spec, bool replace_equal);
+			 const struct efx_filter_spec *spec,
+			 bool replace_equal);
 int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id);
 int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 			   int filter_id, int rxq_i, int stack_id);
+
+int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev, unsigned vport_id,
+			       const struct efx_filter_spec *spec,
+			       u64 *filter_id_out, bool *is_exclusive_out);
+int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev, unsigned vport_id,
+			       u64 filter_id, bool is_exclusive);
 
 
 /**

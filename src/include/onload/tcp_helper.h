@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -72,6 +72,7 @@ typedef struct tcp_helper_cluster_s {
   uid_t                         thc_euid;
   ci_dllist                     thc_tlos;
   struct tcp_helper_cluster_s*  thc_next;
+  oo_atomic_t                   thc_ref_count;
 } tcp_helper_cluster_t;
 
 
@@ -105,7 +106,7 @@ typedef struct tcp_helper_resource_s {
 #define OO_TRUSTED_LOCK_AWAITING_FREE     0x2
 #define OO_TRUSTED_LOCK_NEED_POLL         0x4
 #define OO_TRUSTED_LOCK_CLOSE_ENDPOINT    0x8
-#define OO_TRUSTED_LOCK_RESET_STACK       0x10
+#define OO_TRUSTED_LOCK_OS_READY          0x10
 #define OO_TRUSTED_LOCK_NEED_PRIME        0x20
   volatile unsigned      trusted_lock;
 
@@ -135,6 +136,7 @@ typedef struct tcp_helper_resource_s {
 
   /*! this is used so we can schedule destruction at task time */
   struct work_struct work_item_dtor;
+  struct completion complete;
 
   /* For deferring work to a non-atomic context. */
   char wq_name[11 + CI_CFG_STACK_NAME_LEN];
@@ -142,14 +144,28 @@ typedef struct tcp_helper_resource_s {
   struct work_struct non_atomic_work;
   /* List of endpoints requiring work in non-atomic context. */
   ci_sllist     non_atomic_list;
+  struct work_struct reset_work;
+
+#ifdef CONFIG_NAMESPACES
+#ifdef ERFM_HAVE_NEW_KALLSYMS
+
+#define EFRM_DO_NAMESPACES
+  /* Namespaces this stack is living into */
+  struct nsproxy *nsproxy;
+#else /* ERFM_HAVE_NEW_KALLSYMS */
+
+/* If CONFIG_IPC_NS is enabled, we really need to handle namespaces.
+ * But we can't without ERFM_HAVE_NEW_KALLSYMS. */
+
+#endif /* ERFM_HAVE_NEW_KALLSYMS */
+#endif /* CONFIG_NAMESPACES */
+
 
 #ifdef  __KERNEL__
   /*! clear to indicate that timer should not restart itself */
   atomic_t                 timer_running;
-  /*! timer tasklet */
-  struct tasklet_struct  tasklet;
-  /*! timer tasklet timer */
-  struct timer_list      timer;
+  /*! timer - periodic poll */
+  struct delayed_work      timer;
 
 #  if HZ < 100
 #   error FIXME: Not able to cope with low HZ at the moment.
@@ -170,8 +186,6 @@ typedef struct tcp_helper_resource_s {
   volatile ci_uint32    trs_aflags;
   /* We've deferred locks to non-atomic handler.  Must close endpoints. */
 # define OO_THR_AFLAG_CLOSE_ENDPOINTS     0x1
-  /* Defer efab_tcp_helper_rm_free_locked() to non-atomic handler. */
-# define OO_THR_AFLAG_RM_FREE             0x2
 
   /*! Spinlock.  Protects:
    *    - ep_tobe_closed
@@ -209,6 +223,23 @@ typedef struct tcp_helper_resource_s {
   pid_t                         thc_tid;
   /* Track list of stacks associated with a single thc */
   struct tcp_helper_resource_s* thc_thr_next;
+
+#ifdef ONLOAD_OFE
+  struct mutex ofe_mutex;
+  struct ofe_configurator* ofe_config;
+#endif
+
+  /* We may need to take the stack lock with irqs disabled (for example
+   * efab_os_callback()).  There are possible paths in the lock dropping code
+   * that are not valid in this context, so we use this tasklet to drop the
+   * lock for us.
+   */
+  struct tasklet_struct         lock_dropper;
+
+  ci_waitable_t         ready_list_waitqs[CI_CFG_N_READY_LISTS];
+  ci_dllist             os_ready_lists[CI_CFG_N_READY_LISTS];
+  spinlock_t            os_ready_list_lock;
+
 } tcp_helper_resource_t;
 
 
@@ -297,6 +328,10 @@ struct tcp_helper_endpoint_s {
                                              * owned by this endpoint.
                                              */
 #define OO_THR_EP_AFLAG_LEGACY_REUSEPORT    0x40
+
+  struct ci_private_s* alien_ref;
+
+  ci_dllink os_ready_link;
 
 
 

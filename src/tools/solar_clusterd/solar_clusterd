@@ -111,8 +111,9 @@ class Server(object):
 
 
     def run(self):
-        signal.signal(signal.SIGINT, self.on_exit)
-        signal.signal(signal.SIGTERM, self.on_exit)
+        for signum in [signal.SIGINT, signal.SIGTERM, signal.SIGHUP,
+                       signal.SIGUSR1, signal.SIGUSR2]:
+            signal.signal(signum, self.on_exit)
         self.listen_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listen_sock.bind(options.socket)
         os.chmod(options.socket, stat.S_IRUSR | stat.S_IWUSR)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -110,6 +110,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
  * \param ep              endpoint kernel data structure 
  * \param supress_hw_ops  set to 1 if you know you are in a context 
  *                        where hw ops are not safe
+ * \param need_update     Whether the filter details need update before clear
  *
  * \return                standard error codes
  *
@@ -117,11 +118,30 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
 
 extern int
 tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep, 
-                                  int supress_hw_ops);
+                                  int supress_hw_ops, int need_update);
 
 extern int
-tcp_helper_endpoint_move_filters(tcp_helper_endpoint_t* ep_from,
-                                 tcp_helper_endpoint_t* ep_to);
+tcp_helper_endpoint_move_filters_pre(tcp_helper_endpoint_t* ep_from,
+                                     tcp_helper_endpoint_t* ep_to);
+extern void
+tcp_helper_endpoint_move_filters_post(tcp_helper_endpoint_t* ep_from,
+                                      tcp_helper_endpoint_t* ep_to);
+extern void
+tcp_helper_endpoint_move_filters_undo(tcp_helper_endpoint_t* ep_from,
+                                      tcp_helper_endpoint_t* ep_to);
+
+
+
+/*--------------------------------------------------------------------
+ *!
+ * Update remote filter details for an endpoint.  Does not update the actual
+ * filter, so is only useful for sockets currently sharing a wild filter.
+ *
+ * \param ep              endpoint kernel data structure 
+ *
+ *--------------------------------------------------------------------*/
+extern void
+tcp_helper_endpoint_update_filter_details(tcp_helper_endpoint_t* ep);
 
 /*--------------------------------------------------------------------
  *!

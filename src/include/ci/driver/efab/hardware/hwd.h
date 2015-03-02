@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,6 +58,7 @@
 #define HWD_FALCONB 0x02
 #define HWD_SIENAA  0x04
 #define HWD_HUNTA   0x08
+#define HWD_MEDFA   0x10
 #define HWD_INVALID 0xff
 
 /* NOTE: in the API's you can also pass in ASCII version
@@ -73,7 +74,7 @@ typedef unsigned char hwd_version_t;
    hwd_* typedefs */
 hwd_version_t hwd_get_version(hwd_version_t version);
 
-#define HWD_MAX_NORM_TABLES 4 /* norm table for each version */
+#define HWD_MAX_NORM_TABLES 5 /* norm table for each version */
 
 /************************************************************/
 #define HWD_OP_ENDIAN_SWAP 0x1

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -90,9 +90,9 @@ int ci_sock_sleep(ci_netif* ni, citp_waitable* w, ci_bits why,
 #if HANDLE_SIGNALS
   ci_assert(si->inside_lib == 0);
   if(CI_UNLIKELY( rc == -EBUSY )) {
-    if( si->run_pending )
+    if( si->aflags & OO_SIGNAL_FLAG_HAVE_PENDING )
       citp_signal_run_pending(si);
-    ci_assert(si->run_pending == 0);
+    ci_assert(~si->aflags & OO_SIGNAL_FLAG_HAVE_PENDING );
     op.lock_flags &= ~(CI_SLEEP_NETIF_LOCKED | CI_SLEEP_SOCK_LOCKED);
     goto again;
   }
@@ -286,7 +286,8 @@ void ci_sock_unlock_slow(ci_netif* ni, citp_waitable* w)
 
 #ifndef __KERNEL__
 
-static int ci_netif_pkt_wait_spin(ci_netif* ni, int* lock_flags, int* done)
+static int ci_netif_pkt_wait_spin(ci_netif* ni, ci_sock_cmn* s,
+                                  int* lock_flags, int* done)
 {
   ci_uint64 start_frc, now_frc;
   int rc = 1;
@@ -321,7 +322,10 @@ static int ci_netif_pkt_wait_spin(ci_netif* ni, int* lock_flags, int* done)
     ci_spinloop_pause();
     /* NB: we do not handle signals here, since memory allocation is
      * considered non-interruptible. */
-  } while( now_frc - start_frc < ni->state->spin_cycles );
+#if CI_CFG_SPIN_STATS
+    ni->state->stats.spin_pkt_wait++;
+#endif
+  } while( now_frc - start_frc < s->b.spin_cycles );
 
   ni->state->is_spinner = 0;
   return rc;
@@ -330,16 +334,17 @@ static int ci_netif_pkt_wait_spin(ci_netif* ni, int* lock_flags, int* done)
 #endif
 
 
-int ci_netif_pkt_wait(ci_netif* ni, int lock_flags)
+int ci_netif_pkt_wait(ci_netif* ni, ci_sock_cmn* s, int lock_flags)
 {
   int rc;
 
   ci_assert(!(lock_flags & CI_SLEEP_NETIF_LOCKED) || ci_netif_is_locked(ni));
 
 #ifndef __KERNEL__
-  if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_PKT_WAIT) ) {
+  if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_PKT_WAIT) &&
+      s != NULL) {
     int done = 0;
-    rc = ci_netif_pkt_wait_spin(ni, &lock_flags, &done);
+    rc = ci_netif_pkt_wait_spin(ni, s, &lock_flags, &done);
     if( done )
       return rc;
   }

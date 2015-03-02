@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -141,6 +141,7 @@ int onload_set_stackname(enum onload_stackname_who who,
                          enum onload_stackname_scope context, 
                          const char* stackname)
 {
+  citp_lib_context_t lib_context;
   char suffix[CI_CFG_STACK_NAME_LEN];
   struct oo_stackname_state *state = 
     oo_stackname_thread_get();
@@ -173,7 +174,8 @@ int onload_set_stackname(enum onload_stackname_who who,
     return -1;
   }
 
-  CITP_LOCK(&citp_ul_lock);
+  citp_enter_lib(&lib_context);
+  CITP_FDTABLE_LOCK();
 
   state->who = who;
   state->context = context;
@@ -192,7 +194,8 @@ int onload_set_stackname(enum onload_stackname_who who,
       oo_stackname_sync_global(state);
   }
 
-  CITP_UNLOCK(&citp_ul_lock);
+  CITP_FDTABLE_UNLOCK();
+  citp_exit_lib(&lib_context, TRUE);
   return 0;
 }
 
@@ -253,7 +256,7 @@ void oo_stackname_get(char **stackname)
     oo_stackname_thread_get();
 
   ci_assert(state != NULL);
-  ci_assert(CITP_ISLOCKED(&citp_ul_lock));
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   /* First look at this thread's configuration to decide where to
    * search for the stack */
@@ -321,7 +324,7 @@ oo_stackname_update_local_state(struct oo_stackname_state *state,
 
   ci_assert(state != NULL);
   ci_assert(cache != NULL);
-  ci_assert(CITP_ISLOCKED(&citp_ul_lock));
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   state->context = cache->context;
   state->who = cache->who;
@@ -371,7 +374,7 @@ void oo_stackname_update(struct oo_stackname_state *cache)
   struct oo_stackname_state *state = 
     oo_stackname_thread_get();
 
-  ci_assert(CITP_ISLOCKED(&citp_ul_lock));
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   if( cache )
     oo_stackname_update_local_state(state, cache);

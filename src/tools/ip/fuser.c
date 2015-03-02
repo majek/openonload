@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,7 @@
 #include <ci/internal/ip.h>
 #include <onload/common.h>
 #include <ci/app/testapp.h>
+#include <onload/ul.h>
 
 static int cfg_kill = 0;
 static int cfg_verbose = 0;
@@ -67,52 +68,6 @@ static void usage(const char* msg)
 }
 
 
-
-struct universal_constats {
-  ci_uint32 onloadfs_st_dev;
-  dev_t dev_onload;
-  dev_t dev_onload_epoll;
-};
-
-static void
-find_universal_constats(struct universal_constats *uc)
-{
-  int fd;
-  struct stat st;
-
-  if( (fd = open(EFAB_DEV, O_RDWR)) < 0 ) {
-    perror("open onload device");
-    exit(1);
-  }
-  if( fstat(fd, &st) != 0 ) {
-    perror("fstat onload device");
-    exit(1);
-  }
-  uc->dev_onload = st.st_rdev;
-  if( ioctl(fd, OO_IOC_GET_ONLOADFS_DEV, &uc->onloadfs_st_dev) != 0 ) {
-    perror("device number of onloadfs");
-    exit(1);
-  }
-  if( close(fd) != 0 ) {
-    perror("close onload device");
-    exit(1);
-  }
-
-  if( (fd = open(OO_EPOLL_DEV, O_RDWR)) < 0 ) {
-    perror("open onload epoll device");
-    exit(1);
-  }
-  if( fstat(fd, &st) != 0 ) {
-    perror("fstat onload epoll device");
-    exit(1);
-  }
-  uc->dev_onload_epoll = st.st_rdev;
-  if( close(fd) != 0 ) {
-    perror("close onload epoll device");
-    exit(1);
-  }
-}
-
 #define MAX_PATHNAME 200
 #define MAX_CMDNAME 16
 #define MAX_CMDLINE 60
@@ -127,7 +82,6 @@ struct procs {
 int
 main(int argc, char* argv[])
 {
-  struct universal_constats uc;
   struct procs *proc_head = NULL;
   DIR *proc_dir, *fd_dir;
   struct dirent *proc_dent, *fd_dent;
@@ -139,8 +93,6 @@ main(int argc, char* argv[])
 
   ci_app_usage = usage;
   ci_app_getopt(USAGE_STR, &argc, argv, cfg_opts, N_CFG_OPTS);
-
-  find_universal_constats(&uc);
 
   /* Scan /proc/ and put all onloaded processes into proc_head list */
   if( (proc_dir = opendir("/proc")) == NULL ) {
@@ -163,9 +115,9 @@ main(int argc, char* argv[])
                 pid, fd_dent->d_name);
        if (stat(filepath, &st) != 0)
         continue;
-       if( st.st_rdev == uc.dev_onload ||
-           st.st_rdev == uc.dev_onload_epoll ||
-           st.st_dev == uc.onloadfs_st_dev ) {
+       if( st.st_rdev == oo_get_st_rdev(OO_STACK_DEV) ||
+           st.st_rdev == oo_get_st_rdev(OO_EPOLL_DEV) ||
+           st.st_dev == oo_onloadfs_dev_t() ) {
         proc = malloc(sizeof(struct procs));
         proc->pid = pid;
 

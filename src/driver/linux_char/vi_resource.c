@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -121,7 +121,7 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
   if (vi_flags & EFHW_VI_RX_PACKED_STREAM)
     efrm_vi_attr_set_packed_stream(attr, 1);
 
-  if ((rc = efrm_vi_alloc(client, attr, &virs)) < 0)
+  if ((rc = efrm_vi_alloc(client, attr, 1, NULL, &virs)) < 0)
     goto fail_vi_alloc;
 
   /* We have to jump through some hoops here:
@@ -144,7 +144,10 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
 
   /* Size EVQ sensibly based on RX and TX Q sizes */
   if (evq_virs == NULL && evq_capacity < 0) {
-    if (vi_flags & EFHW_VI_TX_TIMESTAMPS) {
+    if (vi_flags & EFHW_VI_RX_PACKED_STREAM) {
+      evq_capacity = 32 * 1024;
+    }
+    else if (vi_flags & EFHW_VI_TX_TIMESTAMPS) {
       if (txq_capacity == 0) {
         rc = -EINVAL;
         goto fail_q_alloc;
@@ -199,7 +202,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   struct efrm_vi *virs = NULL;
   struct efrm_vi_attr attr;
   struct efhw_nic *nic;
-  int rc;
+  int rc, ps_buf_size;
 
   ci_assert(alloc != NULL);
   ci_assert(rt != NULL);
@@ -249,6 +252,12 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
     }
   }
 
+  if( alloc_in->ps_buf_size_kb == 0 )
+    ps_buf_size = 1024 * 1024;
+  else
+    ps_buf_size = (int) alloc_in->ps_buf_size_kb * 1024;
+  efrm_vi_attr_set_ps_buffer_size(&attr, ps_buf_size);
+
   rc = vi_resource_alloc(&attr, client, evq ? efrm_vi(evq) : NULL,
                          alloc_in->flags | EFHW_VI_JUMBO_EN,
                          alloc_in->evq_capacity,
@@ -294,6 +303,8 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   alloc_out->mem_mmap_bytes = virs->mem_mmap_bytes;
   alloc_out->rx_prefix_len = virs->rx_prefix_len;
   alloc_out->out_flags = virs->out_flags;
+  alloc_out->out_flags |= EFHW_VI_PS_BUF_SIZE_SET;
+  alloc_out->ps_buf_size = virs->ps_buf_size;
 
   rs->rs_base = &virs->rs;
   EFCH_TRACE("%s: Allocated "EFRM_RESOURCE_FMT" rc=%d", __FUNCTION__,
@@ -318,7 +329,7 @@ void efch_vi_rm_free(efch_resource_t *rs)
   struct efrm_vi *virs = efrm_vi(rs->rs_base);
   if( virs->evq_callback_fn != NULL )
     efrm_eventq_kill_callback(virs);
-  efch_filter_list_free(rs->rs_base, &rs->vi.fl);
+  efch_filter_list_free(rs->rs_base, efrm_vi_get_pd(virs), &rs->vi.fl);
   /* Remove any sniff config we may have set up. */
   if( rs->vi.sniff_flags & EFCH_RX_SNIFF )
     efrm_port_sniff(rs->rs_base, 0, 0, -1);
@@ -467,11 +478,13 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       break;
 
     case CI_RSOP_FILTER_BLOCK_KERNEL:
-      rc = efch_filter_list_op_block(rs->rs_base, &rs->vi.fl, op);
+      rc = efch_filter_list_op_block(rs->rs_base, efrm_vi_get_pd(virs),
+                                     &rs->vi.fl, op);
       break;
 
     case CI_RSOP_FILTER_DEL:
-      rc = efch_filter_list_op_del(rs->rs_base, &rs->vi.fl, op);
+      rc = efch_filter_list_op_del(rs->rs_base, efrm_vi_get_pd(virs),
+                                   &rs->vi.fl, op);
       break;
 
     case CI_RSOP_VI_GET_RX_ERROR_STATS:
@@ -493,8 +506,8 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       }
 
     default:
-      rc = efch_filter_list_op_add(rs->rs_base, &rs->vi.fl, op, copy_out, 0u,
-                                   -1);
+      rc = efch_filter_list_op_add(rs->rs_base, efrm_vi_get_pd(virs),
+                                   &rs->vi.fl, op, copy_out, 0u, -1);
       break;
   }
   return rc;
@@ -504,11 +517,12 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
 /*** Resource manager methods ********************************************/
 
 static int efch_vi_rm_mmap(struct efrm_resource *rs, unsigned long *bytes,
-                           void *opaque, int *map_num, unsigned long *offset,
-                           int index)
+                           void *opaque, int index)
 {
+  int map_num = 0;
+  unsigned long offset = 0;
   return efab_vi_resource_mmap(efrm_vi(rs), bytes, opaque,
-                               map_num, offset, index);
+                               &map_num, &offset, index);
 }
 
 

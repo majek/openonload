@@ -47,10 +47,21 @@ cat >"$header" <<EOF
 EOF
 
 for sym in __read_chk __recv_chk __recvfrom_chk \
-           accept4 pipe2 dup3  epoll_pwait ppoll sendmmsg; do
+           accept4 pipe2 dup3  epoll_pwait ppoll sendmmsg splice; do
     find_sym "$libc_path" "$sym" "$header"
 done
 
-echo -n "#define CI_HAVE_PCAP " >>$header
-check_library_presence pcap.h pcap >>$header
-
+{
+echo -n "#define CI_HAVE_PCAP "
+check_library_presence pcap.h pcap
+echo -n "#define CI_HAVE_SPLICE_RETURNS_INT "
+check_prototype fcntl.h splice \
+    "int (*foo)(int, loff_t*, int, loff_t*, size_t, unsigned int)"
+echo -n "#define CI_HAVE_SPLICE_RETURNS_SSIZE_T "
+check_prototype fcntl.h splice \
+    "ssize_t (*foo)(int, loff_t*, int, loff_t*, size_t, unsigned int)"
+echo -n "#define CI_HAVE_RECVMMSG_CONST_TIMESPEC "
+check_prototype sys/socket.h recvmmsg \
+    "int (*foo)(int, struct mmsghdr*, unsigned int, int,
+                const struct timespec*)"
+} >> $header

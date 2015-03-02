@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,6 +69,7 @@ struct efch_vi_alloc_in {
   uint32_t            flags;  /* EFAB_VI_* flags */
   uint8_t             tx_q_tag;
   uint8_t             rx_q_tag;
+  uint16_t            ps_buf_size_kb;
 };
 
 
@@ -85,6 +86,7 @@ struct efch_vi_alloc_out {
   int32_t             instance;
   uint32_t            rx_prefix_len;
   uint32_t            out_flags; /* EFAB_VI_* flags */
+  uint32_t            ps_buf_size;
 };
 
 
@@ -117,11 +119,13 @@ struct efch_pio_alloc {
 #define EFCH_PD_FLAG_VF_OPTIONAL      0x2
 #define EFCH_PD_FLAG_PHYS_ADDR        0x4
 #define EFCH_PD_FLAG_RX_PACKED_STREAM 0x8
+#define EFCH_PD_FLAG_VPORT            0x10
 
 
 struct efch_pd_alloc {
   int32_t             in_ifindex;
   uint32_t            in_flags;
+  int16_t             in_vlan_id;
 };
 
 
@@ -269,9 +273,11 @@ typedef struct ci_license_challenge_op_s {
   efch_resource_id_t    pd_id;
 
   ci_int16          feature;
-/* SolarCapture Pro feature id. Well known. */
+/* Feature IDs. Well known. */
+#define CI_LCOP_CHALLENGE_FEATURE_ONLOAD    (1)
 #define CI_LCOP_CHALLENGE_FEATURE_SCPRO     (4)
 #define CI_LCOP_CHALLENGE_FEATURE_SCLIVE    (32)
+#define CI_LCOP_CHALLENGE_FEATURE_SCSI      (64)
 
   uint32_t          expiry;
   uint8_t           challenge[CI_LCOP_CHALLENGE_CHALLENGE_LEN];

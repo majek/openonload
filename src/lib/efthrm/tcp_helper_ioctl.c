@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -33,6 +33,9 @@
 #include <onload/efabcfg.h>
 #include <onload/oof_interface.h>
 #include <onload/version.h>
+#ifdef ONLOAD_OFE
+#include "ofe/onload.h"
+#endif
 
 
 int
@@ -151,11 +154,17 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   /* Validate and find the endpoint. */
   if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
     return -EINVAL;
+
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
-  if( tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
-      OO_THR_EP_AFLAG_ATTACHED )
-    return -EBUSY;
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  if( (tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
+       OO_THR_EP_AFLAG_ATTACHED) &&
+      !(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) )
+    return -EBUSY;
+
+  ci_atomic32_and(&wo-> waitable.sb_aflags,
+                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+
 
   /* create OS socket */
   if( op->domain != AF_UNSPEC ) {
@@ -166,7 +175,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
     if( rc < 0 ) {
       LOG_E(ci_log("%s: ERROR: sock_create(%d, %d, 0) failed (%d)",
                    __FUNCTION__, op->domain, type, rc));
-      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+      efab_tcp_helper_close_endpoint(trs, ep->id);
       return rc;
     }
     os_file = sock_alloc_file(sock, flags, NULL);
@@ -174,7 +183,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
       LOG_E(ci_log("%s: ERROR: sock_alloc_file failed (%ld)",
                    __FUNCTION__, PTR_ERR(os_file)));
       sock_release(sock);
-      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+      efab_tcp_helper_close_endpoint(trs, ep->id);
       return PTR_ERR(os_file);
     }
     rc = efab_attach_os_socket(ep, os_file);
@@ -182,7 +191,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
       LOG_E(ci_log("%s: ERROR: efab_attach_os_socket failed (%d)",
                    __FUNCTION__, rc));
       /* NB. efab_attach_os_socket() consumes [os_file] even on error. */
-      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+      efab_tcp_helper_close_endpoint(trs, ep->id);
       return rc;
     }
     wo->sock.domain = op->domain;
@@ -193,23 +202,44 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
     wo->sock.uid = __kuid_val(ep->os_socket->file->f_dentry->d_inode->i_uid);
 #endif
   }
+#if CI_CFG_FD_CACHING
+  else {
+    /* AF_UNSPEC implies this is a TCP accept */
+    ci_assert(wo->waitable.state & CI_TCP_STATE_TCP);
+
+    /* There are ways that a cached socket may have had its fd closed.  If
+     * that happens we come through this ioctl to get a new one, so update the
+     * state to reflect that.
+     */
+    if( wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ) {
+      ci_assert(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE);
+      ci_atomic32_and(&wo->waitable.sb_aflags, ~CI_SB_AFLAG_CACHE_PRESERVE);
+      wo->tcp.cached_on_fd = -1;
+      wo->tcp.cached_on_pid = -1;
+    }
+  }
+#endif
 
   /* Create a new file descriptor to attach the stack to. */
   ci_assert((wo->waitable.state & CI_TCP_STATE_TCP) ||
             wo->waitable.state == CI_TCP_STATE_UDP);
-  rc = oo_create_fd(ep, flags,
-                    (wo->waitable.state & CI_TCP_STATE_TCP) ?
-                    CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP);
+  rc = oo_create_ep_fd(ep, flags,
+                       (wo->waitable.state & CI_TCP_STATE_TCP) ?
+                       CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP);
   if( rc < 0 ) {
-    ci_irqlock_state_t lock_flags;
-    struct oo_file_ref* os_socket;
-    ci_irqlock_lock(&ep->thr->lock, &lock_flags);
-    os_socket = ep->os_socket;
-    ep->os_socket = NULL;
-    ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
-    if( os_socket != NULL )
-      oo_file_ref_drop(os_socket);
-    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+    /* dirty hack:
+     * - accept() does not touch the ep - no need to clear it up;
+     * - accept() needs the tcp state survive
+     * - only accept() does not specity domain as it does not need the OS
+     *   socket.
+     * todo: make a separate ioctl for accept(). */
+    if( op->domain == AF_UNSPEC ) {
+      ci_atomic32_or(&wo-> waitable.sb_aflags,
+                     CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+    }
+    else
+      efab_tcp_helper_close_endpoint(trs, ep->id);
     return rc;
   }
 
@@ -217,6 +247,10 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
 #ifdef SOCK_NONBLOCK
   if( op->type & SOCK_NONBLOCK )
     ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_NONBLOCK);
+#endif
+#ifdef SOCK_CLOEXEC
+  if( op->type & SOCK_CLOEXEC )
+    ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_CLOEXEC);
 #endif
 
   /* Re-read the OS socket buffer size settings.  This ensures we'll use
@@ -232,6 +266,7 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   oo_pipe_attach_t* op = arg;
   tcp_helper_resource_t* trs = priv->thr;
   tcp_helper_endpoint_t* ep = NULL;
+  citp_waitable_obj *wo;
   int rc;
 
   OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
@@ -248,17 +283,26 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
       OO_THR_EP_AFLAG_ATTACHED )
     return -EBUSY;
 
-  rc = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_READER);
+  wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  ci_atomic32_and(&wo->waitable.sb_aflags,
+                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+
+  rc = oo_create_ep_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_READER);
   if( rc < 0 ) {
-    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+    LOG_E(ci_log("%s: ERROR: failed to bind reader [%d:%d] to fd",
+                 __func__, trs->id, ep->id));
+    tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_PEER_CLOSED);
+    efab_tcp_helper_close_endpoint(trs, ep->id);
     return rc;
   }
   op->rfd = rc;
 
-  rc = oo_create_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_WRITER);
+  rc = oo_create_ep_fd(ep, op->flags, CI_PRIV_TYPE_PIPE_WRITER);
   if( rc < 0 ) {
+    LOG_E(ci_log("%s: ERROR: failed to bind writer [%d:%d] to fd",
+                 __func__, trs->id, ep->id));
     efab_linux_sys_close(op->rfd);
-    tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
+    efab_tcp_helper_close_endpoint(trs, ep->id);
     return rc;
   }
   op->wfd = rc;
@@ -411,7 +455,7 @@ efab_ep_filter_clear(ci_private_t *priv, void *arg)
   int rc = efab_ioctl_get_ep(priv, op->tcp_id, &ep);
   if (rc != 0)
     return rc;
-  return tcp_helper_endpoint_clear_filters(ep, 0);
+  return tcp_helper_endpoint_clear_filters(ep, 0, op->need_update);
 }
 static int
 efab_ep_filter_mcast_add(ci_private_t *priv, void *arg)
@@ -450,6 +494,81 @@ efab_cluster_dump(ci_private_t *priv, void *arg)
   return tcp_helper_cluster_dump(priv->thr, CI_USER_PTR_GET(op->buf),
                                  op->buf_len);
 }
+
+#ifdef ONLOAD_OFE
+static int
+efab_ofe_config(ci_private_t *priv, void *arg)
+{
+  oo_ofe_config_t *op = arg;
+  enum ofe_status orc;
+  char *str;
+
+  if( priv->thr->netif.ofe == NULL )
+    return -EINVAL;
+
+  str = kmalloc(op->len + 1, GFP_KERNEL);
+  if( str == NULL )
+    return -ENOMEM;
+  str[op->len] = '\0';
+  if( copy_from_user(str, CI_USER_PTR_GET(op->str), op->len) ) {
+    kfree(str);
+    return -EFAULT;
+  }
+
+  mutex_lock(&priv->thr->ofe_mutex);
+  if( priv->thr->ofe_config == NULL ) {
+    orc = ofe_config_alloc(&priv->thr->ofe_config, priv->thr->netif.ofe);
+    if( orc != OFE_OK ) {
+      mutex_unlock(&priv->thr->ofe_mutex);
+      return -ofe_rc2errno(orc);
+    }
+  }
+  ci_assert(priv->thr->ofe_config);
+
+  orc = ofe_config_command(priv->thr->ofe_config, str);
+  mutex_unlock(&priv->thr->ofe_mutex);
+  kfree(str);
+  if( orc != OFE_OK )
+    return -ofe_rc2errno(orc);
+  return 0;  
+}
+static int
+efab_ofe_config_done(ci_private_t *priv, void *arg)
+{
+  enum ofe_status orc;
+
+  if( priv->thr->netif.ofe == NULL )
+    return -EINVAL;
+
+  mutex_lock(&priv->thr->ofe_mutex);
+  if( priv->thr->ofe_config != NULL ) {
+    orc = ofe_config_free(priv->thr->ofe_config);
+    priv->thr->ofe_config = NULL;
+    if( orc != OFE_OK ) {
+      mutex_unlock(&priv->thr->ofe_mutex);
+      ci_log("%s: ERROR %s", __func__,
+             ofe_engine_get_last_error(priv->thr->netif.ofe));
+      return 0;
+    }
+  }
+  mutex_unlock(&priv->thr->ofe_mutex);
+  return 0;
+}
+static int
+efab_ofe_get_last_error(ci_private_t *priv, void *arg)
+{
+  const char *msg;
+
+  if( priv->thr->netif.ofe == NULL )
+    return -EINVAL;
+
+  msg = ofe_engine_get_last_error(priv->thr->netif.ofe);
+  mutex_lock(&priv->thr->ofe_mutex);
+  strncpy(arg, msg, CI_LOG_MAX_LINE);
+  mutex_unlock(&priv->thr->ofe_mutex);
+  return 0;
+}
+#endif
 
 
 /*--------------------------------------------------------------------
@@ -716,27 +835,13 @@ efab_tcp_helper_more_socks_rsop(ci_private_t* priv, void *unused)
     return -EINVAL;
   return efab_tcp_helper_more_socks(priv->thr);
 }
-#if CI_CFG_USERSPACE_PIPE
+#if CI_CFG_FD_CACHING
 static int
-efab_tcp_helper_pipebufs_to_socks_rsop(ci_private_t* priv, void *unused)
+efab_tcp_helper_clear_epcache_rsop(ci_private_t* priv, void *unused)
 {
   if (priv->thr == NULL)
     return -EINVAL;
-  return efab_tcp_helper_pipebufs_to_socks(priv->thr);
-}
-static int
-efab_tcp_helper_more_pipe_bufs_rsop(ci_private_t* priv,
-                                    void* req)
-{
-  oo_tcp_sock_more_pipe_bufs_t* bufs_req =
-    (oo_tcp_sock_more_pipe_bufs_t* )req;
-
-  if (priv->thr == NULL)
-    return -EINVAL;
-
-  return efab_tcp_helper_more_pipe_bufs(&priv->thr->netif,
-                                        bufs_req->bufs_num,
-                                        &bufs_req->bufs_start);
+  return efab_tcp_helper_clear_epcache(priv->thr);
 }
 #endif
 static int
@@ -1117,15 +1222,12 @@ ioctl_ep_info(ci_private_t *priv, void *arg)
 static int
 ioctl_clone_fd(ci_private_t *priv, void *arg)
 {
-  ci_clone_fd_t *clone_fd = arg;
-  int flags = 0;
-  if( clone_fd->flags )
-    flags = O_CLOEXEC;
-  clone_fd->fd = oo_clone_fd (priv->_filp, 0, flags);
-  if (clone_fd->fd < 0) {
+  ci_clone_fd_t *op = arg;
+  op->fd = oo_clone_fd (priv->_filp, op->do_cloexec);
+  if (op->fd < 0) {
     ci_log("clone fd ioctl: get_unused_fd() failed, errno=%d",
-           -(int)clone_fd->fd); 
-    return clone_fd->fd;
+           -(int)(op->fd)); 
+    return op->fd;
   }
   return 0;
 }
@@ -1203,6 +1305,15 @@ fail2:
   return rc;
 }
 
+
+static int oo_get_cpu_khz_rsop(ci_private_t *priv, void *arg)
+{
+  ci_uint32* cpu_khz = arg;
+  oo_timesync_wait_for_cpu_khz_to_stabilize();
+  *cpu_khz = oo_timesync_cpu_khz;
+  return 0;
+}
+
 /*************************************************************************
  * ATTENTION! ACHTUNG! ATENCION!                                         *
  * This table MUST be synchronised with enum of OO_OP_* operations!      *
@@ -1243,10 +1354,6 @@ oo_operations_table_t oo_operations[] = {
 
   op(OO_IOC_TCP_SOCK_SLEEP,   efab_tcp_helper_sock_sleep_rsop),
   op(OO_IOC_WAITABLE_WAKE,    efab_tcp_helper_waitable_wake_rsop),
-#if CI_CFG_FD_CACHING
-  op(OO_IOC_TCP_CAN_CACHE_FD, efab_tcp_helper_can_cache_fd),
-  op(OO_IOC_TCP_XFER,         efab_tcp_helper_xfer_cached),
-#endif
 
   op(OO_IOC_EP_FILTER_SET,       efab_ep_filter_set),
   op(OO_IOC_EP_FILTER_CLEAR,     efab_ep_filter_clear),
@@ -1260,9 +1367,8 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_PKT_WAIT,       efab_tcp_helper_pkt_wait_rsop),
   op(OO_IOC_TCP_MORE_BUFS,      efab_tcp_helper_more_bufs_rsop),
   op(OO_IOC_TCP_MORE_SOCKS,     efab_tcp_helper_more_socks_rsop),
-#if CI_CFG_USERSPACE_PIPE
-  op(OO_IOC_TCP_PIPEBUFS_TO_SOCKS, efab_tcp_helper_pipebufs_to_socks_rsop),
-  op(OO_IOC_TCP_MORE_PIPE_BUFS, efab_tcp_helper_more_pipe_bufs_rsop),
+#if CI_CFG_FD_CACHING
+  op(OO_IOC_TCP_CLEAR_EPCACHE,  efab_tcp_helper_clear_epcache_rsop),
 #endif
 
   op(OO_IOC_STACK_ATTACH,      efab_tcp_helper_stack_attach ),
@@ -1282,6 +1388,7 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_LISTEN_OS_SOCK,    efab_tcp_helper_listen_os_sock_rsop),
   op(OO_IOC_TCP_CONNECT_OS_SOCK,   efab_tcp_helper_connect_os_sock),
   op(OO_IOC_TCP_HANDOVER,          efab_tcp_helper_handover),
+  op(OO_IOC_FILE_MOVED,            oo_file_moved_rsop),
   op(OO_IOC_TCP_CLOSE_OS_SOCK,     efab_tcp_helper_set_tcp_close_os_sock_rsop),
 
   op(OO_IOC_CP_IPIF_ADDR_KIND,     cicp_ipif_addr_kind_rsop),
@@ -1322,5 +1429,11 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_MOVE_FD, efab_file_move_to_alien_stack_rsop),
   op(OO_IOC_EP_REUSEPORT_BIND, efab_tcp_helper_reuseport_bind),
   op(OO_IOC_CLUSTER_DUMP,      efab_cluster_dump),
+#ifdef ONLOAD_OFE
+  op(OO_IOC_OFE_CONFIG, efab_ofe_config),
+  op(OO_IOC_OFE_CONFIG_DONE, efab_ofe_config_done),
+  op(OO_IOC_OFE_GET_LAST_ERROR, efab_ofe_get_last_error),
+#endif
+  op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
 #undef op
 };

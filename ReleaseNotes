@@ -1,569 +1,295 @@
-
-OpenOnload-201405-u2 Release Notes
-==================================
-
-This is an update release that fixes two important bugs in the
-openonload-201405-u1 release.
-
-The first is in the ef_vi API included with Onload.  This concerns the
-way that memory is registered via the ef_vi API (it does not affect
-users who only use Onload) and can result in arbitrary memory on the
-system becoming corrupted.  Please see SF-113792-KI in the known
-issues database on https://support.solarflare.com/ for full details.
-
-The second is in the bonding code within Onload, and fixes a memory
-leak that occurs once an LACP 802.3ad bond is configured on the
-system.  Please see SF-113764-KI in the known issues database on
-https://support.solarflare.com/ for full details.
-
-In addition, an updated net driver is included to allow building on
-RHEL6.6 and other recent Linux kernel versions.
-
-Please see the ChangeLog file for details of the changes in this release.
-
-The Release Notes for the openonload-201405-u1 release are included at the
-end of this file.
-
-
-OpenOnload-201405-u1 Release Notes
-==================================
-
-This is an update release that fixes bugs in the openonload-201405
-release and adds a few enhancements that are needed to support
-SolarCapture 1.3.
-
-The accompanying ChangeLog file contains details of the changes made
-in this release.
-
-Please see ReleaseNotes-sfc for details of the changes to the SFC net
-driver included with this release.
-
-The Release Notes for the openonload-201405 release are included at the
-end of this file.
-
-
-----------------------------------------
-New Configuration Options
--------------------------
-
-EF_CLUSTER_IGNORE
------------------
-
-When set, this option instructs Onload to ignore attempts to use
-clusters and effectively ignore attempts to set SO_REUSEPORT.  This
-may be useful if third-party software is setting SO_REUSEPORT but is
-hitting one of the limitations set out in the openonload-201405
-release notes below.
-
-
-----------------------------------------
-New features
-------------
-
-SIOCOUTQ/SIOCOUTQNSD
---------------------
-
-Onload now supports the above ioctls for TCP sockets, returning the
-amount of data not yet acknowledged and the amount of data not yet sent
-respectively.
-
-ef_vi API changes
------------------
-
-This release adds two new functions to the ef_vi API:
-
-ef_pd_interface_name()
- - returns the interface name used by this ef_pd.  This can be useful
-   when an ef_pd is allocated using ef_pd_alloc_by_name() as the caller
-   may not know which interface the ef_pd is associated with.
-
-ef_vi_prime()
- - prime interrupts on this VI.
-
-   The ef_vi layer now supports blocking on a fd until it has events
-   ready.  This feature provides the functionality that is already
-   provided by ef_eventq_wait() with the added benefit that as you are
-   blocking on a fd, you can block for events on an VI along with
-   other fds at the same time.
-
-   The fd to use for blocking is the driver handle that was used to
-   allocate the VI.
-
-   Before you can block on the fd, you need to prime interrupts on the
-   VI.  This is done by calling ef_vi_prime().  When this function is
-   called, you must tell it how many events you've read from the
-   eventq which can be retrieved by using ef_eventq_current().  Then
-   you can simply block on the fd becoming readable by using select(),
-   poll(), epoll(), etc.  When the fd is returned as reablable, you
-   can then get the associated events by polling the eventq in the
-   normal way.  Note that at this point, you must call ef_vi_prime()
-   again (with the current value from ef_eventq_current()) before
-   blocking on the fd again.
-
-   The efpingpong example code has been updated to offer a simple
-   example.
-
-This release also adds a new filter type to sniff TX traffic.  This
-filter allows an ef_vi application to get a copy of all traffic being
-sent out on an interface.
-
-SO_REUSEADDR
-------------
-
-This release improves support for the SO_REUSEADDR socket option for
-TCP active open sockets that are sharing a stack.  Previously, whether
-this worked depended on the state of other sockets in the stack.
-Sockets trying to share a local address in different Onload stacks will
-still get an error on bind() despite setting SO_REUSEADDR.
-
-
-----------------------------------------
-Packed stream firmware
-----------------------
-
-Solarflare has created a new firmware variant for the 7000-series
-(Flareon) NICs to allow SolarCapture to capture at higher packet
-rates.  This variant is called "packed stream firmware".  Due to
-limitations in the filter types supported by this firmware Onload will
-not accelerate traffic over NICs running this firmware type.  It is
-still possible to use ef_vi applications (including SolarCapture) with
-this firmware variant, but depending on the applications' use of
-hardware filters you may not be able to insert all the required filter
-types.
-
-
-----------------------------------------
-Performance
------------
-
-The throughput performance regression in the OpenOnload-201405 release
-(see Release Notes below) for interrupt-driven small messages has been
-largely addressed by fixes in this release.
-
-
-----------------------------------------
-New Known Issues
-----------------
-
- - The Onload extension API function onload_move_fd() introduced in
-openonload-201405 does not check that the destination stack is capable
-of RX or TX hardware timestamping before moving the socket.  Sockets
-using SO_TIMESTAMPING should therefore use this function with care.
-We aim to address this in a future release.
-
- - Users of ef_vi or SolarCapture running two applications that both
-attempt to install a unicast-all filter will find that the second one
-succeeds instead of getting an error.  The second application to
-install the filter will receive all the matching traffic and the first
-will stop receiving matching traffic.  The same is true for the
-multicast-all filter.  This will be fixed in a future release.
-
- - "onload_tool reload" on RHEL7 when used with multiple VFs configured
-may return errors from modprobe and mknod about files in /dev already
-existing:
-
-    onload_tool: /sbin/modprobe onload
-    mknod: '/dev/sfc_affinity': File exists
-    onload_tool: FAILED: mknod -m 666 /dev/sfc_affinity c 246 0
-    modprobe: ERROR: Error running install command for sfc_affinity
-    modprobe: ERROR: could not insert 'onload': Operation not permitted
-
-These errors appear to be harmless - it is repeating the operation to
-create the /dev files on discovering the additional VFs - and the
-modules are all loaded correctly but we are investigating how this can
-be avoided on this OS.
-
- - This release makes a change to the way that the ef_vi function
-ef_memreg_alloc() validates the memory regions it is passed.
-Previously it did not check that the start of the region was 4KB
-aligned.  Now it does, and returns -EINVAL if the memory region is
-not suitably aligned.
-
-
-
-OpenOnload-201405 Release Notes
+OpenOnload-201502 Release Notes
 ===============================
 
 This is a major update release that adds new features to OpenOnload.
 
-Below is a brief summary of the new features and limitations that we
-are aware of.  See the ChangeLog for further details and bugs fixed.
+Below is a brief summary of the new features and any limitations that
+we are aware of.  See the ChangeLog for further details and bugs
+fixed.
 
 
-Hardware multicast loopback
----------------------------
-Onload now supports two modes of multicast loopback:
- - software loopback where two sockets are sharing a stack;
- - hardware loopback with no requirement for stack sharing.
-
-Hardware multicast loopback enables multicast traffic to be passed
-between onload stacks. This allows applications running on the same
-machine to benefit from onload acceleration without the need to share
-a stack and so avoid problems such as lock contention or resource
-shortages.
-
-To use hardware multicast loopback you must have:
- - SFC 7000-series (Flareon) NIC;
- - updated firmware to v4_0_7_6710 or later;
- - selected fully featured firmware variant via the sfboot utility.
-
-Note: the feature is not supported on the low-latency firmware
-variant.
-
-Multicast loopback is controlled per OpenOnload stack by two
-environment variables:
-
-EF_MCAST_RECV_HW_LOOP
+Ubuntu/Debian Support
 ---------------------
-Reception of loopback traffic from other OpenOnload stacks is by
-default enabled.  It can be disabled for stacks that do not wish to
-receive it by setting EF_MCAST_RECV_HW_LOOP to 0.
-
-EF_MCAST_SEND
--------------
-Sending of traffic to the hardware loopback path is by default
-disabled, and enabling requires setting EF_MCAST_SEND to either 2 or
-3.  This new EF_MCAST_SEND option deprecates EF_MCAST_LOOP_OFF.
-
-EF_MCAST_SEND controls loopback of multicast traffic to receivers in
-the same and other OpenOnload stacks.
-When set to 0 (default) disables loopback within the same stack as
-well as to other OpenOnload stacks.
-When set to 1 enables loopback to the same stack.
-When set to 2 enables loopback to other OpenOnload stacks.
-When set to 3 enables loopback to the same as well as other OpenOnload
-stacks.
-In respect to loopback to other OpenOnload stacks the option is just a
-hint and the feature requires: (a) 7000-series or newer device, and
-(b) selecting firmware version/variant with hardware loopback support.
-
-Loopback issues and limitations
--------------------------------
-1. Hardware multicast loopback can only be enabled on interfaces that
-support it.  For interfaces without support the environment variable
-settings will be silently ignored.
-
-2. Although a stack may opt out from receiving loopback multicast
-traffic (with EF_MCAST_RECV_HW_LOOP=0) this option can in some
-circumstances be overriden/ignored:
-
- - another stack created with EF_MCAST_RECV_HW_LOOP=1 opts to receive
- the same multicast stream; or
-
- - reception of loopback traffic has been enabled globally (with
- SRIOV, not yet supported)
-
-3. Specifying MULTICAST_TTL=0 on a socket disables sending traffic to
-both the normal network path and the hardware loopback path
-
-4. The IP_MULTICAST_LOOP socket option has no effect on hardware
-multicast loopback.  In general a given stack will receive at least as
-much traffic as it requested.
-
-5. Packets received via the hardware multicast loopback path will not
-have hardware RX timestamps added.  If using this combination, you
-must have a 4.1 or later firmware version.
-
-6. The combination of clustering (see below) and hardware multicast
-loopback on a single socket is not supported in the current release.
-We hope to address this in a future release.
-
-
-Transmit Hardware Timestamping
-------------------------------
-
-This release adds support for packets sent to be timestamped by the
-NIC, and this timestamp returned to the application using the standard
-SO_TIMESTAMPING API.  This features requires (i) suitable 7000-series
-Flareon NIC; (ii) PTP licence installed; and (iii) either a
-SolarCapture Pro or Performance Monitor licence installed.  It is also
-recommend that sfptpd be used to synchronise the NIC clock and
-configure global access to hardware timestamping using the
-SIOCHWTSTAMP ioctl.
-
-Onload extends the Linux SO_TIMESTAMPING API to allow TCP sockets to
-also receive transmit timestamps.  As a TCP segment may be transmitted
-more than once, the returned data includes the times of both the first
-and last time it was transmitted.  These are not provided to the
-application until the data have been acknowledged by the receiver.  As
-packets transmitted may include a number of application-level sends
-combined together, or split a single application send into many
-separate packets, each timestamp includes the number of bytes in the
-byte stream that it corresponds to.
-
-An example application to document the use of these timestamps is
-included in src/tests/onload/hwtimestamping
-
-There are some new onload options to control the delivery of transmit
-timestamps:
-
-EF_TX_TIMESTAMPING
-------------------
-Control of hardware timestamping of transmitted packets, possible values:
-  0 - do not do timestamping (default);
-  1 - request timestamping but continue if hardware is not capable or it
- does not succeed;
-  2 - request timestamping and fail if hardware is capable and it does
- not succeed;
-  3 - request timestamping and fail if hardware is not capable or it
- does not succeed;
-
-EF_TIMESTAMPING_REPORTING
--------------------------
-Controls timestamp reporting, possible values:
- 0: report translated timestamps only when the NIC clock has been set;
- 1: report translated timestamps only when the NIC clock is synchronised 
-(e.g. using ptpd).
-If the above conditions are not met Onload will only report raw (not
-translated) timestamps.
-The current version of sfptpd (v2.1.0.34) does not request the
-synchronisation reporting that this feature relies on.  This will be
-addressed in the next sfptpd release.
-
-
-SO_REUSEPORT application clustering
------------------------------------
-
-This version of Onload includes a new feature to allow clusters of
-applications share a local port number through SO_REUSEPORT and spread
-traffic for that port among them.  This allows the cluster of
-applications to scale across more CPUs.
-
-There are some new onload options to control the use of application
-clustering:
-
-EF_CLUSTER_SIZE
----------------
-If use of SO_REUSEPORT creates a cluster, this option specifies size
-of the cluster to be created.  This option has no impact if use of
-SO_REUSEPORT joins a cluster that already exists.  Note that if fewer
-sockets than specified here join the cluster, then some traffic will
-be lost.  Refer to the SO_REUSEPORT section in the manual for more
-detail.
-
-EF_CLUSTER_NAME
----------------
-Specifies the name of the cluster to create or join when SO_REUSEPORT
-is used.  If no name is specified (default) then a cluster will be
-chosen based on the port numbers used.
-
-EF_CLUSTER_RESTART
-------------------
-This option controls the behaviour when recreating a stack (e.g. due to 
-restarting a process) in an SO_REUSEPORT cluster and it encounters a resource 
-limitation such as an orphan stack from the previous process:
- 0 - return an error
- 1 - terminate the orphan to allow the new process to continue
-
-EF_TCP_FORCE_REUSEPORT / EF_UDP_FORCE_REUSEPORT
------------------------------------------------
-
-These options specify comma-separated lists of port numbers.  TCP /
-UDP sockets respectively that bind to those port numbers will have
-SO_REUSEPORT automatically applied to them, allowing the use of
-application clustering for applications that don't make use of
-SO_REUSEPORT natively.
-
-Application Clustering Limitations
-----------------------------------
-
-There are some limitations to Onload's support for application
-clustering:
-
-- NIC reset while a cluster is active is not supported.  After a NIC
-reset the cluster will not have the correct filters installed.  We
-hope to address this in a future release.
-
-- If a cluster is not fully populated by stacks some traffic will get
-lost.  The traffic is spread among EF_CLUSTER_SIZE stacks, regardless
-of whether all those stacks are present.
-
-- Clustering is only dependent on the port numbers used, not on the IP
-addresses.  If one application binds to 1.1.1.1:12345 and another to
-2.2.2.2:12345, then 1.1.1.1:12345 can get some traffic destined to
-2.2.2.2:12345 which will be dropped in software by Onload.  To get
-correct behaviour all members of the cluster should bind to the same
-IP address. We hope to remove this limitation in future.
-
-- Restarting applications that are using a cluster can fail due to the
-stacks from the previous instance still being present.  Use
-EF_CLUSTER_RESTART to control the behaviour of Onload in this case.
-
-- Support for clustering and SO_REUSEPORT on legacy OSes (where the OS
-does not itself support SO_REUSEPORT) is currently in alpha.  We
-recommend that on these OSes this should only be used to evaluate the
-feature, and that a future release will make support for this suitable
-for use in production.
-
-- To match linux kernel SO_REUSEPORT implementation, we do not do
-clustering on multicast. i.e. SO_REUSEPORT has the same effect as
-SO_REUSEADDR for multicast.
-
-- Spreading of traffic between members of a cluster is done via the
-NICs RSS hash functionality.  For TCP, we hash on source and
-destination IP addresses and ports.  For UDP, we hash only on source
-and destination IP addresses.
-
-- The combination of clustering and hardware multicast loopback on a
-single socket is not supported in the current release.  We hope to
-address this in a future release.
-
-
-Wire-Order Delivery API (WODA)
-------------------------------
-
-This release of Onload includes a new extension API to allow an
-application to wait for and receive data from a set of sockets in a
-similar way to epoll_wait(), but with additional information to ensure
-that the sockets become readable in the same order as the
-corresponding data on the wire.
-
-int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
-                              struct onload_ordered_epoll_event *oo_events,
-                              int maxevents, int timeout);
-
-When onload_ordered_epoll_wait returns with ready events, the events
-are presented in wire order.  To maintain the ordering of the data
-only a certain amount of data should be read from each ready fd.  The
-amount that can be read is given by the bytes field in the associated
-onload_ordered_epoll_event.  The onload_ordered_epoll_event also
-contains the timestamp of the first available ordered data as would
-normally be obtained via the cmsg structure to recvmsg().  The
-timestamp of each received data can also be retrieved as normal if
-desired. 
-
-It is possible to receive data that can not be ordered.  E.g. if the
-data are delivered via the kernel or from a non-Solarflare interface.
-If the associated onload_ordered_epoll_event has ts.tv_sec == 0 then
-that fd is ready without ordered data.
-
-There is some example code included showing use of the API.  You can
-find this in src/tests/onload/wire_order/.  This comprises two
-applications:
-
- - wire_order_server: This uses onload_ordered_epoll_wait to receive
- ordered data over a set of sockets.  Received data is echoed back on
- a single reply socket.
-
- - wire_order_client: This sends sequenced data across a set of
- sockets.  It reads the reply data from the server, and ensures this
- is received in sequence.
-
-The example code is not built as part of the standard install, so to
-build it:
- cd openonload-<ver>/build/gnu_x86_64/tests/onload/wire_order
- USEONLOADEXT=1 make
-
-To run the code with the default options:
-hosta: EF_RX_TIMESTAMPING=3 onload ./wire_order_server
-
-hostb: onload --profile=latency ./wire_order_client hosta
-
-This will use a set of 100 TCP sockets, and send sequenced data over
-them.  You can control the number of sockets used with the -s option,
-the number of iterations with -n and use UDP sockets instead with -U.
 
-Some things to note:
-- to ensure sends are done synchronously, and avoid re-ordering between
-streams the latency profile should be used with onload on the sending
-side (wire_order_client)
-- The test will not work without enabling EF_RX_TIMESTAMPING on the server
-
-Wire-Order Delivery API limitations
------------------------------------
-
-There are some limitations to the wire-order delivering API:
-
-- WODA only works with EF_UL_EPOLL=1, EF_RX_TIMESTAMPING set, and a
-suitable licence to allow timestamping.
-
-- all accelerated sockets in the epoll set must be in a single onload
-stack for correct operation.
-
-- only data that has been received via onload with a hardware timestamp
-will be ordered (e.g. loopback traffic will not be accelerated)
-
-- onload_ordered_epoll_wait() will only work level triggered.  It does
-not support an edge-triggered mode.
-
-- a return value of 0 does not necessarily mean that no fds are ready,
-just that no fds are ready with ordered data.
-
-- the ordering list only contains each socket once, that means if data
-is received to sockets A, B, A, B then you would need to call
-onload_ordered_epoll_wait() (at least) twice to discover all the
-available data.
-
-
-onload_move_fd() extension API
-------------------------------
-
-This version of Onload includes a new extension API to allow sockets
-to be moved between stacks.  This is in addition to the
-onload_set_stackname() API that allows applications to select the
-stack that will be used before a socket is created.  onload_move_fd()
-is particularly useful for servers, as by default all sockets accepted
-from a listening socket will share the same stack as the listening
-socket.  This can result in many sockets sharing a stack, and for some
-servers with multiple worker threads this can cause contention between
-the threads.
-
-int onload_move_fd(int fd);
-
-The supplied file descriptor will be moved to the current stack.  The
-current stack can be controlled using onload_set_stackname().
-
-Currently onload_move_fd() can only be used for:
- - Unbound UDP sockets; or 
- - TCP accepted sockets or TCP sockets in the closed state
-
-In all cases the following conditions must be met:
- - empty send and retransmit queues (i.e. send() etc. has never been
- called on the socket)
- - simple receive queue (no loss, reordering, or urgent data)
- - socket has not yet been added to an epoll set
- - socket is not yet in an application cluster (SO_REUSEPORT)
-
-Returns 0 if successful, otherwise -1.  In all cases the socket is
-usable even if the call failed.
-
-
-TCP SYN cookies
----------------
-
-This release adds support for TCP SYN cookies to protect against a SYN
-flood attack.  This is controlled through the use of the
-EF_TCP_SYNCOOKIES environment variable (default 0, off).
-
-
-sfc_tune module removal
------------------------
-
-This release removes the sfc_tune module that previously would, when
-enabled, attempt to keep CPUs from entering particular cstates and so
-ensure jitter caused by CPUs sleeping was avoided.  Please instead use
-the standard "intel_idle.max_cstate=0 idle=poll" Linux kernel command
-line options to achieve the same affect.
-
-
-
-Performance
------------
-
-Testing for this release has highlighted a small throughput
-performance regression compared to the previous (openonload-201310-u2)
-release.  This affects interrupt-driven streams with small message
-sizes.  The exact difference in performance is dependent on the server
-in use and the message size, but is typically a few percent of
-throughput.  We are aiming to restore the previous performance in the
-next update release.
-
-
-ifenslave with EF_PACKET_BUFFER_MODE=3
---------------------------------------
-
-In some testing using ifenslave to configure bond interfaces we have
-been able to provoke soft lockup warnings from the Linux kernel.  This
-is thought to only apply to RHEL5 update 6 using VFs without an IOMMU,
-i.e. EF_PACKET_BUFFER_MODE=3.  We are aiming to fix this in the next
-update release.
+This release adds Ubuntu and Debian to the list of officially
+supported operating systems.  The currently supported versions are:
+
+  Debian: 6 and 7
+  Ubuntu: 12.04 LTS, 14.04 LTS and 14.10
+
+As new releases are made, Onload will aim to support the most recent
+two major releases of each.
+
+
+KVM
+---
+
+This release adds support for running Onload in KVM guests which have
+either had a VF or PF passed through to them.  The Onload user guide
+contains further details on how to configure and use Onload in a KVM
+guest.
+
+
+Docker containers
+-----------------
+
+This release adds support for running Onload in a docker container.
+Please see the Onload user guide for details of how to install and use
+Onload in a container.  Onload does not support network namespaces
+
+
+VF and Multi-PF Onload
+----------------------
+
+Onload can also be configured to run with VFs or multiple PFs on a
+single port in a non-virtualised environment.
+
+
+Socket Caching
+--------------
+
+This release adds support for caching of passively opened TCP sockets,
+allowing improved connection accept rate.  This feature can be
+controlled using three new environement variables
+(EF_SOCKET_CACHE_PORTS, EF_SOCKET_CACHE_MAX and
+EF_PER_SOCKET_CACHE_MAX) that limit which ports and how many sockets
+can be cached.
+
+There are some restrictions:
+
+- socket caching is only supported if EF_UL_EPOLL=3 (see below);
+- socket caching is not supported after fork();
+- currently caching does not offer a benefit if a single socket accepts
+  connections on multiple local addresses;
+- socket caching is only supported if EF_FDS_MT_SAFE=1;
+- sockets that have been dup()ed will not be cached;
+- sockets that use the O_ASYNC or O_APPEND modes will not be cached;
+- for full benefit sockets that use O_NONBLOCK or O_CLOEXEC should be
+  accept()ed with those flags, rather than setting them later;
+- allowing more sockets to be cached (via EF_SOCKET_CACHE_MAX) than
+  there are file descriptors available can result in drastically reduced
+  performance. It should be considered that the socket cache limit
+  applies per stack, unlike the per-process file descriptor limit.
+
+
+Black/White listing of interfaces
+---------------------------------
+
+New module options and their associated sysfs nodes allow the user to
+control through a whitelist and a blacklist which network interfaces
+will be accelerated by Onload.
+ - Onload will ignore any network interfaces mentioned in the
+ intf_black_list module option.
+ - If the intf_white_list module option is non-empty, Onload will only
+ accelerate the network interfaces mentioned.
+
+These can be updated at runtime, but the changes will only affect new
+stacks.  The configuration is a global setting and can not be modified
+for individual stacks.
+
+
+Scalable epoll mode
+-------------------
+
+This release adds a new epoll mode EF_UL_EPOLL=3.  This mode is
+accelerated, supports socket caching (see above), and is scalable in
+the sense that the cost of the epoll_wait() is independent of the
+number of accelerated FDs in the set and depends only on the number of
+FDs that become ready.
+
+EF_UL_EPOLL=1 remains the default as it has fewer restrictions, but
+EF_UL_EPOLL=3 should be considered for your application as it can
+offer better performance.
+
+The restrictions of EF_UL_EPOLL=3 which mean it's not suitable in all
+cases are as follows:
+ - It does not support monitoring the readiness of the epoll FD via a
+   second poll/epoll/select.
+ - It does not support epoll sets which exist across a fork().
+
+For applications that require this functionality another epoll mode
+should be selected.
+
+
+Remote monitoring of Onload
+---------------------------
+
+As a preview of a future feature, we have included a server process
+that will provide stackdump-like statistics and details of Onload's
+internal state via JSON to remote hosts that connect to it.
+
+The server is in <onload_install_dir>/src/tools/onload_remote_monitor/
+
+There is an example client to demonstrate how to connect and parse the
+JSON returned in <onload_install_dir>/src/tests/onload/onload_remote_monitor/
+
+The current data format is for experimentation only and will change,
+but we are very interested in how this may be useful to you, what data
+you need to access, and how to integrate it into your existing
+monitoring tools.  Please contact support@solarflare.com with
+suggestions and comments.
+
+
+Delegated Sends API
+-------------------
+
+This release adds a new API that allows the user to have Onload handle
+the TCP socket state machine and perform critical sends through
+another mechanism (such as ef_vi) to achieve lower latency.
+
+Sockets are created through the sockets API exactly as normal.  The
+user can then request that Onload delegates sending to their
+application.  Once the application has completed a send through (for
+example) ef_vi, it updates Onload and Onload will handle the TCP state
+machinery, retransmissions, and so on.
+
+There is a pair of example applications in 
+<onload_install_dir>/src/tests/ef_vi/efdelegated_[client,server].c
+
+This API is intended to be used by servers that make sporadic TCP
+sends on a socket rather than large amounts of bi-directional traffic.
+It should be used carefully as there are small windows of time (while
+the send has been delegated to the application) where either the
+application or Onload could be using out of date sequence or
+acknowledgement numbers.  It has been designed such that this should
+be harmless, but may still have the potential to confuse other TCP
+implementations.
+
+
+Per-queue drop counters API
+---------------------------
+
+ef_vi users can now access details of drops and their causes for each
+RX queue using the new ef_vi_stats_query() function.  The efsink
+example application has been updated to do this.
+
+
+Configuration options
+---------------------
+
+The following configuration options have been added.  Those already
+mentioned above have not been included here.
+
+EF_TCP_SEND_NONBLOCK_NO_PACKETS_MODE
+ - This option controls how a non-blocking TCP send() call should
+ behave if it is unable to allocate sufficient packet buffers.  By
+ default Onload will mimic Linux kernel stack behaviour and block
+ for packet buffers to be available.  If set to 1, this option will
+ cause Onload to return error ENOBUFS.  Note this option can cause
+ some applications (that assume that a socket that is writeable is
+ able to send without error) to malfunction.
+
+EF_TCP_RCVBUF_STRICT
+ - This option prevents TCP small segment attack.  With this option set,
+ Onload limits the number of packets inside TCP receive queue and
+ TCP reorder buffer.  In some cases, this option causes performance
+ penalty.  You probably want this option if your application is
+ connecting to unrtusted partner or over untrusted network.
+ Off by default.
+
+EF_TCP_SNDBUF_ESTABLISHED_DEFAULT
+ - Default value for SO_SNDBUF for TCP sockets in the ESTABLISHED state. 
+ This value is used when the TCP connection transitions to ESTABLISHED 
+ state, to avoid confusion of some applications like netperf.
+ If the OS default SO_SNDBUF value is less then this, then this 
+ value is used.
+ If the OS default SO_SNDBUF value is more that 4 * this, then 
+ 4 * this value is used.
+ This variable overrides OS default SO_SNDBUF value only, it does not 
+ change SO_SNDBUF if the application explicitly sets it 
+ (see EF_TCP_SNDBUF variable which overrides application-supplied value).
+
+EF_TCP_RCVBUF_ESTABLISHED_DEFAULT
+ - Default value for SO_RCVBUF for TCP sockets in the ESTABLISHED state.
+ This value is used when the TCP connection transitions to ESTABLISHED 
+ state, to avoid confusion of some applications like netperf.
+ If the OS default SO_RCVBUF value is less then this, then this
+ value is used. 
+ If the OS default SO_RCVBUF value is more that 4 * this, then 
+ 4 * this value is used.
+ This variable overrides OS default SO_RCVBUF value only, it does not 
+ change SO_RCVBUF if the application explicitly sets it 
+ (see EF_TCP_RCVBUF variable which overrides application-supplied value).
+
+EF_OFE_ENGINE_SIZE
+ - Size (in bytes) of Onload Filter Engine to be allocated when a new
+ stack is created.
+
+EF_SO_BUSY_POLL_SPIN
+ - Spin poll,select and epoll in a Linux-like way: enable spinning only if
+ a spinning soclet is preset in the poll/select/epoll set.  See Linux
+ documentation on SO_BUSY_POLL socket option for details.
+ You should also enable spinning via EF_{POLL,SELECT,EPOLL}_SPIN
+ variable if you'd like to spin in poll,select or epoll correspondingly.
+ The spin duration is set via EF_SPIN_USEC, which is equivalent
+ to the Linux sysctl.net.busy_poll value.  EF_POLL_USEC is all-in-one
+ variable to set for all 4 variables mentioned here.
+ Linux never spins in epoll, but Onload does.  This variable does not
+ affect epoll behaviour if EF_UL_EPOLL=2.
+
+EF_SELECT_FAST_USEC
+ - When spinning in a select() call, causes accelerated sockets to be
+ polled for N usecs before unaccelerated sockets are polled.  This
+ reduces latency for accelerated sockets, possibly at the expense of
+ latency on unaccelerated sockets.  Since accelerated sockets are
+ typically the parts of the application which are most
+ performance-sensitive this is typically a good tradeoff.
+
+EF_SELECT_NONBLOCK_FAST_USEC
+ - When invoking select() with timeout==0 (non-blocking), this option
+ causes non-accelerated sockets to be polled only every N usecs.  This
+ reduces latency for accelerated sockets, possibly at the expense of
+ latency on unaccelerated sockets.  Since accelerated sockets are
+ typically the parts of the application which are most
+ performance-sensitive this is often a good tradeoff.
+
+ Set this option to zero to disable, or to a higher value to further
+ improve latency for accelerated sockets.
+
+ This option changes the behaviour of select() calls, so could
+ potentially cause an application to misbehave.
+
+
+ef_vi Documentation
+-------------------
+
+The ef_vi API now has some introductory documentation included in
+doxygen format within the source code.  To access this:
+
+cd openonload-201502/src/include/etherfabric/doxygen
+doxygen doxyfile_ef_vi
+
+This will generate HTML output in the html subdirectory, and an RTF
+document in the rtf subdirectory.
+
+
+Known issues and limitations
+----------------------------
+
+ - A test late in the release process showed a latency performance
+ regression of around 50ns, affecting both TCP and UDP and not
+ dependent on packet size.  We are currently working to understand the
+ cause and will include a fix in the next update release.
+
+ - Use of the ef_vi layer on a 32 bit OS is disabled in this release
+ due to an issue discovered close to the release date.  Please let
+ support@solarflare.com know if this causes you problems.
+
+ - The semantics of EF_EPOLL_MT_SAFE have been clarified.  This must
+ only be set to 1 if all operations on the set are concurrency safe.
+ The documentation now states explicitly that these operations include
+ both epoll calls, and modifications to the file descriptors contained
+ in the set (bind(), listen(), connect(), close()).
+ 
+ - AMD IOMMUs are not supported by Onload or the net driver included
+ in this release.
+
+ - RedHat have implemented an alternative to the bonding driver, which
+ is now included in distributions (not just RedHat based ones) with
+ recent (> 3.3) kernels.  Onload does not recognise interfaces created
+ with teamd/libteam/teaming driver as being acceleratable, and
+ connections going over these interfaces will use the Linux kernel
+ stack rather than Onload.  We are currently investigating how to add
+ support for this new teaming driver to Onload and hope to include it
+ in a future release.  Until then we recommend using the traditional
+ bonding driver to create Onload accelerated bonds.

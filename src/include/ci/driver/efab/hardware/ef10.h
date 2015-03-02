@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -136,7 +136,8 @@
  *          (S) secondary is for CHAR *
  *---------------------------------------------------------------------------*/
 
-#define EF10_P_CTR_AP_BAR	2
+#define EF10_PF_P_CTR_AP_BAR	2
+#define EF10_VF_P_CTR_AP_BAR	0
 #define EF10_S_CTR_AP_BAR	0
 #define EF10_S_DEVID		0x6703
 

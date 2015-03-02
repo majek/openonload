@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,6 +82,7 @@ struct vi_attr {
 	int16_t             hw_stack_id;
 	int8_t              with_timer;
 	int8_t              packed_stream;
+	int32_t             ps_buffer_size;
 };
 
 
@@ -177,8 +178,8 @@ static int efrm_vi_set_alloc_instance_try(struct efrm_vi *virs,
 		return -EEXIST;
 	}
 
-	EFRM_ASSERT(vi_set->free & ((uint64_t)1 << instance));
-	vi_set->free &= ~((uint64_t)1 << instance);
+	EFRM_ASSERT(vi_set->free & (1ULL << instance));
+	vi_set->free &= ~(1ULL << instance);
 
 	virs->allocation.instance = vi_set->allocation.instance + instance;
 	virs->allocation.allocator_id = -1;
@@ -223,7 +224,8 @@ static int efrm_vi_set_alloc_instance(struct efrm_vi *virs,
 
 static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 				     struct efrm_vi *virs,
-				     const struct vi_attr *vi_attr)
+				     const struct vi_attr *vi_attr,
+				     int print_resource_warnings)
 {
 	struct efrm_nic *efrm_nic;
 #ifdef CONFIG_SFC_RESOURCE_VF
@@ -239,7 +241,7 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 #ifdef CONFIG_SFC_RESOURCE_VF
 	vf = efrm_pd_get_vf(pd);
 	if (vf != NULL)
-		return efrm_vf_alloc_vi_set(vf, 1, &virs->allocation);
+		return efrm_vf_vi_alloc(vf, &virs->allocation);
 #endif
 
 	efrm_nic = efrm_nic(efrm_pd_to_resource(pd)->rs_client->nic);
@@ -255,6 +257,21 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 			EFRM_ERR("%s: ERROR: Perhaps sfc_affinity is not "
 				 "configured?", __FUNCTION__);
 			return -EINVAL;
+		}
+	}
+	else {
+		/* try to get a channel for the current CPU */
+		int ifindex = efrm_nic->efhw_nic.ifindex;
+		int cpu = raw_smp_processor_id();
+		static int printed = 0;
+		channel = sfc_affinity_cpu_to_channel(ifindex, cpu);
+		if (channel < 0 && print_resource_warnings && !printed) {
+			EFRM_ERR("%s: WARNING: could not map core_id=%d using "
+				 "ifindex=%d", __FUNCTION__, cpu, ifindex);
+			EFRM_ERR("%s: WARNING: Perhaps sfc_affinity is not "
+				 "configured?", __FUNCTION__);
+			++printed;
+			/* proceed without channel */
 		}
 	}
 	virs->net_drv_wakeup_channel = channel;
@@ -276,8 +293,8 @@ static void efrm_vi_rm_free_instance(struct efrm_vi *virs)
 			vi_set->allocation.instance;
 		int need_complete;
 		spin_lock(&vi_set->allocation_lock);
-		EFRM_ASSERT((vi_set->free & (1 << si)) == 0);
-		vi_set->free |= 1 << si;
+		EFRM_ASSERT((vi_set->free & (1ULL << si)) == 0);
+		vi_set->free |= 1ULL << si;
 		--vi_set->n_vis_flushing;
 		need_complete = vi_set->n_flushing_waiters > 0;
 		spin_unlock(&vi_set->allocation_lock);
@@ -286,10 +303,8 @@ static void efrm_vi_rm_free_instance(struct efrm_vi *virs)
 			complete(&vi_set->allocation_completion);
 	}
 #ifdef CONFIG_SFC_RESOURCE_VF
-	else if (virs->allocation.vf != NULL) {
-		efrm_vf_vi_drop(virs);
-		efrm_vf_free_vi_set(&virs->allocation);
-	}
+	else if (virs->allocation.vf != NULL)
+		efrm_vf_vi_drop(&virs->allocation);
 #endif
 	else {
 		efrm_vi_allocator_free_set(efrm_nic(virs->rs.rs_client->nic),
@@ -527,7 +542,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 efrm_bt_allocation_base(&q->bt_alloc),
 			 q->dma_addrs,
 			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-			 virs->hw_stack_id,
+			 efrm_pd_get_vport_id(virs->pd), virs->hw_stack_id,
 			 flags);
 		break;
 	case EFHW_RXQ:
@@ -539,7 +554,8 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
                         efrm_bt_allocation_base(&q->bt_alloc),
                         q->dma_addrs,
                         (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-                        virs->hw_stack_id,
+                        efrm_pd_get_vport_id(virs->pd), virs->hw_stack_id,
+                        virs->ps_buf_size,
                         flags);
                 if( rc >= 0 ) {
                   virs->rx_prefix_len = rc;
@@ -618,7 +634,8 @@ efrm_vi_rm_fini_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type)
 		efhw_iopages_free(efrm_vi_get_pci_dev(virs), &q->pages,
 			iommu_domain);
 	if (q->bt_alloc.bta_size != 0)
-		efrm_bt_manager_free(nic, &virs->bt_manager, &q->bt_alloc);
+		efrm_bt_manager_free(nic, &virs->bt_manager,
+				     &q->bt_alloc);
 }
 
 
@@ -832,6 +849,7 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		       uint32_t *out_mem_mmap_bytes,
 		       uint32_t *out_txq_capacity,
 		       uint32_t *out_rxq_capacity,
+		       int print_resource_warnings,
 		       enum efrm_vi_alloc_failure *out_failure_reason)
 {
 	struct efrm_vi_attr attr;
@@ -850,16 +868,12 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 	if (wakeup_channel >= 0)
 		efrm_vi_attr_set_wakeup_channel(&attr, wakeup_channel);
 
-	if ((rc = efrm_vi_alloc(client, &attr, &virs)) < 0) {
+	if ((rc = efrm_vi_alloc(client, &attr, print_resource_warnings,
+				name, &virs)) < 0) {
 		if (out_failure_reason != NULL )
 			*out_failure_reason= EFRM_VI_ALLOC_VI_FAILED;
 		goto fail_vi_alloc;
 	}
-
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (efrm_pd_get_vf(pd))
-		efrm_vf_vi_set_name(virs, name);
-#endif
 
 	/* stack id needs to be allocated only if both RX and TX loopback is
 	 * requested */
@@ -1004,6 +1018,15 @@ void efrm_vi_attr_set_packed_stream(struct efrm_vi_attr *attr,
 EXPORT_SYMBOL(efrm_vi_attr_set_packed_stream);
 
 
+void efrm_vi_attr_set_ps_buffer_size(struct efrm_vi_attr *attr,
+				     int ps_buffer_size)
+{
+	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
+	a->ps_buffer_size = ps_buffer_size;
+}
+EXPORT_SYMBOL(efrm_vi_attr_set_ps_buffer_size);
+
+
 void efrm_vi_attr_set_with_timer(struct efrm_vi_attr *attr, int with_timer)
 {
 	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
@@ -1072,6 +1095,8 @@ EXPORT_SYMBOL(efrm_vi_attr_set_hw_stack_id);
 
 int  efrm_vi_alloc(struct efrm_client *client,
 		   const struct efrm_vi_attr *o_attr,
+		   int print_resource_warnings,
+		   const char *vi_name,
 		   struct efrm_vi **p_virs_out)
 {
 	struct efrm_vi_attr s_attr;
@@ -1143,7 +1168,7 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	EFRM_ASSERT(&virs->rs == (struct efrm_resource *) (virs));
 
 	efrm_vi_rm_salvage_flushed_vis(client->nic);
-	rc = efrm_vi_rm_alloc_instance(pd, virs, attr);
+	rc = efrm_vi_rm_alloc_instance(pd, virs, attr, print_resource_warnings);
 	if (rc < 0) {
 		EFRM_ERR("%s: Out of VI instances (%d)", __FUNCTION__, rc);
 		rc = -EBUSY;
@@ -1171,9 +1196,41 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	virs->flags = vi_flags;
 	virs->pd = pd;
 	virs->hw_stack_id = attr->hw_stack_id;
+
+#ifdef __PPC__
+	/* On PPC it is impossible to get DMA addresses that are aligned on
+	 * boundaries greater than 64K, so we cannot use buffers any larger
+	 * than this.
+	 */
+	virs->ps_buf_size = 1 << 16;
+#else
+	if (client->nic->flags & NIC_FLAG_VAR_PACKED_STREAM) {
+		virs->ps_buf_size = 1 << 16;
+		while (virs->ps_buf_size < attr->ps_buffer_size &&
+		       virs->ps_buf_size < 1 << 20)
+			virs->ps_buf_size <<= 1;
+	} else {
+		virs->ps_buf_size = 1 << 20;
+	}
+#endif
+
 #ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf != NULL)
-		efrm_vf_vi_set(virs);
+	if (virs->allocation.vf != NULL) {
+		char name[80];
+
+		if (vi_name == NULL) {
+			snprintf(name, sizeof(name),
+				 "SolarFlare NIC %d VF %d VI %d pid %d",
+				 client->nic->index,
+				 efrm_vf_to_resource(virs->allocation.vf)->
+					rs_instance,
+				 virs->allocation.instance,
+				 current ? current->tgid : -1);
+			name[sizeof(name)-1] = '\0';
+			vi_name = name;
+		}
+		efrm_vf_vi_start(virs, vi_name);
+	}
 #endif
 	if (client->nic->devtype.arch == EFHW_ARCH_FALCON)
 		efrm_bt_manager_ctor(&virs->bt_manager,
@@ -1396,6 +1453,14 @@ int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type)
 	return efrm_vi_rm_init_dmaq(virs, q_type, nic);
 }
 EXPORT_SYMBOL(efrm_vi_q_reinit);
+
+
+extern struct efrm_vi *
+efrm_vi_from_resource(struct efrm_resource *rs)
+{
+	return efrm_vi(rs);
+}
+EXPORT_SYMBOL(efrm_vi_from_resource);
 
 
 /*** Stack ids *********************************************************/

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -340,8 +340,8 @@ ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma)
   efch_resource_t* rs;
   efch_resource_id_t rsid;
   off_t offset;
-  unsigned long bytes, map_offset;
-  int rc, map_num;
+  unsigned long bytes;
+  int rc;
 
   if( !priv )  return -EBADF;
 
@@ -381,9 +381,8 @@ ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma)
              (int) (bytes >> CI_PAGE_SHIFT), offset, 
              vma, vma->vm_start, vma->vm_end);
 
-  map_offset = map_num = 0;
 
-  rc = rs->rs_ops->rm_mmap(rs->rs_base, &bytes, vma, &map_num, &map_offset,
+  rc = rs->rs_ops->rm_mmap(rs->rs_base, &bytes, vma,
                            EFAB_MMAP_OFFSET_TO_MAP_ID(offset));
   if( rc < 0 ) {
     efrm_resource_release(rs->rs_base);

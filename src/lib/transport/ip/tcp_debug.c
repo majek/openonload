@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -683,20 +683,23 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
 {
   ci_tcp_socket_cmn_dump(ni, &tls->c, pf, logger, log_arg);
 
-  logger(log_arg, "%s  listenq: max=%d n=%d", pf, 
-         ci_tcp_listenq_max(ni), tls->n_listenq);
+  logger(log_arg, "%s  listenq: max=%d n=%d new=%d", pf, 
+         ci_tcp_listenq_max(ni), tls->n_listenq, tls->n_listenq_new);
   logger(log_arg, "%s  acceptq: max=%d n=%d accepted=%d", pf,
          tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
   logger(log_arg, "%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
 #if CI_CFG_FD_CACHING
-  logger(log_arg, "%s  epcache: n=%d cache=%s pending=%s",
-         pf, ni->state->epcache_n,
+  logger(log_arg, "%s  sockcache: n=%d sock_n=%d cache=%s pending=%s",
+         pf, ni->state->cache_avail_stack, tls->cache_avail_sock,
          ci_ni_dllist_is_empty(ni, &tls->epcache_cache) ? "EMPTY":"yes",
          ci_ni_dllist_is_empty(ni, &tls->epcache_pending) ? "EMPTY":"yes");
 #endif
 #if CI_CFG_STATS_TCP_LISTEN
   {
     ci_tcp_socket_listen_stats* s = &tls->stats;
+#if CI_CFG_FD_CACHING
+    logger(log_arg, "%s  sockcache_hit=%d", pf, s->n_sockcache_hit);
+#endif
     logger(log_arg,
            "%s  l_overflow=%d l_no_synrecv=%d aq_overflow=%d aq_no_sock=%d",
            pf, s->n_listenq_overflow, s->n_listenq_no_synrecv,
@@ -749,10 +752,13 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   char buf[LINE_LEN + 1];
   int n;
 
+  if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+    ci_timestamp_q_dump(ni, &ts->timestamp_q, pf, logger, log_arg);
+
   ci_tcp_socket_cmn_dump(ni, &ts->c, pf, logger, log_arg);
 
   logger(log_arg, "%s  tcpflags: "CI_TCP_SOCKET_FLAGS_FMT" local_peer: %d",
-         pf, CI_TCP_SOCKET_FLAGS_PRI_ARG(ts), ts->s.local_peer);
+         pf, CI_TCP_SOCKET_FLAGS_PRI_ARG(ts), ts->local_peer);
 
   logger(log_arg, "%s  snd: up=%08x una-nxt-max=%08x-%08x-%08x enq=%08x%s",
          pf,
@@ -764,6 +770,8 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
          ci_tcp_sendq_n_pkts(ts),
          ci_tcp_inflight(ts), ts->retrans.num, tcp_snd_wnd(ts),
          SEQ_SUB(ts->snd_max, tcp_snd_nxt(ts)));
+  if( ts->snd_delegated != 0 )
+    logger(log_arg, "%s  snd delegated=%d", pf, ts->snd_delegated);
   logger(log_arg, "%s  snd: cwnd=%d+%d used=%d ssthresh=%d bytes_acked=%d %s",
          pf, ts->cwnd, ts->cwnd_extra, tcp_cwnd_used(ts),
          ts->ssthresh, ts->bytes_acked, congstate_str(ts));
@@ -784,12 +792,10 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
          ts->recv2.num, tcp_rcv_usr(ts));
 
   logger(log_arg,
-         "%s  eff_mss=%d smss=%d amss=%d  used_bufs=%d uid=%d"
-         CI_DEBUG(" pid=%d")" wscl s=%d r=%d",
+         "%s  eff_mss=%d smss=%d amss=%d  used_bufs=%d wscl s=%d r=%d",
          pf, ts->eff_mss, ts->smss, ts->amss,
          ts->send.num + ts->retrans.num + ts->rob.num+ts->recv1.num
-         + ts->recv2.num, (int) ts->s.uid CI_DEBUG_ARG((int)ts->s.pid),
-         ts->snd_wscl, ts->rcv_wscl);
+         + ts->recv2.num, ts->snd_wscl, ts->rcv_wscl);
   logger(log_arg, "%s  srtt=%02d rttvar=%03d rto=%d zwins=%u,%u", pf,
          tcp_srtt(ts), tcp_rttvar(ts), ts->rto, ts->zwin_probes,
          ts->zwin_acks);

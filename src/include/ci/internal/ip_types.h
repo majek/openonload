@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -62,7 +62,10 @@ typedef struct ci_netif_nic_s {
 } ci_netif_nic_t;
 
 
+#ifdef __KERNEL__
 struct tcp_helper_endpoint_s;
+struct oof_cb_sw_filter_op;
+#endif
 
 
 /*!
@@ -89,6 +92,7 @@ struct ci_netif_s {
   /* Use ci_netif_get_driver_handle() rather than this directly. */
   ef_driver_handle     driver_handle;
   unsigned             mmap_bytes;
+  char*                cplane_ptr;
   char*                io_ptr;
 #if CI_CFG_PIO
   uint8_t*             pio_ptr;
@@ -166,20 +170,21 @@ struct ci_netif_s {
   /* This field must be protected by the netif lock.
    */
   unsigned             flags;
-  /* netif was once (and maybe still is) shared between multiple processes */
-# define CI_NETIF_FLAGS_SHARED           0x1
-  /* netif is protected from destruction with an extra ref_count */
-# define CI_NETIF_FLAGS_DTOR_PROTECTED   0x2
-  /* netif is a kernel-only stack and thus is trusted */
-# define CI_NETIF_FLAGS_IS_TRUSTED       0x4
-                                      /* 0x8 free */
-  /* Stack [k_ref_count] to be decremented when sockets close. */
-# define CI_NETIF_FLAGS_DROP_SOCK_REFS   0x80
-  /* Don't use this stack for new sockets unless name says otherwise */
-# define CI_NETIF_FLAGS_DONT_USE_ANON    0x100
   /* Sending ONLOAD_MSG_WARM */
-# define CI_NETIF_FLAG_MSG_WARM           0x200
-#ifdef __KERNEL__
+# define CI_NETIF_FLAG_MSG_WARM          0x1
+
+#ifndef __KERNEL__
+  /* netif was once (and maybe still is) shared between multiple processes */
+# define CI_NETIF_FLAGS_SHARED           0x10
+  /* netif is protected from destruction with an extra ref_count */
+# define CI_NETIF_FLAGS_DTOR_PROTECTED   0x20
+  /* Don't use this stack for new sockets unless name says otherwise */
+# define CI_NETIF_FLAGS_DONT_USE_ANON    0x40
+#else
+  /* netif is a kernel-only stack and thus is trusted */
+# define CI_NETIF_FLAGS_IS_TRUSTED       0x100
+  /* Stack [k_ref_count] to be decremented when sockets close. */
+# define CI_NETIF_FLAGS_DROP_SOCK_REFS   0x200
   /* Currently being used from a driverlink context */
 # define CI_NETIF_FLAG_IN_DL_CONTEXT     0x400
   /* Should not allocate packets in atomic/driverlink context */
@@ -197,6 +202,14 @@ struct ci_netif_s {
 
   /* Stack overflow avoidance, used from allocate_vi(). */
   ci_uint64 vi_data[10];
+
+  /* List of postponed sw filter updates and its lock */
+  /* It is the innermost lock - no other locks, no kfree(), etc
+   * could be used under it. */
+  spinlock_t swf_update_lock; /* innermost lock */
+  /* The first and the last entry in the postponed
+   * sw filter update list. */
+  struct oof_cb_sw_filter_op *swf_update_first, *swf_update_last;
 #endif
 
   /* Used from ci_netif_poll_evq() only.  Moved here to avoid stack
@@ -205,6 +218,10 @@ struct ci_netif_s {
   ef_request_id tx_events[EF_VI_TRANSMIT_BATCH];
   /* See also copy in ci_netif_state. */
   unsigned      error_flags;
+
+#ifdef ONLOAD_OFE
+  struct ofe_engine* ofe;
+#endif
 };
 
 
@@ -226,11 +243,23 @@ struct citp_socket_s {
 };
 
 
+/* To avoid complicated compat code, use simplified msghdr when
+ * compiling in-kernel  */
+#ifndef __KERNEL__
+typedef struct msghdr ci_msghdr;
+#else
+typedef struct {
+  ci_iovec*     msg_iov;
+  unsigned long msg_iovlen;
+} ci_msghdr;
+#endif
+
+
 /* Arguments to ci_tcp_recvmsg(). */
 typedef struct ci_tcp_recvmsg_args {
   ci_netif*      ni;
   ci_tcp_state*  ts;
-  struct msghdr* msg;
+  ci_msghdr*     msg;
   int            flags;
 } ci_tcp_recvmsg_args;
 

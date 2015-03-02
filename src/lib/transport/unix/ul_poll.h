@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,6 +63,11 @@ struct oo_ul_poll_state {
 
   /* Should it spin */
   unsigned              ul_poll_spin;
+
+#if CI_CFG_SPIN_STATS
+  /* Have we incremented statistics for this spin round? */
+  int stat_incremented;
+#endif
 };
 
 #endif /* CI_CFG_USERSPACE_SELECT */

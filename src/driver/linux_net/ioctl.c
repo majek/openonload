@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,7 +76,8 @@ static void efx_ioctl_mcdi_complete_reset(struct efx_nic *efx,
 static int efx_ioctl_do_mcdi_old(struct efx_nic *efx, union efx_ioctl_data *data)
 {
 	struct efx_mcdi_request *req = &data->mcdi_request;
-	size_t outlen;
+	efx_dword_t *inbuf;
+	size_t inbuf_len, outlen;
 	int rc;
 
 	if (req->len > sizeof(req->payload)) {
@@ -90,9 +91,18 @@ static int efx_ioctl_do_mcdi_old(struct efx_nic *efx, union efx_ioctl_data *data
 		return -ENOTSUPP;
 	}
 
-	rc = efx_mcdi_rpc_quiet(efx, req->cmd,
-				(const efx_dword_t *)req->payload,
-				req->len, (efx_dword_t *)req->payload,
+	inbuf_len = ALIGN(req->len, 4);
+	inbuf = kmalloc(inbuf_len, GFP_KERNEL);
+	if (!inbuf)
+		return -ENOMEM;
+	/* Ensure zero-padding if req->len not a multiple of 4 */
+	if (req->len % 4)
+		inbuf[req->len / 4].u32[0] = 0;
+
+	memcpy(inbuf, req->payload, req->len);
+
+	rc = efx_mcdi_rpc_quiet(efx, req->cmd, inbuf, inbuf_len,
+				(efx_dword_t *)req->payload,
 				sizeof(req->payload), &outlen);
 	efx_ioctl_mcdi_complete_reset(efx, req->cmd, rc);
 
@@ -105,9 +115,9 @@ static int efx_ioctl_do_mcdi(struct efx_nic *efx,
 			     struct efx_mcdi_request2 __user *user_req)
 {
 	struct efx_mcdi_request2 req;
-	size_t outlen_actual;
-	efx_dword_t *buf;
-	size_t buf_len;
+	size_t inbuf_len, outlen_actual;
+	efx_dword_t *inbuf;
+	efx_dword_t *outbuf;
 	int rc;
 
 	if (copy_from_user(&req, user_req, sizeof(req)))
@@ -124,18 +134,30 @@ static int efx_ioctl_do_mcdi(struct efx_nic *efx,
 	    req.outlen > MCDI_CTL_SDU_LEN_MAX_V2)
 		return -EINVAL;
 
-	buf_len = ALIGN(max(req.inlen, req.outlen), 4);
-	buf = kmalloc(buf_len, GFP_USER);
-	if (!buf)
+	inbuf_len = ALIGN(req.inlen, 4);
+	inbuf = kmalloc(inbuf_len, GFP_USER);
+	if (!inbuf)
 		return -ENOMEM;
+	/* Ensure zero-padding if req.inlen not a multiple of 4 */
+	if (req.inlen % 4)
+		inbuf[req.inlen / 4].u32[0] = 0;
 
-	if (copy_from_user(buf, &user_req->payload, req.inlen)) {
+	outbuf = kmalloc(ALIGN(req.outlen, 4), GFP_USER);
+	if (!outbuf) {
+		rc = -ENOMEM;
+		goto out_free;
+	}
+
+	if (copy_from_user(inbuf, &user_req->payload, req.inlen)) {
 		rc = -EFAULT;
 		goto out_free;
 	}
 
-	rc = efx_mcdi_rpc_quiet(efx, req.cmd, buf, req.inlen,
-				buf, req.outlen, &outlen_actual);
+	/* We use inbuf_len as an inlen not divisible by 4 annoys mcdi-logging.
+	 * It doesn't care about outlen however.
+	 */
+	rc = efx_mcdi_rpc_quiet(efx, req.cmd, inbuf, inbuf_len,
+				outbuf, req.outlen, &outlen_actual);
 	efx_ioctl_mcdi_complete_reset(efx, req.cmd, rc);
 
 	if (rc) {
@@ -152,11 +174,12 @@ static int efx_ioctl_do_mcdi(struct efx_nic *efx,
 	req.outlen = outlen_actual;
 
 	if (copy_to_user(user_req, &req, sizeof(req)) ||
-	    copy_to_user(&user_req->payload, buf, outlen_actual))
+	    copy_to_user(&user_req->payload, outbuf, outlen_actual))
 		rc = -EFAULT;
 
 out_free:
-	kfree(buf);
+	kfree(outbuf);
+	kfree(inbuf);
 	return rc;
 }
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,6 +29,10 @@
 
 #include "ip_internal.h"
 #include <onload/common.h>
+
+#ifdef ONLOAD_OFE
+#include "ofe/onload.h"
+#endif
 
 #ifndef __KERNEL__
 #include <ci/internal/efabcfg.h>
@@ -140,7 +144,7 @@ static void ci_udp_clr_filters(citp_socket* ep)
 {
   ci_udp_state* us = SOCK_TO_UDP(ep->s);
   if( UDP_GET_FLAG(us, CI_UDPF_FILTERED) ) {
-    ci_tcp_ep_clear_filters(ep->netif, S_SP(us));
+    ci_tcp_ep_clear_filters(ep->netif, S_SP(us), 0);
     UDP_CLR_FLAG(us, CI_UDPF_FILTERED);
   }
 }
@@ -158,6 +162,14 @@ static int ci_udp_set_filters(citp_socket* ep, ci_udp_state* us)
 
   rc = ci_tcp_ep_set_filters(ep->netif, S_SP(us), us->s.cp.so_bindtodevice, 
                              OO_SP_NULL);
+  if( rc == -EFILTERSSOME ) {
+    if( CITP_OPTS.no_fail )
+      rc = 0;
+    else {
+      ci_tcp_ep_clear_filters(ep->netif, S_SP(us), 0);
+      rc = -ENOBUFS;
+    }
+  }
   if( rc < 0 ) {
     LOG_UC(log(FNS_FMT "ci_tcp_ep_set_filters failed (%d)",
                FNS_PRI_ARGS(ep->netif, ep->s), -rc));
@@ -239,6 +251,14 @@ static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
   /* reset any rx/tx that have taken place already */
   UDP_CLR_FLAG(us, CI_UDPF_EF_SEND);
 
+#ifdef ONLOAD_OFE
+    if( ep->netif->ofe != NULL )
+      us->s.ofe_code_start = ofe_socktbl_find(
+                        ep->netif->ofe, OFE_SOCKTYPE_UDP,
+                        udp_laddr_be32(us), udp_raddr_be32(us),
+                        udp_lport_be16(us), udp_rport_be16(us));
+#endif
+
   /* OS source addrs have already been handed-over, so this must be one of
    * our src addresses.
    */
@@ -248,12 +268,10 @@ static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
   if( udp_laddr_be32(us) != INADDR_ANY_BE32 )
     UDP_SET_FLAG(us, CI_UDPF_EF_BIND);
   CI_UDPSTATE_SHOW_EP( ep );
-#if CI_CFG_NO_FAIL_BIND
-  if( rc == CI_SOCKET_ERROR ) {
+  if( rc == CI_SOCKET_ERROR && CITP_OPTS.no_fail) {
     CITP_STATS_NETIF(++ep->netif->state->stats.udp_bind_no_filter);
     goto handover;
   }
-#endif
   return rc;
 
  handover:
@@ -278,6 +296,7 @@ void ci_udp_handle_force_reuseport(ci_fd_t fd, citp_socket* ep,
         ci_assert(CI_IS_VALID_SOCKET(os_sock));
         rc = ci_sys_setsockopt(os_sock, SOL_SOCKET, SO_REUSEPORT, &one,
                                sizeof(one));
+        ci_rel_os_sock_fd(os_sock);
         if( rc != 0 && errno == ENOPROTOOPT )
           ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
         ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT;
@@ -405,6 +424,15 @@ ci_udp_disconnect(citp_socket* ep, ci_udp_state* us, ci_fd_t os_sock)
    * about in this case.
    */
   ci_udp_clr_filters(ep);
+
+#ifdef ONLOAD_OFE
+    if( ep->netif->ofe != NULL )
+      us->s.ofe_code_start = ofe_socktbl_find(
+                        ep->netif->ofe, OFE_SOCKTYPE_UDP,
+                        udp_laddr_be32(us), udp_raddr_be32(us),
+                        udp_lport_be16(us), udp_rport_be16(us));
+#endif
+
   if( (rc = ci_udp_set_filters(ep, us)) != 0 )
     /* Not too bad -- should still get packets via OS socket. */
     LOG_U(log(FNS_FMT "ERROR: ci_udp_set_filters failed (%d)",
@@ -489,6 +517,14 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
   }
 
   if( onloadable ) {
+#ifdef ONLOAD_OFE
+    if( ep->netif->ofe != NULL )
+      us->s.ofe_code_start = ofe_socktbl_find(
+                        ep->netif->ofe, OFE_SOCKTYPE_UDP,
+                        udp_laddr_be32(us), udp_raddr_be32(us),
+                        udp_lport_be16(us), udp_rport_be16(us));
+#endif
+
     if( (rc = ci_udp_set_filters(ep, us)) != 0 ) {
       /* Failed to set filters.  Most likely we've run out of h/w filters.
        * Handover to O/S to avoid breaking the app.
@@ -518,10 +554,8 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
   return 0;
 
  out:
-#if CI_CFG_NO_FAIL_CONNECT
-  if( rc < 0 )
+  if( rc < 0 && CITP_OPTS.no_fail )
     goto handover;
-#endif
   return rc;
 
  handover:
@@ -702,7 +736,7 @@ void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id, int do_free)
 
   if( UDP_GET_FLAG(us, CI_UDPF_FILTERED) ) {
     UDP_CLR_FLAG(us, CI_UDPF_FILTERED);
-    ci_tcp_ep_clear_filters(netif, S_SP(us));
+    ci_tcp_ep_clear_filters(netif, S_SP(us), 0);
   }
   ci_udp_recv_q_drop(netif, &us->recv_q);
   ci_ni_dllist_remove(netif, &us->s.reap_link);
@@ -716,8 +750,12 @@ void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id, int do_free)
   /* Only free state if no outstanding tx packets: otherwise it'll get
    * freed by the tx completion event.
    */
-  if( us->tx_count == 0 && do_free )
-    ci_udp_state_free(netif, us);
+  if( do_free ) {
+    if( us->tx_count == 0 )
+      ci_udp_state_free(netif, us);
+    else
+      CITP_STATS_NETIF_INC(netif, udp_free_with_tx_active);
+  }
 }
 
 #endif /* __ci_driver__ */

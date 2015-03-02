@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,6 +125,7 @@ static int citp_udp_socket(int domain, int type, int protocol)
   if( fdtable_strict() )  CITP_FDTABLE_LOCK();
   if((fd = ci_udp_ep_ctor(&epi->sock, ni, domain, type)) < 0) {
     /*! ?? \TODO unpick the ci_udp_ep_ctor according to how failed */
+    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
     Log_U(ci_log(LPF "socket: udp_ep_ctor failed"));
     errno = -fd;
     goto fail3;
@@ -185,7 +186,7 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
        * map the the new stack into user space of the executing process.
        */
       fdinfo = citp_fdtable_lookup(fdinfo->fd);
-      fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE);
+      fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE, CI_FALSE);
       epi = fdi_to_sock_fdi(fdinfo);
       ep = &epi->sock;
       ci_netif_cluster_prefault(ep->netif);
@@ -242,7 +243,7 @@ static int citp_udp_connect(citp_fdinfo* fdinfo,
 }
 
 
-static int citp_udp_close(citp_fdinfo* fdinfo, int may_cache)
+static int citp_udp_close(citp_fdinfo* fdinfo)
 {
   return 0;
 }
@@ -333,7 +334,8 @@ static int citp_udp_setsockopt(citp_fdinfo* fdinfo, int level,
       ! CI_SOCK_NOT_BOUND(s) ) {
     ci_log("%s: setting reuseport after binding on udp not supported",
            __FUNCTION__);
-    return -ENOSYS;
+    errno = ENOSYS;
+    return -1;
   }
 
   citp_fdinfo_release_ref(fdinfo, 0);
@@ -342,8 +344,8 @@ static int citp_udp_setsockopt(citp_fdinfo* fdinfo, int level,
 
 #if CI_CFG_RECVMMSG
 static int citp_udp_recvmmsg(citp_fdinfo* fdinfo, struct mmsghdr* msg, 
-                             unsigned vlen, int flags, 
-                             const struct timespec *timeout)
+                             unsigned vlen, int flags,
+                             ci_recvmmsg_timespec* timeout)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   ci_udp_iomsg_args a;
@@ -471,6 +473,13 @@ static int citp_udp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
   us = SOCK_TO_UDP(epi->sock.s);
   ni = epi->sock.netif;
 
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! ss->stat_incremented) ) {
+    ni->state->stats.spin_select++;
+    ss->stat_incremented = 1;
+  }
+#endif
+
   citp_poll_if_needed(ni, ss->now_frc, ss->ul_select_spin);
   mask = ci_udp_poll_events(ni, us);
 
@@ -496,6 +505,10 @@ static int citp_udp_poll(citp_fdinfo*__restrict__ fdi,
   ci_netif* ni = epi->sock.netif;
   unsigned mask;
 
+#if CI_CFG_SPIN_STATS
+  ni->state->stats.spin_poll++;
+#endif
+
   mask = ci_udp_poll_events(ni, us);
   pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
   if( pfd->revents == 0 )
@@ -513,27 +526,43 @@ static int citp_udp_poll(citp_fdinfo*__restrict__ fdi,
 #if CI_CFG_USERSPACE_EPOLL
 #include "ul_epoll.h"
 /* More-or-less copy of citp_udp_poll */
-static void citp_udp_epoll(citp_fdinfo*__restrict__ fdi,
-                           struct citp_epoll_member*__restrict__ eitem,
-                           struct oo_ul_epoll_state*__restrict__ eps)
+static int citp_udp_epoll(citp_fdinfo*__restrict__ fdi,
+                          struct citp_epoll_member*__restrict__ eitem,
+                          struct oo_ul_epoll_state*__restrict__ eps,
+                          int* stored_event)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
   ci_udp_state* us = SOCK_TO_UDP(epi->sock.s);
   ci_netif* ni = epi->sock.netif;
   ci_uint64 sleep_seq;
   unsigned mask;
-  int stored_event;
+  int seq_mismatch = 0;
+
+#if CI_CFG_SPIN_STATS
+  if( CI_UNLIKELY(! eps->stat_incremented) ) {
+    ni->state->stats.spin_epoll++;
+    eps->stat_incremented = 1;
+  }
+#endif
 
   /* Try to return a result without polling if we can. */
   sleep_seq = us->s.b.sleep_seq.all;
   mask = ci_udp_poll_events(ni, us);
-  stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
-  if( !stored_event && !eps->ordering_info )
+  *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
+                                              &us->s.b.sleep_seq.all,
+                                              &seq_mismatch);
+  if( (*stored_event == 0) && !eps->ordering_info )
     if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
       sleep_seq = us->s.b.sleep_seq.all;
       mask = ci_udp_poll_events(ni, us);
-      citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq);
+      *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
+                                                  &us->s.b.sleep_seq.all,
+                                                  &seq_mismatch);
     }
+
+  /* We shouldn't have stored an event if there was a mismatch */
+  ci_assert( !(seq_mismatch == 1 && *stored_event == 1) );
+  return seq_mismatch;
 }
 #endif
 
@@ -612,7 +641,7 @@ static int citp_udp_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr* msg,
 }
 
 
-int citp_udp_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
+int citp_udp_tmpl_alloc(citp_fdinfo* fdi, const struct iovec* initial_msg,
                         int mlen, struct oo_msg_template** omt_pp,
                         unsigned flags)
 {
@@ -621,7 +650,7 @@ int citp_udp_tmpl_alloc(citp_fdinfo* fdi, struct iovec* initial_msg,
 
 
 int citp_udp_tmpl_update(citp_fdinfo* fdi, struct oo_msg_template* omt,
-                         struct onload_template_msg_update_iovec* updates,
+                         const struct onload_template_msg_update_iovec* updates,
                          int ulen, unsigned flags)
 {
   return -EOPNOTSUPP;
@@ -752,6 +781,10 @@ citp_protocol_impl citp_udp_protocol_impl = {
     .tmpl_abort     = citp_udp_tmpl_abort,
 #if CI_CFG_USERSPACE_EPOLL
     .ordered_data   = citp_udp_ordered_data,
+#endif
+    .is_spinning    = citp_sock_is_spinning,
+#if CI_CFG_FD_CACHING
+    .cache          = citp_nonsock_cache,
 #endif
   }
 };

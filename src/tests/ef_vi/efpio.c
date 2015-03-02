@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,7 +84,7 @@ static int		cfg_wait = 0;
 static int              cfg_use_vf;
 static int              cfg_phys_mode;
 static int              cfg_disable_tx_push;
-static int              cfg_no_precopy;
+static int              cfg_precopy = 1;
 
 
 #define N_RX_BUFS	16u
@@ -181,7 +181,7 @@ static void rx_post_8(void)
   unsigned buf_i;
 
   for( i = 0; i < 8; ++i ) {
-    buf_i = rx_posted % N_RX_BUFS;
+    buf_i = rx_posted & (N_RX_BUFS - 1);
     TEST(rx_posted - rx_completed < N_RX_BUFS);
     pb = pkt_bufs[buf_i];
     TRY(ef_vi_receive_init(&vi, pb->dma_buf_addr, pb->id));
@@ -230,57 +230,77 @@ static void rx_wait(void)
 }
 
 
-static void tx_send(void)
+static inline void tx_send(void)
 {
   TRY(ef_vi_transmit_pio(&vi, 0, tx_frame_len, 0));
 }
 
 /**********************************************************************/
 
-static void pong_test(void)
+static void pong_test(ef_vi* vi)
 {
-  int i;
+  int i, n_iter = cfg_iter;
 
   rx_post_8();
 
-  for( i = 0; i < cfg_iter; ++i ) {
-    rx_wait();
-    if( cfg_no_precopy )
-      ef_pio_memcpy(&vi, pkt_bufs[N_RX_BUFS]->dma_buf, 0, tx_frame_len);
-    tx_send();
-    if( i % 8 == 0 )
-      rx_post_8();
+  if( ! cfg_precopy ) {
+    void* tx_buf = pkt_bufs[N_RX_BUFS]->dma_buf;
+    for( i = 0; i < n_iter; ++i ) {
+      rx_wait();
+      TRY(ef_vi_transmit_copy_pio(vi, 0, tx_buf, tx_frame_len, 0));
+      if( (i & 7) == 0 )
+        rx_post_8();
+    }
+  }
+  else {
+    for( i = 0; i < n_iter; ++i ) {
+      rx_wait();
+      TRY(ef_vi_transmit_pio(vi, 0, tx_frame_len, 0));
+      if( (i & 7) == 0 )
+        rx_post_8();
+    }
   }
 }
 
 
-static void ping_test(void)
+static void ping_test(ef_vi* vi)
 {
   struct timeval start, end;
-  int i, usec;
+  int i, usec, n_iter = cfg_iter;
 
   rx_post_8();
 
   gettimeofday(&start, NULL);
-  for( i = 0; i < cfg_iter; ++i ) {
-    if( cfg_no_precopy )
-      ef_pio_memcpy(&vi, pkt_bufs[N_RX_BUFS]->dma_buf, 0, tx_frame_len);
-    tx_send();
-    if( i % 8 == 0 )
-      rx_post_8();
-    rx_wait();
+
+  if( ! cfg_precopy ) {
+    void* tx_buf = pkt_bufs[N_RX_BUFS]->dma_buf;
+    for( i = 0; i < n_iter; ++i ) {
+      TRY(ef_vi_transmit_copy_pio(vi, 0, tx_buf, tx_frame_len, 0));
+      if( (i & 7) == 0 )
+        rx_post_8();
+      rx_wait();
+    }
   }
+  else {
+    for( i = 0; i < n_iter; ++i ) {
+      TRY(ef_vi_transmit_pio(vi, 0, tx_frame_len, 0));
+      if( (i & 7) == 0 )
+        rx_post_8();
+      rx_wait();
+    }
+  }
+
   gettimeofday(&end, NULL);
 
   usec = (end.tv_sec - start.tv_sec) * 1000000;
   usec += end.tv_usec - start.tv_usec;
-  printf("round-trip time: %0.3f usec\n", (double) usec / cfg_iter);
+  printf("round-trip time: %0.3f usec\n", (double) usec / n_iter);
 }
 
 
 typedef struct {
   const char*   name;
-  void        (*fn)(void);
+  void        (*fn)(ef_vi* vi);
 } test_t;
 
 static test_t the_tests[] = {
@@ -457,7 +477,7 @@ int main(int argc, char* argv[])
       cfg_disable_tx_push = 1;
       break;
     case 'c':
-      cfg_no_precopy = 1;
+      cfg_precopy = 0;
       break;
     case '?':
       usage();
@@ -492,9 +512,9 @@ int main(int argc, char* argv[])
   printf("# udp payload len: %d\n", cfg_payload_len);
   printf("# iterations: %d\n", cfg_iter);
   printf("# frame len: %d\n", tx_frame_len);
-  if( cfg_no_precopy )
+  if( ! cfg_precopy )
     printf("# copy on critical path\n");
-  t->fn();
+  t->fn(&vi);
 
   return 0;
 }

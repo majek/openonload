@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -140,11 +140,12 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
 
 int onload_zc_release_buffers(int fd, onload_zc_handle* bufs, int bufs_len)
 {
-  int rc = 0, i;
+  int rc = 0, i, rx_pkt, released;
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
   citp_sock_fdi* epi;
   ci_netif* ni;
+  ci_ip_pkt_fmt* pkt;
 
   Log_CALL(ci_log("%s(%d, %p, %d)", __FUNCTION__, fd, bufs, bufs_len));
 
@@ -158,7 +159,7 @@ int onload_zc_release_buffers(int fd, onload_zc_handle* bufs, int bufs_len)
       ni = epi->sock.netif;
       ci_netif_lock(ni);
       for( i = 0; i < bufs_len; ++i ) {
-        ci_ip_pkt_fmt* pkt = (ci_ip_pkt_fmt*)bufs[i];
+        pkt = (ci_ip_pkt_fmt*)bufs[i];
         if( pkt->stack_id != ni->state->stack_id ) {
           LOG_U(log("%s: attempt to free buffer from stack %d to stack %d",
                     __FUNCTION__, pkt->stack_id, ni->state->stack_id));
@@ -167,8 +168,22 @@ int onload_zc_release_buffers(int fd, onload_zc_handle* bufs, int bufs_len)
         }
       }
       if( rc == 0 ) {
-        for( i = 0; i < bufs_len; ++i )
-          ci_netif_pkt_release_check_keep(ni, (ci_ip_pkt_fmt*)bufs[i]);
+        for( i = 0; i < bufs_len; ++i ) {
+          pkt = (ci_ip_pkt_fmt*)bufs[i];
+          /* If we are releasing a packet without the RX_FLAG then the user
+           * allocated and then freed the packet (without using it).
+           * We detect this to decrement n_asyn_pkts.
+           * RX packets (kept via ONLOAD_ZC_KEEP) are counted differently
+           * so don't decrement here.  (But may release)
+           */
+          rx_pkt = pkt->flags & CI_PKT_FLAG_RX;
+          released = ci_netif_pkt_release_check_keep(ni, pkt);
+          if ( ! rx_pkt ) {
+            ci_assert(released == 1);
+            (void) released;
+            --ni->state->n_async_pkts;
+          }
+        }
       }
       ci_netif_unlock(ni);
       break;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2013 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -85,16 +85,15 @@
 #define EFX_USE_QWORD_IO 1
 #endif
 
-/* PIO only works on 64-bit architectures */
-#if BITS_PER_LONG == 64
-/* not strictly necessary to restrict to x86 arch, but done for safety
- * since unusual write combining behaviour can break PIO.
+/* Hardware issue requires that only 64-bit naturally aligned writes
+ * are seen by hardware. Its not strictly necessary to restrict to
+ * x86_64 arch, but done for safety since unusual write combining behaviour
+ * can break PIO.
  */
 #ifdef CONFIG_X86_64
 /* PIO is a win only if write-combining is possible */
 #ifdef ARCH_HAS_IOREMAP_WC
 #define EFX_USE_PIO 1
-#endif
 #endif
 #endif
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,6 +37,8 @@
 #include <onload/ul/tcp_helper.h>
 #include <onload/ul.h>
 #include <onload/version.h>
+
+#include <../unix/internal.h>
 
 #define LPF "citp_netif_"
 #define LPFIN "-> " LPF
@@ -88,7 +90,7 @@ ci_inline void __citp_add_netif( ci_netif* ni )
   ci_assert( ni );
   CI_MAGIC_CHECK(ni, NETIF_MAGIC);
   ci_assert( citp_netifs_inited );
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   /* Add to the list of active netifs */
   ci_dllist_push(&citp_active_netifs, &ni->link);
@@ -101,7 +103,7 @@ ci_inline void __citp_remove_netif(ci_netif* ni)
   ci_assert( ni );
   CI_MAGIC_CHECK(ni, NETIF_MAGIC);
   ci_assert( citp_netifs_inited );
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
   ci_assert( ci_dllist_not_empty(&citp_active_netifs) );
 
   /* Remove from the list of active netifs */
@@ -116,8 +118,7 @@ static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
   ci_netif* ni;
   int realloc = 0;
 
-
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   /* Allocate netif from the heap */
   ni = CI_ALLOC_OBJ(ci_netif);
@@ -127,7 +128,7 @@ static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
     goto fail1;
   }
 
-  rc = ef_onload_driver_open(fd, 1);
+  rc = ef_onload_driver_open(fd, OO_STACK_DEV, 1);
   if( rc < 0 ) {
     Log_E(ci_log("%s: failed to open driver (%d)", __FUNCTION__, -rc));
     goto fail2;
@@ -175,13 +176,13 @@ static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
   return rc;
 }
 
-int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni)
+int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni, int locked)
 {
   ci_netif *ni;
   int rc;
 
 
-  ni = citp_find_ul_netif(stack_id, 0);
+  ni = citp_find_ul_netif(stack_id, locked);
   if( ni != NULL ) {
     citp_netif_add_ref(ni);
     *out_ni = ni;
@@ -193,10 +194,12 @@ int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni)
     return -ENOMEM;
   }
 
-  CITP_LOCK(&citp_ul_lock);
+  if( ! locked )
+    CITP_FDTABLE_LOCK();
   rc = ci_netif_restore_id(ni, stack_id);
   if( rc < 0 ) {
-    CITP_UNLOCK(&citp_ul_lock);
+    if( ! locked )
+      CITP_FDTABLE_UNLOCK();
     CI_FREE_OBJ(ni);
     return rc;
   }
@@ -205,7 +208,8 @@ int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni)
   citp_netif_add_ref(ni);
   citp_netif_ctor_hook(ni, 0);
 
-  CITP_UNLOCK(&citp_ul_lock);
+  if( ! locked )
+    CITP_FDTABLE_UNLOCK();
 
   ci_log("Importing "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT
          " [%s]", ni->state->pretty_name);
@@ -235,7 +239,7 @@ ci_netif* citp_find_ul_netif( int id, int locked )
   ci_assert( citp_netifs_inited );
 
   if( !locked )
-    CITP_LOCK_RD(&citp_ul_lock);
+    CITP_FDTABLE_LOCK_RD();
     
   CI_DLLIST_FOR_EACH2( ci_netif, ni, link, &citp_active_netifs )
     if( NI_ID(ni) == id )
@@ -245,7 +249,7 @@ ci_netif* citp_find_ul_netif( int id, int locked )
 
  exit_find:
   if( !locked )
-    CITP_UNLOCK(&citp_ul_lock);
+    CITP_FDTABLE_UNLOCK_RD();
   return ni;
 }
 
@@ -264,12 +268,13 @@ void citp_cmn_netif_init_ctor(unsigned netif_dtor_mode)
   /* Remember configuration parameters */
   citp_netif_dtor_mode = netif_dtor_mode;
 
-  CITP_LOCK(&citp_ul_lock);
+  /* no asserts about signal state yet - do not call CITP_FDTABLE_LOCK */
+  __CITP_LOCK(&citp_ul_lock);
 
   /* Initialise the active netif list */
   ci_dllist_init(&citp_active_netifs);
 
-  CITP_UNLOCK(&citp_ul_lock);
+  __CITP_UNLOCK(&citp_ul_lock);
 }
 
 
@@ -288,12 +293,12 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
   ci_assert( fd );
   ci_assert( out_ni );
 
-  CITP_LOCK(&citp_ul_lock);
+  CITP_FDTABLE_LOCK();
 
   oo_stackname_get(&stackname);
   if( stackname == NULL ) {
     /* This implies EF_DONT_ACCELERATE is set */
-    CITP_UNLOCK(&citp_ul_lock);
+    CITP_FDTABLE_UNLOCK();
     return CI_SOCKET_HANDOVER;
   }
 
@@ -334,13 +339,13 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
   ** condition with short-lived endpoints.
   */
   citp_netif_add_ref(ni);
-  CITP_UNLOCK(&citp_ul_lock);
+  CITP_FDTABLE_UNLOCK();
   CI_MAGIC_CHECK(ni, NETIF_MAGIC);
   *out_ni = ni;
   return 0;
   
  fail:
-  CITP_UNLOCK(&citp_ul_lock);
+  CITP_FDTABLE_UNLOCK();
   errno = -rc;
 
   return rc;
@@ -362,7 +367,7 @@ int citp_netif_recreate_probed(ci_fd_t ul_sock_fd,
   ci_assert( citp_netifs_inited );
   ci_assert( ni_fd_out );
   ci_assert( ni_out );
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   /* Allocate netif from the heap */
   ni = CI_ALLOC_OBJ(ci_netif);
@@ -431,7 +436,7 @@ ci_netif* __citp_get_any_netif(void)
 {
   ci_netif* ni = 0;
   
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
   
   if( ci_dllist_not_empty(&citp_active_netifs) )
     ni = CI_CONTAINER(ci_netif, link, ci_dllist_start(&citp_active_netifs));
@@ -439,11 +444,113 @@ ci_netif* __citp_get_any_netif(void)
   return ni;
 }
 
+
+#if CI_CFG_FD_CACHING
+
+static void ci_tcp_acceptq_drop_cached_from_waitable(ci_netif* ni,
+                                                     citp_waitable* w)
+{
+  ci_tcp_state* ts;
+  oo_sp next;
+
+  do {
+    next = w->wt_next;
+
+    ts = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
+    if( ci_tcp_is_cached(ts) )
+      ci_tcp_helper_close_no_trampoline(ts->cached_on_fd);
+    if( OO_SP_IS_NULL(next) )
+      return;
+    w = SP_TO_WAITABLE(ni, next);
+  } while(1);
+}
+
+
+/* Call close on every cached fd in the acceptq. */
+static void ci_tcp_acceptq_drop_cached(ci_netif* ni,
+                                       ci_tcp_socket_listen* tls)
+{
+  citp_waitable* w;
+  ci_assert(ci_sock_is_locked(ni, &tls->s.b));
+
+  if( ci_tcp_acceptq_not_empty(tls) ) {
+    /* Either acceptq_get or acceptq_put is non-empty.  If acceptq_get
+     * is empty, swizzle acceptq_put into it.  Else we cannot swizzle
+     * so drop from acceptq_put directly. */
+    if( OO_SP_IS_NULL(tls->acceptq_get) ) {
+      ci_tcp_acceptq_get_swizzle(ni, tls);
+    }
+    else if( ci_ill_not_empty(tls->acceptq_put) ) {
+      w = SP_TO_WAITABLE(ni, OO_SP_FROM_INT(ni, tls->acceptq_put));
+      ci_tcp_acceptq_drop_cached_from_waitable(ni, w);
+    }
+    w = SP_TO_WAITABLE(ni, tls->acceptq_get);
+    ci_tcp_acceptq_drop_cached_from_waitable(ni, w);
+  }
+}
+
+
+void citp_netif_cache_disable(void)
+{
+  ci_netif* ni;
+  int rc;
+  unsigned id;
+  /* Disable caching on every netif. */
+  if( ci_dllist_not_empty(&citp_active_netifs) )
+    CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs) {
+      ci_netif_lock(ni);
+      ci_assert_le(ni->state->cache_avail_stack,
+                   ni->state->opts.sock_cache_max);
+      if( ni->state->cache_avail_stack != ni->state->opts.sock_cache_max ) {
+        /* ioctl to drop the cache lists. */
+        rc = ci_tcp_helper_clear_epcache(ni);
+        /* Silence unused-but-set warning for NDEBUG builds. */
+        (void)rc;
+        ci_assert_equal(rc, 0);
+        /* Find all listening sockets and drop the cached fds on them. */
+        for( id = 0; id < ni->state->n_ep_bufs; ++id ) {
+          citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
+          if( wo->waitable.state == CI_TCP_LISTEN ) {
+            citp_waitable* w = &wo->waitable;
+            ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+            ci_tcp_socket_listen* tls = SOCK_TO_TCP_LISTEN(s);
+            ci_sock_lock(ni, &tls->s.b);
+            ci_tcp_acceptq_drop_cached(ni, tls);
+            ci_sock_unlock(ni, &tls->s.b);
+          }
+        }
+      }
+      ni->state->cache_avail_stack = 0;
+      ci_netif_unlock(ni);
+    }
+}
+
+
+void citp_netif_cache_warn_on_fork(void)
+{
+  ci_netif* ni;
+
+  /* Disable caching on every netif. */
+  if( ci_dllist_not_empty(&citp_active_netifs) )
+    CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs) {
+      ci_netif_lock(ni);
+      if( ni->state->opts.sock_cache_max > 0 &&
+          ~ni->state->flags & CI_NETIF_FLAG_SOCKCACHE_FORKED ) {
+        ni->state->flags |= CI_NETIF_FLAG_SOCKCACHE_FORKED;
+        NI_LOG(ni, CONFIG_WARNINGS,
+               "WARNING: Socket caching is not supported after fork().");
+      }
+      ci_netif_unlock(ni);
+    }
+}
+#endif /* CI_CFG_FD_CACHING */
+
+
 int citp_get_active_netifs(ci_netif **array, int array_size)
 {
   ci_netif* ni = 0;
   int n = 0;
-  ci_assert( CITP_ISLOCKED_RD(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED_RD;
   
   if( ci_dllist_not_empty(&citp_active_netifs) ) {
     CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs) {
@@ -475,7 +582,7 @@ void __citp_netif_mark_all_shared(void)
   ci_netif* ni;
   ci_netif* next_ni;
 
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   /* Remove any 'destruct protect' references, if we are in
   ** CITP_NETIF_DTOR_NONE mode the CI_NETIF_FLAGS_DTOR_PROTECTED
@@ -502,7 +609,7 @@ void __citp_netif_mark_all_dont_use(void)
 {
   ci_netif* ni;
 
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs)
     ni->flags |= CI_NETIF_FLAGS_DONT_USE_ANON;
@@ -516,7 +623,7 @@ void __citp_netif_unprotect_all(void)
   ci_netif* ni;
   ci_netif* next_ni;
 
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   CI_DLLIST_FOR_EACH3(ci_netif, ni, link, &citp_active_netifs, next_ni) {
     if( ni->flags & CI_NETIF_FLAGS_DTOR_PROTECTED ) {
@@ -539,9 +646,9 @@ void __citp_netif_ref_count_zero( ci_netif* ni, int locked )
                __FUNCTION__, NI_ID(ni), ci_netif_get_driver_handle(ni), ni));
 
   if( !locked )
-    CITP_LOCK(&citp_ul_lock);
+    CITP_FDTABLE_LOCK();
 
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   /* Forget about the netif */
   __citp_remove_netif(ni);
@@ -549,7 +656,7 @@ void __citp_netif_ref_count_zero( ci_netif* ni, int locked )
   __citp_netif_free(ni);
 
   if( !locked )
-    CITP_UNLOCK(&citp_ul_lock);
+    CITP_FDTABLE_UNLOCK();
 }
 
 
@@ -564,7 +671,7 @@ void __citp_netif_free(ci_netif* ni)
   ci_assert( ni );
   CI_MAGIC_CHECK(ni, NETIF_MAGIC);
   ci_assert( oo_atomic_read(&ni->ref_count) == 0 );
-  ci_assert( CITP_ISLOCKED(&citp_ul_lock) );
+  CITP_FDTABLE_ASSERT_LOCKED(1);
 
   Log_V(ci_log("%s: Freeing NI %d (fd:%d ni:%p)", __FUNCTION__,
                NI_ID(ni), ci_netif_get_driver_handle(ni), ni));

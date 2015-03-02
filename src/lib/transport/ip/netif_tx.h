@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,27 +63,6 @@ ci_inline void ci_netif_pkt_to_iovec(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     pkt = PKT_CHK(ni, pkt->frag_next);
   }
 }
-
-
-#if CI_CFG_USE_PIO
-ci_inline void ci_netif_pkt_to_pio(ci_netif* ni, ci_ip_pkt_fmt* pkt,
-                                   ci_int32 offset)
-{
-  int i = 0, intf_i = pkt->intf_i;
-  unsigned n = pkt->n_buffers;
-
-  ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
-  ci_assert_ge(2048 /* PIO region size */, pkt->pay_len);
-
-  while( 1 ) {
-    ef_pio_memcpy(&ni->nic_hw[intf_i].vi, PKT_START(pkt), offset, pkt->buf_len);
-    if( ++i == n )
-      return;
-    offset += pkt->buf_len;
-    pkt = PKT_CHK(ni, pkt->frag_next);
-  } 
-}
-#endif
 
 
 /**********************************************************************

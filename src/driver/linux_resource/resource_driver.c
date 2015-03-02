@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -186,11 +186,13 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	int rc;
 	unsigned map_min, map_max;
 	unsigned vi_base = 0;
+	unsigned vport_id = 0;
 
 	if (dev_type->arch == EFHW_ARCH_EF10) {
 		map_min = res_dim->vi_min;
 		map_max = res_dim->vi_lim;
 		vi_base = res_dim->vi_base;
+		vport_id = res_dim->vport_id;
 	}
 	else if (dev_type->arch == EFHW_ARCH_FALCON) {
 		map_min = CI_MIN(res_dim->evq_int_min, res_dim->evq_timer_min);
@@ -205,7 +207,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		return -EINVAL;
 
 	efhw_nic_init(nic, nic_flags, NIC_OPT_DEFAULT, dev_type, map_min,
-		      map_max, vi_base);
+		      map_max, vi_base, vport_id);
 	lnic->efrm_nic.efhw_nic.pci_dev = dev;
 	lnic->efrm_nic.efhw_nic.ctr_ap_dma_addr =
 		pci_resource_start(dev, nic->ctr_ap_bar);

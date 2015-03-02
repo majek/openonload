@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,6 +77,12 @@ int onload_stack_opt_set_int(const char* opt, int64_t val)
 }
 
 __attribute__((weak))
+int onload_stack_opt_get_int(const char* opt, int64_t* val)
+{
+  return 0;
+}
+
+__attribute__((weak))
 int onload_stack_opt_reset(void)
 {
   return 0;
@@ -134,16 +140,18 @@ int onload_set_recv_filter(int fd, onload_zc_recv_filter_callback filter,
 /**************************************************************************/
 
 __attribute__((weak))
-int onload_msg_template_alloc(int fd, struct iovec* initial_msg, int mlen,
-                              onload_template_handle* handle, unsigned flags)
+int onload_msg_template_alloc(int fd, const struct iovec* initial_msg,
+                              int mlen, onload_template_handle* handle,
+                              unsigned flags)
 {
   return -ENOSYS;
 }
 
 __attribute__((weak))
-int onload_msg_template_update(int fd, onload_template_handle handle,
-                               struct onload_template_msg_update_iovec* updates,
-                               int ulen, unsigned flags)
+int
+onload_msg_template_update(int fd, onload_template_handle handle,
+                           const struct onload_template_msg_update_iovec* updates,
+                           int ulen, unsigned flags)
 {
   return -ENOSYS;
 }
@@ -192,6 +200,39 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
 
 __attribute__((weak))
 int onload_move_fd(int fd)
+{
+  return -EINVAL;
+}
+
+
+/**************************************************************************/
+
+__attribute__((weak))
+enum onload_delegated_send_rc
+onload_delegated_send_prepare(int fd, int size, unsigned flags,
+                              struct onload_delegated_send* out)
+{
+  return ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET;
+}
+
+__attribute__((weak))
+int
+onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
+                               int flags)
+{
+  return -EINVAL;
+}
+
+__attribute__((weak))
+int
+onload_delegated_send_cancel(int fd)
+{
+  return -EINVAL;
+}
+
+__attribute__((weak))
+int
+oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
 {
   return -EINVAL;
 }

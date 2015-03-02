@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2005-2013 Solarflare Communications Inc.
+ * Copyright 2005-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -78,6 +78,11 @@ enum efx_filter_match_flags {
 				    EFX_FILTER_MATCH_REM_HOST |	  \
 				    EFX_FILTER_MATCH_REM_PORT)
 
+#define EFX_FILTER_MATCH_FLAGS_RFS_DEST_ONLY (EFX_FILTER_MATCH_ETHER_TYPE | \
+				    EFX_FILTER_MATCH_IP_PROTO |   \
+				    EFX_FILTER_MATCH_LOC_HOST |   \
+				    EFX_FILTER_MATCH_LOC_PORT)
+
 /**
  * enum efx_filter_priority - priority of a hardware filter specification
  * @EFX_FILTER_PRI_SARFS: Driver inserted performance hint
@@ -116,6 +121,7 @@ enum efx_filter_priority {
  * @EFX_FILTER_FLAG_RX: Filter is for RX
  * @EFX_FILTER_FLAG_TX: Filter is for TX
  * @EFX_FILTER_FLAG_STACK_ID: Stack ID value for self loopback supression.
+ * @EFX_FILTER_FLAG_VPORT_ID: Virtual port ID for adapter switching.
  */
 enum efx_filter_flags {
 	EFX_FILTER_FLAG_RX_RSS = 0x01,
@@ -124,6 +130,8 @@ enum efx_filter_flags {
 	EFX_FILTER_FLAG_RX = 0x08,
 	EFX_FILTER_FLAG_TX = 0x10,
 	EFX_FILTER_FLAG_STACK_ID = 0x20,
+	EFX_FILTER_FLAG_VPORT_ID = 0x40,
+	EFX_FILTER_FLAG_LOOPBACK = 0x80,
 };
 
 /**
@@ -136,6 +144,7 @@ enum efx_filter_flags {
  *	an RX drop filter
  * @stack_id: Stack id associated with RX queue, used for
  *	multicast loopback suppression
+ * @vport_id: Virtual port ID associated with RX queue, for adapter switching
  * @outer_vid: Outer VLAN ID to match, if %EFX_FILTER_MATCH_OUTER_VID is set
  * @inner_vid: Inner VLAN ID to match, if %EFX_FILTER_MATCH_INNER_VID is set
  * @loc_mac: Local MAC address to match, if %EFX_FILTER_MATCH_LOC_MAC or
@@ -164,6 +173,7 @@ struct efx_filter_spec {
 	u32	flags:8;
 	u32	dmaq_id:16;
 	u32	stack_id:16;
+	u32	vport_id;
 	u32	rss_context;
 	__be16	outer_vid __aligned(4); /* allow jhash2() of match values */
 	__be16	inner_vid;
@@ -175,7 +185,7 @@ struct efx_filter_spec {
 	__be32	rem_host[4];
 	__be16	loc_port;
 	__be16	rem_port;
-	/* total 64 bytes */
+	/* total 72 bytes */
 };
 
 enum {
@@ -310,6 +320,18 @@ static inline void efx_filter_set_stack_id(struct efx_filter_spec *spec,
 {
 	spec->flags |= EFX_FILTER_FLAG_STACK_ID;
 	spec->stack_id = stack_id;
+}
+
+/**
+ * efx_filter_set_vport_id - override virtual port id relating to filter
+ * @spec: Specification to initialise
+ * @vport_id: ID of the virtual port
+ */
+static inline void efx_filter_set_vport_id(struct efx_filter_spec *spec,
+					   unsigned vport_id)
+{
+	spec->flags |= EFX_FILTER_FLAG_VPORT_ID;
+	spec->vport_id = vport_id;
 }
 
 #endif /* EFX_FILTER_H */

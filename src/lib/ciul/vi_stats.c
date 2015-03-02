@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,9 +36,14 @@ falcon_query_layout(ef_vi* vi,
   return -EINVAL;
 }
 
+
 int
 ef10_query_layout(ef_vi* vi, const ef_vi_stats_layout**const layout_out)
 {
+/* Layout is imposed by ef10_get_rx_error_stats in ef10.c
+ * The layout should be either derived dynamically or come from a
+ * common header.
+ */
   static const ef_vi_stats_layout layout = {
 #define EF10_RX_STATS_SIZE 16
     .evsl_data_size = EF10_RX_STATS_SIZE,
@@ -80,7 +85,7 @@ ef_vi_stats_query_layout(ef_vi* vi,
   case EF_VI_ARCH_EF10:
     return ef10_query_layout(vi, layout_out);
   default:
-	  EF_VI_BUG_ON(1);
+    EF_VI_BUG_ON(1);
     return -EINVAL;
   }
 }
@@ -113,7 +118,7 @@ ef_vi_stats_query(ef_vi* vi, ef_driver_handle dh, void* data, int do_reset)
   case EF_VI_ARCH_EF10:
     return ef10_query(vi, dh, data, do_reset);
   default:
-	  EF_VI_BUG_ON(1);
+    EF_VI_BUG_ON(1);
     return -EINVAL;
   }
 }

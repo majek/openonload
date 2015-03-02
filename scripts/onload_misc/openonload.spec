@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201405-u2
+%define pkgversion 201502
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -281,12 +281,13 @@ rm -fR $RPM_BUILD_ROOT
 %attr(644, -, -) /usr/lib*/lib*.a
 /usr/libexec/onload/apps
 /usr/libexec/onload/profiles
-%{_bindir}
-%{_sbindir}
+%{_bindir}/*
+%{_sbindir}/*
 /lib/onload
-/sbin
+/sbin/*
 /usr/include/onload*
 /usr/include/aoe
+/usr/include/etherfabric/*.h
 %docdir %{_defaultdocdir}/%{name}-%{pkgversion}
 %attr(644, -, -) %{_defaultdocdir}/%{name}-%{pkgversion}/*
 %attr(644, -, -) %{_sysconfdir}/modprobe.d/onload.conf

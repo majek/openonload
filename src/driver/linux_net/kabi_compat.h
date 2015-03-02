@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,7 +17,6 @@
 #undef EFX_HAVE_ROUND_JIFFIES_UP
 #undef EFX_NEED_PCI_CLEAR_MASTER
 #define EFX_NEED_PCI_CLEAR_MASTER
-#undef EFX_HAVE_IOMMU_FOUND
 #undef EFX_NEED_GETNSTIMEOFDAY
 #define EFX_NEED_GETNSTIMEOFDAY
 #undef EFX_NEED_NS_TO_TIMESPEC

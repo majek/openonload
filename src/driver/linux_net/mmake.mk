@@ -21,6 +21,7 @@ export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
 export CONFIG_SFC_AOE := y
 export CONFIG_SFC_PPS := y
+export CONFIG_SFC_MCDI_LOGGING := y
 
 ifdef GCOV
 IMPORT        := ../linux/gcov.c ../linux/gcov.h

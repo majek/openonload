@@ -61,7 +61,6 @@ LIB_SRCS	+=		\
                 efabcfg.c       \
 		common_sockopts.c \
 		tcp_sockopts.c  \
-		rwlock.c	\
 		save_fd.c	\
 		tcp_helper.c	\
 		syscall.c	\
@@ -84,6 +83,16 @@ ifndef MMAKE_NO_RULES
 
 MMAKE_OBJ_PREFIX := ci_ip_
 LIB_OBJS	:= $(LIB_SRCS:%.c=$(MMAKE_OBJ_PREFIX)%.o)
+
+ifdef OFE_TREE
+  ifeq (${PLATFORM},gnu_x86_64)
+    LIB_OBJS	+= $(OFE_TREE)/solsec_ofe/binary_u64.o
+  endif
+  ifeq (${PLATFORM},gnu)
+    LIB_OBJS	+= $(OFE_TREE)/solsec_ofe/binary_u32.o
+  endif
+endif
+
 
 ALL		:= $(TARGET)
 

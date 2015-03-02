@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -40,7 +40,7 @@
 #include <onload/version.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/vi.h>
-#include <etherfabric/cluster_protocol.h>
+#include <etherfabric/internal/cluster_protocol.h>
 #include "internal.h"
 
 
@@ -218,4 +218,5 @@ PyMODINIT_FUNC initcluster_protocol(void)
   MODULE_INT_CONST(module, EF_PD_VF);
   MODULE_INT_CONST(module, EF_PD_PHYS_MODE);
   MODULE_INT_CONST(module, EF_PD_RX_PACKED_STREAM);
+  MODULE_INT_CONST(module, EF_PD_VPORT);
 }

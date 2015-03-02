@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,6 +45,7 @@
 
 #include "bt_manager.h"
 #include <ci/driver/efab/hardware.h>
+#include <ci/efhw/efhw_buftable.h>
 
 static int
 efrm_bt_block_reuse_try(struct efhw_buffer_table_block *block,
@@ -109,7 +110,23 @@ fail:
 	return rc;
 }
 
-void
+static void
+efrm_bt_block_clear(struct efhw_nic *nic, int bta_flags,
+		    struct efhw_buffer_table_block *block,
+		    int first, int size)
+{
+	if (!(bta_flags &
+	      (EFRM_BTA_FLAG_FRAUD | EFRM_BTA_FLAG_IN_RESET)))
+		efhw_nic_buffer_table_clear(nic, block, first, size);
+#ifndef NDEBUG
+	else
+		block->btb_clear_mask |= EFHW_BT_BLOCK_RANGE(first, size);
+#endif
+
+}
+                    
+
+static void
 efrm_bt_blocks_free(struct efhw_nic *nic,
 		    struct efrm_buffer_table_allocation *a)
 {
@@ -118,13 +135,12 @@ efrm_bt_blocks_free(struct efhw_nic *nic,
 
 	EFRM_ASSERT(a->bta_first_entry_offset == 0);
 	while ( (block = a->bta_blocks) != NULL) {
-		efhw_nic_buffer_table_clear(nic, block, 0,
-				min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE));
+		efrm_bt_block_clear(nic, a->bta_flags, block, 0,
+				    min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE));
 		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
 		a->bta_blocks = block->btb_next;
 		efhw_nic_buffer_table_free(nic, block);
 	}
-	EFRM_DO_DEBUG(a->bta_size = 0);
 }
 
 int
@@ -136,6 +152,7 @@ efrm_bt_manager_alloc(struct efhw_nic *nic,
 
 	a->bta_size = size;
 	a->bta_order = manager->order;
+	a->bta_flags = 0;
 	atomic_add(a->bta_size, &manager->btm_entries);
 
 	if (size < EFHW_BUFFER_TABLE_BLOCK_SIZE &&
@@ -181,9 +198,8 @@ efrm_bt_free_small(struct efhw_nic *nic, struct efrm_bt_manager *manager,
 {
 	EFRM_ASSERT(a->bta_size < EFHW_BUFFER_TABLE_BLOCK_SIZE);
 
-	efhw_nic_buffer_table_clear(nic, a->bta_blocks,
-				    a->bta_first_entry_offset,
-				    a->bta_size);
+	efrm_bt_block_clear(nic, a->bta_flags, a->bta_blocks,
+			    a->bta_first_entry_offset, a->bta_size);
 
 	spin_lock_bh(&manager->btm_lock);
 	a->bta_blocks->btb_free_mask |=
@@ -201,43 +217,12 @@ efrm_bt_free_small(struct efhw_nic *nic, struct efrm_bt_manager *manager,
 		manager->btm_block = NULL;
 	spin_unlock_bh(&manager->btm_lock);
 
-	efhw_nic_buffer_table_free(nic, a->bta_blocks);
+	if ((a->bta_flags & (EFRM_BTA_FLAG_IN_RESET | EFRM_BTA_FLAG_FRAUD))
+             != EFRM_BTA_FLAG_IN_RESET)
+		efhw_nic_buffer_table_free(nic, a->bta_blocks);
 	atomic_dec(&manager->btm_blocks);
 }
 
-static void
-efrm_bt_realloc_free(struct efhw_nic *nic,
-		     struct efrm_bt_manager *manager,
-		     struct efrm_buffer_table_allocation *a,
-		     struct efhw_buffer_table_block *failed_block)
-{
-	int n = a->bta_size;
-	struct efhw_buffer_table_block *block = a->bta_blocks;
-	struct efhw_buffer_table_block *next;
-
-	while (block != failed_block) {
-		next = block->btb_next;
-		efhw_nic_buffer_table_free(nic, block);
-		block = next;
-		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
-		atomic_dec(&manager->btm_blocks);
-	}
-	block = failed_block->btb_next;
-	efhw_nic_buffer_table_free(nic, failed_block);
-	atomic_dec(&manager->btm_blocks);
-
-	while (n > 0) {
-		next = block->btb_next;
-		/* we ignore rc from realloc(): free() should be called
-		 * in any case */
-		efhw_nic_buffer_table_realloc(nic, manager->owner,
-					      manager->order, block);
-		efhw_nic_buffer_table_free(nic, block);
-		block = next;
-		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
-		atomic_dec(&manager->btm_blocks);
-	}
-}
 
 int
 efrm_bt_manager_realloc(struct efhw_nic *nic,
@@ -245,8 +230,10 @@ efrm_bt_manager_realloc(struct efhw_nic *nic,
 			struct efrm_buffer_table_allocation *a)
 {
 	int n = a->bta_size;
-	int rc = 0;
+	int rc = 0, rc1 = 0;
 	struct efhw_buffer_table_block *block = a->bta_blocks;
+
+	a->bta_flags = EFRM_BTA_FLAG_IN_RESET;
 
 	EFRM_DO_DEBUG(
 		if (a->bta_size > EFHW_BUFFER_TABLE_BLOCK_SIZE)
@@ -275,8 +262,15 @@ efrm_bt_manager_realloc(struct efhw_nic *nic,
 							   manager->owner,
 							   manager->order,
 							   block);
-			if( rc != 0 )
-				goto fail;
+			if( rc != 0 && rc1 == 0 ) {
+				EFRM_ERR("%s ERROR: failed to re-allocate "
+					 "buffer table entries "
+					 "after reset size=%d order=%d",
+					 __func__, a->bta_size,
+					  manager->order);
+				rc1 = rc;
+				a->bta_flags |= EFRM_BTA_FLAG_FRAUD;
+			}
 		}
 		else {
 			EFRM_ASSERT((block->btb_free_mask & mask) == mask);
@@ -287,18 +281,7 @@ efrm_bt_manager_realloc(struct efhw_nic *nic,
 		block = block->btb_next;
 	} while (n > 0);
 
-	return 0;
-
-fail:
-	EFRM_ERR("%s ERROR: failed to re-allocate buffer table entries "
-		 "after reset size=%d", __func__, a->bta_size);
-	if (a->bta_size <= EFHW_BUFFER_TABLE_BLOCK_SIZE)
-		efrm_bt_free_small(nic, manager, a);
-	else
-		efrm_bt_realloc_free(nic, manager, a, block);
-	a->bta_size = 0;
-	EFRM_DO_DEBUG(a->bta_blocks = NULL;)
-	return rc;
+	return rc1;
 }
 
 void
@@ -321,11 +304,12 @@ efrm_bt_manager_free(struct efhw_nic *nic, struct efrm_bt_manager *manager,
 	a->bta_size = 0;
 }
 
-void
+int
 efrm_bt_nic_set(struct efhw_nic *nic, struct efrm_buffer_table_allocation *a,
 		dma_addr_t *dma_addrs)
 {
 	int n = a->bta_size;
+	int rc, rc1 = 0;
 	struct efhw_buffer_table_block *block = a->bta_blocks;
 
 	EFRM_DO_DEBUG(
@@ -337,12 +321,26 @@ efrm_bt_nic_set(struct efhw_nic *nic, struct efrm_buffer_table_allocation *a,
 	)
 
 	do {
-		efhw_nic_buffer_table_set(nic, block,
+		rc = efhw_nic_buffer_table_set(nic, block,
 				a->bta_first_entry_offset,
 				min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE),
 				dma_addrs + (a->bta_size - n));
+		if( rc != 0 ) {
+			if( ~a->bta_flags & EFRM_BTA_FLAG_IN_RESET )
+				return rc;
+			rc1 = rc;
+			if( ~a->bta_flags & EFRM_BTA_FLAG_FRAUD ) {
+				a->bta_flags |= EFRM_BTA_FLAG_FRAUD;
+				EFRM_ERR("%s: ERROR: failed to set buffer"
+					 "table entries: size=%d order=%d",
+					 __func__,
+					 a->bta_size, a->bta_order);
+			}
+		}
 		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
 		block = block->btb_next;
 	} while (n > 0);
+
+	return rc1;
 }
 

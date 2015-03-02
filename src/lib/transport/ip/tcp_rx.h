@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,7 +37,6 @@ ci_inline int ci_tcp_need_ack(ci_netif* ni, ci_tcp_state* ts)
    *
    * - We're in fast-start.
    */
-  int max_window = CI_MIN(tcp_rcv_buff(ts), (0xffff << ts->rcv_wscl));
   return 
 #if CI_CFG_DYNAMIC_ACK_RATE 
     /* We only need to look at dynack_thresh, not also delack_thresh,
@@ -48,7 +47,7 @@ ci_inline int ci_tcp_need_ack(ci_netif* ni, ci_tcp_state* ts)
 #else
     ((ts->acks_pending & CI_TCP_ACKS_PENDING_MASK) > NI_OPTS(ni).delack_thresh)
 #endif
-    || ( SEQ_GE(ts->rcv_delivered + max_window,
+    || ( SEQ_GE(ts->rcv_delivered + ts->rcv_window_max,
                 ts->rcv_wnd_right_edge_sent+ci_tcp_ack_trigger_delta(ts)) |
          (ci_tcp_is_in_faststart(ts)                                    ) );
 }
@@ -67,8 +66,6 @@ ci_inline void ci_tcp_rx_post_poll(ci_netif* ni, ci_tcp_state* ts)
 
   if( ci_tcp_sendq_not_empty(ts) )
     ci_tcp_tx_advance(ts, ni);
-  if( ci_tcp_tx_advertise_space(ni, ts) )
-    ci_tcp_wake(ni, ts, CI_SB_FLAG_WAKE_TX);
 
 #if CI_CFG_TCP_FASTSTART
   if( ci_tcp_time_now(ni) - ts->t_prev_recv_payload > NI_CONF(ni).tconst_idle )
@@ -83,15 +80,15 @@ ci_inline void ci_tcp_rx_post_poll(ci_netif* ni, ci_tcp_state* ts)
              __FUNCTION__, NTS_PRI_ARGS(ni, ts), ts->acks_pending);
 #endif
 
-    if( OO_SP_NOT_NULL(ts->s.local_peer) ) {
+    if( OO_SP_NOT_NULL(ts->local_peer) ) {
       if( ts->acks_pending )
-        ci_tcp_send_ack_loopback(ni, ts);
+        ci_tcp_send_ack_loopback(ni, ts, CI_FALSE);
       return;
     }
     if( ci_tcp_need_ack(ni, ts) ) {
       ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
       if(CI_LIKELY( pkt != NULL )) {
-        ci_tcp_send_ack(ni, ts, pkt);
+        ci_tcp_send_ack(ni, ts, pkt, CI_FALSE);
         return;
       }
     }

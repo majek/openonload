@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,6 +38,8 @@ void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
   s->rx_errno = ENOTCONN;
   s->pkt.ether_type = CI_ETHERTYPE_IP;
   ci_ip_cache_init(&s->pkt);
+
+  s->s_flags &= ~CI_SOCK_FLAG_FILTER;
 }
 
 
@@ -56,16 +58,18 @@ void oo_sock_cplane_init(struct oo_sock_cplane* cp)
 }
 
 
-void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
+void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s, int can_poison)
 {
   oo_p sp;
 
   /* Poison. */
-  CI_DEBUG(memset(&s->b + 1, 0xf0, (char*) (s + 1) - (char*) (&s->b + 1)));
+  CI_DEBUG(
+  if( can_poison )
+    memset(&s->b + 1, 0xf0, (char*) (s + 1) - (char*) (&s->b + 1));
+  )
 
   citp_waitable_reinit(ni, &s->b);
   oo_sock_cplane_init(&s->cp);
-  s->local_peer = OO_SP_NULL;
 
   s->s_flags = CI_SOCK_FLAG_CONNECT_MUST_BIND | CI_SOCK_FLAG_PMTU_DO;
   s->s_aflags = 0u;
@@ -92,9 +96,6 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
   s->timestamping_flags = 0u;
   s->os_sock_status = OO_OS_STATUS_TX;
 
-  ci_ip_queue_init(&s->timestamp_q);
-  s->timestamp_q_extract = OO_PP_NULL;
-
 
   ci_sock_cmn_reinit(ni, s);
 
@@ -105,11 +106,12 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s)
 }
 
 
-static int ci_sock_cmn_timestamp_q_reapable(ci_netif* ni, ci_sock_cmn* s)
+static int ci_sock_cmn_timestamp_q_reapable(ci_netif* ni,
+                                            ci_timestamp_q* timestamp_q)
 {
   int count = 0;
-  oo_pkt_p p = s->timestamp_q.head;
-  while( ! OO_PP_EQ(p, s->timestamp_q_extract) ) {
+  oo_pkt_p p = timestamp_q->queue.head;
+  while( ! OO_PP_EQ(p, timestamp_q->extract) ) {
     ++count;
     p = PKT_CHK(ni, p)->tsq_next;
   }
@@ -117,9 +119,15 @@ static int ci_sock_cmn_timestamp_q_reapable(ci_netif* ni, ci_sock_cmn* s)
 }
 
 
-void ci_sock_cmn_timestamp_q_drop(ci_netif* netif, ci_sock_cmn* s)
+void ci_sock_cmn_timestamp_q_init(ci_netif* netif, ci_timestamp_q* q)
 {
-  ci_ip_pkt_queue* qu = &s->timestamp_q;
+  ci_ip_queue_init(&q->queue);
+  q->extract = OO_PP_NULL;
+}
+
+void ci_sock_cmn_timestamp_q_drop(ci_netif* netif, ci_timestamp_q* q)
+{
+  ci_ip_pkt_queue* qu = &q->queue;
   ci_ip_pkt_fmt* p;
   CI_DEBUG(int i = qu->num);
 
@@ -137,13 +145,13 @@ void ci_sock_cmn_timestamp_q_drop(ci_netif* netif, ci_sock_cmn* s)
 }
 
 
-void ci_sock_cmn_timestamp_q_enqueue(ci_netif* ni, ci_sock_cmn* s,
+void ci_sock_cmn_timestamp_q_enqueue(ci_netif* ni, ci_timestamp_q* q,
                                      ci_ip_pkt_fmt* pkt)
 {
-  ci_ip_pkt_queue* qu = &s->timestamp_q;
+  ci_ip_pkt_queue* qu = &q->queue;
   oo_pkt_p prev_head = qu->head;
 
-  /* This part is effectively ci_ip_queue_enqueue(ni, &s->timestamp_q, p);
+  /* This part is effectively ci_ip_queue_enqueue(ni, &q->queue, p);
    * but inlined to allow using tsq_next field 
    */
   pkt->tsq_next = OO_PP_NULL;
@@ -162,28 +170,27 @@ void ci_sock_cmn_timestamp_q_enqueue(ci_netif* ni, ci_sock_cmn* s,
 
 
   if( OO_PP_IS_NULL(prev_head) ) {
-    ci_assert(OO_PP_IS_NULL(s->timestamp_q_extract));
-    s->timestamp_q_extract = qu->head;
+    ci_assert(OO_PP_IS_NULL(q->extract));
+    q->extract = qu->head;
   } 
   else {
-    ci_sock_cmn_timestamp_q_reap(ni, s);
+    if( OO_PP_IS_NULL(q->extract) )
+      q->extract = OO_PKT_P(pkt);
+    ci_sock_cmn_timestamp_q_reap(ni, q);
   }
-
-  /* Tells post-poll loop to put socket on the [reap_list]. */
-  s->b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
 }
 
 
-void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_sock_cmn* s)
+void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_timestamp_q* q)
 { 
   ci_assert(ci_netif_is_locked(ni));
-  while( ! OO_PP_EQ(s->timestamp_q.head, s->timestamp_q_extract) ) {
-    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, s->timestamp_q.head);
+  while( ! OO_PP_EQ(q->queue.head, q->extract) ) {
+    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, q->queue.head);
     oo_pkt_p next = pkt->tsq_next;
 
     ci_netif_pkt_release(ni, pkt);
-    --s->timestamp_q.num;
-    s->timestamp_q.head = next;
+    --q->queue.num;
+    q->queue.head = next;
   }
 }
 
@@ -193,8 +200,9 @@ void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_sock_cmn* s)
 void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
                       oo_dump_log_fn_t logger, void* log_arg)
 {
-  int ts_q_reapable = ci_sock_cmn_timestamp_q_reapable(ni, s);
-  logger(log_arg, "%s  s_flags: "CI_SOCK_FLAGS_FMT, pf,
+  logger(log_arg, "%s  uid=%d"CI_DEBUG(" pid=%d")
+         " s_flags: "CI_SOCK_FLAGS_FMT, pf,
+         (int) s->uid CI_DEBUG_ARG((int)s->pid),
          CI_SOCK_FLAGS_PRI_ARG(s));
   logger(log_arg, "%s  rcvbuf=%d sndbuf=%d bindtodev=%d(%d,%d:%d) ttl=%d", pf,
          s->so.rcvbuf, s->so.sndbuf, s->cp.so_bindtodevice,
@@ -210,8 +218,14 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
          s->os_sock_status >> OO_OS_STATUS_SEQ_SHIFT,
          (s->os_sock_status & OO_OS_STATUS_RX) ? ",RX":"",
          (s->os_sock_status & OO_OS_STATUS_TX) ? ",TX":"");
-  if( s->timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
-    logger(log_arg, "%s  TX timestamping queue: packets %d reap %d extract %d",
-           pf, s->timestamp_q.num - ts_q_reapable, ts_q_reapable,
-           OO_PP_ID(s->timestamp_q_extract));
+}
+
+void ci_timestamp_q_dump(ci_netif* ni, ci_timestamp_q* timestamp_q,
+                         const char* pf, oo_dump_log_fn_t logger,
+                         void* log_arg)
+{
+  int ts_q_reapable = ci_sock_cmn_timestamp_q_reapable(ni, timestamp_q);
+  logger(log_arg, "%s  TX timestamping queue: packets %d reap %d extract %d",
+         pf, timestamp_q->queue.num - ts_q_reapable, ts_q_reapable,
+         OO_PP_ID(timestamp_q->extract));
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -541,6 +541,8 @@ ci_ip_stats_update(ci_ip_stats *dest_stats, ci_ip_stats *src_stats) {
       __CI_TCP_EXT_STATS_INC( (netif), tcp_abort_on_timeout )
 #define CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_LINGER( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), tcp_abort_on_linger )
+#define CI_TCP_EXT_STATS_INC_TCP_ABORT_ON_DELEGATED_SEND( netif ) \
+      __CI_TCP_EXT_STATS_INC( (netif), tcp_abort_on_delegated_send )
 #define CI_TCP_EXT_STATS_INC_TCP_ABORT_FAILED( netif ) \
       __CI_TCP_EXT_STATS_INC( (netif), tcp_abort_failed )
 

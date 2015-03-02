@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,7 +47,7 @@
 
 #include <etherfabric/base.h>
 #include <etherfabric/pd.h>
-#include <etherfabric/cluster_protocol.h>
+#include <etherfabric/internal/cluster_protocol.h>
 #include "ef_vi_internal.h"
 #include "logging.h"
 
@@ -238,6 +238,7 @@ static int clusterd_alloc_cluster(int sock, const char* cluster_name,
         return 0;
       }
       else if( r1 == CLUSTERD_ERR_FAIL ) {
+        LOG(ef_log("%s: ERROR: daemon returned error %d", __FUNCTION__, r2));
         return -r2;
       }
     }
@@ -270,7 +271,7 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
   pd->pd_intf_name = malloc(IF_NAMESIZE);
   if( pd->pd_intf_name == NULL ) {
     LOGVV(ef_log("%s: malloc failed", __FUNCTION__));
-    goto alloc_locally;
+    return -ENOMEM;
   }
 
   if( (rc = clusterd_connect(&sock)) < 0 ) {

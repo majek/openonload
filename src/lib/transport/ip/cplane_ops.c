@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1226,7 +1226,11 @@ cicp_user_retrieve(ci_netif*                    ni,
      * destination changes.  Requires that we remember the fwd table
      * version.
      */
+
     ipcache->ifindex = sock_cp->ip_multicast_if;
+    /* In case of multicast traffic with multicast_if set
+     * route info ignored */
+    row = NULL;
   handle_bound_dev:
     bond_rowid = -1;
     source_mac = &mac_storage;
@@ -1240,8 +1244,14 @@ cicp_user_retrieve(ci_netif*                    ni,
 #endif
         )
       goto alienroute;
-    /* Select source IP: Bound local IP, else local IP given with
-     * IP_MULTICAST_IF, else arbitrary IP on this interface.
+    /* Select source IP:
+     * 1. Bound local IP,
+     * 2. IP_MULTICAST_IF addr, where both mcast local addr and iface provided
+     * 3. IP from routing table lookup (SO_BINDTODEVICE interface
+     *    could have multiple IPs assigned to it). This case includes multicast
+     *    where IP_MULTICAST_IF has not been provided (neither local ip or if)
+     * 4. arbitrary IP on this interface - this includes multicast, where
+     *    multicast local addr is not provided while interface is
      *
      * NB. We're handling SO_BINDTODEVICE as well as IP_MULTICAST_IF here.
      */
@@ -1250,6 +1260,13 @@ cicp_user_retrieve(ci_netif*                    ni,
     else if( sock_cp->ip_multicast_if != CI_IFID_BAD &&
              sock_cp->ip_multicast_if_laddr_be32 != 0 )
       ipcache->ip_saddr_be32 = sock_cp->ip_multicast_if_laddr_be32;
+    /* Present route preferred source address is used,
+     * unless we deal with multicast traffic, for which there is interface but
+     * not local ip address specified. However, in this case the row
+     * variable has been set to NULL - see above - therefore no
+     * special check here */
+    else if( row != NULL )
+      ipcache->ip_saddr_be32 = row->pref_source;
     /* TODO: Could this syscall either by bundling in cicp_llap_retrieve(),
      * or by having a u/l llap table that includes this.
      */
@@ -1262,7 +1279,8 @@ cicp_user_retrieve(ci_netif*                    ni,
       goto noroute;
     ipcache->mtu = row->mtu;
     ci_assert(ipcache->mtu);
-    if( ipcache->ip.ip_daddr_be32 == row->net_ip ) {
+    if( ipcache->ip.ip_daddr_be32 == row->net_ip ||
+        row->encap.type == CICP_LLAP_TYPE_LOOP) {
       ipcache->status = retrrc_localroute;
       ipcache->encap.type = CICP_LLAP_TYPE_SFC;
       ipcache->ether_offset = 4;

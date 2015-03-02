@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -132,9 +132,13 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 			return 0;
 		}
 		break;
+        case 0x1923:
+        case 0x1903:
         case 0x0923:
         case 0x0903:
         case 0x0901:
+		dt->function = device_id & 0x1000 ? EFHW_FUNCTION_VF :
+			EFHW_FUNCTION_PF;
 		dt->arch = EFHW_ARCH_EF10;
 		dt->variant = 'A';
 		dt->revision = class_revision;
@@ -159,7 +163,7 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 */
 void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		   struct efhw_device_type *dev_type, unsigned map_min,
-		   unsigned map_max, unsigned vi_base)
+		   unsigned map_max, unsigned vi_base, unsigned vport_id)
 {
 	nic->devtype = *dev_type;
 	nic->flags = flags;
@@ -214,7 +218,8 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		nic->q_sizes[EFHW_TXQ] = 512 | 1024 | 2048 | 4096;
 		nic->q_sizes[EFHW_RXQ] = 512 | 1024 | 2048 | 4096;
 
-		nic->ctr_ap_bar = EF10_P_CTR_AP_BAR;
+		nic->ctr_ap_bar = dev_type->function == EFHW_FUNCTION_PF ?
+			EF10_PF_P_CTR_AP_BAR : EF10_VF_P_CTR_AP_BAR;
 		nic->num_evqs   = 1024;
 		nic->num_dmaqs  = 1024;
 		nic->num_timers = 1024;
@@ -225,6 +230,7 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		nic->ctr_ap_bytes = 0;
 		nic->efhw_func = &ef10_char_functional_units;
 		nic->vi_base = vi_base;
+		nic->vport_id = vport_id;
 		break;
 	default:
 		EFHW_ASSERT(0);

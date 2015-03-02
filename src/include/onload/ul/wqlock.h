@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -102,7 +102,7 @@ static inline void oo_wqlock_try_drain_work(struct oo_wqlock* wql,
                                          void* cb_arg)
 {
   uintptr_t v = wql->lock;
-  assert(v & OO_WQLOCK_LOCKED);
+  assert((v & OO_WQLOCK_LOCKED) || !(v & OO_WQLOCK_WORK_BITS));
   if( v & OO_WQLOCK_WORK_BITS )
     if( ci_cas_uintptr_succeed(&wql->lock, v, v & OO_WQLOCK_LOCK_BITS) )
       cb(cb_arg, (void*) (v & OO_WQLOCK_WORK_BITS));

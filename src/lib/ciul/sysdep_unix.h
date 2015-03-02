@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,15 @@ typedef uint64_t ef_vi_dma_addr_t;
 
 /**********************************************************************
  * Compiler/processor dependencies.
+ *
+ * The following describes how we are using these primitives:
+ *
+ * wmb: Ensure ordering between writes to device, or write to memory and
+ *      write to device.
+ *
+ * wmb_wc: Ensure WC write completes before uncached write to device.
+ *
+ * mmiowb: Ensure write to device is flushed out promptly.
  */
 
 #define __printf(fmt, arg)  __attribute__((format(printf, fmt, arg)))
@@ -69,14 +78,16 @@ typedef uint64_t ef_vi_dma_addr_t;
 # endif
 
 # if defined(__i386__) || defined(__x86_64__)  /* GCC x86/x64 */
-#  define wmb()     __asm__ __volatile__("": : :"memory")
-#  define mmiowb()  ((void)0)
-#  define smp_rmb() __asm__ __volatile__("lfence": : :"memory")
+#  define wmb()       __asm__ __volatile__("": : :"memory")
+#  define wmb_wc()    __builtin_ia32_sfence()
+#  define mmiowb()    do{}while(0)
+#  define smp_rmb()   __asm__ __volatile__("lfence": : :"memory")
 
 # elif defined(__PPC__)
-#  define wmb()     __asm__ __volatile__("sync" : : :"memory")
-#  define mmiowb()     __asm__ __volatile__("sync" : : :"memory")
-#  define smp_rmb() __asm__ __volatile__("lwsync": : :"memory")
+#  define wmb()       __asm__ __volatile__("sync" : : :"memory")
+#  define wmb_wc()    __asm__ __volatile__("sync" : : :"memory")
+#  define mmiowb()    __asm__ __volatile__("sync" : : :"memory")
+#  define smp_rmb()   __asm__ __volatile__("lwsync": : :"memory")
 
 # else
 #  error Unknown processor architecture
@@ -101,65 +112,68 @@ typedef uint64_t ef_vi_dma_addr_t;
 #endif
 
 #if EF_VI_LITTLE_ENDIAN
+# define cpu_to_le16(v)   (v)
+# define le16_to_cpu(v)   (v)
 # define cpu_to_le32(v)   (v)
 # define le32_to_cpu(v)   (v)
+# define cpu_to_le64(v)   (v)
+# define le64_to_cpu(v)   (v)
 #else
+/* TODO: use optimised versions of these */
+# define cpu_to_le16(v)   (((v) >> 8) |		\
+			   ((v) << 8))
+# define le16_to_cpu(v)   (cpu_to_le16(v))
 # define cpu_to_le32(v)   (((v) >> 24)               |  \
 	                   (((v) & 0x00ff0000) >> 8) |	\
 			   (((v) & 0x0000ff00) << 8) |	\
 			   ((v) << 24))
-#define le32_to_cpu(v) (cpu_to_le32(v))
+# define le32_to_cpu(v)   (cpu_to_le32(v))
+# define cpu_to_le64(v)   (((v) >> 56)                           |	\
+	                   (((v) & 0x00ff000000000000ull) >> 40) |	\
+	                   (((v) & 0x0000ff0000000000ull) >> 24) |	\
+		           (((v) & 0x000000ff00000000ull) >> 8)  |	\
+			   (((v) & 0x00000000ff000000ull) << 8)  |	\
+			   (((v) & 0x0000000000ff0000ull) << 24) |	\
+			   (((v) & 0x000000000000ff00ull) << 40) |	\
+			   ((v) << 56))
+# define le64_to_cpu(v)   (cpu_to_le64(v))
 #endif
 
-#if EF_VI_LITTLE_ENDIAN
-# define cpu_to_le64(v)    (v)
-# define le64_to_cpu(v)    (v)
-#else
-# define cpu_to_le64(v)     (((v) >> 56)                        |	\
-	                     (((v) & 0x00ff000000000000ull) >> 40) |	\
-	                     (((v) & 0x0000ff0000000000ull) >> 24) |	\
-		             (((v) & 0x000000ff00000000ull) >> 8)  |	\
-			     (((v) & 0x00000000ff000000ull) << 8)  |	\
-			     (((v) & 0x0000000000ff0000ull) << 24) |	\
-			     (((v) & 0x000000000000ff00ull) << 40) |	\
-			     ((v) << 56))
-# define le64_to_cpu(v) (cpu_to_le64(v))
-#endif
 
 #if defined(__PPC__)
 
 ef_vi_inline void __nosync_writel(uint32_t data, volatile void *addr)
 {
-	__asm__ __volatile__("stwbrx %1,0,%2"
-			     : "=m" (*(uint32_t*)addr)
-			     : "r" (data), "r" (addr));
+  __asm__ __volatile__("stwbrx %1,0,%2"
+                       : "=m" (*(uint32_t*)addr)
+                       : "r" (data), "r" (addr));
 }
 
 
 ef_vi_inline void __nosync_writed(uint64_t data, volatile void *addr)
 {
-	__asm__ __volatile__("stdbrx %1,0,%2"
-			     : "=m" (*(uint64_t*)addr)
-			     : "r" (data), "r" (addr));
+  __asm__ __volatile__("stdbrx %1,0,%2"
+                       : "=m" (*(uint64_t*)addr)
+                       : "r" (data), "r" (addr));
 }
 
 ef_vi_inline void writel(uint32_t data, volatile void *addr)
 {
-	__asm__ __volatile__("sync; stwbrx %1,0,%2"
-			     : "=m" (*(uint32_t*)addr)
-			     : "r" (data), "r" (addr));
+  __asm__ __volatile__("sync; stwbrx %1,0,%2"
+                       : "=m" (*(uint32_t*)addr)
+                       : "r" (data), "r" (addr));
 }
 
 #else
 
 ef_vi_inline void __raw_writel(uint32_t data, volatile void *addr)
 {
-	*((volatile uint32_t *) addr) = data;
+  *((volatile uint32_t *) addr) = data;
 }
 
 ef_vi_inline void writel(uint32_t data, volatile void *addr)
 {
-	__raw_writel(cpu_to_le32(data), addr);
+  __raw_writel(cpu_to_le32(data), addr);
 }
 
 #endif

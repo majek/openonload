@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,7 +35,7 @@
 #include <onload/extensions_zc.h>
 
 
-int onload_msg_template_alloc(int fd, struct iovec* initial_msg, 
+int onload_msg_template_alloc(int fd, const struct iovec* initial_msg,
                               int mlen, onload_template_handle* handlep,
                               unsigned flags)
 {
@@ -61,9 +61,10 @@ int onload_msg_template_alloc(int fd, struct iovec* initial_msg,
 }
 
 
-int onload_msg_template_update(int fd, onload_template_handle handle, 
-                               struct onload_template_msg_update_iovec* updates,
-                               int ulen, unsigned flags)
+int
+onload_msg_template_update(int fd, onload_template_handle handle,
+                           const struct onload_template_msg_update_iovec* updates,
+                           int ulen, unsigned flags)
 {
   struct oo_msg_template* omt = handle;
   citp_lib_context_t lib_context;

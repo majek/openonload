@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2013 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -35,6 +35,8 @@
 #include "efx.h"
 #include "nic.h"
 #include "farch_regs.h"
+#include "sriov.h"
+#include "siena_sriov.h"
 #include "io.h"
 #include "workarounds.h"
 
@@ -353,7 +355,7 @@ efx_free_special_buffer(struct efx_nic *efx, struct efx_special_buffer *buffer)
  **************************************************************************/
 
 /* This writes to the TX_DESC_WPTR; write pointer for TX descriptor ring */
-static inline void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue)
+void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue)
 {
 	unsigned write_ptr;
 	efx_dword_t reg;
@@ -992,14 +994,13 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 	struct efx_nic *efx = rx_queue->efx;
 	bool rx_ev_buf_owner_id_err, rx_ev_ip_hdr_chksum_err;
 	bool rx_ev_tcp_udp_chksum_err, rx_ev_eth_crc_err;
-	bool rx_ev_frm_trunc, rx_ev_drib_nib, rx_ev_tobe_disc;
+	bool rx_ev_frm_trunc, rx_ev_drib_nib, rx_ev_tobe_disc = 0;
 	bool rx_ev_other_err, rx_ev_pause_frm;
 	bool rx_ev_hdr_type, rx_ev_mcast_pkt;
 	unsigned rx_ev_pkt_type;
 
 	rx_ev_hdr_type = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_HDR_TYPE);
 	rx_ev_mcast_pkt = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_MCAST_PKT);
-	rx_ev_tobe_disc = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_TOBE_DISC);
 	rx_ev_pkt_type = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_PKT_TYPE);
 	rx_ev_buf_owner_id_err = EFX_QWORD_FIELD(*event,
 						 FSF_AZ_RX_EV_BUF_OWNER_ID_ERR);
@@ -1022,10 +1023,14 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 	 * checksum errors during self-test. */
 	if (rx_ev_frm_trunc)
 		++channel->n_rx_frm_trunc;
-	else if (rx_ev_tobe_disc)
-		++channel->n_rx_tobe_disc;
-	else if (!efx->loopback_selftest) {
-		if (rx_ev_eth_crc_err)
+	else if (likely(!efx->loopback_selftest)) {
+		/* only look at tobe_disc if we're not in loopback mode */
+		rx_ev_tobe_disc =
+			EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_TOBE_DISC);
+
+		if (rx_ev_tobe_disc)
+			++channel->n_rx_tobe_disc;
+		else if (rx_ev_eth_crc_err)
 			++channel->n_rx_eth_crc_err;
 		else if (rx_ev_ip_hdr_chksum_err)
 			++channel->n_rx_ip_hdr_chksum_err;
@@ -1608,9 +1613,10 @@ void efx_farch_irq_disable_master(struct efx_nic *efx)
  * Interrupt must already have been enabled, otherwise nasty things
  * may happen.
  */
-void efx_farch_irq_test_generate(struct efx_nic *efx)
+int efx_farch_irq_test_generate(struct efx_nic *efx)
 {
 	efx_farch_interrupts(efx, true, true);
+	return 0;
 }
 
 /* Process a fatal interrupt
@@ -1872,8 +1878,10 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 		vi_count * vi_dc_entries;
 
 #ifdef CONFIG_SFC_SRIOV
-	if (efx->type->sriov_wanted(efx))
-		vi_count = max_t(unsigned, vi_count, EFX_VI_BASE);
+	if (efx->type->sriov_wanted) {
+		if (efx->type->sriov_wanted(efx))
+			vi_count = max_t(unsigned, vi_count, EFX_VI_BASE);
+	}
 	efx->vf_buftbl_base = res->buffer_table_min;
 	entries_per_vf = (vi_dc_entries + EFX_VF_BUFTBL_PER_VI) * efx_vf_size(efx);
 #else
@@ -1891,8 +1899,8 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	entries_per_vnic = min_entries_per_vnic + 512;
 
 #ifdef EFX_NOT_UPSTREAM
-	if (efx_target_num_vis) {
-		unsigned vnic_count = efx_target_num_vis;
+	if (efx_target_num_vis >= 0) {
+		unsigned vnic_count = (unsigned) efx_target_num_vis;
 		unsigned vnic_limit = min(buftbl_free / min_entries_per_vnic,
 					  res->evq_timer_lim - vi_count);
 
@@ -1910,30 +1918,32 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 
 #ifdef CONFIG_SFC_SRIOV
 	/* If there is buffer table left, then try and allocate VFs */
-	if (efx->type->sriov_wanted(efx)) {
-		unsigned vf_limit = min(buftbl_free / entries_per_vf,
-					res->evq_timer_lim - vi_count);
-		vf_limit = min_t(unsigned, vf_limit, EFX_VF_COUNT_MAX);
-		vf_limit = min_t(unsigned, vf_limit,
-				 (1024 - EFX_VI_BASE) >> efx->vi_scale);
-
-		if (efx->vf_count > vf_limit) {
-			netif_err(efx, probe, efx->net_dev,
-				  "Reducing VF count from from %d to %d. "
-				  "Reduce rx_desc_cache_size, "
-				  "tx_desc_cache_size and/or num_vis\n",
-				  efx->vf_count, vf_limit);
-			efx->vf_count = vf_limit;
+	if (efx->type->sriov_wanted) {
+		if (efx->type->sriov_wanted(efx)) {
+			unsigned vf_limit = min(buftbl_free / entries_per_vf,
+						res->evq_timer_lim - vi_count);
+			vf_limit = min_t(unsigned, vf_limit, EFX_VF_COUNT_MAX);
+			vf_limit = min_t(unsigned, vf_limit,
+					 (1024 - EFX_VI_BASE) >> efx->vi_scale);
+			
+			if (efx->vf_count > vf_limit) {
+				netif_err(efx, probe, efx->net_dev,
+					  "Reducing VF count from from %d to %d. "
+					  "Reduce rx_desc_cache_size, "
+					  "tx_desc_cache_size and/or num_vis\n",
+					  efx->vf_count, vf_limit);
+				efx->vf_count = vf_limit;
+			}
+			res->buffer_table_min +=
+				efx->vf_count * efx_vf_size(efx) * EFX_VF_BUFTBL_PER_VI;
+			vi_count += efx->vf_count * efx_vf_size(efx);
+			buftbl_free -= efx->vf_count * entries_per_vf;
 		}
-		res->buffer_table_min +=
-			efx->vf_count * efx_vf_size(efx) * EFX_VF_BUFTBL_PER_VI;
-		vi_count += efx->vf_count * efx_vf_size(efx);
-		buftbl_free -= efx->vf_count * entries_per_vf;
 	}
 #endif
 
 #ifdef EFX_NOT_UPSTREAM
-	if (!efx_target_num_vis) {
+	if (efx_target_num_vis < 0) {
 		/* Export remaining buffer table through driverlink */
 		vnic_limit = min(buftbl_free / entries_per_vnic,
 				 res->evq_timer_lim - vi_count);
@@ -1963,14 +1973,16 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	res->rxq_lim = min(res->rxq_lim, vi_count);
 	res->txq_lim = min(res->txq_lim, vi_count);
 #ifdef CONFIG_SFC_SRIOV
-	if (efx->type->sriov_wanted(efx)) {
-		unsigned vnic_base = EFX_VI_BASE +
-			efx->vf_count * efx_vf_size(efx);
-
-		res->evq_timer_min = max_t(int, res->evq_timer_min, vnic_base);
-		res->evq_int_min = max_t(int, res->evq_int_min, vnic_base);
-		res->rxq_min = max_t(int, res->rxq_min, vnic_base);
-		res->txq_min = max_t(int, res->txq_min, vnic_base);
+	if (efx->type->sriov_wanted) {
+		if (efx->type->sriov_wanted(efx)) {
+			unsigned vnic_base = EFX_VI_BASE +
+				efx->vf_count * efx_vf_size(efx);
+			
+			res->evq_timer_min = max_t(int, res->evq_timer_min, vnic_base);
+			res->evq_int_min = max_t(int, res->evq_int_min, vnic_base);
+			res->rxq_min = max_t(int, res->rxq_min, vnic_base);
+			res->txq_min = max_t(int, res->txq_min, vnic_base);
+		}
 	}
 #endif
 	res->flags |= EFX_DL_FALCON_HAVE_RSS_CHANNEL_COUNT;
@@ -2208,6 +2220,8 @@ static void efx_farch_filter_push_rx_config(struct efx_nic *efx)
 	struct efx_farch_filter_state *state = efx->filter_state;
 	struct efx_farch_filter_table *table;
 	efx_oword_t filter_ctl;
+
+	netif_dbg(efx, drv, efx->net_dev, "pushing RX config\n");
 
 	efx_reado(efx, &filter_ctl, FR_BZ_RX_FILTER_CTL);
 
@@ -2700,7 +2714,7 @@ u32 efx_farch_filter_get_rx_id_limit(struct efx_nic *efx)
 }
 
 s32 efx_farch_filter_insert(struct efx_nic *efx,
-			    struct efx_filter_spec *gen_spec,
+			    const struct efx_filter_spec *gen_spec,
 			    bool replace_equal)
 {
 	struct efx_farch_filter_state *state = efx->filter_state;
@@ -3280,7 +3294,7 @@ void efx_farch_filter_update_rx_scatter(struct efx_nic *efx)
 #if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
 
 s32 efx_farch_filter_async_insert(struct efx_nic *efx,
-				  struct efx_filter_spec *gen_spec)
+				  const struct efx_filter_spec *gen_spec)
 {
 	return efx_farch_filter_insert(efx, gen_spec, true);
 }
@@ -3401,6 +3415,19 @@ void efx_farch_filter_unblock_kernel(struct efx_nic *efx,
 	efx_farch_filter_push_rx_config(efx);
 
 	spin_unlock_bh(&efx->filter_lock);
+}
+
+int efx_farch_vport_filter_insert(struct efx_nic *efx, unsigned vport_id,
+				  const struct efx_filter_spec *spec,
+				  u64 *filter_id_out, bool *is_exclusive_out)
+{
+	return -EOPNOTSUPP;
+}
+
+int efx_farch_vport_filter_remove(struct efx_nic *efx, unsigned vport_id,
+				  u64 filter_id, bool is_exclusive)
+{
+	return -EOPNOTSUPP;
 }
 
 #endif /* EFX_NOT_UPSTREAM */

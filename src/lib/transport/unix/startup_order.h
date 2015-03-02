@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -36,6 +36,11 @@ STARTUP_ITEM(CITP_INIT_ONLOADEXT, oo_extensions_init)
 STARTUP_ITEM(CITP_INIT_FORK_HOOKS, ci_setup_fork)
 /* fdtable */
 STARTUP_ITEM(CITP_INIT_FDTABLE, citp_fdtable_ctor)
+
+#ifdef ONLOAD_OFE
+STARTUP_ITEM(CITP_INIT_OFE, citp_ofe_ctor)
+#endif
+
 /* init citp_netif_info */
 STARTUP_ITEM(CITP_INIT_NETIF, citp_netif_init_ctor)
 

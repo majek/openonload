@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -133,10 +133,11 @@ void ci_netif_send(ci_netif* netif, ci_ip_pkt_fmt* pkt)
     order = ci_log2_ge(pkt->pay_len, CI_CFG_MIN_PIO_BLOCK_ORDER);
     buddy = &netif->state->nic[intf_i].pio_buddy;
     if( netif->state->nic[intf_i].oo_vi_flags & OO_VI_FLAGS_PIO_EN ) {
-      if( pkt->pay_len <= NI_OPTS(netif).pio_thresh ) {
+      if( pkt->pay_len <= NI_OPTS(netif).pio_thresh && pkt->n_buffers == 1 ) {
         if( (offset = ci_pio_buddy_alloc(netif, buddy, order)) >= 0 ) {
-          ci_netif_pkt_to_pio(netif, pkt, offset);
-          rc = ef_vi_transmit_pio(vi, offset, pkt->pay_len, OO_PKT_ID(pkt));
+          rc = ef_vi_transmit_copy_pio(&netif->nic_hw[pkt->intf_i].vi, offset,
+                                       PKT_START(pkt), pkt->buf_len,
+                                       OO_PKT_ID(pkt));
           if( rc == 0 ) {
             CITP_STATS_NETIF_INC(netif, pio_pkts);
             ci_assert(pkt->pio_addr == -1);

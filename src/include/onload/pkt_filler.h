@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -41,7 +41,7 @@ struct oo_pkt_filler {
  *  - -EFAULT on mem fault (kernel only, SIGSEGV in userland)
  *  - -ERESTARTSYS if interrupted by a signal (kernel only)
  */
-extern int oo_pkt_fill(ci_netif*, int* p_netif_locked,
+extern int oo_pkt_fill(ci_netif*, ci_sock_cmn* s, int* p_netif_locked,
                        struct oo_pkt_filler* pkt_filler,
                        ci_iovec_ptr* piov, int bytes_to_copy
                        CI_KERNEL_ARG(ci_addr_spc_t addr_spc)) CI_HF;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -422,7 +422,7 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
 
 void efab_linux_termination_ctor(void)
 {
-#ifdef EFRM_HAS_FIND_KSYM
+#ifdef ERFM_HAVE_NEW_KALLSYMS
   efab_my_zap_other_threads = efrm_find_ksym("zap_other_threads");
   TERM_DEBUG("Find zap_other_threads via kallsyms at %p", t.addr);
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -96,7 +96,7 @@ static void ci_tcp_state_connected_opts_init(ci_netif* netif, ci_tcp_state* ts)
   sp = oo_sockp_to_statep(netif, S_SP(ts));
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, timeout_q_link));
   ci_ni_dllist_link_init(netif, &ts->timeout_q_link, sp, "tmoq");
-  CI_DEBUG(ci_ni_dllist_mark_free(&ts->timeout_q_link));
+  ci_ni_dllist_mark_free(&ts->timeout_q_link);
 
   sp = oo_sockp_to_statep(netif, S_SP(ts));
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, tx_ready_link));
@@ -105,7 +105,8 @@ static void ci_tcp_state_connected_opts_init(ci_netif* netif, ci_tcp_state* ts)
 }
 
 
-static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts)
+static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts,
+                                        int from_cache)
 {
   /* SO_RCVLOWAT */
   ts->s.so.rcvlowat = 1;
@@ -124,23 +125,42 @@ static void ci_tcp_state_tcb_init_fixed(ci_netif* netif, ci_tcp_state* ts)
   sock_laddr_be32(&(ts->s)) = 0;
   TS_TCP(ts)->tcp_source_be16 = 0;
 #if CI_CFG_FD_CACHING
-  ts->cached_on_pid = -1;
+  /* If this is being initialised from the cache we need to preserve the cache
+   * details.
+   */
+  if( !from_cache ) {
+    ts->cached_on_fd = -1;
+    ts->cached_on_pid = -1;
+  }
 #endif
+
+  /*
+   * It's required to set protocol before ci_tcp_helper_sock_attach()
+   * since it's used to determine TCP or UDP file operations should be
+   * attached to the file descriptor in kernel.
+   */
+  ts->s.pkt.ip.ip_ihl_version = CI_IP4_IHL_VERSION(sizeof(ci_ip4_hdr));
+  ts->s.pkt.ip.ip_protocol = IPPROTO_TCP;
+  ts->s.pkt.ip.ip_check_be16 = 0;
+  ts->s.pkt.ip.ip_id_be16 = 0;
+  TS_TCP(ts)->tcp_check_be16 = 0;
 }
 
 /* Reset state for a connection, used for shutdown following listen. */
-static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
+static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
+                                    int from_cache)
 {
   ci_tcp_state_setup_timers(netif, ts);
 
 #if CI_CFG_FD_CACHING
-  {
+  if( !from_cache ) {
     oo_p sp;
     ts->cached_on_fd = -1;
+    ts->cached_on_pid = -1;
     sp = TS_OFF(netif, ts);
     OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_link));
     ci_ni_dllist_link_init(netif, &ts->epcache_link, sp, "epch");
-    CI_DEBUG (ci_ni_dllist_mark_free (&ts->epcache_link));
+    ci_ni_dllist_self_link(netif, &ts->epcache_link);
   }
 #endif
 
@@ -159,13 +179,16 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
   /* Initialise packet header and flow control state. */
   TS_TCP(ts)->tcp_urg_ptr_be16 = 0;
   tcp_enq_nxt(ts) = tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_snd_up(ts) = 0;
+  ts->snd_delegated = 0;
   ts->snd_max = tcp_snd_nxt(ts) + 1;
   /* ?? snd_nxt, snd_max, should be set as SYN is sent */
 
   /* WSCL option variables RFC1323 */
   ts->snd_wscl = 0;
   CI_IP_SOCK_STATS_VAL_TXWSCL( ts, ts->snd_wscl);
-  ts->rcv_wscl = ci_tcp_wscl_by_buff(netif, tcp_rcv_buff(ts));
+  ts->rcv_wscl = ci_tcp_wscl_by_buff(
+                            netif,
+                            ci_tcp_rcvbuf_established(netif, &ts->s));
   CI_IP_SOCK_STATS_VAL_RXWSCL( ts, ts->rcv_wscl);
 
   /* receive window */
@@ -243,17 +266,20 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts)
 
   ts->tmpl_head = OO_PP_NULL;
 
+  ts->local_peer = OO_SP_NULL;
+
   memset(&ts->stats, 0, sizeof(ts->stats));
 }
 
 
-void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts)
+void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts, int from_cache)
 {
   ci_assert(CI_PTR_OFFSET(&ts->s.pkt.ip, 4) == 0);
   LOG_TV(ci_log(LPF "%s(): %d", __FUNCTION__, S_FMT(ts)));
 
 #if defined(TCP_STATE_POISON) && !defined(NDEBUG)
-  {
+  /* Can't poison a cached socket - there's some bits of state to preserve. */
+  if( !from_cache ) {
     void *poison_start = &ts->s.b + 1;
     memset(poison_start, TCP_STATE_POISON,
            ((char*)(ts+1)) - (char*)poison_start);
@@ -261,12 +287,14 @@ void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts)
 #endif
 
   /* Initialise the lower level. */
-  ci_sock_cmn_init(netif, &ts->s);
+  ci_sock_cmn_init(netif, &ts->s, !from_cache);
   ci_pmtu_state_init(netif, &ts->s, &ts->pmtus, CI_IP_TIMER_PMTU_DISCOVER);
 
   /* Initialise this level. */
-  ci_tcp_state_tcb_init_fixed(netif, ts);
-  ci_tcp_state_tcb_reinit(netif, ts);
+  ci_tcp_state_tcb_init_fixed(netif, ts, from_cache);
+  ci_tcp_state_tcb_reinit(netif, ts, from_cache);
+
+  ci_sock_cmn_timestamp_q_init(netif, &ts->timestamp_q);
 }
 
 void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
@@ -281,7 +309,9 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
   ci_sock_cmn_reinit(netif, &ts->s);
   ci_pmtu_state_reinit(netif, &ts->s, &ts->pmtus);
   /* Reinitialise this level. */
-  ci_tcp_state_tcb_reinit(netif, ts);
+  ci_tcp_state_tcb_reinit(netif, ts, 0);
+
+  ci_sock_cmn_timestamp_q_init(netif, &ts->timestamp_q);
 }
 
 
@@ -297,7 +327,7 @@ ci_tcp_state* ci_tcp_get_state_buf(ci_netif* netif)
     return NULL;
   }
 
-  ci_tcp_state_init(netif, &wo->tcp);
+  ci_tcp_state_init(netif, &wo->tcp, 0);
   return &wo->tcp;
 }
 

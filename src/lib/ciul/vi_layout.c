@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -102,7 +102,7 @@ int ef_vi_receive_query_layout(ef_vi* vi,
   case EF_VI_ARCH_EF10:
     return ef10_query_layout(vi, ef_vi_layout_out, len_out);
   default:
-	  EF_VI_BUG_ON(1);
+    EF_VI_BUG_ON(1);
     return -EINVAL;
   }
 }

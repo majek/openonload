@@ -57,6 +57,19 @@ gnu_32bit_platform () {
   echo $userplatform
 }
 
+setup_filter_engine_env () {
+  $withofe || return
+
+  if [ -z "$filter_engine" ] ; then
+    if [ -d "$filter_engine_def" ] ; then
+      filter_engine="$filter_engine_def"
+    fi
+  fi
+
+  [ -n "$filter_engine" ] && export OFE_TREE="$filter_engine"
+}
+
+
 ######################################################################
 # main
 
@@ -71,6 +84,8 @@ all=true
 keepbuild=false
 cc_opt=
 NDEBUG=1; export NDEBUG
+filter_engine_def="/opt/onload_filter_engine"
+withofe=true
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -84,6 +99,8 @@ while [ $# -gt 0 ]; do
   --debug)	unset NDEBUG;;
   --strict)     strict=true;;
   --ppc-at)     is_ppc || usage ; cc_opt="CC=$2" ; shift ;;
+  --filter-engine=*) filter_engine=${1#--filter-engine=} ;;
+  --no-filter-engine) withofe=false ;;
   -*)           usage;;
   *)            break;;
   esac
@@ -91,6 +108,8 @@ while [ $# -gt 0 ]; do
 done
 
 [ $# = 0 ] || usage
+
+setup_filter_engine_env
 
 # Try to build 64-bit userland if they asked for it, or if this system
 # looks like it has a 64-bit userland.

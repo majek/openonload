@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2011-2013 Solarflare Communications Inc.
+ * Copyright 2011-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -460,7 +460,7 @@ struct efx_ptp_data {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
 	bool nic_ts_enabled;
 #endif
-	MCDI_DECLARE_BUF(txbuf, MC_CMD_PTP_IN_TRANSMIT_LENMAX);
+	_MCDI_DECLARE_BUF(txbuf, MC_CMD_PTP_IN_TRANSMIT_LENMAX);
 
 	unsigned int good_syncs;
 	unsigned int fast_syncs;
@@ -983,7 +983,7 @@ static int efx_ptp_get_timestamp_corrections(struct efx_nic *efx)
 static int efx_ptp_enable(struct efx_nic *efx)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_ENABLE_LEN);
-	MCDI_DECLARE_BUF_OUT_OR_ERR(outbuf, 0);
+	MCDI_DECLARE_BUF_ERR(outbuf);
 	int rc;
 
 	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_ENABLE);
@@ -1011,7 +1011,7 @@ static int efx_ptp_enable(struct efx_nic *efx)
 static int efx_ptp_disable(struct efx_nic *efx)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_PTP_IN_DISABLE_LEN);
-	MCDI_DECLARE_BUF_OUT_OR_ERR(outbuf, 0);
+	MCDI_DECLARE_BUF_ERR(outbuf);
 	int rc;
 
 	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_DISABLE);
@@ -1405,7 +1405,7 @@ static int efx_ptp_xmit_skb(struct efx_nic *efx, struct sk_buff *skb)
 	}
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
 	if (vlan_tx_tag_present(skb)) {
-		skb = __vlan_put_tag(skb, htons(ETH_P_8021Q),
+		skb = vlan_insert_tag_set_proto(skb, htons(ETH_P_8021Q),
 				     vlan_tx_tag_get(skb));
 		if (unlikely(!skb))
 			return NETDEV_TX_OK;
@@ -1942,6 +1942,7 @@ static int efx_ptp_restart(struct efx_nic *efx)
 		int rc = efx_ptp_start(efx);
 		if (!rc)
 		       rc = efx_ptp_synchronize(efx, PTP_SYNC_ATTEMPTS);
+		return rc;
 	}
 #endif
 	return 0;
@@ -2654,43 +2655,41 @@ int efx_ptp_get_mode(struct efx_nic *efx)
 int efx_ptp_change_mode(struct efx_nic *efx, bool enable_wanted,
 			unsigned int new_mode)
 {
-	if ((enable_wanted != efx->ptp_data->enabled) ||
-	    (enable_wanted && (efx->ptp_data->mode != new_mode))) {
-		int rc = 0;
+	int rc = 0;
 
-		if (enable_wanted) {
-			/* Change of mode requires disable */
-			if (efx->ptp_data->enabled &&
-			    (efx->ptp_data->mode != new_mode)) {
-				efx->ptp_data->enabled = false;
-				rc = efx_ptp_stop(efx);
-				if (rc != 0)
-					return rc;
-			}
-
-			/* Set new operating mode and establish
-			 * baseline synchronisation, which must
-			 * succeed.
-			 */
-			efx->ptp_data->mode = new_mode;
-			if (netif_running(efx->net_dev))
-				rc = efx_ptp_start(efx);
-			if (rc == 0) {
-				rc = efx_ptp_synchronize(efx,
-							 PTP_SYNC_ATTEMPTS * 2);
-				if (rc != 0)
-					efx_ptp_stop(efx);
-			}
-		} else {
+	/* If we are being asked to disable PTP we always disable it.
+	 * Otherwise, carry out the enable request unless we are already
+	 * enabled and the mode isn't changing.
+	 */
+	if (!enable_wanted) {
+		rc = efx_ptp_stop(efx);
+	} else if (!efx->ptp_data->enabled ||
+		   (efx->ptp_data->mode != new_mode)) {
+		/* We need to disable PTP to change modes */
+		if (efx->ptp_data->enabled) {
+			efx->ptp_data->enabled = false;
 			rc = efx_ptp_stop(efx);
+			if (rc != 0)
+				return rc;
 		}
 
-		if (rc != 0)
-			return rc;
-
-		efx->ptp_data->enabled = enable_wanted;
+		/* Set new operating mode and establish baseline
+		 * synchronisation, which must succeed.
+		 */
+		efx->ptp_data->mode = new_mode;
+		if (netif_running(efx->net_dev))
+			rc = efx_ptp_start(efx);
+		if (rc == 0) {
+			rc = efx_ptp_synchronize(efx, PTP_SYNC_ATTEMPTS * 2);
+			if (rc != 0)
+				efx_ptp_stop(efx);
+		}
 	}
 
+	if (rc != 0)
+		return rc;
+
+	efx->ptp_data->enabled = enable_wanted;
 	return 0;
 }
 

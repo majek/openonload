@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -154,13 +154,14 @@ int onload_move_fd(int fd)
   if( rc != 0 )
     goto out;
 
-  op_arg = ci_netif_get_driver_handle(ni);
-  rc = oo_resource_op(fd, OO_IOC_MOVE_FD, &op_arg);
+  op_arg = fd;
+  rc = oo_resource_op(ci_netif_get_driver_handle(ni),
+                      OO_IOC_MOVE_FD, &op_arg);
   if( rc != 0 )
     goto out;
 
   fdi = citp_fdtable_lookup(fd);
-  fdi = citp_reprobe_moved(fdi, CI_FALSE);
+  fdi = citp_reprobe_moved(fdi, CI_FALSE, CI_FALSE);
   citp_fdinfo_release_ref(fdi, CI_FALSE);
 
 out:
@@ -214,7 +215,9 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
     if( fdi->protocol->type == CITP_EPOLL_FD ) {
       rc = citp_epoll_ordered_wait(fdi, events, oo_events, maxevents, timeout,
                                      NULL, &lib_context);
+      citp_reenter_lib(&lib_context);
       citp_fdinfo_release_ref(fdi, 0);
+      citp_exit_lib(&lib_context, rc >= 0);
       return rc;
     }
     citp_fdinfo_release_ref(fdi, 0);
@@ -279,3 +282,117 @@ unsigned onload_lib_ext_version[] = {
   ONLOAD_EXT_VERSION_MINOR,
   ONLOAD_EXT_VERSION_MICRO
 };
+
+
+/**************************************************************************/
+
+enum onload_delegated_send_rc
+onload_delegated_send_prepare(int fd, int size, unsigned flags,
+                              struct onload_delegated_send* out)
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+  enum onload_delegated_send_rc rc = ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET;
+
+  Log_CALL(ci_log("%s(%d, %d, %p)", __FUNCTION__, fd, size, out));
+
+  citp_enter_lib(&lib_context);
+  fdi = citp_fdtable_lookup(fd);
+  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_prepare != NULL )
+    rc = citp_fdinfo_get_ops(fdi)->dsend_prepare(fdi, size, flags, out);
+  citp_fdinfo_release_ref(fdi, 0);
+  citp_exit_lib(&lib_context, rc == 0);
+
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+
+int
+onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
+                               int flags)
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+  int rc = -ENOTTY;
+
+  Log_CALL(ci_log("%s(%d, %p, %d, 0x%x)", __FUNCTION__,
+                  fd, iov, iovlen, flags));
+
+  citp_enter_lib(&lib_context);
+  fdi = citp_fdtable_lookup(fd);
+  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_complete != NULL )
+    rc = citp_fdinfo_get_ops(fdi)->dsend_complete(fdi, iov, iovlen, flags);
+  citp_fdinfo_release_ref(fdi, 0);
+  citp_exit_lib(&lib_context, rc == 0);
+
+  if( rc < 0 ) {
+    errno = -rc;
+    rc = -1;
+  }
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+
+int
+onload_delegated_send_cancel(int fd)
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+  int rc = -ENOTTY;
+
+  Log_CALL(ci_log("%s(%d)", __FUNCTION__, fd));
+
+  citp_enter_lib(&lib_context);
+  fdi = citp_fdtable_lookup(fd);
+  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_cancel != NULL )
+    rc = citp_fdinfo_get_ops(fdi)->dsend_cancel(fdi);
+  citp_fdinfo_release_ref(fdi, 0);
+  citp_exit_lib(&lib_context, rc == 0);
+
+  if( rc < 0 ) {
+    errno = -rc;
+    rc = -1;
+  }
+  Log_CALL_RESULT(rc);
+  return rc;
+}
+
+int
+oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+   citp_sock_fdi* epi;
+  ci_netif* ni;
+  int rc = -ENOTTY;
+  int intf_i = -1;
+
+  Log_CALL(ci_log("%s(%d, %p, %d)", __FUNCTION__, fd, iov, iovcnt));
+
+  citp_enter_lib(&lib_context);
+  fdi = citp_fdtable_lookup(fd);
+  if( fdi == NULL || ! citp_fdinfo_is_socket(fdi) )
+    goto out;
+  epi = fdi_to_sock_fdi(fdi);
+  ni = epi->sock.netif;
+
+  if( hwport >= 0 && hwport < CI_CFG_MAX_REGISTER_INTERFACES )
+    intf_i = ci_hwport_to_intf_i(ni, hwport);
+  if( intf_i < 0 )
+    intf_i = epi->sock.s->pkt.intf_i;
+  if( intf_i < 0 )
+    return -ENETDOWN;
+  rc = ci_netif_raw_send(ni, intf_i,  iov, iovcnt);
+  if( rc < 0 ) {
+    errno = -rc;
+    rc = -1;
+  }
+
+out:
+  citp_fdinfo_release_ref(fdi, 0);
+  citp_exit_lib(&lib_context, rc == 0);
+  Log_CALL_RESULT(rc);
+
+  return rc;
+}
+

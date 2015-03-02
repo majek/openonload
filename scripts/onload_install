@@ -46,6 +46,11 @@ usage() {
   err "  --test             - Do not install; just print commands"
   err "  --listfiles        - Do not install; just list installed files"
   err
+  err "  --filter-engine    - Specify location of filter engine directory"
+  err "                       by default - /opt/onload_filter_engine"
+  err "  --no-filter-engine - Don't include filter engine support even if it's"
+  err "                       present in the system"
+  err
   exit 1
 }
 
@@ -134,7 +139,9 @@ install_dlib() {
   local realname=$(basename "$libf")
   local linkname=$(echo "$realname" | sed 's/\.so\..*/.so/')
   install_x "$libf" "$destdir/$realname"
-  install_link "$destdir/$realname" "$destdir/$linkname"
+  if [ "$realname" != "$linkname" ]; then
+    install_link "$destdir/$realname" "$destdir/$linkname"
+  fi
 }
 
 
@@ -178,26 +185,38 @@ install_slib32() {
 }
 
 install_solar_clusterd() {
-  local pwd=$PWD
-  try $do cd "$TOP/src/tools/solar_clusterd"
-  local python_manifest=$(mktemp)
-  if [ -z "$i_prefix" ]; then
-    # Debian and Ubuntu mess up if --prefix=/usr is set.
-    ONLOAD_TREE="$TOP" ONLOAD_BUILD="$TOP/build/$u64" \
-      $do python setup.py install --record=$python_manifest
-  else
-    ONLOAD_TREE="$TOP" ONLOAD_BUILD="$TOP/build/$u64" \
-      $do python setup.py install --prefix="$i_prefix/usr" \
-                                  --record=$python_manifest
-  fi
+  local clusterd_lib="$u64/tools/solar_clusterd/cluster_protocol.so"
+  local python_cmd
+  local python_sitelib
+
+  python_cmd="from distutils.sysconfig import get_python_lib; import sys; "
+  python_cmd="$python_cmd sys.stdout.write(get_python_lib(plat_specific=1))"
+  python_sitelib=$(python -c "$python_cmd" 2> /dev/null)
 
   if [ $? != 0 ]; then
-    log "Could not install solar_clusterd python modules. "\
-        "(If using SLES10 you need the 'python-devel' pacakge)"
-  fi
+    log "WARNING: solar_clusterd will not be installed as python" \
+        "site-packages location could not be determined." \
+        "(If using SLES10 you need the 'python-devel' package)"
+  elif [ ! -e "$clusterd_lib" ]; then
+    log "Not installing solar_clusterd because it has not been built."
+  else
+    try mkdir -p "$python_sitelib/solar_clusterd"
 
-  manifest_combine $python_manifest
-  try $do cd $pwd
+    # Install built python extension module
+    install_dlib "$clusterd_lib" "$python_sitelib/solar_clusterd"
+
+    # Install solar_clusterd script and all python files from source folder
+    try $do cd "$TOP/src/tools/solar_clusterd" > /dev/null
+
+    install_x solar_clusterd "$i_usrbin/solar_clusterd"
+
+    /bin/ls *.py |
+      while read -r f; do
+        install_f "$f" "$python_sitelib/solar_clusterd"
+      done;
+
+    try $do cd - > /dev/null
+  fi
 }
 
 ######################################################################
@@ -228,9 +247,12 @@ install_userland() {
     install_dlib32 "$u32"/lib/onload_ext/libonload_ext.so "$i_lib32"
     install_slib "$u64"/lib/onload_ext/libonload_ext.a "$i_lib64"
     install_slib32 "$u32"/lib/onload_ext/libonload_ext.a "$i_lib32"
+    install_slib "$u64"/lib/ciul/libciul1.a "$i_lib64"
+    install_slib32 "$u32"/lib/ciul/libciul1.a "$i_lib32"
     install_x "$u64/tools/ip/onload_stackdump" "$i_usrbin/onload_stackdump"
     install_x "$u64/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
     install_x "$u64/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
+    [ -f "$u64/tools/ip/onload_fe" ] && install_x "$u64/tools/ip/onload_fe" "$i_usrbin/onload_fe"
     install_solar_clusterd
     $affinity && {
       install_plib32 "$u32/lib/sfcaffinity/libsfcaffinity.so" \
@@ -245,9 +267,11 @@ install_userland() {
               "$i_lib32/libonload.so"
     install_dlib "$u32"/lib/onload_ext/libonload_ext.so "$i_lib32"
     install_slib "$u32"/lib/onload_ext/libonload_ext.a "$i_lib32"
+    install_slib "$u32"/lib/ciul/libciul1.a "$i_lib32"
     install_x "$u32/tools/ip/onload_stackdump" "$i_usrbin/onload_stackdump"
     install_x "$u32/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
     install_x "$u32/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
+    [ -f "$u32/tools/ip/onload_fe" ] && install_x "$u32/tools/ip/onload_fe" "$i_usrbin/onload_fe"
     $affinity && {
       install_plib "$u32/lib/sfcaffinity/libsfcaffinity.so" \
                 "$i_lib32/libsfcaffinity.so"
@@ -292,17 +316,25 @@ install_userland() {
     $do python setup.py install --prefix="$i_prefix/usr"\
                                 --record=$python_manifest
   fi
-  manifest_combine $python_manifest
 
   if [ $? != 0 ]; then
-    log "Could not Openonload python modules. "\
-        "(If using SLES10 you need the 'python-devel' pacakge)"
+    log "Could not install OpenOnload python modules. "\
+        "(If using SLES10 you need the 'python-devel' package)"
   fi
 
-  # Install header files.
+  manifest_combine $python_manifest
+
   try $do cd "$TOP/src/include"
+
+  # Install header files for Onload extensions library
   install_f onload/extensions.h "$i_include/onload/extensions.h"
   install_f onload/extensions_zc.h "$i_include/onload/extensions_zc.h"
+
+  # Install header files for ef_vi app development
+  /bin/ls etherfabric/*.h |
+    while read -r f; do
+      install_f "$f" "$i_include/$f"
+    done;
 
   # Install aoe header files
   try $do cd "$TOP/src/include"
@@ -352,15 +384,14 @@ install_kernel_modules() {
 
   # Install driver meta-data.
   try $do cd "$TOP/build/$d/driver"
-  local mid="$i_usrlibexec/modules/$KVER"
-  install_f linux_net/Module.symvers "$mid/sfc/Module.symvers"
-  install_f linux_resource/Module.symvers "$mid/sfc_resource/Module.symvers"
-  install_f linux_char/Module.symvers "$mid/sfc_char/Module.symvers"
+  install_f linux_net/Module.symvers "$did/sfc.symvers"
+  install_f linux_resource/Module.symvers "$did/sfc_resource.symvers"
+  install_f linux_char/Module.symvers "$did/sfc_char.symvers"
   if [ -e linux_aoe/Module.symvers ]; then
-    install_f linux_aoe/Module.symvers "$mid/sfc_aoe/Module.symvers"
+    install_f linux_aoe/Module.symvers "$did/sfc_aoe.symvers"
   fi
-  install_f linux_onload/Module.symvers "$mid/onload/Module.symvers"
-  install_f linux_affinity/Module.symvers "$mid/sfc_affinity/Module.symvers"
+  install_f linux_onload/Module.symvers "$did/onload.symvers"
+  install_f linux_affinity/Module.symvers "$did/sfc_affinity.symvers"
 }
 
 
@@ -495,7 +526,6 @@ check_whether_installed() {
   done
 }
 
-
 ######################################################################
 
 do_rpm_install() {
@@ -542,6 +572,7 @@ force=false
 check_install=true
 logprog=true
 sfccheck=true
+withofe=true
 
 KVER=$(uname -r)
 export KVER
@@ -585,6 +616,8 @@ while [ $# -gt 0 ]; do
   --test)	do=echo; test=true;;
   --listfiles)	do=donot; test=true; listfiles=true; check_install=false
                 logprog=false; build=false; uninstall=false; sfccheck=false;;
+  --filter-engine=*) buildargs="$buildargs $1 ${1#--filter-engine}" ;;
+  --no-filter-engine) withofe=false; "$buildargs $1";;
   -*)           usage;;
   *)            break;;
   esac
@@ -687,6 +720,8 @@ if $sfccheck; then
     err
     log "WARNING: Try:   onload_tool reload"
     err
+    log "WARNING: If this problem persists you may need to update"
+    log "WARNING: your initramfs to include the correct sfc module"
   else
     echo
     echo "$me: To load the newly installed drivers run:  onload_tool reload"

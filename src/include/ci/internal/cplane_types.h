@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -297,7 +297,8 @@ enum {
   CICP_LLAP_TYPE_USES_HASH = 0x10,
   /* Distinguishes onloadable from not onloadable when hwport ==
    * CI_HWPORT_ID_BAD */
-  CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT = 0x20
+  CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT = 0x20,
+  CICP_LLAP_TYPE_LOOP = 0x40,
 };
 /* enum is always int, so no typedef for enum */
 typedef ci_uint8 cicp_llap_type_t;
@@ -308,12 +309,13 @@ typedef struct {
 } cicp_encap_t;
 
 
-#define CICP_ENCAP_NAME_FMT "%s%s%s%s%s%s"
+#define CICP_ENCAP_NAME_FMT "%s%s%s%s%s%s%s"
 #define CICP_ENCAP_NAME_MAX_LEN 28
 
 #define cicp_encap_name(encap)                                  \
   (encap & CICP_LLAP_TYPE_SFC ? "SFC " : ""),                   \
     (encap & CICP_LLAP_TYPE_VLAN ? "VLAN " : ""),               \
+    (encap & CICP_LLAP_TYPE_LOOP ? "LOOP " : ""),               \
     (encap & CICP_LLAP_TYPE_BOND ? "BOND " : ""),               \
     (encap & CICP_LLAP_TYPE_XMIT_HASH_LAYER4 ? "L4 " : ""),     \
     (encap & CICP_LLAP_TYPE_USES_HASH ? "HASH " : ""),          \

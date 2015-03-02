@@ -1,5 +1,6 @@
 ifeq ($(LINUX),1)
-SUBDIRS		:= ip efabcfg iscsictl sfcaffinity solar_clusterd
+SUBDIRS		:= ip efabcfg iscsictl sfcaffinity solar_clusterd \
+		jansson-2.7 onload_remote_monitor
 OTHER_SUBDIRS	:= unix chariot firmware
 ifneq ($(ONLOAD_ONLY),1)
 SUBDIRS		+= ftl unifdef misc mc-comms sfutils sfutils-linux

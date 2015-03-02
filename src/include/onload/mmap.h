@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -21,15 +21,14 @@
 *********************************************************************/
 
 /* Mmap areas:
- * - CI_NETIF_MMAP_ID_STATE
- *   netif shared state; ep buffers; control plane shared state
- * - CI_NETIF_MMAP_ID_IO
- *   VI resource: IO bar.
- * - CI_NETIF_MMAP_ID_IOBUFS
- *   VI resource: queues
+ * - CI_NETIF_MMAP_ID_STATE     netif shared state; ep buffers
+ * - CI_NETIF_MMAP_ID_CPLANE    control plane shared state, read-only
+ * - CI_NETIF_MMAP_ID_IO        VI resource: IO bar.
+ * - CI_NETIF_MMAP_ID_IOBUFS    VI resource: queues
  *   + if CI_CFG_PKTS_AS_HUGE_PAGES=1, mmap pkt_shm_id array
- * - CI_NETIF_MMAP_ID_PIO
- *   VI resource: PIO IO BAR
+ * - CI_NETIF_MMAP_ID_PIO       VI resource: PIO IO BAR
+ * - CI_NETIF_MMAP_ID_OFE_RO    OFE read-only part of engine
+ * - CI_NETIF_MMAP_ID_OFE_RW    OFE read-write part of engine
  * - CI_NETIF_MMAP_ID_PKTS + packet set id
  *   packet sets
  *
@@ -39,12 +38,17 @@
  * handler.
  */
 #define CI_NETIF_MMAP_ID_STATE    0
-#define CI_NETIF_MMAP_ID_IO       1
-#define CI_NETIF_MMAP_ID_IOBUFS   2
+#define CI_NETIF_MMAP_ID_CPLANE   1
+#define CI_NETIF_MMAP_ID_IO       2
+#define CI_NETIF_MMAP_ID_IOBUFS   3
 #if CI_CFG_PIO
-#define CI_NETIF_MMAP_ID_PIO      3
+#define CI_NETIF_MMAP_ID_PIO      4
 #endif
-#define CI_NETIF_MMAP_ID_PKTS     4
+#ifdef ONLOAD_OFE
+#define CI_NETIF_MMAP_ID_OFE_RO   5
+#define CI_NETIF_MMAP_ID_OFE_RW   6
+#endif
+#define CI_NETIF_MMAP_ID_PKTS     7
 #define CI_NETIF_MMAP_ID_PKTSET(id) (CI_NETIF_MMAP_ID_PKTS+(id))
 
 /* Mmap start should be aligned by page, so

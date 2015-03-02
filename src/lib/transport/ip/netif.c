@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,73 +37,96 @@ char* CI_NETIF_PTR(ci_netif* ni, oo_p off)
 
 /*--------------------------------------------------------------------
  *
- * Common routines for timeout list
+ * Common routines for timeout lists
  *
  *--------------------------------------------------------------------*/
 
-/*! set global netif "timeout state" timer */
-ci_inline void ci_netif_timeout_set_timer(ci_netif* ni)
+/*! set or clear global netif "timeout state" timer */
+ci_inline void ci_netif_timeout_set_timer(ci_netif* ni, ci_iptime_t prev_time)
 {
-  ci_tcp_state* ts;
+  ci_iptime_t time = 0; /* shut up gcc */
+  int i, found = 0;
 
-  ci_assert( !ci_ni_dllist_is_empty(ni, &ni->state->timeout_q) );
-  ts = TCP_STATE_FROM_LINK(ci_ni_dllist_head(ni, &ni->state->timeout_q));
-  /* ts->t_last_sent is now time we want to timeout this state */
-  ci_ip_timer_set(ni, &ni->state->timeout_tid, ts->t_last_sent);
-}
-
-
-/*! clear global netif "timeout state" timer */
-ci_inline void ci_netif_timeout_clear_timer(ci_netif* ni)
-{
-  ci_assert( ci_ni_dllist_is_empty(ni, &ni->state->timeout_q) );
-  ci_ip_timer_clear(ni, &ni->state->timeout_tid);
+  for( i = 0; i < OO_TIMEOUT_Q_MAX; i++ ) {
+    ci_tcp_state* ts;
+    if( ci_ni_dllist_is_empty(ni, &ni->state->timeout_q[i]) )
+      continue;
+    ts = TCP_STATE_FROM_LINK(ci_ni_dllist_head(ni, &ni->state->timeout_q[i]));
+    if( TIME_LE(ts->t_last_sent, prev_time) )
+      return;
+    if( !found || TIME_LT(ts->t_last_sent, time) ) {
+      found = 1;
+      time = ts->t_last_sent;
+    }
+  }
+  /* We can be called both from timer handler (when the timer is not
+   * running) and from RX handler (the timer is running).
+   * Take care about all cases. */
+  if( ! found )
+    ci_ip_timer_clear(ni, &ni->state->timeout_tid);
+  else if( ci_ip_timer_pending(ni, &ni->state->timeout_tid) )
+    ci_ip_timer_modify(ni, &ni->state->timeout_tid, time);
+  else
+    ci_ip_timer_set(ni, &ni->state->timeout_tid, time);
 }
 
 
 /*! add a state to the timeout list */
-ci_inline void ci_netif_timeout_add(ci_netif* ni, ci_tcp_state* ts)
+ci_inline void ci_netif_timeout_add(ci_netif* ni, ci_tcp_state* ts, int idx)
 {
-  ci_ni_dllist_link* link;
-  ci_tcp_state* link_ts;
-  ci_ni_dllist_t* list = &ni->state->timeout_q;
+  int is_first;
+  ci_ni_dllist_t* my_list = &ni->state->timeout_q[idx];
+  ci_ni_dllist_t* other_list;
+  ci_tcp_state* other_ts;
 
   ci_assert( ci_ni_dllist_is_free(&ts->timeout_q_link) );
 
-  /* run backwards through the list to find out where to insert */
-  for( link = ci_ni_dllist_start_last(ni, list);
-       link != ci_ni_dllist_end(ni, list);
-       ci_ni_dllist_backiter(ni, link) ) {
-    link_ts = TCP_STATE_FROM_LINK(link);
-    if ( TIME_GE(ts->t_last_sent, link_ts->t_last_sent) )
-      break;
-  }
-  ci_ni_dllist_insert_after(ni, link, &ts->timeout_q_link);
+  is_first = ci_ni_dllist_is_empty(ni, my_list);
+  ci_ni_dllist_push_tail(ni, my_list, &ts->timeout_q_link);
 
-  /* if we've now the head of the list */
-  if( &ts->timeout_q_link == ci_ni_dllist_head(ni, list) ) {
-    /* if we've not the tail then list must have been non-empty */
-    if( &ts->timeout_q_link != ci_ni_dllist_tail(ni, list) )
-      ci_ip_timer_clear(ni, &ni->state->timeout_tid);
-    ci_netif_timeout_set_timer(ni);
+  /* Set up the timer */
+  if( ! is_first )
+    return;
+
+  other_list = &ni->state->timeout_q[1-idx];
+  if( ci_ni_dllist_is_empty(ni, other_list) ) {
+    ci_ip_timer_set(ni, &ni->state->timeout_tid, ts->t_last_sent);
+    return;
   }
+
+  other_ts = TCP_STATE_FROM_LINK(ci_ni_dllist_head(ni, other_list));
+  if( TIME_LT(ts->t_last_sent, other_ts->t_last_sent) )
+    ci_ip_timer_modify(ni, &ni->state->timeout_tid, ts->t_last_sent);
+  else
+    ci_ip_timer_modify(ni, &ni->state->timeout_tid, other_ts->t_last_sent);
 }
 
 /*! remove a state from the timeout list */
 void ci_netif_timeout_remove(ci_netif* ni, ci_tcp_state* ts)
 {
-  /* WIN32: ci_tcp_is_timeout_ophan() does not check for orphaned EP */
+  int is_first, idx;
+
   ci_assert( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
-              ci_tcp_is_timeout_ophan(ts));
+              ci_tcp_is_timeout_orphan(ts));
   ci_assert( !ci_ni_dllist_is_free(&ts->timeout_q_link) );
+
+  if( ts->s.b.state == CI_TCP_TIME_WAIT )
+    idx = OO_TIMEOUT_Q_TIMEWAIT;
+  else
+    idx = OO_TIMEOUT_Q_FINWAIT;
+  is_first = OO_P_EQ( ci_ni_dllist_link_addr(ni, &ts->timeout_q_link),
+               ci_ni_dllist_link_addr(ni, ci_ni_dllist_head(ni,
+                                                &ni->state->timeout_q[idx])) );
 
   /* remove from the list */
   ci_ni_dllist_remove(ni, &ts->timeout_q_link);
-  CI_DEBUG(ci_ni_dllist_mark_free(&ts->timeout_q_link));
+  ci_ni_dllist_mark_free(&ts->timeout_q_link);
 
-  /* if needed clear timer */
-  if( ci_ni_dllist_is_empty(ni, &ni->state->timeout_q) )
-    ci_netif_timeout_clear_timer(ni);
+  /* if needed re-set or clear timer */
+  if( ! is_first )
+    return;
+
+  ci_netif_timeout_set_timer(ni, ts->t_last_sent);
 }
 
 /*! timeout a state from the list */
@@ -111,9 +134,8 @@ void ci_netif_timeout_leave(ci_netif* netif, ci_tcp_state* ts)
 {
   ci_assert(netif);
   ci_assert(ts);
-  /* WIN32: ci_tcp_is_timeout_ophan() does not check for orphaned EP */
   ci_assert( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
-              ci_tcp_is_timeout_ophan(ts) );
+              ci_tcp_is_timeout_orphan(ts) );
 
 #ifndef NDEBUG
   if (ts->s.b.state == CI_TCP_TIME_WAIT)
@@ -129,70 +151,74 @@ void ci_netif_timeout_leave(ci_netif* netif, ci_tcp_state* ts)
 
 /*! called to try and free up a connection from
     this list when we are low on tcp states */
-int ci_netif_timeout_reap(ci_netif* ni)
+/* todo: pass listening socket as a parameter
+ * if we are satisfyed by a cached ep */
+void ci_netif_timeout_reap(ci_netif* ni)
 {
-  ci_tcp_state* ts;
+  int i;
+  int reaped = 0;
+
   ci_assert(ni);
+  ci_assert(ci_netif_is_locked(ni));
   ci_assert(OO_SP_IS_NULL(ni->state->free_eps_head));
 
-  /* TODO check a connection is orphaned before trying to reap it
-   * - a non-orphaned one will not yield its tcp_state for re-use */
+  for( i = 0; i < OO_TIMEOUT_Q_MAX; i++ ) {
+    ci_ni_dllist_t* list = &ni->state->timeout_q[i];
+    ci_ni_dllist_link* l;
+    oo_p next;
 
-  while( OO_SP_IS_NULL(ni->state->free_eps_head) ) {
+    for( l = ci_ni_dllist_start(ni, list); l != ci_ni_dllist_end(ni, list);
+         l = (void*) CI_NETIF_PTR(ni, next) ) {
+      ci_tcp_state* ts = TCP_STATE_FROM_LINK(l);
+      next = l->next;
 
-    if(ci_ni_dllist_is_empty(ni, &ni->state->timeout_q)){
-      LOG_U(log(LPF "No more connections to reap from TIME_WAIT/FIN_WAIT2"));
-      return 0;
+      if( ts->s.b.sb_aflags & (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_IN_CACHE) ) {
+        LOG_NV(log(LPF "Reaping %d from %s", S_FMT(ts), state_str(ts)));
+        ci_netif_timeout_leave(ni, ts);
+        CITP_STATS_NETIF(++ni->state->stats.timewait_reap);
+        if( OO_SP_NOT_NULL(ni->state->free_eps_head) )
+          return;
+
+        /* We've probably reaped a cached connection,
+         * but in some cases it can be used by the caller. */
+        reaped = 1;
+      }
     }
-
-    ts = TCP_STATE_FROM_LINK(
-            ci_ni_dllist_head(ni, &ni->state->timeout_q));
-    LOG_NV(log(LPF "Reaping %d from %s", S_FMT(ts), state_str(ts)));
-    ci_netif_timeout_leave(ni, ts);
-    CITP_STATS_NETIF(++ni->state->stats.timewait_reap);
-
-#if CI_CFG_FD_CACHING
-    if (ts->cached_on_fd != -1) {
-      /* This was a cached EP; will have been returned to the cache */
-      return 2;
-    }
-#endif
   }
 
-  return 1;
+  if( ! reaped )
+    LOG_U(log(LPF "No more connections to reap from TIME_WAIT/FIN_WAIT2"));
 }
 
 /*! this is the timeout timer callback function */
 void
 ci_netif_timeout_state(ci_netif* ni)
 {
-  ci_ni_dllist_link* lnk;
-  ci_tcp_state* ts;
-  ci_iptime_t now = ci_ip_time_now(ni);
+  int i;
 
-  LOG_NV(log(LPF "timeout state timer, now=0x%x", now));
+  LOG_NV(log(LPF "timeout state timer, now=0x%x", ci_ip_time_now(ni)));
 
   /* check last active state of each connection in TIME_WAIT */
 
-  while( ci_ni_dllist_not_empty(ni, &ni->state->timeout_q) ) {
-    lnk = ci_ni_dllist_head(ni, &ni->state->timeout_q);
-    ts = TCP_STATE_FROM_LINK(lnk);
-    /* WIN32: ci_tcp_is_timeout_ophan() does not check for orphaned EP */
-    ci_assert( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
-                ci_tcp_is_timeout_ophan(ts) );
+  for( i = 0; i < OO_TIMEOUT_Q_MAX; i++ ) {
+    ci_ni_dllist_link* lnk;
+    ci_tcp_state* ts;
+    ci_ni_dllist_t* list = &ni->state->timeout_q[i];
 
-    if( TIME_LE(ts->t_last_sent, now) ){
+    while( ci_ni_dllist_not_empty(ni, list) ) {
+      lnk = ci_ni_dllist_head(ni, list);
+      ts = TCP_STATE_FROM_LINK(lnk);
+      ci_assert( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
+                  ci_tcp_is_timeout_orphan(ts) );
+
+      if( TIME_GT(ts->t_last_sent, ci_ip_time_now(ni)) )
+        break; /* break from the inner loop */
+
+      /* ci_netif_timeout_leave() calls ci_tcp_drop() calls
+       * ci_netif_timeout_remove() which re-enables timer */
       ci_netif_timeout_leave(ni, ts);
-      /* Don't need to clear the timeout timer here as it's not set if
-         it's just timed out! */
-    }
-    else {
-      ci_netif_timeout_set_timer(ni);
-      return;
     }
   }
-  /* the queue is empty, so no need to restart the timer. */
-  ci_assert(!ci_ip_timer_pending(ni, &ni->state->timeout_tid));
 }
 
 /*--------------------------------------------------------------------
@@ -207,17 +233,22 @@ ci_netif_timeout_state(ci_netif* ni)
  * - add back onto timeout list
  */
 
-void ci_netif_timewait_restart(ci_netif *ni, ci_tcp_state *ts)
+void ci_netif_timeout_restart(ci_netif *ni, ci_tcp_state *ts)
 {
+  int is_tw = (ts->s.b.state == CI_TCP_TIME_WAIT);
   ci_assert(ts);
-  ci_assert(ts->s.b.state == CI_TCP_TIME_WAIT);
+  ci_assert( is_tw || ci_tcp_is_timeout_orphan(ts));
 
   /* take it off the list */
   ci_netif_timeout_remove(ni, ts);
   /* store time to leave TIMEWAIT state */
-  ts->t_last_sent = ci_ip_time_now(ni) + NI_CONF(ni).tconst_2msl_time;
+  ts->t_last_sent = ci_ip_time_now(ni) +
+      ( is_tw ?
+        NI_CONF(ni).tconst_2msl_time : NI_CONF(ni).tconst_fin_timeout );
   /* add to list */
-  ci_netif_timeout_add(ni, ts);
+  ci_netif_timeout_add(
+                ni, ts,
+                is_tw ?  OO_TIMEOUT_Q_TIMEWAIT : OO_TIMEOUT_Q_FINWAIT);
 }
 
 
@@ -241,8 +272,7 @@ void ci_netif_timewait_enter(ci_netif* ni, ci_tcp_state* ts)
   /* called before the state is changed to TIME_WAIT */
   ci_assert(ts->s.b.state != CI_TCP_TIME_WAIT);
   /* if already in the timeout list */
-  /* WIN32: ci_tcp_is_timeout_ophan() does not check for orphaned EP */
-  if ( ci_tcp_is_timeout_ophan(ts) ) {
+  if ( ci_tcp_is_timeout_orphan(ts) ) {
     ci_netif_timeout_remove(ni, ts);
   }
   ci_assert( ci_ni_dllist_is_free(&ts->timeout_q_link) );
@@ -252,28 +282,50 @@ void ci_netif_timewait_enter(ci_netif* ni, ci_tcp_state* ts)
   /* store time to leave TIMEWAIT state */
   ts->t_last_sent = ci_ip_time_now(ni) + NI_CONF(ni).tconst_2msl_time;
   /* add to list */
-  ci_netif_timeout_add(ni, ts);
+  ci_netif_timeout_add(ni, ts, OO_TIMEOUT_Q_TIMEWAIT);
 }
 
 
 int ci_netif_timewait_try_to_free_filter(ci_netif* ni)
 {
-  ci_ni_dllist_t* list = &ni->state->timeout_q;
-  ci_ni_dllist_link* l;
+  int i;
+  int found = 0;
 
   ci_assert(ci_netif_is_locked(ni));
 
-  for( l = ci_ni_dllist_start(ni, list); l != ci_ni_dllist_end(ni, list);
-       ci_ni_dllist_iter(ni, l) ) {
-    ci_tcp_state* ts = TCP_STATE_FROM_LINK(l);
-    if( ts->s.b.state != CI_TCP_TIME_WAIT )  continue;
-    if( ts->s.s_flags & CI_SOCK_FLAG_FILTER ) {
-      ci_netif_timeout_leave(ni, ts);
-      CITP_STATS_NETIF(++ni->state->stats.timewait_reap_filter);
-      return 1;
-    }
-  }
+  for( i = 0; i < OO_TIMEOUT_Q_MAX; i++ ) {
+    ci_ni_dllist_t* list = &ni->state->timeout_q[i];
+    ci_ni_dllist_link* l;
+    oo_p next;
 
+    for( l = ci_ni_dllist_start(ni, list); l != ci_ni_dllist_end(ni, list);
+         l = (void*) CI_NETIF_PTR(ni, next) ) {
+      ci_tcp_state* ts = TCP_STATE_FROM_LINK(l);
+      next = l->next;
+
+      if( ts->s.s_flags & CI_SOCK_FLAG_FILTER ) {
+        /* No cached sockets here: orphaned or timewait only.
+         * They really free the hw filter when we drop them. */
+        ci_assert( (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ||
+                   ts->s.b.state == CI_TCP_TIME_WAIT );
+
+        ci_netif_timeout_leave(ni, ts);
+        CITP_STATS_NETIF(++ni->state->stats.timewait_reap_filter);
+
+        /* With EF10, there is no guarantee that the filter we've freed can
+         * be reused for the filter parameters needed now.  Moreover, in most
+         * cases it can't.
+         * We reap ALL time-wait sockets in hope they'll help us.
+         * Reaping finwait&friends is a more sensitive action - so we reap
+         * one and go away. */
+        if( i == OO_TIMEOUT_Q_FINWAIT )
+          return 1;
+        found = 1;
+      }
+    }
+    if( found )
+      return 1;
+  }
   return 0;
 }
 
@@ -287,19 +339,31 @@ int ci_netif_timewait_try_to_free_filter(ci_netif* ni)
 /*! add a state to the fin timeout list */
 void ci_netif_fin_timeout_enter(ci_netif* ni, ci_tcp_state* ts)
 {
-  /* For Windows we have to be able to timeout when in FIN_WAIT2 but not
-   * orphaned so that we can re-use the socket post-disconnectex */
   /* check endpoint is an orphan */
-  ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN);
+  ci_assert(ts->s.b.sb_aflags & (CI_SB_AFLAG_ORPHAN|CI_SB_AFLAG_IN_CACHE));
   /* check state is correct */
   ci_assert(ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN);
-  /* and not already in the list */
-  ci_assert(ci_ni_dllist_is_free(&ts->timeout_q_link));
 
-  LOG_TC(log(LPF "%s: %d %s", __FUNCTION__, S_FMT(ts), state_str(ts)));
-  /* store time to leave FIN_WAIT2 state */
-  ts->t_last_sent = ci_ip_time_now(ni) + NI_CONF(ni).tconst_fin_timeout;
-  ci_netif_timeout_add(ni, ts);
+  /* It's possible to come down this path twice in the caching case.  We can
+   * queue a fin-timeout when the user socket is closed and the socket enters
+   * the cache.  However, it if becomes a true orphan while still cached we
+   * will come this way again, so need to avoid re-queueing.  At the point it
+   * may have been removed from the cache (for example if clearing the cache
+   * queue on listener shutdown), so we've lost it's history, so can't check
+   * unfortunately.
+   */
+#if CI_CFG_FD_CACHING
+  if( ci_ni_dllist_is_free(&ts->timeout_q_link) ) {
+#else
+  ci_assert(ci_ni_dllist_is_free(&ts->timeout_q_link));
+#endif
+    LOG_TC(log(LPF "%s: %d %s", __FUNCTION__, S_FMT(ts), state_str(ts)));
+    /* store time to leave FIN_WAIT2 state */
+    ts->t_last_sent = ci_ip_time_now(ni) + NI_CONF(ni).tconst_fin_timeout;
+    ci_netif_timeout_add(ni, ts, OO_TIMEOUT_Q_FINWAIT);
+#if CI_CFG_FD_CACHING
+  }
+#endif
 }
 
 
@@ -319,21 +383,44 @@ static int ci_netif_try_to_reap_udp(ci_netif* ni, ci_udp_state* udp,
 
 static int ci_netif_try_to_reap_timestamp_q(ci_netif* ni, 
                                             struct ci_sock_cmn_s* s,
+                                            ci_timestamp_q* timestamp_q,
+                                            int socklocked,
                                             int* add_to_reap_list)
 {
-  ci_ip_pkt_queue* tsq = &s->timestamp_q;
+  ci_ip_pkt_queue* tsq = &timestamp_q->queue;
   int tsq_num_before = tsq->num;
+  ci_ip_pkt_fmt* pkt;
 
   ci_assert(ci_netif_is_locked(ni));
 
-  while( ! OO_PP_EQ(tsq->head, s->timestamp_q_extract) ) {
-    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, tsq->head);
-    oo_pkt_p next = pkt->tsq_next;
+  if( OO_PP_IS_NULL(timestamp_q->extract) )
+    return 0;
+  pkt = PKT_CHK(ni, tsq->head);
+
+  while( ! OO_PP_EQ(tsq->head, timestamp_q->extract) ) {
+    oo_pkt_p next;
+
+    pkt = PKT_CHK(ni, tsq->head);
+    next = pkt->tsq_next;
 
     ci_netif_pkt_release(ni, pkt);
     --tsq->num;
     tsq->head = next;
   }
+
+  if( socklocked && OO_PP_NOT_NULL(timestamp_q->extract) &&
+      pkt->tx_hw_stamp.tv_sec == CI_PKT_TX_HW_STAMP_CONSUMED ) {
+    /* We must not set timestamp_q_extract to NULL without both locks:
+     * * stack lock is necessary to free the packet and because
+     *   other code might add a new packet to the queue;
+     * * socket lock is needed because the code under socket lock
+     *   expects the stable value of timestamp_q_extract.*/
+    tsq->head = OO_PP_NULL;
+    --tsq->num;
+    ci_netif_pkt_release(ni, pkt);
+    ci_assert_equal(tsq->num, 0);
+  }
+
 
   if( tsq->num > 1 )
     ++(*add_to_reap_list);
@@ -350,6 +437,11 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
   citp_waitable_obj* wo;
   int freed_n = 0;
   int add_to_reap_list;
+  int reap_harder = ni->state->pkt_sets_n == ni->state->pkt_sets_max
+#ifdef __KERNEL__
+      || (ni->flags & CI_NETIF_FLAG_NO_PACKET_BUFFERS)
+#endif
+      || ni->state->mem_pressure;
 
   if( ci_ni_dllist_is_empty(ni, &ni->state->reap_list) )
     return;
@@ -372,11 +464,26 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
 
     if( wo->waitable.state & CI_TCP_STATE_TCP_CONN ) {
       ci_tcp_state* ts = &wo->tcp;
-      int q_num_b4 = ts->recv1.num;
+      ci_int32 q_num_b4 = ts->recv1.num;
       ci_tcp_rx_reap_rxq_bufs(ni, ts);
+
       freed_n += q_num_b4 - ts->recv1.num;
       freed_n += ci_netif_try_to_reap_timestamp_q(ni, &ts->s,
+                                                  &ts->timestamp_q, 0,
                                                   &add_to_reap_list);
+
+      /* Try to reap the last packet */
+      if( reap_harder && (ts->recv1.num == 1 ||
+                          ts->timestamp_q.queue.num == 1) &&
+          ci_sock_trylock(ni, &ts->s.b) ) {
+        q_num_b4 = ts->recv1.num;
+        ci_tcp_rx_reap_rxq_bufs_socklocked(ni, ts);
+        freed_n += q_num_b4 - ts->recv1.num;
+        freed_n += ci_netif_try_to_reap_timestamp_q(ni, &ts->s,
+                                                    &ts->timestamp_q, 1,
+                                                    &add_to_reap_list);
+        ci_sock_unlock(ni, &ts->s.b);
+      }
       if( ts->recv1.num > 1 || add_to_reap_list)
         ci_ni_dllist_put(ni, &ni->state->reap_list, &ts->s.reap_link);
     }
@@ -385,11 +492,31 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
       freed_n += ci_netif_try_to_reap_udp(ni, us, &us->recv_q,
                                           &add_to_reap_list);
       freed_n += ci_netif_try_to_reap_timestamp_q(ni, &us->s,
+                                                  &us->timestamp_q, 0,
                                                   &add_to_reap_list);
+
+      if( reap_harder && us->timestamp_q.queue.num == 1 &&
+          ci_sock_trylock(ni, &us->s.b) ) {
+        freed_n += ci_netif_try_to_reap_timestamp_q(ni, &us->s,
+                                                    &us->timestamp_q,  1,
+                                                    &add_to_reap_list);
+        ci_sock_unlock(ni, &us->s.b);
+      }
+
       if( add_to_reap_list )
         ci_ni_dllist_put(ni, &ni->state->reap_list, &us->s.reap_link);
     }
   } while( freed_n < stop_once_freed_n && &wo->sock.reap_link != last );
+
+  if( freed_n < (stop_once_freed_n >> 1) ) {
+    /* We do not get here from ci_netif_pkt_alloc_slow,
+     * because it uses stop_once_freed_n=1. */
+    freed_n += ci_netif_pkt_try_to_free(ni, 0, stop_once_freed_n - freed_n);
+    if( freed_n < (stop_once_freed_n >> 1) && reap_harder ) {
+      freed_n += ci_netif_pkt_try_to_free(ni, 1,
+                                          stop_once_freed_n - freed_n);
+    }
+  }
 
   CITP_STATS_NETIF_ADD(ni, pkts_reaped, freed_n);
 }
@@ -691,15 +818,19 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
 #ifndef __KERNEL__
       ci_assert_equal(netif->state->pkt_sets_n, netif->state->pkt_sets_max);
 #else
+      tcp_helper_resource_t *trs = netif2tcp_helper_resource(netif);
       /* Probably, we are in atomic context and can not allocate more
        * buffers just now. */
-      tcp_helper_resource_t *trs = netif2tcp_helper_resource(netif);
       if( netif->state->pkt_sets_n ==  netif->state->pkt_sets_max )
         break;
       ci_assert(netif->flags & CI_NETIF_FLAG_IN_DL_CONTEXT);
       ci_assert(netif->flags & CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION);
-      if( OO_STACK_NEEDS_MORE_PACKETS(netif) )
-        queue_work(trs->wq, &trs->non_atomic_work);
+
+      /* Set this flag and schedule packet allocation regardless of
+       * free_packets_low value used inside ci_tcp_helper_more_bufs above */
+      netif->flags |= CI_NETIF_FLAG_NO_PACKET_BUFFERS;
+      queue_work(trs->wq, &trs->non_atomic_work);
+
       if( netif->state->n_freepkts >= CI_CFG_RX_DESC_BATCH &&
           netif->state->n_freepkts >=
             CI_MIN(4 * CI_CFG_RX_DESC_BATCH,
@@ -708,6 +839,12 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
         max_n_to_post = netif->state->n_freepkts;
         goto enough_pkts;
       }
+
+      /* Packets will be allocated later, but for now we should
+       * try to reap. */
+      ci_netif_try_to_reap(netif, max_n_to_post - netif->state->n_freepkts);
+      if( netif->state->n_freepkts >= max_n_to_post )
+        goto enough_pkts;
       return;
 #endif
     }
@@ -759,6 +896,18 @@ static void citp_waitable_deferred_work(ci_netif* ni, citp_waitable* w)
 
 int ci_netif_lock_or_defer_work(ci_netif* ni, citp_waitable* w)
 {
+#if CI_CFG_FD_CACHING && !defined(NDEBUG)
+  /* Cached sockets should not be deferring work - there are no user references
+   */
+  if( (w->state & CI_TCP_STATE_TCP) && !(w->state == CI_TCP_LISTEN) )
+    ci_assert(!ci_tcp_is_cached(&CI_CONTAINER(citp_waitable_obj,
+                                              waitable, w)->tcp));
+#endif
+  /* Orphaned sockets should not be deferring work - no-one has a reference to
+   * them, and the queue link can be used for other things.
+   */
+  ci_assert(!(w->sb_aflags & CI_SB_AFLAG_ORPHAN));
+
   if( ni->state->defer_work_count >= NI_OPTS(ni).defer_work_limit ) {
     int rc = ci_netif_lock(ni);
     if( rc == 0 ) {
@@ -978,7 +1127,8 @@ int ci_netif_mmap_shmbuf(ci_netif* netif, int shmbufid)
     /* Map a buffer of epbufs into userland. */
     rc = oo_resource_mmap(ci_netif_get_driver_handle(netif), 0,
                           CI_NETIF_MMAP_ID_PAGE(shmbufid - 1),
-                          EP_BUF_BLOCKPAGES * CI_PAGE_SIZE, &p);
+                          EP_BUF_BLOCKPAGES * CI_PAGE_SIZE,
+                          OO_MMAP_FLAG_DEFAULT, &p);
     if( rc < 0 )  return -EINVAL;
 
     netif->u_shmbufs[shmbufid] = (char*) p;
@@ -1002,5 +1152,88 @@ void ci_netif_error_detected(ci_netif* ni, unsigned error_flag,
   ni->error_flags |= error_flag;
   ni->state->error_flags |= ni->error_flags;
 }
+
+
+#ifndef __KERNEL__
+int ci_netif_get_ready_list(ci_netif* ni)
+{
+  int i = 0;
+
+  /* First list is used for eps not in a set */
+  ci_netif_lock(ni);
+  while( i++ < CI_CFG_N_READY_LISTS ) {
+    if( !((ni->state->ready_lists_in_use >> i) & 1) ) {
+      ni->state->ready_lists_in_use |= 1 << i;
+      break;
+    }
+  }
+  ci_netif_unlock(ni);
+
+  return i < CI_CFG_N_READY_LISTS ? i : 0;
+}
+
+
+void ci_netif_put_ready_list(ci_netif* ni, int id)
+{
+  ci_ni_dllist_link* lnk;
+  citp_waitable* w;
+
+  ci_assert(ni->state->ready_lists_in_use & (1 << id));
+  ci_assert_nequal(id, 0);
+
+  ci_netif_lock(ni);
+  while( ci_ni_dllist_not_empty(ni, &ni->state->ready_lists[id]) ) {
+    lnk = ci_ni_dllist_pop(ni, &ni->state->ready_lists[id]);
+    w = CI_CONTAINER(citp_waitable, ready_link, lnk);
+
+    ci_ni_dllist_self_link(ni, lnk);
+    w->ready_list_id = 0;
+  }
+  ni->state->ready_lists_in_use &= ~(1 << id);
+  ci_netif_unlock(ni);
+}
+
+
+int ci_netif_raw_send(ci_netif* ni, int intf_i,
+                      const ci_iovec *iov, int iovlen)
+{
+  ci_ip_pkt_fmt* pkt;
+  ci_uint8* p;
+  int i;
+
+  ci_netif_lock(ni);
+  pkt = ci_netif_pkt_alloc(ni);
+  if( pkt == NULL )
+    return -ENOBUFS;
+
+  pkt->intf_i = intf_i;
+  if( intf_i < 0 || intf_i >= CI_CFG_MAX_INTERFACES )
+    return -ENETDOWN;
+
+  pkt->pkt_start_off = 0;
+  pkt->buf_len = 0;
+  p = pkt->dma_start;
+  for( i = 0; i < iovlen; i++ ) {
+    if( p + CI_IOVEC_LEN(iov) - pkt->dma_start >
+        CI_CFG_PKT_BUF_SIZE - sizeof(pkt) ) {
+      ci_netif_pkt_free(ni, pkt);
+      return -EMSGSIZE;
+    }
+
+    memcpy(p, CI_IOVEC_BASE(iov), CI_IOVEC_LEN(iov));
+    p += CI_IOVEC_LEN(iov);
+    pkt->buf_len += CI_IOVEC_LEN(iov);
+    iov++;
+  }
+
+  pkt->pay_len = pkt->buf_len;
+  ci_netif_send(ni, pkt);
+
+  ci_netif_unlock(ni);
+  return 0;
+}
+
+#endif
+
 
 /*! \cidoxg_end */

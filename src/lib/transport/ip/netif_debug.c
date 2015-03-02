@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -13,7 +13,7 @@
 ** GNU General Public License for more details.
 */
 
-/**************************************************************************\
+#/**************************************************************************\
 ** <L5_PRIVATE L5_SOURCE>
 **   Copyright: (c) Level 5 Networks Limited.
 **      Author: djr
@@ -43,7 +43,7 @@ static void ci_netif_state_assert_valid(ci_netif* ni,
   ci_tcp_state* ts;
   int intf_i, n;
   ci_ni_dllist_link* lnk;
-  ci_iptime_t last_time = 0;
+  ci_iptime_t last_time;
   oo_pkt_p pp, last_pp;
   oo_sp sockp;
   oo_p a;
@@ -73,29 +73,35 @@ static void ci_netif_state_assert_valid(ci_netif* ni,
   verify(ni->filter_table->table_size_mask > 0u);
 
   /* Check timeout queue 
-  **    - contains sockets in the correct (timewait/fin_wait2) state, 
+  **    - contains sockets in the correct (timewait or
+  **      CI_TCP_STATE_TIMEOUT_ORPHAN) state, 
   **    - is ordered by t_last_sent (time to timeout state ), and that
   **    - the timer is pending if the queue is not empty.
   */
-  for( a = nis->timeout_q.l.next;
-       ! OO_P_EQ(a, ci_ni_dllist_link_addr(ni, &nis->timeout_q.l)); ) {
-    ts = TCP_STATE_FROM_LINK((ci_ni_dllist_link*) CI_NETIF_PTR(ni, a));
-    verify(IS_VALID_SOCK_P(ni, S_SP(ts)));
-    verify( (ts->s.b.state == CI_TCP_TIME_WAIT) ||
-            ci_tcp_is_timeout_ophan(ts) );
-    if (!last_time) last_time = ts->t_last_sent;
-    verify( TIME_LE(last_time, ts->t_last_sent) );
-    last_time = ts->t_last_sent;
-    verify(ci_ip_timer_pending(ni, &nis->timeout_tid));
-    a = ts->timeout_q_link.next;
+  for( n = 0; n < OO_TIMEOUT_Q_MAX; n++ ) {
+    last_time = 0; /* fixme: 0 is a valid time */
+
+    for( a = nis->timeout_q[n].l.next;
+         ! OO_P_EQ(a, ci_ni_dllist_link_addr(ni,
+                              &nis->timeout_q[n].l)); ) {
+      ts = TCP_STATE_FROM_LINK((ci_ni_dllist_link*) CI_NETIF_PTR(ni, a));
+      verify(IS_VALID_SOCK_P(ni, S_SP(ts)));
+      if( n == OO_TIMEOUT_Q_TIMEWAIT )
+        verify( (ts->s.b.state == CI_TCP_TIME_WAIT) );
+      else
+        verify( ci_tcp_is_timeout_orphan(ts) );
+      if (!last_time) last_time = ts->t_last_sent;
+      verify( TIME_LE(last_time, ts->t_last_sent) );
+      last_time = ts->t_last_sent;
+      verify(ci_ip_timer_pending(ni, &nis->timeout_tid));
+      a = ts->timeout_q_link.next;
+    }
   }
 
   { /* Check the allocated endpoint IDs. */
     unsigned id;
     verify(nis->n_ep_bufs <= NI_OPTS(ni).max_ep_bufs);
-    for( id = 0; id < nis->n_ep_bufs; ++id )
-    if( oo_sock_id_is_waitable(ni, id) )
-    {
+    for( id = 0; id < nis->n_ep_bufs; ++id ) {
       w = ID_TO_WAITABLE(ni, id);
       verify(w);
       verify(W_ID(w) == id);
@@ -250,16 +256,15 @@ void ci_netif_dump_sockets_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   ci_netif_state* ns = ni->state;
   unsigned id;
 
-  for( id = 0; id < ns->n_ep_bufs; ++id )
-    if( oo_sock_id_is_waitable(ni, id) ) {
-      citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
-      if( wo->waitable.state != CI_TCP_STATE_FREE &&
-          wo->waitable.state != CI_TCP_CLOSED ) {
-        citp_waitable_dump_to_logger(ni, &wo->waitable, "", logger, log_arg);
-        logger(log_arg,
-               "------------------------------------------------------------");
-      }
+  for( id = 0; id < ns->n_ep_bufs; ++id ) {
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
+    if( wo->waitable.state != CI_TCP_STATE_FREE &&
+        wo->waitable.state != CI_TCP_CLOSED ) {
+      citp_waitable_dump_to_logger(ni, &wo->waitable, "", logger, log_arg);
+      logger(log_arg,
+             "------------------------------------------------------------");
     }
+  }
 }
 
 
@@ -269,13 +274,11 @@ void ci_netif_print_sockets(ci_netif* ni)
   unsigned id;
 
   for( id = 0; id < ns->n_ep_bufs; ++id ) {
-    if( oo_sock_id_is_waitable(ni, id) ) {
-      citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
-      if( wo->waitable.state != CI_TCP_STATE_FREE &&
-          wo->waitable.state != CI_TCP_CLOSED &&
-          wo->waitable.state & CI_TCP_STATE_SOCKET ) {
-        citp_waitable_print(&wo->waitable);
-      }
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
+    if( wo->waitable.state != CI_TCP_STATE_FREE &&
+        wo->waitable.state != CI_TCP_CLOSED &&
+        wo->waitable.state & CI_TCP_STATE_SOCKET ) {
+      citp_waitable_print(&wo->waitable);
     }
   }
 }
@@ -304,9 +307,10 @@ static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
          (ns->mem_pressure ? " LOW":""));
   logger(log_arg, "  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d pressure_pool=%d",
          ns->n_rx_pkts, rx_ring, rx_queued, ns->mem_pressure_pkt_pool_n);
-  logger(log_arg, "  pkt_bufs: tx=%d tx_ring=%d tx_oflow=%d tx_other=%d",
-         (used - ns->n_rx_pkts), tx_ring, tx_oflow,
-         (used - ns->n_rx_pkts - tx_ring - tx_oflow));
+  logger(log_arg, "  pkt_bufs: tx=%d tx_ring=%d tx_oflow=%d",
+         (used - ns->n_rx_pkts - ns->n_looppkts), tx_ring, tx_oflow);
+  logger(log_arg, "  pkt_bufs: in_loopback=%d in_sock=%d", ns->n_looppkts,
+         used - ns->n_rx_pkts - ns->n_looppkts - tx_ring - tx_oflow);
 }
 
 
@@ -409,9 +413,7 @@ int ci_netif_force_wake(ci_netif* ni, int everyone)
 
   /* ?? todo: could pass in mask to select states to wake */
 
-  for( id = 0; id < ns->n_ep_bufs; ++id )
-    if( oo_sock_id_is_waitable(ni, id) )
-    {
+  for( id = 0; id < ns->n_ep_bufs; ++id ) {
     citp_waitable* w = ID_TO_WAITABLE(ni, id);
 
     if( w->state != CI_TCP_STATE_FREE ) {
@@ -498,17 +500,27 @@ void ci_netif_dump_timeoutq(ci_netif* ni)
   ci_netif_state* nis = ni->state;
   ci_tcp_state * ts;
   oo_p a;
+  int i;
 
   if( ci_ip_timer_pending(ni, &nis->timeout_tid) ) {
     int diff = nis->timeout_tid.time - ci_tcp_time_now(ni);
     log("timeout due in %umS",
           ci_ip_time_ticks2ms(ni, diff));
   }
-  for( a = nis->timeout_q.l.next;
-       ! OO_P_EQ(a, ci_ni_dllist_link_addr(ni, &nis->timeout_q.l)); ) {
-    ts = TCP_STATE_FROM_LINK((ci_ni_dllist_link*) CI_NETIF_PTR(ni, a));
-    log("   %d: %10s 0x%08x", S_FMT(ts), state_str(ts), ts->t_last_sent);
-    a = ts->timeout_q_link.next;
+  for( i = 0; i < OO_TIMEOUT_Q_MAX; i++ ) {
+    if( i == OO_TIMEOUT_Q_TIMEWAIT )
+      log("TIME-WAIT queue");
+    else
+      log("FIN-WAIT queue");
+    for( a = nis->timeout_q[i].l.next;
+         ! OO_P_EQ(a, ci_ni_dllist_link_addr(ni, &nis->timeout_q[i].l)); ) {
+      ts = TCP_STATE_FROM_LINK((ci_ni_dllist_link*) CI_NETIF_PTR(ni, a));
+      if( i == OO_TIMEOUT_Q_TIMEWAIT )
+        log("   %d: t=0x%08x", S_FMT(ts), ts->t_last_sent);
+      else
+        log("   %d: t=0x%08x %s", S_FMT(ts), ts->t_last_sent, state_str(ts));
+      a = ts->timeout_q_link.next;
+    }
   }
 }
 
@@ -576,7 +588,10 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
   logger(log_arg, "%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
          NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
          nic->vi_variant, (int) nic->vi_revision);
-  logger(log_arg, "  vi=%d pd_owner=%d", ef_vi_instance(vi), nic->pd_owner);
+  logger(log_arg, "  vi=%d pd_owner=%d channel=%d%s oo_vi_flags=%x",
+         ef_vi_instance(vi), nic->pd_owner, (int) nic->vi_channel,
+         ni->state->dump_intf[intf_i] ? " tcpdump" : "",
+         nic->oo_vi_flags);
   logger(log_arg, "  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
          ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
          ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
@@ -589,7 +604,12 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
          ef_vi_transmit_space(vi), ef_vi_transmit_fill_level(vi),
          nic->tx_dmaq_insert_seq - nic->tx_dmaq_done_seq - nic->dmaq.num,
          nic->dmaq.num);
-  logger(log_arg, "  txq: tot_pkts=%d bytes=%d",
+  logger(log_arg, "  txq: pio_buf_size=%d tot_pkts=%d bytes=%d",
+#if CI_CFG_PIO
+         nic->pio_io_len, 
+#else
+         0,
+#endif
          nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
 }
 
@@ -614,10 +634,17 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
 
   logger(log_arg, "%s: stack=%d name=%s", __FUNCTION__, NI_ID(ni),
          ni->state->name);
-  logger(log_arg, "  ver=%s uid=%d pid=%d %s", ONLOAD_VERSION
+  logger(log_arg, "  ver=%s uid=%d pid=%d ns_flags=%x %s %s", ONLOAD_VERSION
       , (int) ns->uid, (int) ns->pid
+      , ns->flags
       , (ns->flags & CI_NETIF_FLAG_ONLOAD_UNSUPPORTED)
           ? "ONLOAD_UNSUPPORTED" : ""
+#if CI_CFG_FD_CACHING
+      , (ns->flags & CI_NETIF_FLAG_SOCKCACHE_FORKED)
+          ? "SOCKCACHE_FORKED" : ""
+#else
+      , ""
+#endif
       );
 
   tmp = ni->state->lock.lock;
@@ -643,6 +670,10 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   if( ns->error_flags )
     logger(log_arg, "  ERRORS: "CI_NETIF_ERRORS_FMT,
            CI_NETIF_ERRORS_PRI_ARG(ns->error_flags));
+  if( ni->state->dump_write_i != ni->state->dump_read_i )
+    logger(log_arg, "  tcpdump: %d/%d packets in queue",
+           (ci_uint8)(ni->state->dump_write_i - ni->state->dump_read_i),
+           CI_CFG_DUMPQUEUE_LEN);
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     ci_netif_dump_vi(ni, intf_i, logger, log_arg);

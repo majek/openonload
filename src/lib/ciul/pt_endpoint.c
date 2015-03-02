@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -32,7 +32,8 @@
 #include "driver_access.h"
 #include "logging.h"
 #include "efch_intf_ver.h"
-#include <etherfabric/init.h>
+#include <stdio.h>
+
 
 /* ****************************************************************************
  * This set of functions provides the equivalent functionality of the
@@ -112,6 +113,28 @@ static int get_ts_correction(ef_driver_handle vi_dh, int res_id,
 
 /****************************************************************************/
 
+void ef_vi_set_intf_ver(char* intf_ver, size_t len)
+{
+  /* Bodge interface requested to match the one used in
+   * openonload-201405-u1.  The interface has changed since then, but in
+   * ways that are forward and backward compatible with
+   * openonload-201405-u1.
+   *
+   * We check that the current interface is the one expected, because if
+   * not then something has changed and compatibility may not have been
+   * preserved.
+   */
+  strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
+  /* when built from repo */
+  if( strcmp(EFCH_INTF_VER, "e12018c1ff2aff3d8ee46432b5669fcd") &&
+      /* when built from distro */
+      strcmp(EFCH_INTF_VER, "c4122121098b174cc48ef7e56c792b4a") ) {
+    fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
+    abort();
+  }
+}
+
+
 int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 		  efch_resource_id_t pd_or_vi_set_id,
 		  ef_driver_handle pd_or_vi_set_dh,
@@ -152,15 +175,25 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     txq_capacity = (s = getenv("EF_VI_TXQ_SIZE")) ? atoi(s) : -1;
   if( rxq_capacity == -1 )
     rxq_capacity = (s = getenv("EF_VI_RXQ_SIZE")) ? atoi(s) : -1;
+  if( evq_capacity == -1 && (vi_flags & EF_VI_RX_PACKED_STREAM) )
+    /* At time of writing we're doing this at user-level as well as in
+     * driver.  Utimately we want this default to be applied in the driver
+     * so we don't have to know this magic number (which may change in
+     * future).  For now we also apply it here so that the default will be
+     * applied when running against a 201405-u1 driver.  This can be
+     * removed once the driver ABI changes.
+     */
+    evq_capacity = 32768;
 
   /* Allocate resource and mmap. */
   memset(&ra, 0, sizeof(ra));
-  strncpy(ra.intf_ver, EFCH_INTF_VER, sizeof(ra.intf_ver));
+  ef_vi_set_intf_ver(ra.intf_ver, sizeof(ra.intf_ver));
   ra.ra_type = EFRM_RESOURCE_VI;
   ra.u.vi_in.ifindex = ifindex;
   ra.u.vi_in.pd_or_vi_set_fd = pd_or_vi_set_dh;
   ra.u.vi_in.pd_or_vi_set_rs_id = pd_or_vi_set_id;
   ra.u.vi_in.vi_set_instance = index_in_vi_set;
+  ra.u.vi_in.ps_buf_size_kb = (vi_flags & EF_VI_RX_PS_BUF_SIZE_64K) ? 64 : 1024;
   if( evq != NULL ) {
     ra.u.vi_in.evq_fd = evq_dh;
     ra.u.vi_in.evq_rs_id = efch_make_resource_id(evq->vi_resource_id);
@@ -191,7 +224,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     goto fail1;
 
   if( ra.u.vi_out.io_mmap_bytes ) {
-    rc = ci_resource_mmap(vi_dh, ra.out_id.index, 0,
+    rc = ci_resource_mmap(vi_dh, ra.out_id.index, EFCH_VI_MMAP_IO,
 			  ra.u.vi_out.io_mmap_bytes, &p);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: ci_resource_mmap (io) %d", __FUNCTION__, rc));
@@ -204,14 +237,14 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
       int inst_in_iopage = 0;
       int vi_windows_per_page = CI_PAGE_SIZE / 8192;
       if( vi_windows_per_page > 1 )
-	      inst_in_iopage = ra.u.vi_out.instance & (vi_windows_per_page - 1);
+        inst_in_iopage = ra.u.vi_out.instance & (vi_windows_per_page - 1);
       io_mmap_base = (char*) p;
       io_mmap_ptr = io_mmap_base + inst_in_iopage * 8192;
     }
   }
 
   if( ra.u.vi_out.mem_mmap_bytes ) {
-    rc = ci_resource_mmap(vi_dh, ra.out_id.index, 1,
+    rc = ci_resource_mmap(vi_dh, ra.out_id.index, EFCH_VI_MMAP_MEM,
 			  ra.u.vi_out.mem_mmap_bytes, &p);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: ci_resource_mmap (mem) %d", __FUNCTION__, rc));
@@ -235,7 +268,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   ef_vi_init(vi, nic_type.arch, nic_type.variant, nic_type.revision,
 	     vi_flags, state);
   ef_vi_init_out_flags(vi, (ra.u.vi_out.out_flags & EFHW_VI_CLOCK_SYNC_STATUS) ?
-                           EF_VI_OUT_CLOCK_SYNC_STATUS : 0);
+                       EF_VI_OUT_CLOCK_SYNC_STATUS : 0);
   ef_vi_init_io(vi, io_mmap_ptr);
   if( evq_capacity ) {
     ef_vi_init_evq(vi, evq_capacity, mem_mmap_ptr);
@@ -263,7 +296,14 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   vi->vi_io_mmap_bytes = ra.u.vi_out.io_mmap_bytes;
   vi->vi_mem_mmap_bytes = ra.u.vi_out.mem_mmap_bytes;
   vi->vi_resource_id = ra.out_id.index;
+  if( ra.u.vi_out.out_flags & EFHW_VI_PS_BUF_SIZE_SET )
+    vi->vi_ps_buf_size = ra.u.vi_out.ps_buf_size;
+  else
+    vi->vi_ps_buf_size = 1024 * 1024;
+  BUG_ON(vi->vi_ps_buf_size != 64*1024 &&
+         vi->vi_ps_buf_size != 1024*1024);
   vi->vi_clustered = vi_clustered;
+  vi->vi_i = ra.u.vi_out.instance;
   ef_vi_init_state(vi);
   rc = ef_vi_add_queue(evq, vi);
   BUG_ON(rc != q_label);
@@ -294,26 +334,26 @@ int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
 			ef_vi* evq_opt, ef_driver_handle evq_dh,
 			enum ef_vi_flags flags)
 {
-	efch_resource_id_t res_id = efch_make_resource_id(pd->pd_resource_id);
-        int index_in_vi_set = 0;
-	int vi_clustered = 0;
+  efch_resource_id_t res_id = efch_make_resource_id(pd->pd_resource_id);
+  int index_in_vi_set = 0;
+  int vi_clustered = 0;
 
-	if( pd->pd_flags & EF_PD_PHYS_MODE )
-		flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
-	else
-		flags &= ~(EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR);
+  if( pd->pd_flags & EF_PD_PHYS_MODE )
+    flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
+  else
+    flags &= ~(EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR);
 
-	if( pd->pd_cluster_sock != -1 ) {
-		pd_dh = pd->pd_cluster_dh;
-		res_id = efch_make_resource_id(
-			pd->pd_cluster_viset_resource_id);
-                index_in_vi_set = -1;
-		vi_clustered = 1;
-	}
-	return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set,
-			     -1/*ifindex*/, evq_capacity, rxq_capacity,
-			     txq_capacity, evq_opt, evq_dh, vi_clustered,
-                             flags);
+  if( pd->pd_cluster_sock != -1 ) {
+    pd_dh = pd->pd_cluster_dh;
+    res_id = efch_make_resource_id(
+                                   pd->pd_cluster_viset_resource_id);
+    index_in_vi_set = -1;
+    vi_clustered = 1;
+  }
+  return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set,
+                       -1/*ifindex*/, evq_capacity, rxq_capacity,
+                       txq_capacity, evq_opt, evq_dh, vi_clustered,
+                       flags);
 			     
 }
 
@@ -325,16 +365,16 @@ int ef_vi_alloc_from_set(ef_vi* vi, ef_driver_handle vi_dh,
 			 ef_vi* evq_opt, ef_driver_handle evq_dh,
 			 enum ef_vi_flags flags)
 {
-	if( vi_set->vis_pd->pd_flags & EF_PD_PHYS_MODE )
-		flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
-	else
-		flags &= ~(EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR);
-	return __ef_vi_alloc(vi, vi_dh,
-			     efch_make_resource_id(vi_set->vis_res_id),
-			     vi_set_dh, index_in_vi_set,
-			     -1/*ifindex*/,
-			     evq_capacity, rxq_capacity, txq_capacity,
-			     evq_opt, evq_dh, 0, flags);
+  if( vi_set->vis_pd->pd_flags & EF_PD_PHYS_MODE )
+    flags |= EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR;
+  else
+    flags &= ~(EF_VI_TX_PHYS_ADDR | EF_VI_RX_PHYS_ADDR);
+  return __ef_vi_alloc(vi, vi_dh,
+                       efch_make_resource_id(vi_set->vis_res_id),
+                       vi_set_dh, index_in_vi_set,
+                       -1/*ifindex*/,
+                       evq_capacity, rxq_capacity, txq_capacity,
+                       evq_opt, evq_dh, 0, flags);
 }
 
 

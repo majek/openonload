@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2012 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -35,6 +35,9 @@
 #include <linux/bootmem.h>
 #include <linux/slab.h>
 #include <asm/uaccess.h>
+#ifdef EFX_HAVE_LINUX_EXPORT_H
+#include <linux/export.h>
+#endif
 
 /*
  * Kernel backwards compatibility
@@ -721,4 +724,49 @@ void efx_warn_on_slowpath(const char *file, const int line,
 	efx_warn_slowpath(file, line, function, "");
 }
 EXPORT_SYMBOL(efx_warn_on_slowpath); /* Onload */
+#endif
+
+#ifndef EFX_HAVE_PCI_VFS_ASSIGNED
+int pci_vfs_assigned(struct pci_dev *dev)
+{
+#if defined(CONFIG_PCI_ATS) && defined(EFX_HAVE_PCI_DEV_FLAGS_ASSIGNED)
+	struct pci_dev *vfdev;
+	int pos;
+	unsigned int vfs_assigned = 0;
+	unsigned short dev_id;
+
+	/* only search if we are a PF */
+	if (!dev->is_physfn)
+		return 0;
+
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_SRIOV);
+	if (!pos)
+		return 0;
+
+	/*
+	 * determine the device ID for the VFs, the vendor ID will be the
+	 * same as the PF so there is no need to check for that one
+	 */
+	pci_read_config_word(dev, pos + PCI_SRIOV_VF_DID, &dev_id);
+
+	/* loop through all the VFs to see if we own any that are assigned */
+	vfdev = pci_get_device(dev->vendor, dev_id, NULL);
+	while (vfdev) {
+		/*
+		 * It is considered assigned if it is a virtual function with
+		 * our dev as the physical function and the assigned bit is set
+		 */
+		if (vfdev->is_virtfn && (vfdev->physfn == dev) &&
+		    (vfdev->dev_flags & PCI_DEV_FLAGS_ASSIGNED))
+			vfs_assigned++;
+
+		vfdev = pci_get_device(dev->vendor, dev_id, vfdev);
+	}
+
+	return vfs_assigned;
+#else
+	return 0;
+#endif
+}
+EXPORT_SYMBOL_GPL(pci_vfs_assigned);
 #endif

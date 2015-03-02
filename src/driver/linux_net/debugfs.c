@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2012 Solarflare Communications Inc.
+ * Copyright 2006-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -463,9 +463,14 @@ static struct efx_debugfs_parameter efx_debugfs_tx_queue_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_tx_queue, tso_long_headers),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, tso_packets),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, pushes),
+	EFX_UINT_PARAMETER(struct efx_tx_queue, doorbell_notify_comp),
+	EFX_UINT_PARAMETER(struct efx_tx_queue, doorbell_notify_tx),
 #ifdef EFX_NOT_UPSTREAM
 	EFX_U64_PARAMETER(struct efx_tx_queue, tx_bytes),
 	EFX_ULONG_PARAMETER(struct efx_tx_queue, tx_packets),
+#ifdef EFX_USE_SARFS
+	EFX_UINT_PARAMETER(struct efx_tx_queue, sarfs_update),
+#endif
 #endif
 	{NULL},
 };
@@ -559,10 +564,10 @@ static struct efx_debugfs_parameter efx_debugfs_rx_queue_parameters[] = {
 	EFX_UINT_PARAMETER(struct efx_rx_queue, min_fill),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, recycle_count),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, page_add),
-	EFX_UINT_PARAMETER(struct efx_rx_queue, page_remove),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, page_recycle_count),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, page_recycle_failed),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, page_recycle_full),
+	EFX_UINT_PARAMETER(struct efx_rx_queue, page_repost_count),
 	EFX_UINT_PARAMETER(struct efx_rx_queue, slow_fill_count),
 	{NULL},
 };

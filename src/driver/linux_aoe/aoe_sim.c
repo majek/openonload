@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -414,7 +414,7 @@ int aoe_dl_register(void)
 			memcpy(new_dev->perm_addr, mac, ETH_ALEN);
 #endif
 #if !defined(EFX_USE_KCOMPAT) || !defined(SET_ETHTOOL_OPS)
-                       net_dev->ethtool_ops = NULL;
+			net_dev->ethtool_ops = NULL;
 #else
 			SET_ETHTOOL_OPS(new_dev, NULL);
 #endif

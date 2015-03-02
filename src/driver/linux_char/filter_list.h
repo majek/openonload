@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -19,18 +19,18 @@
 
 extern void efch_filter_list_init(struct efch_filter_list *);
 
-extern void efch_filter_list_free(struct efrm_resource *,
+extern void efch_filter_list_free(struct efrm_resource *, struct efrm_pd *,
                                   struct efch_filter_list *);
 
-extern int efch_filter_list_del(struct efrm_resource *,
+extern int efch_filter_list_del(struct efrm_resource *, struct efrm_pd *,
                                 struct efch_filter_list *, int filter_id);
 
-extern int efch_filter_list_op_add(struct efrm_resource *,
-                                  struct efch_filter_list *,
-                                  ci_resource_op_t *, int *copy_out,
-                                  unsigned efx_filter_flags, int rss_context);
+extern int efch_filter_list_op_add(struct efrm_resource *, struct efrm_pd *,
+                                   struct efch_filter_list *,
+                                   ci_resource_op_t *, int *copy_out,
+                                   unsigned efx_filter_flags, int rss_context);
 
-extern int efch_filter_list_op_del(struct efrm_resource *rs,
+extern int efch_filter_list_op_del(struct efrm_resource *rs, struct efrm_pd *,
                                    struct efch_filter_list *fl,
                                    ci_resource_op_t *op);
 
@@ -38,7 +38,7 @@ extern int efch_filter_list_op(struct efrm_resource *rs,
                                struct efch_filter_list *fl,
                                ci_resource_op_t *op);
 
-extern int efch_filter_list_op_block(struct efrm_resource *rs,
+extern int efch_filter_list_op_block(struct efrm_resource *rs, struct efrm_pd*,
                                      struct efch_filter_list *fl,
                                      ci_resource_op_t *op);
 #endif  /* __FILTER_LIST_H__ */

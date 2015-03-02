@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -71,6 +71,7 @@
 
 #include "onload_internal.h"
 #include <onload/cplane.h>
+#include <onload/nic.h>
 #include <onload/debug.h>
 #include <ci/internal/cplane_handle.h>
 #include <net/arp.h>
@@ -117,6 +118,7 @@
 #define CICPOS_PROCFS_FILE_FWDINFO "mib-fwd"
 #define CICPOS_PROCFS_FILE_BONDINFO "mib-bond"
 #define CICPOS_PROCFS_FILE_PMTU    "mib-pmtu"
+#define CICPOS_PROCFS_FILE_BLACK_WHITE_LIST "intf-black-white-list"
 
 
 
@@ -263,8 +265,7 @@ int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
                        const void* buf, unsigned int size)
 {
   struct msghdr msg;
-  struct iovec iov;
-  mm_segment_t oldfs;
+  struct kvec iov;
   struct sockaddr_in addr;
   int rc;
 
@@ -275,19 +276,14 @@ int cicp_raw_sock_send(struct socket *raw_sock, ci_ip_addr_t ip_be32,
 
   msg.msg_name = &addr;
   msg.msg_namelen = sizeof(addr);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
   msg.msg_control = NULL;
   msg.msg_controllen = 0;
   msg.msg_flags = MSG_DONTWAIT;
 
   iov.iov_base = (void*) buf;
-  iov.iov_len=size;
+  iov.iov_len  = size;
 
-  oldfs = get_fs(); 
-  set_fs(KERNEL_DS);
-  rc = sock_sendmsg(raw_sock, &msg, size);
-  set_fs(oldfs);
+  rc = kernel_sendmsg(raw_sock, &msg, &iov, 1, size);
 
   return rc;
 }
@@ -906,6 +902,9 @@ cicpos_llap_read(struct seq_file *seq, void *s)
 			} else
 			{   seq_printf(seq, "X ");
 			}
+			if (row->encapsulation.type & CICP_LLAP_TYPE_LOOP) {
+			    seq_printf(seq, " LOOP");
+			}
 			if (row->encapsulation.type & CICP_LLAP_TYPE_VLAN) {
 			    seq_printf(seq, " VLAN %d",
 				       row->encapsulation.vlan_id);
@@ -1230,7 +1229,8 @@ cicpos_fwd_read(struct seq_file *seq, void *s)
             seq_printf(seq, "%1d encap " CICP_ENCAP_NAME_FMT,
                        row->hwport, cicp_encap_name(row->encap.type));
         else
-            seq_printf(seq, "X");
+            seq_printf(seq, "X "CICP_ENCAP_NAME_FMT,
+                       cicp_encap_name(row->encap.type));
         seq_printf(seq, "\n");
         /* second string */
         seq_printf(seq, "\tdst "CI_IP_PRINTF_FORMAT"/%d "
@@ -1307,6 +1307,27 @@ static const struct file_operations cicpos_pmtu_fops = {
 };
 
 
+static int cicpos_bwl_read(struct seq_file *seq, void *unused)
+{
+  return oo_nic_black_white_list_proc_get(seq);
+}
+
+
+static int cicpos_bwl_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_bwl_read, PDE_DATA(inode));
+}
+
+
+static const struct file_operations cicpos_bwl_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_bwl_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
+
 static void
 cicpos_procfs_ctor(cicp_mibs_kern_t *control_plane)
 {   void *caller_info = control_plane;
@@ -1336,6 +1357,8 @@ cicpos_procfs_ctor(cicp_mibs_kern_t *control_plane)
 			 &cicpos_bond_fops,  caller_info);
 	proc_create_data(CICPOS_PROCFS_FILE_PMTU, 0, oo_proc_root,
 			 &cicpos_pmtu_fops,  caller_info);
+	proc_create_data(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, 0, oo_proc_root,
+			 &cicpos_bwl_fops,  caller_info);
     }
 }
 
@@ -1353,6 +1376,7 @@ cicpos_procfs_dtor(cicp_mibs_kern_t *control_plane)
         remove_proc_entry(CICPOS_PROCFS_FILE_FWDINFO, oo_proc_root);
         remove_proc_entry(CICPOS_PROCFS_FILE_BONDINFO, oo_proc_root);
         remove_proc_entry(CICPOS_PROCFS_FILE_PMTU, oo_proc_root);
+        remove_proc_entry(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, oo_proc_root);
     }
 }
 
@@ -1568,7 +1592,7 @@ request_table(cicp_nlsock_t *nlsock, int nlmsg_type, int rtm_flags,
               char* buf)
 {
   struct msghdr msg;
-  struct iovec iov;
+  struct kvec iov;
   struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
   struct rtmsg *rtm = (void *)(nlhdr+1);
   int ret;
@@ -1590,10 +1614,8 @@ request_table(cicp_nlsock_t *nlsock, int nlmsg_type, int rtm_flags,
   msg.msg_namelen=0;
   msg.msg_controllen=0;
   msg.msg_flags=0;
-  msg.msg_iov=&iov;
-  msg.msg_iovlen=1;
 
-  ret = sock_sendmsg(nlsock->sock, &msg, nlhdr->nlmsg_len);
+  ret = kernel_sendmsg(nlsock->sock, &msg, &iov, 1, nlhdr->nlmsg_len);
   
   if (ret < 0) {
     ci_log("%s():sock_sendmsg failed, err=%d", __FUNCTION__, ret);
@@ -1619,7 +1641,7 @@ netlink_read(struct socket *sock, char *buf, size_t count,
              int blocking, int retry)
 {   struct sockaddr_nl nladdr;
     struct msghdr msg;
-    struct iovec iov;
+    struct kvec iov;
     int rc;
 
     memset(&nladdr, 0, sizeof(nladdr));
@@ -1632,13 +1654,11 @@ netlink_read(struct socket *sock, char *buf, size_t count,
 
     msg.msg_name=&nladdr;
     msg.msg_namelen=sizeof(nladdr);
-    msg.msg_iov=&iov;
-    msg.msg_iovlen=1;
     msg.msg_control=0;
     msg.msg_controllen=0;
     msg.msg_flags = blocking ? 0 : MSG_DONTWAIT;
 
-    rc = sock_recvmsg(sock, &msg, count, msg.msg_flags);
+    rc = kernel_recvmsg(sock, &msg, &iov, 1, count, msg.msg_flags);
 
     /* wait a bit for the reply */
     if (retry && rc == -EAGAIN) {
@@ -2211,9 +2231,7 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
     dest_ipset = rtmsg->rtm_dst_len;
     tos = rtmsg->rtm_tos;
 
-    /* We only support RTN_UNICAST and 32 bit netmask
-     * RTN_LOCAL entries. We assume that the 32 bit netmask
-     * local routes will be route for the loopback addresses
+    /* We only support RTN_UNICAST and RTN_LOCAL entries.
      */
     if (ignore ||
         (rtmsg->rtm_type == RTN_LOCAL && (rtmsg->rtm_flags & RTM_F_CLONED))
@@ -2222,8 +2240,7 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
        * pmtu only */
     }
     else if (CI_UNLIKELY(rtmsg->rtm_type != RTN_UNICAST &&
-                    !(rtmsg->rtm_type == RTN_LOCAL &&
-                      dest_ipset == 32)))
+                         rtmsg->rtm_type != RTN_LOCAL))
     {   /* don't complain for local table routes and cached entries */
         if (rtmsg->rtm_table != RT_TABLE_LOCAL &&
             !(rtmsg->rtm_flags & RTM_F_CLONED))
@@ -2368,7 +2385,7 @@ cicpos_dump_pmtu_row(cicp_nlsock_t *nlsock, int rowid,
 {
   int rc;
   struct msghdr msg;
-  struct iovec iov;
+  struct kvec iov;
   ci_ip_addr_net_t net_ip = CICP_MIBS(session->control_plane)->
                                 pmtu_table->entries[rowid].net_ip;
   struct nlmsghdr *nlhdr = (struct nlmsghdr *) buf;
@@ -2398,10 +2415,8 @@ cicpos_dump_pmtu_row(cicp_nlsock_t *nlsock, int rowid,
   msg.msg_namelen=0;
   msg.msg_controllen=0;
   msg.msg_flags=0;
-  msg.msg_iov=&iov;
-  msg.msg_iovlen=1;
 
-  rc = sock_sendmsg(nlsock->sock, &msg, nlhdr->nlmsg_len);
+  rc = kernel_sendmsg(nlsock->sock, &msg, &iov, 1, nlhdr->nlmsg_len);
   if( rc < 0 )
     return;
 
@@ -2852,7 +2867,8 @@ cicpos_handle_llap_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
     ci_assert(NULL != ifinfomsg);
 
     /* we are only interested in ethernet interfaces */
-    if (ifinfomsg->ifi_type != ARPHRD_ETHER)
+    if (ifinfomsg->ifi_type != ARPHRD_ETHER &&
+        ifinfomsg->ifi_type != ARPHRD_LOOPBACK)
     {   /*ci_log("Only interested in ethernet interfaces");*/
 	return 0;
     }
@@ -2886,6 +2902,10 @@ cicpos_handle_llap_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 	    case IFLA_MTU:
 		mtu = (ci_mtu_t) *((unsigned *)RTA_DATA(attr));
+                /* On linux>=3.14 (and possibly earlier) loopback interface
+                 * has no mtu; let's set a safe default. */
+                if( mtu == 0 )
+                    mtu = (ci_mtu_t) (-1);
 		break;
 
 	    case IFLA_BROADCAST:
@@ -2913,7 +2933,10 @@ cicpos_handle_llap_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 
 	rc = cicpos_llap_import(session->control_plane, &rowid,
 	                        ifinfomsg->ifi_index,
-	                        mtu, up, &name[0], &mac, &sync);
+	                        mtu, up,
+                                ifinfomsg->ifi_type == ARPHRD_LOOPBACK ?
+                                  CICP_LLAP_TYPE_LOOP : CICP_LLAP_TYPE_NONE,
+                                &name[0], &mac, &sync);
 	    
 	/* remember we've seen this LLAP */
 	if (0 == rc)

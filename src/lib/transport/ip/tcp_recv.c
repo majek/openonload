@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -85,7 +85,7 @@ ci_tcp_recv_fill_msgname(ci_tcp_state* ts, struct sockaddr *name,
 }
 
 
-int ci_tcp_send_wnd_update(ci_netif* ni, ci_tcp_state* ts)
+int ci_tcp_send_wnd_update(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
 {
   ci_assert(ci_netif_is_locked(ni));
 
@@ -102,7 +102,7 @@ int ci_tcp_send_wnd_update(ci_netif* ni, ci_tcp_state* ts)
       LOG_TR(log(LNTS_FMT "window update advertised=%d",
                  LNTS_PRI_ARGS(ni, ts), tcp_rcv_wnd_advertised(ts)));
       CITP_STATS_NETIF_INC(ni, wnd_updates_sent);
-      ci_tcp_send_ack(ni, ts, pkt);
+      ci_tcp_send_ack(ni, ts, pkt, sock_locked);
       /* Update the ack trigger so we won't attempt to send another windows
       ** update for a while.
       */
@@ -132,7 +132,8 @@ static void ci_tcp_recvmsg_send_wnd_update(ci_netif* ni, ci_tcp_state* ts,
   LOG_TR(log(LNTS_FMT "ack_trigger=%x c/w rcv_delivered=%x "
              "rcv_added=%u buff=%u wnd_rhs=%x current=%u",
              LNTS_PRI_ARGS(ni, ts), ts->ack_trigger, ts->rcv_delivered,
-             ts->rcv_added, tcp_rcv_buff(ts), tcp_rcv_wnd_right_edge_sent(ts),
+             ts->rcv_added, ts->rcv_window_max,
+             tcp_rcv_wnd_right_edge_sent(ts),
              tcp_rcv_wnd_current(ts)));
 
   if( ts->s.b.state & CI_TCP_STATE_NOT_CONNECTED )  goto out;
@@ -150,13 +151,13 @@ static void ci_tcp_recvmsg_send_wnd_update(ci_netif* ni, ci_tcp_state* ts,
   ** actually check that the right edge has moved by at least
   ** ci_tcp_ack_trigger_delta() since we last advertised a window.
   */
-  if( ! ci_tcp_send_wnd_update(ni, ts) )
+  if( ! ci_tcp_send_wnd_update(ni, ts, CI_TRUE) )
     /* Reset [ack_trigger] so it'll fire when we would advertise a window
     ** which is at least tcp_rcv_wnd_advertised() + delta.
     */
     ts->ack_trigger = ts->rcv_delivered
       + ci_tcp_ack_trigger_delta(ts)
-      - SEQ_SUB(ts->rcv_delivered + tcp_rcv_buff(ts),
+      - SEQ_SUB(ts->rcv_delivered + ts->rcv_window_max,
                 tcp_rcv_wnd_right_edge_sent(ts));
 
  out:
@@ -290,7 +291,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
 #ifndef __KERNEL__
   citp_signal_info* si = citp_signal_get_specific_inited();
 #endif
-  ci_uint64 max_spin = ni->state->spin_cycles;
+  ci_uint64 max_spin = ts->s.b.spin_cycles;
   int rc, spin_limit_by_so = 0;
 
   if( ts->s.so.rcvtimeo_msec ) {
@@ -324,6 +325,9 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
                                          ts->s.so.rcvtimeo_msec, &ts->s.b, si);
     if( rc != 0 )
       goto out;
+#if CI_CFG_SPIN_STATS
+    ni->state->stats.spin_tcp_recv++;
+#endif
   } while( now_frc - start_frc < max_spin );
 
   rc = spin_limit_by_so ? -EAGAIN : 0;
@@ -570,11 +574,13 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     if( rc2 < 0 ) {
       /* If we've received anything at all, we must say how much. */
       if( rinf.rc ) {
+#ifndef __KERNEL__
         ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                                  &a->msg->msg_namelen);
         ci_tcp_fill_recv_timestamp(ni,
                 a->msg, rinf.timestamp, &rinf.hw_timestamp,
                 ts->s.cmsg_flags, ts->s.timestamping_flags);
+#endif
       } else
         CI_SET_ERROR(rinf.rc, -rc2);
       goto out;
@@ -588,21 +594,21 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
  slow_path:
 
   if( flags & MSG_ERRQUEUE ) {
-    if( OO_PP_NOT_NULL(ts->s.timestamp_q_extract) ) {
+    if( OO_PP_NOT_NULL(ts->timestamp_q.extract) ) {
       ci_ip_pkt_fmt* pkt;
       struct onload_scm_timestamping_stream stamps;
       struct cmsg_state cmsg_state;
       int tx_hw_stamp_in_sync;
 
-      pkt = PKT_CHK_NNL(ni, ts->s.timestamp_q_extract);
+      pkt = PKT_CHK_NNL(ni, ts->timestamp_q.extract);
       if( pkt->tx_hw_stamp.tv_sec == CI_PKT_TX_HW_STAMP_CONSUMED ) {
         if( OO_PP_IS_NULL(pkt->tsq_next) ) {
           rinf.rc = -EAGAIN;
           CI_SET_ERROR(rinf.rc, -rinf.rc);
           goto unlock_out;   
         }
-        ts->s.timestamp_q_extract = pkt->tsq_next;
-        pkt = PKT_CHK_NNL(ni, ts->s.timestamp_q_extract);
+        ts->timestamp_q.extract = pkt->tsq_next;
+        pkt = PKT_CHK_NNL(ni, ts->timestamp_q.extract);
         ci_assert(pkt->tx_hw_stamp.tv_sec != CI_PKT_TX_HW_STAMP_CONSUMED);
       }
 
@@ -630,6 +636,10 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
         stamps.first_sent.tv_nsec = pkt->tx_hw_stamp.tv_nsec;
       }
       stamps.len = pkt->pf.tcp_tx.end_seq - pkt->pf.tcp_tx.start_seq;
+
+      /* FIN and SYN eat seq space, but the user is not interested in them */
+      if( TX_PKT_TCP(pkt)->tcp_flags & (CI_TCP_FLAG_SYN|CI_TCP_FLAG_FIN) )
+        stamps.len--;
 
       ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING_STREAM,
                   sizeof(stamps), &stamps);
@@ -672,14 +682,29 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   } else if( TCP_RX_ERRNO(ts) ) {
     CI_SET_ERROR(rinf.rc, TCP_RX_ERRNO(ts));
   }
+#ifndef __KERNEL__
+  a->msg->msg_controllen = 0;
+#endif
   goto unlock_out;
 
  success_unlock_out:
+#ifndef __KERNEL__
   ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                            &a->msg->msg_namelen);  /*!\TODO fixme remove cast*/
   ci_tcp_fill_recv_timestamp(ni, a->msg, rinf.timestamp, &rinf.hw_timestamp,
       ts->s.cmsg_flags, ts->s.timestamping_flags);
+#endif
  unlock_out:
+
+  /* If we've received FIN and RXQ is empty, let's reap it.
+   * See the counterpart in ci_tcp_rx_process_fin(), if FIN arrives with
+   * the empty receive queue. */
+  if( ( ( (ts->s.b.state & CI_TCP_STATE_RECVD_FIN) && tcp_rcv_usr(ts) == 0 )
+        || ni->state->mem_pressure ) && ci_netif_trylock(ni) ) {
+    ci_tcp_rx_reap_rxq_bufs_socklocked(ni, ts);
+    ci_netif_unlock(ni);
+  }
+
   ci_sock_unlock(ni, &ts->s.b);
  out:
   if(CI_UNLIKELY( ni->state->rxq_low ))

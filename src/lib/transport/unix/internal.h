@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -38,6 +38,7 @@
   #define _BSD_SOURCE*/
 
 #include <ci/tools.h>
+#pragma GCC poison ci_cpu_khz
 #include <ci/internal/ip.h>
 #include <ci/internal/ip_signal.h>
 #include <ci/internal/ip_log.h>
@@ -66,6 +67,9 @@ typedef struct {
   ci_uint64             spin_cycles;
   ci_uint64             poll_nonblock_fast_cycles;
   ci_uint64             poll_fast_cycles;
+  ci_uint64             select_nonblock_fast_cycles;
+  ci_uint64             select_fast_cycles;
+  ci_uint32             cpu_khz;
 
   enum {
     CITP_INIT_NONE = 0,
@@ -142,7 +146,7 @@ typedef struct {
                        citp_lib_context_t*);
   int  (*connect     )(citp_fdinfo*, const struct sockaddr*, socklen_t,
                        citp_lib_context_t*);
-  int  (*close       )(citp_fdinfo*, int may_cache);
+  int  (*close       )(citp_fdinfo*);
   int  (*shutdown    )(citp_fdinfo*, int);
   int  (*getsockname )(citp_fdinfo*, struct sockaddr*, socklen_t*);
   int  (*getpeername )(citp_fdinfo*, struct sockaddr*, socklen_t*);
@@ -150,8 +154,8 @@ typedef struct {
   int  (*setsockopt  )(citp_fdinfo*, int, int, const void*, socklen_t);
   int  (*recv        )(citp_fdinfo*, struct msghdr*, int);
 #if CI_CFG_RECVMMSG
-  int  (*recvmmsg    )(citp_fdinfo*, struct mmsghdr*, unsigned, int, 
-                       const struct timespec*);
+  int  (*recvmmsg    )(citp_fdinfo*, struct mmsghdr*, unsigned, int,
+                       ci_recvmmsg_timespec*);
 #endif
   int  (*send        )(citp_fdinfo*, const struct msghdr*, int);
 #if CI_CFG_SENDMMSG
@@ -165,10 +169,9 @@ typedef struct {
                        struct oo_ul_select_state*);
   int  (*poll        )(citp_fdinfo*, struct pollfd*, struct oo_ul_poll_state*);
 #if CI_CFG_USERSPACE_EPOLL
-  /* epoll() returns "Possibly, I've got an event" bool; keep this member
-   * NULL if not supported. */
-  void (*epoll       )(citp_fdinfo*, struct citp_epoll_member* eitem,
-                       struct oo_ul_epoll_state*);
+  /* epoll() returns "poll again" bool */
+  int (*epoll       )(citp_fdinfo*, struct citp_epoll_member* eitem,
+                       struct oo_ul_epoll_state*, int* stored_event);
 #endif
 #endif
 #if CI_CFG_SENDFILE
@@ -183,10 +186,10 @@ typedef struct {
   int  (*zc_recv_filter)(citp_fdinfo*, onload_zc_recv_filter_callback,
                          void*, int);
   int  (*recvmsg_kernel)(citp_fdinfo*, struct msghdr*, int);
-  int  (*tmpl_alloc)(citp_fdinfo*, struct iovec*, int, struct oo_msg_template**,
-                     unsigned);
+  int  (*tmpl_alloc)(citp_fdinfo*, const struct iovec*, int,
+                     struct oo_msg_template**, unsigned);
   int  (*tmpl_update)(citp_fdinfo*, struct oo_msg_template*,
-                      struct onload_template_msg_update_iovec*, int,
+                      const struct onload_template_msg_update_iovec*, int,
                       unsigned);
   int  (*tmpl_abort)(citp_fdinfo*, struct oo_msg_template*);
 #if CI_CFG_USERSPACE_EPOLL
@@ -197,6 +200,16 @@ typedef struct {
   int  (*ordered_data)(citp_fdinfo*, struct timespec* limit,
                        struct timespec* first_out, int* bytes_out);
 #endif
+  int (*is_spinning)(citp_fdinfo*);
+#if CI_CFG_FD_CACHING
+  int  (*cache     )(citp_fdinfo*);
+#endif
+  enum onload_delegated_send_rc
+       (*dsend_prepare)(citp_fdinfo*, int size, unsigned flags,
+                        struct onload_delegated_send* out);
+  int  (*dsend_complete)(citp_fdinfo*, const ci_iovec *iov, int iovlen,
+                         int flags);
+  int  (*dsend_cancel)(citp_fdinfo*);
 } citp_fdops;
 
 
@@ -301,14 +314,11 @@ struct citp_fdinfo_s {
 # define FDI_ON_RCZ_CLOSE	1
 # define FDI_ON_RCZ_DUP2	2
 # define FDI_ON_RCZ_HANDOVER	3
-# define FDI_ON_RCZ_UNCACHE	4
 # define FDI_ON_RCZ_MOVED	5
 # define FDI_ON_RCZ_DONE	6
   volatile char        on_ref_count_zero;
 
 #if CI_CFG_FD_CACHING
-  /* Zero normally, non-zero if this fdinfo is cached */
-  char                 is_cached;
   /* Non-zero if this fd is eligable for caching (i.e. if created via
    * accept).
    */
@@ -319,8 +329,7 @@ struct citp_fdinfo_s {
    * it allows us to calculate more quickly whether a FD needs special
    * action; without it, we'd need the test:
    *
-   * if( (fdi == &the_reserved_fd) || (fdi == &the_closed_fd) ||
-   *     (fdi->is_cached) )
+   * if( (fdi == &the_reserved_fd) || (fdi == &the_closed_fd) )
    *
    * before using an fd.  Since we'd pad the structure up to a 32-bit
    * boundary anyway, might as well make use of the space.  (Note we use
@@ -414,6 +423,10 @@ ci_inline void citp_fdinfo_release_ref(citp_fdinfo* fdinfo,
              (oo_atomic_read (&fdinfo->ref_count) > 1000000));
   ci_assert_gt(oo_atomic_read(&fdinfo->ref_count), 0);
 
+  /* We might call ref_count_zero, which locks fdtable.  Assert that
+   * it is possible: */
+  ci_assert(oo_per_thread_get()->sig.inside_lib);
+
   if( oo_atomic_quick_dec_and_test(&fdinfo->ref_count) )
     __citp_fdinfo_ref_count_zero(fdinfo, fdt_locked);
 }
@@ -446,6 +459,12 @@ ci_inline void citp_fdinfo_ref_fast(citp_fdinfo* fdinfo) {
 */
 extern void citp_fdinfo_handover(citp_fdinfo* fdi, int nonb_switch) CI_HF;
 
+ci_inline int citp_fdinfo_is_socket(const citp_fdinfo* fdi)
+{
+  return (fdi->protocol->type == CITP_TCP_SOCKET) ||
+         (fdi->protocol->type == CITP_UDP_SOCKET);
+}
+
 extern int citp_ep_dup(unsigned oldfd, int (*syscall)(int,long), long) CI_HF;
 
 /* One of these should be used as an arg to citp_ep_dup(). */
@@ -473,9 +492,6 @@ extern int         __citp_exec_restore( int fd ) CI_HF;
  */
 
 extern citp_protocol_impl citp_tcp_protocol_impl CI_HV;
-#if CI_CFG_FD_CACHING
-extern citp_protocol_impl citp_tcp_cached_protocol_impl CI_HV;
-#endif
 extern citp_protocol_impl citp_udp_protocol_impl CI_HV;
 #if CI_CFG_USERSPACE_EPOLL
 extern citp_protocol_impl citp_epoll_protocol_impl CI_HV;
@@ -499,7 +515,7 @@ typedef struct {
 typedef struct {
   citp_fdinfo  fdinfo;
   ci_netif*     netif;
-  struct oo_alien_ep* ep;
+  citp_waitable* ep;
   int os_socket;
 } citp_alien_fdi;
 
@@ -556,10 +572,6 @@ extern int citp_syscall_init(void) CI_HF;
 
 extern int citp_init_trampoline(ci_fd_t fd) CI_HF;
 #undef socklen_t
-
-extern int citp_onload_dev_major(void);
-extern int citp_onload_epoll_dev_major(void);
-extern dev_t citp_onloadfs_dev_t(void);
 
 extern citp_fdinfo* citp_tcp_dup(citp_fdinfo* orig_fdi);
 
@@ -654,14 +666,101 @@ ci_inline void citp_fdtable_busy_clear(unsigned fd, citp_fdinfo_p fdip,
 extern citp_fdinfo_p citp_fdtable_busy_wait(unsigned fd, int fdt_locked) CI_HF;
 
 
-#define CITP_FDTABLE_LOCK()	CITP_LOCK(&citp_ul_lock)
-#define CITP_FDTABLE_LOCK_RD()	CITP_LOCK_RD(&citp_ul_lock)
-#define CITP_FDTABLE_UNLOCK()	CITP_UNLOCK(&citp_ul_lock)
-#define CITP_FDTABLE_UNLOCK_RD()CITP_UNLOCK/*??_RD*/(&citp_ul_lock)
 
+
+/**********************************************************************
+ ** Transport library user-level lock
+ */
+
+/******************************************************************************
+ * Even our carefully optimized lock operations and atomic ops are quite slow.
+ * Specifically, this is caused by the presence of the LOCK prefix seems to
+ * cost up to 100 cycles.  The glibc boys have apparently noticed the same
+ * issues, and so keep a bit hanging of gs (at gs:0x10) that says whether the
+ * current process is multithreaded.  We use this to determine whether or not
+ * we need to assert the LOCK bit on the bus when doing atomic operations.
+ * Note however that any atomic types in the shared state must assert the LOCK
+ * bit regardless of whether the app is multithreaded -- it's only the state
+ * private to the process for which we can play this game.
+ */
+
+#define __CITP_LOCK(l) do {	\
+    if (ci_is_multithreaded())	\
+      oo_rwlock_lock_write(l);	\
+  } while(0)
+
+#define __CITP_LOCK_RD(l) do {	\
+    if (ci_is_multithreaded())	\
+      oo_rwlock_lock_read(l);	\
+  } while(0)
+
+#define __CITP_UNLOCK(l) do {	\
+    if (ci_is_multithreaded())	\
+      oo_rwlock_unlock_write(l);\
+  } while(0)
+
+#define __CITP_UNLOCK_RD(l) do {\
+    if (ci_is_multithreaded())	\
+      oo_rwlock_unlock_read(l);	\
+  } while(0)
+
+/* \TODO Add specific unlock read and unlock write operations */
+
+#ifdef NDEBUG
+
+#define CITP_FDTABLE_LOCK()	__CITP_LOCK(&citp_ul_lock)
+#define CITP_FDTABLE_LOCK_RD()	__CITP_LOCK_RD(&citp_ul_lock)
+#define CITP_FDTABLE_UNLOCK()	__CITP_UNLOCK(&citp_ul_lock)
+#define CITP_FDTABLE_UNLOCK_RD() __CITP_UNLOCK_RD(&citp_ul_lock)
+
+#define CITP_FDTABLE_ASSERT_LOCKED(fdt_locked)
+#define CITP_FDTABLE_ASSERT_LOCKED_RD
+
+#else
+
+ci_inline void CITP_FDTABLE_LOCK(void)
+{
+  citp_signal_info* si = &oo_per_thread_get()->sig;
+  ci_assert(si->inside_lib);
+  ci_atomic32_or(&si->aflags, OO_SIGNAL_FLAG_FDTABLE_LOCKED);
+  __CITP_LOCK(&citp_ul_lock);
+}
+ci_inline void CITP_FDTABLE_LOCK_RD(void)
+{
+  citp_signal_info* si = &oo_per_thread_get()->sig;
+  ci_assert(si->inside_lib);
+  ci_atomic32_or(&si->aflags, OO_SIGNAL_FLAG_FDTABLE_LOCKED);
+  __CITP_LOCK_RD(&citp_ul_lock);
+}
+ci_inline void CITP_FDTABLE_UNLOCK(void)
+{
+  citp_signal_info* si = &oo_per_thread_get()->sig;
+  ci_assert(si->inside_lib);
+  ci_atomic32_and(&si->aflags, ~OO_SIGNAL_FLAG_FDTABLE_LOCKED);
+  __CITP_UNLOCK(&citp_ul_lock);
+}
+ci_inline void CITP_FDTABLE_UNLOCK_RD(void)
+{
+  citp_signal_info* si = &oo_per_thread_get()->sig;
+  ci_assert(si->inside_lib);
+  ci_atomic32_and(&si->aflags, ~OO_SIGNAL_FLAG_FDTABLE_LOCKED);
+  __CITP_UNLOCK_RD(&citp_ul_lock);
+}
+
+ci_inline void
+_CITP_FDTABLE_ASSERT_LOCKED(int fdt_locked, char* file, int line)
+{
+  citp_signal_info* si = &oo_per_thread_get()->sig;
+  if( ! fdt_locked )
+    return;
+  _ci_assert(si->aflags & OO_SIGNAL_FLAG_FDTABLE_LOCKED, file, line);
+  _ci_assert(si->inside_lib, file, line);
+}
 #define CITP_FDTABLE_ASSERT_LOCKED(fdt_locked)			\
-  ci_assert(! (fdt_locked) || CITP_ISLOCKED(&citp_ul_lock))
+  _CITP_FDTABLE_ASSERT_LOCKED(fdt_locked, __FILE__, __LINE__)
 
+#define CITP_FDTABLE_ASSERT_LOCKED_RD CITP_FDTABLE_ASSERT_LOCKED(1)
+#endif
 
 /**********************************************************************
  ** File-descriptor table.
@@ -687,10 +786,15 @@ extern citp_fdinfo*  citp_fdtable_lookup_fast(citp_lib_context_t*,
 extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd) CI_HF;
 
 extern citp_fdinfo* citp_reprobe_moved(citp_fdinfo* fdinfo,
-                                       int from_fast_lookup);
+                                       int from_fast_lookup,
+                                       int fdip_is_already_busy);
 
-extern void          citp_fdtable_close_cached(void) CI_HF;
-extern void          citp_fdtable_new_fd_set(unsigned fd, citp_fdinfo_p,
+#if CI_CFG_FD_CACHING
+extern void          citp_netif_cache_disable(void) CI_HF;
+extern void          citp_netif_cache_warn_on_fork(void) CI_HF;
+#endif
+extern void          citp_fdtable_fork_hook(void) CI_HF;
+extern citp_fdinfo_p citp_fdtable_new_fd_set(unsigned fd, citp_fdinfo_p,
 					     int fdt_locked) CI_HF;
 extern void          citp_fdtable_insert(citp_fdinfo*,
 					 unsigned fd, int fdt_locked) CI_HF;
@@ -772,6 +876,8 @@ ci_inline int __citp_checked_enter_lib(citp_lib_context_t *lib_context
   Log_LIB(log("  citp_checked_enter_lib(%p) [was_in=%d] %s (%d)",
               lib_context->thread, was_inside_lib, fn, line));
   lib_context->thread->sig.inside_lib = 1;
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   return !was_inside_lib;
 }
 
@@ -784,6 +890,8 @@ ci_inline void __citp_enter_lib(citp_lib_context_t *lib_context
   lib_context->thread = __oo_per_thread_get();
   Log_LIB(log("  citp_enter_lib(%p) %s (%d)", lib_context->thread, fn, line));
   ci_assert_equal(lib_context->thread->sig.inside_lib, 0);
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   lib_context->thread->sig.inside_lib = 1;
 }
 
@@ -793,6 +901,8 @@ ci_inline void __citp_reenter_lib(citp_lib_context_t *lib_context
                                   CI_DEBUG_ARG(int line) ) {
   Log_LIB(log("  citp_reenter_lib(%p) %s (%d)", lib_context->thread, fn, line));
   ci_assert_equal(lib_context->thread->sig.inside_lib, 0);
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   lib_context->thread->sig.inside_lib = 1;
 }
 
@@ -802,9 +912,12 @@ ci_inline void __citp_exit_lib(citp_lib_context_t *lib_context, int do_errno
                                CI_DEBUG_ARG(int line) ) {
   Log_LIB(log("  citp_exit_lib(%p) %s (%d)", lib_context->thread, fn, line));
   ci_assert_equal(lib_context->thread->sig.inside_lib, 1);
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   lib_context->thread->sig.inside_lib = 0;
   ci_compiler_barrier();
-  if(CI_UNLIKELY( lib_context->thread->sig.run_pending ))
+  if(CI_UNLIKELY( lib_context->thread->sig.aflags &
+                  OO_SIGNAL_FLAG_HAVE_PENDING ))
     citp_signal_run_pending(&lib_context->thread->sig);
   if( do_errno )
     errno = lib_context->saved_errno;
@@ -821,6 +934,8 @@ ci_inline int __citp_checked_enter_lib(citp_lib_context_t *lib_context
   Log_LIB(log("  citp_checked_enter_lib(%p) [was_in=%d] %s (%d)",
               lib_context->thread, lib_context->thread->sig.inside_lib > 0,
               fn, line));
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   ++lib_context->thread->sig.inside_lib;    
   return (lib_context->thread->sig.inside_lib==1);
 }
@@ -836,6 +951,8 @@ ci_inline void __citp_enter_lib(citp_lib_context_t *lib_context
               lib_context->thread, lib_context->thread->sig.inside_lib,
               fn, line));
   ci_assert_ge(lib_context->thread->sig.inside_lib, 0);
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   ++lib_context->thread->sig.inside_lib;
 }
 
@@ -848,6 +965,8 @@ ci_inline void __citp_reenter_lib(citp_lib_context_t *lib_context
               lib_context->thread, lib_context->thread->sig.inside_lib,
               fn, line));
   ci_assert_ge(lib_context->thread->sig.inside_lib, 0);
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   ++lib_context->thread->sig.inside_lib;
 }
 
@@ -860,10 +979,13 @@ ci_inline void __citp_exit_lib(citp_lib_context_t *lib_context, int do_errno
               lib_context->thread, lib_context->thread->sig.inside_lib,
               fn, line));
   ci_assert_ge(lib_context->thread->sig.inside_lib, 1);
+  ci_assert(~lib_context->thread->sig.aflags &
+            OO_SIGNAL_FLAG_FDTABLE_LOCKED);
   --lib_context->thread->sig.inside_lib;
   ci_compiler_barrier();
   if(CI_UNLIKELY( lib_context->thread->sig.inside_lib == 0 && 
-                  lib_context->thread->sig.run_pending ))
+                  (lib_context->thread->sig.aflags &
+                   OO_SIGNAL_FLAG_HAVE_PENDING) ))
     citp_signal_run_pending(&lib_context->thread->sig);
   if( do_errno )
     errno = lib_context->saved_errno;
@@ -950,7 +1072,8 @@ extern int onload_close(int fd) CI_HF;
  */
 int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
                     ci_uint64 timeout_ms, ci_uint64 *used_ms,
-                    citp_lib_context_t *lib_context);
+                    citp_lib_context_t *lib_context,
+                    const sigset_t *sigmask);
 /* Generic select/pselect implementation.
  * This function is called after citp_enter_lib(), and it MUST NOT call
  * citp_exit_lib().
@@ -960,14 +1083,13 @@ int citp_ul_do_poll(struct pollfd*__restrict__ fds, nfds_t nfds,
 int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
                       ci_uint64 timeout_ms, ci_uint64 *used_ms,
                       citp_lib_context_t *lib_context,
-                      const sigset_t *sigmask, sigset_t *sigsaved);
+                      const sigset_t *sigmask);
 
 /* ppoll/pselect common code.
  *
  * ppoll/pselect functions work in following way:
  * - enter lib;
  * - non-blocking poll/select and fast exit if we've got anything;
- * - exit lib if not spinning
  * - spin:
  *   - citp_ul_pwait_spin_pre():
  *     - exit lib;
@@ -975,7 +1097,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
  *     - enter lib to prevent all signals to be handled;
  *     - set sigprocmask - allow some new signals;
  *     - check for pending signals and return -1(errno=EINTR) if necessary.
- *   - citp_ul_do_(poll|select)
+ *   - spin in poll/select/epoll
  *   - citp_ul_pwait_spin_done():
  *     - restore sigmask
  *     - check signals to return -1(errno=EINTR) if any;
@@ -1004,6 +1126,7 @@ citp_ul_pwait_spin_pre(citp_lib_context_t *lib_context,
                        const sigset_t *sigmask, sigset_t *sigsaved)
 {
   Log_POLL(log("%s(%p,%p)", __func__, sigmask, sigsaved));
+  citp_exit_lib(lib_context, CI_FALSE);
   sigprocmask(SIG_BLOCK, sigmask, sigsaved);
   citp_enter_lib(lib_context);
 
@@ -1011,7 +1134,8 @@ citp_ul_pwait_spin_pre(citp_lib_context_t *lib_context,
     return 0;
 
   sigprocmask(SIG_SETMASK, sigmask, NULL);
-  if(CI_UNLIKELY( lib_context->thread->sig.run_pending )) {
+  if(CI_UNLIKELY( lib_context->thread->sig.aflags &
+                  OO_SIGNAL_FLAG_HAVE_PENDING )) {
     sigprocmask(SIG_SETMASK, sigsaved, NULL);
     Log_POLL(log("%s: interrupted", __func__));
     errno = EINTR;
@@ -1025,7 +1149,8 @@ citp_ul_pwait_spin_done(citp_lib_context_t *lib_context,
 {
   Log_POLL(log("%s(%p,%d)", __func__, sigsaved, *p_rc));
   sigprocmask(SIG_BLOCK, sigsaved, NULL);
-  if(CI_UNLIKELY( lib_context->thread->sig.run_pending )) {
+  if(CI_UNLIKELY( lib_context->thread->sig.aflags &
+                  OO_SIGNAL_FLAG_HAVE_PENDING )) {
     Log_POLL(log("%s: interrupted", __func__));
     errno = EINTR;
     *p_rc = -1;
@@ -1057,8 +1182,33 @@ static inline int citp_poll_if_needed(ci_netif* ni, ci_uint64 recent_frc,
   }
   return 0;
 }
+
+
+/* Query onload driver for the cpu_khz value */
+void citp_oo_get_cpu_khz(ci_uint32* cpu_khz);
+
+
+ci_inline ci_uint64 citp_usec_to_cycles64(unsigned usec)
+{ return (ci_uint64) usec * citp.cpu_khz / 1000; }
+
 #endif
 
+extern int citp_sock_is_spinning(citp_fdinfo* fdi);
+
+/**********************************************************************
+ * Utils
+ */
+ci_inline void
+ms2timespec(ci_uint64 timeout, ci_uint64 spent, struct timespec* tv)
+{
+  if( timeout > spent ) {
+    tv->tv_sec = (timeout - spent) / 1000;
+    tv->tv_nsec = ((timeout - spent) % 1000) * 1000000;
+  }
+  else {
+    tv->tv_sec = tv->tv_nsec = 0;
+  }
+}
 
 #endif  /* __CI_TRANSPORT_INTERNAL_H__ */
 /*! \cidoxg_end */

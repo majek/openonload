@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -120,13 +120,14 @@
 #define EF_LOG_BANNER                 0
 #define EF_LOG_RESOURCE_WARNINGS      1
 #define EF_LOG_CONN_DROP              2
-#define EF_LOG_MAX                    3  /* Must be last */
+#define EF_LOG_CONFIG_WARNINGS        3
+#define EF_LOG_MAX                    4  /* Must be last */
 
 
-#define NI_LOG(ni, lg, fmt, ...)                                \
-  do {                                                          \
-    if( NI_OPTS(ni).log_category & 1 << (EF_LOG_ ## lg) )       \
-      ci_log(fmt, __VA_ARGS__);                                 \
+#define NI_LOG(ni, lg, ...)                                \
+  do {                                                     \
+    if( NI_OPTS(ni).log_category & 1 << (EF_LOG_ ## lg) )  \
+      ci_log(__VA_ARGS__);                                 \
   } while( 0 );
 
 
@@ -223,7 +224,7 @@
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 
-#define CI_SB_FLAGS_FMT			"%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SB_FLAGS_FMT			"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SB_FLAGS_PRI_ARG(sb)                                         \
   ((sb)->sb_flags  & CI_SB_FLAG_WAKE_TX         ? "WK_TX ":""),         \
   ((sb)->sb_flags  & CI_SB_FLAG_WAKE_RX         ? "WK_RX ":""),         \
@@ -236,7 +237,10 @@
   ((sb)->sb_aflags & CI_SB_AFLAG_O_ASYNC        ? "O_ASYNC ":""),       \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_NONBLOCK     ? "O_NONBLOCK ":""),    \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_NDELAY       ? "O_NDELAY ":""),      \
-  ((sb)->sb_aflags & CI_SB_AFLAG_O_APPEND       ? "O_APPEND ":"")
+  ((sb)->sb_aflags & CI_SB_AFLAG_O_APPEND       ? "O_APPEND ":""),      \
+  ((sb)->sb_aflags & CI_SB_AFLAG_O_CLOEXEC      ? "O_CLOEXEC ":""),     \
+  ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE       ? "CACHE ":""),         \
+  ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ? "CACHE_NO_FD ":"")
 
 
 #define CI_EVMASK_FMT                  "%s%s%s%s%s%s%s"
@@ -321,14 +325,19 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_EPLOCK_NETIF_CLOSE_ENDPOINT  ? "CLOSE_EP ":""),             \
   ((v) & CI_EPLOCK_NETIF_NEED_WAKE       ? "WAKE ":""),                 \
   ((v) & CI_EPLOCK_NETIF_PKT_WAKE        ? "PKT_WAKE ":""),             \
+  ((v) & CI_EPLOCK_NETIF_SWF_UPDATE      ? "SWF_UPDATE ":""),           \
   ((v) & CI_EPLOCK_NETIF_IS_PKT_WAITER   ? "PKT_WAIT ":""),             \
   ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":"")
 
 
-#define CI_NETIF_ERRORS_FMT       "%s%s"
+#define CI_NETIF_ERRORS_FMT       "%s%s%s%s%s"
 #define CI_NETIF_ERRORS_PRI_ARG(errors)                         \
   ((errors) & CI_NETIF_ERROR_POST_POLL_LIST ? "PPL ":""),       \
-  ((errors) & CI_NETIF_ERROR_LOOP_PKTS_LIST ? "LOOP ":"")
+  ((errors) & CI_NETIF_ERROR_LOOP_PKTS_LIST ? "LOOP ":""),      \
+  ((errors) & CI_NETIF_ERROR_ASSERT         ? "ASS ":""),       \
+  ((errors) & CI_NETIF_ERROR_REMAP          ? "REMAP ":""),     \
+  ((errors) & CI_NETIF_ERROR_SYNRECV_TABLE  ? "SYNRECV ":"")
+  
 
 
 #define OO_CMSG_FLAGS_FMT  "%s%s%s%s%s%s%s%s"

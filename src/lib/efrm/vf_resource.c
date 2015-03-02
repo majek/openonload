@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -387,65 +387,6 @@ void efrm_vf_removed(struct efrm_vf *vf)
 	vf->vi_count = 0;
 	efrm_vf_manager->nic[vf->nic_index].vfs_probed--;
 	spin_unlock_bh(&efrm_vf_manager->rm.rm_lock);
-}
-
-/*********************************************************************
- *
- *  VI sets inside VF
- *
- *********************************************************************/
-
-void efrm_vf_vi_set(struct efrm_vi *virs)
-{
-	struct efrm_vf *vf = virs->allocation.vf;
-	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
-					vf->vi_base];
-
-	EFRM_ASSERT(vf->vi_base >= 64);
-	EFRM_ASSERT(virs->allocation.instance >= vf->vi_base);
-	EFRM_ASSERT(virs->allocation.instance < vf->vi_base + vf->vi_count);
-
-	vi->virs = virs;
-	strcpy(vi->name, "vfvi");
-}
-
-void efrm_vf_vi_set_name(struct efrm_vi *virs, const char *name)
-{
-	struct efrm_vf *vf = virs->allocation.vf;
-	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
-					vf->vi_base];
-
-	EFRM_ASSERT(name != NULL);
-	EFRM_ASSERT(vf->vi_base >= 64);
-	EFRM_ASSERT(virs->allocation.instance >= vf->vi_base);
-	EFRM_ASSERT(virs->allocation.instance < vf->vi_base + vf->vi_count);
-
-	strncpy(vi->name, name, sizeof(vi->name));
-	vi->name[sizeof(vi->name) - 1] = '\0';
-}
-
-int
-efrm_vf_alloc_vi_set(struct efrm_vf *vf, int min_vis_in_set,
-		     struct efrm_vi_allocation *set_out)
-{
-	set_out->allocator_id = -1;
-	set_out->order = fls(min_vis_in_set - 1);
-	set_out->instance = efrm_buddy_alloc(&vf->vi_instances,
-					     set_out->order);
-	if (set_out->instance < 0)
-		return -EBUSY;
-	set_out->vf = vf;
-	return 0;
-}
-
-int
-efrm_vf_free_vi_set(struct efrm_vi_allocation *set)
-{
-	struct efrm_vf *vf = set->vf;
-
-	efrm_buddy_free(&vf->vi_instances, set->instance, set->order);
-
-	return 0;
 }
 
 

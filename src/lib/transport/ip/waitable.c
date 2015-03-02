@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -34,6 +34,7 @@ void citp_waitable_reinit(ci_netif* ni, citp_waitable* w)
   /* Reinitialise fields between separate uses. */
   w->sleep_seq.all = 0;
   w->sigown = 0;
+  w->spin_cycles = ni->state->sock_spin_cycles;
 }
 
 
@@ -55,6 +56,11 @@ void citp_waitable_init(ci_netif* ni, citp_waitable* w, int id)
   OO_P_ADD(sp, CI_MEMBER_OFFSET(citp_waitable, post_poll_link));
   ci_ni_dllist_link_init(ni, &w->post_poll_link, sp, "ppll");
   ci_ni_dllist_self_link(ni, &w->post_poll_link);
+
+  sp = oo_sockp_to_statep(ni, W_SP(w));
+  OO_P_ADD(sp, CI_MEMBER_OFFSET(citp_waitable, ready_link));
+  ci_ni_dllist_link_init(ni, &w->ready_link, sp, "rll");
+  ci_ni_dllist_self_link(ni, &w->ready_link);
 
   w->lock.wl_val = 0;
   CI_DEBUG(w->wt_next = OO_SP_NULL);
@@ -81,7 +87,7 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
       citp_waitable* w = ID_TO_WAITABLE(netif, link);
       link = w->next_id;
       CI_DEBUG(w->next_id = CI_ILL_END);
-      ci_assert(w->state == CI_TCP_STATE_FREE);
+      ci_assert_equal(w->state, CI_TCP_STATE_FREE);
       ci_assert(OO_SP_IS_NULL(w->wt_next));
       w->wt_next = netif->state->free_eps_head;
       netif->state->free_eps_head = W_SP(w);
@@ -90,10 +96,6 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
 
   if( OO_SP_IS_NULL(netif->state->free_eps_head) ) {
     ci_tcp_helper_more_socks(netif);
-
-    if( OO_SP_IS_NULL(netif->state->free_eps_head) &&
-        OO_SP_NOT_NULL(netif->state->free_pipe_bufs) )
-      ci_tcp_helper_pipebufs_to_socks(netif);
 
     if( OO_SP_IS_NULL(netif->state->free_eps_head) )
       ci_netif_timeout_reap(netif);
@@ -119,6 +121,7 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
 
   netif->state->free_eps_head = wo->waitable.wt_next;
   CI_DEBUG(wo->waitable.wt_next = OO_SP_NULL);
+  ci_assert_equal(wo->waitable.state, CI_TCP_STATE_FREE);
 
   return wo;
 }
@@ -157,6 +160,43 @@ static void ci_drop_orphan(ci_netif * ni)
 #endif
 
 
+#if CI_CFG_FD_CACHING
+void citp_waitable_obj_free_to_cache(ci_netif* ni, citp_waitable* w)
+{
+#if defined (__KERNEL__) && !defined(NDEBUG)
+  /* There should be no non-atomic work queued for endpoints going to cache -
+   * they don't get their filters removed.
+   */
+  tcp_helper_endpoint_t* ep = ci_netif_get_valid_ep(ni, w->bufid);
+  ci_assert(!(ep->ep_aflags & OO_THR_EP_AFLAG_NON_ATOMIC));
+#endif
+  ci_assert(!(w->sb_aflags & CI_SB_AFLAG_ORPHAN));
+  ci_assert(w->sb_aflags & CI_SB_AFLAG_NOT_READY);
+  ci_assert(w->sb_aflags & CI_SB_AFLAG_IN_CACHE);
+  ci_assert(w->state == CI_TCP_CLOSED);
+  ci_assert(ci_ni_dllist_is_self_linked(ni, &w->post_poll_link));
+  ci_assert(OO_SP_IS_NULL(w->wt_next));
+
+  /* This resets a subset of the state done by __citp_waitable_obj_free.
+   * We do not set the orphan flag, as cached endpoints remain attached.
+   * We do not alter the state, as that too remains accurate.
+   *
+   * We preserve cache related aflags.  If the endpoint is freed before being
+   * accepted from the cache then these will be cleared when
+   * __citp_waitable_obj_free is called, otherwise they'll be checked for
+   * correctness, and updated if necessary when the socket is accepted.
+   */
+  w->wake_request = 0;
+  w->sb_flags = 0;
+  ci_atomic32_and(&w->sb_aflags, CI_SB_AFLAG_NOT_READY |
+                                 CI_SB_AFLAG_CACHE_PRESERVE);
+  w->lock.wl_val = 0;
+  w->ready_list_id = 0;
+  CI_USER_PTR_SET(w->eitem, NULL);
+}
+#endif
+
+
 static void __citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
 {
   ci_assert(w->sb_aflags & CI_SB_AFLAG_ORPHAN);
@@ -169,6 +209,8 @@ static void __citp_waitable_obj_free(ci_netif* ni, citp_waitable* w)
   w->sb_aflags = CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_NOT_READY;
   w->state = CI_TCP_STATE_FREE;
   w->lock.wl_val = 0;
+  w->ready_list_id = 0;
+  CI_USER_PTR_SET(w->eitem, NULL);
 }
 
 
@@ -219,7 +261,11 @@ void citp_waitable_obj_free_nnl(ci_netif* ni, citp_waitable* w)
 
 void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo, int do_free)
 {
-  if( wo->waitable.state == CI_TCP_LISTEN )
+  if( wo->waitable.sb_aflags & CI_SB_AFLAG_MOVED_AWAY ) {
+    if( do_free )
+      citp_waitable_obj_free(ni, &wo->waitable);
+  }
+  else if( wo->waitable.state == CI_TCP_LISTEN )
     ci_tcp_listen_all_fds_gone(ni, &wo->tcp_listen, do_free);
   else if( wo->waitable.state & CI_TCP_STATE_TCP )
     ci_tcp_all_fds_gone(ni, &wo->tcp, do_free);
@@ -276,6 +322,8 @@ void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
    * have been left there because the stack believes a wakeup is needed.
    */
   ci_ni_dllist_remove_safe(ni, &wo->waitable.post_poll_link);
+  ci_ni_dllist_remove_safe(ni, &wo->waitable.ready_link);
+  wo->waitable.ready_list_id = 0;
 
   citp_waitable_cleanup(ni, wo, 1);
 }
@@ -288,7 +336,6 @@ const char* citp_waitable_type_str(citp_waitable* w)
   if( w->state & CI_TCP_STATE_TCP )         return "TCP";
   else if( w->state == CI_TCP_STATE_UDP )   return "UDP";
   else if( w->state == CI_TCP_STATE_FREE )  return "FREE";
-  else if( w->state == CI_TCP_STATE_ALIEN ) return "ALIEN";
 #if CI_CFG_USERSPACE_PIPE
   else if( w->state == CI_TCP_STATE_PIPE )  return "PIPE";
 #endif
@@ -328,6 +375,12 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
          w->sleep_seq.rw.tx,
          ci_bit_test(&w->wake_request, CI_SB_FLAG_WAKE_TX_B) ? "(RQ)":"    ",
          CI_SB_FLAGS_PRI_ARG(w));
+
+  if( w->spin_cycles == -1 )
+    logger(log_arg, "%s  ul_poll: -1 spin cycles -1 usecs", pf);
+  else
+    logger(log_arg, "%s  ul_poll: %llu spin cycles %u usec", pf,
+         w->spin_cycles, oo_cycles64_to_usec(ni, w->spin_cycles));
 }
 
 

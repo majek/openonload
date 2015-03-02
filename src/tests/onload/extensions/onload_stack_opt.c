@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,14 @@ int main(void)
   int s1;
   int s2;
   int s3;
+  
+  int64_t spin = 0;
+
+  rc = onload_stack_opt_get_int("EF_SPIN_USEC", &spin);
+  if( rc )
+    printf("Error getting stack option: %d\n", -rc);
+  else
+    printf("Spinning 20001 for %ld usecs\n", spin);
 
   /* create a 'default' stack */
   s1 = createSocket(20001);
@@ -66,11 +74,17 @@ int main(void)
   /* specify a spin time */
   rc = onload_stack_opt_set_int("EF_SPIN_USEC", 1000000);
   if( rc )
-    printf("Error setting stack option: %d", -rc);
+    printf("Error setting stack option: %d\n", -rc);
 
   /* set a name to create a new stack */
   if( onload_set_stackname(ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "s_name1") )
     perror("Error setting stackname:");
+
+  rc = onload_stack_opt_get_int("EF_SPIN_USEC", &spin);
+  if( rc )
+    printf("Error getting stack option: %d\n", -rc);
+  else
+    printf("Spinning 20002 for %ld usecs\n", spin);
 
   /* create a socket thereby creating a new stack */
   s2 = createSocket(20002);
@@ -81,6 +95,12 @@ int main(void)
   /* set a name to create another new stack */
   if( onload_set_stackname(ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "s_name2") )
     perror("Error setting stackname:");
+
+  rc = onload_stack_opt_get_int("EF_SPIN_USEC", &spin);
+  if( rc )
+    printf("Error getting stack option: %d\n", -rc);
+  else
+    printf("Spinning 20003 for %ld usecs\n", spin);
 
   /* create a socket in the new stack */
   s3 = createSocket(20003);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -32,6 +32,7 @@
 #include <ci/efrm/vi_resource_manager.h>
 #include <etherfabric/ef_vi.h> /* For VI_MAPPING_* macros, vi_mappings type */
 #include <ci/efrm/efrm_client.h>
+#include <ci/efch/mmap.h>
 #include "linux_char_internal.h"
 #include "char_internal.h"
 
@@ -166,21 +167,23 @@ int efab_vi_resource_mmap(struct efrm_vi *virs, unsigned long *bytes,
                           void *opaque, int *map_num, unsigned long *offset,
                           int index)
 {
-  int rc;
+  int rc = -EINVAL;
 
   EFRM_RESOURCE_ASSERT_VALID(&virs->rs, 0);
   ci_assert_equal((*bytes &~ CI_PAGE_MASK), 0);
 
-  if( index == 0 )
-    /* This is the IO mapping. */
-    rc = efab_vi_rm_mmap_io(virs, bytes, opaque, map_num, offset);
-  else if( index == 1 )
-    /* This is the memory mapping. */
-    rc = efab_vi_rm_mmap_mem(virs, bytes, opaque, map_num, offset);
-  else {
-    /* This is the PIO mapping. */
-    ci_assert_equal(index, 2);
-    rc = efab_vi_rm_mmap_pio(virs, bytes, opaque, map_num, offset);
+  switch( index ) {
+    case EFCH_VI_MMAP_IO:
+      rc = efab_vi_rm_mmap_io(virs, bytes, opaque, map_num, offset);
+      break;
+    case EFCH_VI_MMAP_MEM:
+      rc = efab_vi_rm_mmap_mem(virs, bytes, opaque, map_num, offset);
+      break;
+    case EFCH_VI_MMAP_PIO:
+      rc = efab_vi_rm_mmap_pio(virs, bytes, opaque, map_num, offset);
+      break;
+    default:
+      ci_assert(0);
   }
 
   return rc;

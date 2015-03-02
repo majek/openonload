@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -99,15 +99,15 @@
 
 /* ---- ef_vi_event helpers --- */
 
-#define EFVI_FALCON_EVENT_CODE(evp) \
-       ((evp)->u64 & EFVI_FALCON_EVENT_CODE_MASK)
+#define EFVI_FALCON_EVENT_CODE(evp)             \
+  ((evp)->u64 & EFVI_FALCON_EVENT_CODE_MASK)
 
 #define EFVI_FALCON_EVENT_SW_DATA_MASK    0x0000ffff
 
 #define __EFVI_FALCON_OPEN_MASK(WIDTH)  ((((uint64_t)1) << (WIDTH)) - 1)
 
-#define EFVI_FALCON_EVENT_CODE_MASK \
-           (__EFVI_FALCON_OPEN_MASK(EV_CODE_WIDTH) << EV_CODE_LBN)
+#define EFVI_FALCON_EVENT_CODE_MASK                             \
+  (__EFVI_FALCON_OPEN_MASK(EV_CODE_WIDTH) << EV_CODE_LBN)
 
 
 #endif  /* __EF_VI_FALCON_H__ */

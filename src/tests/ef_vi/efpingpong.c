@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -134,10 +134,12 @@ struct pkt_buf {
 
 static ef_driver_handle  driver_handle;
 static ef_vi		 vi;
+static ef_filter_cookie  filter_cookie;
 
 struct pkt_buf*          pkt_bufs[N_BUFS];
 static ef_pd             pd;
 static ef_memreg         memreg;
+static void*             pkt_buf_mem;
 static unsigned          rx_posted, rx_completed;
 static int               tx_frame_len;
 
@@ -321,15 +323,15 @@ static void do_init(int ifindex)
   TRY(ef_filter_spec_set_ip4_local(&filter_spec, IPPROTO_UDP,
                                    sa_local.sin_addr.s_addr,
                                    sa_local.sin_port));
-  TRY(ef_vi_filter_add(&vi, driver_handle, &filter_spec, NULL));
+  TRY(ef_vi_filter_add(&vi, driver_handle, &filter_spec, &filter_cookie));
 
   {
     int bytes = N_BUFS * BUF_SIZE;
-    void* p;
-    TEST(posix_memalign(&p, CI_PAGE_SIZE, bytes) == 0);
-    TRY(ef_memreg_alloc(&memreg, driver_handle, &pd, driver_handle, p, bytes));
+    TEST(posix_memalign(&pkt_buf_mem, CI_PAGE_SIZE, bytes) == 0);
+    TRY(ef_memreg_alloc(&memreg, driver_handle, &pd, driver_handle, pkt_buf_mem,
+                        bytes));
     for( i = 0; i < N_BUFS; ++i ) {
-      pb = (void*) ((char*) p + i * BUF_SIZE);
+      pb = (void*) ((char*) pkt_buf_mem + i * BUF_SIZE);
       pb->id = i;
       pb->dma_buf_addr = ef_memreg_dma_addr(&memreg, i * BUF_SIZE);
       pb->dma_buf_addr += MEMBER_OFFSET(struct pkt_buf, dma_buf);
@@ -344,6 +346,18 @@ static void do_init(int ifindex)
 
   pb = pkt_bufs[FIRST_TX_BUF];
   tx_frame_len = init_udp_pkt(pb->dma_buf + cfg_tx_align, cfg_payload_len);
+}
+
+
+static void do_free(void)
+{
+  TRY(ef_vi_filter_del(&vi, driver_handle, &filter_cookie));
+  TRY(ef_vi_flush(&vi, driver_handle));
+  TRY(ef_memreg_free(&memreg, driver_handle));
+  free(pkt_buf_mem);
+  TRY(ef_vi_free(&vi, driver_handle));
+  TRY(ef_pd_free(&pd, driver_handle));
+  TRY(ef_driver_close(driver_handle));
 }
 
 
@@ -500,6 +514,11 @@ int main(int argc, char* argv[])
   printf("# tx align: %d\n", cfg_tx_align);
   t->fn();
 
+  /* Free all ef_vi resources we allocated above.  This isn't
+   * necessary as the process is about to exit which will free up all
+   * resources.  It is just to serve as an example of how to free up
+   * ef_vi resources without exiting the process. */
+  do_free();
   return 0;
 }
 

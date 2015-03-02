@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -311,23 +311,25 @@ static int vf_vfdi_req(struct vf_init_status *vf_ini)
 	}
 
 	EFRM_ERR("%s: Timed out op %d", pci_name(vf_ini->vf->pci_dev), op);
+
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
-#ifdef RHEL_MAJOR
-#if RHEL_MAJOR >= 6 /* RHEL5 has iommu, but not iommu_domain_has_cap */
-#define HAS_IOMMU_CAPS
+	if (!
+#ifdef EFRM_HAVE_IOMMU_DOMAIN_HAS_CAP
+	     iommu_domain_has_cap(vf_ini->vf->iommu_domain,
+				  IOMMU_CAP_CACHE_COHERENCY)
+#elif defined(EFRM_HAVE_IOMMU_CAPABLE)
+	     iommu_capable(vf_ini->vf->pci_dev->dev.bus,
+			   IOMMU_CAP_CACHE_COHERENCY)
+#else
+	     1
 #endif
-#else /* RHEL_MAJOR */
-#define HAS_IOMMU_CAPS
-#endif
-#ifdef HAS_IOMMU_CAPS
-	if (!iommu_domain_has_cap(vf_ini->vf->iommu_domain,
-				  IOMMU_CAP_CACHE_COHERENCY) )
+	      ) {
 		EFRM_ERR("You have very old IOMMU chip, which is not "
 			 "supported by %s driver.  Try to boot with "
 			 "iommu=off kernel parameter", KBUILD_MODNAME);
-#endif /* HAS_IOMMU_CAPS */
-#undef HAS_IOMMU_CAPS
+	}
 #endif /* CONFIG_SFC_RESOURCE_VF_IOMMU */
+
 	return -ETIMEDOUT;
 }
 
@@ -677,6 +679,8 @@ fail2:
 	return rc;
 }
 
+static void efrm_vf_vi_irq_free(struct efrm_vf *vf, struct efrm_vf_vi *vi);
+
 static void efrm_pci_vf_remove(struct pci_dev *pci_dev)
 {
 	struct efrm_vf *vf = pci_get_drvdata(pci_dev);
@@ -689,8 +693,9 @@ static void efrm_pci_vf_remove(struct pci_dev *pci_dev)
 		WARN_ON_ONCE(1);
 		for (i = 0; i < vf->vi_count; i++) {
 			struct efrm_vf_vi *vi = &vf->vi[i];
-			if (vi->virs->evq_callback_fn != NULL)
-				efrm_vf_eventq_callback_kill(vi->virs);
+
+			if (vi->virs != NULL)
+				efrm_vf_vi_irq_free(vf, vi);
 		}
 		live_remove = 1;
 	}
@@ -864,25 +869,135 @@ int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked,
 
 /*********************************************************************
  *
- * VI management:
- * Queue allocation
+ * VI management: IRQ callback
  *
  *********************************************************************/
 
-void efrm_vf_vi_drop(struct efrm_vi *virs)
+static void vf_vi_call_evq_callback(struct efrm_vf_vi *vi)
+{
+	struct efrm_vf *vf = vi_to_vf(vi);
+	struct efrm_vi *virs = vi->virs;
+	efrm_evq_callback_fn handler;
+	void *arg;
+
+	EFRM_ASSERT(virs);
+
+	handler = virs->evq_callback_fn;
+	rmb();
+	arg = virs->evq_callback_arg;
+
+	if (handler == NULL) {
+		/* This is seen at VI creation time, so we should not cry
+		 * too loud.  It will be nice to see this at other times,
+		 * but it is not easy. */
+		EFRM_TRACE("%s VI %d/%d interrupt IRQ %d but no handler",
+			   pci_name(vf->pci_dev),
+			   vi->index, virs->allocation.instance, vi->irq);
+		return;
+        }
+
+	/* Fixme: callback with is_timeout=true? */
+	handler(arg, false, efrm_nic_tablep->nic[vf->nic_index]);
+}
+
+static void efrm_vf_tasklet(unsigned long l)
+{
+	struct efrm_vf_vi *vi = (void *)l;
+	vf_vi_call_evq_callback(vi);
+}
+
+static irqreturn_t vf_vi_interrupt(int irq, void *dev_id
+#if defined(EFX_HAVE_IRQ_HANDLER_REGS)
+	, struct pt_regs *regs __attribute__ ((unused))
+#endif
+	)
+{
+	struct efrm_vf_vi *vi = dev_id;
+	tasklet_schedule(&vi->tasklet);
+	return IRQ_HANDLED;
+}
+
+static int
+efrm_vf_vi_irq_setup(struct efrm_vf *vf, struct efrm_vf_vi *vi)
+{
+	int rc;
+
+	/* Enable interrupts */
+	tasklet_init(&vi->tasklet, &efrm_vf_tasklet, (unsigned long)vi);
+	rc = request_irq(vi->irq, vf_vi_interrupt,
+			 IRQF_SAMPLE_RANDOM, vi->name, vi);
+	if (rc) {
+		EFRM_ERR("%s: failed to request IRQ %d for VI %d",
+			 pci_name(vf->pci_dev), vi->irq, vi->index);
+	}
+
+	return rc;
+}
+
+static void
+efrm_vf_vi_irq_free(struct efrm_vf *vf, struct efrm_vf_vi *vi)
+{
+	EFRM_ASSERT(vf);
+
+#ifdef EFX_USE_IRQ_SET_AFFINITY_HINT
+	irq_set_affinity_hint(vi->irq, NULL);
+#endif
+	free_irq(vi->irq, vi);
+	tasklet_kill(&vi->tasklet);
+}
+
+/*********************************************************************
+ *
+ * VI allocation
+ *
+ *********************************************************************/
+
+void efrm_vf_vi_drop(struct efrm_vi_allocation *allocation)
+{
+	struct efrm_vf *vf = allocation->vf;
+	struct efrm_vf_vi *vi = &vf->vi[allocation->instance -
+					vf->vi_base];
+
+	EFRM_ASSERT(allocation->instance >= vf->vi_base);
+	EFRM_ASSERT(allocation->instance < vf->vi_base + vf->vi_count);
+
+	if (vi->virs != NULL)
+		efrm_vf_vi_irq_free(vf, vi);
+
+	efrm_buddy_free(&vf->vi_instances, allocation->instance, 0);
+
+	vi->virs = NULL;
+}
+
+int
+efrm_vf_vi_alloc(struct efrm_vf *vf, struct efrm_vi_allocation *allocation)
+{
+	allocation->allocator_id = -1;
+	allocation->order = 0;
+	allocation->instance = efrm_buddy_alloc(&vf->vi_instances, 0);
+	if (allocation->instance < 0)
+		return -EBUSY;
+	allocation->vf = vf;
+
+	return 0;
+}
+
+void efrm_vf_vi_start(struct efrm_vi *virs, const char *name)
 {
 	struct efrm_vf *vf = virs->allocation.vf;
 	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
 					vf->vi_base];
 
+	EFRM_ASSERT(vf->vi_base >= 64);
 	EFRM_ASSERT(virs->allocation.instance >= vf->vi_base);
 	EFRM_ASSERT(virs->allocation.instance < vf->vi_base + vf->vi_count);
-	EFRM_ASSERT(vi->virs == virs);
 
-	if (vi->virs->evq_callback_fn != NULL)
-		efrm_vf_eventq_callback_kill(virs);
-
-	vi->virs = NULL;
+	vi->virs = virs;
+	if (name == NULL)
+		name = "vfvi";
+	strncpy(vi->name, name, sizeof(vi->name));
+	vi->name[sizeof(vi->name) - 1] = '\0';
+	efrm_vf_vi_irq_setup(vf, vi);
 }
 
 /*********************************************************************
@@ -976,7 +1091,7 @@ out1:
 }
 
 
-#ifdef EFRM_HAS_FIND_KSYM
+#ifdef ERFM_HAVE_NEW_KALLSYMS
 
 int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu)
 {
@@ -1052,7 +1167,7 @@ int efrm_vf_vi_set_cpu_affinity(struct efrm_vi *virs, int cpu)
 
 /*********************************************************************
  *
- * VI management: IRQ moderation and callback
+ * VI management: IRQ moderation
  *
  *********************************************************************/
 
@@ -1103,81 +1218,11 @@ int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
 }
 
 
-static void vf_vi_call_evq_callback(struct efrm_vf_vi *vi)
-{
-	struct efrm_vf *vf = vi_to_vf(vi);
-	struct efrm_vi *virs = vi->virs;
-
-	EFRM_ASSERT(virs);
-	EFRM_ASSERT(virs->evq_callback_fn);
-
-	/* Fixme: callback with is_timeout=true? */
-	virs->evq_callback_fn(virs->evq_callback_arg, false,
-			      efrm_nic_tablep->nic[vf->nic_index]);
-}
-
-static void efrm_vf_tasklet(unsigned long l)
-{
-	struct efrm_vf_vi *vi = (void *)l;
-	vf_vi_call_evq_callback(vi);
-}
-
-static irqreturn_t vf_vi_interrupt(int irq, void *dev_id
-#if defined(EFX_HAVE_IRQ_HANDLER_REGS)
-	, struct pt_regs *regs __attribute__ ((unused))
-#endif
-	)
-{
-	struct efrm_vf_vi *vi = dev_id;
-	tasklet_schedule(&vi->tasklet);
-	return IRQ_HANDLED;
-}
-
-/* When eventq callback was registered, enable interrupts */
-int efrm_vf_eventq_callback_registered(struct efrm_vi *virs)
-{
-	struct efrm_vf *vf = virs->allocation.vf;
-	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
-					vf->vi_base];
-	int rc;
-
-	EFRM_ASSERT(virs->allocation.instance >= vf->vi_base);
-	EFRM_ASSERT(virs->allocation.instance < vf->vi_base + vf->vi_count);
-	EFRM_ASSERT(vi->virs == virs);
-
-	/* Enable interrupts */
-	tasklet_init(&vi->tasklet, &efrm_vf_tasklet, (unsigned long)vi);
-	rc = request_irq(vi->irq, vf_vi_interrupt,
-			 IRQF_SAMPLE_RANDOM, vi->name, vi);
-	if (rc) {
-		EFRM_ERR("%s: failed to request IRQ %d for VI %d",
-			 pci_name(vf->pci_dev), vi->irq, vi->index);
-		virs->evq_callback_fn = NULL;
-		return rc;
-	}
-
-	return 0;
-}
-
-/* Before really killing callback, disable interrupts */
-void efrm_vf_eventq_callback_kill(struct efrm_vi *virs)
-{
-	struct efrm_vf *vf = virs->allocation.vf;
-	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
-					vf->vi_base];
-
-	EFRM_ASSERT(vf);
-	EFRM_ASSERT(vi->virs == virs);
-	if (virs->evq_callback_fn == NULL)
-		return;
-
-#ifdef EFX_USE_IRQ_SET_AFFINITY_HINT
-	irq_set_affinity_hint(vi->irq, NULL);
-#endif
-	free_irq(vi->irq, vi);
-	tasklet_kill(&vi->tasklet);
-	vi->virs->evq_callback_fn = NULL;
-}
+/*********************************************************************
+ *
+ * Module init
+ *
+ *********************************************************************/
 
 static struct pci_driver efrm_pci_vf_driver = {
 	.name		= KBUILD_MODNAME,
@@ -1206,7 +1251,13 @@ void efrm_vf_driver_fini(void)
 
 #endif /* CONFIG_SFC_RESOURCE_VF */
 
-#ifdef EFRM_HAS_FIND_KSYM
+/*********************************************************************
+ *
+ * Export efrm_find_ksym()
+ *
+ *********************************************************************/
+
+#ifdef ERFM_HAVE_NEW_KALLSYMS
 
 struct efrm_ksym_name {
 	const char *name;
@@ -1235,6 +1286,6 @@ void *efrm_find_ksym(const char *name)
 }
 EXPORT_SYMBOL(efrm_find_ksym);
 
-#endif  /* EFRM_HAS_FIND_KSYM */
+#endif  /* ERFM_HAVE_NEW_KALLSYMS */
 
 

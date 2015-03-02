@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -130,14 +130,17 @@ struct efrm_vi {
 	/*! EFHW_VI_ effective flags */
 	unsigned out_flags;
 
+	/* Buffer size for packed stream VIs.
+	 */
+	int      ps_buf_size;
+
 	int      rx_flush_outstanding;
 	uint64_t flush_time;
 	int      flush_count;
 	void   (*flush_callback_fn)(void *);
 	void    *flush_callback_arg;
 
-	void (*evq_callback_fn) (void *arg, int is_timeout,
-				 struct efhw_nic *nic);
+	efrm_evq_callback_fn evq_callback_fn;
 	void *evq_callback_arg;
 	struct efrm_vi_set *vi_set;
 	struct efrm_bt_manager bt_manager;

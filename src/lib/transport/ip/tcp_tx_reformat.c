@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,7 +28,7 @@
 
 #include "ip_internal.h"
 #include <ci/internal/transport_config_opt.h>
-#include <etherfabric/iovec_ptr.h>
+#include "iovec_ptr.h"
 #include "netif_tx.h"
 
 #define LPF "TCP TX RFMT "

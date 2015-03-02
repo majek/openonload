@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -281,14 +281,18 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
       ip_cmsg_recv_timestamp(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
 
   if( flags & CI_IP_CMSG_TIMESTAMPING ) {
-    struct timespec rx_hw_stamp;
     int flags = us->s.timestamping_flags;
-    rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
-    rx_hw_stamp.tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
-    if( ! (rx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
-        flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
-    ip_cmsg_recv_timestamping(ni, pkt->pf.udp.rx_stamp, &rx_hw_stamp,
-                              flags, &cmsg_state);
+    if( flags & (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
+                | ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE
+                | ONLOAD_SOF_TIMESTAMPING_SOFTWARE) ) {
+      struct timespec rx_hw_stamp;
+      rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
+      rx_hw_stamp.tv_nsec = pkt->pf.udp.rx_hw_stamp.tv_nsec;
+      if( ! (rx_hw_stamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
+          flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
+      ip_cmsg_recv_timestamping(ni, pkt->pf.udp.rx_stamp, &rx_hw_stamp,
+                                flags, &cmsg_state);
+    }
   }
 
   ci_ip_cmsg_finish(&cmsg_state);

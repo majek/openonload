@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -162,8 +162,8 @@ static struct lm90_data *lm90_update_device(struct device *dev);
 
 #if !defined(EFX_USE_I2C_LEGACY) && !defined(EFX_HAVE_OLD_I2C_DRIVER_PROBE)
 static const struct i2c_device_id lm90_id[] = {
-        { "sfc_max6647" },
-        { }
+	{ "sfc_max6647" },
+	{ }
 };
 #endif
 
@@ -174,7 +174,7 @@ struct i2c_driver efx_lm90_driver = {
 	.driver.name	= "sfc_lm90",
 #endif
 #ifdef EFX_USE_I2C_LEGACY
-        .detach_client  = lm90_detach_client,
+	.detach_client  = lm90_detach_client,
 #else
 	.probe		= efx_lm90_probe,
 	.remove		= lm90_remove,
@@ -190,7 +190,7 @@ struct i2c_driver efx_lm90_driver = {
 
 struct lm90_data {
 #ifdef EFX_HAVE_HWMON_CLASS_DEVICE
-        struct class_device *hwmon_dev;
+	struct class_device *hwmon_dev;
 #else
 	struct device *hwmon_dev;
 #endif
@@ -728,13 +728,13 @@ static int lm90_remove(struct i2c_client *client)
 #ifdef EFX_USE_I2C_LEGACY
 static int lm90_detach_client(struct i2c_client *client)
 {
-        int err;
+	int err;
 
-        lm90_remove(client);
-        err = i2c_detach_client(client);
-        if (!err)
-                kfree(client);
-        return err;
+	lm90_remove(client);
+	err = i2c_detach_client(client);
+	if (!err)
+		kfree(client);
+	return err;
 }
 #endif
 

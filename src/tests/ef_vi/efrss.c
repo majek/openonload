@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,366 +45,375 @@
 
 /* efrss
  *
- * Forward packets between two interfaces without modification, spreading
- * the load over multiple VIs and threads.
+ * Receive packets on an interface spreading load over multiple VIs/threads.
  *
  * 2011 Solarflare Communications Inc.
  * Author: David Riddoch
  * Date: 2011/04/14
  */
 
-#define _GNU_SOURCE
+#include <etherfabric/vi.h>
+#include <etherfabric/pd.h>
+#include <etherfabric/memreg.h>
 
-#include "efvi_sfw.h"
-
-#include <sched.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <net/if.h>
-#include <unistd.h>
-#include <sys/time.h>
-#include <assert.h>
-#include <errno.h>
-#include <string.h>
+#include "utils.h"
 
 
-#define LOGE(x)  do{ x; }while(0)         /* errors */
-#define LOGW(x)  do{ x; }while(0)         /* warnings */
-#define LOGS(x)  do{ x; }while(0)         /* setup */
-#define LOGI(x)  do{}while(0)             /* info */
+/* Hardware delivers at most ef_vi_receive_buffer_len() bytes to each
+ * buffer (default 1792), and for best performance buffers should be
+ * aligned on a 64-byte boundary.  Also, RX DMA will not cross a 4K
+ * boundary.  The I/O address space may be discontiguous at 4K boundaries.
+ * So easiest thing to do is to make buffers always be 2K in size.
+ */
+#define PKT_BUF_SIZE         2048
+
+/* Align address where data is delivered onto EF_VI_DMA_ALIGN boundary,
+ * because that gives best performance.
+ */
+#define RX_DMA_OFF           ROUND_UP(sizeof(struct pkt_buf), EF_VI_DMA_ALIGN)
 
 
-struct global;
+struct pkt_buf {
+  /* I/O address corresponding to the start of this pkt_buf struct.
+   * The pkt_buf is mapped into both VIs so there are two sets of rx
+   * and tx IO addresses. */
+  ef_addr*           rx_ef_addr;
 
+  /* pointer to where received packets start.  One per VI. */
+  void**             rx_ptr;
 
-enum thread_state {
-  thread_new,
-  thread_initialising,
-  thread_running,
-  thread_finished,
+  /* id to help look up the buffer when polling the EVQ */
+  int                id;
+
+  struct pkt_buf*    next;
 };
 
 
-struct thread {
-  struct global*    global;
-  int               id;
-  pthread_t         pthread_id;
-  cpu_set_t         cpus;
-  enum thread_state state;
-  struct vi**       vis;
-  int               vis_n;
-  struct vi**       fwd_map;
-  int               n_rx;
+struct pkt_bufs {
+  /* Memory for packet buffers */
+  void*  mem;
+  size_t mem_size;
+
+  /* Number of packet buffers allocated */
+  int    num;
+
+  /* pool of free packet buffers (LIFO to minimise working set) */
+  struct pkt_buf*    free_pool;
+  int                free_pool_n;
 };
 
 
-struct global {
-  int                threads_n;
-  struct thread**    threads;
-  int                net_ifs_max;
-  int                net_ifs_n;
-  struct net_if** net_ifs;
-  pthread_mutex_t    mutex;
-  pthread_cond_t     condvar;
+struct vi {
+  /* virtual interface (rxq + txq + evq) */
+  ef_vi              vi;
+
+  /* registered memory for DMA */
+  ef_memreg          memreg;
+
+  /* statistics */
+  uint64_t           n_pkts;
 };
+
+
+/* handle for accessing the driver */
+static ef_driver_handle   dh;
+/* protection domain */
+static ef_pd              pd;
+/* VI set */
+static ef_vi_set          vi_set;
+
+static struct vi* vis;
+static struct pkt_bufs pbs;
+static int cfg_hexdump;
+
 
 /**********************************************************************/
 
-static void handle_rx(struct thread* thread, struct vi* vi,
-                      int pkt_buf_i, int len)
+
+/* Given a id to a packet buffer, look up the data structure.  The ids
+ * are assigned in ascending order so this is simple to do. */
+static inline struct pkt_buf* pkt_buf_from_id(int pkt_buf_i)
 {
+  assert((unsigned) pkt_buf_i < (unsigned) pbs.num);
+  return (void*) ((char*) pbs.mem + (size_t) pkt_buf_i * PKT_BUF_SIZE);
+}
+
+
+/* Try to refill the RXQ on the given VI with at most
+ * REFILL_BATCH_SIZE packets if it has enough space and we have
+ * enough free buffers. */
+static void vi_refill_rx_ring(int vi_i)
+{
+  ef_vi* vi = &vis[vi_i].vi;
+#define REFILL_BATCH_SIZE  16
   struct pkt_buf* pkt_buf;
-  struct vi* send_vi;
-  int rc;
+  int i;
 
-  LOGI(fprintf(stderr, "[%d,%s] INFO: received pkt=%d len=%d\n",
-               thread->id, vi->interface, pkt_buf_i, len));
+  if( ef_vi_receive_space(vi) < REFILL_BATCH_SIZE ||
+      pbs.free_pool_n < REFILL_BATCH_SIZE )
+    return;
 
-  pkt_buf = pkt_buf_from_id(vi, pkt_buf_i);
-  send_vi = thread->fwd_map[vi->id];
-  rc = vi_send(send_vi, pkt_buf, RX_PKT_OFF(vi), len);
-  if( rc != 0 ) {
-    assert(rc == -EAGAIN);
-    /* TXQ is full.  A real app might consider implementing an overflow
-     * queue in software.  We simply choose not to send.
-     */
-    LOGW(fprintf(stderr, "[%d,%s] WARNING: dropped send\n",
-                 thread->id, send_vi->net_if->name));
+  for( i = 0; i < REFILL_BATCH_SIZE; ++i ) {
+    pkt_buf = pbs.free_pool;
+    pbs.free_pool = pbs.free_pool->next;
+    --pbs.free_pool_n;
+    ef_vi_receive_init(vi, pkt_buf->rx_ef_addr[vi_i], pkt_buf->id);
   }
-  pkt_buf_release(pkt_buf);
-  ++thread->n_rx;
+  ef_vi_receive_push(vi);
 }
 
 
-static void handle_rx_discard(struct thread* thread, struct vi* vi,
-                              int pkt_buf_i, int discard_type)
+/* Free buffer into free pool in LIFO order to minimize cache footprint. */
+static inline void pkt_buf_free(struct pkt_buf* pkt_buf)
 {
-  struct pkt_buf* pkt_buf;
-
-  LOGE(fprintf(stderr, "[%d,%s] ERROR: discard type=%d\n",
-               thread->id, vi->net_if->name, discard_type));
-
-  pkt_buf = pkt_buf_from_id(vi, pkt_buf_i);
-  pkt_buf_release(pkt_buf);
+  pkt_buf->next = pbs.free_pool;
+  pbs.free_pool = pkt_buf;
+  ++pbs.free_pool_n;
 }
 
 
-static void complete_tx(struct thread* thread, int vi_i, int pkt_buf_i)
+static void hexdump(const void* pv, int len)
 {
-  struct pkt_buf* pkt_buf;
-  assert(vi_i < thread->vis_n);
-  pkt_buf = pkt_buf_from_id(thread->vis[vi_i], pkt_buf_i);
-  pkt_buf_release(pkt_buf);
+  const unsigned char* p = (const unsigned char*) pv;
+  int i;
+  for( i = 0; i < len; ++i ) {
+    const char* eos;
+    switch( i & 15 ) {
+    case 0:
+      printf("%08x  ", i);
+      eos = "";
+      break;
+    case 1:
+      eos = " ";
+      break;
+    case 15:
+      eos = "\n";
+      break;
+    default:
+      eos = (i & 1) ? " " : "";
+      break;
+    }
+    printf("%02x%s", (unsigned) p[i], eos);
+  }
+  printf(((len & 15) == 0) ? "\n" : "\n\n");
 }
 
 
-static void thread_set_state(struct thread* thread, enum thread_state state)
+/* Handle an RX event on a VI. */
+static void handle_rx(int vi_i, int pkt_buf_i, int len)
 {
-  TEST(pthread_mutex_lock(&thread->global->mutex) == 0);
-  thread->state = state;
-  TEST(pthread_mutex_unlock(&thread->global->mutex) == 0);
-  pthread_cond_broadcast(&thread->global->condvar);
+  struct vi* vi = &vis[vi_i];
+  struct pkt_buf* pkt_buf = pkt_buf_from_id(pkt_buf_i);
+  ++vi->n_pkts;
+  if( cfg_hexdump )
+    hexdump(pkt_buf->rx_ptr[vi_i], len);
+  pkt_buf_free(pkt_buf);
 }
 
 
-static void thread_main_loop(struct thread* thread)
+static void handle_rx_discard(int pkt_buf_i, int discard_type)
 {
-  ef_request_id ids[EF_VI_TRANSMIT_BATCH];
-  ef_event evs[16];
-  struct vi* vi;
-  int i, j, n, n_ev, vi_i = 0;
+  struct pkt_buf* pkt_buf = pkt_buf_from_id(pkt_buf_i);
+  pkt_buf_free(pkt_buf);
+}
 
-  thread_set_state(thread, thread_running);
 
-  while( thread->state == thread_running ) {
-    vi = thread->vis[vi_i];
-    vi_i = (vi_i + 1) % thread->vis_n;
+static void loop(int vi_i)
+{
+  ef_event evs[EF_VI_EVENT_POLL_MIN_EVS];
+  ef_vi* vi = &vis[vi_i].vi;
+  int i;
 
-    n_ev = ef_eventq_poll(&vi->vi, evs, sizeof(evs) / sizeof(evs[0]));
-    if( n_ev <= 0 )
-      continue;
-
-    for( i = 0; i < n_ev; ++i ) {
+  while( 1 ) {
+    int n_ev = ef_eventq_poll(vi, evs, sizeof(evs) / sizeof(evs[0]));
+    for( i = 0; i < n_ev; ++i )
       switch( EF_EVENT_TYPE(evs[i]) ) {
       case EF_EVENT_TYPE_RX:
         /* This code does not handle jumbos. */
         assert(EF_EVENT_RX_SOP(evs[i]) != 0);
         assert(EF_EVENT_RX_CONT(evs[i]) == 0);
-        handle_rx(thread, vi, EF_EVENT_RX_RQ_ID(evs[i]),
-                  EF_EVENT_RX_BYTES(evs[i]));
-        break;
-      case EF_EVENT_TYPE_TX:
-        n = ef_vi_transmit_unbundle(&vi->vi, &evs[i], ids);
-        for( j = 0; j < n; ++j )
-          complete_tx(thread, TX_RQ_ID_VI(ids[j]), TX_RQ_ID_PB(ids[j]));
+        handle_rx(vi_i, EF_EVENT_RX_RQ_ID(evs[i]),
+                  EF_EVENT_RX_BYTES(evs[i]) - ef_vi_receive_prefix_len(vi));
         break;
       case EF_EVENT_TYPE_RX_DISCARD:
-        handle_rx_discard(thread, vi, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
+        handle_rx_discard(EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
                           EF_EVENT_RX_DISCARD_TYPE(evs[i]));
         break;
       default:
-        LOGE(fprintf(stderr, "[%d] ERROR: unexpected event type=%d\n",
-                     thread->id, (int) EF_EVENT_TYPE(evs[i])));
+        LOGE("ERROR: unexpected event %d\n", (int) EF_EVENT_TYPE(evs[i]));
         break;
       }
-    }
-    vi_refill_rx_ring(vi);
+    vi_refill_rx_ring(vi_i);
   }
-
-  thread_set_state(thread, thread_finished);
 }
 
 
-void* thread_fn(void* arg)
+static void* thread_fn(void* arg)
 {
-  struct thread* thread = arg;
-  struct global* global = thread->global;
-  int i, j;
-
-  assert(thread->state == thread_new);
-  thread_set_state(thread, thread_initialising);
-
-  TEST(sched_setaffinity(0, sizeof(thread->cpus), &thread->cpus) == 0);
-
-  /* Allocate a VI for each interface. */
-  assert(thread->vis_n == 0);
-  for( i = 0; i < global->net_ifs_n; ++i ) {
-    thread->vis[i] = vi_alloc_from_set(i, global->net_ifs[i], thread->id);
-    ++thread->vis_n;
-    LOGS(fprintf(stderr, "[%d] vi[%d]=%d\n", thread->id, i,
-                 ef_vi_instance(&thread->vis[i]->vi)));
-  }
-
-  /* Map each VIs packet pool into the other interfaces' protection domains
-   * so that we can use packet buffers from one VI's pool with other
-   * interfaces.
-   */
-  for( i = 0; i < global->net_ifs_n; ++i )
-    for( j = 0; j < thread->vis_n; ++j )
-      if( thread->vis[j]->net_if != global->net_ifs[i] )
-        net_if_map_vi_pool(global->net_ifs[i], thread->vis[j]);
-
-  for( i = 0; i < thread->vis_n; ++i )
-    thread->fwd_map[i] = thread->vis[(i + 1) % thread->vis_n];
-
-  thread_main_loop(thread);
-
+  int vi_i = (uintptr_t) arg;
+  loop(vi_i);
   return NULL;
 }
 
 
-static struct thread* thread_alloc(struct global* global, int id)
+static void monitor(int n_threads)
 {
-  struct thread* thread;
-  thread = calloc(1, sizeof(*thread));
-  thread->global = global;
-  thread->id = id;
-  CPU_ZERO(&thread->cpus);
-  thread->state = thread_new;
-  thread->vis = calloc(global->net_ifs_max, sizeof(thread->vis[0]));
-  thread->fwd_map = calloc(global->net_ifs_max, sizeof(thread->fwd_map[0]));
-  return thread;
-}
-
-/**********************************************************************/
-
-static struct global* global_alloc(int n_threads, int n_net_ifs)
-{
-  struct global* global = calloc(1, sizeof(*global));
-  global->threads_n = n_threads;
-  global->threads = calloc(global->threads_n, sizeof(global->threads[0]));
-
-  global->net_ifs_max = n_net_ifs;
-  global->net_ifs_n = 0;
-  global->net_ifs = calloc(global->net_ifs_max,
-                              sizeof(global->net_ifs[0]));
-
-  TEST(pthread_mutex_init(&global->mutex, NULL) == 0);
-  TEST(pthread_cond_init(&global->condvar, NULL) == 0);
-
-  return global;
-}
-
-
-static void global_add_net_if(struct global* global,
-                                 struct net_if* net_if)
-{
-  TEST(global->net_ifs_n < global->net_ifs_max);
-  global->net_ifs[global->net_ifs_n++] = net_if;
-}
-
-/**********************************************************************/
-
-static void monitor(struct global* global)
-{
-  /* Print approx packet rate for each thread every second. */
-
   struct timeval start, end;
-  int* prev = calloc(global->threads_n, sizeof(int));
-  int* now = calloc(global->threads_n, sizeof(int));
-  int i, ms, pkt_rate;
-  char line[global->threads_n * 10];
-  char* p;
+  int* prev_pkts = calloc(n_threads, sizeof(*prev_pkts));
+  int* now_pkts = calloc(n_threads, sizeof(*now_pkts));
+  int* pkt_rates = calloc(n_threads, sizeof(*pkt_rates));
+  int ms, i;
 
-  for( i = 0; i < global->threads_n; ++i )
-    prev[i] = global->threads[i]->n_rx;
+  for( i = 0; i < n_threads; ++i )
+    prev_pkts[i] = vis[i].n_pkts;
   gettimeofday(&start, NULL);
 
+  for( i = 0; i < n_threads; ++i )
+    printf("vi%d-rx\t", i);
+  printf("\n");
   while( 1 ) {
     sleep(1);
-    for( i = 0; i < global->threads_n; ++i )
-      now[i] = global->threads[i]->n_rx;
+    for( i = 0; i < n_threads; ++i )
+      now_pkts[i] = vis[i].n_pkts;
     gettimeofday(&end, NULL);
     ms = (end.tv_sec - start.tv_sec) * 1000;
     ms += (end.tv_usec - start.tv_usec) / 1000;
-    p = line;
-    for( i = 0; i < global->threads_n; ++i ) {
-      pkt_rate = (int) ((int64_t) (now[i] - prev[i]) * 1000 / ms);
-      p += sprintf(p, "%s%d", i ? "\t":"", pkt_rate);
-      prev[i] = now[i];
+
+    for( i = 0; i < n_threads; ++i ) {
+      pkt_rates[i] = (int64_t)(now_pkts[i] - prev_pkts[i]) * 1000 / ms;
+      printf("%d\t", pkt_rates[i]);
     }
+    printf("\n");
+    for( i = 0; i < n_threads; ++i )
+      prev_pkts[i] = now_pkts[i];
     start = end;
-    printf("%s\n", line);
-    fflush(stdout);
   }
+}
+
+
+/* Allocate and initialize the VI set from which we will allocate
+ * VIs. */
+static int init_vi_set(const char* intf, int n_threads)
+{
+  TRY(ef_driver_open(&dh));
+  TRY(ef_pd_alloc_by_name(&pd, dh, intf, EF_PD_DEFAULT));
+  TRY(ef_vi_set_alloc_from_pd(&vi_set, dh, &pd, dh, n_threads));
+
+  ef_filter_spec fs;
+  ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
+  TRY(ef_filter_spec_set_unicast_all(&fs));
+  TRY(ef_vi_set_filter_add(&vi_set, dh, &fs, NULL));
+  ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
+  TRY(ef_filter_spec_set_multicast_all(&fs));
+  TRY(ef_vi_set_filter_add(&vi_set, dh, &fs, NULL));
+  return 0;
+}
+
+
+/* Allocate and initialize the packet buffers. */
+static int init_pkts_memory(int n_threads)
+{
+  int i;
+
+  /* Number of buffers is the worst case to fill up all the queues
+   * assuming that you are going to allocate n_threads VIs, both have
+   * a RXQ and TXQ and both have default capacity of 512. */
+  pbs.num = 2 * n_threads * 512;
+  pbs.mem_size = pbs.num * PKT_BUF_SIZE;
+  pbs.mem_size = ROUND_UP(pbs.mem_size, huge_page_size);
+  /* Allocate huge-page-aligned memory to give best chance of allocating
+   * transparent huge-pages.
+   */
+  TEST(posix_memalign(&pbs.mem, huge_page_size, pbs.mem_size) == 0);
+
+  for( i = 0; i < pbs.num; ++i ) {
+    struct pkt_buf* pkt_buf = pkt_buf_from_id(i);
+    pkt_buf->id = i;
+    TEST(pkt_buf->rx_ef_addr = calloc(n_threads, sizeof(*pkt_buf->rx_ef_addr)));
+    TEST(pkt_buf->rx_ptr = calloc(n_threads, sizeof(*pkt_buf->rx_ptr)));
+    pkt_buf_free(pkt_buf);
+  }
+  return 0;
+}
+
+
+/* Allocate and initialize a VI. */
+static int init_vi(const char* intf, int vi_i)
+{
+  struct vi* vi = &vis[vi_i];
+  int i;
+  TRY(ef_vi_alloc_from_set(&vi->vi, dh, &vi_set, dh, -1, -1, -1, -1, NULL,
+                          -1, EF_VI_FLAGS_DEFAULT));
+
+  /* Memory for pkt buffers has already been allocated.  Map it into
+   * the VI. */
+  TRY(ef_memreg_alloc(&vi->memreg, dh, &pd, dh, pbs.mem, pbs.mem_size));
+  for( i = 0; i < pbs.num; ++i ) {
+    struct pkt_buf* pkt_buf = pkt_buf_from_id(i);
+    pkt_buf->rx_ef_addr[vi_i] =
+      ef_memreg_dma_addr(&vi->memreg, i * PKT_BUF_SIZE) + RX_DMA_OFF;
+    pkt_buf->rx_ptr[vi_i] = (char*) pkt_buf + RX_DMA_OFF +
+      ef_vi_receive_prefix_len(&vi->vi);
+  }
+
+  /* Our pkt buffer allocation function makes assumptions on queue sizes */
+  assert(ef_vi_receive_capacity(&vi->vi) == 511);
+  assert(ef_vi_transmit_capacity(&vi->vi) == 511);
+
+  while( ef_vi_receive_space(&vi->vi) > REFILL_BATCH_SIZE )
+    vi_refill_rx_ring(vi_i);
+
+  return 0;
 }
 
 
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
-  fprintf(stderr, "  efrss <num-threads> <# of intfs> <intf0> ... <intf(n-1)> "
-          "<filter-spec>...\n");
+  fprintf(stderr, "  efrss <num-threads> <intf>\n");
   fprintf(stderr, "\n");
-  fprintf(stderr, "filter-spec:\n");
-  fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:<local-port>"
-          "[,<remote-host>:<remote-port>]\n");
-  fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
-  fprintf(stderr, "  {unicast-all,multicast-all}:[vid=<vlan>]\n");
+  fprintf(stderr, "options:\n");
+  fprintf(stderr, "  -d     hexdump received packet\n");
   exit(1);
 }
 
 
 int main(int argc, char* argv[])
 {
-  struct global* global;
-  int n_threads;
-  int n_intfs;
-  int i, j;
+  const char* intf;
+  pthread_t thread;
+  int i, n_threads;
+  int c;
 
-  if( argc < 4 )
+  while( (c = getopt(argc, argv, "d")) != -1 )
+    switch( c ) {
+    case 'd':
+      cfg_hexdump = 1;
+      break;
+    case '?':
+      usage();
+    default:
+      TEST(0);
+    }
+  argc -= optind;
+  argv += optind;
+
+  if( argc != 2 )
     usage();
-  ++argv;
-  --argc;
-
   n_threads = atoi(argv[0]);
   ++argv;
   --argc;
-  n_intfs = atoi(argv[0]);
-  ++argv;
-  --argc;
-  global = global_alloc(n_threads, n_intfs);
+  intf = argv[0];
 
-  /* Allocate per-interface state. */
-  for( i = 0; i < n_intfs; ++i )
-    global_add_net_if(global, net_if_alloc(i, argv[i], global->threads_n));
-  argv += n_intfs;
-  argc -= n_intfs;
+  TEST(vis = calloc(n_threads, sizeof(*vis)));
+  TRY(init_vi_set(intf, n_threads));
+  TRY(init_pkts_memory(n_threads));
+  for( i = 0; i < n_threads; ++i )
+    init_vi(intf, i);
 
-  /* Allocate per-thread state and start worker threads. */
-  for( i = 0; i < global->threads_n; ++i ) {
-    struct thread* thread = thread_alloc(global, i);
-    global->threads[i] = thread;
-    CPU_SET(i, &thread->cpus);
-    TEST(pthread_create(&thread->pthread_id, NULL, thread_fn, thread) == 0);
-  }
-
-  /* Wait for threads to initialise.  Not strictly necessary, but increases
-   * chances that we'll not get any drops when we install the filters.  (If
-   * we install filter before VIs are ready, packets will be dropped).
-   */
-  TEST(pthread_mutex_lock(&global->mutex) == 0);
-  for( i = 0; i < global->threads_n; ++i )
-    while( global->threads[i]->state != thread_running )
-      pthread_cond_wait(&global->condvar, &global->mutex);
-  TEST(pthread_mutex_unlock(&global->mutex) == 0);
-
-  /* Add filters as per cmdline args. */
-  for( i = 0; i < global->net_ifs_n; ++i ) {
-    struct net_if* net_if = global->net_ifs[i];
-    ef_filter_spec fs;
-    for( j = 0; j < argc; ++j ) {
-      if( filter_parse(&fs, argv[j]) ) {
-        LOGE(fprintf(stderr, "ERROR: Bad filter spec '%s'\n", argv[j]));
-        exit(1);
-      }
-      TRY(ef_vi_set_filter_add(&net_if->vi_set, net_if->dh, &fs, NULL));
-    }
-  }
-
-  monitor(global);
+  for( i = 0; i < n_threads; ++i )
+    TRY(pthread_create(&thread, NULL, thread_fn, (void*)(uintptr_t)i));
+  monitor(n_threads);
 
   return 0;
 }

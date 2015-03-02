@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -72,10 +72,6 @@ static void oo_iobufset_kfree(struct oo_buffer_pages *pages)
 
 #ifdef OO_DO_HUGE_PAGES
 
-#ifdef CLONE_NEWIPC
-#include <linux/nsproxy.h>
-#endif
-
 #define OO_SHM_KEY_BASE 0xefab
 #define OO_SHM_KEY(id) (OO_SHM_KEY_BASE | (id << 16))
 #define OO_SHM_KEY_ID_MASK 0xffff
@@ -94,9 +90,7 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
   struct cred *creds;
 #endif
 
-  /* sys_shmat does not work when the process is shutting down. */
-  if( current->mm == NULL )
-    return -EFAULT;
+  ci_assert( current->mm );
 
   /* sys_shmget(SHM_HUGETLB) need CAP_IPC_LOCK.
    * So, we give this capability and reset it back.
@@ -209,15 +203,13 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
     goto fail1;
 
   p->shmid = shmid;
-#ifdef CLONE_NEWIPC
-  p->ipc_ns = current->nsproxy->ipc_ns;
-#endif
   rc = 0;
   goto out;
 
 fail1:
-fail2:
   put_page(p->pages[0]);
+fail2:
+  efab_linux_sys_shmdt((char __user *)uaddr);
 fail3:
   efab_linux_sys_shmctl(shmid, IPC_RMID, NULL);
 out:
@@ -240,42 +232,14 @@ out:
   return rc;
 }
 
-#ifdef CLONE_NEWIPC
-static void oo_bufpage_huge_free(struct oo_buffer_pages *p);
-
-static void oo_bufpage_huge_free_work(struct work_struct *data)
-{
-  oo_bufpage_huge_free(container_of(data, struct oo_buffer_pages, wi));
-}
-#endif
-
 static void oo_bufpage_huge_free(struct oo_buffer_pages *p)
 {
   ci_assert(p->shmid >= 0);
   ci_assert(current);
-#ifdef CLONE_NEWIPC
-  if( current->nsproxy == NULL ) {
-    INIT_WORK(&p->wi, oo_bufpage_huge_free_work);
-    queue_work(CI_GLOBAL_WORKQUEUE, &p->wi);
-  }
-  else if( CI_UNLIKELY( current->nsproxy->ipc_ns != p->ipc_ns ) ) {
-    /* Ideally, we'd like to call switch_task_namespaces() to get old
-     * namespace - but it is not exported.
-     * Moreover, it may be destroyed - (get|put)_ipc_ns() are not exported
-     * so we can't prevent it. */
-    ci_log("Onload does not support applications which use CLONE_NEWIPC "
-           "together with huge pages.");
-    ci_log("Leaking 1 huge page.");
-    put_page(p->pages[0]);
-    oo_iobufset_kfree(p);
-  }
-  else
-#endif
-  {
-    put_page(p->pages[0]);
-    efab_linux_sys_shmctl(p->shmid, IPC_RMID, NULL);
-    oo_iobufset_kfree(p);
-  }
+
+  put_page(p->pages[0]);
+  efab_linux_sys_shmctl(p->shmid, IPC_RMID, NULL);
+  oo_iobufset_kfree(p);
 }
 #endif
  
@@ -330,8 +294,8 @@ static int oo_bufpage_alloc(struct oo_buffer_pages **pages_out,
   oo_atomic_set(&pages->ref_count, 1);
 
 #ifdef OO_DO_HUGE_PAGES
-  if( (*flags & (OO_IOBUFSET_FLAG_TRY_HUGE_PAGE |
-                 OO_IOBUFSET_FLAG_FORCE_HUGE_PAGE)) &&
+  if( (*flags & (OO_IOBUFSET_FLAG_HUGE_PAGE_TRY |
+                 OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE)) &&
       gfp_flag == GFP_KERNEL &&
       low_order == HPAGE_SHIFT - PAGE_SHIFT ) {
     if (oo_bufpage_huge_alloc(pages, flags) == 0) {
@@ -340,7 +304,7 @@ static int oo_bufpage_alloc(struct oo_buffer_pages **pages_out,
     }
   }
   pages->shmid = -1;
-  if( *flags & OO_IOBUFSET_FLAG_FORCE_HUGE_PAGE ) {
+  if( *flags & OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE ) {
     ci_assert_equal(low_order, HPAGE_SHIFT - PAGE_SHIFT);
     return -ENOMEM;
   }
@@ -393,7 +357,7 @@ oo_iobufset_pages_alloc(int nic_order, int *flags,
   ci_assert(pages_out);
 
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-  if( *flags & OO_IOBUFSET_FLAG_FORCE_HUGE_PAGE ) {
+  if( *flags & OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE ) {
 # ifdef OO_DO_HUGE_PAGES
     rc = oo_bufpage_alloc(pages_out, order, order, flags, gfp_flag);
 # else
@@ -404,6 +368,10 @@ oo_iobufset_pages_alloc(int nic_order, int *flags,
   {
 #ifdef OO_HAVE_COMPOUND_PAGES
     int low_order = order;
+    if( *flags & OO_IOBUFSET_FLAG_COMPOUND_PAGE_LIMIT )
+      low_order -= 3;
+    else if( *flags & OO_IOBUFSET_FLAG_COMPOUND_PAGE_NONE )
+      low_order = 0;
     do {
       /* It is better to allocate high-order pages for many reasons:
        * - in theory, access to continious memory is faster;
@@ -427,8 +395,8 @@ oo_iobufset_pages_alloc(int nic_order, int *flags,
     } while( 1 );
 #elif defined(OO_DO_HUGE_PAGES) && CI_CFG_PKTS_AS_HUGE_PAGES
     rc = -ENOMEM;
-    if( *flags & (OO_IOBUFSET_FLAG_TRY_HUGE_PAGE |
-                 OO_IOBUFSET_FLAG_FORCE_HUGE_PAGE) )
+    if( *flags & (OO_IOBUFSET_FLAG_HUGE_PAGE_TRY |
+                 OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE) )
       rc = oo_bufpage_alloc(pages_out, order, order, flags, gfp_flag);
     if( rc != 0 )
       rc = oo_bufpage_alloc(pages_out, order, 0, flags, gfp_flag);
@@ -454,7 +422,8 @@ static void oo_iobufset_free_memory(struct oo_iobufset *rs)
 static void oo_iobufset_resource_free(struct oo_iobufset *rs)
 {
   efrm_pd_dma_unmap(rs->pd, rs->pages->n_bufs,
-                    compound_order(rs->pages->pages[0]),
+                    EFHW_GFP_ORDER_TO_NIC_ORDER(
+                                    compound_order(rs->pages->pages[0])),
                     &rs->dma_addrs[0], sizeof(rs->dma_addrs[0]),
                     &rs->buf_tbl_alloc);
 
@@ -485,6 +454,9 @@ oo_iobufset_resource_alloc(struct oo_buffer_pages * pages, struct efrm_pd *pd,
   int rc;
   int gfp_flag = (in_atomic() || in_interrupt()) ? GFP_ATOMIC : GFP_KERNEL;
   int size = sizeof(struct oo_iobufset) + pages->n_bufs * sizeof(dma_addr_t);
+  int nic_order;
+  void **addrs;
+  unsigned int i;
 
   ci_assert(iobrs_out);
   ci_assert(pd);
@@ -513,12 +485,28 @@ oo_iobufset_resource_alloc(struct oo_buffer_pages * pages, struct efrm_pd *pd,
   iobrs->pd = pd;
   iobrs->pages = pages;
 
+  nic_order = EFHW_GFP_ORDER_TO_NIC_ORDER(compound_order(pages->pages[0]));
+
+  ci_assert_le(sizeof(void *) * pages->n_bufs, PAGE_SIZE);
+  addrs = kmalloc(sizeof(void *) * pages->n_bufs, gfp_flag);
+  if (addrs == NULL)
+  {
+    rc = -ENOMEM;
+    goto fail;
+  }
+
+  for (i = 0; i < pages->n_bufs; i++) {
+    addrs[i] = page_address(pages->pages[i]);
+  }
+
   rc = efrm_pd_dma_map(iobrs->pd, pages->n_bufs,
-                       compound_order(pages->pages[0]),
-                       &pages->pages[0], sizeof(pages->pages[0]),
+                       nic_order,
+                       addrs, sizeof(addrs[0]),
                        &iobrs->dma_addrs[0], sizeof(iobrs->dma_addrs[0]),
                        hw_addrs, sizeof(hw_addrs[0]),
                        put_user_fake, &iobrs->buf_tbl_alloc);
+  kfree(addrs);
+
   if( rc < 0 )
     goto fail;
 

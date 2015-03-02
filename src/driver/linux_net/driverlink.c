@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005      Fen Systems Ltd.
- * Copyright 2005-2012 Solarflare Communications Inc.
+ * Copyright 2005-2015 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -348,7 +348,7 @@ bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
 #define EFX_FILTER_ID_MASK	((1 << EFX_FILTER_PRI_SHIFT) - 1)
 
 int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
-			 struct efx_filter_spec *spec,
+			 const struct efx_filter_spec *spec,
 			 bool replace_equal)
 {
 	s32 filter_id = efx_filter_insert_filter(efx_dl_handle(efx_dev)->efx,
@@ -382,6 +382,25 @@ int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
 
+int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev, unsigned vport_id,
+			       const struct efx_filter_spec *spec,
+			       u64 *filter_id_out, bool *is_exclusive_out)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	return efx->type->vport_filter_insert(efx, vport_id, spec,
+					      filter_id_out, is_exclusive_out);
+}
+EXPORT_SYMBOL(efx_dl_vport_filter_insert);
+
+int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev, unsigned vport_id,
+			       u64 filter_id, bool is_exclusive)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	return efx->type->vport_filter_remove(efx, vport_id, filter_id,
+					      is_exclusive);
+}
+EXPORT_SYMBOL(efx_dl_vport_filter_remove);
+
 int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
 		    size_t inlen, size_t outlen, size_t *outlen_actual,
 		    const u8 *inbuf, u8 *outbuf)
@@ -393,9 +412,9 @@ int efx_dl_mcdi_rpc(struct efx_dl_device *efx_dev, unsigned int cmd,
 	if (WARN_ON(inlen & 3 || outlen & 3))
 		return -EINVAL;
 
-	return efx_mcdi_rpc(efx_dl_handle(efx_dev)->efx, cmd,
-			    (const efx_dword_t *)inbuf, inlen,
-			    (efx_dword_t *)outbuf, outlen, outlen_actual);
+	return efx_mcdi_rpc_quiet(efx_dl_handle(efx_dev)->efx, cmd,
+				  (const efx_dword_t *)inbuf, inlen,
+				  (efx_dword_t *)outbuf, outlen, outlen_actual);
 }
 EXPORT_SYMBOL(efx_dl_mcdi_rpc);
 

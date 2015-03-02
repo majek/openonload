@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,7 +25,7 @@ static void citp_passthrough_dtor(citp_fdinfo* fdi, int fdt_locked)
   citp_netif_release_ref(fdi_to_alien_fdi(fdi)->netif, fdt_locked);
 }
 
-static int citp_passthrough_close(citp_fdinfo* fdi, int may_cache)
+static int citp_passthrough_close(citp_fdinfo* fdi)
 {
   citp_alien_fdi* epi = fdi_to_alien_fdi(fdi);
 
@@ -134,8 +134,8 @@ citp_passthrough_send(citp_fdinfo* fdi, const struct msghdr* msg, int flags)
 #if CI_CFG_RECVMMSG
 static int
 citp_passthrough_recvmmsg(citp_fdinfo* fdi, struct mmsghdr* msg, 
-                          unsigned vlen, int flags, 
-                          const struct timespec *timeout)
+                          unsigned vlen, int flags,
+                          ci_recvmmsg_timespec* timeout)
 {
 #ifdef OO_RECVMMSG_NOT_IN_LIBC
   errno = ENOSYS;
@@ -203,12 +203,15 @@ citp_protocol_impl citp_passthrough_protocol_impl = {
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,
     .tmpl_abort     = citp_nonsock_tmpl_abort,
+#if CI_CFG_FD_CACHING
+    .cache          = citp_nonsock_cache,
+#endif
   }
 };
 
 void citp_passthrough_init(citp_alien_fdi* epi)
 {
-  oo_os_sock_get(epi->netif, epi->ep->b.bufid, &epi->os_socket);
+  oo_os_sock_get(epi->netif, epi->ep->bufid, &epi->os_socket);
   __citp_fdtable_reserve(epi->os_socket, 1);
   /* ci_tcp_helper_get_sock_fd gets the citp_dup2_lock lock: release it  */
   oo_rwlock_unlock_read(&citp_dup2_lock);

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,9 +35,14 @@
 #define OO_UDP_RX_PER_PKT_OVERHEAD  350
 
 
-# define RECVQ_DEPTH(us, payload)                                       \
-  ((payload) + ci_udp_recv_q_bytes(&(us)->recv_q) +                     \
+#define UDP_RECVQ_DEPTH(us)                                             \
+  (ci_udp_recv_q_bytes(&(us)->recv_q) +                                 \
    ci_udp_recv_q_pkts(&(us)->recv_q) * OO_UDP_RX_PER_PKT_OVERHEAD)
+
+
+
+# define UDP_RECVQ_DEPTH_NEXT(us, payload_len)                          \
+   (UDP_RECVQ_DEPTH(us) + OO_UDP_RX_PER_PKT_OVERHEAD + (payload_len))
 # define WILL_OVERFLOW_RECVQ(us, depth) ((depth) > (us)->s.so.rcvbuf)
 
 

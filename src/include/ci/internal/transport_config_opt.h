@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2014  Solarflare Communications Inc.
+** Copyright 2005-2015  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -62,7 +62,7 @@
 /* Some defaults.  These can be overridden at runtime. */
 #define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<10)
 /* The real max for endpoint order */
-#define CI_CFG_NETIF_MAX_ENDPOINTS_MAX (1<<15)
+#define CI_CFG_NETIF_MAX_ENDPOINTS_MAX (1<<21)
 
 /* ANVL assumes the 2MSL time is 60 secs. Set slightly smaller */
 #define CI_CFG_TCP_TCONST_MSL		25
@@ -130,6 +130,8 @@
 
 /* Use userland pipe() implementation. */
 #define CI_CFG_USERSPACE_PIPE           1
+/* Arbitrary limit of 1MB following linux kernel */
+#define CI_CFG_MAX_PIPE_SIZE            (1<<20)
 
 /* Enable this to support port striping. */
 #define CI_CFG_PORT_STRIPING            0
@@ -222,6 +224,9 @@
 /* ANVL requires some pretty small MSS values.  
    This is chosen to match the ANVL parameter */
 #define CI_CFG_TCP_MINIMUM_MSS		64
+
+/* Default MSS value */
+#define CI_CFG_TCP_DEFAULT_MSS		536
 
 /* How many RX descriptors to push at a time. */
 #define CI_CFG_RX_DESC_BATCH		16
@@ -358,7 +363,6 @@
  * inherits specific socket state when accept() is called.
  */
 # define CI_CFG_ACCEPT_INHERITS_NONBLOCK 0
-# define CI_CFG_ACCEPT_INHERITS_NODELAY  1
 
 /* Should the number of bytes reported by ioctl(FIONREAD) be limited
    to a maximum of the recieve buffer size? */
@@ -410,23 +414,6 @@
  * to the user must be 1 for Windows, but optional otherwise
  */
 #define CI_CFG_CONTROL_PLANE_USER_SYNC    1
-
-/* Compile-time control for "no fail" exit from UDP connect/bind.
- * Provided on the premis that we at least want to fail gracefully & therefore,
- * if we're about to fail because of the UL stack, we let the OS have a go. 
- *
- * NOTES: 
- * 1. this will probably mask problems in the UL library - so the debug
- *    build defauls to all "no fail" options disabled & the release version
- *    defaults to all "no fail" options enabled. 
- *
- * 2. Better than "graceless", but of very limited appeal for UDP where
- *    the traffic includes fragmented messages and CI_CFG_UDP_TUNNELLING==1
- *    as the OS socket cannot handle our software-only scheme (
- *    now, if we had a hardware scheme ... 8-) )
- */
-#define CI_CFG_NO_FAIL_BIND           1  /* UDP  */
-#define CI_CFG_NO_FAIL_CONNECT        1  /* UDP  */
 
 /*
  * CI_CFG_CONGESTION_WINDOW_VALIDATION actviates RFC2861 compliance;
@@ -533,11 +520,8 @@
 #define CI_CFG_FAKE_IPV6 1
 
 
-/* Include support for caching file descriptors at user-level.
-**
-** NB. At time of writing this feature is broken.
-*/
-#define CI_CFG_FD_CACHING      0
+/* Include support for caching file descriptors at user-level.  */
+#define CI_CFG_FD_CACHING      1
 
 /* Enable iSCSI features. */
 #define CI_CFG_ISCSI           0
@@ -579,6 +563,14 @@
 */
 #define CI_CFG_STATS_NETIF		1
 
+/* Per-netif statistics for spin rounds inside each operation.
+ * It depends on CI_CFG_STATS_NETIF being on. */
+#ifdef NDEBUG
+#define CI_CFG_SPIN_STATS 0
+#else
+#define CI_CFG_SPIN_STATS 1
+#endif
+
 /*
  * install broadcast hardware filters for UDP
  * - not needed currently as all such sockets get passed to OS
@@ -600,9 +592,8 @@
 #define CI_CFG_BLOCKING_SPIN_SLEEPEX 1 /* SleepEx */
 #define CI_CFG_BLOCKING_SPIN_SOAW 1 /* SignalObjectAndWait */
 
-/* Number of buckets in the listen queue hash table.  Must be a power of
-** 2. */
-#define CI_CFG_TCP_LISTENQ_BUCKETS  32
+/* Maximum number of retransmit for SYN-ACKs */
+#define CI_CFG_TCP_SYNACK_RETRANS_MAX 10
 
 #ifndef CI_CFG_REF_WIN32_FO
 #define CI_CFG_REF_WIN32_FO 1 /* keep ref to file object to
@@ -702,6 +693,14 @@
 #else
 #define CI_CFG_USE_PIO 0
 #endif
+
+/* How many epolls sets will have a ready list maintained by the stack */
+#define CI_CFG_EPOLL1_SETS_PER_STACK 4
+/* How many ready lists are maintained - one dummy list for sockets that
+ * aren't asssociated with a specific set's ready list, plus the ones assigned
+ * for epolls sets - CI_CFG_EPOLL1_SETS_PER_STACK.
+ */
+#define CI_CFG_N_READY_LISTS (CI_CFG_EPOLL1_SETS_PER_STACK + 1)
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */
