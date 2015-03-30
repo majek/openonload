@@ -139,13 +139,14 @@ static inline void consume_packet(struct thread* t,
   /* Do something useful with the received packet! */
 
   if( cfg_verbose )
-    printf("PKT: ts=%d.%09d cap_len=%d orig_len=%d flags=%s%s%s%s\n",
+    printf("PKT: ts=%d.%09d cap_len=%d orig_len=%d flags=%s%s%s%s%s\n",
            ps_pkt->ps_ts_sec, ps_pkt->ps_ts_nsec,
            (int) ps_pkt->ps_cap_len, (int) ps_pkt->ps_orig_len,
            (ps_pkt->ps_flags & EF_VI_PS_FLAG_CLOCK_SET) ? "ClkSet,":"",
            (ps_pkt->ps_flags & EF_VI_PS_FLAG_CLOCK_IN_SYNC) ? "InSync,":"",
            (ps_pkt->ps_flags & EF_VI_PS_FLAG_BAD_FCS) ? "BadFcs,":"",
-           (ps_pkt->ps_flags & EF_VI_PS_FLAG_BAD_IP_CSUM) ? "BadCsum,":"");
+           (ps_pkt->ps_flags & EF_VI_PS_FLAG_BAD_L3_CSUM) ? "BadL3Csum,":"",
+           (ps_pkt->ps_flags & EF_VI_PS_FLAG_BAD_L4_CSUM) ? "BadL4Csum,":"");
 
   if( cfg_hexdump )
     hexdump(ef_packed_stream_packet_payload(ps_pkt), ps_pkt->ps_cap_len);

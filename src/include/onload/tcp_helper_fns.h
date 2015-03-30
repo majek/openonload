@@ -426,16 +426,9 @@ static inline unsigned
 efab_tcp_helper_ready_list_events(tcp_helper_resource_t* trs,
                                   int ready_list)
 {
-  if( trs->netif.state->ready_list_flags[ready_list] &
-      CI_NI_READY_LIST_FLAG_RESCAN ) {
-    return POLLIN;
-  }
-  else {
-    return
-        ci_ni_dllist_is_empty(&trs->netif,
-                              &trs->netif.state->ready_lists[ready_list])
-        ?  0 : POLLIN;
-  }
+  return ci_ni_dllist_is_empty(&trs->netif,
+                               &trs->netif.state->ready_lists[ready_list])
+         ?  0 : POLLIN;
 }
 
 

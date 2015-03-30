@@ -200,10 +200,10 @@ install_solar_clusterd() {
   elif [ ! -e "$clusterd_lib" ]; then
     log "Not installing solar_clusterd because it has not been built."
   else
-    try mkdir -p "$python_sitelib/solar_clusterd"
+    try mkdir -p "$i_prefix/$python_sitelib/solar_clusterd"
 
     # Install built python extension module
-    install_dlib "$clusterd_lib" "$python_sitelib/solar_clusterd"
+    install_dlib "$clusterd_lib" "$i_prefix/$python_sitelib/solar_clusterd"
 
     # Install solar_clusterd script and all python files from source folder
     try $do cd "$TOP/src/tools/solar_clusterd" > /dev/null
@@ -212,7 +212,7 @@ install_solar_clusterd() {
 
     /bin/ls *.py |
       while read -r f; do
-        install_f "$f" "$python_sitelib/solar_clusterd"
+        install_f "$f" "$i_prefix/$python_sitelib/solar_clusterd"
       done;
 
     try $do cd - > /dev/null
@@ -379,7 +379,7 @@ install_kernel_modules() {
   # Debian/Ubuntu: get new sfc.ko into ramfs
   if [ -z "$i_prefix" -a -f "/boot/initrd.img-$KVER" ] && \
      which update-initramfs >/dev/null 2>&1; then
-    update-initramfs -u -k $KVER
+    $do update-initramfs -u -k $KVER
   fi
 
   # Install driver meta-data.

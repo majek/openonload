@@ -71,7 +71,7 @@ check_node_device() {
   local minor="$3"
   local have=$(stat -c '%t %T' "$path" 2> /dev/null)
   local want=$(printf '%x %x' "$major" "$minor")
-  [ "$have" == "$want" ]
+  [ "$have" = "$want" ]
 }
 
 domknod () {
@@ -154,7 +154,7 @@ cmd_configure_container() {
   container=$1
   pid=$($DOCKER inspect --format {{.State.Pid}} $container) || \
     fail "ERROR: Could not retrieve PID for container '$container'."
-  [ $($DOCKER inspect --format {{.State.Running}} $container) == 'true' ] || \
+  [ $($DOCKER inspect --format {{.State.Running}} $container) = 'true' ] || \
     fail "ERROR: Container '$container' is not running."
 
   # /proc/<pid>/cgroup consists of lines with the following format:

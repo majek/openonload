@@ -298,9 +298,11 @@ onload_delegated_send_prepare(int fd, int size, unsigned flags,
 
   citp_enter_lib(&lib_context);
   fdi = citp_fdtable_lookup(fd);
-  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_prepare != NULL )
-    rc = citp_fdinfo_get_ops(fdi)->dsend_prepare(fdi, size, flags, out);
-  citp_fdinfo_release_ref(fdi, 0);
+  if( fdi != NULL ) {
+    if( citp_fdinfo_get_ops(fdi)->dsend_prepare != NULL )
+      rc = citp_fdinfo_get_ops(fdi)->dsend_prepare(fdi, size, flags, out);
+    citp_fdinfo_release_ref(fdi, 0);
+  }
   citp_exit_lib(&lib_context, rc == 0);
 
   Log_CALL_RESULT(rc);

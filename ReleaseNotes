@@ -1,3 +1,70 @@
+OpenOnload-201502-u1 Release Notes
+==================================
+
+This is a minor update release that fixes a number of issues in
+OpenOnload-201502.
+
+Below is a brief summary of any limitations that we are aware of.  See
+the ChangeLog for further details and a list of bugs fixed.
+
+The Release Notes for OpenOnload-201502 are included at the end of
+this file.
+
+
+Performance Regression
+----------------------
+
+Final testing of the OpenOnload-201502 release revealed a performance
+regression, highlighted in the release notes at the time, of around
+50ns.
+
+This update release includes changes that recover this, but during
+investigation we discovered a number of other relevant factors, some
+of which can potentially be used to demonstrate a significant
+performance improvement:
+
+1) We saw variation between different Linux distributions, the
+majority of which can be attributed to the different compiler versions
+used on these.  The gcc-4.8.2 based compiler included with RHEL7 for
+example showed in some cases improvement in latency (tested with
+sfnt-pingpong) of around 50ns compared to the gcc-4.4 based compiler
+distributed with RHEL6.
+
+2) Possibly related to (1) we found that small code changes in the
+history of OpenOnload that should have no effect on the
+performance (well away from the critical path) could be shown to have
+an effect, both positive and negative.  This is thought to be due to
+changes in code and data locality and cache performance.  We have
+ongoing work to understand this in more detail and develop it into
+further performance improvements.
+
+3) For each of the above the magnitude of the change was test and
+traffic dependent.  For example, some historic code changes would show
+a TCP improvement but a UDP regression, and vice versa, and the extent
+of these would depend on the compiler and OS used.  This suggests that
+our benchmarks may not 100% accurately predict the performance of your
+applications (this is hopefully not surprising, benchmarks can never
+be perfect), and that your mileage may vary.
+
+4) Some new firmware features can add noticeable latency when using
+the "full featured" firmware variant.  In particular the use of the
+vswitch in the NIC (which is enabled when using multiple VFs, and can
+be forced off using the num_vfs=0 sfc module parameter) and multicast
+chaining filters.  For absolute best latency we continue to recommend
+using the "low latency" firmware variant.
+
+
+Scalable epoll mode
+-------------------
+
+The OpenOnload-201502 release added a new scalable epoll mode
+(EF_UL_EPOLL=3) - for further details see the 201502 release notes
+below.  An issue in the way this new mode was enabled in that release
+meant that it was not being used even when selected.  This has been
+fixed in the update release.
+
+
+
 OpenOnload-201502 Release Notes
 ===============================
 
@@ -5,7 +72,6 @@ This is a major update release that adds new features to OpenOnload.
 
 Below is a brief summary of the new features and any limitations that
 we are aware of.  See the ChangeLog for further details and bugs
-fixed.
 
 
 Ubuntu/Debian Support

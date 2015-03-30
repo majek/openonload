@@ -406,7 +406,6 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   ci_assert(a);
   ci_assert(ni);
   ci_assert(ts);
-  ci_ss_assert(ni, ts->s.b.state != CI_TCP_LISTEN);
   ci_assert(a->msg);
 
   rinf.stack_locked = 0;
@@ -422,6 +421,8 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     CI_SET_ERROR(rinf.rc, -rinf.rc);
     return rinf.rc;
   }
+
+  if( ts->s.b.state == CI_TCP_LISTEN )  goto check_errno;
 
   have_polled = 0;
   ci_assert_equal(rinf.rc, 0);

@@ -1,3 +1,30 @@
+openonload-201502-u1
+--------------------
+
+Update net driver (v4.4.1.1021)
+
+bug44482: Add 'provides' statements for sfc-kmod-symvers to onload spec file.
+bug46981: Make onload build tolerate missing libjansson dependencies
+bug47081: add vport switching example for efpingpong sample
+bug51961: Fix error preserving file ownership when extracting Onload tarball as root
+bug51827: fix onload_delegated_send_prepare when called on a non-onload-fd
+bug50793: Don't inline citp_waitable_wake_not_in_poll
+bug51175: Avoid panic when closing listening sockets with socket caching
+bug51530: do not update initramfs in onload_install when just asked to list files
+bug51463: fix solarclusterd build error when creating RPM as non-root
+bug51465: fix date in RPM spec file to avoid rpmbuild complaints
+bug51360: warn user about unsupported combination of spin+epoll0
+bug51479: correctly handle epoll_wait with timeout=-1 and EF_UL_EPOLL=3
+bug51442: fix bashism in onload_tool and other scripts
+bug51301: add onload_remote_monitor dependencies to spec file
+bug50655: fix simultaneous listen() and recv(), was causing assertion
+bug51242: fix EF_UL_EPOLL=3 behaviour when epoll set changes during epoll_wait()
+bug51242: fix handling of return code when enabling EF_UL_EPOLL=3
+bug51324: do not report SA_SIGINFO when it is unset
+bug52045: fix epoll_ordered_wait to restart if repoll returns 0
+bug50746: initialise hash to correctly distribute traffic over LACP bond
+
+
 openonload-201502
 -----------------
 

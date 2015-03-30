@@ -295,12 +295,12 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 
   /* Linux walks VMAs on core dump, suppress the message */
   if( ~current->flags & PF_DUMPCORE )
-    CI_DEBUG(ci_log("%s: "EFRM_RESOURCE_FMT" vma=%p sz=%lx pageoff=%lx id=%d FAILED%s",
-		    __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs),
-		    vma, vma->vm_end - vma->vm_start,
-		    (address - vma->vm_start) >> CI_PAGE_SHIFT,
-                    EFAB_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)),
-		    ops->rm_nopage ? "":" NO HANDLER"));
+    EFCH_ERR("%s: "EFRM_RESOURCE_FMT" vma=%p sz=%lx pageoff=%lx id=%d FAILED%s",
+             __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs),
+             vma, vma->vm_end - vma->vm_start,
+             (address - vma->vm_start) >> CI_PAGE_SHIFT,
+             EFAB_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)),
+             ops->rm_nopage ? "":" NO HANDLER");
 
   return NOPAGE_SIGBUS;
 }

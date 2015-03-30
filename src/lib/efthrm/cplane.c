@@ -1466,6 +1466,7 @@ cicp_bond_add_master(const cicp_mibs_kern_t *mibs, cicp_llap_row_t *row,
     bond->master.mode = -1;
     bond->master.active_hwport = CI_HWPORT_ID_BAD;
     bond->master.fatal = 0;
+    bond->master.hash_policy = CICP_BOND_XMIT_POLICY_NONE;
     row->bond_rowid = (bond - &mibs->user.bondinfo_utable->bond[0]);
   }
 

@@ -985,6 +985,7 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
 static const u8 mac_addr_ig_mask[ETH_ALEN] __aligned(2) = {0x01, 0, 0, 0, 0, 0};
 
 #define IP4_ADDR_FULL_MASK	((__force __be32)~0)
+#define IP4_PROTO_FULL_MASK	0xFF
 #define PORT_FULL_MASK		((__force __be16)~0)
 #define ETHER_TYPE_FULL_MASK	((__force __be16)~0)
 
@@ -998,6 +999,8 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 {
 	struct ethtool_tcpip4_spec *ip_entry = &rule->h_u.tcp_ip4_spec;
 	struct ethtool_tcpip4_spec *ip_mask = &rule->m_u.tcp_ip4_spec;
+	struct ethtool_usrip4_spec *uip_entry = &rule->h_u.usr_ip4_spec;
+	struct ethtool_usrip4_spec *uip_mask = &rule->m_u.usr_ip4_spec;
 	struct ethhdr *mac_entry = &rule->h_u.ether_spec;
 	struct ethhdr *mac_mask = &rule->m_u.ether_spec;
 	struct efx_filter_spec spec;
@@ -1060,6 +1063,22 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
 		if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE) {
 			mac_entry->h_proto = spec.ether_type;
 			mac_mask->h_proto = ETHER_TYPE_FULL_MASK;
+		}
+	} else if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE &&
+		   spec.ether_type == htons(ETH_P_IP)) {
+		rule->flow_type = IP_USER_FLOW;
+		uip_entry->ip_ver = ETH_RX_NFC_IP4;
+		if (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) {
+			uip_mask->proto = IP4_PROTO_FULL_MASK;
+			uip_entry->proto = spec.ip_proto;
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+			uip_entry->ip4dst = spec.loc_host[0];
+			uip_mask->ip4dst = IP4_ADDR_FULL_MASK;
+		}
+		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+			uip_entry->ip4src = spec.rem_host[0];
+			uip_mask->ip4src = IP4_ADDR_FULL_MASK;
 		}
 	} else {
 		/* The above should handle all filters that we insert */
@@ -1187,6 +1206,8 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 {
 	struct ethtool_tcpip4_spec *ip_entry = &rule->h_u.tcp_ip4_spec;
 	struct ethtool_tcpip4_spec *ip_mask = &rule->m_u.tcp_ip4_spec;
+	struct ethtool_usrip4_spec *uip_entry = &rule->h_u.usr_ip4_spec;
+	struct ethtool_usrip4_spec *uip_mask = &rule->m_u.usr_ip4_spec;
 	struct ethhdr *mac_entry = &rule->h_u.ether_spec;
 	struct ethhdr *mac_mask = &rule->m_u.ether_spec;
 	struct efx_filter_spec spec;
@@ -1246,6 +1267,32 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
 		}
 		if (ip_mask->tos)
 			return -EINVAL;
+		break;
+
+	case IP_USER_FLOW:
+		if (uip_mask->l4_4_bytes || uip_mask->tos || uip_mask->ip_ver ||
+		    uip_entry->ip_ver != ETH_RX_NFC_IP4)
+			return -EINVAL;
+		spec.match_flags = EFX_FILTER_MATCH_ETHER_TYPE;
+		spec.ether_type = htons(ETH_P_IP);
+		if (uip_mask->ip4dst) {
+			if (uip_mask->ip4dst != IP4_ADDR_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+			spec.loc_host[0] = uip_entry->ip4dst;
+		}
+		if (uip_mask->ip4src) {
+			if (uip_mask->ip4src != IP4_ADDR_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+			spec.rem_host[0] = uip_entry->ip4src;
+		}
+		if (uip_mask->proto) {
+			if (uip_mask->proto != IP4_PROTO_FULL_MASK)
+				return -EINVAL;
+			spec.match_flags |= EFX_FILTER_MATCH_IP_PROTO;
+			spec.ip_proto = uip_entry->proto;
+		}
 		break;
 
 	case ETHER_FLOW:
@@ -1359,7 +1406,7 @@ static int efx_ethtool_set_rxfh(struct net_device *net_dev,
 #endif
 
 #if defined(EFX_USE_KCOMPAT)
-#if defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) && !defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
+#if defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) && !defined(EFX_HAVE_ETHTOOL_GET_RXFH) && !defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
 /* Wrappers that only set the indirection table, not the key. */
 static int efx_ethtool_get_rxfh_indir(struct net_device *net_dev, u32 *indir)
 {
@@ -1586,9 +1633,7 @@ const struct ethtool_ops_ext efx_ethtool_ops_ext = {
 #elif defined(EFX_HAVE_ETHTOOL_GET_RXFH)
 	.get_rxfh		= efx_ethtool_get_rxfh_no_hfunc,
 	.set_rxfh		= efx_ethtool_set_rxfh_no_hfunc,
-#endif
-
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR)
+#elif defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR)
 # if defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR)
 	.get_rxfh_indir		= efx_ethtool_old_get_rxfh_indir,
 	.set_rxfh_indir		= efx_ethtool_old_set_rxfh_indir,

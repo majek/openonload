@@ -1250,10 +1250,10 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
 **
 ** Transmit a packet already resident in Programmed I/O.
 **
-** The Programmed I/O region used by this call must not be reused until the
-** TX_COMPLETE event for the transmitted packet is handled, thus completing
-** the transmit operation. Failure to do so might corrupt an ongoing
-** transmit.
+** The Programmed I/O region used by this call must not be reused until an
+** event indicating TX completion is handled (see \ref using_transmit), thus
+** completing the transmit operation for the packet. Failure to do so might
+** corrupt an ongoing transmit.
 **
 ** The Programmed I/O region can hold multiple packets, referenced by
 ** different offset parameters. All other constraints must still be
@@ -1293,10 +1293,10 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
 ** adapter's Programmed I/O buffer. As a result it is slightly faster than
 ** calling ef_pio_memcpy() followed by ef_vi_transmit_pio().
 **
-** The Programmed I/O region used by this call must not be reused until the
-** TX_COMPLETE event for the transmitted packet is handled, thus completing
-** the transmit operation. Failure to do so might corrupt transmitted
-** packets.
+** The Programmed I/O region used by this call must not be reused until an
+** event indicating TX completion is handled (see \ref using_transmit), thus
+** completing the transmit operation for the packet. Failure to do so might
+** corrupt an ongoing transmit.
 **
 ** The Programmed I/O region can hold multiple smaller packets, referenced
 ** by different offset parameters. All other constraints must still be

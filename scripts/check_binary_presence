@@ -1,0 +1,9 @@
+#!/bin/bash
+
+binary="$1"
+if command -v $binary >/dev/null 2>$1; then
+    echo 1
+else
+    echo "WARNING: Failed to find $binary in path" >&2
+    echo 0
+fi

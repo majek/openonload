@@ -284,6 +284,7 @@ static void monitor(int n_threads)
       printf("%d\t", pkt_rates[i]);
     }
     printf("\n");
+    fflush(stdout);
     for( i = 0; i < n_threads; ++i )
       prev_pkts[i] = now_pkts[i];
     start = end;

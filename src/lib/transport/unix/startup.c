@@ -431,6 +431,12 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin);
 #if CI_CFG_USERSPACE_EPOLL
   GET_ENV_OPT_INT("EF_UL_EPOLL",        ul_epoll);
+  if( opts->ul_epoll == 0 && ci_cfg_opts.netif_opts.int_driven == 0 ) {
+    ci_log("EF_INT_DRIVEN=0 and EF_UL_EPOLL=0 are not compatible.  "
+           "EF_INT_DRIVEN can be set to 0 implicitly, because of non-zero "
+           "EF_POLL_USEC.  If you need both spinning and EF_UL_EPOLL=0, "
+           "please set EF_INT_DRIVEN=1 explicitly.");
+  }
   GET_ENV_OPT_INT("EF_EPOLL_SPIN",      ul_epoll_spin);
   GET_ENV_OPT_INT("EF_EPOLL_CTL_FAST",  ul_epoll_ctl_fast);
   GET_ENV_OPT_INT("EF_EPOLL_CTL_HANDOFF",ul_epoll_ctl_handoff);

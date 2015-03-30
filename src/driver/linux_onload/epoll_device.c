@@ -34,6 +34,7 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/epoll.h>
 #include <linux/eventpoll.h>
+#include <linux/poll.h>
 #include <linux/unistd.h> /* for __NR_epoll_pwait */
 #include "onload_internal.h"
 #include <ci/internal/cplane_ops.h> /* for oo_timesync_cpu_khz */
@@ -92,9 +93,12 @@ struct oo_epoll1_private {
   /* kernel epoll file */
   struct file *os_file;
 
+  /* home stack support */
   tcp_helper_resource_t* home_stack;
   int ready_list;
   ci_waitable_t home_w;
+  ci_uint32 flags;
+#define OO_EPOLL1_FLAG_HOME_STACK_CHANGED 1
 };
 
 /*************************************************************
@@ -744,13 +748,40 @@ static int oo_epoll1_wait(struct oo_epoll1_private *priv,
 static void oo_epoll1_set_home_stack(struct oo_epoll1_private* priv,
                                      tcp_helper_resource_t* thr, int ready_list)
 {
+  tcp_helper_resource_t* old_thr = priv->home_stack;
+  int old_ready_list = priv->ready_list;
+
+  /* We do not lock home_stack field.  It UL corrupts it - is is too bad
+   * for this UL, because we'll malfunction but never crash.
+   * Behaving UL has epoll lock to protect it from simultaneous changes of
+   * the home stack. */
   priv->home_stack = thr;
   priv->ready_list = ready_list;
-  ci_atomic32_or(&thr->netif.state->ready_list_flags[ready_list],
-                 CI_NI_READY_LIST_FLAG_RESCAN);
-  ci_waitable_wakeup_all(&priv->home_w);
+
+  priv->flags = OO_EPOLL1_FLAG_HOME_STACK_CHANGED;
+  /* We never release stacks after oo_epoll_add_stack(), so we definitely
+   * keep a reference to old_thr. */
+  if( old_thr != NULL )
+    ci_waitable_wakeup_all(&old_thr->ready_list_waitqs[old_ready_list]);
+  else
+    ci_waitable_wakeup_all(&priv->home_w);
 }
 
+static void oo_epoll_prime_all_stacks(struct oo_epoll_private* priv)
+{
+  int i;
+  tcp_helper_resource_t* thr;
+  ci_netif* ni;
+  
+  OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
+    tcp_helper_request_wakeup(thr);
+  }
+}
+
+/* It is a f_op->poll() like function, but we poll from oo_epoll1_block_on()
+ * only, so there is no need to propogate it as such. */
+/* Fixme: get rid of f_op->poll() prototype, and call
+ * add_wait_queue(this_wq, ept.wq[0]) directly. */
 static unsigned oo_epoll1_poll(struct file* filp, poll_table* wait)
 {
   struct oo_epoll_private *priv = filp->private_data;
@@ -764,14 +795,106 @@ static unsigned oo_epoll1_poll(struct file* filp, poll_table* wait)
     poll_wait(filp, &thr->ready_list_waitqs[ready_list].wq, wait);
 
     mask = efab_tcp_helper_ready_list_events(thr, ready_list);
-    if( !poll_does_not_wait(wait) && !mask )
-      tcp_helper_request_wakeup(thr);
+    /* no need to prime the stack - it is done
+     * from oo_epoll_prime_all_stacks() */
   }
   else
     poll_wait(filp, &priv->p.p1.home_w.wq, wait);
 
   return mask;
 }
+
+struct oo_epoll_poll_table {
+  poll_table pt;
+  wait_queue_t wq[2];
+  wait_queue_head_t* w[2];
+  struct task_struct* task;
+  struct file* filp;
+  int rc;
+};
+
+static void oo_epoll1_block_on_callback(struct file* filp,
+                                        wait_queue_head_t* w,
+                                        poll_table* pt)
+{
+  struct oo_epoll_poll_table* ept;
+  int i = 0;
+
+  ept = container_of(pt, struct oo_epoll_poll_table, pt);
+  if( filp != ept->filp )
+    i = 1;
+
+  ept->w[i] = w;
+  add_wait_queue(w, &ept->wq[i]);
+}
+
+static inline int oo_epoll1_wake_home_callback(wait_queue_t* wait,
+                                               unsigned mode, int sync,
+                                               void* key)
+{
+  struct oo_epoll_poll_table* ept;
+
+  ept = container_of(wait, struct oo_epoll_poll_table, wq[0]);
+  ept->rc |= OO_EPOLL1_EVENT_ON_HOME;
+  return wake_up_process(ept->task);
+}
+static inline int oo_epoll1_wake_other_callback(wait_queue_t* wait,
+                                                unsigned mode, int sync,
+                                                void* key)
+{
+  struct oo_epoll_poll_table* ept;
+
+  ept = container_of(wait, struct oo_epoll_poll_table, wq[1]);
+  ept->rc |= OO_EPOLL1_EVENT_ON_OTHER;
+  return wake_up_process(ept->task);
+}
+
+/* this is essentially sys_poll([home_filp,other_filp], timeout_ms) */
+static int oo_epoll1_block_on(struct file* home_filp,
+                              struct file* other_filp,
+                              int timeout_ms)
+{
+  struct oo_epoll_poll_table ept;
+  int rc, ret = 0;
+
+  ept.rc = 0;
+  ept.filp = home_filp;
+  ept.task = current;
+  ept.w[0] = ept.w[1] = NULL;
+  init_poll_funcptr(&ept.pt, oo_epoll1_block_on_callback);
+  init_waitqueue_func_entry(&ept.wq[0], oo_epoll1_wake_home_callback);
+
+  rc = oo_epoll1_poll(home_filp, &ept.pt);
+
+  if( rc != 0 ) {
+    ret = OO_EPOLL1_EVENT_ON_HOME;
+    rc = other_filp->f_op->poll(other_filp, NULL);
+    if( rc )
+      ret |= OO_EPOLL1_EVENT_ON_OTHER;
+  }
+  else {
+    init_waitqueue_func_entry(&ept.wq[1], oo_epoll1_wake_other_callback);
+    rc = other_filp->f_op->poll(other_filp, &ept.pt);
+    if( rc )
+      ret = OO_EPOLL1_EVENT_ON_OTHER;
+    else {
+      oo_epoll_prime_all_stacks(home_filp->private_data);
+      set_current_state(TASK_INTERRUPTIBLE);
+      if( ept.rc == 0 )
+        schedule_timeout(msecs_to_jiffies(timeout_ms));
+      __set_current_state(TASK_RUNNING);
+      ret = ept.rc;
+    }
+  }
+
+  if( ept.w[0] != NULL )
+    remove_wait_queue(ept.w[0], &ept.wq[0]);
+  if( ept.w[1] != NULL )
+    remove_wait_queue(ept.w[1], &ept.wq[1]);
+
+  return ret;
+}
+
 
 /*************************************************************
  * Common /dev/onload_epoll code
@@ -857,7 +980,9 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     }
     sock_priv = sock_file->private_data;
 
-    rc = oo_epoll_add_stack(priv, sock_priv->thr);
+    rc = 0;
+    if( oo_epoll_add_stack(priv, sock_priv->thr) )
+      rc = -ENOSPC;
     
     fput(sock_file);
     break;
@@ -882,10 +1007,8 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     }
     sock_priv = sock_file->private_data;
 
-    rc = oo_epoll_add_stack(priv, sock_priv->thr);
-
-    /* rc > 0 => successfully added stack */
-    if( rc > 0 )
+    rc = 0;
+    if( oo_epoll_add_stack(priv, sock_priv->thr) )
       oo_epoll1_set_home_stack(&priv->p.p1, sock_priv->thr,
                                local_arg.ready_list);
     else
@@ -895,14 +1018,80 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     break;
   }
 
-  case OO_EPOLL1_IOC_PRIME: {
-    int i;
-    tcp_helper_resource_t* thr;
-    ci_netif* ni;
-    
-    OO_EPOLL_FOR_EACH_STACK(priv, i, thr, ni) {
-      tcp_helper_request_wakeup(thr);
+  case OO_EPOLL1_IOC_REMOVE_HOME_STACK:
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    oo_epoll1_set_home_stack(&priv->p.p1, NULL, 0);
+    rc = 0;
+    break;
+
+  case OO_EPOLL1_IOC_BLOCK_ON: {
+    struct oo_epoll1_block_on_arg local_arg;
+#ifdef __NR_epoll_pwait
+    sigset_t sigmask, sigsaved;
+#endif
+    struct file* other_filp;
+
+    ci_assert_equal(_IOC_SIZE(cmd), sizeof(local_arg));
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    if( copy_from_user(&local_arg, argp, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+
+    other_filp = fget(local_arg.epoll_fd);
+    if( other_filp == NULL )
+      return -EINVAL;
+
+#ifdef __NR_epoll_pwait
+    if( local_arg.flags & OO_EPOLL1_HAS_SIGMASK ) {
+      ci_assert_equal(sizeof(sigset_t), sizeof(local_arg.sigmask));
+      memcpy(&sigmask, &local_arg.sigmask, sizeof(sigset_t));
+      sigdelsetmask(&sigmask, sigmask(SIGKILL)|sigmask(SIGSTOP));
+      sigprocmask(SIG_SETMASK, &sigmask, &sigsaved);
     }
+#else
+    /* Our UL is broken if we need epoll_pwait(): */
+    ci_assert_equal(local_arg.flags & OO_EPOLL1_HAS_SIGMASK, 0);
+#endif
+
+    /* drop OO_EPOLL1_FLAG_HOME_STACK_CHANGED flag */
+    priv->p.p1.flags = 0;
+
+    rc = oo_epoll1_block_on(filp, other_filp, local_arg.timeout_ms);
+
+    if( signal_pending(current) )
+      rc = -EINTR;
+
+#ifdef __NR_epoll_pwait
+    if( local_arg.flags & OO_EPOLL1_HAS_SIGMASK ) {
+      if( signal_pending(current) ) {
+        memcpy(&current->saved_sigmask, &sigsaved, sizeof(sigsaved));
+#ifdef HAVE_SET_RESTORE_SIGMASK
+        set_restore_sigmask();
+#else
+        set_thread_flag(TIF_RESTORE_SIGMASK);
+#endif
+      }
+      else
+        sigprocmask(SIG_SETMASK, &sigsaved, NULL);
+    }
+#endif
+
+    /* no guarantee if stupid user have called us with wrong flags: */
+    ci_assert_equal(local_arg.flags &
+                    (OO_EPOLL1_EVENT_ON_HOME | OO_EPOLL1_EVENT_ON_OTHER), 0);
+    if( rc > 0 ) {
+      local_arg.flags |= rc;
+      rc = 0;
+    }
+
+    if( copy_to_user(argp, &local_arg, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+    break;
+  }
+
+  case OO_EPOLL1_IOC_PRIME: {
+    oo_epoll_prime_all_stacks(priv);
     rc = 0;
     break;
   }
@@ -981,8 +1170,6 @@ static unsigned oo_epoll_fop_poll(struct file* filp, poll_table* wait)
   ci_assert(priv);
   if( priv->type == OO_EPOLL_TYPE_2 )
     return oo_epoll2_poll(priv, wait);
-  else if( priv->type == OO_EPOLL_TYPE_1 )
-    return oo_epoll1_poll(filp, wait);
   else
     return POLLNVAL;
 }
@@ -1007,6 +1194,7 @@ static int oo_epoll_fop_mmap(struct file* filp, struct vm_area_struct* vma)
   }
 
   ci_waitable_ctor(&priv->p.p1.home_w);
+  priv->p.p1.flags = 0;
 
   priv->type = OO_EPOLL_TYPE_1;
   return rc;

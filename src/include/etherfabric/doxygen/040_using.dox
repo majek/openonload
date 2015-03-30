@@ -39,7 +39,7 @@
  *************************************************************************/
  /*! \page using Using %ef_vi
 
-This part of the documenttaion gives information on using %ef_vi to write 
+This part of the documentation gives information on using %ef_vi to write 
 and build applications.
 
 \section components Components
@@ -124,7 +124,7 @@ must be registered for DMA with the network adapter. These requirements
 are enforced by calling ef_memreg_alloc() to register the allocated memory 
 for use with %ef_vi.
 
-The type `ef_iobufset` encapsulates a set of buffers. The adapter uses a 
+The type `ef_iovec` encapsulates a set of buffers. The adapter uses a 
 special address space to identify locations in these buffers, and such 
 addresses are designated by the type `ef_addr`.
 
@@ -151,7 +151,7 @@ To transmit packets, the basic process is:
    protection domain.
 
 -# Post a descriptor for the filled packet buffer onto the TX descriptor 
-   ring, by calling ef_vi_transmit_init() and ef_vitransmit_push(), or
+   ring, by calling ef_vi_transmit_init() and ef_vi_transmit_push(), or
    ef_vi_transmit().
 
    A doorbell is "rung" to inform the adapter that the transmit ring is
@@ -230,9 +230,9 @@ these events in one of the following ways:
 - A thread can block until event notifications arrive (or a timeout
   expires) by calling ef_eventq_wait(). This frees the CPU for other usage.
 
-The batch size for polling must be at least 8. It should be greater than 
-the batch size for refilling to detect when the receive descriptor ring is 
-going empty.
+The batch size for polling must be at least EF_VI_EVENT_POLL_MIN_EVS. It
+should be greater than the batch size for refilling to detect when the
+receive descriptor ring is going empty.
 
 \subsection fd_blocking Blocking on a file descriptor
 

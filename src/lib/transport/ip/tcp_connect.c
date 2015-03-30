@@ -1124,6 +1124,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
     }
   } 
 
+  ci_sock_lock(netif, &ts->s.b);
   ci_tcp_set_slow_state(netif, ts, CI_TCP_LISTEN);
   tls = SOCK_TO_TCP_LISTEN(&ts->s);
 
@@ -1147,6 +1148,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   }
 
   rc = ci_tcp_listen_init(netif, tls);
+  ci_sock_unlock(netif, &ts->s.b);
   if( rc != 0 ) {
     CI_SET_ERROR(rc, -rc);
     goto listen_fail;

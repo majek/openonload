@@ -86,6 +86,7 @@ static int		cfg_eventq_wait;
 static int		cfg_fd_wait;
 static int              cfg_use_vf;
 static int              cfg_phys_mode;
+static int              cfg_use_vport;
 static int              cfg_disable_tx_push;
 static int              cfg_tx_align;
 static int              cfg_rx_align;
@@ -120,8 +121,17 @@ static int              cfg_rx_align;
     }                                                           \
   } while( 0 )
 
+#define CL_CHK(x)                               \
+  do{                                           \
+    if( ! (x) )                                 \
+      usage();                                  \
+  }while(0)
+
 #define MEMBER_OFFSET(c_type, mbr_name)  \
   ((uint32_t) (uintptr_t)(&((c_type*)0)->mbr_name))
+
+
+static void usage(void);
 
 
 struct pkt_buf {
@@ -298,7 +308,7 @@ int init_udp_pkt(void* pkt_buf, int paylen)
 }
 
 
-static void do_init(int ifindex)
+static void do_init(char const* interface)
 {
   enum ef_pd_flags pd_flags = EF_PD_DEFAULT;
   ef_filter_spec filter_spec;
@@ -315,7 +325,12 @@ static void do_init(int ifindex)
 
   /* Allocate virtual interface. */
   TRY(ef_driver_open(&driver_handle));
-  TRY(ef_pd_alloc(&pd, driver_handle, ifindex, pd_flags));
+  if ( cfg_use_vport ) {
+    TRY(ef_pd_alloc_with_vport(&pd, driver_handle, interface, pd_flags,
+                               EF_PD_VLAN_NONE));
+  } else {
+    TRY(ef_pd_alloc_by_name(&pd, driver_handle, interface, pd_flags));
+  }
   TRY(ef_vi_alloc_from_pd(&vi, driver_handle, &pd, driver_handle,
                           -1, -1, -1, NULL, -1, vi_flags));
 
@@ -377,16 +392,6 @@ static int my_getaddrinfo(const char* host, const char* port,
 }
 
 
-static int parse_interface(const char* s, int* ifindex_out)
-{
-  char dummy;
-  if( (*ifindex_out = if_nametoindex(s)) == 0 )
-    if( sscanf(s, "%d%c", ifindex_out, &dummy) != 1 )
-      return 0;
-  return 1;
-}
-
-
 static int parse_host(const char* s, struct in_addr* ip_out)
 {
   const struct sockaddr_in* sin;
@@ -426,6 +431,7 @@ static void usage(void)
   fprintf(stderr, "  -w              - block on eventq instead of busy wait\n");
   fprintf(stderr, "  -f              - block on fd instead of busy wait\n");
   fprintf(stderr, "  -v              - use a VF\n");
+  fprintf(stderr, "  -V              - use a VPORT\n");
   fprintf(stderr, "  -p              - physical address mode\n");
   fprintf(stderr, "  -t              - disable TX push\n");
   fprintf(stderr, "\n");
@@ -433,22 +439,15 @@ static void usage(void)
 }
 
 
-#define CL_CHK(x)                               \
-  do{                                           \
-    if( ! (x) )                                 \
-      usage();                                  \
-  }while(0)
-
-
 int main(int argc, char* argv[])
 {
-  int ifindex;
+  const char* interface;
   test_t* t;
   int c;
 
   printf("# ef_vi_version_str: %s\n", ef_vi_version_str());
 
-  while( (c = getopt (argc, argv, "n:s:wfbvpta:A:")) != -1 )
+  while( (c = getopt (argc, argv, "n:s:wfbvVpta:A:")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -464,6 +463,9 @@ int main(int argc, char* argv[])
       break;
     case 'v':
       cfg_use_vf = 1;
+      break;
+    case 'V':
+      cfg_use_vport = 1;
       break;
     case 'p':
       cfg_phys_mode = 1;
@@ -488,7 +490,7 @@ int main(int argc, char* argv[])
 
   if( argc != 7 )
     usage();
-  CL_CHK(parse_interface(argv[1], &ifindex));
+  interface = argv[1];
   CL_CHK(parse_host(argv[2], &sa_local.sin_addr));
   sa_local.sin_port = htons(atoi(argv[3]));
   CL_CHK(parse_mac(argv[4], remote_mac));
@@ -508,7 +510,7 @@ int main(int argc, char* argv[])
 
   printf("# udp payload len: %d\n", cfg_payload_len);
   printf("# iterations: %d\n", cfg_iter);
-  do_init(ifindex);
+  do_init(interface);
   printf("# frame len: %d\n", tx_frame_len);
   printf("# rx align: %d\n", cfg_rx_align);
   printf("# tx align: %d\n", cfg_tx_align);

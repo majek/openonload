@@ -911,7 +911,6 @@ struct ci_netif_state_s {
 
   ci_ni_dllist_t        ready_lists[CI_CFG_N_READY_LISTS];
 #define CI_NI_READY_LIST_FLAG_WAKE   1 /* Requiest wakeup when something happens */
-#define CI_NI_READY_LIST_FLAG_RESCAN 2 /* Re-scan for events */
   ci_uint32             ready_list_flags[CI_CFG_N_READY_LISTS];
   ci_uint32             ready_lists_in_use;
 
@@ -1113,12 +1112,6 @@ typedef struct {
   /* Handover or move_fd while in epoll set */
 #define CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL 0x4000
 #define CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT 14u
-
-#ifndef NDEBUG
-  /* Listening socket about to disappear but not yet orphaned */
-#define CI_SB_AFLAG_LISTEN_CLOSING      0x8000
-#define CI_SB_AFLAG_LISTEN_CLOSING_BIT  15u
-#endif
 
 #if CI_CFG_FD_CACHING
   /* Flags which are preserved for a cached socket.  */

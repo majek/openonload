@@ -209,63 +209,6 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts, int how)
 #ifdef __KERNEL__
 #include <onload/linux_onload_internal.h>
 
-
-/* Closes a cached fd. In the typical case, this boils down to sys_close. */
-static void uncache_fd(ci_netif* ni, ci_tcp_state* ts)
-{
-  int fd  = ts->cached_on_fd;
-  int pid = ts->cached_on_pid;
-  LOG_EP(ci_log("Uncaching fd %d on pid %d running pid %d:%s", fd,
-                pid, current->tgid, current->comm));
-  /* No tasklets or other bottom-halves - we always have "current" */
-  ci_assert(current);
-  if( !(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD_BIT) &&
-       (~current->flags & PF_EXITING) ) {
-    /* If the process is exiting, there is nothing to do.
-     * Otherwise, we try to close fd. */
-    /* There is peril here.  We don't currently have the NO_FD flag set, so
-     * close the fd via the kernel - hope that the fd isn't currently being
-     * replaced.  We can't tell whether this has happened, as we can't rely
-     * on the close having completed on kernels using deferred fput.  It's
-     * probably feasible to handle this with some furtling with the fdtable,
-     * but for now we just don't handle that case.
-     */
-    /* Fixme: we re-enter timewait and restart the timer.  It is wrong.
-     * We should reuse already-calculated values which were in use before
-     * we've called ci_netif_timeout_remove() above. */
-    struct file* filp;
-
-    if( current->files != NULL ) {
-      if( pid != current->tgid ) {
-        NI_LOG(ni, RESOURCE_WARNINGS,
-               "%s: pid mismatch: cached_on_pid=%d current=%d:%s", __func__,
-               pid, current->tgid, current->comm);
-      }
-      else if( (filp = fget(fd)) == NULL ) {
-        NI_LOG(ni, RESOURCE_WARNINGS,
-               "%s: pid %d does not has cached file under fd=%d",
-               __func__, fd, pid);
-      }
-      else if( filp->f_op != &linux_tcp_helper_fops_tcp ) {
-        NI_LOG(ni, RESOURCE_WARNINGS,
-               "%s: pid %d has unexpected file under fd=%d",
-               __func__, fd, pid);
-        fput(filp);
-      }
-      else {
-        fput(filp);
-        efab_linux_sys_close(fd);
-      }
-    }
-    else {
-      /* This should not happen, as uncache_fd() must not be deferred. */
-      ci_log("%s: called from workqueue - cannot close file descriptor %d.",
-             __func__, fd);
-      ci_assert(0);
-    }
-  }
-}
-
 ci_inline void clear_cached_state(ci_tcp_state *ts)
 {
   ci_atomic32_and(&ts->s.b.sb_aflags, ~CI_SB_AFLAG_IN_CACHE);
@@ -288,7 +231,11 @@ ci_inline void clear_cached_state(ci_tcp_state *ts)
 static void uncache_ep(ci_netif *netif, ci_tcp_socket_listen* tls,
                        ci_tcp_state *ts)
 {
-  LOG_EP(ci_log("Uncaching ep %d", S_FMT(ts)));
+  int fd = ts->cached_on_fd;
+  int pid = ts->cached_on_pid;
+
+  LOG_EP(ci_log("Uncaching ep %d on pid %d running pid %d", fd,
+                pid, current->tgid));
   ci_assert( ci_tcp_is_cached(ts) );
 
   ci_ni_dllist_link_assert_valid(netif, &ts->epcache_link);
@@ -313,17 +260,62 @@ static void uncache_ep(ci_netif *netif, ci_tcp_socket_listen* tls,
 
   clear_cached_state(ts);
 
-  /* The philosophy governing uncache_fd() and uncache_ep() is that the former
-   * is called first and closes the fd, and the latter is called subsequently
-   * (perhaps having been deferred) and frees the endpoint. This would be fine,
-   * except that deferred fput() means we can't guarantee that the fd has
-   * actually been generic_tcp_helper_close()d yet, so neither can we free the
-   * state yet. We get around this by letting whichever of the two paths runs
-   * last (given that each will run precisely once) do the cleanup, and we
-   * control this using [CI_SB_AFLAG_IN_CACHE_NO_FD_BIT]. */
-  /* Fixme: what about timewait? */
-  if( ci_bit_test_and_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_IN_CACHE_NO_FD_BIT) )
-    efab_tcp_helper_close_endpoint(netif2tcp_helper_resource(netif), S_SP(ts));
+  /* No tasklets or other bottom-halves - we always have "current" */
+  ci_assert(current);
+
+  if(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) {
+    /* Already released the fd, just free endpoint */
+    /* Fixme: what about timewait? */
+    efab_tcp_helper_close_endpoint(netif2tcp_helper_resource(netif),
+                                   S_SP(ts));
+  }
+  else if( pid != current->tgid ) {
+    NI_LOG(netif, RESOURCE_WARNINGS,
+           "%s: pid mismatch: cached_on_pid=%d current=%d", __func__,
+           pid, current->tgid);
+  }
+  else if( ~current->flags & PF_EXITING ) {
+    /* If the process is exiting, there is nothing to do.
+     * Otherwise, we try to close fd. */
+    /* There is peril here.  We don't currently have the NO_FD flag set, so
+     * close the fd via the kernel - hope that the fd isn't currently being
+     * replaced.  We can't tell whether this has happened, as we can't rely
+     * on the close having completed on kernels using deferred fput.  It's
+     * probably feasible to handle this with some furtling with the fdtable,
+     * but for now we just don't handle that case.
+     *
+     * It is also possible that we are called inside another process from
+     * the stack unlock hook.
+     */
+    /* Fixme: we re-enter timewait and restart the timer.  It is wrong.
+     * We should reuse already-calculated values which were in use before
+     * we've called ci_netif_timeout_remove() above. */
+    struct file* filp;
+
+    if( current->files != NULL ) {
+      filp = fget(fd);
+      if( filp == NULL ) {
+        NI_LOG(netif, RESOURCE_WARNINGS,
+               "%s: pid %d does not has cached file under fd=%d",
+                __func__, fd, pid);
+      }
+      else if( filp->f_op != &linux_tcp_helper_fops_tcp ) {
+        NI_LOG(netif, RESOURCE_WARNINGS,
+               "%s: pid %d has unexpected file under fd=%d",
+                __func__, fd, pid);
+        fput(filp);
+      }
+      else {
+        fput(filp);
+        efab_linux_sys_close(fd);
+      }
+    }
+    else {
+      NI_LOG(netif, RESOURCE_WARNINGS,
+             "%s: called from workqueue - can not close "
+             "file descriptor %d.", __func__, fd);
+    }
+  }
 
   ci_atomic32_inc(&netif->state->cache_avail_stack);
   ci_atomic32_inc(&tls->cache_avail_sock);
@@ -335,29 +327,23 @@ static void uncache_ep(ci_netif *netif, ci_tcp_socket_listen* tls,
 }
 
 
-#define UNCACHE_LIST_FDS  0x00000001u
-#define UNCACHE_LIST_EPS  0x00000002u
 static void
 uncache_list(ci_netif *netif, ci_tcp_socket_listen* tls,
-             ci_ni_dllist_t *thelist, ci_uint32 flags)
+             ci_ni_dllist_t *thelist)
 {
   ci_ni_dllist_link *l = ci_ni_dllist_start (netif, thelist);
-  ci_assert(ci_netif_is_locked(netif) || (~flags & UNCACHE_LIST_EPS));
   while (l != ci_ni_dllist_end (netif, thelist)) {
     ci_tcp_state *cached_state = CI_CONTAINER (ci_tcp_state, epcache_link, l);
     ci_ni_dllist_iter (netif, l);
 
-    /* We don't free up cached state directly.  We call uncache_fd, which will
+    /* We don't free up cached state directly.  We call uncache_ep, which will
      * close the fd, resulting in all_fds_gone being called, and we'll tidy up
      * from there.
      */
     ci_assert(cached_state);
     ci_assert(ci_tcp_is_cached(cached_state));
     ci_ni_dllist_link_assert_valid(netif, &cached_state->epcache_link);
-    if( flags & UNCACHE_LIST_FDS )
-      uncache_fd(netif, cached_state);
-    if( flags & UNCACHE_LIST_EPS )
-      uncache_ep(netif, tls, cached_state);
+    uncache_ep(netif, tls, cached_state);
   }
 }
 
@@ -366,17 +352,14 @@ uncache_list(ci_netif *netif, ci_tcp_socket_listen* tls,
 void ci_tcp_epcache_drop_cache(ci_netif* ni)
 {
   unsigned id;
-  ci_assert(ci_netif_is_locked(ni));
   for( id = 0; id < ni->state->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
     if( wo->waitable.state == CI_TCP_LISTEN ) {
       citp_waitable* w = &wo->waitable;
       ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
       ci_tcp_socket_listen* tls = SOCK_TO_TCP_LISTEN(s);
-      uncache_list(ni, tls, &tls->epcache_pending,
-                   UNCACHE_LIST_FDS | UNCACHE_LIST_EPS);
-      uncache_list(ni, tls, &tls->epcache_cache,
-                   UNCACHE_LIST_FDS | UNCACHE_LIST_EPS);
+      uncache_list(ni, tls, &tls->epcache_pending);
+      uncache_list(ni, tls, &tls->epcache_cache);
     }
   }
 }
@@ -606,9 +589,9 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
    * cached list are uncached (and freed).
    */
   LOG_EP(ci_log("listen_shutdown - uncache all on cache list"));
-  uncache_list(netif, tls, &tls->epcache_cache, UNCACHE_LIST_EPS);
+  uncache_list(netif, tls, &tls->epcache_cache);
   LOG_EP(ci_log("listen_shutdown - uncache all on pending list"));
-  uncache_list(netif, tls, &tls->epcache_pending, UNCACHE_LIST_EPS);
+  uncache_list(netif, tls, &tls->epcache_pending);
 #endif
 }
 
@@ -649,45 +632,6 @@ void ci_tcp_listen_update_cached(ci_netif* netif, ci_tcp_socket_listen* tls)
   }
   ci_assert(ci_ni_dllist_is_valid(netif, &tls->epcache_pending.l));
 }
-
-
-/* This function closes any cached fds associated with this listening socket.
- * Compare [ci_tcp_listen_shutdown_queues], which, amongst its other duties,
- * tears down all caching state *other* than the fds. The critical thing is
- * that that function requires the stack lock, and so may be deferred, and so
- * cannot be guaranteed to run in the context of the caching process, while
- * this function does not require the lock, and so can always be run in the
- * correct context. */
-void ci_tcp_listen_uncache_fds(ci_netif* netif, ci_tcp_socket_listen* tls)
-{
-  LOG_TV(log("%s: %d uncache fds on accept queue (out of %d entries)",
-             __FUNCTION__, S_FMT(tls), ci_tcp_acceptq_n(tls)));
-
-  while( ci_tcp_acceptq_not_empty(tls) ) {
-    citp_waitable* w;
-    ci_tcp_state* ats;    /* accepted ts */
-
-    w = ci_tcp_acceptq_get(netif, tls);
-    ats = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
-
-    if( ~ats->s.b.sb_aflags & CI_SB_AFLAG_MOVED_AWAY ) {
-      ci_assert(ci_tcp_is_cached(ats) ||
-                (ats->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
-      ci_assert(ats->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-
-      if( ci_tcp_is_cached(ats) ) {
-        LOG_EP(ci_log ("%s: close cached fd from acceptq", __FUNCTION__));
-        uncache_fd(netif, ats);
-      }
-    }
-  }
-
-  LOG_EP(ci_log("%s: close all fds on cache list", __FUNCTION__));
-  uncache_list(netif, tls, &tls->epcache_cache, UNCACHE_LIST_FDS);
-  LOG_EP(ci_log("%s: close all fds on pending list", __FUNCTION__));
-  uncache_list(netif, tls, &tls->epcache_pending, UNCACHE_LIST_FDS);
-}
-
 #endif
 #endif
 

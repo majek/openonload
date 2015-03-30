@@ -88,6 +88,16 @@ struct oo_epoll1_set_home_arg {
   ci_uint32             unused_pad;
 };
 
+struct oo_epoll1_block_on_arg {
+  ci_uint64     sigmask;
+  ci_fixed_descriptor_t epoll_fd;
+  ci_uint32     timeout_ms;
+  ci_uint32     flags; /* INOUT */
+#define OO_EPOLL1_EVENT_ON_HOME  1 /* OUT */
+#define OO_EPOLL1_EVENT_ON_OTHER 2 /* OUT */
+#define OO_EPOLL1_HAS_SIGMASK    4 /* IN */
+};
+
 struct oo_epoll1_shared {
   ci_fixed_descriptor_t epfd; /**< OS epoll fd; UL should use it for
                                    closing only */
@@ -123,6 +133,13 @@ enum {
 #define OO_EPOLL1_IOC_SET_HOME_STACK \
   _IOW(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_SET_HOME_STACK, \
        struct oo_epoll1_set_home_arg)
+  OO_EPOLL1_OP_REMOVE_HOME_STACK,
+#define OO_EPOLL1_IOC_REMOVE_HOME_STACK \
+  _IO(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_REMOVE_HOME_STACK)
+  OO_EPOLL1_OP_BLOCK_ON,
+#define OO_EPOLL1_IOC_BLOCK_ON \
+  _IOWR(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_BLOCK_ON, \
+        struct oo_epoll1_block_on_arg)
 };
 
 #endif /* CI_CFG_USERSPACE_EPOLL */

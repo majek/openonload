@@ -263,8 +263,11 @@ report:
                          "flags %lx restorer %p", __func__, current->pid,
                          sig, type & OO_SIGHANGLER_TYPE_MASK, sa->sa_handler,
                          sa->sa_flags, sa->sa_restorer));
-  if( (signal_data->type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_USER)
+  if( (signal_data->type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_USER) {
     sa->sa_handler = CI_USER_PTR_GET(signal_data->handler);
+    if( ! (signal_data->flags & SA_SIGINFO) )
+      sa->sa_flags &= ~SA_SIGINFO;
+  }
   else if( ! (signal_data->type & OO_SIGHANGLER_IGN_BIT) ) {
     sa->sa_handler = SIG_DFL;
     sa->sa_flags &= ~SA_RESTORER;

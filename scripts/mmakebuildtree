@@ -116,6 +116,35 @@ do_top_level () {
     REMOTEBUILDFLAG=0
   fi
 
+  # Current jansson build does not build 32 bits library on 64 bits
+  # system so we disallow building on 32 bits all together.
+  if [ -n "$BUILD_ORM" ]; then
+    #Allow user to override by setting BUILD_ORM in their environment
+    BUILDORM=$BUILD_ORM
+  else
+    case "$PLATFORM" in
+      gnu_x86_64) BUILDORM=1;;
+      gnu_ppc64) BUILDORM=1;;
+      *) BUILDORM=0;;
+    esac
+    if [ $BUILDORM -eq 1 ] ; then
+      libtool=$(check_binary_presence libtool)
+      if [ $libtool -eq 0 ] ; then
+        BUILDORM=0
+      else
+        autoconf=$(check_binary_presence autoconf)
+        if [ $autoconf -eq 0 ] ; then
+          BUILDORM=0
+        else
+          automake=$(check_binary_presence automake)
+          if [ $automake -eq 0 ] ; then
+            BUILDORM=0
+          fi
+        fi
+      fi
+    fi
+  fi
+
   cat <<-EOF >config.mk
 	PLATFORM := $PLATFORM
 	BUILDPATH := $BUILDPATH
@@ -127,6 +156,7 @@ do_top_level () {
 	TOPPATH := $TOPPATH
 	BUILDENV := $($mmaketool --distribution)-$(gcc -dumpmachine)
 	BUILDHOST := $BUILDHOST
+	BUILDORM := $BUILDORM
 	W_NO_UNUSED_RESULT := $W_NO_UNUSED_RESULT
 	$nt
 	$kpath

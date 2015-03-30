@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201502
+%define pkgversion 201502-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -132,9 +132,9 @@ Source0		: openonload-%{pkgversion}.tgz
 BuildRoot   	: %{_builddir}/%{name}-root
 AutoReqProv	: no
 %if %{redhat}
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel} python-devel
+BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel} python-devel automake libtool autoconf
 %else
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} %{kernelsource} = %{kverrel} glibc-devel glibc %{libpcap_devel} python-devel
+BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} %{kernelsource} = %{kverrel} glibc-devel glibc %{libpcap_devel} python-devel automake libtool autoconf
 %ifarch x86_64
 %if %{build32}
 BuildRequires   : glibc-devel-32bit
@@ -180,6 +180,7 @@ Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{
 %endif
 Conflicts	: kernel-module-sfc-RHEL%{maindist}-%{kverrel}
 Provides	: openonload-kmod = %{kverrel}-%{version}-%{release}
+Provides	: sfc-kmod-symvers = %{kernel}
 AutoReqProv	: no
 
 # %define kmod_name %{name}
@@ -300,9 +301,11 @@ rm -fR $RPM_BUILD_ROOT
 %files kmod-%{kverrel}
 %defattr(744,root,root)
 /lib/modules/%{kernel}/*/*
-/usr/libexec/onload/modules
 
 %changelog
+* Thu Mar 5 2015 Kieran Mansley <kmansley@solarflare.com> 201502-u1
+- Multiple updates to fix customer issues in spec file usage
+
 * Mon May 14 2012 Mark Spender <mspender@solarflare.com> 201205
 - Added fix for MRG trace and vanilla kernel variants
 
@@ -335,7 +338,7 @@ rm -fR $RPM_BUILD_ROOT
 * Thu Aug 13 2009 Derek Whayman <Derek.Whayman@barclayscapital.com> 20090409-bc001
 - Initial version
 
-* Tue Jul 27 2009 Derek Whayman <Derek.Whayman@barclayscapital.com> 20090812-bc001
+* Mon Jul 27 2009 Derek Whayman <Derek.Whayman@barclayscapital.com> 20090812-bc001
 - New tarball from maintainer
 
 

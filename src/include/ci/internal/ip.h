@@ -1540,8 +1540,6 @@ extern void ci_tcp_listen_shutdown_queues(ci_netif* netif,
 extern void ci_tcp_epcache_drop_cache(ci_netif* ni) CI_HF;
 extern void ci_tcp_listen_update_cached(ci_netif* netif,
                                         ci_tcp_socket_listen* tls) CI_HF;
-extern void ci_tcp_listen_uncache_fds(ci_netif* netif,
-                                      ci_tcp_socket_listen* tls) CI_HF;
 #endif
 extern void __ci_tcp_listen_to_normal(ci_netif*, ci_tcp_socket_listen*) CI_HF;
 
@@ -3653,8 +3651,7 @@ ci_inline citp_waitable* ci_tcp_acceptq_get(ci_netif* ni,
 					   ci_tcp_socket_listen* tls) {
   citp_waitable* w;
   ci_assert(ci_sock_is_locked(ni, &tls->s.b) ||
-            (tls->s.b.sb_aflags &
-             (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_LISTEN_CLOSING)));
+            (tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
   ++tls->acceptq_n_out;
   if( OO_SP_IS_NULL(tls->acceptq_get) )  ci_tcp_acceptq_get_swizzle(ni, tls);
   ci_assert(OO_SP_NOT_NULL(tls->acceptq_get));

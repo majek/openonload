@@ -27,6 +27,7 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
+#include <onload/sleep.h>
 
 
 void citp_waitable_reinit(ci_netif* ni, citp_waitable* w)
@@ -455,5 +456,59 @@ void citp_waitable_wakeup(ci_netif* ni, citp_waitable* w)
 }
 
 #endif
+
+void citp_waitable_wake_not_in_poll(ci_netif* ni, citp_waitable* sb,
+                                    unsigned what)
+{
+  ci_assert(what);
+  ci_assert((what & ~(CI_SB_FLAG_WAKE_RX|CI_SB_FLAG_WAKE_TX)) == 0u);
+  ci_assert(!ni->state->in_poll);
+  ci_wmb();
+  if( what & CI_SB_FLAG_WAKE_RX )
+    ++sb->sleep_seq.rw.rx;
+  if( what & CI_SB_FLAG_WAKE_TX )
+    ++sb->sleep_seq.rw.tx;
+  ci_mb();
+
+#ifdef __KERNEL__
+  /* Normally we put an object on a ready list in ci_netif_put_on_post_poll,
+   * but in this case we don't go via there, so have to explicitly queue on
+   * the ready list here.
+   */
+  ci_ni_dllist_remove(ni, &sb->ready_link);
+  ci_ni_dllist_put(ni, &ni->state->ready_lists[sb->ready_list_id],
+                   &sb->ready_link);
+
+  if( what & sb->wake_request ) {
+    sb->sb_flags |= what;
+    citp_waitable_wakeup(ni, sb);
+  }
+
+  /* Wake the ready list too, if that's requested it. */
+  if( ni->state->ready_list_flags[sb->ready_list_id] &
+      CI_NI_READY_LIST_FLAG_WAKE )
+    efab_tcp_helper_ready_list_wakeup(netif2tcp_helper_resource(ni),
+                                      sb->ready_list_id);
+#else
+  if( what & sb->wake_request ) {
+    sb->sb_flags |= what;
+    ci_netif_put_on_post_poll(ni, sb);
+    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
+  }
+  else {
+    /* Normally we put an object on a ready list in ci_netif_put_on_post_poll,
+     * but in this case we don't go via there, so have to explicitly queue on
+     * the ready list here.
+     */
+    ci_ni_dllist_remove(ni, &sb->ready_link);
+    ci_ni_dllist_put(ni, &ni->state->ready_lists[sb->ready_list_id],
+                     &sb->ready_link);
+
+    if( ni->state->ready_list_flags[sb->ready_list_id] &
+        CI_NI_READY_LIST_FLAG_WAKE )
+      ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_NEED_WAKE);
+  }
+#endif
+}
 
 /*! \cidoxg_end */

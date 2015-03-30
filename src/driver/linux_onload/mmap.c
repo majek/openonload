@@ -326,10 +326,11 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 
   /* Linux walks VMAs on core dump, suppress the message */
   if( ~current->flags & PF_DUMPCORE )
-    CI_DEBUG(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d FAILED",
-		    __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
-		    (address - vma->vm_start) >> CI_PAGE_SHIFT,
-                    OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma))));
+    NI_LOG(&trs->netif, RESOURCE_WARNINGS,
+           "%s: %u vma=%p sz=%lx pageoff=%lx id=%d FAILED",
+           __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
+           (address - vma->vm_start) >> CI_PAGE_SHIFT,
+           OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)));
 
   return NOPAGE_SIGBUS;
 }

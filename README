@@ -110,6 +110,6 @@ Any questions?
 
 
 ==========
- version: openonload-201502
-revision: e710c66ff639 openonload-201502/openonload-201502-rc4
-    date: Fri 27 Feb 13:44:20 GMT 2015
+ version: openonload-201502-u1
+revision: 072460d08e32 (ool1502) openonload-201502-u1/openonload-201502-u1-rc2
+    date: Fri 27 Mar 10:29:56 GMT 2015

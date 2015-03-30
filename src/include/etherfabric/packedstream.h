@@ -83,8 +83,18 @@ typedef struct {
 #define EF_VI_PS_FLAG_CLOCK_IN_SYNC    0x2
 /*! \brief Set if a bad Frame Check Sequence has occurred. */
 #define EF_VI_PS_FLAG_BAD_FCS          0x4
-/*! \brief Set if a bad IP Checksum has occurred. */
-#define EF_VI_PS_FLAG_BAD_IP_CSUM      0x8
+/*! \brief Set if a layer-4 (TCP/UDP) checksum error is detected, or if a
+ * good layer-4 checksum is not detected (depending on adapter).
+ */
+#define EF_VI_PS_FLAG_BAD_L4_CSUM      0x8
+/*! \brief Set if a layer-3 (IPv4) checksum error is detected, or if a good
+ * layer-3 checksum is not detected (depending on adapter).
+ */
+#define EF_VI_PS_FLAG_BAD_L3_CSUM      0x10
+
+/* Retained for backwards compatibility.  Do not use. */
+#define EF_VI_PS_FLAG_BAD_IP_CSUM      (EF_VI_PS_FLAG_BAD_L4_CSUM |     \
+                                        EF_VI_PS_FLAG_BAD_L3_CSUM)
 
 
 /*! \brief Packed-stream mode parameters.

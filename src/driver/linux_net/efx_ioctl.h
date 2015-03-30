@@ -202,6 +202,17 @@ struct efx_reset_flags {
 		__be16	pdst;
 		__u8    tos;
 	};
+
+	struct ethtool_usrip4_spec {
+		__be32  ip4src;
+		__be32  ip4dst;
+		__be32  l4_4_bytes;
+		__u8    tos;
+		__u8    ip_ver;
+		__u8    proto;
+	};
+
+	#define ETH_RX_NFC_IP4  1
 	#define RX_CLS_FLOW_DISC	0xffffffffffffffffULL
 	#define ETHTOOL_GRXCLSRLCNT	0x0000002e
 	#define ETHTOOL_GRXCLSRULE	0x0000002f
@@ -214,6 +225,7 @@ struct efx_reset_flags {
 		struct ethtool_tcpip4_spec		tcp_ip4_spec;
 		struct ethtool_tcpip4_spec		udp_ip4_spec;
 		struct ethtool_tcpip4_spec		sctp_ip4_spec;
+		struct ethtool_usrip4_spec		usr_ip4_spec;
 		struct ethhdr				ether_spec;
 		/* unneeded members omitted... */
 		__u8					hdata[60];

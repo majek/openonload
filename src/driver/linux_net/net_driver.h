@@ -81,7 +81,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.4.1.1017"
+#define EFX_DRIVER_VERSION	"4.4.1.1021"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -123,7 +123,7 @@
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_MCDI_PROXY_AUTH)
 #define EFX_USE_MCDI_PROXY_AUTH
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,32)) && defined(CONFIG_NET_NS)
 #define EFX_USE_MCDI_PROXY_AUTH_NL
 #endif
 #endif

@@ -376,11 +376,12 @@ static void usage(void)
           "block-kernel-multicast}\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "options:\n");
-  fprintf(stderr, "  -d     hexdump received packet\n");
-  fprintf(stderr, "  -t     enable hardware timestamps\n");
-  fprintf(stderr, "  -V     allocate a virtual port\n");
-  fprintf(stderr, "  -v     enable verbose logging\n");
-  fprintf(stderr, "  -m     monitor vi error statistics\n");
+  fprintf(stderr, "  -d       hexdump received packet\n");
+  fprintf(stderr, "  -t       enable hardware timestamps\n");
+  fprintf(stderr, "  -V       allocate a virtual port\n");
+  fprintf(stderr, "  -L <vid> assign vlan id to virtual port\n");
+  fprintf(stderr, "  -v       enable verbose logging\n");
+  fprintf(stderr, "  -m       monitor vi error statistics\n");
   exit(1);
 }
 

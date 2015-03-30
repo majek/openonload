@@ -62,7 +62,7 @@ Solarflare network adapters, including:
 - Scatter gather transmit and receive
 - PCI pass-through and SR-IOV for virtualised environments.
 
-But becuase the %ef_vi API operates at this low level, any application 
+But because the %ef_vi API operates at this low level, any application 
 using it must implement the higher layer protocols itself, and also deal 
 with any exceptions or other unusual conditions.
 
@@ -74,7 +74,7 @@ virtual port on the network adapter's switch. Ef_vi can be used to handle
 all packets associated with a physical port, or just a subset. This means 
 that %ef_vi can be used in parallel with the standard Linux kernel network 
 stack and other acceleration technologies such as Solarflare's OpenOnload 
-sockets acceleration. For example, a trading application mkight use %ef_vi 
+sockets acceleration. For example, a trading application might use %ef_vi 
 to receive UDP market data, but use Onload sockets to make TCP trades.
 
 \section scalability Scalability
@@ -91,7 +91,7 @@ This section gives some examples of how %ef_vi can and is being used:
 
 \subsection sockets Sockets acceleration
 
-Ef_vi can be used to replace the BSD sockets API, other another API, for 
+Ef_vi can be used to replace the BSD sockets API, or another API, for 
 sending and receiving streams of traffic. A common example is handling 
 multicast UDP datagrams in electronic trading systems, where low latency 
 is needed and message rates can be very high.

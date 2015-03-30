@@ -788,7 +788,9 @@ static void efx_sarfs(struct efx_nic *efx,
 			keys_eq = efx_sarfs_keys_eq(&entry->key, key);
 			if (EFX_SARFS_ENTRY_NEEDS_UPDATE) {
 				efx_sarfs_insert(efx,  entry, rxq_id, key);
+#ifdef CONFIG_SFC_DEBUGFS
 				++txq->sarfs_update;
+#endif
 			}
 		}
 

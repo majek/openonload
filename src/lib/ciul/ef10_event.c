@@ -218,9 +218,10 @@ ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
       QWORD_GET_U(ESF_DZ_RX_CRC0_ERR, *ev) |
       QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev))
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_FCS;
-  if (QWORD_GET_U(ESF_DZ_RX_TCPUDP_CKSUM_ERR, *ev)  |
-      QWORD_GET_U(ESF_DZ_RX_IPCKSUM_ERR, *ev))
-    ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_IP_CSUM;
+  if (QWORD_GET_U(ESF_DZ_RX_TCPUDP_CKSUM_ERR, *ev))
+    ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_L4_CSUM;
+  if (QWORD_GET_U(ESF_DZ_RX_IPCKSUM_ERR, *ev))
+    ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_L3_CSUM;
 }
 
 

@@ -4146,16 +4146,6 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
   if( tep_p->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT )
     tcp_helper_cluster_legacy_os_close(tep_p);
 
-#if CI_CFG_FD_CACHING
-  if( SP_TO_WAITABLE(ni, ep_id)->state == CI_TCP_LISTEN ) {
-    ci_tcp_socket_listen* tls = SP_TO_TCP_LISTEN(ni, ep_id);
-#ifndef NDEBUG
-    ci_atomic32_or(&tls->s.b.sb_aflags, CI_SB_AFLAG_LISTEN_CLOSING);
-#endif
-    ci_tcp_listen_uncache_fds(ni, tls);
-  }
-#endif
-
   /*! Add ep to the list in tcp_helper_resource_t for closing
     *   - we don't increment the ref count - as we need it to reach 0 when
     * the application exits i.e. crashes (even if its holding the netif lock)
@@ -4216,12 +4206,9 @@ void generic_tcp_helper_close(ci_private_t* priv)
     fput(priv->_filp);
 
 #if CI_CFG_FD_CACHING
-  /* As a rule, we don't close the endpoint for something in the cache.  The
-   * socket will either be accepted, then freed as normal, or freed on removal
-   * from the cache or acceptq on listening socket shutdown.  (The
-   * qualification to this statement is that deferred fput() means that this
-   * path can end up being the last user of the endpoint, in which case we do
-   * close it. Compare uncache_ep().)
+  /* We don't close the endpoint for something in the cache.  The socket will
+   * either be accepted, then freed as normal, or freed on removal from the
+   * cache or acceptq on listening socket shutdown.
    *
    * The IN_CACHE flag is set with the netif lock held before adding to the
    * pending cache queue when deciding to cache.  At that point we still have
@@ -4247,9 +4234,8 @@ void generic_tcp_helper_close(ci_private_t* priv)
    * cope properly with this, just logging that it occurred.
    */
   if( (priv->fd_type == CI_PRIV_TYPE_TCP_EP) &&
-      (wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE) &&
-      ! ci_bit_test_and_set(&wo->waitable.sb_aflags,
-                            CI_SB_AFLAG_IN_CACHE_NO_FD_BIT) )  {
+      (wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE) )  {
+    ci_atomic32_or(&wo->waitable.sb_aflags, CI_SB_AFLAG_IN_CACHE_NO_FD);
     LOG_EP(ci_log("%s: %d:%d fd close while cached - not freeing endpoint",
                   __FUNCTION__, ep->thr->id, OO_SP_FMT(ep->id)));
   }
