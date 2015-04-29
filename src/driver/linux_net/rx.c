@@ -608,6 +608,7 @@ void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic)
 	struct efx_nic *efx = rx_queue->efx;
 	unsigned int fill_level, batch_size;
 	int space, rc = 0;
+	int maxcount;
 
 	if (!rx_queue->refill_enabled)
 		return;
@@ -634,7 +635,7 @@ void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic)
 		   efx_rx_queue_index(rx_queue), fill_level,
 		   rx_queue->max_fill);
 
-
+	maxcount = 2 * EFX_MAX_DMAQ_SIZE;
 	do {
 		rc = efx_init_rx_buffers(rx_queue, atomic);
 		if (unlikely(rc)) {
@@ -643,7 +644,10 @@ void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic)
 				efx_schedule_slow_fill(rx_queue);
 			goto out;
 		}
-	} while ((space -= batch_size) >= batch_size);
+		maxcount--;
+	} while (((space -= batch_size) >= batch_size) && (maxcount > 0));
+
+	WARN_ON_ONCE(maxcount<=0);
 
 	netif_vdbg(rx_queue->efx, rx_status, rx_queue->efx->net_dev,
 		   "RX queue %d fast-filled descriptor ring "
