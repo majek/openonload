@@ -360,6 +360,9 @@ void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue)
 	unsigned write_ptr;
 	efx_dword_t reg;
 
+	tx_queue->last_tx_notify_write_count = tx_queue->write_count;
+	tx_queue->last_tx_notify_push = 0;
+	ci_frc64(&tx_queue->last_tx_notify_tstamp);
 	write_ptr = tx_queue->write_count & tx_queue->ptr_mask;
 	EFX_POPULATE_DWORD_1(reg, FRF_AZ_TX_DESC_WPTR_DWORD, write_ptr);
 	efx_writed_page(tx_queue->efx, &reg,
@@ -376,6 +379,9 @@ static inline void efx_farch_push_tx_desc(struct efx_tx_queue *tx_queue,
 	BUILD_BUG_ON(FRF_AZ_TX_DESC_LBN != 0);
 	BUILD_BUG_ON(FR_AA_TX_DESC_UPD_KER != FR_BZ_TX_DESC_UPD_P0);
 
+	tx_queue->last_tx_notify_write_count = tx_queue->write_count;
+	tx_queue->last_tx_notify_push = 1;
+	ci_frc64(&tx_queue->last_tx_notify_tstamp);
 	write_ptr = tx_queue->write_count & tx_queue->ptr_mask;
 	EFX_POPULATE_OWORD_2(reg, FRF_AZ_TX_DESC_PUSH_CMD, true,
 			     FRF_AZ_TX_DESC_WPTR, write_ptr);
@@ -956,6 +962,8 @@ efx_farch_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 		tx_ev_q_label = EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_Q_LABEL);
 		tx_queue = efx_channel_get_tx_queue(
 			channel, tx_ev_q_label % EFX_TXQ_TYPES);
+		tx_queue->last_tx_comp_index = tx_ev_desc_ptr;
+		ci_frc64(&tx_queue->last_tx_comp_tstamp);
 		tx_descs = ((tx_ev_desc_ptr + 1 - tx_queue->read_count) &
 			    tx_queue->ptr_mask);
 		efx_xmit_done(tx_queue, tx_ev_desc_ptr);
@@ -1788,6 +1796,8 @@ irqreturn_t efx_farch_msi_interrupt(int irq, void *dev_id,
 	struct efx_nic *efx = context->efx;
 	efx_oword_t *int_ker = efx->irq_status.addr;
 	int syserr;
+
+	ci_frc64(&efx->channel[context->index]->last_irq_tstamp);
 
 	netif_vdbg(efx, intr, efx->net_dev,
 		   "IRQ %d on CPU %d status " EFX_OWORD_FMT "\n",

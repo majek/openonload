@@ -3034,6 +3034,7 @@ static int efx_ef10_ev_process(struct efx_channel *channel, int quota)
 		switch (ev_code) {
 		case ESE_DZ_EV_CODE_RX_EV:
 			spent += efx_ef10_handle_rx_event(channel, &event);
+			ci_frc64(&channel->handle_rx_tstamp);
 			if (spent >= quota) {
 				/* XXX can we split a merged event to
 				 * avoid going over-quota?
@@ -3044,6 +3045,7 @@ static int efx_ef10_ev_process(struct efx_channel *channel, int quota)
 			break;
 		case ESE_DZ_EV_CODE_TX_EV:
 			tx_descs += efx_ef10_handle_tx_event(channel, &event);
+			ci_frc64(&channel->handle_tx_tstamp);
 			if (tx_descs > efx->txq_entries) {
 				spent = quota;
 				goto out;
@@ -3053,14 +3055,17 @@ static int efx_ef10_ev_process(struct efx_channel *channel, int quota)
 			break;
 		case ESE_DZ_EV_CODE_MCDI_EV:
 			efx_mcdi_process_event(channel, &event);
+			ci_frc64(&channel->handle_mcdi_tstamp);
 			break;
 		case ESE_DZ_EV_CODE_DRIVER_EV:
 			efx_ef10_handle_driver_event(channel, &event);
+			ci_frc64(&channel->handle_driver_tstamp);
 			if (++spent == quota)
 				goto out;
 			break;
 		case EFX_EF10_DRVGEN_EV:
 			efx_ef10_handle_driver_generated_event(channel, &event);
+			ci_frc64(&channel->handle_drvgen_tstamp);
 			break;
 		default:
 			EFX_FATAL(efx, hw, efx->net_dev,
