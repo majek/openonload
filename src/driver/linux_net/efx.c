@@ -400,6 +400,13 @@ static int efx_check_disabled(struct efx_nic *efx)
  *
  *************************************************************************/
 
+inline void ci_frc64(uint64_t* pval) {
+        /* temp fix until we figure how to get this out in one bite */
+        uint64_t low, high;
+        __asm__ __volatile__("rdtsc" : "=a" (low) , "=d" (high));
+        *pval = (high << 32) | low;
+}
+
 /* Process channel's event queue
  *
  * This function is responsible for processing the event queue of a
@@ -495,6 +502,8 @@ static int efx_poll(struct net_device *dev, int *budget_ret)
 	if (!efx_channel_lock_napi(channel))
 		return budget;
 
+	ci_frc64(&channel->last_napi_entry_tstamp);
+
 	netif_vdbg(efx, intr, efx->net_dev,
 		   "channel %d NAPI poll executing on CPU %d\n",
 		   channel->channel, raw_smp_processor_id());
@@ -504,7 +513,7 @@ static int efx_poll(struct net_device *dev, int *budget_ret)
 	dev->quota -= spent;
 	*budget_ret -= spent;
 #endif
-
+	ci_frc64(&channel->last_channel_process_complete_tstamp);
 	if (spent < budget) {
 		if (efx_channel_has_rx_queue(channel) &&
 		    efx->irq_rx_adaptive &&
@@ -539,6 +548,7 @@ static int efx_poll(struct net_device *dev, int *budget_ret)
 	}
 
 	efx_channel_unlock_napi(channel);
+	ci_frc64(&channel->last_napi_exit_tstamp);
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_OLD_NAPI)
 	return spent;
 #else
@@ -3339,6 +3349,63 @@ struct net_device_stats *efx_net_stats(struct net_device *net_dev)
 	return stats;
 }
 
+void efx_tx_stuck_channel_info(struct efx_nic *efx)
+{
+	struct efx_channel *channel;
+	uint64_t now;
+
+	ci_frc64(&now);
+	netif_info(efx, drv, efx->net_dev, "now: %llu\n", now);
+	efx_for_each_channel(channel, efx) {
+		struct efx_tx_queue *txq;
+
+		netif_info(efx, drv, efx->net_dev, "__ channel %u __\n",
+			   channel->channel);
+		efx_for_each_channel_tx_queue(txq, channel) {
+			netif_info(efx, drv, efx->net_dev,
+				   "tx: ins %u, wri %u, read %u\n",
+				   txq->insert_count, txq->write_count,
+				   txq->read_count);
+			netif_info(efx, drv, efx->net_dev,
+				   "last tx: notify %u @ %llu (push %u), "
+				   "comp %u @ %llu\n",
+				   txq->last_tx_notify_write_count,
+				   txq->last_tx_notify_tstamp,
+				   txq->last_tx_notify_push,
+				   txq->last_tx_comp_index,
+				   txq->last_tx_comp_tstamp);
+		}
+		netif_info(efx, drv, efx->net_dev,
+			   "last: irq %llu, napi entry %llu, exit %llu\n",
+			   channel->last_irq_tstamp,
+			   channel->last_napi_entry_tstamp,
+			   channel->last_napi_exit_tstamp);
+		netif_info(efx, drv, efx->net_dev,
+			   "NAPI poll: process complete %llu\n",
+			   channel->last_channel_process_complete_tstamp);
+		netif_info(efx, drv, efx->net_dev,
+			   "last ev: pre-rx %llu, post-rx %llu\n",
+			   channel->handle_rx1_tstamp,
+			   channel->handle_rx2_tstamp);
+		netif_info(efx, drv, efx->net_dev,
+			   "         pre-tx %llu, post-tx %llu\n",
+			   channel->handle_tx1_tstamp,
+			   channel->handle_tx2_tstamp);
+		netif_info(efx, drv, efx->net_dev,
+			   "         pre-mcdi %llu, post-mcdi %llu\n",
+			   channel->handle_mcdi1_tstamp,
+			   channel->handle_mcdi2_tstamp);
+		netif_info(efx, drv, efx->net_dev,
+			   "         pre-driver %llu, post-driver %llu\n",
+			   channel->handle_driver1_tstamp,
+			   channel->handle_driver2_tstamp);
+		netif_info(efx, drv, efx->net_dev,
+			   "         pre-drvgen %llu, post-drvgen %llu\n",
+			   channel->handle_drvgen1_tstamp,
+			   channel->handle_drvgen2_tstamp);
+	}
+}
+
 /* Context: netif_tx_lock held, BHs disabled. */
 void efx_watchdog(struct net_device *net_dev)
 {
@@ -3347,6 +3414,8 @@ void efx_watchdog(struct net_device *net_dev)
 	netif_err(efx, tx_err, efx->net_dev,
 		  "TX stuck with port_enabled=%d: resetting channels\n",
 		  efx->port_enabled);
+
+	efx_tx_stuck_channel_info(efx);
 
 	efx_schedule_reset(efx, RESET_TYPE_TX_WATCHDOG);
 }
