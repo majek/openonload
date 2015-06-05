@@ -65,11 +65,6 @@ ci_inline int ci_tcp_listenq_hash2idx(ci_uint32 hash, int level)
       ((1 << CI_TCP_LISTEN_BUCKET_S) - 1);
 }
 
-ci_inline ci_ni_aux_mem*
-ci_tcp_listenq_p2aux(ci_netif* ni, oo_p p)
-{
-  return (void*)CI_NETIF_PTR(ni, p);
-}
 ci_inline ci_tcp_listen_bucket*
 ci_tcp_listenq_p2bucket(ci_netif* ni, oo_p p)
 {
@@ -77,7 +72,6 @@ ci_tcp_listenq_p2bucket(ci_netif* ni, oo_p p)
 }
 
 
-#ifdef __KERNEL__
 static int
 ci_tcp_listenq_bucket_drop(ci_netif* ni, ci_tcp_listen_bucket* bucket)
 {
@@ -107,14 +101,15 @@ ci_tcp_listenq_bucket_drop(ci_netif* ni, ci_tcp_listen_bucket* bucket)
       } while( OO_P_NOT_NULL(tsr_p) );
     }
   }
+  ci_ni_aux_free(ni, CI_CONTAINER(ci_ni_aux_mem, u.bucket, bucket));
 
   return ret;
 }
-#endif
 
 
 static void
-ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_listen_bucket* bucket,
+ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
+                             ci_tcp_listen_bucket* bucket,
                              ci_tcp_state_synrecv* tsr, int level)
 {
   ci_ni_aux_mem* aux;
@@ -135,7 +130,7 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   level++;
   aux = ci_tcp_listenq_p2aux(ni, bucket->bucket[idx]);
   if( aux->type == CI_TCP_AUX_TYPE_BUCKET ) {
-    ci_tcp_listenq_bucket_insert(ni, &aux->u.bucket, tsr, level);
+    ci_tcp_listenq_bucket_insert(ni, tls, &aux->u.bucket, tsr, level);
     return;
   }
 
@@ -151,12 +146,13 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_listen_bucket* bucket,
 
   bucket->bucket[idx] = ni->state->free_aux_mem;
   bucket = ci_tcp_bucket_alloc(ni);
+  tls->n_buckets++;
 
   while( OO_P_NOT_NULL(tsr_p) ) {
     tsr = &ci_tcp_listenq_p2aux(ni, tsr_p)->u.synrecv;
 #ifdef __KERNEL__
     if( i++ > CI_LISTENQ_BUCKET_LIST_LIMIT(ni) ) {
-      ci_tcp_listenq_bucket_insert(ni, bucket, tsr, level);
+      ci_tcp_listenq_bucket_insert(ni, tls, bucket, tsr, level);
       ci_netif_error_detected(ni, CI_NETIF_ERROR_SYNRECV_TABLE,
                               __FUNCTION__);
       return;
@@ -164,13 +160,14 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_listen_bucket* bucket,
 #endif
     tsr_p = tsr->bucket_link;
     tsr->bucket_link = OO_P_NULL;
-    ci_tcp_listenq_bucket_insert(ni, bucket, tsr, level);
+    ci_tcp_listenq_bucket_insert(ni, tls, bucket, tsr, level);
   }
 }
 
 /* Return 1 if the bucket is empty now */
 static int
-ci_tcp_listenq_bucket_remove(ci_netif* ni, ci_tcp_listen_bucket* bucket,
+ci_tcp_listenq_bucket_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
+                             ci_tcp_listen_bucket* bucket,
                              ci_tcp_state_synrecv* tsr, int level)
 {
   ci_ni_aux_mem* aux;
@@ -204,10 +201,11 @@ ci_tcp_listenq_bucket_remove(ci_netif* ni, ci_tcp_listen_bucket* bucket,
   level++;
   aux = ci_tcp_listenq_p2aux(ni, bucket->bucket[idx]);
   if( aux->type == CI_TCP_AUX_TYPE_BUCKET ) {
-    empty = ci_tcp_listenq_bucket_remove(ni, &aux->u.bucket, tsr, level);
+    empty = ci_tcp_listenq_bucket_remove(ni, tls, &aux->u.bucket, tsr, level);
     if( empty ) {
       bucket->bucket[idx] = OO_P_NULL;
       ci_ni_aux_free(ni, aux);
+      tls->n_buckets--;
     }
   }
   else {
@@ -321,14 +319,12 @@ ci_tcp_listen_timer_set(ci_netif* ni, ci_tcp_socket_listen* tls,
 }
 
 
-#ifdef __KERNEL__
 int ci_tcp_listenq_drop_all(ci_netif* ni, ci_tcp_socket_listen* tls)
 {
   return
       ci_tcp_listenq_bucket_drop(ni,
                                  ci_tcp_listenq_p2bucket(ni, tls->bucket));
 }
-#endif
 
 void ci_tcp_listenq_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
                            ci_tcp_state_synrecv* tsr)
@@ -337,7 +333,8 @@ void ci_tcp_listenq_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
 
   tls->n_listenq++;
 
-  ci_tcp_listenq_bucket_insert(ni, ci_tcp_listenq_p2bucket(ni, tls->bucket),
+  ci_tcp_listenq_bucket_insert(ni, tls,
+                               ci_tcp_listenq_p2bucket(ni, tls->bucket),
                                tsr, 0);
 
   if( OO_SP_NOT_NULL(tsr->local_peer) )
@@ -361,7 +358,8 @@ void ci_tcp_listenq_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
   ci_assert(tsr);
   ci_assert(tls);
 
-  ci_tcp_listenq_bucket_remove(ni, ci_tcp_listenq_p2bucket(ni, tls->bucket),
+  ci_tcp_listenq_bucket_remove(ni, tls,
+                               ci_tcp_listenq_p2bucket(ni, tls->bucket),
                                tsr, 0);
   if( OO_SP_IS_NULL(tsr->local_peer) ) {
     ci_ni_dllist_remove(ni, ci_tcp_synrecv2link(tsr));

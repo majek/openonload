@@ -120,6 +120,7 @@ struct efch_pio_alloc {
 #define EFCH_PD_FLAG_PHYS_ADDR        0x4
 #define EFCH_PD_FLAG_RX_PACKED_STREAM 0x8
 #define EFCH_PD_FLAG_VPORT            0x10
+#define EFCH_PD_FLAG_MCAST_LOOP       0x20
 
 
 struct efch_pd_alloc {

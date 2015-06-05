@@ -590,6 +590,15 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     u = (s->b.state & CI_TCP_STATE_TCP) ? SOCK_STREAM : SOCK_DGRAM;
     goto u_out;
 
+#ifdef SO_PROTOCOL
+  case SO_PROTOCOL:
+    /* get protocol type - mapped from socket type */
+    ci_assert((s->b.state & CI_TCP_STATE_TCP) ||
+	      s->b.state == CI_TCP_STATE_UDP);
+    u = (s->b.state & CI_TCP_STATE_TCP) ? IPPROTO_TCP : IPPROTO_UDP;
+    goto u_out;
+#endif
+
 
   case SO_DONTROUTE:
     /* don't send via gateway, only directly connected machine */

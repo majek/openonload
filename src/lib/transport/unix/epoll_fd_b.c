@@ -457,12 +457,24 @@ static int citp_epollb_ctl_do(citp_fdinfo* fdi, citp_fdinfo *fd_fdi,
     rc = ci_sys_ioctl(fdi->fd, OO_EPOLL2_IOC_ACTION, &op);
     citp_epollb_postpone_syscall_post(epi, epi->kepfd == -1 ? rc : 0);
     if( rc2 == -ENOMEM ) {
-      rc2 = citp_epollb_postpone(epi, fd_fdi, eop, fd, event, NULL);
+      if( fd_fdi ) {
+        rc2 = citp_epollb_postpone(epi, fd_fdi, eop, fd, event, NULL);
 
-      /* postponed arrray was just cleaned up,
-       * so we do not expect errors */
-      ci_assert_nequal(rc2, -ENOMEM);
-      op.rc = rc2;
+        /* postponed arrray was just cleaned up,
+         * so we do not expect errors */
+        ci_assert_nequal(rc2, -ENOMEM);
+        op.rc = rc2;
+      }
+      /* This is not an onloaded fd, so we can't postpone */
+      else if( op.kepfd ) {
+        op.rc = ci_sys_epoll_ctl(op.kepfd, eop, fd, event);
+      }
+      else {
+        /* We hadn't got kepfd, and our ioctl didn't get us one, not a lot
+         * we can do here.
+         */
+        ci_assert_le(rc, 0);
+      }
     }
     else
       op.rc = rc2;

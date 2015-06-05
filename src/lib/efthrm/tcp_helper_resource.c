@@ -772,8 +772,23 @@ int tcp_helper_vi_hw_stack_id(tcp_helper_resource_t* trs, int hwport)
 {
   int intf_i;
   ci_assert_lt((unsigned) hwport, CI_CFG_MAX_REGISTER_INTERFACES);
-  if( (intf_i = trs->netif.hwport_to_intf_i[hwport]) >= 0 )
-    return efrm_vi_get_hw_stack_id(trs->nic[intf_i].vi_rs);
+  if( (intf_i = trs->netif.hwport_to_intf_i[hwport]) >= 0 ) {
+    struct efrm_vi* vi = trs->nic[intf_i].vi_rs;
+    struct efrm_pd* pd = efrm_vi_pd_get(vi);
+    return efrm_pd_stack_id_get(pd);
+  }
+  else
+    return -1;
+}
+
+
+int tcp_helper_cluster_vi_hw_stack_id(tcp_helper_cluster_t* thc, int hwport)
+{
+  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_REGISTER_INTERFACES);
+  if( thc->thc_vi_set[hwport] != NULL ) {
+    struct efrm_pd* pd = efrm_vi_set_get_pd(thc->thc_vi_set[hwport]);
+    return efrm_pd_stack_id_get(pd);
+  }
   else
     return -1;
 }
@@ -1053,6 +1068,7 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     int release_pd = 0;
     enum efrm_vi_alloc_failure error_reason;
     int try_rx_ts, try_tx_ts, retry_without_rx_ts, retry_without_tx_ts;
+    int tx_mcast_loop = 0;
 
     ci_assert(trs_nic->vi_rs == NULL);
     ci_assert(trs_nic->oo_nic != NULL);
@@ -1068,13 +1084,12 @@ static int allocate_vi(tcp_helper_resource_t* trs,
     } else {
       in_flags &= ~EFHW_VI_RX_LOOPBACK;
     }
-    if( (nic->flags & NIC_FLAG_MCAST_LOOP_HW) &&
-        (NI_OPTS(ni).mcast_send & CITP_MCAST_SEND_FLAG_EXT) ) {
-      vi_flags |= EF_VI_TX_LOOPBACK;
+    tx_mcast_loop = (nic->flags & NIC_FLAG_MCAST_LOOP_HW) &&
+        (NI_OPTS(ni).mcast_send & CITP_MCAST_SEND_FLAG_EXT);
+    if( tx_mcast_loop ) {
       in_flags |= EFHW_VI_TX_LOOPBACK;
       nsn->oo_vi_flags |= OO_VI_FLAGS_TX_HW_LOOPBACK_EN;
     } else {
-      vi_flags &= ~EF_VI_TX_LOOPBACK;
       in_flags &= ~EFHW_VI_TX_LOOPBACK;
       nsn->oo_vi_flags &= ~OO_VI_FLAGS_TX_HW_LOOPBACK_EN;
     }
@@ -1120,7 +1135,8 @@ static int allocate_vi(tcp_helper_resource_t* trs,
 
     if( thc == NULL ) {
       rc = efrm_pd_alloc(&pd, trs_nic->oo_nic->efrm_client, vf,
-                         !!(vi_flags & EF_VI_RX_PHYS_ADDR));
+        ((vi_flags & EF_VI_RX_PHYS_ADDR) ? EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE : 0)|
+        (tx_mcast_loop ? EFRM_PD_ALLOC_FLAG_HW_LOOPBACK : 0) );
 #ifdef CONFIG_SFC_RESOURCE_VF
       if( vf != NULL )
         efrm_vf_resource_release(vf); /* pd keeps a ref to vf */
@@ -1225,6 +1241,7 @@ again:
     ef_vi_init_rxq(vi, vm->rxq_size, vm->rxq_descriptors, vi_ids, vm->rxq_prefix_len);
     vi_ids += vm->rxq_size;
     ef_vi_init_txq(vi, vm->txq_size, vm->txq_descriptors, vi_ids);
+    vi->vi_i = nsn->vi_instance;
     ef_vi_init_state(&ni->nic_hw[intf_i].vi);
     ef_vi_set_stats_buf(&ni->nic_hw[intf_i].vi, &ni->state->vi_stats);
 
@@ -1307,7 +1324,11 @@ static void release_pkts(tcp_helper_resource_t* trs)
   unsigned i;
   int intf_i;
 
-  /* Release packets */
+  /* Assert that there is no packet leak and release packets */
+  if( trs->netif.state->lock.lock & CI_EPLOCK_UNLOCKED ) {
+    ci_assert_equal(ni->state->n_pkts_allocated,
+                    ni->pkt_sets_n << CI_CFG_PKTS_PER_SET_S);
+  }
   for (i = 0; i < ni->pkt_sets_n; i++) {
     ci_assert(ni->buf_pages[i]);
     OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
@@ -1368,6 +1389,35 @@ static void release_vi(tcp_helper_resource_t* trs)
     tcp_helper_cluster_release(trs->thc, trs);
 }
 
+
+static void alloc_aux_bufs(ci_netif* ni)
+{
+  int i;
+    
+  ni->state->free_aux_mem = OO_P_NULL;
+  for( i = 0;
+       ni->state->aux_ofs + i * sizeof(ci_ni_aux_mem) < ni->state->ep_ofs;
+       ++i ) {
+    ci_ni_aux_mem* aux =
+            (ci_ni_aux_mem*)((char*) ni->state + ni->state->aux_ofs) + i;
+    ci_ni_dllist_link_init(ni, &aux->link,
+                           oo_ptr_to_statep(ni, &aux->link), "faux");
+    ci_ni_aux_free(ni, aux);
+  }
+  ni->state->n_free_aux_bufs = i;
+  ci_assert_equal(i, CI_NI_AUX_BUFS_MAX(ni));
+}
+
+static void release_check_aux_bufs(ci_netif* ni)
+{
+  ci_uint32 n_aux_bufs = CI_NI_AUX_BUFS_MAX(ni);
+
+  ci_assert_equal(ni->state->n_free_aux_bufs, n_aux_bufs);
+  if( ni->state->n_free_aux_bufs != n_aux_bufs )
+    ci_log("%s[%d]: leaked %d aux bufs from %d", __func__, NI_ID(ni),
+           n_aux_bufs - ni->state->n_free_aux_bufs, n_aux_bufs);
+
+}
 
 static int
 allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
@@ -1503,13 +1553,7 @@ allocate_netif_resources(ci_resource_onload_alloc_t* alloc,
   ni->filter_table = (void*) ((char*) ns + ns->table_ofs);
 
   /* Initialize the free list of synrecv/aux bufs */
-  ns->free_aux_mem = OO_P_NULL;
-  for( i = 0; ns->aux_ofs + i * sizeof(ci_ni_aux_mem) < ns->ep_ofs; ++i ) {
-    ci_ni_aux_mem* aux = (ci_ni_aux_mem*)((char*) ns + ns->aux_ofs) + i;
-    ci_ni_dllist_link_init(ni, &aux->link,
-                           oo_ptr_to_statep(ni, &aux->link), "faux");
-    ci_ni_aux_free(ni, aux);
-  }
+  alloc_aux_bufs(ni);
 
   /* The shared netif-state buffer and EP buffers are part of the mem mmap */
   trs->mem_mmap_bytes += ns->netif_mmap_bytes;
@@ -1690,7 +1734,6 @@ release_ep_tbl(tcp_helper_resource_t* trs)
     ni->ep_tbl = NULL;
   }
 }
-
 
 static void
 release_netif_resources(tcp_helper_resource_t* trs)
@@ -2891,15 +2934,15 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
      * There are some cases when we fail to send FIN to passively-opened
      * connection: reset such connections. */
     if( w->state & CI_TCP_STATE_CAN_FIN ) {
-#ifndef NDEBUG
-      /* It is normal for EF_TCP_SERVER_LOOPBACK=2 if client closes
-       * loopback connection before it is accepted.
-       * Do not scare users unless they want to be scared:
-       * keep this under #ifndef NDEBUG. */
-      OO_DEBUG_ERR(ci_log("%s: %d:%d in %s state when stack is closed",
-                   __func__, trs->id, i, ci_tcp_state_str(w->state)));
-#endif
+      if( OO_SP_IS_NULL(wo->tcp.local_peer) ) {
+        /* It is normal for EF_TCP_SERVER_LOOPBACK=2,4 if client closes
+         * loopback connection before it is accepted. */
+        OO_DEBUG_ERR(ci_log("%s: %d:%d in %s state when stack is closed",
+                     __func__, trs->id, i, ci_tcp_state_str(w->state)));
+      }
       ci_tcp_send_rst(netif, &wo->tcp);
+      if( OO_SP_NOT_NULL(wo->tcp.local_peer) )
+        ci_netif_poll(netif); /* push RST through the stack */
       ci_tcp_drop(netif, &wo->tcp, ECONNRESET);
       continue;
     }
@@ -3030,6 +3073,10 @@ void tcp_helper_dtor(tcp_helper_resource_t* trs)
      * us to block.
      */
     efab_tcp_helper_rm_reset_untrusted(trs);
+  else
+    /* release_check_aux_bufs just checks for aux bufs leak; there is no
+     * sense in calling it with wedged shared state. */
+    release_check_aux_bufs(&trs->netif);
 
 #ifndef NDEBUG
   /* We are the only user of this stack, so we can grab the lock.

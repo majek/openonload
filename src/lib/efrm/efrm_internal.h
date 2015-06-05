@@ -38,6 +38,21 @@ struct efrm_client {
 };
 
 
+static inline int ci_ffs64(uint64_t x)
+{
+#if BITS_PER_LONG == 64
+	return __builtin_ffsll(x);
+#else
+	uint32_t l = (uint32_t)x;
+	uint32_t h;
+	if (l) 
+		return ffs(l);
+	h = (uint32_t)(x >> 32);
+	return ffs(h)+32;
+#endif
+}
+
+
 /* Only for resources not associated with specific NIC. */
 extern void efrm_resource_manager_add_resource(struct efrm_resource *);
 

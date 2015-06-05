@@ -51,13 +51,22 @@ void efx_watchdog(struct net_device *net_dev);
 int efx_change_mtu(struct net_device *net_dev, int new_mtu);
 int efx_set_mac_address(struct net_device *net_dev, void *data);
 void efx_set_rx_mode(struct net_device *net_dev);
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES)
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES) || defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
-netdev_features_t efx_fix_features(struct net_device *net_dev,
-				   netdev_features_t data);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES)
+netdev_features_t efx_fix_features(struct net_device *net_dev, netdev_features_t data);
+#else
+u32 efx_fix_features(struct net_device *net_dev, u32 data);
 #endif
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES)
 int efx_set_features(struct net_device *net_dev, netdev_features_t data);
+#else
+int efx_set_features(struct net_device *net_dev, u32 data);
 #endif
+#endif
+
 #ifdef CONFIG_NET_RX_BUSY_POLL
 int efx_busy_poll(struct napi_struct *napi);
 #endif
@@ -144,6 +153,15 @@ void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue);
  */
 #define EFX_BW_PCIE_GEN1_X8 (8 << (1 - 1))
 #define EFX_BW_PCIE_GEN2_X8 (8 << (2 - 1))
+
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
+extern bool efx_rss_enabled(const struct efx_nic *efx);
+#else
+static inline bool efx_rss_enabled(struct efx_nic *efx)
+{
+	return efx->n_rss_channels > 1;
+}
+#endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 
@@ -366,6 +384,9 @@ extern int efx_target_num_vis;
 
 void efx_stop_eventq(struct efx_channel *channel);
 void efx_start_eventq(struct efx_channel *channel);
+
+void efx_pause_napi(struct efx_nic *efx);
+int efx_resume_napi(struct efx_nic *efx);
 
 /* Dummy PHY ops for PHY drivers */
 int efx_void_dummy_op_int(void);

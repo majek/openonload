@@ -75,13 +75,10 @@ static int ci_tcp_validate_sa( sa_family_t domain,
 
   /* It should be sa->sa_family, but MS wdm does not understand it,
    * so let's use CI_SIN(sa)->sin_family. */
-  if (CI_SIN(sa)->sin_family != domain 
-#if !CI_CFG_REQUIRE_SOCKADDR_FAM
-      && CI_SIN(sa)->sin_family != AF_UNSPEC
-#endif
-      ) {
+  if (CI_SIN(sa)->sin_family != domain && 
+      CI_SIN(sa)->sin_family != AF_UNSPEC) {
     LOG_U(ci_log(LPF "address family %d does not match "
-                  "with socket domain %d", CI_SIN(sa)->sin_family, domain));
+                 "with socket domain %d", CI_SIN(sa)->sin_family, domain));
     RET_WITH_ERRNO(EAFNOSUPPORT);
   }
 
@@ -700,6 +697,7 @@ static int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
     return -ENOBUFS;
   tls->bucket = ni->state->free_aux_mem;
   ci_tcp_bucket_alloc(ni);
+  tls->n_buckets = 1;
 
   /* Initialise the listenQ. */
   for( i = 0; i <= CI_CFG_TCP_SYNACK_RETRANS_MAX; ++i ) {
@@ -726,6 +724,10 @@ static int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
   sp = TS_OFF(ni, tls);
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_connected));
   ci_ni_dllist_init(ni, &tls->epcache_connected, sp, "epco");
+
+  sp = TS_OFF(ni, tls);
+  OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, epcache_fd_states));
+  ci_ni_dllist_init(ni, &tls->epcache_fd_states, sp, "ecfd");
 
   tls->cache_avail_sock = ni->state->opts.per_sock_cache_max;
 #endif
@@ -818,6 +820,7 @@ int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
   if( !ci_tcp_acceptq_not_empty(tls) ) {
     /* it is possible, for example, if ci_tcp_listenq_try_promote() failed
      * because there are no endpoints */
+    ci_tcp_listenq_drop_all(c_ni, tls);
     citp_waitable_obj_free(c_ni, &tls->s.b);
     ci_netif_unlock(c_ni);
     return -EBUSY;
@@ -839,6 +842,7 @@ int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
    * shutdown.
    */
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
+  ci_tcp_listenq_drop_all(c_ni, tls);
   citp_waitable_obj_free(c_ni, &tls->s.b);
   ci_netif_unlock(c_ni);
 
@@ -1191,7 +1195,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
     VERB(ci_log("%s: set_filters  returned %d", __FUNCTION__, rc));
     if (rc < 0) {
       CI_SET_ERROR(rc, -rc);
-      goto listen_fail;
+      goto post_listen_fail;
     }
   }
 
@@ -1212,10 +1216,12 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   if ( rc < 0 ) {
     /* clear the filter we've just set */
     ci_tcp_ep_clear_filters(netif, S_SP(tls), 0);
-    goto listen_fail;
+    goto post_listen_fail;
   }
   return 0;
 
+ post_listen_fail:
+  ci_tcp_listenq_drop_all(netif, tls);
  listen_fail:
   /* revert TCP state to a non-listening socket format */
   __ci_tcp_listen_to_normal(netif, tls);
@@ -1266,7 +1272,7 @@ int ci_tcp_shutdown(citp_socket* ep, int how, ci_fd_t fd)
   if( SOCK_TO_TCP(s)->snd_delegated ) {
     /* We do not know which seq number to use.  Call
      * onload_delegated_send_cancel(). */
-    CI_SET_ERROR(rc, -EBUSY);
+    CI_SET_ERROR(rc, EBUSY);
     return rc;
   }
 

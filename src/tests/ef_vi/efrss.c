@@ -125,6 +125,7 @@ static ef_vi_set          vi_set;
 static struct vi* vis;
 static struct pkt_bufs pbs;
 static int cfg_hexdump;
+static int cfg_loopback;
 
 
 /**********************************************************************/
@@ -304,7 +305,9 @@ static int init_vi_set(const char* intf, int n_threads)
   ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_unicast_all(&fs));
   TRY(ef_vi_set_filter_add(&vi_set, dh, &fs, NULL));
-  ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
+  ef_filter_spec_init(&fs, cfg_loopback ?
+                      EF_FILTER_FLAG_MCAST_LOOP_RECEIVE :
+                      EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_multicast_all(&fs));
   TRY(ef_vi_set_filter_add(&vi_set, dh, &fs, NULL));
   return 0;
@@ -375,6 +378,7 @@ static void usage(void)
   fprintf(stderr, "\n");
   fprintf(stderr, "options:\n");
   fprintf(stderr, "  -d     hexdump received packet\n");
+  fprintf(stderr, "  -b     enable receive from mcast loopback\n");
   exit(1);
 }
 
@@ -386,10 +390,13 @@ int main(int argc, char* argv[])
   int i, n_threads;
   int c;
 
-  while( (c = getopt(argc, argv, "d")) != -1 )
+  while( (c = getopt(argc, argv, "db")) != -1 )
     switch( c ) {
     case 'd':
       cfg_hexdump = 1;
+      break;
+    case 'b':
+      cfg_loopback = 1;
       break;
     case '?':
       usage();

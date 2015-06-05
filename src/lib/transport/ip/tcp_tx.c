@@ -427,7 +427,7 @@ ci_inline void
 ci_tcp_tx_set_urg_ptr(ci_tcp_state* ts, ci_netif* netif, ci_tcp_hdr* tcp)
 {
   /*! \TODO: this test could be removed from the fast path */
-  if(CI_LIKELY( SEQ_GE(tcp_snd_nxt(ts), tcp_snd_up(ts)) )) {
+  if(CI_LIKELY( SEQ_GE(tcp_snd_nxt(ts) + ts->snd_delegated, tcp_snd_up(ts)) )) {
     tcp_snd_up(ts) = tcp_snd_una(ts);
   }
   else {
@@ -643,6 +643,7 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
   pkt->pf.tcp_tx.start_seq = tcp_enq_nxt(ts);
   tcp_enq_nxt(ts) += 1;
   pkt->pf.tcp_tx.end_seq = tcp_enq_nxt(ts);
+  pkt->pf.tcp_tx.block_end = OO_PP_NULL;
 
   ci_ip_queue_enqueue(netif, &ts->send, pkt);
   ++ts->send_in;
@@ -1147,8 +1148,6 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
   unsigned cwnd_right_edge;
   int paylen, sent_num = 0;
   oo_pkt_p id;
-  int tx_space = ci_tcp_tx_advertise_space(ni, ts);
-  int tx_prequeue = oo_atomic_read(&ts->send_prequeue_in);
 
   ci_assert(ci_netif_is_locked(ni));
   ci_assert(ci_ip_queue_not_empty(sendq));
@@ -1315,7 +1314,6 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
 
     /* Prep the packet for the retransmit queue. */
     ci_assert( ! (pkt->flags & CI_PKT_FLAG_TX_PENDING));
-    pkt->pf.tcp_tx.block_end = OO_PP_NULL;
     ci_assert_equal(pkt->flags & ~CI_PKT_FLAG_TX_MASK_ALLOWED, 0);
 
     CI_IP_SOCK_STATS_ADD_TXBYTE(ts, TX_PKT_LEN(pkt));
@@ -1347,12 +1345,7 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
                       OO_PP_NOT_NULL(sendq->head));
 
       /* Wake up TX if necessary */
-      if ( ci_tcp_tx_advertise_space(ni, ts) &&
-           ( ! tx_space ||
-             tx_prequeue != oo_atomic_read(&ts->send_prequeue_in) ||
-             ( (ts->s.b.sb_aflags & CI_SB_AFLAG_IN_SO_LINGER) &&
-               ci_ip_queue_is_empty(&ts->send) &&
-               oo_atomic_read(&ts->send_prequeue_in) == 0 ) ) )
+      if ( ci_tcp_tx_advertise_space(ni, ts) )
           ci_tcp_wake_possibly_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
 
       if( ts->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED ) {
@@ -1394,9 +1387,7 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
 
     /* Wake up TX if necessary */
     if( NI_OPTS(ni).tcp_sndbuf_mode == 0 &&
-        ci_tcp_tx_advertise_space(ni, ts) &&
-        ( ! tx_space ||
-          tx_prequeue != oo_atomic_read(&ts->send_prequeue_in) ) )
+        ci_tcp_tx_advertise_space(ni, ts) )
       ci_tcp_wake_possibly_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
 
 #if CI_CFG_CONGESTION_WINDOW_VALIDATION

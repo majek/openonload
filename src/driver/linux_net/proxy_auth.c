@@ -159,21 +159,6 @@ struct proxy_admin_state {
 	spinlock_t completed_lock;
 };
 
-/* Allow forcing of authorization via module parameters. If proxy_force_enable
- * is set then no requests will be sent to userspace. The result of the
- * authorization request will be proxy_force_allow - authorized if true.
- */
-static bool proxy_force_enable;
-module_param(proxy_force_enable, bool, 0644);
-MODULE_PARM_DESC(proxy_force_enable,
-		"Enable forcing of proxy authorization to value in proxy_force_allow");
-
-static bool proxy_force_allow;
-module_param(proxy_force_allow, bool, 0644);
-MODULE_PARM_DESC(proxy_force_allow,
-		"Authorization result for proxy_force_enable");
-
-
 static u16 proxy_auth_session_tag;
 
 
@@ -1017,27 +1002,20 @@ static void efx_proxy_request_work(struct work_struct *data)
 			  (index & 0x0000ffff) << 16 |
 			  (u64)handle << 32;
 
-		if (!proxy_force_enable) {
-			spin_lock_bh(&pa->outstanding_lock);
-			list_add_tail(&req->list, &pa->outstanding);
-			spin_unlock_bh(&pa->outstanding_lock);
+		spin_lock_bh(&pa->outstanding_lock);
+		list_add_tail(&req->list, &pa->outstanding);
+		spin_unlock_bh(&pa->outstanding_lock);
 
-			rc = pa->request_func(pa->efx, uhandle,
-					pf, vf, rid,
-					request_buff, pa->request_size);
+		rc = pa->request_func(pa->efx, uhandle,
+				pf, vf, rid,
+				request_buff, pa->request_size);
 
-			if (rc) {
-				immed_send = true;
-				immed_result = pa->default_result;
-				spin_lock_bh(&pa->outstanding_lock);
-				list_del_init(&req->list);
-				spin_unlock_bh(&pa->outstanding_lock);
-			}
-		} else {
+		if (rc) {
 			immed_send = true;
-			immed_result = proxy_force_allow ?
-					MC_CMD_PROXY_COMPLETE_IN_AUTHORIZED :
-					MC_CMD_PROXY_COMPLETE_IN_DECLINED;
+			immed_result = pa->default_result;
+			spin_lock_bh(&pa->outstanding_lock);
+			list_del_init(&req->list);
+			spin_unlock_bh(&pa->outstanding_lock);
 		}
 
 		if (immed_send) {

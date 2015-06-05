@@ -83,12 +83,18 @@ static struct notifier_block efrm_netdev_notifier = {
 	.notifier_call = efrm_netdev_event,
 };
 
-#if EFX_DRIVERLINK_API_VERSION >= 7
+#if EFX_DRIVERLINK_API_VERSION >= 22
+static int
+#elif EFX_DRIVERLINK_API_VERSION >= 7
 static bool 
 #else
 static void 
 #endif
+#if EFX_DRIVERLINK_API_VERSION >= 22
+efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event, int budget);
+#else
 efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event);
+#endif
 
 static struct efx_dl_driver efrm_dl_driver = {
 	.name = "resource",
@@ -394,12 +400,18 @@ static int efrm_netdev_event(struct notifier_block *this,
 }
 
 
-#if EFX_DRIVERLINK_API_VERSION >= 7
+#if EFX_DRIVERLINK_API_VERSION >= 22
+static int
+#elif EFX_DRIVERLINK_API_VERSION >= 7
 static bool 
 #else
 static void 
 #endif
+#if EFX_DRIVERLINK_API_VERSION >= 22
+efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event, int budget)
+#else
 efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event)
+#endif
 {
 	struct efhw_nic *nic = efx_dev->priv;
 	struct linux_efhw_nic *lnic = linux_efhw_nic(nic);
@@ -407,7 +419,12 @@ efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event)
 	int rc;
 
 	rc = efhw_nic_handle_event(nic, lnic->ev_handlers, ev);
-#if EFX_DRIVERLINK_API_VERSION >= 7
+#if EFX_DRIVERLINK_API_VERSION >= 22
+        /* This driverlink version supports NAPI accounting but this Onload
+         * version does not. We emulate old-style driverlink behaviour.
+         * Notionally: return rc ? handled_one_event : didn't_handle_any; */
+        return rc ? 1 : -1;
+#elif EFX_DRIVERLINK_API_VERSION >= 7
 	return rc;
 #endif
 }

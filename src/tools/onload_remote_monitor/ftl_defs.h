@@ -1419,7 +1419,7 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_tcp_socket_cmn, ci_iptime_t, t_ka_time_in_secs)    \
     FTL_TFIELD_INT(ctx, ci_tcp_socket_cmn, ci_iptime_t, t_ka_intvl)     \
     FTL_TFIELD_INT(ctx, ci_tcp_socket_cmn, ci_iptime_t, t_ka_intvl_in_secs) \
-    FTL_TFIELD_INT(ctx, ci_tcp_socket_cmn, ci_uint32, user_mss)               \
+    FTL_TFIELD_INT(ctx, ci_tcp_socket_cmn, ci_uint16, user_mss)               \
     FTL_TFIELD_INT(ctx, ci_tcp_socket_cmn, ci_uint8, tcp_defer_accept)	      \
     FTL_TSTRUCT_END(ctx)
 
@@ -1439,8 +1439,9 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_pkt_queue, retrans)            \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_pkt_queue, recv1)              \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_pkt_queue, recv2)              \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, recv_off)                    \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_int32, recv1_extract)                \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, recv_off)                    \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, outgoing_hdrs_len)           \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_pkt_queue, rob)                \
     FTL_TFIELD_ARRAYOFINT(ctx, ci_tcp_state, ci_int32, last_sack,             \
                           CI_TCP_SACK_MAX_BLOCKS + 1)                         \
@@ -1457,11 +1458,11 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     ) \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, snd_delegated)               \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, fast_path_check)             \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, outgoing_hdrs_len)           \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, amss)                        \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, smss)                        \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, eff_mss)                     \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, snd_up)                      \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, amss)                        \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, smss)                        \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, eff_mss)                     \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, retransmits)                 \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, rcv_wnd_advertised)          \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, rcv_wnd_right_edge_sent)     \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, rcv_added)                   \
@@ -1481,8 +1482,8 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, cwnd_extra)                  \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, ssthresh)                    \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, bytes_acked)                 \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, dup_acks)                    \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, dup_thresh)                  \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, dup_acks)                    \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, dup_thresh)                  \
     ON_CI_CFG_TCP_FASTSTART(                                                  \
       FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, faststart_acks)            \
     )                                                                         \
@@ -1501,7 +1502,6 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_iptime_t, sa)                        \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_iptime_t, sv)                        \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_iptime_t, rto)                       \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, retransmits)                 \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, timed_seq)                   \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_iptime_t, timed_ts)                  \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, tsrecent)                    \
@@ -1510,10 +1510,11 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
       FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, tslastseq)                 \
     )                                                                         \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_iptime_t, tspaws)                    \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, acks_pending)                \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, acks_pending)                \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, urg_data)                    \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, ka_probes)                   \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, zwin_probes)                 \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, zwin_acks)             \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, zwin_probes)                 \
+    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, zwin_acks)             \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_int32, incoming_tcp_hdr_len)         \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_timer, rto_tid)                \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_timer, delack_tid)             \
@@ -1526,7 +1527,6 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
       FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_timer, taildrop_tid)         \
     )                                                                         \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_timer, cork_tid)               \
-    FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint16, urg_data)                    \
     ON_CI_CFG_TCP_SOCK_STATS(                                                 \
       FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_sock_stats, stats_snapshot)  \
       FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ip_sock_stats, stats_cumulative)\
@@ -1536,6 +1536,7 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
       FTL_TFIELD_INT(ctx, ci_tcp_state, ci_int32, cached_on_fd)               \
       FTL_TFIELD_INT(ctx, ci_tcp_state, ci_int32, cached_on_pid)              \
       FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ni_dllist_link, epcache_link)   \
+      FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_ni_dllist_link, epcache_fd_link)\
     )                                                                         \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_int32, send_prequeue)                \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, send_prequeue_in)         \
@@ -1599,6 +1600,8 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
 		        epcache_pending)				      \
       FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,            \
 		        epcache_connected)				      \
+      FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,            \
+		        epcache_fd_states)				      \
       FTL_TFIELD_INT(ctx, ci_tcp_socket_listen, ci_uint32, cache_avail_sock)  \
     )                                                                         \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ip_timer, listenq_tid)    \

@@ -339,6 +339,8 @@ ci_inline void ci_tcp_sendmsg_prep_pkt(ci_netif* ni, ci_tcp_state* ts,
   pkt->pf.tcp_tx.start_seq = seq;
   pkt->pf.tcp_tx.end_seq += seq;
 
+  pkt->pf.tcp_tx.block_end = OO_PP_NULL;
+
   LOG_TV(log(LPF "%s: %d: %x-%x", __FUNCTION__, OO_PKT_FMT(pkt),
              pkt->pf.tcp_tx.start_seq, pkt->pf.tcp_tx.end_seq));
 
@@ -1744,7 +1746,7 @@ unroll_msg_warm(ci_netif* ni, ci_tcp_state* ts, struct tcp_send_info* sinf,
 /* Grab packet buffers. */
 static int
 ci_tcp_send_alloc_pkts(ci_netif* ni, ci_tcp_state* ts,
-                       struct tcp_send_info* sinf)
+                       struct tcp_send_info* sinf, int got)
 {
   ci_ip_pkt_fmt* pkt;
   int rc;
@@ -1760,7 +1762,9 @@ ci_tcp_send_alloc_pkts(ci_netif* ni, ci_tcp_state* ts,
   sinf->fill_list_bytes = 0;
   sinf->n_filled = 0;
 
-  do {
+  sinf->n_needed -= got;
+
+  while( sinf->n_needed > 0 ) {
     if( si_trylock(ni, sinf) ) {
       if( (pkt = ci_netif_pkt_tx_tcp_alloc(ni)) ) {
         ++ni->state->n_async_pkts;
@@ -1770,7 +1774,8 @@ ci_tcp_send_alloc_pkts(ci_netif* ni, ci_tcp_state* ts,
         return rc;;
     } else 
       return rc;
-  } while( --sinf->n_needed > 0 );
+    sinf->n_needed--;
+  }
 
   return rc;
 }
@@ -1818,7 +1823,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     int rc;
     /* We do not know which seq number to use.  Call
      * onload_delegated_send_cancel(). */
-    CI_SET_ERROR(rc, -EBUSY);
+    CI_SET_ERROR(rc, EBUSY);
     return rc;
   }
 
@@ -1927,7 +1932,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
  try_again:
   while( 1 ) {
     /* Grab packet buffers and fill them with data. */
-    m = ci_tcp_send_alloc_pkts(ni, ts, &sinf);
+    m = ci_tcp_send_alloc_pkts(ni, ts, &sinf, 0);
     if( sinf.n_needed > 0 )
       goto no_pkt_buf;
 
@@ -2458,44 +2463,41 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
 }
 
 
-int ci_tcp_ds_get_arp(ci_netif* ni, ci_tcp_state* ts, unsigned flags)
+static int ci_tcp_ds_get_arp(ci_netif* ni, ci_tcp_state* ts)
 {
   int i;
 
-  if( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) ||
-      flags & ONLOAD_DELEGATED_SEND_FLAG_IGNORE_ARP )
-    return 1;
+  ci_assert(ci_netif_is_locked(ni));
 
   cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
   if( ts->s.pkt.status == retrrc_success )
     return 1;
   if( ts->s.pkt.status != retrrc_nomac )
-    return 0;
+    goto fail;
 
-  ci_netif_lock(ni);
-  if( OO_PP_NOT_NULL(ts->retrans_ptr) )
-     ci_tcp_retrans_one(ts, ni, PKT_CHK(ni, ts->retrans_ptr));
+  if( ! ci_ip_queue_is_empty(&ts->retrans) )
+    ci_tcp_retrans_one(ts, ni, PKT_CHK(ni, ts->retrans.head));
   else {
     ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(ni);
     if( pkt == NULL )
-      return -ENOBUFS;
+      goto fail;
 
     ci_tcp_send_ack(ni, ts, pkt, 0);
   }
-  ci_netif_unlock(ni);
 
   /* We can set up netlink notification, but let's spin for now */
   for( i = 0; i < 1000; i++ ) {
     cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
-    if( ts->s.pkt.status == retrrc_success ) {
-      ci_log("%s: i=%d", __func__, i);
+    if( ts->s.pkt.status == retrrc_success )
       return 1;
-    }
     if( ts->s.pkt.status != retrrc_nomac )
-      return 0;
+      goto fail;
     usleep(1);
   }
 
+fail:
+  /* For TCP, we want the ipcache to only be valid when onloadable. */
+  ci_ip_cache_invalidate(&ts->s.pkt);
   return 0;
 }
 
@@ -2503,24 +2505,36 @@ int ci_tcp_ds_get_arp(ci_netif* ni, ci_tcp_state* ts, unsigned flags)
   ( ETH_HLEN + ETH_VLAN_HLEN + sizeof(ci_ip4_hdr) +  \
     0xf * sizeof(ci_uint32) )
 
-int
-ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts,
+enum onload_delegated_send_rc
+ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts, unsigned flags,
                        void* headers, int* headers_len_inout,
                        int* ip_tcp_hdr_len_out,
                        int* tcp_seq_offset_out, int* ip_len_offset_out)
 {
   int headers_len;
-  int ether_header_len = ETH_HLEN + ETH_VLAN_HLEN - ts->s.pkt.ether_offset;
+  int ether_header_len;
   ci_tcp_hdr* tcp;
   ci_ip4_hdr* ip;
 
+  /* Get the ARP, validate the packet cache.
+   * Packet cache could be used under the stack lock only. */
+  ci_assert(ci_netif_is_locked(ni));
+
+  /* Try to get valid cache */
+  if( ! cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) &&
+      (~flags & ONLOAD_DELEGATED_SEND_FLAG_IGNORE_ARP ) &&
+      ! ci_tcp_ds_get_arp(ni, ts) ) {
+    return ONLOAD_DELEGATED_SEND_RC_NOARP;
+  }
+
   /* Check header length size */
+  ether_header_len = ETH_HLEN + ETH_VLAN_HLEN - ts->s.pkt.ether_offset;
   headers_len = ether_header_len + ts->outgoing_hdrs_len;
   ci_assert_le(headers_len, MAX_HEADERS_LEN);
 
   if( *headers_len_inout < headers_len ) {
     *headers_len_inout = headers_len;
-    return -EMSGSIZE;
+    return ONLOAD_DELEGATED_SEND_RC_SMALL_HEADER;
   }
   *headers_len_inout = headers_len;
 
@@ -2530,9 +2544,13 @@ ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts,
   ip = (void*)((ci_uintptr_t)headers + ether_header_len);
   tcp = (void*)((ci_uintptr_t)headers + ether_header_len + sizeof(ci_ip4_hdr));
 
+  /* tcp_snd_nxt, tcp_rcv_nxt, tsrecent, eff_mss could change after we've
+   * passed our header to the user, so there is nothing to do with it. */
   tcp->tcp_seq_be32 = CI_BSWAP_BE32(tcp_snd_nxt(ts));
   tcp->tcp_flags = CI_TCP_FLAG_ACK;
   tcp->tcp_ack_be32 = CI_BSWAP_BE32(tcp_rcv_nxt(ts));
+  ci_tcp_calc_rcv_wnd(ts, "ds_fill_headers");
+  tcp->tcp_window_be16 = TS_TCP(ts)->tcp_window_be16;
   if( ts->tcpflags & CI_TCPT_FLAG_TSO ) {
     ci_uint8* opt = CI_TCP_HDR_OPTS(tcp);
     ci_tcp_tx_opt_tso(&opt, ci_tcp_time_now(ni), ts->tsrecent);
@@ -2553,7 +2571,7 @@ ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts,
   *ip_len_offset_out = ether_header_len +
                        CI_MEMBER_OFFSET(ci_ip4_hdr, ip_tot_len_be16);
 
-  return 0;
+  return ONLOAD_DELEGATED_SEND_RC_OK;
 }
 
 int
@@ -2563,11 +2581,19 @@ ci_tcp_ds_done(ci_netif* ni, ci_tcp_state* ts,
   int already_acked, i;
   ci_iovec_ptr piov;
   struct tcp_send_info sinf;
-  int m;
+  int last_needed CI_DEBUG(= 0x7fffffff);
+  int got = 0;
+  int iov_offset = 0;
 
   sinf.total_unsent = 0;
   sinf.total_sent = 0;
-  sinf.stack_locked = 1;
+  sinf.stack_locked = 0;
+  sinf.rc = 0;
+  sinf.pf.alloc_pkt = NULL;
+  sinf.timeout = 0; /* ignore ts->s.so.sndtimeo_msec */
+  sinf.tcp_send_spin =
+    oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_TCP_SEND);
+  sinf.fill_list = 0;
 
   for( i = 0; i < iovlen; ++i )
     sinf.total_unsent += CI_IOVEC_LEN(&iov[i]);
@@ -2577,65 +2603,94 @@ ci_tcp_ds_done(ci_netif* ni, ci_tcp_state* ts,
   if( sinf.total_unsent > ts->snd_delegated )
     return -EMSGSIZE;
 
-  /* Fixme: do we really need this lock from start to end?
-   * Could we postpone some job to the lock holder? */
-  ci_netif_lock(ni);
-  already_acked = SEQ_SUB(ts->snd_una,  ts->snd_nxt);
-  /* already_acked > 0  => some of our data is already ACKed;
-   * already_acked == 0 => retransmit queue is empty, but our data is not
-   *                       acked;
-   * already_acked < 0 => retransmit queue is not empty, our data is not
-   *                      acked yet. */
-  if( already_acked < 0 )
-    already_acked = 0;
-  if( already_acked > 0 ) {
-    already_acked = CI_MIN(already_acked, sinf.total_unsent);
-
-    ts->snd_delegated -= already_acked;
-    ts->snd_nxt += already_acked;
-    sinf.total_unsent -= already_acked;
-    sinf.total_sent += already_acked;
-    tcp_enq_nxt(ts) += already_acked;
-
-    /* drop already_acked data from iov */
-    while( already_acked > CI_IOVEC_LEN(iov) ) {
-      already_acked -= CI_IOVEC_LEN(iov);
-      iov++;
-      iovlen--;
-    }
-  }
-  if( sinf.total_unsent == 0)
-    goto out;
-
-  /* copy data from iov to retransmit queue */
-  sinf.rc = 0;
-  sinf.pf.alloc_pkt = NULL;
-  sinf.timeout = 0; /* ignore ts->s.so.sndtimeo_msec */
-  sinf.sendq_credit = 0;
-  sinf.tcp_send_spin =
-    oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_TCP_SEND);
-  sinf.sendq_credit = ci_tcp_tx_send_space(ni, ts);
-
-  ci_iovec_ptr_init_nz(&piov, iov, iovlen);
-  CI_IOVEC_BASE(&piov.io) =
-      (void *)((ci_uintptr_t)CI_IOVEC_BASE(&piov.io) + already_acked);
-  ci_assert(! ci_iovec_ptr_is_empty_proper(&piov));
-
-  if( sinf.sendq_credit <= 0 )  goto send_q_full;
-
  try_again:
   while( 1 ) {
-    m = ci_tcp_send_alloc_pkts(ni, ts, &sinf);
-    if( sinf.n_needed > 0 )
-      goto no_pkt_buf;
-  got_pkt_buf:
-    ci_tcp_send_fill_pkts(ni, ts, &sinf, &piov, m);
-    m = 0;
-  filled_some_pkts:
     if( ! si_trylock(ni, &sinf) ) {
       ci_netif_lock(ni);
       sinf.stack_locked = 1;
     }
+
+    already_acked = SEQ_SUB(ts->snd_una,  ts->snd_nxt);
+    /* already_acked > 0  => some of our data is already ACKed;
+     * already_acked == 0 => retransmit queue is empty, but our data is not
+     *                       acked;
+     * already_acked < 0 => retransmit queue is not empty, our data is not
+     *                      acked yet. */
+    if( already_acked < 0 )
+      already_acked = 0;
+    if( already_acked > 0 ) {
+      already_acked = CI_MIN(already_acked, sinf.total_unsent);
+
+      ts->snd_delegated -= already_acked;
+      ts->snd_nxt += already_acked;
+      sinf.total_unsent -= already_acked;
+      sinf.total_sent += already_acked;
+      tcp_enq_nxt(ts) += already_acked;
+
+      /* If iov_offset > 0 it's because some of the data in the iovec was
+       * already acked last time we were here.  We ditch any completely
+       * acked iovecs, so the offset must be < this iovec's length.
+       */
+      ci_assert_lt(iov_offset, CI_IOVEC_LEN(iov));
+
+      /* drop already_acked data from iov */
+      while( iov_offset + already_acked > CI_IOVEC_LEN(iov) ) {
+        already_acked -= (CI_IOVEC_LEN(iov) - iov_offset);
+        iov++;
+        iovlen--;
+        iov_offset = 0;
+      }
+    }
+    if( sinf.total_unsent == 0)
+      goto out;
+
+    /* copy data from iov to retransmit queue */
+    sinf.sendq_credit = ci_tcp_tx_send_space(ni, ts);
+
+    /* Earlier we dropped entirely-ACKed buffers from the iovec, but we must
+     * still account for partial ACKs within the first buffer. The appropriate
+     * offset is the sum of already_acked, which counts new ACKs discovered in
+     * this loop iteration, and iov_offset, which measures anything already
+     * enqueued in a previous iteration.
+     */
+    ci_iovec_ptr_init_nz(&piov, iov, iovlen);
+    ci_iovec_ptr_advance(&piov, already_acked + iov_offset);
+    ci_assert(! ci_iovec_ptr_is_empty_proper(&piov));
+
+    if( sinf.sendq_credit <= 0 )  goto send_q_full;
+
+    /* Either:
+     *  - we got all the buffers we needed and then used them, so got is 0;
+     *  - we didn't get everything we needed, so got < last_needed; or
+     *  - we didn't get everything we needed at first, but then made up the
+     *    difference from the non-blocking pool and retried, so got ==
+     *    last_needed.
+     */
+    ci_assert_le(got, last_needed);
+    last_needed = ci_tcp_send_alloc_pkts(ni, ts, &sinf, got);
+
+    if( sinf.n_needed > 0 )
+      goto no_pkt_buf;
+
+    /* got = last_needed here, but if we're here we're definately going to
+     * use them, so don't bother setting it.
+     */
+
+    /* If we've filled anything it should have been used, we shouldn't get
+     * here with some stuff filled.
+     */
+    ci_assert_equal(sinf.n_filled, 0);
+
+    /* From this point there is nothing that can derail us from either
+     * putting these packets on the retransmit queue before anything changes
+     * or bailing out completely.
+     */
+    ci_tcp_send_fill_pkts(ni, ts, &sinf, &piov, last_needed);
+
+    /* All our allocated pkts have been moved to the fill list */
+    ci_assert_equal(sinf.n_filled, last_needed);
+    got = 0;
+
     if( ts->s.tx_errno ) {
       ci_assert(! (flags & ONLOAD_MSG_WARM));
       ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
@@ -2652,10 +2707,22 @@ ci_tcp_ds_done(ci_netif* ni, ci_tcp_state* ts,
     if( sinf.total_unsent == 0 )
       goto out;
 
+    /* drop enqueued data from iov */
+    iov_offset += already_acked + sinf.fill_list_bytes;
+    while( iov_offset > CI_IOVEC_LEN(iov) ) {
+      iov_offset -= CI_IOVEC_LEN(iov);
+      iov++;
+      iovlen--;
+    }
+
     /* Stuff left to do -- push out what we've got first. */
     if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) )
       ci_netif_poll(ni);
+
+    /* Used up all the packets we filled, update sinf */
     sinf.fill_list = 0;
+    sinf.n_filled = 0;
+
     if( ts->s.tx_errno ) {
       ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
       if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
@@ -2681,11 +2748,19 @@ ci_tcp_ds_done(ci_netif* ni, ci_tcp_state* ts,
   if( sinf.total_sent > already_acked && !ci_ip_queue_is_empty(&ts->retrans))
     ci_tcp_rto_check_and_set(ni, ts);
 
+  /* We may have allocated some packets and then found they weren't neeeded.
+   * Make sure we free them if so.
+   */
+  if( got > 0 )
+    ci_tcp_sendmsg_free_unused_pkts(ni, &sinf);
+
   ci_netif_unlock(ni);
 
   return sinf.total_sent;
 
 send_q_full:
+  ci_assert_equal(sinf.fill_list, NULL);
+
   if( ci_netif_may_poll(ni) && ci_netif_need_poll(ni) &&
       si_trylock(ni, &sinf) ) {
     ci_netif_poll(ni);
@@ -2700,7 +2775,7 @@ send_q_full:
     /* We are pushing our data to retransmit queue; send queue is empty;
      * tx timestamp queue is guaranteed to be disabled.  So, the only
      * non-empty queue is the retransmit one. */
-    ci_assert(OO_PP_NOT_NULL(ts->retrans_ptr));
+    ci_assert(OO_PP_NOT_NULL(ts->retrans.num));
   }
 
   if( flags & MSG_DONTWAIT ) {
@@ -2733,11 +2808,15 @@ send_q_full:
   {
     int rc;
     rc = ci_tcp_sendmsg_no_pkt_buf(ni, ts, flags, &sinf);
-    if( rc == 0 )
-      goto got_pkt_buf;
-    else if( rc == 1 )
-      goto filled_some_pkts;
+    if( rc == 0 ) {
+      got = last_needed - sinf.n_needed;
+      goto try_again;
+    }
     else {
+      /* Once we've filled some packets we're guaranteed to queue them, so
+       * we should never be calling ci_tcp_sendmsg_no_pkt_buf with some
+       * packets filled.
+       */
       ci_assert(rc == -1);
       if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
       return sinf.rc;

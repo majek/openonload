@@ -767,7 +767,7 @@ struct ci_netif_state_s {
   CI_ULCONST ci_uint32  pio_io_mmap_offset;
   CI_ULCONST ci_uint32  vi_state_bytes;
 
-  CI_ULCONST ci_uint32  max_mss;
+  CI_ULCONST ci_uint16  max_mss;
 
   ci_uint32  flags;
 # define CI_NETIF_FLAG_DEBUG              0x1 /* driver is debug build   */
@@ -921,6 +921,7 @@ struct ci_netif_state_s {
   CI_ULCONST ci_uint32  aux_ofs;         /**< Offset to listenq array */
   
   oo_p                  free_aux_mem;    /**< Free list of synrecv bufs. */
+  ci_uint32             n_free_aux_bufs;  /**< Number of free aux bufs */
 
 #if CI_CFG_FD_CACHING
   ci_uint32             cache_avail_stack; /**< Num entries avail on cache */
@@ -1645,7 +1646,7 @@ struct oo_pipe {
 
 /* structure to parse TCP options in SYN */
 typedef struct {
-  ci_int32              smss;           /* Max segment size */
+  ci_uint16             smss;           /* Max segment size */
   ci_uint32             wscl_shft;      /* Window scale shift */
   ci_uint32             flags;          /* Other options enabled (only those
                                            we support) */
@@ -1719,7 +1720,7 @@ typedef struct {
   ci_iptime_t          t_ka_intvl;          /* time between probes in tick      */
   ci_iptime_t          t_ka_intvl_in_secs;  /* time between probes in secs      */
 
-  ci_uint32            user_mss;            /* user-provided maximum MSS */
+  ci_uint16            user_mss;            /* user-provided maximum MSS */
   ci_uint8             tcp_defer_accept;    /* TCP_DEFER_ACCEPT sockopt  */
 #define OO_TCP_DEFER_ACCEPT_OFF 0xff
 
@@ -1764,6 +1765,7 @@ struct ci_tcp_state_s {
   /* List of allocated templated sends on this socket */
   oo_pkt_p            tmpl_head;
 
+  /* Various options.  Should be updated under the stack lock only. */
   ci_uint32            tcpflags;
   /* Options negotiated with SYN options. */
 # define CI_TCPT_FLAG_TSO               0x01  /* Timestamp RFC1323    */
@@ -1785,6 +1787,7 @@ struct ci_tcp_state_s {
 #define CI_TCPT_FLAG_NO_ARP             0x100000 /* there was a failed ARP */
 #define CI_TCPT_FLAG_NO_TX_ADVANCE      0x200000 /* don't tx_advance */
 #define CI_TCPT_FLAG_LOOP_DEFERRED      0x400000 /* deferred loopback conn */
+#define CI_TCPT_FLAG_NO_QUICKACK        0x800000 /* TCP_QUICKACK set to 0 */
 
   /* flags advertised on SYN */
 # define CI_TCPT_SYN_FLAGS \
@@ -1809,11 +1812,15 @@ struct ci_tcp_state_s {
 
   ci_ip_pkt_queue     recv1;      /**< Receive queue. */
   ci_ip_pkt_queue     recv2;      /**< Aux receive queue for urgent data */
-  ci_uint32           recv_off;   /**< Offset to current recv queue
-                                       from base of [ci_tcp_state] */
   oo_pkt_p            recv1_extract; 
                                   /**< Next id in main receive queue to be 
                                        extracted by recvmsg */
+  ci_uint16           recv_off;   /**< Offset to current recv queue
+                                       from base of [ci_tcp_state] */
+
+  ci_uint16           outgoing_hdrs_len;
+  /* Length of IP + TCP headers (inc TSO if any).
+   * Does not include Ethernet header len any more! */
 
   ci_ip_pkt_queue     rob;        /**< Re-order buffer. */
   oo_pkt_p            last_sack[CI_TCP_SACK_MAX_BLOCKS + 1];  
@@ -1847,15 +1854,12 @@ struct ci_tcp_state_s {
   ** is set to an invalid value that should never match a TCP packet.
   */
 
-  ci_uint32            outgoing_hdrs_len;
-  /* Length of IP + TCP headers (inc TSO if any).
-   * Does not include Ethernet header len any more! */
-
-  ci_uint16            amss;        /* advertised mss to the sending side */
-  ci_uint32            smss;        /* sending MSS (excl IP & TCP hdrs)   */
-  ci_uint32            eff_mss;     /* PMTU-based mss, excl TCP options   */
   ci_uint32            snd_up;      /* send urgent pointer, holds the seq 
                                        num of byte following the OOB byte */
+  ci_uint16            amss;        /* advertised mss to the sending side */
+  ci_uint16            smss;        /* sending MSS (excl IP & TCP hdrs)   */
+  ci_uint16            eff_mss;     /* PMTU-based mss, excl TCP options   */
+  ci_uint16            retransmits; /* number of retransmissions */
 
   ci_uint32            rcv_wnd_advertised; /* receive window to advertise in
                                               outgoing packets            */
@@ -1878,6 +1882,8 @@ struct ci_tcp_state_s {
   ci_uint8             rcv_wscl;    /* receive window scaling             */
   ci_uint8             snd_wscl;    /* send window scaling                */
 
+  /* [congstate] could be made 8-bit, but currently there's no packing
+   * advantage gained by doing so. */
   ci_uint16            congstate;   /* congestion status flag             */
 # define CI_TCP_CONG_OPEN       0x0 /* opening congestion window          */
 # define CI_TCP_CONG_RTO        0x1 /* RTO timer has fired                */
@@ -1895,8 +1901,8 @@ struct ci_tcp_state_s {
   ci_uint32            ssthresh;    /* slow-start threshold               */
   ci_uint32            bytes_acked; /* bytes acked but not yet added to cwnd */
   
-  ci_uint32            dup_acks;    /* number of dup-acks received        */
-  ci_uint32            dup_thresh;  /* dupack threshold -- constant for now */
+  ci_uint16            dup_acks;    /* number of dup-acks received        */
+  ci_uint16            dup_thresh;  /* dupack threshold -- constant for now */
 
 #if CI_CFG_TCP_FASTSTART  
   ci_uint32            faststart_acks; /* Bytes to ack before leaving faststart */
@@ -1943,7 +1949,6 @@ struct ci_tcp_state_s {
   ci_iptime_t          sa;          /* smoothed round trip time           */
   ci_iptime_t          sv;          /* round trip time variance estimate  */
   ci_iptime_t          rto;         /* retransmit timeout value           */
-  ci_uint32            retransmits; /* number of retransmissions */
 
   /* these fields for RTT measurement are valid when:
   **   (i) not using TCP timestamps
@@ -1967,20 +1972,26 @@ struct ci_tcp_state_s {
                                         (0xa                        )))
 
   /* delayed acknowledgements */
-  ci_uint32            acks_pending;/* number of packets needing ack      */
+  ci_uint16            acks_pending;/* number of packets needing ack      */
 /* These bits are ORed into acks_pending */
-#define CI_TCP_DELACK_SOON_FLAG 0x80000000
-#define CI_TCP_ACK_FORCED_FLAG  0x40000000
+#define CI_TCP_DELACK_SOON_FLAG 0x8000
+#define CI_TCP_ACK_FORCED_FLAG  0x4000
 /* Mask to get the number of acks pending (includes ACK_FORCED but not
  * DELACK_SOON bit)
  */
-#define CI_TCP_ACKS_PENDING_MASK 0x7fffffff
+#define CI_TCP_ACKS_PENDING_MASK 0x7fff
+
+  ci_uint16 urg_data; /** out-of-band byte store & relevant flags */
+#define CI_TCP_URG_DATA_MASK    0x00ff
+#define CI_TCP_URG_COMING       0x0100  /* oob byte here or coming */
+#define CI_TCP_URG_IS_HERE      0x0200  /* oob byte is valid (got it) */
+#define CI_TCP_URG_PTR_VALID    0x0400  /* tcp_rcv_up is valid */
 
   /* keepalive vailables */
   ci_uint32            ka_probes;   /* number of probes sent              */
 
-  ci_uint32            zwin_probes; /* zero window probes counter         */
-  ci_uint32            zwin_acks;   /* zero window acks counter           */
+  ci_uint16            zwin_probes; /* zero window probes counter         */
+  ci_uint16            zwin_acks;   /* zero window acks counter           */
   ci_int32             incoming_tcp_hdr_len; /* expected TCP header length */
 
   /* timer ids for timers */
@@ -1997,12 +2008,6 @@ struct ci_tcp_state_s {
   ci_ip_timer          cork_tid;    /* TCP timer for TCP_CORK/MSG_MORE   */
 
 
-  ci_uint16 urg_data; /** out-of-band byte store & relevant flags */
-#define CI_TCP_URG_DATA_MASK    0x00ff
-#define CI_TCP_URG_COMING       0x0100  /* oob byte here or coming */
-#define CI_TCP_URG_IS_HERE      0x0200  /* oob byte is valid (got it) */
-#define CI_TCP_URG_PTR_VALID    0x0400  /* tcp_rcv_up is valid */
-
 #if CI_CFG_TCP_SOCK_STATS
   ci_ip_sock_stats     stats_snapshot CI_ALIGN(8);   /**< statistics snapshot */
   ci_ip_sock_stats     stats_cumulative CI_ALIGN(8); /**< cummulative statistics */
@@ -2017,6 +2022,8 @@ struct ci_tcp_state_s {
    * or none 
    */
   ci_ni_dllist_link    epcache_link;
+  /* Link into epcache_fd_list.  */
+  ci_ni_dllist_link    epcache_fd_link;
 #endif
 
   /* An extension of the send queue.  Packets are put here when the netif
@@ -2076,8 +2083,8 @@ struct ci_tcp_socket_listen_s {
   ci_ni_dllist_t       listenq[CI_CFG_TCP_SYNACK_RETRANS_MAX + 1];
   /* index is the number of retransmit. */
 
-  /* Hash table for listenq lookup */
-  oo_p                 bucket;
+  oo_p                 bucket;      /* Hash table for listenq lookup */
+  ci_uint32            n_buckets;   /* Number of "buckets" allocated */
 
 #if CI_CFG_FD_CACHING
   /* We cache EPs between close and accept to speed up passive opens.  See
@@ -2107,6 +2114,13 @@ struct ci_tcp_socket_listen_s {
    * establishment as we need to avoid entering the kernel.
    */
   ci_ni_dllist_t       epcache_connected;
+
+  /* List of all sockets having a cached fd, including any on acceptqs. Its
+   * locking requirements are different from the other lists: pushing requires
+   * the stack lock and ci_ni_dllist_concurrent_push(), and popping and
+   * traversing require the listening socket lock.
+   */
+  ci_ni_dllist_t       epcache_fd_states;
 
   /* Number of available cache entries for this socket. */
   ci_uint32            cache_avail_sock;

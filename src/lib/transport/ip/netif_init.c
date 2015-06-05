@@ -1311,6 +1311,7 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   vi_mem_offset += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
   ids += nsn->vi_rxq_size;
   ef_vi_init_txq(vi, nsn->vi_txq_size, ni->buf_ptr + vi_mem_offset, ids);
+  vi->vi_i = nsn->vi_instance;
   ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
   ef_vi_init_tx_timestamping(vi);
 }

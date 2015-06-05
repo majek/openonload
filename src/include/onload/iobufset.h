@@ -142,7 +142,6 @@ ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
 
 /************** Alloc/free buffer ****************/
 
-#if CI_CFG_PKTS_AS_HUGE_PAGES
 /* Flag is EF_USE_HUGE_PAGES value possibly or'ed with
  * OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED */
 #define OO_IOBUFSET_FLAG_HUGE_PAGE_TRY    0x1 /* EF_USE_HUGE_PAGES=1 */
@@ -152,7 +151,6 @@ ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
 #define OO_IOBUFSET_FLAG_COMPOUND_SHIFT 4
 #define OO_IOBUFSET_FLAG_COMPOUND_MASK  0x30
 #define OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED 0x1000
-#endif
 
 /*!
  * Allocate oo_buffer_pagess.

@@ -182,6 +182,9 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
        *   promote. Check that the peer is alive and try to promote
        *   again.
        */
+      if( tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF &&
+          (tsr->retries & CI_FLAG_TSR_RETRIES_MASK) == max_retries - 1 )
+        tsr->retries &= ~CI_FLAG_TSR_RETRIES_ACKED;
       if( (~tsr->retries & CI_FLAG_TSR_RETRIES_ACKED) ||
           tls->c.tcp_defer_accept == OO_TCP_DEFER_ACCEPT_OFF ) {
         int rc = 0;
@@ -263,27 +266,16 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
 
       ci_assert_equal(tsr->retries & CI_FLAG_TSR_RETRIES_MASK, retries);
 
-      if( (tsr->retries & CI_FLAG_TSR_RETRIES_ACKED) &&
-          tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) {
-        ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
-        if( pkt == NULL )
-          goto out_of_packet;
-        tsr->retries &= ~CI_FLAG_TSR_RETRIES_ACKED;
-        ci_tcp_synrecv_send(netif, tls, tsr, pkt,
-                            CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
-      }
-      else {
-	ci_tcp_listenq_drop(netif, tls, tsr);
-	ci_tcp_synrecv_free(netif, tsr);
-        CITP_STATS_NETIF(++netif->state->stats.synrecv_timeouts);
+      ci_tcp_listenq_drop(netif, tls, tsr);
+      ci_tcp_synrecv_free(netif, tsr);
+      CITP_STATS_NETIF(++netif->state->stats.synrecv_timeouts);
 
-        LOG_TC(log(LPF "SYNRECV retries %d exceeded %d,"
-                   " returned to listen",
-                   tsr->retries & CI_FLAG_TSR_RETRIES_MASK,
-                   NI_OPTS(netif).retransmit_threshold_synack));
+      LOG_TC(log(LPF "SYNRECV retries %d exceeded %d,"
+                 " returned to listen",
+                 tsr->retries & CI_FLAG_TSR_RETRIES_MASK,
+                 NI_OPTS(netif).retransmit_threshold_synack));
 
-        ++synrecv_timeout;
-      }
+      ++synrecv_timeout;
     }
   }
 

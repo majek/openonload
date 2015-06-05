@@ -37,14 +37,15 @@
 #include "efx_ioctl.h"
 #include "mcdi_pcol_aoe.h"
 
-bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event);
+int efx_aoe_event(struct efx_nic *efx, efx_qword_t *event, int budget);
 int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld);
 int efx_aoe_update_keys(struct efx_nic *efx,
 			struct efx_update_license *key_stats);
 int efx_aoe_reset_aoe(struct efx_nic *efx,
 			struct efx_aoe_reset *reset_flags);
 #else
-static inline bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event) { return false; };
+static inline int efx_aoe_event(struct efx_nic *efx, efx_qword_t *event, int budget)
+{ return -ENOENT; };
 #endif
 
 #endif /* EFX_AOE_H */

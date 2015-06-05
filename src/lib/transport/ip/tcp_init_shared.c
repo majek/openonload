@@ -161,6 +161,10 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
     OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_link));
     ci_ni_dllist_link_init(netif, &ts->epcache_link, sp, "epch");
     ci_ni_dllist_self_link(netif, &ts->epcache_link);
+    sp = TS_OFF(netif, ts);
+    OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_fd_link));
+    ci_ni_dllist_link_init(netif, &ts->epcache_fd_link, sp, "ecfd");
+    ci_ni_dllist_self_link(netif, &ts->epcache_fd_link);
   }
 #endif
 

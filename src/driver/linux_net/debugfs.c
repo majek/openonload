@@ -310,7 +310,7 @@ efx_init_debugfs_files(struct dentry *parent,
 
 	return 0;
 
- err:
+err:
 	while (pos--) {
 		if ((1ULL << pos) & ignore)
 			continue;
@@ -334,33 +334,44 @@ int efx_init_debugfs_netdev(struct net_device *net_dev)
 	struct efx_nic *efx = netdev_priv(net_dev);
 	char name[EFX_DEBUGFS_NAME_LEN];
 	char target[EFX_DEBUGFS_NAME_LEN];
+	int rc = -ENAMETOOLONG;
 	size_t len;
 
 	if (snprintf(name, sizeof(name), "nic_%s", net_dev->name) >=
-	    sizeof(name))
+			sizeof(name))
 		return -ENAMETOOLONG;
 	if (snprintf(target, sizeof(target), "cards/%s", pci_name(efx->pci_dev))
 	    >= sizeof(target))
 		return -ENAMETOOLONG;
 	efx->debug_symlink = debugfs_create_symlink(name,
 						    efx_debug_root, target);
-	if (!efx->debug_symlink)
-		return -ENOMEM;
+	if (IS_ERR_OR_NULL(efx->debug_symlink)) {
+		rc = efx->debug_symlink ? PTR_ERR(efx->debug_symlink) : -ENOMEM;
+		return rc;
+	}
 
 	if (snprintf(name, sizeof(name), "if_%s", net_dev->name) >=
-	    sizeof(name))
-		return -ENAMETOOLONG;
+			sizeof(name))
+		goto err;
 	len = snprintf(target, sizeof(target),
 		       "cards/%s/port0", pci_name(efx->pci_dev));
 	if (len >= sizeof(target))
-		return -ENAMETOOLONG;
+		goto err;
 	efx->debug_port_symlink = debugfs_create_symlink(name,
 							 efx_debug_root,
 							 target);
-	if (!efx->debug_port_symlink)
-		return -ENOMEM;
+	if (IS_ERR_OR_NULL(efx->debug_port_symlink)) {
+		rc = efx->debug_port_symlink ?
+				PTR_ERR(efx->debug_port_symlink) :
+				-ENOMEM;
+		goto err;
+	}
 
 	return 0;
+
+err:
+	debugfs_remove(efx->debug_symlink);
+	return rc;
 }
 
 /**
@@ -386,7 +397,7 @@ static struct efx_debugfs_parameter efx_debugfs_port_parameters[] = {
 #if defined(EFX_USE_KCOMPAT) && !defined(NETIF_F_LRO)
 	EFX_BOOL_PARAMETER(struct efx_nic, lro_enabled),
 #endif
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES) && !defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 	EFX_BOOL_PARAMETER(struct efx_nic, rx_checksum_enabled),
 #endif
 	EFX_NAMED_PARAMETER(link_up, struct efx_nic, link_state.up,

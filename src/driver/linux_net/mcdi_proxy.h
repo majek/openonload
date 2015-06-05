@@ -29,6 +29,6 @@
 #include "net_driver.h"
 
 int efx_mcdi_proxy_nl_register(void);
-int efx_mcdi_proxy_nl_unregister(void);
+void efx_mcdi_proxy_nl_unregister(void);
 
 #endif

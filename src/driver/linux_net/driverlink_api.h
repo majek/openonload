@@ -50,7 +50,7 @@ struct efx_dl_device_info;
  * is not used for binary compatibility checking, as that is done by
  * kbuild and the module loader using symbol versions.
  */
-#define EFX_DRIVERLINK_API_VERSION 21
+#define EFX_DRIVERLINK_API_VERSION 22
 
 /**
  * enum efx_dl_ev_prio - Driverlink client's priority level for event handling
@@ -131,7 +131,8 @@ struct efx_dl_driver {
 	void (*remove) (struct efx_dl_device *efx_dev);
 	void (*reset_suspend) (struct efx_dl_device *efx_dev);
 	void (*reset_resume) (struct efx_dl_device *efx_dev, int ok);
-	bool (*handle_event) (struct efx_dl_device *efx_dev, void *p_event);
+	int (*handle_event) (struct efx_dl_device *efx_dev,
+			     void *p_event, int budget);
 	bool (*rx_packet) (struct efx_dl_device *efx_dev, int channel,
 			   u8 *pkt_hdr, int len);
 

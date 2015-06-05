@@ -653,6 +653,8 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
 
   logger(log_arg, "  sock_bufs: max=%u n_allocated=%u",
          NI_OPTS(ni).max_ep_bufs, ns->n_ep_bufs);
+  logger(log_arg, "  aux_bufs: max=%u free=%u",
+         CI_NI_AUX_BUFS_MAX(ni), ns->n_free_aux_bufs);
   ci_netif_dump_pkt_summary(ni, logger, log_arg);
 
 

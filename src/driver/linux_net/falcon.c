@@ -572,21 +572,37 @@ static irqreturn_t falcon_legacy_interrupt_a1(int irq, void *dev_id,
  **************************************************************************
  */
 static int dummy_rx_push_rss_config(struct efx_nic *efx, bool user,
-				    const u32 *rx_indir_table)
+				    const u32 *rx_indir_table, const u8 *key)
 {
 	(void) efx;
 	(void) user;
 	(void) rx_indir_table;
+	(void) key;
 	return -ENOSYS;
 }
 
+static int falcon_b0_rx_pull_rss_config(struct efx_nic *efx)
+{
+	efx_oword_t temp;
+
+	/* Read from IPv4 hash key */
+	efx_reado(efx, &temp, FR_BZ_RX_RSS_TKEY);
+	memcpy(efx->rx_hash_key, &temp, sizeof(temp));
+
+	efx_farch_rx_pull_indir_table(efx);
+	return 0;
+}
+
 static int falcon_b0_rx_push_rss_config(struct efx_nic *efx, bool user,
-					const u32 *rx_indir_table)
+					const u32 *rx_indir_table,
+					const u8 *key)
 {
 	efx_oword_t temp;
 
 	(void) user;
 	/* Set hash key for IPv4 */
+	if (key)
+		memcpy(efx->rx_hash_key, key, sizeof(temp));
 	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
 	efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
 
@@ -2984,7 +3000,8 @@ static int falcon_init_nic(struct efx_nic *efx)
 	falcon_init_rx_cfg(efx);
 
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
-		falcon_b0_rx_push_rss_config(efx, false, efx->rx_indir_table);
+		falcon_b0_rx_push_rss_config(efx, false, efx->rx_indir_table,
+				NULL);
 
 		/* Set destination of both TX and RX Flush events */
 		EFX_POPULATE_OWORD_1(temp, FRF_BZ_FLS_EVQ_ID, 0);
@@ -3232,6 +3249,7 @@ const struct efx_nic_type falcon_a1_nic_type = {
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
 	.rx_push_rss_config = dummy_rx_push_rss_config,
+	.rx_pull_rss_config = efx_port_dummy_op_int,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
 	.rx_remove = efx_farch_rx_remove,
@@ -3343,6 +3361,7 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
 	.rx_push_rss_config = falcon_b0_rx_push_rss_config,
+	.rx_pull_rss_config = falcon_b0_rx_pull_rss_config,
 	.rx_probe = efx_farch_rx_probe,
 	.rx_init = efx_farch_rx_init,
 	.rx_remove = efx_farch_rx_remove,
@@ -3421,4 +3440,5 @@ const struct efx_nic_type falcon_b0_nic_type = {
 	.offload_features = NETIF_F_IP_CSUM | NETIF_F_RXHASH | NETIF_F_NTUPLE,
 	.mcdi_max_ver = -1,
 	.max_rx_ip_filters = FR_BZ_RX_FILTER_TBL0_ROWS,
+	.rx_hash_key_size = 16,
 };

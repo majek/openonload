@@ -466,6 +466,19 @@ static void thunks_exit(struct ppc64_data_struct *ppc64)
     }
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,12,0) || \
+    LINUX_VERSION_CODE >= KERNEL_VERSION(3,15,0)
+/* linux<3.12: flush_icache_range is inline, __flush_icache_range is exported;
+ * linux>=3.15: flush_icache_range is exported */
+#define my_flush_icache_range flush_icache_range
+#else
+/* flush_icache_range is a non-exported function; we are going to get it
+ * out of the kernel using efrm_find_ksym(). */
+#define NEED_FLUSH_ICACHE_HACK
+#include <ci/efrm/sysdep_linux.h>
+static void (*my_flush_icache_range)(unsigned long, unsigned long) = NULL;
+#endif
+
 static int thunks_add(struct ppc64_data_struct *ppc64, 
                       void *mod_func, void *return_addr, void *return_toc, void **pptr)
 {
@@ -498,7 +511,7 @@ static int thunks_add(struct ppc64_data_struct *ppc64,
     
     // ..aaand flush.
     flush_dcache_range((unsigned long)ppc64->thunks_p, (unsigned long)ppc64->thunks_q);
-    flush_icache_range((unsigned long)ppc64->thunks_p, (unsigned long)ppc64->thunks_q);
+    my_flush_icache_range((unsigned long)ppc64->thunks_p, (unsigned long)ppc64->thunks_q);
 
     return 0;
 }
@@ -506,6 +519,17 @@ static int thunks_add(struct ppc64_data_struct *ppc64,
 int linux_trampoline_ppc64_internal_ctor(void)
 {
     int rv = 0;
+
+#ifdef NEED_FLUSH_ICACHE_HACK
+    if( my_flush_icache_range == NULL )
+      my_flush_icache_range = efrm_find_ksym("flush_icache_range");
+    if( my_flush_icache_range == NULL ) {
+      ci_log("%s: failed to find flush_icache_range() function.  "
+             "Proceeding as if no_sct parameter was set to 1/",
+             __func__);
+      return -EINVAL;
+    }
+#endif
 
     memset(&ppc64_data, '\0', sizeof(struct ppc64_data_struct));
 

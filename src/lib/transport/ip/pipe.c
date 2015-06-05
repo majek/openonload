@@ -321,7 +321,7 @@ static int oo_pipe_read_wait(ci_netif* ni, struct oo_pipe* p)
  * Returns number of buffers advanced. */
 ci_inline int
 oo_pipe_move_read_ptr(ci_netif* ni, struct oo_pipe* p, ci_ip_pkt_fmt** pkt,
-                      ci_uint32 *offset)
+                      ci_uint32 *offset, int stack_locked)
 {
   int moved = 0;
   /* It might be we need to skip a 0 length payload pkt.
@@ -330,7 +330,7 @@ oo_pipe_move_read_ptr(ci_netif* ni, struct oo_pipe* p, ci_ip_pkt_fmt** pkt,
   while( *offset >= (*pkt)->pf.pipe.pay_len ) {
     /* read_ptr should not get ahead of write_ptr */
     ci_assert_nequal(OO_PKT_P(*pkt), p->write_ptr.pp);
-    *pkt = PKT_CHK(ni, oo_pipe_next_buf(p, *pkt));
+    *pkt = PKT_CHK_NML(ni, oo_pipe_next_buf(p, *pkt), stack_locked);
     *offset = 0;
     ++moved;
   }
@@ -378,7 +378,7 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
   }
 
   rc = 0;
-  pkt = PKT_CHK(ni, p->read_ptr.pp);
+  pkt = PKT_CHK_NNL(ni, p->read_ptr.pp);
   offset = p->read_ptr.offset;
   for( i = 0; i < iovlen; i++ ) {
     char* start = iov[i].iov_base;
@@ -390,7 +390,7 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
       /* We wish to do a wake if we advance the pointer, but to avoid branching,
        * detect this by keeping a cumulative count of the number of buffers
        * advanced. */
-      do_wake += oo_pipe_move_read_ptr(ni, p, &pkt, &offset);
+      do_wake += oo_pipe_move_read_ptr(ni, p, &pkt, &offset, 0);
 
       read_point = pipe_get_point(ni, p, pkt, offset);
       burst = CI_MIN(pkt->pf.pipe.pay_len - offset, end - start);
@@ -1276,10 +1276,11 @@ again:
   pipe_dump(ni, p);
 
 again_locked:
-  pkt = PKT_CHK(ni, p->read_ptr.pp);
+  pkt = PKT_CHK_NML(ni, p->read_ptr.pp, lock_stack);
   pre_first_pkt = pkt;
 
-  bufs_read_total += oo_pipe_move_read_ptr(ni, p, &pkt, &p->read_ptr.offset);
+  bufs_read_total += oo_pipe_move_read_ptr(ni, p, &pkt, &p->read_ptr.offset,
+                                           lock_stack);
 
   if( bufs_read_total > 0 ) {
     /* If we advanced the pointer, synchronise the pipe state now, as the

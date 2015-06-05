@@ -223,14 +223,7 @@ static void stack_dump_off(ci_netif *ni)
 {
   memset(ni->state->dump_intf, 0, sizeof(ni->state->dump_intf));
   libstack_netif_lock(ni);
-  while( ni->state->dump_read_i != ni->state->dump_write_i ) {
-    LOG_DUMP(ci_log("drop pkt %d", ni->state->dump_queue[
-                    ni->state->dump_read_i % CI_CFG_DUMPQUEUE_LEN]));
-    ci_netif_pkt_release(ni, PKT_CHK(ni,
-                    ni->state->dump_queue[
-                            ni->state->dump_read_i % CI_CFG_DUMPQUEUE_LEN]));
-    ni->state->dump_read_i++;
-  }
+  oo_tcpdump_free_pkts(ni, ni->state->dump_read_i);
   ci_log("Onload stack [%d,%s]: stop packet dump",
          ni->state->stack_id, ni->state->name);
 }
@@ -357,6 +350,15 @@ static void stack_pre_detach(ci_netif *ni)
   memset(ni->state->dump_intf, 0, sizeof(ni->state->dump_intf));
   ci_wmb();
   stack_dump(ni);
+
+  /* The stack is dying, but we should free the last packets to check that
+   * there is no packet leak */
+#ifndef NDEBUG
+  libstack_netif_lock(ni);
+  oo_tcpdump_free_pkts(ni, ni->state->dump_read_i);
+  libstack_netif_unlock(ni);
+#endif
+
   ci_log("Onload stack [%d,%s] is now unused: stop dumping",
          ni->state->stack_id, ni->state->name);
 }

@@ -1649,8 +1649,10 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
 
  unlock_release_exit_ret:
   /* Synchronise state to kernel (if necessary) and block. */
-  if( ep->epfd_syncs_needed && rc == 0 && timeout != 0 )
+  if( ep->epfd_syncs_needed &&
+      ( ! CITP_OPTS.ul_epoll_ctl_fast || (rc == 0 && timeout != 0) ) ) {
     citp_ul_epoll_ctl_sync(ep, fdi->fd);
+  }
   CITP_EPOLL_EP_UNLOCK(ep, 0);
   Log_POLL(ci_log("%s(%d): to kernel", __FUNCTION__, fdi->fd));
 

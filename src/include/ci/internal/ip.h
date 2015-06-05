@@ -917,10 +917,8 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args);
 extern int ci_udp_recvmsg_kernel(int fd, ci_netif* ni, ci_udp_state* us,
                                  struct msghdr* msg, int flags);
 
-extern int ci_tcp_ds_get_arp(ci_netif* ni, ci_tcp_state* ts,
-                             unsigned flags);
-extern int
-ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts,
+extern enum onload_delegated_send_rc
+ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts, unsigned flags,
                        void* headers, int* headers_len_inout,
                        int* ip_tcp_hdr_len_out,
                        int* tcp_seq_offset_out, int* ip_len_offset_out);
@@ -1391,9 +1389,7 @@ extern ci_tcp_state_synrecv* ci_tcp_listenq_lookup(ci_netif* netif,
 						   ci_tcp_socket_listen* tls,
 						   ciip_tcp_rx_pkt*) CI_HF;
 extern void ci_tcp_listenq_drop_oldest(ci_netif*, ci_tcp_socket_listen*) CI_HF;
-#ifdef __KERNEL__
 extern int ci_tcp_listenq_drop_all(ci_netif*, ci_tcp_socket_listen*) CI_HF;
-#endif
 
 extern int ci_tcp_listenq_try_promote(ci_netif*, ci_tcp_socket_listen*,
                                       ci_tcp_state_synrecv*,
@@ -1673,8 +1669,8 @@ extern int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
 #endif
 
 #if CI_CFG_LIMIT_AMSS || CI_CFG_LIMIT_SMSS
-extern int ci_tcp_limit_mss(int mss, ci_netif* ni,
-                            const char* caller) CI_HF;
+extern ci_uint16 ci_tcp_limit_mss(ci_uint16 mss, ci_netif* ni,
+                                  const char* caller) CI_HF;
 #endif
 
 
@@ -2498,6 +2494,19 @@ ci_inline int ci_netif_need_poll_maybe_spinning(ci_netif* ni, ci_uint64 frc_now,
 #define CI_ILL_CTX_T            ci_netif*
 #if CI_CFG_OOP_IS_PTR
 # define CI_ILL_ADDR(ctx,lnk)	((oo_p) (lnk))
+# define CI_ILL_CAS(p,old,new)  ci_cas_uintptr_succeed( \
+                                            (volatile ci_uintptr_t*) (p), \
+                                            (ci_uintptr_t) (old), \
+                                            (ci_uintptr_t) (new))
+# define CI_ILL_XCHG(p,new)     ((oo_p) ci_xchg_uintptr( \
+                                            (volatile ci_uintptr_t*) (p), \
+                                            (ci_uintptr_t) (new)))
+#else
+# define CI_ILL_CAS(p,old,new)  ci_cas32u_succeed((volatile ci_uint32*) (p), \
+                                                  (ci_uint32) (old), \
+                                                  (ci_uint32) (new))
+# define CI_ILL_XCHG(p,new)     ((oo_p) ci_xchg32((volatile ci_uint32*) (p), \
+                                                  (ci_uint32) (new)))
 #endif
 #define CI_ILL_NO_TYPES
 #include <ci/tools/idllist.h.tmpl>
@@ -3270,7 +3279,7 @@ ci_inline int ci_tcp_is_cached(ci_tcp_state* ts)
 }
 
 
-ci_inline ci_uint32 tcp_eff_mss(const ci_tcp_state* ts) {
+ci_inline ci_uint16 tcp_eff_mss(const ci_tcp_state* ts) {
   if( ts->s.b.state != CI_TCP_CLOSED ) {
     ci_assert(ts->s.b.state != CI_TCP_LISTEN);
     ci_assert_gt(CI_CFG_TCP_MINIMUM_MSS, tcp_outgoing_opts_len(ts));
@@ -3469,7 +3478,7 @@ ci_inline void ci_tcp_set_eff_mss(ci_netif* netif, ci_tcp_state* ts) {
   ts->eff_mss = CI_MAX(x, CI_CFG_TCP_MINIMUM_MSS) - tcp_outgoing_opts_len(ts);
 
   /* Increase ssthresh & cwndif eff_mss has increased */
-  ts->ssthresh = CI_MAX(ts->ssthresh, ts->eff_mss << 1u);
+  ts->ssthresh = CI_MAX(ts->ssthresh, (ci_uint32) ts->eff_mss << 1u);
   if( ts->cwnd < ts->eff_mss )
     ci_tcp_set_initialcwnd(netif, ts);
 
@@ -3689,13 +3698,22 @@ ci_inline void ci_tcp_acceptq_put_back(ci_netif* ni, ci_tcp_socket_listen* tls,
 ******************************** Netif *******************************
 *********************************************************************/
 
+#define CI_NI_AUX_BUFS_MAX(ni) \
+  (((ni)->state->ep_ofs - (ni)->state->aux_ofs) / sizeof(ci_ni_aux_mem))
+
 /* Does exactly what it says on the tin! */
+ci_inline ci_ni_aux_mem* ci_tcp_listenq_p2aux(ci_netif* ni, oo_p p)
+{
+  return (void*)CI_NETIF_PTR(ni, p);
+}
+
 ci_inline void ci_ni_aux_free(ci_netif* ni, ci_ni_aux_mem* tsr) {
   /* do not assert this: we are called from tcp_helper_rm_alloc(),
    * when lock does not exist yet */
   /* ci_assert( ci_netif_is_locked(ni) ); */
   tsr->link.next = ni->state->free_aux_mem;
   ni->state->free_aux_mem = oo_ptr_to_statep(ni, tsr);
+  ni->state->n_free_aux_bufs++;
 }
 ci_inline void ci_tcp_synrecv_free(ci_netif* ni, ci_tcp_state_synrecv* tsr) {
   ci_ni_aux_free(ni, CI_CONTAINER(ci_ni_aux_mem, u.synrecv, tsr));
@@ -3707,6 +3725,7 @@ ci_inline ci_ni_aux_mem* ci_ni_aux_alloc(ci_netif* ni) {
   ci_assert( ci_netif_is_locked(ni) );
   aux = (void*) CI_NETIF_PTR(ni, ni->state->free_aux_mem);
   ni->state->free_aux_mem = aux->link.next;
+  ni->state->n_free_aux_bufs--;
   return aux;
 }
 ci_inline ci_tcp_state_synrecv* ci_tcp_synrecv_alloc(ci_netif* ni) {
@@ -3941,26 +3960,16 @@ ci_inline int oo_tcpdump_check(ci_netif *ni, ci_ip_pkt_fmt *pkt, int intf_i)
       oo_tcpdump_queue_len(ni) < CI_CFG_DUMPQUEUE_LEN - 1;
 }
 
-/* Release the packet we are going to overwrite and, possibly, some others.
- * Return 1 if we can dump one more packet. */
-ci_inline int oo_tcpdump_free_pkts(ci_netif *ni)
+/* Release all the packets up to dump_read_i */
+ci_inline void oo_tcpdump_free_pkts(ci_netif *ni, ci_uint8 i)
 {
-  ci_uint8 i = ni->state->dump_write_i;
   oo_pkt_p id;
+  ci_uint8 read_i = ni->state->dump_read_i;
 
   ci_assert(ci_netif_is_locked(ni));
 
-  /* If reader is too slow, do not dump anything */
-  if( i - ni->state->dump_read_i >= CI_CFG_DUMPQUEUE_LEN )
-    return 0;
-
-  /* Free this packet */
-  id = ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN];
-  if( id == OO_PP_NULL )
-    return 1;
-
-  /* If we are going to free something, let's free everything possible */
   do {
+    id = ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN];
     if( id != OO_PP_NULL ) {
       ci_ip_pkt_fmt *pkt = PKT_CHK(ni, id);
       ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN] = OO_PP_NULL;
@@ -3976,15 +3985,33 @@ ci_inline int oo_tcpdump_free_pkts(ci_netif *ni)
       }
     }
     i++;
-    id = ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN];
-  } while( i - ni->state->dump_read_i >= CI_CFG_DUMPQUEUE_LEN );
+  } while( (ci_uint8)(i - read_i) < CI_CFG_DUMPQUEUE_LEN  );
+}
+
+/* Release the packet we are going to overwrite and, possibly, some others.
+ * Return 1 if we can dump one more packet. */
+ci_inline int oo_tcpdump_free_pkts_4write(ci_netif *ni)
+{
+  ci_uint8 i = ni->state->dump_write_i;
+
+  /* If reader is too slow, do not dump anything */
+  if( i - ni->state->dump_read_i >= CI_CFG_DUMPQUEUE_LEN )
+    return 0;
+
+  /* Free this packet */
+  if( ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN] == OO_PP_NULL )
+    return 1;
+
+  /* If we are going to free something, let's free everything possible */
+  oo_tcpdump_free_pkts(ni, i);
   return 1;
 }
 
 /* Dump this packet */
 ci_inline void oo_tcpdump_dump_pkt(ci_netif *ni, ci_ip_pkt_fmt *pkt)
 {
-  if( !oo_tcpdump_free_pkts(ni) || (ni->flags & CI_NETIF_FLAG_MSG_WARM) )
+  if( !oo_tcpdump_free_pkts_4write(ni) ||
+      (ni->flags & CI_NETIF_FLAG_MSG_WARM) )
     return;
 
   ci_assert_equal(ni->state->dump_queue[ni->state->dump_write_i %

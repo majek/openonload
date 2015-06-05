@@ -55,6 +55,9 @@
 #include <ci/efhw/eventq.h>
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_resource_private.h>
+#ifdef CONFIG_SFC_RESOURCE_VF
+#include <ci/efrm/vf_resource_private.h>
+#endif
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/efrm_nic.h>
 #include <ci/efrm/buffer_table.h>
@@ -175,9 +178,17 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 	cb_info->vi = NULL;
 
 	/* Disable the callback. */
+#ifdef CONFIG_SFC_RESOURCE_VF
+	if (virs->allocation.vf)
+		spin_lock(&virs->allocation.vf->vf_evq_cb_lock);
+#endif
 	bit = test_and_clear_bit(VI_RESOURCE_EVQ_STATE_CALLBACK_REGISTERED,
 				 &cb_info->state);
 	EFRM_ASSERT(bit);	/* do not call me twice! */
+#ifdef CONFIG_SFC_RESOURCE_VF
+	if (virs->allocation.vf)
+		spin_unlock(&virs->allocation.vf->vf_evq_cb_lock);
+#endif
 
 	/* If the vi had been primed, unset it. */
 	test_and_clear_bit(VI_RESOURCE_EVQ_STATE_WAKEUP_PENDING,

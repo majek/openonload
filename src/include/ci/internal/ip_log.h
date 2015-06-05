@@ -315,7 +315,7 @@ extern unsigned ci_tp_log CI_HV;
   ((flags) & CI_PKT_FLAG_RX              ? "Rx ":"")
 
 
-#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s"
+#define CI_NETIF_LOCK_FMT         "%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_NETIF_LOCK_PRI_ARG(v)                                        \
   ((v) & CI_EPLOCK_UNLOCKED              ? "UNLOCKED ":""),             \
   ((v) & CI_EPLOCK_LOCKED                ? "LOCKED ":""),               \

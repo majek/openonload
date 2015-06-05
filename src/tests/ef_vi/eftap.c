@@ -290,6 +290,7 @@ static void usage(void)
   fprintf(stderr, "  -s <microseconds>   - time to sleep between sends\n");
   fprintf(stderr, "  -l <local-port>     - Change local port to send from\n");
   fprintf(stderr, "  -t                  - request time packet hit wire\n");
+  fprintf(stderr, "  -b                  - enable loopback on the VI\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "e.g.:\n");
   fprintf(stderr, "  - Send pkts to 239.1.2.3:1234 from eth2:\n"
@@ -313,13 +314,14 @@ int main(int argc, char* argv[])
   char* local_ip;
   ef_pd pd;
   ef_memreg mr;
-  int ifindex, mcast_port;
+  int ifindex, mcast_port, vi_flags = EF_VI_FLAGS_DEFAULT;
   int cfg_payload_len = DEFAULT_PAYLOAD_SIZE, cfg_iter = 10,
-    cfg_usleep = 0;
+    cfg_usleep = 0, cfg_loopback = 0;
   int i, c;
   void* p;
+  int pd_flags = 0;
 
-  while( (c = getopt(argc, argv, "n:p:s:l:t")) != -1 )
+  while( (c = getopt(argc, argv, "n:p:s:l:tb")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -336,8 +338,12 @@ int main(int argc, char* argv[])
     case 't':
       cfg_timestamping = 1;
       break;
+    case 'b':
+      cfg_loopback = 1;
+      break;
     case '?':
       usage();
+      break;
     default:
       TEST(0);
     }
@@ -374,11 +380,14 @@ int main(int argc, char* argv[])
             "MTU\n", cfg_payload_len);
   }
 
+  if( cfg_timestamping )
+    vi_flags |= EF_VI_TX_TIMESTAMPS;
+  if( cfg_loopback )
+    pd_flags |= EF_PD_MCAST_LOOP;
+
   TRY(ef_driver_open(&dh));
-  TRY(ef_pd_alloc(&pd, dh, ifindex, 0));
-  TRY(ef_vi_alloc_from_pd(&vi, dh, &pd, dh, -1, -1, -1, NULL, -1,
-                          cfg_timestamping ? EF_VI_TX_TIMESTAMPS :
-                          EF_VI_FLAGS_DEFAULT));
+  TRY(ef_pd_alloc(&pd, dh, ifindex, pd_flags));
+  TRY(ef_vi_alloc_from_pd(&vi, dh, &pd, dh, -1, -1, -1, NULL, -1, vi_flags));
 
   printf("txq_size=%d\n", ef_vi_transmit_capacity(&vi));
   printf("rxq_size=%d\n", ef_vi_receive_capacity(&vi));

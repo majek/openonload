@@ -431,8 +431,10 @@ enum ef_vi_flags {
   EF_VI_RX_TIMESTAMPS     = 0x10000,            /* ef10 only */
   /** Add timestamp to transmitted packets (7000 series only) */
   EF_VI_TX_TIMESTAMPS     = 0x20000,            /* ef10 only */
-  /** Enable loopback of transmitted packets (7000 series only) */
-  EF_VI_TX_LOOPBACK       = 0x40000,            /* ef10 only */
+  /* Flag EF_VI_TX_LOOPBACK (0x40000) has been removed. Similar
+   * functionality can now be achieved with protection domain and
+   * EF_PD_MCAST_LOOP flag.
+   * Flag value 0x40000 is not to be reused. */
   /** Enable packed stream mode for received packets (7000 series only) */
   EF_VI_RX_PACKED_STREAM  = 0x80000,            /* ef10 only */
   /** Use 64KB packe3d stream buffers, instead of the 1024KB default
@@ -1237,7 +1239,7 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
 **
 ** \param vi     The virtual interface from which to transmit.
 ** \param offset The offset within its Programmed I/O region to the start
-**               of the packet. This must be aligned to at least a 16-byte
+**               of the packet. This must be aligned to at least a 64-byte
 **               boundary.
 ** \param len    Length of the packet to transmit. This must be at a
 **               multiple of 16 bytes.
@@ -1272,7 +1274,7 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
 ** \param vi         The virtual interface from which to transmit.
 ** \param pio_offset The offset within its Programmed I/O region to the
 **                   start of the packet. This must be aligned to at least
-**                   a 16-byte boundary.
+**                   a 64-byte boundary.
 ** \param src_buf    The source buffer from which to read the packet.
 ** \param len        Length of the packet to transmit. This must be at
 **                   least 16 bytes.

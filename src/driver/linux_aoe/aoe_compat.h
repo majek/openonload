@@ -164,7 +164,7 @@ extern void device_destroy(struct class *class, dev_t devt);
 	}
 #endif /* AOE_NEED_TIMESPEC_COMPARE */
 
-#ifdef AOE_NEED_IS_ERR_OR_NULL
+#if defined(AOE_NEED_IS_ERR_OR_NULL) && !defined(EFX_NEED_IS_ERR_OR_NULL)
 	static inline long __must_check IS_ERR_OR_NULL(const void *ptr)
 	{
 		return !ptr || IS_ERR_VALUE((unsigned long)ptr);

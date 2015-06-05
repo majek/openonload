@@ -71,19 +71,28 @@ struct efrm_pd_owner_ids;
 # define EFRM_PD_RX_PACKED_STREAM_MEMORY_ALIGNMENT  (1u << 20)
 #endif
 
+/*   EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE determines whether the protection
+ *       domain will use physical addresses,
+ *       or virtual addresses translated via the buffer table. */
+#define EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE 0x1
+/*   EFRM_PD_ALLOC_FLAG_HW_LOOPBACK determines whether HW LOOPBACK to other
+ *       stacks on the same protection domain will be enabled. */
+#define EFRM_PD_ALLOC_FLAG_HW_LOOPBACK    0x2
 
 /* Allocate a protection domain.
  *
  * If [vf_opt] is NULL, then [client_opt] must not be NULL.  If [vf_opt] is
  * supplied then [client_opt] is ignored.
  *
- * [phys_addr_mode] determines whether the protection domain will use
- * physical addresses, or virtual addresses translated via the buffer
- * table.
+ * [flags] one of the following flags (see above for explanation)
+ *         EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE
+ *         EFRM_PD_ALLOC_FLAG_HW_LOOPBACK
  */
 extern int
 efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
-	      struct efrm_vf *vf_opt, int phys_addr_mode);
+	      struct efrm_vf *vf_opt, int flags);
+
+extern unsigned efrm_pd_stack_id_get(struct efrm_pd *pd);
 
 extern void
 efrm_pd_release(struct efrm_pd *);

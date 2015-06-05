@@ -620,7 +620,7 @@ void ci_tcp_enter_fast_recovery(ci_netif* ni, ci_tcp_state* ts)
   ++ts->stats.fast_recovers;
 
   ts->ssthresh = ci_tcp_losswnd(ts);
-  ts->cwnd = ts->ssthresh + ts->dup_thresh * tcp_eff_mss(ts);
+  ts->cwnd = ts->ssthresh + (ci_uint32) ts->dup_thresh * tcp_eff_mss(ts);
   ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(ni).loss_min_cwnd);
 
   ci_assert(ts->cwnd >= tcp_eff_mss(ts));
@@ -1125,6 +1125,11 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
   ci_assert(!ci_ip_queue_is_empty(rtq) || SEQ_EQ(rxp->ack, tcp_snd_nxt(ts)) ||
             ts-> snd_delegated != 0);
   tcp_snd_una(ts) = rxp->ack;
+
+  /* Wake up TX if necessary */
+  if( NI_OPTS(netif).tcp_sndbuf_mode == 1 &&
+      ci_tcp_tx_advertise_space(netif, ts) )
+    ci_tcp_wake_possibly_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_TX);
 }
 
 
@@ -1190,12 +1195,6 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
 {
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   int snd_max_different;
-  int tx_space = 0, tx_prequeue = 0;
-
-  if( NI_OPTS(netif).tcp_sndbuf_mode == 1 ) {
-    tx_space = ci_tcp_tx_advertise_space(netif, ts);
-    tx_prequeue = oo_atomic_read(&ts->send_prequeue_in);
-  }
 
   /* NB. Do not assert that ACK flag is set here, because it might not be!
   ** (See below; we don't check ACK flag when connection is synchronised).
@@ -1318,13 +1317,6 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
   /* Clear keepalive counter -- it is important to clear this counter up on
    * every ACK for our keepalive request. */
   ci_tcp_kalive_reset(netif, ts);
-
-  /* Wake up TX if necessary */
-  if( NI_OPTS(netif).tcp_sndbuf_mode == 1 &&
-      ci_tcp_tx_advertise_space(netif, ts) &&
-      ( ! tx_space ||
-        tx_prequeue != oo_atomic_read(&ts->send_prequeue_in) ) )
-    ci_tcp_wake_possibly_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_TX);
 }
 
 
@@ -2241,10 +2233,9 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
     else if( ~ts->tcpflags & CI_TCPT_FLAG_SYNCOOKIE )
       ci_tcp_update_rtt(netif, ts, ci_tcp_time_now(netif) - ts->timed_ts);
 
-    /* Do not defer ACK in TCP_DEFER_ACCEPT case
-     * to avoid unnecessary retransmits. */
-    if( tls->c.tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF &&
-        (tsr->retries & CI_FLAG_TSR_RETRIES_MASK) < tls->c.tcp_defer_accept )
+    /* Do not defer ACK if we have data here to avoid
+     * unnecessary retransmits (mostly used for TCP_DEFER_ACCEPT). */
+    if( ! SEQ_EQ(rxp->seq, pkt->pf.tcp_rx.end_seq) )
       TCP_FORCE_ACK(ts);
     /* Now handle ACK and data */
     handle_rx_slow(ts, netif, rxp);
@@ -2556,7 +2547,10 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 #if CI_CFG_TCP_INVALID_OPT_RST
     /* bad option block, send reset rfc1122 4.2.2.5 */
     LOG_U(log(LPF "%d LISTEN bad SYN options will reset", S_FMT(tls)));
-    ci_tcp_synrecv_free(netif, tsr);
+    if( do_syncookie )
+      ci_free(tsr);
+    else
+      ci_tcp_synrecv_free(netif, tsr);
     CITP_STATS_NETIF_INC(netif, rst_sent_bad_options);
     goto reset_out;
 #endif
@@ -3247,7 +3241,6 @@ static void handle_unacceptable_seq(ci_netif* netif, ci_tcp_state* ts,
                  pkt->pf.tcp_rx.end_seq, TCP_RCV_PRI_ARG(ts)));
       LOG_TR(log("  inflated window by %d", inflate));
       ci_tcp_tx_advance(ts, netif);
-      ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_TX);
     }
   }
 

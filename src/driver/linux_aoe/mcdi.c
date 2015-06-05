@@ -1345,7 +1345,7 @@ static const char* ptp_event_code_string(int32_t data)
       }
 }
 
-bool aoe_handle_mcdi_event(struct aoe_port_info *nic_port, void *p_event)
+int aoe_handle_mcdi_event(struct aoe_port_info *nic_port, void *p_event)
 {
   efx_qword_t *event = p_event;
   int32_t code = MCDI_EVENT_FIELD(*event, CODE);
@@ -1353,13 +1353,13 @@ bool aoe_handle_mcdi_event(struct aoe_port_info *nic_port, void *p_event)
   struct aoe_device *dev = nic_port->aoe_parent;
 
   if (MCDI_EVENT_CODE_AOE != code)
-    return false;
+    return -EINVAL;
 
   /* We do not have any per-port AOE events at the moment.
    * So ignore any events on ports other than port0 as duplicates
    */
   if (AOE_PHYS_PORT(nic_port) != 0)
-    return true;
+    return 0;
 
   aoe_code = MCDI_EVENT_FIELD(*event, AOE_ERR_TYPE);
 
@@ -1415,10 +1415,10 @@ bool aoe_handle_mcdi_event(struct aoe_port_info *nic_port, void *p_event)
   default:
    printk(KERN_INFO "sfc_aoe: Unhandled event type=%d\n",
            aoe_code);
-    return false;
+    return -EINVAL;
   }
 
-  return true;
+  return 1;
 }
 
 int aoe_mcdi_fpga_reload(struct aoe_device *dev, int partition)

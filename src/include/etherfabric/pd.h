@@ -71,6 +71,8 @@ enum ef_pd_flags {
   EF_PD_RX_PACKED_STREAM = 0x4,  /* ef10 only */
   /** Protection domain supports virtual ports */
   EF_PD_VPORT            = 0x8,  /* ef10 only */
+  /** Protection domain supports HW multicast loopback */
+  EF_PD_MCAST_LOOP      = 0x10,  /* ef10 only */
 };
 
 

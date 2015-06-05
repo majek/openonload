@@ -355,9 +355,6 @@ extern int ef_vi_prime(ef_vi* vi, ef_driver_handle dh, unsigned current_ptr);
 enum ef_filter_flags {
   /** No flags */
   EF_FILTER_FLAG_NONE           = 0x0,
-  /** If set, the filter will replace an existing filter of the same
-  ** priority or lower */
-  EF_FILTER_FLAG_REPLACE        = 0x1,
   /** If set, the filter will receive looped back packets for matching (see
   ** ef_filter_spec_set_tx_port_sniff()) */
   EF_FILTER_FLAG_MCAST_LOOP_RECEIVE     = 0x2,
@@ -399,15 +396,6 @@ typedef struct {
 **
 ** This function must be called to initialize a filter before calling the
 ** other filter functions.
-**
-** The EF_FILTER_FLAG_REPLACE flag does the following:
-** - if set, the filter will replace an existing filter of the same
-**   priority or lower
-** - otherwise, the filter will replace an existing filter only of   a
-**   lower priority.
-**
-** (The priority is set by the filter type, and there is no API to change
-** it.)
 **
 **  The EF_FILTER_FLAG_MCAST_LOOP_RECEIVE flag does the following:
 ** - if set, the filter will receive looped back packets for matching (see

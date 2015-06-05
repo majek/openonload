@@ -876,28 +876,29 @@ int efrm_vf_alloc_init(struct efrm_vf *vf, struct efrm_vf *linked,
 static void vf_vi_call_evq_callback(struct efrm_vf_vi *vi)
 {
 	struct efrm_vf *vf = vi_to_vf(vi);
-	struct efrm_vi *virs = vi->virs;
+	struct efrm_vi *virs;
 	efrm_evq_callback_fn handler;
 	void *arg;
 
+	spin_lock_bh(&vf->vf_evq_cb_lock);
+
+	virs = vi->virs;
 	EFRM_ASSERT(virs);
 
 	handler = virs->evq_callback_fn;
-	rmb();
 	arg = virs->evq_callback_arg;
 
-	if (handler == NULL) {
+	if (handler == NULL)
 		/* This is seen at VI creation time, so we should not cry
 		 * too loud.  It will be nice to see this at other times,
 		 * but it is not easy. */
 		EFRM_TRACE("%s VI %d/%d interrupt IRQ %d but no handler",
 			   pci_name(vf->pci_dev),
 			   vi->index, virs->allocation.instance, vi->irq);
-		return;
-        }
-
-	/* Fixme: callback with is_timeout=true? */
-	handler(arg, false, efrm_nic_tablep->nic[vf->nic_index]);
+	else
+		/* Fixme: callback with is_timeout=true? */
+		handler(arg, false, efrm_nic_tablep->nic[vf->nic_index]);
+	spin_unlock_bh(&vf->vf_evq_cb_lock);
 }
 
 static void efrm_vf_tasklet(unsigned long l)
@@ -991,7 +992,7 @@ void efrm_vf_vi_start(struct efrm_vi *virs, const char *name)
 	EFRM_ASSERT(vf->vi_base >= 64);
 	EFRM_ASSERT(virs->allocation.instance >= vf->vi_base);
 	EFRM_ASSERT(virs->allocation.instance < vf->vi_base + vf->vi_count);
-
+	spin_lock_init(&vf->vf_evq_cb_lock);
 	vi->virs = virs;
 	if (name == NULL)
 		name = "vfvi";
@@ -1035,7 +1036,10 @@ static int efrm_vf_vi_set_cpu_affinity_via_proc(struct efrm_vi *virs, int cpu)
 	content = kmalloc(content_len, GFP_KERNEL);
 	if (!content)
 		return -ENOMEM;
-#ifdef EFX_HAVE_OLD_CPUMASK_SCNPRINTF
+#if defined(EFX_HAVE_PRINTF_BITMAPS)
+	snprintf(content, content_len, "%*pb",
+		 cpumask_pr_args(cpumask_of(cpu)));
+#elif defined(EFX_HAVE_OLD_CPUMASK_SCNPRINTF)
 	{
 		cpumask_t mask = cpumask_of_cpu(cpu);
 		cpumask_scnprintf(content, content_len, mask);

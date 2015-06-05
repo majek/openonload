@@ -51,6 +51,11 @@ extern int tcp_helper_rx_vi_id(tcp_helper_resource_t*, int hwport);
  */
 extern int tcp_helper_vi_hw_stack_id(tcp_helper_resource_t* trs, int hwport);
 
+/* Return the hw stack id of the VI associated with the named hwport on
+ * given cluster, or -1 if we don't have a VI for that hwport.
+ */
+extern int tcp_helper_cluster_vi_hw_stack_id(tcp_helper_cluster_t* thc, int hwport);
+
 /* Return whether receiving of looped back traffic is enabled on
  * the named hwport, or -1 if we don't have a VI for that hwport.
  */

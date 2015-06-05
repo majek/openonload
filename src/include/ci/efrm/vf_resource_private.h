@@ -115,6 +115,8 @@ struct efrm_vf {
 	unsigned long iova_base;
 #endif
 
+	spinlock_t vf_evq_cb_lock;
+
 	/* Data from the status page: */
 	u8 vi_scale;
 	u8 mac_addr[ETH_ALEN];

@@ -61,12 +61,13 @@ static void aoe_dl_remove(struct efx_dl_device* dl_dev)
 	dl_dev->priv = NULL;
 }
 
-static bool aoe_dl_handle_event(struct efx_dl_device *dl_dev, void *event)
+static int aoe_dl_handle_event(struct efx_dl_device *dl_dev,
+			       void *event, int budget)
 {
 	struct aoe_port_info *port = (struct aoe_port_info *)dl_dev->priv;
 
 	if (!port)
-		return false;
+		return -EINVAL;
 
 	return aoe_handle_mcdi_event(port, event);
 }

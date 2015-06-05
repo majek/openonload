@@ -303,6 +303,7 @@ ci_int32 ci_tcp_rcvbuf_established(ci_netif* ni, ci_sock_cmn* s)
 void ci_tcp_set_established_state(ci_netif* ni, ci_tcp_state* ts)
 {
   ci_assert(ts);
+  ci_assert(ci_netif_is_locked(ni));
 
   ts->s.b.state = CI_TCP_ESTABLISHED;
   CI_TCP_STATS_INC_CURR_ESTAB( ni );
@@ -673,7 +674,7 @@ void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
         break;
       ci_ni_dllist_iter(netif, link);
     }
-    ci_assert_ne(link, ci_ni_dllist_end(netif, &tls->epcache_pending));
+    ci_assert_nequal(link, ci_ni_dllist_end(netif, &tls->epcache_pending));
   }
 #endif
   /* Switch lists */
@@ -1164,7 +1165,7 @@ out:
 
 #if CI_CFG_LIMIT_AMSS || CI_CFG_LIMIT_SMSS
 #include <ci/driver/efab/hardware.h>
-int ci_tcp_limit_mss(int mss, ci_netif* ni, const char* caller)
+ci_uint16 ci_tcp_limit_mss(ci_uint16 mss, ci_netif* ni, const char* caller)
 {
   if( mss > ni->state->max_mss ) {
 #if CI_CFG_STATS_NETIF
@@ -1225,8 +1226,7 @@ void ci_tcp_perform_deferred_socket_work(ci_netif* ni, ci_tcp_state* ts)
 void ci_tcp_set_sndbuf(ci_netif* ni, ci_tcp_state* ts)
 {
   int size = tcp_eff_mss(ts);
-  int tx_space = ci_tcp_tx_advertise_space(ni, ts);
-  int tx_prequeue = oo_atomic_read(&ts->send_prequeue_in);
+  ci_int32 old_so_sndbuf_pkts = ts->so_sndbuf_pkts;
 
   ci_assert(tcp_eff_mss(ts) != 0);
 
@@ -1249,8 +1249,7 @@ void ci_tcp_set_sndbuf(ci_netif* ni, ci_tcp_state* ts)
   /* If we've tx space available and ( there were no space when we started
    * or we are racing with prequeue refill ), send a wake up. */
   if( ci_tcp_tx_advertise_space(ni, ts ) &&
-      ( ! tx_space ||
-        tx_prequeue != oo_atomic_read(&ts->send_prequeue_in) ) )
+      old_so_sndbuf_pkts < ts->so_sndbuf_pkts )
     ci_tcp_wake_possibly_not_in_poll(ni, ts, CI_SB_FLAG_WAKE_TX);
 }
 

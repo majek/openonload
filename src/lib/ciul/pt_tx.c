@@ -105,13 +105,20 @@ int ef_pio_memcpy(ef_vi* vi, const void* base, int offset, int len)
   offset = CI_ROUND_DOWN(offset, 8);
   len = CI_ROUND_UP(len, 8);
 
+  /* To ensure that the resulting TLPs are aligned and have all their
+   * byte-enable bits set, we must ensure that the data in the WC buffer is
+   * always contiguous. See bug49902. */
+  wmb_wc();
+
   /* This loop is doing the following, but guarantees word access:
    * memcpy(pio->pio_io + offset, pio->pio_buffer + offset, len); 
    */
   dst=(uint64_t*)(pio->pio_io + offset);
   src=(uint64_t*)(pio->pio_buffer + offset);
-  for( ; src < (uint64_t*)(pio->pio_buffer + offset + len); ++src,++dst )
+  for( ; src < (uint64_t*)(pio->pio_buffer + offset + len); ++src,++dst ) {
     *dst = *src;
+    ci_compiler_barrier();
+  }
   
   return 0;
 }

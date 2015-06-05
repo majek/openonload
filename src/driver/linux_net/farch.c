@@ -485,7 +485,7 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 			      FRF_BZ_TX_NON_IP_DROP_DIS, 1);
 
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
-		int csum = tx_queue->queue & EFX_TXQ_TYPE_OFFLOAD;
+		int csum = tx_queue->csum_offload;
 		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_IP_CHKSM_DIS, !csum);
 		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_TCP_CHKSM_DIS,
 				    !csum);
@@ -499,7 +499,7 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 		BUILD_BUG_ON(EFX_MAX_TX_QUEUES > 128);
 
 		efx_reado(efx, &reg, FR_AA_TX_CHKSM_CFG);
-		if (tx_queue->queue & EFX_TXQ_TYPE_OFFLOAD)
+		if (tx_queue->csum_offload)
 			__clear_bit_le(tx_queue->queue, &reg);
 		else
 			__set_bit_le(tx_queue->queue, &reg);
@@ -954,16 +954,14 @@ efx_farch_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 		/* Transmit completion */
 		tx_ev_desc_ptr = EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_DESC_PTR);
 		tx_ev_q_label = EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_Q_LABEL);
-		tx_queue = efx_channel_get_tx_queue(
-			channel, tx_ev_q_label % EFX_TXQ_TYPES);
+		tx_queue = efx_channel_get_tx_queue(channel, tx_ev_q_label);
 		tx_descs = ((tx_ev_desc_ptr + 1 - tx_queue->read_count) &
 			    tx_queue->ptr_mask);
 		efx_xmit_done(tx_queue, tx_ev_desc_ptr);
 	} else if (EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_WQ_FF_FULL)) {
 		/* Rewrite the FIFO write pointer */
 		tx_ev_q_label = EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_Q_LABEL);
-		tx_queue = efx_channel_get_tx_queue(
-			channel, tx_ev_q_label % EFX_TXQ_TYPES);
+		tx_queue = efx_channel_get_tx_queue(channel, tx_ev_q_label);
 
 		netif_tx_lock(efx->net_dev);
 		efx_farch_notify_tx_desc(tx_queue);
@@ -1317,12 +1315,13 @@ efx_farch_handle_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 		wake_up(&efx->flush_wq);
 }
 
-static void
-efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
+static int
+efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event, int budget)
 {
 	struct efx_nic *efx = channel->efx;
 	unsigned int ev_sub_code;
 	unsigned int ev_sub_data;
+	int spent = 0;
 
 	ev_sub_code = EFX_QWORD_FIELD(*event, FSF_AZ_DRIVER_EV_SUBCODE);
 	ev_sub_data = EFX_QWORD_FIELD(*event, FSF_AZ_DRIVER_EV_SUBDATA);
@@ -1333,14 +1332,14 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 			   channel->channel, ev_sub_data);
 		efx_farch_handle_tx_flush_done(efx, event);
 		efx_siena_sriov_tx_flush_done(efx, event);
-		efx_dl_handle_event(efx, event);
+		spent = efx_dl_handle_event(efx, event, budget);
 		break;
 	case FSE_AZ_RX_DESCQ_FLS_DONE_EV:
 		netif_vdbg(efx, hw, efx->net_dev, "channel %d RXQ %d flushed\n",
 			   channel->channel, ev_sub_data);
 		efx_farch_handle_rx_flush_done(efx, event);
 		efx_siena_sriov_rx_flush_done(efx, event);
-		efx_dl_handle_event(efx, event);
+		spent = efx_dl_handle_event(efx, event, budget);
 		break;
 	case FSE_AZ_EVQ_INIT_DONE_EV:
 		netif_dbg(efx, hw, efx->net_dev,
@@ -1350,19 +1349,19 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 	case FSE_AZ_SRM_UPD_DONE_EV:
 		netif_vdbg(efx, hw, efx->net_dev,
 			   "channel %d SRAM update done\n", channel->channel);
-		efx_dl_handle_event(efx, event);
+		spent = efx_dl_handle_event(efx, event, budget);
 		break;
 	case FSE_AZ_WAKE_UP_EV:
 		netif_vdbg(efx, hw, efx->net_dev,
 			   "channel %d RXQ %d wakeup event\n",
 			   channel->channel, ev_sub_data);
-		efx_dl_handle_event(efx, event);
+		spent = efx_dl_handle_event(efx, event, budget);
 		break;
 	case FSE_AZ_TIMER_EV:
 		netif_vdbg(efx, hw, efx->net_dev,
 			   "channel %d RX queue %d timer expired\n",
 			   channel->channel, ev_sub_data);
-		efx_dl_handle_event(efx, event);
+		spent = efx_dl_handle_event(efx, event, budget);
 		break;
 	case FSE_AA_RX_RECOVER_EV:
 		netif_err(efx, hw, efx->net_dev,
@@ -1397,7 +1396,8 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 			efx_siena_sriov_desc_fetch_err(efx, ev_sub_data);
 		break;
 	default:
-		if (!efx_dl_handle_event(efx, event)) {
+		spent = efx_dl_handle_event(efx, event, budget);
+		if (spent < 0) {
 			netif_vdbg(efx, hw, efx->net_dev,
 				   "channel %d unknown driver event"
 				   " code %d data %04x\n",
@@ -1406,6 +1406,8 @@ efx_farch_handle_driver_event(struct efx_channel *channel, efx_qword_t *event)
 		}
 		break;
 	}
+
+	return spent >= 0 ? spent : 0;
 }
 
 int efx_farch_ev_process(struct efx_channel *channel, int budget)
@@ -1416,6 +1418,7 @@ int efx_farch_ev_process(struct efx_channel *channel, int budget)
 	int ev_code;
 	int tx_descs = 0;
 	int spent = 0;
+	int rc;
 
 	read_ptr = channel->eventq_read_ptr;
 
@@ -1454,19 +1457,23 @@ int efx_farch_ev_process(struct efx_channel *channel, int budget)
 			efx_farch_handle_generated_event(channel, &event);
 			break;
 		case FSE_AZ_EV_CODE_DRIVER_EV:
-			efx_farch_handle_driver_event(channel, &event);
-			/* Currently, driverlink API does not allow us to
-			 * find the real "spent" number, but we do not want
-			 * to habdle here ALL char event, so let's linit
-			 * them in some way. */
-			if (++spent == budget)
+			rc = efx_farch_handle_driver_event(channel, &event,
+							   budget - spent);
+			if (rc > 0)
+				spent += rc;
+			if (spent >= budget)
 				goto out;
 			break;
 		case FSE_CZ_EV_CODE_USER_EV:
 			efx_siena_sriov_event(channel, &event);
 			break;
 		case FSE_CZ_EV_CODE_MCDI_EV:
-			efx_mcdi_process_event(channel, &event);
+			rc = efx_mcdi_process_event(channel, &event,
+						    budget - spent);
+			if (rc > 0)
+				spent += rc;
+			if (spent >= budget)
+				goto out;
 			break;
 		case FSE_AZ_EV_CODE_GLOBAL_EV:
 			if (efx->type->handle_global_event &&
@@ -1829,6 +1836,24 @@ void efx_farch_rx_push_indir_table(struct efx_nic *efx)
 		efx_writed(efx, &dword,
 			   FR_BZ_RX_INDIRECTION_TBL +
 			   FR_BZ_RX_INDIRECTION_TBL_STEP * i);
+	}
+}
+
+void efx_farch_rx_pull_indir_table(struct efx_nic *efx)
+{
+    size_t i = 0;
+	efx_dword_t dword;
+
+	BUG_ON(efx_nic_rev(efx) < EFX_REV_FALCON_B0);
+
+	BUILD_BUG_ON(ARRAY_SIZE(efx->rx_indir_table) !=
+		     FR_BZ_RX_INDIRECTION_TBL_ROWS);
+
+	for (i = 0; i < FR_BZ_RX_INDIRECTION_TBL_ROWS; i++) {
+		efx_readd(efx, &dword,
+			   FR_BZ_RX_INDIRECTION_TBL +
+			   FR_BZ_RX_INDIRECTION_TBL_STEP * i);
+		efx->rx_indir_table[i] = EFX_DWORD_FIELD(dword, FRF_BZ_IT_QUEUE);
 	}
 }
 
@@ -2534,7 +2559,7 @@ efx_farch_filter_init_rx_auto(struct efx_nic *efx,
 	 */
 	spec->priority = EFX_FILTER_PRI_AUTO;
 	spec->flags = (EFX_FILTER_FLAG_RX |
-		       (efx->n_rss_channels > 1 ? EFX_FILTER_FLAG_RX_RSS : 0) |
+		       (efx_rss_enabled(efx) ? EFX_FILTER_FLAG_RX_RSS : 0) |
 		       (efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0));
 	spec->dmaq_id = 0;
 }

@@ -817,7 +817,10 @@ linux_tcp_helper_fop_read_passthrough(struct file *filp, char *buf,
   ci_private_t *priv = filp->private_data;
   struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
                                                         os_socket->file;
-  return os_file->f_op->read(os_file, buf, len, off);
+  if( CI_UNLIKELY( os_file->f_op->read != NULL ) )
+    return os_file->f_op->read(os_file, buf, len, off);
+  else
+    return do_sync_read(os_file, buf, len, off);
 }
 static ssize_t
 linux_tcp_helper_fop_write_passthrough(struct file *filp, const char *buf,
@@ -826,7 +829,10 @@ linux_tcp_helper_fop_write_passthrough(struct file *filp, const char *buf,
   ci_private_t *priv = filp->private_data;
   struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
                                                         os_socket->file;
-  return os_file->f_op->write(os_file, buf, len, off);
+  if( CI_UNLIKELY( os_file->f_op->read != NULL ) )
+    return os_file->f_op->write(os_file, buf, len, off);
+  else
+    return do_sync_write(os_file, buf, len, off);
 }
 #ifdef fop_has_readv
 static ssize_t

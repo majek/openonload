@@ -79,7 +79,6 @@ struct vi_attr {
 	int16_t             channel;
 	uint8_t             vi_set_instance;
 	int8_t              with_interrupt;
-	int16_t             hw_stack_id;
 	int8_t              with_timer;
 	int8_t              packed_stream;
 	int32_t             ps_buffer_size;
@@ -124,31 +123,7 @@ static void efrm_vi_rm_drop_ref(struct efrm_vi *virs)
 }
 
 
-/*** Stack ids ***********************************************************/
-
-static int
-efrm_vi_alloc_hw_stack_id(struct efrm_vi *virs, int in_stack_id,
-                          int need_hw_loopback);
-
-static void
-efrm_vi_free_hw_stack_id(struct efrm_vi *virs);
-
-
 /*** Instance numbers ****************************************************/
-
-static int ci_ffs64(uint64_t x)
-{
-#if BITS_PER_LONG == 64
-	return __builtin_ffsll(x);
-#else
-	uint32_t l = (uint32_t)x;
-	uint32_t h;
-	if (l) 
-		return ffs(l);
-	h = (uint32_t)(x >> 32);
-	return ffs(h)+32;
-#endif
-}
 
 
 /* Returns -ve code on error and 0 on success. */
@@ -542,8 +517,8 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 efrm_bt_allocation_base(&q->bt_alloc),
 			 q->dma_addrs,
 			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-			 efrm_pd_get_vport_id(virs->pd), virs->hw_stack_id,
-			 flags);
+			 efrm_pd_get_vport_id(virs->pd),
+			 efrm_pd_stack_id_get(virs->pd), flags);
 		break;
 	case EFHW_RXQ:
 		evq_instance = q->evq_ref->rs.rs_instance;
@@ -554,8 +529,8 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
                         efrm_bt_allocation_base(&q->bt_alloc),
                         q->dma_addrs,
                         (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
-                        efrm_pd_get_vport_id(virs->pd), virs->hw_stack_id,
-                        virs->ps_buf_size,
+                        efrm_pd_get_vport_id(virs->pd),
+                        efrm_pd_stack_id_get(virs->pd), virs->ps_buf_size,
                         flags);
                 if( rc >= 0 ) {
                   virs->rx_prefix_len = rc;
@@ -718,7 +693,6 @@ __efrm_vi_resource_free(struct efrm_vi *virs)
 	if (virs->rs.rs_client->nic->devtype.arch == EFHW_ARCH_FALCON)
 		efrm_bt_manager_dtor(&virs->bt_manager);
 	efrm_vi_io_unmap(virs);
-	efrm_vi_free_hw_stack_id(virs);
 	efrm_vi_rm_free_instance(virs);
 	efrm_pd_release(virs->pd);
 	efrm_client_put(virs->rs.rs_client);
@@ -875,13 +849,6 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		goto fail_vi_alloc;
 	}
 
-	/* stack id needs to be allocated only if both RX and TX loopback is
-	 * requested */
-	rc = efrm_vi_alloc_hw_stack_id
-		(virs, virs->hw_stack_id, vi_flags & EFHW_VI_TX_LOOPBACK);
-	if (rc < 0)
-		goto fail_q_alloc;
-
 	/* We have to jump through some hoops here:
 	 * - EF10 needs the event queue allocated before rx and tx queues
 	 * - Event queue needs to know the size of the rx and tx queues
@@ -985,7 +952,6 @@ int __efrm_vi_attr_init(struct efrm_client *client_obsolete,
 	a->vf = NULL;
 	a->interrupt_core = -1;
 	a->channel = -1;
-	a->hw_stack_id = 0;
 	a->packed_stream = 0;
 	return 0;
 }
@@ -1083,16 +1049,6 @@ int efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *attr, int channel_id)
 EXPORT_SYMBOL(efrm_vi_attr_set_wakeup_channel);
 
 
-int efrm_vi_attr_set_hw_stack_id(struct efrm_vi_attr *attr,
-					   int hw_stack_id)
-{
-	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
-	a->hw_stack_id = hw_stack_id;
-	return 0;
-}
-EXPORT_SYMBOL(efrm_vi_attr_set_hw_stack_id);
-
-
 int  efrm_vi_alloc(struct efrm_client *client,
 		   const struct efrm_vi_attr *o_attr,
 		   int print_resource_warnings,
@@ -1125,7 +1081,9 @@ int  efrm_vi_alloc(struct efrm_client *client,
 		    efrm_vf_to_resource(attr->vf)->rs_client != client)
 			return -EINVAL;
 #endif
-		rc = efrm_pd_alloc(&pd, client, attr->vf, attr->vf != NULL);
+		rc = efrm_pd_alloc(&pd, client, attr->vf,
+				   (attr->vf != NULL) ?
+				   EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE : 0);
 		if (rc < 0)
 			goto fail_alloc_pd;
 	} else {
@@ -1144,8 +1102,6 @@ int  efrm_vi_alloc(struct efrm_client *client,
 		goto fail_checks;
 	}
 	if (attr->with_interrupt && attr->with_timer)
-		goto fail_checks;
-	if (attr->hw_stack_id > EFRM_MAX_STACK_ID)
 		goto fail_checks;
 	if (attr->vi_set != NULL) {
 		struct efrm_resource *rs;
@@ -1195,7 +1151,6 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	atomic_set(&virs->evq_refs, 1);
 	virs->flags = vi_flags;
 	virs->pd = pd;
-	virs->hw_stack_id = attr->hw_stack_id;
 
 #ifdef __PPC__
 	/* On PPC it is impossible to get DMA addresses that are aligned on
@@ -1275,18 +1230,18 @@ void efrm_vi_get_info(struct efrm_vi *virs,
 EXPORT_SYMBOL(efrm_vi_get_info);
 
 
-unsigned efrm_vi_get_hw_stack_id(struct efrm_vi *virs)
-{
-	return virs->hw_stack_id;
-}
-EXPORT_SYMBOL(efrm_vi_get_hw_stack_id);
-
-
 int efrm_vi_is_hw_rx_loopback_supported(struct efrm_vi *virs)
 {
 	return (virs->flags & EFHW_VI_RX_LOOPBACK);
 }
 EXPORT_SYMBOL(efrm_vi_is_hw_rx_loopback_supported);
+
+
+struct efrm_pd* efrm_vi_pd_get(struct efrm_vi *virs)
+{
+	return virs->pd;
+}
+EXPORT_SYMBOL(efrm_vi_pd_get);
 
 
 int  efrm_vi_q_get_size(struct efrm_vi *virs, enum efhw_q_type q_type,
@@ -1461,78 +1416,3 @@ efrm_vi_from_resource(struct efrm_resource *rs)
 	return efrm_vi(rs);
 }
 EXPORT_SYMBOL(efrm_vi_from_resource);
-
-
-/*** Stack ids *********************************************************/
-
-static int
-efrm_vi_alloc_hw_stack_id(struct efrm_vi *virs, int in_stack_id,
-                          int need_hw_loopback)
-{
-	struct efrm_nic *nic = efrm_nic(virs->rs.rs_client->nic);
-	static const int word_bitcount = sizeof(*nic->stack_id_usage) * 8;
-	if (!(nic->efhw_nic.flags & NIC_FLAG_MCAST_LOOP_HW)) {
-		virs->hw_stack_id = 0;
-		return 0;
-	}
-	if (in_stack_id == -1) {
-		need_hw_loopback = 1;
-		in_stack_id = 0;
-	}
-	if (in_stack_id != 0) {
-		int i = in_stack_id / word_bitcount;
-		int bitno = in_stack_id % word_bitcount;
-		/* stack ids can be reused but not selected arbitrarily */
-		if(!(nic->stack_id_usage[i] & (1 << bitno))) {
-			EFRM_ERR("%s: ERROR: unregistered stack id used",
-				  __FUNCTION__);
-			return -EINVAL;
-		}
-	}
-	else {
-		int i, v, bitno, id;
-		if (!need_hw_loopback)
-			return 0;
-		spin_lock(&nic->lock);
-		for (i = 0; i < sizeof(nic->stack_id_usage) /
-			    sizeof(*nic->stack_id_usage) &&
-			    ((v=nic->stack_id_usage[i]) == ~0u); ++i);
-		bitno = v ? ci_ffs64(~v) - 1 : 0;
-		id = i * word_bitcount + bitno + 1;
-		if (id <= EFRM_MAX_STACK_ID)
-			nic->stack_id_usage[i] |= 1 << bitno;
-		spin_unlock(&nic->lock);
-
-		if (id > EFRM_MAX_STACK_ID) {
-			/* we run out of stack ids
-			 * suppression of self traffic is not possible
-			 * we continue without it */
-			EFRM_TRACE("%s: WARNING: no free stack ids",
-				  __FUNCTION__);
-			return 0;
-		}
-		virs->hw_stack_id = id;
-		virs->flags |= EFRM_VI_OWNS_STACK_ID;
-	}
-	return 0;
-}
-
-
-static void
-efrm_vi_free_hw_stack_id(struct efrm_vi *virs)
-{
-	struct efrm_nic *nic = efrm_nic(virs->rs.rs_client->nic);
-	if (virs->flags & EFRM_VI_OWNS_STACK_ID) {
-		static const int word_bitcount =
-			sizeof(*nic->stack_id_usage) * 8;
-		int id = virs->hw_stack_id - 1;
-		int i = id / word_bitcount;
-		int bitno = id % word_bitcount;
-		EFRM_ASSERT( virs->hw_stack_id != 0 );
-		spin_lock(&nic->lock);
-		nic->stack_id_usage[i] &= ~(1 << bitno);
-		spin_unlock(&nic->lock);
-		virs->flags &= ~EFRM_VI_OWNS_STACK_ID;
-	}
-}
-

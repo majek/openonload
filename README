@@ -52,8 +52,10 @@ Documentation
 Quick start
 ===========
 
- The following command will build and install the Onload drivers into
- system directories (as root):
+ If deploying Onload from a tarball, then the following command will
+ build and install the Onload drivers into system directories (as root).
+ For instructions on other Onload installation packages (e.g. source RPM),
+ please refer to the Onload user guide.
 
    <top>/scripts/onload_install
 
@@ -110,6 +112,6 @@ Any questions?
 
 
 ==========
- version: openonload-201502-u1
-revision: 072460d08e32 (ool1502) openonload-201502-u1/openonload-201502-u1-rc2
-    date: Fri 27 Mar 10:29:56 GMT 2015
+ version: openonload-201502-u2
+revision: 2c782262e7cc (ool1502) openonload-201502-u2
+    date: Wed  3 Jun 12:36:26 BST 2015

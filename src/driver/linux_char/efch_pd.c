@@ -31,7 +31,7 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
   struct efhw_nic* nic;
   struct efrm_vf *vf = NULL;
   struct efrm_pd *pd_rs;
-  int rc, phys_mode;
+  int rc, phys_mode, hw_loopback;
 
   if ((rc = efrm_client_get(alloc->in_ifindex, NULL, NULL, &client)) < 0) {
     EFCH_ERR("%s: ERROR: ifindex=%d rc=%d", __FUNCTION__,
@@ -75,7 +75,10 @@ pd_rm_alloc(ci_resource_alloc_t* alloc_, ci_resource_table_t* priv_opt,
     goto out;
   }
 
-  rc = efrm_pd_alloc(&pd_rs, client, vf, phys_mode);
+  hw_loopback = (alloc->in_flags & EFCH_PD_FLAG_MCAST_LOOP) != 0;
+  rc = efrm_pd_alloc(&pd_rs, client, vf,
+                     (phys_mode ? EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE : 0) |
+                     (hw_loopback ? EFRM_PD_ALLOC_FLAG_HW_LOOPBACK : 0) );
   if (rc < 0)
     goto out;
 
