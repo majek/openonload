@@ -307,7 +307,11 @@ static void ci_tcp_state_recv_assert_valid(ci_netif* ni, ci_tcp_state* ts,
   verify(ts->recv2.num == num);
 
   if( got_sock_lock ) {
-    verify(SEQ_EQ(seq, tcp_rcv_nxt(ts)));
+    if( (ts->s.b.state & CI_TCP_STATE_ACCEPT_DATA) ||
+        (~ts->s.b.state & CI_TCP_STATE_SYNCHRONISED) )
+      verify(SEQ_EQ(seq, tcp_rcv_nxt(ts)));
+    else
+      verify(SEQ_EQ(seq + 1/*FIN seq number*/, tcp_rcv_nxt(ts)));
     verify(bytes == tcp_rcv_usr(ts));
     if( OO_PP_NOT_NULL(ts->recv1_extract) ) {
       verify(extract_points_in_recv1);
@@ -683,8 +687,9 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
 {
   ci_tcp_socket_cmn_dump(ni, &tls->c, pf, logger, log_arg);
 
-  logger(log_arg, "%s  listenq: max=%d n=%d new=%d", pf, 
-         ci_tcp_listenq_max(ni), tls->n_listenq, tls->n_listenq_new);
+  logger(log_arg, "%s  listenq: max=%d n=%d new=%d buckets=%d", pf, 
+         ci_tcp_listenq_max(ni), tls->n_listenq, tls->n_listenq_new,
+         tls->n_buckets);
   logger(log_arg, "%s  acceptq: max=%d n=%d accepted=%d", pf,
          tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
   logger(log_arg, "%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
@@ -763,7 +768,9 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   logger(log_arg, "%s  snd: up=%08x una-nxt-max=%08x-%08x-%08x enq=%08x%s",
          pf,
          tcp_snd_up(ts), tcp_snd_una(ts), tcp_snd_nxt(ts), ts->snd_max,
-         tcp_enq_nxt(ts), SEQ_LT(tcp_snd_nxt(ts), tcp_snd_up(ts)) ? " URG":"");
+         tcp_enq_nxt(ts),
+         SEQ_LT(tcp_snd_nxt(ts) + ts->snd_delegated, tcp_snd_up(ts)) ?
+           " URG":"");
   logger(log_arg,
          "%s  snd: send=%d(%d) send+pre=%d inflight=%d(%d) wnd=%d unused=%d",
          pf, SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts)), ts->send.num,

@@ -1019,9 +1019,10 @@ ef10_dmaq_tx_q_init(struct efhw_nic *nic, uint dmaq, uint evq_id, uint own_id,
 		}
 	}
 
-	if (flag_loopback) {
+	if (stack_id)
 		vport_id = ef10_gen_port_id(vport_id, stack_id);
 
+	if (flag_loopback) {
 		if (nic->flags & NIC_FLAG_MCAST_LOOP_HW) {
 			rc = _ef10_mcdi_cmd_set_multicast_loopback_suppression
 				(nic, 1, vport_id);

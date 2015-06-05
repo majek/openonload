@@ -77,6 +77,10 @@ extern ssize_t __recv_chk (int fd, void *buf, size_t nbytes, size_t buflen,
 extern ssize_t __recvfrom_chk (int fd, void *buf, size_t nbytes, size_t buflen,
                               int flags, struct sockaddr*, socklen_t*);
 #endif
+#if CI_LIBC_HAS___poll_chk
+extern int __poll_chk (struct pollfd *__fds, nfds_t __nfds, int __timeout,
+                       size_t __fdslen);
+#endif
 
 
 /*! Generate declarations of pointers to the system calls */

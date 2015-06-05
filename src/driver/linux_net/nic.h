@@ -742,6 +742,12 @@ static inline void efx_nic_eventq_read_ack(struct efx_channel *channel)
 {
 	channel->efx->type->ev_read_ack(channel);
 }
+static inline bool efx_nic_hw_unavailable(struct efx_nic *efx)
+{
+	if (efx->type->hw_unavailable)
+		return efx->type->hw_unavailable(efx);
+	return false;
+}
 void efx_nic_event_test_start(struct efx_channel *channel);
 
 /* Falcon/Siena queue operations */
@@ -872,6 +878,7 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw);
 void efx_farch_init_common(struct efx_nic *efx);
 void efx_ef10_handle_drain_event(struct efx_nic *efx);
 void efx_farch_rx_push_indir_table(struct efx_nic *efx);
+void efx_farch_rx_pull_indir_table(struct efx_nic *efx);
 unsigned efx_nic_check_pcie_link(struct efx_nic *efx,
 				 unsigned full_width, unsigned full_speed,
 				 unsigned min_bandwidth);

@@ -205,7 +205,7 @@ static inline void efx_skb_copy_insert_tag(const struct sk_buff *skb,
 
 	memcpy(to, skb->data, offset);
 	veth->h_vlan_proto = htons(ETH_P_8021Q);
-	veth->h_vlan_TCI = htons(vlan_tx_tag_get(skb));
+	veth->h_vlan_TCI = htons(skb_vlan_tag_get(skb));
 
 	if (len <= skb_headlen(skb)) {
 		memcpy(to + offset + VLAN_HLEN, skb->data + offset,
@@ -983,7 +983,7 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 	}
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
-	if (vlan_tx_tag_present(skb)) {
+	if (skb_vlan_tag_present(skb)) {
 		u8 *copy_buffer;
 
 		/* Insert into the headroom if possible */
@@ -992,7 +992,7 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 						    __skb_push(skb, VLAN_HLEN));
 			memmove(skb->data, skb->data + VLAN_HLEN, 2 * ETH_ALEN);
 			veth->h_vlan_proto = htons(ETH_P_8021Q);
-			veth->h_vlan_TCI = htons(vlan_tx_tag_get(skb));
+			veth->h_vlan_TCI = htons(skb_vlan_tag_get(skb));
 			goto begin_packet;
 		}
 
@@ -1648,7 +1648,7 @@ static int tso_start(struct tso_state *st, struct efx_nic *efx,
 	st->in_len = in_len;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
 	st->in_header_len = header_len;
-	if (vlan_tx_tag_present(skb)) {
+	if (skb_vlan_tag_present(skb)) {
 		st->ip_off += VLAN_HLEN;
 		st->tcp_off += VLAN_HLEN;
 		st->header_len += VLAN_HLEN;
@@ -1807,7 +1807,7 @@ static int tso_start_new_packet(struct efx_tx_queue *tx_queue,
 
 		/* Copy and update the headers. */
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
-		if (vlan_tx_tag_present(skb))
+		if (skb_vlan_tag_present(skb))
 			efx_skb_copy_insert_tag(skb, header, st->in_header_len);
 		else
 			/* fall through */

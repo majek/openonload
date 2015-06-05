@@ -209,8 +209,6 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 
   op.id = efch_make_resource_id(resource_id);
   op.u.filter_add.flags =
-    ( (fs->flags & EF_FILTER_FLAG_REPLACE) ?
-      CI_RSOP_FILTER_ADD_FLAG_REPLACE : 0 ) |
     ( (fs->flags & EF_FILTER_FLAG_MCAST_LOOP_RECEIVE) ?
       CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE : 0);
   switch (fs->type) {

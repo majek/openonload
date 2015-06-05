@@ -497,14 +497,19 @@ static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
   ci_assert(ci_sock_is_locked(ni, &listener->s.b));
   ci_assert(ci_tcp_acceptq_not_empty(listener));
   w = ci_tcp_acceptq_get(ni, listener);
-  ci_sock_unlock(ni, &listener->s.b);
 
-  if( w->sb_aflags & CI_SB_AFLAG_MOVED_AWAY )
+  if( w->sb_aflags & CI_SB_AFLAG_MOVED_AWAY ) {
+    ci_sock_unlock(ni, &listener->s.b);
     return citp_tcp_accept_alien(ni, listener, sa, p_sa_len, flags, w);
+  }
 
   ci_assert(w->state & CI_TCP_STATE_TCP);
   ci_assert(w->state != CI_TCP_LISTEN);
   ts = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
+
+  ci_ni_dllist_remove_safe(ni, &ts->epcache_fd_link);
+  ci_sock_unlock(ni, &listener->s.b);
+
   newfd = -1;
 #if CI_CFG_FD_CACHING
   from_cache = ci_tcp_is_cached(ts);
@@ -966,6 +971,16 @@ static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
    */
   ci_ni_dllist_remove_safe(netif, &ts->epcache_link);
   ci_ni_dllist_push(netif, &tls->epcache_pending, &ts->epcache_link);
+
+  /* If the listening socket is going away we might not be able to push it on
+   * to the list of fd-owning-states (and there's no point in doing so anyway).
+   * In that case, we'll just call close the fd now, and all the previous state
+   * will be tidied up eventually by uncache_ep().
+   */
+  ci_assert(ci_ni_dllist_is_self_linked(netif, &ts->epcache_fd_link));
+  if( ! ci_ni_dllist_concurrent_push(netif, &tls->epcache_fd_states,
+                                     &ts->epcache_fd_link) )
+    ci_sys_close(ts->cached_on_fd);
 
   /* We're more of a kidnapped child than an orphan, but we still need to
    * do the state tidy up that's needed for a socket who's parent isn't
@@ -1743,6 +1758,7 @@ citp_tcp_ds_prepare(citp_fdinfo* fdi, int size, unsigned flags,
   ci_netif* ni = epi->sock.netif;
   ci_sock_cmn* s = epi->sock.s;
   ci_tcp_state* ts;
+  enum onload_delegated_send_rc rc;
 
   /* Basic checks */
   if( (~s->b.state & CI_TCP_STATE_CAN_FIN) ||
@@ -1752,13 +1768,14 @@ citp_tcp_ds_prepare(citp_fdinfo* fdi, int size, unsigned flags,
   if( ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE )
     return ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET;
 
-  /* Starting from this place, it might be a good idea to lock the stack
-   * and ensure that various sequence numbers do not change under our feet.
-   *
-   * However, user is responsible for not mixing normal send() with
-   * delegated_send(), so we do not care if the user is crazy. */
-  if( ci_tcp_sendq_not_empty(ts) )
-    return ONLOAD_DELEGATED_SEND_RC_SENDQ_BUSY;
+  /* We lock the stack at this point to ensure that the prequeue has been
+   * flushed, and also to prevent various sequence numbers changing under our
+   * feet. */
+  ci_netif_lock(ni);
+  if( ci_tcp_sendq_not_empty(ts) ) {
+    rc = ONLOAD_DELEGATED_SEND_RC_SENDQ_BUSY;
+    goto unlock_out;
+  }
 
   /* Calculate the windows */
   out->mss = tcp_eff_mss(ts);
@@ -1766,30 +1783,30 @@ citp_tcp_ds_prepare(citp_fdinfo* fdi, int size, unsigned flags,
   out->cong_wnd = ts->cwnd + ts->cwnd_extra - ci_tcp_inflight(ts);
   out->user_size = size;
   if( out->cong_wnd < out->mss ) {
-    /* We are definitely busy retransmitting, but
-     * ci_assert( OO_PP_NOT_NULL(ts->retrans_ptr) );
-     * is incorrect because we are not holding the stack lock. */
+    ci_assert( ci_ip_queue_not_empty(&ts->retrans) );
     out->cong_wnd = 0;
-    return ONLOAD_DELEGATED_SEND_RC_NOWIN;
+    rc = ONLOAD_DELEGATED_SEND_RC_NOWIN;
+    goto unlock_out;
   }
-  if( out->send_wnd == 0 )
-    return ONLOAD_DELEGATED_SEND_RC_NOWIN;
-
-  /* Get the ARP */
-  if( ! ci_tcp_ds_get_arp(ni, ts, flags) )
-    return ONLOAD_DELEGATED_SEND_RC_NOARP;
-
-  if( ci_tcp_ds_fill_headers(ni, ts, out->headers, &out->headers_len,
-                             &out->ip_tcp_hdr_len,
-                             &out->tcp_seq_offset, &out->ip_len_offset) 
-      != 0 ) {
-    return ONLOAD_DELEGATED_SEND_RC_SMALL_HEADER;
+  if( out->send_wnd <= 0 ) {
+    out->send_wnd = 0;
+    rc = ONLOAD_DELEGATED_SEND_RC_NOWIN;
+    goto unlock_out;
   }
+
+
+  rc = ci_tcp_ds_fill_headers(ni, ts, flags, out->headers, &out->headers_len,
+                              &out->ip_tcp_hdr_len,
+                              &out->tcp_seq_offset, &out->ip_len_offset);
+  if( rc != ONLOAD_DELEGATED_SEND_RC_OK )
+    goto unlock_out;
 
   /* Tell TCP state to be ready for ACKs from future */
   ts->snd_delegated = CI_MIN(size, out->send_wnd);
 
-  return ONLOAD_DELEGATED_SEND_RC_OK;
+ unlock_out:
+  ci_netif_unlock(ni);
+  return rc;
 }
 
 int citp_tcp_ds_complete(citp_fdinfo* fdi, const ci_iovec *iov, int iovlen,

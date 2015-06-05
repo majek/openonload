@@ -159,6 +159,7 @@ static int thc_has_orphans(tcp_helper_cluster_t* thc)
  */
 static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
                      uid_t euid, int cluster_size, int packet_buffer_mode,
+                     int hw_loopback_enable,
                      tcp_helper_cluster_t** thc_out)
 {
   int rc, i, j=0;
@@ -181,7 +182,8 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
         ! oo_check_nic_suitable_for_onload(&(oo_nics[i])) )
       continue;
     if( (rc = efrm_pd_alloc(&pd, oo_nics[i].efrm_client, NULL,
-                            packet_buffer_mode != 0)) != 0 )
+                (packet_buffer_mode ? EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE : 0) |
+                (hw_loopback_enable ? EFRM_PD_ALLOC_FLAG_HW_LOOPBACK : 0))) )
       goto fail;
     rc = efrm_vi_set_alloc(pd, thc->thc_cluster_size, 0, &thc->thc_vi_set[j++]);
     efrm_pd_release(pd);
@@ -300,6 +302,7 @@ static int thc_get_or_alloc_thr(tcp_helper_cluster_t* thc,
   ci_resource_onload_alloc_t roa;
   tcp_helper_resource_t* thr_walk;
   ci_irqlock_state_t lock_flags;
+  ci_netif* netif;
   int rc;
 
   /* Search for a suitable stack within the thc.  A suitable stack has
@@ -357,6 +360,15 @@ static int thc_get_or_alloc_thr(tcp_helper_cluster_t* thc,
   kfree(opts);
   if( rc != 0 )
     return rc;
+
+  /* Do not allow clustered stacks to do TCP loopback. */
+  netif = &thr_walk->netif;
+  if( NI_OPTS(netif).tcp_server_loopback != CITP_TCP_LOOPBACK_OFF ||
+      NI_OPTS(netif).tcp_client_loopback != CITP_TCP_LOOPBACK_OFF )
+    ci_log("%s: Disabling Unsupported TCP loopback on clustered stack.",
+           __FUNCTION__);
+  NI_OPTS(netif).tcp_server_loopback = NI_OPTS(netif).tcp_client_loopback =
+    CITP_TCP_LOOPBACK_OFF;
 
   thr_walk->thc_tid      = current->pid;
   thr_walk->thc          = thc;
@@ -606,6 +618,10 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   char name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
   int rc, rc1;
 
+  /* No clustering on sockets bound to alien addresses */
+  if( sock->s_flags & CI_SOCK_FLAG_BOUND_ALIEN )
+    return 0;
+
   if( NI_OPTS(ni).cluster_ignore == 1 ) {
     LOG_NV(ci_log("%s: Ignored attempt to use clusters due to "
                   "EF_CLUSTER_IGNORE option.", __FUNCTION__));
@@ -620,12 +636,6 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   if( trb->cluster_size < 2 ) {
     ci_log("%s: Cluster sizes < 2 are not supported", __FUNCTION__);
     return -EINVAL;
-  }
-
-  if( (NI_OPTS(ni).mcast_send & CITP_MCAST_SEND_FLAG_EXT) != 0 ) {
-    ci_log("%s: Clustering with HW multicast loopback is not supported.  "
-           "Check setting of EF_MCAST_SEND.", __FUNCTION__);
-    return -ENOSYS;
   }
 
   strncpy(name, trb->cluster_name, CI_CFG_STACK_NAME_LEN >> 1);
@@ -697,6 +707,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
 
     if( (rc = thc_alloc(name, protocol, trb->port_be16, ci_geteuid(),
                         trb->cluster_size, NI_OPTS(ni).packet_buffer_mode,
+                        NI_OPTS(ni).mcast_send & CITP_MCAST_SEND_FLAG_EXT,
                         &thc)) != 0 )
       goto alloc_fail;
   }
@@ -728,6 +739,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
       goto cont;
     if( (rc = thc_alloc(name, protocol, trb->port_be16, ci_geteuid(),
                         trb->cluster_size, NI_OPTS(ni).packet_buffer_mode,
+                        NI_OPTS(ni).mcast_send & CITP_MCAST_SEND_FLAG_EXT,
                         &thc)) != 0 )
       goto alloc_fail;
   }

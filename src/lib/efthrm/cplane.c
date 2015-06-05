@@ -1653,7 +1653,7 @@ cicp_bond_remove_slave(cicp_handle_t *control_plane,
       }
 
       if( found ) {
-        cicp_bond_remove_slave_row(control_plane, master, tmp_row);
+        cicp_bond_remove_slave_row(control_plane, master, row);
         rc = 0;
         OO_DEBUG_BONDING(ci_log("Slave %d removed from master %d",
                                 ifindex, master_ifindex));

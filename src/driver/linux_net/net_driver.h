@@ -81,7 +81,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.4.1.1021"
+#define EFX_DRIVER_VERSION	"4.5.1.1010"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -286,6 +286,7 @@ struct efx_tx_buffer {
  *
  * @efx: The associated Efx NIC
  * @queue: DMA queue number
+ * @csum_offload: Is checksum offloading enabled for this queue?
  * @channel: The associated channel
  * @core_txq: The networking core TX queue structure
  * @buffer: The software buffer ring
@@ -340,6 +341,7 @@ struct efx_tx_queue {
 	/* Members which don't change on the fast path */
 	struct efx_nic *efx ____cacheline_aligned_in_smp;
 	unsigned queue;
+	bool csum_offload;
 	struct efx_channel *channel;
 	struct netdev_queue *core_txq;
 	struct efx_tx_buffer *buffer;
@@ -675,6 +677,8 @@ struct efx_sarfs_state {
  * @event_test_cpu: Last CPU to handle interrupt or test event for this channel
  * @irq_count: Number of IRQs since last adaptive moderation decision
  * @irq_mod_score: IRQ moderation score
+ * @rps_flow_id: Flow IDs of filters allocated for accelerated RFS,
+ *      indexed by filter ID
  * @n_rx_tobe_disc: Count of RX_TOBE_DISC errors
  * @n_rx_ip_hdr_chksum_err: Count of RX IP header checksum errors
  * @n_rx_tcp_udp_chksum_err: Count of RX TCP and UDP checksum errors
@@ -734,6 +738,8 @@ struct efx_channel {
 	unsigned int irq_mod_score;
 #ifdef CONFIG_RFS_ACCEL
 	unsigned int rfs_filters_added;
+#define RPS_FLOW_ID_INVALID 0xFFFFFFFF
+	u32 *rps_flow_id;
 #endif
 
 #ifdef CONFIG_SFC_DEBUGFS
@@ -1241,9 +1247,9 @@ struct vfdi_status;
  * @filter_sem: Filter table rw_semaphore, for freeing the table
  * @filter_lock: Filter table lock, for mere content changes
  * @filter_state: Architecture-dependent filter table state
- * @rps_flow_id: Flow IDs of filters allocated for accelerated RFS,
- *	indexed by filter ID
- * @rps_expire_index: Next index to check for expiry in @rps_flow_id
+ * @rps_expire_channel: Next channel to check for expiry
+ * @rps_expire_index: Next index to check for expiry in
+ *	@rps_expire_channel's @rps_flow_id
  * @dl_info: Linked list of hardware parameters exposed through driverlink
  * @dl_node: Driverlink port list
  * @dl_device_list: Driverlink device list
@@ -1273,6 +1279,7 @@ struct vfdi_status;
  * @proxy_admin_lock: RW lock for proxy auth admin locking
  * @proxy_admin_mutex: Mutex for serialising proxy auth admin shutdown
  * @proxy_admin_stop_work: Work item for stopping proxy auth from atomic context.
+ * @debugfs_symlink_mutex: Mutex to protect access to debugfs symlinks.
  * This is stored in the private area of the &struct net_device.
  */
 struct efx_nic {
@@ -1385,7 +1392,7 @@ struct efx_nic {
 	bool mc_bist_for_other_fn;
 	bool port_initialized;
 	struct net_device *net_dev;
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES) && !defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 	bool rx_checksum_enabled;
 #endif
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
@@ -1432,8 +1439,7 @@ struct efx_nic {
 	spinlock_t filter_lock;
 	void *filter_state;
 #ifdef CONFIG_RFS_ACCEL
-#define RPS_FLOW_ID_INVALID 0xFFFFFFFF
-	u32 *rps_flow_id;
+	unsigned int rps_expire_channel;
 	unsigned int rps_expire_index;
 #endif
 
@@ -1502,6 +1508,10 @@ struct efx_nic {
 	rwlock_t proxy_admin_lock;
 	struct mutex proxy_admin_mutex;
 	struct work_struct proxy_admin_stop_work;
+#endif
+
+#ifdef CONFIG_SFC_DEBUGFS
+	struct mutex debugfs_symlink_mutex;
 #endif
 };
 
@@ -1598,6 +1608,7 @@ struct efx_mtd_partition {
  * @tx_remove: Free resources for TX queue
  * @tx_write: Write TX descriptors and doorbell
  * @rx_push_rss_config: Write RSS hash key and indirection table to the NIC
+ * @rx_pull_rss_config: Read RSS hash key and indirection table back from the NIC
  * @rx_probe: Allocate resources for RX queue
  * @rx_init: Initialise RX queue on the NIC
  * @rx_remove: Free resources for RX queue
@@ -1708,6 +1719,7 @@ struct efx_nic_type {
 	int (*init)(struct efx_nic *efx);
 	void (*fini)(struct efx_nic *efx);
 	void (*monitor)(struct efx_nic *efx);
+	bool (*hw_unavailable)(struct efx_nic *efx);
 	enum reset_type (*map_reset_reason)(enum reset_type reason);
 	int (*map_reset_flags)(u32 *flags);
 	int (*reset)(struct efx_nic *efx, enum reset_type method);
@@ -1768,7 +1780,8 @@ struct efx_nic_type {
 	void (*tx_write)(struct efx_tx_queue *tx_queue);
 	void (*tx_notify)(struct efx_tx_queue *tx_queue);
 	int (*rx_push_rss_config)(struct efx_nic *efx, bool user,
-				  const u32 *rx_indir_table);
+				  const u32 *rx_indir_table, const u8 *key);
+	int (*rx_pull_rss_config)(struct efx_nic *efx);
 	int (*rx_probe)(struct efx_rx_queue *rx_queue);
 	void (*rx_init)(struct efx_rx_queue *rx_queue);
 	void (*rx_remove)(struct efx_rx_queue *rx_queue);
@@ -1896,6 +1909,7 @@ struct efx_nic_type {
 	int mcdi_max_ver;
 	unsigned int max_rx_ip_filters;
 	u32 hwtstamp_filters;
+	unsigned int rx_hash_key_size;
 };
 
 /* Is Driverlink supported on this device? */
@@ -1946,11 +1960,13 @@ static inline bool efx_channel_has_tx_queues(struct efx_channel *channel)
 }
 
 static inline struct efx_tx_queue *
-efx_channel_get_tx_queue(struct efx_channel *channel, unsigned type)
+efx_channel_get_tx_queue(struct efx_channel *channel, unsigned int queue)
 {
-	EFX_BUG_ON_PARANOID(!efx_channel_has_tx_queues(channel) ||
-			    type >= EFX_TXQ_TYPES);
-	return &channel->tx_queue[type];
+	/* Odd-numbered channels have their Tx queues reversed */
+	unsigned int q_idx = (channel->channel ^ queue) & 1;
+
+	EFX_BUG_ON_PARANOID(!efx_channel_has_tx_queues(channel));
+	return &channel->tx_queue[q_idx];
 }
 
 /* Iterate over all TX queues belonging to a channel */
@@ -2073,12 +2089,13 @@ static inline void efx_xmit_hwtstamp_pending(struct sk_buff *skb)
 #endif
 
 /* Get partner of a TX queue, seen as part of the same net core queue */
-static inline struct efx_tx_queue *efx_tx_queue_partner(struct efx_tx_queue *tx_queue)
+static inline struct efx_tx_queue *efx_tx_queue_partner(
+	struct efx_tx_queue *tx_queue)
 {
-        if (tx_queue->queue & EFX_TXQ_TYPE_OFFLOAD)
-                return tx_queue - EFX_TXQ_TYPE_OFFLOAD;
-        else
-                return tx_queue + EFX_TXQ_TYPE_OFFLOAD;
+	EFX_BUG_ON_PARANOID(!tx_queue->channel);
+	if (&tx_queue->channel->tx_queue[0] == tx_queue)
+		return &tx_queue->channel->tx_queue[1];
+	return &tx_queue->channel->tx_queue[0];
 }
 
 /* Get the given TX queue fill level */

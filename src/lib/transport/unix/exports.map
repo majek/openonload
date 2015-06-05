@@ -28,6 +28,7 @@
     select;
     pselect;
     poll;
+    __poll_chk;
     ppoll;
     sendfile;
     sendfile64;

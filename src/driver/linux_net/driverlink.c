@@ -71,7 +71,6 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 {
 	struct efx_dl_handle *efx_handle = efx_dl_handle(efx_dev);
 	struct efx_nic *efx = efx_handle->efx;
-	struct efx_channel *channel;
 	unsigned int type;
 
 	netif_info(efx, drv, efx->net_dev,
@@ -88,16 +87,9 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 	 * ensures that NAPI is no longer running when it returns.  Also
 	 * internally lock NAPI while disabled to prevent busy-polling.
 	 */
-	efx_for_each_channel(channel, efx) {
-		napi_disable(&channel->napi_str);
-		while (!efx_channel_lock_napi(channel))
-			msleep(1);
-	}
+	efx_pause_napi(efx);
 	list_del(&efx_handle->port_node);
-	efx_for_each_channel(channel, efx) {
-		efx_channel_unlock_napi(channel);
-		napi_enable(&channel->napi_str);
-	}
+	efx_resume_napi(efx);
 
 	/* Remove this client's kernel blocks */
 	mutex_lock(&efx->dl_block_kernel_mutex);
@@ -141,12 +133,13 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 		goto fail;
 
 	/* Rather than just add to the end of the list,
-	 * find the point that is at the start of the desired priority level
-	 * and insert there
+	 * find the point that is at the end of the desired priority level
+	 * and insert there. This will ensure that remove() callbacks are
+	 * called in the reverse of the order of insertion.
 	 */
 
 	list_for_each_entry(ex_efx_handle, &efx->dl_device_list, port_node) {
-		if (ex_efx_handle->efx_dev.driver->priority >=
+		if (ex_efx_handle->efx_dev.driver->priority >
 			driver->priority) {
 			list_add_tail(&efx_handle->port_node, &ex_efx_handle->port_node);
 			added = true;
@@ -310,19 +303,22 @@ void efx_dl_reset_resume(struct efx_nic *efx, int ok)
 	}
 }
 
-bool efx_dl_handle_event(struct efx_nic *efx, void *event)
+int efx_dl_handle_event(struct efx_nic *efx, void *event, int budget)
 {
 	struct efx_dl_handle *efx_handle;
 	struct efx_dl_device *efx_dev;
 
 	list_for_each_entry(efx_handle, &efx->dl_device_list, port_node) {
 		efx_dev = &efx_handle->efx_dev;
-		if (efx_dev->driver->handle_event &&
-		    efx_dev->driver->handle_event(efx_dev, event))
-			return true;
+		if (efx_dev->driver->handle_event ) {
+			int rc = efx_dev->driver->handle_event(efx_dev,
+							       event, budget);
+			if (rc >= 0 )
+				return rc > budget ? budget : rc;
+		}
 	}
 
-	return false;
+	return -EINVAL;
 }
 
 bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)

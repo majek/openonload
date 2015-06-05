@@ -118,17 +118,18 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
   /* Bodge interface requested to match the one used in
    * openonload-201405-u1.  The interface has changed since then, but in
    * ways that are forward and backward compatible with
-   * openonload-201405-u1.
+   * openonload-201405-u1.  (This is almost true: The exception is addition
+   * of EFCH_PD_FLAG_MCAST_LOOP).
    *
    * We check that the current interface is the one expected, because if
    * not then something has changed and compatibility may not have been
    * preserved.
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
-  /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "e12018c1ff2aff3d8ee46432b5669fcd") &&
+      /* when built from repo */
+  if( strcmp(EFCH_INTF_VER, "e95b2fbfb0433ab2a6ffdfa43dab5eaf") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "c4122121098b174cc48ef7e56c792b4a") ) {
+      strcmp(EFCH_INTF_VER, "46e6fc8977c38979fd70ba727d27596a") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }

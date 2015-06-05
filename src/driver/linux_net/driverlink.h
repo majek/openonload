@@ -36,7 +36,7 @@ void efx_dl_reset_suspend(struct efx_nic *efx);
 void efx_dl_reset_resume(struct efx_nic *efx, int ok);
 
 /* Send unrecognised event to client drivers */
-bool efx_dl_handle_event(struct efx_nic *efx, void *event);
+int efx_dl_handle_event(struct efx_nic *efx, void *event, int budget);
 
 /* Pass the first fragment of an RX packet to client drivers for inspection,
  * allowing them to request that it be discarded

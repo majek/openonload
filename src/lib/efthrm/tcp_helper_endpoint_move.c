@@ -248,6 +248,10 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni)
     OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_link));
     ci_ni_dllist_link_init(alien_ni, &new_ts->epcache_link, sp, "epch");
     ci_ni_dllist_self_link(alien_ni, &new_ts->epcache_link);
+    sp = TS_OFF(alien_ni, new_ts);
+    OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_state, epcache_fd_link));
+    ci_ni_dllist_link_init(alien_ni, &new_ts->epcache_fd_link, sp, "ecfd");
+    ci_ni_dllist_self_link(alien_ni, &new_ts->epcache_fd_link);
 #endif
    
     /* free temporary mid_ts storage */

@@ -339,6 +339,13 @@ int oo_hw_filter_set_thc(struct oo_hw_filter* oofilter,
                          EFX_FILTER_FLAG_RX_SCATTER | EFX_FILTER_FLAG_RX_RSS,
                          base_vi_id);
       spec.rss_context = efrm_vi_set_get_rss_context(thc->thc_vi_set[hwport]);
+#if EFX_DRIVERLINK_API_VERSION >= 15
+      {
+        int stack_id = tcp_helper_cluster_vi_hw_stack_id(thc, hwport);
+        ci_assert( stack_id >= 0 );
+        efx_filter_set_stack_id(&spec, stack_id);
+      }
+#endif
       rc = efx_filter_set_ipv4_local(&spec, protocol, daddr, dport);
       ci_assert_equal(rc, 0);
       rc = efrm_filter_insert(get_client(hwport), &spec, false);

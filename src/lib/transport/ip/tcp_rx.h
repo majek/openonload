@@ -68,8 +68,12 @@ ci_inline void ci_tcp_rx_post_poll(ci_netif* ni, ci_tcp_state* ts)
     ci_tcp_tx_advance(ts, ni);
 
 #if CI_CFG_TCP_FASTSTART
-  if( ci_tcp_time_now(ni) - ts->t_prev_recv_payload > NI_CONF(ni).tconst_idle )
-    ts->faststart_acks = NI_OPTS(ni).tcp_faststart_idle;
+  if( ci_tcp_time_now(ni) - ts->t_prev_recv_payload > NI_CONF(ni).tconst_idle ) {
+    if( ts->tcpflags & CI_TCPT_FLAG_NO_QUICKACK )
+      ts->tcpflags &=~ CI_TCPT_FLAG_NO_QUICKACK;
+    else
+      ts->faststart_acks = NI_OPTS(ni).tcp_faststart_idle;
+  }
   ts->t_prev_recv_payload = ts->t_last_recv_payload;
 #endif
 

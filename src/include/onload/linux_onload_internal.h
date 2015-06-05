@@ -93,6 +93,9 @@ extern int efab_fds_dump(unsigned pid);
 #define FILE_IS_ENDPOINT_SOCK(f) \
     ( (f)->f_op == &linux_tcp_helper_fops_tcp || \
       (f)->f_op == &linux_tcp_helper_fops_udp )
+#define FILE_IS_ENDPOINT_SPECIAL(f) \
+    ( (f)->f_op == &linux_tcp_helper_fops_passthrough || \
+      (f)->f_op == &linux_tcp_helper_fops_alien )
 #if CI_CFG_USERSPACE_PIPE
 #define FILE_IS_ENDPOINT_PIPE(f) \
     ( (f)->f_op == &linux_tcp_helper_fops_pipe_reader || \
@@ -109,7 +112,7 @@ extern int efab_fds_dump(unsigned pid);
 
 #define FILE_IS_ENDPOINT(f) \
     ( FILE_IS_ENDPOINT_SOCK(f) || FILE_IS_ENDPOINT_PIPE(f) || \
-      FILE_IS_ENDPOINT_EPOLL(f))
+      FILE_IS_ENDPOINT_EPOLL(f) || FILE_IS_ENDPOINT_SPECIAL(f) )
 
 
 

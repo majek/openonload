@@ -61,13 +61,13 @@ void efx_aoe_detach(struct efx_nic *efx)
 	efx->aoe_data = NULL;
 }
 
-bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event)
+int efx_aoe_event(struct efx_nic *efx, efx_qword_t *event, int budget)
 {
 	int32_t aoe_code;
 	struct efx_aoe_data *aoe = efx->aoe_data;
 
 	if (!aoe)
-		return false;
+		return -ENOENT;
 
 	aoe_code = MCDI_EVENT_FIELD(*event, AOE_ERR_TYPE);
 	if (aoe_code == MCDI_EVENT_AOE_CPLD_REPROGRAMMED) {
@@ -76,9 +76,9 @@ bool efx_aoe_event(struct efx_nic *efx, efx_qword_t *event)
 		if (waitqueue_active(&aoe->read_data))
 			wake_up(&aoe->read_data);
 	} else
-		return efx_dl_handle_event(efx, event);
+		return efx_dl_handle_event(efx, event, budget);
 
-	return true;
+	return 0;
 }
 
 int efx_aoe_update_cpld(struct efx_nic *efx, struct efx_update_cpld *cpld)

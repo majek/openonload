@@ -1216,7 +1216,8 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
   for( i = 0; i < iovlen; i++ ) {
     if( p + CI_IOVEC_LEN(iov) - pkt->dma_start >
         CI_CFG_PKT_BUF_SIZE - sizeof(pkt) ) {
-      ci_netif_pkt_free(ni, pkt);
+      ci_netif_pkt_release(ni, pkt);
+      ci_netif_unlock(ni);
       return -EMSGSIZE;
     }
 

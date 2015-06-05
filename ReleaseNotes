@@ -1,3 +1,52 @@
+OpenOnload-201502-u2 Release Notes
+==================================
+
+This is a minor update release that fixes a number of issues in
+OpenOnload-201502-u1.
+
+Below is a brief summary of any relevant changes and limitations that
+we are aware of.  See the ChangeLog for further details and a list of
+bugs fixed.
+
+The Release Notes for OpenOnload-201502-u1 are included at the end of
+this file.
+
+
+EF_NAME length change
+---------------------
+
+A bug in the handling of the EF_NAME environment variable meant that
+recent releases accepted names that are longer than officially
+supported.  Names up to 16 characters were accepted, where it should
+have rejected anything over 8 characters.  In particular, this caused
+problems if used in combination with the stackname extension API as
+that did correctly enforce the limit of 8 characters.
+
+This release restores the correct enforcement of the limit of 8
+characters on EF_NAME to ensure it is consistent and compatible with
+the stackname extension API.
+
+If you have been using names longer than 8 characters you may find
+they become truncated.  If you have been using stack names that only
+differ in the last few characters, and this is the portion that is
+truncated, then sockets that should have been placed in seperate
+stacks will as a result share a single stack.  This can be avoided by
+ensuring all names requested are 8 characters or less.
+
+
+ef_vi flags change
+------------------
+
+Recent Onload releases have not correctly supported the use of
+hardware TX loopback when using the ef_vi API.  This releases fixes
+that, but in so doing removes the (broken) EF_VI_TX_LOOPBACK flag and
+replaces it with a flag on the protection domain: EF_PD_MCAST_LOOP.
+The eftap sample code includes the correct use of this flag to enable
+TX hardware loopback.
+
+
+
+
 OpenOnload-201502-u1 Release Notes
 ==================================
 

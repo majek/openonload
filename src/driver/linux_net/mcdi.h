@@ -214,7 +214,8 @@ void efx_mcdi_mode_poll(struct efx_nic *efx);
 void efx_mcdi_mode_event(struct efx_nic *efx);
 void efx_mcdi_flush_async(struct efx_nic *efx);
 
-void efx_mcdi_process_event(struct efx_channel *channel, efx_qword_t *event);
+int efx_mcdi_process_event(struct efx_channel *channel,
+			   efx_qword_t *event, int budget);
 void efx_mcdi_sensor_event(struct efx_nic *efx, efx_qword_t *ev);
 
 /* We expect that 16- and 32-bit fields in MCDI requests and responses

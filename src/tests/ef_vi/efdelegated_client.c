@@ -49,84 +49,38 @@
  * Author: Akhi Singhania
  * Date: 2015/1/20
  *
- * Refer to efdelegated_server for a description.
+ * Refer to efdelegated_server.c for a description.
  */
 
 #define _GNU_SOURCE 1
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <arpa/inet.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <string.h>
-#include <net/if.h>
-#include <netdb.h>
-#include <poll.h>
+#include "utils.h"
 
+#include <arpa/inet.h>
+#include <netdb.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <ifaddrs.h>
 
 
-#define DEFAULT_PAYLOAD_SIZE  28
-
-static int       cfg_warm        = 10;
+static unsigned  cfg_payload_len = 200;
 static int       cfg_iter        = 100000;
-static unsigned  cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
+static int       cfg_warm        = 1000;
 
 static int tcp_sock;
 static int udp_sock;
 
-#define TEST(x)                                                 \
-  do {                                                          \
-    if( ! (x) ) {                                               \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
 
-
-#define TRY(x)                                                  \
-  do {                                                          \
-    int __rc = (x);                                             \
-    if( __rc < 0 ) {                                            \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      fprintf(stderr, "ERROR: rc=%d errno=%d (%s)\n",           \
-              __rc, errno, strerror(errno));                    \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
-
-
-/**********************************************************************/
-
-static void tx_send(void)
+static void tx_send(int len)
 {
-  char buf[1];
-  TRY(send(udp_sock, buf, 1, 0));
+  char buf[len];
+  TEST( send(udp_sock, buf, len, 0) == len );
 }
 
 
 static void rx_wait(void)
 {
   char buf[cfg_payload_len];
-  ssize_t size = 0;
-  while( size != cfg_payload_len ) {
-    ssize_t rc = recv(tcp_sock, buf, cfg_payload_len - size, MSG_DONTWAIT);
-    if( rc > 0 ) {
-      size += rc;
-    }
-    else if( rc == -1 && errno != EAGAIN && errno != EWOULDBLOCK )
-      TRY(rc);
-  }
+  TEST( recv(tcp_sock, buf, cfg_payload_len, MSG_WAITALL) == cfg_payload_len );
 }
 
 
@@ -136,16 +90,18 @@ static void loop(void)
   int i, usec;
 
   for( i = 0; i < cfg_warm; ++i ) {
-    tx_send();
+    tx_send(1);
     rx_wait();
   }
 
   gettimeofday(&start, NULL);
   for( i = 0; i < cfg_iter; ++i ) {
-    tx_send();
+    tx_send(1);
     rx_wait();
   }
   gettimeofday(&end, NULL);
+
+  tx_send(0);  /* tell other end to exit */
 
   usec = (end.tv_sec - start.tv_sec) * 1000000;
   usec += end.tv_usec - start.tv_usec;
@@ -187,9 +143,8 @@ static int parse_host(const char* s, struct in_addr* ip_out)
 static int my_connect(int sock, const char* ipaddr, int port)
 {
   struct sockaddr_in sa;
-  bzero(&sa, sizeof(sa));
   sa.sin_family = AF_INET;
-  TRY(parse_host(ipaddr, &sa.sin_addr));
+  TRY( parse_host(ipaddr, &sa.sin_addr) );
   sa.sin_port = htons(port);
   return connect(sock, (struct sockaddr*) &sa, sizeof(sa));
 }
@@ -198,7 +153,6 @@ static int my_connect(int sock, const char* ipaddr, int port)
 static int my_bind(int sock, int port)
 {
   struct sockaddr_in sa;
-  bzero(&sa, sizeof(sa));
   sa.sin_family = AF_INET;
   sa.sin_addr.s_addr = htonl(INADDR_ANY);
   sa.sin_port = htons(port);
@@ -206,28 +160,33 @@ static int my_bind(int sock, int port)
 }
 
 
-static int init(const char* srv_ip, int port)
+static void init(const char* srv_ip, int port)
 {
-  TRY(udp_sock = socket(AF_INET, SOCK_DGRAM, 0));
-  TRY(my_bind(udp_sock, port));
-  TRY(my_connect(udp_sock, srv_ip, port));
-  TRY(tcp_sock = socket(AF_INET, SOCK_STREAM, 0));
-  TRY(my_connect(tcp_sock, srv_ip, port));
-  return 0;
+  TRY( udp_sock = socket(AF_INET, SOCK_DGRAM, 0) );
+  TRY( my_bind(udp_sock, port) );
+  TRY( my_connect(udp_sock, srv_ip, port) );
+  TRY( tcp_sock = socket(AF_INET, SOCK_STREAM, 0) );
+  TRY( my_connect(tcp_sock, srv_ip, port) );
 }
 
 
 /**********************************************************************/
 
-static void usage(void)
+static void usage_msg(FILE* f)
 {
-  fprintf(stderr, "\nusage:\n");
-  fprintf(stderr, "efdelegated_client [options] srv-ip port\n");
-  fprintf(stderr, "\noptions:\n");
-  fprintf(stderr, "  -w <iterations> - set number of warmup iterations\n");
-  fprintf(stderr, "  -n <iterations> - set number of iterations\n");
-  fprintf(stderr, "  -s <msg-size>   - set payload size\n");
-  fprintf(stderr, "\n");
+  fprintf(f, "\nusage:\n");
+  fprintf(f, "  efdelegated_client [options] <server-host> <port>\n");
+  fprintf(f, "\noptions:\n");
+  fprintf(f, "  -w <iterations>   - set number of warmup iterations\n");
+  fprintf(f, "  -n <iterations>   - set number of iterations\n");
+  fprintf(f, "  -s <msg-size>     - set payload size\n");
+  fprintf(f, "\n");
+}
+
+
+static void usage_err(void)
+{
+  usage_msg(stderr);
   exit(1);
 }
 
@@ -238,8 +197,12 @@ int main(int argc, char* argv[])
   const char* srv_ip;
   int port;
 
-  while( (c = getopt(argc, argv, "n:s:w:")) != -1 )
+  while( (c = getopt(argc, argv, "hn:s:w:")) != -1 )
     switch( c ) {
+    case 'h':
+      usage_msg(stdout);
+      exit(0);
+      break;
     case 'n':
       cfg_iter = atoi(optarg);
       break;
@@ -250,23 +213,21 @@ int main(int argc, char* argv[])
       cfg_payload_len = atoi(optarg);
       break;
     case '?':
-      usage();
+      usage_err();
+      break;
     default:
       TEST(0);
+      break;
     }
-
   argc -= optind;
   argv += optind;
-
   if( argc != 2 )
-    usage();
+    usage_err();
 
   srv_ip = argv[0];
   port = atoi(argv[1]);
-
-  TRY(init(srv_ip, port));
+  init(srv_ip, port);
   loop();
-
   return 0;
 }
 

@@ -593,7 +593,7 @@ static void efx_ethtool_get_stats(struct net_device *net_dev,
 	efx_ptp_update_stats(efx, data);
 }
 
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES) && !defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 
 static int efx_ethtool_set_tso(struct net_device *net_dev, u32 enable)
 {
@@ -687,7 +687,7 @@ static int efx_ethtool_set_flags(struct net_device *net_dev, u32 data)
 }
 #endif
 
-#endif /* EFX_HAVE_NDO_SET_FEATURES */
+#endif /* EFX_HAVE_NDO_SET_FEATURES && EFX_HAVE_EXT_NDO_SET_FEATURES */
 
 static void efx_ethtool_self_test(struct net_device *net_dev,
 				  struct ethtool_test *test, u64 *data)
@@ -1376,16 +1376,32 @@ static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
 }
 #endif
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_KEY_SIZE)
+static u32 efx_ethtool_get_rxfh_key_size(struct net_device *net_dev)
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+
+	return efx->type->rx_hash_key_size;
+}
+#endif
+
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) || !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
 static int efx_ethtool_get_rxfh(struct net_device *net_dev, u32 *indir, u8 *key,
 				u8 *hfunc)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
+	int rc;
+
+	rc = efx->type->rx_pull_rss_config(efx);
+	if (rc)
+		return rc;
 
 	if (hfunc)
 		*hfunc = ETH_RSS_HASH_TOP;
 	if (indir)
 		memcpy(indir, efx->rx_indir_table, sizeof(efx->rx_indir_table));
+	if (key)
+		memcpy(key, efx->rx_hash_key, efx->type->rx_hash_key_size);
 	return 0;
 }
 
@@ -1395,13 +1411,17 @@ static int efx_ethtool_set_rxfh(struct net_device *net_dev,
 	struct efx_nic *efx = netdev_priv(net_dev);
 
 	/* We do not allow change in unsupported parameters */
-	if (key ||
-	    (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP))
+	if (hfunc != ETH_RSS_HASH_NO_CHANGE && hfunc != ETH_RSS_HASH_TOP)
 		return -EOPNOTSUPP;
-	if (!indir)
+	if (!indir && !key)
 		return 0;
 
-	return efx->type->rx_push_rss_config(efx, true, indir);
+	if (!key)
+		key = efx->rx_hash_key;
+	if (!indir)
+		indir = efx->rx_indir_table;
+
+	return efx->type->rx_push_rss_config(efx, true, indir, key);
 }
 #endif
 
@@ -1550,6 +1570,39 @@ static int efx_ethtool_get_module_info(struct net_device *net_dev,
 	return ret;
 }
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CHANNELS) || defined(EFX_HAVE_ETHTOOL_EXT_CHANNELS)
+void efx_ethtool_get_channels(struct net_device *net_dev,
+			      struct ethtool_channels *channels)
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+	unsigned int i, j;
+
+	channels->max_combined = efx->max_channels;
+	channels->max_rx = efx->max_channels;
+	channels->max_tx = efx->max_tx_channels;
+
+	channels->rx_count = min(efx->n_rx_channels, efx->tx_channel_offset);
+	channels->combined_count = efx->n_rx_channels - channels->rx_count;
+	channels->tx_count = efx->n_tx_channels - channels->combined_count;
+
+	/* count up 'other' channels */
+	channels->max_other = 0;
+	channels->other_count = 0;
+	for (i = 0; i < EFX_MAX_EXTRA_CHANNELS; i++) {
+		if (!efx->extra_channel_type[i])
+			continue;
+		channels->max_other++;
+		for (j = 0; j < EFX_MAX_EXTRA_CHANNELS; j++) {
+			if (j >= efx->n_channels)
+				continue;
+			if (efx_get_channel(efx, efx->n_channels - j - 1)->type ==
+					efx->extra_channel_type[i])
+				channels->other_count++;
+		}
+	}
+}
+#endif
+
 const struct ethtool_ops efx_ethtool_ops = {
 	.get_settings		= efx_ethtool_get_settings,
 	.set_settings		= efx_ethtool_set_settings,
@@ -1570,7 +1623,7 @@ const struct ethtool_ops efx_ethtool_ops = {
 	.set_ringparam		= efx_ethtool_set_ringparam,
 	.get_pauseparam         = efx_ethtool_get_pauseparam,
 	.set_pauseparam         = efx_ethtool_set_pauseparam,
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES) && !defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 	.get_rx_csum		= efx_ethtool_get_rx_csum,
 	.set_rx_csum		= efx_ethtool_set_rx_csum,
 	.get_tx_csum		= ethtool_op_get_tx_csum,
@@ -1626,7 +1679,9 @@ const struct ethtool_ops_ext efx_ethtool_ops_ext = {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR_SIZE)
 	.get_rxfh_indir_size	= efx_ethtool_get_rxfh_indir_size,
 #endif
-
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GET_RXFH_KEY_SIZE)
+	.get_rxfh_key_size	= efx_ethtool_get_rxfh_key_size,
+#endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CONFIGURABLE_RSS_HASH)
 	.get_rxfh		= efx_ethtool_get_rxfh,
 	.set_rxfh		= efx_ethtool_set_rxfh,
@@ -1649,5 +1704,8 @@ const struct ethtool_ops_ext efx_ethtool_ops_ext = {
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_GMODULEEEPROM)
 	.get_module_info	= efx_ethtool_get_module_info,
 	.get_module_eeprom	= efx_ethtool_get_module_eeprom,
+#endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_CHANNELS) || defined(EFX_HAVE_ETHTOOL_EXT_CHANNELS)
+	.get_channels		= efx_ethtool_get_channels,
 #endif
 };

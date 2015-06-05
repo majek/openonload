@@ -335,6 +335,9 @@ static int ef10_ef_vi_transmit_pio(ef_vi* vi, int offset, int len,
   EF_VI_ASSERT((unsigned) offset < vi->linked_pio->pio_len);
   EF_VI_ASSERT((unsigned) (offset + len) <= vi->linked_pio->pio_len);
 
+  if( (offset & 63) != 0 )
+    return -EINVAL;
+
   if( qs->added - qs->removed < q->mask ) {
     ef10_pio_push(vi, q, qs, offset, len, dma_id);
     return 0;
@@ -363,8 +366,10 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
   EF_VI_ASSERT(dma_id != 0xffffffff);
   EF_VI_ASSERT((unsigned) offset < vi->linked_pio->pio_len);
   EF_VI_ASSERT((unsigned) (offset + len) <= vi->linked_pio->pio_len);
-  EF_VI_ASSERT((offset & 15) == 0);
   EF_VI_ASSERT(len >= 16);
+
+  if( (offset & 63) != 0 )
+    return -EINVAL;
 
   if( qs->added - qs->removed < q->mask ) {
     /* Copy packet to NIC buffer.  The PIO region on NIC is
@@ -375,8 +380,10 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
     src = (void*) src_buf;
     dst = (void*) (pio->pio_io + offset);
     dst_end = dst + (len >> 3);
-    while( dst < dst_end )
+    while( dst < dst_end ) {
       *dst++ = *src++;
+      ci_compiler_barrier();
+    }
     if( len & 7 ) {
       int done = len & ~7;
       memcpy(merge.u8, (const uint8_t*) src_buf + done,

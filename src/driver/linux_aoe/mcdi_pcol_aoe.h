@@ -1744,6 +1744,8 @@
 #define          MC_CMD_AOE_OP_DDR_ECC_STATUS 0x16
 /* enum: Commands for MC-SPI Master emulation */
 #define          MC_CMD_AOE_OP_MC_SPI_MASTER 0x17
+/* enum: Commands for FC boot control */
+#define          MC_CMD_AOE_OP_FC_BOOT 0x18
 
 /* MC_CMD_AOE_OUT msgresponse */
 #define    MC_CMD_AOE_OUT_LEN 0
@@ -1988,6 +1990,14 @@
 #define       MC_CMD_AOE_IN_MC_SPI_MASTER_WRITE_OFFSET_OFST 8
 #define       MC_CMD_AOE_IN_MC_SPI_MASTER_WRITE_DATA_OFST 12
 
+/* MC_CMD_AOE_IN_FC_BOOT msgrequest */
+#define    MC_CMD_AOE_IN_FC_BOOT_LEN 8
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+/* FC boot control flags */
+#define       MC_CMD_AOE_IN_FC_BOOT_CONTROL_OFST 4
+#define        MC_CMD_AOE_IN_FC_BOOT_CONTROL_BOOT_ENABLE_LBN 0
+#define        MC_CMD_AOE_IN_FC_BOOT_CONTROL_BOOT_ENABLE_WIDTH 1
+
 /* MC_CMD_AOE_OUT_INFO msgresponse */
 #define    MC_CMD_AOE_OUT_INFO_LEN 44
 /* JTAG IDCODE of CPLD */
@@ -2046,6 +2056,8 @@
 #define          MC_CMD_AOE_OUT_INFO_FC_BOOT_FAIL_BAD_BSP 0x5
 /* enum: FC application loaded and execution attempted */
 #define          MC_CMD_AOE_OUT_INFO_FC_BOOT_APP_EXECUTE 0x80
+/* enum: FC application Started */
+#define          MC_CMD_AOE_OUT_INFO_FC_BOOT_APP_STARTED 0x81
 /* enum: No bootrom in FPGA */
 #define          MC_CMD_AOE_OUT_INFO_FC_BOOT_NO_BOOTROM 0xff
 
@@ -2241,3 +2253,6 @@
 
 /* MC_CMD_AOE_OUT_MC_SPI_MASTER msgresponse */
 #define    MC_CMD_AOE_OUT_MC_SPI_MASTER_LEN 0
+
+/* MC_CMD_AOE_OUT_FC_BOOT msgresponse */
+#define    MC_CMD_AOE_OUT_FC_BOOT_LEN 0

@@ -516,6 +516,11 @@ static int efx_phc_settime(struct ptp_clock_info *ptp,
 			   const struct timespec *e_ts);
 static int efx_phc_enable(struct ptp_clock_info *ptp,
 			  struct ptp_clock_request *request, int on);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_64BIT_PHC)
+static int efx_phc_gettime64(struct ptp_clock_info *ptp, struct timespec64 *ts);
+static int efx_phc_settime64(struct ptp_clock_info *ptp,
+			     const struct timespec64 *e_ts);
+#endif
 #endif
 
 #ifdef EFX_NOT_UPSTREAM
@@ -630,11 +635,8 @@ size_t efx_ptp_update_stats(struct efx_nic *efx, u64 *stats)
 	MCDI_SET_DWORD(inbuf, PTP_IN_PERIPH_ID, 0);
 	rc = efx_mcdi_rpc(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
 			  outbuf, sizeof(outbuf), NULL);
-	if (rc) {
-		netif_err(efx, hw, efx->net_dev,
-			  "MC_CMD_PTP_OP_STATUS failed (%d)\n", rc);
+	if (rc)
 		memset(outbuf, 0, sizeof(outbuf));
-	}
 	efx_nic_update_stats(efx_ptp_stat_desc, PTP_STAT_COUNT,
 			     efx_ptp_stat_mask,
 			     stats, _MCDI_PTR(outbuf, 0), false);
@@ -895,14 +897,20 @@ static int efx_ptp_get_attributes(struct efx_nic *efx)
 	 */
 	MCDI_SET_DWORD(inbuf, PTP_IN_OP, MC_CMD_PTP_OP_GET_ATTRIBUTES);
 	MCDI_SET_DWORD(inbuf, PTP_IN_PERIPH_ID, 0);
-	rc = efx_mcdi_rpc(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
-			  outbuf, sizeof(outbuf), &out_len);
-	if (rc == 0)
+	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
+				outbuf, sizeof(outbuf), &out_len);
+	if (rc == 0) {
 		fmt = MCDI_DWORD(outbuf, PTP_OUT_GET_ATTRIBUTES_TIME_FORMAT);
-	else if (rc == -EINVAL)
+	} else if (rc == -EINVAL) {
 		fmt = MC_CMD_PTP_OUT_GET_ATTRIBUTES_SECONDS_NANOSECONDS;
-	else
+	} else if (rc == -EPERM) {
+		netif_info(efx, probe, efx->net_dev, "no PTP support\n");
 		return rc;
+	} else {
+		efx_mcdi_display_error(efx, MC_CMD_PTP, sizeof(inbuf),
+				       outbuf, sizeof(outbuf), rc);
+		return rc;
+	}
 
 	if (fmt == MC_CMD_PTP_OUT_GET_ATTRIBUTES_SECONDS_27FRACTION) {
 		ptp->ns_to_nic_time = efx_ptp_ns_to_s27;
@@ -956,8 +964,8 @@ static int efx_ptp_get_timestamp_corrections(struct efx_nic *efx)
 		       MC_CMD_PTP_OP_GET_TIMESTAMP_CORRECTIONS);
 	MCDI_SET_DWORD(inbuf, PTP_IN_PERIPH_ID, 0);
 
-	rc = efx_mcdi_rpc(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
-			  outbuf, sizeof(outbuf), NULL);
+	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
+				outbuf, sizeof(outbuf), NULL);
 	if (rc == 0) {
 		efx->ptp_data->ts_corrections.tx = MCDI_DWORD(outbuf,
 			PTP_OUT_GET_TIMESTAMP_CORRECTIONS_TRANSMIT);
@@ -973,6 +981,8 @@ static int efx_ptp_get_timestamp_corrections(struct efx_nic *efx)
 		efx->ptp_data->ts_corrections.pps_out = 0;
 		efx->ptp_data->ts_corrections.pps_in = 0;
 	} else {
+		efx_mcdi_display_error(efx, MC_CMD_PTP, sizeof(inbuf), outbuf,
+				       sizeof(outbuf), rc);
 		return rc;
 	}
 
@@ -1019,7 +1029,12 @@ static int efx_ptp_disable(struct efx_nic *efx)
 	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
 				outbuf, sizeof(outbuf), NULL);
 	rc = (rc == -EALREADY) ? 0 : rc;
-	if (rc)
+	/* If we get ENOSYS, the NIC doesn't support PTP, and thus this function
+	 * should only have been called during probe.
+	 */
+	if (rc == -ENOSYS || rc == -EPERM)
+		netif_info(efx, probe, efx->net_dev, "no PTP support\n");
+	else if (rc)
 		efx_mcdi_display_error(efx, MC_CMD_PTP,
 				       MC_CMD_PTP_IN_DISABLE_LEN,
 				       outbuf, sizeof(outbuf), rc);
@@ -1404,9 +1419,9 @@ static int efx_ptp_xmit_skb(struct efx_nic *efx, struct sk_buff *skb)
 			goto fail;
 	}
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_TX_ACCEL)
-	if (vlan_tx_tag_present(skb)) {
+	if (skb_vlan_tag_present(skb)) {
 		skb = vlan_insert_tag_set_proto(skb, htons(ETH_P_8021Q),
-				     vlan_tx_tag_get(skb));
+				     skb_vlan_tag_get(skb));
 		if (unlikely(!skb))
 			return NETDEV_TX_OK;
 	}
@@ -2066,8 +2081,8 @@ int efx_ptp_hw_pps_enable(struct efx_nic *efx, struct efx_ts_hw_pps *data)
 		       efx->ptp_data->channel ?
 		       efx->ptp_data->channel->channel : 0);
 
-	rc  = efx_mcdi_rpc(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
-			NULL, 0, NULL);
+	rc = efx_mcdi_rpc(efx, MC_CMD_PTP, inbuf, sizeof(inbuf),
+			  NULL, 0, NULL);
 
 	if (rc)
 		return rc;
@@ -2189,8 +2204,13 @@ static const struct ptp_clock_info efx_phc_clock_info = {
 	.pps		= 1,
 	.adjfreq	= efx_phc_adjfreq,
 	.adjtime	= efx_phc_adjtime,
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_64BIT_PHC)
+	.gettime64	= efx_phc_gettime64,
+	.settime64	= efx_phc_settime64,
+#else
 	.gettime	= efx_phc_gettime,
 	.settime	= efx_phc_settime,
+#endif
 	.enable		= efx_phc_enable,
 };
 #endif
@@ -3360,6 +3380,36 @@ static int efx_phc_settime(struct ptp_clock_info *ptp,
 
 	return 0;
 }
+
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_64BIT_PHC)
+/* 64-bit PHC compatibility shims.
+ * The hardware (for both Siena and EF10) can only handle a 32-bit seconds part,
+ * so we may as well do the truncation here and call into the regular (32-bit)
+ * pathway rather than reimplementing everything.
+ * This will need revisiting when EF100 hardware comes along (if that supports a
+ * 64-bit seconds part), or January 2038, whichever is sooner.
+ */
+static int efx_phc_gettime64(struct ptp_clock_info *ptp, struct timespec64 *ts)
+{
+	struct timespec ts32;
+	int rc;
+
+	rc = efx_phc_gettime(ptp, &ts32);
+	if (rc)
+		return rc;
+	*ts = timespec_to_timespec64(ts32);
+	return 0;
+}
+
+static int efx_phc_settime64(struct ptp_clock_info *ptp,
+			     const struct timespec64 *e_ts)
+{
+	struct timespec ts32 = timespec64_to_timespec(*e_ts);
+
+	return efx_phc_settime(ptp, &ts32);
+}
+#endif
 
 static int efx_phc_enable(struct ptp_clock_info *ptp,
 			  struct ptp_clock_request *request,

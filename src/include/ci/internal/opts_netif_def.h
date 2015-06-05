@@ -325,8 +325,8 @@ CI_CFG_OPT("EF_USE_DSACK", use_dsack, ci_uint32,
 CI_CFG_OPT("EF_TIMESTAMPING_REPORTING", timestamping_reporting, ci_uint32,
 "Controls timestamp reporting, possible values:\n"
 " 0: report translated timestamps only when the NIC clock has been set;\n"
-" 1: report translated timestamps only when the NIC clock is synchronised "
-"(e.g. using ptpd)\n"
+" 1: report translated timestamps only when the system clock and the NIC "
+"clock are in sync (e.g. using ptpd)\n"
 "If the above conditions are not met Onload will only report raw "
 "(not translated) timestamps.\n",
            1, , 0, 0, 1, yesno)
@@ -439,9 +439,10 @@ CI_CFG_OPT("EF_TCP_RST_DELAYED_CONN", rst_delayed_conn, ci_uint32,
 
 CI_CFG_OPT("EF_TCP_SNDBUF_MODE", tcp_sndbuf_mode, ci_uint32,
            "This option controls how the SO_SNDBUF limit is applied to TCP "
-           "sockets.  In the default mode the limit applies only to the send "
-           "queue.  When this option is set to 1, the limit applies to the "
-           "size of the send queue and retransmit queue combined.",
+           "sockets.  In the default mode the limit applies to the "
+           "size of the send queue and retransmit queue combined.  "
+           "When this option is set to 0 the limit applies to the "
+           "the send queue only.",
            1, , 1, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_SYNCOOKIES", tcp_syncookies, ci_uint32,
@@ -650,7 +651,7 @@ CI_CFG_OPT("EF_TCP_RX_LOG_FLAGS", tcp_rx_log_flags, ci_uint32,
            8, ,  0, MIN, MAX, bitmask)
 
 #if CI_CFG_PORT_STRIPING
-CI_CFG_OPT("EF_STRIPE_DUPACK_THRESHOLD", stripe_dupack_threshold, ci_uint32,
+CI_CFG_OPT("EF_STRIPE_DUPACK_THRESHOLD", stripe_dupack_threshold, ci_uint16,
 "For connections using port striping: Sets the number of duplicate ACKs that "
 "must be received before initiating fast retransmit.",
            8, , CI_CFG_STRIPE_DEFAULT_DUPACK_THRESHOLD, MIN, MAX, count/*?*/)
@@ -992,9 +993,7 @@ CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs, ci_uint32,
 "When this limit is reached listening sockets are not able to accept new "
 "connections over accelerated interfaces.  New sockets and pipes created via "
 "socket() and pipe() etc. are handed over to the kernel stack and so are not "
-"accelerated."
-"\n"
-"Note: Multiple endpoint buffers are consumed by each accelerated pipe.",
+"accelerated.",
            , , CI_CFG_NETIF_MAX_ENDPOINTS, 0, CI_CFG_NETIF_MAX_ENDPOINTS_MAX,
            count)
 

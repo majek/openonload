@@ -1,7 +1,9 @@
 
 TEST_APPS	:= efpingpong efforward efrss efsink efpio eftap \
-		   efsink_packed efforward_packed \
-		   efdelegated_client efdelegated_server
+		   efsink_packed efforward_packed
+ifeq (${PLATFORM},gnu_x86_64)
+TEST_APPS	+= efdelegated_server efdelegated_client
+endif
 
 TARGETS		:= $(TEST_APPS:%=$(AppPattern))
 

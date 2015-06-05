@@ -334,9 +334,13 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
  * This call is necessary if you need to close the connection graciously
  * when the file descriptor is closed via close() or exit().
  * 
- * There is no need to call _cancel() before _prepare().
- * There is no need to call _cancel if all the bytes specified in _prepare
- * were sent.
+ * There is no need to call _cancel() before _prepare().  There is no
+ * need to call _cancel if all the bytes specified in _prepare were
+ * sent. If some (but not all) of the bytes specified in _prepare were
+ * sent, you must call _complete() for the sent bytes and _cancel()
+ * for the remaining reserved-but-not-sent bytes.  This is true even
+ * if the reason for not sending is that you've reached the window
+ * limits retured by the _prepare() call.
  *
  *
  * Note 1, serialization.
@@ -411,7 +415,8 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
     onload_delegated_send_complete(fd, msg pointing to "my_data", 0);
   if( have more data to send )
     goto start;
-  onload_delegated_send_cancel(fd);
+  if( sent != size )
+    onload_delegated_send_cancel(fd);
   close(fd);
  
  */

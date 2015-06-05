@@ -79,52 +79,41 @@
 #include <onload/extensions.h>
 #include "utils.h"
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <inttypes.h>
 #include <arpa/inet.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <string.h>
 #include <net/if.h>
-#include <netdb.h>
-#include <poll.h>
-
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <ifaddrs.h>
+#include <stdbool.h>
 
 
-#define MEMBER_OFFSET(c_type, mbr_name)  \
-  ((uint32_t) (uintptr_t)(&((c_type*)0)->mbr_name))
+#define MTU                   1500
+#define MAX_ETH_HEADERS       (14 + 4)
+#define MAX_IP_TCP_HEADERS    (20 + 20 + 12)
+#define MAX_PACKET            (MTU + MAX_ETH_HEADERS)
+#define MAX_MESSAGE           (MTU - MAX_IP_TCP_HEADERS)
 
-#define DEFAULT_PAYLOAD_SIZE  28
-#define CACHE_ALIGN           __attribute__((aligned(EF_VI_DMA_ALIGN)))
-#define BUF_SIZE              2048
 
-/* To get best performance possible, we prepare to do the next send
- * right after having done the current one.  Therefore, we need at
- * least 2 pkt buffers. */
-#define N_BUFS                2
-
-struct pkt_buf {
-  ef_addr         dma_buf_addr;
-  uint8_t         dma_buf[1] CACHE_ALIGN;
-};
-
-static unsigned  cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
-static int       cfg_iter        = 100000;
-static int       cfg_warm        = 10;
+static unsigned  cfg_payload_len = 200;
 static int       cfg_delegated;
 
-static int      tcp_sock, udp_sock;
-static ef_vi    vi;
-struct pkt_buf* pkt_bufs[N_BUFS];
-static struct onload_delegated_send ods[N_BUFS];
+
+struct state {
+  int                          tcp_sock;
+  int                          udp_sock;
+  ef_pd                        pd;
+  ef_pio                       pio;
+  ef_driver_handle             dh;
+  ef_vi                        vi;
+  char                         pkt_buf[MAX_PACKET];
+  char*                        msg_buf;
+  int                          msg_len;
+  int                          pio_pkt_len;
+  bool                         pio_in_use;
+  struct onload_delegated_send ods;
+};
 
 
 static int min(int x, int y)
@@ -133,17 +122,18 @@ static int min(int x, int y)
 }
 
 
-static void evq_poll(void)
+static void evq_poll(struct state* s)
 {
   ef_request_id ids[EF_VI_TRANSMIT_BATCH];
   ef_event      evs[EF_VI_EVENT_POLL_MIN_EVS];
   int           n_ev, i;
 
-  n_ev = ef_eventq_poll(&vi, evs, sizeof(evs) / sizeof(evs[0]));
+  n_ev = ef_eventq_poll(&(s->vi), evs, sizeof(evs) / sizeof(evs[0]));
   for( i = 0; i < n_ev; ++i )
     switch( EF_EVENT_TYPE(evs[i]) ) {
     case EF_EVENT_TYPE_TX:
-      ef_vi_transmit_unbundle(&vi, &evs[i], ids);
+      if( ef_vi_transmit_unbundle(&(s->vi), &evs[i], ids) )
+        s->pio_in_use = false;
       break;
     default:
       fprintf(stderr, "ERROR: unexpected event "EF_EVENT_FMT"\n",
@@ -154,37 +144,23 @@ static void evq_poll(void)
 }
 
 
-static int sock_rx(void)
+static int sock_rx(int sock)
 {
   char buf[1];
-  int rc = recv(udp_sock, buf, 1, MSG_DONTWAIT);
-  if( rc > 0 ) {
+  int rc = recv(sock, buf, 1, MSG_DONTWAIT);
+  if( rc >= 0 )
     return rc;
-  }
-  else if( rc == -1 && (errno == EAGAIN || errno == EWOULDBLOCK) )
-    return 0;
+  else if( rc == -1 && errno == EAGAIN )
+    return -1;
   else
     TEST(0);
 }
 
 
-static void rx_wait(void)
+static void normal_send(struct state* s)
 {
-  do {
-    evq_poll();
-  } while( sock_rx() == 0 );
-}
-
-
-static void sock_tx(void)
-{
-  char buf[cfg_payload_len];
-  ssize_t size = 0;
-  while( size != cfg_payload_len ) {
-    ssize_t rc;
-    TRY(rc = send(tcp_sock, buf, cfg_payload_len, 0));
-    size += rc;
-  }
+  ssize_t rc = send(s->tcp_sock, s->msg_buf, s->msg_len, 0);
+  TEST( rc == s->msg_len );
 }
 
 
@@ -203,90 +179,94 @@ static void sock_tx(void)
  * that you don't want to do a delegated send, you can call
  * onload_delegated_send_cancel().
  */
-static void delegated_prepare(int iter)
+static void delegated_prepare(struct state* s)
 {
-  /* pkt_buf->dma_buf is beginning of the ef_vi packet buffer.  That
-   * is where we get the API to copy the TCP header. */
-  void* buf = pkt_bufs[iter]->dma_buf;
-  int bytes;
-  ods[iter].headers = buf;
+  /* Prepare to do a delegated send: Get the current packet headers. */
+  s->ods.headers = s->pkt_buf;
+  s->ods.headers_len = MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
+  TRY( onload_delegated_send_prepare(s->tcp_sock, s->msg_len, 0, &(s->ods)) );
 
-  /* We also need to tell the API how much space it has to copy the
-   * header.  We give it the entire pkt buffer even though we know
-   * that it will not need all of it. */
-  ods[iter].headers_len = BUF_SIZE -
-    (int)((uint8_t*)pkt_bufs[iter] - pkt_bufs[iter]->dma_buf);
-  TRY(onload_delegated_send_prepare(tcp_sock, cfg_payload_len, 0, &ods[iter]));
-  /* If we want to send more than MSS, we will have to use multiple
-   * delegated sends.  We do not handle that case in this app. */
-  TEST(cfg_payload_len <= ods[iter].mss);
+  /* We've probably put the headers in the wrong place, because we've
+   * allowed enough space for worst-case headers (including VLAN tag and
+   * TCP options).  Move the headers up so that the end of the headers
+   * meets the start of the message.
+   */
+  s->ods.headers = s->msg_buf - s->ods.headers_len;
+  memmove(s->ods.headers, s->pkt_buf, s->ods.headers_len);
 
-  /* Figure out how much we are actually allowed to send.  If we are
-   * going to send less than MSS, then we need to tell the API. */
-  bytes = min(min(min(ods[iter].send_wnd, ods[iter].cong_wnd), ods[iter].mss),
-              ods[iter].user_size);
-  if( bytes == cfg_payload_len ) {
-    int pio_len = ROUND_UP(ods[iter].headers_len + bytes, 16);
-    if( bytes < ods[iter].mss )
-      onload_delegated_send_tcp_update(&ods[iter], cfg_payload_len, 1);
-    TRY(ef_pio_memcpy(&vi, pkt_bufs[iter]->dma_buf, iter * pio_len, pio_len));
-  }
-}
+  /* If we want to send more than MSS (maximum segment size), we will have
+   * to segment the message into multiple packets.  We do not handle that
+   * case in this app.
+   */
+  TEST( s->msg_len <= s->ods.mss );
 
-
-/* Do the actual delegated send. */
-static void delegated_send(int iter)
-{
   /* Figure out how much we are actually allowed to send. */
-  int bytes = min(min(min(ods[iter].send_wnd, ods[iter].cong_wnd),
-                      ods[iter].mss), ods[iter].user_size);
-  int pio_len = ROUND_UP(ods[iter].headers_len + bytes, 16);
+  int allowed_to_send = min(s->ods.send_wnd, s->ods.cong_wnd);
+  allowed_to_send = min(allowed_to_send, s->ods.mss);
 
-  /* If we cannot send as much as we want to, either do a set of
-   * delegated sends or just call onload_delegated_send_cancel() and
-   * do a normal send.  Both approaches should have comparable
-   * performance.  We do the latter here. */
-  if( bytes < cfg_payload_len ) {
-    TRY(onload_delegated_send_cancel(tcp_sock));
-    sock_tx();
+  if( s->msg_len <= allowed_to_send ) {
+    s->pio_pkt_len = s->ods.headers_len + s->msg_len;
+    onload_delegated_send_tcp_update(&(s->ods), s->msg_len, 1);
+    TRY( ef_pio_memcpy(&(s->vi), s->ods.headers, 0, s->pio_pkt_len) );
   }
   else {
-    struct iovec iov;
-    TRY(ef_vi_transmit_pio(&vi, iter * pio_len, pio_len, 0));
-    iov.iov_len  = cfg_payload_len;
-    iov.iov_base = (uint8_t*)pkt_bufs[iter]->dma_buf + ods[iter].headers_len;
-    TRY(onload_delegated_send_complete(tcp_sock, &iov, 1, 0));
+    /* We can't send at the moment, due to congestion window or receive
+     * window being closed (or message larger than MSS).  Cancel the
+     * delegated send and use normal send instead.
+     */
+    TRY(onload_delegated_send_cancel(s->tcp_sock));
+    s->pio_pkt_len = 0;
   }
 }
 
 
-static void delegated_tx(int iter)
+static void delegated_send(struct state* s)
 {
-  if( iter == 0 )
-    delegated_prepare(0);
-  delegated_send(iter % N_BUFS);
-  delegated_prepare((iter + 1) % N_BUFS);
+  /* Fast path send: */
+  TRY( ef_vi_transmit_pio(&(s->vi), 0, s->pio_pkt_len, 0) );
+  s->pio_pkt_len = 0;
+  s->pio_in_use = 1;
+
+  /* Now tell Onload what we've sent.  It needs to know so that it can
+   * update internal state (eg. sequence numbers) and take a copy of the
+   * payload sent so that it can be retransmitted if needed.
+   *
+   * NB. This does not have to happen immediately after the delegated send
+   * (and is not part of the critical path) but should be done soon after.
+   */
+  struct iovec iov;
+  iov.iov_len  = s->msg_len;
+  iov.iov_base = s->msg_buf;
+  TRY( onload_delegated_send_complete(s->tcp_sock, &iov, 1, 0) );
 }
 
 
-static void loop(void)
+static int rx_wait(struct state* s)
 {
-  int i;
-  /* Do some warmup sends to open up the TCP windows. */
-  for( i = 0; i < cfg_warm; ++i ) {
-    rx_wait();
-    sock_tx();
-  }
+  int rc;
+  do {
+    evq_poll(s);
+    if( ! s->pio_in_use && ! s->pio_pkt_len )
+      /* Get ready for the next delegated send... */
+      delegated_prepare(s);
+  } while( (rc = sock_rx(s->udp_sock)) < 0 );
+  return rc;
+}
 
-  for( i = 0; i < cfg_iter; ++i ) {
-    rx_wait();
-    if( cfg_delegated )
-      delegated_tx(i);
+
+static void loop(struct state* s)
+{
+  while( 1 ) {
+    if( rx_wait(s) == 0 )
+      break;
+    if( s->pio_pkt_len )
+      delegated_send(s);
     else
-      sock_tx();
+      normal_send(s);
   }
-  if( cfg_delegated )
-    TRY(onload_delegated_send_cancel(tcp_sock));
+
+  if( s->pio_pkt_len )
+    TRY(onload_delegated_send_cancel(s->tcp_sock));
 }
 
 
@@ -336,48 +316,28 @@ static int get_ifindex(int sock, int* ifindex_out)
 }
 
 
-static int ef_vi_init(void)
+static void ef_vi_init(struct state* s)
 {
-  ef_pd pd;
-#ifdef __x86_64__
-  ef_pio pio;
-#endif
-  ef_memreg memreg;
-  ef_driver_handle dh;
   enum ef_pd_flags pd_flags = EF_PD_DEFAULT;
   enum ef_vi_flags vi_flags = EF_VI_FLAGS_DEFAULT;
-  void* mem;
   int ifindex;
-  int i;
 
-  TRY(get_ifindex(tcp_sock, &ifindex));
-  TRY(ef_driver_open(&dh));
-  TRY(ef_pd_alloc(&pd, dh, ifindex, pd_flags));
-  TRY(ef_vi_alloc_from_pd(&vi, dh, &pd, dh, -1, 0, -1, NULL, -1, vi_flags));
-#ifdef __x86_64__
-  TRY(ef_pio_alloc(&pio, dh, &pd, -1, dh));
-  TRY(ef_pio_link_vi(&pio, dh, &vi, dh));
-#else
-  /* PIO is only available on x86_64 systems */
-  TEST(0);
-#endif
-  TEST(posix_memalign(&mem, 4096, BUF_SIZE * N_BUFS) == 0);
-  TRY(ef_memreg_alloc(&memreg, dh, &pd, dh, mem, BUF_SIZE * N_BUFS));
-
-  for( i = 0; i < N_BUFS; ++i ) {
-    pkt_bufs[i] = (void*) ((uint8_t*) mem + i * BUF_SIZE);
-    pkt_bufs[i]->dma_buf_addr = ef_memreg_dma_addr(&memreg, i * BUF_SIZE) +
-      MEMBER_OFFSET(struct pkt_buf, dma_buf);
-  }
-
-  return 0;
+  s->pio_pkt_len = 0;
+  s->pio_in_use = ! cfg_delegated;
+  TRY(get_ifindex(s->tcp_sock, &ifindex));
+  TRY(ef_driver_open(&s->dh));
+  TRY(ef_pd_alloc(&s->pd, s->dh, ifindex, pd_flags));
+  TRY(ef_vi_alloc_from_pd(&(s->vi), s->dh, &s->pd, s->dh, -1,0,-1, NULL, -1,
+                          vi_flags));
+  TRY(ef_pio_alloc(&s->pio, s->dh, &s->pd, -1, s->dh));
+  TRY(ef_pio_link_vi(&s->pio, s->dh, &(s->vi), s->dh));
 }
 
 
 static int my_bind(int sock, int port)
 {
   struct sockaddr_in sa;
-  bzero(&sa, sizeof(sa));
+  memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;
   sa.sin_addr.s_addr = htonl(INADDR_ANY);
   sa.sin_port = htons(port);
@@ -385,35 +345,42 @@ static int my_bind(int sock, int port)
 }
 
 
-static int init(int port)
+static void init(struct state* s, int port)
 {
   int lsock;
   int one = 1;
 
-  TRY(udp_sock = socket(AF_INET, SOCK_DGRAM, 0));
-  TRY(my_bind(udp_sock, port));
+  s->msg_len = cfg_payload_len;
+  s->msg_buf = s->pkt_buf + MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
 
-  TRY(lsock = socket(AF_INET, SOCK_STREAM, 0));
-  TRY(setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, (char*)&one, sizeof(one)));
-  TRY(setsockopt(lsock, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof(one)));
-  TRY(my_bind(lsock, port));
-  TRY(listen(lsock, 1));
-  TRY(tcp_sock = accept(lsock, NULL, NULL));
-  TRY(ef_vi_init());
-  return 0;
+  TRY(s->udp_sock = socket(AF_INET, SOCK_DGRAM, 0));
+  TRY(my_bind(s->udp_sock, port));
+
+  TRY( lsock = socket(AF_INET, SOCK_STREAM, 0) );
+  TRY( setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, (char*)&one, sizeof(one)) );
+  TRY( setsockopt(lsock, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof(one)) );
+  TRY( my_bind(lsock, port) );
+  TRY( listen(lsock, 1) );
+  TRY( s->tcp_sock = accept(lsock, NULL, NULL) );
+  TRY( close(lsock) );
+  ef_vi_init(s);
 }
 
 
-static void usage(void)
+static void usage_msg(FILE* f)
 {
-  fprintf(stderr, "\nusage:\n");
-  fprintf(stderr, "efdelegated_server [options] port\n");
-  fprintf(stderr, "\noptions:\n");
-  fprintf(stderr, "  -w <iterations> - set number of warmup interations\n");
-  fprintf(stderr, "  -n <iterations> - set number of iterations\n");
-  fprintf(stderr, "  -s <msg-size>   - set payload size\n");
-  fprintf(stderr, "  -d              - use delegated sends API to send\n");
-  fprintf(stderr, "\n");
+  fprintf(f, "\nusage:\n");
+  fprintf(f, "  efdelegated_server [options] <port>\n");
+  fprintf(f, "\noptions:\n");
+  fprintf(f, "  -s <msg-size>      - set payload size\n");
+  fprintf(f, "  -d                 - use delegated sends API to send\n");
+  fprintf(f, "\n");
+}
+
+
+static void usage_err(void)
+{
+  usage_msg(stderr);
   exit(1);
 }
 
@@ -423,13 +390,11 @@ int main(int argc, char* argv[])
   int port;
   int c;
 
-  while( (c = getopt(argc, argv, "n:s:w:d")) != -1 )
+  while( (c = getopt(argc, argv, "hs:d")) != -1 )
     switch( c ) {
-    case 'n':
-      cfg_iter = atoi(optarg);
-      break;
-    case 'w':
-      cfg_warm = atoi(optarg);
+    case 'h':
+      usage_msg(stdout);
+      exit(0);
       break;
     case 's':
       cfg_payload_len = atoi(optarg);
@@ -438,16 +403,17 @@ int main(int argc, char* argv[])
       cfg_delegated = 1;
       break;
     case '?':
-      usage();
+      usage_err();
+      break;
     default:
       TEST(0);
+      break;
     }
-
   argc -= optind;
   argv += optind;
-
   if( argc != 1 )
-    usage();
+    usage_err();
+
   port = atoi(argv[0]);
 
   if( cfg_delegated && ! onload_is_present() ) {
@@ -455,9 +421,9 @@ int main(int argc, char* argv[])
     exit(1);
   }
 
-  TRY(init(port));
-  loop();
-
+  struct state the_state;
+  init(&the_state, port);
+  loop(&the_state);
   return 0;
 }
 

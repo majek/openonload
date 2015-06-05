@@ -463,7 +463,12 @@ static void oo_netdev_up(struct net_device* netdev)
                         CICP_LLAP_TYPE_XMIT_HASH_LAYER4);
         if( encap.type & CICP_LLAP_TYPE_VLAN ) {
           struct net_device *real_dev = vlan_dev_real_dev(netdev);
+          cicp_encap_t bond_encap;
           master_ifindex = real_dev->ifindex;
+          if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, master_ifindex,
+                                        &bond_encap) == 0 )
+            encap.type |= bond_encap.type & (CICP_LLAP_TYPE_USES_HASH |
+                            CICP_LLAP_TYPE_XMIT_HASH_LAYER4);
         } 
         else {
           master_ifindex = netdev->ifindex;

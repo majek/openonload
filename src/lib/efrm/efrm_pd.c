@@ -93,6 +93,10 @@ struct efrm_pd {
 	 */
 	unsigned vport_id;
 
+	/* stack_id required for self-traffic suppression during hw
+	 * multicast loopback */
+	int stack_id;
+
 	/* Buffer table manager.  Needed iff vf==NULL.
 	 * For Huntington, we'll need separate managers for different
 	 * page orders.*/
@@ -185,10 +189,66 @@ void efrm_pd_owner_ids_dtor(struct efrm_pd_owner_ids* owner_ids)
 	kfree(owner_ids);
 }
 
+
+/***********************************************************************/
+/* Stack ids */
+/***********************************************************************/
+
+static int efrm_pd_stack_id_alloc(struct efrm_pd *pd)
+{
+	struct efrm_nic *nic = efrm_nic(pd->rs.rs_client->nic);
+	const int word_bitcount = sizeof(*nic->stack_id_usage) * 8;
+	int i, v, bitno, id;
+
+	spin_lock(&nic->lock);
+	for (i = 0; i < sizeof(nic->stack_id_usage) /
+		     sizeof(*nic->stack_id_usage) &&
+		     ((v = nic->stack_id_usage[i]) == ~0u); ++i)
+		;
+	bitno = v ? ci_ffs64(~v) - 1 : 0;
+	id = i * word_bitcount + bitno + 1;
+	if (id <= EFRM_MAX_STACK_ID)
+		nic->stack_id_usage[i] |= 1 << bitno;
+	spin_unlock(&nic->lock);
+
+	if (id > EFRM_MAX_STACK_ID) {
+		/* we run out of stack ids suppression of self traffic
+		 * is not possible. */
+		EFRM_TRACE("%s: WARNING: no free stack ids", __FUNCTION__);
+		pd->stack_id = 0;
+		return -ENOMEM;
+	}
+	pd->stack_id = id;
+	return 0;
+}
+
+
+static void efrm_pd_stack_id_free(struct efrm_pd *pd)
+{
+	if (pd->stack_id != 0) {
+		struct efrm_nic *nic = efrm_nic(pd->rs.rs_client->nic);
+		const int word_bitcount = sizeof(*nic->stack_id_usage) * 8;
+		int id = pd->stack_id - 1;
+		int i = id / word_bitcount;
+		int bitno = id % word_bitcount;
+		spin_lock(&nic->lock);
+		nic->stack_id_usage[i] &= ~(1 << bitno);
+		spin_unlock(&nic->lock);
+	}
+}
+
+
+unsigned efrm_pd_stack_id_get(struct efrm_pd *pd)
+{
+	return pd->stack_id;
+}
+EXPORT_SYMBOL(efrm_pd_stack_id_get);
+
+
 /***********************************************************************/
 
 int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
-		  struct efrm_vf *vf_opt, int phys_addr_mode)
+		  struct efrm_vf *vf_opt, int flags)
 {
 	struct efrm_pd *pd;
 	int rc, instance;
@@ -197,8 +257,14 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 
 
 	EFRM_ASSERT((client_opt != NULL) || (vf_opt != NULL));
+	if ((flags &
+	    ~(EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE |
+	    EFRM_PD_ALLOC_FLAG_HW_LOOPBACK)) != 0) {
+		rc = -EINVAL;
+		goto fail1;
+	}
 
-	if (!phys_addr_mode) {
+	if (!(flags & EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE)) {
 		orders_num = efhw_nic_buffer_table_orders_num(
 						client_opt->nic);
 		EFRM_ASSERT(orders_num);
@@ -211,10 +277,11 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		rc = -ENOMEM;
 		goto fail1;
 	}
+	pd->stack_id = 0;
 
 	spin_lock_bh(&pd_manager->rm.rm_lock);
 	instance = pd_manager->next_instance++;
-	if (phys_addr_mode) {
+	if (flags & EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE) {
 		pd->owner_id = OWNER_ID_PHYS_MODE;
 	}
 	else {
@@ -240,7 +307,7 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 		client_opt = vfrs->rs_client;
 	}
 #endif
-	if (!phys_addr_mode) {
+	if (!(flags & EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE)) {
 		int ord;
 		for (ord = 0; ord < orders_num; ord++) {
 			efrm_bt_manager_ctor(
@@ -256,6 +323,13 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 	pd->os_data = efrm_pd_os_stats_ctor(pd);
 	pd->min_nic_order = 0;
 	pd->vport_id = EFRM_PD_VPORT_ID_NONE;
+
+	if (flags & EFRM_PD_ALLOC_FLAG_HW_LOOPBACK) {
+		if ((rc = efrm_pd_stack_id_alloc(pd)) != 0) {
+			efrm_pd_release(pd);
+			return rc;
+		}
+	}
 
 	*pd_out = pd;
 	return 0;
@@ -285,6 +359,8 @@ void efrm_pd_free(struct efrm_pd *pd)
 
 	if (pd->vport_id != EFRM_PD_VPORT_ID_NONE)
 		ef10_vport_free(pd->rs.rs_client->nic, pd->vport_id);
+
+	efrm_pd_stack_id_free(pd);
 
 	spin_lock_bh(&pd_manager->rm.rm_lock);
 	if (pd->owner_id != OWNER_ID_PHYS_MODE) {

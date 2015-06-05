@@ -203,6 +203,8 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   struct efrm_vi_attr attr;
   struct efhw_nic *nic;
   int rc, ps_buf_size;
+  int in_flags;
+  struct efrm_pd* rmpd = NULL;
 
   ci_assert(alloc != NULL);
   ci_assert(rt != NULL);
@@ -238,10 +240,12 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
     client = NULL;
     efrm_vi_attr_set_instance(&attr, efrm_vi_set_from_resource(vi_set),
                               alloc_in->vi_set_instance);
+    rmpd = efrm_vi_set_get_pd(efrm_vi_set_from_resource(vi_set));
   }
   else if( pd != NULL ) {
     client = NULL;
-    efrm_vi_attr_set_pd(&attr, efrm_pd_from_resource(pd));
+    rmpd = efrm_pd_from_resource(pd);
+    efrm_vi_attr_set_pd(&attr, rmpd);
   }
   else {
     rc = efrm_client_get(alloc_in->ifindex, NULL, NULL, &client);
@@ -258,8 +262,12 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
     ps_buf_size = (int) alloc_in->ps_buf_size_kb * 1024;
   efrm_vi_attr_set_ps_buffer_size(&attr, ps_buf_size);
 
+  in_flags = alloc_in->flags | EFHW_VI_JUMBO_EN;
+  if( efrm_pd_stack_id_get(rmpd) > 0 )
+    in_flags |= EFHW_VI_TX_LOOPBACK;
+
   rc = vi_resource_alloc(&attr, client, evq ? efrm_vi(evq) : NULL,
-                         alloc_in->flags | EFHW_VI_JUMBO_EN,
+                         in_flags,
                          alloc_in->evq_capacity,
                          alloc_in->txq_capacity, alloc_in->rxq_capacity,
                          alloc_in->tx_q_tag, alloc_in->rx_q_tag,

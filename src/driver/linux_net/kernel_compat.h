@@ -1770,6 +1770,11 @@ void usleep_range(unsigned long min, unsigned long max);
 	}
 #endif
 
+#ifdef EFX_NEED_SKB_VLAN_TAG_GET
+#define skb_vlan_tag_get	vlan_tx_tag_get
+#define skb_vlan_tag_present	vlan_tx_tag_present
+#endif
+
 /**************************************************************************
  *
  * Missing functions provided by kernel_compat.c
@@ -2806,6 +2811,11 @@ static inline unsigned long efx_get_open_fds(unsigned long fd, const struct fdta
 int pci_vfs_assigned(struct pci_dev *dev);
 #endif
 
+#ifdef EFX_NEED_PCI_ENABLE_MSIX_RANGE
+int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
+			  int minvec, int maxvec);
+#endif
+
 #ifdef EFX_NEED_KMALLOC_ARRAY
 #define kmalloc_array(n,s,f) kcalloc(n,s,f)
 #endif
@@ -2840,6 +2850,17 @@ int pci_vfs_assigned(struct pci_dev *dev);
 
 #ifdef EFX_NEED_SKB_GSO_TCPV6
 #define SKB_GSO_TCPV6 0
+#endif
+
+#ifdef EFX_NEED_IS_ERR_OR_NULL
+static inline bool __must_check IS_ERR_OR_NULL(__force const void *ptr)
+{
+	return !ptr || IS_ERR_VALUE((unsigned long)ptr);
+}
+#endif
+
+#ifdef EFX_NEED_NETDEV_RSS_KEY_FILL
+#define netdev_rss_key_fill get_random_bytes
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

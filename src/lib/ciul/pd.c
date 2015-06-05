@@ -65,6 +65,8 @@ static int __ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh,
     ra.u.pd.in_flags |= EFCH_PD_FLAG_RX_PACKED_STREAM;
   if( flags & EF_PD_VPORT )
     ra.u.pd.in_flags |= EFCH_PD_FLAG_VPORT;
+  if( flags & EF_PD_MCAST_LOOP )
+    ra.u.pd.in_flags |= EFCH_PD_FLAG_MCAST_LOOP;
   ra.u.pd.in_vlan_id = vlan_id;
 
   rc = ci_resource_alloc(pd_dh, &ra);

@@ -59,7 +59,7 @@
 	printk(KERN_ERR "%s-(%d): " fmt, __func__, ECHECK(entry), ## args)
 #endif
 
-#define AOE_DRIVER_VERSION	"4.4.1.1021"
+#define AOE_DRIVER_VERSION	"4.5.1.1010"
 
 /* Number of Connections that are allowed to be over the 10G
  * inteface */
@@ -590,7 +590,7 @@ int aoe_mcdi_set_siena_override(struct aoe_device *dev, bool state);
 int aoe_mcdi_link_status_split(struct aoe_device *dev, uint32_t mode);
 
 /* Event support */
-bool aoe_handle_mcdi_event(struct aoe_port_info *port, void *event);
+int aoe_handle_mcdi_event(struct aoe_port_info *port, void *event);
 int aoe_mcdi_fpga_reload(struct aoe_device *dev, int partition);
 int aoe_apply_static_config(struct aoe_device *dev);
 void aoe_remove_static_config(struct aoe_device *dev);

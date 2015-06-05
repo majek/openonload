@@ -1250,6 +1250,16 @@ OO_INTERCEPT(int, poll,
   Log_CALL_RESULT(rc);
   return rc;
 }
+#if CI_LIBC_HAS___poll_chk
+OO_INTERCEPT(int, __poll_chk,
+             (struct pollfd*__restrict__ fds, nfds_t nfds, int timeout,
+              size_t __fdslen))
+{
+  if(  __fdslen < nfds * sizeof(struct pollfd) )
+    ci_sys___poll_chk(fds, nfds, timeout, __fdslen);
+  return onload_poll(fds, nfds, timeout);
+}
+#endif
 
 #if CI_LIBC_HAS_ppoll
 OO_INTERCEPT(int, ppoll,

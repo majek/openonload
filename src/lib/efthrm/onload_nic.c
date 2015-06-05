@@ -294,7 +294,7 @@ int oo_nic_black_white_list_set(struct oo_nic_black_white_list* bwl,
   int rc;
   if( bwl->bwl_val )
     kfree(bwl->bwl_val);
-  bwl->bwl_val = sanitise_string_copy(val);
+  bwl->bwl_val = sanitise_string_copy((val != NULL) ? val : "");
   if( bwl->bwl_val == NULL )
     return -ENOMEM;
   rtnl_lock();

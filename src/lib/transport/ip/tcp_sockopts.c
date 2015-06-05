@@ -213,7 +213,7 @@ int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
         u = 0;
         if( c->tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) {
           u = ci_ip_time_ticks2ms(netif, NI_CONF(netif).tconst_rto_initial);
-          u = ((u + 500) / 1000) << c->tcp_defer_accept;
+          u = ((u + 500) / 1000) * ( (1 << c->tcp_defer_accept) - 1);
         }
         goto u_out;
       }
@@ -328,7 +328,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
         rc = -EINVAL;
         goto fail_inval;
       }
-      c->user_mss = *(unsigned*)optval;
+      c->user_mss = (ci_uint16) *(unsigned*) optval;
       break;
 
     case TCP_KEEPIDLE:
@@ -353,13 +353,11 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
         int timeo = CI_MIN(*(int*) optval, 100000) * 1000;
         timeo = ci_ip_time_ms2ticks_slow(netif, timeo);
         timeo = CI_MIN(timeo, NI_CONF(netif).tconst_rto_max);
-        c->tcp_defer_accept = 0;
-        while( timeo > ((int) NI_CONF(netif).tconst_rto_initial
-                        << c->tcp_defer_accept) &&
+        c->tcp_defer_accept = 1;
+        while( timeo > ((int) NI_CONF(netif).tconst_rto_initial *
+                        ((1 << c->tcp_defer_accept) - 1)) &&
                c->tcp_defer_accept <= CI_CFG_TCP_SYNACK_RETRANS_MAX )
           ++c->tcp_defer_accept;
-        if( c->tcp_defer_accept >= 1 )
-          c->tcp_defer_accept--;
       }
       else
         c->tcp_defer_accept = OO_TCP_DEFER_ACCEPT_OFF;
@@ -378,6 +376,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
             }
           }
           else {
+            ts->tcpflags |= CI_TCPT_FLAG_NO_QUICKACK;
             CITP_TCP_FASTSTART(ts->faststart_acks = 0);
           }
         }

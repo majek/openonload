@@ -371,6 +371,14 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
 
   *copy_out = 1;
 
+#if EFX_DRIVERLINK_API_VERSION >= 15
+    {
+      unsigned stack_id = efrm_pd_stack_id_get(pd);
+      ci_assert( stack_id >= 0 );
+      efx_filter_set_stack_id(&spec, stack_id);
+    }
+#endif
+
   switch(op->op) {
   case CI_RSOP_FILTER_ADD_IP4:
     rc = efch_filter_list_set_ip4(&spec, op, &replace);

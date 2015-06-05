@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.4.1.1017
+Version:  4.5.1.1010
 
 
 Overview
@@ -266,6 +266,10 @@ Issue 47490:
   ~ Bad interactions can occur with NetworkManager scripts when it sees
     new VFs with random MAC addresses. Alternatively use the older networking
     service/scripts.
+Issue 53477: Redhat BZ 1222066:
+  ~ Currently if pf-count>8 only the lower 8 PF function numbers can be
+    successfully passed into a guest. Note that Solarflare recommends using
+    VFs where possible to pass PCI functions into guest VMs.
 
 
 Known Issues with Solarflare driver/firmware
@@ -299,8 +303,101 @@ Issue 50873:
     creating the team.
 
 
+
+
 Changelog
 ---------
+### v4.5.1.1010 -- Feature release
+
+[General changes]
+  ~ Kernel compat support for v4.0.0.
+  ~ Support ethtool filters on IP protocol.
+  ~ Allow setting and querying the RSS hash key through ethtool interface.
+  ~ Implement ethtool -l|--show-channels.
+  ~ Add known good default RSS (Topelitz) key (vs. using a random key) and add a
+    module parameter 'rss_use_fixed_key' (default:1)
+  ~ Rework allocation of TX queues to allow driver to take advantage of
+    upcoming firmware performance improvements on SFN7142Q adapters in 2*40G
+    mode.
+
+[Stratus ftServer support]
+   ~ Introduce support for Stratus ftServers (including polite and impolite
+     removal cases). Driver module parameter 'monitor_interval_ms'
+     (default 200ms) is used to test see if a PCIe isolation event has occurred.
+   ~ Please use the version of the driver that is supplied by Stratus that has
+     been fully qualified for your ftServer.
+
+[General fixes]
+Issue 52542:
+   ~ Fix rare 'kernel BUG at include/linux/skbuff.h:1485 in efx_rx_mk_skb+0x418/0x440'
+     seen with RHEL7 by filling the skb_cache before initialising the Rx queue.
+Issue 52296:
+   ~ Add timeout in efx_mcdi_acquire_sync() and print a warning on failure.
+Issue 44816:
+  ~ Fix possible ARFS duplicate flows with the same ID causing the error
+    'MC command 0x8a inlen 12 failed rc=-22 (raw=22) arg=2' by tracking
+    RPS flow IDs per channel instead of per function
+
+[PTP fixes]
+Issue 47477:
+   ~ If adapter has no PTP license then display "no PTP support" instead of the
+     obscure message "MC command 0xb failed".
+Issue 45960:
+   ~ fix sfptpd warnings seen when SolarCapture started with ptp=1 and then
+     exited by correcting RX filter insertion actions required in this use-case.
+
+[Onload fixes]
+Issue 52368:
+  ~ [onload] disable and re-enable NAPI more safely during driverlink
+    unregister.
+Issue 52324:
+  ~ [onload] Fix NULL pointer dereference in Onload efrm_pd_alloc() after
+    passing a device into a VM guest.
+Issue 51102:
+  ~ [onload/EFVI] don't try to insert mismatch or broadcast filters when in
+    kernel-block mode. This would cause warnings "X filter insert failed"
+Issue 50721:
+  ~ [onload] Reduce size of initial EF10 memory mapping in preparation of
+    future Onload support on Stratus servers
+Issue 50320:
+  ~ Fix possible 'rcu_preempt self-detected stall' warnings seen where the
+    stack  trace includes 'efx_dl_handle_event' by obeying NAPI budget
+    accounting for work done in driverlink events.
+
+[Build and kernel compat fixes]
+Issue 53241:
+  ~ Build fix for 64bit PHC operations
+    'ptp.c:2187: error: unknown field 'gettime' specified in initializer'
+Issue 53103:
+ ~ Build fix for 3.181.11
+   error: 'struct pci_dev' has no member named 'physfn'
+Issue 52632:
+  ~ Fix build issue when CONFIG_SFC_SRIOV is not set.
+    'error: 'struct efx_ef10_nic_data' has no member named 'vf''
+Issue 52404:
+  ~ Build fix when CONFIG_PCI_IOV is not set to avoid the error
+    'error: 'efx_sriov_get_phys_port_id' undeclared here (not in a function)'
+Issue 52379:
+  ~ Improve kcompat for 3.18.10 that caused
+    'error: implicit declaration of function 'set_cpus_allowed''
+Issue 52371:
+  ~ add RHEL5 kernel compat for IS_ERR_OR_NULL used in efx_init_debugfs_netdev()
+Issue 51721:
+  ~ Avoid the following warning on RHEL7.1
+    'WARNING: at net/core/dev.c:5450 register_netdevice+0x1cc/0x410()'
+Issue 51627:
+  ~ Build fix for 'sfc_minimal=1' which gave the error
+    'struct efx_tx_queue' has no member named 'sarfs_update'
+Issue 51443:
+  ~ Build fix in mcdi_proxy.c for kernels without CONFIG_NET_NS set.
+    'error: 'struct net_device' has no member named 'nd_net''
+Issue 50816:
+  ~ kcompat changes to resolve 'ethtool -K eth2 rx off' failures on RHEL6.6
+Issue 42338:
+  ~ Build fix to use pci_enable_msix_range() instead of pci_enable_msix() for
+    latest kernels.
+
+
 ### v4.4.1.1017 -- Feature release
 
 New features:
@@ -1168,6 +1265,3 @@ Copyright
 ---------
 Copyright 2009-2015 Solarflare Communications Inc.  All rights reserved.
 Use is subject to license terms.
-
-
-

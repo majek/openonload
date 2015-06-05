@@ -151,12 +151,6 @@
 
 #define CI_CFG_IP_TIMER_DEBUG		0
 
-/* Enable this to be strict about requiring all calls that use 
- * a sockaddr to set the family to AF_INET.  Disable to allow
- * the family to be AF_INET or AF_UNSPEC (which seems to be 
- * closer to what Linux allows) */
-#define CI_CFG_REQUIRE_SOCKADDR_FAM	0
-
 /* Enable this to use full IP ID block allocation functionality.
  * Disable this to use a single range (currently 1024) and do
  * less work on the fast path */

@@ -546,6 +546,26 @@ do_rpm_post() {
 }
 
 
+do_deb_user_install() {
+  build=false
+  uninstall=false
+  initscript=false
+  ldconfig=false
+  check_install=false
+  sfccheck=false
+  install_modules=false
+}
+
+do_deb_module_install() {
+  build=false
+  uninstall=false
+  initscript=false
+  ldconfig=false
+  check_install=false
+  sfccheck=false
+  install_user=false
+}
+
 ######################################################################
 # main
 
@@ -573,6 +593,8 @@ check_install=true
 logprog=true
 sfccheck=true
 withofe=true
+install_modules=true
+install_user=true
 
 KVER=$(uname -r)
 export KVER
@@ -664,8 +686,10 @@ case $# in
     ;;
   1)
     case "$1" in
-      rpm_install) do_rpm_install;;
-      rpm_post)    do_rpm_post;;
+      rpm_install)        do_rpm_install;;
+      rpm_post)           do_rpm_post;;
+      deb_user_install)   do_deb_user_install;;
+      deb_module_install) do_deb_module_install;;
       *)           usage;;
     esac
     ;;
@@ -687,12 +711,18 @@ fi
 
 logprog "Installing OpenOnload."
 manifest=
+if $install_user; then
 ${uninstall:-$all}   && install_uninstall
 ${userfiles:-$all}   && install_userland
 ${ldconfig:-$all}    && install_ldconfig
 ${modprobe:-$all}    && install_modprobe_conf
+fi
+if $install_modules; then
 ${kernelfiles:-$all} && install_kernel_modules
+fi
+if $install_user; then
 ${initscript:-$all}  && install_init_script
+fi
 
 if $fail32 && $require32; then
   err

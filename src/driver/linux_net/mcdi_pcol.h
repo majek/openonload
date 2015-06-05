@@ -2209,6 +2209,8 @@
  * batching but higher TX packet rate
  */
 #define          MC_CMD_FW_HIGH_TX_RATE 0x3
+/* enum: Reserved value */
+#define          MC_CMD_FW_PACKED_STREAM_HASH_MODE_1 0x4
 /* enum: Only this option is allowed for non-admin functions */
 #define          MC_CMD_FW_DONT_CARE  0xffffffff
 
@@ -2783,6 +2785,10 @@
 #define          MC_CMD_LOOPBACK_AOE_INT_NEAR  0x23
 /* enum: Medford Wireside datapath loopback */
 #define          MC_CMD_LOOPBACK_DATA_WS  0x24
+/* enum: Force link up without setting up any physical loopback (snapper use
+ * only)
+ */
+#define          MC_CMD_LOOPBACK_FORCE_EXT_LINK  0x25
 /* Supported loopbacks. */
 #define       MC_CMD_GET_LOOPBACK_MODES_OUT_1G_OFST 8
 #define       MC_CMD_GET_LOOPBACK_MODES_OUT_1G_LEN 8
@@ -4851,7 +4857,7 @@
 #define        MC_CMD_MUM_IN_READ_SENSORS_NUM_SENSORS_WIDTH 8
 
 /* MC_CMD_MUM_IN_PROGRAM_CLOCKS msgrequest */
-#define    MC_CMD_MUM_IN_PROGRAM_CLOCKS_LEN 8
+#define    MC_CMD_MUM_IN_PROGRAM_CLOCKS_LEN 12
 /* MUM cmd header */
 /*            MC_CMD_MUM_IN_CMD_OFST 0 */
 /* Bit-mask of clocks to be programmed */
@@ -4859,6 +4865,10 @@
 #define          MC_CMD_MUM_CLOCK_ID_FPGA 0x0 /* enum */
 #define          MC_CMD_MUM_CLOCK_ID_DDR 0x1 /* enum */
 #define          MC_CMD_MUM_CLOCK_ID_NIC 0x2 /* enum */
+/* Control flags for clock programming */
+#define       MC_CMD_MUM_IN_PROGRAM_CLOCKS_FLAGS_OFST 8
+#define        MC_CMD_MUM_IN_PROGRAM_CLOCKS_OVERCLOCK_110_LBN 0
+#define        MC_CMD_MUM_IN_PROGRAM_CLOCKS_OVERCLOCK_110_WIDTH 1
 
 /* MC_CMD_MUM_IN_FPGA_LOAD msgrequest */
 #define    MC_CMD_MUM_IN_FPGA_LOAD_LEN 8
@@ -5240,6 +5250,27 @@
 #define       TX_TIMESTAMP_EVENT_TSTAMP_DATA_HI_LBN 32
 #define       TX_TIMESTAMP_EVENT_TSTAMP_DATA_HI_WIDTH 16
 
+/* RSS_MODE structuredef */
+#define    RSS_MODE_LEN 1
+/* The RSS mode for a particular packet type is a value from 0 - 15 which can
+ * be considered as 4 bits selecting which fields are included in the hash. (A
+ * value 0 effectively disables RSS spreading for the packet type.) The YAML
+ * generation tools require this structure to be a whole number of bytes wide,
+ * but only 4 bits are relevant.
+ */
+#define       RSS_MODE_HASH_SELECTOR_OFST 0
+#define       RSS_MODE_HASH_SELECTOR_LEN 1
+#define        RSS_MODE_HASH_SRC_ADDR_LBN 0
+#define        RSS_MODE_HASH_SRC_ADDR_WIDTH 1
+#define        RSS_MODE_HASH_DST_ADDR_LBN 1
+#define        RSS_MODE_HASH_DST_ADDR_WIDTH 1
+#define        RSS_MODE_HASH_SRC_PORT_LBN 2
+#define        RSS_MODE_HASH_SRC_PORT_WIDTH 1
+#define        RSS_MODE_HASH_DST_PORT_LBN 3
+#define        RSS_MODE_HASH_DST_PORT_WIDTH 1
+#define       RSS_MODE_HASH_SELECTOR_LBN 0
+#define       RSS_MODE_HASH_SELECTOR_WIDTH 8
+
 
 /***********************************/
 /* MC_CMD_READ_REGS
@@ -5498,7 +5529,9 @@
 
 #define MC_CMD_0x82_PRIVILEGE_CTG SRIOV_CTG_GENERAL
 
-/* MC_CMD_INIT_TXQ_IN msgrequest */
+/* MC_CMD_INIT_TXQ_IN msgrequest: Legacy INIT_TXQ request. Use extended version
+ * in new code.
+ */
 #define    MC_CMD_INIT_TXQ_IN_LENMIN 36
 #define    MC_CMD_INIT_TXQ_IN_LENMAX 252
 #define    MC_CMD_INIT_TXQ_IN_LEN(num) (28+8*(num))
@@ -5545,6 +5578,60 @@
 #define       MC_CMD_INIT_TXQ_IN_DMA_ADDR_HI_OFST 32
 #define       MC_CMD_INIT_TXQ_IN_DMA_ADDR_MINNUM 1
 #define       MC_CMD_INIT_TXQ_IN_DMA_ADDR_MAXNUM 28
+
+/* MC_CMD_INIT_TXQ_EXT_IN msgrequest: Extended INIT_TXQ with additional mode
+ * flags
+ */
+#define    MC_CMD_INIT_TXQ_EXT_IN_LEN 544
+/* Size, in entries */
+#define       MC_CMD_INIT_TXQ_EXT_IN_SIZE_OFST 0
+/* The EVQ to send events to. This is an index originally specified to
+ * INIT_EVQ.
+ */
+#define       MC_CMD_INIT_TXQ_EXT_IN_TARGET_EVQ_OFST 4
+/* The value to put in the event data. Check hardware spec. for valid range. */
+#define       MC_CMD_INIT_TXQ_EXT_IN_LABEL_OFST 8
+/* Desired instance. Must be set to a specific instance, which is a function
+ * local queue index.
+ */
+#define       MC_CMD_INIT_TXQ_EXT_IN_INSTANCE_OFST 12
+/* There will be more flags here. */
+#define       MC_CMD_INIT_TXQ_EXT_IN_FLAGS_OFST 16
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_BUFF_MODE_LBN 0
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_BUFF_MODE_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_IP_CSUM_DIS_LBN 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_IP_CSUM_DIS_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_TCP_CSUM_DIS_LBN 2
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_TCP_CSUM_DIS_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_TCP_UDP_ONLY_LBN 3
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_TCP_UDP_ONLY_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_CRC_MODE_LBN 4
+#define        MC_CMD_INIT_TXQ_EXT_IN_CRC_MODE_WIDTH 4
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_TIMESTAMP_LBN 8
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_TIMESTAMP_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_PACER_BYPASS_LBN 9
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_PACER_BYPASS_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_INNER_IP_CSUM_EN_LBN 10
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_INNER_IP_CSUM_EN_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_INNER_TCP_CSUM_EN_LBN 11
+#define        MC_CMD_INIT_TXQ_EXT_IN_FLAG_INNER_TCP_CSUM_EN_WIDTH 1
+/* Owner ID to use if in buffer mode (zero if physical) */
+#define       MC_CMD_INIT_TXQ_EXT_IN_OWNER_ID_OFST 20
+/* The port ID associated with the v-adaptor which should contain this DMAQ. */
+#define       MC_CMD_INIT_TXQ_EXT_IN_PORT_ID_OFST 24
+/* 64-bit address of 4k of 4k-aligned host memory buffer */
+#define       MC_CMD_INIT_TXQ_EXT_IN_DMA_ADDR_OFST 28
+#define       MC_CMD_INIT_TXQ_EXT_IN_DMA_ADDR_LEN 8
+#define       MC_CMD_INIT_TXQ_EXT_IN_DMA_ADDR_LO_OFST 28
+#define       MC_CMD_INIT_TXQ_EXT_IN_DMA_ADDR_HI_OFST 32
+#define       MC_CMD_INIT_TXQ_EXT_IN_DMA_ADDR_MINNUM 1
+#define       MC_CMD_INIT_TXQ_EXT_IN_DMA_ADDR_MAXNUM 64
+/* Flags related to Qbb flow control mode. */
+#define       MC_CMD_INIT_TXQ_EXT_IN_QBB_FLAGS_OFST 540
+#define        MC_CMD_INIT_TXQ_EXT_IN_QBB_ENABLE_LBN 0
+#define        MC_CMD_INIT_TXQ_EXT_IN_QBB_ENABLE_WIDTH 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_QBB_PRIORITY_LBN 1
+#define        MC_CMD_INIT_TXQ_EXT_IN_QBB_PRIORITY_WIDTH 3
 
 /* MC_CMD_INIT_TXQ_OUT msgresponse */
 #define    MC_CMD_INIT_TXQ_OUT_LEN 0
@@ -6187,10 +6274,27 @@
 #define       MC_CMD_FILTER_OP_EXT_IN_IP_PROTO_LEN 2
 /* Firmware defined register 0 to match (reserved; set to 0) */
 #define       MC_CMD_FILTER_OP_EXT_IN_FWDEF0_OFST 68
-/* VNI (VXLAN) or VSID (NVGRE) to match (as bytes in network order; set last
- * byte to 0)
+/* VNI (for VXLAN/Geneve, when IP protocol is UDP) or VSID (for NVGRE, when IP
+ * protocol is GRE) to match (as bytes in network order; set last byte to 0 for
+ * VXLAN/NVGRE, or 1 for Geneve)
  */
 #define       MC_CMD_FILTER_OP_EXT_IN_VNI_OR_VSID_OFST 72
+#define        MC_CMD_FILTER_OP_EXT_IN_VNI_VALUE_LBN 0
+#define        MC_CMD_FILTER_OP_EXT_IN_VNI_VALUE_WIDTH 24
+#define        MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_LBN 24
+#define        MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_WIDTH 8
+/* enum: Match VXLAN traffic with this VNI */
+#define          MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_VXLAN  0x0
+/* enum: Match Geneve traffic with this VNI */
+#define          MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_GENEVE  0x1
+/* enum: Reserved for experimental development use */
+#define          MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_EXPERIMENTAL  0xfe
+#define        MC_CMD_FILTER_OP_EXT_IN_VSID_VALUE_LBN 0
+#define        MC_CMD_FILTER_OP_EXT_IN_VSID_VALUE_WIDTH 24
+#define        MC_CMD_FILTER_OP_EXT_IN_VSID_TYPE_LBN 24
+#define        MC_CMD_FILTER_OP_EXT_IN_VSID_TYPE_WIDTH 8
+/* enum: Match NVGRE traffic with this VSID */
+#define          MC_CMD_FILTER_OP_EXT_IN_VSID_TYPE_NVGRE  0x0
 /* source IP address to match (as bytes in network order; set last 12 bytes to
  * 0 for IPv4 address)
  */
@@ -7077,6 +7181,12 @@
 #define    MC_CMD_GET_CAPABILITIES_OUT_LEN 20
 /* First word of flags. */
 #define       MC_CMD_GET_CAPABILITIES_OUT_FLAGS1_OFST 0
+#define        MC_CMD_GET_CAPABILITIES_OUT_TX_MAC_SECURITY_FILTERING_LBN 12
+#define        MC_CMD_GET_CAPABILITIES_OUT_TX_MAC_SECURITY_FILTERING_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_OUT_ADDITIONAL_RSS_MODES_LBN 13
+#define        MC_CMD_GET_CAPABILITIES_OUT_ADDITIONAL_RSS_MODES_WIDTH 1
+#define        MC_CMD_GET_CAPABILITIES_OUT_QBB_LBN 14
+#define        MC_CMD_GET_CAPABILITIES_OUT_QBB_WIDTH 1
 #define        MC_CMD_GET_CAPABILITIES_OUT_RX_PACKED_STREAM_VAR_BUFFERS_LBN 15
 #define        MC_CMD_GET_CAPABILITIES_OUT_RX_PACKED_STREAM_VAR_BUFFERS_WIDTH 1
 #define        MC_CMD_GET_CAPABILITIES_OUT_RX_RSS_LIMITED_LBN 16
@@ -7120,6 +7230,8 @@
 #define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_LOW_LATENCY  0x1
 /* enum: Packed stream RXDP firmware */
 #define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_PACKED_STREAM  0x2
+/* enum: BIST RXDP firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_BIST  0x10a
 /* enum: RXDP Test firmware image 1 */
 #define          MC_CMD_GET_CAPABILITIES_OUT_RXDP_TEST_FW_TO_MC_CUT_THROUGH  0x101
 /* enum: RXDP Test firmware image 2 */
@@ -7143,6 +7255,10 @@
 #define          MC_CMD_GET_CAPABILITIES_OUT_TXDP  0x0
 /* enum: Low latency TXDP firmware */
 #define          MC_CMD_GET_CAPABILITIES_OUT_TXDP_LOW_LATENCY  0x1
+/* enum: High packet rate TXDP firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXDP_HIGH_PACKET_RATE  0x3
+/* enum: BIST TXDP firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXDP_BIST  0x12d
 /* enum: TXDP Test firmware image 1 */
 #define          MC_CMD_GET_CAPABILITIES_OUT_TXDP_TEST_FW_TSO_EDIT  0x101
 /* enum: TXDP Test firmware image 2 */
@@ -7153,23 +7269,69 @@
 #define        MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_VERSION_REV_WIDTH 12
 #define        MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_VERSION_TYPE_LBN 12
 #define        MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_VERSION_TYPE_WIDTH 4
-#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_FIRST_PKT  0x1 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_SIENA_COMPAT  0x2 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_VSWITCH  0x3 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_SIENA_COMPAT_PM  0x4 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_LOW_LATENCY  0x5 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_TESTFW_ENCAP_PARSING_ONLY  0xf /* enum */
+/* enum: reserved value - do not use (may indicate alternative interpretation
+ * of REV field in future)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_RESERVED  0x0
+/* enum: Trivial RX PD firmware for early Huntington development (Huntington
+ * development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_FIRST_PKT  0x1
+/* enum: RX PD firmware with approximately Siena-compatible behaviour
+ * (Huntington development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_SIENA_COMPAT  0x2
+/* enum: Virtual switching (full feature) RX PD production firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_VSWITCH  0x3
+/* enum: siena_compat variant RX PD firmware using PM rather than MAC
+ * (Huntington development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_SIENA_COMPAT_PM  0x4
+/* enum: Low latency RX PD production firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_LOW_LATENCY  0x5
+/* enum: Packed stream RX PD production firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_PACKED_STREAM  0x6
+/* enum: RX PD firmware handling layer 2 only for high packet rate performance
+ * tests (Medford development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_LAYER2_PERF  0x7
+/* enum: RX PD firmware for GUE parsing prototype (Medford development only) */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_TESTFW_GUE_PROTOTYPE  0xe
+/* enum: RX PD firmware parsing but not filtering network overlay tunnel
+ * encapsulations (Medford development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_RXPD_FW_TYPE_TESTFW_ENCAP_PARSING_ONLY  0xf
 #define       MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_VERSION_OFST 10
 #define       MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_VERSION_LEN 2
 #define        MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_VERSION_REV_LBN 0
 #define        MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_VERSION_REV_WIDTH 12
 #define        MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_VERSION_TYPE_LBN 12
 #define        MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_VERSION_TYPE_WIDTH 4
-#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_FIRST_PKT  0x1 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_SIENA_COMPAT  0x2 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_VSWITCH  0x3 /* enum */
-#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_SIENA_COMPAT_PM  0x4 /* enum */
+/* enum: reserved value - do not use (may indicate alternative interpretation
+ * of REV field in future)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_RESERVED  0x0
+/* enum: Trivial TX PD firmware for early Huntington development (Huntington
+ * development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_FIRST_PKT  0x1
+/* enum: TX PD firmware with approximately Siena-compatible behaviour
+ * (Huntington development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_SIENA_COMPAT  0x2
+/* enum: Virtual switching (full feature) TX PD production firmware */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_VSWITCH  0x3
+/* enum: siena_compat variant TX PD firmware using PM rather than MAC
+ * (Huntington development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_SIENA_COMPAT_PM  0x4
 #define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_LOW_LATENCY  0x5 /* enum */
+/* enum: TX PD firmware handling layer 2 only for high packet rate performance
+ * tests (Medford development only)
+ */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_LAYER2_PERF  0x7
+/* enum: RX PD firmware for GUE parsing prototype (Medford development only) */
+#define          MC_CMD_GET_CAPABILITIES_OUT_TXPD_FW_TYPE_TESTFW_GUE_PROTOTYPE  0xe
 /* Hardware capabilities of NIC */
 #define       MC_CMD_GET_CAPABILITIES_OUT_HW_CAPABILITIES_OFST 12
 /* Licensed capabilities */
@@ -7848,7 +8010,11 @@
 #define    MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_LEN 8
 /* The handle of the RSS context */
 #define       MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_RSS_CONTEXT_ID_OFST 0
-/* Hash control flags */
+/* Hash control flags. The _EN bits are always supported. The _MODE bits only
+ * work when the firmware reports ADDITIONAL_RSS_MODES in
+ * MC_CMD_GET_CAPABILITIES and override the _EN bits if any of them are not 0.
+ * See the RSS_MODE structure for the meaning of the mode bits.
+ */
 #define       MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_FLAGS_OFST 4
 #define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_IPV4_EN_LBN 0
 #define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_IPV4_EN_WIDTH 1
@@ -7858,6 +8024,20 @@
 #define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_IPV6_EN_WIDTH 1
 #define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV6_EN_LBN 3
 #define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV6_EN_WIDTH 1
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_RESERVED_LBN 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_RESERVED_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE_LBN 8
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_UDP_IPV4_RSS_MODE_LBN 12
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_UDP_IPV4_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_OTHER_IPV4_RSS_MODE_LBN 16
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_OTHER_IPV4_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV6_RSS_MODE_LBN 20
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV6_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_UDP_IPV6_RSS_MODE_LBN 24
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_UDP_IPV6_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_OTHER_IPV6_RSS_MODE_LBN 28
+#define        MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_OTHER_IPV6_RSS_MODE_WIDTH 4
 
 /* MC_CMD_RSS_CONTEXT_SET_FLAGS_OUT msgresponse */
 #define    MC_CMD_RSS_CONTEXT_SET_FLAGS_OUT_LEN 0
@@ -7879,7 +8059,12 @@
 
 /* MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT msgresponse */
 #define    MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_LEN 8
-/* Hash control flags */
+/* Hash control flags. If any _MODE bits are non-zero (which will only be true
+ * when the firmware reports ADDITIONAL_RSS_MODES) then the _EN bits should be
+ * disregarded (but are guaranteed to be consistent with the _MODE bits if
+ * RSS_CONTEXT_SET_FLAGS has never been called for this context since it was
+ * allocated).
+ */
 #define       MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_FLAGS_OFST 4
 #define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_IPV4_EN_LBN 0
 #define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_IPV4_EN_WIDTH 1
@@ -7889,6 +8074,20 @@
 #define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_IPV6_EN_WIDTH 1
 #define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_TCPV6_EN_LBN 3
 #define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TOEPLITZ_TCPV6_EN_WIDTH 1
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_RESERVED_LBN 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_RESERVED_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TCP_IPV4_RSS_MODE_LBN 8
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TCP_IPV4_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV4_RSS_MODE_LBN 12
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV4_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV4_RSS_MODE_LBN 16
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV4_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TCP_IPV6_RSS_MODE_LBN 20
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_TCP_IPV6_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV6_RSS_MODE_LBN 24
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV6_RSS_MODE_WIDTH 4
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV6_RSS_MODE_LBN 28
+#define        MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV6_RSS_MODE_WIDTH 4
 
 
 /***********************************/
@@ -9817,6 +10016,239 @@
 
 /* MC_CMD_PRIVILEGE_MODIFY_OUT msgresponse */
 #define    MC_CMD_PRIVILEGE_MODIFY_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_XPM_READ_BYTES
+ * Read XPM memory
+ */
+#define MC_CMD_XPM_READ_BYTES 0x103
+#undef MC_CMD_0x103_PRIVILEGE_CTG
+
+#define MC_CMD_0x103_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_READ_BYTES_IN msgrequest */
+#define    MC_CMD_XPM_READ_BYTES_IN_LEN 8
+/* Start address (byte) */
+#define       MC_CMD_XPM_READ_BYTES_IN_ADDR_OFST 0
+/* Count (bytes) */
+#define       MC_CMD_XPM_READ_BYTES_IN_COUNT_OFST 4
+
+/* MC_CMD_XPM_READ_BYTES_OUT msgresponse */
+#define    MC_CMD_XPM_READ_BYTES_OUT_LENMIN 0
+#define    MC_CMD_XPM_READ_BYTES_OUT_LENMAX 252
+#define    MC_CMD_XPM_READ_BYTES_OUT_LEN(num) (0+1*(num))
+/* Data */
+#define       MC_CMD_XPM_READ_BYTES_OUT_DATA_OFST 0
+#define       MC_CMD_XPM_READ_BYTES_OUT_DATA_LEN 1
+#define       MC_CMD_XPM_READ_BYTES_OUT_DATA_MINNUM 0
+#define       MC_CMD_XPM_READ_BYTES_OUT_DATA_MAXNUM 252
+
+
+/***********************************/
+/* MC_CMD_XPM_WRITE_BYTES
+ * Write XPM memory
+ */
+#define MC_CMD_XPM_WRITE_BYTES 0x104
+#undef MC_CMD_0x104_PRIVILEGE_CTG
+
+#define MC_CMD_0x104_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_WRITE_BYTES_IN msgrequest */
+#define    MC_CMD_XPM_WRITE_BYTES_IN_LENMIN 8
+#define    MC_CMD_XPM_WRITE_BYTES_IN_LENMAX 252
+#define    MC_CMD_XPM_WRITE_BYTES_IN_LEN(num) (8+1*(num))
+/* Start address (byte) */
+#define       MC_CMD_XPM_WRITE_BYTES_IN_ADDR_OFST 0
+/* Count (bytes) */
+#define       MC_CMD_XPM_WRITE_BYTES_IN_COUNT_OFST 4
+/* Data */
+#define       MC_CMD_XPM_WRITE_BYTES_IN_DATA_OFST 8
+#define       MC_CMD_XPM_WRITE_BYTES_IN_DATA_LEN 1
+#define       MC_CMD_XPM_WRITE_BYTES_IN_DATA_MINNUM 0
+#define       MC_CMD_XPM_WRITE_BYTES_IN_DATA_MAXNUM 244
+
+/* MC_CMD_XPM_WRITE_BYTES_OUT msgresponse */
+#define    MC_CMD_XPM_WRITE_BYTES_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_XPM_READ_SECTOR
+ * Read XPM sector
+ */
+#define MC_CMD_XPM_READ_SECTOR 0x105
+#undef MC_CMD_0x105_PRIVILEGE_CTG
+
+#define MC_CMD_0x105_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_READ_SECTOR_IN msgrequest */
+#define    MC_CMD_XPM_READ_SECTOR_IN_LEN 8
+/* Sector index */
+#define       MC_CMD_XPM_READ_SECTOR_IN_INDEX_OFST 0
+/* Sector size */
+#define       MC_CMD_XPM_READ_SECTOR_IN_SIZE_OFST 4
+
+/* MC_CMD_XPM_READ_SECTOR_OUT msgresponse */
+#define    MC_CMD_XPM_READ_SECTOR_OUT_LENMIN 4
+#define    MC_CMD_XPM_READ_SECTOR_OUT_LENMAX 36
+#define    MC_CMD_XPM_READ_SECTOR_OUT_LEN(num) (4+1*(num))
+/* Sector type */
+#define       MC_CMD_XPM_READ_SECTOR_OUT_TYPE_OFST 0
+#define          MC_CMD_XPM_READ_SECTOR_OUT_BLANK            0x0 /* enum */
+#define          MC_CMD_XPM_READ_SECTOR_OUT_CRYPTO_KEY_128   0x1 /* enum */
+#define          MC_CMD_XPM_READ_SECTOR_OUT_CRYPTO_KEY_256   0x2 /* enum */
+#define          MC_CMD_XPM_READ_SECTOR_OUT_INVALID          0xff /* enum */
+/* Sector data */
+#define       MC_CMD_XPM_READ_SECTOR_OUT_DATA_OFST 4
+#define       MC_CMD_XPM_READ_SECTOR_OUT_DATA_LEN 1
+#define       MC_CMD_XPM_READ_SECTOR_OUT_DATA_MINNUM 0
+#define       MC_CMD_XPM_READ_SECTOR_OUT_DATA_MAXNUM 32
+
+
+/***********************************/
+/* MC_CMD_XPM_WRITE_SECTOR
+ * Write XPM sector
+ */
+#define MC_CMD_XPM_WRITE_SECTOR 0x106
+#undef MC_CMD_0x106_PRIVILEGE_CTG
+
+#define MC_CMD_0x106_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_WRITE_SECTOR_IN msgrequest */
+#define    MC_CMD_XPM_WRITE_SECTOR_IN_LENMIN 12
+#define    MC_CMD_XPM_WRITE_SECTOR_IN_LENMAX 44
+#define    MC_CMD_XPM_WRITE_SECTOR_IN_LEN(num) (12+1*(num))
+/* If writing fails due to an uncorrectable error, try up to RETRIES following
+ * sectors (or until no more space available). If 0, only one write attempt is
+ * made. Note that uncorrectable errors are unlikely, thanks to XPM self-repair
+ * mechanism.
+ */
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_RETRIES_OFST 0
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_RETRIES_LEN 1
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_RESERVED_OFST 1
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_RESERVED_LEN 3
+/* Sector type */
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_TYPE_OFST 4
+/*            Enum values, see field(s): */
+/*               MC_CMD_XPM_READ_SECTOR_OUT/TYPE */
+/* Sector size */
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_SIZE_OFST 8
+/* Sector data */
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_DATA_OFST 12
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_DATA_LEN 1
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_DATA_MINNUM 0
+#define       MC_CMD_XPM_WRITE_SECTOR_IN_DATA_MAXNUM 32
+
+/* MC_CMD_XPM_WRITE_SECTOR_OUT msgresponse */
+#define    MC_CMD_XPM_WRITE_SECTOR_OUT_LEN 4
+/* New sector index */
+#define       MC_CMD_XPM_WRITE_SECTOR_OUT_INDEX_OFST 0
+
+
+/***********************************/
+/* MC_CMD_XPM_INVALIDATE_SECTOR
+ * Invalidate XPM sector
+ */
+#define MC_CMD_XPM_INVALIDATE_SECTOR 0x107
+#undef MC_CMD_0x107_PRIVILEGE_CTG
+
+#define MC_CMD_0x107_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_INVALIDATE_SECTOR_IN msgrequest */
+#define    MC_CMD_XPM_INVALIDATE_SECTOR_IN_LEN 4
+/* Sector index */
+#define       MC_CMD_XPM_INVALIDATE_SECTOR_IN_INDEX_OFST 0
+
+/* MC_CMD_XPM_INVALIDATE_SECTOR_OUT msgresponse */
+#define    MC_CMD_XPM_INVALIDATE_SECTOR_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_XPM_BLANK_CHECK
+ * Blank-check XPM memory and report bad locations
+ */
+#define MC_CMD_XPM_BLANK_CHECK 0x108
+#undef MC_CMD_0x108_PRIVILEGE_CTG
+
+#define MC_CMD_0x108_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_BLANK_CHECK_IN msgrequest */
+#define    MC_CMD_XPM_BLANK_CHECK_IN_LEN 8
+/* Start address (byte) */
+#define       MC_CMD_XPM_BLANK_CHECK_IN_ADDR_OFST 0
+/* Count (bytes) */
+#define       MC_CMD_XPM_BLANK_CHECK_IN_COUNT_OFST 4
+
+/* MC_CMD_XPM_BLANK_CHECK_OUT msgresponse */
+#define    MC_CMD_XPM_BLANK_CHECK_OUT_LENMIN 4
+#define    MC_CMD_XPM_BLANK_CHECK_OUT_LENMAX 252
+#define    MC_CMD_XPM_BLANK_CHECK_OUT_LEN(num) (4+2*(num))
+/* Total number of bad (non-blank) locations */
+#define       MC_CMD_XPM_BLANK_CHECK_OUT_BAD_COUNT_OFST 0
+/* Addresses of bad locations (may be less than BAD_COUNT, if all cannot fit
+ * into MCDI response)
+ */
+#define       MC_CMD_XPM_BLANK_CHECK_OUT_BAD_ADDR_OFST 4
+#define       MC_CMD_XPM_BLANK_CHECK_OUT_BAD_ADDR_LEN 2
+#define       MC_CMD_XPM_BLANK_CHECK_OUT_BAD_ADDR_MINNUM 0
+#define       MC_CMD_XPM_BLANK_CHECK_OUT_BAD_ADDR_MAXNUM 124
+
+
+/***********************************/
+/* MC_CMD_XPM_REPAIR
+ * Blank-check and repair XPM memory
+ */
+#define MC_CMD_XPM_REPAIR 0x109
+#undef MC_CMD_0x109_PRIVILEGE_CTG
+
+#define MC_CMD_0x109_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_REPAIR_IN msgrequest */
+#define    MC_CMD_XPM_REPAIR_IN_LEN 8
+/* Start address (byte) */
+#define       MC_CMD_XPM_REPAIR_IN_ADDR_OFST 0
+/* Count (bytes) */
+#define       MC_CMD_XPM_REPAIR_IN_COUNT_OFST 4
+
+/* MC_CMD_XPM_REPAIR_OUT msgresponse */
+#define    MC_CMD_XPM_REPAIR_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_XPM_DECODER_TEST
+ * Test XPM memory address decoders for gross manufacturing defects. Can only
+ * be performed on an unprogrammed part.
+ */
+#define MC_CMD_XPM_DECODER_TEST 0x10a
+#undef MC_CMD_0x10a_PRIVILEGE_CTG
+
+#define MC_CMD_0x10a_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_DECODER_TEST_IN msgrequest */
+#define    MC_CMD_XPM_DECODER_TEST_IN_LEN 0
+
+/* MC_CMD_XPM_DECODER_TEST_OUT msgresponse */
+#define    MC_CMD_XPM_DECODER_TEST_OUT_LEN 0
+
+
+/***********************************/
+/* MC_CMD_XPM_WRITE_TEST
+ * XPM memory write test. Test XPM write logic for gross manufacturing defects
+ * by writing to a dedicated test row. There are 16 locations in the test row
+ * and the test can only be performed on locations that have not been
+ * previously used (i.e. can be run at most 16 times). The test will pick the
+ * first available location to use, or fail with ENOSPC if none left.
+ */
+#define MC_CMD_XPM_WRITE_TEST 0x10b
+#undef MC_CMD_0x10b_PRIVILEGE_CTG
+
+#define MC_CMD_0x10b_PRIVILEGE_CTG SRIOV_CTG_ADMIN
+
+/* MC_CMD_XPM_WRITE_TEST_IN msgrequest */
+#define    MC_CMD_XPM_WRITE_TEST_IN_LEN 0
+
+/* MC_CMD_XPM_WRITE_TEST_OUT msgresponse */
+#define    MC_CMD_XPM_WRITE_TEST_OUT_LEN 0
 
 
 #endif /* MCDI_PCOL_H */

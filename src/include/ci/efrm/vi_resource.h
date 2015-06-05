@@ -194,15 +194,6 @@ extern int efrm_vi_attr_set_interrupt_core(struct efrm_vi_attr *, int core);
 extern int efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *,
 					   int channel_id);
 
-/** Set a hw_stack_id for a VI, value
- * -1: force auto allocate the id, even if it is not needed,
- * 0: auto allocate the id if needed,
- * 1-EFHW_MAX_STACK_ID: request hw stack_id to be set to a specific value,
- *   note: only reusing values is possible
- * */
-extern int efrm_vi_attr_set_hw_stack_id(struct efrm_vi_attr *,
-					   int hw_stack_id);
-
 
 extern struct efrm_vi *
 efrm_vi_from_resource(struct efrm_resource *);
@@ -233,14 +224,15 @@ extern void efrm_vi_get_info(struct efrm_vi *virs,
 			     struct efrm_vi_info *info_out);
 
 /**
- * Returns hw stack id assocaited with a VI.
- */
-extern unsigned efrm_vi_get_hw_stack_id(struct efrm_vi *virs);
-
-/**
  * Tells whether rx loopback is supported by a VI.
  */
 extern int efrm_vi_is_hw_rx_loopback_supported(struct efrm_vi *virs);
+
+
+/**
+ * Returns the pd associated with the VI
+ */
+extern struct efrm_pd* efrm_vi_pd_get(struct efrm_vi *virs);
 
 #define EFRM_VI_Q_GET_SIZE_CURRENT  -123
 

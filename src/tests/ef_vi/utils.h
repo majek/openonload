@@ -114,8 +114,10 @@
 #define ROUND_UP(p, align)   (((p)+(align)-1u) & ~((align)-1u))
 
 
+#ifdef __EFAB_VI_H__
 extern int
 filter_parse(ef_filter_spec* fs, const char* s_in);
+#endif
 
 
 #endif  /* __UTILS_H__ */

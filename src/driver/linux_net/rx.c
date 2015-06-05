@@ -359,12 +359,17 @@ static void efx_unmap_rx_buffer(struct efx_nic *efx,
 	}
 }
 
-static void efx_free_rx_buffer(struct efx_rx_buffer *rx_buf)
+static void efx_free_rx_buffers(struct efx_rx_queue *rx_queue,
+				struct efx_rx_buffer *rx_buf,
+				unsigned int num_bufs)
 {
-	if (rx_buf->page) {
-		put_page(rx_buf->page);
-		rx_buf->page = NULL;
-	}
+	do {
+		if (rx_buf->page) {
+			put_page(rx_buf->page);
+			rx_buf->page = NULL;
+		}
+		rx_buf = efx_rx_buf_next(rx_queue, rx_buf);
+	} while (--num_bufs);
 }
 
 #if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
@@ -420,7 +425,7 @@ static void efx_fini_rx_buffer(struct efx_rx_queue *rx_queue,
 #if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
 		if (!(rx_buf->flags & EFX_RX_PAGE_IN_RECYCLE_RING))
 #endif
-			efx_free_rx_buffer(rx_buf);
+			efx_free_rx_buffers(rx_queue, rx_buf, 1);
 	}
 	rx_buf->page = NULL;
 }
@@ -502,10 +507,7 @@ static void efx_discard_rx_packet(struct efx_channel *channel,
 
 	efx_recycle_rx_pages(channel, rx_buf, n_frags);
 
-	do {
-		efx_free_rx_buffer(rx_buf);
-		rx_buf = efx_rx_buf_next(rx_queue, rx_buf);
-	} while (--n_frags);
+	efx_free_rx_buffers(rx_queue, rx_buf, n_frags);
 }
 #endif
 
@@ -717,11 +719,10 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 
 	skb = napi_get_frags(napi);
 	if (unlikely(!skb)) {
-		while (n_frags--) {
-			put_page(rx_buf->page);
-			rx_buf->page = NULL;
-			rx_buf = efx_rx_buf_next(&channel->rx_queue, rx_buf);
-		}
+		struct efx_rx_queue *rx_queue;
+
+		rx_queue = efx_channel_get_rx_queue(channel);
+		efx_free_rx_buffers(rx_queue, rx_buf, n_frags);
 		return;
 	}
 
@@ -958,7 +959,10 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 
 	skb = efx_rx_mk_skb(channel, &rx_buf, n_frags, eh, hdr_len);
 	if (unlikely(skb == NULL)) {
-		efx_free_rx_buffer(rx_buf);
+		struct efx_rx_queue *rx_queue;
+
+		rx_queue = efx_channel_get_rx_queue(channel);
+		efx_free_rx_buffers(rx_queue, rx_buf, n_frags);
 		return;
 	}
 	skb_record_rx_queue(skb, channel->rx_queue.core_index);
@@ -1046,14 +1050,22 @@ void __efx_rx_packet(struct efx_channel *channel)
 	 * loopback layer, and free the rx_buf here
 	 */
 	if (unlikely(efx->loopback_selftest)) {
+		struct efx_rx_queue *rx_queue;
+
 		efx_loopback_rx_packet(efx, eh, rx_buf->len);
-		efx_free_rx_buffer(rx_buf);
+		rx_queue = efx_channel_get_rx_queue(channel);
+		efx_free_rx_buffers(rx_queue, rx_buf,
+				    channel->rx_pkt_n_frags);
 		goto out;
 	}
 
 	/* Driverlink clients can request that the packet be discarded */
 	if (efx_dl_rx_packet(efx, channel->channel, eh, rx_buf->len)) {
-		efx_free_rx_buffer(rx_buf);
+		struct efx_rx_queue *rx_queue;
+
+		rx_queue = efx_channel_get_rx_queue(channel);
+		efx_free_rx_buffers(rx_queue, rx_buf,
+				    channel->rx_pkt_n_frags);
 		goto out;
 	}
 
@@ -1080,7 +1092,7 @@ void __efx_rx_packet(struct efx_channel *channel)
 #endif
 #endif
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES) || defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 	if (unlikely(!(efx->net_dev->features & NETIF_F_RXCSUM)))
 #else
 	if (unlikely(!efx->rx_checksum_enabled))
@@ -1200,11 +1212,14 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	rx_queue->fast_fill_trigger = trigger;
 	rx_queue->refill_enabled = true;
 
+	/* fill SKB cache; when reconfiguring the Rx queue, this must happen
+	 * before initialising the Rx descriptor ring to avoid re-using
+	 * pointers to skbs that are no longer allocated to this device.
+	 */
+	efx_refill_skb_cache(rx_queue);
+
 	/* Set up RX descriptor ring */
 	efx_nic_init_rx(rx_queue);
-
-	/* fill SKB cache */
-	efx_refill_skb_cache(rx_queue);
 }
 
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
@@ -2087,8 +2102,8 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 		return rc;
 
 	/* Remember this so we can check whether to expire the filter later */
-	efx->rps_flow_id[rc] = flow_id;
-	channel = efx_get_channel(efx, skb_get_rx_queue(skb));
+	channel = efx_get_channel(efx, rxq_index);
+	channel->rps_flow_id[rc] = flow_id;
 	++channel->rfs_filters_added;
 
 	if (ether_type == htons(ETH_P_IP))
@@ -2115,28 +2130,34 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota)
 {
 	bool (*expire_one)(struct efx_nic *efx, u32 flow_id, unsigned int index);
-	unsigned int index, size;
+	unsigned int channel_idx, index, size;
 	u32 flow_id;
 
 	if (!spin_trylock_bh(&efx->filter_lock))
 		return false;
 
 	expire_one = efx->type->filter_rfs_expire_one;
+	channel_idx = efx->rps_expire_channel;
 	index = efx->rps_expire_index;
 	size = efx->type->max_rx_ip_filters;
 	while (quota--) {
-		flow_id = efx->rps_flow_id[index];
+		struct efx_channel *channel = efx_get_channel(efx, channel_idx);
+		flow_id = channel->rps_flow_id[index];
 
 		if (flow_id != RPS_FLOW_ID_INVALID &&
 		    expire_one(efx, flow_id, index)) {
 			netif_info(efx, rx_status, efx->net_dev,
-				   "expired filter %d [flow %u]\n",
-				   index, flow_id);
-			efx->rps_flow_id[index] = RPS_FLOW_ID_INVALID;
+				   "expired filter %d [queue %u flow %u]\n",
+				   index, channel_idx, flow_id);
+			channel->rps_flow_id[index] = RPS_FLOW_ID_INVALID;
 		}
-		if (++index == size)
+		if (++index == size) {
+			if (++channel_idx == efx->n_channels)
+				channel_idx = 0;
 			index = 0;
+		}
 	}
+	efx->rps_expire_channel = channel_idx;
 	efx->rps_expire_index = index;
 
 	spin_unlock_bh(&efx->filter_lock);

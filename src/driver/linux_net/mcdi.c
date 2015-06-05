@@ -165,14 +165,19 @@ void efx_mcdi_fini(struct efx_nic *efx)
 	if (!efx->mcdi)
 		return;
 
-	BUG_ON(atomic_read(&efx->mcdi->iface.state) != MCDI_STATE_QUIESCENT);
+	if (!efx_nic_hw_unavailable(efx)) {
+		BUG_ON(atomic_read(&efx->mcdi->iface.state) !=
+				MCDI_STATE_QUIESCENT);
+
 #ifdef EFX_USE_MCDI_PROXY_AUTH
-	/* Stop the admin side of proxy authorization. */
-	efx_proxy_auth_stop(efx, true);
+		/* Stop the admin side of proxy authorization. */
+		efx_proxy_auth_stop(efx, true);
 
 #endif
-	/* Relinquish the device (back to the BMC, if this is a LOM) */
-	efx_mcdi_drv_attach(efx, false, MC_CMD_FW_DONT_CARE, NULL, NULL);
+		/* Relinquish the device (back to the BMC, if this is a LOM) */
+		efx_mcdi_drv_attach(efx, false, MC_CMD_FW_DONT_CARE,
+				NULL, NULL);
+	}
 
 #ifdef CONFIG_SFC_MCDI_LOGGING
 	free_page((unsigned long)efx->mcdi->iface.logging_buffer);
@@ -388,6 +393,9 @@ static bool efx_mcdi_poll_once(struct efx_nic *efx)
 {
 	struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
 
+	if (efx_nic_hw_unavailable(efx))
+		return true;
+
 	rmb();
 	if (!efx->type->mcdi_poll_response(efx))
 		return false;
@@ -441,6 +449,9 @@ static int efx_mcdi_poll(struct efx_nic *efx)
 			return -ETIMEDOUT;
 	}
 
+	if (efx_nic_hw_unavailable(efx))
+		return -ENETDOWN;
+
 	/* Return rc=0 like wait_event_timeout() */
 	return 0;
 }
@@ -464,21 +475,35 @@ static bool efx_mcdi_acquire_async(struct efx_mcdi_iface *mcdi)
 		MCDI_STATE_QUIESCENT;
 }
 
-static void efx_mcdi_acquire_sync(struct efx_mcdi_iface *mcdi)
+static int efx_mcdi_acquire_sync(struct efx_mcdi_iface *mcdi)
 {
+	int rc;
+
 	/* Wait until the interface becomes QUIESCENT and we win the race
 	 * to mark it RUNNING_SYNC.
 	 */
-	wait_event(mcdi->wq,
-		   atomic_cmpxchg(&mcdi->state,
-				  MCDI_STATE_QUIESCENT,
-				  MCDI_STATE_RUNNING_SYNC) ==
-		   MCDI_STATE_QUIESCENT);
+	rc = wait_event_timeout(mcdi->wq,
+		atomic_cmpxchg(&mcdi->state,
+				MCDI_STATE_QUIESCENT,
+				MCDI_STATE_RUNNING_SYNC) ==
+				MCDI_STATE_QUIESCENT,
+			MCDI_RPC_TIMEOUT);
+
+	if (rc == 0) {
+		netif_err(mcdi->efx, hw, mcdi->efx->net_dev,
+				"Failed to acquire MCDI: state %d\n",
+				atomic_read(&mcdi->state));
+		return -ETIMEDOUT;
+	}
+	return 0;
 }
 
 static int efx_mcdi_await_completion(struct efx_nic *efx)
 {
 	struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
+
+	if (efx_nic_hw_unavailable(efx))
+		return -ENETDOWN;
 
 	if (wait_event_timeout(
 		    mcdi->wq,
@@ -725,9 +750,10 @@ static int _efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned cmd, size_t inlen,
 		rc = efx_mcdi_await_completion(efx);
 
 	if (rc != 0) {
-		netif_err(efx, hw, efx->net_dev,
-			  "MC command 0x%x inlen %d mode %d timed out\n",
-			  cmd, (int)inlen, mcdi->mode);
+		if (rc == -ETIMEDOUT)
+			netif_err(efx, hw, efx->net_dev,
+				"MC command 0x%x inlen %d mode %d timed out\n",
+			  	cmd, (int)inlen, mcdi->mode);
 
 		if (mcdi->mode == MCDI_MODE_EVENTS && efx_mcdi_poll_once(efx)) {
 			netif_err(efx, hw, efx->net_dev,
@@ -1044,7 +1070,9 @@ int efx_mcdi_rpc_start(struct efx_nic *efx, unsigned cmd,
 	if (mcdi->mode == MCDI_MODE_FAIL)
 		return -ENETDOWN;
 
-	efx_mcdi_acquire_sync(mcdi);
+	rc = efx_mcdi_acquire_sync(mcdi);
+	if (rc)
+		return rc;
 	efx_mcdi_send_request(efx, cmd, inbuf, inlen);
 	return 0;
 }
@@ -1162,12 +1190,14 @@ void efx_mcdi_display_error(struct efx_nic *efx, unsigned cmd,
 			    size_t outlen, int rc)
 {
 	int code = 0, err_arg = 0;
+	bool debug_only;
 
 	if (outlen >= MC_CMD_ERR_CODE_OFST + 4)
 		code = MCDI_DWORD(outbuf, ERR_CODE);
 	if (outlen >= MC_CMD_ERR_ARG_OFST + 4)
 		err_arg = MCDI_DWORD(outbuf, ERR_ARG);
-	netif_printk(efx, hw, rc == -EPERM ? KERN_DEBUG : KERN_ERR, efx->net_dev,
+	debug_only = (rc == -EPERM) || efx_nic_hw_unavailable(efx);
+	netif_printk(efx, hw, debug_only ? KERN_DEBUG : KERN_ERR, efx->net_dev,
 		     "MC command 0x%x inlen %d failed rc=%d (raw=%d) arg=%d\n",
 		     cmd, (int)inlen, rc, code, err_arg);
 }
@@ -1265,9 +1295,13 @@ void efx_mcdi_mode_event(struct efx_nic *efx)
 	 * write memory barrier ensure that efx_mcdi_rpc() sees it, which
 	 * efx_mcdi_acquire() provides.
 	 */
-	efx_mcdi_acquire_sync(mcdi);
-	mcdi->mode = MCDI_MODE_EVENTS;
-	efx_mcdi_release(mcdi);
+	if (efx_mcdi_acquire_sync(mcdi) == 0) {
+		mcdi->mode = MCDI_MODE_EVENTS;
+		efx_mcdi_release(mcdi);
+	} else {
+		netif_err(efx, hw, efx->net_dev,
+				"Failed to acquire MCDI - not entering event mode");
+	}
 }
 
 static void efx_mcdi_ev_death(struct efx_nic *efx, int rc)
@@ -1389,8 +1423,8 @@ static void efx_mcdi_fwalert_event(struct efx_nic *efx, efx_qword_t *ev)
 	}
 }
 
-void efx_mcdi_process_event(struct efx_channel *channel,
-			    efx_qword_t *event)
+int efx_mcdi_process_event(struct efx_channel *channel,
+			    efx_qword_t *event, int budget)
 {
 	struct efx_nic *efx = channel->efx;
 	int code = EFX_QWORD_FIELD(*event, MCDI_EVENT_CODE);
@@ -1453,8 +1487,7 @@ void efx_mcdi_process_event(struct efx_channel *channel,
 		efx_time_sync_event(channel, event);
 		break;
 	case MCDI_EVENT_CODE_AOE:
-		efx_aoe_event(efx, event);
-		break;
+		return efx_aoe_event(efx, event, budget);
 	case MCDI_EVENT_CODE_TX_FLUSH:
 	case MCDI_EVENT_CODE_RX_FLUSH:
 		/* Two flush events will be sent: one to the same event
@@ -1468,7 +1501,7 @@ void efx_mcdi_process_event(struct efx_channel *channel,
 		if (!MCDI_EVENT_FIELD(*event, TX_FLUSH_TO_DRIVER))
 			efx_ef10_handle_drain_event(efx);
 		else
-			efx_dl_handle_event(efx, event);
+			return efx_dl_handle_event(efx, event, budget);
 		break;
 	case MCDI_EVENT_CODE_TX_ERR:
 	case MCDI_EVENT_CODE_RX_ERR:
@@ -1494,6 +1527,8 @@ void efx_mcdi_process_event(struct efx_channel *channel,
 		netif_err(efx, hw, efx->net_dev, "Unknown MCDI event " EFX_QWORD_FMT "\n",
 			  EFX_QWORD_VAL(*event));
 	}
+
+	return 1;
 }
 
 /**************************************************************************

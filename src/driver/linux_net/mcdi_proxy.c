@@ -306,7 +306,7 @@ static void efx_mcdi_proxy_stopped(struct efx_nic *efx)
 		genlmsg_end(skb, msg_head);
 		efq_mcdi_proxy_request_acked = false;
 		init_waitqueue_head(&efx_mcdi_proxy_ack_waitq);
-		rc = genlmsg_unicast(efx->net_dev->nd_net, skb, efx_mcdi_proxy_daemon_pid);
+		rc = genlmsg_unicast(dev_net(efx->net_dev), skb, efx_mcdi_proxy_daemon_pid);
 		if (rc != 0)
 			/* genlmsg_unicast frees the skb in the event of failure. */
 			return;
@@ -340,7 +340,7 @@ static void efx_mcdi_proxy_async_completer(struct efx_nic *efx,
 	if (!rsp)
 		return;
 
-	rsp->net = get_net(efx->net_dev->nd_net);
+	rsp->net = get_net(dev_net(efx->net_dev));
 	rsp->cookie = cookie;
 	rsp->rc = rc;
 	rsp->outlen = outlen_actual;
@@ -509,7 +509,7 @@ static int efx_mcdi_proxy_do_proxy_handled(struct sk_buff *skb,
 	ctx->ifindex = efx->net_dev->ifindex;
 	ctx->handle = *handle;
 	ctx->seqno = info->snd_seq;
-	ctx->net = get_net(efx->net_dev->nd_net);
+	ctx->net = get_net(dev_net(efx->net_dev));
 	rc = efx_proxy_auth_handle_response(efx->proxy_admin_state, *handle,
 					    result, granted_privileges, NULL, 0,
 					    efx_mcdi_proxy_proxy_callback, ctx);
@@ -572,7 +572,7 @@ static int efx_mcdi_proxy_do_proxy_done(struct sk_buff *skb, struct genl_info *i
 	ctx->ifindex = efx->net_dev->ifindex;
 	ctx->handle = *handle;
 	ctx->seqno = info->snd_seq;
-	ctx->net = get_net(efx->net_dev->nd_net);
+	ctx->net = get_net(dev_net(efx->net_dev));
 	rc = efx_proxy_auth_handle_response(efx->proxy_admin_state, *handle,
 					    MC_CMD_PROXY_COMPLETE_IN_COMPLETE,
 					    0, nla_data(resp), nla_len(resp),
@@ -668,7 +668,7 @@ static int efx_mcdi_proxy_send_request(struct efx_nic *efx, u64 uhandle,
 		genlmsg_end(skb, msg_head);
 		efq_mcdi_proxy_request_acked = false;
 		init_waitqueue_head(&efx_mcdi_proxy_ack_waitq);
-		rc = genlmsg_unicast(efx->net_dev->nd_net, skb, efx_mcdi_proxy_daemon_pid);
+		rc = genlmsg_unicast(dev_net(efx->net_dev), skb, efx_mcdi_proxy_daemon_pid);
 		if (rc != 0)
 			return rc;
 		if(wait_event_timeout(efx_mcdi_proxy_ack_waitq, efq_mcdi_proxy_request_acked,
@@ -695,18 +695,24 @@ int efx_mcdi_proxy_nl_register(void)
 					   __EFX_MCDI_PROXY_C_MAX);
 #endif
 	if (rc)
-		printk(KERN_ERR "Failed to register efx_mcdi_proxy genl family rc=%d\n",
+		pr_err("Failed to register efx_mcdi_proxy genl family rc=%d\n",
 		       rc);
 	else
-		printk(KERN_INFO "Registered efx_mcdi_proxy genl family as %u\n",
-		       efx_mcdi_proxy_genl_family.id);
+		pr_info("Registered efx_mcdi_proxy genl family as %u\n",
+			efx_mcdi_proxy_genl_family.id);
 
 	return rc;
 }
 
-int efx_mcdi_proxy_nl_unregister(void)
+void efx_mcdi_proxy_nl_unregister(void)
 {
-	return genl_unregister_family(&efx_mcdi_proxy_genl_family);
+	int rc = genl_unregister_family(&efx_mcdi_proxy_genl_family);
+
+	if (rc)
+		pr_warning("Failed to unregister efx_mcdi_proxy genl family rc=%d\n",
+			   rc);
+	else
+		pr_info("Unregistered efx_mcdi_proxy genl family\n");
 }
 
 #endif /* EFX_USE_MCDI_PROXY_AUTH_NL */

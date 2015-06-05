@@ -473,10 +473,12 @@ static void handle_rx_discard(ci_netif* ni, struct ci_netif_poll_state* ps,
   }
 
   if( !handled ) {
+    /* Only dump the packet if the NIC actually delivered it */
     if( (discard_type == EF_EVENT_RX_DISCARD_CSUM_BAD ||
          discard_type == EF_EVENT_RX_DISCARD_MCAST_MISMATCH ||
          discard_type == EF_EVENT_RX_DISCARD_CRC_BAD ||
-         discard_type == EF_EVENT_RX_DISCARD_TRUNC) &&
+         discard_type == EF_EVENT_RX_DISCARD_TRUNC ||
+         discard_type == EF_EVENT_RX_DISCARD_OTHER) &&
         oo_tcpdump_check(ni, pkt, pkt->intf_i) ) {
         pkt->pay_len = frame_len;
         oo_tcpdump_dump_pkt(ni, pkt);

@@ -18,11 +18,14 @@
 ** This header implements a doubly linked list whose pointers are
 ** indirected.  The caller must define the following macros:
 **
-**   CI_MK_ID(x)          - must create an identifier with suffix x
-**   CI_ILL_ADDR_T        - type for indirect addresses
-**   CI_ILL_CTX_T         - type for address conversion context 
-**   CI_ILL_PTR(ctx,a)    - convert address to pointer
-**   CI_ILL_ADDR(ctx,lnk) - return address of link (optional)
+**   CI_MK_ID(x)             - must create an identifier with suffix x
+**   CI_ILL_ADDR_T           - type for indirect addresses
+**   CI_ILL_CTX_T            - type for address conversion context 
+**   CI_ILL_PTR(ctx,a)       - convert address to pointer
+**   CI_ILL_ADDR(ctx,lnk)    - return address of link (optional)
+**   CI_ILL_CAS(p, old, new) - CAS *p for indirect addresses (optional)
+**   CI_ILL_XCHG(p, new)     - Exchange new for *p (required iff CI_ILL_CAS is
+**                             defined)
 **
 ** The code has been crafted with the assumption that CI_ILL_ADDR() is cheaper
 ** than dereferencing a pointer.
@@ -181,6 +184,40 @@ ci_inline void CI_MK_ID(_push)(ctx_t ctx, list_t* list, link_t* link)
 ci_inline void CI_MK_ID(_push_tail)(ctx_t ctx, list_t* list, link_t* link)
 { CI_MK_ID(_insert_before)(ctx, &list->l, link); }
 
+#ifdef CI_ILL_CAS
+/* As _push(), except that it is safe with concurrent traversal of the list
+ * obtained by _concurrent_start(). Multiple writers still require
+ * synchronisation. Returns non-zero on success and zero on failure. In case of
+ * failure, [list] will not be modified and [link] will be restored to its
+ * original state. */
+ci_inline int
+CI_MK_ID(_concurrent_push)(ctx_t ctx, list_t* list, link_t* link) {
+  link_t* list_link = &list->l;
+  CI_ILL_ADDR_T next = OO_ACCESS_ONCE(list_link->next);
+
+  CI_ILL_ADDR_T next_orig = link->next;
+  CI_ILL_ADDR_T prev_orig = link->prev;
+
+  if( next == CI_ILL_ADDR_NULL )
+    return 0;
+
+  link->next = next;
+  link->prev = CI_ILL_ADDR(ctx, list_link);
+  ci_wmb();
+
+  /* If the list changes underneath us, the final traversal is underway, so
+   * don't change anything. */
+  if( ! (CI_ILL_CAS(&list_link->next, next, CI_ILL_ADDR(ctx, link))) ) {
+    link->next = next_orig;
+    link->prev = prev_orig;
+    return 0;
+  }
+
+  CI_ILL_PTR(ctx, next)->prev = list_link->next;
+  return 1;
+}
+#endif
+
 
 ci_inline link_t* CI_MK_ID(_pop)(ctx_t ctx, list_t* list) {
   link_t* l = CI_ILL_PTR(ctx, list->l.next);
@@ -320,6 +357,14 @@ ci_inline link_t* CI_MK_ID(_try_get)(ctx_t ctx, list_t* list)
 
 ci_inline link_t* CI_MK_ID(_start)(ctx_t ctx, list_t* list)
 { return CI_ILL_PTR(ctx, list->l.next); }
+
+#ifdef CI_ILL_CAS
+/* As _start(), but also invalidates the list atomically to prevent further
+ * insertion. A consequence of this is that the function may only be called
+ * once on a given list. */
+ci_inline link_t* CI_MK_ID(_concurrent_start)(ctx_t ctx, list_t* list)
+{ return CI_ILL_PTR(ctx, CI_ILL_XCHG(&list->l.next, CI_ILL_ADDR_NULL)); }
+#endif
 
 ci_inline link_t* CI_MK_ID(_start_last)(ctx_t ctx, list_t* list)
 { return CI_ILL_PTR(ctx, list->l.prev); }

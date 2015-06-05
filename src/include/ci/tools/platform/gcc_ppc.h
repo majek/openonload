@@ -593,6 +593,13 @@ ci_inline  long ci_xchg_u32(volatile int *p,  long val)
    return prev;
 }
 
+/* This is for uniformity with the x86 layer. Implemented as an inline function
+ * rather than a macro for type-safety. */
+ci_inline ci_uint32 ci_xchg32(volatile ci_uint32* p, ci_uint32 val)
+{
+  return (ci_uint32) ci_xchg_u32((volatile int*) p, val);
+}
+
 #ifdef __powerpc64__
 ci_inline  long ci_xchg_u64(volatile long *p,  long val)
 {

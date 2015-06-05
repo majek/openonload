@@ -1,3 +1,60 @@
+openonload-201502-u2
+--------------------
+
+Update net driver (v4.5.1.1010)
+
+Add support for Debian 8, Ubuntu 15.04
+
+task52607: Add support for SO_PROTOCOL
+task52813: Linux-4.0 compatibility
+task43979: Add support for Debian packaging.
+	
+SF-114423-KI/bug49906: Fix packet corruption with templated sends and ef_vi PIO.
+SF-114381-KI/bug43434: Fix EF_NAME accepting longer names than onload_set_stackname()
+SF-114425-KI/bug52613: Avoid system lockup when using delegated sends API and SACK packets
+
+bug53545: fix onload not distributing traffic over lacp bond with vlan
+bug53600: bug53558: intercept __poll_chk on libc >=2.19 (Debian 8, Ubuntu 14.10)
+bug53527: Fix stack overrun in efdelegated_server example app
+bug53453: Correctly handle an epoll ctl on OS fd when postpone limit has been reached
+bug53101: Fix reset of non-accepted loopback connection when stack is destroyed
+bug53101: Fix packet leak in tcpdump
+bug50399: Update eftap to send pkts with multicast loopback RX support
+bug53052: Fixes for CI_CFG_DETAILED_CHECKS=1 debug code
+bug50399: Fix support for transmit hardware loopback in ef_vi (NB: API change)
+bug53011: Purge CI_CFG_REQUIRE_SOCKADDR_FAM build time option
+bug42886: Enable tcpdump logging of packets where hardware marked them as to discard
+bug51175: Avoid fd leak when closing listening sockets with socket caching.
+bug51547: Reduce size and reorder fields in ci_tcp_state for better packing.
+bug52409: Fix cluster+TCP loopback combination incapacitating network interface.
+bug52750: Fix panic when white/blacklist module parameter has no value.
+bug52750: Fix overriding of white/blacklist parameters from modprobe config.
+bug52882: Show the correct index of a VI in onload_stackdump.
+bug51749: Fix kernel panic when SO_REUSEPORT socket bound to non-SF interface
+bug52804: Updated onload_stackdump to display correct output for nics=
+bug49906: Enforce PIO packets must be 64-byte-aligned.
+bug52799: delegated send: use ipcache under the stack lock only
+bug52613: bug48435: improve TX wakeup to wake blocked sender appropriately
+bug52613: Fix delegated send ACK handling to avoid adding to retrans queue when already acked
+bug52613: Fix retransmission of invalid packet with delegated sends.
+bug52613: Fix ordering of packets when mixing normal and delegated sends.
+bug52613: Cope with window having shrunk behind in flight right edge in delegated send
+bug52699: Fix race condition (kernel panic) between vf_callback and vf_callback_kill
+bug45182: Remove unused ef_vi flag: EF_FILTER_FLAG_REPLACE and co.
+bug48384: Match Onload behaviour to Linux when TCP_QUICKACK set to 0
+bug52611: Add stats for free/used aux buffers
+bug52611,bug52655: Fix leak of aux buffers (syn-receive state)
+bug51756: Fix TCP_DEFER_ACCEPT socket option implementation
+bug50648: bug52474: Fix fop_(read|write)_passthrough file operation
+bug50648: Handle listen blocking mode when using CITP_PASSTHROUGH_FD
+bug50648: Fix fdtable lock/unlock on some handover paths
+bug52497: bug50648: Enable trampoline for alien and handover fd
+bug52109: Fix EPOLLONESHOT epoll_wait() followed by select() giving wrong return code
+bug37690: Build fix for CI_CFG_PKTS_AS_HUGE_PAGES=0
+bug50968: Remove correct row from control plane table when slave removed from bond
+bug43453: Support cluster and hw multicast loopback combination
+
+
 openonload-201502-u1
 --------------------
 

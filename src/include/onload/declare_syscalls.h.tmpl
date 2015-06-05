@@ -120,10 +120,13 @@ CI_MK_DECL(int           , close      , (int));
 CI_MK_DECL(int           , fcntl      , (int, int, ...));
 CI_MK_DECL(int           , poll       , (struct pollfd *, nfds_t, int));
 #if CI_LIBC_HAS_ppoll
-CI_MK_DECL(int           , ppoll       , (struct pollfd *, nfds_t, const struct timespec *, const sigset_t *));
+CI_MK_DECL(int           , ppoll      , (struct pollfd *, nfds_t, const struct timespec *, const sigset_t *));
+#endif
+#if CI_LIBC_HAS___poll_chk
+CI_MK_DECL(int           , __poll_chk , (struct pollfd *, nfds_t, int, size_t));
 #endif
 CI_MK_DECL(int           , select     , (int, fd_set*, fd_set*, fd_set*, struct timeval*));
-CI_MK_DECL(int           , pselect     , (int, fd_set*, fd_set*, fd_set*, const struct timespec*, const sigset_t *));
+CI_MK_DECL(int           , pselect    , (int, fd_set*, fd_set*, fd_set*, const struct timespec*, const sigset_t *));
 #if !defined(OO_INTERCEPT)
 /* we do not want strong alias declaration for vfork in a C source - this does not work */
 CI_MK_DECL(pid_t         , vfork      , (void));

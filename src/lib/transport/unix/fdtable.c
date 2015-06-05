@@ -781,6 +781,7 @@ static void citp_fdinfo_do_handover(citp_fdinfo* fdi, int fdt_locked)
 {
   int rc;
   citp_fdinfo* epoll_fdi = NULL;
+  int os_fd = fdi->fd;
 #ifndef NDEBUG
   /* Yuk: does for UDP too. */
   volatile citp_fdinfo_p* p_fdip;
@@ -809,29 +810,33 @@ static void citp_fdinfo_do_handover(citp_fdinfo* fdi, int fdt_locked)
       ci_bit_clear(&fdi_to_sock_fdi(fdi)->sock.s->b.sb_aflags,
                    CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT);
       rc = ci_tcp_file_moved(fdi->fd);
+      ci_assert_equal(rc, 0);
     }
     else {
       citp_fdinfo* new_fdi;
-      CITP_FDTABLE_LOCK();
+      if( !fdt_locked ) CITP_FDTABLE_LOCK();
       new_fdi = citp_fdtable_probe_locked(fdi->fd, CI_TRUE, CI_TRUE);
       citp_fdinfo_release_ref(new_fdi, 1);
-      CITP_FDTABLE_UNLOCK();
-      goto exit;
+      if( !fdt_locked ) CITP_FDTABLE_UNLOCK();
+      ci_assert_equal(citp_fdinfo_get_type(new_fdi), CITP_PASSTHROUGH_FD);
+      os_fd = fdi_to_alien_fdi(new_fdi)->os_socket;
     }
   }
   if( fdi->on_rcz.handover_nonb_switch >= 0 ) {
     int on_off = !! fdi->on_rcz.handover_nonb_switch;
-    int rc = ci_sys_ioctl(fdi->fd, FIONBIO, &on_off);
+    int rc = ci_sys_ioctl(os_fd, FIONBIO, &on_off);
     if( rc < 0 )
       Log_E(ci_log("%s: ioctl failed on_off=%d", __FUNCTION__, on_off));
   }
+  if( rc != 0 )
+    goto exit;
   citp_fdtable_busy_clear(fdi->fd, fdip_passthru, fdt_locked);
 exit:
   citp_fdinfo_get_ops(fdi)->dtor(fdi, fdt_locked);
   if( epoll_fdi != NULL && epoll_fdi->protocol->type == CITP_EPOLL_FD )
     citp_epoll_on_handover(epoll_fdi, fdi, fdt_locked);
   if( epoll_fdi != NULL )
-    citp_fdinfo_release_ref(epoll_fdi, 0);
+    citp_fdinfo_release_ref(epoll_fdi, fdt_locked);
   citp_fdinfo_free(fdi);
 }
 
@@ -929,8 +934,6 @@ void citp_fdinfo_handover(citp_fdinfo* fdi, int nonb_switch)
     ci_assert_nequal(fdi->on_ref_count_zero, FDI_ON_RCZ_NONE);
   }
 
-  CITP_FDTABLE_UNLOCK();
-
   if( fdip == fdi_to_fdip(fdi) ) {
     ci_assert_equal(fdi->on_ref_count_zero, FDI_ON_RCZ_NONE);
     fdi->on_ref_count_zero = FDI_ON_RCZ_HANDOVER;
@@ -940,11 +943,13 @@ void citp_fdinfo_handover(citp_fdinfo* fdi, int nonb_switch)
     ** will be done.  We return without waiting, because the caller
     ** shouldn't do anything more with this socket anyway.
     */
-    citp_fdinfo_release_ref(fdi, 0);
+    citp_fdinfo_release_ref(fdi, 1);
   }
 
   /* Drop the ref passed in. */
-  citp_fdinfo_release_ref(fdi, 0);
+  citp_fdinfo_release_ref(fdi, 1);
+
+  CITP_FDTABLE_UNLOCK();
 }
 
 

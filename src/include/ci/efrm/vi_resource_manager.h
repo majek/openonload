@@ -154,10 +154,6 @@ struct efrm_vi {
 	 * this efrm_vi.
 	 */
 	volatile char __iomem *io_page;
-
-	/* hw stack_id required for self-traffic suppression during
-	 * hw multicast loopback */
-	unsigned hw_stack_id;
 };
 
 
