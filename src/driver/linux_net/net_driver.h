@@ -133,6 +133,7 @@
  * Efx data structures
  *
  **************************************************************************/
+void ci_frc64(uint64_t* pval);
 
 #define EFX_MAX_CHANNELS 32U
 #define EFX_MAX_RX_QUEUES EFX_MAX_CHANNELS
@@ -389,6 +390,11 @@ struct efx_tx_queue {
 	unsigned int empty_read_count ____cacheline_aligned_in_smp;
 #define EFX_EMPTY_COUNT_VALID 0x80000000
 	atomic_t flush_outstanding;
+	uint64_t last_tx_notify_tstamp;
+	unsigned int last_tx_notify_write_count;
+	unsigned int last_tx_notify_push;
+	uint64_t last_tx_comp_tstamp;
+	unsigned int last_tx_comp_index;
 };
 
 /**
@@ -786,6 +792,26 @@ struct efx_channel {
 	u32 sync_timestamp_major;
 	u32 sync_timestamp_minor;
 #endif
+	uint64_t last_irq_tstamp;
+	uint64_t last_napi_entry_tstamp;
+	uint64_t last_napi_exit_tstamp;
+	uint64_t last_channel_process_complete_tstamp;
+	uint64_t handle_rx1_tstamp;
+	uint64_t handle_tx1_tstamp;
+	uint64_t handle_mcdi1_tstamp;
+	uint64_t handle_rx2_tstamp;
+	uint64_t handle_tx2_tstamp;
+	uint64_t handle_mcdi2_tstamp;
+	uint64_t process_evq_complete_tstamp;
+	uint64_t spent_pre_flush_tstamp;
+	uint64_t spent_post_flush_tstamp;
+	uint64_t push_rx_desc_tstamp;
+	uint64_t post_spent_tstamp;
+	uint64_t tx_restart1_tstamp;
+	uint64_t tx_restart2_tstamp;
+
+	unsigned long napi_count;
+	unsigned long last_tx_napi_count;
 };
 
 #ifdef CONFIG_NET_RX_BUSY_POLL
