@@ -3445,6 +3445,34 @@ struct net_device_stats *efx_net_stats(struct net_device *net_dev)
 void efx_watchdog(struct net_device *net_dev)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_channel *channel;
+
+	netif_info(efx, tx_err, efx->net_dev,
+		   "TX queue timeout: printing stopped queue data\n");
+
+	efx_for_each_channel(channel, efx) {
+		struct efx_tx_queue *tx_queue;
+
+		if (!efx_channel_has_tx_queues(channel))
+			continue;
+
+		tx_queue = &channel->tx_queue[0];
+
+		/* The netdev watchdog must have triggered on a queue that was
+		 * stopped, so ignore queues that are running.
+		 */
+		if (!netif_tx_queue_stopped(tx_queue->core_txq))
+			continue;
+
+		netif_info(efx, tx_err, efx->net_dev,
+			   "Channel %u: NAPI state 0x%lx\n", channel->channel,
+			   channel->napi_str.state);
+		efx_for_each_channel_tx_queue(tx_queue, channel)
+			netif_info(efx, tx_err, efx->net_dev,
+				   "Tx queue: insert %u, write %u, read %u\n",
+				   tx_queue->insert_count,
+				   tx_queue->write_count, tx_queue->read_count);
+	}
 
 	netif_err(efx, tx_err, efx->net_dev,
 		  "TX stuck with port_enabled=%d: resetting channels\n",
