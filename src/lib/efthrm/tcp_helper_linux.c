@@ -35,18 +35,28 @@
 
 
 
-#ifndef EFRM_HAVE_POLL_REQUESTED_EVENTS
 /* poll_requested_events_max(): user is not interested in other events */
-#define poll_requested_events_max(p) ~0UL
-/* poll_requested_events_min(): user will not block if got one of these */
-#define poll_requested_events_min(p) (POLLERR | POLLHUP)
-#else
+#ifdef EFRM_HAVE_POLL_REQUESTED_EVENTS
 #define poll_requested_events_max(p) \
     (poll_requested_events(p) | POLLERR | POLLHUP)
+#else
+#define poll_requested_events_max(p) ~0UL
+#endif
+
+/* poll_requested_events_min(): user will not block if got one of these */
+
+#ifdef EFRM_POLL_TABLE_HAS_OLD_KEY
+static inline unsigned long poll_requested_events_min(const poll_table *p)
+{
+  return p && p->key != 0UL ? p->key : (POLLERR | POLLHUP);
+}
+#elif defined(EFRM_HAVE_POLL_REQUESTED_EVENTS)
 static inline unsigned long poll_requested_events_min(const poll_table *p)
 {
   return p && p->_key != 0UL ? p->_key : (POLLERR | POLLHUP);
 }
+#else
+#define poll_requested_events_min(p) (POLLERR | POLLHUP)
 #endif
 
 #define POLL_CAN_NOT_BLOCK(mask, wait) \

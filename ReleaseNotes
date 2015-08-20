@@ -1,3 +1,16 @@
+OpenOnload-201502-u3 Release Notes
+==================================
+
+This is a minor update release that fixes a set of important issues
+with the sfc net driver.  For full details please see the enclosed net
+driver release notes.
+
+This release also includes a small change to kernel compatibility code
+in Onload to allow building on RHEL 6.7.
+
+The Release Notes for OpenOnload-201502-u2 are included below.
+
+
 OpenOnload-201502-u2 Release Notes
 ==================================
 

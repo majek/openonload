@@ -4049,9 +4049,7 @@ int efx_reset_up(struct efx_nic *efx, enum reset_type method, bool ok)
 			   "failed to restore vswitching rc=%d, VFs may not function\n",
 			   rc);
 
-	down_read(&efx->filter_sem);
 	efx_restore_filters(efx);
-	up_read(&efx->filter_sem);
 	if (efx->type->sriov_reset)
 		efx->type->sriov_reset(efx);
 

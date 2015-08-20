@@ -309,7 +309,6 @@ static int ci_bonding_get_hash_policy(char *bond_name, int *policy)
   return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
 
 static int ci_bonding_get_ab_active_slave(char *bond_name, char *active, 
                                           int active_len)
@@ -366,7 +365,6 @@ static int ci_bonding_get_ab_active_slave(char *bond_name, char *active,
   return len;
 }
 
-#endif
 
 typedef void (ci_bonding_list_entry_fn)(ci_dllist*, char*, int, void*);
 
@@ -516,8 +514,6 @@ static int ci_bonding_get_slaves(char *bond_name, ci_dllist *slaves)
 }
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39)
-
 struct ci_read_proc_net_bonding_state {
   char current_slave[IFNAMSIZ];
   int agg_id;
@@ -601,8 +597,6 @@ static int ci_bonding_get_lacp_active_slave(char* bond_name, char* slave_name)
   
   return rc;
 }
-
-#endif
 
 
 struct ci_read_proc_net_igmp_state {
@@ -753,26 +747,16 @@ static int ci_bonding_send_igmp_report(struct net_device *netdev,
 }
 
 
-
 /* This function has the horrible job of determining if a slave is
- * active or not, robust across different kernel versions (which
- * expose this in different ways) and bonding modes
+ * active or not.  We do this by parsing sysfs.  Some earlier kernel
+ * versions would set flags in net device we could use but sysfs is
+ * the proper way.
  */
 ci_inline int ci_bonding_get_slave_is_active(struct net_device *master_net_dev,
                                              struct net_device *slave_net_dev,
                                              int master_rowid)
 {
   int active;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,39)
-# ifdef IFF_SLAVE_INACTIVE
-  /* Netdev priv flag gets set, so read that */
-  active = (slave_net_dev->priv_flags & IFF_SLAVE_INACTIVE) == 0;
-# else
-  /* This isn't ideal but should be good enough to get the right
-   * answer on SLES10 2.6.16 */
-  active = (slave_net_dev->flags & IFF_NOARP) == 0;
-# endif
-#else
   char active_if[IFNAMSIZ];
   int rc, mode;
 
@@ -806,12 +790,12 @@ ci_inline int ci_bonding_get_slave_is_active(struct net_device *master_net_dev,
       return 0;
     active = rc;
   }
-#endif
 
   return active && 
     (slave_net_dev->flags & IFF_UP) && 
     netif_running(slave_net_dev);
 }
+
 
 extern int oo_igmp_on_failover;
 

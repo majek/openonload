@@ -548,7 +548,12 @@ static void efx_repost_rx_page(struct efx_channel *channel,
 		return;
 	}
 
-	nr_bufs = ((efx->rx_bufs_per_page + 1) - page_count(page)) + 1;
+	EFX_BUG_ON_PARANOID(efx->rx_bufs_per_page < 1);
+	EFX_BUG_ON_PARANOID(efx->rx_bufs_per_page > 2);
+	/* repost the first buffer, and the second if there are no refs to it */
+	nr_bufs = 1;
+	if (efx->rx_bufs_per_page == 2)
+		nr_bufs += page_count(page) < efx->rx_bufs_per_page + 1;
 
 	/* Clamp nr_bufs to the minimum of the number of buffers
 	 * creatable from the page and the number of free slots on the

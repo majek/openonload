@@ -1,3 +1,11 @@
+openonload-201502-u3
+--------------------
+
+Update net driver (v4.5.1.1020)
+
+task55114: add compatibility for RHEL 6.7
+
+
 openonload-201502-u2
 --------------------
 

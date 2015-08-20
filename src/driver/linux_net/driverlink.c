@@ -65,6 +65,9 @@ static struct efx_dl_handle *efx_dl_handle(struct efx_dl_device *efx_dev)
 	return container_of(efx_dev, struct efx_dl_handle, efx_dev);
 }
 
+/* Warn if a driverlink call takes longer than 1 second */
+#define EFX_DL_DURATION_WARN (1 * HZ)
+
 /* Remove an Efx device, and call the driver's remove() callback if
  * present. The caller must hold rtnl_lock. */
 static void efx_dl_del_device(struct efx_dl_device *efx_dev)
@@ -72,13 +75,21 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 	struct efx_dl_handle *efx_handle = efx_dl_handle(efx_dev);
 	struct efx_nic *efx = efx_handle->efx;
 	unsigned int type;
+	u64 before, after, duration;
 
 	netif_info(efx, drv, efx->net_dev,
 		   "%s driverlink client unregistering\n",
 		   efx_dev->driver->name);
 
+	before = get_jiffies_64();
+
 	if (efx_dev->driver->remove)
 		efx_dev->driver->remove(efx_dev);
+
+	after = get_jiffies_64();
+	duration = after - before;
+	WARN(duration > EFX_DL_DURATION_WARN, "%s: driverlink remove() took %ums",
+	     efx_dev->driver->name, jiffies_to_msecs(duration));
 
 	list_del(&efx_handle->driver_node);
 
@@ -117,6 +128,7 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 	struct efx_dl_device *efx_dev;
 	int rc;
 	bool added = false;
+	u64 before, after, duration;
 
 	efx_handle = kzalloc(sizeof(*efx_handle), GFP_KERNEL);
 	if (!efx_handle)
@@ -128,7 +140,15 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 	INIT_LIST_HEAD(&efx_handle->port_node);
 	INIT_LIST_HEAD(&efx_handle->driver_node);
 
+	before = get_jiffies_64();
+
 	rc = driver->probe(efx_dev, efx->net_dev, efx->dl_info, "");
+
+	after = get_jiffies_64();
+	duration = after - before;
+	WARN(duration > EFX_DL_DURATION_WARN, "%s: driverlink probe() took %ums\n",
+	     efx_dev->driver->name, jiffies_to_msecs(duration));
+
 	if (rc)
 		goto fail;
 
@@ -281,8 +301,19 @@ void efx_dl_reset_suspend(struct efx_nic *efx)
 				    &efx->dl_device_list,
 				    port_node) {
 		efx_dev = &efx_handle->efx_dev;
-		if (efx_dev->driver->reset_suspend)
+		if (efx_dev->driver->reset_suspend) {
+			u64 before, after, duration;
+
+			before = get_jiffies_64();
+
 			efx_dev->driver->reset_suspend(efx_dev);
+
+			after = get_jiffies_64();
+			duration = after - before;
+			WARN(duration >  EFX_DL_DURATION_WARN,
+			     "%s: driverlink reset_suspend() took %ums\n",
+			     efx_dev->driver->name, jiffies_to_msecs(duration));
+		}
 	}
 }
 
@@ -298,8 +329,19 @@ void efx_dl_reset_resume(struct efx_nic *efx, int ok)
 	list_for_each_entry(efx_handle, &efx->dl_device_list,
 			    port_node) {
 		efx_dev = &efx_handle->efx_dev;
-		if (efx_dev->driver->reset_resume)
+		if (efx_dev->driver->reset_resume) {
+			u64 before, after, duration;
+
+			before = get_jiffies_64();
+
 			efx_dev->driver->reset_resume(efx_dev, ok);
+
+			after = get_jiffies_64();
+			duration = after - before;
+			WARN(duration > EFX_DL_DURATION_WARN,
+			     "%s: driverlink reset_resume() took %ums\n",
+			     efx_dev->driver->name, jiffies_to_msecs(duration));
+		}
 	}
 }
 
@@ -311,8 +353,20 @@ int efx_dl_handle_event(struct efx_nic *efx, void *event, int budget)
 	list_for_each_entry(efx_handle, &efx->dl_device_list, port_node) {
 		efx_dev = &efx_handle->efx_dev;
 		if (efx_dev->driver->handle_event ) {
-			int rc = efx_dev->driver->handle_event(efx_dev,
-							       event, budget);
+			u64 before, after, duration;
+			int rc;
+
+			before = get_jiffies_64();
+
+			rc = efx_dev->driver->handle_event(efx_dev,
+							   event, budget);
+
+			after = get_jiffies_64();
+			duration = after - before;
+			WARN(duration > EFX_DL_DURATION_WARN,
+			     "%s: driverlink handle_event() took %ums\n",
+			     efx_dev->driver->name, jiffies_to_msecs(duration));
+
 			if (rc >= 0 )
 				return rc > budget ? budget : rc;
 		}
@@ -329,9 +383,25 @@ bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
 
 	list_for_each_entry(efx_handle, &efx->dl_device_list, port_node) {
 		efx_dev = &efx_handle->efx_dev;
-		if (efx_dev->driver->rx_packet &&
-		    efx_dev->driver->rx_packet(efx_dev, channel, pkt_hdr, len))
-			discard = true;
+		if (efx_dev->driver->rx_packet) {
+			int rc;
+#ifdef DEBUG
+			u64 before, after, duration;
+
+			before = get_jiffies_64();
+#endif
+			rc = efx_dev->driver->rx_packet(efx_dev, channel,
+							pkt_hdr, len);
+#ifdef DEBUG
+			after = get_jiffies_64();
+			duration = after - before;
+			WARN(duration > EFX_DL_DURATION_WARN,
+			     "%s: driverlink rx_packet() took %ums\n",
+			     efx_dev->driver->name, jiffies_to_msecs(duration));
+#endif
+			if (rc)
+				discard = true;
+		}
 	}
 
 	return discard;

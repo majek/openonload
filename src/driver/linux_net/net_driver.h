@@ -81,7 +81,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.5.1.1010"
+#define EFX_DRIVER_VERSION	"4.5.1.1020"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)

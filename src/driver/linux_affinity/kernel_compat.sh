@@ -73,6 +73,7 @@ EFRM_HAVE_GET_UNUSED_FD_FLAGS	export	get_unused_fd_flags	include/linux/file.h	fs
 EFRM_HAVE_WQ_SYSFS	symbol	WQ_SYSFS	include/linux/workqueue.h
 
 EFRM_HAVE_POLL_REQUESTED_EVENTS	symbol	poll_requested_events	include/linux/poll.h
+EFRM_POLL_TABLE_HAS_OLD_KEY	memtype	struct_poll_table_struct	key	include/linux/poll.h	unsigned long
 
 ERFM_HAVE_NEW_KALLSYMS	symtype	kallsyms_on_each_symbol	include/linux/kallsyms.h int(int (*)(void *, const char *, struct module *, unsigned long), void *)
 
