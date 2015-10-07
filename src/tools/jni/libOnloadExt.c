@@ -227,6 +227,9 @@ static char* JNU_GetStringNativeChars(JNIEnv *env, jstring jstr)
 static jboolean IsInstanceOf( JNIEnv *env, jobject obj, char const* class_name )
 {
 	jclass classId;
+	if ( !env || !obj || !class_name )
+		return JNI_FALSE;
+
 	classId = (*env)->FindClass( env, class_name );
 	if ( !classId )
 		return JNI_FALSE;
@@ -408,64 +411,66 @@ NewZcBuffer( JNIEnv* env, struct onload_zc_iovec* iovec, int fd )
    FileDescriptor rather than a socket, or be prepared to rewrite this
    if you use a different class library or VM.
    Use "javap -private" liberally to find the underlying file
-   descriptor location if it moves. */
-static jint GetFdFromFileDescriptor( JNIEnv *env, jobject obj )
+   descriptor location if it moves.
+   Currently, this expects sun's implementation.
+*/
+
+static jint GetFdFromFileDescriptor(JNIEnv *env, jobject obj)
 {
-	return GetIntFromObject( env, obj, "fd" );
+  if( !obj )
+    return -EINVAL;
+
+  return GetIntFromObject(env, obj, "fd");
 }
 
-static int GetFdFromObject( JNIEnv *env, jobject obj, char const* implType )
+static jint GetFdFromChannel(JNIEnv *env, jobject obj)
 {
-	jobject impl;
-	jobject desc;
-	
-	if ( !obj )
-		return -EINVAL;
-	
-	impl = RunMethodOnObject( env, obj, "getImpl", implType );
-	if ( !impl )
-		return -EINVAL;
-
-	desc = RunMethodOnObject( env, impl, "getFileDescriptor",
-					"()Ljava/io/FileDescriptor;" );
-	if ( !desc )
-		return -EINVAL;
-
-	return GetFdFromFileDescriptor( env, desc );
+  jobject desc;
+  desc = RunMethodOnObject(env, obj, "getFD()",
+                           "()Ljava/io/FileDescriptor;" );
+  return GetFdFromFileDescriptor(env, desc);
 }
 
-static int GetFdFromDatagramSocket( JNIEnv *env, jobject obj )
+static int GetFdFromObject(JNIEnv *env, jobject obj, char const *implType,
+                           char const *channelType)
 {
-	return GetFdFromObject( env, obj, "()Ljava/net/DatagramSocketImpl;" );
+  jobject impl;
+  jobject desc;
+  jint fd;
+
+  /* Prefer getChannel as getImpl can implicitly create a new socket */
+  impl = RunMethodOnObject(env, obj, "getChannel", channelType);
+  fd = GetFdFromChannel(env, impl);
+  if ( fd < 0 ) {
+    /* Channel method has failed, fall back to getImpl */
+    impl = RunMethodOnObject(env, obj, "getImpl", implType);
+    desc = RunMethodOnObject(env, impl, "getFileDescriptor",
+                             "()Ljava/io/FileDescriptor;");
+    fd = GetFdFromFileDescriptor(env, desc);
+  }
+  return fd;
 }
 
-static int GetFdFromSocket( JNIEnv *env, jobject obj )
+/* Disambiguating from multiple types, to the child types we need; in a single place */
+static int GetFdFromUnknown(JNIEnv *env, jobject obj)
 {
-	return GetFdFromObject( env, obj, "()Ljava/net/SocketImpl;" );
+  if( IsInstanceOf(env, obj, "java/io/FileDescriptor") )
+    return GetFdFromFileDescriptor(env, obj);
+  else if( IsInstanceOf(env, obj, "java/nio/channels/spi/AbstractSelectableChannel") )
+    return GetFdFromChannel(env, obj);
+  else if( IsInstanceOf(env, obj, "java/net/DatagramSocket") )
+    return GetFdFromObject(env, obj, "()Ljava/net/DatagramSocketImpl;",
+                             "()Ljava/nio/channels/DatagramChannel;");
+  else if( IsInstanceOf(env, obj, "java/net/Socket") )
+    return GetFdFromObject(env, obj, "()Ljava/net/SocketImpl;",
+                             "()Ljava/nio/channels/SocketChannel;");
+  else if( IsInstanceOf(env, obj, "java/net/ServerSocket") )
+    return GetFdFromObject(env, obj, "()Ljava/net/SocketImpl;",
+                             "()Ljava/nio/channels/ServerSocketChannel;");
+  /* Can add more socket types here as needed */
+  return -EINVAL;
 }
 
-static int GetFdFromServerSocket( JNIEnv *env, jobject obj )
-{
-	/* Right now, the implementation is the same, though the class
-	   is different. */
-	return GetFdFromObject( env, obj, "()Ljava/net/SocketImpl;" );
-}
-
-static int GetFdFromUnknown( JNIEnv * env, jobject fd )
-{
-	int fd_val = -EINVAL;
-	if ( env ) {
-		if ( IsInstanceOf( env, fd, "java/io/FileDescriptor" ) )
-			fd_val = GetFdFromFileDescriptor( env, fd );
-		else if ( IsInstanceOf( env, fd, "java/net/DatagramSocket" ) )
-			fd_val = GetFdFromDatagramSocket( env, fd );
-		else if ( IsInstanceOf( env, fd, "java/net/Socket" ) )
-			fd_val = GetFdFromSocket( env, fd );
-		else if ( IsInstanceOf( env, fd, "java/net/ServerSocket" ) )
-			fd_val = GetFdFromServerSocket( env, fd );
-	}
-	return fd_val;
-}
 
 /* ******************************************* */
 /* Native Implementations of OnloadExt methods */
@@ -481,10 +486,22 @@ JNIEXPORT jint JNICALL
 Java_OnloadExt_SetStackName ( JNIEnv *env, jclass cls,
 				jint who, jint scope, jstring stackname )
 {
+	static int have_dont_accel = 0;
+	static jstring dont_accel;
 	jint rval;
-	char* native_stackname = JNU_GetStringNativeChars(env, stackname);
-	rval = onload_set_stackname( who, scope, native_stackname );
-	free( (void*) native_stackname );
+	if( ! have_dont_accel ) {
+		jfieldID fid = (*env)->GetStaticFieldID(env, cls,
+			"ONLOAD_DONT_ACCELERATE", "Ljava/lang/String;");
+		dont_accel = (*env)->GetStaticObjectField(env, cls, fid);
+		have_dont_accel = 1;
+	}
+	if( stackname == dont_accel )
+		rval = onload_set_stackname( who, scope, ONLOAD_DONT_ACCELERATE );
+	else {
+		char* native_stackname = JNU_GetStringNativeChars(env, stackname);
+		rval = onload_set_stackname( who, scope, native_stackname );
+		free( (void*) native_stackname );
+	}
 	return rval;
 }
 
@@ -571,6 +588,46 @@ JNIEXPORT jint JNICALL
 Java_OnloadExt_CheckFeature (JNIEnv * env, jclass cls, jint fd, jint feature )
 {
 	return onload_fd_check_feature( fd, feature );
+}
+
+
+/* ********************** */
+/* Move FD to a new stack */
+/* ********************** */
+JNIEXPORT jint JNICALL
+Java_OnloadExt_MoveFd__I (JNIEnv* env, jclass cls, jint fd_val)
+{
+  if ( !Java_OnloadExt_IsPresent(env, cls) )
+    return -ENOSYS;
+  return (jint) onload_move_fd(fd_val);
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_MoveFd__Ljava_io_FileDescriptor_2 (JNIEnv* env, jclass cls, jobject fd)
+{
+  jint fd_val = GetFdFromFileDescriptor( env, fd );
+  return Java_OnloadExt_MoveFd__I(env, cls, fd_val);
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_MoveFd__Ljava_net_Socket_2 (JNIEnv* env, jclass cls, jobject fd)
+{
+  jint fd_val = GetFdFromUnknown( env, fd );
+  return Java_OnloadExt_MoveFd__I(env, cls, fd_val);
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_MoveFd__Ljava_net_DatagramSocket_2 (JNIEnv* env, jclass cls, jobject fd)
+{
+  jint fd_val = GetFdFromUnknown( env, fd );
+  return Java_OnloadExt_MoveFd__I(env, cls, fd_val);
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadExt_MoveFd__Ljava_net_ServerSocket_2 (JNIEnv* env, jclass cls, jobject fd)
+{
+  jint fd_val = GetFdFromUnknown( env, fd );
+  return Java_OnloadExt_MoveFd__I(env, cls, fd_val);
 }
 
 /* ******** */
@@ -946,4 +1003,6 @@ Java_OnloadTemplateSend_Abort (JNIEnv* env, jclass cls,
 
 	return rval;
 }
+
+
 

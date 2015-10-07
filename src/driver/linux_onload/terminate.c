@@ -35,7 +35,6 @@
 #include <onload/linux_onload.h>
 #include <onload/linux_trampoline.h>
 
-#ifdef OO_CAN_HANDLE_TERMINATION
 
 /* Max number of stacks we can handle in process termination code.
  * Should not exceed 64, because we use uint64 to keep bitmap. */
@@ -435,12 +434,3 @@ void efab_linux_termination_ctor(void)
 
 }
 
-#else  /* OO_CAN_HANDLE_TERMINATION */
-
-int
-efab_signal_die(ci_private_t *priv_unused, void *arg)
-{
-  return 0;
-}
-
-#endif /* OO_CAN_HANDLE_TERMINATION */

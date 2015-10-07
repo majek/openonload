@@ -104,17 +104,6 @@ Documentation
  If you've any questions please contact <support@solarflare.com>.
 
 
-Compiling and linking
-=====================
-
- Applications or libraries using ef_vi will need to include the header
- files in src/include/etherfabic/
-
- The application will need to be linked with libciul1.a or libciul.so,
- which can be found under the "build" directory after running
- scripts/onload_build or scripts/onload_install.
-
-
 License
 =======
 

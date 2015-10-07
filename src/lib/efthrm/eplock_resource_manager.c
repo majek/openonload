@@ -102,11 +102,6 @@ int
 efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context)
 {
   int l = ni->state->lock.lock;
-  tcp_helper_resource_t *rs = netif2tcp_helper_resource(ni);
-
-  /* Allocate more packets if necessary. */
-  if( !in_dl_context && OO_STACK_NEEDS_MORE_PACKETS(ni) )
-    efab_tcp_helper_more_bufs(rs);
 
   /* We use in_dl_context from now on, and we should remove
    * CI_NETIF_FLAG_IN_DL_CONTEXT under the stack lock. */
@@ -166,7 +161,7 @@ static int efab_eplock_is_unlocked_or_request_wake(ci_eplock_t* epl)
 
 
 int
-efab_eplock_lock_wait(ci_netif* ni)
+efab_eplock_lock_wait(ci_netif* ni, int maybe_wedged)
 {
   wait_queue_t wait;
   int rc;
@@ -186,6 +181,10 @@ efab_eplock_lock_wait(ci_netif* ni)
     schedule();
     if(CI_UNLIKELY( signal_pending(current) )) {
       rc = -ERESTARTSYS;
+      break;
+    }
+    if(CI_UNLIKELY(maybe_wedged) ) {
+      rc = -ECANCELED;
       break;
     }
   }

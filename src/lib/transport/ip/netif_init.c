@@ -32,6 +32,7 @@
 #include <etherfabric/internal/internal.h>
 
 #ifndef __KERNEL__
+#include <net/if.h>
 #include <ci/internal/efabcfg.h>
 #if CI_CFG_PKTS_AS_HUGE_PAGES
 #include <sys/shm.h>
@@ -91,7 +92,6 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   }
 
   /* List of free packet buffers. */
-  nis->freepkts = OO_PP_NULL;
   assert_zero(nis->n_freepkts);
   assert_zero(nis->n_rx_pkts);
   assert_zero(nis->rxq_low);
@@ -103,15 +103,15 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
 
   /* Pool of packet buffers for transmit. */
   assert_zero(nis->n_async_pkts);
-#if ! CI_CFG_PP_IS_PTR
   nis->nonb_pkt_pool = CI_ILL_END;
-#endif
 
   /* Endpoint lookup table.
    * - table must be a power of two in size
    * - table must be large enough for one filter per connection +
    *   the extra filters required for wildcards i.e. "listen any" connections
    *   (so we use double the number of endpoints)
+   *
+   * Fixme: max_ep_bufs includes some space for aux buffers.
    */
   ci_netif_filter_init(ni->filter_table,
                        ci_log2_le(NI_OPTS(ni).max_ep_bufs) + 1);
@@ -192,7 +192,7 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   nis->pid = current->tgid;
 
 #if CI_CFG_FD_CACHING
-  nis->cache_avail_stack = nis->opts.sock_cache_max;
+  nis->passive_cache_avail_stack = nis->opts.sock_cache_max;
 #endif
 
   /* This gets set appropriately in tcp_helper_init_max_mss() */
@@ -208,6 +208,24 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
                       "ready_list");
     nis->ready_list_flags[i] = 0;
   }
+
+  nis->packet_alloc_numa_nodes = 0;
+  nis->sock_alloc_numa_nodes = 0;
+  nis->interrupt_numa_nodes = 0;
+  nis->creation_numa_node = numa_node_id();
+  nis->load_numa_node = efab_tcp_driver.load_numa_node;
+
+#if CI_CFG_FD_CACHING
+  ci_ni_dllist_init(ni, &nis->active_cache.cache,
+                    oo_ptr_to_statep(ni, &nis->active_cache.cache), "ach");
+  ci_ni_dllist_init(ni, &nis->active_cache.pending,
+                    oo_ptr_to_statep(ni, &nis->active_cache.pending), "apd");
+  ci_ni_dllist_init(ni, &nis->active_cache.fd_states,
+                    oo_ptr_to_statep(ni, &nis->active_cache.fd_states), "afd");
+  nis->active_cache.avail_stack = oo_ptr_to_statep(ni,
+                                              &nis->active_cache_avail_stack);
+  nis->active_cache_avail_stack = nis->opts.sock_cache_max;
+#endif
 }
 
 #endif
@@ -220,8 +238,8 @@ static ci_uint32 citp_udp_sndbuf_max, citp_udp_sndbuf_def;
 static ci_uint32 citp_udp_rcvbuf_max, citp_udp_rcvbuf_def;
 static ci_uint32 citp_tcp_backlog_max, citp_tcp_adv_win_scale_max;
 static ci_uint32 citp_fin_timeout;
-static ci_uint32 citp_retransmit_threshold, citp_retransmit_threshold_syn,
-          citp_retransmit_threshold_synack;
+static ci_uint32 citp_retransmit_threshold, citp_retransmit_threshold_orphan,
+                 citp_retransmit_threshold_syn, citp_retransmit_threshold_synack;
 static ci_uint32 citp_keepalive_probes, citp_keepalive_time;
 static ci_uint32 citp_keepalive_intvl;
 static ci_uint32 citp_tcp_sack, citp_tcp_timestamps, citp_tcp_window_scaling;
@@ -330,6 +348,13 @@ ci_setup_ipstack_params(void)
   if (ci_sysctl_get_values("net/ipv4/tcp_retries2", opt, 1, 0) != 0)
     return -1;
   citp_retransmit_threshold = opt[0];
+  if (ci_sysctl_get_values("net/ipv4/tcp_orphan_retries", opt, 1, 0) != 0)
+    return -1;
+  /* tcp_orphan_retries is usually 0, but Linux uses value 8 internally in
+   * such a case.  See linux/net/ipv4/tcp_timer.c: tcp_orphan_retries()
+   * for details. */
+  if( opt[0] > 0 )
+    citp_retransmit_threshold_orphan = opt[0];
   if (ci_sysctl_get_values("net/ipv4/tcp_syn_retries", opt, 1, 0) != 0)
     return -1;
   citp_retransmit_threshold_syn = opt[0];
@@ -412,10 +437,13 @@ void ci_netif_config_opts_defaults(ci_netif_config_opts* opts)
     opts->udp_rcvbuf_def = citp_udp_rcvbuf_def;
 
     opts->tcp_backlog_max = citp_tcp_backlog_max;
+    opts->tcp_synrecv_max = citp_tcp_backlog_max *
+                            CI_CFG_ASSUME_LISTEN_SOCKS;
     opts->tcp_adv_win_scale_max = citp_tcp_adv_win_scale_max;
     opts->fin_timeout = citp_fin_timeout;
 
     opts->retransmit_threshold = citp_retransmit_threshold;
+    opts->retransmit_threshold_orphan = citp_retransmit_threshold_orphan;
     opts->retransmit_threshold_syn = citp_retransmit_threshold_syn;
     opts->retransmit_threshold_synack = citp_retransmit_threshold_synack;
 
@@ -563,6 +591,7 @@ static void ci_netif_config_opts_getenv_ef_log(ci_netif_config_opts* opts)
     {EF_LOG_RESOURCE_WARNINGS, "resource_warnings"},
     {EF_LOG_CONN_DROP, "conn_drop"},
     {EF_LOG_CONFIG_WARNINGS, "config_warnings"},
+    {EF_LOG_USAGE_WARNINGS, "usage_warnings"},
   };
 
   convert_string_to_bitmask(getenv("EF_LOG"), options, EF_LOG_MAX,
@@ -570,9 +599,16 @@ static void ci_netif_config_opts_getenv_ef_log(ci_netif_config_opts* opts)
 }
 
 
+static void
+ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts);
+
+
 void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 {
   const char* s;
+
+  /* Work out what logging is enabled first, so we can log config errors */
+  ci_netif_config_opts_getenv_ef_log(opts);
 
   /* These first options are sensitive to the order in which they are
    * initialised, because the value of one effects the default for
@@ -731,8 +767,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->huge_pages = atoi(s);
   }
   if( opts->huge_pages != 0 && opts->share_with != 0 ) {
-    ci_log("Turning huge pages off because the stack is going "
-           "to be used by multiple users");
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "Turning huge pages off because the "
+               "stack is going to be used by multiple users");
     opts->huge_pages = 0;
   }
 #endif
@@ -846,6 +882,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_UDP_SEND_UNLOCKED")) )
     opts->udp_send_unlocked = atoi(s);
 #endif
+  if( (s = getenv("EF_UDP_SEND_NONBLOCK_NO_PACKETS_MODE")) )
+    opts->udp_nonblock_no_pkts_mode = atoi(s);
   if( (s = getenv("EF_UNCONFINE_SYN")) )
     opts->unconfine_syn = atoi(s) != 0;
   if( (s = getenv("EF_BINDTODEVICE_HANDOVER")) )
@@ -899,6 +937,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->tcp_send_spin = atoi(s);
   if( (s = getenv("EF_TCP_ACCEPT_SPIN")) )
     opts->tcp_accept_spin = atoi(s);
+  if( (s = getenv("EF_TCP_CONNECT_SPIN")) )
+    opts->tcp_connect_spin = atoi(s);
   if( (s = getenv("EF_PKT_WAIT_SPIN")) )
     opts->pkt_wait_spin = atoi(s);
 #if CI_CFG_USERSPACE_PIPE
@@ -921,6 +961,11 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->udp_sndbuf_user = atoi(s);
   if ( (s = getenv("EF_UDP_RCVBUF")) )
     opts->udp_rcvbuf_user = atoi(s);
+
+  if( (s = getenv("EF_TCP_SNDBUF_ESTABLISHED_DEFAULT")) )
+    opts->tcp_sndbuf_est_def = atoi(s);
+  if( (s = getenv("EF_TCP_RCVBUF_ESTABLISHED_DEFAULT")) )
+    opts->tcp_rcvbuf_est_def = atoi(s);
 
   if( opts->tcp_sndbuf_user != 0 ) {
     opts->tcp_sndbuf_min = opts->tcp_sndbuf_max = opts->tcp_sndbuf_user;
@@ -948,8 +993,29 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if ( (s = getenv("EF_RETRANSMIT_THRESHOLD")) )
     opts->retransmit_threshold = atoi(s);
 
-  if ( (s = getenv("EF_TCP_BACKLOG_MAX")) )
+  if ( (s = getenv("EF_TCP_BACKLOG_MAX")) ) {
     opts->tcp_backlog_max = atoi(s);
+    if ( getenv("EF_TCP_SYNRECV_MAX") == NULL ) {
+      opts->tcp_synrecv_max = opts->tcp_backlog_max *
+                              CI_CFG_ASSUME_LISTEN_SOCKS;
+    }
+  }
+  if ( (s = getenv("EF_TCP_SYNRECV_MAX")) ) {
+    opts->tcp_synrecv_max = atoi(s);
+  }
+  /* Number of aux buffers is tcp_synrecv_max * 2.
+   * Number of ep buffers which can be used by aux bufs is
+   * tcp_synrecv_max * 2 / 7.
+   * And we need some space for real endpoints. */
+  if( opts->tcp_synrecv_max * 4 > opts->max_ep_bufs * 7 ) {
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "%s: EF_TCP_SYNRECV_MAX=%d and "
+               "EF_MAX_ENDPOINTS=%d are inconsistent.",
+               opts->tcp_synrecv_max * 2 > opts->max_ep_bufs * 7 ?
+               "ERROR" : "WARNING",
+               opts->tcp_synrecv_max, opts->max_ep_bufs);
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "Too few endpoints requested: ~4 "
+               "syn-receive states consume one endpoint. ");
+  }
 
   if ( (s = getenv("EF_TCP_INITIAL_CWND")) )
     opts->initial_cwnd = atoi(s);
@@ -1004,11 +1070,6 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( opts->free_packets_low == 0 )
     opts->free_packets_low = opts->rxq_size / 2;
 
-#if CI_CFG_SENDFILE
-  if ( (s = getenv("EF_MAX_EP_PINNED_PAGES")) )
-    opts->max_ep_pinned_pages = atoi(s);
-#endif
-
 #if CI_CFG_PIO
   if( opts->pio == 0 )
     /* Makes for more efficient checking on fast data path */
@@ -1036,10 +1097,136 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if( (s = getenv("EF_OFE_ENGINE_SIZE")) )
     opts->ofe_size  = atoi(s);
 #endif
+#if CI_CFG_SEPARATE_UDP_RXQ
+  if( (s = getenv("EF_SEPARATE_UDP_RXQ")) )
+    opts->separate_udp_rxq = atoi(s);
+#endif
 
-  ci_netif_config_opts_getenv_ef_log(opts);
-
+  ci_netif_config_opts_getenv_ef_scalable_filters(opts);
 }
+
+
+static void
+ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts)
+{
+  const char* s;
+
+  /* Nothing is interesting unless EF_SCALABLE_FILTERS is set */
+  if( (s = getenv("EF_SCALABLE_FILTERS")) ) {
+    char ifname[CICP_LLAP_NAME_MAX] = {};
+    const char* mode;
+
+    mode = strchr(s, '=');
+    strncpy(ifname, s, CI_MIN(mode - s, sizeof(ifname) - 1));
+    opts->scalable_filter_ifindex = if_nametoindex(ifname);
+
+    /* If we've got a valid ifindex then we need to determine the mode */
+    if( opts->scalable_filter_ifindex > 0 ) {
+      /* If a mode isn't present in the EF_SCALABLE_FILTERS option check
+       * EF_SCALABLE_FILTERS_MODE.
+       */
+      if( mode == NULL )
+        mode = getenv("EF_SCALABLE_FILTERS_MODE");
+      else
+        ++mode;
+
+      /* If the mode is set explicitly then parse that */
+      if( mode && *mode ) {
+        int mode_value = CITP_SCALABLE_MODE_NONE;
+        int mode_set = 0;
+        struct {const char* name; int mode;} modes[] = {
+          {"transparent_active", CITP_SCALABLE_MODE_TPROXY_ACTIVE},
+          {"passive", CITP_SCALABLE_MODE_PASSIVE},
+          {"rss",     CITP_SCALABLE_MODE_RSS},
+        };
+        while ( *mode ) {
+          const char* mode_end = strchrnul(mode, ':');
+          int len  = mode_end - mode;
+          int i;
+          for( i = 0; i < sizeof(modes) / sizeof(*modes); ++i )
+            if( strncmp(modes[i].name, mode, len) == 0 &&
+                modes[i].name[len] == 0 ) {
+              mode_value |=  modes[i].mode;
+              mode_set |= 3;
+              break;
+          }
+          if( ! (mode_set & 1) ) {
+            CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Error parsing "
+                       "EF_SCALABLE_FILTERS, token '%s', disabling scalable "
+                       "filter mode", mode);
+            opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
+            mode_set = 0;
+            break;
+          }
+          mode = mode_end;
+          if( *mode )
+            ++mode;
+          mode_set &= ~1;
+        }
+
+        if( mode_set ) {
+          int modes_supported[] = {
+            CITP_SCALABLE_MODE_TPROXY_ACTIVE,
+            CITP_SCALABLE_MODE_PASSIVE,
+            CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_PASSIVE,
+            CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_RSS};
+          int n_modes = sizeof(modes_supported)/sizeof(*modes_supported);
+          int fail = 1;
+          int i;
+
+          opts->scalable_filter_mode = mode_value;
+
+          for( i = 0; i < n_modes; ++i) {
+            if( opts->scalable_filter_mode == modes_supported[i] ) {
+              fail = 0;
+              break;
+            }
+          }
+          if( fail ) {
+            CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Unsupported scalable "
+                       "mode selected, disabling scalable filter mode.");
+            opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
+          }
+        }
+        else {
+          opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
+        }
+      }
+      else {
+        /* If the mode was not set explicitly then default to non-rss mode,
+         * otherwise check the mode is supported */
+        if ( opts->scalable_filter_mode < 0 ) {
+          opts->scalable_filter_mode = opts->scalable_filter_ifindex > 0 ?
+                                       (CITP_SCALABLE_MODE_TPROXY_ACTIVE |
+                                        CITP_SCALABLE_MODE_PASSIVE) :
+                                       CITP_SCALABLE_MODE_NONE;
+        }
+      }
+    }
+    else {
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Could not determine ifindex "
+                 "from name '%s', disabling scalable filter mode.", ifname);
+      opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
+    }
+
+    if( opts->scalable_filter_mode != CITP_SCALABLE_MODE_NONE ) {
+      if( (s = getenv("EF_SCALABLE_FILTERS_ENABLE")) )
+        opts->scalable_filter_enable = atoi(s);
+      else
+        opts->scalable_filter_enable = CITP_SCALABLE_FILTERS_ENABLE;
+    }
+    else {
+      opts->scalable_filter_enable = CITP_SCALABLE_FILTERS_DISABLE;
+    }
+  }
+  else {
+    if( (s = getenv("EF_SCALABLE_FILTERS_ENABLE")) )
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "config: EF_SCALABLE_FILTERS_ENABLE "
+                 "ignored as no valid config for EF_SCALABLE_FILTERS found.");
+    opts->scalable_filter_enable = CITP_SCALABLE_FILTERS_DISABLE;
+  }
+}
+
 
 #endif
 
@@ -1107,13 +1294,13 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
     for( id = 0; id < ni->state->pkt_sets_n; id++ ) {
       if( PKT_BUFSET_U_MMAPPED(ni, id) ) {
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-        if( ni->pkt_shm_id && ni->pkt_shm_id[id] >= 0 )
-          rc = shmdt(ni->pkt_sets[id]);
+        if( ni->pkt_set[id].shm_id >= 0 )
+          rc = shmdt(ni->pkt_bufs[id]);
         else
 #endif
         {
           rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
-                                  ni->pkt_sets[id],
+                                  ni->pkt_bufs[id],
                                   CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET);
         }
         if( rc < 0 )
@@ -1137,9 +1324,9 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
   }
 
 #if CI_CFG_PIO
-  if( ni->state->pio_mmap_bytes != 0 && ni->pio_ptr != NULL ) {
+  if( ni->pio_bytes_mapped != 0 && ni->pio_ptr != NULL ) {
     rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
-                            ni->pio_ptr, ni->state->pio_mmap_bytes);
+                            ni->pio_ptr, ni->pio_bytes_mapped);
     if( rc < 0 )  LOG_NV(ci_log("%s: munmap pio %d", __FUNCTION__, rc));
   }
 #endif
@@ -1174,11 +1361,10 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
   ni->io_ptr = NULL;
 #if CI_CFG_PIO
   ni->pio_ptr = NULL;
+  ni->pio_bytes_mapped = 0;
 #endif
   ni->buf_ptr = NULL;
-#if CI_CFG_PKTS_AS_HUGE_PAGES
-  ni->pkt_shm_id = NULL;
-#endif
+  ni->pkt_set = NULL;
 #ifdef ONLOAD_OFE
   ni->ofe = NULL;
 #endif
@@ -1225,6 +1411,9 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
       goto fail2;
     }
     ni->pio_ptr = (uint8_t*) p;
+    /* Record length actually mapped as the value in the shared state can
+     * change across NIC reboots. */
+    ni->pio_bytes_mapped = ns->pio_mmap_bytes;
   }
 #endif
 
@@ -1277,11 +1466,6 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
   }
 #endif
 
-#if CI_CFG_PKTS_AS_HUGE_PAGES
-  if( ns->buf_ofs != (ci_uint32)-1 )
-    ni->pkt_shm_id = (void *)(ni->buf_ptr + ns->buf_ofs);
-#endif
-
   return 0;
 
  fail2:
@@ -1291,29 +1475,54 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
 }
 
 
+ci_inline int vi_io_page_offset(unsigned vi_instance)
+{
+#if CI_PAGE_SIZE > 8192
+  /******** WARNING *******
+   * This is a possible security threat. On x86 as
+   * 8192 is greater then PAGE_SIZE we're mapping individual pages for
+   * each VI's RX_DESC_UPD, TX_DESC_UPD. But on POWER they get into the
+   * same OS page grouped by 8 (64k / 8k). So we have to map them all
+   * together meaning that an application will have access to somebodies
+   * dbells. Not sure if anything can be done here.*/
+
+  /* 8192 is a hardcoded constant. It is current _STEP for all tables in
+   * question for all existing HW (falcon, siena, ef10). This may need
+   * fixing when new HW is out */
+  return (vi_instance & ((CI_PAGE_SIZE / 8192) - 1)) * 8192;
+#else
+  return 0;
+#endif
+}
+
+
 static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
-                       int vi_io_offset_full, int vi_mem_offset)
+                       int vi_io_offset, unsigned* vi_mem_offset,
+                       ef_vi* vi, unsigned vi_instance, int evq_bytes,
+                       int txq_size, ef_vi_stats* vi_stats)
 {
   ef_vi_state* state = (void*) ((char*) ni->state + vi_state_offset);
   ci_netif_state_nic_t* nsn = &(ni->state->nic[nic_i]);
-  ef_vi* vi = &(ni->nic_hw[nic_i].vi);
   uint32_t* ids = (void*) (state + 1);
 
   ef_vi_init(vi, ef_vi_arch_from_efhw_arch(nsn->vi_arch), nsn->vi_variant,
              nsn->vi_revision, nsn->vi_flags, state);
   ef_vi_init_out_flags(vi, nsn->vi_out_flags);
-  ef_vi_init_io(vi, ni->io_ptr + vi_io_offset_full);
+  ef_vi_init_io(vi, ni->io_ptr + vi_io_offset + vi_io_page_offset(vi_instance));
   ef_vi_init_timer(vi, nsn->timer_quantum_ns);
-  ef_vi_init_evq(vi, nsn->vi_evq_bytes / 8, ni->buf_ptr + vi_mem_offset);
-  vi_mem_offset += (nsn->vi_evq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
-  ef_vi_init_rxq(vi, nsn->vi_rxq_size, ni->buf_ptr + vi_mem_offset, ids,
+  ef_vi_init_evq(vi, evq_bytes / 8, ni->buf_ptr + *vi_mem_offset);
+  *vi_mem_offset += (evq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
+  ef_vi_init_rxq(vi, nsn->vi_rxq_size, ni->buf_ptr + *vi_mem_offset, ids,
                  nsn->rx_prefix_len);
-  vi_mem_offset += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
+  *vi_mem_offset += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
   ids += nsn->vi_rxq_size;
-  ef_vi_init_txq(vi, nsn->vi_txq_size, ni->buf_ptr + vi_mem_offset, ids);
-  vi->vi_i = nsn->vi_instance;
+  ef_vi_init_txq(vi, txq_size, ni->buf_ptr + *vi_mem_offset, ids);
+  vi->vi_i = vi_instance;
   ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
   ef_vi_init_tx_timestamping(vi);
+  *vi_mem_offset += (ef_vi_tx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
+  ef_vi_add_queue(vi, vi);
+  ef_vi_set_stats_buf(vi, vi_stats);
 }
 
 
@@ -1328,14 +1537,16 @@ static int netif_tcp_helper_build(ci_netif* ni)
   int rc, nic_i;
   unsigned vi_io_offset, vi_mem_offset, vi_state_offset;
   int vi_state_bytes;
-  int vi_io_offset_full;
+#if CI_CFG_SEPARATE_UDP_RXQ
+  int udp_rxq_vi_state_bytes = 0;
+#endif
 #if CI_CFG_PIO
   unsigned pio_io_offset, pio_buf_offset = 0;
 #endif
 
   /* Do it before mmap, to call unmap if things go wrong. */
-  ni->pkt_sets = CI_ALLOC_ARRAY(char*, ns->pkt_sets_max);
-  CI_ZERO_ARRAY(ni->pkt_sets, ni->state->pkt_sets_max);
+  ni->pkt_bufs = CI_ALLOC_ARRAY(char*, ns->pkt_sets_max);
+  CI_ZERO_ARRAY(ni->pkt_bufs, ni->state->pkt_sets_max);
 
   /****************************************************************************
    * Do other mmaps.
@@ -1351,56 +1562,51 @@ static int netif_tcp_helper_build(ci_netif* ni)
   ** not, so we keep a count to calculate offsets rather than use
   ** nic_index.
   */
-  vi_io_offset = ns->vi_io_mmap_offset;
+  vi_io_offset = 0;
 #if CI_CFG_PIO
-  pio_io_offset = ns->pio_io_mmap_offset;
+  pio_io_offset = 0;
 #endif
-  vi_mem_offset = ns->vi_mem_mmap_offset;
+  vi_mem_offset = 0;
   vi_state_offset = sizeof(*ni->state);
 
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     ci_netif_state_nic_t* nsn = &ns->nic[nic_i];
 
-    LOG_NV(ci_log("%s: ni->io_ptr=%p io_offset=%d mem_offset=%d state_offset=%d",
-                __FUNCTION__, ni->io_ptr,
-                vi_io_offset, vi_mem_offset, vi_state_offset));
+    LOG_NV(ci_log("%s: ni->io_ptr=%p io_offset=%d mem_offset=%d "
+                  "state_offset=%d", __FUNCTION__, ni->io_ptr,
+                  vi_io_offset, vi_mem_offset, vi_state_offset));
 
     ci_assert((vi_mem_offset & (CI_PAGE_SIZE - 1)) == 0);
 
     rc = ef_vi_arch_from_efhw_arch(nsn->vi_arch);
     CI_TEST(rc >= 0);
 
-#if CI_PAGE_SIZE > 8192
-    /******** WARNING *******
-     * This is a possible security threat. On x86 as
-     * 8192 is greater then PAGE_SIZE we're mapping individual pages for
-     * each VI's RX_DESC_UPD, TX_DESC_UPD. But on POWER they get into the
-     * same OS page grouped by 8 (64k / 8k). So we have to map them all
-     * together meaning that an application will have access to somebodies
-     * dbells. Not sure if anything can be done here.*/
+    init_ef_vi(ni, nic_i, vi_state_offset, vi_io_offset, &vi_mem_offset,
+               &ni->nic_hw[nic_i].vi, nsn->vi_instance, nsn->vi_evq_bytes,
+               nsn->vi_txq_size, &ni->state->vi_stats);
+    vi_state_bytes = ef_vi_calc_state_bytes(nsn->vi_rxq_size,
+                                            nsn->vi_txq_size);
+    vi_state_offset += vi_state_bytes;
+    vi_io_offset += nsn->vi_io_mmap_bytes;
 
-    /* 8192 is a hardcoded constant. It is current _STEP for all tables in
-     * question for all existing HW (falcon, siena, ef10). This may need
-     * fixing when new HW is out */
-    vi_io_offset_full = vi_io_offset +
-	    (nsn->vi_instance & ((CI_PAGE_SIZE / 8192) - 1)) * 8192;
+#if CI_CFG_SEPARATE_UDP_RXQ
+    if( NI_OPTS(ni).separate_udp_rxq ) {
+      init_ef_vi(ni, nic_i, vi_state_offset, vi_io_offset, &vi_mem_offset,
+                 &ni->nic_hw[nic_i].udp_rxq_vi, nsn->udp_rxq_vi_instance,
+                 nsn->udp_rxq_vi_evq_bytes, 0, &ni->state->udp_rxq_vi_stats);
+
+      udp_rxq_vi_state_bytes = ef_vi_calc_state_bytes(nsn->vi_rxq_size, 0);
+      vi_state_offset += udp_rxq_vi_state_bytes;
+      vi_io_offset += nsn->vi_io_mmap_bytes;
+    }
+    ci_assert(vi_state_bytes + udp_rxq_vi_state_bytes == ns->vi_state_bytes);
 #else
-    vi_io_offset_full = vi_io_offset;
+    ci_assert(vi_state_bytes == ns->vi_state_bytes);
 #endif
 
-    init_ef_vi(ni, nic_i, vi_state_offset, vi_io_offset_full, vi_mem_offset);
-    ef_vi_add_queue(&ni->nic_hw[nic_i].vi, &ni->nic_hw[nic_i].vi);
-    ef_vi_set_stats_buf(&ni->nic_hw[nic_i].vi, &ni->state->vi_stats);
     if( NI_OPTS(ni).tx_push )
       ef_vi_set_tx_push_threshold(&ni->nic_hw[nic_i].vi,
                                   NI_OPTS(ni).tx_push_thresh);
-
-    vi_state_bytes = ef_vi_calc_state_bytes(nsn->vi_rxq_size,
-                                            nsn->vi_txq_size);
-    ci_assert(vi_state_bytes == ns->vi_state_bytes);
-    vi_state_offset += vi_state_bytes;
-    vi_io_offset += nsn->vi_io_mmap_bytes;
-    vi_mem_offset += nsn->vi_mem_mmap_bytes;
 
 #if CI_CFG_PIO
     if( NI_OPTS(ni).pio &&
@@ -1433,16 +1639,19 @@ static int netif_tcp_helper_build(ci_netif* ni)
    * Initialise control plane table handles in ci_netif.
    */
 
-  if( ns->table_ofs !=
-      (sizeof(ci_netif_state) + ns->vi_state_bytes * oo_stack_intf_max(ni)) ) {
+  if( ns->buf_ofs != sizeof(ci_netif_state) +
+      ns->vi_state_bytes * oo_stack_intf_max(ni) ||
+      ns->table_ofs - ns->buf_ofs != ns->pkt_sets_max * sizeof(ci_pkt_set) ) {
     /* This typically happens if someone puts a variable width type such as
      * long in ci_netif_state_s, and a 32 bit user level library is used
      * with a 64 bit driver.  (Or if user and kernel get out of sync).
      */
     ci_log("ERROR: data structure layout mismatch between kernel and "
            "user level detected!");
-    ci_log("ns->table_ofs=%d != %zd + %d * %d", ns->table_ofs,
+    ci_log("ns->buf_ofs=%d != %zd + %d * %d", ns->buf_ofs,
            sizeof(ci_netif_state), ns->vi_state_bytes, oo_stack_intf_max(ni));
+    ci_log("ns->table_ofs - ns->buf_ofs = %d - %d != %d * %zd",
+           ns->table_ofs, ns->buf_ofs, ns->pkt_sets_max, sizeof(ci_pkt_set));
     return -EINVAL;
   }
 
@@ -1456,6 +1665,7 @@ static void netif_tcp_helper_build2(ci_netif* ni)
 {
   ni->filter_table =
     (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
+  ni->pkt_set = (ci_pkt_set*) ((char*) ni->state + ni->state->buf_ofs);
 }
 
 
@@ -1515,6 +1725,14 @@ static void init_resource_alloc(ci_resource_onload_alloc_t* ra,
    */
   strncpy(ra->in_version, ONLOAD_VERSION, sizeof(ra->in_version));
   strncpy(ra->in_uk_intf_ver, OO_UK_INTF_VER, sizeof(ra->in_uk_intf_ver));
+#ifndef __KERNEL__
+  if( flags & CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS ) {
+    ra->in_cluster_size = CITP_OPTS.cluster_size;
+    ra->in_cluster_restart = CITP_OPTS.cluster_restart_opt;
+    strncpy(ra->in_name, CITP_OPTS.cluster_name, CI_CFG_STACK_NAME_LEN);
+  }
+  else
+#endif
   if( name != NULL )
     strncpy(ra->in_name, name, CI_CFG_STACK_NAME_LEN);
 }
@@ -1764,6 +1982,10 @@ static void ci_netif_sanity_checks(void)
   ci_assert_equal((1u << CI_SB_FLAG_WAKE_TX_B), CI_SB_FLAG_WAKE_TX);
   ci_assert_equal(sizeof(ci_ni_aux_mem), CI_AUX_MEM_SIZE);
 
+  /* AUX_PER_BUF aux buffers + header = ep buffer, where header has
+   * the same size as the aux buffer fitting to a cache line. */
+  ci_assert_equal( CI_AUX_MEM_SIZE * (AUX_PER_BUF + 1), EP_BUF_SIZE);
+
 #ifndef NDEBUG
   {
     int i = CI_MEMBER_OFFSET(ci_ip_cached_hdrs, ip);
@@ -2005,9 +2227,14 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
   oo_pkt_p pkt_list;
   int lim, rc, n;
 
-#if CI_CFG_PKTS_AS_HUGE_PAGES
-  ni->huge_pages_flag = NI_OPTS(ni).huge_pages;
-#endif
+  ci_tcp_helper_more_bufs(ni);
+  if( ni->state->n_freepkts == 0 ) {
+    LOG_E(ci_log("%s: [%d] ERROR: failed to allocate initial packet set",
+                 __func__, NI_ID(ni)));
+    return -ENOMEM;
+  }
+  ni->state->current_pkt_set = 0;
+
   ci_netif_mem_pressure_pkt_pool_fill(ni);
   if( (rc = ci_netif_set_rxq_limit(ni)) < 0 )
     return rc;
@@ -2036,7 +2263,7 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
                      NI_OPTS(ni).rxq_limit, ni->state->rxq_low,
                      NI_OPTS(ni).rxq_min));
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-      else if( ni->huge_pages_flag == 2 )
+      else if( NI_OPTS(ni).huge_pages == OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE )
         LOG_E(ci_log("%s: ERROR: Failed to allocate huge pages to fill RX "
                      "rings", __FUNCTION__));
       else
@@ -2053,8 +2280,8 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
   /* Initial packets allocated: allow other packets to be in non-huge pages
    * if necessary.
    */
-  if( ni->huge_pages_flag == 2 )
-    ni->huge_pages_flag = 1;
+  if( NI_OPTS(ni).huge_pages == OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE )
+    NI_OPTS(ni).huge_pages = OO_IOBUFSET_FLAG_HUGE_PAGE_TRY;
 #endif
   return rc;
 }

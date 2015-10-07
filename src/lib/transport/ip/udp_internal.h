@@ -28,24 +28,6 @@
 #define __UDP_INTERNAL_H__
 
 
-/* On Linux (at least) the space taken in the recvq is calculated as frame
- * size + some skb overhead.  Value used here was measured on kernel
- * 2.6.24.7-65.el5rt using "udp_rcvbuf".
- */
-#define OO_UDP_RX_PER_PKT_OVERHEAD  350
-
-
-#define UDP_RECVQ_DEPTH(us)                                             \
-  (ci_udp_recv_q_bytes(&(us)->recv_q) +                                 \
-   ci_udp_recv_q_pkts(&(us)->recv_q) * OO_UDP_RX_PER_PKT_OVERHEAD)
-
-
-
-# define UDP_RECVQ_DEPTH_NEXT(us, payload_len)                          \
-   (UDP_RECVQ_DEPTH(us) + OO_UDP_RX_PER_PKT_OVERHEAD + (payload_len))
-# define WILL_OVERFLOW_RECVQ(us, depth) ((depth) > (us)->s.so.rcvbuf)
-
-
 struct ci_udp_rx_deliver_state {
   ci_netif*      ni;
   ci_ip_pkt_fmt* pkt;

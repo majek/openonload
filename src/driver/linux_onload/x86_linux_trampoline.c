@@ -69,7 +69,16 @@
 #  else
 #    define OLD_RSP_PROVIDED 0
 #    include <asm/percpu.h>
+
+#    if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
+     /* We do not use current_top_of_stack() function directly, but we
+      * assume that Linux code is structured in known way.
+      * And this function is a good starting point to look into
+      * if this code breaks for a next linux kernel release. */
+#    define HAS_CURRENT_TOP_OF_STACK 1
+#    else
      DECLARE_PER_CPU(unsigned long, kernel_stack);
+#    endif
 
       /* Copy'n'paste percpu_read() and percpu_write() definitions.
        * We can't use percpu_read/percpu_write directly, since they access
@@ -431,14 +440,14 @@ asmlinkage int efab_linux_sys_epoll_create1(int flags)
 
 #ifdef __NR_epoll_create1
   sys_epoll_create_fn = syscall_table[__NR_epoll_create1];
-  TRAMP_DEBUG ("epoll_create1(%d) via %p...", flags, sys_epoll_create);
+  TRAMP_DEBUG ("epoll_create1(%d) via %p...", flags, sys_epoll_create_fn);
   rc = sys_epoll_create_fn(flags);
   if( rc != -ENOSYS )
     goto out;
   /* fallthrough to epoll_create */
 #endif
   sys_epoll_create_fn = syscall_table[__NR_epoll_create];
-  TRAMP_DEBUG ("epoll_create via %p...", sys_epoll_create);
+  TRAMP_DEBUG ("epoll_create via %p...", sys_epoll_create_fn);
   rc = sys_epoll_create_fn(1);
   ci_assert_equal(flags & ~EPOLL_CLOEXEC, 0);
   if( rc >= 0 && flags & EPOLL_CLOEXEC ) {
@@ -581,10 +590,7 @@ asmlinkage int efab_linux_sys_sigaction(int signum,
     return -EFAULT;
   }
 
-  TRAMP_DEBUG ("sigaction(%d,%p,%p,%d) via %p...", signum, act, oact,
-               sizeof(sigset_t), saved_sys_rt_sigaction);
   rc = saved_sys_rt_sigaction(signum, act, oact, sizeof(sigset_t));
-  TRAMP_DEBUG ("... = %d", rc);
   return rc;
 }
 #ifdef CONFIG_COMPAT
@@ -599,10 +605,7 @@ asmlinkage int efab_linux_sys_sigaction32(int signum,
     return -EFAULT;
   }
 
-  TRAMP_DEBUG ("sigaction32(%d,%p,%p,%d) via %p...", signum, act, oact,
-               sizeof(sigset_t), saved_sys_rt_sigaction);
   rc = saved_sys_rt_sigaction32(signum, act, oact, sizeof(sigset_t));
-  TRAMP_DEBUG ("... = %d", rc);
   return rc;
 }
 
@@ -638,7 +641,13 @@ ci_inline unsigned long *get_oldrsp_addr(void)
     unsigned char *ptr;
 #endif
     unsigned char *p;
+#ifdef HAS_CURRENT_TOP_OF_STACK
+    /* current_top_of_stack() reads cpu_tss.x86_tss.sp0, and it is the
+     * pointer we need. */
+    unsigned long kernel_stack_p = (unsigned long)percpu_p(cpu_tss.x86_tss.sp0);
+#else
     unsigned long kernel_stack_p = (unsigned long)percpu_p(kernel_stack);
+#endif
     unsigned char *p_end;
 
     rdmsrl(MSR_LSTAR, result);
@@ -678,7 +687,8 @@ ci_inline unsigned long *get_oldrsp_addr(void)
       p++;
     if (p[0] != 0x65 || p[1] != 0x48 || p[2] != 0x8b ||
         p[3] != 0x24 || p[4] != 0x25 ||
-        p[5] != (kernel_stack_p & 0xff) || p[6] != (kernel_stack_p >> 8)) {
+        p[5] != (kernel_stack_p & 0xff) ||
+        p[6] != ((kernel_stack_p >> 8) & 0xff)) {
       OOPS("Unexpected code in system_call(), can't trampoline.\n"
            "Expecting movq PER_CPU_VAR(kernel_stack),%%rsp");
     }
@@ -1272,7 +1282,7 @@ asmlinkage int efab_linux_sys_shmget(key_t key, size_t size, int shmflg)
   ci_assert(syscall_table);
 
   sys_shmget_fn = syscall_table[__NR_shmget];
-  TRAMP_DEBUG ("shmget(%d,%d,%d) via %p...", key, size, shmflg,
+  TRAMP_DEBUG ("shmget(%d,%ld,%d) via %p...", key, size, shmflg,
                sys_shmget_fn);
   rc = sys_shmget_fn(key, size, shmflg);
   TRAMP_DEBUG ("... = %d", rc);
@@ -1289,7 +1299,7 @@ asmlinkage long efab_linux_sys_shmat(int shmid, char __user *addr, int shmflg)
   TRAMP_DEBUG ("shmat(%d,%p,%d) via %p...", shmid, addr, shmflg,
                sys_shmat_fn);
   rc = sys_shmat_fn(shmid, addr, shmflg);
-  TRAMP_DEBUG ("... = %p", rc);
+  TRAMP_DEBUG ("... = %ld", rc);
   return rc;
 }
 asmlinkage int efab_linux_sys_shmdt(char __user *addr)
@@ -1313,7 +1323,7 @@ asmlinkage int efab_linux_sys_shmctl(int shmid, int cmd, struct shmid_ds __user 
   ci_assert(syscall_table);
 
   sys_shmctl_fn = syscall_table[__NR_shmctl];
-  TRAMP_DEBUG ("shmdt(%p) via %p...", shmid, cmd, buf, sys_shmctl_fn);
+  TRAMP_DEBUG ("shmdt(%d,%d,%p) via %p...", shmid, cmd, buf, sys_shmctl_fn);
   rc = sys_shmctl_fn(shmid, cmd, buf);
   TRAMP_DEBUG ("... = %d", rc);
   return rc;
@@ -1395,9 +1405,7 @@ int efab_linux_trampoline_ctor(int no_sct)
                 syscall_table[__NR_exit_group],
                 syscall_table[__NR_rt_sigaction]);
 
-#ifdef OO_CAN_HANDLE_TERMINATION
     efab_linux_termination_ctor();
-#endif
 
     saved_sys_close = syscall_table [__NR_close];
     ci_assert(saved_sys_close == (void *)sys_close);
@@ -1411,11 +1419,9 @@ int efab_linux_trampoline_ctor(int no_sct)
       patch_syscall_table (syscall_table, __NR_close,
                            efab_linux_trampoline_close, saved_sys_close);
       if( safe_signals_and_exit ) {
-#ifdef OO_CAN_HANDLE_TERMINATION
         patch_syscall_table (syscall_table, __NR_exit_group,
                              efab_linux_trampoline_exit_group,
                              saved_sys_exit_group);
-#endif
         patch_syscall_table (syscall_table, __NR_rt_sigaction,
                              efab_linux_trampoline_sigaction,
                              saved_sys_rt_sigaction);
@@ -1460,11 +1466,9 @@ int efab_linux_trampoline_ctor(int no_sct)
         ia32_syscall_table[__NR_ia32_exit_group] == saved_sys_exit_group) {
       ci_assert_equal(ia32_syscall_table[__NR_ia32_exit_group],
                       saved_sys_exit_group);
-#ifdef OO_CAN_HANDLE_TERMINATION
       patch_syscall_table (ia32_syscall_table, __NR_ia32_exit_group,
                            efab_linux_trampoline_exit_group,
                            saved_sys_exit_group);
-#endif
       patch_syscall_table (ia32_syscall_table, __NR_ia32_rt_sigaction,
                            efab_linux_trampoline_sigaction32,
                            saved_sys_rt_sigaction32);
@@ -1501,10 +1505,8 @@ efab_linux_trampoline_dtor (int no_sct) {
     patch_syscall_table (syscall_table, __NR_close, saved_sys_close,
                          efab_linux_trampoline_close);
     if( safe_signals_and_exit ) {
-#ifdef OO_CAN_HANDLE_TERMINATION
       patch_syscall_table (syscall_table, __NR_exit_group, saved_sys_exit_group,
                            efab_linux_trampoline_exit_group);
-#endif
       patch_syscall_table (syscall_table, __NR_rt_sigaction,
                            saved_sys_rt_sigaction,
                            efab_linux_trampoline_sigaction);
@@ -1544,11 +1546,9 @@ efab_linux_trampoline_dtor (int no_sct) {
     patch_syscall_table (ia32_syscall_table,  __NR_ia32_close,
                          saved_sys_close, efab_linux_trampoline_close32);
     if( safe_signals_and_exit ) {
-#ifdef OO_CAN_HANDLE_TERMINATION
       patch_syscall_table (ia32_syscall_table, __NR_ia32_exit_group,
                            saved_sys_exit_group,
                            efab_linux_trampoline_exit_group);
-#endif
       patch_syscall_table (ia32_syscall_table, __NR_ia32_rt_sigaction,
                            saved_sys_rt_sigaction32,
                            efab_linux_trampoline_sigaction32);

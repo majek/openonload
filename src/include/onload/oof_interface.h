@@ -63,26 +63,26 @@ oof_socket_ctor(struct oof_socket*);
 extern void
 oof_socket_dtor(struct oof_socket*);
 
-extern int
-oof_local_port_thc_search(struct oof_manager* fm, int protocol, int lport,
-                          struct tcp_helper_cluster_s** thc_out);
 
 extern int
-oof_socket_cluster_add(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
-                       int protocol, int lport);
+oof_socket_is_armed(struct oof_socket* skf);
 
-extern void
-oof_socket_set_early_lp(struct oof_manager* fm, struct oof_socket* skf,
-                        int protocol, int lport);
-
-extern void
-oof_socket_cluster_del(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
-                       int protocol, int lport);
-
+#define OOF_SOCKET_ADD_FLAG_CLUSTERED 0x1
+#define OOF_SOCKET_ADD_FLAG_DUMMY     0x2
+#define OOF_SOCKET_ADD_FLAG_NO_STACK  0x4
 extern int
 oof_socket_add(struct oof_manager*, struct oof_socket*,
-               int protocol, unsigned laddr, int lport,
-               unsigned raddr, int rport);
+               int flags, int protocol, unsigned laddr, int lport,
+               unsigned raddr, int rport,
+               struct tcp_helper_cluster_s** thc_out);
+
+extern int
+oof_socket_replace(struct oof_manager* fm,
+                   struct oof_socket* old_skf, struct oof_socket* skf);
+
+extern int
+oof_socket_can_update_stack(struct oof_manager* fm, struct oof_socket* skf,
+                            struct tcp_helper_resource_s* thr);
 
 extern void
 oof_socket_update_sharer_details(struct oof_manager*, struct oof_socket*,
@@ -117,6 +117,21 @@ oof_socket_mcast_del_all(struct oof_manager*, struct oof_socket*);
 extern void
 oof_mcast_update_filters(struct oof_manager* fm, int ifindex);
 
+extern int
+oof_tproxy_install(struct oof_manager* fm,
+                   struct tcp_helper_resource_s* trs,
+                   struct tcp_helper_cluster_s* thc,
+                   int ifindex);
+
+extern int
+oof_tproxy_free(struct oof_manager* fm,
+                struct tcp_helper_resource_s* trs,
+                struct tcp_helper_cluster_s* thc,
+                int ifindex);
+
+extern int
+oof_tproxy_update_filters(struct oof_manager* fm, int ifindex);
+
 extern void
 oof_socket_dump(struct oof_manager*, struct oof_socket*,
                 void (*dump_fn)(void* opaque, const char* fmt, ...),
@@ -136,6 +151,9 @@ oof_cb_socket_stack(struct oof_socket* skf);
 
 extern struct tcp_helper_cluster_s*
 oof_cb_stack_thc(struct tcp_helper_resource_s* skf_stack);
+
+extern const char*
+oof_cb_thc_name(struct tcp_helper_cluster_s* thc);
 
 extern int
 oof_cb_socket_id(struct oof_socket* skf);
@@ -176,6 +194,9 @@ oof_cb_get_hwport_mask(int ifindex, unsigned *hwport_mask);
 
 extern int 
 oof_cb_get_vlan_id(int ifindex, unsigned short *vlan_id);
+
+extern int
+oof_cb_get_mac(int ifindex, unsigned char mac[6]);
 
 extern void
 oof_cb_defer_work(void* owner_private);

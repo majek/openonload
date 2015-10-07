@@ -633,53 +633,29 @@ static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
   /* linux/Documentation/networking/timestamping.txt:
    * If the outgoing packet has to be fragmented, then only the first
    * fragment is time stamped and returned to the sending socket. */
-  if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
-    pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
-    frag_next = ci_udp_timestamp_q_enqueue(netif, us, pkt);
-    goto next_fragment;
-  }
+  if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED &&
+      ci_udp_timestamp_q_enqueue(netif, us, pkt) == 0 )
+    return;
 
   /* Free this packet and all the fragments if possible. */
   while( 1 ) {
-    if( pkt->refcount == 1 ) {
-      frag_next = pkt->frag_next;
+    frag_next = pkt->frag_next;
 
-      pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
-      pkt->refcount = 0;
-      if( pkt->flags & CI_PKT_FLAG_RX )
-        --netif->state->n_rx_pkts;
-      __ci_netif_pkt_clean(pkt);
-      if( pkt->flags & CI_PKT_FLAG_NONB_POOL ) {
-        *ps->tx_pkt_free_list_insert = OO_PKT_P(pkt);
-        ps->tx_pkt_free_list_insert = &pkt->next;
-        ++ps->tx_pkt_free_list_n;
-      }
-      else {
-        pkt->next = netif->state->freepkts;
-        netif->state->freepkts = OO_PKT_P(pkt);
-        ++netif->state->n_freepkts;
-      }
-
-next_fragment:
-      /* is there any next fragment? */
-      if( OO_PP_IS_NULL(frag_next) )
-        break;
-      pkt = PKT_CHK(netif, frag_next);
-      /* Is it next IP fragment? */
-      if( n_buffers == 1 ) {
-        /* have we started with it? */
-        if( ~pkt->flags & CI_PKT_FLAG_TX_PENDING )
-          return;
-        n_buffers = pkt->n_buffers;
-      }
-      else
-        n_buffers--;
-    }
-    else {
-      ci_assert_gt(pkt->refcount, 1);
-      --pkt->refcount;
+    if( ! ci_netif_pkt_release_in_poll(netif, pkt, ps) ) {
+      /* If the packet is in use, then it holds ownership for all next
+       * fragments. */
       break;
     }
+
+    /* is there any next fragment? */
+    if( OO_PP_IS_NULL(frag_next) )
+      break;
+    pkt = PKT_CHK(netif, frag_next);
+    /* Is it next IP fragment? */
+    if( n_buffers == 1 )
+      n_buffers = pkt->n_buffers;
+    else
+      n_buffers--;
   }
 }
 
@@ -728,15 +704,13 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
   }
 
 
+  pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
 #if CI_CFG_UDP
   if( pkt->flags & CI_PKT_FLAG_UDP )
     ci_netif_tx_pkt_complete_udp(ni, ps, pkt);
   else
 #endif
-  {
-    pkt->flags &=~ CI_PKT_FLAG_TX_PENDING;
     ci_netif_pkt_release(ni, pkt);
-  }
 
 }
 
@@ -943,6 +917,18 @@ static int ci_netif_poll_intf(ci_netif* ni, int intf_i, int max_evs)
     ci_netif_tx_progress(ni, intf_i);
   if( ci_netif_dmaq_not_empty(ni, intf_i) )
     ci_netif_dmaq_shove1(ni, intf_i);
+
+#ifdef __KERNEL__
+  /* If the stack is under destruction, and we've received all TX complete
+   * events - wake it up. */
+  if( netif2tcp_helper_resource(ni)->k_ref_count & TCP_HELPER_K_RC_DEAD ) {
+    if( ni->state->nic[intf_i].tx_dmaq_insert_seq ==
+        ni->state->nic[intf_i].tx_dmaq_done_seq )
+      complete(&netif2tcp_helper_resource(ni)->complete);
+    else
+      tcp_helper_request_wakeup_nic(netif2tcp_helper_resource(ni), intf_i);
+  }
+#endif
 
   return total_evs;
 }

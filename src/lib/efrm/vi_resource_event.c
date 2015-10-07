@@ -207,9 +207,9 @@ void efrm_eventq_kill_callback(struct efrm_vi *virs)
 }
 EXPORT_SYMBOL(efrm_eventq_kill_callback);
 
-static void
+static int
 efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
-			bool is_timeout)
+			bool is_timeout, int budget)
 {
 	struct efrm_nic *rnic = efrm_nic(nic);
 	efrm_evq_callback_fn handler;
@@ -219,6 +219,7 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 	int32_t new_evq_state;
 	struct efrm_vi *virs;
 	int bit;
+	int rc = 0;
 
 	EFRM_ASSERT(efrm_vi_manager);
 
@@ -233,7 +234,7 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 		if ((evq_state & VI_RESOURCE_EVQ_STATE(BUSY)) != 0) {
 			EFRM_ERR("%s:%d: evq_state[%d] corrupted!",
 				 __FUNCTION__, __LINE__, instance);
-			return;
+			return 0;
 		}
 
 		if (!is_timeout)
@@ -250,7 +251,7 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 			if (new_evq_state == evq_state ||
 			    cmpxchg(&cb_info->state, evq_state,
 				    new_evq_state) == evq_state)
-				return;
+				return 0;
 		}
 	}
 
@@ -259,7 +260,7 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 		rmb();
 		arg = virs->evq_callback_arg;
 		EFRM_ASSERT(handler != NULL);
-		handler(arg, is_timeout, nic);
+		rc = handler(arg, is_timeout, nic, budget);
 	}
 
 	/* Clear the BUSY bit. */
@@ -270,16 +271,20 @@ efrm_eventq_do_callback(struct efhw_nic *nic, unsigned instance,
 		EFRM_ERR("%s:%d: evq_state corrupted!",
 			 __FUNCTION__, __LINE__);
 	}
+
+	return rc;
 }
 
-void efrm_handle_wakeup_event(struct efhw_nic *nic, unsigned instance)
+int efrm_handle_wakeup_event(struct efhw_nic *nic, unsigned instance,
+			     int budget)
 {
-	efrm_eventq_do_callback(nic, instance, false);
+	return efrm_eventq_do_callback(nic, instance, false, budget);
 }
 
-void efrm_handle_timeout_event(struct efhw_nic *nic, unsigned instance)
+int efrm_handle_timeout_event(struct efhw_nic *nic, unsigned instance,
+			      int budget)
 {
-	efrm_eventq_do_callback(nic, instance, true);
+	return efrm_eventq_do_callback(nic, instance, true, budget);
 }
 
 void efrm_handle_sram_event(struct efhw_nic *nic)

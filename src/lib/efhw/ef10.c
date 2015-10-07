@@ -55,7 +55,6 @@
 #include <driver/linux_net/driverlink_api.h>
 #include <driver/linux_net/mcdi_pcol.h>
 
-#if EFX_DRIVERLINK_API_VERSION >= 9
 #include <ci/efhw/ef10.h>
 #include "ef10_mcdi.h"
 
@@ -76,18 +75,29 @@ static int ef10_mcdi_rpc(struct efhw_nic *nic, unsigned int cmd,
 			 size_t inlen, size_t outlen, size_t *outlen_actual,
 			 const void *inbuf, void *outbuf)
 {
-	if (nic->resetting) {
+	int rc;
+	struct efx_dl_device *efx_dev = efhw_nic_dl_device(nic);
+
+	/* [nic->resetting] means we have detected that we are in a reset.
+	 * There is potentially a period after [nic->resetting] is cleared
+	 * but before driverlink is re-enabled, during which time [efx_dev]
+	 * will be NULL. */
+	if (nic->resetting || efx_dev == NULL) {
 		if (outlen == 0) {
 			/* user should not handle any errors */
 			*outlen_actual = 0;
 			return 0;
 		}
 		else
-			return -EBUSY;
+			return -ENETDOWN;
 	}
-	return efx_dl_mcdi_rpc(efhw_nic_dl_device(nic), cmd, 
-			       inlen, outlen, outlen_actual,
-			       (const u8 *)inbuf, (u8 *)outbuf);
+	rc = efx_dl_mcdi_rpc(efx_dev, cmd, inlen, outlen, outlen_actual,
+			     (const u8 *)inbuf, (u8 *)outbuf);
+	/* If we see ENETDOWN here, we must be in the window between hardware
+	 * being removed and being informed about this fact by the kernel. */
+	if (rc == -ENETDOWN)
+		ci_atomic32_or(&nic->resetting, NIC_RESETTING_FLAG_VANISHED);
+	return rc;
 }
 
 
@@ -102,6 +112,13 @@ ef10_mcdi_check_response(const char* caller, const char* failed_cmd,
 	 * bogus arguments.  Since we do not have the ability to
 	 * initiate reset of NICs.  We will just print a scary warning
 	 * and continue. */
+#ifdef NDEBUG
+	if (rc == -ENETDOWN) {
+		/* ENETDOWN indicates absent hardware. Don't print a warning
+		 * in NDEBUG builds. */
+	}
+	else
+#endif
 	if (rc != 0) {
 		EFHW_ERR("%s: %s failed rc=%d", caller, failed_cmd, rc);
 	}
@@ -133,6 +150,7 @@ static int _ef10_nic_get_35388_workaround(struct efhw_nic *nic)
 	int rc, enabled;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_WORKAROUNDS_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(out);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_WORKAROUNDS, 
 			   0, sizeof(out), &out_size, NULL, out);
 	MCDI_CHECK(MC_CMD_GET_WORKAROUNDS, rc, out_size);
@@ -149,6 +167,7 @@ static int _ef10_nic_read_35388_workaround(struct efhw_nic *nic)
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_WORKAROUND_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, WORKAROUND_IN_ENABLED, 1);
 	EFHW_MCDI_SET_DWORD(in, WORKAROUND_IN_TYPE,
@@ -207,6 +226,8 @@ _ef10_nic_check_supported_filter(struct efhw_nic *nic, unsigned filter) {
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_PARSER_DISP_INFO_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_PARSER_DISP_INFO_OUT_LENMAX);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, GET_PARSER_DISP_INFO_IN_OP,
 		MC_CMD_GET_PARSER_DISP_INFO_IN_OP_GET_SUPPORTED_RX_MATCHES);
@@ -241,6 +262,8 @@ ef10_nic_license_check(struct efhw_nic *nic, const uint32_t feature,
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_LICENSED_APP_STATE_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_LICENSED_APP_STATE_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, GET_LICENSED_APP_STATE_IN_APP_ID, feature);
 
@@ -274,6 +297,8 @@ ef10_nic_license_challenge(struct efhw_nic *nic,
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_LICENSED_APP_OP_VALIDATE_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_LICENSED_APP_OP_VALIDATE_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_TRACE("%s:", __FUNCTION__);
 
@@ -316,6 +341,9 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	EFHW_MCDI_DECLARE_BUF(ver_out, MC_CMD_GET_VERSION_OUT_LEN);
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_CAPABILITIES_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(ver_out);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_CAPABILITIES,
 			   sizeof(in), sizeof(out), &out_size, in, out);
@@ -360,6 +388,9 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	if (flags & (1u <<
 		     MC_CMD_GET_CAPABILITIES_OUT_RX_PACKED_STREAM_VAR_BUFFERS_LBN))
 		*capabitlity_flags |= NIC_FLAG_VAR_PACKED_STREAM;
+	if (flags & (1u <<
+		     MC_CMD_GET_CAPABILITIES_OUT_ADDITIONAL_RSS_MODES_LBN))
+		*capabitlity_flags |= NIC_FLAG_ADDITIONAL_RSS_MODES;
 
 	return rc;
 }
@@ -375,6 +406,8 @@ static int _ef10_nic_get_rx_timestamp_correction(struct efhw_nic *nic,
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS_LEN);
 	EFHW_MCDI_DECLARE_BUF(out,
 			      MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP,
 			    MC_CMD_PTP_OP_GET_TIMESTAMP_CORRECTIONS);
@@ -401,11 +434,6 @@ ef10_nic_tweak_hardware(struct efhw_nic *nic)
 	 * per-descriptor
 	 */
 
-
-	/* EF10 TODO: anything needed for Huntington that wasn't
-	 * needed for Falcon 
-	 */
-
 #define VLAN_IP_WILD   (1 << MC_CMD_FILTER_OP_IN_MATCH_DST_IP_LBN |     \
                         1 << MC_CMD_FILTER_OP_IN_MATCH_DST_PORT_LBN |   \
                         1 << MC_CMD_FILTER_OP_IN_MATCH_ETHER_TYPE_LBN | \
@@ -426,10 +454,6 @@ ef10_nic_tweak_hardware(struct efhw_nic *nic)
 	nic->rx_prefix_len = (nic->flags & NIC_FLAG_14BYTE_PREFIX) ?
 			      14 :
 			      0;
-
-#if EFX_DRIVERLINK_API_VERSION < 15
-	nic->flags &= ~NIC_FLAG_MCAST_LOOP_HW;
-#endif
 }
 
 
@@ -485,6 +509,8 @@ _ef10_mcdi_cmd_event_queue_enable(struct efhw_nic *nic,
 	uint32_t out;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_EVQ_IN_LEN(n_pages));
+	EFHW_MCDI_INITIALISE_BUF(in);
+
 	EFHW_MCDI_SET_DWORD(in, INIT_EVQ_IN_SIZE, evq_size);
 	EFHW_MCDI_SET_DWORD(in, INIT_EVQ_IN_INSTANCE, evq);
 	EFHW_MCDI_SET_DWORD(in, INIT_EVQ_IN_TMR_LOAD, 0);
@@ -539,6 +565,7 @@ _ef10_mcdi_cmd_event_queue_disable(struct efhw_nic *nic, uint evq)
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_FINI_EVQ_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, FINI_EVQ_IN_INSTANCE, evq);
 
 	EFHW_ASSERT(evq >= 0);
@@ -563,6 +590,7 @@ _ef10_mcdi_cmd_driver_event(struct efhw_nic *nic, uint64_t data, uint32_t evq)
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_DRIVER_EVENT_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, DRIVER_EVENT_IN_EVQ, evq);
 	EFHW_MCDI_SET_QWORD(in, DRIVER_EVENT_IN_DATA, data);
 
@@ -583,6 +611,7 @@ _ef10_mcdi_cmd_ptp_time_event_subscribe(struct efhw_nic *nic, uint32_t evq,
 	int sync_flag = EFHW_VI_CLOCK_SYNC_STATUS;
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_TIME_EVENT_SUBSCRIBE_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP, MC_CMD_PTP_OP_TIME_EVENT_SUBSCRIBE);
 	EFHW_MCDI_SET_DWORD(in, PTP_IN_PERIPH_ID, 0); 
@@ -611,6 +640,7 @@ static int _ef10_mcdi_cmd_ptp_time_event_unsubscribe(struct efhw_nic *nic,
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_TIME_EVENT_UNSUBSCRIBE_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, PTP_IN_OP,
 			    MC_CMD_PTP_OP_TIME_EVENT_UNSUBSCRIBE);
@@ -742,7 +772,7 @@ static void ef10_nic_sw_event(struct efhw_nic *nic, int data, int evq)
 
 static int
 ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-		  efhw_event_t *ev)
+		  efhw_event_t *ev, int budget)
 {
 	unsigned evq;
 
@@ -751,33 +781,33 @@ ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 		case ESE_DZ_DRV_WAKE_UP_EV:
 			evq = EF10_EVENT_WAKE_EVQ_ID(ev) - nic->vi_base;
 			if (evq < nic->vi_lim && evq >= nic->vi_min) {
-				efhw_handle_wakeup_event(nic, h, evq);
-				return 1;
+				return efhw_handle_wakeup_event(nic, h, evq,
+								budget);
 			}
 			else {
 				EFHW_NOTICE("%s: wakeup evq out of range: "
 					    "%d %d %d %d",
 					    __FUNCTION__, evq, nic->vi_base,
 					    nic->vi_min, nic->vi_lim);
-				return 0;
+				return -EINVAL;
 			}
 		case ESE_DZ_DRV_TIMER_EV:
 			evq = EF10_EVENT_WAKE_EVQ_ID(ev) - nic->vi_base;
 			if (evq < nic->vi_lim && evq >= nic->vi_min) {
-				efhw_handle_timeout_event(nic, h, evq);
-				return 1;
+				return efhw_handle_timeout_event(nic, h, evq,
+								 budget);
 			}
 			else {
 				EFHW_NOTICE("%s: timer evq out of range: "
 					    "%d %d %d %d",
 					    __FUNCTION__, evq, nic->vi_base,
 					    nic->vi_min, nic->vi_lim);
-				return 0;
+				return -EINVAL;
 			}
 		default:
 			EFHW_TRACE("UNKNOWN DRIVER EVENT: " EF10_EVENT_FMT,
 				 EF10_EVENT_PRI_ARG(*ev));
-			return 0;
+			return -EINVAL;
 		}
 	}
 
@@ -795,14 +825,14 @@ ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 		default:
 			EFHW_NOTICE("%s: unexpected MCDI event code %d",
 				    __FUNCTION__, code);
-			return 0;
+			return -EINVAL;
 		}
 	}
 
 	EFHW_TRACE("%s: unknown event type=%x", __FUNCTION__,
 		   (unsigned)EF10_EVENT_CODE(ev));
 
-	return 0;
+	return -EINVAL;
 }
 
 
@@ -819,6 +849,7 @@ _ef10_mcdi_cmd_enable_multicast_loopback(struct efhw_nic *nic,
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_PARSER_DISP_CONFIG_IN_LEN(1));
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_TYPE,
 			MC_CMD_SET_PARSER_DISP_CONFIG_IN_TXQ_MCAST_UDP_DST_LOOKUP_EN);
 	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_ENTITY, instance);
@@ -840,6 +871,7 @@ _ef10_mcdi_cmd_set_multicast_loopback_suppression
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_PARSER_DISP_CONFIG_IN_LEN(1));
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_TYPE,
 			MC_CMD_SET_PARSER_DISP_CONFIG_IN_VADAPTOR_SUPPRESS_SELF_TX);
 	EFHW_MCDI_SET_DWORD(in, SET_PARSER_DISP_CONFIG_IN_ENTITY, port_id);
@@ -871,6 +903,7 @@ _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	int i, rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_TXQ_IN_LEN(n_dma_addrs));
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_IN_SIZE, numentries);
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_IN_TARGET_EVQ, target_evq);
 	EFHW_MCDI_SET_DWORD(in, INIT_TXQ_IN_LABEL, label);
@@ -930,6 +963,7 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	size_t out_size;
 	int ps_buf_size_mcdi;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_INIT_RXQ_EXT_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	if (flag_packed_stream) {
 		/* Bug45759: This should really be checked in the fw or 2048
@@ -1130,6 +1164,7 @@ _ef10_mcdi_cmd_fini_rxq(struct efhw_nic *nic, uint32_t instance)
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_FINI_RXQ_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, FINI_RXQ_IN_INSTANCE, instance);
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FINI_RXQ, sizeof(in), 0, &out_size,
@@ -1145,6 +1180,7 @@ _ef10_mcdi_cmd_fini_txq(struct efhw_nic *nic, uint32_t instance)
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_FINI_TXQ_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, FINI_TXQ_IN_INSTANCE, instance);
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FINI_TXQ, sizeof(in), 0, &out_size,
@@ -1209,6 +1245,8 @@ _ef10_mcdi_cmd_buffer_table_alloc(struct efhw_nic *nic, int page_size,
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_ALLOC_BUFTBL_CHUNK_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_ALLOC_BUFTBL_CHUNK_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, ALLOC_BUFTBL_CHUNK_IN_OWNER, owner_id);
 	EFHW_MCDI_SET_DWORD(in, ALLOC_BUFTBL_CHUNK_IN_PAGE_SIZE, page_size);
@@ -1233,6 +1271,7 @@ _ef10_mcdi_cmd_buffer_table_free(struct efhw_nic *nic,
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_FREE_BUFTBL_CHUNK_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, FREE_BUFTBL_CHUNK_IN_HANDLE, handle);
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FREE_BUFTBL_CHUNK, sizeof(in), 0,
@@ -1254,6 +1293,7 @@ _ef10_mcdi_cmd_buffer_table_program(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, 
 			      MC_CMD_PROGRAM_BUFTBL_ENTRIES_IN_LEN(n_entries));
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, PROGRAM_BUFTBL_ENTRIES_IN_HANDLE, handle);
 	EFHW_MCDI_SET_DWORD(in, PROGRAM_BUFTBL_ENTRIES_IN_FIRSTID, first_entry);
@@ -1291,11 +1331,16 @@ static int __ef10_nic_buffer_table_alloc(struct efhw_nic *nic, int owner,
 					 int order,
 					 struct efhw_buffer_table_block *block)
 {
-	int numentries, rc, btb_index;
+	int numentries = 0, rc, btb_index = 0;
 
 	rc = _ef10_mcdi_cmd_buffer_table_alloc
 		(nic, EFHW_NIC_PAGE_SIZE << order, owner, &btb_index,
 		 &numentries, &block->btb_hw.ef10.handle);
+
+	/* Initialise the software state even if MCDI failed, so that we can
+	 * retry the MCDI call at some point in the future. */
+	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block));
+
 	if (rc != 0)
 		return rc;
 	if (numentries != 32) {
@@ -1305,16 +1350,16 @@ static int __ef10_nic_buffer_table_alloc(struct efhw_nic *nic, int owner,
 	}
 
 	block->btb_vaddr = EF10_BUF_ID_ORDER_2_VADDR(btb_index, order);
-	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block));
 	return 0;
 }
 
 
 static int
 ef10_nic_buffer_table_alloc(struct efhw_nic *nic, int owner, int order,
-			    struct efhw_buffer_table_block **block_out)
+			    struct efhw_buffer_table_block **block_out,
+			    int reset_pending)
 {
-	int rc;
+	int rc = 0;
 	struct efhw_buffer_table_block *block;
 
 	block = kmalloc(sizeof(*block), GFP_KERNEL);
@@ -1323,15 +1368,26 @@ ef10_nic_buffer_table_alloc(struct efhw_nic *nic, int owner, int order,
 
 	memset(block, 0, sizeof(*block));
 
-	rc = __ef10_nic_buffer_table_alloc(nic, REAL_OWNER_ID(owner), order,
-					   block);
-	if ( rc != 0 ) {
-		kfree(block);
-		return rc;
+	/* [reset_pending] indicates that the caller's hardware state is going
+	 * to be reallocated.  In that case, we don't want to allocate from the
+	 * HW now as that state would be leaked when the reallocation happens.
+	 * Instead, we just return the software block to the caller as if the
+	 * allocation had actually happened, and then the reallocation will
+	 * take care of things in due course. */
+	if (! reset_pending) {
+		rc = __ef10_nic_buffer_table_alloc(nic, REAL_OWNER_ID(owner),
+						   order, block);
+		/* ENETDOWN indicates absent hardware. In this case we should
+		 * keep the software state, although we propagate the failure
+		 * out of the efhw layer. */
+		if (rc != 0 && rc != -ENETDOWN) {
+			kfree(block);
+			return rc;
+		}
 	}
 
 	*block_out = block;
-	return 0;
+	return rc;
 }
 
 
@@ -1346,10 +1402,14 @@ ef10_nic_buffer_table_realloc(struct efhw_nic *nic, int owner, int order,
 
 static void
 ef10_nic_buffer_table_free(struct efhw_nic *nic,
-			   struct efhw_buffer_table_block *block)
+			   struct efhw_buffer_table_block *block,
+			   int reset_pending)
 {
-	_ef10_mcdi_cmd_buffer_table_free(nic, block->btb_hw.ef10.handle);
-	EFHW_DO_DEBUG(efhw_buffer_table_free_debug(block));
+	if (! reset_pending) {
+		_ef10_mcdi_cmd_buffer_table_free(nic,
+						 block->btb_hw.ef10.handle);
+		EFHW_DO_DEBUG(efhw_buffer_table_free_debug(block));
+	}
 	kfree(block);
 }
 
@@ -1430,6 +1490,8 @@ int ef10_nic_piobuf_alloc(struct efhw_nic *nic, unsigned *handle_out)
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_ALLOC_PIOBUF_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_ALLOC_PIOBUF_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_ALLOC_PIOBUF,
 			   sizeof(in), sizeof(out), &out_size, in, out);
@@ -1447,6 +1509,8 @@ int ef10_nic_piobuf_free(struct efhw_nic *nic, unsigned handle)
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_FREE_PIOBUF_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_FREE_PIOBUF_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, FREE_PIOBUF_IN_PIOBUF_HANDLE, handle);
 
@@ -1462,6 +1526,8 @@ int ef10_nic_piobuf_link(struct efhw_nic *nic, unsigned txq, unsigned handle)
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_LINK_PIOBUF_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_LINK_PIOBUF_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, LINK_PIOBUF_IN_PIOBUF_HANDLE, handle);
 	EFHW_MCDI_SET_DWORD(in, LINK_PIOBUF_IN_TXQ_INSTANCE, txq);
@@ -1478,6 +1544,8 @@ int ef10_nic_piobuf_unlink(struct efhw_nic *nic, unsigned txq)
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_UNLINK_PIOBUF_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_UNLINK_PIOBUF_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, UNLINK_PIOBUF_IN_TXQ_INSTANCE, txq);
 
@@ -1501,6 +1569,8 @@ ef10_nic_rss_context_alloc(struct efhw_nic *nic, uint vport_id,
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RSS_CONTEXT_ALLOC_IN_LEN);
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_RSS_CONTEXT_ALLOC_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_ALLOC_IN_NUM_QUEUES, num_qs);
 	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_ALLOC_IN_TYPE,
@@ -1526,6 +1596,7 @@ ef10_nic_rss_context_free(struct efhw_nic *nic, int handle)
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RSS_CONTEXT_FREE_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_FREE_IN_RSS_CONTEXT_ID, handle);
 
@@ -1544,6 +1615,7 @@ ef10_nic_rss_context_set_table(struct efhw_nic *nic, int handle,
 	int i;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RSS_CONTEXT_SET_TABLE_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_SET_TABLE_IN_RSS_CONTEXT_ID,
 			    handle);
@@ -1568,6 +1640,7 @@ ef10_nic_rss_context_set_key(struct efhw_nic *nic, int handle,
 	int i;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RSS_CONTEXT_SET_KEY_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_SET_KEY_IN_RSS_CONTEXT_ID, handle);
 
@@ -1580,6 +1653,80 @@ ef10_nic_rss_context_set_key(struct efhw_nic *nic, int handle,
 	return rc;
 }
 
+
+static int
+__ef10_nic_rss_context_get_flags(struct efhw_nic *nic, int handle,
+				 ci_uint32* nic_flags_out)
+{
+	int rc;
+	size_t out_size;
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RSS_CONTEXT_GET_FLAGS_IN_LEN);
+	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
+	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_GET_FLAGS_IN_RSS_CONTEXT_ID, handle);
+	rc = ef10_mcdi_rpc(nic, MC_CMD_RSS_CONTEXT_GET_FLAGS,
+			   sizeof(in), sizeof(out), &out_size, in, out);
+	MCDI_CHECK(MC_CMD_RSS_CONTEXT_GET_FLAGS, rc, out_size);
+	if (rc != 0 )
+		return rc;
+	*nic_flags_out = EFHW_MCDI_DWORD(out, RSS_CONTEXT_GET_FLAGS_OUT_FLAGS);
+	return 0;
+}
+
+
+static int
+__ef10_nic_rss_context_set_flags(struct efhw_nic *nic, int handle,
+				 ci_uint32 nic_flags)
+{
+	int rc;
+	size_t out_size;
+	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_RSS_CONTEXT_SET_FLAGS);
+	EFHW_MCDI_INITIALISE_BUF(in);
+
+	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_SET_FLAGS_IN_RSS_CONTEXT_ID, handle);
+
+	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_SET_FLAGS_IN_FLAGS, nic_flags);
+
+	rc = ef10_mcdi_rpc(nic, MC_CMD_RSS_CONTEXT_SET_FLAGS,
+			   sizeof(in), 0, &out_size, in, NULL);
+	MCDI_CHECK(MC_CMD_RSS_CONTEXT_SET_FLAGS, rc, out_size);
+	return rc;
+}
+
+
+static int
+ef10_nic_rss_context_set_flags(struct efhw_nic *nic, int handle,
+			       unsigned flags)
+{
+	int rc;
+	ci_dword_t nic_flags, nic_flags_mask, nic_flags_new;
+	ci_uint32 final_flags;
+	int tcp_mode;
+	nic_flags.u32[0] = 0;  /* Placate old compilers. */
+	rc = __ef10_nic_rss_context_get_flags(nic, handle, nic_flags.u32);
+	if (rc != 0)
+		return rc;
+	tcp_mode = ((flags & EFHW_RSS_FLAG_SRC_ADDR) ?
+			(1 << RSS_MODE_HASH_SRC_ADDR_LBN) : 0) |
+		   ((flags & EFHW_RSS_FLAG_DST_ADDR) ?
+			(1 << RSS_MODE_HASH_DST_ADDR_LBN) : 0) |
+		   ((flags & EFHW_RSS_FLAG_SRC_PORT) ?
+			(1 << RSS_MODE_HASH_SRC_PORT_LBN) : 0) |
+		   ((flags & EFHW_RSS_FLAG_DST_PORT) ?
+			(1 << RSS_MODE_HASH_DST_PORT_LBN) : 0);
+	CI_POPULATE_DWORD_2(nic_flags_mask,
+		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV4_EN, 1,
+		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE,
+		(1 << RSS_MODE_HASH_SRC_PORT_WIDTH) - 1);
+	CI_POPULATE_DWORD_2(nic_flags_new,
+		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV4_EN, 1,
+		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE, tcp_mode);
+	final_flags = (nic_flags.u32[0] & (~nic_flags_mask.u32[0])) |
+		nic_flags_new.u32[0];
+	rc = __ef10_nic_rss_context_set_flags(nic, handle, final_flags);
+	return rc;
+}
 
 /*--------------------------------------------------------------------
  *
@@ -1594,6 +1741,7 @@ ef10_nic_set_tx_port_sniff(struct efhw_nic *nic, int instance, int enable,
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_TX_PORT_SNIFF_CONFIG_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_SET_DWORD(in, SET_TX_PORT_SNIFF_CONFIG_IN_RX_CONTEXT,
 			    rss_context);
@@ -1618,6 +1766,7 @@ ef10_nic_set_port_sniff(struct efhw_nic *nic, int instance, int enable,
 	int rc;
 	size_t out_size;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_SET_PORT_SNIFF_CONFIG_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 
 	EFHW_MCDI_POPULATE_DWORD_2(in, SET_PORT_SNIFF_CONFIG_IN_FLAGS,
 		SET_PORT_SNIFF_CONFIG_IN_ENABLE, enable ? 1 : 0,
@@ -1652,6 +1801,9 @@ ef10_get_rx_error_stats(struct efhw_nic *nic, int instance,
 	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_RMON_STATS_RX_ERRORS_OUT_LEN);
 	size_t out_size = sizeof(out);
 	uint32_t* data_out = data;
+
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
 
 	if (data_len != sizeof(*data_out) * 4)
 		return -EINVAL;
@@ -1689,6 +1841,9 @@ ef10_vport_alloc(struct efhw_nic *nic, int vlan_id, unsigned *vport_id_out)
 	size_t out_size;
 	int rc;
 
+	EFHW_MCDI_INITIALISE_BUF(in);
+	EFHW_MCDI_INITIALISE_BUF(out);
+
 	if (vlan_id > 4095)
 		return -EINVAL;
 
@@ -1725,6 +1880,7 @@ ef10_vport_free(struct efhw_nic *nic, unsigned vport_id)
 	size_t out_size;
 	int rc;
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_VPORT_FREE_IN_LEN);
+	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_SET_DWORD(in, VPORT_FREE_IN_VPORT_ID, vport_id);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_VPORT_FREE, sizeof(in), 0,
 			   &out_size, in, NULL);
@@ -1768,36 +1924,8 @@ struct efhw_func_ops ef10_char_functional_units = {
 	ef10_nic_rss_context_free,
 	ef10_nic_rss_context_set_table,
 	ef10_nic_rss_context_set_key,
+	ef10_nic_rss_context_set_flags,
 	ef10_nic_license_challenge,
 	ef10_nic_license_check,
 	ef10_get_rx_error_stats,
 };
-
-#else /* #if EFX_DRIVERLINK_API_VERSION >= 9 */
-
-int ef10_nic_piobuf_alloc(struct efhw_nic *nic, unsigned *handle_out)
-{
-	return -EINVAL;
-}
-
-
-int ef10_nic_piobuf_free(struct efhw_nic *nic, unsigned handle)
-{
-	return -EINVAL;
-}
-
-
-int ef10_nic_piobuf_link(struct efhw_nic *nic, unsigned txq, unsigned handle)
-{
-	return -EINVAL;
-}
-
-
-int ef10_nic_piobuf_unlink(struct efhw_nic *nic, unsigned txq)
-{
-	return -EINVAL;
-}
-
-struct efhw_func_ops ef10_char_functional_units;
-
-#endif

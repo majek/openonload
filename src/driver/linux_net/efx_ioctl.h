@@ -149,7 +149,12 @@ struct efx_mcdi_request2 {
 	__u16 outlen;
 	__u16 flags;
 	__u32 host_errno;
-	__u32 payload[0];
+	/*
+	 * The maximum payload length is 0x400 (MCDI_CTL_SDU_LEN_MAX_V2) - 4 bytes
+	 * = 255 x 32 bit words as MCDI_CTL_SDU_LEN_MAX_V2 doesn't take account of
+	 * the space required by the V1 header, which still exists in a V2 command.
+	 */
+	__u32 payload[255];
 };
 #define EFX_MCDI_REQUEST_ERROR	0x0001
 

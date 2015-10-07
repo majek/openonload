@@ -34,8 +34,7 @@
 
 #define TSR_FMT "ptr:%x next:%x hash:%x l:%s r:%s:%d"
 #define TSR_ARGS(tsr)                                               \
-  oo_ptr_to_statep(ni, CI_CONTAINER(ci_ni_aux_mem, u.synrecv, tsr)),\
-  tsr->bucket_link, tsr->hash,                                      \
+  ci_tcp_synrecv2p(ni, tsr), tsr->bucket_link, tsr->hash,           \
   ip_addr_str(tsr->l_addr),                                         \
   ip_addr_str(tsr->r_addr), CI_BSWAP_BE16(tsr->r_port)
 
@@ -65,12 +64,6 @@ ci_inline int ci_tcp_listenq_hash2idx(ci_uint32 hash, int level)
       ((1 << CI_TCP_LISTEN_BUCKET_S) - 1);
 }
 
-ci_inline ci_tcp_listen_bucket*
-ci_tcp_listenq_p2bucket(ci_netif* ni, oo_p p)
-{
-  return &ci_tcp_listenq_p2aux(ni, p)->u.bucket;
-}
-
 
 static int
 ci_tcp_listenq_bucket_drop(ci_netif* ni, ci_tcp_listen_bucket* bucket)
@@ -84,13 +77,13 @@ ci_tcp_listenq_bucket_drop(ci_netif* ni, ci_tcp_listen_bucket* bucket)
   for( idx = 0; idx < CI_TCP_LISTEN_BUCKET_SIZE; idx++ ) {
     if( OO_P_IS_NULL(bucket->bucket[idx]) )
       continue;
-    aux = ci_tcp_listenq_p2aux(ni, bucket->bucket[idx]);
+    aux = ci_ni_aux_p2aux(ni, bucket->bucket[idx]);
     if( aux->type == CI_TCP_AUX_TYPE_BUCKET )
       ret += ci_tcp_listenq_bucket_drop(ni, &aux->u.bucket);
     else {
       tsr_p = bucket->bucket[idx];
       do {
-        tsr = &ci_tcp_listenq_p2aux(ni, tsr_p)->u.synrecv;
+        tsr = &ci_ni_aux_p2aux(ni, tsr_p)->u.synrecv;
         tsr_p = tsr->bucket_link;
         if( OO_SP_IS_NULL(tsr->local_peer) )
           ci_ni_dllist_remove(ni, ci_tcp_synrecv2link(tsr));
@@ -114,7 +107,7 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
 {
   ci_ni_aux_mem* aux;
   int idx = ci_tcp_listenq_hash2idx(tsr->hash, level);
-  oo_p tsr_p = oo_ptr_to_statep(ni, CI_CONTAINER(ci_ni_aux_mem, u.synrecv, tsr));
+  oo_p tsr_p = ci_tcp_synrecv2p(ni, tsr);
 #ifdef __KERNEL__
   int i = 0;
 #endif
@@ -128,7 +121,7 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
   }
 
   level++;
-  aux = ci_tcp_listenq_p2aux(ni, bucket->bucket[idx]);
+  aux = ci_ni_aux_p2aux(ni, bucket->bucket[idx]);
   if( aux->type == CI_TCP_AUX_TYPE_BUCKET ) {
     ci_tcp_listenq_bucket_insert(ni, tls, &aux->u.bucket, tsr, level);
     return;
@@ -140,16 +133,17 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
   tsr->bucket_link = bucket->bucket[idx];
   bucket->bucket[idx] = tsr_p;
 
-  if( level > CI_LISTENQ_BUCKET_MAX_DEPTH(ni) ||
-      OO_P_IS_NULL(ni->state->free_aux_mem) )
+  if( level > CI_LISTENQ_BUCKET_MAX_DEPTH(ni) )
     return;
 
-  bucket->bucket[idx] = ni->state->free_aux_mem;
-  bucket = ci_tcp_bucket_alloc(ni);
+  bucket->bucket[idx] = ci_ni_aux_alloc_bucket(ni);
+  if( OO_P_IS_NULL(bucket->bucket[idx]) )
+    return;
+  bucket = ci_ni_aux_p2bucket(ni, bucket->bucket[idx]);
   tls->n_buckets++;
 
   while( OO_P_NOT_NULL(tsr_p) ) {
-    tsr = &ci_tcp_listenq_p2aux(ni, tsr_p)->u.synrecv;
+    tsr = &ci_ni_aux_p2aux(ni, tsr_p)->u.synrecv;
 #ifdef __KERNEL__
     if( i++ > CI_LISTENQ_BUCKET_LIST_LIMIT(ni) ) {
       ci_tcp_listenq_bucket_insert(ni, tls, bucket, tsr, level);
@@ -172,7 +166,7 @@ ci_tcp_listenq_bucket_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
 {
   ci_ni_aux_mem* aux;
   int idx = ci_tcp_listenq_hash2idx(tsr->hash, level);
-  oo_p tsr_p = oo_ptr_to_statep(ni, CI_CONTAINER(ci_ni_aux_mem, u.synrecv, tsr));
+  oo_p tsr_p = ci_tcp_synrecv2p(ni, tsr);
 
   /* Fixme: we remove empty buckets only.  In theory, it may be useful to
    * remove a bucket with one non-empty list, but it maked code more
@@ -199,7 +193,7 @@ ci_tcp_listenq_bucket_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
 #endif
 
   level++;
-  aux = ci_tcp_listenq_p2aux(ni, bucket->bucket[idx]);
+  aux = ci_ni_aux_p2aux(ni, bucket->bucket[idx]);
   if( aux->type == CI_TCP_AUX_TYPE_BUCKET ) {
     empty = ci_tcp_listenq_bucket_remove(ni, tls, &aux->u.bucket, tsr, level);
     if( empty ) {
@@ -216,7 +210,7 @@ ci_tcp_listenq_bucket_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
     else {
       ci_tcp_state_synrecv* prev = &aux->u.synrecv;
       while( prev->bucket_link != tsr_p ) {
-        aux = ci_tcp_listenq_p2aux(ni, prev->bucket_link);
+        aux = ci_ni_aux_p2aux(ni, prev->bucket_link);
         prev = &aux->u.synrecv;
 #ifdef __KERNEL__
         if( i++ > CI_LISTENQ_BUCKET_LIST_LIMIT(ni) ) {
@@ -268,7 +262,7 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
     return NULL;
 
   level++;
-  aux = ci_tcp_listenq_p2aux(ni, bucket->bucket[idx]);
+  aux = ci_ni_aux_p2aux(ni, bucket->bucket[idx]);
   if( aux->type == CI_TCP_AUX_TYPE_BUCKET )
     return ci_tcp_listenq_bucket_lookup(ni, &aux->u.bucket, rxp, level);
 
@@ -283,7 +277,7 @@ ci_tcp_listenq_bucket_lookup(ci_netif* ni, ci_tcp_listen_bucket* bucket,
       return tsr;
     if( OO_P_IS_NULL(tsr->bucket_link) )
       return NULL;
-    aux = ci_tcp_listenq_p2aux(ni, tsr->bucket_link);
+    aux = ci_ni_aux_p2aux(ni, tsr->bucket_link);
     tsr = &aux->u.synrecv;
 #ifdef __KERNEL__
     if( i++ > CI_LISTENQ_BUCKET_LIST_LIMIT(ni) ) {
@@ -323,7 +317,7 @@ int ci_tcp_listenq_drop_all(ci_netif* ni, ci_tcp_socket_listen* tls)
 {
   return
       ci_tcp_listenq_bucket_drop(ni,
-                                 ci_tcp_listenq_p2bucket(ni, tls->bucket));
+                                 ci_ni_aux_p2bucket(ni, tls->bucket));
 }
 
 void ci_tcp_listenq_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
@@ -334,7 +328,7 @@ void ci_tcp_listenq_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
   tls->n_listenq++;
 
   ci_tcp_listenq_bucket_insert(ni, tls,
-                               ci_tcp_listenq_p2bucket(ni, tls->bucket),
+                               ci_ni_aux_p2bucket(ni, tls->bucket),
                                tsr, 0);
 
   if( OO_SP_NOT_NULL(tsr->local_peer) )
@@ -359,7 +353,7 @@ void ci_tcp_listenq_remove(ci_netif* ni, ci_tcp_socket_listen* tls,
   ci_assert(tls);
 
   ci_tcp_listenq_bucket_remove(ni, tls,
-                               ci_tcp_listenq_p2bucket(ni, tls->bucket),
+                               ci_ni_aux_p2bucket(ni, tls->bucket),
                                tsr, 0);
   if( OO_SP_IS_NULL(tsr->local_peer) ) {
     ci_ni_dllist_remove(ni, ci_tcp_synrecv2link(tsr));
@@ -399,7 +393,7 @@ ci_tcp_listenq_lookup(ci_netif* netif, ci_tcp_socket_listen* tls,
   ci_tcp_state_synrecv* tsr;
 
   tsr = ci_tcp_listenq_bucket_lookup(
-                        netif, ci_tcp_listenq_p2bucket(netif, tls->bucket),
+                        netif, ci_ni_aux_p2bucket(netif, tls->bucket),
                         rxp, 0);
   if( tsr == NULL ) {
     LOG_TV(log(LPF "no match for %s:%d->%s:%d",
@@ -437,9 +431,9 @@ get_ts_from_cache(ci_netif *netif,
 {
   ci_tcp_state *ts = NULL;
 #if CI_CFG_FD_CACHING
-  if( ci_ni_dllist_not_empty(netif, &tls->epcache_cache) ) {
+  if( ci_ni_dllist_not_empty(netif, &tls->epcache.cache) ) {
     /* Take the entry from the cache */
-    ci_ni_dllist_link *link = ci_ni_dllist_pop(netif, &tls->epcache_cache);
+    ci_ni_dllist_link *link = ci_ni_dllist_pop(netif, &tls->epcache.cache);
     ts = CI_CONTAINER (ci_tcp_state, epcache_link, link);
     ci_assert (ts);
     ci_ni_dllist_self_link(netif, &ts->epcache_link);
@@ -464,7 +458,7 @@ get_ts_from_cache(ci_netif *netif,
        * back on the list.
        */
       LOG_EP(ci_log("changed interface of cached EP, re-queueing"));
-      ci_ni_dllist_push_tail(netif, &tls->epcache_cache, &ts->epcache_link);
+      ci_ni_dllist_push_tail(netif, &tls->epcache.cache, &ts->epcache_link);
       ts = NULL;
       CITP_STATS_NETIF(++netif->state->stats.sockcache_miss_intmismatch);
     }
@@ -667,7 +661,7 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
       if (rc < 0) {
         /* Bung it back on the cache list */
         LOG_EP(ci_log("Unable to create s/w filter!"));
-        ci_ni_dllist_push(netif, &tls->epcache_cache, &ts->epcache_link);
+        ci_ni_dllist_push(netif, &tls->epcache.cache, &ts->epcache_link);
         return rc;
       }
 

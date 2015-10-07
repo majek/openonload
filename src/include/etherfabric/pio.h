@@ -163,16 +163,20 @@ extern int ef_pio_unlink_vi(ef_pio* pio, ef_driver_handle pio_dh,
 ** \param vi     The virtual interface for the Programmed I/O region.
 ** \param base   The base address of the memory to copy.
 ** \param offset The offset into the Programmed I/O region at which to copy
-**               the data. This must be a multiple of 8, otherwise adjacent
-**               sends might result in corrupt data.
+**               the data to.  You shouldn't try to copy memory to part of the
+**               PIO region that is already in use for an ongoing send as this
+**               may result in corruption.
 ** \param len    The number of bytes to copy.
 **
 ** \return 0 on success, or a negative error code.
 **
-** Copy data from memory into a Programmed I/O region.
+** This function copies data from the user buffer to the adapter's PIO
+** buffer.  It goes via an intermediate buffer to meet any alignment
+** requirements that the adapter may have.
 **
-** This function copies the data via a local copy of the adapter's
-** Programmed I/O buffer.
+** Please refer to the PIO transmit functions (e.g.:
+** ef_vi_transmit_pio() and ef_vi_transmit_copy_pio()) for alignment
+** requirements of packets.
 **
 ** The Programmed I/O region can hold multiple smaller packets, referenced
 ** by different offset parameters. All other constraints must still be

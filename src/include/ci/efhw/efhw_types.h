@@ -58,6 +58,7 @@
 #include <ci/efhw/iopage_types.h>
 #include <ci/efhw/sysdep.h>
 #include <ci/efhw/common.h>
+#include <ci/compat.h>
 
 /*--------------------------------------------------------------------
  *
@@ -217,7 +218,7 @@ struct efhw_func_ops {
 
 	/*! Handle an event from hardware, e.g. delivered via driverlink */
 	int (*handle_event) (struct efhw_nic *nic, struct efhw_ev_handler *h, 
-			     efhw_event_t *ev);
+			     efhw_event_t *ev, int budget);
 
   /*-------------- DMA support  ------------ */
 
@@ -263,7 +264,8 @@ struct efhw_func_ops {
 
 	/*! Allocate buffer table block. */
 	int (*buffer_table_alloc) (struct efhw_nic *nic, int owner, int order,
-				   struct efhw_buffer_table_block **block_out);
+				   struct efhw_buffer_table_block **block_out,
+				   int reset_pending);
 
 	/* Re-allocate buffer table block after NIC reset.
 	 * In case of failure, the block should be marked as invalid;
@@ -274,7 +276,8 @@ struct efhw_func_ops {
 
 	/*! Free buffer table block */
 	void (*buffer_table_free) (struct efhw_nic *nic,
-				   struct efhw_buffer_table_block *block);
+				   struct efhw_buffer_table_block *block,
+				   int reset_pending);
 
 	/*! Set/program buffer table page entries */
 	int (*buffer_table_set) (struct efhw_nic *nic,
@@ -320,6 +323,11 @@ struct efhw_func_ops {
 	int (*rss_context_set_key) (struct efhw_nic *nic, int handle,
 				    const uint8_t *key);
 
+	/*! Set up which items will be included in rx rss hash,
+	 *  it is a combination of EFHW_RSS_FLAG_* flags.
+	 */
+	int (*rss_context_set_flags) (struct efhw_nic *nic, int handle,
+				      unsigned flags);
   /*-------------- Licensing ------------------------ */
 	int (* license_challenge) (struct efhw_nic *nic,
 				   const uint32_t feature,
@@ -388,10 +396,17 @@ struct efhw_nic {
 # define NIC_FLAG_PACKED_STREAM         0x400
 # define NIC_FLAG_RX_RSS_LIMITED        0x800
 # define NIC_FLAG_VAR_PACKED_STREAM     0x1000
+# define NIC_FLAG_ADDITIONAL_RSS_MODES  0x2000
 
-	unsigned resetting;	/*!< NIC is currently being reset */
+	ci_uint32 resetting;	/*!< Flags indicating unavailability of HW */
+# define NIC_RESETTING_FLAG_RESET       0x00000001
+# define NIC_RESETTING_FLAG_UNPLUGGED   0x00000002
+# define NIC_RESETTING_FLAG_VANISHED    0x00000004
 
 	unsigned mtu;		/*!< MAC MTU (includes MAC hdr) */
+
+	/*! Bus for hotplug purposes, as we can't rely on pci_dev->bus. */
+	unsigned char bus_number;
 
 	/* hardware resources */
 

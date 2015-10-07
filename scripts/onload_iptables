@@ -5,17 +5,22 @@
 import subprocess
 import sys
 import re
+import os
+import glob
+import copy
 from optparse import OptionParser
 
 global unparsable_is_fatal
 global chain_policy
 global default_chain_policy
 global use_verbose_iptables
+global skips
 chain_policy = None
 default_chain_policy = "ACCEPT"
 unparsable_is_fatal = True
 program_version = "0.1"
 use_verbose_iptables = True
+skips = [ 'reject-with', ]
 
 def StripComments(line):
 	''' Return c-style comment separately. '''
@@ -123,6 +128,7 @@ def SkipFirst( x, skip=1 ):
 def GenerateBits( line ):
 	''' Split a line like: "DROP       tcp  --  anywhere             anywhere            tcp dpt:5205 flags:FIN,RST,URG/URG" into a map. '''
 	global use_verbose_iptables
+	global skips
 	
 	bits = line.split()
 	#print "@bits", bits
@@ -145,7 +151,9 @@ def GenerateBits( line ):
 		raise ValueError( "Insuffcient arguments in rule." )
 		# Note: iptables rules that do not have a target are valid, but don't affect the packet, so
 		# we can safely ignore them this way too.
-	elif len(bits) < 7:
+	# If there are few elements, or an ignored element, then we must not have a source rule provided
+  # So assume 'all source ports' as a default rule.
+	elif len(bits) < 7 or bits[5] in skips:
 		rval['module'] = bits[1]
 		rval['rule'] = ["spts:0:65535" ]
 	else:
@@ -181,10 +189,16 @@ def FilterValidPieces(g):
 	''' Raise an error on any rule pieces we don't understand, otherwise yield them as a map '''
 	single_prefix = [ 'spt:', 'dpt:', ]
 	range_prefix = [ 'spts:', 'dpts:', ]
+	global skips
+	yield_next = None
 	for piece in g:
 		num_yielded = 0
 		s = piece.split(':')
 		#print "piece=", piece, "s=",s, len(s)
+		if yield_next:
+			yield { 'prefix':yield_next, 'start':piece, 'end':piece }
+			num_yielded = num_yielded + 1
+			yield_next = None
 		for prefix in single_prefix:
 			if piece.find(prefix) == 0 and len(s) == 2:
 				yield { 'prefix':prefix, 'start':s[1], 'end':s[1] }
@@ -194,6 +208,11 @@ def FilterValidPieces(g):
 				#print "@piece yield", s[1], s[2]
 				yield { 'prefix':prefix, 'start':s[1], 'end':s[2] }
 				num_yielded = num_yielded + 1
+		for prefix in skips:
+			if piece.find(prefix) == 0 and len(s) == 1:
+				yield_next = prefix
+				num_yielded = num_yielded + 1
+
 		if num_yielded != 1:
 			raise ValueError( "Could not parse rule fragment '%s' into a filter rule."%piece )
 
@@ -209,6 +228,8 @@ def MergePieces ( g ):
 		if 'dpt' in piece['prefix']:
 			rval['local_min'] = piece['start']
 			rval['local_max'] = piece['end']
+		if 'reject-with' in piece['prefix']:
+			rval['reject-with'] = piece['start']
 	return rval
 
 def GetBits( bits ):
@@ -217,7 +238,7 @@ def GetBits( bits ):
 	#print "@b", bits
 	return MergePieces(FilterValidPieces( GenerateRulesPieces( bits ) ))
 
-def ComprehensibleIpRule( d, strict ):
+def ComprehensibleIpRule( d, strict, swap ):
 	''' Turn a map of iptable rule pieces into a map which includes all our fields for enforcment, or raise a ValueError if it cannot be done. '''
 	global use_verbose_iptables
 	understood = [ 'tcp', 'udp', '/*' ]
@@ -231,8 +252,11 @@ def ComprehensibleIpRule( d, strict ):
 		rval = GetBits( d )
 		if strict and ( d['dest'] != "0.0.0.0/0.0.0.0" or rval['remote_max'] is not None ) and rval['local_max'] is None:
 			raise ValueError( "Strict Warning: Remote match specified, without local." )
+		if strict and rval.get('reject-with') is not None:
+			raise ValueError( "Strict Warning: reject-with specified, cannot support." )
 	else:
 		raise ValueError( "Unknown/Unsupported module '%s', expected one of %s"%(d['module'],str(understood)) )
+
 	rval['local_ip'] = d['dest']
 	rval['remote_ip'] = d['source']
 	rval['action'] = d['action']
@@ -246,6 +270,17 @@ def ComprehensibleIpRule( d, strict ):
 		rval['local_max'] = 65535
 	if rval['remote_max'] is None:
 		rval['remote_max'] = 65535
+
+	# If we had an outgoing rule we are making an incoming one, flip it.
+	if swap:
+		tmp = copy.deepcopy(rval);
+		rval['local_ip'] = tmp['remote_ip']
+		rval['remote_ip'] = tmp['local_ip']
+		rval['local_min'] = tmp['remote_min']
+		rval['local_max'] = tmp['remote_max']
+		rval['remote_max'] = tmp['local_max']
+		rval['remote_min'] = tmp['local_min']
+
 	return rval
 
 def SysFsAction( action ):
@@ -299,6 +334,12 @@ def GetInterfaces( options ):
 	else:
 		return [ options.interface ]
 
+def SwapSrcDest( bits ):
+	rval = bits
+	rval['source']		= bits['dest']
+	rval['dest']		= bits['source']
+	return rval
+
 def MakeSysFsRuleFromLine( line, options ):
 	''' Turn a line (from iptables -L) into another line, in SysFs format (going via a map). '''
 	comment,good = StripComments(line)
@@ -311,7 +352,7 @@ def MakeSysFsRuleFromLine( line, options ):
 	else:
 		# Otherwise, we do need to propogate exceptions
 		bits = GenerateBits(good)
-	rulemap = ComprehensibleIpRule( bits, options.strict )
+	rulemap = ComprehensibleIpRule( bits, options.strict, options.treat_as_outgoing )
 	#print "@rulemap", rulemap
 	interfaces = GetInterfaces( options )
 	rules = RuleFromInterface( interfaces, rulemap )
@@ -338,6 +379,17 @@ def PrintFrom(x, options):
 				failure_count = failure_count + 1
 				pass
 	return failure_count
+
+
+def PrintInstalledRules(filename=None):
+	''' Print out the current rules '''
+	if filename is None:
+		filename = '*'
+	for filename in glob.glob(os.path.join('/proc/driver/sfc_resource/', filename, 'firewall_rules')):
+		with open( filename ) as file:
+			rules = file.read()
+			print(rules)
+
 
 def OutputFilterRulesFrom(x, options):
 	''' Builds up all the rules, in minimal format, so that we can fail the whole set if an error occurs '''
@@ -389,10 +441,13 @@ def ParseCommandLineOptions():
 	parser.add_option("-i", "--interface", action="store", dest="interface", help="Write out directly to /proc/driver/sfc_resource/ for this interface", metavar="[ethX]" )
 	parser.add_option("-a", "--all", action="store_true", dest="all", default=False, help="Write out to /proc/driver/sfc_resource/ for all interfaces.  Note that this can include non-solarflare interfaces; but the rules here will not take effect (as onload only supports solarflare cards) until a solarflare card is given that name." )
 	parser.add_option("-o", "--output", action="store", dest="output", help="Output to the given file.  Note: If you wish to later send this file to /proc/driver/sfc_resource/firewall_add then you will need to ensure that you do not exceed the /proc filesystem block limit (typically 1024 bytes); or that you flush the writes between lines, rather than risking a rule getting broken due to an unfortunate split.", metavar="FILE" )
+	parser.add_option("--report", action="store_true", dest="report", help="Report the currently installed rules." )
 	parser.add_option("--chain", action="store", dest="chain", default="INPUT",
 					   help="Which iptables chain to parse the rules from.  Default is INPUT." )
 	parser.add_option("--use-extended", action="store_true", dest="use_verbose_iptables", default=False,
 				help="Use extended IPtables (-L -n -v, rather than just -L -n) input, which includes which interface each rule is applied to.  Disabled by default, as the format may vary." )
+	parser.add_option("--treat-as-outgoing", action="store_true", dest="treat_as_outgoing", default=False,
+				help="Treat the chain as an OUTPUT chain, and so treat its dest rules as remote hosts.\Note: Onload can ONLY block incoming packets; but this is often suffcieint to prevent the connection." )
 	(options, args) = parser.parse_args()
 	unparsable_is_fatal = options.unparsable_is_fatal and not options.verbose
 	use_verbose_iptables = options.use_verbose_iptables
@@ -430,7 +485,11 @@ def main():
 	''' Main entry point '''
 	options, args = ParseCommandLineOptions()
 	#print "@opt", options
-	
+
+	if options.report:
+		PrintInstalledRules(options.interface)
+		return 0
+ 	
 	try:
 		source = SelectSource(options)
 	except Exception:
@@ -439,7 +498,7 @@ def main():
 		return -2
 	
 	generator = SkipHeaders(FindChain(StripEntry(source), options.chain, options.verbose))
-	
+
 	if options.verbose:
 		return PrintFrom( generator, options )
 	else:

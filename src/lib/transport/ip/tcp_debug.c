@@ -695,9 +695,9 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
   logger(log_arg, "%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
 #if CI_CFG_FD_CACHING
   logger(log_arg, "%s  sockcache: n=%d sock_n=%d cache=%s pending=%s",
-         pf, ni->state->cache_avail_stack, tls->cache_avail_sock,
-         ci_ni_dllist_is_empty(ni, &tls->epcache_cache) ? "EMPTY":"yes",
-         ci_ni_dllist_is_empty(ni, &tls->epcache_pending) ? "EMPTY":"yes");
+         pf, ni->state->passive_cache_avail_stack, tls->cache_avail_sock,
+         ci_ni_dllist_is_empty(ni, &tls->epcache.cache) ? "EMPTY":"yes",
+         ci_ni_dllist_is_empty(ni, &tls->epcache.pending) ? "EMPTY":"yes");
 #endif
 #if CI_CFG_STATS_TCP_LISTEN
   {
@@ -758,7 +758,8 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   int n;
 
   if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
-    ci_timestamp_q_dump(ni, &ts->timestamp_q, pf, logger, log_arg);
+    ci_udp_recvq_dump(ni, &ts->timestamp_q, pf, "  TX timestamping queue:",
+                      logger, log_arg);
 
   ci_tcp_socket_cmn_dump(ni, &ts->c, pf, logger, log_arg);
 
@@ -782,8 +783,9 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   logger(log_arg, "%s  snd: cwnd=%d+%d used=%d ssthresh=%d bytes_acked=%d %s",
          pf, ts->cwnd, ts->cwnd_extra, tcp_cwnd_used(ts),
          ts->ssthresh, ts->bytes_acked, congstate_str(ts));
-  logger(log_arg, "%s  snd: "OOF_IPCACHE_STATE" "OOF_IPCACHE_DETAIL,
-         pf, OOFA_IPCACHE_STATE(ni, &ts->s.pkt),
+  logger(log_arg, "%s  snd: sndbuf_pkts=%d "OOF_IPCACHE_STATE" "
+	 OOF_IPCACHE_DETAIL,
+	 pf, ts->so_sndbuf_pkts, OOFA_IPCACHE_STATE(ni, &ts->s.pkt),
          OOFA_IPCACHE_DETAIL(&ts->s.pkt));
   logger(log_arg, "%s  snd: limited rwnd=%d cwnd=%d nagle=%d more=%d app=%d",
          pf, stats.tx_stop_rwnd, stats.tx_stop_cwnd, stats.tx_stop_nagle,
@@ -807,15 +809,18 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
          tcp_srtt(ts), tcp_rttvar(ts), ts->rto, ts->zwin_probes,
          ts->zwin_acks);
   logger(log_arg,
-         "%s  retrans=%d dupacks=%u rtos=%u frecs=%u seqerr=%u,%u ooo_pkts=%d "
-         "ooo=%d", pf, ts->retransmits, ts->dup_acks, stats.rtos,
+         "%s  curr_retrans=%d total_retrans=%d dupacks=%u",
+         pf, ts->retransmits, stats.total_retrans, ts->dup_acks);
+  logger(log_arg,
+         "%s  rtos=%u frecs=%u seqerr=%u,%u ooo_pkts=%d "
+         "ooo=%d", pf, stats.rtos,
          stats.fast_recovers, stats.rx_seq_errs, stats.rx_ack_seq_errs,
          stats.rx_ooo_pkts, stats.rx_ooo_fill);
   logger(log_arg, "%s  tx: defer=%d nomac=%u warm=%u warm_aborted=%u", pf,
          stats.tx_defer, stats.tx_nomac_defer, stats.tx_msg_warm,
          stats.tx_msg_warm_abort);
-  logger(log_arg, "%s  tmpl: alloc=%u send_fast=%u send_slow=%u active=%u", pf,
-         stats.tx_tmpl_alloc, stats.tx_tmpl_send_fast, stats.tx_tmpl_send_slow,
+  logger(log_arg, "%s  tmpl: send_fast=%u send_slow=%u active=%u", pf,
+         stats.tx_tmpl_send_fast, stats.tx_tmpl_send_slow,
          stats.tx_tmpl_active);
 
 #ifndef __KERNEL__

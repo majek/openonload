@@ -70,30 +70,63 @@ static void efab_ep_handover_setup(ci_private_t* priv, int* in_epoll_p)
   }
 }
 
+#ifndef EFRM_HAVE_CLOEXEC_TEST
+#include <linux/time.h> /* FD_ISSET is defined here */
+#define close_on_exec(fd, fdt) FD_ISSET(fd, fdt->close_on_exec)
+#endif
+
 /*! Replace [old_filp] with [new_filp] in the current process's fdtable.
 ** Fails if [fd] is bad, or doesn't currently resolve to [old_filp].
 */
-int oo_fd_replace_file(struct file* old_filp, struct file* new_filp, int fd)
+static int
+oo_fd_replace_file(struct file* old_filp, struct file* new_filp,
+                   int old_fd, int* new_fd_p)
 {
-  spin_lock(&current->files->file_lock);
-  if( fcheck(fd) != old_filp ) {
+  task_lock(current);
+  if( atomic_read(&current->files->count) != 1 ) {
+    /* This is a multithreaded application, and someone can be already
+     * calling into this endpoint.  We should not remove the ep from under
+     * other thread's feet.  UL library will call dup2().
+     * 
+     * See also __fget_light() comments, because sys_ioctl() uses
+     * it to obtain the struct file.
+     */
+    int new_fd;
+
+    task_unlock(current);
+    rcu_read_lock(); /* for files_fdtable() */
+    new_fd = get_unused_fd_flags(
+                close_on_exec(old_fd, files_fdtable(current->files)) ?
+                O_CLOEXEC : 0);
+    rcu_read_unlock();
+    if( new_fd < 0 ) {
+      return new_fd;
+    }
+    get_file(new_filp);
+    fd_install(new_fd, new_filp);
+
+    /* UL library will examine the returned fd, and call dup2() if it is !=
+     * old_fd. */
+    *new_fd_p = new_fd;
+    return 0;
+  }
+
+  rcu_read_lock();
+  if( fcheck(old_fd) != old_filp ) {
+    rcu_read_unlock();
     spin_unlock(&current->files->file_lock);
     return -EINVAL;
   }
 
-  /* If others have reference to our oo_file, they can restore the file
-   * from the shared state.
-   * file_count is incremented by:
-   * - dup/dup2/... - another fd points to oo_file;
-   * - fork - same fd in another process points to oo_file;
-   * - syscall from another thread.
-   */
   get_file(new_filp);
-  ci_fdtable_set_fd(ci_files_fdtable(current->files), fd, new_filp);
-  spin_unlock(&current->files->file_lock);
+  rcu_assign_pointer(files_fdtable(current->files)->fd[old_fd], new_filp);
+  rcu_read_unlock();
+  task_unlock(current);
 
+  synchronize_rcu();
   fput(old_filp);
 
+  *new_fd_p = old_fd;
   return 0;
 }
 
@@ -101,6 +134,8 @@ int oo_file_moved_rsop(ci_private_t* priv, void *p_fd)
 {
   tcp_helper_endpoint_t* ep;
   int fd = *(ci_int32*) p_fd;
+  int rc;
+  int new_fd;
 
   if( priv->fd_type != CI_PRIV_TYPE_PASSTHROUGH_EP &&
       priv->fd_type != CI_PRIV_TYPE_ALIEN_EP)
@@ -111,16 +146,24 @@ int oo_file_moved_rsop(ci_private_t* priv, void *p_fd)
   ep = ci_trs_ep_get(priv->thr, priv->sock_id);
 
   if( priv->fd_type == CI_PRIV_TYPE_PASSTHROUGH_EP ) {
-    ci_assert(ep->os_socket->file);
+    struct file* os_file;
+
     ci_assert_equal(priv->_filp->f_op, &linux_tcp_helper_fops_passthrough);
-    return oo_fd_replace_file(priv->_filp, ep->os_socket->file, fd);
+    rc = oo_os_sock_get_from_ep(ep, &os_file);
+    if( rc != 0 )
+      return rc;
+    rc = oo_fd_replace_file(priv->_filp, os_file, fd, &new_fd);
+    oo_os_sock_put(os_file);
   }
   else {
     ci_assert(ep->alien_ref);
     ci_assert_equal(priv->_filp->f_op, &linux_tcp_helper_fops_alien);
-    return oo_fd_replace_file(priv->_filp, ep->alien_ref->_filp, fd);
+    rc = oo_fd_replace_file(priv->_filp, ep->alien_ref->_filp, fd, &new_fd);
   }
-  return 0; /* unreachable */
+  if( rc != 0 )
+    return rc;
+  *(ci_int32*) p_fd = new_fd;
+  return 0;
 }
 
 /* Handover the user-level socket to the OS one.  This means that the FD
@@ -132,48 +175,28 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
 {
   tcp_helper_endpoint_t* ep;
   int fd = *(ci_int32*) p_fd;
-  struct file *oo_file;
-  ci_private_t *fd_priv;
-  int rc, line, in_epoll;
+  struct file *oo_file = priv->_filp;
+  int rc, line, in_epoll, new_fd;
   citp_waitable_obj* wobj;
+  struct file* os_file;
 
-  oo_file = fget(fd);
-
-  /* We invoke this on the stack-fd rather than the socket-fd because if we
-   * do the latter it is hard to know whether there are any other refs to
-   * the socket.
-   */
-  if( priv->fd_type != CI_PRIV_TYPE_NETIF ) {
+  if( priv->fd_type != CI_PRIV_TYPE_TCP_EP &&
+      priv->fd_type != CI_PRIV_TYPE_UDP_EP ) {
     line = __LINE__;
     goto unexpected_error;
   }
-  if( oo_file->f_op != &linux_tcp_helper_fops_tcp &&
-      oo_file->f_op != &linux_tcp_helper_fops_udp ) {
+  ep = ci_trs_ep_get(priv->thr, priv->sock_id);
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 ) {
     line = __LINE__;
     goto unexpected_error;
   }
-  fd_priv = oo_file->private_data;
-  ci_assert( CI_PRIV_TYPE_IS_ENDPOINT(fd_priv->fd_type) );
-  if( priv->thr != fd_priv->thr ) {
-    line = __LINE__;
-    goto unexpected_error;
-  }
-  ep = ci_trs_ep_get(fd_priv->thr, fd_priv->sock_id);
-  if( ep->os_socket == NULL ) {
-    line = __LINE__;
-    goto unexpected_error;
-  }
-  /* Legacy Clustering: Don't currently allow handover of sockets sharing
-   * an os socket to do legacy reuseport.  This should be prevented at user
-   * level.
-   */
-  ci_assert( (ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT) == 0 );
 
   /* get locks */
-  wobj = SP_TO_WAITABLE_OBJ(&priv->thr->netif, fd_priv->sock_id);
+  wobj = SP_TO_WAITABLE_OBJ(&priv->thr->netif, priv->sock_id);
   rc = ci_netif_lock(&priv->thr->netif);
   if( rc != 0 ) {
-    fput(oo_file);
+    oo_os_sock_put(os_file);
     return rc;
   }
 
@@ -182,23 +205,26 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     fasync_helper(-1, oo_file, 0, &ep->fasync_queue);
 
   citp_waitable_cleanup(&priv->thr->netif, wobj, 0);
-  efab_ep_handover_setup(fd_priv, &in_epoll);
+  efab_ep_handover_setup(priv, &in_epoll);
   ci_netif_unlock(&priv->thr->netif);
 
   if( in_epoll ) {
-    fput(oo_file);
+    oo_os_sock_put(os_file);
     return -EBUSY;
   }
 
-  rc = oo_fd_replace_file(oo_file, ep->os_socket->file, fd);
+  rc = oo_fd_replace_file(oo_file, os_file, fd, &new_fd);
+  oo_os_sock_put(os_file);
+  if( rc != 0 )
+    return rc;
 
-  /* drop the last reference to the onload file */
-  fput(oo_file);
-  return rc;
+  *(ci_int32*) p_fd = new_fd;
+
+  /* exit from ioctl drops the last reference to the onload file */
+  return 0;
 
 
  unexpected_error:
-  fput(oo_file);
   OO_DEBUG_ERR(ci_log("%s: ERROR: unexpected error in HANDOVER at line %d",
                       __FUNCTION__, line));
   return -EINVAL;
@@ -287,7 +313,6 @@ static int get_os_fd_from_ep(tcp_helper_endpoint_t *ep)
     return -EINVAL;
   }
 
-  get_file(os_file);
   fd_install(fd, os_file);
 
   return fd;
@@ -338,6 +363,11 @@ get_linux_socket(tcp_helper_endpoint_t* ep)
   sock = SOCKET_I(inode);
   ci_assert_equal(sock->file, socketp);
   return sock;
+}
+
+static void put_linux_socket(struct socket *sock)
+{
+  fput(sock->file);
 }
 
 int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
@@ -446,18 +476,17 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
 
   msg.msg_flags = op->flags;
 
-  rc = sock_sendmsg(sock, &msg, total_bytes);
+  rc = sock_sendmsg(sock, &msg);
   /* Clear OS TX flag if necessary  */
-  oo_os_sock_status_bit_clear(SP_TO_SOCK(&ep->thr->netif, ep->id),
-                              OO_OS_STATUS_TX,
-                              ep->os_socket->file->f_op->poll(
-                                    ep->os_socket->file, NULL) & POLLOUT);
+  oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
+                                      sock->file, OO_OS_STATUS_TX);
 
  out:
   if( p_iovec != local_iovec && p_iovec != NULL)
     sock_kfree_s(sock->sk, p_iovec, iovec_bytes);
   if( ctl_buf != local_ctl && ctl_buf != NULL)
     sock_kfree_s(sock->sk, ctl_buf, op->msg_controllen);
+  put_linux_socket(sock);
   return rc;
 }
 
@@ -467,9 +496,12 @@ int efab_tcp_helper_os_sock_sendmsg_raw(ci_private_t* priv, void *arg)
   tcp_helper_endpoint_t *ep = ci_trs_get_valid_ep(priv->thr, op->sock_id);
   int fd, rc;
   unsigned flags = op->flags;
+  struct socket* sock;
 
   ep = ci_trs_get_valid_ep(priv->thr, op->sock_id);
   fd = get_os_fd_from_ep(ep);
+  if( fd < 0 )
+    return -EINVAL;
 
 #ifdef CONFIG_COMPAT
   if( op->sizeof_ptr != sizeof(void*) )
@@ -482,10 +514,12 @@ int efab_tcp_helper_os_sock_sendmsg_raw(ci_private_t* priv, void *arg)
                               CI_USER_PTR_GET(op->socketcall_args), flags);
 
   /* Clear OS TX flag if necessary  */
-  oo_os_sock_status_bit_clear(SP_TO_SOCK(&ep->thr->netif, ep->id),
-                              OO_OS_STATUS_TX,
-                              ep->os_socket->file->f_op->poll(
-                                    ep->os_socket->file, NULL) & POLLOUT);
+  sock = get_linux_socket(ep);
+  if( sock != NULL ) {
+    oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
+                                        sock->file, OO_OS_STATUS_TX);
+    put_linux_socket(sock);
+  }
   efab_linux_sys_close(fd);
   return rc;
 }
@@ -574,10 +608,9 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
     op->flags |= MSG_DONTWAIT;
   rc = sock_recvmsg(sock, &msg, total_bytes, op->flags);
   /* Clear OS RX flag if we've got everything  */
-  oo_os_sock_status_bit_clear(SP_TO_SOCK(&ep->thr->netif, ep->id),
-                              OO_OS_STATUS_RX,
-                              sock->file->f_op->poll(sock->file, NULL) &
-                                                                    POLLIN);
+  oo_os_sock_status_bit_clear_handled(
+            SP_TO_SOCK(&ep->thr->netif, ep->id), sock->file,
+            OO_OS_STATUS_RX | (op->msg_controllen ? OO_OS_STATUS_ERR : 0));
   if( rc < 0 )
     goto out;
 
@@ -604,6 +637,7 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
  out:
   if( p_iovec != local_iovec && p_iovec != NULL)
     sock_kfree_s(sock->sk, p_iovec, iovec_bytes);
+  put_linux_socket(sock);
   op->rc = rc;
   return rc > 0 ? 0 : rc;
 }
@@ -624,31 +658,74 @@ efab_move_addr_to_kernel(void __user *uaddr, int ulen, struct sockaddr *kaddr)
 }
 #endif
 
-/* This function does a 'bind' and (optionally) a getname on the OS socket.
- * It is semantically equivalent to:
- *   - fd = get_os_sock_fd()
- *   - sys_bind (fd, ...)
- *   - sys_getsockname
- *   - sys_close (fd)
- * except that we do it all in one system call
+
+int efab_tcp_helper_create_os_sock(ci_private_t *priv)
+{
+  struct socket *sock;
+  int flags = 0;
+  int rc;
+  ci_netif *ni = &priv->thr->netif;
+  citp_waitable *w = SP_TO_WAITABLE(ni, priv->sock_id);
+  tcp_helper_endpoint_t *ep = efab_priv_to_ep(priv);
+
+  /* It's always valid to set the O_ flag rather than the SOCK_ flag,
+   * as either they're the same, or the O_ flag is what we want.
+   */
+  if( w->sb_aflags & CI_SB_AFLAG_O_NONBLOCK)
+    flags |= O_NONBLOCK;
+  if( w->sb_aflags & CI_SB_AFLAG_O_CLOEXEC)
+    flags |= O_CLOEXEC;
+  rc = efab_create_os_socket(ep, SP_TO_SOCK(ni, priv->sock_id)->domain,
+                             SOCK_STREAM, flags);
+  if( rc < 0 )
+    return rc;
+
+  /* At this point we are marked as OS_BACKED, so any new options that get
+   * set will get synced directly as needed.  We need to sync anything that
+   * has been set before now and we need to ensure we don't undo anything
+   * that is happening concurrently with this.
+   */
+  sock = get_linux_socket(ep);
+
+  /* Copy F_SETOWN_EX, F_SETSIG to the new file */
+#ifdef F_SETOWN_EX
+  if(priv->_filp->f_owner.pid != 0) {
+    rcu_read_lock();
+    __f_setown(sock->file, priv->_filp->f_owner.pid,
+               priv->_filp->f_owner.pid_type, 1);
+    rcu_read_unlock();
+  }
+#endif
+  sock->file->f_owner.signum = priv->_filp->f_owner.signum;
+
+  rc = ci_tcp_sync_sockopts_to_os_sock(ni, ep->id, sock);
+  put_linux_socket(sock);
+
+  if( rc < 0 ) {
+    /* Drop the OS socket to leave this endpoint in a consistent state. */
+    struct oo_file_ref* os_socket;
+    unsigned long lock_flags;
+    ci_atomic32_and(&w->sb_aflags, ~CI_SB_AFLAG_OS_BACKED);
+    spin_lock_irqsave(&ep->lock, lock_flags);
+    os_socket = ep->os_socket;
+    ep->os_socket = NULL;
+    spin_unlock_irqrestore(&ep->lock, lock_flags);
+    if( os_socket != NULL ) {
+      oo_file_ref_drop(os_socket);
+     }
+  }
+
+  return rc;
+}
+
+/* This function does a 'bind' and a getname on the OS socket.  It is the
+ * common functionality between kernel and user (via ioctl) bind.
  */
-extern int efab_tcp_helper_bind_os_sock (tcp_helper_resource_t *trs,
-                                         oo_sp sock_id,
-                                         struct sockaddr *addr,
-                                         int addrlen, ci_uint16 *out_port)
+int efab_tcp_helper_bind_os_sock_common(struct socket* sock,
+                                        struct sockaddr *addr, int addrlen,
+                                        ci_uint16 *out_port)
 {
   int rc;
-  tcp_helper_endpoint_t *ep;
-  struct socket *sock;
-
-  ci_assert(trs);
-
-  ep = ci_trs_get_valid_ep(trs, sock_id);
-  if( ep == NULL )
-    return -EINVAL;
-  sock = get_linux_socket(ep);
-  if( sock == NULL )
-    return -EINVAL;
 
   rc = sock->ops->bind(sock, addr, addrlen);
   LOG_TV(ci_log("%s: rc=%d", __FUNCTION__, rc));
@@ -667,43 +744,126 @@ extern int efab_tcp_helper_bind_os_sock (tcp_helper_resource_t *trs,
 }
 
 
-int efab_tcp_helper_listen_os_sock(tcp_helper_resource_t* trs,
-                                   oo_sp sock_id, int backlog)
+/* This function handles the OS socket bind when done from the kernel.  In
+ * this case we are already expected to have an OS socket.
+ */
+extern int efab_tcp_helper_bind_os_sock_kernel(tcp_helper_resource_t *trs,
+                                               oo_sp sock_id,
+                                               struct sockaddr *addr,
+                                               int addrlen, ci_uint16 *out_port)
+{
+  int rc;
+  tcp_helper_endpoint_t *ep;
+  struct socket *sock;
+
+  ci_assert(trs);
+
+  ep = ci_trs_get_valid_ep(trs, sock_id);
+  if( ep == NULL )
+    return -EINVAL;
+
+  sock = get_linux_socket(ep);
+
+  if( sock == NULL )
+    return -EINVAL;
+
+  rc = efab_tcp_helper_bind_os_sock_common(sock, addr, addrlen, out_port);
+  put_linux_socket(sock);
+
+  return rc;
+}
+
+
+/* This function handles the OS socket bind when done via ioctl.  If there's
+ * no OS socket then it will attempt to create one before performing the bind.
+ */
+extern int efab_tcp_helper_bind_os_sock_rsop(ci_private_t *priv, void *arg)
+{
+  oo_tcp_bind_os_sock_t *op = arg;
+  struct sockaddr_storage k_address_buf;
+  int addrlen = op->addrlen;
+  ci_uint16 port;
+  int rc;
+  tcp_helper_endpoint_t *ep;
+  struct socket *sock;
+
+  ci_assert(priv);
+  ci_assert(op);
+  if( !CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type) )
+    return -EINVAL;
+  ci_assert(priv->thr);
+
+  rc = move_addr_to_kernel(CI_USER_PTR_GET(op->address), addrlen,
+                           (struct sockaddr *)&k_address_buf);
+  if( rc < 0 )
+    return rc;
+
+  ep = efab_priv_to_ep(priv);
+  if( ep == NULL )
+    return -EINVAL;
+
+  sock = get_linux_socket(ep);
+
+  /* For tcp sockets we delay creation of the os socket until we know whether
+   * we need one or not.  We don't create OS sockets for sockets with
+   * IP_TRANSPARENT set, which we require to be set before bind time to be
+   * accelerated.
+   */
+  if( (sock == NULL) && (priv->fd_type == CI_PRIV_TYPE_TCP_EP) ) {
+    efab_tcp_helper_create_os_sock(priv);
+    sock = get_linux_socket(ep);
+    if( rc < 0 )
+      return rc;
+  }
+
+  if( sock == NULL )
+    return -EINVAL;
+
+  rc = efab_tcp_helper_bind_os_sock_common(sock,
+                                           (struct sockaddr *)&k_address_buf,
+                                           addrlen, &port);
+  put_linux_socket(sock);
+
+  if( rc < 0 )
+    return rc;
+
+  op->addrlen = port;
+  return 0;
+}
+
+
+int efab_tcp_helper_listen_os_sock(ci_private_t* priv, void* p_backlog)
 {
   int rc = -EINVAL;
   tcp_helper_endpoint_t *ep;
   struct socket *sock;
+  int backlog;
 
-  ci_assert (trs);
+  if( !CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type) )
+    return -EINVAL;
+  ci_assert(priv->thr);
 
-  ep = ci_trs_get_valid_ep(trs, sock_id); 
+  backlog = *(ci_uint32*)p_backlog;
+  ep = efab_priv_to_ep(priv);
+
   sock = get_linux_socket(ep);
+  /* They only way we come here without binding the OS socket (and hence
+   * ensuring it exists) is if we directly handover a socket on listen.
+   */
+  if( sock == NULL ) {
+    rc = efab_tcp_helper_create_os_sock(priv);
+    if( rc < 0 )
+      return rc;
+    sock = get_linux_socket(ep);
+  }
+
   if( sock == NULL )
     return -EINVAL;
 
-  /* If this is a legacy reuseport sock we need to check if this socket should
-   * do the os listen.
-   */
-  if( (ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT) &&
-      !tcp_helper_cluster_legacy_os_listen(ep) ) {
-    LOG_TV(ci_log("%s: Not listening on legacy reuseport os sock",
-                  __FUNCTION__));
-    return 0;
-  }
-
-  /* Install callback into OS socket:
-   * - do not do it twice: listen() may be called again after shutdown()
-   * - do it before calling the real listen() to avoid race */
-  if( ep->os_sock_pt.whead == NULL )
-    efab_tcp_helper_os_pollwait_register(ep);
+  oo_os_sock_poll_register(&ep->os_sock_poll, sock->file);
 
   rc = sock->ops->listen (sock, backlog);
-
-  /* If this is a legacy reuseport socket, and we failed to listen, then
-   * notify the cluster that this socket isn't listening.
-   */
-  if( (ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT) && (rc < 0) )
-    tcp_helper_cluster_legacy_os_shutdown(ep);
+  put_linux_socket(sock);
 
   LOG_TV(ci_log("%s: rc=%d", __FUNCTION__, rc));
 
@@ -722,17 +882,8 @@ extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t *ep,
   if( sock == NULL )
     return -EINVAL;
 
-  /* If this is a legacy reuseport sock we don't shutdown, and we inform the
-   * cluster.
-   */
-  if( ep->ep_aflags & OO_THR_EP_AFLAG_LEGACY_REUSEPORT ) {
-    tcp_helper_cluster_legacy_os_shutdown(ep);
-    LOG_TV(ci_log("%s: Not shutting down legacy reuseport os sock",
-                  __FUNCTION__));
-    return 0;
-  }
-
   rc = sock->ops->shutdown (sock, how);
+  put_linux_socket(sock);
   LOG_TV(ci_log("%s: shutdown(%d) rc=%d", __FUNCTION__, how, rc));
 
   return rc;
@@ -771,17 +922,20 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
   struct socket *sock = get_linux_socket(ep);
   struct socket *newsock;
   int rc;
+  short socktype;
 
+  if( sock == NULL )
+    return -EINVAL;
+  socktype = sock->type;
   rc = kernel_accept(sock, &newsock, op->flags);
 
   /* Clear OS RX flag if we've got everything  */
-  oo_os_sock_status_bit_clear(s, OO_OS_STATUS_RX,
-                 ep->os_socket->file->f_op->poll(ep->os_socket->file,
-                                                 NULL) & POLLIN);
+  oo_os_sock_status_bit_clear_handled(s, sock->file, OO_OS_STATUS_RX);
+  put_linux_socket(sock);
 
   if( rc != 0 )
     return rc;
-  newsock->type = sock->type;
+  newsock->type = socktype;
 
   if( CI_USER_PTR_GET(op->addr) != NULL ) {
     char address[sizeof(struct sockaddr_in6)];
@@ -859,11 +1013,12 @@ extern int efab_tcp_helper_connect_os_sock(ci_private_t *priv, void *arg)
   addrlen = op->addrlen;
 
   /* Get at the OS socket backing the u/l socket for fd */
-  ep = ci_trs_get_valid_ep(priv->thr, priv->sock_id); 
+  ep = efab_priv_to_ep(priv);
+  s = SP_TO_SOCK(&priv->thr->netif, ep->id);
+
   sock = get_linux_socket(ep);
   if( sock == NULL )
     return -EINVAL;
-  s = SP_TO_SOCK(&priv->thr->netif, ep->id);
 
   rc = move_addr_to_kernel(CI_USER_PTR_GET(op->address), addrlen, k_address);
   if (rc >=0) {
@@ -873,6 +1028,7 @@ extern int efab_tcp_helper_connect_os_sock(ci_private_t *priv, void *arg)
       sock->file->f_flags |= O_NONBLOCK;
     rc = sock->ops->connect(sock, k_address, addrlen, sock->file->f_flags);
   }
+  put_linux_socket(sock);
 
   return rc;
 }
@@ -891,31 +1047,14 @@ int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,
   if( sock == NULL )
     return  -EINVAL;
   tcp_set_state(sock->sk, TCP_CLOSE);
+  put_linux_socket(sock);
   return 0;
 }
 
 
-extern int efab_tcp_helper_getsockopt(tcp_helper_resource_t* trs,
-				      oo_sp sock_id, int level, int optname,
-				      char* optval, int* optlen )
-{
-  tcp_helper_endpoint_t* ep;
-  struct socket* sock;
-  int rc = -EINVAL;
-
-  ep = ci_trs_get_valid_ep(trs, sock_id);
-  sock = get_linux_socket(ep);
-  if( sock == NULL )
-    return  -EINVAL;
-  rc = sock->ops->getsockopt(sock, level, optname, optval, optlen);
-  LOG_SV(ci_log("%s: rc=%d", __FUNCTION__, rc));
-  return rc;
-}
-
-
-extern int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs,
-				      oo_sp sock_id, int level, 
-				      int optname, char* optval, int optlen )
+int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs, oo_sp sock_id,
+                               int level, int optname, char* user_optval,
+                               int optlen)
 {
   tcp_helper_endpoint_t* ep;
   struct socket* sock;
@@ -924,13 +1063,14 @@ extern int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs,
   /* Get at the OS socket backing the u/l socket for fd.  NB. No need to
   ** get_file() here, since if the os_socket exists it is guaranteed to
   ** remain referenced until the u/l socket's [struct file] goes away.  And
-  ** it can't go away while we're in setsockopt.
+  ** it can't go away while we're in this ioctl.
   */
   ep = ci_trs_get_valid_ep(trs, sock_id);
   sock = get_linux_socket(ep);
   if( sock == NULL )
     return  -EINVAL;
-  rc = sock->ops->setsockopt(sock, level, optname, optval, optlen);
+  rc = sock_setsockopt(sock, level, optname, user_optval, optlen);
+  put_linux_socket(sock);
   LOG_SV(ci_log("%s: rc=%d", __FUNCTION__, rc));
 
   return rc;

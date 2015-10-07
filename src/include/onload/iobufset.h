@@ -134,6 +134,11 @@ ci_inline unsigned long oo_iobufset_pfn(struct oo_buffer_pages *pages, int offse
       ((offset >> PAGE_SHIFT) & ((1 << order) - 1));
 }
 
+/*! Find the number of pages in this iobufset. */
+ci_inline int oo_iobufset_npages(struct oo_buffer_pages *pages)
+{
+  return pages->n_bufs;
+}
 
 ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
 {
@@ -144,13 +149,15 @@ ci_inline void o_iobufset_resource_ref(struct oo_iobufset *iobrs)
 
 /* Flag is EF_USE_HUGE_PAGES value possibly or'ed with
  * OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED */
+#if CI_CFG_PKTS_AS_HUGE_PAGES
 #define OO_IOBUFSET_FLAG_HUGE_PAGE_TRY    0x1 /* EF_USE_HUGE_PAGES=1 */
 #define OO_IOBUFSET_FLAG_HUGE_PAGE_FORCE  0x2 /* EF_USE_HUGE_PAGES=2 */
+#define OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED 0x4
+#endif
 #define OO_IOBUFSET_FLAG_COMPOUND_PAGE_LIMIT 0x10 /* EF_COMPOUND_PAGES_MODE=1 */
 #define OO_IOBUFSET_FLAG_COMPOUND_PAGE_NONE  0x20 /* EF_COMPOUND_PAGES_MODE=2 */
 #define OO_IOBUFSET_FLAG_COMPOUND_SHIFT 4
 #define OO_IOBUFSET_FLAG_COMPOUND_MASK  0x30
-#define OO_IOBUFSET_FLAG_HUGE_PAGE_FAILED 0x1000
 
 /*!
  * Allocate oo_buffer_pagess.
@@ -171,21 +178,25 @@ oo_iobufset_pages_alloc(int nic_order, int *flags,
 extern void oo_iobufset_pages_release(struct oo_buffer_pages *);
 
 /*!
- * Map oo_buffer_pagess to protection domain and create iobufset resource.
+ * Map oo_buffer_pages to protection domain and create iobufset resource.
  *
- * \param pages      Pages to map. Grabs a reference on success.
- * \param pd         PD that "owns" these buffers. Grabs a reference
- *                   on success.
- * \param iobrs_out  pointer to return the new IO buffer set
- * \param hw_addrs   array to store hw addresses
+ * \param pages           Pages to map. Grabs a reference on success.
+ * \param pd              PD that "owns" these buffers. Grabs a reference
+ *                        on success.
+ * \param iobrs_out       pointer to return the new IO buffer set
+ * \param hw_addrs        array to store hw addresses
+ * \param reset_pending   Indicates that H/W-resource realloc is coming in the
+ *                        future, and so new H/W state should not be alloced.
  *
  * \return           status code; if non-zero, iobrs_out is unchanged
  */
 extern int
 oo_iobufset_resource_alloc(struct oo_buffer_pages *pages, struct efrm_pd *pd,
-                           struct oo_iobufset **iobrs_out, uint64_t *hw_addrs);
+                           struct oo_iobufset **iobrs_out, uint64_t *hw_addrs,
+                           int reset_pending);
 
-extern void oo_iobufset_resource_release(struct oo_iobufset *);
+extern void
+oo_iobufset_resource_release(struct oo_iobufset *, int reset_pending);
 
 extern int oo_iobufset_resource_remap_bt(struct oo_iobufset *iobrs,
                                          uint64_t *hw_addrs);

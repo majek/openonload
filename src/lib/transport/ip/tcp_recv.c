@@ -595,23 +595,15 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
  slow_path:
 
   if( flags & MSG_ERRQUEUE ) {
-    if( OO_PP_NOT_NULL(ts->timestamp_q.extract) ) {
+    if( ci_udp_recv_q_not_empty(&ts->timestamp_q) ) {
       ci_ip_pkt_fmt* pkt;
       struct onload_scm_timestamping_stream stamps;
       struct cmsg_state cmsg_state;
       int tx_hw_stamp_in_sync;
 
-      pkt = PKT_CHK_NNL(ni, ts->timestamp_q.extract);
-      if( pkt->tx_hw_stamp.tv_sec == CI_PKT_TX_HW_STAMP_CONSUMED ) {
-        if( OO_PP_IS_NULL(pkt->tsq_next) ) {
-          rinf.rc = -EAGAIN;
-          CI_SET_ERROR(rinf.rc, -rinf.rc);
-          goto unlock_out;   
-        }
-        ts->timestamp_q.extract = pkt->tsq_next;
-        pkt = PKT_CHK_NNL(ni, ts->timestamp_q.extract);
-        ci_assert(pkt->tx_hw_stamp.tv_sec != CI_PKT_TX_HW_STAMP_CONSUMED);
-      }
+      ci_rmb();
+      pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q);
+      ci_udp_recv_q_deliver(ni, &ts->timestamp_q, pkt);
 
       a->msg->msg_flags = 0;
       cmsg_state.msg = a->msg;
@@ -645,9 +637,6 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
       ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING_STREAM,
                   sizeof(stamps), &stamps);
 
-      /* Mark this packet/timestamp as consumed */
-      pkt->tx_hw_stamp.tv_sec = CI_PKT_TX_HW_STAMP_CONSUMED;
-
       ci_ip_cmsg_finish(&cmsg_state);
       a->msg->msg_flags |= MSG_ERRQUEUE;
 
@@ -656,7 +645,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     }
     rinf.rc = -EAGAIN;
     CI_SET_ERROR(rinf.rc, -rinf.rc);
-    goto unlock_out;
+    goto check_errno;
   }
 
   ci_assert(flags & MSG_OOB);

@@ -269,6 +269,23 @@ extern int ef_vi_set_alloc_from_pd(ef_vi_set* vi_set,
                                    struct ef_pd* pd, ef_driver_handle pd_dh,
                                    int n_vis);
 
+
+/*! \brief Free a virtual interface set
+**
+** \param vi_set    Memory for the allocated virtual interface set.
+** \param vi_set_dh The ef_driver_handle to associate with the virtual
+**                  interface set.
+**
+** \return 0 on success, or a negative error code.
+**
+** Free a virtual interface set.
+**
+** To free up all resources, you must also close the associated driver
+** handle.
+*/
+extern int ef_vi_set_free(ef_vi_set* vi_set, ef_driver_handle vi_set_dh);
+
+
 /*! \brief Allocate a virtual interface from a virtual interface set
 **
 ** \param vi              Memory for the allocated virtual interface.
@@ -478,6 +495,8 @@ extern int ef_filter_spec_set_ip4_full(ef_filter_spec* filter_spec,
 ** The Virtual LAN filter can be combined with other filters as follows:
 ** - Ethernet MAC Address filters: supported.
 **   See ef_filter_spec_set_eth_local().
+** - EtherType filters: supported.
+** - IP protocol filters: supported.
 ** - IP4 filters:
 **   - 7000-series adapter with full feature firmware: supported.
 **     Packets that match the IP4 filter will be received only if they also
@@ -663,7 +682,59 @@ extern int ef_filter_spec_set_block_kernel(ef_filter_spec* filter_spec);
 **
 ** This filter is not supported by 5000-series and 6000-series adapters.
 */
-extern int ef_filter_spec_set_block_kernel_multicast(ef_filter_spec* filter_spec);
+extern int
+ef_filter_spec_set_block_kernel_multicast(ef_filter_spec* filter_spec);
+
+
+/*! \brief Add an EtherType filter on the filter specification
+**
+** \param filter_spec       The ef_filter_spec on which to set the filter.
+** \param ether_type_be16   The EtherType on which to filter, in network order.
+**
+** \return 0 on success, or a negative error code:\n
+**         -EPROTONOSUPPORT indicates that a filter is already set that is
+**         incompatible with the new filter.
+**
+** Add an EtherType filter on the filter specification
+**
+** The EtherType filter can be combined with other filters as follows:
+** - Ethernet MAC Address filters: supported.
+**   See ef_filter_spec_set_eth_local().
+** - Other filters: not supported, -EPROTONOSUPPORT is returned.
+**
+** This filter is not supported by 5000-series and 6000-series adapters.
+** 7000-series adapters require a firmware version of at least v4.6 for full
+** support for these filters.  v4.5 firmware supports such filters only
+** when not combined with a MAC address.  Insertion of such filters on firmware
+** versions that do not support them will fail.
+*/
+extern int
+ef_filter_spec_set_eth_type(ef_filter_spec *filter_spec,
+			    uint16_t ether_type_be16);
+
+
+/*! \brief Add an IP protocol filter on the filter specification
+**
+** \param filter_spec   The ef_filter_spec on which to set the filter.
+** \param ip_proto      The IP protocol on which to filter.
+**
+** \return 0 on success, or a negative error code:\n
+**         -EPROTONOSUPPORT indicates that a filter is already set that is
+**         incompatible with the new filter.
+**
+** Add an IP protocol filter on the filter specification
+**
+** The IP protocol filter can be combined with other filters as follows:
+** - Ethernet MAC Address filters: supported.
+**   See ef_filter_spec_set_eth_local().
+** - Other filters: not supported, -EPROTONOSUPPORT is returned.
+**
+** This filter is not supported by 5000-series and 6000-series adapters.
+** 7000-series adapters require a firmware version of at least v4.5.  Insertion
+** of such filters on firmware versions that do not support them will fail.
+*/
+extern int
+ef_filter_spec_set_ip_proto(ef_filter_spec *filter_spec, uint8_t ip_proto);
 
 
 /*! \brief Set a Block Kernel Unicast filter on the filter specification

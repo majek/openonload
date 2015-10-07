@@ -30,6 +30,7 @@
 #define __CI_APP_TESTAPP_H__
 
 #include <ci/net/ethernet.h>
+#include <ci/net/sockopts.h> /* for ci_tcp_info */
 
 
 /**********************************************************************
@@ -185,8 +186,7 @@ extern void ci_fd_dump_all(int max);
   */
 extern void ci_dummy_work(unsigned usec);
 
-struct tcp_info;
-extern void ci_dump_tcp_info(ci_log_fn_t, const struct tcp_info*);
+extern void ci_dump_tcp_info(ci_log_fn_t, const struct ci_tcp_info*);
 
 
 #endif  /* __CI_APP_TESTAPP_H__ */

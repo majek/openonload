@@ -298,6 +298,11 @@ static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
     ev_out->tx_timestamp.ts_nsec = qs->ts_nsec;
     EF_VI_DEBUG(qs->ts_nsec = EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
     ev_out->tx_timestamp.ts_sec = timestamp_extract(*ev);
+    ev_out->tx_timestamp.ts_nsec += evq->tx_ts_correction_ns;
+    if( ev_out->tx_timestamp.ts_nsec >= 1000000000 ) {
+      ev_out->tx_timestamp.ts_nsec -= 1000000000;
+      ev_out->tx_timestamp.ts_sec += 1;
+    }
     /* One TX pkt could have spanned multiple
      * descriptors. Iterate to find the one that actually
      * is finished. */
@@ -490,6 +495,14 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev,
     ev_out->sw.data = CI_DWORD_VAL(*ev);
     break;
   }
+  case MCDI_EVENT_CODE_TX_FLUSH:
+  case MCDI_EVENT_CODE_RX_FLUSH:
+    /* Normally we will stop polling before flushing. The exception is the case
+     * where we issue an emergency flush in response to a device-removal
+     * notification. At user-level there is no clean way to determine whether
+     * this has happened, so just swallow the event in NDEBUG builds. */
+    LOG(ef_log("%s: Saw flush in poll (code=%u)", __FUNCTION__, code));
+    break;
   default:
     ef_log("%s: ERROR: Unhandled mcdi event code=%u", __FUNCTION__,
            code);
@@ -572,7 +585,7 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 #endif
     evq->ep_state->evq.evq_ptr += sizeof(ef_vi_event);
 
-    if (evs_len < EF_VI_EVENT_POLL_MIN_EVS)
+    if (evs_len == 0)
       break;
 
     pev = EF_VI_EVENT_PTR(evq, 0);
@@ -642,6 +655,10 @@ ef_vi_inline int ef10_unbundle_one_packet(ef_vi* vi,
      &ts, &ts_flags);
   pkt->ps_ts_sec = ts.tv_sec;
   pkt->ps_ts_nsec = ts.tv_nsec;
+  /* Zeroing space after header to avoid it being interpreted as an option
+   * record.
+   */
+  *(uint32_t*)(pkt + 1) = 0;
   EF_VI_ASSERT(EF_VI_PS_FLAG_CLOCK_SET ==
                EF_VI_SYNC_FLAG_CLOCK_SET);
   EF_VI_ASSERT(EF_VI_PS_FLAG_CLOCK_IN_SYNC ==
@@ -659,7 +676,19 @@ ef_vi_inline int ef10_unbundle_one_packet(ef_vi* vi,
 
 ef_vi_inline int ef_ps_max_credits(ef_vi* vi)
 {
-  return ef_eventq_capacity(vi) / EF_VI_PS_MAX_EVENTS_PER_CREDIT - 1;
+  int events_available, max_credit;
+  int tx_reservation = ef_vi_transmit_capacity(vi);
+  /* If TX timestamping is enabled, we get three events for every transmit. */
+  if( vi->vi_flags & EF_VI_TX_TIMESTAMPS )
+    tx_reservation *= 3;
+  /* Leaving extra allowance for periodic timesync events. These arrive at 4
+   * per second, so 100 gives us 25 seconds of leeway.
+   */
+  events_available = ef_eventq_capacity(vi) - tx_reservation - 100;
+  max_credit = events_available / EF_VI_PS_MAX_EVENTS_PER_CREDIT;
+  if( max_credit < 0 )
+    max_credit = 0;
+  return max_credit;
 }
 
 

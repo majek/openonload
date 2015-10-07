@@ -711,9 +711,9 @@ static inline void efx_nic_notify_rx_desc(struct efx_rx_queue *rx_queue)
 {
 	rx_queue->efx->type->rx_write(rx_queue);
 }
-static inline void efx_nic_generate_fill_event(struct efx_rx_queue *rx_queue)
+static inline int efx_nic_generate_fill_event(struct efx_rx_queue *rx_queue)
 {
-	rx_queue->efx->type->rx_defer_refill(rx_queue);
+	return rx_queue->efx->type->rx_defer_refill(rx_queue);
 }
 
 /* Event data path */
@@ -762,7 +762,7 @@ void efx_farch_rx_init(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_fini(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_remove(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_write(struct efx_rx_queue *rx_queue);
-void efx_farch_rx_defer_refill(struct efx_rx_queue *rx_queue);
+int efx_farch_rx_defer_refill(struct efx_rx_queue *rx_queue);
 int efx_farch_ev_probe(struct efx_channel *channel);
 int efx_farch_ev_init(struct efx_channel *channel);
 void efx_farch_ev_fini(struct efx_channel *channel);

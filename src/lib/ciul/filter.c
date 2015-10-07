@@ -44,6 +44,8 @@ enum ef_filter_type {
   EF_FILTER_BLOCK_KERNEL_UNICAST  = 0x200,
   EF_FILTER_BLOCK_KERNEL_MULTICAST  = 0x400,
   EF_FILTER_TX_PORT_SNIFF       = 0x800,
+  EF_FILTER_IP_PROTO            = 0x1000,
+  EF_FILTER_ETHER_TYPE          = 0x2000,
 };
 
 
@@ -94,7 +96,8 @@ int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id)
 {
   if (fs->type != 0 && fs->type != EF_FILTER_IP4 &&
       fs->type != EF_FILTER_MISMATCH_MULTICAST &&
-      fs->type != EF_FILTER_MISMATCH_UNICAST)
+      fs->type != EF_FILTER_MISMATCH_UNICAST &&
+      fs->type != EF_FILTER_IP_PROTO && fs->type != EF_FILTER_ETHER_TYPE)
     return -EPROTONOSUPPORT;
   fs->type |= EF_FILTER_VLAN;
   fs->data[5] = vlan_id;
@@ -105,9 +108,10 @@ int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id)
 int ef_filter_spec_set_eth_local(ef_filter_spec *fs, int vlan_id,
 				 const void *mac)
 {
-  if (fs->type != 0)
+  if (fs->type != 0 && fs->type != EF_FILTER_IP_PROTO &&
+      fs->type != EF_FILTER_ETHER_TYPE)
     return -EPROTONOSUPPORT;
-  fs->type = EF_FILTER_MAC;
+  fs->type |= EF_FILTER_MAC;
   fs->data[0] = vlan_id;
   memcpy(&fs->data[1], mac, 6);
   return 0;
@@ -195,6 +199,27 @@ int ef_filter_spec_set_block_kernel_unicast(ef_filter_spec *fs)
   return 0;
 }
 
+#define EF_FILTER_DATA_INDEX_IPPROTO_OR_ETHERTYPE  3
+
+int ef_filter_spec_set_ip_proto(ef_filter_spec *fs, uint8_t ip_proto)
+{
+  if (fs->type != 0 && fs->type != EF_FILTER_VLAN && fs->type != EF_FILTER_MAC)
+    return -EPROTONOSUPPORT;
+  fs->type |= EF_FILTER_IP_PROTO;
+  fs->data[EF_FILTER_DATA_INDEX_IPPROTO_OR_ETHERTYPE] = ip_proto;
+  return 0;
+}
+
+
+int ef_filter_spec_set_eth_type(ef_filter_spec *fs, uint16_t ether_type_be16)
+{
+  if (fs->type != 0 && fs->type != EF_FILTER_VLAN && fs->type != EF_FILTER_MAC)
+    return -EPROTONOSUPPORT;
+  fs->type |= EF_FILTER_ETHER_TYPE;
+  fs->data[EF_FILTER_DATA_INDEX_IPPROTO_OR_ETHERTYPE] = ether_type_be16;
+  return 0;
+}
+
 
 /**********************************************************************
  * Add and remove filters.
@@ -211,28 +236,61 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
   op.u.filter_add.flags =
     ( (fs->flags & EF_FILTER_FLAG_MCAST_LOOP_RECEIVE) ?
       CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE : 0);
+
+  /* Common spec-population for flags shared by multiple filter-types. */
+  if (fs->type & EF_FILTER_MAC) {
+    op.u.filter_add.mac.vlan_id = fs->data[0];
+    memcpy(op.u.filter_add.mac.mac, &fs->data[1], 6);
+  }
+  else {
+    if (fs->type & EF_FILTER_IP4) {
+      op.u.filter_add.ip4.protocol = fs->data[0];
+      op.u.filter_add.ip4.host_be32 = fs->data[1];
+      op.u.filter_add.ip4.port_be16 = fs->data[2];
+      op.u.filter_add.ip4.rhost_be32 = fs->data[3];
+      op.u.filter_add.ip4.rport_be16 = fs->data[4];
+    }
+    if (fs->type & EF_FILTER_VLAN)
+      op.u.filter_add.mac.vlan_id = fs->data[5];
+  }
+
+  /* EF_FILTER_IP_PROTO and EF_FILTER_ETHER_TYPE are mutually exclusive with
+   * EF_FILTER_IP4.  They may be combined with at most one of EF_FILTER_MAC or
+   * EF_FILTER_VLAN, however. */
+  if (fs->type & EF_FILTER_IP_PROTO)
+    op.u.filter_add.ip4.protocol =
+      fs->data[EF_FILTER_DATA_INDEX_IPPROTO_OR_ETHERTYPE];
+  else if (fs->type & EF_FILTER_ETHER_TYPE)
+    op.u.filter_add.u.in.ether_type_be16 =
+      fs->data[EF_FILTER_DATA_INDEX_IPPROTO_OR_ETHERTYPE];
+
   switch (fs->type) {
   case EF_FILTER_IP4 | EF_FILTER_VLAN:
     op.op = CI_RSOP_FILTER_ADD_IP4_VLAN;
-    op.u.filter_add.ip4.protocol = fs->data[0];
-    op.u.filter_add.ip4.host_be32 = fs->data[1];
-    op.u.filter_add.ip4.port_be16 = fs->data[2];
-    op.u.filter_add.ip4.rhost_be32 = fs->data[3];
-    op.u.filter_add.ip4.rport_be16 = fs->data[4];
-    op.u.filter_add.mac.vlan_id = fs->data[5];
     break;
   case EF_FILTER_IP4:
     op.op = CI_RSOP_FILTER_ADD_IP4;
-    op.u.filter_add.ip4.protocol = fs->data[0];
-    op.u.filter_add.ip4.host_be32 = fs->data[1];
-    op.u.filter_add.ip4.port_be16 = fs->data[2];
-    op.u.filter_add.ip4.rhost_be32 = fs->data[3];
-    op.u.filter_add.ip4.rport_be16 = fs->data[4];
     break;
   case EF_FILTER_MAC:
     op.op = CI_RSOP_FILTER_ADD_MAC;
-    op.u.filter_add.mac.vlan_id = fs->data[0];
-    memcpy(op.u.filter_add.mac.mac, &fs->data[1], 6);
+    break;
+  case EF_FILTER_MAC | EF_FILTER_IP_PROTO:
+    op.op = CI_RSOP_FILTER_ADD_MAC_IP_PROTO;
+    break;
+  case EF_FILTER_MAC | EF_FILTER_ETHER_TYPE:
+    op.op = CI_RSOP_FILTER_ADD_MAC_ETHER_TYPE;
+    break;
+  case EF_FILTER_IP_PROTO | EF_FILTER_VLAN:
+    op.op = CI_RSOP_FILTER_ADD_IP_PROTO_VLAN;
+    break;
+  case EF_FILTER_ETHER_TYPE | EF_FILTER_VLAN:
+    op.op = CI_RSOP_FILTER_ADD_ETHER_TYPE_VLAN;
+    break;
+  case EF_FILTER_IP_PROTO:
+    op.op = CI_RSOP_FILTER_ADD_IP_PROTO;
+    break;
+  case EF_FILTER_ETHER_TYPE:
+    op.op = CI_RSOP_FILTER_ADD_ETHER_TYPE;
     break;
   case EF_FILTER_ALL_UNICAST:
     op.op = CI_RSOP_FILTER_ADD_ALL_UNICAST;
@@ -242,14 +300,12 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
     break;
   case EF_FILTER_MISMATCH_UNICAST | EF_FILTER_VLAN:
     op.op = CI_RSOP_FILTER_ADD_MISMATCH_UNICAST_VLAN;
-    op.u.filter_add.mac.vlan_id = fs->data[5];
     break;
   case EF_FILTER_MISMATCH_UNICAST:
     op.op = CI_RSOP_FILTER_ADD_MISMATCH_UNICAST;
     break;
   case EF_FILTER_MISMATCH_MULTICAST | EF_FILTER_VLAN:
     op.op = CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST_VLAN;
-    op.u.filter_add.mac.vlan_id = fs->data[5];
     break;
   case EF_FILTER_MISMATCH_MULTICAST:
     op.op = CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST;
@@ -287,7 +343,7 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
       filter_cookie_out->filter_id = -1;
     else
       filter_cookie_out->filter_id = 
-        op.u.filter_add.out_filter_id;
+        op.u.filter_add.u.out.filter_id;
     filter_cookie_out->filter_type = fs->type;
   }
   return rc;

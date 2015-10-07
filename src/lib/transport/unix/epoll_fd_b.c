@@ -179,10 +179,6 @@ static void citp_epollb_dtor(citp_fdinfo* fdi, int fdt_locked)
       CITP_FDTABLE_UNLOCK();
   }
 }
-static int citp_epollb_close(citp_fdinfo *fdi)
-{
-  return 0;
-}
 
 int citp_epollb_ioctl(citp_fdinfo *fdi, int cmd, void *arg)
 {
@@ -200,7 +196,6 @@ citp_protocol_impl citp_epollb_protocol_impl = {
     /* Important members -- users will realy call it. */
     .dup         = citp_epollb_dup,
     .dtor        = citp_epollb_dtor,
-    .close       = citp_epollb_close,
     .ioctl       = citp_epollb_ioctl,
 
     /* Poll/select for epollfd is done via kernel. */
@@ -230,7 +225,6 @@ citp_protocol_impl citp_epollb_protocol_impl = {
 #endif
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
-    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,

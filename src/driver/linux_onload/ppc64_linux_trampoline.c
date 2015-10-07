@@ -474,12 +474,10 @@ int efab_linux_trampoline_ctor(int no_sct)
                 linux_trampoline_ppc64_intercept_syscall(__NR_close,
                                                          efab_linux_trampoline_close64,
                                                          efab_linux_trampoline_close32);
-#ifdef OO_CAN_HANDLE_TERMINATION
             state.replace_exit_group =
                 linux_trampoline_ppc64_intercept_syscall(__NR_exit_group,
                                                          efab_linux_trampoline_exit_group,
                                                          efab_linux_trampoline_exit_group);
-#endif
             state.replace_rt_sigaction =
                 linux_trampoline_ppc64_intercept_syscall(__NR_rt_sigaction,
                                                          efab_linux_trampoline_sigaction,

@@ -29,10 +29,6 @@
 #include "ip_internal.h"
 #include <ci/internal/ip_stats.h>
 #include <ci/net/sockopts.h>
-#ifndef __KERNEL__
-# include <limits.h>
-# include <net/if.h>
-#endif
 
 
 /* 
@@ -54,6 +50,10 @@
 #endif
 
 #define REPORT_CASE(sym) case sym:
+
+#ifndef __KERNEL__
+#include <limits.h>
+#include <net/if.h>
 
 /* Emulate Linux mapping between priority and TOS field */
 #include <linux/types.h>
@@ -79,7 +79,6 @@ static unsigned ci_tos2priority[] = {
 };
 
 
-#ifndef __KERNEL__
 int ci_sock_rx_bind2dev(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
 {
   ci_ifid_t base_ifindex;
@@ -169,79 +168,16 @@ static int ci_sock_bindtodevice(ci_netif* ni, ci_sock_cmn* s,
    */
   return CI_SOCKET_HANDOVER;
 }
-#else
-static int ci_sock_bindtodevice(ci_netif* ni, ci_sock_cmn* s,
-                                const void* optval, socklen_t optlen)
-{
-  /* ?? TODO: -- need kernel version of if_nametoindex() */
-  return CI_SOCKET_HANDOVER;
-}
-#endif
 
 
-#if defined(__KERNEL__) && defined(__linux__)
-int ci_khelper_getsockopt(ci_netif* ni,  oo_sp sock_p, int level, 
-			  int optname, char* optval, int* optlen )
-{
-  tcp_helper_endpoint_t* ep;
-  struct file* file;
-  struct inode* inode;
-  int rc = -EINVAL;
 
-  ci_assert(ni != NULL);
-
-  ep = ci_netif_get_valid_ep(ni, sock_p);
-  if( ep->os_socket == NULL )
-    return -EINVAL;
-  file = ep->os_socket->file;
-  inode = file->f_dentry->d_inode;
-  if( inode != NULL ) {
-    struct socket* sock = SOCKET_I(inode);
-    if( sock != NULL ) {
-      ci_assert(sock->file == file);
-      rc = sock->ops->getsockopt(sock, level, optname, optval, optlen);
-      LOG_SV(ci_log("%s: rc=%d", __FUNCTION__, rc));
-    }
-  }
-  return rc;
-}
-
-
-int ci_khelper_setsockopt(ci_netif* ni, oo_sp sock_p, int level, 
-			  int optname, const void* optval, int optlen )
-{
-  tcp_helper_endpoint_t* ep;
-  struct file* file;
-  struct inode* inode;
-  int rc = -EINVAL;
-
-  ci_assert(ni != NULL);
-
-  ep = ci_netif_get_valid_ep(ni, sock_p);
-  if( ep->os_socket == NULL )
-    return -EINVAL;
-  file = ep->os_socket->file;
-  inode = file->f_dentry->d_inode;
-  if( inode != NULL ) {
-    struct socket* sock = SOCKET_I(inode);
-    if( sock != NULL ) {
-      ci_assert(sock->file == file);
-      rc = sock->ops->setsockopt(sock, level, optname, (char*) optval, optlen);
-      LOG_SV(ci_log("%s: rc=%d", __FUNCTION__, rc));
-    }
-  }
-  return rc;
-}
-#endif
-
-#ifndef __KERNEL__
 /* Get OS socket option value */
 ci_inline int
-ci_get_os_sockopt(citp_socket *ep, ci_fd_t fd, int level, int optname, 
-                  void *optval, socklen_t *optlen )
+ci_get_os_sockopt(ci_fd_t fd, int level, int optname, void *optval,
+                  socklen_t *optlen )
 {
   int rc;
-  ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
+  ci_fd_t os_sock = ci_get_os_sock_fd(fd);
 
   if (CI_IS_VALID_SOCKET(os_sock) ) { 
     rc = ci_sys_getsockopt(os_sock, level, optname, optval, optlen);
@@ -254,21 +190,7 @@ ci_get_os_sockopt(citp_socket *ep, ci_fd_t fd, int level, int optname,
     RET_WITH_ERRNO(ENOPROTOOPT); 
   }
 }
-#else
-/* Get OS socket option value 
- * [fd] is unused
- */
-ci_inline int
-ci_get_os_sockopt(citp_socket *ep, ci_fd_t fd, int level, int optname, 
-                  void *optval, socklen_t *optlen )
-{
-  int rc;
-  
-  rc = ci_khelper_getsockopt( ep->netif,SC_SP(ep->s), level, optname, optval, 
-			      optlen );
-  return rc;
-}
-#endif
+#endif /* ifndef __KERNEL__ */
 
 /*
  * The handlers in this module must conform to the following:
@@ -280,7 +202,7 @@ ci_get_os_sockopt(citp_socket *ep, ci_fd_t fd, int level, int optname,
  */
 
 /* Handler for common getsockopt:SOL_IP options. */
-int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
+int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
                    int optname, void *optval, socklen_t *optlen )
 {
   unsigned u;
@@ -292,7 +214,7 @@ int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
   case IP_OPTIONS:
     /* gets the IP options to be sent with every packet from this socket */
     LOG_U(ci_log("%s: "NS_FMT" unhandled IP_OPTIONS", __FUNCTION__,
-                 NS_PRI_ARGS(ep->netif, s)));
+                 NS_PRI_ARGS(ni, s)));
     goto fail_unsup;
 
   case IP_TOS:
@@ -313,15 +235,22 @@ int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
 
   case IP_MTU:
     if( s->b.state == CI_TCP_STATE_UDP ) {
+#ifndef __KERNEL__
       if( sock_raddr_be32(s) != 0 ) {
         ci_ip_cache_invalidate(&s->pkt);
-        cicp_user_retrieve(ep->netif, &s->pkt, &s->cp);
-        if( cicp_ip_cache_is_valid(CICP_HANDLE(ep->netif), &s->pkt) ) {
+        cicp_user_retrieve(ni, &s->pkt, &s->cp);
+        if( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &s->pkt) ) {
           u = s->pkt.mtu;
           break;
         }
       }
-      return ci_get_os_sockopt(ep, fd, IPPROTO_IP, optname, optval, optlen);
+      return ci_get_os_sockopt(fd, IPPROTO_IP, optname, optval, optlen);
+#else
+      /* We should only be calling this function in the kernel for TCP
+       * sockets.
+       */
+      ci_assert(0);
+#endif
     }
     /* gets the current known path MTU of the current socket */
     /*! \todo Can we improve on the flagging here (other than
@@ -407,6 +336,12 @@ int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
     u = !!(s->so.so_debug & CI_SOCKOPT_FLAG_IP_RECVERR);
     break;
 
+#ifdef IP_TRANSPARENT
+  case IP_TRANSPARENT:
+    u = !!(s->s_flags & CI_SOCK_FLAG_TPROXY);
+    break;
+#endif
+
 
   case IP_RECVTTL:
     u = !!(s->cmsg_flags & CI_IP_CMSG_TTL);
@@ -420,11 +355,20 @@ int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
     u = !!(s->cmsg_flags & CI_IP_CMSG_RETOPTS);
     break;
 
+#ifndef __KERNEL__
   /* UDP is handled in UDP-specific functions. */
   REPORT_CASE(IP_MULTICAST_IF)
   REPORT_CASE(IP_MULTICAST_LOOP)
   REPORT_CASE(IP_MULTICAST_TTL)
-    return ci_get_os_sockopt(ep, fd, IPPROTO_IP, optname, optval, optlen);
+    /* Doing a getsockopt of these options on a TCP socket seems sufficiently
+     * unlikely that I'm just returning an error rather than handling this
+     * properly if there's no os socket to give us the answer.
+     */
+    if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED )
+      return ci_get_os_sockopt(fd, IPPROTO_IP, optname, optval, optlen);
+    else
+      RET_WITH_ERRNO(ENOPROTOOPT);
+#endif
 
   case IP_PKTINFO:
     u = !!(s->cmsg_flags & CI_IP_CMSG_PKTINFO);
@@ -439,25 +383,25 @@ int ci_get_sol_ip( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
 
  fail_inval:
   LOG_SC( log("%s: "NS_FMT" invalid option: %i (EINVAL)",
-             __FUNCTION__, NS_PRI_ARGS(ep->netif, s), optname));
+             __FUNCTION__, NS_PRI_ARGS(ni, s), optname));
   RET_WITH_ERRNO(EINVAL);
 
  fail_noopt:
   LOG_SC( log("%s: "NS_FMT" unimplemented/bad option: %i (ENOPROTOOPT)",
-             __FUNCTION__, NS_PRI_ARGS(ep->netif, s), optname));
+             __FUNCTION__, NS_PRI_ARGS(ni, s), optname));
 
  fail_unsup:
   RET_WITH_ERRNO(ENOPROTOOPT);
 }
 
+#ifndef __KERNEL__
 #if CI_CFG_FAKE_IPV6
-# ifndef __KERNEL__ 
 /* Handler for common getsockopt:SOL_IPV6 options. */
-int ci_get_sol_ip6( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
-                    int optname, void *optval, socklen_t *optlen )
+int ci_get_sol_ip6(ci_sock_cmn* s, ci_fd_t fd, int optname, void *optval,
+                   socklen_t *optlen )
 {
   int rc;
-  ci_fd_t os_sock = ci_get_os_sock_fd (ep, fd);
+  ci_fd_t os_sock = ci_get_os_sock_fd(fd);
 
   if (CI_IS_VALID_SOCKET(os_sock) ) { 
     rc = ci_sys_getsockopt( os_sock, IPPROTO_IPV6, optname, optval, optlen);
@@ -470,20 +414,7 @@ int ci_get_sol_ip6( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
     RET_WITH_ERRNO(ENOPROTOOPT); 
   }
 }
-# else /* is kernel */
-/* Get OS socket option value 
- * [fd] is unused
- */
-int ci_get_sol_ip6( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
-		    int optname, void *optval, socklen_t *optlen )
-{
-  int rc;
-  
-  rc = ci_khelper_getsockopt( ep->netif, SC_SP(ep->s), IPPROTO_IPV6, 
-			      optname, optval, optlen );
-  return rc;
-}
-# endif
+#endif
 #endif
 
 /* Handler for common getsockopt:SOL_SOCKET options. */
@@ -683,6 +614,15 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
     goto u_out;
   }
 
+#ifdef SO_SELECT_ERR_QUEUE
+  case SO_SELECT_ERR_QUEUE:
+    if( s->s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE )
+      u = 1;
+    else
+      u = 0;
+    goto u_out;
+#endif
+
   default: /* Unexpected & known invalid options end up here */
     goto fail_noopt;
   }
@@ -709,6 +649,7 @@ int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
   RET_WITH_ERRNO(ENOPROTOOPT);
 }
 
+#ifndef __KERNEL__
 /* Handler for common setsockopt:SOL_IP handlers */
 int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
                    int optname, const void *optval, socklen_t optlen)
@@ -774,6 +715,7 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     }
 
     s->cp.ip_ttl = (ci_uint8) v;
+    s->s_flags |= CI_SOCK_FLAG_SET_IP_TTL;
     if( ! CI_IP_IS_MULTICAST(s->pkt.ip.ip_daddr_be32) )
       s->pkt.ip.ip_ttl = s->cp.ip_ttl;
     if( s->b.state == CI_TCP_STATE_UDP) {
@@ -855,9 +797,57 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
       goto fail_fault;
     if (ci_get_optval(optval, optlen))
       s->so.so_debug |= CI_SOCKOPT_FLAG_IP_RECVERR;
-    else
+    else {
       s->so.so_debug &= ~CI_SOCKOPT_FLAG_IP_RECVERR;
+      if( s->os_sock_status & OO_OS_STATUS_ERR ) {
+        oo_sp sock_id = SC_SP(s);
+        oo_resource_op(ci_netif_get_driver_handle(netif),
+                       OO_IOC_OS_POLLERR_CLEAR, &sock_id);
+      }
+    }
     break;
+
+#ifdef IP_TRANSPARENT
+  case IP_TRANSPARENT:
+    if( (rc = opt_not_ok(optval, optlen, char)) )
+      goto fail_fault;
+    if (ci_get_optval(optval, optlen)) {
+      if( (NI_OPTS(netif).scalable_filter_enable !=
+           CITP_SCALABLE_FILTERS_ENABLE) ||
+          (NI_OPTS(netif).scalable_filter_mode &
+           CITP_SCALABLE_MODE_TPROXY_ACTIVE) == 0 ||
+          ! (s->b.state & CI_TCP_STATE_TCP) )
+        goto handover;
+      if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED ) {
+        /* The transparent proxy socket option must be set before we acquire
+         * an os socket.
+         */
+        rc = -EINVAL;
+        goto fail_fault;
+      }
+      s->s_flags |= CI_SOCK_FLAG_TPROXY;
+    }
+    else {
+      /* If we've bound the socket we've inserted only sw filters and we
+       * have no backing socket.  Fixing up the state would be hard, and we
+       * don't see an obvious reason for wanting to do this, so for now
+       * we're not supporting it.
+       *
+       * Sockets with IP_TRANSPARENT must be explicitly bound so we can
+       * simply check the bound flag to detect this case.
+       */
+      if( (s->s_flags & CI_SOCK_FLAG_TPROXY) &&
+          (s->s_flags & CI_SOCK_FLAG_BOUND) ) {
+        rc = -EINVAL;
+        goto fail_fault;
+      }
+      else {
+        s->s_flags &= ~CI_SOCK_FLAG_TPROXY;
+      }
+    }
+    break;
+#endif
+
 
 
   case IP_RECVTTL:
@@ -921,6 +911,14 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
              __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
  fail_unhan:
   RET_WITH_ERRNO( ENOPROTOOPT );
+
+#ifdef IP_TRANSPARENT
+ handover:
+  LOG_SC(log("%s: "NS_FMT" can't handle option %i; handing over",
+             __FUNCTION__, NS_PRI_ARGS(netif, s), optname));
+  /* This is not actually a failure, so don't set errno. */
+  return CI_SOCKET_HANDOVER;
+#endif
 }
 
 #if CI_CFG_FAKE_IPV6
@@ -1243,6 +1241,15 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
             "Try setting EF_RX_TIMESTAMPING.");
     }
 
+
+    /* SOF_TIMESTAMPING_OPT_ID support for TX */
+    if( v & ONLOAD_SOF_TIMESTAMPING_OPT_ID &&
+        ~s->timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_ID ) {
+      s->ts_key = 0;
+      if( s->b.state & CI_TCP_STATE_TCP_CONN )
+        s->ts_key = SOCK_TO_TCP(s)->snd_una;
+    }
+
     rc = 0;
     s->timestamping_flags = v;
     if ( (s->b.state & CI_TCP_STATE_TCP) &&
@@ -1256,6 +1263,17 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
     else
       s->cmsg_flags &= ~CI_IP_CMSG_TIMESTAMPING;
     break;
+
+#ifdef SO_SELECT_ERR_QUEUE
+  case SO_SELECT_ERR_QUEUE:
+    if( (rc = opt_not_ok(optval, optlen, char)) )
+      goto fail_inval;
+    if( ci_get_optval(optval, optlen) )
+      ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_SELECT_ERR_QUEUE_BIT);
+    else
+      ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_SELECT_ERR_QUEUE_BIT);
+    break;
+#endif
 
   default:
     /* SOL_SOCKET options that are defined to fail with ENOPROTOOPT:
@@ -1296,18 +1314,7 @@ int ci_setsockopt_os_fail_ignore(ci_netif* ni, ci_sock_cmn* s, int err,
                                  int level, int optname,
                                  const void* optval, socklen_t optlen)
 {
-  if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) ) {
-    if( err == ENOPROTOOPT ) {
-      /* We support reuseport where the OS doesn't, so set a flag to say
-       * that's what we're doing, and hide the error.
-       */
-      s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
-      return 1;
-    }
-    else
-      return 0;
-  }
-  else if( level == SOL_SOCKET && optname == ONLOAD_SO_BUSY_POLL &&
+  if( level == SOL_SOCKET && optname == ONLOAD_SO_BUSY_POLL &&
            optlen >= sizeof(int) ) 
     return 1;
   else if( (s->b.state & CI_TCP_STATE_TCP) && level == SOL_SOCKET &&
@@ -1318,6 +1325,12 @@ int ci_setsockopt_os_fail_ignore(ci_netif* ni, ci_sock_cmn* s, int err,
   return 0;
 }
 
+
+/* This function is the common handler for SOL_SOCKET level options that do
+ * not require the stack lock to be held.  It is safe to call this function
+ * with the lock held though, and this is done in the TCP case, as all options
+ * on a TCP socket must be set with the stack lock held.
+ */
 int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
 			     const void* optval, socklen_t optlen)
 {
@@ -1331,7 +1344,7 @@ int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
       goto fail_inval;
     timeo_usec = tv->tv_sec * 1000000ULL + tv->tv_usec;
     if( timeo_usec == 0 )
-      s->so.sndtimeo_msec = 0;
+      s->so.rcvtimeo_msec = 0;
     else if( timeo_usec > 0xffffffffULL * 1000 )
       s->so.rcvtimeo_msec = -1; /* some weeks = MAX_UINT */
     else if( timeo_usec < 1000 )
@@ -1366,5 +1379,6 @@ int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
  fail_inval:
   RET_WITH_ERRNO(-rc);
 }
+#endif /* ifndef __KERNEL__ */
 
 /*! \cidoxg_end */

@@ -49,6 +49,11 @@
 #include <ci/efrm/resource.h>
 #include <ci/efrm/vi_allocation.h>
 
+/* EFRM_RSS_MODE_ID_MAX needs to be large engough
+ * to accomodate all modes.
+ * See EFRM_RSS_MODE_ID in vi_set.h
+ */
+#define EFRM_RSS_MODE_ID_MAX 1
 
 struct efrm_vi_set {
 	struct efrm_resource      rs;
@@ -57,7 +62,7 @@ struct efrm_vi_set {
 	spinlock_t                allocation_lock;
 	struct completion         allocation_completion;
 	uint64_t                  free;
-	int                       rss_context;
+	int                       rss_context[EFRM_RSS_MODE_ID_MAX + 1];
 	int                       n_vis;
 	int                       n_vis_flushing;
 	int                       n_flushing_waiters;

@@ -44,10 +44,6 @@
 static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
 {
   unsigned efab_flags = 0u;
-  if( vi_flags & EF_VI_ISCSI_RX_HDIG     ) efab_flags |= EFHW_VI_ISCSI_RX_HDIG_EN;
-  if( vi_flags & EF_VI_ISCSI_TX_HDIG     ) efab_flags |= EFHW_VI_ISCSI_TX_HDIG_EN;
-  if( vi_flags & EF_VI_ISCSI_RX_DDIG     ) efab_flags |= EFHW_VI_ISCSI_RX_DDIG_EN;
-  if( vi_flags & EF_VI_ISCSI_TX_DDIG     ) efab_flags |= EFHW_VI_ISCSI_TX_DDIG_EN;
   if( vi_flags & EF_VI_TX_PHYS_ADDR      ) efab_flags |= EFHW_VI_TX_PHYS_ADDR_EN;
   if( vi_flags & EF_VI_RX_PHYS_ADDR      ) efab_flags |= EFHW_VI_RX_PHYS_ADDR_EN;
   if( vi_flags & EF_VI_TX_IP_CSUM_DIS    ) efab_flags |= EFHW_VI_TX_IP_CSUM_DIS;
@@ -127,9 +123,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "e95b2fbfb0433ab2a6ffdfa43dab5eaf") &&
+  if( strcmp(EFCH_INTF_VER, "a8fd6c5a3d1861962b4a60fbf2018ec0") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "46e6fc8977c38979fd70ba727d27596a") ) {
+      strcmp(EFCH_INTF_VER, "2d8b85ee29b09d1b0dbf811481699412") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }
@@ -351,6 +347,13 @@ int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
     index_in_vi_set = -1;
     vi_clustered = 1;
   }
+#ifdef __powerpc__
+  /* take into account reserved entries see ef10/falcon_event.c */
+  if( evq_capacity < 0 )
+    evq_capacity = -1 - 16;
+  else if( evq_capacity > 0 )
+    evq_capacity += 16;
+#endif
   return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set,
                        -1/*ifindex*/, evq_capacity, rxq_capacity,
                        txq_capacity, evq_opt, evq_dh, vi_clustered,

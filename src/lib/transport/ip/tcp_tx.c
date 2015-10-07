@@ -64,6 +64,7 @@ ci_inline void ci_ip_tcp_list_to_dmaq(ci_netif* ni, ci_tcp_state* ts,
         CI_TCP_PAYLEN(oo_tx_ip_hdr(pkt), TX_PKT_TCP(pkt)) != 0 )
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
+    ci_netif_pkt_hold(ni, pkt);
     __ci_netif_dmaq_insert_prep_pkt(ni, pkt);
     pkt->netif.tx.dmaq_next = pkt->next;
     ++n;
@@ -144,6 +145,7 @@ static void ci_ip_tcp_list_to_dmaq_striping(ci_netif* ni, ci_tcp_state* ts,
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     pp = pkt->next;
+    ci_netif_pkt_hold(ni, pkt);
     __ci_netif_dmaq_insert_prep_pkt(ni, pkt);
     pkt->netif.tx.dmaq_next = pkt->next;
     ++n;
@@ -832,12 +834,13 @@ int ci_tcp_synrecv_send(ci_netif* netif, ci_tcp_socket_listen* tls,
     oo_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr) + optlen;
 
   if( OO_SP_NOT_NULL(tsr->local_peer) ) {
-    ci_ip_local_send(netif, pkt, &tls->s, tsr->local_peer);
+    ci_ip_local_send(netif, pkt, S_SP(tls), tsr->local_peer);
     rc = 0;
   }
-  else
+  else {
     rc = ci_ip_send_pkt_send(netif, pkt, ipcache);
-  ci_netif_pkt_release(netif, pkt);
+    ci_netif_pkt_release(netif, pkt);
+  }
   if(CI_UNLIKELY( rc != 0 ))
     CITP_STATS_NETIF(++netif->state->stats.synrecv_send_fails);
   else
@@ -869,6 +872,7 @@ int ci_tcp_retrans_one(ci_tcp_state* ts, ci_netif* netif, ci_ip_pkt_fmt* pkt)
     return 1;
 
   CITP_STATS_NETIF_INC(netif, retransmits);
+  ++ts->stats.total_retrans;
 
   iphdr = oo_tx_ip_hdr(pkt);
   tcp = TX_PKT_TCP(pkt);
@@ -1230,7 +1234,7 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
      * We MUST send SYN & FIN even if there is TCP_CORK.
      */
     if( (pkt->flags & CI_PKT_FLAG_TX_MORE) && OO_PP_IS_NULL(pkt->next) &&
-        (ts->s.b.state & CI_TCP_STATE_CAN_FIN) &&
+        ts->s.tx_errno == 0 &&
         (PKT_TCP_TX_SEQ_SPACE(pkt) < tcp_eff_mss(ts)) &&
         (pkt->n_buffers < CI_IP_PKT_SEGMENTS_MAX)) {
 
@@ -1351,7 +1355,7 @@ void ci_tcp_tx_advance(ci_tcp_state* ts, ci_netif* ni)
       if( ts->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED ) {
         ci_ip_pkt_fmt *pkt = PKT_CHK(ni, head);
         head = pkt->next;
-        ci_ip_local_send(ni, pkt, &ts->s, ts->local_peer);
+        ci_ip_local_send(ni, pkt, S_SP(ts), ts->local_peer);
 
         /* deliver this packet to listening socket, it will call
          * ci_tcp_listenq_try_promote() and fix up ts->local_peer. */
@@ -1589,8 +1593,15 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
 
   pkt->buf_len = pkt->pay_len = 
     oo_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
-  /* ?? TODO: should we respect here SO_BINDTODEVICE? */
-  ci_ip_send_pkt(netif, NULL, pkt);
+  if( pkt->intf_i == OO_INTF_I_LOOPBACK ) {
+    ci_netif_pkt_hold(netif, pkt);
+    ci_ip_local_send(netif, pkt, pkt->pf.tcp_tx.lo.rx_sock,
+                     pkt->pf.tcp_tx.lo.tx_sock);
+  }
+  else {
+    /* ?? TODO: should we respect here SO_BINDTODEVICE? */
+    ci_ip_send_pkt(netif, NULL, pkt);
+  }
   CI_TCP_STATS_INC_OUT_SEGS(netif);
   ci_netif_pkt_release(netif, pkt);
   CI_TCP_STATS_INC_OUT_RSTS( netif );

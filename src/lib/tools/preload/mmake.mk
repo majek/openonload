@@ -1,5 +1,5 @@
 
-TARGETS		:= libefabnetstat_pl.so libaf_onload.so
+TARGETS		:= libefabnetstat_pl.so
 MMAKE_TYPE	:= DLL
 
 ifneq ($(ONLOAD_ONLY),1)

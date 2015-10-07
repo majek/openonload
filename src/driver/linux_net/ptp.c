@@ -2418,7 +2418,8 @@ void efx_ptp_remove(struct efx_nic *efx)
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_WORK_SYNC)
 	cancel_work_sync(&efx->ptp_data->work);
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHC_SUPPORT)
-	cancel_work_sync(&efx->ptp_data->pps_work);
+	if (efx->ptp_data->pps_workwq)
+		cancel_work_sync(&efx->ptp_data->pps_work);
 #endif
 #endif
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_CANCEL_WORK_SYNC)

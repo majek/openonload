@@ -57,9 +57,11 @@ EFRM_HAVE_IOREMAP_WC		symbol	ioremap_wc		arch/$SRCARCH/include/asm/io.h include/
 
 EFRM_HAVE_IOMMU_MAP_OLD	symtype	iommu_map	include/linux/iommu.h int(struct iommu_domain *, unsigned long, phys_addr_t, int, int)
 EFRM_HAVE_IOMMU_MAP	symtype	iommu_map	include/linux/iommu.h int(struct iommu_domain *, unsigned long, phys_addr_t, size_t, int)
+EFRM_HAVE_IOMMU_GROUP	symbol	iommu_group_add_device	include/linux/iommu.h
 
 EFRM_HAVE_NETFILTER_INDIRECT_SKB		memtype	struct_nf_hook_ops	hook	include/linux/netfilter.h	unsigned int(*)(unsigned int, struct sk_buff **, const struct net_device *, const struct net_device *, int (*)(struct sk_buff *))
 EFRM_HAVE_NETFILTER_HOOK_OPS		memtype	struct_nf_hook_ops	hook	include/linux/netfilter.h	unsigned int(*)(const struct nf_hook_ops *, struct sk_buff *, const struct net_device *, const struct net_device *, int (*)(struct sk_buff *))
+EFRM_HAVE_NETFILTER_HOOK_STATE		memtype	struct_nf_hook_state	hook	include/linux/netfilter.h int
 
 EFRM_HAVE_KSTRTOUL	symbol	kstrtoul	include/linux/kernel.h
 EFRM_HAVE_IN4_PTON	symbol	in4_pton	include/linux/inet.h
@@ -90,6 +92,24 @@ EFRM_HAVE_IOMMU_CAPABLE	symbol	iommu_capable	include/linux/iommu.h
 EFRM_HAVE_F_DENTRY	memtype	struct_file	f_dentry	include/linux/fs.h	struct dentry *
 
 EFRM_HAVE_MSG_ITER	memtype	struct_msghdr	msg_iter	include/linux/socket.h	struct iov_iter
+
+EFRM_HAVE_TEAMING		file	include/uapi/linux/if_team.h
+
+# we need close_on_exec() function, but there is a catch: close_on_exec is
+# also a field in struct fdtable.  It is easier to check fd_is_open().
+EFRM_HAVE_CLOEXEC_TEST	symbol	fd_is_open	include/linux/fdtable.h
+
+EFRM_SOCK_SENDMSG_NEEDS_LEN	symtype	sock_sendmsg	include/linux/net.h int(struct socket *, struct msghdr *, size_t)
+
+EFRM_HAVE___VFS_READ_EXPORTED	export	__vfs_read	include/linux/fs.h
+
+EFRM_HAVE_FOP_READV	memtype	struct_file_operations	readv	include/linux/fs.h ssize_t (*) (struct file *, const struct iovec *, unsigned long, loff_t *)
+EFRM_HAVE_FOP_AIO_READ	memtype	struct_file_operations	aio_read	include/linux/fs.h ssize_t (*) (struct kiocb *, const struct iovec *, unsigned long, loff_t)
+EFRM_HAVE_FOP_READ_ITER	memtype	struct_file_operations	read_iter	include/linux/fs.h ssize_t (*) (struct kiocb *, struct iov_iter *)
+
+EFRM_SOCK_CREATE_KERN_HAS_NET	symtype	sock_create_kern	include/linux/net.h int(struct net *, int, int, int, struct socket **)
+
+EFRM_HAVE_SK_SLEEP_FUNC	symtype	sk_sleep	include/net/sock.h wait_queue_head_t *(struct sock *)
 
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'

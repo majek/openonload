@@ -45,8 +45,24 @@
  ****************************************************************************
  */
 
+
 #include "linux_resource_internal.h"
+
+/* We depend on rx_channel_count being available for 
+ * EFX_DRIVERLINK_API_VERSION=22 
+ */
+#define EFX_DRIVERLINK_API_VERSION_MINOR 2
+
 #include <driver/linux_net/driverlink_api.h>
+
+/* When driverlink API version is updated we'll need to select a
+ * different MINOR version.  Put this here to make sure we
+ * remember. 
+ */
+#if EFX_DRIVERLINK_API_VERSION != 22
+#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
+#endif
+
 #include "efrm_internal.h"
 #include "kernel_compat.h"
 
@@ -57,12 +73,7 @@
 #  include <net/net_namespace.h>
 #endif
 #include <ci/efrm/efrm_filter.h>
-
-#if EFX_DRIVERLINK_API_VERSION < 9
-/* Forward declare data structure that does not exist in older API
- * versions to minimize use of '#if' */
-struct efx_dl_ef10_resources;
-#endif
+#include <ci/tools/sysdep.h>
 
 /* The DL driver and associated calls */
 static int efrm_dl_probe(struct efx_dl_device *efrm_dev,
@@ -83,18 +94,8 @@ static struct notifier_block efrm_netdev_notifier = {
 	.notifier_call = efrm_netdev_event,
 };
 
-#if EFX_DRIVERLINK_API_VERSION >= 22
 static int
-#elif EFX_DRIVERLINK_API_VERSION >= 7
-static bool 
-#else
-static void 
-#endif
-#if EFX_DRIVERLINK_API_VERSION >= 22
 efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event, int budget);
-#else
-efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event);
-#endif
 
 static struct efx_dl_driver efrm_dl_driver = {
 	.name = "resource",
@@ -122,15 +123,24 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 #if EFX_DRIVERLINK_API_VERSION >= 9
 		rd->vi_min = ef10_res->vi_min;
 		rd->vi_lim = ef10_res->vi_lim;
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+					EFX_DRIVERLINK_API_VERSION_MINOR > 0)
+		/* Pre-driverlink-22.1 we only had access to
+		 * rss_channel_count - the number of rss channels the
+		 * net driver is using.  It now also exposes
+		 * rx_channel_count which is how many there are
+		 * available in total to use 
+		 */
+		rd->rss_channel_count = ef10_res->rx_channel_count;
+#else
 		rd->rss_channel_count = ef10_res->rss_channel_count;
+#endif
 		rd->vi_base = ef10_res->vi_base;
 		EFRM_TRACE("Using VI range %d+(%d-%d)", rd->vi_base, 
 			   rd->vi_min, rd->vi_lim);
 #endif
 #if EFX_DRIVERLINK_API_VERSION >= 18
 		rd->vport_id = ef10_res->vport_id;
-#else
-		rd->vport_id = EVB_PORT_ID_ASSIGNED;
 #endif
 	}
 	else {
@@ -150,10 +160,16 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 		rd->evq_timer_lim--;
 		rd->non_irq_evq = rd->evq_timer_lim;
 		
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+					EFX_DRIVERLINK_API_VERSION_MINOR > 1)
+		/* See comment above for EF10 equivalent code */
+		rd->rss_channel_count = falcon_res->rx_channel_count;
+#else
 		if (falcon_res->flags & EFX_DL_FALCON_HAVE_RSS_CHANNEL_COUNT)
 			rd->rss_channel_count = falcon_res->rss_channel_count;
 		else
 			rd->rss_channel_count = 1;
+#endif
 	}
 	if (sriov_res != NULL) {
 		rd->vf_vi_base = sriov_res->vi_base;
@@ -278,15 +294,22 @@ efrm_dl_probe(struct efx_dl_device *efrm_dev,
 }
 
 /* When we unregister ourselves on module removal, this function will be
- * called for all the devices we claimed */
+ * called for all the devices we claimed. It will also be called on a single
+ * device if that device is unplugged.
+ */
 static void efrm_dl_remove(struct efx_dl_device *efrm_dev)
 {
 	struct efhw_nic *nic = efrm_dev->priv;
-	struct linux_efhw_nic *lnic = linux_efhw_nic(nic);
 	EFRM_TRACE("%s called", __func__);
-	if (efrm_dev->priv)
-		efrm_nic_del(lnic);
-	EFRM_TRACE("%s OK", __func__);
+	if (nic) {
+		struct linux_efhw_nic *lnic = linux_efhw_nic(nic);
+		lnic->dl_device = NULL;
+                lnic->efrm_nic.dl_dev_info = NULL;
+		/* Absent hardware is treated as a protracted reset. */
+		efrm_nic_reset_suspend(nic);
+		ci_atomic32_or(&nic->resetting, NIC_RESETTING_FLAG_UNPLUGGED);
+	}
+
 }
 
 static void efrm_dl_reset_suspend(struct efx_dl_device *efrm_dev)
@@ -295,7 +318,9 @@ static void efrm_dl_reset_suspend(struct efx_dl_device *efrm_dev)
 
 	EFRM_NOTICE("%s:", __func__);
 
-	nic->resetting = 1;
+	efrm_nic_reset_suspend(nic);
+
+	ci_atomic32_or(&nic->resetting, NIC_RESETTING_FLAG_RESET);
 }
 
 static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
@@ -306,6 +331,11 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 #endif
 
 	EFRM_NOTICE("%s: ok=%d", __func__, ok);
+
+	/* Driverlink calls might have been disabled forcibly if, e.g., the NIC
+	 * had been in BIST mode.  We know that they're safe now, so enable
+	 * them. */
+	efrm_driverlink_resume(efrm_nic);
 
 #if EFX_DRIVERLINK_API_VERSION >= 9
 	/* VI base may have changed on EF10 hardware */
@@ -372,6 +402,42 @@ void efrm_driverlink_unregister(void)
 }
 
 
+/* In the ordinary course of things, when hardware is unplugged, the kernel
+ * will tell the net driver, which will forward the news to us by calling our
+ * removal hook, and this will prevent us from attempting any further
+ * driverlink calls on that device. However, if we detect that hardware has
+ * gone before receiving the notification, we would like just the same to
+ * prevent further driverlink activity. These functions allow us to arrange
+ * that. */
+
+/* [failure_generation] is the value returned by efrm_driverlink_generation()
+ * at some point before the detected failure that prompted this call. */
+void efrm_driverlink_desist(struct efrm_nic* nic, unsigned failure_generation)
+{
+	EFRM_TRACE("%s:", __func__);
+
+	spin_lock_bh(&nic->lock);
+	if (failure_generation == nic->driverlink_generation)
+		nic->rnic_flags |= EFRM_NIC_FLAG_DRIVERLINK_PROHIBITED;
+	spin_unlock_bh(&nic->lock);
+}
+
+void efrm_driverlink_resume(struct efrm_nic* nic)
+{
+	EFRM_TRACE("%s:", __func__);
+
+	spin_lock_bh(&nic->lock);
+	++nic->driverlink_generation;
+	nic->rnic_flags &= ~EFRM_NIC_FLAG_DRIVERLINK_PROHIBITED;
+	spin_unlock_bh(&nic->lock);
+}
+
+unsigned efrm_driverlink_generation(struct efrm_nic* nic)
+{
+	return ACCESS_ONCE(nic->driverlink_generation);
+}
+
+
 static int efrm_netdev_event(struct notifier_block *this,
 			     unsigned long event, void *ptr)
 {
@@ -400,31 +466,14 @@ static int efrm_netdev_event(struct notifier_block *this,
 }
 
 
-#if EFX_DRIVERLINK_API_VERSION >= 22
 static int
-#elif EFX_DRIVERLINK_API_VERSION >= 7
-static bool 
-#else
-static void 
-#endif
-#if EFX_DRIVERLINK_API_VERSION >= 22
 efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event, int budget)
-#else
-efrm_dl_event(struct efx_dl_device *efx_dev, void *p_event)
-#endif
 {
 	struct efhw_nic *nic = efx_dev->priv;
 	struct linux_efhw_nic *lnic = linux_efhw_nic(nic);
 	efhw_event_t *ev = p_event;
 	int rc;
 
-	rc = efhw_nic_handle_event(nic, lnic->ev_handlers, ev);
-#if EFX_DRIVERLINK_API_VERSION >= 22
-        /* This driverlink version supports NAPI accounting but this Onload
-         * version does not. We emulate old-style driverlink behaviour.
-         * Notionally: return rc ? handled_one_event : didn't_handle_any; */
-        return rc ? 1 : -1;
-#elif EFX_DRIVERLINK_API_VERSION >= 7
+	rc = efhw_nic_handle_event(nic, lnic->ev_handlers, ev, budget);
 	return rc;
-#endif
 }

@@ -66,14 +66,16 @@ eventq_wait_dtor(eventq_wait_data_t *evdata)
 }
 
 /* This callback is executed in the context of waker */
-static void eventq_wait_all(void *arg, int is_timeout, struct efhw_nic *nic)
+static int eventq_wait_all(void *arg, int is_timeout,
+                           struct efhw_nic *nic, int budget)
 {
   eventq_wait_data_t *evdata = (eventq_wait_data_t *)arg;
 
   ci_assert(evdata);
   if (is_timeout) 
-    return;
+    return 0;
   ci_waitable_wakeup_all(&evdata->evq_waitable);
+  return 1;
 }
 
 
@@ -204,11 +206,13 @@ clear_evdata:
 }
 
 
-static void efab_vi_rm_prime_cb(void *arg, int is_timeout, struct efhw_nic *nic)
+static int efab_vi_rm_prime_cb(void *arg, int is_timeout,
+                               struct efhw_nic *nic, int budget)
 {
   ci_private_char_t* priv = arg;
   priv->cpcp_readable = 1;
   wake_up_interruptible(&priv->cpcp_poll_queue);
+  return 1;
 }
 
 

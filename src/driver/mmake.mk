@@ -20,7 +20,6 @@ endif
 ifeq ($(BUILD_AFONLOAD),1)
 DRIVER_SUBDIRS  += openonload
 endif
-#DRIVER_SUBDIRS	+=  linux_iscsi
 
 ifeq ($(BUILD_XEN),1)
 DRIVER_SUBDIRS += linux_xen

@@ -146,7 +146,6 @@ typedef struct {
                        citp_lib_context_t*);
   int  (*connect     )(citp_fdinfo*, const struct sockaddr*, socklen_t,
                        citp_lib_context_t*);
-  int  (*close       )(citp_fdinfo*);
   int  (*shutdown    )(citp_fdinfo*, int);
   int  (*getsockname )(citp_fdinfo*, struct sockaddr*, socklen_t*);
   int  (*getpeername )(citp_fdinfo*, struct sockaddr*, socklen_t*);
@@ -174,17 +173,8 @@ typedef struct {
                        struct oo_ul_epoll_state*, int* stored_event);
 #endif
 #endif
-#if CI_CFG_SENDFILE
-  /*!
-   * Hook to be called after sendfile() operation.
-   * Always called (independent of status of sendfile()).
-   */
-  void  (*sendfile_post_hook)(citp_fdinfo*);
-#endif
   int  (*zc_send     )(citp_fdinfo*, struct onload_zc_mmsg*, int);
   int  (*zc_recv     )(citp_fdinfo*, struct onload_zc_recv_args*);
-  int  (*zc_recv_filter)(citp_fdinfo*, onload_zc_recv_filter_callback,
-                         void*, int);
   int  (*recvmsg_kernel)(citp_fdinfo*, struct msghdr*, int);
   int  (*tmpl_alloc)(citp_fdinfo*, const struct iovec*, int,
                      struct oo_msg_template**, unsigned);
@@ -344,10 +334,10 @@ extern ci_uint64 fdtable_seq_no;
 
 ci_inline void citp_fdinfo_init(citp_fdinfo* fdi, citp_protocol_impl* p) {
   /* The rest of the initialisation is done in citp_fdtable_insert(). */
+  oo_atomic_set(&fdi->ref_count, 1);
 #if CI_CFG_FD_CACHING
   fdi->can_cache = 0;
 #endif
-  oo_atomic_set(&fdi->ref_count, 1);
   fdi->protocol = p;
   fdi->seq = fdtable_seq_no++;
   fdi->epoll_fd = -1;

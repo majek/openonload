@@ -67,6 +67,7 @@
 
 #include "linux_resource_internal.h"
 #include "kernel_compat.h"
+#include <driver/linux_net/driverlink_api.h>
 #include <ci/efrm/nic_table.h>
 #include <ci/efhw/eventq.h>
 #include <ci/efhw/nic.h>
@@ -80,7 +81,7 @@
 #include <ci/driver/internal.h>
 #include <ci/efhw/falcon.h>
 #include "compat_pat_wc.h"
-
+#include "efrm_internal.h"
 
 MODULE_AUTHOR("Solarflare Communications");
 MODULE_LICENSE("GPL");
@@ -176,6 +177,17 @@ static int linux_efhw_nic_map_ctr_ap(struct linux_efhw_nic *lnic)
 	return rc;
 }
 
+
+/* Determines whether the control BAR for the device [dev] is where we expect
+ * it to be for the NIC [nic]. This is a requirement for hotplug
+ * revivification. */
+static inline int
+efrm_nic_bar_is_good(struct efhw_nic* nic, struct pci_dev* dev)
+{
+	return nic->ctr_ap_dma_addr == pci_resource_start(dev, nic->ctr_ap_bar);
+}
+
+
 static int
 linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		    spinlock_t *reg_lock, unsigned nic_flags, int ifindex,
@@ -187,6 +199,9 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	unsigned map_min, map_max;
 	unsigned vi_base = 0;
 	unsigned vport_id = 0;
+
+	/* Tie the lifetime of the kernel's state to that of our own. */
+	pci_dev_get(dev);
 
 	if (dev_type->arch == EFHW_ARCH_EF10) {
 		map_min = res_dim->vi_min;
@@ -203,18 +218,22 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		map_max = CI_MIN(map_max, res_dim->rxq_lim);
 		map_max = CI_MIN(map_max, res_dim->txq_lim);
 	}
-	else
-		return -EINVAL;
+	else {
+		rc = -EINVAL;
+		goto fail;
+	}
 
 	efhw_nic_init(nic, nic_flags, NIC_OPT_DEFAULT, dev_type, map_min,
 		      map_max, vi_base, vport_id);
 	lnic->efrm_nic.efhw_nic.pci_dev = dev;
+	lnic->efrm_nic.efhw_nic.bus_number = dev->bus->number;
 	lnic->efrm_nic.efhw_nic.ctr_ap_dma_addr =
 		pci_resource_start(dev, nic->ctr_ap_bar);
+	EFRM_ASSERT(efrm_nic_bar_is_good(nic, dev));
 
 	rc = linux_efhw_nic_map_ctr_ap(lnic);
 	if (rc < 0)
-		return rc;
+		goto fail;
 
 	rc = efrm_nic_ctor(&lnic->efrm_nic, ifindex, res_dim);
 	if (rc < 0) {
@@ -222,7 +241,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 			iounmap(nic->bar_ioaddr);
 			nic->bar_ioaddr = 0;
 		}
-		return rc;
+		goto fail;
 	}
 
 	/* By default struct efhw_nic contains its own lock for protecting
@@ -236,6 +255,37 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	efrm_init_resource_filter(&dev->dev, ifindex);
 
 	return 0;
+
+fail:
+	pci_dev_put(dev);
+	return rc;
+}
+
+
+/* This should be called instead of linux_efrm_nic_ctor() when reusing existing
+ * NIC state (i.e. when a new NIC is compatible with one that had gone away).
+ */
+static void
+linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic, struct pci_dev *dev,
+		       const struct vi_resource_dimensions *res_dim,
+                       struct efhw_device_type *dev_type, int ifindex)
+{
+	struct efhw_nic* nic = &lnic->efrm_nic.efhw_nic;
+
+	/* Tidy up old state. */
+	efrm_shutdown_resource_filter(&nic->pci_dev->dev);
+	pci_dev_put(nic->pci_dev);
+
+	/* Bring up new state. */
+	pci_dev_get(dev);
+	nic->pci_dev = dev;
+	nic->bus_number = dev->bus->number;
+	nic->ifindex = ifindex;
+	if (dev_type->arch == EFHW_ARCH_EF10) {
+		nic->vi_base = res_dim->vi_base;
+		nic->vport_id = res_dim->vport_id;
+        }
+	efrm_init_resource_filter(&nic->pci_dev->dev, ifindex);
 }
 
 static void linux_efrm_nic_dtor(struct linux_efhw_nic *lnic)
@@ -250,6 +300,7 @@ static void linux_efrm_nic_dtor(struct linux_efhw_nic *lnic)
 		nic->bar_ioaddr = 0;
 	}
 	efrm_shutdown_resource_filter(&nic->pci_dev->dev);
+	pci_dev_put(nic->pci_dev);
 }
 
 static void efrm_dev_show(struct pci_dev *dev, int revision,
@@ -268,6 +319,23 @@ static void efrm_dev_show(struct pci_dev *dev, int revision,
 			    res_dim->bt_min, res_dim->bt_lim, res_dim->rxq_min,
 			    res_dim->rxq_lim, res_dim->txq_min, res_dim->txq_lim,
 			    res_dim->rss_channel_count);
+}
+
+
+/* Determines whether a known NIC is equivalent to one that would be
+ * instantiated according to a [pci_dev] and an [efhw_device_type]. The
+ * intended use-case is to check whether a new NIC can step into the shoes of
+ * one that went away. */
+static inline int
+efrm_nic_matches_device(struct efhw_nic* nic, struct pci_dev* dev,
+			struct efhw_device_type* dev_type)
+{
+	return nic->bus_number           == dev->bus->number   &&
+	       nic->pci_dev->devfn       == dev->devfn         &&
+	       nic->pci_dev->device      == dev->device        &&
+	       nic->devtype.arch         == dev_type->arch     &&
+	       nic->devtype.revision     == dev_type->revision &&
+	       nic->devtype.variant      == dev_type->variant;
 }
 
 
@@ -306,6 +374,9 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 	int constructed = 0;
 	int registered_nic = 0;
 	u8 class_revision;
+	int nic_index;
+	int nics_probed_delta = 0;
+	struct efhw_nic* old_nic;
 
 	rc = pci_read_config_byte(dev, PCI_CLASS_REVISION, &class_revision);
 	if (rc != 0) {
@@ -330,28 +401,84 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 		resources_init = 1;
 	}
 
-	/* Allocate memory for the new adapter-structure. */
-	lnic = kmalloc(sizeof(*lnic), GFP_KERNEL);
-	if (lnic == NULL) {
-		EFRM_ERR("%s: ERROR: failed to allocate memory", __func__);
-		rc = -ENOMEM;
-		goto failed;
+	spin_lock_bh(&efrm_nic_tablep->lock);
+	EFRM_FOR_EACH_NIC(nic_index, old_nic) {
+		/* We would like to break out of this loop after rediscovering
+		 * a NIC, but the EFRM_FOR_EACH_NIC construct doesn't allow
+		 * this, so instead we check explicitly that we haven't set
+		 * [lnic] yet. */
+		if (lnic == NULL && old_nic != NULL &&
+		    efrm_nic_matches_device(old_nic, dev, &dev_type)) {
+			EFRM_ASSERT(old_nic->resetting);
+			if (efrm_nic_bar_is_good(old_nic, dev)) {
+				EFRM_NOTICE("%s: Rediscovered nic_index %d",
+					    __func__, nic_index);
+				lnic = linux_efhw_nic(old_nic);
+			}
+			else {
+				EFRM_WARN("%s: New device matches nic_index %d "
+					  "but has different BAR. Existing "
+					  "Onload stacks will not use the new "
+					  "device.",
+					  __func__, nic_index);
+			}
+		}
 	}
-	memset(lnic, 0, sizeof(*lnic));
+	spin_unlock_bh(&efrm_nic_tablep->lock);
+	/* We can drop the lock now as [lnic] will not go away until the module
+	 * unloads. */
+
+	if (lnic != NULL) {
+		linux_efrm_nic_reclaim(lnic, dev, res_dim, &dev_type, ifindex);
+		/* We have now taken ownership of the state and should pull it
+		 * down on failure. */
+		constructed = registered_nic = 1;
+	}
+	else {
+		/* Allocate memory for the new adapter-structure. */
+		lnic = kmalloc(sizeof(*lnic), GFP_KERNEL);
+		if (lnic == NULL) {
+			EFRM_ERR("%s: ERROR: failed to allocate memory",
+				 __func__);
+			rc = -ENOMEM;
+			goto failed;
+		}
+		memset(lnic, 0, sizeof(*lnic));
+
+		lnic->ev_handlers = &ev_handler;
+
+		/* OS specific hardware mappings */
+		rc = linux_efrm_nic_ctor(lnic, dev, reg_lock, flags, ifindex,
+					 res_dim, &dev_type);
+		if (rc < 0) {
+			EFRM_ERR("%s: ERROR: linux_efrm_nic_ctor failed (%d)",
+				 __func__, rc);
+			goto failed;
+		}
+		constructed = 1;
+
+		/* Tell the driver about the NIC - this needs to be done before
+		   the resources managers get created below. Note we haven't
+		   initialised the hardware yet, and I don't like doing this
+		   before the perhaps unreliable hardware initialisation.
+		   However, there's quite a lot of code to review if we wanted
+		   to hardware init before bringing up the resource managers.
+		   */
+		rc = efrm_driver_register_nic(&lnic->efrm_nic);
+		if (rc < 0) {
+			EFRM_ERR("%s: ERROR: efrm_driver_register_nic failed "
+				 "(%d)", __func__, rc);
+			goto failed;
+		}
+		registered_nic = 1;
+
+		++nics_probed_delta;
+	}
+
+	lnic->dl_device = dl_device;
 	efrm_nic = &lnic->efrm_nic;
 	nic = &efrm_nic->efhw_nic;
-
-	lnic->ev_handlers = &ev_handler;
-	lnic->dl_device = dl_device;
-
-	/* OS specific hardware mappings */
-	rc = linux_efrm_nic_ctor(lnic, dev, reg_lock, flags, ifindex,
-				 res_dim, &dev_type);
-	if (rc < 0) {
-		EFRM_ERR("%s: ERROR: linux_efrm_nic_ctor failed (%d)",
-			 __func__, rc);
-		goto failed;
-	}
+	efrm_driverlink_resume(efrm_nic);
 
 	if( timer_quantum_ns )
 		nic->timer_quantum_ns = timer_quantum_ns;
@@ -360,22 +487,6 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 	nic->rx_prefix_len = rx_prefix_len;
 	nic->rx_usr_buf_size = rx_usr_buf_size;
 
-	constructed = 1;
-
-	/* Tell the driver about the NIC - this needs to be done before the
-	   resources managers get created below. Note we haven't initialised
-	   the hardware yet, and I don't like doing this before the perhaps
-	   unreliable hardware initialisation. However, there's quite a lot
-	   of code to review if we wanted to hardware init before bringing
-	   up the resource managers. */
-	rc = efrm_driver_register_nic(efrm_nic);
-	if (rc < 0) {
-		EFRM_ERR("%s: ERROR: efrm_driver_register_nic failed (%d)",
-			 __func__, rc);
-		goto failed;
-	}
-	registered_nic = 1;
-
 	/* Tell the resource manager about the parameters for this nic.  This
 	 * must be done once the resource manager can identify the nic, ie
 	 * after it's been registered with the driver.
@@ -383,6 +494,16 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 #ifdef CONFIG_SFC_RESOURCE_VF
 	efrm_vf_init_nic_params(&efrm_nic->efhw_nic, res_dim);
 #endif
+
+	/* There is a race here: we need to clear [nic->resetting] so that
+	 * efhw_nic_init_hardware() can do MCDI, but that means that any
+	 * existing clients can also attempt MCDI, potentially before
+	 * efhw_nic_init_hardware() completes. NIC resets already suffer from
+	 * an equivalent race. TODO: Fix this, perhaps by introducing an
+	 * intermediate degree of resetting-ness during which we can do MCDI
+	 * but no-one else can. */
+	ci_wmb();
+	nic->resetting = 0;
 
 	/****************************************************/
 	/* hardware bringup                                 */
@@ -425,7 +546,9 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 		    nic->index, nic->ifindex);
 
 	*lnic_out = lnic;
-	++n_nics_probed;
+	n_nics_probed += nics_probed_delta;
+	efrm_nic_post_reset(nic);
+
 	return 0;
 
 failed:
@@ -441,10 +564,10 @@ failed:
 
 /****************************************************************************
  *
- * efrm_nic_del: Remove the nic from the resource driver structures
+ * efrm_nic_shutdown: Shut down our access to the NIC hw
  *
  ****************************************************************************/
-void efrm_nic_del(struct linux_efhw_nic *lnic)
+static void efrm_nic_shutdown(struct linux_efhw_nic *lnic)
 {
 	struct efhw_nic *nic = &lnic->efrm_nic.efhw_nic;
 
@@ -452,6 +575,18 @@ void efrm_nic_del(struct linux_efhw_nic *lnic)
 	EFRM_ASSERT(nic);
 
 	efrm_vi_wait_nic_complete_flushes(nic);
+	linux_efrm_nic_dtor(lnic);
+
+	EFRM_TRACE("%s: done", __func__);
+}
+/****************************************************************************
+ *
+ * efrm_nic_del: Remove the nic from the resource driver structures
+ *
+ ****************************************************************************/
+static void efrm_nic_del(struct linux_efhw_nic *lnic)
+{
+	EFRM_TRACE("%s:", __func__);
 
 	efrm_driver_unregister_nic(&lnic->efrm_nic);
 
@@ -459,10 +594,38 @@ void efrm_nic_del(struct linux_efhw_nic *lnic)
 	if (--n_nics_probed == 0)
 		efrm_resources_fini();
 
-	linux_efrm_nic_dtor(lnic);
 	kfree(lnic);
 
 	EFRM_TRACE("%s: done", __func__);
+}
+
+
+/****************************************************************************
+ *
+ * efrm_nic_del_all: Shut down our access to any hw or driverlink
+ *
+ ****************************************************************************/
+static void efrm_nic_shutdown_all(void)
+{
+	int i;
+	struct efhw_nic* nic;
+
+	EFRM_FOR_EACH_NIC(i, nic)
+		efrm_nic_shutdown(linux_efhw_nic(nic));
+}
+/****************************************************************************
+ *
+ * efrm_nic_del_all: Delete all remaining efrm_nics. Call this before
+ * efrm_driver_stop().
+ *
+ ****************************************************************************/
+static void efrm_nic_del_all(void)
+{
+	int i;
+	struct efhw_nic* nic;
+
+	EFRM_FOR_EACH_NIC(i, nic)
+		efrm_nic_del(linux_efhw_nic(nic));
 }
 
 
@@ -538,9 +701,10 @@ static void cleanup_sfc_resource(void)
 	efrm_filter_remove_proc_entries();
 	efrm_uninstall_proc_entries();
 
-	efrm_driver_stop();
-
+	efrm_nic_shutdown_all();
 	efrm_driverlink_unregister();
+	efrm_nic_del_all();
+	efrm_driver_stop();
 
 	/* Clean up char-driver specific initialisation.
 	   - driver dtor can use both work queue and buffer table entries */

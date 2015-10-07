@@ -760,7 +760,6 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
       citp_waitable* w = &wo->waitable;
 
       if( (strcmp(sock_type, "tcp_listen") == 0) &&
-          (w->state & CI_TCP_STATE_SOCKET) &&
           (w->state == CI_TCP_LISTEN) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
         orm_dump_struct("ci_tcp_socket_listen", &wo->tcp_listen);
@@ -768,8 +767,7 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
         dump_buf_cat("}, ");
       }
       else if( (strcmp(sock_type, "tcp") == 0) &&
-          (w->state & CI_TCP_STATE_SOCKET) &&
-          (w->state & CI_TCP_STATE_TCP) ) {
+               (w->state & CI_TCP_STATE_TCP) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
         orm_dump_struct("ci_tcp_state", &wo->tcp);
         dump_buf_cleanup();
@@ -777,8 +775,7 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
       }
 #if CI_CFG_UDP
       else if( (strcmp(sock_type, "udp") == 0) &&
-          (w->state & CI_TCP_STATE_SOCKET) &&
-          (w->state == CI_TCP_STATE_UDP) ) {
+               (w->state == CI_TCP_STATE_UDP) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
         orm_dump_struct("ci_udp_state", &wo->udp);
         dump_buf_cleanup();
@@ -788,7 +785,7 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
 
 #if CI_CFG_USERSPACE_PIPE
       else if( (strcmp(sock_type, "pipe") == 0) &&
-          (w->state == CI_TCP_STATE_PIPE) ) {
+               (w->state == CI_TCP_STATE_PIPE) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
         orm_dump_struct("oo_pipe", &wo->pipe);
         dump_buf_cleanup();

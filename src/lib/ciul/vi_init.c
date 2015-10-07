@@ -47,6 +47,7 @@
 #include "ef_vi_internal.h"
 #include "efch_intf_ver.h"
 #include <onload/version.h>
+#include "logging.h"
 
 
 #define EF_VI_STATE_BYTES(rxq_sz, txq_sz)               \
@@ -191,10 +192,31 @@ static int rx_desc_bytes(struct ef_vi* vi)
 }
 
 
+static int tx_desc_bytes(struct ef_vi* vi)
+{
+  switch( vi->nic_type.arch ) {
+  case EF_VI_ARCH_FALCON:
+    return (vi->vi_flags & EF_VI_TX_PHYS_ADDR) ? 8 : 4;
+  case EF_VI_ARCH_EF10:
+    return 8;
+  default:
+    EF_VI_BUG_ON(1);
+    return 8;
+  }
+}
+
+
 int ef_vi_rx_ring_bytes(struct ef_vi* vi)
 {
   EF_VI_ASSERT(vi->inited & EF_VI_INITED_RXQ);
   return (vi->vi_rxq.mask + 1) * rx_desc_bytes(vi);
+}
+
+
+int ef_vi_tx_ring_bytes(struct ef_vi* vi)
+{
+  EF_VI_ASSERT(vi->inited & EF_VI_INITED_TXQ);
+  return (vi->vi_txq.mask + 1) * tx_desc_bytes(vi);
 }
 
 
@@ -219,6 +241,11 @@ int ef_vi_init(struct ef_vi* vi, int arch, int variant, int revision,
     break;
   case EF_VI_ARCH_EF10:
     ef10_vi_init(vi);
+    /* Temporary hack: In future we'll get this from the driver (which will
+     * get it from the adapter).  This value comes from:
+     *     PTP_TX_MAC_PCS_DELAY * 1e9 / (1 << 27)
+     */
+    vi->tx_ts_correction_ns = 178;
     break;
   default:
     return -EINVAL;

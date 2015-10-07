@@ -203,10 +203,13 @@ MODULE_PARM_DESC(max_neighs,
                  "Maximum number of rows in Onload's ARP/neighbour table."
                  "This is rounded up internally to a power of two");
 
-
-/* Extern declaration of iSCSI functions defined in iscsi_support.c */
-extern void efab_prepare_for_iscsi(void);
-extern void efab_cleanup_in_iscsi(void);
+int scalable_filter_gid = -2;
+module_param(scalable_filter_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(scalable_filter_gid,
+                 "Group id which may use scalable filters.  "
+                 "-2 (default) means \"CAP_NET_RAW required\"; "
+                 "-1 means \"any user may use scalable filter mode\".  "
+                 "See EF_SCALABLE_FILTERS environment variable.");
 
 
 /**************************************************************************** 
@@ -222,7 +225,8 @@ int efab_fds_dump(unsigned pid)
   ci_private_t* priv;
   int fd, rc = 0;
 
-  t = ci_lock_task_by_pid(pid);
+  rcu_read_lock();
+  t = ci_get_task_by_pid(pid);
 
   if( ! t ) {
     ci_log("%s: bad pid %d", __FUNCTION__, pid);
@@ -234,13 +238,10 @@ int efab_fds_dump(unsigned pid)
       rc = -EINVAL;
     }
     else {
-      ci_fdtable *fdt;
+      for( fd = 0; fd < files_fdtable(t->files)->max_fds; ++fd ) {
+	rcu_read_lock();
+	filp = fcheck_files(t->files, fd);
 
-      spin_lock(&t->files->file_lock);
-      fdt = ci_files_fdtable(t->files);
-
-      for( fd = 0; fd < fdt->max_fds; ++fd ) {
-	filp = fdt->fd[fd];
 	if( ! filp )  continue;
 	priv = 0;
 
@@ -273,12 +274,9 @@ int efab_fds_dump(unsigned pid)
         if( priv ) THR_PRIV_DUMP(priv, "      ");
 #endif
       }
-
-      spin_unlock(&t->files->file_lock);
     }
-
-    ci_unlock_task();
   }
+  rcu_read_unlock();
 
   return rc;
 }
@@ -476,27 +474,12 @@ long oo_fop_unlocked_ioctl(struct file* filp, unsigned cmd, unsigned long arg)
 }
 
 
-#if !HAVE_UNLOCKED_IOCTL
-int oo_fop_ioctl(struct inode* inode, struct file *filp,
-                 unsigned cmd, unsigned long arg) 
-{
-  return oo_fop_unlocked_ioctl(filp, cmd, arg);
-}
-#endif
-
-
 struct file_operations oo_fops = {
   .owner   = THIS_MODULE,
   .open    = oo_fop_open,
   .release = oo_fop_release,
-#if HAVE_UNLOCKED_IOCTL
   .unlocked_ioctl = oo_fop_unlocked_ioctl,
-#else
-  .ioctl   = oo_fop_ioctl,
-#endif
-#if HAVE_COMPAT_IOCTL
   .compat_ioctl = oo_fop_compat_ioctl,
-#endif
   .mmap    = oo_fop_mmap,
 };
 
@@ -628,7 +611,11 @@ static int __init onload_module_init(void)
     goto fail_bonding;
   }
 
-  efab_prepare_for_iscsi();
+  rc = ci_teaming_init(CI_GLOBAL_WORKQUEUE, &CI_GLOBAL_CPLANE);
+  if( rc < 0 ) {
+    ci_log("%s: ERROR: ci_teaming_init failed (%d)", __FUNCTION__, rc);
+    goto failed_teaming;
+  }
 
   rc = oo_driverlink_register();
   if( rc < 0 )
@@ -664,6 +651,8 @@ failed_epolldev_ctor:
   oo_driverlink_unregister_nf();
   oo_driverlink_unregister_dl();
  failed_driverlink:
+  ci_teaming_fini(&CI_GLOBAL_CPLANE);
+ failed_teaming:
   ci_bonding_fini();
  fail_bonding:
   efab_tcp_driver_dtor();
@@ -689,6 +678,7 @@ static void onload_module_exit(void)
   ci_chrdev_dtor(oo_dev_name);
   onloadfs_fini();
 
+  ci_teaming_fini(&CI_GLOBAL_CPLANE);
   ci_bonding_fini();
 
   oo_driverlink_unregister_nf();
@@ -703,13 +693,13 @@ static void onload_module_exit(void)
   efab_tcp_driver_dtor();
 
   oo_driverlink_unregister_dl();
+  oo_nic_shutdown();
 
   ci_uninstall_proc_entries();
   OO_DEBUG_VERB(ci_log("Unregistered client driver"));
 
   efab_linux_trampoline_dtor(no_ct);
 
-  efab_cleanup_in_iscsi();
   ci_cfg_drv_dtor();
   OO_DEBUG_LOAD(ci_log("Onload module unloaded"));
 }

@@ -42,26 +42,23 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
   ci_sock_cmn* s = ep->s;
   ci_tcp_state* ts = NULL;
   int rc = 0;
-  int os_socket_exists;
+  int os_socket_exists = s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED;
 
-  if( s->b.state != CI_TCP_LISTEN ) {
+  if( s->b.state != CI_TCP_LISTEN )
     ts = SOCK_TO_TCP(s);
-    os_socket_exists = !(ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED);
-  }
-  else
-    os_socket_exists = 1;
 
   /* Keep the os socket in sync.  If this is a "get" request then the
    * return will be based on our support, not the os's (except for EFAULT
    * handling which we get for free).
    * Exceptions:
-   *  - listening OS-socket should be non-blocking;
+   *  - FIONBIO is applied just in time on handover if needed (listening
+   *    sockets always have a non-blocking OS socket)
    *  - FIONREAD, TIOCOUTQ, SIOCOUTQNSD and SIOCATMARK are useless on OS
    *    socket, let's avoid syscall.
    */
   if( os_socket_exists && request != FIONREAD && request != SIOCATMARK &&
       request != FIOASYNC && request != TIOCOUTQ && request != SIOCOUTQNSD &&
-      ( s->b.state != CI_TCP_LISTEN || request != (int) FIONBIO ) ) {
+      request != (int) FIONBIO ) {
     rc = oo_os_sock_ioctl(netif, s->b.bufid, request, arg, NULL);
     if( rc < 0 )
       return rc;
@@ -73,6 +70,13 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
 		 (long)arg));
 
   switch( request ) {
+  case FIONBIO:
+    if( CI_IOCTL_ARG_OK(int, arg) ) {
+      CI_CMN_IOCTL_FIONBIO(ep->s, arg);
+      rc = 0;
+      break;
+    }
+    goto fail_fault;
   case FIONREAD: /* synonym of SIOCINQ */
     if( !CI_IOCTL_ARG_OK(int, arg) )
       goto fail_fault;
@@ -212,15 +216,6 @@ static int ci_tcp_ioctl_lk(citp_socket* ep, ci_fd_t fd, int request,
 int ci_tcp_ioctl(citp_socket* ep, ci_fd_t fd, int request, void* arg)
 {
   int rc;
-
-  switch( request ) {
-  case FIONBIO:
-    if( CI_IOCTL_ARG_OK(int, arg) ) {
-      CI_CMN_IOCTL_FIONBIO(ep->s, arg);
-      return 0;
-    }
-    return -EFAULT;
-  }
 
   ci_netif_lock(ep->netif);
   rc = ci_tcp_ioctl_lk(ep, fd, request, arg);

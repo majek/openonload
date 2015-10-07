@@ -153,10 +153,10 @@ extern void *efrm_find_ksym(const char *name);
  * Otherwise, we get warnongs from lockdep because the "name" looks
  * in the same way for the lockdep machinery. */
 #ifdef EFRM_HAVE_WQ_SYSFS
-#define efrm_alloc_workqueue(name) \
-  alloc_workqueue(name, WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS, 1);
+#define efrm_alloc_workqueue(name, flags) \
+  alloc_workqueue(name, flags, 0);
 #else
-#define efrm_alloc_workqueue(name) \
+#define efrm_alloc_workqueue(name, flags) \
   create_singlethread_workqueue(name);
 #endif
 

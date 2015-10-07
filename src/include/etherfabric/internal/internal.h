@@ -108,6 +108,7 @@ extern int ef_vi_evq_reinit(ef_vi* vi);
  **********************************************************************/
 
 extern int  ef_vi_rx_ring_bytes(struct ef_vi*);
+extern int  ef_vi_tx_ring_bytes(struct ef_vi*);
 
 extern int  ef_vi_init(struct ef_vi*, int arch, int variant, int revision,
 		       unsigned ef_vi_flags, ef_vi_state*);

@@ -57,6 +57,9 @@ extern void ci_netif_unlock(ci_netif*) CI_HF;
  * they return -EINTR if interrupted by a signal.
  */
 #define ci_netif_lock(ni)        ef_eplock_lock(ni)
+#ifdef __KERNEL__
+#define ci_netif_lock_maybe_wedged(ni) ef_eplock_lock_maybe_wedged(ni)
+#endif
 #define ci_netif_lock_id(ni,id)  ef_eplock_lock(ni)
 #define ci_netif_trylock(ni)     ef_eplock_trylock(&(ni)->state->lock)
 
@@ -274,6 +277,10 @@ ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
 #endif
 #define EP_BUF_PER_PAGE    (CI_PAGE_SIZE / EP_BUF_SIZE)
 
+/* Aux buffers are sub-buffers of EP buffers.  Header at beginning,
+ * and 7 aux buffer per 1024 bytes. */
+#define AUX_PER_BUF 7
+
 #ifndef CI_HAVE_OS_NOPAGE
 /* For platforms that have multiple mmaps() for socket buffers, these
 ** macros define the number of buffers in each mmap/block.
@@ -434,8 +441,7 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 ** fast-path code.
 */
 ci_inline oo_pkt_p VALID_PKT_ID(ci_netif* ni, oo_pkt_p pp) {
-#if ! CI_CFG_PP_IS_PTR
-# ifdef __KERNEL__
+#ifdef __KERNEL__
 # define pkt_sets_n(ni) (ni)->pkt_sets_n
 #else
 # define pkt_sets_n(ni) (ni)->state->pkt_sets_n
@@ -443,7 +449,6 @@ ci_inline oo_pkt_p VALID_PKT_ID(ci_netif* ni, oo_pkt_p pp) {
   OO_PP_INIT(ni, pp,
              OO_PP_ID(pp) % (pkt_sets_n(ni) << CI_CFG_PKTS_PER_SET_S));
 #undef pkt_sets_n
-#endif
   return pp;
 }
 
@@ -476,6 +481,8 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 #define TRUSTED_PKT_ID(ni, id)                          \
   __TRUSTED_PKT_ID((ni), (id), __FILE__, __LINE__)
 
+#define PKT_ID2SET(id) ((id) >> CI_CFG_PKTS_PER_SET_S)
+#define PKT_SET_ID(pkt) PKT_ID2SET(OO_PKT_P(pkt))
 
 /* __PKT_BUF(ni, id)
 **
@@ -486,12 +493,12 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 #ifdef __KERNEL__
 /* Note that, to avoid us having kernel-only args (or unused args in 
  * user mode), ef_iobufset_ptr() doesn't exist in the kernel */
-# define __PKT_BUF(ni, id)                                          \
-  oo_iobufset_ptr((ni)->buf_pages[(id) >> CI_CFG_PKTS_PER_SET_S],   \
+# define __PKT_BUF(ni, id)                                      \
+  oo_iobufset_ptr((ni)->pkt_bufs[PKT_ID2SET(id)],               \
                   ((id) & PKTS_PER_SET_M) * CI_CFG_PKT_BUF_SIZE)
 #else
 # define __PKT_BUF(ni, id)                                      \
-  ((ni)->pkt_sets[(id) >> CI_CFG_PKTS_PER_SET_S] +              \
+  ((ni)->pkt_bufs[PKT_ID2SET(id)] +                             \
             ((id) & PKTS_PER_SET_M) * CI_CFG_PKT_BUF_SIZE)
 #endif
 
@@ -500,19 +507,14 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 ** Converts an [oo_pkt_p] to a packet without any checks.  Maps it into the
 ** current address space if necessary.
 */
-#if CI_CFG_PP_IS_PTR
-
-/* ?? this cast should not be necessary!!!!!!!!!!! */
-# define __PKT(ni, pp)  ((ci_ip_pkt_fmt*) (pp))
-
-#elif defined(__KERNEL__)
+#if defined(__KERNEL__)
 
   /* Buffer will already be mmaped, or faulted in on demand. */
 # define __PKT(ni, pp)  ((ci_ip_pkt_fmt*) __PKT_BUF((ni),OO_PP_ID(pp)))
 
 #else
 
-# define PKT_BUFSET_U_MMAPPED(ni, setid)  ((ni)->pkt_sets[setid] != NULL)
+# define PKT_BUFSET_U_MMAPPED(ni, setid)  ((ni)->pkt_bufs[setid] != NULL)
 
 extern ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id) CI_HF;
 

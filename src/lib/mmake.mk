@@ -1,10 +1,6 @@
 
 SUBDIRS		:= citools ciapp efhwdef
 
-ifeq ($(DRIVER_TYPE),iscsi)
-DRIVER_SUBDIRS	:= citools iscsi sfgpxe
-endif
-
 ifeq ($(LINUX),1)
 DRIVER_SUBDIRS	:= citools ciul transport efabcfg
 OTHER_SUBDIRS	:= spektor

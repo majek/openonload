@@ -22,6 +22,11 @@
  * by the Free Software Foundation, incorporated herein by reference.
  */
 #include <linux/jiffies.h>
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_LINUX_LOG2_H)
+#include <linux/log2.h>
+#else
+#include <linux/kernel.h>
+#endif
 #include <linux/moduleparam.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -31,10 +36,6 @@
 #include "mcdi.h"
 #include "mcdi_pcol.h"
 #include "mcdi_proxy.h"
-
-#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_NEED_IS_POWER_OF_2)
-#include <linux/log2.h>
-#endif
 
 #ifdef EFX_USE_MCDI_PROXY_AUTH
 
@@ -309,9 +310,6 @@ int efx_proxy_auth_configure_list(struct efx_nic *efx,
 	int block_count;
 	int rc;
 
-	if (!is_power_of_2(request_size) || !is_power_of_2(response_size))
-		return -EINVAL;
-
 	if (default_result > MC_CMD_PROXY_COMPLETE_IN_TIMEDOUT)
 		return -EINVAL;
 
@@ -354,8 +352,11 @@ int efx_proxy_auth_configure_list(struct efx_nic *efx,
 	}
 
 	/* Allocate three contiguous buffers for receiving requests, returning
-	 * responses and bookkeeping.
+	 * responses and bookkeeping. These must all be power of 2 sizes.
 	 */
+	request_size = roundup_pow_of_two(request_size);
+	response_size = roundup_pow_of_two(response_size);
+
 	rc = efx_nic_alloc_buffer(efx, &pa->request_buffer,
 			request_size * block_count, GFP_KERNEL);
 	if (rc)
@@ -587,7 +588,7 @@ int efx_proxy_auth_detached(struct efx_nic *efx)
 	 * have finished processing other work items by then, and the workqueue
 	 * should then be empty.
 	 */
-	queue_work(pa->workqueue, &pa->request_work);
+	queue_work(pa->workqueue, &pa->detach_work);
 	write_unlock_bh(&efx->proxy_admin_lock);
 
 	return 0;
@@ -862,6 +863,21 @@ int efx_proxy_auth_handle_response(struct proxy_admin_state *pa,
 		goto out_response;
 	}
 
+	req = &pa->req_state[index];
+
+	/* Move to completed state before we modify anything else
+	 * to prevent race against timeout.
+	 */
+	if (atomic_cmpxchg(&req->state, PROXY_REQ_OUTSTANDING,
+			PROXY_REQ_COMPLETED) != PROXY_REQ_OUTSTANDING) {
+		rc = -ETIMEDOUT;
+		goto out_response;
+	}
+
+	spin_lock_bh(&pa->outstanding_lock);
+	list_del_init(&req->list);
+	spin_unlock_bh(&pa->outstanding_lock);
+
 	/* Now copy response buffer if applicable. */
 	if (response_buffer && (response_size < pa->response_size)) {
 		char *result_dest = pa->response_buffer.addr;
@@ -876,18 +892,11 @@ int efx_proxy_auth_handle_response(struct proxy_admin_state *pa,
 		result = MC_CMD_PROXY_COMPLETE_IN_DECLINED;
 	}
 
-	req = &pa->req_state[index];
 	req->result = result;
 	req->granted_privileges = granted_privileges;
 
 	req->complete_cb = complete_cb;
 	req->cb_context = cb_context;
-
-	spin_lock_bh(&pa->outstanding_lock);
-	list_del_init(&req->list);
-	spin_unlock_bh(&pa->outstanding_lock);
-
-	atomic_set(&req->state, PROXY_REQ_COMPLETED);
 
 	spin_lock_bh(&pa->completed_lock);
 	list_add_tail(&req->list, &pa->completed);
@@ -942,8 +951,6 @@ static void efx_proxy_request_work(struct work_struct *data)
 		u64 uhandle;
 		u32 index = req - pa->req_state;
 		int rc;
-		bool immed_send = false;
-		u32 immed_result;
 		u16 pf, vf, rid;
 		u32 handle;
 
@@ -1011,22 +1018,25 @@ static void efx_proxy_request_work(struct work_struct *data)
 				request_buff, pa->request_size);
 
 		if (rc) {
-			immed_send = true;
-			immed_result = pa->default_result;
-			spin_lock_bh(&pa->outstanding_lock);
-			list_del_init(&req->list);
-			spin_unlock_bh(&pa->outstanding_lock);
-		}
+			/* We failed in sending the request up; complete
+			 * immediately.
+			 */
+			req->result = pa->default_result;
 
-		if (immed_send) {
 			read_lock_bh(&pa->efx->proxy_admin_lock);
 			/* If we're no longer in the ready state leave this
 			 * in the outstanding state to be picked up by
 			 * fail_outstanding.
 			 */
 			if (pa->state == PROXY_AUTH_ADMIN_READY) {
-				req->result = immed_result;
+				/* We're in the same workqueue as the timeout
+				 * handler, so we can't race against that here.
+				 */
 				atomic_set(&req->state, PROXY_REQ_COMPLETED);
+
+				spin_lock_bh(&pa->outstanding_lock);
+				list_del_init(&req->list);
+				spin_unlock_bh(&pa->outstanding_lock);
 
 				spin_lock_bh(&pa->completed_lock);
 				list_add_tail(&req->list, &pa->completed);
@@ -1063,7 +1073,6 @@ static void efx_proxy_completed_work(struct work_struct *data)
 
 	while ((req = efx_proxy_pop_completed(pa))) {
 		u32 index = req - pa->req_state;
-		struct proxy_mc_state *mc_state;
 		void (*cb)(int, void*) = req->complete_cb;
 		void *context = req->cb_context;
 		int rc;
@@ -1072,14 +1081,10 @@ static void efx_proxy_completed_work(struct work_struct *data)
 				"%s: completing index %u\n", __func__, index);
 
 		WARN_ON(index > pa->block_count);
-		if (index > pa->block_count) {
+		if (index > pa->block_count)
 			rc = -EINVAL;
-		} else {
-			mc_state = pa->status_buffer.addr;
-			mc_state += index;
-
+		else
 			rc = efx_proxy_auth_send_response(pa, index, req);
-		}
 
 		if (cb)
 			cb(rc, context);
@@ -1100,7 +1105,6 @@ static unsigned long efx_proxy_auth_fail_outstanding(
 		struct proxy_admin_state *pa, unsigned long now)
 {
 	struct proxy_req_state *req, *prev;
-	struct proxy_mc_state *mc_state;
 	unsigned long deadline = 0;
 	u32 index;
 
@@ -1123,6 +1127,16 @@ static unsigned long efx_proxy_auth_fail_outstanding(
 		}
 		prev = req;
 
+		/* Move to completed state before doing anything to avoid race
+		 * against timeout. If we fail here we give up processing the
+		 * list and ask to be rescheduled.
+		 */
+		if (atomic_cmpxchg(&req->state, PROXY_REQ_OUTSTANDING,
+				PROXY_REQ_COMPLETED) != PROXY_REQ_OUTSTANDING) {
+			deadline = jiffies;
+			break;
+		}
+
 		spin_lock_bh(&pa->outstanding_lock);
 		list_del_init(&req->list);
 		WARN_ON(!list_empty(&pa->outstanding));
@@ -1134,10 +1148,6 @@ static unsigned long efx_proxy_auth_fail_outstanding(
 			continue;
 
 		req->result = pa->default_result;
-		mc_state = pa->status_buffer.addr;
-		mc_state += index;
-
-		atomic_set(&req->state, PROXY_REQ_COMPLETED);
 		efx_proxy_auth_send_response(pa, index, req);
 	}
 

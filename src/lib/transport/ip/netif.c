@@ -172,7 +172,11 @@ void ci_netif_timeout_reap(ci_netif* ni)
       ci_tcp_state* ts = TCP_STATE_FROM_LINK(l);
       next = l->next;
 
+#if CI_CFG_FD_CACHING
       if( ts->s.b.sb_aflags & (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_IN_CACHE) ) {
+#else
+      if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN ) {
+#endif
         LOG_NV(log(LPF "Reaping %d from %s", S_FMT(ts), state_str(ts)));
         ci_netif_timeout_leave(ni, ts);
         CITP_STATS_NETIF(++ni->state->stats.timewait_reap);
@@ -340,7 +344,11 @@ int ci_netif_timewait_try_to_free_filter(ci_netif* ni)
 void ci_netif_fin_timeout_enter(ci_netif* ni, ci_tcp_state* ts)
 {
   /* check endpoint is an orphan */
+#if CI_CFG_FD_CACHING
   ci_assert(ts->s.b.sb_aflags & (CI_SB_AFLAG_ORPHAN|CI_SB_AFLAG_IN_CACHE));
+#else
+  ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN);
+#endif
   /* check state is correct */
   ci_assert(ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN);
 
@@ -367,9 +375,9 @@ void ci_netif_fin_timeout_enter(ci_netif* ni, ci_tcp_state* ts)
 }
 
 
-static int ci_netif_try_to_reap_udp(ci_netif* ni, ci_udp_state* udp,
-                                    ci_udp_recv_q* recv_q, 
-                                    int* add_to_reap_list)
+static int ci_netif_try_to_reap_udp_recv_q(ci_netif* ni,
+                                           ci_udp_recv_q* recv_q, 
+                                           int* add_to_reap_list)
 {
   int freed_n;
   ci_uint32 reaped_b4 = recv_q->pkts_reaped;
@@ -378,53 +386,6 @@ static int ci_netif_try_to_reap_udp(ci_netif* ni, ci_udp_state* udp,
   if( recv_q->pkts_reaped != recv_q->pkts_added )
     ++(*add_to_reap_list);
   return freed_n;
-}
-
-
-static int ci_netif_try_to_reap_timestamp_q(ci_netif* ni, 
-                                            struct ci_sock_cmn_s* s,
-                                            ci_timestamp_q* timestamp_q,
-                                            int socklocked,
-                                            int* add_to_reap_list)
-{
-  ci_ip_pkt_queue* tsq = &timestamp_q->queue;
-  int tsq_num_before = tsq->num;
-  ci_ip_pkt_fmt* pkt;
-
-  ci_assert(ci_netif_is_locked(ni));
-
-  if( OO_PP_IS_NULL(timestamp_q->extract) )
-    return 0;
-  pkt = PKT_CHK(ni, tsq->head);
-
-  while( ! OO_PP_EQ(tsq->head, timestamp_q->extract) ) {
-    oo_pkt_p next;
-
-    pkt = PKT_CHK(ni, tsq->head);
-    next = pkt->tsq_next;
-
-    ci_netif_pkt_release(ni, pkt);
-    --tsq->num;
-    tsq->head = next;
-  }
-
-  if( socklocked && OO_PP_NOT_NULL(timestamp_q->extract) &&
-      pkt->tx_hw_stamp.tv_sec == CI_PKT_TX_HW_STAMP_CONSUMED ) {
-    /* We must not set timestamp_q_extract to NULL without both locks:
-     * * stack lock is necessary to free the packet and because
-     *   other code might add a new packet to the queue;
-     * * socket lock is needed because the code under socket lock
-     *   expects the stable value of timestamp_q_extract.*/
-    tsq->head = OO_PP_NULL;
-    --tsq->num;
-    ci_netif_pkt_release(ni, pkt);
-    ci_assert_equal(tsq->num, 0);
-  }
-
-
-  if( tsq->num > 1 )
-    ++(*add_to_reap_list);
-  return tsq_num_before - tsq->num;
 }
 
 
@@ -438,9 +399,6 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
   int freed_n = 0;
   int add_to_reap_list;
   int reap_harder = ni->state->pkt_sets_n == ni->state->pkt_sets_max
-#ifdef __KERNEL__
-      || (ni->flags & CI_NETIF_FLAG_NO_PACKET_BUFFERS)
-#endif
       || ni->state->mem_pressure;
 
   if( ci_ni_dllist_is_empty(ni, &ni->state->reap_list) )
@@ -468,20 +426,15 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
       ci_tcp_rx_reap_rxq_bufs(ni, ts);
 
       freed_n += q_num_b4 - ts->recv1.num;
-      freed_n += ci_netif_try_to_reap_timestamp_q(ni, &ts->s,
-                                                  &ts->timestamp_q, 0,
-                                                  &add_to_reap_list);
+      freed_n += ci_netif_try_to_reap_udp_recv_q(ni, &ts->timestamp_q,
+                                                 &add_to_reap_list);
 
       /* Try to reap the last packet */
-      if( reap_harder && (ts->recv1.num == 1 ||
-                          ts->timestamp_q.queue.num == 1) &&
+      if( reap_harder && ts->recv1.num == 1 &&
           ci_sock_trylock(ni, &ts->s.b) ) {
         q_num_b4 = ts->recv1.num;
         ci_tcp_rx_reap_rxq_bufs_socklocked(ni, ts);
         freed_n += q_num_b4 - ts->recv1.num;
-        freed_n += ci_netif_try_to_reap_timestamp_q(ni, &ts->s,
-                                                    &ts->timestamp_q, 1,
-                                                    &add_to_reap_list);
         ci_sock_unlock(ni, &ts->s.b);
       }
       if( ts->recv1.num > 1 || add_to_reap_list)
@@ -489,19 +442,10 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
     }
     else if( wo->waitable.state == CI_TCP_STATE_UDP ) {
       ci_udp_state* us = &wo->udp;
-      freed_n += ci_netif_try_to_reap_udp(ni, us, &us->recv_q,
-                                          &add_to_reap_list);
-      freed_n += ci_netif_try_to_reap_timestamp_q(ni, &us->s,
-                                                  &us->timestamp_q, 0,
-                                                  &add_to_reap_list);
-
-      if( reap_harder && us->timestamp_q.queue.num == 1 &&
-          ci_sock_trylock(ni, &us->s.b) ) {
-        freed_n += ci_netif_try_to_reap_timestamp_q(ni, &us->s,
-                                                    &us->timestamp_q,  1,
-                                                    &add_to_reap_list);
-        ci_sock_unlock(ni, &us->s.b);
-      }
+      freed_n += ci_netif_try_to_reap_udp_recv_q(ni, &us->recv_q,
+                                                 &add_to_reap_list);
+      freed_n += ci_netif_try_to_reap_udp_recv_q(ni, &us->timestamp_q,
+                                                 &add_to_reap_list);
 
       if( add_to_reap_list )
         ci_ni_dllist_put(ni, &ni->state->reap_list, &us->s.reap_link);
@@ -552,10 +496,14 @@ void ci_netif_rxq_low_on_recv(ci_netif* ni, ci_sock_cmn* s,
    * and ripe for reaping.  ci_netif_rx_post() will also try to reap more
    * buffers from other sockets if necessary.
    */
-  if( s->b.state == CI_TCP_STATE_UDP )
+  if( s->b.state == CI_TCP_STATE_UDP ) {
     ci_udp_recv_q_reap(ni, &SOCK_TO_UDP(s)->recv_q);
-  else if( s->b.state & CI_TCP_STATE_TCP_CONN )
+    ci_udp_recv_q_reap(ni, &SOCK_TO_UDP(s)->timestamp_q);
+  }
+  else if( s->b.state & CI_TCP_STATE_TCP_CONN ) {
     ci_tcp_rx_reap_rxq_bufs(ni, SOCK_TO_TCP(s));
+    ci_udp_recv_q_reap(ni, &SOCK_TO_TCP(s)->timestamp_q);
+  }
 
   if( ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL )
     /* See if we've freed enough to exit memory pressure.  Done here so
@@ -578,7 +526,7 @@ void ci_netif_mem_pressure_pkt_pool_fill(ci_netif* ni)
   ci_ip_pkt_fmt* pkt;
   int intf_i, n = 0;
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-    n += CI_CFG_RX_DESC_BATCH;
+    n += (2*CI_CFG_RX_DESC_BATCH);
   while( ni->state->mem_pressure_pkt_pool_n < n &&
          (pkt = ci_netif_pkt_alloc(ni)) != NULL ) {
     pkt->flags |= CI_PKT_FLAG_RX;
@@ -595,13 +543,16 @@ static void ci_netif_mem_pressure_pkt_pool_use(ci_netif* ni)
 {
   /* Empty the special [mem_pressure_pkt_pool] into the free pool. */
   ci_ip_pkt_fmt* pkt;
+#ifdef __KERNEL__
+  int is_locked = 1;
+#endif
   while( ! OO_PP_IS_NULL(ni->state->mem_pressure_pkt_pool) ) {
     pkt = PKT(ni, ni->state->mem_pressure_pkt_pool);
     ni->state->mem_pressure_pkt_pool = pkt->next;
     --ni->state->mem_pressure_pkt_pool_n;
     ci_assert_equal(pkt->refcount, 0);
     ci_assert(pkt->flags & CI_PKT_FLAG_RX);
-    ci_netif_pkt_free(ni, pkt);
+    ci_netif_pkt_free(ni, pkt CI_KERNEL_ARG(&is_locked));
   }
 }
 
@@ -613,7 +564,7 @@ static void ci_netif_mem_pressure_enter_critical(ci_netif* ni, int intf_i)
 
   CITP_STATS_NETIF_INC(ni, memory_pressure_enter);
   ni->state->mem_pressure |= OO_MEM_PRESSURE_CRITICAL;
-  ni->state->rxq_limit = CI_CFG_RX_DESC_BATCH;
+  ni->state->rxq_limit = 2*CI_CFG_RX_DESC_BATCH;
   ci_netif_mem_pressure_pkt_pool_use(ni);
   if( ci_netif_rx_vi_space(ni, ci_netif_rx_vi(ni, intf_i)) >=
       CI_CFG_RX_DESC_BATCH )
@@ -676,19 +627,20 @@ int ci_netif_mem_pressure_try_exit(ci_netif* ni)
   return 1;
 }
 
-
 /*--------------------------------------------------------------------
  *
  *
  *--------------------------------------------------------------------*/
 
-static void __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i, int max)
+static int __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i,
+                               int bufset_id, int max)
 {
   ci_ip_pkt_fmt* pkt;
   int i;
+  int posted = 0;
 
   ci_assert_ge(max, CI_CFG_RX_DESC_BATCH);
-  ci_assert_ge(ni->state->n_freepkts, max);
+  ci_assert_ge(ni->pkt_set[bufset_id].n_free, max);
 
   do {
     for( i = 0; i < CI_CFG_RX_DESC_BATCH; ++i ) {
@@ -696,10 +648,10 @@ static void __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i, int max)
       ** ci_netif_pkt_alloc().  Nasty, but this is really performance
       ** critical.
       */
-      ci_assert(OO_PP_NOT_NULL(ni->state->freepkts));
-      pkt = PKT(ni, ni->state->freepkts);
-      ci_assert(OO_PP_EQ(ni->state->freepkts, OO_PKT_P(pkt)));
-      ni->state->freepkts = pkt->next;
+      ci_assert(OO_PP_NOT_NULL(ni->pkt_set[bufset_id].free));
+      pkt = PKT(ni, ni->pkt_set[bufset_id].free);
+      ci_assert(OO_PP_EQ(ni->pkt_set[bufset_id].free, OO_PKT_P(pkt)));
+      ni->pkt_set[bufset_id].free = pkt->next;
       pkt->refcount = 1;
       pkt->flags |= CI_PKT_FLAG_RX;
       pkt->intf_i = intf_i;
@@ -728,11 +680,14 @@ static void __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i, int max)
       }
 #endif
     }
+    ni->pkt_set[bufset_id].n_free -= CI_CFG_RX_DESC_BATCH;
     ni->state->n_freepkts -= CI_CFG_RX_DESC_BATCH;
     ni->state->n_rx_pkts  += CI_CFG_RX_DESC_BATCH;
     ef_vi_receive_push(vi);
-    max -= CI_CFG_RX_DESC_BATCH;
-  } while( max >= CI_CFG_RX_DESC_BATCH );
+    posted += CI_CFG_RX_DESC_BATCH;
+  } while( max - posted >= CI_CFG_RX_DESC_BATCH );
+
+  return posted;
 }
 
 
@@ -751,7 +706,9 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
   */
   ef_vi* vi = ci_netif_rx_vi(netif, intf_i);
   ci_ip_pkt_fmt* pkt;
-  int max_n_to_post, rx_allowed;
+  int max_n_to_post, rx_allowed, n_to_post;
+  int bufset_id = NI_PKT_SET(netif);
+  int ask_for_more_packets = 0;
 
   ci_assert(ci_netif_is_locked(netif));
   ci_assert(ci_netif_rx_vi_space(netif, vi) >= CI_CFG_RX_DESC_BATCH);
@@ -762,15 +719,37 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
     goto rx_limited;
  not_rx_limited:
 
-  if( netif->state->n_freepkts < max_n_to_post )
-    goto not_enough_pkts;
- enough_pkts:
-
   ci_assert_ge(max_n_to_post, CI_CFG_RX_DESC_BATCH);
-  ci_assert_le(max_n_to_post, netif->state->n_freepkts);
-  __ci_netif_rx_post(netif, vi, intf_i, max_n_to_post);
-  CHECK_FREEPKTS(netif);
-  return;
+  /* We could have enough packets in all sets together, but we need them
+   * in one set. */
+  if( netif->pkt_set[bufset_id].n_free < CI_CFG_RX_DESC_BATCH )
+    goto find_new_bufset;
+
+ good_bufset:
+  do {
+    n_to_post = CI_MIN(max_n_to_post, netif->pkt_set[bufset_id].n_free);
+    max_n_to_post -= __ci_netif_rx_post(netif, vi, intf_i,
+                                        bufset_id, n_to_post);
+    ci_assert_ge(max_n_to_post, 0);
+
+    if( max_n_to_post < CI_CFG_RX_DESC_BATCH ) {
+      if( bufset_id != netif->state->current_pkt_set ) {
+        ci_netif_pkt_set_change(netif, bufset_id,
+                                ask_for_more_packets);
+      }
+      CHECK_FREEPKTS(netif);
+      return;
+    }
+
+ find_new_bufset:
+    bufset_id = ci_netif_pktset_best(netif);
+    if( bufset_id == -1 ||
+        netif->pkt_set[bufset_id].n_free < CI_CFG_RX_DESC_BATCH )
+      goto not_enough_pkts;
+    ask_for_more_packets = ci_netif_pkt_set_is_underfilled(netif,
+                                                           bufset_id);
+  } while( 1 );
+  /* unreachable */
 
 
  rx_limited:
@@ -782,12 +761,26 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
     CITP_STATS_NETIF_INC(netif, reap_rx_limited);
     ci_netif_try_to_reap(netif, max_n_to_post - rx_allowed);
     rx_allowed = NI_OPTS(netif).max_rx_packets - netif->state->n_rx_pkts;
+    if( rx_allowed < 0 )
+      rx_allowed = 0;
     max_n_to_post = CI_MIN(max_n_to_post, rx_allowed);
     if( ef_vi_receive_fill_level(vi) + max_n_to_post < low_thresh(netif) )
       /* Ask recv() path to refill when some buffers are freed. */
       netif->state->rxq_low = ci_netif_rx_vi_space(netif, vi) - max_n_to_post;
     if( max_n_to_post >= CI_CFG_RX_DESC_BATCH )
       goto not_rx_limited;
+  }
+  if( netif->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL ) {
+    /* We want to always be able to post a small number of buffers to
+     * the rxq when in critical memory pressure as otherwise we may
+     * drop packets that would release queued buffers.
+     *
+     * When we enter critical memory pressure we release a few packet
+     * buffers for exactly this purpose, so make sure we can use them
+     * here.
+     */
+    rx_allowed = CI_CFG_RX_DESC_BATCH;
+    max_n_to_post = ci_netif_rx_vi_space(netif, vi);
   }
   max_n_to_post = CI_MIN(max_n_to_post, rx_allowed);
   if(CI_LIKELY( max_n_to_post >= CI_CFG_RX_DESC_BATCH ))
@@ -798,75 +791,44 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
   return;
 
  not_enough_pkts:
-#if ! CI_CFG_PP_IS_PTR
+  /* The best packet set has less than CI_CFG_RX_DESC_BATCH packets.
+   * We should free some packets or allocate a new set. */
+
+  /* Even if we free packets and find a good bufset, we'd better to
+   * allocate more packets when time allows: */
+  ask_for_more_packets = 1;
+
   /* Grab buffers from the non-blocking pool. */
   while( (pkt = ci_netif_pkt_alloc_nonb(netif)) != NULL ) {
     --netif->state->n_async_pkts;
     CITP_STATS_NETIF_INC(netif, pkt_nonb_steal);
     pkt->flags &= ~CI_PKT_FLAG_NONB_POOL;
+    bufset_id = PKT_SET_ID(pkt);
     ci_netif_pkt_release_1ref(netif, pkt);
-    if( netif->state->n_freepkts >= max_n_to_post )
-      goto enough_pkts;
+    if( netif->pkt_set[bufset_id].n_free >= CI_CFG_RX_DESC_BATCH )
+      goto good_bufset;
   }
-#endif
 
   /* Still not enough -- allocate more memory if possible. */
-  while( netif->state->pkt_sets_n < netif->state->pkt_sets_max ) {
-    int old_n_freepkts = netif->state->n_freepkts;
-    ci_tcp_helper_more_bufs(netif);
-    if( old_n_freepkts == netif->state->n_freepkts ) {
-#ifndef __KERNEL__
-      ci_assert_equal(netif->state->pkt_sets_n, netif->state->pkt_sets_max);
-#else
-      tcp_helper_resource_t *trs = netif2tcp_helper_resource(netif);
-      /* Probably, we are in atomic context and can not allocate more
-       * buffers just now. */
-      if( netif->state->pkt_sets_n ==  netif->state->pkt_sets_max )
-        break;
-      ci_assert(netif->flags & CI_NETIF_FLAG_IN_DL_CONTEXT);
-      ci_assert(netif->flags & CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION);
-
-      /* Set this flag and schedule packet allocation regardless of
-       * free_packets_low value used inside ci_tcp_helper_more_bufs above */
-      netif->flags |= CI_NETIF_FLAG_NO_PACKET_BUFFERS;
-      queue_work(trs->wq, &trs->non_atomic_work);
-
-      if( netif->state->n_freepkts >= CI_CFG_RX_DESC_BATCH &&
-          netif->state->n_freepkts >=
-            CI_MIN(4 * CI_CFG_RX_DESC_BATCH,
-                   NI_OPTS(netif).free_packets_low / 2)
-        ) {
-        max_n_to_post = netif->state->n_freepkts;
-        goto enough_pkts;
-      }
-
-      /* Packets will be allocated later, but for now we should
-       * try to reap. */
-      ci_netif_try_to_reap(netif, max_n_to_post - netif->state->n_freepkts);
-      if( netif->state->n_freepkts >= max_n_to_post )
-        goto enough_pkts;
-      return;
-#endif
-    }
-    if( netif->state->n_freepkts >= max_n_to_post )
-      goto enough_pkts;
+  if( netif->state->pkt_sets_n < netif->state->pkt_sets_max &&
+      ci_tcp_helper_more_bufs(netif) == 0 ) {
+    bufset_id = netif->state->pkt_sets_n - 1;
+    ci_assert_equal(netif->pkt_set[bufset_id].n_free,
+                    1 << CI_CFG_PKTS_PER_SET_S);
+    ask_for_more_packets = 0;
+    goto good_bufset;
   }
 
-  if( ef_vi_receive_fill_level(vi) + netif->state->n_freepkts <
-      low_thresh(netif) ) {
+  if( ef_vi_receive_fill_level(vi) < low_thresh(netif) ) {
     CITP_STATS_NETIF_INC(netif, reap_buf_limited);
-    ci_netif_try_to_reap(netif, max_n_to_post - netif->state->n_freepkts);
+    ci_netif_try_to_reap(netif, max_n_to_post);
     max_n_to_post = CI_MIN(max_n_to_post, netif->state->n_freepkts);
-    if( ef_vi_receive_fill_level(vi) + max_n_to_post < low_thresh(netif) )
-      /* Ask recv() path to refill when some buffers are freed. */
-      netif->state->rxq_low = ci_netif_rx_vi_space(netif, vi) - max_n_to_post;
-    if( max_n_to_post >= CI_CFG_RX_DESC_BATCH )
-      goto enough_pkts;
-  }
-
-  if( netif->state->n_freepkts >= CI_CFG_RX_DESC_BATCH ) {
-    max_n_to_post = netif->state->n_freepkts;
-    goto enough_pkts;
+    bufset_id = ci_netif_pktset_best(netif);
+    if( bufset_id != -1 &&
+        netif->pkt_set[bufset_id].n_free >= CI_CFG_RX_DESC_BATCH )
+      goto good_bufset;
+    /* Ask recv() path to refill when some buffers are freed. */
+    netif->state->rxq_low = ci_netif_rx_vi_space(netif, vi);
   }
 
   CITP_STATS_NETIF_INC(netif, refill_buf_limited);
@@ -992,6 +954,20 @@ unsigned ci_netif_purge_deferred_socket_list(ci_netif* ni)
   return l;
 }
 
+void ci_netif_merge_atomic_counters(ci_netif* ni)
+{
+  ci_int32 val;
+#define merge(ni, field) \
+  do {                                                          \
+    val = ni->state->atomic_##field;                            \
+  } while( ci_cas32_fail(&ni->state->atomic_##field, val, 0) );\
+  ni->state->field += val;
+
+  merge(ni, n_rx_pkts);
+  merge(ni, n_async_pkts);
+#undef merge
+}
+
 #ifdef __KERNEL__
 #define KERNEL_DL_CONTEXT_DECL , int in_dl_context
 #define KERNEL_DL_CONTEXT , in_dl_context
@@ -1034,6 +1010,13 @@ static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
     CITP_STATS_NETIF(++ni->state->stats.deferred_polls);
     ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_NEED_POLL);
     ci_netif_poll(ni);
+    l = ni->state->lock.lock;
+  }
+
+  if( l & CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS ) {
+    ef_eplock_clear_flags(&ni->state->lock,
+                          CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS);
+    ci_netif_merge_atomic_counters(ni);
     l = ni->state->lock.lock;
   }
 
@@ -1228,7 +1211,9 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
   }
 
   pkt->pay_len = pkt->buf_len;
+  ci_netif_pkt_hold(ni, pkt);
   ci_netif_send(ni, pkt);
+  ci_netif_pkt_release(ni, pkt);
 
   ci_netif_unlock(ni);
   return 0;

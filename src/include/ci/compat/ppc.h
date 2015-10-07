@@ -47,6 +47,8 @@
 #define CI_PAGE_SIZE     (1 << CI_PAGE_SHIFT)
 #define CI_PAGE_MASK     (~((ci_uintptr_t) CI_PAGE_SIZE - 1))
 
+#define CI_CACHE_LINE_SIZE 128
+
 #define CI_CPU_HAS_IOSPACE 0 /* CPU has a separate IO space */
 
 #endif  /* __CI_COMPAT_PPC_H__ */

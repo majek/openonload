@@ -70,14 +70,16 @@ efrm_bt_manager_dtor(struct efrm_bt_manager *manager)
 extern int
 efrm_bt_manager_alloc(struct efhw_nic *nic,
 		      struct efrm_bt_manager *manager, int size,
-		      struct efrm_buffer_table_allocation *a);
+		      struct efrm_buffer_table_allocation *a,
+		      int reset_pending);
 extern int
 efrm_bt_manager_realloc(struct efhw_nic *nic,
 			struct efrm_bt_manager *manager,
 			struct efrm_buffer_table_allocation *a);
 extern void
 efrm_bt_manager_free(struct efhw_nic *nic, struct efrm_bt_manager *manager,
-		     struct efrm_buffer_table_allocation *a);
+		     struct efrm_buffer_table_allocation *a,
+		     int reset_pending);
 extern int
 efrm_bt_nic_set(struct efhw_nic *nic, struct efrm_buffer_table_allocation *a,
 		dma_addr_t *dma_addrs);

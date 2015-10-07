@@ -93,8 +93,6 @@ struct oof_local_port {
    * in [oof_manager::local_addrs].
    */
   struct oof_local_port_addr *lp_addr;
-
-  struct oof_thc             *lp_thcf;
 };
 
 
@@ -140,6 +138,23 @@ struct oof_cplane_update {
 };
 
 
+static const ci_uint8 oof_tproxy_ipprotos[] = {IPPROTO_ICMP, IPPROTO_IGMP};
+#define OOF_TPROXY_IPPROTO_FILTER_COUNT (sizeof(oof_tproxy_ipprotos) /       \
+                                         sizeof(oof_tproxy_ipprotos[0]))
+/* Tproxy per ifindex */
+struct oof_tproxy {
+  struct oo_hw_filter ft_filter; /* mac filter */
+  struct oo_hw_filter ft_filter_arp;
+  struct oo_hw_filter ft_filter_ipproto[OOF_TPROXY_IPPROTO_FILTER_COUNT];
+  int ft_ifindex;
+  unsigned ft_hwport_mask;
+  unsigned short ft_vlan_id;
+  ci_uint8 ft_mac[6];
+
+  ci_dllink ft_manager_link;
+};
+
+
 struct oof_manager {
 
   /* Pointer to state belonging to the code module using this module. */
@@ -170,6 +185,14 @@ struct oof_manager {
   struct oof_local_addr* fm_local_addrs;
 
   ci_dllist    fm_mcast_laddr_socks;
+
+  /* List of scalable-filter-manager structures, or "tproxies" for short. */
+  ci_dllist    fm_tproxies;
+  /* In some circumstances, tproxies need to install protocol filters that are
+   * not MAC-qualified and are required for the lifetime of any tproxy and are
+   * system-global. */
+#define OOF_TPROXY_GLOBAL_FILTER_COUNT OOF_TPROXY_IPPROTO_FILTER_COUNT
+  struct oo_hw_filter fm_tproxy_global_filters[OOF_TPROXY_GLOBAL_FILTER_COUNT];
 
   /* This mask tracks which hwports are up.  Unicast filters are usually
    * installed on all interfaces that are up and mapped into the

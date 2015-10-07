@@ -1,423 +1,231 @@
-OpenOnload-201502-u3 Release Notes
-==================================
-
-This is a minor update release that fixes a set of important issues
-with the sfc net driver.  For full details please see the enclosed net
-driver release notes.
-
-This release also includes a small change to kernel compatibility code
-in Onload to allow building on RHEL 6.7.
-
-The Release Notes for OpenOnload-201502-u2 are included below.
-
-
-OpenOnload-201502-u2 Release Notes
-==================================
-
-This is a minor update release that fixes a number of issues in
-OpenOnload-201502-u1.
-
-Below is a brief summary of any relevant changes and limitations that
-we are aware of.  See the ChangeLog for further details and a list of
-bugs fixed.
-
-The Release Notes for OpenOnload-201502-u1 are included at the end of
-this file.
-
-
-EF_NAME length change
----------------------
-
-A bug in the handling of the EF_NAME environment variable meant that
-recent releases accepted names that are longer than officially
-supported.  Names up to 16 characters were accepted, where it should
-have rejected anything over 8 characters.  In particular, this caused
-problems if used in combination with the stackname extension API as
-that did correctly enforce the limit of 8 characters.
-
-This release restores the correct enforcement of the limit of 8
-characters on EF_NAME to ensure it is consistent and compatible with
-the stackname extension API.
-
-If you have been using names longer than 8 characters you may find
-they become truncated.  If you have been using stack names that only
-differ in the last few characters, and this is the portion that is
-truncated, then sockets that should have been placed in seperate
-stacks will as a result share a single stack.  This can be avoided by
-ensuring all names requested are 8 characters or less.
-
-
-ef_vi flags change
-------------------
-
-Recent Onload releases have not correctly supported the use of
-hardware TX loopback when using the ef_vi API.  This releases fixes
-that, but in so doing removes the (broken) EF_VI_TX_LOOPBACK flag and
-replaces it with a flag on the protection domain: EF_PD_MCAST_LOOP.
-The eftap sample code includes the correct use of this flag to enable
-TX hardware loopback.
-
-
-
-
-OpenOnload-201502-u1 Release Notes
-==================================
-
-This is a minor update release that fixes a number of issues in
-OpenOnload-201502.
-
-Below is a brief summary of any limitations that we are aware of.  See
-the ChangeLog for further details and a list of bugs fixed.
-
-The Release Notes for OpenOnload-201502 are included at the end of
-this file.
-
-
-Performance Regression
-----------------------
-
-Final testing of the OpenOnload-201502 release revealed a performance
-regression, highlighted in the release notes at the time, of around
-50ns.
-
-This update release includes changes that recover this, but during
-investigation we discovered a number of other relevant factors, some
-of which can potentially be used to demonstrate a significant
-performance improvement:
-
-1) We saw variation between different Linux distributions, the
-majority of which can be attributed to the different compiler versions
-used on these.  The gcc-4.8.2 based compiler included with RHEL7 for
-example showed in some cases improvement in latency (tested with
-sfnt-pingpong) of around 50ns compared to the gcc-4.4 based compiler
-distributed with RHEL6.
-
-2) Possibly related to (1) we found that small code changes in the
-history of OpenOnload that should have no effect on the
-performance (well away from the critical path) could be shown to have
-an effect, both positive and negative.  This is thought to be due to
-changes in code and data locality and cache performance.  We have
-ongoing work to understand this in more detail and develop it into
-further performance improvements.
-
-3) For each of the above the magnitude of the change was test and
-traffic dependent.  For example, some historic code changes would show
-a TCP improvement but a UDP regression, and vice versa, and the extent
-of these would depend on the compiler and OS used.  This suggests that
-our benchmarks may not 100% accurately predict the performance of your
-applications (this is hopefully not surprising, benchmarks can never
-be perfect), and that your mileage may vary.
-
-4) Some new firmware features can add noticeable latency when using
-the "full featured" firmware variant.  In particular the use of the
-vswitch in the NIC (which is enabled when using multiple VFs, and can
-be forced off using the num_vfs=0 sfc module parameter) and multicast
-chaining filters.  For absolute best latency we continue to recommend
-using the "low latency" firmware variant.
-
-
-Scalable epoll mode
--------------------
-
-The OpenOnload-201502 release added a new scalable epoll mode
-(EF_UL_EPOLL=3) - for further details see the 201502 release notes
-below.  An issue in the way this new mode was enabled in that release
-meant that it was not being used even when selected.  This has been
-fixed in the update release.
-
-
-
-OpenOnload-201502 Release Notes
+OpenOnload-201509 Release Notes
 ===============================
 
 This is a major update release that adds new features to OpenOnload.
 
-Below is a brief summary of the new features and any limitations that
-we are aware of.  See the ChangeLog for further details and bugs
+Below is a brief summary of the new features and any limitations that we are
+aware of.  See the ChangeLog for further details and a list of bugs fixed.
 
 
-Ubuntu/Debian Support
----------------------
+Scalable filters
+----------------
 
-This release adds Ubuntu and Debian to the list of officially
-supported operating systems.  The currently supported versions are:
+Normally, an Onload stack receives only the traffic that is destined for
+sockets that it has created.  It achieves this by installing a "filter" in
+hardware to match only the expected traffic for each socket.  These filters are
+a limited resource and take tens of microseconds to initialise, and so there is
+a limit to the number of sockets with filters, and to how quickly they can be
+created.
 
-  Debian: 6 and 7
-  Ubuntu: 12.04 LTS, 14.04 LTS and 14.10
+This release of Onload implements several "scalable filtering" modes to
+overcome this limitation.  In these modes, Onload receives all incoming traffic
+on a specified interface.  This prevents unaccelerated traffic from being
+passed on that interface.  It is suggested that additional PFs or VFs be
+configured on the adapter and used for this purpose.
 
-As new releases are made, Onload will aim to support the most recent
-two major releases of each.
+Scalable filter modes are configured using the EF_SCALABLE_FILTERS,
+EF_SCALABLE_FILTERS_MODE and EF_SCALABLE_FILTERS_ENABLE environment variables.
+Further discussion is contained in the "Transparent proxying" and "Scalable
+listening sockets" sections below.
+
+The feature requires 7000-series adapters and a firmware version of at least
+v4.6.
+
+By default use of scalable filters requires CAP_NET_RAW.  It is possible to
+configure Onload to avoid the capability check through the use of the
+scalable_filter_gid Onload module parameter.  This can be set to -1 to avoid
+capability checking for this feature entirely, set to a group id to allow users
+in that group to use the feature, or left at the default to use the
+capability checking in all cases.
+
+Please consult the User Guide for full details.
 
 
-KVM
----
+Transparent proxying
+--------------------
 
-This release adds support for running Onload in KVM guests which have
-either had a VF or PF passed through to them.  The Onload user guide
-contains further details on how to configure and use Onload in a KVM
-guest.
+Support for the IP_TRANSPARENT socket option was added in this release.  The
+option allows sockets to be bound to addresses that need not be local, and is
+most commonly used by HTTP proxies.  It requires the use of the "transparent
+active" or "RSS transparent active" scalable filter modes.
+
+It is subject to the following limitations:
+
+ * The IP_TRANSPARENT option must be set on socket before the socket is bound.
+ * The IP_TRANSPARENT option cannot be cleared after bind on accelerated
+   sockets.
+ * IP_TRANSPARENT sockets cannot be accelerated if they are bound to port 0 or
+   to INADDR_ANY.
+ * IP_TRANSPARENT sockets cannot be passed to the kernel stack when bound to a
+   port that is in the list specified by EF_FORCE_TCP_REUSEPORT.
+
+When combined with clustering (i.e. when using the "RSS transparent active"
+mode), the following additional limitations apply:
+
+ * EF_CLUSTER_NAME must be set explicitly for the processes sharing the
+   cluster.
+ * The stack name, whether specified by EF_NAME or by onload_set_stackname(),
+   must be empty.
+
+Please consult the User Guide for full details.
 
 
-Docker containers
------------------
+Active-open socket caching
+--------------------------
 
-This release adds support for running Onload in a docker container.
-Please see the Onload user guide for details of how to install and use
-Onload in a container.  Onload does not support network namespaces
+This release adds support for caching active-open sockets in addition to the
+support for caching passive-open sockets that was introduced in OpenOnload
+201502.  This reduces the time required to create a new socket.  As the cost
+of installing a hardware filter would negate the advantages of caching, only
+sockets with the IP_TRANSPARENT option set are eligible to enter the active-
+open cache.
 
 
-VF and Multi-PF Onload
+Scalable listening sockets
+--------------------------
+
+Ordinarily, for each accelerated listening socket, Onload installs one filter
+per IP address per physical port.  In a typical configuration with one IP
+configured per port, this results in a maximum of 2048 listening sockets
+(although in practice the limit will be still lower as there will be other
+users of the filter table).
+
+Onload can now install a single filter that captures all traffic on an
+interface, removing the need to install an extra filter for each listening
+socket, and so avoiding this limitation on the number of listening sockets.
+This is called the passive scalable filter mode.
+
+To use this feature, first enable scalable filters as described in the User
+Guide.  Listening sockets that are bound to an IP configured on the
+scalable-filter interface will take advantage of this feature.
+
+The following limitations apply:
+
+ * Sockets using this feature must be bound to the appropriate IP address
+   before listen() is called on them.
+ * When using large numbers of listening sockets, it might be necessary to
+   increase the new option EF_TCP_SYNRECV_MAX to ensure that there are enough
+   buffers to handle incoming connections.
+ * After an IP address is removed from an interface, sockets using scalable
+   filters (both listening sockets and sockets accepted from the listeners)
+   will continue to receive traffic that arrives at the NIC if it matches the
+   local and remote address and port of the socket.
+
+Please consult the User Guide for full details.
+
+
+Teamd support
+-------------
+
+Onload now supports bonds/teams configured with the "teaming" kernel module and
+"teamd" daemon.  This is in addition to the long-standing support for bonds
+configured using the "bonding" module.  teamd is distributed with RHEL 7.
+
+
+Stratus ftServer
+----------------
+
+This release adds support for the Stratus ftServer platform.  When one unit of
+the system is removed from service, Onload stacks will fail over gracefully to
+the redundant unit.
+
+
+New ef_vi filter-types
 ----------------------
 
-Onload can also be configured to run with VFs or multiple PFs on a
-single port in a non-virtualised environment.
+Support for IP-protocol and Ethertype filters have been added to ef_vi.  These
+are only supported on 7000-series adapters with a firmware version of at least
+v4.6.  Further details are available in the ef_vi Doxygen documentation.
 
 
-Socket Caching
---------------
+New options
+-----------
 
-This release adds support for caching of passively opened TCP sockets,
-allowing improved connection accept rate.  This feature can be
-controlled using three new environement variables
-(EF_SOCKET_CACHE_PORTS, EF_SOCKET_CACHE_MAX and
-EF_PER_SOCKET_CACHE_MAX) that limit which ports and how many sockets
-can be cached.
+In addition to the options described above for scalable filters the following
+new options have been added:
 
-There are some restrictions:
-
-- socket caching is only supported if EF_UL_EPOLL=3 (see below);
-- socket caching is not supported after fork();
-- currently caching does not offer a benefit if a single socket accepts
-  connections on multiple local addresses;
-- socket caching is only supported if EF_FDS_MT_SAFE=1;
-- sockets that have been dup()ed will not be cached;
-- sockets that use the O_ASYNC or O_APPEND modes will not be cached;
-- for full benefit sockets that use O_NONBLOCK or O_CLOEXEC should be
-  accept()ed with those flags, rather than setting them later;
-- allowing more sockets to be cached (via EF_SOCKET_CACHE_MAX) than
-  there are file descriptors available can result in drastically reduced
-  performance. It should be considered that the socket cache limit
-  applies per stack, unlike the per-process file descriptor limit.
-
-
-Black/White listing of interfaces
----------------------------------
-
-New module options and their associated sysfs nodes allow the user to
-control through a whitelist and a blacklist which network interfaces
-will be accelerated by Onload.
- - Onload will ignore any network interfaces mentioned in the
- intf_black_list module option.
- - If the intf_white_list module option is non-empty, Onload will only
- accelerate the network interfaces mentioned.
-
-These can be updated at runtime, but the changes will only affect new
-stacks.  The configuration is a global setting and can not be modified
-for individual stacks.
+ * EF_TCP_SYNRECV_MAX: This controls the maximum number of TCP connections in
+   the stack in the SYN_RCVD state.  Endpoint buffers are used to represent
+   these connections, and each endpoint buffer can accommodate up to four such
+   connections.  As such, when tuning this value it is necessary to ensure that
+   EF_MAX_ENDPOINTS is sufficiently large.  As endpoint buffers are also
+   required for established connections, it is recommended that
+   EF_TCP_SYNRECV_MAX be no larger than three quarters of the value of
+   EF_SYNRECV_MAX.  By default, EF_TCP_SYNRECV_MAX is equal to four times the
+   value of /proc/sys/net/ipv4/tcp_max_syn_backlog.
+ * EF_TCP_CONNECT_SPIN: This option is analogous to EF_TCP_ACCEPT_SPIN.  When
+   enabled, calls to connect() for TCP sockets will spin until a connection is
+   established, or until the spin- or socket-timeout has elapsed.  It is off by
+   default, in imitation of the behaviour of earlier Onload releases.
+ * EF_TCP_SNDBUF_MODE=2: A new value of 2 has been introduced for this
+   variable.  When selected, the sizes of send-buffers for TCP sockets will be
+   adjusted automatically according to network conditions.
+ * EF_TCP_SOCKBUF_MAX_FRACTION: This option controls the maximum fraction of the 
+   TX buffers that may be allocated to a single socket with EF_TCP_SNDBUF_MODE=2
+ * EF_UDP_SEND_NONBLOCK_NO_PACKETS_MODE: This option controls how a non-blocking 
+   UDP send() call should behave if it is unable to allocate sufficient packet 
+   buffers.
+ * EF_RETRANSMIT_THRESHOLD_ORPHAN: This option is similar to 
+   EF_RETRANSMIT_THRESHOLD, but sets the maximum number of retransmissions 
+   before an orphaned socket is aborted.
 
 
-Scalable epoll mode
--------------------
+UDP TX Timestamps
+-----------------
 
-This release adds a new epoll mode EF_UL_EPOLL=3.  This mode is
-accelerated, supports socket caching (see above), and is scalable in
-the sense that the cost of the epoll_wait() is independent of the
-number of accelerated FDs in the set and depends only on the number of
-FDs that become ready.
+Previously, when using recvmsg() to retrieve TX timestamps for UDP
+packets, the payload that Onload would return would consist only of
+the UDP payload.  Now, the entire Ethernet frame is returned.  This
+matches the behaviour of the Linux kernel.
 
-EF_UL_EPOLL=1 remains the default as it has fewer restrictions, but
-EF_UL_EPOLL=3 should be considered for your application as it can
-offer better performance.
-
-The restrictions of EF_UL_EPOLL=3 which mean it's not suitable in all
-cases are as follows:
- - It does not support monitoring the readiness of the epoll FD via a
-   second poll/epoll/select.
- - It does not support epoll sets which exist across a fork().
-
-For applications that require this functionality another epoll mode
-should be selected.
+Any application relying on the old Onload behaviour should be updated
+to expect Linux behaviour to ensure it is portable and can be run
+without Onload.  To facilitate running applications with multiple
+Onload versions onload_fd_check_feature() has been extended to support
+the ONLOAD_FD_FEAT_UDP_TX_TS_HDR option.  On new versions of Onload
+this will return 1.  When run on older versions of Onload this will
+return -EOPNOTSUPP and this should be taken to indicate that no packet
+headers are returned if the socket is accelerated.  The behaviour of
+TCP sockets and unaccelerated UDP sockets is unchanged and the new
+onload_fd_check_feature() option does not apply to them.
 
 
-Remote monitoring of Onload
----------------------------
+TX Timestamp correction
+-----------------------
 
-As a preview of a future feature, we have included a server process
-that will provide stackdump-like statistics and details of Onload's
-internal state via JSON to remote hosts that connect to it.
-
-The server is in <onload_install_dir>/src/tools/onload_remote_monitor/
-
-There is an example client to demonstrate how to connect and parse the
-JSON returned in <onload_install_dir>/src/tests/onload/onload_remote_monitor/
-
-The current data format is for experimentation only and will change,
-but we are very interested in how this may be useful to you, what data
-you need to access, and how to integrate it into your existing
-monitoring tools.  Please contact support@solarflare.com with
-suggestions and comments.
+In earlier releases TX timestamps were reported at a point approximately
+180ns before the wire time.  That error is corrected in this release, so
+that TX timestamps now report the time that the first byte of the packet
+reaches the wire.
 
 
-Delegated Sends API
--------------------
+Other changes
+-------------
 
-This release adds a new API that allows the user to have Onload handle
-the TCP socket state machine and perform critical sends through
-another mechanism (such as ef_vi) to achieve lower latency.
+The onload_set_recv_filter() API for UDP sockets has been deprecated in this
+release.
 
-Sockets are created through the sockets API exactly as normal.  The
-user can then request that Onload delegates sending to their
-application.  Once the application has completed a send through (for
-example) ef_vi, it updates Onload and Onload will handle the TCP state
-machinery, retransmissions, and so on.
+In OpenOnload 201502, the delegated-send APIs were inconsistent in the manner
+in which they returned errors.  Now, all of the API calls return -1 on error
+and set errno appropriately.
 
-There is a pair of example applications in 
-<onload_install_dir>/src/tests/ef_vi/efdelegated_[client,server].c
+By default, Onload now supports up to 8 interfaces.  The previous default was
+6.  This remains a compile-time option and is configured by setting the
+CI_CFG_MAX_INTERFACES and CI_CFG_MAX_REGISTER_INTERFACES symbols.
 
-This API is intended to be used by servers that make sporadic TCP
-sends on a socket rather than large amounts of bi-directional traffic.
-It should be used carefully as there are small windows of time (while
-the send has been delegated to the application) where either the
-application or Onload could be using out of date sequence or
-acknowledgement numbers.  It has been designed such that this should
-be harmless, but may still have the potential to confuse other TCP
-implementations.
+It is now possible to create multiple listening sockets with SO_REUSEPORT bound
+to the same port but to different addresses.  Previously, only one such
+clustered socket could be bound to any given port.
 
 
-Per-queue drop counters API
----------------------------
+Known Issues
+------------
 
-ef_vi users can now access details of drops and their causes for each
-RX queue using the new ef_vi_stats_query() function.  The efsink
-example application has been updated to do this.
+Epoll sets used with onload_ordered_epoll_wait must only contain sockets in one
+onload stack.  This is not explicitly enforced, so applications must ensure
+that this is the case or they could potentially see mis-ordering.
 
+On realtime kernels under high interrupt load, certain Onload operations in
+kernel context may cause stalls to be reported in the kernel.  The stalls are
+not harmful in themselves, but we intend to address this in a future release.
 
-Configuration options
----------------------
-
-The following configuration options have been added.  Those already
-mentioned above have not been included here.
-
-EF_TCP_SEND_NONBLOCK_NO_PACKETS_MODE
- - This option controls how a non-blocking TCP send() call should
- behave if it is unable to allocate sufficient packet buffers.  By
- default Onload will mimic Linux kernel stack behaviour and block
- for packet buffers to be available.  If set to 1, this option will
- cause Onload to return error ENOBUFS.  Note this option can cause
- some applications (that assume that a socket that is writeable is
- able to send without error) to malfunction.
-
-EF_TCP_RCVBUF_STRICT
- - This option prevents TCP small segment attack.  With this option set,
- Onload limits the number of packets inside TCP receive queue and
- TCP reorder buffer.  In some cases, this option causes performance
- penalty.  You probably want this option if your application is
- connecting to unrtusted partner or over untrusted network.
- Off by default.
-
-EF_TCP_SNDBUF_ESTABLISHED_DEFAULT
- - Default value for SO_SNDBUF for TCP sockets in the ESTABLISHED state. 
- This value is used when the TCP connection transitions to ESTABLISHED 
- state, to avoid confusion of some applications like netperf.
- If the OS default SO_SNDBUF value is less then this, then this 
- value is used.
- If the OS default SO_SNDBUF value is more that 4 * this, then 
- 4 * this value is used.
- This variable overrides OS default SO_SNDBUF value only, it does not 
- change SO_SNDBUF if the application explicitly sets it 
- (see EF_TCP_SNDBUF variable which overrides application-supplied value).
-
-EF_TCP_RCVBUF_ESTABLISHED_DEFAULT
- - Default value for SO_RCVBUF for TCP sockets in the ESTABLISHED state.
- This value is used when the TCP connection transitions to ESTABLISHED 
- state, to avoid confusion of some applications like netperf.
- If the OS default SO_RCVBUF value is less then this, then this
- value is used. 
- If the OS default SO_RCVBUF value is more that 4 * this, then 
- 4 * this value is used.
- This variable overrides OS default SO_RCVBUF value only, it does not 
- change SO_RCVBUF if the application explicitly sets it 
- (see EF_TCP_RCVBUF variable which overrides application-supplied value).
-
-EF_OFE_ENGINE_SIZE
- - Size (in bytes) of Onload Filter Engine to be allocated when a new
- stack is created.
-
-EF_SO_BUSY_POLL_SPIN
- - Spin poll,select and epoll in a Linux-like way: enable spinning only if
- a spinning soclet is preset in the poll/select/epoll set.  See Linux
- documentation on SO_BUSY_POLL socket option for details.
- You should also enable spinning via EF_{POLL,SELECT,EPOLL}_SPIN
- variable if you'd like to spin in poll,select or epoll correspondingly.
- The spin duration is set via EF_SPIN_USEC, which is equivalent
- to the Linux sysctl.net.busy_poll value.  EF_POLL_USEC is all-in-one
- variable to set for all 4 variables mentioned here.
- Linux never spins in epoll, but Onload does.  This variable does not
- affect epoll behaviour if EF_UL_EPOLL=2.
-
-EF_SELECT_FAST_USEC
- - When spinning in a select() call, causes accelerated sockets to be
- polled for N usecs before unaccelerated sockets are polled.  This
- reduces latency for accelerated sockets, possibly at the expense of
- latency on unaccelerated sockets.  Since accelerated sockets are
- typically the parts of the application which are most
- performance-sensitive this is typically a good tradeoff.
-
-EF_SELECT_NONBLOCK_FAST_USEC
- - When invoking select() with timeout==0 (non-blocking), this option
- causes non-accelerated sockets to be polled only every N usecs.  This
- reduces latency for accelerated sockets, possibly at the expense of
- latency on unaccelerated sockets.  Since accelerated sockets are
- typically the parts of the application which are most
- performance-sensitive this is often a good tradeoff.
-
- Set this option to zero to disable, or to a higher value to further
- improve latency for accelerated sockets.
-
- This option changes the behaviour of select() calls, so could
- potentially cause an application to misbehave.
-
-
-ef_vi Documentation
--------------------
-
-The ef_vi API now has some introductory documentation included in
-doxygen format within the source code.  To access this:
-
-cd openonload-201502/src/include/etherfabric/doxygen
-doxygen doxyfile_ef_vi
-
-This will generate HTML output in the html subdirectory, and an RTF
-document in the rtf subdirectory.
-
-
-Known issues and limitations
-----------------------------
-
- - A test late in the release process showed a latency performance
- regression of around 50ns, affecting both TCP and UDP and not
- dependent on packet size.  We are currently working to understand the
- cause and will include a fix in the next update release.
-
- - Use of the ef_vi layer on a 32 bit OS is disabled in this release
- due to an issue discovered close to the release date.  Please let
- support@solarflare.com know if this causes you problems.
-
- - The semantics of EF_EPOLL_MT_SAFE have been clarified.  This must
- only be set to 1 if all operations on the set are concurrency safe.
- The documentation now states explicitly that these operations include
- both epoll calls, and modifications to the file descriptors contained
- in the set (bind(), listen(), connect(), close()).
- 
- - AMD IOMMUs are not supported by Onload or the net driver included
- in this release.
-
- - RedHat have implemented an alternative to the bonding driver, which
- is now included in distributions (not just RedHat based ones) with
- recent (> 3.3) kernels.  Onload does not recognise interfaces created
- with teamd/libteam/teaming driver as being acceleratable, and
- connections going over these interfaces will use the Linux kernel
- stack rather than Onload.  We are currently investigating how to add
- support for this new teaming driver to Onload and hope to include it
- in a future release.  Until then we recommend using the traditional
- bonding driver to create Onload accelerated bonds.

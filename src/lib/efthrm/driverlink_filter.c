@@ -964,7 +964,7 @@ int efx_dlfilter_handler(int ifindex, efx_dlfilter_cb_t* fcb,
     if( CI_UNLIKELY(ip_paylen < sizeof(ci_icmp_hdr)) )
       return 0;
 
-    /* iSCSI/Control Plane ping interception */
+    /* Control Plane ping interception */
     cicppl_handle_icmp(&CI_GLOBAL_CPLANE, ip, len);
 
     if( dlfilter_handle_icmp(ifindex, fcb, ip, len, &thr_id) ) {

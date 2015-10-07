@@ -105,8 +105,20 @@ static inline int oo_nf_dev_match(const struct net_device *net_dev)
     net_dev = vlan_dev_real_dev(net_dev);
 
 #if CI_CFG_TEAMING
-  if( NETDEV_IS_BOND_MASTER(net_dev) )
-    return 1;
+  /* We should return 1 for accelerated bond or team interface.
+   * There is no easy way to check if an interface is team or not,
+   * so we just look into the cplane llap table and see if this llap is
+   * accelerated. */
+  {
+    cicp_encap_t encap;
+    ci_hwport_id_t hwport;
+
+    if( cicp_llap_retrieve(&CI_GLOBAL_CPLANE, net_dev->ifindex,
+                           NULL, &hwport, NULL, &encap, NULL, NULL) == 0 &&
+        ( hwport != CI_HWPORT_ID_BAD ||
+          (encap.type & CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT) ) )
+      return 1;
+  }
 #endif
 
   return efx_dl_netdev_is_ours(net_dev);
@@ -132,24 +144,46 @@ static int oo_nf_skb_get_payload(struct sk_buff* skb, void** pdata, int* plen)
   }
 }
 
-static unsigned int oo_netfilter_arp(
-#ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
-                                    const struct nf_hook_ops* ops,
-#else
-                                    unsigned int hooknum,
+#if defined (RHEL_MAJOR) && defined (RHEL_MINOR)
+#if RHEL_MAJOR == 7 && RHEL_MINOR >= 2
+/* RHEL 7.2 kernel is crazy and can't be parsed by kernel_compat.sh correctly */
+#define EFRM_HAVE_NETFILTER_INDEV_OUTDEV yes
 #endif
-#ifdef EFX_HAVE_NETFILTER_INDIRECT_SKB
+#endif
+
+
+static unsigned int oo_netfilter_arp(
+#ifdef EFRM_HAVE_NETFILTER_HOOK_STATE
+                                     const struct nf_hook_ops* ops,
+                                     struct sk_buff* skb,
+#ifdef EFRM_HAVE_NETFILTER_INDEV_OUTDEV
+                                     const struct net_device* indev,
+                                     const struct net_device* outdev,
+#else
+#define indev state->in
+#endif
+                                     const struct nf_hook_state *state
+#else
+#ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
+                                     const struct nf_hook_ops* ops,
+                                     struct sk_buff* skb,
+#else
+                                     unsigned int hooknum,
+#ifdef EFRM_HAVE_NETFILTER_INDIRECT_SKB
+        /* this is the oldest case, linux<2.6.24 */
                                      struct sk_buff** pskb,
+#define skb (*pskb)
 #else
                                      struct sk_buff* skb,
 #endif
+#endif
                                      const struct net_device* indev,
                                      const struct net_device* outdev,
-                                     int (*okfn)(struct sk_buff*))
-{
-#ifdef EFX_HAVE_NETFILTER_INDIRECT_SKB
-  struct sk_buff* skb = *pskb;
+                                     int (*okfn)(struct sk_buff*)
 #endif
+                                     )
+
+{
   void* data;
   int len;
 
@@ -164,6 +198,8 @@ static unsigned int oo_netfilter_arp(
 
   return NF_ACCEPT;
 }
+#undef indev
+#undef skb
 
 
 #ifndef CONFIG_NETFILTER
@@ -183,23 +219,36 @@ static struct nf_hook_ops oo_netfilter_arp_hook = {
 };
 
 static unsigned int oo_netfilter_ip(
+#ifdef EFRM_HAVE_NETFILTER_HOOK_STATE
+                                     const struct nf_hook_ops* ops,
+                                     struct sk_buff* skb,
+#ifdef EFRM_HAVE_NETFILTER_INDEV_OUTDEV
+                                     const struct net_device* indev,
+                                     const struct net_device* outdev,
+#else
+#define indev state->in
+#endif
+                                     const struct nf_hook_state *state
+#else
 #ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
-                                    const struct nf_hook_ops* ops,
+                                     const struct nf_hook_ops* ops,
+                                     struct sk_buff* skb,
 #else
-                                    unsigned int hooknum,
-#endif
-#ifdef EFX_HAVE_NETFILTER_INDIRECT_SKB
-                                    struct sk_buff** pskb,
+                                     unsigned int hooknum,
+#ifdef EFRM_HAVE_NETFILTER_INDIRECT_SKB
+        /* this is the oldest case, linux<2.6.24 */
+                                     struct sk_buff** pskb,
+#define skb (*pskb)
 #else
-                                    struct sk_buff* skb,
+                                     struct sk_buff* skb,
 #endif
-                                    const struct net_device* indev,
-                                    const struct net_device* outdev,
-                                    int (*okfn)(struct sk_buff*))
+#endif
+                                     const struct net_device* indev,
+                                     const struct net_device* outdev,
+                                     int (*okfn)(struct sk_buff*)
+#endif
+                                    )
 {
-#ifdef EFX_HAVE_NETFILTER_INDIRECT_SKB
-  struct sk_buff* skb = *pskb;
-#endif
   void* data;
   int len;
 
@@ -214,6 +263,8 @@ static unsigned int oo_netfilter_ip(
     return NF_ACCEPT;
   }
 }
+#undef indev
+#undef skb
 
 static struct nf_hook_ops oo_netfilter_ip_hook = {
   .hook = oo_netfilter_ip,
@@ -232,46 +283,34 @@ static struct nf_hook_ops oo_netfilter_ip_hook = {
 };
 
 
-static void oo_efrm_reset_callback(struct efrm_client* client, void* arg)
+/******************************************************************************
+ * cplane_add() and cplane_remove() are called in the course of the driverlink
+ * handlers for the appropriate netdev events.
+ *****************************************************************************/
+
+static void cplane_add(struct oo_nic* onic)
 {
-  struct oo_nic* onic;
-  ci_netif* ni;
-  int hwport, intf_i;
-  int ifindex = efrm_client_get_ifindex(client);
-  ci_irqlock_state_t lock_flags;
-  ci_dllink *link;
+  int oo_nic_i = onic - oo_nics;
+  ci_hwport_id_t hwport = CI_HWPORT_ID(oo_nic_i);
+  cicp_encap_t encapsulation;
 
-  if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
-    hwport = onic - oo_nics;
+  cicp_hwport_add_nic(&CI_GLOBAL_CPLANE, hwport);
 
-    /* First of all, reset non-fully-created stacks.
-     * Possibly, we'll reset them twice: here and later, when they are
-     * created and moved to all_stacks list.
-     * There is almost no harm except for bug 33496, which is present
-     * regardless of our behaviour here.
-     */
-    ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
-    CI_DLLIST_FOR_EACH(link, &THR_TABLE.started_stacks) {
-      tcp_helper_resource_t *thr;
-      thr = CI_CONTAINER(tcp_helper_resource_t, all_stacks_link, link);
-      ni = &thr->netif;
-      /* We call tcp_helper_reset_stack, but it surely fails to get lock,
-       * so we just set up flags here. */
-      if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
-        tcp_helper_reset_stack(ni, intf_i);
-    }
-    ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
-
-    ni = NULL;
-    while( iterate_netifs_unlocked(&ni) == 0 )
-      if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
-        tcp_helper_reset_stack(ni, intf_i);
-  }
+  encapsulation.type = CICP_LLAP_TYPE_SFC;
+  encapsulation.vlan_id = 0;
+  cicp_llap_set_hwport(&CI_GLOBAL_CPLANE,
+                       efrm_client_get_ifindex(onic->efrm_client),
+                       hwport, &encapsulation);
 }
 
-static struct efrm_client_callbacks oo_efrm_client_callbacks = {
-  oo_efrm_reset_callback
-};
+
+static void cplane_remove(struct oo_nic* onic)
+{
+  cicp_llap_set_hwport(&CI_GLOBAL_CPLANE,
+                       efrm_client_get_ifindex(onic->efrm_client),
+                       CI_HWPORT_ID_BAD, NULL);
+  cicp_hwport_remove_nic(&CI_GLOBAL_CPLANE, CI_HWPORT_ID(onic - oo_nics));
+}
 
 
 /* This function will create an oo_nic if one hasn't already been created.
@@ -289,51 +328,32 @@ static struct efrm_client_callbacks oo_efrm_client_callbacks = {
  */
 static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
 {
-  struct efrm_client* efrm_client;
-  struct efhw_nic* efhw_nic; 
+  struct efhw_nic* efhw_nic;
   struct oo_nic* onic;
-  int rc;
 
   BUG_ON(!netif_running(net_dev));
 
   onic = oo_nic_find_ifindex(net_dev->ifindex);
+  if( onic == NULL )
+    onic = oo_nic_add(net_dev->ifindex);
 
-  if( onic == NULL ) {
-    rc = efrm_client_get(net_dev->ifindex, &oo_efrm_client_callbacks, 
-                         NULL, &efrm_client);
-    if( rc != 0 )
-      /* Resource driver doesn't know about this ifindex. */
-      goto fail1;
-
-    onic = oo_nic_add(efrm_client);
-    if( onic == NULL ) {
-      ci_log("%s: oo_nic_add(ifindex=%d) failed", __func__, net_dev->ifindex);
-      goto fail2;
+  if( onic != NULL ) {
+    if( net_dev->flags & IFF_UP ) {
+      cplane_add(onic);
+      efhw_nic = efrm_client_get_nic(onic->efrm_client);
+      oof_hwport_up_down(oo_nic_hwport(onic), 1,
+                         efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
+                         efhw_nic->flags & NIC_FLAG_VLAN_FILTERS);
+      onic->oo_nic_flags |= OO_NIC_UP;
     }
-  }
-
-  if( net_dev->flags & IFF_UP ) {
-    efhw_nic = efrm_client_get_nic(onic->efrm_client);
-    oof_hwport_up_down(oo_nic_hwport(onic), 1,
-                       efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
-                       efhw_nic->flags & NIC_FLAG_VLAN_FILTERS);
+    /* Remove OO_NIC_UNPLUGGED regardless of whether the interface is IFF_UP,
+     * as we don't want to attempt to create ghost VIs now that the hardware is
+     * back.
+     */
+    onic->oo_nic_flags &= ~OO_NIC_UNPLUGGED;
   }
 
   return onic;
-
- fail2:
-  efrm_client_put(efrm_client);
- fail1:
-  return NULL;
-}
-
-static void oo_netdev_remove(struct oo_nic *onic)
-{
-  struct efrm_client *efrm_client;
-
-  efrm_client = onic->efrm_client;
-  oo_nic_remove(onic);
-  efrm_client_put(efrm_client);
 }
 
 static int oo_dl_probe(struct efx_dl_device* dl_dev,
@@ -369,20 +389,25 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
 
 static void oo_dl_remove(struct efx_dl_device* dl_dev)
 {
-  struct net_device *net_dev = dl_dev->priv;
+  /* We need to fini all of the hardware queues immediately. The net driver
+   * will tidy up its own queues and *all* VIs, so if we don't free our own
+   * queues they will be left dangling and will not be cleared even on an
+   * entity reset.
+   *   A note on locking: iterate_netifs_unlocked() will give us netif pointers
+   * that are guaranteed to remain valid, but the state of the underlying
+   * netifs may be unstable. However, we only touch immutable state. We can't
+   * defer the work to the lock holders as we need to speak to the hardware
+   * right now, before it goes away.
+   */
+  ci_netif* ni = NULL;
+  struct net_device* netdev = dl_dev->priv;
   struct oo_nic* onic;
-  ci_irqlock_state_t lock_flags;
-
-  ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
-  if( ci_dllist_not_empty(&THR_TABLE.all_stacks) ) {
-    ci_log("Driverlink unregistering but still stacks present");
-    ci_assert(0);
+  if( (onic = oo_nic_find_ifindex(netdev->ifindex)) != NULL ) {
+    int hwport = onic - oo_nics;
+    onic->oo_nic_flags |= OO_NIC_UNPLUGGED;
+    while( iterate_netifs_unlocked(&ni) == 0 )
+      tcp_helper_shutdown_vi(ni, hwport);
   }
-  ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
-
-  onic = oo_nic_find_ifindex(net_dev->ifindex);
-  if( onic != NULL )
-    oo_netdev_remove(onic);
 }
 
 
@@ -422,98 +447,43 @@ static void oo_fixup_wakeup_breakage(int ifindex)
 
 static void oo_netdev_up(struct net_device* netdev)
 {
-  struct oo_nic* onic;
-
   /* Does efrm own this device? */
   if( efrm_nic_present(netdev->ifindex) ) {
     oo_netdev_may_add(netdev);
     oo_fixup_wakeup_breakage(netdev->ifindex);
   }
-  else {
+  else if( oo_use_vlans && (netdev->priv_flags & IFF_802_1Q_VLAN) ) {
     cicp_encap_t encap;
 
-    encap.type = CICP_LLAP_TYPE_NONE;
-    encap.vlan_id = 0;
-
-#if CI_CFG_TEAMING
-    if( NETDEV_IS_BOND_MASTER(netdev) ) {
-      OO_DEBUG_BONDING(ci_log("Bond master %s UP", netdev->name));
-      encap.type |= CICP_LLAP_TYPE_BOND;
-    }
-#endif
-
-    if( oo_use_vlans && (netdev->priv_flags & IFF_802_1Q_VLAN) ) {
-      encap.type |= CICP_LLAP_TYPE_VLAN;
-      encap.vlan_id = vlan_dev_vlan_id(netdev);
-
-      if( NETDEV_IS_BOND_MASTER(vlan_dev_real_dev(netdev)) )
-        encap.type |= CICP_LLAP_TYPE_BOND;
-    }
-
-    if( encap.type != CICP_LLAP_TYPE_NONE ) {
-#if CI_CFG_TEAMING
-      if( encap.type & CICP_LLAP_TYPE_BOND ) {
-        cicp_encap_t old_encap;
-        ci_ifid_t master_ifindex;
-
-        /* To avoid deadlock, we should not call something like
-         * ci_bonding_check_mode().  Unset hash flags and hope
-         * they'll be set correctly during cplane update. */
-        encap.type &=~ (CICP_LLAP_TYPE_USES_HASH |
-                        CICP_LLAP_TYPE_XMIT_HASH_LAYER4);
-        if( encap.type & CICP_LLAP_TYPE_VLAN ) {
-          struct net_device *real_dev = vlan_dev_real_dev(netdev);
-          cicp_encap_t bond_encap;
-          master_ifindex = real_dev->ifindex;
-          if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, master_ifindex,
-                                        &bond_encap) == 0 )
-            encap.type |= bond_encap.type & (CICP_LLAP_TYPE_USES_HASH |
-                            CICP_LLAP_TYPE_XMIT_HASH_LAYER4);
-        } 
-        else {
-          master_ifindex = netdev->ifindex;
-        }
-
-        if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                                        &old_encap) != 0 )
-          cicpos_llap_import(&CI_GLOBAL_CPLANE, NULL, netdev->ifindex, 
-                             netdev->mtu, 1, encap.type,
-                             netdev->name, NULL, NULL);
-        else 
-          OO_DEBUG_BONDING
-            (ci_log("NETDEV_UP changing encap on %d from %d to %d", 
-                    netdev->ifindex, old_encap.type, encap.type));
-
-        cicp_llap_set_bond(&CI_GLOBAL_CPLANE, netdev->ifindex, 
-                           master_ifindex, &encap);
-        if( encap.type & CICP_LLAP_TYPE_VLAN ) 
-          cicp_llap_set_vlan(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                             master_ifindex);
-      }
-      else
-#endif
-      if( (encap.type & CICP_LLAP_TYPE_VLAN) && 
-          efrm_nic_present(vlan_dev_real_dev(netdev)->ifindex) ) {
-        struct net_device* real_dev = vlan_dev_real_dev(netdev);
-        onic = oo_nic_find_ifindex(real_dev->ifindex);
-        if( onic == NULL )
-          /* VLAN has come up before parent, so try adding parent now */
-          onic = oo_netdev_may_add(real_dev);
-        if( onic != NULL ) {
-          cicp_llap_set_hwport(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                               CI_HWPORT_ID(onic - oo_nics), &encap);
-          if( encap.type & CICP_LLAP_TYPE_VLAN ) 
-            cicp_llap_set_vlan(&CI_GLOBAL_CPLANE, netdev->ifindex, 
-                               real_dev->ifindex);
-        }
-        else 
-          OO_DEBUG_BONDING(ci_log("Failed to configure VLAN if %d as parent "
-                                  "onic (if %d) not found", 
-                                  netdev->ifindex, real_dev->ifindex));
-      }
-    }
+    if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
+                                    &encap) != 0 )
+      cicpos_llap_import(&CI_GLOBAL_CPLANE, NULL, netdev->ifindex, 
+                         netdev->mtu, 1, CICP_LLAP_TYPE_VLAN,
+                         netdev->name, NULL, NULL);
+    cicp_llap_set_vlan(&CI_GLOBAL_CPLANE, netdev->ifindex, 
+                       vlan_dev_real_dev(netdev)->ifindex,
+                       vlan_dev_vlan_id(netdev));
   }
 #if CI_CFG_TEAMING
+  else if( NETDEV_IS_BOND_MASTER(netdev) ) {
+    cicp_encap_t encap;
+
+    if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
+                                    &encap) != 0 ) {
+      cicpos_llap_import(&CI_GLOBAL_CPLANE, NULL, netdev->ifindex,
+                         netdev->mtu, 1, CICP_LLAP_TYPE_BOND,
+                         netdev->name, NULL, NULL);
+    }
+    else {
+      OO_DEBUG_BONDING(ci_log("NETDEV_UP changing encap on %d from %x to %x",
+                              netdev->ifindex, encap.type,
+                              CICP_LLAP_TYPE_BOND));
+    }
+
+    /* To avoid deadlock, we should not call something like
+     * ci_bonding_check_mode().  */
+     cicp_llap_set_bond(&CI_GLOBAL_CPLANE, netdev->ifindex);
+  }
   if( NETDEV_IS_BOND(netdev) )
     ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);
 #endif
@@ -529,31 +499,15 @@ static void oo_netdev_going_down(struct net_device* netdev)
   if( onic != NULL ) {
       oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0);
       ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
-      if( THR_TABLE.stack_count == 0 )
-        oo_netdev_remove(onic);
-      else
-        ci_log("Unable to oo_nic_remove(ifindex=%d, hwport=%d) because of "
-               "open stacks", netdev->ifindex, oo_nic_hwport(onic));
+      onic->oo_nic_flags &= ~OO_NIC_UP;
+      cplane_remove(onic);
       ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
-    }
-    else {
-      if( (netdev->priv_flags & IFF_802_1Q_VLAN) ||
-          NETDEV_IS_BOND_MASTER(netdev) ) {
-        cicp_encap_t encap;
-        /* NB. I am deliberately not testing oo_use_vlans and
-         * efrm_nic_present(real_dev_ifindex) as below.
-         */
-        /* encap will be set correctly later */
-        encap.type = CICP_LLAP_TYPE_NONE;
-        cicp_llap_set_hwport(&CI_GLOBAL_CPLANE, netdev->ifindex,
-                             CI_HWPORT_ID_BAD, &encap);
-      }
-
-#if CI_CFG_TEAMING
-      if( NETDEV_IS_BOND_MASTER(netdev) )
-        cicp_bond_remove_master(&CI_GLOBAL_CPLANE, netdev->ifindex);
-#endif
-    }
+  }
+  else {
+    /* ensure that acceleration is off */
+    cicp_llap_set_hwport(&CI_GLOBAL_CPLANE, netdev->ifindex,
+                         CI_HWPORT_ID_BAD, NULL);
+  }
 #if CI_CFG_TEAMING
     if( NETDEV_IS_BOND(netdev) )
       ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);

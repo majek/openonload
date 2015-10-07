@@ -42,6 +42,7 @@ struct oo_pkt_filler {
  *  - -ERESTARTSYS if interrupted by a signal (kernel only)
  */
 extern int oo_pkt_fill(ci_netif*, ci_sock_cmn* s, int* p_netif_locked,
+                       int can_block,
                        struct oo_pkt_filler* pkt_filler,
                        ci_iovec_ptr* piov, int bytes_to_copy
                        CI_KERNEL_ARG(ci_addr_spc_t addr_spc)) CI_HF;
@@ -85,17 +86,6 @@ ci_inline void oo_pkt_filler_add_pkt(struct oo_pkt_filler* pf,
   else
     pkt->next = OO_PP_NULL;
   pf->alloc_pkt = pkt;
-}
-
-
-ci_inline int oo_pkt_fill_failed(int rc) {
-#ifdef __KERNEL__
-  ci_assert(rc == 0 || rc == -ERESTARTSYS || rc == -EFAULT);
-  return rc < 0;
-#else
-  ci_assert_equal(rc, 0);
-  return 0;
-#endif
 }
 
 

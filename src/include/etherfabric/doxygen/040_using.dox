@@ -51,8 +51,36 @@ distribution directory:
 
 \section compiling Compiling and Linking
 
-Refer to the `README.%ef_vi` file in the Onload directory for compile and 
-link instructions.
+Applications or libraries using ef_vi will need to include the header
+files in src/include/etherfabic/
+
+The application will need to be linked with libciul1.a or libciul.so,
+which can be found under the "build" directory after running
+scripts/onload_build or scripts/onload_install.
+
+If compiling your application against one version of Onload, and
+running on a system with a different version of Onload, some care is
+required.  Onload currently preserves compatibility and provides a
+stable API between the ef_vi user-space and the kernel drivers, so
+that applications compiled using an older ef_vi library will work when
+run with newer drivers.  Compatibility in the other direction (newer
+ef_vi libraries running with older drivers) is not guaranteed.
+Finally, Onload does not currently maintain compatibility between
+compiling against one version of the ef_vi libraries, and then running
+against another.
+
+The simplest approach is to link statically to libciul, as this
+ensures that the version of the library used will match the one you
+have compiled against.  If linking dynamically, it is recommended that
+you keep libciul.so and the application binary together.
+onload_install does not install libciul.so into system directories to
+avoid the installed version being used in place of the version you
+compiled against.
+
+For those wishing to use ef_vi in combination with Onload there should
+be no problem linking statically to libciul and dynamically to the
+other libraries to allow the Onload intercepts to take effect.  The
+ef_delegated example application does exactly this.
 
 \section using_setup Setup
 

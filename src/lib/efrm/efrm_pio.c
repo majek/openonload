@@ -129,16 +129,17 @@ int efrm_pio_alloc(struct efrm_pd *pd, struct efrm_pio **pio_out)
 	nic = client->nic;
 
 	if (efrm_is_pio_enabled() == 0) {
-		EFRM_ERR("%s: no PIO support, disabled with pio=0 module parameter",
-				__FUNCTION__);
-		return -EINVAL;
+		EFRM_TRACE("%s: PIO support is disabled.", __FUNCTION__);
+		EFRM_TRACE("%s: Check sfc_resource driver's pio module param",
+			   __FUNCTION__);
+		return -EPERM;
 	}
 
 	if (nic->devtype.arch != EFHW_ARCH_EF10) {
-		EFRM_ERR("%s: Only ef10 supports PIO."
-			 "  Expected arch=%d but got %d\n", __FUNCTION__,
-			 EFHW_ARCH_EF10, nic->devtype.arch);
-		return -EINVAL;
+		EFRM_TRACE("%s: Only EF10 NIC supports PIO."
+			   "  Expected arch=%d but got %d\n", __FUNCTION__,
+			   EFHW_ARCH_EF10, nic->devtype.arch);
+		return -EOPNOTSUPP;
 	}
 
 	if ((pio = kmalloc(sizeof(*pio), GFP_KERNEL)) == NULL)
@@ -150,7 +151,7 @@ int efrm_pio_alloc(struct efrm_pd *pd, struct efrm_pio **pio_out)
 
 	rc = ef10_nic_piobuf_alloc(nic, &pio->epio_handle);
 	if (rc < 0) {
-		if( rc == -ENOSPC )
+		if( rc == -ENOSPC || rc == -ENETDOWN )
 			EFRM_TRACE("%s: ef10_nic_piobuf_alloc failed: %d\n",
 				 __FUNCTION__, rc);
 		else

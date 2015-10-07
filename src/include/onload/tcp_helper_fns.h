@@ -63,10 +63,22 @@ extern int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
                                int ifindices_len, tcp_helper_cluster_t* thc,
                                tcp_helper_resource_t** rs_out);
 
+extern int
+tcp_helper_rm_alloc_proxy(ci_resource_onload_alloc_t* alloc,
+                          const ci_netif_config_opts* opts,
+                          int ifindices_len,
+                          tcp_helper_resource_t** rs_out);
+
 extern void tcp_helper_dtor(tcp_helper_resource_t* trs);
 
 
+extern void tcp_helper_suspend_interface(ci_netif* ni, int intf_i);
+
 extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
+
+extern void tcp_helper_purge_txq(ci_netif* ni, int intf_i);
+
+extern void tcp_helper_shutdown_vi(ci_netif* ni, int hwport);
 
 extern int efab_tcp_helper_rm_mmap(tcp_helper_resource_t*,
                                    unsigned long bytes,
@@ -93,8 +105,10 @@ extern int efab_ioctl_get_ep(ci_private_t*, oo_sp,
                              tcp_helper_endpoint_t** ep_out);
 
 
-extern void efab_tcp_helper_os_pollwait_register(tcp_helper_endpoint_t* ep);
-extern void efab_tcp_helper_os_pollwait_unregister(tcp_helper_endpoint_t* ep);
+extern int efab_os_sock_callback(wait_queue_t *wait, unsigned mode, int sync,
+                                 void *key);
+
+extern void efab_os_wakeup_work(struct work_struct *data);
 
 /* get a resource installed install_resource_into_priv, or return a
  negative error code (does not remove the resource from the priv) */
@@ -121,6 +135,14 @@ efab_get_tcp_helper_of_priv(ci_private_t* priv, tcp_helper_resource_t**trs_out,
 ci_inline tcp_helper_resource_t* efab_priv_to_thr(ci_private_t* priv) {
   ci_assert(priv->thr);
   return priv->thr;
+}
+
+ci_inline tcp_helper_endpoint_t* efab_priv_to_ep(ci_private_t* priv)
+{
+  tcp_helper_resource_t* thr = efab_priv_to_thr(priv);
+  ci_assert_equal(TRUSTED_SOCK_ID(&thr->netif, priv->sock_id),
+                  priv->sock_id);
+  return ci_trs_ep_get(thr, priv->sock_id);
 }
 
 extern int efab_thr_get_inaccessible_stack_info(unsigned id,
@@ -210,13 +232,15 @@ extern int efab_tcp_helper_os_sock_recvmsg(ci_private_t *priv, void *arg);
 
 extern int efab_tcp_helper_os_sock_accept(ci_private_t *priv, void *arg);
 
-extern int efab_tcp_helper_bind_os_sock (tcp_helper_resource_t* trs,
-                                         oo_sp sock_id,
-                                         struct sockaddr *addr,
-                                         int addrlen, ci_uint16 *out_port);
+extern int efab_tcp_helper_create_os_sock(ci_private_t *priv);
+extern int efab_tcp_helper_bind_os_sock_rsop(ci_private_t *priv, void *arg);
+extern int efab_tcp_helper_bind_os_sock_kernel(tcp_helper_resource_t* trs,
+                                               oo_sp sock_id,
+                                               struct sockaddr *addr,
+                                               int addrlen,
+                                               ci_uint16 *out_port);
 
-extern int efab_tcp_helper_listen_os_sock (tcp_helper_resource_t* trs,
-					   oo_sp sock_id, int backlog);
+extern int efab_tcp_helper_listen_os_sock(ci_private_t *priv, void *p_backlog);
 
 extern int efab_tcp_helper_shutdown_os_sock (tcp_helper_endpoint_t* ep,
                                              ci_int32 how);
@@ -239,13 +263,12 @@ extern int efab_tcp_helper_clear_epcache(tcp_helper_resource_t* trs);
 extern void efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs,
                                            oo_sp ep_id);
 extern int efab_file_move_to_alien_stack(ci_private_t *priv,
-                                         ci_netif *alien_ni);
+                                         ci_netif *alien_ni,
+                                         int drop_filter);
 
 extern void
 tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
                            tcp_helper_resource_t* trs);
-extern void
-tcp_helper_cluster_ref(tcp_helper_cluster_t* thc);
 
 extern int
 tcp_helper_cluster_from_cluster(tcp_helper_resource_t* thr);
@@ -253,36 +276,15 @@ tcp_helper_cluster_from_cluster(tcp_helper_resource_t* thr);
 extern int
 tcp_helper_cluster_dump(tcp_helper_resource_t* thr, void* buf, int buf_len);
 
-/*! Called when a socket with the CI_SOCK_FLAG_REUSEPORT_LEGACY flag is closed
- */
-extern void
-tcp_helper_cluster_legacy_os_close(tcp_helper_endpoint_t* ep);
-
-/*! Called when a socket with the CI_SOCK_FLAG_REUSEPORT_LEGACY flag set
- * tries to listen on it's backing sock.  In the legacy reuseport case that
- * backing socket is shared, so we need the cluster to decide whether this
- * ep should be responsible for the os pollwait registration.
- *
- * \return 1 if this endpoint should do the listen and pollwait register
- *         0 if not
- */
-extern int
-tcp_helper_cluster_legacy_os_listen(tcp_helper_endpoint_t* ep);
-
-/*! Called when a socket with the CI_SOCK_FLAG_REUSEPORT_LEGACY flag set
- * tries to shutdown it's backing sock.  In the legacy reuseport case that
- * backing socket is shared, so we should not do the shutdown and the
- * clustering code should be informed.
- *
- * Legacy Clustering: Would be nicer to work out when we could actually
- * shutdown the os socket.
- */
-extern void
-tcp_helper_cluster_legacy_os_shutdown(tcp_helper_endpoint_t* ep);
-
 
 extern void tcp_helper_pace(tcp_helper_resource_t*, int pace_val);
 
+extern int tcp_helper_cluster_alloc_thr(const char* name,
+                                        int cluster_size,
+                                        int cluster_restart,
+                                        int ni_flags,
+                                        const ci_netif_config_opts* ni_opts,
+                                        tcp_helper_resource_t** thr_out);
 
 /*--------------------------------------------------------------------
  *!
@@ -374,16 +376,22 @@ tcp_helper_request_wakeup_nic(tcp_helper_resource_t* trs, int intf_i) {
   /* ci_assert(ci_bit_test(&trs->netif.state->evq_primed, nic_i)); */
   unsigned current_i =
     ef_eventq_current(&trs->netif.nic_hw[intf_i].vi) / sizeof(efhw_event_t);
-  efrm_eventq_request_wakeup(trs->nic[intf_i].vi_rs, current_i);
+  efrm_eventq_request_wakeup(trs->nic[intf_i].thn_vi_rs, current_i);
 }
 
 
+ci_inline void
+tcp_helper_request_wakeup_nic_if_needed(tcp_helper_resource_t* trs,
+                                        int intf_i)
+{
+  if( ! ci_bit_test(&trs->netif.state->evq_primed, intf_i) &&
+      ! ci_bit_test_and_set(&trs->netif.state->evq_primed, intf_i) )
+    tcp_helper_request_wakeup_nic(trs, intf_i);
+}
 ci_inline void tcp_helper_request_wakeup(tcp_helper_resource_t* trs) {
   int intf_i;
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i)
-    if( ! ci_bit_test(&trs->netif.state->evq_primed, intf_i) &&
-        ! ci_bit_test_and_set(&trs->netif.state->evq_primed, intf_i) )
-      tcp_helper_request_wakeup_nic(trs, intf_i);
+    tcp_helper_request_wakeup_nic_if_needed(trs, intf_i);
 }
 
 
@@ -394,6 +402,11 @@ extern void generic_tcp_helper_close(ci_private_t* priv);
 extern
 int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,
                                           oo_sp sock_id);
+
+extern
+int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs, oo_sp sock_id,
+                               int level, int optname, char* optval,
+                               int optlen);
 
 
 
@@ -433,6 +446,11 @@ efab_tcp_helper_ready_list_events(tcp_helper_resource_t* trs,
 
 
 extern int efab_attach_os_socket(tcp_helper_endpoint_t*, struct file*);
+extern int efab_create_os_socket(tcp_helper_endpoint_t* ep, ci_int32 domain,
+                                 ci_int32 type, int flags);
+
+extern void
+tcp_helper_defer_dl2work(tcp_helper_resource_t* trs, ci_uint32 flag);
 
 
 extern int
@@ -452,8 +470,6 @@ extern int onloadfs_get_dev_t(ci_private_t* priv, void* arg);
 extern void oo_file_moved(ci_private_t* priv);
 extern int onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
                              int flags, int fd_type, ci_private_t **priv_p);
-extern int oo_fd_replace_file(struct file* old_filp, struct file* new_filp,
-                              int fd);
 
 extern int oo_clone_fd(struct file* filp, int do_cloexec);
 

@@ -25,6 +25,8 @@
 
 #include "aoe.h"
 
+
+
 static int aoe_bind_fd_to_port(struct aoe_map_entry *entry,
 			       struct aoe_bind_ioctl *ioctl)
 {
@@ -193,6 +195,18 @@ static int aoe_ioctl_get_portid(struct aoe_map_entry *entry,
 	return aoe_get_portid(op->ifindex, &op->board_id, &op->port_id);
 }
 
+static int aoe_ioctl_get_board_type(struct aoe_map_entry *entry,
+				struct aoe_ioctl *ioctl)
+{
+	struct aoe_get_board_type_ioctl *op = &ioctl->u.get_board_type;
+
+	if (entry->state < OPENED)
+                return -EINVAL;
+
+	return aoe_get_board_type(op->ifindex, &op->board_type);
+}
+
+
 long aoe_control_ioctl(struct aoe_map_entry *entry, u16 aoe_cmd,
 		       struct aoe_ioctl __user *user_data)
 {
@@ -218,6 +232,11 @@ long aoe_control_ioctl(struct aoe_map_entry *entry, u16 aoe_cmd,
 		break;
 
 	case AOE_DMA_OP:
+		if(entry->aoe_dev->board_type != BOARD_TYPE_SFN5122F){
+			printk(KERN_ERR "sfc_aoe: Ioctl AOE_DMA_OP Not Supported\n");
+			return -EPERM;
+		}
+
 		op = aoe_ioctl_dma_op;
 		size = sizeof(data.u.dma);
 		break;
@@ -245,6 +264,11 @@ long aoe_control_ioctl(struct aoe_map_entry *entry, u16 aoe_cmd,
 	case AOE_GET_PORT_ID:
 		op = aoe_ioctl_get_portid;
 		size = sizeof(data.u.get_portid);
+		break;
+
+	case AOE_GET_BOARD_TYPE:
+		op = aoe_ioctl_get_board_type;
+		size = sizeof(data.u.get_board_type);
 		break;
 
 	default:

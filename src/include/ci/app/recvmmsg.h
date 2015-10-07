@@ -29,6 +29,8 @@
 
 #include <dlfcn.h>
 
+#include "libc_compat.h" /* for CI_HAVE_RECVMMSG_CONST_TIMESPEC */
+
 #include <linux/socket.h>
 
 #ifdef MSG_WAITFORONE
@@ -50,7 +52,11 @@ struct mmsghdr {
 __attribute__((unused))
 #endif
 static int sc_recvmmsg(int fd, struct mmsghdr* mmsg, unsigned vlen,
-                       int flags, const struct timespec* timeout)
+                       int flags,
+#if ! CI_HAVE_RECVMMSG_NOCONST_TIMESPEC
+                       const
+#endif
+                       struct timespec* timeout)
 {
   return syscall(__NR_recvmmsg, fd, mmsg, vlen, flags, timeout);
 }

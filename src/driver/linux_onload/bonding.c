@@ -826,6 +826,9 @@ static void ci_bonding_failover(struct net_device *net_dev,
      * would be nice to somehow get the list of all relevant
      * interfaces and loop here instead */
 
+    ci_hwport_id_t old_hwport;
+    old_hwport = cicp_llap_get_hwport(&CI_GLOBAL_CPLANE, net_dev->ifindex);
+
     if( cicp_llap_update_active_hwport(&CI_GLOBAL_CPLANE, net_dev->ifindex, 
                                        hwport, rowid, fatal) )
       OO_DEBUG_BONDING(ci_log("Failover hwport update failed"));
@@ -852,6 +855,11 @@ static void ci_bonding_failover(struct net_device *net_dev,
      * callbacks on each hwport and encapsulation change
      */
     cicpos_ipif_bond_change(&CI_GLOBAL_CPLANE, net_dev->ifindex);
+
+    /* After updating the control plane, call back into Onload proper so that
+     * it can do any necessary tidying. */
+    if( old_hwport != CI_HWPORT_ID_BAD )
+      oo_nic_failover_from_hwport(old_hwport);
   }
 }
 
@@ -1207,7 +1215,8 @@ static void ci_bonding_workitem_fn(struct work_struct *data)
   
   rc = ci_bonding_get_masters(&masters);
   if( rc != 0 ) {
-    OO_DEBUG_BONDING(ci_log("Error %d reading bonding masters", rc));
+    if( rc != -EIO )
+      OO_DEBUG_BONDING(ci_log("Error %d reading bonding masters", rc));
     ci_assert(ci_dllist_is_empty(&masters));
     ci_bonding_set_timer_period(HZ, 0);
     return;

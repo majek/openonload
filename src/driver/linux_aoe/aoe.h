@@ -34,8 +34,9 @@
 #include "aoe_compat.h"
 #include "aoe_ioctl.h"
 
-#include <driverlink_api.h>
+#include <net_driver.h>
 #include <bitfield.h>
+
 
 #define AOE_NAME        "sfc_aoe"
 #define MAP_SIZE        32
@@ -59,7 +60,7 @@
 	printk(KERN_ERR "%s-(%d): " fmt, __func__, ECHECK(entry), ## args)
 #endif
 
-#define AOE_DRIVER_VERSION	"4.5.1.1020"
+#define AOE_DRIVER_VERSION	"4.7.0.1008"
 
 /* Number of Connections that are allowed to be over the 10G
  * inteface */
@@ -144,6 +145,11 @@ enum msg_status {
 	AOE_TIMEOUT,
 };
 
+enum BANK_NAME {
+	DDR_BANK_BOTTOM = 0,
+	DDR_BANK_TOP,
+};
+
 enum entry_state {
 	CLOSED = 0,
 	CLOSING,
@@ -156,6 +162,16 @@ enum entry_state {
 	DATA_PENDING,
 	DATA_PENDING_DONE,
 	DATA_PENDING_FAILED,
+};
+
+enum board_type {
+	BOARD_TYPE_SFN5122F = 0x7, /*modena*/
+	BOARD_TYPE_SFN7942F = 0x18  /*sorrento*/
+};
+
+enum board_index {
+	BOARD_INDEX_SFN5122F = 0, 
+	BOARD_INDEX_SFN7942F,  
 };
 
 enum fpga_state {
@@ -375,6 +391,7 @@ struct aoe_work_struct_s {
 #define MAX_DMA_AREAS	128
 struct aoe_device {
 	uint32_t board;
+	uint32_t board_type;
 	struct pci_dev *pci_dev;
 	struct device *dev;
 	struct aoe_mmap_data *fpga_map;
@@ -408,6 +425,7 @@ struct aoe_device {
 	int (*cpld_version)(struct aoe_device *, char *);
 	int (*board_rev)(struct aoe_device *, char *);
 	int (*fc_version)(struct aoe_device *, char *);
+	int (*mum_version)(struct aoe_device *, char *);
 	int (*fpga_build_changeset)(struct aoe_device *, char *);
 	int (*fpga_services_version)(struct aoe_device *, char *);
 	int (*fpga_services_changeset)(struct aoe_device *, char *);
@@ -450,8 +468,6 @@ struct aoe_netdev {
 };
 
 #define MAX_BANKS_COUNT MC_CMD_FC_IN_DDR_NUM_BANKS
-
-extern const char *dimm_bank_name[MAX_BANKS_COUNT];
 
 /* Utility functions */
 static inline int AOE_PHYS_PORT(struct aoe_port_info *port)
@@ -574,6 +590,7 @@ void aoe_destroy_mmaps(struct aoe_device *dev);
 int aoe_verify_map_range_lock(struct aoe_map_entry *entry, uint64_t addr, uint32_t len);
 void aoe_release_map_lock(struct aoe_map_entry *entry);
 void aoe_flush_mmaps(struct aoe_device *dev);
+int aoe_process_map_entry_operation(struct aoe_map_entry *entry,uint64_t addr,uint32_t len);
 
 int aoe_netdev_register(struct aoe_device *dev,
 			unsigned int int_macs,
@@ -587,6 +604,8 @@ int aoe_mcdi_mac_stats(struct aoe_device *dev, dma_addr_t dma_addr,
 		       int index, enum aoe_mac_type type);
 int aoe_mcdi_update_stats(__le64 *dma_addr, struct aoe_mac_stats *stats);
 int aoe_mcdi_set_siena_override(struct aoe_device *dev, bool state);
+int aoe_mcdi_get_board_type_info(struct aoe_device *dev);
+
 int aoe_mcdi_link_status_split(struct aoe_device *dev, uint32_t mode);
 
 /* Event support */
@@ -597,12 +616,15 @@ void aoe_remove_static_config(struct aoe_device *dev);
 void aoe_mcdi_ddr_ecc_status(struct aoe_device *dev,
 			     struct aoe_ddr_ecc_work_params_s *params);
 /* Sysfs */
-int aoe_sysfs_setup(struct device *parent, struct aoe_device *aoe_instance);
+int aoe_sysfs_setup_root(struct device *parent, struct aoe_device *aoe_instance);
+int aoe_sysfs_setup_child(struct aoe_device *aoe_instance);
 void aoe_sysfs_delete(struct aoe_device *aoe_instance);
 int aoe_sysfs_add_map(struct aoe_device *aoe_instance, struct aoe_mmap_entry *map);
 void aoe_sysfs_del_map(struct aoe_device *aoe_instance, struct aoe_mmap_entry *map);
 int aoe_port_sysfs_setup(struct aoe_device *aoe_instance,
                          struct aoe_port_info *port);
+const char** aoe_get_dimm_name(struct aoe_device *dev);
+
 void aoe_mcdi_set_port_funcs(struct aoe_port_info *port);
 void aoe_mcdi_set_ddr_funcs(struct aoe_dimm_info *dimm);
 
@@ -667,6 +689,8 @@ int aoe_get_num_boards(void);
 int aoe_get_num_ports(int board_id, int *num_ports);
 int aoe_get_ifindex(int board_id, int port_id, int *ifindex);
 int aoe_get_portid(int ifindex, int *board_id, int *port_id);
+int aoe_get_board_type(uint32_t ifindex, uint32_t *board_type);
+int aoe_get_board_type_index_value(struct aoe_device *dev);
 
 /* AOE stats support */
 int aoe_setup_stats_entry(struct aoe_map_entry *entry,

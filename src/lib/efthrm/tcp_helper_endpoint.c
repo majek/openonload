@@ -29,6 +29,7 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/oof_interface.h>
 #include <onload/drv/dump_to_user.h>
+#include <ci/internal/cplane_ops.h>
 #include "tcp_filters_internal.h"
 #include "oof_impl.h"
 
@@ -61,6 +62,9 @@ tcp_helper_endpoint_ctor(tcp_helper_endpoint_t *ep,
   ep->fasync_queue = NULL;
   ep->ep_aflags = 0;
   ep->alien_ref = NULL;
+  spin_lock_init(&ep->lock);
+  oo_os_sock_poll_ctor(&ep->os_sock_poll);
+  init_waitqueue_func_entry(&ep->os_sock_poll.wait, efab_os_sock_callback);
 
   ci_dllink_self_link(&ep->os_ready_link);
 
@@ -74,7 +78,7 @@ tcp_helper_endpoint_ctor(tcp_helper_endpoint_t *ep,
 void
 tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
 {
-  ci_irqlock_state_t lock_flags;
+  unsigned long lock_flags;
 
   /* the endpoint structure stays in the array in the THRM even after
      it is freed - therefore ensure properly cleaned up */
@@ -84,14 +88,14 @@ tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
   oof_socket_mcast_del_all(efab_tcp_driver.filter_manager, &ep->oofilter);
   oof_socket_dtor(&ep->oofilter);
 
-  ci_irqlock_lock(&ep->thr->lock, &lock_flags);
+  spin_lock_irqsave(&ep->lock, lock_flags);
   if( ep->os_socket != NULL ) {
     OO_DEBUG_ERR(ci_log(FEP_FMT "ERROR: O/S socket still referenced",
                         FEP_PRI_ARGS(ep)));
     oo_file_ref_drop(ep->os_socket);
     ep->os_socket = NULL;
   }
-  ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
+  spin_unlock_irqrestore(&ep->lock, lock_flags);
   if( ep->alien_ref != NULL ) {
     OO_DEBUG_ERR(ci_log(FEP_FMT "ERROR: alien socket still referenced",
                         FEP_PRI_ARGS(ep)));
@@ -160,9 +164,13 @@ tcp_helper_endpoint_reuseaddr_cleanup(ci_netif* ni, ci_sock_cmn* s)
  *      0/lp          0/0        phys_port=n    listen on BINDTODEVICE
  *      lIP/lp        rIP/rp     from_tcp_id=n  TCP connection passively opened
  *                                              (use filter from this TCP ep)
+ *      aIP/ap        rIP/rp     s_flags & TPROXY
+ *                               && phys_port=n TCP connection using transparent
+ *                                              shared filter
  *
  *
  *--------------------------------------------------------------------*/
+
 
 int
 tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
@@ -175,7 +183,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   unsigned laddr, raddr;
   int protocol, lport, rport;
   int rc;
-  ci_irqlock_state_t lock_flags;
+  unsigned long lock_flags;
 
   OO_DEBUG_TCPH(ci_log("%s: [%d:%d] bindto_ifindex=%d from_tcp_id=%d",
                        __FUNCTION__, ep->thr->id,
@@ -196,7 +204,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
    * TCP socket, and is used when we're setting filters for a passively
    * opened TCP connection.
    */
-  ci_irqlock_lock(&ep->thr->lock, &lock_flags);
+  spin_lock_irqsave(&ep->lock, lock_flags);
   if( OO_SP_NOT_NULL(from_tcp_id) ) {
     listen_ep = ci_trs_get_valid_ep(ep->thr, from_tcp_id);
     os_sock_ref = listen_ep->os_socket;
@@ -206,7 +214,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   }
   if( os_sock_ref != NULL )
     os_sock_ref = oo_file_ref_add(os_sock_ref);
-  ci_irqlock_unlock(&ep->thr->lock, &lock_flags);
+  spin_unlock_irqrestore(&ep->lock, lock_flags);
 
   /* Loopback sockets do not need filters */
   if( (s->b.state & CI_TCP_STATE_TCP) && s->b.state != CI_TCP_LISTEN &&
@@ -215,7 +223,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
     goto set_os_port_keeper_and_out;
   }
 
-  if( ep->oofilter.sf_local_port != NULL ) {
+  if( oof_socket_is_armed(&ep->oofilter) ) {
     /* we already have a filter; and we also have a reference of OS socket. */
     ci_assert(ep->os_port_keeper);
     ci_assert( ! in_atomic() );
@@ -231,20 +239,29 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
     oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
   }
 
-  if( OO_SP_NOT_NULL(from_tcp_id) )
+  /* Assuming that sockets that already use MAC filter do not enter here.
+   * We would have no information on how to clear the MAC filter. */
+  ci_assert((s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
+
+  if( ci_tcp_use_mac_filter(ni, s, bindto_ifindex, from_tcp_id) )
+    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_TCP(ni, ep->id));
+  else if( OO_SP_NOT_NULL(from_tcp_id) )
     rc = oof_socket_share(efab_tcp_driver.filter_manager, &ep->oofilter,
                           &listen_ep->oofilter, laddr, raddr, rport);
   else {
+    int flags;
     ci_assert( ! in_atomic() );
     ci_assert( ~ep->thr->netif.flags & CI_NETIF_FLAG_IN_DL_CONTEXT );
 
+    flags = (ep->thr->thc != NULL && (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0) ?
+            OOF_SOCKET_ADD_FLAG_CLUSTERED : 0;
     rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
-                        protocol, laddr, lport, raddr, rport);
+                        flags, protocol, laddr, lport, raddr, rport, NULL);
     if( rc != 0 && rc != -EFILTERSSOME &&
         (s->s_flags & CI_SOCK_FLAG_REUSEADDR) &&
         tcp_helper_endpoint_reuseaddr_cleanup(&ep->thr->netif, s) ) {
       rc = oof_socket_add(efab_tcp_driver.filter_manager, &ep->oofilter,
-                          protocol, laddr, lport, raddr, rport);
+                          flags, protocol, laddr, lport, raddr, rport, NULL);
     }
     if( rc == 0 || rc == -EFILTERSSOME )
       s->s_flags |= CI_SOCK_FLAG_FILTER;
@@ -277,16 +294,18 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
                                   int supress_hw_ops, int need_update)
 {
   struct oo_file_ref* os_sock_ref;
+  ci_sock_cmn* s = SP_TO_SOCK(&ep->thr->netif, ep->id);
 
   OO_DEBUG_TCPH(ci_log("%s: [%d:%d] %s %s", __FUNCTION__, ep->thr->id,
                        OO_SP_FMT(ep->id), 
                        in_atomic() ? "ATOMIC":"",
                        supress_hw_ops ? "SUPRESS_HW":""));
 
-   SP_TO_SOCK(&ep->thr->netif, ep->id)->s_flags &= ~CI_SOCK_FLAG_FILTER;
+  ci_assert((s->s_flags & CI_SOCK_FLAG_FILTER) == 0 ||
+            (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
 
 #if CI_CFG_FD_CACHING
-  if( need_update )
+  if( need_update && !(s->s_flags & CI_SOCK_FLAG_MAC_FILTER) )
     tcp_helper_endpoint_update_filter_details(ep);
 #endif
 
@@ -294,14 +313,25 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
     ci_assert( supress_hw_ops );
   }
 
-  if( supress_hw_ops ) {
+  if( (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) != 0 ) {
+    ci_tcp_sock_clear_scalable_filter(&ep->thr->netif,
+                                      SP_TO_TCP(&ep->thr->netif,ep->id));
+
+    os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
+    if( os_sock_ref != NULL )
+      oo_file_ref_drop(os_sock_ref);
+  }
+  else if( supress_hw_ops ) {
     /* Remove software filters immediately to ensure packets are not
      * delivered to this endpoint.  Defer oof_socket_del() if needed
      * to non-atomic context.
      */
     if( oof_socket_del_sw(efab_tcp_driver.filter_manager, &ep->oofilter) ) {
-      ep->oofilter.sf_flags |= OOF_SOCKET_SW_FILTER_WAS_REMOVED;
       tcp_helper_endpoint_queue_non_atomic(ep, OO_THR_EP_AFLAG_CLEAR_FILTERS);
+      /* If we have been called from atomic context, we sill might actually
+       * have a hw filter. However in such a case there is a non-atomic work
+       * pending on endpoint to sort that out - we fall through to clearing
+       * socket filter flags */
     }
     else {
       os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
@@ -315,20 +345,26 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
     os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
     if( os_sock_ref != NULL )
       oo_file_ref_drop(os_sock_ref);
-
-    /* Reset sf_flags for the next incarnation of this endpoint */
-    ep->oofilter.sf_flags = 0;
   }
+
+  SP_TO_SOCK(&ep->thr->netif, ep->id)->s_flags &=
+                              ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
+
   return 0;
 }
 
 /******************* Move Filters from one ep to another ****************/
-/* We support 3 cases:
+/* We support full move in 3 cases:
  * - closed TCP socket: no filters;
  * - closed UDP socket: no filters;
  * - accepted TCP socket:
  *   ep_from has shared filter,
  *   ep_to gets full filter and os socket ref
+ *
+ * We also support move without filters (drop_filter = true) in one case:
+ * - clustered dummy tcp socket that is connecting to loopback address.
+ *   hw and sw filter is left behind to be cleared in '_post' phase function.
+ *   That is in fact we move os_port_keeper only.
  */
 
 /* Move filters from one endpoint to another: called BEFORE the real move.
@@ -337,7 +373,8 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
  */
 int
 tcp_helper_endpoint_move_filters_pre(tcp_helper_endpoint_t* ep_from,
-                                     tcp_helper_endpoint_t* ep_to)
+                                     tcp_helper_endpoint_t* ep_to,
+                                     int drop_filter)
 {
   struct oo_file_ref* os_sock_ref;
   int rc;
@@ -351,7 +388,8 @@ tcp_helper_endpoint_move_filters_pre(tcp_helper_endpoint_t* ep_from,
     return -EINVAL;
   }
 
-  if( s->b.state != CI_TCP_CLOSED && ep_from->oofilter.sf_local_port != NULL ) {
+  if( ! drop_filter && s->b.state != CI_TCP_CLOSED &&
+      ep_from->oofilter.sf_local_port != NULL ) {
     if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 ) {
       LOG_E(ci_log("%s: ERROR: reuseport being set and socket not closed",
                    __func__));
@@ -396,8 +434,6 @@ tcp_helper_endpoint_move_filters_undo(tcp_helper_endpoint_t* ep_from,
 {
   struct oo_file_ref* os_sock_ref;
 
-  tcp_helper_endpoint_clear_filters(ep_to, 0, 0);
-
   os_sock_ref = oo_file_ref_xchg(&ep_to->os_port_keeper, NULL);
   if( os_sock_ref != NULL ) {
     struct oo_file_ref* old_ref;
@@ -406,6 +442,8 @@ tcp_helper_endpoint_move_filters_undo(tcp_helper_endpoint_t* ep_from,
     if( old_ref != NULL )
       oo_file_ref_drop(old_ref);
   }
+
+  tcp_helper_endpoint_clear_filters(ep_to, 0, 0);
 }
 
 void
@@ -414,9 +452,10 @@ tcp_helper_endpoint_update_filter_details(tcp_helper_endpoint_t* ep)
   ci_netif* ni = &ep->thr->netif;
   ci_sock_cmn* s = SP_TO_SOCK(ni, ep->id);
 
-  oof_socket_update_sharer_details(efab_tcp_driver.filter_manager,
-                                   &ep->oofilter,
-                                   sock_raddr_be32(s), sock_rport_be16(s));
+  if( !(s->s_flags & CI_SOCK_FLAG_MAC_FILTER) )
+    oof_socket_update_sharer_details(efab_tcp_driver.filter_manager,
+                                     &ep->oofilter,
+                                     sock_raddr_be32(s), sock_rport_be16(s));
 }
 
 static void oof_socket_dump_fn(void* arg, oo_dump_log_fn_t log, void* log_arg)
@@ -478,7 +517,11 @@ tcp_helper_endpoint_shutdown(tcp_helper_resource_t* thr, oo_sp ep_id,
    * Since we must never have a filter configured for an unbound
    * socket, we clear the filters here. */
   tcp_helper_endpoint_clear_filters(ep, supress_hw_ops, 0);
-  SP_TO_SOCK(&thr->netif, ep_id)->s_flags &= ~CI_SOCK_FLAG_FILTER;
+  /* Filter flags should have been cleared by
+   * tcp_helper_endpoint_clear_filters.
+   */
+  ci_assert_nflags(SP_TO_SOCK(&thr->netif, ep_id)->s_flags,
+                   (CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER));
 
   rc = efab_tcp_helper_shutdown_os_sock(ep, how);
 

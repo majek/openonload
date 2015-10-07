@@ -60,8 +60,13 @@ check_prototype fcntl.h splice \
 echo -n "#define CI_HAVE_SPLICE_RETURNS_SSIZE_T "
 check_prototype fcntl.h splice \
     "ssize_t (*foo)(int, loff_t*, int, loff_t*, size_t, unsigned int)"
-echo -n "#define CI_HAVE_RECVMMSG_CONST_TIMESPEC "
+# Some Ubuntus (1504) have timespec parameter in recvmmsg without
+# "const" keyword.  We assume normal definition of recvmmsg if it is not
+# present in libc.
+echo -n "#define CI_HAVE_RECVMMSG_NOCONST_TIMESPEC "
 check_prototype sys/socket.h recvmmsg \
     "int (*foo)(int, struct mmsghdr*, unsigned int, int,
-                const struct timespec*)"
+                struct timespec*)"
+echo -n "#define CI_HAVE_NET_TSTAMP "
+check_header_presence linux/net_tstamp.h
 } >> $header

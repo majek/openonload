@@ -544,6 +544,16 @@ def interface_show(ethx):
     if sfc_affinity_ifindex_is_registered(ethx.ifindex()):
         cpu2rxq = sfc_affinity_get_cpu2rxq(ethx)
         out("%s cpu2rxq=%s" % (ethx, ','.join([str(x) for x in cpu2rxq])))
+        out("%s req. core -> channel -> core(s)" % ethx)
+        for cpu in range(len(cpu2rxq)):
+            rxq = cpu2rxq[cpu]
+            if rxq < 0:
+                out("%s %7d   -> no mapping" % (ethx, cpu))
+            else:
+                irq = rxq_get_irq(ethx, rxq)
+                irq_m = irq_get_cpumask(irq)
+                core_list = mask.int_to_comma_sep_list(irq_m)
+                out("%s %7d   -> %5d   -> %5s" % (ethx, cpu, rxq, core_list))
     else:
         out("%s not registered with sfc_affinity" % ethx)
 

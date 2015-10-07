@@ -564,8 +564,7 @@ _cicpos_mac_invalidate_all(cicp_mac_mib_t *mact);
 #if CI_CFG_TEAMING
 
 extern int /* rc */
-cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex,
-                   ci_ifid_t master_ifindex, cicp_encap_t *encap);
+cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex);
 
 extern int cicp_bond_find_rowid(cicp_handle_t *control_plane, 
                                 ci_ifid_t ifindex);
@@ -765,7 +764,7 @@ cicppl_llap_get_vlan(const cicp_handle_t *control_plane,
  */
 extern int /* rc */
 cicp_llap_set_vlan(cicp_handle_t *control_plane, ci_ifid_t ifindex,
-                   ci_ifid_t master_ifindex);
+                   ci_ifid_t master_ifindex, ci_uint16 vlan_id);
 
 
 /*! Prevent an LLAP with CI_HWPORT_ID_BAD from being considered
@@ -867,7 +866,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
 		   ci_mtu_t mtu,
 		   ci_uint8 /* bool */ up,
 		   cicp_llap_type_t type,
-		   char *name,
+		   const char *name,
 		   ci_mac_addr_t *ref_mac,
 		   cicpos_llap_row_t *ref_sync);
 

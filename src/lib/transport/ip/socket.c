@@ -39,7 +39,7 @@ void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
   s->pkt.ether_type = CI_ETHERTYPE_IP;
   ci_ip_cache_init(&s->pkt);
 
-  s->s_flags &= ~CI_SOCK_FLAG_FILTER;
+  s->s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
 }
 
 
@@ -106,95 +106,6 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s, int can_poison)
 }
 
 
-static int ci_sock_cmn_timestamp_q_reapable(ci_netif* ni,
-                                            ci_timestamp_q* timestamp_q)
-{
-  int count = 0;
-  oo_pkt_p p = timestamp_q->queue.head;
-  while( ! OO_PP_EQ(p, timestamp_q->extract) ) {
-    ++count;
-    p = PKT_CHK(ni, p)->tsq_next;
-  }
-  return count;
-}
-
-
-void ci_sock_cmn_timestamp_q_init(ci_netif* netif, ci_timestamp_q* q)
-{
-  ci_ip_queue_init(&q->queue);
-  q->extract = OO_PP_NULL;
-}
-
-void ci_sock_cmn_timestamp_q_drop(ci_netif* netif, ci_timestamp_q* q)
-{
-  ci_ip_pkt_queue* qu = &q->queue;
-  ci_ip_pkt_fmt* p;
-  CI_DEBUG(int i = qu->num);
-
-  ci_assert(netif);
-  ci_assert(qu);
-
-  while( OO_PP_NOT_NULL(qu->head)   CI_DEBUG( && i-- > 0) ) {
-    p = PKT_CHK(netif, qu->head);
-    qu->head = p->tsq_next;
-    ci_netif_pkt_release(netif, p);
-  }
-  ci_assert_equal(i, 0);
-  ci_assert(OO_PP_IS_NULL(qu->head));
-  qu->num = 0;
-}
-
-
-void ci_sock_cmn_timestamp_q_enqueue(ci_netif* ni, ci_timestamp_q* q,
-                                     ci_ip_pkt_fmt* pkt)
-{
-  ci_ip_pkt_queue* qu = &q->queue;
-  oo_pkt_p prev_head = qu->head;
-
-  /* This part is effectively ci_ip_queue_enqueue(ni, &q->queue, p);
-   * but inlined to allow using tsq_next field 
-   */
-  pkt->tsq_next = OO_PP_NULL;
-  if( ci_ip_queue_is_empty(qu) ) {
-    ci_assert(OO_PP_IS_NULL(qu->head));
-    qu->head = OO_PKT_P(pkt);
-  }
-  else {
-    ci_assert(OO_PP_NOT_NULL(qu->head));
-    /* This assumes the netif lock is held, so use
-       ci_ip_queue_enqueue_nnl() if it's not */
-    PKT(ni, qu->tail)->tsq_next = OO_PKT_P(pkt);
-  }
-  qu->tail = OO_PKT_P(pkt);
-  qu->num++;
-
-
-  if( OO_PP_IS_NULL(prev_head) ) {
-    ci_assert(OO_PP_IS_NULL(q->extract));
-    q->extract = qu->head;
-  } 
-  else {
-    if( OO_PP_IS_NULL(q->extract) )
-      q->extract = OO_PKT_P(pkt);
-    ci_sock_cmn_timestamp_q_reap(ni, q);
-  }
-}
-
-
-void ci_sock_cmn_timestamp_q_reap(ci_netif* ni, ci_timestamp_q* q)
-{ 
-  ci_assert(ci_netif_is_locked(ni));
-  while( ! OO_PP_EQ(q->queue.head, q->extract) ) {
-    ci_ip_pkt_fmt* pkt = PKT_CHK(ni, q->queue.head);
-    oo_pkt_p next = pkt->tsq_next;
-
-    ci_netif_pkt_release(ni, pkt);
-    --q->queue.num;
-    q->queue.head = next;
-  }
-}
-
-
 
 
 void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
@@ -218,14 +129,11 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
          s->os_sock_status >> OO_OS_STATUS_SEQ_SHIFT,
          (s->os_sock_status & OO_OS_STATUS_RX) ? ",RX":"",
          (s->os_sock_status & OO_OS_STATUS_TX) ? ",TX":"");
+
+  if( s->b.ready_list_id > 0 )
+    logger(log_arg, "%s  epoll3: ready_list_id %d epoll_pid %d",
+           pf, s->b.ready_list_id, s->b.eitem_pid);
+  else
+    logger(log_arg, "%s  epoll3: ready_list_id %d", pf, s->b.ready_list_id);
 }
 
-void ci_timestamp_q_dump(ci_netif* ni, ci_timestamp_q* timestamp_q,
-                         const char* pf, oo_dump_log_fn_t logger,
-                         void* log_arg)
-{
-  int ts_q_reapable = ci_sock_cmn_timestamp_q_reapable(ni, timestamp_q);
-  logger(log_arg, "%s  TX timestamping queue: packets %d reap %d extract %d",
-         pf, timestamp_q->queue.num - ts_q_reapable, ts_q_reapable,
-         OO_PP_ID(timestamp_q->extract));
-}

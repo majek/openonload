@@ -7,7 +7,6 @@ LIB_SRCS	:= nic.c \
 		   eventq.c \
 		   falcon.c \
 		   falcon_mac.c \
-		   falcon_iscsi.c \
 		   falcon_spi.c \
 		   ef10.c
 

@@ -69,16 +69,18 @@ extern int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 /* Send the [pkt] via loopback from socket [s] to socket [dst].
  */
 ci_inline void ci_ip_local_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
-                                ci_sock_cmn *s, oo_sp dst)
+                                oo_sp src, oo_sp dst)
 {
   ci_assert(ci_netif_is_locked(ni));
-  pkt->pf.tcp_tx.lo.tx_sock = SC_SP(s);
+  pkt->pf.tcp_tx.lo.tx_sock = src;
   pkt->pf.tcp_tx.lo.rx_sock = dst;
-  if( OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock) )
+  if( OO_SP_IS_NULL(pkt->pf.tcp_tx.lo.rx_sock) ) {
+    ci_netif_pkt_release(ni, pkt);
+    /* Fixme: it should not happen at all, but it happens. */
     return;
-  LOG_NT(ci_log(NS_FMT "loopback TX pkt %d to %d", NS_PRI_ARGS(ni, s),
-                OO_PKT_FMT(pkt), OO_SP_FMT(pkt->pf.tcp_tx.lo.rx_sock)));
-  ci_netif_pkt_hold(ni, pkt);
+  }
+  LOG_NT(ci_log("%d:%d loopback TX pkt %d to %d", NI_ID(ni), OO_SP_FMT(src),
+                OO_PKT_FMT(pkt), OO_SP_FMT(dst)));
   pkt->next = ni->state->looppkts;
   ni->state->looppkts = OO_PKT_P(pkt);
   ni->state->n_looppkts++;
@@ -114,13 +116,15 @@ ci_inline void
 __ci_ip_send_tcp(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_tcp_state* ts)
 {
   if( ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ) {
-    ci_ip_local_send(ni, pkt, &ts->s, ts->local_peer);
+    ci_netif_pkt_hold(ni, pkt);
+    ci_ip_local_send(ni, pkt, S_SP(ts), ts->local_peer);
     return;
   }
   ci_ip_cache_check(&ts->s.pkt);
   CI_IPV4_STATS_INC_OUT_REQUESTS(ni);
   if(CI_LIKELY( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) )) {
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
+    ci_netif_pkt_hold(ni, pkt);
     ci_netif_send(ni, pkt);
   }
   else {

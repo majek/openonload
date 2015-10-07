@@ -71,7 +71,7 @@ efrm_bt_block_reuse_try(struct efhw_buffer_table_block *block,
 static int
 efrm_bt_blocks_alloc(struct efhw_nic *nic,
 		     struct efrm_bt_manager *manager,
-		     struct efrm_buffer_table_allocation *a)
+		     struct efrm_buffer_table_allocation *a, int reset_pending)
 {
 	int i, rc;
 	int size = a->bta_size;
@@ -83,8 +83,12 @@ efrm_bt_blocks_alloc(struct efhw_nic *nic,
 
 	for (i = 0; i < n_blocks; i++) {
 		rc = efhw_nic_buffer_table_alloc(nic, manager->owner,
-						 manager->order, &block);
-		if (rc != 0)
+						 manager->order, &block,
+						 reset_pending);
+		/* ENETDOWN indicates absent hardware, in which case we should
+		 * not report failure as we wish to preserve all software state
+		 * in anticipation of the hardware's reappearance. */
+		if (rc != 0 && rc != -ENETDOWN)
 			goto fail;
 		block->btb_next = a->bta_blocks;
 		if (size >= EFHW_BUFFER_TABLE_BLOCK_SIZE)
@@ -105,7 +109,7 @@ fail:
 			 __FUNCTION__, size, manager->order, rc);
 	while ( (block = a->bta_blocks) != NULL) {
 		a->bta_blocks = block->btb_next;
-		efhw_nic_buffer_table_free(nic, block);
+		efhw_nic_buffer_table_free(nic, block, reset_pending);
 	}
 	return rc;
 }
@@ -113,10 +117,10 @@ fail:
 static void
 efrm_bt_block_clear(struct efhw_nic *nic, int bta_flags,
 		    struct efhw_buffer_table_block *block,
-		    int first, int size)
+		    int first, int size, int reset_pending)
 {
-	if (!(bta_flags &
-	      (EFRM_BTA_FLAG_FRAUD | EFRM_BTA_FLAG_IN_RESET)))
+	if (! reset_pending && !(bta_flags & (EFRM_BTA_FLAG_FRAUD |
+					      EFRM_BTA_FLAG_IN_RESET)))
 		efhw_nic_buffer_table_clear(nic, block, first, size);
 #ifndef NDEBUG
 	else
@@ -128,7 +132,7 @@ efrm_bt_block_clear(struct efhw_nic *nic, int bta_flags,
 
 static void
 efrm_bt_blocks_free(struct efhw_nic *nic,
-		    struct efrm_buffer_table_allocation *a)
+		    struct efrm_buffer_table_allocation *a, int reset_pending)
 {
 	int n = a->bta_size;
 	struct efhw_buffer_table_block *block;
@@ -136,17 +140,18 @@ efrm_bt_blocks_free(struct efhw_nic *nic,
 	EFRM_ASSERT(a->bta_first_entry_offset == 0);
 	while ( (block = a->bta_blocks) != NULL) {
 		efrm_bt_block_clear(nic, a->bta_flags, block, 0,
-				    min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE));
+				    min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE),
+                                    reset_pending);
 		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
 		a->bta_blocks = block->btb_next;
-		efhw_nic_buffer_table_free(nic, block);
+		efhw_nic_buffer_table_free(nic, block, reset_pending);
 	}
 }
 
 int
 efrm_bt_manager_alloc(struct efhw_nic *nic,
 		      struct efrm_bt_manager *manager, int size,
-		      struct efrm_buffer_table_allocation *a)
+		      struct efrm_buffer_table_allocation *a, int reset_pending)
 {
 	int rc;
 
@@ -172,7 +177,7 @@ efrm_bt_manager_alloc(struct efhw_nic *nic,
 
 	/* Failed to allocate from already-existing block.
 	 * Let's get another block(s)! */
-	rc = efrm_bt_blocks_alloc(nic, manager, a);
+	rc = efrm_bt_blocks_alloc(nic, manager, a, reset_pending);
 	if (rc != 0) {
 		atomic_sub(a->bta_size, &manager->btm_entries);
 		a->bta_size = 0;
@@ -194,12 +199,13 @@ efrm_bt_manager_alloc(struct efhw_nic *nic,
 
 static void
 efrm_bt_free_small(struct efhw_nic *nic, struct efrm_bt_manager *manager,
-		   struct efrm_buffer_table_allocation *a)
+		   struct efrm_buffer_table_allocation *a, int reset_pending)
 {
 	EFRM_ASSERT(a->bta_size < EFHW_BUFFER_TABLE_BLOCK_SIZE);
 
 	efrm_bt_block_clear(nic, a->bta_flags, a->bta_blocks,
-			    a->bta_first_entry_offset, a->bta_size);
+			    a->bta_first_entry_offset, a->bta_size,
+			    reset_pending);
 
 	spin_lock_bh(&manager->btm_lock);
 	a->bta_blocks->btb_free_mask |=
@@ -217,9 +223,10 @@ efrm_bt_free_small(struct efhw_nic *nic, struct efrm_bt_manager *manager,
 		manager->btm_block = NULL;
 	spin_unlock_bh(&manager->btm_lock);
 
-	if ((a->bta_flags & (EFRM_BTA_FLAG_IN_RESET | EFRM_BTA_FLAG_FRAUD))
+	if (! reset_pending &&
+	    (a->bta_flags & (EFRM_BTA_FLAG_IN_RESET | EFRM_BTA_FLAG_FRAUD))
              != EFRM_BTA_FLAG_IN_RESET)
-		efhw_nic_buffer_table_free(nic, a->bta_blocks);
+		efhw_nic_buffer_table_free(nic, a->bta_blocks, reset_pending);
 	atomic_dec(&manager->btm_blocks);
 }
 
@@ -286,21 +293,22 @@ efrm_bt_manager_realloc(struct efhw_nic *nic,
 
 void
 efrm_bt_manager_free(struct efhw_nic *nic, struct efrm_bt_manager *manager,
-		     struct efrm_buffer_table_allocation *a)
+		     struct efrm_buffer_table_allocation *a,
+		     int reset_pending)
 {
 	EFRM_ASSERT(a->bta_order == manager->order);
 
 	atomic_sub(a->bta_size, &manager->btm_entries);
 
 	if (a->bta_size < EFHW_BUFFER_TABLE_BLOCK_SIZE) {
-		efrm_bt_free_small(nic, manager, a);
+		efrm_bt_free_small(nic, manager, a, reset_pending);
 		a->bta_size = 0;
 		return;
 	}
 
 	atomic_sub((a->bta_size - 1) / EFHW_BUFFER_TABLE_BLOCK_SIZE + 1,
 		   &manager->btm_blocks);
-	efrm_bt_blocks_free(nic, a);
+	efrm_bt_blocks_free(nic, a, reset_pending);
 	a->bta_size = 0;
 }
 
@@ -325,7 +333,10 @@ efrm_bt_nic_set(struct efhw_nic *nic, struct efrm_buffer_table_allocation *a,
 				a->bta_first_entry_offset,
 				min(n, EFHW_BUFFER_TABLE_BLOCK_SIZE),
 				dma_addrs + (a->bta_size - n));
-		if( rc != 0 ) {
+		/* ENETDOWN indicates absent hardware, in which case we should
+		 * not report failure as we wish to preserve all software state
+		 * in anticipation of the hardware's reappearance. */
+		if (rc != 0 && rc != -ENETDOWN) {
 			if( ~a->bta_flags & EFRM_BTA_FLAG_IN_RESET )
 				return rc;
 			rc1 = rc;

@@ -220,17 +220,6 @@ static int ci_udp_ioctl_locked(ci_netif* ni, ci_udp_state* us,
     if( ! CI_IOCTL_ARG_OK(int, arg) )
       return -EFAULT;
     rc = 1;
-#if CI_CFG_ZC_RECV_FILTER
-# ifndef __KERNEL__
-    if( us->recv_q_filter ) {
-      ci_netif_unlock(ni);
-      ci_sock_lock(ni, &us->s.b);
-      rc = ci_udp_recv_q_readable(ni, us);
-      ci_sock_unlock(ni, &us->s.b);
-      ci_netif_lock(ni);
-    }
-# endif
-#endif
     if( rc ) {
       /* Return the size of the datagram at the head of the receive queue.
        *
@@ -242,10 +231,10 @@ static int ci_udp_ioctl_locked(ci_netif* ni, ci_udp_state* us,
       oo_pkt_p extract = us->recv_q.extract;
       if( OO_PP_NOT_NULL(extract) ) {
         ci_ip_pkt_fmt* pkt = PKT_CHK(ni, extract);
-        if( (pkt->pf.udp.rx_flags & CI_IP_PKT_FMT_PREFIX_UDP_RX_CONSUMED) &&
-            OO_PP_NOT_NULL(pkt->next) )
-          pkt = PKT_CHK(ni, pkt->next);
-        if( !(pkt->pf.udp.rx_flags & CI_IP_PKT_FMT_PREFIX_UDP_RX_CONSUMED) ) {
+        if( (pkt->rx_flags & CI_PKT_RX_FLAG_RECV_Q_CONSUMED) &&
+            OO_PP_NOT_NULL(pkt->udp_rx_next) )
+          pkt = PKT_CHK(ni, pkt->udp_rx_next);
+        if( !(pkt->rx_flags & CI_PKT_RX_FLAG_RECV_Q_CONSUMED) ) {
           *(int*) arg = pkt->pf.udp.pay_len;
           return 0;
         }

@@ -115,8 +115,8 @@ int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
   oo_tcp_reuseport_bind_t op;
   int rc;
 
-  strncpy(op.cluster_name, cluster_name, (CI_CFG_STACK_NAME_LEN >> 1));
-  op.cluster_name[CI_CFG_STACK_NAME_LEN >> 1] = '\0';
+  strncpy(op.cluster_name, cluster_name, CI_CFG_CLUSTER_NAME_LEN);
+  op.cluster_name[CI_CFG_CLUSTER_NAME_LEN] = '\0';
   op.cluster_size = cluster_size;
   op.cluster_restart_opt = cluster_restart_opt;
   op.addr_be32 = addr_be32;
@@ -262,10 +262,27 @@ int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
   oo_sock_attach_t op;
 
   op.ep_id = ep_id;
-  op.domain = domain;
   op.type = type;
+  op.domain = domain;
   oo_rwlock_lock_read(&citp_dup2_lock);
   rc = oo_resource_op(stack_fd, OO_IOC_SOCK_ATTACH, &op);
+  oo_rwlock_unlock_read (&citp_dup2_lock);
+  if( rc < 0 )
+    return rc;
+  return op.fd;
+}
+
+
+int ci_tcp_helper_tcp_accept_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
+                                         int type)
+{
+  int rc;
+  oo_tcp_accept_sock_attach_t op;
+
+  op.ep_id = ep_id;
+  op.type = type;
+  oo_rwlock_lock_read(&citp_dup2_lock);
+  rc = oo_resource_op(stack_fd, OO_IOC_TCP_ACCEPT_SOCK_ATTACH, &op);
   oo_rwlock_unlock_read (&citp_dup2_lock);
   if( rc < 0 )
     return rc;
@@ -360,19 +377,6 @@ int ci_tcp_helper_close_no_trampoline(int fd) {
 }
 
 
-int ci_tcp_helper_handover (ci_fd_t stack_fd, ci_fd_t sock_fd)
-{
-  ci_int32 io_fd = sock_fd;
-  return oo_resource_op(stack_fd, OO_IOC_TCP_HANDOVER, &io_fd);
-}
-
-int ci_tcp_file_moved(ci_fd_t sock_fd)
-{
-  ci_int32 io_fd = sock_fd;
-  return oo_resource_op(sock_fd, OO_IOC_FILE_MOVED, &io_fd);
-}
-
-
 
 #include <onload/dup2_lock.h>
 oo_rwlock citp_dup2_lock;
@@ -402,47 +406,17 @@ int ci_tcp_helper_rel_sock_fd(ci_fd_t fd)
 }
 
 
-/*--------------------------------------------------------------------
- *!
- * Move a tcp state from one tcp helper to another
- *
- * Both endpoint states must exist, be allocated and in the closed state.
- * The kernel state of the "from" state is moved to the new endpoint state
- * This includes
- *    - moving the corresponding OS socket.
- *    - redirecting the existing L5 OS file to reference the new state
- *
- * \return                standard error codes
- *
- *--------------------------------------------------------------------*/
 
-int ci_tcp_helper_move_state(ci_netif* ni, ci_fd_t fd, oo_sp ep_id,
-                             ci_netif* new_ni, oo_sp new_ep_id)
-{
-  oo_tcp_move_state_t op;
-
-  op.ep_id = ep_id;
-  op.new_trs_id = new_ni->state->stack_id;
-  op.new_ep_id = new_ep_id;
-
-  return oo_resource_op(fd, OO_IOC_TCP_MOVE_STATE, &op);
-}
-
-
-int ci_tcp_helper_bind_os_sock(ci_netif* ni, oo_sp sock_id,
-                               const struct sockaddr* address,
-                               size_t addrlen,
-                               ci_uint16* out_port)
+int ci_tcp_helper_bind_os_sock(ci_fd_t fd, const struct sockaddr* address,
+                               size_t addrlen, ci_uint16* out_port)
 {
   int rc;
   oo_tcp_bind_os_sock_t op;
 
   CI_USER_PTR_SET(op.address, address);
   op.addrlen = addrlen;
-  op.sock_id = sock_id;
 
-  rc = oo_resource_op(ci_netif_get_driver_handle(ni),
-                      OO_IOC_TCP_BIND_OS_SOCK, &op);
+  rc = oo_resource_op(fd, OO_IOC_TCP_BIND_OS_SOCK, &op);
 
   if (rc < 0) {
     errno = -rc;
@@ -510,6 +484,42 @@ int ci_tcp_helper_set_tcp_close_os_sock(ci_netif *ni, oo_sp sock_id)
 {
   return oo_resource_op(ci_netif_get_driver_handle(ni),
                         OO_IOC_TCP_CLOSE_OS_SOCK, &sock_id);
+}
+
+
+/* This ioctl creates a backing OS socket for a TCP endpoint. If a socket
+ * option is passed with level >= 0 then that option is synced to the OS
+ * socket after creation.
+ */
+int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
+                                         ci_sock_cmn *s, int level,
+                                         int optname, const void* optval,
+                                         int optlen)
+{
+  int rc;
+  oo_tcp_create_set_t op;
+
+  /* State sync must be done while the state is not being changed under out
+   * feet.
+   */
+  ci_assert(ci_netif_is_locked(ni));
+  /* When we install filters we take a reference to the OS socket.  That means
+   * we need to have created the OS socket (if needed) before installing a
+   * filter.
+   */
+  ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER);
+  /* This must be called before we turn into a listening socket.  If F_SETFL
+   * is used after a socket enters the listening state onload filters the
+   * request to ensure that the OS socket remains non-blocking.
+   */
+  ci_assert_nequal(s->b.state, CI_TCP_LISTEN);
+
+  op.level = level;
+  op.optname = optname;
+  CI_USER_PTR_SET(op.optval, optval);
+  op.optlen = optlen;
+  rc = oo_resource_op(fd, OO_IOC_OS_SOCK_CREATE_AND_SET, &op);
+  return rc;
 }
 
 

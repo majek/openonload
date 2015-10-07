@@ -73,7 +73,7 @@ MODULE_LICENSE("GPL");
 
 /*--------------------------------------------------------------------
  *
- * Driver log/debug settings, exported to dependent modules (ip, iscsi)
+ * Driver log/debug settings, exported to dependent modules (ip)
  *
  *--------------------------------------------------------------------*/
 
@@ -155,15 +155,6 @@ ci_char_fop_ioctl(struct file *filp, uint cmd, ulong arg)
   return 0;
 }
 
-#ifndef HAVE_UNLOCKED_IOCTL
-static int
-ci_char_fop_legacy_ioctl(struct inode *ino, struct file *filp,
-                         uint cmd, ulong arg)
-{ 
-  return (int) ci_char_fop_ioctl(filp, cmd, arg);
-}
-#endif
-
 
 /****************************************************************************
  *
@@ -224,14 +215,8 @@ static unsigned ci_char_fop_poll(struct file* filp, poll_table* wait)
 
 struct file_operations ci_char_fops = {
   .owner = THIS_MODULE,
-#ifdef HAVE_UNLOCKED_IOCTL
   .unlocked_ioctl = ci_char_fop_ioctl,
-#else
-  .ioctl = ci_char_fop_legacy_ioctl,
-#endif
-#ifdef HAVE_COMPAT_IOCTL
   .compat_ioctl = ci_char_fop_ioctl,
-#endif
   .mmap = ci_char_fop_mmap,
   .open = ci_char_fop_open,
   .release = ci_char_fop_close,

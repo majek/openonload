@@ -57,10 +57,13 @@
 #include <ci/efrm/debug.h>
 #include <ci/efrm/driver_private.h>
 #include <ci/driver/efab/hardware.h>
-#include <driver/linux_net/driverlink_api.h>
 
 extern int  efrm_driverlink_register(void);
 extern void efrm_driverlink_unregister(void);
+extern void efrm_driverlink_desist(struct efrm_nic* nic,
+				   unsigned failure_generation);
+extern void efrm_driverlink_resume(struct efrm_nic* nic);
+extern unsigned efrm_driverlink_generation(struct efrm_nic* nic);
 
 extern int
 efrm_nic_add(struct efx_dl_device *dl_device, unsigned int opts,
@@ -69,7 +72,6 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned int opts,
 	     const struct vi_resource_dimensions *, int ifindex,
 	     unsigned timer_quantum_ns, unsigned rx_prefix_len,
 	     unsigned rx_usr_buf_size);
-extern void efrm_nic_del(struct linux_efhw_nic *);
 
 extern int efrm_install_proc_entries(void);
 extern void efrm_uninstall_proc_entries(void);

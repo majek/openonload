@@ -58,7 +58,6 @@
 #define CI_TP_LOG_STATS	0x4000000	/* Statistics */
 #define CI_TP_LOG_TO	0x8000000	/* TCP out of order */
 #define CI_TP_LOG_ARPV	0x10000000	/* ARP verbose */
-#define CI_TP_LOG_IDO	0x20000000	/* iSCSI digest offload (Falcon) */
 #define CI_TP_LOG_SIG	0x40000000	/* Signals */
 #define CI_TP_LOG_URG	0x80000000	/* TCP urgent data */
 
@@ -121,12 +120,20 @@
 #define EF_LOG_RESOURCE_WARNINGS      1
 #define EF_LOG_CONN_DROP              2
 #define EF_LOG_CONFIG_WARNINGS        3
-#define EF_LOG_MAX                    4  /* Must be last */
+#define EF_LOG_USAGE_WARNINGS         4
+#define EF_LOG_MAX                    5  /* Must be last */
 
 
 #define NI_LOG(ni, lg, ...)                                \
   do {                                                     \
     if( NI_OPTS(ni).log_category & 1 << (EF_LOG_ ## lg) )  \
+      ci_log(__VA_ARGS__);                                 \
+  } while( 0 );
+
+
+#define CONFIG_LOG(opts, lg, ...)                          \
+  do {                                                     \
+    if( (opts)->log_category & 1 << (EF_LOG_ ## lg) )      \
       ci_log(__VA_ARGS__);                                 \
   } while( 0 );
 
@@ -192,15 +199,15 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_SACK   ? "SACK ":""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_ECN    ? "ECN " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_STRIPE ? "STRIPE ":""),               \
-  ((ts)->tcpflags & CI_TCPT_FLAG_ADVANCE_NEEDED   ? "ADV_NEED "  :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_WAS_ESTAB        ? "ESTAB "     :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT ? "NONBCON "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED   ? "PASSIVE "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NO_ARP           ? "ARP_FAIL "  :""), \
-  ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":"")
+  ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":""), \
+  ((ts)->tcpflags & CI_TCPT_FLAG_MEM_DROP         ? "MEM_DROP ":"")
 
 
-#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SOCK_FLAGS_PRI_ARG(s)                                        \
   ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),                \
   ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_RD ? "SHUTRD ":""),          \
@@ -220,11 +227,12 @@
   ((s)->s_flags & CI_SOCK_FLAG_SET_SNDBUF ? "SNDBUF ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_SET_RCVBUF ? "RCVBUF ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL ? "SW_FILTER_FULL ":""),  \
-  ((s)->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY ? "REUSEPORT_LEGACY ":""),  \
+  ((s)->s_flags & CI_SOCK_FLAG_TPROXY ? "TRANSPARENT ":""),             \
+  ((s)->s_flags & CI_SOCK_FLAG_MAC_FILTER ? "MAC_FILTER ":""),          \
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 
-#define CI_SB_FLAGS_FMT			"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SB_FLAGS_FMT			"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SB_FLAGS_PRI_ARG(sb)                                         \
   ((sb)->sb_flags  & CI_SB_FLAG_WAKE_TX         ? "WK_TX ":""),         \
   ((sb)->sb_flags  & CI_SB_FLAG_WAKE_RX         ? "WK_RX ":""),         \
@@ -233,14 +241,15 @@
   ((sb)->sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ ? "ACCEPTQ ":""),       \
   ((sb)->sb_aflags & CI_SB_AFLAG_DEFERRED       ? "DEFERRED ":""),      \
   ((sb)->sb_aflags & CI_SB_AFLAG_AVOID_INTERRUPTS ? "AVOID_INT ":""),   \
-  ((sb)->sb_aflags & CI_SB_AFLAG_IN_SO_LINGER   ? "IN_LINGER ":""),     \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_ASYNC        ? "O_ASYNC ":""),       \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_NONBLOCK     ? "O_NONBLOCK ":""),    \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_NDELAY       ? "O_NDELAY ":""),      \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_APPEND       ? "O_APPEND ":""),      \
   ((sb)->sb_aflags & CI_SB_AFLAG_O_CLOEXEC      ? "O_CLOEXEC ":""),     \
   ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE       ? "CACHE ":""),         \
-  ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ? "CACHE_NO_FD ":"")
+  ((sb)->sb_aflags & CI_SB_AFLAG_IN_PASSIVE_CACHE ? "PASSIVE_CACHE ":""), \
+  ((sb)->sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ? "CACHE_NO_FD ":""),   \
+  ((sb)->sb_aflags & CI_SB_AFLAG_OS_BACKED      ? "OS_BACKED ":"")
 
 
 #define CI_EVMASK_FMT                  "%s%s%s%s%s%s%s"

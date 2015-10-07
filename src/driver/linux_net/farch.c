@@ -1576,10 +1576,11 @@ void efx_farch_ev_test_generate(struct efx_channel *channel)
 	efx_farch_magic_event(channel, EFX_CHANNEL_MAGIC_TEST(channel));
 }
 
-void efx_farch_rx_defer_refill(struct efx_rx_queue *rx_queue)
+int efx_farch_rx_defer_refill(struct efx_rx_queue *rx_queue)
 {
 	efx_farch_magic_event(efx_rx_queue_channel(rx_queue),
 			      EFX_CHANNEL_MAGIC_FILL(rx_queue));
+	return 0;
 }
 
 /**************************************************************************
@@ -2012,6 +2013,7 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 #endif
 	res->flags |= EFX_DL_FALCON_HAVE_RSS_CHANNEL_COUNT;
 	res->rss_channel_count = efx->rss_spread;
+	res->rx_channel_count = efx->n_rx_channels;
 
 	res->rx_usr_buf_size = EFX_RX_USR_BUF_SIZE;
 

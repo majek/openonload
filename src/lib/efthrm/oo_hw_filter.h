@@ -33,18 +33,61 @@ struct tcp_helper_resource_s;
  */
 #define OO_HW_VLAN_DEFAULT (0)
 
-#define OO_HW_SRC_FLAG_LOOPBACK (1)
+/* Filter manipulation flags */
+#define OO_HW_SRC_FLAG_LOOPBACK          (0x1)
+#define OO_HW_SRC_FLAG_RSS_DST           (0x2)
+#define OO_HW_SRC_FLAG_KERNEL_REDIRECT   (0x4)
 
 
 /* Initialise filter object. */
 extern void oo_hw_filter_init(struct oo_hw_filter* oofilter);
+extern void oo_hw_filter_init2(struct oo_hw_filter* oofilter,
+                               struct tcp_helper_resource_s* trs,
+                               struct tcp_helper_cluster_s* thc);
 
 /* Remove all filters and disassociate with stack. */
 extern void oo_hw_filter_clear(struct oo_hw_filter* oofilter);
 
 /* Remove specified filters.  Association with stack remains. */
 extern void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
-                                       unsigned hwport_mask);
+                                       unsigned hwport_mask, int redirect);
+
+/* Abstraction of the various filter types used by Onload. Used by the oo_hw
+ * filter-setting functions. */
+struct oo_hw_filter_spec {
+#define OO_HW_FILTER_TYPE_MAC            0
+#define OO_HW_FILTER_TYPE_ETHERTYPE      1
+#define OO_HW_FILTER_TYPE_IP             2
+#define OO_HW_FILTER_TYPE_IP_PROTO       3
+#define OO_HW_FILTER_TYPE_IP_PROTO_MAC   4
+  unsigned type;
+
+  union {
+    struct {
+      unsigned   saddr;
+      int        sport;
+      unsigned   daddr;
+      unsigned   dport;
+      int        protocol;
+    } ip;
+    struct {
+      ci_uint8   mac[6];
+    } mac;
+    struct {
+      /* Ethertype filters are always MAC-qualified in Onload. */
+      ci_uint8   mac[6];
+      ci_uint16  t;
+    } ethertype;
+    struct {
+      /* IP-protocol filters may be MAC-qualified or not, and have different
+       * values of [type] above in each case, but share this union element. */
+      ci_uint8   mac[6];
+      ci_uint8   p;
+    } ipproto;
+  } addr;
+
+  ci_uint16 vlan_id;
+};
 
 /* Add filters on specified hwports, if needed.  Must already be associated
  * with a stack.
@@ -62,37 +105,39 @@ extern void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
  * A filter specifying vlan_id is used for filters on ports in both hwport_mask
  * and set_vlan_mask.
  */
-extern int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
-                                    int protocol,
-                                    unsigned saddr, int sport,
-                                    unsigned daddr, int dport,
-                                    ci_uint16 vlan_id, unsigned set_vlan_mask,
-                                    unsigned hwport_mask, unsigned src_flags);
+extern int
+oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
+                         const struct oo_hw_filter_spec* oo_filter_spec,
+                         unsigned set_vlan_mask, unsigned hwport_mask,
+                         unsigned src_flags);
 
-/* Clear existing filter, if any.  The insert new filters and associate
- * filter object with given stack.
+
+/* Insert new filters.
+ *
+ * filter object needs to be associated with stack (or cluster)
+ * and contain no preexisting filters.
  *
  * If we fail to insert any filters the filter is cleared.
  */
 extern int oo_hw_filter_set(struct oo_hw_filter* oofilter,
-                            struct tcp_helper_resource_s* trs, int protocol,
-                            unsigned saddr, int sport,
-                            unsigned daddr, int dport,
-                            ci_uint16 vlan_id, unsigned set_vlan_mask,
-                            unsigned hwport_mask, unsigned src_flags);
+                            const struct oo_hw_filter_spec* oo_filter_spec,
+                            unsigned set_vlan_mask, unsigned hwport_mask,
+                            unsigned src_flags);
 
 /* Redirect filter to direct packets to a different stack.  This is similar
  * to doing clear then set, except that it is guaranteed that (for
  * interfaces common to old and new stacks) no packets will slip through
  * the filter during the redirection.
+ *
+ * Clustered filters cannot be moved to a new stack. In case a clustered filter
+ * is given new_stack needs to be NULL and functionality is limited
+ * to setting/removing filters on interfaces where change is required.
  */
 extern int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                                struct tcp_helper_resource_s* new_stack,
-                               int protocol,
-                               unsigned saddr, int sport,
-                               unsigned daddr, int dport,
-                               ci_uint16 vlan_id, unsigned set_vlan_mask,
-                               unsigned hwport_mask, unsigned src_flags);
+                               const struct oo_hw_filter_spec* oo_filter_spec,
+                               unsigned set_vlan_mask, unsigned hwport_mask,
+                               unsigned src_flags);
 
 
 /* Transfer filters on ports in hwport_mask from oofilter_old to oofilter_new.
@@ -110,11 +155,5 @@ extern void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
  * with a stack.
  */
 extern unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter);
-
-
-extern int oo_hw_filter_set_thc(struct oo_hw_filter* oofilter,
-                                struct tcp_helper_cluster_s* thc, int protocol,
-                                unsigned daddr, int dport,
-                                unsigned hwport_mask);
 
 #endif  /* __ONLOAD_HW_FILTER_H__ */

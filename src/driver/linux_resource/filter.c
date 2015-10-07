@@ -51,6 +51,7 @@
  */
 #include <linux/device.h>
 #include "linux_resource_internal.h"
+#include <driver/linux_net/driverlink_api.h>
 #include "kernel_compat.h"
 #include <ci/driver/internal.h>
 #include <ci/tools/byteorder.h>
@@ -155,14 +156,8 @@ static efrm_pd_handle efrm_pd_del_rule = NULL;
 
 static int efrm_is_mac_spec( struct efx_filter_spec const* spec )
 {
-#if EFX_DRIVERLINK_API_VERSION < 9
-	return spec->type &
-	       (EFX_FILTER_MAC_FULL | EFX_FILTER_MAC_WILD);
-#else
 	return spec->match_flags &
 	       (EFX_FILTER_MATCH_LOC_MAC | EFX_FILTER_MATCH_LOC_MAC_IG);
-#endif
-
 }
 
 static int efrm_atoi( const char** src, size_t* length )
@@ -435,20 +430,6 @@ efrm_protocol_matches( struct efx_filter_spec *spec, efrm_protocol_t proto )
 {
 	/* Returns a truth value - does the spec match the protocol? */
 
-#if EFX_DRIVERLINK_API_VERSION < 9
-	switch (spec->type) {
-	case EFX_FILTER_TCP_FULL:
-	case EFX_FILTER_TCP_WILD:
-		return (proto == ep_tcp) || (proto==ep_ip);
-	case EFX_FILTER_UDP_FULL:
-	case EFX_FILTER_UDP_WILD:
-		return (proto == ep_udp) || (proto==ep_ip);
-	case EFX_FILTER_MAC_FULL:
-	case EFX_FILTER_MAC_WILD:
-		return proto == ep_eth;
-	}
-	return 0;
-#else
 	if ( (spec->match_flags & EFX_FILTER_MATCH_ETHER_TYPE) &&
 	     (spec->ether_type == htons(ETH_P_IP)) ) {
 		if( proto == ep_ip )
@@ -469,7 +450,6 @@ efrm_protocol_matches( struct efx_filter_spec *spec, efrm_protocol_t proto )
 		return 1;
 
 	return 0;
-#endif
 }
 
 
@@ -963,48 +943,6 @@ static int print_rule ( struct seq_file *seq,
 	}
 }
 
-#if EFX_DRIVERLINK_API_VERSION < 9
-/* TODO: I think these can be included now, rather than copied here */
-static inline int __efx_filter_get_ipv4(const struct efx_filter_spec *spec,
-                                        __be32 *host1, __be16 *port1,
-                                        __be32 *host2, __be16 *port2)
-{
-	*host1 = htonl(spec->data[0] >> 16 | spec->data[1] << 16);
-	*port1 = htons(spec->data[0]);
-	*host2 = htonl(spec->data[2]);
-	*port2 = htons(spec->data[1] >> 16);
-	return 0;
-}
-
-
-/* As __efx_filter_get_ipv4 is ONLY correct in some circumstances -
-   use this which checks the ->type field first */
-static inline int efx_filter_get_ipv4(const struct efx_filter_spec *spec,
-				      __be32 *host1, __be16 *port1,
-				      __be32 *host2, __be16 *port2)
-{
-	__be32 ignored_host;
-	__be16 ignored_port;
-	switch (spec->type) {
-	case EFX_FILTER_TCP_FULL:
-	case EFX_FILTER_UDP_FULL:
-		return __efx_filter_get_ipv4( spec, host1, port1,
-					      host2, port2 );
-	case EFX_FILTER_TCP_WILD:
-		*host1 = 0;
-		*port1 = 0;
-		return __efx_filter_get_ipv4(spec, &ignored_host,
-					     &ignored_port, host2, port2);
-	case EFX_FILTER_UDP_WILD:
-		*host1 = 0;
-		*port1 = 0;
-		return __efx_filter_get_ipv4(spec, &ignored_host, port2,
-					     host2, &ignored_port);
-	default:
-		return -EINVAL;
-	}
-}
-#else //#if EFX_DRIVERLINK_API_VERSION < 9
 
 /* As not all filters will have ipv4 hosts/ports etc.  use this which
    checks the spec match_flags field first */
@@ -1039,30 +977,16 @@ static inline int efx_filter_get_ipv4(const struct efx_filter_spec *spec,
 	else
 		return -EINVAL;
 }
-#endif
+
 
 static inline int efx_get_vlan(const struct efx_filter_spec *spec, u16* vid )
 {
-#if EFX_DRIVERLINK_API_VERSION < 9
-	switch (spec->type) {
-	case EFX_FILTER_MAC_WILD:
-		*vid = EFX_FILTER_VID_UNSPEC;
-		break;
-	case EFX_FILTER_MAC_FULL:
-		*vid = spec->data[0];
-		break;
-	default:
-		return -EINVAL;
-	}
-	return 0;
-#else
 	/* TODO support inner VLAN tag matching */
 	if( spec->match_flags & EFX_FILTER_MATCH_OUTER_VID )
 		*vid = CI_BSWAP_BE16(spec->outer_vid);
 	else
 		*vid = EFX_FILTER_VID_UNSPEC;
 	return 0;
-#endif
 }
 
 static inline int
@@ -1072,22 +996,12 @@ efx_filter_get_mac(const struct efx_filter_spec *spec, u8 *addr, u16* vid )
 	if ( rc < 0 )
 		return rc;
 
-#if EFX_DRIVERLINK_API_VERSION < 9
-	addr[0] = spec->data[2] >> 8;
-	addr[1] = spec->data[2];
-	addr[2] = spec->data[1] >> 24;
-	addr[3] = spec->data[1] >> 16;
-	addr[4] = spec->data[1] >> 8;
-	addr[5] = spec->data[1];
-	return 0;
-#else
 	/* TODO support remote MAC address matching */
 	if( !efrm_is_mac_spec( spec ) )
 		return -EINVAL;
 
 	memcpy(addr, spec->loc_mac, ETH_ALEN);
 	return 0;
-#endif
 }
 
 /* TODO: Move these helper functions to their own section */
@@ -1952,10 +1866,14 @@ int efrm_filter_insert(struct efrm_client *client,
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
+	int rc;
+	/* If [efx_dev] is NULL, the hardware is morally absent. */
+	if ( efx_dev == NULL )
+		return -ENETDOWN;
 	/* This should be called every time a driver wishes to insert a
 	   filter to the NIC, to check whether the firewall rules want to
 	   block it. */
-	int rc = efrm_filter_check( efx_dev, spec );
+	rc = efrm_filter_check( efx_dev, spec );
 	if ( rc >= 0 )
 		rc = efx_dl_filter_insert( efx_dev, spec, replace );
 	return rc;
@@ -1966,8 +1884,22 @@ EXPORT_SYMBOL(efrm_filter_insert);
 void efrm_filter_remove(struct efrm_client *client, int filter_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
+	struct efrm_nic *rnic = efrm_nic(efhw_nic);
 	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
-	efx_dl_filter_remove(efx_dev, filter_id);
+	if( efx_dev != NULL ) {
+		/* If the filter op fails with ENETDOWN, that indicates that
+		 * the hardware is inacessible but that the device has not
+		 * (yet) been shut down.  It will be recovered by a subsequent
+		 * reset.  In the meantime, the net driver's and Onload's
+		 * opinions as to the installed filters will diverge.  We
+		 * minimise the damage by preventing further driverlink
+		 * activity until the reset happens. */
+		unsigned generation = efrm_driverlink_generation(rnic);
+		if( efx_dl_filter_remove(efx_dev, filter_id) == -ENETDOWN )
+			efrm_driverlink_desist(rnic, generation);
+	}
+	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
+	 * nothing to do. */
 }
 EXPORT_SYMBOL(efrm_filter_remove);
 
@@ -1977,23 +1909,27 @@ void efrm_filter_redirect(struct efrm_client *client, int filter_id,
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
-#if EFX_DRIVERLINK_API_VERSION >= 16
-	efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
-#else
-	efx_dl_filter_redirect(efx_dev, filter_id, rxq_i);
-#endif
+	if ( efx_dev != NULL ) {
+		efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
+	}
+	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
+	 * nothing to do. */
 }
 EXPORT_SYMBOL(efrm_filter_redirect);
 
 
 int efrm_filter_block_kernel(struct efrm_client *client, int flags, bool block)
 {
-#if EFX_DRIVERLINK_API_VERSION > 10
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
 	int rc = 0;
+
+	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
+	 * nothing to do. This counts as success. */
+	if ( efx_dev == NULL )
+		return 0;
+
 	if ( block ) {
-#if EFX_DRIVERLINK_API_VERSION > 11
 		if ( flags & EFRM_FILTER_BLOCK_UNICAST ) {
 			rc = efx_dl_filter_block_kernel(efx_dev,
 					EFX_DL_FILTER_BLOCK_KERNEL_UCAST);
@@ -2006,11 +1942,7 @@ int efrm_filter_block_kernel(struct efrm_client *client, int flags, bool block)
 		}
 		if ( rc < 0 )
 			goto unicast_unblock;
-#else
-		rc = efx_dl_filter_block_kernel(efx_dev);
-#endif
 	} else {
-#if EFX_DRIVERLINK_API_VERSION > 11
 		if ( flags & EFRM_FILTER_BLOCK_MULTICAST ) {
 			efx_dl_filter_unblock_kernel(efx_dev,
 					EFX_DL_FILTER_BLOCK_KERNEL_MCAST);
@@ -2020,13 +1952,7 @@ unicast_unblock:
 			efx_dl_filter_unblock_kernel(efx_dev,
 					EFX_DL_FILTER_BLOCK_KERNEL_UCAST);
 		}
-#else
-		efx_dl_filter_unblock_kernel(efx_dev);
-#endif
 	}
 	return rc;
-#else
-	return -EOPNOTSUPP;
-#endif
 }
 EXPORT_SYMBOL(efrm_filter_block_kernel);

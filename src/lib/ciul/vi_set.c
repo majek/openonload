@@ -81,3 +81,9 @@ int ef_vi_set_alloc_from_pd(ef_vi_set* viset, ef_driver_handle dh,
     return -EINVAL;
   }
 }
+
+
+int ef_vi_set_free(ef_vi_set* vi_set, ef_driver_handle dh)
+{
+  return 0;
+}

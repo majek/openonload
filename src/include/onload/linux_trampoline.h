@@ -92,12 +92,8 @@ extern void efab_linux_trampoline_ul_fail(void);
 #endif
 
 extern int safe_signals_and_exit;
-/* NB onload/ioctl.h and lib/transport/ip/signal.c copies this test */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
-#define OO_CAN_HANDLE_TERMINATION
 extern asmlinkage long efab_linux_trampoline_exit_group(int status);
 extern void efab_linux_termination_ctor(void);
-#endif
 
 extern asmlinkage long
 efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,

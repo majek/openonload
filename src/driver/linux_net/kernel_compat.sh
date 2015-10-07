@@ -349,7 +349,6 @@ EFX_HAVE_PCI_VFS_ASSIGNED		symbol	pci_vfs_assigned	include/linux/pci.h
 EFX_HAVE_LINUX_EXPORT_H			file				include/linux/export.h
 EFX_NEED_KMALLOC_ARRAY			nsymbol	kmalloc_array	include/linux/slab.h
 EFX_HAVE_VOID_DYNAMIC_NETDEV_DBG	symtype	__dynamic_netdev_dbg	include/linux/dynamic_debug.h void (struct _ddebug *, const struct net_device *, const char *, ...)
-EFX_NEED_IS_POWER_OF_2	nsymbol	is_power_of_2	include/linux/log2.h
 EFX_HAVE_NDO_EXT_BUSY_POLL		member	struct_net_device_extended	ndo_busy_poll	        include/linux/netdevice.h
 EFX_HAVE_NET_DEVICE_OPS_EXT	member struct_net_device_extended	netdev_ops_ext	include/linux/netdevice.h
 EFX_HAVE_NET_DEVICE_OPS_EXT_GET_PHYS_PORT_ID	member struct_net_device_ops_ext	ndo_get_phys_port_id	include/linux/netdevice.h
@@ -358,6 +357,7 @@ EFX_HAVE_NET_DEVICE_OPS_EXT_SET_VF_LINK_STATE	member struct_net_device_ops_ext	n
 EFX_NEED_SKB_GSO_TCPV6			nsymbol	SKB_GSO_TCPV6		include/linux/skbuff.h
 EFX_NEED_IS_ERR_OR_NULL		nsymbol IS_ERR_OR_NULL	include/linux/err.h
 EFX_NEED_NETDEV_RSS_KEY_FILL	nsymbol	netdev_rss_key_fill	include/linux/netdevice.h
+EFX_HAVE_LINUX_LOG2_H           file                include/linux/log2.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 

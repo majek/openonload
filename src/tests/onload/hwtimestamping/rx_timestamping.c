@@ -123,6 +123,7 @@
 struct configuration {
   char const*    cfg_ioctl;     /* e.g. eth6  - calls the ts enable ioctl */
   unsigned short cfg_port;      /* listen port */
+  int            cfg_protocol;  /* udp or tcp? */
 };
 
 /* Commandline options, configuration etc. */
@@ -134,8 +135,26 @@ void print_help(void)
            "Default: None\n"
          "\t--port\t<num>\tPort to listen on.  "
            "Default: 9000\n"
+         "\t--proto\t[TCP|UDP].  "
+           "Default: UDP\n"
         );
   exit(-1);
+}
+
+
+static void get_protcol(struct configuration* cfg, const char* protocol)
+{
+  if( 0 == strcasecmp(protocol, "UDP") ) {
+    cfg->cfg_protocol = IPPROTO_UDP;
+  }
+  else if( 0 == strcasecmp(protocol, "TCP") ) {
+    cfg->cfg_protocol = IPPROTO_TCP;
+  }
+  else {
+    printf("ERROR: '%s' is not a recognised protocol (TCP or UCP).\n",
+           protocol);
+    exit(-EINVAL);
+  }
 }
 
 
@@ -146,13 +165,15 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
   static struct option long_options[] = {
     { "ioctl", required_argument, 0, 'i' },
     { "port", required_argument, 0, 'p' },
+    { "proto", required_argument, 0, 'P' },
     { 0, no_argument, 0, 0 }
   };
-  char const* optstring = "ip";
+  const char* optstring = "ipP";
 
   /* Defaults */
   bzero(cfg, sizeof(struct configuration));
   cfg->cfg_port = 9000;
+  cfg->cfg_protocol = IPPROTO_UDP;
 
   opt = getopt_long(argc, argv, optstring, long_options, &option_index);
   while( opt != -1 ) {
@@ -162,6 +183,9 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
         break;
       case 'p':
         cfg->cfg_port = atoi(optarg);
+        break;
+      case 'P':
+        get_protcol(cfg, optarg);
         break;
       default:
         print_help();
@@ -242,21 +266,38 @@ static void do_ts_sockopt(int sock)
   TRY(setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &enable, sizeof(int)));
 }
 
-static int add_udp(unsigned short port)
+static int add_socket(struct configuration* cfg)
 {
   int s;
   struct sockaddr_in host_address;
+  int domain = SOCK_DGRAM;
+  if ( cfg->cfg_protocol == IPPROTO_TCP )
+    domain = SOCK_STREAM;
 
-  make_address(port, &host_address);
+  make_address(cfg->cfg_port, &host_address);
 
-  s = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  s = socket(PF_INET, domain, cfg->cfg_protocol);
   TEST(s >= 0);
-
   TRY(bind(s, (struct sockaddr*)&host_address, sizeof(host_address)) );
 
-  printf("UDP socket created, listening on port %d\n", port );
-
+  printf("Socket created, listening on port %d\n", cfg->cfg_port);
   return s;
+}
+
+
+static int accept_child(int parent)
+{
+  int child;
+  socklen_t clilen;
+  struct sockaddr_in cli_addr;
+  clilen = sizeof(cli_addr);
+
+  TRY(listen(parent, 1));
+  child = accept(parent, (struct sockaddr* ) &cli_addr, &clilen);
+  TEST(child >= 0);
+
+  printf("Socket accepted\n");
+  return child;
 }
 
 
@@ -309,7 +350,7 @@ static void handle_time(struct msghdr* msg)
 }
 
 /* Receive a packet, and print out the timestamps from it */
-void do_recv(int sock, unsigned int pkt_num)
+static int do_recv(int sock, unsigned int pkt_num)
 {
   struct msghdr msg;
   struct iovec iov;
@@ -331,33 +372,44 @@ void do_recv(int sock, unsigned int pkt_num)
 
   /* block for message */
   got = recvmsg(sock, &msg, 0);
-  TEST(got >= 0);
+  if( !got && errno == EAGAIN )
+    return 0;
 
   printf("Packet %d - %d bytes\t", pkt_num, got);
   handle_time(&msg);
-  return;
+  return got;
 };
 
 
 int main(int argc, char** argv)
 {
   struct configuration cfg;
-  int sock;
+  int parent, sock, got;
   unsigned int pkt_num = 0;
 
   parse_options(argc, argv, &cfg);
 
   /* Initialise */
-  sock = add_udp(cfg.cfg_port);
-  do_ioctl(&cfg, sock);
+  parent = add_socket(&cfg);
+  do_ioctl(&cfg, parent);
+  sock = parent;
+  if( cfg.cfg_protocol == IPPROTO_TCP )
+    sock = accept_child(parent);
   do_ts_sockopt(sock);
 
   /* Run forever */
   while( 1 ) {
     pkt_num ++;
-    do_recv(sock, pkt_num);
+    got = do_recv(sock, pkt_num);
+    /* TCP can detect an exit; for UDP, zero payload packets are valid */
+    if ( got == 0 && cfg.cfg_protocol == IPPROTO_TCP ) {
+      printf( "recvmsg returned 0 - end of stream\n" );
+      break;
+    }
   }
 
   close(sock);
+  if( cfg.cfg_protocol == IPPROTO_TCP )
+    close(parent);
   return 0;
 }

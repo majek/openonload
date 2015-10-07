@@ -222,13 +222,10 @@ static int ef10_ef_vi_transmitv_init(ef_vi* vi, const ef_iovec* iov,
 }
 
 
-static void ef_vi_transmit_push_desc(ef_vi* vi)
+static void ef_vi_transmit_push_desc(ef_vi* vi, ef_vi_ef10_dma_tx_phys_desc *dp)
 {
   ef_vi_txq* q = &vi->vi_txq;
   ef_vi_txq_state* qs = &vi->ep_state->txq;
-  unsigned di = qs->previous & q->mask;
-  ef_vi_ef10_dma_tx_phys_desc *dp =
-    (ef_vi_ef10_dma_tx_buf_desc*) q->descriptors + di;
   uint32_t *dbell = (void*) (vi->io + ER_DZ_TX_DESC_UPD_REG);
 
 #if !defined(__KERNEL__) && (defined(__x86_64__) || defined(__i386__))
@@ -259,11 +256,23 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 }
 
 
+ef_vi_inline int
+ef10_tx_descriptor_is_tail(ef_vi_ef10_dma_tx_buf_desc* dp)
+{
+  return ! QWORD_TEST_BIT(ESF_DZ_TX_USR_CONT, *dp);
+}
+
+
 static void ef10_ef_vi_transmit_push(ef_vi* vi)
 {
   ef_vi_txq_state* qs = &vi->ep_state->txq;
-  if( (qs->previous - qs->removed) < vi->tx_push_thresh )
-    ef_vi_transmit_push_desc(vi);
+  ef_vi_txq* q = &vi->vi_txq;
+  unsigned di = qs->previous & q->mask;
+  ef_vi_ef10_dma_tx_phys_desc *dp =
+    (ef_vi_ef10_dma_tx_buf_desc*) q->descriptors + di;
+  if( (qs->previous - qs->removed) < vi->tx_push_thresh &&
+      ef10_tx_descriptor_is_tail(dp) )
+    ef_vi_transmit_push_desc(vi, dp);
   else
     ef_vi_transmit_push_doorbell(vi);
   EF_VI_BUG_ON(qs->previous == qs->added);

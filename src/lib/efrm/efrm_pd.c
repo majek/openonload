@@ -694,7 +694,8 @@ static inline int efrm_pd_bt_find_order_idx(struct efrm_pd *pd,
 }
 
 static void efrm_pd_dma_unmap_bt(struct efrm_pd *pd,
-				 struct efrm_bt_collection *bt_alloc)
+				 struct efrm_bt_collection *bt_alloc,
+				 int reset_pending)
 {
 	int ord_idx;
 	int i;
@@ -707,29 +708,26 @@ static void efrm_pd_dma_unmap_bt(struct efrm_pd *pd,
 
 		efrm_bt_manager_free(efrm_client_get_nic(pd->rs.rs_client),
 				     &pd->bt_managers[ord_idx],
-				     &bt_alloc->allocs[i]);
+				     &bt_alloc->allocs[i],
+				     reset_pending);
 	}
 
 	kfree(bt_alloc->allocs);
 }
 
 
-static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int nic_order,
-			  dma_addr_t *pci_addrs, int pci_addrs_stride,
-			  uint64_t *user_addrs, int user_addrs_stride,
-			  void (*user_addr_put)(uint64_t, uint64_t *),
-			  struct efrm_bt_collection *bt_alloc)
+static int
+efrm_pd_bt_program(struct efrm_pd *pd, int nic_order, dma_addr_t *pci_addrs,
+		   int pci_addrs_stride, struct efrm_bt_collection *bt_alloc)
 {
-	int i, n, first, rc, rc1 = 0;
-	dma_addr_t *dma_addrs;
-	uint64_t user_addr;
-	struct efhw_buffer_table_block *block;
-	int dma_size, bt_num;
+	int i, rc, rc1 = 0;
+	int bt_num;
 	dma_addr_t page_offset;
+	dma_addr_t *dma_addrs;
+	int dma_size = 0;
 
 	EFRM_ASSERT(pd->owner_id != OWNER_ID_PHYS_MODE);
 
-	dma_size = 0;
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
 		if (bt_alloc->allocs[bt_num].bta_size == 0)
 			break;
@@ -771,7 +769,23 @@ static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int nic_order,
 	}
 	kfree(dma_addrs);
 
-	/* Copy buftable addresses to user. */
+	return rc1;
+}
+
+
+static void
+efrm_pd_bt_write_user_addrs(struct efrm_pd *pd, uint64_t *user_addrs,
+			    int user_addrs_stride,
+			    void (*user_addr_put)(uint64_t, uint64_t *),
+			    struct efrm_bt_collection *bt_alloc)
+{
+	int i, n, first;
+	uint64_t user_addr;
+	struct efhw_buffer_table_block *block;
+	int bt_num;
+
+	EFRM_ASSERT(pd->owner_id != OWNER_ID_PHYS_MODE);
+
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
 		if (bt_alloc->allocs[bt_num].bta_size == 0)
 			break;
@@ -796,9 +810,41 @@ static int efrm_pd_bt_map(struct efrm_pd *pd, int n_pages, int nic_order,
 			n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;
 		} while (n > 0);
 	}
-
-	return rc1;
 }
+
+
+static int efrm_pd_bt_map(struct efrm_pd *pd, int nic_order,
+			  dma_addr_t *pci_addrs, int pci_addrs_stride,
+			  uint64_t *user_addrs, int user_addrs_stride,
+			  void (*user_addr_put)(uint64_t, uint64_t *),
+			  struct efrm_bt_collection *bt_alloc,
+			  int reset_pending)
+{
+	int rc = 0;
+
+	EFRM_ASSERT(pd->owner_id != OWNER_ID_PHYS_MODE);
+
+	/* The first half of this function's job is to program physical
+	 * addresses to the allocated buffer-table entries.  We can't (and
+	 * needn't) do that if there's a reset pending. */
+	if (! reset_pending) {
+		rc = efrm_pd_bt_program(pd, nic_order, pci_addrs,
+					pci_addrs_stride, bt_alloc);
+		/* Failure here doesn't prevent us from continuing, but we
+		 * should report the failure to the caller. */
+	}
+
+	/* The rest of the work is to copy buftable addresses to user.  This
+	 * needs to be done even if we're awaiting reset.  In that case, the
+	 * addresses are potentially invalid and will be rewritten when the
+	 * reset happens, but they are at least in-range and so will avoid
+	 * upsetting later sanity checks. */
+	efrm_pd_bt_write_user_addrs(pd, user_addrs, user_addrs_stride,
+				    user_addr_put, bt_alloc);
+
+	return rc;
+}
+
 
 /* Check that PCI addresses are properly aligned for the buffer table
  * pages we have selected. */
@@ -827,20 +873,21 @@ efrm_pd_nic_order_fixup(struct efrm_pd *pd, int ord_idx, int n_pages,
 
 static inline int efrm_pd_bt_alloc(struct efrm_pd *pd, size_t bytes,
 				   int ord_idx,
-				   struct efrm_buffer_table_allocation *bt)
+				   struct efrm_buffer_table_allocation *bt,
+				   int reset_pending)
 {
 	return efrm_bt_manager_alloc(efrm_client_get_nic(pd->rs.rs_client),
 				    &pd->bt_managers[ord_idx],
 				    bytes >> (EFHW_NIC_PAGE_SHIFT +
 					      pd->bt_managers[ord_idx].order),
-				    bt);
+				    bt, reset_pending);
 }
 
 static int
 efrm_pd_bt_alloc_unaligned(struct efrm_pd *pd, int n_pages, int nic_order,
 			   dma_addr_t *pci_addrs, int pci_addrs_stride,
 			   struct efrm_bt_collection *bt_alloc,
-			   int ord_idx, int ord_idx_min)
+			   int ord_idx, int ord_idx_min, int reset_pending)
 {
 	int ord_idx_mid = ord_idx;
 	int bt_num, i;
@@ -882,7 +929,7 @@ efrm_pd_bt_alloc_unaligned(struct efrm_pd *pd, int n_pages, int nic_order,
 			/* Aligned page: map it */
 			rc = efrm_pd_bt_alloc(
 				pd, NIC_ORDER_TO_BYTES(nic_order), ord_idx,
-				&bt_alloc->allocs[bt_num++]);
+				&bt_alloc->allocs[bt_num++], reset_pending);
 			if( rc != 0 )
 				break;
 		}
@@ -890,7 +937,8 @@ efrm_pd_bt_alloc_unaligned(struct efrm_pd *pd, int n_pages, int nic_order,
 			/* Aligned page, smaller order: map it */
 			rc = efrm_pd_bt_alloc(pd, NIC_ORDER_TO_BYTES(nic_order),
 					      ord_idx_mid,
-					      &bt_alloc->allocs[bt_num++]);
+					      &bt_alloc->allocs[bt_num++],
+					      reset_pending);
 			if( rc != 0 )
 				break;
 		}
@@ -901,21 +949,21 @@ efrm_pd_bt_alloc_unaligned(struct efrm_pd *pd, int n_pages, int nic_order,
 				pd,
 				((mask_mid + 1) - ((*pci_addrs) & mask_mid)),
 				ord_idx_min,
-				&bt_alloc->allocs[bt_num++]);
+				&bt_alloc->allocs[bt_num++], reset_pending);
 			if (rc != 0)
 				break;
 			rc = efrm_pd_bt_alloc(
 				pd,
 				NIC_ORDER_TO_BYTES(nic_order) - (mask_mid + 1),
 				ord_idx_mid,
-				&bt_alloc->allocs[bt_num++]);
+				&bt_alloc->allocs[bt_num++], reset_pending);
 			if (rc != 0)
 				break;
 			rc = efrm_pd_bt_alloc(
 				pd,
 				((*pci_addrs) & mask_mid),
 				ord_idx_min,
-				&bt_alloc->allocs[bt_num++]);
+				&bt_alloc->allocs[bt_num++], reset_pending);
 			if (rc != 0)
 				break;
 		}
@@ -924,7 +972,7 @@ efrm_pd_bt_alloc_unaligned(struct efrm_pd *pd, int n_pages, int nic_order,
 	}
 
 	if (rc != 0)
-		efrm_pd_dma_unmap_bt(pd, bt_alloc);
+		efrm_pd_dma_unmap_bt(pd, bt_alloc, reset_pending);
 	return rc;
 }
 
@@ -932,7 +980,8 @@ static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 			      dma_addr_t *pci_addrs, int pci_addrs_stride,
 			      uint64_t *user_addrs, int user_addrs_stride,
 			      void (*user_addr_put)(uint64_t, uint64_t *),
-			      struct efrm_bt_collection *bt_alloc)
+			      struct efrm_bt_collection *bt_alloc,
+			      int reset_pending)
 {
 	int rc = 0;
 	int ord_idx, ord_idx_min;
@@ -957,13 +1006,14 @@ static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 			return -ENOMEM;
 		rc = efrm_pd_bt_alloc(
 				pd, n_pages * NIC_ORDER_TO_BYTES(nic_order),
-				ord_idx, &bt_alloc->allocs[0]);
+				ord_idx, &bt_alloc->allocs[0], reset_pending);
 	}
 	else {
 		rc = efrm_pd_bt_alloc_unaligned(pd, n_pages, nic_order,
 						pci_addrs, pci_addrs_stride,
 						bt_alloc,
-						ord_idx, ord_idx_min);
+						ord_idx, ord_idx_min,
+						reset_pending);
 	}
 
 	if (rc < 0) {
@@ -973,15 +1023,17 @@ static int efrm_pd_dma_map_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 		return rc;
 	}
 
-	rc = efrm_pd_bt_map(pd, n_pages, nic_order,
-			    pci_addrs, pci_addrs_stride,
-			    user_addrs, user_addrs_stride,
-			    user_addr_put, bt_alloc);
+        EFRM_ASSERT(rc == 0);
+
+	rc = efrm_pd_bt_map(pd, nic_order, pci_addrs, pci_addrs_stride,
+			    user_addrs, user_addrs_stride, user_addr_put,
+			    bt_alloc, reset_pending);
 	if (rc == 0)
 		return rc;
 
 	/* Error: free already-allocated buftable entries */
-	efrm_pd_dma_unmap_bt(pd, bt_alloc);
+	EFRM_ASSERT(! reset_pending);
+	efrm_pd_dma_unmap_bt(pd, bt_alloc, reset_pending);
 	return rc;
 }
 
@@ -1060,10 +1112,9 @@ int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 
 	if (rc1 != 0)
 		return rc1;
-	return efrm_pd_bt_map(pd, n_pages, nic_order,
-			      pci_addrs, pci_addrs_stride,
-			      user_addrs, user_addrs_stride,
-			      user_addr_put, bt_alloc);
+	return efrm_pd_bt_map(pd, nic_order, pci_addrs, pci_addrs_stride,
+			      user_addrs, user_addrs_stride, user_addr_put,
+			      bt_alloc, 0);
 }
 EXPORT_SYMBOL(efrm_pd_dma_remap_bt);
 
@@ -1073,7 +1124,7 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int nic_order,
 		    void *p_pci_addrs, int pci_addrs_stride,
 		    uint64_t *user_addrs, int user_addrs_stride,
 		    void (*user_addr_put)(uint64_t, uint64_t *),
-		    struct efrm_bt_collection *bt_alloc)
+		    struct efrm_bt_collection *bt_alloc, int reset_pending)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	int rc;
@@ -1106,7 +1157,7 @@ int efrm_pd_dma_map(struct efrm_pd *pd, int n_pages, int nic_order,
 		rc = efrm_pd_dma_map_bt(pd, n_pages, nic_order,
 					pci_addrs, pci_addrs_stride,
 					user_addrs, user_addrs_stride,
-					user_addr_put, bt_alloc);
+					user_addr_put, bt_alloc, reset_pending);
 		if (rc < 0)
 			goto fail2;
 	} else {
@@ -1139,11 +1190,11 @@ EXPORT_SYMBOL(efrm_pd_dma_map);
 
 void efrm_pd_dma_unmap(struct efrm_pd *pd, int n_pages, int nic_order,
 		       void *p_pci_addrs, int pci_addrs_stride,
-		       struct efrm_bt_collection *bt_alloc)
+		       struct efrm_bt_collection *bt_alloc, int reset_pending)
 {
 	dma_addr_t *pci_addrs = p_pci_addrs;
 	if (pd->owner_id != OWNER_ID_PHYS_MODE)
-		efrm_pd_dma_unmap_bt(pd, bt_alloc);
+		efrm_pd_dma_unmap_bt(pd, bt_alloc, reset_pending);
 #ifdef CONFIG_SFC_RESOURCE_VF
 	if (pd->vf != NULL)
 		efrm_pd_dma_unmap_vf(pd, n_pages, nic_order,

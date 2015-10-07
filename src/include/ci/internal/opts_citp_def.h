@@ -115,7 +115,7 @@ CI_CFG_OPT("EF_UL_EPOLL", ul_epoll, ci_uint32,
 "some restrictions.  It does not support epoll sets that exist across fork(). "
 "It does not support monitoring the readiness of the set's epoll fd via a "
 "another epoll/poll/select.",
-          2, , CITP_EPOLL_UL, 0, 2, oneof:kernel;ul;kernel_accel;ul_scale)
+          2, , CITP_EPOLL_UL, 0, 3, oneof:kernel;ul;kernel_accel;ul_scale)
 
 CI_CFG_OPT("EF_EPOLL_SPIN", ul_epoll_spin, ci_uint32, 
 "Spin in epoll_wait() calls until an event is satisfied or the spin timeout "
@@ -273,7 +273,16 @@ CI_CFG_OPT("EF_TCP_SEND_SPIN", tcp_send_spin, ci_uint32,
            1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_TCP_ACCEPT_SPIN", tcp_accept_spin, ci_uint32,
-"Spin in blocking TCP accept() calls until data arrives, the spin timeout "
+"Spin in blocking TCP accept() calls until incoming connection is "
+"established, the spin timeout "
+"expires or the socket timeout expires(whichever is the sooner).  If the "
+"spin timeout expires, enter the kernel and block.  The spin timeout is set "
+"by EF_SPIN_USEC or EF_POLL_USEC.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_CONNECT_SPIN", tcp_connect_spin, ci_uint32,
+"Spin in blocking TCP connect() calls until connection is established, "
+"the spin timeout "
 "expires or the socket timeout expires(whichever is the sooner).  If the "
 "spin timeout expires, enter the kernel and block.  The spin timeout is set "
 "by EF_SPIN_USEC or EF_POLL_USEC.",

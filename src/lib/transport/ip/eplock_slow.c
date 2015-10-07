@@ -34,24 +34,33 @@
 #endif
 
 
-static int __ef_eplock_lock_wait(ci_netif *ni)
+CI_BUILD_ASSERT( (CI_EPLOCK_LOCK_FLAGS & CI_EPLOCK_CALLBACK_FLAGS) == 0 );
+
+
+static int __ef_eplock_lock_wait(ci_netif *ni, int maybe_wedged)
 {
 #ifndef __KERNEL__
+  ci_assert_equal(maybe_wedged, 0);
   return oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_EPLOCK_LOCK_WAIT,
                         NULL);
 #else
   return efab_eplock_lock_wait(ni
-		       CI_BLOCKING_CTX_ARG(ci_blocking_ctx_arg_needed()));
+		       CI_BLOCKING_CTX_ARG(ci_blocking_ctx_arg_needed()),
+                       maybe_wedged);
 #endif
 }
 
 
-int __ef_eplock_lock_slow(ci_netif *ni)
+int __ef_eplock_lock_slow(ci_netif *ni, int maybe_wedged)
 {
 #ifndef __KERNEL__
   ci_uint64 start_frc, now_frc;
 #endif
   int rc, l, n;
+
+#ifndef __KERNEL__
+  ci_assert_equal(maybe_wedged, 0);
+#endif
 
   if( ef_eplock_trylock(&ni->state->lock) )
     return 0;
@@ -74,7 +83,7 @@ int __ef_eplock_lock_slow(ci_netif *ni)
 #endif
 
   while( 1 ) {
-    if( (rc = __ef_eplock_lock_wait(ni)) < 0 ) {
+    if( (rc = __ef_eplock_lock_wait(ni, maybe_wedged)) < 0 ) {
 #ifndef __KERNEL__
       if( rc == -EINTR )
         /* Keep waiting if interrupted by a signal.  I think this is okay:
@@ -92,12 +101,8 @@ int __ef_eplock_lock_slow(ci_netif *ni)
       /* There is nothing we can do except propagate the error.  Caller
        * must handle it.
        */
-      if( rc == -ERESTARTSYS )
-        /* Actually it would probably be better to just return -ERESTARTSYS
-         * here, as I suspect most callers will want to propagate that.
-         * But we'll need to audit all the callers first.
-         */
-        return -EINTR;
+      if( (rc == -ERESTARTSYS) || (rc == -ECANCELED) )
+        return rc;
       LOG_E(ci_log("%s: ERROR: rc=%d", __FUNCTION__, rc));
       return rc;
 #endif

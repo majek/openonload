@@ -98,6 +98,31 @@ static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
 }
 
 
+/* Parses a parameter of the form "param=val,", advancing *arg beyond the comma
+ * and returning the integer value of val.  If nothing follows the comma, or
+ * the argument is otherwise invalid, *arg will be NULL on return.  N.B.: This
+ * function resets the strtok() state, and the portion of *arg that is consumed
+ * will be altered. */
+static int consume_parameter(char **arg)
+{
+  int val;
+  char *param = strtok(*arg, ",");
+  param = strchr(param, '=');
+  ++param;
+  if( ! strlen(param) ) {
+    /* Nothing after the comma, so return an error.  The return value itself is
+     * insignificant. */
+    *arg = NULL;
+    return 0;
+  }
+  val = atoi(param);
+
+  *arg = strtok(NULL, "");
+
+  return val;
+}
+
+
 int filter_parse(ef_filter_spec* fs, const char* s_in)
 {
   struct sockaddr_in lsin, rsin;
@@ -132,16 +157,10 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
         goto out;
     }
     if( ! strncmp("vid=", remainder, strlen("vid=")) ) {
-      vlan = strtok(remainder, ",");
-      vlan = strchr(vlan, '=');
-      ++vlan;
-      if( ! strlen(vlan) )
-        goto out;
-      TRY(ef_filter_spec_set_vlan(fs, atoi(vlan)));
-
-      remainder = strtok(NULL, "");
+      int vlan_id = consume_parameter(&remainder);
       if( remainder == NULL )
         goto out;
+      TRY(ef_filter_spec_set_vlan(fs, vlan_id));
     }
 
     if( strchr(remainder, ',') ) {
@@ -171,17 +190,24 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
       goto out;
 
     if( ! strncmp("vid=", remainder, strlen("vid=")) ) {
-      vlan = strtok(remainder, ",");
-      vlan = strchr(vlan, '=');
-      ++vlan;
-      if( ! strlen(vlan) )
-        goto out;
-      vlan_id = atoi(vlan);
-
-      remainder = strtok(NULL, "");
+      vlan_id = consume_parameter(&remainder);
       if( remainder == NULL )
         goto out;
     }
+
+    if( ! strncmp("ethertype=", remainder, strlen("ethertype=")) ) {
+      uint16_t ethertype = htons(consume_parameter(&remainder));
+      if( remainder == NULL )
+        goto out;
+      TRY(ef_filter_spec_set_eth_type(fs, ethertype));
+    }
+    else if( ! strncmp("ipproto=", remainder, strlen("ipproto=")) ) {
+      uint8_t ipproto = consume_parameter(&remainder);
+      if( remainder == NULL )
+        goto out;
+      TRY(ef_filter_spec_set_ip_proto(fs, ipproto));
+    }
+
     for( i = 0; i < 6; ++i ) {
       mac[i] = strtol(remainder, &remainder, 16);
       if( i != 5 ) {
@@ -195,6 +221,50 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
     if( strlen(remainder) )
       goto out;
     TRY(ef_filter_spec_set_eth_local(fs, vlan_id, mac));
+    rc = 0;
+  }
+
+  else if( ! strcmp("ethertype", type) ) {
+    uint16_t ethertype;
+
+    remainder = strtok(NULL, "");
+    if( remainder == NULL )
+      goto out;
+
+    if( ! strncmp("vid=", remainder, strlen("vid=")) ) {
+      int vlan_id = consume_parameter(&remainder);
+      if( remainder == NULL )
+        goto out;
+      TRY(ef_filter_spec_set_vlan(fs, vlan_id));
+    }
+
+    ethertype = htons(strtol(remainder, &remainder, 10));
+    if( strlen(remainder) )
+      goto out;
+
+    TRY(ef_filter_spec_set_eth_type(fs, ethertype));
+    rc = 0;
+  }
+
+  else if( ! strcmp("ipproto", type) ) {
+    uint8_t ipproto;
+
+    remainder = strtok(NULL, "");
+    if( remainder == NULL )
+      goto out;
+
+    if( ! strncmp("vid=", remainder, strlen("vid=")) ) {
+      int vlan_id = consume_parameter(&remainder);
+      if( remainder == NULL )
+        goto out;
+      TRY(ef_filter_spec_set_vlan(fs, vlan_id));
+    }
+
+    ipproto = strtol(remainder, &remainder, 10);
+    if( strlen(remainder) )
+      goto out;
+
+    TRY(ef_filter_spec_set_ip_proto(fs, ipproto));
     rc = 0;
   }
 

@@ -56,8 +56,14 @@ struct efrm_vi;
 struct efrm_pd;
 
 
+/* note mode default and src are mutually exclusive */
+#define EFRM_RSS_MODE_DEFAULT 0x1 /* standard non-tproxy mode */
+#define EFRM_RSS_MODE_SRC     0x2 /* semi transparent proxy passive side */
+#define EFRM_RSS_MODE_DST     0x4 /* transparent proxy active side */
+
 extern int
 efrm_vi_set_alloc(struct efrm_pd *, int n_vis, unsigned vi_props,
+		  int rss_mode,
 		  struct efrm_vi_set **vi_set_out);
 
 extern void
@@ -69,8 +75,11 @@ efrm_vi_set_num_vis(struct efrm_vi_set *);
 extern int
 efrm_vi_set_get_base(struct efrm_vi_set *);
 
+#define EFRM_RSS_MODE_ID_DEFAULT 0
+#define EFRM_RSS_MODE_ID_SRC     0
+#define EFRM_RSS_MODE_ID_DST     1
 extern int
-efrm_vi_set_get_rss_context(struct efrm_vi_set *);
+efrm_vi_set_get_rss_context(struct efrm_vi_set *, unsigned rss_id);
 
 extern struct efrm_resource *
 efrm_vi_set_to_resource(struct efrm_vi_set *);

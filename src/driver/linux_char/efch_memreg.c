@@ -52,7 +52,7 @@ static void efch_memreg_free(struct efch_memreg *mr)
     efrm_pd_dma_unmap(mr->pd, mr->head.n_addrs, 0,
                       mr->head.dma_addrs,
                       sizeof(mr->head.dma_addrs[0]),
-                      &mr->head.bt_alloc);
+                      &mr->head.bt_alloc, 0);
     vfree(mr->head.dma_addrs);
   }
 #endif
@@ -61,7 +61,7 @@ static void efch_memreg_free(struct efch_memreg *mr)
     efrm_pd_dma_unmap(mr->pd, mr->middle.n_addrs, mr->nic_order,
                       mr->middle.dma_addrs,
                       sizeof(mr->middle.dma_addrs[0]),
-                      &mr->middle.bt_alloc);
+                      &mr->middle.bt_alloc, 0);
     vfree(mr->middle.dma_addrs);
   }
 
@@ -70,7 +70,7 @@ static void efch_memreg_free(struct efch_memreg *mr)
     efrm_pd_dma_unmap(mr->pd, mr->tail.n_addrs, 0,
                       mr->tail.dma_addrs,
                       sizeof(mr->tail.dma_addrs[0]),
-                      &mr->tail.bt_alloc);
+                      &mr->tail.bt_alloc, 0);
     vfree(mr->tail.dma_addrs);
   }
 #endif
@@ -129,7 +129,7 @@ static int efch_dma_map(struct efrm_pd *pd,
                        ar->dma_addrs,
                        sizeof(ar->dma_addrs[0]),
                        *user_addrs, user_addrs_stride,
-                       user_addr_put, &ar->bt_alloc);
+                       user_addr_put, &ar->bt_alloc, 0);
   if (rc < 0) {
     EFCH_ERR("%s: ERROR: efrm_pd_dma_map failed (%d)", __FUNCTION__, rc);
     return rc;
@@ -396,7 +396,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     efrm_pd_dma_unmap(pd, mr->head.n_addrs, 0,
                       mr->head.dma_addrs,
                       sizeof(mr->head.dma_addrs[0]),
-                      &mr->head.bt_alloc);
+                      &mr->head.bt_alloc, 0);
   }
 #endif
 
@@ -404,7 +404,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     efrm_pd_dma_unmap(pd, mr->middle.n_addrs, mr->nic_order,
                       mr->middle.dma_addrs,
                       sizeof(mr->middle.dma_addrs[0]),
-                      &mr->middle.bt_alloc);
+                      &mr->middle.bt_alloc, 0);
   }
 
 #if (PAGE_SIZE != EFHW_NIC_PAGE_SIZE)
@@ -412,7 +412,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
     efrm_pd_dma_unmap(pd, mr->tail.n_addrs, 0,
                       mr->tail.dma_addrs,
                       sizeof(mr->tail.dma_addrs[0]),
-                      &mr->tail.bt_alloc);
+                      &mr->tail.bt_alloc, 0);
   }
 #endif
 

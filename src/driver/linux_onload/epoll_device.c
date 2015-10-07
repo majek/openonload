@@ -1117,14 +1117,6 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
   return rc;
 }
 
-#if !HAVE_UNLOCKED_IOCTL
-int oo_epoll_fop_ioctl(struct inode* inode, struct file *filp,
-                       unsigned cmd, unsigned long arg) 
-{
-  return oo_epoll_fop_unlocked_ioctl(filp, cmd, arg);
-}
-#endif
-
 static int oo_epoll_fop_open(struct inode* inode, struct file* filp)
 {
   struct oo_epoll_private *priv = kmalloc(sizeof(*priv), GFP_KERNEL);
@@ -1204,14 +1196,8 @@ struct file_operations oo_epoll_fops =
 {
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(poll, oo_epoll_fop_poll),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_epoll_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_epoll_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_epoll_fop_unlocked_ioctl),
-#endif
   CI_STRUCT_MBR(open, oo_epoll_fop_open),
   CI_STRUCT_MBR(release,  oo_epoll_fop_release),
   CI_STRUCT_MBR(mmap,  oo_epoll_fop_mmap),

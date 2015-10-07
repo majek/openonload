@@ -49,7 +49,7 @@
 #define IGNORE(_x)
 
 
-#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_UDP) + 1)
+#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_AUXBUF) + 1)
 
 
 typedef struct {
@@ -77,7 +77,6 @@ typedef struct {
   unsigned        tcp_n_in_listenq;
   unsigned        tcp_n_in_acceptq;
   unsigned        udp_has_recvq;
-  unsigned        udp_recvq_bytes;
   unsigned        udp_recvq_pkts;
   unsigned        udp_has_sendq;
   unsigned        udp_sendq_bytes;
@@ -90,6 +89,12 @@ typedef struct {
   unsigned        ef_vi_rx_ev_bad_desc_i;
   unsigned        ef_vi_rx_ev_bad_q_label;
   unsigned        ef_vi_evq_gap;
+#if CI_CFG_SEPARATE_UDP_RXQ
+  unsigned        ef_vi_udp_rxq_rx_ev_lost;
+  unsigned        ef_vi_udp_rxq_rx_ev_bad_desc_i;
+  unsigned        ef_vi_udp_rxq_rx_ev_bad_q_label;
+  unsigned        ef_vi_udp_rxq_evq_gap;
+#endif
 } more_stats_t;
 
 
@@ -175,6 +180,7 @@ static stat_desc_t more_stats_fields[] = {
 #if CI_CFG_USERSPACE_PIPE
   ss(TCP_STATE_PIPE),
 #endif
+  ss(TCP_STATE_AUXBUF),
   stat_desc_nm(more_stats_t, states[N_STATES], "BAD_STATE", 0),
   ns(sock_orphans),
   ns(sock_wake_needed_rx),
@@ -193,7 +199,6 @@ static stat_desc_t more_stats_fields[] = {
   ts(tcp_n_in_listenq),
   ts(tcp_n_in_acceptq),
   us(udp_has_recvq),
-  us(udp_recvq_bytes),
   us(udp_recvq_pkts),
   us(udp_has_sendq),
   us(udp_sendq_bytes),
@@ -206,6 +211,12 @@ static stat_desc_t more_stats_fields[] = {
   nsa(ef_vi_rx_ev_bad_desc_i),
   nsa(ef_vi_rx_ev_bad_q_label),
   nsa(ef_vi_evq_gap),
+#if CI_CFG_SEPARATE_UDP_RXQ
+  nsa(ef_vi_udp_rxq_rx_ev_lost),
+  nsa(ef_vi_udp_rxq_rx_ev_bad_desc_i),
+  nsa(ef_vi_udp_rxq_rx_ev_bad_q_label),
+  nsa(ef_vi_udp_rxq_evq_gap),
+#endif
 #undef ns
 #undef nsa
 #undef ts
@@ -1156,7 +1167,7 @@ static void do_socket_op(const socket_op_t* op, socket_t* s)
       ok = 0;
     if( (op->flags & FL_UDP) && wo->waitable.state != CI_TCP_STATE_UDP )
       ok = 0;
-    if( ! (wo->waitable.state & CI_TCP_STATE_SOCKET) )
+    if( ! CI_TCP_STATE_IS_SOCKET(wo->waitable.state) )
       ok = 0;
 
     if( ok )
@@ -1241,9 +1252,8 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
     }
     else if( state == CI_TCP_STATE_UDP ) {
       ci_udp_state* us = &wo->udp;
-      if( ci_udp_recv_q_not_empty(us) ) {
+      if( ci_udp_recv_q_not_empty(&us->recv_q) ) {
         ++s->udp_has_recvq;
-        s->udp_recvq_bytes += ci_udp_recv_q_bytes(&us->recv_q);
         s->udp_recvq_pkts += ci_udp_recv_q_pkts(&us->recv_q);
       }
       if( us->tx_count ) {
@@ -1263,6 +1273,14 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
   s->ef_vi_rx_ev_bad_desc_i = ni->state->vi_stats.rx_ev_bad_desc_i;
   s->ef_vi_rx_ev_bad_q_label = ni->state->vi_stats.rx_ev_bad_q_label;
   s->ef_vi_evq_gap = ni->state->vi_stats.evq_gap;
+#if CI_CFG_SEPARATE_UDP_RXQ
+  s->ef_vi_udp_rxq_rx_ev_lost = ni->state->udp_rxq_vi_stats.rx_ev_lost;
+  s->ef_vi_udp_rxq_rx_ev_bad_desc_i =
+    ni->state->udp_rxq_vi_stats.rx_ev_bad_desc_i;
+  s->ef_vi_udp_rxq_rx_ev_bad_q_label =
+    ni->state->udp_rxq_vi_stats.rx_ev_bad_q_label;
+  s->ef_vi_udp_rxq_evq_gap = ni->state->udp_rxq_vi_stats.evq_gap;
+#endif
 }
 
 
@@ -1415,7 +1433,7 @@ void socket_add_all(int stack_id)
 
   for( i = 0; i < (int)n->ni.state->n_ep_bufs; ++i ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(&n->ni, i);
-    if( ! (wo->waitable.state & CI_TCP_STATE_SOCKET) )  continue;
+    if( ! CI_TCP_STATE_IS_SOCKET(wo->waitable.state) )  continue;
     socket_add(stack_id, i);
   }
 }
@@ -2015,10 +2033,12 @@ static void stack_alloc_pkts_block(ci_netif* ni)
   ci_ip_pkt_fmt* pkt;
   oo_pkt_p pp = OO_PP_NULL;
   int i, locked = cfg_lock;
+  int rc;
+
   for( i = 0; i < (int) arg_u[0]; ++i ) {
-    pkt = ci_netif_pkt_alloc_block(ni, NULL, &locked);
-    if( pkt == NULL ) {
-      ci_log("%d: allocated %d buffers", NI_ID(ni), i);
+    rc = ci_netif_pkt_alloc_block(ni, NULL, &locked, CI_TRUE, &pkt);
+    if( rc != 0 ) {
+      ci_log("%d: allocated %d buffers, rc=%d", NI_ID(ni), i, rc);
       break;
     }
     pkt->next = pp;
@@ -2038,7 +2058,6 @@ static void stack_alloc_pkts_block(ci_netif* ni)
     libstack_netif_unlock(ni);
 }
 
-#if ! CI_CFG_PP_IS_PTR
 static void stack_nonb_pkt_pool_n(ci_netif* ni)
 {
   volatile ci_uint64 *nonb_pkt_pool_ptr;
@@ -2073,7 +2092,6 @@ static void stack_nonb_pkt_pool_n(ci_netif* ni)
   ci_log("%s: [%d] n_async_pkts=%d nonb_pkt_pool_n=%d", __FUNCTION__,
          NI_ID(ni), n_async_pkts, n);
 }
-#endif
 
 static void stack_alloc_nonb_pkts(ci_netif* ni)
 {
@@ -2452,9 +2470,7 @@ static const stack_op_t stack_ops[] = {
   STACK_OP_AU(alloc_pkts,      "allocate more pkt buffers", "<num>"),
   STACK_OP_AU(alloc_pkts_hold, "allocate and hold pkts 'till USR1", "<num>"),
   STACK_OP_AU(alloc_pkts_block,"allocate pkt buffers (blocking)", "<num>"),
-#if ! CI_CFG_PP_IS_PTR
   STACK_OP(nonb_pkt_pool_n,    "count number of packets in non-blocking pool"),
-#endif
   STACK_OP_AU(alloc_nonb_pkts, "allocate nonb pkt buffers", "<num>"),
   STACK_OP_AU(nonb_thrash,     "allocate and free nonb pkt buffers", "<num>"),
   STACK_OP_AU(txpkt,           "show content of transmit packet", "<pkt-id>"),

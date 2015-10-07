@@ -156,6 +156,12 @@ typedef union {
 
 #define EFHW_MAC_FILTER_TYPE_MASK	(0xffff) /* Mask of types above */
 
+/* RSS context hash flags - Huntington */
+
+#define EFHW_RSS_FLAG_SRC_ADDR 0x1
+#define EFHW_RSS_FLAG_DST_ADDR 0x2
+#define EFHW_RSS_FLAG_SRC_PORT 0x4
+#define EFHW_RSS_FLAG_DST_PORT 0x8
 
 /* NIC's page size information */
 

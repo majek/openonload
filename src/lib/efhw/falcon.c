@@ -238,8 +238,6 @@ falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 	volatile char __iomem *efhw_kva = EFHW_KVA(nic);
 
 	/* Q attributes */
-	int iscsi_hdig_en = ((flags & EFHW_VI_ISCSI_TX_HDIG_EN) != 0);
-	int iscsi_ddig_en = ((flags & EFHW_VI_ISCSI_TX_DDIG_EN) != 0);
 	int csum_ip_dis = ((flags & EFHW_VI_TX_IP_CSUM_DIS) != 0);
 	int csum_tcp_dis = ((flags & EFHW_VI_TX_TCPUDP_CSUM_DIS) != 0);
 	int non_ip_drop_dis = ((flags & EFHW_VI_TX_TCPUDP_ONLY) == 0);
@@ -295,17 +293,11 @@ falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 		(buf_idx << __DW2(FRF_AZ_TX_DESCQ_BUF_BASE_ID_LBN)));
 
 	/* dword 3 */
-	__DW3CHCK(FRF_AZ_TX_ISCSI_HDIG_EN);
-	__DW3CHCK(FRF_AZ_TX_ISCSI_DDIG_EN);
 	__DW3CHCK(FRF_BZ_TX_IP_CHKSM_DIS);
 	__DW3CHCK(FRF_BZ_TX_NON_IP_DROP_DIS);
 	__DW3CHCK(FRF_BZ_TX_TCP_CHKSM_DIS);
-	__RANGECHCK(iscsi_hdig_en, FRF_AZ_TX_ISCSI_HDIG_EN_WIDTH);
-	__RANGECHCK(iscsi_ddig_en, FRF_AZ_TX_ISCSI_DDIG_EN_WIDTH);
 
-	val3 = ((iscsi_hdig_en << __DW3(FRF_AZ_TX_ISCSI_HDIG_EN_LBN)) |
-		(iscsi_ddig_en << __DW3(FRF_AZ_TX_ISCSI_DDIG_EN_LBN)) |
-		(1 << __DW3(FRF_AZ_TX_DESCQ_EN_LBN)));	/* queue enable bit */
+	val3 = 1 << __DW3(FRF_AZ_TX_DESCQ_EN_LBN);	/* queue enable bit */
 
 	/* Cummulative features - check nothing is invalid */
 	switch (nic->devtype.variant) {
@@ -346,10 +338,10 @@ falcon_dmaq_tx_q_init(struct efhw_nic *nic,
 		 (q_mask_width     << __DW3(FRF_CZ_TX_DPT_Q_MASK_WIDTH_LBN)));
 
 	EFHW_TRACE("%s: txq %x evq %u tag %x id %x buf %x "
-		   "%x:%x:%x->%" PRIx64 ":%" PRIx64 ":%" PRIx64,
+		   "%x->%" PRIx64 ":%" PRIx64 ":%" PRIx64,
 		   __FUNCTION__,
 		   dmaq, evq_id, tag, own_id, buf_idx, dmaq_size,
-		   iscsi_hdig_en, iscsi_ddig_en, val1, val2, val3);
+		   val1, val2, val3);
 
 	/* Falcon requires 128 bit atomic access for this register */
 	FALCON_LOCK_LOCK(nic);
@@ -384,8 +376,6 @@ falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 
 	/* Q attributes */
 	int jumbo = ((flags & EFHW_VI_JUMBO_EN) != 0);
-	int iscsi_hdig_en = ((flags & EFHW_VI_ISCSI_RX_HDIG_EN) != 0);
-	int iscsi_ddig_en = ((flags & EFHW_VI_ISCSI_RX_DDIG_EN) != 0);
 	int hdr_split_en = ((flags & EFHW_VI_RX_HDR_SPLIT) != 0);
 
 	if (flags & (EFHW_VI_RX_TIMESTAMPS | EFHW_VI_RX_PACKED_STREAM))
@@ -442,21 +432,16 @@ falcon_dmaq_rx_q_init(struct efhw_nic *nic,
 		(buf_idx << __DW2(FRF_AZ_RX_DESCQ_BUF_BASE_ID_LBN)));
 
 	/* dword 3 */
-	__DW3CHCK(FRF_AZ_RX_ISCSI_HDIG_EN);
-	__DW3CHCK(FRF_AZ_RX_ISCSI_DDIG_EN);
 	__DW3CHCK(FRF_CZ_RX_HDR_SPLIT);
 
-	val3 = (iscsi_hdig_en << __DW3(FRF_AZ_RX_ISCSI_HDIG_EN_LBN)) |
-	    (iscsi_ddig_en << __DW3(FRF_AZ_RX_ISCSI_DDIG_EN_LBN)) |
-	    (hdr_split_en << __DW3(FRF_CZ_RX_HDR_SPLIT_LBN));
+	val3 = hdr_split_en << __DW3(FRF_CZ_RX_HDR_SPLIT_LBN);
 
 	EFHW_TRACE("%s: rxq %x evq %u tag %x id %x buf %x %s "
-		   "%x:%x:%x:%x -> %" PRIx64 ":%" PRIx64 ":%" PRIx64,
+		   "%x:%x -> %" PRIx64 ":%" PRIx64 ":%" PRIx64,
 		   __FUNCTION__,
 		   dmaq, evq_id, tag, own_id, buf_idx,
 		   jumbo ? "jumbo" : "normal", dmaq_size,
-		   iscsi_hdig_en, iscsi_ddig_en, hdr_split_en,
-		   val1, val2, val3);
+		   hdr_split_en, val1, val2, val3);
 
 	/* Falcon requires 128 bit atomic access for this register */
 	FALCON_LOCK_LOCK(nic);
@@ -1056,63 +1041,6 @@ void falcon_nic_wakeup_mask_set(struct efhw_nic *nic, unsigned mask)
 	FALCON_LOCK_UNLOCK(nic);
 }
 
-#if EFX_DRIVERLINK_API_VERSION < 8
-/*--------------------------------------------------------------------
- *
- * RXDP - low level interface
- *
- *--------------------------------------------------------------------*/
-
-static void
-falcon_nic_set_rx_usr_buf_size(struct efhw_nic *nic, int usr_buf_bytes)
-{
-	FALCON_LOCK_DECL;
-	volatile char __iomem *efhw_kva = EFHW_KVA(nic);
-	uint64_t val, val2, usr_buf_size = usr_buf_bytes / 32;
-	int rubs_lbn, rubs_width, roec_lbn;
-
-	__DWCHCK(FRF_AA_RX_USR_BUF_SIZE);
-	__DWCHCK(FRF_BZ_RX_USR_BUF_SIZE);
-	__QWCHCK(FRF_AA_RX_OWNERR_CTL);
-	__QWCHCK(FRF_BZ_RX_OWNERR_CTL);
-
-	switch (nic->devtype.variant) {
-	default:
-		EFHW_ASSERT(0);
-		/* Fall-through to avoid compiler warnings. */
-	case 'A':
-		rubs_lbn = FRF_AA_RX_USR_BUF_SIZE_LBN;
-		rubs_width = FRF_AA_RX_USR_BUF_SIZE_WIDTH;
-		roec_lbn = FRF_AA_RX_OWNERR_CTL_LBN;
-		break;
-	case 'B':
-	case 'C':
-		rubs_lbn = FRF_BZ_RX_USR_BUF_SIZE_LBN;
-		rubs_width = FRF_BZ_RX_USR_BUF_SIZE_WIDTH;
-		roec_lbn = FRF_AA_RX_OWNERR_CTL_LBN;
-		break;
-	}
-
-	__RANGECHCK(usr_buf_size, rubs_width);
-
-	/* Falcon requires 128 bit atomic access for this register */
-	FALCON_LOCK_LOCK(nic);
-	if (!nic->resetting) {
-		falcon_read_qq(efhw_kva + FR_AZ_RX_CFG_REG_OFST, &val, &val2);
-
-		val &= ~((__FALCON_MASK64(rubs_width)) << rubs_lbn);
-		val |= (usr_buf_size << rubs_lbn);
-		
-		/* shouldn't be needed for a production driver */
-		val |= ((uint64_t) 1 << roec_lbn);
-		
-		falcon_write_qq(efhw_kva + FR_AZ_RX_CFG_REG_OFST, val, val2);
-		mmiowb();
-	}
-	FALCON_LOCK_UNLOCK(nic);
-}
-#endif
-
 
 /*--------------------------------------------------------------------
  *
@@ -1262,17 +1190,6 @@ falcon_nic_tweak_hardware(struct efhw_nic *nic)
 
 	/* ?? bug2396 rx_cfg should be ok so long as the net driver
 	 * always pushes buffers big enough for the link MTU */
-
-#if EFX_DRIVERLINK_API_VERSION < 8
-	/* set the RX buffer cutoff size to be the same as PAGE_SIZE.
-	 * Use this value when we think that there will be a lot of
-	 * jumbo frames.
-	 *
-	 * The default value 1600 is useful when packets are small,
-	 * but would means that jumbo frame RX queues would need more
-	 * descriptors pushing */
-	falcon_nic_set_rx_usr_buf_size(nic, nic->rx_usr_buf_size);
-#endif
 
 	/* TXDP tweaks */
 	/* ?? bug2396 looks ok */
@@ -1557,12 +1474,14 @@ static const int __falcon_nic_buffer_table_orders[] = {0};
 
 static int
 falcon_nic_buffer_table_alloc(struct efhw_nic *nic, int owner, int order,
-			      struct efhw_buffer_table_block **block_out)
+			      struct efhw_buffer_table_block **block_out,
+			      int reset_pending)
 {
 	struct efhw_buffer_table_block *block;
 	FALCON_LOCK_DECL;
 
 	EFHW_ASSERT(order == 0);
+	(void) reset_pending;
 
 	FALCON_LOCK_LOCK(nic);
 	block = nic->bt_free_block;
@@ -1590,9 +1509,12 @@ falcon_nic_buffer_table_realloc(struct efhw_nic *nic, int owner, int order,
 
 static void
 falcon_nic_buffer_table_free(struct efhw_nic *nic,
-			      struct efhw_buffer_table_block *block)
+			     struct efhw_buffer_table_block *block,
+			     int reset_pending)
 {
 	FALCON_LOCK_DECL;
+
+	(void) reset_pending;
 
 	block->btb_hw.falcon.owner = 0;
 	EFHW_DO_DEBUG(efhw_buffer_table_free_debug(block);)
@@ -1816,6 +1738,13 @@ int falcon_nic_rss_context_set_key(struct efhw_nic *nic, int handle,
 }
 
 
+int falcon_nic_rss_context_set_flags(struct efhw_nic *nic, int handle,
+			             unsigned flags)
+{
+	return -EOPNOTSUPP;
+}
+
+
 /*--------------------------------------------------------------------
  *
  * Sniff
@@ -1878,7 +1807,7 @@ static int falcon_get_rx_error_stats(struct efhw_nic *nic, int instance,
 
 static int
 falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-		    efhw_event_t *ev)
+		    efhw_event_t *ev, int budget)
 {
 	unsigned q;
 
@@ -1888,7 +1817,7 @@ falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 	if (FALCON_EVENT_CODE(ev) != FALCON_EVENT_CODE_CHAR) {
 		EFHW_TRACE("%s: unknown event type=%x", __FUNCTION__,
 			   (unsigned)FALCON_EVENT_CODE(ev));
-		return 0;
+		return -EINVAL;
 	}
 
 	switch (FALCON_EVENT_DRIVER_SUBCODE(ev)) {
@@ -1896,21 +1825,13 @@ falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 	case TX_DESCQ_FLS_DONE_EV_DECODE:
 		q = FALCON_EVENT_TX_FLUSH_Q_ID(ev);
 		EFHW_TRACE("TX[%d] flushed", q);
-#if !defined(__ci_ul_driver__)
 		return efhw_handle_txdmaq_flushed(nic, h, q);
-#else
-		return 1;
-#endif
 
 	case RX_DESCQ_FLS_DONE_EV_DECODE:
 		q = FALCON_EVENT_TX_FLUSH_Q_ID(ev);
 		EFHW_TRACE("RX[%d] flushed", q);
-#if !defined(__ci_ul_driver__)
 		return efhw_handle_rxdmaq_flushed(nic, h, q, 
 			FALCON_EVENT_RX_FLUSH_FAIL(ev));
-#else
-		return 1;
-#endif
 
 	case SRM_UPD_DONE_EV_DECODE:
 		nic->buf_commit_outstanding =
@@ -1924,15 +1845,15 @@ falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 
 	case WAKE_UP_EV_DECODE:
 		EFHW_TRACE("%sWAKE UP", "");
-		efhw_handle_wakeup_event(nic, h,
-					 FALCON_EVENT_WAKE_EVQ_ID(ev));
-		return 1;
+		return efhw_handle_wakeup_event(nic, h,
+						FALCON_EVENT_WAKE_EVQ_ID(ev),
+						budget);
 
 	case TIMER_EV_DECODE:
 		EFHW_TRACE("%sTIMER", "");
-		efhw_handle_timeout_event(nic, h, 
-					  FALCON_EVENT_WAKE_EVQ_ID(ev));
-		return 1;
+		return efhw_handle_timeout_event(nic, h, 
+						 FALCON_EVENT_WAKE_EVQ_ID(ev),
+						 budget);
 
 	case RX_DESCQ_FLSFF_OVFL_EV_DECODE:
 		/* This shouldn't happen. */
@@ -1942,7 +1863,7 @@ falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 	default:
 		EFHW_TRACE("UNKOWN DRIVER EVENT: " FALCON_EVENT_FMT,
 			   FALCON_EVENT_PRI_ARG(*ev));
-		return 0;
+		return -EINVAL;
 	}
 }
 
@@ -1983,6 +1904,7 @@ struct efhw_func_ops falcon_char_functional_units = {
 	falcon_nic_rss_context_free,
 	falcon_nic_rss_context_set_table,
 	falcon_nic_rss_context_set_key,
+	falcon_nic_rss_context_set_flags,
 	falcon_license_challenge,
 	falcon_license_check,
 	falcon_get_rx_error_stats,

@@ -175,9 +175,7 @@ static void citp_epoll_last_stack_socket_gone(struct citp_epoll_fd* epoll_fd,
   ci_sys_ioctl(epoll_fd->epfd_os, OO_EPOLL1_IOC_REMOVE_HOME_STACK);
   ci_netif_put_ready_list(epoll_fd->home_stack, epoll_fd->ready_list);
 
-  if( ! fdt_locked )  CITP_FDTABLE_LOCK();
-  citp_netif_release_ref(epoll_fd->home_stack, 1);
-  if( ! fdt_locked )  CITP_FDTABLE_UNLOCK();
+  citp_netif_release_ref(epoll_fd->home_stack, fdt_locked);
 
   epoll_fd->home_stack = NULL;
   epoll_fd->ready_list = 0;
@@ -334,11 +332,6 @@ static void citp_epoll_dtor(citp_fdinfo* fdi, int fdt_locked)
 }
 
 
-static int citp_epoll_close(citp_fdinfo *fdi)
-{
-  return 0;
-}
-
 static citp_fdinfo* citp_epoll_dup(citp_fdinfo* orig_fdi)
 {
   citp_fdinfo    *fdi;
@@ -368,7 +361,6 @@ citp_protocol_impl citp_epoll_protocol_impl = {
     /* Important members -- users will realy call it. */
     .dup         = citp_epoll_dup,
     .dtor        = citp_epoll_dtor,
-    .close       = citp_epoll_close,
     .ioctl       = citp_epoll_ioctl,
 
     /* Poll/select for epollfd is done via kernel. */
@@ -398,7 +390,6 @@ citp_protocol_impl citp_epoll_protocol_impl = {
 #endif
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
-    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,
@@ -633,6 +624,7 @@ static void citp_epoll_ctl_onload_add_other(struct citp_epoll_member* eitem,
   ci_dllist_push(&ep->oo_sockets, &eitem->dllink);
   ep->oo_sockets_n++;
 
+#if CI_CFG_FD_CACHING
   /* We need to be able to autopop at user level if we want to cache, and that
    * means we can only cache stuff added as home sockets.
    */
@@ -640,6 +632,7 @@ static void citp_epoll_ctl_onload_add_other(struct citp_epoll_member* eitem,
    * specific about why uncacheable - set flags?
    */
   fd_fdi->can_cache = 0;
+#endif
 
   if( ! *sync_kernel ) {
     eitem->epfd_event.events = EP_NOT_REGISTERED;

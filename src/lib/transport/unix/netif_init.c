@@ -99,15 +99,21 @@ static void citp_netif_pre_fork_hook(void)
   citp_enter_lib(&citp_lib_context_across_fork);
 
   CITP_FDTABLE_LOCK();
+
+#if CI_CFG_FD_CACHING
+  /* citp_netif_cache_warn_on_fork takes netif lock
+   * so should be called before taking dup2 lock so lock
+   * ordering is consistent with ci_tcp_ep_ctor
+   */
+  if( citp.init_level >= CITP_INIT_NETIF )
+    citp_netif_cache_warn_on_fork();
+#endif
+
   oo_rwlock_lock_write(&citp_dup2_lock);
   pthread_mutex_lock(&citp_pkt_map_lock);
 
   if( citp.init_level < CITP_INIT_NETIF )
     return;
-
-#if CI_CFG_FD_CACHING
-  citp_netif_cache_warn_on_fork();
-#endif
 
   stackname_state = oo_stackname_thread_get();
   memcpy(&stackname_config_across_fork, stackname_state, 
@@ -291,7 +297,18 @@ static void ci_netif_check_process_config(ci_netif* ni)
       NI_LOG(ni, CONFIG_WARNINGS, "Sockets that are added to an epoll set can "
                                   "only be cached if EF_UL_EPOLL=3");
   }
+  if( (NI_OPTS(ni).scalable_filter_ifindex != 0) &&
+      (CITP_OPTS.ul_epoll != 1) && (CITP_OPTS.ul_epoll != 3) ) {
+    NI_LOG(ni, CONFIG_WARNINGS, "When using a scalable filters mode handover "
+                                "of TCP sockets in an epoll set is only "
+                                "supported if EF_UL_EPOLL=1 or 3.");
+  }
 #endif
+  if( NI_OPTS(ni).scalable_filter_enable && CITP_OPTS.stack_per_thread ) {
+    NI_LOG(ni, CONFIG_WARNINGS, "EF_STACK_PER_THREAD=1 cannot be used in "
+                                "scalable filters mode as a single filter "
+                                "configuration can only be used by one stack.");
+  }
 }
 
 

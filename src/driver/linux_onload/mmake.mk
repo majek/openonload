@@ -9,10 +9,10 @@
 
 ONLOAD_SRCS	:= driver.c linux_cplane.c \
 		tcp_sendpage.c driverlink_ip.c linux_stats.c pinbuf.c \
-		linux_trampoline.c shmbuf.c iscsi_support.c compat.c \
+		linux_trampoline.c shmbuf.c compat.c \
 		ossock_calls.c linux_efabcfg.c linux_sock_ops.c mmap.c \
-		bonding.c epoll_device.c terminate.c sigaction_calls.c \
-		onloadfs.c
+		bonding.c teaming.c epoll_device.c terminate.c \
+		sigaction_calls.c onloadfs.c
 
 EFTHRM_SRCS	:= cplane.c cplane_prot.c eplock_resource_manager.c \
 		tcp_helper_endpoint.c tcp_helper_resource.c \
@@ -23,7 +23,8 @@ EFTHRM_SRCS	:= cplane.c cplane_prot.c eplock_resource_manager.c \
 		efabcfg.c onload_nic.c id_pool.c dump_to_user.c iobufset.c \
 		tcp_helper_cluster.c
 
-EFTHRM_HDRS	:= oo_hw_filter.h oof_impl.h tcp_filters_internal.h
+EFTHRM_HDRS	:= oo_hw_filter.h oof_impl.h tcp_filters_internal.h \
+		tcp_helper_resource.h
 
 ifeq ($(LINUX),1)
 EFTHRM_SRCS	+= tcp_helper_linux.c

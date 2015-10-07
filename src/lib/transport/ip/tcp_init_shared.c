@@ -168,7 +168,6 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   }
 #endif
 
-  ts->s.b.state = CI_TCP_CLOSED;
   ci_tcp_fast_path_disable(ts);
 
   ts->tcpflags = NI_OPTS(netif).syn_opts;
@@ -190,9 +189,7 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   /* WSCL option variables RFC1323 */
   ts->snd_wscl = 0;
   CI_IP_SOCK_STATS_VAL_TXWSCL( ts, ts->snd_wscl);
-  ts->rcv_wscl = ci_tcp_wscl_by_buff(
-                            netif,
-                            ci_tcp_rcvbuf_established(netif, &ts->s));
+  ts->rcv_wscl = 0;
   CI_IP_SOCK_STATS_VAL_RXWSCL( ts, ts->rcv_wscl);
 
   /* receive window */
@@ -273,6 +270,10 @@ static void ci_tcp_state_tcb_reinit(ci_netif* netif, ci_tcp_state* ts,
   ts->local_peer = OO_SP_NULL;
 
   memset(&ts->stats, 0, sizeof(ts->stats));
+
+  /* ts is in valid state now */
+  ci_wmb();
+  ts->s.b.state = CI_TCP_CLOSED;
 }
 
 
@@ -293,12 +294,11 @@ void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts, int from_cache)
   /* Initialise the lower level. */
   ci_sock_cmn_init(netif, &ts->s, !from_cache);
   ci_pmtu_state_init(netif, &ts->s, &ts->pmtus, CI_IP_TIMER_PMTU_DISCOVER);
+  ci_udp_recv_q_init(&ts->timestamp_q);
 
   /* Initialise this level. */
   ci_tcp_state_tcb_init_fixed(netif, ts, from_cache);
   ci_tcp_state_tcb_reinit(netif, ts, from_cache);
-
-  ci_sock_cmn_timestamp_q_init(netif, &ts->timestamp_q);
 }
 
 void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
@@ -306,16 +306,61 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
   ci_assert(CI_PTR_OFFSET(&ts->s.pkt.ip, 4) == 0);
   LOG_TV(ci_log(LPF "%s(): %d", __FUNCTION__, S_FMT(ts)));
 
+  /* When we have not finished it, the state in not valid and should not be
+   * used. */
+  ts->s.b.state = CI_TCP_INVALID;
+  ci_wmb();
+
   /* This functions leaves ts->s.addr_spc_id alone so that 
      the state can still be freed correctly. */
 
   /* Reinitialise the lower level. */
   ci_sock_cmn_reinit(netif, &ts->s);
   ci_pmtu_state_reinit(netif, &ts->s, &ts->pmtus);
+  ci_udp_recv_q_init(&ts->timestamp_q);
   /* Reinitialise this level. */
   ci_tcp_state_tcb_reinit(netif, ts, 0);
+}
 
-  ci_sock_cmn_timestamp_q_init(netif, &ts->timestamp_q);
+
+ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
+{
+  ci_tcp_state *ts = NULL;
+#if CI_CFG_FD_CACHING
+  if( ci_ni_dllist_not_empty(netif, &netif->state->active_cache.cache) ) {
+    /* Take the first entry from the cache.  However, do not take it
+     * if the ep's pid does not match current pid which may happen if
+     * we are doing stack sharing. */
+    ci_ni_dllist_link *link =
+      ci_ni_dllist_head(netif, &netif->state->active_cache.cache);
+    ts = CI_CONTAINER(ci_tcp_state, epcache_link, link);
+    ci_assert(ts);
+#ifdef __KERNEL__
+    if( ts->cached_on_pid != current->pid )
+#else
+    if( ts->cached_on_pid != getpid() )
+#endif
+      return NULL;
+    ci_ni_dllist_pop(netif, &netif->state->active_cache.cache);
+    ci_ni_dllist_self_link(netif, &ts->epcache_link);
+    ci_ni_dllist_remove_safe(netif, &ts->epcache_fd_link);
+    CITP_STATS_NETIF(++netif->state->stats.activecache_hit);
+    ci_atomic32_inc((volatile ci_uint32*)CI_NETIF_PTR(netif,
+                    netif->state->active_cache.avail_stack));
+/* FIXME SCJ assert on number in cache (task54537) */
+
+    LOG_EP(ci_log("Taking cached socket "NSS_FMT" fd %d off cached list",
+                  NSS_PRI_ARGS(netif, &ts->s), ts->cached_on_fd));
+
+    ci_tcp_state_init(netif, ts, 1);
+    /* Shouldn't have touched these bits of state */
+    ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
+    ci_assert(ci_tcp_is_cached(ts));
+
+    CITP_STATS_NETIF(++netif->state->stats.sockcache_hit);
+  }
+#endif
+  return ts;
 }
 
 
@@ -333,6 +378,35 @@ ci_tcp_state* ci_tcp_get_state_buf(ci_netif* netif)
 
   ci_tcp_state_init(netif, &wo->tcp, 0);
   return &wo->tcp;
+}
+
+void ci_ni_aux_more_bufs(ci_netif* ni)
+{
+  citp_waitable_obj* wo = citp_waitable_obj_alloc(ni);
+  ci_ni_aux_mem* aux;
+  oo_p sp;
+  int i;
+
+  if( wo == NULL )
+    return;
+
+  wo->header.state = CI_TCP_STATE_AUXBUF;
+  sp = oo_sockp_to_statep(ni, W_SP(&wo->waitable));
+  ci_assert_equal(CI_MEMBER_OFFSET(ci_ni_aux_mem, link), 0);
+
+  for( aux = (void *)((ci_uintptr_t)wo + CI_AUX_MEM_SIZE), i = 1;
+       (ci_uintptr_t)(wo+1) > (ci_uintptr_t)aux;
+       aux++, i++ ) {
+    OO_P_ADD(sp, CI_AUX_MEM_SIZE);
+    ci_ni_dllist_link_init(ni, &aux->link, sp, "faux");
+    aux->no = i;
+    ni->state->n_aux_bufs++;
+    /* We could call ci_ni_aux_free() here, but we already have correct sp
+     * to use. */
+    aux->link.next = ni->state->free_aux_mem;
+    ni->state->free_aux_mem = sp;
+    ni->state->n_free_aux_bufs++;
+  }
 }
 
 /*! \cidoxg_end */

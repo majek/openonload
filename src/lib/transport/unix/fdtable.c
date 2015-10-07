@@ -204,6 +204,30 @@ static void fdtable_swap(unsigned fd, citp_fdinfo_p from,
   if( fdip_cas_fail(p_fdip, from, to) )  goto again;
 }
 
+static int fdtable_fd_move(ci_fd_t sock_fd, int op)
+{
+  ci_uint32 io_fd = sock_fd;
+  int rc;
+
+  oo_rwlock_lock_read(&citp_dup2_lock);
+  rc = oo_resource_op(sock_fd, op, &io_fd);
+
+  if( rc != 0 || io_fd == sock_fd ) {
+    oo_rwlock_unlock_read(&citp_dup2_lock);
+    return rc;
+  }
+
+  /* Kernel failed to hand over, but there is no epoll here - let's dup */
+  rc = ci_sys_dup2(io_fd, sock_fd);
+  ci_tcp_helper_close_no_trampoline(io_fd);
+  oo_rwlock_unlock_read(&citp_dup2_lock);
+  if( rc == sock_fd )
+    return 0;
+  else if( rc >= 0 )
+    return -EINVAL;
+  return rc;
+}
+
 static citp_fdinfo_p
 citp_fdtable_probe_restore(int fd, ci_ep_info_t * info, int print_banner)
 {
@@ -291,8 +315,8 @@ citp_fdtable_probe_restore(int fd, ci_ep_info_t * info, int print_banner)
   else if( info->fd_type == CI_PRIV_TYPE_PASSTHROUGH_EP ) {
     citp_waitable* w = SP_TO_WAITABLE(ni, info->sock_id);
     citp_alien_fdi* alien_fdi;
-    if( ~w->sb_aflags & CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL ) {
-      ci_tcp_file_moved(fd);
+    if( ~w->sb_aflags & CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL &&
+        fdtable_fd_move(fd, OO_IOC_FILE_MOVED) == 0 ) {
       citp_netif_release_ref(ni, 1);
       return fdip_passthru;
     }
@@ -328,7 +352,7 @@ citp_fdtable_probe_restore(int fd, ci_ep_info_t * info, int print_banner)
 
     /* Replace the file under this fd if possible */
     if( ~w->sb_aflags & CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL )
-      ci_tcp_file_moved(fd);
+      fdtable_fd_move(fd, OO_IOC_FILE_MOVED);
 
     if( sock_fdi->sock.s->b.state & CI_TCP_STATE_TCP )
       proto = &citp_tcp_protocol_impl;
@@ -776,7 +800,6 @@ citp_fdinfo* citp_fdtable_lookup_noprobe(unsigned fd)
   return NULL;
 }
 
-
 static void citp_fdinfo_do_handover(citp_fdinfo* fdi, int fdt_locked)
 {
   int rc;
@@ -798,29 +821,25 @@ static void citp_fdinfo_do_handover(citp_fdinfo* fdi, int fdt_locked)
     if( epoll_fdi->protocol->type == CITP_EPOLLB_FD )
       citp_epollb_on_handover(epoll_fdi, fdi);
   }
-  rc = ci_tcp_helper_handover(
-                ci_netif_get_driver_handle(fdi_to_sock_fdi(fdi)->sock.netif),
-                fdi->fd);
-  if( rc == -EBUSY ) {
-    ci_assert(fdi_to_sock_fdi(fdi)->sock.s->b.sb_aflags & CI_SB_AFLAG_MOVED_AWAY);
-    if( fdi->epoll_fd >= 0 ) {
-      /* If this is our epoll, we can do full handover: we manually add os
-       * fd into the epoll set.
-       * Fixme: ensure we are not in _other_ epoll sets */
-      ci_bit_clear(&fdi_to_sock_fdi(fdi)->sock.s->b.sb_aflags,
-                   CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT);
-      rc = ci_tcp_file_moved(fdi->fd);
-      ci_assert_equal(rc, 0);
-    }
-    else {
-      citp_fdinfo* new_fdi;
-      if( !fdt_locked ) CITP_FDTABLE_LOCK();
-      new_fdi = citp_fdtable_probe_locked(fdi->fd, CI_TRUE, CI_TRUE);
-      citp_fdinfo_release_ref(new_fdi, 1);
-      if( !fdt_locked ) CITP_FDTABLE_UNLOCK();
-      ci_assert_equal(citp_fdinfo_get_type(new_fdi), CITP_PASSTHROUGH_FD);
-      os_fd = fdi_to_alien_fdi(new_fdi)->os_socket;
-    }
+  rc = fdtable_fd_move(fdi->fd, OO_IOC_TCP_HANDOVER);
+  if( rc == -EBUSY && fdi->epoll_fd >= 0 ) {
+    ci_assert(fdi_to_sock_fdi(fdi)->sock.s->b.sb_aflags &
+              CI_SB_AFLAG_MOVED_AWAY);
+    /* If this is our epoll, we can do full handover: we manually add os
+     * fd into the epoll set.
+     * Fixme: ensure we are not in _other_ epoll sets */
+    ci_bit_clear(&fdi_to_sock_fdi(fdi)->sock.s->b.sb_aflags,
+                 CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT);
+    rc = fdtable_fd_move(fdi->fd, OO_IOC_FILE_MOVED);
+  }
+  if( rc != 0 ) {
+    citp_fdinfo* new_fdi;
+    if( ! fdt_locked ) CITP_FDTABLE_LOCK();
+    new_fdi = citp_fdtable_probe_locked(fdi->fd, CI_TRUE, CI_TRUE);
+    citp_fdinfo_release_ref(new_fdi, 1);
+    if( ! fdt_locked ) CITP_FDTABLE_UNLOCK();
+    ci_assert_equal(citp_fdinfo_get_type(new_fdi), CITP_PASSTHROUGH_FD);
+    os_fd = fdi_to_alien_fdi(new_fdi)->os_socket;
   }
   if( fdi->on_rcz.handover_nonb_switch >= 0 ) {
     int on_off = !! fdi->on_rcz.handover_nonb_switch;
@@ -1432,7 +1451,6 @@ int citp_ep_dup3(unsigned fromfd, unsigned tofd, int flags)
   if( fdip_is_normal(tofdip) ) {
     /* We're duping onto a user-level socket. */
     citp_fdinfo* tofdi = fdip_to_fdi(tofdip);
-    ci_verify(citp_fdinfo_get_ops(tofdi)->close(tofdi) != 1);
     if( tofdi->epoll_fd >= 0 ) {
       citp_fdinfo* epoll_fdi = citp_epoll_fdi_from_member(tofdi, 0);
       if( epoll_fdi ) {
@@ -1586,7 +1604,6 @@ int citp_ep_close(unsigned fd)
       goto done;
     }
 
-    rc = citp_fdinfo_get_ops(fdi)->close(fdi);
     Log_V(ci_log("%s: fd=%d u/l socket", __FUNCTION__, fd));
     ci_assert_equal(fdi->fd, fd);
     ci_assert_equal(fdi->on_ref_count_zero, FDI_ON_RCZ_NONE);
@@ -1602,6 +1619,7 @@ int citp_ep_close(unsigned fd)
     }
 
     citp_fdinfo_release_ref(fdi, 0);
+    rc = 0;
   }
   else {
     ci_assert(fdip_is_passthru(fdip) ||

@@ -67,7 +67,8 @@ extern int efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context);
 
 /*! Comment? */
 extern int efab_eplock_lock_wait(ci_netif* ni
-				 CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t bc));
+				 CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t bc),
+                                 int maybe_wedged);
 
 extern int
 efab_eplock_lock_timeout(ci_netif* ni, signed long timeout_jiffies);

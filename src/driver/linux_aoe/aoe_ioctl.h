@@ -174,6 +174,12 @@ struct aoe_get_portid_ioctl {
 	__u32 port_id;
 };
 
+#define AOE_GET_BOARD_TYPE 0xa0ea
+struct aoe_get_board_type_ioctl {
+	__u32 ifindex;
+	__u32 board_type;
+};
+
 /* AOE private ioctl command structures *************************************/
 
 union aoe_ioctl_data {
@@ -186,6 +192,7 @@ union aoe_ioctl_data {
 	struct aoe_num_ports_ioctl num_ports;
 	struct aoe_get_ifindex_ioctl get_ifindex;
 	struct aoe_get_portid_ioctl get_portid;
+	struct aoe_get_board_type_ioctl get_board_type;
 };
 
 struct aoe_ioctl {

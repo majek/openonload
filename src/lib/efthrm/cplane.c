@@ -1475,14 +1475,43 @@ cicp_bond_add_master(const cicp_mibs_kern_t *mibs, cicp_llap_row_t *row,
   return rc;
 }
 
+static void
+cicp_bond_remove_master_row(cicp_handle_t *control_plane, int rowid)
+{
+  const cicp_mibs_kern_t* mibs = CICP_MIBS(control_plane);
+  cicp_bond_row_t* master = &mibs->user.bondinfo_utable->bond[rowid];
+  cicp_bond_row_t* tmp_row;
+  int next_rowid = master->next;
+
+  ci_assert(master->type == CICP_BOND_ROW_TYPE_MASTER);
+
+  while ( next_rowid != CICP_BOND_ROW_NEXT_BAD ) {
+    tmp_row = &mibs->user.bondinfo_utable->bond[next_rowid];
+    ci_assert(tmp_row->type == CICP_BOND_ROW_TYPE_SLAVE);
+
+    next_rowid = tmp_row->next;
+
+    cicp_bond_remove_slave_row(control_plane, master, tmp_row);
+
+    OO_DEBUG_BONDING(ci_log("Removing master %d purged slave %d (row %d)",
+                            master->ifid, tmp_row->ifid, 
+                            (int)(tmp_row - 
+                                  &mibs->user.bondinfo_utable->bond[0])));
+  }
+  OO_DEBUG_BONDING(ci_log("Removed master %d (row %d)",
+                          master->ifid, rowid));
+  ci_assert(master->master.n_slaves == 0);
+  ci_assert(master->master.n_active_slaves == 0);
+  master->type = CICP_BOND_ROW_TYPE_FREE;
+}
 
 extern int 
 cicp_bond_remove_master(cicp_handle_t *control_plane, ci_ifid_t ifindex)
 {
   const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
-  cicp_bond_row_t *master, *tmp_row;
+  cicp_bond_row_t *master;
   cicp_fwdinfo_t *fwdinfot;
-  int rc = 0, next_rowid;
+  int rc = 0;
 
   fwdinfot = mibs->user.fwdinfo_utable;
 
@@ -1498,31 +1527,13 @@ cicp_bond_remove_master(cicp_handle_t *control_plane, ci_ifid_t ifindex)
 
     cicp_llap_update_all_bond_rowid(control_plane, ifindex, 
                                     CICP_BOND_ROW_NEXT_BAD, 0);
-
-    next_rowid = master->next;
-    while ( next_rowid != CICP_BOND_ROW_NEXT_BAD ) {
-      tmp_row = &mibs->user.bondinfo_utable->bond[next_rowid];
-      ci_assert(tmp_row->type == CICP_BOND_ROW_TYPE_SLAVE);
-
-      next_rowid = tmp_row->next;
-
-      cicp_bond_remove_slave_row(control_plane, master, tmp_row);
-
-      OO_DEBUG_BONDING(ci_log("Removing master %d purged slave %d (row %d)",
-                              ifindex, tmp_row->ifid, 
-                              (int)(tmp_row - 
-                                    &mibs->user.bondinfo_utable->bond[0])));
-    }
-    ci_assert(master->master.n_slaves == 0);
-    ci_assert(master->master.n_active_slaves == 0);
-    master->type = CICP_BOND_ROW_TYPE_FREE;
-    OO_DEBUG_BONDING(ci_log("Removed master %d (row %d)", ifindex, 
-                            (int)(master - 
-                                  &mibs->user.bondinfo_utable->bond[0])));
+    cicp_bond_remove_master_row(control_plane,
+                                master - &mibs->user.bondinfo_utable->bond[0]);
 
     ci_verlock_write_stop(&fwdinfot->version);
     
     cicp_fwdinfo_something_changed(control_plane);
+    oof_mcast_update_filters(efab_tcp_driver.filter_manager, ifindex);
   }
 
   cicp_bondinfo_dump(control_plane);
@@ -1681,18 +1692,20 @@ cicp_bond_remove_slave(cicp_handle_t *control_plane,
 
 
 extern int /* rc */
-cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex,
-                   ci_ifid_t master_ifindex, cicp_encap_t *encap)
+cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex)
 {
   cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
   int rc = 0, ipif_status_before, ipif_status_after;
   cicp_llap_kmib_t *llapt;
   cicp_llap_row_t *row;
   cicp_bond_row_t *bond;
+  cicp_encap_t encap;
 
   ci_assert(mibs != NULL);
   ci_assert(mibs->llap_table != NULL);
-  ci_assert(encap->type & CICP_LLAP_TYPE_BOND);
+
+  encap.type = CICP_LLAP_TYPE_BOND | CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT;
+  encap.vlan_id = 0;
    
   CICP_LOCK_BEGIN(control_plane);
 
@@ -1705,12 +1718,11 @@ cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex,
 
     ci_verlock_write_start(&llapt->version);
 
-    encap->type |= CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT;
-    memcpy(&row->encapsulation, encap, sizeof(row->encapsulation));
+    memcpy(&row->encapsulation, &encap, sizeof(row->encapsulation));
 
-    bond = cicp_bond_find(mibs, master_ifindex);
+    bond = cicp_bond_find(mibs, ifindex);
     if( bond == NULL )
-      rc = cicp_bond_add_master(mibs, row, master_ifindex);
+      rc = cicp_bond_add_master(mibs, row, ifindex);
     else {
       row->bond_rowid = (bond - &mibs->user.bondinfo_utable->bond[0]);
       ci_assert(bond->type == CICP_BOND_ROW_TYPE_MASTER);
@@ -1729,7 +1741,7 @@ cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex,
 
     /* update the forwarding cache correspondingly */
     cicp_fwdinfo_llap_set_encapsulation(control_plane, ifindex,
-                                        encap);
+                                        &encap);
   } else
     rc = -ENODEV; /* device not found */
 	
@@ -1997,15 +2009,6 @@ cicp_ipif_addr_get_kind(const cicp_ipif_kmib_t *ipift, ci_ip_addr_net_t ip,
 
     while (row < maxrow && cicp_ipif_row_allocated(row))
     {
-	ci_ip_addr_t net_addr;
-
-	CI_IP_ADDR_SET_SUBNET(&net_addr, &row->net_ip, row->net_ipset);
-	/* if (CI_IP_ADDR_IN_SUBNET(&ip, &row->net_ip, row->net_ipset))
-	       subnet_found = TRUE;  */
-
-	if (CI_IP_ADDR_EQ(&ip, &net_addr))
-	    out_addr_kind->bits.is_netaddr = 1;
-
 	if (CI_IP_ADDR_EQ(&ip, &row->net_ip))
 	    out_addr_kind->bits.is_ownaddr = 1;
 
@@ -2645,7 +2648,7 @@ cicp_hwport_kmib_ctor(cicp_hwport_kmib_t **out_hwportt)
 			 "hardware port table",
 		         (unsigned)sizeof(cicp_hwport_kmib_t)););
 	    
-	for (hwport=0; hwport < CI_HWPORT_ID_MAX; hwport++)
+	for (hwport=0; hwport <= CI_HWPORT_ID_MAX; hwport++)
 	{
 	    cicp_hwport_row_t *row = &hwportt->nic[hwport];
 	    memset(&hwportt->nic[hwport], 0, sizeof(hwportt->nic[hwport]));
@@ -3486,7 +3489,9 @@ cicp_fwdinfo_update_hwport_to_base_ifindex(cicp_mibs_kern_t *control_plane)
 
   for( ; row < end_row; ++row )
     if( cicp_llap_row_allocated(row) && row->up &&
-        (row->encapsulation.type & CICP_LLAP_TYPE_SFC) ) {
+        ( (row->encapsulation.type &
+           (CICP_LLAP_TYPE_SFC | CICP_LLAP_TYPE_VLAN)) ==
+          CICP_LLAP_TYPE_SFC ) ) {
       /* This LLAP is an SF hardware interface and is up.
        *
        * NB. An up SFC interface can have a bad hwport transiently while it
@@ -6535,8 +6540,53 @@ cicpos_llap_find(const cicp_llap_kmib_t *llapt, ci_ifid_t ifindex)
 }
 
 
+/* Called under CICP_LOCK_BEGIN() and verlock */
+static void
+__cicpos_llap_set_vlan(cicp_handle_t *control_plane,
+                       cicp_llap_row_t *vlan_row,
+                       cicp_llap_row_t *master_row)
+{
+  cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
+  cicp_llap_kmib_t *llapt = mibs->llap_table;
+  int ipif_status_before, ipif_status_after;
 
+  ipif_status_before = cicp_check_ipif_callback(mibs, vlan_row->ifindex);
 
+  vlan_row->vlan_ifindex = master_row->ifindex;
+  vlan_row->vlan_rowid = master_row - &llapt->llap[0];
+  vlan_row->bond_rowid = master_row->bond_rowid;
+  vlan_row->encapsulation.type = master_row->encapsulation.type |
+                                 CICP_LLAP_TYPE_VLAN;
+  vlan_row->hwport = master_row->hwport;
+  OO_DEBUG_FWD(ci_log("%s: update vlan id=%d ifindex=%d "
+                      "with new master parameters ifindex=%d",
+                      __func__, vlan_row->encapsulation.vlan_id,
+                      vlan_row->ifindex, master_row->ifindex));
+
+  /* Check to see if this change should cause an ipif callback */
+  ipif_status_after = cicp_check_ipif_callback(mibs, vlan_row->ifindex);
+  if( ipif_status_before != ipif_status_after )
+    cicp_ipif_announce_if(control_plane, vlan_row->ifindex, ipif_status_after);
+}
+
+/* Called under CICP_LOCK_BEGIN() and verlock */
+static void
+cicpos_llap_update_vlans(cicp_handle_t *control_plane,
+                         cicp_llap_row_t *newrow)
+{
+  cicp_llap_kmib_t *llapt = CICP_MIBS(control_plane)->llap_table;
+  cicp_llap_row_t *row;
+  cicp_llap_row_t *end_row = llapt->llap + llapt->rows_max;
+
+  OO_DEBUG_FWD(ci_log("%s: update vlans of master ifindex=%d",
+                      __func__, newrow->ifindex));
+  for (row = &llapt->llap[0]; row < end_row; ++row) {
+    if( !cicp_llap_row_allocated(row) )
+      return;
+    if( row->vlan_ifindex == newrow->ifindex )
+      __cicpos_llap_set_vlan(control_plane, row, newrow);
+  }
+}
 
 
 /*! Add a new link layer access point (that does not exist)
@@ -6563,17 +6613,18 @@ cicpos_llap_find(const cicp_llap_kmib_t *llapt, ci_ifid_t ifindex)
  * NB: also need to call cicpos_fwdinfo_llap_import when you use this
  */
 static int /* rc */
-cicpos_llap_add(cicp_llap_kmib_t *llapt, 
+cicpos_llap_add(cicp_handle_t *control_plane,
                 cicp_llap_rowid_t *out_rowid,
 		ci_ifid_t ifindex,
                 ci_mtu_t mtu,
                 ci_uint8 /* bool */ up,
-                char *name,
+                const char *name,
                 ci_hwport_id_t hwport,
                 ci_mac_addr_t *ref_mac,
 		cicp_encap_t *ref_encap,
 		cicpos_llap_row_t *ref_sync)
 {   cicp_llap_row_t *newrow;
+    cicp_llap_kmib_t *llapt = CICP_MIBS(control_plane)->llap_table;
     int rc;
     
     ci_assert(NULL != llapt);
@@ -6596,6 +6647,7 @@ cicpos_llap_add(cicp_llap_kmib_t *llapt,
 	    ci_assert(newrow->hwport == CI_HWPORT_ID_BAD || newrow->mtu > 0);
             newrow->bond_rowid = CICP_BOND_ROW_NEXT_BAD;
             newrow->vlan_rowid = CICP_BOND_ROW_NEXT_BAD;
+            newrow->vlan_ifindex = 0;
 	    CI_MAC_ADDR_SET(&newrow->mac, ref_mac);
 	    memcpy(&newrow->encapsulation, ref_encap,
 		   sizeof(newrow->encapsulation));
@@ -6606,6 +6658,9 @@ cicpos_llap_add(cicp_llap_kmib_t *llapt,
 
 	    *out_rowid = (ci_uint32)(newrow - &llapt->llap[0]);
 	    rc = 0;
+
+            if( ~ref_encap->type & CICP_LLAP_TYPE_VLAN )
+                cicpos_llap_update_vlans(control_plane, newrow);
 	CI_VERLOCK_WRITE_END(llapt->version)
           
         OO_DEBUG_ARP(DPRINTF(CODEID": llap "CI_IFID_PRINTF_FORMAT" set "
@@ -6669,12 +6724,12 @@ cicpos_llap_compress(cicp_llap_kmib_t *llapt)
 
 extern int /* rc */
 cicp_llap_set_vlan(cicp_handle_t *control_plane, ci_ifid_t ifindex,
-                   ci_ifid_t master_ifindex)
+                   ci_ifid_t master_ifindex, ci_uint16 vlan_id)
 {
   cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
   cicp_llap_kmib_t *llapt;
   cicp_llap_row_t *row, *master_row;
-  int rc = 0, ipif_status_before, ipif_status_after;
+  int rc = 0;
 
   ci_assert(mibs->llap_table != NULL);
 
@@ -6686,21 +6741,28 @@ cicp_llap_set_vlan(cicp_handle_t *control_plane, ci_ifid_t ifindex,
 
   row = cicp_llap_find_ifid(llapt, ifindex);
   master_row = cicp_llap_find_ifid(llapt, master_ifindex);
-  if( row != NULL && master_row != NULL ) {
-    ipif_status_before = cicp_check_ipif_callback(mibs, ifindex);
-
-    row->vlan_rowid = master_row - &llapt->llap[0];
-    /* This property is inherited from the parent LLAP */ 
-    if( master_row->encapsulation.type & CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT )
-      row->encapsulation.type |= CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT;
-    else
-      row->encapsulation.type &=~ CICP_LLAP_TYPE_CAN_ONLOAD_BAD_HWPORT;
-
-    /* Check to see if this change should cause an ipif callback */
-    ipif_status_after = cicp_check_ipif_callback(mibs, ifindex);
-    if( ipif_status_before != ipif_status_after )
-      cicp_ipif_announce_if(control_plane, ifindex, ipif_status_after);
-  } else
+  if( row != NULL ) {
+    OO_DEBUG_FWD(ci_log("%s: set vlan id=%d ifindex=%d row=%d "
+                        "on master ifindex=%d row=%d",
+                        __func__, vlan_id, ifindex,
+                        (int)(row - &llapt->llap[0]),
+                        master_ifindex,
+                        (int)(master_row ?
+                              master_row - &llapt->llap[0] : -1)));
+    row->encapsulation.vlan_id = vlan_id;
+    if( master_row != NULL )
+      __cicpos_llap_set_vlan(control_plane, row, master_row);
+    else {
+      /* VLAN device is UP, but its master is not.  We add a placeholder for
+       * VLAN device and will update it when we are notified about the
+       * master. */
+      OO_DEBUG_FWD(ci_log("%s: postponed vlan id=%d ifindex=%d "
+                          "on master ifindex %d",
+                          __func__, vlan_id, ifindex, master_ifindex));
+      row->vlan_ifindex = master_ifindex;
+    }
+  }
+  else
     rc = -ENODEV; /* device not found */
 
   ci_verlock_write_stop(&llapt->version);
@@ -6906,6 +6968,25 @@ extern int cicp_llap_update_can_onload_bad_hwport(cicp_handle_t *control_plane,
   return rc;
 }
 
+static void
+cicp_llap_row_pre_free(cicp_handle_t *control_plane, cicp_llap_row_t* row)
+{
+  if( row->bond_rowid == CICP_BOND_ROW_NEXT_BAD ||
+      !(row->encapsulation.type & CICP_LLAP_TYPE_BOND) ||
+      (row->encapsulation.type & CICP_LLAP_TYPE_VLAN) )
+    return;
+
+  ci_verlock_write_start(
+            &CICP_MIBS(control_plane)->user.fwdinfo_utable->version);
+  cicp_bond_remove_master_row(control_plane, row->bond_rowid);
+  ci_verlock_write_stop(
+            &CICP_MIBS(control_plane)->user.fwdinfo_utable->version);
+}
+
+#else
+static void
+cicp_llap_row_pre_free(cicp_handle_t *control_plane, cicp_llap_row_t* row)
+{ }
 #endif
 
 
@@ -6998,11 +7079,15 @@ cicp_llap_set_hwport(cicp_handle_t *control_plane, ci_ifid_t ifindex,
 
         if( row == NULL ) {
           cicp_llap_rowid_t rowid;
+          cicp_encap_t encap;
 
-          rc = cicpos_llap_add(llapt, &rowid, ifindex,
+          encap.type = CICP_LLAP_TYPE_NONE;
+          rc = cicpos_llap_add(control_plane, &rowid, ifindex,
                                CICP_HWPORT_MAX_MTU_DEFAULT,
                                /* up */ FALSE, /* name */"", hwport,
-                               &default_mac, ref_encap, &default_sync);
+                               &default_mac,
+                               ref_encap ? ref_encap : &encap,
+                               &default_sync);
         } 
         else {
           ci_assert(row->hwport == CI_HWPORT_ID_BAD || 
@@ -7016,6 +7101,8 @@ cicp_llap_set_hwport(cicp_handle_t *control_plane, ci_ifid_t ifindex,
           if( ref_encap != NULL )
             memcpy(&row->encapsulation, ref_encap, sizeof(row->encapsulation));
 
+          if( ~row->encapsulation.type & CICP_LLAP_TYPE_VLAN )
+            cicpos_llap_update_vlans(control_plane, row);
           CI_VERLOCK_WRITE_END(llapt->version);
         }
 
@@ -7064,7 +7151,7 @@ cicpos_llap_update(cicp_llap_kmib_t *llapt,
                    cicp_llap_rowid_t rowid,
                    ci_mtu_t mtu,
                    ci_uint8 /* bool */ up,
-                   char *name,
+                   const char *name,
                    ci_mac_addr_t *ref_mac,
 		   cicpos_llap_row_t *ref_sync)
 {   int /* bool */ change = FALSE;
@@ -7120,7 +7207,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
 		   ci_mtu_t mtu,
 		   ci_uint8 /* bool */ up,
 		   cicp_llap_type_t type,
-		   char *name,
+		   const char *name,
 		   ci_mac_addr_t *ref_mac,
 		   cicpos_llap_row_t *ref_sync)
 {   const cicp_mibs_kern_t *mibs = CICP_MIBS(control_plane);
@@ -7152,7 +7239,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
           else
             encap.type = CICP_LLAP_TYPE_NONE;
           encap.vlan_id = 0;
-          rc = cicpos_llap_add(llapt, &rowid, ifindex, mtu, up, name, 
+          rc = cicpos_llap_add(control_plane, &rowid, ifindex, mtu, up, name, 
                                CI_HWPORT_ID_BAD, ref_mac, &encap, ref_sync);
           OO_DEBUG_ARP(if (0 != rc)
                          DPRINTF(CODEID": adding access point failed rc=%d",
@@ -7225,14 +7312,15 @@ cicpos_llap_delete(cicp_handle_t *control_plane, ci_ifid_t ifindex)
     ci_assert(NULL != control_plane);
     ci_assert(NULL != mibs->llap_table);
 
+    CICP_LOCK_BEGIN(control_plane)
+
     llapt = mibs->llap_table;
     rowid = cicpos_llap_find(llapt, ifindex);
-
-    CICP_LOCK_BEGIN(control_plane)
 	
 	if (CICP_LLAP_ROWID_BAD != rowid)
 	{
-	    /* not really a lock - reversion when # rows changes */
+	    cicp_llap_row_pre_free(control_plane, &llapt->llap[rowid]);
+            oof_mcast_update_filters(efab_tcp_driver.filter_manager, ifindex);
 	    cicp_llap_row_free(&llapt->llap[rowid]);
 	    cicpos_llap_compress(llapt);
 	    cicpos_fwdinfo_llap_import(control_plane, ifindex,
@@ -7468,8 +7556,12 @@ cicpos_llap_post_poll(cicpos_parse_state_t *session)
        rowid < llapt->rows_max && 
        cicp_llap_row_allocated(&llapt->llap[rowid]); 
        rowid++ ) {
-    if( !ci_bitset_in(CI_BITSET_REF(session->imported_llap), rowid) ) 
+    if( !ci_bitset_in(CI_BITSET_REF(session->imported_llap), rowid) )  {
+      cicp_llap_row_pre_free(session->control_plane, &llapt->llap[rowid]);
+      oof_mcast_update_filters(efab_tcp_driver.filter_manager,
+                               llapt->llap[rowid].ifindex);
       cicp_llap_row_free(&llapt->llap[rowid]);
+    }
   }
   (void)cicpos_llap_compress(llapt);
 

@@ -57,11 +57,6 @@ static void citp_pipe_dtor(citp_fdinfo* fdinfo, int fdt_locked)
   LOG_PIPE("%s: done", __FUNCTION__);
 }
 
-static int citp_pipe_close(citp_fdinfo *fdi)
-{
-  return 0;
-}
-
 static citp_fdinfo* citp_pipe_dup(citp_fdinfo* orig_fdi)
 {
   citp_fdinfo*   fdi;
@@ -113,13 +108,12 @@ static int citp_pipe_send(citp_fdinfo* fdinfo,
 int citp_splice_pipe_pipe(citp_pipe_fdi* in_pipe_fdi,
                           citp_pipe_fdi* out_pipe_fdi, size_t rlen, int flags)
 {
-  int non_block = (flags & SPLICE_F_NONBLOCK) || (out_pipe_fdi->pipe->aflags &
-    (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_WRITER_SHIFT));
   return ci_pipe_zc_move(in_pipe_fdi->ni, in_pipe_fdi->pipe,
                          out_pipe_fdi->pipe, rlen,
-                         non_block ? MSG_DONTWAIT : 0);
+                         (flags & SPLICE_F_NONBLOCK) ? MSG_DONTWAIT : 0);
 }
 
+extern int onload_ioctl(int, unsigned long, ...);
 
 /* Copies data from an alien descriptor to pipe
  *
@@ -145,17 +139,16 @@ int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
                            citp_lib_context_t* lib_context)
 {
   citp_pipe_fdi* epi = fdi_to_pipe_fdi(fdi);
-  int len_in_bufs = OO_PIPE_SIZE_TO_BUFS(olen);
   struct iovec iov_on_stack[CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN];
   struct iovec* iov = iov_on_stack;
+  int iov_num_allocated = CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN;
   int want_buf_count;
   int rc;
   int bytes_to_read;
   int len = olen;
   int no_more = 1; /* for now we only run single loop */
   int written_total = 0;
-  int non_block = (flags & SPLICE_F_NONBLOCK) || (epi->pipe->aflags &
-      (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_WRITER_SHIFT));
+  int non_block = flags & SPLICE_F_NONBLOCK;
   if( fdi_is_reader(fdi) ) {
     errno = EINVAL;
     return -1;
@@ -165,13 +158,57 @@ int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
     errno = ENOTSUP;
     return -1;
   }
+
+  {
+    /* Fixme
+     * Should not use this code if alien_fd is not Onload fd.  For Onload fd,
+     * we can replace poll(), fcntl() and ioctl() by non-syscall code.
+     */
+    struct pollfd pfd;
+
+    pfd.fd = alien_fd;
+    pfd.events = POLLIN;
+
+    if( fcntl(alien_fd, F_GETFL) & O_NONBLOCK ) {
+      /* alien_fd is non-blocking.  Do we have any data? */
+      if( poll(&pfd, 1, 0) == 0 ) {
+        errno = EAGAIN;
+        return -1;
+      }
+    }
+    else {
+      /* alien_fd could block.  Do it before allocating pipe buffers. */
+      citp_exit_lib_if(lib_context, TRUE);
+      poll(&pfd, 1, -1);
+      citp_reenter_lib(lib_context);
+    }
+  }
+
   do {
     int count;
     int iov_num;
     int bytes_to_write;
     struct ci_pipe_pkt_list pkts = {};
     struct ci_pipe_pkt_list pkts2;
-    want_buf_count = len_in_bufs;
+    int bytes_in_sock;
+
+    if( onload_ioctl(alien_fd, FIONREAD, &bytes_in_sock) == 0 ) {
+      if( bytes_in_sock == 0 ) {
+        if( written_total ) {
+          rc = written_total;
+          break;
+        }
+        /* Someone could read from alien_fd after the poll() above.
+         * It is silly, but it could happen.  We just assume the minimal
+         * amount of data in the alien_fd. */
+        bytes_in_sock = 1;
+      }
+    }
+    else
+      bytes_in_sock = olen;
+    bytes_in_sock = CI_MIN(bytes_in_sock, olen - written_total);
+    want_buf_count = OO_PIPE_SIZE_TO_BUFS(bytes_in_sock);
+
     /* We might need to wait for buffers here on the first iteration */
     rc = ci_pipe_zc_alloc_buffers(epi->ni, epi->pipe, want_buf_count,
                                   MSG_NOSIGNAL | (non_block || written_total ?
@@ -193,14 +230,17 @@ int citp_pipe_splice_write(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
       ci_assert_gt(pkts.count, 0);
     count = pkts.count;
 
-    if( count > CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN ) {
+    if( count > iov_num_allocated ) {
       void* niov = realloc(iov == iov_on_stack ? NULL : iov,
-                           sizeof(*iov) * len_in_bufs);
-      if( niov == NULL )
+                           sizeof(*iov) * count);
+      if( niov == NULL ) {
         /* we can still move quite a few pkts */
-        count = CITP_PIPE_SPLICE_WRITE_STACK_IOV_LEN;
-      else
-        niov = iov;
+        count = iov_num_allocated;
+      }
+      else {
+        iov = niov;
+        iov_num_allocated = count;
+      }
     }
 
     ci_assert_ge(count, 1);
@@ -279,8 +319,7 @@ int citp_pipe_splice_read(citp_fdinfo* fdi, int alien_fd, loff_t* alien_off,
   citp_pipe_fdi* epi = fdi_to_pipe_fdi(fdi);
   int rc;
   int read_len = 0;
-  int non_block = (flags & SPLICE_F_NONBLOCK) || (epi->pipe->aflags &
-       (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_READER_SHIFT));
+  int non_block = flags & SPLICE_F_NONBLOCK;
   if( ! fdi_is_reader(fdi) ) {
     errno = EINVAL;
     return -1;
@@ -668,7 +707,6 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
     .socket      = NULL,        /* nobody should ever call this */
     .dtor        = citp_pipe_dtor,
     .dup         = citp_pipe_dup,
-    .close       = citp_pipe_close,
 
     .recv        = citp_pipe_recv,
     .send        = citp_pipe_send_none,
@@ -700,7 +738,6 @@ citp_protocol_impl citp_pipe_read_protocol_impl = {
 #endif
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
-    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc    = citp_nonsock_tmpl_alloc,
     .tmpl_update   = citp_nonsock_tmpl_update,
@@ -721,7 +758,6 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
     .socket      = NULL,        /* nobody should ever call this */
     .dtor        = citp_pipe_dtor,
     .dup         = citp_pipe_dup,
-    .close       = citp_pipe_close,
 
     .recv        = citp_pipe_recv_none,
     .send        = citp_pipe_send,
@@ -753,12 +789,7 @@ citp_protocol_impl citp_pipe_write_protocol_impl = {
 #endif
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
-    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
-#if CI_CFG_SENDFILE
-    /* qustion kostik: will we ever ever need this??? */
-    .sendfile_post_hook = NULL,
-#endif
     .tmpl_alloc    = citp_nonsock_tmpl_alloc,
     .tmpl_update   = citp_nonsock_tmpl_update,
     .tmpl_abort    = citp_nonsock_tmpl_abort,

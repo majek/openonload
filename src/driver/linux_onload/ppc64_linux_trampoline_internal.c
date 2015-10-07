@@ -544,10 +544,8 @@ int linux_trampoline_ppc64_internal_ctor(void)
         goto end;
     }
 
-#ifdef OO_CAN_HANDLE_TERMINATION
     if( ppc64_data.syscall_table )
       efab_linux_termination_ctor();
-#endif
 
     thunks_init(&ppc64_data);
 

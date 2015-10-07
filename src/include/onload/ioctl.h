@@ -94,14 +94,8 @@ enum {
                               ci_tramp_reg_args_t in */
 #define OO_IOC_IOCTL_TRAMP_REG  OO_IOC_W(IOCTL_TRAMP_REG, ci_tramp_reg_args_t)
 
-/* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
   OO_OP_DIE_SIGNAL,           /*< Die because unhandled signal is received */
 #define OO_IOC_DIE_SIGNAL       OO_IOC_W(DIE_SIGNAL, ci_int32)
-
-  /* ISCSI */
-  OO_OP_ISCSI_CONTROL_OP,      /*< iSCSI control operations */
-#define OO_IOC_ISCSI_CONTROL_OP OO_IOC_RW(ISCSI_CONTROL_OP, \
-                                          ci_iscsi_control_params)
 
   /* TCP helper operations */
   OO_OP_TCP_SOCK_SLEEP,
@@ -124,9 +118,6 @@ enum {
 #define OO_IOC_EP_FILTER_DUMP       OO_IOC_W(EP_FILTER_DUMP,            \
                                              oo_tcp_filter_dump_t)
 
-  OO_OP_TCP_MOVE_STATE,
-#define OO_IOC_TCP_MOVE_STATE       OO_IOC_W(TCP_MOVE_STATE,            \
-                                             oo_tcp_move_state_t)
   OO_OP_TCP_SOCK_LOCK,
 #define OO_IOC_TCP_SOCK_LOCK        OO_IOC_W(TCP_SOCK_LOCK, ci_int32)
   OO_OP_TCP_SOCK_UNLOCK,
@@ -152,6 +143,11 @@ enum {
   OO_OP_SOCK_ATTACH,
 #define OO_IOC_SOCK_ATTACH          OO_IOC_RW(SOCK_ATTACH, \
                                               oo_sock_attach_t)
+
+  OO_OP_TCP_ACCEPT_SOCK_ATTACH,
+#define OO_IOC_TCP_ACCEPT_SOCK_ATTACH   OO_IOC_RW(TCP_ACCEPT_SOCK_ATTACH, \
+                                              oo_tcp_accept_sock_attach_t)
+
 #if CI_CFG_USERSPACE_PIPE
   OO_OP_PIPE_ATTACH,
 #define OO_IOC_PIPE_ATTACH          OO_IOC_RW(PIPE_ATTACH, \
@@ -159,6 +155,10 @@ enum {
 #endif
 
   /* OS-specific TCP helper operations */
+
+  OO_OP_OS_SOCK_CREATE_AND_SET,
+#define OO_IOC_OS_SOCK_CREATE_AND_SET OO_IOC_W(OS_SOCK_CREATE_AND_SET,  \
+                                              oo_tcp_create_set_t)
   OO_OP_OS_SOCK_FD_GET,
 #define OO_IOC_OS_SOCK_FD_GET       OO_IOC_RW(OS_SOCK_FD_GET,           \
                                               oo_os_sock_fd_get_t)
@@ -186,13 +186,16 @@ enum {
 #define OO_IOC_TCP_CONNECT_OS_SOCK  OO_IOC_W(TCP_CONNECT_OS_SOCK, \
                                              oo_tcp_sockaddr_with_len_t)
   OO_OP_TCP_HANDOVER,
-#define OO_IOC_TCP_HANDOVER         OO_IOC_W(TCP_HANDOVER, ci_int32)
+#define OO_IOC_TCP_HANDOVER         OO_IOC_RW(TCP_HANDOVER, ci_int32)
 
   OO_OP_FILE_MOVED,
-#define OO_IOC_FILE_MOVED           OO_IOC_W(FILE_MOVED, ci_int32)
+#define OO_IOC_FILE_MOVED           OO_IOC_RW(FILE_MOVED, ci_int32)
 
   OO_OP_TCP_CLOSE_OS_SOCK,
 #define OO_IOC_TCP_CLOSE_OS_SOCK    OO_IOC_W(TCP_CLOSE_OS_SOCK, oo_sp)
+
+  OO_OP_OS_POLLERR_CLEAR,
+#define OO_IOC_OS_POLLERR_CLEAR     OO_IOC_W(OS_POLLERR_CLEAR, oo_sp)
 
 
 

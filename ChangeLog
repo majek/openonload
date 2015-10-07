@@ -1,8 +1,135 @@
+openonload-201509
+-----------------
+
+Add support for recent Linux versions including 4.1, 4.2
+Update sfc net driver to version v4_5_1_1026 (see enclosed ReleaseNotes-sfc)
+
+task8595: Implement ef_vi_set_free()
+task50720: Add support for Stratus ftServer fault tolerant systems
+task44377: Add --report to onload_iptables to show current rules.
+task40201: Add onload_iptables --treat_as_outgoing to allow import of OUTPUT rules
+task50968: Add support for new Linux teaming module
+task47081: Add sample code to demonstrate VPORT switching
+task48078: Stackdump details about which NUMA node interesting events occurred on.
+task47505: Add EF_TCP_CONNECT_SPIN to control spinning in connect()
+task50479: Recycle packet buffers in sets to avoid performance degrading over time
+task52626: Add EF_TCP_SYNRECV_MAX to limit number of buffers used for TCP SYN RECV state connections
+task50705: Add initial support for separate UDP receive queue
+task53668: Add anonymise_stackdump.py tool
+task53715: Add support for IP_TRANSPARENT socket option
+task8595:  Add epoll3 ready list id to socket information in stackdump
+task51259: Scalable filter for active open
+task53915: Add support for passively opened sockets using MAC filter.
+task54521: Add TCP protocol to hardware rx timestamping sample.
+task52052: Add mem_drop flag to TCP sockets in onload_stackdump to report memory drops
+task53857: Add support for IP-proto and ethertype filters to ef_vi.
+task51262: Active endpoint caching
+task52071: Implement onload_get_tcp_info extension function
+task52339: Implement Linux-style TX timestamping: SO_SELECT_ERR_QUEUE, SOF_TIMESTAMPING_OPT_ID
+task47708: Add option to auto-tune TCP send buffer size per socket. Enable with EF_TCP_SNDBUF_MODE=2
+task55965: add SOF_TIMESTAMPING_OPT_CMSG support.
+task52339: Implement SOF_TIMESTAMPING_OPT_TSONLY (as found in linux>=4.0).
+task56363: increase number of supported NIC ports from 6 to 8
+task54288: Apply correction to TX timestamp to reflect latency to wire
+
+SF-114668-KI/bug49989: honour NAPI budget when polling in a timer event, avoids "MCDI request was completed without an event"
+
+bug51463: respect i_prefix install path when solar_clusterd built from srpm
+bug51221: update onload_iptables to skip reject-with directive
+bug45475: fix timestamping example code to build on older kernels
+bug51741: improve sfcaffinity_config output to show core and channel mappings
+bug50320: respect NAPI budget for Onload events, avoids "self-detected stall on CPU"
+bug51932: do not be fussy about which CPU for interrupt if running out of VIs
+bug50827: prevent socket joining multicast group if error adding filter
+bug52236: remove the onload_set_recv_filter() functionality
+bug50648: fix kernel crash during UDP socket handover
+bug51146: fix deadlock between fdtable and epoll locks
+bug53000: fix RST sending code match Linux behaviour (no ACK flag set)
+bug52678: improve SO_LINGER socket option and its interaction with timeouts
+bug53684: ensure packets sent at stack destruction time make it onto wire
+bug49932: PPC: ef_vi_alloc_from_pd underestimated required eventq size
+bug49932: increase default eventq capacity to accomodate timesync events
+bug53101: fix packet leak in oo_raw_send()
+bug53444: fix ef_vi_eventq_poll() returning fewer events than it could
+bug53885: fix sys_read(udp_sock) when data arrived via OS causing kernel panic
+bug50081: don't warn about "unknown option" for EF_LOG_FILE
+bug53986: fix SRPM spec file when kernel devel packages are present
+bug54307: fix zero length MSG_WARM send causing segfault
+bug54077: fix crash when deleting bond slave corrupts bonding user table
+bug54547: fix thread safety issues in efrss test/example application
+bug53101: free loopback sockets at stack destruction
+bug53979: fix errno-related issues in delegated send. Now returns -1 with errno set.
+bug54662: remove spurious interface appearing in mib-hwport file
+bug49651: correctly handle optlen value in getsockopt(TCP_INFO)
+bug49650: add latest statistics to getsockopt(TCP_INFO)
+bug54650: fix packet leak in IP-fragmented UDP send
+bug54682: make dup2 and netif lock ordering consistent to avoid deadlock
+bug54682: correct netif / fdtable lock order and check netif list valid
+bug54764: fix packet leak when UDP packet is sent (unaccelerated) via OS
+bug53101: fix packet leak in TCP_DEFER_ACCEPT paths
+bug54808: fix atagram length returned by recvmsg for 32-bit app with TX timestamp
+bug54689: do not block non-blocking socket in UDP send if unable to alloc packet
+bug54689: avoid stuck stack due to no packets posted to rxq in critical memory pressure
+bug54741: extend EF_TCP_SEND_NONBLOCK_NO_PACKETS_MODE to cover connect()
+bug45979: fix kernel panic when very large MTU (9200) configured
+bug54657: ensure interrupts are primed before dropping into kernel for epoll_wait()
+bug54708: wire-order delivery: handle stacks which have not received anything
+bug54793: correctly accelerate IP interfaces with /31 netmask
+bug54924: return useful error from ef_pio_alloc when hw or module incapable
+bug54968: correctly handle SO_RCVTIMEO with 0 value (was affecting SO_SNDTIMEO).	
+bug54920: fix send buffer size checks when MSG_SENDPAGE_NOTLAST is set
+bug54891: return POLLERR if TX timestamp queue is non-empty
+bug55166: fix case where datagram sending via system write() is interrupted by signal
+bug55178: correctly handle TX timestamps when send queue is overfilled.
+bug54352: update openonload.spec file to support kernel-mft-* packages
+bug52744: add ioctl SIOCGHWTSTAMP/SIOCSHWTSTAMP support
+bug53101: fix packet leak in onload_move_fd()
+bug55344: fix sending of packets via syscall when route changes (was returning EAFNOSUPPORT)
+bug54650: fix packet leak caused by non-atomic change of some n_*_pkt counters
+bug55267: fix ARP reinforcement from syn-recv socket state to avoid frequent sending via OS
+bug55468: check ONLOAD_SOF_TIMESTAMPING_STREAM flag instead of assuming set
+bug54658: don't print reap list by default in stackdump, could become corrupted and get stuck
+bug48303: use dracut as alternative to update_initramfs in onload_install on RHEL7
+bug55449: fix citp_udp_ordered_data() + indirect packet
+bug55472: UDP TX timestamps: return full packet with Ethernet header
+bug55580: correctly detect active bond slave changing on RHEL 6.7
+bug55657: multiple fixes for onload_move_fd() causing sockets to timeout
+bug55599: fix errno value when ICMP is received during connection attempt
+bug55448: fix local address detection
+bug53749: use /proc/sys/net/ipv4/tcp_orphan_retries in Onload
+bug53175: return POLLRDHUP event when socket was shut down for read
+bug55617: add support for ONLOAD_DONT_ACCELERATE in JNI wrapper
+bug53840: templated sends: set advertised window correctly
+bug55396: support SocketChannel in JNI wrapper
+bug55396: support MoveFd in JNI wrapper
+bug55981: fix lock inversion in ci_tcp_listen() introduced in 201502-u1
+bug55265: implement OO_OS_STATUS_ERR flag: errqueue was ignored after getsockopt(SO_ERROR)
+bug55357: make Onload match Linux's meaning of tcpi_probes TCP_INFO field
+bug56003: fix efsink test app time sync flag reporting
+bug56102: Fix crash when sharing stack after "ethtool -t"
+task8595: make environment parsing heed EF_LOG.
+bug56153: rework os_pollwait_register() to avoid potential deadlock
+bug56191: Fix iommu grouping before attaching to domains: function probe failed on Linux 4.2
+bug56091: fix tx_timestamping example code: reset msg_controllen
+bug56284: improve description of EF_TCP_{RCV,SND}BUF_ESTABLISHED_DEFAULT
+bug56288: don't ignore setting of EF_TCP_(RCV|SND)BUF_ESTABLISHED_DEFAULT
+bug55964: fix ee_info value reported in TX timestamp cmsg extended error
+bug56385: properly enqueue multi-buffered packet to TX timestamp queue; was truncated after ~1800 bytes
+bug56275: ef_vi: take TX capacity into account when allocating packed stream credit.
+bug56358: Fix efrecv example code to handle multiple events in a single poll.
+bug56411: use rx_channel_count to allow more interrupts to be used when rss_cpus set
+bug56168: SUSE: call schedule() between dma_unmap and vfree; avoids "bad page state"
+bug56383: avoid TX push on multi-buffered packets, avoids fw corruption of packet
+bug56417: fix filter leak and EEXIST return from oof filter code
+bug52733: fix n_async_pkts counter when unrolling MSG_WARM with zc_send (previously incremented for each call)
+bug56855: bug48930: postpone atomic work when processing interface updates.
+
+
 openonload-201502-u3
 --------------------
-
+ 
 Update net driver (v4.5.1.1020)
-
+ 
 task55114: add compatibility for RHEL 6.7
 
 

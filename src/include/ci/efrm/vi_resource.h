@@ -73,16 +73,6 @@ struct efrm_vi_attr {
 };
 
 
-struct efrm_vi_info {
-	/** The base of the I/O aperture (4K) containing doorbells. */
-	dma_addr_t  vi_window_base;
-	/** The instance number of this VI. */
-	int         vi_instance;
-	/** Size of host memory mapping. */
-	int         vi_mem_mmap_bytes;
-};
-
-
 struct efrm_vi_q_size {
 	/** The number of "entries" in the queue. */
 	int  q_len_entries;
@@ -214,14 +204,6 @@ extern int  efrm_vi_alloc(struct efrm_client *client,
 			  int print_resource_warnings,
 			  const char *vi_name,
 			  struct efrm_vi **p_virs_out);
-
-/**
- * Returns various attributes of a VI.
- *
- * See definition of [efrm_vi_info] for more details.
- */
-extern void efrm_vi_get_info(struct efrm_vi *virs,
-			     struct efrm_vi_info *info_out);
 
 /**
  * Tells whether rx loopback is supported by a VI.
@@ -361,6 +343,7 @@ extern void efrm_vi_resource_release_flushed(struct efrm_vi *virs);
  */
 extern struct efrm_pd *efrm_vi_get_pd(struct efrm_vi *);
 
+extern void efrm_vi_resource_shutdown(struct efrm_vi *virs);
 
 /*--------------------------------------------------------------------
  *
@@ -372,8 +355,8 @@ extern struct efrm_pd *efrm_vi_get_pd(struct efrm_vi *);
 extern void efrm_eventq_reset(struct efrm_vi *virs);
 
 /*! Callback function provided by user */
-typedef void (*efrm_evq_callback_fn) (void *arg, int is_timeout,
-				      struct efhw_nic *nic);
+typedef int (*efrm_evq_callback_fn) (void *arg, int is_timeout,
+				     struct efhw_nic *nic, int budget);
 
 /*! Register a kernel-level handler for the event queue.  This function is
  * called whenever a timer expires, or whenever the event queue is woken

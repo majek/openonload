@@ -111,7 +111,7 @@ void efx_remove_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_init_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic);
-void efx_rx_slow_fill(unsigned long context);
+void efx_rx_slow_fill(struct work_struct *data);
 void __efx_rx_packet(struct efx_channel *channel);
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
 void fastcall efx_rx_packet(struct efx_rx_queue *rx_queue, unsigned int index,
@@ -126,6 +126,7 @@ static inline void efx_rx_flush_packet(struct efx_channel *channel)
 		__efx_rx_packet(channel);
 }
 void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue);
+void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 
 #define EFX_MAX_DMAQ_SIZE 4096UL
 #define EFX_DEFAULT_RX_DMAQ_SIZE 1024UL
@@ -385,8 +386,11 @@ extern int efx_target_num_vis;
 void efx_stop_eventq(struct efx_channel *channel);
 void efx_start_eventq(struct efx_channel *channel);
 
+#ifdef EFX_NOT_UPSTREAM
+/* Only used from driverlink. */
 void efx_pause_napi(struct efx_nic *efx);
 int efx_resume_napi(struct efx_nic *efx);
+#endif
 
 /* Dummy PHY ops for PHY drivers */
 int efx_void_dummy_op_int(void);

@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.5.1.1020
+Version:  4.5.1.1026
 
 
 Overview
@@ -14,11 +14,9 @@ Supported hardware platforms
 The drivers contained in this package support the following Solarflare 
 adapters:
 
-- Solarflare Flareon [Ultra] Server Adapters:
+- Solarflare Flareon Server Adapters:
   - Solarflare SFN7002F Dual Port SFP+ Server Adapter
-  - Solarflare SFN7004F Quad Port SFP+ Server Adapter
   - Solarflare SFN7122F Dual Port SFP+ Server Adapter
-  - Solarflare SFN7124F Quad Port SFP+ Server Adapter
   - Solarflare SFN7142Q Dual Port QSFP+ Server Adapter
   - Solarflare SFN7322F Precision Time Synchronization Server Adapter
 
@@ -68,7 +66,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.5.1.1020
+   version: 4.4.1.1017
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -90,31 +88,10 @@ please refer to the "Solarflare Server Adapter User's Guide"
 
 Linux distribution support for Solarflare Adapters
 --------------------------------------------------
+RHEL6 and SLES11 have in-built Solarflare adapter drivers but these
+drivers may not support the latest SFN7XXX adapters.
 
-This driver package is supported on:
- - RedHat Enterprise Linux		          5.10,  5.11
- - RedHat Enterprise Linux		          6.5, 6.6
-   - Redhat Messaging Realtime and Grid           2.4, 2.5
- - RedHat Enterprise Linux 		          7.0, 7.1
-   - RedHat Enterprise Linux for Realtime	  7.1
- - SuSE Linux Enterprise Server 11                sp3, sp4
-   - SuSE Linux Enterprise RealTime Extension 11  
- - SuSE Linux Enterprise Server 12                base release
- - Canonical Ubuntu Server LTS                    14.04
- - Canonical Ubuntu Server                        14.10, 15.04
- - Debian 7 "Wheezy"                              7.7
- - Debian 8 "Jessie"                              8.0
- - Linux                                          2.6.18 to 4.1
-
-Note RHEL6 and SLES11 have in-built Solarflare adapter drivers but these
-drivers may not support SFN7XXX adapters.
-
-Solarflare aims to support the current and previous major release of each
-supported distribution at the time this driver was released (plus, possibly,
-the latest long term support release if this is neither the current nor
-previous major release). Support includes all minor updates/releases/service
-packs of the above major releases, for which the distributor has not yet
-declared end of life/support.
+It is recommended to install the latest Solarflare supplied drivers.
 
 
 Support
@@ -289,48 +266,79 @@ Issue 47490:
   ~ Bad interactions can occur with NetworkManager scripts when it sees
     new VFs with random MAC addresses. Alternatively use the older networking
     service/scripts.
+Issue 53477: Redhat BZ 1222066:
+  ~ Currently if pf-count>8 only the lower 8 PF function numbers can be
+    successfully passed into a guest. Note that Solarflare recommends using
+    VFs where possible to pass PCI functions into guest VMs.
+
+
+Known Issues with Solarflare driver/firmware
+--------------------------------------------
+Issue 41550: SF-113649-KI:
+  ~ allmulti mode is now correctly supported when using adapter firmware
+    >=v4.4.2.1011 and "sfboot firmware-variant=full-feature"
+    In other cases only multicast traffic which is not being received by other
+    VFs or PFs will be received by the allmulti interface.
+  ~ The lack of a proper allmulti mode could be an issue if subscribing to a
+    very large number of multicast groups where the number of hardware filters
+    is exceeded.
+Issue 48214: SF-113650-KI:
+  ~ SARFS/SXPS is not compatible with changes in linux >=3.0 and has been
+    disabled in this release. In this case please use the kernel ARFS/XPS
+    features.
 Issue 50308:
   ~ For RHEL 7.0 disabling GRO after passing traffic is unsafe, and can lead to
     a kernel NULL pointer deference. This is believed to be addressed by Redhat
     in RHEL 7.1. This will only happen when LRO is also disabled. For
     configurations that disable GRO and LRO, please disable GRO after the driver
     is loaded, but before the interface is brought up.
-Issue 50873:
-  ~ Changing the MTU across the page size (4K for x86) on a network team in
-    RHEL 7.0 can cause a hang. As a workaround please change the MTU of the
-    component interfaces of the team before creating it. This is fixed in
-    RHEL 7.1
-
-
-Known Issues with Solarflare driver/firmware
---------------------------------------------
-Issue 48214: SF-113650-KI:
-  ~ SARFS/SXPS is not compatible with changes in linux >=3.0 and has been
-    disabled in this release. In this case please use the kernel ARFS/XPS
-    features.
 Issue 50868:
   ~ If using a SFN7142Q adapter with adapter firmware v4.1.0.6742 and running
     sfupdate, after the update the two network interfaces from the second QSFP+
     port will be in a disabled state. Please reload the driver to correct this.
     This issue has been resolved in adapter firmware >=v4.1.1.1022.
+Issue 50873:
+  ~ Changing the MTU on a network team in RHEL 7 can cause a hang. As a
+    workaround please change the MTU of the component interfaces before
+    creating the team.
+
+
 
 
 Changelog
 ---------
-### v4.5.1.1020 -- Update release
 
-Issue 50755:
-  ~ Fix serious page reference counting issue relating to the RX recycle ring.
-  ~ For full details please see the following known issue on the Solarflare
-    support site where you can also sign up for e-mail notifications
-    <https://support.solarflare.com/index.php?option=com_cognidox&file=SF-114768-KI-2_Serious_page_reference_counting_issue_in_Linux_network_driver.htm&Itemid=24&catid=3011&view=embed&id=3013>
+### v4.5.1.1026 -- Update release
 
-Issue 53778:
-  ~ Resolve deadlock when setting VF VLAN via "ip link" command.
+[General changes]
+  ~ Support for SFA7942Q AOE platform.
+  ~ Support for linux v4.2.
+  ~ Make locking between NAPI and busy-polling less expensive.
 
-Issue 54347:
-  ~ Add legacy method for changing a PF's MAC address.
-  ~ This restores compatability with Solarflare adapter firmware <= 4.1.1.1023
+[Stratus ftServer support]
+  ~ Further work to remove warnings if device isolation and fail-over occurs.
+  ~ Fix infinite loop in efx_pause_napi() on module unload if a hardware fault
+    causes the driver to enter a disabled state and onload is being used.
+
+Issue 54445:
+  ~ Address "NOHZ: local_softirq_pending 08" seen on sfc.ko module unload.
+
+Issue 54748:
+  ~ When sfc.ko module parameters rss_numa_local=1 and rss_cpus is
+    greater than the number of logical CPUs on a node, remove the false
+    limitation that onload could only use interrupts on the local NUMA node.
+
+Issue 54840:
+  ~ Fix efx_ef10_filter_is_exclusive() did not identify the ethertype and
+    IP-protocol filters.
+
+Issue 55443:
+  ~ Fix rare case where after several attempts to allocate memory in order to
+    refill the RX descriptor ring fails the driver does not continue to retry.
+    This causes the ethtool stat "rx_nodesc_drops" to increase.
+
+Issue 56015:
+  ~ Fix potential NULL pointer deference in efx_mcdi_mon_remove().
 
 
 ### v4.5.1.1010 -- Feature release
@@ -555,7 +563,6 @@ Issue 46587:
      efx_ef10_filter_table_restore(). There should not be MCDI timeouts seen
      in production systems so this is a defensive fix rather than a bug fix.
 
-
 ### v4.1.0.6734 -- Feature release
 
 New Features:
@@ -697,7 +704,6 @@ Issue 39894:
 Issue 38352:
   ~ Remove build time warning message when MTD is disabled, as sfutils can now
     work on linux using an IOCTL to the driver.
-
 
 ### v4.0.0.6585 -- Feature release
 
@@ -1172,8 +1178,7 @@ Features:
     use 'ethtool -s ethX msglvl ...' to enable and disable messages
   - Register dump support: for diagnostic purposes, 
     use 'ethtool -d' to dump register state
-
-
+     
 ### v3.0.11.2248 -- Update release
 
 Issue 22752
@@ -1190,7 +1195,6 @@ Issue 21679
   ~ Fix build failure on recent non-SMP kernels
 Issue 21675
   ~ Fix build failure with Debian 2.6.36
-
 
 ### v3.0.8.2221 -- Update release
 
@@ -1252,7 +1256,6 @@ Issue 20662
 Issue 20649
   ~ Fix error message when setting invalid ring parameters
 
-
 ### v3.0.6.2199 -- Update release
 
 Issue 20541
@@ -1290,9 +1293,7 @@ Issue 19985
 Issue 19951
   ~ Fix 2.6.27.19-5-xen module load failure
 
-
 ### v3.0.5.2175 -- Update release
-
 
 Copyright
 ---------

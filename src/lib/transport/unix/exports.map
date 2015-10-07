@@ -30,9 +30,6 @@
     poll;
     __poll_chk;
     ppoll;
-    sendfile;
-    sendfile64;
-    sendfilev;
     splice;
     read;
     __read_chk;
@@ -106,7 +103,6 @@
     onload_zc_send;
     onload_zc_release_buffers;
     onload_zc_alloc_buffers;
-    onload_set_recv_filter;
     onload_recvmsg_kernel;
     onload_thread_set_spin;
     onload_msg_template_alloc;
@@ -119,6 +115,7 @@
     onload_delegated_send_complete;
     onload_delegated_send_cancel;
     oo_raw_send;
+    onload_get_tcp_info;
   local:
     /* everything else must not be in the dynamic symbol table */
     *;

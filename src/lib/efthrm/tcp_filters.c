@@ -53,6 +53,8 @@
 #include <driver/linux_net/driverlink_api.h>
 #include <onload/nic.h>
 
+#define KERNEL_REDIRECT_VI_ID 0
+
 /*
  * Module option to control whether getting an error (EBUSY) on some
  * ports when adding a filter is fatal or not.
@@ -70,14 +72,22 @@ static struct efrm_client* get_client(int hwport)
 }
 
 
-void oo_hw_filter_init(struct oo_hw_filter* oofilter)
+void oo_hw_filter_init2(struct oo_hw_filter* oofilter,
+                        struct tcp_helper_resource_s* trs,
+                        struct tcp_helper_cluster_s* thc)
 {
   int i;
   oofilter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
-  oofilter->trs = NULL;
-  oofilter->thc = NULL;
+  oofilter->trs = trs;
+  oofilter->thc = thc;
   for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
     oofilter->filter_id[i] = -1;
+}
+
+
+void oo_hw_filter_init(struct oo_hw_filter* oofilter)
+{
+  oo_hw_filter_init2(oofilter, NULL, NULL);
 }
 
 
@@ -110,63 +120,143 @@ void oo_hw_filter_clear(struct oo_hw_filter* oofilter)
 
 
 void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
-                                unsigned hwport_mask)
+                                unsigned hwport_mask, int redirect)
 {
   int hwport;
 
-  ci_assert_equal(oofilter->thc, NULL);
-  if( oofilter->trs != NULL )
+  if( redirect || oofilter->trs != NULL || oofilter->thc != NULL )
     for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
       if( hwport_mask & (1 << hwport) )
         oo_hw_filter_clear_hwport(oofilter, hwport);
 }
 
 
-static int oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
-                                   int protocol,
-                                   unsigned saddr, int sport,
-                                   unsigned daddr, int dport,
-                                   ci_uint16 vlan_id, unsigned src_flags)
+static int
+oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
+                        const struct oo_hw_filter_spec* oo_filter_spec,
+                        unsigned src_flags)
 {
   struct efx_filter_spec spec;
-  int rc = 0, vi_id;
+  int rc = 0;
+  int vi_id;
+  const u8* mac_ptr = NULL;
+  int replace = false;
+  int kernel_redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
+  int cluster = (oofilter->thc != NULL) && ! kernel_redirect;
 
-  ci_assert_equal(oofilter->thc, NULL);
+  if( ! kernel_redirect )
+    ci_assert_nequal(oofilter->trs == NULL, oofilter->thc == NULL);
   ci_assert(oofilter->filter_id[hwport] < 0);
 
-  if( (vi_id = tcp_helper_rx_vi_id(oofilter->trs, hwport)) >= 0 ) {
+  if( kernel_redirect )
+    vi_id = KERNEL_REDIRECT_VI_ID;
+  else {
+    vi_id = cluster ?
+      tcp_helper_cluster_vi_base(oofilter->thc, hwport) :
+      tcp_helper_rx_vi_id(oofilter->trs, hwport);
+  }
+
+  if( vi_id  >= 0 ) {
     int flags = EFX_FILTER_FLAG_RX_SCATTER;
-    int hw_rx_loopback_supported =
-      tcp_helper_vi_hw_rx_loopback_supported(oofilter->trs, hwport);
+    int hw_rx_loopback_supported = (cluster || kernel_redirect) ?
+      0 : tcp_helper_vi_hw_rx_loopback_supported(oofilter->trs, hwport);
 
     ci_assert( hw_rx_loopback_supported >= 0 );
     if( hw_rx_loopback_supported && (src_flags & OO_HW_SRC_FLAG_LOOPBACK) ) {
       flags |= EFX_FILTER_FLAG_TX;
     }
 
+    if( cluster )
+      flags |= EFX_FILTER_FLAG_RX_RSS;
+
     efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED, flags, vi_id);
 
+    if( cluster ) {
+      int rss_context = -1;
+      if( src_flags & OO_HW_SRC_FLAG_RSS_DST )
+        rss_context = efrm_vi_set_get_rss_context
+            (oofilter->thc->thc_vi_set[hwport], EFRM_RSS_MODE_ID_DST);
+      if( rss_context == -1 )
+        /* fallback to default RSS context */
+        rss_context = efrm_vi_set_get_rss_context
+            (oofilter->thc->thc_vi_set[hwport], EFRM_RSS_MODE_ID_DEFAULT);
+      spec.rss_context = rss_context;
+    }
+
 #if EFX_DRIVERLINK_API_VERSION >= 15
-    {
-      unsigned stack_id = tcp_helper_vi_hw_stack_id(oofilter->trs, hwport);
+    if( ! kernel_redirect ) {
+      unsigned stack_id = cluster ?
+        tcp_helper_cluster_vi_hw_stack_id(oofilter->thc, hwport) :
+        tcp_helper_vi_hw_stack_id(oofilter->trs, hwport);
       ci_assert( stack_id >= 0 );
       efx_filter_set_stack_id(&spec, stack_id);
     }
 #endif
 
-    if( saddr != 0 )
-      rc = efx_filter_set_ipv4_full(&spec, protocol, daddr, dport,
-                                    saddr, sport);
-    else
-      rc = efx_filter_set_ipv4_local(&spec, protocol, daddr, dport);
-    ci_assert_equal(rc, 0);
+    switch( oo_filter_spec->type ) {
+    case OO_HW_FILTER_TYPE_MAC:
+      mac_ptr = oo_filter_spec->addr.mac.mac;
+      replace = true;
+      break;
+
+    case OO_HW_FILTER_TYPE_ETHERTYPE:
+      /* Ethertype filter is not MAC-qualified. There are no primitives in the
+       * net driver, so we need to set filter flags manually. */
+      spec.ether_type = oo_filter_spec->addr.ethertype.t;
+      mac_ptr = oo_filter_spec->addr.ethertype.mac;
+      spec.match_flags |= EFX_FILTER_MATCH_ETHER_TYPE;
+      replace = true;
+      break;
+
+    case OO_HW_FILTER_TYPE_IP_PROTO_MAC:
+      mac_ptr = oo_filter_spec->addr.ipproto.mac;
+      /* Fall through. */
+    case OO_HW_FILTER_TYPE_IP_PROTO:
+      /* As in the case of the ethertype filter above, we have to populate
+       * [spec] ourselves. */
+      spec.ether_type = CI_ETHERTYPE_IP;
+      spec.ip_proto = oo_filter_spec->addr.ipproto.p;
+      spec.match_flags |= EFX_FILTER_MATCH_ETHER_TYPE |
+                          EFX_FILTER_MATCH_IP_PROTO;
+      replace = true;
+      break;
+
+    case OO_HW_FILTER_TYPE_IP:
+      if( oo_filter_spec->addr.ip.saddr != 0 )
+        rc = efx_filter_set_ipv4_full(&spec,
+                                      oo_filter_spec->addr.ip.protocol,
+                                      oo_filter_spec->addr.ip.daddr,
+                                      oo_filter_spec->addr.ip.dport,
+                                      oo_filter_spec->addr.ip.saddr,
+                                      oo_filter_spec->addr.ip.sport);
+      else
+        rc = efx_filter_set_ipv4_local(&spec,
+                                       oo_filter_spec->addr.ip.protocol,
+                                       oo_filter_spec->addr.ip.daddr,
+                                       oo_filter_spec->addr.ip.dport);
+      ci_assert_equal(rc, 0);
+      break;
+
+    default:
+      /* Invalid filter type. */
+      ci_assert(0);
+      return -EINVAL;
+    }
+
     /* note: bug 42561 affecting loopback on VLAN 0 with fw <= v4_0_6_6688 */
-    if( vlan_id != OO_HW_VLAN_UNSPEC ) {
-      rc = efx_filter_set_eth_local(&spec, vlan_id, NULL);
+    if( oo_filter_spec->vlan_id != OO_HW_VLAN_UNSPEC || mac_ptr != NULL ) {
+      u16 efx_vlan_id = (oo_filter_spec->vlan_id == OO_HW_VLAN_UNSPEC) ?
+                        EFX_FILTER_VID_UNSPEC : (u16) oo_filter_spec->vlan_id;
+      rc = efx_filter_set_eth_local(&spec, efx_vlan_id, mac_ptr);
       ci_assert_equal(rc, 0);
     }
-    rc = efrm_filter_insert(get_client(hwport), &spec, false);
-    if( rc >= 0 ) {
+    rc = efrm_filter_insert(get_client(hwport), &spec, replace);
+    /* ENETDOWN indicates that the hardware has gone away. This is not a
+     * failure condition at this layer as we can attempt to restore filters
+     * when the hardware comes back. A negative filter ID signifies that there
+     * is no filter from the net driver's point of view, so we are justified in
+     * storing [rc] in the [filter_id] array. */
+    if( rc >= 0 || rc == -ENETDOWN ) {
       oofilter->filter_id[hwport] = rc;
       rc = 0;
     }
@@ -176,28 +266,27 @@ static int oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 
 
 int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
-                             int protocol,
-                             unsigned saddr, int sport,
-                             unsigned daddr, int dport,
-                             ci_uint16 vlan_id, unsigned set_vlan_mask,
-                             unsigned hwport_mask, unsigned src_flags)
+                             const struct oo_hw_filter_spec* oo_filter_spec,
+                             unsigned set_vlan_mask, unsigned hwport_mask,
+                             unsigned src_flags)
 {
   int rc1, rc = 0, ok_seen = 0, hwport;
-  uint16_t set_vlan_id;
 
-  ci_assert(oofilter->trs != NULL);
-  ci_assert_equal(oofilter->thc, NULL);
+  /* We will change this copy of the filter spec according to [set_vlan_mask]
+   * as we iterate over the hwports. */
+  struct oo_hw_filter_spec masked_spec = *oo_filter_spec;
+
+  if( (src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT) == 0 )
+    ci_assert_nequal(oofilter->trs != NULL, oofilter->thc != NULL);
 
   for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
     if( (hwport_mask & (1u << hwport)) && oofilter->filter_id[hwport] < 0 ) {
       /* If we've been told to set the vlan when installing the filter on this
        * port then use provided vlan_id, otherwise use OO_HW_VLAN_UNSPEC.
        */
-      set_vlan_id = (set_vlan_mask & (1u << hwport)) ?
-        vlan_id : OO_HW_VLAN_UNSPEC;
-      rc1 = oo_hw_filter_set_hwport(oofilter, hwport, protocol,
-                                    saddr, sport, daddr, dport, set_vlan_id,
-                                    src_flags);
+      masked_spec.vlan_id = (set_vlan_mask & (1u << hwport)) ?
+        oo_filter_spec->vlan_id : OO_HW_VLAN_UNSPEC;
+      rc1 = oo_hw_filter_set_hwport(oofilter, hwport, &masked_spec, src_flags);
       /* Need to know if any interfaces are ok */
       if( ! rc1 )
         ok_seen = 1;
@@ -221,19 +310,14 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
 
 
 int oo_hw_filter_set(struct oo_hw_filter* oofilter,
-                     tcp_helper_resource_t* trs, int protocol,
-                     unsigned saddr, int sport,
-                     unsigned daddr, int dport,
-                     ci_uint16 vlan_id, unsigned set_vlan_mask,
-                     unsigned hwport_mask, unsigned src_flags)
+                     const struct oo_hw_filter_spec* oo_filter_spec,
+                     unsigned set_vlan_mask, unsigned hwport_mask,
+                     unsigned src_flags)
 {
   int rc;
 
-  ci_assert_equal(oofilter->thc, NULL);
-  oo_hw_filter_clear(oofilter);
-  oofilter->trs = trs;
-  rc = oo_hw_filter_add_hwports(oofilter, protocol, saddr, sport, daddr, dport,
-                                vlan_id, set_vlan_mask, hwport_mask, src_flags);
+  rc = oo_hw_filter_add_hwports(oofilter, oo_filter_spec, set_vlan_mask,
+                                hwport_mask, src_flags);
   if( rc < 0 )
     oo_hw_filter_clear(oofilter);
   return rc;
@@ -242,46 +326,80 @@ int oo_hw_filter_set(struct oo_hw_filter* oofilter,
 
 int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                         struct tcp_helper_resource_s* new_stack,
-                        int protocol,
-                        unsigned saddr, int sport,
-                        unsigned daddr, int dport,
-                        ci_uint16 vlan_id, unsigned set_vlan_mask,
-                        unsigned hwport_mask, unsigned src_flags)
+                        const struct oo_hw_filter_spec* oo_filter_spec,
+                        unsigned set_vlan_mask, unsigned hwport_mask,
+                        unsigned src_flags)
 {
   unsigned add_hwports = 0u;
   int hwport, vi_id;
+  int redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
 
-  /* TODO: clustering: This needed for handling NIC resets
+  /* TODO: clustering: This needed for handling NIC resets.
+   * For clusters we can only add/remove filters from intefaces.
    */
-  if( oofilter->thc != NULL ) {
-    ci_log("%s: ERROR: not supported on clustered filters", __FUNCTION__);
+  if( new_stack != NULL && oofilter->thc != NULL ) {
+    ci_log("%s: ERROR: Stack moving not supported on clustered filters",
+           __FUNCTION__);
     return -EINVAL;
   }
 
-  oo_hw_filter_clear_hwports(oofilter, ~hwport_mask);
+  oo_hw_filter_clear_hwports(oofilter, ~hwport_mask, redirect);
 
   for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
     if( hwport_mask & (1 << hwport) ) {
-      if( (vi_id = tcp_helper_rx_vi_id(new_stack, hwport)) >= 0 ) {
-        if( oofilter->filter_id[hwport] >= 0 ) {
-          unsigned stack_id = tcp_helper_vi_hw_stack_id(new_stack, hwport);
-          ci_assert( stack_id >= 0 );
-          efrm_filter_redirect(get_client(hwport), oofilter->filter_id[hwport],
-                               vi_id, stack_id);
-        }
-        else {
-          add_hwports |= 1 << hwport;
-        }
+      /* has the target stack got hwport */
+      if( new_stack != NULL )
+        vi_id = tcp_helper_rx_vi_id(new_stack, hwport);
+      else if( oofilter->thc != NULL )
+        vi_id = tcp_helper_cluster_vi_base(oofilter->thc, hwport);
+      else
+        vi_id = redirect ? 0 : -1;
+
+      /* Remove filter due to lack of hardware? */
+      if( vi_id < 0 ) {
+        /* if the target stack has no vi on this hwport, we will not install
+         * the filter even though with KERNEL_REDIRECT it would be possible
+         * This means that KERNEL_REDIRECT filter hwports will match
+         * MAC_FILTER's hwport allocation.
+         *
+         * For KERNEL_REDIRECT filters not to owned by a stack,
+         * we install filters on all suggested hwports.
+         */
+        oo_hw_filter_clear_hwport(oofilter, hwport);
+        continue;
+      }
+
+      /* Mark for installing new filter? */
+      if( oofilter->filter_id[hwport] < 0 ) {
+        add_hwports |= 1 << hwport;
+        continue;
+      }
+
+      /* Move filter between stacks */
+      /*
+       * Only in non-clustered stack case there is work to do.
+       */
+      if( redirect ) {
+        /* Always need to point to vi_id 0, so nothing to do */
+      }
+      else if( oofilter->thc != NULL ) {
+        /* Nothing to do. We would only enter here with new_stack == NULL,
+         * as the check is done above */
       }
       else {
-        oo_hw_filter_clear_hwport(oofilter, hwport);
+        /* Move filter between stacks we attempt this even when new_stack
+         * == old_stack */
+        unsigned stack_id = tcp_helper_vi_hw_stack_id(new_stack, hwport);
+        ci_assert_ge( stack_id, 0 );
+        efrm_filter_redirect(get_client(hwport),
+                             oofilter->filter_id[hwport], vi_id,
+                             stack_id);
       }
     }
 
   /* Insert new filters for any other interfaces in hwport_mask. */
   oofilter->trs = new_stack;
-  return oo_hw_filter_add_hwports(oofilter, protocol, saddr, sport,
-                                  daddr, dport, vlan_id, set_vlan_mask,
+  return oo_hw_filter_add_hwports(oofilter, oo_filter_spec, set_vlan_mask,
                                   add_hwports, src_flags);
 }
 
@@ -319,41 +437,4 @@ unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter)
       if( oofilter->filter_id[hwport] >= 0 )
         hwport_mask |= 1 << hwport;
   return hwport_mask;
-}
-
-
-int oo_hw_filter_set_thc(struct oo_hw_filter* oofilter,
-                         tcp_helper_cluster_t* thc, int protocol,
-                         unsigned daddr, int dport,
-                         unsigned hwport_mask)
-{
-  struct efx_filter_spec spec;
-  int hwport, base_vi_id, rc;
-
-  ci_assert_equal(oofilter->trs, NULL);
-  oofilter->thc = thc;
-  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
-    if( hwport_mask & (1 << hwport) && thc->thc_vi_set[hwport] != NULL ) {
-      base_vi_id = efrm_vi_set_get_base(thc->thc_vi_set[hwport]);
-      efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED,
-                         EFX_FILTER_FLAG_RX_SCATTER | EFX_FILTER_FLAG_RX_RSS,
-                         base_vi_id);
-      spec.rss_context = efrm_vi_set_get_rss_context(thc->thc_vi_set[hwport]);
-#if EFX_DRIVERLINK_API_VERSION >= 15
-      {
-        int stack_id = tcp_helper_cluster_vi_hw_stack_id(thc, hwport);
-        ci_assert( stack_id >= 0 );
-        efx_filter_set_stack_id(&spec, stack_id);
-      }
-#endif
-      rc = efx_filter_set_ipv4_local(&spec, protocol, daddr, dport);
-      ci_assert_equal(rc, 0);
-      rc = efrm_filter_insert(get_client(hwport), &spec, false);
-      if( rc < 0 ) {
-        oo_hw_filter_clear(oofilter);
-        return rc;
-      }
-      oofilter->filter_id[hwport] = rc;
-    }
-  return 0;
 }

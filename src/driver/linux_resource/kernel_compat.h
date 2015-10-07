@@ -70,66 +70,6 @@
 #include <linux/nsproxy.h>
 #endif
 
-/********* wait_for_completion_timeout() ********************/
-
-/* RHEL_RELEASE_CODE from linux/version.h is only defined for 2.6.9-55EL
- * UTS_RELEASE is unfortunately unusable
- * Really only need this fix for <2.6.9-34EL
- */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)) && \
-	!defined(RHEL_RELEASE_CODE)
-
-static inline unsigned long fastcall
-efrm_wait_for_completion_timeout(struct completion *x, unsigned long timeout)
-{
-	might_sleep();
-
-	spin_lock_irq(&x->wait.lock);
-	if (!x->done) {
-		DECLARE_WAITQUEUE(wait, current);
-
-		wait.flags |= WQ_FLAG_EXCLUSIVE;
-		__add_wait_queue_tail(&x->wait, &wait);
-		do {
-			__set_current_state(TASK_UNINTERRUPTIBLE);
-			spin_unlock_irq(&x->wait.lock);
-			timeout = schedule_timeout(timeout);
-			spin_lock_irq(&x->wait.lock);
-			if (!timeout) {
-				__remove_wait_queue(&x->wait, &wait);
-				goto out;
-			}
-		} while (!x->done);
-		__remove_wait_queue(&x->wait, &wait);
-	}
-	x->done--;
-out:
-	spin_unlock_irq(&x->wait.lock);
-	return timeout;
-}
-
-#  ifdef wait_for_completion_timeout
-#    undef wait_for_completion_timeout
-#  endif
-#  define wait_for_completion_timeout efrm_wait_for_completion_timeout
-
-#endif
-
-/********* io mapping ********************/
-
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,9)
-
-  #ifndef __iomem
-  #define __iomem
-  #endif
-
-  static inline void efrm_iounmap(volatile void __iomem *addr)
-  {
-	  iounmap((void __iomem *)addr);
-  }
-  #define iounmap(arg) efrm_iounmap(arg)
-
-#endif
 
 /********* IOMMU mapping ********************/
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
@@ -240,12 +180,6 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #  endif
 #endif
 
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,8))
-static inline void efrm_pci_disable_msi(struct pci_dev *dev) {}
-#undef pci_disable_msi
-#define pci_disable_msi efrm_pci_disable_msi
-#endif
 
 /* VM_RESERVED prevents the MM from attempting to swap-out these
  * pages.

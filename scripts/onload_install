@@ -376,10 +376,23 @@ install_kernel_modules() {
   if [ -z "$i_prefix" ]; then
     $do /sbin/depmod -a "$KVER" || log "depmod exited with status $?"
   fi
-  # Debian/Ubuntu: get new sfc.ko into ramfs
-  if [ -z "$i_prefix" -a -f "/boot/initrd.img-$KVER" ] && \
-     which update-initramfs >/dev/null 2>&1; then
-    $do update-initramfs -u -k $KVER
+
+  if [ -z "$i_prefix" ]; then
+    if [ -f "/boot/initrd.img-$KVER" ]; then
+      # Debian/Ubuntu: get new sfc.ko into ramfs
+      if which update-initramfs >/dev/null 2>&1; then
+        $do update-initramfs -u -k $KVER
+      # RHEL7: get new sfc.ko into ramfs
+      elif which dracut >/dev/null 2>&1; then
+        $do dracut --kver $KVER
+      else
+        log "WARNING: commands to update initrd not found"
+        log "WARNING: please update your initrd manually."
+      fi
+    else
+      log "WARNING: initrd not found in default location."
+      log "WARNING: please update your initrd manually."
+    fi
   fi
 
   # Install driver meta-data.

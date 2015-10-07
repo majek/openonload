@@ -36,18 +36,25 @@
 
 #ifdef __KERNEL__
 
+/* Caller must call oo_os_sock_put() to release the os_sock*/
 int oo_os_sock_get_from_ep(tcp_helper_endpoint_t* ep, oo_os_file* os_sock_out)
 {
+  unsigned long lock_flags;
+
+  spin_lock_irqsave(&ep->lock, lock_flags);
   if( ep->os_socket != NULL ) {
     *os_sock_out = ep->os_socket->file;
+    get_file(*os_sock_out);
+    spin_unlock_irqrestore(&ep->lock, lock_flags);
     ci_assert(*os_sock_out != NULL);
     return 0;
   }
+  spin_unlock_irqrestore(&ep->lock, lock_flags);
   *os_sock_out = NULL;
   return -EINVAL;
 }
 
-
+/* Caller must call oo_os_sock_put() to release the os_sock */
 int oo_os_sock_get(ci_netif* ni, oo_sp sock_p, oo_os_file* os_sock_out)
 {
   int sock_id = OO_SP_TO_INT(sock_p);
@@ -86,7 +93,7 @@ int oo_os_sock_get(ci_netif* ni, oo_sp sock_p, oo_os_file* os_sock_out)
 }
 
 
-void oo_os_sock_release(ci_netif* ni, oo_os_file fd)
+static void oo_os_sock_release(ci_netif* ni, oo_os_file fd)
 {
   int rc = ci_sys_close(fd);
   oo_rwlock_unlock_read(&citp_dup2_lock);

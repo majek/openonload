@@ -905,15 +905,10 @@ cicp_fwdinfo_addr_kind(const cicp_fwdinfo_t *fwdt, ci_ip_addr_net_t ip,
 {
   const cicp_fwd_row_t *row    = &fwdt->path[0];
   const cicp_fwd_row_t *maxrow = row + fwdt->rows_max;
-  ci_ip_addr_t net_addr;
 
   out_addr_kind->bitsvalue = 0;  /* clear all bits to zero */
 
   while( row < maxrow && cicp_fwd_row_allocated(row) ) {
-    CI_IP_ADDR_SET_SUBNET(&net_addr, &row->net_ip, row->net_ipset);
-
-    if (CI_IP_ADDR_EQ(&ip, &net_addr))
-      out_addr_kind->bits.is_netaddr = 1;
 
     if (CI_IP_ADDR_EQ(&ip, &row->net_ip))
       out_addr_kind->bits.is_ownaddr = 1;
@@ -1024,20 +1019,6 @@ _cicpos_route_find(const cicp_fwdinfo_t   *routet,
 
     return row < maxrow && cicp_fwd_row_allocated(row)?
 	   (ci_uint32)(row-minrow): CICP_FWD_ROWID_BAD;
-}
-
-
-
-
-ci_inline int cicp_blacklist_match(const ci_int8 *blacklist_to_intf_i,
-                                   int max_index, ci_ifid_t ifindex)
-{
-  int i;
-  ci_assert_le(max_index, CI_CFG_MAX_BLACKLIST_INTERFACES);
-  for( i = 0; i < max_index; ++i)
-    if( blacklist_to_intf_i[i] == ifindex )
-      return 1;
-  return 0;
 }
 
 
@@ -1191,6 +1172,7 @@ cicp_user_retrieve(ci_netif*                    ni,
   ci_ip_addr_kind_t kind;
   ci_mac_addr_t mac_storage;
   void* source_mac;
+  const void* const_source_mac;
   ci_int16 bond_rowid;
   int osrc;
 
@@ -1237,6 +1219,7 @@ cicp_user_retrieve(ci_netif*                    ni,
     osrc = cicp_llap_retrieve(CICP_HANDLE(ni), ipcache->ifindex, &ipcache->mtu,
                               &ipcache->hwport, source_mac, &ipcache->encap,
                               NULL/*base_ifindex*/, &bond_rowid);
+    const_source_mac = source_mac;
     if( osrc != 0 || ! ci_ip_cache_is_onloadable(ni, ipcache)
 #if CI_CFG_TEAMING
         || ( (ipcache->encap.type & CICP_LLAP_TYPE_BOND) && 
@@ -1279,7 +1262,10 @@ cicp_user_retrieve(ci_netif*                    ni,
       goto noroute;
     ipcache->mtu = row->mtu;
     ci_assert(ipcache->mtu);
-    if( ipcache->ip.ip_daddr_be32 == row->net_ip ||
+    /* We could use cicp_fwdinfo_addr_kind(ip.ip_daddr_be32), but it is
+     * rather expensive.  Instead, we just match with the "preferred source"
+     * of this route to find if the destination address is a local one. */
+    if( ipcache->ip.ip_daddr_be32 == row->pref_source ||
         row->encap.type == CICP_LLAP_TYPE_LOOP) {
       ipcache->status = retrrc_localroute;
       ipcache->encap.type = CICP_LLAP_TYPE_SFC;
@@ -1301,7 +1287,7 @@ cicp_user_retrieve(ci_netif*                    ni,
     else
       ipcache->ip_saddr_be32 = row->pref_source;
     ipcache->encap = row->encap;
-    source_mac = &row->pref_src_mac;
+    const_source_mac = &row->pref_src_mac;
     bond_rowid = row->bond_rowid;
   }
 
@@ -1315,7 +1301,7 @@ cicp_user_retrieve(ci_netif*                    ni,
   else {
     ipcache->ether_offset = ETH_VLAN_HLEN;
   }
-  memcpy(ci_ip_cache_ether_shost(ipcache), source_mac, ETH_ALEN);
+  memcpy(ci_ip_cache_ether_shost(ipcache), const_source_mac, ETH_ALEN);
 
   /* Find the next hop, initialise the destination mac and select TTL. */
   if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) ) {
@@ -1472,6 +1458,7 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
   ipcache->ip.ip_ttl = from_ipcache->ip.ip_ttl;
   ipcache->status = from_ipcache->status;
   ipcache->flags = from_ipcache->flags;
+  ipcache->nexthop = from_ipcache->nexthop;
   /* ipcache->pmtus = something; */
   ipcache->mtu = from_ipcache->mtu;
   ipcache->ifindex = from_ipcache->ifindex;

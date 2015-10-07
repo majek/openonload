@@ -516,8 +516,7 @@ efab_ipp_icmp_qpkt(tcp_helper_resource_t* thr,
     get_errno(icmp_type, icmp_code, &err, &hard);
     OO_DEBUG_IPP(ci_log("%s: TCP", __FUNCTION__));
 
-    s->so_error = err;
-    ci_tcp_drop(ni, ts, 0);
+    ci_tcp_drop(ni, ts, err);
   }
 }
 

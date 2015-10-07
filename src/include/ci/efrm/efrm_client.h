@@ -21,7 +21,10 @@ struct efrm_client;
 
 
 struct efrm_client_callbacks {
+        /* Called after NIC is back up and MCDI is possible. */
 	void (*post_reset)(struct efrm_client *, void *user_data);
+        /* Called when a reset has been notified. */
+	void (*reset_suspend)(struct efrm_client *, void *user_data);
 };
 
 

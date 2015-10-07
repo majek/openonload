@@ -184,6 +184,12 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_BLOCK_KERNEL_MULTICAST 0x7C
 # define                CI_RSOP_TX_PT_SNIFF             0x7D
 # define                CI_RSOP_VI_GET_RX_ERROR_STATS   0x7E
+# define                CI_RSOP_FILTER_ADD_MAC_IP_PROTO 0x7F
+# define                CI_RSOP_FILTER_ADD_MAC_ETHER_TYPE         0x80
+# define                CI_RSOP_FILTER_ADD_IP_PROTO_VLAN          0x81
+# define                CI_RSOP_FILTER_ADD_ETHER_TYPE_VLAN        0x82
+# define                CI_RSOP_FILTER_ADD_IP_PROTO     0x83
+# define                CI_RSOP_FILTER_ADD_ETHER_TYPE   0x84
 
   union {
     struct {
@@ -228,7 +234,14 @@ typedef struct ci_resource_op_s {
 #     define            CI_RSOP_FILTER_ADD_FLAG_REPLACE            1
 #     define            CI_RSOP_FILTER_ADD_FLAG_MCAST_LOOP_RECEIVE 2
       int32_t           flags;
-      int32_t           out_filter_id;
+      union {
+        struct {
+          uint16_t      ether_type_be16;
+        } in;
+        struct {
+          int32_t       filter_id;
+        } out;
+      } u;
     } filter_add;
     struct {
       int32_t           filter_id;

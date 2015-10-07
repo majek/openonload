@@ -47,6 +47,9 @@ public class OnloadExt {
     public static final int ONLOAD_SCOPE_USER        = 3;
     /** Make name global.  @see SetStackName() */
     public static final int ONLOAD_SCOPE_GLOBAL      = 4;
+    /** Special stack name value to allow creating unaccelerated sockets.
+     * @see SetStackName() */
+    public static final String ONLOAD_DONT_ACCELERATE = null;
     
     /** Set all types of spin.  @see SetSpin */
     public static final int ONLOAD_SPIN_ALL          = 0;
@@ -86,7 +89,8 @@ public class OnloadExt {
     /** Set the current stack name.
      * From this point onwards, until another call to this function overrides
      * it, sockets created by 'who' will be in 'stackname' (where the name is
-     * local to 'scope')
+     * local to 'scope').  If stackname is ONLOAD_DONT_ACCELERATE, the socket
+     * will be unaccelerated and not placed in any stack.
      * @param who       should this call apply to only this thread, or the
      *                  whole process?  (Also used for 
      * @param scope     is the name system wide, or local to this thread etc.
@@ -99,6 +103,7 @@ public class OnloadExt {
      * @see ONLOAD_SCOPE_PROCESS
      * @see ONLOAD_SCOPE_USER
      * @see ONLOAD_SCOPE_GLOBAL
+     * @see ONLOAD_DONT_ACCELERATE
      */
     public static native int SetStackName (int who, int scope,
                                            String stackname );
@@ -164,8 +169,8 @@ public class OnloadExt {
      * @param stat   statistics structure, filled out by this call.
      * @return 0 on success, negative error code on failure.
      */
-    public static native int FdStat (java.io.FileDescriptor socket, Stat stat );
-    
+     public static native int FdStat (java.io.FileDescriptor socket, Stat stat );
+
     /** Checks whether the given feature is supported.
      * @param fd      The socket to check.
      * @param feature The feature to check support for.
@@ -195,6 +200,42 @@ public class OnloadExt {
      */
     public static native int ResetStackOptions ();
 
+    /** Move a newly created accepted socket to the current stack.
+     * @param fd   the socket to get information on.
+     * @return 0 or negative error code.
+     * @note This method only currently suports connected TCP sockets.
+     */
+    public static native int MoveFd ( int fd );
+
+    /** Move a newly created accepted socket to the current stack.
+     * @param fd   the socket to get information on.
+     * @return 0 or negative error code.
+     * @note This method only makes sense for connected TCP sockets,
+     *       not datagram or server sockets.
+     */
+    public static native int MoveFd ( java.io.FileDescriptor fd );
+
+    /** Move a newly created accepted socket to the current stack.
+     * @param socket   the socket to move.
+     * @return 0 or negative error code.
+     * @note This method only currently suports connected TCP sockets.
+     */
+    public static native int MoveFd ( java.net.Socket socket );
+
+    /** Move a newly created accepted socket to the current stack.
+     * @param socket   the socket to move.
+     * @return 0 or negative error code.
+     * @note This method only currently suports connected TCP sockets.
+     */
+    public static native int MoveFd ( java.net.DatagramSocket socket );
+
+    /** Move a newly created accepted socket to the current stack.
+     * @param socket   the socket to move.
+     * @return 0 or negative error code.
+     * @note This method only currently suports connected TCP sockets.
+     */
+    public static native int MoveFd ( java.net.ServerSocket socket );
+    
     /** Simple unit test and example */
     public static void main(String[] args) throws java.net.SocketException,
                                                   java.io.IOException
@@ -211,7 +252,7 @@ public class OnloadExt {
 
         System.out.println( "Expected: oo:java[xxx]: Using OpenOnload xxx Copyright 2006-xxx Solarflare Communications, 2002-2005 Level 5 Networks [x]\n" );
 
-        java.net.DatagramSocket s = new java.net.DatagramSocket( 5400 );
+        java.net.DatagramSocket ds1 = new java.net.DatagramSocket( 5400 );
 
         rc = OnloadExt.SetStackName( ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "Mary" );
         ok &= rc==0;
@@ -221,6 +262,11 @@ public class OnloadExt {
 
         rc = OnloadExt.SetStackName( ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "Hidden" );
         ok &= rc==0;
+
+        rc = OnloadExt.SetStackName( ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, ONLOAD_DONT_ACCELERATE );
+        ok &= rc==0;
+
+        java.net.DatagramSocket ds2 = new java.net.DatagramSocket( 5402 );
 
         rc = OnloadExt.SetStackOption( "EF_RFC_RTO_MAX", 270 );
         ok &= rc==0;
@@ -240,21 +286,22 @@ public class OnloadExt {
         }
 
         rc = OnloadExt.SetSpin( ONLOAD_SPIN_ALL, true );
-        java.net.ServerSocket s2 = new java.net.ServerSocket( 5401 );
+        java.net.ServerSocket ss1 = new java.net.ServerSocket( 5401 );
         ok &= rc==0;
 
         ok &= ( 0 == OnloadExt.CheckFeature( 14, OnloadExt.ONLOAD_FD_FEAT_MSG_WARM ) );
 
         System.out.println( "Expected: oo:java[xxx]: Using OpenOnload xxx Copyright 2006-xxx Solarflare Communications, 2002-2005 Level 5 Networks [y,Mary]" );
 
-        java.net.Socket s3 = new java.net.Socket( "localhost", 5401 );
+        java.net.Socket ss2 = new java.net.Socket( "localhost", 5401 );
+        java.net.Socket ss3 = ss1.accept();
 
         rc = OnloadExt.FdStat( d, stat );
         System.out.println( "\n        Rval: " + rc
                   + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
-                  + " Endpoint State: " + stat.endpointState
+                  + " Endpoint State: " + Integer.toHexString(stat.endpointState)
                 );
         System.out.println( "Expect: Rval: -22 Stack ID: 0 Name:  Endpoint ID: 0 Endpoint State: 0" );
         ok &= rc <= 0;
@@ -262,38 +309,43 @@ public class OnloadExt {
         ok &= stat.stackName.equals("");
         ok &= stat.endpointState == 0;
 
-        rc = OnloadExt.FdStat( s, stat );
+        rc = OnloadExt.FdStat( ds1, stat );
         System.out.println( "\n        Rval: " + rc
                   + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
-                  + " Endpoint State: " + stat.endpointState
+                  + " Endpoint State: " + Integer.toHexString(stat.endpointState)
                 );
-        System.out.println( "Expect: Rval: x Stack ID: x Name:  Endpoint ID: nn Endpoint State: 45312" );
+        System.out.println( "Expect: Rval: x Stack ID: x Name:  Endpoint ID: nn Endpoint State: b000" );
         ok &= rc > 0;
         ok &= stat.stackName.equals("");
         ok &= stat.endpointId > 0;
-        ok &= stat.endpointState == 45312;
+        ok &= stat.endpointState == 0xb000; //CI_TCP_STATE_UDP
 
-        rc = OnloadExt.FdStat( s2, stat );
+        rc = OnloadExt.FdStat( ds2, stat );
+        System.out.println( "\n        Rval: " + rc);
+        System.out.println( "Expect: Rval: 0" );
+        ok &= rc==0;
+
+        rc = OnloadExt.FdStat( ss1, stat );
         System.out.println( "\n        Rval: " + rc
                   + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
-                  + " Endpoint State: " + stat.endpointState
+                  + " Endpoint State: " + Integer.toHexString(stat.endpointState)
                 );
-        System.out.println( "Expect: Rval: x Stack ID: y Name: Mary Endpoint ID: nn Endpoint State: 4934" );
+        System.out.println( "Expect: Rval: x Stack ID: y Name: Mary Endpoint ID: nn Endpoint State: 1246" );
         ok &= rc > 0;
         ok &= stat.stackName.equals("Mary");
         ok &= stat.endpointId > 0;
-        ok &= stat.endpointState == 4934;
+        ok &= stat.endpointState == 0x1246; //CI_TCP_LISTEN
 
-        rc = OnloadExt.FdStat( s3, stat );
+        rc = OnloadExt.FdStat( ss2, stat );
         System.out.println( "\n        Rval: " + rc
                   + " Stack ID: " + stat.stackId
                   + " Name: " + stat.stackName
                   + " Endpoint ID: " + stat.endpointId
-                  + " Endpoint State: " + stat.endpointState
+                  + " Endpoint State: " + Integer.toHexString(stat.endpointState)
                 );
         System.out.println( "Expect: Rval: 0 Stack ID: 0 Name:  Endpoint ID: 0 Endpoint State: 0" );
         ok &= rc == 0;
@@ -301,9 +353,34 @@ public class OnloadExt {
         ok &= stat.endpointId == 0;
         ok &= stat.endpointState == 0;
 
-        s.close();
-        s2.close();
-        s3.close();
+        /* Connected socket */
+        System.out.println( "\n** Have DUT2 connect TCP to port 5401 please **" );
+        java.net.Socket ss4 = ss1.accept();
+
+        rc = OnloadExt.SetStackName( ONLOAD_ALL_THREADS, ONLOAD_SCOPE_GLOBAL, "Joe" );
+        ok &= rc==0;
+        rc = OnloadExt.MoveFd( ss4 );
+        ok &= rc==0;
+
+        rc = OnloadExt.FdStat( ss4, stat );
+        System.out.println( "\n        Rval: " + rc
+                  + " Stack ID: " + stat.stackId
+                  + " Name: " + stat.stackName
+                  + " Endpoint ID: " + stat.endpointId
+                  + " Endpoint State: " + Integer.toHexString(stat.endpointState)
+                );
+        System.out.println( "Expect: Rval: x Stack ID: y Name: Joe Endpoint ID: nn Endpoint State: 3331" );
+        ok &= rc > 0;
+        ok &= stat.stackName.equals("Joe");
+        ok &= stat.endpointId > 0;
+        ok &= stat.endpointState == 0x3331; //CI_TCP_ESTABLISHED
+
+        ds1.close();
+        ds2.close();
+        ss1.close();
+        ss2.close();
+        ss3.close();
+        ss4.close();
 
         if ( ok )
           System.out.println( "\n\t\tTest Passed" );

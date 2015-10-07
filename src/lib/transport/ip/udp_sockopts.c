@@ -213,7 +213,7 @@ int ci_udp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
       if(  us->s.so_error ) {
       	u = ci_get_so_error(&us->s);
       } else {
-	ci_fd_t os_sock = ci_get_os_sock_fd (ep, fd);
+	ci_fd_t os_sock = ci_get_os_sock_fd(fd);
         if( !__get_socket_opt(ep, os_sock, level, optname, optval, optlen) )
 	  u = *(int*)optval;
         ci_rel_os_sock_fd( os_sock );
@@ -229,7 +229,7 @@ int ci_udp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
     switch (optname) {
     case IP_RECVERR:
       {
-	ci_fd_t os_sock = ci_get_os_sock_fd (ep, fd);
+	ci_fd_t os_sock = ci_get_os_sock_fd(fd);
         if( !__get_socket_opt(ep, os_sock, level, optname, optval, optlen) )
 	  u = *(int*)optval;
         ci_rel_os_sock_fd( os_sock );
@@ -251,13 +251,13 @@ int ci_udp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
       goto u_out_char;
 
     default:
-      return ci_get_sol_ip(ep, &us->s, fd, optname, optval, optlen);
+      return ci_get_sol_ip(netif, &us->s, fd, optname, optval, optlen);
     }
 
 #if CI_CFG_FAKE_IPV6
   } else if (level ==  IPPROTO_IPV6 && us->s.domain == AF_INET6) {
     /* IP6 level options valid for TCP */
-    return ci_get_sol_ip6(ep, &us->s, fd, optname, optval, optlen);
+    return ci_get_sol_ip6(&us->s, fd, optname, optval, optlen);
 #endif
 
   } else if (level == IPPROTO_UDP) {
@@ -339,11 +339,11 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       }
 
       us->s.so.rcvbuf = v;
-      /* It is essential that [max_recvq_depth] be <= SO_RCVBUF, else
+      /* It is essential that [max_recvq_pkts] be <= SO_RCVBUF, else
        * SO_RCVBUF has no effect (see ci_udp_rx_deliver()).  Simplest thing
        * is to reset it to zero.
        */
-      us->stats.max_recvq_depth = 0;
+      us->stats.max_recvq_pkts = 0;
       break;
 
     case SO_TIMESTAMP:
@@ -580,7 +580,7 @@ int ci_udp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
 
   /* Keep the OS socket in sync so we can move freely between efab & OS fds
   ** on a per-call basis if necessary. */
-  os_sock = ci_get_os_sock_fd(ep, fd);
+  os_sock = ci_get_os_sock_fd(fd);
   ci_assert(CI_IS_VALID_SOCKET(os_sock));
   rc = __set_socket_opt(ep, os_sock, level, optname, optval, optlen);
   if( rc == CI_SOCKET_ERROR &&

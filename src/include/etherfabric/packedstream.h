@@ -92,7 +92,7 @@ typedef struct {
  */
 #define EF_VI_PS_FLAG_BAD_L3_CSUM      0x10
 
-/* Retained for backwards compatibility.  Do not use. */
+/*! \brief Retained for backwards compatibility.  Do not use. */
 #define EF_VI_PS_FLAG_BAD_IP_CSUM      (EF_VI_PS_FLAG_BAD_L4_CSUM |     \
                                         EF_VI_PS_FLAG_BAD_L3_CSUM)
 

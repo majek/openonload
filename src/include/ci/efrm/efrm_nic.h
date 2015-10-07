@@ -88,6 +88,14 @@ struct efrm_nic {
 	 */
 	int32_t rx_sniff_rxq;
 	int32_t tx_sniff_rxq;
+
+	/* Flags protected by [lock]. */
+	unsigned rnic_flags;
+#define EFRM_NIC_FLAG_DRIVERLINK_PROHIBITED      0x00000001u
+
+	/* Counter incrementing with each reset/hotplug, to avoid races between
+	 * failing operations and resets that would fix them. */
+	unsigned driverlink_generation;
 };
 
 

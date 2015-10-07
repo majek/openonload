@@ -25,9 +25,8 @@
 
 #include "aoe.h"
 #include <linux/netdevice.h>
-#include <net_driver.h>
 #include <mcdi.h>
-#include <driverlink_api.h>
+/* #include <driverlink_api.h> via net_driver.h */
 
 static int aoe_dl_probe(struct efx_dl_device* dl_dev,
 			const struct net_device* net_dev,

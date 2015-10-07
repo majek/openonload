@@ -74,11 +74,13 @@ ci_inline int oo_pkt_fill_copy(void* to, const void* from, int n_bytes
 
 
 int oo_pkt_fill(ci_netif* ni, ci_sock_cmn* s, int* p_netif_locked,
+                int can_block,
                 struct oo_pkt_filler* pf, ci_iovec_ptr* piov,
                 int bytes_to_copy  CI_KERNEL_ARG(ci_addr_spc_t addr_spc))
 {
   ci_ip_pkt_fmt* next_pkt;
   int n;
+  int rc;
 
   ci_assert_le(bytes_to_copy, ci_iovec_ptr_bytes_count(piov));
   ci_assert_ge((int) (pf->buf_end - pf->buf_start), 0);
@@ -117,11 +119,12 @@ int oo_pkt_fill(ci_netif* ni, ci_sock_cmn* s, int* p_netif_locked,
 
       next_pkt = oo_pkt_filler_next_pkt(ni, pf, *p_netif_locked);
       if( next_pkt == NULL ) {
-        next_pkt = ci_netif_pkt_alloc_block(ni, s, p_netif_locked);
-#ifdef __KERNEL__
-        if(CI_UNLIKELY( next_pkt == NULL ))
-          return -ERESTARTSYS;
-#endif
+        ci_assert(p_netif_locked);
+        rc = ci_netif_pkt_alloc_block(ni, s, p_netif_locked, can_block,
+                                      &next_pkt);
+        if( rc != 0 )
+          return rc;
+
       }
       oo_tx_pkt_layout_init(next_pkt);
       ++pf->pkt->n_buffers;

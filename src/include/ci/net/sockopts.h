@@ -103,6 +103,11 @@ struct ci_tcp_info
   ci_uint32 tcpi_snd_cwnd;
   ci_uint32 tcpi_advmss;
   ci_uint32 tcpi_reordering;
+
+  ci_uint32 tcpi_rcv_rtt;
+  ci_uint32 tcpi_rcv_space;
+
+  ci_uint32 tcpi_total_retrans;
 };
 
 #endif /* __CI_NET_SOCKOPTS_H__ */

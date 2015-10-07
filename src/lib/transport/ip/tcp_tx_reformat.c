@@ -98,7 +98,7 @@ static ci_ip_pkt_fmt* ci_tcp_tx_allocate_pkt(ci_netif* ni, ci_tcp_state* ts,
 {
   ci_ip_pkt_fmt* next;
 
-  next = ci_netif_pkt_tx_tcp_alloc(ni);
+  next = ci_netif_pkt_tx_tcp_alloc(ni, ts);
   if( ! next )  return NULL;
   oo_tx_pkt_layout_init(next);
   ci_pkt_init_from_ipcache_len(next, &ts->s.pkt, hdrlen);

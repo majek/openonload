@@ -95,10 +95,11 @@ ssize_t linux_tcp_helper_fop_sendpage_udp(struct file* filp,
                                           int offset, size_t size,
                                           loff_t* ppos, int flags)
 {
-  ci_private_t* priv = filp->private_data;
-  tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
-  tcp_helper_endpoint_t* ep = ci_trs_get_valid_ep(trs, priv->sock_id);
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(filp->private_data);
+  struct file* os_sock;
+  int rc;
 
-  return ep->os_socket->file->f_op->sendpage(ep->os_socket->file,
-                                             page, offset, size, ppos, flags);
+  OO_OS_SOCKET_FOP(ep, os_sock, rc, sendpage,
+                   page, offset, size, ppos, flags);
+  return rc;
 }

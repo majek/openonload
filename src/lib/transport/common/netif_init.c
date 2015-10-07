@@ -111,7 +111,8 @@ ci_inline void __citp_remove_netif(ci_netif* ni)
 }
 
 
-static int __citp_netif_alloc(ef_driver_handle* fd, const char *name, 
+static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
+                              int flags,
                               ci_netif** out_ni)
 {
   int rc;
@@ -145,7 +146,7 @@ static int __citp_netif_alloc(ef_driver_handle* fd, const char *name,
         goto fail3;
     }
 
-    rc = ci_netif_ctor(ni, *fd, name, 0);
+    rc = ci_netif_ctor(ni, *fd, name, flags);
     if( rc == 0 ) {
       break;
     }
@@ -288,6 +289,7 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
   ci_netif* ni = NULL;
   int rc;
   char* stackname;
+  int use_scalable_clustered_stack = 0;
 
   ci_assert( citp_netifs_inited );
   ci_assert( fd );
@@ -301,21 +303,39 @@ int citp_netif_alloc_and_init(ef_driver_handle* fd, ci_netif** out_ni)
     CITP_FDTABLE_UNLOCK();
     return CI_SOCKET_HANDOVER;
   }
+  else if( ci_cfg_opts.netif_opts.scalable_filter_enable ==
+             CITP_SCALABLE_FILTERS_ENABLE &&
+           (ci_cfg_opts.netif_opts.scalable_filter_mode &
+             CITP_SCALABLE_MODE_RSS) &&
+           stackname[0] == '\0' ) {
+    use_scalable_clustered_stack = 1;
+  }
 
   /* Look through the active netifs for a stack with a name that
    * matches.  If it has no name, ignore it if DONT_USE_ANON netif
    * flag is set
    */
-  if( ci_dllist_not_empty(&citp_active_netifs) )
+  if( ci_dllist_not_empty(&citp_active_netifs) ) {
     CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs)
-      if( strncmp(ni->state->name, stackname, CI_CFG_STACK_NAME_LEN) == 0 )
-        if( strlen(ni->state->name) != 0 || 
-            (ni->flags & CI_NETIF_FLAGS_DONT_USE_ANON) == 0 )
+      if( ! use_scalable_clustered_stack ) {
+        if( strncmp(ni->state->name, stackname, CI_CFG_STACK_NAME_LEN) == 0 )
+          if( strlen(ni->state->name) != 0 ||
+              (ni->flags & CI_NETIF_FLAGS_DONT_USE_ANON) == 0 )
+            break;
+      }
+      else if( ni->state->flags & CI_NETIF_FLAG_SCALABLE_FILTERS_RSS &&
+               ni->state->pid == getpid() ) {
+          /* We pick the stack that is marked with the above flag.
+           * A process is expected to have access only to one of these. */
           break;
+     }
+  }
 
   if( ni == NULL ) {
     /* Allocate a new netif */
-    rc = __citp_netif_alloc(fd, stackname, &ni);
+    int flags = use_scalable_clustered_stack ?
+                CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS : 0;
+    rc = __citp_netif_alloc(fd, stackname, flags, &ni);
     if( rc < 0 ) {
       Log_E(ci_log("%s: failed to create netif (%d)", __FUNCTION__, -rc));
       goto fail;
@@ -447,80 +467,24 @@ ci_netif* __citp_get_any_netif(void)
 
 #if CI_CFG_FD_CACHING
 
-static void ci_tcp_acceptq_drop_cached_from_waitable(ci_netif* ni,
-                                                     citp_waitable* w)
-{
-  ci_tcp_state* ts;
-  oo_sp next;
-
-  do {
-    next = w->wt_next;
-
-    ts = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
-    if( ci_tcp_is_cached(ts) )
-      ci_tcp_helper_close_no_trampoline(ts->cached_on_fd);
-    if( OO_SP_IS_NULL(next) )
-      return;
-    w = SP_TO_WAITABLE(ni, next);
-  } while(1);
-}
-
-
-/* Call close on every cached fd in the acceptq. */
-static void ci_tcp_acceptq_drop_cached(ci_netif* ni,
-                                       ci_tcp_socket_listen* tls)
-{
-  citp_waitable* w;
-  ci_assert(ci_sock_is_locked(ni, &tls->s.b));
-
-  if( ci_tcp_acceptq_not_empty(tls) ) {
-    /* Either acceptq_get or acceptq_put is non-empty.  If acceptq_get
-     * is empty, swizzle acceptq_put into it.  Else we cannot swizzle
-     * so drop from acceptq_put directly. */
-    if( OO_SP_IS_NULL(tls->acceptq_get) ) {
-      ci_tcp_acceptq_get_swizzle(ni, tls);
-    }
-    else if( ci_ill_not_empty(tls->acceptq_put) ) {
-      w = SP_TO_WAITABLE(ni, OO_SP_FROM_INT(ni, tls->acceptq_put));
-      ci_tcp_acceptq_drop_cached_from_waitable(ni, w);
-    }
-    w = SP_TO_WAITABLE(ni, tls->acceptq_get);
-    ci_tcp_acceptq_drop_cached_from_waitable(ni, w);
-  }
-}
-
-
 void citp_netif_cache_disable(void)
 {
   ci_netif* ni;
-  int rc;
-  unsigned id;
   /* Disable caching on every netif. */
   if( ci_dllist_not_empty(&citp_active_netifs) )
     CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs) {
       ci_netif_lock(ni);
-      ci_assert_le(ni->state->cache_avail_stack,
+      ci_assert_le(ni->state->passive_cache_avail_stack,
                    ni->state->opts.sock_cache_max);
-      if( ni->state->cache_avail_stack != ni->state->opts.sock_cache_max ) {
+      if( ni->state->passive_cache_avail_stack !=
+          ni->state->opts.sock_cache_max ) {
         /* ioctl to drop the cache lists. */
-        rc = ci_tcp_helper_clear_epcache(ni);
+        int rc = ci_tcp_helper_clear_epcache(ni);
         /* Silence unused-but-set warning for NDEBUG builds. */
         (void)rc;
         ci_assert_equal(rc, 0);
-        /* Find all listening sockets and drop the cached fds on them. */
-        for( id = 0; id < ni->state->n_ep_bufs; ++id ) {
-          citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
-          if( wo->waitable.state == CI_TCP_LISTEN ) {
-            citp_waitable* w = &wo->waitable;
-            ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
-            ci_tcp_socket_listen* tls = SOCK_TO_TCP_LISTEN(s);
-            ci_sock_lock(ni, &tls->s.b);
-            ci_tcp_acceptq_drop_cached(ni, tls);
-            ci_sock_unlock(ni, &tls->s.b);
-          }
-        }
       }
-      ni->state->cache_avail_stack = 0;
+      ni->state->passive_cache_avail_stack = 0;
       ci_netif_unlock(ni);
     }
 }
@@ -695,75 +659,5 @@ void __citp_netif_free(ci_netif* ni)
   CI_FREE_OBJ(ni);
 }
 
-
-/*! \todo Wouldn't export from the lib. when in a separate module
- *   so moved it here for now - from whence it export's nicely! 
- *   Yep, not nice, but a pragmatic answer to something that was 
- *   taking too long to resolve. 
- */
-
-/* Rehome (by duplicating) the existing EP from [ep] to another netif.
- * The target netif is [new_ni]: a valid ptr to netif to which to rehome [ep].  
- * [ep->netif] must be locked on entry, and if valid, [new_ni] must be unlocked.
- * Returns 0 if failed to rehome (in which case [*ep] is unchanged)
- *         1 if rehomed (in which case [*ep] has been altered & [ep->netif] is
- *           locked)
- */
-int citp_rehome_closed_endpoint(citp_socket* ep, ci_fd_t fd, ci_netif* new_ni )
-{
-  ef_driver_handle new_fd = (ef_driver_handle)(-1); /* for new netif */
-  ci_netif* old_ni;
-  ci_tcp_state *old_ts, *new_ts;
-
-  ci_assert_equal(ep->s->b.state, CI_TCP_CLOSED);
-  ci_assert( ci_netif_is_locked(ep->netif) );
-
-  /* The sequence here is:
-   * 1. get a new netif (if not provided)
-   *  Failure: do nothing more, just use the existing netif
-   *  success: the netif has just been constructed. It's not locked.
-   * 2. Lock new netif, get a TCP state
-   * 3. Duplicate fields of current (CLOSED) TCP state -> new state
-   * 4. Substitute new netif, tcp-state into existing ep
-   * 5. Free-up old TCP state
-   * 6. Unlock old netif
-   */
-  old_ni = ep->netif;
-  old_ts = SOCK_TO_TCP(ep->s);
-
-  ci_assert(new_ni);
-
-  if( old_ni == new_ni ) {
-    ci_log("%s: old NI = new NI (%p)!", __FUNCTION__, old_ni);
-    return 1;
-  }
-  /* got "new" netif, lock it */
-  ci_netif_lock( new_ni );
-  /* We have to take the EP ref here  */
-  citp_netif_add_ref(new_ni);
-
-  /* Get en EP from [new_ni] and copy the state over */
-  if( CI_UNLIKELY( ci_tcp_move_state(ep->netif, old_ts, fd, new_ni, &new_ts))) {
-    ci_netif_unlock( new_ni );
-    if(new_fd != (ef_driver_handle)(-1))
-      ef_onload_driver_close( new_fd );
-    else
-      citp_netif_release_ref(new_ni, 0/*fd/context table not locked*/);
-    Log_U(ci_log("%s: Failed to move state to new EP", __FUNCTION__));
-    return 0;
-  }
-  
-  /* 4. Substitute in the new netif & EP */
-  ep->netif = new_ni;
-  ep->s = SP_TO_SOCK_CMN( new_ni, S_SP(new_ts) );
-
-  /* 5. Free the old EP (it is CLOSED) */
-  ci_tcp_state_free(old_ni, old_ts);
-  /* 6. Unlock the old netif */
-  ci_netif_unlock(old_ni);
-  CHECK_TEP(ep);
-  ci_assert( ci_netif_is_locked(ep->netif) );
-  return 1;
-}
 
 /*! \cidoxg_end */

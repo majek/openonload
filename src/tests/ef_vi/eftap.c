@@ -122,6 +122,7 @@ static struct pkt_buf* pb;
 static int tx_frame_len;
 static int cfg_timestamping;
 static int cfg_local_port = LOCAL_PORT;
+static int cfg_vport;
 static int n_sent;
 
 #define MEMBER_OFFSET(c_type, mbr_name)  \
@@ -291,6 +292,7 @@ static void usage(void)
   fprintf(stderr, "  -l <local-port>     - Change local port to send from\n");
   fprintf(stderr, "  -t                  - request time packet hit wire\n");
   fprintf(stderr, "  -b                  - enable loopback on the VI\n");
+  fprintf(stderr, "  -v                  - enable VPORT (loopback)\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "e.g.:\n");
   fprintf(stderr, "  - Send pkts to 239.1.2.3:1234 from eth2:\n"
@@ -319,9 +321,9 @@ int main(int argc, char* argv[])
     cfg_usleep = 0, cfg_loopback = 0;
   int i, c;
   void* p;
-  int pd_flags = 0;
+  int pd_flags = EF_PD_DEFAULT;
 
-  while( (c = getopt(argc, argv, "n:p:s:l:tb")) != -1 )
+  while( (c = getopt(argc, argv, "n:p:s:l:tbv")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -340,6 +342,9 @@ int main(int argc, char* argv[])
       break;
     case 'b':
       cfg_loopback = 1;
+      break;
+    case 'v':
+      cfg_vport = 1;
       break;
     case '?':
       usage();
@@ -386,7 +391,11 @@ int main(int argc, char* argv[])
     pd_flags |= EF_PD_MCAST_LOOP;
 
   TRY(ef_driver_open(&dh));
-  TRY(ef_pd_alloc(&pd, dh, ifindex, pd_flags));
+  if( cfg_vport )
+    TRY(ef_pd_alloc_with_vport(&pd, dh, interface, pd_flags,
+                               EF_PD_VLAN_NONE));
+  else
+    TRY(ef_pd_alloc(&pd, dh, ifindex, pd_flags));
   TRY(ef_vi_alloc_from_pd(&vi, dh, &pd, dh, -1, -1, -1, NULL, -1, vi_flags));
 
   printf("txq_size=%d\n", ef_vi_transmit_capacity(&vi));

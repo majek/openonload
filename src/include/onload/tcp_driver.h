@@ -104,6 +104,8 @@ typedef struct efab_tcp_driver_s {
   ci_uint32         stack_list_seq;
   ci_waitq_t        stack_list_wq;
 
+  ci_uint32         load_numa_node;
+
 } efab_tcp_driver_t;
 
 

@@ -44,16 +44,6 @@
 #define ON_PID_SUPPORT IGNORE
 #endif
 
-#if CI_CFG_PP_IS_PTR
-#error "Not handled yet"
-#endif
-
-#if ! CI_CFG_PP_IS_PTR
-#define ON_NO_CI_CFG_PP_IS_PTR DO
-#else
-#define ON_NO_CI_CFG_PP_IS_PTR IGNORE
-#endif
-
 #if CI_CFG_SUPPORT_STATS_COLLECTION
 #define ON_CI_CFG_SUPPORT_STATS_COLLECTION DO
 #else
@@ -64,12 +54,6 @@
 #define ON_CI_CFG_TCP_SOCK_STATS DO
 #else
 #define ON_CI_CFG_TCP_SOCK_STATS IGNORE
-#endif
-
-#if CI_CFG_ZC_RECV_FILTER
-#define ON_CI_CFG_ZC_RECV_FILTER DO
-#else
-#define ON_CI_CFG_ZC_RECV_FILTER IGNORE
 #endif
 
 #if CI_CFG_FD_CACHING
@@ -190,6 +174,12 @@
 #define ON_CI_CFG_PIO IGNORE
 #endif
 
+#if CI_CFG_SEPARATE_UDP_RXQ
+#define ON_CI_CFG_SEPARATE_UDP_RXQ DO
+#else
+#define ON_CI_CFG_SEPARATE_UDP_RXQ IGNORE
+#endif
+
 
 #define STRUCT_NS_MMAP_INFO(ctx) \
     FTL_TSTRUCT_BEGIN(ctx, cicp_ns_mmap_info_t,)			      \
@@ -271,10 +261,17 @@ typedef struct {
     FTL_TFIELD_STRUCT(ctx, ci_netif_state_nic_t,                        \
                       ci_pio_buddy_allocator, pio_buddy)                \
   ) \
-  FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint32, vi_mem_mmap_bytes) \
   FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint32, vi_io_mmap_bytes) \
   FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint32, vi_evq_bytes) \
+  ON_CI_CFG_SEPARATE_UDP_RXQ(                                            \
+    FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint32,            \
+                        udp_rxq_vi_evq_bytes)                            \
+  )                                                                      \
   FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint16, vi_instance) \
+  ON_CI_CFG_SEPARATE_UDP_RXQ(                                            \
+    FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint16,            \
+                         udp_rxq_vi_instance)                            \
+  )                                                                      \
   FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint16, vi_rxq_size) \
   FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint16, vi_txq_size) \
   FTL_TFIELD_CONSTINT(ctx, ci_netif_state_nic_t, ci_uint8, vi_arch)     \
@@ -419,6 +416,7 @@ typedef struct {
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, interrupt_primes)          \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, interrupt_no_events)       \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, interrupt_lock_contends)   \
+    FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, interrupt_budget_limited)  \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, deferred_polls)      \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, timeout_interrupts)        \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, timeout_interrupt_polls)   \
@@ -565,6 +563,7 @@ typedef struct {
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_pipe_read)    \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_pipe_write)   \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_tcp_accept)   \
+      FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_tcp_connect)  \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_pkt_wait)     \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_select)       \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint64, spin_poll)         \
@@ -574,7 +573,8 @@ typedef struct {
     ON_CI_CFG_FD_CACHING(                                               \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, sockcache_cached)  \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, sockcache_contention) \
-      FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, sockcache_stacklim) \
+      FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, passive_sockcache_stacklim) \
+      FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, active_sockcache_stacklim) \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, sockcache_socklim) \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, sockcache_hit)     \
       FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, sockcache_hit_reap) \
@@ -586,6 +586,7 @@ typedef struct {
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, tcp_rcvbuf_abused_recv_guilty)   \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, tcp_rcvbuf_abused_rob_desperate) \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, tcp_rcvbuf_abused_badly)   \
+    FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, tcp_listen_synack_retrans_no_buffer) \
     FTL_TSTRUCT_END(ctx)
 
 #if CI_CFG_SUPPORT_STATS_COLLECTION
@@ -885,6 +886,14 @@ typedef struct {
   FTL_TFIELD_INT(ctx, ef_vi_stats, ci_uint32, evq_gap)                  \
   FTL_TSTRUCT_END(ctx)
 
+#define STRUCT_SOCKET_CACHE(ctx)                                        \
+  FTL_TSTRUCT_BEGIN(ctx, ci_socket_cache_t, )                           \
+  FTL_TFIELD_STRUCT(ctx, ci_socket_cache_t, ci_ni_dllist_t, cache)      \
+  FTL_TFIELD_STRUCT(ctx, ci_socket_cache_t, ci_ni_dllist_t, pending)    \
+  FTL_TFIELD_STRUCT(ctx, ci_socket_cache_t, ci_ni_dllist_t, fd_states)  \
+  FTL_TFIELD_INT(ctx, ci_socket_cache_t, ci_int32, avail_stack)         \
+  FTL_TSTRUCT_END(ctx)
+
 #define STRUCT_NETIF_STATE(ctx)                                         \
   FTL_TSTRUCT_BEGIN(ctx, ci_netif_state, )                              \
   FTL_TFIELD_ARRAYOFSTRUCT(ctx, ci_netif_state, ci_netif_state_nic_t,   \
@@ -896,9 +905,6 @@ typedef struct {
   FTL_TFIELD_ARRAYOFINT(ctx, ci_netif_state, char, pretty_name,         \
                         CI_CFG_STACK_NAME_LEN + 8)                      \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, netif_mmap_bytes)      \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, vi_mem_mmap_offset)    \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, vi_io_mmap_offset)     \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, pio_io_mmap_offset)    \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, vi_state_bytes)        \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, max_mss)               \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, flags)                 \
@@ -914,26 +920,24 @@ typedef struct {
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, last_spin_poll_frc)    \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, last_sleep_frc)        \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_eplock_t, lock)             \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, freepkts)               \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, current_pkt_set)        \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_freepkts)             \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, looppkts)               \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_looppkts)             \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_rx_pkts)              \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, atomic_n_rx_pkts)       \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, atomic_n_async_pkts)    \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, rxq_low)                \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, rxq_limit)              \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, mem_pressure)          \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, mem_pressure_pkt_pool)  \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, mem_pressure_pkt_pool_n) \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_async_pkts)           \
-  ON_NO_CI_CFG_PP_IS_PTR(                                               \
-    FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, nonb_pkt_pool)       \
-  ) \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, nonb_pkt_pool)         \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_netif_ipid_cb_t, ipid)      \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, vi_ofs)                \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, table_ofs)             \
-  ON_CI_CFG_PKTS_AS_HUGE_PAGES(                                         \
-    FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, buf_ofs)             \
-  ) \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, buf_ofs)               \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, pkt_sets_n)            \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, pkt_sets_max)          \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_pkts_allocated)       \
@@ -961,10 +965,11 @@ typedef struct {
     FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, pio_bufs_ofs)        \
   ) \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, ep_ofs)                \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, aux_ofs)               \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, free_aux_mem)           \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, n_free_aux_bufs)       \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, n_aux_bufs)            \
   ON_CI_CFG_FD_CACHING(                                                 \
-    FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, cache_avail_stack)       \
+    FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, passive_cache_avail_stack)  \
   )                                                                     \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_netif_config, conf)         \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_netif_config_opts, opts)    \
@@ -1001,6 +1006,18 @@ typedef struct {
     FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint8, dump_write_i)         \
   ) \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ef_vi_stats, vi_stats) \
+  ON_CI_CFG_SEPARATE_UDP_RXQ(                                           \
+    FTL_TFIELD_STRUCT(ctx, ci_netif_state, ef_vi_stats, udp_rxq_vi_stats)\
+  )                                                                     \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, creation_numa_node)     \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, load_numa_node)         \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, packet_alloc_numa_nodes)\
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, sock_alloc_numa_nodes) \
+  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, interrupt_numa_nodes)  \
+  ON_CI_CFG_FD_CACHING(                                                 \
+    FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_socket_cache_t, active_cache)   \
+    FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, active_cache_avail_stack)  \
+  )                                                                     \
   FTL_TSTRUCT_END(ctx)
 
 
@@ -1034,10 +1051,10 @@ typedef struct {
 
 #define STRUCT_WAITABLE(ctx)					     	      \
     FTL_TSTRUCT_BEGIN(ctx, citp_waitable, )                                   \
-    FTL_TFIELD_STRUCT(ctx, citp_waitable, ci_sleep_seq_t, sleep_seq)    \
-    FTL_TFIELD_INT(ctx, citp_waitable, ci_uint64, spin_cycles)          \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_int32, bufid)                       \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_uint32, state)                      \
+    FTL_TFIELD_STRUCT(ctx, citp_waitable, ci_sleep_seq_t, sleep_seq)    \
+    FTL_TFIELD_INT(ctx, citp_waitable, ci_uint64, spin_cycles)          \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_uint32, wake_request)         \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_uint32, sb_flags)                   \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_uint32, sb_aflags)                  \
@@ -1048,6 +1065,7 @@ typedef struct {
     FTL_TFIELD_STRUCT(ctx, citp_waitable, ci_ni_dllist_link, ready_link)  \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_int32, ready_list_id)         \
     FTL_TFIELD_STRUCT(ctx, citp_waitable, ci_user_ptr_t, eitem)         \
+    FTL_TFIELD_INT(ctx, citp_waitable, ci_int32, eitem_pid)             \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_int32, sigown)                \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_uint32, moved_to_stack_id)    \
     FTL_TFIELD_INT(ctx, citp_waitable, ci_int32, moved_to_sock_id)      \
@@ -1251,7 +1269,7 @@ typedef struct oo_sock_cplane oo_sock_cplane_t;
   FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, n_rx_overflow)    \
   FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, n_rx_mem_drop)    \
   FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, n_rx_pktinfo)     \
-  FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, max_recvq_depth)  \
+  FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, max_recvq_pkts)  \
   FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, n_tx_os)          \
   FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, n_tx_os_slow)     \
   FTL_TFIELD_INT(ctx, ci_udp_socket_stats, ci_uint32, n_tx_onload_c)    \
@@ -1285,24 +1303,24 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_stop_more)     \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_stop_nagle)    \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_stop_app)      \
+  ON_CI_CFG_BURST_CONTROL(                                              \
+     FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_stop_burst) \
+                                                                        ) \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_nomac_defer)   \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_defer)         \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_msg_warm_abort) \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_msg_warm)      \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_tmpl_alloc)    \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_tmpl_send_fast) \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_tmpl_send_slow) \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_tmpl_active)   \
-  ON_CI_CFG_BURST_CONTROL(                                              \
-     FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, tx_stop_burst) \
-                                                                        ) \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, rtos)             \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, fast_recovers)    \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, rx_seq_errs)      \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, rx_ack_seq_errs)  \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, rx_ooo_pkts)      \
-  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, rx_ooo_fill)      \
   FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint32, rx_isn)           \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, tx_tmpl_active)   \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, rtos)             \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, fast_recovers)    \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, rx_seq_errs)      \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, rx_ack_seq_errs)  \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, rx_ooo_pkts)      \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, rx_ooo_fill)      \
+  FTL_TFIELD_INT(ctx, oo_tcp_socket_stats, ci_uint16, total_retrans)    \
   FTL_TSTRUCT_END(ctx)
 
 #define STRUCT_UDP_RECV_Q(ctx) \
@@ -1310,36 +1328,18 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_int32, head)                        \
     FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_int32, tail)                        \
     FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, pkts_added)                 \
-    FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, bytes_added)                \
+    FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, pkts_reaped)                \
     FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_int32, extract)                     \
     FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, pkts_delivered)             \
-    FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, bytes_delivered)            \
-    ON_CI_CFG_ZC_RECV_FILTER(                                                 \
-      FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_int32, filter)                    \
-      FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, pkts_filter_dropped)      \
-      FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, bytes_filter_dropped)     \
-      FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, pkts_filter_passed)       \
-      FTL_TFIELD_INT(ctx, ci_udp_recv_q, ci_uint32, bytes_filter_passed)      \
-    ) \
     FTL_TSTRUCT_END(ctx)
-
-#define STRUCT_TIMESTAMP_Q(ctx)                                         \
-  FTL_TSTRUCT_BEGIN(ctx, ci_timestamp_q, )                              \
-  FTL_TFIELD_STRUCT(ctx, ci_timestamp_q, ci_ip_pkt_queue, queue)        \
-  FTL_TFIELD_INT(ctx, ci_timestamp_q, ci_int32, extract)                \
-  FTL_TSTRUCT_END(ctx)
 
 #define STRUCT_UDP(ctx)                                                 \
   FTL_TSTRUCT_BEGIN(ctx, ci_udp_state, )                                \
   FTL_TFIELD_STRUCT(ctx, ci_udp_state, ci_sock_cmn, s)                  \
   FTL_TFIELD_STRUCT(ctx, ci_udp_state, ci_ip_cached_hdrs, ephemeral_pkt) \
   FTL_TFIELD_INT(ctx, ci_udp_state, ci_uint32, udpflags)                \
-  ON_CI_CFG_ZC_RECV_FILTER(                                             \
-    FTL_TFIELD_INT(ctx, ci_udp_state, ci_uint64, recv_q_filter)         \
-    FTL_TFIELD_INT(ctx, ci_udp_state, ci_uint64, recv_q_filter_arg)     \
-  ) \
   FTL_TFIELD_STRUCT(ctx, ci_udp_state, ci_udp_recv_q, recv_q)           \
-  FTL_TFIELD_STRUCT(ctx, ci_udp_state, ci_timestamp_q, timestamp_q)     \
+  FTL_TFIELD_STRUCT(ctx, ci_udp_state, ci_udp_recv_q, timestamp_q)     \
   FTL_TFIELD_INT(ctx, ci_udp_state, ci_int32, zc_kernel_datagram)       \
   FTL_TFIELD_INT(ctx, ci_udp_state, ci_uint32, zc_kernel_datagram_count) \
   FTL_TFIELD_STRUCT(ctx, ci_udp_state, struct oo_timespec, stamp_cache)        \
@@ -1448,7 +1448,7 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, dsack_start)                 \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, dsack_end)                   \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_int32, dsack_block)                  \
-    FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_timestamp_q, timestamp_q)  \
+    FTL_TFIELD_STRUCT(ctx, ci_tcp_state, ci_udp_recv_q, timestamp_q)  \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, snd_check)                   \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, snd_nxt)                     \
     FTL_TFIELD_INT(ctx, ci_tcp_state, ci_uint32, snd_max)                     \
@@ -1593,15 +1593,11 @@ typedef struct oo_tcp_socket_stats oo_tcp_socket_stats;
     FTL_TFIELD_ARRAYOFSTRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,       \
 			     listenq, CI_CFG_TCP_SYNACK_RETRANS_MAX + 1)      \
     FTL_TFIELD_INT(ctx, ci_tcp_socket_listen, ci_int32, bucket)               \
+    FTL_TFIELD_INT(ctx, ci_tcp_socket_listen, ci_uint32, n_buckets)           \
     ON_CI_CFG_FD_CACHING(                                                     \
-      FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,            \
-		        epcache_cache)				      \
-      FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,            \
-		        epcache_pending)				      \
+      FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_socket_cache_t, epcache)\
       FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,            \
 		        epcache_connected)				      \
-      FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ni_dllist_t,            \
-		        epcache_fd_states)				      \
       FTL_TFIELD_INT(ctx, ci_tcp_socket_listen, ci_uint32, cache_avail_sock)  \
     )                                                                         \
     FTL_TFIELD_STRUCT(ctx, ci_tcp_socket_listen, ci_ip_timer, listenq_tid)    \

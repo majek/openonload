@@ -53,6 +53,8 @@
 #define CI_PAGE_SHIFT      12
 #define CI_PAGE_MASK       (~((ci_uintptr_t) CI_PAGE_SIZE - 1))
 
+#define CI_CACHE_LINE_SIZE 64
+
 #define CI_CPU_HAS_SSE	   1	/* SSE extensions supported */
 #define CI_CPU_HAS_SSE2	   0	/* SSE2 extensions supported */
 #define CI_CPU_OOS	   0	/* CPU does out of order stores */

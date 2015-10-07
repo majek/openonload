@@ -45,20 +45,39 @@
 
 
 
-oo_pkt_p ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us, 
+int ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us, 
                                     ci_ip_pkt_fmt* pkt)
 {
-  oo_pkt_p frag_next = pkt->frag_next;
+  ci_ip_pkt_fmt* p;
+  int tsonly = us->s.timestamping_flags &
+    ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY;
 
+  /* Limit timistamp queue by SO_SNDBUF */
+  if( ci_udp_recv_q_pkts(&us->timestamp_q) + pkt->n_buffers >
+      ci_udp_recv_q_bytes2packets(us->s.so.sndbuf) ) {
+    /* recv(MSG_ERRQUEUE) does not lock the stack and can not reap the
+     * timestamp queue, so the queue should be reaped if it looks
+     * overfilled. */
+    ci_udp_recv_q_reap(ni, &us->timestamp_q);
+    if( ci_udp_recv_q_pkts(&us->timestamp_q) + pkt->n_buffers >= 
+        ci_udp_recv_q_bytes2packets(us->s.so.sndbuf) ) {
+      return -ENOSPC;
+    }
+  }
 
-  /* Limit timistamp queue by SO_SNDBUF
-   * (or something like this - "CI_CFG_PKT_BUF_SIZE / 2" is just an
-   * arbitrary value) */
-  if( us->timestamp_q.queue.num * CI_CFG_PKT_BUF_SIZE / 2 > us->s.so.sndbuf )
-    return OO_PKT_P(pkt);
+  for( p = pkt; CI_TRUE; p = PKT_CHK(ni, p->frag_next) ) {
+    oo_offbuf_set_start(&p->buf, oo_ether_hdr(p));
+    oo_offbuf_set_len(&p->buf, tsonly ? 0 : p->buf_len);
+    if( OO_PP_IS_NULL(p->frag_next) )
+      break;
+    if( tsonly ) {
+      p = PKT_CHK(ni, p->frag_next);
+      pkt->frag_next = 0;
+      ci_netif_pkt_release(ni, p);
+    }
+  }
 
-  pkt->frag_next = OO_PP_NULL;
-  ci_sock_cmn_timestamp_q_enqueue(ni, &us->timestamp_q, pkt);
+  ci_udp_recv_q_put(ni, &us->timestamp_q, pkt);
   /* Tells post-poll loop to put socket on the [reap_list]. */
   us->s.b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
 
@@ -68,13 +87,7 @@ oo_pkt_p ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us,
   ci_netif_put_on_post_poll(ni, &us->s.b);
   ci_udp_wake_possibly_not_in_poll(ni, us, CI_SB_FLAG_WAKE_RX);
 
-  /* 
-   * If the outgoing packet has to be fragmented, then only the first
-   * fragment is time stamped and returned to the sending socket. 
-   */
-  if( OO_PP_IS_NULL(frag_next) )
-    return OO_PP_NULL;
-  return frag_next;
+  return 0;
 }
 
 
@@ -83,9 +96,10 @@ int ci_udp_recv_q_reap(ci_netif* ni, ci_udp_recv_q* q)
   int freed = 0;
   while( ! OO_PP_EQ(q->head, q->extract) ) {
     ci_ip_pkt_fmt* pkt = PKT_CHK(ni, q->head);
-    q->head = pkt->next;
+    int n_buffers = pkt->n_buffers;
+    q->head = pkt->udp_rx_next;
     freed += ci_netif_pkt_release_check_keep(ni, pkt);
-    ++q->pkts_reaped;
+    q->pkts_reaped += n_buffers;
   }
   return freed;
 }
@@ -96,7 +110,7 @@ void ci_udp_recv_q_drop(ci_netif* ni, ci_udp_recv_q* q)
   ci_ip_pkt_fmt* pkt;
   while( OO_PP_NOT_NULL(q->head) ) {
     pkt = PKT_CHK(ni, q->head);
-    q->head = pkt->next;
+    q->head = pkt->udp_rx_next;
     ci_netif_pkt_release_check_keep(ni, pkt);
   }
 }
@@ -142,7 +156,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   ci_ip_pkt_fmt* q_pkt;
   ci_udp_state* us = SOCK_TO_UDP(s);
   ci_netif* ni = state->ni;
-  int recvq_depth = UDP_RECVQ_DEPTH_NEXT(us, pkt->pf.udp.pay_len);
+  int recvq_depth = ci_udp_recv_q_pkts(&us->recv_q) + pkt->n_buffers;
 
   LOG_UV(log("%s: "NS_FMT "pay_len=%d "CI_IP_PRINTF_FORMAT" -> "
              CI_IP_PRINTF_FORMAT, __FUNCTION__,
@@ -163,7 +177,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   }
 #endif
 
-  if( (recvq_depth <= us->stats.max_recvq_depth) &&
+  if( (recvq_depth <= us->stats.max_recvq_pkts) &&
       ! (ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ) {
   fast_receive:
     if( ! state->queued ) {
@@ -183,6 +197,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
       ++ni->state->n_rx_pkts;
       q_pkt->pf.udp.pay_len = pkt->pf.udp.pay_len;
       q_pkt->pf.udp.rx_stamp = pkt->pf.udp.rx_stamp;
+      q_pkt->pf.udp.rx_hw_stamp.tv_sec = pkt->pf.udp.rx_hw_stamp.tv_sec;
       oo_offbuf_init(&q_pkt->buf, PKT_START(q_pkt), 0);
       q_pkt->flags = (CI_PKT_FLAG_RX_INDIRECT | CI_PKT_FLAG_UDP |
                       CI_PKT_FLAG_RX);
@@ -191,8 +206,8 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
       ci_netif_pkt_hold(ni, pkt);
       pkt = q_pkt;
     }
-    pkt->pf.udp.rx_flags = 0;
-    ci_udp_recv_q_put(ni, us, pkt);
+    ci_assert( (pkt->rx_flags & CI_PKT_RX_FLAG_UDP_KEEP) == 0 );
+    ci_udp_recv_q_put(ni, &us->recv_q, pkt);
     us->s.b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
     ci_netif_put_on_post_poll(ni, &us->s.b);
     ci_udp_wake_possibly_not_in_poll(ni, us, CI_SB_FLAG_WAKE_RX);
@@ -200,17 +215,17 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   }
 
   /* First check if we've come here just to update max_recvq_depth */
-  if( recvq_depth > us->stats.max_recvq_depth ) {
-    if( ! WILL_OVERFLOW_RECVQ(us, recvq_depth) &&
+  if( recvq_depth > us->stats.max_recvq_pkts ) {
+    if( recvq_depth <= ci_udp_recv_q_bytes2packets(us->s.so.rcvbuf)  &&
         ! (ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ) {
-      us->stats.max_recvq_depth = recvq_depth;
+      us->stats.max_recvq_pkts = recvq_depth;
       goto fast_receive;
     }
   }
 
   /* Receive queue overflow or memory pressure. */
  drop:
-  if( WILL_OVERFLOW_RECVQ(us, recvq_depth) ) {
+  if( recvq_depth > ci_udp_recv_q_bytes2packets(us->s.so.rcvbuf) ) {
     LOG_UR(log(FNS_FMT "OVERFLOW pay_len=%d",
                FNS_PRI_ARGS(ni, s), pkt->pf.udp.pay_len));
     ++us->stats.n_rx_overflow;

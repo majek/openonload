@@ -46,6 +46,7 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
   ci_netif* ni;
   ci_ip_pkt_fmt *pkt;
   unsigned max_len;
+  ci_tcp_state* ts = NULL;
 
   Log_CALL(ci_log("%s(%d, %p, %d, %x)", __FUNCTION__, fd, iovecs,
                   iovecs_len, flags));
@@ -59,9 +60,12 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
       epi = fdi_to_sock_fdi(fdi);
       ni = epi->sock.netif;
       ci_netif_lock(ni);
+      if( epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN )
+	ts = SOCK_TO_TCP(epi->sock.s);
+
       for( i = 0; i < iovecs_len; ++i ) {
         max_len = CI_CFG_PKT_BUF_SIZE;
-        pkt = ci_netif_pkt_tx_tcp_alloc(ni);
+        pkt = ci_netif_pkt_tx_tcp_alloc(ni, ts);
         if( pkt == NULL ) {
           while( --i >= 0 )
             ci_netif_pkt_release(ni, (ci_ip_pkt_fmt*)iovecs[i].buf);
@@ -70,17 +74,15 @@ int onload_zc_alloc_buffers(int fd, struct onload_zc_iovec* iovecs,
           goto out;
         }
         /* Make sure this is clear as it affects behaviour when freeing */
-        pkt->pf.udp.rx_flags = 0;
+        pkt->rx_flags &=~ CI_PKT_RX_FLAG_UDP_KEEP;
         iovecs[i].buf = (struct oo_zc_buf *)pkt;
         if( flags & ONLOAD_ZC_BUFFER_HDR_TCP ) {
-          if( (citp_fdinfo_get_type(fdi) == CITP_TCP_SOCKET) &&
-              (epi->sock.s->b.state & CI_TCP_STATE_TCP_CONN) ) {
-            ci_tcp_state* ts = SOCK_TO_TCP(epi->sock.s);
-            oo_tx_pkt_layout_init(pkt);
+	  if( ts != NULL ) {
+	    oo_tx_pkt_layout_init(pkt);
             iovecs[i].iov_base = ((char *)oo_tx_ip_hdr(pkt)) + 
               ts->outgoing_hdrs_len;
             max_len = tcp_eff_mss(ts);
-          } 
+	  }
           else {
             /* Best guess.  We can fix it up later.  Magic 12 leaves
              * space for time stamp option (common case)
@@ -285,30 +287,6 @@ int onload_zc_send(struct onload_zc_mmsg* msgs, int mlen, int flags)
 
   Log_CALL_RESULT(done);
   return done;
-}
-
-
-int onload_set_recv_filter(int fd, onload_zc_recv_filter_callback filter,
-                           void* cb_arg, int flags)
-{
-  int rc;
-  citp_lib_context_t lib_context;
-  citp_fdinfo* fdi;
-
-  Log_CALL(ci_log("%s(%d, %p, %p, %x)", __FUNCTION__, fd, filter,
-                  cb_arg, flags));
-
-  if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
-    rc = citp_fdinfo_get_ops(fdi)->zc_recv_filter(fdi, filter, cb_arg, flags);
-    citp_fdinfo_release_ref_fast(fdi);
-    citp_exit_lib(&lib_context, rc >= 0);
-  } else {
-    citp_exit_lib_if(&lib_context, TRUE);
-    rc = -ESOCKTNOSUPPORT;
-  }
-
-  Log_CALL_RESULT(rc);
-  return rc;
 }
 
 

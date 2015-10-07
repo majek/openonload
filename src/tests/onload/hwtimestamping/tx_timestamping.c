@@ -307,6 +307,7 @@ static void do_ioctl(struct configuration* cfg, int sock)
 
   return;
 #else
+  (void) sock;
   printf("SIOCHWTSTAMP ioctl not supported, ignoring --ioctl\n"
          "HW timestamps will be unavailable unless sfptpd is running\n");
   return; 
@@ -464,9 +465,9 @@ void do_echo(int sock, unsigned int pkt_num)
 
   /* retrieve TX timestamp */
   msg.msg_control = control;
-  msg.msg_controllen = 1024;
   iov.iov_len = 2048;
   do {
+    msg.msg_controllen = 1024;
     got = recvmsg(sock, &msg, MSG_ERRQUEUE);
   } while (got < 0 && errno == EAGAIN);
   TEST(got >= 0);

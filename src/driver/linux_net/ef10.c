@@ -472,6 +472,12 @@ static int efx_ef10_probe(struct efx_nic *efx)
 	rc = efx_mcdi_init(efx);
 	if (rc)
 		goto fail2;
+#ifdef EFX_NOT_UPSTREAM
+	/* If we're not meant to expose this as a network device, stop here */
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT))
+		return 0;
+#endif
 
 	/* Reset (most) configuration for this function */
 	rc = efx_mcdi_reset(efx, RESET_TYPE_ALL);
@@ -1261,6 +1267,7 @@ static int efx_ef10_dimension_resources(struct efx_nic *efx)
 	res->vi_lim = nic_data->n_allocated_vis;
 	res->timer_quantum_ns = efx->timer_quantum_ns;
 	res->rss_channel_count = efx->rss_spread;
+	res->rx_channel_count = efx->n_rx_channels;
 	if (EFX_INT_MODE_USE_MSI(efx))
 		res->flags |= EFX_DL_EF10_USE_MSI;
 
@@ -2709,13 +2716,12 @@ static void efx_ef10_rx_write(struct efx_rx_queue *rx_queue)
 			efx_rx_queue_index(rx_queue));
 }
 
-static efx_mcdi_async_completer efx_ef10_rx_defer_refill_complete;
-
-static void efx_ef10_rx_defer_refill(struct efx_rx_queue *rx_queue)
+static int efx_ef10_rx_defer_refill(struct efx_rx_queue *rx_queue)
 {
 	struct efx_channel *channel = efx_rx_queue_channel(rx_queue);
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_DRIVER_EVENT_IN_LEN);
 	efx_qword_t event;
+	size_t outlen;
 
 	EFX_POPULATE_QWORD_2(event,
 			     ESF_DZ_EV_CODE, EFX_EF10_DRVGEN_EV,
@@ -2729,17 +2735,8 @@ static void efx_ef10_rx_defer_refill(struct efx_rx_queue *rx_queue)
 	memcpy(MCDI_PTR(inbuf, DRIVER_EVENT_IN_DATA), &event.u64[0],
 	       sizeof(efx_qword_t));
 
-	efx_mcdi_rpc_async(channel->efx, MC_CMD_DRIVER_EVENT,
-			   inbuf, sizeof(inbuf), 0,
-			   efx_ef10_rx_defer_refill_complete, 0);
-}
-
-static void
-efx_ef10_rx_defer_refill_complete(struct efx_nic *efx, unsigned long cookie,
-				  int rc, efx_dword_t *outbuf,
-				  size_t outlen_actual)
-{
-	/* nothing to do */
+	return efx_mcdi_rpc(channel->efx, MC_CMD_DRIVER_EVENT,
+			    inbuf, sizeof(inbuf), NULL, 0, &outlen);
 }
 
 static int efx_ef10_ev_probe(struct efx_channel *channel)
@@ -3381,6 +3378,14 @@ static unsigned int efx_ef10_filter_hash(const struct efx_filter_spec *spec)
  */
 static bool efx_ef10_filter_is_exclusive(const struct efx_filter_spec *spec)
 {
+#ifdef EFX_NOT_UPSTREAM
+	/* special case ether type and ip proto filters for onload */
+	if (spec->match_flags == EFX_FILTER_MATCH_ETHER_TYPE ||
+	    spec->match_flags == EFX_FILTER_MATCH_IP_PROTO ||
+	    spec->match_flags ==
+		     (EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO))
+		return true;
+#endif
 	if (spec->match_flags & EFX_FILTER_MATCH_LOC_MAC &&
 	    !is_multicast_ether_addr(spec->loc_mac))
 		return true;
@@ -4028,7 +4033,7 @@ static int efx_ef10_filter_redirect(struct efx_nic *efx, u32 filter_id,
 	new_spec.stack_id = stack_id;
 	rc = efx_ef10_filter_push(efx, &new_spec,
 				  &table->entry[filter_idx].handle, true);
-	if (rc)
+	if (rc && (rc != -ENETDOWN))
 		netdev_WARN(efx->net_dev,
 			    "failed to update filter: filter_id=%#x "
 			    "filter_flags = %#x rxq_i=%u "

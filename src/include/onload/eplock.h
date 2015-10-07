@@ -45,7 +45,7 @@
 
 
 /* Internal!  Do not call. */
-extern int __ef_eplock_lock_slow(ci_netif *) CI_HF;
+extern int __ef_eplock_lock_slow(ci_netif *, int maybe_wedged) CI_HF;
 
 
 #if defined(CI_HAVE_COMPARE_AND_SWAP)
@@ -67,7 +67,7 @@ ci_inline int ef_eplock_lock(ci_netif *ni) {
   int rc = 0;
   if( ci_cas32_fail(&ni->state->lock.lock,
                     CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
-    rc = __ef_eplock_lock_slow(ni);
+    rc = __ef_eplock_lock_slow(ni, 0);
 #ifdef __KERNEL__
   return rc;
 #else
@@ -79,12 +79,25 @@ ci_inline int ef_eplock_lock(ci_netif *ni) {
 #endif
 }
 
+
+#ifdef __KERNEL__
+ci_inline int ef_eplock_lock_maybe_wedged(ci_netif *ni) OO_MUST_CHECK_RET;
+ci_inline int ef_eplock_lock_maybe_wedged(ci_netif *ni) {
+  int rc = 0;
+  if( ci_cas32_fail(&ni->state->lock.lock,
+                    CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
+    rc = __ef_eplock_lock_slow(ni, 1);
+  return rc;
+}
+#endif
+
+
   /*! Only call this if you hold the lock.  [flag] must have exactly one
   ** bit set.
   */
 ci_inline void ef_eplock_holder_set_flag(ci_eplock_t* l, int flag) {
   unsigned v;
-  ci_assert((flag & 0xf0000000) == 0u);
+  ci_assert((flag & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     ci_assert(v & CI_EPLOCK_LOCKED);
@@ -95,7 +108,7 @@ ci_inline void ef_eplock_holder_set_flag(ci_eplock_t* l, int flag) {
   /*! Only call this if you hold the lock. */
 ci_inline void ef_eplock_holder_set_flags(ci_eplock_t* l, unsigned flags) {
   unsigned v;
-  ci_assert((flags & 0xf0000000) == 0u);
+  ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     ci_assert(v & CI_EPLOCK_LOCKED);
@@ -107,7 +120,7 @@ ci_inline void ef_eplock_holder_set_flags(ci_eplock_t* l, unsigned flags) {
   /*! Clear the specified lock flags. */
 ci_inline void ef_eplock_clear_flags(ci_eplock_t* l, int flags) {
   unsigned v;
-  ci_assert((flags & 0xf0000000) == 0u);
+  ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
   } while( ci_cas32_fail(&l->lock, v, v &~ flags) );
@@ -119,7 +132,7 @@ ci_inline void ef_eplock_clear_flags(ci_eplock_t* l, int flags) {
   */
 ci_inline int ef_eplock_set_flag_if_locked(ci_eplock_t* l, unsigned flag) {
   unsigned v;
-  ci_assert((flag & 0xf0000000) == 0u);
+  ci_assert((flag & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     if( v & CI_EPLOCK_UNLOCKED )  return 0;
@@ -134,7 +147,7 @@ ci_inline int ef_eplock_set_flag_if_locked(ci_eplock_t* l, unsigned flag) {
   */
 ci_inline int ef_eplock_set_flags_if_locked(ci_eplock_t* l, unsigned flags) {
   unsigned v;
-  ci_assert((flags & 0xf0000000) == 0u);
+  ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     if( v & CI_EPLOCK_UNLOCKED )  return 0;
@@ -161,7 +174,7 @@ ci_inline int ef_eplock_trylock_and_set_flags(ci_eplock_t* l, unsigned flags) {
 ci_inline int ef_eplock_lock_or_set_flag(ci_eplock_t* l, unsigned flag) {
   unsigned v, new_v;
   int rc;
-  ci_assert((flag  & 0xf0000000) == 0u);
+  ci_assert((flag  & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     if( (v = l->lock) & CI_EPLOCK_UNLOCKED ) {
       rc = 1;
@@ -183,7 +196,7 @@ ci_inline int ef_eplock_lock_or_set_flag(ci_eplock_t* l, unsigned flag) {
 ci_inline int ef_eplock_lock_or_set_flags(ci_eplock_t* l, unsigned flags) {
   unsigned v, new_v;
   int rc;
-  ci_assert((flags  & 0xf0000000) == 0u);
+  ci_assert((flags  & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     if( (v = l->lock) & CI_EPLOCK_UNLOCKED ) {
       rc = 1;
@@ -216,7 +229,7 @@ ci_inline int ef_eplock_try_unlock(ci_eplock_t* l,
   ** NB. This is not atomic.
   */
 ci_inline unsigned ef_eplock_flags(ci_eplock_t* l)
-{ return l->lock & (CI_EPLOCK_FL_NEED_WAKE | 0x0fffffff); }
+{ return l->lock & (CI_EPLOCK_FL_NEED_WAKE | CI_EPLOCK_CALLBACK_FLAGS); }
 
 #endif
 

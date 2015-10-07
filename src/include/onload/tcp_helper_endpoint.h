@@ -44,6 +44,9 @@ extern void efab_tcp_driver_dtor(void);
  * or -1 if we don't have a VI for that hwport.
  */
 extern int tcp_helper_rx_vi_id(tcp_helper_resource_t*, int hwport);
+#if CI_CFG_SEPARATE_UDP_RXQ
+extern int tcp_helper_udp_rxq_rx_vi_id(tcp_helper_resource_t* trs, int hwport);
+#endif
 
 
 /* Return the hw stack id of the VI associated with the named hwport,
@@ -55,6 +58,10 @@ extern int tcp_helper_vi_hw_stack_id(tcp_helper_resource_t* trs, int hwport);
  * given cluster, or -1 if we don't have a VI for that hwport.
  */
 extern int tcp_helper_cluster_vi_hw_stack_id(tcp_helper_cluster_t* thc, int hwport);
+
+/* Return VI base of the VI set instantiated on the given hwport for the
+ * given cluster, or -1 if cluster does not have VI set for that hwport */
+extern int tcp_helper_cluster_vi_base(tcp_helper_cluster_t* thc, int hwport);
 
 /* Return whether receiving of looped back traffic is enabled on
  * the named hwport, or -1 if we don't have a VI for that hwport.
@@ -127,7 +134,8 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
 
 extern int
 tcp_helper_endpoint_move_filters_pre(tcp_helper_endpoint_t* ep_from,
-                                     tcp_helper_endpoint_t* ep_to);
+                                     tcp_helper_endpoint_t* ep_to,
+                                     int drop_filter);
 extern void
 tcp_helper_endpoint_move_filters_post(tcp_helper_endpoint_t* ep_from,
                                       tcp_helper_endpoint_t* ep_to);

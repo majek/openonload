@@ -287,7 +287,7 @@ static unsigned int interrupt_mode;
 #if !defined(EFX_USE_KCOMPAT) || (defined(topology_core_cpumask) && !defined(__VMKLNX__))
 #define HAVE_EFX_NUM_PACKAGES
 #endif
-#if !defined(EFX_USE_KCOMPAT) || (defined(topology_thread_cpumask) && !defined(__VMKLNX__) && defined(EFX_HAVE_EXPORTED_CPU_SIBLING_MAP))
+#if !defined(EFX_USE_KCOMPAT) || (defined(topology_sibling_cpumask) && !defined(__VMKLNX__) && defined(EFX_HAVE_EXPORTED_CPU_SIBLING_MAP))
 #define HAVE_EFX_NUM_CORES
 #endif
 
@@ -713,8 +713,6 @@ efx_alloc_channel(struct efx_nic *efx, int i, struct efx_channel *old_channel)
 
 	rx_queue = &channel->rx_queue;
 	rx_queue->efx = efx;
-	setup_timer(&rx_queue->slow_fill, efx_rx_slow_fill,
-		    (unsigned long)rx_queue);
 
 	return channel;
 }
@@ -755,8 +753,6 @@ efx_copy_channel(const struct efx_channel *old_channel)
 	rx_queue = &channel->rx_queue;
 	rx_queue->buffer = NULL;
 	memset(&rx_queue->rxd, 0, sizeof(rx_queue->rxd));
-	setup_timer(&rx_queue->slow_fill, efx_rx_slow_fill,
-		    (unsigned long)rx_queue);
 
 	return channel;
 }
@@ -1029,6 +1025,10 @@ static void efx_stop_datapath(struct efx_nic *efx)
 			  "successfully flushed all queues\n");
 	}
 
+#if defined(EFX_NOT_UPSTREAM) && (!defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_WORK_SYNC))
+	cancel_work_sync(&efx->schedule_all_channels_work);
+#endif
+
 	efx_for_each_channel(channel, efx) {
 		efx_for_each_channel_rx_queue(rx_queue, channel)
 			efx_fini_rx_queue(rx_queue);
@@ -1056,6 +1056,10 @@ static void efx_remove_channel(struct efx_channel *channel)
 static void efx_remove_channels(struct efx_nic *efx)
 {
 	struct efx_channel *channel;
+
+#if defined(EFX_NOT_UPSTREAM) && (!defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_WORK_SYNC))
+	cancel_work_sync(&efx->schedule_all_channels_work);
+#endif
 
 	efx_for_each_channel(channel, efx)
 		efx_remove_channel(channel);
@@ -1175,7 +1179,23 @@ rollback:
 
 void efx_schedule_slow_fill(struct efx_rx_queue *rx_queue)
 {
-	mod_timer(&rx_queue->slow_fill, jiffies + msecs_to_jiffies(100));
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
+	schedule_delayed_work(&rx_queue->slow_fill_work,
+                                msecs_to_jiffies(100));
+#else
+	queue_delayed_work(efx_workqueue, &rx_queue->slow_fill_work,
+                                msecs_to_jiffies(100));
+#endif
+}
+
+void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue)
+{
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
+        cancel_delayed_work_sync(&rx_queue->slow_fill_work);
+#else
+        cancel_delayed_work(&rx_queue->slow_fill_work);
+        flush_workqueue(efx_workqueue);
+#endif
 }
 
 static const struct efx_channel_type efx_default_channel_type = {
@@ -1395,6 +1415,11 @@ static int efx_init_port(struct efx_nic *efx)
 	rc = efx->phy_op->reconfigure(efx);
 	if (rc && rc != -EPERM)
 		goto fail2;
+#ifdef EFX_NOT_UPSTREAM
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT))
+		return 0;
+#endif
 
 	mutex_unlock(&efx->mac_lock);
 	return 0;
@@ -1727,7 +1752,7 @@ static unsigned int efx_num_cores(const cpumask_t *in)
 		if (!cpumask_test_cpu(cpu, core_mask)) {
 			++count;
 			cpumask_or(core_mask, core_mask,
-				   topology_thread_cpumask(cpu));
+				   topology_sibling_cpumask(cpu));
 		}
 	}
 
@@ -2351,7 +2376,7 @@ static void efx_rss_choose_core(cpumask_t *set, const cpumask_t *package_set,
 	cpumask_clear(used_set);
 	for_each_cpu(cpu, package_set) {
 		if (!cpumask_test_cpu(cpu, used_set)) {
-			cpumask_copy(core_set, topology_thread_cpumask(cpu));
+			cpumask_copy(core_set, topology_sibling_cpumask(cpu));
 			cpumask_or(used_set, used_set, core_set);
 
 			count = 0;
@@ -2401,7 +2426,7 @@ static void efx_build_cpu_channel_map(struct efx_nic *efx)
 			 * If not then leave it -1 and we'll fall back
 			 * on skb_tx_hash.
 			 */
-			threads = topology_thread_cpumask(cpu);
+			threads = topology_sibling_cpumask(cpu);
 
 			for_each_cpu(cpu2, threads)
 				if (cpu2 < num_possible_cpus() &&
@@ -2847,6 +2872,11 @@ static int efx_probe_all(struct efx_nic *efx)
 		netif_err(efx, probe, efx->net_dev, "failed to create NIC\n");
 		goto fail1;
 	}
+#ifdef EFX_NOT_UPSTREAM
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT))
+		return 0;
+#endif
 
 	rc = efx_probe_port(efx);
 	if (rc) {
@@ -3003,6 +3033,14 @@ static void efx_stop_all(struct efx_nic *efx)
 
 static void efx_remove_all(struct efx_nic *efx)
 {
+#ifdef EFX_NOT_UPSTREAM
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT)) {
+		efx_remove_nic(efx);
+		return;
+	}
+#endif
+
 	efx_remove_channels(efx);
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
 	efx_sarfs_fini(efx);
@@ -3228,7 +3266,7 @@ static int efx_init_napi_channel(struct efx_channel *channel)
 		}
 	}
 #endif
-	efx_channel_init_lock(channel);
+	efx_channel_busy_poll_init(channel);
 
 	return 0;
 }
@@ -3273,9 +3311,26 @@ static void efx_fini_napi(struct efx_nic *efx)
 		efx_fini_napi_channel(channel);
 }
 
+#ifdef EFX_NOT_UPSTREAM
+static void efx_schedule_all_channels(struct work_struct *data)
+{
+	struct efx_nic *efx = container_of(data, struct efx_nic,
+			schedule_all_channels_work);
+	struct efx_channel *channel;
+
+	efx_for_each_channel(channel, efx) {
+		local_bh_disable();
+		efx_schedule_channel(channel);
+		local_bh_enable();
+	}
+}
+
 void efx_pause_napi(struct efx_nic *efx)
 {
 	struct efx_channel *channel;
+
+	if (efx->state != STATE_READY)
+		return;
 
 	ASSERT_RTNL();
 	netif_dbg(efx, drv, efx->net_dev, "Pausing NAPI\n");
@@ -3292,17 +3347,24 @@ int efx_resume_napi(struct efx_nic *efx)
 {
 	struct efx_channel *channel;
 
+	if (efx->state != STATE_READY)
+		return 0;
+
 	ASSERT_RTNL();
 	netif_dbg(efx, drv, efx->net_dev, "Resuming NAPI\n");
 
 	efx_for_each_channel(channel, efx) {
 		efx_channel_unlock_napi(channel);
 		napi_enable(&channel->napi_str);
-		efx_schedule_channel(channel);
 	}
+
+	/* Schedule all channels in case we've
+	 * missed something whilst paused. */
+	schedule_work(&efx->schedule_all_channels_work);
 
 	return 0;
 }
+#endif
 
 /**************************************************************************
  *
@@ -3339,7 +3401,7 @@ int efx_busy_poll(struct napi_struct *napi)
 	if (!netif_running(efx->net_dev))
 		return LL_FLUSH_FAILED;
 
-	if (!efx_channel_lock_poll(channel))
+	if (!efx_channel_try_lock_poll(channel))
 		return LL_FLUSH_BUSY;
 
 	old_rx_packets = channel->rx_queue.rx_packets;
@@ -3444,6 +3506,34 @@ struct net_device_stats *efx_net_stats(struct net_device *net_dev)
 void efx_watchdog(struct net_device *net_dev)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_channel *channel;
+
+	netif_info(efx, tx_err, efx->net_dev,
+		   "TX queue timeout: printing stopped queue data\n");
+
+	efx_for_each_channel(channel, efx) {
+		struct efx_tx_queue *tx_queue;
+
+		if (!efx_channel_has_tx_queues(channel))
+			continue;
+
+		tx_queue = &channel->tx_queue[0];
+
+		/* The netdev watchdog must have triggered on a queue that was
+		 * stopped, so ignore queues that are running.
+		 */
+		if (!netif_tx_queue_stopped(tx_queue->core_txq))
+			continue;
+
+		netif_info(efx, tx_err, efx->net_dev,
+			   "Channel %u: NAPI state 0x%lx\n", channel->channel,
+			   channel->napi_str.state);
+		efx_for_each_channel_tx_queue(tx_queue, channel)
+			netif_info(efx, tx_err, efx->net_dev,
+				   "Tx queue: insert %u, write %u, read %u\n",
+				   tx_queue->insert_count,
+				   tx_queue->write_count, tx_queue->read_count);
+	}
 
 	netif_err(efx, tx_err, efx->net_dev,
 		  "TX stuck with port_enabled=%d: resetting channels\n",
@@ -4370,6 +4460,10 @@ static int efx_init_struct(struct efx_nic *efx,
 	efx->state = STATE_UNINIT;
 	strlcpy(efx->name, pci_name(pci_dev), sizeof(efx->name));
 
+#ifdef EFX_NOT_UPSTREAM
+	INIT_WORK(&efx->schedule_all_channels_work, efx_schedule_all_channels);
+#endif
+
 	efx->net_dev = net_dev;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NDO_SET_FEATURES) && !defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
 	efx->rx_checksum_enabled = true;
@@ -4686,6 +4780,11 @@ static void efx_pci_remove_main(struct efx_nic *efx)
 #else
 	flush_workqueue(reset_workqueue);
 #endif
+#ifdef EFX_NOT_UPSTREAM
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT))
+		goto remove;
+#endif
 
 	efx_disable_interrupts(efx);
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SMP) && !defined(__VMKLNX__)
@@ -4695,6 +4794,7 @@ static void efx_pci_remove_main(struct efx_nic *efx)
 	efx_fini_port(efx);
 	efx->type->fini(efx);
 	efx_fini_napi(efx);
+remove:
 	efx_remove_all(efx);
 }
 
@@ -4834,6 +4934,12 @@ static int efx_pci_probe_main(struct efx_nic *efx)
 	rc = efx_probe_all(efx);
 	if (rc)
 		goto fail1;
+
+#ifdef EFX_NOT_UPSTREAM
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT))
+		return 0;
+#endif
 
 	rc = efx_init_napi(efx);
 	if (rc)
@@ -4980,6 +5086,11 @@ static int efx_pci_probe(struct pci_dev *pci_dev,
 	rc = efx_pci_probe_main(efx);
 	if (rc)
 		goto fail3;
+#ifdef EFX_NOT_UPSTREAM
+	if (efx->mcdi->fn_flags &
+			(1 << MC_CMD_DRV_ATTACH_EXT_OUT_FLAG_NO_ACTIVE_PORT))
+		return 0;
+#endif
 
 	rc = efx_init_debugfs_channels(efx);
 	if (rc)

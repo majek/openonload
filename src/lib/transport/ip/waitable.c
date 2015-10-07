@@ -340,6 +340,7 @@ const char* citp_waitable_type_str(citp_waitable* w)
 #if CI_CFG_USERSPACE_PIPE
   else if( w->state == CI_TCP_STATE_PIPE )  return "PIPE";
 #endif
+  else if( w->state == CI_TCP_STATE_AUXBUF )  return "AUXBUFS";
   else return "<unknown-citp_waitable-type>";
 }
 
@@ -349,7 +350,7 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
 {
   unsigned tmp;
 
-  if( w->state & CI_TCP_STATE_SOCKET ) {
+  if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
     ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
     logger(log_arg, "%s%s "NT_FMT"lcl="OOF_IP4PORT" rmt="OOF_IP4PORT" %s",
            pf, citp_waitable_type_str(w), NI_ID(ni), W_FMT(w),
@@ -361,7 +362,7 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
     logger(log_arg, "%s%s "NT_FMT, pf,
            citp_waitable_type_str(w), NI_ID(ni), W_FMT(w));
 
-  if( w->state == CI_TCP_STATE_FREE )
+  if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF )
     return;
 
   tmp = w->lock.wl_val;
@@ -397,7 +398,7 @@ void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
   citp_waitable_obj* wo = CI_CONTAINER(citp_waitable_obj, waitable, w);
 
   citp_waitable_dump2(ni, w, pf, logger, log_arg);
-  if( w->state & CI_TCP_STATE_SOCKET ) {
+  if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
     ci_sock_cmn_dump(ni, &wo->sock, pf, logger, log_arg);
     if( w->state == CI_TCP_LISTEN )
       ci_tcp_socket_listen_dump(ni, &wo->tcp_listen, pf, logger, log_arg);
@@ -421,7 +422,7 @@ void citp_waitable_print(citp_waitable* w)
    *   TCP 2 0 0.0.0.0:12865 0.0.0.0:0 LISTEN
    *   UDP 0 0 172.16.129.131:57521 0.0.0.0:0 UDP
    */
-  if( w->state & CI_TCP_STATE_SOCKET ) {
+  if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
     ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
     citp_waitable_obj* wo = CI_CONTAINER(citp_waitable_obj, waitable, w);
     int tq = 0;

@@ -123,6 +123,68 @@ efab_tcp_helper_stack_attach(ci_private_t* priv, void *arg)
   return 0;
 }
 
+
+static int
+efab_tcp_helper_sock_attach_setup_flags(int* sock_type_in_out)
+{
+  int flags;
+
+/* SOCK_CLOEXEC and SOCK_NONBLOCK exist from 2.6.27 both */
+#ifdef SOCK_TYPE_MASK
+  BUILD_BUG_ON(SOCK_CLOEXEC != O_CLOEXEC);
+  flags = *sock_type_in_out & (SOCK_CLOEXEC | SOCK_NONBLOCK);
+  *sock_type_in_out &= SOCK_TYPE_MASK;
+# ifdef SOCK_NONBLOCK
+  if( SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK) )
+    flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
+# endif
+#else
+  flags = 0;
+#endif
+
+  return flags;
+}
+
+
+static int
+efab_tcp_helper_sock_attach_common(tcp_helper_resource_t* trs,
+                                   tcp_helper_endpoint_t* ep,
+                                   ci_int32 sock_type, int fd_type, int flags)
+{
+  int rc;
+  citp_waitable_obj *wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  (void) wo;
+
+  /* Create a new file descriptor to attach the socket to. */
+  rc = oo_create_ep_fd(ep, flags, fd_type);
+  if( rc >= 0 ) {
+#ifdef SOCK_NONBLOCK
+    if( sock_type & SOCK_NONBLOCK )
+      ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_NONBLOCK);
+#endif
+#ifdef SOCK_CLOEXEC
+    if( sock_type & SOCK_CLOEXEC )
+      ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_CLOEXEC);
+#endif
+
+    /* Re-read the OS socket buffer size settings.  This ensures we'll use
+     * up-to-date values for this new socket.
+     */
+    efab_get_os_settings(&NI_OPTS_TRS(trs));
+  }
+
+  return rc;
+}
+
+
+/* This ioctl may be entered with or without the stack lock.  This has two
+ * immediate implications:
+ *  - it must not rely on the consistency of nor make atomically inconsistent
+ *    modifications to the state protected by the stack lock; and
+ *  - it must not block on the stack lock.
+ * Trylocks are safe, however.  Also, the caller provides a guarantee that the
+ * endpoint whose ep_id is passed in will not change under the ioctl's feet
+ * and that the ioctl may modify it freely. */
 static int
 efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
 {
@@ -130,20 +192,10 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   tcp_helper_resource_t* trs = priv->thr;
   tcp_helper_endpoint_t* ep = NULL;
   citp_waitable_obj *wo;
-  int rc, flags, type = op->type;
-
-/* SOCK_CLOEXEC and SOCK_NONBLOCK exist from 2.6.27 both */
-#ifdef SOCK_TYPE_MASK
-  BUILD_BUG_ON(SOCK_CLOEXEC != O_CLOEXEC);
-  flags = type & (SOCK_CLOEXEC | SOCK_NONBLOCK);
-  type &= SOCK_TYPE_MASK;
-# ifdef SOCK_NONBLOCK
-    if( SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK) )
-      flags = (flags & ~SOCK_NONBLOCK) | O_NONBLOCK;
-# endif
-#else
-  flags = 0;
-#endif
+  int rc;
+  int flags;
+  int sock_type = op->type;
+  int fd_type;
 
   OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
   if( trs == NULL ) {
@@ -157,108 +209,122 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
 
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
-  if( (tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
-       OO_THR_EP_AFLAG_ATTACHED) &&
-      !(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) )
-    return -EBUSY;
+
+  ci_assert( (wo->waitable.state == CI_TCP_STATE_UDP) ||
+             (wo->waitable.state & CI_TCP_STATE_TCP) );
+  fd_type = (wo->waitable.state & CI_TCP_STATE_TCP) ?
+            CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP;
 
   ci_atomic32_and(&wo-> waitable.sb_aflags,
                   ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+  wo->sock.domain = op->domain;
 
+  flags = efab_tcp_helper_sock_attach_setup_flags(&sock_type);
 
-  /* create OS socket */
-  if( op->domain != AF_UNSPEC ) {
-    struct socket *sock;
-    struct file *os_file;
-
-    rc = sock_create(op->domain, type, 0, &sock);
+  /* We always need an OS socket for UDP endpoints, so grab one here.  In the
+   * TCP case we don't want a backing socket for sockets with IP_TRANSPARENT
+   * set, but we can't tell that yet, unless we're in a stack configuration
+   * that doesn't support IP_TRANSPARENT.
+   *
+   * We could always defer creation of OS sockets for TCP, as we have to
+   * support that for the IP_TRANSPARENT case, but until this feature has
+   * matured a bit we'll err on the side of caution and only use it where it
+   * might actually be needed.
+   */
+  if( (NI_OPTS(&trs->netif).scalable_filter_enable !=
+       CITP_SCALABLE_FILTERS_ENABLE) ||
+      (fd_type == CI_PRIV_TYPE_UDP_EP) ) {
+    rc = efab_create_os_socket(ep, op->domain, sock_type, flags);
     if( rc < 0 ) {
-      LOG_E(ci_log("%s: ERROR: sock_create(%d, %d, 0) failed (%d)",
-                   __FUNCTION__, op->domain, type, rc));
       efab_tcp_helper_close_endpoint(trs, ep->id);
       return rc;
     }
-    os_file = sock_alloc_file(sock, flags, NULL);
-    if( IS_ERR(os_file) ) {
-      LOG_E(ci_log("%s: ERROR: sock_alloc_file failed (%ld)",
-                   __FUNCTION__, PTR_ERR(os_file)));
-      sock_release(sock);
-      efab_tcp_helper_close_endpoint(trs, ep->id);
-      return PTR_ERR(os_file);
-    }
-    rc = efab_attach_os_socket(ep, os_file);
-    if( rc < 0 ) {
-      LOG_E(ci_log("%s: ERROR: efab_attach_os_socket failed (%d)",
-                   __FUNCTION__, rc));
-      /* NB. efab_attach_os_socket() consumes [os_file] even on error. */
-      efab_tcp_helper_close_endpoint(trs, ep->id);
-      return rc;
-    }
-    wo->sock.domain = op->domain;
-    wo->sock.ino = ep->os_socket->file->f_dentry->d_inode->i_ino;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
-    wo->sock.uid = ep->os_socket->file->f_dentry->d_inode->i_uid;
-#else
-    wo->sock.uid = __kuid_val(ep->os_socket->file->f_dentry->d_inode->i_uid);
-#endif
   }
-#if CI_CFG_FD_CACHING
   else {
-    /* AF_UNSPEC implies this is a TCP accept */
-    ci_assert(wo->waitable.state & CI_TCP_STATE_TCP);
-
+#if CI_CFG_FD_CACHING
     /* There are ways that a cached socket may have had its fd closed.  If
      * that happens we come through this ioctl to get a new one, so update the
      * state to reflect that.
      */
     if( wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ) {
-      ci_assert(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE);
+      ci_assert_flags(wo->waitable.sb_aflags, CI_SB_AFLAG_IN_CACHE);
+      ci_assert_flags(wo->waitable.state, CI_TCP_STATE_TCP);
+
       ci_atomic32_and(&wo->waitable.sb_aflags, ~CI_SB_AFLAG_CACHE_PRESERVE);
       wo->tcp.cached_on_fd = -1;
       wo->tcp.cached_on_pid = -1;
     }
-  }
 #endif
+  }
 
-  /* Create a new file descriptor to attach the stack to. */
-  ci_assert((wo->waitable.state & CI_TCP_STATE_TCP) ||
-            wo->waitable.state == CI_TCP_STATE_UDP);
-  rc = oo_create_ep_fd(ep, flags,
-                       (wo->waitable.state & CI_TCP_STATE_TCP) ?
-                       CI_PRIV_TYPE_TCP_EP : CI_PRIV_TYPE_UDP_EP);
+  rc = efab_tcp_helper_sock_attach_common(trs, ep, op->type, fd_type, flags);
   if( rc < 0 ) {
-    /* dirty hack:
-     * - accept() does not touch the ep - no need to clear it up;
-     * - accept() needs the tcp state survive
-     * - only accept() does not specity domain as it does not need the OS
-     *   socket.
-     * todo: make a separate ioctl for accept(). */
-    if( op->domain == AF_UNSPEC ) {
-      ci_atomic32_or(&wo-> waitable.sb_aflags,
-                     CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-      tcp_helper_endpoint_clear_aflags(ep, OO_THR_EP_AFLAG_ATTACHED);
-    }
-    else
-      efab_tcp_helper_close_endpoint(trs, ep->id);
+    efab_tcp_helper_close_endpoint(trs, ep->id);
     return rc;
   }
 
   op->fd = rc;
-#ifdef SOCK_NONBLOCK
-  if( op->type & SOCK_NONBLOCK )
-    ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_NONBLOCK);
-#endif
-#ifdef SOCK_CLOEXEC
-  if( op->type & SOCK_CLOEXEC )
-    ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_CLOEXEC);
-#endif
-
-  /* Re-read the OS socket buffer size settings.  This ensures we'll use
-   * up-to-date values for this new socket.
-   */
-  efab_get_os_settings(&NI_OPTS_TRS(trs));
   return 0;
 }
+
+
+static int
+efab_tcp_helper_tcp_accept_sock_attach(ci_private_t* priv, void *arg)
+{
+  oo_tcp_accept_sock_attach_t* op = arg;
+  tcp_helper_resource_t* trs = priv->thr;
+  tcp_helper_endpoint_t* ep = NULL;
+  citp_waitable_obj *wo;
+  int rc;
+  int flags;
+  int sock_type = op->type;
+
+  OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  /* Validate and find the endpoint. */
+  if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
+    return -EINVAL;
+
+  ep = ci_trs_get_valid_ep(trs, op->ep_id);
+  wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  ci_assert(wo->waitable.state & CI_TCP_STATE_TCP);
+
+  ci_atomic32_and(&wo-> waitable.sb_aflags,
+                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+
+#if CI_CFG_FD_CACHING
+  /* There are ways that a cached socket may have had its fd closed.  If
+   * that happens we come through this ioctl to get a new one, so update the
+   * state to reflect that.
+   */
+  if( wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ) {
+    ci_assert(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE);
+    ci_atomic32_and(&wo->waitable.sb_aflags, ~CI_SB_AFLAG_CACHE_PRESERVE);
+    wo->tcp.cached_on_fd = -1;
+    wo->tcp.cached_on_pid = -1;
+  }
+#endif
+
+  flags = efab_tcp_helper_sock_attach_setup_flags(&sock_type);
+  rc = efab_tcp_helper_sock_attach_common(trs, ep, op->type,
+                                          CI_PRIV_TYPE_TCP_EP, flags);
+  if( rc < 0 ) {
+    /* - accept() does not touch the ep - no need to clear it up;
+     * - accept() needs the tcp state survive
+     */
+    ci_atomic32_or(&wo-> waitable.sb_aflags,
+                   CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+    return rc;
+  }
+ 
+  op->fd = rc; 
+  return 0;
+}
+
 
 static int
 efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
@@ -279,9 +345,6 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
     return -EINVAL;
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
-  if( tcp_helper_endpoint_set_aflags(ep, OO_THR_EP_AFLAG_ATTACHED) &
-      OO_THR_EP_AFLAG_ATTACHED )
-    return -EBUSY;
 
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
   ci_atomic32_and(&wo->waitable.sb_aflags,
@@ -308,119 +371,6 @@ efab_tcp_helper_pipe_attach(ci_private_t* priv, void *arg)
   op->wfd = rc;
 
   return 0;
-}
-
-
-/*--------------------------------------------------------------------
- *!
- * Moves a endpoint state from current TCP helper resource to new
- * TCP helper resource. Moves OS file pointer and redirects state
- * in associated OS file to point to the new state
- *
- * \todo FIXME this is security hole! we should not get new_trs_id
- *             from user space!
- *
- * \param priv            Provate structure of associated OS file
- * \param op              TCP state endpoint id of new and old states;
- *                        id of new TCP resource to move to
- *
- * \return                standard error codes
- *
- *--------------------------------------------------------------------*/
-
-static int
-efab_tcp_helper_move_state(ci_private_t* priv, void *arg)
-{
-  oo_tcp_move_state_t *op = arg;
-  tcp_helper_endpoint_t *new_ep;
-  tcp_helper_resource_t * new_trs = NULL;
-  ci_netif* ni, *new_ni;
-  ci_tcp_state * ts, *new_ts;
-  tcp_helper_endpoint_t* ep;
-  int rc = efab_ioctl_get_ep(priv, op->ep_id, &ep);
-  if (rc != 0)
-    return rc;
-
-  OO_DEBUG_TCPH(ci_log("%s: (trs=%p (%u), priv=%p, ep_id=%u, new_trs_id=%u, "
-                       "new_ep_id=%u", __FUNCTION__, priv->thr, priv->thr->id,
-                       priv, OO_SP_FMT(op->ep_id), op->new_trs_id,
-                       OO_SP_FMT(op->new_ep_id)));
-
-  do {
-    /* check that the existing id is valid */
-    ni = &priv->thr->netif;
-    ts = SP_TO_TCP(ni, ep->id);
-
-    /* TODO: check this endpoint belongs to the tcp helper resource of priv and not
-     * somewhere else */
-    
-    /* this function does not change fd_type or fd ops, so it is not able
-     * to cope with changing the socket type. We think this only makes sense
-     * for TCP, so assert we are taking a TCP endpoint.
-     */
-    ci_assert_equal(ts->s.pkt.ip.ip_protocol, IPPROTO_TCP);
-    ci_assert_equal(priv->fd_type, CI_PRIV_TYPE_TCP_EP);
-
-    /* get pointer to resource from handle - increments ref count */
-    rc = efab_thr_table_lookup(NULL, op->new_trs_id,
-                               EFAB_THR_TABLE_LOOKUP_CHECK_USER, &new_trs);
-    if (rc < 0) {
-      OO_DEBUG_ERR( ci_log("%s: invalid new resource handle", __FUNCTION__) );
-      break;
-    }
-    ci_assert(new_trs != NULL);
-    /* check valid endpoint in new netif */
-    new_ni = &new_trs->netif;
-    new_ep = ci_netif_get_valid_ep(new_ni, op->new_ep_id);
-    new_ts = SP_TO_TCP(new_ni, new_ep->id);
-
-    /* check the two endpoint states look valid */
-    if( (ts->s.pkt.ip.ip_protocol != new_ts->s.pkt.ip.ip_protocol) ||
-        (ts->s.b.state != CI_TCP_CLOSED) ||
-        (ep->oofilter.sf_local_port != NULL) ) {
-      efab_thr_release(new_trs);
-      rc = -EINVAL;
-      OO_DEBUG_ERR(ci_log("%s: invalid endpoint states", __FUNCTION__));
-      break;
-    }
-
-    /* should be fine to complete */
-    ci_assert(new_trs);
-    {
-      tcp_helper_resource_t *old_trs;
-    again:
-      old_trs = priv->thr;
-      if (ci_cas_uintptr_fail((ci_uintptr_t *)&priv->thr,
-                              (ci_uintptr_t)old_trs, (ci_uintptr_t)new_trs))
-        goto again;
-      efab_thr_release(old_trs);
-    }
-
-    /* move file to hold details of new resource, new endpoint */
-    ci_assert(OO_SP_EQ(priv->sock_id, op->ep_id));
-    priv->sock_id = new_ep->id;
-
-    OO_DEBUG_TCPH(ci_log("%s: set epid %u", __FUNCTION__,
-                         OO_SP_FMT(priv->sock_id)));
-    
-    /* copy across any necessary state */
-
-    ci_assert_equal(new_ep->os_socket, NULL);
-    new_ep->os_socket = ep->os_socket;
-    ep->os_socket = NULL;
-
-    /* set ORPHAN flag in current as not attached to an FD */
-    ci_bit_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_ORPHAN_BIT);
-    /* remove ORPHAN flag in new TCP state */
-    ci_atomic32_and(&new_ts->s.b.sb_aflags,
-		    ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
-
-    return 0;
-
-  } while (0);
-
-  return rc;
-
 }
 
 
@@ -677,7 +627,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
           info->u.ni_endpoint.tx_pkts_max = ts->so_sndbuf_pkts;
           info->u.ni_endpoint.tx_pkts_num = ts->send.num;
         }
-        if( wo->waitable.state & CI_TCP_STATE_SOCKET ) {
+        if( CI_TCP_STATE_IS_SOCKET(wo->waitable.state) ) {
           ci_sock_cmn* s = &wo->sock;
           info->u.ni_endpoint.protocol = (int) sock_protocol(s);
           info->u.ni_endpoint.laddr = sock_laddr_be32(s);
@@ -751,37 +701,46 @@ efab_tcp_helper_waitable_wake_rsop(ci_private_t* priv, void* arg)
   return 0;
 }
 
+
+/* This resource op must be called with the stack lock held.  This ensures
+ * that we sync a consistent set of state to the OS socket when it is created.
+ * All operations that can affect what we sync (setsockopt, ioctl, fcntl) are
+ * protected by the stack lock so we know they won't change under our feet.
+ */
 static int
-efab_tcp_helper_bind_os_sock_rsop(ci_private_t* priv, void *arg)
+efab_tcp_helper_os_sock_create_and_set_rsop(ci_private_t* priv, void* arg)
 {
-  oo_tcp_bind_os_sock_t *op = arg;
-  struct sockaddr_storage k_address_buf;
-  int addrlen = op->addrlen;
-  ci_uint16 port;
+  oo_tcp_create_set_t *op = arg;
+  tcp_helper_resource_t* trs = priv->thr;
+  tcp_helper_endpoint_t* ep = NULL;
   int rc;
 
-  if (priv->thr == NULL)
+  ci_assert(priv);
+  ci_assert(op);
+
+  if (!CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type))
     return -EINVAL;
-  rc = move_addr_to_kernel(CI_USER_PTR_GET(op->address), addrlen,
-                           (struct sockaddr *)&k_address_buf);
+
+  ci_assert(priv->thr);
+  ci_assert_equal(priv->fd_type, CI_PRIV_TYPE_TCP_EP);
+  ep = efab_priv_to_ep(priv);
+
+  OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, ep->id));
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  rc = efab_tcp_helper_create_os_sock(priv);
   if( rc < 0 )
     return rc;
-  rc = efab_tcp_helper_bind_os_sock(priv->thr, op->sock_id,
-                                    (struct sockaddr *)&k_address_buf,
-                                    addrlen, &port);
-  if( rc < 0 )
-    return rc;
-  op->addrlen = port;
-  return 0;
-}
-static int
-efab_tcp_helper_listen_os_sock_rsop(ci_private_t* priv, void *p_backlog)
-{
-  if ( CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type) )
-    return efab_tcp_helper_listen_os_sock(priv->thr, priv->sock_id,
-                                          *(ci_uint32 *)p_backlog);
-  else
-    return -EINVAL;
+
+  /* If we've been given a socket option to sync, do it now */
+  if( op->level >= 0 )
+    rc = efab_tcp_helper_setsockopt(trs, ep->id, op->level, op->optname,
+                                    CI_USER_PTR_GET(op->optval), op->optlen);
+
+  return rc;
 }
 static int
 tcp_helper_endpoint_shutdown_rsop(ci_private_t* priv, void *arg)
@@ -798,6 +757,20 @@ efab_tcp_helper_set_tcp_close_os_sock_rsop(ci_private_t* priv, void *arg)
 {
   oo_sp *sock_id_p = arg;
   return efab_tcp_helper_set_tcp_close_os_sock(priv->thr, *sock_id_p);
+}
+static int
+efab_tcp_helper_os_pollerr_clear(ci_private_t* priv, void *arg)
+{
+  oo_sp *sock_id_p = arg;
+  tcp_helper_endpoint_t *ep = ci_trs_get_valid_ep(priv->thr, *sock_id_p);
+  struct file *os_file;
+  int rc = oo_os_sock_get_from_ep(ep, &os_file);
+
+  if( rc != 0 )
+    return 0;
+  oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
+                                      os_file, OO_OS_STATUS_ERR);
+  return 0;
 }
 static int
 efab_tcp_helper_sock_lock_slow_rsop(ci_private_t* priv, void *p_sock_id)
@@ -1078,7 +1051,7 @@ efab_eplock_lock_wait_rsop(ci_private_t *priv, void *unused)
 {
   if (priv->thr == NULL)
     return -EINVAL;
-  return efab_eplock_lock_wait(&priv->thr->netif);
+  return efab_eplock_lock_wait(&priv->thr->netif, 0);
 }
 static int
 efab_install_stack(ci_private_t *priv, void *arg)
@@ -1195,7 +1168,7 @@ void tcp_helper_pace(tcp_helper_resource_t* trs, int pace_val)
 {
   int intf_i;
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i)
-    efrm_pt_pace(trs->nic[intf_i].vi_rs, pace_val);
+    efrm_pt_pace(trs->nic[intf_i].thn_vi_rs, pace_val);
 }
 static int ioctl_pace(ci_private_t* priv, void* arg)
 {
@@ -1236,8 +1209,6 @@ ioctl_kill_self(ci_private_t *priv, void *unused)
 {
   return send_sig(SIGPIPE, current, 0);
 }
-extern int ioctl_iscsi_control_op (ci_private_t *priv, void *arg);
-
 
 extern int efab_file_move_to_alien_stack_rsop(ci_private_t *priv, void *arg);
 extern int efab_tcp_loopback_connect(ci_private_t *priv, void *arg);
@@ -1350,8 +1321,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_IOCTL_TRAMP_REG,       efab_linux_trampoline_register),
   op(OO_IOC_DIE_SIGNAL,            efab_signal_die),
 
-  op(OO_IOC_ISCSI_CONTROL_OP, ioctl_iscsi_control_op),
-
   op(OO_IOC_TCP_SOCK_SLEEP,   efab_tcp_helper_sock_sleep_rsop),
   op(OO_IOC_WAITABLE_WAKE,    efab_tcp_helper_waitable_wake_rsop),
 
@@ -1361,7 +1330,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_EP_FILTER_MCAST_DEL, efab_ep_filter_mcast_del),
   op(OO_IOC_EP_FILTER_DUMP,      efab_ep_filter_dump),
 
-  op(OO_IOC_TCP_MOVE_STATE,     efab_tcp_helper_move_state),
   op(OO_IOC_TCP_SOCK_LOCK,      efab_tcp_helper_sock_lock_slow_rsop),
   op(OO_IOC_TCP_SOCK_UNLOCK,    efab_tcp_helper_sock_unlock_slow_rsop),
   op(OO_IOC_TCP_PKT_WAIT,       efab_tcp_helper_pkt_wait_rsop),
@@ -1373,11 +1341,13 @@ oo_operations_table_t oo_operations[] = {
 
   op(OO_IOC_STACK_ATTACH,      efab_tcp_helper_stack_attach ),
   op(OO_IOC_INSTALL_STACK_BY_ID, efab_tcp_helper_lookup_and_attach_stack),
-  op(OO_IOC_SOCK_ATTACH,       efab_tcp_helper_sock_attach ),
+  op(OO_IOC_SOCK_ATTACH,           efab_tcp_helper_sock_attach ),
+  op(OO_IOC_TCP_ACCEPT_SOCK_ATTACH,efab_tcp_helper_tcp_accept_sock_attach ),
 #if CI_CFG_USERSPACE_PIPE
   op(OO_IOC_PIPE_ATTACH,       efab_tcp_helper_pipe_attach ),
 #endif
 
+  op(OO_IOC_OS_SOCK_CREATE_AND_SET,efab_tcp_helper_os_sock_create_and_set_rsop),
   op(OO_IOC_OS_SOCK_FD_GET,        efab_tcp_helper_get_sock_fd),
   op(OO_IOC_OS_SOCK_SENDMSG,       efab_tcp_helper_os_sock_sendmsg),
   op(OO_IOC_OS_SOCK_SENDMSG_RAW,   efab_tcp_helper_os_sock_sendmsg_raw),
@@ -1385,11 +1355,12 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OS_SOCK_ACCEPT,        efab_tcp_helper_os_sock_accept),
   op(OO_IOC_TCP_ENDPOINT_SHUTDOWN, tcp_helper_endpoint_shutdown_rsop),
   op(OO_IOC_TCP_BIND_OS_SOCK,      efab_tcp_helper_bind_os_sock_rsop),
-  op(OO_IOC_TCP_LISTEN_OS_SOCK,    efab_tcp_helper_listen_os_sock_rsop),
+  op(OO_IOC_TCP_LISTEN_OS_SOCK,    efab_tcp_helper_listen_os_sock),
   op(OO_IOC_TCP_CONNECT_OS_SOCK,   efab_tcp_helper_connect_os_sock),
   op(OO_IOC_TCP_HANDOVER,          efab_tcp_helper_handover),
   op(OO_IOC_FILE_MOVED,            oo_file_moved_rsop),
   op(OO_IOC_TCP_CLOSE_OS_SOCK,     efab_tcp_helper_set_tcp_close_os_sock_rsop),
+  op(OO_IOC_OS_POLLERR_CLEAR,      efab_tcp_helper_os_pollerr_clear),
 
   op(OO_IOC_CP_IPIF_ADDR_KIND,     cicp_ipif_addr_kind_rsop),
   op(OO_IOC_CP_LLAP_FIND,          cicp_llap_find_rsop),

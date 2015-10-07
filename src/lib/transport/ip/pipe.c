@@ -241,7 +241,7 @@ ci_inline int do_copy_write(void* to, const void* from, int n_bytes)
 }
 
 
-static int oo_pipe_read_wait(ci_netif* ni, struct oo_pipe* p)
+static int oo_pipe_read_wait(ci_netif* ni, struct oo_pipe* p, int non_block)
 {
   ci_uint64 sleep_seq;
   int rc;
@@ -255,7 +255,7 @@ static int oo_pipe_read_wait(ci_netif* ni, struct oo_pipe* p)
   LOG_PIPE("%s: not enough data in the pipe",
            __FUNCTION__);
 
-  if( p->aflags & (CI_PFD_AFLAG_NONBLOCK << CI_PFD_AFLAG_READER_SHIFT) ) {
+  if( non_block ) {
     LOG_PIPE("%s: O_NONBLOCK is set so exit", __FUNCTION__);
     CI_SET_ERROR(rc, EAGAIN);
     return rc;
@@ -360,7 +360,9 @@ int ci_pipe_read(ci_netif* ni, struct oo_pipe* p,
  again:
   bytes_available = oo_pipe_data_len(p);
   if( bytes_available == 0 ) {
-    if( (rc = oo_pipe_read_wait(ni, p)) != 1 )
+    if( (rc = oo_pipe_read_wait(ni, p,
+                                p->aflags & (CI_PFD_AFLAG_NONBLOCK <<
+                                             CI_PFD_AFLAG_READER_SHIFT))) != 1 )
       goto out;
   }
 
@@ -1408,11 +1410,7 @@ again_locked:
 
  wait_for_bytes:
   LOG_PIPE("%s[%u]: wait_for_bytes", __FUNCTION__, p->b.bufid);
-  if( flags & MSG_DONTWAIT ) {
-     CI_SET_ERROR(rc, EAGAIN);
-     goto out;
-  }
-  if( (rc = oo_pipe_read_wait(ni, p)) != 1 )
+  if( (rc = oo_pipe_read_wait(ni, p, flags & MSG_DONTWAIT)) != 1 )
      goto out;
   goto again;
 }

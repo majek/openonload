@@ -162,38 +162,30 @@ void ci_netif_assert_valid(ci_netif* ni, const char* file, int line)
 
 void ci_netif_verify_freepkts(ci_netif *ni, const char *file, int line)
 {
-  int count, verify_list = 0;
   ci_ip_pkt_fmt *pkt;
+  int c1, c2, i;
 
-  if( ni->state->n_freepkts == 0 )
-    verify(OO_PP_IS_NULL(ni->state->freepkts));
-  else
-    verify_list = 1;
+  for( c1 = 0, i = 0; i < ni->state->pkt_sets_n; i++ ) {
+    verify( OO_PP_NOT_NULL(ni->pkt_set[i].free) ==
+            (ni->pkt_set[i].n_free > 0) );
+    verify(ni->pkt_set[i].n_free >= 0);
+    c1 += ni->pkt_set[i].n_free;
 
-  if( OO_PP_IS_NULL(ni->state->freepkts) )
-    verify(ni->state->n_freepkts == 0);
-  else
-    verify_list = 1;
+    if( ni->pkt_set[i].n_free > 0 ) {
+      c2 = 1;
+      /* can't do PKT_CHK here as that asserts that refcount > 0 */
+      pkt = PKT(ni, ni->pkt_set[i].free);
+      while( OO_PP_NOT_NULL(pkt->next) ) {
+        verify(pkt->refcount == 0);
+        verify(pkt->n_buffers == 1);
+        verify((pkt->flags & ~ CI_PKT_FLAG_NONB_POOL) == 0);
+        verify(OO_PP_IS_NULL(pkt->frag_next));
 
-  if( verify_list ) {
-    verify(ni->state->n_freepkts > 0);
-    verify(OO_PP_NOT_NULL(ni->state->freepkts));
-
-    count = 1;
-    /* can't do PKT_CHK here as that asserts that refcount > 0 */
-    pkt = PKT(ni, ni->state->freepkts);
-
-    while( OO_PP_NOT_NULL(pkt->next) ) {
-      verify(pkt->refcount == 0);
-      verify(pkt->n_buffers == 1);
-      verify((pkt->flags & ~ CI_PKT_FLAG_NONB_POOL) == 0);
-      verify(OO_PP_IS_NULL(pkt->frag_next));
-
-      pkt = PKT(ni, pkt->next);
-      ++count;
+        pkt = PKT(ni, pkt->next);
+        ++c2;
+      }
+      verify(c2 == ni->pkt_set[i].n_free);
     }
-
-    verify(ni->state->n_freepkts == count);
   }
 }
 
@@ -277,7 +269,7 @@ void ci_netif_print_sockets(ci_netif* ni)
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
     if( wo->waitable.state != CI_TCP_STATE_FREE &&
         wo->waitable.state != CI_TCP_CLOSED &&
-        wo->waitable.state & CI_TCP_STATE_SOCKET ) {
+        CI_TCP_STATE_IS_SOCKET(wo->waitable.state) ) {
       citp_waitable_print(&wo->waitable);
     }
   }
@@ -287,8 +279,16 @@ void ci_netif_print_sockets(ci_netif* ni)
 static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
                                       void* log_arg)
 {
-  int intf_i, rx_ring = 0, tx_ring = 0, tx_oflow = 0, used, rx_queued;
+  int intf_i, rx_ring = 0, tx_ring = 0, tx_oflow = 0, used, rx_queued, i;
   ci_netif_state* ns = ni->state;
+
+  logger(log_arg, "  pkt_sets: pkt_size=%d set_size=%d max=%d alloc=%d",
+         CI_CFG_PKT_BUF_SIZE, PKTS_PER_SET, ns->pkt_sets_max, ns->pkt_sets_n);
+
+  for( i = 0; i < ns->pkt_sets_n; i++ ) {
+    logger(log_arg, "  pkt_set[%d]: free=%d%s", i, ni->pkt_set[i].n_free,
+           i == ns->current_pkt_set ? " current" : "");
+  }
 
   rx_ring = 0;
   tx_ring = 0;
@@ -300,8 +300,8 @@ static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
   used = ns->n_pkts_allocated - ns->n_freepkts - ns->n_async_pkts;
   rx_queued = ns->n_rx_pkts - rx_ring - ns->mem_pressure_pkt_pool_n;
 
-  logger(log_arg, "  pkt_bufs: size=%d max=%d alloc=%d free=%d async=%d%s",
-         CI_CFG_PKT_BUF_SIZE, ns->pkt_sets_max * PKTS_PER_SET,
+  logger(log_arg, "  pkt_bufs: max=%d alloc=%d free=%d async=%d%s",
+         ns->pkt_sets_max * PKTS_PER_SET,
          ns->n_pkts_allocated, ns->n_freepkts, ns->n_async_pkts,
          (ns->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ? " CRITICAL":
          (ns->mem_pressure ? " LOW":""));
@@ -372,7 +372,6 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
   log("   n_zero_refs=%d n_freepkts=%d estimated_free_nonb=%d", 
       n_zero_refs, ns->n_freepkts, n_zero_refs - ns->n_freepkts);
 
-#if ! CI_CFG_PP_IS_PTR
   {
     /* Can't do this race free, but what the heck.  (Actually we could, but
      * we'd have to grab the whole list).
@@ -390,7 +389,6 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
     }
     log("   free_nonb=%d nonb_pkt_pool=%"CI_PRIx64, no_nonb, ns->nonb_pkt_pool);
   }
-#endif
 }
 
 
@@ -568,7 +566,11 @@ void ci_netif_dump_extra(ci_netif* ni)
   log("  hwport_to_intf_i=%s intf_i_to_hwport=%s", hp2i, i2hp);
   log("  uk_intf_ver=%s", OO_UK_INTF_VER);
   log("  deferred count %d/%d", ns->defer_work_count, NI_OPTS(ni).defer_work_limit);
-  ci_netif_dump_reap_list(ni, 0);
+  log("  numa nodes: creation=%d load=%d",
+      ns->creation_numa_node, ns->load_numa_node);
+  log("  numa node masks: packet alloc=%x sock alloc=%x interrupt=%x",
+      ns->packet_alloc_numa_nodes, ns->sock_alloc_numa_nodes,
+      ns->interrupt_numa_nodes);
 }
 
 
@@ -611,6 +613,22 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
          0,
 #endif
          nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
+
+#ifndef __KERNEL__
+#if CI_CFG_SEPARATE_UDP_RXQ
+  if( NI_OPTS(ni).separate_udp_rxq ) {
+    vi = &ni->nic_hw[intf_i].udp_rxq_vi;
+    logger(log_arg, "  vi=%d", ef_vi_instance(vi));
+    logger(log_arg, "  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
+           ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
+           ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
+    logger(log_arg, "  rxq: cap=%d lim=%d spc=%d level=%d total_desc=%d",
+           ef_vi_receive_capacity(vi), ni->state->rxq_limit,
+           ci_netif_rx_vi_space(ni, vi), ef_vi_receive_fill_level(vi),
+           vi->ep_state->rxq.removed);
+  }
+#endif
+#endif
 }
 
 void ci_netif_dump(ci_netif* ni)
@@ -653,8 +671,10 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
 
   logger(log_arg, "  sock_bufs: max=%u n_allocated=%u",
          NI_OPTS(ni).max_ep_bufs, ns->n_ep_bufs);
-  logger(log_arg, "  aux_bufs: max=%u free=%u",
-         CI_NI_AUX_BUFS_MAX(ni), ns->n_free_aux_bufs);
+  /* aux buffers number is limited by tcp_synrecv_max*2 */
+  logger(log_arg, "  aux_bufs: max=%u allocated=%u free=%u",
+         NI_OPTS(ni).tcp_synrecv_max * 2, ni->state->n_aux_bufs,
+         ns->n_free_aux_bufs);
   ci_netif_dump_pkt_summary(ni, logger, log_arg);
 
 
@@ -676,6 +696,15 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
     logger(log_arg, "  tcpdump: %d/%d packets in queue",
            (ci_uint8)(ni->state->dump_write_i - ni->state->dump_read_i),
            CI_CFG_DUMPQUEUE_LEN);
+
+#if CI_CFG_FD_CACHING
+  logger(log_arg, "  active cache: hit=%d avail=%d cache=%s pending=%s",
+         ns->stats.activecache_hit,
+         *(ci_uint32*)CI_NETIF_PTR(ni, ns->active_cache.avail_stack), 
+         ci_ni_dllist_is_empty(ni, &ns->active_cache.cache) ? "EMPTY":"yes",
+         ci_ni_dllist_is_empty(ni, &ns->active_cache.pending) ? "EMPTY":"yes");
+
+#endif
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     ci_netif_dump_vi(ni, intf_i, logger, log_arg);

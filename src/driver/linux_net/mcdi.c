@@ -72,7 +72,7 @@ struct efx_mcdi_async_param {
 };
 
 static void efx_mcdi_timeout_async(unsigned long context);
-static bool efx_mcdi_poll_once(struct efx_nic *efx);
+static int efx_mcdi_poll_once(struct efx_nic *efx);
 static void efx_mcdi_abandon(struct efx_nic *efx);
 
 #ifdef CONFIG_SFC_MCDI_LOGGING
@@ -389,22 +389,22 @@ static void efx_mcdi_read_response_header(struct efx_nic *efx)
 	}
 }
 
-static bool efx_mcdi_poll_once(struct efx_nic *efx)
+static int efx_mcdi_poll_once(struct efx_nic *efx)
 {
 	struct efx_mcdi_iface *mcdi = efx_mcdi(efx);
 
 	if (efx_nic_hw_unavailable(efx))
-		return true;
+		return -ENETDOWN;
 
 	rmb();
 	if (!efx->type->mcdi_poll_response(efx))
-		return false;
+		return -EAGAIN;
 
 	spin_lock_bh(&mcdi->iface_lock);
 	efx_mcdi_read_response_header(efx);
 	spin_unlock_bh(&mcdi->iface_lock);
 
-	return true;
+	return 0;
 }
 
 static int efx_mcdi_poll(struct efx_nic *efx)
@@ -442,17 +442,14 @@ static int efx_mcdi_poll(struct efx_nic *efx)
 
 		time = jiffies;
 
-		if (efx_mcdi_poll_once(efx))
-			break;
+		rc = efx_mcdi_poll_once(efx);
+		if (rc != -EAGAIN)
+			return rc;
 
 		if (time_after(time, finish))
 			return -ETIMEDOUT;
 	}
 
-	if (efx_nic_hw_unavailable(efx))
-		return -ENETDOWN;
-
-	/* Return rc=0 like wait_event_timeout() */
 	return 0;
 }
 
@@ -755,7 +752,8 @@ static int _efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned cmd, size_t inlen,
 				"MC command 0x%x inlen %d mode %d timed out\n",
 			  	cmd, (int)inlen, mcdi->mode);
 
-		if (mcdi->mode == MCDI_MODE_EVENTS && efx_mcdi_poll_once(efx)) {
+		if (mcdi->mode == MCDI_MODE_EVENTS &&
+				(efx_mcdi_poll_once(efx) == 0)) {
 			netif_err(efx, hw, efx->net_dev,
 				  "MCDI request was completed without an event\n");
 			rc = 0;
@@ -996,7 +994,7 @@ static int _efx_mcdi_rpc_evb_retry(struct efx_nic *efx, unsigned cmd,
 		} while ((rc == -EPROTO) && (raw_rc == MC_CMD_ERR_NO_EVB_PORT)
 				&& time_before(jiffies, abort_time));
 
-		if (rc && !quiet)
+		if (rc && !quiet && !(cmd == MC_CMD_REBOOT && rc == -EIO))
 			efx_mcdi_display_error(efx, cmd, inlen,
 					outbuf, outlen, rc);
 	}

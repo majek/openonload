@@ -71,6 +71,7 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
   citp_fdinfo* fdi;
   citp_sock_fdi* sock_epi;
   citp_pipe_fdi* pipe_epi;
+  citp_alien_fdi* alien_epi;
   int rc;
   citp_lib_context_t lib_context;
 
@@ -93,11 +94,17 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
 #if CI_CFG_USERSPACE_PIPE
     case CITP_PIPE_FD:
       pipe_epi = fdi_to_pipe_fdi(fdi);
-      stat->endpoint_id = -1;
-      stat->endpoint_state = 0;
+      stat->endpoint_id = W_FMT(&pipe_epi->pipe->b);
+      stat->endpoint_state = pipe_epi->pipe->b.state;
       rc = onload_fd_stat_netif(pipe_epi->ni, stat);
       break;
 #endif
+    case CITP_PASSTHROUGH_FD:
+      alien_epi = fdi_to_alien_fdi(fdi);
+      stat->endpoint_id = W_FMT(alien_epi->ep);
+      stat->endpoint_state = alien_epi->ep->state;
+      rc = onload_fd_stat_netif(alien_epi->netif, stat);
+      break;
     default:
       LOG_U(log("%s: unknown fdinfo type %d", __FUNCTION__, 
                 citp_fdinfo_get_type(fdi)));
@@ -174,10 +181,11 @@ out:
 static int onload_fd_check_msg_warm(int fd)
 {
   struct onload_stat stat = { .stack_name = NULL };
-  int ok = CI_TCP_STATE_SOCKET | CI_TCP_STATE_TCP | CI_TCP_STATE_TCP_CONN;
+  int ok = CI_TCP_STATE_TCP | CI_TCP_STATE_TCP_CONN;
   int rc;
 
   if ( ( onload_fd_stat(fd, &stat) > 0 ) &&
+       ( CI_TCP_STATE_IS_SOCKET(stat.endpoint_state) ) &&
        ( ok == (stat.endpoint_state & ok) ) )
     rc = 1;
   else
@@ -188,11 +196,16 @@ static int onload_fd_check_msg_warm(int fd)
   return rc;
 }
 
+
 int onload_fd_check_feature(int fd, enum onload_fd_feature feature)
 {
   switch ( feature ) {
   case ONLOAD_FD_FEAT_MSG_WARM:
-    return onload_fd_check_msg_warm( fd );
+    return onload_fd_check_msg_warm(fd);
+    break;
+  case ONLOAD_FD_FEAT_UDP_TX_TS_HDR:
+    return 1;
+    break;
   default:
     break;
   }
@@ -315,22 +328,23 @@ onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
 {
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
-  int rc = -ENOTTY;
+  int rc;
 
   Log_CALL(ci_log("%s(%d, %p, %d, 0x%x)", __FUNCTION__,
                   fd, iov, iovlen, flags));
 
   citp_enter_lib(&lib_context);
   fdi = citp_fdtable_lookup(fd);
-  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_complete != NULL )
+  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_complete != NULL ) {
     rc = citp_fdinfo_get_ops(fdi)->dsend_complete(fdi, iov, iovlen, flags);
+  }
+  else {
+    errno = ENOTTY;
+    rc = -1;
+  }
   citp_fdinfo_release_ref(fdi, 0);
   citp_exit_lib(&lib_context, rc == 0);
 
-  if( rc < 0 ) {
-    errno = -rc;
-    rc = -1;
-  }
   Log_CALL_RESULT(rc);
   return rc;
 }
@@ -340,21 +354,22 @@ onload_delegated_send_cancel(int fd)
 {
   citp_lib_context_t lib_context;
   citp_fdinfo* fdi;
-  int rc = -ENOTTY;
+  int rc = -1;
 
   Log_CALL(ci_log("%s(%d)", __FUNCTION__, fd));
 
   citp_enter_lib(&lib_context);
   fdi = citp_fdtable_lookup(fd);
-  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_cancel != NULL )
+  if( fdi != NULL && citp_fdinfo_get_ops(fdi)->dsend_cancel != NULL ) {
     rc = citp_fdinfo_get_ops(fdi)->dsend_cancel(fdi);
+  }
+  else {
+    errno = ENOTTY;
+    rc = -1;
+  }
   citp_fdinfo_release_ref(fdi, 0);
   citp_exit_lib(&lib_context, rc == 0);
 
-  if( rc < 0 ) {
-    errno = -rc;
-    rc = -1;
-  }
   Log_CALL_RESULT(rc);
   return rc;
 }
@@ -366,15 +381,17 @@ oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
   citp_fdinfo* fdi;
    citp_sock_fdi* epi;
   ci_netif* ni;
-  int rc = -ENOTTY;
+  int rc = -1;
   int intf_i = -1;
 
   Log_CALL(ci_log("%s(%d, %p, %d)", __FUNCTION__, fd, iov, iovcnt));
 
   citp_enter_lib(&lib_context);
   fdi = citp_fdtable_lookup(fd);
-  if( fdi == NULL || ! citp_fdinfo_is_socket(fdi) )
+  if( fdi == NULL || ! citp_fdinfo_is_socket(fdi) ) {
+    errno = ENOTTY;
     goto out;
+  }
   epi = fdi_to_sock_fdi(fdi);
   ni = epi->sock.netif;
 
@@ -382,8 +399,10 @@ oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
     intf_i = ci_hwport_to_intf_i(ni, hwport);
   if( intf_i < 0 )
     intf_i = epi->sock.s->pkt.intf_i;
-  if( intf_i < 0 )
-    return -ENETDOWN;
+  if( intf_i < 0 ) {
+    errno = ENETDOWN;
+    return -1;
+  }
   rc = ci_netif_raw_send(ni, intf_i,  iov, iovcnt);
   if( rc < 0 ) {
     errno = -rc;
@@ -398,3 +417,55 @@ out:
   return rc;
 }
 
+
+int onload_get_tcp_info(int fd, struct onload_tcp_info* uinfo, int* len_in_out)
+{
+  citp_lib_context_t lib_context;
+  citp_fdinfo* fdi;
+  citp_sock_fdi* sock_epi;
+  ci_tcp_state* ts;
+  int rc = -1;
+  struct onload_tcp_info info;
+
+  Log_CALL(ci_log("%s(%d, %p, %p(%d))", __FUNCTION__,
+                  fd, uinfo, len_in_out, *len_in_out));
+
+  citp_enter_lib(&lib_context);
+  fdi = citp_fdtable_lookup(fd);
+  if( fdi == NULL || citp_fdinfo_get_type(fdi) != CITP_TCP_SOCKET )
+    goto fail;
+  sock_epi = fdi_to_sock_fdi(fdi);
+  if( sock_epi->sock.s->b.state == CI_TCP_LISTEN ||
+      sock_epi->sock.s->b.state == CI_TCP_CLOSED )
+    goto fail;
+  ts = SOCK_TO_TCP(sock_epi->sock.s);
+
+  info.so_recvbuf = ts->s.so.rcvbuf;
+  info.rcvbuf_used = tcp_rcv_usr(ts);
+  info.rcv_window = tcp_rcv_wnd_right_edge_sent(ts) - ts->rcv_added;
+
+  info.so_sndbuf = ts->s.so.sndbuf;
+  info.so_sndbuf_pkts = ts->so_sndbuf_pkts;
+  info.sndbuf_pkts_avail = ci_tcp_tx_send_space(sock_epi->sock.netif, ts);
+  info.snd_mss = tcp_eff_mss(ts);
+
+  info.snd_window = SEQ_SUB(ts->snd_max, tcp_snd_nxt(ts));
+  info.cong_window = ts->cwnd + ts->cwnd_extra - ci_tcp_inflight(ts);
+  if( info.cong_window < info.snd_mss )
+    info.cong_window = 0;
+
+  if( *len_in_out > sizeof(info) )
+    *len_in_out = sizeof(info);
+  memcpy(uinfo, &info, *len_in_out);
+
+  rc = 0;
+  goto out;
+
+fail:
+  errno = EINVAL;
+ out:
+  if( fdi != NULL )
+    citp_fdinfo_release_ref(fdi, 0);
+  citp_exit_lib(&lib_context, FALSE);
+  return rc;
+}

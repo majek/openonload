@@ -39,9 +39,6 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <signal.h>
-#if __GNUC__ >= 3 		/* ?? XXX FIXME */
-# include <sys/sendfile.h>
-#endif
 
 #include <ci/internal/transport_config_opt.h>
 

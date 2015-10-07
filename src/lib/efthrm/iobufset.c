@@ -419,13 +419,14 @@ static void oo_iobufset_free_memory(struct oo_iobufset *rs)
   kfree(rs);
 
 }
-static void oo_iobufset_resource_free(struct oo_iobufset *rs)
+static void
+oo_iobufset_resource_free(struct oo_iobufset *rs, int reset_pending)
 {
   efrm_pd_dma_unmap(rs->pd, rs->pages->n_bufs,
                     EFHW_GFP_ORDER_TO_NIC_ORDER(
                                     compound_order(rs->pages->pages[0])),
                     &rs->dma_addrs[0], sizeof(rs->dma_addrs[0]),
-                    &rs->buf_tbl_alloc);
+                    &rs->buf_tbl_alloc, reset_pending);
 
   if (rs->pd != NULL)
     efrm_pd_release(rs->pd);
@@ -435,10 +436,11 @@ static void oo_iobufset_resource_free(struct oo_iobufset *rs)
 }
 
 
-void oo_iobufset_resource_release(struct oo_iobufset *iobrs)
+void
+oo_iobufset_resource_release(struct oo_iobufset *iobrs, int reset_pending)
 {
   if (oo_atomic_dec_and_test(&iobrs->ref_count))
-    oo_iobufset_resource_free(iobrs);
+    oo_iobufset_resource_free(iobrs, reset_pending);
 }
 
 static void put_user_fake(uint64_t v, uint64_t *p)
@@ -448,7 +450,8 @@ static void put_user_fake(uint64_t v, uint64_t *p)
 
 int
 oo_iobufset_resource_alloc(struct oo_buffer_pages * pages, struct efrm_pd *pd,
-                           struct oo_iobufset **iobrs_out, uint64_t *hw_addrs)
+                           struct oo_iobufset **iobrs_out, uint64_t *hw_addrs,
+                           int reset_pending)
 {
   struct oo_iobufset *iobrs;
   int rc;
@@ -500,11 +503,11 @@ oo_iobufset_resource_alloc(struct oo_buffer_pages * pages, struct efrm_pd *pd,
   }
 
   rc = efrm_pd_dma_map(iobrs->pd, pages->n_bufs,
-                       nic_order,
-                       addrs, sizeof(addrs[0]),
-                       &iobrs->dma_addrs[0], sizeof(iobrs->dma_addrs[0]),
-                       hw_addrs, sizeof(hw_addrs[0]),
-                       put_user_fake, &iobrs->buf_tbl_alloc);
+		       nic_order,
+		       addrs, sizeof(addrs[0]),
+		       &iobrs->dma_addrs[0], sizeof(iobrs->dma_addrs[0]),
+		       hw_addrs, sizeof(hw_addrs[0]),
+		       put_user_fake, &iobrs->buf_tbl_alloc, reset_pending);
   kfree(addrs);
 
   if( rc < 0 )

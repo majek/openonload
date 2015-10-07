@@ -114,41 +114,53 @@ static int efx_ioctl_do_mcdi_old(struct efx_nic *efx, union efx_ioctl_data *data
 static int efx_ioctl_do_mcdi(struct efx_nic *efx,
 			     struct efx_mcdi_request2 __user *user_req)
 {
-	struct efx_mcdi_request2 req;
+	struct efx_mcdi_request2 *req;
 	size_t inbuf_len, outlen_actual;
-	efx_dword_t *inbuf;
-	efx_dword_t *outbuf;
+	efx_dword_t *inbuf = NULL;
+	efx_dword_t *outbuf = NULL;
 	int rc;
 
-	if (copy_from_user(&req, user_req, sizeof(req)))
-		return -EFAULT;
+	req = kmalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	if (copy_from_user(req, user_req, sizeof(*req))) {
+		rc = -EFAULT;
+		goto out_free;
+	}
 
 	/* No input flags are defined yet */
-	if (req.flags != 0)
-		return -EINVAL;
+	if (req->flags != 0) {
+		rc = -EINVAL;
+		goto out_free;
+	}
 
 	/* efx_mcdi_rpc() will check the length anyway, but this avoids
 	 * trying to allocate an extreme amount of memory.
 	 */
-	if (req.inlen > MCDI_CTL_SDU_LEN_MAX_V2 ||
-	    req.outlen > MCDI_CTL_SDU_LEN_MAX_V2)
-		return -EINVAL;
+	if (req->inlen > MCDI_CTL_SDU_LEN_MAX_V2 ||
+	    req->outlen > MCDI_CTL_SDU_LEN_MAX_V2) {
+		rc = -EINVAL;
+		goto out_free;
+	}
 
-	inbuf_len = ALIGN(req.inlen, 4);
+	inbuf_len = ALIGN(req->inlen, 4);
 	inbuf = kmalloc(inbuf_len, GFP_USER);
-	if (!inbuf)
-		return -ENOMEM;
+	if (!inbuf) {
+		rc = -ENOMEM;
+		goto out_free;
+	}
 	/* Ensure zero-padding if req.inlen not a multiple of 4 */
-	if (req.inlen % 4)
-		inbuf[req.inlen / 4].u32[0] = 0;
+	if (req->inlen % 4)
+		inbuf[req->inlen / 4].u32[0] = 0;
 
-	outbuf = kmalloc(ALIGN(req.outlen, 4), GFP_USER);
+	outbuf = kmalloc(ALIGN(req->outlen, 4), GFP_USER);
 	if (!outbuf) {
 		rc = -ENOMEM;
 		goto out_free;
 	}
 
-	if (copy_from_user(inbuf, &user_req->payload, req.inlen)) {
+	if (copy_from_user(inbuf, &user_req->payload, req->inlen)) {
 		rc = -EFAULT;
 		goto out_free;
 	}
@@ -156,30 +168,31 @@ static int efx_ioctl_do_mcdi(struct efx_nic *efx,
 	/* We use inbuf_len as an inlen not divisible by 4 annoys mcdi-logging.
 	 * It doesn't care about outlen however.
 	 */
-	rc = efx_mcdi_rpc_quiet(efx, req.cmd, inbuf, inbuf_len,
-				outbuf, req.outlen, &outlen_actual);
-	efx_ioctl_mcdi_complete_reset(efx, req.cmd, rc);
+	rc = efx_mcdi_rpc_quiet(efx, req->cmd, inbuf, inbuf_len,
+				outbuf, req->outlen, &outlen_actual);
+	efx_ioctl_mcdi_complete_reset(efx, req->cmd, rc);
 
 	if (rc) {
 		if (outlen_actual) {
 			/* Error was reported by the MC */
-			req.flags |= EFX_MCDI_REQUEST_ERROR;
-			req.host_errno = -rc;
+			req->flags |= EFX_MCDI_REQUEST_ERROR;
+			req->host_errno = -rc;
 			rc = 0;
 		} else {
 			/* Communication failure */
 			goto out_free;
 		}
 	}
-	req.outlen = outlen_actual;
+	req->outlen = outlen_actual;
 
-	if (copy_to_user(user_req, &req, sizeof(req)) ||
+	if (copy_to_user(user_req, req, sizeof(*req)) ||
 	    copy_to_user(&user_req->payload, outbuf, outlen_actual))
 		rc = -EFAULT;
 
 out_free:
 	kfree(outbuf);
 	kfree(inbuf);
+	kfree(req);
 	return rc;
 }
 
@@ -610,7 +623,7 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		      union efx_ioctl_data __user *user_data)
 {
 	int (*op)(struct efx_nic *, union efx_ioctl_data *);
-	union efx_ioctl_data data;
+	union efx_ioctl_data *data = NULL;
 	size_t size;
 	int rc;
 
@@ -619,7 +632,7 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 
 	switch (cmd) {
 	case EFX_MCDI_REQUEST:
-		size = sizeof(data.mcdi_request);
+		size = sizeof(data->mcdi_request);
 		op = efx_ioctl_do_mcdi_old;
 		break;
 	case EFX_MCDI_REQUEST2:
@@ -627,7 +640,7 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		return efx_ioctl_do_mcdi(efx, &user_data->mcdi_request2);
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RESET)
 	case EFX_RESET_FLAGS:
-		size = sizeof(data.reset_flags);
+		size = sizeof(data->reset_flags);
 		op = efx_ioctl_reset_flags;
 		break;
 #endif
@@ -638,83 +651,83 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 #endif
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR)
 	case EFX_RXFHINDIR:
-		size = sizeof(data.rxfh_indir);
+		size = sizeof(data->rxfh_indir);
 		op = efx_ioctl_rxfh_indir;
 		break;
 #endif
 #ifdef CONFIG_SFC_PTP
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NET_TSTAMP)
 	case EFX_TS_INIT:
-		size = sizeof(data.ts_init);
+		size = sizeof(data->ts_init);
 		op = efx_ioctl_ts_init;
 		break;
 	case EFX_TS_READ:
-		size = sizeof(data.ts_read);
+		size = sizeof(data->ts_read);
 		op = efx_ioctl_ts_read;
 		break;
 #endif
 #if defined(EFX_NOT_UPSTREAM)
 	case EFX_GET_TS_CONFIG:
-		size = sizeof(data.ts_init);
+		size = sizeof(data->ts_init);
 		op = efx_ioctl_get_ts_config;
 		break;
 	case EFX_TS_SETTIME:
-		size = sizeof(data.ts_settime);
+		size = sizeof(data->ts_settime);
 		op = efx_ioctl_ts_settime;
 		break;
 	case EFX_TS_ADJTIME:
-		size = sizeof(data.ts_adjtime);
+		size = sizeof(data->ts_adjtime);
 		op = efx_ioctl_ts_adjtime;
 		break;
 	case EFX_TS_SYNC:
-		size = sizeof(data.ts_sync);
+		size = sizeof(data->ts_sync);
 		op = efx_ioctl_ts_sync;
 		break;
 	case EFX_TS_SET_SYNC_STATUS:
-		size = sizeof(data.ts_set_sync_status);
+		size = sizeof(data->ts_set_sync_status);
 		op = efx_ioctl_ts_set_sync_status;
 		break;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) && !defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
 	case EFX_GET_TS_INFO:
-		size = sizeof(data.ts_info);
+		size = sizeof(data->ts_info);
 		op = efx_ioctl_get_ts_info;
 		break;
 #endif
 	case EFX_TS_SET_VLAN_FILTER:
-		size = sizeof(data.ts_vlan_filter);
+		size = sizeof(data->ts_vlan_filter);
 		op = efx_ioctl_ts_set_vlan_filter;
 		break;
 	case EFX_TS_SET_UUID_FILTER:
-		size = sizeof(data.ts_uuid_filter);
+		size = sizeof(data->ts_uuid_filter);
 		op = efx_ioctl_ts_set_uuid_filter;
 		break;
 	case EFX_TS_SET_DOMAIN_FILTER:
-		size = sizeof(data.ts_domain_filter);
+		size = sizeof(data->ts_domain_filter);
 		op = efx_ioctl_ts_set_domain_filter;
 		break;
 #endif
 #endif
 #ifdef CONFIG_SFC_PPS
 	case EFX_TS_GET_PPS:
-		size = sizeof(data.pps_event);
+		size = sizeof(data->pps_event);
 		op = efx_ioctl_get_pps_event;
 		break;
 	case EFX_TS_ENABLE_HW_PPS:
-		size = sizeof(data.pps_enable);
+		size = sizeof(data->pps_enable);
 		op = efx_ioctl_hw_pps_enable;
 		break;
 #endif
 #ifdef CONFIG_SFC_AOE
 	case EFX_UPDATE_CPLD:
-		size = sizeof(data.cpld);
+		size = sizeof(data->cpld);
 		op = efx_ioctl_update_cpld;
 		break;
 	case EFX_LICENSE_UPDATE:
-		size = sizeof(data.key_stats);
+		size = sizeof(data->key_stats);
 		op = efx_ioctl_update_license_old;
 		break;
 	case EFX_RESET_AOE:
-		size = sizeof(data.aoe_reset);
+		size = sizeof(data->aoe_reset);
 		op = efx_ioctl_reset_aoe;
 		break;
 #endif
@@ -722,19 +735,19 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		return efx_ioctl_get_mod_eeprom(efx, user_data);
 
 	case EFX_GMODULEINFO:
-		size = sizeof(data.modinfo);
+		size = sizeof(data->modinfo);
 		op = efx_ioctl_get_mod_info;
 		break;
 	case EFX_GET_DEVICE_IDS:
-		size = sizeof(data.device_ids);
+		size = sizeof(data->device_ids);
 		op = efx_ioctl_get_device_ids;
 		break;
 	case EFX_LICENSE_UPDATE2:
-		size = sizeof(data.key_stats2);
+		size = sizeof(data->key_stats2);
 		op = efx_ioctl_update_license;
 		break;
 	case EFX_LICENSED_APP_STATE:
-		size = sizeof(data.app_state);
+		size = sizeof(data->app_state);
 		op = efx_ioctl_licensed_app_state;
 		break;
 	default:
@@ -743,13 +756,22 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		return -EOPNOTSUPP;
 	}
 
-	if (copy_from_user(&data, user_data, size))
+	data = kmalloc(sizeof(*data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+
+	if (copy_from_user(data, user_data, size)) {
+		kfree(data);
 		return -EFAULT;
-	rc = op(efx, &data);
-	if (rc)
-		return rc;
-	if (copy_to_user(user_data, &data, size))
-		return -EFAULT;
+	}
+
+	rc = op(efx, data);
+	if (!rc) {
+		if (copy_to_user(user_data, data, size))
+			rc = -EFAULT;
+	}
+
+	kfree(data);
 	return 0;
 }
 

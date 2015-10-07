@@ -246,6 +246,17 @@ int aoe_verify_map_range_lock(struct aoe_map_entry *entry,
 	return ret;
 }
 
+int aoe_process_map_entry_operation(struct aoe_map_entry *entry,
+			      uint64_t addr,
+			      uint32_t len)
+{
+	int ret;
+
+	entry->write_map = NULL;;
+	ret = entry->startMessageSend(entry);
+	return ret;
+}
+
 void aoe_release_map_lock(struct aoe_map_entry *entry)
 {
 	struct aoe_mmap_entry *mmap = entry->write_map;

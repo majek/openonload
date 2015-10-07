@@ -199,14 +199,6 @@ static int citp_closedfd_fcntl(citp_fdinfo *fdinfo, int cmd, long arg)
 }
 
 
-static int citp_closedfd_close(citp_fdinfo* fdinfo)
-{
-  Log_V(log(LPF "close(%d)", fdinfo->fd ));
-  errno = EBADF;
-  return -1;
-}
-
-
 static int citp_closedfd_ioctl(citp_fdinfo* fdinfo, int request, void* arg)
 {
   Log_V(log(LPF "ioctl(%d)", fdinfo->fd ));
@@ -254,17 +246,6 @@ static int citp_closedfd_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
 }
 
 
-static int citp_closedfd_zc_recv_filter(citp_fdinfo* fdi, 
-                                        onload_zc_recv_filter_callback filter,
-                                        void* cb_arg, int flags)
-{
-#if CI_CFG_ZC_RECV_FILTER
-  return -EBADF;
-#else
-  return -ENOSYS;
-#endif
-}
-
 #if CI_CFG_FD_CACHING
 static int citp_closedfd_cache(citp_fdinfo* fdi)
 {
@@ -286,7 +267,6 @@ citp_protocol_impl citp_closed_protocol_impl = {
     .listen      = citp_closedfd_listen,
     .accept      = citp_closedfd_accept,
     .connect     = citp_closedfd_connect,
-    .close       = citp_closedfd_close,
     .shutdown    = citp_closedfd_shutdown,
     .getsockname = citp_closedfd_getsockname,
     .getpeername = citp_closedfd_getpeername,
@@ -308,7 +288,6 @@ citp_protocol_impl citp_closed_protocol_impl = {
 #endif
     .zc_send     = citp_closedfd_zc_send,
     .zc_recv     = citp_closedfd_zc_recv,
-    .zc_recv_filter = citp_closedfd_zc_recv_filter,
     .recvmsg_kernel = citp_closedfd_recvmsg_kernel,
 #if CI_CFG_FD_CACHING
     .cache       = citp_closedfd_cache,

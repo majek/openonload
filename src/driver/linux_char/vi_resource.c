@@ -28,6 +28,11 @@
 #include "filter_list.h"
 #include "linux_char_internal.h"
 
+/* Reserved space in evq for a reasonable number of time sync events.
+ * They arrive at a rate of 4 per second.  This allows app to get
+ * 25s behind...
+ */
+#define CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY (4 * 25)
 
 static const char *q_names[EFHW_N_Q_TYPES] = { "TXQ", "RXQ", "EVQ" };
 
@@ -115,8 +120,10 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
   struct efrm_vi *virs;
   int rc;
 
-  if (vi_flags & EFHW_VI_RM_WITH_INTERRUPT)
+  if (vi_flags & EFHW_VI_RM_WITH_INTERRUPT) {
     efrm_vi_attr_set_with_interrupt(attr, 1);
+    efrm_vi_attr_set_interrupt_core(attr, raw_smp_processor_id());
+  }
 
   if (vi_flags & EFHW_VI_RX_PACKED_STREAM)
     efrm_vi_attr_set_packed_stream(attr, 1);
@@ -152,11 +159,17 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
         rc = -EINVAL;
         goto fail_q_alloc;
       }
-      /* Each TX completion is accompanied by 2 timestamp events. */
-      evq_capacity = rxq_capacity + 3 * txq_capacity;
+      /* Each TX completion is accompanied by 2 timestamp events.
+       * Take into account additional capacity to reserve as indicated by
+       * evq_capacity.
+       */
+      evq_capacity = rxq_capacity + 3 * txq_capacity - evq_capacity - 1;
+
+      /* Reserve space for time sync events. */
+      evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
     }
     else
-      evq_capacity = rxq_capacity + txq_capacity;
+      evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
     if (evq_capacity == 0)
       evq_capacity = -1;
   }

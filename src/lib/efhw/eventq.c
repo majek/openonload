@@ -98,7 +98,7 @@ efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 		    EFHW_BUFFER_TABLE_BLOCK_SIZE);
 
 	/* Initialise the buffer table entries. */
-	rc = efhw_nic_buffer_table_alloc(nic, 0, 0, &h->bt_block);
+	rc = efhw_nic_buffer_table_alloc(nic, 0, 0, &h->bt_block, 0);
 	if (rc < 0) {
 		EFHW_WARN("%s: failed to allocate buffer table block",
 			  __FUNCTION__);
@@ -193,7 +193,7 @@ void efhw_keventq_dtor(struct efhw_nic *nic, struct efhw_keventq *evq)
 	/* Free buftable entries */
 	efhw_nic_buffer_table_clear(nic, evq->hw.bt_block, 0,
                               1 << order);
-	efhw_nic_buffer_table_free(nic, evq->hw.bt_block);
+	efhw_nic_buffer_table_free(nic, evq->hw.bt_block, 0);
 
 	/* free the pages used by the eventq itself */
 	efhw_iopages_free(nic->pci_dev, &evq->hw.iobuff, NULL);
@@ -227,28 +227,28 @@ efhw_handle_rxdmaq_flushed(struct efhw_nic *nic, struct efhw_ev_handler *h,
 	return h->dmaq_flushed_fn(nic, instance, true, failed);
 }
 
-void
+int
 efhw_handle_wakeup_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			 unsigned instance)
+			 unsigned instance, int budget)
 {
 	if (!h->wakeup_fn) {
 		EFHW_WARN("%s: no handler registered", __FUNCTION__);
-		return;
+		return 0;
 	}
 
-	h->wakeup_fn(nic, instance);
+	return h->wakeup_fn(nic, instance, budget);
 }
 
-void
+int
 efhw_handle_timeout_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
-			  unsigned instance)
+			  unsigned instance, int budget)
 {
 	if (!h->timeout_fn) {
 		EFHW_WARN("%s: no handler registered", __FUNCTION__);
-		return;
+		return 0;
 	}
 
-	h->timeout_fn(nic, instance);
+	return h->timeout_fn(nic, instance, budget);
 }
 
 /**********************************************************************
@@ -299,7 +299,8 @@ int efhw_keventq_poll(struct efhw_nic *nic, struct efhw_keventq *q)
 		if (likely(EFHW_IS_EVENT(ev))) {
 			count++;
 
-			if (efhw_nic_handle_event(nic, q->ev_handlers, ev) < 1)
+			if (efhw_nic_handle_event(nic, q->ev_handlers, ev,
+						  0x7fffffff) < 0)
 				EFHW_ERR("efhw_keventq_poll: [%d] UNEXPECTED "
 					 "EVENT:"FALCON_EVENT_FMT,
 					 q->instance,

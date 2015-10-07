@@ -48,12 +48,6 @@
 #define OOF_SRC_FLAGS_DEFAULT 0
 #define OOF_SRC_FLAGS_DEFAULT_MCAST (OO_HW_SRC_FLAG_LOOPBACK)
 
-extern void
-tcp_helper_cluster_release(struct tcp_helper_cluster_s* thc,
-                           struct tcp_helper_resource_s* trs);
-extern void
-tcp_helper_cluster_ref(struct tcp_helper_cluster_s* thc);
-
 #ifndef NDEBUG
 
 static void oof_mutex_lock_chk_not_atomic(struct mutex* m)
@@ -104,11 +98,16 @@ static struct oof_manager* the_manager;
 #define ERR_LOG(...)  OO_DEBUG_ERR(ci_log(__VA_ARGS__))
 
 #define SK_FMT             "%d:%d"
-#define SK_PRI_ARGS(skf)   oof_cb_stack_id(oof_cb_socket_stack(skf)),   \
+#define SK_PRI_ARGS(skf)   oof_cb_stack_id(oof_socket_stack_safe(skf)),   \
                            oof_cb_socket_id(skf)
+#define SK_PRI_ARGS_SAFE(skf,no_stack) (no_stack ? -1 : \
+                                        oof_cb_stack_id(oof_socket_stack_safe(skf))), \
+                                       (no_stack ? -1 : \
+                                        oof_cb_socket_id(skf))
 
 #define FSK_FMT            "%s: "SK_FMT" "
 #define FSK_PRI_ARGS(skf)  __FUNCTION__, SK_PRI_ARGS(skf)
+#define FSK_PRI_ARGS_SAFE(skf,no_stack)  __FUNCTION__, SK_PRI_ARGS_SAFE(skf, no_stack)
 
 #define TRIPLE_FMT         "%s "IPPORT_FMT
 #define TRIPLE_ARGS(proto, ip, port)                    \
@@ -129,6 +128,8 @@ static struct oof_manager* the_manager;
     TRIPLE_ARGS(skf->sf_local_port->lp_protocol,                \
                 skf->sf_laddr, skf->sf_local_port->lp_lport)
 
+static struct tcp_helper_resource_s*
+oof_socket_stack_safe(struct oof_socket* skf);
 
 static void
 oof_mcast_filter_list_free(ci_dllist* mcast_filters);
@@ -140,8 +141,12 @@ static void
 oof_socket_mcast_remove(struct oof_manager* fm, struct oof_socket* skf,
                         ci_dllist* mcast_filters);
 
-static void
+static int
 oof_socket_mcast_remove_sw(struct oof_manager* fm, struct oof_socket* skf);
+
+static void
+oof_socket_mcast_del_connected(struct oof_manager* fm,
+                               struct oof_socket* skf, int stack_locked);
 
 static unsigned
 oof_mcast_filter_duplicate_hwports(struct oof_mcast_filter* mf,
@@ -164,40 +169,31 @@ __oof_manager_addr_del(struct oof_manager*, unsigned laddr, unsigned ifindex);
 static void
 __oof_mcast_update_filters(struct oof_manager* fm, int ifindex);
 
-static void
-oof_thc_add_ref(struct oof_local_port* lp);
-
 static int
-oof_thc_install_filters(struct oof_manager* fm, struct oof_local_port* lp,
-                        unsigned laddr);
+oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft);
 
-static int
-oof_thc_alloc(struct oof_manager* fm, struct tcp_helper_cluster_s* thc,
-              struct oof_local_port* lp);
-
-static void
-oof_thc_remove_filters(struct oof_manager* fm, struct oof_local_port* lp);
-
-static void
-oof_thc_do_del(struct oof_thc* thcf);
-
-static int
-oof_thc_release(struct oof_manager* fm, struct oof_local_port* lp);
-
-
-static int oof_is_clustered(struct oof_local_port* lp)
-{
-  return lp->lp_thcf != NULL;
-}
+extern int scalable_filter_gid;
 
 /**********************************************************************
 ***********************************************************************
 **********************************************************************/
 
+/* Indicates whether oof attempted setting the filters
+ * This function does not work with KERNEL_REDIRECT filters
+ * (exclusive tproxy case), where
+ * both trs and thc fileds can be null and filters still installed */
+static int oo_hw_filter_is_empty(struct oo_hw_filter* ft)
+{
+  return ft->trs == NULL && ft->thc == NULL;
+}
+
+
 static int __oof_hw_filter_set(struct oof_manager* fm,
                                struct oof_socket* skf,
                                struct oo_hw_filter* oofilter,
-                               struct tcp_helper_resource_s* trs, int protocol,
+                               struct tcp_helper_resource_s* trs,
+                               struct tcp_helper_cluster_s* thc,
+                               int protocol,
                                unsigned saddr, int sport,
                                unsigned daddr, int dport,
                                unsigned hwport_mask,
@@ -206,20 +202,42 @@ static int __oof_hw_filter_set(struct oof_manager* fm,
                                const char* caller)
 {
   int rc;
+  struct oo_hw_filter_spec oo_filter_spec = {
+    .type             = OO_HW_FILTER_TYPE_IP,
+    .addr.ip.saddr    = saddr,
+    .addr.ip.sport    = sport,
+    .addr.ip.daddr    = daddr,
+    .addr.ip.dport    = dport,
+    .addr.ip.protocol = protocol,
+    .vlan_id          = OO_HW_VLAN_UNSPEC,
+  };
+  struct oo_hw_filter old_oofilter;
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
 
+  /* cannot change filter type from normal to clustered */
+  ci_assert(oofilter->thc == NULL || trs == NULL);
+  ci_assert(oofilter->trs == NULL || thc == NULL);
+  ci_assert(trs == NULL || thc == NULL);
+
+  /* The old filter is stored in old_oofilter to free hw filter after unlock.
+   * Now, the oofilter can be reinitialised with new stack - this will prevent
+   * removal of the socket by oof_socket_del_sw. */
+  old_oofilter = *oofilter;
+  oo_hw_filter_init2(oofilter, trs, thc);
+
   spin_unlock_bh(&fm->fm_inner_lock);
   ci_assert(!in_atomic());
-  rc = oo_hw_filter_set(oofilter, trs, protocol, saddr, sport,
-                            daddr, dport, OO_HW_VLAN_UNSPEC, 0,
-                            hwport_mask, src_flags);
+  oo_hw_filter_clear(&old_oofilter);
+  rc = oo_hw_filter_set(oofilter, &oo_filter_spec, 0, hwport_mask,
+                        src_flags);
   spin_lock_bh(&fm->fm_inner_lock);
 
   if( rc == 0 ) {
-    IPF_LOG(FSK_FMT "FILTER "QUIN_FMT, caller, SK_PRI_ARGS(skf),
-            QUIN_ARGS(protocol, daddr, dport, saddr, sport));
+    IPF_LOG(FSK_FMT "FILTER "QUIN_FMT"%s", caller, SK_PRI_ARGS(skf),
+            QUIN_ARGS(protocol, daddr, dport, saddr, sport),
+            thc != NULL ? " CLUSTERED" : "");
     oof_dl_filter_set(oofilter,
                       oof_cb_stack_id(oof_cb_socket_stack(skf)),
                       protocol, saddr, sport, daddr, dport);
@@ -241,50 +259,36 @@ static int __oof_hw_filter_set(struct oof_manager* fm,
 }
 
 
-static int oof_hw_thc_filter_set(struct oof_manager* fm,
-                                 struct oof_local_port* lp, int la_i,
-                                 unsigned laddr)
-{
-  int rc;
-  struct oof_thc* thcf = lp->lp_thcf;
-  ci_assert(spin_is_locked(&fm->fm_inner_lock));
-  ci_assert(mutex_is_locked(&fm->fm_outer_lock));
-  spin_unlock_bh(&fm->fm_inner_lock);
-  ci_assert(! in_atomic());
-  oo_hw_filter_init(&thcf->tf_filters[la_i]);
-  rc = oo_hw_filter_set_thc(&thcf->tf_filters[la_i], thcf->tf_thc,
-                            lp->lp_protocol, laddr, lp->lp_lport,
-                            fm->fm_hwports_available & fm->fm_hwports_up);
-  spin_lock_bh(&fm->fm_inner_lock);
-  return rc;
-}
-
-
-static void oof_hw_filter_clear(struct oof_manager* fm,
-                                struct oo_hw_filter* oofilter)
-{
-  ci_assert(spin_is_locked(&fm->fm_inner_lock));
-  ci_assert(mutex_is_locked(&fm->fm_outer_lock));
-
-  spin_unlock_bh(&fm->fm_inner_lock);
-  ci_assert(!in_atomic());
-  oo_hw_filter_clear(oofilter);
-  spin_lock_bh(&fm->fm_inner_lock);
-}
-
-
 static void oof_hw_filter_clear_hwports(struct oof_manager* fm,
                                         struct oo_hw_filter* oofilter,
                                         unsigned hwport_mask)
 {
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
-  ci_assert(oofilter->thc == NULL);
+
+  if( oo_hw_filter_is_empty(oofilter) ) {
+    /* we cannot drop lock if oofilter is empty
+     * as oofilter and its underlying skf might get removed  */
+    return;
+  }
 
   spin_unlock_bh(&fm->fm_inner_lock);
   ci_assert(!in_atomic());
-  oo_hw_filter_clear_hwports(oofilter, hwport_mask);
+  oo_hw_filter_clear_hwports(oofilter, hwport_mask, 0);
   spin_lock_bh(&fm->fm_inner_lock);
+}
+
+
+static void oof_hw_filter_clear(struct oof_manager* fm,
+                                struct oo_hw_filter* oofilter)
+{
+  oof_hw_filter_clear_hwports(fm, oofilter, -1);
+  /* We postpone oo_hw_filter_clear operation to avoid possibility of
+   * having the skf (our oofilter belongs to) removed by
+   * oo_hw_filter_del_sw.
+   *
+   * Note: oofilter is empty and can be cleared in atomic context */
+  oo_hw_filter_clear(oofilter);
 }
 
 
@@ -311,7 +315,7 @@ static void __oof_hw_filter_clear_wild(struct oof_manager* fm,
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
 
-  if( lpa->lpa_filter.trs != NULL ) {
+  if( ! oo_hw_filter_is_empty(&lpa->lpa_filter) ) {
     IPF_LOG("%s: CLEAR "TRIPLE_FMT" stack=%d", caller,
             TRIPLE_ARGS(lp->lp_protocol, laddr, lp->lp_lport),
             oof_cb_stack_id(lpa->lpa_filter.trs));
@@ -332,14 +336,22 @@ static int oof_hw_filter_update(struct oof_manager* fm,
                                 unsigned src_flags)
 {
   int rc;
+  struct oo_hw_filter_spec oo_filter_spec = {
+    .type             = OO_HW_FILTER_TYPE_IP,
+    .addr.ip.saddr    = saddr,
+    .addr.ip.sport    = sport,
+    .addr.ip.daddr    = daddr,
+    .addr.ip.dport    = dport,
+    .addr.ip.protocol = protocol,
+    .vlan_id          = vlan_id,
+  };
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
 
   spin_unlock_bh(&fm->fm_inner_lock);
   ci_assert(!in_atomic());
-  rc = oo_hw_filter_update(oofilter, new_stack, protocol,
-                           saddr, sport, daddr, dport, vlan_id,
+  rc = oo_hw_filter_update(oofilter, new_stack, &oo_filter_spec,
                            fm->fm_hwports_vlan_filters & hwport_mask,
                            hwport_mask, src_flags);
   spin_lock_bh(&fm->fm_inner_lock);
@@ -357,6 +369,7 @@ static void __oof_hw_filter_move(struct oof_manager* fm,
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
   ci_assert(! CI_IP_IS_MULTICAST(laddr));
+  ci_assert(lpa->lpa_filter.thc == NULL);
 
   IPF_LOG(FSK_FMT "MOVE "TRIPLE_FMT" from stack %d", caller, SK_PRI_ARGS(skf),
           TRIPLE_ARGS(lp->lp_protocol, laddr, lp->lp_lport),
@@ -384,8 +397,8 @@ static void __oof_hw_filter_transfer(struct oof_manager* fm,
 }
 
 
-#define oof_hw_filter_set(fm, skf, f, s, p, sa, sp, da, dp, pp, sf, fie)     \
-  __oof_hw_filter_set((fm), (skf), (f), (s), (p), (sa), (sp), (da),      \
+#define oof_hw_filter_set(fm, skf, f, s, t, p, sa, sp, da, dp, pp, sf, fie)     \
+  __oof_hw_filter_set((fm), (skf), (f), (s), (t), (p), (sa), (sp), (da),      \
                       (dp), (pp), (sf), (fie),  __FUNCTION__)
 
 #define oof_hw_filter_clear_full(fm, skf)                \
@@ -443,7 +456,7 @@ oof_local_port_free(struct oof_manager* fm, struct oof_local_port* lp)
     spin_lock_bh(&fm->fm_inner_lock);
     for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
       struct oof_local_port_addr* lpa = &lp->lp_addr[la_i];
-      ci_assert(lpa->lpa_filter.trs == NULL);
+      ci_assert(oo_hw_filter_is_empty(&lpa->lpa_filter));
       ci_assert(ci_dllist_is_empty(&lpa->lpa_semi_wild_socks));
       ci_assert(ci_dllist_is_empty(&lpa->lpa_full_socks));
     }
@@ -476,7 +489,6 @@ oof_local_port_alloc(struct oof_manager* fm, int protocol, int lport)
   lp->lp_lport = lport;
   lp->lp_protocol = protocol;
   lp->lp_refs = 0;
-  lp->lp_thcf = NULL;
   ci_dllist_init(&lp->lp_wild_socks);
   ci_dllist_init(&lp->lp_mcast_filters);
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i )
@@ -488,14 +500,75 @@ oof_local_port_alloc(struct oof_manager* fm, int protocol, int lport)
 ***********************************************************************
 **********************************************************************/
 
+
+static int oof_socket_is_clustered(struct oof_socket* skf)
+{
+  return (skf->sf_flags & OOF_SOCKET_CLUSTERED) != 0;
+}
+
+
+static int oof_socket_is_dummy(struct oof_socket* skf)
+{
+  return (skf->sf_flags & OOF_SOCKET_DUMMY) != 0;
+}
+
+
+static int oof_socket_is_stackless(struct oof_socket* skf)
+{
+  return (skf->sf_flags & OOF_SOCKET_NO_STACK) != 0;
+}
+
+
+static struct tcp_helper_resource_s*
+oof_socket_stack_safe(struct oof_socket* skf)
+{
+  return oof_socket_is_stackless(skf) ? NULL : oof_cb_socket_stack(skf);
+}
+
+
+/* Returns cluster associated with socket if there is any.
+ * In case socket is not associated with cluster or stack returns NULL.
+ */
+static struct tcp_helper_cluster_s*
+oof_socket_thc_safe(struct oof_socket* skf)
+{
+  struct tcp_helper_resource_s* skf_stack = oof_socket_stack_safe(skf);
+  return skf_stack != NULL ? oof_cb_stack_thc(skf_stack) : NULL;
+}
+
+
+int oof_socket_is_armed(struct oof_socket* skf)
+{
+  return skf->sf_local_port != NULL && ! oof_socket_is_dummy(skf);
+}
+
+
+static struct tcp_helper_cluster_s*
+oof_socket_thc_effective(struct oof_socket* skf)
+{
+  if( oof_socket_is_clustered(skf) )
+    return oof_socket_thc_safe(skf);
+  return NULL;
+}
+
+
+static struct tcp_helper_resource_s*
+oof_socket_stack_effective(struct oof_socket* skf)
+{
+  if( oof_socket_is_clustered(skf) )
+    return NULL;
+  return oof_cb_socket_stack(skf);
+}
+
+
 void
 oof_socket_ctor(struct oof_socket* skf)
 {
   skf->sf_local_port = NULL;
-  skf->sf_early_lp = NULL;
   skf->sf_flags = 0;
   oo_hw_filter_init(&skf->sf_full_match_filter);
   ci_dllist_init(&skf->sf_mcast_memberships);
+  ci_dllink_mark_free(&skf->sf_lp_link);
 }
 
 
@@ -503,50 +576,174 @@ void
 oof_socket_dtor(struct oof_socket* skf)
 {
   ci_assert(skf->sf_local_port == NULL);
-  ci_assert(skf->sf_early_lp == NULL);
-  ci_assert(skf->sf_full_match_filter.trs == NULL);
+  ci_assert(oo_hw_filter_is_empty(&skf->sf_full_match_filter));
   ci_assert(ci_dllist_is_empty(&skf->sf_mcast_memberships));
+  ci_assert(ci_dllink_is_free(&skf->sf_lp_link));
 }
 
 
-static struct oof_socket*
-oof_socket_at_head(ci_dllist* list)
+void
+oof_socket_remove_from_list(struct oof_socket* skf)
 {
-  if( ci_dllist_is_empty(list) )
-    return NULL;
-  else
-    return CI_CONTAINER(struct oof_socket, sf_lp_link, ci_dllist_head(list));
+  ci_assert(! ci_dllink_is_free(&skf->sf_lp_link));
+  ci_dllist_remove(&skf->sf_lp_link);
+  ci_dllink_mark_free(&skf->sf_lp_link);
 }
 
 
 static struct oof_socket*
-oof_socket_list_find_matching_stack(ci_dllist* list,
-                                    struct tcp_helper_resource_s* stack)
+oof_socket_at_head(ci_dllist* list, int no_flags, int want_flags)
 {
   struct oof_socket* skf;
   CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, list)
-    if( oof_cb_socket_stack(skf) == stack )
+    if( (skf->sf_flags & no_flags) == 0 &&
+        (~skf->sf_flags & want_flags) == 0 )
       return skf;
   return NULL;
 }
 
 
-static int
-oof_socket_is_first_in_stack(ci_dllist* list, struct oof_socket* skf,
-                             struct tcp_helper_resource_s* stack)
+static struct oof_socket*
+oof_socket_list_find_matching_stack(ci_dllist* list,
+                                    struct tcp_helper_resource_s* stack,
+                                    int allow_dummy)
 {
-  return skf == oof_socket_list_find_matching_stack(list, stack);
+  struct oof_socket* skf;
+  CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, list)
+    if( ! oof_socket_is_stackless(skf) &&
+        (allow_dummy || ! oof_socket_is_dummy(skf)) &&
+        oof_cb_socket_stack(skf) == stack )
+      return skf;
+  return NULL;
 }
 
 
+/* Tells whether this socket deserves a filter */
 static int
 oof_socket_is_first_in_same_stack(ci_dllist* list, struct oof_socket* skf)
 {
-  /* Return true if [skf] is the first socket in the list, considering only
-   * sockets in the same stack as [skf].
-   */
-  return oof_socket_is_first_in_stack(list, skf, oof_cb_socket_stack(skf));
+  /* Return true if [skf] is non-dummy and  is the first socket in the list,
+   * considering only sockets in the same stack as [skf]. */
+  if( oof_socket_is_dummy(skf) )
+    return 0;
+  return skf ==
+         oof_socket_list_find_matching_stack(list, oof_cb_socket_stack(skf), 0);
 }
+
+
+/* Finds another socket that belongs to the same cluster */
+static struct oof_socket*
+__oof_socket_list_find_cluster_sibling(ci_dllist* list,
+                                       struct tcp_helper_resource_s* stack,
+                                       struct tcp_helper_cluster_s* thc,
+                                       int allow_dummy)
+{
+  struct oof_socket* skf;
+  CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link, list)
+    if( ! oof_socket_is_stackless(skf) &&
+        (allow_dummy || ! oof_socket_is_dummy(skf)) &&
+        oof_socket_thc_effective(skf) == thc &&
+        oof_cb_socket_stack(skf) != stack )
+      return skf;
+  return NULL;
+}
+
+
+static struct oof_socket*
+oof_socket_list_find_cluster_sibling(ci_dllist* list,
+                                     struct oof_socket* skf,
+                                     int allow_dummy)
+{
+  struct tcp_helper_resource_s* stack = oof_cb_socket_stack(skf);
+  struct tcp_helper_cluster_s* thc = oof_socket_thc_effective(skf);
+  if( thc == NULL )
+    return NULL;
+  return __oof_socket_list_find_cluster_sibling(list, stack, thc, allow_dummy);
+}
+
+
+static int
+oof_socket_has_cluster_sibling(ci_dllist* list, struct oof_socket* skf)
+{
+  return oof_socket_list_find_cluster_sibling(list, skf, 0) != NULL;
+}
+
+
+/* Verifies whether insertion of given socket is allowed.
+ *
+ * This is meant for reserving wild or semi-wild proto:port[:ip]
+ * tuples for clustered wild sockets.
+ *
+ * list needs to be either lp_wild_socks or lpa_semi_wild_socks
+ * from respectively local_port or local_port_address the socket is being
+ * added to.
+ *
+ * Insertion of socket is allowed when on the list:
+ *  * there is no other socket - 0 is returned, or
+ *  * there is already a socket belonging to a cluster,
+      though the socket must not be present in the same stack, then
+      1 is returned and thc_out is populated with the reference
+ *    to the cluster.
+ * If insertion is not allowed, error (-EADDRINUSE) is returned.
+ *
+ * Note insertion of second socket from the same stack is not allowed.
+ */
+static int
+oof_socket_insert_probe(ci_dllist* list, struct oof_socket* skf,
+                        struct tcp_helper_cluster_s** thc_out)
+{
+  int has_stack = (skf->sf_flags & OOF_SOCKET_NO_STACK) == 0;
+  struct tcp_helper_cluster_s* thc;
+  struct oof_socket* skf2;
+  if( ci_dllist_is_empty(list) )
+    return 0;
+  /* if skf is not clustered any clustered socket blocks its insertion*/
+  if( ! oof_socket_is_clustered(skf) )
+    return oof_socket_at_head(list, 0, OOF_SOCKET_CLUSTERED) != NULL ?
+           -EADDRINUSE : 0;
+  if( has_stack ) {
+    /* is there a duplicate socket in our stack. */
+    skf2 = oof_socket_list_find_matching_stack(list, oof_cb_socket_stack(skf), 1);
+    if( skf2 != NULL )
+      return -EADDRINUSE;
+    /* Foot in the door check: whether our cluster is already allowed */
+    skf2 = oof_socket_list_find_cluster_sibling(list, skf, 1);
+    if( skf2 != NULL )
+      return 0;
+    return -EADDRINUSE;
+  }
+
+  /* Now, we deal with stackless clustered socket and the list is not empty */
+
+  /* To uphold foot in the door principle, we try to locate cluster first */
+  skf2 = oof_socket_at_head(list, 0, OOF_SOCKET_CLUSTERED);
+  if( skf2 == NULL ) {
+    /* An existing non clustered socket blocks the insertion */
+    return -EADDRINUSE;
+  }
+
+  /* We should not have a clustered socked without a stack */
+  ci_assert_nflags(skf2->sf_flags, OOF_SOCKET_NO_STACK);
+
+  thc = oof_socket_thc_effective(skf2);
+
+  ci_assert_nequal(thc, NULL);
+
+  /* Client will move skf to cluster but we need to tell the client which one.
+   * We allow insertion to book this slot and avoid race with non-clustered
+   * sockets.
+   * There should be no race with clustered ones as this socket is going
+   * to be moved (or revoked) under duration of current cluster lock */
+  if( (skf->sf_flags & OOF_SOCKET_NO_STACK) != 0 ) {
+    if( thc_out != NULL )
+      *thc_out = thc;
+    return 1; /* we have found a cluster */
+  }
+  /* Either our space no space in our cluster or another cluster claimed
+   * the socket */
+  return -EADDRINUSE;
+}
+
 
 /**********************************************************************
 ***********************************************************************
@@ -564,6 +761,7 @@ oof_manager_alloc(unsigned local_addr_max, void* owner_private)
 {
   struct oof_manager* fm;
   int hash;
+  int i;
 
   ci_assert(the_manager == NULL);
 
@@ -585,6 +783,9 @@ oof_manager_alloc(unsigned local_addr_max, void* owner_private)
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
     ci_dllist_init(&fm->fm_local_ports[hash]);
   ci_dllist_init(&fm->fm_mcast_laddr_socks);
+  ci_dllist_init(&fm->fm_tproxies);
+  for( i = 0; i < OOF_TPROXY_GLOBAL_FILTER_COUNT; ++i )
+    oo_hw_filter_init(&fm->fm_tproxy_global_filters[i]);
   fm->fm_hwports_up = 0;
   fm->fm_hwports_up_new = 0;
   fm->fm_hwports_mcast_replicate_capable = 0;
@@ -603,6 +804,7 @@ void
 oof_manager_free(struct oof_manager* fm)
 {
   int hash;
+  ci_assert(ci_dllist_is_empty(&fm->fm_tproxies));
   ci_assert(ci_dllist_is_empty(&fm->fm_mcast_laddr_socks));
   ci_assert(fm == the_manager);
   the_manager = NULL;
@@ -684,10 +886,35 @@ oof_manager_addr_find(struct oof_manager* fm, unsigned laddr)
 }
 
 
+static int oof_socket_can_share_hw_filter(struct oof_socket* skf,
+                                          struct oo_hw_filter* filter)
+{
+  struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
+  struct tcp_helper_cluster_s* skf_thc = oof_socket_thc_safe(skf);
+
+  if( (skf->sf_flags & OOF_SOCKET_NO_SHARING) != 0 )
+    return 0;
+  return (filter->trs != NULL && filter->trs == skf_stack) ||
+         (filter->thc != NULL && filter->thc == skf_thc);
+}
+
+
+/* Obtains a wild socket that can be granted filters,
+ * dummy sockets are not taken into account */
+static struct oof_socket*
+oof_wild_socket(struct oof_local_port* lp, struct oof_local_port_addr* lpa)
+{
+  struct oof_socket* skf;
+  skf = oof_socket_at_head(&lpa->lpa_semi_wild_socks, OOF_SOCKET_DUMMY, 0);
+  if( skf == NULL )
+    skf = oof_socket_at_head(&lp->lp_wild_socks, OOF_SOCKET_DUMMY, 0);
+  return skf;
+}
+
+
 static void
 __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
 {
-  struct tcp_helper_resource_s* skf_stack;
   struct oof_local_port_addr* lpa;
   struct oof_local_port* lp;
   struct oof_local_addr* la;
@@ -761,16 +988,12 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
       if( is_new )
         oof_local_port_addr_init(lpa);
       /* Add h/w filter for wild sockets. */
-      skf = NULL;
-      if( ci_dllist_not_empty(&lpa->lpa_semi_wild_socks) ) {
-        ci_assert(!is_new);
-        skf = oof_socket_at_head(&lpa->lpa_semi_wild_socks);
-      }
-      else if( ci_dllist_not_empty(&lp->lp_wild_socks) ) {
-        skf = oof_socket_at_head(&lp->lp_wild_socks);
-      }
-      if( skf != NULL && ! oof_is_clustered(lp) )
-        oof_hw_filter_set(fm, skf, &lpa->lpa_filter, oof_cb_socket_stack(skf),
+      ci_assert( ! ci_dllist_not_empty(&lpa->lpa_semi_wild_socks) || ! is_new );
+      skf = oof_wild_socket(lp, lpa);
+      if( skf != NULL )
+        oof_hw_filter_set(fm, skf, &lpa->lpa_filter,
+                          oof_socket_stack_effective(skf),
+                          oof_socket_thc_effective(skf),
                           lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
                           fm->fm_hwports_available & fm->fm_hwports_up,
                           OOF_SRC_FLAGS_DEFAULT, 1);
@@ -778,11 +1001,13 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                           &lpa->lpa_full_socks) {
         ci_assert(!is_new);
-        skf_stack = oof_cb_socket_stack(skf);
-        if( lpa->lpa_filter.trs == skf_stack )
+        ci_assert(! oof_socket_is_clustered(skf));
+        ci_assert(! oof_socket_is_dummy(skf));
+        if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
           ++lpa->lpa_n_full_sharers;
-        else if( ! oof_is_clustered(lp) )
-          oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter, skf_stack,
+        else
+          oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter,
+                            oof_cb_socket_stack(skf), NULL,
                             lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
                             skf->sf_laddr, lp->lp_lport,
                             fm->fm_hwports_available & fm->fm_hwports_up,
@@ -800,20 +1025,16 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
              * continues to reach the socket, albeit without acceleration.
              * BUT don't do that if existing TCP connections are using the
              * hardware filter.
+             * With cluster filters there might be sibling cluster stacks
+             * using the same hw filter as well.
              */
-            if( lp->lp_protocol == IPPROTO_UDP ||
-                lpa->lpa_n_full_sharers == 0 )
+            if( (lp->lp_protocol == IPPROTO_UDP ||
+                 lpa->lpa_n_full_sharers == 0 ) &&
+                ! oof_socket_has_cluster_sibling(&lp->lp_wild_socks, skf) &&
+                ! oof_socket_has_cluster_sibling(&lpa->lpa_semi_wild_socks, skf) )
               oof_hw_filter_clear_wild(fm, lp, lpa, laddr);
           }
         }
-      if( oof_is_clustered(lp) ) {
-        int rc = oof_hw_thc_filter_set(fm, lp, la_i, laddr);
-        if( rc != 0 )
-          OO_DEBUG_ERR(ci_log("%s: ERROR: FILTER "TRIPLE_FMT" failed (%d)",
-                              __FUNCTION__,
-                              TRIPLE_ARGS(lp->lp_protocol, la->la_laddr,
-                                          lp->lp_lport), rc));
-      }
     }
 }
 
@@ -883,10 +1104,7 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
                         &fm->fm_local_ports[hash]) {
       lpa = &lp->lp_addr[la_i];
       /* Remove h/w filters that use [laddr]. */
-      if( ! oof_is_clustered(lp) )
-        oof_hw_filter_clear_wild(fm, lp, lpa, la->la_laddr);
-      else
-        oof_hw_filter_clear(fm, &lp->lp_thcf->tf_filters[la_i]);
+      oof_hw_filter_clear_wild(fm, lp, lpa, la->la_laddr);
 
       CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                           &lpa->lpa_full_socks)
@@ -911,7 +1129,7 @@ __oof_manager_addr_del(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
       lpa = &lp->lp_addr[la_i];
       ci_assert(ci_dllist_is_empty(&lpa->lpa_semi_wild_socks));
       ci_assert(ci_dllist_is_empty(&lpa->lpa_full_socks));
-      ci_assert(lpa->lpa_filter.trs == NULL);
+      ci_assert(oo_hw_filter_is_empty(&lpa->lpa_filter));
     }
 #endif
 
@@ -943,6 +1161,7 @@ oof_manager_update_all_filters(struct oof_manager* fm)
   struct oof_local_port_addr* lpa;
   struct oof_mcast_filter* mf;
   struct oof_local_port* lp;
+  struct oof_tproxy* ft;
   struct oof_socket* skf;
   unsigned laddr, hwport_mask;
   int hash, la_i;
@@ -957,15 +1176,17 @@ oof_manager_update_all_filters(struct oof_manager* fm)
       for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
         lpa = &lp->lp_addr[la_i];
         laddr = fm->fm_local_addrs[la_i].la_laddr;
-        if( lpa->lpa_filter.trs != NULL )
-          oof_hw_filter_update(fm, &lpa->lpa_filter, lpa->lpa_filter.trs,
+        if( ! oo_hw_filter_is_empty(&lpa->lpa_filter) )
+          oof_hw_filter_update(fm, &lpa->lpa_filter,
+                               lpa->lpa_filter.trs,
                                lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
                                OO_HW_VLAN_UNSPEC,
                                fm->fm_hwports_available & fm->fm_hwports_up,
                                OOF_SRC_FLAGS_DEFAULT);
         CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
-                            &lpa->lpa_full_socks)
-          if( skf->sf_full_match_filter.trs != NULL )
+                            &lpa->lpa_full_socks) {
+          ci_assert_equal(skf->sf_full_match_filter.thc, NULL);
+          if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) )
             oof_hw_filter_update(fm, &skf->sf_full_match_filter,
                                  skf->sf_full_match_filter.trs,
                                  lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
@@ -973,11 +1194,13 @@ oof_manager_update_all_filters(struct oof_manager* fm)
                                  OO_HW_VLAN_UNSPEC,
                                  fm->fm_hwports_available & fm->fm_hwports_up,
                                  OOF_SRC_FLAGS_DEFAULT);
+        }
       }
       /* Find and update multicast filters. */
       CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
-                          &lp->lp_mcast_filters)
-        if( mf->mf_filter.trs != NULL ) {
+                          &lp->lp_mcast_filters) {
+        ci_assert_equal(mf->mf_filter.thc, NULL);
+        if( ! oo_hw_filter_is_empty(&mf->mf_filter) ) {
           hwport_mask = oof_mcast_filter_installable_hwports(lp, mf);
           hwport_mask &= fm->fm_hwports_up & fm->fm_hwports_available;
           oof_hw_filter_update(fm, &mf->mf_filter, mf->mf_filter.trs,
@@ -986,7 +1209,13 @@ oof_manager_update_all_filters(struct oof_manager* fm)
                                mf->mf_vlan_id, hwport_mask,
                                OOF_SRC_FLAGS_DEFAULT_MCAST);
         }
+      }
     }
+
+    /* let us update tproxy filters */
+    CI_DLLIST_FOR_EACH2(struct oof_tproxy, ft, ft_manager_link,
+                        &fm->fm_tproxies)
+      oof_tproxy_filter_update(fm, ft);
 }
 
 
@@ -1135,26 +1364,17 @@ oof_local_port_get(struct oof_manager* fm, int protocol, int lport)
 }
 
 
-static struct oof_socket*
-oof_wild_socket(struct oof_local_port* lp, struct oof_local_port_addr* lpa)
-{
-  struct oof_socket* skf;
-  skf = oof_socket_at_head(&lpa->lpa_semi_wild_socks);
-  if( skf == NULL )
-    skf = oof_socket_at_head(&lp->lp_wild_socks);
-  return skf;
-}
 
-
+/* This is for fixing sw filters, hence cluster is ignored */
 static struct oof_socket*
 oof_wild_socket_matching_stack(struct oof_local_port* lp,
                                struct oof_local_port_addr* lpa,
                                struct tcp_helper_resource_s* stack)
 {
   struct oof_socket* skf;
-  skf = oof_socket_list_find_matching_stack(&lpa->lpa_semi_wild_socks, stack);
+  skf = oof_socket_list_find_matching_stack(&lpa->lpa_semi_wild_socks, stack, 0);
   if( skf == NULL )
-    skf = oof_socket_list_find_matching_stack(&lp->lp_wild_socks, stack);
+    skf = oof_socket_list_find_matching_stack(&lp->lp_wild_socks, stack, 0);
   return skf;
 }
 
@@ -1164,7 +1384,6 @@ oof_full_socks_del_hw_filters(struct oof_manager* fm,
                               struct oof_local_port* lp,
                               struct oof_local_port_addr* lpa)
 {
-  struct tcp_helper_resource_s* stack = lpa->lpa_filter.trs;
   struct oof_socket* skf;
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
@@ -1172,10 +1391,11 @@ oof_full_socks_del_hw_filters(struct oof_manager* fm,
 
   CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
                       &lpa->lpa_full_socks) {
-    if( oof_cb_socket_stack(skf) != stack )
+    if( oo_hw_filter_is_empty(&skf->sf_full_match_filter) )
       continue;
-    if( skf->sf_full_match_filter.trs == NULL )
+    if( ! oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
       continue;
+    ci_assert_equal(skf->sf_full_match_filter.thc, NULL);
     oof_hw_filter_clear_full(fm, skf);
     ++lpa->lpa_n_full_sharers;
   }
@@ -1192,27 +1412,34 @@ oof_full_socks_add_hw_filters(struct oof_manager* fm,
    * associated with [lpa] is about to be removed or pointed at a different
    * stack.
    */
-  struct tcp_helper_resource_s* filter_stack = lpa->lpa_filter.trs;
-  struct oof_socket* skf_tmp;
   struct oof_socket* skf;
   int rc = 0;
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
 
-  if( filter_stack == NULL ) {
+  if( oo_hw_filter_is_empty(&lpa->lpa_filter) ) {
     ERR_LOG("%s: ERROR: %s:%d has no filter", __FUNCTION__,
             FMT_PROTOCOL(lp->lp_protocol), FMT_PORT(lp->lp_lport));
     return -EINVAL;
   }
 
-  CI_DLLIST_FOR_EACH3(struct oof_socket, skf, sf_lp_link,
-                      &lpa->lpa_full_socks, skf_tmp) {
-    if( oof_cb_socket_stack(skf) != filter_stack )
+  /* oof_hw_filter_set() drops the spin lock, so we need to be
+   * extremely careful here.
+   * In the loop we are guaranteed that skf is not removed from list
+   * as oof_hw_filter_set() marks the socket as having HW filter
+   * before dropping the lock. This will prevent oof_socket_del_sw()
+   * from full removal of the socket.
+   */
+  CI_DLLIST_FOR_EACH2(struct oof_socket, skf, sf_lp_link,
+                      &lpa->lpa_full_socks) {
+    if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) )
       continue;
-    if( skf->sf_full_match_filter.trs != NULL )
+    if( ! oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
       continue;
-    rc = oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter, filter_stack,
+    ci_assert(! oof_socket_is_clustered(skf));
+    rc = oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter,
+                           oof_cb_socket_stack(skf), NULL,
                            lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
                            skf->sf_laddr, lp->lp_lport,
                            fm->fm_hwports_available & fm->fm_hwports_up,
@@ -1245,7 +1472,6 @@ oof_local_port_addr_fixup_wild(struct oof_manager* fm,
                                struct oof_local_port_addr* lpa,
                                unsigned laddr, enum fixup_wild_why why)
 {
-  struct tcp_helper_resource_s* skf_stack;
   struct oof_socket* skf;
   int rc, skf_has_filter;
   int unshare_full_match;
@@ -1258,12 +1484,10 @@ oof_local_port_addr_fixup_wild(struct oof_manager* fm,
   unshare_full_match = lpa->lpa_n_full_sharers > 0;
   if( skf == NULL ) {
     thresh = oof_shared_keep_thresh;
-    skf_stack = NULL;
   }
   else {
     thresh = oof_shared_steal_thresh;
-    skf_stack = oof_cb_socket_stack(skf);
-    if( lpa->lpa_filter.trs == skf_stack )
+    if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
       /* The existing filter points at the correct stack, so no need to add
        * filters for full-match sockets in that stack.
        */
@@ -1316,19 +1540,43 @@ oof_local_port_addr_fixup_wild(struct oof_manager* fm,
 
   if( skf != NULL ) {
     skf_has_filter = 0;
-    if( lpa->lpa_filter.trs == NULL ) {
+    if( oo_hw_filter_is_empty(&lpa->lpa_filter) ) {
       ci_assert(lpa->lpa_n_full_sharers == 0);
-      rc = oof_hw_filter_set(fm, skf, &lpa->lpa_filter, skf_stack,
+      rc = oof_hw_filter_set(fm, skf, &lpa->lpa_filter,
+                             oof_socket_stack_effective(skf),
+                             oof_socket_thc_effective(skf),
                              lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
                              fm->fm_hwports_available & fm->fm_hwports_up,
                              OOF_SRC_FLAGS_DEFAULT, 1);
       skf_has_filter = rc == 0;
     }
-    else if( lpa->lpa_filter.trs != skf_stack && lpa->lpa_n_full_sharers==0 ) {
-      oof_hw_filter_move(fm, skf, lp, lpa, laddr,
-                         fm->fm_hwports_available & fm->fm_hwports_up);
-      ci_assert(lpa->lpa_filter.trs == skf_stack);
-      skf_has_filter = 1;
+    else if( ! oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) &&
+             lpa->lpa_n_full_sharers == 0 ) {
+      /* We don't have support for filter re-direct changing the rss context.
+       * If either the old or new filter uses rss then we need to remove and
+       * re-insert.  Unfortunately that leaves a gap.  However, full match
+       * filters are inserted when we unshare, so the sockets that were
+       * previously sharing the wild filter that's being replaced will not
+       * miss traffic.
+       */
+      if( lpa->lpa_filter.thc || oof_socket_thc_safe(skf) ) {
+        oof_hw_filter_clear_wild(fm, lp, lpa, laddr);
+        rc = oof_hw_filter_set(fm, skf, &lpa->lpa_filter,
+                               oof_socket_stack_effective(skf),
+                               oof_socket_thc_effective(skf),
+                               lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
+                               fm->fm_hwports_available & fm->fm_hwports_up,
+                               OOF_SRC_FLAGS_DEFAULT, 1);
+        skf_has_filter = rc == 0;
+      }
+      else {
+        /* Clustered sockets cannot have hardware filters moved */
+        ci_assert_equal(lpa->lpa_filter.thc, NULL);
+        oof_hw_filter_move(fm, skf, lp, lpa, laddr,
+                           fm->fm_hwports_available & fm->fm_hwports_up);
+        ci_assert(lpa->lpa_filter.trs == oof_cb_socket_stack(skf));
+        skf_has_filter = 1;
+      }
     }
     if( skf_has_filter )
       oof_full_socks_del_hw_filters(fm, lp, lpa);
@@ -1367,11 +1615,11 @@ oof_socket_add_full_sw(struct oof_socket* skf)
 
 
 static void
-oof_socket_del_full_sw(struct oof_socket* skf)
+oof_socket_del_full_sw(struct oof_socket* skf, int stack_locked)
 {
   struct oof_local_port* lp = skf->sf_local_port;
   oof_cb_sw_filter_remove(skf, skf->sf_laddr, lp->lp_lport,
-                          skf->sf_raddr, skf->sf_rport, lp->lp_protocol, 1);
+                          skf->sf_raddr, skf->sf_rport, lp->lp_protocol, stack_locked);
 }
 
 
@@ -1387,12 +1635,12 @@ static void
 oof_socket_del_full(struct oof_manager* fm, struct oof_socket* skf,
                     struct oof_local_port_addr* lpa)
 {
-  ci_dllist_remove(&skf->sf_lp_link);
-  oof_socket_del_full_sw(skf);
-  if( skf->sf_full_match_filter.trs != NULL ) {
+  oof_socket_remove_from_list(skf);
+  oof_socket_del_full_sw(skf, 1);
+  if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) ) {
     oof_hw_filter_clear_full(fm, skf);
   }
-  else if( oof_cb_socket_stack(skf) == lpa->lpa_filter.trs ) {
+  else if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) ) {
     ci_assert(lpa->lpa_n_full_sharers > 0);
     --lpa->lpa_n_full_sharers;
     oof_local_port_addr_fixup_wild(fm, skf->sf_local_port, lpa, skf->sf_laddr,
@@ -1405,11 +1653,13 @@ static int
 oof_socket_add_full_hw(struct oof_manager* fm, struct oof_socket* skf,
                        struct oof_local_port_addr* lpa)
 {
-  struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
   int rc;
-  if( lpa->lpa_filter.trs != skf_stack ) {
+  ci_assert(! oof_socket_is_clustered(skf));
+  ci_assert(! oof_socket_is_dummy(skf));
+  if( ! oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) ) {
     struct oof_local_port* lp = skf->sf_local_port;
-    rc = oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter, skf_stack,
+    rc = oof_hw_filter_set(fm, skf, &skf->sf_full_match_filter,
+                           oof_cb_socket_stack(skf), NULL,
                            lp->lp_protocol, skf->sf_raddr, skf->sf_rport,
                            skf->sf_laddr, lp->lp_lport,
                            fm->fm_hwports_available & fm->fm_hwports_up,
@@ -1445,13 +1695,16 @@ static int
 __oof_socket_add_wild(struct oof_manager* fm, struct oof_socket* skf,
                       struct oof_local_port_addr* lpa, unsigned laddr)
 {
-  struct tcp_helper_resource_s* skf_stack = oof_cb_socket_stack(skf);
   struct oof_local_port* lp = skf->sf_local_port;
   struct oof_socket* other_skf;
   int rc;
 
-  other_skf = oof_wild_socket_matching_stack(lp, lpa, skf_stack);
+  ci_assert(! oof_socket_is_dummy(skf));
+
+  other_skf = oof_wild_socket_matching_stack(lp, lpa, oof_cb_socket_stack(skf));
   if( other_skf != NULL )
+    /* Hide sw filter of other socket on the same stack
+     *  (likely the wilder one) */
     oof_cb_sw_filter_remove(other_skf, laddr, lp->lp_lport,
                             0, 0, lp->lp_protocol, 1);
   rc = oof_cb_sw_filter_insert(skf, laddr, lp->lp_lport, 0, 0,
@@ -1459,28 +1712,28 @@ __oof_socket_add_wild(struct oof_manager* fm, struct oof_socket* skf,
   if( rc != 0 )
     return rc;
 
-  if( ! oof_is_clustered(lp) ) {
-    if( lpa->lpa_filter.trs == NULL ) {
-      rc = oof_hw_filter_set(fm, skf, &lpa->lpa_filter, skf_stack,
-                             lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
-                             fm->fm_hwports_available & fm->fm_hwports_up,
-                             OOF_SRC_FLAGS_DEFAULT, 1);
-      if( rc != 0 )
-        oof_cb_sw_filter_remove(skf, laddr, lp->lp_lport, 0, 0,
-                                lp->lp_protocol, 1);
-      return rc;
-    }
-    else if( lpa->lpa_filter.trs != skf_stack ) {
-      /* H/w filter already exists but points to a different stack.  This is
-       * fixed if necessary in oof_local_port_addr_fixup_wild().
-       */
-      OO_DEBUG_IPF(other_skf = oof_wild_socket(lp, lpa);
-                   if( other_skf != NULL )
-                     ci_log(FSK_FMT "STEAL "TRIPLE_FMT" from "SK_FMT,
-                            FSK_PRI_ARGS(skf),
-                            TRIPLE_ARGS(lp->lp_protocol, laddr, lp->lp_lport),
-                            SK_PRI_ARGS(other_skf)));
-    }
+  if( oo_hw_filter_is_empty(&lpa->lpa_filter) ) {
+    rc = oof_hw_filter_set(fm, skf, &lpa->lpa_filter,
+                           oof_socket_stack_effective(skf),
+                           oof_socket_thc_effective(skf),
+                           lp->lp_protocol, 0, 0, laddr, lp->lp_lport,
+                           fm->fm_hwports_available & fm->fm_hwports_up,
+                           OOF_SRC_FLAGS_DEFAULT, 1);
+    if( rc != 0 )
+      oof_cb_sw_filter_remove(skf, laddr, lp->lp_lport, 0, 0,
+                              lp->lp_protocol, 1);
+    return rc;
+  }
+  else if( ! oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) ) {
+    /* H/w filter already exists but points to a different stack.  This is
+     * fixed if necessary in oof_local_port_addr_fixup_wild().
+     */
+    OO_DEBUG_IPF(other_skf = oof_wild_socket(lp, lpa);
+                 if( other_skf != NULL )
+                   ci_log(FSK_FMT "STEAL "TRIPLE_FMT" from "SK_FMT,
+                          FSK_PRI_ARGS(skf),
+                          TRIPLE_ARGS(lp->lp_protocol, laddr, lp->lp_lport),
+                          SK_PRI_ARGS(other_skf)));
   }
   return 0;
 }
@@ -1510,7 +1763,7 @@ oof_socket_steal_or_add_wild(struct oof_manager* fm, struct oof_socket* skf)
       continue;
     lpa = &lp->lp_addr[la_i];
     if( oof_socket_list_find_matching_stack(&lpa->lpa_semi_wild_socks,
-                                            skf_stack) == NULL ) {
+                                            skf_stack, 0) == NULL ) {
       rc = __oof_socket_add_wild(fm, skf, lpa, la->la_laddr);
       if( rc == 0 && ! has_ok )
         has_ok = 1;
@@ -1530,13 +1783,48 @@ oof_socket_steal_or_add_wild(struct oof_manager* fm, struct oof_socket* skf)
 }
 
 
+static int oof_are_cluster_compatible(ci_dllist* list, struct oof_socket* skf)
+{
+  return oof_socket_is_clustered(skf) ?
+         oof_socket_at_head(list, OOF_SOCKET_CLUSTERED |
+                                  OOF_SOCKET_DUMMY, 0) == NULL :
+         oof_socket_at_head(list, OOF_SOCKET_DUMMY, OOF_SOCKET_CLUSTERED) == NULL;
+}
+
+
+static int oof_are_all_addrs_cluster_compatible(struct oof_manager* fm,
+                                                struct oof_local_port* lp,
+                                                struct oof_socket* skf)
+{
+  int la_i;
+  for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
+    struct oof_local_port_addr* lpa = &lp->lp_addr[la_i];
+    if( ! oof_are_cluster_compatible(&lpa->lpa_semi_wild_socks, skf) )
+      return 0;
+  }
+  return 1;
+}
+
+
 static int
-__oof_socket_add(struct oof_manager* fm, struct oof_socket* skf)
+__oof_socket_add(struct oof_manager* fm, struct oof_socket* skf, int do_arm_only,
+                 int inc_laddr_ref, struct tcp_helper_cluster_s** thc_out)
 {
   struct oof_local_port* lp = skf->sf_local_port;
   struct oof_local_port_addr* lpa;
   struct oof_local_addr* la;
   int rc = 0, la_i;
+  int dummy = oof_socket_is_dummy(skf);
+  /* helper flags to describe what operations will be done for wild sockets */
+  int do_arm = ! dummy;
+  int do_insert = ! do_arm_only;
+
+  ci_assert(ci_dllink_is_free(&skf->sf_lp_link));
+  /* we need to do something */
+  ci_assert(do_arm || do_insert);
+  /* multicast and full match sockets do not support two-stage add*/
+  ci_assert((do_arm && do_insert) || ! CI_IP_IS_MULTICAST(skf->sf_laddr));
+  ci_assert((do_arm && do_insert) || ! skf->sf_raddr);
 
   if( skf->sf_laddr ) {
     la_i = oof_manager_addr_find(fm, skf->sf_laddr);
@@ -1559,246 +1847,277 @@ __oof_socket_add(struct oof_manager* fm, struct oof_socket* skf)
     lpa = &lp->lp_addr[la_i];
     la = &fm->fm_local_addrs[la_i];
     if( skf->sf_raddr ) {
-      if( oof_is_clustered(lp) ) {
+      if( oof_socket_is_clustered(skf) ) {
         ci_log("%s: ERROR: Full match filter with reuseport set", __FUNCTION__);
         return -EINVAL;
       }
       if( (rc = oof_socket_add_full_sw(skf)) != 0 )
         return rc;
       if( (rc = oof_socket_add_full_hw(fm, skf, lpa)) != 0 ) {
-        oof_socket_del_full_sw(skf);
+        oof_socket_del_full_sw(skf, 1);
         return rc;
       }
       ci_dllist_push(&lpa->lpa_full_socks, &skf->sf_lp_link);
     }
     else {
-      rc = __oof_socket_add_wild(fm, skf, lpa, skf->sf_laddr);
-      if( rc != 0 )
+      if( do_arm ) {
+        if( ! oof_are_cluster_compatible(&lp->lp_wild_socks, skf) )
+          return -EADDRINUSE;
+      }
+      if( do_insert ) {
+        rc = oof_socket_insert_probe(&lpa->lpa_semi_wild_socks, skf, thc_out);
+        if( rc < 0 )
+          return rc;
+      }
+      if( do_arm )
+        rc = __oof_socket_add_wild(fm, skf, lpa, skf->sf_laddr);
+      if( rc < 0 )
         return rc;
       ci_dllist_push(&lpa->lpa_semi_wild_socks, &skf->sf_lp_link);
-      if( ! oof_is_clustered(lp) )
+      if( do_arm )
         oof_local_port_addr_fixup_wild(fm, lp, lpa, skf->sf_laddr,
                                        fuw_add_wild);
     }
-    ++la->la_sockets;
+    if( inc_laddr_ref )
+      ++la->la_sockets;
   }
   else {
-    rc = oof_socket_steal_or_add_wild(fm, skf);
-    if( rc != 0 && rc != -EFILTERSSOME )
+    if( do_arm ) {
+      if( ! oof_are_all_addrs_cluster_compatible(fm, lp, skf) )
+        return -EADDRINUSE;
+    }
+    if( do_insert ) {
+      rc = oof_socket_insert_probe(&lp->lp_wild_socks, skf, thc_out);
+      if( rc < 0 )
+        return rc;
+    }
+    if( do_arm )
+      rc = oof_socket_steal_or_add_wild(fm, skf);
+    if( rc < 0 && rc != -EFILTERSSOME )
       return rc;
     ci_dllist_push(&lp->lp_wild_socks, &skf->sf_lp_link);
-    if( ! oof_is_clustered(lp) )
+    if( do_arm )
       oof_local_port_fixup_wild(fm, lp, fuw_add_wild);
   }
-
   return rc;
 }
 
 
-/* Returns -ve error if oof_local_port exists but no cluster points to it.
- * Returns 0 if oof_local_port does not exist.
- * Returns 1 and sets thc_out if oof_local_port exists and contains a thc.
- */
-int oof_local_port_thc_search(struct oof_manager* fm, int protocol, int lport,
-                              struct tcp_helper_cluster_s** thc_out)
-{
-  struct oof_local_port* lp;
-  int rc;
-  spin_lock_bh(&fm->fm_inner_lock);
-  lp = oof_local_port_find(fm, protocol, lport);
-  if( lp == NULL ) {
-    rc = 0;
-  }
-  else if( lp->lp_thcf == NULL ) {
-    rc = -EADDRINUSE;
-  }
-  else {
-    rc = 1;
-    *thc_out = lp->lp_thcf->tf_thc;
-  }
-  spin_unlock_bh(&fm->fm_inner_lock);
-  return rc;
-}
-
-
-/* Add a thc reference to a oof_local_port.  If the oof_local_port
- * does not exist, it is allocated.
+/* Replaces socket that uses an installed dummy (semi-)wild filter without stack,
  *
- * As we do not do multicast clustering, this function should not be
- * called for multicast addresses. */
-int oof_socket_cluster_add(struct oof_manager* fm,
-                           struct tcp_helper_cluster_s* thc, int protocol,
-                           int lport)
+ * This is needed when our dummy socket was not backed by socket buffer.
+ *
+ * Mind target skf should be initialized but not installed.
+ *
+ * Use oof_socket_dtor on old_skf.
+ *
+ */
+int oof_socket_replace(struct oof_manager* fm,
+                       struct oof_socket* old_skf, struct oof_socket* skf)
 {
-  int rc;
-  struct oof_local_port* lp = oof_local_port_get(fm, protocol, lport);
-  if( lp == NULL ) {
-    ERR_LOG("%s: ERROR: out of memory", __FUNCTION__);
-    return -ENOMEM;
-  }
-
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
-  if( oof_is_clustered(lp) ) {
-    if( lp->lp_thcf->tf_thc != thc ) {
-      rc = -EINVAL;
-      goto fail;
-    }
-    /* A reference for this cluster already exists so drop the one
-     * oof_local_port_get() took. */
-    --lp->lp_refs;
-    oof_thc_add_ref(lp);
-  }
-  else {
-    if( (rc = oof_thc_alloc(fm, thc, lp)) != 0 ) {
-      goto fail;
-    }
-  }
+
+  ci_assert_nequal(old_skf->sf_local_port, NULL);
+  ci_assert(! ci_dllink_is_free(&old_skf->sf_lp_link));
+  ci_assert_flags(old_skf->sf_flags, OOF_SOCKET_DUMMY | OOF_SOCKET_NO_STACK);
+  ci_assert(oo_hw_filter_is_empty(&old_skf->sf_full_match_filter));
+  ci_assert(ci_dllist_is_empty(&old_skf->sf_mcast_memberships));
+
+  ci_assert_equal(skf->sf_local_port, NULL);
+  ci_assert(ci_dllink_is_free(&skf->sf_lp_link));
+  ci_assert(oo_hw_filter_is_empty(&skf->sf_full_match_filter));
+  ci_assert(ci_dllist_is_empty(&skf->sf_mcast_memberships));
+  ci_assert_nequal(oof_socket_thc_safe(skf), NULL);
+
+  skf->sf_laddr = old_skf->sf_laddr;
+  skf->sf_raddr = old_skf->sf_raddr;
+  skf->sf_rport = old_skf->sf_rport;
+  skf->sf_local_port = old_skf->sf_local_port;
+  skf->sf_flags = old_skf->sf_flags & ~OOF_SOCKET_NO_STACK;
+
+  /* Do the swap in port/portaddr list */
+  ci_dllist_insert_after(&old_skf->sf_lp_link, &skf->sf_lp_link);
+  oof_socket_remove_from_list(old_skf);
+
+  /* mark old socket as empty */
+  old_skf->sf_local_port = NULL;
+  old_skf->sf_flags = 0;
+
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
   return 0;
-
- fail:
-  if( --lp->lp_refs == 0 )
-    ci_dllist_remove(&lp->lp_manager_link);
-  else
-    lp = NULL;
-  spin_unlock_bh(&fm->fm_inner_lock);
-  mutex_unlock(&fm->fm_outer_lock);
-  if( lp != NULL )
-    oof_local_port_free(fm, lp);
-  return rc;
 }
 
 
-/* This funciton undos what is done in oof_socket_cluster_add().  Only
- * useful when the caller of oof_socket_cluster_add() wants to undo
- * after calling it. */
-void oof_socket_cluster_del(struct oof_manager* fm,
-                            struct tcp_helper_cluster_s* thc, int protocol,
-                            int lport)
+/* check that it should be OK to update a stack-less socket
+ * with the given stack.
+ *
+ * Possible collision would be existence of another clustered socket
+ * in the same stack, or different cluster holding the stack, or
+ * a nonclustered socket.
+ * */
+int oof_socket_can_update_stack(struct oof_manager* fm, struct oof_socket* skf,
+                                struct tcp_helper_resource_s* thr)
 {
-  struct oof_local_port* lp = oof_local_port_get(fm, protocol, lport);
-  if( lp == NULL )
-    return;
+  int can_add = 0;
+  struct oof_local_port* lp;
+  int la_i;
+  ci_dllist* list;
 
-  mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
-  ci_assert(oof_is_clustered(lp));
-  /* Drop reference taken by oof_local_port_get() above. */
-  --lp->lp_refs;
-  if( --lp->lp_thcf->tf_ref == 0 ) {
-    ci_assert(lp->lp_refs == 1);
-    --lp->lp_refs;
-    ci_dllist_remove(&lp->lp_manager_link);
+
+  ci_assert_flags(skf->sf_flags, OOF_SOCKET_DUMMY | OOF_SOCKET_NO_STACK);
+
+  lp = skf->sf_local_port;
+  ci_assert_nequal(lp, NULL);
+  if( skf->sf_laddr ) {
+    la_i = oof_manager_addr_find(fm, skf->sf_laddr);
+    ci_assert_ge(la_i, 0);
+    list = &lp->lp_addr[la_i].lpa_semi_wild_socks;
   }
   else {
-    lp = NULL;
+    list = &lp->lp_wild_socks;
   }
-  spin_unlock_bh(&fm->fm_inner_lock);
-  mutex_unlock(&fm->fm_outer_lock);
 
-  if( lp != NULL ) {
-    oof_thc_do_del(lp->lp_thcf);
-    oof_local_port_free(fm, lp);
-  }
+  /* no socket of the same stack, even dummy one */
+  can_add = oof_socket_list_find_matching_stack(list, thr, 1) == NULL;
+
+  /* FIXME we could add some assertions to check
+   *  * there is no other conflicting socket on list
+   */
+  spin_unlock_bh(&fm->fm_inner_lock);
+  return can_add;
 }
 
 
-/* This function should be called on a clustered socket once it's been moved
- * into a clustered stack in order to set the clustering per-socket filter
- * state. */
-void oof_socket_set_early_lp(struct oof_manager* fm, struct oof_socket* skf,
-                             int protocol, int lport)
-{
-  struct oof_local_port* lp = oof_local_port_get(fm, protocol, lport);
-
-  mutex_lock(&fm->fm_outer_lock);
-  spin_lock_bh(&fm->fm_inner_lock);
-
-  ci_assert(oof_is_clustered(lp));
-  ci_assert(skf->sf_local_port == NULL);
-  skf->sf_early_lp = lp;
-
-  spin_unlock_bh(&fm->fm_inner_lock);
-  mutex_unlock(&fm->fm_outer_lock);
-}
-
+/* Adds a socket or arms a dummy socket
+ *
+ * Before new socket is added some checks are done:
+ * If there is an existing socket claiming the same
+ * tuple of proto:port[:ip], then -EADDRINUSE is returned,
+ * unless both new and existing sockets belong to the same cluster
+ * and different stacks.
+ *
+ * If dummy add is performed no sw or hw filters will be installed,
+ * and if the new dummy socket is both clustered and stackless,
+ * thc_out might be filled with thc of existing cluster using the tuple
+ * when that is the case.
+ *
+ * In case existing dummy socket is given, its arming will be performed
+ * that is its dummy status is lifted with sw and hw filters set as needed.
+ *
+ * Return values:
+ * 0 - socket added successfully
+ * 1 - socket added thc_out filled (important for dummy stackless sockets)
+ * <0 - error
+ */
 
 int
 oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
-               int protocol, unsigned laddr, int lport,
-               unsigned raddr, int rport)
+               int flags, int protocol, unsigned laddr, int lport,
+               unsigned raddr, int rport,
+               struct tcp_helper_cluster_s** thc_out)
 {
   struct oof_local_port* lp;
-  struct tcp_helper_resource_s* skf_stack;
-  struct tcp_helper_cluster_s* skf_thc;
   int rc;
-  int remove_thc_filters_on_error = 0;
-
-  IPF_LOG(FSK_FMT QUIN_FMT, FSK_PRI_ARGS(skf),
-          QUIN_ARGS(protocol, laddr, lport, raddr, rport));
-
-  lp = (skf->sf_early_lp != NULL) ? skf->sf_early_lp :
-                                    oof_local_port_get(fm, protocol, lport);
-  if( lp == NULL ) {
-    ERR_LOG(FSK_FMT "ERROR: out of memory", FSK_PRI_ARGS(skf));
-    return -ENOMEM;
-  }
+  int clustered = flags & OOF_SOCKET_ADD_FLAG_CLUSTERED;
+  int dummy = flags & OOF_SOCKET_ADD_FLAG_DUMMY;
+  int no_stack = flags & OOF_SOCKET_ADD_FLAG_NO_STACK;
+  int do_arm_only;
+  int inc_laddr_ref = 1;
 
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
 
-  skf_stack = oof_cb_socket_stack(skf);
-  skf_thc   = oof_cb_stack_thc(skf_stack);
+  lp = skf->sf_local_port;
+  do_arm_only = lp != NULL && oof_socket_is_dummy(skf);
+
+  IPF_LOG(FSK_FMT QUIN_FMT"%s%s%s", FSK_PRI_ARGS_SAFE(skf, no_stack),
+          QUIN_ARGS(protocol, laddr, lport, raddr, rport),
+          clustered ? " CLUSTERED" : "",
+          do_arm_only ? " ARMING" : "",
+          dummy ? " DUMMY" : "");
+
+  ci_assert_equal(lp == NULL, ci_dllink_is_free(&skf->sf_lp_link));
+  ci_assert(! dummy || ! do_arm_only);
+  ci_assert(lp == NULL || oof_socket_is_dummy(skf));
+  ci_assert(dummy || ! no_stack);
 
   rc = -EINVAL;
-  if( skf->sf_local_port != NULL ) {
-    ERR_LOG(FSK_FMT "ERROR: already bound to "SK_ADDR_FMT,
-            FSK_PRI_ARGS(skf), SK_ADDR_ARGS(skf));
-    goto fail1;
-  }
   if( lport == 0 || ((raddr || rport) && ! (raddr && rport)) ) {
     ERR_LOG(FSK_FMT "ERROR: bad "IPPORT_FMT" "IPPORT_FMT,
-            FSK_PRI_ARGS(skf), IPPORT_ARG(laddr, lport),
+            FSK_PRI_ARGS_SAFE(skf, no_stack), IPPORT_ARG(laddr, lport),
             IPPORT_ARG(raddr, rport));
-    goto fail1;
+    ci_assert(! do_arm_only);
+    goto just_unlock;
+  }
+  if( ! do_arm_only && skf->sf_local_port != NULL ) {
+    ERR_LOG(FSK_FMT "ERROR: already bound to "SK_ADDR_FMT,
+            FSK_PRI_ARGS(skf), SK_ADDR_ARGS(skf));
+    goto just_unlock;
   }
 
-  if( skf_thc != NULL ) {
-    /* If the stack is clustered, we better have already associated
-     * the lp with a cluster.
-     */
-    if( ! oof_is_clustered(lp) ) {
-      ERR_LOG(FSK_FMT "ERROR: Clustered socket referring to non clustered"
-              " oof_local_port.", FSK_PRI_ARGS(skf));
-      goto fail1;
+  if( do_arm_only ) {
+    lp = oof_local_port_find(fm, protocol, lport);
+    ci_assert_nequal(lp, NULL);
+    ci_assert_equal(skf->sf_local_port, lp);
+    if( raddr == 0 ) {
+      ci_assert_equal(skf->sf_laddr, laddr);
+      ci_assert_equal(skf->sf_raddr, raddr);
+      ci_assert_equal(skf->sf_rport, rport);
+      skf->sf_flags &= ~OOF_SOCKET_DUMMY;
+      inc_laddr_ref = 0;
     }
-    /* We do not cluster on multicast addresses. */
-    if( ! CI_IP_IS_MULTICAST(laddr) ) {
-      rc = oof_thc_install_filters(fm, lp, laddr);
-      if( rc < 0 )
-        goto fail1;
-      remove_thc_filters_on_error = rc;
+    else {
+      /* Socket performs connect (inferred from raddr).
+       * Lets remove old dummy oofsocket and fallthrough as if we have
+       * never installed one...
+       * ..almost: we need to make sure socket does not share clustered filter
+       * so we set NO SHARING flag.
+       */
+      ci_assert_nequal(laddr, 0);
+      ci_assert(skf->sf_laddr == 0 || skf->sf_laddr == laddr);
+      /* increase local addr reference count only
+       * when original socket was fully wild */
+      inc_laddr_ref = skf->sf_laddr == 0;
+      skf->sf_local_port = NULL;
+      skf->sf_flags = OOF_SOCKET_NO_SHARING;
+      do_arm_only = 0; /* fall through to socket creation from scratch */
     }
+    /* Socket is removed from wild list, it will be readded by __oof_socket_add
+     * to either the same list or the full list.
+     *
+     * In case the socket stays wild and only gets armed, temporary removal
+     * from the list will prevent it from being spuriously considered
+     * in wild filter resolution.
+     **/
+    oof_socket_remove_from_list(skf);
   }
   else {
-    /* Else the associated lport should not be referring to a oof_thc.
-     */
-    if( oof_is_clustered(lp) )
-      goto fail1;
+    spin_unlock_bh(&fm->fm_inner_lock);
+    lp = oof_local_port_get(fm, protocol, lport);
+    spin_lock_bh(&fm->fm_inner_lock);
+    if( lp == NULL ) {
+      ERR_LOG(FSK_FMT "ERROR: out of memory", FSK_PRI_ARGS(skf));
+      rc = -ENOMEM;
+      goto just_unlock;
+    }
+    skf->sf_flags = (no_stack ? OOF_SOCKET_NO_STACK : 0) |
+                    (dummy ? OOF_SOCKET_DUMMY : 0) |
+                    (clustered ? OOF_SOCKET_CLUSTERED : 0);
   }
 
   skf->sf_laddr = laddr;
   skf->sf_raddr = raddr;
   skf->sf_rport = rport;
   skf->sf_local_port = lp;
-  rc = __oof_socket_add(fm, skf);
-  if( rc < 0 && rc != -EFILTERSSOME ) {
-    skf->sf_local_port = NULL;
-    goto fail0;
-  }
-  skf->sf_early_lp = NULL;
+
+  rc = __oof_socket_add(fm, skf, do_arm_only, inc_laddr_ref, thc_out);
+
+  if( rc < 0 && rc != -EFILTERSSOME )
+    goto unlock_release_lp;
+
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
   if( ci_dllist_not_empty(&skf->sf_mcast_memberships) )
@@ -1806,13 +2125,10 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
       return -EFILTERSSOME;
   return rc;
 
- fail0:
-  if( remove_thc_filters_on_error == 1 )
-    oof_thc_remove_filters(fm, lp);
- fail1:
-  /* If we have an sf_early_lp, we didn't call oof_local_port_get and so didn't
-   * take out an additional reference. */
-  if( lp == skf->sf_early_lp || --lp->lp_refs > 0 )
+ unlock_release_lp:
+  skf->sf_local_port = NULL;
+  skf->sf_flags = 0;
+  if( --lp->lp_refs > 0 )
     lp = NULL;
   else
     ci_dllist_remove(&lp->lp_manager_link);
@@ -1820,6 +2136,11 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
   mutex_unlock(&fm->fm_outer_lock);
   if( lp != NULL )
     oof_local_port_free(fm, lp);
+  return rc;
+
+ just_unlock:
+  spin_unlock_bh(&fm->fm_inner_lock);
+  mutex_unlock(&fm->fm_outer_lock);
   return rc;
 }
 
@@ -1841,9 +2162,9 @@ oof_socket_update_sharer_details(struct oof_manager* fm, struct oof_socket* skf,
    * otherwise it implies we've been using a hw filter with the wrong details.
    */
 #ifndef NDEBUG
-  ci_assert(skf->sf_full_match_filter.trs == NULL);
+  ci_assert(oo_hw_filter_is_empty(&skf->sf_full_match_filter));
 #else
-  if( skf->sf_full_match_filter.trs ) {
+  if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) ) {
     ci_log("%s: called for socket with full-match filter", __func__);
   }
 #endif
@@ -1872,7 +2193,13 @@ __oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
   int rc, la_i;
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
-  ci_assert(skf->sf_early_lp == NULL);
+
+  ci_assert_equal(skf->sf_local_port == NULL,
+                  ci_dllink_is_free(&skf->sf_lp_link));
+  ci_assert_impl(skf->sf_local_port == NULL, skf->sf_flags == 0);
+  ci_assert_equal(listen_skf->sf_local_port == NULL,
+                  ci_dllink_is_free(&listen_skf->sf_lp_link));
+  ci_assert_impl(listen_skf->sf_local_port == NULL, listen_skf->sf_flags == 0);
 
   if( skf->sf_local_port != NULL || ! skf->sf_laddr || ! skf->sf_raddr )
     return -EINVAL;
@@ -1923,14 +2250,8 @@ oof_socket_share(struct oof_manager* fm, struct oof_socket* skf,
   skf->sf_laddr = laddr;
   skf->sf_raddr = raddr;
   skf->sf_rport = rport;
-  if( oof_is_clustered(listen_skf->sf_local_port) )
-    oof_thc_add_ref(listen_skf->sf_local_port);
+
   rc = __oof_socket_share(fm, skf, listen_skf);
-  if( rc != 0 && oof_is_clustered(listen_skf->sf_local_port) )
-    /* Having just added the reference above 
-     * and keeping fm lock since then, we are guaranteed that
-     * this will simply decrement the count and nothing more. */
-    ci_verify(oof_thc_release(fm, listen_skf->sf_local_port) == 0);
 
   spin_unlock_bh(&fm->fm_inner_lock);
   return rc;
@@ -1945,9 +2266,12 @@ __oof_socket_del_wild(struct oof_socket* skf,
   struct oof_local_port* lp = skf->sf_local_port;
   struct oof_socket* other_skf;
 
+  ci_assert(! oof_socket_is_dummy(skf));
+
   oof_socket_del_wild_sw(skf, laddr);
   other_skf = oof_wild_socket_matching_stack(lp, lpa, skf_stack);
   if( other_skf != NULL ) {
+    /* Unhide hidden socket on the same stack */
     int rc = oof_cb_sw_filter_insert(other_skf, laddr, lp->lp_lport,
                                      0, 0, lp->lp_protocol, 1);
     if( rc != 0 )
@@ -1960,18 +2284,16 @@ static void
 oof_socket_del_semi_wild(struct oof_manager* fm, struct oof_socket* skf,
                          struct oof_local_port_addr* lpa)
 {
-  struct tcp_helper_resource_s* skf_stack;
   int hidden;
 
-  skf_stack = oof_cb_socket_stack(skf);
-  hidden = ! oof_socket_is_first_in_stack(&lpa->lpa_semi_wild_socks,
-                                          skf, skf_stack);
-  ci_dllist_remove(&skf->sf_lp_link);
+  hidden = ! oof_socket_is_first_in_same_stack(&lpa->lpa_semi_wild_socks,
+                                               skf);
+
+  oof_socket_remove_from_list(skf);
   if( ! hidden ) {
-    __oof_socket_del_wild(skf, skf_stack, lpa, skf->sf_laddr);
-    if( ! oof_is_clustered(skf->sf_local_port) )
-      oof_local_port_addr_fixup_wild(fm, skf->sf_local_port, lpa,
-                                     skf->sf_laddr, fuw_del_wild);
+    __oof_socket_del_wild(skf, oof_cb_socket_stack(skf), lpa, skf->sf_laddr);
+    oof_local_port_addr_fixup_wild(fm, skf->sf_local_port, lpa,
+                                   skf->sf_laddr, fuw_del_wild);
   }
 }
 
@@ -1985,12 +2307,13 @@ oof_socket_del_wild(struct oof_manager* fm, struct oof_socket* skf)
   struct oof_local_addr* la;
   int hidden, la_i;
 
-  skf_stack = oof_cb_socket_stack(skf);
-  hidden = ! oof_socket_is_first_in_stack(&lp->lp_wild_socks, skf, skf_stack);
-  ci_dllist_remove(&skf->sf_lp_link);
+  hidden = ! oof_socket_is_first_in_same_stack(&lp->lp_wild_socks, skf);
+
+  oof_socket_remove_from_list(skf);
   if( hidden )
     return;
 
+  skf_stack = oof_cb_socket_stack(skf);
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
     if(  ci_dllist_is_empty(&la->la_active_ifs) )
@@ -1998,7 +2321,7 @@ oof_socket_del_wild(struct oof_manager* fm, struct oof_socket* skf)
       continue;
     lpa = &lp->lp_addr[la_i];
     if( oof_socket_list_find_matching_stack(&lpa->lpa_semi_wild_socks,
-                                            skf_stack) == NULL )
+                                            skf_stack, 0) == NULL )
       __oof_socket_del_wild(skf, skf_stack, lpa, la->la_laddr);
   }
 }
@@ -2012,24 +2335,31 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
   struct oof_local_addr* la;
   ci_dllist mcast_filters;
   int la_i;
-  struct oof_thc* thcf = NULL;
+  int dummy;
 
   ci_dllist_init(&mcast_filters);
 
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
 
-  ci_assert(skf->sf_local_port == NULL || skf->sf_early_lp == NULL);
+  lp = skf->sf_local_port;
+  dummy = oof_socket_is_dummy(skf);
 
-  if( (lp = skf->sf_local_port) != NULL ) {
-    IPF_LOG(FSK_FMT QUIN_FMT, FSK_PRI_ARGS(skf),
+  ci_assert(! dummy || ! skf->sf_raddr);
+  ci_assert(! dummy || ! CI_IP_IS_MULTICAST(skf->sf_laddr));
+  ci_assert_equal(lp == NULL, ci_dllink_is_free(&skf->sf_lp_link));
+  ci_assert_impl(lp == NULL, skf->sf_flags == 0);
+
+  if( lp != NULL ) {
+    IPF_LOG(FSK_FMT QUIN_FMT,
+            FSK_PRI_ARGS_SAFE(skf, oof_socket_is_stackless(skf)),
             QUIN_ARGS(lp->lp_protocol, skf->sf_laddr, lp->lp_lport,
                       skf->sf_raddr, skf->sf_rport));
 
     oof_socket_mcast_remove(fm, skf, &mcast_filters);
 
     if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
-      ci_dllist_remove(&skf->sf_lp_link);
+      oof_socket_remove_from_list(skf);
       if( skf->sf_raddr != 0 ) {
         /* Undo path for oof_udp_connect_mcast_laddr().  It's possible we
          * don't actually have either of these filters, if we haven't joined
@@ -2040,7 +2370,7 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
          * Any wild match filters will have been removed already, via the
          * standard path.
          */
-        oof_socket_del_full_sw(skf);
+        oof_socket_del_full_sw(skf, 1);
         skf->sf_flags &= ~OOF_SOCKET_MCAST_FULL_SW_FILTER;
         oof_hw_filter_clear_full(fm, skf);
       }
@@ -2060,24 +2390,17 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
     }
     else {
       oof_socket_del_wild(fm, skf);
-      if( ! oof_is_clustered(lp) )
+      if(! dummy )
         oof_local_port_fixup_wild(fm, skf->sf_local_port, fuw_del_wild);
     }
 
     skf->sf_local_port = NULL;
-  }
-  else {
-    lp = skf->sf_early_lp;
-    skf->sf_early_lp = NULL;
+    skf->sf_flags = 0;
   }
 
   /* The remainder of the cleanup must be performed for a local port even if
    * filters haven't been installed yet. */
   if( lp != NULL ) {
-    if( oof_is_clustered(lp) )
-      if( oof_thc_release(fm, lp) )
-        thcf = lp->lp_thcf;
-
     ci_assert(lp->lp_refs > 0);
     if( --lp->lp_refs == 0 )
       ci_dllist_remove(&lp->lp_manager_link);
@@ -2087,9 +2410,6 @@ oof_socket_del(struct oof_manager* fm, struct oof_socket* skf)
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
-
- if( thcf != NULL )
-      oof_thc_do_del(thcf);
   if( lp != NULL )
     oof_local_port_free(fm, lp);
   oof_mcast_filter_list_free(&mcast_filters);
@@ -2112,16 +2432,21 @@ oof_socket_del_sw(struct oof_manager* fm, struct oof_socket* skf)
   struct oof_local_port* lp;
   struct oof_local_port_addr* lpa;
   struct oof_local_addr* la;
-  int la_i, rc = 1;
+  int la_i, mcast_hw_filter = 0, ucast_hw_filter = 0;
 
   spin_lock_bh(&fm->fm_inner_lock);
+
+  ci_assert_equal(skf->sf_local_port == NULL,
+                  ci_dllink_is_free(&skf->sf_lp_link));
+  ci_assert_impl(skf->sf_local_port == NULL,
+                 skf->sf_flags == 0);
 
   if( (lp = skf->sf_local_port) != NULL ) {
     IPF_LOG(FSK_FMT QUIN_FMT, FSK_PRI_ARGS(skf),
             QUIN_ARGS(lp->lp_protocol, skf->sf_laddr, lp->lp_lport,
                       skf->sf_raddr, skf->sf_rport));
-
-    oof_socket_mcast_remove_sw(fm, skf);
+    ucast_hw_filter = 1;
+    mcast_hw_filter = oof_socket_mcast_remove_sw(fm, skf);
 
     if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
       /* Nothing to do. */
@@ -2132,7 +2457,7 @@ oof_socket_del_sw(struct oof_manager* fm, struct oof_socket* skf)
       lpa = &lp->lp_addr[la_i];
       la = &fm->fm_local_addrs[la_i];
       if( skf->sf_raddr ) {
-        oof_socket_del_full_sw(skf);
+        oof_socket_del_full_sw(skf, 1);
           /* If this endpoint only sharing SW filters and is not the
            * last one to be removed, it is safe to remove the filters
            * in an atomic context.
@@ -2141,30 +2466,31 @@ oof_socket_del_sw(struct oof_manager* fm, struct oof_socket* skf)
            * drop the cluster ref, which is not safe where we have to avoid
            * hw ops.
            */
-        if( skf->sf_full_match_filter.trs == NULL &&
+        if( oo_hw_filter_is_empty(&skf->sf_full_match_filter) &&
             lp->lp_refs > 1 &&
-            lpa->lpa_n_full_sharers > 1 &&
-            ! oof_is_clustered(lp) ) {
-          ci_dllist_remove(&skf->sf_lp_link);
+            lpa->lpa_n_full_sharers > 1 ) {
+          oof_socket_remove_from_list(skf);
           ci_assert(la->la_sockets > 0);
           --la->la_sockets;
           --lpa->lpa_n_full_sharers;
           skf->sf_local_port = NULL;
+          skf->sf_flags = 0;
           --lp->lp_refs;
-          rc = 0;
+         ucast_hw_filter = 0;
         }
       }
       else
         oof_socket_del_wild_sw(skf, skf->sf_laddr);
     }
-    else {
+    else
       for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i )
         oof_socket_del_wild_sw(skf, fm->fm_local_addrs[la_i].la_laddr);
-    }
+    if( mcast_hw_filter || ucast_hw_filter )
+      skf->sf_flags |= OOF_SOCKET_SW_FILTER_WAS_REMOVED;
   }
 
   spin_unlock_bh(&fm->fm_inner_lock);
-  return rc;
+  return mcast_hw_filter || ucast_hw_filter;
 }
 
 
@@ -2217,7 +2543,7 @@ oof_udp_connect_mcast_laddr(struct oof_manager* fm, struct oof_socket* skf,
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
   ci_assert(CI_IP_IS_MULTICAST(skf->sf_laddr));
   ci_assert(CI_IP_IS_MULTICAST(laddr));
-  ci_assert(skf->sf_full_match_filter.trs == NULL ||
+  ci_assert(oo_hw_filter_is_empty(&skf->sf_full_match_filter) ||
            (skf->sf_laddr == laddr && skf->sf_raddr == raddr &&
             skf->sf_rport == rport));
 
@@ -2295,7 +2621,6 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
    * there may be an interval when there are no filters installed and
    * packets will go to the wrong place.
    */
-  struct tcp_helper_resource_s* skf_stack;
   struct oof_local_port_addr* lpa;
   struct oof_local_addr* la;
   struct oof_local_port* lp;
@@ -2344,6 +2669,9 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
           IPPORT_ARG(skf->sf_laddr, lp->lp_lport),
           IPPORT_ARG(laddr, lp->lp_lport), IPPORT_ARG(raddr, rport));
 
+  ci_assert(! oof_socket_is_dummy(skf));
+  skf->sf_flags &= ~(OOF_SOCKET_CLUSTERED | OOF_SOCKET_DUMMY);
+
   /* First half of adding as full-match.  May or may not insert full-match
    * h/w filter.  We mustn't install s/w filter until we've removed the
    * existing s/w filter else we can confuse the filter table (which
@@ -2369,12 +2697,11 @@ oof_udp_connect(struct oof_manager* fm, struct oof_socket* skf,
     la_i_old = oof_manager_addr_find(fm, laddr_old);
     ci_assert(la_i_old >= 0 && la_i_old < fm->fm_local_addr_n);
     lpa = &lp->lp_addr[la_i_old];
-    skf_stack = oof_cb_socket_stack(skf);
-    hidden = ! oof_socket_is_first_in_stack(&lpa->lpa_semi_wild_socks,
-                                            skf, skf_stack);
-    ci_dllist_remove(&skf->sf_lp_link);
+    hidden = ! oof_socket_is_first_in_same_stack(&lpa->lpa_semi_wild_socks,
+                                                 skf);
+    oof_socket_remove_from_list(skf);
     if( ! hidden )
-      __oof_socket_del_wild(skf, skf_stack, lpa, laddr_old);
+      __oof_socket_del_wild(skf, oof_cb_socket_stack(skf), lpa, laddr_old);
   }
   else {
     oof_socket_del_wild(fm, skf);
@@ -2696,6 +3023,8 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
   unsigned conflicted_port_mask;
   struct oof_mcast_filter* mf;
   int rc;
+  int mf_pushed = 0;
+  struct oof_mcast_filter* old_mm_filter;
 
   ci_assert(lp != NULL);
   ci_assert(OOF_NEED_MCAST_FILTER(fm, skf, mm));
@@ -2757,8 +3086,10 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
     oof_mcast_filter_init(mf, mm->mm_maddr, mm->mm_vlan_id);
     mf->mf_filter.trs = skf_stack;
     ci_dllist_push(&lp->lp_mcast_filters, &mf->mf_lp_link);
+    mf_pushed = 1;
   }
 
+  old_mm_filter = mm->mm_filter;
   mm->mm_filter = mf;
   ci_dllist_push(&mf->mf_memberships, &mm->mm_filter_link);
   mf->mf_hwport_mask |= OOF_MCAST_WILD_HWPORTS(fm, mm);
@@ -2767,7 +3098,7 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
                             0, 0, mf->mf_maddr, lp->lp_lport,
                             mf->mf_vlan_id, install_hwport_mask,
                             OOF_SRC_FLAGS_DEFAULT_MCAST);
-  if( rc != 0 )
+  if( rc != 0 ) {
     /* We didn't get all of the filters we wanted, but traffic should
      * still get there via the kernel stack.
      */
@@ -2776,14 +3107,23 @@ oof_mcast_install(struct oof_manager* fm, struct oof_mcast_member* mm,
             IPPORT_ARG(mm->mm_maddr, lp->lp_lport),
             mm->mm_ifindex, mm->mm_hwport_mask, mf->mf_hwport_mask,
             install_hwport_mask, oo_hw_filter_hwports(&mf->mf_filter), rc);
+    mm->mm_filter = old_mm_filter;
+    ci_dllist_pop(&mf->mf_memberships);
+    if( mf_pushed ) {
+      ci_dllist_pop(&lp->lp_mcast_filters);
+      ci_dllist_push(mcast_filters, &mf->mf_lp_link);
+    }
+    oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport,
+                            0, 0, lp->lp_protocol, 1);
+  }
 
   return rc;
 }
 
 
-static void
+static int
 oof_mcast_remove(struct oof_manager* fm, struct oof_mcast_member* mm,
-                 ci_dllist* mcast_filters)
+                 int stack_locked, ci_dllist* mcast_filters)
 {
   struct oof_mcast_filter* mf = mm->mm_filter;
   struct oof_socket* skf = mm->mm_socket;
@@ -2791,6 +3131,7 @@ oof_mcast_remove(struct oof_manager* fm, struct oof_mcast_member* mm,
   struct oof_mcast_filter* mf2;
   unsigned hwport_mask;
   int rc;
+  int filter_removed = 0;
 
   ci_assert(mm->mm_filter != NULL);
   ci_assert(ci_dllist_not_empty(&mf->mf_memberships));
@@ -2824,6 +3165,7 @@ oof_mcast_remove(struct oof_manager* fm, struct oof_mcast_member* mm,
             IPPORT_ARG(mm->mm_maddr, lp->lp_lport));
     ci_dllist_remove(&mf->mf_lp_link);
     ci_dllist_push(mcast_filters, &mf->mf_lp_link);
+    filter_removed = 1;
   }
   else {
     mf->mf_hwport_mask = oof_mcast_filter_hwport_mask(fm, mf);
@@ -2869,7 +3211,8 @@ oof_mcast_remove(struct oof_manager* fm, struct oof_mcast_member* mm,
   if( ! oof_socket_has_maddr_filter(skf, mm->mm_maddr) &&
       ! OOF_CONNECTED_MCAST(skf, mm->mm_maddr) )
     oof_cb_sw_filter_remove(skf, mm->mm_maddr, lp->lp_lport,
-                            0, 0, lp->lp_protocol, 1);
+                            0, 0, lp->lp_protocol, stack_locked);
+  return filter_removed;
 }
 
 
@@ -2902,17 +3245,30 @@ __oof_mcast_update_filters(struct oof_manager* fm, int ifindex)
 {
   struct oof_local_port* lp;
   struct oof_mcast_filter* mf;
+  struct oof_mcast_filter* mf_temp;
   struct oof_mcast_member* mm;
+  struct oof_mcast_member* mm_temp;
   unsigned hwport_mask;
   int rc, hash, touched;
+  ci_dllist mcast_filters;
+  int remove = 0;
+
 
   if( (rc = oof_cb_get_hwport_mask(ifindex, &hwport_mask)) != 0 ) {
-    ERR_LOG("%s: ERROR: oof_cb_get_hwport_mask(%d) failed rc=%d",
-            __FUNCTION__, ifindex, rc);
-    return;
+    if( rc != -ENODEV ) {
+      ERR_LOG("%s: ERROR: oof_cb_get_hwport_mask(%d) failed rc=%d",
+              __FUNCTION__, ifindex, rc);
+      return;
+    }
+    /* device is gone, remove all memberships for the ifindex */
+    remove = 1;
+    hwport_mask = 0;
   }
 
-  IPF_LOG("%s: if=%u hwports=%x", __FUNCTION__, ifindex, hwport_mask);
+  IPF_LOG("%s: if=%u hwports=%x nodev %d",
+          __FUNCTION__, ifindex, hwport_mask, remove);
+
+  ci_dllist_init(&mcast_filters);
 
   for( hash = 0; hash < OOF_LOCAL_PORT_TBL_SIZE; ++hash )
     CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
@@ -2921,20 +3277,38 @@ __oof_mcast_update_filters(struct oof_manager* fm, int ifindex)
        * oof_mcast_filter_installable_hwports() to give correct results.
        */
       touched = 0;
-      CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
-                          &lp->lp_mcast_filters)
-        CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_filter_link,
-                            &mf->mf_memberships)
+      CI_DLLIST_FOR_EACH3(struct oof_mcast_filter, mf, mf_lp_link,
+                          &lp->lp_mcast_filters, mf_temp)
+        CI_DLLIST_FOR_EACH3(struct oof_mcast_member, mm, mm_filter_link,
+                            &mf->mf_memberships, mm_temp)
           if( mm->mm_ifindex == ifindex ) {
-            mm->mm_hwport_mask = hwport_mask;
-            mf->mf_hwport_mask = oof_mcast_filter_hwport_mask(fm, mf);
             touched = 1;
+            ci_assert_equal(mm->mm_filter, mf);
+            if( remove ) {
+              struct oof_socket* skf = mm->mm_socket;
+              int maddr = mm->mm_maddr;
+              ci_dllist_remove(&mm->mm_socket_link);
+              rc = oof_mcast_remove(fm, mm, 0, &mcast_filters);
+              ci_free(mm);
+              if( OOF_CONNECTED_MCAST(skf, maddr) )
+                oof_socket_mcast_del_connected(fm, skf, 0);
+              if( rc )
+                /* get away: filter got removed,
+                 * membership list does not exist any more */
+                break;
+            }
+            else {
+              mm->mm_hwport_mask = hwport_mask;
+              mf->mf_hwport_mask = oof_mcast_filter_hwport_mask(fm, mf);
+            }
           }
       if( touched )
         CI_DLLIST_FOR_EACH2(struct oof_mcast_filter, mf, mf_lp_link,
                             &lp->lp_mcast_filters)
           oof_mcast_update(fm, lp, mf, ifindex);
     }
+
+  oof_mcast_filter_list_free(&mcast_filters);
 }
 
 
@@ -3016,8 +3390,13 @@ oof_socket_mcast_add(struct oof_manager* fm, struct oof_socket* skf,
       if( OOF_CONNECTED_MCAST(skf, maddr) )
         rc = oof_udp_connect_mcast_laddr(fm, skf, skf->sf_laddr, skf->sf_raddr,
                                          skf->sf_rport);
-      if( rc == 0 && OOF_NEED_MCAST_FILTER(fm, skf, mm) )
+      if( rc == 0 && OOF_NEED_MCAST_FILTER(fm, skf, mm) ) {
         rc = oof_mcast_install(fm, mm, &mcast_filters);
+        if( rc != 0 ) {
+          ci_dllist_pop(&skf->sf_mcast_memberships);
+          new_mm = mm;
+        }
+      }
     }
   }
 
@@ -3037,9 +3416,9 @@ oof_socket_mcast_add(struct oof_manager* fm, struct oof_socket* skf,
 }
 
 
-void
-oof_socket_mcast_del_connected(struct oof_manager* fm, struct oof_socket* skf,
-                               unsigned maddr, int ifindex)
+static void
+oof_socket_mcast_del_connected(struct oof_manager* fm,
+                               struct oof_socket* skf, int stack_locked)
 {
   struct oof_mcast_member* mm;
   unsigned hwports = 0;
@@ -3067,7 +3446,7 @@ oof_socket_mcast_del_connected(struct oof_manager* fm, struct oof_socket* skf,
   /* If we have no hwports we don't need any filters. */
   else if( hwports == hwports_full ) {
     if( skf->sf_flags & OOF_SOCKET_MCAST_FULL_SW_FILTER ) {
-      oof_socket_del_full_sw(skf);
+      oof_socket_del_full_sw(skf, stack_locked);
       skf->sf_flags &= ~OOF_SOCKET_MCAST_FULL_SW_FILTER;
     }
     oof_hw_filter_clear_full(fm, skf);
@@ -3096,10 +3475,10 @@ oof_socket_mcast_del(struct oof_manager* fm, struct oof_socket* skf,
   if( mm != NULL ) {
     ci_dllist_remove(&mm->mm_socket_link);
     if( mm->mm_filter != NULL )
-      oof_mcast_remove(fm, mm, &mcast_filters);
+      oof_mcast_remove(fm, mm, 1, &mcast_filters);
 
     if( OOF_CONNECTED_MCAST(skf, maddr) )
-      oof_socket_mcast_del_connected(fm, skf, maddr, ifindex);
+      oof_socket_mcast_del_connected(fm, skf, 1);
   }
 
   spin_unlock_bh(&fm->fm_inner_lock);
@@ -3127,7 +3506,7 @@ oof_socket_mcast_del_all(struct oof_manager* fm, struct oof_socket* skf)
     mm = CI_CONTAINER(struct oof_mcast_member, mm_socket_link,
                       ci_dllist_pop(&skf->sf_mcast_memberships));
     if( mm->mm_filter != NULL )
-      oof_mcast_remove(fm, mm, &mf_list);
+      oof_mcast_remove(fm, mm, 1, &mf_list);
     ci_dllist_push(&mm_list, &mm->mm_socket_link);
   }
 
@@ -3203,7 +3582,7 @@ oof_socket_mcast_install(struct oof_manager* fm, struct oof_socket* skf)
       }
       else {
         if( ! OOF_NEED_MCAST_FILTER(fm, skf, mm) )
-          oof_mcast_remove(fm, mm, &mcast_filters);
+          oof_mcast_remove(fm, mm, 1, &mcast_filters);
       }
     }
   }
@@ -3235,187 +3614,323 @@ oof_socket_mcast_remove(struct oof_manager* fm, struct oof_socket* skf,
     ci_assert(mm->mm_socket == skf);
     ci_assert(CI_IP_IS_MULTICAST(mm->mm_maddr));
     if( mm->mm_filter != NULL )
-      oof_mcast_remove(fm, mm, mcast_filters);
+      oof_mcast_remove(fm, mm, 1, mcast_filters);
   }
 }
 
 
-static void
+static int
 oof_socket_mcast_remove_sw(struct oof_manager* fm, struct oof_socket* skf)
 {
   struct oof_mcast_member* mm;
+  int needs_cleanup = 0;
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
 
   CI_DLLIST_FOR_EACH2(struct oof_mcast_member, mm, mm_socket_link,
                       &skf->sf_mcast_memberships) {
+    needs_cleanup = 1;
     ci_assert(mm->mm_socket == skf);
     ci_assert(CI_IP_IS_MULTICAST(mm->mm_maddr));
-    if( mm->mm_filter != NULL )
+    if( mm->mm_filter != NULL ) {
       oof_cb_sw_filter_remove(skf, mm->mm_maddr, skf->sf_local_port->lp_lport,
                               0, 0, skf->sf_local_port->lp_protocol, 1);
+    }
   }
+  return needs_cleanup;
 }
+
 
 /**********************************************************************
-***********************************************************************
+************************** TPROXY *************************************
 **********************************************************************/
 
-
-static void oof_thc_add_ref(struct oof_local_port* lp)
+/* Initializes or updates tproxy filters in response to iface up/down or slave
+ * being added or removed from the bond */
+static int
+oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
 {
-  ci_assert(lp);
-  ci_assert(lp->lp_thcf);
-  ++lp->lp_thcf->tf_ref;
-}
-
-
-/* Install the HW filters for the cluster.  Returns -ve error on
- * failure, 0 if filters already installed, 1 if filters were actually
- * installed.
- */
-static int oof_thc_install_filters(struct oof_manager* fm,
-                                   struct oof_local_port* lp, unsigned laddr)
-{
-  struct oof_thc* thcf = lp->lp_thcf;
-  struct oof_local_addr* la;
-  int la_i, rc;
-
-  ci_assert(mutex_is_locked(&fm->fm_outer_lock));
-  ci_assert(spin_is_locked(&fm->fm_inner_lock));
-
-  if( thcf->tf_filters_installed == 1 )
-    return 0;
-
-  thcf->tf_laddr = laddr;
-  if( thcf->tf_laddr == 0 ) {
-
-    for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
-      la = &fm->fm_local_addrs[la_i];
-      if( ci_dllist_is_empty(&la->la_active_ifs) )
-        /* Entry invalid or address disabled. */
-        continue;
-      if( (rc = oof_hw_thc_filter_set(fm, lp, la_i, la->la_laddr)) != 0 ) {
-        OO_DEBUG_ERR(ci_log("%s: ERROR: FILTER "TRIPLE_FMT" failed (%d)",
-                            __FUNCTION__,
-                            TRIPLE_ARGS(lp->lp_protocol, la->la_laddr,
-                                        lp->lp_lport), rc));
-        while( --la_i >= 0 )
-          oo_hw_filter_clear(&thcf->tf_filters[la_i]);
-        return rc;
-      }
-    }
-    thcf->tf_filters_installed = 1;
-    return 1;
-  }
-  else {
-    int found = 0;
-    for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i )
-      if( thcf->tf_laddr == fm->fm_local_addrs[la_i].la_laddr ) {
-        found = 1;
-        break;
-      }
-    if( found == 0 )
-      return -EINVAL;
-
-    la = &fm->fm_local_addrs[la_i];
-    if( ci_dllist_is_empty(&la->la_active_ifs) )
-      /* Entry invalid or address disabled. */
-      return -EINVAL;
-    if( (rc = oof_hw_thc_filter_set(fm, lp, la_i, la->la_laddr)) != 0 )
-      if( rc < 0 ) {
-      OO_DEBUG_ERR(ci_log("%s: ERROR: FILTER "TRIPLE_FMT" failed (%d)",
-                          __FUNCTION__,
-                          TRIPLE_ARGS(lp->lp_protocol, la->la_laddr,
-                                      lp->lp_lport), rc));
-      return rc;
-      }
-    thcf->tf_filters_installed = 1;
-    return 1;
-  }
-}
-
-
-static int oof_thc_alloc(struct oof_manager* fm,
-                         struct tcp_helper_cluster_s* thc,
-                         struct oof_local_port* lp)
-{
-  struct oof_thc* thcf;
-  struct oo_hw_filter* filters;
+  unsigned short vlan_id = OO_HW_VLAN_UNSPEC;
+  unsigned hwport_mask = 0;
+  unsigned effective_hwport_mask;
+  int ifindex;
+  ci_uint8 mac[6];
+  int rc, rc1;
+  struct oo_hw_filter_spec oo_filter_spec;
+  struct tcp_helper_resource_s* trs = ft->ft_filter.trs;
   int i;
-  IPF_LOG("%s: %s lport=%d", __FUNCTION__, FMT_PROTOCOL(lp->lp_protocol),
-          lp->lp_lport);
+
+  CI_BUILD_ASSERT(oo_filter_spec.addr.ethertype.mac ==
+                  oo_filter_spec.addr.mac.mac);
+  CI_BUILD_ASSERT(oo_filter_spec.addr.ipproto.mac ==
+                  oo_filter_spec.addr.mac.mac);
+
+  ci_assert(spin_is_locked(&fm->fm_inner_lock));
+  ci_assert(mutex_is_locked(&fm->fm_outer_lock));
+  ci_assert(ft != NULL);
+
+  ifindex = ft->ft_ifindex;
+
+  ci_assert( ft->ft_filter.trs != NULL ||
+             ft->ft_filter.thc != NULL);
+
+  rc = oof_cb_get_vlan_id(ifindex, &vlan_id);
+  if( rc != 0 ) {
+    IPF_LOG("%s: ERROR: cannot get vlan id for if=%d rc=%d",
+            __FUNCTION__, ifindex, rc);
+    return rc;
+  }
+
+  if( vlan_id == 0 )
+    vlan_id = OO_HW_VLAN_UNSPEC;
+
+  rc = oof_cb_get_hwport_mask(ifindex, &hwport_mask);
+  if( rc != 0 ) {
+    IPF_LOG("%s: ERROR: cannot get hwports for if=%d rc=%d",
+            __FUNCTION__ , ifindex, rc);
+    return rc;
+  }
+
+  rc = oof_cb_get_mac(ifindex, mac);
+  if( rc != 0 ) {
+    IPF_LOG("%s: ERROR: cannot get mac address for if=%d rc=%d",
+            __FUNCTION__ , ifindex, rc);
+    return rc;
+  }
+
+  if( (fm->fm_hwports_available & hwport_mask) != hwport_mask ) {
+    /* We need accelerated interfaces only
+     * FIXME: for now we fall through... most likely not capturing any traffic
+     */
+    IPF_LOG("%s: ERROR: some of tproxy hwports are not accelerated, "
+            "got hwports 0x%x, need 0x%x",
+            __FUNCTION__, fm->fm_hwports_available, hwport_mask);
+  }
+
+  ft->ft_hwport_mask = hwport_mask;
+  ft->ft_vlan_id = vlan_id;
+  memcpy(ft->ft_mac, mac, sizeof(ft->ft_mac));
+
+  effective_hwport_mask = hwport_mask &
+                          fm->fm_hwports_available &
+                          fm->fm_hwports_up;
+
+  spin_unlock_bh(&fm->fm_inner_lock);
+
+  oo_filter_spec.type = OO_HW_FILTER_TYPE_MAC;
+  memcpy(oo_filter_spec.addr.mac.mac, mac, sizeof(oo_filter_spec.addr.mac.mac));
+  oo_filter_spec.vlan_id = vlan_id;
+  rc = oo_hw_filter_update(&ft->ft_filter, trs, &oo_filter_spec,
+                           effective_hwport_mask, effective_hwport_mask,
+                           OO_HW_SRC_FLAG_RSS_DST);
+
+#define ETHERTYPE_ARP 0x806
+  /* This filter redirects ARP traffic back to kernel. */
+  oo_filter_spec.type = OO_HW_FILTER_TYPE_ETHERTYPE;
+  oo_filter_spec.addr.ethertype.t = htons(ETHERTYPE_ARP);
+  /* [vlan_id] and [mac] are already set. */
+  rc1 = oo_hw_filter_update(&ft->ft_filter_arp, trs, &oo_filter_spec,
+                            effective_hwport_mask, effective_hwport_mask,
+                            OO_HW_SRC_FLAG_KERNEL_REDIRECT);
+  if( rc1 != 0 )
+    ERR_LOG("%s: failed to install filter to steer ARP traffic to kernel "
+            "(rc1=%d)", __FUNCTION__, rc1);
+
+  IPF_LOG("%s: if=%u hwports=%x/%x MAC=%02x%02x%02x%02x%02x%02x "
+          "vlan=%d rc=%d rc1=%d",
+          __FUNCTION__, ifindex, hwport_mask, effective_hwport_mask,
+         mac[0], mac[1],mac[2], mac[3], mac[4], mac[5], vlan_id, rc, rc1 );
+
+  /* Install the IP-protocol-to-kernel filters. */
+  for( i = 0; i < OOF_TPROXY_IPPROTO_FILTER_COUNT; ++i ) {
+    oo_filter_spec.type = OO_HW_FILTER_TYPE_IP_PROTO_MAC;
+    oo_filter_spec.addr.ipproto.p = oof_tproxy_ipprotos[i];
+    rc1 = oo_hw_filter_update(&ft->ft_filter_ipproto[i], trs,
+                              &oo_filter_spec, effective_hwport_mask,
+                              effective_hwport_mask,
+                              OO_HW_SRC_FLAG_KERNEL_REDIRECT);
+    if( rc1 == -EPROTONOSUPPORT ) {
+      /* The requested filter-type didn't exist.  This is expected on low-
+       * latency firmware, which doesn't support IP-proto + MAC filters, so
+       * retry without the MAC. */
+      IPF_LOG("%s: IP-proto + MAC filter-insertion failed.  Retrying without "
+              "MAC.", __FUNCTION__);
+      oo_filter_spec.type = OO_HW_FILTER_TYPE_IP_PROTO;
+
+      /* IP-protocol filters that are not MAC-qualified are system-global, so
+       * their metadata lives in [fm] rather than in [ft].  For the same
+       * reason, we install them on all available hwports. */
+      rc1 = oo_hw_filter_update(&fm->fm_tproxy_global_filters[i], trs,
+                                &oo_filter_spec,
+                                fm->fm_hwports_available & fm->fm_hwports_up,
+                                fm->fm_hwports_available & fm->fm_hwports_up,
+                                OO_HW_SRC_FLAG_KERNEL_REDIRECT);
+    }
+
+    if( rc1 != 0 )
+      ERR_LOG("%s: failed to install filter to steer IP protocol %d to kernel"
+              "(rc1=%d)", __FUNCTION__, oo_filter_spec.addr.ipproto.p, rc1);
+  }
+
+  spin_lock_bh(&fm->fm_inner_lock);
+  return rc;
+}
+
+
+/* Allocate and initialize and add to oof_manager tproxy instance on given if
+ */
+static int oof_tproxy_alloc(struct oof_manager* fm,
+                            struct tcp_helper_resource_s* trs,
+                            struct tcp_helper_cluster_s* thc,
+                            unsigned ifindex)
+{
+  struct oof_tproxy* ft;
+  int rc;
+  int i;
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
 
   spin_unlock_bh(&fm->fm_inner_lock);
-  thcf = CI_ALLOC_OBJ(struct oof_thc);
+  ft = CI_ALLOC_OBJ(struct oof_tproxy);
   spin_lock_bh(&fm->fm_inner_lock);
-  if( thcf == NULL ) {
+
+  if( ft == NULL ) {
     OO_DEBUG_ERR(ci_log("%s: ERROR: out of memory", __FUNCTION__));
     return -ENOMEM;
   }
 
+  ft->ft_ifindex = ifindex;
+  oo_hw_filter_init2(&ft->ft_filter, trs, thc);
+  oo_hw_filter_init2(&ft->ft_filter_arp, trs, thc);
+  for( i = 0; i < OOF_TPROXY_IPPROTO_FILTER_COUNT; ++i )
+    oo_hw_filter_init2(&ft->ft_filter_ipproto[i], trs, thc);
+
+  rc = oof_tproxy_filter_update(fm, ft);
+  if( rc == 0 )
+    ci_dllist_push(&fm->fm_tproxies, &ft->ft_manager_link);
+  else
+    ci_free(ft);
+  return rc;
+}
+
+
+static struct oof_tproxy*
+oof_tproxy_find(struct oof_manager* fm,
+                struct tcp_helper_resource_s* trs,
+                struct tcp_helper_cluster_s* thc,
+                int ifindex)
+{
+  struct oof_tproxy* ft;
+  ci_assert(spin_is_locked(&fm->fm_inner_lock));
+  CI_DLLIST_FOR_EACH2(struct oof_tproxy, ft, ft_manager_link,
+                      &fm->fm_tproxies) {
+    if( (ifindex < 0 || ft->ft_ifindex == ifindex) &&
+        (trs == NULL || ft->ft_filter.trs == trs) &&
+        (thc == NULL || ft->ft_filter.thc == thc) )
+      return ft;
+  }
+  return NULL;
+}
+
+
+/* Add tproxy instance */
+int
+oof_tproxy_install(struct oof_manager* fm,
+                   struct tcp_helper_resource_s* trs,
+                   struct tcp_helper_cluster_s* thc,
+                   int ifindex)
+{
+  struct oof_tproxy* ft;
+  int rc;
+
+  /* If we fail the capability check then need to see if we can allow
+   * this user to install the scalable filter.
+   */
+  if( !capable(CAP_NET_RAW) && (scalable_filter_gid != -1) &&
+      (ci_getgid() != scalable_filter_gid) )
+    return -EPERM;
+
+  mutex_lock(&fm->fm_outer_lock);
+  spin_lock_bh(&fm->fm_inner_lock);
+
+  ft = oof_tproxy_find(fm, NULL, NULL, ifindex);
+  if( ft != NULL ) {
+    rc = -EALREADY;
+    goto fail1;
+  }
+  rc = oof_tproxy_alloc(fm, trs, thc, ifindex);
+
+fail1:
   spin_unlock_bh(&fm->fm_inner_lock);
-  filters = CI_ALLOC_ARRAY(struct oo_hw_filter, fm->fm_local_addr_max);
-  spin_lock_bh(&fm->fm_inner_lock);
-  if( filters == NULL ) {
-    ci_free(thcf);
-    OO_DEBUG_ERR(ci_log("%s: ERROR: out of memory", __FUNCTION__));
-    return -ENOMEM;
-  }
-  for( i = 0; i < fm->fm_local_addr_max; ++i )
-    oo_hw_filter_init(&filters[i]);
+  mutex_unlock(&fm->fm_outer_lock);
+  return rc;
+}
 
-  lp->lp_thcf      = thcf;
-  thcf->tf_filters = filters;
-  thcf->tf_thc     = thc;
-  thcf->tf_ref     = 1;
-  thcf->tf_filters_installed = 0;
-  tcp_helper_cluster_ref(thc);
+
+static int __oof_tproxy_free(struct oof_manager* fm,
+                             struct oof_tproxy* ft)
+{
+  int i;
+
+  ci_assert(ft != NULL);
+
+  ci_assert(spin_is_locked(&fm->fm_inner_lock));
+  ci_assert(mutex_is_locked(&fm->fm_outer_lock));
+
+  ci_dllist_remove(&ft->ft_manager_link);
+
+  IPF_LOG("%s: if=%u",
+          __FUNCTION__, ft->ft_ifindex);
+  spin_unlock_bh(&fm->fm_inner_lock);
+  /* These IP-protocol filters are safe to clear even if they are unused. */
+  for( i = 0; i < OOF_TPROXY_IPPROTO_FILTER_COUNT; ++i )
+    oo_hw_filter_clear(&ft->ft_filter_ipproto[i]);
+  oo_hw_filter_clear(&ft->ft_filter_arp);
+  oo_hw_filter_clear(&ft->ft_filter);
+  spin_lock_bh(&fm->fm_inner_lock);
+
+  ci_free(ft);
   return 0;
 }
 
 
-static void oof_thc_remove_filters(struct oof_manager* fm,
-                                   struct oof_local_port* lp)
+int
+oof_tproxy_free(struct oof_manager* fm,
+                struct tcp_helper_resource_s* trs,
+                struct tcp_helper_cluster_s* thc,
+                int ifindex)
 {
-  int la_i;
-  struct oof_thc* thcf = lp->lp_thcf;
-  thcf->tf_filters_installed = 0;
-  for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i )
-    if( (thcf->tf_laddr == 0 ||
-         thcf->tf_laddr == fm->fm_local_addrs[la_i].la_laddr) &&
-        ci_dllist_not_empty(&(fm->fm_local_addrs[la_i].la_active_ifs)) ) {
-      spin_unlock_bh(&fm->fm_inner_lock);
-      oo_hw_filter_clear(&thcf->tf_filters[la_i]);
-      spin_lock_bh(&fm->fm_inner_lock);
+  struct oof_tproxy* ft;
+  int rc;
+
+  mutex_lock(&fm->fm_outer_lock);
+  spin_lock_bh(&fm->fm_inner_lock);
+
+  ft = oof_tproxy_find(fm, trs, thc, ifindex);
+  if( ft == NULL ) {
+    rc = -ENOENT;
+    spin_unlock_bh(&fm->fm_inner_lock);
+    goto fail1;
+  }
+  rc = __oof_tproxy_free(fm, ft);
+
+  spin_unlock_bh(&fm->fm_inner_lock);
+
+  if( ci_dllist_is_empty(&fm->fm_tproxies) ) {
+    /* Last tproxy has gone, so clear global filters. */
+    int i;
+    for( i = 0; i < OOF_TPROXY_GLOBAL_FILTER_COUNT; ++i ) {
+      /* for now we clear filters using oo_hw_filter_clear_hwports as
+       * oo_hw_filter_clear does not support stackless filters */
+      oo_hw_filter_clear_hwports(&fm->fm_tproxy_global_filters[i], -1u, 1);
+      oo_hw_filter_clear(&fm->fm_tproxy_global_filters[i]);
     }
-}
+  }
 
-
-static void oof_thc_do_del(struct oof_thc* thcf)
-{
-  tcp_helper_cluster_release(thcf->tf_thc, NULL);
-  ci_free(thcf->tf_filters);
-  ci_free(thcf);
-}
-
-
-static int oof_thc_release(struct oof_manager* fm,
-                           struct oof_local_port* lp)
-{
-  struct oof_thc* thcf = lp->lp_thcf;
-  ci_assert(spin_is_locked(&fm->fm_inner_lock));
-  ci_assert(thcf->tf_ref > 0);
-
-  if( --thcf->tf_ref > 0 )
-    return 0;
-  --lp->lp_refs;
-  ci_assert_gt(lp->lp_refs, 0);
-  oof_thc_remove_filters(fm, lp);
-  return 1; /* all references had been removed */
+fail1:
+  mutex_unlock(&fm->fm_outer_lock);
+  return rc;
 }
 
 
@@ -3442,10 +3957,7 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
   ci_assert(skf->sf_local_port != NULL);
 
   /* Work out whether the socket can receive any packets. */
-  if( lp->lp_thcf != NULL) {
-    state = "CLUSTERED";
-  }
-  else if( skf->sf_full_match_filter.trs != NULL ) {
+  if( ! oo_hw_filter_is_empty(&skf->sf_full_match_filter) ) {
     state = "ACCELERATED (full)";
   }
   else if( CI_IP_IS_MULTICAST(skf->sf_laddr) ) {
@@ -3476,24 +3988,35 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
     ci_assert(la_i >= 0 && la_i < fm->fm_local_addr_n);
     lpa = &lp->lp_addr[la_i];
     if( skf->sf_raddr ) {
-      if( lpa->lpa_filter.trs == skf_stack )
-        state = "ACCELERATED (sharing wild)";
-      else if( lpa->lpa_filter.trs == NULL )
+      if( oo_hw_filter_is_empty(&lpa->lpa_filter) )
         state = "ORPHANED (no filter)";
+      else if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
+        state = "ACCELERATED (sharing wild)";
       else
         state = "ORPHANED (filter points elsewhere)";
     }
     else {
-      if( oof_wild_socket(lp, lpa) == skf ) {
-        if( lpa->lpa_filter.trs == skf_stack )
-          state = "ACCELERATED (wild)";
-        else if( lpa->lpa_filter.trs == NULL )
+      struct oof_socket* wskf = oof_wild_socket(lp, lpa);
+      if( wskf == skf ) {
+        if( oo_hw_filter_is_empty(&lpa->lpa_filter) )
           state = "FILTER_MISSING (not accelerated)";
+        else if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) ) {
+          if( lpa->lpa_filter.thc != NULL )
+            state = "ACCELERATED CLUSTERED-MASTER (wild)";
+          else
+            state = "ACCELERATED (wild)";
+        }
         else
           state = "!! BAD_FILTER !!";
       }
-      else
-        state = "HIDDEN";
+      else {
+        if( oof_socket_is_dummy(skf) )
+          state = "CLUSTERED (not activated)";
+        else if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
+          state = "ACCELERATED CLUSTERED-SLAVE (wild)";
+        else
+          state = "HIDDEN";
+      }
     }
   }
   else {
@@ -3504,7 +4027,7 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
         lpa = &lp->lp_addr[la_i];
         if( oof_wild_socket(lp, lpa) == skf )
           ++n_mine;
-        if( lpa->lpa_filter.trs == skf_stack )
+        if( oof_socket_can_share_hw_filter(skf, &lpa->lpa_filter) )
           ++n_filter;
       }
     if( n_laddr == 0 )
@@ -3519,8 +4042,9 @@ oof_socket_dump_w_lp(const char* pf, struct oof_manager* fm,
       state = "ACCELERATED";
   }
 
-  log(loga, "%s: "SK_FMT" "SK_ADDR_FMT" %s", pf,
-      SK_PRI_ARGS(skf), SK_ADDR_ARGS(skf), state);
+  log(loga, "%s: "SK_FMT" "SK_ADDR_FMT" %s %s", pf,
+      SK_PRI_ARGS(skf), SK_ADDR_ARGS(skf), state,
+      oof_socket_thc_safe(skf) ? oof_cb_thc_name(oof_socket_thc_safe(skf)) : "");
 }
 
 
@@ -3573,9 +4097,8 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
   struct oof_socket* skf;
   int la_i;
 
-  log(loga, "%s: %s:%d n_refs=%d %s", __FUNCTION__,
-      FMT_PROTOCOL(lp->lp_protocol), FMT_PORT(lp->lp_lport), lp->lp_refs,
-      lp->lp_thcf != NULL ? "clustered" : "");
+  log(loga, "%s: %s:%d n_refs=%d", __FUNCTION__,
+      FMT_PROTOCOL(lp->lp_protocol), FMT_PORT(lp->lp_lport), lp->lp_refs);
 
   ci_assert(spin_is_locked(&fm->fm_inner_lock));
   ci_assert(mutex_is_locked(&fm->fm_outer_lock));
@@ -3589,7 +4112,7 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];
     lpa = &lp->lp_addr[la_i];
-    if( lpa->lpa_filter.trs != NULL )
+    if( ! oo_hw_filter_is_empty(&lpa->lpa_filter) )
       log(loga, "  FILTER "IPPORT_FMT" hwports=%x stack=%d",
           IPPORT_ARG(la->la_laddr, lp->lp_lport),
           oo_hw_filter_hwports(&lpa->lpa_filter),
@@ -3630,6 +4153,21 @@ oof_local_port_dump(struct oof_manager* fm, struct oof_local_port* lp,
 }
 
 
+static void
+oof_tproxy_dump(struct oof_manager* fm, struct oof_tproxy* ft,
+                    void (*log)(void* opaque, const char* fmt, ...),
+                    void* loga)
+{
+  ci_uint8* m = ft->ft_mac;
+  log(loga, "  if=%d hwports=%x,%x mac=%02x:%02x:%02x:%02x:%02x:%02x "
+            "vlan_id=%d stack=%d cluster=%s",
+      ft->ft_ifindex, ft->ft_hwport_mask, oo_hw_filter_hwports(&ft->ft_filter),
+      m[0], m[1], m[2], m[3], m[4], m[5], ft->ft_vlan_id,
+      oof_cb_stack_id(ft->ft_filter.trs),
+      ft->ft_filter.thc != NULL ? oof_cb_thc_name(ft->ft_filter.thc) : "None");
+}
+
+
 void
 oof_manager_dump(struct oof_manager* fm,
                 void (*log)(void* opaque, const char* fmt, ...),
@@ -3637,8 +4175,10 @@ oof_manager_dump(struct oof_manager* fm,
 {
   struct oof_local_port* lp;
   struct oof_local_addr* la;
+  struct oof_tproxy* ft;
   struct oof_socket* skf;
   int la_i, hash;
+  int i;
 
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
@@ -3666,6 +4206,18 @@ oof_manager_dump(struct oof_manager* fm,
     CI_DLLIST_FOR_EACH2(struct oof_local_port, lp, lp_manager_link,
                         &fm->fm_local_ports[hash])
       oof_local_port_dump(fm, lp, log, loga);
+
+  log(loga, "%s: scalable interfaces and MAC filters",
+      __FUNCTION__);
+  CI_DLLIST_FOR_EACH2(struct oof_tproxy, ft, ft_manager_link,
+                      &fm->fm_tproxies)
+    oof_tproxy_dump(fm, ft, log, loga);
+
+  for( i = 0; i < OOF_TPROXY_GLOBAL_FILTER_COUNT; ++i ) {
+    unsigned hwports = oo_hw_filter_hwports(&fm->fm_tproxy_global_filters[i]);
+    if( hwports != 0 )
+      log(loga, "Global filter %d: hwports=%x", i, hwports);
+  }
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);

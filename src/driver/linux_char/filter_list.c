@@ -19,10 +19,11 @@
 #include <ci/efrm/pd.h>
 #include <ci/efrm/vi_resource.h>
 #include <ci/efhw/nic.h>
+#include <ci/net/ethernet.h>
 #include "efch.h"
 #include <ci/efch/op_types.h>
 #include "filter_list.h"
-#include <driver/linux_resource/linux_resource_internal.h>
+#include <driver/linux_net/driverlink_api.h>
 
 
 struct filter {
@@ -73,9 +74,13 @@ static void efch_filter_destruct(struct efrm_resource *rs,
     if( f->flags & FILTER_FLAGS_VPORT ) {
       struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
       struct efx_dl_device* efx_dev = efhw_nic_dl_device(efhw_nic);
-      bool is_exclusive = !! (f->flags & FILTER_FLAGS_VPORT_IS_EXCLUSIVE);
-      efx_dl_vport_filter_remove(efx_dev, efrm_pd_get_vport_id(pd),
-                                 f->efrm_filter_id, is_exclusive);
+      if( efx_dev != NULL ) {
+        bool is_exclusive = !! (f->flags & FILTER_FLAGS_VPORT_IS_EXCLUSIVE);
+        efx_dl_vport_filter_remove(efx_dev, efrm_pd_get_vport_id(pd),
+                                   f->efrm_filter_id, is_exclusive);
+      }
+      /* If [efx_dev] is NULL, the hardware is morally absent and so there's
+       * nothing to do. */
     }
     else {
       efrm_filter_remove(rs->rs_client, f->efrm_filter_id);
@@ -217,11 +222,18 @@ static int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
     if( efrm_pd_has_vport(pd) ) {
       struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
       struct efx_dl_device* efx_dev = efhw_nic_dl_device(efhw_nic);
-      bool is_exclusive;
-      rc = efx_dl_vport_filter_insert(efx_dev, efrm_pd_get_vport_id(pd),
-                                      spec, &f->efrm_filter_id, &is_exclusive);
-      if( is_exclusive )
-        f->flags |= FILTER_FLAGS_VPORT_IS_EXCLUSIVE;
+      if( efx_dev != NULL ) {
+        bool is_exclusive;
+        rc = efx_dl_vport_filter_insert(efx_dev, efrm_pd_get_vport_id(pd),
+                                        spec, &f->efrm_filter_id, &is_exclusive);
+        if( is_exclusive )
+          f->flags |= FILTER_FLAGS_VPORT_IS_EXCLUSIVE;
+      }
+      else {
+        /* If [efx_dev] is NULL, the hardware is morally absent and so there's
+         * nothing to do. This counts as success. */
+        rc = 0;
+      }
     }
     else {
       rc = efrm_filter_insert(rs->rs_client, spec, replace);
@@ -250,7 +262,7 @@ static int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
     return rc;
   }
 
-  op->u.filter_add.out_filter_id = f->filter_id;
+  op->u.filter_add.u.out.filter_id = f->filter_id;
   return 0;
 }
 
@@ -298,27 +310,55 @@ int efch_filter_list_set_mac(struct efx_filter_spec* spec,
 }
 
 
+int efch_filter_list_set_ip_proto(struct efx_filter_spec* spec,
+                                  ci_resource_op_t* op, int *replace_out)
+{
+  *replace_out = false;
+  if( ! capable(CAP_NET_ADMIN) )
+    return -EPERM;
+  /* The net driver doesn't have an explicit API for setting IP-proto filter-
+   * state, so we have to do it by hand. */
+  spec->match_flags |= EFX_FILTER_MATCH_ETHER_TYPE |
+                       EFX_FILTER_MATCH_IP_PROTO;
+  spec->ether_type = CI_ETHERTYPE_IP;
+  spec->ip_proto = op->u.filter_add.ip4.protocol;
+  return 0;
+}
+
+
+int efch_filter_list_set_ether_type(struct efx_filter_spec* spec,
+                                    ci_resource_op_t* op, int *replace_out)
+{
+  *replace_out = false;
+  if( ! capable(CAP_NET_ADMIN) )
+    return -EPERM;
+  /* The net driver doesn't have an explicit API for setting ethertype filter-
+   * state, so we have to do it by hand. */
+  spec->match_flags |= EFX_FILTER_MATCH_ETHER_TYPE;
+  spec->ether_type = op->u.filter_add.u.in.ether_type_be16;
+  return 0;
+}
+
+
+/* Marks [spec] as having a type abstracted by [set_fn] by calling the latter
+ * on the former.  Also sets a VLAN on the filter if [vlan_opt] is
+ * non-negative. [set_fn] may be NULL in the case that only this VLAN-setting
+ * behaviour is required. */
 int efch_filter_list_set_misc(struct efx_filter_spec* spec,
                               ci_resource_op_t* op,
                               int (*set_fn)(struct efx_filter_spec*),
                               int vlan_opt, int *replace_out)
 {
-  int rc;
+  int rc = 0;
 
-#if EFX_DRIVERLINK_API_VERSION >= 5
   *replace_out = false;
   if( ! capable(CAP_NET_ADMIN) )
     return -EPERM;
-  if( (rc = set_fn(spec)) < 0 )
+  if( set_fn != NULL && (rc = set_fn(spec)) < 0 )
     return rc;
   if( vlan_opt >= 0 )
     rc = efx_filter_set_eth_local(spec, vlan_opt, NULL);
   return rc;
-#else
-  ci_log("%s: Multicast-default filter not supported by this sfc driver",
-         __FUNCTION__);
-  return -ENOPROTOOPT;
-#endif
 }
 
 
@@ -389,6 +429,34 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
   case CI_RSOP_FILTER_ADD_MAC:
     rc = efch_filter_list_set_mac(&spec, op, &replace);
     break;
+  case CI_RSOP_FILTER_ADD_MAC_IP_PROTO:
+    rc = efch_filter_list_set_mac(&spec, op, &replace);
+    if( rc >= 0 )
+      rc = efch_filter_list_set_ip_proto(&spec, op, &replace);
+    break;
+  case CI_RSOP_FILTER_ADD_MAC_ETHER_TYPE:
+    rc = efch_filter_list_set_mac(&spec, op, &replace);
+    if( rc >= 0 )
+      rc = efch_filter_list_set_ether_type(&spec, op, &replace);
+    break;
+  case CI_RSOP_FILTER_ADD_IP_PROTO_VLAN:
+    rc = efch_filter_list_set_ip_proto(&spec, op, &replace);
+    if( rc >= 0 )
+      rc = efch_filter_list_set_misc(&spec, op, NULL,
+                                     op->u.filter_add.mac.vlan_id, &replace);
+    break;
+  case CI_RSOP_FILTER_ADD_ETHER_TYPE_VLAN:
+    rc = efch_filter_list_set_ether_type(&spec, op, &replace);
+    if( rc >= 0 )
+      rc = efch_filter_list_set_misc(&spec, op, NULL,
+                                     op->u.filter_add.mac.vlan_id, &replace);
+    break;
+  case CI_RSOP_FILTER_ADD_IP_PROTO:
+    rc = efch_filter_list_set_ip_proto(&spec, op, &replace);
+    break;
+  case CI_RSOP_FILTER_ADD_ETHER_TYPE:
+    rc = efch_filter_list_set_ether_type(&spec, op, &replace);
+    break;
   case CI_RSOP_FILTER_ADD_ALL_UNICAST:
     rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_uc_def, -1,
                                    &replace);
@@ -397,24 +465,6 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
     rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_mc_def, -1,
                                    &replace);
     break;
-#if EFX_DRIVERLINK_API_VERSION == 10
-  case CI_RSOP_FILTER_ADD_MISMATCH_UNICAST:
-    rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_uc_mismatch, -1,
-                                   &replace);
-    break;
-  case CI_RSOP_FILTER_ADD_MISMATCH_UNICAST_VLAN:
-    rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_uc_mismatch,
-                                   op->u.filter_add.mac.vlan_id, &replace);
-    break;
-  case CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST:
-    rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_mc_mismatch, -1,
-                                   &replace);
-    break;
-  case CI_RSOP_FILTER_ADD_MISMATCH_MULTICAST_VLAN:
-    rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_mc_mismatch,
-                                   op->u.filter_add.mac.vlan_id, &replace);
-    break;
-#else
   case CI_RSOP_FILTER_ADD_MISMATCH_UNICAST:
     rc = efch_filter_list_set_misc(&spec, op, efx_filter_set_uc_def, -1,
                                    &replace);
@@ -439,7 +489,6 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
     else
       rc = 0;
     break;
-#endif
   default:
     rc = -EOPNOTSUPP;
     break;

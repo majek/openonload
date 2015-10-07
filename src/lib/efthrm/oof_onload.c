@@ -24,6 +24,7 @@
 #include <onload/cplane.h>
 #include "tcp_filters_internal.h"
 #include <onload/driverlink_filter.h>
+#include <onload/tcp_helper_fns.h>
 
 #define skf_to_ep(skf)  CI_CONTAINER(tcp_helper_endpoint_t, oofilter, (skf))
 #define skf_to_ni(skf)  (&skf_to_ep(skf)->thr->netif)
@@ -106,6 +107,7 @@ oof_onload_dtor(efab_tcp_driver_t* on_drv)
 struct tcp_helper_resource_s*
 oof_cb_socket_stack(struct oof_socket* skf)
 {
+  ci_assert_nflags(skf->sf_flags, OOF_SOCKET_NO_STACK);
   return skf_to_ep(skf)->thr;
 }
 
@@ -117,10 +119,18 @@ oof_cb_stack_thc(struct tcp_helper_resource_s* skf_stack)
 }
 
 
+const char*
+oof_cb_thc_name(struct tcp_helper_cluster_s* thc)
+{
+  return thc->thc_name;
+}
+
+
 int
 oof_cb_socket_id(struct oof_socket* skf)
 {
-  return OO_SP_FMT(skf_to_ep(skf)->id);
+  return (skf->sf_flags & OOF_SOCKET_NO_STACK) == 0 ?
+         OO_SP_FMT(skf_to_ep(skf)->id) : -1;
 }
 
 
@@ -190,6 +200,7 @@ oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
                           unsigned raddr, int rport, int protocol, int op_op)
 {
   ci_netif* ni = skf_to_ni(skf);
+  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
   struct oof_cb_sw_filter_op* op = CI_ALLOC_OBJ(struct oof_cb_sw_filter_op);
   
   if( op == NULL ) {
@@ -215,9 +226,12 @@ oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
   ni->swf_update_last = op;
   spin_unlock_bh(&ni->swf_update_lock);
 
-  if( ef_eplock_trylock_and_set_flags(&ni->state->lock,
-                                      CI_EPLOCK_NETIF_SWF_UPDATE) )
-    ci_netif_unlock(ni);
+  /* We are holding a spinlock, so claim to be in driverlink context here */
+  if( efab_tcp_helper_netif_lock_or_set_flags(trs, OO_TRUSTED_LOCK_SWF_UPDATE,
+                                              CI_EPLOCK_NETIF_SWF_UPDATE, 1) ) {
+    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_SWF_UPDATE);
+    efab_tcp_helper_netif_unlock(trs, 1);
+  }
 }
 
 /* Fixme: most callers of oof_cb_sw_filter_insert do not check rc. */
@@ -227,15 +241,17 @@ oof_cb_sw_filter_insert(struct oof_socket* skf, unsigned laddr, int lport,
                         int stack_locked)
 {
   ci_netif* ni = skf_to_ni(skf);
+  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
   int rc = 0;
 
   ci_assert(!stack_locked || ci_netif_is_locked(ni));
 
-  if( stack_locked || ci_netif_trylock(ni) ) {
+  /* We are holding a spinlock, so claim to be in driverlink context here */
+  if( stack_locked || efab_tcp_helper_netif_try_lock(trs, 1) ) {
     rc = ci_netif_filter_insert(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
                                 laddr, lport, raddr, rport, protocol);
     if( ! stack_locked )
-      ci_netif_unlock(ni);
+      efab_tcp_helper_netif_unlock(trs, 1);
   }
   else
     oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
@@ -250,6 +266,7 @@ oof_cb_sw_filter_remove(struct oof_socket* skf, unsigned laddr, int lport,
                         int stack_locked)
 {
   ci_netif* ni = skf_to_ni(skf);
+  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
 
   if( skf->sf_flags & OOF_SOCKET_SW_FILTER_WAS_REMOVED )
     return;
@@ -258,11 +275,12 @@ oof_cb_sw_filter_remove(struct oof_socket* skf, unsigned laddr, int lport,
    * if OOF_SOCKET_SW_FILTER_WAS_REMOVED flag is set. */
   ci_assert(!stack_locked || ci_netif_is_locked(ni));
 
-  if( stack_locked || ci_netif_trylock(ni) ) {
+  /* We are holding a spinlock, so claim to be in driverlink context here */
+  if( stack_locked || efab_tcp_helper_netif_try_lock(trs, 1) ) {
     ci_netif_filter_remove(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
                            laddr, lport, raddr, rport, protocol);
     if( ! stack_locked )
-      ci_netif_unlock(ni);
+      efab_tcp_helper_netif_unlock(trs, 1);
   }
   else
     oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
@@ -346,6 +364,17 @@ oof_cb_get_vlan_id(int ifindex, unsigned short *vlan_id)
   return rc;
 }
 
+
+int
+oof_cb_get_mac(int ifindex, unsigned char out_mac[6])
+{
+  ci_mac_addr_t mac;
+  int rc;
+  rc = cicppl_llap_get_mac(&CI_GLOBAL_CPLANE, ifindex, &mac);
+  if( rc == 0 )
+    memcpy(out_mac, mac, sizeof(mac));
+  return rc;
+}
 
 void
 oof_cb_defer_work(void* owner_private)

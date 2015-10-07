@@ -63,16 +63,20 @@ extern "C" {
 enum ef_pd_flags {
   /** Default flags */
   EF_PD_DEFAULT          = 0x0,
-  /** Protection domain supports virtual filters */
+  /** Protection domain uses a virtual function and the system
+   * IOMMU instead of NIC buffer table.
+   */
   EF_PD_VF               = 0x1,
-  /** Protection domain supports physical addressing mode */
+  /** Protection domain uses physical addressing mode */
   EF_PD_PHYS_MODE        = 0x2,
-  /** Protection domain supports packed streams */
+  /** Protection domain supports packed stream mode */
   EF_PD_RX_PACKED_STREAM = 0x4,  /* ef10 only */
   /** Protection domain supports virtual ports */
   EF_PD_VPORT            = 0x8,  /* ef10 only */
   /** Protection domain supports HW multicast loopback */
-  EF_PD_MCAST_LOOP      = 0x10,  /* ef10 only */
+  EF_PD_MCAST_LOOP       = 0x10,  /* ef10 only */
+  /** Protection domain uses >= 64KB registered memory mappings */
+  EF_PD_MEMREG_64KiB     = 0x20,  /* ef10 only */
 };
 
 

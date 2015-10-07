@@ -76,6 +76,7 @@ static inline void efrm_resource_init(struct efrm_resource *rs,
 
 #ifdef __KERNEL__
 extern int efrm_nic_post_reset(struct efhw_nic *nic);
+extern int efrm_nic_reset_suspend(struct efhw_nic *nic);
 #endif
 
 

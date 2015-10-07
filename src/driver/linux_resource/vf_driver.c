@@ -68,14 +68,12 @@
 #include <ci/efrm/vi_resource_private.h>
 #include <ci/efrm/vf_resource_private.h>
 
+#include <ci/tools.h>
+#include <ci/tools/bitfield.h>
+
 #define EFX_USE_KCOMPAT
-#include <driver/linux_net/efx.h> /* for various definitions */
 #include "vfdi.h"
-#if EFX_DRIVERLINK_API_VERSION >= 9
 #include <driver/linux_net/farch_regs.h> /* for FR_CZ_USR_EV */
-#else
-#include <driver/linux_net/regs.h> /* for FR_CZ_USR_EV */
-#endif
 #define EFX_IRQ_MOD_RESOLUTION 5
 #include "kernel_compat.h"
 
@@ -279,7 +277,7 @@ static int vf_vfdi_req(struct vf_init_status *vf_ini)
 	struct vfdi_req *req = vf_ini->req.mem;
 	unsigned int op = req->op;
 	unsigned data, type;
-	efx_dword_t dword;
+	ci_dword_t dword;
 	unsigned long retry;
 
 	BUG_ON(op == VFDI_OP_RESPONSE);
@@ -288,10 +286,10 @@ static int vf_vfdi_req(struct vf_init_status *vf_ini)
 
 	for (type = 0; type < 4; ++type) {
 		data = (unsigned)((u64)vf_ini->req.dma_addr >> (type << 4));
-		EFX_POPULATE_DWORD_3(dword,
-				     VFDI_EV_SEQ, vf_ini->req_seq & 0xff,
-				     VFDI_EV_TYPE, type,
-				     VFDI_EV_DATA, data & 0xffff);
+		CI_POPULATE_DWORD_3(dword,
+				    VFDI_EV_SEQ, vf_ini->req_seq & 0xff,
+				    VFDI_EV_TYPE, type,
+				    VFDI_EV_DATA, data & 0xffff);
 		writel(dword.u32[0], vf_ini->bar + FR_CZ_USR_EV);
 		wmb();
 		vf_ini->req_seq++;
@@ -540,6 +538,29 @@ static int find_iommu_type(struct pci_dev *pci_dev)
 		       pci_name(pci_dev));
 	return IOMMU_TYPE_UNKNOWN;
 }
+
+#ifdef EFRM_HAVE_IOMMU_GROUP
+static void vf_iommu_to_default_group(struct pci_dev *pci_dev)
+{
+	struct iommu_group *group = iommu_group_get(&pci_dev->dev);
+	struct iommu_group *master_group = iommu_group_get(&pci_dev->physfn->dev);
+
+	if (group == NULL || master_group == NULL) {
+		EFRM_ERR("Failed to revert %s back to default IOMMU group",
+			 pci_name(pci_dev));
+		if( group != NULL )
+			iommu_group_put(group);
+		if( master_group != NULL )
+			iommu_group_put(master_group);
+		return;
+	}
+
+	iommu_group_remove_device(&pci_dev->dev);
+	iommu_group_add_device(master_group, &pci_dev->dev);
+	iommu_group_put(group); /* revert _get() above */
+	iommu_group_put(group); /* free */
+}
+#endif
 #endif
 
 
@@ -591,6 +612,22 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 	if (iommu_present(pci_dev->dev.bus)) {
+#ifdef EFRM_HAVE_IOMMU_GROUP
+		struct iommu_group *group;
+		/* ASC (or absence of it) makes us look as if different VFs
+		 * could not be assigned to different domains.  As
+		 * a workaround, we allocate iommu group per each VF. */
+		group = iommu_group_alloc();
+		if (IS_ERR(group)) {
+			rc = PTR_ERR(group);
+			goto fail2;
+		}
+		iommu_group_remove_device(&pci_dev->dev);
+		rc = iommu_group_add_device(group, &pci_dev->dev);
+		if (rc != 0)
+			goto fail3;
+#endif
+
 		if (efrm_pt_domain == NULL) {
 			efrm_pt_domain = iommu_domain_alloc(pci_dev->dev.bus);
 			if (efrm_pt_domain == NULL)
@@ -602,7 +639,7 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 		rc = iommu_attach_device(efrm_pt_domain, &pci_dev->dev);
 		mutex_unlock(&efrm_iommu_mutex);
 		if (rc != 0 )
-			goto fail2;
+			goto fail3;
 		vf->iova_basep = &efrm_pt_iova_base;
 	}
 #endif
@@ -611,7 +648,7 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	if (rc) {
 		EFRM_ERR("%s %s: failed to enable PCI VF: %d",
 			pci_name(pci_dev), __func__, rc);
-		goto fail3;
+		goto fail4;
 	}
 
 	pci_set_master(pci_dev);
@@ -621,7 +658,7 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	if (rc != 0) {
 		EFRM_ERR("%s %s: failed to map PCI BAR for VF: %d",
 			pci_name(pci_dev), __func__, rc);
-		goto fail4;
+		goto fail5;
 	}
 
 	/* Allocate VFDI req and status pages. */
@@ -631,19 +668,19 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 	EFRM_BUILD_ASSERT(sizeof(struct vfdi_req) <= PAGE_SIZE);
 	rc = vf_alloc_page(&vf_ini, "req", &vf_ini.req);
 	if (rc != 0)
-		goto fail5;
+		goto fail6;
 
 	EFRM_BUILD_ASSERT(sizeof(struct vfdi_status) <= PAGE_SIZE);
 	rc = vf_alloc_page(&vf_ini, "status", &vf_ini.status);
 	if (rc != 0)
-		goto fail6;
+		goto fail7;
 
 	/* Init status page */
 	rc = vf_init_status(&vf_ini);
 	if (rc != 0) {
 		EFRM_ERR("%s %s: failed to init status page: %d",
 			pci_name(pci_dev), __func__, rc);
-		goto fail7;
+		goto fail8;
 	}
 
 	vf_fini_status(&vf_ini);
@@ -661,19 +698,23 @@ static int efrm_pci_vf_probe(struct pci_dev *pci_dev,
 
 	return 0;
 
-fail7:
+fail8:
 	vf_free_page(&vf_ini, &vf_ini.status);
-fail6:
+fail7:
 	vf_free_page(&vf_ini, &vf_ini.req);
-fail5:
+fail6:
 	vf_unmap_bar(vf, vf_ini.bar);
-fail4:
+fail5:
 	/* pci_clear_master is called from pci_disable_device */
 	pci_disable_device(pci_dev);
-fail3:
+fail4:
 #ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
 	iommu_detach_device(efrm_pt_domain, &pci_dev->dev);
+fail3:
+#ifdef EFRM_HAVE_IOMMU_GROUP
+	vf_iommu_to_default_group(pci_dev);
 fail2:
+#endif
 #endif
 	kfree(vf);
 	return rc;
@@ -707,6 +748,12 @@ static void efrm_pci_vf_remove(struct pci_dev *pci_dev)
 
 	/* pci_clear_master is called from pci_disable_device */
 	pci_disable_device(pci_dev);
+
+#ifdef CONFIG_SFC_RESOURCE_VF_IOMMU
+#ifdef EFRM_HAVE_IOMMU_GROUP
+	vf_iommu_to_default_group(pci_dev);
+#endif
+#endif
 
 	if (!live_remove)
 		kfree(vf);
@@ -897,7 +944,8 @@ static void vf_vi_call_evq_callback(struct efrm_vf_vi *vi)
 			   vi->index, virs->allocation.instance, vi->irq);
 	else
 		/* Fixme: callback with is_timeout=true? */
-		handler(arg, false, efrm_nic_tablep->nic[vf->nic_index]);
+		handler(arg, false, efrm_nic_tablep->nic[vf->nic_index],
+			INT_MAX);
 	spin_unlock_bh(&vf->vf_evq_cb_lock);
 }
 
@@ -1056,7 +1104,7 @@ static int efrm_vf_vi_set_cpu_affinity_via_proc(struct efrm_vi *virs, int cpu)
 		EFRM_TRACE("%s could not open %s: %ld; try request_irq(%d)",
 			   pci_name(vf->pci_dev), filename, PTR_ERR(file),
 			   vi->irq);
-		rc = request_irq(vi->irq, no_action, IRQF_DISABLED,
+		rc = request_irq(vi->irq, no_action, 0,
 				 vi->name, NULL);
 		if (rc == 0)
 			free_irq(vi->irq, NULL);
@@ -1181,7 +1229,7 @@ int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
 	struct efrm_vf_vi *vi = &vf->vi[virs->allocation.instance -
 					vf->vi_base];
 	unsigned int ticks, mode;
-	efx_dword_t cmd;
+	ci_dword_t cmd;
 	char *bar;
 	int rc;
 
@@ -1206,9 +1254,9 @@ int efrm_vf_vi_qmoderate(struct efrm_vi *virs, int usec)
 		mode = FFE_CZ_TIMER_MODE_INT_HLDOFF;
 	}
 
-	EFX_POPULATE_DWORD_2(cmd,
-			     FRF_CZ_TC_TIMER_MODE, mode,
-			     FRF_CZ_TC_TIMER_VAL, ticks);
+	CI_POPULATE_DWORD_2(cmd,
+			    FRF_CZ_TC_TIMER_MODE, mode,
+			    FRF_CZ_TC_TIMER_VAL, ticks);
 	writel(cmd.u32[0],
 	       bar + FR_BZ_TIMER_COMMAND_P0 +
 	       (vi->index << (PAGE_SHIFT + 1)));

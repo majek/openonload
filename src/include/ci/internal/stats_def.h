@@ -56,6 +56,8 @@ OO_STAT("Number of times an interrupt found no network events.",
         ci_uint32, interrupt_no_events, count)
 OO_STAT("Number of times an interrupt could not lock the stack.",
         ci_uint32, interrupt_lock_contends, count)
+OO_STAT("Number of times an interrupt handler was limited by NAPI budget.",
+        ci_uint32, interrupt_budget_limited, count)
 OO_STAT("Number of times poll has been deferred to lock holder.",
         ci_uint32, deferred_polls, count)
 OO_STAT("Number of timeout interrupts.",
@@ -336,6 +338,8 @@ OO_STAT("Number of loops spent in pipe write() code while busy-waiting",
         ci_uint64, spin_pipe_write, count)
 OO_STAT("Number of loops spent in TCP accept() code while busy-waiting",
         ci_uint64, spin_tcp_accept, count)
+OO_STAT("Number of loops spent in TCP connect() code while busy-waiting",
+        ci_uint64, spin_tcp_connect, count)
 OO_STAT("Number of loops spent in waiting for a free packet while busy-waiting",
         ci_uint64, spin_pkt_wait, count)
 OO_STAT("Number of loops x sockets spent in select() busy-waiting",
@@ -354,8 +358,10 @@ OO_STAT("Number of sockets cached over lifetime of the stack",
         ci_uint32, sockcache_cached, count)
 OO_STAT("Number of sockets not cached owing to lock contention",
         ci_uint32, sockcache_contention, count)
-OO_STAT("Number of sockets not cached owing to stack limit",
-        ci_uint32, sockcache_stacklim, count)
+OO_STAT("Number of passive sockets not cached owing to stack limit",
+        ci_uint32, passive_sockcache_stacklim, count)
+OO_STAT("Number of active sockets not cached owing to stack limit",
+        ci_uint32, active_sockcache_stacklim, count)
 OO_STAT("Number of sockets not cached owing to per-socket limit",
         ci_uint32, sockcache_socklim, count)
 OO_STAT("Number of socket-cache hits",
@@ -364,6 +370,14 @@ OO_STAT("Number of socket-cache hits after reaping",
         ci_uint32, sockcache_hit_reap, count)
 OO_STAT("Number of socket-cache misses due to mismatched interfaces",
         ci_uint32, sockcache_miss_intmismatch, count)
+OO_STAT("Number of active sockets cached over lifetime of the stack",
+        ci_uint32, activecache_cached, count)
+OO_STAT("Number of sockets not cached owing to stack limit",
+        ci_uint32, activecache_stacklim, count)
+OO_STAT("Number of active-cache hits",
+        ci_uint32, activecache_hit, count)
+OO_STAT("Number of active-cache hits after reaping",
+        ci_uint32, activecache_hit_reap, count)
 #endif
 OO_STAT("Number of times when TCP SO_RCVBUF value was found to be abused "
         "by too small incoming segments",
@@ -388,3 +402,7 @@ OO_STAT("Number of times when TCP listening socket failed to retransmit "
         "SYNACK because it failed to allocate more packet buffers "
         "(probably postponing packet buffers allocation).",
         ci_uint32, tcp_listen_synack_retrans_no_buffer, count)
+OO_STAT("Number proactive packet buffers allocation because of "
+        "EF_FREE_PACKETS_LOW_WATERMARK or fragmentation of free packets "
+        "between packet sets.",
+        ci_uint32, proactive_packet_allocation, count)

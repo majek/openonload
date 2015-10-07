@@ -74,46 +74,18 @@
 
 
 struct pkt_buf {
-  /* I/O address corresponding to the start of this pkt_buf struct.
-   * The pkt_buf is mapped into both VIs so there are two sets of rx
-   * and tx IO addresses. */
-  ef_addr*           rx_ef_addr;
+  /* I/O address corresponding to the start of this pkt_buf struct. */
+  ef_addr            rx_ef_addr;
 
-  /* pointer to where received packets start.  One per VI. */
-  void**             rx_ptr;
+  /* pointer to where received packets start. */
+  void*              rx_ptr;
 
-  /* id to help look up the buffer when polling the EVQ */
+  /* ID to associate with the pkt_buf */
   int                id;
 
+  /* For building a linked list */
   struct pkt_buf*    next;
 };
-
-
-struct pkt_bufs {
-  /* Memory for packet buffers */
-  void*  mem;
-  size_t mem_size;
-
-  /* Number of packet buffers allocated */
-  int    num;
-
-  /* pool of free packet buffers (LIFO to minimise working set) */
-  struct pkt_buf*    free_pool;
-  int                free_pool_n;
-};
-
-
-struct vi {
-  /* virtual interface (rxq + txq + evq) */
-  ef_vi              vi;
-
-  /* registered memory for DMA */
-  ef_memreg          memreg;
-
-  /* statistics */
-  uint64_t           n_pkts;
-};
-
 
 /* handle for accessing the driver */
 static ef_driver_handle   dh;
@@ -122,54 +94,82 @@ static ef_pd              pd;
 /* VI set */
 static ef_vi_set          vi_set;
 
-static struct vi* vis;
-static struct pkt_bufs pbs;
+static pthread_cond_t  ready_cond  = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t ready_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int             ready_cnt;
+
 static int cfg_hexdump;
 static int cfg_loopback;
 
+struct vi_state {
+  /* virtual interface (rxq + evq) */
+  ef_vi              vi;
+
+  /* Memory for packet buffers */
+  void*              mem;
+  size_t             mem_size;
+
+  /* registered memory for DMA */
+  ef_memreg          memreg;
+
+  /* Number of packet buffers allocated */
+  int                num;
+
+  /* pool of free packet buffers (LIFO to minimise working set) */
+  struct pkt_buf*    free_pool;
+  int                free_pool_n;
+
+  /* statistics */
+  uint64_t           n_pkts;
+};
+
+/* One per thread */
+struct vi_state* vi_states;
 
 /**********************************************************************/
 
 
 /* Given a id to a packet buffer, look up the data structure.  The ids
  * are assigned in ascending order so this is simple to do. */
-static inline struct pkt_buf* pkt_buf_from_id(int pkt_buf_i)
+static inline struct pkt_buf* pkt_buf_from_id(struct vi_state* vi_state,
+                                              int pkt_buf_i)
 {
-  assert((unsigned) pkt_buf_i < (unsigned) pbs.num);
-  return (void*) ((char*) pbs.mem + (size_t) pkt_buf_i * PKT_BUF_SIZE);
+  assert((unsigned) pkt_buf_i < (unsigned) vi_state->num);
+  return (void*) ((char*) vi_state->mem + (size_t) pkt_buf_i * PKT_BUF_SIZE);
 }
 
 
 /* Try to refill the RXQ on the given VI with at most
  * REFILL_BATCH_SIZE packets if it has enough space and we have
  * enough free buffers. */
-static void vi_refill_rx_ring(int vi_i)
+static void vi_refill_rx_ring(struct vi_state* vi_state)
 {
-  ef_vi* vi = &vis[vi_i].vi;
+  ef_vi* vi = &vi_state->vi;
 #define REFILL_BATCH_SIZE  16
   struct pkt_buf* pkt_buf;
   int i;
 
   if( ef_vi_receive_space(vi) < REFILL_BATCH_SIZE ||
-      pbs.free_pool_n < REFILL_BATCH_SIZE )
+      vi_state->free_pool_n < REFILL_BATCH_SIZE )
     return;
 
   for( i = 0; i < REFILL_BATCH_SIZE; ++i ) {
-    pkt_buf = pbs.free_pool;
-    pbs.free_pool = pbs.free_pool->next;
-    --pbs.free_pool_n;
-    ef_vi_receive_init(vi, pkt_buf->rx_ef_addr[vi_i], pkt_buf->id);
+    pkt_buf = vi_state->free_pool;
+    vi_state->free_pool = vi_state->free_pool->next;
+    --vi_state->free_pool_n;
+    ef_vi_receive_init(vi, pkt_buf->rx_ef_addr, pkt_buf->id);
   }
   ef_vi_receive_push(vi);
 }
 
 
 /* Free buffer into free pool in LIFO order to minimize cache footprint. */
-static inline void pkt_buf_free(struct pkt_buf* pkt_buf)
+static inline void pkt_buf_free(struct vi_state* vi_state,
+                                struct pkt_buf* pkt_buf)
 {
-  pkt_buf->next = pbs.free_pool;
-  pbs.free_pool = pkt_buf;
-  ++pbs.free_pool_n;
+  pkt_buf->next = vi_state->free_pool;
+  vi_state->free_pool = pkt_buf;
+  ++vi_state->free_pool_n;
 }
 
 
@@ -201,29 +201,34 @@ static void hexdump(const void* pv, int len)
 
 
 /* Handle an RX event on a VI. */
-static void handle_rx(int vi_i, int pkt_buf_i, int len)
+static void handle_rx(struct vi_state* vi_state, int pkt_buf_i, int len)
 {
-  struct vi* vi = &vis[vi_i];
-  struct pkt_buf* pkt_buf = pkt_buf_from_id(pkt_buf_i);
-  ++vi->n_pkts;
+  struct pkt_buf* pkt_buf = pkt_buf_from_id(vi_state, pkt_buf_i);
+  ++vi_state->n_pkts;
   if( cfg_hexdump )
-    hexdump(pkt_buf->rx_ptr[vi_i], len);
-  pkt_buf_free(pkt_buf);
+    hexdump(pkt_buf->rx_ptr, len);
+  pkt_buf_free(vi_state, pkt_buf);
 }
 
 
-static void handle_rx_discard(int pkt_buf_i, int discard_type)
+static void handle_rx_discard(struct vi_state* vi_state, int pkt_buf_i,
+                              int discard_type)
 {
-  struct pkt_buf* pkt_buf = pkt_buf_from_id(pkt_buf_i);
-  pkt_buf_free(pkt_buf);
+  struct pkt_buf* pkt_buf = pkt_buf_from_id(vi_state, pkt_buf_i);
+  pkt_buf_free(vi_state, pkt_buf);
 }
 
 
-static void loop(int vi_i)
+static void loop(struct vi_state* vi_state)
 {
   ef_event evs[EF_VI_EVENT_POLL_MIN_EVS];
-  ef_vi* vi = &vis[vi_i].vi;
+  ef_vi* vi = &vi_state->vi;
   int i;
+
+  pthread_mutex_lock(&ready_mutex);
+  ++ready_cnt;
+  pthread_cond_signal(&ready_cond);
+  pthread_mutex_unlock(&ready_mutex);
 
   while( 1 ) {
     int n_ev = ef_eventq_poll(vi, evs, sizeof(evs) / sizeof(evs[0]));
@@ -233,26 +238,64 @@ static void loop(int vi_i)
         /* This code does not handle jumbos. */
         assert(EF_EVENT_RX_SOP(evs[i]) != 0);
         assert(EF_EVENT_RX_CONT(evs[i]) == 0);
-        handle_rx(vi_i, EF_EVENT_RX_RQ_ID(evs[i]),
+        handle_rx(vi_state, EF_EVENT_RX_RQ_ID(evs[i]),
                   EF_EVENT_RX_BYTES(evs[i]) - ef_vi_receive_prefix_len(vi));
         break;
       case EF_EVENT_TYPE_RX_DISCARD:
-        handle_rx_discard(EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
+        handle_rx_discard(vi_state, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
                           EF_EVENT_RX_DISCARD_TYPE(evs[i]));
         break;
       default:
         LOGE("ERROR: unexpected event %d\n", (int) EF_EVENT_TYPE(evs[i]));
         break;
       }
-    vi_refill_rx_ring(vi_i);
+    vi_refill_rx_ring(vi_state);
   }
+}
+
+
+/* Allocate and initialize a VI. */
+static int init_vi(struct vi_state* vi_state)
+{
+  int i;
+  TRY(ef_vi_alloc_from_set(&vi_state->vi, dh, &vi_set, dh, -1, -1, -1, 0, NULL,
+                          -1, EF_VI_FLAGS_DEFAULT));
+
+  /* The VI has just an RXQ with default capacity of 512 */
+  vi_state->num = 512;
+  vi_state->mem_size = vi_state->num * PKT_BUF_SIZE;
+  vi_state->mem_size = ROUND_UP(vi_state->mem_size, huge_page_size);
+  /* Allocate huge-page-aligned memory to give best chance of allocating
+   * transparent huge-pages.
+   */
+  TEST(posix_memalign(&vi_state->mem, huge_page_size, vi_state->mem_size) == 0);
+  TRY(ef_memreg_alloc(&vi_state->memreg, dh, &pd, dh, vi_state->mem,
+                      vi_state->mem_size));
+
+  for( i = 0; i < vi_state->num; ++i ) {
+    struct pkt_buf* pkt_buf = pkt_buf_from_id(vi_state, i);
+    pkt_buf->rx_ef_addr =
+      ef_memreg_dma_addr(&vi_state->memreg, i * PKT_BUF_SIZE) + RX_DMA_OFF;
+    pkt_buf->rx_ptr = (char*) pkt_buf + RX_DMA_OFF +
+      ef_vi_receive_prefix_len(&vi_state->vi);
+    pkt_buf_free(vi_state, pkt_buf);
+  }
+
+  /* Our pkt buffer allocation function makes assumptions on queue sizes */
+  assert(ef_vi_receive_capacity(&vi_state->vi) == 511);
+
+  while( ef_vi_receive_space(&vi_state->vi) > REFILL_BATCH_SIZE )
+    vi_refill_rx_ring(vi_state);
+
+  return 0;
 }
 
 
 static void* thread_fn(void* arg)
 {
-  int vi_i = (uintptr_t) arg;
-  loop(vi_i);
+  struct vi_state* vi_state = arg;
+  init_vi(vi_state);
+  loop(vi_state);
   return NULL;
 }
 
@@ -266,7 +309,7 @@ static void monitor(int n_threads)
   int ms, i;
 
   for( i = 0; i < n_threads; ++i )
-    prev_pkts[i] = vis[i].n_pkts;
+    prev_pkts[i] = vi_states[i].n_pkts;
   gettimeofday(&start, NULL);
 
   for( i = 0; i < n_threads; ++i )
@@ -275,7 +318,7 @@ static void monitor(int n_threads)
   while( 1 ) {
     sleep(1);
     for( i = 0; i < n_threads; ++i )
-      now_pkts[i] = vis[i].n_pkts;
+      now_pkts[i] = vi_states[i].n_pkts;
     gettimeofday(&end, NULL);
     ms = (end.tv_sec - start.tv_sec) * 1000;
     ms += (end.tv_usec - start.tv_usec) / 1000;
@@ -300,7 +343,12 @@ static int init_vi_set(const char* intf, int n_threads)
   TRY(ef_driver_open(&dh));
   TRY(ef_pd_alloc_by_name(&pd, dh, intf, EF_PD_DEFAULT));
   TRY(ef_vi_set_alloc_from_pd(&vi_set, dh, &pd, dh, n_threads));
+  return 0;
+}
 
+
+static int install_filters(void)
+{
   ef_filter_spec fs;
   ef_filter_spec_init(&fs, EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_unicast_all(&fs));
@@ -310,63 +358,6 @@ static int init_vi_set(const char* intf, int n_threads)
                       EF_FILTER_FLAG_NONE);
   TRY(ef_filter_spec_set_multicast_all(&fs));
   TRY(ef_vi_set_filter_add(&vi_set, dh, &fs, NULL));
-  return 0;
-}
-
-
-/* Allocate and initialize the packet buffers. */
-static int init_pkts_memory(int n_threads)
-{
-  int i;
-
-  /* Number of buffers is the worst case to fill up all the queues
-   * assuming that you are going to allocate n_threads VIs, both have
-   * a RXQ and TXQ and both have default capacity of 512. */
-  pbs.num = 2 * n_threads * 512;
-  pbs.mem_size = pbs.num * PKT_BUF_SIZE;
-  pbs.mem_size = ROUND_UP(pbs.mem_size, huge_page_size);
-  /* Allocate huge-page-aligned memory to give best chance of allocating
-   * transparent huge-pages.
-   */
-  TEST(posix_memalign(&pbs.mem, huge_page_size, pbs.mem_size) == 0);
-
-  for( i = 0; i < pbs.num; ++i ) {
-    struct pkt_buf* pkt_buf = pkt_buf_from_id(i);
-    pkt_buf->id = i;
-    TEST(pkt_buf->rx_ef_addr = calloc(n_threads, sizeof(*pkt_buf->rx_ef_addr)));
-    TEST(pkt_buf->rx_ptr = calloc(n_threads, sizeof(*pkt_buf->rx_ptr)));
-    pkt_buf_free(pkt_buf);
-  }
-  return 0;
-}
-
-
-/* Allocate and initialize a VI. */
-static int init_vi(const char* intf, int vi_i)
-{
-  struct vi* vi = &vis[vi_i];
-  int i;
-  TRY(ef_vi_alloc_from_set(&vi->vi, dh, &vi_set, dh, -1, -1, -1, -1, NULL,
-                          -1, EF_VI_FLAGS_DEFAULT));
-
-  /* Memory for pkt buffers has already been allocated.  Map it into
-   * the VI. */
-  TRY(ef_memreg_alloc(&vi->memreg, dh, &pd, dh, pbs.mem, pbs.mem_size));
-  for( i = 0; i < pbs.num; ++i ) {
-    struct pkt_buf* pkt_buf = pkt_buf_from_id(i);
-    pkt_buf->rx_ef_addr[vi_i] =
-      ef_memreg_dma_addr(&vi->memreg, i * PKT_BUF_SIZE) + RX_DMA_OFF;
-    pkt_buf->rx_ptr[vi_i] = (char*) pkt_buf + RX_DMA_OFF +
-      ef_vi_receive_prefix_len(&vi->vi);
-  }
-
-  /* Our pkt buffer allocation function makes assumptions on queue sizes */
-  assert(ef_vi_receive_capacity(&vi->vi) == 511);
-  assert(ef_vi_transmit_capacity(&vi->vi) == 511);
-
-  while( ef_vi_receive_space(&vi->vi) > REFILL_BATCH_SIZE )
-    vi_refill_rx_ring(vi_i);
-
   return 0;
 }
 
@@ -413,15 +404,19 @@ int main(int argc, char* argv[])
   --argc;
   intf = argv[0];
 
-  TEST(vis = calloc(n_threads, sizeof(*vis)));
+  TEST(vi_states = calloc(n_threads, sizeof(*vi_states)));
   TRY(init_vi_set(intf, n_threads));
-  TRY(init_pkts_memory(n_threads));
   for( i = 0; i < n_threads; ++i )
-    init_vi(intf, i);
+    TRY(pthread_create(&thread, NULL, thread_fn, &vi_states[i]));
 
-  for( i = 0; i < n_threads; ++i )
-    TRY(pthread_create(&thread, NULL, thread_fn, (void*)(uintptr_t)i));
+  /* Wait till workers have initialized before installing filters.
+   * Installing filters too early can cause drops on the VI. */
+  pthread_mutex_lock(&ready_mutex);
+  while( ready_cnt != n_threads )
+    pthread_cond_wait(&ready_cond, &ready_mutex);
+  pthread_mutex_unlock(&ready_mutex);
+  TRY(install_filters());
+
   monitor(n_threads);
-
   return 0;
 }

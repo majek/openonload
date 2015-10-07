@@ -111,6 +111,7 @@
 #include <linux/init.h>     /* module_init/module_exit */
 
 #include <driver/linux_net/kernel_compat.h>
+#include <driver/linux_affinity/kernel_compat.h>
 
 typedef int socklen_t;
 
@@ -182,12 +183,6 @@ typedef struct files_struct ci_fdtable;
 typedef struct fdtable ci_fdtable;
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,19)
-# define fop_has_readv
-#else
-# undef fop_has_readv
-#endif
-
 /* splice_write was introduces before 2.6.18, but we really need sendfile()
  * only. In 2.6.18, sendfile() works even without splice_write fop, but it
  * is not true for later kernels. */
@@ -211,38 +206,11 @@ ci_inline int ci_is_sysadmin(void)
 }
 
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
-ci_inline ci_fdtable *ci_files_fdtable(struct files_struct *f)
-{ return f; }
-ci_inline void ci_fdtable_set_fd(ci_fdtable *fdt, int fd, void *p)
-{ fdt->fd[fd] = p; }
-#else
-ci_inline ci_fdtable *ci_files_fdtable(struct files_struct *f)
-{ return files_fdtable(f); }
-ci_inline void ci_fdtable_set_fd(ci_fdtable *fdt, int fd, void *p)
-{ rcu_assign_pointer(fdt->fd[fd], p); }
-#endif
-
-
-ci_inline void ci_unlock_task(void)
-{
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,17)
-  read_unlock(&tasklist_lock);
-#else
-  rcu_read_unlock();
-#endif
-}
-
-ci_inline struct task_struct* ci_lock_task_by_pid(pid_t p) {
+/* ci_get_task_by_pid() must be called under rcu_read_lock();
+ * the returned task should be used under the same rcu lock. */
+ci_inline struct task_struct* ci_get_task_by_pid(pid_t p) {
   struct task_struct* t;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,17)
-  read_lock(&tasklist_lock);
-#else
-  rcu_read_lock();
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9) || LINUX_VERSION_CODE == KERNEL_VERSION(2,6,24)
-  t = find_task_by_pid(p);
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
   t = find_task_by_pid_type(p, PIDTYPE_PID);
 #else
   {
@@ -250,8 +218,6 @@ ci_inline struct task_struct* ci_lock_task_by_pid(pid_t p) {
     t = pid_task(pid, PIDTYPE_PID);
   }
 #endif
-  if( !t )
-    ci_unlock_task();
   return t;
 }
 
@@ -624,18 +590,6 @@ struct pci_bus * pci_add_new_bus(struct pci_bus *parent, struct pci_dev *dev, in
 extern struct ci_private_s *ci_fpriv(struct file *);
 extern struct file *ci_privf(struct ci_private_s *);
 
-
-/* 2.6.14 have RTMGRP_* for user mode only */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,6,13)
-  #if defined(RTMGRP_LINK) || \
-      defined(RTMGRP_IPV4_IFADDR) || \
-      defined(RTMGRP_IPV4_ROUTE)
-    #error "oops"
-  #endif
-#define RTMGRP_LINK        RTNLGRP_LINK
-#define RTMGRP_IPV4_IFADDR RTNLGRP_IPV4_IFADDR
-#define RTMGRP_IPV4_ROUTE  RTNLGRP_IPV4_ROUTE
-#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
 #define dev_get_by_index(net, ifindex) dev_get_by_index(ifindex)

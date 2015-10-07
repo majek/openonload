@@ -27,6 +27,11 @@
 
 #define AOE_MIN(x, y)   (x < y ? x : y)
 
+static int (*aoe_entry_operation[])(struct aoe_map_entry *entry,uint64_t addr,uint32_t len)= {
+	[BOARD_INDEX_SFN5122F] = aoe_verify_map_range_lock, /*this function puts the condition of making memory map before read/write*/
+	[BOARD_INDEX_SFN7942F] = aoe_process_map_entry_operation /*this function will bypass component rom memory map and allow read/write*/
+};
+
 enum aoe_cmd_progress {
 	AOE_CMD_REQ_DATA,
 	AOE_CMD_CONTINUE,
@@ -224,9 +229,17 @@ static enum aoe_cmd_progress check_cmd_data(struct aoe_map_entry *entry)
 static int aoe_handle_cmd(struct aoe_map_entry *entry)
 {
 	int ret;
+	int idx = -1;
 	struct aoe_user_buffer *buffer = &entry->request;
 	struct amm_stream_control *request = 
 		(struct amm_stream_control*)buffer->data;
+
+	/* get board index to index into array of function pointer aoe_entry_operation*/
+	idx = aoe_get_board_type_index_value(entry->aoe_dev);
+	if(idx < 0){
+		DPRINTK("sfc_aoe:Unknown Board\n");
+		return -EFAULT;
+	}
 
 	/* at this point we know that we have enough data fully
  	 * process a command
@@ -237,14 +250,14 @@ static int aoe_handle_cmd(struct aoe_map_entry *entry)
 		{
 			uint64_t addr = be64_to_cpu(request->read_req.address_be);
 			uint32_t len = be32_to_cpu(request->read_req.data_len_be);
-			ret = aoe_verify_map_range_lock(entry, addr, len);
+			ret = aoe_entry_operation[idx](entry, addr, len);
 		}
 		break;
 	case AMM_OP_WRITE_REQUEST:
 		{
 			uint64_t addr = be64_to_cpu(request->write_req.address_be);
 			uint32_t len = be32_to_cpu(request->write_req.data_len_be);
-			ret = aoe_verify_map_range_lock(entry, addr, len);
+			ret = aoe_entry_operation[idx](entry, addr, len);
 		}
 		break;
 	case AMM_OP_READMAPCOUNT_REQUEST:

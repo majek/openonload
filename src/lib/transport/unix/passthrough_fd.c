@@ -22,18 +22,13 @@
 
 static void citp_passthrough_dtor(citp_fdinfo* fdi, int fdt_locked)
 {
-  citp_netif_release_ref(fdi_to_alien_fdi(fdi)->netif, fdt_locked);
-}
-
-static int citp_passthrough_close(citp_fdinfo* fdi)
-{
   citp_alien_fdi* epi = fdi_to_alien_fdi(fdi);
 
   CITP_FDTABLE_LOCK();
   ci_tcp_helper_close_no_trampoline(epi->os_socket);
   __citp_fdtable_reserve(epi->os_socket, 0);
   CITP_FDTABLE_UNLOCK();
-  return 0;
+  citp_netif_release_ref(fdi_to_alien_fdi(fdi)->netif, fdt_locked);
 }
 
 static int
@@ -169,7 +164,6 @@ citp_protocol_impl citp_passthrough_protocol_impl = {
   .ops         = {
     .dtor               = citp_passthrough_dtor,
     .dup                = citp_tcp_dup,
-    .close              = citp_passthrough_close,
 
 #if CI_CFG_USERSPACE_SELECT
     .select             = citp_passthrough_select,
@@ -198,7 +192,6 @@ citp_protocol_impl citp_passthrough_protocol_impl = {
 
     .zc_send     = citp_nonsock_zc_send,
     .zc_recv     = citp_nonsock_zc_recv,
-    .zc_recv_filter = citp_nonsock_zc_recv_filter,
     .recvmsg_kernel = citp_nonsock_recvmsg_kernel,
     .tmpl_alloc     = citp_nonsock_tmpl_alloc,
     .tmpl_update    = citp_nonsock_tmpl_update,
@@ -211,7 +204,15 @@ citp_protocol_impl citp_passthrough_protocol_impl = {
 
 void citp_passthrough_init(citp_alien_fdi* epi)
 {
-  oo_os_sock_get(epi->netif, epi->ep->bufid, &epi->os_socket);
+  int rc = oo_os_sock_get(epi->netif, epi->ep->bufid, &epi->os_socket);
+
+  /* No sensible way to handle oo_os_sock_get failure.  Just record it. */
+  if( rc != 0 ) {
+    Log_U(ci_log("%s: oo_os_sock_get([%d:%d]) returned %d",
+                 __func__, NI_ID(epi->netif), epi->ep->bufid, rc));
+    epi->os_socket = -1;
+    return;
+  }
   __citp_fdtable_reserve(epi->os_socket, 1);
   /* ci_tcp_helper_get_sock_fd gets the citp_dup2_lock lock: release it  */
   oo_rwlock_unlock_read(&citp_dup2_lock);

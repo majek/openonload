@@ -53,6 +53,9 @@
 */
 typedef struct ci_netif_nic_s {
   ef_vi                      vi;
+#if CI_CFG_SEPARATE_UDP_RXQ
+  ef_vi                      udp_rxq_vi;
+#endif
 #if CI_CFG_PIO
   ef_pio                     pio;
 #endif // CI_CFG_PIO
@@ -67,6 +70,14 @@ struct tcp_helper_endpoint_s;
 struct oof_cb_sw_filter_op;
 #endif
 
+/* Non-shared packet buffer set structures */
+#ifdef __KERNEL__
+/* For eachone packet set, we store its pages */
+typedef struct oo_buffer_pages* ci_pkt_bufs;
+#else
+/* For each packet set we have a pointer returned by mmap() */
+typedef char* ci_pkt_bufs;
+#endif
 
 /*!
 ** ci_netif
@@ -96,6 +107,7 @@ struct ci_netif_s {
   char*                io_ptr;
 #if CI_CFG_PIO
   uint8_t*             pio_ptr;
+  ci_uint32            pio_bytes_mapped;
 #endif
   char*                buf_ptr;
 #endif
@@ -129,20 +141,6 @@ struct ci_netif_s {
 
   ci_netif_filter_table* filter_table;
 
-#ifdef __KERNEL__
-  /** pkt resources, 1:1 mapping with [pkt_rs]. Note that these have
-   *  the SAME lifetime as [pkt_rs]. Entry in this array MUST NOT be
-   *  taken to imply that a ref. has been taken; it hasn't! */
-  struct oo_buffer_pages** buf_pages;
-# if CI_CFG_PKTS_AS_HUGE_PAGES
-  int                   huge_pages_flag;
-# endif
-#else
-# if CI_CFG_PKTS_AS_HUGE_PAGES
-  ci_int32             *pkt_shm_id;
-# endif
-  char**                pkt_sets; /* array of mmaped pkt sets */
-#endif
 
 #ifdef __ci_driver__
   ci_contig_shmbuf_t   state_buf;
@@ -155,6 +153,12 @@ struct ci_netif_s {
   unsigned                        ep_tbl_n;
   unsigned                        ep_tbl_max;
 #endif
+
+  /* This is pointer to the shared state of packet sets */
+  ci_pkt_set*           pkt_set;
+  /* And this is non-shared array for UL- or kernel- specific data
+   * about packet sets */
+  ci_pkt_bufs*          pkt_bufs;
 
 #ifndef __ci_driver__
   /* for table of active UL netifs (unix/netif_init.c) */
@@ -172,15 +176,23 @@ struct ci_netif_s {
   unsigned             flags;
   /* Sending ONLOAD_MSG_WARM */
 # define CI_NETIF_FLAG_MSG_WARM          0x1
+  /* Set to request allocation of scalable filters at stack creation
+   * This flag is not stored in netif state.  It is passed to
+   * tcp_helper_resource_rm_alloc_proxy function through ioctl.
+   */
+# define CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS 0x2
 
 #ifndef __KERNEL__
+
   /* netif was once (and maybe still is) shared between multiple processes */
 # define CI_NETIF_FLAGS_SHARED           0x10
   /* netif is protected from destruction with an extra ref_count */
 # define CI_NETIF_FLAGS_DTOR_PROTECTED   0x20
   /* Don't use this stack for new sockets unless name says otherwise */
 # define CI_NETIF_FLAGS_DONT_USE_ANON    0x40
+
 #else
+
   /* netif is a kernel-only stack and thus is trusted */
 # define CI_NETIF_FLAGS_IS_TRUSTED       0x100
   /* Stack [k_ref_count] to be decremented when sockets close. */
@@ -189,8 +201,13 @@ struct ci_netif_s {
 # define CI_NETIF_FLAG_IN_DL_CONTEXT     0x400
   /* Should not allocate packets in atomic/driverlink context */
 # define CI_NETIF_FLAG_AVOID_ATOMIC_ALLOCATION 0x800
-  /* Packet allocation postponed */
-#define CI_NETIF_FLAG_NO_PACKET_BUFFERS  0x1000
+#if CI_CFG_PKTS_AS_HUGE_PAGES
+  /* Huge pages packet allocation have failed */
+#define CI_NETIF_FLAG_HUGE_PAGES_FAILED  0x2000
+#endif
+  /* Shared state wedged */
+#define CI_NETIF_FLAG_WEDGED             0x4000
+
 #endif
 
 #ifndef __KERNEL__
@@ -235,10 +252,6 @@ struct ci_netif_s {
 struct citp_socket_s {
   ci_netif*            netif;
   ci_sock_cmn*         s;
-
-  /* When SO_LINGER is used, this value checks that the endpoint was not
-   * re-used for another socket. */
-  ci_uint64            so_linger_hash;
 
 };
 

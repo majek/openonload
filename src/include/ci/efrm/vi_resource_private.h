@@ -62,10 +62,12 @@ extern void efrm_vi_rm_salvage_flushed_vis(struct efhw_nic *);
 extern void efrm_vi_rm_free_flushed_resource(struct efrm_vi *virs);
 
 /*! Wakeup handler */
-extern void efrm_handle_wakeup_event(struct efhw_nic *nic, unsigned id);
+extern int efrm_handle_wakeup_event(struct efhw_nic *nic,
+				    unsigned id, int budget);
 
 /*! Timeout handler */
-extern void efrm_handle_timeout_event(struct efhw_nic *nic, unsigned id);
+extern int efrm_handle_timeout_event(struct efhw_nic *nic,
+				     unsigned id, int budget);
 
 /*! DMA flush handler */
 extern int efrm_handle_dmaq_flushed_schedule(struct efhw_nic *nic,

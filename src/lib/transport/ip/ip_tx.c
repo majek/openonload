@@ -73,6 +73,7 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   switch( ipcache->status ) {
   case retrrc_success:
     ci_ip_set_mac_and_port(ni, ipcache, pkt);
+    ci_netif_pkt_hold(ni, pkt);
     ci_netif_send(ni, pkt);
     return 0;
   case retrrc_nomac:
@@ -117,12 +118,15 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
     if( ts->s.pkt.mtu != prev_mtu )
       CI_PMTU_TIMER_NOW(ni, &ts->pmtus);
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
+    ci_netif_pkt_hold(ni, pkt);
     ci_netif_send(ni, pkt);
     return;
   }
   else if( ts->s.pkt.status == retrrc_localroute &&
-           (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE) )
-    ci_ip_local_send(ni, pkt, &ts->s, OO_SP_NULL);
+           (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE) ) {
+    ci_netif_pkt_hold(ni, pkt);
+    ci_ip_local_send(ni, pkt, S_SP(ts), OO_SP_NULL);
+  }
 
   /* For TCP, we want the ipcache to only be valid when onloadable. */
   ci_ip_cache_invalidate(&ts->s.pkt);

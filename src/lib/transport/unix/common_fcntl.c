@@ -46,19 +46,37 @@ int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd,
    */
   int dummy;
   int os_sock;
+  int rc;
 
   if( fcntl_result == NULL )
     fcntl_result = &dummy;
   *fcntl_result = 0;
 
-  if( (epi->sock.s->b.state & CI_TCP_STATE_TCP) &&
-      epi->sock.s->b.state != CI_TCP_LISTEN &&
-      (SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
-    /* This socket doesn't have an OS socket. */
-    return 0;
+  if( (epi->sock.s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) == 0 ) {
+    /* This socket doesn't have an OS socket.  O_ASYNC is tricky to deal with
+     * later, and we can't cache sockets using it anyway as we need to enter
+     * the kernel to sort out the async queue.  If we don't have an OS socket
+     * just because we're deferring creation then just create one now.
+     */
+    if( (cmd == F_SETFL) && (arg & O_ASYNC) &&
+        (epi->sock.s->b.state == CI_TCP_CLOSED) &&
+        !(SOCK_TO_TCP(epi->sock.s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
+      ci_netif_lock(epi->sock.netif);
+      rc = ci_tcp_helper_os_sock_create_and_set(epi->sock.netif, fd,
+                                                epi->sock.s, -1, 0, NULL, 0);
+      ci_netif_unlock(epi->sock.netif);
+      if( rc < 0 )
+        return rc;
+    }
+    else {
+      /* Either we'll never have an OS socket, or we'll sync this up when
+       * it's created.
+       */
+      return 0;
+    }
   }
 
-  os_sock = ci_get_os_sock_fd(&epi->sock, fd);
+  os_sock = ci_get_os_sock_fd(fd);
   if( ! CI_IS_VALID_SOCKET(os_sock) ) {
     /* Only errors that are possible are:
      *   i) There is no OS socket (handled above, (impossible))

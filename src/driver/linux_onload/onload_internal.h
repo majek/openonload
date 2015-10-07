@@ -35,6 +35,20 @@ extern void ci_bonding_fini(void);
 
 extern void ci_bonding_set_timer_period(int period, int occurences);
 
+struct cicp_mibs_kern_s;
+struct workqueue_struct;
+#ifdef EFRM_HAVE_TEAMING
+extern int ci_teaming_init(struct workqueue_struct* wq,
+			   struct cicp_mibs_kern_s* cplane);
+extern void ci_teaming_fini(struct cicp_mibs_kern_s* cplane);
+#else
+static inline int ci_teaming_init(struct workqueue_struct* wq,
+				  struct cicp_mibs_kern_s* cplane)
+{ return 0; }
+static inline void ci_teaming_fini(struct cicp_mibs_kern_s* cplane)
+{ }
+#endif
+
 extern int __init oo_epoll_chrdev_ctor(void);
 extern void oo_epoll_chrdev_dtor(void);
 

@@ -8,7 +8,6 @@ LIB_SRCS	:= \
 		bufrange.c \
 		crc16.c \
 		crc32.c \
-		crc32c.c \
 		toeplitz.c \
 		cpu_features.c \
 		dllist.c \

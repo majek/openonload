@@ -138,19 +138,4 @@ ci_inline void ci_tcp_tx_maybe_do_striping(ci_ip_pkt_fmt* pkt,
 #endif
 }
 
-
-/* Returns the number of additional packet buffers that this socket is
- * permitted to queue on its send queue.
- */
-ci_inline int ci_tcp_tx_send_space(ci_netif* ni, ci_tcp_state* ts)
-{
-  if( NI_OPTS(ni).tcp_sndbuf_mode ) {
-    return ts->so_sndbuf_pkts -
-        (ci_tcp_sendq_n_pkts(ts) + ts->retrans.num +
-         ts->timestamp_q.queue.num);
-  }
-  else
-    return ts->so_sndbuf_pkts - ci_tcp_sendq_n_pkts(ts);
-}
-
 #endif  /* __TCP_TX_H__ */

@@ -46,10 +46,6 @@ CI_MK_DECL(int           , getpeername, (int, struct sockaddr*, socklen_t*));
 CI_MK_DECL(int           , getsockopt , (int, int, int, void*, socklen_t*));
 CI_MK_DECL(int           , setsockopt , (int, int, int, const void*, socklen_t));
 
-#if defined(__linux__) || defined(__sun__)
-CI_MK_DECL(ssize_t       , sendfile   , (int, int, off_t*, size_t));
-#endif
-
 #if CI_LIBC_HAS_splice
 # if CI_HAVE_SPLICE_RETURNS_SSIZE_T
 #  define ci_splice_return_type ssize_t
@@ -59,10 +55,6 @@ CI_MK_DECL(ssize_t       , sendfile   , (int, int, off_t*, size_t));
 #  error unknown splice prototype
 # endif
 CI_MK_DECL(ci_splice_return_type, splice, (int, loff_t*, int, loff_t*, size_t, unsigned int));
-#endif
-
-#ifdef __sun__
-CI_MK_DECL(ssize_t       , sendfilev  , (int, const struct sendfilevec *, int, size_t *));
 #endif
 
 CI_MK_DECL(ssize_t       , readv      , (int, const struct iovec*, int));
@@ -95,7 +87,7 @@ CI_MK_DECL(ssize_t       , __recvfrom_chk , (int, void*, size_t, size_t, int,
                                          struct sockaddr*, socklen_t*));
 #endif
 CI_MK_DECL(ssize_t       , recvmsg    , (int, struct msghdr*, int));
-#if CI_HAVE_RECVMMSG_CONST_TIMESPEC
+#if ! CI_HAVE_RECVMMSG_NOCONST_TIMESPEC
 # define ci_recvmmsg_timespec    const struct timespec
 #else
 # define ci_recvmmsg_timespec    struct timespec
@@ -144,7 +136,6 @@ CI_MK_DECL(int           , open64     , (const char*, int, ...));
 CI_MK_DECL(int           , creat64    , (const char*, mode_t));
 CI_MK_DECL(int           , setrlimit64, (__rlimit_resource_t, const struct rlimit64 *));
 CI_MK_DECL(int           , __fxstat64 , (int, int, struct stat64 *));
-CI_MK_DECL(ssize_t       , sendfile64 , (int, int, off64_t*, size_t));
 # endif
 #endif
 
@@ -156,7 +147,6 @@ CI_MK_DECL(int           , open64     , (const char*, int, ...));
 CI_MK_DECL(int           , creat64    , (const char*, mode_t));
 CI_MK_DECL(int           , setrlimit64, (__rlimit_resource_t, const struct rlimit64 *));
 CI_MK_DECL(int           , _fxstat    , (int, int, struct stat *));
-CI_MK_DECL(ssize_t       , sendfile64 , (int, int, off64_t*, size_t));
 # endif
 #endif
 

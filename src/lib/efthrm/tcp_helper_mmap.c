@@ -98,14 +98,25 @@ static int tcp_helper_rm_mmap_io(tcp_helper_resource_t* trs,
   int rc, intf_i;
   int map_num = 0;
   unsigned long offset = 0;
+  ci_netif* ni;
 
+  ni = &trs->netif;
   OO_DEBUG_VM(ci_log("%s: %u bytes=0x%lx", __func__, trs->id, bytes));
 
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
-    rc = efab_vi_resource_mmap(trs->nic[intf_i].vi_rs, &bytes, opaque,
+    rc = efab_vi_resource_mmap(trs->nic[intf_i].thn_vi_rs, &bytes, opaque,
                                &map_num, &offset, EFCH_VI_MMAP_IO);
     if( rc < 0 )
       return rc;
+
+#if CI_CFG_SEPARATE_UDP_RXQ
+    if( NI_OPTS(ni).separate_udp_rxq ) {
+      rc = efab_vi_resource_mmap(trs->nic[intf_i].thn_udp_rxq_vi_rs, &bytes,
+                                 opaque, &map_num, &offset, EFCH_VI_MMAP_IO);
+      if( rc < 0 )
+        return rc;
+    }
+#endif
   }
   ci_assert_equal(bytes, 0);
 
@@ -125,8 +136,8 @@ static int tcp_helper_rm_mmap_pio(tcp_helper_resource_t* trs,
   OO_DEBUG_VM(ci_log("%s: %u bytes=0x%lx", __func__, trs->id, bytes));
 
   OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
-    if( trs->nic[intf_i].pio_io_mmap_bytes != 0 ) {
-      rc = efab_vi_resource_mmap(trs->nic[intf_i].vi_rs, &bytes, opaque,
+    if( trs->nic[intf_i].thn_pio_io_mmap_bytes != 0 ) {
+      rc = efab_vi_resource_mmap(trs->nic[intf_i].thn_vi_rs, &bytes, opaque,
                                  &map_num, &offset, EFCH_VI_MMAP_PIO);
       if( rc < 0 )
         return rc;
@@ -152,17 +163,19 @@ static int tcp_helper_rm_mmap_buf(tcp_helper_resource_t* trs,
   OO_DEBUG_VM(ci_log("%s: %u bytes=0x%lx", __func__, trs->id, bytes));
 
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i ) {
-    rc = efab_vi_resource_mmap(trs->nic[intf_i].vi_rs, &bytes, opaque,
+    rc = efab_vi_resource_mmap(trs->nic[intf_i].thn_vi_rs, &bytes, opaque,
                                &map_num, &offset, EFCH_VI_MMAP_MEM);
     if( rc < 0 )  return rc;
-  }
-#ifdef OO_DO_HUGE_PAGES
-  ci_assert_ge(bytes, ni->pkt_sets_max * sizeof(trs->pkt_shm_id[0]));
-  ci_assert_lt(bytes - PAGE_SIZE,
-               ni->pkt_sets_max * sizeof(trs->pkt_shm_id[0]));
-#else
-  ci_assert_equal(bytes, 0);
+
+#if CI_CFG_SEPARATE_UDP_RXQ
+    if( NI_OPTS(ni).separate_udp_rxq ) {
+      rc = efab_vi_resource_mmap(trs->nic[intf_i].thn_udp_rxq_vi_rs, &bytes,
+                                 opaque, &map_num, &offset, EFCH_VI_MMAP_MEM);
+      if( rc < 0 )  return rc;
+    }
 #endif
+  }
+  ci_assert_equal(bytes, 0);
   return 0;
 }
 
@@ -174,6 +187,7 @@ static int tcp_helper_rm_mmap_pkts(tcp_helper_resource_t* trs,
   ci_netif* ni;
   ci_netif_state* ns;
   int bufid = map_id - CI_NETIF_MMAP_ID_PKTS;
+  struct vm_area_struct* vma = opaque;
 
   if( bytes != CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET )
     return -EINVAL;
@@ -184,10 +198,23 @@ static int tcp_helper_rm_mmap_pkts(tcp_helper_resource_t* trs,
 
   /* Reserve space for packet buffers */
   if( bufid < 0 || bufid > ns->pkt_sets_max ||
-      ni->buf_pages[bufid] == NULL ) {
+      ni->pkt_bufs[bufid] == NULL ) {
     OO_DEBUG_ERR(ci_log("%s: %u BAD bufset_id=%d", __FUNCTION__,
                         trs->id, bufid));
     return -EINVAL;
+  }
+#ifdef OO_DO_HUGE_PAGES
+  if( oo_iobufset_get_shmid(ni->pkt_bufs[bufid]) >= 0 ) {
+    OO_DEBUG_ERR(ci_log("%s: [%d] WARNING mmapping huge page from bufset=%d "
+                        "will split it", __func__, trs->id, bufid));
+  }
+#endif
+
+  if( oo_iobufset_npages(ni->pkt_bufs[bufid]) == 1 ) {
+    /* Avoid nopage handler, mmap it all at once */
+    return remap_pfn_range(vma, vma->vm_start,
+                           oo_iobufset_pfn(ni->pkt_bufs[bufid], 0), bytes,
+                           vma->vm_page_prot);
   }
 
   return 0;

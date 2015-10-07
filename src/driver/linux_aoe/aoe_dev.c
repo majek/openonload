@@ -264,6 +264,49 @@ int aoe_get_portid(int ifindex, int *board_id, int *port_id)
 	return -ENODEV;
 }
 
+int aoe_get_board_type(uint32_t ifindex, uint32_t *board_type)
+{
+	int idx;
+	struct aoe_device *dev;
+	struct aoe_port_info *port;
+
+        for (idx = 0; idx < AOE_MAX_DEVS; idx++) {
+                dev = aoe_dev_list[idx];
+                if (!dev) {
+                        break;
+                }
+
+		list_for_each_entry(port, &dev->nic_ports, list) {
+			if (port->ifindex == ifindex) {
+				*board_type = dev->board_type;
+				return 0;
+			}
+		}
+	}
+	return -ENODEV;
+}
+
+int aoe_get_board_type_index_value(struct aoe_device *dev)
+{
+	int index = -1;
+
+	switch(dev->board_type)
+	{
+		case BOARD_TYPE_SFN5122F:
+			index = BOARD_INDEX_SFN5122F;
+			break;
+
+		case BOARD_TYPE_SFN7942F:
+			index = BOARD_INDEX_SFN7942F;
+			break;
+			
+		default:
+			index = -1;
+	}
+
+	return index;
+}
+
 static void aoe_update_port_config(struct aoe_port_info *port)
 {
 	aoe_mcdi_set_mtu(port, port->mtu);
@@ -372,6 +415,7 @@ struct aoe_device * aoe_add_device(struct efx_dl_device *dl_dev,
 	int idx;
 	unsigned int int_macs;
 	unsigned int ext_macs;
+	bool root_entry_deleted = 0;
 	struct aoe_device *aoe_instance = NULL;
 	struct aoe_port_info *nic_port;
 	struct aoe_device **stored_aoes = aoe_dev_list;
@@ -465,6 +509,18 @@ struct aoe_device * aoe_add_device(struct efx_dl_device *dl_dev,
 	mutex_init(&aoe_instance->dma_lock);
 	aoe_instance->bind_unique_fd = NULL;
 
+	if (aoe_sysfs_setup_root(aoe_parent_p->aoe_dev, aoe_instance)) {
+		printk(KERN_ERR "sfc_aoe: Failed to set up FPGA root sysfs\n");
+		goto queue_error;
+	}
+
+	aoe_link_port(aoe_instance, nic_port, net_dev, dl_dev);
+
+	if(aoe_mcdi_get_board_type_info(aoe_instance)) {
+		printk(KERN_ERR "sfc_aoe: Failed to get board type\n");
+		goto sysfs_error;
+	}
+
 	if (aoe_qu_setup(aoe_instance, 10)) {
 		printk(KERN_ERR "sfc_aoe: Failed to set up comms thread\n");
 		goto comms_error;
@@ -475,26 +531,28 @@ struct aoe_device * aoe_add_device(struct efx_dl_device *dl_dev,
 		goto map_error;
 	}
 
-	if (aoe_sysfs_setup(aoe_parent_p->aoe_dev, aoe_instance)) {
-		printk(KERN_ERR "sfc_aoe: Failed to set up FPGA sysfs\n");
+	if (aoe_sysfs_setup_child(aoe_instance)) {
+		printk(KERN_ERR "sfc_aoe: Failed to set up FPGA child sysfs\n");
 		goto sys_error;
 	}
-
-	aoe_link_port(aoe_instance, nic_port, net_dev, dl_dev);
 
 	if (aoe_netdev_register(aoe_instance, int_macs, ext_macs)) {
 		printk(KERN_ERR "sfc_aoe: Failed to set up register\n");
 		goto net_error;
 	}
 
-	if (aoe_apply_static_config(aoe_instance)) {
-		printk(KERN_ERR "sfc_aoe: Firmware not at required level\n");
-		goto config_error;
+	if(aoe_instance->board_type == BOARD_TYPE_SFN5122F){
+		if (aoe_apply_static_config(aoe_instance)) {
+			printk(KERN_ERR "sfc_aoe: Firmware not at required level\n");
+			goto config_error;
+		}
 	}
 
-	if (aoe_stats_device_setup(aoe_instance)) {
-		printk(KERN_ERR "sfc_aoe: Failed to setup DMA pools\n");
-		goto stats_error;
+	if(aoe_instance->board_type == BOARD_TYPE_SFN5122F){
+		if (aoe_stats_device_setup(aoe_instance)) {
+			printk(KERN_ERR "sfc_aoe: Failed to setup DMA pools\n");
+			goto stats_error;
+		}
 	}
 
 	return aoe_instance;
@@ -505,12 +563,16 @@ config_error:
 	aoe_netdev_unregister(aoe_instance);
 net_error:
 	aoe_sysfs_delete(aoe_instance);
+	root_entry_deleted = 1;
 sys_error:
 	aoe_destroy_mmaps(aoe_instance);
 map_error:
 	destroy_workqueue(aoe_instance->event_workwq);
 comms_error:
 	aoe_qu_destroy(aoe_instance);
+sysfs_error:
+	if(!root_entry_deleted)
+		kobject_del(&aoe_instance->aoe_kobj);
 queue_error:
 	kfree(aoe_instance);
 	stored_aoes[idx] = NULL;
@@ -530,8 +592,10 @@ static void aoe_device_clean(struct aoe_device *aoe_instance)
 #endif
 	destroy_workqueue(aoe_instance->event_workwq);
 	aoe_prepare_for_reload(aoe_instance);
-	aoe_stats_device_destroy(aoe_instance);
-	aoe_remove_static_config(aoe_instance);
+	if(aoe_instance->board_type == BOARD_TYPE_SFN5122F){
+		aoe_stats_device_destroy(aoe_instance);
+		aoe_remove_static_config(aoe_instance);
+	}
 	aoe_netdev_unregister(aoe_instance);
 	aoe_sysfs_delete(aoe_instance);
 }

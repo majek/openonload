@@ -189,7 +189,7 @@ static void handle_rx(struct resources* res, int pkt_buf_i, int len)
     printf("HW_TSTAMP=%ld.%09ld  delta=%"PRId64"ns  %s %s\n",
            hw_ts.tv_sec, hw_ts.tv_nsec, timespec_diff_ns(sw_ts, hw_ts),
            (ts_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? "ClockSet" : "",
-           (ts_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? "ClockInSync" : "");
+           (ts_flags & EF_VI_SYNC_FLAG_CLOCK_IN_SYNC) ? "ClockInSync" : "");
   }
 
   /* Do something useful with packet contents here! */
@@ -367,7 +367,10 @@ static void usage(void)
   fprintf(stderr, "filter-spec:\n");
   fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:"
           "<local-port>[,<remote-host>:<remote-port>]\n");
-  fprintf(stderr, "  eth:[vid=<vlan>,]<local-mac>\n");
+  fprintf(stderr, "  eth:[vid=<vlan>,][{ipproto,ethertype}=<val>,]"
+                  "<local-mac>\n");
+  fprintf(stderr, "  ethertype:[vid=<vlan>,]<ethertype>\n");
+  fprintf(stderr, "  ipproto:[vid=<vlan>,]<protocol>\n");
   fprintf(stderr, "  {unicast-all,multicast-all}\n");
   fprintf(stderr, "  {unicast-mis,multicast-mis}:[vid=<vlan>]\n");
   fprintf(stderr, "  {sniff}:[promisc|no-promisc]\n");

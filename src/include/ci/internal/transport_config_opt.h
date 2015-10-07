@@ -47,20 +47,15 @@
 #endif
 
 /* Maximum number of network interfaces (ports) per stack. */
-#define CI_CFG_MAX_INTERFACES           6
+#define CI_CFG_MAX_INTERFACES           8
 
 /* Maximum number of networks interfaces that can be registered with the
  * onload driver.
  */
-#define CI_CFG_MAX_REGISTER_INTERFACES  6
-
-/* Maximum number of network interfaces that can be blacklisted as non
- * accelerated
- */
-#define CI_CFG_MAX_BLACKLIST_INTERFACES 4
+#define CI_CFG_MAX_REGISTER_INTERFACES  8
 
 /* Some defaults.  These can be overridden at runtime. */
-#define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<10)
+#define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<13)
 /* The real max for endpoint order */
 #define CI_CFG_NETIF_MAX_ENDPOINTS_MAX (1<<21)
 
@@ -284,9 +279,6 @@
  */
 #define CI_CFG_HW_TIMER                 1
 
-/* Implement pointers to packets as actual pointers. */
-#define CI_CFG_PP_IS_PTR                0
-
 /* Implement stack pointers as actual pointers. */
 #define CI_CFG_OOP_IS_PTR               0
 
@@ -365,6 +357,9 @@
 /* Maximum possible value for listen queue (backlog).
  * It is substituted from OS, when possible. */
 #define CI_TCP_LISTENQ_MAX 256
+/* Assume this number of listening socket per stack when calculating
+ * EF_TCP_SYNRECV_MAX. */
+#define CI_CFG_ASSUME_LISTEN_SOCKS 4
 
 /* TCP window scale maximum and default.
  * Maximum is taken from RFC1323 and may be overriden by OS settings for
@@ -376,8 +371,9 @@
 /* It is supposed that 
  * CI_TCP_RETRANSMIT_THRESHOLD > CI_TCP_RETRANSMIT_THRESHOLD_SYN.
  * Do not break this! */
-#define CI_TCP_RETRANSMIT_THRESHOLD     15  /* retransmit 15 times */
-#define CI_TCP_RETRANSMIT_THRESHOLD_SYN 4   /* retransmit SYN 4 times */
+#define CI_TCP_RETRANSMIT_THRESHOLD        15  /* retransmit 15 times */
+#define CI_TCP_RETRANSMIT_THRESHOLD_ORPHAN 8   /* orphaned sock: 8 times */
+#define CI_TCP_RETRANSMIT_THRESHOLD_SYN    4   /* retransmit SYN 4 times */
 
 /* Should we send DSACK option? */
 #define CI_CFG_TCP_DSACK 1
@@ -517,21 +513,6 @@
 /* Include support for caching file descriptors at user-level.  */
 #define CI_CFG_FD_CACHING      1
 
-/* Enable iSCSI features. */
-#define CI_CFG_ISCSI           0
-
-/*
- * If set to 1, enable asynchronous zero-copy transmit for iSCSI.
- */
-#define CI_CFG_ISCSI_ZC_TX 1
-
-/*
- * If set to 1, enable iSCSI digest offload.  Only works properly on falcon
- * B silicon and later, but necessary to get iSCSI to load these days
- */
-# define CI_CFG_ISCSI_TX_DIGEST_OFFLOAD 0
-# define CI_CFG_ISCSI_RX_DIGEST_OFFLOAD 0
-
 /* Support physical addressing (as well as protected buffer addressing). */
 #ifdef __KERNEL__
 # define CI_CFG_SUPPORT_PHYS_ADDR  1
@@ -594,19 +575,13 @@
 				 stop it disappearing too soon */
 #endif
 
-#define CI_CFG_SENDFILE   0
-#define CI_CFG_SENDFILEV  0
-# undef  CI_CFG_SENDFILE
-# define CI_CFG_SENDFILE  1
+#define CI_CFG_SENDFILE   1
 
 /* Enable support for recvmmsg(). */
 #define CI_CFG_RECVMMSG          1
 
 /* Enable support for sendmmsg(). */
 #define CI_CFG_SENDMMSG          1
-
-/* Enable filtering of packets before delivery */
-#define CI_CFG_ZC_RECV_FILTER    1
 
 /* HACK: Limit the advertised MSS for TCP because our TCP path does not
  * currently cope with frames that don't fit in a single packet buffer.
@@ -620,11 +595,11 @@
 /* Max length of "name" of a stack. */
 #define CI_CFG_STACK_NAME_LEN  16
 
+/* Max length of "name" of a cluster. */
+#define CI_CFG_CLUSTER_NAME_LEN (CI_CFG_STACK_NAME_LEN >> 1)
+
 /* Teaming support in OpenOnload */
 #define CI_CFG_TEAMING 1
-
-/* Allow the TCP RX path to assume it holds the only reference to packets. */
-#define CI_CFG_TCP_RX_1REF  0
 
 /* Onload tcpdump support */
 #define CI_CFG_TCPDUMP 1
@@ -632,10 +607,6 @@
 #if CI_CFG_TCPDUMP
 /* Dump queue length, should be 2^x, x <= 8 */
 #define CI_CFG_DUMPQUEUE_LEN 128
-
-#if CI_CFG_TCP_RX_1REF
-#error "CI_CFG_TCP_RX_1REF and CI_CFG_TCPDUMP cannot both be enabled."
-#endif
 #endif /* CI_CFG_TCPDUMP */
 
 
@@ -687,6 +658,11 @@
 #else
 #define CI_CFG_USE_PIO 0
 #endif
+
+
+/* Include support for an additional RXQ for UDP receives.
+ */
+#define CI_CFG_SEPARATE_UDP_RXQ 0
 
 /* How many epolls sets will have a ready list maintained by the stack */
 #define CI_CFG_EPOLL1_SETS_PER_STACK 4

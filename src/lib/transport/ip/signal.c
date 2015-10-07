@@ -256,7 +256,6 @@ void citp_signal_intercept(int signum, siginfo_t *info, void *context)
     citp_signal_run_now(signum, info, context, our_info);
 }
 
-/* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
 /* SIG_DFL simulator for signals like SIGINT, SIGTERM: it is postponed
  * properly to safe shared stacks. */
 static void citp_signal_terminate(int signum, siginfo_t *info, void *context)
@@ -296,7 +295,6 @@ void *citp_signal_sarestorer_get(void)
 
   LOG_SIG(log("%s: citp_signal_intercept=%p",
               __func__, citp_signal_intercept));
-  /* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
   LOG_SIG(log("%s: citp_signal_terminate=%p", __func__, 
               citp_signal_terminate));
   for( sig = 1; sig < _NSIG; sig++ ) {
@@ -342,7 +340,6 @@ void *citp_signal_sarestorer_get(void)
 
 /*! Our signal handlers for various interception types */
 sa_sigaction_t citp_signal_handlers[OO_SIGHANGLER_DFL_MAX+1] = {
-/* This is really #ifdef OO_CAN_HANDLE_TERMINATION */
   citp_signal_terminate  /*OO_SIGHANGLER_TERM*/,
   NULL, NULL /*OO_SIGHANGLER_STOP, OO_SIGHANGLER_CORE - TODO */
 };

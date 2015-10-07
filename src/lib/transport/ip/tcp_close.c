@@ -91,7 +91,11 @@ static int ci_tcp_add_fin(ci_tcp_state* ts, ci_netif* netif)
 #else
   {
     int is_locked = 1;
-    pkt = ci_netif_pkt_alloc_block(netif, &ts->s, &is_locked);
+    int rc = ci_netif_pkt_alloc_block(netif, &ts->s, &is_locked,
+                                      CI_TRUE/*can_block*/, &pkt);
+    /* In UL, ci_netif_pkt_alloc_block(can_block=TRUE) never fails. */
+    (void)rc;
+    ci_assert_equal(rc, 0);
     --netif->state->n_async_pkts;
     if (is_locked == 0)
       ci_netif_lock(netif);
@@ -158,7 +162,7 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts, int how)
 
 
   /* Now we should do SHUT_WR; set CI_SHUT_RD  also if necessary */
-  if( ! (ts->s.b.state & CI_TCP_STATE_CAN_FIN) ) {
+  if( ts->s.tx_errno != 0 ) {
     if( how == SHUT_RDWR ) {
       ts->s.rx_errno = CI_SHUT_RD;
       ci_tcp_wake_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_RX);
@@ -175,7 +179,11 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts, int how)
   else
     ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT1);
   /* if not tied to an fd, make sure we leave this state at some point */
+#if CI_CFG_FD_CACHING
   if( ts->s.b.sb_aflags & (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_IN_CACHE) )
+#else
+  if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN )
+#endif
     ci_netif_fin_timeout_enter(netif, ts);
 
   if( how == SHUT_RDWR )
@@ -219,7 +227,7 @@ static void uncache_fd(ci_netif* ni, ci_tcp_state* ts)
                 pid, current->tgid, current->comm));
   /* No tasklets or other bottom-halves - we always have "current" */
   ci_assert(current);
-  if( !(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD_BIT) &&
+  if( !(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) &&
        (~current->flags & PF_EXITING) ) {
     /* If the process is exiting, there is nothing to do.
      * Otherwise, we try to close fd. */
@@ -268,7 +276,8 @@ static void uncache_fd(ci_netif* ni, ci_tcp_state* ts)
 
 ci_inline void clear_cached_state(ci_tcp_state *ts)
 {
-  ci_atomic32_and(&ts->s.b.sb_aflags, ~CI_SB_AFLAG_IN_CACHE);
+  ci_atomic32_and(&ts->s.b.sb_aflags,
+                  ~(CI_SB_AFLAG_IN_CACHE|CI_SB_AFLAG_IN_PASSIVE_CACHE));
   ts->cached_on_fd = -1;
   ts->cached_on_pid = -1;
 }
@@ -284,6 +293,10 @@ ci_inline void clear_cached_state(ci_tcp_state *ts)
  * - frees fd
  * It should now be handled as normal when we process the close via all fds
  * gone.
+ *
+ * If called with non-NULL tls, then this will remove the cached
+ * sockets on the listening socket.  Else removes the cached sockets
+ * on the stack a.k.a. active caching.
  */
 static void uncache_ep(ci_netif *netif, ci_tcp_socket_listen* tls,
                        ci_tcp_state *ts)
@@ -325,16 +338,28 @@ static void uncache_ep(ci_netif *netif, ci_tcp_socket_listen* tls,
   if( ci_bit_test_and_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_IN_CACHE_NO_FD_BIT) )
     efab_tcp_helper_close_endpoint(netif2tcp_helper_resource(netif), S_SP(ts));
 
-  ci_atomic32_inc(&netif->state->cache_avail_stack);
-  ci_atomic32_inc(&tls->cache_avail_sock);
+  if( tls ) {
+    ci_atomic32_inc((volatile ci_uint32*)
+                    CI_NETIF_PTR(netif, tls->epcache.avail_stack));
+    ci_atomic32_inc(&tls->cache_avail_sock);
 
-  ci_assert_le(netif->state->cache_avail_stack,
-               netif->state->opts.sock_cache_max);
-  ci_assert_le(tls->cache_avail_sock,
-               netif->state->opts.per_sock_cache_max);
+    ci_assert_le(netif->state->passive_cache_avail_stack,
+                 netif->state->opts.sock_cache_max);
+    ci_assert_le(tls->cache_avail_sock,
+                 netif->state->opts.per_sock_cache_max);
+  }
+  else {
+    ci_netif_state* ns = netif->state;
+    ci_atomic32_inc(&ns->active_cache_avail_stack);
+    ci_assert_le(ns->active_cache_avail_stack, ns->opts.sock_cache_max);
+  }
 }
 
 
+/* If called with non-NULL tls, then this will remove the cached
+ * sockets on the listening socket.  Else removes the cached sockets
+ * on the stack a.k.a. active caching.
+ */
 static void
 uncache_ep_list(ci_netif *netif, ci_tcp_socket_listen* tls,
                 ci_ni_dllist_t *thelist)
@@ -362,8 +387,8 @@ uncache_ep_list(ci_netif *netif, ci_tcp_socket_listen* tls,
 void ci_tcp_listen_uncache_fds(ci_netif* netif, ci_tcp_socket_listen* tls)
 {
   ci_ni_dllist_link* l = ci_ni_dllist_concurrent_start(netif,
-                                                       &tls->epcache_fd_states);
-  while( l != ci_ni_dllist_end(netif, &tls->epcache_fd_states) ) {
+                                                       &tls->epcache.fd_states);
+  while( l != ci_ni_dllist_end(netif, &tls->epcache.fd_states) ) {
     ci_tcp_state* cached_state = CI_CONTAINER(ci_tcp_state, epcache_fd_link, l);
     ci_ni_dllist_iter(netif, l);
 
@@ -393,10 +418,19 @@ void ci_tcp_epcache_drop_cache(ci_netif* ni)
       ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
       ci_tcp_socket_listen* tls = SOCK_TO_TCP_LISTEN(s);
       ci_tcp_listen_uncache_fds(ni, tls);
-      uncache_ep_list(ni, tls, &tls->epcache_pending);
-      uncache_ep_list(ni, tls, &tls->epcache_cache);
+      uncache_ep_list(ni, tls, &tls->epcache.pending);
+      uncache_ep_list(ni, tls, &tls->epcache.cache);
     }
   }
+}
+
+
+void ci_tcp_active_cache_drop_cache(ci_netif* ni)
+{
+  ci_netif_state* ns = ni->state;
+  ci_assert(ci_netif_is_locked(ni));
+  uncache_ep_list(ni, NULL, &ns->active_cache.pending);
+  uncache_ep_list(ni, NULL, &ns->active_cache.cache);
 }
 
 #endif
@@ -404,6 +438,50 @@ void ci_tcp_epcache_drop_cache(ci_netif* ni)
 
 
 #if CI_CFG_FD_CACHING || defined(__KERNEL__)
+
+#ifndef __KERNEL__
+static
+#endif
+/* Wait for SO_LINGER timeout (or ACKed send queue).
+ * Starts with the stack locked, exits with the stack unlocked. */
+void ci_tcp_linger(ci_netif* ni, ci_tcp_state* ts)
+{
+  /* This is called at user-level when a socket is closed if linger is
+  ** enabled and has a timeout, and there is TX data outstanding.
+  **
+  ** Our job is to block until all data is successfully sent and acked, or
+  ** until timeout.
+  */
+  ci_uint64 sleep_seq;
+  int rc = 0;
+  ci_uint32 timeout = ts->s.so.linger * 1000;
+  int flags = CI_SLEEP_NETIF_LOCKED;
+
+  LOG_TC(log("%s: "NTS_FMT, __FUNCTION__, NTS_PRI_ARGS(ni, ts)));
+
+  ci_assert(ci_netif_is_locked(ni));
+#ifndef __KERNEL__
+  ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE);
+#endif
+  ci_assert(ts->s.s_flags & CI_SOCK_FLAG_LINGER);
+  ci_assert(ts->s.b.state != CI_TCP_LISTEN);
+
+  while( 1 ) {
+    sleep_seq = ts->s.b.sleep_seq.all;
+    ci_rmb();
+    if( SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) ) {
+      break;
+    }
+    rc = ci_sock_sleep(ni, &ts->s.b, CI_SB_FLAG_WAKE_TX, flags,
+                       sleep_seq, &timeout);
+    flags = 0;
+    if( rc )
+      break;
+  }
+  if( flags )
+    ci_netif_unlock(ni);
+}
+
 #if defined(__KERNEL__)
 static
 #endif
@@ -471,15 +549,22 @@ int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts)
 
     rc = __ci_tcp_shutdown(netif, ts, SHUT_RDWR);
 
-    if( (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) ) {
-      if( ts->s.b.state == CI_TCP_CLOSED )
-        ci_tcp_state_free(netif, ts);
-      else if( ts->s.s_flags & CI_SOCK_FLAG_LINGER &&
-          ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts)) ) {
-        ci_assert(ts->s.so.linger != 0);
-        ci_bit_set(&ts->s.b.sb_aflags, CI_SB_AFLAG_IN_SO_LINGER_BIT);
-      }
+    if( (ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN) &&
+        ts->s.b.state == CI_TCP_CLOSED ) {
+      ci_tcp_state_free(netif, ts);
     }
+#ifndef __KERNEL__
+    /* Socket caching + SO_LINGER.  In-kernel case is handled in
+     * efab_tcp_helper_close_endpoint() */
+    else if( (ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE) && 
+             (ts->s.s_flags & CI_SOCK_FLAG_LINGER) &&
+             ! SEQ_EQ(tcp_enq_nxt(ts), tcp_snd_una(ts))
+           ) {
+        ci_assert(ts->s.so.linger != 0);
+        ci_tcp_linger(netif, ts);
+        ci_netif_lock(netif);
+    }
+#endif
     return rc;
   }
 
@@ -624,9 +709,9 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
    * cached list are uncached (and freed).
    */
   LOG_EP(ci_log("listen_shutdown - uncache all on cache list"));
-  uncache_ep_list(netif, tls, &tls->epcache_cache);
+  uncache_ep_list(netif, tls, &tls->epcache.cache);
   LOG_EP(ci_log("listen_shutdown - uncache all on pending list"));
-  uncache_ep_list(netif, tls, &tls->epcache_pending);
+  uncache_ep_list(netif, tls, &tls->epcache.pending);
 #endif
 }
 
@@ -657,15 +742,15 @@ void ci_tcp_listen_update_cached(ci_netif* netif, ci_tcp_socket_listen* tls)
   /* We also need to update the filters for the pending list, so they can be
    * shutdown cleanly.
    */
-  l = ci_ni_dllist_start(netif, &tls->epcache_pending);
-  while( l != ci_ni_dllist_end(netif, &tls->epcache_pending) ) {
+  l = ci_ni_dllist_start(netif, &tls->epcache.pending);
+  while( l != ci_ni_dllist_end(netif, &tls->epcache.pending) ) {
     cached_state = CI_CONTAINER(ci_tcp_state, epcache_link, l);
     cached_ep = ci_netif_ep_get(netif, cached_state->s.b.bufid);
 
     tcp_helper_endpoint_update_filter_details(cached_ep);
     ci_ni_dllist_iter(netif, l);
   }
-  ci_assert(ci_ni_dllist_is_valid(netif, &tls->epcache_pending.l));
+  ci_assert(ci_ni_dllist_is_valid(netif, &tls->epcache.pending.l));
 }
 
 #endif
@@ -683,11 +768,6 @@ void __ci_tcp_listen_shutdown(ci_netif* netif, ci_tcp_socket_listen* tls,
   /* unlocked when called from ci_tcp_all_fds_gone() */
   ci_assert(ci_sock_is_locked(netif, &tls->s.b) ||
             (tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
-
-  /* Set state at start-of-day: fop_poll should return proper events when
-   * we wake up this endpoint in the process of shutdown.
-   * Also, this prevents new loopback connections. */
-  tls->s.b.state = CI_TCP_CLOSED;
 
   LOG_TV(ci_log("%s: S_FMT=%d", __FUNCTION__, S_FMT(tls)));
 
@@ -751,6 +831,12 @@ void ci_tcp_all_fds_gone(ci_netif* ni, ci_tcp_state* ts, int do_free)
   if( (ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN) &&
       !(ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
     ci_netif_fin_timeout_enter(ni, ts);
+
+  /* Orphaned sockets do not need keepalive */
+  if( ts->s.s_flags & CI_SOCK_FLAG_KALIVE ) {
+    ts->s.s_flags &=~ CI_SOCK_FLAG_KALIVE;
+    ci_tcp_kalive_check_and_clear(ni, ts);
+  }
 
   /* This frees [ts] if appropriate. */
   if( do_free )

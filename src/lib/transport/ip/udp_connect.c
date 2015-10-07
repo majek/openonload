@@ -292,13 +292,16 @@ void ci_udp_handle_force_reuseport(ci_fd_t fd, citp_socket* ep,
                         (ci_dllist*)(ci_uintptr_t)CITP_OPTS.udp_reuseports) {
       if( force_reuseport->port == ((struct sockaddr_in*)sa)->sin_port ) {
         int one = 1;
-        ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
+        ci_fd_t os_sock = ci_get_os_sock_fd(fd);
         ci_assert(CI_IS_VALID_SOCKET(os_sock));
         rc = ci_sys_setsockopt(os_sock, SOL_SOCKET, SO_REUSEPORT, &one,
                                sizeof(one));
         ci_rel_os_sock_fd(os_sock);
-        if( rc != 0 && errno == ENOPROTOOPT )
-          ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT_LEGACY;
+        /* Fixme: shouldn't we handle errors? */
+        if( rc != 0 ) {
+          log("%s: failed to set SO_REUSEPORT on OS socket: "
+              "rc=%d errno=%d", __func__, rc, errno);
+        }
         ep->s->s_flags |= CI_SOCK_FLAG_REUSEPORT;
         LOG_UC(log("%s "SF_FMT", applied legacy SO_REUSEPORT flag for port %u",
                    __FUNCTION__, SF_PRI_ARGS(ep, fd), force_reuseport->port));
@@ -326,20 +329,6 @@ int ci_udp_reuseport_bind(citp_socket* ep, ci_fd_t fd,
   if( lport_be16 == 0 ) {
     LOG_UC(ci_log("%s: Binding to port 0 with reuseport set not supported",
                   __FUNCTION__));
-    RET_WITH_ERRNO(ENOSYS);
-  }
-
-  /* If we don't have SO_REUSEPORT support in the kernel then we can't allow
-   * clustered sockets to be handed over - they're sharing an os socket.
-   * We don't allow implicit reuseport bind, so we can see now whether we'd
-   * have to handover.
-   *
-   * Legacy reuseport: This could still change before bind conclusion.
-   */
-  if( (ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) &&
-      ci_udp_should_handover(ep, sa, lport_be16) ) {
-    LOG_U(ci_log("%s: Binding would result in handover, which is not supported"
-                 " on kernels that do not support SO_REUSEPORT", __FUNCTION__));
     RET_WITH_ERRNO(ENOSYS);
   }
 
@@ -376,17 +365,7 @@ int ci_udp_bind(citp_socket* ep, ci_fd_t fd, const struct sockaddr* addr,
    */
   ci_udp_clr_filters(ep);
 
-  /* If the OS doesn't support reuseport we need to allow the clustering code
-   * to decide whether to bind the OS socket.
-   */
-  if( ! (ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY) ) {
-    rc = ci_tcp_helper_bind_os_sock(ep->netif, SC_SP(ep->s), addr,
-                                    addrlen, &local_port);
-  }
-  else {
-    local_port = ((struct sockaddr_in*)addr)->sin_port;
-    rc = 0;
-  }
+  rc = ci_tcp_helper_bind_os_sock(fd, addr, addrlen, &local_port);
 
   if( rc == CI_SOCKET_ERROR )
     return rc;
@@ -591,13 +570,7 @@ int ci_udp_connect(citp_socket* ep, ci_fd_t fd,
   LOG_UC(log("%s("SF_FMT", addrlen=%d)", __FUNCTION__,
              SF_PRI_ARGS(ep,fd), addrlen));
 
-  if( ep->s->s_flags & CI_SOCK_FLAG_REUSEPORT_LEGACY ) {
-    ci_log("%s: Connecting a UDP socket with SO_REUSEPORT set is not supported"
-           " where the kernel does not support SO_REUSEPORT.", __FUNCTION__);
-    return -1;
-  }
-
-  os_sock = ci_get_os_sock_fd (ep, fd);
+  os_sock = ci_get_os_sock_fd(fd);
   if( !CI_IS_VALID_SOCKET( os_sock ) ) {
     LOG_U(ci_log("%s: no backing socket", __FUNCTION__));
     return -1;
@@ -669,7 +642,7 @@ int ci_udp_shutdown(citp_socket* ep, ci_fd_t fd, int how)
   CHECK_UEP(ep);
   LOG_UV(log(LPF "shutdown("SF_FMT", %d)", SF_PRI_ARGS(ep,fd), how));
 
-  os_sock = ci_get_os_sock_fd (ep, fd);
+  os_sock = ci_get_os_sock_fd(fd);
 
   if( CI_IS_VALID_SOCKET( os_sock ) ) {
     rc = ci_sys_shutdown(os_sock, how);

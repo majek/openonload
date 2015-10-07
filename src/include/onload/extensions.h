@@ -148,6 +148,29 @@ extern int onload_stack_opt_get_int(const char* opt, int64_t* val);
 extern int onload_stack_opt_reset(void);
 
 
+/**********************************************************************
+ * onload_fd_stat: return internal details of a file descriptor
+ *
+ * This call returns some details that can be useful for debugging and
+ * combining application-state with Onload state such as the output of
+ * onload_stackdump.  It returns 1 if the file descriptor is
+ * accelerated (and the details below are completed) or 0 if it is not
+ * accelerated by Onload.
+ * 
+ * stack_id :    the numeric ID of the stack that this file descriptor
+ *               belongs to.
+ * stack_name :  the string name of the stack that this file descriptor
+ *               belongs to.
+ * endpoint_id : the numeric ID of the file descritor within its stack
+ * endpoint_state : an integer that describes the current internal 
+ *                  state of this file descriptor.  This can not be 
+ *                  easily decoded by an application, and any 
+ *                  significance of the value may change between Onload
+ *                  releases.
+ * 
+ * The caller must free stack_name (when it is set).
+ */
+
 struct onload_stat {
   int32_t   stack_id;
   char*     stack_name;
@@ -164,6 +187,10 @@ extern int onload_fd_stat(int fd, struct onload_stat* stat);
  * By default each thread uses the spinning options as specified by the
  * Onload configuration options.  This call can be used to override those
  * settings on a per-thread basis.
+ *
+ * Unlike all other parts of Onload extention API, ONLOAD_SPIN_MAX value is
+ * not guaranteed to be stable across Onload releases.  New enum entries
+ * could be added, and ONLOAD_SPIN_MAX will be changed accordingly.
  */
 
 enum onload_spin_type {
@@ -182,6 +209,7 @@ enum onload_spin_type {
   ONLOAD_SPIN_STACK_LOCK,
   ONLOAD_SPIN_SOCK_LOCK,
   ONLOAD_SPIN_SO_BUSY_POLL,
+  ONLOAD_SPIN_TCP_CONNECT,
   ONLOAD_SPIN_MAX /* special value to mark largest valid input */
 };
 
@@ -201,7 +229,11 @@ extern int onload_thread_set_spin(enum onload_spin_type type, int spin);
 
 enum onload_fd_feature {
   /* Check whether this fd supports ONLOAD_MSG_WARM or not */
-  ONLOAD_FD_FEAT_MSG_WARM
+  ONLOAD_FD_FEAT_MSG_WARM = 0,
+  /* Check whether this Onload returns headers with transmit
+   * timestamps on UDP sockets
+   */
+  ONLOAD_FD_FEAT_UDP_TX_TS_HDR = 1,
 };
 
 extern int onload_fd_check_feature(int fd, enum onload_fd_feature feature);
@@ -220,7 +252,7 @@ extern int onload_fd_check_feature(int fd, enum onload_fd_feature feature);
  * Current limitations for accepted sockets:
  * a) empty send queue and retransmit queue (i.e. send() was never called
  *    on this socket);
- * b) simple receive queue: no loss, no reordering, no urgent data.
+ * b) simple receive queue: do not read() before move, no urgent data.
  *
  * Returns 0 f moved successfully, -1 otherwise.
  * In any case, fd is a good accelerated socket after this call.
@@ -503,6 +535,71 @@ onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
 
 extern int
 onload_delegated_send_cancel(int fd);
+
+
+/**********************************************************************
+ * onload_get_tcp_info: Onload-specific call similar to Linux TCP_INFO
+ *
+ * Returns -1 with errno EINVAL for a file descriptor which is not an
+ * Onload TCP connection.
+ *
+ *
+ *
+ *
+ */
+struct onload_tcp_info {
+  /* Receive buffer and its current use:
+   * so_recvbuf ~= rcvbuf_used + rcv_window.
+   *
+   * - so_recvbuf is also available via getsockopt(SO_RCVBUF);
+   * - rcvbuf_used is also available via ioctl(FIONREAD), but ignoring
+   *    SO_OOBINLINE complexity (i.e. just the number of bytes in receive
+   *    queue, urgent or not);
+   * - rcv_window is also available via getsockopt(TCP_INFO), tcpi_rcv_space.
+   */
+  int so_recvbuf;
+  int rcvbuf_used;
+  int rcv_window;
+
+  /* Send buffer and its current use:
+   * so_sndbuf_pkts * snd_mss ~= so_sndbuf.
+   *
+   * - so_sndbuf is also available via getsockopt(SO_SNDBUF);
+   * - so_sndbuf_pkts is the packet limit used for send queue by Onload
+   *    internally, calculated from user-supplied SO_SNDBUF value;
+   * - sndbuf_pkts_avail is the number of packets could be added to send
+   *    queue just now;
+   * - snd_mss is also available as getsockopt(TCP_INFO), tcpi_snd_mss
+   */
+  int so_sndbuf;
+  int so_sndbuf_pkts;
+  int sndbuf_pkts_avail;
+  int snd_mss;
+
+  /* Send windows:
+   * - snd_window is the window size we've got from the network peer;
+   *    it is the same as send_wnd value in onload_delegated_send.
+   * - cong_window is the current congestion window, i.e. the size of data
+   *    we are allowed to send to network by TCP congestion control
+   *    protocol in use; it is the same as cong_wnd value in
+   *    onload_delegated_send.
+   */
+  int snd_window;
+  int cong_window;
+};
+
+/* Get onload_tcp_info structure defined above if the fd refers to
+ * accelerated TCP connection.
+ * Return 0 on success, -1 with errno=EINVAL on failure.
+ *
+ * len_in_out: user passes the size of memory available for the info
+ * pointer; the function call returns the length of onload_tcp_info that
+ * was really filled in.  len_in_out parameter is supposed to be used as
+ * a sort of version number, to allow onload_tcp_info structure to be
+ * extened in future.
+ */
+extern int
+onload_get_tcp_info(int fd, struct onload_tcp_info* info, int* len_in_out);
 
 
 #ifdef __cplusplus

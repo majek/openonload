@@ -68,7 +68,7 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   /*! \todo This should be part of sock_cmn reinit, but the comment to that
    * function suggests that it's possibly not a good plan to move it there */
 
-  ci_sock_cmn_timestamp_q_init(netif, &us->timestamp_q);
+  ci_udp_recv_q_init(&us->timestamp_q);
 
   /*! \todo These two should really be handled in ci_sock_cmn_init() */
 
@@ -86,10 +86,6 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   udp_lport_be16(us) = 0;
   udp_rport_be16(us) = 0;
 
-#if CI_CFG_ZC_RECV_FILTER
-  us->recv_q_filter = 0;
-  us->recv_q_filter_arg = 0;
-#endif
   ci_udp_recv_q_init(&us->recv_q);
   us->zc_kernel_datagram = OO_PP_NULL;
   us->zc_kernel_datagram_count = 0;
@@ -245,6 +241,17 @@ percent (uint64_t a, unsigned b)
 #endif
 }
 
+void ci_udp_recvq_dump(ci_netif* ni, ci_udp_recv_q* q,
+                       const char* pf1, const char* pf2,
+                       oo_dump_log_fn_t logger, void* log_arg)
+{
+  logger(log_arg,
+         "%s%s q_pkts=%d reap=%d tot_pkts=%u", pf1, pf2,
+         ci_udp_recv_q_pkts(q), ci_udp_recv_q_reapable(q),
+         q->pkts_added);
+
+}
+
 void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
                       oo_dump_log_fn_t logger, void* log_arg)
 {
@@ -260,35 +267,21 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
   (void) tx_total;
 
   if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
-    ci_timestamp_q_dump(ni, &us->timestamp_q, pf, logger, log_arg);
+    ci_udp_recvq_dump(ni, &us->timestamp_q, pf, "  TX timestamping queue:",
+                      logger, log_arg);
 
   /* General. */
   logger(log_arg, "%s  udpflags: "CI_UDP_STATE_FLAGS_FMT, pf,
          CI_UDP_STATE_FLAGS_PRI_ARG(us));
 
   /* Receive path. */
-  logger(log_arg,
-         "%s  rcv: q_bytes=%d q_depth=%d q_pkts=%d reap=%d tot_bytes=%u"
-         " tot_pkts=%u", pf, ci_udp_recv_q_bytes(&us->recv_q),
-         UDP_RECVQ_DEPTH(us), ci_udp_recv_q_pkts(&us->recv_q),
-         ci_udp_recv_q_reapable(&us->recv_q),
-         (unsigned) us->recv_q.bytes_added, rx_added);
-#if CI_CFG_ZC_RECV_FILTER
-  logger(log_arg,
-         "%s  rcv: filtered=%d unfiltered=%d "
-         "tot_filt_rej=%d tot_filt_pass=%d ",
-         pf,
-         us->recv_q.pkts_filter_passed - us->recv_q.pkts_delivered,
-         us->recv_q.pkts_added - us->recv_q.pkts_filter_passed - 
-         us->recv_q.pkts_filter_dropped,
-         us->recv_q.pkts_filter_dropped, us->recv_q.pkts_filter_passed);
-#endif
+  ci_udp_recvq_dump(ni, &us->recv_q, pf, "  rcv:", logger, log_arg);
   logger(log_arg,
          "%s  rcv: oflow_drop=%u(%u%%) mem_drop=%u eagain=%u pktinfo=%u "
-         "q_max=%u", pf, uss.n_rx_overflow,
+         "q_max_pkts=%u", pf, uss.n_rx_overflow,
          percent(uss.n_rx_overflow, rx_total),
          uss.n_rx_mem_drop, uss.n_rx_eagain, uss.n_rx_pktinfo, 
-         uss.max_recvq_depth);
+         uss.max_recvq_pkts);
   logger(log_arg, "%s  rcv: os=%u(%u%%) os_slow=%u os_error=%u", pf,
          rx_os, percent(rx_os, rx_total), uss.n_rx_os_slow, uss.n_rx_os_error);
 

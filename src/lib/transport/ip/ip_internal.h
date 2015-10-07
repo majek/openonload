@@ -204,8 +204,11 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
                                        bindto_ifindex, from_tcp_id);
 
 #else
-  rc = ci_tcp_helper_ep_set_filters(ci_netif_get_driver_handle(ni), sock_id,
-                                    bindto_ifindex, from_tcp_id);
+  if( ci_tcp_can_set_filter_in_ul(ni, SP_TO_SOCK(ni, sock_id)) )
+    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_TCP(ni, sock_id));
+  else
+    rc = ci_tcp_helper_ep_set_filters(ci_netif_get_driver_handle(ni), sock_id,
+                                      bindto_ifindex, from_tcp_id);
 #endif
 
   LOG_TC( if(rc < 0)
@@ -264,8 +267,14 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
   rc = tcp_helper_endpoint_clear_filters(ci_netif_get_valid_ep(ni, sock_id),
                                          supress_hw_ops, need_update);
 #else
-  rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni), sock_id,
-                                      need_update);
+  if( (SP_TO_SOCK(ni, sock_id)->s_flags & CI_SOCK_FLAG_MAC_FILTER) &&
+      ci_tcp_can_set_filter_in_ul(ni, SP_TO_SOCK(ni, sock_id)) ) {
+    ci_tcp_sock_clear_scalable_filter(ni, SP_TO_TCP(ni, sock_id));
+    rc = 0;
+  }
+  else
+    rc = ci_tcp_helper_ep_clear_filters(ci_netif_get_driver_handle(ni), sock_id,
+                                        need_update);
 #endif
 
   LOG_TC( if (rc < 0)
@@ -388,9 +397,33 @@ enum {
 	ONLOAD_SOF_TIMESTAMPING_SOFTWARE = (1<<4),
 	ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE = (1<<5),
 	ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE = (1<<6),
+	ONLOAD_SOF_TIMESTAMPING_OPT_ID = (1<<7),
+	ONLOAD_SOF_TIMESTAMPING_TX_SCHED = (1<<8),
+	ONLOAD_SOF_TIMESTAMPING_TX_ACK = (1<<9),
+	ONLOAD_SOF_TIMESTAMPING_OPT_CMSG = (1<<10),
+	ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY = (1<<11),
+
+	ONLOAD_SOF_TIMESTAMPING_LAST = ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY,
 	ONLOAD_SOF_TIMESTAMPING_MASK =
-	( (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE << 1) - 1 )
+	( (ONLOAD_SOF_TIMESTAMPING_LAST << 1) - 1 )
 };
+
+/* Replica of sock_extended_err - just in case we do not have ee_data in
+ * the headers in use. */
+struct oo_sock_extended_err {
+  ci_uint32 ee_errno;
+  ci_uint8  ee_origin;
+  ci_uint8  ee_type;
+  ci_uint8  ee_code;
+  ci_uint8  ee_pad;
+  ci_uint32 ee_info;
+  ci_uint32 ee_data;
+};
+
+/* SO_EE_ORIGIN_TIMESTAMPING could be undefined. */
+#ifndef SO_EE_ORIGIN_TIMESTAMPING
+#define SO_EE_ORIGIN_TIMESTAMPING 4
+#endif
 
 /* The following value needs to match its counterpart
  * in kernel headers.
@@ -402,14 +435,6 @@ enum {
 #define opt_ok(ov,ol,ty)     ((ov) && (ol) >= sizeof(ty))
 #define opt_not_ok(ov,ol,ty) \
     ((ol) < sizeof(ty) ? -EINVAL : (ov) ? 0 : -EFAULT)
-
-#if defined(__KERNEL__) && defined(__linux__)
-extern int ci_khelper_getsockopt(ci_netif* ni,  oo_sp sock_id, int level, 
-				 int optname, char* optval, int* optlen ) CI_HF;
-extern int ci_khelper_setsockopt(ci_netif* ni, oo_sp sock_id, int level, 
-				 int optname, const void* optval, 
-				 int optlen ) CI_HF;
-#endif
 
 ci_inline unsigned 
 ci_get_optval(const void *optval, socklen_t optlen)
@@ -451,39 +476,51 @@ ci_getsockopt_final(void *optval, socklen_t *optlen, int level,
                                  val, val_size);
 }
 
+
+/*! Handler for TCP getsockopt:SOL_TCP options.
+ * \param netif   [in] Netif context
+ * \param s       [in] Socket state context
+ * \param optname [in] Option being queried
+ * \param optval  [out] Location for value being returned
+ * \param optlen  [in/out] Length of buffer ref'd by [optval]
+ * \return        As for getsockopt()
+ */
+extern int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s,
+			  int optname, void *optval,
+			  socklen_t *optlen) CI_HF;
+
 /*! Handler for common getsockopt:SOL_IP options. The handlers here will
  * cope with both TCP & UDP.
  * \param netif   [in] Netif context
- * \param ts      [in] TCP state context
+ * \param s       [in] Socket state context
  * \param fd      [in] File descriptor
  * \param optname [in] Option being queried
  * \param optval  [out] Location for value being returned
  * \param optlen  [in/out] Length of buffer ref'd by [optval]
  * \return        As for getsockopt()
  */
-extern int ci_get_sol_ip( citp_socket* netif, ci_sock_cmn* s, ci_fd_t fd,
+extern int ci_get_sol_ip( ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd,
 			  int optname, void *optval,
 			  socklen_t *optlen ) CI_HF;
 
 #if CI_CFG_FAKE_IPV6
 /*! Handler for common getsockopt:SOL_IPV6 options. The handlers here will
  * cope with both TCP & UDP.
- * \param ep      [in] Endpoint handle
- * \param ts      [in] TCP state context
+ * \param s       [in] Socket state context
  * \param fd      [in] File descriptor
  * \param optname [in] Option being queried
  * \param optval  [out] Location for value being returned
  * \param optlen  [in/out] Length of buffer ref'd by [optval]
  * \return        As for getsockopt()
  */
-extern int ci_get_sol_ip6( citp_socket* ep, ci_sock_cmn* s, ci_fd_t fd,
+extern int ci_get_sol_ip6( ci_sock_cmn* s, ci_fd_t fd,
                            int optname, void *optval, 
                            socklen_t *optlen ) CI_HF;
 #endif
 
 /*! Handler for common getsockopt:SOL_SOCKET options.
  * \param ni      [in] Netif context
- * \param ts      [in] TCP state context (regardless of the actual protocol)
+ * \param s       [in] Socket state context
  * \param optname [in] Option being queried
  * \param optval  [out] Location for value being returned
  * \param optlen  [in/out] Length of buffer ref'd by [optval]
@@ -495,7 +532,7 @@ extern int ci_get_sol_socket( ci_netif* netif, ci_sock_cmn* s,
 
 /*! Handler for common setsockopt:SOL_IP handlers.
  * \param netif   [in] Netif context
- * \param ts      [in] TCP state context
+ * \param s       [in] Socket state context
  * \param optname [in] Option being modified
  * \param optval  [in] Location for new value
  * \param optlen  [in] Length of buffer ref'd by [optval]
@@ -508,7 +545,7 @@ ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
 #if CI_CFG_FAKE_IPV6
 /*! Handler for common setsockopt:SOL_IPV6 handlers.
  * \param netif   [in] Netif context
- * \param ts      [in] TCP state context
+ * \param s       [in] Socket state context
  * \param optname [in] Option being modified
  * \param optval  [in] Location for new value
  * \param optlen  [in] Length of buffer ref'd by [optval]
@@ -521,8 +558,7 @@ ci_set_sol_ip6( ci_netif* netif, ci_sock_cmn* s,
 
 /*! Handler for common setsockopt:SOL_SOCKET handlers.
  * \param netif   [in] Netif context
- * \param ts      [in] TCP state context (regardless of protocol)
- * \param os_rc   [in] Return code from callers setsockopt() on OS backing sock
+ * \param s       [in] Socket state context
  * \param optname [in] Option being modified
  * \param optval  [in] Location for new value
  * \param optlen  [in] Length of buffer ref'd by [optval]
@@ -727,6 +763,63 @@ ci_inline int ci_netif_intf_i_to_base_ifindex(ci_netif* ni, int intf_i)
   return cicp_fwd_hwport_to_base_ifindex(&CICP_MIBS(CICP_HANDLE(ni))->user,
                                          hwport);
 }
+
+
+/*********************************************************************
+ ****************************** Free Packets *************************
+ *********************************************************************/
+
+/* Returns true if the packet is freed. */
+ci_inline int/*bool*/
+ci_netif_pkt_release_in_poll(ci_netif* netif, ci_ip_pkt_fmt* pkt,
+                             struct ci_netif_poll_state* ps)
+{
+  if( pkt->refcount == 1 ) {
+    /* We are going to free the packet, so it is not in use
+     * by TX any more. */
+    ci_assert(~pkt->flags & CI_PKT_FLAG_TX_PENDING);
+
+    pkt->refcount = 0;
+    if( pkt->flags & CI_PKT_FLAG_RX )
+      --netif->state->n_rx_pkts;
+    __ci_netif_pkt_clean(pkt);
+    if( pkt->flags & CI_PKT_FLAG_NONB_POOL ) {
+      *ps->tx_pkt_free_list_insert = OO_PKT_P(pkt);
+      ps->tx_pkt_free_list_insert = &pkt->next;
+      ++ps->tx_pkt_free_list_n;
+    }
+    else {
+      ci_netif_pkt_put(netif, pkt);
+    }
+    return CI_TRUE;
+  }
+  else {
+    ci_assert_gt(pkt->refcount, 1);
+    --pkt->refcount;
+    return CI_FALSE;
+  }
+}
+                             
+
+#ifdef __KERNEL__
+extern void ci_netif_set_merge_atomic_flag(ci_netif* ni);
+#define CI_NETIF_STATE_MOD(ni, is_locked, field, mod) \
+  do {                                                                      \
+    if( is_locked ) {                                                       \
+      mod##mod ni->state->field;                                            \
+    }                                                                       \
+    else {                                                                  \
+      ci_int32 val;                                                         \
+      do {                                                                  \
+        val = ni->state->atomic_##field;                                    \
+      } while( ci_cas32u_fail(&ni->state->atomic_##field, val, val mod 1) );\
+    }                                                                       \
+  } while(0)
+#else
+#define CI_NETIF_STATE_MOD(ni, is_locked, field, mod) \
+  do { mod##mod ni->state->field; } while(0)
+#endif
+
 
 #endif /* __CI_LIB_IP_INTERNAL_H__ */
 /*! \cidoxg_end */

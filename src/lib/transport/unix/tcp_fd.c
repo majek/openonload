@@ -49,6 +49,245 @@ int sock_cloexec_broken = 0;
 int ci_tcp_close(ci_netif* netif, ci_tcp_state* ts);
 #endif
 
+
+#ifndef __ci_driver__
+#if CI_CFG_FD_CACHING
+#ifdef O_CLOEXEC
+#define CI_CACHE_FIXUP_FLAGS (O_NONBLOCK | O_CLOEXEC)
+#else
+#define CI_CACHE_FIXUP_FLAGS (O_NONBLOCK)
+#endif
+
+static int
+citp_tcp_cached_fixup_flags(ci_netif* ni, ci_tcp_state* ts, int fd, int flags)
+{
+  int current_flags = 0;
+  int new_flags;
+  int rc = 0;
+
+  /* Socket caching is only supported on linux, where these are identical */
+  CI_BUILD_ASSERT(O_NONBLOCK == O_NDELAY);
+
+  if( !!(flags & O_NONBLOCK) != 
+      !!(ts->s.b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK) ) {
+    /* Get current flags */
+    current_flags = ci_sys_fcntl(fd, F_GETFL);
+
+    if( current_flags >= 0 ) {
+      /* Add or remove O_NONBLOCK flag */
+      new_flags = flags & O_NONBLOCK ? (current_flags | O_NONBLOCK) :
+                                       (current_flags & ~O_NONBLOCK);
+
+      /* Set new value */
+      rc = ci_sys_fcntl(fd, F_SETFL, new_flags);
+
+      /* Flip the value of the onload flag */
+      if( rc == 0 )
+        ci_atomic32_merge(&ts->s.b.sb_aflags, ~ts->s.b.sb_aflags,
+                          CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY);
+      else
+        NI_LOG(ni, RESOURCE_WARNINGS, "%s: Failed to modify O_NONBLOCK setting"
+               " of cached socket to new value", __FUNCTION__);
+    }
+    else {
+      NI_LOG(ni, RESOURCE_WARNINGS, "%s: Failed to modify O_NONBLOCK setting "
+             "of cached socket to new value", __FUNCTION__);
+    }
+  }
+
+#ifdef O_CLOEXEC
+  if( !!(flags & O_CLOEXEC) != 
+      !!(ts->s.b.sb_aflags & CI_SB_AFLAG_O_CLOEXEC) ) {
+    /* Set new value */
+    rc = ci_sys_fcntl(fd, F_SETFD, (flags & O_CLOEXEC) ? FD_CLOEXEC : 0);
+
+    /* Flip the value of the onload flag */
+    if( rc == 0 )
+      ci_atomic32_merge(&ts->s.b.sb_aflags, ~ts->s.b.sb_aflags,
+                        CI_SB_AFLAG_O_CLOEXEC);
+    else
+      NI_LOG(ni, RESOURCE_WARNINGS, "%s: Failed to modify O_CLOEXEC setting of"
+             " cached socket to new value", __FUNCTION__);
+  }
+#endif
+
+  return rc;
+}
+#endif
+
+
+/* When initialising an endpoint, either from scratch or from an accept queue,
+ * we need to get hold of an fd.  Given a TCP state, this function gets an fd
+ * for it and associates them with one another.  If the TCP state was taken
+ * from the cache, then it might have an fd already available; otherwise, we go
+ * into the kernel to get one.  In either case, the fd will be marked as busy
+ * on return from this function.
+ *     [listener] serves only to identify whether the socket for which we need
+ * an fd is passive-open.  It should be NULL otherwise.
+ *     This function may take the fdtable lock, and so the caller must not
+ * hold the stack lock.
+ */
+static ci_fd_t citp_tcp_ep_acquire_fd(ci_netif* netif, ci_tcp_state* ts,
+                                      ci_tcp_socket_listen* listener,
+                                      int domain, int type, int flags)
+{
+  ci_fd_t fd;
+#if CI_CFG_FD_CACHING
+  int from_cache;
+#endif
+
+  /* As well as protecting the explicit fdtable operations that follow, the
+   * fdtable lock prevents a probe of the new fd until we've finished setting
+   * it up. */
+  if( fdtable_strict() )  CITP_FDTABLE_LOCK();
+
+#if CI_CFG_FD_CACHING
+  from_cache = ci_tcp_is_cached(ts);
+
+  /* It is possible that someone is concurrently trying to dup2/3 onto the
+   * cached fd we're using.  We need to ensure that the NO_FD flag does not
+   * change once we've decided we don't need an fd, so mark the fdtable entry
+   * as busy.
+   *
+   * This is similar to the case with non-cached fds between return from the
+   * accept ioctl, and setting the entry in the fdtable when not using
+   * EF_FDTABLE_STRICT=1, so if we're requiring that apps that might be doing
+   * this set that option anyway in the non-caching case, we may want to
+   * consider only doing this check if fdtable_strict()...
+   */
+  if( (from_cache != 0) &&
+      !(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
+    int prev = citp_fdtable_new_fd_set(ts->cached_on_fd, fdip_busy,
+                                       fdtable_strict());
+
+    /* Now we're in one of two states:
+     * - there was dup2/3 in progress onto our fd, but it's now completed
+     * - there was no dup2/3 in progress, and one can't happen until we
+     *   clear the busy state of the fd
+     * This means that we can safely use the CI_SB_AFLAG_IN_CACHE_NO_FD flag.
+     */
+    if( ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD )
+      citp_fdtable_busy_clear(ts->cached_on_fd, prev, fdtable_strict());
+  }
+
+  if( (from_cache == 0) || (ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
+#endif
+    /* Need to create new fd */
+    ci_fd_t stack_fd = ci_netif_get_driver_handle(netif);
+    oo_sp sp = S_SP(ts);
+    fd = ( listener != NULL ) ?
+      ci_tcp_helper_tcp_accept_sock_attach(stack_fd, sp, flags) :
+      ci_tcp_helper_sock_attach(stack_fd, sp, domain, type);
+    if( fd < 0 ) {
+      if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+      return fd;
+    }
+
+    citp_fdtable_new_fd_set(fd, fdip_busy, fdtable_strict());
+#if CI_CFG_FD_CACHING
+  }
+  else {
+    /* Caching is unsupported but not disabled after fork(), so it is possible
+     * to hit this assertion, but we definitely want to catch it as it will
+     * definitely break things.  For the active-open cache, we do an explicit
+     * pid check and so in that case we should not trigger this assertion. */
+    ci_assert_equal(ts->cached_on_pid, getpid());
+
+    fd = ts->cached_on_fd;
+
+   /* It's possible that the cached socket has different flags from those
+    * requested - if so we need to sort that out.
+    */
+    citp_tcp_cached_fixup_flags(netif, ts, fd, flags);
+
+   /* We're reusing a cached socket.  We don't attach, but need to set the
+    * flags that would be set on attach.  We also clear the cached_on_fd
+    * state.
+    *
+    * This state must be consistent before we add the entry to the fdtable.
+    */
+    ci_atomic32_and(&ts->s.b.sb_aflags,
+                    ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ |
+                      CI_SB_AFLAG_IN_CACHE | CI_SB_AFLAG_IN_PASSIVE_CACHE));
+    ts->cached_on_fd = -1;
+    ts->cached_on_pid = -1;
+  }
+#endif
+
+  if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
+
+  /* By this point, [ts] should have had its cache bit cleared. */
+  ci_assert(! ci_tcp_is_cached(ts));
+
+  return fd;
+}
+
+
+/* Called where some initialisation is needed, but not a full construction. */
+ci_fd_t ci_tcp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
+{
+  ci_tcp_state* ts;
+  ci_fd_t fd;
+
+  ci_assert(ep);
+  ci_assert(netif);
+
+  ci_netif_lock(netif);
+  ts = ci_tcp_get_state_buf_from_cache(netif);
+  if( ts == NULL )
+    ts = ci_tcp_get_state_buf(netif);
+#if ! CI_CFG_FD_CACHING
+  else
+    ci_assert(0);
+#endif
+
+  ci_netif_unlock(netif);
+
+  if( ts == NULL ) {
+    LOG_E(ci_log("%s: [%d] out of socket buffers", __FUNCTION__,NI_ID(netif)));
+    return -ENOMEM;
+  }
+
+  fd = citp_tcp_ep_acquire_fd(netif, ts, NULL, domain, type,
+                              type
+#if CI_CFG_FD_CACHING
+                              & CI_CACHE_FIXUP_FLAGS
+#endif
+                              );
+  if( fd < 0 ) {
+    if( fd == -EAFNOSUPPORT )
+      LOG_U(ci_log("%s: citp_tcp_ep_acquire_fd (domain=%d, type=%d) failed %d",
+                   __FUNCTION__, domain, type, fd));
+    else
+      LOG_E(ci_log("%s: citp_tcp_ep_acquire_fd (domain=%d, type=%d) failed %d",
+                   __FUNCTION__, domain, type, fd));
+    return fd;
+  }
+
+  /* The fd is marked busy, so we still have the unique reference to [ts]. */
+
+  ci_assert(~ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN);
+  /* Apply default sockbuf sizes now we've updated them from the kernel
+   ** defaults. */
+  ts->s.so.sndbuf = NI_OPTS(netif).tcp_sndbuf_def;
+  ts->s.so.rcvbuf = NI_OPTS(netif).tcp_rcvbuf_def;
+  ep->netif = netif;
+  ep->s = &ts->s;
+
+#ifndef NDEBUG
+  /* We hold the only reference to [ep] and its fd is marked busy, so its
+   * validity is not contingent on the netif lock, but CHECK_TEP also validates
+   * the netif itself.*/
+  ci_netif_lock(netif);
+  CHECK_TEP(ep);
+  ci_netif_unlock(netif);
+#endif
+
+  return fd;
+}
+#endif
+
+
 static int
 citp_tcp_socket(int domain, int type, int protocol)
 {
@@ -67,6 +306,9 @@ citp_tcp_socket(int domain, int type, int protocol)
   }
   fdi = &epi->fdinfo;
   citp_fdinfo_init(fdi, &citp_tcp_protocol_impl);
+#if CI_CFG_FD_CACHING
+  fdi->can_cache = 1;
+#endif
 
   rc = citp_netif_alloc_and_init(&fd, &ni);
   if( rc != 0 ) {
@@ -79,17 +321,11 @@ citp_tcp_socket(int domain, int type, int protocol)
     goto fail2;
   }
 
-  /* Protect the fdtable entry until we're done initialising. */
-  if( fdtable_strict() )  CITP_FDTABLE_LOCK();
   if((fd = ci_tcp_ep_ctor( &epi->sock, ni, domain, type)) < 0) {
-    if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
     Log_U(ci_log(LPF "socket: tcp_ep_ctor failed"));
     errno = -fd;
     goto fail3;
   }
-
-  citp_fdtable_new_fd_set(fd, fdip_busy, fdtable_strict());
-  if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
 
   CI_DEBUG(epi->sock.s->pid = getpid());
 
@@ -142,21 +378,6 @@ ci_inline ci_uint64 linger_hash(ci_sock_cmn* s)
 static void citp_tcp_dtor(citp_fdinfo* fdinfo, int fdt_locked)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
-  ci_sock_cmn* s = epi->sock.s;
-
-  /* Check for SO_LINGER: if !CI_SB_AFLAG_IN_SO_LINGER or hash mismatch,
-   * then close worked perferctly and we have nothing to wait for. */
-  if( epi->sock.so_linger_hash != 0 &&
-      linger_hash(s) == epi->sock.so_linger_hash &&
-      s->b.sb_aflags & CI_SB_AFLAG_IN_SO_LINGER &&
-      (s->b.state & CI_TCP_STATE_TCP) && s->b.state != CI_TCP_LISTEN ) {
-
-    /* ci_tcp_linger can be interrupted by a signal, and we so not want to
-     * deadlock. */
-    if( fdt_locked ) CITP_FDTABLE_UNLOCK();
-    ci_tcp_linger(epi->sock.netif, SOCK_TO_TCP(s));
-    if( fdt_locked ) CITP_FDTABLE_LOCK();
-  }
   citp_netif_release_ref(epi->sock.netif, fdt_locked);
 }
 
@@ -168,6 +389,8 @@ static void tcp_handover(citp_sock_fdi* sock_fdi)
   */
   ci_sock_cmn* s = sock_fdi->sock.s;
   int nonb_switch = -1;
+
+  ci_assert_flags(s->b.sb_aflags, CI_SB_AFLAG_OS_BACKED);
 
   if( s->b.state == CI_TCP_LISTEN ) {
     /* O/S socket is already has O_NONBLOCK.  Turn it off? */
@@ -201,6 +424,10 @@ static int citp_tcp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
   ci_netif_unlock_fdi(epi);
   if( rc == CI_SOCKET_HANDOVER ) {
     int fd = fdinfo->fd;
+
+    /* ci_tcp_bind must give us an OS socket if we should have one */
+    ci_assert_flags(s->b.sb_aflags, CI_SB_AFLAG_OS_BACKED);
+
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_bind);
     tcp_handover(epi);
     fdinfo = citp_fdtable_lookup(fd);
@@ -243,9 +470,26 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
   Log_VSS(ci_log(LPF "listen("EF_FMT", %d)", EF_PRI_ARGS(epi,fdinfo->fd),
               backlog));
 
-  ci_netif_lock_fdi(epi);
-  rc = ci_tcp_listen(&(epi->sock), fdinfo->fd, backlog);
-  ci_netif_unlock_fdi(epi);
+  if( epi->sock.s->s_flags & CI_SOCK_FLAG_TPROXY ) {
+    /* We do not support IP_TRANSPARENT on listening sockets.  If this has
+     * already been bound then we're past the point where we should have
+     * created the OS socket, otherwise we can just handover.
+     *
+     * Note that this only applies if EF_SCALABLE_FILTERS is set.  If not,
+     * then we hand over sockets as soon as IP_TRANSPARENT is applied.
+     */
+    NI_LOG(epi->sock.netif, USAGE_WARNINGS, "Listening sockets using socket "
+           "option IP_TRANSPARENT cannot be accelerated");
+    if( epi->sock.s->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND ) {
+      rc = CI_SOCKET_HANDOVER;
+    }
+    else {
+      rc = EINVAL;
+    }
+  }
+  else {
+    rc = ci_tcp_listen(&(epi->sock), fdinfo->fd, backlog);
+  }
 
   if( rc == CI_SOCKET_HANDOVER ||
       ( (rc < 0) && CITP_OPTS.no_fail &&
@@ -255,7 +499,9 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
      * first (that's the very last thing that ci_tcp_listen() does, so it
      * won't have happened yet).
      */
+    ci_netif_lock_fdi(epi);
     rc = ci_tcp_helper_listen_os_sock(fdinfo->fd, backlog);
+    ci_netif_unlock_fdi(epi);
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_listen);
     tcp_handover(epi);
     return rc;
@@ -357,8 +603,8 @@ static int citp_tcp_accept_alien(ci_netif* ni, ci_tcp_socket_listen* listener,
   }
   ci_assert(ani);
 
-  newfd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(ani),
-                                    sp, AF_UNSPEC, flags);
+  newfd = ci_tcp_helper_tcp_accept_sock_attach(ci_netif_get_driver_handle(ani),
+                                               sp, flags);
   if( newfd < 0 ) {
     if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
     return -1;
@@ -416,65 +662,6 @@ fail:
 }
 
 
-#if CI_CFG_FD_CACHING
-static int citp_tcp_accept_cached_fixup_flags(ci_netif* ni, ci_tcp_state* ts,
-                                              int fd, int flags)
-{
-  int current_flags = 0;
-  int new_flags;
-  int rc = 0;
-
-  /* Socket caching is only supported on linux, where these are identical */
-  CI_BUILD_ASSERT(O_NONBLOCK == O_NDELAY);
-
-  if( !!(flags & O_NONBLOCK) != 
-      !!(ts->s.b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK) ) {
-    /* Get current flags */
-    current_flags = ci_sys_fcntl(fd, F_GETFL);
-
-    if( current_flags >= 0 ) {
-      /* Add or remove O_NONBLOCK flag */
-      new_flags = flags & O_NONBLOCK ? (current_flags | O_NONBLOCK) :
-                                       (current_flags & ~O_NONBLOCK);
-
-      /* Set new value */
-      rc = ci_sys_fcntl(fd, F_SETFL, new_flags);
-
-      /* Flip the value of the onload flag */
-      if( rc == 0 )
-        ci_atomic32_merge(&ts->s.b.sb_aflags, ~ts->s.b.sb_aflags,
-                          CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY);
-      else
-        NI_LOG(ni, RESOURCE_WARNINGS, "%s: Failed to modify O_NONBLOCK setting"
-               " of cached socket to new value", __FUNCTION__);
-    }
-    else {
-      NI_LOG(ni, RESOURCE_WARNINGS, "%s: Failed to modify O_NONBLOCK setting "
-             "of cached socket to new value", __FUNCTION__);
-    }
-  }
-
-#ifdef O_CLOEXEC
-  if( !!(flags & O_CLOEXEC) != 
-      !!(ts->s.b.sb_aflags & CI_SB_AFLAG_O_CLOEXEC) ) {
-    /* Set new value */
-    rc = ci_sys_fcntl(fd, F_SETFD, (flags & O_CLOEXEC) ? FD_CLOEXEC : 0);
-
-    /* Flip the value of the onload flag */
-    if( rc == 0 )
-      ci_atomic32_merge(&ts->s.b.sb_aflags, ~ts->s.b.sb_aflags,
-                        CI_SB_AFLAG_O_CLOEXEC);
-    else
-      NI_LOG(ni, RESOURCE_WARNINGS, "%s: Failed to modify O_CLOEXEC setting of"
-             " cached socket to new value", __FUNCTION__);
-  }
-#endif
-
-  return rc;
-}
-#endif
-
-
 static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
 			      ci_tcp_socket_listen* listener,
 			      struct sockaddr* sa, socklen_t* p_sa_len,
@@ -486,7 +673,6 @@ static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
   citp_waitable* w;
   int newfd;
 #if CI_CFG_FD_CACHING
-  citp_fdinfo_p prev;
   int from_cache;
 #endif
 
@@ -506,92 +692,29 @@ static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
   ci_assert(w->state & CI_TCP_STATE_TCP);
   ci_assert(w->state != CI_TCP_LISTEN);
   ts = &CI_CONTAINER(citp_waitable_obj, waitable, w)->tcp;
-
-  ci_ni_dllist_remove_safe(ni, &ts->epcache_fd_link);
-  ci_sock_unlock(ni, &listener->s.b);
-
-  newfd = -1;
 #if CI_CFG_FD_CACHING
   from_cache = ci_tcp_is_cached(ts);
+  ci_ni_dllist_remove_safe(ni, &ts->epcache_fd_link);
 #endif
+  ci_sock_unlock(ni, &listener->s.b);
 
-  if( fdtable_strict() )  CITP_FDTABLE_LOCK();
-
-#if CI_CFG_FD_CACHING
-  /* It is possible that someone is concurrently trying to dup2/3 onto the
-   * cached fd we're using.  We need to ensure that the NO_FD flag does not
-   * change once we've decided we don't need an fd, so mark the fdtable entry
-   * as busy.
-   *
-   * This is similar to the case with non-cached fds between return from the
-   * accept ioctl, and setting the entry in the fdtable when not using
-   * EF_FDTABLE_STRICT=1, so if we're requiring that apps that might be doing
-   * this set that option anyway in the non-caching case, we may want to
-   * consider only doing this check if fdtable_strict()...
-   */
-  if( from_cache && !(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
-    prev = citp_fdtable_new_fd_set(ts->cached_on_fd, fdip_busy,
-                                   fdtable_strict());
-
-    /* Now we're in one of two states:
-     * - there was dup2/3 in progress onto our fd, but it's now completed
-     * - there was no dup2/3 in progress, and one can't happen until we
-     *   clear the busy state of the fd
-     * This means that we can safely use the CI_SB_AFLAG_IN_CACHE_NO_FD flag.
-     */
-    if( ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD )
-      citp_fdtable_busy_clear(ts->cached_on_fd, prev, fdtable_strict());
+  newfd = citp_tcp_ep_acquire_fd(ni, ts, listener, ts->s.domain, SOCK_STREAM,
+                                 flags);
+  if( newfd < 0 ) {
+    Log_E(ci_log(LPF "%s: citp_tcp_ep_acquire_fd failed: %d",
+                 __FUNCTION__, newfd));
+    ci_sock_lock(ni, &listener->s.b);
+    ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+    ci_tcp_acceptq_put_back(ni, listener, &ts->s.b);
+    CITP_STATS_TCP_LISTEN(++listener->stats.n_accept_no_fd);
+    ci_sock_unlock(ni, &listener->s.b);
+    return -1;
   }
-
-  if( !from_cache || (ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
-#endif
-    /* Need to create new fd */
-    newfd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(ni),
-                                      S_SP(ts), AF_UNSPEC, flags);
-    if( newfd < 0 ) {
-      Log_E(ci_log(LPF "%s: ci_tcp_helper_sock_attach %d",
-                   __FUNCTION__, newfd));
-      if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
-      ci_sock_lock(ni, &listener->s.b);
-      ci_assert(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-      ci_tcp_acceptq_put_back(ni, listener, &ts->s.b);
-      CITP_STATS_TCP_LISTEN(++listener->stats.n_accept_no_fd);
-      ci_sock_unlock(ni, &listener->s.b);
-      return -1;
-    }
-
-    citp_fdtable_new_fd_set(newfd, fdip_busy, fdtable_strict());
-#if CI_CFG_FD_CACHING
-  }
-  else {
-    /* On fork, we uncache all sockets so shouldn't get here. */
-    ci_assert_equal(ts->cached_on_pid, getpid());
-    newfd = ts->cached_on_fd;
-
-    /* It's possible that this accept wants different flags to those on our
-     * cached socket - if so we need to sort that out.
-     */
-    citp_tcp_accept_cached_fixup_flags(ni, ts, newfd, flags);
-
-    /* We're reusing a cached socket.  We don't attach, but need to set the
-     * flags that would be set on attach.  We also clear the cached_on_fd
-     * state.
-     *
-     * This state must be consistent before we add the entry to the fdtable.
-     */
-    ci_atomic32_and(&ts->s.b.sb_aflags,
-                    ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ |
-                      CI_SB_AFLAG_IN_CACHE));
-    ts->cached_on_fd = -1;
-    ts->cached_on_pid = -1;
-  }
-#endif
 
   Log_EP(ci_log("%s: accepted fd=%d", __FUNCTION__, newfd));
-  if( fdtable_strict() )  CITP_FDTABLE_UNLOCK();
 
-  /* ts didn't come from cache, or it was for another process.  Either way,
-   * we need to create the u/l state for the fd (i.e. fdinfo).
+  /* Whether [ts] came from the cache or not, we need to create the u/l state
+   * for the fd (i.e. fdinfo).
    */
   ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN));
   ci_assert(!(ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ));
@@ -614,9 +737,10 @@ static int citp_tcp_accept_ul(citp_fdinfo* fdinfo, ci_netif* ni,
 
 #if CI_CFG_FD_CACHING
   if( from_cache ) {
-    ci_atomic32_inc(&ni->state->cache_avail_stack);
+    ci_atomic32_inc(&ni->state->passive_cache_avail_stack);
     ci_atomic32_inc(&listener->cache_avail_sock);
-    ci_assert_le(ni->state->cache_avail_stack, ni->state->opts.sock_cache_max);
+    ci_assert_le(ni->state->passive_cache_avail_stack,
+                 ni->state->opts.sock_cache_max);
     ci_assert_le(listener->cache_avail_sock,
                  ni->state->opts.per_sock_cache_max);
   }
@@ -838,6 +962,7 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
                             citp_lib_context_t* lib_context)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
+  ci_sock_cmn* s = epi->sock.s;
   int rc;
   int moved = 0;
 
@@ -849,7 +974,24 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
               (sai != NULL) ? CI_BSWAP_BE16(sai->sin_port) : 0, sa_len));
 #endif
 
-  rc = ci_tcp_connect( &epi->sock, sa, sa_len, fdinfo->fd, &moved);
+
+  /* We do not support implicit bind of sockets with IP_TRANSPARENT set.
+   * These sockets are expected to be used in one of 2 ways:
+   * - active connects using a specific local address and port
+   * - listeners with wild ip or port
+   * If this is an active connect it must specify a port.  We don't maintain
+   * an OS socket, so can't get the port number that way.  If we need to create
+   * an OS socket to get the port we'll have to handover.
+   */
+  if( (s->s_flags & CI_SOCK_FLAG_TPROXY) &&
+      (s->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND) ) {
+    NI_LOG(epi->sock.netif, USAGE_WARNINGS, "Sockets using socket option "
+           "IP_TRANSPARENT must explicitly bind to a port to be accelerated");
+    rc = CI_SOCKET_HANDOVER;
+  }
+  else {
+    rc = ci_tcp_connect( &epi->sock, sa, sa_len, fdinfo->fd, &moved);
+  }
 
   if( moved ) {
     fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE, CI_FALSE);
@@ -863,60 +1005,81 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
     /* Possibly we also should handover.  To do it properly, we need
      * current epi value. */
     epi = fdi_to_sock_fdi(fdinfo);
+    s = epi->sock.s;
   }
 
   if (rc == CI_SOCKET_HANDOVER
       || ((rc < 0) && CITP_OPTS.no_fail &&
           (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS))) {
-    /* Try to connect the OS socket. OS connect also syncs non-blocking
-     * state between UL/OS sockets. */
-    citp_exit_lib(lib_context, FALSE);
-    rc = ci_tcp_helper_connect_os_sock(fdinfo->fd, sa, sa_len);
-    citp_reenter_lib(lib_context);
-    /* Do handover to OS in the case of success only */
-    if( rc == 0 ||
-        /* \todo If non-blocking OS connect fails, we may want to connect
-         *       via L5 NIC. It will work, but not using UL stack. */
-        (((epi->sock.s->b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK |
-                                       CI_SB_AFLAG_O_NDELAY))
-          || epi->sock.s->so.sndtimeo_msec) &&
-         (errno == EINPROGRESS)) ) {
-      int saved_errno = errno;
-      CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_connect);
-      tcp_handover(epi);
-      errno = saved_errno;
-      return rc;
+    /* We try to connect the OS socket if we have one, or it's valid to create
+     * one.  That means non-tproxy sockets, or tproxy sockets that have not
+     * been bound (ie they wouldn't have an os socket even if they weren't
+     * tproxy.
+     */
+    if( !(s->s_flags & CI_SOCK_FLAG_TPROXY) ||
+         (s->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND) ) {
+      ci_netif_lock_fdi(epi);
+      if( ~epi->sock.s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED ) {
+        rc = ci_tcp_helper_os_sock_create_and_set(epi->sock.netif, fdinfo->fd,
+                                                  epi->sock.s,
+                                                  0, 0, NULL, 0);
+      }
+      ci_netif_unlock_fdi(epi);
+
+      /* Try to connect the OS socket. OS connect also syncs non-blocking
+       * state between UL/OS sockets. */
+      citp_exit_lib(lib_context, FALSE);
+      rc = ci_tcp_helper_connect_os_sock(fdinfo->fd, sa, sa_len);
+      citp_reenter_lib(lib_context);
+      /* Do handover to OS in the case of success only */
+      if( rc == 0 ||
+          /* \todo If non-blocking OS connect fails, we may want to connect
+           *       via L5 NIC. It will work, but not using UL stack. */
+          (((epi->sock.s->b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK |
+                                         CI_SB_AFLAG_O_NDELAY))
+            || epi->sock.s->so.sndtimeo_msec) &&
+           (errno == EINPROGRESS)) ) {
+        int saved_errno = errno;
+        CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_connect);
+        tcp_handover(epi);
+        errno = saved_errno;
+        return rc;
+      }
+      else {
+        /* binding information may get modified by connection failure */
+        int saved_errno = errno;  /* may get trampled in the next calls */
+        ci_fd_t fd = ci_get_os_sock_fd(fdinfo->fd );
+
+        if( fd >= 0 ) {
+          union ci_sockaddr_u sa_u;
+          socklen_t sa_len = sizeof(sa_u);
+
+          if( ci_sys_getsockname(fd, &sa_u.sa, &sa_len) == 0 ) {
+            if( sa_len >= sizeof(struct sockaddr_in) &&
+                sa_u.sa.sa_family == AF_INET ) {
+              sock_lport_be16(epi->sock.s) = sa_u.sin.sin_port;
+#if CI_CFG_FAKE_IPV6
+            } else if( sa_len >= sizeof(struct sockaddr_in6) && 
+                       sa_u.sa.sa_family == AF_INET6 ) {
+              sock_lport_be16(epi->sock.s) = sa_u.sin6.sin6_port;
+#endif
+            } else {
+              Log_U(ci_log("%s: sockaddr from getsockname() len:%d, fam:%d",
+                __FUNCTION__, sa_len, sa_u.sa.sa_family));
+            }
+          }
+          ci_rel_os_sock_fd(fd);
+        }
+
+        errno = saved_errno;
+        epi->sock.s->tx_errno = EPIPE;
+
+        epi->sock.s->rx_errno = ENOTCONN;
+      }
     }
     else {
-      /* binding information may get modified by connection failure */
-      int saved_errno = errno;  /* may get trampled in the next calls */
-      ci_fd_t fd = ci_get_os_sock_fd( &epi->sock, fdinfo->fd );
-
-      if( fd >= 0 ) {
-        union ci_sockaddr_u sa_u;
-        socklen_t sa_len = sizeof(sa_u);
-
-        if( ci_sys_getsockname(fd, &sa_u.sa, &sa_len) == 0 ) {
-          if( sa_len >= sizeof(struct sockaddr_in) &&
-              sa_u.sa.sa_family == AF_INET ) {
-            sock_lport_be16(epi->sock.s) = sa_u.sin.sin_port;
-#if CI_CFG_FAKE_IPV6
-          } else if( sa_len >= sizeof(struct sockaddr_in6) && 
-                     sa_u.sa.sa_family == AF_INET6 ) {
-            sock_lport_be16(epi->sock.s) = sa_u.sin6.sin6_port;
-#endif
-          } else {
-            Log_U(ci_log("%s: sockaddr from getsockname() len:%d, fam:%d",
-              __FUNCTION__, sa_len, sa_u.sa.sa_family));
-          }
-        }
-        ci_rel_os_sock_fd(fd);
-      }
-
-      errno = saved_errno;
-      epi->sock.s->tx_errno = EPIPE;
-
-      epi->sock.s->rx_errno = ENOTCONN;
+      NI_LOG(epi->sock.netif, USAGE_WARNINGS, "Sockets using socket option "
+             "IP_TRANSPARENT cannot be handed over after bind");
     }
   }
   citp_fdinfo_release_ref( fdinfo, 0 );
@@ -926,7 +1089,7 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
 
 #if CI_CFG_FD_CACHING
 static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
-                                  ci_tcp_socket_listen* tls)
+                                  ci_socket_cache_t* cache, int active)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   ci_sock_cmn* s = epi->sock.s;
@@ -940,7 +1103,7 @@ static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
    * - decrement the remaining number of cache spaces
    * - what we're cached on
    * - setting the NOT_READY flag, to avoid incorrect re-probe
-   * - pushing onto the epcache_pending list
+   * - pushing onto the cache or pending list
    *
    * Then we need to ensure that the rest of the socket state closely
    * matches what it would be if we weren't caching it.  This means doing
@@ -951,34 +1114,33 @@ static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
    * We don't go via citp_waitable_all_fds_gone as we must not set the
    * ORPHAN flag - we remain attached to our fd.
    */
-  ci_atomic32_dec(&netif->state->cache_avail_stack);
-  ci_atomic32_dec(&tls->cache_avail_sock);
-  ci_assert_ge(netif->state->cache_avail_stack, 0);
-  ci_assert_ge(tls->cache_avail_sock, 0);
-  ci_assert_lt(netif->state->cache_avail_stack,
+  ci_atomic32_dec((volatile ci_uint32*)CI_NETIF_PTR(netif,
+                                                    cache->avail_stack));
+  ci_assert_ge(cache->avail_stack, 0);
+  ci_assert_lt(*(ci_uint32*)CI_NETIF_PTR(netif, cache->avail_stack),
                netif->state->opts.sock_cache_max);
-  ci_assert_lt(tls->cache_avail_sock, netif->state->opts.per_sock_cache_max);
 
   ts->cached_on_fd = fdinfo->fd;
   ts->cached_on_pid = getpid();
 
   ci_assert(!(s->b.sb_aflags & CI_SB_AFLAG_NOT_READY));
-  ci_atomic32_or(&s->b.sb_aflags, CI_SB_AFLAG_NOT_READY | CI_SB_AFLAG_IN_CACHE);
+  ci_atomic32_or(&s->b.sb_aflags, CI_SB_AFLAG_NOT_READY | CI_SB_AFLAG_IN_CACHE
+                                 | (active ? 0 : CI_SB_AFLAG_IN_PASSIVE_CACHE));
 
   /* If this socket was previously accepted from cache it may already be on
    * the connected list, so it needs removing before pushing to the pending
    * list.
    */
   ci_ni_dllist_remove_safe(netif, &ts->epcache_link);
-  ci_ni_dllist_push(netif, &tls->epcache_pending, &ts->epcache_link);
+  ci_ni_dllist_push(netif, &cache->pending, &ts->epcache_link);
 
   /* If the listening socket is going away we might not be able to push it on
    * to the list of fd-owning-states (and there's no point in doing so anyway).
-   * In that case, we'll just call close the fd now, and all the previous state
+   * In that case, we'll just call close the fd now, and all the previous stat:
    * will be tidied up eventually by uncache_ep().
    */
   ci_assert(ci_ni_dllist_is_self_linked(netif, &ts->epcache_fd_link));
-  if( ! ci_ni_dllist_concurrent_push(netif, &tls->epcache_fd_states,
+  if( ! ci_ni_dllist_concurrent_push(netif, &cache->fd_states,
                                      &ts->epcache_fd_link) )
     ci_sys_close(ts->cached_on_fd);
 
@@ -1003,28 +1165,45 @@ static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
       !(ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
     ci_netif_fin_timeout_enter(netif, ts);
 
-  ci_tcp_close(netif, ts);
+  /* Now need to trigger the next transition.  If the socket is not closed
+   * yet then we just go via ci_tcp_close, which will handle whatever state
+   * we're in appropriately.
+   *
+   * If we're already closed there's nothing else we're waiting for - we can
+   * free to cache straightaway.
+   */
+  if( ts->s.b.state != CI_TCP_CLOSED ) {
+    ci_tcp_close(netif, ts);
+  }
+  else {
+    /* Only active cached sockets can go directly to the cached list - we
+     * can only cache passive sockets that still have their hw filter ref.
+     */
+    ci_assert(active);
+    ci_tcp_state_free_to_cache(netif, ts);
+  }
   ci_assert(ci_tcp_is_cached(ts));
 }
-#endif
 
 
-/* Close a user-level file-descriptor.
- */
-static int citp_tcp_close(citp_fdinfo* fdinfo)
+static void citp_tcp_close_passive_cached(ci_netif* netif, citp_fdinfo* fdinfo,
+                                          ci_tcp_socket_listen* tls)
 {
-  citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
-  ci_sock_cmn* s = epi->sock.s;
+  ci_atomic32_dec(&tls->cache_avail_sock);
+  ci_assert_ge(tls->cache_avail_sock, 0);
+  ci_assert_lt(tls->cache_avail_sock, netif->state->opts.per_sock_cache_max);
 
-  /* SO_LINGER is handled in-kernel */
-  if( s->b.state != CI_TCP_LISTEN && (s->s_flags & CI_SOCK_FLAG_LINGER) ) {
-    epi->sock.so_linger_hash = linger_hash(s);
-  }
-  else
-    epi->sock.so_linger_hash = 0;
-
-  return 0;
+  citp_tcp_close_cached(fdinfo, &tls->epcache, 0);
 }
+
+
+static void citp_tcp_close_active_cached(ci_netif* netif, citp_fdinfo* fdinfo)
+{
+  citp_tcp_close_cached(fdinfo, &netif->state->active_cache, 1);
+}
+
+
+#endif
 
 
 #if CI_CFG_FD_CACHING
@@ -1062,14 +1241,12 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
 
   Log_VSS(ci_log(LPF "cache("EF_FMT")", EF_PRI_ARGS(epi, fdinfo->fd)));
 
-  /* We limit the maximum number of sockets cached in a
-   * stack. Technically this needs the stack lock, and we check it
-   * again with lock held below, but try it first without in case we
-   * can avoid taking the lock unnecessarily.
+  /* We don't cache OS-backed sockets as managing the backing socket would
+   * require going into the kernel.  This stops us from caching listening
+   * sockets.
    */
-  if( netif->state->cache_avail_stack == 0 ) {
-    Log_EP(ci_log("FD %d not cached - stack limit reached", fdinfo->fd));
-    CITP_STATS_NETIF(++netif->state->stats.sockcache_stacklim);
+  if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED ) {
+    Log_EP(ci_log("FD %d not cached - has backing socket", fdinfo->fd));
     return 0;
   }
 
@@ -1089,8 +1266,7 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     return 0;
   }
 
-  /* We may not be cacheable, for example if we've been duped (this will also
-   * remove listening sockets, which don't get can_cache set), or added to
+  /* We may not be cacheable, for example if we've been duped, or added to
    * a ul_epoll=2 set.
    */
   if( !fdinfo->can_cache ) {
@@ -1115,48 +1291,77 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     return 0;
   }
 
-  /* We limit the maximum number of sockets cached in a stack. */
-  if( netif->state->cache_avail_stack == 0 ) {
-    Log_EP(ci_log("FD %d not cached - stack limit reached", fdinfo->fd));
-    CITP_STATS_NETIF(++netif->state->stats.sockcache_stacklim);
-    goto unlock_out;
+  /* We need to decide whether this socket should go on the passive- or
+   * active-open cache, as the remaining work is different in each case. */
+  if( SOCK_TO_TCP(s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED ) {
+    rc = ci_netif_listener_lookup(netif, sock_laddr_be32(s),
+                                  sock_lport_be16(s));
+    if( rc < 0 ) {
+      /* If the listener has been closed, we can't cache this socket. */
+      rc = 0;
+      goto unlock_out;
+    }
+
+    /* This is a passive-open socket whose listener is still open, so check
+     * that we satisfy the additional restrictions placed on the passive cache.
+     */
+
+    /* We limit the maximum number of sockets cached in a stack. */
+    if( netif->state->passive_cache_avail_stack == 0 ) {
+      Log_EP(ci_log("FD %d not cached - passive stack limit reached",
+                    fdinfo->fd));
+      CITP_STATS_NETIF(++netif->state->stats.passive_sockcache_stacklim);
+      goto unlock_out;
+    }
+
+    /* The tcp state needs to still have its filters, or we'd have to go into
+     * kernel anyway.
+     */
+    if( !(s->b.state & CI_TCP_STATE_TCP_CONN) ) {
+      Log_EP(ci_log("FD %d not cached - not in suitable state (0x%x)",
+                    fdinfo->fd, s->b.state));
+      goto unlock_out;
+    }
+
+    if( s->s_flags & CI_SOCK_FLAG_FILTER ) {
+      Log_EP(ci_log("FD %d not cached - full match hw filter is installed",
+                    fdinfo->fd));
+      goto unlock_out;
+    }
+
+    tls = SP_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
+
+    if( tls->cache_avail_sock == 0 ) {
+      Log_EP(ci_log("FD %d not cached - per-socket limit reached", fdinfo->fd));
+      CITP_STATS_NETIF(++netif->state->stats.sockcache_socklim);
+      goto unlock_out;
+    }
+
+    /* Woohoo!  Cache this sucker! */
+    citp_tcp_close_passive_cached(netif, fdinfo, tls);
+    Log_EP(ci_log("FD %d cached on passive-open cache", fdinfo->fd));
+  }
+  else {
+    /* This socket goes on the active-open cache, so we're good to go.
+     * Currently the only such sockets are either closed and unbound or have
+     * IP_TRANSPARENT set. */
+    ci_assert(s->s_flags & CI_SOCK_FLAG_TPROXY ||
+              (s->b.state == CI_TCP_CLOSED &&
+               ! (s->s_flags & CI_SOCK_FLAG_BOUND)));
+
+    /* We limit the maximum number of sockets cached in a stack. */
+    if( netif->state->active_cache_avail_stack == 0 ) {
+      Log_EP(ci_log("FD %d not cached - active stack limit reached",
+                    fdinfo->fd));
+      CITP_STATS_NETIF(++netif->state->stats.active_sockcache_stacklim);
+      goto unlock_out;
+    }
+
+    citp_tcp_close_active_cached(netif, fdinfo);
+    Log_EP(ci_log("FD %d cached on active-open cache", fdinfo->fd));
   }
 
-  /* The tcp state needs to still have its filters, or we'd have to go into
-   * kernel anyway.
-   */
-  if( !(s->b.state & CI_TCP_STATE_TCP_CONN) ) {
-    Log_EP(ci_log("FD %d not cached - not in suitable state (0x%x)",
-                  fdinfo->fd, s->b.state));
-    goto unlock_out;
-  }
-
-  if( s->s_flags & CI_SOCK_FLAG_FILTER ) {
-    Log_EP(ci_log("FD %d not cached - full match hw filter is installed",
-                  fdinfo->fd));
-    goto unlock_out;
-  }
-
-  /* We need a listening socket to cache on. */
-  rc = ci_netif_filter_lookup(netif, sock_laddr_be32(s), sock_lport_be16(s),
-                              0,0, sock_protocol(s));
-  if( rc < 0 ) {
-    Log_EP(ci_log("FD %d not cached - no listening socket", fdinfo->fd));
-    goto unlock_out;
-  }
-
-  tls = SP_TO_TCP_LISTEN(netif, CI_NETIF_FILTER_ID_TO_SOCK_ID(netif, rc));
-
-  if( tls->cache_avail_sock == 0 ) {
-    Log_EP(ci_log("FD %d not cached - per-socket limit reached", fdinfo->fd));
-    CITP_STATS_NETIF(++netif->state->stats.sockcache_socklim);
-    goto unlock_out;
-  }
-
-  /* Woohoo!  Cache this sucker! */
-  citp_tcp_close_cached(fdinfo, tls);
   rc = 1;
-  Log_EP(ci_log("FD %d cached", fdinfo->fd));
   CITP_STATS_NETIF(++netif->state->stats.sockcache_cached);
 
  unlock_out:
@@ -1241,6 +1446,13 @@ static int citp_tcp_setsockopt(citp_fdinfo* fdinfo, int level,
      * Hence, we just remove filters and wash our hands, but do not
      * handover. */
     if( epi->sock.s->b.state == CI_TCP_LISTEN ) {
+      /* Do not support listening tproxy sockets at the moment - that means
+       * we can be sure that something in the listening state does have an
+       * os socket backing it.
+       */
+      ci_assert_nflags(epi->sock.s->s_flags, CI_SOCK_FLAG_TPROXY);
+      ci_assert_flags(epi->sock.s->b.sb_aflags, CI_SB_AFLAG_OS_BACKED);
+
       ci_netif_lock_fdi(epi);
       ci_tcp_helper_ep_clear_filters(
                             ci_netif_get_driver_handle(epi->sock.netif),
@@ -1250,6 +1462,44 @@ static int citp_tcp_setsockopt(citp_fdinfo* fdinfo, int level,
       return 0;
     }
     else if( epi->sock.s->b.state == CI_TCP_CLOSED ) {
+      ci_netif_lock_fdi(epi);
+      if( (epi->sock.s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) == 0 ) {
+        /* Non os-backed TCP sockets are one of three things:
+         * 1 passively accepted
+         * 2 pre bind, connect and listen
+         * 3 tproxy bound sockets
+         * For sockets in state 2 we can create the OS socket now and sync the
+         * option we were trying to set, so that we can just handover.
+         * I'm not convinced we can get here at all for sockets in state 1 -
+         * perhaps if we concurrently close whilst setting the socket option.
+         * In that case it's valid to fail.
+         * For tproxy bound sockets we can't handover, so we fail.
+         */
+        if( (SOCK_TO_TCP(epi->sock.s)->tcpflags &
+             CI_TCPT_FLAG_PASSIVE_OPENED) ) {
+          ci_netif_unlock_fdi(epi);
+          RET_WITH_ERRNO(EINVAL);
+        }
+        else if( (epi->sock.s->s_flags & CI_SOCK_FLAG_TPROXY) &&
+                 (epi->sock.s->s_flags & CI_SOCK_FLAG_PORT_BOUND) ) {
+          ci_netif_unlock_fdi(epi);
+          NI_LOG(epi->sock.netif, USAGE_WARNINGS, "Sockets that have been "
+                 "bound with IP_TRANSPARENT set cannot be handed over, and "
+                 "socket option %d %d requires handover", level, optname);
+          RET_WITH_ERRNO(EINVAL);
+        }
+
+        rc = ci_tcp_helper_os_sock_create_and_set(epi->sock.netif, fdinfo->fd,
+                                                  epi->sock.s, level, optname,
+                                                  optval, optlen);
+        if( rc < 0 ) {
+          ci_netif_unlock_fdi(epi);
+          RET_WITH_ERRNO(errno);
+        }
+      }
+      ci_netif_unlock_fdi(epi);
+
+      ci_assert_flags(epi->sock.s->b.sb_aflags, CI_SB_AFLAG_OS_BACKED);
       tcp_handover(epi);
       return 0;
     }
@@ -1257,7 +1507,9 @@ static int citp_tcp_setsockopt(citp_fdinfo* fdinfo, int level,
       RET_WITH_ERRNO(EINVAL);
   }
 
-  if( (epi->sock.s->s_flags & CI_SOCK_FLAG_PORT_BOUND) != 0 &&
+  if( rc == 0 &&
+      (epi->sock.s->s_flags & CI_SOCK_FLAG_PORT_BOUND) != 0 &&
+      (epi->sock.s->s_flags & CI_SOCK_FLAG_FILTER) == 0 &&
       ci_opt_is_setting_reuseport(level, optname, optval, optlen) != 0 )
     /* If the following fails, we are not undoing the bind() done
      * before as that is non-trivial.  We are still leaving the socket
@@ -1427,17 +1679,19 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
   /* Fast path: CI_TCP_LISTEN or
    * CI_TCP_ESTABLISHED || CI_TCP_CLOSE_WAIT.
    * Everything else goes via ci_tcp_poll_events_nolisten() */
-  if( ( s->b.state & (CI_TCP_STATE_SYNCHRONISED | CI_TCP_STATE_CAN_FIN)) ==
-        (CI_TCP_STATE_SYNCHRONISED | CI_TCP_STATE_CAN_FIN) ) {
-    if( rd && ci_tcp_recv_not_blocked(SOCK_TO_TCP(s)) ) {
+  if( (s->b.state & CI_TCP_STATE_SYNCHRONISED) && s->tx_errno == 0 ) {
+    ci_tcp_state* ts = SOCK_TO_TCP(s);
+    if( rd && ( ci_tcp_recv_not_blocked(ts) ||
+                ci_udp_recv_q_not_empty(&ts->timestamp_q) ) ) {
         FD_SET(fdi->fd, ss->rdu);
         ++*n;
     }
-    if( wr && ci_tcp_tx_advertise_space(ni, SOCK_TO_TCP(s)) ) {
+    if( wr && ( ci_tcp_tx_advertise_space(ni, ts) ||
+                ci_udp_recv_q_not_empty(&ts->timestamp_q) ) ) {
         FD_SET(fdi->fd, ss->wru);
         ++*n;
     }
-    if( ex && tcp_urg_data(SOCK_TO_TCP(s)) & CI_TCP_URG_IS_HERE ) {
+    if( ex && ci_tcp_poll_events_nolisten_haspri(ni, ts) ) {
       FD_SET(fdi->fd, ss->exu);
       ++*n;
     }
@@ -1450,8 +1704,8 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
   }
   else {
     /* slow path: instead of copying ci_tcp_poll_events_nolisten(), just
-     * call it. */
-    unsigned mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
+     * call it.  And avoid races by calling ci_tcp_poll_events(). */
+    unsigned mask = ci_tcp_poll_events(ni, s);
     if( rd && (mask & SELECT_RD_SET) ) {
       FD_SET(fdi->fd, ss->rdu);
       ++*n;
@@ -1469,7 +1723,6 @@ static int citp_tcp_select(citp_fdinfo* fdi, int* n, int rd, int wr, int ex,
   return 1;
 }
 
-
 static int citp_tcp_poll(citp_fdinfo*__restrict__ fdi,
                          struct pollfd*__restrict__ pfd,
                          struct oo_ul_poll_state*__restrict__ ps)
@@ -1483,17 +1736,11 @@ static int citp_tcp_poll(citp_fdinfo*__restrict__ fdi,
   ni->state->stats.spin_poll++;
 #endif
 
-  if( s->b.state != CI_TCP_LISTEN )
-    mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-  else
-    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+  mask = ci_tcp_poll_events(ni, s);
   pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
   if( pfd->revents == 0 )
     if( citp_poll_if_needed(ni, ps->this_poll_frc, ps->ul_poll_spin) ) {
-      if( s->b.state != CI_TCP_LISTEN )
-        mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-      else
-        mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+      mask = ci_tcp_poll_events(ni, s);
       pfd->revents = mask & (pfd->events | POLLERR | POLLHUP);
     }
 
@@ -1527,10 +1774,7 @@ static int citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
 
   /* Try to return a result without polling if we can. */
   sleep_seq = s->b.sleep_seq.all;
-  if( s->b.state != CI_TCP_LISTEN )
-    mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-  else
-    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+  mask = ci_tcp_poll_events(ni, s);
   *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
                                               &s->b.sleep_seq.all,
                                               &seq_mismatch);
@@ -1541,10 +1785,7 @@ static int citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
   if( (*stored_event == 0) && !eps->ordering_info ) {
     if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
       sleep_seq = s->b.sleep_seq.all;
-      if( s->b.state != CI_TCP_LISTEN )
-        mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-      else
-        mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+      mask = ci_tcp_poll_events(ni, s);
       seq_mismatch = 0;
       *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
                                                   &s->b.sleep_seq.all,
@@ -1557,36 +1798,6 @@ static int citp_tcp_epoll(citp_fdinfo*__restrict__ fdi,
   return seq_mismatch;
 }
 #endif /*CI_CFG_USERSPACE_EPOLL*/
-
-
-#if CI_CFG_SENDFILE
-/*!
- * TCP post hook of the sendfile() system call.  Checks whether the send
- * queue needs to be advanced to push out enqueued data.
- *
- * \param out_fdinfo   output file descriptor information
- */
-static void citp_tcp_sendfile_post_hook(citp_fdinfo* out_fdinfo)
-{
- citp_socket* ep = fdi_to_socket(out_fdinfo);
-
-  if( ep->s->b.state & CI_TCP_STATE_TCP_CONN ) {
-    ci_tcp_state* ts = SOCK_TO_TCP(ep->s);
-    /* Do the basic check first: avoid locking unless we really need to. */
-    if( ts->tcpflags & CI_TCPT_FLAG_ADVANCE_NEEDED ) {
-      ci_ip_pkt_queue* sendq = &ts->send;
-      ci_netif* ni = ep->netif;
-      Log_V(ci_log(LPF "sendfile_post_hook(0x%lx)", (unsigned long)out_fdinfo));
-      ci_netif_lock(ni);
-      CHECK_TEP(ep);
-      ts->tcpflags &=~ CI_TCPT_FLAG_ADVANCE_NEEDED;
-      if(CI_LIKELY( ts->s.tx_errno == 0 && ! ci_ip_queue_is_empty(sendq) ))
-        ci_tcp_tx_advance(ts, ni);
-      ci_netif_unlock(ni);
-    }
-  }
-}
-#endif
 
 
 static int citp_tcp_zc_send(citp_fdinfo* fdi, struct onload_zc_mmsg* msg, 
@@ -1633,18 +1844,6 @@ static int citp_tcp_recvmsg_kernel(citp_fdinfo* fdi, struct msghdr *msg,
                                    int flags)
 {
   return -EOPNOTSUPP;
-}
-
-
-static int citp_tcp_zc_recv_filter(citp_fdinfo* fdi, 
-                                   onload_zc_recv_filter_callback filter,
-                                   void* cb_arg, int flags)
-{
-#if CI_CFG_ZC_RECV_FILTER
-  return -EOPNOTSUPP;
-#else
-  return -ENOSYS;
-#endif
 }
 
 
@@ -1761,7 +1960,7 @@ citp_tcp_ds_prepare(citp_fdinfo* fdi, int size, unsigned flags,
   enum onload_delegated_send_rc rc;
 
   /* Basic checks */
-  if( (~s->b.state & CI_TCP_STATE_CAN_FIN) ||
+  if( s->tx_errno != 0 ||
       (s->timestamping_flags & ONLOAD_SOF_TIMESTAMPING_STREAM) )
     return ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET;
   ts = SOCK_TO_TCP(epi->sock.s);
@@ -1817,12 +2016,14 @@ int citp_tcp_ds_complete(citp_fdinfo* fdi, const ci_iovec *iov, int iovlen,
   ci_sock_cmn* s = epi->sock.s;
   int rc;
 
-  if( (~s->b.state & CI_TCP_STATE_TCP) || s->b.state == CI_TCP_LISTEN )
-    return -EINVAL;
+  if( (~s->b.state & CI_TCP_STATE_TCP) || s->b.state == CI_TCP_LISTEN ) {
+    errno = EINVAL;
+    return -1;
+  }
 
   rc = ci_tcp_ds_done(ni, SOCK_TO_TCP(epi->sock.s), iov, iovlen, flags);
 
-  if( rc == -EPIPE && ! (flags & MSG_NOSIGNAL) ) {
+  if( rc == -1 && errno == EPIPE && ! (flags & MSG_NOSIGNAL) ) {
     ci_sys_ioctl(ci_netif_get_driver_handle(epi->sock.netif),
                  OO_IOC_KILL_SELF_SIGPIPE, NULL);
   }
@@ -1834,8 +2035,10 @@ int citp_tcp_ds_cancel(citp_fdinfo* fdi)
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
   ci_sock_cmn* s = epi->sock.s;
 
-  if( (~s->b.state & CI_TCP_STATE_TCP) || s->b.state == CI_TCP_LISTEN )
-    return -ENOTTY;
+  if( (~s->b.state & CI_TCP_STATE_TCP) || s->b.state == CI_TCP_LISTEN ) {
+    errno = ENOTTY;
+    return -1;
+  }
 
   SOCK_TO_TCP(epi->sock.s)->snd_delegated = 0;
   return 0;
@@ -1852,7 +2055,6 @@ citp_protocol_impl citp_tcp_protocol_impl = {
     .listen             = citp_tcp_listen,
     .accept             = citp_tcp_accept,
     .connect            = citp_tcp_connect,
-    .close              = citp_tcp_close,
     .shutdown           = citp_tcp_shutdown,
     .getsockname        = citp_tcp_getsockname,
     .getpeername        = citp_tcp_getpeername,
@@ -1875,12 +2077,8 @@ citp_protocol_impl citp_tcp_protocol_impl = {
     .epoll              = citp_tcp_epoll,
 #endif
 #endif
-#if CI_CFG_SENDFILE
-    .sendfile_post_hook = citp_tcp_sendfile_post_hook,
-#endif
     .zc_send            = citp_tcp_zc_send,
     .zc_recv            = citp_tcp_zc_recv,
-    .zc_recv_filter     = citp_tcp_zc_recv_filter,
     .recvmsg_kernel     = citp_tcp_recvmsg_kernel,
     .tmpl_alloc         = citp_tcp_tmpl_alloc,
     .tmpl_update        = citp_tcp_tmpl_update,

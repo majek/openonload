@@ -76,6 +76,25 @@ static inline void __msg_iov_init(struct msghdr *msg, struct iovec *iov,
   iov_iter_init(&(msg)->msg_iter, dir, iov, iovlen, bytes)
 #endif
 
+
+#ifdef EFRM_SOCK_SENDMSG_NEEDS_LEN
+static inline int oo_sock_sendmsg(struct socket *sock, struct msghdr *msg)
+{
+  size_t bytes = 0;
+
+#ifdef EFRM_HAVE_MSG_ITER
+  bytes = msg->msg_iter.count;
+#else
+  int i;
+  for( i = 0; i < msg->msg_iovlen; ++i )
+    bytes += msg->msg_iov[i].iov_len;
+#endif
+  return sock_sendmsg(sock, msg, bytes);
+}
+#define sock_sendmsg oo_sock_sendmsg
+#endif
+
+
 /*--------------------------------------------------------------------
  *
  * System calls
@@ -180,6 +199,16 @@ task_nsproxy_done(struct task_struct *tsk)
   task_unlock(tsk);
 }
 #endif
+#endif
+
+#ifndef EFRM_SOCK_CREATE_KERN_HAS_NET
+struct net;
+static inline int my_sock_create_kern(struct net *net, int family, int type,
+                                  int proto, struct socket **res)
+{
+  return sock_create_kern(family, type, proto, res);
+}
+#define sock_create_kern my_sock_create_kern
 #endif
 
 #endif  /* __CI_DRIVER_EFAB_LINUX_ONLOAD__ */

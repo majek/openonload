@@ -35,6 +35,14 @@ ci_tcp_poll_events_listen(ci_netif *ni, ci_tcp_socket_listen *tls)
   return 0;
 }
 
+ci_inline int/*bool*/
+ci_tcp_poll_events_nolisten_haspri(ci_netif *ni, ci_tcp_state *ts)
+{
+  return ( tcp_urg_data(ts) & CI_TCP_URG_IS_HERE ) ||
+         ( (ts->s.s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE) &&
+           ci_udp_recv_q_not_empty(&ts->timestamp_q) );
+}
+
 /* This function should not be used for listening sockets.
  * Once upon a time, this function simulated both Linux and Solaris.
  * Linux behaviour changed in 2.6.32, and this function was reworked.
@@ -47,26 +55,24 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
   ci_assert_nequal(ts->s.b.state, CI_TCP_LISTEN);
 
   /* Shutdown: */
-  if( !(ts->s.b.state & CI_TCP_STATE_CAN_FIN) &&
-      !(ts->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT) )
+  if( ts->s.tx_errno && !(ts->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT) )
     revents |= POLLOUT; /* SHUT_WR && !NONBLOCK_CONNECT */
   if( (TCP_RX_DONE(ts) & CI_SHUT_RD) )
-    revents |= POLLIN; /* SHUT_RD */
-  if( !(ts->s.b.state & CI_TCP_STATE_CAN_FIN) && TCP_RX_DONE(ts) )
+    revents |= POLLIN | POLLRDHUP; /* SHUT_RD */
+  if( ts->s.tx_errno && TCP_RX_DONE(ts) )
     revents |= POLLHUP; /* SHUT_RDWR */
   /* Errors */
-  if( ts->s.so_error )
+  if( ts->s.so_error || ci_udp_recv_q_not_empty(&ts->timestamp_q) )
     revents |= POLLERR;
 
   /* synchronised: !CLOSED !SYN_SENT */
   if( ts->s.b.state & CI_TCP_STATE_SYNCHRONISED ) {
     /* normal send: */
-    if( (ts->s.b.state & CI_TCP_STATE_CAN_FIN) && 
-        ci_tcp_tx_advertise_space(ni, ts) )
+    if( ! ts->s.tx_errno && ci_tcp_tx_advertise_space(ni, ts) )
       revents |= POLLOUT | POLLWRNORM;
 
     /* urg */
-    if( tcp_urg_data(ts) & CI_TCP_URG_IS_HERE )
+    if( ci_tcp_poll_events_nolisten_haspri(ni, ts) )
       revents |= POLLPRI;
 
     /* normal recv or nothing to recv forever */
@@ -81,6 +87,23 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
   return revents;
 }
 
+ci_inline short ci_tcp_poll_events(ci_netif* ni, ci_sock_cmn* s)
+{
+  short mask;
+  if( s->b.state == CI_TCP_LISTEN ) {
+    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
+    if( *((volatile ci_uint32 *)&s->b.state) != CI_TCP_LISTEN )
+      mask = 0;
+  }
+  else if( s->b.state == CI_TCP_INVALID ) {
+    mask = 0;
+  }
+  else {
+    mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
+  }
+  return mask;
+}
+
 
 ci_inline unsigned
 ci_udp_poll_events(ci_netif* ni, ci_udp_state* us)
@@ -92,14 +115,24 @@ ci_udp_poll_events(ci_netif* ni, ci_udp_state* us)
       (UDP_TX_ERRNO(us) && ! UDP_IS_SHUT_WR(us)) )
     events |= POLLERR;
 
-  if( UDP_IS_SHUT_RDWR(us) )
-    events |= POLLHUP | POLLIN;
+  if( UDP_IS_SHUT_RD(us) ) {
+    events |= POLLRDHUP | POLLIN;
+    if( UDP_IS_SHUT_RDWR(us) )
+      events |= POLLHUP;
+  }
 
-  if( UDP_RX_DONE(us) | ci_udp_recv_q_not_empty(us) )
+  if( UDP_RX_DONE(us) | ci_udp_recv_q_not_empty(&us->recv_q) )
     events |= POLLIN | POLLRDNORM;
 
   if( us->s.os_sock_status & OO_OS_STATUS_RX )
     events |= POLLIN | POLLRDNORM;
+
+  if( ci_udp_recv_q_not_empty(&us->timestamp_q) ||
+      (us->s.os_sock_status & OO_OS_STATUS_ERR) ) {
+    events |= POLLERR;
+    if( us->s.s_aflags & CI_SOCK_AFLAG_SELECT_ERR_QUEUE )
+      events |= POLLPRI;
+  }
 
   if( ci_udp_tx_advertise_space(us) &&
       (us->s.os_sock_status & OO_OS_STATUS_TX) )

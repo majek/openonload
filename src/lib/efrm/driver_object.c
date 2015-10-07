@@ -171,6 +171,7 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 	INIT_LIST_HEAD(&efrm_nic->clients);
 	efrm_nic->rx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
 	efrm_nic->tx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
+	efrm_nic->driverlink_generation = 0;
 	return 0;
 
 fail3:
@@ -290,13 +291,31 @@ int efrm_nic_post_reset(struct efhw_nic *nic)
 }
 
 
+int efrm_nic_reset_suspend(struct efhw_nic *nic)
+{
+	struct efrm_nic *rnic = efrm_nic(nic);
+	struct efrm_client *client;
+	struct list_head *client_link;
+
+	spin_lock_bh(&efrm_nic_tablep->lock);
+	list_for_each(client_link, &rnic->clients) {
+		client = container_of(client_link, struct efrm_client, link);
+		client->callbacks->reset_suspend(client, client->user_data);
+	}
+	spin_unlock_bh(&efrm_nic_tablep->lock);
+
+	return 0;
+}
+
+
 static void efrm_client_nullcb(struct efrm_client *client, void *user_data)
 {
 }
 
 
 static struct efrm_client_callbacks efrm_null_callbacks = {
-	efrm_client_nullcb
+	efrm_client_nullcb,
+	efrm_client_nullcb,
 };
 
 static void efrm_client_init_from_nic(struct efrm_nic *rnic,
@@ -411,7 +430,11 @@ EXPORT_SYMBOL(efrm_nic_present);
  */
 struct efx_dl_device* efhw_nic_dl_device(struct efhw_nic* efhw_nic)
 {
-	return linux_efhw_nic(efhw_nic)->dl_device;
+	struct efrm_nic* rnic = efrm_nic(efhw_nic);
+	struct linux_efhw_nic* lnic = linux_efhw_nic(efhw_nic);
+	if (rnic->rnic_flags & EFRM_NIC_FLAG_DRIVERLINK_PROHIBITED)
+		return NULL;
+	return lnic->dl_device;
 }
 EXPORT_SYMBOL(efhw_nic_dl_device);
 

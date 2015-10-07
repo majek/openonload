@@ -35,7 +35,6 @@ LIB_SRCS	:=		\
 		csum_copy_iovec_setlen.c \
 		cplane_ops.c	\
 		netif_init.c	\
-		tcp_init.c	\
 		tcp_connect.c	\
 		waitable.c	\
 		socket.c	\
@@ -47,6 +46,8 @@ LIB_SRCS	:=		\
 		pkt_filler.c	\
 		pio_buddy.c	\
 		pipe.c		\
+		common_sockopts.c \
+		tcp_sockopts.c  \
 		tcp_syncookie.c
 
 ifneq ($(DRIVER),1)
@@ -55,12 +56,9 @@ LIB_SRCS	+=		\
 		init.c		\
 		udp_sockopts.c	\
 		udp_ioctl.c	\
-		tcp_state_dup.c	\
 		signal.c	\
 		common_ioctl.c  \
                 efabcfg.c       \
-		common_sockopts.c \
-		tcp_sockopts.c  \
 		save_fd.c	\
 		tcp_helper.c	\
 		syscall.c	\

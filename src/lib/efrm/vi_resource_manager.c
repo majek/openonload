@@ -131,7 +131,7 @@ efrm_create_or_destroy_vi_resource_manager(
 
 	memset(efrm_vi_manager, 0, sizeof(*efrm_vi_manager));
 
-	efrm_vi_manager->workqueue = efrm_alloc_workqueue("sfc_vi");
+	efrm_vi_manager->workqueue = efrm_alloc_workqueue("sfc_vi", WQ_SYSFS);
 	if (efrm_vi_manager->workqueue == NULL) {
 		rc = -ENOMEM;
 		goto fail_create_workqueue;

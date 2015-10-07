@@ -34,11 +34,25 @@ efab_linux_trampoline_close:
 
 #elif defined(__x86_64__)
 
+/* we have return address on the stack before pt_regs, so
+ * pt_regs is expected on 8(%rsp) */
+#define RSP_TP_PT_REGS_OFFSET_BASE 8
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
+/* See Linux changeset 76f5df43cab5e765c0bd42289103e8f625813ae1
+ * "Always allocate a complete "struct pt_regs" on the kernel stack":
+ * linux used to skip callee-preserved r15-bx registers on older kernels.
+ * 6 registers, 8 bytes each gives 48 bytes of offset above base. */
+#define RSP_TP_PT_REGS_OFFSET (RSP_TP_PT_REGS_OFFSET_BASE - 6*8)
+#else
+#define RSP_TP_PT_REGS_OFFSET (RSP_TP_PT_REGS_OFFSET_BASE)
+#endif
+
 	.globl	efab_linux_trampoline_close
 	.type	efab_linux_trampoline_close,@function
 	.align 16
 efab_linux_trampoline_close:
-	leaq	-40(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
+	leaq	RSP_TP_PT_REGS_OFFSET(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
 	mov	(%rsp),%rdx     /* 3rd arg is return address */
 	jmp	efab_linux_trampoline_handler_close
 .Lfe1:
@@ -49,7 +63,7 @@ efab_linux_trampoline_close:
 	.type	efab_linux_trampoline_close32,@function
 	.align 16
 efab_linux_trampoline_close32:
-	leaq	-40(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
+	leaq	RSP_TP_PT_REGS_OFFSET(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
 	mov	(%rsp),%rdx     /* 3rd arg is return address */
 	jmp	efab_linux_trampoline_handler_close32
 .Lfe2:

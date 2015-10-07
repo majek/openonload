@@ -602,7 +602,7 @@ finish:
 finish_ret:
 	entry->state = new_state;
 	entry->mcdi_return_code = msg->mcdi_return_code;
-	if (ret <= 0) {
+	if (ret <= 0 && (new_state != DATA_PENDING_FAILED)) {
 		/* been closed mid transaction */
 		if (aoe_entry_dec(entry)) {
 			ret = -EINVAL;
@@ -660,8 +660,10 @@ static int mcdi_completion_handler(struct aoe_proxy_msg *msg)
 		return -EINVAL;
 	}
 
-	if (0 >= mcdi_decode_response_msg(entry, msg))
+	if (0 >= mcdi_decode_response_msg(entry, msg)) {
 		free_aoe_msg(msg);
+		msg = NULL;
+	}
 
 	/* If a multi part message has been send and all
 	 * the matching responses have been seen then it is
@@ -669,6 +671,10 @@ static int mcdi_completion_handler(struct aoe_proxy_msg *msg)
 	 */
 
 	if (entry->state >= DATA_PENDING) {
+		if(msg){
+			free_aoe_msg(msg);
+			msg = NULL;
+		}
 		wake_up(&entry->read_queue);
 		DPRINTK("Wake up sent, state for %d is %d\n", entry->seqno, entry->state);
 	} else {
@@ -860,8 +866,8 @@ static int aoe_mcdi_fc_info(struct aoe_device *dev, struct aoe_dev_info *info)
 	MCDI_SET_DWORD(inbuf, FC_IN_OP_HDR, MC_CMD_FC_OP_GET_VERSION);
 
 	msg.cmd = MC_CMD_FC;
-        msg.req_len = MC_CMD_FC_IN_GET_VERSION_LEN;
-        msg.resp_len = MC_CMD_FC_OUT_GET_VERSION_LEN;
+	msg.req_len = MC_CMD_FC_IN_GET_VERSION_LEN;
+	msg.resp_len = MC_CMD_FC_OUT_GET_VERSION_LEN;
 
 	msg.request_data = inbuf;
 	msg.response_data = outbuf;
@@ -999,6 +1005,31 @@ static int aoe_mcdi_fpga_info(struct aoe_device *dev, struct aoe_dev_info *info)
 	return 0;
 }
 
+static int aoe_mcdi_mum_info(struct aoe_device *dev, uint32_t* buf)
+{
+	struct aoe_proxy_msg msg = {0};
+	int ret = 0;
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_MUM_IN_GET_VERSION_LEN);
+	MCDI_DECLARE_BUF(outbuf, MC_CMD_MUM_OUT_GET_VERSION_LEN);
+
+	MCDI_SET_DWORD(inbuf, MUM_IN_OP_HDR, MC_CMD_MUM_OP_GET_VERSION);
+	msg.cmd = MC_CMD_MUM;
+	msg.req_len = MC_CMD_MUM_IN_GET_VERSION_LEN;
+	msg.resp_len = MC_CMD_MUM_OUT_GET_VERSION_LEN;
+	msg.request_data = inbuf;
+	msg.response_data = outbuf;
+
+	if ((ret = aoe_dl_send_block_wait(dev, &msg)))
+		return ret;
+
+	buf[0] = MCDI_DWORD(msg.response_data,
+					 MUM_OUT_GET_VERSION_VERSION_LO);
+	buf[1] = MCDI_DWORD(msg.response_data,
+					 MUM_OUT_GET_VERSION_VERSION_HI);
+
+	return 0;
+}
+
 static int aoe_mcdi_fpga_services_info(struct aoe_device *dev, struct aoe_dev_info *info)
 {
 	struct aoe_proxy_msg msg;
@@ -1089,6 +1120,24 @@ int aoe_mcdi_fpga_version(struct aoe_device *dev, char *buf)
                         info.fpga_major, info.fpga_minor, info.fpga_micro, info.fpga_build);
 }
 
+int aoe_mcdi_mum_version(struct aoe_device *dev, char *buf)
+{
+	int ret = 0;
+	uint32_t mum_version[2] = {0};
+	uint16_t *version = NULL;
+	ret = aoe_mcdi_mum_info(dev,mum_version);
+
+	if(ret)
+		return ret;
+
+	version = (uint16_t*)mum_version;
+	return snprintf(buf, PAGE_SIZE, "%d.%d.%d.%.4d\n",
+			le16_to_cpu(version[0]),
+			le16_to_cpu(version[1]),
+			le16_to_cpu(version[2]),
+			le16_to_cpu(version[3]));
+}
+
 int aoe_mcdi_fpga_services_version(struct aoe_device *dev, char *buf)
 {
 	struct aoe_dev_info info;
@@ -1148,6 +1197,7 @@ int aoe_mcdi_cpld_version(struct aoe_device *dev, char *buf)
 {
 	struct aoe_dev_info info;
 	int ret;
+
 	ret = aoe_mcdi_aoe_info(dev, &info);
 	if (ret)
 		return ret;
@@ -1246,6 +1296,30 @@ int aoe_mcdi_set_siena_override(struct aoe_device *dev, bool override)
 	return aoe_dl_send_block_wait(dev, &msg);
 }
 
+int aoe_mcdi_get_board_type_info(struct aoe_device *dev)
+{
+	struct aoe_proxy_msg msg = {0};
+	MCDI_DECLARE_BUF(outbuf, MC_CMD_GET_BOARD_CFG_OUT_LENMIN);
+	int ret = 0;
+
+	msg.cmd = MC_CMD_GET_BOARD_CFG;
+	msg.req_len = MC_CMD_GET_BOARD_CFG_IN_LEN;
+	msg.resp_len = MC_CMD_GET_BOARD_CFG_OUT_LENMIN;
+	msg.request_data = outbuf;
+	msg.response_data = outbuf;
+
+	if ((ret = aoe_dl_send_block_wait(dev, &msg)))
+	{
+		printk(KERN_ERR "sfc_aoe: aoe_mcdi_get_board_type_info failed %d\n", ret);
+		return ret;
+	}
+
+	dev->board_type = MCDI_DWORD(outbuf, GET_BOARD_CFG_OUT_BOARD_TYPE);
+
+	return ret;
+}
+
+
 static const char* aoe_fc_err(int rc)
 {
         switch (rc) {
@@ -1279,6 +1353,7 @@ void aoe_mcdi_ddr_ecc_status(struct aoe_device *dev,
 	int ret = 0;
 	uint32_t status;
 	uint8_t bank_id = params->bank_id;
+	const char **dimm_name = NULL;
 
 	msg.request_data = inbuf;
 
@@ -1300,34 +1375,37 @@ void aoe_mcdi_ddr_ecc_status(struct aoe_device *dev,
 
 		status = MCDI_DWORD(outbuf, AOE_OUT_DDR_ECC_STATUS_STATUS);
 
+		dimm_name = aoe_get_dimm_name(dev);
+
 		if (BITFIELD_GET(status, AOE_OUT_DDR_ECC_STATUS_SBE))
 			fpga_event(dev, "DDR Slot#%d(%s) Single-bit error_count = %d",
-			       bank_id, dimm_bank_name[bank_id],
+			       bank_id, dimm_name[bank_id],
 			       BITFIELD_GET(status, AOE_OUT_DDR_ECC_STATUS_SBE_COUNT));
 		if (BITFIELD_GET(status, AOE_OUT_DDR_ECC_STATUS_DBE))
 			fpga_event(dev, "DDR Slot#%d(%s) Double-bit error_count = %d",
-			       bank_id, dimm_bank_name[bank_id],
+			       bank_id, dimm_name[bank_id],
 			       BITFIELD_GET(status, AOE_OUT_DDR_ECC_STATUS_DBE_COUNT));
 		if (BITFIELD_GET(status, AOE_OUT_DDR_ECC_STATUS_CORDROP))
 			fpga_event(dev, "DDR Slot#%d(%s) Cordrop error_count = %d",
-			       bank_id, dimm_bank_name[bank_id],
+			       bank_id, dimm_name[bank_id],
 			       BITFIELD_GET(status, AOE_OUT_DDR_ECC_STATUS_CORDROP_COUNT));
 	}
 }
 
 static void aoe_ddr_ecc_status_event(struct aoe_port_info *nic_port, uint8_t bank_id)
 {
+	const char **dimm_name = NULL;
 	struct aoe_device *dev = nic_port->aoe_parent;
 	struct aoe_ddr_ecc_work_params_s *work_params =
 		&(dev->aoe_event_work.work_params.ddr_ecc_work_params);
 
 	work_params->bank_id = bank_id;
-
+	dimm_name = aoe_get_dimm_name(dev);
 	dev->aoe_event_work.work_type = AOE_WORK_DDR_ECC;
 	queue_work(dev->event_workwq, &dev->aoe_event_work.event_work);
 	fpga_event(dev,
 		   "DDR ECC status update on bank#%d(%s)",
-		   bank_id, dimm_bank_name[bank_id])
+		   bank_id, dimm_name[bank_id])
 }
 
 static const char* ptp_event_code_string(int32_t data)
@@ -1824,6 +1902,7 @@ int aoe_mcdi_ddr_partnum(struct aoe_dimm_info *dimm, char *buf)
 		return ret;
 
 	strncpy(buf, &(dimm->spd[DIMM_SPD_PARTNO_LBN]), DIMM_SPD_PARTNO_WIDTH);
+	buf[DIMM_SPD_PARTNO_WIDTH] = '\n';
 	buf[DIMM_SPD_PARTNO_WIDTH] = 0;
 
 	return strlen(buf);
@@ -1948,6 +2027,9 @@ int aoe_mcdi_info_boot_result(struct aoe_device *dev, char *buf)
 		reason = "Incorrect BSP";
 		break;
 	case MC_CMD_AOE_OUT_INFO_FC_BOOT_APP_EXECUTE:
+		reason = "OK";
+		break;
+	case MC_CMD_AOE_OUT_INFO_FC_BOOT_APP_STARTED:
 		reason = "OK";
 		break;
 	case MC_CMD_AOE_OUT_INFO_FC_BOOT_NO_BOOTROM:
@@ -2095,6 +2177,7 @@ void aoe_mcdi_set_funcs(struct aoe_device *dev)
 	dev->fpga_version = aoe_mcdi_fpga_version;
 	dev->board_rev = aoe_mcdi_board_revision;
 	dev->fc_version = aoe_mcdi_fc_version;
+	dev->mum_version = aoe_mcdi_mum_version;
 	dev->cpld_version = aoe_mcdi_cpld_version;
 	dev->fpga_build_changeset = aoe_mcdi_fpga_build_changeset;
 	dev->fpga_services_version = aoe_mcdi_fpga_services_version;

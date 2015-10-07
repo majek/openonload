@@ -40,37 +40,40 @@ typedef struct tcp_helper_endpoint_s tcp_helper_endpoint_t;
 
 
 struct tcp_helper_nic {
-  int                  intf_i;
-  struct oo_nic*       oo_nic;
-  struct efrm_vi*      vi_rs;
-  unsigned             vi_mem_mmap_bytes;
+  int                  thn_intf_i;
+  struct oo_nic*       thn_oo_nic;
+  struct efrm_vi*      thn_vi_rs;
+#if CI_CFG_SEPARATE_UDP_RXQ
+  struct efrm_vi*      thn_udp_rxq_vi_rs;
+#endif
+  /* Track the size of the VI mmap in the kernel. */
+  unsigned             thn_vi_mmap_bytes;
+#if CI_CFG_SEPARATE_UDP_RXQ
+  unsigned             thn_udp_rxq_vi_mmap_bytes;
+#endif
 #if CI_CFG_PIO
-  struct efrm_pio*     pio_rs;
-  unsigned             pio_io_mmap_bytes;
+  struct efrm_pio*     thn_pio_rs;
+  unsigned             thn_pio_io_mmap_bytes;
 #endif
 };
 
 
 struct tcp_helper_resource_s;
 
-typedef struct thc_legacy_os_sock_s {
-    ci_uint32                    tlos_laddr_be32;
-    ci_uint16                    tlos_lport_be16;
-    int                          tlos_protocol;
-    int                          tlos_pollwait_registered;
-    struct oo_file_ref*          tlos_os_sock;
-    int                          tlos_refs;
-    ci_dllink                    tlos_next;
-} thc_legacy_os_sock_t;
-
 typedef struct tcp_helper_cluster_s {
   struct efrm_vi_set*           thc_vi_set[CI_CFG_MAX_REGISTER_INTERFACES];
-  struct oof_thc*               thc_oof_head;
   struct tcp_helper_resource_s* thc_thr_head;
-  char                          thc_name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
+  char                          thc_name[CI_CFG_CLUSTER_NAME_LEN + 1];
   int                           thc_cluster_size;
   uid_t                         thc_euid;
   ci_dllist                     thc_tlos;
+
+#define THC_FLAG_PACKET_BUFFER_MODE 0x1
+#define THC_FLAG_HW_LOOPBACK_ENABLE 0x2
+#define THC_FLAG_TPROXY             0x4
+  unsigned                      thc_flags;
+  int                           thc_tproxy_ifindex;
+
   struct tcp_helper_cluster_s*  thc_next;
   oo_atomic_t                   thc_ref_count;
 } tcp_helper_cluster_t;
@@ -108,6 +111,8 @@ typedef struct tcp_helper_resource_s {
 #define OO_TRUSTED_LOCK_CLOSE_ENDPOINT    0x8
 #define OO_TRUSTED_LOCK_OS_READY          0x10
 #define OO_TRUSTED_LOCK_NEED_PRIME        0x20
+#define OO_TRUSTED_LOCK_DONT_BLOCK_SHARED 0x40
+#define OO_TRUSTED_LOCK_SWF_UPDATE        0x80
   volatile unsigned      trusted_lock;
 
   /*! Link for global list of stacks. */
@@ -144,6 +149,12 @@ typedef struct tcp_helper_resource_s {
   struct work_struct non_atomic_work;
   /* List of endpoints requiring work in non-atomic context. */
   ci_sllist     non_atomic_list;
+
+  /* For deferring resets to a non-atomic context. */
+#define ONLOAD_RESET_WQ_NAME "onload-rst-wq:%s"
+#define ONLOAD_RESET_WQ_NAME_BASELEN 15
+  char reset_wq_name[ONLOAD_RESET_WQ_NAME_BASELEN + CI_CFG_STACK_NAME_LEN];
+  struct workqueue_struct *reset_wq;
   struct work_struct reset_work;
 
 #ifdef CONFIG_NAMESPACES
@@ -183,9 +194,26 @@ typedef struct tcp_helper_resource_s {
    */
   ci_sllist             ep_tobe_closed;
 
+  /* This field is currently used under the trusted lock only, BUT it must
+   * be modified via atomic operations ONLY.  These flags are used in
+   * stealing the shared and trusted locks from atomic or driverlink
+   * context to workqueue context.  When such a "steal" (or "deferral")
+   * is in action, the field might be used from 2 contexts 
+   * simultaneously. */
   volatile ci_uint32    trs_aflags;
   /* We've deferred locks to non-atomic handler.  Must close endpoints. */
 # define OO_THR_AFLAG_CLOSE_ENDPOINTS     0x1
+  /* We've deferred locks to non-atomic handler.  Must poll and prime. */
+# define OO_THR_AFLAG_POLL_AND_PRIME      0x2
+  /* We've deferred locks to non-atomic handler.  Must unlock only. */
+# define OO_THR_AFLAG_UNLOCK              0x4
+  /* Have we deferred something while holding the trusted lock? */
+# define OO_THR_AFLAG_DEFERRED_TRUSTED    0x7
+  /* We've deferred shared lock to non-atomic handler.  Must allocate
+   * a packet set */
+#define OO_THR_AFLAG_NEED_PKT_SET         0x8
+  /* Have we deferred something while holding the shared lock? */
+# define OO_THR_AFLAG_DEFERRED_UNTRUSTED  0x8
 
   /*! Spinlock.  Protects:
    *    - ep_tobe_closed
@@ -198,6 +226,8 @@ typedef struct tcp_helper_resource_s {
 
   /* Bit mask of intf_i that need resetting by the lock holder */
   unsigned              intfs_to_reset;
+  /* Bit mask of intf_i that have been removed/suspended and not yet reset */
+  unsigned              intfs_suspended;
 
   unsigned              mem_mmap_bytes;
   unsigned              io_mmap_bytes;
@@ -212,11 +242,6 @@ typedef struct tcp_helper_resource_s {
   
   struct tcp_helper_nic      nic[CI_CFG_MAX_INTERFACES];
 
-#if CI_CFG_PKTS_AS_HUGE_PAGES
-  /* shmid of packet set */
-  ci_int32             *pkt_shm_id;
-#endif
-
   /* The cluster this stack is associated with if any */
   tcp_helper_cluster_t*         thc;
   /* TID of thread that created this stack within the cluster */
@@ -228,13 +253,6 @@ typedef struct tcp_helper_resource_s {
   struct mutex ofe_mutex;
   struct ofe_configurator* ofe_config;
 #endif
-
-  /* We may need to take the stack lock with irqs disabled (for example
-   * efab_os_callback()).  There are possible paths in the lock dropping code
-   * that are not valid in this context, so we use this tasklet to drop the
-   * lock for us.
-   */
-  struct tasklet_struct         lock_dropper;
 
   ci_waitable_t         ready_list_waitqs[CI_CFG_N_READY_LISTS];
   ci_dllist             os_ready_lists[CI_CFG_N_READY_LISTS];
@@ -299,14 +317,21 @@ struct tcp_helper_endpoint_s {
   /*! Head of the waitqueue */
   ci_waitable_t waitq;			
 
+  /* IRQ lock to protect os_socket.
+   * It is not ci_irqlock_t, because ci_irqlock_t is BH lock, but we need
+   * IRQ lock here.  This lock is used from Linux wake up callback, and
+   * __wake_up() function calls spin_lock_irqsave() before calling
+   * callbacks. */
+  spinlock_t lock;
+
   /*!< OS socket that backs this user-level socket.  May be NULL (not all
    * socket types have an OS socket).
-   * os_socket should be set only when aflags & OO_THR_EP_AFLAG_ATTACHED
+   * os_socket and os_sock_pt should be changed under ep->lock only.
    */
   struct oo_file_ref* os_socket;
 
-  /*!< OS socket poll table to get OS errors */
-  struct oo_os_sock_poll os_sock_pt;
+  /*!< Used to poll OS socket for OS events. */
+  struct oo_os_sock_poll os_sock_poll;
 
   struct fasync_struct* fasync_queue;
 
@@ -317,17 +342,11 @@ struct tcp_helper_endpoint_s {
 
   /*! Atomic endpoint flags not visible for UL. */
   volatile ci_uint32 ep_aflags;
-#define OO_THR_EP_AFLAG_ATTACHED       0x1
 #define OO_THR_EP_AFLAG_PEER_CLOSED    0x2  /* Used for pipe */
 #define OO_THR_EP_AFLAG_NON_ATOMIC     0x4  /* On the non-atomic list */
 #define OO_THR_EP_AFLAG_CLEAR_FILTERS  0x8  /* Needs filters clearing */
 #define OO_THR_EP_AFLAG_NEED_FREE      0x10 /* Endpoint to be freed */
-#define OO_THR_EP_AFLAG_OS_NOTIFIER    0x20 /* Pollwait registration for os
-                                             * sock used by cluster without
-                                             * kernel reuseport support is
-                                             * owned by this endpoint.
-                                             */
-#define OO_THR_EP_AFLAG_LEGACY_REUSEPORT    0x40
+#define OO_THR_EP_AFLAG_OS_NOTIFIER    0x20 /* Pollwait registration for os */
 
   struct ci_private_s* alien_ref;
 

@@ -80,13 +80,20 @@ ci_ip_pkt_fmt* __ci_netif_pkt_rx_to_tx(ci_netif* ni, ci_ip_pkt_fmt* pkt,
              pkt->pkt_eth_payload_off = 0xff);
   }
   else {
+    /* Let's cheat and avoid slow path: try bufset of this packet first,
+     * the currently-used bufset second. */
+    int old_bufset_id, new_bufset_id;
+
+    old_bufset_id = PKT_SET_ID(pkt);
+    new_bufset_id = NI_PKT_SET(ni);
     ci_netif_pkt_release(ni, pkt);
-    if(CI_LIKELY( OO_PP_NOT_NULL(ni->state->freepkts) ))
-      pkt = ci_netif_pkt_get(ni);
-    else {
-      pkt = ci_netif_pkt_alloc_nonb(ni);
-      --ni->state->n_async_pkts;
-    }
+    if(CI_LIKELY( ni->pkt_set[old_bufset_id].n_free > 0 ))
+      pkt = ci_netif_pkt_get(ni, old_bufset_id);
+    else if( old_bufset_id != new_bufset_id &&
+             ni->pkt_set[new_bufset_id].n_free > 0 )
+      pkt = ci_netif_pkt_get(ni, new_bufset_id);
+    else
+      pkt = ci_netif_pkt_alloc_slow(ni, 0, 1);
     if( pkt == NULL ) {
       LOG_U(ci_log("%s: can't allocate reply packet", caller));
       CITP_STATS_NETIF_INC(ni, poll_no_pkt);
@@ -1084,26 +1091,15 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
 
     ci_assert(p->refcount > 0);
 
-    if( p->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
-      ci_sock_cmn_timestamp_q_enqueue(netif, &ts->timestamp_q, p);
+    if( p->flags & CI_PKT_FLAG_TX_TIMESTAMPED &&
+        (ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_STREAM) ) {
+      ci_udp_recv_q_put(netif, &ts->timestamp_q, p);
 
       /* Tells post-poll loop to put socket on the [reap_list]. */
       ts->s.b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
     }
-    else if( --p->refcount == 0 ) {
-      ci_assert(OO_PP_IS_NULL(p->frag_next));
-      ci_assert(!(p->flags & CI_PKT_FLAG_RX));
-      __ci_netif_pkt_clean(p);
-      if( p->flags & CI_PKT_FLAG_NONB_POOL ) {
-        *ps->tx_pkt_free_list_insert = OO_PKT_P(p);
-        ps->tx_pkt_free_list_insert = &p->next;
-        ++ps->tx_pkt_free_list_n;
-      }
-      else {
-        p->next = netif->state->freepkts;
-        netif->state->freepkts = OO_PKT_P(p);
-        ++netif->state->n_freepkts;
-      }
+    else {
+      ci_netif_pkt_release_in_poll(netif, p, ps);
     }
 
     if( ci_ip_queue_is_empty(rtq) ) {
@@ -1127,8 +1123,8 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
   tcp_snd_una(ts) = rxp->ack;
 
   /* Wake up TX if necessary */
-  if( NI_OPTS(netif).tcp_sndbuf_mode == 1 &&
-      ci_tcp_tx_advertise_space(netif, ts) )
+  if( NI_OPTS(netif).tcp_sndbuf_mode >= 1 &&
+      ( ci_tcp_tx_advertise_space(netif, ts) || ts->s.tx_errno ) )
     ci_tcp_wake_possibly_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_TX);
 }
 
@@ -1250,6 +1246,11 @@ static void ci_tcp_rx_handle_ack(ci_tcp_state* ts, ci_netif* netif,
     if( ts->congstate != CI_TCP_CONG_OPEN && ts->congstate != CI_TCP_CONG_NOTIFIED)
       /* Congested: try to recover. */
       ci_tcp_try_cwndrecover(ts, netif, pkt);
+
+    if( NI_OPTS(netif).tcp_sndbuf_mode == 2 &&
+	ci_tcp_should_expand_sndbuf(netif, ts) )
+      ci_tcp_expand_sndbuf(netif, ts);
+
   }
   else{
     /* (From Stevens Vol II, p970.)
@@ -2215,6 +2216,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
       SEQ_EQ(rxp->seq, pkt->pf.tcp_rx.end_seq) &&
       (tsr->retries & CI_FLAG_TSR_RETRIES_MASK) < tls->c.tcp_defer_accept ) {
     CITP_STATS_TCP_LISTEN(++netif->state->stats.accepts_deferred);
+    ci_netif_pkt_release(netif, pkt);
   }
   else if( ci_tcp_listenq_try_promote(netif, tls, tsr, ipcache, &ts) < 0 ) {
     CI_TCP_EXT_STATS_INC_LISTEN_DROPS( netif );
@@ -2338,7 +2340,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 
     /* If listen queue is full: */
     if( (tls->n_listenq >= ci_tcp_listenq_max(netif)) |
-        (OO_P_IS_NULL(netif->state->free_aux_mem)) ) {
+        ( ! ci_ni_aux_can_alloc(netif) ) ) {
 
       /* If we cope with acceptq, we can try syncookie. */
       if( NI_OPTS(netif).tcp_syncookies )
@@ -2444,8 +2446,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     CITP_STATS_TCP_LISTEN(++tls->stats.n_listenq_overflow);
     goto freepkt_out;
   }
-  if(CI_UNLIKELY( !do_syncookie &&
-                  OO_P_IS_NULL(netif->state->free_aux_mem) )) {
+  if(CI_UNLIKELY( !do_syncookie && ! ci_ni_aux_can_alloc(netif) )) {
     CITP_STATS_TCP_LISTEN(++tls->stats.n_listenq_no_synrecv);
     goto freepkt_out;
   }
@@ -2529,7 +2530,11 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     tsr = ci_alloc(sizeof(ci_tcp_state_synrecv));
   }
   else {
-    tsr = ci_tcp_synrecv_alloc(netif);
+    /* We've already called ci_ni_aux_can_alloc() above, so we are sure
+     * that we *really* can alloc tsr. */
+    tsr = ci_ni_aux_p2synrecv(netif,
+                              ci_ni_aux_alloc(netif,
+                                              CI_TCP_AUX_TYPE_SYNRECV));
     tsr->bucket_link = OO_P_NULL;
     tsr->hash = rxp->hash;
   }
@@ -2986,6 +2991,7 @@ ci_inline void handle_rx_fin_wait_1(ci_tcp_state* ts, ci_netif* netif)
 
     LOG_TC(log(LPF "%d FIN-WAIT1->FIN-WAIT2", S_FMT(ts)));
     ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT2);
+    ci_tcp_wake_possibly_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_TX);
 
     if ( ci_tcp_is_timeout_orphan(ts) )
       ci_netif_timeout_restart(netif, ts);
@@ -3050,10 +3056,9 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
         LOG_TV(log(LPF "SYN in TIME WAIT state, recycling connection"));
         ci_netif_timeout_leave(netif, ts);
 
-        filter_id = ci_netif_filter_lookup(netif,
-                                           oo_ip_hdr(pkt)->ip_daddr_be32,
-                                           tcp->tcp_dest_be16, 0, 0,
-                                           IPPROTO_TCP);
+        filter_id = ci_netif_listener_lookup(netif,
+                                             oo_ip_hdr(pkt)->ip_daddr_be32,
+                                             tcp->tcp_dest_be16);
 
         if( filter_id >= 0 ) {
           ci_tcp_socket_listen* tls;
@@ -3306,10 +3311,7 @@ static void handle_unacceptable_seq(ci_netif* netif, ci_tcp_state* ts,
     LOG_U(log(LPF "%d handle unacceptable seq RSTACK needed because "
               "not in synchronized state",S_FMT(ts)));
     CITP_STATS_NETIF_INC(netif, rst_sent_bad_seq);
-    if( OO_SP_IS_NULL(ts->local_peer) )
-      ci_tcp_reply_with_rst(netif, rxp);
-    else
-      ci_netif_pkt_release_rx(netif, pkt);
+    ci_tcp_reply_with_rst(netif, rxp);
     /* because we're not going to send an ACK here, the dsack block needs
        to be cleared to prevent the next packet getting confused when
        it finds there is a old block still waiting */
@@ -3540,25 +3542,23 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     ** have access to [pkt] after (it may have been freed already).
     */
     if( pkt->pf.tcp_rx.pay_len ) {
-      if( CI_UNLIKELY(ts->s.rx_errno) )
+      if( CI_UNLIKELY(ts->s.rx_errno) ) {
         /* If the socket will never read again then send reset See
         ** Steven's p238 or rfc1122 4.2.2.13.
+        ** Linux queues data in ESTABLISHED + RCV_SHUTDOWN.
+        ** Linux sends RST without ACK here, i.e. we should call
+        ** ci_tcp_reply_with_rst() instead of ci_tcp_send_rst().
         */
-        /* However, Linux only does this if it has also shutdown(wr),
-        ** hence we check for fin-wait[12].  If only rd was shutdown,
-        ** Linux continues to receive data without error (but in
-        ** non-blocking mode).
-        */
-        if( ts->s.b.state == CI_TCP_FIN_WAIT1 ||
-            ts->s.b.state == CI_TCP_FIN_WAIT2 )
+        if( (ts->s.b.state & CI_TCP_STATE_RECVD_FIN) ||
+            ts->s.tx_errno != 0 )
         {
           LOG_U(log(LNTS_FMT" data arrived with SHUT_RD (rx=%x tx=%x)",
                     LNTS_PRI_ARGS(netif, ts), ts->s.rx_errno, ts->s.tx_errno));
-          ci_netif_pkt_release_rx(netif, pkt);
-          ci_tcp_send_rst(netif,ts);
+          ci_tcp_reply_with_rst(netif, rxp);
           ci_tcp_drop(netif, ts, ECONNRESET);
           return;
         }
+      }
 
       /* We do not accept data beyond our window (since it makes window
       ** management painful).
@@ -3810,6 +3810,7 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     /* Process segments without payload, as they'll be freed immediately. */
     goto continue_mem_pressure;
   CITP_STATS_NETIF_INC(netif, memory_pressure_drops);
+  ts->tcpflags |= CI_TCPT_FLAG_MEM_DROP;
   ci_tcp_drop_rob(netif, ts);
   goto drop;
 
@@ -4207,6 +4208,13 @@ void ci_tcp_handle_rx(ci_netif* netif, struct ci_netif_poll_state* ps,
 
   ci_netif_filter_for_each_match(netif,
                                  ip->ip_daddr_be32, tcp->tcp_dest_be16,
+                                 0, 0, IPPROTO_TCP, pkt->intf_i, pkt->vlan,
+                                 ci_tcp_rx_deliver_to_listen, &rxp, NULL);
+  if(CI_LIKELY( rxp.pkt == NULL ))
+    return;
+
+  ci_netif_filter_for_each_match(netif,
+                                 0, tcp->tcp_dest_be16,
                                  0, 0, IPPROTO_TCP, pkt->intf_i, pkt->vlan,
                                  ci_tcp_rx_deliver_to_listen, &rxp, NULL);
   if(CI_LIKELY( rxp.pkt == NULL ))

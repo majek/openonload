@@ -148,6 +148,10 @@ void efhw_iopages_free(struct pci_dev *pci_dev, struct efhw_iopages *p,
 			EFRM_ASSERT(0);
 #endif
 		}
+#ifdef CONFIG_SUSE_KERNEL
+	/* bug 56168 */
+	schedule();
+#endif
 	vfree(p->ptr);
 	kfree(p->dma_addrs);
 }

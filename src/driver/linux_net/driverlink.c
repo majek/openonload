@@ -28,9 +28,9 @@
 #include <linux/skbuff.h>
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
+/* #include "driverlink_api.h" via net_driver.h */
 #include "net_driver.h"
 #include "efx.h"
-#include "driverlink_api.h"
 #include "driverlink.h"
 #include "filter.h"
 #include "nic.h"
@@ -88,7 +88,8 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 
 	after = get_jiffies_64();
 	duration = after - before;
-	WARN(duration > EFX_DL_DURATION_WARN, "%s: driverlink remove() took %ums",
+	WARN(!efx_nic_hw_unavailable(efx) && duration > EFX_DL_DURATION_WARN,
+	     "%s: driverlink remove() took %ums",
 	     efx_dev->driver->name, jiffies_to_msecs(duration));
 
 	list_del(&efx_handle->driver_node);
@@ -146,7 +147,8 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 
 	after = get_jiffies_64();
 	duration = after - before;
-	WARN(duration > EFX_DL_DURATION_WARN, "%s: driverlink probe() took %ums\n",
+	WARN(!efx_nic_hw_unavailable(efx) && duration > EFX_DL_DURATION_WARN,
+	     "%s: driverlink probe() took %ums\n",
 	     efx_dev->driver->name, jiffies_to_msecs(duration));
 
 	if (rc)
@@ -206,7 +208,7 @@ EXPORT_SYMBOL(efx_dl_unregister_driver);
 
 /* Register a new driver with the driverlink layer. The driver's
  * probe routine will be called for every attached nic. */
-int efx_dl_register_driver(struct efx_dl_driver *driver)
+int __efx_dl_register_driver(struct efx_dl_driver *driver)
 {
 	struct efx_nic *efx;
 
@@ -215,6 +217,16 @@ int efx_dl_register_driver(struct efx_dl_driver *driver)
 		       driver->name);
 		return -EPERM;
 	}
+
+	if (driver->flags & EFX_DL_DRIVER_REQUIRES_MINOR_VER &&
+	    driver->minor_ver > EFX_DRIVERLINK_API_VERSION_MINOR) {
+		pr_err("Efx driverlink: %s requires API %d.%d, sfc has %d.%d\n",
+		       driver->name, EFX_DRIVERLINK_API_VERSION,
+		       driver->minor_ver, EFX_DRIVERLINK_API_VERSION,
+		       EFX_DRIVERLINK_API_VERSION_MINOR);
+		return -EPERM;
+	}
+	driver->flags |= EFX_DL_DRIVER_SUPPORTS_MINOR_VER;
 
 	printk(KERN_INFO "Efx driverlink registering %s driver\n",
 		 driver->name);
@@ -231,7 +243,7 @@ int efx_dl_register_driver(struct efx_dl_driver *driver)
 	rtnl_unlock();
 	return 0;
 }
-EXPORT_SYMBOL(efx_dl_register_driver);
+EXPORT_SYMBOL(__efx_dl_register_driver);
 
 void efx_dl_unregister_nic(struct efx_nic *efx)
 {
@@ -310,7 +322,8 @@ void efx_dl_reset_suspend(struct efx_nic *efx)
 
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(duration >  EFX_DL_DURATION_WARN,
+			WARN(!efx_nic_hw_unavailable(efx) && \
+			     duration > EFX_DL_DURATION_WARN,
 			     "%s: driverlink reset_suspend() took %ums\n",
 			     efx_dev->driver->name, jiffies_to_msecs(duration));
 		}
@@ -338,7 +351,8 @@ void efx_dl_reset_resume(struct efx_nic *efx, int ok)
 
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(duration > EFX_DL_DURATION_WARN,
+			WARN(!efx_nic_hw_unavailable(efx) && \
+			     duration > EFX_DL_DURATION_WARN,
 			     "%s: driverlink reset_resume() took %ums\n",
 			     efx_dev->driver->name, jiffies_to_msecs(duration));
 		}
@@ -363,7 +377,8 @@ int efx_dl_handle_event(struct efx_nic *efx, void *event, int budget)
 
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(duration > EFX_DL_DURATION_WARN,
+			WARN(!efx_nic_hw_unavailable(efx) && \
+			     duration > EFX_DL_DURATION_WARN,
 			     "%s: driverlink handle_event() took %ums\n",
 			     efx_dev->driver->name, jiffies_to_msecs(duration));
 
@@ -395,7 +410,8 @@ bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
 #ifdef DEBUG
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(duration > EFX_DL_DURATION_WARN,
+			WARN(!efx_nic_hw_unavailable(efx) && \
+			     duration > EFX_DL_DURATION_WARN,
 			     "%s: driverlink rx_packet() took %ums\n",
 			     efx_dev->driver->name, jiffies_to_msecs(duration));
 #endif

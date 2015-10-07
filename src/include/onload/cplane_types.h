@@ -288,6 +288,7 @@ typedef struct  {
     ci_hwport_id_t hwport;      /*< hardware port & NIC of interface */
     ci_int16 bond_rowid;        /*< bond table row id */
     ci_int16 vlan_rowid;        /*< VLAN master LLAP rowid */
+    ci_ifid_t vlan_ifindex;     /*< ifindex for VLAN master - no vlan_rowid */
 
     ci_mac_addr_t mac;		/*< MAC address of access point */ 
     cicp_encap_t encapsulation; /*< encapsulation used on this i/f */
@@ -533,6 +534,10 @@ struct cicp_mibs_kern_s
     cicp_hwport_kmib_t *hwport_table;     /*< Hardware port MIB */
     cicp_pmtu_kmib_t   *pmtu_table;       /*< PMTU cache */
     cicp_stat_t         stat;             /*< control Plane Statistics */
+
+#ifdef EFRM_HAVE_TEAMING
+    struct ci_team_control *team;         /*< object providing team support */
+#endif
 } /* cicp_mibs_kern_t */;
 
 /* typedef struct cicp_mibs_kern_s cicp_handle_t; */

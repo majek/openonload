@@ -210,8 +210,14 @@
 
 /* The negative offset from the start of a packet's DMA to the start of the
  * metadata.
+ *
+ * This is set larger than the size of the metadata to give space for an empty
+ * option record. While there is space available between the DMA start location
+ * and the packet contents, we avoid using that since that would mean modifying
+ * two cache lines rather than one.
  */
-#define EF_VI_PS_METADATA_OFFSET         sizeof(ef_packed_stream_packet)
+#define EF_VI_PS_METADATA_OFFSET                \
+  (sizeof(ef_packed_stream_packet) + sizeof(uint32_t))
 
 /* The amount of space we leave at the start of each buffer before the
  * first DMA.  Needs to be enough space for ef_packed_stream_packet, plus

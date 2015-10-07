@@ -177,8 +177,8 @@
 #define efhw_nic_sw_event(nic, data, ev) \
 	((nic)->efhw_func->sw_event(nic, data, ev))
 
-#define efhw_nic_handle_event(nic, handler, ev) \
-	((nic)->efhw_func->handle_event((nic), (handler), (ev)))
+#define efhw_nic_handle_event(nic, handler, ev, budget) \
+	((nic)->efhw_func->handle_event((nic), (handler), (ev), (budget)))
 
 /*-------------- DMA support  ------------ */
 #define efhw_nic_dmaq_tx_q_init(nic, dmaq, evq, owner, tag,		\
@@ -221,12 +221,14 @@
 	((nic)->efhw_func->buffer_table_orders)
 #define efhw_nic_buffer_table_orders_num(nic)                           \
 	((nic)->efhw_func->buffer_table_orders_num)
-#define efhw_nic_buffer_table_alloc(nic, owner, order, block_out)       \
-	((nic)->efhw_func->buffer_table_alloc(nic, owner, order, block_out))
+#define efhw_nic_buffer_table_alloc(nic, owner, order, block_out,	    \
+				    reset_pending)			    \
+	((nic)->efhw_func->buffer_table_alloc(nic, owner, order, block_out, \
+					      reset_pending))
 #define efhw_nic_buffer_table_realloc(nic, owner, order, block)         \
 	((nic)->efhw_func->buffer_table_realloc(nic, owner, order, block))
-#define efhw_nic_buffer_table_free(nic, block)                          \
-	((nic)->efhw_func->buffer_table_free(nic, block))
+#define efhw_nic_buffer_table_free(nic, block, reset_pending)		\
+	((nic)->efhw_func->buffer_table_free(nic, block, reset_pending))
 #define efhw_nic_buffer_table_set(nic, block, first_entry, n_entries,   \
 				  addrs)                                \
 	((nic)->efhw_func->buffer_table_set(nic, block, first_entry,    \
@@ -256,6 +258,9 @@
 
 #define efhw_nic_rss_context_set_key(nic, handle, key)                  \
 	((nic)->efhw_func->rss_context_set_key((nic), (handle), (key)))
+
+#define efhw_nic_rss_context_set_flags(nic, handle, flags)              \
+	((nic)->efhw_func->rss_context_set_flags((nic), (handle), (flags)))
 
 /*-------------- Licensing ---------------- */
 #define efhw_nic_license_challenge(nic, feature, challenge, expiry, signature) \

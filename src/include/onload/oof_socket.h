@@ -18,7 +18,6 @@
 
 
 struct oof_local_port;
-struct oof_thc;
 
 
 /* Per-socket state for the filtering module.
@@ -30,19 +29,23 @@ struct oof_socket {
   /* If NULL then no packets are filtered to this socket. */
   struct oof_local_port* sf_local_port;
 
-  /* Sometimes the socket has a local port associated with it before the rest
-   * of the filtering apparatus is set up. */
-  struct oof_local_port* sf_early_lp;
-
   /* List of [struct oof_mcast_member]s. */
   ci_dllist sf_mcast_memberships;
 
+/* sf_flags field can be nonzero only when sf_local_port != NULL
+ * and when socket is fully deleted all flags are cleared. */
 #define OOF_SOCKET_MCAST_FULL_SW_FILTER   0x00000001
 #define OOF_SOCKET_SW_FILTER_WAS_REMOVED  0x00000002
+#define OOF_SOCKET_CLUSTERED              0x00000004
+/* socket is inserted but not armed */
+#define OOF_SOCKET_DUMMY                  0x00000008
+/* a dummy socket that has no stack (no endpoint association) */
+#define OOF_SOCKET_NO_STACK               0x00000010
+/* full socket will not share filter of a semi-wild one */
+#define OOF_SOCKET_NO_SHARING             0x00000020
   unsigned  sf_flags;
 
-  /* All other fields are only valid when [sf_local_port] is not NULL. */
-
+  /* All other fields are only valid when [sf_local_port] is not NULL */
   struct oo_hw_filter sf_full_match_filter;
 
   unsigned  sf_laddr, sf_raddr;
@@ -57,19 +60,6 @@ struct oof_socket {
    */
   ci_dllink sf_lp_link;
 
-};
-
-
-/* A clustered filter.  Shared by all sockets that have been bound to
- * a clustering {laddr, lport}.
- */
-struct oof_thc {
-  struct oo_hw_filter*         tf_filters;
-  struct tcp_helper_cluster_s* tf_thc;
-  struct oof_thc*              tf_next;
-  unsigned                     tf_laddr;
-  int                          tf_ref;
-  int                          tf_filters_installed;
 };
 
 #endif  /* __ONLOAD_OOF_SOCKET_H__ */

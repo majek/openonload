@@ -62,8 +62,8 @@ extern int efhw_keventq_poll(struct efhw_nic *, struct efhw_keventq *);
 
 /*! Callbacks for handling events. */
 struct efhw_ev_handler {
-	void (*wakeup_fn)(struct efhw_nic *nic, unsigned);
-	void (*timeout_fn)(struct efhw_nic *nic, unsigned);
+	int (*wakeup_fn)(struct efhw_nic *nic, unsigned, int);
+	int (*timeout_fn)(struct efhw_nic *nic, unsigned, int);
 	int (*dmaq_flushed_fn) (struct efhw_nic *, unsigned, int, int);
 };
 
@@ -77,11 +77,11 @@ extern int efhw_handle_txdmaq_flushed(struct efhw_nic *,
 extern int efhw_handle_rxdmaq_flushed(struct efhw_nic *,
 				       struct efhw_ev_handler *,
 				       unsigned, int);
-extern void efhw_handle_wakeup_event(struct efhw_nic *, 
+extern int efhw_handle_wakeup_event(struct efhw_nic *,
+				    struct efhw_ev_handler *,
+				    unsigned, int);
+extern int efhw_handle_timeout_event(struct efhw_nic *,
 				     struct efhw_ev_handler *,
-				     unsigned);
-extern void efhw_handle_timeout_event(struct efhw_nic *,
-				      struct efhw_ev_handler *, 
-				      unsigned);
+				     unsigned, int);
 
 #endif /* __CI_EFHW_EVENTQ_H__ */

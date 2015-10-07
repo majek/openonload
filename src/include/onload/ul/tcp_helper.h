@@ -38,10 +38,13 @@ extern int ci_tcp_helper_more_bufs(struct ci_netif_s* ni) CI_HF;
 extern int ci_tcp_helper_stack_attach(ci_fd_t from_fd,
                                       efrm_nic_set_t *out_ptr_nic_set,
                                       ci_uint32 *out_map_size);
-/*! Allocate fd for socket ep_id; create OS socket if domain != AF_UNSPEC
- * and attach them all together. */
+
+/*! Allocate fd for socket ep_id and create OS socket for UDP socks */
 extern int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                      int domain, int type);
+/*! Allocate fd for accepted tcp socket ep_id */
+extern int ci_tcp_helper_tcp_accept_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
+                                               int type);
 extern int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                      int flags, int fds[2]);
 
@@ -53,17 +56,13 @@ extern int ci_tcp_helper_clear_epcache(struct ci_netif_s*);
 extern int ci_tcp_helper_close_no_trampoline(int) CI_HF;
 extern void ci_tcp_helper_close_no_trampoline_retaddr(void) CI_HF;
 
-extern int ci_tcp_helper_handover(ci_fd_t stack_fd, ci_fd_t sock_fd) CI_HF;
-extern int ci_tcp_file_moved(ci_fd_t sock_fd) CI_HF;
-
 extern ci_fd_t ci_tcp_helper_get_sock_fd(ci_fd_t fd) CI_HF;
 
 extern int ci_tcp_helper_rel_sock_fd (ci_fd_t fd) CI_HF;
 
 
 struct sockaddr;
-extern int ci_tcp_helper_bind_os_sock(ci_netif* ni, oo_sp sock_id,
-                                      const struct sockaddr* addr,
+extern int ci_tcp_helper_bind_os_sock(ci_fd_t fd, const struct sockaddr* addr,
                                       size_t addrlen,
                                       ci_uint16* out_port) CI_HF;
 
@@ -74,35 +73,17 @@ extern int ci_tcp_helper_endpoint_shutdown(ci_fd_t fd, int how,
 
 extern int ci_tcp_helper_connect_os_sock(ci_fd_t, const struct sockaddr*,
                                          size_t addrlen) CI_HF;
+
+extern int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
+                                                ci_sock_cmn *s, int level,
+                                                int optname, const void* optval,
+                                                int optlen) CI_HF;
 #endif
 
 extern int ciul_can_handle_addr(struct ci_netif_s *netif, ci_uint32 ip_be32,
                                 unsigned int proto,
                                 ci_uint32 *src_ip_be32_out,
                                 unsigned *nic_i_out, unsigned *mtu_out) CI_HF;
-
-/*--------------------------------------------------------------------
- *!
- * Move a tcp state from one tcp helper to another
- *
- * Both endpoint states must exist, be allocated and in the closed state. 
- * The kernel state of the "from" state is moved to the new endpoint state
- * This includes 
- *    - moving the corresponding OS socket. 
- *    - redirecting the existing L5 OS file to reference the new state
- *
- * \param fd              File descriptor of endpoint
- * \param ep_id           TCP control block id
- * \param new_tcp_helper  TCP helper to move to 
- * \param new_tcp_id      New TCP control block id 
- *
- * \return                standard error codes
- *
- *--------------------------------------------------------------------*/
-
-extern int
-ci_tcp_helper_move_state(ci_netif* ni, ci_fd_t fd, oo_sp ep_id,
-                         ci_netif* new_ni, oo_sp new_ep_id) CI_HF;
 
 
 /*--------------------------------------------------------------------

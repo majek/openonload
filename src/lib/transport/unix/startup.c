@@ -111,6 +111,8 @@ static void __oo_per_thread_init_thread(struct oo_per_thread* pt)
     pt->spinstate |= (1 << ONLOAD_SPIN_TCP_SEND);
   if( CITP_OPTS.tcp_accept_spin )
     pt->spinstate |= (1 << ONLOAD_SPIN_TCP_ACCEPT);
+  if( CITP_OPTS.tcp_connect_spin )
+    pt->spinstate |= (1 << ONLOAD_SPIN_TCP_CONNECT);
   if( CITP_OPTS.pkt_wait_spin )
     pt->spinstate |= (1 << ONLOAD_SPIN_PKT_WAIT);
 #if CI_CFG_USERSPACE_PIPE
@@ -179,6 +181,7 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_TCP_RECV_SPIN",      tcp_recv_spin);
   DUMP_OPT_INT("EF_TCP_SEND_SPIN",      tcp_send_spin);
   DUMP_OPT_INT("EF_TCP_ACCEPT_SPIN",    tcp_accept_spin);
+  DUMP_OPT_INT("EF_TCP_CONNECT_SPIN",   tcp_connect_spin);
   DUMP_OPT_INT("EF_PKT_WAIT_SPIN",      pkt_wait_spin);
 #if CI_CFG_USERSPACE_PIPE
   DUMP_OPT_INT("EF_PIPE_RECV_SPIN",     pipe_recv_spin);
@@ -420,6 +423,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_TCP_RECV_SPIN",   tcp_recv_spin);
   GET_ENV_OPT_INT("EF_TCP_SEND_SPIN",   tcp_send_spin);
   GET_ENV_OPT_INT("EF_TCP_ACCEPT_SPIN", tcp_accept_spin);
+  GET_ENV_OPT_INT("EF_TCP_CONNECT_SPIN",tcp_connect_spin);
   GET_ENV_OPT_INT("EF_PKT_WAIT_SPIN",   pkt_wait_spin);
 #if CI_CFG_USERSPACE_PIPE
   GET_ENV_OPT_INT("EF_PIPE_RECV_SPIN",  pipe_recv_spin);
@@ -475,8 +479,8 @@ static void citp_opts_getenv(citp_opts_t* opts)
   }
 
   if( (s = getenv("EF_CLUSTER_NAME")) ) {
-    strncpy(opts->cluster_name, s, CI_CFG_STACK_NAME_LEN >> 1);
-    opts->cluster_name[CI_CFG_STACK_NAME_LEN >> 1] = '\0';
+    strncpy(opts->cluster_name, s, CI_CFG_CLUSTER_NAME_LEN);
+    opts->cluster_name[CI_CFG_CLUSTER_NAME_LEN] = '\0';
   }
   else {
     opts->cluster_name[0] = '\0';
@@ -513,6 +517,7 @@ static void citp_opts_validate_env(void)
     "EF_LD_PRELOAD",
     "EF_CLUSTER_NAME",
     "EF_OFE_CONFIG_FILE",
+    "EF_LOG_FILE",
     NULL
   };
   char** env_name;

@@ -75,6 +75,9 @@
 # define _ci_assert_or(x, y, f, l)            __analysis_assume((x)||(y))
 # define _ci_assert_impl(x, y, f, l)          __analysis_assume(!(x) || (y))
 # define _ci_assert_equiv(x, y, f, l)         __analysis_assume((!(x)== !(y))
+# define _ci_assert_flags(x, y, f, l)         __analysis_assume((((x)&(y)) \
+                                                                == (y)))
+# define _ci_assert_nflags(x, y, f, l)        __analysis_assume((((x)&(y))==0))
 # define _ci_assert_equal_msg(x, y, m, f, l)  __analysis_assume((x)==(y))
 
 # define _ci_verify(exp, file, line) \
@@ -116,6 +119,8 @@
 # define _ci_assert_ge(exp1, exp2, file, line)       do{}while(0)
 # define _ci_assert_gt(exp1, exp2, file, line)       do{}while(0)
 # define _ci_assert_impl(exp1, exp2, file, line)     do{}while(0)
+# define _ci_assert_flags(exp1, exp2, file, line)    do{}while(0)
+# define _ci_assert_nflags(exp1, exp2, file, line)   do{}while(0)
 
 # define _ci_verify(exp, file, line) \
   do { \
@@ -196,6 +201,10 @@
 # define _ci_assert_or(x, y, f, l)     _ci_assert2((x)||(y), x, y, (f), (l))
 # define _ci_assert_impl(x, y, f, l)   _ci_assert2(!(x) || (y), x, y, (f), (l))
 # define _ci_assert_equiv(x, y, f, l)  _ci_assert2(!(x)== !(y), x, y, (f), (l))
+# define _ci_assert_flags(x, y, f, l)  _ci_assert2(((x)&(y))== (y), x, y, \
+                                                    (f), (l))
+# define _ci_assert_nflags(x, y, f, l) _ci_assert2(((x)&(y))== 0, x, y, \
+                                                    (f), (l))
 
 #define _ci_assert_equal_msg(exp1, exp2, msg, file, line)       \
   do {                                                          \
@@ -325,6 +334,12 @@
 
 #define ci_assert_equiv(exp1, exp2) \
         _ci_assert_equiv(exp1, exp2, __FILE__, __LINE__)
+
+#define ci_assert_flags(val, flags) \
+        _ci_assert_flags(val, flags, __FILE__, __LINE__)
+
+#define ci_assert_nflags(val, flags) \
+        _ci_assert_nflags(val, flags, __FILE__, __LINE__)
 
 
 #define CI_TEST(exp)                            \

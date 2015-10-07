@@ -359,7 +359,6 @@ void ci_tcp_timeout_kalive(ci_netif* netif, ci_tcp_state* ts)
 	      S_FMT(ts), ts->ka_probes, ci_tcp_kalive_probes_get(ts)));
 
     ci_tcp_send_rst(netif, ts);
-    ts->ka_probes = 0;
     ci_tcp_drop(netif, ts, ETIMEDOUT);
     return;
   }
@@ -485,7 +484,7 @@ static void ci_tcp_drop_due_to_rto(ci_netif *ni, ci_tcp_state *ts,
   LOG_U(log(LNTS_FMT " (%s) state=%u so_error=%d retransmits=%u max=%u",
             LNTS_PRI_ARGS(ni, ts), __FUNCTION__,
             ts->s.b.state, ts->s.so_error, ts->retransmits, max_retrans));
-  ci_tcp_send_rst(ni, ts);
+  /* Linux does NOT send RST here. */
   ts->retransmits = 0;
   ci_tcp_drop(ni, ts, ETIMEDOUT);
 
@@ -548,6 +547,10 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
 
   if( ts->s.b.state == CI_TCP_SYN_SENT ) {
     max_retrans = NI_OPTS(netif).retransmit_threshold_syn;
+  }
+  else if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN ) {
+    max_retrans = NI_OPTS(netif).retransmit_threshold_orphan;
+    CITP_STATS_NETIF(++netif->state->stats.tcp_rtos);
   }
   else {
     max_retrans = NI_OPTS(netif).retransmit_threshold;

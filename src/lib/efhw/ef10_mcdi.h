@@ -134,6 +134,9 @@ ci_inline ci_uint16 efhw_mcdi_read(char *addr)
 #define EFHW_MCDI_DECLARE_BUF(_name, _len)				\
 	ci_dword_t _name[DIV_ROUND_UP((_len), 4)]
 
+#define EFHW_MCDI_INITIALISE_BUF(_name)				\
+	memset(_name, 0, sizeof(_name))
+
 #define EFHW_MCDI_DWORD(_buf, _field)					\
 	efhw_mcdi_readl(_EFHW_MCDI_DWORD_FIELD((_buf), _field))
 

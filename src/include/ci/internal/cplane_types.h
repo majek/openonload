@@ -182,8 +182,7 @@ typedef ci_uint32 ci_ip_addr_net_t; /* intended to be stored big endian */
 typedef union {
     struct {
         unsigned is_broadcast:1, /* is an IPIF broadcast address */
-	         is_ownaddr:1,   /* is an IPIF home address */
-		 is_netaddr:1;   /* is an IPIF subetwork address */
+	         is_ownaddr:1;   /* is an IPIF home address */
     } bits;
     ci_uint32 bitsvalue; /* zero when none of the bits are set */
 } ci_ip_addr_kind_t;

@@ -1493,10 +1493,6 @@ static int ci_add_netlink_memberships(struct socket *sockp)
    * netlink socket options to register your interest for a certain netlink
    * group broadcast.
    */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
-  return ci_bind_netlink_socket
-           (sockp, RTMGRP_LINK | RTMGRP_IPV4_ROUTE | RTMGRP_IPV4_IFADDR);
-#else
   mm_segment_t fs;
   int optval, rc;
 
@@ -1538,7 +1534,6 @@ static int ci_add_netlink_memberships(struct socket *sockp)
 end:
   set_fs(fs);
   return rc;
-#endif
 }
 
 
@@ -1618,12 +1613,12 @@ request_table(cicp_nlsock_t *nlsock, int nlmsg_type, int rtm_flags,
   ret = kernel_sendmsg(nlsock->sock, &msg, &iov, 1, nlhdr->nlmsg_len);
   
   if (ret < 0) {
-    ci_log("%s():sock_sendmsg failed, err=%d", __FUNCTION__, ret);
+    ci_log("%s():kernel_sendmsg failed, err=%d", __FUNCTION__, ret);
     return ret;
     
   } else
   if(ret != nlhdr->nlmsg_len) {
-    ci_log("%s():sock_sendmsg failed. Read %d bytes but expected %d.",
+    ci_log("%s():kernel_sendmsg failed. Read %d bytes but expected %d.",
            __FUNCTION__, ret, nlhdr->nlmsg_len);
     return -ENODATA;
     
@@ -2268,6 +2263,13 @@ cicpos_handle_route_msg(cicpos_parse_state_t *session, struct nlmsghdr *nlhdr)
 	    ci_scope_set_host(&scope);
 	else
 	    ci_scope_set_global(&scope);
+
+#ifndef LOOPBACK_IFINDEX
+/* Needed for <=3.2; not needed for >=3.10(rhel7) and >=3.16. */
+#define LOOPBACK_IFINDEX 1
+#endif
+        if( rtmsg->rtm_table == RT_TABLE_LOCAL )
+            ifindex = LOOPBACK_IFINDEX;
 
         if( (rtmsg->rtm_flags & RTM_F_CLONED) ) {
             int rowid;

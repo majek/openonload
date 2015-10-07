@@ -35,6 +35,58 @@
 
 
 
+/* file_operations might have readv/writev, aio_read/aio_write,
+ * read_iter/write_iter members.  To support this variety, we define one
+ * simple handler and derive whatever this kernel needs from it. */
+#ifdef EFRM_HAVE_FOP_READV
+#define DEFINE_FOP_RW_V(base_handler, rw_v_handler) \
+  static ssize_t rw_v_handler(struct file *filp, const struct iovec *iov,   \
+                              unsigned long iovlen, loff_t *off)            \
+  { return base_handler(filp, iov, iovlen); }
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+#define DEFINE_FOP_AIO_RW(base_handler, aio_rw_handler) \
+  static ssize_t aio_rw_handler(struct kiocb *iocb, const struct iovec *iov,\
+                                unsigned long iovlen, loff_t pos)           \
+  { if (!is_sync_kiocb(iocb))                                               \
+      return -EOPNOTSUPP;                                                   \
+    return base_handler(iocb->ki_filp, iov, iovlen); }
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+#define DEFINE_FOP_RW_ITER(base_handler, rw_iter_handler) \
+  static ssize_t rw_iter_handler(struct kiocb *iocb, struct iov_iter *v)    \
+  { if (!is_sync_kiocb(iocb))                                               \
+      return -EOPNOTSUPP;                                                   \
+    if( ~v->type & ITER_IOVEC )                                             \
+      return -EOPNOTSUPP;                                                   \
+    return base_handler(iocb->ki_filp, v->iov, v->nr_segs); }
+#endif
+
+
+
+#ifndef EFRM_HAVE___VFS_READ_EXPORTED
+static inline ssize_t oo___vfs_read(struct file *file, char __user *buf,
+                                 size_t count, loff_t *pos)
+{
+  if( file->f_op->read )
+    return file->f_op->read(file, buf, count, pos);
+  else
+    return do_sync_read(file, buf, count, pos);
+}
+#define __vfs_read oo___vfs_read
+static inline ssize_t oo___vfs_write(struct file *file, const char __user *buf,
+                                  size_t count, loff_t *pos)
+{
+  if( file->f_op->write )
+    return file->f_op->write(file, buf, count, pos);
+  else
+    return do_sync_write(file, buf, count, pos);
+}
+#define __vfs_write oo___vfs_write
+#endif
+
+
+
 /* poll_requested_events_max(): user is not interested in other events */
 #ifdef EFRM_HAVE_POLL_REQUESTED_EVENTS
 #define poll_requested_events_max(p) \
@@ -60,7 +112,7 @@ static inline unsigned long poll_requested_events_min(const poll_table *p)
 #endif
 
 #define POLL_CAN_NOT_BLOCK(mask, wait) \
-  ( poll_does_not_wait(wait) || (poll_requested_events_min(wait) & (mask)) )
+  ( (poll_requested_events_min(wait) & (mask)) )
 
 /* Is it possible for a thread polling the socket to block and later be
  * woken, given the mask value provided?
@@ -75,10 +127,6 @@ static inline unsigned long poll_requested_events_min(const poll_table *p)
   ( ! POLL_CAN_NOT_BLOCK((mask), (wait)) &&                         \
     ( ((mask) & (POLLIN | POLLOUT)) !=                              \
       (poll_requested_events_max(wait) & (POLLIN | POLLOUT)) ) )
-
-#define TCP_LISTEN_POLL_AWAITING_EVENTS(mask, wait)                 \
-  ( ! POLL_CAN_NOT_BLOCK((mask), (wait)) &&                         \
-    ( (mask) == 0 && (poll_requested_events_max(wait) & POLLIN) ) )
 
 
 static inline int
@@ -118,14 +166,8 @@ efab_fop_poll__prime_if_needed(tcp_helper_resource_t* trs,
                         "enable_interrupts=%d", __FUNCTION__,
                         trs->id, ep->id, mask_awaiting_events,
                         waitqueue_active(&ep->waitq.wq), enable_interrupts));
-  if( mask_awaiting_events
-#ifndef EFRM_HAVE_POLL_REQUESTED_EVENTS
-      && waitqueue_active(&ep->waitq.wq)
-#endif
+  if( mask_awaiting_events && waitqueue_active(&ep->waitq.wq)
       ) {
-#ifdef EFRM_HAVE_POLL_REQUESTED_EVENTS
-    ci_assert(waitqueue_active(&ep->waitq.wq));
-#endif
     /* This thread looks likely to block on this socket. */
     ci_frc64(&trs->netif.state->last_sleep_frc);
     if( enable_interrupts ) {
@@ -152,45 +194,6 @@ static ssize_t linux_tcp_helper_fop_read_pipe(struct file *filp, char *buf,
   return ci_pipe_read(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
                       iov, 1);
 }
-
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_readv_pipe(struct file *filp,
-                                          const struct iovec *iov,
-                                          unsigned long iovlen, loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_read_pipe(struct kiocb *iocb, 
-                                             const struct iovec *iov, 
-                                             unsigned long iovlen, loff_t pos)
-#endif
-{
-#ifndef fop_has_readv
-  struct file *filp = iocb->ki_filp;
-#endif
-  ci_private_t* priv = filp->private_data;
-  tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
-
-  return ci_pipe_read(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
-                      iov, iovlen);
-}
-
-static ssize_t linux_tcp_helper_fop_read_notsupp(struct file *filp, char *buf,
-                                                 size_t len, loff_t *off)
-{
-  return -EOPNOTSUPP;
-}
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_readv_notsupp(struct file *filp,
-                                          const struct iovec *iov,
-                                          unsigned long iovlen, loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_read_notsupp(struct kiocb *iocb, 
-                                             const struct iovec *iov, 
-                                             unsigned long iovlen, loff_t pos)
-#endif
-{
-  return -EOPNOTSUPP;
-}
-
 static ssize_t linux_tcp_helper_fop_write_pipe(struct file *filp,
                                                const char *buf,
                                                size_t len, loff_t *off)
@@ -206,44 +209,81 @@ static ssize_t linux_tcp_helper_fop_write_pipe(struct file *filp,
                        iov, 1);
 }
 
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_writev_pipe(struct file *filp,
-                                    const struct iovec *iov,
-                                    unsigned long iovlen, loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_write_pipe(struct kiocb *iocb, 
-                                    const struct iovec *iov, 
-                                    unsigned long iovlen, loff_t pos)
-#endif
+static ssize_t linux_tcp_helper_fop_read_iov_pipe(struct file *filp,
+                                                  const struct iovec *iov,
+                                                  unsigned long iovlen)
 {
-#ifndef fop_has_readv
-  struct file *filp = iocb->ki_filp;
-#endif
+  ci_private_t* priv = filp->private_data;
+  tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
+
+  return ci_pipe_read(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
+                      iov, iovlen);
+}
+static ssize_t linux_tcp_helper_fop_write_iov_pipe(struct file *filp,
+                                                   const struct iovec *iov,
+                                                   unsigned long iovlen)
+{
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
 
   return ci_pipe_write(&trs->netif, SP_TO_PIPE(&trs->netif, priv->sock_id),
                        iov, iovlen);
 }
+#ifdef EFRM_HAVE_FOP_READV
+DEFINE_FOP_RW_V(linux_tcp_helper_fop_read_iov_pipe, \
+                linux_tcp_helper_fop_readv_pipe)
+DEFINE_FOP_RW_V(linux_tcp_helper_fop_write_iov_pipe, \
+                linux_tcp_helper_fop_writev_pipe)
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+DEFINE_FOP_AIO_RW(linux_tcp_helper_fop_read_iov_pipe, \
+                  linux_tcp_helper_fop_aio_read_pipe)
+DEFINE_FOP_AIO_RW(linux_tcp_helper_fop_write_iov_pipe, \
+                  linux_tcp_helper_fop_aio_write_pipe)
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+DEFINE_FOP_RW_ITER(linux_tcp_helper_fop_read_iov_pipe, \
+                   linux_tcp_helper_fop_read_iter_pipe)
+DEFINE_FOP_RW_ITER(linux_tcp_helper_fop_write_iov_pipe, \
+                   linux_tcp_helper_fop_write_iter_pipe)
+#endif
 
+
+static ssize_t linux_tcp_helper_fop_read_notsupp(struct file *filp, char *buf,
+                                                 size_t len, loff_t *off)
+{
+  return -EOPNOTSUPP;
+}
 static ssize_t linux_tcp_helper_fop_write_notsupp(struct file *filp,
                                                   const char *buf,
                                                   size_t len, loff_t *off)
 {
   return -EOPNOTSUPP;
 }
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_writev_notsupp(struct file *filp,
-                                    const struct iovec *iov,
-                                    unsigned long iovlen, loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_write_notsupp(struct kiocb *iocb, 
-                                    const struct iovec *iov, 
-                                    unsigned long iovlen, loff_t pos)
-#endif
+#ifdef EFRM_HAVE_FOP_READV
+static ssize_t linux_tcp_helper_fop_rw_v_notsupp(struct file *filp,
+                                          const struct iovec *iov,
+                                          unsigned long iovlen, loff_t *off)
 {
   return -EOPNOTSUPP;
 }
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+static ssize_t linux_tcp_helper_fop_aio_rw_notsupp(struct kiocb *iocb, 
+                                             const struct iovec *iov, 
+                                             unsigned long iovlen, loff_t pos)
+{
+  return -EOPNOTSUPP;
+}
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+static ssize_t linux_tcp_helper_fop_rw_iter_notsupp(struct kiocb *iocb,
+                                                      struct iov_iter *tofrom)
+{
+  return -EOPNOTSUPP;
+}
+#endif
+
 
 
 static unsigned linux_tcp_helper_fop_poll_pipe_reader(struct file* filp,
@@ -301,28 +341,18 @@ static unsigned efab_linux_tcp_helper_fop_poll_tcp(struct file* filp,
   enable_interrupts = efab_fop_poll__poll_if_needed(trs, &s->b);
   tep_p = ci_trs_ep_get(trs, id);
 
-  if( s->b.state != CI_TCP_LISTEN ) {
-    mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
-    if( ! poll_does_not_wait(wait) ) {
-      efab_fop_poll__prime_if_needed(trs, tep_p,
-                                     SOCK_POLL_AWAITING_EVENTS(mask, wait),
-                                     enable_interrupts);
-      /* From the closed state, handover is possible.  We should add OS
-       * socket waitqueue to the poll table.
-       */
-      if( s->b.state == CI_TCP_CLOSED && tep_p->os_socket  != NULL ) {
-        struct file *os_sock = tep_p->os_socket->file;
-        ci_assert(os_sock->f_op != NULL);
-        ci_assert(os_sock->f_op->poll != NULL);
-        os_sock->f_op->poll(os_sock, wait); /* drop results */
-      }
-    }
-  }
-  else {
-    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
-    efab_fop_poll__prime_if_needed(trs, tep_p,
-                                   TCP_LISTEN_POLL_AWAITING_EVENTS(mask, wait),
-                                   enable_interrupts);
+  mask = ci_tcp_poll_events(ni, s);
+  efab_fop_poll__prime_if_needed(trs, tep_p,
+                                 SOCK_POLL_AWAITING_EVENTS(mask, wait),
+                                 enable_interrupts);
+  if( ! poll_does_not_wait(wait) && s->b.state == CI_TCP_CLOSED &&
+      tep_p->os_socket  != NULL) {
+    /* From the closed state, handover is possible.  We should add OS
+     * socket waitqueue to the poll table.
+     */
+    struct file *os_sock;
+    int drop_rc;
+    OO_OS_SOCKET_FOP(tep_p, os_sock, drop_rc, poll, wait);
   }
 
   OO_DEBUG_ASYNC(ci_log("%s: return 0x%x, enable_interrupts=%d",
@@ -476,9 +506,12 @@ int linux_tcp_helper_fop_fasync(int fd, struct file *filp, int mode)
 
   rc = linux_tcp_helper_fop_fasync_no_os(fd, filp, mode);
   if( rc == 0 && ep->os_socket != NULL) {
-    rc = ep->os_socket->file->f_op->fasync(fd, ep->os_socket->file, mode);
-    if( rc != 0 )
-      linux_tcp_helper_fop_fasync_no_os(fd, filp, !mode);
+    struct file *os_sock;
+    if( oo_os_sock_get_from_ep(ep, &os_sock) == 0 ) {
+      if( os_sock->f_op->fasync(fd, os_sock, mode) != 0 )
+        linux_tcp_helper_fop_fasync_no_os(fd, filp, !mode);
+      oo_os_sock_put(os_sock);
+    }
   }
   return rc < 0 ? rc : 0;
 }
@@ -543,30 +576,14 @@ static ssize_t linux_tcp_helper_fop_write_tcp(struct file *filp, const char *buf
  * operations (which the interposing library doesn't get a chance to
  * intercept).
  */
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_writev_tcp(struct file *filp,
-                                               const struct iovec *iov,
-                                               unsigned long iovlen,
-                                               loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_write_tcp(struct kiocb *iocb, 
-                                                  const struct iovec *iov, 
-                                                  unsigned long iovlen,
-                                                  loff_t pos)
-#endif
+static ssize_t linux_tcp_helper_fop_write_iov_tcp(struct file *filp,
+                                                  const struct iovec *iov,
+                                                  unsigned long iovlen)
 {
-#ifndef fop_has_readv
-  struct file *filp = iocb->ki_filp;
-#endif
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
   ci_sock_cmn* s;
   int rc;
-
-#ifndef fop_has_readv
-  if (!is_sync_kiocb(iocb))
-    return -EINVAL;
-#endif
 
   s = SP_TO_SOCK(&trs->netif, priv->sock_id);
   fix_nonblock_flag(filp, s);
@@ -579,6 +596,18 @@ static ssize_t linux_tcp_helper_fop_aio_write_tcp(struct kiocb *iocb,
   CI_SET_ERROR(rc, s->tx_errno);
   return rc;
 }
+#ifdef EFRM_HAVE_FOP_READV
+DEFINE_FOP_RW_V(linux_tcp_helper_fop_write_iov_tcp, \
+                linux_tcp_helper_fop_writev_tcp)
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+DEFINE_FOP_AIO_RW(linux_tcp_helper_fop_write_iov_tcp, \
+                  linux_tcp_helper_fop_aio_write_tcp)
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+DEFINE_FOP_RW_ITER(linux_tcp_helper_fop_write_iov_tcp, \
+                   linux_tcp_helper_fop_write_iter_tcp)
+#endif
 
 /*!
  * write() file operation implementation for UDP case.
@@ -621,29 +650,16 @@ static ssize_t linux_tcp_helper_fop_write_udp(struct file *filp, const char *buf
  * operations (which the interposing library doesn't get a chance to
  * intercept).
  */
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_writev_udp(struct file *filp,
-                                    const struct iovec *iov,
-                                    unsigned long iovlen, loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_write_udp(struct kiocb *iocb, 
-                                    const struct iovec *iov, 
-                                    unsigned long iovlen, loff_t pos)
-#endif
+static ssize_t linux_tcp_helper_fop_write_iov_udp(struct file *filp,
+                                                  const struct iovec *iov,
+                                                  unsigned long iovlen)
 {
-#ifndef fop_has_readv
-  struct file *filp = iocb->ki_filp;
-#endif
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
   ci_udp_iomsg_args a;
   ci_msghdr m;
   ci_sock_cmn* s;
 
-#ifndef fop_has_readv
-  if (!is_sync_kiocb(iocb))
-    return -EINVAL;
-#endif
   m.msg_iov = (struct iovec *)iov; /* FIXME: remove const qualifier */
   m.msg_iovlen = iovlen;
 
@@ -655,6 +671,18 @@ static ssize_t linux_tcp_helper_fop_aio_write_udp(struct kiocb *iocb,
 
   return ci_udp_sendmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK));
 }
+#ifdef EFRM_HAVE_FOP_READV
+DEFINE_FOP_RW_V(linux_tcp_helper_fop_write_iov_udp, \
+                linux_tcp_helper_fop_writev_udp)
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+DEFINE_FOP_AIO_RW(linux_tcp_helper_fop_write_iov_udp, \
+                  linux_tcp_helper_fop_aio_write_udp)
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+DEFINE_FOP_RW_ITER(linux_tcp_helper_fop_write_iov_udp, \
+                   linux_tcp_helper_fop_write_iter_udp)
+#endif
 
 /*!
  * read() file operation implementation.
@@ -705,21 +733,10 @@ static ssize_t linux_tcp_helper_fop_read_tcp(struct file *filp, char *buf,
  * operations (which the interposing library doesn't get a chance to
  * intercept).
  */
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_readv_tcp(struct file *filp,
-                                              const struct iovec *iov,
-                                              unsigned long iovlen,
-                                              loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_read_tcp(struct kiocb *iocb, 
-                                                 const struct iovec *iov, 
-                                                 unsigned long iovlen,
-                                                 loff_t pos)
-#endif
+static ssize_t linux_tcp_helper_fop_read_iov_tcp(struct file *filp,
+                                                 const struct iovec *iov,
+                                                 unsigned long iovlen)
 {
-#ifndef fop_has_readv
-  struct file *filp = iocb->ki_filp;
-#endif
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
   ci_tcp_recvmsg_args a;
@@ -727,10 +744,6 @@ static ssize_t linux_tcp_helper_fop_aio_read_tcp(struct kiocb *iocb,
   ci_sock_cmn* s;
   int rc;
 
-#ifndef fop_has_readv
-  if (!is_sync_kiocb(iocb))
-    return -EINVAL;
-#endif
   s = SP_TO_SOCK(&trs->netif, priv->sock_id);
   fix_nonblock_flag(filp, s);
 
@@ -749,6 +762,18 @@ static ssize_t linux_tcp_helper_fop_aio_read_tcp(struct kiocb *iocb,
   CI_SET_ERROR(rc, ENOTCONN);
   return rc;
 }
+#ifdef EFRM_HAVE_FOP_READV
+DEFINE_FOP_RW_V(linux_tcp_helper_fop_read_iov_tcp, \
+                linux_tcp_helper_fop_readv_tcp)
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+DEFINE_FOP_AIO_RW(linux_tcp_helper_fop_read_iov_tcp, \
+                  linux_tcp_helper_fop_aio_read_tcp)
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+DEFINE_FOP_RW_ITER(linux_tcp_helper_fop_read_iov_tcp, \
+                   linux_tcp_helper_fop_read_iter_tcp)
+#endif
 
 /*!
  * read() file operation implementation for UDP case.
@@ -783,29 +808,16 @@ static ssize_t linux_tcp_helper_fop_read_udp(struct file *filp, char *buf,
   return ci_udp_recvmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK));
 }
 
-#ifdef fop_has_readv
-static ssize_t linux_tcp_helper_fop_readv_udp(struct file *filp,
-                                          const struct iovec *iov,
-                                          unsigned long iovlen, loff_t *off)
-#else
-static ssize_t linux_tcp_helper_fop_aio_read_udp(struct kiocb *iocb, 
-                                             const struct iovec *iov, 
-                                             unsigned long iovlen, loff_t pos)
-#endif
+static ssize_t linux_tcp_helper_fop_read_iov_udp(struct file *filp,
+                                                 const struct iovec *iov,
+                                                 unsigned long iovlen)
 {
-#ifndef fop_has_readv
-  struct file *filp = iocb->ki_filp;
-#endif
   ci_private_t* priv = filp->private_data;
   tcp_helper_resource_t* trs = efab_priv_to_thr(priv);
   ci_udp_iomsg_args a;
   ci_msghdr m;
   ci_sock_cmn* s;
 
-#ifndef fop_has_readv
-  if (!is_sync_kiocb(iocb))
-    return -EINVAL;
-#endif
   s = SP_TO_SOCK(&trs->netif, priv->sock_id);
   fix_nonblock_flag(filp, s);
 
@@ -818,93 +830,169 @@ static ssize_t linux_tcp_helper_fop_aio_read_udp(struct kiocb *iocb,
 
   return ci_udp_recvmsg(&a, &m, (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK));
 }
+#ifdef EFRM_HAVE_FOP_READV
+DEFINE_FOP_RW_V(linux_tcp_helper_fop_read_iov_udp, \
+                linux_tcp_helper_fop_readv_udp)
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+DEFINE_FOP_AIO_RW(linux_tcp_helper_fop_read_iov_udp, \
+                  linux_tcp_helper_fop_aio_read_udp)
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+DEFINE_FOP_RW_ITER(linux_tcp_helper_fop_read_iov_udp, \
+                   linux_tcp_helper_fop_read_iter_udp)
+#endif
 
 
 static ssize_t
 linux_tcp_helper_fop_read_passthrough(struct file *filp, char *buf,
                                       size_t len, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
-  if( CI_UNLIKELY( os_file->f_op->read != NULL ) )
-    return os_file->f_op->read(os_file, buf, len, off);
-  else
-    return do_sync_read(os_file, buf, len, off);
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 )
+    return rc;
+  rc = __vfs_read(os_file, buf, len, off);
+  oo_os_sock_put(os_file);
+
+  return rc;
 }
 static ssize_t
 linux_tcp_helper_fop_write_passthrough(struct file *filp, const char *buf,
                                        size_t len, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
-  if( CI_UNLIKELY( os_file->f_op->read != NULL ) )
-    return os_file->f_op->write(os_file, buf, len, off);
-  else
-    return do_sync_write(os_file, buf, len, off);
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 )
+    return rc;
+  rc = __vfs_write(os_file, buf, len, off);
+  oo_os_sock_put(os_file);
+
+  return rc;
 }
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
 static ssize_t
 linux_tcp_helper_fop_readv_passthrough(struct file *filp,
                                        const struct iovec *iov,
                                        unsigned long iovlen, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
-  return os_file->f_op->readv(os_file, iov, iovlen, off);
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  OO_OS_SOCKET_FOP(ep, os_file, rc, readv, iov, iovlen, off);
+  return rc;
 }
 static ssize_t
 linux_tcp_helper_fop_writev_passthrough(struct file *filp,
                                         const struct iovec *iov,
                                         unsigned long iovlen, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
-  return os_file->f_op->writev(os_file, iov, iovlen, off);
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  OO_OS_SOCKET_FOP(ep, os_file, rc, writev, iov, iovlen, off);
+  return rc;
 }
-#else
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
 static ssize_t
 linux_tcp_helper_fop_aio_read_passthrough(struct kiocb *iocb, 
                                           const struct iovec *iov, 
                                           unsigned long iovlen, loff_t pos)
 {
-  ci_private_t *priv = iocb->ki_filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(iocb->ki_filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 )
+    return rc;
   iocb->ki_filp = os_file;
-  return os_file->f_op->aio_read(iocb, iov, iovlen, pos);
+  rc = os_file->f_op->aio_read(iocb, iov, iovlen, pos);
+  oo_os_sock_put(os_file);
+
+  return rc;
 }
 static ssize_t
 linux_tcp_helper_fop_aio_write_passthrough(struct kiocb *iocb, 
                                            const struct iovec *iov, 
                                            unsigned long iovlen, loff_t pos)
 {
-  ci_private_t *priv = iocb->ki_filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(iocb->ki_filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 )
+    return rc;
   iocb->ki_filp = os_file;
-  return os_file->f_op->aio_write(iocb, iov, iovlen, pos);
+  rc = os_file->f_op->aio_write(iocb, iov, iovlen, pos);
+  oo_os_sock_put(os_file);
+
+  return rc;
+}
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+static ssize_t
+linux_tcp_helper_fop_read_iter_passthrough(struct kiocb *iocb,
+                                           struct iov_iter *to)
+{
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(iocb->ki_filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 )
+    return rc;
+  iocb->ki_filp = os_file;
+  rc = os_file->f_op->read_iter(iocb, to); 
+  oo_os_sock_put(os_file);
+
+  return rc;
+}
+static ssize_t
+linux_tcp_helper_fop_write_iter_passthrough(struct kiocb *iocb,
+                                            struct iov_iter *from)
+{
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(iocb->ki_filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  rc = oo_os_sock_get_from_ep(ep, &os_file);
+  if( rc != 0 )
+    return rc;
+  iocb->ki_filp = os_file;
+  rc = os_file->f_op->write_iter(iocb, from); 
+  oo_os_sock_put(os_file);
+
+  return rc;
 }
 #endif
 
 static unsigned linux_tcp_helper_fop_poll_passthrough(struct file* filp,
                                                       poll_table* wait)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *os_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
-                                                        os_socket->file;
-  return os_file->f_op->poll(os_file, wait);
+  tcp_helper_endpoint_t* ep = efab_priv_to_ep(filp->private_data);
+  struct file *os_file;
+  int rc;
+
+  OO_OS_SOCKET_FOP(ep, os_file, rc, poll, wait);
+  return rc;
 }
 
 static ssize_t
 linux_tcp_helper_fop_read_alien(struct file *filp, char *buf,
                                       size_t len, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->read(alien_file, buf, len, off);
 }
@@ -912,19 +1000,17 @@ static ssize_t
 linux_tcp_helper_fop_write_alien(struct file *filp, const char *buf,
                                        size_t len, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->write(alien_file, buf, len, off);
 }
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
 static ssize_t
 linux_tcp_helper_fop_readv_alien(struct file *filp,
                                        const struct iovec *iov,
                                        unsigned long iovlen, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->readv(alien_file, iov, iovlen, off);
 }
@@ -933,19 +1019,18 @@ linux_tcp_helper_fop_writev_alien(struct file *filp,
                                         const struct iovec *iov,
                                         unsigned long iovlen, loff_t *off)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->writev(alien_file, iov, iovlen, off);
 }
-#else
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
 static ssize_t
 linux_tcp_helper_fop_aio_read_alien(struct kiocb *iocb, 
                                           const struct iovec *iov, 
                                           unsigned long iovlen, loff_t pos)
 {
-  ci_private_t *priv = iocb->ki_filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(iocb->ki_filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->aio_read(iocb, iov, iovlen, pos);
 }
@@ -954,18 +1039,36 @@ linux_tcp_helper_fop_aio_write_alien(struct kiocb *iocb,
                                            const struct iovec *iov, 
                                            unsigned long iovlen, loff_t pos)
 {
-  ci_private_t *priv = iocb->ki_filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(iocb->ki_filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->aio_write(iocb, iov, iovlen, pos);
+}
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+static ssize_t
+linux_tcp_helper_fop_read_iter_alien(struct kiocb *iocb, 
+                                     struct iov_iter *to)
+{
+  struct file *alien_file = efab_priv_to_ep(iocb->ki_filp->private_data)->
+                                                           alien_ref->_filp;
+  iocb->ki_filp = alien_file;
+  return alien_file->f_op->read_iter(iocb, to);
+}
+static ssize_t
+linux_tcp_helper_fop_write_iter_alien(struct kiocb *iocb, 
+                                      struct iov_iter *from)
+{
+  struct file *alien_file = efab_priv_to_ep(iocb->ki_filp->private_data)->
+                                                           alien_ref->_filp;
+  iocb->ki_filp = alien_file;
+  return alien_file->f_op->write_iter(iocb, from);
 }
 #endif
 
 static unsigned linux_tcp_helper_fop_poll_alien(struct file* filp,
                                                       poll_table* wait)
 {
-  ci_private_t *priv = filp->private_data;
-  struct file *alien_file = ci_trs_get_valid_ep(priv->thr, priv->sock_id)->
+  struct file *alien_file = efab_priv_to_ep(filp->private_data)->
                                                            alien_ref->_filp;
   return alien_file->f_op->poll(alien_file, wait);
 }
@@ -978,22 +1081,21 @@ struct file_operations linux_tcp_helper_fops_tcp =
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_tcp),
   CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_tcp),
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
   CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_tcp),
   CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_tcp),
-#else
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
   CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_tcp),
   CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_tcp),
 #endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+  CI_STRUCT_MBR(read_iter, linux_tcp_helper_fop_read_iter_tcp),
+  CI_STRUCT_MBR(write_iter, linux_tcp_helper_fop_write_iter_tcp),
+#endif
   CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_tcp),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
-#endif
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
@@ -1010,22 +1112,21 @@ struct file_operations linux_tcp_helper_fops_udp =
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_udp),
   CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_udp),
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
   CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_udp),
   CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_udp),
-#else
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
   CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_udp),
   CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_udp),
 #endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+  CI_STRUCT_MBR(read_iter, linux_tcp_helper_fop_read_iter_udp),
+  CI_STRUCT_MBR(write_iter, linux_tcp_helper_fop_write_iter_udp),
+#endif
   CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_udp),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
-#endif
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
@@ -1041,22 +1142,21 @@ struct file_operations linux_tcp_helper_fops_passthrough =
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_passthrough),
   CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_passthrough),
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
   CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_passthrough),
   CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_passthrough),
-#else
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
   CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_passthrough),
   CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_passthrough),
 #endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+  CI_STRUCT_MBR(read_iter, linux_tcp_helper_fop_read_iter_passthrough),
+  CI_STRUCT_MBR(write_iter, linux_tcp_helper_fop_write_iter_passthrough),
+#endif
   CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_passthrough),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
-#endif
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
@@ -1071,22 +1171,21 @@ struct file_operations linux_tcp_helper_fops_alien =
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_alien),
   CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_alien),
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
   CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_alien),
   CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_alien),
-#else
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
   CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_alien),
   CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_alien),
 #endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+  CI_STRUCT_MBR(read_iter, linux_tcp_helper_fop_read_iter_alien),
+  CI_STRUCT_MBR(write_iter, linux_tcp_helper_fop_write_iter_alien),
+#endif
   CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_alien),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
-#endif
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release, linux_tcp_helper_fop_close),
@@ -1102,22 +1201,21 @@ struct file_operations linux_tcp_helper_fops_pipe_reader =
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_pipe),
   CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_notsupp),
-#ifdef fop_has_readv
+#ifdef EFRM_HAVE_FOP_READV
   CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_pipe),
-  CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_notsupp),
-#else
+  CI_STRUCT_MBR(writev, linux_tcp_helper_fop_rw_v_notsupp),
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
   CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_pipe),
-  CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_notsupp),
+  CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_rw_notsupp),
+#endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+  CI_STRUCT_MBR(read_iter, linux_tcp_helper_fop_read_iter_pipe),
+  CI_STRUCT_MBR(write_iter, linux_tcp_helper_fop_rw_iter_notsupp),
 #endif
   CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_pipe_reader),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
-#endif
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release,  linux_tcp_helper_fop_close_pipe),
@@ -1129,22 +1227,21 @@ struct file_operations linux_tcp_helper_fops_pipe_writer =
   CI_STRUCT_MBR(owner, THIS_MODULE),
   CI_STRUCT_MBR(read, linux_tcp_helper_fop_read_notsupp),
   CI_STRUCT_MBR(write, linux_tcp_helper_fop_write_pipe),
-#ifdef fop_has_readv
-  CI_STRUCT_MBR(readv, linux_tcp_helper_fop_readv_notsupp),
+#ifdef EFRM_HAVE_FOP_READV
+  CI_STRUCT_MBR(readv, linux_tcp_helper_fop_rw_v_notsupp),
   CI_STRUCT_MBR(writev, linux_tcp_helper_fop_writev_pipe),
-#else
-  CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_read_notsupp),
+#endif
+#ifdef EFRM_HAVE_FOP_AIO_READ
+  CI_STRUCT_MBR(aio_read, linux_tcp_helper_fop_aio_rw_notsupp),
   CI_STRUCT_MBR(aio_write, linux_tcp_helper_fop_aio_write_pipe),
 #endif
+#ifdef EFRM_HAVE_FOP_READ_ITER
+  CI_STRUCT_MBR(read_iter, linux_tcp_helper_fop_rw_iter_notsupp),
+  CI_STRUCT_MBR(write_iter, linux_tcp_helper_fop_write_iter_pipe),
+#endif
   CI_STRUCT_MBR(poll, linux_tcp_helper_fop_poll_pipe_writer),
-#if HAVE_UNLOCKED_IOCTL
   CI_STRUCT_MBR(unlocked_ioctl, oo_fop_unlocked_ioctl),
-#else
-  CI_STRUCT_MBR(ioctl, oo_fop_ioctl),
-#endif
-#if HAVE_COMPAT_IOCTL
   CI_STRUCT_MBR(compat_ioctl, oo_fop_compat_ioctl),
-#endif
   CI_STRUCT_MBR(mmap, oo_fop_mmap),
   CI_STRUCT_MBR(open, oo_fop_open),
   CI_STRUCT_MBR(release,  linux_tcp_helper_fop_close_pipe),
@@ -1323,173 +1420,177 @@ int efab_tcp_helper_poll_udp(struct file *filp, int *mask,
 
 /****** OS socket callback *****/
 
-static int efab_os_callback(wait_queue_t *wait, unsigned mode, int sync,
-                            void *key)
+/* Returns the fixed "mask" for OS socket events.
+ * This is really linux-specific function. */
+static short efab_os_wakup_fix_mask(tcp_helper_endpoint_t *ep, short mask,
+                                    ci_int32 *so_error_out)
 {
-  struct oo_os_sock_poll *os_sock_pt = container_of(wait,
-                                                    struct oo_os_sock_poll,
-                                                    wait);
-  tcp_helper_endpoint_t *ep = container_of(os_sock_pt,
-                                           tcp_helper_endpoint_t,
-                                           os_sock_pt);
-  struct file *file = ep->os_socket->file;
-  struct socket *sock = SOCKET_I(file->f_dentry->d_inode);
-  ci_int32 so_error;
-  unsigned long mask = (unsigned long)key;
-  ci_sock_cmn *s = SP_TO_SOCK(&ep->thr->netif, ep->id);
-  int wq_active, do_wakeup = 0;
-  unsigned long flags;
-  tcp_helper_resource_t* trs = ep->thr;
+  struct file *file;
+  struct socket *sock;
+  int rc;
 
-  OO_DEBUG_ASYNC(ci_log("%s: %d:%d %s:%d key=%lx", __FUNCTION__,
-                         ep->thr->id, OO_SP_FMT(ep->id),
-                         ip_addr_str(sock_laddr_be32(s)),
-                        (unsigned) CI_BSWAP_BE16(sock_lport_be16(s)),
-                        mask));
-
+  rc = oo_os_sock_get_from_ep(ep, &file);
+  if( rc != 0 )
+    return 0;
+  sock = SOCKET_I(file->f_dentry->d_inode);
   ci_assert(sock);
 
-  so_error = -sock_error(sock->sk);
-  if( so_error ) {
-    SP_TO_SOCK(&ep->thr->netif, ep->id)->so_error = so_error;
-    do_wakeup = 1;
-  }
+  *so_error_out = -sock_error(sock->sk);
 
   /* Normally, we know the mask.  But: linux<2.6.30 uses 0, and some events
    * on modern kernel also use 0.
    * So, we find the current mask if necessary.
    * These 2 masks are not the same: key is the _event_just_happened_,
-   * while poll returns the _events_ever_happened_.
-   *
-   * We'd like to call f_op->poll(), but udp_poll does not like this
-   * context (see bug25557, bug25311).
-   */
-  if( !mask ) {
+   * while poll returns the _events_ever_happened_. */
+  if( mask == 0 || mask == (short)0xffff ) {
+    /* We'd like to call file->f_op->poll() in all cases, but
+     * datagram_poll() is so much faster than udp_poll();
+     * and on some kernels udp_poll() function does not like
+     * arbitrary context we can be running on. */
     if( sock->type == SOCK_DGRAM )
       mask = datagram_poll(file, sock, NULL);
     else
       mask = file->f_op->poll(file, NULL);
   }
-  else if( (mask & POLLIN) && sock->type == SOCK_DGRAM ) {
-    /* This suck, but it is necessary: we have to re-check that we
-     * really have POLLIN event.
-     * 2.6.32 sends POLLIN wakeup when ICMP error is received
-     * (it also sends POLLERR later). */
-    mask &= datagram_poll(ep->os_socket->file, sock, NULL);
-  }
-
-  /* oo_os_sock_status_bit_set is better to be called once, so
-   * we use if-elseif instead of two ifs. */
-  if( (mask & (POLLIN | POLLOUT)) == (POLLIN | POLLOUT) ) {
-    oo_os_sock_status_bit_set(s, OO_OS_STATUS_RX | OO_OS_STATUS_TX);
-    ++s->b.sleep_seq.rw.rx;
-    ++s->b.sleep_seq.rw.tx;
-    do_wakeup = 1;
-  }
-  else if( mask & POLLIN ) {
-    oo_os_sock_status_bit_set(s, OO_OS_STATUS_RX);
-    ++s->b.sleep_seq.rw.rx;
-    do_wakeup = 1;
-  }
-  else if( mask & POLLOUT ) {
-    oo_os_sock_status_bit_set(s, OO_OS_STATUS_TX);
-    ++s->b.sleep_seq.rw.tx;
-    do_wakeup = 1;
-
-  }
-  else if( mask & (POLLHUP | POLLERR) )
-    do_wakeup = 1;
-  OO_DEBUG_ASYNC(ci_log("%s: updated mask=%lx, do_wakeup=%d", __FUNCTION__,
-                        mask, do_wakeup));
-
-  /* Wake up endpoint if someone is waiting on poll() */
-  if( do_wakeup ) {
-    wq_active = ci_waitable_active(&ep->waitq);
-    ci_waitable_wakeup_all(&ep->waitq);
-    if( wq_active ) {
-      if( mask & POLLIN )
-        CITP_STATS_NETIF_INC(&ep->thr->netif, sock_wakes_rx_os);
-      if( mask & POLLOUT )
-        CITP_STATS_NETIF_INC(&ep->thr->netif, sock_wakes_tx_os);
-    }
-
-    /* It's safe to check the id before we decide whether to put stuff on the
-     * ready list, as the epoll code will always start off assuming that things
-     * may be ready, and this check is after we've set the os ready status.
+  else if( *so_error_out || ((mask & POLLIN) && sock->type == SOCK_DGRAM) ) {
+    /* In some cases, we should drop the flagged event.
+     * - If so_error was non-zero, we've just zeroed it.  POLLERR event was
+     *   flagged, but we've "handled" it - and is not shown by the OS
+     *   socket any more.
+     * - Some kernels (2.6.32) send POLLIN wakeup to UDP socket when ICMP
+     *   error is received, but poll() does not show this event.
      */
-    if( s->b.ready_list_id > 0 ) {
-      /* The best thing is if we can just get the lock - in that case we can
-       * just bung this socket straight on the ready list.
+    mask &= datagram_poll(file, sock, NULL);
+  }
+
+  oo_os_sock_put(file);
+
+  return mask;
+}
+
+/* Tell any waiters that there is an OS event.  This function is not
+ * Linux-specific and should be moved to tcp_helper_endpoint.c. */
+static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
+                                 short mask, ci_int32 so_error)
+{
+  ci_sock_cmn *s = SP_TO_SOCK(&ep->thr->netif, ep->id);
+  int wq_active;
+  unsigned long flags;
+  tcp_helper_resource_t* trs = ep->thr;
+  ci_uint32 os_sock_status;
+
+  OO_DEBUG_ASYNC(ci_log("%s: updated mask=%hx so_error=%d os_sock_status=%x",
+                        __FUNCTION__, mask, so_error, s->os_sock_status));
+
+  if( so_error )
+    SP_TO_SOCK(&ep->thr->netif, ep->id)->so_error = so_error;
+  os_sock_status = oo_os_sock_status_from_mask(mask);
+  if( os_sock_status == 0 && so_error == 0 )
+    return;
+
+
+  /* Set os_sock_status field in the socket. */
+  if( os_sock_status != 0 &&
+      (s->os_sock_status & os_sock_status) != os_sock_status ) {
+    oo_os_sock_status_bit_set(s, os_sock_status);
+  }
+
+  /* Wake up endpoint if someone is waiting on poll().
+   * wq_active here is unreliable: it could change either way before the
+   * actual call to ci_waitable_wakeup_all().  So, it is used to update
+   * statistics only. */
+  wq_active = ci_waitable_active(&ep->waitq);
+  if( (os_sock_status & (OO_OS_STATUS_RX | OO_OS_STATUS_ERR))
+      || so_error ) {
+    ++s->b.sleep_seq.rw.rx;
+    if( wq_active )
+      CITP_STATS_NETIF_INC(&ep->thr->netif, sock_wakes_rx_os);
+  }
+  if( (os_sock_status & (OO_OS_STATUS_TX | OO_OS_STATUS_ERR))
+      || so_error ) {
+    ++s->b.sleep_seq.rw.tx;
+    if( wq_active )
+      CITP_STATS_NETIF_INC(&ep->thr->netif, sock_wakes_tx_os);
+  }
+  ci_waitable_wakeup_all(&ep->waitq);
+
+  /* Epoll3 support: */
+
+  /* It's safe to check the id before we decide whether to put stuff on the
+   * ready list, as the epoll code will always start off assuming that things
+   * may be ready, and this check is after we've set the os ready status.
+   */
+  if( s->b.ready_list_id > 0 ) {
+    /* The best thing is if we can just get the lock - in that case we can
+     * just bung this socket straight on the ready list.
+     */
+    if( efab_tcp_helper_netif_try_lock(trs, 1) ) {
+      ci_ni_dllist_remove(&trs->netif, &s->b.ready_link);
+      ci_ni_dllist_put(&trs->netif,
+                       &trs->netif.state->ready_lists[s->b.ready_list_id],
+                       &s->b.ready_link);
+      ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
+      tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK);
+      /* do not insert anything here - we should return immediately */
+    }
+    else {
+      /* If we couldn't get the lock straight away then we need to set a
+       * flag so this can be handled by the lock holder.  We can't set the
+       * flag though until we've got the work ready to do, ie queued it on
+       * the os ready list.
        */
-      if( efab_tcp_helper_netif_try_lock(trs, 1) ) {
+      spin_lock_irqsave(&trs->os_ready_list_lock, flags);
+      ci_dllist_remove(&ep->os_ready_link);
+      ci_dllist_put(&trs->os_ready_lists[s->b.ready_list_id],
+                    &ep->os_ready_link);
+      spin_unlock_irqrestore(&trs->os_ready_list_lock, flags);
+
+      if( efab_tcp_helper_netif_lock_or_set_flags(trs,
+                                                  OO_TRUSTED_LOCK_OS_READY,
+                                                  CI_EPLOCK_NETIF_NEED_WAKE,
+                                                  1) ) {
+        spin_lock_irqsave(&trs->os_ready_list_lock, flags);
+        ci_dllist_remove_safe(&ep->os_ready_link);
+        spin_unlock_irqrestore(&trs->os_ready_list_lock, flags);
+
         ci_ni_dllist_remove(&trs->netif, &s->b.ready_link);
         ci_ni_dllist_put(&trs->netif,
                          &trs->netif.state->ready_lists[s->b.ready_list_id],
                          &s->b.ready_link);
         ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
-        tasklet_schedule(&trs->lock_dropper);
-      }
-      else {
-        /* If we couldn't get the lock straight away then we need to set a
-         * flag so this can be handled by the lock holder.  We can't set the
-         * flag though until we've got the work ready to do, ie queued it on
-         * the os ready list.
-         */
-        spin_lock_irqsave(&trs->os_ready_list_lock, flags);
-        ci_dllist_remove(&ep->os_ready_link);
-        ci_dllist_put(&trs->os_ready_lists[s->b.ready_list_id],
-                      &ep->os_ready_link);
-        spin_unlock_irqrestore(&trs->os_ready_list_lock, flags);
-
-        if( efab_tcp_helper_netif_lock_or_set_flags(trs,
-                                                    OO_TRUSTED_LOCK_OS_READY,
-                                                    CI_EPLOCK_NETIF_NEED_WAKE,
-                                                    1) ) {
-          spin_lock_irqsave(&trs->os_ready_list_lock, flags);
-          ci_dllist_remove_safe(&ep->os_ready_link);
-          spin_unlock_irqrestore(&trs->os_ready_list_lock, flags);
-
-          ci_ni_dllist_remove(&trs->netif, &s->b.ready_link);
-          ci_ni_dllist_put(&trs->netif,
-                           &trs->netif.state->ready_lists[s->b.ready_list_id],
-                           &s->b.ready_link);
-          ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
-          tasklet_schedule(&trs->lock_dropper);
-        }
+        tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK);
+        /* do not insert anything here - we should return immediately */
       }
     }
   }
-
-  return 1;
 }
 
-static void efab_ptable_queue_proc(struct file *file,
-                                   wait_queue_head_t *whead,
-                                   poll_table *pt)
+
+/* This function is a handler for events on the OS socket.  It is called by
+ * Linux function __wake_up after spin_lock_irqsave(), so all this code
+ * should be ready to work with the interrupts turned off. */
+int efab_os_sock_callback(wait_queue_t *wait, unsigned mode, int sync, void *key)
 {
-  struct oo_os_sock_poll *os_sock_pt = container_of(pt,
-                                                    struct oo_os_sock_poll,
-                                                    pt);
-  init_waitqueue_func_entry(&os_sock_pt->wait, efab_os_callback);
-  os_sock_pt->whead = whead;
-  add_wait_queue(whead, &os_sock_pt->wait);
+  tcp_helper_endpoint_t *ep = container_of(wait,
+                                           tcp_helper_endpoint_t,
+                                           os_sock_poll.wait);
+  unsigned long mask = (unsigned long)key;
+  short fixed_mask;
+  ci_int32 so_error = 0;
+
+  fixed_mask = efab_os_wakup_fix_mask(ep, mask, &so_error);
+  OO_DEBUG_ASYNC(ci_sock_cmn *s = SP_TO_SOCK(&ep->thr->netif, ep->id);
+                 ci_log("%s: %d:%d %s:%d mask=%lx fixed_mask=%hx so_error=%d",
+                        __FUNCTION__,
+                         ep->thr->id, OO_SP_FMT(ep->id),
+                         ip_addr_str(sock_laddr_be32(s)),
+                        (unsigned) CI_BSWAP_BE16(sock_lport_be16(s)),
+                        mask, fixed_mask, so_error));
+
+  if( fixed_mask || so_error )
+    efab_os_wakeup_event(ep, fixed_mask, so_error);
+
+  return 1; /* nobody is really interested in the return value */
 }
 
-/* connect to os_sock->f_op->poll() to get error messages */
-void efab_tcp_helper_os_pollwait_register(tcp_helper_endpoint_t* ep)
-{
-  OO_DEBUG_ASYNC(ci_log("%s: %d:%d", __FUNCTION__, ep->thr->id,
-                        OO_SP_FMT(ep->id)));
-  ci_assert_equal(ep->os_sock_pt.whead, NULL);
-  init_poll_funcptr(&ep->os_sock_pt.pt, efab_ptable_queue_proc);
-  ep->os_socket->file->f_op->poll(ep->os_socket->file, &ep->os_sock_pt.pt);
-}
-
-void efab_tcp_helper_os_pollwait_unregister(tcp_helper_endpoint_t* ep)
-{
-  if( ep->os_sock_pt.whead ) {
-    remove_wait_queue(ep->os_sock_pt.whead, &ep->os_sock_pt.wait);
-    ep->os_sock_pt.whead = NULL;
-  }
-}
 /*! \cidoxg_end */

@@ -1907,7 +1907,7 @@ void usleep_range(unsigned long min, unsigned long max);
 	#endif
 
 	#ifdef topology_thread_siblings
-		#define topology_thread_cpumask(cpu)		\
+		#define topology_sibling_cpumask(cpu)		\
 			(&(topology_thread_siblings(cpu)))
 	#endif
 
@@ -1937,6 +1937,10 @@ void usleep_range(unsigned long min, unsigned long max);
 		}
 	#endif
 
+#else
+	#if !defined(topology_sibling_cpumask) && defined(topology_thread_cpumask)
+		#define topology_sibling_cpumask topology_thread_cpumask
+	#endif
 #endif
 
 #ifndef EFX_HAVE_CPUMASK_OF_NODE
@@ -2221,12 +2225,6 @@ static inline unsigned long __attribute_const__ rounddown_pow_of_two(unsigned lo
 
 #ifndef order_base_2
 #define order_base_2(x) fls((x) - 1)
-#endif
-
-#ifdef EFX_NEED_IS_POWER_OF_2
-static inline bool is_power_of_2(unsigned long n) {
-	return (n != 0 && ((n & (n - 1)) == 0));
-}
 #endif
 
 #ifdef EFX_NEED_ON_EACH_CPU_WRAPPER
@@ -2861,6 +2859,24 @@ static inline bool __must_check IS_ERR_OR_NULL(__force const void *ptr)
 
 #ifdef EFX_NEED_NETDEV_RSS_KEY_FILL
 #define netdev_rss_key_fill get_random_bytes
+#endif
+
+#ifndef smp_mb__before_atomic
+#ifdef CONFIG_X86
+/* As in arch/x86/include/asm/barrier.h */
+#define smp_mb__before_atomic() barrier()
+#else
+/* As in include/asm-generic/barrier.h and arch/powerpc/include/asm/barrier.h */
+#define smp_mb__before_atomic() smp_mb()
+#endif
+#endif
+
+#ifndef READ_ONCE
+#define READ_ONCE(x) ACCESS_ONCE((x))
+#endif
+
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, v) (ACCESS_ONCE((x)) = (v))
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

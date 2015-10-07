@@ -38,7 +38,7 @@ void ci_udp_state_free(ci_netif* ni, ci_udp_state* us)
   ci_assert(us->s.b.state == CI_TCP_STATE_UDP);
   ci_assert(ci_ni_dllist_is_self_linked(ni, &us->s.b.post_poll_link));
 
-  ci_sock_cmn_timestamp_q_drop(ni, &us->timestamp_q);
+  ci_udp_recv_q_drop(ni, &us->timestamp_q);
 
   citp_waitable_obj_free(ni, &us->s.b);
 }

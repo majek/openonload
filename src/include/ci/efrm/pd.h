@@ -199,12 +199,12 @@ extern int efrm_pd_dma_map(struct efrm_pd *, int n_pages, int nic_order,
 			   void *dma_addrs, int dma_addrs_stride,
 			   uint64_t *user_addrs, int user_addrs_stride,
 			   void (*user_addr_put)(uint64_t, uint64_t *),
-			   struct efrm_bt_collection *);
+			   struct efrm_bt_collection *, int reset_pending);
 
 /* Unmap pages previously mapped by efrm_pd_dma_map(). */
 extern void efrm_pd_dma_unmap(struct efrm_pd *, int n_pages, int nic_order,
 			      void *dma_addrs, int dma_addrs_stride,
-			      struct efrm_bt_collection *);
+			      struct efrm_bt_collection *, int reset_pending);
 
 /* Re-map pages already mapped by efrm_pd_dma_map() after NIC reset.
  * In: pd, n_pages, nic_order, pages, dma_addrs.

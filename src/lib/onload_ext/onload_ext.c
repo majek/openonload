@@ -220,20 +220,31 @@ int
 onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
                                int flags)
 {
-  return -EINVAL;
+  errno = EINVAL;
+  return -1;
 }
 
 __attribute__((weak))
 int
 onload_delegated_send_cancel(int fd)
 {
-  return -EINVAL;
+  errno = EINVAL;
+  return -1;
 }
 
 __attribute__((weak))
 int
 oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
 {
-  return -EINVAL;
+  errno = EINVAL;
+  return -1;
+}
+
+__attribute__((weak))
+int
+onload_get_tcp_info(int fd, struct onload_tcp_info* info, int* len_in_out)
+{
+  errno = EINVAL;
+  return -1;
 }
 

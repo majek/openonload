@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201502-u3
+%define pkgversion 201509
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -70,7 +70,7 @@
 
 %if %kernel_installed
 
-%define kernel_pkg %( rpm -q --whatprovides /lib/modules/%{kernel} | grep kernel | grep -v source | grep -v base) 
+%define kernel_pkg %( rpm -q --whatprovides /lib/modules/%{kernel}/kernel/arch | grep kernel) 
 # form a fake kernel name in known format 2.6.32-0.41-rt
 %define kernel_long %( echo %{kernel_pkg} | sed "s/kernel-\\([a-zA-Z_-]*\\)[-\.]\\([2-9].[0-9].*\\)/\\2-\\1/; s/kernel-//")
 

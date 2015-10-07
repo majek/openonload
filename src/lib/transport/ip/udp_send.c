@@ -163,6 +163,12 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
   ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
 
+  /* Release the ref we've taken in ci_udp_sendmsg_fill() for
+   * ci_netif_send().  We already hold initial reference to the packet,
+   * so could not free it here. */
+  ci_assert_gt(pkt->refcount, 1);
+  --pkt->refcount;
+
   cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt), 
                        ipcache->ifindex);
 
@@ -315,14 +321,15 @@ static int do_sys_sendmsg(ci_sock_cmn *s, oo_os_file os_sock,
 {
   struct socket* sock;
   int i, bytes;
+  struct msghdr kmsg;
 
   ci_assert(S_ISSOCK(os_sock->f_dentry->d_inode->i_mode));
   sock = SOCKET_I(os_sock->f_dentry->d_inode);
   ci_assert(! user_buffers || ! atomic);
 
-  ci_log("%s: user_buffers=%d atomic=%d sk_allocation=%x ATOMIC=%x",
-         __FUNCTION__, user_buffers, atomic,
-         sock->sk->sk_allocation, GFP_ATOMIC);
+  LOG_NT(ci_log("%s: user_buffers=%d atomic=%d sk_allocation=%x ATOMIC=%x",
+               __FUNCTION__, user_buffers, atomic,
+               sock->sk->sk_allocation, GFP_ATOMIC));
 
   if( atomic && sock->sk->sk_allocation != GFP_ATOMIC ) {
     ci_log("%s: cannot proceed", __FUNCTION__);
@@ -332,15 +339,19 @@ static int do_sys_sendmsg(ci_sock_cmn *s, oo_os_file os_sock,
   for( i = 0, bytes = 0; i < msg->msg_iovlen; ++i )
     bytes += msg->msg_iov[i].iov_len;
 
-  if( user_buffers )
-    bytes = sock_sendmsg(sock, (struct msghdr*) msg, bytes);
-  else
-    bytes = kernel_sendmsg(sock, (struct msghdr*) msg,
+  memset(&kmsg, 0, sizeof(kmsg));
+  if( user_buffers ) {
+    oo_msg_iov_init(&kmsg, WRITE, msg->msg_iov, msg->msg_iovlen, bytes);
+    bytes = sock_sendmsg(sock, &kmsg);
+  }
+  else {
+    bytes = kernel_sendmsg(sock, &kmsg,
                            (struct kvec*) msg->msg_iov, msg->msg_iovlen,
                            bytes);
+  }
+
   /* Clear OS TX flag if necessary  */
-  oo_os_sock_status_bit_clear(s, OO_OS_STATUS_TX,
-                              os_sock->f_op->poll(os_sock, NULL) & POLLOUT);
+  oo_os_sock_status_bit_clear_handled(s, os_sock, OO_OS_STATUS_TX);
   return bytes;
 }
 
@@ -354,8 +365,10 @@ static int ci_udp_sendmsg_os(ci_netif* ni, ci_udp_state* us,
   ++us->stats.n_tx_os;
 
   rc = oo_os_sock_get(ni, S_ID(us), &os_sock);
-  if( rc == 0 )
+  if( rc == 0 ) {
     rc = do_sys_sendmsg(&us->s, os_sock, msg, flags, user_buffers, atomic);
+    oo_os_sock_put(os_sock);
+  }
   return rc;
 }
 
@@ -398,7 +411,7 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
   int ret, rc, err;
   struct sockaddr_in sa;
   socklen_t salen = sizeof(sa);
-  ci_fd_t os_sock = (ci_fd_t)ci_get_os_sock_fd ( ep, fd);
+  ci_fd_t os_sock = (ci_fd_t)ci_get_os_sock_fd(fd);
 
   ci_assert( !udp_lport_be16(us));
 
@@ -587,12 +600,19 @@ static void ci_udp_sendmsg_send_pkt_via_os(ci_netif* ni, ci_udp_state* us,
 }
 
 
-static void fixup_n_async_pkts(ci_netif *ni, ci_ip_pkt_fmt* pkt)
+static void fixup_pkt_not_transmitted(ci_netif *ni, ci_ip_pkt_fmt* pkt)
 {
   ci_assert(ci_netif_is_locked(ni));
   while( 1 ) {
+    /* This is normally done in prep_send_pkt() */
     ci_assert_gt(pkt->n_buffers, 0);
     ni->state->n_async_pkts -= pkt->n_buffers;
+
+    /* Drop additional ref taken in ci_udp_sendmsg_fill() which is normally
+     * consumed by ci_netif_send(). */
+    ci_assert_gt(pkt->refcount, 1);
+    pkt->refcount--;
+
     if( OO_PP_IS_NULL(pkt->next) )
       break;
     pkt = PKT_CHK(ni, pkt->next);
@@ -695,6 +715,7 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
       while( 1 ) {
         oo_pkt_p next = pkt->next;
         prep_send_pkt(ni, us, pkt, ipcache);
+        /* We've called ci_netif_pkt_hold() in ci_udp_sendmsg_fill(). */
         ci_netif_send(ni, pkt);
         if( OO_PP_IS_NULL(next) )
           break;
@@ -740,18 +761,22 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
       }
     }
   }
-  else if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) )
+  else if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) ) {
+    fixup_pkt_not_transmitted(ni, first_pkt);
     ci_udp_sendmsg_mcast(ni, us, ipcache, first_pkt);
-  else
+  }
+  else {
+    fixup_pkt_not_transmitted(ni, first_pkt);
     LOG_U(ci_log("%s: do not send UDP packet because IP TTL = 0",
                  __FUNCTION__));
+  }
 
   ni->state->send_may_poll = 0;
   return;
 
  send_pkt_via_os:
   ++us->stats.n_tx_os_late;
-  fixup_n_async_pkts(ni, pkt);
+  fixup_pkt_not_transmitted(ni, pkt);
   ci_udp_sendmsg_send_pkt_via_os(ni, us, pkt, flags, sinf);
   return;
 
@@ -770,7 +795,7 @@ static void ci_udp_sendmsg_send(ci_netif* ni, ci_udp_state* us,
      * odd thing to do).
      */
     ++us->stats.n_tx_unconnect_late;
-  fixup_n_async_pkts(ni, pkt);
+  fixup_pkt_not_transmitted(ni, pkt);
   return;
 }
 
@@ -1058,12 +1083,12 @@ ci_inline ci_ip4_hdr* eth_ip_init(ci_netif* ni, ci_udp_state* us,
 
 /* Allocate packet buffers and fill them with the payload.
  *
- * Returns [bytes_to_send] on success.  Always succeeds (or segfaults) when
- * called at userlevel.  In kernel can return -EFAULT or -ERESTARTSYS.
+ * Returns [bytes_to_send] on success, -errno on failure.
  */
 static
 int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
                         ci_iovec_ptr* piov, int bytes_to_send,
+                        int flags,
                         struct oo_pkt_filler* pf,
                         struct udp_send_info* sinf)
 {
@@ -1074,7 +1099,10 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
   ci_uint16 ip_id;
   ci_ip4_hdr* ip;
   int pmtu = sinf->ipcache.mtu;
-
+  int can_block = ! ((NI_OPTS(ni).udp_nonblock_no_pkts_mode) &&
+                     ((flags & MSG_DONTWAIT) ||
+                       (us->s.b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK|CI_SB_AFLAG_O_NDELAY))));
+  
   ci_assert(pmtu > 0);
 
   frag_off = 0;
@@ -1087,9 +1115,10 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
       ! sinf->stack_locked )
     sinf->stack_locked = ci_netif_trylock(ni);
 
-  first_pkt = ci_netif_pkt_alloc_block(ni, &us->s, &sinf->stack_locked);
-  if(CI_UNLIKELY( ci_netif_pkt_alloc_block_was_interrupted(first_pkt) ))
-    return -ERESTARTSYS;
+  rc = ci_netif_pkt_alloc_block(ni, &us->s, &sinf->stack_locked, can_block,
+                                &first_pkt);
+  if( rc != 0 )
+    return rc;
   oo_tx_pkt_layout_init(first_pkt);
 
   ip_id = NEXT_IP_ID(ni);
@@ -1131,9 +1160,12 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
     frag_off += frag_bytes;
     ip->ip_id_be16 = ip_id;
 
-    rc = oo_pkt_fill(ni, &us->s, &sinf->stack_locked, pf, piov,
+    /* This refcount is used later by ci_netif_send() */
+    ci_netif_pkt_hold(ni, pf->pkt);
+
+    rc = oo_pkt_fill(ni, &us->s, &sinf->stack_locked, can_block, pf, piov,
                      payload_bytes CI_KERNEL_ARG(CI_ADDR_SPC_CURRENT));
-    if(CI_UNLIKELY( oo_pkt_fill_failed(rc) ))
+    if( CI_UNLIKELY( rc != 0 ) )
       goto fill_failed;
 
     if( bytes_left == 0 )
@@ -1142,11 +1174,10 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
     /* This counts the number of fragments not including the first. */
     ++us->stats.n_tx_fragments;
 
-    new_pkt = ci_netif_pkt_alloc_block(ni, &us->s, &sinf->stack_locked);
-    if(CI_UNLIKELY( ci_netif_pkt_alloc_block_was_interrupted(new_pkt) )) {
-      rc = -ERESTARTSYS;
+    rc = ci_netif_pkt_alloc_block(ni, &us->s, &sinf->stack_locked, 
+                                  can_block, &new_pkt);
+    if( CI_UNLIKELY( rc != 0 ))
       goto fill_failed;
-    }
     oo_tx_pkt_layout_init(new_pkt);
 
     pf->pkt->next = OO_PKT_P(new_pkt);
@@ -1167,35 +1198,46 @@ int ci_udp_sendmsg_fill(ci_netif* ni, ci_udp_state* us,
   return bytes_to_send;
 
  fill_failed:
-#ifdef __KERNEL__
-  /* ?? FIXME: We'll leak a packet buffer here if we can't get the stack
-   * lock.  We need a generic function for freeing a packet whether or not
-   * we have the lock.
-   */
   if( ! sinf->stack_locked && ci_netif_lock(ni) == 0 )
     sinf->stack_locked = 1;
-  if( sinf->stack_locked )
-    ci_netif_pkt_release(ni, first_pkt);
 
-  switch( rc ) {
-  case -EFAULT:
-  case -ERESTARTSYS:
-    /* Waiting for packet was interrupted by a signal.  To match kernel
-     * semantics we should really do an uninterruptible wait for packet
-     * buffers.  However, if the packet pool becomes permanently depleted
-     * (which at time of writing is possible) then we wouldn't be able to
-     * kill the app, which would be very unfriendly.
-     *
-     * Instead we return -ERESTARTSYS so that the signal is handled and we
-     * try again.
-     */
-    return rc;
-  default:
-    /* Not possible. */
-    CI_TEST(0);
+  /* Release the refs we've taken for ci_netif_send().
+   * Unlike fixup_pkt_not_transmitted(), we can't rely that ->next links to
+   * the next IP fragment, because oo_pkt_fill() can leave it in other way.
+   * So, we should go through all fragments and decrement refcounts for IP
+   * fragments only. */
+  {
+    ci_ip_pkt_fmt* pkt = first_pkt;
+    int n_buffers;
+
+    while( 1 ) {
+      n_buffers = pkt->n_buffers;
+      ci_assert_gt(pkt->refcount, 1);
+      pkt->refcount--;
+      /* Skip scatter-gather fragments, we need to release
+       * IP fragments only. */
+      while( n_buffers-- > 0 ) {
+        CI_NETIF_STATE_MOD(ni, sinf->stack_locked, n_async_pkts, -);
+        if( OO_PP_IS_NULL(pkt->frag_next) )
+          goto pkt_chain_released;
+        pkt = PKT_CHK(ni, pkt->frag_next);
+      }
+    }
   }
-#endif
-  return 0;
+ pkt_chain_released:
+
+  /* Free the packet chain by freeing the first fragment. */
+ #ifdef __KERNEL__
+   if( ! sinf->stack_locked )
+     ci_netif_set_merge_atomic_flag(ni);
+   ci_netif_pkt_release_mnl(ni, first_pkt, &sinf->stack_locked);
+ #else
+   /* ci_netif_lock() can't fail in UL */
+   ci_assert(sinf->stack_locked);
+   ci_netif_pkt_release(ni, first_pkt);
+ #endif
+
+  return rc;
 }
 
 
@@ -1251,7 +1293,11 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
     sinf->rc = -EMSGSIZE;
     return;
   }
-  rc = ci_udp_sendmsg_fill(ni, us, &piov, bytes_to_send, &pf, sinf);
+  rc = ci_udp_sendmsg_fill(ni, us, &piov, bytes_to_send, flags, &pf, sinf);
+  if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_ID ) {
+    pf.pkt->ts_key = us->s.ts_key;
+    ci_atomic32_inc(&us->s.ts_key);
+  }
   if( sinf->stack_locked && ! was_locked )
     ++us->stats.n_tx_lock_pkt;
   if(CI_LIKELY( rc >= 0 )) {

@@ -91,6 +91,8 @@ typedef struct ci_resource_onload_alloc_s {
   char                    in_version[OO_VER_STR_LEN + 1];
   char                    in_uk_intf_ver[CI_CHSUM_STR_LEN + 1];
   char                    in_name[CI_CFG_STACK_NAME_LEN + 1];
+  int                     in_cluster_size;
+  int                     in_cluster_restart;
   efrm_nic_set_t          out_nic_set;
   ci_uint32               out_netif_mmap_bytes;
 } ci_resource_onload_alloc_t;
@@ -136,7 +138,7 @@ typedef struct {
 } oo_tcp_filter_set_t;
 
 typedef struct {
-  char      cluster_name[(CI_CFG_STACK_NAME_LEN >> 1) + 1];
+  char      cluster_name[CI_CFG_CLUSTER_NAME_LEN + 1];
   ci_int32  cluster_size;
   ci_uint32 cluster_restart_opt;
   ci_uint32 addr_be32;
@@ -172,6 +174,13 @@ typedef struct {
 } oo_tcp_move_state_t;
 
 typedef struct {
+  ci_int32      level;
+  ci_int32      optname;
+  ci_user_ptr_t optval;
+  ci_int32      optlen;
+} oo_tcp_create_set_t;
+
+typedef struct {
   oo_sp         sock_id;
   ci_user_ptr_t address; /* const struct sockaddr */
   ci_uint32     addrlen; /* IN: addrlen OUT: port */
@@ -195,6 +204,12 @@ typedef struct {
   ci_int32              type;
   ci_int32              padding;
 } oo_sock_attach_t;
+
+typedef struct {
+  ci_fixed_descriptor_t fd;     /* OUT */
+  oo_sp                 ep_id;
+  ci_int32              type;
+} oo_tcp_accept_sock_attach_t;
 
 #if CI_CFG_USERSPACE_PIPE
 typedef struct {
@@ -558,7 +573,6 @@ struct oo_op_tcp_drop_from_acceptq {
  *
  *--------------------------------------------------------------------*/
 
-#include <ci/iscsi/sis_interface.h> /* to get ci_iscsi_control_params type */
 #include <onload/ioctl.h>
 
 #endif /* __ONLOAD_COMMON_H__ */

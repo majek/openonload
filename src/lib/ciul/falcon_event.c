@@ -294,7 +294,7 @@ int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
       break;
     }
 
-    if (evs_len < EF_VI_EVENT_POLL_MIN_EVS)
+    if (evs_len == 0)
       break;
 
     pev = EF_VI_EVENT_PTR(evq, 0);
@@ -327,6 +327,7 @@ int falcon_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
 
 int ef_eventq_has_event(ef_vi* vi)
 {
+  EF_VI_ASSERT(vi->evq_base);
   return EF_VI_IS_EVENT(EF_VI_EVENT_PTR(vi, 0));
 }
 

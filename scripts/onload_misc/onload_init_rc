@@ -17,7 +17,11 @@ case "$1" in
     /sbin/onload_tool mknod onload onload_epoll
     /sbin/modprobe sfc_affinity
     /sbin/onload_tool mknod sfc_affinity
-    # TODO: Configure sfc_affinity.
+    # sfc_affinity will overwrite your IRQ core affinitiy settings
+    # so we do not do this by default.  It is however required if you wish
+    # Onload to affinitise interrupts.
+    # Uncomment this next line to spread the channels evenly over all cores
+    # See "/usr/sbin/sfcaffinity_config --help" for more advanced usage.
     #/usr/sbin/sfcaffinity_config auto
     ;;
   *)

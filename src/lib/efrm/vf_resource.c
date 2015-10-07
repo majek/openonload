@@ -134,7 +134,7 @@ efrm_vf_init_nic_params(struct efhw_nic* nic,
 			   nic->mac_addr, ETH_ALEN) == 0)
 			break;
 
-	EFRM_ASSERT(nic_index == nic->index);
+	EFRM_ASSERT(nic_index < EFHW_MAX_NR_DEVS);
 #endif
 
 	EFRM_TRACE("vf_vi_base=%u vf_vi_scale=%u vf_count=%u",

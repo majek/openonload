@@ -113,14 +113,4 @@ fail:
 #endif
 
 
-
-/* NOTE: there seems to be no reliable way of getting this in the kernel, but
- *       it is required to allow netif creation from within the kernel (used
- *       for iSCSI support).  So, the value to be returned by ci_get_cpu_khz()
- *       is currently set by passing a module parameter to the char driver,
- *       and the implementation of ci_get_cpu_khz() can be found in
- *       driver/linux/char_driver.c .
- */
-
-
 /*! \cidoxg_end */

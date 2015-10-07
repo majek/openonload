@@ -141,6 +141,15 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
 }
 
 
+int ci_netif_listener_lookup(ci_netif* netif, unsigned laddr, unsigned lport)
+{
+  int rc = ci_netif_filter_lookup(netif, laddr, lport, 0, 0, IPPROTO_TCP);
+  if( rc < 0 )
+    rc = ci_netif_filter_lookup(netif, 0, lport, 0, 0, IPPROTO_TCP);
+  return rc;
+}
+
+
 ci_uint32
 ci_netif_filter_hash(ci_netif* ni, unsigned laddr, unsigned lport,
                      unsigned raddr, unsigned rport, unsigned protocol)
@@ -343,7 +352,15 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp sock_p,
   int hops = 0;
   unsigned first;
 
-  ci_assert(ci_netif_is_locked(netif));
+  ci_assert(ci_netif_is_locked(netif)
+#ifdef __KERNEL__
+            /* release_ep_tbl might be called without the stack lock.
+             * Do not complain about this. */
+            || (netif2tcp_helper_resource(netif)->k_ref_count &
+                TCP_HELPER_K_RC_DEAD)
+#endif
+            );
+
 
   tbl = netif->filter_table;
   hash1 = tcp_hash1(tbl, laddr, lport, raddr, rport, protocol);

@@ -662,12 +662,18 @@ out:
 		efx_nic_notify_rx_desc(rx_queue);
 }
 
-void efx_rx_slow_fill(unsigned long context)
+void efx_rx_slow_fill(struct work_struct *data)
 {
-	struct efx_rx_queue *rx_queue = (struct efx_rx_queue *)context;
+	struct efx_rx_queue *rx_queue =
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_NEED_WORK_API_WRAPPERS)
+		container_of(data, struct efx_rx_queue, slow_fill_work.work);
+#else
+		container_of(data, struct efx_rx_queue, slow_fill_work);
+#endif
 
 	/* Post an event to cause NAPI to run and refill the queue */
-	efx_nic_generate_fill_event(rx_queue);
+	if (efx_nic_generate_fill_event(rx_queue) != 0)
+		efx_schedule_slow_fill(rx_queue);
 	++rx_queue->slow_fill_count;
 }
 
@@ -1184,6 +1190,8 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	netif_dbg(rx_queue->efx, drv, rx_queue->efx->net_dev,
 		  "initialising RX queue %d\n", efx_rx_queue_index(rx_queue));
 
+	INIT_DELAYED_WORK(&rx_queue->slow_fill_work, efx_rx_slow_fill);
+
 	/* Initialise ptr fields */
 	rx_queue->added_count = 0;
 	rx_queue->notified_count = 0;
@@ -1238,7 +1246,7 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 	netif_dbg(rx_queue->efx, drv, rx_queue->efx->net_dev,
 		  "shutting down RX queue %d\n", efx_rx_queue_index(rx_queue));
 
-	del_timer_sync(&rx_queue->slow_fill);
+	efx_cancel_slow_fill(rx_queue);
 
 	/* Release RX buffers from the current read ptr to the write ptr */
 	if (rx_queue->buffer) {

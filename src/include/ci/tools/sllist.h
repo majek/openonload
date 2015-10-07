@@ -41,6 +41,9 @@ typedef struct {
 
 /**********************************************************************/
 
+ci_inline int ci_sllink_busy(ci_sllink* link)
+{ return link->next != NULL; }
+
 ci_inline void ci_sllist_init(ci_sllist* list)
 { list->head = 0; }
 
@@ -62,6 +65,7 @@ ci_inline ci_sllink* ci_sllist_pop(ci_sllist* list) {
   ci_sllink* link;
   link = list->head;
   list->head = link->next;
+  link->next = NULL;
   return link;
 }
 

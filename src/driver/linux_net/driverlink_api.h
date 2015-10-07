@@ -51,6 +51,11 @@ struct efx_dl_device_info;
  * kbuild and the module loader using symbol versions.
  */
 #define EFX_DRIVERLINK_API_VERSION 22
+#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 2
+
+#ifndef EFX_DRIVERLINK_API_VERSION_MINOR
+#define EFX_DRIVERLINK_API_VERSION_MINOR 0
+#endif
 
 /**
  * enum efx_dl_ev_prio - Driverlink client's priority level for event handling
@@ -69,9 +74,15 @@ enum efx_dl_ev_prio {
  * @EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE: Set by drivers that
  *	promise to use the RX buffer size programmed by the net driver
  *	on Falcon and Siena.  Defined from API version 8.
+ * @EFX_DL_DRIVER_REQUIRES_MINOR_VER: Set by client drivers to indicate the
+ *      minor_ver entry us present in their struct. Defined from API 22.1.
+ * @EFX_DL_DRIVER_SUPPORTS_MINOR_VER: Set by the server driver to
+ *      indicate the minor version supplied by the client is supported.
  */
 enum efx_dl_driver_flags {
 	EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE = 0x1,
+	EFX_DL_DRIVER_REQUIRES_MINOR_VER = 0x2,
+	EFX_DL_DRIVER_SUPPORTS_MINOR_VER = 0x4,
 };
 
 /**
@@ -120,6 +131,7 @@ enum efx_dl_driver_flags {
  * defined and the return type of @handle_event was void.
  */
 struct efx_dl_driver {
+/* public: */
 	const char *name;
 	enum efx_dl_ev_prio priority;
 	enum efx_dl_driver_flags flags;
@@ -139,6 +151,9 @@ struct efx_dl_driver {
 /* private: */
 	struct list_head node;
 	struct list_head device_list;
+
+/* public: */
+	unsigned int minor_ver;
 };
 
 /**
@@ -226,6 +241,7 @@ enum efx_dl_falcon_resource_flags {
  *	%EFX_DL_FALCON_HAVE_TIMER_QUANTUM_NS is set.
  * @rx_usr_buf_size: RX buffer size for user-mode queues and kernel-mode
  *	queues with scatter enabled, in bytes.  Defined from API version 8.
+ * @rx_channel_count: Number of receive channels available for use.
  */
 struct efx_dl_falcon_resources {
 	struct efx_dl_device_info hdr;
@@ -244,6 +260,9 @@ struct efx_dl_falcon_resources {
 	unsigned rss_channel_count;
 	unsigned timer_quantum_ns;
 	unsigned rx_usr_buf_size;
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 1)
+        unsigned int rx_channel_count;
+#endif
 };
 
 /**
@@ -334,9 +353,10 @@ enum efx_dl_ef10_resource_flags {
  *	the cached value in their reset_resume() function.
  * @vi_min: Relative index of first available VI
  * @vi_lim: Relative index of last available VI + 1
- * @rss_channel_count: Number of receive channels used for RSS.
  * @timer_quantum_ns: Timer quantum (nominal period between timer ticks)
  *      for wakeup timers, in nanoseconds.
+ * @rss_channel_count: Number of receive channels used for RSS.
+ * @rx_channel_count: Number of receive channels available for use.
  */
 struct efx_dl_ef10_resources {
 	struct efx_dl_device_info hdr;
@@ -347,6 +367,9 @@ struct efx_dl_ef10_resources {
 	unsigned rss_channel_count;
 	enum efx_dl_ef10_resource_flags flags;
 	unsigned int vport_id;
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 0)
+	unsigned int rx_channel_count;
+#endif
 };
 
 /**
@@ -366,10 +389,19 @@ struct efx_dl_device {
 	struct efx_dl_driver *driver;
 };
 
+/**
+ * efx_dl_unregister_driver() - Unregister a client driver
+ * @driver: Driver operations structure
+ *
+ * This acquires the rtnl_lock and therefore must be called from
+ * process context.
+ */
+void efx_dl_unregister_driver(struct efx_dl_driver *driver);
+
 /* Include API version number in symbol used for efx_dl_register_driver */
 #define efx_dl_stringify_1(x, y) x ## y
 #define efx_dl_stringify_2(x, y) efx_dl_stringify_1(x, y)
-#define efx_dl_register_driver					\
+#define __efx_dl_register_driver				\
 	efx_dl_stringify_2(efx_dl_register_driver_api_ver_,	\
 			   EFX_DRIVERLINK_API_VERSION)
 
@@ -380,16 +412,28 @@ struct efx_dl_device {
  * This acquires the rtnl_lock and therefore must be called from
  * process context.
  */
-int efx_dl_register_driver(struct efx_dl_driver *driver);
+int __efx_dl_register_driver(struct efx_dl_driver *driver);
 
-/**
- * efx_dl_unregister_driver() - Unregister a client driver
- * @driver: Driver operations structure
- *
- * This acquires the rtnl_lock and therefore must be called from
- * process context.
- */
-void efx_dl_unregister_driver(struct efx_dl_driver *driver);
+static inline int efx_dl_register_driver(struct efx_dl_driver *driver)
+{
+	int rc;
+
+#if EFX_DRIVERLINK_API_VERSION_MINOR > 0
+	driver->flags |= EFX_DL_DRIVER_REQUIRES_MINOR_VER;
+	driver->flags &= ~EFX_DL_DRIVER_SUPPORTS_MINOR_VER;
+	driver->minor_ver = EFX_DRIVERLINK_API_VERSION_MINOR;
+#endif
+
+	rc = __efx_dl_register_driver(driver);
+
+#if EFX_DRIVERLINK_API_VERSION_MINOR > 0
+	if (rc == 0 && !(driver->flags & EFX_DL_DRIVER_SUPPORTS_MINOR_VER)) {
+		efx_dl_unregister_driver(driver);
+		rc = -EPERM;
+	}
+#endif
+	return rc;
+}
 
 /**
  * efx_dl_netdev_is_ours() - Check whether device is handled by sfc

@@ -69,7 +69,8 @@ vi_set_rm_alloc(ci_resource_alloc_t* alloc_,
   }
 
   vi_props = 0;
-  rc = efrm_vi_set_alloc(pd, alloc->in_n_vis, vi_props, &vi_set);
+  rc = efrm_vi_set_alloc(pd, alloc->in_n_vis, vi_props,
+                         EFRM_RSS_MODE_DEFAULT, &vi_set);
   if( rc != 0 )
     goto fail3;
 
@@ -98,9 +99,11 @@ static void vi_set_rm_free(efch_resource_t *rs)
                         &rs->vi_set.fl);
   /* Remove any sniff config we may have set up. */
   if( rs->vi_set.sniff_flags & EFCH_RX_SNIFF )
-    efrm_port_sniff(rs->rs_base, 0, 0, efrm_vi_set_get_rss_context(vi_set));
+    efrm_port_sniff(rs->rs_base, 0, 0, efrm_vi_set_get_rss_context(vi_set,
+        EFRM_RSS_MODE_ID_DEFAULT));
   if( rs->vi_set.sniff_flags & EFCH_TX_SNIFF )
-    efrm_tx_port_sniff(rs->rs_base, 0, efrm_vi_set_get_rss_context(vi_set));
+    efrm_tx_port_sniff(rs->rs_base, 0, efrm_vi_set_get_rss_context(vi_set,
+        EFRM_RSS_MODE_ID_DEFAULT));
 }
 
 
@@ -125,7 +128,8 @@ vi_set_rm_rsops(efch_resource_t* rs, ci_resource_table_t* priv_opt,
                 CI_BLOCKING_CTX_ARG(ci_blocking_ctx_t bc))
 {
   struct efrm_vi_set *vi_set = efrm_vi_set_from_resource(rs->rs_base);
-  int rss_context = efrm_vi_set_get_rss_context(vi_set);
+  int rss_context = efrm_vi_set_get_rss_context(vi_set,
+                                                EFRM_RSS_MODE_ID_DEFAULT);
   unsigned flags;
 
   int rc;

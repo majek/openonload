@@ -402,6 +402,9 @@ CI_CFG_OPT("EF_TCP_SEND_SPIN", tcp_send_spin, ci_uint32,
 CI_CFG_OPT("EF_TCP_ACCEPT_SPIN", tcp_accept_spin, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
 
+CI_CFG_OPT("EF_TCP_CONNECT_SPIN", tcp_connect_spin, ci_uint32,
+           "", 1, , 0, 0, 1, yesno)
+
 CI_CFG_OPT("EF_PKT_WAIT_SPIN", pkt_wait_spin, ci_uint32,
            "", 1, , 0, 0, 1, yesno)
 
@@ -442,8 +445,25 @@ CI_CFG_OPT("EF_TCP_SNDBUF_MODE", tcp_sndbuf_mode, ci_uint32,
            "sockets.  In the default mode the limit applies to the "
            "size of the send queue and retransmit queue combined.  "
            "When this option is set to 0 the limit applies to the "
-           "the send queue only.",
-           1, , 1, 0, 1, yesno)
+           "the send queue only."
+           "When this option is set to 2, the SNDBUF size is automatically "
+           "adjusted for each TCP socket to match the window advertised by "
+           "the peer (limited by EF_TCP_SOCKBUF_MAX_FRACTION). If the"
+           "application sets SO_SNDBUF explictly then automatic adjustment is"
+           "not used for that socket. The limit is applied to the size of the"
+           "send queue and retransmit queue combined. You may also want to set"
+           "EF_TCP_RCVBUF_MODE to give automatic adjustment of RCVBUF.",
+           2, , 1, 0, 2, oneof:no;yes;auto)
+
+CI_CFG_OPT("EF_TCP_SOCKBUF_MAX_FRACTION", tcp_sockbuf_max_fraction, ci_uint32,
+           "This option controls the maximum fraction of the TX buffers"
+           "that may be allocated to a single socket with EF_TCP_SNDBUF_MODE=2."
+           "It also controls the maximum fraction of the RX buffers that may"
+           "be allocated to a single socket with EF_TCP_RCVBUF_MODE=1."
+           "The maximum allocation for a socket is EF_MAX_TX_PACKETS/(2^N)"
+           "for TX and EF_MAX_RX_PACKETS/(2^N) for RX, where N is specified"
+           "here.",
+           4, , 1, 1, 10, count)
 
 CI_CFG_OPT("EF_TCP_SYNCOOKIES", tcp_syncookies, ci_uint32,
 "Use TCP syncookies to protect from SYN flood attack",
@@ -467,6 +487,17 @@ CI_CFG_OPT("EF_TCP_RCVBUF_STRICT", tcp_rcvbuf_strict, ci_uint32,
 "penalty.  You probably want this option if your application is "
 "connecting to unrtusted partner or over untrusted network.\n"
 "Off by default.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_UDP_SEND_NONBLOCK_NO_PACKETS_MODE", 
+           udp_nonblock_no_pkts_mode, ci_uint32,
+           "This option controls how a non-blocking UDP send() call should "
+           "behave if it is unable to allocate sufficient packet buffers.  By "
+           "default Onload will mimic Linux kernel stack behaviour and block "
+           "for packet buffers to be available.  If set to 1, this option will "
+           "cause Onload to return error ENOBUFS.  Note this option can cause "
+           "some applications (that assume that a socket that is writeable is "
+           "able to send without error) to malfunction.",
            1, , 0, 0, 1, yesno)
 
 /**********************************************************************
@@ -604,7 +635,10 @@ CI_CFG_OPT("EF_PIO", pio, ci_uint32,
 "In all cases, PIO will only be used for small packets (see EF_PIO_THRESHOLD) "
 "and if the VI's transmit queue is currently empty.  If these conditions are "
 "not met DMA will be used, even in mode 2.\n"
-"Note: PIO is currently only available on x86_64 systems",
+"Note: PIO is currently only available on x86_64 systems\n"
+"Note: Mode 2 will not prevent a stack from operating without PIO in the\n"
+"      event that PIO allocation is originally successful but then fails\n"
+"      after an adapter is rebooted or hotplugged while that stack exists.",
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
 
@@ -662,8 +696,14 @@ CI_CFG_OPT("EF_STRIPE_TCP_OPT", stripe_tcp_opt, ci_uint32,
 #endif
 
 CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD", retransmit_threshold, ci_int32,
-"Number of retransmit timeouts before a TCP connect is aborted.",
+"Number of retransmit timeouts before a TCP connection is aborted.",
            8,  retransmit_threshold, CI_TCP_RETRANSMIT_THRESHOLD,
+           0, SMAX, count)
+
+CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD_ORPHAN", retransmit_threshold_orphan, ci_int32,
+"Number of retransmit timeouts before a TCP connection is aborted "
+"in case of orphaned connection.",
+           8,  retransmit_threshold, CI_TCP_RETRANSMIT_THRESHOLD_ORPHAN,
            0, SMAX, count)
 
 CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD_SYN", retransmit_threshold_syn, ci_int32,
@@ -677,7 +717,7 @@ CI_CFG_OPT("EF_RETRANSMIT_THRESHOLD_SYNACK", retransmit_threshold_synack,
            ci_int32,
 "Number of times a SYN-ACK will be retransmitted before an embryonic "
 "connection will be aborted.",
-           8,  retransmit_threshold_synack, CI_TCP_LISTEN_SYNACK_RETRIES, 0,
+           8,  retransmit_threshold, CI_TCP_LISTEN_SYNACK_RETRIES, 0,
            CI_CFG_TCP_SYNACK_RETRANS_MAX, count)
 
 /*****************************************************************/
@@ -984,40 +1024,49 @@ CI_CFG_OPT("EF_PREFAULT_PACKETS", prefault_packets, ci_int32,
 "reserved.  Set to 0 to prevent prefaulting.",
            , , 1, 0, 1000000000, count)
 
-/* Max is currently 2^21 EPs */
+/* Max is currently 2^21 EPs.
+ * We allocate ep in pages, EP_BUF_PER_PAGE=4 ep per page, so min is 4.
+ * 7 synrecv states consume one endpoint, but we also use aux buffers for
+ * listening buckets, so the real ratio is 3,5 synrecv state consumes on
+ * endpoint. */
 CI_CFG_OPT("EF_MAX_ENDPOINTS", max_ep_bufs, ci_uint32,
 "This option places an upper limit on the number of accelerated endpoints "
 "(sockets, pipes etc.) in an Onload stack.  This option should be set to a "
-"power of two between 1 and 2^21."
+"power of two between 4 and 2^21."
 "\n"
 "When this limit is reached listening sockets are not able to accept new "
 "connections over accelerated interfaces.  New sockets and pipes created via "
 "socket() and pipe() etc. are handed over to the kernel stack and so are not "
-"accelerated.",
-           , , CI_CFG_NETIF_MAX_ENDPOINTS, 0, CI_CFG_NETIF_MAX_ENDPOINTS_MAX,
+"accelerated."
+"\n"
+"Note: ~4 syn-receive states consume one endpoint, see also "
+"EF_TCP_SYNRECV_MAX.",
+           , , CI_CFG_NETIF_MAX_ENDPOINTS, 4, CI_CFG_NETIF_MAX_ENDPOINTS_MAX,
            count)
 
 CI_CFG_OPT("EF_TCP_SNDBUF_ESTABLISHED_DEFAULT", tcp_sndbuf_est_def, ci_uint32,
-"Default value for SO_SNDBUF for TCP sockets in the ESTABLISHED state. "
-"This value is used when the TCP connection transitions to ESTABLISHED "
-"state, to avoid confusion of some applications like netperf.\n"
-"If the OS default SO_SNDBUF value is less then this, then this "
-"value is used. "
-"If the OS default SO_SNDBUF value is more that 4 * this, then "
-"4 * this value is used.\n"
+"Overrides the OS default SO_SNDBUF value for TCP sockets in the ESTABLISHED "
+"state if the OS default SO_SNDBUF value falls outside bounds set with this "
+"option. This value is used when the TCP connection transitions to "
+"ESTABLISHED state, to avoid confusion of some applications like netperf.\n"
+"The lower bound is set to this value and the upper bound is set to 4 * this "
+"value. If the OS default SO_SNDBUF value is less than the lower bound, then "
+"the lower bound is used. If the OS default SO_SNDBUF value is more than the "
+"upper bound, then the upper bound is used.\n"
 "This variable overrides OS default SO_SNDBUF value only, it does not "
 "change SO_SNDBUF if the application explicitly sets it "
 "(see EF_TCP_SNDBUF variable which overrides application-supplied value).",
            ,  , 128 * 1024, MIN, MAX, bincount)
 
 CI_CFG_OPT("EF_TCP_RCVBUF_ESTABLISHED_DEFAULT", tcp_rcvbuf_est_def, ci_uint32,
-"Default value for SO_RCVBUF for TCP sockets in the ESTABLISHED state.  "
-"This value is used when the TCP connection transitions to ESTABLISHED "
-"state, to avoid confusion of some applications like netperf.\n"
-"If the OS default SO_RCVBUF value is less then this, then this "
-"value is used. "
-"If the OS default SO_RCVBUF value is more that 4 * this, then "
-"4 * this value is used.\n"
+"Overrides the OS default SO_RCVBUF value for TCP sockets in the ESTABLISHED "
+"state if the OS default SO_RCVBUF value falls outside bounds set with this "
+"option. This value is used when the TCP connection transitions to "
+"ESTABLISHED state, to avoid confusion of some applications like netperf.\n"
+"The lower bound is set to this value and the upper bound is set to 4 * this "
+"value. If the OS default SO_RCVBUF value is less than the lower bound, then "
+"the lower bound is used. If the OS default SO_RCVBUF value is more than the "
+"upper bound, then the upper bound is used.\n"
 "This variable overrides OS default SO_RCVBUF value only, it does not "
 "change SO_RCVBUF if the application explicitly sets it "
 "(see EF_TCP_RCVBUF variable which overrides application-supplied value).",
@@ -1092,9 +1141,20 @@ CI_CFG_OPT("EF_UDP_RCVBUF", udp_rcvbuf_user, ci_uint32,
            ,  udp_rcvbuf, 0, MIN, MAX, bincount)
 
 CI_CFG_OPT("EF_TCP_BACKLOG_MAX", tcp_backlog_max, ci_uint32,
-"Places an upper limit on the number of embryonic (half-open) connections in "
-"an OpenOnload stack.",
+"Places an upper limit on the number of embryonic (half-open) connections for "
+"one listening socket; see also EF_TCP_SYNRECV_MAX.  This value is overridden "
+"by /proc/sys/net/ipv4/tcp_max_syn_backlog.",
            , , CI_TCP_LISTENQ_MAX, MIN, MAX, bincount)
+
+/* The number we really use is tcp_synrecv_max*2 - it is the maximum
+ * number of aux buffers, assuming that synrrecv state can use one half of
+ * them and listening bucktes use another half. */
+CI_CFG_OPT("EF_TCP_SYNRECV_MAX", tcp_synrecv_max, ci_uint32,
+"Places an upper limit on the number of embryonic (half-open) connections in "
+"an Onload stack; see also EF_TCP_BACKLOG_MAX.  By default, "
+"EF_TCP_SYNRECV_MAX = 4 * EF_TCP_BACKLOG_MAX.",
+           , , CI_TCP_LISTENQ_MAX * CI_CFG_ASSUME_LISTEN_SOCKS,
+           MIN, CI_CFG_NETIF_MAX_ENDPOINTS_MAX, bincount)
 
 CI_CFG_OPT("EF_TCP_INITIAL_CWND", initial_cwnd, ci_int32,
 "Sets the initial size of the congestion window (in bytes) for TCP "
@@ -1198,12 +1258,6 @@ CI_CFG_OPT("EF_CONG_AVOID_SCALE_BACK", cong_avoid_scale_back, ci_uint32,
            , , 0, MIN, MAX, count/*?*/)
 #endif
 
-#if CI_CFG_SENDFILE
-CI_CFG_OPT("EF_MAX_EP_PINNED_PAGES", max_ep_pinned_pages, ci_uint32,
-"Not currently used.",
-           , , CI_CFG_SENDFILE_MAX_PAGES_PER_EP, MIN, MAX, bincount)
-#endif
-
 CI_CFG_OPT("EF_FREE_PACKETS_LOW_WATERMARK", free_packets_low, ci_uint16,
 "Keep free packets number to be at least this value.  EF_MIN_FREE_PACKETS "
 "defines initialisation behaviour; this value is about normal application "
@@ -1234,17 +1288,73 @@ CI_CFG_OPT("EF_OFE_ENGINE_SIZE", ofe_size, ci_uint32,
            , , 0, 0, MAX, bincount)
 #endif
 
-#define CI_EF_LOG_DEFAULT ((1 << EF_LOG_BANNER) | (1 << EF_LOG_RESOURCE_WARNINGS) | (1 << EF_LOG_CONFIG_WARNINGS))
+#define CI_EF_LOG_DEFAULT ((1 << EF_LOG_BANNER) | (1 << EF_LOG_RESOURCE_WARNINGS) | (1 << EF_LOG_CONFIG_WARNINGS) | (1 << EF_LOG_USAGE_WARNINGS))
 CI_CFG_OPT("EF_LOG", log_category, ci_uint32,
 "Designed to control how chatty Onload's informative/warning messages are.  "
 "Specified as a comma seperated list of options to enable and disable "
 "(with a minus sign).  Valid options are 'banner' (on by default), "
-"'resource_warnings' (on by default), 'config_warnings' (on by default) and "
-"'conn_drop' (off by default).  E.g.: To enable conn_drop: EF_LOG=conn_drop.  "
-"E.g.: To enable conn_drop and turn off resource warnings: EF_LOG=conn_drop,"
-"-resource_warnings",
+"'resource_warnings' (on by default), 'config_warnings' (on by default) "
+"'conn_drop' (off by default) and 'usage_warnings' (on by default).  E.g.: "
+"To enable conn_drop: EF_LOG=conn_drop.  " "E.g.: To enable conn_drop and "
+"turn off resource warnings: EF_LOG=conn_drop,-resource_warnings",
            , , CI_EF_LOG_DEFAULT, 0, MAX, count)
 
+#if CI_CFG_SEPARATE_UDP_RXQ
+CI_CFG_OPT("EF_SEPARATE_UDP_RXQ", separate_udp_rxq, ci_uint32,
+"Use separate RXQ for udp RX.",
+           1, , 0, 0, 1, yesno)
+#endif
+
+CI_CFG_OPT("EF_SCALABLE_FILTERS", scalable_filter_ifindex, ci_int32,
+"Specifies the interface on which to enable support for scalable filters, "
+"and configures the scalable filter mode(s) to use.  Scalable filters "
+"allow Onload to use a single hardware MAC-address filter to avoid "
+"hardware limitations and overheads.  This removes restrictions on "
+"the number of simultaneous connections and increases performance of "
+"active connect calls, but kernel support on the selected interface is "
+"limited to ARP/DHCP/ICMP protocols and some Onload features that rely "
+"on unaccelerated traffic (such as receiving fragmented UDP datagrams) "
+" will not work.  Please see the Onload user guide for full details.\n"
+"\n"
+"Depending on the mode selected this option will enable support for:\n"
+" - scalable listening sockets;\n"
+" - IP_TRANSPARENT socket option;\n"
+"\n"
+"The interface specified must be a SFN7000 or later NIC."
+"\n"
+"Format of EF_SCALABLE_FILTERS variable is as follows:\n"
+"  EF_SCALABLE_FILTERS=<interface-name>[=mode[:mode]]\n"
+"      where mode is one of: transparent_active,passive,rss\n"
+"The following modes and their combinations can be specified:\n"
+"  transparent_active, passive, rss:transparent_active, "
+"transparent_active:passive",
+           ,  , 0, 0, SMAX, count)
+
+#define CITP_SCALABLE_MODE_NONE              0x0
+#define CITP_SCALABLE_MODE_RSS               0x1
+#define CITP_SCALABLE_MODE_TPROXY_ACTIVE     0x2
+#define CITP_SCALABLE_MODE_PASSIVE           0x4
+
+#define CITP_SCALABLE_MODE_TPROXY_ACTIVE_RSS (CITP_SCALABLE_MODE_TPROXY_ACTIVE | \
+                                              CITP_SCALABLE_MODE_RSS)
+
+CI_CFG_OPT("EF_SCALABLE_FILTERS_MODE", scalable_filter_mode, ci_int32,
+           "Stores scalable filter mode set with EF_SCALABLE_FILTERS.  "
+           "To be set indirectly with EF_SCALABLE_FILTERS variable",
+           ,  , -1, -1, 6, oneof:
+           auto;
+           none;reserved1;transparent_active;rss_transparent_active;
+           passive;reserved5;passive_tproxy_active;
+           )
+
+#define CITP_SCALABLE_FILTERS_DISABLE 0
+#define CITP_SCALABLE_FILTERS_ENABLE  1
+CI_CFG_OPT("EF_SCALABLE_FILTERS_ENABLE", scalable_filter_enable, ci_int32,
+"Turn the scalable filter feature on or off on a stack.  If this is set to 1 "
+"then the configuration selected in EF_SCALABLE_FILTERS will be used.  If this "
+"is set to 0 then scalable filters will not be used for this stack.  If unset "
+"this will default to 1 if EF_SCALABLE_FILTERS is configured.",
+           , , 0, 0, 1, yesno)
 
 #ifdef CI_CFG_OPTGROUP
 /* define some categories - currently more as an example than as the final

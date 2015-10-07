@@ -25,15 +25,28 @@
 
 #include "aoe.h"
 
-const char *dimm_bank_name[MAX_BANKS_COUNT] = {
+static const char *dimm_bank_name_6902F[MAX_BANKS_COUNT] = {
 	[MC_CMD_FC_IN_DDR_BANK_B0] = "bottom0",
 	[MC_CMD_FC_IN_DDR_BANK_B1] = "bottom1",
 	[MC_CMD_FC_IN_DDR_BANK_T0] = "top0",
 	[MC_CMD_FC_IN_DDR_BANK_T1] = "top1"
 };
 
+static const char *dimm_bank_name_7942F[MAX_BANKS_COUNT-2] = {
+	[DDR_BANK_BOTTOM] = "bottom",
+	[DDR_BANK_TOP] = "top"
+};
+
+struct aoe_state_type {
+	unsigned int max_bank_num;
+	struct kobj_type aoe_state_ktype;
+};
+
 static ssize_t aoe_fpga_reload(struct aoe_device *dev,
 			       const char *buf, size_t count);
+static ssize_t aoe_get_board_type_info(struct aoe_device *dev,char *buf);
+
+
 
 struct aoe_device_attr {
 	struct attribute attr;
@@ -284,6 +297,7 @@ static struct sysfs_ops aoe_dimm_ops = {
 
 /* FPGA attributes */
 AOE_INFO_ATTR(fpga_version, aoe_mcdi_fpga_version);
+AOE_INFO_ATTR(mum_version, aoe_mcdi_mum_version);
 AOE_INFO_ATTR(cpld_version, aoe_mcdi_cpld_version);
 AOE_INFO_ATTR(board_rev, aoe_mcdi_board_revision);
 AOE_INFO_ATTR(fc_version, aoe_mcdi_fc_version);
@@ -303,6 +317,7 @@ AOE_INFO_ATTR(boot_result, aoe_mcdi_info_boot_result);
 
 /* FPGA operations */
 AOE_DEVICE_ATTR(reload, 0664, NULL, aoe_fpga_reload);
+AOE_DEVICE_ATTR(board_type, 0444, aoe_get_board_type_info, NULL);
 
 /* MAP attributes */
 AOE_MAP_ATTR_LONG(base_addr, 0664);
@@ -331,10 +346,11 @@ AOE_DIMM_ATTR(spd, ddr_spd);
 
 static struct attribute *aoe_default_attrs[] = {
 	&aoe_device_attr_reload.attr,
+	&aoe_device_attr_board_type.attr,
 	NULL,
 };
 
-static struct attribute *aoe_state_attrs[] = {
+static struct attribute *aoe_state_attrs_6902F[] = {
 	&aoe_state_attr_board_rev.attr,
 	&aoe_state_attr_fpga_version.attr,
 	&aoe_state_attr_cpld_version.attr,
@@ -349,6 +365,23 @@ static struct attribute *aoe_state_attrs[] = {
 	&aoe_state_attr_fpga_power.attr,
 	&aoe_state_attr_bad_sodimm.attr,
 	&aoe_state_attr_has_byteblaster.attr,
+	&aoe_state_attr_fc_running.attr,
+	&aoe_state_attr_boot_result.attr,
+	NULL,
+};
+
+static struct attribute *aoe_state_attrs_7942F[] = {
+	&aoe_state_attr_board_rev.attr,
+	&aoe_state_attr_fpga_version.attr,
+	&aoe_state_attr_fc_version.attr,
+	&aoe_state_attr_mum_version.attr,
+	&aoe_state_attr_fpga_build_changeset.attr,
+	&aoe_state_attr_fpga_services_version.attr,
+	&aoe_state_attr_fpga_services_changeset.attr,
+	&aoe_state_attr_fpga_bsp_version.attr,
+	&aoe_state_attr_fpga_good.attr,
+	&aoe_state_attr_fpga_power.attr,
+	&aoe_state_attr_bad_sodimm.attr,
 	&aoe_state_attr_fc_running.attr,
 	&aoe_state_attr_boot_result.attr,
 	NULL,
@@ -391,10 +424,19 @@ static struct kobj_type aoe_board_ktype = {
 	.default_attrs = aoe_default_attrs,
 };
 
-static struct kobj_type aoe_state_ktype = {
-	.release = aoe_boardattr_release,
-	.sysfs_ops = &aoe_state_ops,
-	.default_attrs = aoe_state_attrs,
+static struct aoe_state_type aoe_state[] = {
+		[BOARD_INDEX_SFN5122F] = {
+						.max_bank_num = MAX_BANKS_COUNT,
+						.aoe_state_ktype.release = aoe_boardattr_release,
+						.aoe_state_ktype.sysfs_ops = &aoe_state_ops,
+						.aoe_state_ktype.default_attrs = aoe_state_attrs_6902F,
+					 },
+		[BOARD_INDEX_SFN7942F] = {
+						.max_bank_num = MAX_BANKS_COUNT-2,
+						.aoe_state_ktype.release = aoe_boardattr_release,
+						.aoe_state_ktype.sysfs_ops = &aoe_state_ops,
+						.aoe_state_ktype.default_attrs = aoe_state_attrs_7942F,
+					 }
 };
 
 static struct kobj_type aoe_map_ktype = {
@@ -414,6 +456,31 @@ static struct kobj_type aoe_dimm_ktype = {
 	.sysfs_ops = &aoe_dimm_ops,
 	.default_attrs = aoe_default_dimm_attrs,
 };
+
+static ssize_t aoe_get_board_type_info(struct aoe_device *dev, char *buf)
+{
+	int ret;
+	ret = aoe_mcdi_get_board_type_info(dev);
+	if (ret)
+		return ret;
+
+	switch(dev->board_type)
+	{
+		case BOARD_TYPE_SFN7942F:
+			ret = snprintf(buf, PAGE_SIZE, "%s\n","SFA7942Q");
+			break;
+
+		case BOARD_TYPE_SFN5122F:
+			ret = snprintf(buf, PAGE_SIZE, "%s\n","SFA6902F");
+			break;
+
+		default:
+			ret = snprintf(buf, PAGE_SIZE, "%s\n","Unknown");
+	}
+
+	return ret;
+}
+
 
 static ssize_t aoe_fpga_reload(struct aoe_device *dev,
 			       const char *buf, size_t count)
@@ -496,35 +563,50 @@ void aoe_sysfs_del_map(struct aoe_device *aoe_instance,
 	kobject_del(&map->map_kobj);
 }
 
-int aoe_sysfs_setup(struct device *parent, struct aoe_device *aoe_instance)
+int aoe_sysfs_setup_root(struct device *parent, struct aoe_device *aoe_instance)
 {
-	unsigned int bank = 0;
-	struct aoe_dimm_info *dimm;
-	struct aoe_state_info *info;
+
 	int ret = kobject_init_and_add(&aoe_instance->aoe_kobj,
 				       &aoe_board_ktype,
 				       &parent->kobj,
 				       "fpga%d", aoe_instance->board);
-	if (ret)
-		return ret;
+
+	return ret;
+}
+
+int aoe_sysfs_setup_child(struct aoe_device *aoe_instance)
+{
+	unsigned int bank = 0;
+	struct aoe_dimm_info *dimm;
+	struct aoe_state_info *info;
+	int ret = 0;
+	const char **dimm_name = NULL;
+	int idx = -1;
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
+	idx = aoe_get_board_type_index_value(aoe_instance);
+	if(idx < 0)
+		return -EINVAL;
+
 	ret = kobject_init_and_add(&info->state_kobj,
-				   &aoe_state_ktype,
+				   &(aoe_state[idx].aoe_state_ktype),
 				   &aoe_instance->aoe_kobj,
 				   "state");
+
 	if (ret)
 		return ret;
 
 	info->parent = aoe_instance;
 	aoe_instance->info = info;
+	dimm_name = aoe_get_dimm_name(aoe_instance);
+	if(!dimm_name)
+		return -ENODEV;
 
 	/* Discover the devices ? */
-	while (bank < MAX_BANKS_COUNT) {
-
+	while (bank < aoe_state[idx].max_bank_num) {
 		dimm = kzalloc(sizeof(*dimm), GFP_KERNEL);
 		if (!dimm)
 			return -ENOMEM;
@@ -532,7 +614,7 @@ int aoe_sysfs_setup(struct device *parent, struct aoe_device *aoe_instance)
 		ret = kobject_init_and_add(&dimm->dimm_kobj,
 					   &aoe_dimm_ktype,
 					   &aoe_instance->aoe_kobj,
-					   "dimm_%s", dimm_bank_name[bank]);
+					   "dimm_%s", dimm_name[bank]);
 
 		if (ret) {
 			kfree(dimm);
@@ -589,3 +671,26 @@ void aoe_sysfs_delete(struct aoe_device *aoe_instance)
 
 	kobject_del(&aoe_instance->aoe_kobj);
 }
+
+const char** aoe_get_dimm_name(struct aoe_device *dev)
+{
+	const char **dimm_name = NULL;
+
+	switch(dev->board_type)
+	{
+		case BOARD_TYPE_SFN5122F:
+			dimm_name = dimm_bank_name_6902F;
+			break;
+
+		case BOARD_TYPE_SFN7942F:
+			dimm_name = dimm_bank_name_7942F;
+			break;
+
+		default:
+			printk(KERN_ERR "sfc_aoe: Unknown Dimm Name\n");
+			return NULL;
+	}
+
+	return dimm_name;
+}
+

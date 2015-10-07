@@ -32,10 +32,6 @@
 
 #if !defined(__KERNEL__)
 #  include <netinet/tcp.h>
-#else
-#  error "this file is UL-only"
-#endif
-
 
 #define LPF "TCP SOCKOPTS "
 
@@ -50,93 +46,201 @@ static const unsigned char sock_congstate_linux_map[] = {
 
 
 static int
-ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* info)
+ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* uinfo,
+                socklen_t* optlen)
 {
   ci_iptime_t now = ci_ip_time_now(netif);
+  struct ci_tcp_info info;
 
-  memset(info, 0, sizeof(*info));
+  memset(&info, 0, sizeof(info));
 
-  info->tcpi_state = ci_sock_states_linux_map[CI_TCP_STATE_NUM(s->b.state)];
-  /* info->tcpi_backoff = 0; */
+  info.tcpi_state = ci_sock_states_linux_map[CI_TCP_STATE_NUM(s->b.state)];
+  /* info.tcpi_backoff = 0; */
 
-  info->tcpi_ato = 
+  info.tcpi_ato = 
     ci_ip_time_ticks2ms(netif, netif->state->conf.tconst_delack) * 1000;
-  info->tcpi_rcv_mss    = CI_CFG_TCP_DEFAULT_MSS;
+  info.tcpi_rcv_mss    = CI_CFG_TCP_DEFAULT_MSS;
   /* no way to get the actual mss */
-  /* info->tcpi_sacked     = 0; */ /* there is no way to get any of these */
-  /* info->tcpi_lost       = 0; */
-  /* info->tcpi_fackets    = 0; */
-  /* info->tcpi_reordering = 0; */
-  /* info->tcpi_last_ack_sent = 0; */
-  /* info->tcpi_last_ack_recv = 0; */
+  /* info.tcpi_sacked     = 0; */ /* there is no way to get any of these */
+  /* info.tcpi_lost       = 0; */
+  /* info.tcpi_fackets    = 0; */
+  /* info.tcpi_reordering = 0; */
+  /* info.tcpi_last_ack_sent = 0; */
+  /* info.tcpi_last_ack_recv = 0; */
 
   if( s->b.state != CI_TCP_LISTEN ) {
     ci_tcp_state* ts = SOCK_TO_TCP(s);
 
-    info->tcpi_pmtu       = ts->pmtus.pmtu;
-    info->tcpi_ca_state = sock_congstate_linux_map[ts->congstate];
-    info->tcpi_retransmits = ts->retransmits;
-    info->tcpi_probes = ts->ka_probes;
+    info.tcpi_pmtu       = ts->pmtus.pmtu;
+    info.tcpi_ca_state = sock_congstate_linux_map[ts->congstate];
+    info.tcpi_retransmits = ts->retransmits;
+    info.tcpi_probes = ts->ka_probes;
 
-    /* info->tcpi_options = 0; */
+    /* info.tcpi_options = 0; */
     if( ts->tcpflags & CI_TCPT_FLAG_TSO )
-      info->tcpi_options |= CI_TCPI_OPT_TIMESTAMPS;
+      info.tcpi_options |= CI_TCPI_OPT_TIMESTAMPS;
     if( ts->tcpflags & CI_TCPT_FLAG_ECN )
-      info->tcpi_options |= CI_TCPI_OPT_ECN;
+      info.tcpi_options |= CI_TCPI_OPT_ECN;
     if( ts->tcpflags & CI_TCPT_FLAG_SACK )
-      info->tcpi_options |= CI_TCPI_OPT_SACK;
+      info.tcpi_options |= CI_TCPI_OPT_SACK;
 
     if( ts->tcpflags & CI_TCPT_FLAG_WSCL ) {
-      info->tcpi_options |= CI_TCPI_OPT_WSCALE;
-      info->tcpi_snd_wscale = ts->snd_wscl;
-      info->tcpi_rcv_wscale = ts->rcv_wscl;
+      info.tcpi_options |= CI_TCPI_OPT_WSCALE;
+      info.tcpi_snd_wscale = ts->snd_wscl;
+      info.tcpi_rcv_wscale = ts->rcv_wscl;
     }
 
-    info->tcpi_rto = ci_ip_time_ticks2ms(netif, ts->rto) * 1000;
-    info->tcpi_snd_mss    = ts->eff_mss;
-    info->tcpi_unacked    = ts->acks_pending & CI_TCP_ACKS_PENDING_MASK;
+    info.tcpi_rto = ci_ip_time_ticks2ms(netif, ts->rto) * 1000;
+    info.tcpi_snd_mss    = ts->eff_mss;
+    info.tcpi_unacked    = ts->acks_pending & CI_TCP_ACKS_PENDING_MASK;
 #if CI_CFG_TCP_SOCK_STATS
-    info->tcpi_retrans    = ts->stats_cumulative.count.tx_retrans_pkt;
+    info.tcpi_retrans    = ts->stats_cumulative.count.tx_retrans_pkt;
 #endif
 #if CI_CFG_CONGESTION_WINDOW_VALIDATION
-    info->tcpi_last_data_sent = ci_ip_time_ticks2ms(netif,
+    info.tcpi_last_data_sent = ci_ip_time_ticks2ms(netif,
 						    now - ts->t_last_sent);
 #else
-    info->tcpi_last_data_sent = 0;
+    info.tcpi_last_data_sent = 0;
 #endif
-    info->tcpi_last_data_recv = ci_ip_time_ticks2ms(netif,
+    info.tcpi_last_data_recv = ci_ip_time_ticks2ms(netif,
 						    now - ts->tspaws);
     
-    info->tcpi_rtt = ci_ip_time_ticks2ms(netif, ts->sa) * 1000 / 8;
-    info->tcpi_rttvar = ci_ip_time_ticks2ms(netif, ts->sv) * 1000 / 4;
-    info->tcpi_rcv_ssthresh = ts->ssthresh;
+    info.tcpi_rtt = ci_ip_time_ticks2ms(netif, ts->sa) * 1000 / 8;
+    info.tcpi_rttvar = ci_ip_time_ticks2ms(netif, ts->sv) * 1000 / 4;
+    info.tcpi_rcv_ssthresh = ts->ssthresh;
     if( tcp_eff_mss(ts) != 0 ) {
-      info->tcpi_snd_ssthresh = ts->ssthresh / tcp_eff_mss(ts);
-      info->tcpi_snd_cwnd     = ts->cwnd / tcp_eff_mss(ts);
+      info.tcpi_snd_ssthresh = ts->ssthresh / tcp_eff_mss(ts);
+      info.tcpi_snd_cwnd     = ts->cwnd / tcp_eff_mss(ts);
     }
     else { /* non-initialised connection */
-      info->tcpi_snd_ssthresh = 0;
-      info->tcpi_snd_cwnd     = 0;
+      info.tcpi_snd_ssthresh = 0;
+      info.tcpi_snd_cwnd     = 0;
     }
-    info->tcpi_advmss     = ts->amss;
+    info.tcpi_advmss     = ts->amss;
+
+    info.tcpi_rcv_rtt = 0; /* we do not support adaptive SO_RCVBUF */
+    info.tcpi_rcv_space = tcp_rcv_wnd_right_edge_sent(ts) - ts->rcv_added;
+    info.tcpi_total_retrans = ts->stats.total_retrans;
+
+    /* Starting from linux-3.15, there are tcpi_pacing_rate and
+     * tcpi_max_pacing_rate fields.  However, as Onload does not support
+     * pacing, we might as well pretend that we simulate older kernel
+     * with smaller tcp_info size. */
   }
+
+  if( *optlen > sizeof(info) )
+    *optlen = sizeof(info);
+  memcpy(uinfo, &info, *optlen);
 
   return 0;
 }
 
+#endif /* !defined(__KERNEL__) */
 
-/* [fd] is unused in the kernel version */
-int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
-		      int optname, void *optval, socklen_t *optlen )
+int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s, int optname, void *optval,
+                   socklen_t *optlen )
 {
-  ci_sock_cmn* s = ep->s;
 #if defined(__linux__) || \
     defined(__sun__) && defined(TCP_KEEPALIVE_THRESHOLD) || \
     defined(__sun__) && defined(TCP_KEEPALIVE_ABORT_THRESHOLD)
   ci_tcp_socket_cmn *c = &(SOCK_TO_WAITABLE_OBJ(s)->tcp.c);
 #endif
-  ci_netif* netif = ep->netif;
   unsigned u = 0;
+
+  switch(optname){
+  case TCP_NODELAY:
+    /* gets status of TCP Nagle algorithm  */
+    u = ((s->s_aflags & CI_SOCK_AFLAG_NODELAY) != 0);
+    goto u_out;
+  case TCP_MAXSEG:
+    /* gets the MSS size for this connection */
+    if ((s->b.state & CI_TCP_STATE_TCP_CONN)) {
+      u = tcp_eff_mss(SOCK_TO_TCP(s));
+    } else {
+      u = 536;
+    }
+    goto u_out;
+# ifdef TCP_CORK
+  case TCP_CORK:
+    /* don't send partial framses, all partial frames sent
+    ** when the option is cleared */
+    u = ((s->s_aflags & CI_SOCK_AFLAG_CORK) != 0);
+    goto u_out;
+# endif
+
+
+  case TCP_KEEPIDLE:
+    {
+      /* idle time for keepalives  */
+      u = (unsigned) c->t_ka_time_in_secs;
+    }
+    goto u_out;
+  case TCP_KEEPINTVL:
+    {
+      /* time between keepalives */
+      u = (unsigned) c->t_ka_intvl_in_secs;
+    }
+    goto u_out;
+  case TCP_KEEPCNT:
+    {
+      /* number of keepalives before giving up */
+      u = c->ka_probe_th;
+    }
+    goto u_out;
+  case TCP_INFO:
+#ifndef __KERNEL__
+    /* struct tcp_info to be filled */
+    return ci_tcp_info_get(netif, s, (struct ci_tcp_info*) optval, optlen);
+#else
+      /* We only do getopt in the kernel to synchronise options that have
+       * been set.
+       */
+      ci_assert(0);
+#endif
+  case TCP_DEFER_ACCEPT:
+    {
+      u = 0;
+      if( c->tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) {
+        u = ci_ip_time_ticks2ms(netif, NI_CONF(netif).tconst_rto_initial);
+        u = ((u + 500) / 1000) * ( (1 << c->tcp_defer_accept) - 1);
+      }
+      goto u_out;
+    }
+  case TCP_QUICKACK:
+    {
+      u = 0;
+      if( s->b.state & CI_TCP_STATE_TCP_CONN ) {
+        ci_tcp_state* ts = SOCK_TO_TCP(s);
+        u = ci_tcp_is_in_faststart(ts);
+      }
+      goto u_out;
+    }
+  default:
+#ifndef __KERNEL__
+    LOG_TC( log(LPF "getsockopt: unimplemented or bad option: %i", 
+                optname));
+    RET_WITH_ERRNO(ENOPROTOOPT);
+#else
+      /* In the kernel we explicitly sync options, so shouldn't be making up
+       * crazy new things.
+       */
+      ci_assert(0);
+#endif
+  }
+
+  return 0;
+
+ u_out:
+  return ci_getsockopt_final(optval, optlen, IPPROTO_TCP, &u, sizeof(u));
+}
+
+
+#if !defined(__KERNEL__)
+int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
+		      int optname, void *optval, socklen_t *optlen )
+{
+  ci_sock_cmn* s = ep->s;
+  ci_netif* netif = ep->netif;
 
   /* NOTE: The setsockopt() call is reflected into the os socket to
    * keep the two in sync - it's assumed that we know everything
@@ -150,97 +254,39 @@ int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
    */
 
   if(level == SOL_SOCKET) {
+
+    if( optname == SO_SNDBUF &&
+	NI_OPTS(netif).tcp_sndbuf_mode == 2 &&
+	s->b.state & CI_TCP_STATE_TCP_CONN ) {
+      /* need to update sndbuf (bytes) from current sndbuf_pkts */
+      ci_tcp_state* ts = SOCK_TO_TCP(s);
+      ci_tcp_set_sndbuf_from_sndbuf_pkts(netif, ts);
+    }
+
     /* Common SOL_SOCKET handler */
     return ci_get_sol_socket(netif, s, optname, optval, optlen);
 
-  } else if (level ==  IPPROTO_IP) {
+  }
+  else if (level ==  IPPROTO_IP) {
     /* IP level options valid for TCP */
-    return ci_get_sol_ip(ep, s, fd, optname, optval, optlen);
+    return ci_get_sol_ip(netif, s, fd, optname, optval, optlen);
 
 #if CI_CFG_FAKE_IPV6
-  } else if (level ==  IPPROTO_IPV6 && s->domain == AF_INET6) {
+  }
+  else if (level ==  IPPROTO_IPV6 && s->domain == AF_INET6) {
     /* IP6 level options valid for TCP */
-    return ci_get_sol_ip6(ep, s, fd, optname, optval, optlen);
+    return ci_get_sol_ip6(s, fd, optname, optval, optlen);
 #endif
 
-  } else if (level == IPPROTO_TCP) {
-    /* TCP level options valid for TCP */
-    switch(optname){
-    case TCP_NODELAY:
-      /* gets status of TCP Nagle algorithm  */
-      u = ((s->s_aflags & CI_SOCK_AFLAG_NODELAY) != 0);
-      goto u_out;
-    case TCP_MAXSEG:
-      /* gets the MSS size for this connection */
-      if ((s->b.state & CI_TCP_STATE_TCP_CONN)) {
-        u = tcp_eff_mss(SOCK_TO_TCP(s));
-      } else {
-        u = 536;
-      }
-      goto u_out;
-# ifdef TCP_CORK
-    case TCP_CORK:
-      /* don't send partial framses, all partial frames sent
-      ** when the option is cleared */
-      u = ((s->s_aflags & CI_SOCK_AFLAG_CORK) != 0);
-      goto u_out;
-# endif
-
-
-    case TCP_KEEPIDLE:
-      {
-        /* idle time for keepalives  */
-        u = (unsigned) c->t_ka_time_in_secs;
-      }
-      goto u_out;
-    case TCP_KEEPINTVL:
-      {
-        /* time between keepalives */
-        u = (unsigned) c->t_ka_intvl_in_secs;
-      }
-      goto u_out;
-    case TCP_KEEPCNT:
-      {
-        /* number of keepalives before giving up */
-        u = c->ka_probe_th;
-      }
-      goto u_out;
-    case TCP_INFO:
-      /* struct tcp_info to be filled */
-      return ci_tcp_info_get(netif, s, (struct ci_tcp_info*) optval);
-    case TCP_DEFER_ACCEPT:
-      {
-        u = 0;
-        if( c->tcp_defer_accept != OO_TCP_DEFER_ACCEPT_OFF ) {
-          u = ci_ip_time_ticks2ms(netif, NI_CONF(netif).tconst_rto_initial);
-          u = ((u + 500) / 1000) * ( (1 << c->tcp_defer_accept) - 1);
-        }
-        goto u_out;
-      }
-    case TCP_QUICKACK:
-      {
-        u = 0;
-        if( s->b.state & CI_TCP_STATE_TCP_CONN ) {
-          ci_tcp_state* ts = SOCK_TO_TCP(s);
-          u = ci_tcp_is_in_faststart(ts);
-        }
-        goto u_out;
-      }
-    default:
-      LOG_TC( log(LPF "getsockopt: unimplemented or bad option: %i", 
-                  optname));
-      RET_WITH_ERRNO(ENOPROTOOPT);
-    }
-  } else {
+  }
+  else if (level == IPPROTO_TCP) {
+    /* TCP specific options */
+    return ci_get_sol_tcp(netif, s, optname, optval, optlen);
+  }
+  else {
     SOCKOPT_RET_INVALID_LEVEL(s);
   }
-
-  return 0;
-
- u_out:
-  return ci_getsockopt_final(optval, optlen, level, &u, sizeof(u));
 }
-
 
 static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
 				int optname, const void* optval,
@@ -317,6 +363,60 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
   }
   else if( level == IPPROTO_TCP ) {
     switch(optname) {
+# ifdef TCP_CORK
+    case TCP_CORK:
+      if( *(unsigned*) optval ) {
+	ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
+      } else {
+	ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
+	/* We need to push out a segment that was corked.  Note that CORK
+	** doesn't prevent full segments from going out, so if the send
+	** queue contains more than one segment, it must be limited by
+	** something else (and therefore not our problem).
+	**
+	** ?? We could be even more clever here and use the existing
+	** deferred mechanism to advance the sendq if the netif lock were
+	** contended.
+	*/
+	if( s->b.state != CI_TCP_LISTEN ) {
+	  ci_tcp_state* ts = SOCK_TO_TCP(s);
+	  if( ts->send.num == 1 ) {
+            TX_PKT_TCP(PKT_CHK(netif, ts->send.head))->tcp_flags |=
+                                                     CI_TCP_FLAG_PSH;
+	    ci_tcp_tx_advance(ts, netif);
+	  }
+	}
+      }
+      break;
+# endif
+    case TCP_NODELAY:
+      if( NI_OPTS(netif).tcp_force_nodelay )
+        break;
+      if( *(unsigned*) optval ) {
+	ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
+
+	if( s->b.state != CI_TCP_LISTEN ) {
+	  ci_tcp_state* ts = SOCK_TO_TCP(s);
+          ci_uint32 cork; 
+
+	  if( ts->send.num == 1 ) {
+            /* When TCP_NODELAY is set, push out pending segments (even if
+            ** CORK is set).
+            */
+            if( (cork = (s->s_aflags & CI_SOCK_AFLAG_CORK)) )
+              ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
+
+            if( ci_ip_queue_not_empty(&ts->send) )
+              ci_tcp_tx_advance(ts, netif);
+
+            if ( cork )
+              ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
+          }
+        }
+      }
+      else
+        ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
+      break;
 
      
     case TCP_MAXSEG:
@@ -401,6 +501,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
   RET_WITH_ERRNO(-rc);
 }
 
+
 /* Setsockopt() handler called by appropriate Unix/Windows intercepts.
  * \param ep       Context
  * \param fd       Linux: Our FD, Windows: ignored (CI_INVALID_SOCKET)
@@ -418,114 +519,53 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
   ci_netif* ni = ep->netif;
   int rc = 0;
 
+  ci_netif_lock_count(ni, setsockopt_ni_lock_contends);
+
   /* If not yet connected, apply to the O/S socket.  This keeps the O/S
   ** socket in sync in case we need to hand-over.
   */
   /*! \todo This is very much a "make it work" change.  Ideally we should
    * do the updates lazily so that we don't waste time with a socket that
-   * may never be used for an OS connection.
+   * may never be used for an OS connection.  At the moment lazy sockopts
+   * are only done when scalable filters are enabled.
    */
   if( ! (s->b.state & CI_TCP_STATE_SYNCHRONISED) ) {
-    ci_fd_t os_sock = ci_get_os_sock_fd(ep, fd);
+    ci_fd_t os_sock = CI_FD_BAD;
+    if( s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED )
+      os_sock = ci_get_os_sock_fd(fd);
     if( CI_IS_VALID_SOCKET(os_sock) ) {
       rc = ci_sys_setsockopt(os_sock, level, optname, optval, optlen);
       ci_rel_os_sock_fd(os_sock);
       if( rc != 0 &&
           ! ci_setsockopt_os_fail_ignore(ni, s, errno, level, optname,
                                          optval, optlen) ) {
-        return rc;
+        goto unlock_out;
       }
       rc = 0;
     }
   }
 
-  /* We can set some sockopts without the netif lock. */
-  if( level == IPPROTO_TCP ) {
-    switch( optname ) {
-# ifdef TCP_CORK
-    case TCP_CORK:
-      if( *(unsigned*) optval ) {
-	ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
-      } else {
-	ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
-	/* We need to push out a segment that was corked.  Note that CORK
-	** doesn't prevent full segments from going out, so if the send
-	** queue contains more than one segment, it must be limited by
-	** something else (and therefore not our problem).
-	**
-	** ?? We could be even more clever here and use the existing
-	** deferred mechanism to advance the sendq if the netif lock were
-	** contended.
-	*/
-	if( s->b.state != CI_TCP_LISTEN ) {
-	  ci_tcp_state* ts = SOCK_TO_TCP(s);
-	  if( ts->send.num == 1 ) {
-	    ci_netif_lock(ni);
-	    if( ts->send.num == 1 ) {
-              TX_PKT_TCP(PKT_CHK(ni, ts->send.head))->tcp_flags |=
-                                                    CI_TCP_FLAG_PSH;
-	      ci_tcp_tx_advance(ts, ni);
-            }
-	    ci_netif_unlock(ni);
-	  }
-	}
-      }
-      goto success;
-# endif
-    case TCP_NODELAY:
-      if( NI_OPTS(ni).tcp_force_nodelay )
-        goto success;
-      if( *(unsigned*) optval ) {
-	ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
-
-	if( s->b.state != CI_TCP_LISTEN ) {
-	  ci_tcp_state* ts = SOCK_TO_TCP(s);
-          ci_uint32 cork; 
-
-	  if( ts->send.num == 1 ) {
-            /* When TCP_NODELAY is set, push out pending segments (even if
-            ** CORK is set).
-            */
-            if( (cork = (s->s_aflags & CI_SOCK_AFLAG_CORK)) )
-              ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
-
-            ci_netif_lock(ni);
-            if( ci_ip_queue_not_empty(&ts->send) )
-              ci_tcp_tx_advance(ts, ni);
-	    ci_netif_unlock(ni);
-
-            if ( cork )
-              ci_bit_set(&s->s_aflags, CI_SOCK_AFLAG_CORK_BIT);
-          }
-        }
-      }
-      else
-        ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
-      goto success;
-    }
-  }
-  else if( level == SOL_SOCKET ) {
+  if( level == SOL_SOCKET ) {
     rc = ci_set_sol_socket_nolock(ni, s, optname, optval, optlen);
-    if( rc <= 0 )  return rc;
+    if( rc <= 0 )  goto unlock_out;
   }
   else if( level == IPPROTO_IPV6 ) {
 #ifdef IPV6_V6ONLY
     if( optname == IPV6_V6ONLY && *(unsigned*) optval )
-      return CI_SOCKET_HANDOVER;
+      rc = CI_SOCKET_HANDOVER;
+      goto unlock_out;
 #endif
     /* All socket options are already set for system socket, and we do not
     ** handle IPv6 option natively. */
-    goto success;
+    goto unlock_out;
   }
 
-  /* Otherwise we need to grab the netif lock. */
-  ci_netif_lock_count(ni, setsockopt_ni_lock_contends);
   rc = ci_tcp_setsockopt_lk(ep, fd, level, optname, optval, optlen);
+
+ unlock_out:
   ci_netif_unlock(ni);
   return rc;
-
- success:
-  return 0;
 }
+#endif /* !defined(__KERNEL__) */
 
 /*! \cidoxg_end */

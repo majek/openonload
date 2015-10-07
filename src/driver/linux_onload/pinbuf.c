@@ -41,9 +41,7 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
   pmd_t* pmd;
   pte_t* ptep;
   pte_t  pte;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
   pud_t* pud;
-#endif
   struct page* pg = 0;
   ci_uintptr_t address = (ci_uintptr_t)uaddr;
 
@@ -57,7 +55,6 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
     goto done;
   }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
   pud = pud_offset(pgd, address);
   if( CI_UNLIKELY(pud_none(*pud) | pud_bad(*pud)) ) {
     FPL(ci_log("follow_page: %lx pud_none=%d pud_bad=%d",
@@ -65,9 +62,6 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
     goto done;
   }
   pmd = pmd_offset(pud, address);
-#else
-  pmd = pmd_offset(pgd, address);
-#endif
 
   if( CI_UNLIKELY(pmd_none(*pmd) | pmd_bad(*pmd)) ) {
     FPL(ci_log("follow_page: %lx pmd_none=%d pmd_bad=%d",
@@ -86,13 +80,8 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
   if( CI_LIKELY(pte_present(pte)) ) {
     if( ci_pte_valid(pte) )
       pg = pte_page(pte);
-    else {
-# ifdef pte_pfn
+    else
       FPL(ci_log("follow_page: %lx pfn=%lx not valid", (long)address, pte_pfn(pte)));
-# else
-      FPL(ci_log("follow_page: %lx not valid", (long)address));
-# endif
-    }
     get_page(pg);
   }
   else

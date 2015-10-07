@@ -335,7 +335,7 @@ static void print_docs(int argc, char* argv[])
     }
   }
   else {
-    ci_app_usage("Expected csv, html, rtf or text.");
+    ci_app_usage("Expected html, rtf or text.");
   }
 }
 

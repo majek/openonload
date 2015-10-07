@@ -707,15 +707,6 @@ static long fop_ioctl(struct file *filp,
 }
 
 
-#ifndef HAVE_UNLOCKED_IOCTL
-static int fop_legacy_ioctl(struct inode *inode, struct file *filp,
-			    unsigned cmd, unsigned long arg) 
-{
-	return (int) fop_ioctl(filp, cmd, arg);
-}
-#endif
-
-
 static int fop_open(struct inode *inode, struct file *filp)
 {
 	struct aff_fd *aff;
@@ -745,14 +736,8 @@ static int fop_close(struct inode *inode, struct file *filp)
 
 struct file_operations fops = {
 	.owner = THIS_MODULE,
-#ifdef HAVE_UNLOCKED_IOCTL
 	.unlocked_ioctl = fop_ioctl,
-#else
-	.ioctl = fop_legacy_ioctl,
-#endif
-#ifdef HAVE_COMPAT_IOCTL
 	.compat_ioctl = fop_ioctl,
-#endif
 	.open = fop_open,
 	.release = fop_close,
 };

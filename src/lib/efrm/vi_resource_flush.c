@@ -174,10 +174,10 @@ efrm_vi_resource_issue_tx_flush(struct efrm_vi *virs, bool *completed)
 	EFRM_TRACE("%s: tx queue %d flush requested for nic %d",
 		   __FUNCTION__, instance, efrm_nic->efhw_nic.index);
 	rc = efhw_nic_flush_tx_dma_channel(&efrm_nic->efhw_nic, instance);
-	if (rc == -EAGAIN)
-		efrm_vi_resource_tx_flush_done(virs, completed);
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
+	if (rc == -EAGAIN)
+		efrm_vi_resource_tx_flush_done(virs, completed);
 
 	queue_delayed_work(efrm_vi_manager->workqueue,
 			   &nvi->flush_work_item, HZ);
@@ -289,9 +289,11 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 * for bug18474/bug20608 is needed, and we'd
 			 * like to know about it.
 			 */
-			EFRM_WARN("%s: rx flush outstanding after 1 second on"
-				  " ifindex %d\n", __FUNCTION__, 
-				  efrm_nic->efhw_nic.ifindex);
+                        if (!efrm_nic->efhw_nic.resetting)
+				EFRM_WARN("%s: rx flush outstanding after 1 "
+					  "second on ifindex %d\n",
+					  __FUNCTION__,
+					  efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_rx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -307,9 +309,11 @@ void efrm_vi_check_flushes(struct work_struct *data)
 			 * for bug18474/bug20608 is needed, and we'd
 			 * like to know about it.
 			 */
-			EFRM_WARN("%s: tx flush outstanding after 1 second on"
-				  " ifindex %d\n", __FUNCTION__, 
-				  efrm_nic->efhw_nic.ifindex);
+                        if (!efrm_nic->efhw_nic.resetting)
+				EFRM_WARN("%s: tx flush outstanding after 1 "
+					  "second on ifindex %d\n",
+					  __FUNCTION__,
+					  efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_tx_flush_done(virs, &completed);
 			found = true;
 		}

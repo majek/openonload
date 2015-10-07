@@ -334,4 +334,28 @@ static inline void efx_filter_set_vport_id(struct efx_filter_spec *spec,
 	spec->vport_id = vport_id;
 }
 
+/**
+ * efx_filter_set_ethertype - add or override ethertype relating to filter
+ * @spec: Specification to set
+ * @ether_type: Ethernet protocol ID to match
+ */
+static inline void efx_filter_set_ethertype(struct efx_filter_spec *spec,
+					    u16 ether_type)
+{
+	spec->flags |= EFX_FILTER_MATCH_ETHER_TYPE;
+	spec->ether_type = htons(ether_type);
+}
+
+/**
+ * efx_filter_set_ipproto - add or override ip protocol relating to filter
+ * @spec: Specification to set
+ * @ip_proto: IP protocol ID to match
+ */
+static inline void efx_filter_set_ipproto(struct efx_filter_spec *spec,
+					  u8 ip_proto)
+{
+	spec->flags |= EFX_FILTER_MATCH_IP_PROTO;
+	spec->ip_proto = ip_proto;
+}
+
 #endif /* EFX_FILTER_H */

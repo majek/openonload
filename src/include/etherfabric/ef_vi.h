@@ -606,8 +606,10 @@ typedef struct ef_vi {
   unsigned                      rx_buffer_len;
   /** The length of the prefix at the start of a received packet */
   unsigned                      rx_prefix_len;
-  /** The timestamp correction for received packets */
+  /** The timestamp correction (ticks) for received packets */
   int                           rx_ts_correction;
+  /** The timestamp correction (ns) for transmitted packets */
+  int                           tx_ts_correction_ns;
   /** Pointer to virtual interface memory */
   char*                         vi_mem_mmap_ptr;
   /** Length of virtual interface memory */
@@ -825,13 +827,17 @@ ef_vi_inline int ef_vi_receive_buffer_len(ef_vi* vi)
 }
 
 
-/*! \i_ef_vi Set the length of receive buffers.
- *
- * Set the length of receive buffers for this VI.  The new length is used
- * for subsequent calls to ef_vi_receive_init() and ef_vi_receive_post().
- *
- * This call has no effect for 5000 and 6000-series (Falcon) adapters.
- */
+/*! \brief Sets the length of receive buffers.
+**
+** \param vi      The virtual interface for which to set the length of
+**                receive buffers.
+** \param buf_len The length of receive buffers.
+**
+** Sets the length of receive buffers for this VI. The new length is used
+** for subsequent calls to ef_vi_receive_init() and ef_vi_receive_post().
+**
+** This call has no effect for 5000 and 6000-series (Falcon) adapters.
+*/
 ef_vi_inline void ef_vi_receive_set_buffer_len(ef_vi* vi, unsigned buf_len)
 {
   vi->rx_buffer_len = buf_len;
@@ -1241,8 +1247,8 @@ extern int ef_vi_transmit_init(ef_vi* vi, ef_addr addr, int bytes,
 ** \param offset The offset within its Programmed I/O region to the start
 **               of the packet. This must be aligned to at least a 64-byte
 **               boundary.
-** \param len    Length of the packet to transmit. This must be at a
-**               multiple of 16 bytes.
+** \param len    Length of the packet to transmit. This must be at
+**               least 16 bytes.
 ** \param dma_id DMA id to associate with the descriptor. This is
 **               completely arbitrary, and can be used for subsequent
 **               tracking of buffers.
@@ -1447,7 +1453,12 @@ extern int ef_eventq_has_many_events(ef_vi* evq, int n_events);
 */
 ef_vi_inline int ef_eventq_capacity(ef_vi* vi)
 {
-  return (vi->evq_mask + 1u) / 8;
+  return (vi->evq_mask + 1u) / 8
+#ifdef __powerpc__
+/* take into account reserved entries see ef10/falcon_event.c */
+         - 16
+#endif
+         ;
 }
 
 

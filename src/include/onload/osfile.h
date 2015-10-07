@@ -70,11 +70,19 @@ typedef ci_os_file oo_os_file;
 struct tcp_helper_endpoint_s;
 extern int oo_os_sock_get_from_ep(struct tcp_helper_endpoint_s* ep,
                                   oo_os_file* os_sock_out) CI_HF;
+static inline void oo_os_sock_put(oo_os_file os_sock)
+{ fput(os_sock); }
+#define OO_OS_SOCKET_FOP(ep, os_sock, rc, fop, ...) \
+  do {                                              \
+    rc = oo_os_sock_get_from_ep(ep, &os_sock);      \
+    if( rc == 0 ) {                                 \
+      rc = os_sock->f_op->fop(os_sock, __VA_ARGS__);\
+      oo_os_sock_put(os_sock);                      \
+    }                                               \
+  } while(0)
+
 #endif
 extern int  oo_os_sock_get(struct ci_netif_s*, oo_sp, oo_os_file* out) CI_HF;
-#ifndef __KERNEL__
-extern void oo_os_sock_release(struct ci_netif_s*, oo_os_file) CI_HF;
-#endif
 
 extern int oo_os_sock_sendmsg(struct ci_netif_s*, oo_sp,
                               const struct msghdr*, int flags) CI_HF;
@@ -105,14 +113,50 @@ extern void oo_file_ref_drop_list_now(struct oo_file_ref*);
   ((struct oo_file_ref*) ci_xchg_uintptr((pp), (ci_uintptr_t) (fr)))
 #endif
 
-
 #if defined(__KERNEL__) && defined(__linux__)
-/* Used to poll OS socket for POLLERR (ICMP messages) */
+/* Used to poll OS socket for OS events. */
 struct oo_os_sock_poll {
-  poll_table pt;
   wait_queue_t wait;
-  wait_queue_head_t *whead;
+  struct file *file;
+  spinlock_t lock;
 };
+static inline wait_queue_head_t *
+oo_os_sock_to_wait_queue_head(struct file *os_file)
+{
+#ifdef EFRM_HAVE_SK_SLEEP_FUNC
+  return sk_sleep(SOCKET_I(os_file->f_dentry->d_inode)->sk);
+#else
+  return SOCKET_I(os_file->f_dentry->d_inode)->sk->sk_sleep;
+#endif
+}
+static inline void
+oo_os_sock_poll_register(struct oo_os_sock_poll *sock_poll,
+                         struct file *os_file)
+{
+  struct file *old_file = NULL;
+
+  if( os_file )
+    get_file(os_file);
+  spin_lock_bh(&sock_poll->lock);
+  if( sock_poll->file != NULL ) {
+    remove_wait_queue(oo_os_sock_to_wait_queue_head(sock_poll->file),
+                      &sock_poll->wait);
+    old_file = sock_poll->file;
+  }
+  sock_poll->file = os_file;
+  if( os_file )
+    add_wait_queue(oo_os_sock_to_wait_queue_head(os_file), &sock_poll->wait);
+  spin_unlock_bh(&sock_poll->lock);
+
+  if( old_file )
+    fput(old_file);
+}
+static inline void
+oo_os_sock_poll_ctor(struct oo_os_sock_poll *sock_poll)
+{
+  spin_lock_init(&sock_poll->lock);
+}
+
 #endif
 
 #endif /* _CI_DRIVER_EFAB_OSFILE_H_ */

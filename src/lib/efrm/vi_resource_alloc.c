@@ -225,28 +225,13 @@ static int efrm_vi_rm_alloc_instance(struct efrm_pd *pd,
 		int ifindex = efrm_nic->efhw_nic.ifindex;
 		channel = sfc_affinity_cpu_to_channel(ifindex,
 						      vi_attr->interrupt_core);
-		if (channel < 0) {
+		if (channel < 0 && print_resource_warnings) {
 			EFRM_ERR("%s: ERROR: could not map core_id=%d using "
 				 "ifindex=%d", __FUNCTION__,
 				 (int) vi_attr->interrupt_core, ifindex);
 			EFRM_ERR("%s: ERROR: Perhaps sfc_affinity is not "
 				 "configured?", __FUNCTION__);
 			return -EINVAL;
-		}
-	}
-	else {
-		/* try to get a channel for the current CPU */
-		int ifindex = efrm_nic->efhw_nic.ifindex;
-		int cpu = raw_smp_processor_id();
-		static int printed = 0;
-		channel = sfc_affinity_cpu_to_channel(ifindex, cpu);
-		if (channel < 0 && print_resource_warnings && !printed) {
-			EFRM_ERR("%s: WARNING: could not map core_id=%d using "
-				 "ifindex=%d", __FUNCTION__, cpu, ifindex);
-			EFRM_ERR("%s: WARNING: Perhaps sfc_affinity is not "
-				 "configured?", __FUNCTION__);
-			++printed;
-			/* proceed without channel */
 		}
 	}
 	virs->net_drv_wakeup_channel = channel;
@@ -402,10 +387,6 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_TX_IP_CSUM_DIS;
 		if (!(q_flags & EFRM_VI_TCP_UDP_CSUM))
 			vi_flags |= EFHW_VI_TX_TCPUDP_CSUM_DIS;
-		if (q_flags & EFRM_VI_ISCSI_HEADER_DIGEST)
-			vi_flags |= EFHW_VI_ISCSI_TX_HDIG_EN;
-		if (q_flags & EFRM_VI_ISCSI_DATA_DIGEST)
-			vi_flags |= EFHW_VI_ISCSI_TX_DDIG_EN;
 		if (q_flags & EFRM_VI_ETH_FILTER)
 			vi_flags |= EFHW_VI_TX_ETH_FILTER_EN;
 		if (q_flags & EFRM_VI_TCP_UDP_FILTER)
@@ -608,9 +589,14 @@ efrm_vi_rm_fini_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type)
 	if (efhw_iopages_n_pages(&q->pages))
 		efhw_iopages_free(efrm_vi_get_pci_dev(virs), &q->pages,
 			iommu_domain);
-	if (q->bt_alloc.bta_size != 0)
+	if (q->bt_alloc.bta_size != 0) {
+		/* Never treat the queue's buffer-table allocation as stale.
+		 * This need not in fact be true, but this behaviour is
+		 * long-standing and only affects Falcon/Siena. */
+		EFRM_ASSERT(nic->devtype.arch == EFHW_ARCH_FALCON);
 		efrm_bt_manager_free(nic, &virs->bt_manager,
-				     &q->bt_alloc);
+				     &q->bt_alloc, 0);
+	}
 }
 
 
@@ -653,6 +639,23 @@ efrm_vi_io_unmap(struct efrm_vi* virs)
 		break;
 	}
 }
+
+
+/* Just shut down the queues in hardware. Normally this should only happen as
+ * a result of the very-asynchronous flush management. The exception to this
+ * principle is the case where a NIC is being removed and we need to tidy up
+ * its state immediately. */
+void
+efrm_vi_resource_shutdown(struct efrm_vi *virs)
+{
+	int instance = virs->rs.rs_instance;
+	struct efhw_nic *nic = virs->rs.rs_client->nic;
+	efhw_nic_flush_rx_dma_channel(nic, instance);
+	efhw_nic_flush_tx_dma_channel(nic, instance);
+	efhw_nic_event_queue_disable(nic, instance,
+				(virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
+}
+EXPORT_SYMBOL(efrm_vi_resource_shutdown);
 
 
 static void
@@ -1126,10 +1129,14 @@ int  efrm_vi_alloc(struct efrm_client *client,
 	efrm_vi_rm_salvage_flushed_vis(client->nic);
 	rc = efrm_vi_rm_alloc_instance(pd, virs, attr, print_resource_warnings);
 	if (rc < 0) {
-		EFRM_ERR("%s: Out of VI instances (%d)", __FUNCTION__, rc);
+		if (print_resource_warnings) {
+			EFRM_ERR("%s: Out of VI instances with given "
+				 "attributes (%d)", __FUNCTION__, rc);
+		}
 		rc = -EBUSY;
 		goto fail_alloc_id;
 	}
+        EFRM_ASSERT(virs->allocation.instance >= 0);
 	rc = efrm_vi_io_map(virs, client->nic, virs->allocation.instance);
 	if (rc < 0) {
 		EFRM_ERR("%s: failed to I/O map id=%d (rc=%d)\n",
@@ -1207,27 +1214,6 @@ fail_alloc_pd:
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_alloc);
-
-
-void efrm_vi_get_info(struct efrm_vi *virs,
-		      struct efrm_vi_info *info_out)
-{
-	int instance = virs->rs.rs_instance;
-	struct efhw_nic *nic = efrm_client_get_nic(virs->rs.rs_client);
-
-	if (nic->devtype.arch == EFHW_ARCH_EF10)	
-		info_out->vi_window_base = nic->ctr_ap_dma_addr + 
-			ef10_tx_dma_page_base(instance);
-	else if (nic->devtype.arch == EFHW_ARCH_FALCON)
-		info_out->vi_window_base = nic->ctr_ap_dma_addr + 
-			falcon_tx_dma_page_base(instance);
-	else 
-		EFRM_ASSERT(0);
-
-	info_out->vi_instance = instance;
-	info_out->vi_mem_mmap_bytes = virs->mem_mmap_bytes;
-}
-EXPORT_SYMBOL(efrm_vi_get_info);
 
 
 int efrm_vi_is_hw_rx_loopback_supported(struct efrm_vi *virs)
@@ -1335,7 +1321,7 @@ static int efrm_vi_q_init_pf(struct efrm_vi *virs, enum efhw_q_type q_type,
 	if (nic->devtype.arch == EFHW_ARCH_FALCON) {
 		rc = efrm_bt_manager_alloc(nic, &virs->bt_manager,
 				1 << EFHW_GFP_ORDER_TO_NIC_ORDER(q->page_order),
-				&q->bt_alloc);
+				&q->bt_alloc, 0);
 		if (rc != 0) {
 			EFRM_ERR("%s: Failed to allocate %s "
 				 "buffer table entries",
@@ -1352,10 +1338,15 @@ static int efrm_vi_q_init_pf(struct efrm_vi *virs, enum efhw_q_type q_type,
 	if (q_type != EFHW_EVQ)
 		efrm_vi_attach_evq(virs, q_type, evq);
 	rc = efrm_vi_rm_init_dmaq(virs, q_type, nic);
+	/* ENETDOWN indicates absent hardware, in which case we should not
+	 * report failure as we wish to preserve all software state in
+	 * anticipation of the hardware's reappearance. */
+	if (rc == -ENETDOWN)
+		rc = 0;
 	if (rc != 0)
 		if (nic->devtype.arch == EFHW_ARCH_FALCON)
 			efrm_bt_manager_free(nic, &virs->bt_manager,
-					     &q->bt_alloc);
+					     &q->bt_alloc, 0);
 	return rc;
 }
 

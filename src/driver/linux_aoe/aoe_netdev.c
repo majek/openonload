@@ -30,6 +30,7 @@
 #include "aoe_compat.h"
 
 
+
 struct ethtool_string {
 	char name[ETH_GSTRING_LEN];
 };
@@ -540,9 +541,18 @@ int aoe_netdev_register(struct aoe_device *dev,
 	int ret = 0;
 
 	/* If driver was loaded with "force_sienastats" then
- 	 * we do not want to override the sienastats with the aoe ones
- 	 * in this case create the extra interfaces, else do not
- 	 */
+	 * we do not want to override the sienastats with the aoe ones
+	 * in this case create the extra interfaces, else do not
+	 */
+
+	if(dev->board_type != BOARD_TYPE_SFN5122F){
+		if(force_sienastats||debug||link_mode){
+			force_sienastats = false;
+			debug = false;
+			link_mode = false;
+			printk(KERN_ALERT "sfc_aoe: Module Options force_sienastats, debug, link_mode not supported. Disabling them.\n");
+		}
+	}
 
 	if (!force_sienastats)
 		return 0;

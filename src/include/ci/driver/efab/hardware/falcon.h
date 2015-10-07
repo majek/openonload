@@ -327,9 +327,6 @@ falcon_read_qq(volatile char __iomem *addr, uint64_t *q0, uint64_t *q1)
  *
  *---------------------------------------------------------------------------*/
 
-/* iSCSI queue for A1; see bug 5427 for more details. */
-#define FALCON_A1_ISCSI_DMAQ 4
-
 /*! returns an address within a bar of the TX DMA doorbell */
 static inline uint falcon_tx_dma_page_addr(uint dmaq_idx)
 {

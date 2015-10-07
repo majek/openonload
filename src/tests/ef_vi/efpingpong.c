@@ -447,7 +447,7 @@ int main(int argc, char* argv[])
 
   printf("# ef_vi_version_str: %s\n", ef_vi_version_str());
 
-  while( (c = getopt (argc, argv, "n:s:wfbvVpta:A:")) != -1 )
+  while( (c = getopt (argc, argv, "n:s:wfvVpta:A:")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
