@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,8 @@
 
 #define _GNU_SOURCE 1
 
+#include "utils.h"
+
 #include <etherfabric/vi.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/memreg.h>
@@ -59,17 +61,12 @@
 #include <ci/tools/ippacket.h>
 #include <ci/net/ipv4.h>
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdint.h>
 #include <inttypes.h>
 #include <arpa/inet.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <string.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <poll.h>
+#include <stddef.h>
 
 
 /* This gives a frame len of 70, which is the same as:
@@ -100,35 +97,11 @@ static int              cfg_rx_align;
 #define MAX_UDP_PAYLEN	(1500 - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr))
 
 
-#define TEST(x)                                                  \
-  do {                                                          \
-    if( ! (x) ) {                                               \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
-
-#define TRY(x)                                                  \
-  do {                                                          \
-    int __rc = (x);                                             \
-    if( __rc < 0 ) {                                            \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      fprintf(stderr, "ERROR: rc=%d errno=%d (%s)\n",           \
-              __rc, errno, strerror(errno));                    \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
-
 #define CL_CHK(x)                               \
   do{                                           \
     if( ! (x) )                                 \
       usage();                                  \
   }while(0)
-
-#define MEMBER_OFFSET(c_type, mbr_name)  \
-  ((uint32_t) (uintptr_t)(&((c_type*)0)->mbr_name))
 
 
 static void usage(void);
@@ -349,7 +322,7 @@ static void do_init(char const* interface)
       pb = (void*) ((char*) pkt_buf_mem + i * BUF_SIZE);
       pb->id = i;
       pb->dma_buf_addr = ef_memreg_dma_addr(&memreg, i * BUF_SIZE);
-      pb->dma_buf_addr += MEMBER_OFFSET(struct pkt_buf, dma_buf);
+      pb->dma_buf_addr += offsetof(struct pkt_buf, dma_buf);
       pkt_bufs[i] = pb;
     }
   }

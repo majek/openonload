@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -41,6 +41,20 @@
 
 #ifndef __ONLOAD_LINUX_TRAMPOLINE_PPC64_INTERNAL_H__
 #define __ONLOAD_LINUX_TRAMPOLINE_PPC64_INTERNAL_H__
+
+/* The main difference between POWER ABIv1 and POWER ABIv2 is
+ * the structure of function pointers.
+ * For ABIv1 the function pointer is a pointer to a pair (entrypoint pointer, TOC),
+ * but for ABIv2 it's just entry point pointer, as is common in other archs.
+ * Thunks are always (entry point, TOC), so for ABIv2 we must take the first element.
+ */
+#if defined(_CALL_ELF) && _CALL_ELF >= 2
+#define THUNKPTR(_x) ((_x)[0])
+#define THUNK_ADDR_SIZE (sizeof(void *))
+#else
+#define THUNKPTR(_x) (_x)
+#define THUNK_ADDR_SIZE (2 * sizeof(void *))
+#endif
 
 typedef struct syscall_entry_struct
 {

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,19 @@
 /*! \cidoxg_include_ci_ul */
 #ifndef __CI_CIUL_SYSDEP_H__
 #define __CI_CIUL_SYSDEP_H__
+
+
+#if defined(__i386__) || defined(__x86_64__)
+# define EF_VI_LITTLE_ENDIAN   1
+#elif defined(__BYTE_ORDER)
+# define EF_VI_LITTLE_ENDIAN   (__BYTE_ORDER == __LITTLE_ENDIAN)
+#elif defined(__LITTLE_ENDIAN)
+# define EF_VI_LITTLE_ENDIAN   1
+#elif defined(__BIG_ENDIAN)
+# define EF_VI_LITTLE_ENDIAN   0
+#else
+# error "EF_VI_LITTLE_ENDIAN needs fixing"
+#endif
 
 
 #if defined(__unix__) && !defined(__KERNEL__)

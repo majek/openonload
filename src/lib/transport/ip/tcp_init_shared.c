@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -323,6 +323,7 @@ void ci_tcp_state_reinit(ci_netif* netif, ci_tcp_state* ts)
 }
 
 
+#ifndef __KERNEL__
 ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
 {
   ci_tcp_state *ts = NULL;
@@ -335,12 +336,24 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
       ci_ni_dllist_head(netif, &netif->state->active_cache.cache);
     ts = CI_CONTAINER(ci_tcp_state, epcache_link, link);
     ci_assert(ts);
-#ifdef __KERNEL__
-    if( ts->cached_on_pid != current->pid )
-#else
-    if( ts->cached_on_pid != getpid() )
-#endif
+
+    /* The use-case we are targeting is that there is only one active
+     * process using the stack with active cache.  Reuse an endpoint from
+     * other process if it is marked with NO_FD flags (NO_FD is set when fd
+     * is closed, for example when the process exits).
+     *
+     * The concurrent access to this list from different processes is
+     * guarged by the stack lock, i.e. we guarantee a sort of correctness
+     * for this unsupported use-case.
+     */
+    if( ts->cached_on_pid != getpid() &&
+        (~ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) ) {
       return NULL;
+    }
+    /* Sian says that cached_on_pid is not used by the following code, so
+     * we can leave it as-is even if we steal a NO_FD endpoint from another
+     * process. */
+
     ci_ni_dllist_pop(netif, &netif->state->active_cache.cache);
     ci_ni_dllist_self_link(netif, &ts->epcache_link);
     ci_ni_dllist_remove_safe(netif, &ts->epcache_fd_link);
@@ -362,6 +375,7 @@ ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif *netif)
 #endif
   return ts;
 }
+#endif
 
 
 ci_tcp_state* ci_tcp_get_state_buf(ci_netif* netif)

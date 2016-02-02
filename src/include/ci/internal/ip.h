@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -432,11 +432,11 @@ typedef struct {
 
 #ifdef __KERNEL__
 # define NI_PKT_SET(ni) \
-  ( (ni)->state->current_pkt_set < 0 ? 0 :              \
-    (ni)->state->current_pkt_set >= (ni)->pkt_sets_n ?   \
-    (ni)->pkt_sets_n - 1 : (ni)->state->current_pkt_set )
+  ( (ni)->packets->id < 0 ? 0 :              \
+    (ni)->packets->id >= (ni)->pkt_sets_n ?   \
+    (ni)->pkt_sets_n - 1 : (ni)->packets->id )
 #else
-# define NI_PKT_SET(ni) ((ni)->state->current_pkt_set)
+# define NI_PKT_SET(ni) ((ni)->packets->id)
 #endif
 
 #define IPTIMER_STATE(ni) (&(ni)->state->iptimer_state)
@@ -545,7 +545,7 @@ CI_DEBUG(extern void ci_netif_verify_freepkts(ci_netif *, const char *, int);)
 
 #if !defined(CI_HAVE_OS_NOPAGE)
 #define PKT_BUFSET_ALLOCATED(ni, id) \
-        ((ni)->state->pkt_sets_n > (id))  
+        ((ni)->packets->sets_n > (id))  
 #endif
 
 
@@ -1233,7 +1233,9 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
 #endif
 
 extern ci_tcp_state* ci_tcp_get_state_buf(ci_netif*) CI_HF;
+#ifndef __KERNEL__
 extern ci_tcp_state* ci_tcp_get_state_buf_from_cache(ci_netif*) CI_HF;
+#endif
 extern ci_udp_state* ci_udp_get_state_buf(ci_netif*) CI_HF;
 extern void ci_tcp_state_init(ci_netif* netif, ci_tcp_state* ts,
                               int from_cache) CI_HF;
@@ -1251,6 +1253,7 @@ extern void ci_tcp_listen_all_fds_gone(ci_netif*, ci_tcp_socket_listen*,
 extern void ci_tcp_all_fds_gone(ci_netif* netif, ci_tcp_state*,
                                 int do_free) CI_HF;
 #endif
+extern void ci_tcp_all_fds_gone_common(ci_netif* netif, ci_tcp_state*) CI_HF;
 extern void ci_tcp_rx_reap_rxq_bufs(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 extern void ci_tcp_rx_reap_rxq_last_buf(ci_netif* netif, ci_tcp_state* ts) CI_HF;
 static inline void
@@ -1474,8 +1477,9 @@ ci_netif_listener_lookup(ci_netif* netif,
 /* Invokes the callback on each socket that matches the supplied addressing
  * fields.  If the callback returns non-zero, then the search is
  * terminated.
+ * Returns 1 if the search was terminated, 0 otherwise.
  */
-extern void
+extern int
 ci_netif_filter_for_each_match(ci_netif*, unsigned laddr, unsigned lport,
                                unsigned raddr, unsigned rport,
                                unsigned protocol, int intf_i, int vlan,
@@ -1537,6 +1541,7 @@ extern unsigned int ci_tcp_wscl_by_buff(ci_netif *netif,
 
 extern ci_int32 ci_tcp_rcvbuf_established(ci_netif* ni, ci_sock_cmn* s) CI_HF;
 
+extern ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss) CI_HF;
 
 /* timer handlers */
 #define ci_tcp_time_now(ni) ci_ip_time_now(ni)
@@ -1977,9 +1982,7 @@ ci_inline int ci_netif_rx_vi_space(ci_netif* ni, ef_vi* vi)
 
 
 ci_inline int oo_stack_intf_max(ci_netif* ni) {
-#if CI_CFG_MAX_INTERFACES == 1
-  return 1;
-#elif defined(__KERNEL__)
+#if defined(__KERNEL__)
   return ni->nic_n;
 #else
   return ni->state->nic_n;
@@ -2307,6 +2310,19 @@ ci_inline int ci_netif_may_poll(ci_netif* ni)
 }
 
 
+#if defined(__KERNEL__) || ! defined(NDEBUG)
+/* If we have detected certain errors, we forbid polling stacks in the kernel.
+ * In those cases, we also prevent interrupts from being primed, lest we
+ * trigger an interrupt storm.  One consequence of this is that anything that
+ * resets any of the relevant error conditions must also ensure that the
+ * interrupt is reprimed if necessary. */
+ci_inline int ci_netif_may_poll_in_kernel(ci_netif* ni, int intf_i)
+{
+  return ni->state->nic[intf_i].nic_error_flags == 0;
+}
+#endif
+
+
 ci_inline int ci_netif_is_spinner(ci_netif* ni)
 {
   return ni->state->is_spinner | ni->state->n_spinners;
@@ -2479,13 +2495,13 @@ ci_inline void __ci_netif_pkt_clean(ci_ip_pkt_fmt* pkt)
 ci_inline ci_ip_pkt_fmt* ci_netif_pkt_get(ci_netif* ni, int bufset_id)
 {
   ci_ip_pkt_fmt* pkt;
-  ci_assert_gt(ni->state->n_freepkts, 0);
-  ci_assert_gt(ni->pkt_set[bufset_id].n_free, 0);
-  ci_assert(OO_PP_NOT_NULL(ni->pkt_set[bufset_id].free));
-  pkt = PKT(ni, ni->pkt_set[bufset_id].free);
-  ni->pkt_set[bufset_id].free = pkt->next;
-  --ni->pkt_set[bufset_id].n_free;
-  --ni->state->n_freepkts;
+  ci_assert_gt(ni->packets->n_free, 0);
+  ci_assert_gt(ni->packets->set[bufset_id].n_free, 0);
+  ci_assert(OO_PP_NOT_NULL(ni->packets->set[bufset_id].free));
+  pkt = PKT(ni, ni->packets->set[bufset_id].free);
+  ni->packets->set[bufset_id].free = pkt->next;
+  --ni->packets->set[bufset_id].n_free;
+  --ni->packets->n_free;
   pkt->refcount = 1;
   CI_DEBUG(pkt->intf_i = -1);
   CHECK_FREEPKTS(ni);
@@ -2495,11 +2511,11 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_get(ci_netif* ni, int bufset_id)
 ci_inline void ci_netif_pkt_put(ci_netif* ni, ci_ip_pkt_fmt* pkt)
 {
   int bufset_id = PKT_SET_ID(pkt);
-  ci_assert_le(bufset_id, ni->state->pkt_sets_n);
-  pkt->next = ni->pkt_set[bufset_id].free;
-  ni->pkt_set[bufset_id].free = OO_PKT_P(pkt);
-  ++ni->pkt_set[bufset_id].n_free;
-  ++ni->state->n_freepkts;
+  ci_assert_le(bufset_id, ni->packets->sets_n);
+  pkt->next = ni->packets->set[bufset_id].free;
+  ni->packets->set[bufset_id].free = OO_PKT_P(pkt);
+  ++ni->packets->set[bufset_id].n_free;
+  ++ni->packets->n_free;
   CHECK_FREEPKTS(ni);
 }
 
@@ -2509,7 +2525,7 @@ ci_inline void ci_netif_pkt_put(ci_netif* ni, ci_ip_pkt_fmt* pkt)
 ci_inline int/*bool*/
 ci_netif_pkt_set_is_underfilled(ci_netif* ni, int bufset_id)
 {
-  return ni->pkt_set[bufset_id].n_free < PKTS_PER_SET / 2;
+  return ni->packets->set[bufset_id].n_free < PKTS_PER_SET / 2;
 }
 
 /* Set new current_pkt_set.
@@ -2522,27 +2538,18 @@ ci_netif_pkt_set_is_underfilled(ci_netif* ni, int bufset_id)
 ci_inline void ci_netif_pkt_set_change(ci_netif* ni, int bufset_id,
                                        int/*bool*/ is_underfilled)
 {
-  ni->state->current_pkt_set = bufset_id;
+  ni->packets->id = bufset_id;
   ci_assert_equal(bufset_id, NI_PKT_SET(ni));
 
-  if( ni->state->pkt_sets_n < ni->state->pkt_sets_max && is_underfilled )
+  if( ni->packets->sets_n < ni->packets->sets_max && is_underfilled )
     ef_eplock_holder_set_flag(&ni->state->lock,
                               CI_EPLOCK_NETIF_NEED_PKT_SET);
 
   /* When we are called from ci_netif_rx_post(), we could already consume
    * all available packets.  Let's set NEED_PKT_SET flag above and exit. */
-  if( ni->pkt_set[bufset_id].n_free == 0 )
+  if( ni->packets->set[bufset_id].n_free == 0 )
     return;
-  ci_assert(OO_PP_NOT_NULL(ni->pkt_set[bufset_id].free));
-
-  if( is_underfilled ) {
-    /* If this packet set was underfilled when we started to use it, it is
-     * definitely underfilled now. */
-    ci_assert(ci_netif_pkt_set_is_underfilled(ni, bufset_id));
-    /* And if the best set is underfilled, then we are using more than
-     * a half of already-allocated packets. */
-    ci_assert_lt(ni->state->n_freepkts, ni->state->n_pkts_allocated / 2);
-  }
+  ci_assert(OO_PP_NOT_NULL(ni->packets->set[bufset_id].free));
 }
 
 ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc(ci_netif* ni) {
@@ -2550,7 +2557,7 @@ ci_inline ci_ip_pkt_fmt* ci_netif_pkt_alloc(ci_netif* ni) {
   int bufset_id;
   ci_assert( ci_netif_is_locked(ni) );
   bufset_id = NI_PKT_SET(ni);
-  if(CI_LIKELY( ni->pkt_set[bufset_id].n_free > 0 ))
+  if(CI_LIKELY( ni->packets->set[bufset_id].n_free > 0 ))
     pkt = ci_netif_pkt_get(ni, bufset_id);
   else
     pkt = ci_netif_pkt_alloc_slow(ni, 0, 0);
@@ -2573,8 +2580,8 @@ ci_inline int ci_netif_pkt_nonb_pool_not_empty(ci_netif* ni)
  * non-blocking free pool count as being allocated to TX.
  */
 ci_inline int ci_netif_pkt_tx_n(ci_netif* ni) {
-  return ni->state->n_pkts_allocated - ni->state->n_rx_pkts
-    - ni->state->n_freepkts;
+  return ni->packets->n_pkts_allocated - ni->state->n_rx_pkts
+    - ni->packets->n_free;
 }
 
 
@@ -2602,7 +2609,7 @@ ci_inline int ci_netif_pkt_tx_may_alloc(ci_netif* ni) {
  * for the TX path -- either from the free pool of the non-blocking pool.
  */
 ci_inline int ci_netif_pkt_tx_can_alloc_now(ci_netif* ni) {
-  return ( (ci_netif_pkt_tx_may_alloc(ni) && ni->state->n_freepkts > 0) ||
+  return ( (ci_netif_pkt_tx_may_alloc(ni) && ni->packets->n_free > 0) ||
            ci_netif_pkt_nonb_pool_not_empty(ni) );
 }
 
@@ -2617,7 +2624,7 @@ ci_netif_pkt_tx_tcp_alloc(ci_netif* ni, ci_tcp_state* ts) {
   ci_assert(ci_netif_is_locked(ni));
   bufset_id = NI_PKT_SET(ni);
   if(CI_LIKELY( ci_netif_pkt_tx_may_alloc(ni) &&
-                ni->pkt_set[bufset_id].n_free > 0 )) {
+                ni->packets->set[bufset_id].n_free > 0 )) {
     return ci_netif_pkt_get(ni, bufset_id);
   }
   else {
@@ -4114,6 +4121,7 @@ ci_inline void oo_tcpdump_dump_pkt(ci_netif *ni, ci_ip_pkt_fmt *pkt)
   pkt->refcount++;
   ni->state->dump_queue[ni->state->dump_write_i %
                         CI_CFG_DUMPQUEUE_LEN] = OO_PKT_P(pkt);
+  ci_wmb();
   ni->state->dump_write_i++;
   if( pkt->n_buffers > 1 ) {
     do {

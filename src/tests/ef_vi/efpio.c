@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,8 @@
 
 #define _GNU_SOURCE 1
 
+#include "utils.h"
+
 #include <etherfabric/vi.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/pio.h>
@@ -60,14 +62,9 @@
 #include <ci/tools/ippacket.h>
 #include <ci/net/ipv4.h>
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdint.h>
+#include <stddef.h>
 #include <inttypes.h>
 #include <arpa/inet.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <string.h>
 #include <net/if.h>
 #include <netdb.h>
 
@@ -92,31 +89,6 @@ static int              cfg_precopy = 1;
 #define MAX_UDP_PAYLEN	(1500 - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr))
 
 
-#define TEST(x)                                                 \
-  do {                                                          \
-    if( ! (x) ) {                                               \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
-
-#define TRY(x)                                                  \
-  do {                                                          \
-    int __rc = (x);                                             \
-    if( __rc < 0 ) {                                            \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      fprintf(stderr, "ERROR: rc=%d errno=%d (%s)\n",           \
-              __rc, errno, strerror(errno));                    \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
-
-#define MEMBER_OFFSET(c_type, mbr_name)  \
-  ((uint32_t) (uintptr_t)(&((c_type*)0)->mbr_name))
-
-
 struct pkt_buf {
   struct pkt_buf* next;
   ef_addr         dma_buf_addr;
@@ -131,7 +103,7 @@ static ef_vi		 vi;
 struct pkt_buf*          pkt_bufs[N_RX_BUFS + 1];
 static ef_pd             pd;
 static ef_memreg         memreg;
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__PPC64__)
 static ef_pio            pio;
 #endif
 static unsigned          rx_posted, rx_completed;
@@ -333,11 +305,11 @@ static void do_init(int ifindex)
   TRY(ef_pd_alloc(&pd, driver_handle, ifindex, pd_flags));
   TRY(ef_vi_alloc_from_pd(&vi, driver_handle, &pd, driver_handle,
                           -1, -1, -1, NULL, -1, vi_flags));
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__PPC64__)
   TRY(ef_pio_alloc(&pio, driver_handle, &pd, -1, driver_handle));
   TRY(ef_pio_link_vi(&pio, driver_handle, &vi, driver_handle));
 #else
-  /* PIO is only available on x86_64 systems */
+  /* PIO is not available on this system. */
   TEST(0);
 #endif
 
@@ -361,7 +333,7 @@ static void do_init(int ifindex)
   for( i = 0; i <= N_RX_BUFS; ++i ) {
     pb = pkt_bufs[i];
     pb->id = i;
-    pb->dma_buf_addr += MEMBER_OFFSET(struct pkt_buf, dma_buf);
+    pb->dma_buf_addr += offsetof(struct pkt_buf, dma_buf);
   }
 
   init_udp_pkt(pkt_bufs[N_RX_BUFS]->dma_buf, cfg_payload_len);

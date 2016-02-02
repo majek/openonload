@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,8 +69,6 @@
 
 /* Debugging for internal use only */
 #  define TRAMP_DEBUG(x...) (void)0
-// #define TRAMP_DEBUG(x...) ci_log(x)
-
 
 /* These are in fact labels in the PPC64 trampoline assembler */
 extern uint32_t __onload_trampoline_ppc64, __onload_end_trampoline_ppc64;
@@ -103,6 +101,7 @@ struct ppc64_data_struct ppc64_data;
 
 /* Bytes reserved for thunks - a page should be ample */
 #define TOTAL_THUNK_BYTES  PAGE_SIZE
+
 
 void *get_syscall_return_address(void) { return ppc64_data.syscall_return_point; }
 
@@ -162,12 +161,12 @@ static void patch_syscall_entry(syscall_entry_t *to_patch, void *syscall_table)
 
         to_patch->original_entry64[0] = (uint64_t *)syscall_p[0]; // Pointer to 64-bit entry.
         to_patch->original_entry64[1] = (uint64_t *)alpaca->kernel_toc;
-        TRAMP_DEBUG("64-bit 0x%p \n", to_patch->original_entry64[0], 
+        TRAMP_DEBUG("64-bit 0x%p 0x%p \n", to_patch->original_entry64[0], 
                   to_patch->original_entry64[1]);
 #ifdef CONFIG_COMPAT
         to_patch->original_entry32[0] = (uint64_t *)syscall_p[1];
         to_patch->original_entry32[1] = (uint64_t *)alpaca->kernel_toc;
-        TRAMP_DEBUG("64-bit 0x%p 0x%p \n", to_patch->original_entry32[0], 
+        TRAMP_DEBUG("32-bit 0x%p 0x%p \n", to_patch->original_entry32[0], 
                   to_patch->original_entry32[1]);
 #endif
     }
@@ -185,6 +184,7 @@ static void patch_syscall_entry(syscall_entry_t *to_patch, void *syscall_table)
     if (to_patch->entry32)
         syscall_p[1] = (uint64_t *)to_patch->entry32;
 #endif
+    TRAMP_DEBUG("now syscall_p[0] = 0x%p \n", syscall_p[0]);
 
     flush_dcache_range((unsigned long)syscall_p, (unsigned long)syscall_p + 16);
 }
@@ -282,18 +282,21 @@ uint64_t *find_syscall_table(void **return_addr)
      *
      * LOAD_HANDLER(r12, system_call_entry)
       */
-#define ADDI_SIGNATURE  0x398C0000
-#else
+#define ADDI_ORI_SIGNATURE  0x398C0000
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(3,8,0)
     /* Later kernels use r10.
      * 
      * LOAD_HANDLER(r10, system_call_entry)
      */
-#define ADDI_SIGNATURE  0x394A0000
+#define ADDI_ORI_SIGNATURE  0x394A0000
+#else
+    /* Kernels starting from 3.8 use ORI instead of ADDI */
+#define ADDI_ORI_SIGNATURE  0x614A0000
 #endif
 
     for (i =0 ;i < (0x80>>2); ++i)
     {
-        if ((pv[i] & 0xFFFF0000) == ADDI_SIGNATURE )
+        if ((pv[i] & 0xFFFF0000) == ADDI_ORI_SIGNATURE )
         {
             sys_call_entry_offset = (pv[i] & 0xFFFF);
         }
@@ -301,7 +304,7 @@ uint64_t *find_syscall_table(void **return_addr)
 
     if (sys_call_entry_offset & 0x80000000)
     {
-        TRAMP_DEBUG("Failed to find ADDI - sorry, chaps.\n");
+        TRAMP_DEBUG("Failed to find ADDI/ORI - sorry, chaps.\n");
         rv = ERR_PTR(-EIO);
         goto end;
     }
@@ -497,7 +500,13 @@ static int thunks_add(struct ppc64_data_struct *ppc64,
     /* Copy the thunk code in */
     memcpy(&ppc64->thunks_p[ppc64->thunks_used], &__onload_trampoline_ppc64, thunk_bytes);
     /* You can just copy the function pointer */
-    memcpy(&ppc64->thunks_p[ppc64->thunks_used + thunk_bytes], (uint8_t *)mod_func, 16);
+#if defined(_CALL_ELF) && _CALL_ELF >= 2
+    memcpy(&ppc64->thunks_p[ppc64->thunks_used + thunk_bytes], 
+           (uint8_t *)&mod_func, THUNK_ADDR_SIZE);
+#else
+    memcpy(&ppc64->thunks_p[ppc64->thunks_used + thunk_bytes], 
+           (uint8_t *)mod_func, THUNK_ADDR_SIZE);
+#endif
     /* Now the return pointer */
     {
         uint64_t **returnp = (uint64_t **)(&ppc64->thunks_p[ppc64->thunks_used + thunk_bytes + 16]);

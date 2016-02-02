@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -249,7 +249,8 @@ typedef struct {
   FTL_TSTRUCT_BEGIN(ctx, ci_netif_state_nic_t, )                        \
   FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_uint32, timer_quantum_ns) \
   FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_uint32, rx_prefix_len)   \
-  FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_int32, rx_ts_correction) \
+  FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_int16, rx_ts_correction) \
+  FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_int16, tx_ts_correction) \
   FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_uint32, vi_flags)        \
   FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_uint32, vi_out_flags)    \
   FTL_TFIELD_INT(ctx, ci_netif_state_nic_t, ci_uint32, oo_vi_flags)     \
@@ -503,6 +504,7 @@ typedef struct {
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, synrecv_timeouts)          \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, synrecv_purge)             \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, syn_drop_busy)             \
+    FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, syn_drop_no_return_route)  \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, listen2synrecv)            \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, synrecv2established)       \
     FTL_TFIELD_INT(ctx, ci_netif_stats, ci_uint32, ul_accepts)                \
@@ -920,8 +922,6 @@ typedef struct {
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, last_spin_poll_frc)    \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, last_sleep_frc)        \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_eplock_t, lock)             \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, current_pkt_set)        \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_freepkts)             \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, looppkts)               \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_looppkts)             \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_rx_pkts)              \
@@ -938,9 +938,6 @@ typedef struct {
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, vi_ofs)                \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, table_ofs)             \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, buf_ofs)               \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, pkt_sets_n)            \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, pkt_sets_max)          \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, n_pkts_allocated)       \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_ip_timer_state, iptimer_state) \
   FTL_TFIELD_STRUCT(ctx, ci_netif_state, ci_ip_timer, timeout_tid)      \
   FTL_TFIELD_ARRAYOFSTRUCT(ctx, ci_netif_state, ci_ni_dllist_t, timeout_q, \

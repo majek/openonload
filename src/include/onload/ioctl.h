@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -295,7 +295,7 @@ enum {
   OO_OP_CLUSTER_DUMP,
 #define OO_IOC_CLUSTER_DUMP       OO_IOC_W(CLUSTER_DUMP,            \
                                              oo_cluster_dump_t)
-#ifdef ONLOAD_OFE
+
 #define OO_IOC_OFE_CONFIG         OO_IOC_W(OFE_CONFIG, oo_ofe_config_t)
   OO_OP_OFE_CONFIG,
 #define OO_IOC_OFE_CONFIG_DONE    OO_IOC_NONE(OFE_CONFIG_DONE)
@@ -303,7 +303,6 @@ enum {
 #define OO_IOC_OFE_GET_LAST_ERROR OO_IOC_R(OFE_GET_LAST_ERROR, \
                                            char[CI_LOG_MAX_LINE])
   OO_OP_OFE_GET_LAST_ERROR,
-#endif
 
   OO_OP_GET_CPU_KHZ,
 #define OO_IOC_GET_CPU_KHZ        OO_IOC_R(GET_CPU_KHZ, ci_uint32)

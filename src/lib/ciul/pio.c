@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,7 +31,12 @@
 #include "logging.h"
 
 
-#ifdef __x86_64__
+#define PIO_BUF_MAP_SIZE     PAGE_SIZE
+
+#define EF10_VI_WINDOW_STEP  8192
+
+
+#if defined(__x86_64__) || defined(__PPC64__)
 int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
                  unsigned len_hint, ef_driver_handle pd_dh)
 {
@@ -94,13 +99,14 @@ int ef_pio_link_vi(ef_pio* pio, ef_driver_handle pio_dh, ef_vi* vi,
   }
 
   if( pio->pio_io == NULL ) {
+    int bar_off = vi->vi_i * EF10_VI_WINDOW_STEP + 4096;
     rc = ci_resource_mmap(vi_dh, vi->vi_resource_id, EFCH_VI_MMAP_PIO,
-                          4096, &p);
+                          PIO_BUF_MAP_SIZE, &p);
     if( rc < 0 ) {
       LOGVV(ef_log("%s: ci_resource_mmap (pio) %d", __FUNCTION__, rc));
       return rc;
     }
-    pio->pio_io = (uint8_t*) p;
+    pio->pio_io = (uint8_t*) p + (bar_off & (PAGE_SIZE - 1));
   }
 
   vi->linked_pio = pio;
@@ -120,8 +126,14 @@ int ef_pio_unlink_vi(ef_pio* pio, ef_driver_handle pio_dh, ef_vi* vi,
   op.u.pio_unlink_vi.in_vi_id = efch_make_resource_id(vi->vi_resource_id);
 
   rc = ci_resource_op(pio_dh, &op);
-  if( rc < 0 )
+  if( rc < 0 ) {
     LOGV(ef_log("%s: ci_resource_op failed %d", __FUNCTION__, rc));
+  }
+  else {
+    rc = ci_resource_munmap(vi_dh, pio->pio_io, PIO_BUF_MAP_SIZE);
+    if( rc < 0 )
+      LOGV(ef_log("%s: ci_resource_munmap failed %d", __FUNCTION__, rc));
+  }
   return rc;
 }
 

@@ -1,3 +1,61 @@
+OpenOnload-201509-u1 Release Notes
+==================================
+
+This is a minor update release that fixes a number of issues with
+OpenOnload-201509 and the associated SFC net driver.
+
+Below is a brief summary of the relevant changes and limitations that
+we are aware of.  Please see the ChangeLog for further details and a
+list of bugs fixed.
+
+The ReleaseNotes for OpenOnload-201509 are included below.
+
+
+RSS and cluster hashing
+-----------------------
+
+This release configures the network adapter to use a fixed key for
+flow hashing by default, so that all network ports consistently hash
+packets for a particular flow to the same channel within an RSS set or
+cluster.  In addition the hashing is symmetric, so that both
+directions in an IP conversation are hashed to the same channel. This
+applies to packets handled by the kernel stack, by ef_vi and by
+SolarCapture.
+
+When using solar_clusterd and ef_vi it is possible to select a
+particular channel within a cluster by prefixing the cluster name with
+index@.  For example, "0@mycluster" selects the first channel. This is
+useful when receiving packets from multiple ports, as it ensures that
+packets from a particular flow are steered to the same thread
+regardless of which port they arrive at.
+
+
+Teamd support for mixed bonds
+-----------------------------
+
+OpenOnload-201509 added support for bonds configured using teamd in
+addition to the long-standing bonding module.  It has recently become
+apparent that Onload is not correctly dealing with teamd-configured
+bonds that have a mix of Solarflare and non-Solarflare interfaces.
+Onload should recognise these as unacceleratable but currently will
+attempt to accelerate traffic on the Solarflare interfaces in the
+bond, which may lead to unexpected behaviour should the bond failover
+to a non-Solarflare interface.
+
+We will address this in a future update release.  To work around the
+problem we recommend using the bonding module to configure bonds that
+have a mix of Solarflare and non-Solarflare interfaces in them.
+
+
+sfc_resource /proc file name change
+-----------------------------------
+
+To avoid a naming collision when interfaces are renamed the files that
+used to be at /proc/driver/sfc_resource/ethX/pdY have moved to
+/proc/driver/sfc_resource/devices/0000:0Z.00.0/pdY
+
+
+
 OpenOnload-201509 Release Notes
 ===============================
 

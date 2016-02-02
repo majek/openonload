@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -123,6 +123,15 @@ static void efrm_vi_rm_drop_ref(struct efrm_vi *virs)
 }
 
 
+static inline void efrm_atomic_or(int i, atomic_t *v)
+{
+	int old, new;
+	do {
+		old = atomic_read(v);
+		new = old | i;
+	} while (atomic_cmpxchg(v, old, new) != old);
+}
+
 /*** Instance numbers ****************************************************/
 
 
@@ -137,7 +146,7 @@ static int efrm_vi_set_alloc_instance_try(struct efrm_vi *virs,
 			EFRM_ERR("%s: ERROR: vi_set instance=%d out-of-range "
 				 "(size=%d)", __FUNCTION__, instance,
 				 1 << vi_set->allocation.order);
-			return -EINVAL;
+			return -EDOM;
 		}
 	} else {
 		if ((instance = ci_ffs64(vi_set->free) - 1) < 0) {
@@ -480,11 +489,20 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 	int rc = 0;
 	struct efrm_vi_q *q = &virs->q[queue_type];
 	struct efrm_nic* efrm_nic;
-	int instance, evq_instance, interrupting, wakeup_evq;
+	int instance, evq_instance = -1, interrupting, wakeup_evq;
 	unsigned flags = virs->flags;
 
 	efrm_nic = efrm_nic(nic);
+
+	mutex_lock(&efrm_nic->dmaq_state.lock);
+
+	if( efrm_nic->dmaq_state.unplugging ) {
+		mutex_unlock(&efrm_nic->dmaq_state.lock);
+		return -ENETDOWN;
+	}
+
 	instance = virs->rs.rs_instance;
+
 	if (efrm_vi_is_phys(virs))
 		flags |= EFHW_VI_TX_PHYS_ADDR_EN | EFHW_VI_RX_PHYS_ADDR_EN;
 
@@ -545,13 +563,36 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 (flags & (EFHW_VI_RX_TIMESTAMPS |
 			           EFHW_VI_TX_TIMESTAMPS)) != 0,
 			 (flags & EFHW_VI_NO_CUT_THROUGH) == 0,
-			 &virs->rx_ts_correction,
 			 &virs->out_flags);
 		break;
 	default:
 		EFRM_ASSERT(0);
 		break;
 	}
+
+	/* Here we violate the usual principle that we should not change our
+	 * behaviour as a direct consequence of the resetting state.  However,
+	 * we need to detect failure to allocate a queue, and, since some of
+	 * the MCDI operations have an outlen of zero, they will appear to
+	 * succeed even while a reset is pending.  We check this *after*
+	 * attempting the MCDI call to avoid a race against the flag being set
+	 * between the check and the call. */
+	if (nic->resetting)
+		rc = -ENETDOWN;
+
+	if( ! list_empty(&q->init_link) ) {
+		/* TODO assertion instead */
+		EFRM_WARN("Double initialized queue "
+			  "nic %d type %d 0x%x (evq 0x%x) rc %d",
+			  nic->index, queue_type, instance, evq_instance, rc);
+	} else {
+		if( rc == 0 )
+			list_add_tail(&q->init_link,
+				      &efrm_nic->dmaq_state.q[queue_type]);
+	}
+
+	mutex_unlock(&efrm_nic->dmaq_state.lock);
+
 	return rc;
 }
 
@@ -576,8 +617,8 @@ efrm_vi_rm_fini_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type)
 		efhw_nic_pace(nic, instance, 0);
 		break;
 	case EFHW_EVQ:
-		efhw_nic_event_queue_disable(nic, instance,
-				(virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
+		if (~atomic_read(&virs->shut_down_flags) & EFRM_VI_SHUT_DOWN_EVQ)
+                        efrm_vi_q_flush(virs, queue_type);
 		break;
 	default:
 		break;
@@ -586,9 +627,11 @@ efrm_vi_rm_fini_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type)
 	/* NB. No need to disable DMA queues here.  Nobody is using it
 	 * anyway.
 	 */
-	if (efhw_iopages_n_pages(&q->pages))
-		efhw_iopages_free(efrm_vi_get_pci_dev(virs), &q->pages,
-			iommu_domain);
+	if (efhw_iopages_n_pages(&q->pages)) {
+		struct pci_dev* dev = efrm_vi_get_pci_dev(virs);
+		efhw_iopages_free(dev, &q->pages, iommu_domain);
+		pci_dev_put(dev);
+	}
 	if (q->bt_alloc.bta_size != 0) {
 		/* Never treat the queue's buffer-table allocation as stale.
 		 * This need not in fact be true, but this behaviour is
@@ -641,6 +684,75 @@ efrm_vi_io_unmap(struct efrm_vi* virs)
 }
 
 
+/* Marks all queues as having been shut down. */
+void
+efrm_vi_resource_mark_shut_down(struct efrm_vi *virs)
+{
+	efrm_atomic_or(EFRM_VI_SHUT_DOWN, &virs->shut_down_flags);
+}
+EXPORT_SYMBOL(efrm_vi_resource_mark_shut_down);
+
+
+static int
+__efrm_vi_q_flush(struct efhw_nic* nic, enum efhw_q_type queue_type,
+		  int instance, int rx_ts)
+{
+	int rc;
+
+	switch (queue_type) {
+	case EFHW_RXQ:
+		rc = efhw_nic_flush_rx_dma_channel(nic, instance);
+		break;
+	case EFHW_TXQ:
+		rc = efhw_nic_flush_tx_dma_channel(nic, instance);
+		break;
+	case EFHW_EVQ:
+		/* flushing EVQ is as good as disabling it */
+		efhw_nic_event_queue_disable(nic, instance, rx_ts);
+		rc = 0;
+		break;
+	default:
+		EFRM_ASSERT(0);
+		rc = -EINVAL;
+	};
+	return rc;
+}
+
+
+int
+efrm_vi_q_flush(struct efrm_vi *virs, enum efhw_q_type queue_type)
+{
+	struct efrm_vi_q *q = &virs->q[queue_type];
+	int instance = virs->rs.rs_instance;
+	struct efhw_nic *nic = virs->rs.rs_client->nic;
+	struct efrm_nic* efrm_nic = efrm_nic(nic);
+
+	int rc = 0;
+
+	mutex_lock(&efrm_nic->dmaq_state.lock);
+
+	if( list_empty(&q->init_link) ) {
+		EFRM_TRACE("Queue already flushed nic %d type %d 0x%x",
+			  nic->index, queue_type, instance);
+		/* we should not issue MCDI now */
+		rc = -EALREADY;
+		mutex_unlock(&efrm_nic->dmaq_state.lock);
+		return rc;
+	} else {
+		list_del(&q->init_link);
+		INIT_LIST_HEAD(&q->init_link);
+	}
+
+	rc = __efrm_vi_q_flush(nic, queue_type, instance,
+			       (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
+	EFRM_TRACE("Flushed queue nic %d type %d 0x%x rc %d",
+		  nic->index, queue_type, instance, rc);
+	mutex_unlock(&efrm_nic->dmaq_state.lock);
+	return rc;
+}
+EXPORT_SYMBOL(efrm_vi_q_flush);
+
+
 /* Just shut down the queues in hardware. Normally this should only happen as
  * a result of the very-asynchronous flush management. The exception to this
  * principle is the case where a NIC is being removed and we need to tidy up
@@ -648,12 +760,10 @@ efrm_vi_io_unmap(struct efrm_vi* virs)
 void
 efrm_vi_resource_shutdown(struct efrm_vi *virs)
 {
-	int instance = virs->rs.rs_instance;
-	struct efhw_nic *nic = virs->rs.rs_client->nic;
-	efhw_nic_flush_rx_dma_channel(nic, instance);
-	efhw_nic_flush_tx_dma_channel(nic, instance);
-	efhw_nic_event_queue_disable(nic, instance,
-				(virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
+	efrm_vi_resource_mark_shut_down(virs);
+	efrm_vi_q_flush(virs, EFHW_RXQ);
+	efrm_vi_q_flush(virs, EFHW_TXQ);
+	efrm_vi_q_flush(virs, EFHW_EVQ);
 }
 EXPORT_SYMBOL(efrm_vi_resource_shutdown);
 
@@ -703,6 +813,42 @@ __efrm_vi_resource_free(struct efrm_vi *virs)
 	kfree(virs);
 }
 
+
+/* dummy parameter indicates only sw state needs to be updated
+ * e.g. after impolite unplug we assume all queues are gone */
+void efrm_nic_flush_all_queues(struct efhw_nic *nic, int dummy)
+{
+	int type;
+	struct efrm_nic *efrm_nic = efrm_nic_from_efhw_nic(nic);
+
+	mutex_lock(&efrm_nic->dmaq_state.lock);
+	if (!dummy)
+		efrm_nic->dmaq_state.unplugging = 1;
+	EFRM_TRACE(" Flushing all queues for nic %d nohw %d", nic->index, dummy);
+	for (type = 0; type < EFHW_N_Q_TYPES; ++type) {
+		while (!list_empty(&efrm_nic->dmaq_state.q[type])) {
+			struct list_head *h = list_pop(&efrm_nic->dmaq_state.q[type]);
+			struct efrm_vi *virs;
+			int rc;
+			virs = list_entry(h, struct efrm_vi, q[type].init_link);
+			INIT_LIST_HEAD(&virs->q[type].init_link);
+			if (dummy)
+				continue;
+			efrm_vi_resource_mark_shut_down(virs);
+			efrm_atomic_or(efrm_vi_shut_down_flag(type), &virs->shut_down_flags);
+			rc = __efrm_vi_q_flush(virs->rs.rs_client->nic, type,
+				virs->rs.rs_instance,
+				(virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
+			(void) rc;
+			EFRM_TRACE(" nic %d type %d 0x%x rc %d",
+				nic->index, type, virs->rs.rs_instance, rc);
+		}
+	}
+	mutex_unlock(&efrm_nic->dmaq_state.lock);
+}
+EXPORT_SYMBOL(efrm_nic_flush_all_queues);
+
+
 /*** Resource object  ****************************************************/
 
 int
@@ -739,6 +885,7 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 	struct efrm_vf *vf = virs->allocation.vf;
 	efhw_iommu_domain *iommu_domain = efrm_vf_get_iommu_domain(vf);
 	unsigned long iova_base = 0;
+	struct pci_dev* dev;
 
 	if (n_q_entries == 0)
 		return 0;
@@ -766,9 +913,10 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 	iova_base = vf ? efrm_vf_alloc_ioaddrs(vf,
 		1 << qsize.q_len_page_order, NULL) : 0;
 #endif
-	rc = efhw_iopages_alloc(efrm_vi_get_pci_dev(virs), &q->pages,
-				qsize.q_len_page_order, iommu_domain,
-				iova_base);
+	dev = efrm_vi_get_pci_dev(virs);
+	rc = efhw_iopages_alloc(dev, &q->pages, qsize.q_len_page_order,
+				iommu_domain, iova_base);
+	pci_dev_put(dev);
 	if (rc < 0) {
 		EFRM_ERR("%s: Failed to allocate %s DMA buffer",
 			 __FUNCTION__, q_names[q_type]);
@@ -786,6 +934,8 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 		dma_addrs[i] = efhw_iopages_dma_addr(&q->pages, i);
 
 	q_flags = vi_flags_to_q_flags(vi_flags, q_type);
+
+	INIT_LIST_HEAD(&q->init_link);
 	rc = efrm_vi_q_init(virs, q_type, qsize.q_len_entries,
 			    dma_addrs,
 			    efhw_iopages_n_pages(&q->pages) *
@@ -800,7 +950,9 @@ efrm_vi_q_alloc(struct efrm_vi *virs, enum efhw_q_type q_type,
 
 
 fail_q_init:
-	efhw_iopages_free(efrm_vi_get_pci_dev(virs), &q->pages, iommu_domain);
+	dev = efrm_vi_get_pci_dev(virs);
+	efhw_iopages_free(dev, &q->pages, iommu_domain);
+	pci_dev_put(dev);
 fail_iopages:
 	return rc;
 }
@@ -1004,50 +1156,46 @@ void efrm_vi_attr_set_with_timer(struct efrm_vi_attr *attr, int with_timer)
 EXPORT_SYMBOL(efrm_vi_attr_set_with_timer);
 
 
-int efrm_vi_attr_set_instance(struct efrm_vi_attr *attr,
-			      struct efrm_vi_set *vi_set,
-			      int instance_in_set)
+void efrm_vi_attr_set_instance(struct efrm_vi_attr *attr,
+			       struct efrm_vi_set *vi_set,
+			       int instance_in_set)
 {
 	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
-	int set_size = 1 << vi_set->allocation.order;
-	if (instance_in_set >= 0 && instance_in_set < set_size) {
-		a->vi_set = vi_set;
-		a->vi_set_instance = instance_in_set;
-		return 0;
-	} else if (instance_in_set < 0) {
-		a->vi_set = vi_set;
+	a->vi_set = vi_set;
+	if (instance_in_set < 0)
 		a->vi_set_instance = 0xff;
-		return 0;
-	} else {
-		return -EINVAL;
-	}
+	else if (instance_in_set <= 0xfe)
+		a->vi_set_instance = instance_in_set;
+	else
+		/* Ensure we provoke EDOM when we attempt to allocate.
+		 * This field is a u8, and 0xff means "any".  So 0xfe is
+		 * largest value interpreted as an instance num.
+		 */
+		a->vi_set_instance = 0xfe;
 }
 EXPORT_SYMBOL(efrm_vi_attr_set_instance);
 
 
-int efrm_vi_attr_set_vf(struct efrm_vi_attr *attr, struct efrm_vf *vf)
+void efrm_vi_attr_set_vf(struct efrm_vi_attr *attr, struct efrm_vf *vf)
 {
 	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
 	a->vf = vf;
-	return 0;
 }
 EXPORT_SYMBOL(efrm_vi_attr_set_vf);
 
 
-int efrm_vi_attr_set_interrupt_core(struct efrm_vi_attr *attr, int core_id)
+void efrm_vi_attr_set_interrupt_core(struct efrm_vi_attr *attr, int core_id)
 {
 	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
 	a->interrupt_core = core_id;
-	return 0;
 }
 EXPORT_SYMBOL(efrm_vi_attr_set_interrupt_core);
 
 
-int efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *attr, int channel_id)
+void efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *attr, int channel_id)
 {
 	struct vi_attr *a = VI_ATTR_FROM_O_ATTR(attr);
 	a->channel = channel_id;
-	return 0;
 }
 EXPORT_SYMBOL(efrm_vi_attr_set_wakeup_channel);
 
@@ -1077,18 +1225,25 @@ int  efrm_vi_alloc(struct efrm_client *client,
 		pd = attr->vi_set->pd;
 	if (pd == NULL) {
 		/* Legacy compatibility.  Create a [pd] from [client]. */
-		if (client == NULL)
+		if (client == NULL) {
+			EFRM_ERR("%s: ERROR: no PD or CLIENT\n", __func__);
 			return -EINVAL;
+		}
 #ifdef CONFIG_SFC_RESOURCE_VF
 		if (attr->vf != NULL &&
-		    efrm_vf_to_resource(attr->vf)->rs_client != client)
+		    efrm_vf_to_resource(attr->vf)->rs_client != client) {
+			EFRM_ERR("%s: ERROR: VF client mismatch\n", __func__);
 			return -EINVAL;
+		}
 #endif
 		rc = efrm_pd_alloc(&pd, client, attr->vf,
 				   (attr->vf != NULL) ?
 				   EFRM_PD_ALLOC_FLAG_PHYS_ADDR_MODE : 0);
-		if (rc < 0)
+		if (rc < 0) {
+			EFRM_ERR("%s: ERROR: failed to alloc PD (rc=%d)\n",
+				 __func__, rc);
 			goto fail_alloc_pd;
+		}
 	} else {
 		efrm_resource_ref(efrm_pd_to_resource(pd));
 		client = efrm_pd_to_resource(pd)->rs_client;
@@ -1104,14 +1259,21 @@ int  efrm_vi_alloc(struct efrm_client *client,
 			 "stream PD", __FUNCTION__);
 		goto fail_checks;
 	}
-	if (attr->with_interrupt && attr->with_timer)
+	if (attr->with_interrupt && attr->with_timer) {
+		EFRM_ERR("%s: ERROR: requested INTERRUPT and TIMER", __func__);
 		goto fail_checks;
+	}
 	if (attr->vi_set != NULL) {
 		struct efrm_resource *rs;
 		rs = efrm_vi_set_to_resource(attr->vi_set);
 		if (efrm_client_get_ifindex(rs->rs_client) !=
-		    efrm_client_get_ifindex(client))
+		    efrm_client_get_ifindex(client)) {
+			EFRM_ERR("%s: ERROR: vi_set ifindex=%d client "
+				 "ifindex=%d", __func__,
+				 efrm_client_get_ifindex(rs->rs_client),
+				 efrm_client_get_ifindex(client));
 			goto fail_checks;
+		}
 	}
 
 	if (attr->with_interrupt)
@@ -1133,7 +1295,6 @@ int  efrm_vi_alloc(struct efrm_client *client,
 			EFRM_ERR("%s: Out of VI instances with given "
 				 "attributes (%d)", __FUNCTION__, rc);
 		}
-		rc = -EBUSY;
 		goto fail_alloc_id;
 	}
         EFRM_ASSERT(virs->allocation.instance >= 0);
@@ -1306,6 +1467,25 @@ efrm_vi_q_init_common(struct efrm_vi *virs, enum efhw_q_type q_type,
 	return 0;
 }
 
+unsigned
+efrm_vi_shut_down_flag(enum efhw_q_type queue)
+{
+	switch (queue) {
+		default:
+			EFRM_ASSERT(0);
+			/* Fall through. */
+		case EFHW_TXQ:
+			return EFRM_VI_SHUT_DOWN_TXQ;
+		case EFHW_RXQ:
+			return EFRM_VI_SHUT_DOWN_RXQ;
+		case EFHW_EVQ:
+			return EFRM_VI_SHUT_DOWN_EVQ;
+	}
+
+	/* Unreachable. */
+}
+
+
 
 static int efrm_vi_q_init_pf(struct efrm_vi *virs, enum efhw_q_type q_type,
 			     const dma_addr_t *dma_addrs, int dma_addrs_n,
@@ -1341,8 +1521,10 @@ static int efrm_vi_q_init_pf(struct efrm_vi *virs, enum efhw_q_type q_type,
 	/* ENETDOWN indicates absent hardware, in which case we should not
 	 * report failure as we wish to preserve all software state in
 	 * anticipation of the hardware's reappearance. */
-	if (rc == -ENETDOWN)
+	if (rc == -ENETDOWN) {
+		efrm_atomic_or(efrm_vi_shut_down_flag(q_type), &virs->shut_down_flags);
 		rc = 0;
+	}
 	if (rc != 0)
 		if (nic->devtype.arch == EFHW_ARCH_FALCON)
 			efrm_bt_manager_free(nic, &virs->bt_manager,
@@ -1374,7 +1556,7 @@ EXPORT_SYMBOL(efrm_vi_q_init);
 
 
 
-int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type)
+static int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type)
 {
 	struct efrm_vi_q *q;
 	struct efhw_nic *nic;
@@ -1398,7 +1580,16 @@ int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type)
 
 	return efrm_vi_rm_init_dmaq(virs, q_type, nic);
 }
-EXPORT_SYMBOL(efrm_vi_q_reinit);
+
+
+void efrm_vi_qs_reinit(struct efrm_vi *virs)
+{
+	atomic_set(&virs->shut_down_flags, 0);
+	efrm_vi_q_reinit(virs, EFHW_EVQ);
+	efrm_vi_q_reinit(virs, EFHW_TXQ);
+	efrm_vi_q_reinit(virs, EFHW_RXQ);
+}
+EXPORT_SYMBOL(efrm_vi_qs_reinit);
 
 
 extern struct efrm_vi *

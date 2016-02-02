@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1831,11 +1831,11 @@ static void stack_netif_unlock(ci_netif* ni)
 
 static void stack_lock_force_wake(ci_netif* ni)
 {
-  unsigned v;
+  ci_uint64 v;
   if( ! cfg_lock )  libstack_netif_lock(ni);
   do
     v = ni->state->lock.lock;
-  while( ci_cas32_fail(&ni->state->lock.lock,v,v|CI_EPLOCK_FL_NEED_WAKE) );
+  while( ci_cas64u_fail(&ni->state->lock.lock,v,v|CI_EPLOCK_FL_NEED_WAKE) );
   if( ! cfg_lock )  libstack_netif_unlock(ni);
 }
 

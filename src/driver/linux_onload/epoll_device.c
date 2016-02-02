@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -171,7 +171,7 @@ static void oo_epoll_release_common(struct oo_epoll_private* priv)
   for( i = 0; i < epoll_max_stacks; i++ ) {
     if( priv->stacks[i] == NULL )
       break;
-    efab_tcp_helper_k_ref_count_dec(priv->stacks[i], 1);
+    efab_tcp_helper_k_ref_count_dec(priv->stacks[i]);
     priv->stacks[i] = NULL;
   }
   kfree(priv->stacks);

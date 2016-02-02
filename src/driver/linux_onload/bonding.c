@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -112,7 +112,7 @@ static int ci_bonding_do_sysfs_read(struct ci_bonding_sysfs_read* state,
 {
   int rc;
 
-  do {
+  while( 1 ) {
     rc = state->f->f_op->read(state->f, (__user char *)data, count,
                               &state->f->f_pos);
     /* See linux/drivers/net/bonding/bond_sysfs.c:
@@ -122,7 +122,13 @@ static int ci_bonding_do_sysfs_read(struct ci_bonding_sysfs_read* state,
       clear_tsk_thread_flag(current, TIF_SIGPENDING);
 
     /* I've never seen -ERESTARTSYS, but let's add it here. */
-  } while( rc == -ERESTARTNOINTR || rc == -ERESTARTSYS );
+    if( rc != -ERESTARTNOINTR && rc != -ERESTARTSYS )
+      break;
+
+    /* Someone else is holding the RTNL lock.  Make sure that they have a
+     * chance to drop it. */
+    schedule();
+  }
   return rc;
 }
 
@@ -855,11 +861,6 @@ static void ci_bonding_failover(struct net_device *net_dev,
      * callbacks on each hwport and encapsulation change
      */
     cicpos_ipif_bond_change(&CI_GLOBAL_CPLANE, net_dev->ifindex);
-
-    /* After updating the control plane, call back into Onload proper so that
-     * it can do any necessary tidying. */
-    if( old_hwport != CI_HWPORT_ID_BAD )
-      oo_nic_failover_from_hwport(old_hwport);
   }
 }
 
@@ -1022,8 +1023,11 @@ static int ci_bonding_check_slaves(struct net_device* master_net_dev,
     slave = CI_CONTAINER(struct ci_bonding_ifname, list_link,
                          ci_dllist_pop(&slaves));
     rc = ci_bonding_check_slave(slave, master_net_dev, master_rowid);
-    if( rc < 0 )
+    if( rc < 0 ) {
+      OO_DEBUG_BONDING(ci_log("ci_bonding_check_slave() failed for master %s: "
+                              "%d", master_net_dev->name, rc));
       fault = 1;
+    }
     else {
       non_sfc_port |= rc;
       no_slaves = 0;
@@ -1149,24 +1153,36 @@ static void ci_bonding_process_master(struct ci_bonding_ifname *master)
   master_rowid = rc;
 
   rc = ci_bonding_check_mode(master_net_dev, master_rowid, &fatal);
-  if( rc < 0 ) 
+  if( rc < 0 ) {
+    OO_DEBUG_BONDING(ci_log("ci_bonding_check_mode() failed for master %s: %d",
+                            master->ifname, rc));
     goto out1;
+  }
   mode = rc;
 
   rc = ci_bonding_check_hash_policy(master_net_dev, master_rowid, mode, &fatal);
-  if( rc != 0 )
+  if( rc != 0 ) {
+    OO_DEBUG_BONDING(ci_log("ci_bonding_check_hash_policy() failed for master "
+                            "%s: %d", master->ifname, rc));
     goto out1;
-   
+  }
+
   rc = ci_bonding_check_slaves(master_net_dev, master_rowid, &fatal);
-  if( rc != 0 )
+  if( rc != 0 ) {
+    OO_DEBUG_BONDING(ci_log("ci_bonding_check_slaves() failed for master %s: "
+                            "%d", master->ifname, rc));
     goto out1;
+  }
 
   /* Check active will also call ci_bonding_failover() to update active
    * interface when appropriate 
    */
   rc = ci_bonding_check_active(master_net_dev, master_rowid);
-  if( rc != 0 )
+  if( rc != 0 ) {
+    OO_DEBUG_BONDING(ci_log("ci_bonding_check_active() failed for master %s: "
+                            "%d", master->ifname, rc));
     goto out1;
+  }
 
  out1:
   if( rc != 0 && 

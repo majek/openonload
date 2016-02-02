@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -342,7 +342,8 @@ onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
     errno = ENOTTY;
     rc = -1;
   }
-  citp_fdinfo_release_ref(fdi, 0);
+  if( fdi != NULL )
+    citp_fdinfo_release_ref(fdi, 0);
   citp_exit_lib(&lib_context, rc == 0);
 
   Log_CALL_RESULT(rc);
@@ -367,7 +368,8 @@ onload_delegated_send_cancel(int fd)
     errno = ENOTTY;
     rc = -1;
   }
-  citp_fdinfo_release_ref(fdi, 0);
+  if( fdi != NULL )
+    citp_fdinfo_release_ref(fdi, 0);
   citp_exit_lib(&lib_context, rc == 0);
 
   Log_CALL_RESULT(rc);
@@ -410,7 +412,8 @@ oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
   }
 
 out:
-  citp_fdinfo_release_ref(fdi, 0);
+  if( fdi != NULL )
+    citp_fdinfo_release_ref(fdi, 0);
   citp_exit_lib(&lib_context, rc == 0);
   Log_CALL_RESULT(rc);
 

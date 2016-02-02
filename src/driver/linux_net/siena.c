@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1150,7 +1150,7 @@ static int siena_mtd_probe_partition(struct efx_nic *efx,
 				     unsigned int type)
 {
 	const struct siena_nvram_type_info *info;
-	size_t size, erase_size;
+	size_t size, erase_size, write_size;
 	bool protected;
 	int rc;
 
@@ -1163,7 +1163,8 @@ static int siena_mtd_probe_partition(struct efx_nic *efx,
 	if (info->port != efx_port_num(efx))
 		return -ENODEV;
 
-	rc = efx_mcdi_nvram_info(efx, type, &size, &erase_size, &protected);
+	rc = efx_mcdi_nvram_info(efx, type, &size, &erase_size, &write_size,
+				 &protected);
 	if (rc)
 		return rc;
 	if (protected && !efx_allow_nvconfig_writes)
@@ -1177,6 +1178,11 @@ static int siena_mtd_probe_partition(struct efx_nic *efx,
 	part->common.mtd.flags = MTD_CAP_NORFLASH;
 	part->common.mtd.size = size;
 	part->common.mtd.erasesize = erase_size;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_MTD_WRITESIZE)
+	part->common.mtd.writesize = write_size;
+#else
+	part->common.writesize = write_size;
+#endif
 
 	return 0;
 }

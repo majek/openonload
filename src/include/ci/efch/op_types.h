@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -190,6 +190,7 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_ETHER_TYPE_VLAN        0x82
 # define                CI_RSOP_FILTER_ADD_IP_PROTO     0x83
 # define                CI_RSOP_FILTER_ADD_ETHER_TYPE   0x84
+# define                CI_RSOP_VI_GET_TS_CORRECTION    0x85
 
   union {
     struct {
@@ -249,6 +250,10 @@ typedef struct ci_resource_op_s {
     struct {
       int32_t           out_rx_ts_correction;
     } vi_rx_ts_correction;
+    struct {
+      int32_t           out_rx_ts_correction;
+      int32_t           out_tx_ts_correction;
+    } vi_ts_correction;
     struct {
       uint8_t           enable;
       uint8_t           promiscuous;

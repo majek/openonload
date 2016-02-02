@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -101,7 +101,8 @@ int efx_mtd_add(struct efx_nic *efx, struct efx_mtd_partition *parts,
 						    i * sizeof_part);
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_MTD_WRITESIZE)
-		part->mtd.writesize = 1;
+		if (!part->mtd.writesize)
+			part->mtd.writesize = 1;
 #endif
 		if (efx_allow_nvconfig_writes)
 			part->mtd.flags |= MTD_WRITEABLE;

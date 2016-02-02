@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -155,7 +155,7 @@ struct ci_netif_s {
 #endif
 
   /* This is pointer to the shared state of packet sets */
-  ci_pkt_set*           pkt_set;
+  oo_pktbuf_manager*    packets;
   /* And this is non-shared array for UL- or kernel- specific data
    * about packet sets */
   ci_pkt_bufs*          pkt_bufs;
@@ -237,7 +237,8 @@ struct ci_netif_s {
   unsigned      error_flags;
 
 #ifdef ONLOAD_OFE
-  struct ofe_engine* ofe;
+  struct ofe_engine*  ofe;
+  struct ofe_channel* ofe_channel;
 #endif
 };
 

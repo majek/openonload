@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -138,7 +138,8 @@ struct oof_cplane_update {
 };
 
 
-static const ci_uint8 oof_tproxy_ipprotos[] = {IPPROTO_ICMP, IPPROTO_IGMP};
+static const ci_uint8 oof_tproxy_ipprotos[] ={IPPROTO_ICMP, IPPROTO_IGMP,
+                                              IPPROTO_UDP};
 #define OOF_TPROXY_IPPROTO_FILTER_COUNT (sizeof(oof_tproxy_ipprotos) /       \
                                          sizeof(oof_tproxy_ipprotos[0]))
 /* Tproxy per ifindex */
@@ -199,6 +200,7 @@ struct oof_manager {
    * corresponding stack and not unavailable (see below).
    */
   unsigned     fm_hwports_up;
+  unsigned     fm_hwports_down;
 
   /* This mask tracks which hwports are unavailable because they are
    * members of an unacceleratable bond.  ie. Filters should not be used
@@ -223,6 +225,8 @@ struct oof_manager {
    * Protected by [fm_cplane_updates_lock].
    */
   unsigned     fm_hwports_up_new;
+  unsigned     fm_hwports_down_new;
+  unsigned     fm_hwports_removed;
   unsigned     fm_hwports_available_new;
   unsigned     fm_hwports_mcast_replicate_capable_new;
   unsigned     fm_hwports_vlan_filters_new;

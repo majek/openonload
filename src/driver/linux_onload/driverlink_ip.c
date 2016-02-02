@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -284,7 +284,7 @@ static struct nf_hook_ops oo_netfilter_ip_hook = {
 
 
 /******************************************************************************
- * cplane_add() and cplane_remove() are called in the course of the driverlink
+ * cplane_add() is called in the course of the driverlink
  * handlers for the appropriate netdev events.
  *****************************************************************************/
 
@@ -304,15 +304,6 @@ static void cplane_add(struct oo_nic* onic)
 }
 
 
-static void cplane_remove(struct oo_nic* onic)
-{
-  cicp_llap_set_hwport(&CI_GLOBAL_CPLANE,
-                       efrm_client_get_ifindex(onic->efrm_client),
-                       CI_HWPORT_ID_BAD, NULL);
-  cicp_hwport_remove_nic(&CI_GLOBAL_CPLANE, CI_HWPORT_ID(onic - oo_nics));
-}
-
-
 /* This function will create an oo_nic if one hasn't already been created.
  *
  * There are two code paths whereby this function can be called multiple
@@ -322,30 +313,29 @@ static void cplane_remove(struct oo_nic* onic)
  *   oo_netdev_event() will call oo_netdev_may_add() before dl_probe is run,
  *   which will call oo_netdev_may_add() itself.
  *
- * - If stacks were present when oo_netdev_event() received NETDEV_GOING_DOWN,
- *   it won't have called oo_nic_remove(). A lter NETDEV_UP would then
- *   call oo_nic_add().
+ * Once a device is noticed by onload, it should stay registered in cplane 
+ * despite going up or being hotplugged.
  */
 static struct oo_nic *oo_netdev_may_add(const struct net_device *net_dev)
 {
   struct efhw_nic* efhw_nic;
   struct oo_nic* onic;
 
-  BUG_ON(!netif_running(net_dev));
-
   onic = oo_nic_find_ifindex(net_dev->ifindex);
   if( onic == NULL )
     onic = oo_nic_add(net_dev->ifindex);
 
   if( onic != NULL ) {
-    if( net_dev->flags & IFF_UP ) {
-      cplane_add(onic);
-      efhw_nic = efrm_client_get_nic(onic->efrm_client);
-      oof_hwport_up_down(oo_nic_hwport(onic), 1,
-                         efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
-                         efhw_nic->flags & NIC_FLAG_VLAN_FILTERS);
+    int up = net_dev->flags & IFF_UP;
+    cplane_add(onic);
+    efhw_nic = efrm_client_get_nic(onic->efrm_client);
+    oof_hwport_up_down(oo_nic_hwport(onic), up,
+                       efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
+                       efhw_nic->flags & NIC_FLAG_VLAN_FILTERS, 0);
+    if( up )
       onic->oo_nic_flags |= OO_NIC_UP;
-    }
+    else
+      onic->oo_nic_flags &= ~OO_NIC_UP;
     /* Remove OO_NIC_UNPLUGGED regardless of whether the interface is IFF_UP,
      * as we don't want to attempt to create ghost VIs now that the hardware is
      * back.
@@ -377,11 +367,31 @@ static int oo_dl_probe(struct efx_dl_device* dl_dev,
   }
 #endif
 
-  if( netif_running(net_dev) ) {
+  if( ! netif_running(net_dev) ) {
+    onic = oo_nic_find_ifindex(net_dev->ifindex);
+    if( onic != NULL ) {
+      /* We are dealing here with hotplug.  We block kernel traffic using drop
+       * filters to prevent it hitting kernel and causing connection resets.
+       * The filters will be redirected towards our RXQ when the interface
+       * comes up.  The branch above that deals with the case where the device
+       * is up will also insert appropriate filters, although this will be
+       * deferred to the workqueue.  TODO: If we add support for hotplug on
+       * generic Linux systems, we should also consider the case where [onic]
+       * is NULL. */
+      OO_DEBUG_VERB(ci_log("%s: Trigger drop filters on if %d", __func__,
+                           net_dev->ifindex));
+
+      /* Notify Onload that previous device on that hwport disappeared. */
+      oof_hwport_removed(oo_nic_hwport(onic));
+    }
+  }
+
+  if( onic == NULL ) {
     onic = oo_netdev_may_add(net_dev);
     if( onic == NULL )
       return -1;
   }
+
   dl_dev->priv = (void *)net_dev;
   return 0;
 }
@@ -404,9 +414,29 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
   struct oo_nic* onic;
   if( (onic = oo_nic_find_ifindex(netdev->ifindex)) != NULL ) {
     int hwport = onic - oo_nics;
+
+    /* Filter status need to be synced as after this function is finished
+     * no further operations will be allowed.
+     * Also note on polite hotplug oo_dl_remove() is called before
+     * oo_netdev_going_down(), which will not have a chance to do its job
+     * regarding filters.
+     */
+    oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0, 1);
+
+    /* We need to prevent simultaneous resets so that the queues that we are
+     * shutting down don't get brought back up again.  We do this by disabling
+     * any further scheduling of resets, and then flushing any already
+     * scheduled on each stack. */
+    efrm_client_disable_post_reset(onic->efrm_client);
+
     onic->oo_nic_flags |= OO_NIC_UNPLUGGED;
-    while( iterate_netifs_unlocked(&ni) == 0 )
+    while( iterate_netifs_unlocked(&ni) == 0 ) {
+      tcp_helper_flush_resets(ni);
       tcp_helper_shutdown_vi(ni, hwport);
+    }
+
+    /* Some queues may belong to stacks under construction or destruction
+     * These have not been flushed above and are dealt with in erm_dl_remove. */
   }
 }
 
@@ -447,10 +477,15 @@ static void oo_fixup_wakeup_breakage(int ifindex)
 
 static void oo_netdev_up(struct net_device* netdev)
 {
+  struct oo_nic *onic;
   /* Does efrm own this device? */
   if( efrm_nic_present(netdev->ifindex) ) {
-    oo_netdev_may_add(netdev);
+    /* oo_netdev_may_add may trigger oof_hwport_up_down only
+     * once on probe time */
+    onic = oo_netdev_may_add(netdev);
     oo_fixup_wakeup_breakage(netdev->ifindex);
+    onic->oo_nic_flags |= OO_NIC_UP;
+    oof_hwport_up_down(oo_nic_hwport(onic), 1, 0, 0, 0);
   }
   else if( oo_use_vlans && (netdev->priv_flags & IFF_802_1Q_VLAN) ) {
     cicp_encap_t encap;
@@ -492,16 +527,12 @@ static void oo_netdev_up(struct net_device* netdev)
 
 static void oo_netdev_going_down(struct net_device* netdev)
 {
-  ci_irqlock_state_t lock_flags;
   struct oo_nic *onic;
 
   onic = oo_nic_find_ifindex(netdev->ifindex);
   if( onic != NULL ) {
-      oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0);
-      ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+      oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0, 0);
       onic->oo_nic_flags &= ~OO_NIC_UP;
-      cplane_remove(onic);
-      ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
   }
   else {
     /* ensure that acceleration is off */

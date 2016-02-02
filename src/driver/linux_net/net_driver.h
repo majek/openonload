@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,7 +82,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.5.1.1026"
+#define EFX_DRIVER_VERSION	"4.5.1.1037"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -1515,6 +1515,9 @@ static inline unsigned int efx_port_num(struct efx_nic *efx)
 struct efx_mtd_partition {
 	struct list_head node;
 	struct mtd_info mtd;
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_MTD_WRITESIZE)
+	size_t writesize;
+#endif
 	const char *dev_type_name;
 	const char *type_name;
 	char name[IFNAMSIZ + 20];

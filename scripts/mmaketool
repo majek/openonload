@@ -160,20 +160,21 @@ userarch() {
 }
 
 userbuild_linux32() {
-  case "$(processor)" in
+  local proc=$(processor)
+  case "$proc" in
     ppc64)  echo gnu_ppc32 ;;
-    ppc)    echo gnu_ppc32 ;;
-    *)      echo gnu ;;
+    ppc64le)echo gnu_ppc32le ;;
+    x86_64) echo gnu ;;
+    i*86)   echo gnu ;;
+    *)      echo gnu_$proc ;;
   esac
 }
 
 userbuild_linux() {
-  case "$(userarch)" in
-    x86_64) echo gnu_x86_64 ;;
-    ia64)   echo gnu_ia64 ;;
-    ppc64)  echo gnu_ppc64 ;;
-    ppc)    echo gnu_ppc32 ;;
-    *)      echo gnu ;;
+  local ua=$(userarch)
+  case "$ua" in
+    i*86)   echo gnu ;;
+    *)      echo "gnu_$ua" ;;
   esac
 }
 

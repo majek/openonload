@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -172,6 +172,12 @@ int efrm_nic_ctor(struct efrm_nic *efrm_nic, int ifindex,
 	efrm_nic->rx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
 	efrm_nic->tx_sniff_rxq = EFRM_PORT_SNIFF_NO_OWNER;
 	efrm_nic->driverlink_generation = 0;
+
+        mutex_init(&efrm_nic->dmaq_state.lock);
+        INIT_LIST_HEAD(&efrm_nic->dmaq_state.q[EFHW_EVQ]);
+        INIT_LIST_HEAD(&efrm_nic->dmaq_state.q[EFHW_RXQ]);
+        INIT_LIST_HEAD(&efrm_nic->dmaq_state.q[EFHW_TXQ]);
+
 	return 0;
 
 fail3:
@@ -188,6 +194,10 @@ void efrm_nic_dtor(struct efrm_nic *efrm_nic)
 {
 	/* Things have gone very wrong if there are any driver clients */
 	EFRM_ASSERT(list_empty(&efrm_nic->clients));
+
+        EFRM_ASSERT(list_empty(&efrm_nic->dmaq_state.q[EFHW_EVQ]));
+        EFRM_ASSERT(list_empty(&efrm_nic->dmaq_state.q[EFHW_RXQ]));
+        EFRM_ASSERT(list_empty(&efrm_nic->dmaq_state.q[EFHW_TXQ]));
 
 	efrm_pd_owner_ids_dtor(efrm_nic->owner_ids);
 	efrm_vi_allocator_dtor(efrm_nic);
@@ -256,6 +266,35 @@ void efrm_driver_unregister_nic(struct efrm_nic *rnic)
 #ifdef __KERNEL__
 
 
+/* At hot-unplug, we shut down queues forcibly.  An intervening reset would
+ * bring those queues back up again, which would be problematic, so the
+ * EFRM_CLIENT_DISABLE_POST_RESET flag can be used to prevent post-reset
+ * processing in such situations.
+ *     These functions clear and set that flag.  There is no explicit
+ * synchronisation as the intended callers (i.e. driverlink probe and removal
+ * hooks) are already serialised. */
+
+void efrm_nic_enable_post_reset(struct efhw_nic* nic)
+{
+	struct efrm_nic *rnic = efrm_nic(nic);
+	struct efrm_client *client;
+	struct list_head *client_link;
+
+	spin_lock_bh(&efrm_nic_tablep->lock);
+	list_for_each(client_link, &rnic->clients) {
+		client = container_of(client_link, struct efrm_client, link);
+		client->flags &= ~EFRM_CLIENT_DISABLE_POST_RESET;
+	}
+	spin_unlock_bh(&efrm_nic_tablep->lock);
+}
+
+void efrm_client_disable_post_reset(struct efrm_client* client)
+{
+	client->flags |= EFRM_CLIENT_DISABLE_POST_RESET;
+}
+EXPORT_SYMBOL(efrm_client_disable_post_reset);
+
+
 int efrm_nic_post_reset(struct efhw_nic *nic)
 {
 	struct efrm_nic *rnic = efrm_nic(nic);
@@ -268,11 +307,14 @@ int efrm_nic_post_reset(struct efhw_nic *nic)
 	spin_lock_bh(&efrm_nic_tablep->lock);
 	list_for_each(client_link, &rnic->clients) {
 		client = container_of(client_link, struct efrm_client, link);
+		if (client->flags & EFRM_CLIENT_DISABLE_POST_RESET) {
+			EFRM_TRACE("%s: post-reset disabled", __FUNCTION__);
+		}
 		/* can't call post_reset directly as we're holding a
 		 * spin lock and it may block (on EF10).  So just take
 		 * a reference and call post_reset below 
 		 */
-		if (client->callbacks->post_reset) {
+		else if (client->callbacks->post_reset) {
 			++client->ref_count;
 			list_add(&client->reset_link, &reset_list);
 		}
@@ -323,6 +365,7 @@ static void efrm_client_init_from_nic(struct efrm_nic *rnic,
 {
 	client->nic = &rnic->efhw_nic;
 	client->ref_count = 1;
+	client->flags = 0;
 	INIT_LIST_HEAD(&client->resources);
 	list_add(&client->link, &rnic->clients);
 }

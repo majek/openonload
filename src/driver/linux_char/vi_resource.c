@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -168,8 +168,14 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
       /* Reserve space for time sync events. */
       evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
     }
-    else
+    else if (vi_flags & EFHW_VI_RX_TIMESTAMPS) {
       evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
+      /* Reserve space for time sync events. */
+      evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
+    }
+    else {
+      evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
+    }
     if (evq_capacity == 0)
       evq_capacity = -1;
   }
@@ -276,7 +282,7 @@ efch_vi_rm_alloc(ci_resource_alloc_t* alloc, ci_resource_table_t* rt,
   efrm_vi_attr_set_ps_buffer_size(&attr, ps_buf_size);
 
   in_flags = alloc_in->flags | EFHW_VI_JUMBO_EN;
-  if( efrm_pd_stack_id_get(rmpd) > 0 )
+  if( rmpd != NULL && efrm_pd_stack_id_get(rmpd) > 0 )
     in_flags |= EFHW_VI_TX_LOOPBACK;
 
   rc = vi_resource_alloc(&attr, client, evq ? efrm_vi(evq) : NULL,
@@ -393,14 +399,6 @@ static int efab_vi_get_mac(struct efrm_vi* virs, void* mac_out)
 }
 
 
-static int efch_vi_get_rx_ts_correction(struct efrm_vi* virs,
-                                        int32_t* rx_ts_correction_out)
-{
-  *rx_ts_correction_out = virs->rx_ts_correction;
-  return 0;
-}
-
-
 static int efch_vi_get_rx_error_stats(struct efrm_vi* virs,
                                       void* data, int data_len,
                                       int do_reset)
@@ -459,8 +457,18 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       break;
 
     case CI_RSOP_VI_GET_RX_TS_CORRECTION:
-      rc = efch_vi_get_rx_ts_correction
-	      (virs, &op->u.vi_rx_ts_correction.out_rx_ts_correction);
+      op->u.vi_rx_ts_correction.out_rx_ts_correction =
+        efrm_client_get_nic(virs->rs.rs_client)->rx_ts_correction;
+      rc = 0;
+      *copy_out = 1;
+      break;
+
+    case CI_RSOP_VI_GET_TS_CORRECTION:
+      op->u.vi_ts_correction.out_rx_ts_correction =
+        efrm_client_get_nic(virs->rs.rs_client)->rx_ts_correction;
+      op->u.vi_ts_correction.out_tx_ts_correction =
+        efrm_client_get_nic(virs->rs.rs_client)->tx_ts_correction;
+      rc = 0;
       *copy_out = 1;
       break;
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -107,6 +107,8 @@ typedef struct ef_pd {
   /** Resource ID of the virtual interface set for the application cluster
   **  associated with the protection domain */
   unsigned         pd_cluster_viset_resource_id;
+  /** Index of VI wanted within a cluster. */
+  int              pd_cluster_viset_index;
 } ef_pd;
 
 
@@ -136,21 +138,25 @@ extern int ef_pd_alloc(ef_pd* pd, ef_driver_handle pd_dh, int ifindex,
                        enum ef_pd_flags flags);
 
 
-/*! \brief Allocate a protection domain, trying first from a cluster, and
-**         then from an interface
+/*! \brief Allocate a protection domain for a named interface or cluster
 **
 ** \param pd                   Memory to use for the allocated protection
 **                             domain.
-** \param pd_dh                The ef_driver_handle to associate with the
-**                             protection domain.
+** \param pd_dh                An ef_driver_handle.
 ** \param cluster_or_intf_name Name of cluster, or name of interface.
 ** \param flags                Flags to specify protection domain
 **                             properties.
 **
 ** \return 0 on success, or a negative error code.
 **
-** Allocate a protection domain, trying first from a cluster, and then from
-** an interface.
+** Allocate a protection domain, trying first from a cluster of the given
+** name, or if no cluster of that name exists assume that @p
+** cluster_or_intf_name is the name of an interface.
+**
+** When @p cluster_or_intf_name gives the name of a cluster it may
+** optionally be prefixed with a channel number.  For example: "0@cluster".
+** In this case the specified channel instance within the cluster is
+** allocated.
 */
 extern int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
                                const char* cluster_or_intf_name,

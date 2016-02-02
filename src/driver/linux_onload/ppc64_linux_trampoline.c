@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,8 +55,6 @@
 
 /* Debugging for internal use only */
 #  define TRAMP_DEBUG(x...) (void)0
-//#define TRAMP_DEBUG(x...) ci_log(x)
-
 
 #define TRAMPOLINE_BITS_64  0
 #define TRAMPOLINE_BITS_32  1
@@ -98,8 +96,8 @@ asmlinkage int efab_linux_sys_close(int fd)
 
     if (state.replace_close)
     {
-        TRAMP_DEBUG ("close %d via saved_sys_close=%p...", fd, state.replace_close->original_entry64);
-        rc = ((int (*)(int))(state.replace_close->original_entry64))(fd);
+        TRAMP_DEBUG ("close %d via saved_sys_close=%p...", fd, THUNKPTR(state.replace_close->original_entry64));
+        rc = ((int (*)(int))THUNKPTR(state.replace_close->original_entry64))(fd);
         TRAMP_DEBUG (".. = %d", rc);
     }
     else
@@ -114,7 +112,7 @@ asmlinkage int efab_linux_sys_exit_group(int status)
 {
     if (state.replace_exit_group)
     {
-        return ((int (*)(int))(state.replace_exit_group->original_entry64))(status);
+        return ((int (*)(int))THUNKPTR(state.replace_exit_group->original_entry64))(status);
     }
     else
     {
@@ -132,7 +130,7 @@ asmlinkage int efab_linux_sys_epoll_create1(int flags)
 #ifdef __NR_epoll_create1
     if (state.no_replace_epoll_create1)
     {
-        sys_epoll_create_fn = (int (*)(int))(state.no_replace_epoll_create1->original_entry64);
+        sys_epoll_create_fn = (int (*)(int))THUNKPTR(state.no_replace_epoll_create1->original_entry64);
         TRAMP_DEBUG("epoll_create1 via %p .. ", sys_epoll_create_fn);
         rc = sys_epoll_create_fn(flags);
         if (rc != -ENOSYS)
@@ -144,7 +142,7 @@ asmlinkage int efab_linux_sys_epoll_create1(int flags)
         ci_log("Unexpected epoll_ctl() request before full init");
         return -EFAULT;
     }
-    sys_epoll_create_fn = (int (*)(int))(state.no_replace_epoll_create->original_entry64);
+    sys_epoll_create_fn = (int (*)(int))THUNKPTR(state.no_replace_epoll_create->original_entry64);
     TRAMP_DEBUG("epoll_create via %p .. ", sys_epoll_create_fn);
     rc = sys_epoll_create_fn(1);
     ci_assert_equal(flags & ~EPOLL_CLOEXEC, 0);
@@ -177,7 +175,7 @@ asmlinkage int efab_linux_sys_epoll_ctl(int epfd, int op, int fd,
     }
 
     sys_epoll_ctl_fn = (int (*)(int, int , int, struct epoll_event *))
-        (state.no_replace_epoll_ctl->original_entry64);
+        THUNKPTR(state.no_replace_epoll_ctl->original_entry64);
   TRAMP_DEBUG ("epoll_ctl(%d,%d,%d,%p) via %p...", epfd, op, fd, event,
                sys_epoll_ctl_fn);
   rc = sys_epoll_ctl_fn(epfd, op, fd, event);
@@ -197,7 +195,7 @@ asmlinkage int efab_linux_sys_epoll_wait(int epfd, struct epoll_event *events,
   }
 
   sys_epoll_wait_fn = (int (*)(int, struct epoll_event *, int, int))
-                       (state.no_replace_epoll_wait->original_entry64);
+                       THUNKPTR(state.no_replace_epoll_wait->original_entry64);
   TRAMP_DEBUG ("epoll_wait(%d,%p,%d,%d) via %p...", epfd, events, maxevents,
                timeout, sys_epoll_wait_fn);
   rc = sys_epoll_wait_fn(epfd, events, maxevents, timeout);
@@ -221,7 +219,7 @@ asmlinkage int efab_linux_sys_sendmsg(int fd, struct msghdr __user* msg,
   }
 
   sys_socketcall_fn = (void *)
-          state.no_replace_socketcall->original_entry64;
+          THUNKPTR(state.no_replace_socketcall->original_entry64);
   TRAMP_DEBUG ("sendmsg(%d,%p,%d) via %p...", fd, msg,
                flags, sys_socketcall_fn);
   memset(args, 0, sizeof(args));
@@ -252,7 +250,7 @@ efab_linux_sys_sendmsg32(int fd, struct compat_msghdr __user* msg,
   }
 
   sys_socketcall_fn = (void *)
-          state.no_replace_socketcall->original_entry32;
+          THUNKPTR(state.no_replace_socketcall->original_entry32);
   TRAMP_DEBUG ("sendmsg(%d,%p,%d) via %p...", fd, msg,
                flags, sys_socketcall_fn);
   memset(args, 0, sizeof(args));
@@ -280,9 +278,9 @@ asmlinkage int efab_linux_sys_sigaction(int signum,
   }
 
   TRAMP_DEBUG ("sigaction(%d,%p,%p,%d) via %p...", signum, act, oact,
-               (int)sizeof(sigset_t), state.replace_rt_sigaction->original_entry64);
+               (int)sizeof(sigset_t), THUNKPTR(state.replace_rt_sigaction->original_entry64));
   rc = ((int (*)(int, const struct sigaction *, struct sigaction *, size_t))
-        (state.replace_rt_sigaction->original_entry64))(signum, act, oact, sizeof(sigset_t));
+        THUNKPTR(state.replace_rt_sigaction->original_entry64))(signum, act, oact, sizeof(sigset_t));
   TRAMP_DEBUG ("... = %d", rc);
   return rc;
 }
@@ -299,10 +297,10 @@ asmlinkage int efab_linux_sys_sigaction32(int signum,
     return -EFAULT;
   }
 
-  TRAMP_DEBUG ("sigaction(%d,%p,%p,%d) via %p...", signum, act, oact,
-               (int)sizeof(sigset_t), state.replace_rt_sigaction->original_entry32);
+  TRAMP_DEBUG ("sigaction32(%d,%p,%p,%d) via %p...", signum, act, oact,
+               (int)sizeof(sigset_t), THUNKPTR(state.replace_rt_sigaction->original_entry32));
   rc = ((int (*)(int, const struct sigaction32 *, struct sigaction32 *, size_t))
-        (state.replace_rt_sigaction->original_entry32))(signum, act, oact, sizeof(sigset_t));
+        THUNKPTR(state.replace_rt_sigaction->original_entry32))(signum, act, oact, sizeof(sigset_t));
   TRAMP_DEBUG ("... = %d", rc);
   return rc;
 }
@@ -315,8 +313,10 @@ static int efab_linux_trampoline_close64(int fd)
   struct file *f;
   int rc;
 
+  TRAMP_DEBUG("close64: %d\n", fd);
+
   efab_syscall_enter();
-  
+
   f = fget (fd);
   if (f) {
       if (FILE_IS_ENDPOINT(f)) {
@@ -338,9 +338,10 @@ static int efab_linux_trampoline_close64(int fd)
     /* Undo the fget above */
     fput(f);
   }
-  
+
+  TRAMP_DEBUG("going unto %p\n", THUNKPTR(state.replace_close->original_entry64));
   /* Not one of our FDs -- usual close */
-  rc = ((int (*)(int))(state.replace_close->original_entry64))(fd);
+  rc = ((int (*)(int))THUNKPTR(state.replace_close->original_entry64))(fd);
   TRAMP_DEBUG("Close64: Chain returns %d \n", rc);
   efab_syscall_exit();
   return rc;
@@ -352,6 +353,8 @@ int efab_linux_trampoline_close32(int fd)
   /* Firstly, is this one our sockets?  If not, do the usual thing */
   struct file *f;
   int rc;
+
+  TRAMP_DEBUG("close32: %d\n", fd);
 
   efab_syscall_enter();
 
@@ -378,7 +381,7 @@ int efab_linux_trampoline_close32(int fd)
   }
   
   /* Not one of our FDs -- usual close */
-  rc = ((int (*)(int))(state.replace_close->original_entry32))(fd);
+  rc = ((int (*)(int))THUNKPTR(state.replace_close->original_entry32))(fd);
   TRAMP_DEBUG("Close32: Chain returns %d \n", rc);
   efab_syscall_exit();
   return rc;
@@ -450,7 +453,6 @@ static int setup_trampoline(struct pt_regs *regs,
     }
     return rc;
 }
-
 
 
 int efab_linux_trampoline_ctor(int no_sct)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1432,7 +1432,9 @@ static void citp_epoll_poll_ul(struct oo_ul_epoll_state*__restrict__ eps)
 
 
 ci_inline int citp_epoll_os_fds(citp_epoll_fdi *efdi,
-                                struct epoll_event* events, int maxevents)
+                                struct epoll_event* events,
+                                struct citp_ordering_info* ordering_info,
+                                int maxevents)
 {
   struct oo_epoll1_wait_arg op;
   struct citp_epoll_fd* ep = efdi->epoll;
@@ -1449,6 +1451,13 @@ ci_inline int citp_epoll_os_fds(citp_epoll_fdi *efdi,
   op.maxevents = maxevents;
   CI_USER_PTR_SET(op.events, events);
   rc = ci_sys_ioctl(efdi->epoll->epfd_os, OO_EPOLL1_IOC_WAIT, &op);
+
+  /* We don't have valid timestamps for events grabbed via the kernel, so
+   * we need to ensure that the ordering info shows that.
+   */
+  if( ordering_info && (rc >= 0) )
+    memset(ordering_info, 0, (sizeof(struct citp_ordering_info)) * op.rc);
+
   return rc < 0 ? rc : op.rc;
 }
 
@@ -1516,6 +1525,14 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     else
 #endif
       rc = ci_sys_epoll_wait(fdi->fd, events, maxevents, timeout);
+
+    /* We don't have valid timestamps for events grabbed via the kernel, so
+     * we need to ensure that the ordering info shows that.
+     */
+    if( ordering && (rc > 0) )
+      memset(ordering->ordering_info, 0,
+            (sizeof(struct citp_ordering_info)) * rc);
+
     ep->blocking = 0;
     return rc;
   }
@@ -1555,7 +1572,9 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     if(CI_UNLIKELY( ep->shared->flag & OO_EPOLL1_FLAG_EVENT )) {
       if(CI_LIKELY( rc < maxevents )) {
         rc_os = citp_epoll_os_fds(fdi_to_epoll_fdi(fdi),
-                                  events + rc, maxevents - rc);
+                                  events + rc,
+                                  ordering ? ordering->ordering_info+rc : NULL,
+                                  maxevents - rc);
         if( rc_os > 0 )
           rc += rc_os;
       }
@@ -1578,7 +1597,8 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
   /* eps.events == events */
 
   /* poll OS fds: */
-  rc = citp_epoll_os_fds(fdi_to_epoll_fdi(fdi), events, maxevents);
+  rc = citp_epoll_os_fds(fdi_to_epoll_fdi(fdi), events,
+                         ordering ?  ordering->ordering_info : NULL, maxevents);
   if( rc != 0 || timeout == 0 ) {
     Log_POLL(ci_log("%s(%d): %d kernel events", __FUNCTION__, fdi->fd, rc));
     goto unlock_release_exit_ret;
@@ -1969,6 +1989,8 @@ citp_ul_epoll_store_event(struct oo_ul_epoll_state*__restrict__ eps,
   if( eps->ordering_info ) {
     citp_fdinfo* fdi = citp_ul_epoll_member_to_fdi(eitem);
     struct timespec zero = {0, 0};
+    eps->ordering_info[0].oo_event.ts.tv_sec = 0;
+    eps->ordering_info[0].oo_event.ts.tv_nsec = 0;
     ci_assert(fdi);
     eps->ordering_info[0].fdi = fdi;
     if( events & EPOLLIN )
@@ -2070,19 +2092,21 @@ static void citp_epoll_get_ordering_limit(ci_netif* ni,
 {
   struct timespec base_ts;
 
-  ci_netif_lock(ni);
-  citp_epoll_latest_rx(ni, &base_ts);
-  ci_netif_poll(ni);
-  citp_epoll_earliest_rx(ni, limit_out);
-  ci_netif_unlock(ni);
+  if( ni ) {
+    ci_netif_lock(ni);
+    citp_epoll_latest_rx(ni, &base_ts);
+    ci_netif_poll(ni);
+    citp_epoll_earliest_rx(ni, limit_out);
+    ci_netif_unlock(ni);
 
-  if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
-    limit_out->tv_sec = base_ts.tv_sec;
-    limit_out->tv_nsec = base_ts.tv_nsec;
+    if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
+      limit_out->tv_sec = base_ts.tv_sec;
+      limit_out->tv_nsec = base_ts.tv_nsec;
+    }
+
+    Log_POLL(ci_log("%s: poll limit %lu:%09lu", __FUNCTION__,
+                    limit_out->tv_sec, limit_out->tv_nsec));
   }
-
-  Log_POLL(ci_log("%s: poll limit %lu:%09lu", __FUNCTION__,
-                  limit_out->tv_sec, limit_out->tv_nsec));
 }
 
 
@@ -2176,7 +2200,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   struct citp_epoll_fd* ep = fdi_to_epoll(fdi);
   struct citp_epoll_member* eitem;
   citp_fdinfo* sock_fdi = NULL;
-  citp_sock_fdi* sock_epi = fdi_to_sock_fdi(fdi);
+  citp_sock_fdi* sock_epi;
   ci_netif* ni = NULL;
   struct timespec limit_ts = {0, 0};
   struct citp_ordering_info* ordering_info = NULL;
@@ -2184,7 +2208,6 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   struct citp_ordered_wait wait;
   int n_socks;
 
- again:
   Log_POLL(ci_log("%s(%d, max_ev=%d, timeout=%d) ul=%d dead=%d syncs=%d",
                   __FUNCTION__, fdi->fd, maxevents, timeout,
                   ! ci_dllist_is_empty(&ep->oo_sockets),
@@ -2203,8 +2226,8 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
    */
   n_socks = CI_MAX(maxevents,
                    ep->home_stack ? ep->oo_stack_sockets_n : ep->oo_sockets_n);
-  ordering_info = ci_calloc(n_socks, sizeof(*ordering_info));
-  wait_events = ci_calloc(n_socks, sizeof(*wait_events));
+  ordering_info = ci_alloc(n_socks * sizeof(*ordering_info));
+  wait_events = ci_alloc(n_socks * sizeof(*wait_events));
 
   if( !ordering_info || !wait_events ) {
     CITP_EPOLL_EP_UNLOCK(ep, 0);
@@ -2217,6 +2240,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
 
   if( ep->home_stack ) {
     ni = ep->home_stack;
+    citp_netif_add_ref(ni);
   }
   else if( ci_dllist_not_empty(&ep->oo_sockets) ) {
     ci_dllink *link;
@@ -2237,6 +2261,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
         if( citp_fdinfo_is_socket(sock_fdi) ) {
           sock_epi = fdi_to_sock_fdi(sock_fdi);
           ni = sock_epi->sock.netif;
+          citp_netif_add_ref(ni);
           break;
         }
       }
@@ -2249,13 +2274,13 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
 
   CITP_EPOLL_EP_UNLOCK(ep, 0);
 
-  if( ni )
-    citp_epoll_get_ordering_limit(ni, &limit_ts);
+ again:
+  citp_epoll_get_ordering_limit(ni, &limit_ts);
 
   wait.ordering_info = ordering_info;
   wait.poll_again = 0;
   /* citp_epoll_wait will do citp_exit_lib */
-  rc = citp_epoll_wait(fdi, wait_events, ni ? &wait : NULL,
+  rc = citp_epoll_wait(fdi, wait_events, &wait,
                        n_socks, timeout, sigmask, lib_context);
   if( rc < 0 )
     goto out;
@@ -2264,7 +2289,6 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
    * the ordering - but the fds will be ready next time the user does a wait.
    */
   if( wait.poll_again ) {
-    ci_assert( ni );
     ci_assert_gt(rc, 0);
     Log_POLL(ci_log("%s: need repoll at user level", __FUNCTION__));
     citp_epoll_get_ordering_limit(ni, &limit_ts);
@@ -2292,6 +2316,8 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   }
 
 out:
+  if( ni )
+    citp_netif_release_ref(ni, 0);
   ci_free(ordering_info);
   ci_free(wait_events);
   return rc;

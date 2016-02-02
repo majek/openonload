@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -349,17 +349,10 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
   ci_oword_t d;
   uint32_t* doorbell = (void*) (vi->io + FR_BZ_TX_DESC_UPD_REGP0_OFST);
 
-#if  !defined(__KERNEL__) && defined(__powerpc64__) &&  __GNUC__ >= 4
   d.u32[0] = dp->u32[0];
   d.u32[1] = dp->u32[1];
-  __nosync_writel((1) << __DW3(FRF_AZ_TX_DESC_PUSH_CMD_LBN), &d.u32[2]);
-  __nosync_writel((qs->added & q->mask) << __DW4(FRF_AZ_TX_DESC_WPTR_LBN), &d.u32[3]);
-#else
-  d.u32[0] = cpu_to_le32(dp->u32[0]);
-  d.u32[1] = cpu_to_le32(dp->u32[1]);
-  d.u32[2] = ((1) << __DW3(FRF_AZ_TX_DESC_PUSH_CMD_LBN));
-  d.u32[3] = ((qs->added & q->mask) << __DW4(FRF_AZ_TX_DESC_WPTR_LBN));
-#endif
+  d.u32[2] = cpu_to_le32((1) << __DW3(FRF_AZ_TX_DESC_PUSH_CMD_LBN));
+  d.u32[3] = cpu_to_le32(qs->added & q->mask);
 
   LOGV(ef_log("vi: vi_tx_push: "CI_OWORD_FMT,
               CI_OWORD_VAL(d)));
@@ -374,22 +367,16 @@ static void ef_vi_transmit_push_desc(ef_vi* vi)
 		       : "m" (d)
 		       : "xmm0", "memory");
 #elif  !defined(__KERNEL__) && defined(__powerpc64__) &&  __GNUC__ >= 4
-  __asm__ __volatile__ 
-    ("lxvw4x %%vs32, 0, %2\n\t"
-     "stxvw4x %%vs32, 0, %1"
-     : "=m" (*(volatile uint64_t*)doorbell)
-     : "r" (doorbell), 
-       "r" (&d)
-     : "vs32");
-		
+  __asm__ __volatile__("lxvw4x %%vs32, 0, %2\n\t"
+                       "stxvw4x %%vs32, 0, %1"
+                       : "=m" (*(volatile uint64_t*)doorbell)
+                       : "r" (doorbell), "r" (&d)
+                       : "vs32");
 #else
-  /* byte swapping was already performed, bytes were filled in correct
-   * order */
-  writel(d.u32[0], doorbell);
-  writel(d.u32[1], doorbell + 1);
-  writel(d.u32[2], doorbell + 2);
-  wmb();
-  writel(d.u32[3], doorbell + 3);
+  noswap_writel(d.u32[0], doorbell + 0);
+  noswap_writel(d.u32[1], doorbell + 1);
+  noswap_writel(d.u32[2], doorbell + 2);
+  noswap_writel(d.u32[3], doorbell + 3);
 #endif
   mmiowb();
 }
@@ -399,8 +386,7 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 {
   LOGV(ef_log("vi: vi_tx_push_dbell: "));
 
-  writel((vi->ep_state->txq.added & vi->vi_txq.mask) <<
-         __DW4(FRF_AZ_TX_DESC_WPTR_LBN),
+  writel(vi->ep_state->txq.added & vi->vi_txq.mask,
          vi->io + FR_BZ_TX_DESC_UPD_REGP0_OFST + 12);
   mmiowb();
 }
@@ -485,8 +471,7 @@ static void falcon_ef_vi_receive_push(ef_vi* vi)
 {
   LOGV(ef_log("vi: vi_rx_push: "));
 
-  writel ((vi->ep_state->rxq.added & vi->vi_rxq.mask) <<
-          __DW4(FRF_AZ_RX_DESC_WPTR_LBN),
+  writel (vi->ep_state->rxq.added & vi->vi_rxq.mask,
           vi->io + FR_BZ_RX_DESC_UPD_REGP0_OFST + 12);
   mmiowb();
 }

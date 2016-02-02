@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,7 +125,8 @@ struct efrm_vi_mappings {
 	void*            evq_base;
 
 	unsigned         timer_quantum_ns;
-	unsigned         rx_ts_correction;
+	int              rx_ts_correction;
+	int              tx_ts_correction;
 
 	unsigned         rxq_size;
 	void*            rxq_descriptors;
@@ -165,24 +166,22 @@ extern void efrm_vi_attr_set_ps_buffer_size(struct efrm_vi_attr *attr,
 extern void efrm_vi_attr_set_with_timer(struct efrm_vi_attr *attr,
 					int with_timer);
 
-/** Allocate VI from a VI set.  Returns -EINVAL if instance is not in
- * range.
- */
-extern int efrm_vi_attr_set_instance(struct efrm_vi_attr *attr,
+/** Allocate VI from a VI set. */
+extern void efrm_vi_attr_set_instance(struct efrm_vi_attr *attr,
 				      struct efrm_vi_set *,
 				      int instance_in_set);
 
 /** Allocate VI from a VF. */
-extern int efrm_vi_attr_set_vf(struct efrm_vi_attr *, struct efrm_vf *);
+extern void efrm_vi_attr_set_vf(struct efrm_vi_attr *, struct efrm_vf *);
 
 /** The interrupt associated with the VI should be on (or close to) the
  * given core.
  */
-extern int efrm_vi_attr_set_interrupt_core(struct efrm_vi_attr *, int core);
+extern void efrm_vi_attr_set_interrupt_core(struct efrm_vi_attr *, int core);
 
 /** The VI should use the given net-driver channel for wakeups. */
-extern int efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *,
-					   int channel_id);
+extern void efrm_vi_attr_set_wakeup_channel(struct efrm_vi_attr *,
+					    int channel_id);
 
 
 extern struct efrm_vi *
@@ -261,10 +260,16 @@ extern int efrm_vi_q_init(struct efrm_vi *virs, enum efhw_q_type q_type,
 			  int q_tag, unsigned q_flags,
 			  struct efrm_vi *evq);
 
+
+/* Issue flush of a VI dma/event queue.
+ */
+extern int
+efrm_vi_q_flush(struct efrm_vi *virs, enum efhw_q_type queue_type);
+
 /**
  * Reinitialises a VI after a NIC reset 
  */
-extern int efrm_vi_q_reinit(struct efrm_vi *virs, enum efhw_q_type q_type);
+extern void efrm_vi_qs_reinit(struct efrm_vi *virs);
 
 /**
  * Allocate a VI dma/event queue.
@@ -343,6 +348,7 @@ extern void efrm_vi_resource_release_flushed(struct efrm_vi *virs);
  */
 extern struct efrm_pd *efrm_vi_get_pd(struct efrm_vi *);
 
+extern void efrm_vi_resource_mark_shut_down(struct efrm_vi *virs);
 extern void efrm_vi_resource_shutdown(struct efrm_vi *virs);
 
 /*--------------------------------------------------------------------
@@ -350,9 +356,6 @@ extern void efrm_vi_resource_shutdown(struct efrm_vi *virs);
  * eventq handling
  *
  *--------------------------------------------------------------------*/
-
-/*! Reset an event queue and clear any associated timers */
-extern void efrm_eventq_reset(struct efrm_vi *virs);
 
 /*! Callback function provided by user */
 typedef int (*efrm_evq_callback_fn) (void *arg, int is_timeout,

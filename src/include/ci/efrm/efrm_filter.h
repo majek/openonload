@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,8 +69,8 @@ extern int  efrm_filter_insert(struct efrm_client *,
 			       struct efx_filter_spec *spec,
 			       bool replace_equal);
 extern void efrm_filter_remove(struct efrm_client *, int filter_id);
-extern void efrm_filter_redirect(struct efrm_client *,
-				 int filter_id, int rxq_i, int stack_id);
+extern int efrm_filter_redirect(struct efrm_client *,
+			        int filter_id, int rxq_i, int stack_id);
 extern int efrm_filter_block_kernel(struct efrm_client *client, int flags,
                                     bool block);
 

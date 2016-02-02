@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -313,15 +313,15 @@ MODULE_PARM_DESC(rss_numa_local, "Restrict RSS to CPUs on the local NUMA node");
 
 #ifdef EFX_NOT_UPSTREAM
 /* A fixed key for RSS that has been tested and found to provide good
- * spreading behaviour.
- * This is the first 40 bytes of sha512("sfcrsskey").
+ * spreading behaviour.  It also has the desirable property of being
+ * symmetric.
  */
 static const u8 efx_rss_fixed_key[40] = {
-	0xa4, 0x86, 0xfe, 0x31, 0x11, 0xb3, 0xf1, 0xca,
-	0x1f, 0xe8, 0x77, 0xb3, 0xbf, 0x71, 0x16, 0xa0,
-	0xf2, 0x07, 0xec, 0xe1, 0x54, 0xa4, 0x25, 0xa0,
-	0x7a, 0xf8, 0x16, 0x8c, 0x57, 0x12, 0xb7, 0xfd,
-	0xc5, 0x77, 0xb2, 0x5e, 0x5d, 0xe3, 0xc5, 0xbe,
+	0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+	0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+	0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+	0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+	0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 };
 
 static bool efx_rss_use_fixed_key = true;
@@ -2549,7 +2549,8 @@ static int efx_soft_enable_interrupts(struct efx_nic *efx)
 	struct efx_channel *channel, *end_channel;
 	int rc;
 
-	BUG_ON(efx->state == STATE_DISABLED);
+	if (efx->state == STATE_DISABLED)
+		return -ENETDOWN;
 
 	efx->irq_soft_enabled = true;
 	smp_wmb();
@@ -2612,7 +2613,8 @@ static int efx_enable_interrupts(struct efx_nic *efx)
 	struct efx_channel *channel, *end_channel;
 	int rc;
 
-	BUG_ON(efx->state == STATE_DISABLED);
+	if (efx->state == STATE_DISABLED)
+		return -ENETDOWN;
 
 	if (efx->eeh_disabled_legacy_irq) {
 		enable_irq(efx->legacy_irq);
@@ -2960,11 +2962,11 @@ static int efx_probe_all(struct efx_nic *efx)
 static void efx_start_all(struct efx_nic *efx)
 {
 	EFX_ASSERT_RESET_SERIALISED(efx);
-	BUG_ON(efx->state == STATE_DISABLED);
 
 	/* Check that it is appropriate to restart the interface. All
 	 * of these flags are safe to read under just the rtnl lock */
-	if (efx->port_enabled || !netif_running(efx->net_dev) || efx->reset_pending)
+	if ((efx->state == STATE_DISABLED) || efx->port_enabled ||
+			!netif_running(efx->net_dev) || efx->reset_pending)
 		return;
 
 	efx_start_port(efx);
@@ -3519,10 +3521,10 @@ void efx_watchdog(struct net_device *net_dev)
 
 		tx_queue = &channel->tx_queue[0];
 
-		/* The netdev watchdog must have triggered on a queue that was
-		 * stopped, so ignore queues that are running.
+		/* The netdev watchdog must have triggered on a queue that had
+		 * stopped transmitting, so ignore other queues.
 		 */
-		if (!netif_tx_queue_stopped(tx_queue->core_txq))
+		if (!netif_xmit_stopped(tx_queue->core_txq))
 			continue;
 
 		netif_info(efx, tx_err, efx->net_dev,
@@ -4972,6 +4974,9 @@ static int efx_pci_probe_main(struct efx_nic *efx)
 	return 0;
 
  fail6:
+#if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SMP) && !defined(__VMKLNX__)
+	efx_clear_interrupt_affinity(efx);
+#endif
 	efx_nic_fini_interrupt(efx);
  fail5:
 	efx_fini_port(efx);

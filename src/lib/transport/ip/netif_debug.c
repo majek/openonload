@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -165,16 +165,16 @@ void ci_netif_verify_freepkts(ci_netif *ni, const char *file, int line)
   ci_ip_pkt_fmt *pkt;
   int c1, c2, i;
 
-  for( c1 = 0, i = 0; i < ni->state->pkt_sets_n; i++ ) {
-    verify( OO_PP_NOT_NULL(ni->pkt_set[i].free) ==
-            (ni->pkt_set[i].n_free > 0) );
-    verify(ni->pkt_set[i].n_free >= 0);
-    c1 += ni->pkt_set[i].n_free;
+  for( c1 = 0, i = 0; i < ni->packets->sets_n; i++ ) {
+    verify( OO_PP_NOT_NULL(ni->packets->set[i].free) ==
+            (ni->packets->set[i].n_free > 0) );
+    verify(ni->packets->set[i].n_free >= 0);
+    c1 += ni->packets->set[i].n_free;
 
-    if( ni->pkt_set[i].n_free > 0 ) {
+    if( ni->packets->set[i].n_free > 0 ) {
       c2 = 1;
       /* can't do PKT_CHK here as that asserts that refcount > 0 */
-      pkt = PKT(ni, ni->pkt_set[i].free);
+      pkt = PKT(ni, ni->packets->set[i].free);
       while( OO_PP_NOT_NULL(pkt->next) ) {
         verify(pkt->refcount == 0);
         verify(pkt->n_buffers == 1);
@@ -184,7 +184,7 @@ void ci_netif_verify_freepkts(ci_netif *ni, const char *file, int line)
         pkt = PKT(ni, pkt->next);
         ++c2;
       }
-      verify(c2 == ni->pkt_set[i].n_free);
+      verify(c2 == ni->packets->set[i].n_free);
     }
   }
 }
@@ -283,11 +283,12 @@ static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
   ci_netif_state* ns = ni->state;
 
   logger(log_arg, "  pkt_sets: pkt_size=%d set_size=%d max=%d alloc=%d",
-         CI_CFG_PKT_BUF_SIZE, PKTS_PER_SET, ns->pkt_sets_max, ns->pkt_sets_n);
+         CI_CFG_PKT_BUF_SIZE, PKTS_PER_SET, ni->packets->sets_max,
+         ni->packets->sets_n);
 
-  for( i = 0; i < ns->pkt_sets_n; i++ ) {
-    logger(log_arg, "  pkt_set[%d]: free=%d%s", i, ni->pkt_set[i].n_free,
-           i == ns->current_pkt_set ? " current" : "");
+  for( i = 0; i < ni->packets->sets_n; i++ ) {
+    logger(log_arg, "  pkt_set[%d]: free=%d%s", i, ni->packets->set[i].n_free,
+           i == ni->packets->id ? " current" : "");
   }
 
   rx_ring = 0;
@@ -297,12 +298,12 @@ static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
     tx_ring += ef_vi_transmit_fill_level(&ni->nic_hw[intf_i].vi);
     tx_oflow += ns->nic[intf_i].dmaq.num;
   }
-  used = ns->n_pkts_allocated - ns->n_freepkts - ns->n_async_pkts;
+  used = ni->packets->n_pkts_allocated - ni->packets->id - ns->n_async_pkts;
   rx_queued = ns->n_rx_pkts - rx_ring - ns->mem_pressure_pkt_pool_n;
 
   logger(log_arg, "  pkt_bufs: max=%d alloc=%d free=%d async=%d%s",
-         ns->pkt_sets_max * PKTS_PER_SET,
-         ns->n_pkts_allocated, ns->n_freepkts, ns->n_async_pkts,
+         ni->packets->sets_max * PKTS_PER_SET,
+         ni->packets->n_pkts_allocated, ni->packets->id, ns->n_async_pkts,
          (ns->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ? " CRITICAL":
          (ns->mem_pressure ? " LOW":""));
   logger(log_arg, "  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d pressure_pool=%d",
@@ -343,7 +344,7 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
   }
   CI_ZERO_ARRAY(alloc, MAX_NO_DIFF_ALLOCS);
 
-  for( i = 0; i < ns->n_pkts_allocated; i++ ) {
+  for( i = 0; i < ni->packets->n_pkts_allocated; i++ ) {
     ci_ip_pkt_fmt* pkt;
     oo_pkt_p pp;
     OO_PP_INIT(ni, pp, i);
@@ -370,7 +371,7 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
   ci_free(alloc);
 
   log("   n_zero_refs=%d n_freepkts=%d estimated_free_nonb=%d", 
-      n_zero_refs, ns->n_freepkts, n_zero_refs - ns->n_freepkts);
+      n_zero_refs, ni->packets->id, n_zero_refs - ni->packets->id);
 
   {
     /* Can't do this race free, but what the heck.  (Actually we could, but
@@ -613,6 +614,9 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
          0,
 #endif
          nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
+  if( nic->nic_error_flags )
+    logger(log_arg, "  ERRORS: "CI_NETIF_NIC_ERRORS_FMT,
+           CI_NETIF_NIC_ERRORS_PRI_ARG(nic->nic_error_flags));
 
 #ifndef __KERNEL__
 #if CI_CFG_SEPARATE_UDP_RXQ
@@ -646,7 +650,7 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
 #else
   ci_ip_timer_state its;
 #endif
-  unsigned tmp;
+  ci_uint64 tmp;
   long diff;
   int intf_i;
 
@@ -666,8 +670,19 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
       );
 
   tmp = ni->state->lock.lock;
-  logger(log_arg, "  lock=%x "CI_NETIF_LOCK_FMT"  nics=%x primed=%x", tmp,
+  logger(log_arg, "  lock=%llx "CI_NETIF_LOCK_FMT"  nics=%x primed=%x",
+         (unsigned long long)tmp,
          CI_NETIF_LOCK_PRI_ARG(tmp), ni->nic_set.nics, ns->evq_primed);
+#ifdef __KERNEL__
+  {
+    /* This is useful mostly for orphaned stacks */
+    tcp_helper_resource_t* trs = netif2tcp_helper_resource(ni);
+    logger(log_arg, "  ref=%d trusted_lock=0x%x k_ref=0x%x "
+           "n_ep_closing=%d",
+           oo_atomic_read(&trs->ref_count),
+           trs->trusted_lock, trs->k_ref_count, trs->n_ep_closing_refs);
+  }
+#endif
 
   logger(log_arg, "  sock_bufs: max=%u n_allocated=%u",
          NI_OPTS(ni).max_ep_bufs, ns->n_ep_bufs);

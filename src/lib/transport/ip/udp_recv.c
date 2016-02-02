@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -116,6 +116,56 @@ ci_inline int do_copy(void* to, const void* from, int n_bytes)
 }
 
 
+struct oo_copy_state {
+  int pkt_left;
+  int pkt_off;
+  int bytes_copied;
+  int bytes_to_copy;
+  const char *from;
+  const ci_ip_pkt_fmt* pkt;
+};
+
+ci_inline int
+__oo_copy_frag_to_iovec_no_adv(ci_netif* ni, 
+                               ci_iovec_ptr* piov, 
+                               struct oo_copy_state *ocs)
+{
+  int n;
+
+  n = CI_MIN(ocs->pkt_left, CI_IOVEC_LEN(&piov->io));
+  n = CI_MIN(n, ocs->bytes_to_copy);
+  if(CI_UNLIKELY( do_copy(CI_IOVEC_BASE(&piov->io),
+                          ocs->from + ocs->pkt_off, n) != 0 ))
+    return -EFAULT;
+  
+  ocs->bytes_copied += n;
+  ocs->pkt_off += n;
+  if( n == ocs->bytes_to_copy )
+    return 0;
+  
+  ocs->bytes_to_copy -= n;
+  if( n == ocs->pkt_left ) {
+    /* Caller guarantees that packet contains at least [bytes_to_copy]. */
+    ci_assert(OO_PP_NOT_NULL(ocs->pkt->frag_next));
+    ci_iovec_ptr_advance(piov, n);
+    ocs->pkt = PKT_CHK_NNL(ni, ocs->pkt->frag_next);
+    ocs->pkt_off = 0;
+    /* We're unlikely to hit end-of-pkt-buf and end-of-iovec at the same
+     * time, and if we do, just go round the loop again.
+     */
+    return 1;
+  }
+  
+  ci_assert_equal(n, CI_IOVEC_LEN(&piov->io));
+  if( piov->iovlen == 0 )
+    return 0;
+  piov->io = *piov->iov++;
+  --piov->iovlen;
+
+  return 1;
+}
+
+
 static int
 oo_copy_pkt_to_iovec_no_adv(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
                             ci_iovec_ptr* piov, int bytes_to_copy)
@@ -127,42 +177,60 @@ oo_copy_pkt_to_iovec_no_adv(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
    *
    * Returns number of bytes copied on success, or -EFAULT otherwise.
    */
-  int n, pkt_left, pkt_off = 0;
-  int bytes_copied = 0;
+  int rc;
+  struct oo_copy_state ocs;
+  ocs.bytes_copied = 0;
+  ocs.bytes_to_copy = bytes_to_copy;
+  ocs.pkt_off = 0;
+  ocs.pkt = pkt;
 
   while( 1 ) {
-    pkt_left = oo_offbuf_left(&pkt->buf) - pkt_off;
-    n = CI_MIN(pkt_left, CI_IOVEC_LEN(&piov->io));
-    n = CI_MIN(n, bytes_to_copy);
-    if(CI_UNLIKELY( do_copy(CI_IOVEC_BASE(&piov->io),
-                            oo_offbuf_ptr(&pkt->buf) + pkt_off, n) != 0 ))
-      return -EFAULT;
-
-    bytes_copied += n;
-    pkt_off += n;
-    if( n == bytes_to_copy )
-      return bytes_copied;
-
-    bytes_to_copy -= n;
-    if( n == pkt_left ) {
-      /* Caller guarantees that packet contains at least [bytes_to_copy]. */
-      ci_assert(OO_PP_NOT_NULL(pkt->frag_next));
-      ci_iovec_ptr_advance(piov, n);
-      pkt = PKT_CHK_NNL(ni, pkt->frag_next);
-      pkt_off = 0;
-      /* We're unlikely to hit end-of-pkt-buf and end-of-iovec at the same
-       * time, and if we do, just go round the loop again.
-       */
+    ocs.pkt_left = oo_offbuf_left(&(ocs.pkt->buf)) - ocs.pkt_off;
+    ocs.from = oo_offbuf_ptr(&(ocs.pkt->buf));
+    rc = __oo_copy_frag_to_iovec_no_adv(ni, piov, &ocs);
+    if( rc == 0 )
+      return ocs.bytes_copied;
+    else if( rc == 1 )
       continue;
-    }
-
-    ci_assert_equal(n, CI_IOVEC_LEN(&piov->io));
-    if( piov->iovlen == 0 )
-      return bytes_copied;
-    piov->io = *piov->iov++;
-    --piov->iovlen;
+    else if( rc < 0 )
+      return rc;
+    else
+      ci_assert(0);
   }
 }
+
+
+#ifndef __KERNEL__
+/* Very similar to oo_copy_pkt_to_iovec_no_adv() but doesn't use pkt->buf */
+static int 
+ci_udp_timestamp_q_pkt_to_iovec(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
+                                ci_iovec_ptr* piov)
+{
+  int rc;
+  struct oo_copy_state ocs;
+  ocs.bytes_copied = 0;
+  ocs.bytes_to_copy = CI_BSWAP_BE16(oo_ip_hdr_const(pkt)->ip_tot_len_be16) +
+    oo_ether_hdr_size(pkt);
+  ocs.pkt_off = 0;
+  ocs.pkt = pkt;
+  while( 1 ) {
+    /* Don't use pkt->buf so we don't interfere with the data path.  We
+     * need different offsets to include the delivery of the headers
+     */
+    ocs.pkt_left = ocs.pkt->buf_len - ocs.pkt_off;
+    ocs.from = (char *)oo_ether_hdr_const(ocs.pkt);
+    rc = __oo_copy_frag_to_iovec_no_adv(ni, piov, &ocs);
+    if( rc == 0 )
+      return ocs.bytes_copied;
+    else if( rc == 1 )
+      continue;
+    else if( rc < 0 )
+      return rc;
+    else
+      ci_assert(0);
+  }
+}
+#endif
 
 
 #ifndef __KERNEL__
@@ -406,15 +474,10 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
       }
       ci_put_cmsg(&cmsg_state, SOL_SOCKET, ONLOAD_SCM_TIMESTAMPING,
                   sizeof(ts), &ts);
-      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY ) {
+      if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY )
         rc = SLOWPATH_RET_ZERO;
-      }
-      else {
-        rc = oo_copy_pkt_to_iovec_no_adv(
-              ni, pkt, piov,
-              CI_BSWAP_BE16(oo_ip_hdr(pkt)->ip_tot_len_be16) +
-              oo_ether_hdr_size(pkt));
-      }
+      else
+        rc = ci_udp_timestamp_q_pkt_to_iovec(ni, pkt, piov);
 
       memset(&errhdr, 0, sizeof(errhdr));
       errhdr.ee.ee_errno = ENOMSG;

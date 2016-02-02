@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -252,11 +252,13 @@ static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
   UDP_CLR_FLAG(us, CI_UDPF_EF_SEND);
 
 #ifdef ONLOAD_OFE
-    if( ep->netif->ofe != NULL )
-      us->s.ofe_code_start = ofe_socktbl_find(
+  if( ep->netif->ofe_channel != NULL )
+    us->s.ofe_code_start = ofe_socktbl_find(
                         ep->netif->ofe, OFE_SOCKTYPE_UDP,
                         udp_laddr_be32(us), udp_raddr_be32(us),
                         udp_lport_be16(us), udp_rport_be16(us));
+  else
+    us->s.ofe_code_start = OFE_ADDR_NULL;
 #endif
 
   /* OS source addrs have already been handed-over, so this must be one of
@@ -405,11 +407,13 @@ ci_udp_disconnect(citp_socket* ep, ci_udp_state* us, ci_fd_t os_sock)
   ci_udp_clr_filters(ep);
 
 #ifdef ONLOAD_OFE
-    if( ep->netif->ofe != NULL )
+    if( ep->netif->ofe_channel != NULL )
       us->s.ofe_code_start = ofe_socktbl_find(
                         ep->netif->ofe, OFE_SOCKTYPE_UDP,
                         udp_laddr_be32(us), udp_raddr_be32(us),
                         udp_lport_be16(us), udp_rport_be16(us));
+    else
+      us->s.ofe_code_start = OFE_ADDR_NULL;
 #endif
 
   if( (rc = ci_udp_set_filters(ep, us)) != 0 )
@@ -497,11 +501,13 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
 
   if( onloadable ) {
 #ifdef ONLOAD_OFE
-    if( ep->netif->ofe != NULL )
+    if( ep->netif->ofe_channel != NULL )
       us->s.ofe_code_start = ofe_socktbl_find(
                         ep->netif->ofe, OFE_SOCKTYPE_UDP,
                         udp_laddr_be32(us), udp_raddr_be32(us),
                         udp_lport_be16(us), udp_rport_be16(us));
+    else
+      us->s.ofe_code_start = OFE_ADDR_NULL;
 #endif
 
     if( (rc = ci_udp_set_filters(ep, us)) != 0 ) {

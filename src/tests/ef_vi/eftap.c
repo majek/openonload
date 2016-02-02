@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,7 @@
  * Date: 2014/02/17
  */
 
+#include "utils.h"
 
 #include <etherfabric/vi.h>
 #include <etherfabric/pd.h>
@@ -67,40 +68,12 @@
 #include <ci/tools/ippacket.h>
 #include <ci/net/ipv4.h>
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdint.h>
 #include <inttypes.h>
 #include <arpa/inet.h>
-#include <sys/time.h>
-#include <errno.h>
-#include <string.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <ifaddrs.h>
-
-
-#define TEST(x)                                                 \
-  do {                                                          \
-    if( ! (x) ) {                                               \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
-
-
-#define TRY(x)                                                  \
-  do {                                                          \
-    int __rc = (x);                                             \
-    if( __rc < 0 ) {                                            \
-      fprintf(stderr, "ERROR: '%s' failed\n", #x);              \
-      fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      fprintf(stderr, "ERROR: rc=%d errno=%d (%s)\n",           \
-              __rc, errno, strerror(errno));                    \
-      exit(1);                                                  \
-    }                                                           \
-  } while( 0 )
+#include <stddef.h>
 
 
 #define MAX_UDP_PAYLEN	(1500 - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr))
@@ -124,9 +97,6 @@ static int cfg_timestamping;
 static int cfg_local_port = LOCAL_PORT;
 static int cfg_vport;
 static int n_sent;
-
-#define MEMBER_OFFSET(c_type, mbr_name)  \
-  ((uint32_t) (uintptr_t)(&((c_type*)0)->mbr_name))
 
 
 struct pkt_buf {
@@ -408,7 +378,7 @@ int main(int argc, char* argv[])
   TRY(ef_memreg_alloc(&mr, dh, &pd, dh, p, BUF_SIZE));
   pb = (void*)p;
   pb->dma_buf_addr = ef_memreg_dma_addr(&mr, 0) +
-    MEMBER_OFFSET(struct pkt_buf, dma_buf);
+    offsetof(struct pkt_buf, dma_buf);
   tx_frame_len = init_udp_pkt(pb->dma_buf, cfg_payload_len);
 
   for( i = 0; i < cfg_iter; ++i ) {

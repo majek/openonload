@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -19,6 +19,14 @@
 #include "char_internal.h"
 #include <driver/linux_resource/kernel_compat.h>
 #include <driver/linux_resource/compat_pat_wc.h>
+
+
+#ifdef __PPC64__
+/* HACK FIXME: PPC kernels that we support do have pgprot_writecombine(),
+ * but kernel-compat doesn't detect (I think because it is a macro).
+ */
+# define EFRM_HAVE_PGPROT_WRITECOMBINE
+#endif
 
 
 /****************************************************************************

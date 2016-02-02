@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -2245,7 +2245,8 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 	if (efx->aoe_data) {
 		ptp->rx_ts_inline = true;
 		/* no sync events required */
-		channel->sync_events_state = SYNC_EVENTS_VALID;
+		if (channel)
+			channel->sync_events_state = SYNC_EVENTS_VALID;
 	}
 #endif
 

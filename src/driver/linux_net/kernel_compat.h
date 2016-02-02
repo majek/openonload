@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1508,6 +1508,13 @@ extern struct i2c_driver efx_lm90_driver;
 	}
 #endif
 
+#ifdef EFX_NEED_IPV4_IS_LBCAST
+	static inline bool ipv4_is_lbcast(__be32 addr)
+	{
+		return addr == htonl(INADDR_BROADCAST);
+	}
+#endif
+
 #ifdef EFX_NEED_IP_IS_FRAGMENT
 	static inline bool ip_is_fragment(const struct iphdr *iph)
 	{
@@ -2877,6 +2884,10 @@ static inline bool __must_check IS_ERR_OR_NULL(__force const void *ptr)
 
 #ifndef WRITE_ONCE
 #define WRITE_ONCE(x, v) (ACCESS_ONCE((x)) = (v))
+#endif
+
+#ifndef EFX_HAVE_NETIF_XMIT_STOPPED
+#define netif_xmit_stopped netif_tx_queue_stopped
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

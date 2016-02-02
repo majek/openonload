@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -100,6 +100,7 @@ struct efrm_vi_q {
 	unsigned long                        flush_jiffies;
 	int                                  flushing;
 	struct list_head                     flush_link;
+	struct list_head                     init_link;
 	struct efrm_vi                      *evq_ref;
 };
 
@@ -119,13 +120,21 @@ struct efrm_vi {
 
 	unsigned rx_prefix_len;
 
-	int rx_ts_correction;
-
 	/*! EFHW_VI_* flags or EFRM_VI_RELEASED */
 	unsigned flags;
 #define EFRM_VI_RELEASED 0x10000000
 #define EFRM_VI_OWNS_STACK_ID 0x20000000
 #define EFRM_VI_STOPPING 0x40000000
+
+	/* Sometimes a queue is shut down forcibly or never initialised,
+	 * pending recovery on reset. */
+	atomic_t shut_down_flags;
+#define EFRM_VI_SHUT_DOWN_RXQ 0x00000001
+#define EFRM_VI_SHUT_DOWN_TXQ 0x00000002
+#define EFRM_VI_SHUT_DOWN_EVQ 0x00000004
+#define EFRM_VI_SHUT_DOWN     (EFRM_VI_SHUT_DOWN_RXQ | \
+			       EFRM_VI_SHUT_DOWN_TXQ | \
+			       EFRM_VI_SHUT_DOWN_EVQ)
 
 	/*! EFHW_VI_ effective flags */
 	unsigned out_flags;

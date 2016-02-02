@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,7 +82,8 @@ static int efx_mcdi_phy_stats_read(struct seq_file *file, void *data)
 
 	value = (efx_dword_t *)phy_data->stats + pos;
 
-	return seq_printf(file, "%d\n", EFX_DWORD_FIELD(*value, EFX_DWORD_0));
+	seq_printf(file, "%d\n", EFX_DWORD_FIELD(*value, EFX_DWORD_0));
+	return 0;
 }
 
 #define PHY_STAT_PARAMETER(_index, _name)				\

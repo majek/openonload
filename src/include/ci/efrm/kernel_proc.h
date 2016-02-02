@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,11 +55,27 @@
 
 /* For file_operations */
 #include <linux/fs.h>
+#include <linux/if.h>
+
+#include <ci/tools/debug.h>
+
+/* This must be at least long enough to store a PCI domain:bus:slot.fn address.
+ * The kernel uses a hard-coded value of 32 in lots of places for this. */
+#define EFRM_PROC_NAME_LEN 32
+
+/* We use interface names as filenames, too. */
+CI_BUILD_ASSERT(EFRM_PROC_NAME_LEN >= IFNAMSIZ);
 
 typedef void* efrm_pd_handle;
 
-extern efrm_pd_handle efrm_proc_dir_get(char const* dirname);
-extern int efrm_proc_dir_put(efrm_pd_handle handle);
+extern int
+efrm_proc_dir_update_symlink(char const* dirname, const char* symlink_name);
+
+extern efrm_pd_handle efrm_proc_device_dir_get(const char* device_name);
+extern efrm_pd_handle efrm_proc_intf_dir_get(const char* intf_name);
+
+extern int efrm_proc_device_dir_put(efrm_pd_handle handle);
+extern int efrm_proc_intf_dir_put(efrm_pd_handle handle);
 
 efrm_pd_handle
 efrm_proc_create_file( char const* name, mode_t mode, efrm_pd_handle parent,

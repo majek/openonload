@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -453,7 +453,12 @@ static int oo_pipe_wait_write(ci_netif* ni, struct oo_pipe* p, int flags,
   int rc = 0;
 
   ci_assert(ci_netif_is_locked(ni));
-  *stack_locked = 1;
+  ci_assert_equal(*stack_locked, 1);
+
+  if ( oo_pipe_is_writable(p) )
+    return 0;
+  ci_netif_unlock(ni);
+  *stack_locked = 0;
 
 #ifndef __KERNEL__
   if( oo_per_thread_get()->spinstate & (1 << ONLOAD_SPIN_PIPE_SEND) ) {
@@ -503,10 +508,7 @@ static int oo_pipe_wait_write(ci_netif* ni, struct oo_pipe* p, int flags,
 
     /* we should sleep here */
     LOG_PIPE("%s: going to sleep", __FUNCTION__);
-    rc = ci_sock_sleep(ni, &p->b, CI_SB_FLAG_WAKE_TX,
-                       *stack_locked ? CI_SLEEP_NETIF_LOCKED : 0,
-                       sleep_seq, 0);
-    *stack_locked = 0;
+    rc = ci_sock_sleep(ni, &p->b, CI_SB_FLAG_WAKE_TX, 0, sleep_seq, 0);
     if ( p->aflags & (CI_PFD_AFLAG_CLOSED << CI_PFD_AFLAG_READER_SHIFT) ) {
       CI_SET_ERROR(rc, EPIPE);
       if( ! (flags & MSG_NOSIGNAL) )
@@ -1591,6 +1593,7 @@ __oo_pipe_zc_copy_last_buffer(ci_netif* ni, struct oo_pipe* pipe_src,
           /* Returning -EINTR will cause the zero-copy framework to call us
            * again. */
           ci_netif_lock(ni);
+          stack_locked = 1;
           if( rc == 0 )
             return -EINTR;
         }

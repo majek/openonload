@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1730,6 +1730,10 @@ cicp_llap_set_bond(cicp_handle_t *control_plane, ci_ifid_t ifindex)
        * have been brought up after the bonding interface and set their
        * hwport appropriately */ 
       row->hwport = bond->master.active_hwport;
+      /* Setting the encapsulation, as we did earlier, implies non-fatality, so
+       * set that too.  Ideally we would have done the two at the same time,
+       * but we didn't have [bond] early enough. */
+      bond->master.fatal = 0;
     }
 
     ci_verlock_write_stop(&llapt->version);
@@ -3542,7 +3546,6 @@ ci_inline int cicpos_bond_refresh_hwport(cicp_mibs_kern_t *mibs, int locked)
     bond_row = &mibs->user.bondinfo_utable->bond[i];
     if( bond_row->type == CICP_BOND_ROW_TYPE_SLAVE ) {
       llap_row = cicp_llap_find_ifid(mibs->llap_table, bond_row->ifid);
-      ci_assert_equal(llap_row->bond_rowid, i);
       if( llap_row != NULL ) {
         hwport = llap_row->hwport;
       }
@@ -7451,7 +7454,7 @@ cicpos_parse_state_alloc(cicp_handle_t *control_plane)
   return session;
 
  out4:
-  kfree(session->imported_pmtu);
+  kfree(session->imported_llap);
  out3:
   kfree(session->imported_ipif);
  out2:

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,6 +51,8 @@ extern struct efhw_nic *efrm_client_get_nic(struct efrm_client *);
 extern int efrm_client_get_ifindex(struct efrm_client *);
 
 extern int efrm_nic_present(int ifindex);
+
+extern void efrm_client_disable_post_reset(struct efrm_client*);
 
 
 

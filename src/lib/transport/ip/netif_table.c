@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -167,12 +167,12 @@ ci_inline int ci_sock_intf_check(ci_netif* ni, ci_sock_cmn* s,
 }
 
 
-void ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
-                                    unsigned lport, unsigned raddr,
-                                    unsigned rport, unsigned protocol,
-                                    int intf_i, int vlan,
-                                    int (*callback)(ci_sock_cmn*, void*),
-                                    void* callback_arg, ci_uint32* hash_out)
+int ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
+                                   unsigned lport, unsigned raddr,
+                                   unsigned rport, unsigned protocol,
+                                   int intf_i, int vlan,
+                                   int (*callback)(ci_sock_cmn*, void*),
+                                   void* callback_arg, ci_uint32* hash_out)
 {
   ci_netif_filter_table* tbl;
   unsigned hash1, hash2 = 0;
@@ -203,7 +203,7 @@ void ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
         if(CI_LIKELY( (s->rx_bind2dev_ifindex == CI_IFID_BAD ||
                        ci_sock_intf_check(ni, s, intf_i, vlan)) ))
           if( callback(s, callback_arg) != 0 )
-            return;
+            return 1;
     }
     else if( id == EMPTY )
       break;
@@ -219,6 +219,7 @@ void ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
       break;
     }
   }
+  return 0;
 }
 
 

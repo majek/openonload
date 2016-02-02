@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,7 +125,11 @@ int citp_fdtable_ctor()
   */
 
   if( (rc = oo_rwlock_ctor(&citp_ul_lock)) != 0 ) {
-    Log_E(log("%s: oo_rwlock_ctor %d", __FUNCTION__, rc));
+    Log_E(log("%s: oo_rwlock_ctor(ul_lock) %d", __FUNCTION__, rc));
+    return -1;
+  }
+  if( (rc = oo_rwlock_ctor(&citp_dup2_lock)) != 0 ) {
+    Log_E(log("%s: oo_rwlock_ctor(dup2_lock) %d", __FUNCTION__, rc));
     return -1;
   }
 
@@ -886,13 +890,27 @@ void __citp_fdinfo_ref_count_zero(citp_fdinfo* fdi, int fdt_locked)
     else 
 #endif
     {
-      if( ! fdt_locked && fdtable_strict() )  CITP_FDTABLE_LOCK();
-      ci_tcp_helper_close_no_trampoline(fdi->fd);
-      /* The swap must occur after the close, otherwise another thread could
-       * cause a probe of the old endpoint info, which is about be freed.
+      /* We mark the fd as busy before closing it to avoid races.  This means
+       * that if this fd is looked up during this phase of the close the looker
+       * upper will have to wait.
+       *
+       * There are problems if we try and keep this safe just by swapping
+       * the unknown and closing fdi entries.  If we set to unknown before
+       * close that could result in things being re-probed in the gap between
+       * setting to uknown and actually closing the fd.  If we close before
+       * setting to unknown then the fd could be re-used by the kernel
+       * without onload seeing it, and lookups would still return the closing
+       * fdi until the unknown entry had been swapped in.
        */
-      fdtable_swap(fdi->fd, fdip_closing, fdip_unknown,
+      if( ! fdt_locked && fdtable_strict() )  CITP_FDTABLE_LOCK();
+
+      fdtable_swap(fdi->fd, fdip_closing, fdip_busy,
 		   fdt_locked | fdtable_strict());
+
+      ci_tcp_helper_close_no_trampoline(fdi->fd);
+
+      citp_fdtable_busy_clear(fdi->fd, fdip_unknown,
+                              fdt_locked | fdtable_strict());
       citp_fdinfo_get_ops(fdi)->dtor(fdi, fdt_locked | fdtable_strict());
       if( ! fdt_locked && fdtable_strict() )  CITP_FDTABLE_UNLOCK();
       citp_fdinfo_free(fdi);

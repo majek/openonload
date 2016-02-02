@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,10 +53,11 @@
 #include <ci/efhw/efhw_buftable.h>
 
 #include <driver/linux_net/driverlink_api.h>
-#include <driver/linux_net/mcdi_pcol.h>
 
 #include <ci/efhw/ef10.h>
+#include <ci/efhw/mc_driver_pcol.h>
 #include "ef10_mcdi.h"
+
 
 /* We base owner ids from 1 within Onload so that we can use owner id 0 as
  * as easy check whether a pd is using physical addressing mode.  However, we
@@ -103,7 +104,8 @@ static int ef10_mcdi_rpc(struct efhw_nic *nic, unsigned int cmd,
 
 static void
 ef10_mcdi_check_response(const char* caller, const char* failed_cmd, 
-			 int rc, int expected_len, int actual_len)
+			 int rc, int expected_len, int actual_len, 
+			 int rate_limit)
 {
 	/* The NIC will return error if we gave it invalid arguments
 	 * or if something has gone wrong in the hardware at which
@@ -120,17 +122,23 @@ ef10_mcdi_check_response(const char* caller, const char* failed_cmd,
 	else
 #endif
 	if (rc != 0) {
-		EFHW_ERR("%s: %s failed rc=%d", caller, failed_cmd, rc);
+		if (rate_limit)
+			EFHW_ERR_LIMITED("%s: %s failed rc=%d",
+					 caller, failed_cmd, rc);
+		else
+			EFHW_ERR("%s: %s failed rc=%d",
+				 caller, failed_cmd, rc);
 	}
-	else if (expected_len != actual_len) {
+	else if (actual_len < expected_len) {
 		EFHW_ERR("%s: ERROR: '%s' expected response len %d, got %d",
 			 caller, failed_cmd, expected_len, actual_len);
 	}
 }
 
 
-#define MCDI_CHECK(op, rc, actual_len)					\
-  ef10_mcdi_check_response(__func__, #op, (rc), op##_OUT_LEN, (actual_len))
+#define MCDI_CHECK(op, rc, actual_len, rate_limit)		     \
+	ef10_mcdi_check_response(__func__, #op, (rc), op##_OUT_LEN,  \
+				 (actual_len), (rate_limit))
 
 
 /*----------------------------------------------------------------------------
@@ -153,7 +161,7 @@ static int _ef10_nic_get_35388_workaround(struct efhw_nic *nic)
 	EFHW_MCDI_INITIALISE_BUF(out);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_WORKAROUNDS, 
 			   0, sizeof(out), &out_size, NULL, out);
-	MCDI_CHECK(MC_CMD_GET_WORKAROUNDS, rc, out_size);
+	MCDI_CHECK(MC_CMD_GET_WORKAROUNDS, rc, out_size, 0);
 	if (rc != 0)
 		return rc;
 
@@ -269,7 +277,7 @@ ef10_nic_license_check(struct efhw_nic *nic, const uint32_t feature,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_LICENSED_APP_STATE,
 			   sizeof(in), sizeof(out), &out_size, in, out);
-	MCDI_CHECK(MC_CMD_GET_LICENSED_APP_STATE, rc, out_size);
+	MCDI_CHECK(MC_CMD_GET_LICENSED_APP_STATE, rc, out_size, 0);
 	if (rc != 0)
 		return rc;
 	license_state = EFHW_MCDI_DWORD(out, GET_LICENSED_APP_STATE_OUT_STATE);
@@ -317,7 +325,7 @@ ef10_nic_license_challenge(struct efhw_nic *nic,
 			   sizeof(in), sizeof(out), &out_size, in, out);
 	if (rc != 0)
 	  return rc;
-	MCDI_CHECK(MC_CMD_LICENSED_APP_OP_VALIDATE, rc, out_size);
+	MCDI_CHECK(MC_CMD_LICENSED_APP_OP_VALIDATE, rc, out_size, 0);
 	*expiry = EFHW_MCDI_DWORD(out, LICENSED_APP_OP_VALIDATE_OUT_EXPIRY);
 	memcpy(signature, 
 	       _EFHW_MCDI_ARRAY_PTR(out, LICENSED_APP_OP_VALIDATE_OUT_RESPONSE,
@@ -347,7 +355,7 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_GET_CAPABILITIES,
 			   sizeof(in), sizeof(out), &out_size, in, out);
-	MCDI_CHECK(MC_CMD_GET_CAPABILITIES, rc, out_size);
+	MCDI_CHECK(MC_CMD_GET_CAPABILITIES, rc, out_size, 0);
 	if (rc != 0)
 		return rc;
 	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_OUT_FLAGS1);
@@ -396,16 +404,17 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 }
 
 
-static int _ef10_nic_get_rx_timestamp_correction(struct efhw_nic *nic,
-						  int *rx_ts_correction,
-						  const char* caller)
+static int ef10_nic_get_timestamp_correction(struct efhw_nic *nic,
+					     int *rx_ts_correction,
+					     int *tx_ts_correction,
+					     const char* caller)
 {
-	int rc;
+	int rc, tx_ticks;
 	size_t out_size;
 
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_PTP_IN_GET_TIMESTAMP_CORRECTIONS_LEN);
 	EFHW_MCDI_DECLARE_BUF(out,
-			      MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN);
+			      MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_LEN);
 	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_INITIALISE_BUF(out);
 
@@ -415,14 +424,23 @@ static int _ef10_nic_get_rx_timestamp_correction(struct efhw_nic *nic,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), sizeof(out), &out_size,
 			   in, out);
-	ef10_mcdi_check_response(__func__,
-				 "MC_CMD_PTP_OP_GET_TIMESTAMP_CORRECTIONS",
-				 rc,
-				 MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_LEN,
-				 out_size);
-	if( rc == 0 )
-		*rx_ts_correction =
-		EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_RECEIVE);
+	if( rc == 0 ) {
+		if (out_size >= MC_CMD_PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_LEN) {
+			*rx_ts_correction =
+				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_GENERAL_RX);
+			tx_ticks =
+				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_V2_GENERAL_TX);
+			*tx_ts_correction =
+				((uint64_t) tx_ticks * 1000000000) >> 27;
+		} else {
+			*rx_ts_correction =
+				EFHW_MCDI_DWORD(out, PTP_OUT_GET_TIMESTAMP_CORRECTIONS_RECEIVE);
+			/* This firmware ver can't tell us TX correction, so
+			 * must be Huntington.  This is the correct val...
+			 */
+			*tx_ts_correction = 178;
+		}
+	}
 	return rc;
 }
 
@@ -471,6 +489,26 @@ ef10_nic_init_hardware(struct efhw_nic *nic,
 	memcpy(nic->mac_addr, mac_addr, ETH_ALEN);
 
 	ef10_nic_tweak_hardware(nic);
+
+	rc = ef10_nic_get_timestamp_correction(nic, &(nic->rx_ts_correction),
+					       &(nic->tx_ts_correction),
+					       __FUNCTION__);
+	if( rc < 0 ) {
+		if( rc == -EPERM || rc == -ENOSYS ) 
+			EFHW_TRACE("%s: WARNING: failed to get HW timestamp "
+				   "corrections rc=%d", __FUNCTION__, rc);
+		else
+			EFHW_ERR("%s: ERROR: failed to get HW timestamp "
+				 "corrections rc=%d", __FUNCTION__, rc);
+		/* This will happen if the NIC does not have a PTP
+		 * licence.  Without that licence the user is unlikely
+		 * to be doing such accurate timestamping, but try to
+		 * do something sensible... these values are correct
+		 * for Huntington.
+		 */
+		nic->rx_ts_correction = -12;
+		nic->tx_ts_correction = 178;
+	}
 
 	rc = _ef10_nic_check_licence(nic);
 	if( rc < 0 ) return rc;
@@ -554,7 +592,7 @@ _ef10_mcdi_cmd_event_queue_enable(struct efhw_nic *nic,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_INIT_EVQ, sizeof(in), sizeof(out),
 			   &out_size, in, &out);
-	MCDI_CHECK(MC_CMD_INIT_EVQ, rc, out_size);
+	MCDI_CHECK(MC_CMD_INIT_EVQ, rc, out_size, 0);
         return rc;
 }
 
@@ -573,7 +611,7 @@ _ef10_mcdi_cmd_event_queue_disable(struct efhw_nic *nic, uint evq)
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FINI_EVQ, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_FINI_EVQ, rc, out_size);
+	MCDI_CHECK(MC_CMD_FINI_EVQ, rc, out_size, 0);
 }
 
 
@@ -596,7 +634,7 @@ _ef10_mcdi_cmd_driver_event(struct efhw_nic *nic, uint64_t data, uint32_t evq)
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_DRIVER_EVENT, sizeof(in), 0, &out_size,
 			   in, NULL);
-	MCDI_CHECK(MC_CMD_DRIVER_EVENT, rc, out_size);
+	MCDI_CHECK(MC_CMD_DRIVER_EVENT, rc, out_size, 0);
 }
 
 
@@ -624,10 +662,12 @@ _ef10_mcdi_cmd_ptp_time_event_subscribe(struct efhw_nic *nic, uint32_t evq,
 		rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), 0, &out_size,
 				   in, NULL);
 	}
-	ef10_mcdi_check_response(__func__,
-				 "MC_CMD_PTP_OP_TIME_EVENT_SUBSCRIBE", rc,
-				 MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_LEN,
-				 out_size);
+
+#ifndef MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_OUT_LEN
+#define MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_OUT_LEN	\
+	MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE_LEN
+#endif
+	MCDI_CHECK(MC_CMD_PTP_OUT_TIME_EVENT_SUBSCRIBE, rc, out_size, 0);
 	if (rc == 0 && out_flags != NULL)
 		*out_flags |= sync_flag;
 	return rc;
@@ -651,27 +691,25 @@ static int _ef10_mcdi_cmd_ptp_time_event_unsubscribe(struct efhw_nic *nic,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_PTP, sizeof(in), 0, &out_size,
 			   in, NULL);
-	ef10_mcdi_check_response(__func__,
-				 "MC_CMD_PTP_OP_TIME_EVENT_UNSUBSCRIBE",
-				 rc,
-				 MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE_LEN,
-				 out_size);
+
+#ifndef MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE_OUT_LEN
+#define MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE_OUT_LEN	\
+	MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE_LEN
+#endif
+	MCDI_CHECK(MC_CMD_PTP_OUT_TIME_EVENT_UNSUBSCRIBE, rc, out_size, 0);
 	return rc;
 }
 
 
 /* This function will enable the given event queue with the requested
- * properties.  If enable_time_sync_events is set, then on success,
- * this function will also return rx_ts_correction_out as the
- * correction factor to be applied to every rx timestamp.
+ * properties.
  */
 static int
 ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			    uint buf_base_id, dma_addr_t *dma_addrs,
 			    uint n_pages, int interrupting, int enable_dos_p,
 			    int wakeup_evq, int enable_time_sync_events,
-			    int enable_cut_through, int *rx_ts_correction_out,
-			    int* flags_out)
+			    int enable_cut_through, int* flags_out)
 {
         int rc;
 	rc = _ef10_mcdi_cmd_event_queue_enable(nic, evq, evq_size, dma_addrs, 
@@ -683,12 +721,8 @@ ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 		   evq_size, rc);
 
 	if( rc == 0 && enable_time_sync_events ) {
-		rc = _ef10_nic_get_rx_timestamp_correction
-			(nic, rx_ts_correction_out, __FUNCTION__);
-		if( rc == 0 ) {
-			rc = _ef10_mcdi_cmd_ptp_time_event_subscribe
-				(nic, evq, flags_out, __FUNCTION__);
-		}
+		rc = _ef10_mcdi_cmd_ptp_time_event_subscribe
+			(nic, evq, flags_out, __FUNCTION__);
 		if( rc != 0 ) {
 			_ef10_mcdi_cmd_event_queue_disable(nic, evq);
 			/* Firmware returns EPERM if you do not have
@@ -822,6 +856,14 @@ ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 			evq = EF10_EVENT_RX_FLUSH_Q_ID(ev);
 			EFHW_TRACE("%s: rx flush done %d", __FUNCTION__, evq);
 			return efhw_handle_rxdmaq_flushed(nic, h, evq, false);
+		case MCDI_EVENT_CODE_TX_ERR:
+			EFHW_NOTICE("%s: unexpected MCDI TX error event "
+				    "(event code %d)",__FUNCTION__, code);
+			return -EINVAL;
+		case MCDI_EVENT_CODE_RX_ERR:
+			EFHW_NOTICE("%s: unexpected MCDI RX error event "
+				    "(event code %d)",__FUNCTION__, code);
+			return -EINVAL;
 		default:
 			EFHW_NOTICE("%s: unexpected MCDI event code %d",
 				    __FUNCTION__, code);
@@ -857,7 +899,7 @@ _ef10_mcdi_cmd_enable_multicast_loopback(struct efhw_nic *nic,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_SET_PARSER_DISP_CONFIG, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_SET_PARSER_DISP_CONFIG, rc, out_size);
+	MCDI_CHECK(MC_CMD_SET_PARSER_DISP_CONFIG, rc, out_size, 0);
 	return rc;
 }
 
@@ -879,7 +921,7 @@ _ef10_mcdi_cmd_set_multicast_loopback_suppression
 			    suppress_self_transmission ? 1 : 0);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_SET_PARSER_DISP_CONFIG, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_SET_PARSER_DISP_CONFIG, rc, out_size);
+	MCDI_CHECK(MC_CMD_SET_PARSER_DISP_CONFIG, rc, out_size, 0);
 	return rc;
 }
 
@@ -926,7 +968,7 @@ _ef10_mcdi_cmd_init_txq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_INIT_TXQ, sizeof(in), 0,
 			   &out_size, in, NULL);
-        MCDI_CHECK(MC_CMD_INIT_TXQ, rc, out_size);
+        MCDI_CHECK(MC_CMD_INIT_TXQ, rc, out_size, 0);
         return rc;
 }
 
@@ -1008,7 +1050,7 @@ _ef10_mcdi_cmd_init_rxq(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_INIT_RXQ, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_INIT_RXQ, rc, out_size);
+	MCDI_CHECK(MC_CMD_INIT_RXQ, rc, out_size, 0);
         return rc;
 }
 
@@ -1169,7 +1211,7 @@ _ef10_mcdi_cmd_fini_rxq(struct efhw_nic *nic, uint32_t instance)
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FINI_RXQ, sizeof(in), 0, &out_size,
 			   in, NULL);
-	MCDI_CHECK(MC_CMD_FINI_RXQ, rc, out_size);
+	MCDI_CHECK(MC_CMD_FINI_RXQ, rc, out_size, 0);
 	return rc;
 }
 
@@ -1185,7 +1227,7 @@ _ef10_mcdi_cmd_fini_txq(struct efhw_nic *nic, uint32_t instance)
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FINI_TXQ, sizeof(in), 0, &out_size,
 			   in, NULL);
-	MCDI_CHECK(MC_CMD_FINI_TXQ, rc, out_size);
+	MCDI_CHECK(MC_CMD_FINI_TXQ, rc, out_size, 0);
 	return rc;
 }
 
@@ -1253,7 +1295,7 @@ _ef10_mcdi_cmd_buffer_table_alloc(struct efhw_nic *nic, int page_size,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_ALLOC_BUFTBL_CHUNK,
 			   sizeof(in), sizeof(out), &out_size, in, out);
-	MCDI_CHECK(MC_CMD_ALLOC_BUFTBL_CHUNK, rc, out_size);
+	MCDI_CHECK(MC_CMD_ALLOC_BUFTBL_CHUNK, rc, out_size, 1);
 	if ( rc != 0 )
 		return rc;
 
@@ -1276,7 +1318,7 @@ _ef10_mcdi_cmd_buffer_table_free(struct efhw_nic *nic,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_FREE_BUFTBL_CHUNK, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_FREE_BUFTBL_CHUNK, rc, out_size);
+	MCDI_CHECK(MC_CMD_FREE_BUFTBL_CHUNK, rc, out_size, 1);
 }
 
 
@@ -1314,7 +1356,7 @@ _ef10_mcdi_cmd_buffer_table_program(struct efhw_nic *nic, dma_addr_t *dma_addrs,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_PROGRAM_BUFTBL_ENTRIES, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_PROGRAM_BUFTBL_ENTRIES, rc, out_size);
+	MCDI_CHECK(MC_CMD_PROGRAM_BUFTBL_ENTRIES, rc, out_size, 1);
 	return rc;
 }
 
@@ -1339,8 +1381,6 @@ static int __ef10_nic_buffer_table_alloc(struct efhw_nic *nic, int owner,
 
 	/* Initialise the software state even if MCDI failed, so that we can
 	 * retry the MCDI call at some point in the future. */
-	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block));
-
 	if (rc != 0)
 		return rc;
 	if (numentries != 32) {
@@ -1408,7 +1448,6 @@ ef10_nic_buffer_table_free(struct efhw_nic *nic,
 	if (! reset_pending) {
 		_ef10_mcdi_cmd_buffer_table_free(nic,
 						 block->btb_hw.ef10.handle);
-		EFHW_DO_DEBUG(efhw_buffer_table_free_debug(block));
 	}
 	kfree(block);
 }
@@ -1667,7 +1706,7 @@ __ef10_nic_rss_context_get_flags(struct efhw_nic *nic, int handle,
 	EFHW_MCDI_SET_DWORD(in, RSS_CONTEXT_GET_FLAGS_IN_RSS_CONTEXT_ID, handle);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_RSS_CONTEXT_GET_FLAGS,
 			   sizeof(in), sizeof(out), &out_size, in, out);
-	MCDI_CHECK(MC_CMD_RSS_CONTEXT_GET_FLAGS, rc, out_size);
+	MCDI_CHECK(MC_CMD_RSS_CONTEXT_GET_FLAGS, rc, out_size, 0);
 	if (rc != 0 )
 		return rc;
 	*nic_flags_out = EFHW_MCDI_DWORD(out, RSS_CONTEXT_GET_FLAGS_OUT_FLAGS);
@@ -1690,7 +1729,7 @@ __ef10_nic_rss_context_set_flags(struct efhw_nic *nic, int handle,
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_RSS_CONTEXT_SET_FLAGS,
 			   sizeof(in), 0, &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_RSS_CONTEXT_SET_FLAGS, rc, out_size);
+	MCDI_CHECK(MC_CMD_RSS_CONTEXT_SET_FLAGS, rc, out_size, 0);
 	return rc;
 }
 
@@ -1863,7 +1902,7 @@ ef10_vport_alloc(struct efhw_nic *nic, int vlan_id, unsigned *vport_id_out)
 
 	rc = ef10_mcdi_rpc(nic, MC_CMD_VPORT_ALLOC, sizeof(in), sizeof(out),
 			   &out_size, in, out);
-	MCDI_CHECK(MC_CMD_VPORT_ALLOC, rc, out_size);
+	MCDI_CHECK(MC_CMD_VPORT_ALLOC, rc, out_size, 0);
 	if (rc)
 		return rc;
 	if (out_size < MC_CMD_VPORT_ALLOC_OUT_LEN)
@@ -1884,7 +1923,7 @@ ef10_vport_free(struct efhw_nic *nic, unsigned vport_id)
 	EFHW_MCDI_SET_DWORD(in, VPORT_FREE_IN_VPORT_ID, vport_id);
 	rc = ef10_mcdi_rpc(nic, MC_CMD_VPORT_FREE, sizeof(in), 0,
 			   &out_size, in, NULL);
-	MCDI_CHECK(MC_CMD_VPORT_FREE, rc, out_size);
+	MCDI_CHECK(MC_CMD_VPORT_FREE, rc, out_size, 0);
 }
 
 

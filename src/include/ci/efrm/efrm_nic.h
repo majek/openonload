@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -96,6 +96,20 @@ struct efrm_nic {
 	/* Counter incrementing with each reset/hotplug, to avoid races between
 	 * failing operations and resets that would fix them. */
 	unsigned driverlink_generation;
+
+        struct {
+          struct mutex lock;
+          /* indicates that efrm nic is going to be removed
+           * Currently, this blocks further evq/dmaq init mcdi
+           * operations from being issued */
+          int unplugging;
+          /* list of initialized queues by type
+           * used at time of hotplug.
+           * Linked by efrm_vi_q::init_link field.
+           */
+	  struct list_head q[EFHW_N_Q_TYPES];
+        } dmaq_state;
+
 };
 
 

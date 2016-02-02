@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -316,6 +316,12 @@ enum {
 /*! \brief Get the reason for a TX_ERROR event */
 #define EF_EVENT_TX_ERROR_TYPE(e)              ((e).tx_error.subtype)
 
+/*! \brief The adapter clock has previously been set in sync with the
+** system */
+#define EF_VI_SYNC_FLAG_CLOCK_SET 1
+/*! \brief The adapter clock is in sync with the external clock (PTP) */
+#define EF_VI_SYNC_FLAG_CLOCK_IN_SYNC 2
+
 /*! \brief Get the TX descriptor ring ID used for a timestamped packet. */
 #define EF_EVENT_TX_WITH_TIMESTAMP_Q_ID(e)     ((e).tx_timestamp.q_id)
 /*! \brief Get the dma_id used for a timetsamped packet. */
@@ -327,13 +333,10 @@ enum {
 ** packet */
 #define EF_EVENT_TX_WITH_TIMESTAMP_NSEC(e)     ((e).tx_timestamp.ts_nsec)
 /*! \brief Get the sync flags from the timestamp of a transmitted packet */
-#define EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(e) ((e).tx_timestamp.ts_nsec & 3)
-
-/*! \brief The adapter clock has previously been set in sync with the
-** system */
-#define EF_VI_SYNC_FLAG_CLOCK_SET 1
-/*! \brief The adapter clock is in sync with the external clock (PTP) */
-#define EF_VI_SYNC_FLAG_CLOCK_IN_SYNC 2
+#define EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK \
+  (EF_VI_SYNC_FLAG_CLOCK_SET | EF_VI_SYNC_FLAG_CLOCK_IN_SYNC)
+#define EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(e) \
+  ((e).tx_timestamp.ts_nsec & EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK)
 
 /*!\brief The reason for an EF_EVENT_TYPE_TX_ERROR event */
 enum {

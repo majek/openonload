@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -377,16 +377,16 @@ efab_signal_get_tramp_data(struct mm_signal_data **tramp_data)
 {
   struct mm_hash *p;
 
-  read_lock (&oo_mm_tbl_lock);
+  write_lock (&oo_mm_tbl_lock);
   p = oo_mm_tbl_lookup(current->mm);
   if( p == NULL || CI_USER_PTR_GET(p->signal_data.user_data) == NULL) {
-    read_unlock (&oo_mm_tbl_lock);
+    write_unlock (&oo_mm_tbl_lock);
     return -ENOSYS;
   }
   efab_get_mm_hash_locked(p);
   *tramp_data = &p->signal_data;
 
-  read_unlock (&oo_mm_tbl_lock);
+  write_unlock (&oo_mm_tbl_lock);
 
   return 0;
 }

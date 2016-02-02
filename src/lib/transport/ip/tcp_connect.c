@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -371,6 +371,8 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
 
   ci_assert(ts->s.pkt.mtu);
 
+  ts->tcpflags &=~ CI_TCPT_FLAG_FIN_RECEIVED;
+
   /* Now that we know the outgoing route, set the MTU related values.
    * Note, even these values are speculative since the real MTU
    * could change between now and passing the packet to the lower layers
@@ -458,11 +460,13 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   }
 
 #ifdef ONLOAD_OFE
-    if( ni->ofe != NULL )
-      ts->s.ofe_code_start = ofe_socktbl_find(
+  if( ni->ofe_channel != NULL )
+    ts->s.ofe_code_start = ofe_socktbl_find(
                         ni->ofe, OFE_SOCKTYPE_TCP_ACTIVE,
                         tcp_laddr_be32(ts), tcp_raddr_be32(ts),
                         tcp_lport_be16(ts), tcp_rport_be16(ts));
+  else
+    ts->s.ofe_code_start = OFE_ADDR_NULL;
 #endif
 
   rc = ci_tcp_ep_set_filters(ni, S_SP(ts), ts->s.cp.so_bindtodevice,
@@ -508,7 +512,12 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   ts->tcpflags |= NI_OPTS(ni).syn_opts;
 
   if( (ts->tcpflags & CI_TCPT_FLAG_WSCL) ) {
-    ts->rcv_wscl = ci_tcp_wscl_by_buff(ni, ci_tcp_rcvbuf_established(ni, &ts->s));
+    if( NI_OPTS(ni).tcp_rcvbuf_mode == 1 )
+      ts->rcv_wscl =
+	ci_tcp_wscl_by_buff(ni, ci_tcp_max_rcvbuf(ni, ts->amss));
+    else
+      ts->rcv_wscl =
+	ci_tcp_wscl_by_buff(ni, ci_tcp_rcvbuf_established(ni, &ts->s));
     CI_IP_SOCK_STATS_VAL_RXWSCL(ts, ts->rcv_wscl);
   }
   else {
@@ -1430,7 +1439,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
    */
   if( ~s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN ) {
 #ifdef ONLOAD_OFE
-    if( netif->ofe != NULL ) {
+    if( netif->ofe_channel != NULL ) {
       tls->s.ofe_code_start = ofe_socktbl_find(
                         netif->ofe, OFE_SOCKTYPE_TCP_LISTEN,
                         tcp_laddr_be32(tls), INADDR_ANY,
@@ -1439,6 +1448,10 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
                         netif->ofe, OFE_SOCKTYPE_TCP_PASSIVE,
                         tcp_laddr_be32(tls), INADDR_ANY,
                         tcp_lport_be16(ts), 0);
+    }
+    else {
+      tls->s.ofe_code_start = OFE_ADDR_NULL;
+      tls->ofe_promote = OFE_ADDR_NULL;
     }
 #endif
     rc = ci_tcp_ep_set_filters(netif, S_SP(tls), tls->s.cp.so_bindtodevice,

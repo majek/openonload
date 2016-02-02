@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,8 +55,9 @@
 #include <string.h>
 #include <errno.h>
 #include <netdb.h>
-
-/**********************************************************************/
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <stddef.h>
 
 
 static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
@@ -353,4 +354,112 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
  out:
   free(s);
   return rc;
+}
+
+
+void sock_put_int(int sock, int i)
+{
+  i = htonl(i);
+  TEST( send(sock, &i, sizeof(i), 0) == sizeof(i) );
+}
+
+
+int sock_get_int(int sock)
+{
+  int i;
+  TEST( recv(sock, &i, sizeof(i), MSG_WAITALL) == sizeof(i) );
+  return ntohl(i);
+}
+
+
+int sock_get_ifindex(int sock, int* ifindex_out)
+{
+  int rc = -1;
+
+  struct sockaddr_storage sas;
+  socklen_t len = sizeof(sas);
+  TRY( getsockname(sock, (void*) &sas, &len) );
+
+  int addr_off, addr_len;
+  switch( sas.ss_family ) {
+  case AF_INET:;
+    addr_off = offsetof(struct sockaddr_in, sin_addr);
+    addr_len = sizeof(((struct sockaddr_in*) 0)->sin_addr);
+    break;
+  case AF_INET6:
+    addr_off = offsetof(struct sockaddr_in6, sin6_addr);
+    addr_len = sizeof(((struct sockaddr_in6*) 0)->sin6_addr);
+    break;
+  default:
+    return -1;
+  }
+
+  struct ifaddrs *addrs, *iap;
+  TRY( getifaddrs(&addrs) );
+  for( iap = addrs; iap != NULL; iap = iap->ifa_next )
+    if( (iap->ifa_flags & IFF_UP) && iap->ifa_addr &&
+        iap->ifa_addr->sa_family == sas.ss_family &&
+        memcmp((char*) &sas + addr_off,
+               (char*) iap->ifa_addr + addr_off, addr_len) == 0 ) {
+      TEST( (*ifindex_out = if_nametoindex(iap->ifa_name)) != 0 );
+      rc = 0;
+      break;
+    }
+
+  freeifaddrs(addrs);
+  return rc;
+}
+
+
+int getaddrinfo_storage(int family, const char* host, const char* port,
+                        struct sockaddr_storage* sas)
+{
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_flags = AI_PASSIVE;
+  hints.ai_family = family;
+  struct addrinfo* ai;
+  int rc = getaddrinfo(host, port, &hints, &ai);
+  if( rc != 0 ) {
+    fprintf(stderr, "ERROR: could not resolve '%s:%s' (%s)\n",
+            host ? host : "", port, gai_strerror(rc));
+    return -1;
+  }
+  TEST( ai->ai_addrlen <= sizeof(*sas) );
+  memcpy(sas, ai->ai_addr, ai->ai_addrlen);
+  return 0;
+}
+
+
+int mk_socket(int family, int socktype,
+              int op(int sockfd, const struct sockaddr *addr,
+                     socklen_t addrlen),
+              const char* host, const char* port)
+{
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_flags = AI_PASSIVE;
+  hints.ai_family = family;
+  hints.ai_socktype = socktype;
+  struct addrinfo* ai;
+  int rc = getaddrinfo(host, port, &hints, &ai);
+  if( rc != 0 ) {
+    fprintf(stderr, "ERROR: could not resolve '%s:%s' (%s)\n",
+            (host) ? host : "", (port) ? port : "", gai_strerror(rc));
+    return -1;
+  }
+  int sock;
+  if( (sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol)) < 0 ) {
+    fprintf(stderr, "ERROR: socket(%d, %d, %d) failed (%s)\n",
+            ai->ai_family, ai->ai_socktype, ai->ai_protocol, strerror(errno));
+    return -1;
+  }
+  if( op != NULL && op(sock, ai->ai_addr, ai->ai_addrlen) < 0 ) {
+    fprintf(stderr, "ERROR: op(%s, %s) failed (%s)\n",
+            host, port, strerror(errno));
+    close(sock);
+    return -1;
+  }
+  freeaddrinfo(ai);
+  return sock;
 }

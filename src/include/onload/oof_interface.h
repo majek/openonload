@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,7 +49,10 @@ oof_manager_addr_del(struct oof_manager*, unsigned laddr, unsigned ifindex);
 
 extern void
 oof_hwport_up_down(int hwport, int up, int mcast_replicate_capable,
-                   int vlan_filters);
+                   int vlan_filters, int sync);
+
+extern void
+oof_hwport_removed(int hwport);
 
 extern void
 oof_hwport_un_available(int hwport, int available);

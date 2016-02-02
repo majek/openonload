@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -445,7 +445,31 @@ efab_cluster_dump(ci_private_t *priv, void *arg)
                                  op->buf_len);
 }
 
-#ifdef ONLOAD_OFE
+#ifndef ONLOAD_OFE
+
+static int
+efab_ofe_config(ci_private_t *priv, void *arg)
+{
+  ci_log("%s: ERROR: SolarSecure Filter Engine support not built", __func__);
+  return -EOPNOTSUPP;
+}
+
+static int
+efab_ofe_config_done(ci_private_t *priv, void *arg)
+{
+  ci_log("%s: ERROR: SolarSecure Filter Engine support not built", __func__);
+  return -EOPNOTSUPP;
+}
+
+static int
+efab_ofe_get_last_error(ci_private_t *priv, void *arg)
+{
+  ci_log("%s: ERROR: SolarSecure Filter Engine support not built", __func__);
+  return -EOPNOTSUPP;
+}
+
+#else
+
 static int
 efab_ofe_config(ci_private_t *priv, void *arg)
 {
@@ -475,7 +499,7 @@ efab_ofe_config(ci_private_t *priv, void *arg)
   }
   ci_assert(priv->thr->ofe_config);
 
-  orc = ofe_config_command(priv->thr->ofe_config, str);
+  orc = ofe_config_command(priv->thr->ofe_config, NULL, str);
   mutex_unlock(&priv->thr->ofe_mutex);
   kfree(str);
   if( orc != OFE_OK )
@@ -485,9 +509,10 @@ efab_ofe_config(ci_private_t *priv, void *arg)
 static int
 efab_ofe_config_done(ci_private_t *priv, void *arg)
 {
+  ci_netif* ni = &(priv->thr->netif);
   enum ofe_status orc;
 
-  if( priv->thr->netif.ofe == NULL )
+  if( ni->ofe == NULL )
     return -EINVAL;
 
   mutex_lock(&priv->thr->ofe_mutex);
@@ -496,9 +521,25 @@ efab_ofe_config_done(ci_private_t *priv, void *arg)
     priv->thr->ofe_config = NULL;
     if( orc != OFE_OK ) {
       mutex_unlock(&priv->thr->ofe_mutex);
-      ci_log("%s: ERROR %s", __func__,
-             ofe_engine_get_last_error(priv->thr->netif.ofe));
-      return 0;
+      ci_log("%s: ERROR %s", __func__, ofe_engine_get_last_error(ni->ofe));
+      return -(ofe_rc2errno(orc));
+    }
+    if( ni->ofe_channel == NULL ) {
+      ni->ofe_channel = kmalloc(ofe_channel_bytes(ni->ofe), GFP_KERNEL);
+      if( ni->ofe_channel == NULL ) {
+        mutex_unlock(&priv->thr->ofe_mutex);
+        ci_log("ERROR: [%d] failed to allocate SSFE channel", NI_ID(ni));
+        return -ENOMEM;
+      }
+      orc = ofe_channel_init(ni->ofe_channel, ni->ofe, 0);
+      if( orc != OFE_OK ) {
+        mutex_unlock(&priv->thr->ofe_mutex);
+        ci_log("ERROR: [%d] ofe_channel_init failed: %s", NI_ID(ni),
+               ofe_engine_get_last_error(ni->ofe));
+        kfree(ni->ofe_channel);
+        ni->ofe_channel = NULL;
+        return -(ofe_rc2errno(orc));
+      }
     }
   }
   mutex_unlock(&priv->thr->ofe_mutex);
@@ -518,6 +559,7 @@ efab_ofe_get_last_error(ci_private_t *priv, void *arg)
   mutex_unlock(&priv->thr->ofe_mutex);
   return 0;
 }
+
 #endif
 
 
@@ -581,7 +623,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
       rc = efab_thr_table_lookup(NULL, index, flags, &next_thr);
       if( rc == 0 ) {
         if( next_thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )
-          efab_tcp_helper_k_ref_count_dec(next_thr, 1);
+          efab_tcp_helper_k_ref_count_dec(next_thr);
         else
           efab_thr_release(next_thr);
         info->u.ni_next_ni.index = index;
@@ -655,7 +697,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
      * stack but just a ref_count_dec in case of orphan
      */
     if( thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )
-      efab_tcp_helper_k_ref_count_dec(thr, 1);
+      efab_tcp_helper_k_ref_count_dec(thr);
     else
       efab_thr_release(thr);
   }
@@ -1266,7 +1308,7 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
   ci_tcp_drop(&thr->netif, ts, ECONNRESET);
   ci_assert_equal(ep->os_port_keeper, NULL);
   ci_netif_unlock(&thr->netif);
-  efab_tcp_helper_k_ref_count_dec(thr, 1);
+  efab_tcp_helper_k_ref_count_dec(thr);
   return 0;
 
 fail1:
@@ -1400,11 +1442,9 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_MOVE_FD, efab_file_move_to_alien_stack_rsop),
   op(OO_IOC_EP_REUSEPORT_BIND, efab_tcp_helper_reuseport_bind),
   op(OO_IOC_CLUSTER_DUMP,      efab_cluster_dump),
-#ifdef ONLOAD_OFE
-  op(OO_IOC_OFE_CONFIG, efab_ofe_config),
-  op(OO_IOC_OFE_CONFIG_DONE, efab_ofe_config_done),
+  op(OO_IOC_OFE_CONFIG,         efab_ofe_config),
+  op(OO_IOC_OFE_CONFIG_DONE,    efab_ofe_config_done),
   op(OO_IOC_OFE_GET_LAST_ERROR, efab_ofe_get_last_error),
-#endif
   op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
 #undef op
 };

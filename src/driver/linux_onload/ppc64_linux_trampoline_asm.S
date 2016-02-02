@@ -42,16 +42,27 @@ __onload_trampoline_ppc64:
         std 31, 8(1)
         bl 1f
 1:      mflr 31
+#if !defined(_CALL_ELF) || _CALL_ELF < 2
         ld 2, __onload_end_trampoline_ppc64-1b+8(31)
+#else
+        std 2, __onload_end_trampoline_ppc64-1b+8(31)
+#endif
         ld 31, __onload_end_trampoline_ppc64-1b(31)
         mtlr 31
+#if defined(_CALL_ELF) && _CALL_ELF >= 2
+	mr 12, 31
+#endif
         ld 31, 8(1)
         blrl
         /* Same trick again on the way back */
         std 31, 8(1)
         bl 2f
 2:      mflr 31
+#if !defined(_CALL_ELF) || _CALL_ELF < 2
         ld 2, __onload_end_trampoline_ppc64-2b+24(31)
+#else
+        ld 2, __onload_end_trampoline_ppc64-2b+8(31)
+#endif
         ld 31, __onload_end_trampoline_ppc64-2b+16(31)
         mtlr 31
         ld 31, 8(1)

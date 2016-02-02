@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1045,6 +1045,9 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 /* Handle a received packet.  Second half: Touches packet payload. */
 void __efx_rx_packet(struct efx_channel *channel)
 {
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_GRO)
+	struct napi_struct *napi = &channel->napi_str;
+#endif
 	struct efx_nic *efx = channel->efx;
 	struct efx_rx_buffer *rx_buf =
 		efx_rx_buffer(&channel->rx_queue, channel->rx_pkt_index);
@@ -1122,7 +1125,7 @@ void __efx_rx_packet(struct efx_channel *channel)
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_GRO)
 	if ((rx_buf->flags & EFX_RX_PKT_TCP) && !channel->type->receive_skb &&
 	    !efx_channel_busy_polling(channel) &&
-	    !efx_should_copy_rx_packet(rx_buf))
+	    (!efx_should_copy_rx_packet(rx_buf) || napi->gro_list))
 		efx_rx_packet_gro(channel, rx_buf, channel->rx_pkt_n_frags, eh);
 	else
 #endif
@@ -2186,7 +2189,7 @@ bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota)
  * Return: %true if the specification is a non-drop RX filter that
  * matches a local MAC address I/G bit value of 1 or matches a local
  * IPv4 or IPv6 address value in the respective multicast address
- * range.  Otherwise %false.
+ * range, or is IPv4 broadcast.  Otherwise %false.
  */
 bool efx_filter_is_mc_recipient(const struct efx_filter_spec *spec)
 {
@@ -2203,7 +2206,8 @@ bool efx_filter_is_mc_recipient(const struct efx_filter_spec *spec)
 	     (EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_LOC_HOST)) ==
 	    (EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_LOC_HOST)) {
 		if (spec->ether_type == htons(ETH_P_IP) &&
-		    ipv4_is_multicast(spec->loc_host[0]))
+		    (ipv4_is_multicast(spec->loc_host[0]) ||
+		     ipv4_is_lbcast(spec->loc_host[0])))
 			return true;
 		if (spec->ether_type == htons(ETH_P_IPV6) &&
 		    ((const u8 *)spec->loc_host)[0] == 0xff)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -515,6 +515,8 @@ static int efx_mcdi_await_completion(struct efx_nic *efx)
 			if (net_ratelimit())
 				netif_warn(efx, drv, efx->net_dev,
 					   "MCDI completion wasn't processed in a timely manner\n");
+		} else if (efx_nic_hw_unavailable(efx)) {
+			return -ENETDOWN;
 		} else {
 			return -ETIMEDOUT;
 		}
@@ -1748,12 +1750,15 @@ fail:
 	return rc;
 }
 
+#define EFX_MCDI_NVRAM_DEFAULT_WRITE_LEN 128
+
 int efx_mcdi_nvram_info(struct efx_nic *efx, unsigned int type,
 			size_t *size_out, size_t *erase_size_out,
-			bool *protected_out)
+			size_t *write_size_out, bool *protected_out)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_INFO_IN_LEN);
-	MCDI_DECLARE_BUF(outbuf, MC_CMD_NVRAM_INFO_OUT_LEN);
+	MCDI_DECLARE_BUF(outbuf, MC_CMD_NVRAM_INFO_V2_OUT_LEN);
+	size_t write_size = 0;
 	size_t outlen;
 	int rc;
 
@@ -1768,6 +1773,14 @@ int efx_mcdi_nvram_info(struct efx_nic *efx, unsigned int type,
 		goto fail;
 	}
 
+	if (outlen >= MC_CMD_NVRAM_INFO_V2_OUT_LEN)
+		write_size = MCDI_DWORD(outbuf, NVRAM_INFO_V2_OUT_WRITESIZE);
+
+	if (write_size == 0)
+		/* Not provided by MCDI, or not set for this partition. */
+		write_size = EFX_MCDI_NVRAM_DEFAULT_WRITE_LEN;
+
+	*write_size_out = write_size;
 	*size_out = MCDI_DWORD(outbuf, NVRAM_INFO_OUT_SIZE);
 	*erase_size_out = MCDI_DWORD(outbuf, NVRAM_INFO_OUT_ERASESIZE);
 	*protected_out = !!(MCDI_DWORD(outbuf, NVRAM_INFO_OUT_FLAGS) &
@@ -2289,9 +2302,14 @@ static int efx_mcdi_nvram_read(struct efx_nic *efx, unsigned int type,
 static int efx_mcdi_nvram_write(struct efx_nic *efx, unsigned int type,
 				loff_t offset, const u8 *buffer, size_t length)
 {
-	MCDI_DECLARE_BUF(inbuf,
-			 MC_CMD_NVRAM_WRITE_IN_LEN(EFX_MCDI_NVRAM_LEN_MAX));
+	efx_dword_t *inbuf;
+	size_t inlen;
 	int rc;
+
+	inlen = ALIGN(MC_CMD_NVRAM_WRITE_IN_LEN(length), 4);
+	inbuf = kzalloc(inlen, GFP_KERNEL);
+	if (!inbuf)
+		return -ENOMEM;
 
 	MCDI_SET_DWORD(inbuf, NVRAM_WRITE_IN_TYPE, type);
 	MCDI_SET_DWORD(inbuf, NVRAM_WRITE_IN_OFFSET, offset);
@@ -2300,9 +2318,9 @@ static int efx_mcdi_nvram_write(struct efx_nic *efx, unsigned int type,
 
 	BUILD_BUG_ON(MC_CMD_NVRAM_WRITE_OUT_LEN != 0);
 
-	rc = efx_mcdi_rpc(efx, MC_CMD_NVRAM_WRITE, inbuf,
-			  ALIGN(MC_CMD_NVRAM_WRITE_IN_LEN(length), 4),
-			  NULL, 0, NULL);
+	rc = efx_mcdi_rpc(efx, MC_CMD_NVRAM_WRITE, inbuf, inlen, NULL, 0, NULL);
+	kfree(inbuf);
+
 	return rc;
 }
 
@@ -2416,7 +2434,11 @@ int efx_mcdi_mtd_write(struct mtd_info *mtd, loff_t start,
 	}
 
 	while (offset < end) {
-		chunk = min_t(size_t, end - offset, EFX_MCDI_NVRAM_LEN_MAX);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_MTD_WRITESIZE)
+		chunk = min_t(size_t, end - offset, mtd->writesize);
+#else
+		chunk = min_t(size_t, end - offset, part->common.writesize);
+#endif
 		rc = efx_mcdi_nvram_write(efx, part->nvram_type, offset,
 					  buffer, chunk);
 		if (rc)

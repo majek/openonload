@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -610,7 +610,7 @@ static void efrm_remove_files( efrm_filter_table_t* table )
 		table->efrm_ft_rules_file = NULL;
 	}
 	if ( table && table->efrm_ft_directory ) {
-		efrm_proc_dir_put(table->efrm_ft_directory);
+		efrm_proc_intf_dir_put(table->efrm_ft_directory);
 		table->efrm_ft_directory = NULL;
 	}
 }
@@ -624,7 +624,7 @@ static void efrm_add_files( efrm_filter_table_t* table )
 		return;
 	if ( !table->efrm_ft_directory ) {
 		char const* ifname = table->efrm_ft_interface_name;
-		table->efrm_ft_directory = efrm_proc_dir_get( ifname );
+		table->efrm_ft_directory = efrm_proc_intf_dir_get(ifname);
 	}
 	if ( table->efrm_ft_directory && !table->efrm_ft_rules_file ) {
 		table->efrm_ft_rules_file = efrm_proc_create_file(
@@ -872,7 +872,7 @@ static int print_eth_rule ( struct seq_file *seq, char const* iface,
                                 efrm_filter_rule_macaddress_t const* rule,
                                 unsigned short vlan_id )
 {
-	return seq_printf( seq, "if=%s rule=%d protocol=eth "
+	seq_printf( seq, "if=%s rule=%d protocol=eth "
 		"mac=%02x:%02x:%02x:%02x:%02x:%02x"
 		"/%02x:%02x:%02x:%02x:%02x:%02x vlan=%d action=%s\n",
 		iface ? iface : "?", number,
@@ -890,6 +890,7 @@ static int print_eth_rule ( struct seq_file *seq, char const* iface,
 		(unsigned char) rule->efrm_lcl_mask[5] & 0xff,
 		vlan_id,
 		action );
+	return 0;
 };
 
 static int print_ip_rule ( struct seq_file *seq, char const* iface,
@@ -898,7 +899,7 @@ static int print_ip_rule ( struct seq_file *seq, char const* iface,
                                efrm_protocol_t protocol,
                                unsigned short vlan_id )
 {
-	return seq_printf( seq, "if=%s rule=%d protocol=%s"
+	seq_printf( seq, "if=%s rule=%d protocol=%s"
 		" local_ip=" CI_IP_PRINTF_FORMAT "/" CI_IP_PRINTF_FORMAT
 		" remote_ip=" CI_IP_PRINTF_FORMAT "/" CI_IP_PRINTF_FORMAT
 		" local_port=%d-%d remote_port=%d-%d vlan=%d action=%s\n",
@@ -912,6 +913,7 @@ static int print_ip_rule ( struct seq_file *seq, char const* iface,
 		rule->efrp_rmt_min, rule->efrp_rmt_max,
 		vlan_id,
 		action );
+	return 0;
 }
 
 static int print_rule ( struct seq_file *seq,
@@ -1904,16 +1906,17 @@ void efrm_filter_remove(struct efrm_client *client, int filter_id)
 EXPORT_SYMBOL(efrm_filter_remove);
 
 
-void efrm_filter_redirect(struct efrm_client *client, int filter_id,
+int efrm_filter_redirect(struct efrm_client *client, int filter_id,
 			  int rxq_i, int stack_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
 	if ( efx_dev != NULL ) {
-		efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
+		return efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
 	}
 	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
 	 * nothing to do. */
+        return -ENODEV;
 }
 EXPORT_SYMBOL(efrm_filter_redirect);
 

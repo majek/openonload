@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,7 +47,7 @@
 /*! \cidoxg_lib_ef */
 #include "ef_vi_internal.h"
 #include "logging.h"
-#include "mcdi_pcol.h"
+#include <ci/efhw/mc_driver_pcol.h>
 #include <etherfabric/packedstream.h>
 
 
@@ -98,8 +98,6 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
   /* ABORT bit not included in this as it is not set by fw */
   const ci_uint32 discard_mask =
     CI_BSWAPC_LE32(1 << ESF_DZ_RX_ECC_ERR_LBN |
-                   1 << ESF_DZ_RX_CRC1_ERR_LBN |
-                   1 << ESF_DZ_RX_CRC0_ERR_LBN |
                    1 << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN |
                    1 << ESF_DZ_RX_IPCKSUM_ERR_LBN |
                    1 << ESF_DZ_RX_ECRC_ERR_LBN);
@@ -153,8 +151,6 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
   ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
 
   if( QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev) |
-      QWORD_GET_U(ESF_DZ_RX_CRC1_ERR, *ev) |
-      QWORD_GET_U(ESF_DZ_RX_CRC0_ERR, *ev) |
       QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev) )
     ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CRC_BAD;
   else
@@ -176,8 +172,6 @@ ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
 
   const ci_uint32 discard_mask =
     CI_BSWAPC_LE32(1 << ESF_DZ_RX_ECC_ERR_LBN |
-                   1 << ESF_DZ_RX_CRC1_ERR_LBN |
-                   1 << ESF_DZ_RX_CRC0_ERR_LBN |
                    1 << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN |
                    1 << ESF_DZ_RX_IPCKSUM_ERR_LBN |
                    1 << ESF_DZ_RX_ECRC_ERR_LBN);
@@ -214,8 +208,6 @@ ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
     return;
 
   if (QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev)  |
-      QWORD_GET_U(ESF_DZ_RX_CRC1_ERR, *ev) |
-      QWORD_GET_U(ESF_DZ_RX_CRC0_ERR, *ev) |
       QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev))
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_FCS;
   if (QWORD_GET_U(ESF_DZ_RX_TCPUDP_CKSUM_ERR, *ev))
@@ -503,8 +495,16 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev,
      * this has happened, so just swallow the event in NDEBUG builds. */
     LOG(ef_log("%s: Saw flush in poll (code=%u)", __FUNCTION__, code));
     break;
+  case MCDI_EVENT_CODE_TX_ERR:
+    ef_log("%s: ERROR: MCDI TX error event - check parameters to "
+	   "transmit_init()", __FUNCTION__);
+    break;
+  case MCDI_EVENT_CODE_RX_ERR:
+    ef_log("%s: ERROR: MCDI RX error event - check parameters to "
+	   "receive_init()", __FUNCTION__);
+    break;
   default:
-    ef_log("%s: ERROR: Unhandled mcdi event code=%u", __FUNCTION__,
+    ef_log("%s: ERROR: Unhandled MCDI event code=%u", __FUNCTION__,
            code);
     break;
   }
@@ -698,7 +698,6 @@ ef_vi_inline void ef_vi_packed_stream_alloc_credits(ef_vi* vi, int n_credits)
   uint32_t* doorbell = (void*) (vi->io + ER_DZ_RX_DESC_UPD_REG);
   qs->rx_ps_credit_avail += n_credits;
   EF_VI_ASSERT(qs->rx_ps_credit_avail < 128);
-  wmb();
   writel(ES_DZ_PS_MAGIC_DOORBELL_CREDIT | n_credits, doorbell);
   mmiowb();
 }

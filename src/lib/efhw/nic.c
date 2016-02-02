@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -265,6 +265,22 @@ void efhw_nic_dtor(struct efhw_nic *nic)
 	EFHW_TRACE("%s: event queues ... done", __FUNCTION__);
 
 	spin_lock_destroy(&nic->the_reg_lock);
+	spin_lock_destroy(&nic->pci_dev_lock);
 
 	EFHW_TRACE("%s: DONE", __FUNCTION__);
 }
+
+
+/* Returns the struct pci_dev for the NIC, taking out a reference to it.
+ * Callers should call pci_dev_put() on the returned pointer to release that
+ * reference when they're finished. */
+struct pci_dev* efhw_nic_get_pci_dev(struct efhw_nic* nic)
+{
+	struct pci_dev* dev;
+	spin_lock_bh(&nic->pci_dev_lock);
+	dev = nic->pci_dev;
+	pci_dev_get(dev);
+	spin_unlock_bh(&nic->pci_dev_lock);
+	return dev;
+}
+

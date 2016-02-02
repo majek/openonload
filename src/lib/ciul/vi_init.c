@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -241,11 +241,6 @@ int ef_vi_init(struct ef_vi* vi, int arch, int variant, int revision,
     break;
   case EF_VI_ARCH_EF10:
     ef10_vi_init(vi);
-    /* Temporary hack: In future we'll get this from the driver (which will
-     * get it from the adapter).  This value comes from:
-     *     PTP_TX_MAC_PCS_DELAY * 1e9 / (1 << 27)
-     */
-    vi->tx_ts_correction_ns = 178;
     break;
   default:
     return -EINVAL;
@@ -320,8 +315,14 @@ void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction)
 }
 
 
-void ef_vi_init_tx_timestamping(struct ef_vi* vi)
+void ef_vi_init_tx_timestamping(struct ef_vi* vi, int tx_ts_correction)
 {
+  /* Bottom two bits of the nsec field contain the sync flags, and we
+   * don't want to affect those when we add in the correction, so
+   * ensure those bits are zero 
+   */
+  vi->tx_ts_correction_ns = tx_ts_correction &=~ 
+    EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK;
   vi->inited |= EF_VI_INITED_TX_TIMESTAMPING;
 }
 

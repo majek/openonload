@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -166,6 +166,74 @@ static void ci_tcp_recvmsg_send_wnd_update(ci_netif* ni, ci_tcp_state* ts,
   ci_netif_unlock(ni);
 }
 
+/* This function calculates the appropriate TCP receive buffer space
+ * using Dynamic Right Sizing. It should be called whenever data is copied
+ * to the application.
+ */
+void ci_tcp_rcvbuf_drs(ci_netif* netif, ci_tcp_state* ts)
+{
+  ci_iptime_t time;
+  ci_uint32 rcv_bytes;
+
+  /* Set an upper ceiling on rcvbuf for a single socket.
+   * In general, DRS will pick a smaller size than this, based on how much
+   * data the socket is transfering each RTT.
+   * Useful to make this fairly big so that a stack with a single socket can 
+   * achieve good throughput. If we find that resource contention with many
+   * sockets is a problem can adjust via EF_TCP_SOCKBUF_MAX_FRACTION.
+   * If neceesary, could implement a fairness algorithm to control access to
+   * the buffers (similar to flow WFQ). But general advice would be to make
+   * sufficient packet buffers available (e.g. at least sum of Bandwidth Delay
+   * Products * 4) */
+  int max_rcvbuf_packets =
+    NI_OPTS(netif).max_rx_packets >> NI_OPTS(netif).tcp_sockbuf_max_fraction;
+
+  time = ci_tcp_time_now(netif) - ts->rcvbuf_drs.time;
+  if( time < (ts->sa >> 3) || ts->sa == 0 )
+    return;
+
+  /* Number of bytes delivered to user in last RTT */
+  rcv_bytes = ts->rcv_delivered - ts->rcvbuf_drs.seq;
+  if( rcv_bytes <= ts->rcvbuf_drs.bytes )
+    goto new_period;
+
+  /* rcv_bytes gives the number of bytes received in the previous RTT.
+   * The current RTT worth of data is already in flight and so we need
+   * to size the buffer (to advertise in the next ACK) for the following RTT:
+   * [prev RTT][current RTT][following RTT]
+   */
+
+  if( ! (ts->s.s_flags & CI_SOCK_FLAG_SET_SNDBUF) ) {
+    int rcv_wnd, rcvbuf;
+
+    /* at least 2x factor to cope with packet loss, plus small extra cushion */
+    rcv_wnd = (rcv_bytes << 1) + 16 * ts->amss;
+
+    if( rcv_bytes >= ts->rcvbuf_drs.bytes + (ts->rcvbuf_drs.bytes >> 2) ) {
+      /* traffic grew, but by how much ? */
+      if (rcv_bytes >= ts->rcvbuf_drs.bytes + (ts->rcvbuf_drs.bytes >> 1))
+	/* looks like 2x growth per RTT so we need rcv_win > 4 * rcv_bytes */
+	rcv_wnd <<= 1;
+      else
+	/* looks like slow start, so want rcv_win > 3 * rcv_bytes */
+	rcv_wnd += (rcv_wnd >> 1);
+    }
+
+    rcvbuf = CI_MIN(rcv_wnd, max_rcvbuf_packets * ts->amss);
+
+    if( rcvbuf > ts->s.so.rcvbuf ) {
+      ts->s.so.rcvbuf = rcvbuf;
+      ci_tcp_set_rcvbuf(netif, ts);
+      /* Window will be calculated from this new value.  */
+    }
+  }
+  ts->rcvbuf_drs.bytes = rcv_bytes;
+
+ new_period:
+  ts->rcvbuf_drs.seq = ts->rcv_delivered;
+  ts->rcvbuf_drs.time = ci_tcp_time_now(netif);
+}
+
 
 /* Copy data from the receive queue to the app's buffer(s).  Returns the
 ** number of bytes copied.  This function also sends window updates as
@@ -236,6 +304,9 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
     if(CI_LIKELY( ! (rinf->a->flags & MSG_PEEK) )) {
       ci_assert(peek_off == 0);
       ts->rcv_delivered += n;
+      if( NI_OPTS(netif).tcp_rcvbuf_mode == 1 )
+	/* for now run every time we update rcv_delivered */
+	ci_tcp_rcvbuf_drs(netif, ts);
       if( oo_offbuf_left(&pkt->buf) == 0 ) {
         /* We've emptied the current packet. */
         if( CI_UNLIKELY(SEQ_LE(ts->ack_trigger, ts->rcv_delivered)) )
@@ -665,6 +736,9 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     goto poll_recv_queue;
   if( rinf.rc )  goto success_unlock_out;
  check_errno:
+  /* tcp recv() does not set errno if the connection was properly shut down */
+  if( ts->tcpflags & CI_TCPT_FLAG_FIN_RECEIVED )
+    goto unlock_out;
   if (ts->s.so_error) {
     ci_int32 rc1 = ci_get_so_error(&ts->s);
     if (rc1 != 0)
@@ -1170,6 +1244,9 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
     rinf->stack_locked = 0;
   }
  out:
+  if( NI_OPTS(ni).tcp_rcvbuf_mode == 1 )
+    ci_tcp_rcvbuf_drs(ni, ts);
+
   /* Must return if we've filled the app buffer. */
   must_return_from_recv |= ci_iovec_ptr_is_empty_proper(&rinf->piov);
 

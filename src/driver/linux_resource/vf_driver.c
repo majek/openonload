@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -545,9 +545,14 @@ static void vf_iommu_to_default_group(struct pci_dev *pci_dev)
 	struct iommu_group *group = iommu_group_get(&pci_dev->dev);
 	struct iommu_group *master_group = iommu_group_get(&pci_dev->physfn->dev);
 
+	if (!iommu_present(pci_dev->dev.bus)) {
+		EFRM_ASSERT(group == NULL && master_group == NULL);
+		return;
+	}
+
 	if (group == NULL || master_group == NULL) {
-		EFRM_ERR("Failed to revert %s back to default IOMMU group",
-			 pci_name(pci_dev));
+		EFRM_ERR("Failed to revert %s back to default IOMMU group: %p %p",
+			 pci_name(pci_dev), group, master_group);
 		if( group != NULL )
 			iommu_group_put(group);
 		if( master_group != NULL )

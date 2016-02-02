@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -313,6 +313,7 @@ AOE_INFO_ATTR(fpga_power, aoe_mcdi_info_fpga_power);
 AOE_INFO_ATTR(bad_sodimm, aoe_mcdi_info_bad_sodimm);
 AOE_INFO_ATTR(has_byteblaster, aoe_mcdi_info_has_byte_blaster);
 AOE_INFO_ATTR(fc_running, aoe_mcdi_info_fc_running);
+AOE_INFO_ATTR(aoe_state, aoe_mcdi_info_aoe_state);
 AOE_INFO_ATTR(boot_result, aoe_mcdi_info_boot_result);
 
 /* FPGA operations */
@@ -366,6 +367,7 @@ static struct attribute *aoe_state_attrs_6902F[] = {
 	&aoe_state_attr_bad_sodimm.attr,
 	&aoe_state_attr_has_byteblaster.attr,
 	&aoe_state_attr_fc_running.attr,
+	&aoe_state_attr_aoe_state.attr,
 	&aoe_state_attr_boot_result.attr,
 	NULL,
 };
@@ -383,6 +385,7 @@ static struct attribute *aoe_state_attrs_7942F[] = {
 	&aoe_state_attr_fpga_power.attr,
 	&aoe_state_attr_bad_sodimm.attr,
 	&aoe_state_attr_fc_running.attr,
+	&aoe_state_attr_aoe_state.attr,
 	&aoe_state_attr_boot_result.attr,
 	NULL,
 };

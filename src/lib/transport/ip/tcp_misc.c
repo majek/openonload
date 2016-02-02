@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -199,8 +199,10 @@ static void __ci_tcp_state_free(ci_netif *ni, ci_tcp_state *ts)
       peer->local_peer = OO_SP_NULL;
   }
 
+#if CI_CFG_PIO
   /* Free up any associated templated sends */
   ci_tcp_tmpl_free_all(ni, ts);
+#endif
 
   /* Remove from any lists we're in. */
   ci_ni_dllist_remove_safe(ni, &ts->s.b.post_poll_link);
@@ -316,7 +318,9 @@ void ci_tcp_set_established_state(ci_netif* ni, ci_tcp_state* ts)
   ** modified them).  The defaults are too small, but we need to stick with
   ** them at socket creation time because some apps (e.g. netperf) modify
   ** their behaviour depending on what they see in SO_SNDBUF and SO_RCVBUF.
-  ** TODO: If would be more elegant to grow them dynamically as needed.
+  **
+  ** It would be more elegant to grow them dynamically as needed:
+  ** EF_TCP_SNDBUF_MODE=2 and EF_TCP_RCVBUF_MODE=1 now do this.
   */
   if( NI_OPTS(ni).tcp_sndbuf_user != 0 )
     ts->s.so.sndbuf = oo_adjust_SO_XBUF(NI_OPTS(ni).tcp_sndbuf_user);
@@ -334,6 +338,11 @@ void ci_tcp_set_established_state(ci_netif* ni, ci_tcp_state* ts)
 
   ts->s.so.rcvbuf = ci_tcp_rcvbuf_established(ni, &ts->s);
   ci_tcp_set_rcvbuf(ni, ts);
+
+  /* setup stats for Dynamic Right Sizing */
+  ts->rcvbuf_drs.bytes = ts->rcv_wnd_advertised;
+  ts->rcvbuf_drs.seq   = ts->rcv_delivered;
+  ts->rcvbuf_drs.time  = ci_tcp_time_now(ni);
 
 #if CI_CFG_PORT_STRIPING
   if( ts->tcpflags & CI_TCPT_FLAG_STRIPE ) {
@@ -1658,6 +1667,15 @@ void ci_tcp_moderate_sndbuf(ci_netif* ni, ci_tcp_state* ts)
 				ci_tcp_sendq_n_pkts(ts) >> 1);
     ts->so_sndbuf_pkts = CI_MAX(ts->so_sndbuf_pkts, min_sndbuf_pkts);
   }
+}
+
+
+ci_int32 ci_tcp_max_rcvbuf(ci_netif* ni, ci_uint16 amss)
+{
+  /* estimate the largest rcvbuf we could allocate in
+   * ci_tcp_rcvbuf_drs() */
+  return ( NI_OPTS(ni).max_rx_packets >>
+           NI_OPTS(ni).tcp_sockbuf_max_fraction ) * amss;
 }
 
 

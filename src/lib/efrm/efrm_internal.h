@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,9 @@ struct efrm_client {
 	struct efhw_nic *nic;
 	int ref_count;
 	struct list_head resources;
+
+#define EFRM_CLIENT_DISABLE_POST_RESET  0x00000001u
+	uint32_t flags;
 };
 
 
@@ -75,8 +78,10 @@ static inline void efrm_resource_init(struct efrm_resource *rs,
 }
 
 #ifdef __KERNEL__
+extern void efrm_nic_enable_post_reset(struct efhw_nic* nic);
 extern int efrm_nic_post_reset(struct efhw_nic *nic);
 extern int efrm_nic_reset_suspend(struct efhw_nic *nic);
+extern void efrm_nic_flush_all_queues(struct efhw_nic *nic, int nohw);
 #endif
 
 

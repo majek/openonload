@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -335,9 +335,11 @@
 #define        MC_CMD_FC_IN_DDR_TEST_START_B1_WIDTH 1
 
 /* MC_CMD_FC_IN_DDR_TEST_POLL msgrequest */
-#define    MC_CMD_FC_IN_DDR_TEST_POLL_LEN 8
+#define    MC_CMD_FC_IN_DDR_TEST_POLL_LEN 12
 #define       MC_CMD_FC_IN_DDR_TEST_CMD_OFST 0
 /*            MC_CMD_FC_IN_DDR_TEST_HEADER_OFST 4 */
+/* Clear previous test result and prepare for restarting DDR test */
+#define       MC_CMD_FC_IN_DDR_TEST_POLL_CLEAR_RESULT_FOR_DDR_TEST_OFST 8
 
 /* MC_CMD_FC_IN_GET_ASSERT msgrequest */
 #define    MC_CMD_FC_IN_GET_ASSERT_LEN 4
@@ -354,6 +356,10 @@
 #define          MC_CMD_FC_IN_FPGA_BUILD_SERVICES 0x2
 /* enum: Get the BSP version */
 #define          MC_CMD_FC_IN_FPGA_BUILD_BSP_VERSION 0x3
+/* enum: Get build register for V2 (SFA974X) */
+#define          MC_CMD_FC_IN_FPGA_BUILD_BUILD_V2 0x4
+/* enum: GEt the services register for V2 (SFA974X) */
+#define          MC_CMD_FC_IN_FPGA_BUILD_SERVICES_V2 0x5
 
 /* MC_CMD_FC_IN_READ_MAP msgrequest */
 #define    MC_CMD_FC_IN_READ_MAP_LEN 8
@@ -711,6 +717,7 @@
 #define       MC_CMD_FC_IN_DDR_OP_OFST 4
 #define          MC_CMD_FC_IN_DDR_SET_SPD  0x0 /* enum */
 #define          MC_CMD_FC_IN_DDR_GET_STATUS  0x1 /* enum */
+#define          MC_CMD_FC_IN_DDR_SET_INFO  0x2 /* enum */
 #define       MC_CMD_FC_IN_DDR_BANK_OFST 8
 #define          MC_CMD_FC_IN_DDR_BANK_B0  0x0 /* enum */
 #define          MC_CMD_FC_IN_DDR_BANK_B1  0x1 /* enum */
@@ -733,6 +740,15 @@
 #define       MC_CMD_FC_IN_DDR_SPD_NUM 128
 /* Page index of the spd data copied into MC_CMD_FC_IN_DDR_SPD */
 #define       MC_CMD_FC_IN_DDR_SPD_PAGE_ID_OFST 144
+
+/* MC_CMD_FC_IN_DDR_SET_INFO msgrequest */
+#define    MC_CMD_FC_IN_DDR_SET_INFO_LEN 16
+/*            MC_CMD_FC_IN_CMD_OFST 0 */
+/*            MC_CMD_FC_IN_DDR_OP_OFST 4 */
+/* Affected bank */
+/*            MC_CMD_FC_IN_DDR_BANK_OFST 8 */
+/* Size of DDR */
+#define       MC_CMD_FC_IN_DDR_SIZE_OFST 12
 
 /* MC_CMD_FC_IN_DDR_GET_STATUS msgrequest */
 #define    MC_CMD_FC_IN_DDR_GET_STATUS_LEN 12
@@ -1266,6 +1282,116 @@
 #define        MC_CMD_FC_OUT_FPGA_BUILD_REVISION_HIGH_LBN 0
 #define        MC_CMD_FC_OUT_FPGA_BUILD_REVISION_HIGH_WIDTH 16
 
+/* MC_CMD_FC_OUT_FPGA_BUILD_V2 msgresponse */
+#define    MC_CMD_FC_OUT_FPGA_BUILD_V2_LEN 32
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_COMPONENT_INFO_OFST 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_IS_APPLICATION_LBN 31
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_IS_APPLICATION_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_IS_LICENSED_LBN 30
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_IS_LICENSED_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_COMPONENT_ID_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_COMPONENT_ID_WIDTH 14
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_VERSION_MAJOR_LBN 12
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_VERSION_MAJOR_WIDTH 4
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_VERSION_MINOR_LBN 4
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_VERSION_MINOR_WIDTH 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_BUILD_NUM_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_BUILD_NUM_WIDTH 4
+/* Build timestamp (seconds since epoch) */
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_TIMESTAMP_OFST 4
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_PARAMETERS_OFST 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_PMA_PASSTHROUGH_LBN 31
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_PMA_PASSTHROUGH_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM2_QDR_DEF_LBN 29
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM2_QDR_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM1_QDR_DEF_LBN 28
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM1_QDR_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DDR3_ECC_ENABLED_LBN 27
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DDR3_ECC_ENABLED_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE2_DDR3_DEF_LBN 26
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE2_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE1_DDR3_DEF_LBN 25
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE1_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM2_TO_DDR3_DEF_LBN 24
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM2_TO_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM1_T0_DDR3_DEF_LBN 23
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM1_T0_DDR3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE2_RLDRAM_DEF_LBN 22
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE2_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE1_RLDRAM_DEF_LBN 21
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DISCRETE1_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM2_RLDRAM_DEF_LBN 20
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM2_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM1_RLDRAM_DEF_LBN 19
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SODIMM1_RLDRAM_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC0_3_SPEED_LBN 18
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC0_3_SPEED_WIDTH 1
+#define          MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC0_3_SPEED_10G 0x0 /* enum */
+#define          MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC0_3_SPEED_40G 0x1 /* enum */
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP4_7_SPEED_LBN 17
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP4_7_SPEED_WIDTH 1
+#define          MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP4_7_SPEED_10G 0x0 /* enum */
+#define          MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP4_7_SPEED_40G 0x1 /* enum */
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP0_3_SPEED_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP0_3_SPEED_WIDTH 1
+#define          MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP0_3_SPEED_10G 0x0 /* enum */
+#define          MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP0_3_SPEED_40G 0x1 /* enum */
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP7_DEF_LBN 15
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP7_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP6_DEF_LBN 14
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP6_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP5_DEF_LBN 13
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP5_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP4_DEF_LBN 12
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP4_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP3_DEF_LBN 11
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP2_DEF_LBN 10
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP2_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP1_DEF_LBN 9
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP1_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP0_DEF_LBN 8
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_SFP0_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC3_DEF_LBN 7
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC3_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC2_DEF_LBN 6
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC2_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC1_DEF_LBN 5
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC1_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC0_DEF_LBN 4
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_NIC0_DEF_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_FPGA_TYPE_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_FPGA_TYPE_WIDTH 4
+#define          MC_CMD_FC_FPGA_V2_TYPE_A3 0x0 /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_A4 0x1 /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_A5 0x2 /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_A7 0x3 /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_D3 0x8 /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_D4 0x9 /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_D5 0xa /* enum */
+#define          MC_CMD_FC_FPGA_V2_TYPE_D7 0xb /* enum */
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_IDENTIFIER_OFST 12
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_CHANGESET_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_CHANGESET_WIDTH 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_BUILD_FLAG_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_BUILD_FLAG_WIDTH 1
+/*               MC_CMD_FC_FPGA_BUILD_FLAG_INTERNAL 0x0 */
+/*               MC_CMD_FC_FPGA_BUILD_FLAG_RELEASE 0x1 */
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_VERSION_HI_OFST 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_MINOR_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_MINOR_WIDTH 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_MAJOR_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_MAJOR_WIDTH 16
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_VERSION_LO_OFST 20
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_BUILD_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_BUILD_WIDTH 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_MICRO_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_DEPLOYMENT_VERSION_MICRO_WIDTH 16
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_REVISION_LO_OFST 24
+#define       MC_CMD_FC_OUT_FPGA_BUILD_V2_REVISION_HI_OFST 28
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_REVISION_HIGH_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_BUILD_V2_REVISION_HIGH_WIDTH 16
+
 /* MC_CMD_FC_OUT_FPGA_SERVICES msgresponse */
 #define    MC_CMD_FC_OUT_FPGA_SERVICES_LEN 32
 #define       MC_CMD_FC_OUT_FPGA_SERVICES_COMPONENT_INFO_OFST 0
@@ -1315,6 +1441,40 @@
 #define       MC_CMD_FC_OUT_FPGA_SERVICES_REVISION_HI_OFST 28
 #define        MC_CMD_FC_OUT_FPGA_SERVICES_REVISION_HIGH_LBN 0
 #define        MC_CMD_FC_OUT_FPGA_SERVICES_REVISION_HIGH_WIDTH 16
+
+/* MC_CMD_FC_OUT_FPGA_SERVICES_V2 msgresponse */
+#define    MC_CMD_FC_OUT_FPGA_SERVICES_V2_LEN 32
+#define       MC_CMD_FC_OUT_FPGA_SERVICES_V2_COMPONENT_INFO_OFST 0
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_IS_APPLICATION_LBN 31
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_IS_APPLICATION_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_IS_LICENSED_LBN 30
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_IS_LICENSED_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_COMPONENT_ID_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_COMPONENT_ID_WIDTH 14
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_VERSION_MAJOR_LBN 12
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_VERSION_MAJOR_WIDTH 4
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_VERSION_MINOR_LBN 4
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_VERSION_MINOR_WIDTH 8
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_BUILD_NUM_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_BUILD_NUM_WIDTH 4
+/* Build timestamp (seconds since epoch) */
+#define       MC_CMD_FC_OUT_FPGA_SERVICES_V2_TIMESTAMP_OFST 4
+#define       MC_CMD_FC_OUT_FPGA_SERVICES_V2_PARAMETERS_OFST 8
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_PTP_ENABLED_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_PTP_ENABLED_WIDTH 1
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_FC_FLASH_BOOTED_LBN 8
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_FC_FLASH_BOOTED_WIDTH 1
+#define       MC_CMD_FC_OUT_FPGA_SERVICES_V2_IDENTIFIER_OFST 12
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_CHANGESET_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_CHANGESET_WIDTH 16
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_BUILD_FLAG_LBN 16
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_BUILD_FLAG_WIDTH 1
+/*               MC_CMD_FC_FPGA_BUILD_FLAG_INTERNAL 0x0 */
+/*               MC_CMD_FC_FPGA_BUILD_FLAG_RELEASE 0x1 */
+#define       MC_CMD_FC_OUT_FPGA_SERVICES_V2_REVISION_LO_OFST 24
+#define       MC_CMD_FC_OUT_FPGA_SERVICES_V2_REVISION_HI_OFST 28
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_REVISION_HIGH_LBN 0
+#define        MC_CMD_FC_OUT_FPGA_SERVICES_V2_REVISION_HIGH_WIDTH 16
 
 /* MC_CMD_FC_OUT_BSP_VERSION msgresponse */
 #define    MC_CMD_FC_OUT_BSP_VERSION_LEN 4
@@ -1596,6 +1756,9 @@
 
 /* MC_CMD_FC_OUT_DDR_SET_SPD msgresponse */
 #define    MC_CMD_FC_OUT_DDR_SET_SPD_LEN 0
+
+/* MC_CMD_FC_OUT_DDR_SET_INFO msgresponse */
+#define    MC_CMD_FC_OUT_DDR_SET_INFO_LEN 0
 
 /* MC_CMD_FC_OUT_DDR_GET_STATUS msgresponse */
 #define    MC_CMD_FC_OUT_DDR_GET_STATUS_LEN 4
@@ -2010,6 +2173,8 @@
 #define       MC_CMD_AOE_OUT_INFO_FPGA_VERSION_OFST 12
 /* FPGA type - read from CPLD straps */
 #define       MC_CMD_AOE_OUT_INFO_FPGA_TYPE_OFST 16
+#define          MC_CMD_AOE_OUT_INFO_FPGA_TYPE_A5_C2   0x1 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_FPGA_TYPE_A7_C2   0x2 /* enum */
 /* FPGA state (debug) */
 #define       MC_CMD_AOE_OUT_INFO_FPGA_STATE_OFST 20
 /* FPGA image - partition from which loaded */
@@ -2023,23 +2188,28 @@
 /* Random pieces of information */
 #define       MC_CMD_AOE_OUT_INFO_FLAGS_OFST 32
 /* enum: Power to FPGA supplied by PEG connector, not PCIe bus */
-#define          MC_CMD_AOE_OUT_INFO_PEG_POWER 0x1
+#define          MC_CMD_AOE_OUT_INFO_PEG_POWER            0x1
 /* enum: CPLD apparently good */
-#define          MC_CMD_AOE_OUT_INFO_CPLD_GOOD 0x2
+#define          MC_CMD_AOE_OUT_INFO_CPLD_GOOD            0x2
 /* enum: FPGA working normally */
-#define          MC_CMD_AOE_OUT_INFO_FPGA_GOOD 0x4
+#define          MC_CMD_AOE_OUT_INFO_FPGA_GOOD            0x4
 /* enum: FPGA is powered */
-#define          MC_CMD_AOE_OUT_INFO_FPGA_POWER 0x8
+#define          MC_CMD_AOE_OUT_INFO_FPGA_POWER           0x8
 /* enum: Board has incompatible SODIMMs fitted */
-#define          MC_CMD_AOE_OUT_INFO_BAD_SODIMM 0x10
+#define          MC_CMD_AOE_OUT_INFO_BAD_SODIMM           0x10
 /* enum: Board has ByteBlaster connected */
-#define          MC_CMD_AOE_OUT_INFO_HAS_BYTEBLASTER 0x20
-/* Revision of Modena board */
+#define          MC_CMD_AOE_OUT_INFO_HAS_BYTEBLASTER      0x20
+/* enum: FPGA Boot flash has an invalid header. */
+#define          MC_CMD_AOE_OUT_INFO_FPGA_BAD_BOOT_HDR    0x40
+/* enum: FPGA Application flash is accessible. */
+#define          MC_CMD_AOE_OUT_INFO_FPGA_APP_FLASH_GOOD  0x80
+/* Revision of Modena and Sorrento boards. Sorrento can be R1_2 or R1_3. */
 #define       MC_CMD_AOE_OUT_INFO_BOARD_REVISION_OFST 36
 #define          MC_CMD_AOE_OUT_INFO_UNKNOWN  0x0 /* enum */
 #define          MC_CMD_AOE_OUT_INFO_R1_0  0x10 /* enum */
 #define          MC_CMD_AOE_OUT_INFO_R1_1  0x11 /* enum */
 #define          MC_CMD_AOE_OUT_INFO_R1_2  0x12 /* enum */
+#define          MC_CMD_AOE_OUT_INFO_R1_3  0x13 /* enum */
 /* Result of FC booting - not valid while a ByteBlaster is connected. */
 #define       MC_CMD_AOE_OUT_INFO_FC_BOOT_RESULT_OFST 40
 /* enum: No error */

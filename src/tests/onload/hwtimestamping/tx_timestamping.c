@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -322,7 +322,8 @@ static void do_ts_sockopt(struct configuration* cfg, int sock)
   int ok = 0;
 
   printf("Selecting hardware timestamping mode.\n");
-  enable = SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_SYS_HARDWARE;
+  enable = SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_SYS_HARDWARE |
+    SOF_TIMESTAMPING_RAW_HARDWARE;
   if (cfg->cfg_protocol == IPPROTO_TCP)
     enable |= ONLOAD_SOF_TIMESTAMPING_STREAM;
   ok = setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &enable, sizeof(int));

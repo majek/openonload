@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -471,6 +471,15 @@ struct aoe_device * aoe_add_device(struct efx_dl_device *dl_dev,
 	 * MACs as well */
 	if (aoe_instance) {
 		aoe_link_port(aoe_instance, nic_port, net_dev, dl_dev);
+
+		if (aoe_mcdi_map_ext_port(aoe_instance, nic_port)) {
+                        /* sysfs entry needs to persist in case of failure
+                         * from mcdi command to get external port bitmap
+                         * So returning valid aoe_instance.
+                         */
+			printk(KERN_ERR "sfc_aoe: Failed to map external port\n");
+		}
+
 		return aoe_instance;
 	}
 
@@ -519,6 +528,13 @@ struct aoe_device * aoe_add_device(struct efx_dl_device *dl_dev,
 	if(aoe_mcdi_get_board_type_info(aoe_instance)) {
 		printk(KERN_ERR "sfc_aoe: Failed to get board type\n");
 		goto sysfs_error;
+	}
+
+	if (aoe_mcdi_map_ext_port(aoe_instance, nic_port)) {
+                /* sysfs entry needs to persist in case of failure
+                 * from mcdi command to get external port bitmap
+                 */
+		printk(KERN_ERR "sfc_aoe: Failed to map external port\n");
 	}
 
 	if (aoe_qu_setup(aoe_instance, 10)) {

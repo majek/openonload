@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -142,7 +142,8 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
   const u8* mac_ptr = NULL;
   int replace = false;
   int kernel_redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
-  int cluster = (oofilter->thc != NULL) && ! kernel_redirect;
+  int drop = src_flags & OO_HW_SRC_FLAG_DROP;
+  int cluster = (oofilter->thc != NULL) && ! kernel_redirect && ! drop;
 
   if( ! kernel_redirect )
     ci_assert_nequal(oofilter->trs == NULL, oofilter->thc == NULL);
@@ -150,6 +151,8 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 
   if( kernel_redirect )
     vi_id = KERNEL_REDIRECT_VI_ID;
+  else if( drop )
+    vi_id = EFX_FILTER_RX_DMAQ_ID_DROP;
   else {
     vi_id = cluster ?
       tcp_helper_cluster_vi_base(oofilter->thc, hwport) :
@@ -158,7 +161,8 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 
   if( vi_id  >= 0 ) {
     int flags = EFX_FILTER_FLAG_RX_SCATTER;
-    int hw_rx_loopback_supported = (cluster || kernel_redirect) ?
+    /* we might need to have loopback supported when installing drop filter */
+    int hw_rx_loopback_supported = (cluster || kernel_redirect || drop) ?
       0 : tcp_helper_vi_hw_rx_loopback_supported(oofilter->trs, hwport);
 
     ci_assert( hw_rx_loopback_supported >= 0 );
@@ -184,7 +188,7 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
     }
 
 #if EFX_DRIVERLINK_API_VERSION >= 15
-    if( ! kernel_redirect ) {
+    if( ! kernel_redirect && ! drop ) {
       unsigned stack_id = cluster ?
         tcp_helper_cluster_vi_hw_stack_id(oofilter->thc, hwport) :
         tcp_helper_vi_hw_stack_id(oofilter->trs, hwport);
@@ -268,6 +272,7 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                              const struct oo_hw_filter_spec* oo_filter_spec,
                              unsigned set_vlan_mask, unsigned hwport_mask,
+                             unsigned drop_hwport_mask,
                              unsigned src_flags)
 {
   int rc1, rc = 0, ok_seen = 0, hwport;
@@ -286,7 +291,8 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
        */
       masked_spec.vlan_id = (set_vlan_mask & (1u << hwport)) ?
         oo_filter_spec->vlan_id : OO_HW_VLAN_UNSPEC;
-      rc1 = oo_hw_filter_set_hwport(oofilter, hwport, &masked_spec, src_flags);
+      rc1 = oo_hw_filter_set_hwport(oofilter, hwport, &masked_spec,
+          src_flags | ((drop_hwport_mask & (1u << hwport)) ? OO_HW_SRC_FLAG_DROP : 0));
       /* Need to know if any interfaces are ok */
       if( ! rc1 )
         ok_seen = 1;
@@ -312,12 +318,13 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
 int oo_hw_filter_set(struct oo_hw_filter* oofilter,
                      const struct oo_hw_filter_spec* oo_filter_spec,
                      unsigned set_vlan_mask, unsigned hwport_mask,
+                     unsigned drop_hwport_mask,
                      unsigned src_flags)
 {
   int rc;
 
   rc = oo_hw_filter_add_hwports(oofilter, oo_filter_spec, set_vlan_mask,
-                                hwport_mask, src_flags);
+                                hwport_mask, drop_hwport_mask, src_flags);
   if( rc < 0 )
     oo_hw_filter_clear(oofilter);
   return rc;
@@ -328,6 +335,7 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                         struct tcp_helper_resource_s* new_stack,
                         const struct oo_hw_filter_spec* oo_filter_spec,
                         unsigned set_vlan_mask, unsigned hwport_mask,
+                        unsigned drop_hwport_mask,
                         unsigned src_flags)
 {
   unsigned add_hwports = 0u;
@@ -348,7 +356,10 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
   for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
     if( hwport_mask & (1 << hwport) ) {
       /* has the target stack got hwport */
-      if( new_stack != NULL )
+      if( drop_hwport_mask & (1 << hwport) ||
+          src_flags & OO_HW_SRC_FLAG_DROP )
+        vi_id = EFX_FILTER_RX_DMAQ_ID_DROP;
+      else if( new_stack != NULL )
         vi_id = tcp_helper_rx_vi_id(new_stack, hwport);
       else if( oofilter->thc != NULL )
         vi_id = tcp_helper_cluster_vi_base(oofilter->thc, hwport);
@@ -389,18 +400,26 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
       else {
         /* Move filter between stacks we attempt this even when new_stack
          * == old_stack */
-        unsigned stack_id = tcp_helper_vi_hw_stack_id(new_stack, hwport);
+        unsigned stack_id = vi_id == EFX_FILTER_RX_DMAQ_ID_DROP ? 0 :
+                            tcp_helper_vi_hw_stack_id(new_stack, hwport);
+        int rc;
         ci_assert_ge( stack_id, 0 );
-        efrm_filter_redirect(get_client(hwport),
-                             oofilter->filter_id[hwport], vi_id,
-                             stack_id);
+        rc = efrm_filter_redirect(get_client(hwport),
+                                  oofilter->filter_id[hwport], vi_id,
+                                  stack_id);
+        if( rc == -ENOENT || rc == -ENODEV ) {
+            /* net driver does not know about our filter, let's better
+             * remove reference to it and try to add new instance */
+            oofilter->filter_id[hwport] = rc;
+            add_hwports |= 1 << hwport;
+        }
       }
     }
 
   /* Insert new filters for any other interfaces in hwport_mask. */
   oofilter->trs = new_stack;
   return oo_hw_filter_add_hwports(oofilter, oo_filter_spec, set_vlan_mask,
-                                  add_hwports, src_flags);
+                                  add_hwports, drop_hwport_mask, src_flags);
 }
 
 

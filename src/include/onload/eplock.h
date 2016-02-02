@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,10 +52,10 @@ extern int __ef_eplock_lock_slow(ci_netif *, int maybe_wedged) CI_HF;
 
   /*! Attempt to lock an eplock.  Returns true on success. */
 ci_inline int ef_eplock_trylock(ci_eplock_t* l) {
-  unsigned v = l->lock;
+  ci_uint64 v = l->lock;
   return (v & CI_EPLOCK_UNLOCKED) &&
-    ci_cas32_succeed(&l->lock,
-		    v, (v &~ CI_EPLOCK_UNLOCKED) | CI_EPLOCK_LOCKED);
+    ci_cas64u_succeed(&l->lock,
+                      v, (v &~ CI_EPLOCK_UNLOCKED) | CI_EPLOCK_LOCKED);
 }
 
   /* Always returns 0 (success) at userland.  Returns -EINTR if interrupted
@@ -65,8 +65,8 @@ ci_inline int ef_eplock_trylock(ci_eplock_t* l) {
 ci_inline int ef_eplock_lock(ci_netif *ni) OO_MUST_CHECK_RET_IN_KERNEL;
 ci_inline int ef_eplock_lock(ci_netif *ni) {
   int rc = 0;
-  if( ci_cas32_fail(&ni->state->lock.lock,
-                    CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
+  if( ci_cas64u_fail(&ni->state->lock.lock,
+                     CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
     rc = __ef_eplock_lock_slow(ni, 0);
 #ifdef __KERNEL__
   return rc;
@@ -84,8 +84,8 @@ ci_inline int ef_eplock_lock(ci_netif *ni) {
 ci_inline int ef_eplock_lock_maybe_wedged(ci_netif *ni) OO_MUST_CHECK_RET;
 ci_inline int ef_eplock_lock_maybe_wedged(ci_netif *ni) {
   int rc = 0;
-  if( ci_cas32_fail(&ni->state->lock.lock,
-                    CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
+  if( ci_cas64u_fail(&ni->state->lock.lock,
+                     CI_EPLOCK_UNLOCKED, CI_EPLOCK_LOCKED) )
     rc = __ef_eplock_lock_slow(ni, 1);
   return rc;
 }
@@ -95,49 +95,49 @@ ci_inline int ef_eplock_lock_maybe_wedged(ci_netif *ni) {
   /*! Only call this if you hold the lock.  [flag] must have exactly one
   ** bit set.
   */
-ci_inline void ef_eplock_holder_set_flag(ci_eplock_t* l, int flag) {
-  unsigned v;
+ci_inline void ef_eplock_holder_set_flag(ci_eplock_t* l, ci_uint64 flag) {
+  ci_uint64 v;
   ci_assert((flag & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     ci_assert(v & CI_EPLOCK_LOCKED);
     if( v & flag )  break;
-  } while( ci_cas32_fail(&l->lock, v, v | flag) );
+  } while( ci_cas64u_fail(&l->lock, v, v | flag) );
 }
 
   /*! Only call this if you hold the lock. */
-ci_inline void ef_eplock_holder_set_flags(ci_eplock_t* l, unsigned flags) {
-  unsigned v;
+ci_inline void ef_eplock_holder_set_flags(ci_eplock_t* l, ci_uint64 flags) {
+  ci_uint64 v;
   ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     ci_assert(v & CI_EPLOCK_LOCKED);
     if( (v & flags) == flags )
       break;
-  } while( ci_cas32_fail(&l->lock, v, v | flags) );
+  } while( ci_cas64u_fail(&l->lock, v, v | flags) );
 }
 
   /*! Clear the specified lock flags. */
-ci_inline void ef_eplock_clear_flags(ci_eplock_t* l, int flags) {
-  unsigned v;
+ci_inline void ef_eplock_clear_flags(ci_eplock_t* l, ci_uint64 flags) {
+  ci_uint64 v;
   ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
-  } while( ci_cas32_fail(&l->lock, v, v &~ flags) );
+  } while( ci_cas64u_fail(&l->lock, v, v &~ flags) );
 }
 
   /*! Used to alert the lock holder.  Caller would normally not hold the
   ** lock.  Returns 1 on success, or 0 if the lock is unlocked.  [flag]
   ** must have exactly one bit set.
   */
-ci_inline int ef_eplock_set_flag_if_locked(ci_eplock_t* l, unsigned flag) {
-  unsigned v;
+ci_inline int ef_eplock_set_flag_if_locked(ci_eplock_t* l, ci_uint64 flag) {
+  ci_uint64 v;
   ci_assert((flag & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     if( v & CI_EPLOCK_UNLOCKED )  return 0;
     if( v & flag )  break;
-  } while( ci_cas32_fail(&l->lock, v, v | flag) );
+  } while( ci_cas64u_fail(&l->lock, v, v | flag) );
   return 1;
 }
 
@@ -145,34 +145,34 @@ ci_inline int ef_eplock_set_flag_if_locked(ci_eplock_t* l, unsigned flag) {
   ** lock.  Returns 1 on success, or 0 if the lock is unlocked.  [flag]
   ** may have one or more bits set.
   */
-ci_inline int ef_eplock_set_flags_if_locked(ci_eplock_t* l, unsigned flags) {
-  unsigned v;
+ci_inline int ef_eplock_set_flags_if_locked(ci_eplock_t* l, ci_uint64 flags) {
+  ci_uint64 v;
   ci_assert((flags & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
     v = l->lock;
     if( v & CI_EPLOCK_UNLOCKED )  return 0;
     if( (v & flags) == flags )  break;
-  } while( ci_cas32_fail(&l->lock, v, v | flags) );
+  } while( ci_cas64u_fail(&l->lock, v, v | flags) );
   return 1;
 }
 
   /*! Attempt to grab the lock -- return non-zero on success.  Set [flags]
   ** whether or not the lock is obtained.
   */
-ci_inline int ef_eplock_trylock_and_set_flags(ci_eplock_t* l, unsigned flags) {
-  unsigned v, new_v;
+ci_inline int ef_eplock_trylock_and_set_flags(ci_eplock_t* l, ci_uint64 flags) {
+  ci_uint64 v, new_v;
   do {
     v = l->lock;
     new_v = (v &~ CI_EPLOCK_UNLOCKED) | CI_EPLOCK_LOCKED | flags;
-  } while( ci_cas32_fail(&l->lock, v, new_v) );
+  } while( ci_cas64u_fail(&l->lock, v, new_v) );
   return v & CI_EPLOCK_UNLOCKED;
 }
 
   /*! Either obtains the lock (returning 1) or sets the flag (returning 0).
   ** [flag] must have exactly one bit set.
   */
-ci_inline int ef_eplock_lock_or_set_flag(ci_eplock_t* l, unsigned flag) {
-  unsigned v, new_v;
+ci_inline int ef_eplock_lock_or_set_flag(ci_eplock_t* l, ci_uint64 flag) {
+  ci_uint64 v, new_v;
   int rc;
   ci_assert((flag  & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
@@ -186,15 +186,15 @@ ci_inline int ef_eplock_lock_or_set_flag(ci_eplock_t* l, unsigned flag) {
       rc = 0;
       new_v = v | flag;
     }
-  } while( ci_cas32_fail(&l->lock, v, new_v) );
+  } while( ci_cas64u_fail(&l->lock, v, new_v) );
   return rc;
 }
 
   /*! Either obtains the lock (returning 1) or sets the flags (returning
    * 0).
    */
-ci_inline int ef_eplock_lock_or_set_flags(ci_eplock_t* l, unsigned flags) {
-  unsigned v, new_v;
+ci_inline int ef_eplock_lock_or_set_flags(ci_eplock_t* l, ci_uint64 flags) {
+  ci_uint64 v, new_v;
   int rc;
   ci_assert((flags  & CI_EPLOCK_LOCK_FLAGS) == 0u);
   do {
@@ -208,7 +208,7 @@ ci_inline int ef_eplock_lock_or_set_flags(ci_eplock_t* l, unsigned flags) {
       rc = 0;
       new_v = v | flags;
     }
-  } while( ci_cas32_fail(&l->lock, v, new_v) );
+  } while( ci_cas64u_fail(&l->lock, v, new_v) );
   return rc;
 }
 
@@ -216,19 +216,19 @@ ci_inline int ef_eplock_lock_or_set_flags(ci_eplock_t* l, unsigned flags) {
   ** This should only be needed inside an unlock callback.
   */
 ci_inline int ef_eplock_try_unlock(ci_eplock_t* l, 
-				   unsigned* lock_val_out,
-				   unsigned  flag_mask) {
-  unsigned lv = *lock_val_out = l->lock;
-  unsigned unlock = (lv &~ (CI_EPLOCK_LOCKED | CI_EPLOCK_FL_NEED_WAKE)) |
+				   ci_uint64* lock_val_out,
+				   ci_uint64  flag_mask) {
+  ci_uint64 lv = *lock_val_out = l->lock;
+  ci_uint64 unlock = (lv &~ (CI_EPLOCK_LOCKED | CI_EPLOCK_FL_NEED_WAKE)) |
                     CI_EPLOCK_UNLOCKED;
   return (lv & flag_mask) ? 0 :
-    ci_cas32_succeed(&l->lock, lv, unlock);
+    ci_cas64u_succeed(&l->lock, lv, unlock);
 }
 
   /*! Return the flags which are currently set (including need-wakeup).
   ** NB. This is not atomic.
   */
-ci_inline unsigned ef_eplock_flags(ci_eplock_t* l)
+ci_inline ci_uint64 ef_eplock_flags(ci_eplock_t* l)
 { return l->lock & (CI_EPLOCK_FL_NEED_WAKE | CI_EPLOCK_CALLBACK_FLAGS); }
 
 #endif

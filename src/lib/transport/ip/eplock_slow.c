@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,7 +56,8 @@ int __ef_eplock_lock_slow(ci_netif *ni, int maybe_wedged)
 #ifndef __KERNEL__
   ci_uint64 start_frc, now_frc;
 #endif
-  int rc, l, n;
+  int rc;
+  ci_uint64 l, n;
 
 #ifndef __KERNEL__
   ci_assert_equal(maybe_wedged, 0);
@@ -115,7 +116,7 @@ int __ef_eplock_lock_slow(ci_netif *ni, int maybe_wedged)
     l = ni->state->lock.lock;
     if( l & CI_EPLOCK_UNLOCKED ) {
       n = (l &~ CI_EPLOCK_UNLOCKED) | CI_EPLOCK_LOCKED;
-      if( ci_cas32_succeed(&ni->state->lock.lock, l, n) )
+      if( ci_cas64u_succeed(&ni->state->lock.lock, l, n) )
 	return 0;
       else
 	goto again;

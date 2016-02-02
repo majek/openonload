@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -686,7 +686,18 @@ typedef struct {
 #if defined(CI_CFG_PKTS_AS_HUGE_PAGES)
   CI_ULCONST ci_int32   shm_id; /**< shared memory id for huge page  */
 #endif
-} ci_pkt_set;
+} oo_pktbuf_set;
+
+typedef struct {
+  ci_int32 id;      /**< Id of the current packet set */
+  ci_int32 n_free;  /**< Total number of free packets */
+  CI_ULCONST ci_uint32 sets_n;   /**< number of pkt sets allocated */
+  CI_ULCONST ci_uint32 sets_max; /**< max number of packet sets */
+  /* Packet buffers allocated.  This is [sets_n * PKTS_PER_SET]. */
+  CI_ULCONST ci_int32  n_pkts_allocated;
+
+  oo_pktbuf_set set[0];
+} oo_pktbuf_manager;
 
 
 
@@ -701,41 +712,49 @@ typedef ci_uint32 ci_async_op_flags_t;
 
 /*! Comment? */
 typedef struct {
-  volatile ci_int32  lock;
-# define CI_EPLOCK_UNINITIALISED           0x00000000
-# define CI_EPLOCK_UNLOCKED	           0x10000000
-# define CI_EPLOCK_LOCKED	           0x20000000
-# define CI_EPLOCK_FL_NEED_WAKE	           0x40000000
+  volatile ci_uint64  lock;
+# define CI_EPLOCK_UNINITIALISED           0x00000000ULL
+# define CI_EPLOCK_UNLOCKED	           0x10000000ULL
+# define CI_EPLOCK_LOCKED	           0x20000000ULL
+# define CI_EPLOCK_FL_NEED_WAKE	           0x40000000ULL
 
-# define CI_EPLOCK_LOCK_FLAGS              0x70000000
+ /* Flags used by eplock code itself */
+# define CI_EPLOCK_LOCK_FLAGS              0x70000000ULL
 
-  /* Higher levels may use low-order bits as flags. */
-# define CI_EPLOCK_CALLBACK_FLAGS          0x8fffffff
+  /* Higher levels may use unused bits as flags. */
+# define CI_EPLOCK_CALLBACK_FLAGS          0xffffffff8fffffffULL
+
+  /* These bits are the head of a linked list of sockets.
+   * It should have enough space for CI_CFG_NETIF_MAX_ENDPOINTS_MAX
+   * which is currently equal to 1 << 21 */
+# define CI_EPLOCK_NETIF_SOCKET_LIST       0x001fffffULL
+
+  /* someone's waiting for free packet buffers
+   * this flag can persist after netif_unlock() */
+# define CI_EPLOCK_NETIF_IS_PKT_WAITER     0x80000000ULL
 
   /* stack needs to be primed (interrupt request) */
-# define CI_EPLOCK_NETIF_NEED_PRIME        0x01000000
+# define CI_EPLOCK_NETIF_NEED_PRIME        0x1000000000000000ULL
   /* stack needs to be polled */
-# define CI_EPLOCK_NETIF_NEED_POLL         0x02000000
+# define CI_EPLOCK_NETIF_NEED_POLL         0x2000000000000000ULL
   /* sockets waiting to be closed in appropriate context */
-# define CI_EPLOCK_NETIF_CLOSE_ENDPOINT    0x04000000
+# define CI_EPLOCK_NETIF_CLOSE_ENDPOINT    0x4000000000000000ULL
   /* one or more sockets needs waking */
-# define CI_EPLOCK_NETIF_NEED_WAKE         0x08000000
+# define CI_EPLOCK_NETIF_NEED_WAKE         0x8000000000000000ULL
   /* need to wake someone waiting for free packet buffers */
-# define CI_EPLOCK_NETIF_PKT_WAKE          0x00100000
+# define CI_EPLOCK_NETIF_PKT_WAKE          0x0100000000000000ULL
   /* need to process postponed sw filter updates */
-# define CI_EPLOCK_NETIF_SWF_UPDATE        0x00200000
+# define CI_EPLOCK_NETIF_SWF_UPDATE        0x0200000000000000ULL
   /* need to merge atomic_n_*_pkts fields into non-atomic ones */
   /* fixme: should't we reuse _NEED_POLL flag for this purpose
    * because we are short of flags? */
-# define CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS 0x00400000
+# define CI_EPLOCK_NETIF_MERGE_ATOMIC_COUNTERS 0x0400000000000000ULL
   /* have to allocate more packet buffers */
-# define CI_EPLOCK_NETIF_NEED_PKT_SET      0x80000000
+# define CI_EPLOCK_NETIF_NEED_PKT_SET      0x0800000000000000ULL
+  /* need to purge defunct TXQs */
+# define CI_EPLOCK_NETIF_PURGE_TXQS        0x0010000000000000ULL
   /* mask for the above flags that must be handled before dropping lock */
-# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0x8f700000
-  /* someone's waiting for free packet buffers */
-# define CI_EPLOCK_NETIF_IS_PKT_WAITER     0x00800000
-  /* these bits are the head of a linked list of sockets */
-# define CI_EPLOCK_NETIF_SOCKET_LIST       0x000fffff
+# define CI_EPLOCK_NETIF_UNLOCK_FLAGS      0xff10000000000000ULL
 } ci_eplock_t;
 
 
@@ -754,7 +773,8 @@ typedef struct {
 typedef struct {
   ci_uint32             timer_quantum_ns CI_ALIGN(8);
   ci_uint32             rx_prefix_len;
-  ci_int32              rx_ts_correction;
+  ci_int16              rx_ts_correction;
+  ci_int16              tx_ts_correction;
   ci_uint32             vi_flags;
   ci_uint32             vi_out_flags;
   /* set of vi_flags that need to be accessed by onload  */
@@ -804,6 +824,9 @@ typedef struct {
   ci_uint32             pd_owner;
   /* Timestamp of the last packet received with a hardware timestamp. */
   struct oo_timespec    last_rx_timestamp;
+
+# define CI_NETIF_NIC_ERROR_REMAP               0x00000001u
+  ci_uint32             nic_error_flags;
 } ci_netif_state_nic_t;
 
 
@@ -841,7 +864,7 @@ struct ci_netif_state_s {
 # define CI_NETIF_ERROR_LOOP_PKTS_LIST      0x02
 # define CI_NETIF_ERROR_UDP_SEND_PKTS_LIST  0x04
 # define CI_NETIF_ERROR_ASSERT              0x08
-# define CI_NETIF_ERROR_REMAP               0x10
+/* 0x10 was CI_NETIF_ERROR_REMAP, which is now per-interface. */
 # define CI_NETIF_ERROR_SYNRECV_TABLE       0x20
 
   /* The bits of this field are used for eventq-primed flags. */
@@ -878,13 +901,9 @@ struct ci_netif_state_s {
    * aligning the lock itself and the following member to a cache-line
    * boundary.  Please take note of this if adding another member here. */
 
-  /** Index of the current set */
-  ci_int32              current_pkt_set CI_ALIGN(CI_CACHE_LINE_SIZE);
-  ci_int32              n_freepkts;      /**< Number of free packets */
-
   /** List of packets sent via loopback in order of transmit;
    * it should be reverted when delivering to receiver. */
-  oo_pkt_p              looppkts;
+  oo_pkt_p              looppkts CI_ALIGN(CI_CACHE_LINE_SIZE);
   ci_int32              n_looppkts;
 
   /* Number of packets that are in use by the RX path.  This includes
@@ -937,11 +956,6 @@ struct ci_netif_state_s {
 
   CI_ULCONST ci_uint32  table_ofs;       /**< offset of s/w filter table */
   CI_ULCONST ci_uint32  buf_ofs;         /**< offset of packet metadata */
-  CI_ULCONST ci_uint32  pkt_sets_n;      /**< number of pkt sets allocated */
-  CI_ULCONST ci_uint32  pkt_sets_max;    /**< max number of iobufsets */
-
-  /* Packet buffers allocated.  This is [pkt_sets_n * PKTS_PER_SET]. */
-  CI_ULCONST ci_int32   n_pkts_allocated;
 
   ci_ip_timer_state     iptimer_state CI_ALIGN(8);
 
@@ -1873,6 +1887,8 @@ struct ci_tcp_state_s {
 #define CI_TCPT_FLAG_LOOP_DEFERRED      0x800  /* deferred loopback conn */
 #define CI_TCPT_FLAG_NO_QUICKACK        0x1000 /* TCP_QUICKACK set to 0 */
 #define CI_TCPT_FLAG_MEM_DROP           0x2000 /* drops due to mem_pressure */
+#define CI_TCPT_FLAG_FIN_RECEIVED       0x4000
+  /* peer have graciously closed this connection by sending FIN */
 
   /* flags advertised on SYN */
 # define CI_TCPT_SYN_FLAGS \
@@ -2119,6 +2135,13 @@ struct ci_tcp_state_s {
 
   ci_ni_dllist_link    timeout_q_link;
   ci_ni_dllist_link    tx_ready_link;
+
+  /* Additional stats for Dynamic Right Sizing */
+  struct {
+    ci_uint32          bytes;
+    ci_uint32          seq;
+    ci_iptime_t        time;
+  } rcvbuf_drs;
 
   struct oo_tcp_socket_stats  stats;
 };

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,335 +45,395 @@
 
 /* efdelegated_server
  *
- * Copyright 2009-2015 Solarflare Communications Inc.
- * Author: Akhi Singhania
- * Date: 2015/1/20
+ * Copyright 2015 Solarflare Communications Inc.
+ * Author: David Riddoch
  *
+ * This sample application is used together with efdelegated_client to
+ * measure the performance of OpenOnload's "Delegated Sends" feature.
  *
- * This is a sample application to demonstrate usage of the
- * onload_delegated_sends() API.  This API allows you to do sends via
- * ef_vi on an Onloaded TCP socket to get better latency.  The API
- * essentially boils down to first retriving the TCP header, adding
- * your own payload, sending via ef_vi layer, and finally telling the
- * API how many bytes you sent so it can update the internal TCP state
- * machinery.
+ * This application is a very basic simulation of an exchange: It accepts a
+ * TCP connection from a client.  It sends UDP multicast messages, and
+ * expects that the client will send a message over the TCP connection in
+ * response to a subset of the UDP messages.  It measures the time taken
+ * from sending a UDP message to receiving the corresponding reply.
  *
- * In this application, we compare the performance of an echo server
- * using normal sockets with using the delegated sends API.
- *
- * For normal sends, run apps like below:
- *
- * onload ./efdelegated_server 12345
- * onload ./efdelegated_client <srv-ip-addr> 12345
- *
- * For delegated sends, run apps like below:
- *
- * onload ./efdelegated_server -d 12345
- * onload ./efdelegated_client <srv-ip-addr> 12345
+ * When used with OpenOnload this application uses hardware timestamps
+ * taken on the adapter so that the latency measured is very accurate.
+ * (Note that for 7000-series adapters this requires a Performance Monitor
+ * license).
  */
 
-#include <etherfabric/vi.h>
-#include <etherfabric/pio.h>
-#include <etherfabric/pd.h>
-#include <etherfabric/memreg.h>
-#include <onload/extensions.h>
 #include "utils.h"
 
+#include <onload/extensions.h>
+#include <stdarg.h>
 #include <arpa/inet.h>
-#include <net/if.h>
+#include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <ifaddrs.h>
-#include <stdbool.h>
+#include <sys/epoll.h>
+#include <net/if.h>
 
 
-#define MTU                   1500
-#define MAX_ETH_HEADERS       (14 + 4)
-#define MAX_IP_TCP_HEADERS    (20 + 20 + 12)
-#define MAX_PACKET            (MTU + MAX_ETH_HEADERS)
-#define MAX_MESSAGE           (MTU - MAX_IP_TCP_HEADERS)
+/* We use a special message to trigger the client to send a message on the
+ * TCP socket.  This message is chosen for compatibility with the AOE ANTS
+ * sample application.
+ */
+#define INTERESTING_MSG    "hit me 0 0"
+#define BORING_MSG         "boring"
 
 
-static unsigned  cfg_payload_len = 200;
-static int       cfg_delegated;
+static const char* cfg_port = "8122";
+static const char* cfg_mcast_addr = "224.1.2.3";
+static int         cfg_measure_nth = 10;
+static int         cfg_log_level = 1;
+static bool        cfg_hw_ts = true;
+static int         cfg_send_rate = 100000;
+static int         cfg_iter;
+static int         cfg_warm_n;
 
 
-struct state {
-  int                          tcp_sock;
-  int                          udp_sock;
-  ef_pd                        pd;
-  ef_pio                       pio;
-  ef_driver_handle             dh;
-  ef_vi                        vi;
-  char                         pkt_buf[MAX_PACKET];
-  char*                        msg_buf;
-  int                          msg_len;
-  int                          pio_pkt_len;
-  bool                         pio_in_use;
-  struct onload_delegated_send ods;
+struct server_state {
+  int      epoll;
+  int      listen_sock;
+  int      tcp_sock;
+  int      udp_sock;
+  int      udp_sock_ts;
+  bool     have_sent;
+  bool     have_rx_ts;
+  bool     have_tx_ts;
+  int      rx_msg_size;
+  int      tx_msg_size;
+  char*    rx_buf;
+  char*    tx_buf;
+  char*    tx_buf_ts;
+  int      inter_tx_gap_ns;
+  uint64_t rtt_sum;
+  unsigned rtt_min, rtt_max;
+  int      rtt_n;
+  unsigned n_lost_msgs;
 };
 
 
-static int min(int x, int y)
+static void msg(int level, const char* fmt, ...)
 {
-  return x < y ? x : y;
+  if( level <= cfg_log_level ) {
+    va_list vargs;
+    va_start(vargs, fmt);
+    vfprintf(stderr, fmt, vargs);
+    va_end(vargs);
+  }
 }
 
 
-static void evq_poll(struct state* s)
+static int max_i(int a, int b)
 {
-  ef_request_id ids[EF_VI_TRANSMIT_BATCH];
-  ef_event      evs[EF_VI_EVENT_POLL_MIN_EVS];
-  int           n_ev, i;
-
-  n_ev = ef_eventq_poll(&(s->vi), evs, sizeof(evs) / sizeof(evs[0]));
-  for( i = 0; i < n_ev; ++i )
-    switch( EF_EVENT_TYPE(evs[i]) ) {
-    case EF_EVENT_TYPE_TX:
-      if( ef_vi_transmit_unbundle(&(s->vi), &evs[i], ids) )
-        s->pio_in_use = false;
-      break;
-    default:
-      fprintf(stderr, "ERROR: unexpected event "EF_EVENT_FMT"\n",
-              EF_EVENT_PRI_ARG(evs[i]));
-      TEST(0);
-      break;
-    }
+  return a > b ? a : b;
 }
 
 
-static int sock_rx(int sock)
+static void timespec_add_ns(struct timespec* ts, unsigned long ns)
 {
-  char buf[1];
-  int rc = recv(sock, buf, 1, MSG_DONTWAIT);
-  if( rc >= 0 )
-    return rc;
-  else if( rc == -1 && errno == EAGAIN )
-    return -1;
-  else
-    TEST(0);
+  assert( ns < 1000000000 );
+  if( (ts->tv_nsec += ns) >= 1000000000 ) {
+    ts->tv_nsec -= 1000000000;
+    ts->tv_sec += 1;
+  }
 }
 
 
-static void normal_send(struct state* s)
+static int64_t timespec_diff_ns(struct timespec a, struct timespec b)
 {
-  ssize_t rc = send(s->tcp_sock, s->msg_buf, s->msg_len, 0);
-  TEST( rc == s->msg_len );
+  return (a.tv_sec - b.tv_sec) * (int64_t) 1000000000
+    + (a.tv_nsec - b.tv_nsec);
 }
 
 
-/**********************************************************************/
-/* Below is the most interesting bit of code in the app */
-/**********************************************************************/
+static bool timespec_le(struct timespec a, struct timespec b)
+{
+  return a.tv_sec < b.tv_sec ||
+    (a.tv_sec == b.tv_sec && a.tv_nsec <= b.tv_nsec);
+}
 
-/* Prepare to do a delegated send.  You want to try to call this out
- * of the critical path of sending or else you will not be getting
- * very much benefit from the API.
- *
- * In this app, we call this function right after having done the
- * previous send and while we wait for the next ping from the client.
- *
- * This function can be called speculatively.  If later on you decide
- * that you don't want to do a delegated send, you can call
- * onload_delegated_send_cancel().
+
+/*
+ * Like a recv() call, except that it also returns a h/w timestamp.
  */
-static void delegated_prepare(struct state* s)
+static int recv_ts(int sock, void* buf, size_t len, int flags,
+                   struct timespec* ts)
 {
-  /* Prepare to do a delegated send: Get the current packet headers. */
-  s->ods.headers = s->pkt_buf;
-  s->ods.headers_len = MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
-  TRY( onload_delegated_send_prepare(s->tcp_sock, s->msg_len, 0, &(s->ods)) );
-
-  /* We've probably put the headers in the wrong place, because we've
-   * allowed enough space for worst-case headers (including VLAN tag and
-   * TCP options).  Move the headers up so that the end of the headers
-   * meets the start of the message.
-   */
-  s->ods.headers = s->msg_buf - s->ods.headers_len;
-  memmove(s->ods.headers, s->pkt_buf, s->ods.headers_len);
-
-  /* If we want to send more than MSS (maximum segment size), we will have
-   * to segment the message into multiple packets.  We do not handle that
-   * case in this app.
-   */
-  TEST( s->msg_len <= s->ods.mss );
-
-  /* Figure out how much we are actually allowed to send. */
-  int allowed_to_send = min(s->ods.send_wnd, s->ods.cong_wnd);
-  allowed_to_send = min(allowed_to_send, s->ods.mss);
-
-  if( s->msg_len <= allowed_to_send ) {
-    s->pio_pkt_len = s->ods.headers_len + s->msg_len;
-    onload_delegated_send_tcp_update(&(s->ods), s->msg_len, 1);
-    TRY( ef_pio_memcpy(&(s->vi), s->ods.headers, 0, s->pio_pkt_len) );
+  struct msghdr msg;
+  struct iovec iov = { buf, len };
+  char cmsg_buf[512];
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_namelen = 0;
+  msg.msg_control = cmsg_buf;
+  msg.msg_controllen = sizeof(cmsg_buf);
+  msg.msg_flags = 0;  /* work-around for onload bug57094 */
+  int rc = recvmsg(sock, &msg, flags);
+  if( rc > 0 ) {
+    assert( ! (msg.msg_flags & MSG_CTRUNC) );
+    struct cmsghdr* cmsg;
+    for( cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg) )
+      if( cmsg->cmsg_level == SOL_SOCKET &&
+          cmsg->cmsg_type == SO_TIMESTAMPING ) {
+        memcpy(ts, (char*) CMSG_DATA(cmsg) + 2 * sizeof(struct timespec),
+               sizeof(*ts));
+        if( ts->tv_sec != 0 )
+          return rc;
+      }
+    errno = ETIME;
+    rc = -1;
   }
-  else {
-    /* We can't send at the moment, due to congestion window or receive
-     * window being closed (or message larger than MSS).  Cancel the
-     * delegated send and use normal send instead.
-     */
-    TRY(onload_delegated_send_cancel(s->tcp_sock));
-    s->pio_pkt_len = 0;
-  }
-}
-
-
-static void delegated_send(struct state* s)
-{
-  /* Fast path send: */
-  TRY( ef_vi_transmit_pio(&(s->vi), 0, s->pio_pkt_len, 0) );
-  s->pio_pkt_len = 0;
-  s->pio_in_use = 1;
-
-  /* Now tell Onload what we've sent.  It needs to know so that it can
-   * update internal state (eg. sequence numbers) and take a copy of the
-   * payload sent so that it can be retransmitted if needed.
-   *
-   * NB. This does not have to happen immediately after the delegated send
-   * (and is not part of the critical path) but should be done soon after.
-   */
-  struct iovec iov;
-  iov.iov_len  = s->msg_len;
-  iov.iov_base = s->msg_buf;
-  TRY( onload_delegated_send_complete(s->tcp_sock, &iov, 1, 0) );
-}
-
-
-static int rx_wait(struct state* s)
-{
-  int rc;
-  do {
-    evq_poll(s);
-    if( ! s->pio_in_use && ! s->pio_pkt_len )
-      /* Get ready for the next delegated send... */
-      delegated_prepare(s);
-  } while( (rc = sock_rx(s->udp_sock)) < 0 );
   return rc;
 }
 
 
-static void loop(struct state* s)
+static void wait_for_client(struct server_state* ss)
 {
-  while( 1 ) {
-    if( rx_wait(s) == 0 )
-      break;
-    if( s->pio_pkt_len )
-      delegated_send(s);
-    else
-      normal_send(s);
+  msg(1, "Waiting for client to connect\n");
+  TRY( listen(ss->listen_sock, 1) );
+  TRY( ss->tcp_sock = accept(ss->listen_sock, NULL, NULL) );
+  msg(1, "Accepted client connection\n");
+  TRY( shutdown(ss->listen_sock, SHUT_RD) );
+
+  struct epoll_event e;
+  e.events = EPOLLIN;
+  e.data.fd = ss->tcp_sock;
+  TRY( epoll_ctl(ss->epoll, EPOLL_CTL_ADD, ss->tcp_sock, &e) );
+
+  if( cfg_hw_ts ) {
+    e.events = EPOLLIN | EPOLLHUP | EPOLLERR | EPOLLPRI;
+    e.data.fd = ss->udp_sock_ts;
+    TRY( epoll_ctl(ss->epoll, EPOLL_CTL_ADD, ss->udp_sock_ts, &e) );
   }
 
-  if( s->pio_pkt_len )
-    TRY(onload_delegated_send_cancel(s->tcp_sock));
+  if( cfg_hw_ts ) {
+    int tsm = SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE;
+    int rc = setsockopt(ss->tcp_sock, SOL_SOCKET, SO_TIMESTAMPING,
+                        &tsm, sizeof(tsm));
+    if( rc < 0 ) {
+      fprintf(stderr, "ERROR: failed to enable h/w timestamping for TCP RX\n");
+      exit(5);
+    }
+  }
+  int one = 1;
+  TRY( setsockopt(ss->tcp_sock, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) );
+  ss->rx_msg_size = sock_get_int(ss->tcp_sock);
+  ss->tx_msg_size = sock_get_int(ss->tcp_sock);
+  int min_tx_msg = max_i(strlen(INTERESTING_MSG), strlen(BORING_MSG));
+  if( ss->tx_msg_size < min_tx_msg ) {
+    fprintf(stderr, "ERROR: UDP message size %d less than minimum %d\n",
+            ss->tx_msg_size, min_tx_msg);
+    exit(6);
+  }
+  ss->tx_buf = malloc(ss->tx_msg_size);
+  strncpy(ss->tx_buf, BORING_MSG, ss->tx_msg_size);
+  ss->tx_buf_ts = malloc(ss->tx_msg_size);
+  strncpy(ss->tx_buf_ts, INTERESTING_MSG, ss->tx_msg_size);
+  ss->rx_buf = malloc(ss->rx_msg_size);
+
+  if( cfg_iter == 0 )
+    cfg_iter = 5/*seconds*/ * cfg_send_rate / cfg_measure_nth;
+  if( cfg_warm_n == 0 ) {
+    cfg_warm_n = cfg_iter / 10;
+    if( cfg_warm_n == 0 )
+      cfg_warm_n = 2;
+  }
+  ss->rtt_sum = 0;
+  ss->rtt_min = -1;
+  ss->rtt_max = 0;
+  ss->rtt_n = -cfg_warm_n;
 }
 
 
-/**********************************************************************/
-/* Below is just initialization cruft and not really interesting for
- * delegated sends API. */
-/**********************************************************************/
-
-static int parse_interface(const char* intf_name, int* ifindex_out)
+static void measured_rtt(struct server_state* ss, struct timespec tx_ts,
+                         struct timespec rx_ts)
 {
-  if( (*ifindex_out = if_nametoindex(intf_name)) == 0 )
-    return -errno;
-  return 0;
+  ss->have_sent = ss->have_rx_ts = ss->have_tx_ts = false;
+  uint64_t ns = (rx_ts.tv_sec - tx_ts.tv_sec) * 1000000000;
+  ns += rx_ts.tv_nsec - tx_ts.tv_nsec;
+  msg(2, "rtt: %d\n", (int) ns);
+  if( ++(ss->rtt_n) > 0 ) {
+    ss->rtt_sum += ns;
+    if( ns <= ss->rtt_min )
+      ss->rtt_min = ns;
+    else if( ns >= ss->rtt_max )
+      ss->rtt_max = ns;
+    if( ss->rtt_n == cfg_iter ) {
+      printf("n_lost_msgs:  %u\n", ss->n_lost_msgs);
+      printf("n_samples:    %d\n", ss->rtt_n);
+      printf("latency_mean: %u\n", (unsigned) (ss->rtt_sum / ss->rtt_n));
+      printf("latency_min:  %u\n", ss->rtt_min);
+      printf("latency_max:  %u\n", ss->rtt_max);
+      exit(0);
+    }
+  }
 }
 
 
-static int get_ifindex(int sock, int* ifindex_out)
+static void event_loop(struct server_state* ss)
 {
-  int rc = -1;
-  struct ifaddrs *addrs, *iap;
-  struct sockaddr_in sa;
-  char sock_ip_addr[32];
-  socklen_t len = sizeof(sa);
-  TRY(getsockname(sock, (struct sockaddr*)&sa, &len));
-  snprintf(sock_ip_addr, sizeof(sock_ip_addr), "%s", inet_ntoa(sa.sin_addr));
+  msg(1, "Starting event loop\n");
 
-  getifaddrs(&addrs);
-  for( iap = addrs; iap != NULL; iap = iap->ifa_next) {
-    if( iap->ifa_addr &&
-        iap->ifa_flags & IFF_UP &&
-        iap->ifa_addr->sa_family == AF_INET ) {
-      struct sockaddr_in* sa = (struct sockaddr_in*)iap->ifa_addr;
-      char intf_ip_addr[32];
-      inet_ntop(iap->ifa_addr->sa_family, (void *)&(sa->sin_addr), intf_ip_addr,
-                sizeof(intf_ip_addr));
-      if( ! strcmp(sock_ip_addr, intf_ip_addr) ) {
-        TRY(parse_interface(iap->ifa_name, ifindex_out));
-        rc = 0;
-        goto done;
+  struct timespec tx_ts, rx_ts, next_tx_ts, lost_tx_ts = { 0, 0 };
+  ss->have_sent = ss->have_tx_ts = ss->have_rx_ts = false;
+  int rc, rx_left = ss->rx_msg_size;
+  unsigned send_i = 0;
+
+  clock_gettime(CLOCK_REALTIME, &next_tx_ts);
+  timespec_add_ns(&next_tx_ts, ss->inter_tx_gap_ns);
+
+  while( 1 ) {
+    struct epoll_event e;
+    TRY( rc = epoll_wait(ss->epoll, &e, 1, 0) );
+
+    if( rc == 0 ) {
+      struct timespec now;
+      clock_gettime(CLOCK_REALTIME, &now);
+      if( ! timespec_le(next_tx_ts, now) )
+        continue;
+      timespec_add_ns(&next_tx_ts, ss->inter_tx_gap_ns);
+      if( ++send_i >= cfg_measure_nth && ! ss->have_sent ) {
+        msg(3, "Send message (timed)\n");
+        TEST( send(ss->udp_sock_ts, ss->tx_buf_ts, ss->tx_msg_size, 0)
+                == ss->tx_msg_size );
+        if( ! cfg_hw_ts ) {
+          ss->have_tx_ts = true;
+          tx_ts = now;
+        }
+        send_i = 0;
+        ss->have_sent = true;
+      }
+      else {
+        msg(3, "Send message\n");
+        TEST( send(ss->udp_sock, ss->tx_buf, ss->tx_msg_size, 0)
+                == ss->tx_msg_size );
+        if( send_i >= cfg_measure_nth ) {
+          /* Not had a reply to last timed message.  Try to detect lost
+           * messages.
+           */
+          if( send_i == cfg_measure_nth ) {
+            lost_tx_ts = now;
+          }
+          else if( ss->have_tx_ts &&
+                   timespec_diff_ns(now, lost_tx_ts) > 10000000 ) {
+            msg(2, "WARNING: No response to timed message\n");
+            if( ss->rtt_n > 0 )
+              ++(ss->n_lost_msgs);
+            ss->have_sent = false;
+            ss->have_tx_ts = false;
+            ss->have_rx_ts = false;
+          }
+        }
       }
     }
+
+    else if( e.data.fd == ss->tcp_sock ) {
+      TEST( e.events & EPOLLIN );
+      if( cfg_hw_ts ) {
+        rc = recv_ts(ss->tcp_sock, ss->rx_buf, rx_left, MSG_DONTWAIT, &rx_ts);
+      }
+      else {
+        rc = recv(ss->tcp_sock, ss->rx_buf, rx_left, MSG_DONTWAIT);
+        clock_gettime(CLOCK_REALTIME, &rx_ts);
+      }
+      if( rc > 0 ) {
+        msg(3, "Received %d from client at %d.%09d\n", rc,
+            (int) rx_ts.tv_sec, (int) rx_ts.tv_nsec);
+        if( (rx_left -= rc) == 0 ) {
+          send(ss->tcp_sock, ss->rx_buf, 1, MSG_NOSIGNAL);
+          rx_left = ss->rx_msg_size;
+          ss->have_rx_ts = true;
+          if( ss->have_tx_ts )
+            measured_rtt(ss, tx_ts, rx_ts);
+        }
+      }
+      else if( rc == 0 || errno == ECONNRESET ) {
+        break;
+      }
+      else if( errno == ETIME ) {
+        fprintf(stderr, "ERROR: Did not get H/W timestamp on RX\n");
+        exit(3);
+      }
+      else {
+        TRY( rc );
+      }
+    }
+
+    else if( e.data.fd == ss->udp_sock_ts ) {
+      assert( cfg_hw_ts );
+      assert( ! ss->have_tx_ts );
+      TEST( recv_ts(ss->udp_sock_ts, ss->rx_buf, 1,
+                    MSG_ERRQUEUE | MSG_DONTWAIT, &tx_ts) == 1 );
+      msg(3, "TX timestamp %d.%09d\n", (int) tx_ts.tv_sec,
+             (int) tx_ts.tv_nsec);
+      ss->have_tx_ts = true;
+      if( ss->have_rx_ts )
+        measured_rtt(ss, tx_ts, rx_ts);
+    }
   }
 
- done:
-  freeifaddrs(addrs);
-  return rc;
+  msg(1, "Client disconnected\n");
+  TRY( close(ss->tcp_sock) );
 }
 
 
-static void ef_vi_init(struct state* s)
-{
-  enum ef_pd_flags pd_flags = EF_PD_DEFAULT;
-  enum ef_vi_flags vi_flags = EF_VI_FLAGS_DEFAULT;
-  int ifindex;
+/**********************************************************************/
 
-  s->pio_pkt_len = 0;
-  s->pio_in_use = ! cfg_delegated;
-  TRY(get_ifindex(s->tcp_sock, &ifindex));
-  TRY(ef_driver_open(&s->dh));
-  TRY(ef_pd_alloc(&s->pd, s->dh, ifindex, pd_flags));
-  TRY(ef_vi_alloc_from_pd(&(s->vi), s->dh, &s->pd, s->dh, -1,0,-1, NULL, -1,
-                          vi_flags));
-  TRY(ef_pio_alloc(&s->pio, s->dh, &s->pd, -1, s->dh));
-  TRY(ef_pio_link_vi(&s->pio, s->dh, &(s->vi), s->dh));
+static int mk_udp_sock(const char* mcast_intf, bool enable_timestamping)
+{
+  int sock;
+  TRY( sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) );
+  if( mcast_intf != NULL ) {
+    struct ip_mreqn mreqn;
+    mreqn.imr_multiaddr.s_addr = htonl(INADDR_ANY);
+    mreqn.imr_address.s_addr = htonl(INADDR_ANY);
+    TEST( (mreqn.imr_ifindex = if_nametoindex(mcast_intf)) != 0 );
+    TRY( setsockopt(sock, SOL_IP, IP_MULTICAST_IF, &mreqn, sizeof(mreqn)) );
+  }
+  /* NB. We have to connect after doing IP_MULTICAST_IF else we may bind to
+   * the wrong local address.
+   */
+  struct sockaddr_storage sas;
+  TRY( getaddrinfo_storage(AF_INET, cfg_mcast_addr, cfg_port, &sas) );
+  TRY( connect(sock, (void*) &sas, sizeof(sas)) );
+  if( enable_timestamping ) {
+    int tsm = SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_RAW_HARDWARE;
+    int rc = setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &tsm, sizeof(tsm));
+    if( rc < 0 )
+      fprintf(stderr, "ERROR: failed to enable h/w timestamping for UDP TX\n");
+  }
+  return sock;
 }
 
 
-static int my_bind(int sock, int port)
+static void init(struct server_state* ss, const char* mcast_intf)
 {
-  struct sockaddr_in sa;
-  memset(&sa, 0, sizeof(sa));
-  sa.sin_family = AF_INET;
-  sa.sin_addr.s_addr = htonl(INADDR_ANY);
-  sa.sin_port = htons(port);
-  return bind(sock, (struct sockaddr*)&sa, sizeof(sa));
-}
-
-
-static void init(struct state* s, int port)
-{
-  int lsock;
-  int one = 1;
-
-  s->msg_len = cfg_payload_len;
-  s->msg_buf = s->pkt_buf + MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
-
-  TRY(s->udp_sock = socket(AF_INET, SOCK_DGRAM, 0));
-  TRY(my_bind(s->udp_sock, port));
-
-  TRY( lsock = socket(AF_INET, SOCK_STREAM, 0) );
-  TRY( setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, (char*)&one, sizeof(one)) );
-  TRY( setsockopt(lsock, IPPROTO_TCP, TCP_NODELAY, (char*)&one, sizeof(one)) );
-  TRY( my_bind(lsock, port) );
-  TRY( listen(lsock, 1) );
-  TRY( s->tcp_sock = accept(lsock, NULL, NULL) );
-  TRY( close(lsock) );
-  ef_vi_init(s);
+  TRY( ss->listen_sock = mk_socket(0, SOCK_STREAM, bind, NULL, cfg_port) );
+  TRY( ss->udp_sock = mk_udp_sock(mcast_intf, false) );
+  TRY( ss->udp_sock_ts = mk_udp_sock(mcast_intf, cfg_hw_ts) );
+  TRY( ss->epoll = epoll_create(10) );
+  ss->inter_tx_gap_ns = 1000000000 / cfg_send_rate;
+  ss->n_lost_msgs = 0;
 }
 
 
 static void usage_msg(FILE* f)
 {
   fprintf(f, "\nusage:\n");
-  fprintf(f, "  efdelegated_server [options] <port>\n");
+  fprintf(f, "  efdelegated_server [options] <mcast-interface>\n");
   fprintf(f, "\noptions:\n");
-  fprintf(f, "  -s <msg-size>      - set payload size\n");
-  fprintf(f, "  -d                 - use delegated sends API to send\n");
+  fprintf(f, "  -h                - print usage info\n");
+  fprintf(f, "  -r <send-rate>    - set UDP message send rate\n");
+  fprintf(f, "  -n <n>            - measure RTT for 1-in-n sends\n");
+  fprintf(f, "  -i <num-iter>     - number of samples to measure\n");
+  fprintf(f, "  -n <num-warmups>  - number of warmup samples\n");
+  fprintf(f, "  -s                - use software timestamps\n");
+  fprintf(f, "  -l <log-level>    - set log level\n");
+  fprintf(f, "  -p <port>         - set TCP/UDP port number\n");
   fprintf(f, "\n");
 }
 
@@ -387,20 +447,34 @@ static void usage_err(void)
 
 int main(int argc, char* argv[])
 {
-  int port;
   int c;
 
-  while( (c = getopt(argc, argv, "hs:d")) != -1 )
+  while( (c = getopt(argc, argv, "hr:n:i:w:sl:p:")) != -1 )
     switch( c ) {
     case 'h':
       usage_msg(stdout);
       exit(0);
       break;
-    case 's':
-      cfg_payload_len = atoi(optarg);
+    case 'r':
+      cfg_send_rate = atoi(optarg);
       break;
-    case 'd':
-      cfg_delegated = 1;
+    case 'n':
+      cfg_measure_nth = atoi(optarg);
+      break;
+    case 'i':
+      cfg_iter = atoi(optarg);
+      break;
+    case 'w':
+      cfg_warm_n = atoi(optarg);
+      break;
+    case 's':
+      cfg_hw_ts = false;
+      break;
+    case 'l':
+      cfg_log_level = atoi(optarg);
+      break;
+    case 'p':
+      cfg_port = optarg;
       break;
     case '?':
       usage_err();
@@ -413,17 +487,29 @@ int main(int argc, char* argv[])
   argv += optind;
   if( argc != 1 )
     usage_err();
+  const char* mcast_intf = argv[0];
 
-  port = atoi(argv[0]);
-
-  if( cfg_delegated && ! onload_is_present() ) {
-    fprintf(stderr, "ERROR: Must run with Onload to use delegated sends\n");
-    exit(1);
+  if( onload_is_present() ) {
+    if( cfg_hw_ts ) {
+      TRY( onload_stack_opt_set_int("EF_RX_TIMESTAMPING", 3) );
+      TRY( onload_stack_opt_set_int("EF_TX_TIMESTAMPING", 3) );
+    }
+  }
+  else if( cfg_hw_ts ) {
+    fprintf(stderr, "ERROR: Cannot use hardware timestamp because Onload is "
+            "not being used.  You can use -s to use software timestamps, but "
+            "they are much less accurate.\n");
+    exit(4);
+  }
+  else {
+    msg(1, "Using software timestamps\n");
+    cfg_hw_ts = false;
   }
 
-  struct state the_state;
-  init(&the_state, port);
-  loop(&the_state);
+  struct server_state ss;
+  init(&ss, mcast_intf);
+  wait_for_client(&ss);
+  event_loop(&ss);
   return 0;
 }
 

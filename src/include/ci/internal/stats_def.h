@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -228,6 +228,8 @@ OO_STAT("Times a synrecv has been purged to make room for a new one.",
         ci_uint32, synrecv_purge, count)
 OO_STAT("Times a SYN has been dropped due to overload.",
         ci_uint32, syn_drop_busy, count)
+OO_STAT("Number of SYN dropped due to no return route.",
+        ci_uint32, syn_drop_no_return_route, count)
 OO_STAT("Transitions from LISTEN to SYN-RECV.",
         ci_uint32, listen2synrecv, count)
 OO_STAT("Transitions from SYN-RECV to ESTABLISHED.",
@@ -402,7 +404,10 @@ OO_STAT("Number of times when TCP listening socket failed to retransmit "
         "SYNACK because it failed to allocate more packet buffers "
         "(probably postponing packet buffers allocation).",
         ci_uint32, tcp_listen_synack_retrans_no_buffer, count)
-OO_STAT("Number proactive packet buffers allocation because of "
+OO_STAT("Number of proactive packet buffers allocations because of "
         "EF_FREE_PACKETS_LOW_WATERMARK or fragmentation of free packets "
         "between packet sets.",
         ci_uint32, proactive_packet_allocation, count)
+OO_STAT("Number of times the stack lock was deferred from driverlink "
+        "context to workqueue.",
+        ci_uint32, stack_locks_deferred, count)

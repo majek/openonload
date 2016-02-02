@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -153,7 +153,7 @@ static void ci_drop_orphan(ci_netif * ni)
     ci_irqlock_unlock(&trs->lock, &lock_flags);
 
     if( dec_needed )
-      efab_tcp_helper_k_ref_count_dec(trs, 0);
+      efab_tcp_helper_k_ref_count_dec(trs);
   }
 }
 #else

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -176,24 +176,28 @@ static void efx_fini_debugfs_dir(struct dentry *dir,
 
 int efx_debugfs_read_uint(struct seq_file *file, void *data)
 {
-	return seq_printf(file, "%#x\n", *(unsigned int *)data);
+	seq_printf(file, "%#x\n", *(unsigned int *)data);
+	return 0;
 }
 
 int efx_debugfs_read_int(struct seq_file *file, void *data)
 {
-	return seq_printf(file, "%d\n", *(int *)data);
+	seq_printf(file, "%d\n", *(int *)data);
+	return 0;
 }
 
 int efx_debugfs_read_ulong(struct seq_file *file, void *data)
 {
-	return seq_printf(file, "%lu\n", *(unsigned long *)data);
+	seq_printf(file, "%lu\n", *(unsigned long *)data);
+	return 0;
 }
 
 int efx_debugfs_read_atomic(struct seq_file *file, void *data)
 {
 	unsigned int value = atomic_read((atomic_t *) data);
 
-	return seq_printf(file, "%#x\n", value);
+	seq_printf(file, "%#x\n", value);
+	return 0;
 }
 
 int efx_debugfs_read_dword(struct seq_file *file, void *data)
@@ -201,7 +205,8 @@ int efx_debugfs_read_dword(struct seq_file *file, void *data)
 	unsigned int value = EFX_DWORD_FIELD(*(efx_dword_t *) data,
 					     EFX_DWORD_0);
 
-	return seq_printf(file, "%#x\n", value);
+	seq_printf(file, "%#x\n", value);
+	return 0;
 }
 
 #ifdef EFX_NOT_UPSTREAM
@@ -209,21 +214,24 @@ int efx_debugfs_read_u64(struct seq_file *file, void *data)
 {
 	unsigned long long value = *((u64 *) data);
 
-	return seq_printf(file, "%llu\n", value);
+	seq_printf(file, "%llu\n", value);
+	return 0;
 }
 #endif
 
 int efx_debugfs_read_bool(struct seq_file *file, void *data)
 {
-	return seq_printf(file, "%d\n", *(bool *)data);
+	seq_printf(file, "%d\n", *(bool *)data);
+	return 0;
 }
 
 static int efx_debugfs_read_int_mode(struct seq_file *file, void *data)
 {
 	unsigned int value = *(enum efx_int_mode *) data;
 
-	return seq_printf(file, "%d => %s\n", value,
+	seq_printf(file, "%d => %s\n", value,
 			  STRING_TABLE_LOOKUP(value, efx_interrupt_mode));
+	return 0;
 }
 
 #define EFX_INT_MODE_PARAMETER(container_type, parameter)		\
@@ -234,8 +242,9 @@ static int efx_debugfs_read_loop_mode(struct seq_file *file, void *data)
 {
 	unsigned int value = *(enum efx_loopback_mode *)data;
 
-	return seq_printf(file, "%d => %s\n", value,
+	seq_printf(file, "%d => %s\n", value,
 			  STRING_TABLE_LOOKUP(value, efx_loopback_mode));
+	return 0;
 }
 
 #define EFX_LOOPBACK_MODE_PARAMETER(container_type, parameter)		\
@@ -253,8 +262,9 @@ static int efx_debugfs_read_nic_state(struct seq_file *file, void *data)
 {
 	unsigned int value = *(enum nic_state *)data;
 
-	return seq_printf(file, "%d => %s\n", value,
+	seq_printf(file, "%d => %s\n", value,
 			  STRING_TABLE_LOOKUP(value, nic_state));
+	return 0;
 }
 
 #define EFX_NIC_STATE_PARAMETER(container_type, parameter)		\
@@ -263,7 +273,8 @@ static int efx_debugfs_read_nic_state(struct seq_file *file, void *data)
 
 int efx_debugfs_read_string(struct seq_file *file, void *data)
 {
-	return seq_printf(file, "%s\n", (const char *)data);
+	seq_printf(file, "%s\n", (const char *)data);
+	return 0;
 }
 
 
@@ -771,14 +782,16 @@ static int efx_nic_debugfs_read_desc(struct seq_file *file, void *data)
 		break;
 	}
 
-	return seq_printf(file, "%s %s board\n", rev_name, efx->phy_name);
+	seq_printf(file, "%s %s board\n", rev_name, efx->phy_name);
+	return 0;
 }
 
 static int efx_nic_debugfs_read_name(struct seq_file *file, void *data)
 {
 	struct efx_nic *efx = data;
 
-	return seq_printf(file, "%s\n", efx->name);
+	seq_printf(file, "%s\n", efx->name);
+	return 0;
 }
 
 /* Per-NIC parameters */

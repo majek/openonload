@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -177,11 +177,11 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
 redo:
     rc = efrm_vi_set_alloc(pd, thc->thc_cluster_size, 0,
                            rss_flags, &thc->thc_vi_set[i]);
-    if( rc != 0 && rss_flags ) {
+    if( rc != 0 && (rss_flags != EFRM_RSS_MODE_DEFAULT) ) {
       LOG_E(ci_log("Installing special RSS mode filter failed on hwport %d, "
                    "falling back to default mode.  Transparent proxy will not "
                    "work with this interface.", i));
-      rss_flags = 0;
+      rss_flags = EFRM_RSS_MODE_DEFAULT;
       goto redo;
     }
 
@@ -307,13 +307,13 @@ static int thc_get_thr(tcp_helper_cluster_t* thc,
   ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
   thr_walk = thc->thc_thr_head;
   while( thr_walk != NULL ) {
-    if( thr_walk->thc_tid == current->pid ) {
-      if( oof_socket_can_update_stack(fm, oofilter, thr_walk) ) {
-        efab_thr_ref(thr_walk);
-        *thr_out = thr_walk;
-        ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
-        return 0;
-      }
+    if( (~thr_walk->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) &&
+        thr_walk->thc_tid == current->pid &&
+        oof_socket_can_update_stack(fm, oofilter, thr_walk) ) {
+      efab_thr_ref(thr_walk);
+      *thr_out = thr_walk;
+      ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+      return 0;
     }
     thr_walk = thr_walk->thc_thr_next;
   }

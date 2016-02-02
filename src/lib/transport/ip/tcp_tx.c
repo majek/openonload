@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -632,6 +632,11 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
     opt += optlen;
     optlen += ci_tcp_tx_insert_syn_options(netif, ts->amss,
                                            ts->tcpflags, ts->rcv_wscl, &opt);
+
+    /* If we don't get timestamps, we'll need to calculate RTT without
+     * them.  Let's prepare: */
+    ts->timed_seq = thdr->tcp_seq_be32;
+    ts->timed_ts = ci_tcp_time_now(netif);
   }
 
   CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);

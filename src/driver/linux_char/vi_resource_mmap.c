@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -106,6 +106,7 @@ efab_vi_rm_mmap_pio(struct efrm_vi *virs,
   int len;
   int instance;
   struct efhw_nic *nic;
+  int bar_off;
 
   nic = efrm_client_get_nic(virs->rs.rs_client);
 
@@ -121,8 +122,8 @@ efab_vi_rm_mmap_pio(struct efrm_vi *virs,
   /* Map the control page. */
   len = CI_MIN(*bytes, CI_PAGE_SIZE);
   *bytes -= len;
-  rc = ci_mmap_bar(nic, ef10_tx_dma_page_base(instance) + CI_PAGE_SIZE, len,
-                   opaque, map_num, offset, 1);
+  bar_off = (ef10_tx_dma_page_base(instance) + 4096) & PAGE_MASK;
+  rc = ci_mmap_bar(nic, bar_off, len, opaque, map_num, offset, 1);
   if( rc < 0 )
     EFCH_ERR("%s: ERROR: ci_mmap_bar failed rc=%d", __FUNCTION__, rc);
   return rc;

@@ -22,8 +22,10 @@
 
 import os, shutil, sys, optparse, socket, select, stat, signal, pwd, errno
 
+import platform
+onload_build = 'gnu_%s' % platform.machine()
 path = os.path.join(os.path.dirname(sys.argv[0]), '../../..', 'build',
-                    'gnu_x86_64', 'tools', 'solar_clusterd')
+                    onload_build, 'tools', 'solar_clusterd')
 if os.path.exists(path):
     sys.path.append(path)
     import daemonize, parse_config, cluster_protocol as cp

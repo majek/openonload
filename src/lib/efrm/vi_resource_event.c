@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -83,47 +83,6 @@ void efrm_eventq_request_wakeup(struct efrm_vi *virs, unsigned current_ptr)
 }
 EXPORT_SYMBOL(efrm_eventq_request_wakeup);
 
-
-void efrm_eventq_reset(struct efrm_vi *virs)
-{
-	struct efhw_nic *nic = virs->rs.rs_client->nic;
-	struct efrm_nic *efrm_nic = container_of(nic, struct efrm_nic,
-						 efhw_nic);
-	int instance = virs->rs.rs_instance;
-	int wakeup_evq;
-
-	EFRM_ASSERT(virs->q[EFHW_EVQ].capacity != 0);
-
-	/* FIXME: Protect against concurrent resets. */
-
-	efhw_nic_event_queue_disable(nic, instance,
-				  (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
-
-	wakeup_evq = virs->net_drv_wakeup_channel >= 0?
-		virs->net_drv_wakeup_channel:
-		efrm_nic->rss_channel_count == 0?
-		0:
-		instance % efrm_nic->rss_channel_count;
-	memset(efrm_eventq_base(virs), EFHW_CLEAR_EVENT_VALUE,
-	       efrm_vi_rm_evq_bytes(virs, -1));
-	virs->out_flags = 0;
-	/* NB. We do not enable DOS protection because of bug12916. */
-	efhw_nic_event_queue_enable(nic, instance, virs->q[EFHW_EVQ].capacity,
-			efrm_bt_allocation_base(&virs->q[EFHW_EVQ].bt_alloc),
-			virs->q[EFHW_EVQ].dma_addrs, 
-			1 << virs->q[EFHW_EVQ].page_order,
-				    /* make siena look like falcon for now */
-				    instance < 64, 
-				    0, wakeup_evq,
-				    (virs->flags &
-				     (EFHW_VI_RX_TIMESTAMPS |
-				      EFHW_VI_TX_TIMESTAMPS)) != 0,
-				    (virs->flags &
-				     EFHW_VI_NO_CUT_THROUGH) == 0,
-				    &virs->rx_ts_correction,
-				    &virs->out_flags);
-}
-EXPORT_SYMBOL(efrm_eventq_reset);
 
 int
 efrm_eventq_register_callback(struct efrm_vi *virs,

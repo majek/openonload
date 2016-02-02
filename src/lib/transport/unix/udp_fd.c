@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -551,6 +551,7 @@ static int citp_udp_epoll(citp_fdinfo*__restrict__ fdi,
     if( citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin) ) {
       sleep_seq = us->s.b.sleep_seq.all;
       mask = ci_udp_poll_events(ni, us);
+      seq_mismatch = 0;
       *stored_event = citp_ul_epoll_set_ul_events(eps, eitem, mask, sleep_seq,
                                                   &us->s.b.sleep_seq.all,
                                                   &seq_mismatch);

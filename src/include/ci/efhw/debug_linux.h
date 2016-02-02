@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,6 +63,15 @@
 #define EFHW_PRINTK(level, fmt, ...) \
 	printk(level EFHW_PRINTK_PREFIX fmt printk_nl, __VA_ARGS__)
 
+/* This macro will do <x> no more than (approximately) once per second.  In
+ * other words, <x> is rate-limited.
+ */
+#define EFHW_LIMITED(x) do {                    \
+	static uint64_t last_jiffy;		\
+	if (jiffies - last_jiffy > HZ) { x; }	\
+	last_jiffy = jiffies;			\
+} while(0)
+
 /* Following macros should be used with non-zero format parameters
  * due to __VA_ARGS__ limitations.  Use "%s" with __FUNCTION__ if you can't
  * find better parameters. */
@@ -70,6 +79,11 @@
 #define EFHW_WARN(fmt, ...)    EFHW_PRINTK(KERN_WARNING, fmt, __VA_ARGS__)
 #define EFHW_NOTICE(fmt, ...)  EFHW_PRINTK(KERN_NOTICE, fmt, __VA_ARGS__)
 #define EFHW_TRACE(fmt, ...)
+
+/* Defined for messaging that may be high rate in normal operation */
+#define EFHW_ERR_LIMITED(fmt, ...)    EFHW_LIMITED(EFHW_ERR(fmt, __VA_ARGS__))
+#define EFHW_WARN_LIMITED(fmt, ...)   EFHW_LIMITED(EFHW_WARN(fmt, __VA_ARGS__))
+#define EFHW_NOTICE_LIMITED(fmt, ...) EFHW_LIMITED(EFHW_NOTICE(fmt, __VA_ARGS__))
 
 #ifndef NDEBUG
 #define EFHW_ASSERT(cond)  BUG_ON((cond) == 0)

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -202,6 +202,7 @@ static int __oof_hw_filter_set(struct oof_manager* fm,
                                const char* caller)
 {
   int rc;
+  unsigned drop_hwports_mask;
   struct oo_hw_filter_spec oo_filter_spec = {
     .type             = OO_HW_FILTER_TYPE_IP,
     .addr.ip.saddr    = saddr,
@@ -230,7 +231,28 @@ static int __oof_hw_filter_set(struct oof_manager* fm,
   spin_unlock_bh(&fm->fm_inner_lock);
   ci_assert(!in_atomic());
   oo_hw_filter_clear(&old_oofilter);
-  rc = oo_hw_filter_set(oofilter, &oo_filter_spec, 0, hwport_mask,
+
+  /* Below TCP and UPD are treated differently.
+   *
+   * There is a race allowing pkts hit kernel stack after onload removes
+   * rx filters when interface goes down.
+   *
+   * In case of TCP traffic could hit kernel causing RST response.  To avoid
+   * this, filters are made to drop traffic to prevent it hitting kernel when
+   * interface is down.
+   *
+   * For UDP the race with filters has no practical issue as the traffic gets
+   * handled correctly through kernel by the backing socket.  However, there is
+   * an issue with drop filters.  Drop filters would not get necessary flags
+   * set and further redirect would create filter without appropriate HW
+   * multicast loopback settings.
+   */
+
+  drop_hwports_mask = protocol == IPPROTO_UDP ? 0 :
+                      fm->fm_hwports_down & fm->fm_hwports_available;
+  rc = oo_hw_filter_set(oofilter, &oo_filter_spec, 0,
+                        hwport_mask | drop_hwports_mask,
+                        drop_hwports_mask,
                         src_flags);
   spin_lock_bh(&fm->fm_inner_lock);
 
@@ -336,6 +358,7 @@ static int oof_hw_filter_update(struct oof_manager* fm,
                                 unsigned src_flags)
 {
   int rc;
+  unsigned drop_hwports_mask;
   struct oo_hw_filter_spec oo_filter_spec = {
     .type             = OO_HW_FILTER_TYPE_IP,
     .addr.ip.saddr    = saddr,
@@ -351,9 +374,12 @@ static int oof_hw_filter_update(struct oof_manager* fm,
 
   spin_unlock_bh(&fm->fm_inner_lock);
   ci_assert(!in_atomic());
+  drop_hwports_mask = protocol == IPPROTO_UDP ? 0 :
+                      fm->fm_hwports_down & fm->fm_hwports_available;
   rc = oo_hw_filter_update(oofilter, new_stack, &oo_filter_spec,
                            fm->fm_hwports_vlan_filters & hwport_mask,
-                           hwport_mask, src_flags);
+                           hwport_mask | drop_hwports_mask, drop_hwports_mask,
+                           src_flags);
   spin_lock_bh(&fm->fm_inner_lock);
   return rc;
 }
@@ -788,6 +814,8 @@ oof_manager_alloc(unsigned local_addr_max, void* owner_private)
     oo_hw_filter_init(&fm->fm_tproxy_global_filters[i]);
   fm->fm_hwports_up = 0;
   fm->fm_hwports_up_new = 0;
+  fm->fm_hwports_down = 0;
+  fm->fm_hwports_down_new = 0;
   fm->fm_hwports_mcast_replicate_capable = 0;
   fm->fm_hwports_mcast_replicate_capable_new = 0;
   fm->fm_hwports_vlan_filters = 0;
@@ -1220,30 +1248,66 @@ oof_manager_update_all_filters(struct oof_manager* fm)
 
 
 void oof_hwport_up_down(int hwport, int up, int mcast_replicate_capable,
-                        int vlan_filters)
+                        int vlan_filters, int sync)
 {
   /* A physical interface has gone up or down. */
 
   struct oof_manager* fm = the_manager;
 
+  if( fm == NULL )
+    /* this might be the case in dl_remove on driver unload */
+    return;
+
   spin_lock_bh(&fm->fm_cplane_updates_lock);
+
   if( up ) {
-    if( mcast_replicate_capable )
-      fm->fm_hwports_mcast_replicate_capable_new |= 1 << hwport;
-
-    if( vlan_filters )
-      fm->fm_hwports_vlan_filters_new |= 1 << hwport;
-
-    fm->fm_hwports_up_new |= 1 << hwport;
-  }
-  else {
-    fm->fm_hwports_up_new &= ~(1 << hwport);
+    /* we allow resetting these flags only when device goes up */
     fm->fm_hwports_mcast_replicate_capable_new &= ~(1 << hwport);
     fm->fm_hwports_vlan_filters_new &= ~(1 << hwport);
   }
+
+  if( mcast_replicate_capable )
+    fm->fm_hwports_mcast_replicate_capable_new |= 1 << hwport;
+  fm->fm_hwports_vlan_filters_new &= ~(1 << hwport);
+  if( vlan_filters )
+    fm->fm_hwports_vlan_filters_new |= 1 << hwport;
+  if( up ) {
+    fm->fm_hwports_up_new |= 1 << hwport;
+    fm->fm_hwports_down_new &= ~(1 << hwport);
+  }
+  else {
+    fm->fm_hwports_up_new &= ~(1 << hwport);
+    fm->fm_hwports_down_new |= (1 << hwport);
+  }
   spin_unlock_bh(&fm->fm_cplane_updates_lock);
 
-  oof_cb_defer_work(fm->fm_owner_private);
+  if( sync )
+    oof_do_deferred_work(fm);
+  else
+    oof_cb_defer_work(fm->fm_owner_private);
+}
+
+
+/* This is called when a new interface is probed that is stepping into the
+ * shoes of a previous interface.  We trigger the insertion of drop filters
+ * for that interface to prevent the kernel from receiving traffic destined for
+ * this interface before that interface comes up, lest pre-existing connections
+ * get reset. */
+void oof_hwport_removed(int hwport)
+{
+  struct oof_manager* fm = the_manager;
+
+  spin_lock_bh(&fm->fm_cplane_updates_lock);
+  fm->fm_hwports_removed    |= 1 << hwport;
+  fm->fm_hwports_up_new     &= ~(1 << hwport);
+  fm->fm_hwports_down_new   |= 1 << hwport;
+  spin_unlock_bh(&fm->fm_cplane_updates_lock);
+
+  /* To avoid racing against the kernel, we need to force the filters to be
+   * updated right now.  Normally this operation is deferred to a workqueue,
+   * but our context is sufficiently friendly that this is safe. */
+  ci_assert(! in_atomic());
+  oof_do_deferred_work(fm);
 }
 
 
@@ -1272,6 +1336,8 @@ void oof_do_deferred_work(struct oof_manager* fm)
    * held.  We handle control plane changes here.  Reason for deferring to
    * a workitem is so we can grab locks in the right order.
    */
+  unsigned hwports_up_new, hwports_down_new, hwports_available_new,
+           hwports_changed, hwports_removed;
   IPF_LOG("%s:", __FUNCTION__);
 
   mutex_lock(&fm->fm_outer_lock);
@@ -1279,33 +1345,87 @@ void oof_do_deferred_work(struct oof_manager* fm)
 
   oof_manager_drain_cplane_updates(fm);
 
+  spin_lock_bh(&fm->fm_cplane_updates_lock);
+
+  hwports_changed = fm->fm_hwports_mcast_replicate_capable ^
+    fm->fm_hwports_mcast_replicate_capable_new;
+
   fm->fm_hwports_mcast_replicate_capable =
     fm->fm_hwports_mcast_replicate_capable_new;
+
+  hwports_changed |= fm->fm_hwports_vlan_filters ^
+                     fm->fm_hwports_vlan_filters_new;
+
   fm->fm_hwports_vlan_filters = fm->fm_hwports_vlan_filters_new;
 
-  if( fm->fm_hwports_up != fm->fm_hwports_up_new ) {
-    IPF_LOG("%s: up=%x (mcast replicate=%x vlan filters=%x) down=%x",
+  hwports_removed = fm->fm_hwports_removed;
+  hwports_up_new = fm->fm_hwports_up_new;
+  hwports_down_new = fm->fm_hwports_down_new;
+  hwports_available_new = fm->fm_hwports_available_new;
+
+  hwports_changed |= hwports_removed |
+    (hwports_up_new ^ fm->fm_hwports_up) |
+    (hwports_down_new ^ fm->fm_hwports_down);
+
+
+  /* Restart port change monitoring */
+  fm->fm_hwports_removed = 0;
+
+  spin_unlock_bh(&fm->fm_cplane_updates_lock);
+
+  if( hwports_changed ) {
+    /* some ports might have changed down then up before we got here.
+     * if this was in result of hotplug than we might be seeing a new interface
+     * under the same hwport and all filter ids we store are invalid.
+     * In such case we make sure we remove all filters first and install new ones.
+     * We could do more accurate check by comparing old and new ifindices.
+     *
+     * The following gives us all ports that are up after previously going down,
+     * however oof_do_deferred work had no chance to process the down request
+     * separately.
+     */
+    IPF_LOG("%s: changed=%x, up=%x down=%x removed=%d, all up=%x, down=%x "
+            "(mcast replicate=%x vlan filters=%x) down=%x",
             __FUNCTION__,
-            fm->fm_hwports_up_new &~ fm->fm_hwports_up,
-            fm->fm_hwports_mcast_replicate_capable & 
-              fm->fm_hwports_up_new &~ fm->fm_hwports_up,
-            fm->fm_hwports_vlan_filters & 
-              fm->fm_hwports_up_new &~ fm->fm_hwports_up,
-            ~fm->fm_hwports_up_new & fm->fm_hwports_up);
-    fm->fm_hwports_up = fm->fm_hwports_up_new;
+            hwports_changed,
+            hwports_up_new &~ fm->fm_hwports_up,
+            hwports_down_new &~ fm->fm_hwports_down,
+            hwports_removed,
+            hwports_up_new, hwports_down_new,
+            fm->fm_hwports_mcast_replicate_capable &
+              hwports_up_new &~ fm->fm_hwports_up,
+            fm->fm_hwports_vlan_filters &
+              hwports_up_new &~ fm->fm_hwports_up,
+            ~hwports_up_new & fm->fm_hwports_up);
+
+    /* the ports, which went from up -> down -> up might have stale filter ids if
+     * up was result of hotplug, lets remove the filters by indicating that
+     * the ports are down */
+    fm->fm_hwports_up = hwports_up_new & ~hwports_removed;
+    fm->fm_hwports_down = hwports_down_new & ~hwports_removed;
+
     oof_manager_update_all_filters(fm);
+
+    if( hwports_removed ) {
+      /* now lets reinstall the filters that we removed earlier from downed ports */
+      fm->fm_hwports_up = hwports_up_new;
+      fm->fm_hwports_down = hwports_down_new;
+      oof_manager_update_all_filters(fm);
+    }
   }
 
-  if( fm->fm_hwports_available != fm->fm_hwports_available_new ) {
+  if( fm->fm_hwports_available != hwports_available_new ) {
     IPF_LOG("%s: available=%x unavailable=%x", __FUNCTION__,
-            fm->fm_hwports_available_new &~ fm->fm_hwports_available,
-            ~fm->fm_hwports_available_new & fm->fm_hwports_available);
-    fm->fm_hwports_available = fm->fm_hwports_available_new;
+            hwports_available_new &~ fm->fm_hwports_available,
+            ~hwports_available_new & fm->fm_hwports_available);
+    fm->fm_hwports_available = hwports_available_new;
     oof_manager_update_all_filters(fm);
   }
 
-  BUG_ON(~fm->fm_hwports_up & fm->fm_hwports_mcast_replicate_capable);
-  BUG_ON(~fm->fm_hwports_up & fm->fm_hwports_vlan_filters);
+  BUG_ON(~(fm->fm_hwports_up | fm->fm_hwports_down) &
+         fm->fm_hwports_mcast_replicate_capable);
+  BUG_ON(~(fm->fm_hwports_up | fm->fm_hwports_down) &
+         fm->fm_hwports_vlan_filters);
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
@@ -3652,6 +3772,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
 {
   unsigned short vlan_id = OO_HW_VLAN_UNSPEC;
   unsigned hwport_mask = 0;
+  unsigned allowed_hwport_mask;
   unsigned effective_hwport_mask;
   int ifindex;
   ci_uint8 mac[6];
@@ -3711,9 +3832,9 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
   ft->ft_vlan_id = vlan_id;
   memcpy(ft->ft_mac, mac, sizeof(ft->ft_mac));
 
-  effective_hwport_mask = hwport_mask &
-                          fm->fm_hwports_available &
-                          fm->fm_hwports_up;
+  allowed_hwport_mask = fm->fm_hwports_available &
+                        (fm->fm_hwports_up | fm->fm_hwports_down);
+  effective_hwport_mask = hwport_mask & allowed_hwport_mask;
 
   spin_unlock_bh(&fm->fm_inner_lock);
 
@@ -3722,6 +3843,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
   oo_filter_spec.vlan_id = vlan_id;
   rc = oo_hw_filter_update(&ft->ft_filter, trs, &oo_filter_spec,
                            effective_hwport_mask, effective_hwport_mask,
+                           0,
                            OO_HW_SRC_FLAG_RSS_DST);
 
 #define ETHERTYPE_ARP 0x806
@@ -3731,6 +3853,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
   /* [vlan_id] and [mac] are already set. */
   rc1 = oo_hw_filter_update(&ft->ft_filter_arp, trs, &oo_filter_spec,
                             effective_hwport_mask, effective_hwport_mask,
+                            0,
                             OO_HW_SRC_FLAG_KERNEL_REDIRECT);
   if( rc1 != 0 )
     ERR_LOG("%s: failed to install filter to steer ARP traffic to kernel "
@@ -3748,6 +3871,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
     rc1 = oo_hw_filter_update(&ft->ft_filter_ipproto[i], trs,
                               &oo_filter_spec, effective_hwport_mask,
                               effective_hwport_mask,
+                              0,
                               OO_HW_SRC_FLAG_KERNEL_REDIRECT);
     if( rc1 == -EPROTONOSUPPORT ) {
       /* The requested filter-type didn't exist.  This is expected on low-
@@ -3762,8 +3886,9 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
        * reason, we install them on all available hwports. */
       rc1 = oo_hw_filter_update(&fm->fm_tproxy_global_filters[i], trs,
                                 &oo_filter_spec,
-                                fm->fm_hwports_available & fm->fm_hwports_up,
-                                fm->fm_hwports_available & fm->fm_hwports_up,
+                                allowed_hwport_mask,
+                                allowed_hwport_mask,
+                                0,
                                 OO_HW_SRC_FLAG_KERNEL_REDIRECT);
     }
 
@@ -4183,8 +4308,9 @@ oof_manager_dump(struct oof_manager* fm,
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
 
-  log(loga, "%s: hwports up=%x unavailable=%x local_addr_n=%d", __FUNCTION__,
-      fm->fm_hwports_up, ~fm->fm_hwports_available, fm->fm_local_addr_n);
+  log(loga, "%s: hwports up=%x, down=%x unavailable=%x local_addr_n=%d",
+      __FUNCTION__, fm->fm_hwports_up,fm->fm_hwports_down,
+      ~fm->fm_hwports_available, fm->fm_local_addr_n);
 
   for( la_i = 0; la_i < fm->fm_local_addr_n; ++la_i ) {
     la = &fm->fm_local_addrs[la_i];

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,7 +92,7 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   }
 
   /* List of free packet buffers. */
-  assert_zero(nis->n_freepkts);
+  assert_zero(ni->packets->n_free);
   assert_zero(nis->n_rx_pkts);
   assert_zero(nis->rxq_low);
   assert_zero(nis->mem_pressure);
@@ -149,8 +149,8 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   assert_zero(nis->n_ep_bufs);
   nis->max_ep_bufs = NI_OPTS(ni).max_ep_bufs;
 
-  assert_zero(nis->pkt_sets_n);
-  nis->pkt_sets_max = ni->pkt_sets_max;
+  assert_zero(ni->packets->sets_n);
+  ni->packets->sets_max = ni->pkt_sets_max;
 
   /* Fragmented packet re-assembly list */
   nis->rx_defrag_head = OO_PP_NULL;
@@ -245,6 +245,36 @@ static ci_uint32 citp_keepalive_intvl;
 static ci_uint32 citp_tcp_sack, citp_tcp_timestamps, citp_tcp_window_scaling;
 static ci_uint32 citp_tcp_dsack;
 
+static void
+ci_setup_ipstack_params_default(void)
+{
+  citp_tcp_sndbuf_min = CI_CFG_TCP_SNDBUF_MIN;
+  citp_tcp_sndbuf_def = CI_CFG_TCP_SNDBUF_DEFAULT;
+  citp_tcp_sndbuf_max = CI_CFG_TCP_SNDBUF_MAX;
+  citp_tcp_rcvbuf_min = CI_CFG_TCP_RCVBUF_MIN;
+  citp_tcp_rcvbuf_def = CI_CFG_TCP_RCVBUF_DEFAULT;
+  citp_tcp_rcvbuf_max = CI_CFG_TCP_RCVBUF_MAX;
+  citp_udp_sndbuf_max = CI_CFG_UDP_SNDBUF_MAX;
+  citp_udp_sndbuf_def = CI_CFG_UDP_SNDBUF_DEFAULT;
+  citp_udp_rcvbuf_max = CI_CFG_UDP_RCVBUF_MAX;
+  citp_udp_rcvbuf_def = CI_CFG_UDP_RCVBUF_DEFAULT;
+  citp_tcp_backlog_max = CI_TCP_LISTENQ_MAX;
+  citp_tcp_adv_win_scale_max = CI_TCP_WSCL_MAX;
+  citp_fin_timeout = CI_CFG_TCP_FIN_TIMEOUT;
+  citp_retransmit_threshold = CI_TCP_RETRANSMIT_THRESHOLD;
+  citp_retransmit_threshold_orphan = CI_TCP_RETRANSMIT_THRESHOLD_ORPHAN;
+  citp_retransmit_threshold_syn = CI_TCP_RETRANSMIT_THRESHOLD_SYN;
+  citp_retransmit_threshold_synack = CI_TCP_RETRANSMIT_THRESHOLD_SYN;
+  citp_keepalive_probes = CI_TCP_KEEPALIVE_PROBES;
+  citp_keepalive_time = CI_TCP_TCONST_KEEPALIVE_TIME;
+  citp_keepalive_intvl = CI_TCP_TCONST_KEEPALIVE_INTVL;
+  citp_tcp_sack = CI_CFG_TCP_SACK;
+  citp_tcp_timestamps = CI_CFG_TCP_TSO;
+  citp_tcp_window_scaling = CI_TCP_WSCL_DEFAULT;
+  citp_tcp_dsack = CI_CFG_TCP_DSACK;
+  
+}
+
 
 #ifndef __KERNEL__
 /* Interface for sysctl. */
@@ -300,6 +330,9 @@ ci_setup_ipstack_params(void)
    */
   if (citp_ipstack_params_inited)
     return 0;
+
+  /* Set up default values in case something goes wrong */
+  ci_setup_ipstack_params_default();
 
   /* If /proc is not valid, we go away. */
   if (ci_sysctl_get_values("net/ipv4/ip_forward", opt, 1, 1) != 0)
@@ -402,12 +435,12 @@ ci_setup_ipstack_params(void)
    * XXX need an implementation.
    */
 
+  ci_setup_ipstack_params_default();
   citp_ipstack_params_inited = 0;
   return 0;
 }
 
 #endif /* __KERNEL__ */
-
 
 
 void ci_netif_config_opts_defaults(ci_netif_config_opts* opts)
@@ -858,6 +891,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->tcp_nonblock_no_pkts_mode = atoi(s);
   if( (s = getenv("EF_TCP_RCVBUF_STRICT")) )
     opts->tcp_rcvbuf_strict = atoi(s);
+  if( (s = getenv("EF_TCP_RCVBUF_MODE")) )
+    opts->tcp_rcvbuf_mode = atoi(s);
   if( (s = getenv("EF_POLL_ON_DEMAND")) )
     opts->poll_on_demand = atoi(s);
   if( (s = getenv("EF_INT_REPRIME")) )
@@ -1013,6 +1048,16 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
                opts->tcp_synrecv_max * 2 > opts->max_ep_bufs * 7 ?
                "ERROR" : "WARNING",
                opts->tcp_synrecv_max, opts->max_ep_bufs);
+    if( getenv("EF_TCP_SYNRECV_MAX") == NULL ) {
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "EF_TCP_SYNRECV_MAX is set to %d "
+                 "based on %s value and assuming up to %d listening "
+                 "sockets in the Onload stack",
+                 opts->tcp_synrecv_max,
+                 getenv("EF_TCP_BACKLOG_MAX") == NULL ?
+                 "/proc/sys/net/ipv4/tcp_max_syn_backlog" :
+                 "EF_TCP_BACKLOG_MAX",
+                 CI_CFG_ASSUME_LISTEN_SOCKS);
+    }
     CONFIG_LOG(opts, CONFIG_WARNINGS, "Too few endpoints requested: ~4 "
                "syn-receive states consume one endpoint. ");
   }
@@ -1279,6 +1324,13 @@ void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
  *                                                                           *
  *****************************************************************************/
 
+static void netif_tcp_helper_build2(ci_netif* ni)
+{
+  ni->filter_table =
+    (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
+  ni->packets = (oo_pktbuf_manager*) ((char*) ni->state + ni->state->buf_ofs);
+}
+
 
 #ifndef __KERNEL__
 
@@ -1291,10 +1343,10 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
     unsigned id;
 
     /* Unmap packets pages */
-    for( id = 0; id < ni->state->pkt_sets_n; id++ ) {
+    for( id = 0; id < ni->packets->sets_n; id++ ) {
       if( PKT_BUFSET_U_MMAPPED(ni, id) ) {
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-        if( ni->pkt_set[id].shm_id >= 0 )
+        if( ni->packets->set[id].shm_id >= 0 )
           rc = shmdt(ni->pkt_bufs[id]);
         else
 #endif
@@ -1364,9 +1416,10 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
   ni->pio_bytes_mapped = 0;
 #endif
   ni->buf_ptr = NULL;
-  ni->pkt_set = NULL;
+  ni->packets = NULL;
 #ifdef ONLOAD_OFE
   ni->ofe = NULL;
+  ni->ofe_channel = NULL;
 #endif
 
   /****************************************************************************
@@ -1475,27 +1528,6 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
 }
 
 
-ci_inline int vi_io_page_offset(unsigned vi_instance)
-{
-#if CI_PAGE_SIZE > 8192
-  /******** WARNING *******
-   * This is a possible security threat. On x86 as
-   * 8192 is greater then PAGE_SIZE we're mapping individual pages for
-   * each VI's RX_DESC_UPD, TX_DESC_UPD. But on POWER they get into the
-   * same OS page grouped by 8 (64k / 8k). So we have to map them all
-   * together meaning that an application will have access to somebodies
-   * dbells. Not sure if anything can be done here.*/
-
-  /* 8192 is a hardcoded constant. It is current _STEP for all tables in
-   * question for all existing HW (falcon, siena, ef10). This may need
-   * fixing when new HW is out */
-  return (vi_instance & ((CI_PAGE_SIZE / 8192) - 1)) * 8192;
-#else
-  return 0;
-#endif
-}
-
-
 static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
                        int vi_io_offset, unsigned* vi_mem_offset,
                        ef_vi* vi, unsigned vi_instance, int evq_bytes,
@@ -1504,11 +1536,13 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   ef_vi_state* state = (void*) ((char*) ni->state + vi_state_offset);
   ci_netif_state_nic_t* nsn = &(ni->state->nic[nic_i]);
   uint32_t* ids = (void*) (state + 1);
+  unsigned vi_bar_off = vi_instance * 8192;
 
   ef_vi_init(vi, ef_vi_arch_from_efhw_arch(nsn->vi_arch), nsn->vi_variant,
              nsn->vi_revision, nsn->vi_flags, state);
   ef_vi_init_out_flags(vi, nsn->vi_out_flags);
-  ef_vi_init_io(vi, ni->io_ptr + vi_io_offset + vi_io_page_offset(vi_instance));
+  vi_io_offset += vi_bar_off & (CI_PAGE_SIZE - 1);
+  ef_vi_init_io(vi, ni->io_ptr + vi_io_offset);
   ef_vi_init_timer(vi, nsn->timer_quantum_ns);
   ef_vi_init_evq(vi, evq_bytes / 8, ni->buf_ptr + *vi_mem_offset);
   *vi_mem_offset += (evq_bytes + CI_PAGE_SIZE - 1) & CI_PAGE_MASK;
@@ -1519,7 +1553,7 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   ef_vi_init_txq(vi, txq_size, ni->buf_ptr + *vi_mem_offset, ids);
   vi->vi_i = vi_instance;
   ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
-  ef_vi_init_tx_timestamping(vi);
+  ef_vi_init_tx_timestamping(vi, nsn->tx_ts_correction);
   *vi_mem_offset += (ef_vi_tx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
   ef_vi_add_queue(vi, vi);
   ef_vi_set_stats_buf(vi, vi_stats);
@@ -1534,19 +1568,15 @@ static int netif_tcp_helper_build(ci_netif* ni)
   **   ci_netif_get_driver_handle(ni), ni->tcp_mmap (for user builds only)
   */
   ci_netif_state* ns = ni->state;
-  int rc, nic_i;
+  int rc, nic_i, size;
   unsigned vi_io_offset, vi_mem_offset, vi_state_offset;
   int vi_state_bytes;
 #if CI_CFG_SEPARATE_UDP_RXQ
   int udp_rxq_vi_state_bytes = 0;
 #endif
 #if CI_CFG_PIO
-  unsigned pio_io_offset, pio_buf_offset = 0;
+  unsigned pio_io_offset, pio_buf_offset = 0, vi_bar_off;
 #endif
-
-  /* Do it before mmap, to call unmap if things go wrong. */
-  ni->pkt_bufs = CI_ALLOC_ARRAY(char*, ns->pkt_sets_max);
-  CI_ZERO_ARRAY(ni->pkt_bufs, ni->state->pkt_sets_max);
 
   /****************************************************************************
    * Do other mmaps.
@@ -1624,7 +1654,9 @@ static int netif_tcp_helper_build(ci_netif* ni)
         pio_buf_offset;
       pio_buf_offset += nsn->pio_io_len;
       /* And set up rest of PIO struct so we can call ef_vi_pio_memcpy */
+      vi_bar_off = nsn->vi_instance * 8192;
       ni->nic_hw[nic_i].pio.pio_io = ni->pio_ptr + pio_io_offset;
+      ni->nic_hw[nic_i].pio.pio_io += (vi_bar_off + 4096) & (CI_PAGE_SIZE - 1);
       ni->nic_hw[nic_i].pio.pio_len = nsn->pio_io_len;
       ni->nic_hw[nic_i].vi.linked_pio = &ni->nic_hw[nic_i].pio;
       pio_io_offset += nsn->pio_io_mmap_bytes;
@@ -1635,13 +1667,22 @@ static int netif_tcp_helper_build(ci_netif* ni)
   /* Initialise timer related stuff that is only used at user level */
   ci_ip_timer_state_init_ul(ni);
 
-  /****************************************************************************
-   * Initialise control plane table handles in ci_netif.
+  /* Set up ni->packets->sets_max */
+  netif_tcp_helper_build2(ni);
+  ni->pkt_bufs = CI_ALLOC_ARRAY(char*, ni->packets->sets_max);
+  CI_ZERO_ARRAY(ni->pkt_bufs, ni->packets->sets_max);
+
+  /* sets_max may be smaller than the space the kernel reserved for
+   * the array (if we have had trouble allocating packet buffers), so
+   * we need to be aware of that when checking the sizes are sane
    */
+  size = ns->table_ofs - ns->buf_ofs - sizeof(oo_pktbuf_manager);
 
   if( ns->buf_ofs != sizeof(ci_netif_state) +
       ns->vi_state_bytes * oo_stack_intf_max(ni) ||
-      ns->table_ofs - ns->buf_ofs != ns->pkt_sets_max * sizeof(ci_pkt_set) ) {
+      size % sizeof(oo_pktbuf_set) != 0 ||
+      ni->packets->sets_max < 1 || 
+      size / sizeof(oo_pktbuf_set) < ni->packets->sets_max ) {
     /* This typically happens if someone puts a variable width type such as
      * long in ci_netif_state_s, and a 32 bit user level library is used
      * with a 64 bit driver.  (Or if user and kernel get out of sync).
@@ -1650,8 +1691,11 @@ static int netif_tcp_helper_build(ci_netif* ni)
            "user level detected!");
     ci_log("ns->buf_ofs=%d != %zd + %d * %d", ns->buf_ofs,
            sizeof(ci_netif_state), ns->vi_state_bytes, oo_stack_intf_max(ni));
-    ci_log("ns->table_ofs - ns->buf_ofs = %d - %d != %d * %zd",
-           ns->table_ofs, ns->buf_ofs, ns->pkt_sets_max, sizeof(ci_pkt_set));
+    ci_log("oo_pktbuf_set=%zd, size=%d, sets_max=%d", 
+           sizeof(oo_pktbuf_set), size, ni->packets->sets_max);
+    ci_log("a: %d != 0", size % sizeof(oo_pktbuf_set) != 0);
+    ci_log("b: 1 <= %zd <= %d ", size / sizeof(oo_pktbuf_set), 
+           ni->packets->sets_max);
     return -EINVAL;
   }
 
@@ -1660,13 +1704,6 @@ static int netif_tcp_helper_build(ci_netif* ni)
 
 #endif
 
-
-static void netif_tcp_helper_build2(ci_netif* ni)
-{
-  ni->filter_table =
-    (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
-  ni->pkt_set = (ci_pkt_set*) ((char*) ni->state + ni->state->buf_ofs);
-}
 
 
 #ifndef __KERNEL__
@@ -1694,7 +1731,6 @@ netif_tcp_helper_restore(ci_netif* ni, unsigned netif_mmap_bytes)
                        ni->state, netif_mmap_bytes);
     return rc;
   }
-  netif_tcp_helper_build2(ni);
 
   return rc;
 }
@@ -1742,56 +1778,64 @@ static void init_resource_alloc(ci_resource_onload_alloc_t* ra,
 
 #ifdef ONLOAD_OFE
 static void
-ofe_setup(ef_driver_handle fd, ci_netif* ni, char* ofe_config_file)
+ofe_setup(ef_driver_handle fd, ci_netif* ni, const char* ofe_config_file)
 {
-  char line[200];
-  FILE *f = fopen(ofe_config_file, "r");
   struct ofe_stats_usage stat;
   enum ofe_status orc;
+  char line[200];
+  FILE* f;
+  int rc;
 
-  if( f == NULL ) {
-    ci_log("[%s] Failed to read Onload Filter Engine configuration file %s",
-           ni->state->pretty_name, ofe_config_file);
+  if( ofe_config_file != NULL ) {
+    if( (f = fopen(ofe_config_file, "r")) == NULL ) {
+      ci_log("[%s] ERROR: failed to open filter engine configuration file "
+             "'%s': %s", ni->state->pretty_name, ofe_config_file,
+             strerror(errno));
+      return;
+    }
+    while( fgets(line, sizeof(line), f) != NULL ) {
+      oo_ofe_config_t op;
+      op.len = strlen(line);
+      CI_USER_PTR_SET(op.str, line);
+      rc = oo_resource_op(fd, OO_IOC_OFE_CONFIG, &op);
+      if( rc != 0 ) {
+        ci_log("[%s] error in filter engine config file '%s': %s",
+               ni->state->pretty_name, ofe_config_file, line);
+        if( ofe_engine_get_last_error(ni->ofe) != NULL ) {
+          ci_log("OFE ERROR: %s", ofe_engine_get_last_error(ni->ofe));
+        }
+        else {
+          char err[CI_LOG_MAX_LINE];
+          oo_resource_op(fd, OO_IOC_OFE_GET_LAST_ERROR, err);
+          err[CI_LOG_MAX_LINE-1] = '\0';
+          ci_log("OFE ERROR: %s", err);
+        }
+        break;
+      }
+    }
+    oo_resource_op(fd, OO_IOC_OFE_CONFIG_DONE, NULL);
+  }
+
+  ni->ofe_channel = malloc(ofe_channel_bytes(ni->ofe));
+  orc = ofe_channel_init(ni->ofe_channel, ni->ofe, 0);
+  if( orc != OFE_OK ) {
+    ci_log("[%s] ERROR: ofe_channel_init failed: %s", ni->state->pretty_name,
+           ofe_engine_get_last_error(ni->ofe));
+    /* ?? FIXME: Don't leave OFE half initialised! */
     return;
   }
-
-  while( fgets(line, sizeof(line), f) != NULL ) {
-    oo_ofe_config_t op;
-    int rc;
-
-    op.len = strlen(line);
-    CI_USER_PTR_SET(op.str, line);
-    rc = oo_resource_op(fd, OO_IOC_OFE_CONFIG, &op);
-    if( rc != 0 ) {
-      ci_log("[%s] Onload Filter Engine fails to process configuration file %s",
-             ni->state->pretty_name, ofe_config_file);
-      ci_log("%s", line);
-      if( ofe_engine_get_last_error(ni->ofe) != NULL )
-        ci_log("OFE ERROR: %s", ofe_engine_get_last_error(ni->ofe));
-      else {
-        char err[CI_LOG_MAX_LINE];
-        oo_resource_op(fd, OO_IOC_OFE_GET_LAST_ERROR, err);
-        err[CI_LOG_MAX_LINE-1] = '\0';
-        ci_log("OFE ERROR: %s", err);
-      }
-      break;
-    }
-  }
-  oo_resource_op(fd, OO_IOC_OFE_CONFIG_DONE, NULL);
 
   /* Remap read-write part */
   orc = ofe_stats_rw_mem(ni->ofe, &stat);
   if( orc == OFE_OK && stat.max != 0 ) {
-    void *p = (void*)ni->ofe;
-    int rc;
-
-    p = (char*)p + NI_OPTS(ni).ofe_size - stat.max;
+    void* p = (char*) ni->ofe + NI_OPTS(ni).ofe_size - stat.max;
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
                           CI_NETIF_MMAP_ID_OFE_RW, stat.max,
                           OO_MMAP_FLAG_FIXED, &p);
     if( rc != 0 ) {
       ci_log("[%s] failed to remap read-write part of Onload Filter Engine",
              ni->state->pretty_name);
+      /* ?? FIXME: Don't leave OFE half initialised! */
     }
   }
 }
@@ -1915,17 +1959,11 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
     LOG_E(ci_log("%s: netif_tcp_helper_build failed rc=%d", __FUNCTION__, rc));
     goto fail;
   }
-  netif_tcp_helper_build2(ni);
 
 #ifdef ONLOAD_OFE
-  /* Set up OFE after mmap. */
-  {
-    char* file_name = getenv("EF_OFE_CONFIG_FILE");
-    if( file_name != NULL && file_name[0] != '\0' && ni->ofe != NULL )
-      ofe_setup(fd, ni, file_name);
-  }
+  if( ni->ofe != NULL )
+    ofe_setup(fd, ni, getenv("EF_OFE_CONFIG_FILE"));
 #endif
-
 
   return 0;
 
@@ -2053,7 +2091,7 @@ static int ci_netif_pkt_prefault(ci_netif* ni)
   int rc = 0;
 
   if( NI_OPTS(ni).prefault_packets ) {
-    n = ni->state->n_pkts_allocated;
+    n = ni->packets->n_pkts_allocated;
     for( i = 0; i < n; ++i ) {
       pkt = PKT(ni, i);
       rc += *(volatile ci_int32*)(&pkt->refcount);
@@ -2081,7 +2119,7 @@ static void ci_netif_pkt_prefault_reserve(ci_netif* ni)
 }
 
 
-#if !CI_CFG_USE_PIO
+#if CI_CFG_PIO && !CI_CFG_USE_PIO
 /*
  * Enforce EF_PIO semantics: on non-x86_64 systems we need to also
  * perform this check here at user-level, rather than just in the kernel
@@ -2120,7 +2158,7 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   ci_assert(ni);
   ci_netif_sanity_checks();
 
-#if !CI_CFG_USE_PIO
+#if CI_CFG_PIO && !CI_CFG_USE_PIO
   rc = check_pio(opts);
   if( rc < 0 ) return rc;
 #endif
@@ -2228,12 +2266,12 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
   int lim, rc, n;
 
   ci_tcp_helper_more_bufs(ni);
-  if( ni->state->n_freepkts == 0 ) {
+  if( ni->packets->n_free == 0 ) {
     LOG_E(ci_log("%s: [%d] ERROR: failed to allocate initial packet set",
                  __func__, NI_ID(ni)));
     return -ENOMEM;
   }
-  ni->state->current_pkt_set = 0;
+  ni->packets->id = 0;
 
   ci_netif_mem_pressure_pkt_pool_fill(ni);
   if( (rc = ci_netif_set_rxq_limit(ni)) < 0 )

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,11 +58,12 @@
 
 /** Top level directory for sfc specific stats **/
 static struct proc_dir_entry *efrm_proc_root = NULL;
+static struct proc_dir_entry *efrm_proc_nic_dir = NULL;
 static struct proc_dir_entry *efrm_proc_resources = NULL;
 
 /** Subdirectories (interfaces) **/
 struct efrm_procdir_s {
-	char efrm_pd_name [IFNAMSIZ];
+	char efrm_pd_name[EFRM_PROC_NAME_LEN];
 	int efrm_pd_refcount;
 	struct efrm_procdir_s* efrm_pd_next;
 /*	int efrm_pd_access_mode; */
@@ -71,26 +72,33 @@ struct efrm_procdir_s {
 };
 struct efrm_file_s {
 	struct efrm_procdir_s* efrm_pf_parent;
-	char efrm_pf_name [IFNAMSIZ];
+	char efrm_pf_name[EFRM_PROC_NAME_LEN];
 	struct efrm_file_s* efrm_pf_next;
 	struct proc_dir_entry* efrm_pf_file;
 };
-struct efrm_procdir_s* efrm_pd_root = NULL;
+static struct efrm_procdir_s* efrm_pd_device_list = NULL;
+static struct efrm_procdir_s* efrm_pd_intf_list = NULL;
 static DEFINE_MUTEX(efrm_pd_mutex);
 
 /****************************************************************************
  *
- * /proc/drivers/sfc/ethX/
+ * /proc/drivers/sfc_resource/devices/<PCI bus address>/
+ * /proc/drivers/sfc_resource/<interface name>/
  *
  ****************************************************************************/
 
-efrm_pd_handle efrm_proc_dir_get(char const* dirname)
+#define EFRM_PROC_DEVICES_NAME "devices"
+
+
+static efrm_pd_handle
+efrm_proc_dir_get(char const* dirname, struct proc_dir_entry* parent,
+		  struct efrm_procdir_s** entry_list_head)
 {
 	/* Acquire a handle to a directory; creates the directory if needed */
 	struct efrm_procdir_s* rval = NULL;
 	struct efrm_procdir_s* procdir;
-	if( !efrm_proc_root ) {
-		EFRM_ERR( "%s: Creating subdirectory %s before root.\n",
+	if( !parent ) {
+		EFRM_ERR( "%s: Creating subdirectory %s before parent.\n",
 		          __func__, dirname );
 		return NULL;
 	}
@@ -99,7 +107,7 @@ efrm_pd_handle efrm_proc_dir_get(char const* dirname)
 		return 0;
 	
 	mutex_lock( &efrm_pd_mutex );
-	procdir = efrm_pd_root;
+	procdir = *entry_list_head;
 	
 	/* Does it already exist? If so, increment the refcount */
 	while ( procdir ) {
@@ -116,30 +124,52 @@ efrm_pd_handle efrm_proc_dir_get(char const* dirname)
 	if ( !rval ) {
 		rval = (struct efrm_procdir_s*) kmalloc(
 				sizeof(struct efrm_procdir_s), GFP_KERNEL );
-		if ( rval ) {
-			/* Create the directory */
-			rval->efrm_pd_dir = proc_mkdir(dirname, efrm_proc_root);
-			if ( rval->efrm_pd_dir ) {
-				rval->efrm_pd_refcount = 1;
-				rval->efrm_pd_next = efrm_pd_root;
-				rval->efrm_pd_child = NULL;
-				efrm_pd_root = rval;
-				strlcpy( rval->efrm_pd_name, dirname, IFNAMSIZ);
-			}
-			else {
-				/* Failed to create actual directory,
-				   don't leave the table hanging around */
-				kfree( rval );
-				rval = NULL;
-			}
+
+		if( rval == NULL )
+			goto out;
+
+		/* Create the directory */
+		rval->efrm_pd_dir = proc_mkdir(dirname, parent);
+		if( rval->efrm_pd_dir == NULL ) {
+			/* Failed to create actual directory, don't leave the
+			 * table hanging around */
+			kfree(rval);
+			rval = NULL;
+			goto out;
 		}
+
+		rval->efrm_pd_refcount = 1;
+		rval->efrm_pd_next = *entry_list_head;
+		rval->efrm_pd_child = NULL;
+		*entry_list_head = rval;
+		strlcpy(rval->efrm_pd_name, dirname, EFRM_PROC_NAME_LEN);
 	}
-	
+
+out:
 	mutex_unlock( &efrm_pd_mutex );
 	return (efrm_pd_handle) rval;
 }
 
-int efrm_proc_dir_put(efrm_pd_handle pd_handle)
+
+efrm_pd_handle
+efrm_proc_device_dir_get(char const* device_name)
+{
+	return efrm_proc_dir_get(device_name, efrm_proc_nic_dir,
+				 &efrm_pd_device_list);
+}
+
+
+efrm_pd_handle
+efrm_proc_intf_dir_get(char const* intf_name)
+{
+	return efrm_proc_dir_get(intf_name, efrm_proc_root,
+				 &efrm_pd_intf_list);
+}
+
+
+static int
+efrm_proc_dir_put(efrm_pd_handle pd_handle, struct proc_dir_entry* parent,
+		  struct efrm_procdir_s** entry_list_head)
 {
 	/* Release handle to directory, removes directory if not in use. */
 	struct efrm_procdir_s* handle = (struct efrm_procdir_s*) pd_handle;
@@ -150,7 +180,7 @@ int efrm_proc_dir_put(efrm_pd_handle pd_handle)
 	if ( !pd_handle ) return rval;
 	
 	mutex_lock( &efrm_pd_mutex );
-	procdir = efrm_pd_root;
+	procdir = *entry_list_head;
 	
 	/* Check provided procdir actually exists */
 	while ( procdir ) {
@@ -163,12 +193,13 @@ int efrm_proc_dir_put(efrm_pd_handle pd_handle)
 							procdir->efrm_pd_next;
 				}
 				else {
-					efrm_pd_root = procdir->efrm_pd_next;
+					*entry_list_head =
+						procdir->efrm_pd_next;
 				}
-				/* Delete the directory and table entry*/
+				/* Delete the directory and the table entry*/
 				/* TODO: Warn if it still has files in it */
 				remove_proc_entry(procdir->efrm_pd_name,
-						  efrm_proc_root);
+						  parent);
 				kfree( procdir );
 			}
 			rval = 0;
@@ -182,6 +213,20 @@ int efrm_proc_dir_put(efrm_pd_handle pd_handle)
 	mutex_unlock( &efrm_pd_mutex );
 	return rval;
 }
+
+
+int efrm_proc_device_dir_put(efrm_pd_handle handle)
+{
+	return efrm_proc_dir_put(handle, efrm_proc_nic_dir,
+				 &efrm_pd_device_list);
+}
+
+
+int efrm_proc_intf_dir_put(efrm_pd_handle handle)
+{
+	return efrm_proc_dir_put(handle, efrm_proc_root, &efrm_pd_intf_list);
+}
+
 
 efrm_pd_handle
 efrm_proc_create_file( char const* name, mode_t mode, efrm_pd_handle parent,
@@ -208,7 +253,7 @@ efrm_proc_create_file( char const* name, mode_t mode, efrm_pd_handle parent,
 		goto done_create_file;
 	}
 	rval->efrm_pf_parent = handle;
-	strlcpy( rval->efrm_pf_name, name, IFNAMSIZ );
+	strlcpy( rval->efrm_pf_name, name, EFRM_PROC_NAME_LEN );
 	rval->efrm_pf_next = handle ? handle->efrm_pd_child : NULL;
 	
 	entry = proc_create_data( name, mode, root, fops, context );
@@ -269,28 +314,32 @@ efrm_proc_remove_file( efrm_pd_handle handle )
 	mutex_unlock( &efrm_pd_mutex );
 }
 
-static int efrm_proc_dir_check_all_removed(void)
+static int
+efrm_proc_dir_check_all_removed(struct proc_dir_entry* parent,
+				struct efrm_procdir_s** entry_list_head)
 {
 	/* Check there are no directories hanging around. */
 	int rval = 1;
 	struct efrm_procdir_s* procdir;
 	mutex_lock( &efrm_pd_mutex );
 	
-	procdir = efrm_pd_root;
+	procdir = *entry_list_head;
 	
 	while ( procdir ) {
 		/* If it's better to remove them */
 		struct efrm_procdir_s* next = procdir->efrm_pd_next;
 		rval = 0;
+
 		/* Which is worse, to leak these, or to destroy them while
 		   somthing is holding a handle? */
-		remove_proc_entry(procdir->efrm_pd_name, efrm_proc_root);
+		remove_proc_entry(procdir->efrm_pd_name, parent);
+
 		/* Delete the table entry*/
 		kfree( procdir );
 		procdir = next;
 	}
 	
-	efrm_pd_root = NULL;
+	*entry_list_head = NULL;
 	mutex_unlock( &efrm_pd_mutex );
 	return rval;
 }
@@ -313,17 +362,27 @@ int efrm_install_proc_entries(void)
 		efrm_proc_root = proc_mkdir("driver/sfc_resource", NULL);
 		if (!efrm_proc_root) {
 			rc = -ENOMEM;
+			goto out;
 		}
-		else {
-			efrm_proc_resources = proc_create(
-					"resources", 0, efrm_proc_root,
-					&efrm_resource_fops_proc);
-			if ( !efrm_proc_resources ) {
-				EFRM_WARN("%s: Unable to create /proc/drivers/"
-					  "sfc_resource/resources", __func__);
-			}
+
+		/* Create the parent directory for per-NIC stats. */
+		efrm_proc_nic_dir = proc_mkdir(EFRM_PROC_DEVICES_NAME,
+					       efrm_proc_root);
+		if ( !efrm_proc_nic_dir ) {
+			EFRM_WARN("%s: Unable to create /proc/drivers/"
+				  "sfc_resources/" EFRM_PROC_DEVICES_NAME,
+				  __func__);
+		}
+
+		efrm_proc_resources = proc_create("resources", 0,
+						  efrm_proc_root,
+						  &efrm_resource_fops_proc);
+		if ( !efrm_proc_resources ) {
+			EFRM_WARN("%s: Unable to create /proc/drivers/"
+				  "sfc_resource/resources", __func__);
 		}
 	}
+out:
 	mutex_unlock( &efrm_pd_mutex );
 	return rc;
 }
@@ -332,7 +391,10 @@ int efrm_uninstall_proc_entries(void)
 {
 	int rc = 0;
 	
-	if ( !efrm_proc_dir_check_all_removed() ) {
+	if ( ! efrm_proc_dir_check_all_removed(efrm_proc_nic_dir,
+					       &efrm_pd_device_list) ||
+	     ! efrm_proc_dir_check_all_removed(efrm_proc_root,
+					       &efrm_pd_intf_list)) {
 		return -EPERM;
 	}
 
@@ -346,6 +408,9 @@ int efrm_uninstall_proc_entries(void)
 	if ( efrm_proc_resources )
 		remove_proc_entry("resources", efrm_proc_root);
 	efrm_proc_resources = NULL;
+	if ( efrm_proc_nic_dir )
+		remove_proc_entry(EFRM_PROC_DEVICES_NAME, efrm_proc_root);
+	efrm_proc_nic_dir = NULL;
 	if ( efrm_proc_root )
 		remove_proc_entry("driver/sfc_resource", NULL);
 	efrm_proc_root = NULL;

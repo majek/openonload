@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -247,14 +247,6 @@ static struct efrm_client_callbacks oo_efrm_client_callbacks = {
   oo_efrm_reset_callback,
   oo_efrm_reset_suspend_callback,
 };
-
-
-/* When the bonding component detects that a failover has occurred, it calls
- * this function so that any necessary cleanup on stacks can be performed. */
-void oo_nic_failover_from_hwport(int hwport)
-{
-  oo_efrm_reset_hook_generic(oo_nics[hwport].efrm_client, tcp_helper_purge_txq);
-}
 
 
 struct oo_nic* oo_nic_add(int ifindex)

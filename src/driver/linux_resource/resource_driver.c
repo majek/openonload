@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -231,6 +231,8 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		pci_resource_start(dev, nic->ctr_ap_bar);
 	EFRM_ASSERT(efrm_nic_bar_is_good(nic, dev));
 
+	spin_lock_init(&lnic->efrm_nic.efhw_nic.pci_dev_lock);
+
 	rc = linux_efhw_nic_map_ctr_ap(lnic);
 	if (rc < 0)
 		goto fail;
@@ -271,14 +273,16 @@ linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic, struct pci_dev *dev,
                        struct efhw_device_type *dev_type, int ifindex)
 {
 	struct efhw_nic* nic = &lnic->efrm_nic.efhw_nic;
+	struct pci_dev* old_pci_dev = nic->pci_dev;
 
 	/* Tidy up old state. */
-	efrm_shutdown_resource_filter(&nic->pci_dev->dev);
-	pci_dev_put(nic->pci_dev);
+	efrm_shutdown_resource_filter(&old_pci_dev->dev);
 
 	/* Bring up new state. */
 	pci_dev_get(dev);
+	spin_lock_bh(&nic->pci_dev_lock);
 	nic->pci_dev = dev;
+	spin_unlock_bh(&nic->pci_dev_lock);
 	nic->bus_number = dev->bus->number;
 	nic->ifindex = ifindex;
 	if (dev_type->arch == EFHW_ARCH_EF10) {
@@ -286,6 +290,10 @@ linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		nic->vport_id = res_dim->vport_id;
         }
 	efrm_init_resource_filter(&nic->pci_dev->dev, ifindex);
+
+	/* Drop reference to [old_pci_dev] now that the race window has been
+	 * closed for someone else trying to take out a new reference. */
+	pci_dev_put(old_pci_dev);
 }
 
 static void linux_efrm_nic_dtor(struct linux_efhw_nic *lnic)
@@ -327,15 +335,18 @@ static void efrm_dev_show(struct pci_dev *dev, int revision,
  * intended use-case is to check whether a new NIC can step into the shoes of
  * one that went away. */
 static inline int
-efrm_nic_matches_device(struct efhw_nic* nic, struct pci_dev* dev,
-			struct efhw_device_type* dev_type)
+efrm_nic_matches_device(struct efhw_nic* nic, const struct pci_dev* dev,
+			const struct efhw_device_type* dev_type)
 {
-	return nic->bus_number           == dev->bus->number   &&
-	       nic->pci_dev->devfn       == dev->devfn         &&
-	       nic->pci_dev->device      == dev->device        &&
-	       nic->devtype.arch         == dev_type->arch     &&
-	       nic->devtype.revision     == dev_type->revision &&
-	       nic->devtype.variant      == dev_type->variant;
+	struct pci_dev* nic_dev = efhw_nic_get_pci_dev(nic);
+	int result = nic->bus_number	   == dev->bus->number	 &&
+		     nic_dev->devfn	   == dev->devfn	 &&
+		     nic_dev->device	   == dev->device	 &&
+		     nic->devtype.arch	   == dev_type->arch	 &&
+		     nic->devtype.revision == dev_type->revision &&
+		     nic->devtype.variant  == dev_type->variant;
+	pci_dev_put(nic_dev);
+	return result;
 }
 
 
@@ -545,8 +556,11 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 		    pci_name(dev) ? pci_name(dev) : "?",
 		    nic->index, nic->ifindex);
 
+        efrm_nic->dmaq_state.unplugging = 0;
+
 	*lnic_out = lnic;
 	n_nics_probed += nics_probed_delta;
+	efrm_nic_enable_post_reset(nic);
 	efrm_nic_post_reset(nic);
 
 	return 0;

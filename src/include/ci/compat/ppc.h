@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,10 +29,25 @@
 #ifndef __CI_COMPAT_PPC_H__
 #define __CI_COMPAT_PPC_H__
 
+#ifdef __KERNEL__
+# include <asm/byteorder.h>
+#else
+# include <byteswap.h>
+# include <endian.h>
+#endif
 
-#define CI_MY_BYTE_ORDER   CI_BIG_ENDIAN
 
- 
+#if defined(__BYTE_ORDER) ? __BYTE_ORDER == __LITTLE_ENDIAN : \
+                            defined(__LITTLE_ENDIAN)
+# define CI_MY_BYTE_ORDER  CI_LITTLE_ENDIAN
+#elif defined(__BYTE_ORDER) ? __BYTE_ORDER == __BIG_ENDIAN : \
+                              defined(__BIG_ENDIAN)
+# define CI_MY_BYTE_ORDER  CI_BIG_ENDIAN
+#else
+# error "Byte-order error"
+#endif
+
+
 #define CI_WORD_SIZE     4
 #define CI_PTR_SIZE      8
 

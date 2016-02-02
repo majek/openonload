@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -54,6 +54,7 @@
 #include <ci/efrm/buffer_table.h>
 #include <ci/efrm/pd.h>
 #include <ci/efrm/driver_private.h>
+#include <ci/efhw/nic.h>
 #include "efrm_internal.h"
 #include "efrm_pd.h"
 #include "kernel_compat.h"
@@ -113,8 +114,10 @@ void *
 efrm_pd_os_stats_ctor(struct efrm_pd *pd)
 {
 	struct efrm_pd_proc *ret;
-	char name[IFNAMSIZ];
+	char name[EFRM_PROC_NAME_LEN];
 	int owner = efrm_pd_owner_id(pd);
+	struct pci_dev* dev;
+	struct efhw_nic* nic;
 
 	/* Phys mode: no buffer table */
 	if (owner == OWNER_ID_PHYS_MODE)
@@ -124,11 +127,11 @@ efrm_pd_os_stats_ctor(struct efrm_pd *pd)
 	if (ret == NULL)
 		return NULL;
 
-	ret->parent =
-		efrm_proc_dir_get(__dev_get_by_index(
-			current->nsproxy->net_ns,
-			efrm_pd_to_resource(pd)->rs_client->nic->ifindex
-			)->name);
+	nic = efrm_pd_to_resource(pd)->rs_client->nic;
+
+	dev = efhw_nic_get_pci_dev(efrm_pd_to_resource(pd)->rs_client->nic);
+	ret->parent = efrm_proc_device_dir_get(pci_name(dev));
+	pci_dev_put(dev);
 	if (ret->parent == NULL)
 		goto fail1;
 
@@ -141,7 +144,7 @@ efrm_pd_os_stats_ctor(struct efrm_pd *pd)
 	return ret;
 
 fail2:
-	efrm_proc_dir_put(ret->parent);
+	efrm_proc_device_dir_put(ret->parent);
 fail1:
 	kfree(ret);
 	return NULL;
@@ -156,6 +159,6 @@ efrm_pd_os_stats_dtor(struct efrm_pd *pd, void *os_data)
 		return;
 
 	efrm_proc_remove_file(data->stats);
-	efrm_proc_dir_put(data->parent);
+	efrm_proc_device_dir_put(data->parent);
 	kfree(data);
 }

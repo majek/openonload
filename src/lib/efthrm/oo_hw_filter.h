@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,6 +37,7 @@ struct tcp_helper_resource_s;
 #define OO_HW_SRC_FLAG_LOOPBACK          (0x1)
 #define OO_HW_SRC_FLAG_RSS_DST           (0x2)
 #define OO_HW_SRC_FLAG_KERNEL_REDIRECT   (0x4)
+#define OO_HW_SRC_FLAG_DROP              (0x8)
 
 
 /* Initialise filter object. */
@@ -109,6 +110,7 @@ extern int
 oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                          const struct oo_hw_filter_spec* oo_filter_spec,
                          unsigned set_vlan_mask, unsigned hwport_mask,
+                         unsigned drop_hwport_mask,
                          unsigned src_flags);
 
 
@@ -122,6 +124,7 @@ oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
 extern int oo_hw_filter_set(struct oo_hw_filter* oofilter,
                             const struct oo_hw_filter_spec* oo_filter_spec,
                             unsigned set_vlan_mask, unsigned hwport_mask,
+                            unsigned drop_hwport_mask,
                             unsigned src_flags);
 
 /* Redirect filter to direct packets to a different stack.  This is similar
@@ -137,6 +140,7 @@ extern int oo_hw_filter_update(struct oo_hw_filter* oofilter,
                                struct tcp_helper_resource_s* new_stack,
                                const struct oo_hw_filter_spec* oo_filter_spec,
                                unsigned set_vlan_mask, unsigned hwport_mask,
+                               unsigned drop_hwport_mask,
                                unsigned src_flags);
 
 

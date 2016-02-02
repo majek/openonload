@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -118,8 +118,14 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* uinfo,
     }
     info.tcpi_advmss     = ts->amss;
 
-    info.tcpi_rcv_rtt = 0; /* we do not support adaptive SO_RCVBUF */
-    info.tcpi_rcv_space = tcp_rcv_wnd_right_edge_sent(ts) - ts->rcv_added;
+    if ( NI_OPTS(netif).tcp_rcvbuf_mode == 1 ) {
+      info.tcpi_rcv_rtt = info.tcpi_rtt; /* we currently use same measure */
+      info.tcpi_rcv_space = ts->rcvbuf_drs.bytes;
+    }
+    else {
+      info.tcpi_rcv_rtt = 0; /* we do not support adaptive SO_RCVBUF */
+      info.tcpi_rcv_space = tcp_rcv_wnd_right_edge_sent(ts) - ts->rcv_added;
+    }
     info.tcpi_total_retrans = ts->stats.total_retrans;
 
     /* Starting from linux-3.15, there are tcpi_pacing_rate and

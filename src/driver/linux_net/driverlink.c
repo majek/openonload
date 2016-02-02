@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -67,6 +67,16 @@ static struct efx_dl_handle *efx_dl_handle(struct efx_dl_device *efx_dev)
 
 /* Warn if a driverlink call takes longer than 1 second */
 #define EFX_DL_DURATION_WARN (1 * HZ)
+#define EFX_DL_CHECK_DURATION(duration, label)  \
+	do {                                                                   \
+		if (duration > EFX_DL_DURATION_WARN &&                         \
+		    !efx_nic_hw_unavailable(efx))                              \
+			netif_warn(efx, drv, efx->net_dev,                     \
+				   "%s: driverlink " label " took %ums\n",     \
+				   efx_dev->driver->name,                      \
+				   jiffies_to_msecs(duration));                \
+	} while (0)
+
 
 /* Remove an Efx device, and call the driver's remove() callback if
  * present. The caller must hold rtnl_lock. */
@@ -88,9 +98,7 @@ static void efx_dl_del_device(struct efx_dl_device *efx_dev)
 
 	after = get_jiffies_64();
 	duration = after - before;
-	WARN(!efx_nic_hw_unavailable(efx) && duration > EFX_DL_DURATION_WARN,
-	     "%s: driverlink remove() took %ums",
-	     efx_dev->driver->name, jiffies_to_msecs(duration));
+	EFX_DL_CHECK_DURATION(duration, "remove()");
 
 	list_del(&efx_handle->driver_node);
 
@@ -147,9 +155,7 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 
 	after = get_jiffies_64();
 	duration = after - before;
-	WARN(!efx_nic_hw_unavailable(efx) && duration > EFX_DL_DURATION_WARN,
-	     "%s: driverlink probe() took %ums\n",
-	     efx_dev->driver->name, jiffies_to_msecs(duration));
+	EFX_DL_CHECK_DURATION(duration, "probe()");
 
 	if (rc)
 		goto fail;
@@ -322,10 +328,7 @@ void efx_dl_reset_suspend(struct efx_nic *efx)
 
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(!efx_nic_hw_unavailable(efx) && \
-			     duration > EFX_DL_DURATION_WARN,
-			     "%s: driverlink reset_suspend() took %ums\n",
-			     efx_dev->driver->name, jiffies_to_msecs(duration));
+			EFX_DL_CHECK_DURATION(duration, "reset_suspend()");
 		}
 	}
 }
@@ -351,10 +354,7 @@ void efx_dl_reset_resume(struct efx_nic *efx, int ok)
 
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(!efx_nic_hw_unavailable(efx) && \
-			     duration > EFX_DL_DURATION_WARN,
-			     "%s: driverlink reset_resume() took %ums\n",
-			     efx_dev->driver->name, jiffies_to_msecs(duration));
+			EFX_DL_CHECK_DURATION(duration, "reset_resume()");
 		}
 	}
 }
@@ -377,10 +377,7 @@ int efx_dl_handle_event(struct efx_nic *efx, void *event, int budget)
 
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(!efx_nic_hw_unavailable(efx) && \
-			     duration > EFX_DL_DURATION_WARN,
-			     "%s: driverlink handle_event() took %ums\n",
-			     efx_dev->driver->name, jiffies_to_msecs(duration));
+			EFX_DL_CHECK_DURATION(duration, "handle_event()");
 
 			if (rc >= 0 )
 				return rc > budget ? budget : rc;
@@ -410,10 +407,7 @@ bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
 #ifdef DEBUG
 			after = get_jiffies_64();
 			duration = after - before;
-			WARN(!efx_nic_hw_unavailable(efx) && \
-			     duration > EFX_DL_DURATION_WARN,
-			     "%s: driverlink rx_packet() took %ums\n",
-			     efx_dev->driver->name, jiffies_to_msecs(duration));
+			EFX_DL_CHECK_DURATION(duration, "rx_packet()");
 #endif
 			if (rc)
 				discard = true;

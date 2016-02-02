@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,8 +45,9 @@
  */
 
 #include "ef_vi_internal.h"
-#include "logging.h"
 #include <etherfabric/pio.h>
+#include "logging.h"
+#include "memcpy_to_io.h"
 
 
 #define EFVI_EF10_DMA_TX_FRAG		1
@@ -63,12 +64,6 @@ typedef ci_qword_t ef_vi_ef10_dma_rx_phys_desc;
 
 /* RX descriptor for virtual packet transfers */
 typedef ci_qword_t ef_vi_ef10_dma_rx_buf_desc;
-
-
-union u64merge {
-  uint64_t  u64[1];
-  uint8_t   u8[8];
-};
 
 
 ef_vi_inline void
@@ -230,19 +225,33 @@ static void ef_vi_transmit_push_desc(ef_vi* vi, ef_vi_ef10_dma_tx_phys_desc *dp)
 
 #if !defined(__KERNEL__) && (defined(__x86_64__) || defined(__i386__))
   ci_oword_t d;
-  d.u32[0] = cpu_to_le32(dp->u32[0]);
-  d.u32[1] = cpu_to_le32(dp->u32[1]);
-  d.u32[2] = qs->added & q->mask;
+  d.u32[0] = dp->u32[0];
+  d.u32[1] = dp->u32[1];
+  d.u32[2] = cpu_to_le32(qs->added & q->mask);
   __asm__ __volatile__("movups %1, %%xmm0\n\t"
                        "movaps %%xmm0, %0"
                        : "=m" (*(volatile uint64_t*)(dbell))
                        : "m" (d)
                        : "xmm0", "memory");
+#elif !defined(__KERNEL__) && defined(__powerpc64__) &&  __GNUC__ >= 4
+  ci_oword_t d;
+  d.u32[0] = dp->u32[0];
+  d.u32[1] = dp->u32[1];
+  d.u32[2] = cpu_to_le32(qs->added & q->mask);
+  /* TODO: This sync is needed for the DMA path, but is redundant on PIO
+   * paths due to the wmb_wc() which is also a sync.  We should optimise
+   * that case...
+   */
+  __asm__ __volatile__("sync\n\t"
+                       "lxvw4x %%vs32, 0, %2\n\t"
+                       "stxvw4x %%vs32, 0, %1"
+                       : "=m" (*(volatile uint64_t*)dbell)
+                       : "r" (dbell), "r" (&d)
+                       : "vs32", "memory");
 #else
-  writel(cpu_to_le32(dp->u32[0]), (void *)(dbell));
-  writel(cpu_to_le32(dp->u32[1]), (void *)(dbell + 1));
-  wmb();
-  writel((qs->added & q->mask), dbell + 2);
+  noswap_writel(dp->u32[0],   dbell + 0);
+  noswap_writel(dp->u32[1],   dbell + 1);
+  writel(qs->added & q->mask, dbell + 2);
 #endif
   mmiowb();
 }
@@ -335,10 +344,6 @@ static int ef10_ef_vi_transmit_pio(ef_vi* vi, int offset, int len,
   ef_vi_txq* q = &vi->vi_txq;
   ef_vi_txq_state* qs = &vi->ep_state->txq;
 
-#if defined(__powerpc64__)
-  return -EOPNOTSUPP;
-#endif
-
   EF_VI_ASSERT((dma_id & EF_REQUEST_ID_MASK) == dma_id);
   EF_VI_ASSERT(dma_id != 0xffffffff);
   EF_VI_ASSERT((unsigned) offset < vi->linked_pio->pio_len);
@@ -363,43 +368,18 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
   ef_vi_txq_state* qs = &vi->ep_state->txq;
   ef_vi_txq* q = &vi->vi_txq;
   ef_pio* pio = vi->linked_pio;
-  volatile uint64_t *dst, *dst_end;
-  union u64merge merge;
-  const uint64_t* src;
-
-#if defined(__powerpc64__)
-  return -EOPNOTSUPP;
-#endif
 
   EF_VI_ASSERT((dma_id & EF_REQUEST_ID_MASK) == dma_id);
   EF_VI_ASSERT(dma_id != 0xffffffff);
-  EF_VI_ASSERT((unsigned) offset < vi->linked_pio->pio_len);
-  EF_VI_ASSERT((unsigned) (offset + len) <= vi->linked_pio->pio_len);
+  EF_VI_ASSERT((unsigned) offset < pio->pio_len);
+  EF_VI_ASSERT((unsigned) (offset + len) <= pio->pio_len);
   EF_VI_ASSERT(len >= 16);
 
   if( (offset & 63) != 0 )
     return -EINVAL;
 
   if( qs->added - qs->removed < q->mask ) {
-    /* Copy packet to NIC buffer.  The PIO region on NIC is
-     * write only, and to avoid silicon bugs must only be hit
-     * with writes at are 64-bit aligned and a multiple of
-     * 64-bits in size.
-     */
-    src = (void*) src_buf;
-    dst = (void*) (pio->pio_io + offset);
-    dst_end = dst + (len >> 3);
-    while( dst < dst_end ) {
-      *dst++ = *src++;
-      ci_compiler_barrier();
-    }
-    if( len & 7 ) {
-      int done = len & ~7;
-      memcpy(merge.u8, (const uint8_t*) src_buf + done,
-             len & 7);
-      *dst = merge.u64[0];
-    }
-
+    memcpy_to_pio(pio->pio_io + offset, src_buf, len);
     ef10_pio_push(vi, q, qs, offset, len, dma_id);
     return 0;
   } else {
@@ -451,7 +431,6 @@ static void ef10_ef_vi_receive_push(ef_vi* vi)
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
   if( qs->added - qs->prev_added < 8 )
     return;
-  wmb();
   writel(((qs->added - ((qs->added - qs->prev_added) & 7)) &
           vi->vi_rxq.mask), vi->io + ER_DZ_RX_DESC_UPD_REG);
   qs->prev_added = qs->added - ((qs->added - qs->prev_added) & 7);

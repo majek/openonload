@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,8 +47,8 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
     goto got_pkt_out;
 
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-  if( ni->pkt_set[setid].shm_id >= 0 ) {
-    p = shmat(ni->pkt_set[setid].shm_id, NULL, 0);
+  if( ni->packets->set[setid].shm_id >= 0 ) {
+    p = shmat(ni->packets->set[setid].shm_id, NULL, 0);
     if( p == (void *)-1) {
       if( errno == EACCES ) {
         ci_log("Failed to mmap packet buffer for [%s] with errno=EACCES.\n"
@@ -60,7 +60,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
       }
       else {
         ci_log("%s: shmat(0x%x) failed for pkt set %d (%d)", __FUNCTION__,
-               ni->pkt_set[setid].shm_id, setid, -errno);
+               ni->packets->set[setid].shm_id, setid, -errno);
       }
       goto out;
     }
@@ -99,9 +99,9 @@ int ci_netif_pktset_best(ci_netif* ni)
 {
   int i, ret = -1, n_free = 0;
   
-  for( i = 0; i < ni->state->pkt_sets_n; i ++ ) {
-    if( ni->pkt_set[i].n_free > n_free ) {
-      n_free = ni->pkt_set[i].n_free;
+  for( i = 0; i < ni->packets->sets_n; i ++ ) {
+    if( ni->packets->set[i].n_free > n_free ) {
+      n_free = ni->packets->set[i].n_free;
       ret = i;
     }
   }
@@ -121,8 +121,8 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_non
   ci_assert(ci_netif_is_locked(ni));
 
   if( use_nonb ||
-      (ni->state->n_freepkts == 0 &&
-       ni->state->pkt_sets_n == ni->state->pkt_sets_max) )
+      (ni->packets->n_free == 0 &&
+       ni->packets->sets_n == ni->packets->sets_max) )
     if( (pkt = ci_netif_pkt_alloc_nonb(ni)) != NULL ) {
       --ni->state->n_async_pkts;
       CITP_STATS_NETIF_INC(ni, pkt_nonb_steal);
@@ -134,9 +134,9 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_non
     if(CI_UNLIKELY( ! ci_netif_pkt_tx_may_alloc(ni) ))
       return NULL;
 
-  ci_assert_equal(ni->state->current_pkt_set, NI_PKT_SET(ni));
-  ci_assert_equal(ni->pkt_set[NI_PKT_SET(ni)].n_free, 0);
-  ci_assert(OO_PP_IS_NULL(ni->pkt_set[NI_PKT_SET(ni)].free));
+  ci_assert_equal(ni->packets->id, NI_PKT_SET(ni));
+  ci_assert_equal(ni->packets->set[NI_PKT_SET(ni)].n_free, 0);
+  ci_assert(OO_PP_IS_NULL(ni->packets->set[NI_PKT_SET(ni)].free));
  again:
   bufset_id = ci_netif_pktset_best(ni);
   if( bufset_id != -1 ) {
@@ -145,21 +145,21 @@ ci_ip_pkt_fmt* ci_netif_pkt_alloc_slow(ci_netif* ni, int for_tcp_tx, int use_non
     return ci_netif_pkt_get(ni, bufset_id);
   }
 
-  while( ni->state->pkt_sets_n < ni->state->pkt_sets_max ) {
-    int old_n_freepkts = ni->state->n_freepkts;
+  while( ni->packets->sets_n < ni->packets->sets_max ) {
+    int old_n_freepkts = ni->packets->n_free;
     int rc = ci_tcp_helper_more_bufs(ni);
     if( rc != 0 )
       break;
     CHECK_FREEPKTS(ni);
-    if( old_n_freepkts == ni->state->n_freepkts )
-      ci_assert_equal(ni->state->pkt_sets_n, ni->state->pkt_sets_max);
-    if( ni->state->n_freepkts > 0 )
+    if( old_n_freepkts == ni->packets->n_free )
+      ci_assert_equal(ni->packets->sets_n, ni->packets->sets_max);
+    if( ni->packets->n_free > 0 )
       break;
   }
 
-  if( ni->state->n_freepkts == 0 )
+  if( ni->packets->n_free == 0 )
     ci_netif_try_to_reap(ni, 1);
-  if( ni->state->n_freepkts > 0 )
+  if( ni->packets->n_free > 0 )
     goto again;
 
   return NULL;
@@ -180,7 +180,7 @@ ci_inline void __ci_dbg_poison_header(ci_ip_pkt_fmt* pkt, ci_uint32 pattern)
 #ifdef __KERNEL__
 void ci_netif_set_merge_atomic_flag(ci_netif* ni)
 {
-  ci_uint32 val;
+  ci_uint64 val;
   int iter = 1000;
   while( 1 ) {
     val = ni->state->lock.lock;

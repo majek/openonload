@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -444,7 +444,7 @@ ci_inline oo_pkt_p VALID_PKT_ID(ci_netif* ni, oo_pkt_p pp) {
 #ifdef __KERNEL__
 # define pkt_sets_n(ni) (ni)->pkt_sets_n
 #else
-# define pkt_sets_n(ni) (ni)->state->pkt_sets_n
+# define pkt_sets_n(ni) (ni)->packets->sets_n
 #endif
   OO_PP_INIT(ni, pp,
              OO_PP_ID(pp) % (pkt_sets_n(ni) << CI_CFG_PKTS_PER_SET_S));
@@ -472,7 +472,7 @@ ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
 #else
 ci_inline oo_pkt_p __TRUSTED_PKT_ID(ci_netif* ni, oo_pkt_p pp,
                                     const char* f, int l) {
-  ci_ss_assertfl(ni, (unsigned) OO_PP_ID(pp) < ni->state->n_pkts_allocated,
+  ci_ss_assertfl(ni, (unsigned) OO_PP_ID(pp) < ni->packets->n_pkts_allocated,
                  f, l);
   return pp;
 }
@@ -568,6 +568,11 @@ ci_inline ci_ip_pkt_fmt* __ci_pkt_chk(ci_netif* ni, oo_pkt_p pp, int ni_locked,
 *********************************************************************/
 
 ci_inline struct oo_eth_hdr* oo_ether_hdr(ci_ip_pkt_fmt* pkt)
+{
+  return (void*) (pkt->dma_start + pkt->pkt_start_off);
+}
+
+ci_inline const struct oo_eth_hdr* oo_ether_hdr_const(const ci_ip_pkt_fmt* pkt)
 {
   return (void*) (pkt->dma_start + pkt->pkt_start_off);
 }

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -70,6 +70,11 @@ typedef dma_addr_t ef_vi_dma_addr_t;
 #ifndef __printf
 # define __printf(fmt, arg)  __attribute__((format(printf, fmt, arg)))
 #endif
+
+
+/* We don't worry much about optimising these in kernel. */
+#define unordered_writel(data, addr)  __raw_writel(cpu_to_le32(data), (addr))
+#define noswap_writel(data, addr)     writel(le32_to_cpu(data), (addr))
 
 
 #endif  /* __CI_CIUL_SYSDEP_LINUX_H__ */

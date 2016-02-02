@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1530,7 +1530,7 @@ static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
                        &trs->netif.state->ready_lists[s->b.ready_list_id],
                        &s->b.ready_link);
       ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
-      tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK);
+      tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK_TRUSTED);
       /* do not insert anything here - we should return immediately */
     }
     else {
@@ -1558,7 +1558,7 @@ static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
                          &trs->netif.state->ready_lists[s->b.ready_list_id],
                          &s->b.ready_link);
         ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
-        tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK);
+        tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK_TRUSTED);
         /* do not insert anything here - we should return immediately */
       }
     }

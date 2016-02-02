@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -3577,6 +3577,25 @@
 #define       MC_CMD_NVRAM_INFO_OUT_PHYSDEV_OFST 16
 #define       MC_CMD_NVRAM_INFO_OUT_PHYSADDR_OFST 20
 
+/* MC_CMD_NVRAM_INFO_V2_OUT msgresponse */
+#define    MC_CMD_NVRAM_INFO_V2_OUT_LEN 28
+#define       MC_CMD_NVRAM_INFO_V2_OUT_TYPE_OFST 0
+/*            Enum values, see field(s): */
+/*               MC_CMD_NVRAM_TYPES/MC_CMD_NVRAM_TYPES_OUT/TYPES */
+#define       MC_CMD_NVRAM_INFO_V2_OUT_SIZE_OFST 4
+#define       MC_CMD_NVRAM_INFO_V2_OUT_ERASESIZE_OFST 8
+#define       MC_CMD_NVRAM_INFO_V2_OUT_FLAGS_OFST 12
+#define        MC_CMD_NVRAM_INFO_V2_OUT_PROTECTED_LBN 0
+#define        MC_CMD_NVRAM_INFO_V2_OUT_PROTECTED_WIDTH 1
+#define        MC_CMD_NVRAM_INFO_V2_OUT_TLV_LBN 1
+#define        MC_CMD_NVRAM_INFO_V2_OUT_TLV_WIDTH 1
+#define        MC_CMD_NVRAM_INFO_V2_OUT_A_B_LBN 7
+#define        MC_CMD_NVRAM_INFO_V2_OUT_A_B_WIDTH 1
+#define       MC_CMD_NVRAM_INFO_V2_OUT_PHYSDEV_OFST 16
+#define       MC_CMD_NVRAM_INFO_V2_OUT_PHYSADDR_OFST 20
+/* Writes must be multiples of this size. Added to support the MUM on Sorrento.
+ */
+#define       MC_CMD_NVRAM_INFO_V2_OUT_WRITESIZE_OFST 24
 
 /***********************************/
 /* MC_CMD_NVRAM_UPDATE_START

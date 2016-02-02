@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,7 +56,9 @@
 
 /* Some defaults.  These can be overridden at runtime. */
 #define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<13)
-/* The real max for endpoint order */
+/* The real max for endpoint order.
+ * Do not forget to change CI_EPLOCK_NETIF_SOCKET_LIST if you increase
+ * this number.*/
 #define CI_CFG_NETIF_MAX_ENDPOINTS_MAX (1<<21)
 
 /* ANVL assumes the 2MSL time is 60 secs. Set slightly smaller */
@@ -375,8 +377,12 @@
 #define CI_TCP_RETRANSMIT_THRESHOLD_ORPHAN 8   /* orphaned sock: 8 times */
 #define CI_TCP_RETRANSMIT_THRESHOLD_SYN    4   /* retransmit SYN 4 times */
 
-/* Should we send DSACK option? */
+/* Should we send SACK/DSACK option in TCP? */
+#define CI_CFG_TCP_SACK 1
 #define CI_CFG_TCP_DSACK 1
+
+/* ... and TCP timestamp option? */
+#define CI_CFG_TCP_TSO 1
 
 /* Path to the /proc/sys/ */
 #define CI_CFG_PROC_PATH		"/proc/sys/"
@@ -653,7 +659,7 @@
  * PIO is suspected to not be safe, but those builds may be sharing a
  * stack with a 64 bit system that is using PIO safely.
  */
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__PPC64__)
 #define CI_CFG_USE_PIO CI_CFG_PIO
 #else
 #define CI_CFG_USE_PIO 0

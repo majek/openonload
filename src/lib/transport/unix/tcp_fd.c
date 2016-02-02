@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1160,10 +1160,7 @@ static void citp_tcp_close_cached(citp_fdinfo* fdinfo,
   ci_ni_dllist_remove_safe(netif, &s->b.ready_link);
   s->b.ready_list_id = 0;
 
-  /* If we are in a state where we time out orphaned connections: */
-  if( (ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN) &&
-      !(ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
-    ci_netif_fin_timeout_enter(netif, ts);
+  ci_tcp_all_fds_gone_common(netif, ts);
 
   /* Now need to trigger the next transition.  If the socket is not closed
    * yet then we just go via ci_tcp_close, which will handle whatever state

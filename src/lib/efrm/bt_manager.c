@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -122,11 +122,6 @@ efrm_bt_block_clear(struct efhw_nic *nic, int bta_flags,
 	if (! reset_pending && !(bta_flags & (EFRM_BTA_FLAG_FRAUD |
 					      EFRM_BTA_FLAG_IN_RESET)))
 		efhw_nic_buffer_table_clear(nic, block, first, size);
-#ifndef NDEBUG
-	else
-		block->btb_clear_mask |= EFHW_BT_BLOCK_RANGE(first, size);
-#endif
-
 }
                     
 
@@ -270,8 +265,8 @@ efrm_bt_manager_realloc(struct efhw_nic *nic,
 							   manager->order,
 							   block);
 			if( rc != 0 && rc1 == 0 ) {
-				EFRM_ERR("%s ERROR: failed to re-allocate "
-					 "buffer table entries "
+				EFRM_ERR_LIMITED("%s ERROR: failed to "
+					 "re-allocate buffer table entries "
 					 "after reset size=%d order=%d",
 					 __func__, a->bta_size,
 					  manager->order);
@@ -342,10 +337,9 @@ efrm_bt_nic_set(struct efhw_nic *nic, struct efrm_buffer_table_allocation *a,
 			rc1 = rc;
 			if( ~a->bta_flags & EFRM_BTA_FLAG_FRAUD ) {
 				a->bta_flags |= EFRM_BTA_FLAG_FRAUD;
-				EFRM_ERR("%s: ERROR: failed to set buffer"
-					 "table entries: size=%d order=%d",
-					 __func__,
-					 a->bta_size, a->bta_order);
+				EFRM_ERR_LIMITED("%s: ERROR: failed to set "
+				  "buffer table entries: size=%d order=%d",
+				  __func__, a->bta_size, a->bta_order);
 			}
 		}
 		n -= EFHW_BUFFER_TABLE_BLOCK_SIZE;

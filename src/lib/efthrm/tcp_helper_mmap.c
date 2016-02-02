@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -197,7 +197,7 @@ static int tcp_helper_rm_mmap_pkts(tcp_helper_resource_t* trs,
   ci_assert(ns);
 
   /* Reserve space for packet buffers */
-  if( bufid < 0 || bufid > ns->pkt_sets_max ||
+  if( bufid < 0 || bufid > ni->packets->sets_max ||
       ni->pkt_bufs[bufid] == NULL ) {
     OO_DEBUG_ERR(ci_log("%s: %u BAD bufset_id=%d", __FUNCTION__,
                         trs->id, bufid));

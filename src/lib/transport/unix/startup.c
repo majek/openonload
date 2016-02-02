@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -516,7 +516,9 @@ static void citp_opts_validate_env(void)
     "EF_NO_PRELOAD_RESTORE",
     "EF_LD_PRELOAD",
     "EF_CLUSTER_NAME",
+#ifdef ONLOAD_OFE
     "EF_OFE_CONFIG_FILE",
+#endif
     "EF_LOG_FILE",
     NULL
   };

@@ -1,3 +1,86 @@
+openonload-201509-u1
+--------------------
+
+Update sfc net driver to version v4_5_1_1037
+Update AOE driver to version v4_7_0_1033
+	
+task58695: Build on recent Linux kernels 
+task54288: Improve accuracy of hardware TX timestamps
+task47708: Add option (EF_TCP_RCVBUF_MODE=1) to auto-tune receive buffer size per socket. 
+task57121: Improve delegated send sample code.
+task58575: Improve PIO latency with frames whose size is not multiple of qword
+task59096: Allow instance of VI within set or cluster to be specified
+task59096: Allow efsink to run without specifying a stream
+task52430: Experimental support for PowerPC little-endian.
+task52430: Optimisations for Power8 systems. 
+task57340: Use symmetric RSS hash.  Affects ef_vi, SolarCapture.  See Release Notes
+
+SF-115347-KI/bug57612: fix handling of fragmented unicast UDP with scalable filters mode
+	
+bug56596: add onload_stackdump counter syn_drop_no_return_route
+bug56799: add wmb in oo_tcpdump_dump_pkt to avoid potential packet leak in onload_tcpdump
+bug57106: handle failure to allocate a special RSS mode by falling back to default.
+bug56948, bug57052: fixes EALREADY on EVQ_INIT when stressing stack creation
+bug57119: add stack_locks_deferred counter to stackdump
+bug56652: avoid endpoint wakeups from driverlink context on RT kernels
+bug56919: allow reuse of socket from cache from different PID in some cases
+bug42928: increment mm_hash->ref under write lock only, avoids "mmap del of NULL" warning
+bug57017: correctly calculate initial TCP RTT during connect()
+bug57407: avoid race on re-use of accelerated fd as non-accelerated.
+bug53260: make Onload's behaviour for SO_LINGER more closely match Linux's
+bug53525: improve messages for ef_vi MCDI TX/RX error events
+bug57128: fix assertion in efab_tcp_helper_reuseport_bind() when interrupt driven
+bug57683: make ef_pio_unlink_vi unmap the PIO region so PIO can be allocated again
+bug57274: ensure unicast UDP packet is only delivered to a single socket
+bug57728: correctly initialize citp_dup2_lock at start of day
+bug57983: fix memory leak and handling of disappearing stack in WODA
+bug58079: improve WODA latency scaling with large numbers of sockets in the set.
+bug58086: don't segfault when delegated send API called with bad fd
+bug57197: improve checking of arguments supplied to the ef_vi API (e.g. size of vi set)
+bug58115: add kernel refcount values to stackdump output
+bug58050: prevent EBUSY after repeatedly creating a stack with packet prefault
+bug58217: fix rtnl lock assertions seen during bond failover in debug build
+bug58217: Prevent flood of 'Not accelerating bond' messages.
+bug57796: fix assertion in UDP debug build when poll is needed during epoll()
+bug57631: correctly count keepalive probes when orphaning TCP socket to avoid assertion
+bug58115: drop stack refcount if loop connection fails because of backlog to avoid zombie stack
+bug58562: fix NULL deref and memory leak in error path in control plane initialisation
+bug58580: avoid NULL deref if pkt allocation failed when replying to TCP SYN
+bug58614: fix bad assertion in bonding debug build
+bug57953: Avoid segfault when running with TX timestamping and SW multicast loopback
+bug58295: Prevent packet remap errors on one NIC from stalling entire stack
+bug58545: Prevent interrupt storm after packet remap failure
+bug58643: Don't post packets to a NIC if we failed to remap them
+bug58747: Avoid EALREADY on MCDI_CMD_FINI_(RX|TX|EV)Q after remap failure or hotplug
+bug58709: Apply timestamp corrections to h/w timestamps reported by Onload
+bug58622: Fix TX timestamp correction obtained from NIC.  Was too small
+bug58274: remove check which could falsely flag some non-IP packets as bad FCS
+bug57740: fix filter confusion caused by hardware port down and up in single handler
+bug58510: limit rate of some error messages to avoid overwhelming serial log
+bug58753: purge btb_clear_mask field and all asserts with it
+bug59103: Return informative errors when failing to allocate VI from set.
+bug59103: Fix broken handling of VI set instance range check
+bug58370: Avoid memory corruption at hotplug
+bug59104: Avoid infinite loop on RHEL7.2 reading bonding sysfs files
+bug58989: prevent Onload traffic reaching kernel stack on bond failover/hotplug
+bug59149: reserve space for timesync events when rx hw timestamping to avoid evq overflow
+bug53985: force TCP recv() to return 0 if properly shut down
+bug59176: drop stack lock when spinning in write(pipe_fd, ...)
+bug58558: fix sendfile() hang on realtime kernels
+bug59265: fix race between reset and hotplug causing leak of TX/RX queues
+bug59265: avoid MC assertions during repeated hotplug events
+bug59206: don't warn about PIO alloc failure when hardware is absent
+bug59277: fix CI_CFG_MAX_INTERFACES=1 + TCP loopback stack
+bug57953: fix seg fault when TX timestamped packet also delivered via sw loopback
+bug59573: bug55063: Fix onload_iptables rules on VLANs and bonds
+bug59425: during hot unplug free VIs of stacks under construction/destruction
+bug59345: allocate vi resources even for downed interfaces to improve bond behaviour
+bug59362: fix flush timeouts after hotplug
+bug55063: avoid naming collisions in /proc/driver/sfc_resource
+bug58248: fix Ubuntu warning "sysfs: cannot create duplicate filename onload-wq"
+bug55799: improve warning message about EF_TCP_SYNRECV_MAX
+
+
 openonload-201509
 -----------------
 

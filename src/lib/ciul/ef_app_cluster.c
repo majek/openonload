@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -256,7 +256,9 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
   int rc, sock, ifindex;
   ef_driver_handle cluster_dh;
   unsigned pd_id = 0, viset_id = 0; /* Initialise to shutup the compiler */
+  const char* cluster_name = cluster_or_intf_name;
   const char* s;
+  char* end;
 
   if( (s = getenv("EF_VI_PD_FLAGS")) != NULL ) {
     if( strstr(s, "vf") != NULL )
@@ -274,6 +276,17 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
     return -ENOMEM;
   }
 
+  /* Cluster name has format [idx@]name.  The idx gives the index of the
+   * channel within the cluster.  If not given, then any channel will do.
+   */
+  pd->pd_cluster_viset_index = -1;
+  errno = 0;
+  int idx = strtol(cluster_name, &end, 10);
+  if( errno == 0 && end != cluster_name && *end == '@' ) {
+    pd->pd_cluster_viset_index = idx;
+    cluster_name = end + 1;
+  }
+
   if( (rc = clusterd_connect(&sock)) < 0 ) {
     LOGV(ef_log("%s: solar_clusterd not present.  Trying ef_pd_alloc()",
                 __FUNCTION__));
@@ -287,13 +300,13 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
     return rc;
   }
 
-  if( (rc = clusterd_alloc_cluster(sock, cluster_or_intf_name, flags,
+  if( (rc = clusterd_alloc_cluster(sock, cluster_name, flags,
                                    &cluster_dh, &pd_id, &viset_id,
                                    pd->pd_intf_name)) < 0 ) {
     close(sock);
     if( rc == -ENOENT ) {
       LOGV(ef_log("%s: cluster '%s' does not exist.  Trying ef_pd_alloc()",
-                  __FUNCTION__, cluster_or_intf_name));
+                  __FUNCTION__, cluster_name));
       goto alloc_locally;
     }
     free(pd->pd_intf_name);
@@ -302,7 +315,7 @@ int ef_pd_alloc_by_name(ef_pd* pd, ef_driver_handle pd_dh,
     return rc;
   }
 
-  pd->pd_cluster_name = strdup(cluster_or_intf_name);
+  pd->pd_cluster_name = strdup(cluster_name);
   pd->pd_cluster_sock = sock;
   pd->pd_cluster_dh = cluster_dh;
   pd->pd_resource_id = pd_id;

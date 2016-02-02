@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -46,13 +46,13 @@
 
 
 int ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us, 
-                                    ci_ip_pkt_fmt* pkt)
+                               ci_ip_pkt_fmt* pkt)
 {
   ci_ip_pkt_fmt* p;
   int tsonly = us->s.timestamping_flags &
     ONLOAD_SOF_TIMESTAMPING_OPT_TSONLY;
 
-  /* Limit timistamp queue by SO_SNDBUF */
+  /* Limit timestamp queue by SO_SNDBUF */
   if( ci_udp_recv_q_pkts(&us->timestamp_q) + pkt->n_buffers >
       ci_udp_recv_q_bytes2packets(us->s.so.sndbuf) ) {
     /* recv(MSG_ERRQUEUE) does not lock the stack and can not reap the
@@ -65,16 +65,10 @@ int ci_udp_timestamp_q_enqueue(ci_netif* ni, ci_udp_state* us,
     }
   }
 
-  for( p = pkt; CI_TRUE; p = PKT_CHK(ni, p->frag_next) ) {
-    oo_offbuf_set_start(&p->buf, oo_ether_hdr(p));
-    oo_offbuf_set_len(&p->buf, tsonly ? 0 : p->buf_len);
-    if( OO_PP_IS_NULL(p->frag_next) )
-      break;
-    if( tsonly ) {
-      p = PKT_CHK(ni, p->frag_next);
-      pkt->frag_next = 0;
-      ci_netif_pkt_release(ni, p);
-    }
+  if( tsonly && OO_PP_NOT_NULL(pkt->frag_next) ) {
+    p = PKT_CHK(ni, pkt->frag_next);
+    pkt->frag_next = OO_PP_NULL;
+    ci_netif_pkt_release(ni, p);
   }
 
   ci_udp_recv_q_put(ni, &us->timestamp_q, pkt);
@@ -167,8 +161,8 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   state->delivered = 1;
 
 #ifdef ONLOAD_OFE
-  if( ni->ofe != NULL && !OFE_ADDR_IS_NULL(ni->ofe, s->ofe_code_start) &&
-      ofe_process_packet(ni->ofe, s->ofe_code_start, ci_ip_time_now(ni),
+  if( s->ofe_code_start != OFE_ADDR_NULL &&
+      ofe_process_packet(ni->ofe_channel, s->ofe_code_start, ci_ip_time_now(ni),
                          oo_ether_hdr(pkt), pkt->pay_len, pkt->vlan,
                          CI_BSWAP_BE16(oo_ether_type_get(pkt)),
                          oo_ip_hdr(pkt))
@@ -180,7 +174,12 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
   if( (recvq_depth <= us->stats.max_recvq_pkts) &&
       ! (ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ) {
   fast_receive:
-    if( ! state->queued ) {
+    /* The same queue link is used for both the TX timestamp_q and the
+     * udp recv_q, so we need to use an indirect packet if this is
+     * timestamped.  This can only occur in the loopback case, where the
+     * state->queued flag is ignored.
+     */
+    if( ! state->queued && !(pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED) ) {
       state->queued = 1;
       ci_netif_pkt_hold(ni, pkt);
     }
@@ -211,7 +210,17 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
     us->s.b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
     ci_netif_put_on_post_poll(ni, &us->s.b);
     ci_udp_wake_possibly_not_in_poll(ni, us, CI_SB_FLAG_WAKE_RX);
-    return 0;  /* continue delivering to other sockets */
+    if( CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ||
+        oo_ip_hdr(pkt)->ip_daddr_be32 == CI_IP_ALL_BROADCAST ) {
+      /* Multicast or all-broadcast address:
+       * continue delivering to other sockets */
+      return 0;
+    }
+    else {
+      /* We should also check for the interface broadcast address,
+       * but we don't */
+      return 1;
+    }
   }
 
   /* First check if we've come here just to update max_recvq_depth */
@@ -248,6 +257,7 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
                       int ip_paylen)
 {
   struct ci_udp_rx_deliver_state state;
+  int dealt_with;
 
   ASSERT_VALID_PKT(ni, pkt);
   ci_assert(oo_ip_hdr(pkt)->ip_protocol == IPPROTO_UDP);
@@ -273,18 +283,21 @@ void ci_udp_handle_rx(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_udp_hdr* udp,
   state.queued = 0;
   state.delivered = 0;
 
-  ci_netif_filter_for_each_match(ni,
-                                 oo_ip_hdr(pkt)->ip_daddr_be32,
-                                 udp->udp_dest_be16,
-                                 oo_ip_hdr(pkt)->ip_saddr_be32,
-                                 udp->udp_source_be16,
-                                 IPPROTO_UDP, pkt->intf_i, pkt->vlan,
-                                 ci_udp_rx_deliver, &state, NULL);
-  ci_netif_filter_for_each_match(ni,
-                                 oo_ip_hdr(pkt)->ip_daddr_be32,
-                                 udp->udp_dest_be16,
-                                 0, 0, IPPROTO_UDP, pkt->intf_i, pkt->vlan,
-                                 ci_udp_rx_deliver, &state, NULL);
+  dealt_with = 
+    ci_netif_filter_for_each_match(ni,
+                                   oo_ip_hdr(pkt)->ip_daddr_be32,
+                                   udp->udp_dest_be16,
+                                   oo_ip_hdr(pkt)->ip_saddr_be32,
+                                   udp->udp_source_be16,
+                                   IPPROTO_UDP, pkt->intf_i, pkt->vlan,
+                                   ci_udp_rx_deliver, &state, NULL);
+  if( ! dealt_with ) {
+    ci_netif_filter_for_each_match(ni,
+                                   oo_ip_hdr(pkt)->ip_daddr_be32,
+                                   udp->udp_dest_be16,
+                                   0, 0, IPPROTO_UDP, pkt->intf_i, pkt->vlan,
+                                   ci_udp_rx_deliver, &state, NULL);
+  }
 
   if( state.queued ) {
     ci_assert_gt(pkt->refcount, 1);

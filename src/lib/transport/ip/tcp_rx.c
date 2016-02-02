@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -87,10 +87,10 @@ ci_ip_pkt_fmt* __ci_netif_pkt_rx_to_tx(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     old_bufset_id = PKT_SET_ID(pkt);
     new_bufset_id = NI_PKT_SET(ni);
     ci_netif_pkt_release(ni, pkt);
-    if(CI_LIKELY( ni->pkt_set[old_bufset_id].n_free > 0 ))
+    if(CI_LIKELY( ni->packets->set[old_bufset_id].n_free > 0 ))
       pkt = ci_netif_pkt_get(ni, old_bufset_id);
     else if( old_bufset_id != new_bufset_id &&
-             ni->pkt_set[new_bufset_id].n_free > 0 )
+             ni->packets->set[new_bufset_id].n_free > 0 )
       pkt = ci_netif_pkt_get(ni, new_bufset_id);
     else
       pkt = ci_netif_pkt_alloc_slow(ni, 0, 1);
@@ -1336,6 +1336,7 @@ static void ci_tcp_rx_process_fin(ci_netif* netif, ci_tcp_state* ts)
   /* TODO does the dropping of packets from the ROB above require us
      to update SACK state? */
 
+  ts->tcpflags |= CI_TCPT_FLAG_FIN_RECEIVED;
   ts->s.rx_errno = CI_SHUT_RD;
   if( ts->s.b.state == CI_TCP_ESTABLISHED ) {
     ci_tcp_set_slow_state(netif, ts, CI_TCP_CLOSE_WAIT);
@@ -2399,9 +2400,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt),
                        ip_pkt_dump_len(CI_BSWAP_BE16(ip->ip_tot_len_be16)),
 		       0));
-    /*! \TODO: which counter do I increment here?  Also improve these log
-     * messages.
-     */
+    CITP_STATS_NETIF(++netif->state->stats.syn_drop_no_return_route);
     goto freepkt_out;
   }
 
@@ -2578,9 +2577,16 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
 
   /* store timestamp in echo reply */
   tsr->timest = ci_tcp_time_now(netif);
-  tsr->rcv_wscl = (ci_uint8)
-      ci_tcp_wscl_by_buff(netif, ci_tcp_rcvbuf_established(netif, &tls->s));
   tsr->rcv_nxt = rxp->seq + 1;
+  if( NI_OPTS(netif).tcp_rcvbuf_mode == 1 )
+    /* may overestimate MSS, but this is "OK" */
+    tsr->rcv_wscl = (ci_uint8)
+      ci_tcp_wscl_by_buff(netif,
+			  ci_tcp_max_rcvbuf(netif, netif->state->max_mss));
+  else
+    tsr->rcv_wscl = (ci_uint8)
+      ci_tcp_wscl_by_buff(netif,
+			  ci_tcp_rcvbuf_established(netif, &tls->s));
 
   if( do_syncookie )
     ci_tcp_syncookie_syn(netif, tls, tsr);
@@ -2605,7 +2611,7 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   if( OO_SP_NOT_NULL(tsr->local_peer) )
     ci_netif_pkt_hold(netif, pkt);
   tx_pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
-  if( pkt != NULL )
+  if( tx_pkt != NULL )
     ci_tcp_synrecv_send(netif, tls, tsr, tx_pkt,
                         CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, &ipcache);
 
@@ -3913,8 +3919,8 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
   CHECK_TS(ni, ts);
 
 #ifdef ONLOAD_OFE
-  if( ni->ofe != NULL && !OFE_ADDR_IS_NULL(ni->ofe, s->ofe_code_start) &&
-      ofe_process_packet(ni->ofe, s->ofe_code_start, ci_ip_time_now(ni),
+  if( s->ofe_code_start != OFE_ADDR_NULL &&
+      ofe_process_packet(ni->ofe_channel, s->ofe_code_start, ci_ip_time_now(ni),
                          oo_ether_hdr(pkt), pkt->pay_len, pkt->vlan,
                          CI_BSWAP_BE16(oo_ether_type_get(pkt)),
                          oo_ip_hdr(pkt))
@@ -4086,9 +4092,8 @@ static int ci_tcp_rx_deliver_to_listen(ci_sock_cmn* s, void* opaque_arg)
   ciip_tcp_rx_pkt* rxp = opaque_arg;
 
 #ifdef ONLOAD_OFE
-  if( rxp->ni->ofe != NULL &&
-      !OFE_ADDR_IS_NULL(rxp->ni->ofe, s->ofe_code_start) &&
-      ofe_process_packet(rxp->ni->ofe, s->ofe_code_start,
+  if( s->ofe_code_start != OFE_ADDR_NULL &&
+      ofe_process_packet(rxp->ni->ofe_channel, s->ofe_code_start,
                          ci_ip_time_now(rxp->ni),
                          oo_ether_hdr(rxp->pkt), rxp->pkt->pay_len,
                          rxp->pkt->vlan,

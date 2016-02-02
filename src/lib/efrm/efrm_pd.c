@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,6 +52,7 @@
 #include <ci/efrm/vf_resource.h>
 #include <ci/efrm/vf_resource_private.h>
 #include <ci/efhw/ef10.h>
+#include <ci/efhw/nic.h>
 #include "efrm_internal.h"
 #include "bt_manager.h"
 #include "efrm_pd.h"
@@ -436,17 +437,6 @@ struct efrm_vf *efrm_pd_get_vf(struct efrm_pd *pd)
 }
 
 
-struct pci_dev *efrm_pd_get_pci_dev(struct efrm_pd *pd)
-{
-#ifdef CONFIG_SFC_RESOURCE_VF
-	if (pd->vf)
-		return pd->vf->pci_dev;
-	else
-#endif
-		return pd->rs.rs_client->nic->pci_dev;
-}
-
-
 int efrm_pd_share_dma_mapping(struct efrm_pd *pd, struct efrm_pd *pd1)
 {
 #ifndef CONFIG_SFC_RESOURCE_VF_IOMMU
@@ -661,9 +651,12 @@ static void efrm_pd_dma_unmap_nic(struct efrm_pd *pd,
 				  int n_pages, int nic_order,
 				  dma_addr_t *pci_addrs, int pci_addrs_stride)
 {
-	efrm_pd_dma_unmap_pci(efrm_client_get_nic(pd->rs.rs_client)->pci_dev,
-			      n_pages, nic_order,
-			      pci_addrs, pci_addrs_stride);
+	struct efhw_nic* nic = efrm_client_get_nic(pd->rs.rs_client);
+	struct pci_dev* dev = efhw_nic_get_pci_dev(nic);
+
+	efrm_pd_dma_unmap_pci(dev, n_pages, nic_order, pci_addrs,
+			      pci_addrs_stride);
+	pci_dev_put(dev);
 }
 
 
@@ -672,10 +665,14 @@ static int efrm_pd_dma_map_nic(struct efrm_pd *pd,
 			       void **addrs, int addrs_stride,
 			       dma_addr_t *pci_addrs, int pci_addrs_stride)
 {
-	return efrm_pd_dma_map_pci(
-			efrm_client_get_nic(pd->rs.rs_client)->pci_dev,
-			n_pages, nic_order, addrs, addrs_stride,
-			pci_addrs, pci_addrs_stride);
+	struct efhw_nic* nic = efrm_client_get_nic(pd->rs.rs_client);
+	struct pci_dev* dev = efhw_nic_get_pci_dev(nic);
+	int rc = efrm_pd_dma_map_pci(dev, n_pages, nic_order, addrs,
+				     addrs_stride, pci_addrs,
+				     pci_addrs_stride);
+	pci_dev_put(dev);
+
+	return rc;
 }
 
 

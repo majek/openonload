@@ -27,8 +27,12 @@ efforward_packed: efforward_packed.o utils.o
 efpingpong: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
 efpingpong: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
 
+efdelegated_server: efdelegated_server.o utils.o
 efdelegated_server: MMAKE_LIBS     += $(LINK_ONLOAD_EXT_LIB)
 efdelegated_server: MMAKE_LIB_DEPS += $(ONLOAD_EXT_LIB_DEPEND)
+efdelegated_client: efdelegated_client.o utils.o
+efdelegated_client: MMAKE_LIBS     += $(LINK_ONLOAD_EXT_LIB)
+efdelegated_client: MMAKE_LIB_DEPS += $(ONLOAD_EXT_LIB_DEPEND)
 
 efpio: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
 efpio: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)

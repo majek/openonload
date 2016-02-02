@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -108,6 +108,8 @@ static int efx_ioctl_do_mcdi_old(struct efx_nic *efx, union efx_ioctl_data *data
 
 	req->rc = -rc;
 	req->len = (__u8)outlen;
+
+	kfree(inbuf);
 	return 0;
 }
 
@@ -583,11 +585,13 @@ efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
 
 	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0) {
 		rc = efx_ef10_update_keys(efx, stats);
-		if (rc)
-			return rc;
-	} else {
-		memset(stats, 0, sizeof(*stats));
+		/* return directly since SFA7942Q(Sorrento) only
+		 * uses EF10 based licensing
+		 */
+		return rc;
 	}
+ 
+	memset(stats, 0, sizeof(*stats));
 
 #ifdef CONFIG_SFC_AOE
 	if (efx->aoe_data) {
@@ -772,7 +776,7 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	}
 
 	kfree(data);
-	return 0;
+	return rc;
 }
 
 static long

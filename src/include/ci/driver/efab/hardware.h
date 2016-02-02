@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -153,15 +153,13 @@
 #define efhw_nic_event_queue_enable(nic, evq, size, buf_base, dma_addrs, \
 				    n_pages, interrupting, dos_p, wakeup_evq, \
                                     enable_time_sync_events,            \
-                                    enable_cut_through,                 \
-                                    rx_ts_correction_out, flags_out)    \
+                                    enable_cut_through, flags_out)      \
   ((nic)->efhw_func->event_queue_enable((nic), (evq), (size),           \
                                         (buf_base), (dma_addrs),        \
                                         (n_pages), (interrupting),      \
                                         (dos_p), (wakeup_evq),          \
                                         (enable_time_sync_events),      \
                                         (enable_cut_through),           \
-                                        (rx_ts_correction_out),         \
 					(flags_out)))
 
 #define efhw_nic_event_queue_disable(nic, evq, time_sync_events_enabled) \

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,8 @@
 #include "efrm_internal.h"
 #include "efrm_vi.h"
 #include "efrm_vi_set.h"
+
+#define JIFFIES_NO_TIMEOUT 0
 
 /* Workqueue item to postpone processing of "flush complete" event. */
 struct efrm_flushed_req {
@@ -124,64 +126,84 @@ efrm_vi_resource_tx_flush_done(struct efrm_vi *virs, bool *completed)
 			  __FUNCTION__, virs->rs.rs_instance);	
 }
 
+
 static void
-efrm_vi_resource_issue_rx_flush(struct efrm_vi *virs, bool *completed)
+__efrm_vi_resource_issue_flush(struct efrm_vi *virs, int queue, bool *completed)
 {
 	struct efrm_nic *efrm_nic = efrm_nic_from_rs(&virs->rs);
 	struct efrm_nic_vi *nvi = &efrm_nic->nvi;
+	struct efrm_vi_q *q = &virs->q[queue];
+	struct list_head* flush_outstanding_list = (queue == EFHW_TXQ) ?
+		&nvi->tx_flush_outstanding_list : &nvi->rx_flush_outstanding_list;
 	int instance;
+	int rc;
 
+	EFRM_ASSERT(queue == EFHW_TXQ || queue == EFHW_RXQ);
 	instance = virs->rs.rs_instance;
 
-	virs->q[EFHW_RXQ].flush_jiffies = jiffies;
+	/* It might be long time before HW is instructed to perform flush,
+	 * Now, the timeout is disabled it will be enabled once hardware
+	 * is notified about the flush */
+	q->flush_jiffies = JIFFIES_NO_TIMEOUT;
+	list_add_tail(&q->flush_link, flush_outstanding_list);
+	if( queue == EFHW_RXQ) {
+		virs->rx_flush_outstanding = virs->q[EFHW_RXQ].flushing;
+		++(nvi->rx_flush_outstanding_count);
+	}
 
-	list_add_tail(&virs->q[EFHW_RXQ].flush_link,
-		      &nvi->rx_flush_outstanding_list);
-	virs->rx_flush_outstanding = virs->q[EFHW_RXQ].flushing;
-	++(nvi->rx_flush_outstanding_count);
+	/* If the VI was shut down forcibly, its queues have been flushed
+	 * already.  Simulate the completion to keep our state consistent. */
+	if (atomic_read(&virs->shut_down_flags) & efrm_vi_shut_down_flag(queue)) {
+		if (queue == EFHW_TXQ)
+			efrm_vi_resource_tx_flush_done(virs, completed);
+		else
+			efrm_vi_resource_rx_flush_done(virs, completed);
+		return;
+	}
 
 	/* Drop spin lock as efhw_nic_* calls can block */
 	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
 
-	EFRM_TRACE("%s: rx queue %d flush requested for nic %d",
-		   __FUNCTION__, instance, efrm_nic->efhw_nic.index);
-	efhw_nic_flush_rx_dma_channel(&efrm_nic->efhw_nic, instance);
+	EFRM_TRACE("%s: %s queue %d flush requested for nic %d",
+		   __FUNCTION__, queue == EFHW_TXQ ? "tx" : "rx",
+                   instance, efrm_nic->efhw_nic.index);
+        rc = efrm_vi_q_flush(virs, queue);
 
 	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
 
+	if (rc != 0) {
+		if (queue == EFHW_TXQ)
+			efrm_vi_resource_tx_flush_done(virs, completed);
+		else
+			efrm_vi_resource_rx_flush_done(virs, completed);
+	}
+	if (!q->flushing)
+		return;
+	/* flush_jiffies needs to be different than JIFFIES_NO_TIMEOUT,
+	 * we ensure this by always setting the least significat bit */
+	q->flush_jiffies = jiffies | 1;
+	/* Link needs to be move to the end to maintain ordering
+	 * of the list by jiffies */
+	list_del(&q->flush_link);
+	list_add_tail(&q->flush_link, flush_outstanding_list);
 	queue_delayed_work(efrm_vi_manager->workqueue,
 			   &nvi->flush_work_item, HZ);
 }
+
+
+static void
+efrm_vi_resource_issue_rx_flush(struct efrm_vi *virs, bool *completed)
+{
+	__efrm_vi_resource_issue_flush( virs, EFHW_RXQ, completed);
+}
+
 
 static void
 efrm_vi_resource_issue_tx_flush(struct efrm_vi *virs, bool *completed)
 {
-	struct efrm_nic *efrm_nic = efrm_nic_from_rs(&virs->rs);
-	struct efrm_nic_vi *nvi = &efrm_nic->nvi;
-	int instance;
-	int rc;
-
-	instance = virs->rs.rs_instance;
-
-	virs->q[EFHW_TXQ].flush_jiffies = jiffies;
-
-	list_add_tail(&virs->q[EFHW_TXQ].flush_link,
-		      &efrm_nic->nvi.tx_flush_outstanding_list);
-
-	/* Drop spin lock as efhw_nic_* calls can block */
-	spin_unlock_bh(&efrm_vi_manager->rm.rm_lock);
-
-	EFRM_TRACE("%s: tx queue %d flush requested for nic %d",
-		   __FUNCTION__, instance, efrm_nic->efhw_nic.index);
-	rc = efhw_nic_flush_tx_dma_channel(&efrm_nic->efhw_nic, instance);
-
-	spin_lock_bh(&efrm_vi_manager->rm.rm_lock);
-	if (rc == -EAGAIN)
-		efrm_vi_resource_tx_flush_done(virs, completed);
-
-	queue_delayed_work(efrm_vi_manager->workqueue,
-			   &nvi->flush_work_item, HZ);
+	__efrm_vi_resource_issue_flush( virs, EFHW_TXQ, completed);
 }
+
 
 static void efrm_vi_resource_process_flushes(struct efrm_nic *efrm_nic,
 					     bool *completed)
@@ -265,6 +287,7 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	struct efrm_vi *virs;
 	bool completed;
 	bool found = false;
+	unsigned long j;
 
 	EFRM_RESOURCE_MANAGER_ASSERT_VALID(&efrm_vi_manager->rm);
 
@@ -280,20 +303,24 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	if (!efrm_vi_rm_flushes_pending(efrm_nic))
 		goto out;
 
+	j = jiffies - HZ;
+
 	list_for_each_safe(pos, temp, &nvi->rx_flush_outstanding_list) {
 		virs = container_of(pos, struct efrm_vi,
 				    q[EFHW_RXQ].flush_link);
-		if( time_after(jiffies, virs->q[EFHW_RXQ].flush_jiffies) ) {
+		/* timeout suppressed entries might be out of order */
+		if (virs->q[EFHW_RXQ].flush_jiffies == JIFFIES_NO_TIMEOUT)
+			continue;
+		if( time_after(j, virs->q[EFHW_RXQ].flush_jiffies) ) {
 			/* Please don't whitelist this log output. If
 			 * it's appearing, that means this workaround
 			 * for bug18474/bug20608 is needed, and we'd
 			 * like to know about it.
 			 */
                         if (!efrm_nic->efhw_nic.resetting)
-				EFRM_WARN("%s: rx flush outstanding after 1 "
-					  "second on ifindex %d\n",
-					  __FUNCTION__,
-					  efrm_nic->efhw_nic.ifindex);
+				EFRM_WARN_LIMITED("%s: rx flush outstanding "
+				  "after 1 second on ifindex %d",
+				  __FUNCTION__, efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_rx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -303,17 +330,18 @@ void efrm_vi_check_flushes(struct work_struct *data)
 	list_for_each_safe(pos, temp, &nvi->tx_flush_outstanding_list) {
 		virs = container_of(pos, struct efrm_vi,
 				    q[EFHW_TXQ].flush_link);
-		if( time_after(jiffies, virs->q[EFHW_TXQ].flush_jiffies) ) {
+		if (virs->q[EFHW_TXQ].flush_jiffies == JIFFIES_NO_TIMEOUT)
+			continue;
+		if( time_after(j, virs->q[EFHW_TXQ].flush_jiffies) ) {
 			/* Please don't whitelist this log output. If
 			 * it's appearing, that means this workaround
 			 * for bug18474/bug20608 is needed, and we'd
 			 * like to know about it.
 			 */
                         if (!efrm_nic->efhw_nic.resetting)
-				EFRM_WARN("%s: tx flush outstanding after 1 "
-					  "second on ifindex %d\n",
-					  __FUNCTION__,
-					  efrm_nic->efhw_nic.ifindex);
+				EFRM_WARN_LIMITED("%s: tx flush outstanding "
+				  "after 1 second on ifindex %d",
+				  __FUNCTION__, efrm_nic->efhw_nic.ifindex);
 			efrm_vi_resource_tx_flush_done(virs, &completed);
 			found = true;
 		}
@@ -441,8 +469,7 @@ efrm_handle_rx_dmaq_flushed(struct efhw_nic *nic, int instance,
 				 * However, failed=TRUE is siena-specific. */
 				EFRM_ASSERT(nic->devtype.arch ==
 					    EFHW_ARCH_FALCON);
-				rc = efhw_nic_flush_rx_dma_channel(nic,
-								   instance);
+                                rc = efrm_vi_q_flush(virs, EFHW_RXQ);
 				EFRM_ASSERT(rc == 0);
 				(void) rc;  /* kill compiler warning */
 				*completed = false;

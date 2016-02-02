@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,6 +76,9 @@ extern int efrm_handle_dmaq_flushed_schedule(struct efhw_nic *nic,
 
 /*! SRAM update handler */
 extern void efrm_handle_sram_event(struct efhw_nic *nic);
+
+extern unsigned
+efrm_vi_shut_down_flag(enum efhw_q_type queue);
 
 extern int
 efrm_vi_q_init_common(struct efrm_vi *, enum efhw_q_type, int n_q_entries,

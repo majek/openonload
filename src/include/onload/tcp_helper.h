@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -111,8 +111,9 @@ typedef struct tcp_helper_resource_s {
 #define OO_TRUSTED_LOCK_CLOSE_ENDPOINT    0x8
 #define OO_TRUSTED_LOCK_OS_READY          0x10
 #define OO_TRUSTED_LOCK_NEED_PRIME        0x20
-#define OO_TRUSTED_LOCK_DONT_BLOCK_SHARED 0x40
+/* 0x40 is available for reuse; was OO_TRUSTED_LOCK_DONT_BLOCK_SHARED. */
 #define OO_TRUSTED_LOCK_SWF_UPDATE        0x80
+#define OO_TRUSTED_LOCK_PURGE_TXQS        0x100
   volatile unsigned      trusted_lock;
 
   /*! Link for global list of stacks. */
@@ -147,6 +148,7 @@ typedef struct tcp_helper_resource_s {
   char wq_name[11 + CI_CFG_STACK_NAME_LEN];
   struct workqueue_struct *wq;
   struct work_struct non_atomic_work;
+  struct delayed_work purge_txq_work;
   /* List of endpoints requiring work in non-atomic context. */
   ci_sllist     non_atomic_list;
 
@@ -206,14 +208,15 @@ typedef struct tcp_helper_resource_s {
   /* We've deferred locks to non-atomic handler.  Must poll and prime. */
 # define OO_THR_AFLAG_POLL_AND_PRIME      0x2
   /* We've deferred locks to non-atomic handler.  Must unlock only. */
-# define OO_THR_AFLAG_UNLOCK              0x4
+# define OO_THR_AFLAG_UNLOCK_TRUSTED      0x4
   /* Have we deferred something while holding the trusted lock? */
 # define OO_THR_AFLAG_DEFERRED_TRUSTED    0x7
-  /* We've deferred shared lock to non-atomic handler.  Must allocate
-   * a packet set */
-#define OO_THR_AFLAG_NEED_PKT_SET         0x8
-  /* Have we deferred something while holding the shared lock? */
-# define OO_THR_AFLAG_DEFERRED_UNTRUSTED  0x8
+
+  /* Defer the shared lock (without the trusted lock!) to the work queue */
+# define OO_THR_AFLAG_UNLOCK_UNTRUSTED    0x8
+
+  /* Don't block on the shared lock when resetting a stack. */
+# define OO_THR_AFLAG_DONT_BLOCK_SHARED   0x10
 
   /*! Spinlock.  Protects:
    *    - ep_tobe_closed

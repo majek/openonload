@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,7 +76,7 @@ extern void tcp_helper_suspend_interface(ci_netif* ni, int intf_i);
 
 extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
 
-extern void tcp_helper_purge_txq(ci_netif* ni, int intf_i);
+extern void tcp_helper_flush_resets(ci_netif* ni);
 
 extern void tcp_helper_shutdown_vi(ci_netif* ni, int hwport);
 
@@ -98,7 +98,7 @@ extern void tcp_helper_rm_dump(int fd_type, oo_sp sock_id,
                      (priv)->thr, line_prefix)
 
 extern unsigned efab_tcp_helper_netif_lock_callback(eplock_helper_t*,
-                                                    ci_uint32 lock_val,
+                                                    ci_uint64 lock_val,
                                                     int in_dl_context);
 
 extern int efab_ioctl_get_ep(ci_private_t*, oo_sp,
@@ -297,8 +297,13 @@ extern int tcp_helper_cluster_alloc_thr(const char* name,
  *--------------------------------------------------------------------*/
 
 extern void
-efab_tcp_helper_k_ref_count_dec(tcp_helper_resource_t* trs,
+__efab_tcp_helper_k_ref_count_dec(tcp_helper_resource_t* trs,
                                 int can_destroy_now);
+/* It is usually unsafe to destroy the stack from a random context */
+ci_inline void efab_tcp_helper_k_ref_count_dec(tcp_helper_resource_t* trs)
+{
+  __efab_tcp_helper_k_ref_count_dec(trs, 0);
+}
 
 /*--------------------------------------------------------------------
  *!
@@ -340,7 +345,7 @@ efab_tcp_helper_netif_try_lock(tcp_helper_resource_t*, int in_dl_context);
 extern int
 efab_tcp_helper_netif_lock_or_set_flags(tcp_helper_resource_t* trs,
                                         unsigned trusted_flags,
-                                        unsigned untrusted_flags,
+                                        ci_uint64 untrusted_flags,
                                         int in_dl_context);
 
 
@@ -366,7 +371,7 @@ ci_inline void
 iterate_netifs_unlocked_dropref(ci_netif * netif)
 {
   ci_assert(netif);
-  efab_tcp_helper_k_ref_count_dec(netif2tcp_helper_resource(netif), 1); 
+  efab_tcp_helper_k_ref_count_dec(netif2tcp_helper_resource(netif)); 
 }
 
 
@@ -374,9 +379,14 @@ ci_inline void
 tcp_helper_request_wakeup_nic(tcp_helper_resource_t* trs, int intf_i) {
   /* This assertion is good, but fails on linux so currently disabled */
   /* ci_assert(ci_bit_test(&trs->netif.state->evq_primed, nic_i)); */
-  unsigned current_i =
-    ef_eventq_current(&trs->netif.nic_hw[intf_i].vi) / sizeof(efhw_event_t);
-  efrm_eventq_request_wakeup(trs->nic[intf_i].thn_vi_rs, current_i);
+
+  /* If we're not allowed to poll the stack in the kernel, it's neither useful
+   * nor safe to prime the interrupt. */
+  if( ci_netif_may_poll_in_kernel(&trs->netif, intf_i) ) {
+    unsigned current_i =
+      ef_eventq_current(&trs->netif.nic_hw[intf_i].vi) / sizeof(efhw_event_t);
+    efrm_eventq_request_wakeup(trs->nic[intf_i].thn_vi_rs, current_i);
+  }
 }
 
 

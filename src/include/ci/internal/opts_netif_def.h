@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -499,6 +499,16 @@ CI_CFG_OPT("EF_UDP_SEND_NONBLOCK_NO_PACKETS_MODE",
            "some applications (that assume that a socket that is writeable is "
            "able to send without error) to malfunction.",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_RCVBUF_MODE", tcp_rcvbuf_mode, ci_uint32,
+"This option controls how the RCVBUF is set for TCP "
+"Mode 0 (default) gives fixed size RCVBUF."
+"Mode 1 will enable automatic tuning of RCVBUF using Dynamic Right Sizing."
+"       If SO_RCVBUF is explictly set by the application this value will be"
+"       used. EF_TCP_SOCKBUF_MAX_FRACTION can be used to control the maximum"
+"       size of the buffer for an individual socket."
+"The effect of EF_TCP_RCVBUF_STRICT is independent of this setting.",
+	   1, , 0, 0, 1, yesno)
 
 /**********************************************************************
  * Narrow fields (few bits).

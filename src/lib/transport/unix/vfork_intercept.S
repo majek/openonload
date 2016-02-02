@@ -146,7 +146,7 @@ onload_vfork:
 	vfork = onload_vfork
 
 #endif	 /* __1386__ or __x86_64__ */
-#if defined(__PPC64__)
+#if defined(__PPC64__) && (!defined(_CALL_ELF) || _CALL_ELF < 2)
 
    .text
    .align   3
@@ -215,6 +215,67 @@ onload_vfork: .quad .onload_vfork, .TOC.@tocbase, 0;
 vfork = onload_vfork
 .globl .vfork
 .vfork = .onload_vfork
+
+
+#elif defined(__PPC64__) && defined(_CALL_ELF) && _CALL_ELF >= 2
+        /* assume for now that this is called as a normal function - create
+         * GEP and LEP entry points .  Also, add symbol table entry for LEP,
+         * and mark it as ABI ELFv2 mkg
+         */
+        .abiversion 2
+        .text
+        .align 3
+        .globl onload_vfork
+        .type onload_vfork,@function
+
+onload_vfork:
+        addis    %r2, %r12, (.TOC. - onload_vfork)@ha
+        addi  %r2, %r2, (.TOC. - onload_vfork)@l
+.localentry onload_vfork,. - onload_vfork 
+        mflr %r0
+        ld %r6, onload___vfork_rtaddr@got(%r2)
+        std %r0, 0(%r6)
+        ld %r6, onload___vfork_r31@got(%r2)
+        std %r31, 0(%r6)
+        bl .onload___vfork_is_vfork 
+        nop
+        cmpdi %r3,0
+        beq .Lfork
+        ld    %r6,ci_sys_vfork@got(%r2)
+        ld    %r6,0(%r6)
+        ld    %r0,0(%r6)
+        mr   %r31,%r2
+        mtctr %r0
+        ld    %r2,8(%r6)
+        bctrl
+        mr    %r2,%r31
+        mr    %r31,%r3
+        cmpdi %r3,0
+        beq .Linchild
+        bl .citp_netif_parent_vfork_hook
+        nop
+        mr %r3,%r31
+        b .Lret
+.Linchild:
+        bl .citp_netif_child_vfork_hook
+        nop
+        mr %r3,%r31
+        b .Lret
+.Lfork:
+        bl .onload___vfork_as_fork
+        nop
+.Lret:
+        ld %r6, onload___vfork_r31@got(%r2)
+        ld %r31, 0(%r6)
+        ld %r6, onload___vfork_rtaddr@got(%r2)
+        ld %r0, 0(%r6)
+        mtlr %r0
+        blr
+
+.globl vfork
+vfork = onload_vfork
+
+
 #elif defined(__PPC__)
     .text
     .align 3

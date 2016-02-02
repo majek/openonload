@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -18,6 +18,7 @@
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_resource_private.h>
 #include <ci/efrm/vf_resource_private.h>
+#include <ci/efhw/nic.h>
 #include <etherfabric/ef_vi.h>
 #include "efrm_internal.h"
 
@@ -37,7 +38,8 @@ static void common_vi_get_mappings(struct efrm_vi* vi_rs, struct efhw_nic* nic,
   vm->rxq_size = vi_rs->q[EFHW_RXQ].capacity;
   if( vm->rxq_size != 0 )
     vm->rxq_descriptors = efhw_iopages_ptr(&vi_rs->q[EFHW_RXQ].pages);
-  vm->rx_ts_correction = vi_rs->rx_ts_correction;
+  vm->rx_ts_correction = nic->rx_ts_correction;
+  vm->tx_ts_correction = nic->tx_ts_correction;
 
   vm->txq_size = vi_rs->q[EFHW_TXQ].capacity;
   if( vm->txq_size != 0 )
@@ -91,14 +93,23 @@ struct efrm_pd *efrm_vi_get_pd(struct efrm_vi *virs)
 EXPORT_SYMBOL(efrm_vi_get_pd);
 
 
+/* Returns the struct pci_dev for the VI, taking out a reference to it.
+ * Callers should call pci_dev_put() on the returned pointer to release that
+ * reference when they're finished. */
 struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *virs)
 {
+	struct pci_dev* dev;
+
 #ifdef CONFIG_SFC_RESOURCE_VF
-	if (virs->allocation.vf)
-		return virs->allocation.vf->pci_dev;
+	if (virs->allocation.vf) {
+		dev = virs->allocation.vf->pci_dev;
+		pci_dev_get(dev);
+	}
 	else
 #endif
-		return virs->rs.rs_client->nic->pci_dev;
+		dev = efhw_nic_get_pci_dev(virs->rs.rs_client->nic);
+
+	return dev;
 }
 EXPORT_SYMBOL(efrm_vi_get_pci_dev);
 

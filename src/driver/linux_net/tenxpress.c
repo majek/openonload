@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -197,7 +197,8 @@ static int tenxpress_ber_read(struct seq_file *file, void *data)
 	ber = (reg & MDIO_PCS_10GBRT_STAT2_BER) >>
 		__ffs(MDIO_PCS_10GBRT_STAT2_BER);
 
-	return seq_printf(file, "%d\n", ber);
+	seq_printf(file, "%d\n", ber);
+	return 0;
 }
 
 
@@ -215,10 +216,11 @@ static int tenxpress_snr_read(struct seq_file *file, void *data)
 	reg = efx_mdio_read(efx, MDIO_MMD_PMAPMD, MDIO_PMA_10GBT_SNR + lane);
 	snr = reg - MDIO_PMA_10GBT_SNR_BIAS;
 	if (abs(snr) <= MDIO_PMA_10GBT_SNR_MAX)
-		return seq_printf(file, "%d.%d\n",
-				  snr / 10, (int)abs(snr % 10));
+		seq_printf(file, "%d.%d\n", snr / 10, (int)abs(snr % 10));
 	else
-		return seq_puts(file, "Not available\n");
+		seq_puts(file, "Not available\n");
+
+	return 0;
 }
 
 

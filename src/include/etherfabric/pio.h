@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -75,7 +75,7 @@ typedef struct ef_pio {
 struct ef_pd;
 struct ef_vi;
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__PPC__)
 /*! \brief Allocate a Programmed I/O region
 **
 ** \param pio      Memory to use for the allocated Programmed I/O region.

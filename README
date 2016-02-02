@@ -27,7 +27,7 @@ Supported platforms
  including the following network adapters:
 
    SFN7142Q
-   SFN7122F, SFN7322F
+   SFN7122F, SFN7322F, SFN7124F
    SFN5122F, SFN5322F
    SFN6122F, SFN6322F
    SFN5812H, SFN5814H
@@ -112,6 +112,6 @@ Any questions?
 
 
 ==========
- version: openonload-201509
-revision: 96c184ec94ea openonload-201509
-    date: Tue  6 Oct 12:30:14 BST 2015
+ version: openonload-201509-u1
+revision: c191d197704a (ool1509) openonload-201509-u1
+    date: Thu 28 Jan 17:12:57 GMT 2016

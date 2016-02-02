@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,6 +55,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <assert.h>
 #include <errno.h>
 #include <string.h>
@@ -86,7 +87,7 @@
       fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
       fprintf(stderr, "ERROR: rc=%d errno=%d (%s)\n",           \
               __rc, errno, strerror(errno));                    \
-      exit(1);                                                  \
+      abort();                                                  \
     }                                                           \
   } while( 0 )
 
@@ -96,7 +97,7 @@
     if( ! (x) ) {                                               \
       fprintf(stderr, "ERROR: TEST(%s) failed\n", #x);          \
       fprintf(stderr, "ERROR: at %s:%d\n", __FILE__, __LINE__); \
-      exit(1);                                                  \
+      abort();                                                  \
     }                                                           \
   } while( 0 )
 
@@ -114,10 +115,40 @@
 #define ROUND_UP(p, align)   (((p)+(align)-1u) & ~((align)-1u))
 
 
+#ifndef SO_TIMESTAMPING
+# define SO_TIMESTAMPING                 37
+#endif
+#ifndef SOF_TIMESTAMPING_TX_HARDWARE
+# define SOF_TIMESTAMPING_TX_HARDWARE    (1<<0)
+# define SOF_TIMESTAMPING_TX_SOFTWARE    (1<<1)
+# define SOF_TIMESTAMPING_RX_HARDWARE    (1<<2)
+# define SOF_TIMESTAMPING_RX_SOFTWARE    (1<<3)
+# define SOF_TIMESTAMPING_SOFTWARE       (1<<4)
+# define SOF_TIMESTAMPING_SYS_HARDWARE   (1<<5)
+# define SOF_TIMESTAMPING_RAW_HARDWARE   (1<<6)
+#endif
+
+
 #ifdef __EFAB_VI_H__
 extern int
 filter_parse(ef_filter_spec* fs, const char* s_in);
 #endif
+
+
+extern void sock_put_int(int sock, int i);
+
+extern int sock_get_int(int sock);
+
+extern int sock_get_ifindex(int sock, int* ifindex_out);
+
+extern int getaddrinfo_storage(int family,
+                               const char* host, const char* port,
+                               struct sockaddr_storage* sas);
+
+extern int mk_socket(int family, int socktype,
+                     int op(int sockfd, const struct sockaddr *addr,
+                            socklen_t addrlen),
+                     const char* host, const char* port);
 
 
 #endif  /* __UTILS_H__ */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -103,10 +103,7 @@ struct efhw_buffer_table_block {
 		} falcon;
 	} btb_hw;
 
-	/* Bit masks of free entries.  Free entries are set to 1. */
-#ifndef NDEBUG
-	uint32_t btb_clear_mask;
-#endif
+	/* Bit mask of free entries.  Free entries are set to 1. */
 	uint32_t btb_free_mask;
 };
 
@@ -202,7 +199,6 @@ struct efhw_func_ops {
 				    int wakeup_evq,
 				    int enable_time_sync_events,
 				    int enable_cut_through,
-				    int *rx_ts_correction_out,
 				    int* flags_out);
 
 	/*! Disable the given event queue (and any associated timer) */
@@ -377,6 +373,7 @@ struct efhw_nic {
 	int index;
 	int ifindex;		/*!< OS level nic index */
 	struct pci_dev *pci_dev;	/*!< pci descriptor */
+	spinlock_t pci_dev_lock;        /*!< Protects access to pci_dev. */
 
 	struct efhw_device_type devtype;
 
@@ -459,6 +456,10 @@ struct efhw_nic {
 
 	/* Limit on size of rx buffer to use */
 	unsigned rx_usr_buf_size;
+
+	/* Corrections for TX and RX timestamps. */
+	int rx_ts_correction;
+	int tx_ts_correction;
 
 	/* Base offset of queues used when dealing with absolute numbers, 
 	 * e.g. wakeup events.  Can change when NIC is reset.

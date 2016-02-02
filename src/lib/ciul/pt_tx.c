@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,6 +48,7 @@
 #include <etherfabric/pio.h>
 #include "ef_vi_internal.h"
 #include "logging.h"
+#include "memcpy_to_io.h"
 
 
 int ef_vi_transmit_init(ef_vi* vi, ef_addr base, int len, ef_request_id dma_id)
@@ -95,31 +96,21 @@ int ef_pio_memcpy(ef_vi* vi, const void* base, int offset, int len)
    * 64-bits in size.
    */
   ef_pio* pio = vi->linked_pio;
-  uint64_t *src, *dst;
 
   EF_VI_ASSERT(offset + len <= pio->pio_len);
 
   memcpy(pio->pio_buffer + offset, base, len);
 
-  len += CI_OFFSET(offset, 8);
-  offset = CI_ROUND_DOWN(offset, 8);
-  len = CI_ROUND_UP(len, 8);
+  len += CI_OFFSET(offset, MEMCPY_TO_PIO_ALIGN);
+  offset = CI_ROUND_DOWN(offset, MEMCPY_TO_PIO_ALIGN);
+  len = CI_ROUND_UP(len, MEMCPY_TO_PIO_ALIGN);
 
   /* To ensure that the resulting TLPs are aligned and have all their
    * byte-enable bits set, we must ensure that the data in the WC buffer is
-   * always contiguous. See bug49902. */
-  wmb_wc();
-
-  /* This loop is doing the following, but guarantees word access:
-   * memcpy(pio->pio_io + offset, pio->pio_buffer + offset, len); 
+   * always contiguous. See bug49906.
    */
-  dst=(uint64_t*)(pio->pio_io + offset);
-  src=(uint64_t*)(pio->pio_buffer + offset);
-  for( ; src < (uint64_t*)(pio->pio_buffer + offset + len); ++src,++dst ) {
-    *dst = *src;
-    ci_compiler_barrier();
-  }
-  
+  wmb_wc();
+  memcpy_to_pio_aligned(pio->pio_io + offset, pio->pio_buffer + offset, len);
   return 0;
 }
 

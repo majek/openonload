@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,11 +77,11 @@ static int efrm_rss_context_alloc(struct efrm_pd *pd,
 	/* Copied from efx_rss_fixed_key from linux_net/efx.c.
 	 * FIXME: maintain consistency with net driver. */
 	static const uint8_t rx_hash_key[RSS_KEY_LEN] = {
-		0xa4, 0x86, 0xfe, 0x31, 0x11, 0xb3, 0xf1, 0xca,
-		0x1f, 0xe8, 0x77, 0xb3, 0xbf, 0x71, 0x16, 0xa0,
-		0xf2, 0x07, 0xec, 0xe1, 0x54, 0xa4, 0x25, 0xa0,
-		0x7a, 0xf8, 0x16, 0x8c, 0x57, 0x12, 0xb7, 0xfd,
-		0xc5, 0x77, 0xb2, 0x5e, 0x5d, 0xe3, 0xc5, 0xbe,
+		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
+		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 	};
 	uint8_t rx_indir_table[RSS_TABLE_LEN];
 
@@ -105,6 +105,14 @@ static int efrm_rss_context_alloc(struct efrm_pd *pd,
 
 		shared = 1;
 	}
+
+	/* TODO: I've disabled use of shared RSS contexts because the
+	 * firmware generates random hash keys by default.  This may give
+	 * poor spreading, and won't be symmetric.  Once firmware has been
+	 * fixed for a while we can re-enable shared contexts (or provide
+	 * an option).
+	 */
+	shared = 0;
 
 	rc = efhw_nic_rss_context_alloc(client->nic, efrm_pd_get_vport_id(pd),
 					num_qs, shared, &rss_context);
@@ -194,8 +202,8 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 	EFRM_ASSERT(rss_modes & (EFRM_RSS_MODE_DEFAULT|EFRM_RSS_MODE_SRC));
 	/* mode default and src are exclusive */
 	EFRM_ASSERT(~rss_modes & (EFRM_RSS_MODE_DEFAULT|EFRM_RSS_MODE_SRC));
-	if (n_vis > 64) {
-		EFRM_ERR("%s: ERROR: set size=%d too big (max=64)",
+	if (n_vis < 1 || n_vis > 64) {
+		EFRM_ERR("%s: ERROR: set size=%d out of range (max=64)",
 			 __FUNCTION__, n_vis);
 		return -EINVAL;
 	}

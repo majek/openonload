@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -120,29 +120,39 @@ citp_init_trampoline(ci_fd_t fd)
   int rc;
   int i;
   ci_tramp_reg_args_t args;
-#if defined(__PPC64__)
-  /* intermediate buffer is needed as not to break strict aliasing rules */
-  /* see bug31834 */
+#if defined(__PPC64__) && (!defined(_CALL_ELF) || _CALL_ELF < 2)
+  /* intermediate buffer is needed as not to break strict aliasing rules
+   * see bug31834.  Note that ELFv2 (mostly used on LE systems) uses
+   * "normal" fn ptrs.
+   */
   int (*handler_ptr)(int) = ci_trampoline_handler_ppc;
   uint32_t *ptrbuf[sizeof(handler_ptr)];
 #endif
 
   CI_USER_PTR_SET (args.trampoline_exclude, ci_tcp_helper_close_no_trampoline_retaddr);
   CI_USER_PTR_SET (args.trampoline_ul_fail, ci_trampoline_ul_fail);
-#if defined(__PPC64__)      
-  /* PPC64 - function pointers are in fact transition vectors */
+#if defined(__PPC64__) && (!defined(_CALL_ELF) || _CALL_ELF < 2)
+  /* PPC64 ELFv1 - function pointers are in fact transition vectors */
   memcpy(ptrbuf, handler_ptr, sizeof(ptrbuf));
   CI_USER_PTR_SET (args.trampoline_entry, ptrbuf[0]);
   CI_USER_PTR_SET (args.trampoline_toc,   ptrbuf[1]);
   CI_USER_PTR_SET (args.trampoline_user_fixup, &onload_trampoline_user_fixup_64 );
 #elif defined(__PPC__)
-  /* PPC32 - function pointers are just pointers, r2 points to ELF GOT */
+  /* PPC32 and PPC64 ELFv2: function pointers are just pointers, r2 points
+   * to ELF GOT.
+   */
   {
       uint32_t r2;
       asm("mr %0,2" : "=r"(r2));
       CI_USER_PTR_SET (args.trampoline_entry, &ci_trampoline_handler_ppc);
       CI_USER_PTR_SET (args.trampoline_toc,   r2);
-      CI_USER_PTR_SET (args.trampoline_user_fixup, &onload_trampoline_user_fixup_32 );
+#ifdef __PPC64__
+      CI_USER_PTR_SET (args.trampoline_user_fixup,
+                       &onload_trampoline_user_fixup_64 );
+#else
+      CI_USER_PTR_SET (args.trampoline_user_fixup,
+                       &onload_trampoline_user_fixup_32 );
+#endif
   }
 #else
   /* x86, x86_64, ia64 - no toc or user fixup, function pointers mean what they say */

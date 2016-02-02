@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -129,9 +129,11 @@ int __ci_tcp_shutdown(ci_netif* netif, ci_tcp_state* ts, int how)
   ci_assert(ts);
   ci_assert(ci_netif_is_locked(netif));
 
+#if CI_CFG_PIO
   /* Free up any associated templated sends */
   if( how == SHUT_WR || how == SHUT_RDWR )
     ci_tcp_tmpl_free_all(netif, ts);
+#endif
 
   /* "Not connected" here means a FIN has gone both ways.  ie. TIME-WAIT,
   ** CLOSED, CLOSING, LAST-ACK.  Also LISTEN and SYN-SENT of course.
@@ -794,6 +796,31 @@ void __ci_tcp_listen_shutdown(ci_netif* netif, ci_tcp_socket_listen* tls,
 }
 
 
+void ci_tcp_all_fds_gone_common(ci_netif* ni, ci_tcp_state* ts)
+{
+  /* All process references to this socket have gone.  So we should
+   * shutdown() if necessary, and arrange for all resources to eventually
+   * get cleaned up.
+   *
+   * ci_netif_poll() is called just
+   * before calling this function, so we're up-to-date.
+   */
+  ci_assert(ci_netif_is_locked(ni));
+  ci_assert(ts->s.b.state & CI_TCP_STATE_TCP);
+
+  /* If we are in a state where we time out orphaned connections: */
+  if( (ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN) &&
+      !(ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
+    ci_netif_fin_timeout_enter(ni, ts);
+
+  /* Orphaned sockets do not need keepalive */
+  if( ts->s.s_flags & CI_SOCK_FLAG_KALIVE ) {
+    ts->s.s_flags &=~ CI_SOCK_FLAG_KALIVE;
+    ci_tcp_kalive_check_and_clear(ni, ts);
+    ts->ka_probes = 0;
+  }
+}
+
 #ifdef __KERNEL__
 void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls,
                                 int do_free)
@@ -817,26 +844,7 @@ void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls,
 
 void ci_tcp_all_fds_gone(ci_netif* ni, ci_tcp_state* ts, int do_free)
 {
-  /* All process references to this socket have gone.  So we should
-   * shutdown() if necessary, and arrange for all resources to eventually
-   * get cleaned up.
-   *
-   * This is called by the driver only.  ci_netif_poll() is called just
-   * before calling this function, so we're up-to-date.
-   */
-  ci_assert(ci_netif_is_locked(ni));
-  ci_assert(ts->s.b.state & CI_TCP_STATE_TCP);
-
-  /* If we are in a state where we time out orphaned connections: */
-  if( (ts->s.b.state & CI_TCP_STATE_TIMEOUT_ORPHAN) &&
-      !(ts->s.b.sb_flags & CI_SB_FLAG_MOVED) )
-    ci_netif_fin_timeout_enter(ni, ts);
-
-  /* Orphaned sockets do not need keepalive */
-  if( ts->s.s_flags & CI_SOCK_FLAG_KALIVE ) {
-    ts->s.s_flags &=~ CI_SOCK_FLAG_KALIVE;
-    ci_tcp_kalive_check_and_clear(ni, ts);
-  }
+  ci_tcp_all_fds_gone_common(ni, ts);
 
   /* This frees [ts] if appropriate. */
   if( do_free )

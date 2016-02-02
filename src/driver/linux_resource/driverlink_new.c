@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -303,6 +303,10 @@ static void efrm_dl_remove(struct efx_dl_device *efrm_dev)
 	EFRM_TRACE("%s called", __func__);
 	if (nic) {
 		struct linux_efhw_nic *lnic = linux_efhw_nic(nic);
+
+                /* flush all outstanding dma queues */
+                efrm_nic_flush_all_queues(nic, 0);
+
 		lnic->dl_device = NULL;
                 lnic->efrm_nic.dl_dev_info = NULL;
 		/* Absent hardware is treated as a protracted reset. */
@@ -365,6 +369,10 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 #endif
 	}
 #endif
+
+	/* Remove record on que initialization from before a reset
+	 * No hardware operation will be performed */
+	efrm_nic_flush_all_queues(nic, 1);
 
         if( ok )
           nic->resetting = 0;

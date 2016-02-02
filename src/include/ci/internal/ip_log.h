@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -339,14 +339,17 @@ extern unsigned ci_tp_log CI_HV;
   ((v) & CI_EPLOCK_NETIF_SOCKET_LIST     ? "DEFERRED ":"")
 
 
-#define CI_NETIF_ERRORS_FMT       "%s%s%s%s%s"
+#define CI_NETIF_ERRORS_FMT       "%s%s%s%s"
 #define CI_NETIF_ERRORS_PRI_ARG(errors)                         \
   ((errors) & CI_NETIF_ERROR_POST_POLL_LIST ? "PPL ":""),       \
   ((errors) & CI_NETIF_ERROR_LOOP_PKTS_LIST ? "LOOP ":""),      \
   ((errors) & CI_NETIF_ERROR_ASSERT         ? "ASS ":""),       \
-  ((errors) & CI_NETIF_ERROR_REMAP          ? "REMAP ":""),     \
   ((errors) & CI_NETIF_ERROR_SYNRECV_TABLE  ? "SYNRECV ":"")
-  
+
+
+#define CI_NETIF_NIC_ERRORS_FMT       "%s"
+#define CI_NETIF_NIC_ERRORS_PRI_ARG(errors)                         \
+  ((errors) & CI_NETIF_NIC_ERROR_REMAP      ? "REMAP ":"")
 
 
 #define OO_CMSG_FLAGS_FMT  "%s%s%s%s%s%s%s%s"

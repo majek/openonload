@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -45,6 +45,13 @@
 
 #define AOE_DEFAULT_MTU		1540
 
+/*The macros are temporary till mcdi yml is approved for build register to generate proper mcdi.h file*/
+#define SFP0_3_SPEED_MASK	0x00010000
+#define SFP4_7_SPEED_MASK	0x00020000
+#define EXT_PORT_BITMASK	0x0000FF00
+#define EXT_PORT_BITMAP_WIDTH	8
+#define PORT_NUM_FACTOR	        4
+
 #define NDEBUG 1
 
 #define ECHECK(x)       ((x == NULL) ? -1 : x->idx)
@@ -60,7 +67,7 @@
 	printk(KERN_ERR "%s-(%d): " fmt, __func__, ECHECK(entry), ## args)
 #endif
 
-#define AOE_DRIVER_VERSION	"4.7.0.1008"
+#define AOE_DRIVER_VERSION	"4.7.0.1033"
 
 /* Number of Connections that are allowed to be over the 10G
  * inteface */
@@ -313,6 +320,7 @@ struct aoe_link_params {
 struct aoe_port_info {
 	struct list_head list;
 	int ifindex;
+	uint32_t ext_port_num;
 	struct efx_dl_device *dl_dev;
 	struct aoe_device *aoe_parent;
 	struct kobject port_kobj;
@@ -392,6 +400,9 @@ struct aoe_work_struct_s {
 struct aoe_device {
 	uint32_t board;
 	uint32_t board_type;
+	uint32_t ext_port_bitmap;
+	uint32_t sfp0_3_speed;
+	uint32_t sfp4_7_speed;
 	struct pci_dev *pci_dev;
 	struct device *dev;
 	struct aoe_mmap_data *fpga_map;
@@ -437,6 +448,7 @@ struct aoe_device {
 	int (*bad_sodimm)(struct aoe_device *, char *);
 	int (*has_byteblaster)(struct aoe_device *, char *);
 	int (*fc_running)(struct aoe_device *, char *);
+	int (*aoe_state)(struct aoe_device *, char *);
 	int (*boot_result)(struct aoe_device *, char *);
 };
 
@@ -605,8 +617,8 @@ int aoe_mcdi_mac_stats(struct aoe_device *dev, dma_addr_t dma_addr,
 int aoe_mcdi_update_stats(__le64 *dma_addr, struct aoe_mac_stats *stats);
 int aoe_mcdi_set_siena_override(struct aoe_device *dev, bool state);
 int aoe_mcdi_get_board_type_info(struct aoe_device *dev);
-
 int aoe_mcdi_link_status_split(struct aoe_device *dev, uint32_t mode);
+int aoe_mcdi_map_ext_port(struct aoe_device *dev, struct aoe_port_info *port);
 
 /* Event support */
 int aoe_handle_mcdi_event(struct aoe_port_info *port, void *event);
@@ -643,6 +655,7 @@ struct aoe_dev_info {
 	uint32_t fpga_image;
 	uint32_t fc_version[2];
 	uint32_t board_rev;
+	uint32_t aoe_state;
 	uint32_t fpga_build_revision;
 	bool     fpga_build_type;
 	uint32_t fpga_build_changeset[2];
@@ -655,8 +668,9 @@ struct aoe_dev_info {
 	bool	 has_byteblaster;
 	bool	 fc_running;
 	uint32_t boot_result;
+	uint32_t fpga_build_parameter;
 	/* Other information from the mcdi command can be added
- 	 * here as and when it is needed */
+	* here as and when it is needed */
 };
 
 /* state checks */

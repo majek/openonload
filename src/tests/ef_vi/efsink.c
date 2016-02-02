@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -362,7 +362,7 @@ static void* monitor_fn(void* arg)
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
-  fprintf(stderr, "  efsink <options> <interface> <filter-spec>...\n");
+  fprintf(stderr, "  efsink <options> <interface> [<filter-spec>...]\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "filter-spec:\n");
   fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:"
@@ -425,7 +425,7 @@ int main(int argc, char* argv[])
 
   argc -= optind;
   argv += optind;
-  if( argc < 2 )
+  if( argc < 1 )
     usage();
   interface = argv[0];
   ++argv; --argc;

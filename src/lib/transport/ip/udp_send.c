@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -478,11 +478,13 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
       ci_assert( ! (us->udpflags & CI_UDPF_FILTERED) );
 
 #ifdef ONLOAD_OFE
-      if( ni->ofe != NULL )
+      if( ni->ofe_channel != NULL )
         us->s.ofe_code_start = ofe_socktbl_find(
                         ni->ofe, OFE_SOCKTYPE_UDP,
                         udp_laddr_be32(us), udp_raddr_be32(us),
                         udp_lport_be16(us), udp_rport_be16(us));
+      else
+        us->s.ofe_code_start = OFE_ADDR_NULL;
 #endif
 
       rc = ci_tcp_ep_set_filters(ni, S_SP(us), us->s.cp.so_bindtodevice,

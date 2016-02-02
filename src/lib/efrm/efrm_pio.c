@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -299,17 +299,16 @@ fail:
 
 int efrm_pio_map_kernel(struct efhw_nic *nic, struct efrm_vi *vi, void **io)
 {
+	int bar_off = ef10_tx_dma_page_base(vi->rs.rs_instance) + 4096;
+	int bar_page_off = bar_off & PAGE_MASK;
+
 #ifdef CONFIG_FORCE_PIO_NON_CACHED
 	EFRM_WARN("%s: mapping PIO in non cached mode", __FUNCTION__);
 	*io = ioremap_nocache(
-		nic->ctr_ap_dma_addr +
-		ef10_tx_dma_page_base(vi->rs.rs_instance) +
-		PAGE_SIZE, PAGE_SIZE);
+		nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
 #elif defined EFRM_HAVE_IOREMAP_WC
 	*io = ioremap_wc(
-		nic->ctr_ap_dma_addr +
-		ef10_tx_dma_page_base(vi->rs.rs_instance) +
-		PAGE_SIZE, PAGE_SIZE);
+		nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
 #elif defined HAS_COMPAT_PAT_WC
 	if( !compat_pat_wc_is_initialized() ) {
 		EFRM_ERR("%s: write combining compatibility module not "
@@ -318,15 +317,14 @@ int efrm_pio_map_kernel(struct efhw_nic *nic, struct efrm_vi *vi, void **io)
 		return -EINVAL;
 	}
 	*io = compat_pat_wc_ioremap_wc(
-		nic->ctr_ap_dma_addr +
-		ef10_tx_dma_page_base(vi->rs.rs_instance) +
-		PAGE_SIZE, PAGE_SIZE);
+		nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
 #else
 	EFRM_ERR("%s: This kernel does not seem to support write"
 		 " combining.  Consider disabling it or not using PIO.",
 		 __FUNCTION__);
 	return -EINVAL;
 #endif
+	*io = (char*) *io + (bar_off & (PAGE_SIZE - 1u));
 	return 0;
 }
 EXPORT_SYMBOL(efrm_pio_map_kernel);
@@ -334,7 +332,7 @@ EXPORT_SYMBOL(efrm_pio_map_kernel);
 
 void efrm_pio_unmap_kernel(struct efrm_vi *vi, void *io)
 {
-	iounmap(io);
+	iounmap((void*) ((unsigned long) io & PAGE_MASK));
 }
 EXPORT_SYMBOL(efrm_pio_unmap_kernel);
 

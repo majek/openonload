@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -333,53 +333,29 @@ typedef union ci_oword {
 #define CI_INSERT_FIELDS32(...)                         \
   cpu_to_le32(CI_INSERT_FIELDS_NATIVE(__VA_ARGS__))
 
-/* This is all too hackish, but it provably leads to latency reduction
- * on PPC. The point is that PPC byteswapping load/store is in principle
- * slower than a rotate-based implementation that works totally on registers.
- * But if byteswapping store is performed directly into the target memory
- * address, w/o any intermediate steps, it works slightly faster.
- * Unfortunately, GCC neither knows about byteswapping store instructions 
- * nor is able to optimize memory access in cases like:
- *    *x = cpu_to_le32(v)
- * if cpu_to_le32 is implemented using something like
- *       __asm__ __volatile__("stwbrx %1,0,%2" : "=m" (*addr) :
- *                                    "r" (data), "r" (addr))
- * So to some extent, we're forced to simulate "byte-swapping assignment"
- * with the following macros, in order to obtain any performance gain.
- */
-
-#if !defined(__KERNEL__) && defined(__PPC__)
-#define __CI_WRITE_DWORD(_v, _d) __nosync_writel(_v, _d)
-#define __CI_WRITE_QWORD(_v, _d) __nosync_writed(_v, _d)
-#else
-#define __CI_WRITE_DWORD(_v, _d) (*(_d) = (uint32_t)cpu_to_le32(_v))
-#define __CI_WRITE_QWORD(_v, _d) (*(_d) = cpu_to_le64(_v))
-#endif
-
-
-#define CI_POPULATE_OWORD64(oword, ...) do {                            \
-    __CI_WRITE_QWORD(CI_INSERT_FIELDS_NATIVE(0, 63, __VA_ARGS__), &(oword).u64[0]); \
-    __CI_WRITE_QWORD(CI_INSERT_FIELDS_NATIVE(64, 127, __VA_ARGS__), &(oword).u64[1]); \
+#define CI_POPULATE_OWORD64(oword, ...) do {                    \
+    (oword).u64[0] = CI_INSERT_FIELDS64(0, 63, __VA_ARGS__);    \
+    (oword).u64[1] = CI_INSERT_FIELDS64(64, 127, __VA_ARGS__);  \
   } while (0)
 
-#define CI_POPULATE_QWORD64(qword, ...) do {                            \
-    __CI_WRITE_QWORD(CI_INSERT_FIELDS_NATIVE(0, 63, __VA_ARGS__), &(qword).u64[0]); \
+#define CI_POPULATE_QWORD64(qword, ...) do {                    \
+    (qword).u64[0] = CI_INSERT_FIELDS64(0, 63, __VA_ARGS__);    \
   } while (0)
 
 #define CI_POPULATE_OWORD32(oword, ...) do {                            \
-    __CI_WRITE_DWORD((uint32_t)CI_INSERT_FIELDS_NATIVE(0, 31, __VA_ARGS__), &(oword).u32[0]); \
-    __CI_WRITE_DWORD((uint32_t)CI_INSERT_FIELDS_NATIVE(32, 63, __VA_ARGS__), &(oword).u32[1]); \
-    __CI_WRITE_DWORD((uint32_t)CI_INSERT_FIELDS_NATIVE(64, 95, __VA_ARGS__), &(oword).u32[2]); \
-    __CI_WRITE_DWORD((uint32_t)CI_INSERT_FIELDS_NATIVE(96, 127, __VA_ARGS__), &(oword).u32[3]); \
+    (oword).u32[0] = (uint32_t)CI_INSERT_FIELDS32(0, 31, __VA_ARGS__);  \
+    (oword).u32[1] = (uint32_t)CI_INSERT_FIELDS32(32, 63, __VA_ARGS__); \
+    (oword).u32[2] = (uint32_t)CI_INSERT_FIELDS32(64, 95, __VA_ARGS__); \
+    (oword).u32[3] = (uint32_t)CI_INSERT_FIELDS32(96, 127, __VA_ARGS__); \
   } while (0)
 
 #define CI_POPULATE_QWORD32(qword, ...) do {                            \
-    __CI_WRITE_DWORD((uint32_t)CI_INSERT_FIELDS_NATIVE(0, 31, __VA_ARGS__), &(qword).u32[0]); \
-    __CI_WRITE_DWORD((uint32_t)CI_INSERT_FIELDS_NATIVE(32, 63, __VA_ARGS__), &(qword).u32[1]); \
+    (qword).u32[0] = (uint32_t)CI_INSERT_FIELDS32(0, 31, __VA_ARGS__);  \
+    (qword).u32[1] = (uint32_t)CI_INSERT_FIELDS32(32, 63, __VA_ARGS__); \
   } while (0)
 
-#define CI_POPULATE_DWORD(dword, ...) do {                              \
-    __CI_WRITE_DWORD(CI_INSERT_FIELDS_NATIVE(0, 31, __VA_ARGS__), &(dword).u32[0]); \
+#define CI_POPULATE_DWORD(dword, ...) do {                      \
+    (dword).u32[0] = CI_INSERT_FIELDS32(0, 31, __VA_ARGS__);    \
   } while (0)
 
 #if BITS_PER_LONG == 64

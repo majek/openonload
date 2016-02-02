@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -910,11 +910,13 @@ static int aoe_mcdi_aoe_info(struct aoe_device *dev, struct aoe_dev_info *info)
 
 	/* Fpga version can be obtained from here as well but it does
  	 * not have the major.minor.build format and so is of less use
- 	 */
+         */
 	info->cpld_version = MCDI_DWORD(msg.response_data,
 					AOE_OUT_INFO_CPLD_VERSION);
 	info->board_rev = MCDI_DWORD(msg.response_data,
 				      AOE_OUT_INFO_BOARD_REVISION);
+	info->aoe_state = MCDI_DWORD(msg.response_data,
+				      AOE_OUT_INFO_FPGA_STATE);
 	flags = MCDI_DWORD(msg.response_data,
 				      AOE_OUT_INFO_FLAGS);
 
@@ -997,6 +999,8 @@ static int aoe_mcdi_fpga_info(struct aoe_device *dev, struct aoe_dev_info *info)
 	info->fpga_build_type = COMP_FIELD(outbuf,
 					   FC_OUT_FPGA_BUILD_IDENTIFIER,
 					   FC_OUT_FPGA_BUILD_BUILD_FLAG);
+	info->fpga_build_parameter = MCDI_DWORD(outbuf,
+						   FC_OUT_FPGA_BUILD_PARAMETERS);
 	info->fpga_build_changeset[0] = MCDI_DWORD(outbuf,
 						   FC_OUT_FPGA_BUILD_REVISION_LO);
 	info->fpga_build_changeset[1] = COMP_FIELD(outbuf,
@@ -1647,15 +1651,24 @@ int aoe_mcdi_set_mtu(struct aoe_port_info *port, uint32_t aoe_mtu)
 	msg.resp_len = 0;
 	msg.cmd = MC_CMD_AOE;
 
+	if (!dev->ext_port_bitmap) {
+		ret =  aoe_mcdi_map_ext_port(dev, port);
+		if (ret) {
+			printk(KERN_ERR "sfc_aoe: failed to map external port %d\n",
+				ret);
+			return ret;
+		}
+	}
+
 	MCDI_SET_DWORD(inbuf, AOE_IN_OP_HDR, MC_CMD_AOE_OP_SET_MTU_OFFSET);
-	MCDI_SET_DWORD(inbuf, AOE_IN_SET_MTU_OFFSET_PORT, AOE_PHYS_PORT(port));
+	MCDI_SET_DWORD(inbuf, AOE_IN_SET_MTU_OFFSET_PORT, port->ext_port_num);
 	MCDI_SET_DWORD(inbuf, AOE_IN_SET_MTU_OFFSET_OFFSET, aoe_mtu);
 
 	ret = aoe_dl_send_block_wait(dev, &msg);
 
 	if (ret)
 		printk(KERN_ERR "sfc_aoe: AOE port mtu change on port %d failed %d\n",
-                       AOE_PHYS_PORT(port), ret);
+                       port->ext_port_num, ret);
         else
           port->mtu = aoe_mtu;
 
@@ -1679,9 +1692,18 @@ static int aoe_mcdi_get_link_params(struct aoe_port_info *port)
 	msg.resp_len = MC_CMD_FC_OUT_UHLINK_PHY_LEN;
 	msg.cmd = MC_CMD_FC;
 
+        if (!dev->ext_port_bitmap) {
+                ret =  aoe_mcdi_map_ext_port(dev, port);
+                if (ret) {
+                        printk(KERN_ERR "sfc_aoe: failed to map external port %d\n",
+                                ret);
+                        return ret;
+                }
+        }
+
 	cmd_header = (MC_CMD_FC_OP_UHLINK_PHY << MC_CMD_FC_IN_UHLINK_OP_LBN) |
 		     (MC_CMD_FC_IN_PORT_EXT_OFST << MC_CMD_FC_IN_UHLINK_PORT_TYPE_LBN) |
-		     (AOE_PHYS_PORT(port) << MC_CMD_FC_IN_UHLINK_PORT_IDX_LBN) |
+		     ((port->ext_port_num) << MC_CMD_FC_IN_UHLINK_PORT_IDX_LBN) |
 		     (MC_CMD_FC_OP_UHLINK_CMD_FORMAT_PORT_OVERRIDE << MC_CMD_FC_IN_UHLINK_CMD_FORMAT_LBN);
 
 	MCDI_SET_DWORD(inbuf, FC_IN_OP_HDR, MC_CMD_FC_OP_UHLINK);
@@ -1691,7 +1713,7 @@ static int aoe_mcdi_get_link_params(struct aoe_port_info *port)
 
 	if (ret) {
 		printk(KERN_ERR "sfc_aoe: AOE read transceiver settings on port %d failed %d\n",
-                       AOE_PHYS_PORT(port), ret);
+                      port->ext_port_num, ret);
 		goto failed;
 	}
 
@@ -1997,6 +2019,17 @@ int aoe_mcdi_info_fc_running(struct aoe_device *dev, char *buf)
 	return snprintf(buf, PAGE_SIZE, "%d\n", info.fc_running);
 }
 
+int aoe_mcdi_info_aoe_state(struct aoe_device *dev, char *buf)
+{
+	struct aoe_dev_info info;
+	int ret;
+	ret = aoe_mcdi_aoe_info(dev, &info);
+	if (ret)
+		return ret;
+
+	return snprintf(buf, PAGE_SIZE, "0x%02x\n", info.aoe_state);
+}
+
 int aoe_mcdi_info_boot_result(struct aoe_device *dev, char *buf)
 {
 	struct aoe_dev_info info;
@@ -2190,6 +2223,7 @@ void aoe_mcdi_set_funcs(struct aoe_device *dev)
 	dev->bad_sodimm = aoe_mcdi_info_bad_sodimm;
 	dev->has_byteblaster = aoe_mcdi_info_has_byteblaster;
 	dev->fc_running = aoe_mcdi_info_fc_running;
+	dev->aoe_state = aoe_mcdi_info_aoe_state;
 	dev->boot_result = aoe_mcdi_info_boot_result;
 }
 
@@ -2212,5 +2246,59 @@ void aoe_mcdi_set_port_funcs(struct aoe_port_info *port)
 	port->dc_gain = aoe_mcdi_port_dc_gain;
 	port->rx_eq = aoe_mcdi_port_rx_eq;
 	port->mac_addr = aoe_mcdi_port_mac_addr;
+}
+
+int aoe_mcdi_map_ext_port(struct aoe_device *dev, struct aoe_port_info *port)
+{
+	int ret = -EINVAL;
+	struct aoe_dev_info info = {0};
+	uint32_t port_num = AOE_PHYS_PORT(port);
+
+	switch(dev->board_type) 
+	{
+		case BOARD_TYPE_SFN5122F:
+			/* direct mapping exist for modena*/
+			port->ext_port_num = port_num;
+			ret = 0;
+			break;
+
+		case BOARD_TYPE_SFN7942F:
+			if(!dev->ext_port_bitmap) {
+				ret = aoe_mcdi_fpga_info(dev,&info);
+				if(!ret) {
+					dev->ext_port_bitmap = (info.fpga_build_parameter & EXT_PORT_BITMASK) >> EXT_PORT_BITMAP_WIDTH;
+					dev->sfp0_3_speed = info.fpga_build_parameter & SFP0_3_SPEED_MASK;
+					dev->sfp4_7_speed = info.fpga_build_parameter & SFP4_7_SPEED_MASK;
+				} else {
+					printk(KERN_ERR "AOE bitmap extraction failed %d\n",ret);
+					return ret;
+				}
+			}
+
+			/* speed value 0-->10G and 1-->40G*/
+			if(dev->sfp0_3_speed && dev->sfp4_7_speed) {
+				/* 40G mode - direct mapping exist */
+				port->ext_port_num = port_num;
+			} else {
+				/* 10G mode */
+				if(port_num & 1U) {
+					/* aoe odd port number-->external port number
+					   1-->4, 3-->5, 5-->6, 7-->7 */
+					port->ext_port_num = (port_num >> 1) + PORT_NUM_FACTOR;
+				} else {
+					/* aoe even port number-->external port number
+					   0-->0, 2-->1, 4-->2, 6-->3 */
+					port->ext_port_num = port_num >> 1;
+				}
+			}
+
+			ret = 0;
+			break;
+
+		default:
+			printk(KERN_ERR "Unknown board type = %d\n",dev->board_type);
+	}
+
+	return ret;
 }
 

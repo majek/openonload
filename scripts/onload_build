@@ -26,8 +26,7 @@ usage() {
   err "  --debug            - Build debug binaries"
   err "  --strict           - Compiler warnings are errors"
   if is_ppc ; then
-    err "  --ppc-at <CC-path> - Build with IBM Advanced Toolchain, opt value "
-    err "                       should point to CC location in /opt/"
+  err "  --ppc-at <path>    - Path to IBM Advanced Toolchain install"
   fi
   err
   exit 1
@@ -35,26 +34,11 @@ usage() {
 
 
 have_64bit_userland() {
-  mmaketool --userarch | grep 64 >/dev/null 2>&1
+  mmaketool --userarch | grep -q 64
 }
 
 is_ppc () {
-  local platform="$(uname -m)"
-
-  [ "$platform" = "ppc64" -o "$platform" = "ppc32" ] && return 0
-  return 1
-}
-
-gnu_32bit_platform () {
-  local userplatform
-
-  if is_ppc ; then
-    userplatform=gnu_ppc32
-  else
-    userplatform=gnu
-  fi
-
-  echo $userplatform
+  uname -m | grep -qi ppc
 }
 
 setup_filter_engine_env () {
@@ -82,7 +66,7 @@ user32=false
 user64=false
 all=true
 keepbuild=false
-cc_opt=
+ppc_at=
 NDEBUG=1; export NDEBUG
 filter_engine_def="/opt/onload_filter_engine"
 withofe=true
@@ -98,7 +82,7 @@ while [ $# -gt 0 ]; do
   --keep)       keepbuild=true;;
   --debug)	unset NDEBUG;;
   --strict)     strict=true;;
-  --ppc-at)     is_ppc || usage ; cc_opt="CC=$2" ; shift ;;
+  --ppc-at)     is_ppc || usage; ppc_at="$2"; shift;;
   --filter-engine=*) filter_engine=${1#--filter-engine=} ;;
   --no-filter-engine) withofe=false ;;
   -*)           usage;;
@@ -115,10 +99,13 @@ setup_filter_engine_env
 # looks like it has a 64-bit userland.
 if $user64 || have_64bit_userland; then
   is64=true
-  userplatform=gnu_$(mmaketool --userarch)
 else
   is64=false
-  userplatform=$(gnu_32bit_platform)
+fi
+
+if [ -n "$ppc_at" ]; then
+  try [ -d "$ppc_at" ]
+  try [ -x "$ppc_at/bin/cc" ]
 fi
 
 if [ -n "$ONLOAD_BUILD_STRICT" ] || $strict; then
@@ -154,26 +141,41 @@ fi
 if $all || $user || $user64; then
   if $is64; then
     # 64-bit user-level drivers and tools.
+    userplatform=$(mmaketool --userbuild)
     if [ -d "$userplatform" ]; then
       nodeps=
     else
       try mmakebuildtree "$userplatform"
       nodeps=MMAKE_NO_DEPS=1
     fi
-    make $cc_opt -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
+    make -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
       fail "ERROR: Failed to build 64-bit user-level components."
+
+    if [ -n "$ppc_at" ]; then
+      if [ -d "${userplatform}_at" ]; then
+        nodeps=
+      else
+        try mmakebuildtree -d "${userplatform}_at" "$userplatform"
+        echo "export PATH := $ppc_at/bin:\$(PATH)" \
+             >>"${userplatform}_at/options_config.mk"
+        nodeps=MMAKE_NO_DEPS=1
+      fi
+      make -j4 -C "${userplatform}_at" ONLOAD_ONLY=1 $nodeps ||
+        fail "ERROR: Failed to build with IBM Advanced Tools ($ppc_at)"
+    fi
   fi
 fi
 
 if $all || $user || $user32; then
   # 32-bit user-level drivers and tools.
-  if [ -d "gnu" ]; then
+  userplatform=$(mmaketool --userbuild_base32)
+  if [ -d "$userplatform" ]; then
     nodeps=
   else
-    try mmakebuildtree "$(gnu_32bit_platform)"
+    try mmakebuildtree "$userplatform"
     nodeps=MMAKE_NO_DEPS=1
   fi
-  make $cc_opt -j4 -C "$(gnu_32bit_platform)" ONLOAD_ONLY=1 $nodeps || {
+  make -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps || {
     if $is64; then
       err
       log "WARNING: Failed to build 32-bit user-level components."

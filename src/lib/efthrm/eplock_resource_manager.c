@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -101,7 +101,7 @@ efab_eplock_record_pid(ci_netif *ni)
 int
 efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context)
 {
-  int l = ni->state->lock.lock;
+  ci_uint64 l = ni->state->lock.lock;
 
   /* We use in_dl_context from now on, and we should remove
    * CI_NETIF_FLAG_IN_DL_CONTEXT under the stack lock. */
@@ -128,7 +128,7 @@ efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context)
     */
     l = efab_tcp_helper_netif_lock_callback(&ni->eplock_helper, l, in_dl_context);
   }
-  else if( ci_cas32_fail(&ni->state->lock.lock, l, CI_EPLOCK_UNLOCKED) ) {
+  else if( ci_cas64u_fail(&ni->state->lock.lock, l, CI_EPLOCK_UNLOCKED) ) {
     /* Someone (probably) set a flag when we tried to unlock, so we'd
     ** better handle the flag(s).
     */
@@ -147,11 +147,11 @@ efab_eplock_unlock_and_wake(ci_netif *ni, int in_dl_context)
 
 static int efab_eplock_is_unlocked_or_request_wake(ci_eplock_t* epl)
 {
-  int l;
+  ci_uint64 l;
 
   while( (l = epl->lock) & CI_EPLOCK_LOCKED )
     if( (l & CI_EPLOCK_FL_NEED_WAKE) ||
-        ci_cas32_succeed(&epl->lock, l, l | CI_EPLOCK_FL_NEED_WAKE) )
+        ci_cas64u_succeed(&epl->lock, l, l | CI_EPLOCK_FL_NEED_WAKE) )
       return 1;
 
   ci_assert(l & CI_EPLOCK_UNLOCKED);

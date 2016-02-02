@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -281,12 +281,10 @@ typedef struct {
   ci_uint32 old_state;
 } oo_tcp_endpoint_shutdown_t;
 
-#ifdef ONLOAD_OFE
 typedef struct {
   ci_uint32 len;
   ci_user_ptr_t str;
 } oo_ofe_config_t;
-#endif
 
 
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1280,7 +1280,6 @@ falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			      int wakeup_evq /* ef10 only */,
 			      int enable_time_sync_events /* ef10 only */,
 			      int enable_cut_through /* ef10 only */,
-			      int *rx_ts_correction_out /* ef10 only */,
 			      int* flags_out /* ef10 only */)
 {
 	EFHW_ASSERT(nic);
@@ -1492,7 +1491,6 @@ falcon_nic_buffer_table_alloc(struct efhw_nic *nic, int owner, int order,
 	nic->bt_free_block = block->btb_next;
 	FALCON_LOCK_UNLOCK(nic);
 
-	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block);)
 	block->btb_hw.falcon.owner = owner;
 	*block_out = block;
 	return 0;
@@ -1502,7 +1500,6 @@ falcon_nic_buffer_table_realloc(struct efhw_nic *nic, int owner, int order,
 			        struct efhw_buffer_table_block *block)
 {
 	/* do nothing: allocation does not change accross reset */
-	EFHW_DO_DEBUG(efhw_buffer_table_alloc_debug(block);)
 	EFHW_ASSERT(order == 0);
 	return 0;
 }
@@ -1517,7 +1514,6 @@ falcon_nic_buffer_table_free(struct efhw_nic *nic,
 	(void) reset_pending;
 
 	block->btb_hw.falcon.owner = 0;
-	EFHW_DO_DEBUG(efhw_buffer_table_free_debug(block);)
 	FALCON_LOCK_LOCK(nic);
 	block->btb_next = nic->bt_free_block;
 	nic->bt_free_block = block;

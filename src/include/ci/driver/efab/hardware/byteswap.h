@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,38 +43,37 @@
 #ifndef __CI_DRIVER_EFAB_HARDWARE_BYTESWAP_H__
 #define __CI_DRIVER_EFAB_HARDWARE_BYTESWAP_H__
 
+#include <endian.h>
+#include <byteswap.h>
+
+
 #if defined(__i386__) || defined(__x86_64__)
 # define EF_VI_LITTLE_ENDIAN   1
-#elif defined(__PPC__)
+#elif defined(__BYTE_ORDER)
+# define EF_VI_LITTLE_ENDIAN   (__BYTE_ORDER == __LITTLE_ENDIAN)
+#elif defined(__LITTLE_ENDIAN)
+# define EF_VI_LITTLE_ENDIAN   1
+#elif defined(__BIG_ENDIAN)
 # define EF_VI_LITTLE_ENDIAN   0
 #else
-# error Unknown processor
+# error "EF_VI_LITTLE_ENDIAN needs fixing"
 #endif
 
+
 #if EF_VI_LITTLE_ENDIAN
+# define cpu_to_le16(v)   (v)
+# define le16_to_cpu(v)   (v)
 # define cpu_to_le32(v)   (v)
 # define le32_to_cpu(v)   (v)
+# define cpu_to_le64(v)   (v)
+# define le64_to_cpu(v)   (v)
 #else
-# define cpu_to_le32(v)   (((v) >> 24)               |  \
-	                   (((v) & 0x00ff0000) >> 8) |	\
-			   (((v) & 0x0000ff00) << 8) |	\
-			   ((v) << 24))
-#define le32_to_cpu(v) (cpu_to_le32(v))
-#endif
-
-#if EF_VI_LITTLE_ENDIAN
-# define cpu_to_le64(v)    (v)
-# define le32_to_cpu(v)    (v)
-#else
-# define cpu_to_le64(v)     (((v) >> 56)                        |	\
-	                     (((v) & 0x00ff000000000000ull) >> 40) |	\
-	                     (((v) & 0x0000ff0000000000ull) >> 24) |	\
-		             (((v) & 0x000000ff00000000ull) >> 8)  |	\
-			     (((v) & 0x00000000ff000000ull) << 8)  |	\
-			     (((v) & 0x0000000000ff0000ull) << 24) |	\
-			     (((v) & 0x000000000000ff00ull) << 40) |	\
-			     ((v) << 56))
-# define le64_to_cpu(v) (cpu_to_le64(v))
+# define cpu_to_le16(v)   bswap_16(v)
+# define le16_to_cpu(v)   bswap_16(v)
+# define cpu_to_le32(v)   bswap_32(v)
+# define le32_to_cpu(v)   bswap_32(v)
+# define cpu_to_le64(v)   bswap_64(v)
+# define le64_to_cpu(v)   bswap_64(v)
 #endif
 
 

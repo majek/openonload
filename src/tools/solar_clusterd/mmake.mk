@@ -38,6 +38,9 @@ endif
 ifeq ($(buildplatform),gnu_ppc64)
 BUILD_SC := 1
 endif
+ifeq ($(buildplatform),gnu_ppc64le)
+BUILD_SC := 1
+endif
 
 # Don't build cluster_protocol.so if python-devel is not present.  The
 # way we detect this is by checking if Python.h is present.

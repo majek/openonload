@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -95,14 +95,25 @@ static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
 
 
 static int get_ts_correction(ef_driver_handle vi_dh, int res_id,
-			     int* rx_ts_correction)
+			     int* rx_ts_correction, int* tx_ts_correction)
 {
   ci_resource_op_t op;
   int rc;
-  op.op = CI_RSOP_VI_GET_RX_TS_CORRECTION;
   op.id = efch_make_resource_id(res_id);
+  op.op = CI_RSOP_VI_GET_TS_CORRECTION;
+  rc = ci_resource_op(vi_dh, &op);
+  if( rc == 0 ) {
+    *rx_ts_correction = op.u.vi_ts_correction.out_rx_ts_correction;
+    *tx_ts_correction = op.u.vi_ts_correction.out_tx_ts_correction;
+    return 0;
+  }
+  op.op = CI_RSOP_VI_GET_RX_TS_CORRECTION;
   rc = ci_resource_op(vi_dh, &op);
   *rx_ts_correction = op.u.vi_rx_ts_correction.out_rx_ts_correction;
+  /* This driver can't tell us the TX correction.  So this must be a Hunti
+   * chip, and the appropriate correction is...
+   */
+  *tx_ts_correction = 178;
   return rc;
 }
 
@@ -123,9 +134,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "a8fd6c5a3d1861962b4a60fbf2018ec0") &&
+  if( strcmp(EFCH_INTF_VER, "7ea3e5321e5fd3383375e5c5ffc69881") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "2d8b85ee29b09d1b0dbf811481699412") ) {
+      strcmp(EFCH_INTF_VER, "44960836e81b59840eeca7999f97e791") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }
@@ -135,7 +146,7 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
 int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 		  efch_resource_id_t pd_or_vi_set_id,
 		  ef_driver_handle pd_or_vi_set_dh,
-		  int index_in_vi_set, int ifindex, int evq_capacity,
+		  int index_in_vi_set, int evq_capacity,
 		  int rxq_capacity, int txq_capacity,
 		  ef_vi* evq, ef_driver_handle evq_dh,
 		  int vi_clustered, enum ef_vi_flags vi_flags)
@@ -154,6 +165,9 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   EF_VI_BUG_ON((evq == NULL) != (evq_capacity != 0));
   EF_VI_BUG_ON(! evq_capacity && ! rxq_capacity && ! txq_capacity);
 
+  if( pd_or_vi_set_dh < 0 )
+    return -EINVAL;
+
   /* Ensure ef_vi_free() only frees what we allocate. */
   io_mmap_ptr = NULL;
   io_mmap_base = NULL;
@@ -164,8 +178,6 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   else if( (q_label = evq->vi_qs_n) == EF_VI_MAX_QS )
     return -EBUSY;
 
-  if( ifindex < 0 && (s = getenv("EF_VI_IFINDEX")) )
-    ifindex = atoi(s);
   if( evq_capacity == -1 )
     evq_capacity = (s = getenv("EF_VI_EVQ_SIZE")) ? atoi(s) : -1;
   if( txq_capacity == -1 )
@@ -186,7 +198,6 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   memset(&ra, 0, sizeof(ra));
   ef_vi_set_intf_ver(ra.intf_ver, sizeof(ra.intf_ver));
   ra.ra_type = EFRM_RESOURCE_VI;
-  ra.u.vi_in.ifindex = ifindex;
   ra.u.vi_in.pd_or_vi_set_fd = pd_or_vi_set_dh;
   ra.u.vi_in.pd_or_vi_set_rs_id = pd_or_vi_set_id;
   ra.u.vi_in.vi_set_instance = index_in_vi_set;
@@ -205,6 +216,8 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   ra.u.vi_in.tx_q_tag = q_label;
   ra.u.vi_in.rx_q_tag = q_label;
   ra.u.vi_in.flags = vi_flags_to_efab_flags(vi_flags);
+  /* [ra.u.vi_in.ifindex] is unused as we've ensured that [pd_or_vi_set_dh] is
+   * valid. */
   rc = ci_resource_alloc(vi_dh, &ra);
   if( rc < 0 ) {
     LOGVV(ef_log("%s: ci_resource_alloc %d", __FUNCTION__, rc));
@@ -277,12 +290,14 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 		   ra.u.vi_out.rx_prefix_len);
     mem_mmap_ptr += (ef_vi_rx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
     ids += rxq_capacity;
-    if( vi_flags & EF_VI_RX_TIMESTAMPS ) {
-      int rx_ts_correction;
-      rc = get_ts_correction(vi_dh, ra.out_id.index, &rx_ts_correction);
+    if( vi_flags & (EF_VI_RX_TIMESTAMPS | EF_VI_TX_TIMESTAMPS) ) {
+      int rx_ts_correction, tx_ts_correction;
+      rc = get_ts_correction(vi_dh, ra.out_id.index,
+                             &rx_ts_correction, &tx_ts_correction);
       if( rc < 0 )
         goto fail4;
       ef_vi_init_rx_timestamping(vi, rx_ts_correction);
+      ef_vi_init_tx_timestamping(vi, tx_ts_correction);
     }
   }
   if( txq_capacity )
@@ -344,7 +359,7 @@ int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
     pd_dh = pd->pd_cluster_dh;
     res_id = efch_make_resource_id(
                                    pd->pd_cluster_viset_resource_id);
-    index_in_vi_set = -1;
+    index_in_vi_set = pd->pd_cluster_viset_index;
     vi_clustered = 1;
   }
 #ifdef __powerpc__
@@ -354,11 +369,9 @@ int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
   else if( evq_capacity > 0 )
     evq_capacity += 16;
 #endif
-  return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set,
-                       -1/*ifindex*/, evq_capacity, rxq_capacity,
-                       txq_capacity, evq_opt, evq_dh, vi_clustered,
-                       flags);
-			     
+  return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set, evq_capacity,
+		       rxq_capacity, txq_capacity, evq_opt, evq_dh,
+		       vi_clustered, flags);
 }
 
 
@@ -376,7 +389,6 @@ int ef_vi_alloc_from_set(ef_vi* vi, ef_driver_handle vi_dh,
   return __ef_vi_alloc(vi, vi_dh,
                        efch_make_resource_id(vi_set->vis_res_id),
                        vi_set_dh, index_in_vi_set,
-                       -1/*ifindex*/,
                        evq_capacity, rxq_capacity, txq_capacity,
                        evq_opt, evq_dh, 0, flags);
 }

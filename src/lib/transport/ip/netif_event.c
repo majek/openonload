@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -532,29 +532,33 @@ static void process_post_poll_list(ci_netif* ni)
       ci_mb();
 
       lists_need_wake |= 1 << sb->ready_list_id;
-#ifdef __KERNEL__
-      if( (sb->sb_flags & sb->wake_request) )
-        citp_waitable_wakeup(ni, sb);
-      else
-        sb->sb_flags = 0;
-#else
-      /* Leave endpoints that need waking on the post-poll list so they can
-       * be woken in the driver with a single syscall when we drop the
-       * lock.
-       */
       if( ! (sb->sb_flags & sb->wake_request) ) {
-	sb->sb_flags = 0;
+        sb->sb_flags = 0;
       }
       else {
-        /* NB. Important to leave [sb_flags] set here, as we may run
-         * process_post_poll_list() multiple times before dropping the
-         * lock.  If we cleared [sb_flags] this endpoint could be dropped
-         * from the list.
-         */
-        need_wake = 1;
-        continue;
-      }
+#ifdef __KERNEL__
+        /* In realtime kernel, citp_waitable_wakeup() from NAPI context is
+         * harmful */
+        if( !((ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT) && 
+              oo_avoid_wakeup_from_dl()) ) {
+          citp_waitable_wakeup(ni, sb);
+        }
+        else
 #endif
+        {
+          /* Leave endpoints that need waking on the post-poll list so they can
+           * be woken in the driver with a single syscall when we drop the
+           * lock.
+           */
+          /* NB. Important to leave [sb_flags] set here, as we may run
+           * process_post_poll_list() multiple times before dropping the
+           * lock.  If we cleared [sb_flags] this endpoint could be dropped
+           * from the list.
+           */
+          need_wake = 1;
+          continue;
+        }
+      }
     }
     ci_ni_dllist_remove_safe(ni, &sb->post_poll_link);
   }
@@ -671,11 +675,12 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
   ci_assert(pkt->flags & CI_PKT_FLAG_TX_PENDING);
   nic->tx_bytes_removed += TX_PKT_LEN(pkt);
   ci_assert((int) (nic->tx_bytes_added - nic->tx_bytes_removed) >=0);
+#if CI_CFG_PIO
   if( pkt->pio_addr >= 0 ) {
     ci_pio_buddy_free(ni, &nic->pio_buddy, pkt->pio_addr, pkt->pio_order);
     pkt->pio_addr = -1;
   }
-
+#endif
   if( pkt->flags & CI_PKT_FLAG_TX_TIMESTAMPED ) {
     if( ev != NULL && EF_EVENT_TYPE(*ev) == EF_EVENT_TYPE_TX_WITH_TIMESTAMP ) {
       int opt_tsf = ((NI_OPTS(ni).timestamping_reporting) &
@@ -888,6 +893,11 @@ static int ci_netif_poll_intf(ci_netif* ni, int intf_i, int max_evs)
   struct ci_netif_poll_state ps;
   int total_evs = 0;
   int rc;
+
+#if defined(__KERNEL__) || ! defined(NDEBUG)
+  if( ! ci_netif_may_poll_in_kernel(ni, intf_i) )
+    return 0;
+#endif
 
   ci_assert(ci_netif_is_locked(ni));
   ps.tx_pkt_free_list_insert = &ps.tx_pkt_free_list;

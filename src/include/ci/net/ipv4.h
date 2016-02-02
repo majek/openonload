@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -140,7 +140,8 @@ ci_inline ci_uint32 ci_ip_mask2prefix(ci_uint32 mask_he32)
 }
 
 /* Well-known addresses */
-#define CI_IP_ALL_HOSTS 0x10000e0
+#define CI_IP_ALL_HOSTS     0x10000e0
+#define CI_IP_ALL_BROADCAST 0xffffffff
 
 /** check an IP address aganst a provided IP adadress and mask */
 #define CI_IP_ADDR(ipa, ipb, ipc, ipd)                                \

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -70,16 +70,17 @@ efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 				    unsigned int page_order)
 {
 	int i, j, rc;
+	struct pci_dev* dev = efhw_nic_get_pci_dev(nic);
 
 	/* Allocate an iobuffer. */
 	EFHW_TRACE("allocating eventq size %x",
 		   1u << (page_order + PAGE_SHIFT));
-	rc = efhw_iopages_alloc(nic->pci_dev, &h->iobuff, page_order, NULL,
+	rc = efhw_iopages_alloc(dev, &h->iobuff, page_order, NULL,
 				0UL);
 	if (rc < 0) {
 		EFHW_WARN("%s: failed to allocate %u pages",
 			  __FUNCTION__, 1u << page_order);
-		return rc;
+		goto out;
 	}
 
 	/* Set the eventq pages to match EFHW_CLEAR_EVENT() */
@@ -102,8 +103,8 @@ efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 	if (rc < 0) {
 		EFHW_WARN("%s: failed to allocate buffer table block",
 			  __FUNCTION__);
-		efhw_iopages_free(nic->pci_dev, &h->iobuff, NULL);
-		return rc;
+		efhw_iopages_free(dev, &h->iobuff, NULL);
+		goto out;
 	}
 	for (i = 0; i < (1 << page_order); ++i) {
 		for (j = 0; j < EFHW_NIC_PAGES_IN_OS_PAGE; ++j) {
@@ -115,7 +116,12 @@ efhw_nic_event_queue_alloc_iobuffer(struct efhw_nic *nic,
 				  1 << EFHW_GFP_ORDER_TO_NIC_ORDER(page_order),
 				  dma_addrs);
 	falcon_nic_buffer_table_confirm(nic);
-	return 0;
+
+	rc = 0;
+
+out:
+	pci_dev_put(dev);
+	return rc;
 }
 
 /**********************************************************************
@@ -163,7 +169,6 @@ efhw_keventq_ctor(struct efhw_nic *nic, int instance,
 				    0 /* not used on falcon */,
 				    0 /* not used on falcon */,
 				    0 /* not used on falcon */,
-				    NULL /* not used on falcon */,
 				    NULL /* not used on falcon */);
 
 	evq->lock = KEVQ_UNLOCKED;
@@ -181,6 +186,8 @@ void efhw_keventq_dtor(struct efhw_nic *nic, struct efhw_keventq *evq)
 {
 	int order = EFHW_GFP_ORDER_TO_NIC_ORDER(get_order(evq->hw.capacity *
 							  sizeof(efhw_event_t)));
+	struct pci_dev* dev;
+
 	EFHW_ASSERT(evq);
 
 	EFHW_TRACE("%s: [%d]", __FUNCTION__, evq->instance);
@@ -196,7 +203,9 @@ void efhw_keventq_dtor(struct efhw_nic *nic, struct efhw_keventq *evq)
 	efhw_nic_buffer_table_free(nic, evq->hw.bt_block, 0);
 
 	/* free the pages used by the eventq itself */
-	efhw_iopages_free(nic->pci_dev, &evq->hw.iobuff, NULL);
+	dev = efhw_nic_get_pci_dev(nic);
+	efhw_iopages_free(dev, &evq->hw.iobuff, NULL);
+	pci_dev_put(dev);
 }
 
 int

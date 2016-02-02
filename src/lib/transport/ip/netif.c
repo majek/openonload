@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2015  Solarflare Communications Inc.
+** Copyright 2005-2016  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -398,7 +398,7 @@ void ci_netif_try_to_reap(ci_netif* ni, int stop_once_freed_n)
   citp_waitable_obj* wo;
   int freed_n = 0;
   int add_to_reap_list;
-  int reap_harder = ni->state->pkt_sets_n == ni->state->pkt_sets_max
+  int reap_harder = ni->packets->sets_n == ni->packets->sets_max
       || ni->state->mem_pressure;
 
   if( ci_ni_dllist_is_empty(ni, &ni->state->reap_list) )
@@ -597,7 +597,7 @@ int ci_netif_mem_pressure_try_exit(ci_netif* ni)
   }
 
   if( NI_OPTS(ni).max_rx_packets - ni->state->n_rx_pkts < pkts_needed ||
-      ni->state->n_freepkts < pkts_needed ) {
+      ni->packets->n_free < pkts_needed ) {
     /* TODO: May not be necessary in future, as rxq_low should be set, and
      * should provoke the recv() path to free packet bufs.  For now this is
      * needed though.
@@ -613,7 +613,7 @@ int ci_netif_mem_pressure_try_exit(ci_netif* ni)
      * TODO: Be more efficient here by grabbing the whole pool, taking what
      * we need, and put back.
      */
-    while( ni->state->n_freepkts < pkts_needed ) {
+    while( ni->packets->n_free < pkts_needed ) {
       if( (pkt = ci_netif_pkt_alloc_nonb(ni)) == NULL )
         return 0;
       --ni->state->n_async_pkts;
@@ -640,7 +640,7 @@ static int __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i,
   int posted = 0;
 
   ci_assert_ge(max, CI_CFG_RX_DESC_BATCH);
-  ci_assert_ge(ni->pkt_set[bufset_id].n_free, max);
+  ci_assert_ge(ni->packets->set[bufset_id].n_free, max);
 
   do {
     for( i = 0; i < CI_CFG_RX_DESC_BATCH; ++i ) {
@@ -648,10 +648,10 @@ static int __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i,
       ** ci_netif_pkt_alloc().  Nasty, but this is really performance
       ** critical.
       */
-      ci_assert(OO_PP_NOT_NULL(ni->pkt_set[bufset_id].free));
-      pkt = PKT(ni, ni->pkt_set[bufset_id].free);
-      ci_assert(OO_PP_EQ(ni->pkt_set[bufset_id].free, OO_PKT_P(pkt)));
-      ni->pkt_set[bufset_id].free = pkt->next;
+      ci_assert(OO_PP_NOT_NULL(ni->packets->set[bufset_id].free));
+      pkt = PKT(ni, ni->packets->set[bufset_id].free);
+      ci_assert(OO_PP_EQ(ni->packets->set[bufset_id].free, OO_PKT_P(pkt)));
+      ni->packets->set[bufset_id].free = pkt->next;
       pkt->refcount = 1;
       pkt->flags |= CI_PKT_FLAG_RX;
       pkt->intf_i = intf_i;
@@ -680,8 +680,8 @@ static int __ci_netif_rx_post(ci_netif* ni, ef_vi* vi, int intf_i,
       }
 #endif
     }
-    ni->pkt_set[bufset_id].n_free -= CI_CFG_RX_DESC_BATCH;
-    ni->state->n_freepkts -= CI_CFG_RX_DESC_BATCH;
+    ni->packets->set[bufset_id].n_free -= CI_CFG_RX_DESC_BATCH;
+    ni->packets->n_free -= CI_CFG_RX_DESC_BATCH;
     ni->state->n_rx_pkts  += CI_CFG_RX_DESC_BATCH;
     ef_vi_receive_push(vi);
     posted += CI_CFG_RX_DESC_BATCH;
@@ -722,18 +722,18 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
   ci_assert_ge(max_n_to_post, CI_CFG_RX_DESC_BATCH);
   /* We could have enough packets in all sets together, but we need them
    * in one set. */
-  if( netif->pkt_set[bufset_id].n_free < CI_CFG_RX_DESC_BATCH )
+  if( netif->packets->set[bufset_id].n_free < CI_CFG_RX_DESC_BATCH )
     goto find_new_bufset;
 
  good_bufset:
   do {
-    n_to_post = CI_MIN(max_n_to_post, netif->pkt_set[bufset_id].n_free);
+    n_to_post = CI_MIN(max_n_to_post, netif->packets->set[bufset_id].n_free);
     max_n_to_post -= __ci_netif_rx_post(netif, vi, intf_i,
                                         bufset_id, n_to_post);
     ci_assert_ge(max_n_to_post, 0);
 
     if( max_n_to_post < CI_CFG_RX_DESC_BATCH ) {
-      if( bufset_id != netif->state->current_pkt_set ) {
+      if( bufset_id != netif->packets->id ) {
         ci_netif_pkt_set_change(netif, bufset_id,
                                 ask_for_more_packets);
       }
@@ -744,7 +744,7 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
  find_new_bufset:
     bufset_id = ci_netif_pktset_best(netif);
     if( bufset_id == -1 ||
-        netif->pkt_set[bufset_id].n_free < CI_CFG_RX_DESC_BATCH )
+        netif->packets->set[bufset_id].n_free < CI_CFG_RX_DESC_BATCH )
       goto not_enough_pkts;
     ask_for_more_packets = ci_netif_pkt_set_is_underfilled(netif,
                                                            bufset_id);
@@ -805,15 +805,15 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
     pkt->flags &= ~CI_PKT_FLAG_NONB_POOL;
     bufset_id = PKT_SET_ID(pkt);
     ci_netif_pkt_release_1ref(netif, pkt);
-    if( netif->pkt_set[bufset_id].n_free >= CI_CFG_RX_DESC_BATCH )
+    if( netif->packets->set[bufset_id].n_free >= CI_CFG_RX_DESC_BATCH )
       goto good_bufset;
   }
 
   /* Still not enough -- allocate more memory if possible. */
-  if( netif->state->pkt_sets_n < netif->state->pkt_sets_max &&
+  if( netif->packets->sets_n < netif->packets->sets_max &&
       ci_tcp_helper_more_bufs(netif) == 0 ) {
-    bufset_id = netif->state->pkt_sets_n - 1;
-    ci_assert_equal(netif->pkt_set[bufset_id].n_free,
+    bufset_id = netif->packets->sets_n - 1;
+    ci_assert_equal(netif->packets->set[bufset_id].n_free,
                     1 << CI_CFG_PKTS_PER_SET_S);
     ask_for_more_packets = 0;
     goto good_bufset;
@@ -822,10 +822,10 @@ void ci_netif_rx_post(ci_netif* netif, int intf_i)
   if( ef_vi_receive_fill_level(vi) < low_thresh(netif) ) {
     CITP_STATS_NETIF_INC(netif, reap_buf_limited);
     ci_netif_try_to_reap(netif, max_n_to_post);
-    max_n_to_post = CI_MIN(max_n_to_post, netif->state->n_freepkts);
+    max_n_to_post = CI_MIN(max_n_to_post, netif->packets->n_free);
     bufset_id = ci_netif_pktset_best(netif);
     if( bufset_id != -1 &&
-        netif->pkt_set[bufset_id].n_free >= CI_CFG_RX_DESC_BATCH )
+        netif->packets->set[bufset_id].n_free >= CI_CFG_RX_DESC_BATCH )
       goto good_bufset;
     /* Ask recv() path to refill when some buffers are freed. */
     netif->state->rxq_low = ci_netif_rx_vi_space(netif, vi);
@@ -893,7 +893,7 @@ int ci_netif_lock_or_defer_work(ci_netif* ni, citp_waitable* w)
   }
 
   while( 1 ) {
-    unsigned new_v, v = ni->state->lock.lock;
+    ci_uint64 new_v, v = ni->state->lock.lock;
     if( v & CI_EPLOCK_UNLOCKED ) {
       if( ci_netif_trylock(ni) ) {
         ci_bit_clear(&w->sb_aflags, CI_SB_AFLAG_DEFERRED_BIT);
@@ -905,7 +905,7 @@ int ci_netif_lock_or_defer_work(ci_netif* ni, citp_waitable* w)
       ci_assert(w->next_id == CI_ILL_END);
       w->next_id = v & CI_EPLOCK_NETIF_SOCKET_LIST;
       new_v = (v & ~CI_EPLOCK_NETIF_SOCKET_LIST) | (W_ID(w) + 1);
-      if( ci_cas32_succeed(&ni->state->lock.lock, v, new_v) ) {
+      if( ci_cas64u_succeed(&ni->state->lock.lock, v, new_v) ) {
         ++ni->state->defer_work_count;
         return 0;
       }
@@ -941,12 +941,12 @@ static void ci_netif_perform_deferred_socket_work(ci_netif* ni,
 
 unsigned ci_netif_purge_deferred_socket_list(ci_netif* ni)
 {
-  unsigned l;
+  ci_uint64 l;
 
   ci_assert(ci_netif_is_locked(ni));
 
   while( (l = ni->state->lock.lock) & CI_EPLOCK_NETIF_SOCKET_LIST )
-    if( ci_cas32_succeed(&ni->state->lock.lock, l,
+    if( ci_cas64u_succeed(&ni->state->lock.lock, l,
                         l &~ CI_EPLOCK_NETIF_SOCKET_LIST) )
       ci_netif_perform_deferred_socket_work(ni,
                                             l & CI_EPLOCK_NETIF_SOCKET_LIST);
@@ -984,9 +984,9 @@ static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
   ** efab_eplock_unlock_and_wake() path, so no need to do this stuff if
   ** already in kernel.
   */
-  int l = ni->state->lock.lock;
+  ci_uint64 l = ni->state->lock.lock;
   int intf_i;
-  unsigned after_unlock_flags;
+  ci_uint64 after_unlock_flags;
 
   ci_assert(ci_netif_is_locked(ni));  /* double unlock? */
 
@@ -1035,8 +1035,8 @@ static void ci_netif_unlock_slow(ci_netif* ni KERNEL_DL_CONTEXT_DECL)
   if( !(l & (CI_EPLOCK_NETIF_UNLOCK_FLAGS |
              CI_EPLOCK_NETIF_SOCKET_LIST |
              CI_EPLOCK_FL_NEED_WAKE)) ) {
-    if( ci_cas32_succeed(&ni->state->lock.lock,
-                         l, (l &~ CI_EPLOCK_LOCKED) | CI_EPLOCK_UNLOCKED) ) {
+    if( ci_cas64u_succeed(&ni->state->lock.lock,
+                          l, (l &~ CI_EPLOCK_LOCKED) | CI_EPLOCK_UNLOCKED) ) {
       /* If the NEED_PRIME flag was set, handle it here */
       if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME ) {
         CITP_STATS_NETIF_INC(ni, unlock_slow_need_prime);
@@ -1090,8 +1090,8 @@ void ci_netif_unlock(ci_netif* ni)
 
   ci_assert_equal(ni->state->in_poll, 0);
   if(CI_LIKELY( ni->state->lock.lock == CI_EPLOCK_LOCKED &&
-                ci_cas32_succeed(&ni->state->lock.lock,
-                                 CI_EPLOCK_LOCKED, CI_EPLOCK_UNLOCKED) ))
+                ci_cas64u_succeed(&ni->state->lock.lock,
+                                  CI_EPLOCK_LOCKED, CI_EPLOCK_UNLOCKED) ))
     return;
   CITP_STATS_NETIF_INC(ni, unlock_slow);
   ci_netif_unlock_slow(ni KERNEL_DL_CONTEXT);
