@@ -52,10 +52,8 @@ extern int oo_debug_bits;
 #define __OO_DEBUGMEMSIZE__	0x00000040    /* size of shared memory  */
 #define __OO_DEBUGTRAMP__       0x00000080    /* trampoline and mmap()  */
 #define __OO_DEBUGARP__         0x00000100    /* ARP related messages   */
-#define __OO_DEBUGFWD__         0x00000200    /* fwd table related messages */
 #define __OO_DEBUGOS__          0x00000400    /* OS related messages  
                                                  i.e. NDIS interaction  */
-#define __OO_DEBUGCPTX__        0x00000800    /* transmit from control plane */
 #define __OO_DEBUGIPP__         0x00001000    /* IP Protocols (ICMP...) */
 #define __OO_DEBUGSTATS__       0x00002000    /* IP Statistics gathering*/
 #define __OO_DEBUGDLF__		0x00004000    /* Driverlink filter	*/
@@ -94,9 +92,7 @@ extern int oo_debug_bits;
 #define OO_DEBUG_MEMSIZE(foo) OO_DYNAMIC_DEBUG(__OO_DEBUGMEMSIZE__, foo)
 #define OO_DEBUG_TRAMP(foo)   OO_DYNAMIC_DEBUG(__OO_DEBUGTRAMP__, foo)
 #define OO_DEBUG_ARP(foo)     OO_DYNAMIC_DEBUG(__OO_DEBUGARP__, foo)
-#define OO_DEBUG_FWD(foo)     OO_DYNAMIC_DEBUG(__OO_DEBUGFWD__, foo)
 #define OO_DEBUG_OS(foo)      OO_DYNAMIC_DEBUG(__OO_DEBUGOS__, foo)
-#define OO_DEBUG_CPTX(foo)    OO_DYNAMIC_DEBUG(__OO_DEBUGCPTX__, foo)
 #define OO_DEBUG_IPP(foo)     OO_DYNAMIC_DEBUG(__OO_DEBUGIPP__, foo)
 #define OO_DEBUG_STATS(foo)   OO_DYNAMIC_DEBUG(__OO_DEBUGSTATS__, foo)
 #define OO_DEBUG_DLF(foo)     OO_DYNAMIC_DEBUG(__OO_DEBUGDLF__, foo)

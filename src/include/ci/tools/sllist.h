@@ -29,6 +29,7 @@
 #ifndef __CI_TOOLS_SLLIST_H__
 #define __CI_TOOLS_SLLIST_H__
 
+#include <ci/compat/sysdep.h>
 
 typedef struct ci_sllink_s {
   struct ci_sllink_s*  next;
@@ -44,15 +45,21 @@ typedef struct {
 ci_inline int ci_sllink_busy(ci_sllink* link)
 { return link->next != NULL; }
 
+/* It is needed to make ci_sllink_busy() works correctly if this link is
+ * the last in the list.  We use even number here, so it can't accidentaly
+ * match with any valid value, because all valid values are aligned.
+ */
+#define CI_SLLIST_TAIL ((ci_sllink*)(ci_uintptr_t)0xdeaddead)
+
 ci_inline void ci_sllist_init(ci_sllist* list)
-{ list->head = 0; }
+{ list->head = CI_SLLIST_TAIL; }
 
 
 ci_inline int ci_sllist_is_empty(ci_sllist* list)
-{ return list->head == 0; }
+{ return list->head == CI_SLLIST_TAIL; }
 
 ci_inline int ci_sllist_not_empty(ci_sllist* list)
-{ return list->head != 0; }
+{ return list->head != CI_SLLIST_TAIL; }
 
 
 ci_inline void ci_sllist_push(ci_sllist* list, ci_sllink* link) {
@@ -72,7 +79,11 @@ ci_inline ci_sllink* ci_sllist_pop(ci_sllist* list) {
 
 ci_inline ci_sllink* ci_sllist_try_pop(ci_sllist* list) {
   ci_sllink* link;
-  if( (link = list->head) )  list->head = link->next;
+  link = list->head;
+  if( link == CI_SLLIST_TAIL )
+    return NULL;
+  list->head = link->next;
+  link->next = NULL; /* not busy any more */
   return link;
 }
 

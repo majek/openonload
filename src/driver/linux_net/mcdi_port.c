@@ -32,7 +32,6 @@
 #endif
 #include "efx.h"
 #include "debugfs.h"
-#include "phy.h"
 #include "mcdi.h"
 #include "mcdi_pcol.h"
 #include "nic.h"
@@ -671,7 +670,7 @@ static void efx_mcdi_phy_get_settings(struct efx_nic *efx, struct ethtool_cmd *e
 static int efx_mcdi_phy_set_settings(struct efx_nic *efx, struct ethtool_cmd *ecmd)
 {
 	struct efx_mcdi_phy_data *phy_cfg = efx->phy_data;
-	unsigned advertising = ecmd->advertising;
+	unsigned int advertising = ecmd->advertising;
 	bool autoneg = !!(efx->link_advertising & ADVERTISED_Autoneg);
 	u32 caps;
 	int rc;
@@ -841,7 +840,7 @@ out:
 }
 
 static int efx_mcdi_phy_run_tests(struct efx_nic *efx, int *results,
-				  unsigned flags)
+				  unsigned int flags)
 {
 	struct efx_mcdi_phy_data *phy_cfg = efx->phy_data;
 	u32 mode;
@@ -1179,8 +1178,7 @@ int efx_mcdi_set_mac(struct efx_nic *efx)
 	ether_addr_copy(MCDI_PTR(cmdbytes, SET_MAC_IN_ADDR),
 			efx->net_dev->dev_addr);
 
-	MCDI_SET_DWORD(cmdbytes, SET_MAC_IN_MTU,
-			EFX_MAX_FRAME_LEN(efx->net_dev->mtu));
+	MCDI_SET_DWORD(cmdbytes, SET_MAC_IN_MTU, efx->type->calc_mac_mtu(efx));
 	MCDI_SET_DWORD(cmdbytes, SET_MAC_IN_DRAIN, 0);
 
 	/* Set simple MAC filter for Siena */
@@ -1209,6 +1207,21 @@ int efx_mcdi_set_mac(struct efx_nic *efx)
 	MCDI_SET_DWORD(cmdbytes, SET_MAC_IN_FCNTL, fcntl);
 
 	return efx_mcdi_rpc(efx, MC_CMD_SET_MAC, cmdbytes, sizeof(cmdbytes),
+			    NULL, 0, NULL);
+}
+
+int efx_mcdi_set_mtu(struct efx_nic *efx)
+{
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_MAC_EXT_IN_LEN);
+
+	BUILD_BUG_ON(MC_CMD_SET_MAC_OUT_LEN != 0);
+
+	MCDI_SET_DWORD(inbuf, SET_MAC_EXT_IN_MTU, efx->type->calc_mac_mtu(efx));
+
+	MCDI_POPULATE_DWORD_1(inbuf, SET_MAC_EXT_IN_CONTROL,
+			      SET_MAC_EXT_IN_CFG_MTU, 1);
+
+	return efx_mcdi_rpc(efx, MC_CMD_SET_MAC, inbuf, sizeof(inbuf),
 			    NULL, 0, NULL);
 }
 

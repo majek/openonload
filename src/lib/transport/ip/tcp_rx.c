@@ -1125,7 +1125,7 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
   /* Wake up TX if necessary */
   if( NI_OPTS(netif).tcp_sndbuf_mode >= 1 &&
       ( ci_tcp_tx_advertise_space(netif, ts) || ts->s.tx_errno ) )
-    ci_tcp_wake_possibly_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_TX);
+    ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_TX);
 }
 
 
@@ -2280,7 +2280,6 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   ci_tcp_hdr* tcp = rxp->tcp;
   ci_tcp_state_synrecv* tsr;
   ci_ip_cached_hdrs ipcache;
-  struct oo_sock_cplane sock_cp;
   oo_sp local_peer = OO_SP_NULL;
   int do_syncookie = 0;
 
@@ -2379,12 +2378,64 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
    * some info in the ipcache does depend on them when interface is a bond.
    */
   ci_ip_cache_init(&ipcache);
-  sock_cp = tls->s.cp;
   ipcache.ip.ip_daddr_be32 = ip->ip_saddr_be32;
   ipcache.dport_be16 = tcp->tcp_source_be16;
-  sock_cp.ip_laddr_be32 = ip->ip_daddr_be32;
-  sock_cp.lport_be16 = tcp->tcp_dest_be16;
-  cicp_user_retrieve(netif, &ipcache, &sock_cp);
+  if( CI_UNLIKELY( pkt->intf_i == OO_INTF_I_LOOPBACK ) ) {
+    /* This packet was received via loopback, so there is no need to call
+     * cicp_user_retrieve().  Even if the route table has a strange route,
+     * we always should reply back. */
+    ipcache.status = retrrc_localroute;
+    ipcache.encap.type = CICP_LLAP_TYPE_SFC;
+    ipcache.ether_offset = 4;
+    ipcache.intf_i = OO_INTF_I_LOOPBACK;
+    ipcache.mtu = netif->state->max_mss;
+    cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(netif)).mac_utable,
+                              &ipcache.mac_integrity);
+  }
+  else if( NI_OPTS(netif).tcp_listen_replies_back ) {
+    ci_ifid_t ifindex;
+    int rc;
+
+    if( pkt->vlan ) {
+      ipcache.encap.type = CICP_LLAP_TYPE_VLAN;
+      ipcache.encap.vlan_id = pkt->vlan;
+    } else {
+      ipcache.encap.type = CICP_LLAP_TYPE_SFC;
+      ipcache.encap.vlan_id = 0;
+    }
+    cicp_ipcache_vlan_set(&ipcache);
+    ipcache.intf_i = pkt->intf_i;
+    rc = cicp_llap_find(CICP_HANDLE(netif), &ifindex,
+                        netif->state->intf_i_to_hwport[ipcache.intf_i],
+                        ipcache.encap.vlan_id);
+    if( rc == 0 ) {
+      rc = cicp_llap_retrieve(CICP_HANDLE(netif),
+                              ifindex, &ipcache.mtu,
+                              NULL, NULL, NULL, NULL, NULL);
+
+      if( rc == 0 ) {
+        ci_assert(ipcache.mtu);
+        ipcache.ip_saddr_be32 =
+          ipcache.ip.ip_saddr_be32 = ip->ip_daddr_be32;
+        CI_MAC_ADDR_SET(ci_ip_cache_ether_dhost(&ipcache),
+                        oo_ether_shost(pkt));
+        CI_MAC_ADDR_SET(ci_ip_cache_ether_shost(&ipcache),
+                        oo_ether_dhost(pkt));
+        cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(netif)).mac_utable,
+                                  &ipcache.mac_integrity);
+        ipcache.status = retrrc_success;
+      }
+      else {
+        ipcache.status = retrrc_alienroute;
+      }
+    }
+  }
+  else {
+    struct oo_sock_cplane sock_cp = tls->s.cp;
+    sock_cp.ip_laddr_be32 = ip->ip_daddr_be32;
+    sock_cp.lport_be16 = tcp->tcp_dest_be16;
+    cicp_user_retrieve(netif, &ipcache, &sock_cp);
+  }
 
   switch( ipcache.status ) {
   case retrrc_success:
@@ -2754,7 +2805,11 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
     ci_assert(ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE);
     if( handle_syn_sent_opts(netif, ts, rxp) < 0 ) return;
     ts->snd_una = ts->snd_nxt;
-    ts->snd_max = ts->snd_nxt + pkt->pf.tcp_rx.window;
+    /* Use s.so.rcvbuf as a window value, because pf.tcp_rx.window in SYN
+     * can be too small.  For normal connection it is updated via the ACK
+     * which finalizes the handshake, but loopback does not send it. */
+    ts->snd_max = ts->snd_nxt + peer->s.so.rcvbuf;
+    /* peer is the listening socket in case of TCP_DEFER_ACCEPT */
     if( peer->s.b.state != CI_TCP_LISTEN )
       peer->snd_max = peer->snd_una + ts->s.so.rcvbuf;
 
@@ -2838,8 +2893,6 @@ static void handle_rx_syn_sent(ci_netif* netif, ci_tcp_state* ts,
   ci_tcp_set_snd_max(ts, rxp->seq, rxp->ack, pkt->pf.tcp_rx.window);
 
 set_isn:
-  ci_assert_equal(tcp_snd_wnd(ts), pkt->pf.tcp_rx.window);
-
   /* Snarf their initial sequence no. and window. */
   ci_tcp_rx_set_isn(ts, pkt->pf.tcp_rx.end_seq);
 
@@ -2997,7 +3050,7 @@ ci_inline void handle_rx_fin_wait_1(ci_tcp_state* ts, ci_netif* netif)
 
     LOG_TC(log(LPF "%d FIN-WAIT1->FIN-WAIT2", S_FMT(ts)));
     ci_tcp_set_slow_state(netif, ts, CI_TCP_FIN_WAIT2);
-    ci_tcp_wake_possibly_not_in_poll(netif, ts, CI_SB_FLAG_WAKE_TX);
+    ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_TX);
 
     if ( ci_tcp_is_timeout_orphan(ts) )
       ci_netif_timeout_restart(netif, ts);
@@ -3848,7 +3901,7 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
   int reset = 1; /* We send a TCP reset unless we have a good reason
                         not to. See RFC793 p36 */
 
-  LOG_U(
+  LOG_TR(
     /* Do not print message in RST case: it is pretty normal for
      * just-dropped connection with some packets inflight. */
     if( !(tcp->tcp_flags & CI_TCP_FLAG_RST) )

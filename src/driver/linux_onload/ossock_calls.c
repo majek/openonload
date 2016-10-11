@@ -403,10 +403,11 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
 
   iovec_bytes = op->msg_iovlen * sizeof(local_iovec[0]);
   rc = -ENOMEM;
-  if( op->msg_iovlen > UIO_FASTIOV )
+  if( op->msg_iovlen > UIO_FASTIOV ) {
     p_iovec = sock_kmalloc(sock->sk, iovec_bytes, GFP_KERNEL);
     if( p_iovec == NULL )
       goto out;
+  }
 
   rc = -EFAULT;
 #ifdef CONFIG_COMPAT
@@ -552,10 +553,11 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
 
   iovec_bytes = op->msg_iovlen * sizeof(local_iovec[0]);
   rc = -ENOMEM;
-  if( op->msg_iovlen > UIO_FASTIOV )
+  if( op->msg_iovlen > UIO_FASTIOV ) {
     p_iovec = sock_kmalloc(sock->sk, iovec_bytes, GFP_KERNEL);
     if( p_iovec == NULL )
       goto out;
+  }
 
   rc = -EFAULT;
 #ifdef CONFIG_COMPAT
@@ -810,10 +812,11 @@ extern int efab_tcp_helper_bind_os_sock_rsop(ci_private_t *priv, void *arg)
    * accelerated.
    */
   if( (sock == NULL) && (priv->fd_type == CI_PRIV_TYPE_TCP_EP) ) {
-    efab_tcp_helper_create_os_sock(priv);
-    sock = get_linux_socket(ep);
+    rc = efab_tcp_helper_create_os_sock(priv);
     if( rc < 0 )
       return rc;
+    sock = get_linux_socket(ep);
+    ci_assert(sock);
   }
 
   if( sock == NULL )
@@ -927,7 +930,13 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
   if( sock == NULL )
     return -EINVAL;
   socktype = sock->type;
-  rc = kernel_accept(sock, &newsock, op->flags);
+  /* Blocking in the accept call is determined by the flags passed in, not
+   * the flags set on the socket.  We don't do anything to prevent multiple
+   * threads racing to pick up the same incoming OS connection, so we always
+   * do non-blocking accepts, no matter what other flags user level has
+   * provided.
+   */
+  rc = kernel_accept(sock, &newsock, op->flags | O_NONBLOCK);
 
   /* Clear OS RX flag if we've got everything  */
   oo_os_sock_status_bit_clear_handled(s, sock->file, OO_OS_STATUS_RX);

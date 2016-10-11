@@ -68,14 +68,17 @@ extern int efhw_device_type_init(struct efhw_device_type *dt,
 extern void efhw_nic_init(struct efhw_nic *nic, unsigned flags,
 			  unsigned options, struct efhw_device_type *dev_type,
 			  unsigned map_min, unsigned map_max, unsigned vi_base,
-			  unsigned vport_id);
+			  unsigned vi_shift, unsigned vport_id);
 
 /*! Destruct NIC resources */
 extern void efhw_nic_dtor(struct efhw_nic *nic);
 
 extern struct pci_dev* efhw_nic_get_pci_dev(struct efhw_nic* nic);
 
-extern struct efx_dl_device* efhw_nic_dl_device(struct efhw_nic*);
+/* Driverlink-handle management. */
+extern struct efx_dl_device* efhw_nic_acquire_dl_device(struct efhw_nic*);
+extern void efhw_nic_release_dl_device(struct efhw_nic*, struct efx_dl_device*);
+extern void efhw_nic_flush_dl(struct efhw_nic*);
 
 
 #endif /* __CI_EFHW_NIC_H__ */

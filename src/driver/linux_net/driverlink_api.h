@@ -51,7 +51,7 @@ struct efx_dl_device_info;
  * kbuild and the module loader using symbol versions.
  */
 #define EFX_DRIVERLINK_API_VERSION 22
-#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 2
+#define EFX_DRIVERLINK_API_VERSION_MINOR_MAX 4
 
 #ifndef EFX_DRIVERLINK_API_VERSION_MINOR
 #define EFX_DRIVERLINK_API_VERSION_MINOR 0
@@ -246,22 +246,22 @@ enum efx_dl_falcon_resource_flags {
 struct efx_dl_falcon_resources {
 	struct efx_dl_device_info hdr;
 	spinlock_t *biu_lock;
-	unsigned buffer_table_min;
-	unsigned buffer_table_lim;
-	unsigned evq_timer_min;
-	unsigned evq_timer_lim;
-	unsigned evq_int_min;
-	unsigned evq_int_lim;
-	unsigned rxq_min;
-	unsigned rxq_lim;
-	unsigned txq_min;
-	unsigned txq_lim;
+	unsigned int buffer_table_min;
+	unsigned int buffer_table_lim;
+	unsigned int evq_timer_min;
+	unsigned int evq_timer_lim;
+	unsigned int evq_int_min;
+	unsigned int evq_int_lim;
+	unsigned int rxq_min;
+	unsigned int rxq_lim;
+	unsigned int txq_min;
+	unsigned int txq_lim;
 	enum efx_dl_falcon_resource_flags flags;
-	unsigned rss_channel_count;
-	unsigned timer_quantum_ns;
-	unsigned rx_usr_buf_size;
+	unsigned int rss_channel_count;
+	unsigned int timer_quantum_ns;
+	unsigned int rx_usr_buf_size;
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 1)
-        unsigned int rx_channel_count;
+	unsigned int rx_channel_count;
 #endif
 };
 
@@ -290,8 +290,8 @@ enum efx_dl_hash_type_flags {
  */
 struct efx_dl_hash_insertion {
 	struct efx_dl_device_info hdr;
-	unsigned data_offset;
-	unsigned hash_offset;
+	unsigned int data_offset;
+	unsigned int hash_offset;
 	enum efx_dl_hash_type_flags flags;
 };
 
@@ -309,9 +309,9 @@ struct efx_dl_hash_insertion {
  */
 struct efx_dl_siena_sriov {
 	struct efx_dl_device_info hdr;
-	unsigned vi_base;
-	unsigned vi_scale;
-	unsigned vf_count;
+	unsigned int vi_base;
+	unsigned int vi_scale;
+	unsigned int vf_count;
 };
 
 /**
@@ -326,7 +326,7 @@ struct efx_dl_siena_sriov {
 struct efx_dl_aoe_resources {
 	struct efx_dl_device_info hdr;
 	unsigned internal_macs;
-	unsigned external_macs;
+	unsigned int external_macs;
 };
 
 /**
@@ -357,18 +357,22 @@ enum efx_dl_ef10_resource_flags {
  *      for wakeup timers, in nanoseconds.
  * @rss_channel_count: Number of receive channels used for RSS.
  * @rx_channel_count: Number of receive channels available for use.
+ * @vi_shift: Shift value for absolute VI number computation.
  */
 struct efx_dl_ef10_resources {
 	struct efx_dl_device_info hdr;
-	unsigned vi_base;
-	unsigned vi_min;
-	unsigned vi_lim;
-	unsigned timer_quantum_ns;
-	unsigned rss_channel_count;
+	unsigned int vi_base;
+	unsigned int vi_min;
+	unsigned int vi_lim;
+	unsigned int timer_quantum_ns;
+	unsigned int rss_channel_count;
 	enum efx_dl_ef10_resource_flags flags;
 	unsigned int vport_id;
 #if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 0)
 	unsigned int rx_channel_count;
+#endif
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && EFX_DRIVERLINK_API_VERSION_MINOR > 2)
+	unsigned int vi_shift;
 #endif
 };
 
@@ -466,10 +470,12 @@ int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id);
 int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 			   int filter_id, int rxq_i, int stack_id);
 
-int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev, unsigned vport_id,
+int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev,
+			       unsigned int vport_id,
 			       const struct efx_filter_spec *spec,
 			       u64 *filter_id_out, bool *is_exclusive_out);
-int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev, unsigned vport_id,
+int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev,
+			       unsigned int vport_id,
 			       u64 filter_id, bool is_exclusive);
 
 

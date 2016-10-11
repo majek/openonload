@@ -10,10 +10,10 @@ TARGET		:= libcitransport0.so
 MMAKE_TYPE	:= DLL
 
 LDEP	:= $(CITPCOMMON_LIB_DEPEND) $(CIIP_LIB_DEPEND) \
-	$(CIUL_LIB_DEPEND) $(CITOOLS_LIB_DEPEND)
+	$(CIUL_LIB_DEPEND) $(CITOOLS_LIB_DEPEND) $(CPLANE_LIB_DEPEND)
 
 LLNK	:= $(LINK_CITPCOMMON_LIB) $(LINK_CIIP_LIB) \
-	$(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB)
+	$(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB) $(LINK_CPLANE_LIB)
 
 
 LIB_SRCS	:=			\
@@ -60,6 +60,13 @@ endif
 MMAKE_CFLAGS 	+= -DONLOAD_EXT_VERSION_MAJOR=$(ONLOAD_EXT_VERSION_MAJOR)
 MMAKE_CFLAGS 	+= -DONLOAD_EXT_VERSION_MINOR=$(ONLOAD_EXT_VERSION_MINOR)
 MMAKE_CFLAGS 	+= -DONLOAD_EXT_VERSION_MICRO=$(ONLOAD_EXT_VERSION_MICRO)
+
+
+# Overwrite standard rule for startup.c: add -fno-stack-protector
+# to execute the library as a binary
+cflags_for_startup := -fno-stack-protector
+$(MMAKE_OBJ_PREFIX)startup.o: $(TOP)/src/lib/transport/unix/startup.c
+	(cflags="$(cflags_for_startup)"; $(MMakeCompileC))
 
 all: $(TARGET)
 

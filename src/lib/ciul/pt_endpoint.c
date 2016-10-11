@@ -55,8 +55,14 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
   if( vi_flags & EF_VI_TX_FILTER_MASK_2  ) efab_flags |= EFHW_VI_TX_Q_MASK_WIDTH_1;
   if( vi_flags & EF_VI_RX_TIMESTAMPS     ) efab_flags |= EFHW_VI_RX_TIMESTAMPS;
   if( vi_flags & EF_VI_TX_TIMESTAMPS     ) efab_flags |= EFHW_VI_TX_TIMESTAMPS;
-  if( vi_flags & EF_VI_RX_PACKED_STREAM  ) efab_flags |= (EFHW_VI_RX_PACKED_STREAM |
-                                                          EFHW_VI_NO_CUT_THROUGH);
+  if( vi_flags & EF_VI_ENABLE_EV_TIMER   ) efab_flags |= EFHW_VI_ENABLE_EV_TIMER;
+  if( vi_flags & EF_VI_RX_PACKED_STREAM  ) efab_flags |=
+                                                   (EFHW_VI_RX_PACKED_STREAM |
+                                                    EFHW_VI_NO_EV_CUT_THROUGH);
+  if( vi_flags & EF_VI_RX_EVENT_MERGE) efab_flags |= (EFHW_VI_RX_PREFIX |
+                                                    EFHW_VI_NO_RX_CUT_THROUGH |
+                                                    EFHW_VI_ENABLE_RX_MERGE |
+                                                    EFHW_VI_NO_EV_CUT_THROUGH);
   return efab_flags;
 }
 
@@ -118,6 +124,59 @@ static int get_ts_correction(ef_driver_handle vi_dh, int res_id,
 }
 
 
+int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
+                             int num_alts, size_t buf_space)
+{
+  ci_resource_op_t op;
+  int i, rc;
+  unsigned max_hw;
+
+  if( ! (vi->vi_flags & EF_VI_TX_ALT) ) {
+    LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT flag not set", __func__));
+    return -EINVAL;
+  }
+  if( vi->tx_alt_id2hw != NULL ) {
+    LOGVV(ef_log("%s: ERROR: already called", __func__));
+    return -EALREADY;
+  }
+  vi->tx_alt_id2hw = malloc(num_alts * sizeof(vi->tx_alt_id2hw[0]));
+  if( vi->tx_alt_id2hw == NULL ) {
+    LOGVV(ef_log("%s: ERROR: out of memory (num_alts=%d)", __func__, num_alts));
+    return -ENOMEM;
+  }
+
+  memset(&op, 0, sizeof(op));
+  op.id = efch_make_resource_id(vi->vi_resource_id);
+  op.op = CI_RSOP_VI_TX_ALT_ALLOC;
+  op.u.vi_tx_alt_alloc_in.num_alts = num_alts;
+  op.u.vi_tx_alt_alloc_in.buf_space_32b = (buf_space + 31) / 32;
+  if( (rc = ci_resource_op(vi_dh, &op)) < 0 ) {
+    LOGVV(ef_log("%s: ERROR: driver returned %d", __func__, rc));
+    free(vi->tx_alt_id2hw);
+    vi->tx_alt_id2hw = NULL;
+    return rc;
+  }
+
+  vi->tx_alt_num = num_alts;
+  max_hw = 0;
+  for( i = 0; i < num_alts; ++i ) {
+    vi->tx_alt_id2hw[i] = op.u.vi_tx_alt_alloc_out.alt_ids[i];
+    if( vi->tx_alt_id2hw[i] > max_hw )
+      max_hw = vi->tx_alt_id2hw[i];
+  }
+  vi->tx_alt_hw2id = calloc(max_hw + 1, sizeof(vi->tx_alt_hw2id[0]));
+  if( vi->tx_alt_hw2id == NULL ) {
+    LOGVV(ef_log("%s: ERROR: out of memory (max_hw=%u)", __func__, max_hw));
+    free(vi->tx_alt_id2hw);
+    vi->tx_alt_id2hw = NULL;
+    return -ENOMEM;
+  }
+  for( i = 0; i < num_alts; ++i )
+    vi->tx_alt_hw2id[vi->tx_alt_id2hw[i]] = i;
+  return 0;
+}
+
+
 /****************************************************************************/
 
 void ef_vi_set_intf_ver(char* intf_ver, size_t len)
@@ -134,9 +193,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "7ea3e5321e5fd3383375e5c5ffc69881") &&
+  if( strcmp(EFCH_INTF_VER, "6eb29a59b6a0365c95c78b8ffba2777b") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "44960836e81b59840eeca7999f97e791") ) {
+      strcmp(EFCH_INTF_VER, "c217ae46d057c90f295732ada3711ae4") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }
@@ -167,6 +226,11 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 
   if( pd_or_vi_set_dh < 0 )
     return -EINVAL;
+  if( (vi_flags & EF_VI_TX_ALT) && (vi_flags & EF_VI_TX_TIMESTAMPS) ) {
+    LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT and EF_VI_TX_TIMESTAMPS not "
+                 "supported together", __func__));
+    return -EOPNOTSUPP;
+  }
 
   /* Ensure ef_vi_free() only frees what we allocate. */
   io_mmap_ptr = NULL;
@@ -416,6 +480,8 @@ int ef_vi_free(ef_vi* ep, ef_driver_handle fd)
   }
 
   free(ep->ep_state);
+  free(ep->tx_alt_id2hw);
+  free(ep->tx_alt_hw2id);
 
   EF_VI_DEBUG(memset(ep, 0, sizeof(*ep)));
 

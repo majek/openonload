@@ -56,6 +56,8 @@
 #include <etherfabric/pd.h>
 #include <etherfabric/memreg.h>
 
+#include <poll.h>
+
 #include "utils.h"
 
 
@@ -95,6 +97,7 @@ struct resources {
   /* virtual interface (rxq + txq) */
   struct ef_vi       vi;
   int                rx_prefix_len;
+  int                pktlen_offset;
 
   /* registered memory for DMA */
   void*              pkt_bufs;
@@ -108,6 +111,7 @@ struct resources {
   /* statistics */
   uint64_t           n_rx_pkts;
   uint64_t           n_rx_bytes;
+  uint64_t           n_ht_events;
 };
 
 
@@ -117,6 +121,12 @@ static int cfg_vport;
 static int cfg_vlan_id = EF_PD_VLAN_NONE;
 static int cfg_verbose;
 static int cfg_monitor_vi_stats;
+static int cfg_rx_merge;
+static int cfg_eventq_wait;
+static int cfg_fd_wait;
+
+/* Mutex to protect printing from different threads */
+static pthread_mutex_t printf_mutex;
 
 
 static inline
@@ -139,6 +149,7 @@ static void hexdump(const void* pv, int len)
 {
   const unsigned char* p = (const unsigned char*) pv;
   int i;
+  pthread_mutex_lock(&printf_mutex);
   for( i = 0; i < len; ++i ) {
     const char* eos;
     switch( i & 15 ) {
@@ -159,6 +170,7 @@ static void hexdump(const void* pv, int len)
     printf("%02x%s", (unsigned) p[i], eos);
   }
   printf(((len & 15) == 0) ? "\n" : "\n\n");
+  pthread_mutex_unlock(&printf_mutex);
 }
 
 
@@ -186,10 +198,12 @@ static void handle_rx(struct resources* res, int pkt_buf_i, int len)
     void* dma_ptr = (char*) pkt_buf + RX_DMA_OFF;
     TRY(ef_vi_receive_get_timestamp_with_sync_flags(&res->vi, dma_ptr,
                                                     &hw_ts, &ts_flags));
+    pthread_mutex_lock(&printf_mutex);
     printf("HW_TSTAMP=%ld.%09ld  delta=%"PRId64"ns  %s %s\n",
            hw_ts.tv_sec, hw_ts.tv_nsec, timespec_diff_ns(sw_ts, hw_ts),
            (ts_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? "ClockSet" : "",
            (ts_flags & EF_VI_SYNC_FLAG_CLOCK_IN_SYNC) ? "ClockInSync" : "");
+    pthread_mutex_unlock(&printf_mutex);
   }
 
   /* Do something useful with packet contents here! */
@@ -219,6 +233,16 @@ static void handle_rx_discard(struct resources* res,
 }
 
 
+static void handle_batched_rx(struct resources* res, int pkt_buf_i)
+{
+  struct pkt_buf* pkt_buf = pkt_buf_from_id(res, pkt_buf_i);
+  void* dma_ptr = (char*) pkt_buf + RX_DMA_OFF;
+
+  handle_rx(res, pkt_buf_i,
+            *(uint16_t*)((uint8_t*)dma_ptr + res->pktlen_offset));
+}
+
+
 static void refill_rx_ring(struct resources* res)
 {
 #define REFILL_BATCH_SIZE  16
@@ -242,33 +266,61 @@ static void refill_rx_ring(struct resources* res)
 static void thread_main_loop(struct resources* res)
 {
   ef_event evs[32];
-  int i, n_ev;
+  ef_request_id ids[EF_VI_RECEIVE_BATCH];
+  int i, j, n_ev, n_rx;
 
   while( 1 ) {
+    /* Poll event queue for events */
     n_ev = ef_eventq_poll(&res->vi, evs, sizeof(evs) / sizeof(evs[0]));
-    if( n_ev <= 0 )
-      continue;
-
-    for( i = 0; i < n_ev; ++i ) {
-      switch( EF_EVENT_TYPE(evs[i]) ) {
-      case EF_EVENT_TYPE_RX:
-        /* This code does not handle jumbos. */
-        assert(EF_EVENT_RX_SOP(evs[i]) != 0);
-        assert(EF_EVENT_RX_CONT(evs[i]) == 0);
-        handle_rx(res, EF_EVENT_RX_RQ_ID(evs[i]),
-                  EF_EVENT_RX_BYTES(evs[i]) - res->rx_prefix_len);
-        break;
-      case EF_EVENT_TYPE_RX_DISCARD:
-        handle_rx_discard(res, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
-                        EF_EVENT_RX_DISCARD_BYTES(evs[i]) - res->rx_prefix_len,
-                        EF_EVENT_RX_DISCARD_TYPE(evs[i]));
-        break;
-      default:
-        LOGE("ERROR: unexpected event type=%d\n", (int) EF_EVENT_TYPE(evs[i]));
-        break;
+    if( n_ev > 0 ) {
+      for( i = 0; i < n_ev; ++i ) {
+        switch( EF_EVENT_TYPE(evs[i]) ) {
+        case EF_EVENT_TYPE_RX:
+          /* This code does not handle jumbos. */
+          assert(EF_EVENT_RX_SOP(evs[i]) != 0);
+          assert(EF_EVENT_RX_CONT(evs[i]) == 0);
+          assert(!cfg_rx_merge);
+          handle_rx(res, EF_EVENT_RX_RQ_ID(evs[i]),
+                    EF_EVENT_RX_BYTES(evs[i]) - res->rx_prefix_len);
+          break;
+        case EF_EVENT_TYPE_RX_MULTI:
+          /* This code does not handle jumbos. */
+          assert(EF_EVENT_RX_MULTI_SOP(evs[i]) != 0);
+          assert(EF_EVENT_RX_MULTI_CONT(evs[i]) == 0);
+          assert(cfg_rx_merge);
+          n_rx = ef_vi_receive_unbundle(&res->vi, &evs[i], ids);
+          for( j = 0; j < n_rx; ++j ) {
+            handle_batched_rx(res, ids[j]);
+          }
+          res->n_ht_events += 1;
+          break;
+        case EF_EVENT_TYPE_RX_DISCARD:
+          handle_rx_discard(res, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
+                          EF_EVENT_RX_DISCARD_BYTES(evs[i]) - res->rx_prefix_len,
+                          EF_EVENT_RX_DISCARD_TYPE(evs[i]));
+          break;
+        default:
+          LOGE("ERROR: unexpected event type=%d\n", (int) EF_EVENT_TYPE(evs[i]));
+          break;
+        }
       }
+      refill_rx_ring(res);
     }
-    refill_rx_ring(res);
+    /* Wait on eventq or fd until an event occurs if user requested this,
+     * otherwise keep polling in a tight loop.
+     */
+    else if ( cfg_eventq_wait ) {
+      TRY(ef_eventq_wait(&res->vi, res->dh, ef_eventq_current(&res->vi), 0));
+    }
+    else if ( cfg_fd_wait ) {
+      TRY(ef_vi_prime(&res->vi, res->dh, ef_eventq_current(&res->vi)));
+      struct pollfd pollfd = {
+        .fd      = res->dh,
+        .events  = POLLIN,
+        .revents = 0,
+      };
+      TRY(poll(&pollfd, 1, -1));
+    }
   }
 }
 
@@ -321,7 +373,10 @@ static void monitor(struct resources* res)
   int ms, pkt_rate, mbps;
   const ef_vi_stats_layout* vi_stats_layout;
 
-  printf("# pkt-rate  bandwidth(Mbps)  pkts");
+  if( cfg_rx_merge )
+    printf("# pkt-rate  bandwidth(Mbps)  pkts  events");
+  else
+    printf("# pkt-rate  bandwidth(Mbps)  pkts");
   if( cfg_monitor_vi_stats )
     efvi_stats_header_print(res, &vi_stats_layout);
   printf("\n");
@@ -339,10 +394,17 @@ static void monitor(struct resources* res)
     ms += (end.tv_usec - start.tv_usec) / 1000;
     pkt_rate = (int) ((int64_t) (now_pkts - prev_pkts) * 1000 / ms);
     mbps = (int) ((now_bytes - prev_bytes) * 8 / 1000 / ms);
-    printf("%10d %16d %16llu", pkt_rate, mbps, (unsigned long long) now_pkts);
+    pthread_mutex_lock(&printf_mutex);
+    if( cfg_rx_merge )
+      printf("%10d %16d %16llu %16llu", pkt_rate, mbps,
+                                        (unsigned long long) now_pkts,
+                                        (unsigned long long) res->n_ht_events);
+    else
+      printf("%10d %16d %16llu", pkt_rate, mbps, (unsigned long long) now_pkts);
     if( cfg_monitor_vi_stats )
       efvi_stats_print(res, 1, vi_stats_layout);
     printf("\n");
+    pthread_mutex_unlock(&printf_mutex);
     fflush(stdout);
     prev_pkts = now_pkts;
     prev_bytes = now_bytes;
@@ -385,6 +447,9 @@ static void usage(void)
   fprintf(stderr, "  -L <vid> assign vlan id to virtual port\n");
   fprintf(stderr, "  -v       enable verbose logging\n");
   fprintf(stderr, "  -m       monitor vi error statistics\n");
+  fprintf(stderr, "  -b       use high RX event merge (batched) mode\n");
+  fprintf(stderr, "  -e       block on eventq instead of busy wait\n");
+  fprintf(stderr, "  -f       block on fd instead of busy wait\n");
   exit(1);
 }
 
@@ -397,7 +462,7 @@ int main(int argc, char* argv[])
   unsigned vi_flags;
   int c;
 
-  while( (c = getopt (argc, argv, "dtVL:vm")) != -1 )
+  while( (c = getopt (argc, argv, "dtVL:vmbef")) != -1 )
     switch( c ) {
     case 'd':
       cfg_hexdump = 1;
@@ -417,11 +482,26 @@ int main(int argc, char* argv[])
     case 'm':
       cfg_monitor_vi_stats = 1;
       break;
+    case 'b':
+      cfg_rx_merge = 1;
+      break;
+    case 'e':
+      cfg_eventq_wait = 1;
+      break;
+    case 'f':
+      cfg_fd_wait = 1;
+      break;
     case '?':
       usage();
     default:
       TEST(0);
     }
+
+  if ( cfg_eventq_wait && cfg_fd_wait ) {
+    LOGE("ERROR: you cannot specify both -e (block on eventq) and -f (block on"
+         " fd) as options\n");
+    exit(1);
+  }
 
   argc -= optind;
   argv += optind;
@@ -442,9 +522,25 @@ int main(int argc, char* argv[])
   vi_flags = EF_VI_FLAGS_DEFAULT;
   if( cfg_timestamping )
     vi_flags |= EF_VI_RX_TIMESTAMPS;
+  if( cfg_rx_merge )
+    vi_flags |= EF_VI_RX_EVENT_MERGE;
   TRY(ef_vi_alloc_from_pd(&res->vi, res->dh, &res->pd, res->dh,
                           -1, -1, 0, NULL, -1, vi_flags));
   res->rx_prefix_len = ef_vi_receive_prefix_len(&res->vi);
+  assert(!cfg_rx_merge || res->rx_prefix_len);
+
+  if( cfg_rx_merge ) {
+    const ef_vi_layout_entry* layout;
+    int len, i;
+
+    TRY(ef_vi_receive_query_layout(&res->vi, &layout, &len));
+
+    for( i = 0; i < len; i++ )
+      if( layout[i].evle_type == EF_VI_LAYOUT_PACKET_LENGTH )
+        res->pktlen_offset = layout[i].evle_offset;
+
+    TEST(res->pktlen_offset);
+  }
 
   LOGI("rxq_size=%d\n", ef_vi_receive_capacity(&res->vi));
   LOGI("evq_size=%d\n", ef_eventq_capacity(&res->vi));
@@ -496,6 +592,8 @@ int main(int argc, char* argv[])
     TRY(ef_vi_filter_add(&res->vi, res->dh, &filter_spec, NULL));
     ++argv; --argc;
   }
+
+  pthread_mutex_init(&printf_mutex, NULL);
 
   TEST(pthread_create(&thread_id, NULL, monitor_fn, res) == 0);
   thread_main_loop(res);

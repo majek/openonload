@@ -60,7 +60,7 @@ extern int
 efrm_pio_alloc(struct efrm_pd *, struct efrm_pio **);
 
 extern void
-efrm_pio_release(struct efrm_pio *);
+efrm_pio_release(struct efrm_pio *, bool);
 
 extern struct efrm_resource *
 efrm_pio_to_resource(struct efrm_pio *);

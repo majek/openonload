@@ -410,6 +410,25 @@ static int efch_vi_get_rx_error_stats(struct efrm_vi* virs,
 }
 
 
+static int efch_vi_tx_alt_alloc(struct efrm_vi* virs, ci_resource_op_t* op)
+{
+  int i, rc, num_alts = op->u.vi_tx_alt_alloc_in.num_alts;
+  const int max_alts = ( sizeof(op->u.vi_tx_alt_alloc_out.alt_ids) / 
+                         sizeof(op->u.vi_tx_alt_alloc_out.alt_ids[0]) );
+  if( num_alts > max_alts )
+    return -E2BIG;
+
+  rc = efrm_vi_tx_alt_alloc(virs, num_alts,
+                            op->u.vi_tx_alt_alloc_in.buf_space_32b);
+  if( rc < 0 )
+    return rc;
+
+  for( i = 0; i < num_alts; ++i )
+    op->u.vi_tx_alt_alloc_out.alt_ids[i] = virs->tx_alt_ids[i];
+  return 0;
+}
+
+
 static void efch_vi_flush_complete(void *completion_void)
 {
   complete((struct completion *)completion_void);
@@ -527,12 +546,20 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
         memset(data, 0, data_len);
         rc = efch_vi_get_rx_error_stats(virs, data, data_len,
                                         op->u.vi_stats.do_reset);
-        if( rc != 0 )
+        if( rc != 0 ) {
+          kfree(data);
           break;
+        }
         if( copy_to_user(user_data, data, data_len) )
           rc = -EFAULT;
+        kfree(data);
         break;
       }
+
+    case CI_RSOP_VI_TX_ALT_ALLOC:
+      rc = efch_vi_tx_alt_alloc(virs, op);
+      *copy_out = 1;
+      break;
 
     default:
       rc = efch_filter_list_op_add(rs->rs_base, efrm_vi_get_pd(virs),
@@ -555,20 +582,6 @@ static int efch_vi_rm_mmap(struct efrm_resource *rs, unsigned long *bytes,
 }
 
 
-#ifndef CI_HAVE_OS_NOPAGE
-static unsigned long
-efab_vi_rm_nopage_not_supported(struct efrm_resource* rs,
-                                void* opaque, unsigned long offset,
-                                unsigned long map_size)
-{
-  ci_log("efab_nopage: on '%s' "EFRM_RESOURCE_FMT" offset=%lx"
-	 " map_size=%lx", rs->rs_owner->rm_name,
-	 EFRM_RESOURCE_PRI_ARG(rs), offset, map_size);
-  return (unsigned) -1; /* bus fault */
-}
-#endif
-
-
 static unsigned long
 efch_vi_rm_nopage(struct efrm_resource *rs, void *opaque,
                   unsigned long offset, unsigned long map_size)
@@ -583,17 +596,23 @@ static int efch_vi_rm_mmap_bytes(struct efrm_resource* rs, int map_type)
 }
 
 
+int efch_vi_filter_add(efch_resource_t* rs, ci_filter_add_t* filter_add,
+                       int* copy_out)
+{
+  struct efrm_vi* virs = efrm_vi(rs->rs_base);
+
+  return efch_filter_list_add(rs->rs_base, efrm_vi_get_pd(virs), &rs->vi.fl,
+                              filter_add, copy_out);
+}
+
+
 efch_resource_ops efch_vi_ops = {
-  efch_vi_rm_alloc,
-  efch_vi_rm_free,
-  efch_vi_rm_mmap,
-#if defined(CI_HAVE_OS_NOPAGE)
-  efch_vi_rm_nopage,
-#else
-  efch_vi_rm_nopage_not_supported,
-#endif
-  efch_vi_rm_dump,
-  efch_vi_rm_rsops,
-  efch_vi_rm_mmap_bytes,
+  .rm_alloc = efch_vi_rm_alloc,
+  .rm_free = efch_vi_rm_free,
+  .rm_mmap = efch_vi_rm_mmap,
+  .rm_nopage = efch_vi_rm_nopage,
+  .rm_dump = efch_vi_rm_dump,
+  .rm_rsops = efch_vi_rm_rsops,
+  .rm_mmap_bytes = efch_vi_rm_mmap_bytes,
 };
 

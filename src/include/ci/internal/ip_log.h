@@ -64,6 +64,12 @@
 #define CI_TP_LOG_SC   (CI_TP_LOG_TC|CI_TP_LOG_UC) /* socket control */
 #define CI_TP_LOG_SV   (CI_TP_LOG_TV|CI_TP_LOG_UV) /* socket verbose */
 
+#ifdef __KERNEL__
+#define CI_TP_LOG_DEFAULT (CI_TP_LOG_E|CI_TP_LOG_U|CI_TP_LOG_S)
+#else
+#define CI_TP_LOG_DEFAULT (CI_TP_LOG_E|CI_TP_LOG_U)
+#endif
+
 # define LOG_C(c,x)	do{ if(c) do{x;}while(0); }while(0)
 # define LOG_E(x)	do{if(ci_tp_log&CI_TP_LOG_E )do{x;}while(0);}while(0)
 

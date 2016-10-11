@@ -70,6 +70,7 @@ struct linux_efhw_nic {
 
 	/* Driverlink device context */
 	struct efx_dl_device *dl_device;
+	struct rw_semaphore dl_sem;
 
 	/*! Callbacks for driverlink, when needed. */
 	struct efx_dl_callbacks *dl_callbacks;

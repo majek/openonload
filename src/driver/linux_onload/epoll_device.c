@@ -37,7 +37,6 @@
 #include <linux/poll.h>
 #include <linux/unistd.h> /* for __NR_epoll_pwait */
 #include "onload_internal.h"
-#include <ci/internal/cplane_ops.h> /* for oo_timesync_cpu_khz */
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,29)
 /* Normal Linux epoll depth check does not work for us.
@@ -617,18 +616,25 @@ static unsigned oo_epoll2_poll(struct oo_epoll_private* priv,
 /*************************************************************
  * EPOLL1-specific code
  *************************************************************/
+static void oo_epoll1_set_shared_flag(struct oo_epoll1_private* priv, int set)
+{
+  ci_uint32 tmp, new;
+  do {
+    tmp = priv->sh->flag;
+    if( set )
+      new = (tmp + (1 << OO_EPOLL1_FLAG_SEQ_SHIFT)) | OO_EPOLL1_FLAG_EVENT;
+    else
+      new = tmp & ~OO_EPOLL1_FLAG_EVENT;
+  } while( ci_cas32u_fail(&priv->sh->flag, tmp, new) );
+}
+
 static int oo_epoll1_callback(wait_queue_t *wait, unsigned mode, int sync,
                               void *key)
 {
   struct oo_epoll1_private* priv = container_of(wait,
                                                 struct oo_epoll1_private,
                                                 wait);
-  ci_uint32 tmp;
-  do {
-    tmp = priv->sh->flag;
-  } while( ci_cas32u_fail(&priv->sh->flag, tmp,
-                          (tmp + (1 << OO_EPOLL1_FLAG_SEQ_SHIFT)) |
-                          OO_EPOLL1_FLAG_EVENT) );
+  oo_epoll1_set_shared_flag(priv, 1/*set*/);
   return 0;
 }
 static void oo_epoll1_queue_proc(struct file *file,
@@ -698,12 +704,17 @@ fail1:
 
 static int oo_epoll1_release(struct oo_epoll_private* priv)
 {
-  ci_assert(priv->p.p1.whead);
-  remove_wait_queue(priv->p.p1.whead, &priv->p.p1.wait);
+  struct oo_epoll1_private* priv1 = &priv->p.p1;
 
-  fput(priv->p.p1.os_file);
+  ci_assert(priv1->whead);
+  remove_wait_queue(priv1->whead, &priv1->wait);
 
-  __free_page(priv->p.p1.page);
+  fput(priv1->os_file);
+
+  __free_page(priv1->page);
+
+  if( priv1->home_stack )
+    ci_netif_put_ready_list(&priv1->home_stack->netif, priv1->ready_list);
 
   oo_epoll_release_common(priv);
 
@@ -726,21 +737,22 @@ static int oo_epoll1_wait(struct oo_epoll1_private *priv,
                           struct oo_epoll1_wait_arg *op)
 {
   int rc = 0;
-  ci_uint32 tmp;
+
+  /* We are going to handle all EPOLLET and EPOLLONESHOT events -
+   * remove OO_EPOLL1_FLAG_EVENT flag from the shared page. */
+  oo_epoll1_set_shared_flag(priv, 0/*unset*/);
 
   op->rc = efab_linux_sys_epoll_wait(priv->sh->epfd,
                                      CI_USER_PTR_GET(op->events),
                                      op->maxevents, 0/*timeout*/);
   if( op->rc < 0 )
     rc = op->rc;
-  do {
-    tmp = priv->sh->flag;
-    if( (tmp & 1) == 0 )
-      break;
-    if( priv->os_file->f_op->poll(priv->os_file, NULL) )
-      break;
-  } while( ci_cas32u_fail(&priv->sh->flag, tmp,
-                          tmp & ~OO_EPOLL1_FLAG_EVENT) );
+
+  /* We have not handled all events because they are level-triggered or
+   * because maxevents valus is too small. Set the OO_EPOLL1_FLAG_EVENT
+   * flag back. */
+  if( priv->os_file->f_op->poll(priv->os_file, NULL) )
+    oo_epoll1_set_shared_flag(priv, 1/*set*/);
 
   return rc;
 }
@@ -1111,7 +1123,28 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
   }
 
   default:
-    ci_log("unknown epoll device ioctl: 0x%x", cmd);
+    /* If libc is used on our sockets, sometimes it may call TCGETS ioctl to
+     * determine whether the file is a tty.
+     * tc* functions (tcgetpgrp, tcflush, etc) use direct ioctl syscalls,
+     * so TIOC* ioctl go around onload library even if it is used.
+     * So, we do not print scary warning for 0x5401(TCGETS)
+     * - 0x541A(TIOCSSOFTCAR).
+     * Next is FIONREAD(0x541B), which we can support, but do not do this.
+     * The only ioctl which was really seen in the real life is TIOCGPGRP.
+     */
+#if ! defined (__PPC__)
+    BUILD_BUG_ON(_IOC_TYPE(TIOCSSOFTCAR) != _IOC_TYPE(TCGETS));
+    if( _IOC_TYPE(cmd) != _IOC_TYPE(TCGETS) ||
+        _IOC_NR(cmd) > _IOC_NR(TIOCSSOFTCAR) ) {
+#else
+    /* On PPC TTY ioctls are organized in a complicated way, so for now
+     * we just shut up warnings for a few known ioctl codes
+     */
+    if( cmd != TCGETS && cmd != TIOCGPGRP) {
+#endif
+      ci_log("unknown epoll device ioctl: 0x%x", cmd);
+    }
+
     rc = -EINVAL;
   }
   return rc;

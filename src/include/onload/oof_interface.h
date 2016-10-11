@@ -55,7 +55,7 @@ extern void
 oof_hwport_removed(int hwport);
 
 extern void
-oof_hwport_un_available(int hwport, int available);
+oof_hwport_un_available(ci_hwport_id_t hwport, int available, void *arg);
 
 extern void
 oof_do_deferred_work(struct oof_manager*);
@@ -118,7 +118,7 @@ extern void
 oof_socket_mcast_del_all(struct oof_manager*, struct oof_socket*);
 
 extern void
-oof_mcast_update_filters(struct oof_manager* fm, int ifindex);
+oof_mcast_update_filters(ci_ifid_t ifindex, void *arg);
 
 extern int
 oof_tproxy_install(struct oof_manager* fm,

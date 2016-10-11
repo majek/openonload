@@ -181,13 +181,6 @@
 #endif
 
 
-#define STRUCT_NS_MMAP_INFO(ctx) \
-    FTL_TSTRUCT_BEGIN(ctx, cicp_ns_mmap_info_t,)			      \
-    FTL_TFIELD_INT(ctx, cicp_ns_mmap_info_t, ci_uint32, mac_mmap_len)	      \
-    FTL_TFIELD_INT(ctx, cicp_ns_mmap_info_t, ci_uint32, fwdinfo_mmap_len)     \
-    FTL_TFIELD_INT(ctx, cicp_ns_mmap_info_t, ci_uint32, bondinfo_mmap_len)    \
-    FTL_TSTRUCT_END(ctx)					
-
 typedef struct {
     ci_uint32  a;
     ci_uint32  b;
@@ -902,7 +895,6 @@ typedef struct {
                            nic, CI_CFG_MAX_INTERFACES)                  \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_int32, nic_n)                  \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, evq_last_prime)        \
-  FTL_TFIELD_STRUCT(ctx, ci_netif_state, cicp_ns_mmap_info_t, control_mmap) \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, stack_id)              \
   FTL_TFIELD_ARRAYOFINT(ctx, ci_netif_state, char, pretty_name,         \
                         CI_CFG_STACK_NAME_LEN + 8)                      \
@@ -913,7 +905,7 @@ typedef struct {
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, error_flags)           \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, evq_primed)            \
   FTL_TFIELD_ARRAYOFINT(ctx, ci_netif_state, ci_int8,                   \
-                        hwport_to_intf_i, CI_CFG_MAX_REGISTER_INTERFACES)   \
+                        hwport_to_intf_i, CPLANE_MAX_REGISTER_INTERFACES) \
   FTL_TFIELD_ARRAYOFINT(ctx, ci_netif_state, ci_int8,                   \
                         intf_i_to_hwport, CI_CFG_MAX_INTERFACES)        \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, n_spinners)            \
@@ -973,7 +965,6 @@ typedef struct {
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, sock_spin_cycles)      \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, buzz_cycles)           \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint64, timer_prime_cycles)    \
-  FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, cplane_bytes)          \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, io_mmap_bytes)         \
   FTL_TFIELD_INT(ctx, ci_netif_state, ci_uint32, buf_mmap_bytes)        \
   ON_CI_CFG_PIO(                                                        \

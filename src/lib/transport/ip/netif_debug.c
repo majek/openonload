@@ -298,12 +298,12 @@ static void ci_netif_dump_pkt_summary(ci_netif* ni, oo_dump_log_fn_t logger,
     tx_ring += ef_vi_transmit_fill_level(&ni->nic_hw[intf_i].vi);
     tx_oflow += ns->nic[intf_i].dmaq.num;
   }
-  used = ni->packets->n_pkts_allocated - ni->packets->id - ns->n_async_pkts;
+  used = ni->packets->n_pkts_allocated - ni->packets->n_free - ns->n_async_pkts;
   rx_queued = ns->n_rx_pkts - rx_ring - ns->mem_pressure_pkt_pool_n;
 
   logger(log_arg, "  pkt_bufs: max=%d alloc=%d free=%d async=%d%s",
          ni->packets->sets_max * PKTS_PER_SET,
-         ni->packets->n_pkts_allocated, ni->packets->id, ns->n_async_pkts,
+         ni->packets->n_pkts_allocated, ni->packets->n_free, ns->n_async_pkts,
          (ns->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ? " CRITICAL":
          (ns->mem_pressure ? " LOW":""));
   logger(log_arg, "  pkt_bufs: rx=%d rx_ring=%d rx_queued=%d pressure_pool=%d",
@@ -545,11 +545,11 @@ void ci_netif_dump_reap_list(ci_netif* ni, int verbose)
 void ci_netif_dump_extra(ci_netif* ni)
 {
   ci_netif_state* ns = ni->state;
-  char hp2i[CI_CFG_MAX_REGISTER_INTERFACES * 10];
+  char hp2i[CPLANE_MAX_REGISTER_INTERFACES * 10];
   char i2hp[CI_CFG_MAX_INTERFACES * 10];
   int i, off;
 
-  for( i = 0, off = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0, off = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
     off += sprintf(hp2i+off, "%s%d", i?",":"", (int) ns->hwport_to_intf_i[i]);
   for( i = 0, off = 0; i < CI_CFG_MAX_INTERFACES; ++i )
     off += sprintf(i2hp+off, "%s%d", i?",":"", (int) ns->intf_i_to_hwport[i]);
@@ -614,6 +614,9 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
          0,
 #endif
          nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
+  logger(log_arg, "  clk: %s%s",
+         (nic->last_sync_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? "SET " : "",
+         (nic->last_sync_flags & EF_VI_SYNC_FLAG_CLOCK_IN_SYNC) ? "SYNC" : "");
   if( nic->nic_error_flags )
     logger(log_arg, "  ERRORS: "CI_NETIF_NIC_ERRORS_FMT,
            CI_NETIF_NIC_ERRORS_PRI_ARG(nic->nic_error_flags));

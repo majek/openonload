@@ -205,7 +205,7 @@ void efrm_resource_release(struct efrm_resource *rs)
 		efrm_pd_free(efrm_pd_from_resource(rs));
 		break;
 	case EFRM_RESOURCE_PIO:
-		efrm_pio_free(efrm_pio_from_resource(rs));
+		efrm_pio_free(efrm_pio_from_resource(rs), true);
 		break;
 	default:
 		EFRM_ASSERT(0);

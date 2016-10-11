@@ -41,6 +41,7 @@ struct tcp_recv_info {
   ci_uint64 timestamp;
   struct timespec hw_timestamp;
   const ci_tcp_recvmsg_args* a;
+  int msg_flags;
 };
 
 #ifndef __KERNEL__
@@ -235,6 +236,32 @@ void ci_tcp_rcvbuf_drs(ci_netif* netif, ci_tcp_state* ts)
 }
 
 
+static inline int /* bool */
+ci_tcp_recvmsg_get_nopeek(int peek_off, ci_tcp_state *ts, ci_netif *netif,
+                          ci_ip_pkt_fmt **pkt, int total, int n, int max_bytes,
+                          struct tcp_recv_info *rinf)
+{
+  ci_assert(peek_off == 0);
+  ts->rcv_delivered += n;
+  if( NI_OPTS(netif).tcp_rcvbuf_mode == 1 )
+    /* for now run every time we update rcv_delivered */
+    ci_tcp_rcvbuf_drs(netif, ts);
+  if( oo_offbuf_left(&(*pkt)->buf) == 0 ) {
+    /* We've emptied the current packet. */
+    if( CI_UNLIKELY(SEQ_LE(ts->ack_trigger, ts->rcv_delivered)) )
+      ci_tcp_recvmsg_send_wnd_update(netif, ts, rinf->a->flags);
+    if( total == max_bytes || OO_PP_IS_NULL((*pkt)->next) )
+      /* We've emptied the receive queue. Return non-zero to report this
+       * to the calling function, so that it can return appropriately. */
+      return 1;
+    ts->recv1_extract = (*pkt)->next;
+    *pkt = PKT_CHK_NNL(netif, ts->recv1_extract);
+    ci_assert(oo_offbuf_not_empty(&(*pkt)->buf));
+  }
+  return 0;
+}
+
+
 /* Copy data from the receive queue to the app's buffer(s).  Returns the
 ** number of bytes copied.  This function also sends window updates as
 ** appropriate.
@@ -287,6 +314,16 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
     rinf->hw_timestamp.tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
     rinf->hw_timestamp.tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
   }
+  else if( rinf->rc > 0 ) {
+    /* If we've already got data that we're returning to the app then we
+     * shouldn't be trying to add any more to it.
+     */
+    ci_assert_nflags(rinf->a->flags, ONLOAD_MSG_ONEPKT);
+  }
+  else {
+    /* If we carry on here we'll be ignoring any errors. */
+    ci_assert(0);
+  }
 
   while( 1 ) {
     PKT_TCP_RX_BUF_ASSERT_VALID(netif, pkt);
@@ -301,38 +338,35 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
     total += n;
     ci_assert(total <= max_bytes);
 
-    if(CI_LIKELY( ! (rinf->a->flags & MSG_PEEK) )) {
-      ci_assert(peek_off == 0);
-      ts->rcv_delivered += n;
-      if( NI_OPTS(netif).tcp_rcvbuf_mode == 1 )
-	/* for now run every time we update rcv_delivered */
-	ci_tcp_rcvbuf_drs(netif, ts);
-      if( oo_offbuf_left(&pkt->buf) == 0 ) {
-        /* We've emptied the current packet. */
-        if( CI_UNLIKELY(SEQ_LE(ts->ack_trigger, ts->rcv_delivered)) )
-          ci_tcp_recvmsg_send_wnd_update(netif, ts, rinf->a->flags);
-        if( total == max_bytes || OO_PP_IS_NULL(pkt->next) )
-          /* We've emptied the receive queue. */
-          return total;
-        ts->recv1_extract = pkt->next;
-        pkt = PKT_CHK_NNL(netif, ts->recv1_extract);
-        ci_assert(oo_offbuf_not_empty(&pkt->buf));
-      }
+    if(CI_LIKELY( ! (rinf->a->flags & (MSG_PEEK | ONLOAD_MSG_ONEPKT)) )) {
+      if( ci_tcp_recvmsg_get_nopeek(peek_off, ts, netif, &pkt, total, n,
+                                    max_bytes, rinf) != 0 )
+        return total;
     }
     else {
-      /* copy did an implicit advance of the offbuf which we do not want */
-      oo_offbuf_retard(&pkt->buf, n);
+      if( rinf->a->flags & MSG_PEEK ) {
+        /* copy did an implicit advance of the offbuf which we do not want */
+        oo_offbuf_retard(&pkt->buf, n);
 
-      peek_off += n;
-      if( oo_offbuf_left(&pkt->buf) - peek_off == 0 ) {
-        /* We've emptied the current packet. */
-        if( total == max_bytes || OO_PP_IS_NULL(pkt->next) )
-          /* We've emptied the receive queue. */
-          return total;
-        pkt = PKT_CHK_NNL(netif, pkt->next);
-        peek_off = 0;
-        ci_assert(oo_offbuf_not_empty(&pkt->buf));
+        peek_off += n;
+        if( oo_offbuf_left(&pkt->buf) - peek_off == 0 ) {
+          /* We've emptied the current packet. */
+          if( total == max_bytes || OO_PP_IS_NULL(pkt->next) )
+            /* We've emptied the receive queue. */
+            return total;
+          pkt = PKT_CHK_NNL(netif, pkt->next);
+          peek_off = 0;
+          ci_assert(oo_offbuf_not_empty(&pkt->buf));
+        }
       }
+      else {
+        if( ci_tcp_recvmsg_get_nopeek(peek_off, ts, netif, &pkt, total, n,
+                                      max_bytes, rinf) != 0 )
+          return total;
+      }
+
+      if( rinf->a->flags & ONLOAD_MSG_ONEPKT )
+        return total;
     }
 
     if( CI_IOVEC_LEN(&rinf->piov.io) == 0 ) {
@@ -422,44 +456,47 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
    ((~flags & MSG_WAITALL) && (bytes) >= (ts)->s.so.rcvlowat))
 
 
+#ifndef __KERNEL__
+/* We currently don't need to do any cmsg recvmsg stuff in-kernel
+ * as calls are all via recv/read
+ */
+
 /* Turn timestamps into the requested cmsg structure(s). */
 ci_inline void
-ci_tcp_fill_recv_timestamp(ci_netif* ni, struct msghdr* msg,
-                           ci_uint64 timestamp, struct timespec* hw_timestamp,
-                           ci_uint8 flags, ci_uint8 timestaping_flags)
+ci_tcp_fill_recv_timestamp(struct tcp_recv_info* rinf)
 {
+  ci_netif* ni = rinf->a->ni;
+  ci_tcp_state* ts = rinf->a->ts;
+  ci_msghdr* msg = rinf->a->msg;
+
   if( msg != NULL && msg->msg_controllen != 0 ) {
-#ifdef __KERNEL__
-    /* We currently don't need to do any cmsg recvmsg stuff in-kernel
-     * as calls are all via recv/read
-     */
-#else
     struct cmsg_state cmsg_state;
-    if( CI_UNLIKELY( flags & CI_IP_CMSG_TIMESTAMP_ANY ) ) {
+    if( CI_UNLIKELY( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP_ANY ) ) {
       cmsg_state.msg = msg;
       cmsg_state.cmsg_bytes_used = 0;
       cmsg_state.cm = CMSG_FIRSTHDR(msg);
+      cmsg_state.p_msg_flags = &rinf->msg_flags;
 
-      if ( flags & CI_IP_CMSG_TIMESTAMPNS )
-        ip_cmsg_recv_timestampns(ni, timestamp, &cmsg_state);
+      if ( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPNS )
+        ip_cmsg_recv_timestampns(ni, rinf->timestamp, &cmsg_state);
       else /* CI_IP_CMSG_TIMESTAMP flag gets ignored if NS counterpart is set */
-        if( flags & CI_IP_CMSG_TIMESTAMP )
-          ip_cmsg_recv_timestamp(ni, timestamp, &cmsg_state);
+        if( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMP )
+          ip_cmsg_recv_timestamp(ni, rinf->timestamp, &cmsg_state);
 
-      if( flags & CI_IP_CMSG_TIMESTAMPING ) {
-        if( ! (hw_timestamp->tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
-                timestaping_flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
-        ip_cmsg_recv_timestamping(ni, timestamp, hw_timestamp,
-                timestaping_flags, &cmsg_state);
+      if( ts->s.cmsg_flags & CI_IP_CMSG_TIMESTAMPING ) {
+        if( !(rinf->hw_timestamp.tv_nsec & CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC) )
+          ts->s.timestamping_flags &= ~ONLOAD_SOF_TIMESTAMPING_SYS_HARDWARE;
+        ip_cmsg_recv_timestamping(ni, rinf->timestamp, &rinf->hw_timestamp,
+                ts->s.timestamping_flags, &cmsg_state);
       }
 
       msg->msg_controllen = cmsg_state.cmsg_bytes_used;
     }
     else
       msg->msg_controllen = 0;
-#endif
   }
 }
+#endif
 
 
 int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
@@ -482,6 +519,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   rinf.stack_locked = 0;
   rinf.a = a;
   rinf.rc = 0;
+  rinf.msg_flags = 0;
 
 
   /* ?? TODO: MSG_TRUNC */
@@ -529,6 +567,12 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     if( CI_UNLIKELY(rinf.rc == 0) )  goto check_errno;
     goto success_unlock_out;
   }
+
+  /* With ONLOAD_MSG_ONEPKT we only return data from one ethernet frame,
+   * so if we've got anything at all then we need to return.
+   */
+  if( (rinf.a->flags & ONLOAD_MSG_ONEPKT) && (rinf.rc > 0) )
+    goto success_unlock_out;
 
   if( ! have_polled ) {
     /* We've not yet filled the app's buffer.  But the receive queue may
@@ -649,9 +693,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 #ifndef __KERNEL__
         ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                                  &a->msg->msg_namelen);
-        ci_tcp_fill_recv_timestamp(ni,
-                a->msg, rinf.timestamp, &rinf.hw_timestamp,
-                ts->s.cmsg_flags, ts->s.timestamping_flags);
+        ci_tcp_fill_recv_timestamp(&rinf);
 #endif
       } else
         CI_SET_ERROR(rinf.rc, -rc2);
@@ -676,10 +718,10 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
       pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q);
       ci_udp_recv_q_deliver(ni, &ts->timestamp_q, pkt);
 
-      a->msg->msg_flags = 0;
       cmsg_state.msg = a->msg;
       cmsg_state.cm = a->msg->msg_control;
       cmsg_state.cmsg_bytes_used = 0;
+      cmsg_state.p_msg_flags = &rinf.msg_flags;
       memset(&stamps, 0, sizeof(stamps));
       tx_hw_stamp_in_sync = pkt->tx_hw_stamp.tv_nsec &
                             CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC;
@@ -709,7 +751,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
                   sizeof(stamps), &stamps);
 
       ci_ip_cmsg_finish(&cmsg_state);
-      a->msg->msg_flags |= MSG_ERRQUEUE;
+      rinf.msg_flags |= MSG_ERRQUEUE;
 
       rinf.rc = 0;
       goto unlock_out;
@@ -755,8 +797,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 #ifndef __KERNEL__
   ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                            &a->msg->msg_namelen);  /*!\TODO fixme remove cast*/
-  ci_tcp_fill_recv_timestamp(ni, a->msg, rinf.timestamp, &rinf.hw_timestamp,
-      ts->s.cmsg_flags, ts->s.timestamping_flags);
+  ci_tcp_fill_recv_timestamp(&rinf);
 #endif
  unlock_out:
 
@@ -773,6 +814,10 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
  out:
   if(CI_UNLIKELY( ni->state->rxq_low ))
     ci_netif_rxq_low_on_recv(ni, &ts->s, rinf.rc);
+#ifndef __KERNEL__
+  if( rinf.rc >= 0 )
+    a->msg->msg_flags = rinf.msg_flags;
+#endif
   return rinf.rc;
 }
 
@@ -882,7 +927,7 @@ static int ci_tcp_recvmsg_urg(struct tcp_recv_info *rinf)
 
   /* read the out-of-band byte */
   oob = tcp_urg_data(ts) & CI_TCP_URG_DATA_MASK;
-  msg->msg_flags |= MSG_OOB;
+  rinf->msg_flags |= MSG_OOB;
 
   LOG_URG(ci_log("Reading OOB byte, oob=0x%X, flags=0x%X", oob, rinf->a->flags));
 
@@ -899,7 +944,7 @@ static int ci_tcp_recvmsg_urg(struct tcp_recv_info *rinf)
   }
 
   if( ! can_write ) {
-    msg->msg_flags |= CI_MSG_TRUNC;
+    rinf->msg_flags |= CI_MSG_TRUNC;
     rc = 0;
     goto out;
   }
@@ -1074,7 +1119,8 @@ static int ci_tcp_recvmsg_handle_race(struct tcp_recv_info *rinf)
   ** using recv2 we stick with it until the consumer switches back to
   ** recv1.  Which we haven't.
   */
-  return ci_iovec_ptr_is_empty_proper(&rinf->piov);
+  return ci_iovec_ptr_is_empty_proper(&rinf->piov) ||
+         ((rinf->a->flags & ONLOAD_MSG_ONEPKT) && (rinf->rc > 0));
 }
 
 
@@ -1205,7 +1251,8 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
     rinf->stack_locked = 0;
     /* Pull data out of recv1 and return if we fill app's buffer. */
     rinf->rc += ci_tcp_recvmsg_get(rinf);
-    must_return_from_recv = ci_iovec_ptr_is_empty_proper(&rinf->piov);
+    must_return_from_recv = ci_iovec_ptr_is_empty_proper(&rinf->piov) ||
+                      ((rinf->a->flags & ONLOAD_MSG_ONEPKT) && (rinf->rc > 0));
     if( must_return_from_recv )  goto out;
     /* May need to pull some more from recv2 before the mark.  NB. Can't
     ** just fall through to the code below, because the mark may have moved
@@ -1248,7 +1295,8 @@ static int ci_tcp_recvmsg_recv2(struct tcp_recv_info *rinf)
     ci_tcp_rcvbuf_drs(ni, ts);
 
   /* Must return if we've filled the app buffer. */
-  must_return_from_recv |= ci_iovec_ptr_is_empty_proper(&rinf->piov);
+  must_return_from_recv |= ci_iovec_ptr_is_empty_proper(&rinf->piov) ||
+                      ((rinf->a->flags & ONLOAD_MSG_ONEPKT) && (rinf->rc > 0));
 
   LOG_URG(ci_log("%s: returning %d rc=%d "
 		 "ci_iovec_ptr_is_empty_proper=%d",

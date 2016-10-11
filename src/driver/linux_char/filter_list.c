@@ -73,11 +73,12 @@ static void efch_filter_destruct(struct efrm_resource *rs,
   if( f->flags & FILTER_FLAGS_USES_EFRM_FILTER ) {
     if( f->flags & FILTER_FLAGS_VPORT ) {
       struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
-      struct efx_dl_device* efx_dev = efhw_nic_dl_device(efhw_nic);
+      struct efx_dl_device* efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
       if( efx_dev != NULL ) {
         bool is_exclusive = !! (f->flags & FILTER_FLAGS_VPORT_IS_EXCLUSIVE);
         efx_dl_vport_filter_remove(efx_dev, efrm_pd_get_vport_id(pd),
                                    f->efrm_filter_id, is_exclusive);
+        efhw_nic_release_dl_device(efhw_nic, efx_dev);
       }
       /* If [efx_dev] is NULL, the hardware is morally absent and so there's
        * nothing to do. */
@@ -180,10 +181,50 @@ int efch_filter_list_gen_id(struct efch_filter_list *fl)
 }
 
 
-static int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
-                                struct efch_filter_list *fl,
-                                struct efx_filter_spec *spec,
-                                ci_resource_op_t* op, bool replace)
+static int efch_filter_insert(struct efrm_resource *rs, struct efrm_pd *pd,
+                              struct efx_filter_spec *spec, struct filter *f,
+                              bool replace)
+{
+  int rc;
+
+  if( efrm_pd_has_vport(pd) ) {
+    struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
+    struct efx_dl_device* efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
+    if( efx_dev != NULL ) {
+      bool is_exclusive;
+      rc = efx_dl_vport_filter_insert(efx_dev, efrm_pd_get_vport_id(pd),
+                                      spec, &f->efrm_filter_id, &is_exclusive);
+      efhw_nic_release_dl_device(efhw_nic, efx_dev);
+      if( is_exclusive )
+        f->flags |= FILTER_FLAGS_VPORT_IS_EXCLUSIVE;
+    }
+    else {
+      /* If [efx_dev] is NULL, the hardware is morally absent and so there's
+       * nothing to do. This counts as success. */
+      rc = 0;
+    }
+  }
+  else {
+    rc = efrm_filter_insert(rs->rs_client, spec, replace);
+  }
+  if( rc < 0 )
+    return rc;
+
+  if( efrm_pd_has_vport(pd) )
+    f->flags |= FILTER_FLAGS_VPORT;
+  else
+    f->efrm_filter_id = rc;
+  f->flags |= FILTER_FLAGS_USES_EFRM_FILTER;
+
+  return rc;
+}
+
+
+static int efch_filter_list_rsops_add(struct efrm_resource *rs,
+                                      struct efrm_pd *pd,
+                                      struct efch_filter_list *fl,
+                                      struct efx_filter_spec *spec,
+                                      ci_resource_op_t* op, bool replace)
 {
   struct filter* f;
   int rc;
@@ -219,34 +260,11 @@ static int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
   }
 
   if( ! is_op_block_kernel_only(op->op) ) {
-    if( efrm_pd_has_vport(pd) ) {
-      struct efhw_nic* efhw_nic = efrm_client_get_nic(rs->rs_client);
-      struct efx_dl_device* efx_dev = efhw_nic_dl_device(efhw_nic);
-      if( efx_dev != NULL ) {
-        bool is_exclusive;
-        rc = efx_dl_vport_filter_insert(efx_dev, efrm_pd_get_vport_id(pd),
-                                        spec, &f->efrm_filter_id, &is_exclusive);
-        if( is_exclusive )
-          f->flags |= FILTER_FLAGS_VPORT_IS_EXCLUSIVE;
-      }
-      else {
-        /* If [efx_dev] is NULL, the hardware is morally absent and so there's
-         * nothing to do. This counts as success. */
-        rc = 0;
-      }
-    }
-    else {
-      rc = efrm_filter_insert(rs->rs_client, spec, replace);
-    }
+    rc = efch_filter_insert(rs, pd, spec, f, replace);
     if( rc < 0 ) {
       efch_filter_delete(rs, pd, f);
       return rc;
     }
-    if( efrm_pd_has_vport(pd) )
-      f->flags |= FILTER_FLAGS_VPORT;
-    else
-      f->efrm_filter_id = rc;
-    f->flags |= FILTER_FLAGS_USES_EFRM_FILTER;
   }
 
   spin_lock(&fl->lock);
@@ -295,6 +313,37 @@ int efch_filter_list_set_ip4_vlan(struct efx_filter_spec* spec,
     return rc;
 
   return efx_filter_set_eth_local(spec, op->u.filter_add.mac.vlan_id, NULL);
+}
+
+
+int efch_filter_list_set_ip6(struct efx_filter_spec* spec,
+                             ci_filter_add_t* filter, int* replace_out)
+{
+  int rc;
+  *replace_out = false;
+
+  if( filter->in.spec.l4.ports.source )
+    rc = efx_filter_set_ipv6_full(spec, filter->in.spec.l3.protocol,
+                                  filter->in.spec.l3.u.ipv6.daddr,
+                                  filter->in.spec.l4.ports.dest,
+                                  filter->in.spec.l3.u.ipv6.saddr,
+                                  filter->in.spec.l4.ports.source);
+  else
+    rc = efx_filter_set_ipv6_local(spec, filter->in.spec.l3.protocol,
+                                   filter->in.spec.l3.u.ipv6.daddr,
+                                   filter->in.spec.l4.ports.dest);
+  return rc;
+}
+
+
+int efch_filter_list_set_ip6_vlan(struct efx_filter_spec* spec,
+                                  ci_filter_add_t* filter, int* replace_out)
+{
+  int rc = efch_filter_list_set_ip6(spec, filter, replace_out);
+  if( rc < 0 )
+    return rc;
+
+  return efx_filter_set_eth_local(spec, filter->in.spec.l2.vid, NULL);
 }
 
 
@@ -495,7 +544,7 @@ int efch_filter_list_op_add(struct efrm_resource *rs, struct efrm_pd *pd,
   }
 
   if( rc >= 0 )
-    rc = efch_filter_list_add(rs, pd, fl, &spec, op, replace);
+    rc = efch_filter_list_rsops_add(rs, pd, fl, &spec, op, replace);
 
   return rc;
 }
@@ -517,4 +566,62 @@ int efch_filter_list_op_block(struct efrm_resource *rs, struct efrm_pd *pd,
     return efch_filter_list_add_block(rs, pd, fl);
   else
     return efch_filter_list_del(rs, pd, fl, FILTER_ID_INDEPENDENT_BLOCK);
+}
+
+int efch_filter_list_add(struct efrm_resource *rs, struct efrm_pd *pd,
+                         struct efch_filter_list *fl,
+                         ci_filter_add_t *filter_add, int *copy_out)
+{
+  struct efx_filter_spec spec;
+  struct filter *f;
+  int replace;
+  int rc;
+
+  efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED, EFX_FILTER_FLAG_RX_SCATTER,
+                     rs->rs_instance);
+
+  *copy_out = 1;
+
+#if EFX_DRIVERLINK_API_VERSION >= 15
+  {
+    unsigned stack_id = efrm_pd_stack_id_get(pd);
+    ci_assert( stack_id >= 0 );
+    efx_filter_set_stack_id(&spec, stack_id);
+  }
+#endif
+
+  if( filter_add->in.spec.l2.vid != 0xffff )
+    rc = efch_filter_list_set_ip6_vlan(&spec, filter_add, &replace);
+  else
+    rc = efch_filter_list_set_ip6(&spec, filter_add, &replace);
+  if( rc < 0 )
+    return rc;
+
+  if( (f = ci_alloc(sizeof(*f))) == NULL )
+    return -ENOMEM;
+
+  f->flags = 0;
+
+  rc = efch_filter_insert(rs, pd, &spec, f, replace);
+  if( rc < 0 ) {
+    efch_filter_delete(rs, pd, f);
+    return rc;
+  }
+
+  spin_lock(&fl->lock);
+  rc = efch_filter_list_gen_id(fl);
+  if( rc >= 0 ) {
+    f->filter_id = rc;
+    ci_dllist_put(&fl->filters, &f->link);
+  }
+  spin_unlock(&fl->lock);
+
+  if( rc < 0 ) {
+    efch_filter_delete(rs, pd, f);
+    return rc;
+  }
+
+  filter_add->out.out_len = sizeof(filter_add->out);
+  filter_add->out.filter_id = f->filter_id;
+  return 0;
 }

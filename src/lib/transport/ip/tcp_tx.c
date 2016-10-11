@@ -31,7 +31,7 @@
 #include "ip_tx.h"
 #include <ci/internal/pio_buddy.h>
 #if defined(__ci_driver__) && defined(__linux__)
-# include <onload/cplane.h>
+# include <cplane/exported.h>
 #endif
 #include "tcp_tx.h"
 
@@ -635,8 +635,7 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
 
     /* If we don't get timestamps, we'll need to calculate RTT without
      * them.  Let's prepare: */
-    ts->timed_seq = thdr->tcp_seq_be32;
-    ts->timed_ts = ci_tcp_time_now(netif);
+    ci_tcp_set_rtt_timing(netif, ts, thdr);
   }
 
   CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
@@ -1588,13 +1587,13 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   tcp->tcp_check_be16 = 0;
   ci_tcp_ip_hdr_init(ip, sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr));
 
-  LOG_U(log(LN_FMT "RSTACK %s:%u->%s:%u s=%08x a=%08x",
-            LN_PRI_ARGS(netif), ip_addr_str(ip->ip_saddr_be32),
-            (unsigned) CI_BSWAP_BE16(tcp->tcp_source_be16),
-            ip_addr_str(ip->ip_daddr_be32),
-            (unsigned) CI_BSWAP_BE16(tcp->tcp_dest_be16),
-            (unsigned) CI_BSWAP_BE32(tcp->tcp_seq_be32),
-            (unsigned) CI_BSWAP_BE32(tcp->tcp_ack_be32)));
+  LOG_TR(log(LN_FMT "RSTACK %s:%u->%s:%u s=%08x a=%08x",
+             LN_PRI_ARGS(netif), ip_addr_str(ip->ip_saddr_be32),
+             (unsigned) CI_BSWAP_BE16(tcp->tcp_source_be16),
+             ip_addr_str(ip->ip_daddr_be32),
+             (unsigned) CI_BSWAP_BE16(tcp->tcp_dest_be16),
+             (unsigned) CI_BSWAP_BE32(tcp->tcp_seq_be32),
+             (unsigned) CI_BSWAP_BE32(tcp->tcp_ack_be32)));
 
   pkt->buf_len = pkt->pay_len = 
     oo_ether_hdr_size(pkt) + sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
@@ -1702,6 +1701,11 @@ void ci_tcp_send_ack_loopback(ci_netif* netif, ci_tcp_state* ts,
   peer = (ci_tcp_state *)w_peer;
   if( peer->local_peer != S_SP(ts) )
     return;
+
+  /* ci_tcp_tx_advance() calls ci_tcp_wake_possibly_not_in_poll().
+   * Make sure it works properly when in poll. */
+  if( netif->state->in_poll )
+    ci_netif_put_on_post_poll(netif, &peer->s.b);
 
   do {
     ts->acks_pending = 0;

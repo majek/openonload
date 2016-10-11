@@ -414,14 +414,24 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_RX_LOOPBACK;
 		if (q_flags & EFRM_VI_RX_PACKED_STREAM)
 			vi_flags |= EFHW_VI_RX_PACKED_STREAM;
+		if (q_flags & EFRM_VI_RX_PREFIX)
+			vi_flags |= EFHW_VI_RX_PREFIX;
+		if (q_flags & EFRM_VI_NO_RX_CUT_THROUGH)
+			vi_flags |= EFHW_VI_NO_RX_CUT_THROUGH;
 		break;
 	case EFHW_EVQ:
 		if (q_flags & EFRM_VI_RX_TIMESTAMPS)
 			vi_flags |= EFHW_VI_RX_TIMESTAMPS;
 		if (q_flags & EFRM_VI_TX_TIMESTAMPS)
 			vi_flags |= EFHW_VI_TX_TIMESTAMPS;
-		if (q_flags & EFRM_VI_NO_CUT_THROUGH)
-			vi_flags |= EFHW_VI_NO_CUT_THROUGH;
+		if (q_flags & EFRM_VI_NO_EV_CUT_THROUGH)
+			vi_flags |= EFHW_VI_NO_EV_CUT_THROUGH;
+		if (q_flags & EFRM_VI_RX_PACKED_STREAM)
+			vi_flags |= EFHW_VI_RX_PACKED_STREAM;
+		if (q_flags & EFRM_VI_ENABLE_RX_MERGE)
+			vi_flags |= EFHW_VI_ENABLE_RX_MERGE;
+		if (q_flags & EFRM_VI_ENABLE_EV_TIMER)
+			vi_flags |= EFHW_VI_ENABLE_EV_TIMER;
 		break;
 	default:
 		break;
@@ -463,14 +473,24 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_RX_LOOPBACK;
 		if (vi_flags & EFHW_VI_RX_PACKED_STREAM)
 			q_flags |= EFRM_VI_RX_PACKED_STREAM;
+		if (vi_flags & EFHW_VI_RX_PREFIX)
+			q_flags |= EFRM_VI_RX_PREFIX;
+		if (vi_flags & EFHW_VI_NO_RX_CUT_THROUGH)
+			q_flags |= EFRM_VI_NO_RX_CUT_THROUGH;
 		break;
 	case EFHW_EVQ:
 		if (vi_flags & EFHW_VI_RX_TIMESTAMPS)
 			q_flags |= EFRM_VI_RX_TIMESTAMPS;
 		if (vi_flags & EFHW_VI_TX_TIMESTAMPS)
 			q_flags |= EFRM_VI_TX_TIMESTAMPS;
-		if (vi_flags & EFHW_VI_NO_CUT_THROUGH)
-			q_flags |= EFRM_VI_NO_CUT_THROUGH;
+		if (vi_flags & EFHW_VI_NO_EV_CUT_THROUGH)
+			q_flags |= EFRM_VI_NO_EV_CUT_THROUGH;
+		if (vi_flags & EFHW_VI_RX_PACKED_STREAM)
+			q_flags |= EFRM_VI_RX_PACKED_STREAM;
+		if (vi_flags & EFHW_VI_ENABLE_RX_MERGE)
+			q_flags |= EFRM_VI_ENABLE_RX_MERGE;
+		if (vi_flags & EFHW_VI_ENABLE_EV_TIMER)
+			q_flags |= EFRM_VI_ENABLE_EV_TIMER;
 		break;
 	default:
 		break;
@@ -559,11 +579,7 @@ efrm_vi_rm_init_dmaq(struct efrm_vi *virs, enum efhw_q_type queue_type,
 			 q->dma_addrs,
 			 (1 << q->page_order) * EFHW_NIC_PAGES_IN_OS_PAGE,
 			 interrupting, 0 /* DOS protection */,
-			 wakeup_evq,
-			 (flags & (EFHW_VI_RX_TIMESTAMPS |
-			           EFHW_VI_TX_TIMESTAMPS)) != 0,
-			 (flags & EFHW_VI_NO_CUT_THROUGH) == 0,
-			 &virs->out_flags);
+			 wakeup_evq, flags, &virs->out_flags);
 		break;
 	default:
 		EFRM_ASSERT(0);
@@ -688,14 +704,32 @@ efrm_vi_io_unmap(struct efrm_vi* virs)
 void
 efrm_vi_resource_mark_shut_down(struct efrm_vi *virs)
 {
+	struct efhw_nic* nic = virs->rs.rs_client->nic;
+	struct efrm_nic* efrm_nic = efrm_nic(nic);
+	int type;
+
+	mutex_lock(&efrm_nic->dmaq_state.lock);
+
+	/* We should not attempt to flush these queues, so remove them from the
+	 * requiring-flush lists. */
+	for (type = 0; type < EFHW_N_Q_TYPES; ++type) {
+		struct efrm_vi_q *q = &virs->q[type];
+		if (! list_empty(&q->init_link) ) {
+			list_del(&q->init_link);
+			INIT_LIST_HEAD(&q->init_link);
+		}
+	}
+
 	efrm_atomic_or(EFRM_VI_SHUT_DOWN, &virs->shut_down_flags);
+
+	mutex_unlock(&efrm_nic->dmaq_state.lock);
 }
 EXPORT_SYMBOL(efrm_vi_resource_mark_shut_down);
 
 
 static int
 __efrm_vi_q_flush(struct efhw_nic* nic, enum efhw_q_type queue_type,
-		  int instance, int rx_ts)
+		  int instance, int time_sync_events_enabled)
 {
 	int rc;
 
@@ -708,7 +742,8 @@ __efrm_vi_q_flush(struct efhw_nic* nic, enum efhw_q_type queue_type,
 		break;
 	case EFHW_EVQ:
 		/* flushing EVQ is as good as disabling it */
-		efhw_nic_event_queue_disable(nic, instance, rx_ts);
+		efhw_nic_event_queue_disable(nic, instance,
+					     time_sync_events_enabled);
 		rc = 0;
 		break;
 	default:
@@ -744,28 +779,14 @@ efrm_vi_q_flush(struct efrm_vi *virs, enum efhw_q_type queue_type)
 	}
 
 	rc = __efrm_vi_q_flush(nic, queue_type, instance,
-			       (virs->flags & EFHW_VI_RX_TIMESTAMPS) != 0);
+			       (virs->flags & (EFHW_VI_RX_TIMESTAMPS |
+					       EFHW_VI_TX_TIMESTAMPS)) != 0);
 	EFRM_TRACE("Flushed queue nic %d type %d 0x%x rc %d",
 		  nic->index, queue_type, instance, rc);
 	mutex_unlock(&efrm_nic->dmaq_state.lock);
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_q_flush);
-
-
-/* Just shut down the queues in hardware. Normally this should only happen as
- * a result of the very-asynchronous flush management. The exception to this
- * principle is the case where a NIC is being removed and we need to tidy up
- * its state immediately. */
-void
-efrm_vi_resource_shutdown(struct efrm_vi *virs)
-{
-	efrm_vi_resource_mark_shut_down(virs);
-	efrm_vi_q_flush(virs, EFHW_RXQ);
-	efrm_vi_q_flush(virs, EFHW_TXQ);
-	efrm_vi_q_flush(virs, EFHW_EVQ);
-}
-EXPORT_SYMBOL(efrm_vi_resource_shutdown);
 
 
 static void
@@ -788,6 +809,11 @@ __efrm_vi_resource_free(struct efrm_vi *virs)
 	EFRM_ASSERT(virs->q[EFHW_TXQ].evq_ref == NULL);
 	EFRM_ASSERT(virs->q[EFHW_RXQ].evq_ref == NULL);
 
+	if (virs->tx_alt_num) {
+		struct efhw_nic *nic = &(efrm_nic->efhw_nic);
+		nic->efhw_func->tx_alt_free(nic, virs->tx_alt_num,
+					    virs->tx_alt_cp, virs->tx_alt_ids);
+	}
 	if (virs->pio != NULL) {
 		/* Unlink also manages reference accounting. */
 		rc = efrm_pio_unlink_vi(virs->pio, virs);
@@ -834,7 +860,6 @@ void efrm_nic_flush_all_queues(struct efhw_nic *nic, int dummy)
 			INIT_LIST_HEAD(&virs->q[type].init_link);
 			if (dummy)
 				continue;
-			efrm_vi_resource_mark_shut_down(virs);
 			efrm_atomic_or(efrm_vi_shut_down_flag(type), &virs->shut_down_flags);
 			rc = __efrm_vi_q_flush(virs->rs.rs_client->nic, type,
 				virs->rs.rs_instance,
@@ -1598,3 +1623,21 @@ efrm_vi_from_resource(struct efrm_resource *rs)
 	return efrm_vi(rs);
 }
 EXPORT_SYMBOL(efrm_vi_from_resource);
+
+
+int efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words)
+{
+	struct efhw_nic *nic = virs->rs.rs_client->nic;
+	int rc;
+
+	if (virs->tx_alt_num > 0)
+		return -EALREADY;
+
+	rc = nic->efhw_func->tx_alt_alloc(nic, virs->rs.rs_instance,
+					  num_alt, num_32b_words,
+					  &(virs->tx_alt_cp), virs->tx_alt_ids);
+	if (rc == 0)
+		virs->tx_alt_num = num_alt;
+	return rc;
+}
+EXPORT_SYMBOL(efrm_vi_tx_alt_alloc);

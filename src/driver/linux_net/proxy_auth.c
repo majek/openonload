@@ -47,7 +47,7 @@
 /* The timeout on the userspace app is set shorter than the MCDI timeout.
  * This should avoid timeouts in the proxy client in the event of app timeouts.
  */
-#define APP_TIMEOUT   (MCDI_RPC_TIMEOUT / 2)
+#define APP_TIMEOUT   (MCDI_PROXY_AUTH_CLIENT_TIMEOUT / 2)
 
 /* This structure is shared with the MC. We check the offset of each field
  * with BUILD_BUG_ON. */
@@ -64,6 +64,7 @@ enum proxy_request_state {
 	PROXY_REQ_IDLE,
 	PROXY_REQ_INCOMING,
 	PROXY_REQ_OUTSTANDING,
+	PROXY_REQ_COMPLETING,
 	PROXY_REQ_COMPLETED,
 	PROXY_REQ_RESPONDING,
 };
@@ -544,7 +545,7 @@ int efx_proxy_auth_stop(struct efx_nic *efx, bool unloading)
 			NULL, 0, NULL);
 
 	if (rc) {
-		/* TODO: what should we really do here? */
+		/* todo: what should we really do here? */
 		netif_err(efx, drv, efx->net_dev,
 				"%s: failed to stop proxying %d\n",
 				__func__, rc);
@@ -804,6 +805,36 @@ static int efx_proxy_auth_send_response(struct proxy_admin_state *pa, u32 index,
 	return rc;
 }
 
+/* Must be called with proxy_admin_lock held */
+static bool efx_proxy_auth_valid_uhandle(struct proxy_admin_state *pa,
+	u64 uhandle, u32 *handle, u32 *index)
+{
+	struct proxy_mc_state *mc_state;
+	u32 i, h;
+
+	/* Check response is from current userspace session. */
+	if ((uhandle & 0xffff) != pa->session_tag)
+		return false;
+
+	/* Split user handle into index and handle. */
+	i = (uhandle >> 16) & 0xffff;
+	h = (uhandle >> 32) & 0xffffffff;
+
+	if (i >= pa->block_count)
+		return false;
+
+	mc_state = pa->status_buffer.addr;
+	mc_state += i;
+
+	/* Check handle is the one we're expecting. */
+	if (mc_state->handle != h)
+		return false;
+
+	*index = i;
+	*handle = h;
+	return true;
+}
+
 /**
  * efx_proxy_auth_handle_response() - handle replies from user space
  * @pa:                 Proxy admin state context.
@@ -824,7 +855,6 @@ int efx_proxy_auth_handle_response(struct proxy_admin_state *pa,
 		void *response_buffer, size_t response_size,
 		void (*complete_cb)(int, void*), void *cb_context)
 {
-	struct proxy_mc_state *mc_state;
 	struct proxy_req_state *req;
 	u32 handle;
 	u32 index;
@@ -839,26 +869,7 @@ int efx_proxy_auth_handle_response(struct proxy_admin_state *pa,
 		goto out_response;
 	}
 
-	/* Check response is from current userspace session. */
-	if ((uhandle & 0xffff) != pa->session_tag) {
-		rc = -EINVAL;
-		goto out_response;
-	}
-
-	/* Split user handle into index and handle. */
-	index = (uhandle >> 16) & 0xffff;
-	handle = (uhandle >> 32) & 0xffffffff;
-
-	if (index >= pa->block_count) {
-		rc = -EINVAL;
-		goto out_response;
-	}
-
-	mc_state = pa->status_buffer.addr;
-	mc_state += index;
-
-	/* Check handle is the one we're expecting. */
-	if (mc_state->handle != handle) {
+	if (!efx_proxy_auth_valid_uhandle(pa, uhandle, &handle, &index)) {
 		rc = -EINVAL;
 		goto out_response;
 	}
@@ -907,6 +918,118 @@ int efx_proxy_auth_handle_response(struct proxy_admin_state *pa,
 
 out_response:
 	read_unlock_bh(&pa->efx->proxy_admin_lock);
+	return rc;
+}
+
+/**
+ * efx_proxy_auth_complete_request() - complete the request using PROXY_CMD
+ * @efx:                NIC with proxy configured
+ * @pa:                 Proxy admin state context.
+ * @uhandle:            Handle as passed to .request_func().
+ * @do_cb:              Callback to do completion.
+ * @cb_context:         Callback context.
+ *
+ * Return: zero on success, error code on failure.
+ *
+ * If callback fails, the request is declined.
+ */
+int efx_proxy_auth_complete_request(struct efx_nic *efx, u64 uhandle,
+		int (*do_cb)(struct efx_nic *, u32, u32,
+			     const void *, size_t, void *, size_t, void *),
+		void *cb_context)
+{
+	struct proxy_admin_state *pa;
+	struct proxy_req_state *req;
+	struct proxy_mc_state *mc_state;
+	u32 handle;
+	u32 index;
+	u32 pf;
+	u32 vf;
+	const char *request_buff;
+	size_t request_size;
+	char *response_buff;
+	size_t response_size;
+	int rc;
+
+	/* Below we're going to drop read-lock and do MCDI commands to
+	 * complete the request using proxy auth buffers. The mutex
+	 * allows scheduling and guarantees that these buffers are not freed.
+	 */
+	mutex_lock(&efx->proxy_admin_mutex);
+
+	/* Take state lock for read. Prevent state changes until after
+	 * request has been accepted.
+	 */
+	read_lock_bh(&efx->proxy_admin_lock);
+	pa = efx->proxy_admin_state;
+	if (!pa || pa->state != PROXY_AUTH_ADMIN_READY) {
+		rc = -ESHUTDOWN;
+		goto out_unlock;
+	}
+
+	if (!efx_proxy_auth_valid_uhandle(pa, uhandle, &handle, &index)) {
+		rc = -EINVAL;
+		goto out_unlock;
+	}
+
+	req = &pa->req_state[index];
+
+	if (atomic_cmpxchg(&req->state, PROXY_REQ_OUTSTANDING,
+			PROXY_REQ_COMPLETING) != PROXY_REQ_OUTSTANDING) {
+		rc = -ETIMEDOUT;
+		goto out_unlock;
+	}
+
+	spin_lock_bh(&pa->outstanding_lock);
+	list_del_init(&req->list);
+	spin_unlock_bh(&pa->outstanding_lock);
+
+	mc_state = pa->status_buffer.addr;
+	mc_state += index;
+
+	pf = mc_state->pf;
+	vf = mc_state->vf;
+
+	request_size = pa->request_size;
+	request_buff = pa->request_buffer.addr;
+	request_buff += request_size * index;
+	response_size = pa->response_size;
+	response_buff = pa->response_buffer.addr;
+	response_buff += response_size * index;
+
+	read_unlock_bh(&efx->proxy_admin_lock);
+
+	rc = do_cb(efx, pf, vf, request_buff, request_size,
+		   response_buff, response_size, cb_context);
+
+	read_lock_bh(&efx->proxy_admin_lock);
+	/* Since we hold proxy_admin_mutex pa is still valid and it is
+	 * the same session, but state may change (e.g. in the case of
+	 * MC reboot).
+	 */
+	if (pa->state != PROXY_AUTH_ADMIN_READY) {
+		EFX_BUG_ON_PARANOID(pa->state != PROXY_AUTH_ADMIN_RESTARTING);
+		rc = -ESHUTDOWN;
+		goto out_unlock;
+	}
+
+	req->result = (rc) ? MC_CMD_PROXY_COMPLETE_IN_DECLINED :
+			     MC_CMD_PROXY_COMPLETE_IN_COMPLETE;
+	req->complete_cb = NULL;
+	req->cb_context = NULL;
+
+	atomic_set(&req->state, PROXY_REQ_COMPLETED);
+
+	spin_lock_bh(&pa->completed_lock);
+	list_add_tail(&req->list, &pa->completed);
+	spin_unlock_bh(&pa->completed_lock);
+
+	queue_work(pa->workqueue, &pa->completed_work);
+	rc = 0;
+
+out_unlock:
+	read_unlock_bh(&pa->efx->proxy_admin_lock);
+	mutex_unlock(&efx->proxy_admin_mutex);
 	return rc;
 }
 

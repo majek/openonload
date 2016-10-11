@@ -1,6 +1,7 @@
 
-TEST_APPS	:= efpingpong efforward efrss efsink efpio eftap \
-		   efsink_packed efforward_packed
+TEST_APPS	:= efforward efrss efsink \
+		   efsink_packed efforward_packed eflatency stats \
+		   efsend efsend_pio efsend_timestamping
 ifeq (${PLATFORM},gnu_x86_64)
 TEST_APPS	+= efdelegated_server efdelegated_client
 endif
@@ -18,6 +19,10 @@ clean:
 	@$(MakeClean)
 
 
+eflatency: eflatency.o utils.o
+
+efsend efsend_pio efsend_timestamping: utils.o efsend_common.o
+
 efsink: efsink.o utils.o
 
 efsink_packed: efsink_packed.o utils.o
@@ -34,8 +39,11 @@ efdelegated_client: efdelegated_client.o utils.o
 efdelegated_client: MMAKE_LIBS     += $(LINK_ONLOAD_EXT_LIB)
 efdelegated_client: MMAKE_LIB_DEPS += $(ONLOAD_EXT_LIB_DEPEND)
 
-efpio: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
-efpio: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+efsend efsend_pio efsend_timestamping: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
+efsend efsend_pio efsend_timestamping: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
 
-eftap: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
-eftap: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+eflatency: MMAKE_LIBS     += $(LINK_CITOOLS_LIB)
+eflatency: MMAKE_LIB_DEPS += $(CITOOLS_LIB_DEPEND)
+
+stats: stats.py
+	cp $< $@

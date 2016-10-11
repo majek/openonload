@@ -22,12 +22,9 @@
 	.type	efab_linux_trampoline_close,@function
 efab_linux_trampoline_close:
 	leal	4(%esp),%ecx	/* Base of struct pt_regs in syscall */
-	movl	(%ecx),%eax	/* Original 1st argument = file descriptor */
-                                /* 3rd arg is ret-addr -- already on stack */
 	pushl	%ecx		/* 2nd arg to our handler = struct pt_regs */
-	pushl	%eax		/* 1st arg to our handler = file descriptor */
-	call	efab_linux_trampoline_handler_close
-	add	$8,%esp		/* Pop args from stack */
+	call	efab_linux_trampoline_handler_close3232
+	add	$4,%esp		/* Pop args from stack */
 	ret			/* Return to original syscall entry point */
 .Lfe1:
 	.size	efab_linux_trampoline_close,.Lfe1-efab_linux_trampoline_close
@@ -54,7 +51,7 @@ efab_linux_trampoline_close:
 efab_linux_trampoline_close:
 	leaq	RSP_TP_PT_REGS_OFFSET(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
 	mov	(%rsp),%rdx     /* 3rd arg is return address */
-	jmp	efab_linux_trampoline_handler_close
+	jmp	efab_linux_trampoline_handler_close64
 .Lfe1:
 	.size	efab_linux_trampoline_close,.Lfe1-efab_linux_trampoline_close
 
@@ -63,9 +60,11 @@ efab_linux_trampoline_close:
 	.type	efab_linux_trampoline_close32,@function
 	.align 16
 efab_linux_trampoline_close32:
-	leaq	RSP_TP_PT_REGS_OFFSET(%rsp),%rsi	/* 2nd arg to our handler = struct pt_regs */
-	mov	(%rsp),%rdx     /* 3rd arg is return address */
-	jmp	efab_linux_trampoline_handler_close32
+	leaq	RSP_TP_PT_REGS_OFFSET(%rsp),%rax	/* struct pt_regs */
+	pushq	%rax					/* last arg */
+	call	efab_linux_trampoline_handler_close32
+	add	$8,%rsp					/* pop pt_regs */
+	ret
 .Lfe2:
 	.size	efab_linux_trampoline_close32,.Lfe2-efab_linux_trampoline_close32
 # endif

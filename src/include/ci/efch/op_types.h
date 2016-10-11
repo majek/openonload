@@ -37,6 +37,13 @@
 
 #include <ci/efch/resource_id.h>
 
+/* Needed for definition of in6_addr */
+#ifdef __KERNEL__
+#include <linux/in6.h>
+#else
+#include <netinet/in.h>
+#endif
+
 
 /* We use an md5sum over certain headers to check that userland and kernel
  * drivers are built against a compatible interface.
@@ -191,6 +198,7 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_IP_PROTO     0x83
 # define                CI_RSOP_FILTER_ADD_ETHER_TYPE   0x84
 # define                CI_RSOP_VI_GET_TS_CORRECTION    0x85
+# define                CI_RSOP_VI_TX_ALT_ALLOC         0x86
 
   union {
     struct {
@@ -273,8 +281,67 @@ typedef struct ci_resource_op_s {
       uint32_t          data_len;
       uint8_t           do_reset;
     } vi_stats;
+    struct {
+      uint32_t          num_alts;
+      uint32_t          buf_space_32b;
+    } vi_tx_alt_alloc_in;
+    struct {
+      uint8_t           alt_ids[32];
+    } vi_tx_alt_alloc_out;
   } u CI_ALIGN(8);
 } ci_resource_op_t;
+
+
+typedef union ci_filter_add_u {
+  struct {
+    uint16_t            in_len;
+    uint16_t            out_size;
+    efch_resource_id_t  res_id;
+    uint32_t            fields;
+    uint32_t            opt_fields;
+    uint32_t            flags;
+    struct {
+      struct {
+        uint8_t  dhost[6];
+        uint8_t  shost[6];
+        uint16_t type;
+        uint16_t vid;
+        uint16_t reserved[2];
+      } l2;
+      struct {
+        uint8_t  protocol;
+        uint8_t  reserved[3];
+        union {
+          struct {
+            uint32_t saddr;
+            uint32_t daddr;
+            uint32_t reserved[2];
+          } ipv4;
+          struct {
+            struct in6_addr saddr CI_ALIGN(4);
+            struct in6_addr daddr CI_ALIGN(4);
+            uint32_t reserved[2];
+          } ipv6;
+        } u;
+      } l3;
+      struct {
+        union {
+          struct {
+            uint16_t source;
+            uint16_t dest;
+          } ports;
+          struct {
+            uint32_t pad[8];
+          } pad;
+        };
+      } l4;
+    } spec;
+  } in;
+  struct {
+    uint16_t  out_len;
+    uint64_t  filter_id;
+  } out;
+} ci_filter_add_t;
 
 
 /**********************************************************************
@@ -303,6 +370,44 @@ typedef struct ci_license_challenge_op_s {
   uint8_t           signature[CI_LCOP_CHALLENGE_SIGNATURE_LEN];
 } ci_license_challenge_op_t;
 
+/**********************************************************************
+ *
+ * License challenge (V3 licenses)
+ *
+ */
+
+/* These values are well-known */
+#define CI_LCOP_V3_CHALLENGE_CHALLENGE_LEN (48)
+#define CI_LCOP_V3_CHALLENGE_SIGNATURE_LEN (96)
+#define CI_LCOP_V3_CHALLENGE_MACADDR_LEN (6)
+
+/* The message signed is the SHA384 digest of the
+** concatenation of challenge parameters and response fields:
+**  CHALLENGE[48 bytes],
+**  APP_ID[8 bytes],
+**  EXPIRY_TIME[4 bytes],
+**  EXPIRY_UNITS[4 bytes]
+**  BASE_MACADDR[6 bytes],
+**  CURRENT_MACADDR[6 bytes],
+*/
+#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (70)
+
+typedef struct ci_v3_license_challenge_op_s {
+  int32_t               fd;
+  efch_resource_id_t    pd_id;
+
+  uint8_t           challenge[CI_LCOP_V3_CHALLENGE_CHALLENGE_LEN];
+  uint64_t          app_id;
+/* app ids as in ci_license_challenge_op_s and: */
+#define CI_LCOP_CHALLENGE_FEATURE_TCP_DIRECT (0x100)
+
+  uint8_t           signature[CI_LCOP_V3_CHALLENGE_SIGNATURE_LEN];
+  uint32_t          expiry;
+  uint32_t          days;
+  uint8_t           base_macaddr[CI_LCOP_V3_CHALLENGE_MACADDR_LEN];
+  uint8_t           current_macaddr[CI_LCOP_V3_CHALLENGE_MACADDR_LEN];
+
+} ci_v3_license_challenge_op_t;
 
 /**********************************************************************
  *
@@ -315,13 +420,42 @@ typedef struct ci_resource_prime_op_s {
 } ci_resource_prime_op_t;
 
 
+/**********************************************************************
+ *
+ * Checking capabilities
+ *
+ */
+
+struct efch_capabilities_in {
+  uint32_t cap;
+  int32_t ifindex;
+  int32_t pd_fd;
+  efch_resource_id_t pd_id;
+};
+
+struct efch_capabilities_out {
+  int32_t support_rc;
+  uint64_t val;
+};
+
+typedef struct ci_capabilities_op_s {
+  union {
+    struct efch_capabilities_in cap_in;
+    struct efch_capabilities_out cap_out;
+  };
+} ci_capabilities_op_t;
+
+
 #define CI_IOC_CHAR_BASE       81
 
 #define CI_RESOURCE_OP      (CI_IOC_CHAR_BASE+ 0)  /* ioctls for resources */
 #define CI_RESOURCE_ALLOC   (CI_IOC_CHAR_BASE+ 1)  /* allocate resources   */
 #define CI_LICENSE_CHALLENGE (CI_IOC_CHAR_BASE+ 2) /* license challenge   */
 #define CI_RESOURCE_PRIME   (CI_IOC_CHAR_BASE+ 3)  /* prime resource */
-#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 4)
+#define CI_FILTER_ADD       (CI_IOC_CHAR_BASE+ 4)  /* filter insertion */
+#define CI_CAPABILITIES_OP  (CI_IOC_CHAR_BASE+ 5)  /* capabilities check */
+#define CI_V3_LICENSE_CHALLENGE (CI_IOC_CHAR_BASE+ 6) /* V3 license challenge */
+#define CI_IOC_CHAR_MAX     (CI_IOC_CHAR_BASE+ 7)
 
 
 /**********************************************************************

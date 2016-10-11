@@ -69,22 +69,31 @@ MMAKE_CPPFLAGS	:=
 MMAKE_CFLAGS_DLL := -fPIC
 MMAKE_CFLAGS_LIB := -fPIC
 
+ifdef GCOV
+  # gcov should be run with optimisations disabled.
+  PROFILE_ONLOAD := 1
+endif
+
 ifndef CFLAGS
-ifeq ($(findstring /opt/at6.0,$(CC)),)
-CFLAGS		:= -O2
-else
-CFLAGS 		:= -O3
-endif
-ifndef NO_DEBUG_INFO
-CFLAGS		+= -g
-endif
+  ifneq (${PROFILE_ONLOAD},1)
+    ifeq ($(findstring /opt/at6.0,$(CC)),)
+      CFLAGS	:= -O2
+    else
+      CFLAGS 	:= -O3
+    endif
+  endif
+  ifndef NO_DEBUG_INFO
+    CFLAGS	+= -g
+  endif
 endif
 
 ifndef CXXFLAGS
-CXXFLAGS	:= -O2
-ifndef NO_DEBUG_INFO
-CXXFLAGS	+= -g
-endif
+  ifneq (${PROFILE_ONLOAD},1)
+    CXXFLAGS	:= -O2
+  endif
+  ifndef NO_DEBUG_INFO
+    CXXFLAGS	+= -g
+  endif
 endif
 
 ifdef NDEBUG
@@ -103,6 +112,11 @@ endif
 ifdef OFE_TREE
   MMAKE_INCLUDE	+= -I$(OFE_TREE)/include
   MMAKE_CPPFLAGS	+= -DONLOAD_OFE -DOFE_ONLOAD
+endif
+
+ifdef GCOV
+  MMAKE_CFLAGS        += -fprofile-arcs -ftest-coverage
+  MMAKE_DIR_LINKFLAGS += -fprofile-arcs
 endif
 
 ######################################################################
@@ -127,6 +141,11 @@ define MMakeLinkStaticLib
 $(RM) $@ ; $(AR) -cr $@ $^
 endef
 
+define MMakeLinkRelocatable
+set -x; \
+$(CLINK) $(MMAKE_CARCH) $(CFLAGS) $(MMAKE_DIR_LINKFLAGS) \
+	-fPIC -nostdlib -z combreloc -r $(filter %.o,$^) $$libs -o $@;
+endef
 
 define MMakeLinkPreloadLib
 set -x; \
@@ -165,15 +184,26 @@ endef
 ######################################################################
 # How to name and find libraries.
 #
+ifeq ($(NDEBUG),1)
+MMakeGeneratePrebuiltPath = $(TOP)/prebuilt/$(shell mmaketool --userbuild)/$(lib_where)
+else
+MMakeGeneratePrebuiltPath = $(TOP)/prebuilt/$(shell mmaketool --userbuild)/$(lib_where)/debug
+endif
+
 MMakeGenerateLibTarget = lib$(lib_name)$(lib_ver).a
 MMakeGenerateLibDepend = $(BUILD)/$(lib_where)/$(MMakeGenerateLibTarget)
 MMakeGenerateLibLink   = $(BUILD)/$(lib_where)/lib$(lib_name)$(lib_ver).a
+MMakeGeneratePrebuiltLibDepend = $(MMakeGeneratePrebuiltPath)/$(MMakeGenerateLibTarget)
+MMakeGeneratePrebuiltLibLink   = $(MMakeGeneratePrebuiltPath)/lib$(lib_name)$(lib_ver).a
+
 
 MMakeGenerateDllRealname = lib$(lib_name).so.$(lib_maj).$(lib_min).$(lib_mic)
 MMakeGenerateDllSoname = lib$(lib_name).so.$(lib_maj)
 MMakeGenerateDllLinkname = lib$(lib_name).so
 MMakeGenerateDllDepend = $(BUILD)/$(lib_where)/$(MMakeGenerateDllTarget)
 MMakeGenerateDllLink   = -L$(BUILD)/$(lib_where) -l$(lib_name) -Wl,-rpath $(shell echo "$(BUILDPATH)" | sed 's+/mnt/./home+/home+')/$(lib_where)
+MMakeGeneratePrebuiltDllDepend = $(MMakeGeneratePrebuiltPath)/$(MMakeGenerateDllTarget)
+MMakeGeneratePrebuiltDllLink   = -L$(MMakeGeneratePrebuiltPath) -l$(lib_name) -Wl,-rpath $(shell readlink -f "$(MMakeGeneratePrebuiltPath)")
 
 
 ######################################################################

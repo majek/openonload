@@ -320,7 +320,7 @@ static inline __u16 mdio_phy_id_devad(int phy_id)
 struct mdio_if_info {
 	int prtad;
 	u32 mmds;
-	unsigned mode_support;
+	unsigned int mode_support;
 
 	struct net_device *dev;
 	int (*mdio_read)(struct net_device *dev, int prtad, int devad,

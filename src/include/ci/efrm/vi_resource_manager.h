@@ -60,6 +60,8 @@
 /* Sufficient for 32K x 8byte entry ring */
 #define EFRM_VI_MAX_DMA_ADDR 64
 
+#define EFRM_VI_TX_ALTERNATIVES_MAX  17
+
 
 struct efrm_pd;
 
@@ -163,6 +165,10 @@ struct efrm_vi {
 	 * this efrm_vi.
 	 */
 	volatile char __iomem *io_page;
+
+	unsigned tx_alt_cp;
+	int      tx_alt_num;
+	unsigned tx_alt_ids[EFRM_VI_TX_ALTERNATIVES_MAX];
 };
 
 

@@ -28,10 +28,11 @@
   
 #include "ip_internal.h"
 #include <onload/ul/per_thread.h>
+#include <cplane/debug.h> /* for __CDEBUG_DEFAULT__ */
 
 
 /* By default, log anything unexpected that happens. */
-unsigned ci_tp_log = CI_TP_LOG_E | CI_TP_LOG_U | CI_TP_LOG_DU;
+unsigned ci_tp_log = CI_TP_LOG_DEFAULT;
 unsigned ci_tp_max_dump = 80;
 
 

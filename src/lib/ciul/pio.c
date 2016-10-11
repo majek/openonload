@@ -26,6 +26,7 @@
 
 #include <etherfabric/pd.h>
 #include <etherfabric/pio.h>
+#include <etherfabric/capabilities.h>
 #include "ef_vi_internal.h"
 #include "driver_access.h"
 #include "logging.h"
@@ -42,9 +43,17 @@ int ef_pio_alloc(ef_pio* pio, ef_driver_handle pio_dh, ef_pd* pd,
 {
   ci_resource_alloc_t ra;
   int rc;
+  unsigned long pio_buffer_size;
+
+  rc = ef_pd_capabilities_get(pio_dh, pd, pd_dh, EF_VI_CAP_PIO_BUFFER_SIZE,
+                              &pio_buffer_size);
+  if( rc < 0 ) {
+    LOGVV(ef_log("%s: ef_pd_capabilities_get() failed", __FUNCTION__));
+    return rc;
+  }
 
   memset(pio, 0, sizeof(*pio));
-  pio->pio_len = len_hint < 2048 ? len_hint : 2048;
+  pio->pio_len = len_hint < pio_buffer_size ? len_hint : pio_buffer_size;
   pio->pio_buffer = calloc(sizeof(uint8_t), pio->pio_len);
   if( ! pio->pio_buffer ) {
     LOGVV(ef_log("%s: calloc of pio_buffer failed", __FUNCTION__));

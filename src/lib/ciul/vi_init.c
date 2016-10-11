@@ -140,6 +140,7 @@ int ef_vi_rxq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
   }
 
   state->rxq.added = state->rxq.removed = state->rxq.prev_added = 0;
+  state->rxq.last_completed = vi->vi_rxq.mask;
   state->rxq.in_jumbo = 0;
   state->rxq.bytes_acc = 0;
 
@@ -196,7 +197,7 @@ static int tx_desc_bytes(struct ef_vi* vi)
 {
   switch( vi->nic_type.arch ) {
   case EF_VI_ARCH_FALCON:
-    return (vi->vi_flags & EF_VI_TX_PHYS_ADDR) ? 8 : 4;
+    return 8;
   case EF_VI_ARCH_EF10:
     return 8;
   default:
@@ -235,6 +236,10 @@ int ef_vi_init(struct ef_vi* vi, int arch, int variant, int revision,
   /* vi->vi_stats = NULL; */
   /* vi->io = NULL; */
   /* vi->linked_pio = NULL; */
+  /* vi->tx_alt_num = 0; */
+  /* vi->tx_alt_ids = NULL; */
+  vi->vi_is_normal = !(ef_vi_flags & EF_VI_RX_EVENT_MERGE) &&
+                     !(ef_vi_flags & EF_VI_RX_PACKED_STREAM);
   switch( arch ) {
   case EF_VI_ARCH_FALCON:
     falcon_vi_init(vi);
@@ -344,6 +349,7 @@ void ef_vi_reset_rxq(struct ef_vi* vi)
   qs->bytes_acc = 0;
   qs->rx_ps_pkt_count = 0xF;
   qs->rx_ps_credit_avail = 1;
+  qs->last_completed = vi->vi_rxq.mask;
   if( vi->vi_rxq.mask ) {
     int i;
     for( i = 0; i <= vi->vi_rxq.mask; ++i )

@@ -34,8 +34,7 @@
 
 #include <ci/app.h>
 #include <onload/ioctl.h>
-#include <ci/internal/cplane_handle.h>
-#include <ci/internal/cplane_ops.h>
+#include <onload/cplane_ops.h>
 #include "libstack.h"
 #include <pcap.h>
 #include <net/if.h>
@@ -59,8 +58,8 @@ static struct timeval tv_now;
 static const char *cfg_interface = "any";
 static int cfg_ifindex = -1;
 static cicp_encap_t cfg_encap;
-#define CI_HWPORT_ID_LO CI_CFG_MAX_REGISTER_INTERFACES
-ci_int8 dump_hwports[CI_CFG_MAX_REGISTER_INTERFACES+2];
+#define CI_HWPORT_ID_LO CPLANE_MAX_REGISTER_INTERFACES
+ci_int8 dump_hwports[CPLANE_MAX_REGISTER_INTERFACES+2];
 
 /* Data for dynamic update of the stack list */
 static oo_fd onload_fd = (oo_fd)-1;
@@ -133,14 +132,14 @@ static void ifindex_to_intf_i(ci_netif *ni)
     goto suicide;
   }
 
-#if CI_CFG_TEAMING
+#if CPLANE_TEAMING
   /* Is it bond? */
   if( cfg_encap.type & CICP_LLAP_TYPE_BOND ) {
     rc = ci_bond_get_hwport_list(CICP_HANDLE(ni), base_ifindex, dump_hwports);
     if( rc == 0 ) {
       LOG_DUMP(
         int i;
-        for(i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; i++)
+        for(i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; i++)
           ci_log("dump_hwports[%d]=%d", i, dump_hwports[i]);
       )
       return;
@@ -206,7 +205,7 @@ static void stack_dump_on(ci_netif *ni)
     ci_hwport_id_t hwport_i;
     int intf_i;
     for( hwport_i = 0;
-         hwport_i < CI_CFG_MAX_REGISTER_INTERFACES;
+         hwport_i < CPLANE_MAX_REGISTER_INTERFACES;
          hwport_i++ ) {
       intf_i = ci_netif_get_hwport_to_intf_i(ni)[hwport_i];
       if( intf_i >= 0 )

@@ -30,7 +30,7 @@
 #include <ci/internal/ip.h>
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
-#include <onload/cplane.h>
+#include <cplane/exported.h>
 
 #ifndef NDEBUG
 # define __ENTRY OO_DEBUG_IPP(ci_log("-> %s", __FUNCTION__))
@@ -501,6 +501,7 @@ efab_ipp_icmp_qpkt(tcp_helper_resource_t* thr,
       ci_ipp_pmtu_rx_tcp(thr, SOCK_TO_TCP(s), addr);
     else
       ci_ipp_pmtu_rx_udp(thr, SOCK_TO_UDP(s), addr);
+    return;
   }
 
   /* UDP is interested in PMTU only */

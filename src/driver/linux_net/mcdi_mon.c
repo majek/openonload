@@ -107,6 +107,49 @@ static const struct {
 	SENSOR(VDD08D_VSS08D_CSR,	"0.9V die (int. ADC)",	    IN,    -1),
 	SENSOR(VDD08D_VSS08D_CSR_EXTADC, "0.9V die (ext. ADC)",	    IN,    -1),
 	SENSOR(HOTPOINT_TEMP,  "Controller board temp. (hotpoint)", TEMP,  -1),
+	SENSOR(PHY_POWER_PORT0,		"PHY overcurrent",	    COOL,  0),
+	SENSOR(PHY_POWER_PORT1,		"PHY overcurrent",	    COOL,  1),
+	SENSOR(MUM_VCC,			"MUM Vcc",		    IN,    -1),
+	SENSOR(IN_0V9_A,		"0.9V phase A supply",	    IN,    -1),
+	SENSOR(IN_I0V9_A,
+				     "0.9V phase A supply current", CURR,  -1),
+	SENSOR(VREG_0V9_A_TEMP,
+				    "0.9V phase A regulator temp.", TEMP,  -1),
+	SENSOR(IN_0V9_B,	        "0.9V phase B supply",	    IN,    -1),
+	SENSOR(IN_I0V9_B,
+				     "0.9V phase B supply current", CURR,  -1),
+	SENSOR(VREG_0V9_B_TEMP,
+				    "0.9V phase B regulator temp.", TEMP,  -1),
+	SENSOR(CCOM_AVREG_1V2_SUPPLY,
+				     "CCOM 1.2V supply (int. ADC)", IN,    -1),
+	SENSOR(CCOM_AVREG_1V2_SUPPLY_EXTADC,
+				     "CCOM 1.2V supply (ext. ADC)", IN,    -1),
+	SENSOR(CCOM_AVREG_1V8_SUPPLY,
+				     "CCOM 1.8V supply (int. ADC)", IN,    -1),
+	SENSOR(CCOM_AVREG_1V8_SUPPLY_EXTADC,
+				     "CCOM 1.8V supply (ext. ADC)", IN,    -1),
+	SENSOR(CONTROLLER_RTS,		"CCOM RTS temp.",	    TEMP,  -1),
+	SENSOR(CONTROLLER_MASTER_VPTAT, "Master die int. temp.",    IN,    -1),
+	SENSOR(CONTROLLER_MASTER_INTERNAL_TEMP,
+					   "Master die int. temp.", TEMP,  -1),
+	SENSOR(CONTROLLER_MASTER_VPTAT_EXTADC,
+				"Master die int. temp. (ext. ADC)", IN,    -1),
+	SENSOR(CONTROLLER_MASTER_INTERNAL_TEMP_EXTADC,
+				"Master die int. temp. (ext. ADC)", TEMP,  -1),
+	SENSOR(CONTROLLER_SLAVE_VPTAT,	"Slave die int. temp.",	    IN,    -1),
+	SENSOR(CONTROLLER_SLAVE_INTERNAL_TEMP,
+					    "Slave die int. temp.", TEMP,  -1),
+	SENSOR(CONTROLLER_SLAVE_VPTAT_EXTADC,
+				 "Slave die int. temp. (ext. ADC)", IN,    -1),
+	SENSOR(CONTROLLER_SLAVE_INTERNAL_TEMP_EXTADC,
+				 "Slave die int. temp. (ext. ADC)", TEMP,  -1),
+	SENSOR(SODIMM_VOUT,		"SODIMM supply.",	    IN,    -1),
+	SENSOR(SODIMM_0_TEMP,		"SODIMM 0 temp.",	    TEMP,  -1),
+	SENSOR(SODIMM_1_TEMP,		"SODIMM 1 temp.",	    TEMP,  -1),
+	SENSOR(PHY0_VCC,		"PHY0 supply.",		    IN,    -1),
+	SENSOR(PHY1_VCC,		"PHY1 supply.",		    IN,    -1),
+	SENSOR(CONTROLLER_TDIODE_TEMP,
+				   "Controller die (TDIODE) temp.", TEMP,  -1),
 #undef SENSOR
 };
 
@@ -398,7 +441,7 @@ int efx_mcdi_mon_probe(struct efx_nic *efx)
 	for (i = 0, j = -1, type = -1; ; i++) {
 		enum efx_hwmon_type hwmon_type;
 		const char *hwmon_prefix;
-		unsigned hwmon_index;
+		unsigned int hwmon_index;
 		u16 min1, max1, min2, max2;
 
 		/* Find next sensor type or exit if there is none */

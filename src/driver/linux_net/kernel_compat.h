@@ -141,17 +141,14 @@
 	#define raw_smp_processor_id() (current_thread_info()->cpu)
 #endif
 
-#ifndef NETIF_F_GEN_CSUM
-	#define NETIF_F_GEN_CSUM (NETIF_F_NO_CSUM | NETIF_F_HW_CSUM)
+#ifndef NETIF_F_CSUM_MASK
+#ifdef NETIF_F_IPV6_CSUM
+	#define NETIF_F_CSUM_MASK \
+		(NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM | NETIF_F_HW_CSUM)
+#else
+	#define NETIF_F_CSUM_MASK \
+		(NETIF_F_IP_CSUM | NETIF_F_HW_CSUM)
 #endif
-#ifndef NETIF_F_V4_CSUM
-	#define NETIF_F_V4_CSUM (NETIF_F_GEN_CSUM | NETIF_F_IP_CSUM)
-#endif
-#ifndef NETIF_F_V6_CSUM
-	#define NETIF_F_V6_CSUM  NETIF_F_GEN_CSUM
-#endif
-#ifndef NETIF_F_ALL_CSUM
-	#define NETIF_F_ALL_CSUM (NETIF_F_V4_CSUM | NETIF_F_V6_CSUM)
 #endif
 
 #ifdef NETIF_F_RXHASH
@@ -192,6 +189,14 @@
 #ifndef NETIF_F_ALL_TSO
 	#define NETIF_F_ALL_TSO (NETIF_F_TSO | NETIF_F_TSO6 | NETIF_F_TSO_ECN)
 #endif
+
+#ifndef NETIF_F_GSO_GRE_CSUM
+	#define NETIF_F_GSO_GRE_CSUM 0
+#endif
+#ifndef NETIF_F_GSO_UDP_TUNNEL_CSUM
+	#define NETIF_F_GSO_UDP_TUNNEL_CSUM 0
+#endif
+
 
 /* Cope with small changes in PCI constants between minor kernel revisions */
 #if PCI_X_STATUS != 4
@@ -238,6 +243,18 @@
 #endif
 #ifndef PCI_EXP_LNKSTA_NLW
 	#define  PCI_EXP_LNKSTA_NLW	0x03f0	/* Nogotiated Link Width */
+#endif
+#ifndef PCI_EXP_LNKCAP_MLW
+	#define  PCI_EXP_LNKCAP_MLW     0x000003f0 /* Maximum Link Width */
+#endif
+#ifndef PCI_EXP_LNKCAP_SLS_5_0GB
+	#define  PCI_EXP_LNKCAP_SLS_5_0GB 0x00000002 /* LNKCAP2 SLS bit 1 */
+#endif
+#ifndef PCI_EXP_LNKCAP2
+	#define PCI_EXP_LNKCAP2         44      /* Link Capabilities 2 */
+#endif
+#ifndef PCI_EXP_LNKCAP2_SLS_8_0GB
+	#define  PCI_EXP_LNKCAP2_SLS_8_0GB  0x00000008 /* Supported 8.0GT/s */
 #endif
 
 #ifndef PCI_VENDOR_ID_SOLARFLARE
@@ -362,16 +379,6 @@
 	}
 #endif
 
-#ifndef KBUILD_STR
-	/* KBUILD_MODNAME is not a string */
-	#define __KBUILD_STR(s) #s
-	#define KBUILD_STR(s) __KBUILD_STR(s)
-	static char efx_kbuild_modname[] __attribute__((unused)) =
-		KBUILD_STR(KBUILD_MODNAME);
-	#undef KBUILD_MODNAME
-	#define KBUILD_MODNAME efx_kbuild_modname
-#endif
-
 #ifndef VLAN_PRIO_MASK
 	#define VLAN_PRIO_MASK          0xe000
 #endif
@@ -385,6 +392,66 @@
 
 #ifndef SIOCGHWTSTAMP
 	#define SIOCGHWTSTAMP	0x89b1
+#endif
+
+#ifdef EFX_NEED_UINTPTR_T
+    typedef unsigned long uintptr_t;
+#endif
+
+#ifdef EFX_NEED_IPV6_NFC
+	/**
+	 * struct ethtool_tcpip6_spec - flow specification for TCP/IPv6 etc.
+	 * @ip6src: Source host
+	 * @ip6dst: Destination host
+	 * @psrc: Source port
+	 * @pdst: Destination port
+	 * @tclass: Traffic Class
+	 *
+	 * This can be used to specify a TCP/IPv6, UDP/IPv6 or SCTP/IPv6 flow.
+	 */
+	struct ethtool_tcpip6_spec {
+		__be32	ip6src[4];
+		__be32	ip6dst[4];
+		__be16	psrc;
+		__be16	pdst;
+		__u8    tclass;
+	};
+
+	/**
+	 * struct ethtool_ah_espip6_spec - flow specification for IPsec/IPv6
+	 * @ip6src: Source host
+	 * @ip6dst: Destination host
+	 * @spi: Security parameters index
+	 * @tclass: Traffic Class
+	 *
+	 * This can be used to specify an IPsec transport or tunnel over IPv6.
+	 */
+	struct ethtool_ah_espip6_spec {
+		__be32	ip6src[4];
+		__be32	ip6dst[4];
+		__be32	spi;
+		__u8    tclass;
+	};
+
+	/**
+	 * struct ethtool_usrip6_spec - general flow specification for IPv6
+	 * @ip6src: Source host
+	 * @ip6dst: Destination host
+	 * @l4_4_bytes: First 4 bytes of transport (layer 4) header
+	 * @tclass: Traffic Class
+	 * @l4_proto: Transport protocol number (nexthdr after any Extension Headers)
+	 */
+	struct ethtool_usrip6_spec {
+		__be32	ip6src[4];
+		__be32	ip6dst[4];
+		__be32	l4_4_bytes;
+		__u8    tclass;
+		__u8    l4_proto;
+	};
+
+	#ifndef IPV6_USER_FLOW
+		#define	IPV6_USER_FLOW	0x0e	/* spec only (usr_ip6_spec; nfc only) */
+	#endif
 #endif
 
 /**************************************************************************/
@@ -538,6 +605,10 @@
 		struct ethtool_tcpip4_spec		udp_ip4_spec;
 		struct ethtool_tcpip4_spec		sctp_ip4_spec;
 		struct ethtool_usrip4_spec		usr_ip4_spec;
+		struct ethtool_tcpip6_spec		tcp_ip6_spec;
+		struct ethtool_tcpip6_spec		udp_ip6_spec;
+		struct ethtool_tcpip6_spec		sctp_ip6_spec;
+		struct ethtool_usrip6_spec		usr_ip6_spec;
 		struct ethhdr				ether_spec;
 		/* unneeded members omitted... */
 		__u8					hdata[60];
@@ -990,9 +1061,9 @@
 			     uclist = uclist->next)
 		#define netdev_uc_count(dev) (dev)->uc_count
 	#else
-		struct dev_addr_list { void *da_addr; };
-		#define netdev_for_each_uc_addr(uclist, dev) while (0)
-		#define netdev_uc_count(dev) 0
+		struct dev_addr_list { void *da_addr; struct dev_addr_list *next; };
+		#define netdev_for_each_uc_addr(uclist, dev) while ((void)uclist,(void)dev,0)
+		#define netdev_uc_count(dev) ((void)dev,0)
 	#endif
 #endif
 
@@ -1246,6 +1317,16 @@
 	}
 #endif
 
+#ifdef EFX_NEED_DMA_SET_MASK_AND_COHERENT
+	static inline int dma_set_mask_and_coherent(struct device *dev, u64 mask)
+	{
+		int rc = dma_set_mask(dev, mask);
+		if (rc == 0)
+			dma_set_coherent_mask(dev, mask);
+		return rc;
+	}
+#endif
+
 #ifdef EFX_NEED_FOR_EACH_PCI_DEV
 	#define for_each_pci_dev(d)				\
 		while ((d = pci_get_device(PCI_ANY_ID,		\
@@ -1438,7 +1519,7 @@ extern struct i2c_driver efx_lm90_driver;
 #endif
 
 #ifdef EFX_NEED_COMPARE_ETHER_ADDR
-	static inline unsigned
+	static inline unsigned int
 	compare_ether_addr(const u8 *addr1, const u8 *addr2)
 	{
 		const u16 *a = (const u16 *) addr1;
@@ -1594,7 +1675,8 @@ static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 					unsigned int bytes)
 {}
 static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
-					     unsigned pkts, unsigned bytes)
+					     unsigned int pkts,
+					     unsigned int bytes)
 {}
 static inline void netdev_tx_reset_queue(struct netdev_queue *q) {}
 #endif
@@ -1634,6 +1716,24 @@ static inline void skb_checksum_none_assert(const struct sk_buff *skb)
 
 #ifndef NETIF_F_HW_VLAN_CTAG_TX
 	#define NETIF_F_HW_VLAN_CTAG_TX NETIF_F_HW_VLAN_TX
+#endif
+
+#ifndef NETIF_F_HW_VLAN_CTAG_RX
+       #define NETIF_F_HW_VLAN_CTAG_RX NETIF_F_HW_VLAN_RX
+#endif
+
+#ifdef EFX_HAVE_OLD___VLAN_HWACCEL_PUT_TAG
+static inline struct sk_buff *
+	efx___vlan_hwaccel_put_tag(struct sk_buff *skb, __be16 vlan_proto,
+				   u16 vlan_tci)
+	{
+		WARN_ON(vlan_proto != htons(ETH_P_8021Q));
+		return __vlan_hwaccel_put_tag(skb, vlan_tci);
+	}
+	#define __vlan_hwaccel_put_tag efx___vlan_hwaccel_put_tag
+#endif
+#ifndef NETIF_F_HW_VLAN_CTAG_FILTER
+	#define NETIF_F_HW_VLAN_CTAG_FILTER NETIF_F_HW_VLAN_FILTER
 #endif
 
 #ifdef EFX_NEED___SET_BIT_LE
@@ -1777,10 +1877,65 @@ void usleep_range(unsigned long min, unsigned long max);
 	}
 #endif
 
+#ifdef EFX_HAVE_OLD_NLA64
+static inline int nla_put_u64_64bit(struct sk_buff *skb, int attrtype,
+				    u64 value, int padattr)
+{
+	return nla_put_u64(skb, attrtype, value);
+}
+#endif
+
 #ifdef EFX_NEED_SKB_VLAN_TAG_GET
 #define skb_vlan_tag_get	vlan_tx_tag_get
 #define skb_vlan_tag_present	vlan_tx_tag_present
 #endif
+
+#ifdef EFX_NEED_PAGE_REF_ADD
+static inline void page_ref_add(struct page *page, int nr)
+{
+	atomic_add(nr, &page->_count);
+}
+#endif
+
+#ifdef EFX_HAVE_SKB_ENCAPSULATION
+#ifdef EFX_SKB_HAS_INNER_NETWORK_HEADER
+#define EFX_CAN_SUPPORT_ENCAP_TSO
+#ifndef EFX_HAVE_SKB_INNER_NETWORK_HEADER
+static inline unsigned char *skb_inner_network_header(const struct sk_buff *skb)
+{
+	return skb->head + skb->inner_network_header;
+}
+#endif
+
+#ifndef EFX_HAVE_INNER_IP_HDR
+static inline struct iphdr *inner_ip_hdr(const struct sk_buff *skb)
+{
+	return (struct iphdr *)skb_inner_network_header(skb);
+}
+#endif
+#endif /* EFX_SKB_HAS_INNER_NETWORK_HEADER */
+
+#ifdef EFX_SKB_HAS_INNER_TRANSPORT_HEADER
+#ifndef EFX_HAVE_SKB_INNER_TRANSPORT_HEADER
+static inline unsigned char *skb_inner_transport_header(const struct sk_buff *skb)
+{
+	return skb->head + skb->inner_transport_header;
+}
+#endif
+
+#ifndef EFX_HAVE_INNER_TCP_HDR
+static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
+{
+	return (struct tcphdr *)skb_inner_transport_header(skb);
+}
+#endif
+#else /* !EFX_SKB_HAS_INNER_TRANSPORT_HEADER */
+#undef EFX_CAN_SUPPORT_ENCAP_TSO
+#endif /* EFX_SKB_HAS_INNER_TRANSPORT_HEADER */
+#ifndef NETIF_F_GSO_GRE
+#undef EFX_CAN_SUPPORT_ENCAP_TSO
+#endif /* !NETIF_F_GSO_GRE */
+#endif /* EFX_HAVE_SKB_ENCAPSULATION */
 
 /**************************************************************************
  *
@@ -1874,6 +2029,13 @@ void usleep_range(unsigned long min, unsigned long max);
 				      const cpumask_t *src2p)
 	{
 		cpus_or(*dstp, *src1p, *src2p);
+	}
+
+	#define cpumask_and efx_cpumask_and
+	static inline void efx_cpumask_and(cpumask_t *dstp, const cpumask_t *src1p,
+				      const cpumask_t *src2p)
+	{
+		cpus_and(*dstp, *src1p, *src2p);
 	}
 
 	#define cpumask_weight efx_cpumask_weight
@@ -1996,6 +2158,17 @@ void usleep_range(unsigned long min, unsigned long max);
 	efx_kobject_set_name_vargs(struct kobject *kobj, const char *fmt, va_list vargs);
 #endif
 
+
+#ifdef EFX_NEED_CPUMASK_LOCAL_SPREAD
+#if NR_CPUS == 1
+static inline unsigned int cpumask_local_spread(unsigned int i, int node)
+{
+	return 0;
+}
+#else
+unsigned int cpumask_local_spread(unsigned int i, int node);
+#endif
+#endif
 
 /**************************************************************************
  *
@@ -2155,6 +2328,17 @@ void usleep_range(unsigned long min, unsigned long max);
 			efx_warn_slowpath(__FILE__, __LINE__, __func__,	\
 					  format);			\
 		unlikely(__ret_warn_on);				\
+	})
+#endif
+#ifdef EFX_NEED_WARN_ONCE
+	#define WARN_ONCE(condition, format...) ({      \
+		static int __warned;                    \
+		int __ret_warn_once = !!(condition);    \
+							\
+		if (unlikely(__ret_warn_once))          \
+			if (WARN(!__warned, format))    \
+				__warned = 1;           \
+		unlikely(__ret_warn_once);              \
 	})
 #endif
 #ifdef EFX_NEED_WARN_ON
@@ -2450,6 +2634,19 @@ static inline int efx_on_each_cpu(void (*func) (void *info), void *info, int wai
 			return 1;
 		return lhs->tv_nsec - rhs->tv_nsec;
 	}
+#endif
+
+#ifndef EFX_HAVE_TIMESPEC64
+	#define timespec64		timespec
+	#define timespec64_compare	timespec_compare
+	#define timespec64_add_ns	timespec_add_ns
+	#define timespec64_sub		timespec_sub
+	#define ns_to_timespec64	ns_to_timespec
+	#define timespec64_to_ns	timespec_to_ns
+	#define ktime_to_timespec64	ktime_to_timespec
+	#define timespec64_to_ktime	timespec_to_ktime
+	#define timespec_to_timespec64(t) (t)
+	#define timespec64_to_timespec(t) (t)
 #endif
 
 #ifdef EFX_HAVE_OLD_SKB_LINEARIZE
@@ -2792,7 +2989,7 @@ static inline unsigned long efx_get_open_fds(unsigned long fd, const struct fdta
 #include <linux/ptp_clock_kernel.h>
 #endif
 
-#ifdef EFX_NEED_PTP_PPS_USR
+#ifdef EFX_NEED_PTP_CLOCK_PPSUSR
 #define PTP_CLOCK_PPSUSR (PTP_CLOCK_PPS + 1)
 #endif
 
@@ -2886,8 +3083,37 @@ static inline bool __must_check IS_ERR_OR_NULL(__force const void *ptr)
 #define WRITE_ONCE(x, v) (ACCESS_ONCE((x)) = (v))
 #endif
 
+#ifndef NUMA_NO_NODE
+#define NUMA_NO_NODE (-1)
+#endif
+
+#if !defined(CONFIG_HAVE_MEMORYLESS_NODES) && !defined(cpu_to_mem)
+#define cpu_to_mem(cpu) cpu_to_node(cpu)
+#endif
+
+#ifndef IS_ENABLED
+/* As in include/linux/kconfig.h */
+#define __ARG_PLACEHOLDER_1 0,
+#define config_enabled(cfg) _config_enabled(cfg)
+#define _config_enabled(value) __config_enabled(__ARG_PLACEHOLDER_##value)
+#define __config_enabled(arg1_or_junk) ___config_enabled(arg1_or_junk 1, 0)
+#define ___config_enabled(__ignored, val, ...) val
+
+#define IS_ENABLED(option)	(config_enabled(option) ||	\
+				 config_enabled(option##_MODULE))
+#endif
+
 #ifndef EFX_HAVE_NETIF_XMIT_STOPPED
 #define netif_xmit_stopped netif_tx_queue_stopped
+#endif
+
+#ifdef EFX_HAVE_HW_ENC_FEATURES
+#ifdef EFX_NEED_SKB_INNER_TRANSPORT_OFFSET
+static inline int skb_inner_transport_offset(const struct sk_buff *skb)
+{
+	return skb_inner_transport_header(skb) - skb->data;
+}
+#endif
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

@@ -45,13 +45,14 @@
 # error __KERNEL__ not allowed here.
 #endif
 
+#include <netinet/in.h>
+
 #include <ci/efch/op_types.h>
 #include <ci/efch/mmap_id.h>
 #include <ci/efrm/resource_id.h>
 
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-
 
 struct ci_resource_alloc_s;
 struct ci_resource_op_s;
@@ -98,6 +99,16 @@ ci_resource_op(int fp, struct ci_resource_op_s* io)
 
 /*! \i_efab_unix */
 ci_inline int
+ci_filter_add(int fp, ci_filter_add_t* filter_add)
+{
+  int r;
+  if( (r = ioctl(fp, CI_FILTER_ADD, filter_add)) < 0 )  return -errno;
+  return r;
+}
+
+
+/*! \i_efab_unix */
+ci_inline int
 ci_resource_prime(int fp, struct ci_resource_prime_op_s* io)
 {
   int r;
@@ -105,6 +116,15 @@ ci_resource_prime(int fp, struct ci_resource_prime_op_s* io)
   return r;
 }
 
+
+/*! \i_efab_unix */
+ci_inline int
+ci_capabilities_op(int fp, struct ci_capabilities_op_s* io)
+{
+  int r;
+  if( (r = ioctl(fp, CI_CAPABILITIES_OP, io)) < 0 )  return -errno;
+  return r;
+}
 
 #endif  /* _CI_DRIVER_UNIX_INTF_H_ */
 /*! \cidoxg_end */

@@ -56,12 +56,12 @@
 
   /*! Align forward onto next boundary. */
 
-#define CI_ALIGN_FWD(p, align)               (((p)+(align)-1u) & ~((align)-1u))
+#define CI_ALIGN_FWD(p, align)    (((p)+(align)-1u) & ~((typeof(p))(align)-1u))
 
 
   /*! Align back onto prev boundary. */
 
-#define CI_ALIGN_BACK(p, align)              ((p) & ~((align)-1u))
+#define CI_ALIGN_BACK(p, align)   ((p) & ~((typeof(p))(align)-1u))
 
 
   /*! How far to next boundary? */
@@ -110,9 +110,9 @@
 
   /* Same as CI_ALIGN_FWD and CI_ALIGN_BACK. */
 
-#define CI_ROUND_UP(i, align)      (((i)+(align)-1u) & ~((align)-1u))
+#define CI_ROUND_UP(i, align)      (((i)+(align)-1u) & ~((typeof(i))(align)-1u))
 
-#define CI_ROUND_DOWN(i, align)    ((i) & ~((align)-1u))
+#define CI_ROUND_DOWN(i, align)    ((i) & ~((typeof(i))(align)-1u))
 
 
 /**********************************************************************
@@ -161,13 +161,17 @@
 #if (CI_MY_BYTE_ORDER == CI_LITTLE_ENDIAN)
 # define CI_BSWAPC_BE16(v)   CI_BSWAPC_16(v)
 # define CI_BSWAPC_BE32(v)   CI_BSWAPC_32(v)
+# define CI_BSWAPC_BE64(v)   CI_BSWAPC_64(v)
 # define CI_BSWAPC_LE16(v)   (v)
 # define CI_BSWAPC_LE32(v)   (v)
+# define CI_BSWAPC_LE64(v)   (v)
 #elif (CI_MY_BYTE_ORDER == CI_BIG_ENDIAN)
 # define CI_BSWAPC_BE16(v)   (v)
 # define CI_BSWAPC_BE32(v)   (v)
+# define CI_BSWAPC_BE64(v)   (v)
 # define CI_BSWAPC_LE16(v)   CI_BSWAPC_16(v)
 # define CI_BSWAPC_LE32(v)   CI_BSWAPC_32(v)
+# define CI_BSWAPC_LE64(v)   CI_BSWAPC_64(v)
 #else
 # error Bad endian.
 #endif
@@ -237,6 +241,15 @@
 
 # define CI_KERNEL_ARG_LINUX(x) CI_KERNEL_ARG(x)
 # define CI_ARG_LINUX(x) ,x
+
+
+/* A fixed width ptr wrapper. */
+typedef struct {
+  ci_uint64 ptr CI_ALIGN(8);
+} ci_user_ptr_t;
+
+#define CI_USER_PTR_GET(p)    ((void *)((ci_uintptr_t)((p).ptr)))
+#define CI_USER_PTR_SET(p,x)  ((p).ptr = (ci_uint64)(ci_uintptr_t)(x))
 
 
 #endif  /* __CI_COMPAT_UTILS_H__ */

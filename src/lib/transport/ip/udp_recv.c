@@ -81,6 +81,15 @@
 # endif
 # define LOCAL_MSG_TRUNC	MSG_TRUNC
 
+typedef struct {
+  ci_udp_iomsg_args *a;
+  ci_msghdr* msg;
+  int sock_locked;
+  int flags;
+#if HAVE_MSG_FLAGS
+  int msg_flags;
+#endif
+} ci_udp_recv_info;
 
 
 ci_inline void ci_udp_recvmsg_fill_msghdr(ci_netif* ni, ci_msghdr* msg,
@@ -279,10 +288,11 @@ static void ci_udp_pkt_to_zc_msg(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 #endif /* __KERNEL__ */
 
 
-static int ci_udp_recvmsg_get(ci_netif* ni, ci_udp_state* us,
-                              ci_iovec_ptr* piov, 
-                              ci_msghdr* msg, int flags)
+static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
 {
+  ci_netif* ni = rinf->a->ni;
+  ci_udp_state* us = rinf->a->us;
+  ci_msghdr* msg = rinf->msg;
   ci_ip_pkt_fmt* pkt;
   int rc;
 
@@ -298,7 +308,7 @@ static int ci_udp_recvmsg_get(ci_netif* ni, ci_udp_state* us,
 #if defined(__linux__) && !defined(__KERNEL__)
   if( msg != NULL && msg->msg_controllen != 0 ) {
     if( CI_UNLIKELY(us->s.cmsg_flags != 0 ) )
-      ci_ip_cmsg_recv(ni, us, pkt, msg, 0);
+      ci_ip_cmsg_recv(ni, us, pkt, msg, 0, &rinf->msg_flags);
     else
       msg->msg_controllen = 0;
   }
@@ -310,10 +320,10 @@ static int ci_udp_recvmsg_get(ci_netif* ni, ci_udp_state* us,
   if(CI_LIKELY( rc >= 0 )) {
 #if HAVE_MSG_FLAGS
     if(CI_UNLIKELY( rc < pkt->pf.udp.pay_len && msg != NULL ))
-      msg->msg_flags |= LOCAL_MSG_TRUNC;
+      rinf->msg_flags |= LOCAL_MSG_TRUNC;
 #endif
     ci_udp_recvmsg_fill_msghdr(ni, msg, pkt, &us->s);
-    if( ! (flags & MSG_PEEK) )
+    if( ! (rinf->flags & MSG_PEEK) )
       ci_udp_recv_q_deliver(ni, &us->recv_q, pkt);
     us->udpflags |= CI_UDPF_LAST_RECV_ON;
   }
@@ -412,23 +422,31 @@ static int __ci_udp_recvmsg_try_os(ci_netif *ni, ci_udp_state *us,
 
 #endif  /* __KERNEL__ */
 
-static int ci_udp_recvmsg_try_os(ci_udp_iomsg_args *a,
-                                 ci_msghdr* msg, int flags, int* prc)
+static int ci_udp_recvmsg_try_os(ci_udp_recv_info *rinf, int* prc)
 {
-  ci_udp_state *us = a->us;
+  ci_udp_state *us = rinf->a->us;
+  int rc;
+
   if( !(us->s.os_sock_status & OO_OS_STATUS_RX) )
     return 0;
-  return __ci_udp_recvmsg_try_os(a->ni, us, msg, flags, prc);
+  rc = __ci_udp_recvmsg_try_os(rinf->a->ni, us, rinf->msg, rinf->flags, prc);
+#if HAVE_MSG_FLAGS
+  /* In case of non-negative rc, we copy msg_flags from rinf->msg_flags.
+   * Here we should copy the flags back to ensure we end up with the
+   * correct value. */
+  if( rc >= 0 )
+    rinf->msg_flags = rinf->msg->msg_flags;
+#endif
+  return rc;
 }
 
 
-static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a, 
-                                              ci_msghdr* msg,
-                                              ci_iovec_ptr *piov, int flags)
+static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
+                                              ci_iovec_ptr *piov)
 {
   int rc = 0;
-  ci_netif* ni = a->ni;
-  ci_udp_state* us = a->us;
+  ci_netif* ni = rinf->a->ni;
+  ci_udp_state* us = rinf->a->us;
 
   if(CI_UNLIKELY( ni->state->rxq_low ))
     ci_netif_rxq_low_on_recv(ni, &us->s,
@@ -436,11 +454,11 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
   /* In the kernel recv() with flags is not called.
    * only read(). So flags may only contain MSG_DONTWAIT */
 #ifdef __KERNEL__
-  ci_assert_equal(flags, 0);
+  ci_assert_equal(rinf->flags, 0);
 #endif
 
 #ifndef __KERNEL__
-  if( flags & MSG_ERRQUEUE_CHK ) {
+  if( rinf->flags & MSG_ERRQUEUE_CHK ) {
     if( ci_udp_recv_q_not_empty(&us->timestamp_q) ) {
       ci_ip_pkt_fmt* pkt;
       struct timespec ts[3];
@@ -456,11 +474,11 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
       
       pkt = ci_udp_recv_q_get(ni, &us->timestamp_q);
 
-      msg->msg_flags = 0;
-      cmsg_state.msg = msg;
-      cmsg_state.cm = msg->msg_control;
+      cmsg_state.msg = rinf->msg;
+      cmsg_state.cm = rinf->msg->msg_control;
       cmsg_state.cmsg_bytes_used = 0;
-      ci_iovec_ptr_init_nz(piov, msg->msg_iov, msg->msg_iovlen);
+      cmsg_state.p_msg_flags = &rinf->msg_flags;
+      ci_iovec_ptr_init_nz(piov, rinf->msg->msg_iov, rinf->msg->msg_iovlen);
       memset(ts, 0, sizeof(ts));
 
       if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE ) {
@@ -495,29 +513,31 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
       ci_put_cmsg(&cmsg_state, SOL_IP, IP_RECVERR, sizeof(errhdr), &errhdr);
 
       ci_ip_cmsg_finish(&cmsg_state);
-      msg->msg_flags |= MSG_ERRQUEUE_CHK;
+      rinf->msg_flags |= MSG_ERRQUEUE_CHK;
       return rc;
     }
     /* ICMP is handled via OS, so get OS error */
-    rc = oo_os_sock_recvmsg(ni, SC_SP(&us->s), msg, flags);
+    rc = oo_os_sock_recvmsg(ni, SC_SP(&us->s), rinf->msg, rinf->flags);
     if( rc < 0 ) {
       ci_assert(-rc == errno);
       return -1;
     }
-    else
+    else {
+      rinf->msg_flags = rinf->msg->msg_flags;
       return rc;
+    }
   }
 #endif
   if( (rc = ci_get_so_error(&us->s)) != 0 ) {
     CI_SET_ERROR(rc, rc);
     return rc;
   }
-  if( msg->msg_iovlen > 0 && msg->msg_iov == NULL ) {
+  if( rinf->msg->msg_iovlen > 0 && rinf->msg->msg_iov == NULL ) {
     CI_SET_ERROR(rc, EFAULT);
     return rc;
   }
 #if MSG_OOB_CHK
-  if( flags & MSG_OOB_CHK ) {
+  if( rinf->flags & MSG_OOB_CHK ) {
     CI_SET_ERROR(rc, EOPNOTSUPP);
     return rc;
   }
@@ -529,7 +549,7 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_iomsg_args* a,
     return rc;
   }
 #endif
-  if( msg->msg_iovlen == 0 ) {
+  if( rinf->msg->msg_iovlen == 0 ) {
     /* We have a difference in behaviour from the Linux stack here.  When
     ** msg_iovlen is 0 Linux 2.4.21-15.EL does not set MSG_TRUNC when a
     ** datagram has non-zero length.  We do. */
@@ -693,11 +713,10 @@ ci_udp_recvmsg_socklocked_spin(ci_udp_iomsg_args* a,
 
 
 static int 
-ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
-                      int *p_sock_locked)
+ci_udp_recvmsg_common(ci_udp_recv_info *rinf)
 {
-  ci_netif* ni = a->ni;
-  ci_udp_state* us = a->us;
+  ci_netif* ni = rinf->a->ni;
+  ci_udp_state* us = rinf->a->us;
   int have_polled = 0;
   ci_iovec_ptr  piov = {NULL,0, {NULL, 0}};
   int rc = 0, slow;
@@ -710,18 +729,22 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
   spin_state.timeout = us->s.so.rcvtimeo_msec;
 
   /* Grab the per-socket lock so we can access the receive queue. */
-  if( !*p_sock_locked ) {
+  if( !rinf->sock_locked ) {
     rc = ci_sock_lock(ni, &us->s.b);
     if(CI_UNLIKELY( rc != 0 )) {
       CI_SET_ERROR(rc, -rc);
       return rc;
     }
-    *p_sock_locked = 1;
+    rinf->sock_locked = 1;
   }
 
-  slow = ((flags & (MSG_OOB_CHK | MSG_ERRQUEUE_CHK)) |
-	  (msg->msg_iovlen == 0                    ) |
-	  (msg->msg_iov == NULL                    ) |
+#if HAVE_MSG_FLAGS
+  rinf->msg_flags = 0;
+#endif
+
+  slow = ((rinf->flags & (MSG_OOB_CHK | MSG_ERRQUEUE_CHK)) |
+	  (rinf->msg->msg_iovlen == 0              ) |
+	  (rinf->msg->msg_iov == NULL              ) |
 	  (ni->state->rxq_low                      ) |
 #if CI_CFG_POSIX_RECV  
 	  (udp_lport_be16(us) == 0                 ) |
@@ -731,18 +754,14 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
     goto slow_path;
 
  back_to_fast_path:
-  ci_iovec_ptr_init_nz(&piov, msg->msg_iov, msg->msg_iovlen);
+  ci_iovec_ptr_init_nz(&piov, rinf->msg->msg_iov, rinf->msg->msg_iovlen);
   
  piov_inited:
-#if HAVE_MSG_FLAGS
-  msg->msg_flags = 0;
-#endif
-
   if(CI_UNLIKELY( us->udpflags & CI_UDPF_PEEK_FROM_OS ))
     goto peek_from_os;
 
  check_ul_recv_q:
-  rc = ci_udp_recvmsg_get(ni, us, &piov, msg, flags);
+  rc = ci_udp_recvmsg_get(rinf, &piov);
   if( rc >= 0 )
     goto out;
 
@@ -778,10 +797,10 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
   }
 
   /* Nothing doing at userlevel.  Need to check the O/S socket. */
-  if( ci_udp_recvmsg_try_os(a, msg, flags, &rc) )
+  if( ci_udp_recvmsg_try_os(rinf, &rc) )
     goto out;
 
-  if( ((flags | us->s.b.sb_aflags) & MSG_DONTWAIT)) {
+  if( ((rinf->flags | us->s.b.sb_aflags) & MSG_DONTWAIT)) {
     /* UDP returns EAGAIN when non-blocking even when shutdown. */
     CI_SET_ERROR(rc, EAGAIN);
     ++us->stats.n_rx_eagain;
@@ -816,7 +835,7 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
   }
 
   if( spin_state.do_spin ) {
-    rc = ci_udp_recvmsg_socklocked_spin(a, ni, us, &spin_state);
+    rc = ci_udp_recvmsg_socklocked_spin(rinf->a, ni, us, &spin_state);
     if( rc == 0 )
       goto check_ul_recv_q;
     else if( rc < 0 ) {
@@ -827,14 +846,14 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
 #endif
 
   ci_sock_unlock(ni, &us->s.b);
-  *p_sock_locked = 0;
-  rc = ci_udp_recvmsg_block(a, ni, us, spin_state.timeout);
+  rinf->sock_locked = 0;
+  rc = ci_udp_recvmsg_block(rinf->a, ni, us, spin_state.timeout);
   if( rc == 0 ) {
-    if( !*p_sock_locked )
+    if( !rinf->sock_locked )
       rc = ci_sock_lock(ni, &us->s.b);
   }
   if( rc == 0 ) {
-    *p_sock_locked = 1;
+    rinf->sock_locked = 1;
     goto check_ul_recv_q;
   }
   CI_SET_ERROR(rc, -rc);
@@ -844,7 +863,7 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
   return rc;
 
  slow_path:
-  rc = ci_udp_recvmsg_socklocked_slowpath(a, msg, &piov, flags);
+  rc = ci_udp_recvmsg_socklocked_slowpath(rinf, &piov);
   if( rc == 0 ) 
     goto back_to_fast_path;
   else if( rc == SLOWPATH_RET_IOVLEN_INITED )
@@ -857,7 +876,7 @@ ci_udp_recvmsg_common(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags,
     goto out;
 
  peek_from_os:
-  if( ci_udp_recvmsg_try_os(a, msg, flags, &rc) )
+  if( ci_udp_recvmsg_try_os(rinf, &rc) )
     goto out;
   
   goto check_ul_recv_q;
@@ -869,11 +888,20 @@ int ci_udp_recvmsg(ci_udp_iomsg_args *a, ci_msghdr* msg, int flags)
   ci_netif* ni = a->ni;
   ci_udp_state* us = a->us;
   int rc;
-  int sock_locked = 0;
+  ci_udp_recv_info rinf;
 
-  rc = ci_udp_recvmsg_common(a, msg, flags, &sock_locked);
-  if( sock_locked )
+  rinf.a = a;
+  rinf.msg = msg;
+  rinf.sock_locked = 0;
+  rinf.flags = flags;
+
+  rc = ci_udp_recvmsg_common(&rinf);
+  if( rinf.sock_locked )
     ci_sock_unlock(ni, &us->s.b);
+#if HAVE_MSG_FLAGS
+  if( rc >= 0 )
+    msg->msg_flags = rinf.msg_flags;
+#endif
 
   return rc;
 }
@@ -889,7 +917,11 @@ int ci_udp_recvmmsg(ci_udp_iomsg_args *a, struct mmsghdr* mmsg,
   int rc, i;
   struct timeval tv_before;
   int timeout_msec = -1;
-  int sock_locked = 0;
+  ci_udp_recv_info rinf;
+
+  rinf.a = a;
+  rinf.sock_locked = 0;
+  rinf.flags = flags;
 
   if( timeout ) {
     timeout_msec = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
@@ -898,13 +930,18 @@ int ci_udp_recvmmsg(ci_udp_iomsg_args *a, struct mmsghdr* mmsg,
 
   i = 0;
   while( i < vlen && timeout_msec != 0 ) { 
-    rc = ci_udp_recvmsg_common(a, &mmsg[i].msg_hdr, flags, &sock_locked);
-    if( rc >= 0 )
+    rinf.msg = &mmsg[i].msg_hdr;
+    rc = ci_udp_recvmsg_common(&rinf);
+    if( rc >= 0 ) {
       mmsg[i].msg_len = rc;
+#if HAVE_MSG_FLAGS
+      mmsg[i].msg_hdr.msg_flags = rinf.msg_flags;
+#endif
+    }
     else {
       if( i != 0 && errno != EAGAIN )
         us->s.so_error = errno;
-      if( sock_locked )
+      if( rinf.sock_locked )
         ci_sock_unlock(ni, &us->s.b);
       if( i != 0 )
         return i;
@@ -912,11 +949,11 @@ int ci_udp_recvmmsg(ci_udp_iomsg_args *a, struct mmsghdr* mmsg,
         return rc;
     }
 
-    if( ( flags & MSG_DONTWAIT ) && rc == 0 )
+    if( ( rinf.flags & MSG_DONTWAIT ) && rc == 0 )
       break;
 
-    if( flags & MSG_WAITFORONE )
-      flags |= MSG_DONTWAIT;
+    if( rinf.flags & MSG_WAITFORONE )
+      rinf.flags |= MSG_DONTWAIT;
     
     if( timeout_msec > 0 ) {
       struct timeval tv_after, tv_sub;
@@ -926,13 +963,13 @@ int ci_udp_recvmmsg(ci_udp_iomsg_args *a, struct mmsghdr* mmsg,
       timeout_msec -= tv_sub.tv_sec * 1000 + tv_sub.tv_usec / 1000;
       if( timeout_msec < 0 ) {
         timeout_msec = 0;
-        flags |= MSG_DONTWAIT;
+        rinf.flags |= MSG_DONTWAIT;
       }
     }
     ++i;
   }
 
-  if( sock_locked )
+  if( rinf.sock_locked )
     ci_sock_unlock(ni, &us->s.b);
   
   return i;
@@ -1128,7 +1165,8 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
       if( CI_UNLIKELY(us->s.cmsg_flags != 0 ) ) {
         args->msg.msghdr.msg_controllen = supplied_controllen;
         args->msg.msghdr.msg_control = supplied_control;
-        ci_ip_cmsg_recv(ni, us, pkt, &args->msg.msghdr, 0);
+        ci_ip_cmsg_recv(ni, us, pkt, &args->msg.msghdr, 0,
+                        &args->msg.msghdr.msg_flags);
       }
       else
         args->msg.msghdr.msg_controllen = 0;

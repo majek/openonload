@@ -510,6 +510,17 @@ CI_CFG_OPT("EF_TCP_RCVBUF_MODE", tcp_rcvbuf_mode, ci_uint32,
 "The effect of EF_TCP_RCVBUF_STRICT is independent of this setting.",
 	   1, , 0, 0, 1, yesno)
 
+CI_CFG_OPT("EF_TCP_LISTEN_REPLIES_BACK", tcp_listen_replies_back, ci_uint32,
+"When TCP listening socket replies to incoming SYN, this option forces "
+"Onload to ignore the route table and to reply to the same network "
+"interface the SYN was received from.  This mode could be considered as "
+"a poor man source routing replacement.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_HIGH_THROUGHPUT_MODE", rx_merge_mode, ci_uint32,
+"This option causes onload to optimise for throughput at the cost of latency.",
+           1, , 0, 0, 1, yesno)
+
 /**********************************************************************
  * Narrow fields (few bits).
  */

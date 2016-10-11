@@ -473,7 +473,7 @@ static inline char const* efrm_get_pciname_from_device( struct device* dev )
 }
 
 static char const*
-efrm_get_interefacename_from_index( int ifindex, struct net_device** ndev )
+efrm_get_interfacename_from_index( int ifindex, struct net_device** ndev )
 {
 	/* This returns something of the form eth4, but can only be found when
 	   driver is initialised.
@@ -1781,7 +1781,7 @@ void efrm_init_resource_filter(struct device *dev, int ifindex)
 	mutex_lock( &efrm_ft_mutex );
 
 	pciname = efrm_get_pciname_from_device( dev );
-	ifname = efrm_get_interefacename_from_index( ifindex, &ndev );
+	ifname = efrm_get_interfacename_from_index( ifindex, &ndev );
 	
 	if ( pciname )
 		efrm_remove_table_name( pciname );
@@ -1829,12 +1829,13 @@ int efrm_filter_rename( struct efhw_nic *nic, struct net_device *net_dev )
 	}
 	
 	/* efhw_nic is the device, which has the real id */
-	dl_dev = efhw_nic_dl_device(nic);
+	dl_dev = efhw_nic_acquire_dl_device(nic);
 	if ( !dl_dev ) {
 		EFRM_ERR("%s:Internal error two %p", __func__, dl_dev );
 		return -EINVAL;
 	}
 	pciname = efrm_get_pciname_from_device( &dl_dev->pci_dev->dev);
+        efhw_nic_release_dl_device(nic, dl_dev);
 	if ( !pciname ) {
 		EFRM_ERR("%s:Old device has no pciname", __func__ );
 	}
@@ -1867,7 +1868,7 @@ int efrm_filter_insert(struct efrm_client *client,
 		       bool replace)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
+	struct efx_dl_device *efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
 	int rc;
 	/* If [efx_dev] is NULL, the hardware is morally absent. */
 	if ( efx_dev == NULL )
@@ -1878,6 +1879,7 @@ int efrm_filter_insert(struct efrm_client *client,
 	rc = efrm_filter_check( efx_dev, spec );
 	if ( rc >= 0 )
 		rc = efx_dl_filter_insert( efx_dev, spec, replace );
+        efhw_nic_release_dl_device(efhw_nic, efx_dev);
 	return rc;
 }
 EXPORT_SYMBOL(efrm_filter_insert);
@@ -1887,7 +1889,7 @@ void efrm_filter_remove(struct efrm_client *client, int filter_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efrm_nic *rnic = efrm_nic(efhw_nic);
-	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
+	struct efx_dl_device *efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
 	if( efx_dev != NULL ) {
 		/* If the filter op fails with ENETDOWN, that indicates that
 		 * the hardware is inacessible but that the device has not
@@ -1899,6 +1901,7 @@ void efrm_filter_remove(struct efrm_client *client, int filter_id)
 		unsigned generation = efrm_driverlink_generation(rnic);
 		if( efx_dl_filter_remove(efx_dev, filter_id) == -ENETDOWN )
 			efrm_driverlink_desist(rnic, generation);
+		efhw_nic_release_dl_device(efhw_nic, efx_dev);
 	}
 	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
 	 * nothing to do. */
@@ -1910,9 +1913,12 @@ int efrm_filter_redirect(struct efrm_client *client, int filter_id,
 			  int rxq_i, int stack_id)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
+	struct efx_dl_device *efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
 	if ( efx_dev != NULL ) {
-		return efx_dl_filter_redirect(efx_dev, filter_id, rxq_i, stack_id);
+		int rc = efx_dl_filter_redirect(efx_dev, filter_id, rxq_i,
+						stack_id);
+		efhw_nic_release_dl_device(efhw_nic, efx_dev);
+		return rc;
 	}
 	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
 	 * nothing to do. */
@@ -1924,7 +1930,7 @@ EXPORT_SYMBOL(efrm_filter_redirect);
 int efrm_filter_block_kernel(struct efrm_client *client, int flags, bool block)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
-	struct efx_dl_device *efx_dev = efhw_nic_dl_device(efhw_nic);
+	struct efx_dl_device *efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
 	int rc = 0;
 
 	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
@@ -1938,7 +1944,7 @@ int efrm_filter_block_kernel(struct efrm_client *client, int flags, bool block)
 					EFX_DL_FILTER_BLOCK_KERNEL_UCAST);
 		}
 		if ( rc < 0 )
-			return rc;
+			goto out;
 		if ( flags & EFRM_FILTER_BLOCK_MULTICAST ) {
 			rc = efx_dl_filter_block_kernel(efx_dev,
 					EFX_DL_FILTER_BLOCK_KERNEL_MCAST);
@@ -1956,6 +1962,8 @@ unicast_unblock:
 					EFX_DL_FILTER_BLOCK_KERNEL_UCAST);
 		}
 	}
+out:
+	efhw_nic_release_dl_device(efhw_nic, efx_dev);
 	return rc;
 }
 EXPORT_SYMBOL(efrm_filter_block_kernel);

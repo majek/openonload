@@ -52,6 +52,18 @@
 #include <ci/efhw/nic.h>
 #include <ci/efhw/eventq.h>
 
+static void ef10_device_type_init(struct efhw_device_type *dt,
+				  char variant, int device_id,
+				  int class_revision)
+{
+	dt->function = device_id & 0x1000 ? EFHW_FUNCTION_VF :
+		       EFHW_FUNCTION_PF;
+	dt->arch = EFHW_ARCH_EF10;
+	dt->variant = variant;
+	dt->revision = class_revision;
+}
+
+
 /* Return 0 if not a known type */
 int efhw_device_type_init(struct efhw_device_type *dt,
 			  int vendor_id, int device_id,
@@ -132,16 +144,18 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 			return 0;
 		}
 		break;
-        case 0x1923:
-        case 0x1903:
-        case 0x0923:
-        case 0x0903:
-        case 0x0901:
-		dt->function = device_id & 0x1000 ? EFHW_FUNCTION_VF :
-			EFHW_FUNCTION_PF;
-		dt->arch = EFHW_ARCH_EF10;
-		dt->variant = 'A';
-		dt->revision = class_revision;
+	case 0x1923:
+	case 0x1903:
+	case 0x0923:
+	case 0x0903:
+	case 0x0901:
+		ef10_device_type_init(dt, 'A', device_id, class_revision);
+		break;
+	case 0x1913:
+	case 0x1a03:
+	case 0x0913:
+	case 0x0a03:
+		ef10_device_type_init(dt, 'B', device_id, class_revision);
 		break;
 	default:
 		return 0;
@@ -163,7 +177,8 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 */
 void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		   struct efhw_device_type *dev_type, unsigned map_min,
-		   unsigned map_max, unsigned vi_base, unsigned vport_id)
+		   unsigned map_max, unsigned vi_base, unsigned vi_shift,
+		   unsigned vport_id)
 {
 	nic->devtype = *dev_type;
 	nic->flags = flags;
@@ -215,7 +230,7 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 	case EFHW_ARCH_EF10:
 		nic->q_sizes[EFHW_EVQ] = 512 | 1024 | 2048 | 4096 | 8192 |
 			16384 | 32768;
-		nic->q_sizes[EFHW_TXQ] = 512 | 1024 | 2048 | 4096;
+		nic->q_sizes[EFHW_TXQ] = 512 | 1024 | 2048;
 		nic->q_sizes[EFHW_RXQ] = 512 | 1024 | 2048 | 4096;
 
 		nic->ctr_ap_bar = dev_type->function == EFHW_FUNCTION_PF ?
@@ -230,6 +245,7 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		nic->ctr_ap_bytes = 0;
 		nic->efhw_func = &ef10_char_functional_units;
 		nic->vi_base = vi_base;
+		nic->vi_shift = vi_shift;
 		nic->vport_id = vport_id;
 		break;
 	default:

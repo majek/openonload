@@ -29,7 +29,7 @@
 #include <ci/efrm/licensing.h>
 #include <ci/efch/op_types.h>
 #include <ci/driver/efab/hardware.h>
-#include <onload/cplane.h>
+#include <cplane/exported.h>
 #include <onload/tcp_driver.h>
 #include <onload/tcp_helper_fns.h>
 
@@ -62,7 +62,7 @@ struct oo_nic_black_white_list oo_nic_black_list = {
  * is removed (with fm_outer_lock mutex) before oo_nic entry removed.
  */
 
-struct oo_nic oo_nics[CI_CFG_MAX_REGISTER_INTERFACES];
+struct oo_nic oo_nics[CPLANE_MAX_REGISTER_INTERFACES];
 int oo_n_nics;
 int oo_nic_whitelist_not_empty;
 
@@ -177,16 +177,78 @@ static int oo_nic_black_white_list_update(const char* buf_const, int list_type)
  * allows unlicensed NICs to be screened out so that setups with multiple NICs,
  * some licensed and some not, can function.
  */
-static void oo_check_nic_licensed_for_onload(struct oo_nic* onic)
+static void oo_nic_onload_licensing(struct oo_nic* onic)
 {
   struct efhw_nic* nic = efrm_client_get_nic(onic->efrm_client);
-  int rc;
-  int licensed;
+  ci_hwport_id_t hwport = CI_HWPORT_ID(onic - oo_nics);
+  int rc, licensed;
 
-  rc = efhw_nic_license_check(nic, CI_LCOP_CHALLENGE_FEATURE_ONLOAD, &licensed);
+  rc = efhw_nic_license_check(nic, CI_LCOP_CHALLENGE_FEATURE_ONLOAD,
+                              &licensed);
 
   if( !((rc == 0 && licensed) || rc == -EOPNOTSUPP) )
     nic->flags |= NIC_FLAG_ONLOAD_UNSUPPORTED;
+
+  cicp_licensing_validate_signature(hwport, NULL, 0, 0, 0, NULL, NULL,
+                                    !(nic->flags & NIC_FLAG_ONLOAD_UNSUPPORTED),
+                                    &nic->devtype);
+}
+
+
+static void oo_nic_onload_v3_licensing(struct oo_nic* onic)
+{
+  uint8_t signature[EFRM_V3_LICENSE_CHALLENGE_SIGNATURE_LEN] = { 0 };
+  char challenge[EFRM_V3_LICENSE_CHALLENGE_CHALLENGE_LEN];
+  uint8_t base_mac[EFRM_V3_LICENSE_CHALLENGE_MACADDR_LEN];
+  uint8_t v_mac[EFRM_V3_LICENSE_CHALLENGE_MACADDR_LEN];
+  struct efhw_nic* nic = efrm_client_get_nic(onic->efrm_client);
+  ci_hwport_id_t hwport = CI_HWPORT_ID(onic - oo_nics);
+  uint64_t app_id = CI_LCOP_CHALLENGE_FEATURE_ONLOAD;
+  uint32_t expiry, days;
+  int rc;
+  int licensed;
+
+  rc = efhw_nic_v3_license_check(nic, app_id, &licensed);
+  if( rc != 0 || ! licensed ) {
+    nic->flags |= NIC_FLAG_ONLOAD_UNSUPPORTED;
+    cicp_licensing_validate_signature(hwport, NULL, 0, 0, 0, NULL, NULL, 0,
+                                      &nic->devtype);
+    return;
+  }
+
+  nic->flags &= ~NIC_FLAG_ONLOAD_UNSUPPORTED;
+
+  rc = cicp_licensing_get_challenge(hwport, challenge,
+                                    EFRM_V3_LICENSE_CHALLENGE_CHALLENGE_LEN);
+  if( rc != 0 ) {
+    cicp_licensing_validate_signature(hwport, NULL, 0, 0, 0, NULL, NULL, 0,
+                                      &nic->devtype);
+    return;
+  }
+  efhw_nic_v3_license_challenge(nic, app_id, challenge,
+                                &expiry, &days, signature, base_mac, v_mac);
+  /* If efhw_nic_v3_license_challenge() fails, continue anyway:  the signature
+   * validation will fail in cicp_licensing_validate_signature() below and the
+   * interface will be marked as unlicensed. */
+
+  cicp_licensing_validate_signature(hwport, signature, app_id, expiry, days,
+                                    base_mac, v_mac, 0, &nic->devtype);
+}
+
+
+static void oo_check_nic_licensed_for_onload(struct oo_nic* onic)
+{
+  struct efhw_nic* nic = efrm_client_get_nic(onic->efrm_client);
+  struct efhw_device_type* devtype = &nic->devtype;
+  ci_hwport_id_t hwport = CI_HWPORT_ID(onic - oo_nics);
+
+  if( cicp_licensing_has_state_been_set(hwport) )
+    return;
+
+  if( devtype->arch == EFHW_ARCH_EF10 && devtype->variant > 'A' )
+    oo_nic_onload_v3_licensing(onic);
+  else
+    oo_nic_onload_licensing(onic);
 }
 
 
@@ -261,14 +323,14 @@ struct oo_nic* oo_nic_add(int ifindex)
   rc = efrm_client_get(ifindex, &oo_efrm_client_callbacks, NULL, &efrm_client);
   if( rc != 0 )
     /* Resource driver doesn't know about this ifindex. */
-    goto fail2;
+    goto fail1;
 
   for( i = 0; i < max; ++i )
     if( (onic = &oo_nics[i])->efrm_client == NULL )
       break;
   if( i == max ) {
     ci_log("%s: NOT registering ifindex=%d (too many)", __FUNCTION__, ifindex);
-    goto fail1;
+    goto fail2;
   }
 
   onic->efrm_client = efrm_client;

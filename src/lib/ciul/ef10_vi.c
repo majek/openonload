@@ -266,9 +266,15 @@ static void ef_vi_transmit_push_doorbell(ef_vi* vi)
 
 
 ef_vi_inline int
-ef10_tx_descriptor_is_tail(ef_vi_ef10_dma_tx_buf_desc* dp)
+ef10_tx_descriptor_can_push(const ci_qword_t* dp)
 {
-  return ! QWORD_TEST_BIT(ESF_DZ_TX_USR_CONT, *dp);
+  const uint64_t is_opt = (uint64_t) 1u << ESF_DZ_TX_DESC_IS_OPT_LBN;
+  const uint64_t is_cont = (uint64_t) 1u << ESF_DZ_TX_USR_CONT_LBN;
+  const uint64_t is_pio = (uint64_t) 1u << ESF_DZ_TX_PIO_OPT_LBN;
+  EF_VI_ASSERT( ESF_DZ_TX_DESC_IS_OPT_WIDTH == 1 );
+  EF_VI_ASSERT( ESF_DZ_TX_USR_CONT_WIDTH == 1 );
+  return ( ((dp->u64[0] & (is_opt | is_cont)) == 0) ||
+           ((dp->u64[0] & (is_opt | is_pio)) == (is_opt | is_pio)) );
 }
 
 
@@ -280,7 +286,7 @@ static void ef10_ef_vi_transmit_push(ef_vi* vi)
   ef_vi_ef10_dma_tx_phys_desc *dp =
     (ef_vi_ef10_dma_tx_buf_desc*) q->descriptors + di;
   if( (qs->previous - qs->removed) < vi->tx_push_thresh &&
-      ef10_tx_descriptor_is_tail(dp) )
+      ef10_tx_descriptor_can_push(dp) )
     ef_vi_transmit_push_desc(vi, dp);
   else
     ef_vi_transmit_push_doorbell(vi);
@@ -388,6 +394,106 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
 }
 
 
+/* ?? todo: rename and move to host_ef10_common.h (via firmwaresrc) */
+#define ALT_OP_VFIFO_ID_LBN    48
+#define ALT_OP_VFIFO_ID_WIDTH  5
+#define ALT_OP_IS_SELECT_LBN   59
+#define ALT_OP_IS_SELECT_WIDTH 1
+
+
+static int ef10_ef_vi_transmit_alt_select(ef_vi* vi, unsigned alt_id)
+{
+  ef_vi_txq* q = &vi->vi_txq;
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ci_qword_t* dp;
+  unsigned di;
+
+  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_ALT );
+  EF_VI_ASSERT( alt_id < vi->tx_alt_num );
+
+  if( qs->added - qs->removed >= q->mask )
+    return -EAGAIN;
+
+  di = (qs->added)++ & q->mask;
+  dp = (ci_qword_t*) q->descriptors + di;
+  alt_id = vi->tx_alt_id2hw[alt_id];
+
+  CI_POPULATE_QWORD_4(*dp,
+                      ESF_DZ_TX_DESC_IS_OPT, 1,
+                      ESF_DZ_TX_OPTION_TYPE, 2,
+                      ALT_OP_IS_SELECT, 1,
+                      ALT_OP_VFIFO_ID, alt_id);
+  EF_VI_BUG_ON( q->ids[di] != EF_REQUEST_ID_MASK );
+
+  return 0;
+}
+
+
+static int ef10_ef_vi_transmit_alt_select_normal(ef_vi* vi)
+{
+  ef_vi_txq* q = &vi->vi_txq;
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ci_qword_t* dp;
+  unsigned di;
+
+  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_ALT );
+
+  if( qs->added - qs->removed >= q->mask )
+    return -EAGAIN;
+
+  di = (qs->added)++ & q->mask;
+  dp = (ci_qword_t*) q->descriptors + di;
+
+  CI_POPULATE_QWORD_4(*dp,
+                      ESF_DZ_TX_DESC_IS_OPT, 1,
+                      ESF_DZ_TX_OPTION_TYPE, 2,
+                      ALT_OP_IS_SELECT, 1,
+                      ALT_OP_VFIFO_ID, 0x1f);
+  EF_VI_BUG_ON( q->ids[di] != EF_REQUEST_ID_MASK );
+
+  return 0;
+}
+
+
+static int ef10_ef_vi_transmit_alt_stop(ef_vi* vi, unsigned alt_id)
+{
+  uint32_t* doorbell = (uint32_t*) (vi->io + ER_DZ_TX_DESC_UPD_REG + 8);
+  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_ALT );
+  EF_VI_ASSERT( alt_id < vi->tx_alt_num );
+  alt_id = vi->tx_alt_id2hw[alt_id];
+  /* ?? todo: magic numbers */
+  writel((1u << 11) | (3u << 8) | (4u << 5) | alt_id, doorbell);
+  mmiowb();
+  return 0;
+}
+
+
+static int ef10_ef_vi_transmit_alt_discard(ef_vi* vi, unsigned alt_id)
+{
+  uint32_t* doorbell = (uint32_t*) (vi->io + ER_DZ_TX_DESC_UPD_REG + 8);
+  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_ALT );
+  EF_VI_ASSERT( alt_id < vi->tx_alt_num );
+  alt_id = vi->tx_alt_id2hw[alt_id];
+  /* ?? todo: magic numbers */
+  writel((1u << 11) | (3u << 8) | alt_id, doorbell);
+  mmiowb();
+  return 0;
+}
+
+
+static int ef10_ef_vi_transmit_alt_go(ef_vi* vi, unsigned alt_id)
+{
+  uint32_t* doorbell = (uint32_t*) (vi->io + ER_DZ_TX_DESC_UPD_REG + 8);
+  EF_VI_ASSERT( vi->vi_flags & EF_VI_TX_ALT );
+  EF_VI_ASSERT( alt_id < vi->tx_alt_num );
+  alt_id = vi->tx_alt_id2hw[alt_id];
+  /* ?? todo: magic numbers */
+  writel((1u << 11) | (2u << 8) | alt_id, doorbell);
+  mmiowb();
+  return 0;
+}
+
+
 static int ef10_ef_vi_receive_init(ef_vi* vi, ef_addr addr,
                                    ef_request_id dma_id)
 {
@@ -446,6 +552,11 @@ static void ef10_vi_initialise_ops(ef_vi* vi)
   vi->ops.transmit_push          = ef10_ef_vi_transmit_push;
   vi->ops.transmit_pio           = ef10_ef_vi_transmit_pio;
   vi->ops.transmit_copy_pio      = ef10_ef_vi_transmit_copy_pio;
+  vi->ops.transmit_alt_select    = ef10_ef_vi_transmit_alt_select;
+  vi->ops.transmit_alt_select_default = ef10_ef_vi_transmit_alt_select_normal;
+  vi->ops.transmit_alt_stop      = ef10_ef_vi_transmit_alt_stop;
+  vi->ops.transmit_alt_go        = ef10_ef_vi_transmit_alt_go;
+  vi->ops.transmit_alt_discard   = ef10_ef_vi_transmit_alt_discard;
   if( vi->vi_flags & EF_VI_RX_PACKED_STREAM ) {
     vi->ops.receive_init   = ef10_ef_vi_receive_init_ps;
   } else {
@@ -474,6 +585,13 @@ void ef10_vi_init(ef_vi* vi)
    * way for applications to override.
    */
   vi->rx_buffer_len = 2048 - 256;
+
+  /* Set default rx_discard_mask for ef10 */
+  vi->rx_discard_mask =
+    CI_BSWAPC_LE64(1LL << ESF_DZ_RX_ECC_ERR_LBN
+                   | 1LL << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN
+                   | 1LL << ESF_DZ_RX_IPCKSUM_ERR_LBN
+                   | 1LL << ESF_DZ_RX_ECRC_ERR_LBN);
 
   ef10_vi_initialise_ops(vi);
 }

@@ -35,7 +35,6 @@
 #include "nic.h"
 #include "farch_regs.h"
 #include "io.h"
-#include "phy.h"
 #include "workarounds.h"
 #include "mcdi.h"
 #include "mcdi_pcol.h"
@@ -78,19 +77,24 @@ static inline bool aoe_active(struct siena_nic_data *nic)
 
 static void siena_push_irq_moderation(struct efx_channel *channel)
 {
+	struct efx_nic *efx = channel->efx;
 	efx_dword_t timer_cmd;
 
-	if (channel->irq_moderation)
+	if (channel->irq_moderation_us) {
+		unsigned int ticks;
+
+		ticks = efx_usecs_to_ticks(efx, channel->irq_moderation_us);
 		EFX_POPULATE_DWORD_2(timer_cmd,
 				     FRF_CZ_TC_TIMER_MODE,
 				     FFE_CZ_TIMER_MODE_INT_HLDOFF,
 				     FRF_CZ_TC_TIMER_VAL,
-				     channel->irq_moderation - 1);
-	else
+				     ticks - 1);
+	} else {
 		EFX_POPULATE_DWORD_2(timer_cmd,
 				     FRF_CZ_TC_TIMER_MODE,
 				     FFE_CZ_TIMER_MODE_DIS,
 				     FRF_CZ_TC_TIMER_VAL, 0);
+	}
 	efx_writed_page_locked(channel->efx, &timer_cmd, FR_BZ_TIMER_COMMAND_P0,
 			       channel->channel);
 }
@@ -108,8 +112,8 @@ void siena_finish_flush(struct efx_nic *efx)
 }
 
 static int siena_test_sram(struct efx_nic *efx,
-			   void (*pattern)(unsigned, efx_qword_t *, int, int),
-			   int a, int b)
+			void (*pattern)(unsigned int, efx_qword_t *, int, int),
+			int a, int b)
 {
 	void __iomem *membase = efx->membase + FR_BZ_BUF_FULL_TBL;
 	int finish = efx->sram_lim_qw;
@@ -245,7 +249,7 @@ out:
 
 static int
 siena_test_tables(struct efx_nic *efx,
-		  void (*pattern)(unsigned, efx_qword_t *, int, int),
+		  void (*pattern)(unsigned int, efx_qword_t *, int, int),
 		  int a, int b)
 {
 	int rc, i;
@@ -403,6 +407,7 @@ static int siena_probe_nvconfig(struct efx_nic *efx)
 
 	efx->timer_quantum_ns = (maranello_enabled(efx->nic_data) ?
 				 3072 : 6144); /* 768 cycles */
+	efx->timer_max_ns = efx->type->timer_period_max * efx->timer_quantum_ns;
 
 	return rc;
 }
@@ -416,7 +421,7 @@ static int siena_dimension_resources(struct efx_nic *efx)
 #ifdef CONFIG_SFC_SRIOV
 	struct siena_nic_data *nic_data = efx->nic_data;
 #endif
-	unsigned sram_lim_qw = FR_CZ_BUF_FULL_TBL_ROWS / 2;
+	unsigned int sram_lim_qw = FR_CZ_BUF_FULL_TBL_ROWS / 2;
 	struct efx_dl_falcon_resources *res = &efx->farch_resources;
 	struct efx_dl_device_info *end_res;
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_GET_RESOURCE_LIMITS_OUT_LEN);
@@ -509,6 +514,11 @@ static int siena_probe_nic(struct efx_nic *efx)
 	}
 
 	efx->max_channels = efx->max_tx_channels = EFX_MAX_CHANNELS;
+	EFX_BUG_ON_PARANOID(EFX_TXQ_TYPE_CSUM_OFFLOAD >= 2);
+	EFX_BUG_ON_PARANOID(EFX_TXQ_TYPE_NO_OFFLOAD >= 2);
+	EFX_BUG_ON_PARANOID(EFX_TXQ_TYPE_CSUM_OFFLOAD == EFX_TXQ_TYPE_NO_OFFLOAD);
+	efx->tx_queues_per_channel = 2;
+	efx->select_tx_queue = efx_farch_select_tx_queue;
 
 	efx_reado(efx, &reg, FR_AZ_CS_DEBUG);
 	efx->port_num = EFX_OWORD_FIELD(reg, FRF_CZ_CS_PORT_NUM) - 1;
@@ -605,6 +615,7 @@ fail5:
 	efx_nic_free_buffer(efx, &efx->irq_status);
 fail4:
 fail3:
+	efx_mcdi_detach(efx);
 	efx_mcdi_fini(efx);
 fail1:
 	kfree(efx->nic_data);
@@ -675,7 +686,9 @@ static int siena_init_nic(struct efx_nic *efx)
 	if (rc)
 		return rc;
 
-	efx_nic_check_pcie_link(efx, 8, 2, EFX_BW_PCIE_GEN2_X8);
+#ifdef EFX_NOT_UPSTREAM
+	efx_nic_check_pcie_link(efx, EFX_BW_PCIE_GEN2_X8, NULL, NULL);
+#endif
 
 	/* Do not enable TX_NO_EOP_DISC_EN, since it limits packets to 16
 	 * descriptors (which is bad).
@@ -735,6 +748,7 @@ static void siena_remove_nic(struct efx_nic *efx)
 		device_remove_file(&efx->pci_dev->dev,
 				   &dev_attr_turbo_mode);
 
+	efx_mcdi_detach(efx);
 	efx_mcdi_fini(efx);
 
 	/* Tear down the private nic state, and the driverlink nic params */
@@ -885,6 +899,8 @@ static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 	u64 *stats = nic_data->stats;
 	int retry;
 
+	spin_lock_bh(&efx->stats_lock);
+
 	/* If we're unlucky enough to read statistics wduring the DMA, wait
 	 * up to 10ms for it to finish (typically takes <500us) */
 	for (retry = 0; retry < 100; ++retry) {
@@ -926,7 +942,8 @@ static size_t siena_update_nic_stats(struct efx_nic *efx, u64 *full_stats,
 	return SIENA_STAT_COUNT;
 }
 
-static int siena_mac_reconfigure(struct efx_nic *efx)
+static int siena_mac_reconfigure(struct efx_nic *efx,
+		bool mtu_only __always_unused)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_SET_MCAST_HASH_IN_LEN);
 	int rc;
@@ -1038,8 +1055,8 @@ static void siena_mcdi_request(struct efx_nic *efx,
 			       const efx_dword_t *hdr, size_t hdr_len,
 			       const efx_dword_t *sdu, size_t sdu_len)
 {
-	unsigned pdu = FR_CZ_MC_TREG_SMEM + MCDI_PDU(efx);
-	unsigned doorbell = FR_CZ_MC_TREG_SMEM + MCDI_DOORBELL(efx);
+	unsigned int pdu = FR_CZ_MC_TREG_SMEM + MCDI_PDU(efx);
+	unsigned int doorbell = FR_CZ_MC_TREG_SMEM + MCDI_DOORBELL(efx);
 	unsigned int i;
 	unsigned int inlen_dw = DIV_ROUND_UP(sdu_len, 4);
 
@@ -1291,6 +1308,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.stop_stats = efx_mcdi_mac_stop_stats,
 	.set_id_led = efx_mcdi_set_id_led,
 	.push_irq_moderation = siena_push_irq_moderation,
+	.calc_mac_mtu = efx_nic_calc_mac_mtu,
 	.reconfigure_mac = siena_mac_reconfigure,
 	.check_mac_fault = efx_mcdi_mac_check_fault,
 	.reconfigure_port = efx_mcdi_port_reconfigure,
@@ -1314,6 +1332,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.tx_remove = efx_farch_tx_remove,
 	.tx_write = efx_farch_tx_write,
 	.tx_notify = efx_farch_notify_tx_desc,
+	.tx_limit_len = efx_farch_tx_limit_len,
 	.rx_push_rss_config = siena_rx_push_rss_config,
 	.rx_pull_rss_config = siena_rx_pull_rss_config,
 	.rx_probe = efx_farch_rx_probe,
@@ -1425,10 +1444,6 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.max_rx_ip_filters = FR_BZ_RX_FILTER_TBL0_ROWS,
 	.hwtstamp_filters = (1 << HWTSTAMP_FILTER_NONE |
 			     1 << HWTSTAMP_FILTER_PTP_V1_L4_EVENT |
-			     1 << HWTSTAMP_FILTER_PTP_V1_L4_SYNC |
-			     1 << HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ |
-			     1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT |
-			     1 << HWTSTAMP_FILTER_PTP_V2_L4_SYNC |
-			     1 << HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ),
+			     1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT),
 	.rx_hash_key_size = 16,
 };

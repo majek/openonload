@@ -49,4 +49,9 @@ int efx_sriov_get_phys_port_id(struct net_device *net_dev,
 
 #endif /* CONFIG_SFC_SRIOV */
 
+static inline bool efx_sriov_wanted(struct efx_nic *efx)
+{
+	return efx->type->sriov_wanted && efx->type->sriov_wanted(efx);
+}
+
 #endif /* EFX_SRIOV_H */

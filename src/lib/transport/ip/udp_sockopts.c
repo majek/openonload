@@ -27,7 +27,6 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
-#include <ci/internal/cplane_ops.h>
 
 #ifndef __KERNEL__
 #include <ci/internal/efabcfg.h>

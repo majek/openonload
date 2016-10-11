@@ -27,15 +27,16 @@
 # include <onload/linux_onload.h>
 # include <onload/linux_sock_ops.h>
 # include <onload/linux_trampoline.h>
-#include <onload/cplane.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/efabcfg.h>
 #include <onload/oof_interface.h>
+#include <onload/cplane_ops.h>
 #include <onload/version.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
+#include "onload_kernel_compat.h"
 
 
 int
@@ -860,63 +861,6 @@ efab_tcp_helper_clear_epcache_rsop(ci_private_t* priv, void *unused)
 }
 #endif
 static int
-cicp_ipif_addr_kind_rsop(ci_private_t *priv, void *arg)
-{
-  cp_ipif_addr_kind_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_ipif_addr_kind(CICP_HANDLE(&priv->thr->netif),
-                             op->ip_be32, &op->addr_kind);
-}
-static int
-cicp_ipif_pktinfo_query_rsop(ci_private_t *priv, void *arg)
-{
-  cp_ipif_pktinfo_query_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_ipif_pktinfo_query(CICP_HANDLE(&priv->thr->netif),
-                                 &priv->thr->netif,
-                                 op->pktid, op->ifindex, &op->out_spec_addr);
-}
-static int
-cicp_ipif_by_ifindex_rsop(ci_private_t *priv, void *arg)
-{
-  cp_ipif_by_ifindex_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_ipif_by_ifindex(CICP_HANDLE(&priv->thr->netif),
-                              op->ifindex, &op->out_addr);
-}
-static int
-cicp_llap_find_rsop(ci_private_t *priv, void *arg)
-{
-  cp_llap_find_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_llap_find(CICP_HANDLE(&priv->thr->netif),
-                        &op->ifindex_out, op->hwport, op->vlan_id);
-}
-static int
-cicp_llap_retrieve_rsop(ci_private_t *priv, void *arg)
-{
-  cp_llap_retrieve_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_llap_retrieve(CICP_HANDLE(&priv->thr->netif),
-                            op->ifindex, &op->mtu, &op->hwport, &op->mac,
-                            &op->encap, &op->base_ifindex, &op->bond_rowid);
-}
-static int
-cicp_mac_update_rsop(ci_private_t *priv, void *arg)
-{
-  cp_mac_update_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicp_mac_update(&priv->thr->netif, &op->ver, op->ip, 
-                  (const ci_mac_addr_t *)&op->mac, op->confirm);
-  return 0;
-}
-static int
 cicp_user_defer_send_rsop(ci_private_t *priv, void *arg)
 {
   cp_user_defer_send_t *op = arg;
@@ -926,158 +870,6 @@ cicp_user_defer_send_rsop(ci_private_t *priv, void *arg)
                                 &op->os_rc, op->pkt, op->ifindex);
   /* We ALWAYS want os_rc in the UL, so we always return 0 and ioctl handler
    * copies os_rc to UL. */
-  return 0;
-}
-static int
-cicp_user_pkt_dest_ifid_rsop(ci_private_t *priv, void *arg)
-{
-  cp_user_pkt_dest_ifid_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_user_pkt_dest_ifid(&priv->thr->netif, op->pkt, &op->ifindex);
-}
-static int
-cicp_user_find_home_rsop(ci_private_t *priv, void *arg)
-{
-  cp_src_addr_checks_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
- return cicp_user_find_home(CICP_HANDLE(&priv->thr->netif), &op->ip_be32,
-                            &op->hwport, &op->ifindex,
-                            &op->mac, &op->mtu, &op->encap);
-}
-static int
-cicpos_mac_set_rsop(ci_private_t *priv, void *arg)
-{
-  cp_mac_set_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicpos_mac_set(CICP_HANDLE(&priv->thr->netif), &op->rowinfo,
-                        op->ifindex, op->ip_be32,
-                        (const ci_mac_addr_t *)op->mac,
-                        CI_USER_PTR_GET(op->os_sync_ptr));
-}
-static int
-cicpos_mact_open_rsop(ci_private_t *priv, void *unused)
-{
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicpos_mact_open(CICP_HANDLE(&priv->thr->netif)) ? 0 : -EBUSY;
-}
-static int
-cicpos_mact_close_rsop(ci_private_t *priv, void *unused)
-{
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_mact_close(CICP_HANDLE(&priv->thr->netif));
-  return 0;
-}
-static int
-cicpos_mac_row_seen_rsop(ci_private_t *priv, void *op)
-{
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_mac_row_seen(CICP_HANDLE(&priv->thr->netif),
-                      (cicp_mib_verinfo_t *)op);
-  return 0;
-}
-static int
-cicpos_mac_purge_unseen_rsop(ci_private_t *priv, void *unused)
-{
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_mac_purge_unseen(CICP_HANDLE(&priv->thr->netif));
-  return 0;
-}
-static int
-cicpos_hwport_update_rsop(ci_private_t *priv, void *arg)
-{
-  cp_hwport_update_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_hwport_update(CICP_HANDLE(&priv->thr->netif),
-                       op->hwport, op->max_mtu);
-  return 0;
-}
-static int
-cicp_llap_import_rsop(ci_private_t *priv, void *arg)
-{
-  cp_llap_import_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_llap_import(CICP_HANDLE(&priv->thr->netif), &op->rowid_out,
-                          op->ifindex, op->max_mtu, op->up, op->name,
-                          &op->mac);
-}
-static int
-cicpos_llap_readrow_rsop(ci_private_t *priv, void *arg)
-{
-  cp_llap_readrow_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicpos_llap_readrow(CICP_HANDLE(&priv->thr->netif),
-                             op->rowinfo_index,
-                             &op->table_version, &op->ifindex,
-                             &op->up, &op->encap);
-}
-static int
-cicpos_llap_delete_rsop(ci_private_t *priv, void *p_ifindex)
-{
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_llap_delete(CICP_HANDLE(&priv->thr->netif), *(ci_ifid_t *)p_ifindex);
-  return 0;
-}
-static int
-cicpos_ipif_import_rsop(ci_private_t *priv, void *arg)
-{
-  cp_ipif_import_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicpos_ipif_import(CICP_HANDLE(&priv->thr->netif), &op->rowid,
-                            op->ifindex, op->net_ip, op->net_ipset,
-                            op->net_bcast, op->scope);
-}
-static int
-cicpos_ipif_readrow_rsop(ci_private_t *priv, void *arg)
-{
-  cp_ipif_readrow_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicpos_ipif_readrow(CICP_HANDLE(&priv->thr->netif),
-                             op->rowinfo_index,
-                             &op->table_version, &op->ifindex,
-                             &op->net_ip, &op->net_ipset, &op->net_bcast);
-}
-static int
-cicpos_ipif_delete_rsop(ci_private_t *priv, void *arg)
-{
-  cp_ipif_delete_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_ipif_delete(CICP_HANDLE(&priv->thr->netif),
-                     op->ifindex, op->net_ip, op->net_ipset);
-  return 0;
-}
-static int
-cicp_route_import_rsop(ci_private_t *priv, void *arg)
-{
-  cp_route_import_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  return cicp_route_import(CICP_HANDLE(&priv->thr->netif), &op->rowid,
-                           op->dest_ip, op->dest_ipset, op->next_hop_ip,
-                           op->tos, op->metric, op->pref_source,
-                           op->ifindex, op->mtu);
-}
-static int
-cicpos_route_delete_rsop(ci_private_t *priv, void *arg)
-{
-  cp_route_delete_t *op = arg;
-  if (priv->thr == NULL)
-    return -EINVAL;
-  cicpos_route_delete(CICP_HANDLE(&priv->thr->netif), 
-                      op->dest_ip, op->dest_ipset, CI_IFID_BAD);
   return 0;
 }
 static int
@@ -1108,13 +900,6 @@ thr_priv_dump(ci_private_t *priv, void *unused)
   ci_log("OO_IOC_RSOP_DUMP:");
   THR_PRIV_DUMP(priv, "");
   ci_log("OO_IOC_RSOP_DUMP: done");
-  return 0;
-}
-static int
-oo_cplane_log(ci_private_t *priv, void *unused)
-{
-  cicp_ipif_cilog(&CI_GLOBAL_CPLANE);
-  cicp_llap_cilog(&CI_GLOBAL_CPLANE);
   return 0;
 }
 static int
@@ -1327,6 +1112,22 @@ static int oo_get_cpu_khz_rsop(ci_private_t *priv, void *arg)
   return 0;
 }
 
+static int oo_get_cplane_fd(ci_private_t *priv, void *arg)
+{
+  ci_fixed_descriptor_t* pfd = arg;
+
+  if( priv->thr == NULL || priv->thr->cplane_handle == NULL )
+    return -ENOENT;
+  
+  *pfd = get_unused_fd_flags(O_CLOEXEC);
+  if( *pfd < 0 )
+    return *pfd;
+
+  fd_install(*pfd, priv->thr->cplane_handle);
+  return 0;
+}
+
+
 /*************************************************************************
  * ATTENTION! ACHTUNG! ATENCION!                                         *
  * This table MUST be synchronised with enum of OO_OP_* operations!      *
@@ -1339,7 +1140,6 @@ oo_operations_table_t oo_operations[] = {
 # define op(ioc, fn)  { (ioc), (fn), #ioc }
 #endif
 
-  op(OO_IOC_DBG_CPLANE_LOG,     oo_cplane_log),
   op(OO_IOC_DBG_GET_STACK_INFO, efab_tcp_helper_get_info),
   op(OO_IOC_DBG_WAIT_STACKLIST_UPDATE, efab_tcp_helper_wait_stack_list_update),
 
@@ -1404,31 +1204,7 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_CLOSE_OS_SOCK,     efab_tcp_helper_set_tcp_close_os_sock_rsop),
   op(OO_IOC_OS_POLLERR_CLEAR,      efab_tcp_helper_os_pollerr_clear),
 
-  op(OO_IOC_CP_IPIF_ADDR_KIND,     cicp_ipif_addr_kind_rsop),
-  op(OO_IOC_CP_LLAP_FIND,          cicp_llap_find_rsop),
-  op(OO_IOC_CP_LLAP_RETRIEVE,      cicp_llap_retrieve_rsop),
-  op(OO_IOC_CP_MAC_UPDATE,         cicp_mac_update_rsop),
   op(OO_IOC_CP_USER_DEFER_SEND,    cicp_user_defer_send_rsop),
-  op(OO_IOC_CP_USER_PKT_DEST_IFID, cicp_user_pkt_dest_ifid_rsop),
-  op(OO_IOC_CP_SRC_ADDR_CHECKS,    cicp_user_find_home_rsop),
-  op(OO_IOC_CP_IPIF_PKTINFO_QUERY, cicp_ipif_pktinfo_query_rsop),
-  op(OO_IOC_CP_IPIF_BY_IFINDEX,    cicp_ipif_by_ifindex_rsop),
-#if CI_CFG_CONTROL_PLANE_USER_SYNC
-  op(OO_IOC_CP_MAC_SET,            cicpos_mac_set_rsop),
-  op(OO_IOC_CP_MAC_OPEN,           cicpos_mact_open_rsop),
-  op(OO_IOC_CP_MAC_CLOSE,          cicpos_mact_close_rsop),
-  op(OO_IOC_CP_MAC_SEEN,           cicpos_mac_row_seen_rsop),
-  op(OO_IOC_CP_MAC_PURGE_UNSEEN,   cicpos_mac_purge_unseen_rsop),
-  op(OO_IOC_CP_HWPORT_UPDATE,      cicpos_hwport_update_rsop),
-  op(OO_IOC_CP_LLAP_IMPORT,        cicp_llap_import_rsop),
-  op(OO_IOC_CP_LLAP_DELETE,        cicpos_llap_delete_rsop),
-  op(OO_IOC_CP_LLAP_READROW,       cicpos_llap_readrow_rsop),
-  op(OO_IOC_CP_IPIF_IMPORT,        cicpos_ipif_import_rsop),
-  op(OO_IOC_CP_IPIF_DELETE,        cicpos_ipif_delete_rsop),
-  op(OO_IOC_CP_IPIF_READROW,       cicpos_ipif_readrow_rsop),
-  op(OO_IOC_CP_ROUTE_IMPORT,       cicp_route_import_rsop),
-  op(OO_IOC_CP_ROUTE_DELETE,       cicpos_route_delete_rsop),
-#endif /* CI_CFG_CONTROL_PLANE_USER_SYNC */
 
   op(OO_IOC_EPLOCK_WAKE,      efab_eplock_unlock_and_wake_rsop),
   op(OO_IOC_EPLOCK_LOCK_WAIT, efab_eplock_lock_wait_rsop),
@@ -1446,5 +1222,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OFE_CONFIG_DONE,    efab_ofe_config_done),
   op(OO_IOC_OFE_GET_LAST_ERROR, efab_ofe_get_last_error),
   op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
+  op(OO_IOC_GET_CPLANE_FD, oo_get_cplane_fd),
 #undef op
 };

@@ -44,7 +44,7 @@ PROJECT_NUMBER         = SF-114063-CD
 # for a project that appears at the top of each page and should give viewer a
 # quick idea about the purpose of the project. Keep the description short.
 
-PROJECT_BRIEF          = "Issue 2"
+PROJECT_BRIEF          = "Issue 4"
 
 # With the PROJECT_LOGO tag one can specify a logo or an icon that is included
 # in the documentation. The maximum height of the logo should not exceed 55
@@ -1789,7 +1789,7 @@ LATEX_BIB_STYLE        = plain
 # readers/editors.
 # The default value is: NO.
 
-GENERATE_RTF           = YES
+GENERATE_RTF           = NO
 
 # The RTF_OUTPUT tag is used to specify where the RTF docs will be put. If a
 # relative path is entered the value of OUTPUT_DIRECTORY will be put in front of

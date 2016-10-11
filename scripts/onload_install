@@ -231,7 +231,8 @@ install_userland() {
   # Install libraries and tools.
   try $do cd "$TOP/build"
   u32="$(mmaketool --userbuild_base32)"
-  u64="gnu_$(mmaketool --userarch)"
+  userarch="$(mmaketool --userarch)"
+  u64="gnu_${userarch}"
   if [ -d "$u64" ]; then
     # Tolerate lack of 32-bit transport library on 64-bit systems.
     install_plib32 "$u32/lib/transport/unix/libcitransport0.so" \
@@ -242,6 +243,11 @@ install_userland() {
     install_dlib32 "$u32"/lib/onload_ext/libonload_ext.so "$i_lib32"
     install_slib "$u64"/lib/onload_ext/libonload_ext.a "$i_lib64"
     install_slib32 "$u32"/lib/onload_ext/libonload_ext.a "$i_lib32"
+    # ZF is x86_64-only.
+    if [ "$userarch" = "x86_64" ]; then
+echo
+echo
+    fi
     if [ -n "$ppc_at" ]; then
       install_plib "${u64}_at/lib/transport/unix/libcitransport0.so" \
                    "$i_prefix/$ppc_at/lib64/libonload.so"
@@ -336,16 +342,6 @@ install_userland() {
     while read -r f; do
       install_f "$f" "$i_include/$f"
     done;
-
-  # Install aoe header files
-  try $do cd "$TOP/src/include"
-  if [ -e aoe/amm_streams.h ]; then
-    install_f aoe/amm_streams.h "$i_include/aoe/amm_streams.h"
-  fi
-  try $do cd "$TOP/src/driver"
-  if [ -e  linux_aoe/aoe_ioctl.h ]; then
-    install_f linux_aoe/aoe_ioctl.h "$i_include/aoe/aoe_ioctl.h"
-  fi
 }
 
 
@@ -369,9 +365,7 @@ install_kernel_modules() {
   install_f sfc.ko "$did/sfc.ko"
   install_f sfc_resource.ko "$did/sfc_resource.ko"
   install_f sfc_char.ko "$did/sfc_char.ko"
-  if [ -e sfc_aoe.ko ]; then 
-    install_f sfc_aoe.ko "$did/sfc_aoe.ko"
-  fi
+  install_f onload_cplane.ko "$did/onload_cplane.ko"
   install_f onload.ko "$did/onload.ko"
   $affinity && install_f sfc_affinity.ko "$did/sfc_affinity.ko"
   if [ -z "$i_prefix" ]; then
@@ -379,7 +373,7 @@ install_kernel_modules() {
   fi
 
   if [ -z "$i_prefix" ]; then
-    if [ -f "/boot/initrd.img-$KVER" ]; then
+    if [ -f "/boot/initrd.img-$KVER" -o -f "/boot/initramfs-$KVER.img" ]; then
       # Debian/Ubuntu: get new sfc.ko into ramfs
       if which update-initramfs >/dev/null 2>&1; then
         $do update-initramfs -u -k $KVER
@@ -401,9 +395,7 @@ install_kernel_modules() {
   install_f linux_net/Module.symvers "$did/sfc.symvers"
   install_f linux_resource/Module.symvers "$did/sfc_resource.symvers"
   install_f linux_char/Module.symvers "$did/sfc_char.symvers"
-  if [ -e linux_aoe/Module.symvers ]; then
-    install_f linux_aoe/Module.symvers "$did/sfc_aoe.symvers"
-  fi
+  install_f linux_cplane/Module.symvers "$did/onload_cplane.symvers"
   install_f linux_onload/Module.symvers "$did/onload.symvers"
   install_f linux_affinity/Module.symvers "$did/sfc_affinity.symvers"
 }
@@ -427,7 +419,6 @@ install_modprobe_conf() {
   try $do cd "$TOP/scripts"
 
   install_f onload_misc/onload_modprobe.conf "$i_etc/modprobe.d/onload.conf"
-  install_f onload_misc/sfc_aoe_modprobe.conf "$i_etc/modprobe.d/sfc_aoe.conf"
   if is_rhel4 && ! $test; then
     rhel4_modprobe_fixup
   fi
@@ -533,7 +524,7 @@ check_whether_installed() {
     return
   fi
   local drv where
-  for drv in sfc.ko onload.ko sfc_aoe.ko; do
+  for drv in sfc.ko onload.ko; do
     for where in updates extra; do
       check_file_installed "$i_prefix/lib/modules/$KVER/$where/$drv"
     done

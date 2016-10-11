@@ -27,7 +27,6 @@
 /*! \cidoxg_lib_transport_ip */
   
 #include "ip_internal.h"
-#include <ci/internal/cplane_ops.h>
 #include "tcp_rx.h" /* for ci_tcp_set_snd_max() */
 
 #define LPF "TCP TIMER "

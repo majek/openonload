@@ -63,6 +63,20 @@ int efx_debugfs_read_bool(struct seq_file *, void *);
 
 /* Handy macros for filling out parameters */
 
+/* Initialiser for a struct efx_debugfs_parameter without type-checking */
+#define _EFX_RAW_PARAMETER(_name, reader_function) {			\
+	.name = #_name,							\
+	.offset = 0,							\
+	.reader = reader_function,					\
+}
+
+/* Initialiser for a struct efx_debugfs_parameter without type-checking */
+#define _EFX_PARAMETER(container_type, parameter, reader_function) {	\
+	.name = #parameter,						\
+	.offset = offsetof(container_type, parameter),			\
+	.reader = reader_function,					\
+}
+
 /* Initialiser for a struct efx_debugfs_parameter with type-checking */
 #define EFX_PARAMETER(container_type, parameter, field_type,		\
 			reader_function) {				\

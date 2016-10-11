@@ -701,6 +701,8 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->tcpflags = 0;
     ts->tcpflags |= tsr->tcpopts.flags;
     ts->tcpflags |= CI_TCPT_FLAG_PASSIVE_OPENED;
+    if( NI_OPTS(netif).tcp_listen_replies_back )
+      ts->s.cp.so_bindtodevice = ipcache->ifindex;
     ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
     if( ts->tcpflags & CI_TCPT_FLAG_WSCL ) {
       ts->snd_wscl = tsr->tcpopts.wscl_shft;

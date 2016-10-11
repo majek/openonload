@@ -41,9 +41,5 @@
 # define CI_MK_DECL(ret, fn, args)  ret (*ci_sys_##fn) args = fn
 # include <onload/declare_syscalls.h.tmpl>
 
-/* define the ci_libc_ pointers */
-# define CI_MK_DECL(ret, fn, args)  ret (*ci_libc_##fn) args = fn
-# include <onload/declare_libccalls.h.tmpl>
-
 
 /*! \cidoxg_end */

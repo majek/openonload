@@ -1,0 +1,487 @@
+/****************************************************************************
+ * Copyright 2004-2005: Level 5 Networks Inc.
+ * Copyright 2005-2016: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/**************************************************************************\
+*//*! \file
+** \author    Solarflare Communications, Inc.
+** \brief     Additional Doxygen-format documentation for TCPDirect.
+** \date      2016/05/20
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
+**            are trademarks of Solarflare Communications, Inc.
+*//*
+\**************************************************************************/
+
+/**************************************************************************
+ * Using TCPDirect page
+ *************************************************************************/
+ /*! \page using Using TCPDirect
+
+This part of the documentation gives information on using TCPDirect to write 
+and build applications.
+
+\section using_components Components
+
+All components required to build and link a user application with the 
+Solarflare TCPDirect API are distributed with Onload. When Onload is 
+installed all required directories/files are located under the Onload 
+distribution directory:
+
+\section using_compiling Compiling and Linking
+
+Applications or libraries using TCPDirect will need to include the header
+files in `src/include/zf/`.
+
+The application will need to be linked with `libciul1.a` or `libciul.so`, 
+which can be found under the `build` directory after running 
+`scripts/onload_build` or `scripts/onload_install`.
+
+If compiling your application against one version of Onload, and
+running on a system with a different version of Onload, some care is
+required.  Onload currently preserves compatibility and provides a
+stable API between the TCPDirect user-space and the kernel drivers, so
+that applications compiled using an older TCPDirect library will work when
+run with newer drivers.  Compatibility in the other direction (newer
+TCPDirect libraries running with older drivers) is not guaranteed.
+Finally, Onload does not currently maintain compatibility between
+compiling against one version of the TCPDirect libraries, and then running
+against another.
+
+The simplest approach is to link statically to libciul, as this ensures that 
+the version of the library used will match the one you have compiled 
+against.  If linking dynamically, it is recommended that you keep 
+`libciul.so` and the application binary together. `onload_install` does not 
+install `libciul.so` into system directories to avoid the installed version 
+being used in place of the version you compiled against.
+
+For those wishing to use TCPDirect in combination with Onload there should
+be no problem linking statically to libciul and dynamically to the
+other libraries to allow the Onload intercepts to take effect.
+
+\section using_general General
+
+The majority of the functions in this API will return 0 on success, or a 
+negative error code on failure.  Errno is not used.
+
+Most of the API is non-blocking.  The cases where this is not the case (e.g. 
+zf_muxer_wait()) are highlighted in the rest of this document.
+
+The public API is defined by the headers in 
+`onload_&lt;version>/src/include/zf`.  The headers in `zf_internal` are for 
+internal use only and should not be included by users of the API.
+
+Attributes (defined by struct zf_attr) are used to pass configuration details 
+through the API.  This is similar to the existing SolarCapture attribute 
+system.
+
+The following sections discuss the most common operations.  Endpoint 
+shutdown, obtaining addresses, and some other details are generally omitted 
+for clarity – please refer to the suggested headers and example code for full 
+details.
+
+\section using_stacks Using stacks
+
+Before endpoints can be created, the calling application must first create a 
+stack using the following functions:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zf_stack_alloc(struct zf_attr* attr, struct zf_stack** stack_out);
+int zf_stack_free(struct zf_stack* stack);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+\note These functions can all be found in zf.h.
+
+\section using_endpoints Using endpoints
+
+TCPDirect supports both TCP and UDP, but in contrast to the BSD sockets API 
+the type of these endpoints is explicit through the API types and function 
+calls and UDP endpoints are separated into receive (RX) and transmit (TX) 
+parts.
+
+\note These functions can all be found in zf.h.
+
+\section using_udp_receive UDP receive
+
+First allocate a UDP receive endpoint:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfur_alloc(struct zfur** us_out, struct zf_stack* st,
+               const struct zf_attr* attr);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Then bind to associate the endpoint with an address, port, and add filters:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfur_addr_bind(struct zfur* us,
+                   const struct sockaddr_in* laddr,
+                   const struct sockaddr_in* raddr, int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Then receive packets:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfur_zc_recv(struct zfur *us,
+                 struct zfur_msg* msg,
+                 int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+zfur_zc_recv() will perform a zero-copy read of a single UDP datagram.  The 
+struct zfur_msg is completed to point to the buffers used by this message.  
+Becaues it is zero-copy, the buffers used are locked (preventing re-use by 
+the stack) until zfur_zc_recv_done() is called:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfur_zc_recv_done(struct zfur* us, struct zfur_msg* msg);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Alternatively, a copy-based receive can be used if the caller will want to 
+hold the buffers for an extended period of time:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfur_recv(struct zfur* us, struct iovec* iov_out,
+              int* iovcnt_in_out, int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+\note These functions can all be found in zf_udp.h.
+
+\section using_udp_send UDP send
+
+First allocate a UDP TX endpoint, using the supplied addresses and ports:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfut_alloc(struct zfut** us_out,
+               struct zf_stack* st,
+               const struct sockaddr_in* laddr,
+               const struct sockaddr_in* raddr,
+               int flags,
+               const struct zf_attr* attr);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Then perform a copy-based send (potentially using PIO) of a single datagram:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zfut_send(struct zfut *us,
+              const struct iovec* iov,
+              int iov_cnt,
+              int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+\note These functions can all be found in zf_udp.h.
+
+\section using_tcp_listen TCP listening
+
+A TCP listening endpoint can be created:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zftl_listen(struct zf_stack* st, struct sockaddr_in* laddr,
+                const struct zf_attr* attr, struct zftl** tl_out);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+And a passively opened endpoint accepted:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zftl_accept(struct zftl* tl, struct zft** ts_out);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Listening endpoints can be closed and freed:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zftl_shutdown(struct zftl* ts);
+int zftl_free(struct zftl* ts);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+\note These functions can all be found in zf_tcp.h.
+
+\section using_tcp_send_receive TCP send and receive
+
+Allocate a TCP (non-listening) endpoint.  Unlike UDP, this can be used for 
+both send and receive:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_alloc(struct zf_stack* st, const struct zf_attr* attr,
+              struct zft_handle** handle_out);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Bind the endpoint to a local address/port:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_addr_bind(struct zft_handle* handle,
+                  const struct sockaddr_in* laddr, int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Then connect the endpoint to a remote address/port. Note that the supplied 
+endpoint handle is replaced with a different type as part of this operation.  
+This function does not block (subsequent operations will return an error 
+until it has completed).
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_connect(struct zft_handle* handle,
+                const struct sockaddr_in* raddr, struct zft** ts_out);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Perform a zero-copy receive on the connected TCP endpoint:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_zc_recv(struct zft *ts,
+                struct zft_msg* msg,
+                int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The struct zft_msg is completed to point to the received message.  Because it 
+is zero-copy, this will lock the buffers used until the caller indicates that 
+it has finished with them by calling:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+void zft_zc_recv_done(struct zft* ts, struct zft_msg* msg);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Alternatively a copy-based receive call can be made:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_recv(struct zft* ts,
+             struct iovec* iov_out,
+             int* iovcnt_in_out,
+             int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A copy-based send call can be made, and the supplied buffers reused 
+immediately after this call returns:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_send(struct zft *ts, const struct iovec* iov, int iov_cnt, int flags);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+\note These functions can all be found in zf_tcp.h.
+
+\section using_alternatives Alternative Tx queues
+
+Finally, for lowest latency on the fast path, a special API based around 
+different alternative queues of data can be used.  The TX alternative API 
+is used to minimise latency on send, by pushing packets though the TX path on 
+the NIC before a decision can be made whether they are needed.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_alloc_alternatives(struct zft* ts, const struct zf_attr* attr,
+                           int n_alts, struct zft_alternative* alts_in_out);
+int zft_queue_alternative(struct zft* ts, struct zft_alternative* alt,
+                          const struct iovec* iov, int iov_cnt, int flags,
+                          struct zft_alt_packet* handle);
+int zft_send_alternative(struct zft* ts, struct zft_alternative* alt);
+int zft_cancel_alternative(struct zft* ts, struct zft_alternative* alt);
+int zft_edit_alternative(struct zft* ts, struct zft_alternative* alt,
+                         struct zft_alternative* alt_new,
+                         const struct iovec* iov, int iov_cnt, int flags,
+                         struct zft_alt_packet* handle_in_out);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+At the point when the decision to send is made the packet has already nearly 
+reached the wire, minimising latency on the critical path.
+
+Multiple queues are available for this, allowing alternative packets to be 
+queued.  Then when it is known what needs to be sent the appropriate 
+alternative queue is selected.  Packets queued on this are then sent to the 
+wire.
+
+When a packet is queued a handle is provided to allow future updates to the 
+packet data.  However, packet data update requires requeueing all packets on 
+the affected alternative, so incurs a time penalty.
+
+Here is an example, where there are 2 things that need updates, A and B, but 
+it's not yet known which will be needed.  The application has allocated 3 
+alternative queues, allowing them to queue updates for either A only, B only, 
+or both:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+zft_alloc_alternatives(ts, alts, 3)
+zft_queue_alternative(ts, alt 1, <UpdateA data>, handle)
+zft_queue_alternative(ts, alt 2, <UpdateB data>, handle)
+zft_queue_alternative(ts, alt 3, <UpdateA data>, handle)
+zft_queue_alternative(ts, alt 3, <UpdateB data>, handle)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+-# UpdateA
+-# UpdateB
+-# UpdateA UpdateB
+
+A single packet can only be queued on one alternative.  In the example above 
+each instance of an update is a separate buffer.
+
+When it is known which update is required the application can select the 
+appropriate alternative.  The zft_send_alternative() function is used to do 
+this.  This will send out the packets on the selected alternative, and cancel 
+packets from the other alternatives without sending them, as the TCP headers 
+will be incorrect on these packets.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+zft_send_alternative(ts, alt 1)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+-# 
+-# 
+-# \n
+   -------------> UpdateA
+
+If a queued packet needs to be updated it must be requeued.  This is done 
+via the zft_edit_alternative() function.  As packet data cannot be edited in 
+place once a packet has been queued on an alternative this function will 
+requeue all packets currently queued on the supplied alternative, having 
+replaced the selected packet.
+
+To avoid having to wait for the original alternative to be canceled before 
+re-use a replacement alternative can be supplied:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+zft_alloc_alternatives(ts, alts, 2)
+zft_queue_alternative(ts, alt 1, <UpdateAv1 data>, handle)
+zft_queue_alternative(ts, alt 1, <UpdateBv1 data>, handle)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ -# UpdateAv1 UpdateBv1
+ -# 
+
+Now UpdateB needs modification:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+zft_edit_alternative(ts, alt 1, alt 2, <UpdateBv2 data>, handle)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+-# 
+-# UpdateAv1 UpdateBv2
+
+\note These functions can all be found in zf_tcp.h.
+
+\section using_epoll Epoll – muxer.h
+
+The multiplexer allows multiple endpoints to be polled in a single 
+operation.  The multiplexer owes much of its design (and some of its 
+datatypes) to epoll.
+
+The basic unit of functionality is the multiplexer set implemented by 
+zf_muxer_set.  Each type of endpoint (e.g. UDP receive, UDP transmit, TCP
+listening, TCP) that can be multiplexed is equipped with a method for 
+obtaining a zf_waitable that represents a given endpoint: 
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+struct zf_waitable* zfur_to_waitable(struct zfur* us);
+struct zf_waitable* zfut_to_waitable(struct zfut* us);
+struct zf_waitable* zftl_to_waitable(struct zftl* tl);
+struct zf_waitable* zft_to_waitable(struct zft* ts);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This zf_waitable can then be added to a multiplexer set by calling 
+zf_muxer_add().  Each waitable can only exist in a single multiplexer set at 
+once.  Each multiplexer set can only contain waitables from a single stack.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zf_muxer_add(struct zf_muxer_set*, struct zf_waitable* w,
+                 const struct epoll_event* event);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Having added all of the desired endpoints to a set, the set can be polled 
+using zf_muxer_wait().
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zf_muxer_wait(struct zf_muxer_set*, struct epoll_event* events,
+                  int maxevents, int timeout);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This function polls a multiplexer set and populates an array of event 
+descriptors representing the endpoints in that set that are ready.  The 
+events member of each descriptor specifies the events for which the endpoint 
+is actually ready, and the data member is set to the user-data associated 
+with that descriptor, as specified in the call to zf_muxer_add() or 
+zf_muxer_mod().
+
+Before checking for ready endpoints, the function calls zf_reactor_perform() 
+on the set's stack in order to process events from the hardware.  In contrast 
+to the rest of the API, zf_muxer_wait() can block.  The maximum time to block 
+is specified timeout, and a value of zero results in non-blocking behaviour.  
+A negative value for timeout will allow the function to block indefinitely.  
+If the function, blocks, it will call zf_reactor_perform() repeatedly in a 
+tight loop.
+
+The multiplexer supports only edge-triggered events: that is, if 
+zf_muxer_poll() reports that an endpoint is ready, it will not do so again 
+until a new event occurs on that endpoint, even if the endpoint is in fact 
+ready.
+
+Waitables already in a set can be modified:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zf_muxer_mod(struct zf_waitable* w, const struct epoll_event* event);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+and deleted from the set:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zf_muxer_del(struct zf_waitable* w);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These functions can all be found in muxer.h.
+
+\section using_stack_poll Stack polling
+
+The majority of the calls in the API are non-blocking and for performance 
+reasons do not attempt to speculatively process events on a stack.  The API 
+provides the following function to allow the calling application to request 
+the stack process events.  It will return 0 if nothing user-visible occurred 
+as a result, or 1 if something potentially user-visible happened (e.g. 
+received packet delivered to a zocket, zocket became writeable, etc).  It may 
+return false positives, i.e. report that something user-visible occurred, 
+when in fact it did not.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zf_reactor_perform(struct zf_stack* st);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Any calls which block (e.g. zf_muxer_wait()) will make this call internally.  
+The code examples at the end of this document show how zf_reactor_perform() 
+can be used.
+
+These functions can all be found in zf_reactor.h.
+
+\section using_misc Miscellaneous
+
+For TCP and UDP RX zockets you can discover the received hardware timestamp 
+of a packet using the following calls:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int zft_pkt_get_timestamp(struct zft* ts, const struct iovec* pktbuf,
+                          const struct timespec* timespec);
+int zfur_pkt_get_timestamp(struct zfur* us, const struct zfur_msg* msg,
+                           const struct timespec* ts);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For TCP zockets you can discover the local and/or remote IP addresses and 
+ports in use:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+void zft_getname(struct zft* ts, struct sockaddr_in* laddr_out,
+                 struct sockaddr_in* raddr_out);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These functions can all be found in zf_tcp.h and zf_udp.h.
+
+*/

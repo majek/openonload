@@ -46,6 +46,7 @@ enum ef_filter_type {
   EF_FILTER_TX_PORT_SNIFF       = 0x800,
   EF_FILTER_IP_PROTO            = 0x1000,
   EF_FILTER_ETHER_TYPE          = 0x2000,
+  EF_FILTER_IP6                 = 0x4000,
 };
 
 
@@ -92,12 +93,46 @@ int ef_filter_spec_set_ip4_full(ef_filter_spec *fs, int protocol,
 }
 
 
+int ef_filter_spec_set_ip6_local(ef_filter_spec *fs, int protocol,
+				 const struct in6_addr *host, int port_be16)
+{
+  if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
+    return -EPROTONOSUPPORT;
+  fs->type |= EF_FILTER_IP6;
+  fs->data[0] = protocol;
+  memcpy(&fs->data[1], host, 16);
+  /* data[5] is reserved for a VLAN ID */
+  fs->data[6] = port_be16;
+  memset(&fs->data[7], 0, 16);
+  fs->data[11] = 0;
+  return 0;
+}
+
+
+int ef_filter_spec_set_ip6_full(ef_filter_spec *fs, int protocol,
+				const struct in6_addr *host, int port_be16,
+				const struct in6_addr *rhost, int rport_be16)
+{
+  if (fs->type != 0 && fs->type != EF_FILTER_VLAN)
+    return -EPROTONOSUPPORT;
+  fs->type |= EF_FILTER_IP6;
+  fs->data[0] = protocol;
+  memcpy(&fs->data[1], host, 16);
+  /* data[5] is reserved for a VLAN ID */
+  fs->data[6] = port_be16;
+  memcpy(&fs->data[7], rhost, 16);
+  fs->data[11] = rport_be16;
+  return 0;
+}
+
+
 int ef_filter_spec_set_vlan(ef_filter_spec *fs, int vlan_id)
 {
   if (fs->type != 0 && fs->type != EF_FILTER_IP4 &&
       fs->type != EF_FILTER_MISMATCH_MULTICAST &&
       fs->type != EF_FILTER_MISMATCH_UNICAST &&
-      fs->type != EF_FILTER_IP_PROTO && fs->type != EF_FILTER_ETHER_TYPE)
+      fs->type != EF_FILTER_IP_PROTO && fs->type != EF_FILTER_ETHER_TYPE &&
+      fs->type != EF_FILTER_IP6)
     return -EPROTONOSUPPORT;
   fs->type |= EF_FILTER_VLAN;
   fs->data[5] = vlan_id;
@@ -350,6 +385,41 @@ static int ef_filter_add(ef_driver_handle dh, int resource_id,
 }
 
 
+static int ef_filter_add_ip6(ef_driver_handle dh, int resource_id,
+			     const ef_filter_spec *fs,
+			     ef_filter_cookie *filter_cookie_out)
+{
+  ci_filter_add_t filter_add;
+  int rc;
+
+  filter_add.in.in_len = sizeof(filter_add.in);
+  filter_add.in.out_size = sizeof(filter_add.out);
+
+  filter_add.in.res_id = efch_make_resource_id(resource_id);
+  filter_add.in.spec.l3.protocol = fs->data[0];
+  memcpy(&filter_add.in.spec.l3.u.ipv6.daddr, &fs->data[1], 16);
+  filter_add.in.spec.l4.ports.dest = fs->data[6];
+  memcpy(&filter_add.in.spec.l3.u.ipv6.saddr, &fs->data[7], 16);
+  filter_add.in.spec.l4.ports.source = fs->data[11];
+
+  if( fs->type & EF_FILTER_VLAN )
+    filter_add.in.spec.l2.vid = fs->data[5];
+  else
+    /* Set an invalid VLAN ID */
+    filter_add.in.spec.l2.vid = 0xffff;
+
+  rc = ci_filter_add(dh, &filter_add);
+  if( rc == 0 && filter_cookie_out != NULL ) {
+    filter_cookie_out->filter_id = filter_add.out.filter_id;
+    filter_cookie_out->filter_type = fs->type;
+  } else if( rc == -ENOTTY ) {
+    /* Unsupported IOCTL returns ENOTTY so translate that here */
+    rc = -EOPNOTSUPP;
+  }
+  return rc;
+}
+
+
 static int ef_filter_del(ef_driver_handle dh, int resource_id,
 			 ef_filter_cookie *filter_cookie)
 {
@@ -377,9 +447,14 @@ static int ef_filter_del(ef_driver_handle dh, int resource_id,
 int ef_vi_filter_add(ef_vi *vi, ef_driver_handle dh, const ef_filter_spec *fs,
 		     ef_filter_cookie *filter_cookie_out)
 {
-  if( ! vi->vi_clustered )
-    return ef_filter_add(dh, vi->vi_resource_id,
-                         fs, filter_cookie_out);
+  if( ! vi->vi_clustered ) {
+    if( fs->type & EF_FILTER_IP6 )
+      return ef_filter_add_ip6(dh, vi->vi_resource_id,
+                               fs, filter_cookie_out);
+    else
+      return ef_filter_add(dh, vi->vi_resource_id,
+                           fs, filter_cookie_out);
+  }
   ef_log("%s: WARNING: Ignored attempt to set a filter on a cluster",
          __FUNCTION__);
   return 0;

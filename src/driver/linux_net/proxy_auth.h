@@ -58,4 +58,10 @@ int efx_proxy_auth_handle_response(struct proxy_admin_state *pa,
 		u64 uhandle, u32 result, u32 granted_privileges,
 		void *response_buffer, size_t response_size,
 		void (*complete_cb)(int, void*), void *cb_context);
+
+int efx_proxy_auth_complete_request(struct efx_nic *efx, u64 uhandle,
+		int (*do_cb)(struct efx_nic *, u32, u32,
+			     const void *, size_t, void *, size_t,
+			     void *),
+		void *cb_context);
 #endif

@@ -30,7 +30,6 @@
 #define __CI_DRIVER_EFAB_TCP_DRIVER_H__
 
 #include <ci/driver/internal.h>
-#include <onload/cplane_types.h>
 #include <onload/ipid.h>
 #include <onload/id_pool.h>
 #include <onload/tcp_helper.h>
@@ -75,15 +74,11 @@ typedef struct efab_tcp_driver_s {
   /*! TCP helpers table */
   tcp_helpers_table_t     thr_table;
 
-  /*! Control plane tables handle (this is not simply a pointer) */
-  cicp_handle_t           cplane_handle;
-
   /* ID field in the IP header handling */
   efab_ipid_cb_t          ipid;         /* see ipid.h in this dir. */
 
   /*! Management of RX demux -- s/w and h/w filters. */
   struct oof_manager*           filter_manager;
-  cicpos_ipif_callback_handle_t filter_manager_cp_handle;
   struct work_struct            filter_work_item;
 
   /*! work queue */
@@ -99,12 +94,17 @@ typedef struct efab_tcp_driver_s {
 
   struct oo_file_ref*     file_refs_to_drop;
   struct work_struct      file_refs_work_item;
+  spinlock_t              file_refs_lock;
 
   /* Dynamic stack list update: flag and wait queue.  Used by tcpdump */
   ci_uint32         stack_list_seq;
   ci_waitq_t        stack_list_wq;
 
   ci_uint32         load_numa_node;
+
+  /* Timesync object to be mmaped to UL with each netif */
+  ci_contig_shmbuf_t  shmbuf;
+  struct oo_timesync *timesync;
 
 } efab_tcp_driver_t;
 
@@ -113,7 +113,6 @@ typedef struct efab_tcp_driver_s {
 extern efab_tcp_driver_t efab_tcp_driver;
 
 
-#define CI_GLOBAL_CPLANE         (efab_tcp_driver.cplane_handle)
 #define THR_TABLE                (efab_tcp_driver.thr_table)
 #define CI_GLOBAL_WORKQUEUE      (efab_tcp_driver.workqueue)
 

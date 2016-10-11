@@ -53,10 +53,6 @@ ci_trampoline_handler(unsigned opcode, unsigned data) {
   int saved_errno = errno;
 
   switch (opcode) {
-    case CI_TRAMP_OPCODE_ERROR:
-      __ci_fail ("*** Deliberate user-level fail on syscall exit: 0x%x", data);
-      while (1) sleep (1000);  /* Code never gets here, but just in case! */
-
     case CI_TRAMP_OPCODE_CLOSE:
         /* Reflect the trampoline bounce to the user-mode close */
         if (onload_close(data))

@@ -34,8 +34,13 @@ static ci_cfg_desc cfg_opts[] = {
   { 'o', "onload_stack", CI_CFG_STR, &cfg_stack_name,
                         "stack id or stack name regexp"},
 };
+#define OFE_MAPPING_REMOVE 0
+#define OFE_MAPPING_INSERT 1
+#define OFE_MAPPING_LOAD_MAX_ARGS 3
+#define OFE_MAPPING_DEL_MAX_ARGS 1
+#define OFE_INSERT_RULE_MIN_ARGS 2
+#define OFE_DELETE_RULE_MIN_ARGS 1
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
-
 
 static void usage(const char* msg)
 {
@@ -49,6 +54,8 @@ static void usage(const char* msg)
   ci_log("  %s [options] info", ci_appname);
   ci_log("  %s [options] stats [<counter name> ...]", ci_appname);
   ci_log("  %s [options] command <ofe command>", ci_appname);
+  ci_log("  %s [options] load_ips <table name> <file name> [label]", ci_appname);
+  ci_log("  %s [options] del_ips <table name> <file name>", ci_appname);
 
   ci_log(" ");
   ci_log("options:");
@@ -90,7 +97,7 @@ static void do_ofe_info(ci_netif *ni)
   }
   else
     ci_log("No read-write memory allocated");
-  
+
   table.type = OFE_STATS_TABLE_TYPE_INVALID;
   do {
     if( ofe_stats_table_next(ni->ofe, &table) != OFE_OK )
@@ -192,6 +199,130 @@ static void do_ofe_command(ci_netif *ni)
 
 }
 
+static void do_process_ips(ci_netif *ni)
+{
+  char* fname = NULL;
+  char* label = NULL;
+  char* token;
+  int tkn_count;
+  FILE* cfg_file;
+#define MAX_LINE_SIZE 100
+#define MAX_CMD_SIZE 100
+  char line[MAX_LINE_SIZE];
+  char out_cmd[MAX_CMD_SIZE];
+  char* cmdptr = out_cmd;
+  char* fixed_cmd;
+  int rc = 0;
+  int max_args = 0;
+  int cmd = 0;
+  oo_ofe_config_t op;
+  int success_count = 0;
+  int fail_count = 0;
+  int line_num = 0;
+
+  if( ni->ofe == NULL )
+    return;
+
+  /* process args:  cmd, table and file needed at minimum */
+  if( cfg_argc < 3 ) {
+    ci_app_usage("missing or invalid parameters! Check help");
+    return;
+  }
+  if( strcmp(cfg_argv[0], "load_ips") == 0 ) {
+    cmd = OFE_MAPPING_INSERT;
+    max_args = OFE_MAPPING_LOAD_MAX_ARGS;
+    cmdptr += snprintf(cmdptr, sizeof(out_cmd) - (cmdptr - out_cmd), "%s ",
+                       "mapping_insert");
+  }
+  else if( strcmp(cfg_argv[0], "del_ips") == 0 ) {
+    cmd = OFE_MAPPING_REMOVE;
+    max_args = OFE_MAPPING_DEL_MAX_ARGS;
+    cmdptr += snprintf(cmdptr, sizeof(out_cmd) - (cmdptr - out_cmd), "%s ",
+                       "mapping_remove");
+  }
+  else {
+    ci_app_usage("invalid command");
+    return;
+  }
+  cmdptr += snprintf(cmdptr, sizeof(out_cmd) - (cmdptr - out_cmd),
+                     "%s ", cfg_argv[1]);
+  fixed_cmd = cmdptr;
+  fname = cfg_argv[2];
+  if( fname == NULL ) {
+    ci_app_usage("Missing file name!");
+    return;
+  }
+  if( cfg_argc > 2 )
+    label = cfg_argv[3];
+
+  if( (cfg_file = fopen(fname, "r")) == NULL ) {
+    ci_log("ERROR: failed to open IP config file %s: %s", fname,
+           strerror(errno));
+    return;
+  }
+
+  /* process the config file */
+  while( fgets(line, sizeof(line), cfg_file) != NULL ) {
+    cmdptr = fixed_cmd;
+    tkn_count = 0;
+    line_num++;
+    token = strtok(line, " ");
+    while( (token != NULL) && (tkn_count < max_args) ) {
+      if( (token[0] == '\n') || (token[0] == '\r') || (token[0] == '#') )
+        break;
+      cmdptr += snprintf(cmdptr, sizeof(out_cmd) - (cmdptr - out_cmd),
+                         "%s ", token);
+      tkn_count++;
+      token = strtok(NULL, " ");
+    }
+    if( tkn_count == 0 )
+      continue; /* skip - most likely empty line or comment starting with # */
+
+    if( (cmd == OFE_MAPPING_INSERT) &&
+        (tkn_count < OFE_INSERT_RULE_MIN_ARGS) ) {
+      if( label != NULL ) {
+        cmdptr += snprintf(cmdptr, sizeof(out_cmd) - (cmdptr - out_cmd),
+                             "%s ", label);
+      }
+      else {
+        fail_count++;
+        ci_log("invalid rule! skipping to the next rule at line %d",
+               line_num);
+        continue;
+      }
+    }
+    else if( (cmd == OFE_MAPPING_REMOVE) &&
+             (tkn_count < OFE_DELETE_RULE_MIN_ARGS) ) {
+      ci_log("invalid rule! skipping to the next rule at line %d", line_num);
+      fail_count++;
+      continue;
+    }
+    op.len = cmdptr - out_cmd;
+    CI_USER_PTR_SET(op.str, out_cmd);
+    rc = oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_OFE_CONFIG,
+                        &op);
+
+    if( rc < 0 ) {
+      ci_log("[%s]: failed: %s, at line %d from file %s",
+             ni->state->pretty_name, out_cmd, line_num, fname);
+      fail_count++;
+    }
+    else {
+      success_count++;
+    }
+
+    fixed_cmd[0] = '\0';
+  }
+  oo_resource_op(ci_netif_get_driver_handle(ni), OO_IOC_OFE_CONFIG_DONE, NULL);
+  ci_log("[%s] CMD:%s, processed %d rules from file %s",
+         ni->state->pretty_name, cfg_argv[0], success_count, fname);
+  if( fail_count )
+    ci_log("[%s] CMD:%s, failed to process %d rules from file %s",
+           ni->state->pretty_name, cfg_argv[0], fail_count, fname);
+
+  fclose(cfg_file);
+}
+
 int main(int argc, char* argv[])
 {
   stack_ni_fn_t* do_stack_ofe = NULL;
@@ -199,7 +330,7 @@ int main(int argc, char* argv[])
   ci_app_usage = usage;
   cfg_lock = 0; /* don't lock when attaching */
 
-  ci_app_getopt("info | stats ... | command ...",
+  ci_app_getopt("info | stats ... | command ...|load_ips...|del_ips...",
                 &argc, argv, cfg_opts, N_CFG_OPTS);
   --argc; ++argv;
 
@@ -230,8 +361,14 @@ int main(int argc, char* argv[])
     cfg_argv = argv + 1;
     cfg_argc = argc - 1;
   }
+  else if( strcmp(argv[0], "load_ips") == 0  ||
+           strcmp(argv[0], "del_ips") == 0 ) {
+    do_stack_ofe = do_process_ips;
+    cfg_argv = argv;
+    cfg_argc = argc;
+  }
   else
-    ci_app_usage("info | stats ... | command ...");
+    ci_app_usage("info | stats ... | command ...|load_ips...|del_ips...");
 
   CI_TRY(libstack_init(NULL));
   list_all_stacks2(stackfilter_match_name, do_stack_ofe, NULL, NULL);

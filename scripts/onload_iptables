@@ -386,9 +386,14 @@ def PrintInstalledRules(filename=None):
 	if filename is None:
 		filename = '*'
 	for filename in glob.glob(os.path.join('/proc/driver/sfc_resource/', filename, 'firewall_rules')):
-		with open( filename ) as file:
-			rules = file.read()
-			print(rules)
+		try:
+			fp = open(filename, 'r')
+			rules = fp.read()
+			fp.close()
+		except IOError:
+			print "Cannot find the file", filename
+			sys.exit(1)
+		print(rules)
 
 
 def OutputFilterRulesFrom(x, options):

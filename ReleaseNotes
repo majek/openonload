@@ -1,33 +1,99 @@
-OpenOnload-201509-u1 Release Notes
-==================================
+OpenOnload-201606 Release Notes
+===============================
 
-This is a minor update release that fixes a number of issues with
-OpenOnload-201509 and the associated SFC net driver.
+This is a major update release that adds new features to OpenOnload.
 
-Below is a brief summary of the relevant changes and limitations that
-we are aware of.  Please see the ChangeLog for further details and a
-list of bugs fixed.
-
-The ReleaseNotes for OpenOnload-201509 are included below.
+Below is a brief summary of the new features and any limitations that we are
+aware of.  See the ChangeLog for further details and a list of bugs fixed.
 
 
-RSS and cluster hashing
------------------------
+Linux distribution support
+--------------------------
 
-This release configures the network adapter to use a fixed key for
-flow hashing by default, so that all network ports consistently hash
-packets for a particular flow to the same channel within an RSS set or
-cluster.  In addition the hashing is symmetric, so that both
-directions in an IP conversation are hashed to the same channel. This
-applies to packets handled by the kernel stack, by ef_vi and by
-SolarCapture.
+This Onload package is supported on:
+- Red Hat Enterprise Linux 5.10 - 5.11
+- Red Hat Enterprise Linux 6.6 - 6.8
+- Red Hat Enterprise Linux 7.0 - 7.2
+- Red Hat Messaging Realtime and Grid 2.4, 2.5
+- SuSE Linux Enterprise Server 11 sp2, sp3, sp4
+- SuSE Linux Enterprise Realtime Extension 11
+- SuSE Linux Enterprise Server 12 base and sp1
+- Canonical Ubuntu Server LTS 14.04
+- Canonical Ubuntu Server 15.10, 16.04
+- Debian 7 "Wheezy"
+- Debian 8 "Jessie"
+- Linux kernels 2.6.32 - 4.6
 
-When using solar_clusterd and ef_vi it is possible to select a
-particular channel within a cluster by prefixing the cluster name with
-index@.  For example, "0@mycluster" selects the first channel. This is
-useful when receiving packets from multiple ports, as it ensures that
-packets from a particular flow are steered to the same thread
-regardless of which port they arrive at.
+
+Solarflare Flareon Ultra 8500 NICs
+----------------------------------
+
+This release adds full support for the new range of Solarflare Flareon
+Ultra 8500-series NICs.  If you are interested in learning more about
+the improved performance and features available please contact
+sales@solarflare.com
+
+
+New configuration options
+-------------------------
+
+EF_TCP_LISTEN_REPLIES_BACK: When a TCP listening socket replies to an
+incoming SYN, this option forces Onload to ignore the route table and
+to reply on the same network interface the SYN was received from.
+This mode could be considered as a way to achieve some basic
+source-based routing
+
+EF_HIGH_THROUGHPUT_MODE: This option causes onload to optimise the
+stack and VI configuration for throughput at the cost of latency
+
+In addition, some of the control-plane module options have been moved
+or renamed - please the control plane section below for details.
+
+
+ef_vi Transmit Alternatives API
+-------------------------------
+
+This release adds a new method for sending data to the ef_vi API.
+Using the ef_vi_transmit_alt* functions a set of alternative packets
+can be queued in the NIC ready to be sent.  Once the decision about
+which alternative to send is made the correct one is released onto
+the network with extremely low latency.
+
+Please refer to the ef_vi documentation for further details.  This is
+supported on 8000-series NICs and later.
+
+
+ef_vi Capabilities API
+----------------------
+
+This release adds support for an ef_vi API that will allow users to
+query at runtime what features and capabilities are available on the
+hardware as it is currently configured.  This allows applications to
+built once, then run on a variety of Solarflare NICs and tailor the
+feature set they use to the current hardware capabilities.
+
+Please see src/include/etherfabric/capabilites.h for the API
+documentation and details of the features that can currently be queried.
+
+
+IPv6 ef_vi filtering
+--------------------
+
+This release adds support for IPv6 filters in ef_vi.  Please see the
+documentation for ef_filter_spec_set_ip6_local() and
+ef_filter_spec_set_ip6_full() for further details.  This is supported
+on 7000-series NICs and later.
+
+
+onload_thread_get_spin extension API
+------------------------------------
+
+This release adds a new extensions API call to query per-thread spin
+settings, to complement the existing onload_thread_set_spin().
+onload_thread_get_spin() retrieves the spin settings previously
+configured via onload_thread_set_spin().
+
+Please refer to src/include/onload/extensions.h for the API documentation.
 
 
 Teamd support for mixed bonds
@@ -55,235 +121,76 @@ used to be at /proc/driver/sfc_resource/ethX/pdY have moved to
 /proc/driver/sfc_resource/devices/0000:0Z.00.0/pdY
 
 
+New onload_cplane module
+------------------------
 
-OpenOnload-201509 Release Notes
-===============================
+This release of Onload adds a new binary module named onload_cplane.
+This new module provides some of the module parameters that used to be
+handled by other solarflare modules:
+- oo_bond_poll_base 
+- oo_igmp_on_failover 
+- max_layer2_interfaces 
+- max_routes
+- max_neighs 
+- oo_teaming_dump_period
+- oo_teaming_listen_updates
 
-This is a major update release that adds new features to OpenOnload.
+In previous versions max_layer2_interfaces was used to limit the size
+of both the llap table (table of IP interfaces) and ipif table (table
+of IP addresses).  This has now been separated and max_local_addrs has
+been added to control the size of the ipif table.
 
-Below is a brief summary of the new features and any limitations that we are
-aware of.  See the ChangeLog for further details and a list of bugs fixed.
+The onload_cplane module also takes a new parameter cplane_debug_bits,
+similar to the existing oo_debug_bits parameter, to control the level
+of debug logging produced.
 
+A number of /proc files have been changed:
+- All /proc/driver/onload/mib-* have moved to
+ /proc/driver/onload_cplane/mib-*; the files themselves are exactly the
+ same as previously, apart from /proc/driver/onload/mib-hwport which 
+ has been removed.
+- /proc/driver/onload/cplane has been renamed to
+ /proc/driver/onload_cplane/stats.
+- /proc/driver/onload_cplane/version is a new file containing version
+ information of the onload_cplane module.
 
-Scalable filters
-----------------
+Some build-time configuration options have been effectively removed as
+they are set at build time of the onload_cplane module:
+- CI_CFG_MAX_REGISTER_INTERFACES
+- CI_CFG_TEAMING
 
-Normally, an Onload stack receives only the traffic that is destined for
-sockets that it has created.  It achieves this by installing a "filter" in
-hardware to match only the expected traffic for each socket.  These filters are
-a limited resource and take tens of microseconds to initialise, and so there is
-a limit to the number of sockets with filters, and to how quickly they can be
-created.
-
-This release of Onload implements several "scalable filtering" modes to
-overcome this limitation.  In these modes, Onload receives all incoming traffic
-on a specified interface.  This prevents unaccelerated traffic from being
-passed on that interface.  It is suggested that additional PFs or VFs be
-configured on the adapter and used for this purpose.
-
-Scalable filter modes are configured using the EF_SCALABLE_FILTERS,
-EF_SCALABLE_FILTERS_MODE and EF_SCALABLE_FILTERS_ENABLE environment variables.
-Further discussion is contained in the "Transparent proxying" and "Scalable
-listening sockets" sections below.
-
-The feature requires 7000-series adapters and a firmware version of at least
-v4.6.
-
-By default use of scalable filters requires CAP_NET_RAW.  It is possible to
-configure Onload to avoid the capability check through the use of the
-scalable_filter_gid Onload module parameter.  This can be set to -1 to avoid
-capability checking for this feature entirely, set to a group id to allow users
-in that group to use the feature, or left at the default to use the
-capability checking in all cases.
-
-Please consult the User Guide for full details.
-
-
-Transparent proxying
---------------------
-
-Support for the IP_TRANSPARENT socket option was added in this release.  The
-option allows sockets to be bound to addresses that need not be local, and is
-most commonly used by HTTP proxies.  It requires the use of the "transparent
-active" or "RSS transparent active" scalable filter modes.
-
-It is subject to the following limitations:
-
- * The IP_TRANSPARENT option must be set on socket before the socket is bound.
- * The IP_TRANSPARENT option cannot be cleared after bind on accelerated
-   sockets.
- * IP_TRANSPARENT sockets cannot be accelerated if they are bound to port 0 or
-   to INADDR_ANY.
- * IP_TRANSPARENT sockets cannot be passed to the kernel stack when bound to a
-   port that is in the list specified by EF_FORCE_TCP_REUSEPORT.
-
-When combined with clustering (i.e. when using the "RSS transparent active"
-mode), the following additional limitations apply:
-
- * EF_CLUSTER_NAME must be set explicitly for the processes sharing the
-   cluster.
- * The stack name, whether specified by EF_NAME or by onload_set_stackname(),
-   must be empty.
-
-Please consult the User Guide for full details.
+Finally, some Linux kernel versions break the API symbols used by
+Onload and users should upgrade to a later release where these kernel
+bugs have been fixed:
+- 4.2.0 and 4.2.1: please use 4.2.2 or later
+- 3.7.x and 3.8.x: please use 3.7.10 or >=3.9
+- 3.0.9-rt* from MRG2.1: please use later MRG kernel
 
 
-Active-open socket caching
---------------------------
+sfc_aoe module
+--------------
 
-This release adds support for caching active-open sockets in addition to the
-support for caching passive-open sockets that was introduced in OpenOnload
-201502.  This reduces the time required to create a new socket.  As the cost
-of installing a hardware filter would negate the advantages of caching, only
-sockets with the IP_TRANSPARENT option set are eligible to enter the active-
-open cache.
+The sfc_aoe module is no longer included in the Onload distribution.
+This will in future be distributed separately to allow independent
+releases of these two products. If this causes issues please contact
+support@solarflare.com 
 
 
-Scalable listening sockets
---------------------------
+Interrupt-driven event burst
+----------------------------
 
-Ordinarily, for each accelerated listening socket, Onload installs one filter
-per IP address per physical port.  In a typical configuration with one IP
-configured per port, this results in a maximum of 2048 listening sockets
-(although in practice the limit will be still lower as there will be other
-users of the filter table).
-
-Onload can now install a single filter that captures all traffic on an
-interface, removing the need to install an extra filter for each listening
-socket, and so avoiding this limitation on the number of listening sockets.
-This is called the passive scalable filter mode.
-
-To use this feature, first enable scalable filters as described in the User
-Guide.  Listening sockets that are bound to an IP configured on the
-scalable-filter interface will take advantage of this feature.
-
-The following limitations apply:
-
- * Sockets using this feature must be bound to the appropriate IP address
-   before listen() is called on them.
- * When using large numbers of listening sockets, it might be necessary to
-   increase the new option EF_TCP_SYNRECV_MAX to ensure that there are enough
-   buffers to handle incoming connections.
- * After an IP address is removed from an interface, sockets using scalable
-   filters (both listening sockets and sockets accepted from the listeners)
-   will continue to receive traffic that arrives at the NIC if it matches the
-   local and remote address and port of the socket.
-
-Please consult the User Guide for full details.
-
-
-Teamd support
--------------
-
-Onload now supports bonds/teams configured with the "teaming" kernel module and
-"teamd" daemon.  This is in addition to the long-standing support for bonds
-configured using the "bonding" module.  teamd is distributed with RHEL 7.
-
-
-Stratus ftServer
-----------------
-
-This release adds support for the Stratus ftServer platform.  When one unit of
-the system is removed from service, Onload stacks will fail over gracefully to
-the redundant unit.
-
-
-New ef_vi filter-types
-----------------------
-
-Support for IP-protocol and Ethertype filters have been added to ef_vi.  These
-are only supported on 7000-series adapters with a firmware version of at least
-v4.6.  Further details are available in the ef_vi Doxygen documentation.
-
-
-New options
------------
-
-In addition to the options described above for scalable filters the following
-new options have been added:
-
- * EF_TCP_SYNRECV_MAX: This controls the maximum number of TCP connections in
-   the stack in the SYN_RCVD state.  Endpoint buffers are used to represent
-   these connections, and each endpoint buffer can accommodate up to four such
-   connections.  As such, when tuning this value it is necessary to ensure that
-   EF_MAX_ENDPOINTS is sufficiently large.  As endpoint buffers are also
-   required for established connections, it is recommended that
-   EF_TCP_SYNRECV_MAX be no larger than three quarters of the value of
-   EF_SYNRECV_MAX.  By default, EF_TCP_SYNRECV_MAX is equal to four times the
-   value of /proc/sys/net/ipv4/tcp_max_syn_backlog.
- * EF_TCP_CONNECT_SPIN: This option is analogous to EF_TCP_ACCEPT_SPIN.  When
-   enabled, calls to connect() for TCP sockets will spin until a connection is
-   established, or until the spin- or socket-timeout has elapsed.  It is off by
-   default, in imitation of the behaviour of earlier Onload releases.
- * EF_TCP_SNDBUF_MODE=2: A new value of 2 has been introduced for this
-   variable.  When selected, the sizes of send-buffers for TCP sockets will be
-   adjusted automatically according to network conditions.
- * EF_TCP_SOCKBUF_MAX_FRACTION: This option controls the maximum fraction of the 
-   TX buffers that may be allocated to a single socket with EF_TCP_SNDBUF_MODE=2
- * EF_UDP_SEND_NONBLOCK_NO_PACKETS_MODE: This option controls how a non-blocking 
-   UDP send() call should behave if it is unable to allocate sufficient packet 
-   buffers.
- * EF_RETRANSMIT_THRESHOLD_ORPHAN: This option is similar to 
-   EF_RETRANSMIT_THRESHOLD, but sets the maximum number of retransmissions 
-   before an orphaned socket is aborted.
-
-
-UDP TX Timestamps
------------------
-
-Previously, when using recvmsg() to retrieve TX timestamps for UDP
-packets, the payload that Onload would return would consist only of
-the UDP payload.  Now, the entire Ethernet frame is returned.  This
-matches the behaviour of the Linux kernel.
-
-Any application relying on the old Onload behaviour should be updated
-to expect Linux behaviour to ensure it is portable and can be run
-without Onload.  To facilitate running applications with multiple
-Onload versions onload_fd_check_feature() has been extended to support
-the ONLOAD_FD_FEAT_UDP_TX_TS_HDR option.  On new versions of Onload
-this will return 1.  When run on older versions of Onload this will
-return -EOPNOTSUPP and this should be taken to indicate that no packet
-headers are returned if the socket is accelerated.  The behaviour of
-TCP sockets and unaccelerated UDP sockets is unchanged and the new
-onload_fd_check_feature() option does not apply to them.
-
-
-TX Timestamp correction
------------------------
-
-In earlier releases TX timestamps were reported at a point approximately
-180ns before the wire time.  That error is corrected in this release, so
-that TX timestamps now report the time that the first byte of the packet
-reaches the wire.
-
-
-Other changes
--------------
-
-The onload_set_recv_filter() API for UDP sockets has been deprecated in this
-release.
-
-In OpenOnload 201502, the delegated-send APIs were inconsistent in the manner
-in which they returned errors.  Now, all of the API calls return -1 on error
-and set errno appropriately.
-
-By default, Onload now supports up to 8 interfaces.  The previous default was
-6.  This remains a compile-time option and is configured by setting the
-CI_CFG_MAX_INTERFACES and CI_CFG_MAX_REGISTER_INTERFACES symbols.
-
-It is now possible to create multiple listening sockets with SO_REUSEPORT bound
-to the same port but to different addresses.  Previously, only one such
-clustered socket could be bound to any given port.
-
-
-Known Issues
-------------
-
-Epoll sets used with onload_ordered_epoll_wait must only contain sockets in one
-onload stack.  This is not explicitly enforced, so applications must ensure
-that this is the case or they could potentially see mis-ordering.
-
-On realtime kernels under high interrupt load, certain Onload operations in
-kernel context may cause stalls to be reported in the kernel.  The stalls are
-not harmful in themselves, but we intend to address this in a future release.
-
+During testing for this release we have encountered a rare issue when
+running Onload in interrupt-driven mode with multiple threads or
+processes sharing a stack and using both ports of a NIC at high
+traffic rates.  In this situation Onload can cause the NIC to generate
+a large burst of events which in turn will overflow the net driver's
+event queue.  Due to the timings involved this mainly affects the new
+8500 series NICs, but can in theory apply to earlier generations of
+hardware.  It is not a new issue, so if you have not experienced this
+on previous Onload releases there is no additional risk in upgrading
+to this release.  The symptoms include warnings from the kernel driver
+about driverlink handle_event() operations taking a long time and MCDI
+requests completing without an event.  This may cause the driver to
+reset the NIC in an attempt to recover.  Solarflare have a fix to
+resolve this that is currently being tested and will be included in an
+update release.

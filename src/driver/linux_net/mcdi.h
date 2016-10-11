@@ -26,7 +26,7 @@
 #define EFX_MCDI_H
 
 
-#define MCDI_RPC_TIMEOUT (10 * HZ)
+#define MCDI_PROXY_AUTH_CLIENT_TIMEOUT (10 * HZ)
 
 /**
  * enum efx_mcdi_state - MCDI request handling state
@@ -35,10 +35,6 @@
  * @MCDI_STATE_RUNNING_SYNC: There is a synchronous MCDI request pending.
  *	Only the thread that moved into this state is allowed to move out of it.
  * @MCDI_STATE_RUNNING_ASYNC: There is an asynchronous MCDI request pending.
-#ifdef EFX_USE_MCDI_PROXY_AUTH
- * @MCDI_STATE_PROXY_WAIT: An MCDI request has completed with a response that
- *	indicates we must wait for a proxy try again message.
-#endif
  * @MCDI_STATE_COMPLETED: An MCDI request has completed, but the owning thread
  *	has not yet consumed the result. For all other threads, equivalent to
  *	%MCDI_STATE_RUNNING.
@@ -47,9 +43,6 @@ enum efx_mcdi_state {
 	MCDI_STATE_QUIESCENT,
 	MCDI_STATE_RUNNING_SYNC,
 	MCDI_STATE_RUNNING_ASYNC,
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-	MCDI_STATE_PROXY_WAIT,
-#endif
 	MCDI_STATE_COMPLETED,
 };
 
@@ -77,19 +70,19 @@ enum efx_mcdi_mode {
  * @credits: Number of spurious MCDI completion events allowed before we
  *     trigger a fatal error
  * @resprc: Response error/success code (Linux numbering)
+ * @resp_cmd: Command in response (required in the case of MC_CMD_PROXY_CMD)
  * @resp_hdr_len: Response header length
  * @resp_data_len: Response data (SDU or error) length
  * @async_lock: Serialises access to @async_list while event processing is
  *	enabled
  * @async_list: Queue of asynchronous requests
  * @async_timer: Timer for asynchronous request timeout
+ * @timeout: Current request timeout in jiffies
  * @logging_buffer: buffer that may be used to build MCDI tracing messages
  * @logging_enabled: whether to trace MCDI
-#ifdef EFX_USE_MCDI_PROXY_AUTH
- * @proxy_rx_handle: Most recently received proxy authentication handle
- * @proxy_rx_status: Status of most recent proxy authentication
+ * @proxy_rx_handle: Most recently received proxy authorisation handle
+ * @proxy_rx_status: Status of most recent proxy authorisation
  * @proxy_rx_wq: Wait queue for updates to proxy_rx_handle
-#endif
  */
 struct efx_mcdi_iface {
 	struct efx_nic *efx;
@@ -102,20 +95,20 @@ struct efx_mcdi_iface {
 	unsigned int seqno;
 	int resprc;
 	int resprc_raw;
+	unsigned int resp_cmd;
 	size_t resp_hdr_len;
 	size_t resp_data_len;
 	spinlock_t async_lock;
 	struct list_head async_list;
 	struct timer_list async_timer;
+	unsigned int timeout;
 #ifdef CONFIG_SFC_MCDI_LOGGING
 	char *logging_buffer;
 	bool logging_enabled;
 #endif
-#ifdef EFX_USE_MCDI_PROXY_AUTH
-	atomic_t proxy_rx_handle;
-	atomic_t proxy_rx_status;
+	unsigned int proxy_rx_handle;
+	int proxy_rx_status;
 	wait_queue_head_t proxy_rx_wq;
-#endif
 };
 
 struct efx_mcdi_mon {
@@ -172,22 +165,23 @@ static inline struct efx_mcdi_mon *efx_mcdi_mon(struct efx_nic *efx)
 #endif
 
 int efx_mcdi_init(struct efx_nic *efx);
+void efx_mcdi_detach(struct efx_nic *efx);
 void efx_mcdi_fini(struct efx_nic *efx);
 
-int efx_mcdi_rpc(struct efx_nic *efx, unsigned cmd, const efx_dword_t *inbuf,
-		 size_t inlen, efx_dword_t *outbuf, size_t outlen,
-		 size_t *outlen_actual);
-int efx_mcdi_rpc_quiet(struct efx_nic *efx, unsigned cmd,
+int efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
+		 const efx_dword_t *inbuf, size_t inlen,
+		 efx_dword_t *outbuf, size_t outlen, size_t *outlen_actual);
+int efx_mcdi_rpc_quiet(struct efx_nic *efx, unsigned int cmd,
 		       const efx_dword_t *inbuf, size_t inlen,
 		       efx_dword_t *outbuf, size_t outlen,
 		       size_t *outlen_actual);
 
-int efx_mcdi_rpc_start(struct efx_nic *efx, unsigned cmd,
+int efx_mcdi_rpc_start(struct efx_nic *efx, unsigned int cmd,
 		       const efx_dword_t *inbuf, size_t inlen);
-int efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned cmd, size_t inlen,
+int efx_mcdi_rpc_finish(struct efx_nic *efx, unsigned int cmd, size_t inlen,
 			efx_dword_t *outbuf, size_t outlen,
 			size_t *outlen_actual);
-int efx_mcdi_rpc_finish_quiet(struct efx_nic *efx, unsigned cmd,
+int efx_mcdi_rpc_finish_quiet(struct efx_nic *efx, unsigned int cmd,
 			      size_t inlen, efx_dword_t *outbuf,
 			      size_t outlen, size_t *outlen_actual);
 
@@ -205,7 +199,7 @@ int efx_mcdi_rpc_async_quiet(struct efx_nic *efx, unsigned int cmd,
 			     efx_mcdi_async_completer *complete,
 			     unsigned long cookie);
 
-void efx_mcdi_display_error(struct efx_nic *efx, unsigned cmd,
+void efx_mcdi_display_error(struct efx_nic *efx, unsigned int cmd,
 			    size_t inlen, efx_dword_t *outbuf,
 			    size_t outlen, int rc);
 
@@ -382,6 +376,7 @@ int efx_mcdi_port_get_number(struct efx_nic *efx);
 u32 efx_mcdi_phy_get_caps(struct efx_nic *efx);
 void efx_mcdi_process_link_change(struct efx_nic *efx, efx_qword_t *ev);
 int efx_mcdi_set_mac(struct efx_nic *efx);
+int efx_mcdi_set_mtu(struct efx_nic *efx);
 #define EFX_MC_STATS_GENERATION_INVALID ((__force __le64)(-1))
 void efx_mcdi_mac_start_stats(struct efx_nic *efx);
 void efx_mcdi_mac_stop_stats(struct efx_nic *efx);
@@ -394,6 +389,10 @@ int efx_mcdi_set_workaround(struct efx_nic *efx, u32 type, bool enabled,
 int efx_mcdi_get_workarounds(struct efx_nic *efx, unsigned int *impl_out,
 			     unsigned int *enabled_out);
 int efx_mcdi_get_privilege_mask(struct efx_nic *efx, u32 *mask);
+int efx_mcdi_rpc_proxy_cmd(struct efx_nic *efx, u32 pf, u32 vf,
+			   const void *request_buf, size_t request_size,
+			   void *response_buf, size_t response_size,
+			   size_t *response_size_actual);
 
 #ifdef CONFIG_SFC_MCDI_MON
 int efx_mcdi_mon_probe(struct efx_nic *efx);

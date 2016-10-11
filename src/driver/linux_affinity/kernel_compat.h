@@ -67,5 +67,9 @@ static inline void *PDE_DATA(const struct inode *inode)
 }
 #endif
 
+#ifdef EFRM_OLD_DEV_BY_IDX
+#define __dev_get_by_index(net_ns, ifindex) __dev_get_by_index(ifindex)
+#define dev_get_by_index(net, ifindex) dev_get_by_index(ifindex)
+#endif
 
 #endif

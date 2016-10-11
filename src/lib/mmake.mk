@@ -3,20 +3,29 @@ SUBDIRS		:= citools ciapp efhwdef
 
 ifeq ($(LINUX),1)
 DRIVER_SUBDIRS	:= citools ciul transport efabcfg
+ifndef PREBUILD_CPLANE
+DRIVER_SUBDIRS	+= cplane
+endif
 OTHER_SUBDIRS	:= spektor
-SUBDIRS		+= sfcaffinity sfgpxe onload_ext fsbc
-endif
-
-ifeq ($(SOLARIS),1)
-SUBDIRS		:= sfgpxe
-# libcitools; particularly sysdep.h does not have sparcv9 support at present
-ifneq ($(ISA),sparcv9)
-SUBDIRS		+= citools ciapp efhwdef
-endif
+SUBDIRS		+= sfcaffinity onload_ext fsbc
 endif
 
 ifeq ($(GNU),1)
-SUBDIRS		+= ciul efabcfg transport tools 
+# N.B.: The order matters here.
+SUBDIRS		+= ciul efabcfg
+ifndef PREBUILD_CPLANE
+SUBDIRS		+= cplane
+endif
+SUBDIRS		+= transport tools
+ifndef PREBUILD_ZF
+ifeq (${PLATFORM},gnu_x86_64)
+ifneq ($(ONLOAD_ONLY),1)
+ifneq ($(NO_ZF),1)
+SUBDIRS         += zf
+endif
+endif
+endif
+endif
 endif
 
 

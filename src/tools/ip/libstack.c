@@ -27,8 +27,8 @@
 /*! \cidoxg_tests_ef */
 #include <stdlib.h>
 #include <ci/internal/ip.h>
-#include <ci/internal/cplane_ops.h>
-#include <ci/internal/cplane_handle.h>
+#include <onload/ul.h>
+#include <onload/cplane_ops.h>
 #include <onload/driveraccess.h>
 #include <onload/ioctl.h>
 #include <onload/debug_intf.h>
@@ -2359,13 +2359,15 @@ static void stack_cicp_user_find_home(ci_netif* ni)
 {
   const char* ip_str = arg_s[0];
   struct in_addr in_addr;
-  ci_hwport_id_t hwport;
   ci_ip_addr_t laddr;
-  cicp_encap_t encap;
-  ci_ifid_t ifindex;
-  ci_mac_addr_t mac;
-  ci_mtu_t mtu;
   int rc;
+
+  /* for some reason gcc complians about maybe-uninitialized variables. */
+  ci_hwport_id_t hwport = CI_HWPORT_ID_BAD;
+  cicp_encap_t encap = {0,};
+  ci_ifid_t ifindex = -1;
+  ci_mac_addr_t mac = {0,};
+  ci_mtu_t mtu = 0;
 
   if( ! inet_aton(ip_str, &in_addr) ) {
     ci_log("%s: Bad IP address '%s'", __FUNCTION__, ip_str);
@@ -2386,12 +2388,12 @@ static void stack_cicp_user_find_home(ci_netif* ni)
 
 static void stack_hwport_to_base_ifindex(ci_netif* ni)
 {
-  const cicp_ul_mibs_t* user = &CICP_MIBS(CICP_HANDLE(ni))->user;
-  cicp_fwdinfo_t* fwdt = user->fwdinfo_utable;
+  const cicp_ul_mibs_t* user = &CICP_USER_MIBS(CICP_HANDLE(ni));
+  cicp_llapinfo_t* llapt = user->llapinfo_utable;
   int i;
-  for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
     ci_log("hwport_to_base_ifindex[%d] = %d", i,
-           (int) fwdt->hwport_to_base_ifindex[i]);
+           (int) llapt->hwport_to_base_ifindex[i]);
 }
 
 /**********************************************************************

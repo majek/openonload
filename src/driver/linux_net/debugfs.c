@@ -38,9 +38,9 @@
 /* Parameter definition bound to a structure - each file has one of these */
 struct efx_debugfs_bound_param {
 	const struct efx_debugfs_parameter *param;
-	void *(*get_struct)(void *, unsigned);
+	void *(*get_struct)(void *, unsigned int);
 	void *ref;
-	unsigned index;
+	unsigned int index;
 };
 
 
@@ -291,8 +291,8 @@ int efx_debugfs_read_string(struct seq_file *file, void *data)
 static int
 efx_init_debugfs_files(struct dentry *parent,
 		       struct efx_debugfs_parameter *params, u64 ignore,
-		       void *(*get_struct)(void *, unsigned),
-		       void *ref, unsigned struct_index)
+		       void *(*get_struct)(void *, unsigned int),
+		       void *ref, unsigned int struct_index)
 {
 	struct efx_debugfs_bound_param *binding;
 	unsigned int pos;
@@ -428,7 +428,7 @@ static struct efx_debugfs_parameter efx_debugfs_port_parameters[] = {
 	{NULL},
 };
 
-static void *efx_debugfs_get_same(void *ref, unsigned index)
+static void *efx_debugfs_get_same(void *ref, unsigned int index)
 {
 	return ref;
 }
@@ -478,15 +478,19 @@ void efx_trim_debugfs_port(struct efx_nic *efx,
 
 /* Per-TX-queue parameters */
 static struct efx_debugfs_parameter efx_debugfs_tx_queue_parameters[] = {
+	EFX_UINT_PARAMETER(struct efx_tx_queue, queue),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, insert_count),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, write_count),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, read_count),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, tso_bursts),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, tso_long_headers),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, tso_packets),
+	EFX_UINT_PARAMETER(struct efx_tx_queue, tso_version),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, pushes),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, doorbell_notify_comp),
 	EFX_UINT_PARAMETER(struct efx_tx_queue, doorbell_notify_tx),
+	EFX_UINT_PARAMETER(struct efx_tx_queue, csum_offload),
+	EFX_BOOL_PARAMETER(struct efx_tx_queue, timestamping),
 #ifdef EFX_NOT_UPSTREAM
 	EFX_U64_PARAMETER(struct efx_tx_queue, tx_bytes),
 	EFX_ULONG_PARAMETER(struct efx_tx_queue, tx_packets),
@@ -497,10 +501,13 @@ static struct efx_debugfs_parameter efx_debugfs_tx_queue_parameters[] = {
 	{NULL},
 };
 
-static void *efx_debugfs_get_tx_queue(void *ref, unsigned index)
+static void *efx_debugfs_get_tx_queue(void *ref, unsigned int index)
 {
-	return efx_get_tx_queue(ref, index / EFX_TXQ_TYPES,
-				index % EFX_TXQ_TYPES);
+	struct efx_nic *efx = ref;
+	struct efx_channel *channel =
+		efx_get_tx_channel(efx, index / efx->tx_queues_per_channel);
+
+	return &channel->tx_queue[index % efx->tx_queues_per_channel];
 }
 
 static void efx_fini_debugfs_tx_queue(struct efx_tx_queue *tx_queue);
@@ -594,7 +601,7 @@ static struct efx_debugfs_parameter efx_debugfs_rx_queue_parameters[] = {
 	{NULL},
 };
 
-static void *efx_debugfs_get_rx_queue(void *ref, unsigned index)
+static void *efx_debugfs_get_rx_queue(void *ref, unsigned int index)
 {
 	return efx_channel_get_rx_queue(efx_get_channel(ref, index));
 }
@@ -673,11 +680,15 @@ static void efx_fini_debugfs_rx_queue(struct efx_rx_queue *rx_queue)
 static struct efx_debugfs_parameter efx_debugfs_channel_parameters[] = {
 	EFX_BOOL_PARAMETER(struct efx_channel, enabled),
 	EFX_INT_PARAMETER(struct efx_channel, irq),
-	EFX_UINT_PARAMETER(struct efx_channel, irq_moderation),
+	EFX_UINT_PARAMETER(struct efx_channel, irq_moderation_us),
 	EFX_UINT_PARAMETER(struct efx_channel, eventq_read_ptr),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_tobe_disc),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_ip_hdr_chksum_err),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_tcp_udp_chksum_err),
+	EFX_UINT_PARAMETER(struct efx_channel, n_rx_outer_ip_hdr_chksum_err),
+	EFX_UINT_PARAMETER(struct efx_channel, n_rx_outer_tcp_udp_chksum_err),
+	EFX_UINT_PARAMETER(struct efx_channel, n_rx_inner_ip_hdr_chksum_err),
+	EFX_UINT_PARAMETER(struct efx_channel, n_rx_inner_tcp_udp_chksum_err),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_eth_crc_err),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_mcast_mismatch),
 	EFX_UINT_PARAMETER(struct efx_channel, n_rx_frm_trunc),
@@ -697,7 +708,7 @@ static struct efx_debugfs_parameter efx_debugfs_channel_parameters[] = {
 	{NULL},
 };
 
-static void *efx_debugfs_get_channel(void *ref, unsigned index)
+static void *efx_debugfs_get_channel(void *ref, unsigned int index)
 {
 	return efx_get_channel(ref, index);
 }
@@ -974,21 +985,38 @@ void efx_fini_debugfs_nic(struct efx_nic *efx)
  */
 int efx_init_debugfs(void)
 {
+	int rc;
+
 	/* Create top-level directory */
 	efx_debug_root = debugfs_create_dir("sfc", NULL);
-	if (!efx_debug_root)
+	if (!efx_debug_root) {
+		printk(KERN_ERR "debugfs_create_dir sfc failed.\n");
+		rc = -ENOMEM;
 		goto err;
+	} else if (IS_ERR(efx_debug_root)) {
+		rc = PTR_ERR(efx_debug_root);
+		printk(KERN_ERR "debugfs_create_dir sfc failed, rc=%d.\n", rc);
+		goto err;
+	}
 
 	/* Create "cards" directory */
 	efx_debug_cards = debugfs_create_dir("cards", efx_debug_root);
-	if (!efx_debug_cards)
+	if (!efx_debug_cards) {
+		printk(KERN_ERR "debugfs_create_dir cards failed.\n");
+		rc = -ENOMEM;
 		goto err;
+	} else if (IS_ERR(efx_debug_cards)) {
+		rc = PTR_ERR(efx_debug_cards);
+		printk(KERN_ERR "debugfs_create_dir cards failed, rc=%d.\n",
+		       rc);
+		goto err;
+	}
 
 	return 0;
 
  err:
 	efx_fini_debugfs();
-	return -ENOMEM;
+	return rc;
 }
 
 /**

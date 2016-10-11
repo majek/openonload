@@ -328,6 +328,9 @@ static void citp_epoll_dtor(citp_fdinfo* fdi, int fdt_locked)
   __citp_fdtable_reserve(ep->epfd_os, 0);
   if( ! fdt_locked )  CITP_FDTABLE_UNLOCK();
 
+  ci_free(ep->ordering_info);
+  ci_free(ep->wait_events);
+
   CI_FREE_OBJ(ep);
 }
 
@@ -459,6 +462,9 @@ int citp_epoll_create(int size, int flags)
   ep->blocking = 0;
   ep->home_stack = NULL;
   ep->ready_list = 0;
+  ep->ordering_info = NULL;
+  ep->wait_events = NULL;
+  ep->n_woda_events = 0;
   citp_fdtable_insert(fdi, fd, 0);
   Log_POLL(ci_log("%s: fd=%d driver_fd=%d epfd=%d", __FUNCTION__,
                   fd, ep->epfd_os, (int) ep->shared->epfd));
@@ -466,9 +472,9 @@ int citp_epoll_create(int size, int flags)
 
  fail4:
   __citp_fdtable_reserve(ep->epfd_os, 0);
-  ci_sys_close(ep->epfd_os);
+  ci_tcp_helper_close_no_trampoline(ep->epfd_os);
  fail3:
-  ci_sys_close(fd);
+  ci_tcp_helper_close_no_trampoline(fd);
   citp_fdtable_busy_clear(fd, fdip_unknown, 1);
  fail2:
   CITP_FDTABLE_UNLOCK();
@@ -2203,8 +2209,6 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   citp_sock_fdi* sock_epi;
   ci_netif* ni = NULL;
   struct timespec limit_ts = {0, 0};
-  struct citp_ordering_info* ordering_info = NULL;
-  struct epoll_event* wait_events = NULL;
   struct citp_ordered_wait wait;
   int n_socks;
 
@@ -2223,17 +2227,37 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
    * It's possible that the set also contains un-accelerated fds, so if
    * maxevents is bigger than the number of accelerated fds then we'll use
    * that value.
+   *
+   * If there are large numbers of sockets this can require a lot of memory,
+   * perhaps resulting in the need for the process heap size to be increased.
+   * When a large enough chunk of memory is freed glibc appears to reduce the
+   * process heap size again.  When this happens it is very expensive,
+   * resulting in pages being mapped and unmapped, and TLB flushes on each call
+   * to onload_ordered_epoll_wait.  To avoid this we cache any memory allocated
+   * for this purpose, and only realloc in cases where the size of the set has
+   * grown.
    */
   n_socks = CI_MAX(maxevents,
                    ep->home_stack ? ep->oo_stack_sockets_n : ep->oo_sockets_n);
-  ordering_info = ci_alloc(n_socks * sizeof(*ordering_info));
-  wait_events = ci_alloc(n_socks * sizeof(*wait_events));
 
-  if( !ordering_info || !wait_events ) {
+  if( n_socks > ep->n_woda_events ) {
+    ci_free(ep->ordering_info);
+    ci_free(ep->wait_events);
+
+    ep->ordering_info = ci_alloc(n_socks * sizeof(*ep->ordering_info));
+    ep->wait_events = ci_alloc(n_socks * sizeof(*ep->wait_events));
+
+    ep->n_woda_events = n_socks;
+  }
+
+  if( !ep->ordering_info || !ep->wait_events ) {
     CITP_EPOLL_EP_UNLOCK(ep, 0);
     citp_exit_lib(lib_context, FALSE);
-    free(ordering_info);
-    free(wait_events);
+    ci_free(ep->ordering_info);
+    ep->ordering_info = NULL;
+    ci_free(ep->wait_events);
+    ep->wait_events = NULL;
+    ep->n_woda_events = 0;
     errno = ENOMEM;
     return -1;
   }
@@ -2277,10 +2301,10 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
  again:
   citp_epoll_get_ordering_limit(ni, &limit_ts);
 
-  wait.ordering_info = ordering_info;
+  wait.ordering_info = ep->ordering_info;
   wait.poll_again = 0;
   /* citp_epoll_wait will do citp_exit_lib */
-  rc = citp_epoll_wait(fdi, wait_events, &wait,
+  rc = citp_epoll_wait(fdi, ep->wait_events, &wait,
                        n_socks, timeout, sigmask, lib_context);
   if( rc < 0 )
     goto out;
@@ -2294,7 +2318,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
     citp_epoll_get_ordering_limit(ni, &limit_ts);
 
     citp_reenter_lib(lib_context);
-    rc = citp_epoll_wait(fdi, wait_events, &wait, n_socks,
+    rc = citp_epoll_wait(fdi, ep->wait_events, &wait, n_socks,
                          0, sigmask, lib_context);
     if( rc == 0 && wait.next_timeout != 0 ) {
       citp_reenter_lib(lib_context);
@@ -2305,8 +2329,8 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   }
 
   if( rc > 0 ) {
-    rc = citp_epoll_sort_results(events, wait_events, oo_events, ordering_info,
-                                 rc, maxevents, &limit_ts);
+    rc = citp_epoll_sort_results(events, ep->wait_events, oo_events,
+                                 ep->ordering_info, rc, maxevents, &limit_ts);
     if( rc == 0 && wait.next_timeout != 0 ) {
       citp_reenter_lib(lib_context);
       timeout = wait.next_timeout;
@@ -2318,8 +2342,6 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
 out:
   if( ni )
     citp_netif_release_ref(ni, 0);
-  ci_free(ordering_info);
-  ci_free(wait_events);
   return rc;
 }
 

@@ -55,14 +55,14 @@ def main():
         for stat_name,stat_value in stack_stats.items():
             print "       ", stat_name, ":", stat_value
 
-        netif = stack_details['netif']
+        netif = stack_details['stack']
 
         for key,state in netif.items():
             # For each of the main types of state returned, just return
             # the integers values that they contain - there is lots more
             # available, but this keeps the output clear and readable
             
-            if key.startswith('ci_netif_state'):
+            if key.startswith('stack_state'):
                 print "   ", "Stack state"
                 for netif_state_key, netif_state_value in state.items():
                     if type(netif_state_value) == int:
@@ -70,19 +70,19 @@ def main():
             elif key.startswith('udp'):
                 for socket_id, socket_state in state.items():
                     print "   ", "UDP socket state", socket_id
-                    for udp_state_key, udp_state_value in socket_state['ci_udp_state'].items():
+                    for udp_state_key, udp_state_value in socket_state['udp_state'].items():
                         if type(udp_state_value) == int:
                             print "       ", udp_state_key, ":", udp_state_value
             elif key.startswith('tcp_listen'):
                 for socket_id, socket_state in state.items():
                     print "   ", "Listen socket state", socket_id
-                    for listen_state_key, listen_state_value in socket_state['ci_tcp_socket_listen'].items():
+                    for listen_state_key, listen_state_value in socket_state['tcp_listen_sockets'].items():
                         if type(listen_state_value) == int:
                             print "       ", listen_state_key, ":", listen_state_value
             elif key.startswith('tcp'):
                 for socket_id, socket_state in state.items():
                     print "   ", "TCP socket state", socket_id
-                    for tcp_state_key, tcp_state_value in socket_state['ci_tcp_state'].items():
+                    for tcp_state_key, tcp_state_value in socket_state['tcp_state'].items():
                         if type(tcp_state_value) == int:
                             print "       ", tcp_state_key, ":", tcp_state_value
             elif key.startswith('pipe'):

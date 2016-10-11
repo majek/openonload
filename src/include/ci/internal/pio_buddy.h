@@ -22,7 +22,8 @@ struct ci_netif;
 
 
 /*! Initialise a PIO buddy allocator. */
-extern void ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* buddy);
+extern void ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* buddy,
+                              unsigned pio_len);
 
 /*! Destruct a PIO buddy allocator. */
 extern void ci_pio_buddy_dtor(ci_netif* ni, ci_pio_buddy_allocator* buddy);

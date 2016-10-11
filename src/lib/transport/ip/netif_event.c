@@ -46,8 +46,13 @@
 
 
 struct oo_rx_state {
+  /* Full packet in order, once reception of scattered packet is completed. */
   ci_ip_pkt_fmt* rx_pkt;
+  /* Last fragment received, chained to previous fragments via frag_next */
   ci_ip_pkt_fmt* frag_pkt;
+  /* Without RX Merge: A running total of bytes received for this packet
+   * With RX Merge: The full length of this packet
+   */
   int            frag_bytes;
 };
 
@@ -193,6 +198,7 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
                     ((sync_flags & tsf) ? CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
           nsn->last_rx_timestamp.tv_sec = stamp.tv_sec;
           nsn->last_rx_timestamp.tv_nsec = stamp.tv_nsec;
+          nsn->last_sync_flags = sync_flags;
 
           LOG_NR(log(LPF "RX id=%d timestamp: %lu.%09lu sync %d",
               OO_PKT_FMT(pkt), stamp.tv_sec, stamp.tv_nsec, sync_flags));
@@ -259,6 +265,44 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
 }
 
 
+/* We accumulate new fragments adding them to the head of queue.  Once we've
+ * got everything we need to put them back in order and set up the final
+ * rx pkt.
+ *
+ * This function takes the accumulated state, together with the final fragment,
+ * and sorts that out.
+ */
+static void handle_rx_scatter_last_frag(ci_netif* ni, struct oo_rx_state* s,
+                                        ci_ip_pkt_fmt* pkt)
+{
+  oo_pkt_p next_p;
+
+  /* Caller must have set up the length of the last fragment */
+  ci_assert_gt(pkt->buf_len, 0);
+  ci_assert(OO_PP_IS_NULL(pkt->frag_next));
+
+  pkt->n_buffers = 1;
+  while( 1 ) {  /* reverse the chain of fragments */
+    next_p = s->frag_pkt->frag_next;
+    s->frag_pkt->frag_next = OO_PKT_P(pkt);
+    s->frag_pkt->n_buffers = pkt->n_buffers + 1;
+    if( OO_PP_IS_NULL(next_p) )
+      break;
+    pkt = s->frag_pkt;
+    s->frag_pkt = PKT(ni, next_p);
+  }
+  s->rx_pkt = s->frag_pkt;
+  s->rx_pkt->pay_len = s->frag_bytes;
+  s->frag_pkt = NULL;
+  ASSERT_VALID_PKT(ni, s->rx_pkt);
+}
+
+
+/* When not using RX event merging we get a running total of bytes accumulated
+ * in the jumbo.
+ *
+ * In this case s->frag_bytes tracks the accumulated length from received frags.
+ */
 static void handle_rx_scatter(ci_netif* ni, struct oo_rx_state* s,
                               ci_ip_pkt_fmt* pkt, int frame_bytes,
                               unsigned flags)
@@ -290,22 +334,62 @@ static void handle_rx_scatter(ci_netif* ni, struct oo_rx_state* s,
     }
     else {
       /* Last fragment. */
-      oo_pkt_p next_p;
-      ci_assert(OO_PP_IS_NULL(pkt->frag_next));
-      pkt->n_buffers = 1;
-      while( 1 ) {  /* reverse the chain of fragments */
-        next_p = s->frag_pkt->frag_next;
-        s->frag_pkt->frag_next = OO_PKT_P(pkt);
-        s->frag_pkt->n_buffers = pkt->n_buffers + 1;
-        if( OO_PP_IS_NULL(next_p) )
-          break;
-        pkt = s->frag_pkt;
-        s->frag_pkt = PKT(ni, next_p);
-      }
-      s->rx_pkt = s->frag_pkt;
-      s->rx_pkt->pay_len = s->frag_bytes;
-      s->frag_pkt = NULL;
-      ASSERT_VALID_PKT(ni, s->rx_pkt);
+      handle_rx_scatter_last_frag(ni, s, pkt);
+    }
+  }
+}
+
+
+/* When using rx event merge mode we need to handle jumbos differently.
+ * In this case we get the full length of the packet in the SOP, with each
+ * buffer before the last being filled completely.
+ *
+ * In this case s->frag_bytes is always the full length of the packet, set
+ * when we receive the SOP.
+ */
+static void handle_rx_scatter_merge(ci_netif* ni, struct oo_rx_state* s,
+                                    ci_ip_pkt_fmt* pkt, int prefix_bytes,
+                                    int pkt_bytes, unsigned flags)
+{
+  int full_buffer = CI_CFG_PKT_BUF_SIZE -
+                    CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
+
+  s->rx_pkt = NULL;
+  if( flags & EF_EVENT_FLAG_SOP ) {
+    /* First fragment. */
+    ci_assert(s->frag_pkt == NULL);
+    ci_assert_gt(pkt_bytes, full_buffer - prefix_bytes);
+
+    /* The packet prefix is present in the first buffer */
+    pkt->buf_len = full_buffer - prefix_bytes;
+    oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->buf_len);
+    s->frag_pkt = pkt;
+    s->frag_bytes = pkt_bytes;
+  }
+  else {
+    ci_assert(s->frag_pkt != NULL);
+    ci_assert_gt(pkt_bytes, full_buffer - prefix_bytes);
+
+    if( flags & EF_EVENT_FLAG_CONT ) {
+      /* Middle fragment. */
+      /* Middle fragments are completely filled, and don't contain a prefix */
+      pkt->buf_len = full_buffer;
+      oo_offbuf_init(&pkt->buf, pkt->dma_start, pkt->buf_len);
+      CI_DEBUG(pkt->pay_len = -1);
+
+      pkt->frag_next = OO_PKT_P(s->frag_pkt);
+      s->frag_pkt = pkt;
+    }
+    else {
+      /* Last fragment. */
+      /* The first buffer contains a prefix, but all intervening buffers are
+       * are filled, so this contains whatever's leftover.
+       */
+      pkt->buf_len = (s->frag_bytes + prefix_bytes) % full_buffer;
+      oo_offbuf_init(&pkt->buf, pkt->dma_start, pkt->buf_len);
+      CI_DEBUG(pkt->pay_len = -1);
+
+      handle_rx_scatter_last_frag(ni, s, pkt);
     }
   }
 }
@@ -605,6 +689,7 @@ static void process_post_poll_list(ci_netif* ni)
 # define UDP_CAN_FREE(us)  ((us)->tx_count == 0)
 
 #define CI_NETIF_TX_VI(ni, nic_i, label)  (&(ni)->nic_hw[nic_i].vi)
+#define CI_NETIF_RX_VI(ni, nic_i, label)  (&(ni)->nic_hw[nic_i].vi)
 
 
 static void ci_netif_tx_pkt_complete_udp(ci_netif* netif,
@@ -796,6 +881,40 @@ static int ci_netif_poll_evq(ci_netif* ni, struct ci_netif_poll_state* ps,
           pkt = PKT_CHK(ni, pp);
           ++ni->state->nic[intf_i].tx_dmaq_done_seq;
           __ci_netif_tx_pkt_complete(ni, ps, pkt, &ev[i]);
+        }
+      }
+
+      else if( EF_EVENT_TYPE(ev[i]) == EF_EVENT_TYPE_RX_MULTI ) {
+        ef_request_id *ids = ni->rx_events;
+        int n_ids, j;
+        uint16_t len;
+        ef_vi* vi = CI_NETIF_RX_VI(ni, intf_i, ev[i].rx.q_id);
+        CITP_STATS_NETIF_INC(ni, rx_evs);
+        n_ids = ef_vi_receive_unbundle(vi, &ev[i], ids);
+        ci_assert_ge(n_ids, 0);
+        ci_assert_le(n_ids, sizeof(ni->rx_events) / sizeof(ids[0]));
+        for( j = 0; j < n_ids; ++j ) {
+          OO_PP_INIT(ni, pp, ids[j]);
+          pkt = PKT_CHK(ni, pp);
+          ci_prefetch(pkt->dma_start);
+          ci_prefetch(pkt);
+          ci_assert_equal(pkt->intf_i, intf_i);
+          if( s.rx_pkt != NULL ) {
+            ci_parse_rx_vlan(s.rx_pkt);
+            handle_rx_pkt(ni, ps, s.rx_pkt);
+          }
+          ef_vi_receive_get_bytes(vi, pkt->dma_start, &len);
+          if( (ev[i].rx_multi.flags & (EF_EVENT_FLAG_SOP | EF_EVENT_FLAG_CONT))
+               == EF_EVENT_FLAG_SOP ) {
+            /* Whole packet in a single buffer. */
+            pkt->pay_len = len;
+            oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
+            s.rx_pkt = pkt;
+          }
+          else {
+            handle_rx_scatter_merge(ni, &s, pkt, evq->rx_prefix_len, len,
+                                    ev[i].rx_multi.flags);
+          }
         }
       }
 

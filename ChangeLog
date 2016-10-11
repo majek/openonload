@@ -1,3 +1,95 @@
+openonload-201606
+-----------------
+
+Update bundled sfc net driver to v4.8.2.1004
+
+Add support for Solarflare Flareon Ultra 8500 NICs
+Add support for recent kernel versions, OS distributions and gcc compiler versions
+Add ef_vi "transmit alternatives" API
+Add ef_vi capabilities API to allow runtime discovery of available features
+Rework ef_vi sample applications and add new eflatency benchmark
+Separate distribution of sfc_aoe kernel module from Onload
+
+SF-116299-KI/bug59638: ensure filters are freed before endpoint is freed
+SF-116030-KI/bug60602: Bug57274: fix multicast delivery to >2 receivers
+bug1068: add route metric support
+bug25461: add option for TCP to reply back on interface packets received on (basic source-based routing)
+bug43435: fix rare kernel panic during onload module reload
+bug45791: display interface name when timestamping failure message raised
+bug50671: fix ef_memreg_alloc() with len=4GiB or larger.
+bug51688: Add support for RX event batching to ef_vi and onload
+bug52168: report whether hardware clock is in-sync via stackdump
+bug53985: force TCP recv() to return 0 if properly shut down
+bug54583: fixing search for syscall table for PPC Linux >= 3.8
+bug54583: support for PowerPC ABIv2
+bug55303: ensure sigaction sa_flags match Linux behaviour
+bug55565: OnloadRemoteMonitor API update. Change from struct_type to variable name & less verbose output for array of struct
+bug56347: Avoid crash when creating VIs while VFs passed through to VM.
+bug56799: simplify onload_tcpdump for multi-buffer packets
+bug57017: ensure TCP RTT is calculated properly during connect()
+bug57088: make lock implementation for EF_FDS_MT_SAFE=0 faster
+bug57094: set recvmsg() msg_flags field correctly, e.g. when non-zero on entry
+Bug57143: allow ef_vi users to request receive event merging
+bug57772: fix race between fdtable_busy_clear / fdtable_busy_wait interlocking
+bug57881: add HTTP server for Onload Remote Monitor
+bug57881: add onload_version to orm_json output
+bug57881: add option to request subset of data from Onload Remote Monitor
+bug58224: allow onload_fd_stat to have 'stat' as NULL
+bug58241: fix initial TCP window for loopback connections
+Bug58251: fix handling of bitfields in remote monitor to avoid assertion on struct size
+bug58274: make the set of errors that trigger RX_DISCARD events configurable
+bug58441: avoid outputting errors on ENOSYS from MC_CMD_WORKAROUND.
+bug58510: rate limit reset stack log messge
+bug58547: decrease loglevel LOG_U->LOG_TR after unexpected TCP shutdown
+bug58558: wake up TCP loopback peer socket from send_ack()
+bug58694: fix setsockopt(SO_TIMEO) with active socket cache
+bug58737: limit TCP send buffer by SO_SNDBUF*1.5 instead of *3
+bug58850: disable LOG_DU (dump unexpected packets) by default
+bug58981: avoid small memory leak in JNI FdStat function.
+bug59349: use correct stackname after setting NOCHANGE stack and restoring
+bug59442: add ability supply batch IPs/subnets to a map via an onload_fe command.
+bug59506: add support for IPv6 filters in ef_vi
+bug59609: efab_file_move_to_alien_stack() lock scheme improvement to fix race conditions
+bug59639: fix return value for connect() when using scalable filters with socket caching and loopback.
+bug59671: add MSG_ONEPKT flag to receive data up to a packet boundary
+bug59702: fix filter manager replication/vlan capable flags after interface down/up cycle
+bug59762: bug 59591: remove incorrect debug assertion when tcp socket starts to listen
+bug59855: flush pending driverlink calls at hot-unplug to ensure they complete before removal.
+Bug59875: fix NULL pointer deref after 'oo_nic_add: NOT registering ifindex (too many)' message
+bug59879: make sigaction error message more verbose
+bug59955: provide mechanism to query per-thread spin settings
+bug60058: fix use-after-free slub debug warning in emergency-flush list.
+bug60159: fix assertion in ci_netif_filter_insert when socket caching and loopback sockets used
+bug60274: avoid hang while accepting socket via kernel using O_NONBLOCK.
+bug60421: avoid printing warning if tty ioctls are used on onload epoll fd.
+bug60471: bug 58248: defer stack destructor in more contexts where it can't run
+bug60757: Add tools and options to debug time taken to add and remove filters
+bug60783: Avoid performance degradation of WODA with large numbers of sockets.
+bug60795: Avoid crash on stack allocation failure during NIC reset.
+Bug60876: avoid process stuck in oo_timesync_wait_for_cpu_khz_to_stabilize
+bug60916: fix kernel crash in efab_thr_release() if workqueue allocation failed
+bug61083: Fix FD table locking hang.
+bug61097: show POLLOUT event when non-blocking connect fails
+bug61178: use a mutex in efsink to protect printing from different threads
+Bug61218: avoid kernel panic unloading drivers after 'NOT registering ifindex (too many)' message
+bug61255: don't do ci_sys_close under fdtable lock to avoid debug assertion and potential deadlock
+bug61255: pass EMFILE to user if open() fails
+bug61275: check for destroyed epoll set on socket handover to avoid segfault
+bug61314: make driver robust, and warn, if new endpoint with filters present
+Bug61373: Fix failure to update initramfs after onload_install
+Bug61387: EF10 NICs do not support 4K TXQ sizes, so do not list them as supported
+bug61721: avoid trying to free a PIO buffer if already unlinked due to NIC reset handling
+bug61928: make return values for onload_delegated_send_* consistent when run with/without Onload
+Bug62067,Bug50705: avoid eventq overflow warning when EF_TXQ_SIZE > 512 on Siena NICs
+bug62370: correct free and used packet buffer counts in onload_stackdump
+bug62377: set RSS context flags for MC_CMD_RSS_CONTEXT command correctly, avoids EINVAL MCDI error
+Bug62453: licence JNI wrapper with BSD not GPL
+bug62468: avoid -fstack-protector when executing library, fixes segfault on Ubuntu 16.04
+bug62589: fix RPM spec file conflict with python-libs package
+bug62720: Fix EALREADY on ef_vi EVQ-init with timestamps.
+bug63317: fix memory leak in ef_vi statistics API
+
+
 openonload-201509-u1
 --------------------
 

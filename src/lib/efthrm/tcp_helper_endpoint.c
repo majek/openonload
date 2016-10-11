@@ -29,7 +29,6 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/oof_interface.h>
 #include <onload/drv/dump_to_user.h>
-#include <ci/internal/cplane_ops.h>
 #include "tcp_filters_internal.h"
 #include "oof_impl.h"
 
@@ -224,17 +223,58 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   }
 
   if( oof_socket_is_armed(&ep->oofilter) ) {
-    /* we already have a filter; and we also have a reference of OS socket. */
+    /* We already have a filter.  The only legitimate way to get here is
+     * UDP connect() including disconnect.
+     * However, the user can call OO_IOC_EP_FILTER_SET for any endpoint,
+     * and we should not crash (at least in NDEBUG build). */
     ci_assert(ep->os_port_keeper);
     ci_assert( ! in_atomic() );
     ci_assert( ~ep->thr->netif.flags & CI_NETIF_FLAG_IN_DL_CONTEXT );
+    ci_assert_equal(protocol, IPPROTO_UDP);
 
-    oo_file_ref_drop(os_sock_ref);
-    os_sock_ref = NULL;
+    /* Closing a listening socket without being able to get the stack
+     * lock will free the OS socket but not much else, so we need to
+     * cope with os_sock_ref == NULL.  We don't expect this to also
+     * result in the filter already existing (so shouldn't get here in
+     * that situation) but need to be robust to misbehaving UL.
+     */
+    if( os_sock_ref != NULL ) {
+      oo_file_ref_drop(os_sock_ref);
+      os_sock_ref = NULL;
+    }
+    else {
+      OO_DEBUG_ERR(ci_log(
+        "ERROR: %s is changing the socket [%d:%d] filter to "
+        "%s %s:%d -> %s:%d, "
+        "the filter already exists and there is no backing socket.  "
+        "Something went awry.",
+        __func__, ep->thr->id, OO_SP_FMT(ep->id),
+        protocol == IPPROTO_UDP ? "UDP" : "TCP",
+        ip_addr_str(laddr), lport, ip_addr_str(raddr), rport));
+      ci_assert(0);
+    }
     if( protocol == IPPROTO_UDP && raddr != 0 &&
         ep->oofilter.sf_raddr == 0 ) {
       return oof_udp_connect(efab_tcp_driver.filter_manager, &ep->oofilter,
                              laddr, raddr, rport);
+    }
+    if( protocol != IPPROTO_UDP ) {
+      /* UDP re-connect is OK, but we do not expect anything else.
+       * We've already crashed in DEBUG, but let's complain in NDEBUG. */
+      OO_DEBUG_ERR(ci_log(
+        "ERROR: %s is changing the socket [%d:%d] filter to "
+        "%s %s:%d -> %s:%d, "
+        "but some filter is already installed.  Something went awry.",
+        __func__, ep->thr->id, OO_SP_FMT(ep->id),
+        protocol == IPPROTO_UDP ? "UDP" : "TCP",
+        ip_addr_str(laddr), lport, ip_addr_str(raddr), rport));
+      /* Filter is cleared so that endpoint comes back to consistent state:
+       * tcp sockets after failed set filter operations have no filter.
+       * However, as we are afraid that endpoint is compromised we
+       * return error to prevent its use. */
+      tcp_helper_endpoint_clear_filters
+        (ep, ni->flags & CI_NETIF_FLAG_IN_DL_CONTEXT, 0);
+      return -EALREADY;
     }
     oof_socket_del(efab_tcp_driver.filter_manager, &ep->oofilter);
   }
@@ -295,6 +335,7 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
 {
   struct oo_file_ref* os_sock_ref;
   ci_sock_cmn* s = SP_TO_SOCK(&ep->thr->netif, ep->id);
+  int rc = 0;
 
   OO_DEBUG_TCPH(ci_log("%s: [%d:%d] %s %s", __FUNCTION__, ep->thr->id,
                        OO_SP_FMT(ep->id), 
@@ -332,11 +373,12 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
        * have a hw filter. However in such a case there is a non-atomic work
        * pending on endpoint to sort that out - we fall through to clearing
        * socket filter flags */
+      rc = -EAGAIN;
     }
     else {
       os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
-      ci_assert(os_sock_ref);
-      oo_file_ref_drop(os_sock_ref);
+      if( os_sock_ref != NULL )
+        oo_file_ref_drop(os_sock_ref);
     }
   }
   else {
@@ -350,7 +392,7 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
   SP_TO_SOCK(&ep->thr->netif, ep->id)->s_flags &=
                               ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
 
-  return 0;
+  return rc;
 }
 
 /******************* Move Filters from one ep to another ****************/

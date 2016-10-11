@@ -266,8 +266,8 @@ efch_resource_alloc(ci_resource_table_t* rt, ci_resource_alloc_t* alloc)
      * and caller should try again rather than a genuine error 
      */
     if( rc != -EOPNOTSUPP )
-      EFCH_WARN("%s: did not allocate %d (%d)", __FUNCTION__, 
-                alloc->ra_type,rc);
+      EFCH_WARN("%s: did not allocate %s (%d)", __FUNCTION__, 
+                EFRM_RESOURCE_NAME(alloc->ra_type),rc);
     ci_free(rs);
     return rc;
   }
@@ -276,8 +276,9 @@ efch_resource_alloc(ci_resource_table_t* rt, ci_resource_alloc_t* alloc)
   /* Insert it into the ci_resource_table_t resource table */
   rc = efch_resource_manager_allocate_id(rt, rs, &alloc->out_id);
   if (rc == 0) {
-    EFCH_TRACE("%s: allocated type=%x "EFCH_RESOURCE_ID_FMT, __FUNCTION__,
-               alloc->ra_type, EFCH_RESOURCE_ID_PRI_ARG(alloc->out_id));
+    EFCH_TRACE("%s: allocated type=%s "EFCH_RESOURCE_ID_FMT, __FUNCTION__,
+               EFRM_RESOURCE_NAME(alloc->ra_type),
+               EFCH_RESOURCE_ID_PRI_ARG(alloc->out_id));
     return 0;
   }
 
@@ -309,7 +310,7 @@ efch_resource_op(ci_resource_table_t* rt,
   if( rc < 0 ) {
     EFCH_ERR("%s: ERROR: hwm=%d id="EFCH_RESOURCE_ID_FMT" op=0x%x rc=%d",
              __FUNCTION__, rt->resource_table_highwater, 
-             op->op, EFCH_RESOURCE_ID_PRI_ARG(op->id), rc);
+             EFCH_RESOURCE_ID_PRI_ARG(op->id), op->op, rc);
     goto done;
   }
 
@@ -326,5 +327,28 @@ efch_resource_op(ci_resource_table_t* rt,
   EFCH_TRACE("%s: id="EFCH_RESOURCE_ID_FMT" op=0x%x rc=%d",
              __FUNCTION__, EFCH_RESOURCE_ID_PRI_ARG(op->id), op->op, rc);
 done:
+  return rc;
+}
+
+int efch_filter_add(ci_resource_table_t* rt, ci_filter_add_t* filter_add,
+                    int* copy_out)
+{
+  efch_resource_t* rs;
+  int rc;
+
+  rc = efch_resource_id_lookup(filter_add->in.res_id, rt, &rs);
+  if( rc < 0 ) {
+    EFCH_ERR("%s: ERROR: hwm=%d id="EFCH_RESOURCE_ID_FMT" rc=%d",
+             __FUNCTION__, rt->resource_table_highwater,
+             EFCH_RESOURCE_ID_PRI_ARG(filter_add->in.res_id), rc);
+    return rc;
+  }
+
+  EFCH_TRACE("%s: id="EFCH_RESOURCE_ID_FMT, __FUNCTION__,
+             EFCH_RESOURCE_ID_PRI_ARG(filter_add->in.res_id));
+
+  rc = efch_vi_filter_add(rs, filter_add, copy_out);
+  EFCH_TRACE("%s: id="EFCH_RESOURCE_ID_FMT" rc=%d", __FUNCTION__,
+             EFCH_RESOURCE_ID_PRI_ARG(filter_add->in.res_id), rc);
   return rc;
 }

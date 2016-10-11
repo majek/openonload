@@ -11,11 +11,7 @@ ifeq ($(LINUX),1)
 
 # DRIVER_SUBDIRS must be ordered according to inter-driver dependencies
 DRIVER_SUBDIRS	:= linux_net linux_affinity linux_resource \
-		linux_char linux_onload linux
-
-ifneq ($(wildcard $(linux_aoe) ),"")
-DRIVER_SUBDIRS += linux_aoe
-endif
+		linux_char linux_cplane linux_onload linux
 
 ifeq ($(BUILD_AFONLOAD),1)
 DRIVER_SUBDIRS  += openonload

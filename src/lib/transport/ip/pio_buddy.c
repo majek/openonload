@@ -99,14 +99,23 @@ ci_pio_buddy_free_list_pop(ci_netif* ni, ci_pio_buddy_allocator* b,
 
 
 void
-ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* b)
+ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* b, unsigned pio_len)
 {
   ci_uint8 o;
+
+  /* Order of the buffer size in bytes.  N.B. The buddy API takes orders of
+   * buffer sizes in chunks of CI_CFG_MIN_PIO_BLOCK_ORDER, so subtract the
+   * latter before passing [pio_order] to buddy-API functions. */
+  unsigned pio_order = ci_log2_le(pio_len);
 
   /* Basic sanity */
   ci_assert(b);
   /* Orders array uses a uint8 */
   ci_assert(CI_PIO_BUDDY_MAX_ORDER < 255);
+  /* Buffer size is sane and within range. */
+  ci_assert(CI_IS_POW2(pio_len));
+  ci_assert_ge(pio_order, CI_CFG_MIN_PIO_BLOCK_ORDER);
+  ci_assert_le(pio_order, CI_PIO_BUF_ORDER);
 
   /* Initialise the free list for each order. */
   for( o = 0; o <= CI_PIO_BUDDY_MAX_ORDER; ++o )
@@ -122,7 +131,7 @@ ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* b)
   }
 
   /* At initialisation we have one free block containing the whole space. */
-  ci_pio_buddy_free_list_add(ni, b, CI_PIO_BUDDY_MAX_ORDER, 0);
+  ci_pio_buddy_free_list_add(ni, b, pio_order - CI_CFG_MIN_PIO_BLOCK_ORDER, 0);
 
   b->initialised = 1;
 }

@@ -31,8 +31,6 @@
 #include "internal.h"
 #include "ul_poll.h"
 #include "ul_select.h"
-#include <ci/internal/cplane_ops.h>
-#include <ci/internal/cplane_handle.h>
 #include <onload/ul/tcp_helper.h>
 #include <onload/tcp_poll.h>
 
@@ -309,6 +307,17 @@ static int citp_udp_setsockopt(citp_fdinfo* fdinfo, int level,
   Log_VSC(log("%s("EF_FMT", %d, %d)", __FUNCTION__,
 	      EF_PRI_ARGS(epi, fdinfo->fd),  level, optname));
 
+  if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) != 0 &&
+      ! CI_SOCK_NOT_BOUND(s) ) {
+    int fd = fdinfo->fd;
+    CITP_STATS_NETIF(++epi->sock.netif->state->stats.udp_handover_setsockopt);
+    citp_fdinfo_handover(fdinfo, -1);
+    NI_LOG(epi->sock.netif, USAGE_WARNINGS,
+           "%s: setting reuseport after binding on udp not supported",
+           __FUNCTION__);
+    return ci_sys_setsockopt(fd, level, optname, optval, optlen);
+  }
+
   rc = ci_udp_setsockopt(&epi->sock, fdinfo->fd,
 			 level, optname, optval, optlen);
 
@@ -318,14 +327,6 @@ static int citp_udp_setsockopt(citp_fdinfo* fdinfo, int level,
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.udp_handover_setsockopt);
     citp_fdinfo_handover(fdinfo, -1);
     return 0;
-  }
-
-  if( ci_opt_is_setting_reuseport(level, optname, optval, optlen) != 0 &&
-      ! CI_SOCK_NOT_BOUND(s) ) {
-    ci_log("%s: setting reuseport after binding on udp not supported",
-           __FUNCTION__);
-    errno = ENOSYS;
-    return -1;
   }
 
   citp_fdinfo_release_ref(fdinfo, 0);

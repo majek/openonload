@@ -45,8 +45,6 @@
 /* OS-independent operations enum */
 enum {
   /* Debug ops */
-  OO_OP_DBG_CPLANE_LOG,
-#define OO_IOC_DBG_CPLANE_LOG   OO_IOC_NONE(DBG_CPLANE_LOG)
   OO_OP_DBG_GET_STACK_INFO,
 #define OO_IOC_DBG_GET_STACK_INFO   OO_IOC_RW(DBG_GET_STACK_INFO, \
                                               ci_netif_info_t)
@@ -200,66 +198,9 @@ enum {
 
 
   /* Cplane operations */
-  OO_OP_CP_IPIF_ADDR_KIND,
-#define OO_IOC_CP_IPIF_ADDR_KIND    OO_IOC_RW(CP_IPIF_ADDR_KIND, \
-                                              cp_ipif_addr_kind_t)
-  OO_OP_CP_LLAP_FIND,
-#define OO_IOC_CP_LLAP_FIND         OO_IOC_RW(CP_LLAP_FIND, cp_llap_find_t)
-  OO_OP_CP_LLAP_RETRIEVE,
-#define OO_IOC_CP_LLAP_RETRIEVE     OO_IOC_RW(CP_LLAP_RETRIEVE, \
-                                              cp_llap_retrieve_t)
-  OO_OP_CP_MAC_UPDATE,
-#define OO_IOC_CP_MAC_UPDATE        OO_IOC_W(CP_MAC_UPDATE, cp_mac_update_t)
   OO_OP_CP_USER_DEFER_SEND,
 #define OO_IOC_CP_USER_DEFER_SEND   OO_IOC_RW(CP_USER_DEFER_SEND, \
                                               cp_user_defer_send_t)
-  OO_OP_CP_USER_PKT_DEST_IFID,
-#define OO_IOC_CP_USER_PKT_DEST_IFID    OO_IOC_RW(CP_USER_PKT_DEST_IFID, \
-                                                  cp_user_pkt_dest_ifid_t)
-  OO_OP_CP_SRC_ADDR_CHECKS,
-#define OO_IOC_CP_SRC_ADDR_CHECKS   OO_IOC_RW(CP_SRC_ADDR_CHECKS, \
-                                              cp_src_addr_checks_t)
-  OO_OP_CP_IPIF_PKTINFO_QUERY,
-#define OO_IOC_CP_IPIF_PKTINFO_QUERY    OO_IOC_RW(CP_IPIF_PKTINFO_QUERY, \
-                                                  cp_ipif_pktinfo_query_t)
-  OO_OP_CP_IPIF_BY_IFINDEX,
-#define OO_IOC_CP_IPIF_BY_IFINDEX       OO_IOC_RW(CP_IPIF_BY_IFINDEX, \
-                                                  cp_ipif_by_ifindex_t)
-#if CI_CFG_CONTROL_PLANE_USER_SYNC
-  OO_OP_CP_MAC_SET,
-#define OO_IOC_CP_MAC_SET           OO_IOC_RW(CP_MAC_SET, cp_mac_set_t)
-  OO_OP_CP_MAC_OPEN,
-#define OO_IOC_CP_MAC_OPEN          OO_IOC_NONE(CP_MAC_OPEN)
-  OO_OP_CP_MAC_CLOSE,
-#define OO_IOC_CP_MAC_CLOSE         OO_IOC_NONE(CP_MAC_CLOSE)
-  OO_OP_CP_MAC_SEEN,
-#define OO_IOC_CP_MAC_SEEN          OO_IOC_W(CP_MAC_SEEN, cicp_mib_verinfo_t)
-  OO_OP_CP_MAC_PURGE_UNSEEN,
-#define OO_IOC_CP_MAC_PURGE_UNSEEN  OO_IOC_NONE(CP_MAC_PURGE_UNSEEN)
-  OO_OP_CP_HWPORT_UPDATE,
-#define OO_IOC_CP_HWPORT_UPDATE     OO_IOC_W(CP_HWPORT_UPDATE, \
-                                             cp_hwport_update_t)
-  OO_OP_CP_LLAP_IMPORT,
-#define OO_IOC_CP_LLAP_IMPORT       OO_IOC_RW(CP_LLAP_IMPORT, cp_llap_import_t)
-  OO_OP_CP_LLAP_DELETE,
-#define OO_IOC_CP_LLAP_DELETE       OO_IOC_W(CP_LLAP_DELETE, ci_ifid_t)
-  OO_OP_CP_LLAP_READROW,
-#define OO_IOC_CP_LLAP_READROW      OO_IOC_RW(CP_LLAP_READROW, \
-                                              cp_llap_readrow_t)
-  OO_OP_CP_IPIF_IMPORT,
-#define OO_IOC_CP_IPIF_IMPORT       OO_IOC_RW(CP_IPIF_IMPORT, cp_ipif_import_t)
-  OO_OP_CP_IPIF_DELETE,
-#define OO_IOC_CP_IPIF_DELETE       OO_IOC_W(CP_IPIF_DELETE, cp_ipif_delete_t)
-  OO_OP_CP_IPIF_READROW,
-#define OO_IOC_CP_IPIF_READROW      OO_IOC_RW(CP_IPIF_READROW, \
-                                              cp_ipif_readrow_t)
-  OO_OP_CP_ROUTE_IMPORT,
-#define OO_IOC_CP_ROUTE_IMPORT      OO_IOC_RW(CP_ROUTE_IMPORT, \
-                                              cp_route_import_t)
-  OO_OP_CP_ROUTE_DELETE,
-#define OO_IOC_CP_ROUTE_DELETE      OO_IOC_W(CP_ROUTE_DELETE, \
-                                             cp_route_delete_t)
-#endif /* CI_CFG_CONTROL_PLANE_USER_SYNC */
 
   OO_OP_EPLOCK_WAKE,
 #define OO_IOC_EPLOCK_WAKE          OO_IOC_NONE(EPLOCK_WAKE)
@@ -306,6 +247,10 @@ enum {
 
   OO_OP_GET_CPU_KHZ,
 #define OO_IOC_GET_CPU_KHZ        OO_IOC_R(GET_CPU_KHZ, ci_uint32)
+
+  OO_OP_GET_CPLANE_FD,
+#define OO_IOC_GET_CPLANE_FD      OO_IOC_R(GET_CPLANE_FD, \
+                                           ci_fixed_descriptor_t)
 
   OO_OP_END  /* This had better be last! */
 };

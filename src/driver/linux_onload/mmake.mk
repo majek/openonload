@@ -7,14 +7,14 @@
 ############################
 
 
-ONLOAD_SRCS	:= driver.c linux_cplane.c \
+ONLOAD_SRCS	:= driver.c linux_cplane_netif.c timesync.c \
 		tcp_sendpage.c driverlink_ip.c linux_stats.c pinbuf.c \
 		linux_trampoline.c shmbuf.c compat.c \
 		ossock_calls.c linux_efabcfg.c linux_sock_ops.c mmap.c \
-		bonding.c teaming.c epoll_device.c terminate.c \
-		sigaction_calls.c onloadfs.c
+		epoll_device.c terminate.c sigaction_calls.c onloadfs.c
 
-EFTHRM_SRCS	:= cplane.c cplane_prot.c eplock_resource_manager.c \
+
+EFTHRM_SRCS	:= cplane_netif.c eplock_resource_manager.c \
 		tcp_helper_endpoint.c tcp_helper_resource.c \
 		tcp_helper_ioctl.c tcp_helper_mmap.c tcp_helper_sleep.c \
 		tcp_helper_endpoint_move.c \
@@ -64,8 +64,11 @@ powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
 # linux kbuild support
 #
 
+KBUILD_EXTRA_SYMBOLS=$(BUILDPATH)/driver/linux_cplane/Module.symvers
+export KBUILD_EXTRA_SYMBOLS
 
-all: $(BUILDPATH)/driver/linux_onload/Module.symvers
+all: $(BUILDPATH)/driver/linux_onload/Module.symvers \
+	$(KBUILD_EXTRA_SYMBOLS)
 	$(MMAKE_KBUILD_PRE_COMMAND)
 ifdef OFE_TREE
 ifdef CONFIG_X86_64
@@ -77,8 +80,15 @@ endif
 	$(MMAKE_KBUILD_POST_COMMAND)
 	cp -f onload.ko $(DESTPATH)/driver/linux
 
-$(BUILDPATH)/driver/linux_onload/Module.symvers: \
-	$(BUILDPATH)/driver/linux_char/Module.symvers
+
+
+ifeq ($(USE_EXTRA_SYM),ok)
+PREVIOUS_KSYM=$(BUILDPATH)/driver/linux_char/Module.symvers
+else
+PREVIOUS_KSYM=$(BUILDPATH)/driver/linux_cplane/Module.symvers
+endif
+
+$(BUILDPATH)/driver/linux_onload/Module.symvers: $(PREVIOUS_KSYM)
 	cp $< $@
 
 clean:

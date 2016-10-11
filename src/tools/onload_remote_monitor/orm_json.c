@@ -40,6 +40,7 @@
 #include <onload/ioctl.h>
 #include <onload/driveraccess.h>
 #include <onload/debug_intf.h>
+#include <onload/version.h>
 
 #include "ftl_defs.h"
 #include <jansson.h>
@@ -70,6 +71,10 @@
     }                                                           \
   } while( 0 )
 
+#define ORM_OUTPUT_NONE 0
+#define ORM_OUTPUT_STATS 0x1
+#define ORM_OUTPUT_STACK 0x10
+#define ORM_OUTPUT_ALL 0xFFFF
 
 /**********************************************************/
 /* Manage stack mappings */
@@ -540,6 +545,12 @@ static void oos_cfg_opts_add_field(struct orm_oo_struct* os, const char* name,
   }
 }
 
+/* This function is horrid and fragile.  It's trying to work out where
+ * each field is within a structure (a bit like offsetof()) but
+ * extended to work with bitfields.  It has to second-guess how the
+ * compiler might lay out the fields.  It would be preferable to
+ * replace it with something that just queried how the compiler has
+ * actually done it, but I don't know of such a method */
 
 static void oos_cfg_opts_contruct(void)
 {
@@ -563,31 +574,39 @@ static void oos_cfg_opts_contruct(void)
   oos_cfg_opts_add_field(os, "inited", 0, sizeof(ci_boolean_t));
 
   /* Set offset of individual fields based on how a compiler would do it. */
-  int offset_bits = 0;
+  int offset_bits = 0, in_bitfield = 0;
   for( i = 0; i < os->os_n_fields; ++i ) {
     struct orm_oo_field* of = os->os_fields[i];
     int n_bits, modulus;
     if( of->of_type == ORM_OO_FIELD_TYPE_BITFIELD ) {
       n_bits  = of->u.b.of_n_bits;
-      modulus = 8;
+      /* If it's a bitfield, we'll only need to round up to a byte
+       * boundary if this is the first entry in a bitfield.  This
+       * assumes that bitfields start on a byte boundary, rather than
+       * something bigger.  Who knows if that's right? 
+       */
+      if( in_bitfield )
+        modulus = 1;
+      else
+        modulus = 8;
+      in_bitfield = 1;
     }
     else {
       ci_assert_equal(of->of_type, ORM_OO_FIELD_TYPE_INT);
       n_bits = modulus = of->u.i.of_size * 8;
+      in_bitfield = 0;
     }
 
-    if( (offset_bits / 8 == (offset_bits + n_bits) / 8) ||
-        (offset_bits % modulus == 0) ) {
-      of->of_offset  = of->of_type == ORM_OO_FIELD_TYPE_BITFIELD ?
-        offset_bits : offset_bits / 8;
-      offset_bits   += n_bits;
-    }
-    else {
-      offset_bits    = CI_ROUND_UP(offset_bits, n_bits);
-      of->of_offset  = of->of_type == ORM_OO_FIELD_TYPE_BITFIELD ?
-        offset_bits : offset_bits / 8;
-      offset_bits   += n_bits;
-    }
+    /* Align each field to its natural alignment */
+    if( offset_bits % modulus != 0 )
+      offset_bits = CI_ROUND_UP(offset_bits, n_bits);
+
+    /* Nasty/beware: of_offset is in bits for a bitfield, and bytes
+     * for everything else 
+     */
+    of->of_offset = of->of_type == ORM_OO_FIELD_TYPE_BITFIELD ?
+      offset_bits : offset_bits / 8;
+    offset_bits += n_bits;
   }
   os->os_size = offset_bits / 8;
   TEST(os->os_size == sizeof(ci_netif_config_opts));
@@ -597,8 +616,9 @@ static void oos_cfg_opts_contruct(void)
 /**********************************************************/
 /* Dump functions */
 /**********************************************************/
-
-static void orm_dump_struct(const char* name, const void* stats);
+static void orm_dump_struct(const char* name, const char* struct_type,
+                            const void* stats);
+static void orm_dump_struct_body(const char* struct_type, const void* stats);
 
 
 static void orm_dump_int(struct orm_oo_struct* os, struct orm_oo_field* of,
@@ -673,12 +693,9 @@ static void orm_dump_array_struct(struct orm_oo_field* of, const void* stats)
   ci_assert_equal(of->of_type, ORM_OO_FIELD_TYPE_ARRAY_STRUCT);
   dump_buf_cat("\"%s\": [", of->of_name);
   for( i = 0; i < of->u.as.of_array_len; ++i ) {
-    dump_buf_cat("{");
-    orm_dump_struct(of->u.as.of_struct->os_struct_name,
+    orm_dump_struct_body(of->u.as.of_struct->os_struct_name,
                     (const char*)stats + of->of_offset +
                     (of->u.as.of_struct->os_size * i));
-    dump_buf_cleanup();
-    dump_buf_cat("}, ");
   }
   dump_buf_cleanup();
   dump_buf_cat("], ");
@@ -696,20 +713,19 @@ static void orm_dump_bitfield(struct orm_oo_field* of, const void* stats)
   dump_buf_cat("\"%s\": %u, ", of->of_name, (byte & mask) >> bit_start);
 }
 
-
-static void orm_dump_struct(const char* name, const void* stats)
+static void orm_dump_struct_body(const char* struct_type, const void* stats)
 {
   int i, j;
   struct orm_oo_struct* os;
 
-  /* ci_netif_stats got dumped separately above. */
-  if( ! strcmp(name, "ci_netif_stats") )
-    return;
-
-  dump_buf_cat("\"%s\": {", name);
+  if( ! strcmp(struct_type, "ci_netif_stats") ) {
+      fprintf(stderr, "%s: unexpected call with ci_netif_stats\n", __func__);
+      TEST(0);
+  }
+  dump_buf_cat("{");
   for( i = 0; i < n_orm_oo_structs_index; ++i ) {
     os = orm_oo_structs[i];
-    if( ! strcmp(os->os_struct_name, name) ) {
+    if( ! strcmp(os->os_struct_name, struct_type) ) {
       for( j = 0; j < os->os_n_fields; ++j ) {
         struct orm_oo_field* of = os->os_fields[j];
         switch( of->of_type ) {
@@ -717,7 +733,8 @@ static void orm_dump_struct(const char* name, const void* stats)
           orm_dump_int(os, of, stats);
           break;
         case ORM_OO_FIELD_TYPE_STRUCT:
-          orm_dump_struct(of->u.s.of_struct->os_struct_name,
+          orm_dump_struct(of->of_name,
+                          of->u.s.of_struct->os_struct_name,
                           (const char*)stats + of->of_offset);
           break;
         case ORM_OO_FIELD_TYPE_ARRAY_INT:
@@ -738,12 +755,23 @@ static void orm_dump_struct(const char* name, const void* stats)
     }
   }
 
-  fprintf(stderr, "%s(%s) failed\n", __func__, name);
+  fprintf(stderr, "%s(%s) failed\n", __func__, struct_type);
   TEST(0);
 
  done:
   dump_buf_cleanup();
   dump_buf_cat("}, ");
+}
+
+static void orm_dump_struct(const char* name, const char* struct_type,
+                            const void* stats)
+{
+  /* ci_netif_stats got dumped separately above. */
+  if( ! strcmp(struct_type, "ci_netif_stats") )
+    return;
+
+  dump_buf_cat("\"%s\": ", name);
+  orm_dump_struct_body(struct_type, stats);
 }
 
 
@@ -762,14 +790,15 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
       if( (strcmp(sock_type, "tcp_listen") == 0) &&
           (w->state == CI_TCP_LISTEN) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
-        orm_dump_struct("ci_tcp_socket_listen", &wo->tcp_listen);
+        orm_dump_struct("tcp_listen_sockets", "ci_tcp_socket_listen",
+                        &wo->tcp_listen);
         dump_buf_cleanup();
         dump_buf_cat("}, ");
       }
       else if( (strcmp(sock_type, "tcp") == 0) &&
                (w->state & CI_TCP_STATE_TCP) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
-        orm_dump_struct("ci_tcp_state", &wo->tcp);
+        orm_dump_struct("tcp_state", "ci_tcp_state", &wo->tcp);
         dump_buf_cleanup();
         dump_buf_cat("}, ");
       }
@@ -777,7 +806,7 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
       else if( (strcmp(sock_type, "udp") == 0) &&
                (w->state == CI_TCP_STATE_UDP) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
-        orm_dump_struct("ci_udp_state", &wo->udp);
+        orm_dump_struct("udp_state", "ci_udp_state", &wo->udp);
         dump_buf_cleanup();
         dump_buf_cat("}, ");
       }
@@ -787,7 +816,7 @@ static void orm_waitable_dump(ci_netif* ni, const char* sock_type)
       else if( (strcmp(sock_type, "pipe") == 0) &&
                (w->state == CI_TCP_STATE_PIPE) ) {
         dump_buf_cat("\"%d\": {", W_FMT(w));
-        orm_dump_struct("oo_pipe", &wo->pipe);
+        orm_dump_struct("oo_pipe", "oo_pipe", &wo->pipe);
         dump_buf_cleanup();
         dump_buf_cat("}, ");
       }
@@ -803,8 +832,8 @@ static int orm_shared_state_dump(ci_netif* ni)
 {
   ci_netif_state* ns = ni->state;
 
-  dump_buf_cat("\"netif\": {");
-  orm_dump_struct("ci_netif_state", ns);
+  dump_buf_cat("\"stack\": {");
+  orm_dump_struct("stack_state", "ci_netif_state", ns);
   orm_waitable_dump(ni, "tcp_listen");
   orm_waitable_dump(ni, "tcp");
   orm_waitable_dump(ni, "udp");
@@ -820,16 +849,22 @@ static int orm_shared_state_dump(ci_netif* ni)
 /* Main */
 /**********************************************************/
 
-static int orm_netif_dump(ci_netif* ni, int id)
+static int orm_netif_dump(ci_netif* ni, int id, int output_flags)
 {
   int rc;
   dump_buf_cat("{\"%d\": {", id);
-  if( (rc = orm_shared_state_dump(ni)) != 0 )
-    return rc;
-  dump_buf_cleanup();
-  dump_buf_cat(", ");
-  if( (rc = orm_oo_stats_dump(ni)) != 0 )
-    return rc;
+  if (output_flags & ORM_OUTPUT_STACK) {
+    if( (rc = orm_shared_state_dump(ni)) != 0 )
+      return rc;
+    dump_buf_cleanup();
+    dump_buf_cat(", ");
+  }
+  if (output_flags & ORM_OUTPUT_STATS) {
+    if( (rc = orm_oo_stats_dump(ni)) != 0 )
+      return rc;
+    dump_buf_cleanup();
+    dump_buf_cat(", ");
+  }
   dump_buf_cleanup();
   dump_buf_cat("}}");
   return 0;
@@ -843,6 +878,18 @@ int main(int argc, char* argv[])
   const char* buf;
   json_t* root;
   json_error_t error;
+  int output_flags = ORM_OUTPUT_NONE;
+
+  if (argc == 1)
+    output_flags = ORM_OUTPUT_ALL;
+  for (i=1; i<argc; i++) {
+    if ( !strcmp(argv[i], "stats") )
+      output_flags |= ORM_OUTPUT_STATS;
+    if ( !strcmp(argv[i], "all") )
+      output_flags |= ORM_OUTPUT_ALL;
+    if ( !strcmp(argv[i], "stack") )
+      output_flags |= ORM_OUTPUT_STACK;
+  }
 
   if( orm_map_stacks() != 0 )
     exit(EXIT_FAILURE);
@@ -852,13 +899,15 @@ int main(int argc, char* argv[])
   oos_cfg_opts_contruct();
   oos_ftl_construct();
 
-  dump_buf_cat("{\"json\": [");
+  dump_buf_cat("{\"onload_version\": \"%s\", ", ONLOAD_VERSION);
+  dump_buf_cat("\"json\": [");
 
   for( i = 0; i < n_orm_stacks; ++i ) {
     ci_netif* ni = &orm_stacks[i]->os_ni;
     int id       = orm_stacks[i]->os_id; 
-    if( orm_netif_dump(ni, id) != 0 )
+    if( orm_netif_dump(ni, id, output_flags) != 0 )
       exit(EXIT_FAILURE);
+
     dump_buf_cleanup();
     dump_buf_cat(", ");
   }

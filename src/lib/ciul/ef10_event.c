@@ -89,18 +89,33 @@ typedef ci_qword_t ef_vi_event;
   (EF_VI_PS_SPACE_PER_CREDIT / EF_VI_PS_MIN_PKT_SPACE)
 
 
+ef_vi_inline void rx_discard_consumed(ef_vi* vi, unsigned q_id, unsigned rq_id,
+                                      unsigned len, unsigned flags,
+                                      const ef_vi_event* ev, ef_event* ev_out)
+{
+  ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
+  ev_out->rx_discard.q_id = q_id;
+  ev_out->rx_discard.rq_id = rq_id;
+  ev_out->rx_discard.len = len;
+  ev_out->rx_discard.flags = flags;
+
+  if( QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev) |
+      QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev) )
+    ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CRC_BAD;
+  else
+    /* TCPUDP_CKSUM or IPCKSUM error
+     */
+    ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CSUM_BAD;
+
+  ++vi->ep_state->rxq.removed;
+}
+
 
 ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
 					      ef_event** evs, int* evs_len,
 					      int q_label, int desc_i)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
-  /* ABORT bit not included in this as it is not set by fw */
-  const ci_uint32 discard_mask =
-    CI_BSWAPC_LE32(1 << ESF_DZ_RX_ECC_ERR_LBN |
-                   1 << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN |
-                   1 << ESF_DZ_RX_IPCKSUM_ERR_LBN |
-                   1 << ESF_DZ_RX_ECRC_ERR_LBN);
   ef_event* ev_out = (*evs)++;
   unsigned rx_bytes;
 
@@ -136,7 +151,7 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
    * should have been set but wasn't - i.e. it's a frame
    * trunc 
    */
-  if(likely( ! ((ev->u32[0] & discard_mask) || (rx_bytes == 0)) )) {
+  if(likely( ! ((ev->u64[0] & vi->rx_discard_mask) || (rx_bytes == 0)) )) {
     ++vi->ep_state->rxq.removed;
     return;
   }
@@ -147,18 +162,93 @@ ef_vi_inline void huntington_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
     ev_out->rx_discard.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
     return;
   }
-  ev_out->rx_discard.len = qs->bytes_acc;
-  ev_out->rx_discard.type = EF_EVENT_TYPE_RX_DISCARD;
 
-  if( QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev) |
-      QWORD_GET_U(ESF_DZ_RX_ECRC_ERR, *ev) )
-    ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CRC_BAD;
-  else
-    /* TCPUDP_CKSUM or IPCKSUM error
+  rx_discard_consumed(vi, ev_out->rx.q_id, ev_out->rx.rq_id, qs->bytes_acc,
+                      ev_out->rx.flags, ev, ev_out);
+}
+
+
+/* This has the following differences from huntington_rx_desc_consumed to
+ * support RX event batching:
+ *
+ * - It creates an event of type EF_EVENT_TYPE_RX_MULTI.  This event
+ *   does not contain a len field, as when batching is enabled we are only
+ *   guaranteed a length in the packet prefix.  It also does not contain
+ *   an ef_request_id, as it may complete multiple events.  The application
+ *   must unbundle the batched event with ef_vi_receive_unbundle to retrieve
+ *   the individual request ids.
+ *
+ * - Bytes accumulated during a jumbo are not tracked, as we don't
+ *   necessarily have that information for all pieces.  This means that the
+ *   application must keep track of the total length of a jumbo.
+ *
+ * - We keep track of which descriptors have been completed, separately from
+ *   which descriptors have been removed from the ring.  A descriptor has
+ *   been completed once we have an RX event for it, but it is not removed
+ *   until the application has called ef_vi_receive_unbundle and we can
+ *   clear the request id.  This is necessary as we only have 4 bits of
+ *   descriptor index to identify the descriptor, so can wrap before the
+ *   application removes the descriptors.
+ *
+ * - We determine whether an event is an abort by simply checking if this is
+ *   a second completion for the same descriptor - we can't use the rx_bytes
+ *   field as this is commonly 0.
+ */
+ef_vi_inline void huntington_rx_descs_consumed(ef_vi* vi, const ef_vi_event* ev,
+                                               ef_event** evs, int* evs_len,
+                                               int q_label, int desc_i)
+{
+  ef_vi_rxq_state* qs = &vi->ep_state->rxq;
+  ef_event* ev_out = (*evs)++;
+
+  EF_VI_ASSERT(vi->vi_flags & EF_VI_RX_EVENT_MERGE);
+
+  --(*evs_len);
+  ev_out->rx_multi.q_id = q_label;
+  ev_out->rx_multi.desc_id = desc_i + 1;
+  ev_out->rx_multi.type = EF_EVENT_TYPE_RX_MULTI;
+
+  if( ! qs->in_jumbo ) {
+    ev_out->rx_multi.flags = EF_EVENT_FLAG_SOP;
+  }
+  else {
+    ev_out->rx_multi.flags = 0;
+  }
+
+  if( ! QWORD_GET_U(ESF_DZ_RX_CONT, *ev) )
+    qs->in_jumbo = 0;
+  else {
+    ev_out->rx_multi.flags |= EF_EVENT_FLAG_CONT;
+    ++qs->in_jumbo;
+  }
+
+  if( QWORD_GET_U(ESF_DZ_RX_MAC_CLASS, *ev) == ESE_DZ_MAC_CLASS_MCAST) {
+    ev_out->rx_multi.flags |= EF_EVENT_FLAG_MULTICAST;
+  }
+
+  /* If we get a second completion for the same descriptor then this is a
+   * frame trunc.
+   */
+  if(likely( ! ((ev->u64[0] & vi->rx_discard_mask) ||
+                (desc_i == vi->ep_state->rxq.last_completed)) )) {
+    vi->ep_state->rxq.last_completed = desc_i;
+    return;
+  }
+  if( desc_i == (vi->ep_state->rxq.last_completed & vi->vi_rxq.mask) ) {
+    /* If this is an abort then we didn't really consume a
+     * descriptor, so don't increment completed or removed count.
      */
-    ev_out->rx_discard.subtype = EF_EVENT_RX_DISCARD_CSUM_BAD;
+    EF_VI_ASSERT(QWORD_GET_U(ESF_DZ_RX_BYTES, *ev) == 0);
+    ev_out->rx_discard.type = EF_EVENT_TYPE_RX_NO_DESC_TRUNC;
+    return;
+  }
 
-  ++vi->ep_state->rxq.removed;
+  rx_discard_consumed(vi, ev_out->rx_multi.q_id,
+                      vi->vi_rxq.ids[desc_i], QWORD_GET_U(ESF_DZ_RX_BYTES, *ev),
+                      ev_out->rx_multi.flags, ev, ev_out);
+  vi->vi_rxq.ids[desc_i] = EF_REQUEST_ID_MASK;
+  ++vi->ep_state->rxq.last_completed;
+  EF_VI_ASSERT(desc_i == (vi->ep_state->rxq.last_completed & vi->vi_rxq.mask));
 }
 
 
@@ -169,12 +259,6 @@ ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
   unsigned q_label = QWORD_GET_U(ESF_DZ_RX_QLABEL, *ev);
   unsigned short_pc = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
   unsigned pkt_count_range = (1 << ESF_DZ_RX_DSC_PTR_LBITS_WIDTH);
-
-  const ci_uint32 discard_mask =
-    CI_BSWAPC_LE32(1 << ESF_DZ_RX_ECC_ERR_LBN |
-                   1 << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN |
-                   1 << ESF_DZ_RX_IPCKSUM_ERR_LBN |
-                   1 << ESF_DZ_RX_ECRC_ERR_LBN);
 
   ef_vi* vi = evq_vi->vi_qs[q_label];
 
@@ -204,7 +288,7 @@ ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
   EF_VI_ASSERT(ev_out->rx_packed_stream.n_pkts > 0 ||
                QWORD_GET_U(ESF_DZ_RX_CONT, *ev));
 
-  if (likely( ! ((ev->u32[0] & discard_mask) )))
+  if (likely( ! (ev->u64[0] & evq_vi->rx_discard_mask) ))
     return;
 
   if (QWORD_GET_U(ESF_DZ_RX_ECC_ERR, *ev)  |
@@ -214,6 +298,30 @@ ef_vi_inline void ef10_packed_stream_rx_event(ef_vi* evq_vi,
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_L4_CSUM;
   if (QWORD_GET_U(ESF_DZ_RX_IPCKSUM_ERR, *ev))
     ev_out->rx_packed_stream.ps_flags |= EF_VI_PS_FLAG_BAD_L3_CSUM;
+}
+
+
+ef_vi_inline void ef10_rx_merge_event(ef_vi* evq_vi, const ef_vi_event* ev,
+				      ef_event** evs, int* evs_len)
+{
+  unsigned lbits_mask = __EFVI_MASK(ESF_DZ_RX_DSC_PTR_LBITS_WIDTH,
+                                    unsigned);
+  unsigned q_label = QWORD_GET_U(ESF_DZ_RX_QLABEL, *ev);
+  unsigned short_di, desc_i, q_mask;
+  ef_vi *vi;
+
+  vi = evq_vi->vi_qs[q_label];
+  if (likely(vi != NULL)) {
+    q_mask = vi->vi_rxq.mask;
+    short_di = QWORD_GET_U(ESF_DZ_RX_DSC_PTR_LBITS, *ev);
+    desc_i = (vi->ep_state->rxq.last_completed +
+              ((short_di - vi->ep_state->rxq.last_completed) &
+               lbits_mask) - 1) & q_mask;
+    huntington_rx_descs_consumed(vi, ev, evs, evs_len, q_label, desc_i);
+  }
+  else {
+    INC_ERROR_STAT(evq_vi, rx_ev_bad_q_label);
+  }
 }
 
 
@@ -241,6 +349,22 @@ ef_vi_inline void ef10_rx_event(ef_vi* evq_vi, const ef_vi_event* ev,
 }
 
 
+/* These constants describe useful values to combine major ticks with
+ * TX timestamp events on Medford
+ */
+#define MEDFORD_TX_SECS_EVENT_BITS 16
+#define MEDFORD_TX_SECS_EVENT_MASK ((1 << MEDFORD_TX_SECS_EVENT_BITS) - 1)
+/* This is in theory (1 << (MEDFORD_TX_SECS_EVENT_BITS - 1)) but we
+ * set it to 1 as we don't expect the timestamp events to differ from
+ * the timesync events by more than 1 second.
+ */
+#define MEDFORD_TX_SECS_SYNC_MIN_OFFSET 1
+/* Top bit of event tells us if the timestamp is valid or MAC is in drain */
+#define MEDFORD_TX_SECS_VALID_BIT 0x8000
+/* Next bit of event tells us if the timestamp was generated by MAC or TXDP */
+#define MEDFORD_TX_SECS_TXDP_BIT 0x4000
+
+
 static uint32_t timestamp_extract(ef_vi_event ev)
 {
   uint32_t lo = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, ev);
@@ -248,66 +372,164 @@ static uint32_t timestamp_extract(ef_vi_event ev)
   return (hi << 16) | lo;
 }
 
+static uint32_t timestamp_extract_medford_seconds(ef_vi_event ev,
+                                                  uint16_t *metabits)
+{
+  uint32_t lo = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, ev);
+  /* Currently only the top bit is interesting, so ignore the others.
+   * The next bit also has meaning (source of the timestamp), but we
+   * don't use it at the moment.
+   */
+  *metabits = QWORD_GET_U(ESF_DZ_TX_SOFT2, ev) & MEDFORD_TX_SECS_VALID_BIT;
+  return lo;
+}
+
+
+static inline void ef10_tx_event_ts_lo(ef_vi* evq, const ef_vi_event* ev)
+{
+  ef_vi_txq_state* qs = &evq->ep_state->txq;
+  EF_VI_DEBUG(EF_VI_BUG_ON(qs->ts_nsec != EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID));
+  qs->ts_nsec =
+    (((uint64_t) timestamp_extract(*ev) * 1000000000UL) >> 29) << 2;
+  qs->ts_nsec |= evq->ep_state->evq.sync_flags;
+}
+
+
+static inline void ef10_tx_event_ts_hi(ef_vi* evq, const ef_vi_event* ev,
+                                       ef_event* ev_out)
+{
+  ef_vi_txq_state* qs = &(evq->ep_state->txq);
+  ev_out->tx_timestamp.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
+  EF_VI_DEBUG(EF_VI_BUG_ON(qs->ts_nsec == EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID));
+  ev_out->tx_timestamp.ts_nsec = qs->ts_nsec;
+  EF_VI_DEBUG(qs->ts_nsec = EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
+
+  if( (evq)->nic_type.variant > 'A' ) {
+    uint16_t metabits, delta;
+    ef_eventq_state* evqs = &(evq->ep_state->evq);
+    /* Medford provides 48 bits of timestamp, so we must get the top
+     * 16 bits from the timesync event state.
+     *
+     * See Bug57928 for a description of this section of code and
+     * why it gives the correct result
+     */
+    ev_out->tx_timestamp.ts_sec =
+      timestamp_extract_medford_seconds(*ev, &metabits);
+    /* Because delta is uint16_t this does an implicit mask down to 16 bits
+     * which is what we need, assuming MEDFORD_TX_SECS_EVENT_BITS is 16
+     */
+    delta = ev_out->tx_timestamp.ts_sec - evqs->sync_timestamp_minimum;
+    /* Check that the timestamp in the event is valid.  Must be
+     * synchronsied, not marked as invalid, and within expected
+     * range
+     */
+    if( evqs->sync_timestamp_synchronised && (metabits == 0)
+        EF_VI_DEBUG(&& delta <= 2*MEDFORD_TX_SECS_SYNC_MIN_OFFSET) ) {
+      ev_out->tx_timestamp.ts_sec = delta + evqs->sync_timestamp_minimum;
+    }
+    else {
+      ev_out->tx_timestamp.ts_sec = 0;
+      ev_out->tx_timestamp.ts_nsec = 0;
+    }
+  }
+  else {
+    ev_out->tx_timestamp.ts_sec = timestamp_extract(*ev);
+  }
+
+  ev_out->tx_timestamp.ts_nsec += evq->tx_ts_correction_ns;
+  if( ev_out->tx_timestamp.ts_nsec >= 1000000000 ) {
+    ev_out->tx_timestamp.ts_nsec -= 1000000000;
+    ev_out->tx_timestamp.ts_sec += 1;
+  }
+}
+
+
+static inline void ef10_tx_event_ts_rq_id(ef_vi* evq, ef_event* ev_out)
+{
+  ef_vi_txq_state* qs = &(evq->ep_state->txq);
+  ef_vi_txq* q = &evq->vi_txq;
+  while( q->ids[qs->removed & q->mask] == EF_REQUEST_ID_MASK )
+    ++qs->removed;
+  ev_out->tx_timestamp.rq_id = q->ids[qs->removed & q->mask];
+  q->ids[qs->removed & q->mask] = EF_REQUEST_ID_MASK;
+  ++qs->removed;
+}
+
 
 static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
 				     ef_event** evs, int* evs_len)
 {
-  EF_VI_ASSERT(evq->vi_flags & EF_VI_TX_TIMESTAMPS);
-  /* When TX timestamping is enabled, we get three events for
-   * every transmit.  A TX completion and two timestamp events.
-   * We ignore the completion and store the first timestamp in
-   * the per TXQ state.  On the second timestamp we retrieve the
-   * first one and construct a EF_EVENT_TYPE_TX_WITH_TIMESTAMP
-   * event to send to the user. */
-  if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) == 
-     TX_TIMESTAMP_EVENT_TX_EV_COMPLETION) {
-    /* TX completion event.  Ignored */
-  }
-  else if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-          TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO) {
-    ef_vi_txq_state* qs = &evq->ep_state->txq;
-    EF_VI_DEBUG(
-                EF_VI_BUG_ON(qs->ts_nsec !=
-                             EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID)
-                );
-    qs->ts_nsec =
-      (((((uint64_t)timestamp_extract(*ev)) *
-         1000000000UL) >> 29) << 2) |
-      evq->ep_state->evq.sync_flags;
-  }
-  else if(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-          TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI) {
-    ef_vi_txq_state* qs = &evq->ep_state->txq;
-    ef_vi_txq* q = &evq->vi_txq;
-    ef_event* ev_out = (*evs)++;
+  /* When TX timestamping is enabled, we get three events for every
+   * transmit.  A TX completion and two timestamp events.  We ignore the
+   * completion and store the first timestamp in the per TXQ state.  On the
+   * second timestamp we retrieve the first one and construct a
+   * EF_EVENT_TYPE_TX_WITH_TIMESTAMP event to send to the user.
+   */
+  ef_event* ev_out;
+  switch( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ) {
+  case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
+    break;
+  case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
+    ef10_tx_event_ts_lo(evq, ev);
+    break;
+  case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI:
+    ev_out = (*evs)++;
     --(*evs_len);
-    ev_out->tx_timestamp.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
     ev_out->tx.type = EF_EVENT_TYPE_TX_WITH_TIMESTAMP;
-    EF_VI_DEBUG(
-                EF_VI_BUG_ON(qs->ts_nsec ==
-                             EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID)
-                );
-    ev_out->tx_timestamp.ts_nsec = qs->ts_nsec;
-    EF_VI_DEBUG(qs->ts_nsec = EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID);
-    ev_out->tx_timestamp.ts_sec = timestamp_extract(*ev);
-    ev_out->tx_timestamp.ts_nsec += evq->tx_ts_correction_ns;
-    if( ev_out->tx_timestamp.ts_nsec >= 1000000000 ) {
-      ev_out->tx_timestamp.ts_nsec -= 1000000000;
-      ev_out->tx_timestamp.ts_sec += 1;
-    }
-    /* One TX pkt could have spanned multiple
-     * descriptors. Iterate to find the one that actually
-     * is finished. */
-    while( q->ids[qs->removed & q->mask] == EF_REQUEST_ID_MASK )
-      ++qs->removed;
-    ev_out->tx_timestamp.rq_id = q->ids[qs->removed & q->mask];
-    q->ids[qs->removed & q->mask] = EF_REQUEST_ID_MASK;
-    ++qs->removed;
-  }
-  else {
+    ef10_tx_event_ts_hi(evq, ev, ev_out);
+    ef10_tx_event_ts_rq_id(evq, ev_out);
+    break;
+  default:
     ef_log("%s:%d: ERROR: soft1=%x ev="CI_QWORD_FMT, __FUNCTION__,
            __LINE__, (unsigned) QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
            CI_QWORD_VAL(*ev));
+    break;
+  }
+}
+
+
+static inline void ef10_tx_event_completion(const ef_vi_event* ev,
+                                            ef_event** evs, int* evs_len)
+{
+  ef_event* ev_out = (*evs)++;
+  --(*evs_len);
+  ev_out->tx.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
+  ev_out->tx.desc_id = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, *ev) + 1;
+  ev_out->tx.type = EF_EVENT_TYPE_TX;
+}
+
+
+static void ef10_tx_event_alt(ef_vi* evq, const ef_vi_event* ev,
+                              ef_event** evs, int* evs_len)
+{
+  ef_event* ev_out;
+  unsigned alt_id;
+
+  /* User is not permitted to ask for timestamps at time of writing, as it
+   * makes handling completions hard.  (Note however that the hardware TXQ
+   * does have timestamp events enabled, as these are needed to handle
+   * 'alt' completions).
+   */
+  EF_VI_ASSERT( ! (evq->vi_flags & EF_VI_TX_TIMESTAMPS) );
+
+  switch( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ) {
+  case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
+    ef10_tx_event_completion(ev, evs, evs_len);
+    break;
+  case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
+    break;
+  case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI:
+    alt_id = QWORD_GET_U(ESF_DZ_TX_SOFT2, *ev) & 0x1f/*??magic*/;
+    if( alt_id != 0x1f ) {  /* 0x1f means a normal send completed. */
+      ev_out = (*evs)++;
+      --(*evs_len);
+      ev_out->tx.type = EF_EVENT_TYPE_TX_ALT;
+      ev_out->tx_alt.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
+      ev_out->tx_alt.alt_id = evq->tx_alt_hw2id[alt_id];
+    }
+    break;
+  default:
+    break;
   }
 }
 
@@ -315,27 +537,34 @@ static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
 ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
 				ef_event** evs, int* evs_len)
 {
-  EF_VI_ASSERT(EF_VI_IS_EVENT(ev));
-  if( ! (evq->vi_flags & EF_VI_TX_TIMESTAMPS) ) {
-    if(likely(QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-              TX_TIMESTAMP_EVENT_TX_EV_COMPLETION)) {
-      /* Transmit completion event. */
-      ef_event* ev_out = (*evs)++;
-      --(*evs_len);
-      ev_out->tx.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
-      ev_out->tx.desc_id = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX,
-                                       *ev) + 1;
-      ev_out->tx.type = EF_EVENT_TYPE_TX;
-    }
-    else {
-      ef_log("%s:%d: ERROR: soft1=%x ev="CI_QWORD_FMT,
-             __FUNCTION__, __LINE__, (unsigned)
-             QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
-             CI_QWORD_VAL(*ev));
-    }
+  EF_VI_ASSERT( EF_VI_IS_EVENT(ev) );
+  if( (evq->vi_flags & (EF_VI_TX_TIMESTAMPS | EF_VI_TX_ALT)) == 0 ) {
+    /* Transmit completion event.  Indicates how many descriptors have been
+     * consumed and that DMA reads have completed.
+     */
+    EF_VI_ASSERT( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
+                  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION );
+    ef10_tx_event_completion(ev, evs, evs_len);
+  }
+  /* It would make sense to check (evq->vi_flags & EF_VI_TX_ALT)
+   * instead of tx_alt_num here, but we don't because although the VI
+   * might have been allocated with alternatives, it's possible they
+   * aren't in use.
+   */
+  else if( evq->tx_alt_num ) {
+    EF_VI_ASSERT( evq->vi_flags & EF_VI_TX_ALT );
+    ef10_tx_event_alt(evq, ev, evs, evs_len);
   }
   else {
-    ef10_tx_event_ts_enabled(evq, ev, evs, evs_len);
+    EF_VI_ASSERT( evq->vi_flags & EF_VI_TX_ALT || 
+		  evq->vi_flags & EF_VI_TX_TIMESTAMPS );
+    if( evq->vi_flags & EF_VI_TX_TIMESTAMPS )
+      ef10_tx_event_ts_enabled(evq, ev, evs, evs_len);
+    else {
+      EF_VI_ASSERT( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
+                  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION );
+      ef10_tx_event_completion(ev, evs, evs_len);
+    }
   }
 }
 
@@ -423,6 +652,16 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
   return (evqs->sync_timestamp_major == ~0u) ? -ENOMSG : -EL2NSYNC;
 }
 
+
+static void
+ef10_receive_get_bytes(ef_vi* vi, const void* pkt, uint16_t* bytes_out)
+{
+  EF_VI_ASSERT(ef_vi_receive_prefix_len(vi));
+
+  *bytes_out = *(uint16_t*)((uint8_t*)pkt + ES_DZ_RX_PREFIX_PKTLEN_OFST);
+}
+
+
 int
 ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
 					    struct timespec* ts_out,
@@ -444,12 +683,25 @@ ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 }
 
 
+int
+ef_vi_receive_get_bytes(ef_vi* vi, const void* pkt, uint16_t* bytes_out)
+{
+  ef10_receive_get_bytes(vi, pkt, bytes_out);
+  return 0;
+}
+
+
 static void ef10_major_tick(ef_vi* vi, unsigned major, unsigned minor,
 			    unsigned sync_flags)
 {
   ef_eventq_state* evqs = &(vi->ep_state->evq);
   evqs->sync_timestamp_major = major;
   evqs->sync_timestamp_minor = minor;
+  /* Only used for Medford TX timestamps, but quicker to precompute
+   * here rather than on every timestamp event
+   */
+  evqs->sync_timestamp_minimum =
+    evqs->sync_timestamp_major - MEDFORD_TX_SECS_SYNC_MIN_OFFSET;
   evqs->sync_timestamp_synchronised = 1;
   evqs->sync_flags = sync_flags;
 }
@@ -496,12 +748,14 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev,
     LOG(ef_log("%s: Saw flush in poll (code=%u)", __FUNCTION__, code));
     break;
   case MCDI_EVENT_CODE_TX_ERR:
-    ef_log("%s: ERROR: MCDI TX error event - check parameters to "
-	   "transmit_init()", __FUNCTION__);
+    ef_log("%s: ERROR: MCDI TX error event %x (raw: "CI_QWORD_FMT") - "
+           "check parameters to transmit_init()", __FUNCTION__,
+           QWORD_GET_U(MCDI_EVENT_TX_ERR_DATA, *ev), CI_QWORD_VAL(*ev));
     break;
   case MCDI_EVENT_CODE_RX_ERR:
-    ef_log("%s: ERROR: MCDI RX error event - check parameters to "
-	   "receive_init()", __FUNCTION__);
+    ef_log("%s: ERROR: MCDI RX error event %x (raw: "CI_QWORD_FMT") - "
+           "check parameters to receive_init()", __FUNCTION__,
+           QWORD_GET_U(MCDI_EVENT_RX_ERR_DATA, *ev), CI_QWORD_VAL(*ev));
     break;
   default:
     ef_log("%s: ERROR: Unhandled MCDI event code=%u", __FUNCTION__,
@@ -517,7 +771,6 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
   ef_vi_event *pev, ev;
 
   EF_VI_BUG_ON(evs == NULL);
-  EF_VI_BUG_ON(evs_len < EF_VI_EVENT_POLL_MIN_EVS);
 
 #ifdef __powerpc__
   if(unlikely( EF_VI_IS_EVENT(EF_VI_EVENT_PTR(evq, -17)) ))
@@ -542,11 +795,13 @@ int ef10_ef_eventq_poll(ef_vi* evq, ef_event* evs, int evs_len)
     BUG_ON(ESF_DZ_EV_CODE_LBN < 32u);
     switch( CI_QWORD_FIELD(ev, ESF_DZ_EV_CODE) ) {
     case ESE_DZ_EV_CODE_RX_EV:
-      if( !evq->vi_is_packed_stream )
+      if( evq->vi_is_normal )
         ef10_rx_event(evq, &ev, &evs, &evs_len);
-      else
+      else if( evq->vi_is_packed_stream )
         ef10_packed_stream_rx_event(evq, &ev,
                                     &evs, &evs_len);
+      else
+        ef10_rx_merge_event(evq, &ev, &evs, &evs_len);
       break;
 
     case ESE_DZ_EV_CODE_TX_EV:
@@ -678,8 +933,11 @@ ef_vi_inline int ef_ps_max_credits(ef_vi* vi)
 {
   int events_available, max_credit;
   int tx_reservation = ef_vi_transmit_capacity(vi);
-  /* If TX timestamping is enabled, we get three events for every transmit. */
-  if( vi->vi_flags & EF_VI_TX_TIMESTAMPS )
+  /* If TX timestamping is enabled, we may get as many as three events for
+   * each transmit.  (Note that TX alternatives use timestamp events to
+   * indicate completion).
+   */
+  if( vi->vi_flags & (EF_VI_TX_TIMESTAMPS | EF_VI_TX_ALT) )
     tx_reservation *= 3;
   /* Leaving extra allowance for periodic timesync events. These arrive at 4
    * per second, so 100 gives us 25 seconds of leeway.

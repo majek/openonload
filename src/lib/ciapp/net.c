@@ -122,6 +122,74 @@ int ci_hostport_to_sockaddr(const char* hp, struct sockaddr_in* sa_out)
 }
 
 
+int ci_hostport_to_addrinfo(const char* hp, struct addrinfo* ai_out)
+{
+  struct addrinfo hints;
+  struct addrinfo* ai;
+  const char* host;
+  const char* port;
+  char *s, *p;
+  int rc = -EINVAL;
+
+  ci_assert(hp);  ci_assert(ai_out);
+
+  host = s = strdup(hp);
+  p = strrchr(host, ':');
+  if( p == NULL ) {
+    /* Either host-only or port-only */
+    const char* a = hp;
+    int all_num = 1;
+
+    while( *a ) {
+      if( !isdigit(*a) ) {
+        all_num = 0;
+        break;
+      }
+      ++a;
+    }
+
+    if( all_num == 0 ) {
+      /* host pointer is unchanged */
+      port = NULL;
+    } else {
+      port = host;
+      host = NULL;
+    }
+  } else {
+    port = p + 1;
+    /* There must be something after the final colon */
+    if ( *port == '\0')
+      goto out;
+    /* Terminate the host string */
+    *p = '\0';
+  }
+
+  hints.ai_flags = AI_NUMERICSERV;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = 0;
+  hints.ai_protocol = 0;
+  hints.ai_addrlen = 0;
+  hints.ai_addr = NULL;
+  hints.ai_canonname = NULL;
+  hints.ai_next = NULL;
+  rc = getaddrinfo(host, port, &hints, &ai);
+  if( rc == 0 ) {
+    /* Only return successfully for IPv4 or IPv6 */
+    if( ai->ai_family != AF_INET && ai->ai_family != AF_INET6 ) {
+      rc = -EINVAL;
+      goto out;
+    }
+    memcpy(ai_out, ai, sizeof(struct addrinfo));
+  } else {
+    rc = -EINVAL;
+  }
+
+ out:
+  free(s);
+  return rc;
+}
+
+
 int ci_ntoa(struct in_addr in, char* buf)
 {
   ci_uint32 b;

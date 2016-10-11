@@ -52,11 +52,9 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
 {
   short revents = 0;
 
-  ci_assert_nequal(ts->s.b.state, CI_TCP_LISTEN);
-
   /* Shutdown: */
-  if( ts->s.tx_errno && !(ts->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT) )
-    revents |= POLLOUT; /* SHUT_WR && !NONBLOCK_CONNECT */
+  if( ts->s.tx_errno )
+    revents |= POLLOUT;
   if( (TCP_RX_DONE(ts) & CI_SHUT_RD) )
     revents |= POLLIN | POLLRDHUP; /* SHUT_RD */
   if( ts->s.tx_errno && TCP_RX_DONE(ts) )
@@ -87,19 +85,43 @@ ci_tcp_poll_events_nolisten(ci_netif *ni, ci_tcp_state *ts)
   return revents;
 }
 
+/* Call ci_tcp_poll_events_listen() or ci_tcp_poll_events_nolisten
+ * in accordance with the current state.  All state transitions are
+ * implemented using CI_TCP_INVALID state:
+ *   set state to CI_TCP_INVALID;
+ *   write barrier;
+ *   re-init the waitable object to the new structure;
+ *   write barrier;
+ *   set state to CI_TCP_whatever.
+ * These transitions happen when listen() or
+ * shutdown(listen_sock) are called.
+ *
+ * We use __SOCK_TO_TCP_LISTEN and __SOCK_TO_TCP to avoid assertions that
+ * the socket is in the correct state.  Such assertions can fail, because
+ * we have no way to guarantee that the state have not changed under our
+ * feet.  See the paragraph above for the state transition machinery.
+ * If we detect the state change after the mask is calculated, we drop this
+ * mask and return 0.
+ * 
+ * poll_events() returns 0 if it is called in a transitional state.
+ */
 ci_inline short ci_tcp_poll_events(ci_netif* ni, ci_sock_cmn* s)
 {
   short mask;
   if( s->b.state == CI_TCP_LISTEN ) {
-    mask = ci_tcp_poll_events_listen(ni, SOCK_TO_TCP_LISTEN(s));
-    if( *((volatile ci_uint32 *)&s->b.state) != CI_TCP_LISTEN )
+    mask = ci_tcp_poll_events_listen(ni, __SOCK_TO_TCP_LISTEN(s));
+    if( OO_ACCESS_ONCE(s->b.state) != CI_TCP_LISTEN )
       mask = 0;
   }
   else if( s->b.state == CI_TCP_INVALID ) {
     mask = 0;
   }
   else {
-    mask = ci_tcp_poll_events_nolisten(ni, SOCK_TO_TCP(s));
+    ci_uint32 state;
+    mask = ci_tcp_poll_events_nolisten(ni, __SOCK_TO_TCP(s));
+    state = OO_ACCESS_ONCE(s->b.state);
+    if( state == CI_TCP_INVALID || state == CI_TCP_LISTEN )
+      mask = 0;
   }
   return mask;
 }

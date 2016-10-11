@@ -61,7 +61,7 @@ struct tcp_helper_nic {
 struct tcp_helper_resource_s;
 
 typedef struct tcp_helper_cluster_s {
-  struct efrm_vi_set*           thc_vi_set[CI_CFG_MAX_REGISTER_INTERFACES];
+  struct efrm_vi_set*           thc_vi_set[CPLANE_MAX_REGISTER_INTERFACES];
   struct tcp_helper_resource_s* thc_thr_head;
   char                          thc_name[CI_CFG_CLUSTER_NAME_LEN + 1];
   int                           thc_cluster_size;
@@ -261,6 +261,7 @@ typedef struct tcp_helper_resource_s {
   ci_dllist             os_ready_lists[CI_CFG_N_READY_LISTS];
   spinlock_t            os_ready_list_lock;
 
+  struct file*          cplane_handle;
 } tcp_helper_resource_t;
 
 

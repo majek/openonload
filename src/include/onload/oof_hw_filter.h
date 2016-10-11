@@ -16,6 +16,7 @@
 #ifndef __ONLOAD_OOF_HW_FILTER_H__
 #define __ONLOAD_OOF_HW_FILTER_H__
 
+#include <cplane/config_opt.h>
 
 struct tcp_helper_resource_s;
 struct tcp_helper_cluster_s;
@@ -25,7 +26,7 @@ struct oo_hw_filter {
   struct tcp_helper_resource_s* trs;
   struct tcp_helper_cluster_s*  thc;
   unsigned dlfilter_handle;
-  int filter_id[CI_CFG_MAX_REGISTER_INTERFACES];
+  int filter_id[CPLANE_MAX_REGISTER_INTERFACES];
 };
 
 

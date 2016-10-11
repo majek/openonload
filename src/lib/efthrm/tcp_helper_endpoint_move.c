@@ -153,10 +153,11 @@ static void efab_ip_queue_copy(ci_netif *ni_to, ci_ip_pkt_queue *q_to,
  * the function returns with this stack being unlocked.
  * If rc=0, it returns with alien_ni stack locked;
  * otherwise, both stacks are unlocked.
- * Socket is always unlocked on return.
+ * Original socket is always unlocked on return,
+ * while on success the new_socket is kept locked.
  * Filters might be requested to be dropped in the process */
 int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
-                                  int drop_filter)
+                                  int drop_filter, oo_sp* new_sock_id)
 {
   tcp_helper_resource_t *old_thr = priv->thr;
   tcp_helper_resource_t *new_thr = netif2tcp_helper_resource(alien_ni);
@@ -174,6 +175,21 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
 
   OO_DEBUG_TCPH(ci_log("%s: move %d:%d to %d", __func__,
                        old_thr->id, priv->sock_id, new_thr->id));
+
+  ci_assert(new_sock_id != NULL);
+  /* Lock the second stack */
+  i = 0;
+  while( ! ci_netif_trylock(alien_ni) ) {
+    ci_netif_unlock(&old_thr->netif);
+    if( i++ >= 1000 ) {
+      rc = -EBUSY;
+      goto fail1_ni_unlocked;
+    }
+    rc = ci_netif_lock(&old_thr->netif);
+    if( rc != 0 )
+      goto fail1_ni_unlocked;
+  }
+
   /* Poll the old stack - deliver all data to our socket */
   ci_netif_poll(&old_thr->netif);
 
@@ -187,19 +203,6 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   if( !efab_file_move_supported(&old_thr->netif, old_s, drop_filter) ) {
     rc = -EINVAL;
     goto fail1;
-  }
-
-  /* Lock the second stack */
-  i = 0;
-  while( ! ci_netif_trylock(alien_ni) ) {
-    ci_netif_unlock(&old_thr->netif);
-    if( i++ >= 1000 ) {
-      rc = -EBUSY;
-      goto fail1_ni_unlocked;
-    }
-    rc = ci_netif_lock(&old_thr->netif);
-    if( rc != 0 )
-      goto fail1_ni_unlocked;
   }
 
   /* Allocate a new socket in the alien_ni stack */
@@ -415,12 +418,13 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   ci_bit_set(&old_s->b.sb_aflags, CI_SB_AFLAG_MOVED_AWAY_BIT);
   old_s->b.moved_to_stack_id = alien_ni->state->stack_id;
   old_s->b.moved_to_sock_id = new_s->b.bufid;
+  *new_sock_id = new_s->b.bufid;
   if( ! list_empty(&priv->_filp->f_ep_links) )
     ci_bit_set(&old_s->b.sb_aflags, CI_SB_AFLAG_MOVED_AWAY_IN_EPOLL_BIT);
 
   ci_sock_unlock(&old_thr->netif, &old_s->b);
-  ci_sock_unlock(alien_ni, &new_s->b);
   ci_assert(ci_netif_is_locked(alien_ni));
+  ci_assert(ci_sock_is_locked(alien_ni, &new_s->b));
   OO_DEBUG_TCPH(ci_log("%s: -> [%d:%d] %s", __func__,
                        new_thr->id, new_s->b.bufid,
                        ci_tcp_state_str(new_s->b.state)));
@@ -438,8 +442,8 @@ fail3:
   else
     ci_udp_state_free(alien_ni, SOCK_TO_UDP(new_s));
 fail2:
-  ci_netif_unlock(alien_ni);
 fail1:
+  ci_netif_unlock(alien_ni);
   ci_netif_unlock(&old_thr->netif);
 fail1_ni_unlocked:
   ci_sock_unlock(&old_thr->netif, &old_s->b);
@@ -455,6 +459,7 @@ int efab_file_move_to_alien_stack_rsop(ci_private_t *stack_priv, void *arg)
   tcp_helper_resource_t *old_thr;
   tcp_helper_resource_t *new_thr;
   citp_waitable *w;
+  oo_sp new_sock_id;
   int rc;
 
   if( sock_file == NULL )
@@ -499,13 +504,17 @@ int efab_file_move_to_alien_stack_rsop(ci_private_t *stack_priv, void *arg)
   }
 
   efab_thr_ref(new_thr);
-  rc = efab_file_move_to_alien_stack(sock_priv, &stack_priv->thr->netif, 0);
+  rc = efab_file_move_to_alien_stack(sock_priv, &stack_priv->thr->netif, 0,
+                                     &new_sock_id);
   fput(sock_file);
 
   if( rc != 0 )
     efab_thr_release(new_thr);
-  else
+  else {
     ci_netif_unlock(&new_thr->netif);
+    ci_sock_unlock(&new_thr->netif,
+                   SP_TO_WAITABLE(&new_thr->netif, new_sock_id));
+  }
 
   return rc;
 }
@@ -588,6 +597,8 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         return 0;
 
       case CITP_TCP_LOOPBACK_TO_LISTSTACK:
+      {
+        oo_sp new_sock_id;
         /* Nobody should be using this socket, so trylock should succeed.
          * Overwise we hand over the socket and do not accelerate this
          * loopback connection. */
@@ -601,33 +612,30 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         }
 
         /* move_to_alien changes locks - see comments near it */
-        rc = efab_file_move_to_alien_stack(priv, alien_ni, 1);
+        rc = efab_file_move_to_alien_stack(priv, alien_ni, 1, &new_sock_id);
         if( rc != 0 ) {
           /* error - everything is already unlocked */
           efab_thr_release(netif2tcp_helper_resource(alien_ni));
           /* if we return error, UL will hand the socket over. */
           return rc;
         }
-        /* now alien_ni is locked */
+        /* now alien_ni and new_sock are locked */
 
         /* Connect again, using new endpoint */
         carg->out_rc =
             ci_tcp_connect_lo_samestack(
-                            alien_ni,
-                            SP_TO_TCP(alien_ni,
-                                      SP_TO_WAITABLE(&priv->thr->netif,
-                                                     priv->sock_id)
-                                      ->moved_to_sock_id),
-                            tls_id);
+                          alien_ni, SP_TO_TCP(alien_ni, new_sock_id), tls_id);
         ci_netif_unlock(alien_ni);
+        ci_sock_unlock(alien_ni, SP_TO_WAITABLE(alien_ni, new_sock_id));
         carg->out_moved = 1;
         return 0;
-
+      }
 
       case CITP_TCP_LOOPBACK_TO_NEWSTACK:
       {
         tcp_helper_resource_t *new_thr;
         ci_resource_onload_alloc_t alloc;
+        oo_sp new_sock_id;
 
         memset(&alloc, 0, sizeof(alloc));
 
@@ -656,7 +664,8 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         }
 
         /* move connecting socket to the new stack */
-        rc = efab_file_move_to_alien_stack(priv, &new_thr->netif, 1);
+        rc = efab_file_move_to_alien_stack(priv, &new_thr->netif, 1,
+                                           &new_sock_id);
         if( rc != 0 ) {
           /* error - everything is already unlocked */
           efab_thr_release(netif2tcp_helper_resource(alien_ni));
@@ -670,12 +679,11 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         /* now connect via CITP_TCP_LOOPBACK_TO_CONNSTACK */
         /* connect_lo_toconn unlocks new_thr->netif */
         carg->out_rc =
-            ci_tcp_connect_lo_toconn(
-                            &new_thr->netif,
-                            SP_TO_WAITABLE(&priv->thr->netif,
-                                           priv->sock_id)->moved_to_sock_id,
-                            carg->dst_addr, alien_ni, tls_id);
+            ci_tcp_connect_lo_toconn(&new_thr->netif, new_sock_id,
+                                     carg->dst_addr, alien_ni, tls_id);
         efab_thr_release(netif2tcp_helper_resource(alien_ni));
+        ci_sock_unlock(&new_thr->netif,
+                       SP_TO_WAITABLE(&new_thr->netif, new_sock_id));
         return 0;
       }
       }

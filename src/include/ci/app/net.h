@@ -89,6 +89,8 @@ ci_sock_errcode(ci_sock_err_t a) { return -a.val; }
 extern int ci_hostport_to_sockaddr(const char* hp,
 				   struct sockaddr_in* addr_out);
 
+extern int ci_hostport_to_addrinfo(const char* hp, struct addrinfo* ai_out);
+
   /*! Convert hostname and port to sockaddr.  [host] may be null, in which
   ** case INADDR_ANY is used.  Returns 0 on success, or negative error code
   ** on failure.

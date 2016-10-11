@@ -39,6 +39,7 @@
 #include <onload/tcp_poll.h>
 #include <onload/ul/tcp_helper.h>
 #include <onload/osfile.h>
+#include <onload/extensions.h>
 
 
 #define LPF      "citp_tcp_"
@@ -465,7 +466,6 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   int rc;
-  int fcntl_result;
 
   Log_VSS(ci_log(LPF "listen("EF_FMT", %d)", EF_PRI_ARGS(epi,fdinfo->fd),
               backlog));
@@ -505,15 +505,6 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
     CITP_STATS_NETIF(++epi->sock.netif->state->stats.tcp_handover_listen);
     tcp_handover(epi);
     return rc;
-  }
-
-  if( rc == 0 ) {
-    /* Make OS socket non-blocking. */
-    if( citp_sock_fcntl_os_sock(epi, fdinfo->fd, F_GETFL, 0, "F_GETFL",
-                                &fcntl_result) >= 0 && fcntl_result >= 0 )
-      citp_sock_fcntl_os_sock(epi, fdinfo->fd, F_SETFL,
-                              fcntl_result | O_NONBLOCK,
-                              "F_SETFL", &fcntl_result);
   }
 
   citp_fdinfo_release_ref( fdinfo, 0 );
@@ -1018,13 +1009,19 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
      */
     if( !(s->s_flags & CI_SOCK_FLAG_TPROXY) ||
          (s->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND) ) {
+      rc = 0;
       ci_netif_lock_fdi(epi);
       if( ~epi->sock.s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED ) {
         rc = ci_tcp_helper_os_sock_create_and_set(epi->sock.netif, fdinfo->fd,
                                                   epi->sock.s,
-                                                  0, 0, NULL, 0);
+                                                  -1, 0, NULL, 0);
       }
       ci_netif_unlock_fdi(epi);
+      if( rc < 0 ) {
+        /* Too bad, but we can't do anything.  Return to the user. */
+        citp_fdinfo_release_ref( fdinfo, 0 );
+        RET_WITH_ERRNO(-rc);
+      }
 
       /* Try to connect the OS socket. OS connect also syncs non-blocking
        * state between UL/OS sockets. */
@@ -1233,6 +1230,7 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
   int rc = 0;
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
   ci_sock_cmn* s = epi->sock.s;
+  ci_tcp_state* ts;
   ci_netif* netif = epi->sock.netif;
   ci_tcp_socket_listen* tls;
 
@@ -1247,9 +1245,20 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     return 0;
   }
 
+  /* All listening sockets have OS-backed socket. Hence, our socket is
+   * a connected socket. */
+  ts = SOCK_TO_TCP(s);
+
   /* SO_LINGER handled in the kernel. */
-  if( s->b.state != CI_TCP_LISTEN && (s->s_flags & CI_SOCK_FLAG_LINGER) ) {
+  if( s->s_flags & CI_SOCK_FLAG_LINGER ) {
     Log_EP(ci_log("FD %d not cached - SO_LINGER set", fdinfo->fd));
+    return 0;
+  }
+  
+  /* Loopback sockets lack hw filter - shouldn't cache. */
+  if( OO_SP_NOT_NULL(ts->local_peer) &&
+      ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) {
+    Log_EP(ci_log("FD %d not cached - accelerated loopback", fdinfo->fd));
     return 0;
   }
 
@@ -1290,7 +1299,7 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
 
   /* We need to decide whether this socket should go on the passive- or
    * active-open cache, as the remaining work is different in each case. */
-  if( SOCK_TO_TCP(s)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED ) {
+  if( ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED ) {
     rc = ci_netif_listener_lookup(netif, sock_laddr_be32(s),
                                   sock_lport_be16(s));
     if( rc < 0 ) {
@@ -1536,14 +1545,23 @@ static int citp_tcp_recv(citp_fdinfo* fdinfo, struct msghdr* msg, int flags)
   if (epi->sock.s->b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK|CI_SB_AFLAG_O_NDELAY))
     flags |= MSG_DONTWAIT;
 
+  if( (flags & (MSG_WAITALL | ONLOAD_MSG_ONEPKT)) ==
+      (MSG_WAITALL | ONLOAD_MSG_ONEPKT) ) {
+    Log_E(ci_log("WAITALL and ONEPKT is not a valid flag combination"));
+    errno = EINVAL;
+    return -1;
+  };
+
   Log_V(ci_log(LPF "recv("EF_FMT", len=%d, "CI_SOCKCALL_FLAGS_FMT")",
             EF_PRI_ARGS(epi,fdinfo->fd),
             ci_iovec_bytes(msg->msg_iov, msg->msg_iovlen),
             CI_SOCKCALL_FLAGS_PRI_ARG(flags)));
 
   if( epi->sock.s->b.state != CI_TCP_LISTEN ) {
-    if (msg->msg_iovlen == 0 || msg->msg_iov == NULL)
+    if (msg->msg_iovlen == 0 || msg->msg_iov == NULL) {
+      msg->msg_flags = 0;
       return 0;
+    }
     ci_tcp_recvmsg_args_init(&a, epi->sock.netif, SOCK_TO_TCP(epi->sock.s),
                              msg, flags);
     rc = ci_tcp_recvmsg(&a);

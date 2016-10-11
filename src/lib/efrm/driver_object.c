@@ -470,16 +470,64 @@ EXPORT_SYMBOL(efrm_nic_present);
 /* Arguably this should be in lib/efhw.  However, right now this function
  * is a layer violation because it assumes that the efhw_nic is embedded in
  * a linux_efhw_nic.  That is only necessarily true in the resource driver.
+ *     If this function returns non-NULL, it will return holding a semaphore,
+ * which the caller must release by calling efhw_nic_release_dl_device().  A
+ * consequence of this is that this function and that function have
+ * locking/unlocking semantics, with all of the usual consequences for
+ * lock-ordering etc.  In particular, since this function is sometimes called
+ * with the RTNL lock held, it is not safe to attempt to take that lock in
+ * between calls to this function and efhw_nic_release_dl_device().
  */
-struct efx_dl_device* efhw_nic_dl_device(struct efhw_nic* efhw_nic)
+struct efx_dl_device* efhw_nic_acquire_dl_device(struct efhw_nic* efhw_nic)
 {
 	struct efrm_nic* rnic = efrm_nic(efhw_nic);
 	struct linux_efhw_nic* lnic = linux_efhw_nic(efhw_nic);
+	struct efx_dl_device* dl_device;
 	if (rnic->rnic_flags & EFRM_NIC_FLAG_DRIVERLINK_PROHIBITED)
 		return NULL;
-	return lnic->dl_device;
+
+	/* Acquire the lock if the driverlink device is live, taking care to
+	 * avoid races against it changing under our feet. */
+	dl_device = ACCESS_ONCE(lnic->dl_device);
+	if (dl_device != NULL) {
+		down_read(&lnic->dl_sem);
+
+		/* A flush might have occurred between the first check and
+		 * obtaining the lock, so we must re-obtain the handle. */
+		dl_device = ACCESS_ONCE(lnic->dl_device);
+		if (dl_device == NULL) {
+			up_read(&lnic->dl_sem);
+			return NULL;
+		}
+	}
+
+	return dl_device;
 }
-EXPORT_SYMBOL(efhw_nic_dl_device);
+EXPORT_SYMBOL(efhw_nic_acquire_dl_device);
+
+
+/* Releases a driverlink device handle acquired by
+ * efhw_nic_acquire_dl_device().  This is safe to call even if the handle is
+ * NULL. */
+void efhw_nic_release_dl_device(struct efhw_nic* efhw_nic,
+				struct efx_dl_device* dl_device)
+{
+	if( dl_device != NULL )
+		up_read(&linux_efhw_nic(efhw_nic)->dl_sem);
+}
+EXPORT_SYMBOL(efhw_nic_release_dl_device);
+
+
+/* Waits until there are no outstanding holders of the driverlink device for
+ * the NIC.  This suffers from the usual reader-writer-lock starvation problem;
+ * callers might wish to take measures to prevent further acquisitions of the
+ * semaphore before calling this function. */
+void efhw_nic_flush_dl(struct efhw_nic* efhw_nic)
+{
+	struct linux_efhw_nic* lnic = linux_efhw_nic(efhw_nic);
+	down_write(&lnic->dl_sem);
+	up_write(&lnic->dl_sem);
+}
 
 
 #endif  /* __KERNEL__ */

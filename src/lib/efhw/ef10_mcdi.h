@@ -228,3 +228,17 @@ ci_inline ci_uint16 efhw_mcdi_read(char *addr)
 					      MC_CMD_ ## _name5, _value5,\
 					      MC_CMD_ ## _name6, _value6,\
 					      MC_CMD_ ## _name7, _value7)
+#define EFHW_MCDI_POPULATE_DWORD_8(_buf, _field, _name1, _value1,        \
+				   _name2, _value2, _name3, _value3,     \
+				   _name4, _value4, _name5, _value5,     \
+				   _name6, _value6, _name7, _value7,     \
+				   _name8, _value8)                      \
+	CI_POPULATE_DWORD_8(*_EFHW_MCDI_DWORD(_buf, _field),             \
+					      MC_CMD_ ## _name1, _value1,\
+					      MC_CMD_ ## _name2, _value2,\
+					      MC_CMD_ ## _name3, _value3,\
+					      MC_CMD_ ## _name4, _value4,\
+					      MC_CMD_ ## _name5, _value5,\
+					      MC_CMD_ ## _name6, _value6,\
+					      MC_CMD_ ## _name7, _value7,\
+					      MC_CMD_ ## _name8, _value8)

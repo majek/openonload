@@ -134,6 +134,14 @@ if $all || $kernel; then
     echo "EFX_EXPORTED := 1" >>"$d/options_config.mk"
     nodeps=MMAKE_NO_DEPS=1
   fi
+
+  TOP=$("$bin/mmaketool" --toppath)
+  driver_prebuilt="$("$bin/mmaketool" --processor)_linux"
+  if [ -d "$TOP/prebuilt/${driver_prebuilt}" ]; then
+    try cp -a "$TOP/prebuilt/${driver_prebuilt}"/* "$d"
+    echo "PREBUILD_CPLANE := 1" >>"$d/options_config.mk"
+  fi
+
   make -j4 -C "$d" ONLOAD_ONLY=1 $nodeps ||
     fail "ERROR: Failed to build driver components."
 fi
@@ -148,6 +156,13 @@ if $all || $user || $user64; then
       try mmakebuildtree "$userplatform"
       nodeps=MMAKE_NO_DEPS=1
     fi
+    
+    TOP=$("$bin/mmaketool" --toppath)
+    if [ -d "$TOP/prebuilt/$userplatform" ]; then
+      try cp -a "$TOP/prebuilt/$userplatform" .
+      echo "PREBUILD_CPLANE := 1" >>"$userplatform/options_config.mk"
+    fi
+
     make -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps ||
       fail "ERROR: Failed to build 64-bit user-level components."
 
@@ -175,6 +190,13 @@ if $all || $user || $user32; then
     try mmakebuildtree "$userplatform"
     nodeps=MMAKE_NO_DEPS=1
   fi
+
+  TOP=$("$bin/mmaketool" --toppath)
+  if [ -d "$TOP/prebuilt/$userplatform" ]; then
+    try cp -a "$TOP/prebuilt/$userplatform" .
+    echo "PREBUILD_CPLANE := 1" >>"$userplatform/options_config.mk"
+  fi
+
   make -j4 -C "$userplatform" ONLOAD_ONLY=1 $nodeps || {
     if $is64; then
       err

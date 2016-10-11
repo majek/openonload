@@ -88,7 +88,12 @@ ef_vi_inline void falcon_rx_desc_consumed(ef_vi* vi, const ef_vi_event* ev,
   if( QWORD_TEST_BIT(RX_JUMBO_CONT, *ev) )
     ev_out->rx.flags |= EF_EVENT_FLAG_CONT;
 
-  if(likely( QWORD_TEST_BIT(RX_EV_PKT_OK, *ev) )) {
+  /* Don't discard if packet ok or discard mask indicates
+   * error type should not generate discard event.
+   * Multicast mismatch always generates discard.
+   */
+  if(likely( QWORD_TEST_BIT(RX_EV_PKT_OK, *ev) )
+    || ( ! (ev->u64[0] & vi->rx_discard_mask) )) {
   dont_discard:
     ev_out->rx.len = QWORD_GET_U(RX_EV_BYTE_CNT, *ev);
     ev_out->rx.type = EF_EVENT_TYPE_RX;

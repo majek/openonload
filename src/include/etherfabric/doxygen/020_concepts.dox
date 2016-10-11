@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2015: Solarflare Communications Inc,
+ * Copyright 2005-2016: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -27,8 +27,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2015/02/14
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2016/06/13
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -221,9 +221,19 @@ handled at a higher level:
 - Received packets can be filtered by VLAN, but this requires a recent 
   adapter running full feature firmware. There are also limitations on what 
   other filters can simultaneously be used. For more details, see 
-ef_filter_spec_set_vlan().
+  ef_filter_spec_set_vlan().
 - Transmitted packets can have their VLAN set by adding the desired VLAN 
   tag to the extended header. Unlike checksums, %ef_vi does not provide an 
   offload for this.
+
+\section tx_alternatives TX Alternatives
+
+_TX alternatives_ provide multiple alternative queues for transmission, that 
+can be used to minimize latency. Different possible responses can be pushed 
+through the TX path on the NIC, and held in different queues ready to 
+transmit. When it is decided which response to transmit, the appropriate 
+alternative queue is selected, and the queued packets are sent. Becasue the 
+packets are already prepared, and are held close to the wire, latency is 
+greatly reduced. 
 
 */

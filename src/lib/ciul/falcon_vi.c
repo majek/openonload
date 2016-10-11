@@ -258,6 +258,15 @@ void falcon_vi_init(ef_vi* vi)
    */
   vi->rx_buffer_len = 2048 - 256;
 
+  /* Set default rx_discard_mask for falcon */
+  vi->rx_discard_mask =
+    CI_BSWAPC_LE64(1LL << RX_EV_TOBE_DISC_LBN
+                   | 1LL << RX_EV_TCP_UDP_CHKSUM_ERR_LBN
+                   | 1LL << RX_EV_IP_HDR_CHKSUM_ERR_LBN
+                   | 1LL << RX_EV_ETH_CRC_ERR_LBN
+                   | 1LL << RX_EV_FRM_TRUNC_LBN
+                   | 1LL << RX_EV_BUF_OWNER_ID_ERR_LBN);
+
   falcon_vi_initialise_ops(vi);
 }
 

@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.5.1.1037
+Version:  4.8.2.1004
 
 
 Overview
@@ -15,6 +15,8 @@ The drivers contained in this package support the following Solarflare
 adapters:
 
 - Solarflare Flareon [Ultra] Server Adapters:
+  - Solarflare SFN8022 Dual Port SFP+ Server Adapter
+  - Solarflare SFN8522 Dual Port SFP+ Server Adapter
   - Solarflare SFN7002F Dual Port SFP+ Server Adapter
   - Solarflare SFN7004F Quad Port SFP+ Server Adapter
   - Solarflare SFN7042Q Dual Port QSFP+ Server Adapter
@@ -71,7 +73,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.5.1.1037
+   version: 4.8.2.1004
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -96,7 +98,7 @@ Linux distribution support for Solarflare Adapters
 
 This driver package is supported on:
  - RedHat Enterprise Linux		          5.10,  5.11
- - RedHat Enterprise Linux		          6.5, 6.6, 6.7
+ - RedHat Enterprise Linux		          6.5, 6.6, 6.7, 6.8
    - Redhat Messaging Realtime and Grid           2.4, 2.5
  - RedHat Enterprise Linux 		          7.0, 7.1, 7.2
    - RedHat Enterprise Linux for Realtime	  7.1
@@ -107,7 +109,7 @@ This driver package is supported on:
  - Canonical Ubuntu Server                        14.10, 15.04
  - Debian 7 "Wheezy"                              7.7
  - Debian 8 "Jessie"                              8.0
- - Linux                                          2.6.18 to 4.3
+ - Linux                                          2.6.18 to 4.6
 
 
 This driver has been tested as a VF driver using KVM / ESXi 5.5 and ESXi 6.0
@@ -330,6 +332,214 @@ Issue 50868:
 
 Changelog
 ---------
+
+### v4.8.2.1004 -- GA release adding support for SFN8x22 adapters.
+
+[SFN8522 support]
+ ~ Added full support for SFN8522 series Solarflare adapters.
+ ~ BETA quality support for stateless checksum offloads for NVGRE,VXLAN,GENEVE
+   tunnels created as native linux tunnels or as OpenVSwitch (OVS) tunnels.
+ ~ Please note that SFN8x42 40G QSFP+ adapters are still going through a test
+   cycle at this time and driver/firmware updates will be made available to
+   accompany the GA of these products.
+ ~ Use 4K PIO buffers on SFN8XXX adapters.
+ ~ Adds a module parameter "performance_profile" to allow selection of
+   broad tuning options, allowing selection of low latency ('latency') or
+   high throughput ('throughput') profiles. The default is 'auto', in
+   which the profile is selected based off licensed options on the NIC.
+   At present this only changes the event queue initialization options on 8000
+   series adapters.
+
+[BETA support for overlays/tunnels/encapsulation on SFN8XXX adapters]
+ ~ Add support for encapsulated TSO for 8000 series NICs.
+ ~ Add message when adapter resets due to VXLAN port list change.
+ ~ Add debugfs entry "vxlan_ports" to print the list of VXLAN ports.
+
+[onload]
+Issue 62104:
+ ~ More conservatively account for the number of wakeup events that the driver
+   might have to handle, one for each possible onload stack. This prevents
+   event queue overflows in rare cases.
+
+
+### v4.8.0.1071 -- Beta feature release
+[General changes]
+ ~ BETA quality driver support for SFN8XXX series adapters.
+   Please DO NOT use this driver in production environments as it has not
+   completed the full suite of testing at Solarflare.
+ ~ Support for checksum offloads in the presense of encapsulation/overlay
+   networks (tunnels) on SFN8XXX hardware. Outer frames of
+   (NV)GRE / VxLAN / GENEVE are supported.
+ ~ Support for more efficient TSO on SFN8XXX adapters.
+ ~ Use symmetric RSS hash by default.
+   This is most useful when sniffing both sides of a TCP conversation. This
+   ensures that all packets are directed to the same RX queue and all are
+   handled in-order.
+ ~ Add "tso_version" and "csum_offload" to TX queue information in debugfs.
+ ~ Attach hardware RX timestamps to SKBs in GRO and LRO code-paths.
+ ~ Support IPv6 flow-steering in ethtool rxnfc API (still needs support in
+   ethtool)
+ ~ Support encap-over-IPv6 in ethtool n-tuple API (still needs support in
+   ethtool)
+ ~ Support for SKB xmit_more flags in compatible kernels.
+ ~ Change to use the 4-tuple UDP RSS hashing, as the resulting hash value will
+   help improve GRO performance.
+ ~ Read adadpter PCIe configuration to warn on PCIe lane width or speed not
+   being optimal for the adapter in use.
+
+[EF-VI support]
+ ~ Do not treat a broadcast filter as exclusive in filter logic.
+   This prevented ef_vi from installing >1 UDP filter with the local IP set
+   to broadcast.
+
+[Stratus ftServer support]
+Issue 57944:
+ ~ Take a read lock on the filter table when performing driverlink (onload/EFVI)
+   operations on filters; as there was a possible NULL pointer dereference if
+   there was a race with PCIe hot-plug.
+
+[General fixes]
+Issue 62086:
+ ~ On MC reset (e.g. running sfupdate or ethtool -t offline tests), clear PIO
+   buffer linkage in TXQs. Otherwise, if we fail to allocate new PIO buffers,
+   TXQs will try to use the old deallocated PIO buffers and this will cause an
+   error.
+
+Issue 58215:
+ ~ Remove suprious WARNING from efx_hard_start_xmit() seen after "ethtool -t"
+   off-line self-tests. Use of "ethtool -t" can be identified from
+   "MC entered BIST mode" in the kernel log.
+
+Issue 57217:
+ ~ Fix taking the network interface into promiscuous (or allmulti) mode when
+   running with low-latency firmware variant.
+     i.e "sfboot firmware-variant=ultra-low-latency".
+   The error message seen would be:
+     Unicast mismatch filter insert failed rc=-93
+     Multicast mismatch filter insert failed rc=-93
+
+Issue 41741:
+ ~ Implement shutdown() driver entry point. This helps quiesce the Solarflare
+   adapter when using kexec to transition to a new kernel. This issue was seen
+   on IBM POWER machines that raised EEH errors during the kexec.
+
+Issue 33781:
+ ~ "ethtool -S" statistic "port_rx_bad_bytes" was not being correctly reset in
+   all cases.
+
+
+### v4.7.1.1000 -- Update release
+[General changes]
+ ~ Build fixes for linux 4.5 kernels.
+ ~ Provide an option to place external network port PHY into power down when the
+   network interface is administratively down. This means the link partner also
+   sees link down. Currently this is controlled via an ethtool private flag:
+    - To enable/disable:
+       ethtool --set-priv-flags DEVNAME phy-power-follows-link (on|off)
+    - To show current state:
+       ethtool --show-priv-flags DEVNAME
+ ~ support IPv6 flow steering (needs ethtool support that is not yet released).
+
+Issue 53130
+ ~ Create MTD partitions (to allow sfupdate) even if NVRAM metadata cannot
+    be successfully read.
+
+[Stratus ftServer support]
+Issue 60796:
+ ~ Fix efx_mcdi_acquire_sync() returning -ETIMEDOUT on impolite unplug.
+
+
+### v4.7.0.1035 -- Update release
+
+[General changes]
+ ~ expose SFA7942Q flash partitions via MTD (to speed up sfupdate)
+ ~ Include Stratus ftServer improvements from v4.5.1.1037
+ ~ Use timespec64 if available for y2038 compatibility.
+
+Issue 59734:
+ ~ Fix detection of PHC so that /dev/ptp* is registered on SLES11/12
+
+Issue 59701 & 58885:
+ ~ Take the mac_lock in efx_ef10_sriov_set_vf_mac()
+   This fixes a kernel panic in efx_ef10_filter_vlan_sync_rx_mode() when
+   using SR-IOV direct pass-thru mode.
+
+
+### v4.7.0.1031 -- Feature release 
+
+[General changes]
+ ~ Support adapter firmware state dump via ethtool.
+ ~ Set IRQ interrupt hints for 3.x kernels. The irqbalance service using
+   policy=strict will follow these hints.
+ ~ NAPI budget now only applies to receive processing (previously TX completion
+   and other internal events were incorrectly counted towards the budget).
+ ~ Use symmetric RSS hash key by default. This allows applications such as IDS
+   to ensure that both directions of a TCP stream will be spread via RSS to
+   the same channel.
+ ~ Implement VLAN filtering. (only on full-featured adapter firmware variant)
+
+[SR-IOV]
+ ~ Implement sriov_set_vf_spoofchk() for SFN7XXX adapters.
+
+[Performance]
+ ~ Automatically configure XPS at driver load (on kernels where this is
+   supported).
+ ~ Implement IRQ notifiers so that XPS can match any changes to interrupt
+   affinity.
+ ~ Report TX completions to BQL after all TX events from an interrupt/NAPI poll.
+   This gives a significant improvement to UDP transaction rates using RHEL7 or
+   SLES12 kernels.
+ ~ read EVQ in cache line batches.
+ ~ allocate rx pages on the same node as the interrupt.
+ ~ Improve performance when the driver is asked to add/strip VLAN tags for
+   linux kernels >=3.0.
+
+[General VMware ESXi support]
+Issue 43845:
+  ~ Avoid installation of duplicate default unicast and multicast Rx filters.
+Issue 57409:
+  ~ Disable RSS by default ('num_rss_netqs' module parameter with value greater
+    than zero may be used to enable RSS on specified number of NetQueues).
+
+[Support SR-IOV on VMware ESXi 5.5 and 6.0]
+First release supporting SR-IOV on VMware ESXi (SFN7xxx adapters only).
+This support requires sfutils >=v4.7.0.1004 which contains adapter firmware
+v4.7.0.1019 and firmware-variant=full-feature (setup with sfboot).
+See chapter "SR-IOV Virtualization Using ESXi" of the "Solarflare Server
+Adapter User's Guide".
+  ~ Support 'max_vfs' module parameter to request specified number of VFs
+    for each PF.
+  ~ Enforce PF promiscuous mode if VFs are requested (required on ESXi 5.5 only
+    since ESXi 6.0 enforces this itself).
+  ~ Support VF MAC address configuration; security settings of the port group
+    that the VM network interface belongs to should be used to control it.
+  ~ Support VF default VLAN tagging done by the NIC.
+  ~ Support VF anti-spoofing control configured as "allow/deny forged
+    transmits" in security settings of the port group the VM network interface
+    belongs to.
+  ~ Support reading VF statistics from the hypervisor (for example,
+    esxcli network sriovnic vf stats -n vmnic2 -v 0).
+  ~ Support MTU change requested on VF, if allowed by hypervisor. This is
+    configurable in VM network interface settings.
+  ~ Support VF promiscuous mode, if allowed by hypervisor (ESXi 6.0 only).
+  ~ Support VF VLAN membership control by hypervisor; only untagged traffic
+    is allowed by default.
+
+Issue 51699:
+ ~ Fix lockdep warning on driver unload.
+
+Issue 56887:
+  ~ Fix memory leak for EFX_MCDI_REQUEST private ioctl calls e.g. from sfupdate.
+
+Issue 56934:
+  ~ avoid rx copybreak on GRO tail packet to avoid potential reordering.
+
+
+### v4.5.1.1038 -- Update release
+
+[Stratus ftServer support]
+Issue 59975:
+  ~ Add workaround for loss of RX doorbell in a "breaker" test.
 
 ### v4.5.1.1037 -- Update release
 

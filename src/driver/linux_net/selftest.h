@@ -62,7 +62,7 @@ struct efx_self_tests {
 void efx_loopback_rx_packet(struct efx_nic *efx, const char *buf_ptr,
 			    int pkt_len);
 int efx_selftest(struct efx_nic *efx, struct efx_self_tests *tests,
-		 unsigned flags);
+		 unsigned int flags);
 void efx_selftest_async_start(struct efx_nic *efx);
 void efx_selftest_async_cancel(struct efx_nic *efx);
 void efx_selftest_async_work(struct work_struct *data);

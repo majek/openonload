@@ -36,10 +36,7 @@
 #ifdef __KERNEL__
 # include <onload/oof_interface.h>
 #endif
-#ifndef __KERNEL__
-#include <ci/internal/cplane_handle.h>
-#endif
-#include <ci/internal/cplane_ops.h>
+#include <onload/cplane_ops.h>
 
 
 #ifdef __KERNEL__
@@ -49,6 +46,11 @@
  * definition so just define it to 0.
  */
 #define ONLOAD_MSG_WARM 0
+
+/* ONLOAD_MSG_ONEPKT is only used in user space receive calls, so use
+ * the same trick as for ONLOAD_MSG_WARM above.
+ */
+#define ONLOAD_MSG_ONEPKT 0
 #endif
 
 
@@ -277,7 +279,7 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
                                         need_update);
 #endif
 
-  LOG_TC( if (rc < 0)
+  LOG_TC( if (rc < 0 && rc != -EAGAIN)
             ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
   return rc;
 }
@@ -759,8 +761,8 @@ ci_inline int ci_netif_intf_i_to_base_ifindex(ci_netif* ni, int intf_i)
   ci_hwport_id_t hwport;
   ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
   hwport = ni->state->intf_i_to_hwport[intf_i];
-  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_REGISTER_INTERFACES);
-  return cicp_fwd_hwport_to_base_ifindex(&CICP_MIBS(CICP_HANDLE(ni))->user,
+  ci_assert_lt((unsigned) hwport, CPLANE_MAX_REGISTER_INTERFACES);
+  return cicp_fwd_hwport_to_base_ifindex(&CICP_USER_MIBS(CICP_HANDLE(ni)),
                                          hwport);
 }
 

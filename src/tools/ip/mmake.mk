@@ -13,8 +13,7 @@ APPS	+= locktest
 endif
 
 ifeq ($(GNU),1)
-APPS	+= iifdump \
-           routedump \
+APPS	+= routedump \
            pio_buddy_test \
            locktest
 endif
@@ -33,9 +32,11 @@ onload_fe	:= $(patsubst %,$(AppPattern),onload_fe)
 endif
 
 MMAKE_LIBS	:= $(LINK_CIIP_LIB) $(LINK_CIAPP_LIB) \
-		   $(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB)
+		   $(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB) \
+		   $(LINK_CPLANE_LIB)
 MMAKE_LIB_DEPS	:= $(CIIP_LIB_DEPEND) $(CIAPP_LIB_DEPEND) \
-		   $(CIUL_LIB_DEPEND) $(CITOOLS_LIB_DEPEND)
+		   $(CIUL_LIB_DEPEND) $(CITOOLS_LIB_DEPEND) \
+		   $(CPLANE_LIB_DEPEND)
 
 MMAKE_STACKDUMP_LIBS := $(LINK_ONLOAD_EXT_LIB)
 MMAKE_STACKDUMP_DEPS := $(ONLOAD_EXT_LIB_DEPEND)

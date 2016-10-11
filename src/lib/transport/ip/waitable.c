@@ -109,10 +109,6 @@ citp_waitable_obj* citp_waitable_obj_alloc(ci_netif* netif)
                 OO_SP_FMT(netif->state->free_eps_head)));
 
   ci_assert(IS_VALID_SOCK_P(netif, netif->state->free_eps_head));
-#if !defined(__KERNEL__) && !defined (CI_HAVE_OS_NOPAGE)
-  ci_netif_mmap_shmbuf(netif,
-                       (netif->state->free_eps_head >> EP_BUF_BLOCKSHIFT) + 1);
-#endif
   wo = SP_TO_WAITABLE_OBJ(netif, netif->state->free_eps_head);
 
   ci_assert(OO_SP_EQ(W_SP(&wo->waitable), netif->state->free_eps_head));

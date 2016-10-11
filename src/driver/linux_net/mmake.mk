@@ -12,6 +12,7 @@ ifdef DRIVER
 
 export CONFIG_SFC := m
 export CONFIG_SFC_DEBUGFS := y
+export CONFIG_SFC_DUMP := y
 export CONFIG_SFC_HWMON := y
 export CONFIG_SFC_MCDI_MON := y
 export CONFIG_SFC_SFE4001 := y
@@ -68,7 +69,7 @@ ifdef BUILD_INKERNEL_TESTS
 DRIVER_SUBDIRS := unittest_filters
 endif
 
-ifneq ($(findstring $(shell uname -p),x86_64 i686),)
+ifneq ($(findstring $(shell uname -p),x86_64),)
 DRIVER_SUBDIRS += unittest
 endif
 

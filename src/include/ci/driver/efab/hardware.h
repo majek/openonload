@@ -152,15 +152,12 @@
 
 #define efhw_nic_event_queue_enable(nic, evq, size, buf_base, dma_addrs, \
 				    n_pages, interrupting, dos_p, wakeup_evq, \
-                                    enable_time_sync_events,            \
-                                    enable_cut_through, flags_out)      \
+                                    flags, flags_out)                   \
   ((nic)->efhw_func->event_queue_enable((nic), (evq), (size),           \
                                         (buf_base), (dma_addrs),        \
                                         (n_pages), (interrupting),      \
                                         (dos_p), (wakeup_evq),          \
-                                        (enable_time_sync_events),      \
-                                        (enable_cut_through),           \
-					(flags_out)))
+                                        (flags), (flags_out)))
 
 #define efhw_nic_event_queue_disable(nic, evq, time_sync_events_enabled) \
 	((nic)->efhw_func->event_queue_disable(nic, evq,		\
@@ -267,6 +264,14 @@
 
 #define efhw_nic_license_check(nic, feature, licensed) \
 	((nic)->efhw_func->license_check(nic, feature, licensed))
+
+#define efhw_nic_v3_license_challenge(nic, app_id, challenge, expiry, \
+					days, signature, base_mac, v_mac) \
+	((nic)->efhw_func->v3_license_challenge(nic, app_id, \
+						challenge, expiry, days, \
+						signature, base_mac, v_mac))
+#define efhw_nic_v3_license_check(nic, feature, licensed) \
+	((nic)->efhw_func->v3_license_check(nic, feature, licensed))
 
 /*-------------- Stats ---------------- */
 #define efhw_nic_get_rx_error_stats(nic, instance, data, data_len, do_reset) \

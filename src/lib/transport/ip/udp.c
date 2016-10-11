@@ -28,7 +28,6 @@
 
 #include "ip_internal.h"
 #include "udp_internal.h"
-#include <ci/internal/cplane_ops.h> /* for ip.h ci_ip_cache_init */
 
 
 #define LPF "ci_udp_"

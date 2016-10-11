@@ -19,15 +19,6 @@
 #include <ci/compat.h>
 
 
-/* A fixed width ptr wrapper. */
-typedef struct {
-  ci_uint64 ptr CI_ALIGN(8);
-} ci_user_ptr_t;
-
-#define CI_USER_PTR_GET(p)    ((void *)((ci_uintptr_t)((p).ptr)))
-#define CI_USER_PTR_SET(p,x)  ((p).ptr = (ci_uint64)(ci_uintptr_t)(x))
-
-
 typedef struct ci_netif_s		ci_netif;
 typedef struct ci_netif_state_s		ci_netif_state;
 typedef struct ci_ip_pkt_fmt_s		ci_ip_pkt_fmt;
@@ -48,24 +39,6 @@ struct oo_timeval {
   ci_int32 tv_sec;
   ci_int32 tv_usec;
 };
-
-/* Fixed width type equivalent of struct timespec */
-struct oo_timespec {
-  ci_int32 tv_sec;
-  ci_int32 tv_nsec;
-};
-
-
-typedef volatile ci_uint32 ci_verlock_t;  /*< asyncronously updatable value */
-typedef ci_uint32   ci_verlock_value_t;   /*< snapshot of a ci_verlock_t    */
-
-/*! a value that a properly initialized version number will never take */
-#define CI_VERLOCK_BAD 0
-/*! an initial version number that indicates initially valid data */
-#define CI_VERLOCK_INIT_VALID 1
-/*! an initial version number that indicates initially invalid data */
-#define CI_VERLOCK_INIT_INVALID 2
-
 
 typedef struct {
   volatile ci_uint32 n;

@@ -730,6 +730,8 @@ void ci_tcp_state_free_to_cache(ci_netif* netif, ci_tcp_state* ts)
 */
 void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
 {
+  int rc = 0;
+
   ci_assert(ci_netif_is_locked(netif));
   ci_assert(ts->s.b.state != CI_TCP_LISTEN);
 
@@ -768,10 +770,10 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
   if( !ci_tcp_is_cached(ts) ) {
     if( !ci_ni_dllist_is_self_linked(netif, &ts->epcache_link) ) {
       ci_ni_dllist_remove_safe(netif, &ts->epcache_link);
-      ci_tcp_ep_clear_filters(netif, S_SP(ts), 1);
+      rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 1);
     }
     else {
-      ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
+      rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
     }
   }
   else {
@@ -782,7 +784,7 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
     ts->s.s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
   }
 #else
-  ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
+  rc = ci_tcp_ep_clear_filters(netif, S_SP(ts), 0);
 #endif
 
   if( ts->s.b.sb_aflags & CI_SB_AFLAG_TCP_IN_ACCEPTQ ) {
@@ -790,7 +792,22 @@ void ci_tcp_drop(ci_netif* netif, ci_tcp_state* ts, int so_error)
   }
   else if( ts->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN ) {
     ci_assert(!ci_tcp_is_cached(ts));
+#ifdef __KERNEL__
+    /* If the filters have not gone yet, we should not free the endpoint. */
+    __ci_tcp_state_free(netif, ts);
+    if( rc == -EAGAIN ) {
+      tcp_helper_endpoint_t* ep = ci_netif_get_valid_ep(netif,  S_SP(ts));
+      tcp_helper_endpoint_queue_non_atomic(ep, OO_THR_EP_AFLAG_NEED_FREE);
+    }
+    else {
+      ci_assert_equal(rc, 0);
+      citp_waitable_obj_free(netif, &ts->s.b);
+    }
+#else
+    ci_assert_equal(rc, 0);
     ci_tcp_state_free(netif, ts);
+    (void)rc; /* unused in UL NDEBUG build */
+#endif
   }
 #if CI_CFG_FD_CACHING
   else if( ci_tcp_is_cached(ts) ) {
@@ -1300,7 +1317,7 @@ static void ci_tcp_sync_opt_timeval(struct socket* sock, int* err,
 {
   int rc;
 
-  rc = kernel_setsockopt(sock, level, optname, (char*)&tv,
+  rc = kernel_setsockopt(sock, level, optname, (char*)(ci_uintptr_t)tv,
                          sizeof(struct timeval));
   if( rc < 0 ) {
     ci_log("%s: ERROR (%d) failed to set socket option %d %d to val %lx:%lx "

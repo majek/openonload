@@ -9157,7 +9157,7 @@ dir_stack_get(dir_t *basedir, const value_t *name)
     if (NULL != dirstack && NULL != dirstack->stack)
     {   dir_t *dir = dirstack->stack;
 
-	if (dir != basedir);
+	if (dir != basedir)
 	{   DEBUGDIR(DPRINTF("dir_stack: first get name %p in dir %p\n",
 			     name, dir);)
 	    while (dir != NULL && 

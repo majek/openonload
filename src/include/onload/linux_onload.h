@@ -201,16 +201,6 @@ task_nsproxy_done(struct task_struct *tsk)
 #endif
 #endif
 
-#ifndef EFRM_SOCK_CREATE_KERN_HAS_NET
-struct net;
-static inline int my_sock_create_kern(struct net *net, int family, int type,
-                                  int proto, struct socket **res)
-{
-  return sock_create_kern(family, type, proto, res);
-}
-#define sock_create_kern my_sock_create_kern
-#endif
-
 
 /* Correct sequence for per-cpu variable access is: disable preemption to
  * guarantee that the CPU is not changed under your feet - read/write the

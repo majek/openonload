@@ -567,6 +567,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   size_t total_unsent = 0;
   ci_ip_cached_hdrs* ipcache = &ts->s.pkt;
   int intf_i;
+  ci_netif_state_nic_t* nsn;
   ci_ip_pkt_fmt* pkt;
   ci_iovec_ptr piov;
   ci_ip4_hdr* ip;
@@ -624,6 +625,9 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
        */
       break;
 
+    case retrrc_localroute:
+      goto local_route;
+
     default:
       LOG_U(ci_log("%s: cplane status=%d", __FUNCTION__, ipcache->status));
       rc = -EHOSTUNREACH;
@@ -632,6 +636,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   }
 
   if( ipcache->flags & CI_IP_CACHE_IS_LOCALROUTE ) {
+   local_route:
     LOG_U(ci_log("%s: templated sends not supported on loopback connections",
                  __FUNCTION__));
     rc = -EOPNOTSUPP;
@@ -639,6 +644,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   }
 
   intf_i = ipcache->intf_i;
+  nsn = &ni->state->nic[intf_i];
 
   /* Compute total msg size. */
   for( i = 0; i < mlen; ++i ) {
@@ -663,8 +669,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
      * XXX: maybe add a assertion to the effect of the above comment.
      */
     int max_pio_pkt, max_buf_pkt;
-    /* FIXME: magic number */
-    max_pio_pkt = 2048 /* Max PIO region size */ - ETH_VLAN_HLEN;
+    max_pio_pkt = nsn->pio_io_len - ETH_VLAN_HLEN;
     max_buf_pkt =
       CI_CFG_PKT_BUF_SIZE - CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start);
     max_payload = CI_MIN(max_buf_pkt, max_pio_pkt);
@@ -694,8 +699,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   pkt->intf_i = intf_i;
   pkt->pio_order = ci_log2_ge(ts->outgoing_hdrs_len + ETH_HLEN + ETH_VLAN_HLEN
                               + total_unsent, CI_CFG_MIN_PIO_BLOCK_ORDER);
-  pkt->pio_addr = ci_pio_buddy_alloc(ni, &ni->state->nic[intf_i].pio_buddy,
-                                     pkt->pio_order);
+  pkt->pio_addr = ci_pio_buddy_alloc(ni, &nsn->pio_buddy, pkt->pio_order);
   if( pkt->pio_addr < 0 ) {
     pkt->pio_addr = -1;
     if( ! (flags & ONLOAD_TEMPLATE_FLAGS_PIO_RETRY) ) {
@@ -721,6 +725,11 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   oo_pkt_filler_add_pkt(&sinf->pf, pkt);
   pkt->next = ts->tmpl_head;
   ts->tmpl_head = OO_PKT_P(pkt);
+
+  /* This flag should not be set on a segment of length 0,
+   * we assume this is never the case with templated sends */
+  if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
+    pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
 
   /* XXX: Do I have to worry about MSG_CORK? */
   /* TODO: look at this sinf stuff */
@@ -1941,7 +1950,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
       sinf.total_sent &&
       ( ts->congstate == CI_TCP_CONG_OPEN ||
         ts->congstate == CI_TCP_CONG_FAST_RECOV ) )
-    sinf.sendq_credit += ts->retrans.num << 1;
+    sinf.sendq_credit += ts->retrans.num >> 1;
 
   if( sinf.sendq_credit <= 0 )  goto send_q_full;
 

@@ -69,18 +69,18 @@ TRACE_EVENT(sfc_receive,
 		__entry->queue_mapping = skb->queue_mapping;
 		__entry->skbaddr = skb;
 		__entry->gro = gro;
-#ifndef EFX_USE_FAKE_VLAN_RX_ACCEL
+#ifndef EFX_HAVE_VLAN_RX_PATH
 		/* Ignore vlan arguments and look at the skb, as the
 		 * vlan arguments are *not* being passed separately
 		 * to the kernel
 		 */
-		__entry->vlan_tagged = vlan_tx_tag_present(skb);
+		__entry->vlan_tagged = skb_vlan_tag_present(skb);
 #ifndef EFX_HAVE_OLD___VLAN_PUT_TAG
 		__entry->vlan_proto = ntohs(skb->vlan_proto);
 #else
 		__entry->vlan_proto = ETH_P_8021Q;
 #endif
-		__entry->vlan_tci = vlan_tx_tag_get(skb);
+		__entry->vlan_tci = skb_vlan_tag_get(skb);
 #else
 		__entry->vlan_tagged = vlan_tagged;
 		__entry->vlan_proto = ETH_P_8021Q;
@@ -88,15 +88,20 @@ TRACE_EVENT(sfc_receive,
 #endif
 		__entry->protocol = ntohs(skb->protocol);
 		__entry->ip_summed = skb->ip_summed;
-#ifdef EFX_HAVE_RXHASH_SUPPORT
+#ifdef EFX_HAVE_SKB_HASH
+		__entry->rxhash = skb->hash;
+		__entry->l4_rxhash = skb->l4_hash;
+#else
+	#ifdef EFX_HAVE_RXHASH_SUPPORT
 		__entry->rxhash = skb->rxhash;
-#else
+	#else
 		__entry->rxhash = 0;
-#endif
-#ifdef EFX_HAVE_L4_RXHASH
+	#endif
+	#ifdef EFX_HAVE_L4_RXHASH
 		__entry->l4_rxhash = skb->l4_rxhash;
-#else
+	#else
 		__entry->l4_rxhash = false;
+	#endif
 #endif
 		__entry->len = skb->len;
 		__entry->data_len = skb->data_len;
@@ -148,13 +153,13 @@ TRACE_EVENT(sfc_transmit,
 		__assign_str(dev_name, net_dev->name);
 		__entry->queue_mapping = skb->queue_mapping;
 		__entry->skbaddr = skb;
-		__entry->vlan_tagged = vlan_tx_tag_present(skb);
+		__entry->vlan_tagged = skb_vlan_tag_present(skb);
 #ifndef EFX_HAVE_OLD___VLAN_PUT_TAG
 		__entry->vlan_proto = ntohs(skb->vlan_proto);
 #else
 		__entry->vlan_proto = ETH_P_8021Q;
 #endif
-		__entry->vlan_tci = vlan_tx_tag_get(skb);
+		__entry->vlan_tci = skb_vlan_tag_get(skb);
 		__entry->protocol = ntohs(skb->protocol);
 		__entry->ip_summed = skb->ip_summed;
 		__entry->len = skb->len;

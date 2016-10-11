@@ -39,7 +39,9 @@ LIB_SRCS	+=		\
 		ef10_evtimer.c  \
 		vi_layout.c	\
 		vi_stats.c	\
-		vi_prime.c
+		vi_prime.c	\
+		vi_discard.c	\
+		capabilities.c
 endif
 
 

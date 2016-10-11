@@ -197,54 +197,81 @@ void efx_nic_fini_interrupt(struct efx_nic *efx)
 	}
 }
 
-unsigned
-efx_nic_check_pcie_link(struct efx_nic *efx, unsigned full_width,
-			unsigned full_speed, unsigned min_bandwidth)
+#ifdef EFX_NOT_UPSTREAM
+void
+efx_nic_check_pcie_link(struct efx_nic *efx, unsigned int desired_bandwidth,
+			unsigned int *actual_width, unsigned int *actual_speed)
 {
 	int cap = pci_find_capability(efx->pci_dev, PCI_CAP_ID_EXP);
-	u16 stat;
-	unsigned width, speed, bandwidth, full_bandwidth;
+	unsigned int nic_bandwidth;
+	unsigned int bandwidth;
+	unsigned int nic_width;
+	unsigned int nic_speed;
+	unsigned int width = 0;
+	unsigned int speed = 0;
+	u16 lnksta;
+	u16 lnkcap;
 
 	if (!cap ||
-	    pci_read_config_word(efx->pci_dev, cap + PCI_EXP_LNKSTA, &stat))
-		return 0;
+	    pci_read_config_word(efx->pci_dev, cap + PCI_EXP_LNKSTA, &lnksta) ||
+	    pci_read_config_word(efx->pci_dev, cap + PCI_EXP_LNKCAP, &lnkcap))
+		goto out;
 
-	width = (stat & PCI_EXP_LNKSTA_NLW) >> __ffs(PCI_EXP_LNKSTA_NLW);
-#ifdef DEBUG
-	if (width == 32)
-		netif_warn(efx, drv, efx->net_dev,
-			   "PCI Express width is 32, with maximum expected %d. "
-			   "If running on a virtualized platform this is fine, "
-			   "otherwise it indicates a PCI problem.\n", full_width);
-	else
-		WARN_ON(width == 0 || width > full_width);
-#endif
-	speed = stat & PCI_EXP_LNKSTA_CLS;
-	EFX_WARN_ON_PARANOID(speed == 0 || speed > full_speed);
+	width = (lnksta & PCI_EXP_LNKSTA_NLW) >> __ffs(PCI_EXP_LNKSTA_NLW);
+	speed = (lnksta & PCI_EXP_LNKSTA_CLS);
 
-	bandwidth = (width << (speed - 1));
-	full_bandwidth = (full_width << (full_speed - 1));
+	nic_width = (lnkcap & PCI_EXP_LNKCAP_MLW) >> __ffs(PCI_EXP_LNKCAP_MLW);
 
-	if (bandwidth < min_bandwidth)
+	if (width > nic_width)
+		netif_dbg(efx, drv, efx->net_dev,
+			  "PCI Express width is %d, with maximum expected %d. "
+			  "If running on a virtualized platform this is fine, "
+			  "otherwise it indicates a PCI problem.\n",
+			  width, nic_width);
+
+	nic_speed = 1;
+	if (lnkcap & PCI_EXP_LNKCAP_SLS_5_0GB)
+		nic_speed = 2;
+	/* PCIe Gen3 capabilities are in a different config word. */
+	if (!pci_read_config_word(efx->pci_dev,
+				  cap + PCI_EXP_LNKCAP2, &lnkcap)) {
+		if (lnkcap & PCI_EXP_LNKCAP2_SLS_8_0GB)
+			nic_speed = 3;
+	}
+
+	bandwidth = width << (speed - 1);
+	nic_bandwidth = nic_width << (nic_speed - 1);
+
+	if (desired_bandwidth > nic_bandwidth)
+		/* You can desire all you want, it ain't gonna happen. */
+		desired_bandwidth = nic_bandwidth;
+
+	if (desired_bandwidth && (bandwidth < desired_bandwidth))
 		netif_warn(efx, drv, efx->net_dev,
 			   "This Solarflare Network Adapter requires the "
-			   "equivalent of 8 lanes at PCI Express %d speed for "
+			   "equivalent of %d lanes at PCI Express %d speed for "
 			   "full throughput, but is currently limited to %d "
 			   "lanes at PCI Express %d speed.  Consult your "
 			   "motherboard documentation to find a more "
 			   "suitable slot\n",
-			   ffs(min_bandwidth) - ffs(8) + 1, width, speed);
-
-	if (bandwidth < full_bandwidth)
+			   desired_bandwidth > EFX_BW_PCIE_GEN3_X8 ? 16 : 8,
+			   nic_speed, width, speed);
+	else if (bandwidth < nic_bandwidth)
 		netif_warn(efx, drv, efx->net_dev,
 			   "This Solarflare Network Adapter requires a "
 			   "slot with %d lanes at PCI Express %d speed for "
 			   "optimal latency, but is currently limited to "
 			   "%d lanes at PCI Express %d speed\n",
-			   full_width, full_speed, width, speed);
+			   nic_width, nic_speed, width, speed);
 
-	return width;
+out:
+	if (actual_width)
+		*actual_width = width;
+
+	if (actual_speed)
+		*actual_speed = speed;
 }
+#endif
 
 /* Register dump */
 
@@ -612,4 +639,9 @@ void efx_nic_fix_nodesc_drop_stat(struct efx_nic *efx, u64 *rx_nodesc_drops)
 	efx->rx_nodesc_drops_total = *rx_nodesc_drops;
 	efx->rx_nodesc_drops_prev_state = !!(efx->net_dev->flags & IFF_UP);
 	*rx_nodesc_drops -= efx->rx_nodesc_drops_while_down;
+}
+
+unsigned int efx_nic_calc_mac_mtu(struct efx_nic *efx)
+{
+	return EFX_MAX_FRAME_LEN(efx->net_dev->mtu);
 }

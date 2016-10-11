@@ -30,7 +30,6 @@
 #define __CI_INTERNAL_IP_TX_H__
 
 #include <ci/internal/ip.h>
-#include <ci/internal/cplane_ops.h>
 #include "netif_tx.h"
 
 
@@ -120,7 +119,6 @@ __ci_ip_send_tcp(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_tcp_state* ts)
     ci_ip_local_send(ni, pkt, S_SP(ts), ts->local_peer);
     return;
   }
-  ci_ip_cache_check(&ts->s.pkt);
   CI_IPV4_STATS_INC_OUT_REQUESTS(ni);
   if(CI_LIKELY( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) )) {
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);

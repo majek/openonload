@@ -40,7 +40,7 @@
 #include <ci/internal/transport_config_opt.h>
 #include <ci/efrm/nic_set.h>
 #include <ci/net/ethernet.h>
-#include <ci/internal/cplane_types.h>
+#include <cplane/shared_types.h>
 #include <onload/signals.h> /* for OO_SIGHANGLER_DFL_MAX */
 
 
@@ -86,6 +86,7 @@ enum { CI_CHSUM_STR_LEN = 32 };
  *  subsequently returns.
  */
 typedef struct ci_resource_onload_alloc_s {
+  ci_fixed_descriptor_t   cplane_handle;
   ci_user_ptr_t           in_opts  CI_ALIGN(8);
   ci_uint16               in_flags;
   char                    in_version[OO_VER_STR_LEN + 1];
@@ -288,35 +289,6 @@ typedef struct {
 
 
 
-/* Cplane ioctl structures */
-typedef struct {
-  ci_ip_addr_t      ip_be32;
-  ci_ip_addr_kind_t addr_kind;
-} cp_ipif_addr_kind_t;
-
-typedef struct { /* do not reorder fields if you're not sure about alignment */
-  ci_ifid_t      ifindex_out;
-  ci_uint16      vlan_id;
-  ci_hwport_id_t hwport;
-} cp_llap_find_t;
-
-typedef struct {
-  ci_ifid_t      ifindex; /* IN */
-  ci_mtu_t       mtu;
-  ci_hwport_id_t hwport;
-  ci_mac_addr_t  mac;
-  cicp_encap_t   encap;
-  ci_ifid_t      base_ifindex;
-  ci_int16       bond_rowid;
-} cp_llap_retrieve_t;
-
-typedef struct {
-  cicp_mac_verinfo_t ver;
-  ci_ip_addr_t ip;
-  ci_mac_addr_t mac;
-  ci_int32 /*bool*/  confirm;
-} cp_mac_update_t;
-
 typedef struct {
   oo_pkt_p	pkt;
   ci_uint32	retrieve_rc;
@@ -329,102 +301,6 @@ typedef struct {
   ci_uint32	pkt;
   ci_ifid_t	ifindex;
 } cp_user_pkt_dest_ifid_t;
-
-typedef struct {
-  ci_ip_addr_t   ip_be32; /* IN */
-  ci_ifid_t      ifindex;
-  ci_hwport_id_t hwport;
-  ci_mac_addr_t  mac;
-  ci_mtu_t       mtu;
-  cicp_encap_t   encap;
-} cp_src_addr_checks_t;
-
-#if CI_CFG_CONTROL_PLANE_USER_SYNC
-/* the control plane synchronization operations are made available
-   to the user in Windows but only optionally in Linux */
-typedef struct {
-  ci_user_ptr_t         os_sync_ptr;
-  ci_ip_addr_t          ip_be32;
-  cicp_mib_verinfo_t    rowinfo;
-  ci_ifid_t             ifindex;
-  ci_mac_addr_t         mac;
-} cp_mac_set_t;
-
-typedef struct {
-  ci_mtu_t      max_mtu;
-  ci_hwport_id_t hwport;
-} cp_hwport_update_t;
-
-typedef struct {
-  ci_ifid_t         ifindex;
-  ci_mtu_t          max_mtu;
-  ci_uint8          up;
-  char              name[CICP_LLAP_NAME_MAX];
-  ci_mac_addr_t     mac;
-  cicp_llap_rowid_t rowid_out CI_ALIGN(8);
-} cp_llap_import_t;
-
-typedef struct {
-  ci_verlock_value_t    table_version;
-  cicp_encap_t          encap;
-  ci_ifid_t             ifindex;
-  ci_uint8              up;
-  cicp_llap_rowid_t     rowinfo_index; /* IN */
-} cp_llap_readrow_t;
-
-typedef struct {
-  cicp_ipif_rowid_t rowid; /* OUT */
-  ci_ip_addr_net_t  net_ip;
-  ci_ip_addrset_t   net_ipset;
-  ci_ip_addr_net_t  net_bcast;
-  ci_ifid_t         ifindex;
-  ci_uint8          scope;
-} cp_ipif_import_t;
-
-typedef struct {
-    ci_ip_addr_net_t    net_ip;
-    ci_ip_addrset_t     net_ipset;
-    ci_ifid_t           ifindex;
-} cp_ipif_delete_t;
-
-typedef struct {
-  ci_verlock_value_t    table_version;
-  ci_ip_addr_t          net_ip;
-  ci_ip_addrset_t       net_ipset;
-  ci_ip_addr_t          net_bcast;
-  ci_ifid_t             ifindex;
-  cicp_ipif_rowid_t     rowinfo_index; /* IN */
-} cp_ipif_readrow_t;
-
-typedef struct {
-  ci_ip_addr_t    dest_ip;
-  ci_ip_addrset_t dest_ipset;
-  ci_ip_addr_t    next_hop_ip;
-  ci_ip_addr_t    pref_source;
-  cicp_ip_tos_t   tos;
-  cicp_metric_t   metric;
-  ci_ifid_t       ifindex;
-  ci_mtu_t        mtu;
-  cicp_route_rowid_t  rowid; /* OUT */
-} cp_route_import_t;
-
-typedef struct {
-  ci_ip_addr_t      dest_ip;
-  ci_ip_addrset_t   dest_ipset;
-} cp_route_delete_t;
-#endif
-
-typedef struct {
-  oo_pkt_p     pktid;
-  ci_ifid_t    ifindex;
-  ci_ip_addr_t out_spec_addr;
-} cp_ipif_pktinfo_query_t;
-
-typedef struct {
-  ci_ifid_t    ifindex;
-  ci_ip_addr_t out_addr;
-} cp_ipif_by_ifindex_t;
-
 
 /* This is shared structure. It should not use "int", "long", etc because
  * kernel and userland may have different size for such types. */

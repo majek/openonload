@@ -570,9 +570,9 @@ efx_ioctl_get_device_ids(struct efx_nic *efx, union efx_ioctl_data *data)
 	 * (and we can't change it because it's an ioctl argument)
 	 */
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
-	memcpy(ids->perm_addr, efx->net_dev->perm_addr, ETH_ALEN);
+	ether_addr_copy(ids->perm_addr, efx->net_dev->perm_addr);
 #else
-	memcpy(ids->perm_addr, efx->perm_addr, ETH_ALEN);
+	ether_addr_copy(ids->perm_addr, efx->perm_addr);
 #endif
 	return 0;
 }
@@ -620,6 +620,62 @@ efx_ioctl_licensed_app_state(struct efx_nic *efx, union efx_ioctl_data *data)
 	rc = efx_ef10_licensed_app_state(efx, &data->app_state);
 	return rc;
 }
+
+#ifdef CONFIG_SFC_DUMP
+static int
+efx_ioctl_dump(struct efx_nic *efx, union efx_ioctl_data __user *useraddr)
+{
+	struct ethtool_dump dump;
+	void __user *userbuf =
+		((void __user *)&useraddr->dump) + sizeof(dump);
+	void *buffer;
+	int ret;
+
+	if (copy_from_user(&dump, useraddr, sizeof(dump)))
+		return -EFAULT;
+
+	switch (dump.cmd) {
+	case ETHTOOL_SET_DUMP:
+		ret = efx_ethtool_set_dump(efx->net_dev, &dump);
+		if (ret < 0)
+			return ret;
+		break;
+	case ETHTOOL_GET_DUMP_FLAG:
+		ret = efx_ethtool_get_dump_flag(efx->net_dev, &dump);
+		if (ret < 0)
+			return ret;
+		break;
+	case ETHTOOL_GET_DUMP_DATA:
+		ret = efx_ethtool_get_dump_flag(efx->net_dev, &dump);
+		if (ret < 0)
+			return ret;
+
+		if (dump.len == 0)
+			return -EFAULT;
+		buffer = vzalloc(dump.len);
+		if (!buffer)
+			return -ENOMEM;
+
+		ret = efx_ethtool_get_dump_data(efx->net_dev, &dump,
+						buffer);
+		if (ret == 0) {
+			if (copy_to_user(userbuf, buffer, dump.len))
+				ret = -EFAULT;
+		}
+		vfree(buffer);
+		if (ret < 0)
+			return ret;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	if (copy_to_user(useraddr, &dump, sizeof(dump)))
+		return -EFAULT;
+
+	return 0;
+}
+#endif
 
 /*****************************************************************************/
 
@@ -754,6 +810,10 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		size = sizeof(data->app_state);
 		op = efx_ioctl_licensed_app_state;
 		break;
+#ifdef CONFIG_SFC_DUMP
+	case EFX_DUMP:
+		return efx_ioctl_dump(efx, user_data);
+#endif
 	default:
 		netif_err(efx, drv, efx->net_dev,
 			  "unknown private ioctl cmd %x\n", cmd);

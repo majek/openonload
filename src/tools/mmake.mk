@@ -1,5 +1,5 @@
 ifeq ($(LINUX),1)
-SUBDIRS		:= ip efabcfg sfcaffinity solar_clusterd
+SUBDIRS		:= ip efabcfg sfcaffinity solar_clusterd dlopen_no_deepbind
 OTHER_SUBDIRS	:= unix chariot firmware
 ifneq ($(ONLOAD_ONLY),1)
 SUBDIRS		+= ftl unifdef misc mc-comms sfutils sfutils-linux

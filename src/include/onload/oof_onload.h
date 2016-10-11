@@ -20,7 +20,7 @@
 struct efab_tcp_driver_s;
 
 
-extern int  oof_onload_ctor(struct efab_tcp_driver_s*, unsigned local_addr_max);
+extern int  oof_onload_ctor(struct efab_tcp_driver_s*);
 extern void oof_onload_dtor(struct efab_tcp_driver_s*);
 
 

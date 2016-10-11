@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201509-u1
+%define pkgversion 201606
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -287,16 +287,14 @@ rm -fR $RPM_BUILD_ROOT
 /lib/onload
 /sbin/*
 /usr/include/onload*
-/usr/include/aoe
 /usr/include/etherfabric/*.h
 %docdir %{_defaultdocdir}/%{name}-%{pkgversion}
 %attr(644, -, -) %{_defaultdocdir}/%{name}-%{pkgversion}/*
 %attr(644, -, -) %{_sysconfdir}/modprobe.d/onload.conf
-%attr(644, -, -) %{_sysconfdir}/modprobe.d/sfc_aoe.conf
 %attr(644, -, -) %{_sysconfdir}/depmod.d/onload.conf
 %config %attr(644, -, -) %{_sysconfdir}/sysconfig/openonload
 %{_sysconfdir}/init.d/openonload
-/usr/lib*/python*
+/usr/lib*/python*/site-packages/*
 
 %files kmod-%{kverrel}
 %defattr(744,root,root)

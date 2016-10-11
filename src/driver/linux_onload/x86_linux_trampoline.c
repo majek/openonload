@@ -290,17 +290,30 @@ static void **find_syscall_table(void)
  */
 static void **find_syscall_table(void)
 {
-  unsigned long *idtbase;
+  unsigned long *idtbase = NULL;
   unsigned char *p, *end, idt[6];
   void **result = NULL;
 
-  __asm__("sidt %0" : "=m"(idt));
-  idtbase = (unsigned long *)(idt[2] | (idt[3] << 8) | (idt[4] << 16)
-                              | (idt[5] << 24));
-  TRAMP_DEBUG("idt base=%p, entry 0x80=%08lx,%08lx", idtbase,
-              idtbase[0x80*2], idtbase[0x80*2+1]);
-  p = (unsigned char *)((idtbase[0x80*2] & 0xffff)
-                        | (idtbase[0x80*2+1] & 0xffff0000));
+#ifdef ERFM_HAVE_NEW_KALLSYMS
+  /* Linux-4.4 & 4.5: */
+  idtbase = efrm_find_ksym("do_syscall_32_irqs_on");
+  /* Linux-4.6: */
+  if( idtbase == NULL )
+    idtbase = efrm_find_ksym("do_int80_syscall_32");
+#endif
+
+  if( idtbase == NULL ) {
+    __asm__("sidt %0" : "=m"(idt));
+    idtbase = (unsigned long *)(idt[2] | (idt[3] << 8) | (idt[4] << 16)
+                                | (idt[5] << 24));
+    TRAMP_DEBUG("idt base=%p, entry 0x80=%08lx,%08lx", idtbase,
+                idtbase[0x80*2], idtbase[0x80*2+1]);
+    p = (unsigned char *)((idtbase[0x80*2] & 0xffff)
+                          | (idtbase[0x80*2+1] & 0xffff0000));
+  }
+  else {
+    p = (void *)idtbase;
+  }
   TRAMP_DEBUG("int 0x80 entry point at %p", p);
   end = p + 1024 - 7;
   while (p < end) {
@@ -357,6 +370,19 @@ static void **find_ia32_syscall_table(void)
   unsigned int *idtbase;
   unsigned char idt[10];
 
+#ifdef ERFM_HAVE_NEW_KALLSYMS
+  void *addr;
+
+  /* Linux>=4.2: ia32_sys_call_table is not a local variable any more, so
+   * we can use kallsyms to find it. */
+  addr = efrm_find_ksym("ia32_sys_call_table");
+  if( addr != NULL )
+    return addr;
+#endif
+
+  /* linux<4.4: ia32_sys_call_table is an internal variable in
+   * linux/arch/x86/entry/entry_64_compat.S, and we can parse this asm
+   * code. */
   __asm__("sidt %0" : "=m"(idt));
   idtbase = *(unsigned int **)(&idt[2]);
   TRAMP_DEBUG("idt base=%p, entry 0x80=%08x,%08x,%08x", idtbase,
@@ -375,7 +401,8 @@ static void **find_ia32_syscall_table(void)
     }
     p++;
   }
-  TRAMP_DEBUG("didn't find ia32_syscall table address");
+  ci_log("ERROR: didn't find ia32_sys_call_table address");
+
   return NULL;
 }
 #endif
@@ -558,7 +585,7 @@ efab_linux_sys_sendmsg32(int fd, struct compat_msghdr __user* msg,
     return -EFAULT;
   }
 
-  {
+  if( ia32_syscall_table != NULL ) {
     asmlinkage int (*sys_socketcall_fn)(int, unsigned long *);
     compat_ulong_t args[3];
 
@@ -573,6 +600,8 @@ efab_linux_sys_sendmsg32(int fd, struct compat_msghdr __user* msg,
     if (copy_to_user(socketcall_args, args, sizeof(args)) == 0)
       rc = (sys_socketcall_fn) (SYS_SENDMSG, socketcall_args);
   }
+  else
+    rc = -EOPNOTSUPP;
 
   TRAMP_DEBUG ("... = %d", rc);
   return rc;
@@ -702,6 +731,11 @@ ci_inline unsigned long *get_oldrsp_addr(void)
 }
 #endif
 
+
+
+
+
+#if defined(__i386__) || defined(CONFIG_COMPAT)
 /* Avoid returning to UL via short-path sysret.  The problem exists at
  * least on RHEL4 2.6.9 64-bit kernel + 32-bit UL.  Previously, we've done
  * it with TIF_IRET flag.  The problem is, TIF_IRET is not supposed to be
@@ -716,6 +750,103 @@ avoid_sysret(void)
   set_thread_flag (TIF_NEED_RESCHED);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+/* There are 2 ways to enter syscall: int80 and vsyscall page.
+ * We'll store offsets for 2 different stack layouts. */
+#define TRAMP_PRESAVED_OFF32 2
+static int tramp_offset[TRAMP_PRESAVED_OFF32] = {0,0};
+#endif
+
+#endif
+
+static inline int
+tramp_close_passthrough(int fd)
+{
+  int rc = (saved_sys_close) (fd);
+  efab_syscall_exit();
+  return rc;
+}
+
+static inline int /* bool */
+tramp_close_begin(int fd, ci_uintptr_t *tramp_entry_out,
+                  ci_uintptr_t *tramp_exclude_out)
+{
+  struct file *f;
+  efab_syscall_enter();
+
+  f = fget(fd);
+  if( f != NULL ) {
+    if( FILE_IS_ENDPOINT(f) ) {
+      struct mm_hash *p;
+      read_lock (&oo_mm_tbl_lock);
+      p = oo_mm_tbl_lookup(current->mm);
+      if (p) {
+        *tramp_entry_out =
+            (ci_uintptr_t)CI_USER_PTR_GET(p->trampoline_entry);
+        *tramp_exclude_out =
+            (ci_uintptr_t)CI_USER_PTR_GET(p->trampoline_exclude);
+      }
+      read_unlock (&oo_mm_tbl_lock);
+
+      if( *tramp_entry_out != 0 &&
+          access_ok(VERIFY_READ, *tramp_entry_out, 1)) {
+        fput(f);
+        return false;
+      }
+    }
+    fput(f);
+  }
+
+  /* Not one of our FDs -- usual close */
+  return true;
+}
+
+
+#ifdef __i386__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+/* Find struct pt_regs on the stack using the stack base pointer and
+ * 6 first registers. */
+static inline struct pt_regs *
+tramp_stack_find_regs32(unsigned long *stack)
+{
+  int i, off;
+  unsigned long *regs = stack;
+
+  /* Is one of our saved offsets good? */
+  for( i = 0; i < TRAMP_PRESAVED_OFF32; i++ ) {
+    if( tramp_offset[i] == 0 )
+      break;
+    if( memcmp(regs + tramp_offset[i], stack, 6 * sizeof(*regs)) == 0 ) {
+      TRAMP_DEBUG("%s: reuse offset[%d] = %d", __func__, i, tramp_offset[i]);
+      return (void *)(regs + tramp_offset[i]);
+    }
+  }
+
+  /* Find the registers offset for this stack layout
+   * somewhere in the depth on "stack". */
+  for( regs++, off = 1; off < 20; regs++, off++ ) {
+    if( memcmp(regs, stack, 6 * sizeof(*regs)) == 0 ) {
+      if( i < TRAMP_PRESAVED_OFF32 ) {
+        tramp_offset[i] = off;
+        TRAMP_DEBUG("%s: offset[%d] = %d", __func__, i, off);
+      }
+      else {
+        TRAMP_DEBUG("%s: 3rd offset %d", __func__, off);
+      }
+      return (void *)regs;
+    }
+  }
+  return NULL;
+}
+#endif
+
+
+/* This is the main body of our hacked version of the close system call (but we
+ * are actually called by a wrapper which sets up the "regs" argument).  Since
+ * we've hacked the system call table, then all close system calls will come
+ * via this wrapper.  If appropriate, the call will be trampolined back to user
+ * space, to our library's close which _should_ have intercepted.
+ */
 /* This function will munge the stack ready for trampoline into the calling
  * process.  Note that it doesn't actually perform the trampoline immediately
  * -- this won't happen until the system-call returns.
@@ -726,551 +857,416 @@ avoid_sysret(void)
  * The trampoline handler will be entered with the original system-call's
  * return address in another g/p reg (ecx on x86)
  */
-static int
-setup_trampoline (struct pt_regs *regs, int opcode, int data) {
-  struct mm_hash *p;
+asmlinkage long
+efab_linux_trampoline_handler_close3232(struct pt_regs *regs)
+{
   ci_uintptr_t trampoline_entry = 0;
   ci_uintptr_t trampoline_exclude = 0;
-  int rc;
+  unsigned long *user_sp =0;
 
-  read_lock (&oo_mm_tbl_lock);
-  p = oo_mm_tbl_lookup(current->mm);
-  if (p) {
-    trampoline_entry = (ci_uintptr_t) CI_USER_PTR_GET (p->trampoline_entry);
-    trampoline_exclude = (ci_uintptr_t) CI_USER_PTR_GET (p->trampoline_exclude);
+  if( tramp_close_begin(bx(regs), &trampoline_entry, &trampoline_exclude) )
+    return tramp_close_passthrough(bx(regs));
+
+
+  /* Let's trampoline! */
+  ci_assert (sizeof *user_sp == 4);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+  {
+    int fd = bx(regs);
+    /* regs structure contains correct values for 6 first registers.  We have
+     * to find the real regs pushed to the stack eaqrlier. */
+    regs = tramp_stack_find_regs32((void *)regs);
+    if( regs == NULL )
+      return tramp_close_passthrough(fd);
   }
-  read_unlock (&oo_mm_tbl_lock);
+#endif
 
-  if (trampoline_entry) {
-    unsigned long *user_sp =0;
-
-    /* Found the relevant mm -- trampoline to user-space.  To do so we
-     * hack the return address on the stack.
-     */
-    if (!access_ok (VERIFY_READ, trampoline_entry, 1)) {
-      /* We can't trampoline to this address.  The user may have changed his
-       * address space, or supplied a bad trampoline-entry at registration time
-       * -- so fail gracefully
-       */
-      ci_log ("Pid %d (mm=%p) has bad trampoline entry: 0x%08lX",
-              current->tgid, current->mm, (unsigned long)trampoline_entry);
-      return -EBADF;
-    }
-
-    /* It's one of our's.  We would normally have expected to intercept
-     * this call from the user-library; trampoling by hacking stack.
-     * We verify the stack is as we expect first.
-     */
-
-#if defined(__x86__)
-    ci_assert (sizeof *user_sp == 4);
-
-    if (cs(regs) != __USER_CS) {
-      ci_log ("Warning: trampoline-handler called not from kernel code!");
+  if (cs(regs) != __USER_CS) {
+    ci_log ("Warning: trampoline-handler called not from kernel code!");
 # ifndef NDEBUG
-      ci_log ("This is a debug-build driver, so I'm going to fail here!");
-      ci_assert (0);
+    ci_log ("This is a debug-build driver, so I'm going to fail here!");
+    ci_assert (0);
 # endif
-      return -EINVAL;
-    }
-        
-    /* Can't verify ip with access_ok() -- it often points at 0xffffe002
-     * (i.e. the vsyscall-page)
-     */
-    TRAMP_DEBUG("setup_trampoline:");
-    TRAMP_DEBUG("  bx %08lx", bx(regs));
-    TRAMP_DEBUG("  cx %08lx", cx(regs));
-    TRAMP_DEBUG("  dx %08lx", dx(regs));
-    TRAMP_DEBUG("  si %08lx", si(regs));
-    TRAMP_DEBUG("  di %08lx", di(regs));
-    TRAMP_DEBUG("  bp %08lx", bp(regs));
-    TRAMP_DEBUG("  ax %08lx", ax(regs));
-    TRAMP_DEBUG("  ds %08x", ds(regs));
-    TRAMP_DEBUG("  es %08x", es(regs));
-    TRAMP_DEBUG("  orig_ax %08lx", orig_ax(regs));
-    TRAMP_DEBUG("  ip %08lx", ip(regs));
-    TRAMP_DEBUG("  cs %08x", cs(regs));
-    TRAMP_DEBUG("  flags %08lx", flags(regs));
-    TRAMP_DEBUG("  sp %08lx", sp(regs));
-    TRAMP_DEBUG("  ss %08x", ss(regs));
-
-    if (ip(regs) == trampoline_exclude) {
-      TRAMP_DEBUG("Ignoring call from excluded address 0x%08lx",
-                  (unsigned long)trampoline_exclude);
-      return -EBUSY;
-    }
-
-    /* The little stub in user-mode needs the opcode and data on the user-mode
-     * stack (originally we passed these in registers, ecx and edx, but this
-     * doesn't work in the case of a 32-bit app on a 64-bit machine calling a
-     * system call via the SYSCALL instruction, as used in 2.6 kernels).  The
-     * trampoline handler function may trash ecx and edx (which are scratch
-     * registers for x86 functions, but NOT for system calls), so we also push
-     * the original contents of these registers after we push the return
-     * address onto the user-mode stack.
-     *
-     * First we ensure there is sufficient user-space stack
-     */
-    if (!access_ok (VERIFY_WRITE, sp(reg) - 20, 20)) {
-      ci_log ("Bogus user-mode stack; cannot trampoline!");
-      return -EFAULT;
-    }
-    user_sp = (unsigned long*)sp(reg);
-    user_sp--;
-    if (copy_to_user (user_sp, &ip(regs), 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &cx(regs), 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &dx(regs), 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &data, 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &opcode, 4) != 0)  return -EFAULT;
-
-    /* Hack registers so they're restored to state expected by tramp handler */
-    sp(regs) = (ci_uintptr_t) user_sp;
-
-    /* Hack the return address on the stack to do the trampoline */
-    ip(regs) = trampoline_entry;
-
-    avoid_sysret();
-    TRAMP_DEBUG("set tramp entry 0x%08lx", (unsigned long)trampoline_entry);
-
-
-#elif defined(__i386__)
-
-    ci_assert (sizeof *user_sp == 4);
-
-    if (cs(regs) != __USER_CS) {
-
-      ci_log ("Warning: trampoline-handler called not from kernel code!");
-# ifndef NDEBUG
-      ci_log ("This is a debug-build driver, so I'm going to fail here!");
-      ci_assert (0);
-# endif
-      return -EINVAL;
-    }
-        
-    /* Can't verify ip with access_ok() -- it often points at 0xffffe002
-     * (i.e. the vsyscall-page)
-     * XXX casts to unsigned long were added to avoid warnings -- 2.6.18
-     * and 2.6.30 has different types for these values.
-     */
-    TRAMP_DEBUG("setup_trampoline:");
-    TRAMP_DEBUG("  bx %08lx", bx(regs));
-    TRAMP_DEBUG("  cx %08lx", cx(regs));
-    TRAMP_DEBUG("  dx %08lx", dx(regs));
-    TRAMP_DEBUG("  si %08lx", si(regs));
-    TRAMP_DEBUG("  di %08lx", di(regs));
-    TRAMP_DEBUG("  bp %08lx", bp(regs));
-    TRAMP_DEBUG("  ax %08lx", ax(regs));
-    TRAMP_DEBUG("  ds %08lx", (unsigned long)ds(regs));
-    TRAMP_DEBUG("  es %08lx", (unsigned long)es(regs));
-    TRAMP_DEBUG("  orig_ax %08lx", orig_ax(regs));
-    TRAMP_DEBUG("  ip %08lx", ip(regs));
-    TRAMP_DEBUG("  cs %08lx", (unsigned long)cs(regs));
-    TRAMP_DEBUG("  flags %08lx", flags(regs));
-    TRAMP_DEBUG("  sp %08lx", sp(regs));
-    TRAMP_DEBUG("  ss %08lx", (unsigned long)ss(regs));
-
-    if (ip(regs) == trampoline_exclude) {
-      TRAMP_DEBUG("Ignoring call from excluded address 0x%08lx",
-                  (unsigned long)trampoline_exclude);
-      return -EBUSY;
-    }
-
-    /* The little stub in user-mode needs the opcode and data on the user-mode
-     * stack (originally we passed these in registers, ecx and edx, but this
-     * doesn't work in the case of a 32-bit app on a 64-bit machine calling a
-     * system call via the SYSCALL instruction, as used in 2.6 kernels).  The
-     * trampoline handler function may trash ecx and edx (which are scratch
-     * registers for x86 functions, but NOT for system calls), so we also push
-     * the original contents of these registers after we push the return
-     * address onto the user-mode stack.
-     *
-     * First we ensure there is sufficient user-space stack
-     */
-    if (!access_ok (VERIFY_WRITE, sp(regs) - 20, 20)) {
-      ci_log ("Bogus user-mode stack; cannot trampoline!");
-      return -EFAULT;
-    }
-    user_sp = (unsigned long*)sp(regs);
-    user_sp--;
-    if (copy_to_user (user_sp, &ip(regs), 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &cx(regs), 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &dx(regs), 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &data, 4) != 0)  return -EFAULT;
-    user_sp--;
-    if (copy_to_user (user_sp, &opcode, 4) != 0)  return -EFAULT;
-
-    /* Hack registers so they're restored to state expected by tramp handler */
-    sp(regs) = (ci_uintptr_t) user_sp;
-
-    /* Hack the return address on the stack to do the trampoline */
-    ip(regs) = trampoline_entry;
-
-    avoid_sysret();
-    TRAMP_DEBUG("set tramp entry 0x%08lx", (unsigned long)trampoline_entry);
-
-#elif defined(__x86_64__)
-
-    /* There probably isn't any useful verification we can do here...
-     * The good news is that on x86_64 it is impossible to issue a system-call
-     * from supervisor mode (unlike IA32), and so calls to 'close' from the
-     * kernel don't go via the system-call table.  The bad news is that it is
-     * still theoretically possible to call via the system-call table, in which
-     * case all kinds of badness is liable to happen -- TODO: Is there any way
-     * to verify we're called from user-mode on x86_64?
-     */
-
-    TRAMP_DEBUG("setup_trampoline:");
-    /* Only a partial pt_regs stack frame is set up -- these are missing: */
-    TRAMP_DEBUG("  r15 %016lx XX",regs->r15); /* not saved by syscall entry */
-    TRAMP_DEBUG("  r14 %016lx XX",regs->r14); /* not saved by syscall entry */
-    TRAMP_DEBUG("  r13 %016lx XX",regs->r13); /* not saved by syscall entry */
-    TRAMP_DEBUG("  r12 %016lx XX",regs->r12); /* not saved by syscall entry */
-    TRAMP_DEBUG("  bp %016lx XX", bp(regs)); /* not saved by syscall entry */
-    TRAMP_DEBUG("  bx %016lx XX", bx(regs)); /* not saved by syscall entry */
-    /* These are always present: */
-    TRAMP_DEBUG("  r11 %016lx",regs->r11);
-    TRAMP_DEBUG("  r10 %016lx",regs->r10);
-    TRAMP_DEBUG("  r9  %016lx",regs->r9);
-    TRAMP_DEBUG("  r8  %016lx",regs->r8);
-    TRAMP_DEBUG("  ax %016lx", ax(regs));
-    TRAMP_DEBUG("  cx %016lx", cx(regs));
-    TRAMP_DEBUG("  dx %016lx", dx(regs));
-    TRAMP_DEBUG("  si %016lx", si(regs));
-    TRAMP_DEBUG("  di %016lx", di(regs));
-    TRAMP_DEBUG("  orig_ax %016lx", orig_ax(regs));
-    TRAMP_DEBUG("  ip %016lx", ip(regs));
-    /* Not always present but may be fixed up on syscall handler slow paths: */
-    TRAMP_DEBUG("  cs  %016lx XX",regs->cs);
-    TRAMP_DEBUG("  flags %016lx XX", flags(regs));
-    TRAMP_DEBUG("  rsp %016lx XX", sp(regs));
-    TRAMP_DEBUG("  ss  %016lx XX",regs->ss);
-
-    if (ip(regs) == trampoline_exclude) {
-      TRAMP_DEBUG("Ignoring call from excluded address");
-      return -EBUSY;
-    }
-
-    /* We need to get data back to the user-mode stub handler.  Specifically
-     * -- the real return address, the op-code, and the "data" field (eg.
-     * file-descriptor for close).  We do this by corrupting the registers that
-     * are saved on the stack, so when we trampoline back the trampoline has
-     * these values in its regs as expected.  However, note that the trampoline
-     * handler must not trash ANY registers, since Linux system-calls don't.
-     * Therefore, we save the original values of the registers on the user-mode
-     * stack, to allow the trampoline stub to restore register state before
-     * returning to whoever called the syscall in the first place.
-     *
-     * On Linux x86_64 the old user-sp is stored in the per-cpu variable
-     * oldrsp.
-     */
-    {
-      unsigned long *orig_user_sp;
-#if OLD_RSP_PROVIDED
-      orig_user_sp = (unsigned long *)read_pda(oldrsp);
-#else
-      orig_user_sp = (unsigned long *)percpu_read_from_p(get_oldrsp_addr());
-#endif
-
-      user_sp = orig_user_sp;
-      TRAMP_DEBUG("read user_sp=%p", user_sp);
-
-      /* Make sure there is sufficient user-space stack */
-      if (!access_ok (VERIFY_WRITE, user_sp - 24, 24)) {
-        ci_log ("Invalid user-space stack-pointer; cannot trampoline!");
-        return -EFAULT;
-      }
-
-      ci_assert (sizeof *user_sp == 8);
-
-      user_sp--;
-      /* Return address */
-      if (copy_to_user (user_sp, &ip(regs), 8) != 0)  return -EFAULT;
-      user_sp--;
-      /* %rdi will be trashed by opcode */
-      if (copy_to_user (user_sp, &di(regs), 8) != 0)  return -EFAULT;
-      user_sp--;
-      /* %rsi will be trashed by data */
-      if (copy_to_user (user_sp, &si(regs), 8) != 0)  return -EFAULT;
-
-      /* Write the updated rsp */
-#if OLD_RSP_PROVIDED
-      write_pda(oldrsp, (unsigned long)user_sp);
-#else
-      percpu_write_to_p(get_oldrsp_addr(), (unsigned long)user_sp);
-#endif
-      TRAMP_DEBUG("wrote user_sp=%p", user_sp);
-
-      /* On some slow paths through the syscall code (e.g. when ptracing) the
-       * top of the stack frame gets fixed up, and the rsp there may get copied
-       * back to the pda oldrsp field on exit from the syscall.  So, if we find
-       * the original rsp in the rsp field on the stack, we need to update that
-       * too.
-       */
-      if (sp(regs) == (unsigned long)orig_user_sp) {
-        sp(regs) = (unsigned long)user_sp;
-        TRAMP_DEBUG("wrote sp=%p as well", user_sp);
-      }
-    }
-
-    /* The little stub in user-mode expects the fd to close in rsi, and
-     * the original return address (so that it can get back) in rdx.  We've
-     * saved away the original values of these regs on the user stack so that
-     * the trampoline stub may restore the state before returning to whoever
-     * made the system-call.
-     */
-    di(regs) = opcode;
-    si(regs) = data;
-
-    /* Hack the return address on the stack to do the trampoline */
-    ip(regs) = trampoline_entry;
-
-    TRAMP_DEBUG("set tramp entry %016lx", (unsigned long) trampoline_entry);
-
-
-#elif defined(__ia64__)
-  /* trampoline not support in ia64 */
-  if (trampoline_entry)
-   {
-     user_sp = 0;
-     TRAMP_DEBUG("set tramp entry %016lx", trampoline_entry);
-   }
-
-#else
-#error "Don't know how to support trampolines on this architecture"
-#endif
-
-    rc = 0;
-  }
-  else {
-    /* Attempt to trampoline for a process not using our stack */
-    OO_DEBUG_VERB(ci_log("Error -- attempt to trampoline for unknown process"));
-    rc = -ENOENT;
-  }
-  
-  return rc;
-}
-
- 
-/* This is the main body of our hacked version of the close system call (but we
- * are actually called by a wrapper which sets up the "regs" argument).  Since
- * we've hacked the system call table, then all close system calls will come
- * via this wrapper.  If appropriate, the call will be trampolined back to user
- * space, to our library's close which _should_ have intercepted.
- */
-asmlinkage long
-efab_linux_trampoline_handler_close (int fd, struct pt_regs *regs, void *ret) {
-  /* Firstly, is this one our sockets?  If not, do the usual thing */
-  struct file *f;
-  int rc;
-
-  efab_syscall_enter();
-
-  f = fget (fd);
-  if (f) {
-    if (FILE_IS_ENDPOINT(f)) {
-      /* Yep -- it's one of ours.  This means current process must be using the
-       * module (otherwise how did one of our sockets get in this proc's fd
-       * table?).  It seems it didn't get intercepted -- trampoline back up.
-       * However, only set up trampoline if this has been called via the
-       * correct sys-call entry point
-       */
-      if (setup_trampoline (regs, CI_TRAMP_OPCODE_CLOSE, fd) == 0) {
-        /* The trampoline will get run.  Let it handle the rest. */
-        fput (f);
-        efab_syscall_exit();
-        return 0;
-      }
-    }
-    /* Undo the fget above */
-    fput (f);
+    return tramp_close_passthrough(bx(regs));
   }
 
-  /* Not one of our FDs -- usual close */
-  rc = (saved_sys_close) (fd);
+  /* Can't verify ip with access_ok() -- it often points at 0xffffe002
+   * (i.e. the vsyscall-page)
+   * XXX casts to unsigned long were added to avoid warnings -- 2.6.18
+   * and 2.6.30 has different types for these values.
+   */
+  TRAMP_DEBUG("setup_trampoline:");
+  TRAMP_DEBUG("  bx %08lx", bx(regs));
+  TRAMP_DEBUG("  cx %08lx", cx(regs));
+  TRAMP_DEBUG("  dx %08lx", dx(regs));
+  TRAMP_DEBUG("  si %08lx", si(regs));
+  TRAMP_DEBUG("  di %08lx", di(regs));
+  TRAMP_DEBUG("  bp %08lx", bp(regs));
+  TRAMP_DEBUG("  ax %08lx", ax(regs));
+  TRAMP_DEBUG("  ds %08lx", (unsigned long)ds(regs));
+  TRAMP_DEBUG("  es %08lx", (unsigned long)es(regs));
+  TRAMP_DEBUG("  orig_ax %08lx", orig_ax(regs));
+  TRAMP_DEBUG("  ip %08lx", ip(regs));
+  TRAMP_DEBUG("  cs %08lx", (unsigned long)cs(regs));
+  TRAMP_DEBUG("  flags %08lx", flags(regs));
+  TRAMP_DEBUG("  sp %08lx", sp(regs));
+  TRAMP_DEBUG("  ss %08lx", (unsigned long)ss(regs));
+
+  if (ip(regs) == trampoline_exclude) {
+    TRAMP_DEBUG("Ignoring call from excluded address 0x%08lx",
+                (unsigned long)trampoline_exclude);
+    return tramp_close_passthrough(bx(regs));
+  }
+
+  /* The little stub in user-mode needs the opcode and data on the user-mode
+   * stack (originally we passed these in registers, ecx and edx, but this
+   * doesn't work in the case of a 32-bit app on a 64-bit machine calling a
+   * system call via the SYSCALL instruction, as used in 2.6 kernels).  The
+   * trampoline handler function may trash ecx and edx (which are scratch
+   * registers for x86 functions, but NOT for system calls), so we also push
+   * the original contents of these registers after we push the return
+   * address onto the user-mode stack.
+   *
+   * First we ensure there is sufficient user-space stack
+   */
+  if (!access_ok (VERIFY_WRITE, sp(regs) - 20, 20)) {
+    ci_log ("Bogus user-mode stack; cannot trampoline!");
+    return tramp_close_passthrough(bx(regs));
+  }
+  user_sp = (unsigned long*)sp(regs);
+  user_sp--;
+  if (copy_to_user (user_sp, &ip(regs), 4) != 0)
+    return tramp_close_passthrough(bx(regs));
+  user_sp--;
+  if (copy_to_user (user_sp, &cx(regs), 4) != 0)
+    return tramp_close_passthrough(bx(regs));
+  user_sp--;
+  if (copy_to_user (user_sp, &dx(regs), 4) != 0)
+    return tramp_close_passthrough(bx(regs));
+  user_sp--;
+  if( put_user(bx(regs), user_sp) != 0)
+    return tramp_close_passthrough(bx(regs));
+  user_sp--;
+  if( put_user(CI_TRAMP_OPCODE_CLOSE, user_sp) != 0)
+    return tramp_close_passthrough(bx(regs));
+
+  /* Hack registers so they're restored to state expected by tramp handler */
+  sp(regs) = (ci_uintptr_t) user_sp;
+
+  /* Hack the return address on the stack to do the trampoline */
+  ip(regs) = trampoline_entry;
+
+  TRAMP_DEBUG("set tramp entry 0x%08lx", (unsigned long)trampoline_entry);
+  avoid_sysret();
   efab_syscall_exit();
-  return rc;
+  return 0;
 }
 
+#else /* x86_64 */
+ 
+asmlinkage long
+efab_linux_trampoline_handler_close64(int fd, struct pt_regs *regs)
+{
+  ci_uintptr_t trampoline_entry = 0;
+  ci_uintptr_t trampoline_exclude = 0;
+  unsigned long *user_sp =0;
+
+  if( tramp_close_begin(fd, &trampoline_entry, &trampoline_exclude) )
+    return tramp_close_passthrough(fd);
+
+
+  /* Let's trampoline! */
+  /* There probably isn't any useful verification we can do here...
+   * The good news is that on x86_64 it is impossible to issue a system-call
+   * from supervisor mode (unlike IA32), and so calls to 'close' from the
+   * kernel don't go via the system-call table.  The bad news is that it is
+   * still theoretically possible to call via the system-call table, in which
+   * case all kinds of badness is liable to happen -- TODO: Is there any way
+   * to verify we're called from user-mode on x86_64?
+   */
+
+  TRAMP_DEBUG("setup_trampoline:");
+  /* Only a partial pt_regs stack frame is set up -- these are missing: */
+  TRAMP_DEBUG("  r15 %016lx XX",regs->r15); /* not saved by syscall entry */
+  TRAMP_DEBUG("  r14 %016lx XX",regs->r14); /* not saved by syscall entry */
+  TRAMP_DEBUG("  r13 %016lx XX",regs->r13); /* not saved by syscall entry */
+  TRAMP_DEBUG("  r12 %016lx XX",regs->r12); /* not saved by syscall entry */
+  TRAMP_DEBUG("  bp %016lx XX", bp(regs)); /* not saved by syscall entry */
+  TRAMP_DEBUG("  bx %016lx XX", bx(regs)); /* not saved by syscall entry */
+  /* These are always present: */
+  TRAMP_DEBUG("  r11 %016lx",regs->r11);
+  TRAMP_DEBUG("  r10 %016lx",regs->r10);
+  TRAMP_DEBUG("  r9  %016lx",regs->r9);
+  TRAMP_DEBUG("  r8  %016lx",regs->r8);
+  TRAMP_DEBUG("  ax %016lx", ax(regs));
+  TRAMP_DEBUG("  cx %016lx", cx(regs));
+  TRAMP_DEBUG("  dx %016lx", dx(regs));
+  TRAMP_DEBUG("  si %016lx", si(regs));
+  TRAMP_DEBUG("  di %016lx", di(regs));
+  TRAMP_DEBUG("  orig_ax %016lx", orig_ax(regs));
+  TRAMP_DEBUG("  ip %016lx", ip(regs));
+  /* Not always present but may be fixed up on syscall handler slow paths: */
+  TRAMP_DEBUG("  cs  %016lx XX",regs->cs);
+  TRAMP_DEBUG("  flags %016lx XX", flags(regs));
+  TRAMP_DEBUG("  rsp %016lx XX", sp(regs));
+  TRAMP_DEBUG("  ss  %016lx XX",regs->ss);
+
+  if (ip(regs) == trampoline_exclude) {
+    TRAMP_DEBUG("Ignoring call from excluded address");
+    return tramp_close_passthrough(fd);
+  }
+
+  /* We need to get data back to the user-mode stub handler.  Specifically
+   * -- the real return address, the op-code, and the "data" field (eg.
+   * file-descriptor for close).  We do this by corrupting the registers that
+   * are saved on the stack, so when we trampoline back the trampoline has
+   * these values in its regs as expected.  However, note that the trampoline
+   * handler must not trash ANY registers, since Linux system-calls don't.
+   * Therefore, we save the original values of the registers on the user-mode
+   * stack, to allow the trampoline stub to restore register state before
+   * returning to whoever called the syscall in the first place.
+   *
+   * On Linux x86_64 the old user-sp is stored in the per-cpu variable
+   * oldrsp.
+   */
+  {
+    unsigned long *orig_user_sp;
+#if OLD_RSP_PROVIDED
+    orig_user_sp = (unsigned long *)read_pda(oldrsp);
+#else
+    orig_user_sp = (unsigned long *)percpu_read_from_p(get_oldrsp_addr());
+#endif
+
+    user_sp = orig_user_sp;
+    TRAMP_DEBUG("read user_sp=%p", user_sp);
+
+    /* Make sure there is sufficient user-space stack */
+    if (!access_ok (VERIFY_WRITE, user_sp - 24, 24)) {
+      ci_log ("Invalid user-space stack-pointer; cannot trampoline!");
+      return tramp_close_passthrough(fd);
+    }
+
+    ci_assert (sizeof *user_sp == 8);
+
+    user_sp--;
+    /* Return address */
+    if (copy_to_user (user_sp, &ip(regs), 8) != 0)
+      return tramp_close_passthrough(fd);
+    user_sp--;
+    /* %rdi will be trashed by opcode */
+    if (copy_to_user (user_sp, &di(regs), 8) != 0)
+      return tramp_close_passthrough(fd);
+    user_sp--;
+    /* %rsi will be trashed by data */
+    if (copy_to_user (user_sp, &si(regs), 8) != 0)
+      return tramp_close_passthrough(fd);
+
+    /* Write the updated rsp */
+#if OLD_RSP_PROVIDED
+    write_pda(oldrsp, (unsigned long)user_sp);
+#else
+    percpu_write_to_p(get_oldrsp_addr(), (unsigned long)user_sp);
+#endif
+    TRAMP_DEBUG("wrote user_sp=%p", user_sp);
+
+    /* On some slow paths through the syscall code (e.g. when ptracing) the
+     * top of the stack frame gets fixed up, and the rsp there may get copied
+     * back to the pda oldrsp field on exit from the syscall.  So, if we find
+     * the original rsp in the rsp field on the stack, we need to update that
+     * too.
+     */
+    if (sp(regs) == (unsigned long)orig_user_sp) {
+      sp(regs) = (unsigned long)user_sp;
+      TRAMP_DEBUG("wrote sp=%p as well", user_sp);
+    }
+  }
+
+  /* The little stub in user-mode expects the fd to close in rsi, and
+   * the original return address (so that it can get back) in rdx.  We've
+   * saved away the original values of these regs on the user stack so that
+   * the trampoline stub may restore the state before returning to whoever
+   * made the system-call.
+   */
+  di(regs) = CI_TRAMP_OPCODE_CLOSE;
+  si(regs) = fd;
+
+  /* Hack the return address on the stack to do the trampoline */
+  ip(regs) = trampoline_entry;
+
+  TRAMP_DEBUG("set tramp entry %016lx", (unsigned long) trampoline_entry);
+
+  efab_syscall_exit();
+  return 0;
+}
 
 #ifdef CONFIG_COMPAT
 
-/* In order to support 32-bit apps running in compatibility mode, we need a
- * hybrid of the i386 and x86_64 trampoline setup code.  The struct pt_regs on
- * the stack appear as for the x86_64 code (with a few extra registers at the
- * end, as we are called from an interrupt rather than a SYSCALL instruction);
- * but the userland side looks like i386, so the stack contains 32-bit words
- * and the parameters must be passed on the stack, not in registers.
- */
-static int
-setup_trampoline32 (struct pt_regs *regs, int opcode, int data) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+/* Find struct pt_regs on the stack using the stack base pointer and
+ * 6 known registers. */
+static inline struct pt_regs *
+tramp_stack_find_regs32(unsigned long bx, unsigned long cx,
+                        unsigned long dx, unsigned long si,
+                        unsigned long di, unsigned long bp,
+                        unsigned long *stack)
+{
+  unsigned long regs4[4] = {cx, dx, si, di};
+  int i, off;
+  struct pt_regs *regs;
 
-  struct mm_hash *p;
+  /* Is one of our saved offsets good? */
+  for( i = 0; i < TRAMP_PRESAVED_OFF32; i++ ) {
+    regs = (void *)(stack + tramp_offset[i]);
+    if( tramp_offset[i] == 0 )
+      break;
+    if( memcmp(&regs->cx, regs4, 4 * sizeof(regs4[0])) == 0 &&
+        regs->bx == bx && regs->bp == bp ) {
+      TRAMP_DEBUG("%s: reuse offset[%d] = %d", __func__, i, tramp_offset[i]);
+      return regs;
+    }
+  }
+
+  for( off = 1; off < 20; off++ ) {
+    regs = (void *)(stack + off);
+    if( memcmp(&regs->cx, regs4, 4 * sizeof(regs4[0])) == 0 &&
+        regs->bx == bx && regs->bp == bp ) {
+      if( i < TRAMP_PRESAVED_OFF32 ) {
+        tramp_offset[i] = off;
+        TRAMP_DEBUG("%s: offset[%d] = %d", __func__, i, off);
+      }
+      else {
+        TRAMP_DEBUG("%s: 3rd offset %d", __func__, off);
+      }
+      return regs;
+    }
+  }
+  return NULL;
+}
+
+#endif
+
+extern asmlinkage int
+efab_linux_trampoline_handler_close32(unsigned long bx, unsigned long cx,
+                                      unsigned long dx, unsigned long si,
+                                      unsigned long di, unsigned long bp,
+                                      struct pt_regs *regs)
+{
   ci_uintptr_t trampoline_entry = 0;
   ci_uintptr_t trampoline_exclude = 0;
-  int rc;
+  unsigned int *user32_sp =0;
 
-  read_lock (&oo_mm_tbl_lock);
-  p = oo_mm_tbl_lookup(current->mm);
-  if (p) {
-    trampoline_entry = (ci_uintptr_t) CI_USER_PTR_GET (p->trampoline_entry);
-    trampoline_exclude =  (ci_uintptr_t) CI_USER_PTR_GET (p->trampoline_exclude);
-  }
-  read_unlock (&oo_mm_tbl_lock);
+  if( tramp_close_begin(bx, &trampoline_entry, &trampoline_exclude) )
+    return tramp_close_passthrough(bx);
 
-  if (trampoline_entry) {
-    unsigned int *user32_sp;
 
-    /* Found the relevant mm -- trampoline to user-space.  To do do we
-     * hack the return address on the stack.
+  /* Let's trampoline! */
+  ci_assert (sizeof *user32_sp == 4);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+  regs = tramp_stack_find_regs32(bx, cx, dx, si, di, bp, (void *)regs);
+  if( regs == NULL )
+    return tramp_close_passthrough(bx);
+#endif
+
+  /* It's one of our's.  We would normally have expected to intercept
+   * this call from the user-library; trampoling by hacking stack.
+   * We verify the stack is as we expect first.
+   */
+
+  ci_assert (sizeof *user32_sp == 4);
+
+  if (cs(regs) != __USER32_CS) {
+
+    /* We couldn't check this for the 64-bit syscall, but we *can* do this
+     * check here, because we get extra stuff on the stack due to coming from
+     * an interrupt.
      */
-    if (!access_ok (VERIFY_READ, trampoline_entry, 1)) {
-      /* We can't trampoline to this address.  The user may have changed his
-       * address space, or supplied a bad trampoline-entry at registration time
-       * -- so fail gracefully
-       */
-      ci_log ("Warning: pid %d has bad trampoline entry: 0x%08lx",
-              current->tgid, (unsigned long)trampoline_entry);
-      return -EBADF;
-    }
-
-    /* It's one of our's.  We would normally have expected to intercept
-     * this call from the user-library; trampoling by hacking stack.
-     * We verify the stack is as we expect first.
-     */
-
-    ci_assert (sizeof *user32_sp == 4);
-
-    if (cs(regs) != __USER32_CS) {
-
-      /* We couldn't check this for the 64-bit syscall, but we *can* do this
-       * check here, because we get extra stuff on the stack due to coming from
-       * an interrupt.
-       */
-      ci_log ("Warning: 32-bit trampoline-handler called unexpectedly (%016lx)",
-              cs(regs));
+    ci_log ("Warning: 32-bit trampoline-handler called unexpectedly (%016lx)",
+            cs(regs));
 #ifndef NDEBUG
-      ci_log ("This is a debug-build driver, so I'm going to fail here!");
-      ci_assert (0);
+    ci_log ("This is a debug-build driver, so I'm going to fail here!");
+    ci_assert (0);
 #endif
-      return -EINVAL;
-    }
-        
-    TRAMP_DEBUG("setup_trampoline32:");
-    TRAMP_DEBUG("  r15 %016lx XX",regs->r15);
-    TRAMP_DEBUG("  r14 %016lx XX",regs->r14);
-    TRAMP_DEBUG("  r13 %016lx XX",regs->r13);
-    TRAMP_DEBUG("  r12 %016lx XX",regs->r12);
-    TRAMP_DEBUG("  bp %016lx XX", bp(regs));
-    TRAMP_DEBUG("  bx %016lx XX", bx(regs));
-    TRAMP_DEBUG("  r11 %016lx",regs->r11);
-    TRAMP_DEBUG("  r10 %016lx",regs->r10);
-    TRAMP_DEBUG("  r9  %016lx",regs->r9);
-    TRAMP_DEBUG("  r8  %016lx",regs->r8);
-    TRAMP_DEBUG("  ax %016lx", ax(regs));
-    TRAMP_DEBUG("  cx %016lx", cx(regs));
-    TRAMP_DEBUG("  dx %016lx", dx(regs));
-    TRAMP_DEBUG("  si %016lx", si(regs));
-    TRAMP_DEBUG("  di %016lx", di(regs));
-    TRAMP_DEBUG("  orig_ax %016lx", orig_ax(regs));
-    TRAMP_DEBUG("  ip %016lx", ip(regs));
-    /* Extra context from entry via interrupt: */
-    TRAMP_DEBUG("  cs  %016lx",regs->cs);
-    TRAMP_DEBUG("  flags %016lx", flags(regs)); 
-    TRAMP_DEBUG("  sp %016lx", sp(regs));
-    TRAMP_DEBUG("  ss  %016lx",regs->ss);
-
-    if (ip(regs) == trampoline_exclude) {
-      TRAMP_DEBUG("Ignoring call from excluded address");
-      return -EBUSY;
-    }
-    /* The little stub in user-mode needs the opcode and data on the user-mode
-     * stack (originally we passed these in registers, ecx and edx, but this
-     * doesn't work in the case of a 32-bit app on a 64-bit machine calling a
-     * system call via the SYSCALL instruction, as used in 2.6 kernels).  The
-     * trampoline handler function may trash ecx and edx (which are scratch
-     * registers for x86 functions, but NOT for system calls), so we also push
-     * the original contents of these registers after we push the return
-     * address onto the user-mode stack.
-     *
-     * First we ensure there is sufficient user-space stack
-     */
-    if (!access_ok (VERIFY_WRITE, sp(regs) - 20, 20)) {
-      ci_log ("Bogus 32-bit user-mode stack; cannot trampoline!");
-      return -EFAULT;
-    }
-    user32_sp = (unsigned int*)sp(regs);
-    user32_sp--;
-    if (copy_to_user (user32_sp, &ip(regs), 4) != 0)  return -EFAULT;
-    user32_sp--;
-    if (copy_to_user (user32_sp, &cx(regs), 4) != 0)  return -EFAULT;
-    user32_sp--;
-    if (copy_to_user (user32_sp, &dx(regs), 4) != 0)  return -EFAULT;
-    user32_sp--;
-    if (copy_to_user (user32_sp, &data, 4) != 0)  return -EFAULT;
-    user32_sp--;
-    if (copy_to_user (user32_sp, &opcode, 4) != 0)  return -EFAULT;
-
-    /* Hack registers so they're restored to state expected by tramp handler */
-    sp(regs) = (ci_uintptr_t) user32_sp;
-
-    /* Hack the return address on the stack to do the trampoline */
-    ip(regs) = trampoline_entry;
-
-    TRAMP_DEBUG("set tramp entry 0x%08lx", (unsigned long)trampoline_entry);
-    avoid_sysret();
-    rc = 0;
+    return tramp_close_passthrough(bx);
   }
-  else {
-    /* Attempt to trampoline for a process not using our stack */
-    OO_DEBUG_VERB(ci_log("Error -- attempt to trampoline for unknown process"));
-    rc = -ENOENT;
+      
+  TRAMP_DEBUG("setup_trampoline32:");
+  TRAMP_DEBUG("  r15 %016lx XX",regs->r15);
+  TRAMP_DEBUG("  r14 %016lx XX",regs->r14);
+  TRAMP_DEBUG("  r13 %016lx XX",regs->r13);
+  TRAMP_DEBUG("  r12 %016lx XX",regs->r12);
+  TRAMP_DEBUG("  bp %016lx XX", bp(regs));
+  TRAMP_DEBUG("  bx %016lx XX", bx(regs));
+  TRAMP_DEBUG("  r11 %016lx",regs->r11);
+  TRAMP_DEBUG("  r10 %016lx",regs->r10);
+  TRAMP_DEBUG("  r9  %016lx",regs->r9);
+  TRAMP_DEBUG("  r8  %016lx",regs->r8);
+  TRAMP_DEBUG("  ax %016lx", ax(regs));
+  TRAMP_DEBUG("  cx %016lx", cx(regs));
+  TRAMP_DEBUG("  dx %016lx", dx(regs));
+  TRAMP_DEBUG("  si %016lx", si(regs));
+  TRAMP_DEBUG("  di %016lx", di(regs));
+  TRAMP_DEBUG("  orig_ax %016lx", orig_ax(regs));
+  TRAMP_DEBUG("  ip %016lx", ip(regs));
+  /* Extra context from entry via interrupt: */
+  TRAMP_DEBUG("  cs  %016lx",regs->cs);
+  TRAMP_DEBUG("  flags %016lx", flags(regs)); 
+  TRAMP_DEBUG("  sp %016lx", sp(regs));
+  TRAMP_DEBUG("  ss  %016lx",regs->ss);
+
+  if (ip(regs) == trampoline_exclude) {
+    TRAMP_DEBUG("Ignoring call from excluded address");
+    return tramp_close_passthrough(bx);
   }
-  
-  return rc;
-}
-
-
-asmlinkage int
-efab_linux_trampoline_handler_close32(int fd, struct pt_regs *regs, void *ret) {
-  /* Firstly, is this one our sockets?  If not, do the usual thing */
-  struct file *f;
-  int rc;
-
-  efab_syscall_enter();
-
-  f = fget (fd);
-  if (f) {
-    if (FILE_IS_ENDPOINT(f)) {
-      /* Yep -- it's one of ours.  This means current process must be using the
-       * module (otherwise how did one of our sockets get in this proc's fd
-       * table?).  It seems it didn't get intercepted -- trampoline back up.
-       * However, only set up trampoline if this has been called via the
-       * correct sys-call entry point
-       */
-      if (setup_trampoline32 (regs, CI_TRAMP_OPCODE_CLOSE, fd) == 0) {
-        fput (f);
-        efab_syscall_exit();
-        return 0;
-      }
-    }
-    /* Undo the fget above */
-    fput (f);
+  /* The little stub in user-mode needs the opcode and data on the user-mode
+   * stack (originally we passed these in registers, ecx and edx, but this
+   * doesn't work in the case of a 32-bit app on a 64-bit machine calling a
+   * system call via the SYSCALL instruction, as used in 2.6 kernels).  The
+   * trampoline handler function may trash ecx and edx (which are scratch
+   * registers for x86 functions, but NOT for system calls), so we also push
+   * the original contents of these registers after we push the return
+   * address onto the user-mode stack.
+   *
+   * First we ensure there is sufficient user-space stack
+   */
+  if (!access_ok (VERIFY_WRITE, sp(regs) - 20, 20)) {
+    ci_log ("Bogus 32-bit user-mode stack; cannot trampoline!");
+    return tramp_close_passthrough(bx);
   }
+  user32_sp = (unsigned int*)sp(regs);
+  user32_sp--;
+  if (copy_to_user (user32_sp, &ip(regs), 4) != 0)
+    return tramp_close_passthrough(bx);
+  user32_sp--;
+  if (copy_to_user (user32_sp, &cx(regs), 4) != 0)
+    return tramp_close_passthrough(bx);
+  user32_sp--;
+  if (copy_to_user (user32_sp, &dx(regs), 4) != 0)
+    return tramp_close_passthrough(bx);
+  user32_sp--;
+  if( put_user(bx, user32_sp) != 0)
+    return tramp_close_passthrough(bx);
+  user32_sp--;
+  if( put_user(CI_TRAMP_OPCODE_CLOSE, user32_sp) != 0)
+    return tramp_close_passthrough(bx);
 
-  /* Not one of our FDs -- usual close */
-  rc = (saved_sys_close) (fd);
+  /* Hack registers so they're restored to state expected by tramp handler */
+  sp(regs) = (ci_uintptr_t) user32_sp;
+
+  /* Hack the return address on the stack to do the trampoline */
+  ip(regs) = trampoline_entry;
+
+  TRAMP_DEBUG("set tramp entry 0x%08lx", (unsigned long)trampoline_entry);
+  avoid_sysret();
   efab_syscall_exit();
-  return rc;
+  return 0;
 }
 
-#endif
+#endif /* CONFIG_COMPAT */
+#endif /* arch */
+
+
 
 #ifdef OO_DO_HUGE_PAGES
 #include <linux/unistd.h>
@@ -1483,9 +1479,6 @@ int efab_linux_trampoline_ctor(int no_sct)
                 ia32_syscall_table[__NR_ia32_close],
                 ia32_syscall_table[__NR_ia32_exit_group],
                 ia32_syscall_table[__NR_ia32_rt_sigaction]);
-  } else {
-    /* ia32_syscall_table wasn't found - can't trampoline for 32-bit apps */
-    TRAMP_DEBUG("warning: ia32 syscall table not found");
   }
 #endif
 

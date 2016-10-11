@@ -65,7 +65,7 @@
 #ifdef CONFIG_PPC64
 #define EFX_RECYCLE_RING_SIZE_DEFAULT 4096
 #else
-#define EFX_RECYCLE_RING_SIZE_DEFAULT 512
+#define EFX_RECYCLE_RING_SIZE_DEFAULT 1024
 #endif
 static int rx_recycle_ring_size = EFX_RECYCLE_RING_SIZE_DEFAULT;
 module_param(rx_recycle_ring_size, uint, 0444);
@@ -192,7 +192,7 @@ static void efx_fini_skb_cache(struct efx_rx_queue *rx_queue)
 static struct page *efx_reuse_page(struct efx_rx_queue *rx_queue)
 {
 	struct page *page;
-	unsigned index;
+	unsigned int index;
 
 	index = rx_queue->page_remove & rx_queue->page_ptr_mask;
 	rx_queue->page_remove++;
@@ -240,7 +240,7 @@ static  void efx_init_rx_buffer(struct efx_rx_queue *rx_queue,
 	struct efx_nic *efx = rx_queue->efx;
 	struct efx_rx_page_state *state;
 	dma_addr_t dma_addr;
-	unsigned index;
+	unsigned int index;
 
 	EFX_BUG_ON_PARANOID(page_offset >
 			    PAGE_SIZE << efx->rx_buffer_order);
@@ -257,9 +257,7 @@ static  void efx_init_rx_buffer(struct efx_rx_queue *rx_queue,
 	rx_buf->page_offset = page_offset + efx->rx_ip_align;
 	rx_buf->len = efx->rx_dma_len;
 	rx_buf->flags = flags;
-#if defined(EFX_NOT_UPSTREAM)
 	rx_buf->vlan_tci = 0;
-#endif
 	++rx_queue->added_count;
 }
 
@@ -279,9 +277,9 @@ static int efx_init_rx_buffers(struct efx_rx_queue *rx_queue, bool atomic)
 	struct page *page;
 	struct efx_rx_page_state *state;
 	dma_addr_t dma_addr;
-	unsigned count;
-	unsigned i;
-	unsigned page_offset;
+	unsigned int count;
+	unsigned int i;
+	unsigned int page_offset;
 	u16 flags;
 
 	count = 0;
@@ -297,11 +295,19 @@ static int efx_init_rx_buffers(struct efx_rx_queue *rx_queue, bool atomic)
 			 * and we re-schedule rx_fill from non-atomic
 			 * context in such a case.  So, use __GFP_NO_WARN
 			 * in case of atomic. */
-			page = alloc_pages(__GFP_COMP |
-					   (atomic ?
-					    (GFP_ATOMIC | __GFP_NOWARN)
-					    : GFP_KERNEL),
-					   efx->rx_buffer_order);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ALLOC_PAGES_NODE)
+			struct efx_channel *channel;
+
+			channel = efx_rx_queue_channel(rx_queue);
+			page = alloc_pages_node(channel->irq_mem_node,
+						 __GFP_COMP |
+#else
+			page = alloc_pages(__GFP_COMP|
+#endif
+						(atomic ?
+						 (GFP_ATOMIC | __GFP_NOWARN)
+						 : GFP_KERNEL),
+						efx->rx_buffer_order);
 			if (unlikely(page == NULL))
 				return -ENOMEM;
 			dma_addr =
@@ -330,7 +336,7 @@ static int efx_init_rx_buffers(struct efx_rx_queue *rx_queue, bool atomic)
 		} while (++i < efx->rx_bufs_per_page);
 #if !defined(EFX_NOT_UPSTREAM) || defined(EFX_RX_PAGE_SHARE)
 		/* We hold the only reference so just set to required count */
-		atomic_add(efx->rx_bufs_per_page, &page->_count);
+		page_ref_add(page, efx->rx_bufs_per_page);
 #endif
 
 	} while (++count < efx->rx_pages_per_batch);
@@ -383,7 +389,7 @@ static void efx_recycle_rx_page(struct efx_channel *channel,
 	struct page *page = rx_buf->page;
 	struct efx_rx_queue *rx_queue = efx_channel_get_rx_queue(channel);
 	struct efx_nic *efx = rx_queue->efx;
-	unsigned index;
+	unsigned int index;
 
 	/* Don't continue if page is already present in recycle ring.
 	 * Prevents the page being added to the ring twice
@@ -464,7 +470,7 @@ static void efx_recycle_rx_buf(struct efx_rx_queue *rx_queue,
 			       struct efx_rx_buffer *rx_buf)
 {
 	struct efx_rx_buffer *new_buf;
-	unsigned index;
+	unsigned int index;
 
 	index = rx_queue->added_count & rx_queue->ptr_mask;
 	new_buf = efx_rx_buffer(rx_queue, index);
@@ -519,10 +525,10 @@ static void efx_repost_rx_page(struct efx_channel *channel,
 	struct efx_nic *efx = rx_queue->efx;
 	struct page *page = rx_buf->page;
 	u16 flags;
-	unsigned page_offset = 0;
-	unsigned fill_level;
-	unsigned nr_bufs;
-	unsigned space;
+	unsigned int page_offset = 0;
+	unsigned int fill_level;
+	unsigned int nr_bufs;
+	unsigned int space;
 
 	/* We only repost pages that have not been pushed up the stack.
 	 * These are signalled by a non-null rx_buf page field
@@ -682,7 +688,7 @@ static void efx_rx_packet__check_len(struct efx_rx_queue *rx_queue,
 				     int len)
 {
 	struct efx_nic *efx = rx_queue->efx;
-	unsigned max_len = rx_buf->len - efx->type->rx_buffer_padding;
+	unsigned int max_len = rx_buf->len - efx->type->rx_buffer_padding;
 
 	if (likely(len <= max_len))
 		return;
@@ -720,7 +726,7 @@ static void
 efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 		  unsigned int n_frags, u8 *eh)
 {
-#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)) || defined(CONFIG_SFC_TRACING)
+#if IS_ENABLED(CONFIG_VLAN_8021Q) || defined(CONFIG_SFC_TRACING)
 	struct efx_rx_buffer *head_buf = rx_buf;
 #endif
 	struct napi_struct *napi = &channel->napi_str;
@@ -739,11 +745,13 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_RXHASH_SUPPORT)
 	if (efx->net_dev->features & NETIF_F_RXHASH)
-		skb_set_hash(skb, efx_rx_buf_hash(efx, eh),
-			     PKT_HASH_TYPE_L3);
+		skb_set_hash(skb, efx_rx_buf_hash(efx, eh), PKT_HASH_TYPE_L4);
 #endif
 	skb->ip_summed = ((rx_buf->flags & EFX_RX_PKT_CSUMMED) ?
 			  CHECKSUM_UNNECESSARY : CHECKSUM_NONE);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_CSUM_LEVEL)
+	skb->csum_level = !!(rx_buf->flags & EFX_RX_PKT_CSUM_LEVEL);
+#endif
 
 	for (;;) {
 		skb_fill_page_desc(skb, skb_shinfo(skb)->nr_frags,
@@ -763,16 +771,25 @@ efx_rx_packet_gro(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 	skb_record_rx_queue(skb, channel->rx_queue.core_index);
 
 	skb_mark_napi_id(skb, &channel->napi_str);
+
+	efx_rx_skb_attach_timestamp(channel, skb);
+
 #ifdef CONFIG_SFC_TRACING
 	trace_sfc_receive(skb, true, head_buf->flags & EFX_RX_BUF_VLAN_XTAG,
 			  head_buf->vlan_tci);
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if IS_ENABLED(CONFIG_VLAN_8021Q)
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_VLAN_RX_PATH)
 	if (head_buf->flags & EFX_RX_BUF_VLAN_XTAG)
 		gro_result = vlan_gro_frags(napi, efx->vlan_group,
 					    head_buf->vlan_tci);
 	else
 		/* fall through */
+#else
+	if (head_buf->flags & EFX_RX_BUF_VLAN_XTAG)
+		__vlan_hwaccel_put_tag(napi->skb, htons(ETH_P_8021Q),
+				       head_buf->vlan_tci);
+#endif
 #endif
 	gro_result = napi_gro_frags(napi);
 	if (gro_result != GRO_DROP)
@@ -964,7 +981,7 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 	struct sk_buff *skb;
 	u16 hdr_len = min_t(u16, rx_buf->len, rx_cb_size);
 	u16 rx_buf_flags = rx_buf->flags;
-#if defined(EFX_NOT_UPSTREAM)
+#if IS_ENABLED(CONFIG_VLAN_8021Q)
 	u16 rx_buf_vlan_tci = rx_buf->vlan_tci;
 #endif
 
@@ -980,8 +997,12 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 
 	/* Set the SKB flags */
 	skb_checksum_none_assert(skb);
-	if (likely(rx_buf_flags & EFX_RX_PKT_CSUMMED))
+	if (likely(rx_buf_flags & EFX_RX_PKT_CSUMMED)) {
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
+#if !defined(EFX_USE_KCOMPAT) || defined (EFX_HAVE_CSUM_LEVEL)
+		skb->csum_level = !!(rx_buf_flags & EFX_RX_PKT_CSUM_LEVEL);
+#endif
+	}
 
 	efx_rx_skb_attach_timestamp(channel, skb);
 
@@ -1013,18 +1034,18 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 #elif !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_RXHASH_SUPPORT)
 	if (channel->efx->net_dev->features & NETIF_F_RXHASH)
 		skb_set_hash(skb, efx_rx_buf_hash(channel->efx, eh),
-			     PKT_HASH_TYPE_L3);
+			     (rx_buf_flags & EFX_RX_PKT_TCP? PKT_HASH_TYPE_L4:
+			      PKT_HASH_TYPE_L3));
+#endif
+
+#if IS_ENABLED(CONFIG_VLAN_8021Q)
+	if (rx_buf_flags & EFX_RX_BUF_VLAN_XTAG)
+		__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q),
+				       rx_buf_vlan_tci);
 #endif
 
 	if (channel->type->receive_skb)
-#if defined(EFX_NOT_UPSTREAM)
-		if (channel->type->receive_skb(channel, skb,
-					       rx_buf_flags &
-					       EFX_RX_BUF_VLAN_XTAG,
-					       rx_buf_vlan_tci))
-#else
 		if (channel->type->receive_skb(channel, skb))
-#endif
 			return;
 
 	/* Pass the packet up */
@@ -1032,7 +1053,8 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
 	trace_sfc_receive(skb, false, rx_buf_flags & EFX_RX_BUF_VLAN_XTAG,
 			  rx_buf_vlan_tci);
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if IS_ENABLED(CONFIG_VLAN_8021Q) && defined(EFX_USE_KCOMPAT) && \
+	defined(EFX_HAVE_VLAN_RX_PATH)
 	if (rx_buf_flags & EFX_RX_BUF_VLAN_XTAG) {
 		vlan_hwaccel_receive_skb(skb, channel->efx->vlan_group,
 					 rx_buf_vlan_tci);
@@ -1052,6 +1074,9 @@ void __efx_rx_packet(struct efx_channel *channel)
 	struct efx_rx_buffer *rx_buf =
 		efx_rx_buffer(&channel->rx_queue, channel->rx_pkt_index);
 	u8 *eh = efx_rx_buf_va(rx_buf);
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+	struct vlan_ethhdr *veh = (struct vlan_ethhdr *) eh;
+#endif
 
 	/* Read length from the prefix if necessary.  This already
 	 * excludes the length of the prefix itself.
@@ -1083,11 +1108,18 @@ void __efx_rx_packet(struct efx_channel *channel)
 		goto out;
 	}
 
-#if defined(EFX_NOT_UPSTREAM)
-#if defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+	/* Fake VLAN tagging */
+#if defined(EFX_HAVE_VLAN_RX_PATH)
 	if ((rx_buf->flags & EFX_RX_PKT_VLAN) && efx->vlan_group) {
-		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)eh;
-
+#else
+	if ((rx_buf->flags & EFX_RX_PKT_VLAN) &&
+	    ((veh->h_vlan_proto == htons(ETH_P_8021Q)) ||
+	     (veh->h_vlan_proto == htons(ETH_P_QINQ1)) ||
+	     (veh->h_vlan_proto == htons(ETH_P_QINQ2)) ||
+	     (veh->h_vlan_proto == htons(ETH_P_QINQ3)) ||
+	     (veh->h_vlan_proto == htons(ETH_P_8021AD)))) {
+#endif
 		rx_buf->vlan_tci = ntohs(veh->h_vlan_TCI);
 		memmove(eh - efx->rx_prefix_size + VLAN_HLEN,
 			eh - efx->rx_prefix_size,
@@ -1097,13 +1129,6 @@ void __efx_rx_packet(struct efx_channel *channel)
 		rx_buf->len -= VLAN_HLEN;
 		rx_buf->flags |= EFX_RX_BUF_VLAN_XTAG;
 	}
-#else
-	if ((rx_buf->flags & EFX_RX_PKT_VLAN)) {
-		struct vlan_ethhdr *veh = (struct vlan_ethhdr *)eh;
-		rx_buf->vlan_tci = ntohs(veh->h_vlan_TCI);
-		rx_buf->flags |= EFX_RX_BUF_VLAN_XTAG;
-	}
-#endif
 #endif
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_FEATURES) || defined(EFX_HAVE_EXT_NDO_SET_FEATURES)
@@ -1255,7 +1280,7 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 	if (rx_queue->buffer) {
 		for (i = rx_queue->removed_count; i < rx_queue->added_count;
 		     i++) {
-			unsigned index = i & rx_queue->ptr_mask;
+			unsigned int index = i & rx_queue->ptr_mask;
 			rx_buf = efx_rx_buffer(rx_queue, index);
 			efx_fini_rx_buffer(rx_queue, rx_buf);
 		}
@@ -1384,7 +1409,7 @@ MODULE_PARM_DESC(rx_refill_threshold,
 /* Size of the LRO hash table.  Must be a power of 2.  A larger table
  * means we can accelerate a larger number of streams.
  */
-static unsigned lro_table_size = 128;
+static unsigned int lro_table_size = 128;
 module_param(lro_table_size, uint, 0644);
 MODULE_PARM_DESC(lro_table_size,
 		 "Size of the LRO hash table.  Must be a power of 2");
@@ -1392,7 +1417,7 @@ MODULE_PARM_DESC(lro_table_size,
 /* Maximum length of a hash chain.  If chains get too long then the lookup
  * time increases and may exceed the benefit of LRO.
  */
-static unsigned lro_chain_max = 20;
+static unsigned int lro_chain_max = 20;
 module_param(lro_chain_max, uint, 0644);
 MODULE_PARM_DESC(lro_chain_max,
 		 "Maximum length of chains in the LRO hash table");
@@ -1401,7 +1426,7 @@ MODULE_PARM_DESC(lro_chain_max,
 /* Maximum time (in jiffies) that a connection can be idle before it's LRO
  * state is discarded.
  */
-static unsigned lro_idle_jiffies = HZ / 10 + 1;	/* 100ms */
+static unsigned int lro_idle_jiffies = HZ / 10 + 1;	/* 100ms */
 module_param(lro_idle_jiffies, uint, 0644);
 MODULE_PARM_DESC(lro_idle_jiffies, "Time (in jiffies) after which an"
 		 " idle connection's LRO state is discarded");
@@ -1439,7 +1464,7 @@ MODULE_PARM_DESC(lro_loss_packets, "Number of packets that must "
 int efx_ssr_init(struct efx_channel *channel, struct efx_nic *efx)
 {
 	struct efx_ssr_state *st = &channel->ssr;
-	unsigned i;
+	unsigned int i;
 
 	st->conns_mask = lro_table_size - 1;
 	if ((st->conns_mask + 1) & st->conns_mask) {
@@ -1482,7 +1507,7 @@ static inline void efx_rx_buffer_set_empty(struct efx_rx_buffer *rx_buf)
 /* Drop the given connection, and add it to the free list. */
 static void efx_ssr_drop(struct efx_channel *channel, struct efx_ssr_conn *c)
 {
-	unsigned bucket;
+	unsigned int bucket;
 
 	EFX_BUG_ON_PARANOID(c->skb);
 
@@ -1502,7 +1527,7 @@ void efx_ssr_fini(struct efx_channel *channel)
 {
 	struct efx_ssr_state *st = &channel->ssr;
 	struct efx_ssr_conn *c;
-	unsigned i;
+	unsigned int i;
 
 	/* Return cleanly if efx_ssr_init() has not been called. */
 	if (st->conns == NULL)
@@ -1595,11 +1620,18 @@ static void efx_ssr_deliver(struct efx_ssr_state *st, struct efx_ssr_conn *c)
 	trace_sfc_receive(c->skb, false, EFX_SSR_CONN_IS_VLAN_ENCAP(c),
 			  EFX_SSR_CONN_VLAN_TCI(c));
 #endif
-#ifdef EFX_USE_FAKE_VLAN_RX_ACCEL
+#if IS_ENABLED(CONFIG_VLAN_8021Q)
+#ifdef EFX_HAVE_VLAN_RX_PATH
 	if (EFX_SSR_CONN_IS_VLAN_ENCAP(c))
 		vlan_hwaccel_receive_skb(c->skb, st->efx->vlan_group,
 					 EFX_SSR_CONN_VLAN_TCI(c));
 	else
+#else
+	if (EFX_SSR_CONN_IS_VLAN_ENCAP(c))
+		__vlan_hwaccel_put_tag(c->skb, htons(ETH_P_8021Q),
+				       EFX_SSR_CONN_VLAN_TCI(c));
+	/* Fall through to netif_receive_skb() */
+#endif
 #endif
 		netif_receive_skb(c->skb);
 
@@ -1610,10 +1642,10 @@ static void efx_ssr_deliver(struct efx_ssr_state *st, struct efx_ssr_conn *c)
 /* Stop tracking connections that have gone idle in order to keep hash
  * chains short.
  */
-static void efx_ssr_purge_idle(struct efx_channel *channel, unsigned now)
+static void efx_ssr_purge_idle(struct efx_channel *channel, unsigned int now)
 {
 	struct efx_ssr_conn *c;
-	unsigned i;
+	unsigned int i;
 
 	EFX_BUG_ON_PARANOID(!list_empty(&channel->ssr.active_conns));
 
@@ -1728,9 +1760,11 @@ efx_ssr_merge_page(struct efx_ssr_state *st, struct efx_ssr_conn *c,
 		if (unlikely(c->skb == NULL))
 			return 0;
 
+		efx_rx_skb_attach_timestamp(channel, c->skb);
+
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_RXHASH_SUPPORT)
 		if (st->efx->net_dev->features & NETIF_F_RXHASH)
-			skb_set_hash(c->skb, c->conn_hash, PKT_HASH_TYPE_L3);
+			skb_set_hash(c->skb, c->conn_hash, PKT_HASH_TYPE_L4);
 #endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
@@ -1773,9 +1807,9 @@ efx_ssr_try_merge(struct efx_channel *channel, struct efx_ssr_conn *c)
 	struct efx_rx_buffer *rx_buf = &c->next_buf;
 	u8 *eh = c->next_eh;
 	int data_length, hdr_length, dont_merge;
-	unsigned th_seq, pkt_length;
+	unsigned int th_seq, pkt_length;
 	struct tcphdr *th;
-	unsigned now;
+	unsigned int now;
 
 	now = jiffies;
 	if (now - c->last_pkt_jiffies > lro_idle_jiffies) {
@@ -1862,7 +1896,7 @@ efx_ssr_try_merge(struct efx_channel *channel, struct efx_ssr_conn *c)
 static void efx_ssr_new_conn(struct efx_ssr_state *st, u32 conn_hash,
 			     u32 l2_id, struct tcphdr *th)
 {
-	unsigned bucket = conn_hash & st->conns_mask;
+	unsigned int bucket = conn_hash & st->conns_mask;
 	struct efx_ssr_conn *c;
 
 	if (st->conns_n[bucket] >= lro_chain_max) {
@@ -1911,7 +1945,7 @@ void efx_ssr(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 	void *nh = eh + 1;
 	struct tcphdr *th;
 	u32 conn_hash;
-	unsigned bucket;
+	unsigned int bucket;
 
 	/* Get the hardware hash if available */
 #ifdef EFX_HAVE_RXHASH_SUPPORT
@@ -1923,7 +1957,7 @@ void efx_ssr(struct efx_channel *channel, struct efx_rx_buffer *rx_buf,
 	else
 		conn_hash = 0;
 
-#ifdef EFX_USE_FAKE_VLAN_RX_ACCEL
+#if IS_ENABLED(CONFIG_VLAN_8021Q)
 	if (rx_buf->flags & EFX_RX_BUF_VLAN_XTAG)
 		l2_id = rx_buf->vlan_tci | EFX_SSR_L2_ID_VLAN;
 #endif
@@ -2008,7 +2042,7 @@ void __efx_ssr_end_of_burst(struct efx_channel *channel)
 {
 	struct efx_ssr_state *st = &channel->ssr;
 	struct efx_ssr_conn *c;
-	unsigned j;
+	unsigned int j;
 
 	EFX_BUG_ON_PARANOID(list_empty(&st->active_conns));
 
@@ -2035,12 +2069,44 @@ void __efx_ssr_end_of_burst(struct efx_channel *channel)
 
 #ifdef CONFIG_RFS_ACCEL
 
-int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
-		   u16 rxq_index, u32 flow_id)
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NEW_FLOW_KEYS)
+int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
+			struct efx_filter_spec *spec)
 {
-	struct efx_nic *efx = netdev_priv(net_dev);
-	struct efx_channel *channel;
-	struct efx_filter_spec spec;
+	struct flow_keys fk;
+
+	if (!skb_flow_dissect_flow_keys(skb, &fk, 0))
+		return -EPROTONOSUPPORT;
+	if (fk.basic.n_proto != htons(ETH_P_IP) && fk.basic.n_proto != htons(ETH_P_IPV6))
+		return -EPROTONOSUPPORT;
+#if !defined(EFX_USE_KCOMPAT) || defined(FLOW_DIS_IS_FRAGMENT)
+	if (fk.control.flags & FLOW_DIS_IS_FRAGMENT)
+		return -EPROTONOSUPPORT;
+#endif
+
+	spec->match_flags = EFX_FILTER_MATCH_FLAGS_RFS;
+	spec->ether_type = fk.basic.n_proto;
+	spec->ip_proto = fk.basic.ip_proto;
+
+	if (fk.basic.n_proto == htons(ETH_P_IP)) {
+		spec->rem_host[0] = fk.addrs.v4addrs.src;
+		spec->loc_host[0] = fk.addrs.v4addrs.dst;
+	} else {
+		memcpy(spec->rem_host, &fk.addrs.v6addrs.src, sizeof(struct in6_addr));
+		memcpy(spec->loc_host, &fk.addrs.v6addrs.dst, sizeof(struct in6_addr));
+	}
+
+	spec->rem_port = fk.ports.src;
+	spec->loc_port = fk.ports.dst;
+	return 0;
+}
+
+#else /* !EFX_HAVE_NEW_FLOW_KEYS */
+
+/* The kernel flow dissector isn't up to the job, so use our own. */
+int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
+			struct efx_filter_spec *spec)
+{
 	/* 60 octets is the maximum length of an IPv4 header (all IPv6 headers
 	 * are 40 octets), and we pull 4 more to get the port numbers
 	 */
@@ -2052,10 +2118,6 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	const __be16 *ports;
 	__be16 ether_type;
 	int nhoff;
-	int rc;
-
-	if (flow_id == RPS_FLOW_ID_INVALID)
-		return -EINVAL;
 
 	hptr = skb_header_pointer(skb, 0, headlen, header);
 	if (!hptr)
@@ -2080,11 +2142,8 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	if (ether_type != htons(ETH_P_IP) && ether_type != htons(ETH_P_IPV6))
 		return -EPROTONOSUPPORT;
 
-	efx_filter_init_rx(&spec, EFX_FILTER_PRI_HINT,
-			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
-			   rxq_index);
-	spec.match_flags = EFX_FILTER_MATCH_FLAGS_RFS;
-	spec.ether_type = ether_type;
+	spec->match_flags = EFX_FILTER_MATCH_FLAGS_RFS;
+	spec->ether_type = ether_type;
 
 	if (ether_type == htons(ETH_P_IP)) {
 		const struct iphdr *ip = hptr + nhoff;
@@ -2093,9 +2152,9 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 			return -EINVAL;
 		if (ip_is_fragment(ip))
 			return -EPROTONOSUPPORT;
-		spec.ip_proto = ip->protocol;
-		spec.rem_host[0] = ip->saddr;
-		spec.loc_host[0] = ip->daddr;
+		spec->ip_proto = ip->protocol;
+		spec->rem_host[0] = ip->saddr;
+		spec->loc_host[0] = ip->daddr;
 		if (headlen < nhoff + 4 * ip->ihl + 4)
 			return -EINVAL;
 		ports = (const __be16 *)(hptr + nhoff + 4 * ip->ihl);
@@ -2104,14 +2163,35 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 
 		if (headlen < nhoff + sizeof(*ip6) + 4)
 			return -EINVAL;
-		spec.ip_proto = ip6->nexthdr;
-		memcpy(spec.rem_host, &ip6->saddr, sizeof(ip6->saddr));
-		memcpy(spec.loc_host, &ip6->daddr, sizeof(ip6->daddr));
+		spec->ip_proto = ip6->nexthdr;
+		memcpy(spec->rem_host, &ip6->saddr, sizeof(ip6->saddr));
+		memcpy(spec->loc_host, &ip6->daddr, sizeof(ip6->daddr));
 		ports = (const __be16 *)(ip6 + 1);
 	}
 
-	spec.rem_port = ports[0];
-	spec.loc_port = ports[1];
+	spec->rem_port = ports[0];
+	spec->loc_port = ports[1];
+	return 0;
+}
+#endif /* EFX_HAVE_NEW_FLOW_KEYS */
+
+int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
+		   u16 rxq_index, u32 flow_id)
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_channel *channel;
+	struct efx_filter_spec spec;
+	int rc;
+
+	if (flow_id == RPS_FLOW_ID_INVALID)
+		return -EINVAL;
+
+	efx_filter_init_rx(&spec, EFX_FILTER_PRI_HINT,
+			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
+			   rxq_index);
+	rc = efx_rfs_filter_spec(efx, skb, &spec);
+	if (rc < 0)
+		return rc;
 
 	rc = efx->type->filter_async_insert(efx, &spec);
 	if (rc < 0)
@@ -2122,18 +2202,18 @@ int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 	channel->rps_flow_id[rc] = flow_id;
 	++channel->rfs_filters_added;
 
-	if (ether_type == htons(ETH_P_IP))
+	if (spec.ether_type == htons(ETH_P_IP))
 		netif_info(efx, rx_status, efx->net_dev,
 			   "steering %s %pI4:%u:%pI4:%u to queue %u [flow %u filter %d]\n",
 			   (spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
-			   spec.rem_host, ntohs(ports[0]), spec.loc_host,
-			   ntohs(ports[1]), rxq_index, flow_id, rc);
+			   spec.rem_host, ntohs(spec.rem_port), spec.loc_host,
+			   ntohs(spec.loc_port), rxq_index, flow_id, rc);
 	else
 		netif_info(efx, rx_status, efx->net_dev,
 			   "steering %s [%pI6]:%u:[%pI6]:%u to queue %u [flow %u filter %d]\n",
 			   (spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
-			   spec.rem_host, ntohs(ports[0]), spec.loc_host,
-			   ntohs(ports[1]), rxq_index, flow_id, rc);
+			   spec.rem_host, ntohs(spec.rem_port), spec.loc_host,
+			   ntohs(spec.loc_port), rxq_index, flow_id, rc);
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
 	/* since we have real ARFS, disable SARFS */

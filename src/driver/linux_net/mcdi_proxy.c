@@ -44,6 +44,8 @@ static struct list_head efx_mcdi_proxy_async_list =
 	LIST_HEAD_INIT(efx_mcdi_proxy_async_list);
 spinlock_t efx_mcdi_proxy_async_lock;
 
+extern const struct net_device_ops efx_netdev_ops;
+
 #define EFX_MCDI_PROXY_ACK_TIMEOUT	HZ / 10
 #define EFX_MCDI_PROXY_RETRIES	5
 
@@ -63,6 +65,7 @@ enum {
 	EFX_MCDI_PROXY_A_RC,
 	EFX_MCDI_PROXY_A_RID,
 	EFX_MCDI_PROXY_A_PRIVILEGES,
+	EFX_MCDI_PROXY_A_PAD,
 	__EFX_MCDI_PROXY_A_MAX
 };
 
@@ -154,6 +157,21 @@ static inline struct net_device *efx_mcdi_proxy_get_dev(struct sk_buff *skb,
 	return dev;
 }
 
+static inline struct efx_nic *efx_nic_from_dev(struct net_device *dev)
+{
+	/* Propagate any error pointer */
+	if (IS_ERR(dev))
+		return ERR_CAST(dev);
+	/* Check it's an SFC device */
+	if (dev->netdev_ops != &efx_netdev_ops)
+	{
+		/* Failure path won't know the dev was got, so put it here */
+		dev_put(dev);
+		return ERR_PTR(-EINVAL);
+	}
+	return netdev_priv(dev);
+}
+
 static int efx_mcdi_proxy_do_configure_list(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net_device *dev = efx_mcdi_proxy_get_dev(skb, info);
@@ -162,15 +180,14 @@ static int efx_mcdi_proxy_do_configure_list(struct sk_buff *skb, struct genl_inf
 	    *resp_size = getattr(RESP_SIZE),
 	    *mcdi_cmd;
 	struct nlattr *nla_mcdi;
-	struct efx_nic *efx;
+	struct efx_nic *efx = efx_nic_from_dev(dev);
 	unsigned int nops, op_i = 0;
 	unsigned int *ops;
 	int rc;
 	int i;
 
-	if (IS_ERR(dev))
-		return PTR_ERR(dev);
-	efx = netdev_priv(dev);
+	if (IS_ERR(efx))
+		return PTR_ERR(efx);
 	if (info->attrs[EFX_MCDI_PROXY_A_MCDI_CMDS] == NULL) {
 		rc = -EINVAL;
 		goto out1;
@@ -228,12 +245,11 @@ static int efx_mcdi_proxy_do_configure_one(struct sk_buff *skb, struct genl_info
 	u16 *mcdi_cmd = getattr(MCDI_CMD),
 	    *req_size = getattr(REQ_SIZE),
 	    *resp_size = getattr(RESP_SIZE);
-	struct efx_nic *efx;
+	struct efx_nic *efx = efx_nic_from_dev(dev);
 	int rc;
 
-	if (IS_ERR(dev))
-		return PTR_ERR(dev);
-	efx = netdev_priv(dev);
+	if (IS_ERR(efx))
+		return PTR_ERR(efx);
 	if (mcdi_cmd == NULL || req_size == NULL || resp_size == NULL) {
 		rc = -EINVAL;
 		goto out;
@@ -256,12 +272,11 @@ out:
 static int efx_mcdi_proxy_do_configure_none(struct sk_buff *skb, struct genl_info *info)
 {
 	struct net_device *dev = efx_mcdi_proxy_get_dev(skb, info);
-	struct efx_nic *efx;
+	struct efx_nic *efx = efx_nic_from_dev(dev);
 	int rc;
 
-	if (IS_ERR(dev))
-		return PTR_ERR(dev);
-	efx = netdev_priv(dev);
+	if (IS_ERR(efx))
+		return PTR_ERR(efx);
 	rc = efx_proxy_auth_stop(efx, false);
 	if (rc == 0)
 		efx_mcdi_proxy_daemon_pid = 0;
@@ -383,7 +398,8 @@ static void efx_mcdi_proxy_async_work(struct work_struct *work)
 		if (!msg_head)
 			goto fail_free;
 
-		if (nla_put_u64(skb, EFX_MCDI_PROXY_A_HANDLE, rsp->cookie))
+		if (nla_put_u64_64bit(skb, EFX_MCDI_PROXY_A_HANDLE, rsp->cookie,
+				      EFX_MCDI_PROXY_A_PAD))
 			goto fail_free;
 		if (nla_put_u32(skb, EFX_MCDI_PROXY_A_RC, rsp->rc))
 			goto fail_free;
@@ -414,12 +430,11 @@ static int efx_mcdi_proxy_do_proxy_action_req(struct sk_buff *skb,
 	u16 *mcdi_cmd = getattr(MCDI_CMD);
 	u16 *outlen = getattr(RESP_SIZE);
 
-	struct efx_nic *efx;
+	struct efx_nic *efx = efx_nic_from_dev(dev);
 	int rc;
 
-	if (IS_ERR(dev))
-		return -PTR_ERR(dev);
-	efx = netdev_priv(dev);
+	if (IS_ERR(efx))
+		return PTR_ERR(efx);
 
 	req = info->attrs[EFX_MCDI_PROXY_A_MCDI_REQ];
 
@@ -467,7 +482,8 @@ static void efx_mcdi_proxy_proxy_callback(int mcdi_rc, void *_ctx)
 
 	if (nla_put_u32(skb, EFX_MCDI_PROXY_A_IFINDEX, ctx->ifindex))
 		goto fail;
-	if (nla_put_u64(skb, EFX_MCDI_PROXY_A_HANDLE, ctx->handle))
+	if (nla_put_u64_64bit(skb, EFX_MCDI_PROXY_A_HANDLE, ctx->handle,
+			      EFX_MCDI_PROXY_A_PAD))
 		goto fail;
 	if (nla_put_s32(skb, EFX_MCDI_PROXY_A_RC, mcdi_rc))
 		goto fail;
@@ -491,12 +507,11 @@ static int efx_mcdi_proxy_do_proxy_handled(struct sk_buff *skb,
 	struct net_device *dev = efx_mcdi_proxy_get_dev(skb, info);
 	struct efx_mcdi_proxy_proxy_context *ctx;
 	u64 *handle = getattr(HANDLE);
-	struct efx_nic *efx;
+	struct efx_nic *efx = efx_nic_from_dev(dev);
 	int rc;
 
-	if (IS_ERR(dev))
-		return PTR_ERR(dev);
-	efx = netdev_priv(dev);
+	if (IS_ERR(efx))
+		return PTR_ERR(efx);
 	if (handle == NULL) {
 		rc = -EINVAL;
 		goto out;
@@ -554,12 +569,11 @@ static int efx_mcdi_proxy_do_proxy_done(struct sk_buff *skb, struct genl_info *i
 	const struct nlattr *resp = info->attrs[EFX_MCDI_PROXY_A_MCDI_RESP];
 	struct efx_mcdi_proxy_proxy_context *ctx;
 	u64 *handle = getattr(HANDLE);
-	struct efx_nic *efx;
+	struct efx_nic *efx = efx_nic_from_dev(dev);
 	int rc;
 
-	if (IS_ERR(dev))
-		return PTR_ERR(dev);
-	efx = netdev_priv(dev);
+	if (IS_ERR(efx))
+		return PTR_ERR(efx);
 	if (resp == NULL || handle == NULL) {
 		rc = -EINVAL;
 		goto out;
@@ -658,7 +672,8 @@ static int efx_mcdi_proxy_send_request(struct efx_nic *efx, u64 uhandle,
 		rc = nla_put_u16(skb, EFX_MCDI_PROXY_A_RID, rid);
 		if (rc)
 			goto fail;
-		rc = nla_put_u64(skb, EFX_MCDI_PROXY_A_HANDLE, uhandle);
+		rc = nla_put_u64_64bit(skb, EFX_MCDI_PROXY_A_HANDLE, uhandle,
+				       EFX_MCDI_PROXY_A_PAD);
 		if (rc)
 			goto fail;
 		rc = nla_put(skb, EFX_MCDI_PROXY_A_MCDI_REQ, request_len, request_buffer);

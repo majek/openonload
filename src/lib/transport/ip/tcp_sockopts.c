@@ -559,7 +559,6 @@ int ci_tcp_setsockopt(citp_socket* ep, ci_fd_t fd, int level,
 #ifdef IPV6_V6ONLY
     if( optname == IPV6_V6ONLY && *(unsigned*) optval )
       rc = CI_SOCKET_HANDOVER;
-      goto unlock_out;
 #endif
     /* All socket options are already set for system socket, and we do not
     ** handle IPv6 option natively. */

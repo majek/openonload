@@ -515,7 +515,37 @@ struct efx_device_ids {
 	__u8 perm_addr[6];			/* non-volatile MAC address */
 };
 
-/* Next available cmd number is 0xef28 */
+/* Dump support *************************************************************/
+#define EFX_DUMP 0xef28
+#if !defined (ETHTOOL_SET_DUMP) || defined (EFX_NEED_STRUCT_ETHTOOL_DUMP)
+	struct ethtool_dump {
+		__u32 cmd;
+		__u32 version;
+		__u32 flag;
+		__u32 len;
+		__u8  data[0];
+	};
+#elif !defined (__KERNEL__)
+	struct efx_ethtool_dump {
+		__u32 cmd;
+		__u32 version;
+		__u32 flag;
+		__u32 len;
+		__u8  data[0];
+	};
+	#define ethtool_dump efx_ethtool_dump
+#endif
+#ifndef ETHTOOL_SET_DUMP
+	#define ETHTOOL_SET_DUMP	0x0000003e
+#endif
+#ifndef ETHTOOL_GET_DUMP_FLAG
+	#define ETHTOOL_GET_DUMP_FLAG	0x0000003f
+#endif
+#ifndef ETHTOOL_GET_DUMP_DATA
+	#define ETHTOOL_GET_DUMP_DATA	0x00000040
+#endif
+
+/* Next available cmd number is 0xef29 */
 
 /* Efx private ioctl command structures *************************************/
 
@@ -547,6 +577,7 @@ union efx_ioctl_data {
 	struct efx_aoe_reset aoe_reset;
 	struct efx_device_ids device_ids;
 	struct efx_licensed_app_state app_state;
+	struct ethtool_dump dump;
 };
 
 /**

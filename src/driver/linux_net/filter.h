@@ -69,6 +69,8 @@ enum efx_filter_match_flags {
 	EFX_FILTER_MATCH_OUTER_VID =	0x0100,
 	EFX_FILTER_MATCH_IP_PROTO =	0x0200,
 	EFX_FILTER_MATCH_LOC_MAC_IG =	0x0400,
+	EFX_FILTER_MATCH_ENCAP_TYPE =	0x0800,
+	EFX_FILTER_MATCH_ENCAP_TNI =	0x1000,
 };
 
 #define EFX_FILTER_MATCH_FLAGS_RFS (EFX_FILTER_MATCH_ETHER_TYPE | \
@@ -134,6 +136,26 @@ enum efx_filter_flags {
 	EFX_FILTER_FLAG_LOOPBACK = 0x80,
 };
 
+/** enum efx_encap_type - types of encapsulation
+ * @EFX_ENCAP_TYPE_NONE: no encapsulation
+ * @EFX_ENCAP_TYPE_VXLAN: VXLAN encapsulation
+ * @EFX_ENCAP_TYPE_NVGRE: NVGRE encapsulation
+ * @EFX_ENCAP_TYPE_GENEVE: GENEVE encapsulation
+ * @EFX_ENCAP_FLAG_IPV6: indicates IPv6 outer frame
+ *
+ * Contains both enumerated types and flags.
+ * To get just the type, OR with @EFX_ENCAP_TYPES_MASK.
+ */
+enum efx_encap_type {
+	EFX_ENCAP_TYPE_NONE = 0,
+	EFX_ENCAP_TYPE_VXLAN = 1,
+	EFX_ENCAP_TYPE_NVGRE = 2,
+	EFX_ENCAP_TYPE_GENEVE = 3,
+
+	EFX_ENCAP_TYPES_MASK = 7,
+	EFX_ENCAP_FLAG_IPV6 = 8,
+};
+
 /**
  * struct efx_filter_spec - specification for a hardware filter
  * @match_flags: Match type flags, from &enum efx_filter_match_flags
@@ -185,7 +207,9 @@ struct efx_filter_spec {
 	__be32	rem_host[4];
 	__be16	loc_port;
 	__be16	rem_port;
-	/* total 72 bytes */
+	u32	tni:24;
+	u32     encap_type:4;
+	/* total 76 bytes */
 };
 
 enum {
@@ -196,7 +220,7 @@ enum {
 static inline void efx_filter_init_rx(struct efx_filter_spec *spec,
 				      enum efx_filter_priority priority,
 				      enum efx_filter_flags flags,
-				      unsigned rxq_id)
+				      unsigned int rxq_id)
 {
 	memset(spec, 0, sizeof(*spec));
 	spec->priority = priority;
@@ -206,7 +230,7 @@ static inline void efx_filter_init_rx(struct efx_filter_spec *spec,
 }
 
 static inline void efx_filter_init_tx(struct efx_filter_spec *spec,
-				      unsigned txq_id)
+				      unsigned int txq_id)
 {
 	memset(spec, 0, sizeof(*spec));
 	spec->priority = EFX_FILTER_PRI_REQUIRED;
@@ -258,6 +282,54 @@ efx_filter_set_ipv4_full(struct efx_filter_spec *spec, u8 proto,
 	spec->loc_host[0] = lhost;
 	spec->loc_port = lport;
 	spec->rem_host[0] = rhost;
+	spec->rem_port = rport;
+	return 0;
+}
+
+/**
+ * efx_filter_set_ipv6_local - specify IPv6 host, transport protocol and port
+ * @spec: Specification to initialise
+ * @proto: Transport layer protocol number
+ * @host: Local host address (network byte order)
+ * @port: Local port (network byte order)
+ */
+static inline int
+efx_filter_set_ipv6_local(struct efx_filter_spec *spec, u8 proto,
+			  struct in6_addr host, __be16 port)
+{
+	spec->match_flags |=
+		EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO |
+		EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_LOC_PORT;
+	spec->ether_type = htons(ETH_P_IPV6);
+	spec->ip_proto = proto;
+	memcpy(spec->loc_host, host.s6_addr32, sizeof(spec->loc_host));
+	spec->loc_port = port;
+	return 0;
+}
+
+/**
+ * efx_filter_set_ipv6_full - specify IPv6 hosts, transport protocol and ports
+ * @spec: Specification to initialise
+ * @proto: Transport layer protocol number
+ * @lhost: Local host address (network byte order)
+ * @lport: Local port (network byte order)
+ * @rhost: Remote host address (network byte order)
+ * @rport: Remote port (network byte order)
+ */
+static inline int
+efx_filter_set_ipv6_full(struct efx_filter_spec *spec, u8 proto,
+			 struct in6_addr lhost, __be16 lport,
+			 struct in6_addr rhost, __be16 rport)
+{
+	spec->match_flags |=
+		EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO |
+		EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_LOC_PORT |
+		EFX_FILTER_MATCH_REM_HOST | EFX_FILTER_MATCH_REM_PORT;
+	spec->ether_type = htons(ETH_P_IPV6);
+	spec->ip_proto = proto;
+	memcpy(spec->loc_host, lhost.s6_addr32, sizeof(spec->loc_host));
+	spec->loc_port = lport;
+	memcpy(spec->rem_host, rhost.s6_addr32, sizeof(spec->rem_host));
 	spec->rem_port = rport;
 	return 0;
 }
@@ -316,7 +388,7 @@ static inline int efx_filter_set_mc_def(struct efx_filter_spec *spec)
  * @stack_id: ID of the stack used to suppress stack's own traffic on loopback.
  */
 static inline void efx_filter_set_stack_id(struct efx_filter_spec *spec,
-				      unsigned stack_id)
+				      unsigned int stack_id)
 {
 	spec->flags |= EFX_FILTER_FLAG_STACK_ID;
 	spec->stack_id = stack_id;
@@ -328,7 +400,7 @@ static inline void efx_filter_set_stack_id(struct efx_filter_spec *spec,
  * @vport_id: ID of the virtual port
  */
 static inline void efx_filter_set_vport_id(struct efx_filter_spec *spec,
-					   unsigned vport_id)
+					   unsigned int vport_id)
 {
 	spec->flags |= EFX_FILTER_FLAG_VPORT_ID;
 	spec->vport_id = vport_id;
@@ -356,6 +428,28 @@ static inline void efx_filter_set_ipproto(struct efx_filter_spec *spec,
 {
 	spec->flags |= EFX_FILTER_MATCH_IP_PROTO;
 	spec->ip_proto = ip_proto;
+}
+
+static inline void efx_filter_set_encap_type(struct efx_filter_spec *spec,
+					     enum efx_encap_type encap_type)
+{
+	spec->match_flags |= EFX_FILTER_MATCH_ENCAP_TYPE;
+	spec->encap_type = encap_type;
+}
+
+static inline enum efx_encap_type efx_filter_get_encap_type(
+		const struct efx_filter_spec *spec)
+{
+	if (spec->match_flags & EFX_FILTER_MATCH_ENCAP_TYPE)
+		return spec->encap_type;
+	return EFX_ENCAP_TYPE_NONE;
+}
+
+static inline void efx_filter_set_encap_tni(struct efx_filter_spec *spec,
+		u32 tni)
+{
+	spec->match_flags |= EFX_FILTER_MATCH_ENCAP_TNI;
+	spec->tni = tni;
 }
 
 #endif /* EFX_FILTER_H */

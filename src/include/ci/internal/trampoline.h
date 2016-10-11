@@ -30,8 +30,7 @@
 #define __CI_INTERNAL_TRAMPOLINE_H__
 
 /* Trampoline function opcodes */
-#define CI_TRAMP_OPCODE_ERROR               1
-#define CI_TRAMP_OPCODE_CLOSE               2
+#define CI_TRAMP_OPCODE_CLOSE               1
 
 #endif /* __CI_INTERNAL_TRAMPOLINE_H__ */
 

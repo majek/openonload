@@ -59,9 +59,6 @@ ci_inline unsigned ci_shmbuf_size(ci_shmbuf_t* b)
   (efhw_page_ptr(&(b)->pages[(off) >> CI_PAGE_SHIFT])	\
    + ((off) & (CI_PAGE_SIZE - 1)))
 
-#define __ci_shmbuf_page_ptr(b, page_i)		\
-  efhw_page_ptr(&(b)->pages[(page_i)])
-
 /* Returns true if accessing the shmbuf at the given offset (using
 ** efab_shmbuf_ptr above) is safe.
 */
@@ -91,12 +88,6 @@ ci_inline int ci_shmbuf_access_okay(ci_shmbuf_t* b, unsigned off,
 ci_inline char* ci_shmbuf_ptr(ci_shmbuf_t* b, unsigned off) {
   ci_assert(ci_shmbuf_access_okay(b, off, 1));
   return __ci_shmbuf_ptr(b, off);
-}
-
-ci_inline char* ci_shmbuf_page_ptr(ci_shmbuf_t* b, unsigned page_i) {
-  ci_assert(page_i < b->n_pages);
-  ci_assert(efhw_page_is_valid(&b->pages[page_i]));
-  return __ci_shmbuf_page_ptr(b, page_i);
 }
 
 extern int ci_shmbuf_demand_page(ci_shmbuf_t* b, unsigned page_i,

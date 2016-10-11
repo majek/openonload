@@ -58,6 +58,9 @@
 #include <arpa/inet.h>
 
 #include "onload/extensions.h"
+#ifdef ONLOADEXT_AVAILABLE
+#include "onload/extensions_zc.h"
+#endif
 
 /* Use the kernel definitions if possible -
  * But if not, use our own local definitions, and Onload will allow it.
@@ -128,11 +131,12 @@ struct configuration {
   char const*    cfg_ioctl;     /* e.g. eth6  - calls the ts enable ioctl */
   unsigned short cfg_port;      /* listen port */
   unsigned int   cfg_max_packets; /* Stop after this many (0=forever) */
+  int            cfg_templated; /* use templated send */
 };
 
 /* Commandline options, configuration etc. */
 
-void print_help(void) 
+void print_help(void)
 {
   printf("Usage:\n"
          "\t--proto\t<udp|tcp>\tProtocol.  Default: UDP\n"
@@ -144,6 +148,9 @@ void print_help(void)
            "Default: None\n"
          "\t--max\t<num>\tStop after n packets.  Default: Run forever\n"
          "\t--mcast\t<group>\tSubscribe to multicast group.\n"
+#ifdef ONLOADEXT_AVAILABLE
+         "\t--templated\tUse templated sends.\n"
+#endif
         );
   exit(-1);
 }
@@ -172,10 +179,11 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
     { "port", required_argument, 0, 'p' },
     { "mcast", required_argument, 0, 'c' },
     { "max", required_argument, 0, 'n' },
+    { "templated", no_argument, 0, 'T' },
     { "help", no_argument, 0, 'h' },
     { 0, no_argument, 0, 0 }
   };
-  char const* optstring = "tlipcnh";
+  char const* optstring = "tlipcnTh";
 
   /* Defaults */
   bzero(cfg, sizeof(struct configuration));
@@ -203,6 +211,11 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
       case 'n':
         cfg->cfg_max_packets = atoi(optarg);
         break;
+#ifdef ONLOADEXT_AVAILABLE
+      case 'T':
+        cfg->cfg_templated = 1;
+        break;
+#endif
       case 'h':
       default:
         print_help();
@@ -432,8 +445,33 @@ static void handle_time(struct msghdr* msg)
   }
 }
 
+#ifdef ONLOADEXT_AVAILABLE
+int templated_send(int handle, struct iovec* iov)
+{
+  onload_template_handle tmpl;
+  struct onload_template_msg_update_iovec update;
+
+  struct iovec initial;
+  initial.iov_base = iov->iov_base;
+  initial.iov_len = iov->iov_len;
+
+  update.otmu_base = iov->iov_base;
+  update.otmu_len = iov->iov_len;
+  update.otmu_offset = 0;
+  update.otmu_flags = 0;
+
+  /* Note: This is initialising, and then updating to the same values.
+   * A real application would update only a subset of the values, and
+   * usually with different values.
+   */
+  TRY( onload_msg_template_alloc(handle, &initial, 1, &tmpl, 0));
+  return onload_msg_template_update(handle, tmpl, &update, 1,
+                                    ONLOAD_TEMPLATE_FLAGS_SEND_NOW);
+}
+#endif
+
 /* Receive a packet, and print out the timestamps from it */
-void do_echo(int sock, unsigned int pkt_num)
+int do_echo(int sock, unsigned int pkt_num, int cfg_templated)
 {
   struct msghdr msg;
   struct iovec iov;
@@ -441,6 +479,8 @@ void do_echo(int sock, unsigned int pkt_num)
   char buffer[2048];
   char control[1024];
   int got;
+  int check = 0;
+  const int check_max = 999999;
 
   /* recvmsg header structure */
   make_address(0, 0, &host_address);
@@ -462,19 +502,31 @@ void do_echo(int sock, unsigned int pkt_num)
   /* echo back */
   msg.msg_controllen = 0;
   iov.iov_len = got;
-  TRY(sendmsg(sock, &msg, 0));
+#ifdef ONLOADEXT_AVAILABLE
+  if ( cfg_templated )
+    TRY(templated_send(sock, &iov) );
+  else
+#endif
+    TRY(sendmsg(sock, &msg, 0));
 
-  /* retrieve TX timestamp */
+  /* retrieve TX timestamp
+   * Note: Waiting for it this way isn't the most efficient option.
+   * For higher throughput, check associate times to packets afterwards.
+   */
   msg.msg_control = control;
   iov.iov_len = 2048;
   do {
     msg.msg_controllen = 1024;
     got = recvmsg(sock, &msg, MSG_ERRQUEUE);
-  } while (got < 0 && errno == EAGAIN);
+  } while (got < 0 && errno == EAGAIN && check++ < check_max);
+  if ( got < 0 && errno == EAGAIN ) {
+    printf("Gave up acquiring timestamp.\n");
+    return -EAGAIN;
+  }
   TEST(got >= 0);
 
   handle_time(&msg);
-  return;
+  return 0;
 };
 
 
@@ -494,7 +546,7 @@ int main(int argc, char** argv)
 
   /* Run until we've got enough packets, or an error occurs */
   while( (pkt_num++ < cfg.cfg_max_packets) || (cfg.cfg_max_packets == 0) )
-    do_echo(sock, pkt_num);
+    TRY( do_echo(sock, pkt_num, cfg.cfg_templated) );
 
   close(sock);
   return 0;

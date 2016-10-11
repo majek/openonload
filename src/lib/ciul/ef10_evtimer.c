@@ -62,10 +62,6 @@
 
 static inline void poke_timer(ef_vi* vi, unsigned v)
 {
-  /* TODO: Verify that this NIC variant does not require the bug35388
-   * workaround.
-   */
-  EF_VI_BUG_ON( 1 );
   writel(v, vi->io + ER_DZ_EVQ_TMR_REG);
   /* ?? fixme: why does falcon use mmiowb() here but we don't? */
 }

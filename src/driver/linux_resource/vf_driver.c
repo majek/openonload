@@ -166,7 +166,7 @@ static int vf_map_bar(struct efrm_vf *vf, char **bar_ptr)
 	/* TODO: How do we know that the mask is? */
 	for (dma_mask = DMA_BIT_MASK(46); dma_mask > 0x7fffffffUL;
 	     dma_mask >>= 1) {
-		if (pci_dma_supported(vf->pci_dev, dma_mask) &&
+		if (dma_supported(&vf->pci_dev->dev, dma_mask) &&
 		    ((rc = pci_set_dma_mask(vf->pci_dev, dma_mask)) == 0))
 			break;
 	}
@@ -1337,8 +1337,6 @@ void *efrm_find_ksym(const char *name)
 	t.name = name;
 	t.addr = NULL;
 	kallsyms_on_each_symbol(efrm_check_ksym, &t);
-	if (t.addr == NULL)
-		EFRM_ERR("%s: Can't find symbol %s", __func__, t.name);
 	return t.addr;
 }
 EXPORT_SYMBOL(efrm_find_ksym);

@@ -111,8 +111,8 @@ int citp_fdtable_ctor()
 
   citp_fdtable.inited_count = 0;
 
-  citp_fdtable.table = ci_libc_malloc(sizeof (citp_fdtable_entry) *
-                                      citp_fdtable.size);
+  citp_fdtable.table = malloc(sizeof (citp_fdtable_entry) *
+                              citp_fdtable.size);
   if( ! citp_fdtable.table ) {
     Log_U(log("%s: failed to allocate fdtable (0x%x)", __FUNCTION__,
               citp_fdtable.size));
@@ -820,9 +820,9 @@ static void citp_fdinfo_do_handover(citp_fdinfo* fdi, int fdt_locked)
   Log_V(ci_log("%s: fd=%d nonb_switch=%d", __FUNCTION__, fdi->fd,
 	       fdi->on_rcz.handover_nonb_switch));
 
-  if( fdi->epoll_fd >= 0 ) {
-    epoll_fdi = citp_epoll_fdi_from_member(fdi, fdt_locked);
-    if( epoll_fdi->protocol->type == CITP_EPOLLB_FD )
+  if( fdi->epoll_fd >= 0 &&
+      (epoll_fdi = citp_epoll_fdi_from_member(fdi, fdt_locked)) != NULL &&
+      epoll_fdi->protocol->type == CITP_EPOLLB_FD ) {
       citp_epollb_on_handover(epoll_fdi, fdi);
   }
   rc = fdtable_fd_move(fdi->fd, OO_IOC_TCP_HANDOVER);
@@ -1084,6 +1084,13 @@ void __citp_fdtable_busy_clear_slow(unsigned fd, citp_fdinfo_p new_fdip,
 
   ci_assert(fd < citp_fdtable.inited_count);
 
+  Log_V(ci_log("%s: fd=%u", __FUNCTION__, fd));
+
+  /* We need to write-lock citp_ul_lock to avoid races between
+   * this oo_rwlock_cond_broadcast() and oo_rwlock_cond_wait() below. */
+  if( !fdt_locked )
+    CITP_FDTABLE_LOCK();
+
  again:
   fdip = *p_fdip;
   ci_assert(fdip_is_busy(fdip));
@@ -1094,12 +1101,12 @@ void __citp_fdtable_busy_clear_slow(unsigned fd, citp_fdinfo_p new_fdip,
   else                             next = waiter->next;
   if( fdip_cas_fail(p_fdip, fdip, next) )  goto again;
 
-  oo_rwlock_cond_lock(&waiter->cond);
   oo_rwlock_cond_broadcast(&waiter->cond);
-  oo_rwlock_cond_unlock(&waiter->cond);
 
   if( next != new_fdip )  goto again;
 
+  if( !fdt_locked )
+    CITP_FDTABLE_UNLOCK();
 }
 
 
@@ -1114,16 +1121,24 @@ citp_fdinfo_p citp_fdtable_busy_wait(unsigned fd, int fdt_locked)
   ci_assert(ci_is_multithreaded());
 
   oo_rwlock_cond_init(&waiter.cond);
-  oo_rwlock_cond_lock(&waiter.cond);
+
+  /* We should lock citp_ul_lock before checking the condition which can
+   * lead to oo_rwlock_cond_wait() call. */
+  if( !fdt_locked )
+    CITP_FDTABLE_LOCK();
+
  again:
   waiter.next = *p_fdip;
   if( fdip_is_busy(waiter.next) ) {
     /* we can replace one "busy" fdip by another without fdtable lock */
     if( fdip_cas_succeed(p_fdip, waiter.next, waiter_to_fdip(&waiter)) )
-      oo_rwlock_cond_wait(&waiter.cond);
+      oo_rwlock_cond_wait(&waiter.cond, &citp_ul_lock);
     goto again;
   }
-  oo_rwlock_cond_unlock(&waiter.cond);
+
+  if( !fdt_locked )
+    CITP_FDTABLE_UNLOCK();
+
   oo_rwlock_cond_destroy(&waiter.cond);
 
   errno = saved_errno;
@@ -1566,7 +1581,7 @@ int citp_ep_close(unsigned fd)
   __citp_fdtable_extend(fd);
 
   if( fd >= citp_fdtable.inited_count ) {
-    rc = ci_sys_close(fd);
+    rc = ci_tcp_helper_close_no_trampoline(fd);
     goto done;
   }
 

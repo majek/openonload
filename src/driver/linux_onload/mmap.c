@@ -244,6 +244,8 @@ void oo_mm_tbl_init(void)
  *
  ****************************************************************************/
 
+#define VMA_OFFSET(vma)  ((vma)->vm_pgoff << PAGE_SHIFT)
+
 static void vm_op_open(struct vm_area_struct* vma)
 {
   tcp_helper_resource_t* map;
@@ -255,9 +257,11 @@ static void vm_op_open(struct vm_area_struct* vma)
   OO_DEBUG_TRAMP(ci_log("vm_op_open: %u vma=%p rs_refs=%d",
 		 map->id, vma, (int) oo_atomic_read(&map->ref_count)));
 
-  rc = efab_add_mm_ref (vma->vm_mm);
-  if( rc != 0 )
-    ci_log("%s: ERROR: failed to register mm: rc=%d", __func__, rc);
+  if( OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)) == CI_NETIF_MMAP_ID_STATE ) {
+    rc = efab_add_mm_ref (vma->vm_mm);
+    if( rc != 0 )
+      ci_log("%s: ERROR: failed to register mm: rc=%d", __func__, rc);
+  }
 }
 
 
@@ -269,17 +273,12 @@ static void vm_op_close(struct vm_area_struct* vma)
   OO_DEBUG_TRAMP(ci_log("vm_op_close: %u vma=%p rs_refs=%d",
 		 map->id, vma, (int) oo_atomic_read(&map->ref_count)));
 
-  efab_del_mm_ref (vma->vm_mm);
+  if( OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)) == CI_NETIF_MMAP_ID_STATE )
+    efab_del_mm_ref (vma->vm_mm);
 
   TCP_HELPER_RESOURCE_ASSERT_VALID(map, 0);
 }
 
-
-#define VMA_OFFSET(vma)  ((vma)->vm_pgoff << PAGE_SHIFT)
-
-#ifndef NOPAGE_SIGBUS
-#  define NOPAGE_SIGBUS (NULL)
-#endif
 
 static struct page* vm_op_nopage(struct vm_area_struct* vma, 
                                  unsigned long address,
@@ -297,24 +296,11 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
   if( pfn != (unsigned) -1 ) {
     pg = pfn_to_page(pfn);
 
-    /* Linux 2.6.15 introduce VM_PFNMAP.  At that stage, put_page
-     * was modified to decrement the page reference count even if
-     * PG_reserved is set.  The idea is that put_page is never
-     * called for areas with VM_PFNMAP set and that the two flags
-     * match up.  Under some circumstances (2.6.13/x86_64) we have
-     * PG_reserved set, but never have VM_PFNMAP set.  We need to
-     * know if get_page needs to be called.  Really, get_page should
-     * never have incremented the reference count if put_page wasn't
-     * going to decrement it, but it's a bit late now.
-     */
-#ifdef VM_PFNMAP
     get_page(pg);
-#else
-    if(!PageReserved(pg))
-      get_page(pg);
-#endif
 
+#ifdef EFRM_VMA_HAS_NOPAGE
     if( type )  *type = VM_FAULT_MINOR;
+#endif
 
     OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%lx",
 		   __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
@@ -335,7 +321,7 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
   return NOPAGE_SIGBUS;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+#ifndef EFRM_VMA_HAS_NOPAGE
 static int vm_op_fault(struct vm_area_struct *vma, struct vm_fault *vmf) {
   struct page* page;
 
@@ -350,7 +336,7 @@ static int vm_op_fault(struct vm_area_struct *vma, struct vm_fault *vmf) {
 static struct vm_operations_struct vm_ops = {
   .open  = vm_op_open,
   .close = vm_op_close,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+#ifdef EFRM_VMA_HAS_NOPAGE
   .nopage = vm_op_nopage
 #else
   .fault = vm_op_fault
@@ -382,7 +368,8 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
 
   ci_assert((offset & PAGE_MASK) == offset);
 
-  if( (rc = efab_add_mm_ref (vma->vm_mm)) < 0 )
+  if( OO_MMAP_OFFSET_TO_MAP_ID(offset) == CI_NETIF_MMAP_ID_STATE &&
+      (rc = efab_add_mm_ref (vma->vm_mm)) < 0 )
     return rc;
 
   vma->vm_flags |= EFRM_VM_IO_FLAGS;
@@ -406,7 +393,8 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
   rc = efab_tcp_helper_rm_mmap(priv->thr, bytes, vma,
                                OO_MMAP_OFFSET_TO_MAP_ID(offset),
                                vma->vm_flags & VM_WRITE);
-  if( rc < 0 )
+  if( OO_MMAP_OFFSET_TO_MAP_ID(offset) == CI_NETIF_MMAP_ID_STATE &&
+      rc < 0 )
     efab_del_mm_ref (vma->vm_mm);
 
   return rc;

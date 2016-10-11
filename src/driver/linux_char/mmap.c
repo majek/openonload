@@ -243,10 +243,6 @@ static void vm_op_close(struct vm_area_struct* vma)
 
 #define VMA_OFFSET(vma)  ((vma)->vm_pgoff << PAGE_SHIFT)
 
-#ifndef NOPAGE_SIGBUS
-#  define NOPAGE_SIGBUS (NULL)
-#endif
-
 static struct page* vm_op_nopage(struct vm_area_struct* vma, 
 				  unsigned long address,
 				  int* type)
@@ -282,7 +278,9 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
         get_page(pg);
 #endif
 
+#ifdef EFRM_VMA_HAS_NOPAGE
       if( type )  *type = VM_FAULT_MINOR;
+#endif
 
       EFCH_TRACE("%s: "EFRM_RESOURCE_FMT" vma=%p sz=%lx pageoff=%lx id=%d "
                  "pfn=%x", __FUNCTION__, EFRM_RESOURCE_PRI_ARG(rs),
@@ -306,7 +304,7 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 }
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
+#ifndef EFRM_VMA_HAS_NOPAGE
 static int vm_op_fault(struct vm_area_struct *vma, struct vm_fault *vmf) {
   struct page* ret;
 
@@ -319,7 +317,7 @@ static int vm_op_fault(struct vm_area_struct *vma, struct vm_fault *vmf) {
 static struct vm_operations_struct vm_ops = {
   .open  = vm_op_open,
   .close = vm_op_close,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+#ifdef EFRM_VMA_HAS_NOPAGE
   .nopage = vm_op_nopage
 #else
   .fault = vm_op_fault

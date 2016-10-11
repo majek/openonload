@@ -41,6 +41,7 @@ extern "C" {
 #include <ci/tools/memleak_debug.h>
 #include <ci/tools/config.h>
 #include <ci/tools/utils.h>
+#include <ci/tools/log2.h>
 #include <ci/tools/buffer.h>
 #include <ci/tools/bufrange.h>
 #include <ci/tools/sllist.h>

@@ -110,10 +110,20 @@ enum efrm_vi_q_flags {
 	EFRM_VI_TX_LOOPBACK           = 0x400,
 	/** RXQ: Enable support to receive from loopback datapath beside MAC */
 	EFRM_VI_RX_LOOPBACK           = 0x800,
-	/** RXQ: Disable cut-through. This is necessary to allow RX event batching */
-	EFRM_VI_NO_CUT_THROUGH        = 0x1000,
+	/** EVQ: Disable event cut-through.
+	 *  This is necessary to allow RX event merging.
+	 */
+	EFRM_VI_NO_EV_CUT_THROUGH     = 0x1000,
 	/** RXQ: Enable packed stream mode */
 	EFRM_VI_RX_PACKED_STREAM      = 0x2000,
+	/** RXQ: Enable RX prefix */
+	EFRM_VI_RX_PREFIX             = 0x4000,
+	/** RXQ: Force events to qualify for merging */
+	EFRM_VI_NO_RX_CUT_THROUGH     = 0x8000,
+	/** EVQ: Enable RX event merging */
+	EFRM_VI_ENABLE_RX_MERGE       = 0x10000,
+	/** EVQ: Enable hardare event timer */
+	EFRM_VI_ENABLE_EV_TIMER       = 0x20000,
 };
 
 
@@ -437,6 +447,10 @@ extern uint32_t efrm_vi_rm_evq_bytes(struct efrm_vi *virs, int n_entries);
 
 /*! Get the info needed to use a VI in kernel space. */
 extern void efrm_vi_get_mappings(struct efrm_vi *, struct efrm_vi_mappings *);
+
+
+extern int
+efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words);
 
 
 #endif /* __CI_EFRM_VI_RESOURCE_H__ */

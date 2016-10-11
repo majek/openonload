@@ -50,7 +50,7 @@
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efrm/pd.h>
-#include <ci/tools/utils.h>
+#include <ci/tools/log2.h>
 #include "efrm_internal.h"
 #include "efrm_vi_set.h"
 
@@ -75,7 +75,7 @@ static int efrm_rss_context_alloc(struct efrm_pd *pd,
 	unsigned rss_flags;
 	unsigned rss_context;
 	/* Copied from efx_rss_fixed_key from linux_net/efx.c.
-	 * FIXME: maintain consistency with net driver. */
+	 * FIXME: maintain consistency with net driver and tests. */
 	static const uint8_t rx_hash_key[RSS_KEY_LEN] = {
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,

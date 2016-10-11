@@ -91,6 +91,9 @@ typedef __u64                 ci_uintptr_t;
 #else
 
 # include <stdint.h>
+# ifndef __STDC_FORMAT_MACROS
+#  define __STDC_FORMAT_MACROS
+# endif
 # include <inttypes.h>
 
 typedef uint64_t              ci_uint64;

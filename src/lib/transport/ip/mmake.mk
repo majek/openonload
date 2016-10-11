@@ -62,7 +62,8 @@ LIB_SRCS	+=		\
 		save_fd.c	\
 		tcp_helper.c	\
 		syscall.c	\
-		per_thread.c
+		per_thread.c	\
+		rwlock.c
 endif
 
 ifeq ($(DRIVER),1)
@@ -101,7 +102,7 @@ lib: $(TARGET)
 
 clean:
 	@$(MakeClean)
-	rm -f uk_intf_ver.h
+	rm -f uk_intf_ver.h cplane_api_version.h
 
 
 $(TARGET): $(LIB_OBJS)

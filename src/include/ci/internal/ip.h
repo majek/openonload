@@ -33,7 +33,7 @@
 
 #include <ci/internal/transport_config_opt.h>
 #include <ci/internal/ip_stats.h>
-#include <ci/internal/cplane_types.h>
+#include <cplane/shared_types.h>
 #include <ci/internal/ip_shared_types.h>
 #include <ci/internal/ip_types.h>
 #include <ci/internal/ip_shared_ops.h>
@@ -44,7 +44,7 @@
 #include <ci/internal/transport_config_opt.h>
 #include <onload/primitive_types.h>
 #include <ci/internal/ip_stats.h>
-#include <ci/internal/cplane_types.h>
+#include <cplane/shared_types.h>
 #include <etherfabric/ef_vi.h>
 #include <etherfabric/pio.h>
 #include <onload/offbuf.h>
@@ -60,6 +60,7 @@
 # include <onload/shmbuf.h>
 # include <onload/iobufset.h>
 # include <onload/eplock_resource.h>
+# include <cplane/contig_shmbuf.h>
 
 #endif
 
@@ -293,14 +294,6 @@ extern void ci_pmtu_update_slow(ci_netif *ni, ci_pmtu_state_t *pmtus,
 
 
 
-#if !defined(NDEBUG)
-  #define ci_ip_cache_check(ipcache)                    \
-    do {                                                \
-    } while(0)
-#else
-  #define ci_ip_cache_check(ipcache) do {} while(0)
-#endif
-
 /*! Initializes an IP cache
  *  (to use this macro include <ci/internal/cplane_ops.h>)
  */
@@ -323,8 +316,7 @@ do {                                                            \
  *  (to use this macro include <ci/internal/cplane_ops.h>)
  */
 #define ci_ip_cache_invalidate(ipcache)			\
-{ ci_ip_cache_check(ipcache);				\
-  (ipcache)->mac_integrity.row_version = CI_VERLOCK_BAD; \
+{ (ipcache)->mac_integrity.row_version = CI_VERLOCK_BAD; \
 }
 
 
@@ -520,34 +512,24 @@ extern void ci_tcp_listen_rx_checks(ci_netif*, ci_tcp_socket_listen*,
 
 extern int  ci_netif_force_wake(ci_netif* ni, int everyone) CI_HF;
 
+#ifndef __KERNEL__
 extern int ci_netif_get_ready_list(ci_netif* ni) CI_HF;
+#endif
 extern void ci_netif_put_ready_list(ci_netif* ni, int id) CI_HF;
 
 CI_DEBUG(extern void ci_netif_assert_valid(ci_netif*, const char*, int);)
 CI_DEBUG(extern void ci_netif_verify_freepkts(ci_netif *, const char *, int);)
 
-#ifdef CI_HAVE_OS_NOPAGE
 #define ASSERT_VALID_NETIF_ADDR(ni, addr, size)  do{            \
   ci_assert(ci_to_int(addr) >= 0);                              \
   ci_assert((addr) < (ni)->state->netif_mmap_bytes);            \
   ci_assert((addr) + (size) <= (ni)->state->netif_mmap_bytes);  \
   }while(0)
-#else
-#define ASSERT_VALID_NETIF_ADDR(ni, addr, size)  do{            \
-  ci_assert(ci_to_int(addr) >= 0);                              \
-  }while(0)
-#endif
 
 
 /*********************************************************************
 ************************* Packet buffer mgmt *************************
 *********************************************************************/
-
-#if !defined(CI_HAVE_OS_NOPAGE)
-#define PKT_BUFSET_ALLOCATED(ni, id) \
-        ((ni)->packets->sets_n > (id))  
-#endif
-
 
 /* Assert packet is empty - but may contain payload */
 #ifndef NDEBUG 
@@ -847,6 +829,7 @@ struct cmsg_state {
   struct msghdr* msg;
   struct cmsghdr* cm;
   int cmsg_bytes_used;
+  int* p_msg_flags;
 };
 
 extern void ci_put_cmsg(struct cmsg_state *cmsg_state, int level, int type,
@@ -929,7 +912,8 @@ ci_netif_raw_send(ci_netif* ni, int intf_i,
 #endif
 
 extern void ci_ip_cmsg_recv(ci_netif*, ci_udp_state*, const ci_ip_pkt_fmt*,
-                            struct msghdr*, int netif_locked) CI_HF;
+                            struct msghdr*, int netif_locked,
+                            int *p_msg_flags) CI_HF;
 #ifdef __KERNEL__
 extern void ci_udp_all_fds_gone(ci_netif* netif, oo_sp, int do_free);
 #endif
@@ -2045,16 +2029,21 @@ ci_inline ci_udp_state* SOCK_TO_UDP(ci_sock_cmn* s) {
   return CI_CONTAINER(ci_udp_state, s, s);
 }
 
-#ifdef NDEBUG
-ci_inline ci_tcp_state* SOCK_TO_TCP(ci_sock_cmn* s)
+ci_inline ci_tcp_state* __SOCK_TO_TCP(ci_sock_cmn* s)
 { return CI_CONTAINER(ci_tcp_state, s, s); }
+ci_inline ci_tcp_socket_listen* __SOCK_TO_TCP_LISTEN(ci_sock_cmn* s) {
+  return CI_CONTAINER(ci_tcp_socket_listen, s, s);
+}
+
+#ifdef NDEBUG
+#define SOCK_TO_TCP __SOCK_TO_TCP
 #else
 ci_inline ci_tcp_state* SOCK_TO_TCP_DEBUG(ci_sock_cmn*s, const char*file,
                                           int line) {
   _ci_assert(s->b.state & CI_TCP_STATE_TCP, file, line);
   _ci_assert(s->b.state == CI_TCP_CLOSED ||
              (s->b.state & CI_TCP_STATE_TCP_CONN), file, line);
-  return CI_CONTAINER(ci_tcp_state, s, s);
+  return __SOCK_TO_TCP(s);
 }
 
 # define SOCK_TO_TCP(s) SOCK_TO_TCP_DEBUG(s, __FILE__, __LINE__)
@@ -2062,7 +2051,7 @@ ci_inline ci_tcp_state* SOCK_TO_TCP_DEBUG(ci_sock_cmn*s, const char*file,
 
 ci_inline ci_tcp_socket_listen* SOCK_TO_TCP_LISTEN(ci_sock_cmn* s) {
   ci_assert(s->b.state == CI_TCP_LISTEN);
-  return CI_CONTAINER(ci_tcp_socket_listen, s, s);
+  return __SOCK_TO_TCP_LISTEN(s);
 }
 
 ci_inline citp_waitable_obj* SOCK_TO_WAITABLE_OBJ(ci_sock_cmn* s)
@@ -2290,13 +2279,13 @@ ci_inline const ci_int8* ci_netif_get_hwport_to_intf_i(ci_netif* ni) {
 
 
 ci_inline int __ci_hwport_to_intf_i(ci_netif* ni, ci_hwport_id_t hwport) {
-  ci_assert((unsigned) hwport < CI_CFG_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
   return ci_netif_get_hwport_to_intf_i(ni)[hwport];
 }
 
 
 ci_inline int ci_hwport_to_intf_i(ci_netif* ni, ci_hwport_id_t hwport) {
-  if(CI_LIKELY( (unsigned) hwport < CI_CFG_MAX_REGISTER_INTERFACES ))
+  if(CI_LIKELY( (unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES ))
     return ci_netif_get_hwport_to_intf_i(ni)[hwport];
   return ci_netif_bad_hwport(ni, hwport);
 }
@@ -3605,7 +3594,7 @@ ci_inline void ci_tcp_clear_rtt_timing(ci_tcp_state* ts) {
 
 ci_inline void ci_tcp_set_rtt_timing(ci_netif* netif, 
                                      ci_tcp_state* ts, ci_tcp_hdr* tcp) {
-  ts->timed_seq = CI_BSWAP_BE32(tcp->tcp_seq_be32);
+  ts->timed_seq = tcp->tcp_seq_be32;
   ts->timed_ts = ci_tcp_time_now(netif);
 }
 
@@ -4076,15 +4065,7 @@ ci_inline void oo_tcpdump_free_pkts(ci_netif *ni, ci_uint8 i)
       ci_ip_pkt_fmt *pkt = PKT_CHK(ni, id);
       ni->state->dump_queue[i % CI_CFG_DUMPQUEUE_LEN] = OO_PP_NULL;
       ci_wmb();
-      if( pkt->n_buffers == 1 )
-        ci_netif_pkt_release(ni, pkt);
-      else {
-        do {
-          pkt = PKT_CHK(ni, id);
-          id = pkt->frag_next;
-          ci_netif_pkt_release(ni, pkt);
-        } while( id != OO_PP_NULL );
-      }
+      ci_netif_pkt_release(ni, pkt);
     }
     i++;
   } while( (ci_uint8)(i - read_i) < CI_CFG_DUMPQUEUE_LEN  );
@@ -4118,17 +4099,11 @@ ci_inline void oo_tcpdump_dump_pkt(ci_netif *ni, ci_ip_pkt_fmt *pkt)
 
   ci_assert_equal(ni->state->dump_queue[ni->state->dump_write_i %
                   CI_CFG_DUMPQUEUE_LEN], OO_PP_NULL);
-  pkt->refcount++;
+  ci_netif_pkt_hold(ni, pkt);
   ni->state->dump_queue[ni->state->dump_write_i %
                         CI_CFG_DUMPQUEUE_LEN] = OO_PKT_P(pkt);
   ci_wmb();
   ni->state->dump_write_i++;
-  if( pkt->n_buffers > 1 ) {
-    do {
-      pkt = PKT(ni, pkt->frag_next);
-      pkt->refcount++;
-    } while( OO_PP_NOT_NULL(pkt->frag_next) );
-  }
 
 }
 #else

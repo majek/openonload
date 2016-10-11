@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2015: Solarflare Communications Inc,
+ * Copyright 2005-2016: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -27,8 +27,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2015/02/14
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2016/06/13
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -89,6 +89,12 @@ Applications requiring specific features can check the versions of software:
 - use ef_vi_driver_interface_str() to get the char driver interface 
   required by this build of %ef_vi.
 
+Applications can also check for specific capabilities:
+- use ef_vi_capabilities_get() to get the value of a given capability
+- use ef_vi_capabilities_max() to get the number of available capabilities
+- use ef_vi_capabilities_name() to get a human-readable string describing a 
+  given capability.
+  
 Users of %ef_vi must do the following to setup:
 -# Obtain a driver handle by calling ef_driver_open().
 -# Allocate a protection domain by calling one of the following:
@@ -245,6 +251,66 @@ Data is copied into the PIO buffer with ef_pio_memcpy().
 
 When the PIO buffer is no longer required it should be unlinked by calling 
 ef_pio_unlink_vi(), and then freed by calling ef_pio_free().
+
+\subsection using_tx_alternatives TX Alternatives
+
+To use TX alternatives for a given virtual interface, you must set the
+EF_VI_TX_ALT flag when you allocate the virtual interface. You must then
+allocate a set of TX alternatives for the virtual interface by calling
+ef_vi_transmit_alt_alloc().
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
+                             int num_alts, int buf_space);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This creates a set of TX alternatives. The TX alternatives remain allocated
+until the virtual interface is freed.
+
+The TX alternatives in the set are given sequential IDs, from 0 upwards.
+You can get the number of TX alternatives in a set by calling
+ef_vi_transmit_alt_num_ids().
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You can then buffer responses on the different TX alternatives, choose which
+to transmit, and discard any that are no longer required:
+
+- All TX alternatives are initially in the STOP state, and any packets sent
+  to them are buffered.
+
+- To send packets to a particular TX alternative, select the TX alternative
+  by calling ef_vi_transmit_alt_select(), and then send the packets to the
+  virtual interface using normal send calls such as ef_vi_transmit().
+
+- To transmit the packets that are buffered on a TX alternative, call 
+  ef_vi_transmit_alt_go().
+
+  This transitions the TX alternative to the GO state. While the TX alternative
+  remains in this state, any further packets sent to it are transmitted
+  immediately.
+  
+- To transtition the TX alternative back to the STOP state, call
+  ef_vi_transmit_alt_stop().
+
+- To discard the packets buffered on a TX alternative, transition it to the
+  DISCARD state by calling ef_vi_transmit_alt_discard().
+  
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int ef_vi_transmit_alt_select(struct ef_vi*, unsigned alt_id);
+
+int ef_vi_transmit_alt_stop(struct ef_vi*, unsigned alt_id);
+
+int ef_vi_transmit_alt_go(struct ef_vi*, unsigned alt_id);
+
+int ef_vi_transmit_alt_discard(struct ef_vi*, unsigned alt_id);
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+As packets are transmitted or discarded, events of type EF_EVENT_TYPE_TX_ALT
+are returned to your application. Your application should normally wait until
+all packets have been processed before transitioning to a different state.
 
 \section using_events Handling Events
 

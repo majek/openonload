@@ -1,0 +1,322 @@
+/****************************************************************************
+ * Copyright 2004-2005: Level 5 Networks Inc.
+ * Copyright 2005-2016: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/**************************************************************************\
+*//*! \file
+** \author    Solarflare Communications, Inc.
+** \brief     Additional Doxygen-format documentation for TCPDirect.
+** \date      2016/05/20
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
+**            are trademarks of Solarflare Communications, Inc.
+*//*
+\**************************************************************************/
+
+/**************************************************************************
+ * Overview page
+ *************************************************************************/
+ /*! \page overview Overview
+
+This part of the documentation gives an overview of TCPDirect and how it is 
+often used.
+
+\section overview_platforms Platforms
+
+TCPDirect can be run on the following Solarflare adapters:
+- Solarflare Flareon Adapters
+- TBD Onload Network Adapters
+- TBD Solarflare mezzanine adapters
+- TBD SFA6902F and SFA7942Q ApplicationTCPDirect™ Engine.
+
+Refer to the _Solarflare Server Adapter User Guide_ ‘Product Specifications’ for adapter details.
+
+TCPDirect can run on all lntel and AMD x86 processors, 32 bit and 64 bit platforms.
+
+TCPDirect runs only on Linux. The table below identifies supported operating systems/kernels:
+
+| OS Version                                    | Notes
+| :-------------------------------------------- | :---------------------------------
+| Red Hat Enterprise Linux 6.4 - 7.2            | RHEL6 built-in Solarflare drivers may not support SFN7000 series adapters.
+| Red Hat Messaging Realtime and Grid 2.4, 2.5  | -
+| Red Hat Enterprise Linux for Realtime 7.1     | -
+| SuSE Linux Enterprise Server 11 sp2, sp3, sp4 | Built-in Solarflare drivers may not support SFN7000 series adapters.
+| SuSE Linux Enterprise Realtime Extension 11   | -
+| SuSE Linux Enterprise Server 12 base release  | -
+| Canonical Ubuntu Server LTS 14.04             | -
+| Canonical Ubuntu Server 14.10, 15.04, 15.10   | -
+| Debian 7 “Wheezy” 7.x                         | -
+| Debian 8 “Jessie” 8.0                         | -
+| Linux kernels 2.6.18 - 4.24                   | -
+| The net driver has been tested as a VF driver using KVM, ESXi 5.5 and ESXi 6.0 hypervisors. | Supported guest OS: RHEL 5.11, 6.5, 6.6, 6.7, 7.0, 7.1, SLES 11 (sp4), SLES 12 base release.
+
+Solarflare aim to support the OS current and previous major release at the 
+point these are released (plus the latest long term support release if this 
+is not already included). This includes all minor releases where the 
+distributor has not yet declared end of life/support.	
+
+Whilst the TCPDirect QA test cycle predominantly focuses on the Linux OS 
+versions documented above, although not formally supported, Solarflare are 
+not aware of any issues preventing TCPDirect installation on other Linux 
+variants such as Centos, Gentoo, and Fedora. Some versions of Ubuntu and 
+Debian earlier than those listed above are also known to support TCPDirect.
+
+\section overview_components Components
+
+TCPDirect is supplied as:
+- header files containing the proprietary public API
+- a binary library for linking into your application.
+
+To use TCPDirect, you must have access to the source code for your 
+application, and the toolchain required to build it. You must then replace 
+the existing calls for network access with appropriate calls from the 
+TCPDirect API. Typically this involves replacing calls to the BSD sockets 
+API. Finally you must recompile your application, linking in the TCPDirect 
+library.
+
+For more details, see \ref using.
+
+If you do not have access to source code for your application, you can 
+instead accelerate it with Onload.
+
+\section overview_capabilities Capabilities and Restrictions
+
+TCPDirect supports a carefully selected feature set that allows it to run 
+many real-world applications, without losing performance to 
+resource-intensive features that are seldom used.
+
+Before porting an application to TCPDirect, you should ensure that it 
+supports the features that you require. The subsections below list the 
+support for different features.
+
+If your application requires features that are unsupported by TCPDirect, 
+consider instead using Onload or ef_vi:
+
+- Onload has higher latency than TCPDirect, but a full feature set. 
+
+  Onload supports all of the standard BSD sockets API, meaning that no 
+modifications are required to POSIX-compliant socket-based applications 
+being accelerated. Like TCPDirect, Onload uses kernel bypass for applications 
+over TCP/IP and UDP/IP protocols.
+
+- Ef_vi has even lower latency than TCPDirect, but operates at a lower level.
+
+  Ef_vi is a low level OSI level 2 interface which sends and receives raw 
+Ethernet frames, and exposes many of the advanced capabilities of 
+Solarflare network adapters. But because the ef_vi API operates at this low 
+level, any application using it must implement the higher layer protocols 
+itself, and also deal with any exceptions or other unusual conditions.
+
+\subsection overview_protocols Protocols
+
+The table below shows the protocols that are supported by TCPDirect:
+
+| Protocol                             | Supported
+| :----------------------------------- | :---------------------------------
+| IPv4                                 | Yes
+| IPv6                                 | No
+| UDP                                  | Yes
+| TCP                                  | Yes
+| TCP header options (e.g. timestamps) | No
+| VLANs                                | TBD
+| Multicast RX                         | Yes
+| Multicast TX                         | TBD
+| Multicast loop                       | No
+
+\subsection overview_os OS
+
+The table below shows the OS features that are supported by TCPDirect:
+
+| OS                                   | Supported
+| :----------------------------------- | :---------------------------------
+| Preload                              | Yes
+| Static link                          | TBD
+| Direct API                           | Yes
+| CPLANE                               | Yes
+| Bonding                              | TBD
+| Teaming                              | TBD
+| Handover                             | No
+| Receive via kernel                   | No
+| Multiple threads                     | Yes
+| - processes + separate stacks        | Yes
+| - processes + shared stacks          | No
+| Shared sockets e.g. sockperf         | ???
+| Multiple stacks                      | Yes
+| fork()                               | Yes, with limitations (no shared stacks or sockets)
+| dup()                                | Yes, with limitations (no shared stacks or sockets)
+| User-level only                      | Yes
+| Interrupts                           | No
+| Huge pages                           | Yes
+
+\subsection overview_sockets Sockets
+
+The table below shows the sockets functionality for which the TCPDirect API provides an equivalent:
+
+| Sockets functionality                | Supported
+| :----------------------------------- | :---------------------------------
+| epoll()                              | Yes
+| poll()                               | Yes
+| select()                             | TBD
+| sendmsg(), recvmsg(), etc            | TBD
+| Blocking IO                          | Yes
+| Socket options                       | No, unless functionally required (e.g. IP_ADD_MEMBERSHIP)
+
+\subsection overview_features Features
+
+The table below shows other features that are supported by TCPDirect:
+
+| Feature                              | Supported
+| :----------------------------------- | :---------------------------------
+| Timestamping                         | Yes (receive only)
+| Connection rate                      | No
+| Clustering                           | No
+| Lots of sockets                      | TBD (i.e Scalable epoll)
+| Extension API, e.g. templated send, delegated send etc. | No
+| move_fd(), to move passively opened sockets | TBD
+| PIO                                  | Yes
+
+\subsection overview_locking Locking
+
+The table below shows the locking functionality that is supported by TCPDirect:
+
+| Locking functionality                | Supported
+| :----------------------------------- | :---------------------------------
+| Stack                                | Yes (only if shared between threads)
+| Socket                               | (maybe – see below)
+| Concurrent RX                        | No
+| Concurrent TX                        | No
+| Concurrent RX vs TX                  | TBD
+
+\subsection overview_benchmarks Benchmarks
+
+The table below shows the benchmarks that are supported by TCPDirect:
+
+| Benchmark                            | Supported
+| :----------------------------------- | :---------------------------------
+| Sfnt-pingpong                        | Yes
+| Sfnt-stream                          | Yes
+| Netperf                              | TBD
+| Sockperf                             | TBD
+
+\subsection overview_misc Miscellaneous
+
+The table below shows other functionality that is supported by TCPDirect:
+
+| Functionality                        | Supported
+| :----------------------------------- | :---------------------------------
+| Debug build                          | Yes
+| Use Onload in parallel               | Yes
+| Binary only                          | Yes
+| App exits => semi graceful shutdown  | Yes
+| App dies => semi graceful shutdown   | No
+| Trampolining                         | No
+| Stackdump                            | TBD
+| Periodic timer                       | No
+
+\section overview_performance How TCPDirect Increases Performance
+
+TCPDirect can significantly reduce the costs associated with networking by 
+reducing CPU overheads and improving performance for latency, bandwidth and 
+application scalability.
+
+\subsection overview_overhead Overhead
+
+Transitioning into and out of the kernel from a user-space application is a 
+relatively expensive operation: the equivalent of hundreds or thousands of 
+instructions. With conventional networking such a transition is required 
+every time the application sends and receives data. With TCPDirect, the TCP/IP 
+processing can be done entirely within the user-process, eliminating 
+expensive application/kernel transitions, i.e. system calls. In addition, the 
+TCPDirect TCP/IP stack is highly tuned, offering further overhead savings.
+
+The overhead savings of TCPDirect mean more of the CPU's computing power is 
+available to the application to do useful work.
+
+\subsection overview_latency Latency
+
+Conventionally, when a server application is ready to process a transaction 
+it calls into the OS kernel to perform a 'receive' operation, where the 
+kernel puts the calling thread 'to sleep' until a request arrives from the 
+network. When such a request arrives, the network hardware 'interrupts' the 
+kernel, which receives the request and 'wakes' the application.
+
+All of this overhead takes CPU cycles as well as increasing cache and 
+translation lookaside-buffer (TLB) footprint. With TCPDirect, the application 
+can remain at user level waiting for requests to arrive at the network 
+adapter and process them directly. The elimination of a kernel-to-user 
+transition, an interrupt, and a subsequent user-to-kernel transition can 
+significantly reduce latency. In short, reduced overheads mean reduced 
+latency. 
+
+\subsection overview_bandwidth Bandwidth
+
+Because TCPDirect imposes less overhead, it can process more bytes of network 
+traffic every second. Along with specially tuned buffering and algorithms 
+designed for high speed networks, TCPDirect allows applications to achieve 
+significantly improved bandwidth.
+
+\subsection overview_scalability Scalability
+
+Modern multi-core systems are capable of running many applications 
+simultaneously. However, the advantages can be quickly lost when the multiple 
+cores contend on a single resource, such as locks in a kernel network stack 
+or device driver. These problems are compounded on modern systems with 
+multiple caches across many CPU cores and Non-Uniform Memory Architectures.
+
+TCPDirect results in the network adapter being partitioned and each partition 
+being accessed by an independent copy of the TCP/IP stack. The result is that 
+with TCPDirect, doubling the cores really can result in doubled throughput.
+
+\section overview_use_cases Use cases
+
+TCPDirect gives the greatest benefit for applications that are 
+network-intensive. This includes (but is not limited to):
+- Market-data and trading applications
+- Computational fluid dynamics (CFD)
+- HPC (High Performance Computing)
+- HPMPI (High Performance Message Passing Interface), TCPDirect is compatible
+  with MPICH1 and 2, HPMPI, OpenMPI and SCALI
+- Other physical models which are moderately parallelizable
+- High-bandwidth video-streaming
+- Web-caching, Load-balancing and Memcached applications
+- Content Delivery Networks (CDN) and HTTP servers
+- Other system hot-spots such as distributed lock managers or forced
+  serialization points.
+
+\subsection overview_acceleration Acceleration
+
+TCPDirect can be used to replace the BSD sockets API, or another API, for 
+sending and receiving streams of traffic. A common example is handling 
+multicast UDP datagrams in electronic trading systems, where low latency is 
+needed and message rates can be very high.
+
+Applications can create multiple stacks if needed to handle different streams 
+of packets, or to spread load over multiple threads. If transmitting threads 
+each have their own stack then they can transmit packets concurrently without 
+interlocking and without sharing state. This improves efficiency considerably.
+
+*/
+
+
+

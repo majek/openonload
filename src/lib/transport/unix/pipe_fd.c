@@ -30,8 +30,6 @@
 #include "ul_poll.h"
 #include "ul_select.h"
 #include "ul_epoll.h"
-#include <ci/internal/cplane_ops.h>
-#include <ci/internal/cplane_handle.h>
 #include <onload/ul/tcp_helper.h>
 #include <onload/oo_pipe.h>
 #include <onload/tcp_poll.h>

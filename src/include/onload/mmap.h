@@ -22,7 +22,9 @@
 
 /* Mmap areas:
  * - CI_NETIF_MMAP_ID_STATE     netif shared state; ep buffers
- * - CI_NETIF_MMAP_ID_CPLANE    control plane shared state, read-only
+ * - CI_NETIF_MMAP_ID_TIMESYNC  timesync shared state, read-only
+ *                              (could be extended to other global shared
+ *                              states)
  * - CI_NETIF_MMAP_ID_IO        VI resource: IO bar.
  * - CI_NETIF_MMAP_ID_IOBUFS    VI resource: queues
  *   + if CI_CFG_PKTS_AS_HUGE_PAGES=1, mmap pkt_shm_id array
@@ -38,7 +40,7 @@
  * handler.
  */
 #define CI_NETIF_MMAP_ID_STATE    0
-#define CI_NETIF_MMAP_ID_CPLANE   1
+#define CI_NETIF_MMAP_ID_TIMESYNC 1
 #define CI_NETIF_MMAP_ID_IO       2
 #define CI_NETIF_MMAP_ID_IOBUFS   3
 #if CI_CFG_PIO

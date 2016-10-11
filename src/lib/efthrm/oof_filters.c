@@ -39,6 +39,7 @@
 
 #include "oof_impl.h"
 #include <ci/net/ipv4.h>
+#include <cplane/shared_types.h>
 #include <onload/oof_interface.h>
 #include <onload/oof_socket.h>
 #include <onload/debug.h>
@@ -814,6 +815,7 @@ oof_manager_alloc(unsigned local_addr_max, void* owner_private)
     oo_hw_filter_init(&fm->fm_tproxy_global_filters[i]);
   fm->fm_hwports_up = 0;
   fm->fm_hwports_up_new = 0;
+  fm->fm_hwports_removed = 0;
   fm->fm_hwports_down = 0;
   fm->fm_hwports_down_new = 0;
   fm->fm_hwports_mcast_replicate_capable = 0;
@@ -1311,13 +1313,13 @@ void oof_hwport_removed(int hwport)
 }
 
 
-void oof_hwport_un_available(int hwport, int available)
+void oof_hwport_un_available(ci_hwport_id_t hwport, int available, void *arg)
 {
   /* A physical interface is (or isn't) unavailable because it is a member
    * of an unacceleratable bond.  ie. We should(n't) install filters on
    * this hwport.
    */
-  struct oof_manager* fm = the_manager;
+  struct oof_manager* fm = arg;
 
   spin_lock_bh(&fm->fm_cplane_updates_lock);
   if( available )
@@ -1384,19 +1386,16 @@ void oof_do_deferred_work(struct oof_manager* fm)
      * however oof_do_deferred work had no chance to process the down request
      * separately.
      */
-    IPF_LOG("%s: changed=%x, up=%x down=%x removed=%d, all up=%x, down=%x "
-            "(mcast replicate=%x vlan filters=%x) down=%x",
+    IPF_LOG("%s: changed=%x, up=%x down=%x removed=%x, new state: up=%x, down=%x "
+            "mcast replicate=%x vlan filters=%x",
             __FUNCTION__,
             hwports_changed,
             hwports_up_new &~ fm->fm_hwports_up,
             hwports_down_new &~ fm->fm_hwports_down,
             hwports_removed,
             hwports_up_new, hwports_down_new,
-            fm->fm_hwports_mcast_replicate_capable &
-              hwports_up_new &~ fm->fm_hwports_up,
-            fm->fm_hwports_vlan_filters &
-              hwports_up_new &~ fm->fm_hwports_up,
-            ~hwports_up_new & fm->fm_hwports_up);
+            fm->fm_hwports_mcast_replicate_capable,
+            fm->fm_hwports_vlan_filters);
 
     /* the ports, which went from up -> down -> up might have stale filter ids if
      * up was result of hotplug, lets remove the filters by indicating that
@@ -3433,9 +3432,10 @@ __oof_mcast_update_filters(struct oof_manager* fm, int ifindex)
 
 
 void
-oof_mcast_update_filters(struct oof_manager* fm, int ifindex)
+oof_mcast_update_filters(ci_ifid_t ifindex, void *arg)
 {
   /* Caller must hold the CICP_LOCK. */
+  struct oof_manager* fm = arg;
 
   oof_manager_queue_cplane_update(fm, OOF_CU_UPDATE_FILTERS, 0, ifindex);
   oof_cb_defer_work(fm->fm_owner_private);

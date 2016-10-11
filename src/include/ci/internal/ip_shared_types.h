@@ -667,7 +667,10 @@ typedef struct {
 ** ci_pio_buddy_allocator:  A buddy allocator to allow a pio region linked to
 ** a vi to be divided up into smaller chunks.
 */
-#define CI_PIO_BUF_ORDER 11
+
+/* CI_PIO_BUF_ORDER is the maximum order of the size of the PIO region across
+ * all supported NICs. */
+#define CI_PIO_BUF_ORDER 12
 #define CI_PIO_BUDDY_MAX_ORDER (CI_PIO_BUF_ORDER - CI_CFG_MIN_PIO_BLOCK_ORDER)
 
 
@@ -824,6 +827,8 @@ typedef struct {
   ci_uint32             pd_owner;
   /* Timestamp of the last packet received with a hardware timestamp. */
   struct oo_timespec    last_rx_timestamp;
+  /* Sync flags of the last packet received */
+  ci_uint32             last_sync_flags;
 
 # define CI_NETIF_NIC_ERROR_REMAP               0x00000001u
   ci_uint32             nic_error_flags;
@@ -836,8 +841,6 @@ struct ci_netif_state_s {
   CI_ULCONST ci_int32   nic_n;
 
   ci_uint64             evq_last_prime CI_ALIGN(8);
-
-  CI_ULCONST cicp_ns_mmap_info_t control_mmap CI_ALIGN(8);
 
   CI_ULCONST ci_uint32  stack_id; /* FIXME equal to thr->id */
   CI_ULCONST char       pretty_name[CI_CFG_STACK_NAME_LEN + 8];
@@ -871,7 +874,7 @@ struct ci_netif_state_s {
 
   ci_uint32             evq_primed;
 
-  ci_int8               hwport_to_intf_i[CI_CFG_MAX_REGISTER_INTERFACES];
+  ci_int8               hwport_to_intf_i[CPLANE_MAX_REGISTER_INTERFACES];
   ci_int8               intf_i_to_hwport[CI_CFG_MAX_INTERFACES];
 
   /* Count of threads spinning.  Manipulated using atomics. */
@@ -1013,7 +1016,7 @@ struct ci_netif_state_s {
   ci_uint64             buzz_cycles         CI_ALIGN(8);
   ci_uint64             timer_prime_cycles  CI_ALIGN(8);
 
-  CI_ULCONST ci_uint32  cplane_bytes;
+  CI_ULCONST ci_uint32  timesync_bytes;
   CI_ULCONST ci_uint32  io_mmap_bytes;
   CI_ULCONST ci_uint32  buf_mmap_bytes;
 #if CI_CFG_PIO
@@ -1078,6 +1081,16 @@ struct ci_netif_state_s {
   **
   **   vi_state  (for each nic)
   */
+};
+
+
+struct oo_timesync {
+  struct oo_timespec clock;         /* a recent value from system clock */
+  ci_uint64 clock_made;             /* time (frc) clock was stored */
+  ci_uint64 smoothed_ticks;         /* frc ticks during smoothed_ns time */
+  ci_uint64 smoothed_ns;            /* ns to count smoothed_ticks */
+  ci_uint64 update_jiffies;         /* time in jiffies of next update */
+  ci_uint32 generation_count;       /* to synchronise with local copy */
 };
 
 
@@ -1291,6 +1304,32 @@ typedef struct {
   ci_uint16             pmtu;           /* current PMTU */
   ci_uint8              plateau_id;     /* index in plateau table */
 } ci_pmtu_state_t;
+
+/*! Possible return codes between cicp_user_retrieve and cicp_user_defer
+    if these codes have their least significant bit set it may be worth
+    re-trying the operation
+ */
+typedef enum
+{  retrrc_success = 0,/* call was successful */
+   retrrc_nomac   = 1,/* no mac found, deferred retrieval of MAC info needed */
+   retrrc_noroute = 2,/* route not found */
+   retrrc_alienroute = 3, /* route found but is not via our interfaces */
+   retrrc_localroute = 4, /* destination is local address of the host */ 
+} cicpos_retrieve_rc_t;
+
+
+#define CICPOS_RETRRC(rc, reqs)    ((rc) | (reqs))
+#define CICPOS_RETRRC_RC(retrrc)   ((retrrc) & 0x00FF)
+#define CICPOS_RETRRC_REQS(retrrc) ((retrrc) & 0xFF00)
+
+#define CICPOS_RETRRC_RCSTR(rc) \
+        ((rc) == retrrc_success? "success":                                \
+         (rc) == retrrc_nomac? "MAC currently unknown":                    \
+         (rc) == retrrc_noroute? "no route known to IP address":           \
+         (rc) == retrrc_alienroute? "non-EtherFabric route":               \
+         (rc) == retrrc_localroute? "loopback route":                      \
+         "<unknown forwarding return code>")
+
 
 typedef struct {
   cicp_mac_verinfo_t  mac_integrity; /*!< MAC table version number handle   */
@@ -1744,7 +1783,7 @@ struct oo_pipe {
 /* structure to parse TCP options in SYN */
 typedef struct {
   ci_uint16             smss;           /* Max segment size */
-  ci_uint32             wscl_shft;      /* Window scale shift */
+  ci_uint16             wscl_shft;      /* Window scale shift */
   ci_uint32             flags;          /* Other options enabled (only those
                                            we support) */
 } ci_tcp_options;

@@ -93,7 +93,7 @@ int ci_sock_rx_bind2dev(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
     /* non-Ethernet interface */
     return CI_SOCKET_HANDOVER;
   }
-  if( (unsigned) hwport >= CI_CFG_MAX_REGISTER_INTERFACES )
+  if( (unsigned) hwport >= CPLANE_MAX_REGISTER_INTERFACES )
     return CI_SOCKET_HANDOVER;
   if( __ci_hwport_to_intf_i(ni, hwport) < 0 )
     /* ?? FIXME: We should really be checking whether *all* slaves in the
@@ -309,6 +309,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
       cmsg_state.msg = &msg;
       cmsg_state.cm = CMSG_FIRSTHDR(&msg);
       cmsg_state.cmsg_bytes_used = 0;
+      cmsg_state.p_msg_flags = &msg.msg_flags;
 
       if (s->cmsg_flags & CI_IP_CMSG_PKTINFO) {
         struct in_pktinfo info;

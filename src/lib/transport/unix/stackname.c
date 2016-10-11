@@ -207,9 +207,18 @@ int onload_stackname_save(void)
   if( ! ss )
     return -ENOMEM;
 
-  ss->who = state->who;
-  ss->context = state->context;
-  memcpy(ss->stackname, state->stackname, CI_CFG_STACK_NAME_LEN);
+  if( state->context == ONLOAD_SCOPE_NOCHANGE ) {
+    /* don't save NOCHANGE context but the global options being used */
+    ss->who = oo_stackname_global.who;
+    ss->context = oo_stackname_global.context;
+    memcpy(ss->stackname, oo_stackname_global.stackname,
+           CI_CFG_STACK_NAME_LEN);
+  }
+  else {
+    ss->who = state->who;
+    ss->context = state->context;
+    memcpy(ss->stackname, state->stackname, CI_CFG_STACK_NAME_LEN);
+  }
   ss->next = state->saved_stacks_head;
   state->saved_stacks_head = ss;
 

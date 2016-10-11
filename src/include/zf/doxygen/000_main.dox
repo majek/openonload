@@ -1,0 +1,72 @@
+/****************************************************************************
+ * Copyright 2004-2005: Level 5 Networks Inc.
+ * Copyright 2005-2016: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/**************************************************************************\
+*//*! \file
+** \author    Solarflare Communications, Inc.
+** \brief     Additional Doxygen-format documentation for TCPDirect.
+** \date      2016/05/20
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
+**            are trademarks of Solarflare Communications, Inc.
+*//*
+\**************************************************************************/
+
+/**************************************************************************
+ * Main page
+ *************************************************************************/
+/*! \mainpage TCPDirect
+
+Solarflare's TCPDirect is highly accelerated network middleware. It uses 
+similar techniques to Onload, but delivers lower latency. In order to achieve 
+this, TCPDirect supports a reduced feature set and uses a proprietary API.
+
+\section introduction Introduction
+
+The TCPDirect API provides an interface to an implementation of TCP and UDP 
+over IP. This is dynamically linked into the address space of user-mode 
+applications, and granted direct (but safe) access to the network-adapter 
+hardware. The result is that data can be transmitted to and received from the 
+network directly by the application, without involvement of the operating 
+system. This technique is known as 'kernel bypass'.
+
+Kernel bypass avoids disruptive events such as system calls, context switches 
+and interrupts and so increases the efficiency with which a processor can 
+execute application code. This also directly reduces the host processing 
+overhead, typically by a factor of two, leaving more CPU time available for 
+application processing. This effect is most pronounced for applications which 
+are network intensive.
+
+The key features of TCPDirect are:
+- __User-space__: TCPDirect can be used by unprivileged user-space applications.
+- __Kernel bypass__: Data path operations do not require system calls.
+- __Low CPU overhead__: Data path operations consume very few CPU cycles.
+- __Low latency__: Suitable for low latency applications.
+- __High packet rates__: Supports millions of packets per second per core.
+- __Zero-copy__: Particularly efficient for filtering and forwarding
+  applications.
+- __Flexibility__: Supports many use cases (see \ref overview_use_cases).
+
+*/

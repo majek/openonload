@@ -5,10 +5,7 @@ MMAKE_TYPE	:= LIB
 LIB_SRCS	:= \
 		testapp.c \
 		net.c \
-		bytepattern.c
-
-ifneq ($(ONLOAD_ONLY),1)
-LIB_SRCS	+= \
+		bytepattern.c \
 		ctimer.c \
 		stats.c \
 		iarray_mean_and_limits.c \
@@ -37,7 +34,6 @@ LIB_SRCS	+= \
 
 ifeq ($(LINUX),1)
 LIB_SRCS	+= ifindex.c
-endif
 endif
 
 

@@ -197,8 +197,7 @@ struct efhw_func_ops {
 				    int interrupting, 
 				    int enable_dos_p,
 				    int wakeup_evq,
-				    int enable_time_sync_events,
-				    int enable_cut_through,
+				    int flags,
 				    int* flags_out);
 
 	/*! Disable the given event queue (and any associated timer) */
@@ -325,7 +324,7 @@ struct efhw_func_ops {
 	int (*rss_context_set_flags) (struct efhw_nic *nic, int handle,
 				      unsigned flags);
   /*-------------- Licensing ------------------------ */
-	int (* license_challenge) (struct efhw_nic *nic,
+	int (*license_challenge) (struct efhw_nic *nic,
 				   const uint32_t feature,
 				   const uint8_t* challenge,
 				   uint32_t* expiry,
@@ -333,29 +332,27 @@ struct efhw_func_ops {
 
 	int (*license_check) (struct efhw_nic *nic, const uint32_t feature,
 			      int* licensed);
+	int (*v3_license_challenge) (struct efhw_nic *nic,
+				   const uint64_t app_id,
+				   const uint8_t* challenge,
+				   uint32_t* expiry,
+				   uint32_t* days,
+				   uint8_t* signature,
+				   uint8_t* base_mac,
+				   uint8_t* v_mac);
+	int (*v3_license_check) (struct efhw_nic *nic, uint64_t app_id,
+			         int* licensed);
 
   /*-------------- Stats ------------------------ */
 	int (*get_rx_error_stats) (struct efhw_nic *nic, int instance,
 				   void *data, int data_len, int do_reset);
-};
 
-
-/*----------------------------------------------------------------------------
- *
- * NIC type
- *
- *---------------------------------------------------------------------------*/
-
-enum efhw_function {
-	EFHW_FUNCTION_PF,
-	EFHW_FUNCTION_VF,
-};
-
-struct efhw_device_type {
-	int  arch;            /* enum efhw_arch */
-	char variant;         /* 'A', 'B', ... */
-	int  revision;        /* 0, 1, ... */
-	int  function;        /* enum efhw_function */
+  /*-------------- TX Alternatives ------------------------ */
+	int (*tx_alt_alloc)(struct efhw_nic *nic, int tx_q_id, int num_alt,
+			    int num_32b_words,
+			    unsigned *cp_id_out, unsigned *alt_ids_out);
+	int (*tx_alt_free)(struct efhw_nic *nic, int num_alt, unsigned cp_id,
+			   const unsigned *alt_ids);
 };
 
 
@@ -366,6 +363,44 @@ struct efhw_device_type {
  *---------------------------------------------------------------------------*/
 
 struct pci_dev;
+
+#define NIC_FLAG_ONLOAD_UNSUPPORTED 0x20
+#define NIC_FLAG_VLAN_FILTERS 0x40
+#define NIC_FLAG_BUG35388_WORKAROUND 0x80
+#define NIC_FLAG_MCAST_LOOP_HW 0x100
+#define NIC_FLAG_14BYTE_PREFIX 0x200
+#define NIC_FLAG_PACKED_STREAM 0x400
+#define NIC_FLAG_RX_RSS_LIMITED 0x800
+#define NIC_FLAG_VAR_PACKED_STREAM 0x1000
+#define NIC_FLAG_ADDITIONAL_RSS_MODES 0x2000
+#define NIC_FLAG_PIO 0x4000
+#define NIC_FLAG_HW_MULTICAST_REPLICATION 0x8000
+#define NIC_FLAG_HW_RX_TIMESTAMPING 0x10000
+#define NIC_FLAG_HW_TX_TIMESTAMPING 0x20000
+#define NIC_FLAG_VPORTS 0x40000
+#define NIC_FLAG_PHYS_MODE 0x80000
+#define NIC_FLAG_BUFFER_MODE 0x100000
+#define NIC_FLAG_MULTICAST_FILTER_CHAINING 0x200000
+#define NIC_FLAG_MAC_SPOOFING 0x400000
+#define NIC_FLAG_RX_FILTER_TYPE_IP_LOCAL 0x800000
+#define NIC_FLAG_RX_FILTER_TYPE_IP_FULL 0x1000000
+#define NIC_FLAG_RX_FILTER_TYPE_IP6 0x2000000
+#define NIC_FLAG_RX_FILTER_TYPE_ETH_LOCAL 0x4000000
+#define NIC_FLAG_RX_FILTER_TYPE_ETH_LOCAL_VLAN 0x8000000
+#define NIC_FLAG_RX_FILTER_TYPE_UCAST_ALL 0x10000000
+#define NIC_FLAG_RX_FILTER_TYPE_MCAST_ALL 0x20000000
+#define NIC_FLAG_RX_FILTER_TYPE_UCAST_MISMATCH 0x40000000
+#define NIC_FLAG_RX_FILTER_TYPE_MCAST_MISMATCH 0x80000000
+#define NIC_FLAG_RX_FILTER_TYPE_SNIFF 0x100000000LL
+#define NIC_FLAG_TX_FILTER_TYPE_SNIFF 0x200000000LL
+#define NIC_FLAG_RX_FILTER_IP4_PROTO 0x400000000LL
+#define NIC_FLAG_RX_FILTER_ETHERTYPE 0x800000000LL
+#define NIC_FLAG_ZERO_RX_PREFIX 0x1000000000LL
+#define NIC_FLAG_NIC_PACE 0x2000000000LL
+#define NIC_FLAG_RX_MERGE 0x4000000000LL
+#define NIC_FLAG_TX_ALTERNATIVES 0x8000000000LL
+#define NIC_FLAG_EVQ_V2 0x10000000000LL
+
 
 /*! */
 struct efhw_nic {
@@ -383,17 +418,7 @@ struct efhw_nic {
 # define NIC_OPT_DEFAULT            0
 
 	/*! Internal flags that indicate hardware properties at runtime. */
-	unsigned flags;
-# define NIC_FLAG_10G                   0x10
-# define NIC_FLAG_ONLOAD_UNSUPPORTED    0x20
-# define NIC_FLAG_VLAN_FILTERS          0x40
-# define NIC_FLAG_BUG35388_WORKAROUND   0x80
-# define NIC_FLAG_MCAST_LOOP_HW         0x100
-# define NIC_FLAG_14BYTE_PREFIX         0x200
-# define NIC_FLAG_PACKED_STREAM         0x400
-# define NIC_FLAG_RX_RSS_LIMITED        0x800
-# define NIC_FLAG_VAR_PACKED_STREAM     0x1000
-# define NIC_FLAG_ADDITIONAL_RSS_MODES  0x2000
+	uint64_t flags;
 
 	ci_uint32 resetting;	/*!< Flags indicating unavailability of HW */
 # define NIC_RESETTING_FLAG_RESET       0x00000001
@@ -465,6 +490,10 @@ struct efhw_nic {
 	 * e.g. wakeup events.  Can change when NIC is reset.
 	 */
 	unsigned vi_base;
+	/* Shift value used to calculate absolute VI number, non-null
+	 * on Medford only;
+	 */
+	unsigned vi_shift;
 	/* VI range to use, relative to vi_base, useful for validating
 	 * wakeup event VI is in range
 	 */
@@ -474,6 +503,11 @@ struct efhw_nic {
 	 * driver's configuration of vswitches etc. 
 	 */
 	unsigned vport_id;
+
+	/* Size of PIO buffer */
+	unsigned pio_size;
+	/* Total number of PIO buffers */
+	unsigned pio_num;
 };
 
 

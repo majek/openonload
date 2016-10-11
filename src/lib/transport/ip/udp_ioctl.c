@@ -37,9 +37,7 @@
 void ci_synchronise_clock(ci_netif *ni, struct oo_timesync* oo_ts_local)
 {
   ci_uint32 gc;
-  struct oo_timesync *oo_ts;
-
-  oo_ts = oo_timesync_state(CICP_HANDLE(ni));
+  struct oo_timesync *oo_ts = ni->timesync;
 
   /* Check if our current datapoint for clock_gettime is up to date,
    * and take another if not

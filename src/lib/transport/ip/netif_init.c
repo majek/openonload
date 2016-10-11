@@ -26,12 +26,13 @@
 
 #include "ip_internal.h"
 #include "uk_intf_ver.h"
-#include <ci/internal/cplane_ops.h>
 #include <ci/internal/efabcfg.h>
 #include <onload/version.h>
 #include <etherfabric/internal/internal.h>
 
 #ifndef __KERNEL__
+#include <cplane/ul.h>
+#include "cplane_api_version.h"
 #include <net/if.h>
 #include <ci/internal/efabcfg.h>
 #if CI_CFG_PKTS_AS_HUGE_PAGES
@@ -177,7 +178,7 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   nis->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
   nis->last_sleep_frc = IPTIMER_STATE(ni)->frc;
   
-  oo_timesync_update(CICP_HANDLE(ni));
+  oo_timesync_update(efab_tcp_driver.timesync);
 
   assert_zero(nis->defer_work_count);
 
@@ -893,6 +894,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->tcp_rcvbuf_strict = atoi(s);
   if( (s = getenv("EF_TCP_RCVBUF_MODE")) )
     opts->tcp_rcvbuf_mode = atoi(s);
+  if( (s = getenv("EF_TCP_LISTEN_REPLIES_BACK")) )
+    opts->tcp_listen_replies_back = atoi(s);
   if( (s = getenv("EF_POLL_ON_DEMAND")) )
     opts->poll_on_demand = atoi(s);
   if( (s = getenv("EF_INT_REPRIME")) )
@@ -1147,6 +1150,9 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->separate_udp_rxq = atoi(s);
 #endif
 
+  if( (s = getenv("EF_HIGH_THROUGHPUT_MODE")) )
+    opts->rx_merge_mode = atoi(s);
+
   ci_netif_config_opts_getenv_ef_scalable_filters(opts);
 }
 
@@ -1158,7 +1164,7 @@ ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts)
 
   /* Nothing is interesting unless EF_SCALABLE_FILTERS is set */
   if( (s = getenv("EF_SCALABLE_FILTERS")) ) {
-    char ifname[CICP_LLAP_NAME_MAX] = {};
+    char ifname[IFNAMSIZ] = {};
     const char* mode;
 
     mode = strchr(s, '=');
@@ -1389,12 +1395,6 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
     if( rc < 0 )  LOG_NV(ci_log("%s: munmap io %d", __FUNCTION__, rc));
   }
 
-  if( ni->cplane_ptr != NULL ) {
-    rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
-                            ni->cplane_ptr, ni->state->cplane_bytes);
-    if( rc < 0 )  LOG_NV(ci_log("%s: munmap cplane %d", __FUNCTION__, rc));
-  }
-
   rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
                           ni->state, ni->mmap_bytes);
   ni->state = NULL;
@@ -1409,7 +1409,6 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
   int rc;
 
   /* Initialise all mappings with NULL to roll back in case of error. */
-  ni->cplane_ptr = NULL;
   ni->io_ptr = NULL;
 #if CI_CFG_PIO
   ni->pio_ptr = NULL;
@@ -1423,19 +1422,19 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
 #endif
 
   /****************************************************************************
-   * Create cplane mapping.
+   * Create timesync mapping.
    */
-  if( ns->cplane_bytes != 0 ) {
+  if( ns->timesync_bytes != 0 ) {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
-                          CI_NETIF_MMAP_ID_CPLANE, ns->cplane_bytes,
+                          CI_NETIF_MMAP_ID_TIMESYNC, ns->timesync_bytes,
                           OO_MMAP_FLAG_READONLY, &p);
     if( rc < 0 ) {
-      LOG_NV(ci_log("%s: oo_resource_mmap io %d", __FUNCTION__, rc));
+      LOG_NV(ci_log("%s: oo_resource_mmap timesync %d", __FUNCTION__, rc));
       goto fail1;
     }
-    ni->cplane_ptr = p;
-    cicp_ni_build(&ni->cplane, &ns->control_mmap, p);
+    ni->timesync = p;
   }
+
 
   /****************************************************************************
    * Create the I/O mapping.
@@ -1751,7 +1750,8 @@ ci_inline void netif_tcp_helper_free(ci_netif* ni)
 
 static void init_resource_alloc(ci_resource_onload_alloc_t* ra,
                                 const ci_netif_config_opts* opts,
-                                unsigned flags, const char* name)
+                                unsigned flags, const char* name,
+                                ci_fixed_descriptor_t cplane_handle)
 {
   memset(ra, 0, sizeof(*ra));
   CI_USER_PTR_SET(ra->in_opts, opts);
@@ -1771,6 +1771,7 @@ static void init_resource_alloc(ci_resource_onload_alloc_t* ra,
 #endif
   if( name != NULL )
     strncpy(ra->in_name, name, CI_CFG_STACK_NAME_LEN);
+  ra->cplane_handle = cplane_handle;
 }
 
 
@@ -1854,7 +1855,7 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
   /****************************************************************************
    * Allocate the TCP Helper resource.
    */
-  init_resource_alloc(&ra, opts, flags, stack_name);
+  init_resource_alloc(&ra, opts, flags, stack_name, ni->cplane->fd);
 
   rc = oo_resource_alloc(fd, &ra);
   if( rc < 0 ) {
@@ -1917,22 +1918,6 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
   ns = ni->state = (ci_netif_state*) p;
   ci_assert_equal(ra.out_netif_mmap_bytes, ns->netif_mmap_bytes);
 
-#ifndef CI_HAVE_OS_NOPAGE
-  {
-    int shmbuflistlen;
-    shmbuflistlen = ((opts->max_ep_bufs + EP_BUF_BLOCKNUM - 1)
-                     >> EP_BUF_BLOCKSHIFT) + 1;
-    ni->u_shmbufs = ci_alloc(sizeof(void *) * shmbuflistlen);
-    if( ! ni->u_shmbufs ) {
-      ci_log("Driver memory allocation failed");
-      rc=-ENOMEM;
-      goto fail;
-    }
-    memset(ni->u_shmbufs, 0, sizeof(void*) * shmbuflistlen);
-    ni->u_shmbufs[0] = ns;
-  }
-#endif
-
   /****************************************************************************
    * Final Debug consistency check
    */
@@ -1983,7 +1968,7 @@ netif_tcp_helper_alloc_k(ci_netif** ni_out, const ci_netif_config_opts* opts,
   ci_netif* ni;
   int rc;
 
-  init_resource_alloc(&ra, opts, flags, NULL);
+  init_resource_alloc(&ra, opts, flags, NULL, -1);
   rc = tcp_helper_alloc_kernel(&ra, opts, ifindices_len, &trs);
   if( rc < 0 ) {
     ci_log("%s: tcp_helper_alloc_kernel() failed (%d)", __FUNCTION__, rc);
@@ -2142,6 +2127,21 @@ void ci_netif_cluster_prefault(ci_netif* ni)
   ci_netif_pkt_prefault_reserve(ni);
 }
 
+int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
+{
+  ni->driver_handle = fd;
+  CI_MAGIC_SET(ni, NETIF_MAGIC);
+  ni->flags = 0;
+  ni->error_flags = 0;
+
+  ni->cplane = cicp_get_handle(CPLANE_API_VERSION, -1);
+  if( ni->cplane == NULL ) {
+    LOG_S(ci_log("%s: failed to get control plane handle", __func__));
+    return -EINVAL;
+  }
+
+  return 0;
+}
 
 int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
                   unsigned flags)
@@ -2163,8 +2163,9 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   if( rc < 0 ) return rc;
 #endif
 
-  ni->driver_handle = fd;
-
+  rc = ci_netif_init(ni, fd);
+  if( rc < 0 )
+    return rc;
 
   /***************************************
   * Allocate kernel helper and link into netif
@@ -2172,12 +2173,9 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   if( (rc = netif_tcp_helper_alloc_u(fd, ni, opts, flags, stack_name)) < 0 )
     return rc;
 
-  CI_MAGIC_SET(ni, NETIF_MAGIC);
   ci_netif_pkt_prefault(ni);
   ci_netif_pkt_prefault_reserve(ni);
   oo_atomic_set(&ni->ref_count, 0);
-  ni->flags = 0;
-  ni->error_flags = 0;
 
   NI_LOG(ni, BANNER,
          "Using "ONLOAD_PRODUCT" "ONLOAD_VERSION" "ONLOAD_COPYRIGHT" [%s]",
@@ -2479,34 +2477,39 @@ int ci_netif_restore(ci_netif* ni, ef_driver_handle fd,
   
   LOG_NV(ci_log("%s: fd=%d", __FUNCTION__, fd));
 
-  ni->driver_handle = fd;
-  ni->flags = 0;
-  ni->error_flags = 0;
+  /* Ignore error: we'll try to restore cplane handle later */
+  (void)ci_netif_init(ni, fd);
 
   CI_TRY_RET(netif_tcp_helper_restore(ni, netif_mmap_bytes));
 
-#ifndef CI_HAVE_OS_NOPAGE
-  {
-    int shmbuflistlen;
-    shmbuflistlen = ((ni->state->max_ep_bufs + EP_BUF_BLOCKNUM -1)
-                     >> EP_BUF_BLOCKSHIFT) + 1;
-    ni->u_shmbufs = ci_alloc(shmbuflistlen * sizeof(void*));
-    if( ! ni->u_shmbufs )  return -ENOMEM;
-    memset(ni->u_shmbufs, 0,  shmbuflistlen * sizeof(void*));
-    ni->u_shmbufs[0] = ni->state;
+  if( ni->cplane == NULL ) {
+    ci_fixed_descriptor_t fd;
+    /* Try to get cplane handle out of the restored netif. */
+    rc = oo_resource_op(ci_netif_get_driver_handle(ni),
+                        OO_IOC_GET_CPLANE_FD, &fd);
+    if( rc < 0 ) {
+      ci_log("%s: failed to restore control plane handle: %d", __func__, rc);
+      goto fail;
+    }
+
+    ni->cplane = cicp_get_handle(CPLANE_API_VERSION, fd);
+    if( ni->cplane == NULL ) {
+      ci_log("%s: failed to restore control plane handle", __func__);
+      goto fail;
+    }
   }
-#endif
 
   /* We do not want this stack to be used as default */
   ni->flags |= CI_NETIF_FLAGS_DONT_USE_ANON;
-
-  CI_MAGIC_SET(ni, NETIF_MAGIC);
 
   /* We don't CHECK_NI(ni) here, as it needs the netif lock and we have
    * the fdtable lock at this point.  The netif will be checked later
    * when used.
    */
 
+  return rc;
+ fail:
+  netif_tcp_helper_munmap(ni);
   return rc;
 }
 

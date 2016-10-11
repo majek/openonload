@@ -67,6 +67,9 @@
 #  include <linux/time.h>
 # else
 #  include <stdint.h>
+#  ifndef __STDC_FORMAT_MACROS
+#   define __STDC_FORMAT_MACROS
+#  endif
 #  include <inttypes.h>
 #  include <time.h>
 #   include <sys/types.h>
@@ -199,6 +202,12 @@ typedef union {
     unsigned       ts_sec     :32;
     unsigned       ts_nsec    :32;
   } tx_timestamp;
+  /** An event of type EF_EVENT_TYPE_TX_ALT */
+  struct {
+    unsigned       type       :16;
+    unsigned       q_id       :16;
+    unsigned       alt_id     :16;
+  } tx_alt;
   /** An event of type EF_EVENT_TYPE_RX_NO_DESC_TRUNC */
   struct {
     unsigned       type       :16;
@@ -217,6 +226,13 @@ typedef union {
     unsigned       type       :16;
     unsigned       data;
   } sw;
+  /** An event of type EF_EVENT_TYPE_MULTI */
+  struct {
+    unsigned       type       :16;
+    unsigned       q_id       :16;
+    unsigned       desc_id    :16;
+    unsigned       flags      :16;
+  } rx_multi;
 } ef_event;
 
 
@@ -244,6 +260,10 @@ enum {
   EF_EVENT_TYPE_TX_WITH_TIMESTAMP,
   /** A batch of packets was received in a packed stream. */
   EF_EVENT_TYPE_RX_PACKED_STREAM,
+  /** A batch of packets was received on a RX event merge vi. */
+  EF_EVENT_TYPE_RX_MULTI,
+  /** Packet has been transmitted via a "TX alternative". */
+  EF_EVENT_TYPE_TX_ALT,
 };
 
 
@@ -293,6 +313,15 @@ enum {
 /*! \brief Get the length of a discarded packet */
 #define EF_EVENT_RX_DISCARD_BYTES(e) ((e).rx_discard.len)
 
+/*! \brief Get the RX descriptor ring ID used for a received packet. */
+#define EF_EVENT_RX_MULTI_Q_ID(e)             ((e).rx_multi.q_id)
+/*! \brief True if the CONTinuation Of Packet flag is set for an RX HT event */
+#define EF_EVENT_RX_MULTI_CONT(e)             ((e).rx_multi.flags & \
+                                               EF_EVENT_FLAG_CONT)
+/*! \brief True if the Start Of Packet flag is set for an RX HT event */
+#define EF_EVENT_RX_MULTI_SOP(e)              ((e).rx_multi.flags & \
+                                               EF_EVENT_FLAG_SOP)
+
 /*! \brief The reason for an EF_EVENT_TYPE_RX_DISCARD event */
 enum {
   /** IP header or TCP/UDP checksum error */
@@ -324,7 +353,7 @@ enum {
 
 /*! \brief Get the TX descriptor ring ID used for a timestamped packet. */
 #define EF_EVENT_TX_WITH_TIMESTAMP_Q_ID(e)     ((e).tx_timestamp.q_id)
-/*! \brief Get the dma_id used for a timetsamped packet. */
+/*! \brief Get the dma_id used for a timestamped packet. */
 #define EF_EVENT_TX_WITH_TIMESTAMP_RQ_ID(e)    ((e).tx_timestamp.rq_id)
 /*! \brief Get the number of seconds from the timestamp of a transmitted
 ** packet */
@@ -332,13 +361,19 @@ enum {
 /*! \brief Get the number of nanoseconds from the timestamp of a transmitted
 ** packet */
 #define EF_EVENT_TX_WITH_TIMESTAMP_NSEC(e)     ((e).tx_timestamp.ts_nsec)
-/*! \brief Get the sync flags from the timestamp of a transmitted packet */
+/*! \brief Mask for the sync flags in the timestamp of a transmitted packet */
 #define EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK \
   (EF_VI_SYNC_FLAG_CLOCK_SET | EF_VI_SYNC_FLAG_CLOCK_IN_SYNC)
+/*! \brief Get the sync flags from the timestamp of a transmitted packet */
 #define EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(e) \
   ((e).tx_timestamp.ts_nsec & EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK)
 
-/*!\brief The reason for an EF_EVENT_TYPE_TX_ERROR event */
+/*! \brief Get the TX descriptor ring ID used for a TX alternative packet. */
+#define EF_EVENT_TX_ALT_Q_ID(e)                ((e).tx_alt.q_id)
+/*! \brief Get the TX alternative ID used for a TX alternative packet. */
+#define EF_EVENT_TX_ALT_ALT_ID(e)              ((e).tx_alt.alt_id)
+
+/*! \brief The reason for an EF_EVENT_TYPE_TX_ERROR event */
 enum {
   /** No ownership rights for the packet */
   EF_EVENT_TX_ERROR_RIGHTS,
@@ -428,21 +463,31 @@ enum ef_vi_flags {
   /** Disable using TX descriptor push, so always use doorbell for transmit */
   EF_VI_TX_PUSH_DISABLE   = 0x4000,
   /** Always use TX descriptor push, so never use doorbell for transmit
-  ** (7000 series only) */
+  ** (7000 series and newer) */
   EF_VI_TX_PUSH_ALWAYS    = 0x8000,             /* ef10 only */
-  /** Add timestamp to received packets (7000 series only) */
+  /** Add timestamp to received packets (7000 series and newer) */
   EF_VI_RX_TIMESTAMPS     = 0x10000,            /* ef10 only */
-  /** Add timestamp to transmitted packets (7000 series only) */
+  /** Add timestamp to transmitted packets (7000 series and newer) */
   EF_VI_TX_TIMESTAMPS     = 0x20000,            /* ef10 only */
   /* Flag EF_VI_TX_LOOPBACK (0x40000) has been removed. Similar
    * functionality can now be achieved with protection domain and
    * EF_PD_MCAST_LOOP flag.
    * Flag value 0x40000 is not to be reused. */
-  /** Enable packed stream mode for received packets (7000 series only) */
+  /** Enable packed stream mode for received packets (7000 series or newer) */
   EF_VI_RX_PACKED_STREAM  = 0x80000,            /* ef10 only */
-  /** Use 64KB packe3d stream buffers, instead of the 1024KB default
-  ** (7000 series only) */
+  /** Use 64KiB packed stream buffers, instead of the 1024KiB default (7000
+   * series and newer).
+   */
   EF_VI_RX_PS_BUF_SIZE_64K = 0x100000,          /* ef10 only */
+  /** Enable RX event merging mode for received packets
+   *  See ef_vi_receive_unbundle() and ef_vi_receive_get_bytes() for more
+   *  details on using RX event merging mode. */
+  EF_VI_RX_EVENT_MERGE = 0x200000,          /* ef10 only */
+  /** Enable the "TX alternatives" feature (8000 series and newer). */
+  EF_VI_TX_ALT             = 0x400000,
+  /** Controls, on 8000 series and newer, whether the hardware event timer
+   *  is enabled */
+  EF_VI_ENABLE_EV_TIMER = 0x800000,
 };
 
 
@@ -450,6 +495,21 @@ enum ef_vi_flags {
 enum ef_vi_out_flags {
   /** Clock sync status */
   EF_VI_OUT_CLOCK_SYNC_STATUS = 0x1,            /* ef10 only */
+};
+
+
+/*! \brief Flags that define which errors will cause RX_DISCARD events. */
+enum ef_vi_rx_discard_err_flags {
+  /** TCP or UDP checksum error */
+  EF_VI_DISCARD_RX_L4_CSUM_ERR      = 0x1,
+  /** IP checksum error */
+  EF_VI_DISCARD_RX_L3_CSUM_ERR      = 0x2,
+  /** Ethernet FCS error */
+  EF_VI_DISCARD_RX_ETH_FCS_ERR      = 0x4,
+  /** Ethernet frame length error */
+  EF_VI_DISCARD_RX_ETH_LEN_ERR      = 0x8,      /* ef10 only */
+  /** To be discard in software (includes frame length error) */
+  EF_VI_DISCARD_RX_TOBE_DISC        = 0x10      /* Siena only */
 };
 
 /**********************************************************************
@@ -498,6 +558,8 @@ typedef struct {
   uint16_t  rx_ps_pkt_count;                    /* ef10 only */
   /** Credit for packed stream handling (7000-series only) */
   uint16_t  rx_ps_credit_avail;                 /* ef10 only */
+  /** Last descriptor to be completed (when RX batching) */
+  uint32_t  last_completed;                     /* ef10 only */
 } ef_vi_rxq_state;
 
 /*! \brief State of event queue
@@ -508,13 +570,15 @@ typedef struct {
   /** Event queue pointer */
   ef_eventq_ptr evq_ptr;
   /** Timestamp (major part) */
-  unsigned      sync_timestamp_major;
+  uint32_t      sync_timestamp_major;
   /** Timestamp (minor part) */
-  unsigned      sync_timestamp_minor;
+  uint32_t      sync_timestamp_minor;
+  /** Smallest possible seconds value for given sync_timestamp_major */
+  uint32_t      sync_timestamp_minimum;
   /** Timestamp synchronised with adapter */
-  unsigned      sync_timestamp_synchronised; /* with adapter */
+  uint32_t      sync_timestamp_synchronised; /* with adapter */
   /** Time synchronisation flags */
-  unsigned      sync_flags;
+  uint32_t      sync_flags;
 } ef_eventq_state;
 
 /*! \brief TX descriptor ring
@@ -609,6 +673,8 @@ typedef struct ef_vi {
   unsigned                      rx_buffer_len;
   /** The length of the prefix at the start of a received packet */
   unsigned                      rx_prefix_len;
+  /** The mask to select which errors cause a discard event */
+  uint64_t                      rx_discard_mask;
   /** The timestamp correction (ticks) for received packets */
   int                           rx_ts_correction;
   /** The timestamp correction (ns) for transmitted packets */
@@ -625,6 +691,8 @@ typedef struct ef_vi {
   int                           vi_clustered;
   /** True if packed stream mode is enabled for the virtual interface */
   int                           vi_is_packed_stream;
+  /** True if no special mode is enabled for the virtual interface */
+  int                           vi_is_normal;
   /** The packed stream buffer size for the virtual interface */
   unsigned                      vi_ps_buf_size;
 
@@ -663,6 +731,13 @@ typedef struct ef_vi {
   /** Number of virtual queues for the virtual interface */
   int                           vi_qs_n;
 
+  /** Number of TX alternatives for the virtual interface */
+  unsigned                      tx_alt_num;
+  /** Mapping from end-user TX alternative IDs to hardware IDs  */
+  unsigned*                     tx_alt_id2hw;
+  /** Mapping from hardware TX alternative IDs to end-user IDs  */
+  unsigned*                     tx_alt_hw2id;
+
   /** The type of NIC hosting the virtual interface */
   struct ef_vi_nic_type	        nic_type;
 
@@ -688,6 +763,16 @@ typedef struct ef_vi {
     int (*transmit_copy_pio)(struct ef_vi*, int pio_offset,
                              const void* src_buf, int len,
                              ef_request_id dma_id);
+    /** Select a TX alternative as the destination for future sends */
+    int (*transmit_alt_select)(struct ef_vi*, unsigned alt_id);
+    /** Select the "normal" data path as the destination for future sends */
+    int (*transmit_alt_select_default)(struct ef_vi*);
+    /** Transition a TX alternative to the STOP state */
+    int (*transmit_alt_stop)(struct ef_vi*, unsigned alt_id);
+    /** Transition a TX alternative to the GO state */
+    int (*transmit_alt_go)(struct ef_vi*, unsigned alt_id);
+    /** Transition a TX alternative to the DISCARD state */
+    int (*transmit_alt_discard)(struct ef_vi*, unsigned alt_id);
     /** Initialize an RX descriptor on the RX descriptor ring */
     int (*receive_init)(struct ef_vi*, ef_addr, ef_request_id);
     /** Submit newly initialized RX descriptors to the NIC */
@@ -1048,6 +1133,62 @@ ef_vi_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
                                             unsigned* flags_out);
 
 
+/*! \brief Retrieve the number of bytes in a received packet in RX event
+**         merge mode
+**
+** \param vi        The virtual interface that received the packet.
+** \param pkt       The first packet buffer for the received packet.
+** \param bytes_out Pointer to a uint16_t, that is updated on return with the
+**                  number of bytes in the packet.
+**
+** Note that this function returns the number of bytes in a received packet,
+** not received into a single buffer, ie it must only be called for the first
+** buffer in a packet.  For jumbos it will return the full length of the jumbo.
+** Buffers prior to the last buffer in the packet will be filled completely.
+**
+** The length does not include the length of the packet prefix.
+**
+** \return 0 on success, or a negative error code
+*/
+extern int
+ef_vi_receive_get_bytes(ef_vi* vi, const void* pkt, uint16_t* bytes_out);
+
+
+/*! \brief Maximum number of receive completions per receive event. */
+#define EF_VI_RECEIVE_BATCH 15
+
+
+/*! \brief Unbundle an event of type EF_EVENT_TYPE_RX_MULTI
+**
+** \param ep    The virtual interface that has raised the event.
+** \param event The event, of type EF_EVENT_TYPE_RX_MULTI.
+** \param ids   Array of size EF_VI_RECEIVE_BATCH, that is updated on return
+**              with the DMA ids that were used in the original
+**              ef_vi_receive_init() call.
+**
+** \return The number of valid ef_request_ids (can be zero).
+**
+** Unbundle an event of type EF_EVENT_TYPE_RX_MULTI.
+**
+** In RX event merge mode the NIC will coalesce multiple packet receptions
+** into a single RX event.  This reduces PCIe load, enabling higher potential
+** throughput at the cost of latency.
+**
+** This function returns the number of descriptors whose reception has
+** completed, and updates the ids array with the ef_request_ids for each
+** completed DMA request.
+**
+** After calling this function, the RX descriptors for the completed RX event
+** are ready to be re-used.
+**
+** In order to determine the length of each packet ef_vi_receive_get_bytes()
+** must be called, or the length examined in the packet prefix (see
+** ef_vi_receive_query_layout()).
+*/
+extern int ef_vi_receive_unbundle(ef_vi* ep, const ef_event* event,
+                                  ef_request_id* ids);
+
+
 /**********************************************************************
  * Transmit interface *************************************************
  **********************************************************************/
@@ -1356,6 +1497,103 @@ extern int ef_vi_transmit_unbundle(ef_vi* ep, const ef_event* event,
                                    ef_request_id* ids);
 
 
+/*! \brief Return the number of TX alternatives allocated for a virtual
+** interface.
+**
+** \param vi     The virtual interface to query.
+**
+** \return The number of TX alternatives, or a negative error code.
+**
+** Gets the number of TX alternatives for the given virtual interface.
+*/
+extern unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
+
+
+
+/*! \brief Select a TX alternative as the destination for future sends
+**
+** \param vi     The virtual interface associated with the TX alternative.
+** \param alt_id The TX alternative to select.
+**
+** \return 0 on success, or a negative error code.
+**
+** Selects a TX alternative as the destination for future sends. Packets
+** can be sent to it using normal send calls such as ef_vi_transmit().
+** The action then taken depends on the state of the TX alternative:
+** - if the TX alternative is in the STOP state, the packet is buffered for
+**   possible future transmission
+** - if the TX alternative is in the GO state, the packet is immediately
+**   transmitted.
+*/
+#define ef_vi_transmit_alt_select(vi, alt_id)	\
+  (vi)->ops.transmit_alt_select((vi), (alt_id))
+
+
+/*! \brief Select the "normal" data path as the destination for future
+** sends.
+**
+** \param vi        A virtual interface associated with a TX alternative.
+**
+** Selects the "normal" data path as the destination for future sends.
+** The virtual interface then transmits packets to the network
+** immediately, in the normal way. This call undoes the effect of
+** ef_vi_transmit_alt_select().
+*/
+#define ef_vi_transmit_alt_select_normal(vi)	\
+  (vi)->ops.transmit_alt_select_default((vi))
+
+
+/*! \brief Transition a TX alternative to the STOP state.
+**
+** \param vi        The virtual interface associated with the TX alternative.
+** \param alt_id    The TX alternative to transition to the STOP state.
+**
+** Transitions a TX alternative to the STOP state.  Packets that are sent
+** to a TX alternative in the STOP state are buffered on the adapter.
+*/
+#define ef_vi_transmit_alt_stop(vi, alt_id)     \
+  (vi)->ops.transmit_alt_stop((vi), (alt_id))
+
+
+/*! \brief Transition a TX alternative to the GO state.
+**
+** \param vi     The virtual interface associated with the TX alternative.
+** \param alt_id The TX alternative to transition to the GO state.
+**
+** \return 0 on success, or a negative error code.
+**
+** Transitions a TX alternative to the GO state. Packets buffered in the
+** alternative are transmitted to the network.
+**
+** As packets are transmitted events of type EF_EVENT_TYPE_TX_ALT are
+** returned to the application. The application should normally wait until
+** all packets have been sent before transitioning to a different state.
+*/
+#define ef_vi_transmit_alt_go(vi, alt_id)	\
+  (vi)->ops.transmit_alt_go((vi), (alt_id))
+
+
+/*! \brief Transition a TX alternative to the DISCARD state.
+**
+** \param vi     The virtual interface associated with the TX alternative.
+** \param alt_id The TX alternative to transition to the DISCARD state.
+**
+** \return 0 on success, or a negative error code.
+**
+** Transitions a TX alternative to the DISCARD state. Packets buffered in
+** the alternative are discarded.
+**
+** As packets are discarded, events of type EF_EVENT_TYPE_TX_ALT are
+** returned to the applicatino. The application should normally wait until
+** all packets have been discarded before transitioning to a different state.
+**
+** Memory for the TX alternative remains allocated, and is not freed until
+** the virtual interface is freed.
+*/
+#define ef_vi_transmit_alt_discard(vi, alt_id)          \
+  (vi)->ops.transmit_alt_discard((vi), (alt_id))
+
+
 /*! \brief Set the threshold at which to switch from using TX descriptor
 **         push to using a doorbell
 **
@@ -1487,8 +1725,10 @@ ef_vi_inline unsigned ef_eventq_current(ef_vi* evq)
 enum ef_vi_layout_type {
   /** An Ethernet frameo */
   EF_VI_LAYOUT_FRAME,
-  /** Hardware timestamp (minor ticks) */
+  /** Hardware timestamp (minor ticks) - 32 bits */
   EF_VI_LAYOUT_MINOR_TICKS,
+  /** Packet length - 16 bits */
+  EF_VI_LAYOUT_PACKET_LENGTH,
 };
 
 
@@ -1516,7 +1756,9 @@ typedef struct {
 **
 ** Gets the layout of the data that the adapter delivers into receive
 ** buffers. Depending on the adapter type and options selected, there can
-** be a meta-data prefix in front of each packet delivered into memory.
+** be a meta-data prefix in front of each packet delivered into memory.  Note
+** that this prefix is per-packet, not per buffer, ie for jumbos the prefix
+** will only be present in the first buffer of the packet.
 **
 ** The first entry is always of type EF_VI_LAYOUT_FRAME, and the offset is
 ** the same as the value returned by ef_vi_receive_prefix_len().

@@ -97,38 +97,10 @@ citp_find_all_sys_calls(void)
 }
 
 
-static int
-citp_find_all_libc_calls(void)
-{
-  void* dlhandle;
-  const char* lib = "libc.so.6";  /* ?? */
-
-  dlhandle = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
-  if( dlhandle == 0 ) {    
-    Log_E(log("dlopen: dlerror '%s'", dlerror()));
-    return -1;
-  }
-
-#define CI_MK_DECL(ret, fn, args)               \
-  ci_libc_##fn = dlsym(dlhandle, #fn);          \
-  if( ci_libc_##fn == NULL )                    \
-    return load_sym_fail(#fn);
-
-#include <onload/declare_libccalls.h.tmpl>
-
-  if( dlclose(dlhandle) != 0 )
-    Log_E(log("%s: ERROR: dlclose != 0", __FUNCTION__));
-
-  return 0;
-}
-
 int
 citp_syscall_init(void)
 {
   if (citp_find_all_sys_calls() < 0)
-    return -1;
-
-  if (citp_find_all_libc_calls() < 0)
     return -1;
 
   return 0;

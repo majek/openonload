@@ -27,7 +27,6 @@
 /*! \cidoxg_lib_transport_ip */
   
 #include "ip_internal.h"
-#include <ci/internal/cplane_ops.h>
 
 
 #define LPF "IP CMSG "
@@ -59,10 +58,10 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
    * is enough space for the cmsghdr itself, so just need to check
    * that it is != NULL here
    */
-  if( cmsg_state->msg->msg_flags & MSG_CTRUNC )
+  if( *cmsg_state->p_msg_flags & MSG_CTRUNC )
     return;
   if( cmsg_state->cm == NULL ) {
-    cmsg_state->msg->msg_flags |= MSG_CTRUNC;
+    *cmsg_state->p_msg_flags |= MSG_CTRUNC;
     return;
   }
 
@@ -70,12 +69,12 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
                 cmsg_state->msg->msg_controllen) - 
     (unsigned char*)CMSG_DATA(cmsg_state->cm);
   if( data_space < 0 ) {
-    cmsg_state->msg->msg_flags |= MSG_CTRUNC;
+    *cmsg_state->p_msg_flags |= MSG_CTRUNC;
     return;
   }
 
   if( data_len > data_space ) {
-    cmsg_state->msg->msg_flags |= MSG_CTRUNC;
+    *cmsg_state->p_msg_flags |= MSG_CTRUNC;
     data_len = data_space;
   }
 
@@ -87,7 +86,7 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
 
   cmsg_state->cmsg_bytes_used += CMSG_SPACE(data_len);
 
-  if( cmsg_state->msg->msg_flags & MSG_CTRUNC )
+  if( *cmsg_state->p_msg_flags & MSG_CTRUNC )
     return;
 
 #if !defined(NEED_A_WORKAROUND_FOR_GLIBC_BUG_13500) || defined(__KERNEL__)
@@ -114,6 +113,7 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
   struct in_pktinfo info;
   ci_uint32 addr;
   int hwport;
+  cicp_llap_row_t *lrow;
 
   addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
   info.ipi_addr.s_addr = addr;
@@ -136,12 +136,19 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
    * destination address in the IP header unless the header contains a
    * broadcast or multicast address, in which case the specific-destination
    * is an IP address assigned to the physical interface on which the
-   * datagram arrived. */
-  /*\ FIXME: we should drop the packet if this call fails */
-  cicp_ipif_pktinfo_query(CICP_HANDLE(netif), netif, OO_PKT_P(pkt),
-                          info.ipi_ifindex, 
-                          &info.ipi_spec_dst.s_addr
-                          );
+   * datagram arrived.
+   *
+   * Onload does not work with broadcast (?), so we check for multicast
+   * only.
+   */
+  if( CI_IP_ADDR_IS_MULTICAST(&oo_ip_hdr_const(pkt)->ip_daddr_be32) ) {
+    lrow = cicp_llap_find_ifid(
+                      CICP_USER_MIBS(CICP_HANDLE(netif)).llapinfo_utable,
+                      info.ipi_ifindex);
+    info.ipi_spec_dst.s_addr = lrow->ip_addr;
+  }
+  else
+    info.ipi_spec_dst.s_addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
 
   ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(info), &info);
 }
@@ -251,7 +258,7 @@ void ci_ip_cmsg_finish(struct cmsg_state* cmsg_state)
  * according to cmsg_flags the user has set beforehand.
  */
 void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
-                     struct msghdr *msg, int netif_locked)
+                     struct msghdr *msg, int netif_locked, int *p_msg_flags)
 {
   unsigned flags = us->s.cmsg_flags;
   struct cmsg_state cmsg_state;
@@ -259,6 +266,7 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
   cmsg_state.msg = msg;
   cmsg_state.cmsg_bytes_used = 0;
   cmsg_state.cm = CMSG_FIRSTHDR(msg);
+  cmsg_state.p_msg_flags = p_msg_flags;
 
   if( pkt->flags & CI_PKT_FLAG_RX_INDIRECT )
     pkt = PKT_CHK_NML(ni, pkt->frag_next, netif_locked);

@@ -49,11 +49,12 @@
 #include <ci/internal/ip.h>
 #include <ci/internal/ip_log.h>
 
-#include <onload/cplane.h>
+#include <cplane/exported.h>
 #include <ci/internal/ip.h>
 #include <onload/efabcfg.h>
 #include <onload/version.h>
 #include <onload/driverlink_filter.h>
+#include <onload/nic.h>
 
 #include <net/tcp.h>
 #include <net/udp.h>
@@ -99,7 +100,6 @@ typedef struct ci_proc_efab_entry_s {
   const struct file_operations  *fops;  /**< Proc file operations */
 } ci_proc_efab_entry_t;
 static ci_proc_efab_entry_t ci_proc_efab_table[] = {
-    {"cplane",        &cicp_stat_fops}, 
     {"version",       &efab_version_fops},
     {"dlfilters",     &efab_dlfilters_fops},
 };
@@ -320,6 +320,29 @@ ci_proc_files_uninstall(struct proc_dir_entry *root,
 }
 
 
+#define CICPOS_PROCFS_FILE_BLACK_WHITE_LIST "intf-black-white-list"
+static int cicpos_bwl_read(struct seq_file *seq, void *unused)
+{
+  return oo_nic_black_white_list_proc_get(seq);
+}
+
+
+static int cicpos_bwl_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_bwl_read, PDE_DATA(inode));
+}
+
+
+static const struct file_operations cicpos_bwl_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_bwl_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
+
+
 int
 ci_install_proc_entries(void)
 {
@@ -343,6 +366,9 @@ ci_install_proc_entries(void)
                              ci_alloc_memleak_readproc, NULL) == NULL )
     ci_log("%s: failed to create 'mem'", __FUNCTION__);
 #endif
+
+  proc_create_data(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, 0, oo_proc_root,
+                   &cicpos_bwl_fops,  NULL);
 
   return 0;
 }
@@ -368,6 +394,7 @@ void ci_uninstall_proc_entries(void)
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
   remove_proc_entry("mem", oo_proc_root);
 #endif
+  remove_proc_entry(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, oo_proc_root);
   remove_proc_entry("driver/onload", NULL);
   oo_proc_root = NULL;
 }

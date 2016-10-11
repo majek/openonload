@@ -44,8 +44,6 @@ ci_inline void ci_tcp_tx_finish(ci_netif* netif, ci_tcp_state* ts,
   ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
   ci_uint8* opt = CI_TCP_HDR_OPTS(tcp);
 
-  tcp->tcp_seq_be32 = CI_BSWAP_BE32(pkt->pf.tcp_tx.start_seq);
-
   /* Decrement the faststart counter by the number of bytes acked */
   ci_tcp_reduce_faststart(ts, SEQ_SUB(tcp_rcv_nxt(ts),ts->tslastack));
 
@@ -74,6 +72,8 @@ ci_inline void ci_tcp_tx_finish(ci_netif* netif, ci_tcp_state* ts,
       }
     }
   }
+
+  tcp->tcp_seq_be32 = CI_BSWAP_BE32(pkt->pf.tcp_tx.start_seq);
 }
 
 

@@ -150,7 +150,6 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
     }
 
     /* Apply to this fd and also the OS socket.
-     * NB. Listening OS socket must always be non-blocking.
      * FASYNC should be set to our fd first, because our in-kernel code
      * pushes it to OS socket with correct fd.
      */
@@ -160,8 +159,6 @@ int citp_sock_fcntl(citp_sock_fdi *epi, int fd, int cmd, long arg)
 
     {
       long os_arg = arg;
-      if( s->b.state == CI_TCP_LISTEN )
-        os_arg |= O_NONBLOCK | O_NDELAY;
       citp_sock_fcntl_os_sock(epi, fd, cmd, os_arg, "F_SETFL", NULL);
     }
 

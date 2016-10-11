@@ -49,9 +49,10 @@
 #include "linux_resource_internal.h"
 
 /* We depend on rx_channel_count being available for 
- * EFX_DRIVERLINK_API_VERSION=22 
+ * EFX_DRIVERLINK_API_VERSION=22, also we need vi_shift
+ * values, so requesting minor version 3.
  */
-#define EFX_DRIVERLINK_API_VERSION_MINOR 2
+#define EFX_DRIVERLINK_API_VERSION_MINOR 3
 
 #include <driver/linux_net/driverlink_api.h>
 
@@ -73,6 +74,7 @@
 #  include <net/net_namespace.h>
 #endif
 #include <ci/efrm/efrm_filter.h>
+#include <ci/efhw/nic.h>
 #include <ci/tools/sysdep.h>
 
 /* The DL driver and associated calls */
@@ -136,8 +138,14 @@ init_vi_resource_dimensions(struct vi_resource_dimensions *rd,
 		rd->rss_channel_count = ef10_res->rss_channel_count;
 #endif
 		rd->vi_base = ef10_res->vi_base;
-		EFRM_TRACE("Using VI range %d+(%d-%d)", rd->vi_base, 
-			   rd->vi_min, rd->vi_lim);
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+					EFX_DRIVERLINK_API_VERSION_MINOR > 2)
+		rd->vi_shift = ef10_res->vi_shift;
+#else
+		rd->vi_shift = 0;
+#endif
+		EFRM_TRACE("Using VI range %d+(%d-%d)<<%d", rd->vi_base,
+			   rd->vi_min, rd->vi_lim, rd->vi_shift);
 #endif
 #if EFX_DRIVERLINK_API_VERSION >= 18
 		rd->vport_id = ef10_res->vport_id;
@@ -309,6 +317,12 @@ static void efrm_dl_remove(struct efx_dl_device *efrm_dev)
 
 		lnic->dl_device = NULL;
                 lnic->efrm_nic.dl_dev_info = NULL;
+
+		/* Wait for all in-flight driverlink calls to finish.  Since we
+		 * have already cleared [lnic->dl_device], no new calls can
+		 * start. */
+		efhw_nic_flush_dl(nic);
+
 		/* Absent hardware is treated as a protracted reset. */
 		efrm_nic_reset_suspend(nic);
 		ci_atomic32_or(&nic->resetting, NIC_RESETTING_FLAG_UNPLUGGED);
@@ -365,6 +379,15 @@ static void efrm_dl_reset_resume(struct efx_dl_device *efrm_dev, int ok)
 				   __FUNCTION__, nic->vport_id, 
 				   ef10_res->vport_id);
 			nic->vport_id = ef10_res->vport_id;
+		}
+#endif
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+					EFX_DRIVERLINK_API_VERSION_MINOR > 2)
+		if( nic->vi_shift != ef10_res->vi_shift ) {
+			EFRM_TRACE("%s: vi_shift changed from %d to %d\n",
+				   __FUNCTION__, nic->vi_shift, 
+				   ef10_res->vi_shift);
+			nic->vi_shift = ef10_res->vi_shift;
 		}
 #endif
 	}

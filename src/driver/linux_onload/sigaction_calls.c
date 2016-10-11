@@ -270,10 +270,8 @@ report:
   }
   else if( ! (signal_data->type & OO_SIGHANGLER_IGN_BIT) ) {
     sa->sa_handler = SIG_DFL;
-    sa->sa_flags &= ~SA_RESTORER;
     if( ! (signal_data->flags & SA_SIGINFO) )
       sa->sa_flags &= ~SA_SIGINFO;
-    sa->sa_restorer = NULL;
   }
   OO_DEBUG_SIGNAL(ci_log("%s: %d to user sig=%d handler %p flags %lx "
                          "restorer %p", __func__,
@@ -286,7 +284,9 @@ report:
   if( type != signal_data->type ) {
     tried_changed++;
     if( tried_changed > MAX_TRIES_BUSY ) {
-      ci_log("%s: signal() or sigaction() called too fast", __func__);
+      ci_log("%s: signal() or sigaction() called too fast: "
+             "pid=%d sig=%d type=%x != stored_type=%x", __func__,
+             current->pid, sig, type, signal_data->type);
       return -EBUSY;
     }
     if( (signal_data->type & OO_SIGHANGLER_TYPE_MASK) == OO_SIGHANGLER_BUSY ) {

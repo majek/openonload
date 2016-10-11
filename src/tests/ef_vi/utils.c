@@ -60,7 +60,7 @@
 #include <stddef.h>
 
 
-static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
+static int hostport_parse(struct addrinfo* addr, const char* s_in)
 {
   struct addrinfo hints;
   struct addrinfo* ai;
@@ -69,14 +69,20 @@ static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
   char *s, *p;
   int rc = -EINVAL;
 
-  p = s = strdup(s_in);
-  host = strtok(p, ":");
-  port = strtok(NULL, "");
-  if( host == NULL || port == NULL )
+  /* Split the host:port string on the final colon */
+  host = s = strdup(s_in);
+  p = strrchr(host, ':');
+  if( p == NULL )
     goto out;
+  port = p + 1;
+  /* There must be something after the final colon */
+  if( *port == '\0' )
+    goto out;
+  /* Terminate the host string */
+  *p = '\0';
 
   hints.ai_flags = AI_NUMERICSERV;
-  hints.ai_family = AF_INET;
+  hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = 0;
   hints.ai_protocol = 0;
   hints.ai_addrlen = 0;
@@ -85,10 +91,8 @@ static int hostport_parse(struct sockaddr_in* sin, const char* s_in)
   hints.ai_next = NULL;
   rc = getaddrinfo(host, port, &hints, &ai);
   if( rc == 0 ) {
-    TEST(ai->ai_addrlen == sizeof(*sin));
-    memcpy(sin, ai->ai_addr, ai->ai_addrlen);
-  }
-  else {
+    memcpy(addr, ai, sizeof(struct addrinfo));
+  } else {
     fprintf(stderr, "ERROR: getaddrinfo(\"%s\", \"%s\") returned %d %s\n",
             host, port, rc, gai_strerror(rc));
     rc = -EINVAL;
@@ -126,7 +130,7 @@ static int consume_parameter(char **arg)
 
 int filter_parse(ef_filter_spec* fs, const char* s_in)
 {
-  struct sockaddr_in lsin, rsin;
+  struct addrinfo laddr, raddr;
   const char* type;
   const char* hostport;
   char* vlan;
@@ -167,17 +171,42 @@ int filter_parse(ef_filter_spec* fs, const char* s_in)
     if( strchr(remainder, ',') ) {
       hostport = strtok(remainder, ",");
       remainder = strtok(NULL, "");
-      TRY(hostport_parse(&lsin, hostport));
-      TRY(hostport_parse(&rsin, remainder));
-      TRY(ef_filter_spec_set_ip4_full(fs, protocol, lsin.sin_addr.s_addr,
-                                      lsin.sin_port, rsin.sin_addr.s_addr,
-                                      rsin.sin_port));
+      TRY(hostport_parse(&laddr, hostport));
+      TRY(hostport_parse(&raddr, remainder));
+      if( laddr.ai_family == AF_INET && raddr.ai_family == AF_INET ) {
+        struct sockaddr_in *lsin, *rsin;
+        lsin = (struct sockaddr_in *)laddr.ai_addr;
+        rsin = (struct sockaddr_in *)raddr.ai_addr;
+        TRY(ef_filter_spec_set_ip4_full(fs, protocol, lsin->sin_addr.s_addr,
+                                        lsin->sin_port, rsin->sin_addr.s_addr,
+                                        rsin->sin_port));
+      } else if( laddr.ai_family == AF_INET6 && raddr.ai_family == AF_INET6 ) {
+        struct sockaddr_in6 *lsin6, *rsin6;
+        lsin6 = (struct sockaddr_in6 *)laddr.ai_addr;
+        rsin6 = (struct sockaddr_in6 *)raddr.ai_addr;
+        TRY(ef_filter_spec_set_ip6_full(fs, protocol, &lsin6->sin6_addr,
+                                        lsin6->sin6_port, &rsin6->sin6_addr,
+                                        rsin6->sin6_port));
+      } else {
+        fprintf(stderr, "ERROR: invalid families in local/remote hosts\n");
+        goto out;
+      }
       rc = 0;
     }
     else {
-      TRY(hostport_parse(&lsin, strtok(remainder, ",")));
-      TRY(ef_filter_spec_set_ip4_local(fs, protocol, lsin.sin_addr.s_addr,
-                                       lsin.sin_port));
+      TRY(hostport_parse(&laddr, strtok(remainder, ",")));
+      if( laddr.ai_family == AF_INET ) {
+        struct sockaddr_in *lsin = (struct sockaddr_in *)laddr.ai_addr;
+        TRY(ef_filter_spec_set_ip4_local(fs, protocol, lsin->sin_addr.s_addr,
+                                         lsin->sin_port));
+      } else if( laddr.ai_family == AF_INET6 ) {
+        struct sockaddr_in6 *lsin6 = (struct sockaddr_in6 *)laddr.ai_addr;
+        TRY(ef_filter_spec_set_ip6_local(fs, protocol, &lsin6->sin6_addr,
+                                         lsin6->sin6_port));
+      } else {
+        fprintf(stderr, "ERROR: invalid family in local host\n");
+        goto out;
+      }
       rc = 0;
     }
   }
@@ -462,4 +491,64 @@ int mk_socket(int family, int socktype,
   }
   freeaddrinfo(ai);
   return sock;
+}
+
+
+void get_ipaddr_of_intf(const char* intf, char** ipaddr_out)
+{
+  struct ifaddrs *ifaddrs, *ifa;
+  char* ipaddr = calloc(NI_MAXHOST, sizeof(char));
+  TEST(ipaddr);
+  TRY(getifaddrs(&ifaddrs));
+  for( ifa = ifaddrs; ifa != NULL; ifa = ifa->ifa_next ) {
+    if( ifa->ifa_addr == NULL )
+      continue;
+    if( strcmp(ifa->ifa_name, intf) != 0 )
+      continue;
+    if( ifa->ifa_addr->sa_family != AF_INET )
+      continue;
+    TRY(getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), ipaddr,
+                    NI_MAXHOST, NULL, 0, NI_NUMERICHOST));
+    break;
+  }
+  freeifaddrs(ifaddrs);
+  *ipaddr_out = ipaddr;
+}
+
+
+int my_getaddrinfo(const char* host, const char* port,
+                          struct addrinfo**ai_out)
+{
+  struct addrinfo hints;
+  hints.ai_flags = 0;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = 0;
+  hints.ai_protocol = 0;
+  hints.ai_addrlen = 0;
+  hints.ai_addr = NULL;
+  hints.ai_canonname = NULL;
+  hints.ai_next = NULL;
+  return getaddrinfo(host, port, &hints, ai_out);
+}
+
+
+int parse_host(const char* s, struct in_addr* ip_out)
+{
+  const struct sockaddr_in* sin;
+  struct addrinfo* ai;
+  if( my_getaddrinfo(s, 0, &ai) < 0 )
+    return 0;
+  sin = (const struct sockaddr_in*) ai->ai_addr;
+  *ip_out = sin->sin_addr;
+  return 1;
+}
+
+
+int parse_interface(const char* s, int* ifindex_out)
+{
+  char dummy;
+  if( (*ifindex_out = if_nametoindex(s)) == 0 )
+    if( sscanf(s, "%d%c", ifindex_out, &dummy) != 1 )
+      return 0;
+  return 1;
 }

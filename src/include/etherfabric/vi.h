@@ -61,6 +61,7 @@ extern "C" {
 #endif
 
 struct ef_pd;
+struct in6_addr;
 
 
 /**********************************************************************
@@ -141,6 +142,53 @@ extern int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
 **   event queue.
 */
 extern int ef_vi_free(ef_vi* vi, ef_driver_handle nic);
+
+
+/*! \brief Allocate a set of TX alternatives
+**
+** \param vi         The virtual interface that is to use the
+**                   TX alternatives.
+** \param vi_dh      The ef_driver_handle for the NIC hosting the interface.
+** \param num_alts   The number of TX alternatives for which to allocate
+**                   space.
+** \param buf_space  The buffer space required for the set of TX alternatives,
+**                   in bytes.
+**
+** \return  0 on success, or a negative error code.
+**
+** Allocate a set of TX alternatives for use with a virtual interface. The
+** virtual interface must have been allocated with the EF_VI_TX_ALT flag.
+**
+** The space remains allocated until the virtual interface is freed.
+**
+** TX alternatives provide a mechanism to send with very low latency.  They
+** work by pre-loading packets into the adapter in advance, and then
+** calling ef_vi_transmit_alt_go() to transmit the packets.
+**
+** Packets are pre-loaded into the adapter using normal send calls such as
+** ef_vi_transmit().  Use ef_vi_transmit_alt_select() to select which
+** "alternative" to load the packet into.
+**
+** Each alternative has three states: STOP, GO and DISCARD.  The
+** ef_vi_transmit_alt_stop(), ef_vi_transmit_alt_go() and
+** ef_vi_transmit_alt_discard() calls transition between the states.
+** Typically an alternative is placed in the STOP state, selected,
+** pre-loaded with one or more packets, and then later on the critical path
+** placed in the GO state.
+**
+** When packets are transmitted via TX alternatives, events of type
+** EF_EVENT_TYPE_TX_ALT are returned to the application.  The application
+** is responsible for ensuring that all of the packets in an alternative
+** have been sent before transitioning from GO or DISCARD to the STOP
+** state.
+**
+** The @p buf_space parameter gives the amount of buffering to allocate for
+** this set of TX alternatives, in bytes.  Note that if this buffering is
+** exceeded then packets sent to TX alternatives may be truncated or
+** dropped, and no error is reported in this case.
+*/
+extern int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
+                                    int num_alts, size_t buf_space);
 
 
 /*! \brief Flush the virtual interface
@@ -384,7 +432,7 @@ typedef struct {
   /** Flags for filter */
   unsigned flags;
   /** Data for filter */
-  unsigned data[6];
+  unsigned data[12];
 } ef_filter_spec;
 
 /*! \brief Virtual LANs for a filter */
@@ -481,6 +529,66 @@ extern int ef_filter_spec_set_ip4_full(ef_filter_spec* filter_spec,
                                        unsigned rhost_be32, int rport_be16);
 
 
+/*! \brief Set an IP6 Local filter on the filter specification
+**
+** \param filter_spec The ef_filter_spec on which to set the filter.
+** \param protocol    The protocol on which to filter (IPPROTO_UDP or
+**                    IPPROTO_TCP).
+** \param host        The local host address on which to filter, as a
+**                    pointer to a struct in6_addr.
+** \param port_be16   The local port on which to filter, as a 16-bit
+**                    big-endian value (e.g. the output of htons()).
+**
+** \return 0 on success, or a negative error code:\n
+**         -EPROTONOSUPPORT indicates that a filter is already set that is
+**         incompatible with the new filter.
+**
+** Set an IP6 Local filter on the filter specification.
+**
+** This filter intercepts all packets that match the given protocol and
+** host/port combination.
+**
+** \note You cannot specify a range, or a wildcard, for any parameter.
+*/
+extern int ef_filter_spec_set_ip6_local(ef_filter_spec* filter_spec,
+                                        int protocol,
+                                        const struct in6_addr* host,
+                                        int port_be16);
+
+
+/*! \brief Set an IP6 Full filter on the filter specification
+**
+** \param filter_spec The ef_filter_spec on which to set the filter.
+** \param protocol    The protocol on which to filter (IPPROTO_UDP or
+**                    IPPROTO_TCP).
+** \param host        The local host address on which to filter, as a
+**                    pointer to a struct in6_addr.
+** \param port_be16   The local port on which to filter, as a 16-bit
+**                    big-endian value (e.g. the output of htons()).
+** \param rhost       The remote host address on which to filter, as a
+**                    pointer to a struct in6_addr.
+** \param rport_be16  The remote port on which to filter, as a 16-bit
+**                    big-endian value (e.g. the output of htons()).
+**
+** \return 0 on success, or a negative error code:\n
+**         -EPROTONOSUPPORT indicates that a filter is already set that is
+**         incompatible with the new filter.
+**
+** Set an IP6 Full filter on the filter specification.
+**
+** This filter intercepts all packets that match the given protocol and
+** host/port combinations.
+**
+** \note You cannot specify a range, or a wildcard, for any parameter.
+*/
+extern int ef_filter_spec_set_ip6_full(ef_filter_spec* filter_spec,
+                                       int protocol,
+                                       const struct in6_addr* host,
+                                       int port_be16,
+                                       const struct in6_addr* rhost,
+                                       int rport_be16);
+
+
 /*! \brief Add a Virtual LAN filter on the filter specification
 **
 ** \param filter_spec The ef_filter_spec on which to set the filter.
@@ -544,8 +652,6 @@ extern int ef_filter_spec_set_eth_local(ef_filter_spec* filter_spec,
 ** This filter must be used with caution. It intercepts all unicast packets
 ** that arrive, including ARP resolutions, which must normally be handled
 ** by the kernel for routing to work.
-**
-** This filter is not supported by 5000-series and 6000-series adapters.
 */
 extern int ef_filter_spec_set_unicast_all(ef_filter_spec* filter_spec);
 
@@ -563,8 +669,6 @@ extern int ef_filter_spec_set_unicast_all(ef_filter_spec* filter_spec);
 ** This filter must be used with caution. It intercepts all multicast
 ** packets that arrive, including IGMP group membership queries, which must
 ** normally be handled by the kernel to avoid any membership lapses.
-**
-** This filter is not supported by 5000-series and 6000-series adapters.
 */
 extern int ef_filter_spec_set_multicast_all(ef_filter_spec* filter_spec);
 
@@ -896,6 +1000,20 @@ ef_vi_stats_query_layout(ef_vi* vi,
 extern int
 ef_vi_stats_query(ef_vi* vi, ef_driver_handle vi_dh,
                   void* data, int do_reset);
+
+
+/*! \brief Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
+**
+** \param vi                The virtual interface to configure.
+** \param discard_err_flags Flags which indicate which errors will cause
+**                          discard events
+**
+** \return 0 on success, or a negative error code.
+**
+** Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
+*/
+extern int
+ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags);
 
 
 #ifdef __cplusplus

@@ -187,6 +187,13 @@ int onload_thread_set_spin(enum onload_spin_type type, int spin)
 /**************************************************************************/
 
 __attribute__((weak))
+int onload_thread_get_spin(unsigned* state)
+{
+  return -ENOSYS;
+}
+/**************************************************************************/
+
+__attribute__((weak))
 int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
                               struct onload_ordered_epoll_event *oo_events,
                               int maxevents, int timeout)
@@ -220,7 +227,7 @@ int
 onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
                                int flags)
 {
-  errno = EINVAL;
+  errno = ENOSYS;
   return -1;
 }
 
@@ -228,7 +235,7 @@ __attribute__((weak))
 int
 onload_delegated_send_cancel(int fd)
 {
-  errno = EINVAL;
+  errno = ENOSYS;
   return -1;
 }
 

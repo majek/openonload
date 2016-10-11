@@ -106,6 +106,7 @@ citp_signal_run_app_handler(int sig, siginfo_t *info, void *context)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = SIG_DFL;
+    sa.sa_flags = act.flags;
     sigaction(sig, &sa, NULL);
     LOG_SIG(log("%s: SA_ONESHOT fixup", __func__));
   }

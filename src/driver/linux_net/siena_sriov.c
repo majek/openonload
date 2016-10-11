@@ -115,14 +115,14 @@ struct siena_vf {
 	struct work_struct req;
 	u64 req_addr;
 	int req_type;
-	unsigned req_seqno;
-	unsigned msg_seqno;
+	unsigned int req_seqno;
+	unsigned int msg_seqno;
 	bool busy;
 	struct efx_buffer buf;
-	unsigned buftbl_base;
+	unsigned int buftbl_base;
 	bool rx_filtering;
 	enum efx_filter_flags rx_filter_flags;
-	unsigned rx_filter_qid;
+	unsigned int rx_filter_qid;
 	int rx_filter_id;
 	enum efx_vf_tx_filter_mode tx_filter_mode;
 	int tx_filter_id;
@@ -130,16 +130,16 @@ struct siena_vf {
 	u64 status_addr;
 	struct mutex status_lock;
 	u64 *peer_page_addrs;
-	unsigned peer_page_count;
+	unsigned int peer_page_count;
 	u64 evq0_addrs[EFX_MAX_VF_EVQ_SIZE * sizeof(efx_qword_t) /
 		       EFX_BUF_SIZE];
-	unsigned evq0_count;
+	unsigned int evq0_count;
 	wait_queue_head_t flush_waitq;
 	struct mutex txq_lock;
 	unsigned long txq_mask[VI_MASK_LENGTH];
-	unsigned txq_count;
+	unsigned int txq_count;
 	unsigned long rxq_mask[VI_MASK_LENGTH];
-	unsigned rxq_count;
+	unsigned int rxq_count;
 	unsigned long rxq_retry_mask[VI_MASK_LENGTH];
 	atomic_t rxq_retry_count;
 #if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
@@ -156,7 +156,7 @@ struct efx_memcpy_req {
 	u64 from_addr;
 	unsigned int to_rid;
 	u64 to_addr;
-	unsigned length;
+	unsigned int length;
 };
 
 /**
@@ -214,17 +214,17 @@ MODULE_PARM_DESC(vf_max_tx_channels,
  */
 static struct workqueue_struct *vfdi_workqueue;
 
-static unsigned abs_index(struct siena_vf *vf, unsigned index)
+static unsigned int abs_index(struct siena_vf *vf, unsigned int index)
 {
 	return EFX_VI_BASE + vf->index * efx_vf_size(vf->efx) + index;
 }
 
 static int efx_siena_sriov_cmd(struct efx_nic *efx, bool enable,
-			 unsigned *vi_scale_out, unsigned *vf_total_out)
+			 unsigned int *vi_scale_out, unsigned int *vf_total_out)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_SRIOV_IN_LEN);
 	MCDI_DECLARE_BUF(outbuf, MC_CMD_SRIOV_OUT_LEN);
-	unsigned vi_scale, vf_total;
+	unsigned int vi_scale, vf_total;
 	size_t outlen;
 	int rc;
 
@@ -429,7 +429,7 @@ static void __efx_siena_sriov_push_vf_status(struct siena_vf *vf)
 	struct efx_memcpy_req copy[4];
 	struct efx_endpoint_page *epp;
 	unsigned int pos, count;
-	unsigned data_offset;
+	unsigned int data_offset;
 	efx_qword_t event;
 
 	WARN_ON(!mutex_is_locked(&vf->status_lock));
@@ -499,11 +499,11 @@ static void __efx_siena_sriov_push_vf_status(struct siena_vf *vf)
 				 &event);
 }
 
-static void efx_siena_sriov_bufs(struct efx_nic *efx, unsigned offset,
-			   u64 *addr, unsigned count)
+static void efx_siena_sriov_bufs(struct efx_nic *efx, unsigned int offset,
+			   u64 *addr, unsigned int count)
 {
 	efx_qword_t buf;
-	unsigned pos;
+	unsigned int pos;
 
 	for (pos = 0; pos < count; ++pos) {
 		EFX_POPULATE_QWORD_3(buf,
@@ -516,14 +516,14 @@ static void efx_siena_sriov_bufs(struct efx_nic *efx, unsigned offset,
 	}
 }
 
-static bool bad_vf_index(struct efx_nic *efx, unsigned index)
+static bool bad_vf_index(struct efx_nic *efx, unsigned int index)
 {
 	return index >= efx_vf_size(efx);
 }
 
-static bool bad_buf_count(unsigned buf_count, unsigned max_entry_count)
+static bool bad_buf_count(unsigned int buf_count, unsigned int max_entry_count)
 {
-	unsigned max_buf_count = max_entry_count *
+	unsigned int max_buf_count = max_entry_count *
 		sizeof(efx_qword_t) / EFX_BUF_SIZE;
 
 	return ((buf_count & (buf_count - 1)) || buf_count > max_buf_count);
@@ -532,11 +532,11 @@ static bool bad_buf_count(unsigned buf_count, unsigned max_entry_count)
 /* Check that VI specified by per-port index belongs to a VF.
  * Optionally set VF index and VI index within the VF.
  */
-static bool map_vi_index(struct efx_nic *efx, unsigned abs_index,
-			 struct siena_vf **vf_out, unsigned *rel_index_out)
+static bool map_vi_index(struct efx_nic *efx, unsigned int abs_index,
+			 struct siena_vf **vf_out, unsigned int *rel_index_out)
 {
 	struct siena_nic_data *nic_data = efx->nic_data;
-	unsigned vf_i;
+	unsigned int vf_i;
 
 	if (abs_index < EFX_VI_BASE)
 		return true;
@@ -555,10 +555,10 @@ static int efx_vfdi_init_evq(struct siena_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
 	struct vfdi_req *req = vf->buf.addr;
-	unsigned vf_evq = req->u.init_evq.index;
-	unsigned buf_count = req->u.init_evq.buf_count;
-	unsigned abs_evq = abs_index(vf, vf_evq);
-	unsigned buftbl = EFX_BUFTBL_EVQ_BASE(vf, vf_evq);
+	unsigned int vf_evq = req->u.init_evq.index;
+	unsigned int buf_count = req->u.init_evq.buf_count;
+	unsigned int abs_evq = abs_index(vf, vf_evq);
+	unsigned int buftbl = EFX_BUFTBL_EVQ_BASE(vf, vf_evq);
 	efx_oword_t reg;
 
 	if (bad_vf_index(efx, vf_evq) ||
@@ -596,11 +596,11 @@ static int efx_vfdi_init_rxq(struct siena_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
 	struct vfdi_req *req = vf->buf.addr;
-	unsigned vf_rxq = req->u.init_rxq.index;
-	unsigned vf_evq = req->u.init_rxq.evq;
-	unsigned buf_count = req->u.init_rxq.buf_count;
-	unsigned buftbl = EFX_BUFTBL_RXQ_BASE(vf, vf_rxq);
-	unsigned label;
+	unsigned int vf_rxq = req->u.init_rxq.index;
+	unsigned int vf_evq = req->u.init_rxq.evq;
+	unsigned int buf_count = req->u.init_rxq.buf_count;
+	unsigned int buftbl = EFX_BUFTBL_RXQ_BASE(vf, vf_rxq);
+	unsigned int label;
 	efx_oword_t reg;
 
 	if (bad_vf_index(efx, vf_evq) || bad_vf_index(efx, vf_rxq) ||
@@ -637,11 +637,11 @@ static int efx_vfdi_init_txq(struct siena_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
 	struct vfdi_req *req = vf->buf.addr;
-	unsigned vf_txq = req->u.init_txq.index;
-	unsigned vf_evq = req->u.init_txq.evq;
-	unsigned buf_count = req->u.init_txq.buf_count;
-	unsigned buftbl = EFX_BUFTBL_TXQ_BASE(vf, vf_txq);
-	unsigned label, eth_filt_en;
+	unsigned int vf_txq = req->u.init_txq.index;
+	unsigned int vf_evq = req->u.init_txq.evq;
+	unsigned int buf_count = req->u.init_txq.buf_count;
+	unsigned int buftbl = EFX_BUFTBL_TXQ_BASE(vf, vf_txq);
+	unsigned int label, eth_filt_en;
 	efx_oword_t reg;
 
 	if (bad_vf_index(efx, vf_evq) || bad_vf_index(efx, vf_txq) ||
@@ -703,10 +703,10 @@ static int efx_vfdi_fini_all_queues(struct siena_vf *vf)
 {
 	struct efx_nic *efx = vf->efx;
 	efx_oword_t reg;
-	unsigned count = efx_vf_size(efx);
-	unsigned vf_offset = EFX_VI_BASE + vf->index * efx_vf_size(efx);
-	unsigned timeout = HZ;
-	unsigned index, rxqs_count;
+	unsigned int count = efx_vf_size(efx);
+	unsigned int vf_offset = EFX_VI_BASE + vf->index * efx_vf_size(efx);
+	unsigned int timeout = HZ;
+	unsigned int index, rxqs_count;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_FLUSH_RX_QUEUES_IN_LENMAX);
 	int rc;
 
@@ -787,8 +787,8 @@ static int efx_vfdi_insert_filter(struct siena_vf *vf)
 	struct efx_nic *efx = vf->efx;
 	struct siena_nic_data *nic_data = efx->nic_data;
 	struct vfdi_req *req = vf->buf.addr;
-	unsigned vf_rxq = req->u.mac_filter.rxq;
-	unsigned flags;
+	unsigned int vf_rxq = req->u.mac_filter.rxq;
+	unsigned int flags;
 
 	if (bad_vf_index(efx, vf_rxq) || vf->rx_filtering) {
 		if (net_ratelimit())
@@ -988,7 +988,7 @@ static void efx_siena_sriov_reset_vf(struct siena_vf *vf,
 		memcpy(buffer->addr + pos, &event, sizeof(event));
 
 	for (pos = 0; pos < vf->evq0_count; pos += count) {
-		count = min_t(unsigned, vf->evq0_count - pos,
+		count = min_t(unsigned int, vf->evq0_count - pos,
 			      ARRAY_SIZE(copy_req));
 		for (k = 0; k < count; k++) {
 			copy_req[k].from_buf = NULL;
@@ -1075,7 +1075,7 @@ static const struct efx_channel_type efx_siena_sriov_channel_type = {
 void efx_siena_sriov_probe(struct efx_nic *efx)
 {
 #ifdef CONFIG_SFC_SRIOV
-	unsigned count;
+	unsigned int count;
 
 	if (!efx->max_vfs)
 		return;
@@ -1359,7 +1359,7 @@ static void efx_siena_sriov_free_local(struct efx_nic *efx)
 
 static int efx_siena_sriov_vf_alloc(struct efx_nic *efx)
 {
-	unsigned index;
+	unsigned int index;
 	struct siena_vf *vf;
 	struct siena_nic_data *nic_data = efx->nic_data;
 
@@ -1412,7 +1412,7 @@ static int efx_siena_sriov_vfs_init(struct efx_nic *efx)
 {
 	struct siena_nic_data *nic_data = efx->nic_data;
 	struct pci_dev *pci_dev = efx->pci_dev;
-	unsigned index, devfn, sriov, buftbl_base;
+	unsigned int index, devfn, sriov, buftbl_base;
 	u16 offset, stride;
 	struct siena_vf *vf;
 	int rc;
@@ -1459,7 +1459,7 @@ static void efx_siena_sriov_vf_attrs_init(struct efx_nic *efx)
 {
 	struct siena_nic_data *nic_data = efx->nic_data;
 	struct pci_dev *pci_dev = efx->pci_dev;
-	unsigned devfn, sriov;
+	unsigned int devfn, sriov;
 	u16 offset, stride;
 	struct siena_vf *vf;
 	unsigned int index;
@@ -1690,7 +1690,7 @@ void efx_siena_sriov_event(struct efx_channel *channel, efx_qword_t *event)
 #ifdef CONFIG_SFC_SRIOV
 	struct efx_nic *efx = channel->efx;
 	struct siena_vf *vf;
-	unsigned qid, seq, type, data;
+	unsigned int qid, seq, type, data;
 
 	qid = EFX_QWORD_FIELD(*event, FSF_CZ_USER_QID);
 
@@ -1744,7 +1744,7 @@ error:
 #endif /* CONFIG_SFC_SRIOV */
 }
 
-void efx_siena_sriov_flr(struct efx_nic *efx, unsigned vf_i)
+void efx_siena_sriov_flr(struct efx_nic *efx, unsigned int vf_i)
 {
 #ifdef CONFIG_SFC_SRIOV
 	struct siena_nic_data *nic_data = efx->nic_data;
@@ -1782,7 +1782,7 @@ void efx_siena_sriov_tx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 {
 #ifdef CONFIG_SFC_SRIOV
 	struct siena_vf *vf;
-	unsigned queue, qid;
+	unsigned int queue, qid;
 
 	queue = EFX_QWORD_FIELD(*event,  FSF_AZ_DRIVER_EV_SUBDATA);
 	if (map_vi_index(efx, queue, &vf, &qid))
@@ -1803,7 +1803,7 @@ void efx_siena_sriov_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 {
 #ifdef CONFIG_SFC_SRIOV
 	struct siena_vf *vf;
-	unsigned ev_failed, queue, qid;
+	unsigned int ev_failed, queue, qid;
 
 	queue = EFX_QWORD_FIELD(*event, FSF_AZ_DRIVER_EV_RX_DESCQ_ID);
 	ev_failed = EFX_QWORD_FIELD(*event,
@@ -1826,7 +1826,7 @@ void efx_siena_sriov_rx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 }
 
 /* Called from napi. Schedule the reset work item */
-void efx_siena_sriov_desc_fetch_err(struct efx_nic *efx, unsigned dmaq)
+void efx_siena_sriov_desc_fetch_err(struct efx_nic *efx, unsigned int dmaq)
 {
 #ifdef CONFIG_SFC_SRIOV
 	struct siena_vf *vf;
@@ -1880,8 +1880,10 @@ int efx_init_sriov(void)
 	 * MCDI to complete anyway
 	 */
 	vfdi_workqueue = create_singlethread_workqueue("sfc_vfdi");
-	if (!vfdi_workqueue)
+	if (!vfdi_workqueue) {
+		printk(KERN_ERR "Failed to create vfdi workqueue.\n");
 		return -ENOMEM;
+	}
 #endif
 	return 0;
 }

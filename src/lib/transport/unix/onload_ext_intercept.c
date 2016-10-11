@@ -81,10 +81,15 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
     switch( citp_fdinfo_get_type(fdi) ) {
     case CITP_UDP_SOCKET:
     case CITP_TCP_SOCKET:
-      sock_epi = fdi_to_sock_fdi(fdi);
-      stat->endpoint_id = SC_FMT(sock_epi->sock.s);
-      stat->endpoint_state = sock_epi->sock.s->b.state;
-      rc = onload_fd_stat_netif(sock_epi->sock.netif, stat);
+      if( stat ==  NULL ) {
+        rc = 1;
+      }
+      else {
+        sock_epi = fdi_to_sock_fdi(fdi);
+        stat->endpoint_id = SC_FMT(sock_epi->sock.s);
+        stat->endpoint_state = sock_epi->sock.s->b.state;
+        rc = onload_fd_stat_netif(sock_epi->sock.netif, stat);
+      }
       break;
 #if CI_CFG_USERSPACE_EPOLL
     case CITP_EPOLL_FD:
@@ -93,17 +98,27 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
 #endif
 #if CI_CFG_USERSPACE_PIPE
     case CITP_PIPE_FD:
-      pipe_epi = fdi_to_pipe_fdi(fdi);
-      stat->endpoint_id = W_FMT(&pipe_epi->pipe->b);
-      stat->endpoint_state = pipe_epi->pipe->b.state;
-      rc = onload_fd_stat_netif(pipe_epi->ni, stat);
+      if( stat ==  NULL ) {
+        rc = 1;
+      }
+      else {
+        pipe_epi = fdi_to_pipe_fdi(fdi);
+        stat->endpoint_id = W_FMT(&pipe_epi->pipe->b);
+        stat->endpoint_state = pipe_epi->pipe->b.state;
+        rc = onload_fd_stat_netif(pipe_epi->ni, stat);
+      }
       break;
 #endif
     case CITP_PASSTHROUGH_FD:
-      alien_epi = fdi_to_alien_fdi(fdi);
-      stat->endpoint_id = W_FMT(alien_epi->ep);
-      stat->endpoint_state = alien_epi->ep->state;
-      rc = onload_fd_stat_netif(alien_epi->netif, stat);
+      if( stat ==  NULL ) {
+        rc = 1;
+      }
+      else {
+        alien_epi = fdi_to_alien_fdi(fdi);
+        stat->endpoint_id = W_FMT(alien_epi->ep);
+        stat->endpoint_state = alien_epi->ep->state;
+        rc = onload_fd_stat_netif(alien_epi->netif, stat);
+      }
       break;
     default:
       LOG_U(log("%s: unknown fdinfo type %d", __FUNCTION__, 
@@ -142,6 +157,13 @@ int onload_thread_set_spin(enum onload_spin_type type, int spin)
     onload_thread_set_spin2(type, spin);
   }
 
+  return 0;
+}
+
+int onload_thread_get_spin(unsigned* state)
+{
+  struct oo_per_thread* pt = oo_per_thread_get();
+  *state = pt->spinstate;
   return 0;
 }
 
@@ -397,7 +419,7 @@ oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
   epi = fdi_to_sock_fdi(fdi);
   ni = epi->sock.netif;
 
-  if( hwport >= 0 && hwport < CI_CFG_MAX_REGISTER_INTERFACES )
+  if( hwport >= 0 && hwport < CPLANE_MAX_REGISTER_INTERFACES )
     intf_i = ci_hwport_to_intf_i(ni, hwport);
   if( intf_i < 0 )
     intf_i = epi->sock.s->pkt.intf_i;

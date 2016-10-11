@@ -124,6 +124,7 @@ struct configuration {
   char const*    cfg_ioctl;     /* e.g. eth6  - calls the ts enable ioctl */
   unsigned short cfg_port;      /* listen port */
   int            cfg_protocol;  /* udp or tcp? */
+  unsigned int   cfg_max_packets; /* Stop after this many (0=forever) */
 };
 
 /* Commandline options, configuration etc. */
@@ -137,6 +138,8 @@ void print_help(void)
            "Default: 9000\n"
          "\t--proto\t[TCP|UDP].  "
            "Default: UDP\n"
+         "\t--max\t<num>\tStop after n packets.  "
+           "Default: Run forever\n"
         );
   exit(-1);
 }
@@ -166,9 +169,10 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
     { "ioctl", required_argument, 0, 'i' },
     { "port", required_argument, 0, 'p' },
     { "proto", required_argument, 0, 'P' },
+    { "max", required_argument, 0, 'n' },
     { 0, no_argument, 0, 0 }
   };
-  const char* optstring = "ipP";
+  const char* optstring = "ipPn";
 
   /* Defaults */
   bzero(cfg, sizeof(struct configuration));
@@ -186,6 +190,9 @@ static void parse_options( int argc, char** argv, struct configuration* cfg )
         break;
       case 'P':
         get_protcol(cfg, optarg);
+        break;
+      case 'n':
+        cfg->cfg_max_packets = atoi(optarg);
         break;
       default:
         print_help();
@@ -398,8 +405,7 @@ int main(int argc, char** argv)
   do_ts_sockopt(sock);
 
   /* Run forever */
-  while( 1 ) {
-    pkt_num ++;
+  while((pkt_num++ < cfg.cfg_max_packets || (cfg.cfg_max_packets == 0) ) ) {
     got = do_recv(sock, pkt_num);
     /* TCP can detect an exit; for UDP, zero payload packets are valid */
     if ( got == 0 && cfg.cfg_protocol == IPPROTO_TCP ) {

@@ -38,8 +38,6 @@ MMAKE_KBUILD_ARGS = $(MMAKE_KBUILD_ARGS_CONST) $(MMAKE_KBUILD_ARGS_DBG)
 # - set the environment variable MODVERDIR
 # - include a slash in object file paths
 # - limit output lines (which include object file paths) to 128 characters
-# The modpost script doesn't exist in 2.6.5.
-ifneq ($(filter 2.6.6 2.6.7 2.6.8 2.6.9 2.6.10 2.6.11 2.6.12 2.6.13 2.6.14 2.6.15 2.6.16,$(LINUX_VERSION_3)),)
 MMAKE_KBUILD_ARGS += symverfile=$(CURDIR)/Module.symvers
 MMAKE_KBUILD_PRE_COMMAND := \
 	[ -f Module.symvers ] || cp -f $(KPATH)/Module.symvers .
@@ -48,12 +46,13 @@ MMAKE_KBUILD_POST_COMMAND = \
 		$(if $(CONFIG_MODVERSIONS),-m) \
 		$(if $(CONFIG_MODULE_SRCVERSION_ALL),-a) \
 		-i Module.symvers -o Module.symvers $(addprefix ./,$(TARGETS))
-else
-# 2.6.17 produces Modules.symvers instead of Module.symver
-ifeq ($(LINUX_VERSION_3),2.6.17)
-MMAKE_KBUILD_POST_COMMAND = mv Modules.symvers Module.symvers
-else
-MMAKE_KBUILD_PRE_COMMAND :=
-MMAKE_KBUILD_POST_COMMAND :=
-endif
-endif
+
+# Remove this when RHEL5 is not supported!
+#
+# RHEL5 does not understand KBUILD_EXTRA_SYMBOLS environment variable.
+# Here we find out if a workaround is necessary.
+#
+# USE_EXTRA_SYM=ok if KBUILD_EXTRA_SYMBOLS is handled by the kernel build
+USE_EXTRA_SYM := $(shell $(KPATH)/scripts/mod/modpost -e help 2>/dev/null \
+			 && echo ok)
+

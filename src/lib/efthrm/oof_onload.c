@@ -15,13 +15,13 @@
 
 /* Stuff that connects the oof module and the rest of onload. */
 
+#include <cplane/exported.h>
 #include <onload/oof_interface.h>
 #include <onload/oof_onload.h>
 #include <ci/internal/ip.h>
 #include <onload/tcp_helper.h>
 #include <onload/tcp_driver.h>
 #include <onload/debug.h>
-#include <onload/cplane.h>
 #include "tcp_filters_internal.h"
 #include <onload/driverlink_filter.h>
 #include <onload/tcp_helper_fns.h>
@@ -37,10 +37,10 @@ oof_onload_on_cplane_ipadd(ci_ip_addr_net_t net_ip,
                            ci_ifid_t ifindex,
                            void* arg)
 {
-  efab_tcp_driver_t* on_drv = arg;
+  struct oof_manager* filter_manager = arg;
 
   if( net_ip )
-    oof_manager_addr_add(on_drv->filter_manager, net_ip, ifindex);
+    oof_manager_addr_add(filter_manager, net_ip, ifindex);
 }
 
 
@@ -51,10 +51,10 @@ oof_onload_on_cplane_ipdel(ci_ip_addr_net_t net_ip,
                            ci_ifid_t ifindex,
                            void* arg)
 {
-  efab_tcp_driver_t* on_drv = arg;
+  struct oof_manager* filter_manager = arg;
 
   if( net_ip )
-    oof_manager_addr_del(on_drv->filter_manager, net_ip, ifindex);
+    oof_manager_addr_del(filter_manager, net_ip, ifindex);
 }
 
 static void
@@ -65,20 +65,26 @@ oof_do_deferred_work_fn(struct work_struct *data)
 }
 
 int
-oof_onload_ctor(efab_tcp_driver_t* on_drv, unsigned local_addr_max)
+oof_onload_ctor(efab_tcp_driver_t* on_drv)
 {
+  int rc;
+
   ci_assert(on_drv->filter_manager == NULL);
-  on_drv->filter_manager = oof_manager_alloc(local_addr_max, on_drv);
+  on_drv->filter_manager = oof_manager_alloc(
+                    cicp_get_max_local_addr(&onload_cplane_handle),
+                    on_drv);
   if( on_drv->filter_manager == NULL )
     return -ENOMEM;
   INIT_WORK(&on_drv->filter_work_item, oof_do_deferred_work_fn);
 
-  on_drv->filter_manager_cp_handle =
-    cicpos_ipif_callback_register(&on_drv->cplane_handle,
-                                  oof_onload_on_cplane_ipadd,
-                                  oof_onload_on_cplane_ipdel, on_drv);
-  if( on_drv->filter_manager_cp_handle == 0 ) {
-    ci_log("%s: cicpos_ipif_callback_register failed", __FUNCTION__);
+  rc = cicpos_callback_register(&onload_cplane_handle,
+                                oof_onload_on_cplane_ipadd,
+                                oof_onload_on_cplane_ipdel,
+                                oof_mcast_update_filters,
+                                oof_hwport_un_available,
+                                on_drv->filter_manager);
+  if( rc != 0 ) {
+    ci_log("%s: cicpos_ipif_callback_register failed: %d", __FUNCTION__, rc);
     oof_manager_free(on_drv->filter_manager);
     on_drv->filter_manager = NULL;
     return -ENODEV;
@@ -94,8 +100,7 @@ oof_onload_dtor(efab_tcp_driver_t* on_drv)
   if( on_drv->filter_manager == NULL )
     return;
 
-  cicpos_ipif_callback_deregister(&on_drv->cplane_handle,
-                                  on_drv->filter_manager_cp_handle);
+  cicpos_callback_deregister(&onload_cplane_handle);
   oof_manager_free(on_drv->filter_manager);
 }
 
@@ -344,11 +349,8 @@ CI_BUILD_ASSERT(CI_IFID_ALL == OO_IFID_ALL);
 int 
 oof_cb_get_hwport_mask(int ifindex, unsigned *hwport_mask)
 {
-  ci_irqlock_state_t lock_flags;
   int rc;
-  cicp_lock(&CI_GLOBAL_CPLANE, &lock_flags);
   rc = cicp_get_active_hwport_mask(&CI_GLOBAL_CPLANE, ifindex, hwport_mask);
-  cicp_unlock(&CI_GLOBAL_CPLANE, &lock_flags);
   return rc;
 }
 

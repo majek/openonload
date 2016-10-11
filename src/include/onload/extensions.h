@@ -87,6 +87,15 @@ extern "C" {
  */
 #define ONLOAD_MSG_WARM 0x400
 
+/* Use ONLOAD_MSG_ONEPKT in the flags field of recv(), recvfrom() and
+ * recvmsg() to receive data only up to the next packet boundary.  This
+ * is not compatible with MSG_WAITALL, so that combination of flags will
+ * be rejected as invalid.
+ *
+ * The flag value 0x20000 is not used in header bits/socket.h.
+ */
+#define ONLOAD_MSG_ONEPKT 0x20000
+
 /* Use ONLOAD_SOF_TIMESTAMPING_STREAM with SO_TIMESTAMPING on TCP sockets.
  *
  * The timestamp information is returned via MSG_ERRQUEUE using
@@ -188,6 +197,9 @@ extern int onload_fd_stat(int fd, struct onload_stat* stat);
  * Onload configuration options.  This call can be used to override those
  * settings on a per-thread basis.
  *
+ * The companion function onload_thread_get_spin allows querying of
+ * current thread settings
+ *
  * Unlike all other parts of Onload extention API, ONLOAD_SPIN_MAX value is
  * not guaranteed to be stable across Onload releases.  New enum entries
  * could be added, and ONLOAD_SPIN_MAX will be changed accordingly.
@@ -216,6 +228,9 @@ enum onload_spin_type {
 /* Enable or disable spinning for the current thread. */
 extern int onload_thread_set_spin(enum onload_spin_type type, int spin);
 
+/* Query thread spin settings. The state parameter will be set as a
+ *  bitmask of the spin settings */
+extern int onload_thread_get_spin(unsigned* state);
 
 /**********************************************************************
  * onload_fd_check_feature : Check whether or not a feature is supported

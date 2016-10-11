@@ -44,12 +44,6 @@
 #include "ofe/onload.h"
 #endif
 
-#if defined(__x86_64__) && LINUX_VERSION_CODE < KERNEL_VERSION(2,6,11)
-# define NEED_IOCTL32
-# include <linux/ioctl32.h>
-# include <onload/common.h>
-#endif
-
 /* For FALCON_RX_USR_BUF_SIZE checking. */
 #include <ci/driver/efab/hardware.h>
 
@@ -94,14 +88,9 @@ CI_DEBUG(module_param(oo_debug_code_level, int, S_IRUGO | S_IWUSR);)
 
 CI_DEBUG(module_param(no_shared_state_panic, int, S_IRUGO | S_IWUSR);)
 
-unsigned ci_tp_log = 0xf;
+unsigned ci_tp_log = CI_TP_LOG_DEFAULT;
 module_param(ci_tp_log, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ci_tp_log, "Onload transport log level");
-
-int oo_igmp_on_failover = 0;
-module_param(oo_igmp_on_failover, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(oo_igmp_on_failover,
-                 "Send IGMP joins after bonding failover (off by default)");
 
 module_param(ci_log_options, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ci_log_options,
@@ -170,13 +159,6 @@ MODULE_PARM_DESC(intf_black_list,
                  "Control which interfaces are not accelerated.  "
                  "See intf_white_list for more detail.");
 
-
-int timesync_period = 500;
-module_param(timesync_period, int, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(timesync_period,
-                 "Period in milliseconds between synchronising the Onload"
-                 "clock with the system clock");
-
 int safe_signals_and_exit = 1;
 module_param(safe_signals_and_exit, int, S_IRUGO);
 MODULE_PARM_DESC(safe_signals_and_exit,
@@ -184,24 +166,6 @@ MODULE_PARM_DESC(safe_signals_and_exit,
                  "shared stacks are properly closed.\n"
                  "Intercept rt_sigaction() syscall and postpone signal "
                  "handlers to avoid Onload stack deadlock.");
-
-
-/* Following set of three options define the control plane table sizes */
-
-unsigned max_layer2_interfaces = 50;
-module_param(max_layer2_interfaces, int, S_IRUGO);
-MODULE_PARM_DESC(max_layer2_interfaces,
-                 "Maximum number of LLAP interfaces (inc. bonds, vlans, etc)"
-                 "in Onload's control plane tables");
-unsigned max_routes = 256;
-module_param(max_routes, int, S_IRUGO);
-MODULE_PARM_DESC(max_routes,
-                 "Maximum number of rows in Onload's route table");
-unsigned max_neighs = 1024;
-module_param(max_neighs, int, S_IRUGO);
-MODULE_PARM_DESC(max_neighs,
-                 "Maximum number of rows in Onload's ARP/neighbour table."
-                 "This is rounded up internally to a power of two");
 
 int scalable_filter_gid = -2;
 module_param(scalable_filter_gid, int, S_IRUGO | S_IWUSR);
@@ -506,17 +470,6 @@ ci_chrdev_ctor(struct file_operations *fops, const char *name)
     major = rc;
   oo_dev_major = major;
 
-#ifdef NEED_IOCTL32
-  {
-    /* Register 64 bit handler for 32 bit ioctls.  In 2.6.11 onwards, this
-     * uses the .compat_ioctl file op instead.
-     */
-    int ioc;
-    for( ioc = 0; ioc < OO_OP_END; ++ioc )
-      register_ioctl32_conversion(oo_operations[ioc].ioc_cmd, NULL);
-  }
-#endif
-
   return rc;
 }
 
@@ -526,15 +479,6 @@ ci_chrdev_dtor(const char* name)
 {
   if( oo_dev_major )
     unregister_chrdev(oo_dev_major, name);
-
-#ifdef NEED_IOCTL32
-  {
-    /* unregister 64 bit handler for 32 bit ioctls */
-    int ioc;
-    for( ioc = 0; ioc < OO_OP_END; ++ioc )
-      unregister_ioctl32_conversion(oo_operations[ioc].ioc_cmd);
-  }
-#endif
 }
 
 
@@ -588,12 +532,13 @@ static int __init onload_module_init(void)
   
   oo_mm_tbl_init();
 
-  rc = efab_linux_trampoline_ctor(no_ct);
-  if( rc < 0 ) {
-    ci_log("%s: ERROR: efab_linux_trampoline_ctor failed (%d)",
-           __FUNCTION__, rc);
-    goto failed_trampoline;
-  }
+  rc = efab_tcp_driver_ctor();
+  if( rc != 0 )
+    goto fail_ip_ctor;
+
+  rc = oo_driverlink_register();
+  if( rc < 0 )
+    goto failed_driverlink;
 
   rc = ci_install_proc_entries();
   if( rc < 0 ) {
@@ -601,25 +546,12 @@ static int __init onload_module_init(void)
     goto fail_proc;
   }
 
-  rc = efab_tcp_driver_ctor(max_neighs, max_layer2_interfaces, max_routes);
-  if( rc != 0 )
-    goto fail_ip_ctor;
-
-  rc = ci_bonding_init();
+  rc = efab_linux_trampoline_ctor(no_ct);
   if( rc < 0 ) {
-    ci_log("%s: ERROR: ci_bonding_init failed (%d)", __FUNCTION__, rc);
-    goto fail_bonding;
+    ci_log("%s: ERROR: efab_linux_trampoline_ctor failed (%d)",
+           __FUNCTION__, rc);
+    goto failed_trampoline;
   }
-
-  rc = ci_teaming_init(CI_GLOBAL_WORKQUEUE, &CI_GLOBAL_CPLANE);
-  if( rc < 0 ) {
-    ci_log("%s: ERROR: ci_teaming_init failed (%d)", __FUNCTION__, rc);
-    goto failed_teaming;
-  }
-
-  rc = oo_driverlink_register();
-  if( rc < 0 )
-    goto failed_driverlink;
 
 #ifdef ONLOAD_OFE
   ofe_init(1);
@@ -648,19 +580,22 @@ failed_epolldev_ctor:
  failed_chrdev:
   onloadfs_fini();
  failed_onloadfs:
-  oo_driverlink_unregister_nf();
-  oo_driverlink_unregister_dl();
- failed_driverlink:
-  ci_teaming_fini(&CI_GLOBAL_CPLANE);
- failed_teaming:
-  ci_bonding_fini();
- fail_bonding:
-  efab_tcp_driver_dtor();
- fail_ip_ctor:
+  efab_linux_trampoline_dtor(no_ct);
+
+  /* User API was available for some time: make sure there are no Onload
+   * stacks. */
+  efab_tcp_driver_stop();
+ failed_trampoline:
   ci_uninstall_proc_entries();
  fail_proc:
-  efab_linux_trampoline_dtor(no_ct);
- failed_trampoline:
+  oo_driverlink_unregister();
+ failed_driverlink:
+  /* Remove all NICs when driverlink is gone.
+   * It is possible that efx_dl_register_driver() call was successful, so
+   * we have to shut down all NICs even if oo_driverlink_register() failed. */
+  oo_nic_shutdown();
+  efab_tcp_driver_dtor();
+ fail_ip_ctor:
   ci_cfg_drv_dtor();
  fail_cfg_drv_ctor:
  fail_sanity:
@@ -674,31 +609,28 @@ static void onload_module_exit(void)
 {
   OO_DEBUG_LOAD(ci_log("Onload module unloading"));
 
+  /* Destroy User API: char devices. */
   oo_epoll_chrdev_dtor();
   ci_chrdev_dtor(oo_dev_name);
   onloadfs_fini();
 
-  ci_teaming_fini(&CI_GLOBAL_CPLANE);
-  ci_bonding_fini();
+  /* There are no User API now - so we do not need trampoline any more.
+   * Destroy trampoline early to alleviate the race condition with RT
+   * kernels - see efab_linux_trampoline_dtor() for details. */
+  efab_linux_trampoline_dtor(no_ct);
 
-  oo_driverlink_unregister_nf();
+  /* Destroy all the stacks.
+   * It should be done early, as soon as User API is not available. */
+  efab_tcp_driver_stop();
 
-  /* The ordering here is not strict reverse of construction.  But it is
-   * essential that we do efab_tcp_driver_dtor() early so that any
-   * remaining stacks are destroyed early.
-   *
-   * But not too early: driverlink ARP filter should be removed before
-   * cplane is destructed.
-   */
-  efab_tcp_driver_dtor();
+  /* Remove external interfaces to efab_tcp_driver. */
+  ci_uninstall_proc_entries();
+  oo_driverlink_unregister();
 
-  oo_driverlink_unregister_dl();
+  /* Remove all NICs when driverlink is gone. */
   oo_nic_shutdown();
 
-  ci_uninstall_proc_entries();
-  OO_DEBUG_VERB(ci_log("Unregistered client driver"));
-
-  efab_linux_trampoline_dtor(no_ct);
+  efab_tcp_driver_dtor();
 
   ci_cfg_drv_dtor();
   OO_DEBUG_LOAD(ci_log("Onload module unloaded"));

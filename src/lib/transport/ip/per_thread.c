@@ -48,7 +48,7 @@ citp_init_thread_callback init_thread_callback;
 int oo_per_thread_init(void)
 {
 #ifndef HAVE_CC__THREAD
-  int rc = pthread_key_create(&oo_per_thread_key, ci_libc_free);
+  int rc = pthread_key_create(&oo_per_thread_key, free);
   if( rc != 0) {
     LOG_E(log("%s: ERROR: pthread_key_create failed (rc=%d errno=%d)",
               __FUNCTION__, rc, errno));
@@ -76,7 +76,7 @@ struct oo_per_thread* oo_per_thread_init_and_get(void)
 {
   struct oo_per_thread* pt = pthread_getspecific(oo_per_thread_key);
   if( pt == NULL ) {
-    pt = ci_libc_malloc(sizeof(*oo_per_thread_p));
+    pt = malloc(sizeof(*oo_per_thread_p));
     CI_TEST(pt != NULL);
     pthread_setspecific(oo_per_thread_key, pt);
     memset(pt, 0, sizeof(*pt));

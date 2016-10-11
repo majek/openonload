@@ -649,7 +649,7 @@ static inline  long __ci_xchg( volatile void *ptr,long x, int size)
 #endif
 
 /*  Define this macro ONLY if it is NOT a KERNEL build because <asm/system.h> defines it otherwise */
-#ifndef __KERNEL__
+#if !defined(__KERNEL__) || defined(__oo_standalone__)
 #define xchg(ptr,x) ((__typeof__(*(ptr))) __ci_xchg((ptr),(long)(x),sizeof(*(ptr))))
 #endif
 

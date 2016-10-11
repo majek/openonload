@@ -70,7 +70,7 @@ int efx_set_features(struct net_device *net_dev, u32 data);
 #ifdef CONFIG_NET_RX_BUSY_POLL
 int efx_busy_poll(struct napi_struct *napi);
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_FAKE_VLAN_RX_ACCEL)
+#if defined(EFX_NOT_UPSTREAM) && defined(EFX_HAVE_VLAN_RX_PATH)
 void efx_vlan_rx_register(struct net_device *dev, struct vlan_group *vlan_group);
 #endif
 
@@ -93,7 +93,7 @@ u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb,
 u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb);
 #endif
 #endif
-netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
+int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
 void fastcall efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
 #else
@@ -135,6 +135,10 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 
 #define EFX_MAX_EVQ_SIZE 16384UL
 #define EFX_MIN_EVQ_SIZE 512UL
+#ifdef EFX_NOT_UPSTREAM
+/* Additional event queue entries to add on channel zero for driverlink. */
+#define EFX_EVQ_DL_EXTRA_ENTRIES 1024UL
+#endif
 
 /* Maximum number of TCP segments we support for soft-TSO */
 #define EFX_TSO_MAX_SEGS	100
@@ -149,11 +153,15 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 #define EFX_TXQ_MAX_ENT(efx)	(EFX_WORKAROUND_35388(efx) ? \
 				 EFX_MAX_DMAQ_SIZE / 2 : EFX_MAX_DMAQ_SIZE)
 
+#ifdef EFX_NOT_UPSTREAM
 /* PCIe link bandwidth measure:
  * bw = (width << (speed - 1))
  */
-#define EFX_BW_PCIE_GEN1_X8 (8 << (1 - 1))
-#define EFX_BW_PCIE_GEN2_X8 (8 << (2 - 1))
+#define EFX_BW_PCIE_GEN1_X8  (8  << (1 - 1))
+#define EFX_BW_PCIE_GEN2_X8  (8  << (2 - 1))
+#define EFX_BW_PCIE_GEN3_X8  (8  << (3 - 1))
+#define EFX_BW_PCIE_GEN3_X16 (16 << (3 - 1))
+#endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
 extern bool efx_rss_enabled(const struct efx_nic *efx);
@@ -208,7 +216,7 @@ void efx_sarfs_fini(struct efx_nic *efx);
 
 /* Filters */
 
-void efx_mac_reconfigure(struct efx_nic *efx);
+int efx_mac_reconfigure(struct efx_nic *efx, bool mtu_only);
 
 /**
  * efx_filter_insert_filter - add or replace a filter
@@ -308,7 +316,7 @@ static inline s32 efx_filter_get_rx_ids(struct efx_nic *efx,
 #ifdef CONFIG_RFS_ACCEL
 int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
 		   u16 rxq_index, u32 flow_id);
-bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned quota);
+bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota);
 static inline void efx_filter_rfs_expire(struct efx_channel *channel)
 {
 	if (channel->rfs_filters_added >= 60 &&
@@ -353,6 +361,14 @@ int efx_ethtool_old_get_rxfh_indir(struct net_device *net_dev,
 int efx_ethtool_old_set_rxfh_indir(struct net_device *net_dev,
 				   const struct ethtool_rxfh_indir *indir);
 #endif
+#ifdef CONFIG_SFC_DUMP
+struct ethtool_dump;
+int efx_ethtool_get_dump_flag(struct net_device *net_dev,
+			      struct ethtool_dump *dump);
+int efx_ethtool_get_dump_data(struct net_device *net_dev,
+			      struct ethtool_dump *dump, void *buffer);
+int efx_ethtool_set_dump(struct net_device *net_dev, struct ethtool_dump *val);
+#endif
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_GET_TS_INFO) && !defined(EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO)
 int efx_ethtool_get_ts_info(struct net_device *net_dev,
 			    struct ethtool_ts_info *ts_info);
@@ -376,12 +392,16 @@ int efx_try_recovery(struct efx_nic *efx);
 
 /* Global */
 void efx_schedule_reset(struct efx_nic *efx, enum reset_type type);
+unsigned int efx_usecs_to_ticks(struct efx_nic *efx, unsigned int usecs);
+unsigned int efx_ticks_to_usecs(struct efx_nic *efx, unsigned int ticks);
 int efx_init_irq_moderation(struct efx_nic *efx, unsigned int tx_usecs,
 			    unsigned int rx_usecs, bool rx_adaptive,
 			    bool rx_may_override_tx);
 void efx_get_irq_moderation(struct efx_nic *efx, unsigned int *tx_usecs,
 			    unsigned int *rx_usecs, bool *rx_adaptive);
+#ifdef EFX_NOT_UPSTREAM
 extern int efx_target_num_vis;
+#endif
 
 void efx_stop_eventq(struct efx_channel *channel);
 void efx_start_eventq(struct efx_channel *channel);
@@ -460,6 +480,22 @@ static inline void efx_device_detach_sync(struct efx_nic *efx)
 	netif_tx_lock_bh(dev);
 	netif_device_detach(dev);
 	netif_tx_unlock_bh(dev);
+}
+
+static inline void efx_device_attach_if_not_resetting(struct efx_nic *efx)
+{
+	if ((efx->state != STATE_DISABLED) && !efx->reset_pending)
+		netif_device_attach(efx->net_dev);
+}
+
+static inline void efx_rwsem_assert_write_locked(struct rw_semaphore *sem)
+{
+#ifdef DEBUG
+	if (down_read_trylock(sem)) {
+		up_read(sem);
+		BUG();
+	}
+#endif
 }
 
 #endif /* EFX_EFX_H */

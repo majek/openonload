@@ -173,7 +173,13 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
 
   if( (recvq_depth <= us->stats.max_recvq_pkts) &&
       ! (ni->state->mem_pressure & OO_MEM_PRESSURE_CRITICAL) ) {
+    int multi_destination_pkt;
+
   fast_receive:
+    multi_destination_pkt =
+      CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ||
+      oo_ip_hdr(pkt)->ip_daddr_be32 == CI_IP_ALL_BROADCAST;
+
     /* The same queue link is used for both the TX timestamp_q and the
      * udp recv_q, so we need to use an indirect packet if this is
      * timestamped.  This can only occur in the loopback case, where the
@@ -210,8 +216,7 @@ int ci_udp_rx_deliver(ci_sock_cmn* s, void* opaque_arg)
     us->s.b.sb_flags |= CI_SB_FLAG_RX_DELIVERED;
     ci_netif_put_on_post_poll(ni, &us->s.b);
     ci_udp_wake_possibly_not_in_poll(ni, us, CI_SB_FLAG_WAKE_RX);
-    if( CI_IP_IS_MULTICAST(oo_ip_hdr(pkt)->ip_daddr_be32) ||
-        oo_ip_hdr(pkt)->ip_daddr_be32 == CI_IP_ALL_BROADCAST ) {
+    if( multi_destination_pkt ) {
       /* Multicast or all-broadcast address:
        * continue delivering to other sockets */
       return 0;

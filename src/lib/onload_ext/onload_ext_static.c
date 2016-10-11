@@ -98,6 +98,24 @@ ret fn_name dec_args                                                    \
     return ret_null;                                                    \
 }
 
+#define wrap_with_errno(ret, fn_name, dec_args, call_args, ret_null,    \
+                        errno_null)                                     \
+ret fn_name dec_args                                                    \
+{                                                                       \
+  static ret (*p##fn_name)dec_args;                                     \
+  if( p##fn_name == NULL ) {                                            \
+    onload_ext_check_ver();                                             \
+    if( disabled || (p##fn_name = dlsym(RTLD_NEXT, #fn_name)) == NULL ) \
+      p##fn_name = (void*)(uintptr_t) 1;                                \
+  }                                                                     \
+  if( (void*) p##fn_name != (void*)(uintptr_t) 1 )                      \
+    return p##fn_name call_args;                                        \
+  else {                                                                \
+    errno = errno_null;                                                 \
+    return ret_null;                                                    \
+  }                                                                     \
+}
+
 
 wrap(int, onload_set_stackname, (enum onload_stackname_who who, 
                                  enum onload_stackname_scope context, 
@@ -166,6 +184,8 @@ wrap(int, onload_recvmsg_kernel, (int fd, struct msghdr* msg, int flags),
 wrap(int, onload_thread_set_spin, (enum onload_spin_type type, int spin),
      (type, spin), -ENOSYS)
 
+wrap(int, onload_thread_get_spin, (unsigned* state), (state), -ENOSYS)
+
 wrap(int, onload_move_fd, (int fd), (fd), -ENOSYS)
 
 wrap( int, onload_fd_check_feature, (int fd, enum onload_fd_feature feature),
@@ -176,13 +196,13 @@ wrap( int, onload_ordered_epoll_wait, (int epfd, struct epoll_event *events,
                                   int maxevents, int timeout),
     (epfd, events, oo_events, maxevents, timeout), -ENOSYS)
 
-wrap( enum onload_delegated_send_rc,  onload_delegated_send_prepare,
-      (int fd, int size, unsigned flags, struct onload_delegated_send* out),
-      (fd, size, flags, out), -ENOSYS)
-wrap( int,  onload_delegated_send_complete,
-      (int fd, const struct iovec* iov, int iovlen, int flags),
-      (fd, iov, iovlen, flags), -ENOSYS)
-wrap( int,  onload_delegated_send_cancel, (int fd), (fd), -ENOSYS)
+wrap(enum onload_delegated_send_rc,  onload_delegated_send_prepare,
+     (int fd, int size, unsigned flags, struct onload_delegated_send* out),
+     (fd, size, flags, out), ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET)
+wrap_with_errno(int,  onload_delegated_send_complete,
+                (int fd, const struct iovec* iov, int iovlen, int flags),
+                (fd, iov, iovlen, flags), -1, ENOSYS)
+wrap_with_errno(int, onload_delegated_send_cancel, (int fd), (fd), -1, ENOSYS)
 
 wrap( int,  oo_raw_send,
       (int fd, int hwport, const struct iovec* iov, int iovlen),

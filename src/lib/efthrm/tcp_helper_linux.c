@@ -1280,11 +1280,11 @@ void oo_file_ref_drop(struct oo_file_ref* fr)
   }
   else {
     /* We're not in a context where we can do fput(), so defer. */
-    ci_irqlock_state_t lock_flags;
-    ci_irqlock_lock(&efab_tcp_driver.thr_table.lock, &lock_flags);
+    unsigned long lock_flags;
+    spin_lock_irqsave(&efab_tcp_driver.file_refs_lock, lock_flags);
     fr->next = efab_tcp_driver.file_refs_to_drop;
     efab_tcp_driver.file_refs_to_drop = fr;
-    ci_irqlock_unlock(&efab_tcp_driver.thr_table.lock, &lock_flags);
+    spin_unlock_irqrestore(&efab_tcp_driver.file_refs_lock, lock_flags);
     queue_work(CI_GLOBAL_WORKQUEUE, &efab_tcp_driver.file_refs_work_item);
   }
 }
@@ -1312,11 +1312,11 @@ void oo_file_ref_drop_list_now(struct oo_file_ref* fr_next)
   ci_assert(! in_atomic());
 
   if( fr_next == NULL ) {
-    ci_irqlock_state_t lock_flags;
-    ci_irqlock_lock(&efab_tcp_driver.thr_table.lock, &lock_flags);
+    unsigned long lock_flags;
+    spin_lock_irqsave(&efab_tcp_driver.file_refs_lock, lock_flags);
     fr_next = efab_tcp_driver.file_refs_to_drop;
     efab_tcp_driver.file_refs_to_drop = NULL;
-    ci_irqlock_unlock(&efab_tcp_driver.thr_table.lock, &lock_flags);
+    spin_unlock_irqrestore(&efab_tcp_driver.file_refs_lock, lock_flags);
   }
 
   while( (fr = fr_next) != NULL ) {
@@ -1427,11 +1427,19 @@ static short efab_os_wakup_fix_mask(tcp_helper_endpoint_t *ep, short mask,
 {
   struct file *file;
   struct socket *sock;
-  int rc;
+  unsigned long lock_flags;
+  struct oo_file_ref *kref;
 
-  rc = oo_os_sock_get_from_ep(ep, &file);
-  if( rc != 0 )
+  spin_lock_irqsave(&ep->lock, lock_flags);
+  if( ep->os_socket == NULL ) {
+    spin_unlock_irqrestore(&ep->lock, lock_flags);
     return 0;
+  }
+  kref = oo_file_ref_add(ep->os_socket);
+  spin_unlock_irqrestore(&ep->lock, lock_flags);
+  file = kref->file;
+  ci_assert(file);
+
   sock = SOCKET_I(file->f_dentry->d_inode);
   ci_assert(sock);
 
@@ -1463,7 +1471,7 @@ static short efab_os_wakup_fix_mask(tcp_helper_endpoint_t *ep, short mask,
     mask &= datagram_poll(file, sock, NULL);
   }
 
-  oo_os_sock_put(file);
+  oo_file_ref_drop(kref);
 
   return mask;
 }

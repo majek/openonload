@@ -198,6 +198,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	int rc;
 	unsigned map_min, map_max;
 	unsigned vi_base = 0;
+	unsigned vi_shift = 0;
 	unsigned vport_id = 0;
 
 	/* Tie the lifetime of the kernel's state to that of our own. */
@@ -207,6 +208,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 		map_min = res_dim->vi_min;
 		map_max = res_dim->vi_lim;
 		vi_base = res_dim->vi_base;
+		vi_shift = res_dim->vi_shift;
 		vport_id = res_dim->vport_id;
 	}
 	else if (dev_type->arch == EFHW_ARCH_FALCON) {
@@ -224,7 +226,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	}
 
 	efhw_nic_init(nic, nic_flags, NIC_OPT_DEFAULT, dev_type, map_min,
-		      map_max, vi_base, vport_id);
+		      map_max, vi_base, vi_shift, vport_id);
 	lnic->efrm_nic.efhw_nic.pci_dev = dev;
 	lnic->efrm_nic.efhw_nic.bus_number = dev->bus->number;
 	lnic->efrm_nic.efhw_nic.ctr_ap_dma_addr =
@@ -232,6 +234,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	EFRM_ASSERT(efrm_nic_bar_is_good(nic, dev));
 
 	spin_lock_init(&lnic->efrm_nic.efhw_nic.pci_dev_lock);
+	init_rwsem(&lnic->dl_sem);
 
 	rc = linux_efhw_nic_map_ctr_ap(lnic);
 	if (rc < 0)

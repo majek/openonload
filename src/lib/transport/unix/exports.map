@@ -105,6 +105,7 @@
     onload_zc_alloc_buffers;
     onload_recvmsg_kernel;
     onload_thread_set_spin;
+    onload_thread_get_spin;
     onload_msg_template_alloc;
     onload_msg_template_update;
     onload_msg_template_abort;

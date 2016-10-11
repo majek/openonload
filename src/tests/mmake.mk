@@ -1,3 +1,4 @@
+NO_ZF := 1
 ifeq ($(GNU),1)
 SUBDIRS		:= ciul \
                    nic \
@@ -5,19 +6,30 @@ SUBDIRS		:= ciul \
                    citools \
                    driver \
                    ef_vi \
-                   onload
-
+                   onload \
+                   cplane \
+		   rtt
 
 OTHER_SUBDIRS	:= tweaks \
                    syscalls
 
-ifdef BROKEN
-OTHER_SUBDIRS	+= cplane
-endif
-
 ifeq ($(ONLOAD_ONLY),1)
 SUBDIRS		:= ef_vi \
-                   onload
+                   onload \
+                   rtt
+endif
+
+ifneq ($(NO_ZF),1)
+ifeq (${PLATFORM},gnu_x86_64)
+ifeq ($(shell $(TOP)/$(CURRENT)/zf_apps/zf_supported.sh),1)
+SUBDIRS         += zf_apps
+endif
+ifndef PREBUILD_ZF
+ifneq ($(ONLOAD_ONLY),1)
+SUBDIRS         += zf_unit
+endif
+endif
+endif
 endif
 endif
 

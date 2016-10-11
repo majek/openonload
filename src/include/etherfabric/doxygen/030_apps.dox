@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2015: Solarflare Communications Inc,
+ * Copyright 2005-2016: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -27,8 +27,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2015/02/14
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2016/06/13
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -50,34 +50,23 @@ release; but source code is available on request.
 Most of these applications have additional options to test physical
 addressing mode, or hardware timestamping. Run with "--help" to check this.
 
-| Application           | Description
-| :-------------------- | :------------------------------------------------
-| \ref efforward        | Forward packets between two interfaces without modification.
-| \ref efpingpong       | Ping a simple message format between two interfaces.
-| \ref efpio            | Pingpong application that uses Programmed I/O.
-| \ref efrss            | Forward packets between two interfaces without modification, spreading the load over multiple virtual interfaces and threads.
-| \ref efsink           | Receives streams of packets on a single interface.
-| \ref efsink_packed    | Receives streams of packets on a single interface using packed streams.
-| \ref efsocketpingpong | Ping a simple message format between two interfaces using sockets.
-| \ref eftap            | Sends and receive UDP packets on a single interface.
+| Application              | Description
+| :----------------------- | :------------------------------------------------
+| \ref eflatency           | Measure latency by pinging a simple message between two interfaces.
+| \ref efsend              | Send UDP packets on a specified interface.
+| \ref efsink              | Receive streams of packets on a single interface.
+| \ref efforward           | Forward packets between two interfaces without modification.
+| \ref efsend_timestamping | Send UDP packets on a specified interface, with TX timestamping.
+| \ref efsend_pio          | Send UDP packets on a specified interface using Programmed I/O.
+| \ref efsink_packed       | Receive streams of packets on a single interface using packed streams.
+| \ref efforward_packed    | Forward packets between two interfaces without modification using packed stream mode for receive.
+| \ref efrss               | Forward packets between two interfaces without modification, spreading the load over multiple virtual interfaces and threads.
+| \ref efdelegated_client  | Delegate TCP sends to the ef_vi layer-2 API in order to get lower latency.
+| \ref efdelegated_server  | Server application used together with \ref efdelegated_client.
 
-\section efforward efforward
+\section eflatency eflatency
 
-The efforward application listens for traffic on one interface and echoes 
-it out of a second; and vice versa. It demonstrates a very simple 
-high-performance bridge.
-
-Some route configuration on the clients might be necessary to get this 
-working, but it is a very simple example, and is very easy to start adding 
-packet re-writing rules etc.
-
-Although this is a viable starting point for a bridging application, a 
-better option might be the SolarCapture API, which includes a more 
-complete pre-made bridging application.
-
-\section efpingpong efpingpong
-
-The efpingpong application echoes a single packet back and forth 
+The eflatency application echoes a single packet back and forth 
 repeatedly, measuring the round-trip time.
 
 This is the most useful example application for testing lowest possible 
@@ -88,37 +77,27 @@ latency. It is not a very good sample for building an application, because:
   - does not need to refill the rings
   - does not handle multiple event types.
 
-\subsection efpingpong_usage Usage
+\subsection eflatency_usage Usage
 
-__Server:__ <code>efpingpong pong _server-eth_ _server-ip_ _server-port_ 
-_client-mac_ _client-ip_ _client-port_</code>
+__Server:__ <code>eflatency pong _interface_</code>
 
-__Client:__ <code>efpingpong ping _client-eth_ _client-ip_ _client-port_ 
-_server-mac_ _server-ip_ _server-port_</code>
+__Client:__ <code>eflatency ping _interface_</code>
 
 where:
-- _server-eth_ and _client-eth_ are the interfaces on the server and
-  client machines (e.g. `eth0`)
-- _server-port_ and _client-port_ are port numbers of your choosing on the
-  server and client machines (e.g. `9587`)
-- _server-ip_ and _client-ip_ are the IP addresses of the server and
-  client machines (e.g. `192.168.0.10`)
-- _server-mac_ and _client-mac_ are the MAC addresses of the server and
-  client machines (e.g. `12:34:56:78:90:AB`)
+- _interface_ is the multicast interface on the server or client machine
+  (e.g. `eth0`)
 
-\section efpio efpio
+There are various additional options. See the help text for details.
 
-The efpio application is a variant of \ref efpingpong, which demonstrates 
-the use of PIO for sending. This application requires a 7000-series card 
-that supports PIO.
+\section efsend efsend
 
-Usage is the same as \ref efpingpong.
+The efsend application sends UDP packets on a specified interface.
 
-\section efrss efrss
+The application sends a UDP packet, waits for transmission of the
+packet to finish and then sends the next.
 
-The efrss application is ai variant of \ref efforward. It demonstrates 
-automatically spreading the load over multiple threads, using a vi_set and 
-RSS.
+The number of packets sent, the size of the packet, the amount of
+time to wait between sends can be controlled.
 
 \section efsink efsink
 
@@ -134,32 +113,126 @@ It is a very useful jumping off point as it shows:
 - creation and installation of filters
 - polling the event queue.
 
-However, it does not cover:
-- sending packets
-- putting ring buffer management in a separate thread from packet 
-  processing, which is best practice for a full application.
+However, it does not cover sending packets.
+
+\section efforward efforward
+
+The efforward application listens for traffic on one interface and echoes 
+it out of a second; and vice versa. It demonstrates a very simple 
+high-performance bridge.
+
+Some route configuration on the clients might be necessary to get this 
+working, but it is a very simple example, and is very easy to start adding 
+packet re-writing rules etc.
+
+Although this is a viable starting point for a bridging application, a 
+better option might be the SolarCapture API, which includes a more 
+complete pre-made bridging application.
+
+\section efsend_timestamping efsend_timestamping
+
+The efsend_timestamping application sends UDP packets on a specified interface.
+
+The application sends a UDP packet, waits for transmission of the
+packet to finish and then sends the next.
+
+This application requests tx timestamping, allowing it to report the time
+each packet was transmitted.
+
+The number of packets sent, the size of the packet, the amount of
+time to wait between sends can be controlled.
+
+\section efsend_pio efsend_pio
+
+The efsend_pio application that sends UDP packets on a specified interface.
+
+Packet data is copied to the NIC's PIO buffer before being sent,
+which typically results in lower latency sends compared to accessing
+packet data stored on the host via DMA, which is the method used by
+the efsend sample app.
+
+The application sends a UDP packet, waits for transmission of the
+packet to finish and then sends the next.
+
+The number of packets sent, the size of the packet, the amount of
+time to wait between sends can be controlled.
 
 \section efsink_packed efsink_packed
 
 The efsink_packed application is a variant of \ref efsink that 
 demonstrates usage of the packed-stream firmware.
 
-\section efsocketpingpong efsocketpingpong
+\section efforward_packed efforward_packed
 
-The efsocketpingpong application is another variation on \ref efpingpong. 
-It demonstrates mixed use of sockets and %ef_vi. It can show the 
-difference as %ef_vi is enabled on each of the four endpoints of a 
-round-trip.
+The efforward_packed application is a variant of \ref efforward that 
+demonstrates usage of the packed-stream firmware.
 
-Usage is the same as \ref efpingpong.
+\section efrss efrss
 
-\section eftap eftap
+The efrss application is a variant of \ref efforward. It demonstrates 
+automatically spreading the load over multiple threads, using a vi_set and 
+RSS.
 
-The eftap application is a traffic generator. It waits for completion of a 
-send, and then sends another packet; so it does not burst as fast as is 
-possible; but it's a good demonstration of how to transmit, and how to 
-retrieve the hardware timestamps.
+\section efdelegated_client efdelegated_client
 
+The efdelegated_client application demonstrates usage of OpenOnload's
+"Delegated Sends" feature.  This API allows you to do delegate TCP sends
+for a particular socket to some other mechanism.  For example, this
+sample uses the ef_vi layer-2 API in order to get lower latency than is
+possible with a normal send() call.
+
+The API essentially boils down to first retriving the packet headers,
+adding your own payload to form a raw packet, sending the packet and
+finally telling Onload what it was you sent so it can update the
+internal TCP state of the socket.
+
+This sample application allows you to compare the performance of normal
+sends using the kernel stack, using OpenOnload and using ef_vi with the
+delegated sends API.  It establishes a TCP connection to the server
+process, which starts sending UDP multicast messages.  The client
+receives these messages, and replies to a subset of them with a TCP
+message.  The server measures the latency from the UDP send to the TCP
+receive.
+
+\subsection efdelegated_client_usage Usage
+
+For normal socket-based sends, run as follows:
+
+__Server:__ <code>onload -p latency ./efdelegated_server _mcast-intf_</code>
+__Client:__ <code>onload -p latency ./efdelegated_client _mcast-intf_ _server_</code>
+
+For "delegated" sends, run as follows:
+
+__Server:__ <code>onload -p latency ./efdelegated_server _mcast-intf_</code>
+__Client:__ <code>onload -p latency ./efdelegated_client -d _mcast-intf_ _server_</code>
+
+where:
+- _mcast-intf_ is the multicast interface on the server or client machine
+  (e.g. `eth0`)
+- _server_ is the IP address of the server machine (e.g. `192.168.0.10`)
+
+There are various additional options. See the help text for details.
+
+\section efdelegated_server efdelegated_server
+
+The efdelegated_server application is used together with efdelegated_client
+to measure the performance of OpenOnload's "Delegated Sends" feature.
+
+This application is a very basic simulation of an exchange: It accepts a
+TCP connection from a client.  It sends UDP multicast messages, and
+expects that the client will send a message over the TCP connection in
+response to a subset of the UDP messages.  It measures the time taken
+from sending a UDP message to receiving the corresponding reply.
+
+When used with OpenOnload this application uses hardware timestamps
+taken on the adapter so that the latency measured is very accurate.
+(Note that for 7000-series adapters this requires a Performance Monitor
+license).
+
+\subsection efdelegated_server_usage Usage
+
+See \ref efdelegated_client_usage for \ref efdelegated_client.
+ 
 \section building Building the Example Applications
 
 The %ef_vi example applications are built along with the Onload 

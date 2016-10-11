@@ -40,6 +40,7 @@
 #define EFX_WORKAROUND_FALCON_AB(efx) (efx_nic_rev(efx) <= EFX_REV_FALCON_B0)
 #define EFX_WORKAROUND_SIENA(efx) (efx_nic_rev(efx) == EFX_REV_SIENA_A0)
 #define EFX_WORKAROUND_10G(efx) 1
+#define EFX_WORKAROUND_EF10(efx) (efx_nic_rev(efx) >= EFX_REV_HUNT_A0)
 
 /* Reprog PCIe ACK timer to workaround issue in PCIe IP block */
 #define EFX_WORKAROUND_6943 EFX_WORKAROUND_FALCON_B
@@ -79,5 +80,16 @@
 	((struct efx_ef10_nic_data *)efx->nic_data)->workaround_35388
 #define EFX_WORKAROUND_35388(efx)					\
 	(efx_nic_rev(efx) == EFX_REV_HUNT_A0 && EFX_EF10_WORKAROUND_35388(efx))
+
+#ifdef EFX_NOT_UPSTREAM
+/* RX doorbell seems to go AWOL on Stratus machines during breaker tests */
+#define EFX_WORKAROUND_59975(efx) 0
+/* Driverlink probe can take >1 sec to perform license challenge */
+#define EFX_WORKAROUND_62649 defined
+#endif
+
+/* Moderation timer access must go through MCDI */
+#define EFX_EF10_WORKAROUND_61265(efx)					\
+	((struct efx_ef10_nic_data *)efx->nic_data)->workaround_61265
 
 #endif /* EFX_WORKAROUNDS_H */

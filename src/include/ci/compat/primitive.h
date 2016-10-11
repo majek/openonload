@@ -76,7 +76,11 @@ typedef enum {
  * (Really, they are SYSV "standards".)
  */
 
-#if   defined(__linux__) && defined(__KERNEL__)
+#if   defined(__oo_standalone__)
+#include <stddef.h>
+#include <stdint.h>
+typedef char*                           caddr_t;
+#elif defined(__linux__) && defined(__KERNEL__)
 #include <linux/types.h>
 #else
 #include <sys/types.h>

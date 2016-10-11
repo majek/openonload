@@ -58,7 +58,7 @@ extern int
 efrm_create_pio_resource_manager(struct efrm_resource_manager **);
 
 extern void
-efrm_pio_free(struct efrm_pio *);
+efrm_pio_free(struct efrm_pio *, bool);
 
 
 #endif  /* __EFRM_PIO_H__ */

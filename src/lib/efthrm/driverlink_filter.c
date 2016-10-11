@@ -51,9 +51,10 @@
 #include <onload/linux_ip_protocols.h>
 #include <onload/driverlink_filter.h>
 #include <onload/debug.h>
-#include <ci/internal/cplane_handle.h>
 #include <onload/driverlink_filter_private.h>
-#include <onload/cplane.h>
+#include <cplane/exported.h>
+#include <onload/id_pool.h> /* for CI_ID_POOL_ID_NONE */
+#include <cplane/prot.h>
 
 
 /* *************************************************************

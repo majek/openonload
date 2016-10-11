@@ -76,12 +76,22 @@ extern asmlinkage int efab_linux_trampoline_ioctl (unsigned int fd,
                                                    unsigned int cmd,
                                                    unsigned long arg);
 
-extern asmlinkage long efab_linux_trampoline_handler_close(int fd,
-                                                           struct pt_regs *regs,
-                                                           void *ret);
-extern asmlinkage int efab_linux_trampoline_handler_close32(int fd,
-                                                          struct pt_regs *regs,
-                                                          void *ret);
+/* Close trampoline: gates between C and asm.
+ * The gates have different parameters to make asm simpler. */
+#ifdef __i386__
+extern asmlinkage long
+efab_linux_trampoline_handler_close3232(struct pt_regs *regs);
+#else /* x86_64 */
+extern asmlinkage long
+efab_linux_trampoline_handler_close64(int fd, struct pt_regs *regs);
+#ifdef CONFIG_COMPAT
+extern asmlinkage int
+efab_linux_trampoline_handler_close32(unsigned long bx, unsigned long cx,
+                                      unsigned long dx, unsigned long si,
+                                      unsigned long di, unsigned long bp,
+                                      struct pt_regs *regs);
+#endif
+#endif
 
 extern int efab_linux_trampoline_debug(ci_uintptr_t *param);
 

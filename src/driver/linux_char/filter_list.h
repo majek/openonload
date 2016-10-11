@@ -41,4 +41,9 @@ extern int efch_filter_list_op(struct efrm_resource *rs,
 extern int efch_filter_list_op_block(struct efrm_resource *rs, struct efrm_pd*,
                                      struct efch_filter_list *fl,
                                      ci_resource_op_t *op);
+
+extern int efch_filter_list_add(struct efrm_resource* rs, struct efrm_pd* pd,
+                                struct efch_filter_list* fl,
+                                ci_filter_add_t* filter_add, int* copy_out);
+
 #endif  /* __FILTER_LIST_H__ */

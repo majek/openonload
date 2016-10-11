@@ -26,7 +26,6 @@
 
 /*! \cidoxg_lib_transport_ip */
 #include "ip_internal.h"
-#include <ci/internal/cplane_ops.h>
 
 
 void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)

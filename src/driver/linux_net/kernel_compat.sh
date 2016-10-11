@@ -116,11 +116,13 @@ EFX_NEED_SKB_HEADER_MACROS		nsymbol	skb_mac_header		include/linux/skbuff.h
 EFX_NEED_SKB_NETWORK_HEADER_LEN		nsymbol	skb_network_header_len	include/linux/skbuff.h
 EFX_NEED_SKB_CHECKSUM_START_OFFSET	nsymbol	skb_checksum_start_offset	include/linux/skbuff.h
 EFX_HAVE_CSUM_START			symbol	csum_start		include/linux/skbuff.h
+EFX_HAVE_CSUM_LEVEL			symbol	csum_level		include/linux/skbuff.h
 EFX_HAVE_SKB_SET_TRANSPORT_HEADER	symbol	skb_set_transport_header	include/linux/skbuff.h
 EFX_HAVE_OLD_SKB_HEADER_FIELDS		member	struct_sk_buff		h	include/linux/skbuff.h
 EFX_HAVE_OLD_SKB_LINEARIZE		nsymtype skb_linearize		include/linux/skbuff.h int(struct sk_buff *)
 EFX_HAVE_SKBTX_HW_TSTAMP		symbol	SKBTX_HW_TSTAMP		include/linux/skbuff.h
 EFX_HAVE_SKB_SYSTSTAMP			member	struct_skb_shared_hwtstamps	syststamp	include/linux/skbuff.h
+EFX_HAVE_SKB_TSTAMP_TX			symbol	skb_tstamp_tx		include/linux/skbuff.h
 EFX_NEED_TCP_HDR			nsymbol	tcp_hdr			include/linux/tcp.h
 EFX_NEED_UDP_HDR			nsymbol	udp_hdr			include/linux/udp.h
 EFX_NEED_IP_HDR				nsymbol	ip_hdr			include/linux/ip.h
@@ -138,6 +140,7 @@ EFX_NEED_MMIOWB				custom
 EFX_USE_LINUX_UACCESS_H			file				include/linux/uaccess.h
 EFX_USE_MTD_WRITESIZE			symbol	writesize		include/linux/mtd/mtd.h
 EFX_USE_NETDEV_DEV			member	struct_net_device	dev	include/linux/netdevice.h
+EFX_USE_NETDEV_DEV_PORT                 member  struct_net_device       dev_port include/linux/netdevice.h
 EFX_USE_NETDEV_STATS			custom
 EFX_USE_NETDEV_STATS64			member	struct_net_device_ops	ndo_get_stats64 include/linux/netdevice.h
 EFX_USE_PCI_DEV_REVISION		symbol	revision		include/linux/pci.h
@@ -167,6 +170,7 @@ EFX_NEED_I2C_LOCK_ADAPTER		nsymbol	i2c_lock_adapter	include/linux/i2c.h
 EFX_USE_I2C_BUS_SEMAPHORE		custom
 EFX_HAVE_OLD_DMA_MAPPING_ERROR		custom
 EFX_NEED_DMA_SET_COHERENT_MASK		nsymbol	dma_set_coherent_mask	include/linux/dma-mapping.h
+EFX_NEED_DMA_SET_MASK_AND_COHERENT		nsymbol	dma_set_mask_and_coherent	include/linux/dma-mapping.h
 EFX_HAVE_LINUX_SEMAPHORE_H		file				include/linux/semaphore.h
 EFX_HAVE_PRINTF_BITMAPS			symbol	cpumask_pr_args		include/linux/cpumask.h
 EFX_HAVE_OLD_CPUMASK_SCNPRINTF		nsymtype cpumask_scnprintf	include/linux/cpumask.h int(char *, int, const struct cpumask *)
@@ -177,6 +181,7 @@ EFX_USE_PM_EXT_OPS			symbol	pm_ext_ops		include/linux/pm.h
 EFX_USE_DEV_PM_OPS			symbol	dev_pm_ops		include/linux/pm.h
 EFX_NEED_ATOMIC_CMPXCHG			custom
 EFX_NEED_WARN				nsymbol	WARN			include/asm-generic/bug.h
+EFX_NEED_WARN_ONCE			nsymbol	WARN_ONCE		include/asm-generic/bug.h
 EFX_NEED_WARN_ON			custom
 EFX_NEED_ETHTOOL_CONSTANTS		nsymbol	ADVERTISED_Pause	include/linux/ethtool.h
 EFX_NEED_PCI_WAKE_FROM_D3		nsymbol pci_wake_from_d3        include/linux/pci.h
@@ -203,6 +208,7 @@ EFX_HAVE_NDO_SET_VF_MAC 		member	struct_net_device_ops	ndo_set_vf_mac		include/l
 EFX_HAVE_NDO_SET_VF_VLAN 		member	struct_net_device_ops	ndo_set_vf_vlan		include/linux/netdevice.h
 EFX_HAVE_NDO_SET_VF_SPOOFCHK		member	struct_net_device_ops	ndo_set_vf_spoofchk	include/linux/netdevice.h
 EFX_HAVE_NDO_SET_FEATURES		member	struct_net_device_ops	ndo_set_features	include/linux/netdevice.h
+EFX_HAVE_NDO_FEATURES_CHECK		member	struct_net_device_ops	ndo_features_check	include/linux/netdevice.h
 EFX_HAVE_EXT_NDO_SET_FEATURES           member  struct_net_device_ops_ext ndo_set_features      include/linux/netdevice.h
 EFX_HAVE_VF_LINK_STATE			member	struct_net_device_ops	ndo_set_vf_link_state	include/linux/netdevice.h
 EFX_HAVE_NDO_SET_MULTICAST_LIST		member	struct_net_device_ops	ndo_set_multicast_list	include/linux/netdevice.h
@@ -212,6 +218,9 @@ EFX_HAVE_NDO_SELECT_QUEUE_ACCEL_PRIV	memtype	struct_net_device_ops	ndo_select_qu
 EFX_HAVE_NETDEV_PICK_TX			export	__netdev_pick_tx	include/linux/netdevice.h	net/core/flow_dissector.c
 EFX_HAVE_NDO_BUSY_POLL			member	struct_net_device_ops	ndo_busy_poll	        include/linux/netdevice.h
 EFX_HAVE_NDO_GET_PHYS_PORT_ID           member  struct_net_device_ops   ndo_get_phys_port_id    include/linux/netdevice.h
+EFX_HAVE_NDO_VLAN_RX_ADD_VID		member	struct_net_device_ops	ndo_vlan_rx_add_vid	include/linux/netdevice.h
+EFX_HAVE_NDO_VLAN_RX_ADD_VID_PROTO	memtype	struct_net_device_ops	ndo_vlan_rx_add_vid	include/linux/netdevice.h	int (*)(struct net_device *, __be16, u16)
+EFX_HAVE_NDO_VLAN_RX_ADD_VID_RC		memtype	struct_net_device_ops	ndo_vlan_rx_add_vid	include/linux/netdevice.h	int (*)(struct net_device *, u16)
 EFX_NEED_ETHER_ADDR_COPY		nsymbol ether_addr_copy		include/linux/etherdevice.h
 EFX_NEED_IS_ZERO_ETHER_ADDR		nsymbol	is_zero_ether_addr	include/linux/etherdevice.h
 EFX_NEED_IS_BROADCAST_ETHER_ADDR	nsymbol	is_broadcast_ether_addr	include/linux/etherdevice.h
@@ -230,6 +239,7 @@ EFX_NEED_TIMESPEC_ADD_NS		nsymbol	timespec_add_ns		include/linux/time.h
 EFX_NEED_TIMESPEC_SUB			nsymbol	timespec_sub		include/linux/time.h
 EFX_NEED_TIMESPEC_COMPARE		nsymbol	timespec_compare	include/linux/time.h
 EFX_NEED_NS_TO_TIMESPEC			nexport ns_to_timespec		include/linux/time.h	kernel/time.c
+EFX_HAVE_TIMESPEC64			symbol	timespec64		include/linux/time64.h	include/linux/time.h
 EFX_HAVE_FDTABLE_FULL_ACCESSORS		symbol	__set_close_on_exec	include/linux/fdtable.h
 EFX_HAVE_FDTABLE_PARTIAL_ACCESSORS	symbol	fd_is_open		include/linux/fdtable.h
 EFX_HAVE_FDTABLE_H			file				include/linux/fdtable.h
@@ -239,9 +249,12 @@ EFX_HAVE_OLD_ETHTOOL_GET_RXNFC		memtype	struct_ethtool_ops	get_rxnfc	include/lin
 EFX_HAVE_CPU_RMAP			file				include/linux/cpu_rmap.h
 EFX_NEED_KTIME_SUB_NS			nsymbol	ktime_sub_ns		include/linux/ktime.h
 EFX_HAVE_NET_TSTAMP			file				include/linux/net_tstamp.h include/uapi/linux/net_tstamp.h
-EFX_NEED_PPS_SUB_TS			nsymbol pps_sub_ts		include/linux/pps_kernel.h
+EFX_NEED_PTP_CLOCK_PPSUSR		custom
+EFX_USE_64BIT_PHC			member	struct_ptp_clock_info gettime64	include/linux/ptp_clock_kernel.h
 EFX_HAVE_PHC_SUPPORT			custom
+EFX_NEED_PPS_SUB_TS			nsymbol pps_sub_ts		include/linux/pps_kernel.h
 EFX_NEED_PPS_EVENT_TIME			nsymbol	pps_event_time		include/linux/pps_kernel.h
+EFX_HAVE_PPS_EVENT_TIME_TIMESPEC	nmemtype	struct_pps_event_time	ts_real	include/linux/pps_kernel.h	struct timespec64
 EFX_NEED_PPS_GET_TS			nsymbol	pps_get_ts		include/linux/pps_kernel.h
 EFX_HAVE_PPS_KERNEL			file				include/linux/pps_kernel.h
 EFX_HAVE_DIV_S64_REM			symbol	div_s64_rem		include/linux/math64.h
@@ -262,6 +275,7 @@ EFX_NEED_ETHTOOL_RXFH_INDIR_DEFAULT	nsymbol	ethtool_rxfh_indir_default	include/l
 EFX_NEED_IS_COMPAT_TASK			custom
 EFX_NEED_COMPAT_U64			nsymbol	compat_u64		include/asm/compat.h arch/$SRCARCH/include/asm/compat.h include/asm-$SRCARCH/compat.h
 EFX_USE_IRQ_SET_AFFINITY_HINT		symbol	irq_set_affinity_hint	include/linux/interrupt.h
+EFX_HAVE_IRQ_NOTIFIERS			symbol  irq_affinity_notify	include/linux/interrupt.h
 EFX_HAVE_GSO_MAX_SEGS			member	struct_net_device	gso_max_segs		include/linux/netdevice.h
 EFX_NEED_BYTE_QUEUE_LIMITS		nsymbol	netdev_tx_sent_queue	include/linux/netdevice.h
 EFX_NEED_PCI_VPD_ATTR			nsymbol	pci_vpd			include/linux/pci.h
@@ -274,6 +288,9 @@ EFX_NEED_KOBJECT_INIT_AND_ADD		nsymbol	kobject_init_and_add	include/linux/kobjec
 EFX_HAVE_NON_CONST_JHASH2		symtype	jhash2			include/linux/jhash.h		u32 (u32 *, u32, u32)
 EFX_NEED_KOBJECT_SET_NAME_VARGS		nsymbol kobject_set_name_vargs	include/linux/kobject.h
 EFX_USE_ETHTOOL_OPS_EXT			symbol	ethtool_ops_ext		include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_GET_DUMP_FLAG		member	struct_ethtool_ops get_dump_flag	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_GET_DUMP_DATA		member	struct_ethtool_ops get_dump_data	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_SET_DUMP		member	struct_ethtool_ops set_dump	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_GET_TS_INFO		member	struct_ethtool_ops get_ts_info	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_EXT_GET_TS_INFO	member	struct_ethtool_ops_ext get_ts_info	include/linux/ethtool.h
 EFX_HAVE_OLD___VLAN_PUT_TAG		symtype	__vlan_put_tag		include/linux/if_vlan.h	struct sk_buff *(struct sk_buff *, u16)
@@ -291,6 +308,7 @@ EFX_HAVE_NAPI_STRUCT			symbol	napi_struct		include/linux/netdevice.h
 EFX_NEED_NAPI_HASH			nsymbol	napi_hash_add		include/linux/netdevice.h
 EFX_NEED_SKB_SET_HASH			nsymbol skb_set_hash		include/linux/skbuff.h
 EFX_HAVE_SKB_L4HASH			member	struct_sk_buff l4_rxhash	include/linux/skbuff.h
+EFX_HAVE_SKB_VLANTCI                     member    struct_sk_buff vlan_tci        include/linux/skbuff.h
 EFX_HAVE_BUSY_POLL			file				include/net/busy_poll.h
 EFX_NEED_USLEEP_RANGE			nsymbol	usleep_range		include/linux/delay.h
 EFX_HAVE_SRIOV_GET_TOTALVFS		symbol	pci_sriov_get_totalvfs	include/linux/pci.h
@@ -298,9 +316,19 @@ EFX_HAVE_RWSEM_IS_LOCKED		symbol	rwsem_is_locked		include/linux/rwsem.h
 EFX_HAVE_OLD_GENL_INFO			member	struct_genl_info snd_pid	include/net/genetlink.h
 EFX_NEED_SIGNED_NLA			nsymbol	nla_put_s32		include/net/netlink.h
 EFX_NEED_SKB_VLAN_TAG_GET		nsymbol	skb_vlan_tag_get	include/linux/if_vlan.h
+EFX_HAVE_OLD___VLAN_HWACCEL_PUT_TAG	symtype	__vlan_hwaccel_put_tag	include/linux/if_vlan.h	struct sk_buff *(struct sk_buff *, u16)
 EFX_HAVE_ETHTOOL_CHANNELS		member	struct_ethtool_ops get_channels	include/linux/ethtool.h
 EFX_HAVE_ETHTOOL_EXT_CHANNELS		member	struct_ethtool_ops_ext get_channels	include/linux/ethtool.h
-EFX_USE_64BIT_PHC			member	struct_ptp_clock_info gettime64	include/linux/ptp_clock_kernel.h
+EFX_NEED_UINTPTR_T			nsymbol	uintptr_t		include/linux/types.h
+EFX_NEED_IPV6_NFC			nsymbol	ethtool_tcpip6_spec	include/uapi/linux/ethtool.h
+EFX_HAVE_SKB_HASH			member	struct_sk_buff hash	include/linux/skbuff.h
+EFX_HAVE_OLD_NLA64			nsymbol	nla_put_u64_64bit	include/net/netlink.h
+EFX_HAVE_SKB_INNER_NETWORK_HEADER	symbol	skb_inner_network_header	include/linux/skbuff.h
+EFX_SKB_HAS_INNER_NETWORK_HEADER	member	struct_sk_buff	inner_network_header	include/linux/skbuff.h
+EFX_HAVE_SKB_INNER_TRANSPORT_HEADER	symbol	skb_inner_transport_header	include/linux/skbuff.h
+EFX_SKB_HAS_INNER_TRANSPORT_HEADER	member	struct_sk_buff	inner_transport_header	include/linux/skbuff.h
+EFX_HAVE_INNER_IP_HDR			symbol	inner_ip_hdr		include/linux/ip.h
+EFX_HAVE_INNER_TCP_HDR			symbol	inner_tcp_hdr		include/linux/tcp.h
 
 # Stuff needed in code other than the linux net driver
 EFX_NEED_FOR_EACH_PCI_DEV		nsymbol for_each_pci_dev	include/linux/pci.h
@@ -345,6 +373,7 @@ EFX_HAVE_CPUMASK_OF_PCIBUS		symbol	cpumask_of_pcibus	arch/$SRCARCH/include/asm/p
 EFX_HAVE_VF_INFO_MIN_TX_RATE		member	struct_ifla_vf_info min_tx_rate	include/linux/if_link.h
 EFX_HAVE_NETDEV_HW_FEATURES		member	struct_net_device	hw_features	include/linux/netdevice.h
 EFX_HAVE_NETDEV_EXTENDED_HW_FEATURES    member  struct_net_device_extended hw_features  include/linux/netdevice.h
+EFX_HAVE_NETDEV_FEATURES_CHANGE	symbol	netdev_features_change	include/linux/netdevice.h
 EFX_HAVE_PCI_DEV_FLAGS_ASSIGNED		symbol	PCI_DEV_FLAGS_ASSIGNED	include/linux/pci.h
 EFX_HAVE_PCI_VFS_ASSIGNED		symbol	pci_vfs_assigned	include/linux/pci.h
 EFX_HAVE_LINUX_EXPORT_H			file				include/linux/export.h
@@ -358,8 +387,21 @@ EFX_HAVE_NET_DEVICE_OPS_EXT_SET_VF_LINK_STATE	member struct_net_device_ops_ext	n
 EFX_NEED_SKB_GSO_TCPV6			nsymbol	SKB_GSO_TCPV6		include/linux/skbuff.h
 EFX_NEED_IS_ERR_OR_NULL		nsymbol IS_ERR_OR_NULL	include/linux/err.h
 EFX_NEED_NETDEV_RSS_KEY_FILL	nsymbol	netdev_rss_key_fill	include/linux/netdevice.h
+EFX_HAVE_NETIF_SET_XPS_QUEUE    symbol  netif_set_xps_queue include/linux/netdevice.h
+EFX_HAVE_ALLOC_PAGES_NODE	symbol	alloc_pages_node	include/linux/gfp.h
 EFX_HAVE_LINUX_LOG2_H           file                include/linux/log2.h
 EFX_HAVE_NETIF_XMIT_STOPPED	symbol	netif_xmit_stopped	include/linux/netdevice.h
+EFX_NEED_CPUMASK_LOCAL_SPREAD	nsymbol	cpumask_local_spread	include/linux/cpumask.h
+EFX_HAVE_CONST_PCI_ERR_HANDLER	memtype	struct_pci_driver err_handler	include/linux/pci.h	const struct pci_error_handlers *
+EFX_HAVE_ETHTOOL_PRIV_FLAGS	member	struct_ethtool_ops	get_priv_flags	include/linux/ethtool.h
+EFX_HAVE_HW_ENC_FEATURES	member	struct_net_device	hw_enc_features	include/linux/netdevice.h
+EFX_NEED_SKB_INNER_TRANSPORT_OFFSET	nsymbol	skb_inner_transport_offset	include/linux/skbuff.h
+EFX_HAVE_SKB_XMIT_MORE	bitfield	struct_sk_buff	xmit_more	include/linux/skbuff.h
+EFX_HAVE_NDO_ADD_VXLAN_PORT	member	struct_net_device_ops	ndo_add_vxlan_port	include/linux/netdevice.h
+EFX_NEED_PAGE_REF_ADD		nfile				include/linux/page_ref.h
+EFX_HAVE_NEW_FLOW_KEYS		member	struct_flow_keys	basic		include/net/flow_dissector.h
+EFX_HAVE_SKB_ENCAPSULATION	bitfield	struct_sk_buff	encapsulation	include/linux/skbuff.h
+EFX_HAVE_NDO_ADD_GENEVE_PORT	member	struct_net_device_ops	ndo_add_geneve_port	include/linux/netdevice.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 
@@ -438,6 +480,8 @@ function do_member() { shift 2; defer_test_memtype pos "$@" void; }
 function do_nmember() { shift 2; defer_test_memtype neg "$@" void; }
 function do_memtype() { shift 2; defer_test_memtype pos "$@"; }
 function do_nmemtype() { shift 2; defer_test_memtype neg "$@"; }
+function do_bitfield() { shift 2; defer_test_bitfield pos "$@"; }
+function do_nbitfield() { shift 2; defer_test_bitfield neg "$@"; }
 function do_export()
 {
     local sym=$3
@@ -573,6 +617,27 @@ function defer_test_memtype()
 #include <${file:8}>
 $aggtype kernel_compat_dummy_1;
 __typeof($memtype) *kernel_compat_dummy_2 = &kernel_compat_dummy_1.$memname;
+"
+}
+
+function defer_test_bitfield()
+{
+    local sense=$1
+    local aggtype="${2/_/ }"
+    local memname=$3
+    local file=$4
+    shift 4
+
+    if [ ${file:0:8} != "include/" ]; then
+	fail "defer_test_bitfield() only works in include/ - request was '$file'"
+    fi
+
+    defer_test_compile $sense "
+#include <${file:8}>
+$aggtype kernel_compat_dummy_1;
+unsigned long test(void) {
+	return kernel_compat_dummy_1.$memname;
+}
 "
 }
 
@@ -965,10 +1030,24 @@ void (*dtor)(void*, kmem_cache_t *, unsigned long))) *kernel_compat_dummy = \
 "
 }
 
+function do_EFX_NEED_PTP_CLOCK_PPSUSR
+{
+    # If the enum is not complete
+    test_symbol PTP_CLOCK_PPS include/linux/ptp_clock_kernel.h && \
+      ! test_symbol PTP_CLOCK_PPSUSR include/linux/ptp_clock_kernel.h
+}
+
 function do_EFX_HAVE_PHC_SUPPORT
 {
-    test_symbol PTP_CLOCK_PPSUSR include/linux/ptp_clock_kernel.h && \
-        egrep -q -e "CONFIG_PTP_1588_CLOCK=[y,m]" $KBUILD_SRC/.config
+    if [ "$CONFIG_PTP_1588_CLOCK" = "y" ] || [ "$CONFIG_PTP_1588_CLOCK" = "m" ]; then
+        # Ideally this would use this (but it is a deferred test)
+        #   test_member struct ptp_clock_event ptp_evt pps_times
+        # NB pps_times is needed for the PTP_CLOCK_PPSUSR event
+        test_export ptp_clock_register && \
+          test_symbol pps_times include/linux/ptp_clock_kernel.h
+    else
+        return 1
+    fi
 }
 
 function do_EFX_HAVE_PHYS_ADDR_T
@@ -1100,12 +1179,13 @@ vmsg "KVER       := $KVER"
 vmsg "KPATH      := $KPATH"
 
 # Read the following variables from the Makefile:
-#     KBUILD_SRC:         Root of source tree (not the same as KPATH under SUSE)
-#     ARCH:               Target architecture name
-#     SRCARCH:            Target architecture directory name (2.6.24 onward)
-#     CONFIG_X86_{32,64}: Work around ARCH = x86 madness
+#  KBUILD_SRC:            Root of source tree (not the same as KPATH under SUSE)
+#  ARCH:                  Target architecture name
+#  SRCARCH:               Target architecture directory name (2.6.24 onward)
+#  CONFIG_X86_{32,64}:    Work around ARCH = x86 madness
+#  CONFIG_PTP_1588_CLOCK: PTP clock support
 [ -n "$ARCH" ] && export ARCH
-eval $(read_make_variables KBUILD_SRC ARCH SRCARCH CONFIG_X86_32 CONFIG_X86_64)
+eval $(read_make_variables KBUILD_SRC ARCH SRCARCH CONFIG_X86_32 CONFIG_X86_64 CONFIG_PTP_1588_CLOCK)
 
 # Define:
 #     KBUILD_SRC:         If not already set, same as KPATH

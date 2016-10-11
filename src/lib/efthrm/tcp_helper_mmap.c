@@ -24,8 +24,9 @@
 
 /*! \cidoxg_driver_efab */
 #include <onload/debug.h>
-#include <onload/cplane.h>
-#include <ci/internal/cplane_handle.h>
+#include <cplane/exported.h>
+#include <onload/tcp_driver.h>
+#include <onload/cplane_ops.h>
 #include <onload/tcp_helper.h>
 #include <ci/efch/mmap.h>
 #include <onload/mmap.h>
@@ -55,12 +56,10 @@ static int tcp_helper_rm_mmap_mem(tcp_helper_resource_t* trs,
                           (int) ci_contig_shmbuf_size(&trs->netif.state_buf),
                           bytes));
 
-#ifdef CI_HAVE_OS_NOPAGE
   rc = ci_shmbuf_mmap(&trs->netif.pages_buf, 0, &bytes, opaque,
                            &map_num, &offset);
   if( rc < 0 )  goto out;
   OO_DEBUG_MEMSIZE(ci_log("after mapping page buf have %ld", bytes));
-#endif
 
   ci_assert_equal(bytes, 0);
 
@@ -69,9 +68,9 @@ static int tcp_helper_rm_mmap_mem(tcp_helper_resource_t* trs,
 }
 
 
-static int tcp_helper_rm_mmap_cplane(tcp_helper_resource_t* trs,
-                                     unsigned long bytes,
-                                     void* opaque, int is_writable)
+static int tcp_helper_rm_mmap_timesync(tcp_helper_resource_t* trs,
+                                       unsigned long bytes,
+                                       void* opaque, int is_writable)
 {
   int rc = 0;
   int map_num = 0;
@@ -82,9 +81,8 @@ static int tcp_helper_rm_mmap_cplane(tcp_helper_resource_t* trs,
   if( is_writable )
     return -EPERM;
 
-  /* map the control plane shared data areas */
-  rc = cicp_mmap(CICP_HANDLE(&trs->netif), &bytes, opaque,
-                 &map_num, &offset);
+  rc = ci_contig_shmbuf_mmap(&efab_tcp_driver.shmbuf, offset,
+                             &bytes, opaque, &map_num, &offset);
   if( rc < 0 )  return rc;
   ci_assert_equal(bytes, 0);
 
@@ -275,8 +273,8 @@ int efab_tcp_helper_rm_mmap(tcp_helper_resource_t* trs, unsigned long bytes,
     case CI_NETIF_MMAP_ID_STATE:
       rc = tcp_helper_rm_mmap_mem(trs, bytes, opaque);
       break;
-    case CI_NETIF_MMAP_ID_CPLANE:
-      rc = tcp_helper_rm_mmap_cplane(trs, bytes, opaque, is_writable);
+    case CI_NETIF_MMAP_ID_TIMESYNC:
+      rc = tcp_helper_rm_mmap_timesync(trs, bytes, opaque, is_writable);
       break;
     case CI_NETIF_MMAP_ID_IO:
       rc = tcp_helper_rm_mmap_io(trs, bytes, opaque);

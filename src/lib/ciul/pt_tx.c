@@ -114,4 +114,10 @@ int ef_pio_memcpy(ef_vi* vi, const void* base, int offset, int len)
   return 0;
 }
 
+
+unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi)
+{
+  return vi->tx_alt_num;
+}
+
 /*! \cidoxg_end */

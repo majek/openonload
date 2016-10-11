@@ -55,11 +55,7 @@
 #define __CI_EFHW_COMMON_H__
 
 #include <ci/efhw/common_sysdep.h>
-
-enum efhw_arch {
-	EFHW_ARCH_FALCON,
-	EFHW_ARCH_EF10,
-};
+#include <ci/efhw/device.h>
 
 typedef uint32_t efhw_buffer_addr_t;
 #define EFHW_BUFFER_ADDR_FMT	"[ba:%"PRIx32"]"
@@ -90,7 +86,6 @@ typedef union {
 #define EFHW_VI_TX_TCPUDP_CSUM_DIS 0x200   /*! enable tcp/udp checksum
 					       generation */
 #define EFHW_VI_TX_TCPUDP_ONLY     0x400   /*! drop non-tcp/udp packets */
-/* from here on, Siena only: */
 #define EFHW_VI_TX_IP_FILTER_EN    0x800   /*! TX IP filtering */
 #define EFHW_VI_TX_ETH_FILTER_EN   0x1000  /*! TX MAC filtering */
 #define EFHW_VI_TX_Q_MASK_WIDTH_0  0x2000  /*! TX filter q_mask_width bit 0 */
@@ -101,8 +96,23 @@ typedef union {
 #define EFHW_VI_TX_TIMESTAMPS      0x40000  /*! TX timestamping */
 #define EFHW_VI_TX_LOOPBACK        0x80000  /*! loopback outgoing traffic */
 #define EFHW_VI_RX_LOOPBACK        0x100000  /*! receive loopback traffic */
-#define EFHW_VI_NO_CUT_THROUGH     0x200000  /*! Disable cut-through */
+/* Event cut through must be disabled for RX merging to occur.
+ * Event cut through must be enabled for the best latency.
+ */
+#define EFHW_VI_NO_EV_CUT_THROUGH  0x200000  /*! Disable event cut-through */
 #define EFHW_VI_RX_PACKED_STREAM   0x400000  /*! Packed stream mode */
+/* For RX merging to occur received packets must be processed in store and
+ * forward mode, to enable the length to be added to the packet prefix.  This
+ * setting forces processing as store and forward, even in cases where it
+ * would not otherwise happen.
+ */
+#define EFHW_VI_NO_RX_CUT_THROUGH  0x800000  /*! Disable RX cut-through */
+/* This enables multiple RX packets to be completed via a single RX event.
+ * Whether this actually occurs depends on what happens on the RX datapath
+ * (see EFHW_VI_NO_RX_CUT_THROUGH).
+ */
+#define EFHW_VI_ENABLE_RX_MERGE    0x1000000  /*! Enable RX event merging */
+#define EFHW_VI_ENABLE_EV_TIMER    0x2000000  /*! Enable hardware event timer */
 
 /* Flags indicating effective setings determined at queue
  * allocation/enabling.  Unfortunately these flags are exposed through the

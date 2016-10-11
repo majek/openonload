@@ -71,7 +71,10 @@ struct tcp_helper_endpoint_s;
 extern int oo_os_sock_get_from_ep(struct tcp_helper_endpoint_s* ep,
                                   oo_os_file* os_sock_out) CI_HF;
 static inline void oo_os_sock_put(oo_os_file os_sock)
-{ fput(os_sock); }
+{
+  ci_assert(!in_atomic());
+  fput(os_sock);
+}
 #define OO_OS_SOCKET_FOP(ep, os_sock, rc, fop, ...) \
   do {                                              \
     rc = oo_os_sock_get_from_ep(ep, &os_sock);      \

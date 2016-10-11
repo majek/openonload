@@ -40,6 +40,7 @@ MODULE_PARM_DESC(max_vfs,
 #ifdef EFX_NOT_UPSTREAM
 /* Original name for max_vfs */
 module_param_array_named(vf_count, max_vfs, int, &max_vfs_count, 0);
+MODULE_PARM_DESC(vf_count, "Duplicate of the max_vfs parameter");
 #endif
 
 #ifdef CONFIG_SFC_SRIOV

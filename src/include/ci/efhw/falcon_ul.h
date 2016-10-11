@@ -56,10 +56,6 @@ extern void falcon_ab_timer_tbl_set(struct efhw_nic *, unsigned evq,	/* timer id
 extern void siena_timer_tbl_set(struct efhw_nic *, int instance, int enable,
 				int is_interrupting, int mode, int countdown);
 
-/* These are only used by user-level tools. */
-
-/*!< Read strap pins to get MAC settings & init MAC plugin to match */
-extern int falcon_nic_get_mac_config(struct efhw_nic *nic);
 
 #endif /* __CI_EFHW_FALCON_UL_H__ */
 /*! \cidoxg_end */

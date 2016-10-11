@@ -461,63 +461,6 @@ ci_inline void ci_waitq_init_timeout(ci_waitq_timeout_t* t,
 # define ci_pte_valid(pte)	1
 #endif
 
-extern unsigned ci_va_to_pfn(void* addr);
-
-
-/*--------------------------------------------------------------------
- *
- * ci_contig_shmbuf_t: A (potentially) large buffer that is contiguous in
- * the driver address space, and may be mapped to userlevel.
- *
- *--------------------------------------------------------------------*/
-
-typedef struct {
-  char*		p;
-  unsigned	bytes;
-} ci_contig_shmbuf_t;
-
-
-ci_inline int ci_contig_shmbuf_alloc(ci_contig_shmbuf_t* kus, unsigned bytes) {
-  ci_assert(bytes > 0);
-  kus->bytes = CI_ROUND_UP(bytes, CI_PAGE_SIZE);
-  ci_assert(! ci_in_atomic());
-  kus->p = vmalloc(kus->bytes);
-  return kus->p ? 0 : -ENOMEM;
-}
-
-ci_inline void ci_contig_shmbuf_free(ci_contig_shmbuf_t* kus) {
-  ci_assert(! ci_in_atomic());
-  ci_assert(kus);  ci_assert(kus->p);
-  vfree(kus->p);
-  CI_DEBUG_ZERO(kus);
-}
-
-ci_inline caddr_t ci_contig_shmbuf_ptr(ci_contig_shmbuf_t* kus)
-{ return kus->p; }
-
-ci_inline size_t ci_contig_shmbuf_size(ci_contig_shmbuf_t* kus)
-{ return kus->bytes; }
-
-ci_inline int ci_contig_shmbuf_mmap(ci_contig_shmbuf_t* kus, unsigned offset,
-				unsigned long* bytes, void* opaque,
-				int* map_num, unsigned long* p_offset) {
-  unsigned n = ci_contig_shmbuf_size(kus) - offset;
-  n = CI_MIN(n, *bytes);
-  *bytes -= n;
-  ++*map_num;
-  *p_offset += n;
-  return 0;
-}
-
-/*! map offset in contiguous shmbuf to physical page frame number */
-ci_inline unsigned ci_contig_shmbuf_nopage(ci_contig_shmbuf_t* kus,
-					   unsigned offset)
-{
-  ci_assert(CI_OFFSET(offset, CI_PAGE_SIZE) == 0);
-  ci_assert(offset < kus->bytes);
-  return ci_va_to_pfn(kus->p + offset);
-}
-
 
 /*--------------------------------------------------------------------
  *
@@ -589,11 +532,6 @@ struct pci_bus * pci_add_new_bus(struct pci_bus *parent, struct pci_dev *dev, in
 
 extern struct ci_private_s *ci_fpriv(struct file *);
 extern struct file *ci_privf(struct ci_private_s *);
-
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
-#define dev_get_by_index(net, ifindex) dev_get_by_index(ifindex)
-#endif
 
 
 #endif  /* __CI_DRIVER_PLATFORM_LINUX_KERNEL_H__ */

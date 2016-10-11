@@ -57,6 +57,16 @@
 
 # if defined(__ci_storport__)
 #   error Storport and __KERNEL__ should not be mixed.
+# elif defined(__oo_standalone__)
+
+#  include <string.h> /* for memset */
+#  define INADDR_ANY 0
+
+   /* We need errno values, but we do not need errno variable: */
+#  define _ERRNO_H
+#    include <bits/errno.h>
+#  undef _ERRNO_H
+
 # else
 #  include <ci/tools/platform/linux_kernel.h>
 # endif
@@ -73,7 +83,6 @@
 
 /*! Linux sendfile() support enable/disable. */
 # define CI_HAVE_SENDFILE            /* provide sendfile i/f */
-# define CI_HAVE_OS_NOPAGE
 
 
 typedef ci_int32 ci_uerr_t; /* range of OS user-mode return codes */

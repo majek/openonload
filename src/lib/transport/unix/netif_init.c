@@ -31,18 +31,48 @@
 #include <ci/internal/efabcfg.h>
 #include <ci/tools/sllist.h>
 #include <onload/dup2_lock.h>
+#include <cplane/ul.h>
+#include "cplane_api_version.h"
 
 
 #define LPF "citp_netif_"
 #define LPFIN "-> " LPF
 #define LPFOUT "<- " LPF
 
+static int citp_cplane_init(void)
+{
+  /* We have to open cplane at init time to handle early chroot. */
+  cicp_handle_t *cp;
+  citp_lib_context_t context;
+  int rc = 0;
+
+  citp_enter_lib(&context);
+  CITP_FDTABLE_LOCK();
+  cp = cicp_get_handle(CPLANE_API_VERSION, -1);
+  if( cp == NULL ) {
+    /* We can restore cplane handle from existing sockets, so do not
+     * complain too loud. */
+    Log_S(ci_log("Onload library initialization failed: unable to get "
+                 "control plane handle"));
+    rc = -1;
+  }
+  else {
+    __citp_fdtable_reserve(cp->fd, 1);
+  }
+  CITP_FDTABLE_UNLOCK();
+  citp_exit_lib(&context, 0);
+
+  return rc;
+}
 
 int citp_netif_init_ctor(void)
 {
   Log_S(ci_log("%s()", __FUNCTION__));
 
   citp_set_log_level(CITP_OPTS.log_level);
+
+  /* Errors in citp_oo_get_cpu_khz() are ignored - and we do the same here. */
+  (void)citp_cplane_init();
 
   citp_cmn_netif_init_ctor(CITP_OPTS.netif_dtor);
 

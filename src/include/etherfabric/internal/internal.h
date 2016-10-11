@@ -139,6 +139,15 @@ extern void ef_vi_reset_txq(struct ef_vi*);
 extern void ef_vi_reset_evq(struct ef_vi*, int clear_ring);
 
 
+/* This returns the ID of the next RX buffer in the RXQ.  In the absence of
+ * event merging and errors, this will be the same packet that will be returned
+ * in the next RX event. */
+ef_vi_inline unsigned ef_vi_next_rx_rq_id(ef_vi* vi)
+{
+  return vi->vi_rxq.ids[vi->ep_state->rxq.removed & vi->vi_rxq.mask];
+}
+
+
 /* Internal interfaces, so exclude from doxygen documentation */
 /*! \endcond internal */
 

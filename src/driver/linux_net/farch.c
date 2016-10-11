@@ -142,7 +142,8 @@ int efx_farch_test_registers(struct efx_nic *efx,
 			     const struct efx_farch_register_test *regs,
 			     size_t n_regs)
 {
-	unsigned address = 0, i, j;
+	unsigned int address = 0;
+	int i, j;
 	efx_oword_t mask, imask, original, reg, buf;
 
 	for (i = 0; i < n_regs; ++i) {
@@ -193,7 +194,7 @@ fail:
 
 int efx_farch_test_table(struct efx_nic *efx,
 			 const struct efx_farch_table_test *table,
-			 void (*pattern)(unsigned, efx_qword_t *, int, int),
+			 void (*pattern)(unsigned int, efx_qword_t *, int, int),
 			 int a, int b)
 {
 	efx_oword_t reg, buf;
@@ -357,7 +358,7 @@ efx_free_special_buffer(struct efx_nic *efx, struct efx_special_buffer *buffer)
 /* This writes to the TX_DESC_WPTR; write pointer for TX descriptor ring */
 void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue)
 {
-	unsigned write_ptr;
+	unsigned int write_ptr;
 	efx_dword_t reg;
 
 	write_ptr = tx_queue->write_count & tx_queue->ptr_mask;
@@ -370,7 +371,7 @@ void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue)
 static inline void efx_farch_push_tx_desc(struct efx_tx_queue *tx_queue,
 					  const efx_qword_t *txd)
 {
-	unsigned write_ptr;
+	unsigned int write_ptr;
 	efx_oword_t reg;
 
 	BUILD_BUG_ON(FRF_AZ_TX_DESC_LBN != 0);
@@ -407,10 +408,12 @@ void efx_farch_tx_write(struct efx_tx_queue *tx_queue)
 {
 	struct efx_tx_buffer *buffer;
 	efx_qword_t *txd;
-	unsigned write_ptr;
-	unsigned old_write_count = tx_queue->write_count;
+	unsigned int write_ptr;
+	unsigned int old_write_count = tx_queue->write_count;
 
-	BUG_ON(tx_queue->write_count == tx_queue->insert_count);
+	tx_queue->xmit_pending = false;
+	if (unlikely(tx_queue->write_count == tx_queue->insert_count))
+		return;
 
 	do {
 		write_ptr = tx_queue->write_count & tx_queue->ptr_mask;
@@ -442,11 +445,26 @@ void efx_farch_tx_write(struct efx_tx_queue *tx_queue)
 	}
 }
 
+unsigned int efx_farch_tx_limit_len(struct efx_tx_queue *tx_queue,
+				    dma_addr_t dma_addr, unsigned int len)
+{
+	/* Don't cross 4K boundaries with descriptors. */
+	unsigned int limit = (~dma_addr & (EFX_PAGE_SIZE - 1)) + 1;
+
+	len = min(limit, len);
+
+	if (EFX_WORKAROUND_5391(tx_queue->efx) && (dma_addr & 0xf))
+		len = min_t(unsigned int, len, 512 - (dma_addr & 0xf));
+
+	return len;
+}
+
+
 /* Allocate hardware resources for a TX queue */
 int efx_farch_tx_probe(struct efx_tx_queue *tx_queue)
 {
 	struct efx_nic *efx = tx_queue->efx;
-	unsigned entries;
+	unsigned int entries;
 	int rc;
 
 	entries = tx_queue->ptr_mask + 1;
@@ -456,7 +474,7 @@ int efx_farch_tx_probe(struct efx_tx_queue *tx_queue)
 		return rc;
 
 	efx->farch_resources.txq_min = max(efx->farch_resources.txq_min,
-					   (unsigned)tx_queue->queue + 1);
+					   (unsigned int)tx_queue->queue + 1);
 
 	return 0;
 }
@@ -485,7 +503,7 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 			      FRF_BZ_TX_NON_IP_DROP_DIS, 1);
 
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
-		int csum = tx_queue->csum_offload;
+		int csum = tx_queue->csum_offload != EFX_TXQ_TYPE_NO_OFFLOAD;
 		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_IP_CHKSM_DIS, !csum);
 		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_TCP_CHKSM_DIS,
 				    !csum);
@@ -499,7 +517,7 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 		BUILD_BUG_ON(EFX_MAX_TX_QUEUES > 128);
 
 		efx_reado(efx, &reg, FR_AA_TX_CHKSM_CFG);
-		if (tx_queue->csum_offload)
+		if (tx_queue->csum_offload != EFX_TXQ_TYPE_NO_OFFLOAD)
 			__clear_bit_le(tx_queue->queue, &reg);
 		else
 			__set_bit_le(tx_queue->queue, &reg);
@@ -549,7 +567,7 @@ void efx_farch_tx_remove(struct efx_tx_queue *tx_queue)
 
 /* This creates an entry in the RX descriptor queue */
 static inline void
-efx_farch_build_rx_desc(struct efx_rx_queue *rx_queue, unsigned index)
+efx_farch_build_rx_desc(struct efx_rx_queue *rx_queue, unsigned int index)
 {
 	struct efx_rx_buffer *rx_buf;
 	efx_qword_t *rxd;
@@ -571,7 +589,7 @@ void efx_farch_rx_write(struct efx_rx_queue *rx_queue)
 {
 	struct efx_nic *efx = rx_queue->efx;
 	efx_dword_t reg;
-	unsigned write_ptr;
+	unsigned int write_ptr;
 
 	while (rx_queue->notified_count != rx_queue->added_count) {
 		efx_farch_build_rx_desc(
@@ -590,7 +608,7 @@ void efx_farch_rx_write(struct efx_rx_queue *rx_queue)
 int efx_farch_rx_probe(struct efx_rx_queue *rx_queue)
 {
 	struct efx_nic *efx = rx_queue->efx;
-	unsigned entries;
+	unsigned int entries;
 	int rc;
 
 	entries = rx_queue->ptr_mask + 1;
@@ -602,7 +620,7 @@ int efx_farch_rx_probe(struct efx_rx_queue *rx_queue)
 	/* Increment the rxq_min counter */
 	efx->farch_resources.rxq_min =
 		max(efx->farch_resources.rxq_min,
-		    (unsigned)efx_rx_queue_index(rx_queue) + 1);
+		    (unsigned int)efx_rx_queue_index(rx_queue) + 1);
 
 	return 0;
 }
@@ -706,7 +724,8 @@ static bool efx_farch_flush_wake(struct efx_nic *efx)
  * queues until they're all flushed. Wait for the DRAIN events to be recieved
  * so that there are no more RX and TX events left on any channel.
  */
-static int efx_farch_flush_queues_wait(struct efx_nic *efx, unsigned timeout)
+static int efx_farch_flush_queues_wait(struct efx_nic *efx,
+		unsigned long timeout)
 {
 	struct efx_channel *channel;
 	struct efx_rx_queue *rx_queue;
@@ -796,7 +815,7 @@ static bool efx_check_tx_flush_complete(struct efx_nic *efx)
  */
 static int efx_farch_do_flush(struct efx_nic *efx)
 {
-	unsigned timeout = msecs_to_jiffies(EFX_MAX_FLUSH_TIME);
+	unsigned long timeout = msecs_to_jiffies(EFX_MAX_FLUSH_TIME);
 	struct efx_channel *channel;
 	struct efx_rx_queue *rx_queue;
 	struct efx_tx_queue *tx_queue;
@@ -938,25 +957,22 @@ static void efx_farch_magic_event(struct efx_channel *channel, u32 magic)
  * The NIC batches TX completion events; the message we receive is of
  * the form "complete all TX events up to this index".
  */
-static int
+static void
 efx_farch_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 {
 	unsigned int tx_ev_desc_ptr;
 	unsigned int tx_ev_q_label;
 	struct efx_tx_queue *tx_queue;
 	struct efx_nic *efx = channel->efx;
-	int tx_descs = 0;
 
 	if (unlikely(ACCESS_ONCE(efx->reset_pending)))
-		return 0;
+		return;
 
 	if (likely(EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_COMP))) {
 		/* Transmit completion */
 		tx_ev_desc_ptr = EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_DESC_PTR);
 		tx_ev_q_label = EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_Q_LABEL);
 		tx_queue = efx_channel_get_tx_queue(channel, tx_ev_q_label);
-		tx_descs = ((tx_ev_desc_ptr + 1 - tx_queue->read_count) &
-			    tx_queue->ptr_mask);
 		efx_xmit_done(tx_queue, tx_ev_desc_ptr);
 	} else if (EFX_QWORD_FIELD(*event, FSF_AZ_TX_EV_WQ_FF_FULL)) {
 		/* Rewrite the FIFO write pointer */
@@ -975,13 +991,11 @@ efx_farch_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 			  "TX DMA Q reports TX_EV_PKT_ERR.\n");
 		efx_schedule_reset(efx, RESET_TYPE_DMA_ERROR);
 	} else {
-		EFX_FATAL(efx, hw, efx->net_dev,
+		netif_err(efx, hw, efx->net_dev,
 			  "channel %d unexpected TX event "
 			  EFX_QWORD_FMT"\n", channel->channel,
 			  EFX_QWORD_VAL(*event));
 	}
-
-	return tx_descs;
 }
 
 /* Detect errors included in the rx_evt_pkt_ok bit. */
@@ -995,7 +1009,7 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 	bool rx_ev_frm_trunc, rx_ev_drib_nib, rx_ev_tobe_disc = 0;
 	bool rx_ev_other_err, rx_ev_pause_frm;
 	bool rx_ev_hdr_type, rx_ev_mcast_pkt;
-	unsigned rx_ev_pkt_type;
+	unsigned int rx_ev_pkt_type;
 
 	rx_ev_hdr_type = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_HDR_TYPE);
 	rx_ev_mcast_pkt = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_MCAST_PKT);
@@ -1070,11 +1084,11 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
  * serious.
  */
 static bool
-efx_farch_handle_rx_bad_index(struct efx_rx_queue *rx_queue, unsigned index)
+efx_farch_handle_rx_bad_index(struct efx_rx_queue *rx_queue, unsigned int index)
 {
 	struct efx_channel *channel = efx_rx_queue_channel(rx_queue);
 	struct efx_nic *efx = rx_queue->efx;
-	unsigned expected, dropped;
+	unsigned int expected, dropped;
 
 	if (rx_queue->scatter_n &&
 	    index == ((rx_queue->removed_count + rx_queue->scatter_n - 1) &
@@ -1107,7 +1121,7 @@ efx_farch_handle_rx_event(struct efx_channel *channel, const efx_qword_t *event)
 {
 	unsigned int rx_ev_desc_ptr, rx_ev_byte_cnt;
 	unsigned int rx_ev_hdr_type, rx_ev_pkt_type, rx_ev_mcast_pkt;
-	unsigned expected_ptr;
+	unsigned int expected_ptr;
 	bool rx_ev_pkt_ok, rx_ev_sop, rx_ev_cont;
 	u16 flags;
 	struct efx_rx_queue *rx_queue;
@@ -1234,7 +1248,7 @@ static void efx_farch_handle_generated_event(struct efx_channel *channel,
 	struct efx_rx_queue *rx_queue =
 		efx_channel_has_rx_queue(channel) ?
 		efx_channel_get_rx_queue(channel) : NULL;
-	unsigned magic, code;
+	unsigned int magic, code;
 
 	magic = EFX_QWORD_FIELD(*event, FSF_AZ_DRV_GEN_EV_MAGIC);
 	code = _EFX_CHANNEL_MAGIC_CODE(magic);
@@ -1264,17 +1278,18 @@ static void efx_farch_handle_generated_event(struct efx_channel *channel,
 static void
 efx_farch_handle_tx_flush_done(struct efx_nic *efx, efx_qword_t *event)
 {
-	struct efx_tx_queue *tx_queue;
-	int qid;
+	int qid = EFX_QWORD_FIELD(*event, FSF_AZ_DRIVER_EV_SUBDATA);
 
-	qid = EFX_QWORD_FIELD(*event, FSF_AZ_DRIVER_EV_SUBDATA);
-	if (qid < EFX_TXQ_TYPES * efx->n_tx_channels) {
-		tx_queue = efx_get_tx_queue(efx, qid / EFX_TXQ_TYPES,
-					    qid % EFX_TXQ_TYPES);
-		if (atomic_cmpxchg(&tx_queue->flush_outstanding, 1, 0)) {
-			efx_farch_magic_event(tx_queue->channel,
-					      EFX_CHANNEL_MAGIC_TX_DRAIN(tx_queue));
-		}
+	if (qid < efx->tx_queues_per_channel * efx->n_tx_channels) {
+		struct efx_channel *channel =
+			efx_get_tx_channel(efx,
+					   qid / efx->tx_queues_per_channel);
+		struct efx_tx_queue *tx_queue =
+			efx_channel_get_tx_queue(channel, qid);
+
+		if (atomic_cmpxchg(&tx_queue->flush_outstanding, 1, 0))
+			efx_farch_magic_event(channel,
+				EFX_CHANNEL_MAGIC_TX_DRAIN(tx_queue));
 	}
 }
 
@@ -1416,7 +1431,6 @@ int efx_farch_ev_process(struct efx_channel *channel, int budget)
 	unsigned int read_ptr;
 	efx_qword_t event, *p_event;
 	int ev_code;
-	int tx_descs = 0;
 	int spent = 0;
 	int rc;
 
@@ -1447,11 +1461,7 @@ int efx_farch_ev_process(struct efx_channel *channel, int budget)
 				goto out;
 			break;
 		case FSE_AZ_EV_CODE_TX_EV:
-			tx_descs += efx_farch_handle_tx_event(channel, &event);
-			if (tx_descs > efx->txq_entries) {
-				spent = budget;
-				goto out;
-			}
+			efx_farch_handle_tx_event(channel, &event);
 			break;
 		case FSE_AZ_EV_CODE_DRV_GEN_EV:
 			efx_farch_handle_generated_event(channel, &event);
@@ -1481,7 +1491,7 @@ int efx_farch_ev_process(struct efx_channel *channel, int budget)
 				break;
 			/* else fall through */
 		default:
-			EFX_FATAL(efx, hw, efx->net_dev,
+			netif_err(efx, hw, efx->net_dev,
 				  "channel %d unknown event type %d"
 				  " (data " EFX_QWORD_FMT ")\n",
 				  channel->channel, ev_code,
@@ -1498,7 +1508,7 @@ out:
 int efx_farch_ev_probe(struct efx_channel *channel)
 {
 	struct efx_nic *efx = channel->efx;
-	unsigned entries;
+	unsigned int entries;
 	int rc;
 
 	entries = channel->eventq_mask + 1;
@@ -1508,7 +1518,7 @@ int efx_farch_ev_probe(struct efx_channel *channel)
 		return rc;
 
 	efx->farch_resources.evq_int_min = max(efx->farch_resources.evq_int_min,
-					       (unsigned)channel->channel + 1);
+			(unsigned int)channel->channel + 1);
 
 	return 0;
 }
@@ -1867,12 +1877,12 @@ void efx_farch_rx_pull_indir_table(struct efx_nic *efx)
  * res->buftbl_min            buftbl entries for onload
  * res->buftbl_lim            descriptor caches
  */
-int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
+int efx_farch_dimension_resources(struct efx_nic *efx, unsigned int sram_lim_qw)
 {
 	struct efx_dl_falcon_resources *res = &efx->farch_resources;
-	unsigned vi_dc_entries, vi_count, buftbl_free;
-	unsigned entries_per_vf, entries_per_vnic, vnic_limit;
-	unsigned min_entries_per_vnic;
+	unsigned int vi_dc_entries, vi_count, buftbl_free;
+	unsigned int entries_per_vf, entries_per_vnic, vnic_limit;
+	unsigned int min_entries_per_vnic;
 
 	efx->sram_lim_qw = sram_lim_qw;
 
@@ -1897,17 +1907,16 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	 * and the descriptor caches for those channels. For simplicity assume
 	 * that all channels are fully populated with TX and RX queues */
 	res->buffer_table_min =
-		(((EFX_TXQ_TYPES + 1) * EFX_MAX_DMAQ_SIZE + EFX_MAX_EVQ_SIZE) *
+		(((efx->tx_queues_per_channel + 1) * EFX_MAX_DMAQ_SIZE +
+		  EFX_MAX_EVQ_SIZE) *
 		 efx->n_wanted_channels) * sizeof(efx_qword_t) / EFX_BUF_SIZE;
 	vi_count = res->evq_timer_min;
 	buftbl_free = sram_lim_qw - res->buffer_table_min -
 		vi_count * vi_dc_entries;
 
 #ifdef CONFIG_SFC_SRIOV
-	if (efx->type->sriov_wanted) {
-		if (efx->type->sriov_wanted(efx))
-			vi_count = max_t(unsigned, vi_count, EFX_VI_BASE);
-	}
+	if (efx_sriov_wanted(efx))
+		vi_count = max_t(unsigned int, vi_count, EFX_VI_BASE);
 	efx->vf_buftbl_base = res->buffer_table_min;
 	entries_per_vf = (vi_dc_entries + EFX_VF_BUFTBL_PER_VI) * efx_vf_size(efx);
 #else
@@ -1926,9 +1935,11 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 
 #ifdef EFX_NOT_UPSTREAM
 	if (efx_target_num_vis >= 0) {
-		unsigned vnic_count = (unsigned) efx_target_num_vis;
-		unsigned vnic_limit = min(buftbl_free / min_entries_per_vnic,
-					  res->evq_timer_lim - vi_count);
+		unsigned int vnic_count, vnic_limit;
+
+		vnic_count = (unsigned int) efx_target_num_vis;
+		vnic_limit = min(buftbl_free / min_entries_per_vnic,
+				res->evq_timer_lim - vi_count);
 
 		if (vnic_count > vnic_limit) {
 			netif_err(efx, drv, efx->net_dev,
@@ -1944,27 +1955,25 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 
 #ifdef CONFIG_SFC_SRIOV
 	/* If there is buffer table left, then try and allocate VFs */
-	if (efx->type->sriov_wanted) {
-		if (efx->type->sriov_wanted(efx)) {
-			unsigned vf_limit = min(buftbl_free / entries_per_vf,
-						res->evq_timer_lim - vi_count);
-			vf_limit = min_t(unsigned, vf_limit, EFX_VF_COUNT_MAX);
-			vf_limit = min_t(unsigned, vf_limit,
-					 (1024 - EFX_VI_BASE) >> efx->vi_scale);
-			
-			if (efx->vf_count > vf_limit) {
-				netif_err(efx, probe, efx->net_dev,
-					  "Reducing VF count from from %d to %d. "
-					  "Reduce rx_desc_cache_size, "
-					  "tx_desc_cache_size and/or num_vis\n",
-					  efx->vf_count, vf_limit);
-				efx->vf_count = vf_limit;
-			}
-			res->buffer_table_min +=
-				efx->vf_count * efx_vf_size(efx) * EFX_VF_BUFTBL_PER_VI;
-			vi_count += efx->vf_count * efx_vf_size(efx);
-			buftbl_free -= efx->vf_count * entries_per_vf;
+	if (efx_sriov_wanted(efx)) {
+		unsigned int vf_limit = min(buftbl_free / entries_per_vf,
+					res->evq_timer_lim - vi_count);
+		vf_limit = min_t(unsigned int, vf_limit, EFX_VF_COUNT_MAX);
+		vf_limit = min_t(unsigned int, vf_limit,
+				 (1024 - EFX_VI_BASE) >> efx->vi_scale);
+
+		if (efx->vf_count > vf_limit) {
+			netif_err(efx, probe, efx->net_dev,
+				  "Reducing VF count from from %d to %d. "
+				  "Reduce rx_desc_cache_size, "
+				  "tx_desc_cache_size and/or num_vis\n",
+				  efx->vf_count, vf_limit);
+			efx->vf_count = vf_limit;
 		}
+		res->buffer_table_min +=
+			efx->vf_count * efx_vf_size(efx) * EFX_VF_BUFTBL_PER_VI;
+		vi_count += efx->vf_count * efx_vf_size(efx);
+		buftbl_free -= efx->vf_count * entries_per_vf;
 	}
 #endif
 
@@ -1999,16 +2008,14 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 	res->rxq_lim = min(res->rxq_lim, vi_count);
 	res->txq_lim = min(res->txq_lim, vi_count);
 #ifdef CONFIG_SFC_SRIOV
-	if (efx->type->sriov_wanted) {
-		if (efx->type->sriov_wanted(efx)) {
-			unsigned vnic_base = EFX_VI_BASE +
-				efx->vf_count * efx_vf_size(efx);
-			
-			res->evq_timer_min = max_t(int, res->evq_timer_min, vnic_base);
-			res->evq_int_min = max_t(int, res->evq_int_min, vnic_base);
-			res->rxq_min = max_t(int, res->rxq_min, vnic_base);
-			res->txq_min = max_t(int, res->txq_min, vnic_base);
-		}
+	if (efx_sriov_wanted(efx)) {
+		unsigned int vnic_base = EFX_VI_BASE +
+			efx->vf_count * efx_vf_size(efx);
+
+		res->evq_timer_min = max_t(int, res->evq_timer_min, vnic_base);
+		res->evq_int_min = max_t(int, res->evq_int_min, vnic_base);
+		res->rxq_min = max_t(int, res->rxq_min, vnic_base);
+		res->txq_min = max_t(int, res->txq_min, vnic_base);
 	}
 #endif
 	res->flags |= EFX_DL_FALCON_HAVE_RSS_CHANNEL_COUNT;
@@ -2031,6 +2038,13 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw)
 		  res->buffer_table_min, res->buffer_table_lim);
 
 	return 0;
+}
+
+struct efx_tx_queue *efx_farch_select_tx_queue(struct efx_channel *channel,
+					       struct sk_buff *skb)
+{
+	return &channel->tx_queue[skb->ip_summed ? EFX_TXQ_TYPE_CSUM_OFFLOAD :
+						   EFX_TXQ_TYPE_NO_OFFLOAD];
 }
 
 u32 efx_farch_fpga_ver(struct efx_nic *efx)
@@ -2177,12 +2191,12 @@ struct efx_farch_filter_spec {
 struct efx_farch_filter_table {
 	enum efx_farch_filter_table_id id;
 	u32		offset;		/* address of table relative to BAR */
-	unsigned	size;		/* number of entries */
-	unsigned	step;		/* step between entries */
-	unsigned	used;		/* number currently used */
+	unsigned int	size;		/* number of entries */
+	unsigned int	step;		/* step between entries */
+	unsigned int	used;		/* number currently used */
 	unsigned long	*used_bitmap;
 	struct efx_farch_filter_spec *spec;
-	unsigned	search_limit[EFX_FARCH_FILTER_TYPE_COUNT];
+	unsigned int	search_limit[EFX_FARCH_FILTER_TYPE_COUNT];
 };
 
 struct efx_farch_filter_state {
@@ -3198,7 +3212,7 @@ int efx_farch_filter_table_probe(struct efx_nic *efx)
 {
 	struct efx_farch_filter_state *state;
 	struct efx_farch_filter_table *table;
-	unsigned table_id;
+	unsigned int table_id;
 
 	state = kzalloc(sizeof(struct efx_farch_filter_state), GFP_KERNEL);
 	if (!state)
@@ -3255,7 +3269,7 @@ int efx_farch_filter_table_probe(struct efx_nic *efx)
 	if (table->size) {
 		/* RX default filters must always exist */
 		struct efx_farch_filter_spec *spec;
-		unsigned i;
+		unsigned int i;
 
 		for (i = 0; i < EFX_FARCH_FILTER_SIZE_RX_DEF; i++) {
 			spec = &table->spec[i];
@@ -3444,14 +3458,14 @@ void efx_farch_filter_unblock_kernel(struct efx_nic *efx,
 	spin_unlock_bh(&efx->filter_lock);
 }
 
-int efx_farch_vport_filter_insert(struct efx_nic *efx, unsigned vport_id,
+int efx_farch_vport_filter_insert(struct efx_nic *efx, unsigned int vport_id,
 				  const struct efx_filter_spec *spec,
 				  u64 *filter_id_out, bool *is_exclusive_out)
 {
 	return -EOPNOTSUPP;
 }
 
-int efx_farch_vport_filter_remove(struct efx_nic *efx, unsigned vport_id,
+int efx_farch_vport_filter_remove(struct efx_nic *efx, unsigned int vport_id,
 				  u64 filter_id, bool is_exclusive)
 {
 	return -EOPNOTSUPP;

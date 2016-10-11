@@ -78,7 +78,7 @@ int ef_onload_driver_open(ef_driver_handle* pfd,
 
   ci_assert(pfd);
   rc = oo_open(pfd, dev_type, flags);
-  if( rc != 0 && fd_is_saved[dev_type] >= 0 ) {
+  if( rc != 0 && errno != EMFILE && fd_is_saved[dev_type] >= 0 ) {
     ci_clone_fd_t op;
     op.do_cloexec = do_cloexec;
     LOG_NV(ci_log("%s: open failed, but cloning from saved fd", __func__));

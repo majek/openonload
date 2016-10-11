@@ -27,7 +27,6 @@
 /*! \cidoxg_lib_transport_ip */
 
 #include "ip_internal.h"
-#include <ci/internal/cplane_ops.h> /* for ip.h ci_ip_cache_init */
 
 
 #define TCP_STATE_POISON 0xff

@@ -202,12 +202,22 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 # define f_vfsmnt f_path.mnt
 #endif
 
-#ifdef EFRM_OLD_DEV_BY_IDX
-#define __dev_get_by_index(net_ns, ifindex) __dev_get_by_index(ifindex)
-#endif
-
 #ifndef EFRM_HAVE_NETDEV_NOTIFIER_INFO
 #define netdev_notifier_info_to_dev(info) (info)
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,23)
+#define EFRM_VMA_HAS_NOPAGE
+#endif
+
+#ifndef NOPAGE_SIGBUS
+#  define NOPAGE_SIGBUS (NULL)
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,6,0)
+#define get_user_pages(start, nr_pages, write, force, pages, vmas)  \
+    get_user_pages(current, current->mm,                            \
+                   start, nr_pages, write, force, pages, vmas)
 #endif
 
 #endif /* DRIVER_LINUX_RESOURCE_KERNEL_COMPAT_H */

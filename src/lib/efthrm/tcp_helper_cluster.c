@@ -160,7 +160,7 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
   /* Needed to protect against oo_nics changes */
   rtnl_lock();
 
-  for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i ) {
+  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i ) {
     if( oo_nics[i].efrm_client == NULL ||
         ! oo_check_nic_suitable_for_onload(&(oo_nics[i])) )
       continue;
@@ -199,7 +199,7 @@ redo:
 
  fail:
   rtnl_unlock();
-  for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
     if( thc->thc_vi_set[i] != NULL )
       efrm_vi_set_release(thc->thc_vi_set[i]);
   kfree(thc);
@@ -429,7 +429,7 @@ static void thc_cluster_free(tcp_helper_cluster_t* thc)
   thc_uninstall_tproxy(thc);
 
   /* Free up resources within the thc */
-  for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
     if( thc->thc_vi_set[i] != NULL )
       efrm_vi_set_release(thc->thc_vi_set[i]);
 
@@ -579,20 +579,17 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   tcp_helper_cluster_t* thc;
   tcp_helper_resource_t* thr = NULL;
   citp_waitable* waitable;
-  ci_sock_cmn* sock = SP_TO_SOCK(ni, priv->sock_id);
+  ci_sock_cmn* sock;
   struct oof_manager* fm = efab_tcp_driver.filter_manager;
   struct oof_socket* oofilter;
   struct oof_socket dummy_oofilter;
-  int protocol = thc_get_sock_protocol(sock);
+  int protocol;
   char name[CI_CFG_CLUSTER_NAME_LEN + 1];
   int rc, rc1;
   int flags = 0;
   tcp_helper_cluster_t* named_thc,* ported_thc;
   int alloced = 0;
-
-  /* No clustering on sockets bound to alien addresses */
-  if( sock->s_flags & CI_SOCK_FLAG_BOUND_ALIEN )
-    return 0;
+  oo_sp new_sock_id;
 
   if( NI_OPTS(ni).cluster_ignore == 1 ) {
     LOG_NV(ci_log("%s: Ignored attempt to use clusters due to "
@@ -610,10 +607,25 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     return -EINVAL;
   }
 
+  waitable = SP_TO_WAITABLE(ni, priv->sock_id);
+  rc = ci_sock_lock(ni, waitable);
+  if( rc != 0 )
+    return rc;
+
+  sock = SP_TO_SOCK(ni, priv->sock_id);
+  protocol = thc_get_sock_protocol(sock);
+
+  /* No clustering on sockets bound to alien addresses */
+  if( sock->s_flags & CI_SOCK_FLAG_BOUND_ALIEN ) {
+    rc = 0;
+    goto unlock_sock;
+  }
+
   if( sock->s_flags & (CI_SOCK_FLAG_TPROXY | CI_SOCK_FLAG_MAC_FILTER) ) {
     ci_log("%s: Scalable filter sockets cannot be clustered",
            __FUNCTION__);
-    return -EINVAL;
+    rc = -EINVAL;
+    goto unlock_sock;
   }
 
   oofilter = &ci_trs_ep_get(priv->thr, priv->sock_id)->oofilter;
@@ -621,7 +633,8 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   if( oofilter->sf_local_port != NULL ) {
     ci_log("%s: Socket that already have filter cannot be clustered",
            __FUNCTION__);
-    return -EINVAL;
+    rc = -EINVAL;
+    goto unlock_sock;
   }
 
   if( priv->thr->thc ) {
@@ -635,7 +648,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
       rc = 0;
     if( rc == 0 )
       sock->s_flags |= CI_SOCK_FLAG_FILTER;
-    return rc;
+    goto unlock_sock;
   }
 
   mutex_lock(&thc_init_mutex);
@@ -777,23 +790,31 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   /* Move the socket into the new stack */
   if( (rc = ci_netif_lock(ni)) != 0 )
     goto drop_and_done;
-  waitable = SP_TO_WAITABLE(ni, priv->sock_id);
-  rc = ci_sock_lock(ni, waitable);
-  if( rc != 0 ) {
-    ci_netif_unlock(ni);
-    goto drop_and_done;
-  }
+
+  /* we hold:
+   * * lock on the old socket,
+   * * lock on the old stack,
+   * * reference to the destination stack (thr) */
+
   /* thr referencing scheme comes from efab_file_move_to_alien_stack_rsop */
   efab_thr_ref(thr);
-  rc = efab_file_move_to_alien_stack(priv, &thr->netif, 0);
-  if( rc != 0 )
+  rc = efab_file_move_to_alien_stack(priv, &thr->netif, 0, &new_sock_id);
+  if( rc != 0 ) {
     efab_thr_release(thr);
+    /* both sockets are unlocked, and there is still single reference to thr */
+  }
   else {
+    /* both the new socket and the destination stack are locked */
     /* beside us, socket now holds its own reference to thr */
-    oofilter = &ci_trs_ep_get(thr, sock->b.moved_to_sock_id)->oofilter;
+    waitable = SP_TO_WAITABLE(&thr->netif, new_sock_id);
+    oofilter = &ci_trs_ep_get(thr, new_sock_id)->oofilter;
     oof_socket_replace(fm, &dummy_oofilter, oofilter);
-    SP_TO_SOCK(&thr->netif, sock->b.moved_to_sock_id)->s_flags |= CI_SOCK_FLAG_FILTER;
+    SP_TO_SOCK(&thr->netif, new_sock_id)->s_flags |= CI_SOCK_FLAG_FILTER;
     ci_netif_unlock(&thr->netif);
+    /* we hold:
+     * * two references to thr, of which one belongs to the new socket
+     * * lock on the new socket
+     * we have just unlocked thr */
   }
 
  drop_and_done:
@@ -804,6 +825,8 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   efab_thr_release(thr);
   oof_socket_dtor(&dummy_oofilter);
   mutex_unlock(&thc_init_mutex);
+unlock_sock:
+  ci_sock_unlock(ni, waitable);
   return rc;
 
  alloc_fail:
@@ -813,6 +836,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
  alloc_fail_unlocked:
   oof_socket_dtor(&dummy_oofilter);
   mutex_unlock(&thc_init_mutex);
+  ci_sock_unlock(ni, waitable);
   return rc;
 }
 
@@ -871,7 +895,7 @@ static void thc_dump_fn(void* not_used, oo_dump_log_fn_t log, void* log_arg)
   while( walk != NULL ) {
     int hwports = 0;
     int i;
-    for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
+    for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
       if( walk->thc_vi_set[i] != NULL )
         hwports |= (1 << i);
     log(log_arg, "--------------------------------------------------------");

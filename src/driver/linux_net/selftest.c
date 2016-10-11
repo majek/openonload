@@ -134,12 +134,12 @@ static int efx_test_nvram(struct efx_nic *efx, struct efx_self_tests *tests)
 	return rc;
 }
 
-static void memtest_simple(unsigned id, efx_qword_t *reg, int a, int b)
+static void memtest_simple(unsigned int id, efx_qword_t *reg, int a, int b)
 {
 	EFX_POPULATE_QWORD_2(*reg, EFX_DWORD_0, a, EFX_DWORD_1, b);
 }
 
-static void memtest_changing_bytes(unsigned id, efx_qword_t *reg,
+static void memtest_changing_bytes(unsigned int id, efx_qword_t *reg,
 				   int a, int b)
 {
 	int i;
@@ -169,7 +169,7 @@ static void memtest_bit_sweep(unsigned int id, efx_qword_t *reg,
 }
 
 struct memtest {
-	void (*pattern)(unsigned id, efx_qword_t *reg, int a, int b);
+	void (*pattern)(unsigned int id, efx_qword_t *reg, int a, int b);
 	int a;
 	int b;
 };
@@ -326,7 +326,7 @@ static int efx_test_eventq_irq(struct efx_nic *efx,
 }
 
 static int efx_test_phy(struct efx_nic *efx, struct efx_self_tests *tests,
-			unsigned flags)
+			unsigned int flags)
 {
 	int rc;
 
@@ -487,7 +487,7 @@ static int efx_begin_loopback(struct efx_tx_queue *tx_queue)
 	struct efx_loopback_payload *payload;
 	struct sk_buff *skb;
 	int i;
-	netdev_tx_t rc;
+	int rc;
 
 	/* Transmit N copies of buffer */
 	for (i = 0; i < state->packet_count; i++) {
@@ -514,7 +514,7 @@ static int efx_begin_loopback(struct efx_tx_queue *tx_queue)
 		rc = efx_enqueue_skb(tx_queue, skb);
 		netif_tx_unlock_bh(efx->net_dev);
 
-		if (rc != NETDEV_TX_OK) {
+		if (rc) {
 			netif_err(efx, drv, efx->net_dev,
 				  "TX queue %d could not transmit packet %d of "
 				  "%d in %s loopback test\n", tx_queue->queue,
@@ -751,8 +751,9 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct efx_self_tests *tests,
 
 		/* Test both types of TX queue */
 		efx_for_each_channel_tx_queue(tx_queue, channel) {
-			state->offload_csum = (tx_queue->queue &
-					       EFX_TXQ_TYPE_OFFLOAD);
+			state->offload_csum =
+				tx_queue->csum_offload ==
+					EFX_TXQ_TYPE_CSUM_OFFLOAD;
 			rc = efx_test_loopback(tx_queue,
 					       &tests->loopback[mode]);
 			if (rc && !retry)
@@ -805,7 +806,7 @@ static int efx_test_loopbacks(struct efx_nic *efx, struct efx_self_tests *tests,
  *************************************************************************/
 
 int efx_selftest(struct efx_nic *efx, struct efx_self_tests *tests,
-		 unsigned flags)
+		 unsigned int flags)
 {
 	enum efx_loopback_mode loopback_mode = efx->loopback_mode;
 	int phy_mode = efx->phy_mode;
@@ -885,7 +886,7 @@ int efx_selftest(struct efx_nic *efx, struct efx_self_tests *tests,
 	__efx_reconfigure_port(efx);
 	mutex_unlock(&efx->mac_lock);
 
-	netif_device_attach(efx->net_dev);
+	efx_device_attach_if_not_resetting(efx);
 
 	return rc_test;
 }

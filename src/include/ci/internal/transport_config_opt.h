@@ -49,11 +49,6 @@
 /* Maximum number of network interfaces (ports) per stack. */
 #define CI_CFG_MAX_INTERFACES           8
 
-/* Maximum number of networks interfaces that can be registered with the
- * onload driver.
- */
-#define CI_CFG_MAX_REGISTER_INTERFACES  8
-
 /* Some defaults.  These can be overridden at runtime. */
 #define CI_CFG_NETIF_MAX_ENDPOINTS     (1<<13)
 /* The real max for endpoint order.
@@ -406,12 +401,6 @@
 #define CI_CFG_HANDLE_UDP_FRAG      0
 
 /*
- * Whether the control plane synchronization operations are made available
- * to the user must be 1 for Windows, but optional otherwise
- */
-#define CI_CFG_CONTROL_PLANE_USER_SYNC    1
-
-/*
  * CI_CFG_CONGESTION_WINDOW_VALIDATION actviates RFC2861 compliance;
  * if no packets are sent for N round trip times, then reduced the
  * congestion window by a factor of 2 for each round trip time since
@@ -603,9 +592,6 @@
 
 /* Max length of "name" of a cluster. */
 #define CI_CFG_CLUSTER_NAME_LEN (CI_CFG_STACK_NAME_LEN >> 1)
-
-/* Teaming support in OpenOnload */
-#define CI_CFG_TEAMING 1
 
 /* Onload tcpdump support */
 #define CI_CFG_TCPDUMP 1

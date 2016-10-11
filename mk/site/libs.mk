@@ -1,3 +1,28 @@
+lib_name := onload_zf
+lib_ver  := 0
+lib_where := lib/zf
+ZF_REALNAME := $(MMakeGenerateDllRealname)
+ZF_SONAME	:= $(MMakeGenerateDllSoname)
+ZF_LINKNAME	:= $(MMakeGenerateDllLinkname)
+ifeq ($(ONLOAD_ONLY),1)
+  ZF_LIB_DEPEND	:= $(MMakeGeneratePrebuiltDllDepend)
+  LINK_ZF_LIB	:= $(MMakeGeneratePrebuiltDllLink)
+else
+  ZF_LIB_DEPEND	:= $(MMakeGenerateDllDepend)
+  LINK_ZF_LIB	:= $(MMakeGenerateDllLink)
+endif
+
+lib_name := onload_zf_static
+lib_ver	:=
+ZF_STATIC_LIB		:= $(MMakeGenerateLibTarget)
+ifeq ($(ONLOAD_ONLY),1)
+  ZF_STATIC_LIB_DEPEND	:= $(MMakeGeneratePrebuiltLibDepend)
+  LINK_ZF_STATIC_LIB	:= $(MMakeGeneratePrebuiltLibLink)
+else
+  ZF_STATIC_LIB_DEPEND	:= $(MMakeGenerateLibDepend)
+  LINK_ZF_STATIC_LIB	:= $(MMakeGenerateLibLink)
+endif
+
 # Major: Increment when making a change that is not backwards compatible.
 ONLOAD_EXT_VERSION_MAJOR := 1
 

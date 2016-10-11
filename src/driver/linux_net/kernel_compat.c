@@ -34,6 +34,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/bootmem.h>
 #include <linux/slab.h>
+#include <linux/cpumask.h>
 #include <asm/uaccess.h>
 #ifdef EFX_HAVE_LINUX_EXPORT_H
 #include <linux/export.h>
@@ -811,3 +812,40 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 }
 EXPORT_SYMBOL(pci_enable_msix_range);
 #endif
+
+#if defined(EFX_NEED_CPUMASK_LOCAL_SPREAD) && (NR_CPUS != 1)
+unsigned int cpumask_local_spread(unsigned int i, int node)
+{
+	int cpu;
+
+	/* Wrap: we always want a cpu. */
+	i %= num_online_cpus();
+
+	if (node == -1) {
+		for_each_cpu(cpu, cpu_online_mask)
+			if (i-- == 0)
+				return cpu;
+	} else {
+		/* NUMA first. */
+		for_each_cpu(cpu, cpu_online_mask) {
+			if (!cpumask_test_cpu(cpu, cpumask_of_node(node)))
+				continue;
+			if (i-- == 0)
+				return cpu;
+		}
+
+		for_each_cpu(cpu, cpu_online_mask) {
+			/* Skip NUMA nodes, done above. */
+			if (cpumask_test_cpu(cpu, cpumask_of_node(node)))
+				continue;
+
+			if (i-- == 0)
+				return cpu;
+		}
+	}
+	BUG();
+	/* silence compiler warning */
+	return -EIO;
+}
+#endif
+

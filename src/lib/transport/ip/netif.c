@@ -1098,30 +1098,6 @@ void ci_netif_unlock(ci_netif* ni)
 }
 
 
-#if  !defined(__KERNEL__) && !defined(CI_HAVE_OS_NOPAGE)
-int ci_netif_mmap_shmbuf(ci_netif* netif, int shmbufid)
-{
-  void* p;
-  int rc;
-
-  ci_assert(netif);
-
-  if(CI_UNLIKELY( netif->u_shmbufs[shmbufid] == NULL )) {
-    /* Map a buffer of epbufs into userland. */
-    rc = oo_resource_mmap(ci_netif_get_driver_handle(netif), 0,
-                          CI_NETIF_MMAP_ID_PAGE(shmbufid - 1),
-                          EP_BUF_BLOCKPAGES * CI_PAGE_SIZE,
-                          OO_MMAP_FLAG_DEFAULT, &p);
-    if( rc < 0 )  return -EINVAL;
-
-    netif->u_shmbufs[shmbufid] = (char*) p;
-  }
-
-  return 0;
-}
-#endif
-
-
 void ci_netif_error_detected(ci_netif* ni, unsigned error_flag,
                              const char* caller)
 {
@@ -1154,6 +1130,7 @@ int ci_netif_get_ready_list(ci_netif* ni)
 
   return i < CI_CFG_N_READY_LISTS ? i : 0;
 }
+#endif
 
 
 void ci_netif_put_ready_list(ci_netif* ni, int id)
@@ -1164,7 +1141,10 @@ void ci_netif_put_ready_list(ci_netif* ni, int id)
   ci_assert(ni->state->ready_lists_in_use & (1 << id));
   ci_assert_nequal(id, 0);
 
-  ci_netif_lock(ni);
+  if( ci_netif_lock(ni) != 0 ) {
+    ci_log("epoll: Leaking ready list [%d:%d]", NI_ID(ni), id);
+    return;
+  }
   while( ci_ni_dllist_not_empty(ni, &ni->state->ready_lists[id]) ) {
     lnk = ci_ni_dllist_pop(ni, &ni->state->ready_lists[id]);
     w = CI_CONTAINER(citp_waitable, ready_link, lnk);
@@ -1177,6 +1157,7 @@ void ci_netif_put_ready_list(ci_netif* ni, int id)
 }
 
 
+#ifndef __KERNEL__
 int ci_netif_raw_send(ci_netif* ni, int intf_i,
                       const ci_iovec *iov, int iovlen)
 {

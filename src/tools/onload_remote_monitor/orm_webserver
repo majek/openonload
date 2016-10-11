@@ -1,0 +1,106 @@
+#! /usr/bin/python
+
+#****************************************************************************
+# Copyright (c) 2015, Solarflare Communications Inc,
+#
+# Maintained by Solarflare Communications
+#  <onload-dev@solarflare.com>
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation, incorporated herein by reference.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+#****************************************************************************
+
+import os
+import sys
+import socket
+import select
+import subprocess
+import BaseHTTPServer
+
+def run_cmd(cmd):
+    child = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    stdout = child.communicate()[0]
+    assert child.returncode == 0, child.returncode
+    return stdout
+
+
+def run_orm_json(command=''):
+    orm_json = os.path.join(
+        os.path.dirname(sys.argv[0]), '../../..', 'build', 'gnu_x86_64',
+        'tools', 'onload_remote_monitor', 'orm_json')
+    assert os.path.exists(orm_json), orm_json
+    return run_cmd([orm_json, command])
+
+
+def check_orm_json():
+    orm_json = os.path.join(
+        os.path.dirname(sys.argv[0]), '../../..', 'build', 'gnu_x86_64',
+        'tools', 'onload_remote_monitor', 'orm_json')
+    if not os.path.exists(orm_json):
+        print 'orm_json not built.'
+        print 'Check availability of libtool, autoconf and automake, then rebuild'
+        sys.exit(1)
+
+def usage():
+    print 'Usage: %s port' % sys.argv[0]
+    sys.exit(1)
+
+class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+    def valid_path(s):
+        dirname, basename = os.path.split(str.rstrip(s.path, '/'))
+        return dirname == '/onload' and basename in ['all','stats','stack']
+
+    def do_HEAD_OK(s):
+        s.send_response(200)
+        s.send_header("Content-type", "application/json")
+        s.end_headers()
+
+    def do_HEAD_FAIL(s):
+        s.send_response(404)
+        s.end_headers()
+
+    def do_HEAD(s):
+        if s.valid_path():
+            s.do_HEAD_OK()
+        else:
+            s.do_HEAD_FAIL()
+
+    def do_GET(s):
+        if s.valid_path():
+            try:
+                basename = os.path.basename(str.rstrip(s.path, '/'))
+                r = run_orm_json(basename)
+                s.do_HEAD_OK()
+                s.wfile.write(r)
+            except AssertionError:
+                s.do_HEAD_FAIL() # content fail
+        else:
+            s.do_HEAD_FAIL() # unsupported request
+
+def main():
+    if len(sys.argv) != 2:
+        usage()
+    check_orm_json()
+    port = int(sys.argv[1])
+    server = BaseHTTPServer.HTTPServer
+    httpd = server(('', port), Handler)
+    print 'Started http server on port %s' % port
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    httpd.server_close()
+
+
+if __name__ == '__main__':
+    main()

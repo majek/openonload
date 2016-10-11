@@ -34,6 +34,7 @@
 #include "driverlink.h"
 #include "filter.h"
 #include "nic.h"
+#include "workarounds.h"
 
 /* Global lists are protected by rtnl_lock */
 
@@ -67,16 +68,22 @@ static struct efx_dl_handle *efx_dl_handle(struct efx_dl_device *efx_dev)
 
 /* Warn if a driverlink call takes longer than 1 second */
 #define EFX_DL_DURATION_WARN (1 * HZ)
-#define EFX_DL_CHECK_DURATION(duration, label)  \
+/* Onload probe verifies a SW licenses which can take >1s. See SFC bug 62649 */
+#define EFX_DL_DURATION_PROBE_WARN (3 * HZ)
+
+#define _EFX_DL_CHECK_DURATION(duration, limit, label)			\
 	do {                                                                   \
-		if (duration > EFX_DL_DURATION_WARN &&                         \
+		if (duration > (limit) &&				\
 		    !efx_nic_hw_unavailable(efx))                              \
 			netif_warn(efx, drv, efx->net_dev,                     \
 				   "%s: driverlink " label " took %ums\n",     \
 				   efx_dev->driver->name,                      \
 				   jiffies_to_msecs(duration));                \
 	} while (0)
-
+#define EFX_DL_CHECK_DURATION(duration, label) \
+   _EFX_DL_CHECK_DURATION(duration, EFX_DL_DURATION_WARN, label)
+#define EFX_DL_CHECK_DURATION_PROBE(duration, label) \
+   _EFX_DL_CHECK_DURATION(duration, EFX_DL_DURATION_PROBE_WARN, label)
 
 /* Remove an Efx device, and call the driver's remove() callback if
  * present. The caller must hold rtnl_lock. */
@@ -155,7 +162,11 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 
 	after = get_jiffies_64();
 	duration = after - before;
+#if defined(EFX_WORKAROUND_62649)
+	EFX_DL_CHECK_DURATION_PROBE(duration, "probe()");
+#else
 	EFX_DL_CHECK_DURATION(duration, "probe()");
+#endif
 
 	if (rc)
 		goto fail;
@@ -458,7 +469,8 @@ int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
 
-int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev, unsigned vport_id,
+int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev,
+			       unsigned int vport_id,
 			       const struct efx_filter_spec *spec,
 			       u64 *filter_id_out, bool *is_exclusive_out)
 {
@@ -468,7 +480,8 @@ int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev, unsigned vport_id,
 }
 EXPORT_SYMBOL(efx_dl_vport_filter_insert);
 
-int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev, unsigned vport_id,
+int efx_dl_vport_filter_remove(struct efx_dl_device *efx_dev,
+			       unsigned int vport_id,
 			       u64 filter_id, bool is_exclusive)
 {
 	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;

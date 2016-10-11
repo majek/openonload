@@ -59,8 +59,6 @@ extern "C" {
 
 /*! \brief Memory that has been registered for use with ef_vi */
 typedef struct ef_memreg {
-  /** Resource ID of the memory region */
-  unsigned mr_resource_id;
   /** Addresses of DMA buffers within the reserved system memory */
   ef_addr* mr_dma_addrs;
   /** Base addresses of reserved system memory */

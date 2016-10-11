@@ -39,7 +39,7 @@
 *//*
 \**************************************************************************/
 
-#include <onload/cplane.h>
+#include <cplane/exported.h>
 #include <onload/debug.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/driverlink_filter.h>
@@ -67,7 +67,7 @@ int oof_all_ports_required = 1;
 
 static struct efrm_client* get_client(int hwport)
 {
-  ci_assert((unsigned) hwport < CI_CFG_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
   return oo_nics[hwport].efrm_client;
 }
 
@@ -80,7 +80,7 @@ void oo_hw_filter_init2(struct oo_hw_filter* oofilter,
   oofilter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
   oofilter->trs = trs;
   oofilter->thc = thc;
-  for( i = 0; i < CI_CFG_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
     oofilter->filter_id[i] = -1;
 }
 
@@ -94,7 +94,7 @@ void oo_hw_filter_init(struct oo_hw_filter* oofilter)
 static void oo_hw_filter_clear_hwport(struct oo_hw_filter* oofilter,
                                       int hwport)
 {
-  ci_assert((unsigned) hwport < CI_CFG_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
   if( oofilter->filter_id[hwport] >= 0 ) {
     efrm_filter_remove(get_client(hwport), oofilter->filter_id[hwport]);
     oofilter->filter_id[hwport] = -1;
@@ -107,13 +107,13 @@ void oo_hw_filter_clear(struct oo_hw_filter* oofilter)
   int hwport;
 
   if( oofilter->trs != NULL || oofilter->thc != NULL ) {
-    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
       oo_hw_filter_clear_hwport(oofilter, hwport);
     oofilter->trs = NULL;
     oofilter->thc = NULL;
   }
   else {
-    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
       ci_assert(oofilter->filter_id[hwport] < 0);
   }
 }
@@ -125,7 +125,7 @@ void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
   int hwport;
 
   if( redirect || oofilter->trs != NULL || oofilter->thc != NULL )
-    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
       if( hwport_mask & (1 << hwport) )
         oo_hw_filter_clear_hwport(oofilter, hwport);
 }
@@ -284,7 +284,7 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
   if( (src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT) == 0 )
     ci_assert_nequal(oofilter->trs != NULL, oofilter->thc != NULL);
 
-  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
     if( (hwport_mask & (1u << hwport)) && oofilter->filter_id[hwport] < 0 ) {
       /* If we've been told to set the vlan when installing the filter on this
        * port then use provided vlan_id, otherwise use OO_HW_VLAN_UNSPEC.
@@ -353,7 +353,7 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
 
   oo_hw_filter_clear_hwports(oofilter, ~hwport_mask, redirect);
 
-  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
     if( hwport_mask & (1 << hwport) ) {
       /* has the target stack got hwport */
       if( drop_hwport_mask & (1 << hwport) ||
@@ -436,7 +436,7 @@ void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
 
   ci_assert_equal(oofilter_old->trs, oofilter_new->trs);
 
-  for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
     if( (hwport_mask & (1u << hwport)) &&
         oofilter_old->filter_id[hwport] >= 0 ) {
       ci_assert(oofilter_new->filter_id[hwport] < 0);
@@ -452,7 +452,7 @@ unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter)
   int hwport;
 
   if( oofilter->trs != NULL || oofilter->thc != NULL )
-    for( hwport = 0; hwport < CI_CFG_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
       if( oofilter->filter_id[hwport] >= 0 )
         hwport_mask |= 1 << hwport;
   return hwport_mask;

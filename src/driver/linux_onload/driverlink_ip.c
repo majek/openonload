@@ -29,10 +29,9 @@
 
 #include <ci/internal/ip.h>
 #include <onload/driverlink_filter.h>
-#include <onload/cplane.h>
+#include <cplane/exported.h>
 #include <driver/linux_net/driverlink_api.h>
 #include <onload/linux_onload_internal.h>
-#include <ci/internal/cplane_handle.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/nic.h>
 #include <onload/oof_interface.h>
@@ -82,7 +81,7 @@ static inline u16 vlan_dev_vlan_id(const struct net_device *dev)
 #endif
 
 
-#if CI_CFG_TEAMING
+#if CPLANE_TEAMING
 # ifdef IFF_BONDING
 #  define NETDEV_IS_BOND_MASTER(_dev)                                   \
   ((_dev->flags & (IFF_MASTER)) && (_dev->priv_flags & IFF_BONDING))
@@ -104,7 +103,7 @@ static inline int oo_nf_dev_match(const struct net_device *net_dev)
   if( net_dev->priv_flags & IFF_802_1Q_VLAN )
     net_dev = vlan_dev_real_dev(net_dev);
 
-#if CI_CFG_TEAMING
+#if CPLANE_TEAMING
   /* We should return 1 for accelerated bond or team interface.
    * There is no easy way to check if an interface is team or not,
    * so we just look into the cplane llap table and see if this llap is
@@ -152,54 +151,96 @@ static int oo_nf_skb_get_payload(struct sk_buff* skb, void** pdata, int* plen)
 #endif
 
 
-static unsigned int oo_netfilter_arp(
-#ifdef EFRM_HAVE_NETFILTER_HOOK_STATE
-                                     const struct nf_hook_ops* ops,
-                                     struct sk_buff* skb,
-#ifdef EFRM_HAVE_NETFILTER_INDEV_OUTDEV
-                                     const struct net_device* indev,
-                                     const struct net_device* outdev,
+#if defined(FUTURE_LINUX_RELEASE)
+        /* put future variants here */
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+        /* Linux >= 4.4 : nf_hook_ops were replaced by void;
+         * it is too hard to detect this from kernel_compat.sh */
+# define NFHOOK_PARAMS \
+    void *priv,         \
+    struct sk_buff* skb,\
+    const struct nf_hook_state *state
+# define nfhook_skb skb
+# define nfhook_indev state->in
+#elif  defined(EFRM_HAVE_NETFILTER_HOOK_STATE) && \
+      !defined(EFRM_HAVE_NETFILTER_INDEV_OUTDEV)
+        /* linux < 4.4 */
+# define NFHOOK_PARAMS \
+    const struct nf_hook_ops* ops,  \
+    struct sk_buff* skb,            \
+    const struct nf_hook_state *state
+# define nfhook_skb skb
+# define nfhook_indev state->in
+#elif defined(EFRM_HAVE_NETFILTER_HOOK_STATE) && \
+      defined(EFRM_HAVE_NETFILTER_INDEV_OUTDEV)
+        /* RHEL7 3.10 */
+# define NFHOOK_PARAMS \
+    const struct nf_hook_ops* ops,  \
+    struct sk_buff* skb,            \
+    const struct net_device* indev, \
+    const struct net_device* outdev,\
+    const struct nf_hook_state *state
+# define nfhook_skb skb
+# define nfhook_indev indev
+#elif !defined(EFRM_HAVE_NETFILTER_HOOK_STATE) && \
+       defined(EFRM_HAVE_NETFILTER_HOOK_OPS)
+        /* linux < 4.1 */
+# define NFHOOK_PARAMS \
+    const struct nf_hook_ops* ops,  \
+    struct sk_buff* skb,            \
+    const struct net_device* indev, \
+    const struct net_device* outdev,\
+    int (*okfn)(struct sk_buff*)
+# define nfhook_skb skb
+# define nfhook_indev indev
+#elif !defined(EFRM_HAVE_NETFILTER_HOOK_STATE) && \
+      !defined(EFRM_HAVE_NETFILTER_HOOK_OPS) && \
+      !defined(EFRM_HAVE_NETFILTER_INDIRECT_SKB)
+        /* linux < 3.13 */
+# define NFHOOK_PARAMS \
+    unsigned int hooknum,           \
+    struct sk_buff* skb,            \
+    const struct net_device* indev, \
+    const struct net_device* outdev,\
+    int (*okfn)(struct sk_buff*)
+# define nfhook_skb skb
+# define nfhook_indev indev
+#elif !defined(EFRM_HAVE_NETFILTER_HOOK_STATE) && \
+      !defined(EFRM_HAVE_NETFILTER_HOOK_OPS) && \
+       defined(EFRM_HAVE_NETFILTER_INDIRECT_SKB)
+        /* linux < 2.6.24 */
+# define NFHOOK_PARAMS \
+    unsigned int hooknum,           \
+    struct sk_buff** pskb,          \
+    const struct net_device* indev, \
+    const struct net_device* outdev,\
+    int (*okfn)(struct sk_buff*)
+# define nfhook_skb (*pskb)
+# define nfhook_indev indev
 #else
-#define indev state->in
+# error "Unsupported kernel version"
 #endif
-                                     const struct nf_hook_state *state
-#else
-#ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
-                                     const struct nf_hook_ops* ops,
-                                     struct sk_buff* skb,
-#else
-                                     unsigned int hooknum,
-#ifdef EFRM_HAVE_NETFILTER_INDIRECT_SKB
-        /* this is the oldest case, linux<2.6.24 */
-                                     struct sk_buff** pskb,
-#define skb (*pskb)
-#else
-                                     struct sk_buff* skb,
-#endif
-#endif
-                                     const struct net_device* indev,
-                                     const struct net_device* outdev,
-                                     int (*okfn)(struct sk_buff*)
-#endif
-                                     )
+
+
+
+static unsigned int oo_netfilter_arp(NFHOOK_PARAMS)
 
 {
   void* data;
   int len;
 
-  if( oo_nf_dev_match(indev) &&
-      oo_nf_skb_get_payload(skb, &data, &len) &&
+  if( oo_nf_dev_match(nfhook_indev) &&
+      oo_nf_skb_get_payload(nfhook_skb, &data, &len) &&
       len >= sizeof(ci_ether_arp) ) {
     cicppl_handle_arp_pkt(&CI_GLOBAL_CPLANE,
-                          (ci_ether_hdr*) skb_mac_header(skb),
+                          (ci_ether_hdr*) skb_mac_header(nfhook_skb),
                           (ci_ether_arp*) data,
-                          indev->ifindex, indev->flags & IFF_SLAVE);
+                          nfhook_indev->ifindex,
+                          nfhook_indev->flags & IFF_SLAVE);
   }
 
   return NF_ACCEPT;
 }
-#undef indev
-#undef skb
 
 
 #ifndef CONFIG_NETFILTER
@@ -209,7 +250,9 @@ static unsigned int oo_netfilter_arp(
 
 static struct nf_hook_ops oo_netfilter_arp_hook = {
   .hook = oo_netfilter_arp,
+#ifdef EFRM_HAVE_NETFILTER_OPS_HAVE_OWNER
   .owner = THIS_MODULE,
+#endif
 #ifdef EFX_HAVE_NFPROTO_CONSTANTS
   .pf = NFPROTO_ARP,
 #else
@@ -218,57 +261,28 @@ static struct nf_hook_ops oo_netfilter_arp_hook = {
   .hooknum = NF_ARP_IN,
 };
 
-static unsigned int oo_netfilter_ip(
-#ifdef EFRM_HAVE_NETFILTER_HOOK_STATE
-                                     const struct nf_hook_ops* ops,
-                                     struct sk_buff* skb,
-#ifdef EFRM_HAVE_NETFILTER_INDEV_OUTDEV
-                                     const struct net_device* indev,
-                                     const struct net_device* outdev,
-#else
-#define indev state->in
-#endif
-                                     const struct nf_hook_state *state
-#else
-#ifdef EFRM_HAVE_NETFILTER_HOOK_OPS
-                                     const struct nf_hook_ops* ops,
-                                     struct sk_buff* skb,
-#else
-                                     unsigned int hooknum,
-#ifdef EFRM_HAVE_NETFILTER_INDIRECT_SKB
-        /* this is the oldest case, linux<2.6.24 */
-                                     struct sk_buff** pskb,
-#define skb (*pskb)
-#else
-                                     struct sk_buff* skb,
-#endif
-#endif
-                                     const struct net_device* indev,
-                                     const struct net_device* outdev,
-                                     int (*okfn)(struct sk_buff*)
-#endif
-                                    )
+static unsigned int oo_netfilter_ip(NFHOOK_PARAMS)
 {
   void* data;
   int len;
 
-  if( oo_nf_dev_match(indev) &&
-      oo_nf_skb_get_payload(skb, &data, &len) &&
-      efx_dlfilter_handler(indev->ifindex, efab_tcp_driver.dlfilter,
-                           (const ci_ether_hdr*) skb_mac_header(skb),
+  if( oo_nf_dev_match(nfhook_indev) &&
+      oo_nf_skb_get_payload(nfhook_skb, &data, &len) &&
+      efx_dlfilter_handler(nfhook_indev->ifindex, efab_tcp_driver.dlfilter,
+                           (const ci_ether_hdr*) skb_mac_header(nfhook_skb),
                            data, len) ) {
-    kfree_skb(skb);
+    kfree_skb(nfhook_skb);
     return NF_STOLEN;
   } else {
     return NF_ACCEPT;
   }
 }
-#undef indev
-#undef skb
 
 static struct nf_hook_ops oo_netfilter_ip_hook = {
   .hook = oo_netfilter_ip,
+#ifdef EFRM_HAVE_NETFILTER_OPS_HAVE_OWNER
   .owner = THIS_MODULE,
+#endif
 #ifdef EFX_HAVE_NFPROTO_CONSTANTS
   .pf = NFPROTO_IPV4,
 #else
@@ -293,8 +307,6 @@ static void cplane_add(struct oo_nic* onic)
   int oo_nic_i = onic - oo_nics;
   ci_hwport_id_t hwport = CI_HWPORT_ID(oo_nic_i);
   cicp_encap_t encapsulation;
-
-  cicp_hwport_add_nic(&CI_GLOBAL_CPLANE, hwport);
 
   encapsulation.type = CICP_LLAP_TYPE_SFC;
   encapsulation.vlan_id = 0;
@@ -413,8 +425,6 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
   struct net_device* netdev = dl_dev->priv;
   struct oo_nic* onic;
   if( (onic = oo_nic_find_ifindex(netdev->ifindex)) != NULL ) {
-    int hwport = onic - oo_nics;
-
     /* Filter status need to be synced as after this function is finished
      * no further operations will be allowed.
      * Also note on polite hotplug oo_dl_remove() is called before
@@ -423,20 +433,18 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
      */
     oof_hwport_up_down(oo_nic_hwport(onic), 0, 0, 0, 1);
 
-    /* We need to prevent simultaneous resets so that the queues that we are
-     * shutting down don't get brought back up again.  We do this by disabling
-     * any further scheduling of resets, and then flushing any already
-     * scheduled on each stack. */
+    /* We need to prevent simultaneous resets so that the queues that are to be
+     * shut down don't get brought back up again.  We do this by disabling any
+     * further scheduling of resets, and then flushing any already scheduled on
+     * each stack. */
     efrm_client_disable_post_reset(onic->efrm_client);
 
     onic->oo_nic_flags |= OO_NIC_UNPLUGGED;
-    while( iterate_netifs_unlocked(&ni) == 0 ) {
+    while( iterate_netifs_unlocked(&ni) == 0 )
       tcp_helper_flush_resets(ni);
-      tcp_helper_shutdown_vi(ni, hwport);
-    }
 
-    /* Some queues may belong to stacks under construction or destruction
-     * These have not been flushed above and are dealt with in erm_dl_remove. */
+    /* The actual business of flushing the queues will be handled by the
+     * resource driver in its own driverlink removal hook in a moment. */
   }
 }
 
@@ -478,36 +486,42 @@ static void oo_fixup_wakeup_breakage(int ifindex)
 static void oo_netdev_up(struct net_device* netdev)
 {
   struct oo_nic *onic;
+  struct efhw_nic* efhw_nic;
   /* Does efrm own this device? */
   if( efrm_nic_present(netdev->ifindex) ) {
     /* oo_netdev_may_add may trigger oof_hwport_up_down only
      * once on probe time */
     onic = oo_netdev_may_add(netdev);
-    oo_fixup_wakeup_breakage(netdev->ifindex);
-    onic->oo_nic_flags |= OO_NIC_UP;
-    oof_hwport_up_down(oo_nic_hwport(onic), 1, 0, 0, 0);
+    if( onic != NULL ) {
+      oo_fixup_wakeup_breakage(netdev->ifindex);
+      onic->oo_nic_flags |= OO_NIC_UP;
+      efhw_nic = efrm_client_get_nic(onic->efrm_client);
+      oof_hwport_up_down(oo_nic_hwport(onic), 1,
+                         efhw_nic->devtype.arch == EFHW_ARCH_EF10 ? 1:0,
+                         efhw_nic->flags & NIC_FLAG_VLAN_FILTERS, 0);
+    }
   }
   else if( oo_use_vlans && (netdev->priv_flags & IFF_802_1Q_VLAN) ) {
     cicp_encap_t encap;
 
     if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
                                     &encap) != 0 )
-      cicpos_llap_import(&CI_GLOBAL_CPLANE, NULL, netdev->ifindex, 
-                         netdev->mtu, 1, CICP_LLAP_TYPE_VLAN,
-                         netdev->name, NULL, NULL);
+      cicp_llap_import(&CI_GLOBAL_CPLANE, netdev->ifindex, 
+                       netdev->mtu, CICP_LLAP_TYPE_VLAN,
+                       netdev->name);
     cicp_llap_set_vlan(&CI_GLOBAL_CPLANE, netdev->ifindex, 
                        vlan_dev_real_dev(netdev)->ifindex,
                        vlan_dev_vlan_id(netdev));
   }
-#if CI_CFG_TEAMING
+#if CPLANE_TEAMING
   else if( NETDEV_IS_BOND_MASTER(netdev) ) {
     cicp_encap_t encap;
 
     if( cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, netdev->ifindex,
                                     &encap) != 0 ) {
-      cicpos_llap_import(&CI_GLOBAL_CPLANE, NULL, netdev->ifindex,
-                         netdev->mtu, 1, CICP_LLAP_TYPE_BOND,
-                         netdev->name, NULL, NULL);
+      cicp_llap_import(&CI_GLOBAL_CPLANE, netdev->ifindex,
+                       netdev->mtu, CICP_LLAP_TYPE_BOND,
+                       netdev->name);
     }
     else {
       OO_DEBUG_BONDING(ci_log("NETDEV_UP changing encap on %d from %x to %x",
@@ -539,7 +553,7 @@ static void oo_netdev_going_down(struct net_device* netdev)
     cicp_llap_set_hwport(&CI_GLOBAL_CPLANE, netdev->ifindex,
                          CI_HWPORT_ID_BAD, NULL);
   }
-#if CI_CFG_TEAMING
+#if CPLANE_TEAMING
     if( NETDEV_IS_BOND(netdev) )
       ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);
 #endif
@@ -565,7 +579,7 @@ static int oo_netdev_event(struct notifier_block *this,
     oo_fixup_wakeup_breakage(netdev->ifindex);
     break;
 
-#if CI_CFG_TEAMING && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+#if CPLANE_TEAMING && LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
   case NETDEV_BONDING_FAILOVER:
     ci_bonding_set_timer_period(oo_bond_poll_peak, oo_bond_peak_polls);
     break;
@@ -630,17 +644,12 @@ int oo_driverlink_register(void)
 }
 
 
-void oo_driverlink_unregister_nf(void)
+void oo_driverlink_unregister(void)
 {
   nf_unregister_hook(&oo_netfilter_ip_hook);
   nf_unregister_hook(&oo_netfilter_arp_hook);
   unregister_netdevice_notifier(&oo_netdev_notifier);
-}
-
-void oo_driverlink_unregister_dl(void)
-{
   efx_dl_unregister_driver(&oo_dl_driver);
 }
-
 
 /*! \cidoxg_end */

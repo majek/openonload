@@ -1173,15 +1173,6 @@ static void falcon_nic_close_hardware(struct efhw_nic *nic)
 	falcon_buffer_table_dtor(nic);
 }
 
-#ifndef __ci_ul_driver__
-static
-#endif
-int falcon_nic_get_mac_config(struct efhw_nic *nic)
-{
-	nic->flags |= NIC_FLAG_10G;
-	return 0;
-}
-
 
 static void
 falcon_nic_tweak_hardware(struct efhw_nic *nic)
@@ -1198,6 +1189,22 @@ falcon_nic_tweak_hardware(struct efhw_nic *nic)
 }
 
 
+static void
+falcon_nic_init_capabilities(struct efhw_nic* nic)
+{
+	/* Capabilities are fixed on falcon */
+	nic->flags |= NIC_FLAG_PHYS_MODE | NIC_FLAG_BUFFER_MODE |
+		      NIC_FLAG_NIC_PACE |
+		      NIC_FLAG_RX_FILTER_TYPE_IP_LOCAL |
+		      NIC_FLAG_RX_FILTER_TYPE_IP_FULL |
+		      NIC_FLAG_RX_FILTER_TYPE_ETH_LOCAL |
+		      NIC_FLAG_RX_FILTER_TYPE_UCAST_ALL |
+		      NIC_FLAG_RX_FILTER_TYPE_MCAST_ALL |
+		      NIC_FLAG_MAC_SPOOFING;
+
+}
+
+
 static int
 falcon_nic_init_hardware(struct efhw_nic *nic,
 			 struct efhw_ev_handler *ev_handlers,
@@ -1210,12 +1217,10 @@ falcon_nic_init_hardware(struct efhw_nic *nic,
 	/* header sanity checks */
 	FALCON_ASSERT_VALID();
 
-	rc = falcon_nic_get_mac_config(nic);
-	if (rc < 0)
-		return rc;
-
 	/* Initialise the top level hardware blocks */
 	memcpy(nic->mac_addr, mac_addr, ETH_ALEN);
+
+	falcon_nic_init_capabilities(nic);
 
 	EFHW_TRACE("%s:", __FUNCTION__);
 
@@ -1278,13 +1283,12 @@ falcon_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 			      uint buf_base_id, dma_addr_t *dma_addrs, 
 			      uint n_pages, int interrupting, int enable_dos_p,
 			      int wakeup_evq /* ef10 only */,
-			      int enable_time_sync_events /* ef10 only */,
-			      int enable_cut_through /* ef10 only */,
+			      int flags /* ef10 only */,
 			      int* flags_out /* ef10 only */)
 {
 	EFHW_ASSERT(nic);
 
-	if (enable_time_sync_events)
+	if (flags & (EFHW_VI_RX_TIMESTAMPS | EFHW_VI_TX_TIMESTAMPS))
 		return -EOPNOTSUPP;
 
 	if (nic->devtype.variant < 'C')
@@ -1781,6 +1785,24 @@ static int falcon_license_check(struct efhw_nic *nic, const uint32_t feature,
 	return -EOPNOTSUPP;
 }
 
+static int falcon_v3_license_challenge(struct efhw_nic *nic,
+				    const uint64_t app_id,
+				    const uint8_t* challenge,
+				    uint32_t* expiry,
+				    uint32_t* days,
+				    uint8_t* signature,
+				    uint8_t* base_mac,
+				    uint8_t* v_mac)
+{
+	return -EOPNOTSUPP;
+}
+
+
+static int falcon_v3_license_check(struct efhw_nic *nic, uint64_t feature,
+				   int* licensed)
+{
+	return -EOPNOTSUPP;
+}
 
 /*--------------------------------------------------------------------
  *
@@ -1864,6 +1886,23 @@ falcon_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 }
 
 
+static int
+falcon_tx_alt_alloc(struct efhw_nic *nic, int tx_q_id, int num_alt,
+		    int num_32b_words, unsigned *cp_id_out,
+		    unsigned *alt_ids_out)
+{
+	return -EOPNOTSUPP;
+}
+
+
+static int
+falcon_tx_alt_free(struct efhw_nic *nic, int num_alt, unsigned cp_id,
+		   const unsigned *alt_ids)
+{
+	return -EOPNOTSUPP;
+}
+
+
 /*--------------------------------------------------------------------
  *
  * Abstraction Layer Hooks
@@ -1903,5 +1942,9 @@ struct efhw_func_ops falcon_char_functional_units = {
 	falcon_nic_rss_context_set_flags,
 	falcon_license_challenge,
 	falcon_license_check,
+	falcon_v3_license_challenge,
+	falcon_v3_license_check,
 	falcon_get_rx_error_stats,
+	falcon_tx_alt_alloc,
+	falcon_tx_alt_free,
 };

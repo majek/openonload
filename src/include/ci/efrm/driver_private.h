@@ -104,7 +104,8 @@ struct vi_resource_dimensions {
 	unsigned rss_channel_count;
 
 	/* EF10 Only */
-	unsigned vi_min, vi_lim, vi_base;
+	unsigned vi_min, vi_lim;
+	unsigned vi_base, vi_shift;
 	unsigned vport_id;
 
 	/* SRIOV Only */

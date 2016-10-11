@@ -1,0 +1,122 @@
+/****************************************************************************
+ * Copyright 2004-2005: Level 5 Networks Inc.
+ * Copyright 2005-2016: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/**************************************************************************\
+*//*! \file
+** \author    Solarflare Communications, Inc.
+** \brief     Additional Doxygen-format documentation for TCPDirect.
+** \date      2016/05/20
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
+**            are trademarks of Solarflare Communications, Inc.
+*//*
+\**************************************************************************/
+
+/**************************************************************************
+ * Concepts page
+ *************************************************************************/
+ /*! \page concepts Concepts
+
+This part of the documentation describes the concepts involved in TCPDirect.
+
+\section concepts_stacks Stacks
+
+TCPDirect can have multiple network stacks. Each stack accesses a separate 
+partition of the network adaptor, and uses its own CPU core. This improves 
+security and scalability.
+
+\section concepts_endpoints Endpoints
+
+TCPDirect endpoints are usually represented as a _zocket_. Zockets are 
+similar to BSD or POSIX sockets, but are categorized by protocol and state 
+into different zocket types.
+
+Each type of zocket is represented by its own distinct data structure, and is 
+handled by its own API calls. Because the type of zocket is known, code can 
+be more efficient.
+
+Zockets cannot be converted from one type to another.
+
+\subsection concepts_tcp_endpoints TCP endpoints
+
+For TCP, a new zocket can be listening or non-listening:
+- a listening zocket is represented by a _TCP listening zocket_ data 
+  structure
+- a non-listening zocket is represented by a _TCP zocket handle_.
+
+If the zocket is later connected, a _TCP zocket_ data structure is created 
+and returned. This occurs if:
+- a connection to a TCP listening zocket is accepted
+- a TCP zocket handle is connected.
+
+\subsection concepts_udp_endpoints UDP endpoints
+
+For UDP, a zocket can be used to receive or transmit:
+- a receive zocket is represented by a _UDP receive zocket_ data structure
+- a transmit zocket is represented by a _UDP transmit zocket_ data structure
+
+\subsection concepts_waitables Waitables
+
+The multiplexer uses a _waitable_ endpoint. This is a single structure that 
+can represent any type of zocket.
+
+Each type of zocket has an API call to return a waitable representing the 
+zocket.
+
+See \ref concepts_multiplexer for more details.
+
+\section concepts_multiplexer The multiplexer
+
+The _multiplexer_ allows multiple zockets to be polled in a single operation, 
+similar to using epoll() .
+
+The multiplexer uses _multiplexer sets_ to contain zockets that are to be 
+polled together.
+
+A _waitable_ must be created to represent each zocket for polling.
+
+The waitables that are to be polled together must then be added to the same 
+_multiplexer set_. There are some restrictions:
+- each waitable in a set must come from the same stack
+- no waitable in a set can be in another set.
+
+The multiplexer set can then be polled. This returns a list of endpoints and 
+events that have become ready since the previous poll was made.
+
+\note Waitables cannot be created from a zocket handle (i.e. from a TCP 
+endpoint that is neither listening nor connected). These endpoints cannot be 
+polled.
+
+\section concepts_tx_alternatives TX alternatives
+
+_TX alternatives_ provide multiple alternative queues for transmission, that 
+can be used to minimize latency. Different possible responses can be pushed 
+through the TX path on the NIC, and held in different queues ready to 
+transmit. When it is decided which response to transmit, the appropriate 
+alternative queue is selected, and the queued packets are sent. Becasue the 
+packets are already prepared, and are held close to the wire, latency is 
+greatly reduced. 
+
+*/

@@ -87,7 +87,7 @@ int efrm_pio_realloc(struct efrm_pd *pd, struct efrm_pio *pio,
 	}
 
 	EFRM_ASSERT(pio->epio_pd == pd);
-	EFRM_ASSERT(pio->epio_len == 2048);
+	EFRM_ASSERT(pio->epio_len == nic->pio_size);
 
 	pio->epio_handle = 0;
 
@@ -147,7 +147,7 @@ int efrm_pio_alloc(struct efrm_pd *pd, struct efrm_pio **pio_out)
 	memset(pio, 0, sizeof(*pio));
 
 	pio->epio_pd = pd;
-	pio->epio_len = 2048;
+	pio->epio_len = nic->pio_size;
 
 	rc = ef10_nic_piobuf_alloc(nic, &pio->epio_handle);
 	if (rc < 0) {
@@ -214,7 +214,7 @@ int efrm_pio_unlink_vi(struct efrm_pio *pio, struct efrm_vi *vi)
 	/* Unlink can fail if the associated txq has already been
 	 * flushed. */
 	rc = ef10_nic_piobuf_unlink(nic, vi->rs.rs_instance);
-	efrm_pio_release(pio);
+	efrm_pio_release(pio, rc != -EALREADY);
 	vi->pio = NULL;
 
 	return rc;
@@ -222,22 +222,27 @@ int efrm_pio_unlink_vi(struct efrm_pio *pio, struct efrm_vi *vi)
 EXPORT_SYMBOL(efrm_pio_unlink_vi);
 
 
-void efrm_pio_free(struct efrm_pio *pio)
+void efrm_pio_free_buffer(struct efrm_pio *pio)
 {
 	struct efhw_nic *nic;
 	int rc;
 
 	nic = pio->epio_rs.rs_client->nic;
 
-	/* If the epio_handle has been marked as bad, don't try to
-	 * free the non-existent hardware resources 
-	 */
-	if (pio->epio_handle != -1) {
-		rc = ef10_nic_piobuf_free(nic, pio->epio_handle);
+	rc = ef10_nic_piobuf_free(nic, pio->epio_handle);
 		if (rc < 0)
 			EFRM_ERR("%s: ef10_nic_piobuf_free failed: %d\n",
 				 __FUNCTION__, rc);
-	}
+}
+
+
+void efrm_pio_free(struct efrm_pio *pio, bool free_piobuf)
+{
+	/* If the epio_handle has been marked as bad, don't try to
+	 * free the non-existent hardware resources 
+	 */
+	if (free_piobuf && pio->epio_handle != -1)
+		efrm_pio_free_buffer(pio);
 
 	efrm_pd_release(pio->epio_pd);
 	efrm_client_put(pio->epio_rs.rs_client);
@@ -245,10 +250,10 @@ void efrm_pio_free(struct efrm_pio *pio)
 }
 
 
-void efrm_pio_release(struct efrm_pio *pio)
+void efrm_pio_release(struct efrm_pio *pio, bool free_piobuf)
 {
 	if (__efrm_resource_release(efrm_pio_to_resource(pio)))
-		efrm_pio_free(pio);
+		efrm_pio_free(pio, free_piobuf);
 }
 EXPORT_SYMBOL(efrm_pio_release);
 

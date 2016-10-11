@@ -68,3 +68,22 @@ int efrm_license_challenge(struct efrm_resource *rs,
 }
 
 EXPORT_SYMBOL(efrm_license_challenge);
+
+int efrm_v3_license_challenge(struct efrm_resource *rs,
+                              struct efrm_v3_license_challenge_s *s) {
+  struct efrm_nic* rm_nic;
+
+  EFRM_ASSERT(rs);
+  EFRM_ASSERT(s);
+
+  rm_nic = efrm_nic_from_rs(rs);
+  EFRM_ASSERT(rm_nic);
+
+  return efhw_nic_v3_license_challenge(&rm_nic->efhw_nic, s->app_id,
+                                       s->challenge, &s->expiry, &s->days,
+                                       s->signature, s->base_macaddr,
+                                       s->vadaptor_macaddr);
+}
+
+EXPORT_SYMBOL(efrm_v3_license_challenge);
+

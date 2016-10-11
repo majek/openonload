@@ -103,7 +103,6 @@ struct ci_netif_s {
   /* Use ci_netif_get_driver_handle() rather than this directly. */
   ef_driver_handle     driver_handle;
   unsigned             mmap_bytes;
-  char*                cplane_ptr;
   char*                io_ptr;
 #if CI_CFG_PIO
   uint8_t*             pio_ptr;
@@ -113,24 +112,23 @@ struct ci_netif_s {
 #endif
 
 #ifdef __ci_driver__
-  ci_int8              hwport_to_intf_i[CI_CFG_MAX_REGISTER_INTERFACES];
+  ci_int8              hwport_to_intf_i[CPLANE_MAX_REGISTER_INTERFACES];
   ci_int8              intf_i_to_hwport[CI_CFG_MAX_INTERFACES];
   uid_t                uid;
   uid_t                euid;
-# ifdef CI_HAVE_OS_NOPAGE
   ci_shmbuf_t          pages_buf;
-# else
-  ci_shmbuf_t**        k_shmbufs;
-  unsigned             k_shmbufs_n;
-# endif
-#else
-# ifndef CI_HAVE_OS_NOPAGE
-  void **              u_shmbufs;
-# endif
 #endif
 
 
-  cicp_ni_t            cplane;
+#ifndef __KERNEL__
+  cicp_handle_t        *cplane;
+
+  /* Currently, we do not use timesync from the common code (i.e. from the
+   * code which is compiled in both kernel and user space.
+   * So, kernel code uses efab_tcp_driver.timesync,
+   * and UL code uses ni->timesync. */
+  struct oo_timesync   *timesync;
+#endif
     
 #ifdef __KERNEL__
   /** eplock resource. Note that this has the SAME lifetime as [lock]. 
@@ -233,6 +231,7 @@ struct ci_netif_s {
    * overflow. */
   ef_event      events[16];
   ef_request_id tx_events[EF_VI_TRANSMIT_BATCH];
+  ef_request_id rx_events[EF_VI_RECEIVE_BATCH];
   /* See also copy in ci_netif_state. */
   unsigned      error_flags;
 

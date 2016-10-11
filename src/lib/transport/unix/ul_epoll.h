@@ -165,6 +165,14 @@ struct citp_epoll_fd {
 
   ci_netif* home_stack;
   int ready_list;
+
+  /* When using WODA with large numbers of sockets performance can be harmed
+   * by repeated large alloc/free calls, so we cache memory allocated for this
+   * purpose.
+   */
+  struct citp_ordering_info* ordering_info;
+  struct epoll_event* wait_events;
+  int n_woda_events;
 };
 
 

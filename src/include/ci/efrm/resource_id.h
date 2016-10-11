@@ -68,7 +68,7 @@
 	 (type) == EFRM_RESOURCE_MEMREG?	"MEMREG"	: \
 	 (type) == EFRM_RESOURCE_PD?		"PD"		: \
 	 (type) == EFRM_RESOURCE_PIO?		"PIO"		: \
-						"<invalid>")
+						"<invalid>"
 
 
 #endif /* __CI_DRIVER_EFRM_RESOURCE_ID_H__ */

@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2015: Solarflare Communications Inc,
+ * Copyright 2005-2016: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -27,8 +27,8 @@
 *//*! \file
 ** \author    Solarflare Communications, Inc.
 ** \brief     Additional Doxygen-format documentation for ef_vi.
-** \date      2015/02/14
-** \copyright Copyright &copy; 2015 Solarflare Communications, Inc. All
+** \date      2016/06/13
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
 **            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
 **            are trademarks of Solarflare Communications, Inc.
 *//*
@@ -40,14 +40,14 @@
 /*! \page example Worked Example
 
 This part of the documentation examines a simplified version of \ref 
-efpingpong. This is a small application which listens for packets and 
+eflatency. This is a small application which listens for packets and 
 replies, with as low latency as possible.
 
 This documentation discusses the tradeoffs that have been chosen, some 
 performance issues to avoid, and some possible additions that have been 
 omitted for clarity.
 
-See also the supplied code for \ref efpingpong , which includes many of 
+See also the supplied code for \ref eflatency , which includes many of 
 these improvements.
 
 \section example_setup Setup
@@ -72,8 +72,7 @@ static void do_init(int ifindex){
 The following improvements could be made:
 - check the return values from these functions, in case the card has run 
   out of resources and is unable to allocate more virtual interfaces
-- offer physical buffer mode here (see the supplied \ref efpingpong sample
-  code).
+- offer physical buffer mode here.
 
 \section example_buffers Creating Packet buffers
 

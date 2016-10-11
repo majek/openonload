@@ -394,7 +394,7 @@ struct siena_nic_data {
 #ifdef CONFIG_SFC_SRIOV
 	struct siena_vf *vf;
 	struct efx_channel *vfdi_channel;
-	unsigned vf_rtnl_count;
+	unsigned int vf_rtnl_count;
 	struct efx_buffer vfdi_status;
 	struct list_head local_addr_list;
 	struct list_head local_page_list;
@@ -489,6 +489,7 @@ enum {
 
 /**
  * struct efx_ef10_nic_data - EF10 architecture NIC state
+ * @efx: Pointer back to main interface structure
  * @mcdi_buf: DMA buffer for MCDI
  * @warm_boot_count: Last seen MC warm boot count
  * @vi_base: Absolute index of first VI in this function
@@ -500,19 +501,26 @@ enum {
  * @pio_write_base: Base address for writing PIO buffers
  * @pio_write_vi_base: Relative VI number for @pio_write_base
  * @piobuf_handle: Handle of each PIO buffer allocated
+ * @piobuf_size: size of a single PIO buffer
  * @must_restore_piobufs: Flag: PIO buffers have yet to be restored after MC
  *	reboot
  * @rx_rss_context: Firmware handle for our RSS context
  * @rx_rss_context_exclusive: Whether our RSS context is exclusive or shared
  * @stats: Hardware statistics
+ * @vf_stats_work: Work item to poll hardware statistics (VF driver only)
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
+ * @vf_stats_enabled: Marker to avoid stats work rearming if
+ *	cancel_delayed_work_sync() is not availble. Serialized by stats_lock.
+#endif
  * @workaround_35388: Flag: firmware supports workaround for bug 35388
  * @workaround_26807: Flag: firmware supports workaround for bug 26807
+ * @workaround_61265: Flag: firmware supports workaround for bug 61265
  * @must_check_datapath_caps: Flag: @datapath_caps needs to be revalidated
  *	after MC reboot
  * @datapath_caps: Capabilities of datapath firmware (FLAGS1 field of
  *	%MC_CMD_GET_CAPABILITIES response)
- * @rx_dpcpu_fw_id: Firmware ID of the RxDPCPU
- * @tx_dpcpu_fw_id: Firmware ID of the TxDPCPU
+ * @datapath_caps2: Further capabilities of datapath firmware (FLAGS2 field of
+ *	%MC_CMD_GET_CAPABILITIES_V2 response)
  * @vport_id: The function's vport ID, only relevant for PFs
  * @must_probe_vswitching: Flag: vswitching has yet to be setup after MC reboot
  * @pf_index: The number for this PF, or the parent PF if this is a VF
@@ -520,8 +528,15 @@ enum {
  * @vf: Pointer to VF data structure
 #endif
  * @vport_mac: The MAC address on the vport, only for PFs; VFs will be zero
+ * @vlan_list: List of VLANs added over the interface. Serialised by vlan_lock.
+ * @vlan_lock: Lock to serialize access to vlan_list.
+ * @udp_tunnels: UDP tunnel port numbers and types.
+ * @udp_tunnels_dirty: flag indicating a reboot occurred while pushing
+ *	@udp_tunnels to hardware and thus the push must be re-done.
+ * @udp_tunnels_lock: Serialises writes to @udp_tunnels and @udp_tunnels_dirty.
  */
 struct efx_ef10_nic_data {
+	struct efx_nic *efx;
 	struct efx_buffer mcdi_buf;
 	u16 warm_boot_count;
 	unsigned int vi_base;
@@ -532,16 +547,21 @@ struct efx_ef10_nic_data {
 	void __iomem *wc_membase, *pio_write_base;
 	unsigned int pio_write_vi_base;
 	unsigned int piobuf_handle[EF10_TX_PIOBUF_COUNT];
+	u16 piobuf_size;
 	bool must_restore_piobufs;
 	u32 rx_rss_context;
 	bool rx_rss_context_exclusive;
 	u64 stats[EF10_STAT_COUNT];
+	struct delayed_work vf_stats_work;
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
+	bool vf_stats_enabled;
+#endif
 	bool workaround_35388;
 	bool workaround_26807;
+	bool workaround_61265;
 	bool must_check_datapath_caps;
 	u32 datapath_caps;
-	unsigned int rx_dpcpu_fw_id;
-	unsigned int tx_dpcpu_fw_id;
+	u32 datapath_caps2;
 	unsigned int vport_id;
 	bool must_probe_vswitching;
 	unsigned int pf_index;
@@ -554,10 +574,18 @@ struct efx_ef10_nic_data {
 	uint32_t caps;
 #endif
 	u8 vport_mac[ETH_ALEN];
+	struct list_head vlan_list;
+	struct mutex vlan_lock;
+	struct efx_udp_tunnel udp_tunnels[16];
+	bool udp_tunnels_dirty;
+	struct mutex udp_tunnels_lock;
+	u64 licensed_features;
 };
 
 int efx_init_sriov(void);
 void efx_fini_sriov(void);
+
+unsigned int efx_nic_calc_mac_mtu(struct efx_nic *efx);
 
 struct ethtool_ts_info;
 #ifdef CONFIG_SFC_PTP
@@ -585,9 +613,7 @@ int efx_ptp_ts_set_domain_filter(struct efx_nic *efx, struct efx_ts_set_domain_f
 #endif
 int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel);
 void efx_ptp_defer_probe_with_channel(struct efx_nic *efx);
-#ifdef EFX_NOT_UPSTREAM
 struct efx_channel *efx_ptp_channel(struct efx_nic *efx);
-#endif
 void efx_ptp_remove(struct efx_nic *efx);
 int efx_ptp_set_ts_config(struct efx_nic *efx, struct ifreq *ifr);
 int efx_ptp_get_ts_config(struct efx_nic *efx, struct ifreq *ifr);
@@ -611,10 +637,16 @@ static inline void efx_rx_skb_attach_timestamp(struct efx_channel *channel,
 }
 void efx_ptp_start_datapath(struct efx_nic *efx);
 void efx_ptp_stop_datapath(struct efx_nic *efx);
+bool efx_ptp_use_mac_tx_timestamps(struct efx_nic *efx);
+ktime_t efx_ptp_nic_to_kernel_time(struct efx_tx_queue *tx_queue);
 #else
 static inline int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 { return -ENODEV; }
 static inline void efx_ptp_defer_probe_with_channel(struct efx_nic *efx) {}
+static inline struct efx_channel *efx_ptp_channel(struct efx_nic *efx)
+{
+	return NULL;
+}
 static inline void efx_ptp_remove(struct efx_nic *efx) {}
 static inline int efx_ptp_set_ts_config(struct efx_nic *efx, struct ifreq *ifr) {return -EOPNOTSUPP; }
 static inline int efx_ptp_get_ts_config(struct efx_nic *efx, struct ifreq *ifr) {return -EOPNOTSUPP; }
@@ -634,6 +666,14 @@ static inline void efx_time_sync_event(struct efx_channel *channel,
 				       efx_qword_t *ev) {}
 static inline void efx_ptp_start_datapath(struct efx_nic *efx) {}
 static inline void efx_ptp_stop_datapath(struct efx_nic *efx) {}
+static inline bool efx_ptp_use_mac_tx_timestamps(struct efx_nic *efx)
+{
+	return false;
+}
+static inline ktime_t efx_ptp_nic_to_kernel_time(struct efx_tx_queue *tx_queue)
+{
+	return (ktime_t) { 0 };
+}
 #endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(CONFIG_SFC_PPS)
@@ -757,6 +797,8 @@ void efx_farch_tx_fini(struct efx_tx_queue *tx_queue);
 void efx_farch_tx_remove(struct efx_tx_queue *tx_queue);
 void efx_farch_tx_write(struct efx_tx_queue *tx_queue);
 void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue);
+unsigned int efx_farch_tx_limit_len(struct efx_tx_queue *tx_queue,
+				    dma_addr_t dma_addr, unsigned int len);
 int efx_farch_rx_probe(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_init(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_fini(struct efx_rx_queue *rx_queue);
@@ -810,10 +852,10 @@ int efx_farch_filter_block_kernel(struct efx_nic *efx, enum
 				  efx_dl_filter_block_kernel_type type);
 void efx_farch_filter_unblock_kernel(struct efx_nic *efx, enum
 				     efx_dl_filter_block_kernel_type type);
-int efx_farch_vport_filter_insert(struct efx_nic *efx, unsigned vport_id,
+int efx_farch_vport_filter_insert(struct efx_nic *efx, unsigned int vport_id,
 				  const struct efx_filter_spec *spec,
 				  u64 *filter_id_out, bool *is_exclusive_out);
-int efx_farch_vport_filter_remove(struct efx_nic *efx, unsigned vport_id,
+int efx_farch_vport_filter_remove(struct efx_nic *efx, unsigned int vport_id,
 				  u64 filter_id, bool is_exclusive);
 #endif
 void efx_farch_filter_sync_rx_mode(struct efx_nic *efx);
@@ -829,12 +871,13 @@ bool efx_nic_event_present(struct efx_channel *channel);
  *
  * We should never allow statistics to decrease or to exceed the true
  * value.  Since the computed value will never be greater than the
- * true value, we can achieve this by only storing the computed value
- * when it increases.
+ * true value, except when the MAC stats are zeroed as a result of a NIC reset
+ * we can achieve this by only storing the computed value
+ * when it increases, or when it is zeroed.
  */
 static inline void efx_update_diff_stat(u64 *stat, u64 diff)
 {
-	if ((s64)(diff - *stat) > 0)
+	if (!diff || (s64)(diff - *stat) > 0)
 		*stat = diff;
 }
 
@@ -871,17 +914,21 @@ void siena_prepare_flush(struct efx_nic *efx);
 int efx_farch_fini_dmaq(struct efx_nic *efx);
 void efx_farch_finish_flr(struct efx_nic *efx);
 void siena_finish_flush(struct efx_nic *efx);
+#if !defined(EFX_NOT_UPSTREAM) && !defined(__VMKLNX__)
 void falcon_start_nic_stats(struct efx_nic *efx);
 void falcon_stop_nic_stats(struct efx_nic *efx);
 int falcon_reset_xaui(struct efx_nic *efx);
-int efx_farch_dimension_resources(struct efx_nic *efx, unsigned sram_lim_qw);
+#endif
+int efx_farch_dimension_resources(struct efx_nic *efx,
+				  unsigned int sram_lim_qw);
 void efx_farch_init_common(struct efx_nic *efx);
 void efx_ef10_handle_drain_event(struct efx_nic *efx);
 void efx_farch_rx_push_indir_table(struct efx_nic *efx);
 void efx_farch_rx_pull_indir_table(struct efx_nic *efx);
-unsigned efx_nic_check_pcie_link(struct efx_nic *efx,
-				 unsigned full_width, unsigned full_speed,
-				 unsigned min_bandwidth);
+void efx_nic_check_pcie_link(struct efx_nic *efx,
+			     unsigned int desired_bandwidth,
+			     unsigned int *actual_width,
+			     unsigned int *actual_speed);
 
 int efx_nic_alloc_buffer(struct efx_nic *efx, struct efx_buffer *buffer,
 			 unsigned int len, gfp_t gfp_flags);
@@ -889,13 +936,13 @@ void efx_nic_free_buffer(struct efx_nic *efx, struct efx_buffer *buffer);
 
 /* Tests */
 struct efx_farch_register_test {
-	unsigned address;
+	unsigned int address;
 	efx_oword_t mask;
 };
 struct efx_farch_table_test {
-	unsigned address;
-	unsigned step;
-	unsigned rows;
+	unsigned int address;
+	unsigned int step;
+	unsigned int rows;
 	efx_oword_t mask;
 };
 int efx_farch_test_registers(struct efx_nic *efx,
@@ -903,7 +950,7 @@ int efx_farch_test_registers(struct efx_nic *efx,
 			     size_t n_regs);
 int efx_farch_test_table(struct efx_nic *efx,
 			 const struct efx_farch_table_test *table,
-			 void (*pattern)(unsigned, efx_qword_t *, int, int),
+			 void (*pattern)(unsigned int, efx_qword_t *, int, int),
 			 int a, int b);
 
 size_t efx_nic_get_regs_len(struct efx_nic *efx);
@@ -920,5 +967,7 @@ void efx_nic_fix_nodesc_drop_stat(struct efx_nic *efx, u64 *stat);
 
 void efx_farch_generate_event(struct efx_nic *efx, unsigned int evq,
 			      efx_qword_t *event);
+struct efx_tx_queue *efx_farch_select_tx_queue(struct efx_channel *channel,
+					       struct sk_buff *skb);
 
 #endif /* EFX_NIC_H */

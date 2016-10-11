@@ -78,8 +78,6 @@ extern void tcp_helper_reset_stack(ci_netif* ni, int intf_i);
 
 extern void tcp_helper_flush_resets(ci_netif* ni);
 
-extern void tcp_helper_shutdown_vi(ci_netif* ni, int hwport);
-
 extern int efab_tcp_helper_rm_mmap(tcp_helper_resource_t*,
                                    unsigned long bytes,
                                    void* opaque, int map_id,
@@ -264,7 +262,8 @@ extern void efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs,
                                            oo_sp ep_id);
 extern int efab_file_move_to_alien_stack(ci_private_t *priv,
                                          ci_netif *alien_ni,
-                                         int drop_filter);
+                                         int drop_filter,
+                                         oo_sp* new_sock_id);
 
 extern void
 tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
@@ -566,6 +565,20 @@ typedef struct {
 } oo_operations_table_t;
 
 extern oo_operations_table_t oo_operations[];
+
+
+/*----------------------------------------------------------------------------
+ * Timesync state
+ *---------------------------------------------------------------------------*/
+
+extern unsigned oo_timesync_cpu_khz;
+
+extern void oo_timesync_wait_for_cpu_khz_to_stabilize(void);
+
+extern void oo_timesync_update(struct oo_timesync*);
+
+extern int oo_timesync_ctor(struct oo_timesync *oo_ts);
+extern void oo_timesync_dtor(struct oo_timesync *oo_ts);
 
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_FNS_H__ */
 /*! \cidoxg_end */

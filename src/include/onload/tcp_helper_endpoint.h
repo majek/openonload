@@ -30,14 +30,12 @@
 #define __CI_DRIVER_EFAB_TCP_HELPER_ENDPOINT_H__
 
 #include <ci/driver/internal.h>
-#include <ci/internal/cplane_handle.h>
 #include <onload/tcp_helper.h>
 #include <onload/oof_hw_filter.h>
 
 
-extern int efab_tcp_driver_ctor(unsigned max_macs,
-                                unsigned max_layer2_interfaces, 
-                                unsigned max_routes);
+extern int efab_tcp_driver_ctor(void);
+extern void efab_tcp_driver_stop(void);
 extern void efab_tcp_driver_dtor(void);
 
 /* Return the instance number of the VI associated with the named hwport,

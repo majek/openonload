@@ -37,6 +37,7 @@
 
 #include <ci/tools/config.h>
 #include <ci/tools/utils.h>
+#include <ci/tools/log2.h>
 #include <ci/tools/spinlock.h>
 #include <ci/tools/fifo.h>
 

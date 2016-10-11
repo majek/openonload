@@ -216,7 +216,6 @@ efab_vi_resource_mmap_bytes(struct efrm_vi* virs, int map_type)
 EXPORT_SYMBOL(efab_vi_resource_mmap_bytes);
 
 
-#if defined(CI_HAVE_OS_NOPAGE)
 static 
 ci_boolean_t
 efab_vi_rm_nopage_nic(struct efrm_vi *virs, unsigned *pfn_ptr,
@@ -266,7 +265,6 @@ efab_vi_resource_nopage(struct efrm_vi *virs, void *opaque,
 }
 EXPORT_SYMBOL(efab_vi_resource_nopage);
 
-#endif /* CI_HAVE_OS_NOPAGE */
 
 /* ************************************************************************** */
 

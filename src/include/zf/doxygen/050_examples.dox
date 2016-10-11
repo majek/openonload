@@ -1,0 +1,210 @@
+/****************************************************************************
+ * Copyright 2004-2005: Level 5 Networks Inc.
+ * Copyright 2005-2016: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/**************************************************************************\
+*//*! \file
+** \author    Solarflare Communications, Inc.
+** \brief     Additional Doxygen-format documentation for TCPDirect.
+** \date      2016/05/20
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
+**            are trademarks of Solarflare Communications, Inc.
+*//*
+\**************************************************************************/
+
+/**************************************************************************
+ * Worked Example page
+ *************************************************************************/
+/*! \page example Worked Examples
+
+This part of the documentation examines simplified versions of \ref 
+zfpingpong and \ref zftcppingpong. These are small applications which listen 
+for packets and replies, with as low latency as possible.
+
+\section example_udp UDP ping pong example
+
+In the following example various boiler plate code has been omitted for 
+clarity.  For a full usable example see `src/tests/zf/zfpingpong.c`.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+void ping(struct zf_stack* stack, struct zfut* ut, struct zfur* ur)
+{
+  unsigned char data[1500];
+  struct iovec siov = { data, 1};
+  struct {
+    struct zfur_msg zcr;
+    struct iovec iov[2];
+  } rd = { { .iovcnt = 2 } };
+
+  uint64_t* ping_last_word = cfg.size>=8 ? ((uint64_t*)&data[cfg.size]) -1 : 0;
+
+  siov.iov_len = cfg.size;
+  if( ping_last_word )
+    *ping_last_word = 0x1122334455667788;
+  ZF_TRY(zfut_send(ut, &siov, 1, 0));
+
+  for(int it = 0; it < cfg.itercount;) {
+    while(zf_reactor_perform(stack) == 0);
+
+    rd.zcr.iovcnt = 2;
+    ZF_TRY(zfur_zc_recv(ur, &rd.zcr, 0));
+
+    if( rd.zcr.iovcnt == 0 )
+      continue;
+
+    it += rd.zcr.iovcnt;
+
+    zfur_zc_recv_done(ur, &rd.zcr);
+
+    if( ping_last_word )
+      ++*ping_last_word;
+    ZF_TRY(zfut_send(ut, &siov, 1, 0));
+  }
+}
+
+
+void pong(struct zf_stack* stack, struct zfut* ut, struct zfur* ur)
+{
+  struct {
+    struct zfur_msg zcr;
+    struct iovec iov[2];
+  } rd = { { .iovcnt = 2 } };
+
+  for(int it = 0; it < cfg.itercount;) {
+    while(zf_reactor_perform(stack) == 0);
+
+    rd.zcr.iovcnt = 2;
+    ZF_TRY(zfur_zc_recv(ur, &rd.zcr, 0));
+
+    if( rd.zcr.iovcnt == 0 )
+      continue;
+
+    /* in pong we reply with the same data */
+    for( int i = 0 ; i < rd.zcr.iovcnt; ++i ) {
+      ZF_TRY(zfut_send(ut, &rd.zcr.iov[i], 1, 0));
+    }
+
+    it += rd.zcr.iovcnt;
+    zfur_zc_recv_done(ur, &rd.zcr);
+  }
+}
+
+
+int main(int argc, char* argv[])
+{
+  ZF_TRY(zf_init());
+
+  struct zf_attr* attr;
+  ZF_TRY(zf_attr_alloc(&attr));
+
+  struct zf_stack* stack;
+  ZF_TRY(zf_stack_alloc(attr, &stack));
+
+  struct zfur* ur;
+  ZF_TRY(zfur_alloc(&ur, stack, attr));
+
+  struct sockaddr_in laddr = parse_addr((char*)cfg.laddr);
+  struct sockaddr_in raddr = parse_addr((char*)cfg.raddr);
+  ZF_TRY(zfur_addr_bind(ur, &laddr, &raddr, 0));
+
+  struct zfut* ut;
+  ZF_TRY(zfut_alloc(&ut, stack, &laddr, &raddr, 0, attr));
+
+  (cfg.ping ? &ping : pong)(stack, ut, ur);
+
+  return 0;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+\section example_tcp TCP pong example
+
+In the following example some boiler plate code has been omitted for 
+clarity.  For a full usable example see `src/tests/zf/zftcppingpong.c`, which 
+includes the “ping” side, how to use the multiplexer, and other details.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
+int main(int argc, const char* argv[])
+{
+  ZF_TRY(zf_init());
+
+  struct zf_attr* attr;
+  ZF_TRY(zf_attr_alloc(&attr));
+
+  struct zf_stack* stack;
+  ZF_TRY(zf_stack_alloc(attr, &stack));
+
+  struct zft_handle* tcp_handle;
+  ZF_TRY(zft_alloc(stack, attr, &tcp_handle));
+
+  struct sockaddr_in laddr = {
+    .sin_addr = { inet_addr(argv[1]) },
+    .sin_port = htons(2000),
+  };
+  struct sockaddr_in raddr = {
+    .sin_addr = { inet_addr(argv[2]) },
+    .sin_port = htons(2000),
+  };
+  ZF_TRY(zft_addr_bind(tcp_handle, &laddr));
+  
+  struct zft* tcp;
+  ZF_TRY(zft_connect(tcp_handle, &raddr, &tcp));
+
+  int first_recv = 1;
+  unsigned char data[1500];
+  struct iovec siov = { data, 1};
+  struct {
+    struct zft_msg zcr;
+    struct iovec __iov_tail;
+  } rd = { { .iovcnt = 1 } };
+
+  while(1) {
+    while(zf_reactor_perform(stack) == 0);
+
+    rd.zcr.iovcnt = 1;
+    ZF_TRY(zft_zc_recv(tcp, &rd.zcr, 0));
+
+    if( rd.zcr.iovcnt == 0 )
+      continue;
+
+    if( first_recv ) {
+      first_recv = 0;
+
+      siov.iov_len = rd.zcr.iov[0].iov_len;
+      memcpy(data, ((char*)rd.zcr.iov[0].iov_base), siov.iov_len);
+    }
+    for( int i = 0 ; i < rd.zcr.iovcnt; ++i ) {
+      ZF_TRY(zft_send(tcp, &siov, 1, 0));
+    }
+    zft_zc_recv_done(tcp, &rd.zcr);
+ }
+
+  ZF_TRY(zft_shutdown_tx(tcp));
+  ZF_TRY(zft_free(tcp));
+
+  return 0;
+}
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+*/

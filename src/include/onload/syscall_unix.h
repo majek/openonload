@@ -84,10 +84,6 @@ extern int __poll_chk (struct pollfd *__fds, nfds_t __nfds, int __timeout,
 #define CI_MK_DECL(ret,fn,args)  extern ret (*ci_sys_##fn) args CI_HV
 # include <onload/declare_syscalls.h.tmpl>
 
-/*! Generate declarations of pointers to the libc calls */
-#define CI_MK_DECL(ret,fn,args)  extern ret (*ci_libc_##fn) args CI_HV
-# include <onload/declare_libccalls.h.tmpl>
-
 
 #ifdef OO_RECVMMSG_NOT_IN_LIBC
 extern int ci_sys_recvmmsg(int fd, struct mmsghdr* msg, unsigned vlen,

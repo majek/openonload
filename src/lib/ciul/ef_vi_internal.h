@@ -264,5 +264,11 @@ extern void ef_vi_packed_stream_update_credit(ef_vi* vi);
 
 extern void ef_vi_set_intf_ver(char* intf_ver, size_t len);
 
+enum ef_vi_capability;
+extern int
+ef_pd_capabilities_get(ef_driver_handle handle, ef_pd* pd,
+                       ef_driver_handle pd_dh, enum ef_vi_capability cap,
+                       unsigned long* value);
+
 
 #endif  /* __CI_EF_VI_INTERNAL_H__ */

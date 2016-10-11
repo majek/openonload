@@ -174,13 +174,6 @@ extern int no_shared_state_panic;
 ** only be applied to a pointer that lies within the contiguous region.
 */
 
-#ifndef CI_HAVE_OS_NOPAGE
-# define NI_ADDR_SHIFT           20u
-# define NI_ADDR_SHMBUF(na)      ((na) >> NI_ADDR_SHIFT)
-# define NI_ADDR_OFFSET(na)      ((na) & ((1u << NI_ADDR_SHIFT) - 1u))
-# define NI_ADDR_BUILD(buf, off) (((buf) << NI_ADDR_SHIFT) | (off))
-#endif
-
 
 /* Get from a pointer to an [oo_p].  This must only be used for a pointer
 ** that lies within the contiguous region of the netif state.
@@ -207,43 +200,16 @@ ci_inline oo_p oo_ptr_to_statep(const ci_netif* ni, void* ptr) {
 
 #ifdef __ci_driver__
 
-# ifdef CI_HAVE_OS_NOPAGE
-
 ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
   return off < ci_netif_ep_ofs(ni)
     ? (char*) ni->state + off
     : ci_shmbuf_ptr(&ni->pages_buf, off - ci_netif_ep_ofs(ni));
 }
 
-# else
-
-ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
-  return NI_ADDR_SHMBUF(off)
-    ? ci_shmbuf_ptr(ni->k_shmbufs[NI_ADDR_SHMBUF(off)-1], NI_ADDR_OFFSET(off))
-    : (char*) ni->state + off;
-}
-
-# endif 
-
 #else /* not driver */
-
-# ifdef CI_HAVE_OS_NOPAGE
 
 ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off)
 { return (char*) ni->state + off; }
-
-# else
-
-extern int ci_netif_mmap_shmbuf(ci_netif* netif, int shmbufid);
-
-ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
-  unsigned shm_i = NI_ADDR_SHMBUF(off);
-  if(CI_UNLIKELY( ! ni->u_shmbufs[shm_i] ))
-    ci_netif_mmap_shmbuf(ni, shm_i);
-  return (char*) ni->u_shmbufs[shm_i] + NI_ADDR_OFFSET(off);
-}
-
-# endif
 
 #endif  /* __ci_driver__ */
 
@@ -281,18 +247,6 @@ ci_inline char* oo_state_off_to_ptr(ci_netif* ni, unsigned off) {
  * and 7 aux buffer per 1024 bytes. */
 #define AUX_PER_BUF 7
 
-#ifndef CI_HAVE_OS_NOPAGE
-/* For platforms that have multiple mmaps() for socket buffers, these
-** macros define the number of buffers in each mmap/block.
-*/
-# define EP_BUF_BLOCKSHIFT  3u
-# define EP_BUF_BLOCKNUM    (1u << EP_BUF_BLOCKSHIFT)
-# define EP_BUF_BLOCKMASK   (EP_BUF_BLOCKNUM - 1u)
-# define EP_BUF_BLOCKPAGES  (EP_BUF_BLOCKNUM / EP_BUF_PER_PAGE)
-# define EP_BUF_FINDBLOCKREF(id)  ((id) >> EP_BUF_BLOCKSHIFT)
-# define EP_BUF_FINDBLOCKID(id)   ((id) & EP_BUF_BLOCKMASK)
-#endif
-
 
 /* TRUSTED_SOCK_ID(ni, id)
 **
@@ -321,15 +275,8 @@ ci_inline unsigned __TRUSTED_SOCK_ID(ci_netif* ni, unsigned id,
   TRUSTED_SOCK_ID((ni), OO_SP_TO_INT(sockp))
 
 
-#ifdef CI_HAVE_OS_NOPAGE
 ci_inline unsigned oo_sockid_to_state_off(ci_netif* ni, unsigned sock_id)
 { return ci_netif_ep_ofs(ni) + sock_id * EP_BUF_SIZE; }
-#else
-ci_inline unsigned oo_sockid_to_state_off(ci_netif* ni, unsigned sock_id) {
-  return NI_ADDR_BUILD(EP_BUF_FINDBLOCKREF(sock_id) + 1,
-                       EP_BUF_FINDBLOCKID(sock_id) * EP_BUF_SIZE);
-}
-#endif
 
 
 /* oo_sockp_to_statep(ni, oo_sp)
@@ -354,13 +301,6 @@ ci_inline oo_p oo_sockp_to_statep(ci_netif* ni, oo_sp sockp) {
 #endif
 
 
-#if defined(__KERNEL__) && ! defined(CI_HAVE_OS_NOPAGE)
-ci_inline char* oo_sockid_to_ptr(ci_netif* ni, int sock_id) {
-  return ci_shmbuf_ptr(ni->k_shmbufs[EP_BUF_FINDBLOCKREF(sock_id)],
-                       EP_BUF_FINDBLOCKID(sock_id) * EP_BUF_SIZE);
-}
-#endif
-
 
 /* oo_sockp_to_ptr(ni, sockp)
 **
@@ -369,14 +309,9 @@ ci_inline char* oo_sockid_to_ptr(ci_netif* ni, int sock_id) {
 #if CI_CFG_SOCKP_IS_PTR
 ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 { return (char*) sockp; }
-#elif defined(CI_HAVE_OS_NOPAGE)
-# ifdef __KERNEL__
+#elif defined(__KERNEL__)
 ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 { return ci_shmbuf_ptr(&ni->pages_buf, OO_SP_TO_INT(sockp) * EP_BUF_SIZE); }
-# else
-ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
-{ return CI_NETIF_PTR(ni, oo_sockp_to_statep(ni, sockp)); }
-# endif
 #else
 ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 { return CI_NETIF_PTR(ni, oo_sockp_to_statep(ni, sockp)); }

@@ -60,6 +60,13 @@
 #include <errno.h>
 #include <string.h>
 
+#include <inttypes.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <netdb.h>
+#include <ifaddrs.h>
+#include <stddef.h>
+
 
 #ifndef MAP_HUGETLB
 /* Not always defined in glibc headers.  If the running kernel does not
@@ -113,6 +120,14 @@
 
 
 #define ROUND_UP(p, align)   (((p)+(align)-1u) & ~((align)-1u))
+#define IS_POW2(n)           (((n) & (n - 1)) == 0)
+
+#define __BUILD_ASSERT_NAME(_x) __BUILD_ASSERT_CPP(_x)
+#define __BUILD_ASSERT_CPP(_x)  __BUILD_ASSERT__##_x
+#define BUILD_ASSERT(e) \
+  typedef char __BUILD_ASSERT_NAME(__LINE__)[(e) ? 1 : -1] \
+    __attribute__((unused))
+
 
 
 #ifndef SO_TIMESTAMPING
@@ -150,5 +165,12 @@ extern int mk_socket(int family, int socktype,
                             socklen_t addrlen),
                      const char* host, const char* port);
 
+
+/* Helper functions to query host configuration */
+extern void get_ipaddr_of_intf(const char* intf, char** ipaddr_out);
+extern int my_getaddrinfo(const char* host, const char* port,
+                          struct addrinfo**ai_out);
+extern int parse_host(const char* s, struct in_addr* ip_out);
+extern int parse_interface(const char* s, int* ifindex_out);
 
 #endif  /* __UTILS_H__ */

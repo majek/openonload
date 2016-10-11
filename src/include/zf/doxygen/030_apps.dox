@@ -1,0 +1,124 @@
+/****************************************************************************
+ * Copyright 2004-2005: Level 5 Networks Inc.
+ * Copyright 2005-2016: Solarflare Communications Inc,
+ *                      7505 Irvine Center Drive, Suite 100
+ *                      Irvine, CA 92618, USA
+ *
+ * Maintained by Solarflare Communications
+ *  <linux-xen-drivers@solarflare.com>
+ *  <onload-dev@solarflare.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation, incorporated herein by reference.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ ****************************************************************************
+ */
+
+/**************************************************************************\
+*//*! \file
+** \author    Solarflare Communications, Inc.
+** \brief     Additional Doxygen-format documentation for TCPDirect.
+** \date      2016/05/20
+** \copyright Copyright &copy; 2016 Solarflare Communications, Inc. All
+**            rights reserved. Solarflare, OpenOnload and EnterpriseOnload
+**            are trademarks of Solarflare Communications, Inc.
+*//*
+\**************************************************************************/
+
+/**************************************************************************
+ * Example Applications page
+ *************************************************************************/
+/*! \page applications Example Applications
+
+Solarflare TCPDirect comes with a range of example applications - including
+source code and make files. This is a quick guide to using them, both for
+testing TCPDirect's effectiveness in an environment, and as starting points
+for developing applications.
+
+| Application        | Description
+| :----------------- | :------------------------------------------------
+| \ref zfpingpong    | Pings a simple message format between two interfaces using UDP.
+| \ref zfsink        | Receives streams of packets on a single interface.
+| \ref zftcppingpong | Pings a simple message format between two interfaces using TCP.
+
+\section zfpingpong zfpingpong
+
+The zfpingpong application echoes a single packet back and forth repeatedly 
+using UDP, measuring the round-trip time.
+
+This is the most useful example application for testing lowest possible 
+latency.
+
+\subsection zfpingpong_usage Usage
+
+__Server:__ <code>zfpingpong pong _server-host_:_server-port_ 
+_client-host_:_client-port_</code>
+
+__Client:__ <code>zfpingpong ping _client-host_:_client-port_ 
+_server-host_:_server-port_</code>
+
+where:
+- _server-host_ and _client-host_ identify the server and client machines 
+  (e.g. `hostname` or  `192.168.0.10`)
+- _server-port_ and _client-port_ are port numbers of your choosing on the
+  server and client machines (e.g. `9587`).
+
+There are various additional options. See the help text for details.
+
+\section zfsink zfsink
+
+The zfsink application is a demonstration of capturing packets.
+
+By default it just  reports the amount of data captured, but it also 
+demonstrates simple actions upon the packet data, with the option to hexdump 
+incoming packets.
+
+\subsection zfsink_usage Usage
+
+<code>zfsink _local_addr_ _remote_addr_</code>
+
+There are various additional options. See the help text for details.
+
+\section zftcppingpong zftcppingpong
+
+The zftcppingpong application is a variation on \ref zfpingpong that uses TCP 
+instead of UDP.
+
+Usage is the same as \ref zfpingpong. Like \ref zfpingpong, it has various 
+additional options described in the help text.
+
+\section building Building the Example Applications
+
+The TCPDirect example applications are built along with the Onload 
+installation and will be present in the 
+`/Onload-&lt;version>/build/gnu_x86_64/tests/zf` subdirectory.  In the 
+  build directory there will be `gnu`, `gnu_x86_64`, 
+  `x86_64_linux-&lt;kernel version>` directories:
+- files under the `gnu` directory are 32-bit (if these are built)
+- files under the `gnu_x86_64` directory are 64-bit.
+
+Source code files for the example applications exist in the 
+`/Onload-&lt;version>/src/tests/zf` subdirectory.
+
+To rebuild the example applications you must have the 
+`Onload-&lt;version>/scripts` subdirectory in your path and use the 
+following procedure:
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}
+[root@server01 Onload-<version>]# cd scripts/
+[root@server01 scripts]# export PATH="$PWD:$PATH"
+[root@server01 scripts]# cd ../build/_gnu_x86_64/tests/zf/
+[root@server01 zf]# make clean
+[root@server01 zf]# make
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+*/

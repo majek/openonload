@@ -62,7 +62,7 @@ int efx_siena_sriov_mac_address_changed(struct efx_nic *efx);
 bool efx_siena_sriov_wanted(struct efx_nic *efx);
 void efx_siena_sriov_reset(struct efx_nic *efx);
 int efx_siena_sriov_configure(struct efx_nic *efx, int num_vfs);
-void efx_siena_sriov_flr(struct efx_nic *efx, unsigned flr);
+void efx_siena_sriov_flr(struct efx_nic *efx, unsigned int flr);
 int efx_siena_sriov_set_vf_mac(struct efx_nic *efx, int vf_i, u8 *mac);
 int efx_siena_sriov_set_vf_vlan(struct efx_nic *efx, int vf, u16 vlan, u8 qos);
 int efx_siena_sriov_set_vf_spoofchk(struct efx_nic *efx, int vf, bool spoofchk);
@@ -87,6 +87,6 @@ void efx_siena_sriov_probe(struct efx_nic *efx);
 void efx_siena_sriov_tx_flush_done(struct efx_nic *efx, efx_qword_t *event);
 void efx_siena_sriov_rx_flush_done(struct efx_nic *efx, efx_qword_t *event);
 void efx_siena_sriov_event(struct efx_channel *channel, efx_qword_t *event);
-void efx_siena_sriov_desc_fetch_err(struct efx_nic *efx, unsigned dmaq);
+void efx_siena_sriov_desc_fetch_err(struct efx_nic *efx, unsigned int dmaq);
 
 #endif /* SIENA_SRIOV_H */

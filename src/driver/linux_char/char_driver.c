@@ -128,6 +128,58 @@ ioctl_resource_prime (ci_private_char_t *priv, ulong arg)
   return efch_vi_prime(priv, local.crp_id, local.crp_current_ptr);
 }
 
+ci_noinline int
+ioctl_filter_add (ci_private_char_t *priv, ulong arg)
+{
+  ci_filter_add_t local, *filter_add;
+  uint16_t in_len, out_size;
+  int rc, copy_out = 0;
+  filter_add = (ci_filter_add_t *)arg;
+  if( get_user(in_len, &(filter_add->in.in_len)) )
+    return -EFAULT;
+  memset(&local, 0, sizeof(local));
+  copy_from_user_ret(&local, filter_add, min_t(uint16_t, sizeof(local), in_len),
+                     -EFAULT);
+  out_size = local.in.out_size;
+  rc = efch_filter_add(&priv->rt, &local, &copy_out);
+  if( copy_out )
+    copy_to_user_ret(filter_add, &local, min(local.out.out_len, out_size),
+                     -EFAULT);
+
+  return rc;
+}
+
+
+ci_noinline int
+ioctl_capabilities_op (ci_private_char_t *priv, ulong arg)
+{
+  struct efch_capabilities_in in;
+  struct efch_capabilities_out out;
+  int rc;
+
+  copy_from_user_ret(&in, (caddr_t) arg, sizeof(in), -EFAULT);
+
+  rc = efch_capabilities_op(&in, &out);
+
+  if( rc == 0 )
+    copy_to_user_ret((caddr_t) arg, &out, sizeof(out), -EFAULT);
+
+  return rc;
+}
+
+ci_noinline int
+ioctl_v3_license_challenge (ci_private_char_t *priv, ulong arg)
+{
+  struct ci_v3_license_challenge_op_s local;
+  int rc, copy_out = 0;
+  copy_from_user_ret(&local, (caddr_t) arg, sizeof(local), -EFAULT);
+  rc = efch_v3_license_challenge(&priv->rt, &local, &copy_out);
+  if( (rc == 0) && copy_out )
+    copy_to_user_ret((caddr_t) arg, &local, sizeof(local), -EFAULT);
+
+  return rc;
+}
+
 
 static long
 ci_char_fop_ioctl(struct file *filp, uint cmd, ulong arg) 
@@ -147,7 +199,16 @@ ci_char_fop_ioctl(struct file *filp, uint cmd, ulong arg)
   case CI_RESOURCE_PRIME:
     return ioctl_resource_prime (priv, arg);
 
-  default:
+  case CI_FILTER_ADD:
+    return ioctl_filter_add (priv, arg);
+
+  case CI_CAPABILITIES_OP:
+    return ioctl_capabilities_op (priv, arg);
+
+  case CI_V3_LICENSE_CHALLENGE:
+    return ioctl_v3_license_challenge (priv, arg);
+
+    default:
     ci_log("unknown ioctl (%u)", cmd);
     return -ENOTTY;
 

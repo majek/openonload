@@ -49,7 +49,7 @@ ci_mcast_ipcache_set_mac(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
   dhost[3] = (daddr >> 16) & 0x7f;
   dhost[4] = (daddr >>  8) & 0xff;
   dhost[5] =  daddr        & 0xff;
-  cicp_mac_set_mostly_valid(CICP_MIBS(CICP_HANDLE(ni))->user.mac_utable,
+  cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(ni)).mac_utable,
                             &ipcache->mac_integrity);
 }
 
