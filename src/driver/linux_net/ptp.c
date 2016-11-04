@@ -2369,7 +2369,7 @@ int efx_ptp_probe(struct efx_nic *efx, struct efx_channel *channel)
 		ptp->rx_ts_inline = true;
 		/* no sync events required */
 		if (channel)
-			channel->sync_events_state = SYNC_EVENTS_VALID;
+			channel->sync_events_state = SYNC_EVENTS_DISABLED;
 	}
 #endif
 
@@ -3322,6 +3322,8 @@ void __efx_rx_skb_attach_timestamp(struct efx_channel *channel,
 		return;
 	}
 #endif
+	if (channel->sync_events_state != SYNC_EVENTS_VALID)
+		return;
 
 	pkt_timestamp_minor = (efx_rx_buf_timestamp_minor(efx,
 							  skb_mac_header(skb)) +

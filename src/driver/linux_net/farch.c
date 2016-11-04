@@ -479,7 +479,7 @@ int efx_farch_tx_probe(struct efx_tx_queue *tx_queue)
 	return 0;
 }
 
-void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
+int efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 {
 	struct efx_nic *efx = tx_queue->efx;
 	efx_oword_t reg;
@@ -502,7 +502,11 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 			      FRF_AZ_TX_DESCQ_TYPE, 0,
 			      FRF_BZ_TX_NON_IP_DROP_DIS, 1);
 
+#ifdef CONFIG_SFC_FALCON
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
+#else
+	if (efx_nic_rev(efx) >= EFX_REV_SIENA_A0) {
+#endif
 		int csum = tx_queue->csum_offload != EFX_TXQ_TYPE_NO_OFFLOAD;
 		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_IP_CHKSM_DIS, !csum);
 		EFX_SET_OWORD_FIELD(reg, FRF_BZ_TX_TCP_CHKSM_DIS,
@@ -512,6 +516,7 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 	efx_writeo_table(efx, &reg, efx->type->txd_ptr_tbl_base,
 			 tx_queue->queue);
 
+#ifdef CONFIG_SFC_FALCON
 	if (efx_nic_rev(efx) < EFX_REV_FALCON_B0) {
 		/* Only 128 bits in this register */
 		BUILD_BUG_ON(EFX_MAX_TX_QUEUES > 128);
@@ -523,6 +528,9 @@ void efx_farch_tx_init(struct efx_tx_queue *tx_queue)
 			__set_bit_le(tx_queue->queue, &reg);
 		efx_writeo(efx, &reg, FR_AA_TX_CHKSM_CFG);
 	}
+#endif
+
+	return 0;
 }
 
 static void efx_farch_flush_tx_queue(struct efx_tx_queue *tx_queue)
@@ -625,11 +633,15 @@ int efx_farch_rx_probe(struct efx_rx_queue *rx_queue)
 	return 0;
 }
 
-void efx_farch_rx_init(struct efx_rx_queue *rx_queue)
+int efx_farch_rx_init(struct efx_rx_queue *rx_queue)
 {
 	efx_oword_t rx_desc_ptr;
 	struct efx_nic *efx = rx_queue->efx;
+#ifdef CONFIG_SFC_FALCON
 	bool is_b0 = efx_nic_rev(efx) >= EFX_REV_FALCON_B0;
+#else
+	bool is_b0 = 1;
+#endif
 	bool iscsi_digest_en = is_b0;
 	bool jumbo_en;
 
@@ -667,6 +679,8 @@ void efx_farch_rx_init(struct efx_rx_queue *rx_queue)
 			      FRF_AZ_RX_DESCQ_EN, 1);
 	efx_writeo_table(efx, &rx_desc_ptr, efx->type->rxd_ptr_tbl_base,
 			 efx_rx_queue_index(rx_queue));
+
+	return 0;
 }
 
 static void efx_farch_flush_rx_queue(struct efx_rx_queue *rx_queue)
@@ -1022,8 +1036,12 @@ static u16 efx_farch_handle_rx_not_ok(struct efx_rx_queue *rx_queue,
 						   FSF_AZ_RX_EV_TCP_UDP_CHKSUM_ERR);
 	rx_ev_eth_crc_err = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_ETH_CRC_ERR);
 	rx_ev_frm_trunc = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_FRM_TRUNC);
+#ifdef CONFIG_SFC_FALCON
 	rx_ev_drib_nib = ((efx_nic_rev(efx) >= EFX_REV_FALCON_B0) ?
 			  0 : EFX_QWORD_FIELD(*event, FSF_AA_RX_EV_DRIB_NIB));
+#else
+	rx_ev_drib_nib = 0;
+#endif
 	rx_ev_pause_frm = EFX_QWORD_FIELD(*event, FSF_AZ_RX_EV_PAUSE_FRM_ERR);
 
 	/* Every error apart from tobe_disc and pause_frm */
@@ -1642,7 +1660,9 @@ int efx_farch_irq_test_generate(struct efx_nic *efx)
  */
 irqreturn_t efx_farch_fatal_interrupt(struct efx_nic *efx)
 {
+#ifdef CONFIG_SFC_FALCON
 	struct falcon_nic_data *nic_data = efx->nic_data;
+#endif
 	efx_oword_t *int_ker = efx->irq_status.addr;
 	efx_oword_t fatal_intr;
 	int error, mem_perr;
@@ -1669,8 +1689,10 @@ irqreturn_t efx_farch_fatal_interrupt(struct efx_nic *efx)
 
 	/* Disable both devices */
 	pci_clear_master(efx->pci_dev);
+#ifdef CONFIG_SFC_FALCON
 	if (efx_nic_is_dual_func(efx))
 		pci_clear_master(nic_data->pci_dev2);
+#endif
 	efx_farch_irq_disable_master(efx);
 
 	/* Count errors and reset or disable the NIC accordingly */
@@ -1836,7 +1858,9 @@ void efx_farch_rx_push_indir_table(struct efx_nic *efx)
 	size_t i = 0;
 	efx_dword_t dword;
 
+#ifdef CONFIG_SFC_FALCON
 	BUG_ON(efx_nic_rev(efx) < EFX_REV_FALCON_B0);
+#endif
 
 	BUILD_BUG_ON(ARRAY_SIZE(efx->rx_indir_table) !=
 		     FR_BZ_RX_INDIRECTION_TBL_ROWS);
@@ -1855,7 +1879,9 @@ void efx_farch_rx_pull_indir_table(struct efx_nic *efx)
     size_t i = 0;
 	efx_dword_t dword;
 
+#ifdef CONFIG_SFC_FALCON
 	BUG_ON(efx_nic_rev(efx) < EFX_REV_FALCON_B0);
+#endif
 
 	BUILD_BUG_ON(ARRAY_SIZE(efx->rx_indir_table) !=
 		     FR_BZ_RX_INDIRECTION_TBL_ROWS);
@@ -2027,7 +2053,9 @@ int efx_farch_dimension_resources(struct efx_nic *efx, unsigned int sram_lim_qw)
 	if (EFX_INT_MODE_USE_MSI(efx))
 		res->flags |= EFX_DL_FALCON_USE_MSI;
 
+#ifdef CONFIG_SFC_FALCON
 	BUG_ON(efx_nic_rev(efx) == EFX_REV_FALCON_A1);
+#endif
 	efx->dl_info = &res->hdr;
 
 	netif_dbg(efx, hw, efx->net_dev,
@@ -2123,9 +2151,13 @@ void efx_farch_init_common(struct efx_nic *efx)
 	EFX_SET_OWORD_FIELD(temp, FRF_AZ_TX_PREF_THRESHOLD, 2);
 	/* Disable hardware watchdog which can misfire */
 	EFX_SET_OWORD_FIELD(temp, FRF_AZ_TX_PREF_WD_TMR, 0x3fffff);
+
+#ifdef CONFIG_SFC_FALCON
 	/* Squash TX of packets of 16 bytes or less */
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0)
+#endif
 		EFX_SET_OWORD_FIELD(temp, FRF_BZ_TX_FLUSH_MIN_LEN_EN, 1);
+
 	efx_writeo(efx, &temp, FR_AZ_TX_RESERVED);
 }
 
@@ -2318,6 +2350,7 @@ static void efx_farch_filter_push_rx_config(struct efx_nic *efx)
 			!!(table->spec[EFX_FARCH_FILTER_INDEX_UC_DEF].flags &
 			   table->spec[EFX_FARCH_FILTER_INDEX_MC_DEF].flags &
 			   EFX_FILTER_FLAG_RX_SCATTER));
+#ifdef CONFIG_SFC_FALCON
 	} else if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
 		/* We don't expose 'default' filters because unmatched
 		 * packets always go to the queue number found in the
@@ -2327,6 +2360,7 @@ static void efx_farch_filter_push_rx_config(struct efx_nic *efx)
 		EFX_SET_OWORD_FIELD(
 			filter_ctl, FRF_BZ_SCATTER_ENBL_NO_MATCH_Q,
 			efx->rx_scatter);
+#endif
 	}
 
 	efx_writeo(efx, &filter_ctl, FR_BZ_RX_FILTER_CTL);
@@ -2373,6 +2407,28 @@ static void efx_farch_filter_push_tx_limits(struct efx_nic *efx)
 	}
 
 	efx_writeo(efx, &tx_cfg, FR_AZ_TX_CFG);
+}
+
+bool efx_farch_filter_match_supported(struct efx_nic *efx, bool encap,
+				      unsigned int match_flags)
+{
+	if (encap)
+		return false;
+
+	switch (match_flags) {
+	case (EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO |
+	      EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_LOC_PORT |
+	      EFX_FILTER_MATCH_REM_HOST | EFX_FILTER_MATCH_REM_PORT):
+	case (EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_IP_PROTO |
+	      EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_LOC_PORT):
+	case EFX_FILTER_MATCH_LOC_MAC | EFX_FILTER_MATCH_OUTER_VID:
+	case EFX_FILTER_MATCH_LOC_MAC:
+	case EFX_FILTER_MATCH_LOC_MAC_IG:
+		return true;
+
+	default:
+		return false;
+	}
 }
 
 static int
@@ -3206,6 +3262,7 @@ void efx_farch_filter_table_remove(struct efx_nic *efx)
 		vfree(state->table[table_id].spec);
 	}
 	kfree(state);
+	efx->filter_state = NULL;
 }
 
 int efx_farch_filter_table_probe(struct efx_nic *efx)
@@ -3219,7 +3276,11 @@ int efx_farch_filter_table_probe(struct efx_nic *efx)
 		return -ENOMEM;
 	efx->filter_state = state;
 
+#ifdef CONFIG_SFC_FALCON
 	if (efx_nic_rev(efx) >= EFX_REV_FALCON_B0) {
+#else
+	if (efx_nic_rev(efx) >= EFX_REV_SIENA_A0) {
+#endif
 		table = &state->table[EFX_FARCH_FILTER_TABLE_RX_IP];
 		table->id = EFX_FARCH_FILTER_TABLE_RX_IP;
 		table->offset = FR_BZ_RX_FILTER_TBL0;

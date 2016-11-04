@@ -16,6 +16,7 @@
 #ifndef __ONLOAD_OOF_INTERFACE_H__
 #define __ONLOAD_OOF_INTERFACE_H__
 
+#include <cplane/shared_types.h> /* for ci_hwport_id_t */
 
 struct tcp_helper_resource_s;
 struct oof_socket;
@@ -55,7 +56,8 @@ extern void
 oof_hwport_removed(int hwport);
 
 extern void
-oof_hwport_un_available(ci_hwport_id_t hwport, int available, void *arg);
+oof_hwport_un_available(ci_hwport_id_t hwport, int available, int tag,
+                        void *arg);
 
 extern void
 oof_do_deferred_work(struct oof_manager*);
@@ -204,5 +206,9 @@ oof_cb_get_mac(int ifindex, unsigned char mac[6]);
 extern void
 oof_cb_defer_work(void* owner_private);
 
+extern int
+oof_hwports_list(struct oof_manager* fm, struct seq_file* seq);
+extern int
+oof_ipaddrs_list(struct oof_manager* fm, struct seq_file* seq);
 
 #endif  /* __ONLOAD_OOF_INTERFACE_H__ */

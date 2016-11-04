@@ -256,12 +256,12 @@ static void ci_team_dump(struct ci_team_control* c)
   struct net_device* dev;
 
   /* Add all known teaming interfaces: */
-  rtnl_lock();
+  read_lock(&dev_base_lock);
   for_each_netdev(&init_net, dev) {
     if( ci_team_netdev_is_team(dev) )
       ci_team_dump_one(c, dev->ifindex);
   }
-  rtnl_unlock();
+  read_unlock(&dev_base_lock);
 
   /* When llap is removed, we also remove all bonding info.
    * Hence, we could add all unknown team interfacess and do not worry

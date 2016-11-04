@@ -52,7 +52,7 @@ void citp_log_fn_ul(const char* msg)
 
   if( citp.log_fd < 0 ) {
     if( citp.init_level >= CITP_INIT_SYSCALLS ) {
-      citp.log_fd = oo_fcntl_dupfd_cloexec(STDERR_FILENO, 3);
+      citp.log_fd = oo_fcntl_dupfd_cloexec(STDERR_FILENO, CITP_OPTS.fd_base);
       if( citp.log_fd >= 0 && citp_fdtable.table != NULL )
         citp_fdtable.table[citp.log_fd].fdip =
           fdi_to_fdip(&citp_the_reserved_fd);
@@ -100,7 +100,7 @@ void citp_log_change_fd(void)
   */
   CITP_FDTABLE_LOCK();
   prev = citp.log_fd;
-  newfd = oo_fcntl_dupfd_cloexec(prev, 3);
+  newfd = oo_fcntl_dupfd_cloexec(prev, CITP_OPTS.fd_base);
   if( newfd >= 0 ) {
     __citp_fdtable_reserve(newfd, 1);
     citp.log_fd = newfd;

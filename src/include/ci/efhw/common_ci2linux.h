@@ -33,7 +33,7 @@ typedef unsigned long dma_addr_t;
 #define PRIx64 "llx"
 #endif
 
-#ifndef bool
+#if ! (defined bool) && ! (defined __cplusplus)
 #undef false
 #undef true
 typedef enum {

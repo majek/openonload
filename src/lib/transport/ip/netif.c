@@ -1200,7 +1200,162 @@ int ci_netif_raw_send(ci_netif* ni, int intf_i,
   return 0;
 }
 
+
+/* By using ports from the active wild pool we can potentially be re-using
+ * ports very quickly, including to the same remote addr/port.  In that case
+ * we may overlap with an earlier incarnation that's still in TIME-WAIT, so
+ * we need to ensure that we don't cause the peer to think we're reopening
+ * that connection.
+ *
+ * To do that we record the details of the last closed connection on this port
+ * in a way that would leave the peer in TIME-WAIT (if we're in TIME-WAIT we
+ * won't re-use the port, as we still have a sw filter for the 4-tuple, if
+ * the connection is reset then we're ok).
+ *
+ * When we assign a new port we check if we expect the peer to be out of
+ * TIME-WAIT by now (assuming they're using the same length of timer as us).
+ * If so we can give them a new active wild port as usual.  If not, we'll
+ * keep looking (potentially increasing the pool).
+ */
+static int __ci_netif_active_wild_allow_reuse(ci_netif* ni, ci_active_wild* aw,
+                                              unsigned laddr, unsigned raddr,
+                                              unsigned rport)
+{
+  if( ci_ip_time_now(ni) > aw->expiry )
+    return 1;
+  else
+    return (aw->last_laddr != laddr) || (aw->last_raddr != raddr) ||
+           (aw->last_rport != rport);
+}
+
+
+static oo_sp __ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
+                                        unsigned raddr, unsigned rport,
+                                        ci_uint16* port_out,
+                                        ci_uint32* prev_seq_out)
+{
+  ci_active_wild* aw;
+  ci_uint16 lport;
+  int rc;
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  *prev_seq_out = 0;
+
+  ci_ni_dllist_link* link = NULL;
+  ci_ni_dllist_link* tail = ci_ni_dllist_tail(ni,
+                                              &ni->state->active_wild_pool);
+
+  /* This can happen if active wilds are configured, but we failed to allocate
+   * any at stack creation time, for example because there were no filters
+   * available.
+   */
+  if( ci_ni_dllist_is_empty(ni, &ni->state->active_wild_pool) )
+    return OO_SP_NULL;
+
+  while( link != tail ) {
+    link = ci_ni_dllist_pop(ni, &ni->state->active_wild_pool);
+    ci_ni_dllist_push_tail(ni, &ni->state->active_wild_pool, link);
+
+    aw = CI_CONTAINER(ci_active_wild, pool_link, link);
+
+    lport = sock_lport_be16(&aw->s);
+    rc = ci_netif_filter_lookup(ni, laddr, lport, raddr, rport,
+                                sock_protocol(&aw->s));
+
+    if( rc >= 0 ) {
+      ci_sock_cmn* s = ID_TO_SOCK(ni, ni->filter_table->table[rc].id);
+      if( s->b.state == CI_TCP_TIME_WAIT ) {
+        /* This 4-tuple is in use as TIME_WAIT, but it is safe to re-use
+         * TIME_WAIT for active open.  We ensure we use an initial sequence
+         * number that is a long way from the one used by the old socket.
+         */
+        ci_tcp_state* ts = SOCK_TO_TCP(s);
+        CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_reused_tw);
+        *prev_seq_out = ts->snd_nxt;
+        ci_netif_timeout_leave(ni, ts);
+        *port_out = lport;
+        return SC_SP(&aw->s);
+      }
+    }
+
+    /* If no-one's using this 4-tuple we can let the caller share this
+     * active wild.
+     */
+    if( rc == -ENOENT &&
+        __ci_netif_active_wild_allow_reuse(ni, aw, laddr, raddr, rport) ) {
+      *port_out = lport;
+      return SC_SP(&aw->s);
+    }
+  }
+
+  return OO_SP_NULL;
+}
+
+
+oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
+                               unsigned raddr, unsigned rport,
+                               ci_uint16* port_out, ci_uint32* prev_seq_out)
+{
+  oo_sp active_wild;
+
+  ci_assert(ci_netif_is_locked(ni));
+
+  if( NI_OPTS(ni).tcp_shared_local_ports == 0 )
+    return OO_SP_NULL;
+
+  active_wild = __ci_netif_active_wild_get(ni, laddr, raddr, rport,
+                                           port_out, prev_seq_out);
+
+  /* If we failed to get an active wild try and grow the pool */
+  if( active_wild == OO_SP_NULL &&
+      ni->state->active_wild_n < NI_OPTS(ni).tcp_shared_local_ports_max ) {
+    LOG_TC(ci_log(FN_FMT "Didn't get active wild on first try, getting more",
+                  FN_PRI_ARGS(ni)));
+    CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_grow);
+    ci_tcp_helper_alloc_active_wild(ni);
+    active_wild = __ci_netif_active_wild_get(ni, laddr, raddr, rport,
+                                             port_out, prev_seq_out);
+  }
+
+  if( active_wild != OO_SP_NULL ) {
+    CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_used);
+    LOG_TC(ci_log(FN_FMT "Lookup active wild for %s:0 %s:%u FOUND - lport %u",
+                  FN_PRI_ARGS(ni), ip_addr_str(laddr), ip_addr_str(raddr),
+                  htons(rport), htons(*port_out)));
+  }
+  else {
+    CITP_STATS_NETIF_INC(ni, tcp_shared_local_ports_exhausted);
+    LOG_TC(ci_log(FN_FMT "Lookup active wild for %s:0 %s:%u NOT AVAILABLE",
+                FN_PRI_ARGS(ni), ip_addr_str(laddr), ip_addr_str(raddr),
+                htons(rport)));
+  }
+  return active_wild;
+}
 #endif
+
+/* See comment on __ci_netif_active_wild_allow_reuse() to explain the reason
+ * we need this.
+ */
+void ci_netif_active_wild_sharer_closed(ci_netif* ni, ci_sock_cmn* s)
+{
+  int rc;
+  oo_sp id;
+  ci_active_wild* aw;
+
+  rc = ci_netif_filter_lookup(ni, sock_laddr_be32(s), sock_lport_be16(s),
+                              0, 0, sock_protocol(s));
+
+  if( rc >= 0 ) {
+    id = CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, rc);
+    aw = SP_TO_ACTIVE_WILD(ni, id);
+    ci_assert(aw->s.b.state == CI_TCP_STATE_ACTIVE_WILD);
+    aw->expiry = ci_ip_time_now(ni) + NI_CONF(ni).tconst_2msl_time;
+    aw->last_laddr = sock_laddr_be32(s);
+    aw->last_raddr = sock_raddr_be32(s);
+    aw->last_rport = sock_rport_be16(s);
+  }
+}
 
 
 /*! \cidoxg_end */

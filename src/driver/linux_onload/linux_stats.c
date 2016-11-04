@@ -55,6 +55,7 @@
 #include <onload/version.h>
 #include <onload/driverlink_filter.h>
 #include <onload/nic.h>
+#include <onload/oof_interface.h>
 
 #include <net/tcp.h>
 #include <net/udp.h>
@@ -342,6 +343,38 @@ static const struct file_operations cicpos_bwl_fops = {
 };
 
 
+static int oo_filter_hwports_read(struct seq_file *seq, void *unused)
+{
+  return oof_hwports_list(efab_tcp_driver.filter_manager, seq);
+}
+static int oo_filter_hwports_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, oo_filter_hwports_read, PDE_DATA(inode));
+}
+static const struct file_operations oo_filter_hwports_fops = {
+    .owner   = THIS_MODULE,
+    .open    = oo_filter_hwports_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
+static int oo_filter_ipaddrs_read(struct seq_file *seq, void *unused)
+{
+  return oof_ipaddrs_list(efab_tcp_driver.filter_manager, seq);
+}
+static int oo_filter_ipaddrs_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, oo_filter_ipaddrs_read, PDE_DATA(inode));
+}
+static const struct file_operations oo_filter_ipaddrs_fops = {
+    .owner   = THIS_MODULE,
+    .open    = oo_filter_ipaddrs_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
 
 int
 ci_install_proc_entries(void)
@@ -369,6 +402,10 @@ ci_install_proc_entries(void)
 
   proc_create_data(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, 0, oo_proc_root,
                    &cicpos_bwl_fops,  NULL);
+  proc_create_data("filter_hwports", 0, oo_proc_root,
+                   &oo_filter_hwports_fops,  NULL);
+  proc_create_data("filter_ipaddrs", 0, oo_proc_root,
+                   &oo_filter_ipaddrs_fops,  NULL);
 
   return 0;
 }
@@ -395,6 +432,8 @@ void ci_uninstall_proc_entries(void)
   remove_proc_entry("mem", oo_proc_root);
 #endif
   remove_proc_entry(CICPOS_PROCFS_FILE_BLACK_WHITE_LIST, oo_proc_root);
+  remove_proc_entry("filter_hwports", oo_proc_root);
+  remove_proc_entry("filter_ipaddrs", oo_proc_root);
   remove_proc_entry("driver/onload", NULL);
   oo_proc_root = NULL;
 }

@@ -28,6 +28,7 @@ typedef struct ci_tcp_socket_listen_s	ci_tcp_socket_listen;
 typedef struct ci_udp_state_s		ci_udp_state;
 typedef union  citp_waitable_obj_u	citp_waitable_obj;
 typedef struct citp_socket_s            citp_socket;
+typedef struct ci_active_wild_s         ci_active_wild;
 
 
 /*! The stack's measure of time.  In ticks. */

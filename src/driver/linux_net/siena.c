@@ -619,6 +619,7 @@ fail3:
 	efx_mcdi_fini(efx);
 fail1:
 	kfree(efx->nic_data);
+	efx->nic_data = NULL;
 	return rc;
 }
 
@@ -1306,6 +1307,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.start_stats = efx_mcdi_mac_start_stats,
 	.pull_stats = efx_mcdi_mac_pull_stats,
 	.stop_stats = efx_mcdi_mac_stop_stats,
+	.update_stats_period = efx_mcdi_mac_update_stats_period,
 	.set_id_led = efx_mcdi_set_id_led,
 	.push_irq_moderation = siena_push_irq_moderation,
 	.calc_mac_mtu = efx_nic_calc_mac_mtu,
@@ -1350,6 +1352,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.filter_table_probe = efx_farch_filter_table_probe,
 	.filter_table_restore = efx_farch_filter_table_restore,
 	.filter_table_remove = efx_farch_filter_table_remove,
+	.filter_match_supported = efx_farch_filter_match_supported,
 	.filter_update_rx_scatter = efx_farch_filter_update_rx_scatter,
 	.filter_insert = efx_farch_filter_insert,
 	.filter_remove_safe = efx_farch_filter_remove_safe,

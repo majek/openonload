@@ -45,12 +45,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/epoll.h>
+
 #include "extensions.h"
 #include "extensions_zc.h"
 
 #include "OnloadExt.h"
 #include "OnloadZeroCopy.h"
 #include "OnloadTemplateSend.h"
+#include "OnloadWireOrderDelivery.h"
+#include "OnloadWireOrderDelivery_FdEvent.h"
+#include "OnloadWireOrderDelivery_FdSet.h"
 
 struct native_zc_userdata {
 	JNIEnv*	env;
@@ -107,6 +112,9 @@ Java_OnloadExt_ResetStackOptions (JNIEnv* env, jclass cls)
 #define CHECK_CONSTANT(_x) ( _x == OnloadExt_##_x )
 #define CHECK_CONSTANT_ZC(_x) ( _x == OnloadZeroCopy_##_x )
 #define CHECK_CONSTANT_TMPL(_x) ( _x == OnloadTemplateSend_##_x )
+#define CHECK_CONSTANT_WODA(_x) ( _x == OnloadWireOrderDelivery_##_x )
+
+
 
 static int AreContstantsOk()
 {
@@ -153,6 +161,23 @@ static int AreContstantsOk()
 	&& CHECK_CONSTANT_ZC(ONLOAD_MSG_NOSIGNAL)
 	&& CHECK_CONSTANT_TMPL(ONLOAD_TEMPLATE_FLAGS_SEND_NOW)
 	&& CHECK_CONSTANT_TMPL(ONLOAD_TEMPLATE_FLAGS_DONTWAIT)
+	&& CHECK_CONSTANT_WODA(EPOLL_CTL_ADD)
+	&& CHECK_CONSTANT_WODA(EPOLL_CTL_DEL)
+	&& CHECK_CONSTANT_WODA(EPOLL_CTL_MOD)
+	&& CHECK_CONSTANT_WODA(EPOLLIN)
+	&& CHECK_CONSTANT_WODA(EPOLLPRI)
+	&& CHECK_CONSTANT_WODA(EPOLLOUT)
+	&& CHECK_CONSTANT_WODA(EPOLLRDNORM)
+	&& CHECK_CONSTANT_WODA(EPOLLRDBAND)
+	&& CHECK_CONSTANT_WODA(EPOLLWRNORM)
+	&& CHECK_CONSTANT_WODA(EPOLLWRBAND)
+	&& CHECK_CONSTANT_WODA(EPOLLMSG)
+	&& CHECK_CONSTANT_WODA(EPOLLERR)
+	&& CHECK_CONSTANT_WODA(EPOLLHUP)
+	&& CHECK_CONSTANT_WODA(EPOLLRDHUP)
+#if defined(EPOLLWAKEUP)
+	&& CHECK_CONSTANT_WODA(EPOLLWAKEUP)
+#endif  /* EPOLLWAKEUP */
 	;
 }
 
@@ -250,7 +275,7 @@ static jboolean IsInstanceOf( JNIEnv *env, jobject obj, char const* class_name )
 	return (*env)->IsInstanceOf( env, obj, classId );
 }
 
-static jobject GetFieldFromObject( JNIEnv *env, jobject obj, char const* field,
+static jfieldID GetFieldFromObject( JNIEnv *env, jobject obj, char const* field,
 					char const* field_type )
 {
 	jclass classId;
@@ -261,9 +286,9 @@ static jobject GetFieldFromObject( JNIEnv *env, jobject obj, char const* field,
 	if ( !classId )
 		return NULL;
 	fieldId = (*env)->GetFieldID(env, classId, field, field_type );
-	if ( !fieldId )
+	if ( (*env)->ExceptionOccurred(env) )
 		return NULL;
-	return (*env)->GetObjectField( env, obj, fieldId );
+  return fieldId;
 }
 
 static jobject CreateObject( JNIEnv* env, char const* sig )
@@ -1021,3 +1046,159 @@ Java_OnloadTemplateSend_Abort (JNIEnv* env, jclass cls,
 
 
 
+/* ******************* */
+/* Wire Order Delivery */
+/* ******************* */
+
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_00024FdSet_Allocate
+  (JNIEnv* env, jobject self, jint max)
+{
+  int handle;
+  
+  /* Early out if size is invalid */
+  if ( max < 0 )
+    return -EINVAL;
+
+  handle = epoll_create(max);
+  if ( handle < 0 )
+    return -errno;
+
+  return handle;
+}
+
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_00024FdSet_Destroy
+  (JNIEnv* env, jobject self)
+{
+  int i;
+  /* Get our internal data */
+  int handle = GetIntFromObject(env, self, "handle" );
+  if (handle < 0)
+    return -EINVAL;
+  
+  /* Delete the epoll set */
+  close(handle);
+  SetIntOnObject(env, self, "handle", -1);
+  return 0;
+}
+
+
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_00024FdSet__1Ctl
+  (JNIEnv* env, jobject self, jint fd, jint op, jobject obj, jint events)
+{
+  struct epoll_event epoll_ev;
+  int rc = 0;
+  int handle;
+
+  /* Early out for unsupported options */
+  if ( op < EPOLL_CTL_ADD || op > EPOLL_CTL_MOD )
+    return -EOPNOTSUPP;
+  if ( events & (EPOLLET | EPOLLONESHOT) )
+    return -EOPNOTSUPP;
+
+  /* Check our internal data is valid */
+  handle = GetIntFromObject(env, self, "handle" );
+  if ( handle < 0 )
+    return -EINVAL;
+
+  epoll_ev.events = events;
+
+  switch(op) {
+  case EPOLL_CTL_ADD:
+    /* Take a new reference, keep it only if epoll_ctl succeeds */
+    epoll_ev.data.fd = fd;
+    rc = epoll_ctl(handle, op, fd, &epoll_ev);
+    break;
+  case EPOLL_CTL_DEL:
+    /* Find, and remove, the existing reference; iff epoll_ctl succeeds */
+    /* epoll_ev is ignored here; but can only be NULL on Linux 2.6.9+ */
+    rc = epoll_ctl(handle, op, fd, &epoll_ev);
+    break;
+  case EPOLL_CTL_MOD:
+    /* If epoll_ctl succeeds, release old reference and store new one */
+    epoll_ev.data.fd = fd;
+    rc = epoll_ctl(handle, op, fd, &epoll_ev);
+    break;
+  default:
+    return -EINVAL;
+  }
+  return rc;
+}
+
+
+/* Helper function for WodaWait, copy a single result out */
+static void CopyWodaResult(JNIEnv *env, struct epoll_event *evs,
+                           struct onload_ordered_epoll_event *oev,
+                           jobjectArray results, int i)
+{
+  jobject resultObject = (*env)->GetObjectArrayElement(env, results, i);
+
+  SetIntOnObject(env, resultObject, "available", oev[i].bytes);
+  SetLongOnObject(env, resultObject, "seconds", oev[i].ts.tv_sec);
+  SetLongOnObject(env, resultObject, "nanoseconds", oev[i].ts.tv_nsec);
+  SetIntOnObject(env, resultObject, "fd", evs[i].data.fd);
+}
+
+
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_00024FdSet__1Wait
+  (JNIEnv* env, jobject self, jobjectArray results, jint timeout)
+{
+  jint rc;
+  jint i;
+  jint len;
+  int handle;
+
+  /* No point running unless we have a valid results array */
+  len = (*env)->GetArrayLength(env, results);
+  if( len <= 0 )
+    return -EINVAL;
+
+  handle = GetIntFromObject(env, self, "handle" );
+  if ( handle < 0 )
+    return -EINVAL;
+
+  /* C11-style variable length array here.  Could use alloca */
+  struct epoll_event epoll_evs[len];
+  struct onload_ordered_epoll_event ordered_evs[len];
+
+  /* Actually do the Woda */
+  rc = onload_ordered_epoll_wait(handle, epoll_evs, ordered_evs, len, timeout);
+
+  /* And unpack the results, if any */
+  i = 0;
+  while( i < rc ) {
+    CopyWodaResult(env, epoll_evs, ordered_evs, results, i);
+    i++;
+  }
+
+  return rc;
+}
+
+
+/** Make public some methods for extracting fd's */
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_GetFd(JNIEnv* env, jclass cls, jobject obj)
+{
+  return GetFdFromUnknown(env, obj);
+}
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_GetFd__Ljava_net_ServerSocket_2
+  (JNIEnv* env, jclass cls, jobject obj)
+{
+  return GetFdFromUnknown(env, obj);
+}
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_GetFd__Ljava_net_Socket_2
+  (JNIEnv* env, jclass cls, jobject obj) 
+{
+  return GetFdFromUnknown(env, obj);
+}
+JNIEXPORT jint JNICALL
+Java_OnloadWireOrderDelivery_GetFd__Ljava_nio_channels_spi_AbstractSelectableChannel_2
+  (JNIEnv* env, jclass cls, jobject obj)
+{
+  return GetFdFromUnknown(env, obj);
+}

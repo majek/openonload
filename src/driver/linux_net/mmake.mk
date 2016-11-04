@@ -11,11 +11,15 @@ MMAKE_GEN_SRCS := %.mod.c $(CONFIG_FILES)
 ifdef DRIVER
 
 export CONFIG_SFC := m
+ifdef EFX_FOR_UPSTREAM
+# match UNIFDEF_DEFINES in export.sh
+export CONFIG_SFC_DEBUGFS :=
+export EFX_DISABLE_MCDI_PROXY_AUTH := y
+else
 export CONFIG_SFC_DEBUGFS := y
+endif
 export CONFIG_SFC_DUMP := y
-export CONFIG_SFC_HWMON := y
 export CONFIG_SFC_MCDI_MON := y
-export CONFIG_SFC_SFE4001 := y
 export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
 export CONFIG_SFC_SRIOV := y
@@ -42,6 +46,10 @@ endif
 
 ifdef EFX_NOT_EXPORTED
 EXTRA_MAKEFLAGS += EFX_NOT_EXPORTED=1
+endif
+
+ifdef EFX_FOR_UPSTREAM
+EXTRA_MAKEFLAGS += EFX_FOR_UPSTREAM=1
 endif
 
 KVERPARTS = $(subst -, ,$(subst ., ,$(KVER)))

@@ -32,6 +32,7 @@
 #include <cplane/exported.h>
 #include <onload/tcp_driver.h>
 #include <onload/tcp_helper_fns.h>
+#include <onload/oof_interface.h>
 
 #include <linux/rtnetlink.h>
 
@@ -109,6 +110,11 @@ static void __oo_nic_black_white_list_update(const char* name, int list_type)
         if( efrm_client_get_ifindex(oo_nics[i].efrm_client) == 
             dev->ifindex ) {
           oo_nics[i].black_white_list |= list_type;
+          oof_hwport_un_available(i,
+                                  (list_type & OO_NIC_WHITELIST) ||
+                                  ! (list_type & OO_NIC_BLACKLIST),
+                                  OOF_HWPORT_AVAIL_TAG_BWL,
+                                  efab_tcp_driver.filter_manager);
           break;
         }
       }
@@ -338,10 +344,12 @@ struct oo_nic* oo_nic_add(int ifindex)
   onic->oo_nic_flags = 0;
 
   ++oo_n_nics;
-  ci_log("%s: ifindex=%d oo_index=%d", __FUNCTION__, ifindex, i);
 
   oo_nic_black_white_list_update(oo_nic_white_list.bwl_val, OO_NIC_WHITELIST);
   oo_nic_black_white_list_update(oo_nic_black_list.bwl_val, OO_NIC_BLACKLIST);
+
+  ci_log("%s: ifindex=%d oo_index=%d black_white_list=%d",
+         __FUNCTION__, ifindex, i, onic->black_white_list);
 
   oo_check_nic_licensed_for_onload(onic);
 

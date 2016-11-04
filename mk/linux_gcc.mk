@@ -144,7 +144,7 @@ endef
 define MMakeLinkRelocatable
 set -x; \
 $(CLINK) $(MMAKE_CARCH) $(CFLAGS) $(MMAKE_DIR_LINKFLAGS) \
-	-fPIC -nostdlib -z combreloc -r $(filter %.o,$^) $$libs -o $@;
+	-fPIC -nostdlib $(MMAKE_RELOCATABLE_LIB) -r $(filter %.o,$^) $$libs -o $@;
 endef
 
 define MMakeLinkPreloadLib
@@ -203,7 +203,7 @@ MMakeGenerateDllLinkname = lib$(lib_name).so
 MMakeGenerateDllDepend = $(BUILD)/$(lib_where)/$(MMakeGenerateDllTarget)
 MMakeGenerateDllLink   = -L$(BUILD)/$(lib_where) -l$(lib_name) -Wl,-rpath $(shell echo "$(BUILDPATH)" | sed 's+/mnt/./home+/home+')/$(lib_where)
 MMakeGeneratePrebuiltDllDepend = $(MMakeGeneratePrebuiltPath)/$(MMakeGenerateDllTarget)
-MMakeGeneratePrebuiltDllLink   = -L$(MMakeGeneratePrebuiltPath) -l$(lib_name) -Wl,-rpath $(shell readlink -f "$(MMakeGeneratePrebuiltPath)")
+MMakeGeneratePrebuiltDllLink   = -L$(MMakeGeneratePrebuiltPath) -l$(lib_name)
 
 
 ######################################################################

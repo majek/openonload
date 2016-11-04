@@ -556,7 +556,9 @@ static int oo_epoll2_action(struct oo_epoll_private *priv,
 #ifdef __NR_epoll_pwait
       if (op->rc == -EINTR) {
         memcpy(&current->saved_sigmask, &sigsaved, sizeof(sigsaved));
-#ifdef HAVE_SET_RESTORE_SIGMASK
+/* Must check for both symbols: see def'n of EFRM_HAVE_SET_RESTORE_SIGMASK. */
+#if defined(HAVE_SET_RESTORE_SIGMASK) || \
+    defined(EFRM_HAVE_SET_RESTORE_SIGMASK)
         set_restore_sigmask();
 #else
         set_thread_flag(TIF_RESTORE_SIGMASK);
@@ -908,6 +910,19 @@ static int oo_epoll1_block_on(struct file* home_filp,
 }
 
 
+static int oo_epoll_move_fd(struct oo_epoll1_private* priv, int epoll_fd)
+{
+  struct file* epoll_file = fget(epoll_fd);
+  if( epoll_file != priv->os_file ) {
+    fput(epoll_file);
+    return -EINVAL;
+  }
+  fput(epoll_file);
+
+  priv->sh->epfd = epoll_fd;
+  return 0;
+}
+
 /*************************************************************
  * Common /dev/onload_epoll code
  *************************************************************/
@@ -1078,7 +1093,9 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     if( local_arg.flags & OO_EPOLL1_HAS_SIGMASK ) {
       if( signal_pending(current) ) {
         memcpy(&current->saved_sigmask, &sigsaved, sizeof(sigsaved));
-#ifdef HAVE_SET_RESTORE_SIGMASK
+/* Must check for both symbols: see def'n of EFRM_HAVE_SET_RESTORE_SIGMASK. */
+#if defined(HAVE_SET_RESTORE_SIGMASK) || \
+    defined(EFRM_HAVE_SET_RESTORE_SIGMASK)
         set_restore_sigmask();
 #else
         set_thread_flag(TIF_RESTORE_SIGMASK);
@@ -1120,6 +1137,18 @@ static long oo_epoll_fop_unlocked_ioctl(struct file* filp,
     if( copy_to_user(argp, &local_arg, _IOC_SIZE(cmd)) )
       return -EFAULT;
     return 0;
+  }
+
+  case OO_EPOLL1_IOC_MOVE_FD: {
+    ci_fixed_descriptor_t epoll_fd;
+    ci_assert_equal(_IOC_SIZE(cmd), sizeof(epoll_fd));
+    if( priv->type != OO_EPOLL_TYPE_1 )
+      return -EINVAL;
+    if( copy_from_user(&epoll_fd, argp, _IOC_SIZE(cmd)) )
+      return -EFAULT;
+
+    rc = oo_epoll_move_fd(&priv->p.p1, epoll_fd);
+    break;
   }
 
   default:

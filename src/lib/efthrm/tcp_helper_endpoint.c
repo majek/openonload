@@ -79,6 +79,12 @@ tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
 {
   unsigned long lock_flags;
 
+  /* We need to release zero, one or two file references after dropping a
+   * spinlock. */
+  struct oo_file_ref* files_to_drop[2];
+  int num_files_to_drop = 0;
+  int i;
+
   /* the endpoint structure stays in the array in the THRM even after
      it is freed - therefore ensure properly cleaned up */
   OO_DEBUG_VERB(ci_log(FEP_FMT, FEP_PRI_ARGS(ep)));
@@ -91,10 +97,18 @@ tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
   if( ep->os_socket != NULL ) {
     OO_DEBUG_ERR(ci_log(FEP_FMT "ERROR: O/S socket still referenced",
                         FEP_PRI_ARGS(ep)));
-    oo_file_ref_drop(ep->os_socket);
+    files_to_drop[num_files_to_drop++] = ep->os_socket;
     ep->os_socket = NULL;
   }
+  if( ep->os_port_keeper != NULL ) {
+    files_to_drop[num_files_to_drop++] = ep->os_port_keeper;
+    ep->os_port_keeper = NULL;
+  }
   spin_unlock_irqrestore(&ep->lock, lock_flags);
+
+  for( i = 0; i < num_files_to_drop; ++i )
+    oo_file_ref_drop(files_to_drop[i]);
+
   if( ep->alien_ref != NULL ) {
     OO_DEBUG_ERR(ci_log(FEP_FMT "ERROR: alien socket still referenced",
                         FEP_PRI_ARGS(ep)));

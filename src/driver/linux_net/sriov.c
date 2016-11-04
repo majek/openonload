@@ -98,8 +98,13 @@ int efx_sriov_set_vf_mac(struct net_device *net_dev, int vf_i, u8 *mac)
 		return -EOPNOTSUPP;
 }
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_VLAN_PROTO)
+int efx_sriov_set_vf_vlan(struct net_device *net_dev, int vf_i, u16 vlan,
+			  u8 qos, __be16 vlan_proto)
+#else
 int efx_sriov_set_vf_vlan(struct net_device *net_dev, int vf_i, u16 vlan,
 			  u8 qos)
+#endif
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
@@ -107,6 +112,11 @@ int efx_sriov_set_vf_vlan(struct net_device *net_dev, int vf_i, u16 vlan,
 		if ((vlan & ~VLAN_VID_MASK) ||
 		    (qos & ~(VLAN_PRIO_MASK >> VLAN_PRIO_SHIFT)))
 			return -EINVAL;
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_VLAN_PROTO)
+		if (vlan_proto != htons(ETH_P_8021Q))
+			return -EPROTONOSUPPORT;
+#endif
 
 		return efx->type->sriov_set_vf_vlan(efx, vf_i, vlan, qos);
 	} else {
@@ -135,18 +145,5 @@ int efx_sriov_set_vf_link_state(struct net_device *net_dev, int vf_i,
 	else
 		return -EOPNOTSUPP;
 }
-
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
-int efx_sriov_get_phys_port_id(struct net_device *net_dev,
-			       struct netdev_phys_item_id *ppid)
-{
-	struct efx_nic *efx = netdev_priv(net_dev);
-
-	if (efx->type->sriov_get_phys_port_id)
-		return efx->type->sriov_get_phys_port_id(efx, ppid);
-	else
-		return -EOPNOTSUPP;
-}
-#endif
 
 #endif

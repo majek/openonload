@@ -508,6 +508,11 @@ struct efhw_nic {
 	unsigned pio_size;
 	/* Total number of PIO buffers */
 	unsigned pio_num;
+
+	/* Number of vFIFOs for TX alternatives */
+	uint8_t tx_alts_vfifos;
+	/* Number of common pool buffers for TX alternatives*/
+	uint16_t tx_alts_cp_bufs;
 };
 
 

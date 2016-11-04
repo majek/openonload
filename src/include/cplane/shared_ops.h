@@ -124,7 +124,7 @@ ci_inline void cicp_layer34_hash(const cicp_bond_row_t *row,
 
 extern ci_hwport_id_t
 ci_hwport_bond_get(cicp_handle_t* cplane, const cicp_encap_t *encap, 
-                   ci_int16 bond_rowid, struct cicp_hash_state *hs);
+                   ci_int16 bond_rowid, struct cicp_hash_state *hs) CI_DV;
 
 #endif
 
@@ -251,7 +251,7 @@ cicp_mac_set_mostly_valid(const cicp_mac_mib_t *mact,
 extern int /* rc */
 cicp_mac_get(const cicp_mac_mib_t *mact, ci_ifid_t ifindex,
              const ci_ip_addr_t ip, ci_uint8 *out_mac,
-	     cicp_mac_verinfo_t *out_handle);
+	     cicp_mac_verinfo_t *out_handle) CI_DV;
 
 
 
@@ -366,7 +366,7 @@ cicp_bond_row_allocated(const cicp_bond_row_t *row)
  */
 extern cicp_mac_rowid_t
 cicpos_mac_find_ip(const cicp_mac_mib_t *mact, ci_ifid_t ifindex,
-		   ci_ip_addr_t ip, ci_verlock_value_t *out_ver);
+		   ci_ip_addr_t ip, ci_verlock_value_t *out_ver) CI_DV;
 
 
 
@@ -400,11 +400,11 @@ extern int /* rc */
 cicp_llap_retrieve(cicp_handle_t *control_plane, ci_ifid_t ifindex,
 		   ci_mtu_t *out_mtu, ci_hwport_id_t *out_hwport,
 		   ci_mac_addr_t *out_mac, cicp_encap_t *out_encap,
-                   ci_ifid_t *out_base_ifindex, ci_int16* out_bond_rowid);
+                   ci_ifid_t *out_base_ifindex, ci_int16* out_bond_rowid) CI_DV;
 
 extern int /* rc */
 cicp_llap_find(cicp_handle_t *control_plane, ci_ifid_t *out_ifindex,
-	       ci_hwport_id_t port, const ci_uint16 vlan_id);
+	       ci_hwport_id_t port, const ci_uint16 vlan_id) CI_DV;
 
 
 

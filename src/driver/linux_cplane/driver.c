@@ -1235,6 +1235,39 @@ static const struct file_operations cicpos_pmtu_fops = {
 };
 
 
+static int
+cicpos_hwport2ifindex_read(struct seq_file *seq, void *s)
+{
+  cicp_mibs_kern_t *control_plane = procfs_control_plane(seq->private);
+  const cicp_llapinfo_t *llapt = control_plane->user.llapinfo_utable;
+  int i;
+
+  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; i++ ) {
+    CICP_LOCK_BEGIN(control_plane)
+    if( llapt->hwport_to_base_ifindex[i] > 0 ) {
+      seq_printf(seq, "%d: ifindex=%d %s\n",
+                 i, llapt->hwport_to_base_ifindex[i],
+                 _cicp_llap_get_name(control_plane,
+                                     llapt->hwport_to_base_ifindex[i]));
+    }
+    CICP_LOCK_END;
+  }
+
+  return 0;
+}
+static int cicpos_hwport2ifindex_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, cicpos_hwport2ifindex_read, PDE_DATA(inode));
+}
+static const struct file_operations cicpos_hwport2ifindex_fops = {
+    .owner   = THIS_MODULE,
+    .open    = cicpos_hwport2ifindex_open,
+    .read    = seq_read,
+    .llseek  = seq_lseek,
+    .release = single_release,
+};
+
+
 static void
 cicpos_procfs_ctor(cicp_mibs_kern_t *control_plane,
                    struct proc_dir_entry *cp_proc_root)
@@ -1267,6 +1300,8 @@ cicpos_procfs_ctor(cicp_mibs_kern_t *control_plane,
 			 &cicpos_bond_fops,  caller_info);
 	proc_create_data(CICPOS_PROCFS_FILE_PMTU, 0, cp_proc_root,
 			 &cicpos_pmtu_fops,  caller_info);
+	proc_create_data("hwport2ifindex", 0, cp_proc_root,
+			 &cicpos_hwport2ifindex_fops,  caller_info);
     }
 }
 
@@ -1279,6 +1314,7 @@ cicpos_procfs_dtor(cicp_mibs_kern_t *control_plane,
                    struct proc_dir_entry *cp_proc_root)
 {   if (NULL != cp_proc_root)
     {
+        remove_proc_entry("hwport2ifindex", cp_proc_root);
         remove_proc_entry(CICPOS_PROCFS_FILE_LLAP, cp_proc_root);
 	remove_proc_entry(CICPOS_PROCFS_FILE_MAC, cp_proc_root);
         remove_proc_entry(CICPOS_PROCFS_FILE_IPIF, cp_proc_root);
@@ -1570,13 +1606,13 @@ netlink_read(struct socket *sock, char *buf, size_t count,
 	DEBUGNETLINK(DPRINTF(CODEID": re-read netlink #1"));
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout(HZ/100);
-	rc = sock_recvmsg(sock, &msg, count, msg.msg_flags);
+	rc = kernel_recvmsg(sock, &msg, &iov, 1, count, msg.msg_flags);
 	/* wait a little bit more for the reply */
 	if (retry && rc == -EAGAIN) {
 	    DEBUGNETLINK(DPRINTF(CODEID": re-read netlink #2"));
 	    set_current_state(TASK_INTERRUPTIBLE);
 	    schedule_timeout(HZ/10);
-	    rc = sock_recvmsg(sock, &msg, count, msg.msg_flags);
+	    rc = kernel_recvmsg(sock, &msg, &iov, 1, count, msg.msg_flags);
 	}
     }
 

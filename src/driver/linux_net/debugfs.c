@@ -131,14 +131,11 @@ static struct file_operations efx_debugfs_file_ops = {
  */
 void efx_fini_debugfs_child(struct dentry *dir, const char *name)
 {
-	struct qstr child_name;
+	struct qstr child_name = QSTR_INIT(name, strlen(name));
 	struct dentry *child;
 
-	child_name.len = strlen(name);
-	child_name.name = name;
-	child_name.hash = full_name_hash(child_name.name, child_name.len);
-	child = d_lookup(dir, &child_name);
-	if (child) {
+	child = d_hash_and_lookup(dir, &child_name);
+	if (!IS_ERR_OR_NULL(child)) {
 		/* If it's a "regular" file, free its parameter binding */
 		if (S_ISREG(child->d_inode->i_mode))
 			kfree(child->d_inode->i_private);
@@ -775,12 +772,14 @@ static int efx_nic_debugfs_read_desc(struct seq_file *file, void *data)
 	const char *rev_name;
 
 	switch (efx_nic_rev(efx)) {
+#ifndef CONFIG_SFC_FALCON
 	case EFX_REV_FALCON_A1:
 		rev_name = "Falcon rev A1";
 		break;
 	case EFX_REV_FALCON_B0:
 		rev_name = "Falcon rev B0";
 		break;
+#endif
 	case EFX_REV_SIENA_A0:
 		rev_name = "Siena rev A0";
 		break;

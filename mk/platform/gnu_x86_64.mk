@@ -7,4 +7,7 @@ ifndef MMAKE_CTUNE
 MMAKE_CTUNE := $(shell $(CC) -x c -c -mtune=native - -o /dev/null </dev/null >/dev/null 2>&1 && echo "-mtune=native" || echo "")
 endif
 MMAKE_CARCH := -m64 $(MMAKE_CTUNE)
+
+MMAKE_RELOCATABLE_LIB := -z combreloc
+
 include $(TOP)/mk/linux_gcc.mk

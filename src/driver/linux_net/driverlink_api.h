@@ -330,9 +330,9 @@ struct efx_dl_aoe_resources {
 };
 
 /**
- * enum efx_dl_falcon_resource_flags - Falcon/Siena resource information flags.
+ * enum efx_dl_ef10_resource_flags - EF10 resource information flags.
  *
- * Flags that describe hardware variations for the current Falcon or
+ * Flags that describe hardware variations for the current EF10 or
  * Siena device.
  *
  * @EFX_DL_EF10_USE_MSI: Port is initialised to use MSI/MSI-X interrupts.

@@ -48,7 +48,7 @@ static int citp_cplane_init(void)
 
   citp_enter_lib(&context);
   CITP_FDTABLE_LOCK();
-  cp = cicp_get_handle(CPLANE_API_VERSION, -1);
+  cp = cicp_get_handle(CPLANE_API_VERSION, -1, CITP_OPTS.fd_base);
   if( cp == NULL ) {
     /* We can restore cplane handle from existing sockets, so do not
      * complain too loud. */
@@ -284,31 +284,6 @@ void citp_netif_pre_bproc_move_hook(void)
 }
 
 
-/* Move a NIC file descriptor away from fds 0, 1 or 2.
- *
- * It is assumed that this is called immediately after ef_onload_driver_open(), if
- * necessary, so we don't need to worry about any updating of the fdtable.
- */
-static int __citp_netif_move_fd(ef_driver_handle* fd)
-{
-  int rc;
-
-  /* means the first available fd >= 3 */
-  rc = oo_fcntl_dupfd_cloexec(*fd, 3);
-  if (rc >= 0) {
-    ci_sys_close(*fd);
-    Log_V(ci_log("%s: fd %d moved to %d", __FUNCTION__, *fd, rc));
-    *fd = rc;
-    rc = 0;
-  }
-  else {
-    Log_E(ci_log("%s: move of fd %d failed", __FUNCTION__, *fd));
-  }
-
-  return rc;
-}
-
-
 /* Checks that the stack config is sane, given the process config.
  *
  * Stack only config should already be checked in ci_netif_sanity_checks()
@@ -346,20 +321,9 @@ static void ci_netif_check_process_config(ci_netif* ni)
 void  citp_netif_ctor_hook(ci_netif* ni, int realloc)
 {
 
-  if (!realloc) {
-    /* Don't want netifs on fds 0..3 - move it elsewhere.
-     * TODO: This is kind of sucks -- not exactly elegant.
-     *       Perhaps a better approach is to grow the fdtable but pretend to
-     *       the user that it's smaller.  Then any FDs we need can be placed in
-     *       the "invisible" part of the fd table.
-     */
-    if (ci_netif_get_driver_handle(ni) <= 3) {
-      CI_DEBUG_TRY(__citp_netif_move_fd(&(ni->driver_handle)));
-    }
-
+  if (!realloc)
     /* Protect the netif's FD table entry */
     __citp_fdtable_reserve(ci_netif_get_driver_handle(ni), 1);
-  }
 
   /* Make sure the trampoline is registered. */
   CI_DEBUG_TRY(citp_init_trampoline(ci_netif_get_driver_handle(ni)));

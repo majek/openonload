@@ -216,7 +216,7 @@ static int efx_test_interrupts(struct efx_nic *efx,
 	if (rc == -ENOTSUPP) {
 		netif_dbg(efx, drv, efx->net_dev,
 			  "direct interrupt testing not supported\n");
-		tests->interrupt = 1;
+		tests->interrupt = 0;
 		return 0;
 	}
 
@@ -563,15 +563,13 @@ static int efx_end_loopback(struct efx_tx_queue *tx_queue,
 	rx_good = atomic_read(&state->rx_good);
 	rx_bad = atomic_read(&state->rx_bad);
 	if (tx_done != state->packet_count) {
-		/* Don't free the skbs; they will be picked up on TX
-		 * overflow or channel teardown.
-		 */
 		netif_err(efx, drv, efx->net_dev,
 			  "TX queue %d saw only %d out of an expected %d "
 			  "TX completion events in %s loopback test\n",
 			  tx_queue->queue, tx_done, state->packet_count,
 			  LOOPBACK_MODE(efx));
 		rc = -ETIMEDOUT;
+		efx_purge_tx_queue(tx_queue);
 		/* Allow to fall through so we see the RX errors as well */
 	}
 

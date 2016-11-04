@@ -82,7 +82,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.8.2.1004"
+#define EFX_DRIVER_VERSION	"4.10.0.1011"
 
 #ifdef DEBUG
 #define EFX_BUG_ON_PARANOID(x) BUG_ON(x)
@@ -154,14 +154,18 @@
 #else
 #define EFX_MAX_CORE_TX_QUEUES	1U
 #endif
-#define EFX_TXQ_TYPE_CSUM_OFFLOAD	0
-#define EFX_TXQ_TYPE_NO_OFFLOAD		1
+#define EFX_TXQ_TYPE_NO_OFFLOAD		0
+#define EFX_TXQ_TYPE_CSUM_OFFLOAD	1
 #define EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD	2
+#define EFX_TXQ_TYPE_BOTH_CSUM_OFFLOAD  3
 #define EFX_TXQ_TYPES			3
 #define EFX_MAX_TX_QUEUES	(EFX_TXQ_TYPES * EFX_MAX_CORE_TX_QUEUES)
 
 /* Maximum possible MTU the driver supports */
 #define EFX_MAX_MTU (9 * 1024)
+
+/* Minimum MTU, from RFC791 (IP) */
+#define EFX_MIN_MTU 68
 
 /* Maximum total header length for TSOv2 */
 #define EFX_TSO2_MAX_HDRLEN	208
@@ -330,8 +334,6 @@ struct efx_tx_buffer {
  *	avoid cache-line ping-pong between the xmit path and the
  *	completion path.
  * @merge_events: Number of TX merged completion events
- * @completed_desc_ptr: Most recent completed pointer - only used with
- *      timestamping.
  * @completed_timestamp_major: Top part of the most recent tx timestamp.
  * @completed_timestamp_minor: Low part of the most recent tx timestamp.
  * @insert_count: Current insert pointer
@@ -401,7 +403,6 @@ struct efx_tx_queue {
 	unsigned int doorbell_notify_comp;
 	unsigned int bytes_compl;
 	unsigned int pkts_compl;
-	unsigned int completed_desc_ptr;
 	u32 completed_timestamp_major;
 	u32 completed_timestamp_minor;
 
@@ -1248,6 +1249,7 @@ struct vfdi_status;
  * @rx_hash_key: Toeplitz hash key for RSS
  * @rx_indir_table: Indirection table for RSS
  * @rx_scatter: Scatter mode enabled for receives
+ * @rx_hash_udp_4tuple: UDP 4-tuple hashing enabled
  * @cpu_channel_map: Mapping of CPUs to channels. Used to assign flows.
  * @errors: Error condition stats
  * @int_error_count: Number of internal errors seen recently
@@ -1420,6 +1422,7 @@ struct efx_nic {
 	u8 rx_hash_key[40];
 	u32 rx_indir_table[128];
 	bool rx_scatter;
+	bool rx_hash_udp_4tuple;
 
 #ifdef EFX_TX_STEERING
 	int *cpu_channel_map;
@@ -1473,6 +1476,9 @@ struct efx_nic {
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NETDEV_HW_FEATURES) && !defined(EFX_HAVE_NETDEV_EXTENDED_HW_FEATURES)
 	netdev_features_t hw_features;
 #endif
+
+	bool stats_enabled;
+	unsigned int stats_period_ms;
 
 	struct efx_buffer stats_buffer;
 	u64 rx_nodesc_drops_total;
@@ -1716,6 +1722,7 @@ struct efx_udp_tunnel {
  * @filter_table_probe: Probe filter capabilities and set up filter software state
  * @filter_table_restore: Restore filters removed from hardware
  * @filter_table_remove: Remove filters from hardware and tear down software state
+ * @filter_match_supported: Check if specified filter match supported
  * @filter_update_rx_scatter: Update filters after change to rx scatter setting
  * @filter_insert: add or replace a filter
  * @filter_remove_safe: remove a filter by ID, carefully
@@ -1755,9 +1762,9 @@ struct efx_udp_tunnel {
  * @ptp_set_ts_config: Set hardware timestamp configuration.  The flags
  *	and tx_type will already have been validated but this operation
  *	must validate and update rx_filter.
+ * @get_phys_port_id: Get the underlying physical port id.
  * @sriov_init: Initialise VFs when vf-count is set via module parameter.
  * @sriov_fini: Disable sriov
- * @sriov_get_phys_port_id: Get the underlying physical port id.
  * @sriov_wanted: Check that max_vf > 0.
  * @sriov_respet: Reset sriov, siena only.
  * @sriov_configure: Enable VFs.
@@ -1846,6 +1853,7 @@ struct efx_nic_type {
 	void (*start_stats)(struct efx_nic *efx);
 	void (*pull_stats)(struct efx_nic *efx);
 	void (*stop_stats)(struct efx_nic *efx);
+	void (*update_stats_period)(struct efx_nic *efx);
 	void (*set_id_led)(struct efx_nic *efx, enum efx_led_mode mode);
 	void (*push_irq_moderation)(struct efx_channel *channel);
 	int (*reconfigure_port)(struct efx_nic *efx);
@@ -1881,7 +1889,7 @@ struct efx_nic_type {
 					 struct pt_regs *);
 #endif
 	int (*tx_probe)(struct efx_tx_queue *tx_queue);
-	void (*tx_init)(struct efx_tx_queue *tx_queue);
+	int (*tx_init)(struct efx_tx_queue *tx_queue);
 	void (*tx_remove)(struct efx_tx_queue *tx_queue);
 	void (*tx_write)(struct efx_tx_queue *tx_queue);
 	void (*tx_notify)(struct efx_tx_queue *tx_queue);
@@ -1891,7 +1899,7 @@ struct efx_nic_type {
 				  const u32 *rx_indir_table, const u8 *key);
 	int (*rx_pull_rss_config)(struct efx_nic *efx);
 	int (*rx_probe)(struct efx_rx_queue *rx_queue);
-	void (*rx_init)(struct efx_rx_queue *rx_queue);
+	int (*rx_init)(struct efx_rx_queue *rx_queue);
 	void (*rx_remove)(struct efx_rx_queue *rx_queue);
 	void (*rx_write)(struct efx_rx_queue *rx_queue);
 	int (*rx_defer_refill)(struct efx_rx_queue *rx_queue);
@@ -1905,6 +1913,8 @@ struct efx_nic_type {
 	int (*filter_table_probe)(struct efx_nic *efx);
 	void (*filter_table_restore)(struct efx_nic *efx);
 	void (*filter_table_remove)(struct efx_nic *efx);
+	bool (*filter_match_supported)(struct efx_nic *efx, bool encap,
+				       unsigned int match_flags);
 	void (*filter_update_rx_scatter)(struct efx_nic *efx);
 	s32 (*filter_insert)(struct efx_nic *efx,
 			     const struct efx_filter_spec *spec, bool replace);
@@ -1970,12 +1980,12 @@ struct efx_nic_type {
 	int (*vlan_rx_add_vid)(struct efx_nic *efx, __be16 proto, u16 vid);
 	int (*vlan_rx_kill_vid)(struct efx_nic *efx, __be16 proto, u16 vid);
 #endif
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
+	int (*get_phys_port_id)(struct efx_nic *efx,
+				struct netdev_phys_item_id *ppid);
+#endif
 	int (*sriov_init)(struct efx_nic *efx);
 	void (*sriov_fini)(struct efx_nic *efx);
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
-	int (*sriov_get_phys_port_id)(struct efx_nic *efx,
-				      struct netdev_phys_item_id *ppid);
-#endif
 	bool (*sriov_wanted)(struct efx_nic *efx);
 	void (*sriov_reset)(struct efx_nic *efx);
 	int (*sriov_configure)(struct efx_nic *efx, int num_vfs);
@@ -1997,6 +2007,7 @@ struct efx_nic_type {
 	int (*get_mac_address)(struct efx_nic *efx, unsigned char *perm_addr);
 	int (*set_mac_address)(struct efx_nic *efx);
 	unsigned int (*mcdi_rpc_timeout)(struct efx_nic *efx, unsigned int cmd);
+	unsigned int (*mcdi_acquire_timeout)(struct efx_nic *efx);
 	int (*udp_tnl_push_ports)(struct efx_nic *efx);
 	int (*udp_tnl_add_port)(struct efx_nic *efx, struct efx_udp_tunnel tnl);
 	bool (*udp_tnl_has_port)(struct efx_nic *efx, __be16 port);

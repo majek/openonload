@@ -143,6 +143,9 @@ ci_inline ci_uint16 efhw_mcdi_read(char *addr)
 #define EFHW_MCDI_WORD(_buf, _field)					\
 	efhw_mcdi_read(_EFHW_MCDI_WORD_FIELD((_buf), _field))
 
+#define EFHW_MCDI_BYTE(_buf, _field)					\
+	efhw_mcdi_read(EFHW_MCDI_PTR((_buf), _field))
+
 #define EFHW_MCDI_SET_DWORD(_buf, _field, _value)			\
 	efhw_mcdi_writel((_value), _EFHW_MCDI_DWORD_FIELD((_buf), _field))
 

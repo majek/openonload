@@ -366,12 +366,18 @@ static int thc_alloc_thr(tcp_helper_cluster_t* thc,
       return rc;
     }
   }
-  roa.in_flags = ni_flags;
+  roa.in_flags = ni_flags & ~(CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS |
+                              CI_NETIF_FLAG_IN_DL_CONTEXT);
   strncpy(roa.in_version, ONLOAD_VERSION, sizeof(roa.in_version));
   strncpy(roa.in_uk_intf_ver, oo_uk_intf_ver, sizeof(roa.in_uk_intf_ver));
   if( (opts = kmalloc(sizeof(*opts), GFP_KERNEL)) == NULL )
     return -ENOMEM;
   memcpy(opts, ni_opts, sizeof(*opts));
+  if( ni_flags & CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS ) {
+    /* disabling tcp shared ports on passive socket clustered stacks */
+    opts->tcp_shared_local_ports = 0;
+    opts->tcp_shared_local_ports_max = 0;
+  }
   rc = tcp_helper_rm_alloc(&roa, opts, -1, thc, &thr_walk);
   kfree(opts);
   if( rc != 0 )
@@ -589,6 +595,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   int flags = 0;
   tcp_helper_cluster_t* named_thc,* ported_thc;
   int alloced = 0;
+  int do_sock_unlock = 1;
   oo_sp new_sock_id;
 
   if( NI_OPTS(ni).cluster_ignore == 1 ) {
@@ -761,7 +768,9 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   rc = thc_get_thr(thc, &dummy_oofilter, &thr);
   if( rc != 0 )
     rc = thc_alloc_thr(thc, trb->cluster_restart_opt,
-                       &ni->opts, ni->flags, &thr);
+                       &ni->opts,
+                       ni->flags | CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS,
+                       &thr);
 
   /* If get or alloc succeeded thr holds reference to the cluster,
    * so the cluster cannot go away.  We'll drop our reference and also
@@ -801,6 +810,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   rc = efab_file_move_to_alien_stack(priv, &thr->netif, 0, &new_sock_id);
   if( rc != 0 ) {
     efab_thr_release(thr);
+    do_sock_unlock = 0;
     /* both sockets are unlocked, and there is still single reference to thr */
   }
   else {
@@ -826,7 +836,9 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   oof_socket_dtor(&dummy_oofilter);
   mutex_unlock(&thc_init_mutex);
 unlock_sock:
-  ci_sock_unlock(ni, waitable);
+  /* Only unlock if the socket was locked in the first place */
+  if( do_sock_unlock != 0 )
+    ci_sock_unlock(ni, waitable);
   return rc;
 
  alloc_fail:

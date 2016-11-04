@@ -375,6 +375,23 @@ typedef struct ci_cfg_ioctl_desc_s {
 #define CICFG_DESC_EAGAIN    11 /* retry the operation */
 } ci_cfg_ioctl_desc_t;
 
+
+/* "Donation" shared memory ioctl structures. */
+
+typedef struct {
+  ci_int32       shm_class;
+  ci_user_ptr_t  buffer;
+  ci_uint32      length;
+  ci_int32       buffer_id;
+} oo_dshm_register_t;
+
+typedef struct {
+  ci_int32       shm_class;
+  ci_user_ptr_t  buffer_ids;
+  ci_uint32      count;
+} oo_dshm_list_t;
+
+
 /*--------------------------------------------------------------------
  *
  * Platform dependent IOCTLS

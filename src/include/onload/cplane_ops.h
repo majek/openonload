@@ -107,6 +107,10 @@ CICP_SYSBODY(
 #undef CICP_SYSBODY
 #undef CICP_SYSCALL
 
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility push(default)
+#endif
+
 /*!
  * Establish forwarding information.
  *
@@ -290,6 +294,10 @@ extern int /*bool*/
 cicppl_mac_defer_send(ci_netif *netif, int *out_os_rc,
 		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex);
 
+
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility pop
+#endif
 
 #endif
 

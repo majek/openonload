@@ -157,9 +157,12 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #if __GNUC__ >= 3 && defined(NDEBUG)
 # define CI_HF __attribute__((visibility("hidden")))
 # define CI_HV __attribute__((visibility("hidden")))
+# define CI_DV __attribute__((visibility("default")))
+# define CI_USE_GCC_VISIBILITY
 #else
 # define CI_HF
 # define CI_HV
+# define CI_DV
 #endif
 
 #if __GNUC__ >= 4 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 1)

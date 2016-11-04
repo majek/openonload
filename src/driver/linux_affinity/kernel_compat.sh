@@ -101,6 +101,7 @@ EFRM_HAVE_TEAMING		file	include/uapi/linux/if_team.h
 EFRM_HAVE_CLOEXEC_TEST	symbol	fd_is_open	include/linux/fdtable.h
 
 EFRM_SOCK_SENDMSG_NEEDS_LEN	symtype	sock_sendmsg	include/linux/net.h int(struct socket *, struct msghdr *, size_t)
+EFRM_SOCK_RECVMSG_NEEDS_BYTES	symtype sock_recvmsg	include/linux/net.h int(struct socket *, struct msghdr *, size_t, int)
 
 EFRM_HAVE___VFS_READ_EXPORTED	export	__vfs_read	include/linux/fs.h
 
@@ -111,6 +112,15 @@ EFRM_HAVE_FOP_READ_ITER	memtype	struct_file_operations	read_iter	include/linux/f
 EFRM_SOCK_CREATE_KERN_HAS_NET	symtype	sock_create_kern	include/linux/net.h int(struct net *, int, int, int, struct socket **)
 
 EFRM_HAVE_SK_SLEEP_FUNC	symtype	sk_sleep	include/net/sock.h wait_queue_head_t *(struct sock *)
+
+# Before 4.8, set_restore_sigmask() is defined by some architectures only, and
+# there's a corresponding HAVE_SET_RESTORE_SIGMASK symbol.  On 4.8, the
+# implementation is generic and HAVE_SET_RESTORE_SIGMASK has gone.  This compat
+# will not find the pre-4.8 arch-specific and fallback implementations of
+# set_restore_sigmask() as they were in different places, so it's necessary
+# when using this to check for HAVE_SET_RESTORE_SIGMASK as well as for
+# EFRM_HAVE_SET_RESTORE_SIGMASK.
+EFRM_HAVE_SET_RESTORE_SIGMASK	symbol	set_restore_sigmask	include/linux/sched.h
 
 # TODO move onload-related stuff from net kernel_compat
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'

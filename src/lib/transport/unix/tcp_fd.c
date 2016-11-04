@@ -493,11 +493,16 @@ static int citp_tcp_listen(citp_fdinfo* fdinfo, int backlog)
 
   if( rc == CI_SOCKET_HANDOVER ||
       ( (rc < 0) && CITP_OPTS.no_fail &&
-        (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS) ) ) {
+        (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
+         errno == EACCES) ) ) {
     /* ENOMEM or EBUSY means we are out of some sort of resource, so hand
-     * this socket over to the OS.  We need to listen on the OS socket
-     * first (that's the very last thing that ci_tcp_listen() does, so it
-     * won't have happened yet).
+     * this socket over to the OS.
+     * EACCES means that we couldn't insert filters on any interface due to
+     * Onload iptables so traffic should go via the OS.  The case of Onload
+     * iptables preventing filter insertion on only some interfaces is already
+     * handled correctly in ci_tcp_listen().
+     * We need to listen on the OS socket first (that's the very last thing
+     * that ci_tcp_listen() does, so it won't have happened yet).
      */
     ci_netif_lock_fdi(epi);
     rc = ci_tcp_helper_listen_os_sock(fdinfo->fd, backlog);
@@ -1001,7 +1006,8 @@ static int citp_tcp_connect(citp_fdinfo* fdinfo,
 
   if (rc == CI_SOCKET_HANDOVER
       || ((rc < 0) && CITP_OPTS.no_fail &&
-          (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS))) {
+          (errno == ENOMEM || errno == EBUSY || errno == ENOBUFS ||
+           errno == EACCES))) {
     /* We try to connect the OS socket if we have one, or it's valid to create
      * one.  That means non-tproxy sockets, or tproxy sockets that have not
      * been bound (ie they wouldn't have an os socket even if they weren't
@@ -1297,6 +1303,11 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     return 0;
   }
 
+  if( ts->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD ) {
+    Log_EP(ci_log("FD %d not cached - sharing local port", fdinfo->fd));
+    goto unlock_out;
+  }
+
   /* We need to decide whether this socket should go on the passive- or
    * active-open cache, as the remaining work is different in each case. */
   if( ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED ) {
@@ -1348,12 +1359,24 @@ static int citp_tcp_cache(citp_fdinfo* fdinfo)
     Log_EP(ci_log("FD %d cached on passive-open cache", fdinfo->fd));
   }
   else {
-    /* This socket goes on the active-open cache, so we're good to go.
-     * Currently the only such sockets are either closed and unbound or have
-     * IP_TRANSPARENT set. */
-    ci_assert(s->s_flags & CI_SOCK_FLAG_TPROXY ||
-              (s->b.state == CI_TCP_CLOSED &&
-               ! (s->s_flags & CI_SOCK_FLAG_BOUND)));
+    /* This socket goes on the active-open cache, so we're good to go.  We
+     * checked earlier that the socket doesn't have an OS backing socket.  This
+     * can happen in a few different ways, which we assert here. */
+    ci_assert(
+      /* IP_TRANSPARENT sockets are always OK. */
+      s->s_flags & CI_SOCK_FLAG_TPROXY || (
+        /* Closed sockets are OK to cache if... */
+        s->b.state == CI_TCP_CLOSED && (
+          /* ...they are unbound, or... */
+          ! (s->s_flags & CI_SOCK_FLAG_BOUND) || (
+            /* ...scalable filters and shared local ports are enabled. */
+            NI_OPTS(netif).scalable_filter_enable ==
+              CITP_SCALABLE_FILTERS_ENABLE &&
+            NI_OPTS(netif).tcp_shared_local_ports != 0
+          )
+        )
+      )
+    );
 
     /* We limit the maximum number of sockets cached in a stack. */
     if( netif->state->active_cache_avail_stack == 0 ) {
@@ -1392,10 +1415,13 @@ static int citp_tcp_getsockname(citp_fdinfo* fdinfo,
                                 struct sockaddr* sa, socklen_t* p_sa_len)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdinfo);
+  int rc;
 
   Log_VSC(ci_log(LPF "getsockname("EF_FMT")", EF_PRI_ARGS(epi,fdinfo->fd)));
-  __citp_getsockname(epi->sock.s, sa, p_sa_len);
-  return 0;
+  rc = ci_tcp_getsockname(&epi->sock, fdinfo->fd, sa, p_sa_len);
+  if( rc == 0 )
+    __citp_getsockname(epi->sock.s, sa, p_sa_len);
+  return rc;
 }
 
 

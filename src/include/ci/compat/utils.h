@@ -251,6 +251,5 @@ typedef struct {
 #define CI_USER_PTR_GET(p)    ((void *)((ci_uintptr_t)((p).ptr)))
 #define CI_USER_PTR_SET(p,x)  ((p).ptr = (ci_uint64)(ci_uintptr_t)(x))
 
-
 #endif  /* __CI_COMPAT_UTILS_H__ */
 /*! \cidoxg_end */

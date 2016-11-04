@@ -494,3 +494,10 @@ fail:
   citp_exit_lib(&lib_context, FALSE);
   return rc;
 }
+
+
+
+int onload_socket_nonaccel(int domain, int type, int protocol)
+{
+  return ci_sys_socket(domain, type, protocol);
+}

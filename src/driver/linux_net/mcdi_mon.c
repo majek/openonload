@@ -602,6 +602,7 @@ void efx_mcdi_mon_remove(struct efx_nic *efx)
 		device_remove_file(&efx->pci_dev->dev,
 				   &hwmon->attrs[i].dev_attr);
 	kfree(hwmon->attrs);
+	hwmon->attrs = NULL;
 	if (!IS_ERR_OR_NULL(hwmon->device))
 		hwmon_device_unregister(hwmon->device);
 	efx_nic_free_buffer(efx, &hwmon->dma_buf);

@@ -51,11 +51,13 @@ static inline int efx_nic_rev(struct efx_nic *efx)
 
 u32 efx_farch_fpga_ver(struct efx_nic *efx);
 
+#ifdef CONFIG_SFC_FALCON
 /* NIC has two interlinked PCI functions for the same port. */
 static inline bool efx_nic_is_dual_func(struct efx_nic *efx)
 {
 	return efx_nic_rev(efx) < EFX_REV_FALCON_B0;
 }
+#endif
 
 /* Read the current event from the event queue */
 static inline efx_qword_t *efx_event(struct efx_channel *channel,
@@ -141,6 +143,7 @@ enum {
 	GENERIC_STAT_COUNT
 };
 
+#ifdef CONFIG_SFC_FALCON
 /**
  * struct falcon_board_type - board operations and type information
  * @id: Board type id, as found in NVRAM
@@ -300,6 +303,7 @@ static inline struct falcon_board *falcon_board(struct efx_nic *efx)
 	nic_data = efx->nic_data;
 	return &nic_data->board;
 }
+#endif /* CONFIG_SFC_FALCON */
 
 enum {
 	SIENA_STAT_tx_bytes = GENERIC_STAT_COUNT,
@@ -403,8 +407,6 @@ struct siena_nic_data {
 	struct efx_dl_siena_sriov sriov_resources;
 #endif
 };
-
-void siena_print_fwver(struct efx_nic *efx, char *buf, size_t len);
 
 enum {
 	EF10_STAT_port_tx_bytes = GENERIC_STAT_COUNT,
@@ -632,8 +634,7 @@ void __efx_rx_skb_attach_timestamp(struct efx_channel *channel,
 static inline void efx_rx_skb_attach_timestamp(struct efx_channel *channel,
 					       struct sk_buff *skb)
 {
-	if (channel->sync_events_state == SYNC_EVENTS_VALID)
-		__efx_rx_skb_attach_timestamp(channel, skb);
+	__efx_rx_skb_attach_timestamp(channel, skb);
 }
 void efx_ptp_start_datapath(struct efx_nic *efx);
 void efx_ptp_stop_datapath(struct efx_nic *efx);
@@ -697,8 +698,10 @@ int efx_ef10_licensed_app_state(struct efx_nic *efx,
 				struct efx_licensed_app_state *app_state);
 #endif
 
+#ifdef CONFIG_SFC_FALCON
 extern const struct efx_nic_type falcon_a1_nic_type;
 extern const struct efx_nic_type falcon_b0_nic_type;
+#endif
 extern const struct efx_nic_type siena_a0_nic_type;
 extern const struct efx_nic_type efx_hunt_a0_nic_type;
 extern const struct efx_nic_type efx_hunt_a0_vf_nic_type;
@@ -710,16 +713,18 @@ extern const struct efx_nic_type efx_hunt_a0_vf_nic_type;
  **************************************************************************
  */
 
+#ifdef CONFIG_SFC_FALCON
 int falcon_probe_board(struct efx_nic *efx, u16 revision_info);
+#endif
 
 /* TX data path */
 static inline int efx_nic_probe_tx(struct efx_tx_queue *tx_queue)
 {
 	return tx_queue->efx->type->tx_probe(tx_queue);
 }
-static inline void efx_nic_init_tx(struct efx_tx_queue *tx_queue)
+static inline int efx_nic_init_tx(struct efx_tx_queue *tx_queue)
 {
-	tx_queue->efx->type->tx_init(tx_queue);
+	return tx_queue->efx->type->tx_init(tx_queue);
 }
 static inline void efx_nic_remove_tx(struct efx_tx_queue *tx_queue)
 {
@@ -739,9 +744,9 @@ static inline int efx_nic_probe_rx(struct efx_rx_queue *rx_queue)
 {
 	return rx_queue->efx->type->rx_probe(rx_queue);
 }
-static inline void efx_nic_init_rx(struct efx_rx_queue *rx_queue)
+static inline int efx_nic_init_rx(struct efx_rx_queue *rx_queue)
 {
-	rx_queue->efx->type->rx_init(rx_queue);
+	return rx_queue->efx->type->rx_init(rx_queue);
 }
 static inline void efx_nic_remove_rx(struct efx_rx_queue *rx_queue)
 {
@@ -792,7 +797,7 @@ void efx_nic_event_test_start(struct efx_channel *channel);
 
 /* Falcon/Siena queue operations */
 int efx_farch_tx_probe(struct efx_tx_queue *tx_queue);
-void efx_farch_tx_init(struct efx_tx_queue *tx_queue);
+int efx_farch_tx_init(struct efx_tx_queue *tx_queue);
 void efx_farch_tx_fini(struct efx_tx_queue *tx_queue);
 void efx_farch_tx_remove(struct efx_tx_queue *tx_queue);
 void efx_farch_tx_write(struct efx_tx_queue *tx_queue);
@@ -800,7 +805,7 @@ void efx_farch_notify_tx_desc(struct efx_tx_queue *tx_queue);
 unsigned int efx_farch_tx_limit_len(struct efx_tx_queue *tx_queue,
 				    dma_addr_t dma_addr, unsigned int len);
 int efx_farch_rx_probe(struct efx_rx_queue *rx_queue);
-void efx_farch_rx_init(struct efx_rx_queue *rx_queue);
+int efx_farch_rx_init(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_fini(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_remove(struct efx_rx_queue *rx_queue);
 void efx_farch_rx_write(struct efx_rx_queue *rx_queue);
@@ -817,6 +822,8 @@ void efx_farch_ev_test_generate(struct efx_channel *channel);
 int efx_farch_filter_table_probe(struct efx_nic *efx);
 void efx_farch_filter_table_restore(struct efx_nic *efx);
 void efx_farch_filter_table_remove(struct efx_nic *efx);
+bool efx_farch_filter_match_supported(struct efx_nic *efx, bool encap,
+				      unsigned int match_flags);
 void efx_farch_filter_update_rx_scatter(struct efx_nic *efx);
 s32 efx_farch_filter_insert(struct efx_nic *efx,
 			    const struct efx_filter_spec *spec, bool replace);

@@ -350,6 +350,7 @@ ci_inline char* oo_sockp_to_ptr(ci_netif* ni, oo_sp sockp)
 #if CI_CFG_USERSPACE_PIPE
 #define SP_TO_PIPE(ni, sp)     SP_TO_foo((ni), (sp), struct oo_pipe)
 #endif
+#define SP_TO_ACTIVE_WILD(ni, sp)  SP_TO_foo((ni), (sp), ci_active_wild)
 
 #define ID_TO_foo(ni, id, foo)     SP_TO_##foo((ni), OO_SP_FROM_INT((ni),(id)))
 #define ID_TO_WAITABLE_OBJ(ni, id) ID_TO_foo((ni), (id), WAITABLE_OBJ)

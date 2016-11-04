@@ -1245,6 +1245,7 @@ enum efx_stats_action {
 	EFX_STATS_ENABLE,
 	EFX_STATS_DISABLE,
 	EFX_STATS_PULL,
+	EFX_STATS_PERIOD,
 };
 
 static int efx_mcdi_mac_stats(struct efx_nic *efx,
@@ -1253,24 +1254,36 @@ static int efx_mcdi_mac_stats(struct efx_nic *efx,
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_MAC_STATS_IN_LEN);
 	int rc;
-	int change = action == EFX_STATS_PULL ? 0 : 1;
-	int enable = action == EFX_STATS_ENABLE ? 1 : 0;
-	int period = action == EFX_STATS_ENABLE ? 1000 : 0;
+	int dma, change;
 	dma_addr_t dma_addr = efx->stats_buffer.dma_addr;
-	u32 dma_len = action != EFX_STATS_DISABLE ?
-		MC_CMD_MAC_NSTATS * sizeof(u64) : 0;
+	u32 dma_len;
+
+	if (action == EFX_STATS_ENABLE)
+		efx->stats_enabled = true;
+	else if (action == EFX_STATS_DISABLE)
+		efx->stats_enabled = false;
+
+	if (action == EFX_STATS_PULL) {
+		dma = 0;
+		change = 0;
+	} else {
+		change = 1;
+		dma = efx->stats_enabled;
+	}
+
+	dma_len = dma ? MC_CMD_MAC_NSTATS * sizeof(u64) : 0;
 
 	BUILD_BUG_ON(MC_CMD_MAC_STATS_OUT_DMA_LEN != 0);
 
 	MCDI_SET_QWORD(inbuf, MAC_STATS_IN_DMA_ADDR, dma_addr);
 	MCDI_POPULATE_DWORD_7(inbuf, MAC_STATS_IN_CMD,
-			      MAC_STATS_IN_DMA, !!enable,
+			      MAC_STATS_IN_DMA, dma,
 			      MAC_STATS_IN_CLEAR, clear,
 			      MAC_STATS_IN_PERIODIC_CHANGE, change,
-			      MAC_STATS_IN_PERIODIC_ENABLE, enable,
+			      MAC_STATS_IN_PERIODIC_ENABLE, efx->stats_enabled,
 			      MAC_STATS_IN_PERIODIC_CLEAR, 0,
 			      MAC_STATS_IN_PERIODIC_NOEVENT, 1,
-			      MAC_STATS_IN_PERIOD_MS, period);
+			      MAC_STATS_IN_PERIOD_MS, efx->stats_period_ms);
 	MCDI_SET_DWORD(inbuf, MAC_STATS_IN_DMA_LEN, dma_len);
 	MCDI_SET_DWORD(inbuf, MAC_STATS_IN_PORT_ID, nic_data->vport_id);
 
@@ -1295,6 +1308,11 @@ void efx_mcdi_mac_start_stats(struct efx_nic *efx)
 void efx_mcdi_mac_stop_stats(struct efx_nic *efx)
 {
 	efx_mcdi_mac_stats(efx, EFX_STATS_DISABLE, 0);
+}
+
+void efx_mcdi_mac_update_stats_period(struct efx_nic *efx)
+{
+	efx_mcdi_mac_stats(efx, EFX_STATS_PERIOD, 0);
 }
 
 #define EFX_MAC_STATS_WAIT_US 100

@@ -27,7 +27,9 @@
 /*! \cidoxg_lib_transport_ip */
  
 #include <onload/ul.h>
+#include <onload/ul/tcp_helper.h>
 #include <ci/internal/ip_log.h>
+#include <ci/internal/efabcfg.h>
 #include <onload/epoll.h>
 
 
@@ -70,6 +72,7 @@ int ef_onload_driver_open(ef_driver_handle* pfd,
   int rc;
   int flags = 0;
   int saved_errno = errno;
+  int fd;
 
 #ifdef O_CLOEXEC
   if( do_cloexec )
@@ -92,6 +95,37 @@ int ef_onload_driver_open(ef_driver_handle* pfd,
 
   if( rc != 0 )
     return rc;
+
+  /* Our internal driver handles are not visible to the application.  It may
+   * make assumptions about the fd space available to it, and try to dup2/3
+   * onto one of our driver fds.  To try and minimise this we allow the user
+   * to specify a minimum value for us to use, to try and keep out of their
+   * way.
+   *
+   * We have to be able to cope with them coming along and trying to dup onto
+   * one of these fds anyway, as they may not have set the option up.  As such
+   * we treat failure to shift the fd as acceptable, and just retain the old
+   * one.
+   */
+  if( *pfd < CITP_OPTS.fd_base ) {
+    if( do_cloexec )
+      fd = oo_fcntl_dupfd_cloexec(*pfd, CITP_OPTS.fd_base);
+    else
+      fd = ci_sys_fcntl(*pfd, F_DUPFD, CITP_OPTS.fd_base);
+
+    /* If we've successfully done the dup then we've also set CLOEXEC if
+     * needed on the new fd, so we're done.
+     */
+    if( fd >= 0 ) {
+      ci_tcp_helper_close_no_trampoline(*pfd);
+      *pfd = fd;
+      return 0;
+    }
+    else {
+      LOG_NV(ci_log("%s: Failed to move fd from %d, rc %d",
+                    __func__, *pfd, fd));
+    }
+  }
       
   if( do_cloexec ) {
 #if defined(O_CLOEXEC)

@@ -23,6 +23,11 @@
 #include <cplane/shared_ops.h>
 
 
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility push(default)
+#endif
+
+
 extern cicp_handle_t onload_cplane_handle;
 #define CI_GLOBAL_CPLANE   onload_cplane_handle
 
@@ -282,5 +287,9 @@ extern int cicp_raw_ip_send(const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex);
 /*! Force full table sync. */
 extern void
 cicpos_sync_tables(cicp_handle_t *control_plane);
+
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility pop
+#endif
 
 #endif /* __CPLANE_EXPORTED_H__ */

@@ -783,6 +783,8 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   logger(log_arg, "%s  snd: cwnd=%d+%d used=%d ssthresh=%d bytes_acked=%d %s",
          pf, ts->cwnd, ts->cwnd_extra, tcp_cwnd_used(ts),
          ts->ssthresh, ts->bytes_acked, congstate_str(ts));
+  logger(log_arg, "%s  snd: timed_seq %x timed_ts %x",
+         pf, ts->timed_seq, ts->timed_ts);
   logger(log_arg, "%s  snd: sndbuf_pkts=%d "OOF_IPCACHE_STATE" "
 	 OOF_IPCACHE_DETAIL,
 	 pf, ts->so_sndbuf_pkts, OOFA_IPCACHE_STATE(ni, &ts->s.pkt),

@@ -1083,7 +1083,11 @@ extern int ci_pipe_list_to_iovec(ci_netif* ni, struct oo_pipe* p,
  * others) */
 #define CI_TCP_STATE_AUXBUF    (0xd000)
 
-/* Convert state to number in range 0->0xd */
+/* Set in a socket that is used as the owner for an active wild filter */
+#define CI_TCP_STATE_ACTIVE_WILD (0xe000)
+
+
+/* Convert state to number in range 0->0xe */
 #define CI_TCP_STATE_NUM(s)    (((s) & 0xf000) >> 12u)
 
 
@@ -1317,6 +1321,14 @@ extern void ci_pipe_all_fds_gone(ci_netif* netif, struct oo_pipe* p,
                                  int do_free);
 #endif
 
+/**********************************************************************
+*************************** ACTIVE WILD *******************************
+**********************************************************************/
+
+extern ci_active_wild* ci_active_wild_get_state_buf(ci_netif* netif);
+extern void ci_active_wild_all_fds_gone(ci_netif* ni, ci_active_wild* aw,
+                                        int do_free);
+
 /*********************************************************************
 ************************** citp_waitable_obj *************************
 *********************************************************************/
@@ -1496,6 +1508,14 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp tcp_id,
 #define CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, filter_id)            \
   OO_SP_FROM_INT((ni), (ni)->filter_table->table[filter_id].id)
 
+#ifndef __KERNEL__
+extern oo_sp ci_netif_active_wild_get(ci_netif* ni, unsigned laddr,
+                                      unsigned raddr, unsigned lport,
+                                      ci_uint16* port_out,
+                                      ci_uint32* prev_seq_out);
+#endif
+extern void ci_netif_active_wild_sharer_closed(ci_netif* ni, ci_sock_cmn* s);
+
 /* Bind RX of socket to given interface.  Used by implementation of
  * SO_BINDTODEVICE and EF_MCAST_JOIN_BINDTODEVICE.  Returns 0 on success,
  * CI_SOCKET_HANDOVER otherwise.
@@ -1578,6 +1598,8 @@ extern int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
                        socklen_t addrlen, ci_fd_t fd) CI_HF;
 extern int ci_tcp_reuseport_bind(ci_sock_cmn* sock, ci_fd_t fd) CI_HF;
 extern int ci_tcp_getpeername(citp_socket*, struct sockaddr*, socklen_t*) CI_HF;
+extern int ci_tcp_getsockname(citp_socket*, ci_fd_t, struct sockaddr*,
+                              socklen_t*) CI_HF;
 
 extern int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level, int optname,
 			     void *optval, socklen_t *optlen) CI_HF;
@@ -1609,6 +1631,11 @@ extern void ci_tcp_linger(ci_netif*, ci_tcp_state*) CI_HF;
 extern int ci_tcp_sync_sockopts_to_os_sock(ci_netif* ni, oo_sp sock_id,
                                            struct socket* sock) CI_HF;
 #endif
+
+extern int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls) CI_HF;
+extern int __ci_tcp_bind(ci_netif*, ci_sock_cmn*, ci_fd_t,
+                         ci_uint32 ip_addr_be32, ci_uint16* port_be16,
+                         int may_defer) CI_HF;
 
 /* Send/recv called from within kernel & user-library, so outside above #if */
 extern int ci_tcp_recvmsg(const ci_tcp_recvmsg_args*) CI_HF;
@@ -1664,6 +1691,14 @@ extern const char* /*??ci_*/ip_addr_str(unsigned addr_be32) CI_HF;
 
 extern const char* /*??ci_*/domain_str(int domain) CI_HF;
 extern const char* /*??ci_*/type_str(int type) CI_HF;
+#define CI_SOCK_TYPE_FMT "%s%s%s"
+#ifdef SOCK_CLOEXEC
+#define CI_SOCK_TYPE_ARGS(type) \
+    type_str(type), type & SOCK_CLOEXEC ? " | SOCK_CLOEXEC" : "", \
+    type & SOCK_NONBLOCK ? " | SOCK_NONBLOCK" : ""
+#else
+#define CI_SOCK_TYPE_ARGS(type) type_str(type), "", ""
+#endif
 
 /*! Returns zero if a socket to the destination 'ip_be32' can
  *  be handled by the L5 stack.
@@ -3592,9 +3627,9 @@ ci_inline void ci_tcp_clear_rtt_timing(ci_tcp_state* ts) {
   ts->timed_seq = tcp_snd_una(ts) - 1;
 }
 
-ci_inline void ci_tcp_set_rtt_timing(ci_netif* netif, 
-                                     ci_tcp_state* ts, ci_tcp_hdr* tcp) {
-  ts->timed_seq = tcp->tcp_seq_be32;
+ci_inline void ci_tcp_set_rtt_timing(ci_netif* netif,
+                                     ci_tcp_state* ts, int seq) {
+  ts->timed_seq = seq;
   ts->timed_ts = ci_tcp_time_now(netif);
 }
 

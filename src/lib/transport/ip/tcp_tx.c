@@ -635,7 +635,7 @@ void ci_tcp_enqueue_no_data(ci_tcp_state* ts, ci_netif* netif,
 
     /* If we don't get timestamps, we'll need to calculate RTT without
      * them.  Let's prepare: */
-    ci_tcp_set_rtt_timing(netif, ts, thdr);
+    ci_tcp_set_rtt_timing(netif, ts, tcp_enq_nxt(ts));
   }
 
   CI_TCP_HDR_SET_LEN(thdr, sizeof(*thdr) + optlen);
@@ -1540,6 +1540,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   */
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_tcp_hdr rtcp;
+  ci_uint32 rtcp_endseq;
   ci_ip4_hdr rip;
   ci_tcp_hdr* tcp;
   ci_ip4_hdr* ip;
@@ -1547,8 +1548,11 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   ci_assert(netif);
   ASSERT_VALID_PKT(netif, pkt);
 
+  /* Remember some of the RX packet's properties before the packet becomes
+   * invalid in the course of ci_netif_pkt_rx_to_tx(). */
   rtcp = *rxp->tcp;
   rip = *oo_ip_hdr(pkt);
+  rtcp_endseq = pkt->pf.tcp_rx.end_seq;
 
   if( (pkt = ci_netif_pkt_rx_to_tx(netif, pkt)) == NULL )
     return;
@@ -1578,7 +1582,7 @@ void ci_tcp_reply_with_rst(ci_netif* netif, ciip_tcp_rx_pkt* rxp)
   } else {
     tcp->tcp_seq_be32 = 0;
     tcp->tcp_flags = CI_TCP_FLAG_RST | CI_TCP_FLAG_ACK;
-    tcp->tcp_ack_be32 = CI_BSWAP_BE32(pkt->pf.tcp_rx.end_seq);
+    tcp->tcp_ack_be32 = CI_BSWAP_BE32(rtcp_endseq);
   }
   CI_TCP_HDR_SET_LEN(tcp, sizeof(*tcp));
   tcp->tcp_window_be16 = 0;

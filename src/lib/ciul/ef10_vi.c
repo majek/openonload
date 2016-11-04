@@ -394,6 +394,55 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
 }
 
 
+#ifndef __KERNEL__
+#include <sys/uio.h>
+/* Somewhat limited implementation of transmitv_.
+ * Up to two iovecs can be given,
+ * First iovec is 64byte aligned: both base and len.
+ * Also as we are user only plain iovec is used.
+ */
+int ef10_ef_vi_transmitv_copy_pio(ef_vi* vi, int offset,
+				  const struct iovec* iov, int iovcnt,
+				  ef_request_id dma_id)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ef_vi_txq* q = &vi->vi_txq;
+  ef_pio* pio = vi->linked_pio;
+
+  EF_VI_ASSERT((dma_id & EF_REQUEST_ID_MASK) == dma_id);
+  EF_VI_ASSERT(dma_id != 0xffffffff);
+  EF_VI_ASSERT((unsigned) offset < pio->pio_len);
+  EF_VI_ASSERT(iovcnt >= 1);
+  EF_VI_ASSERT(iovcnt <= 2);
+  EF_VI_ASSERT((unsigned) (offset + iov[0].iov_len) <= pio->pio_len);
+  EF_VI_ASSERT(iovcnt < 2 ||
+               (unsigned) (offset + iov[0].iov_len + iov[1].iov_len) <=
+                          pio->pio_len);
+  EF_VI_ASSERT(iov[0].iov_len != 0);
+  EF_VI_ASSERT((iov[0].iov_len & 7) == 0 || iovcnt == 1);
+
+  if( (offset & 63) != 0 )
+    return -EINVAL;
+
+  if( qs->added - qs->removed < q->mask ) {
+    unsigned char* pio_dst = pio->pio_io + offset;
+    int len = iov[0].iov_len;
+    /* copy multiples of 8 - we make a lot of assumption on first iovec here */
+    memcpy_to_pio_aligned(pio_dst, iov[0].iov_base, (iov[0].iov_len + 7) & ~7);
+
+    if( iovcnt > 1 ) {
+      memcpy_to_pio(pio_dst + len, iov[1].iov_base, iov[1].iov_len);
+      len += iov[1].iov_len;
+    }
+    ef10_pio_push(vi, q, qs, offset, len, dma_id);
+    return 0;
+  } else {
+    return -EAGAIN;
+  }
+}
+#endif
+
+
 /* ?? todo: rename and move to host_ef10_common.h (via firmwaresrc) */
 #define ALT_OP_VFIFO_ID_LBN    48
 #define ALT_OP_VFIFO_ID_WIDTH  5

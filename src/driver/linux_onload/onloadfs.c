@@ -29,6 +29,7 @@
 #include "onload_internal.h"
 #include <onload/linux_onload_internal.h>
 #include "onload_kernel_compat.h"
+#include <onload/dshm.h>
 
 
 static struct file_operations *oo_fops_by_type(int fd_type)
@@ -333,16 +334,12 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
 #ifdef EFX_FSTYPE_HAS_MOUNT
   inode->i_ino = get_next_ino();
 #endif
-  if( fd_type == CI_PRIV_TYPE_NETIF )
+  /* We can't set S_IFSOCK, as the kernel would assume incorrectly that our
+   * inode is preceded by a struct socket.  This is no real loss: we intercept
+   * fstat() at user-level and report the flag there. */
+  if( fd_type == CI_PRIV_TYPE_NETIF || fd_type == CI_PRIV_TYPE_TCP_EP ||
+      fd_type == CI_PRIV_TYPE_UDP_EP )
     inode->i_mode = S_IRWXUGO;
-  if( fd_type == CI_PRIV_TYPE_TCP_EP || fd_type == CI_PRIV_TYPE_UDP_EP )
-    inode->i_mode = 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,21)
-        /* in 2.6.18 this flag makes us "socket" and sendmsg crashes;
-         * see sock_from_file() */
-                    S_IFSOCK |
-#endif
-                    S_IRWXUGO;
   else
     inode->i_mode = S_IFIFO | S_IRUSR | S_IWUSR;
   inode->i_uid = current_fsuid();
@@ -421,8 +418,10 @@ onload_alloc_file(tcp_helper_resource_t *thr, oo_sp ep_id,
 
 void onload_priv_free(ci_private_t *priv)
 {
-  if( priv->_filp->f_vfsmnt != onload_mnt)
+  if( priv->_filp->f_vfsmnt != onload_mnt ) {
+    oo_dshm_free_handle_list(&priv->dshm_list);
     ci_free(priv);
+  }
   /* inode will free the priv automatically */
 }
 

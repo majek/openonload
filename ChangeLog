@@ -1,3 +1,73 @@
+openonload-201606-u1
+--------------------
+
+Update sfc net driver to v4.10.0.1011
+	
+Add TCPDirect library and API
+Support for recent gcc versions (6.1)
+Support for recent Linux kernel versions (4.8)
+
+task61897: improve TCP active-open latency: see EF_TCP_SHARED_LOCAL_PORTS.
+task65068: add single interface mode to WODA: see EF_WODA_SINGLE_INTERFACE
+task64925: report resources for TX alternatives in ef_vi capabilities API
+task63419: add onload_socket_nonaccel extension API to create non-accelerated socket
+task62869: add JNI bindings for WODA
+
+SF-116522-KI/bug63307: fix RTT calculation without TCP timestamps when loss is occurring.
+SF-117038-KI/bug64298: avoid using low fds for onload internals to fix fd clash with java.
+
+bug62973: show CLOSED TCP sockets in onload_stackdump and OnloadRemoteMonitor.
+bug62104: avoid storm of wakeup events resulting in "MCDI request was completed without an event"
+bug63384: bug62973: Fix EINVAL on listen(); shutdown(); listen();
+bug61421: add SIGFPE to the list of signals we do not intercept by default
+bug51442: fix bashism in onload_tool script
+bug63134: OnloadRemoteMonitor - add option to select a single stack by name
+bug62994: handover TCP listen socket if Onload iptables prevents acceleration.
+bug62994: handover socket during TCP connect() if Onload iptables blocks filters
+bug34753: improve handling of EF_PREFAULT_PACKETS - only error if can't reach EF_MAX_PACKETS
+bug60745: improve onload_stackdump help output for filters
+bug63136: OnloadRemoteMonitor: add ability to retrieve EF_* settings
+bug63134: OnloadRemoteMonitor: add option to select a single stack by name 
+bug63723: handle inconsistent cplane state without assertion
+bug63799: fix timestamp output and decode sync flags in efsend_timestamping.c example app
+bug63763: add onload_cplane with weak-modules in RPM spec file
+bug63322: improve WODA behaviour (return faster) with EF_UL_EPOLL=3.
+bug63982: fix build with gcc 6.1: undefined reference to ____ilog2_NaN.
+bug63319: fix recvmmsg() with zero timeout failing to return data.
+bug63745: try to load sfc_aoe module if installed
+bug64249: avoid leaking stacks that were destroyed before application termination.
+bug61373: onload_install changed to update an existing initrd using dracut --force
+bug64486: fix trampoline code to work without KALLSYMS_ALL
+bug63986: tell filter code to avoid blacklisted hwports
+bug63986: add /proc/driver/onload/filter_*
+bug64221: add /proc/driver/onload_cplane/hwport2ifindex
+bug64680: task59983: Fix panic when passing fds through PF_UNIX sockets.
+bug64732: when handling SO_REUSEPORT bind, only unlock socket if it was locked
+bug64435: add EF_LOG_THREAD environment to include thread id in log messages
+bug64853: fix hexdump option in efrss sample, was printing all zeros
+bug64889: don't generate warnings about unexpected MCDI events for MCDI_EVENT_CODE_AOE (0x18)
+bug63563: OnloadRemoteMonitor - output integer values using signed/unsigned format
+bug57881: provide example of how to use OnloadRemoteMonitor with collectd to record stats
+bug63562: OnloadRemoteMonitor - adjust output formats for special fields e.g. IP addresses
+bug63774: disable huge pages if incorrect hugepage size configured and avoid kernel crash
+bug65144: Onload: with EPOLLET, return all events or nothing, fixes reporting when level-triggered events present
+bug49599: avoid stack-locked assertion when freeing SW filters in stack dtor.
+bug65497: Add extra logging for odd failure cases in libstack_mappings_init
+bug63562: OnloadRemoteMonitor - ci_ifid_t displays as signed
+bug64971: OnloadRemoteMonitor - provide finer-grained control of output
+bug65774: fix packed stream buffer sizes returned by capabilities API
+bug65067: ensure we periodically poll while spinning in WODA to process stack in timely fashion.
+bug63768: install orm_json and orm_webserver on 64-bit systems
+bug63914: fix sfcaffinity_config for interfaces with ethX-ptp irq channels
+bug66047: fix kernel panic when calling ef_pio_unlink_vi() twice.
+bug66190: fix memory leak in memreg_rm_alloc()
+bug66155: initialize sb_aflags in ci_active_wild_state_init() to avoid assertion on close of reuseport socket
+bug64746: permit EPOLL_CTL_DEL with invalid pointer for event structure
+bug65026: correctly initialise EF_ACCEPT_INHERIT_NONBLOCK
+bug66477: use dev_base_lock instead of rtnl to protect for_each_netdev(), makes teaming work on RHEL7.3
+bug66612: fix crash allocating stack when low on memory
+
+
 openonload-201606
 -----------------
 
@@ -87,7 +157,7 @@ Bug62453: licence JNI wrapper with BSD not GPL
 bug62468: avoid -fstack-protector when executing library, fixes segfault on Ubuntu 16.04
 bug62589: fix RPM spec file conflict with python-libs package
 bug62720: Fix EALREADY on ef_vi EVQ-init with timestamps.
-bug63317: fix memory leak in ef_vi statistics API
+SF-116521-KI/bug63317: fix memory leak in ef_vi statistics API
 
 
 openonload-201509-u1

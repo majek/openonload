@@ -95,6 +95,25 @@ static inline int oo_sock_sendmsg(struct socket *sock, struct msghdr *msg)
 #endif
 
 
+#ifdef EFRM_SOCK_RECVMSG_NEEDS_BYTES
+static inline int oo_sock_recvmsg(struct socket *sock, struct msghdr *msg,
+                                  int flags)
+{
+  size_t bytes = 0;
+
+#ifdef EFRM_HAVE_MSG_ITER
+  bytes = msg->msg_iter.count;
+#else
+  int i;
+  for( i = 0; i < msg->msg_iovlen; ++i )
+    bytes += msg->msg_iov[i].iov_len;
+#endif
+  return sock_recvmsg(sock, msg, bytes, flags);
+
+}
+#define sock_recvmsg oo_sock_recvmsg
+#endif
+
 /*--------------------------------------------------------------------
  *
  * System calls

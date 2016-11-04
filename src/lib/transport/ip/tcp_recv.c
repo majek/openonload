@@ -682,6 +682,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     int rc2;
 
     /* This function drops the socket lock, and returns unlocked. */
+    ci_assert(!rinf.stack_locked);
     rc2 = ci_sock_sleep(ni, &ts->s.b, CI_SB_FLAG_WAKE_RX,
                         CI_SLEEP_SOCK_LOCKED | CI_SLEEP_SOCK_RQ,
                         sleep_seq, &timeout);

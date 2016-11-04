@@ -523,3 +523,9 @@ int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
 }
 
 
+int ci_tcp_helper_alloc_active_wild(ci_netif *ni)
+{
+  return oo_resource_op(ci_netif_get_driver_handle(ni),
+                        OO_IOC_ALLOC_ACTIVE_WILD, NULL);
+}
+

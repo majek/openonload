@@ -102,6 +102,10 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s, int can_poison)
   OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_sock_cmn, reap_link));
   ci_ni_dllist_link_init(ni, &s->reap_link, sp, "reap");
   ci_ni_dllist_self_link(ni, &s->reap_link);
+
+  /* Not functionally necessary, but avoids garbage addresses in stackdump. */
+  sock_laddr_be32(s) = sock_raddr_be32(s) = 0;
+  sock_lport_be16(s) = sock_rport_be16(s) = 0;
 }
 
 

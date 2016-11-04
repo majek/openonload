@@ -166,6 +166,17 @@ CI_CFG_OPT("EF_EPOLL_MT_SAFE", ul_epoll_mt_safe, ci_uint32,
 "This option improves performance with EF_UL_EPOLL=1 or 3 and also with "
 "EF_UL_EPOLL=2 and EF_EPOLL_CTL_FAST=1.",
            1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_WODA_SINGLE_INTERFACE", woda_single_if, ci_uint32,
+"This option alters the behaviour of onload_ordered_epoll_wait().  This "
+"function would normally ensure correct ordering across multiple interfaces. "
+"However, this impacts latency, as only events arriving before the first "
+"interface polled can be returned and still guarantee ordering.  If the "
+"traffic being ordered is only arriving on a single interface then this "
+"additional constraint is not necessary.  If this option is enabled then "
+"traffic will only be ordered relative to other traffic arriving on the same "
+"interface.\n",
+          , , 0, 0, 1, yesno)
 #endif
 
 CI_CFG_OPT("EF_FDS_MT_SAFE", fds_mt_safe, ci_uint32,
@@ -546,13 +557,16 @@ CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
 "Comma-separated list of signal numbers to avoid postponing "
 "of the signal handlers.  "
 "Your application will deadlock if one of the handlers uses socket "
-"function.  By default, the list includes SIGBUS, SIGSEGV and SIGPROF.\n"
+"function.  By default, the list includes SIGBUS, SIGFPE, SIGSEGV and "
+"SIGPROF.\n"
 "Please specify numbers, not string aliases: EF_SIGNALS_NOPOSTPONE=7,11,27 "
 "instead of EF_SIGNALS_NOPOSTPONE=SIGBUS,SIGSEGV,SIGPROF.\n"
 "You can set EF_SIGNALS_NOPOSTPONE to empty value to postpone "
 "all signal handlers in the same way if you suspect these signals "
 "to call network functions.",
-        A8,, (1 << (SIGBUS-1)) | (1 << (SIGSEGV-1) | (1 << (SIGPROF-1))),
+        A8,,
+        (1 << (SIGBUS-1)) | (1 << (SIGFPE-1)) |
+        (1 << (SIGSEGV-1)) | (1 << (SIGPROF-1)),
         0, (ci_uint64)(-1), bitmask)
 
 # define CITP_VFORK_USE_FORK           0
@@ -609,6 +623,19 @@ CI_CFG_OPT("EF_SOCKET_CACHE_PORTS", sock_cache_ports, ci_uint64,
 "be eligible to be cached.\n",
            A8, , 0, MIN, MAX, list)
 #endif
+
+CI_CFG_OPT("EF_ONLOAD_FD_BASE", fd_base, ci_uint32,
+"Onload uses fds internally that are not visible to the application.  This can "
+"cause problems for applications that make assumptions about their use of the "
+"fd space, for example by doing dup2/3 onto a specific file descriptor.  If "
+"this is done onto an fd that is internally in use by onload than an error of "
+"the form 'citp_ep_dup3(29, 3): target is reserved, see EF_ONLOAD_FD_BASE' "
+"will be emitted.\n"
+"This option specifies a base file descriptor value, that onload should try to "
+"make it's internal file descriptors greater than or equal to.  This allows "
+"the application to direct onload to a part of the fd space that it is not "
+"expecting to explicitly use.\n",
+           A8, , 4, MIN, MAX, count)
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

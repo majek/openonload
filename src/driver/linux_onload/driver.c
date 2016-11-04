@@ -40,6 +40,7 @@
 #include "onload_internal.h"
 #include <onload/version.h>
 #include <onload/oof_interface.h>
+#include <ci/tools.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
@@ -302,6 +303,7 @@ int oo_fop_open(struct inode* inode, struct file* filp)
   CI_ZERO(priv);
   priv->_filp = filp;
   priv->fd_type = CI_PRIV_TYPE_NONE;
+  ci_dllist_init(&priv->dshm_list);
 
   filp->private_data = (void*) priv;
   filp->f_op = &oo_fops;

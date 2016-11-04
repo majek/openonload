@@ -395,7 +395,7 @@ static int __ci_udp_recvmsg_try_os(ci_netif *ni, ci_udp_state *us,
   kmsg.msg_namelen = 0;
   kmsg.msg_name = NULL;
   kmsg.msg_controllen = 0;
-  rc = sock_recvmsg(sock, &kmsg, total_bytes, flags | MSG_DONTWAIT);
+  rc = sock_recvmsg(sock, &kmsg, flags | MSG_DONTWAIT);
   /* Clear OS RX flag if we've got everything  */
   oo_os_sock_status_bit_clear_handled(&us->s, os_sock, OO_OS_STATUS_RX);
   oo_os_sock_put(os_sock);
@@ -929,7 +929,7 @@ int ci_udp_recvmmsg(ci_udp_iomsg_args *a, struct mmsghdr* mmsg,
   }
 
   i = 0;
-  while( i < vlen && timeout_msec != 0 ) { 
+  while( i < vlen ) {
     rinf.msg = &mmsg[i].msg_hdr;
     rc = ci_udp_recvmsg_common(&rinf);
     if( rc >= 0 ) {
@@ -954,19 +954,18 @@ int ci_udp_recvmmsg(ci_udp_iomsg_args *a, struct mmsghdr* mmsg,
 
     if( rinf.flags & MSG_WAITFORONE )
       rinf.flags |= MSG_DONTWAIT;
-    
-    if( timeout_msec > 0 ) {
+
+    ++i;
+
+    if( timeout_msec >= 0 ) {
       struct timeval tv_after, tv_sub;
       gettimeofday(&tv_after, NULL);
       timersub(&tv_after, &tv_before, &tv_sub);
       tv_before = tv_after;
       timeout_msec -= tv_sub.tv_sec * 1000 + tv_sub.tv_usec / 1000;
-      if( timeout_msec < 0 ) {
-        timeout_msec = 0;
-        rinf.flags |= MSG_DONTWAIT;
-      }
+      if( timeout_msec < 0 )
+        break;
     }
-    ++i;
   }
 
   if( rinf.sock_locked )

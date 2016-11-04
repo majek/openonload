@@ -46,6 +46,7 @@
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/mmap.h>
+#include <onload/dshm.h>
 #include <onload/linux_trampoline.h>
 #include <driver/linux_resource/kernel_compat.h>
 
@@ -67,10 +68,6 @@ static ci_dllist mm_hash_tbl[MM_HASH_SIZE];
  */
 DEFINE_RWLOCK(oo_mm_tbl_lock);
 
-
-static inline unsigned
-OO_MMAP_OFFSET_TO_MAP_ID(off_t offset)
-{ return offset >> CI_NETIF_MMAP_ID_SHIFT; }
 
 /* Function to hash an 'mm' pointer */
 static inline unsigned int
@@ -244,8 +241,6 @@ void oo_mm_tbl_init(void)
  *
  ****************************************************************************/
 
-#define VMA_OFFSET(vma)  ((vma)->vm_pgoff << PAGE_SHIFT)
-
 static void vm_op_open(struct vm_area_struct* vma)
 {
   tcp_helper_resource_t* map;
@@ -350,25 +345,20 @@ static struct vm_operations_struct vm_ops = {
  *
  ****************************************************************************/
 
-int
-oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
+
+static int
+oo_stack_mmap(ci_private_t* priv, struct vm_area_struct* vma)
 {
-  ci_private_t* priv = (ci_private_t*) file->private_data;
   off_t offset = VMA_OFFSET(vma);
   unsigned long bytes = vma->vm_end - vma->vm_start;
+  int map_id = OO_MMAP_OFFSET_TO_MAP_ID(offset);
   int rc;
 
-  if( !priv )  return -EBADF;
   if( !priv->thr ) return -ENODEV;
-
-  if( bytes == 0 ) {
-    ci_log("%s: bytes == 0", __func__);
-    return -EINVAL;
-  }
 
   ci_assert((offset & PAGE_MASK) == offset);
 
-  if( OO_MMAP_OFFSET_TO_MAP_ID(offset) == CI_NETIF_MMAP_ID_STATE &&
+  if( map_id == CI_NETIF_MMAP_ID_STATE &&
       (rc = efab_add_mm_ref (vma->vm_mm)) < 0 )
     return rc;
 
@@ -380,24 +370,54 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
   vma->vm_ops = &vm_ops;
   vma->vm_private_data = (void *) priv->thr;
 
-
   OO_DEBUG_TRAMP(ci_log("mmap:  -> %u %d pages offset=0x%lx "
                  "vma=%p ptr=0x%lx-%lx", 
 		 priv->thr->id, (int) (bytes >> CI_PAGE_SHIFT), offset, 
 		 vma, vma->vm_start, vma->vm_end));
 
+  rc = efab_tcp_helper_rm_mmap(priv->thr, bytes, vma, map_id,
+                               vma->vm_flags & VM_WRITE);
+  if( map_id == CI_NETIF_MMAP_ID_STATE && rc < 0 )
+    efab_del_mm_ref (vma->vm_mm);
+
+  return rc;
+}
+
+
+int
+oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
+{
+  ci_private_t* priv = (ci_private_t*) file->private_data;
+  unsigned char map_type =
+#ifdef OO_MMAP_HAVE_EXTENDED_MAP_TYPES
+    OO_MMAP_TYPE(VMA_OFFSET(vma));
+#else
+    OO_MMAP_TYPE_NETIF;
+#endif
+
+  if( !priv )
+    return -EBADF;
+
+  if( vma->vm_end == vma->vm_start ) {
+    ci_log("%s: bytes == 0", __func__);
+    return -EINVAL;
+  }
+
   /* We never turn read-only mmaps into read-write.  Forbid it. */
   if( ! (vma->vm_flags & VM_WRITE) )
     vma->vm_flags &= ~VM_MAYWRITE;
 
-  rc = efab_tcp_helper_rm_mmap(priv->thr, bytes, vma,
-                               OO_MMAP_OFFSET_TO_MAP_ID(offset),
-                               vma->vm_flags & VM_WRITE);
-  if( OO_MMAP_OFFSET_TO_MAP_ID(offset) == CI_NETIF_MMAP_ID_STATE &&
-      rc < 0 )
-    efab_del_mm_ref (vma->vm_mm);
-
-  return rc;
+  switch( map_type ) {
+  case OO_MMAP_TYPE_NETIF:
+    return oo_stack_mmap(priv, vma);
+#ifdef OO_MMAP_HAVE_EXTENDED_MAP_TYPES
+  case OO_MMAP_TYPE_DSHM:
+    return oo_dshm_mmap_impl(vma);
+#endif
+  default:
+    ci_log("%s: Invalid mapping type %d", __FUNCTION__, map_type);
+    return -EINVAL;
+  }
 }
 
 

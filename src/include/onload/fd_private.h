@@ -59,6 +59,9 @@ typedef struct ci_private_s {
   oo_sp                 sock_id;	/*! id of ep */
 
   ci_os_file  _filp;
+
+  /* List of dshm segments owned by this file. */
+  ci_dllist             dshm_list;
 } ci_private_t;
 
 #endif  /* __CI_DRIVER_EFAB_FDPRIVATE_H__ */

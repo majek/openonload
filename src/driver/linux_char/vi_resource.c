@@ -154,7 +154,7 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
     if (vi_flags & EFHW_VI_RX_PACKED_STREAM) {
       evq_capacity = 32 * 1024;
     }
-    else if (vi_flags & EFHW_VI_TX_TIMESTAMPS) {
+    else if (vi_flags & (EFHW_VI_TX_TIMESTAMPS | EFHW_VI_TX_ALT)) {
       if (txq_capacity == 0) {
         rc = -EINVAL;
         goto fail_q_alloc;
@@ -166,7 +166,8 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
       evq_capacity = rxq_capacity + 3 * txq_capacity - evq_capacity - 1;
 
       /* Reserve space for time sync events. */
-      evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
+      if( vi_flags & (EFHW_VI_TX_TIMESTAMPS | EFHW_VI_RX_TIMESTAMPS) )
+        evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
     }
     else if (vi_flags & EFHW_VI_RX_TIMESTAMPS) {
       evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
@@ -362,6 +363,7 @@ void efch_vi_rm_free(efch_resource_t *rs)
     efrm_port_sniff(rs->rs_base, 0, 0, -1);
   if( rs->vi.sniff_flags & EFCH_TX_SNIFF )
     efrm_tx_port_sniff(rs->rs_base, 0, -1);
+  efrm_vi_tx_alt_free(virs);
 }
 
 
@@ -426,6 +428,11 @@ static int efch_vi_tx_alt_alloc(struct efrm_vi* virs, ci_resource_op_t* op)
   for( i = 0; i < num_alts; ++i )
     op->u.vi_tx_alt_alloc_out.alt_ids[i] = virs->tx_alt_ids[i];
   return 0;
+}
+
+static int efch_vi_tx_alt_free(struct efrm_vi* virs, ci_resource_op_t* op)
+{
+  return efrm_vi_tx_alt_free(virs);
 }
 
 
@@ -559,6 +566,10 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
     case CI_RSOP_VI_TX_ALT_ALLOC:
       rc = efch_vi_tx_alt_alloc(virs, op);
       *copy_out = 1;
+      break;
+
+    case CI_RSOP_VI_TX_ALT_FREE:
+      rc = efch_vi_tx_alt_free(virs, op);
       break;
 
     default:

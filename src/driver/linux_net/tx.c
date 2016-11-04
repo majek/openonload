@@ -637,6 +637,7 @@ void efx_sarfs_fini(struct efx_nic *efx)
 					EFX_FILTER_PRI_SARFS,
 					st->conns[i].filter_id);
 	kfree(st->conns);
+	st->conns = NULL;
 	st->enabled = false;
 }
 
@@ -1141,6 +1142,21 @@ static int efx_tx_tso_fallback(struct efx_tx_queue *tx_queue,
 	return 0;
 }
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
+/* Send any pending traffic for a channel. xmit_more is shared across all
+ * queues for a channel, so we must check all of them.
+ */
+static void efx_tx_send_pending(struct efx_channel *channel)
+{
+	struct efx_tx_queue *q;
+
+	efx_for_each_channel_tx_queue(q, channel) {
+		if (q->xmit_pending)
+			efx_nic_push_buffers(q);
+	}
+}
+#endif
+
 /*
  * Add a socket buffer to a TX queue
  *
@@ -1235,31 +1251,21 @@ int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 	/* Update BQL */
 	netdev_tx_sent_queue(tx_queue->core_txq, skb_len);
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_TX_TIMESTAMP)
+	skb_tx_timestamp(skb);
+#endif
+
 	efx_tx_maybe_stop_queue(tx_queue);
 
 	tx_queue->xmit_pending = true;
 
 	/* Pass to hardware. */
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
-	if (!xmit_more || netif_xmit_stopped(tx_queue->core_txq)) {
-		struct efx_tx_queue *q;
-
-		/* There could be packets left on our partner queues if those
-		 * SKBs had skb->xmit_more set. If we do not push those they
-		 * could be left for a long time and cause a netdev watchdog.
-		 *
-		 * This includes the current queue.
-		 */
-		efx_for_each_channel_tx_queue(q, channel) {
-			if (q->xmit_pending)
-				efx_nic_push_buffers(q);
-		}
-	} else {
-		/* There's another TX on the way. Prefetch the next
-		 * descriptor.
-		 */
+	if (!xmit_more || netif_xmit_stopped(tx_queue->core_txq))
+		efx_tx_send_pending(channel);
+	else
+		/* There's another TX on the way. Prefetch next descriptor. */
 		prefetchw(__efx_tx_queue_get_insert_buffer(tx_queue));
-	}
 #else
 	efx_nic_push_buffers(tx_queue);
 #endif
@@ -1287,17 +1293,16 @@ err:
 	 * on this queue or a partner queue then we need to push here to get the
 	 * previous packets out.
 	 */
-	if (!xmit_more) {
-		struct efx_tx_queue *q;
-
-		efx_for_each_channel_tx_queue(q, channel) {
-			if (q->xmit_pending)
-				efx_nic_push_buffers(q);
-		}
-	}
+	if (!xmit_more)
+		efx_tx_send_pending(channel);
 #endif
 
 	return rc;
+}
+
+static bool efx_tx_buffer_in_use(struct efx_tx_buffer *buffer)
+{
+	return buffer->len || (buffer->flags & EFX_TX_BUF_OPTION);
 }
 
 /* Remove packets from the TX queue
@@ -1319,10 +1324,9 @@ static void efx_dequeue_buffers(struct efx_tx_queue *tx_queue,
 	while (read_ptr != stop_index) {
 		struct efx_tx_buffer *buffer = &tx_queue->buffer[read_ptr];
 
-		if (!(buffer->flags & EFX_TX_BUF_OPTION) &&
-		    unlikely(buffer->len == 0)) {
+		if (!efx_tx_buffer_in_use(buffer)) {
 			netif_err(efx, hw, efx->net_dev,
-				  "TX queue %d spurious TX completion id %x\n",
+				  "TX queue %d spurious TX completion id %d\n",
 				  tx_queue->queue, read_ptr);
 			atomic_inc(&efx->errors.spurious_tx);
 			efx_schedule_reset(efx, RESET_TYPE_TX_SKIP);
@@ -1357,17 +1361,31 @@ netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 	trace_sfc_transmit(skb, net_dev);
 #endif
 
+	channel = efx_get_tx_channel(efx, skb_get_queue_mapping(skb));
+
 #if defined(CONFIG_SFC_PTP)
 	/*
 	 * PTP "event" packet
 	 */
 	if (unlikely(efx_xmit_with_hwtstamp(skb)) &&
 		unlikely(efx_ptp_is_ptp_tx(efx, skb))) {
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_XMIT_MORE)
+		/* If the xmit_more flag is set we clear it, because PTP
+		 * transmissions will be going via a different path.
+		 * If it isn't set, this may be the packet that's flushing out
+		 * existing packets that had xmit_more set, so we must do that.
+		 */
+		if (skb->xmit_more) {
+			skb->xmit_more = false;
+		} else {
+			efx_tx_send_pending(channel);
+		}
+#endif
+
 		return efx_ptp_tx(efx, skb);
 	}
 #endif
 
-	channel = efx_get_tx_channel(efx, skb_get_queue_mapping(skb));
 	tx_queue = efx->select_tx_queue(channel, skb);
 
 	rc = efx_enqueue_skb(tx_queue, skb);
@@ -1388,6 +1406,18 @@ void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue)
 		tx_queue->queue / tx_queue->efx->tx_queues_per_channel);
 }
 
+static void efx_xmit_done_check_empty(struct efx_tx_queue *tx_queue)
+{
+	if ((int)(tx_queue->read_count - tx_queue->old_write_count) >= 0) {
+		tx_queue->old_write_count = ACCESS_ONCE(tx_queue->write_count);
+		if (tx_queue->read_count == tx_queue->old_write_count) {
+			smp_mb();
+			tx_queue->empty_read_count =
+				tx_queue->read_count | EFX_EMPTY_COUNT_VALID;
+		}
+	}
+}
+
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
 void fastcall efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index)
 #else
@@ -1405,15 +1435,50 @@ void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index)
 	if (pkts_compl > 1)
 		++tx_queue->merge_events;
 
-	/* Check whether the hardware queue is now empty */
-	if ((int)(tx_queue->read_count - tx_queue->old_write_count) >= 0) {
-		tx_queue->old_write_count = ACCESS_ONCE(tx_queue->write_count);
-		if (tx_queue->read_count == tx_queue->old_write_count) {
-			smp_mb();
-			tx_queue->empty_read_count =
-				tx_queue->read_count | EFX_EMPTY_COUNT_VALID;
+	efx_xmit_done_check_empty(tx_queue);
+}
+
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
+void fastcall efx_xmit_done_single(struct efx_tx_queue *tx_queue)
+#else
+void efx_xmit_done_single(struct efx_tx_queue *tx_queue)
+#endif
+{
+	unsigned int pkts_compl = 0, bytes_compl = 0;
+	unsigned int read_ptr;
+	bool finished = false;
+
+	read_ptr = tx_queue->read_count & tx_queue->ptr_mask;
+
+	while (!finished) {
+		struct efx_tx_buffer *buffer = &tx_queue->buffer[read_ptr];
+
+		if (!efx_tx_buffer_in_use(buffer)) {
+			struct efx_nic *efx = tx_queue->efx;
+
+			netif_err(efx, hw, efx->net_dev,
+				  "TX queue %d spurious single TX completion\n",
+				  tx_queue->queue);
+			atomic_inc(&efx->errors.spurious_tx);
+			efx_schedule_reset(efx, RESET_TYPE_TX_SKIP);
+			return;
 		}
+
+		/* Need to check the flag before dequeueing. */
+		if (buffer->flags & EFX_TX_BUF_SKB)
+			finished = true;
+		efx_dequeue_buffer(tx_queue, buffer, &pkts_compl, &bytes_compl);
+
+		++tx_queue->read_count;
+		read_ptr = tx_queue->read_count & tx_queue->ptr_mask;
 	}
+
+	tx_queue->pkts_compl += pkts_compl;
+	tx_queue->bytes_compl += bytes_compl;
+
+	EFX_WARN_ON_PARANOID(pkts_compl != 1);
+
+	efx_xmit_done_check_empty(tx_queue);
 }
 
 static unsigned int efx_tx_cb_page_count(struct efx_tx_queue *tx_queue)
@@ -1465,7 +1530,7 @@ fail1:
 	return rc;
 }
 
-void efx_init_tx_queue(struct efx_tx_queue *tx_queue)
+int efx_init_tx_queue(struct efx_tx_queue *tx_queue)
 {
 	struct efx_nic *efx = tx_queue->efx;
 
@@ -1486,7 +1551,6 @@ void efx_init_tx_queue(struct efx_tx_queue *tx_queue)
 		tx_queue->timestamping = true;
 	else
 		tx_queue->timestamping = false;
-	tx_queue->completed_desc_ptr = tx_queue->ptr_mask;
 	tx_queue->completed_timestamp_major = 0;
 	tx_queue->completed_timestamp_minor = 0;
 
@@ -1504,38 +1568,49 @@ void efx_init_tx_queue(struct efx_tx_queue *tx_queue)
 	tx_queue->tx_min_size = EFX_WORKAROUND_15592(efx) ? 33 : 0;
 
 	/* Set up TX descriptor ring */
-	efx_nic_init_tx(tx_queue);
+	return efx_nic_init_tx(tx_queue);
+}
+
+void efx_purge_tx_queue(struct efx_tx_queue *tx_queue)
+{
+	while (tx_queue->read_count != tx_queue->insert_count) {
+		unsigned int pkts_compl = 0, bytes_compl = 0;
+		struct efx_tx_buffer *buffer =
+			&tx_queue->buffer[tx_queue->read_count &
+					  tx_queue->ptr_mask];
+
+		efx_dequeue_buffer(tx_queue, buffer, &pkts_compl, &bytes_compl);
+		++tx_queue->read_count;
+	}
 }
 
 void efx_fini_tx_queue(struct efx_tx_queue *tx_queue)
 {
-	struct efx_tx_buffer *buffer;
-
 	netif_dbg(tx_queue->efx, drv, tx_queue->efx->net_dev,
 		  "shutting down TX queue %d\n", tx_queue->queue);
 
 	if (!tx_queue->buffer)
 		return;
 
-	/* Free any buffers left in the ring */
-	while (tx_queue->read_count != tx_queue->insert_count) {
-		unsigned int pkts_compl = 0, bytes_compl = 0;
-		buffer = &tx_queue->buffer[tx_queue->read_count & tx_queue->ptr_mask];
-		efx_dequeue_buffer(tx_queue, buffer, &pkts_compl, &bytes_compl);
-
-		++tx_queue->read_count;
-	}
+	efx_purge_tx_queue(tx_queue);
 	tx_queue->xmit_pending = false;
 	netdev_tx_reset_queue(tx_queue->core_txq);
 }
 
 void efx_remove_tx_queue(struct efx_tx_queue *tx_queue)
 {
+
+	netif_dbg(tx_queue->efx, drv, tx_queue->efx->net_dev,
+		  "removing TX queue %d\n", tx_queue->queue);
+	efx_nic_remove_tx(tx_queue);
+}
+
+void efx_destroy_tx_queue(struct efx_tx_queue *tx_queue)
+{
 	int i;
 
 	netif_dbg(tx_queue->efx, drv, tx_queue->efx->net_dev,
 		  "destroying TX queue %d\n", tx_queue->queue);
-	efx_nic_remove_tx(tx_queue);
 
 	if (tx_queue->cb_page) {
 		for (i = 0; i < efx_tx_cb_page_count(tx_queue); i++)
@@ -1548,3 +1623,4 @@ void efx_remove_tx_queue(struct efx_tx_queue *tx_queue)
 	kfree(tx_queue->buffer);
 	tx_queue->buffer = NULL;
 }
+

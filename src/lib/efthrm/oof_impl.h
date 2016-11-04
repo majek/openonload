@@ -19,6 +19,8 @@
 #include <ci/tools.h>
 #include <ci/internal/transport_config_opt.h>
 #include <onload/oof_hw_filter.h>
+#include <onload/oof_interface.h>
+#include <cplane/driver_types.h> /* for OOF_HWPORT_AVAIL_TAG_NUM */
 
 
 #define OOF_LOCAL_PORT_TBL_SIZE      16
@@ -202,11 +204,10 @@ struct oof_manager {
   unsigned     fm_hwports_up;
   unsigned     fm_hwports_down;
 
-  /* This mask tracks which hwports are unavailable because they are
-   * members of an unacceleratable bond.  ie. Filters should not be used
-   * with unavailable hwports because traffic arriving on them goes via the
-   * kernel stack.
+  /* This mask tracks which hwports are unavailable because of various
+   * reasons.
    */
+  unsigned     fm_hwports_avail_per_tag[OOF_HWPORT_AVAIL_TAG_NUM];
   unsigned     fm_hwports_available;
 
   /* This mask tracks which hwports are capable of multicast replication.
@@ -227,7 +228,7 @@ struct oof_manager {
   unsigned     fm_hwports_up_new;
   unsigned     fm_hwports_down_new;
   unsigned     fm_hwports_removed;
-  unsigned     fm_hwports_available_new;
+  unsigned     fm_hwports_avail_per_tag_new[OOF_HWPORT_AVAIL_TAG_NUM];
   unsigned     fm_hwports_mcast_replicate_capable_new;
   unsigned     fm_hwports_vlan_filters_new;
 

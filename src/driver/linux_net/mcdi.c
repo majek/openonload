@@ -203,6 +203,7 @@ void efx_mcdi_fini(struct efx_nic *efx)
 #endif
 
 	kfree(efx->mcdi);
+	efx->mcdi = NULL;
 }
 
 static void efx_mcdi_send_request(struct efx_nic *efx, unsigned int cmd,
@@ -519,6 +520,7 @@ static bool efx_mcdi_acquire_async(struct efx_mcdi_iface *mcdi)
 static int efx_mcdi_acquire_sync(struct efx_mcdi_iface *mcdi)
 {
 	int rc;
+	struct efx_nic *efx = mcdi->efx;
 
 	/* Wait until the interface becomes QUIESCENT and we win the race
 	 * to mark it RUNNING_SYNC.
@@ -528,15 +530,17 @@ static int efx_mcdi_acquire_sync(struct efx_mcdi_iface *mcdi)
 				MCDI_STATE_QUIESCENT,
 				MCDI_STATE_RUNNING_SYNC) ==
 				MCDI_STATE_QUIESCENT,
-			MCDI_ACQUIRE_TIMEOUT);
+				efx->type->mcdi_acquire_timeout ?
+					efx->type->mcdi_acquire_timeout(efx) :
+					MCDI_ACQUIRE_TIMEOUT);
 
 	if (rc == 0) {
-		if (efx_nic_hw_unavailable(mcdi->efx))
+		if (efx_nic_hw_unavailable(efx))
 			return -ENETDOWN;
 
-		netif_err(mcdi->efx, hw, mcdi->efx->net_dev,
-				"Failed to acquire MCDI: state %d\n",
-				atomic_read(&mcdi->state));
+		netif_err(efx, hw, efx->net_dev,
+			  "Failed to acquire MCDI: state %d\n",
+			  atomic_read(&mcdi->state));
 		return -ETIMEDOUT;
 	}
 	return 0;
@@ -969,9 +973,9 @@ static int efx_mcdi_proxy_wait(struct efx_nic *efx, u32 handle, bool quiet)
 static int _efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
 			 const efx_dword_t *inbuf, size_t inlen,
 			 efx_dword_t *outbuf, size_t outlen,
-			 size_t *outlen_actual, bool quiet, int *raw_rc)
+			 size_t *outlen_actual, bool quiet)
 {
-	int rc;
+	int rc, raw_rc;
 	efx_dword_t *copy_buf = NULL;
 	u32 proxy_handle = 0; /* Zero is an invalid proxy handle. */
 
@@ -986,8 +990,10 @@ static int _efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
 #ifdef DEBUG
 		WARN_ON(1);
 #endif
-		if (!copy_buf)
-			return -ENOMEM;
+		if (!copy_buf) {
+			rc = -ENOMEM;
+			goto fail;
+		}
 		memcpy(copy_buf, inbuf, to_copy);
 		inbuf = copy_buf;
 	}
@@ -997,7 +1003,7 @@ static int _efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
 		goto fail;
 
 	rc = _efx_mcdi_rpc_finish(efx, cmd, inlen, outbuf, outlen,
-			outlen_actual, quiet, &proxy_handle, raw_rc);
+			outlen_actual, quiet, &proxy_handle, &raw_rc);
 
 	if (proxy_handle) {
 		/* Handle proxy authorisation. This allows approval of MCDI
@@ -1021,7 +1027,7 @@ static int _efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
 
 			rc = _efx_mcdi_rpc_finish(efx, cmd, inlen,
 					outbuf, outlen, outlen_actual,
-					quiet, NULL, raw_rc);
+					quiet, NULL, &raw_rc);
 		} else {
 			netif_cond_dbg(efx, hw, efx->net_dev, rc == -EPERM,
 				       err,
@@ -1034,49 +1040,24 @@ static int _efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
 		}
 	}
 
-fail:
-	kfree(copy_buf);
-
-	return rc;
-}
-
-static int _efx_mcdi_rpc_evb_retry(struct efx_nic *efx, unsigned int cmd,
-		 const efx_dword_t *inbuf, size_t inlen,
-		 efx_dword_t *outbuf, size_t outlen,
-		 size_t *outlen_actual, bool quiet)
-{
-	int raw_rc = 0;
-	int rc;
-
-	rc = _efx_mcdi_rpc(efx, cmd, inbuf, inlen,
-			outbuf, outlen, outlen_actual, true, &raw_rc);
-
 	if ((rc == -EPROTO) && (raw_rc == MC_CMD_ERR_NO_EVB_PORT) &&
 			efx->type->is_vf) {
 		/* If the EVB port isn't available within a VF this may
-		 * mean the PF is still bringing the switch up. We should
-		 * retry our request shortly. */
-		unsigned long abort_time = jiffies + MCDI_RPC_TIMEOUT;
-		unsigned int delay_us = 10000;
-
-		netif_dbg(efx, hw, efx->net_dev,
-				"%s: NO_EVB_PORT; will retry request\n",
-				__func__);
-
-		do {
-			usleep_range(delay_us, delay_us + 10000);
-			rc = _efx_mcdi_rpc(efx, cmd, inbuf, inlen,
-					outbuf, outlen, outlen_actual,
-					true, &raw_rc);
-			if (delay_us < 100000)
-				delay_us <<= 1;
-		} while ((rc == -EPROTO) && (raw_rc == MC_CMD_ERR_NO_EVB_PORT)
-				&& time_before(jiffies, abort_time));
+		 * mean the PF is still bringing the switch up. Report this
+		 * to the upper levels so it can schedule a retry later.
+		 */
+		netif_dbg(efx, drv, efx->net_dev,
+			  "EVB port not ready.\n");
+		quiet = true;
+		rc = -EAGAIN;
 	}
 
+fail:
 	if (rc && !quiet && !(cmd == MC_CMD_REBOOT && rc == -EIO))
 		efx_mcdi_display_error(efx, cmd, inlen,
-				outbuf, outlen, rc);
+				       outbuf, outlen, rc);
+
+	kfree(copy_buf);
 
 	return rc;
 }
@@ -1110,7 +1091,7 @@ int efx_mcdi_rpc(struct efx_nic *efx, unsigned int cmd,
 		 efx_dword_t *outbuf, size_t outlen,
 		 size_t *outlen_actual)
 {
-	return _efx_mcdi_rpc_evb_retry(efx, cmd, inbuf, inlen, outbuf, outlen,
+	return _efx_mcdi_rpc(efx, cmd, inbuf, inlen, outbuf, outlen,
 			outlen_actual, false);
 }
 
@@ -1127,7 +1108,7 @@ int efx_mcdi_rpc_quiet(struct efx_nic *efx, unsigned int cmd,
 		       efx_dword_t *outbuf, size_t outlen,
 		       size_t *outlen_actual)
 {
-	return _efx_mcdi_rpc_evb_retry(efx, cmd, inbuf, inlen, outbuf, outlen,
+	return _efx_mcdi_rpc(efx, cmd, inbuf, inlen, outbuf, outlen,
 			outlen_actual, true);
 }
 
@@ -1271,13 +1252,11 @@ void efx_mcdi_display_error(struct efx_nic *efx, unsigned int cmd,
 			    size_t outlen, int rc)
 {
 	int code = 0, err_arg = 0;
-	bool debug_only;
 
 	if (outlen >= MC_CMD_ERR_CODE_OFST + 4)
 		code = MCDI_DWORD(outbuf, ERR_CODE);
 	if (outlen >= MC_CMD_ERR_ARG_OFST + 4)
 		err_arg = MCDI_DWORD(outbuf, ERR_ARG);
-	debug_only = (rc == -EPERM) || efx_nic_hw_unavailable(efx);
 	netif_cond_dbg(efx, hw, efx->net_dev,
 		       rc == -EPERM || efx_nic_hw_unavailable(efx), err,
 		       "MC command 0x%x inlen %d failed rc=%d (raw=%d) arg=%d\n",
@@ -2420,22 +2399,25 @@ int efx_mcdi_rpc_proxy_cmd(struct efx_nic *efx, u32 pf, u32 vf,
 
 static int efx_mcdi_nvram_update_start(struct efx_nic *efx, unsigned int type)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_UPDATE_START_IN_LEN);
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_UPDATE_START_V2_IN_LEN);
 	int rc;
 
 	MCDI_SET_DWORD(inbuf, NVRAM_UPDATE_START_IN_TYPE, type);
+	MCDI_POPULATE_DWORD_1(inbuf, NVRAM_UPDATE_START_V2_IN_FLAGS,
+			      NVRAM_UPDATE_START_V2_IN_FLAG_REPORT_VERIFY_RESULT, 1);
 
 	BUILD_BUG_ON(MC_CMD_NVRAM_UPDATE_START_OUT_LEN != 0);
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_NVRAM_UPDATE_START, inbuf, sizeof(inbuf),
 			  NULL, 0, NULL);
+
 	return rc;
 }
 
 static int efx_mcdi_nvram_read(struct efx_nic *efx, unsigned int type,
 			       loff_t offset, u8 *buffer, size_t length)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_READ_IN_LEN);
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_READ_IN_V2_LEN);
 	MCDI_DECLARE_BUF(outbuf,
 			 MC_CMD_NVRAM_READ_OUT_LEN(EFX_MCDI_NVRAM_LEN_MAX));
 	size_t outlen;
@@ -2444,6 +2426,8 @@ static int efx_mcdi_nvram_read(struct efx_nic *efx, unsigned int type,
 	MCDI_SET_DWORD(inbuf, NVRAM_READ_IN_TYPE, type);
 	MCDI_SET_DWORD(inbuf, NVRAM_READ_IN_OFFSET, offset);
 	MCDI_SET_DWORD(inbuf, NVRAM_READ_IN_LENGTH, length);
+	MCDI_SET_DWORD(inbuf, NVRAM_READ_IN_V2_MODE,
+			      MC_CMD_NVRAM_READ_IN_V2_DEFAULT);
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_NVRAM_READ, inbuf, sizeof(inbuf),
 			  outbuf, sizeof(outbuf), &outlen);
@@ -2498,9 +2482,11 @@ static int efx_mcdi_nvram_erase(struct efx_nic *efx, unsigned int type,
 
 static int efx_mcdi_nvram_update_finish(struct efx_nic *efx, unsigned int type)
 {
-	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_UPDATE_FINISH_IN_LEN);
+	MCDI_DECLARE_BUF(inbuf, MC_CMD_NVRAM_UPDATE_FINISH_V2_IN_LEN);
+	MCDI_DECLARE_BUF(outbuf, MC_CMD_NVRAM_UPDATE_FINISH_V2_OUT_LEN);
+	size_t outlen;
 	u32 reboot;
-	int rc;
+	int rc, rc2;
 
 	/* Reboot PHY's into the new firmware. mcfw reboot is handled
 	 * explicity via ethtool. */
@@ -2509,11 +2495,45 @@ static int efx_mcdi_nvram_update_finish(struct efx_nic *efx, unsigned int type)
 		  type == MC_CMD_NVRAM_TYPE_DISABLED_CALLISTO);
 	MCDI_SET_DWORD(inbuf, NVRAM_UPDATE_FINISH_IN_TYPE, type);
 	MCDI_SET_DWORD(inbuf, NVRAM_UPDATE_FINISH_IN_REBOOT, reboot);
-
-	BUILD_BUG_ON(MC_CMD_NVRAM_UPDATE_FINISH_OUT_LEN != 0);
+	/* Always set this flag. Old firmware ignores it */
+	MCDI_POPULATE_DWORD_1(inbuf, NVRAM_UPDATE_FINISH_V2_IN_FLAGS,
+			      NVRAM_UPDATE_FINISH_V2_IN_FLAG_REPORT_VERIFY_RESULT,
+				1);
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_NVRAM_UPDATE_FINISH, inbuf, sizeof(inbuf),
-			  NULL, 0, NULL);
+			  outbuf, sizeof(outbuf), &outlen);
+	if (!rc && outlen >= MC_CMD_NVRAM_UPDATE_FINISH_V2_OUT_LEN) {
+		rc2 = MCDI_DWORD(outbuf, NVRAM_UPDATE_FINISH_V2_OUT_RESULT_CODE);
+		if (rc2 != MC_CMD_NVRAM_VERIFY_RC_SUCCESS)
+			netif_err(efx, drv, efx->net_dev,
+				  "NVRAM update failed verification with code 0x%x\n",
+				  rc2);
+		switch (rc2) {
+		case MC_CMD_NVRAM_VERIFY_RC_SUCCESS:
+			break;
+		case MC_CMD_NVRAM_VERIFY_RC_CMS_CHECK_FAILED:
+		case MC_CMD_NVRAM_VERIFY_RC_MESSAGE_DIGEST_CHECK_FAILED:
+		case MC_CMD_NVRAM_VERIFY_RC_SIGNATURE_CHECK_FAILED:
+		case MC_CMD_NVRAM_VERIFY_RC_TRUSTED_APPROVERS_CHECK_FAILED:
+		case MC_CMD_NVRAM_VERIFY_RC_SIGNATURE_CHAIN_CHECK_FAILED:
+			rc = -EIO;
+			break;
+		case MC_CMD_NVRAM_VERIFY_RC_INVALID_CMS_FORMAT:
+		case MC_CMD_NVRAM_VERIFY_RC_BAD_MESSAGE_DIGEST:
+			rc = -EINVAL;
+			break;
+		case MC_CMD_NVRAM_VERIFY_RC_NO_VALID_SIGNATURES:
+		case MC_CMD_NVRAM_VERIFY_RC_NO_TRUSTED_APPROVERS:
+		case MC_CMD_NVRAM_VERIFY_RC_NO_SIGNATURE_MATCH:
+		case MC_CMD_NVRAM_VERIFY_RC_REJECT_TEST_SIGNED:
+			rc = -EPERM;
+			break;
+		default:
+			netif_err(efx, drv, efx->net_dev,
+				  "Unknown response to NVRAM_UPDATE_FINISH\n");
+			rc = -EIO;
+		}
+	}
 	return rc;
 }
 

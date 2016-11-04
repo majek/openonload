@@ -39,7 +39,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  ****************************************************************************
  */
-#define EFX_DRIVER_NAME "sfc_control"
 #include "net_driver.h"
 #include "efx.h"
 #include "efx_ioctl.h"
@@ -577,6 +576,7 @@ efx_ioctl_get_device_ids(struct efx_nic *efx, union efx_ioctl_data *data)
 	return 0;
 }
 
+#ifdef EFX_NOT_UPSTREAM
 static int
 efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -590,7 +590,7 @@ efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
 		 */
 		return rc;
 	}
- 
+
 	memset(stats, 0, sizeof(*stats));
 
 #ifdef CONFIG_SFC_AOE
@@ -609,7 +609,9 @@ efx_ioctl_update_license(struct efx_nic *efx, union efx_ioctl_data *data)
 
 	return 0;
 }
+#endif
 
+#ifdef EFX_NOT_UPSTREAM
 static int
 efx_ioctl_licensed_app_state(struct efx_nic *efx, union efx_ioctl_data *data)
 {
@@ -620,6 +622,7 @@ efx_ioctl_licensed_app_state(struct efx_nic *efx, union efx_ioctl_data *data)
 	rc = efx_ef10_licensed_app_state(efx, &data->app_state);
 	return rc;
 }
+#endif
 
 #ifdef CONFIG_SFC_DUMP
 static int
@@ -802,14 +805,18 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 		size = sizeof(data->device_ids);
 		op = efx_ioctl_get_device_ids;
 		break;
+#ifdef EFX_NOT_UPSTREAM
 	case EFX_LICENSE_UPDATE2:
 		size = sizeof(data->key_stats2);
 		op = efx_ioctl_update_license;
 		break;
+#endif
+#ifdef EFX_NOT_UPSTREAM
 	case EFX_LICENSED_APP_STATE:
 		size = sizeof(data->app_state);
 		op = efx_ioctl_licensed_app_state;
 		break;
+#endif
 #ifdef CONFIG_SFC_DUMP
 	case EFX_DUMP:
 		return efx_ioctl_dump(efx, user_data);
@@ -839,83 +846,3 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	return rc;
 }
 
-static long
-control_ioctl(struct file *filp, unsigned int req, unsigned long arg)
-{
-	struct efx_nic *efx;
-	char if_name[IFNAMSIZ];
-	struct efx_ioctl __user *user_data = (struct efx_ioctl __user *)arg;
-	u16 efx_cmd;
-	int rc = 0;
-
-	if (req != SIOCEFX && req != SIOCDEVPRIVATE)
-		return -ENOTTY;
-
-	if (copy_from_user(if_name, &user_data->if_name, sizeof(if_name)) ||
-	    copy_from_user(&efx_cmd, &user_data->cmd, sizeof(efx_cmd)))
-		return -EFAULT;
-
-	/* Serialise ioctl access with efx_reset() by acquiring the rtnl_lock.
-	 * This also maintains compatability with ioctls directly hung off
-	 * the net_device */
-	rtnl_lock();
-
-	list_for_each_entry(efx, &efx_port_list, dl_node) {
-		if (strncmp(efx->net_dev->name, if_name, sizeof(if_name)) != 0)
-			continue;
-
-		rc = efx_private_ioctl(efx, efx_cmd, &user_data->u);
-		goto unlock;
-	}
-
-	/* Couldn't find the device */
-	rc = -ENOSYS;
-
-unlock:
-	rtnl_unlock();
-	return rc;
-}
-
-#ifndef HAVE_UNLOCKED_IOCTL
-static int control_legacy_ioctl(struct inode *ino, struct file *filp,
-				unsigned int req, unsigned long arg)
-{
-	return (int) control_ioctl(filp, req, arg);
-}
-#endif
-
-static struct file_operations control_fops = {
-	.owner = THIS_MODULE,
-#ifdef HAVE_UNLOCKED_IOCTL
-	.unlocked_ioctl = control_ioctl,
-#else
-	.ioctl = control_legacy_ioctl,
-#endif
-#ifdef HAVE_COMPAT_IOCTL
-	.compat_ioctl = control_ioctl,
-#endif
-};
-
-/*****************************************************************************/
-
-int efx_control_init(void)
-{
-	int rc;
-
-	if ((rc = register_chrdev(major, EFX_DRIVER_NAME, &control_fops))
-	    < 0) {
-		printk(KERN_ERR "Failed to register chrdev on %d (%d)\n", major, rc);
-		return rc;
-	}
-	if (!major)
-		major = rc;
-	printk(KERN_INFO "Registered control device on %d\n", major);
-
-	return 0;
-}
-
-void efx_control_fini(void)
-{
-	printk(KERN_INFO "Unregistering device %d from " EFX_DRIVER_NAME "\n", major);
-	unregister_chrdev(major, EFX_DRIVER_NAME);
-}
