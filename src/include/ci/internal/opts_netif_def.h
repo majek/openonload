@@ -1326,6 +1326,35 @@ CI_CFG_OPT("EF_SEPARATE_UDP_RXQ", separate_udp_rxq, ci_uint32,
            1, , 0, 0, 1, yesno)
 #endif
 
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS", tcp_shared_local_ports, ci_uint32,
+"This feature improves the performance of TCP active-opens.  It reduces the "
+"cost of both blocking and non-blocking connect() calls, reduces the "
+"latency to establish new connections, and enables scaling to large numbers "
+"of active-open connections.  It also reduces the cost of closing these "
+"connections."
+"\n"
+"These improvements are achieved by sharing a set of local port numbers "
+"amongst active-open sockets, which saves the cost and scaling limits "
+"associated with installing packet steering filters for each active-open "
+"socket.  Shared local ports are only used when the local port is not "
+"explicitly assigned by the application."
+"\n"
+"Set this option to >=1 to enable local port sharing.  The value set gives "
+"the initial number of local ports to allocate when the Onload stack is "
+"created.  More shared local ports are allocated on demand as needed up to "
+"the maximum given by EF_TCP_SHARED_LOCAL_PORTS_MAX."
+"\n"
+"Note that typically only one local shared port is needed, as different "
+"local ports are only needed when multiple connections are made to the same "
+"remote IP:port.",
+           , , 0, 0, MAX, count)
+
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_MAX", tcp_shared_local_ports_max,
+           ci_uint32,
+"This setting sets the maximum size of the pool of local shared ports.  "
+"See EF_TCP_SHARED_LOCAL_PORTS for details.",
+           , , 100, 0, MAX, count)
+
 CI_CFG_OPT("EF_SCALABLE_FILTERS", scalable_filter_ifindex, ci_int32,
 "Specifies the interface on which to enable support for scalable filters, "
 "and configures the scalable filter mode(s) to use.  Scalable filters "

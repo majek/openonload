@@ -32,8 +32,13 @@
 void efx_sriov_init_max_vfs(struct efx_nic *efx, unsigned int pf_index);
 
 int efx_sriov_set_vf_mac(struct net_device *net_dev, int vf_i, u8 *mac);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_VLAN_PROTO)
+int efx_sriov_set_vf_vlan(struct net_device *net_dev, int vf_i, u16 vlan,
+			  u8 qos, __be16 vlan_proto);
+#else
 int efx_sriov_set_vf_vlan(struct net_device *net_dev, int vf_i, u16 vlan,
 			  u8 qos);
+#endif
 int efx_sriov_set_vf_spoofchk(struct net_device *net_dev, int vf_i,
 			      bool spoofchk);
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NDO_SET_VF_MAC)
@@ -42,11 +47,6 @@ int efx_sriov_get_vf_config(struct net_device *net_dev, int vf_i,
 #endif
 int efx_sriov_set_vf_link_state(struct net_device *net_dev, int vf_i,
 				int link_state);
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
-int efx_sriov_get_phys_port_id(struct net_device *net_dev,
-			       struct netdev_phys_item_id *ppid);
-#endif
-
 #endif /* CONFIG_SFC_SRIOV */
 
 static inline bool efx_sriov_wanted(struct efx_nic *efx)

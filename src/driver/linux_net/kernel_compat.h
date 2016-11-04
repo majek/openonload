@@ -1238,68 +1238,6 @@
 	}
 #endif
 
-#ifdef EFX_USE_I2C_LEGACY
-	#ifndef I2C_BOARD_INFO
-		struct i2c_board_info {
-			char type[I2C_NAME_SIZE];
-			unsigned short flags;
-			unsigned short addr;
-			void *platform_data;
-			int irq;
-		};
-		#define I2C_BOARD_INFO(dev_type, dev_addr) \
-			.type = (dev_type), .addr = (dev_addr)
-	#endif
-	struct i2c_client *
-	i2c_new_device(struct i2c_adapter *adap, const struct i2c_board_info *info);
-	struct i2c_client *
-	i2c_new_probed_device(struct i2c_adapter *adap,
-			      const struct i2c_board_info *info,
-			      const unsigned short *addr_list);
-	void i2c_unregister_device(struct i2c_client *);
-	struct i2c_device_id;
-#endif
-
-#ifdef EFX_NEED_I2C_NEW_DUMMY
-	extern struct i2c_driver efx_i2c_dummy_driver;
-	struct i2c_client *
-	efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address);
-	#undef i2c_new_dummy
-	#define i2c_new_dummy efx_i2c_new_dummy
-#endif
-
-#ifdef EFX_HAVE_OLD_I2C_NEW_DUMMY
-	static inline struct i2c_client *
-	efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address)
-	{
-		return i2c_new_dummy(adap, address, "dummy");
-	}
-	#undef i2c_new_dummy
-	#define i2c_new_dummy efx_i2c_new_dummy
-#endif
-
-#ifdef EFX_NEED_I2C_LOCK_ADAPTER
-	#ifdef EFX_USE_I2C_BUS_SEMAPHORE
-		static inline void i2c_lock_adapter(struct i2c_adapter *adap)
-		{
-			down(&adap->bus_lock);
-		}
-		static inline void i2c_unlock_adapter(struct i2c_adapter *adap)
-		{
-			up(&adap->bus_lock);
-		}
-	#else
-		static inline void i2c_lock_adapter(struct i2c_adapter *adap)
-		{
-			mutex_lock(&adap->bus_lock);
-		}
-		static inline void i2c_unlock_adapter(struct i2c_adapter *adap)
-		{
-			mutex_unlock(&adap->bus_lock);
-		}
-	#endif
-#endif
-
 #ifdef EFX_HAVE_OLD_DMA_MAPPING_ERROR
 	static inline int
 	efx_dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
@@ -1331,29 +1269,6 @@
 	#define for_each_pci_dev(d)				\
 		while ((d = pci_get_device(PCI_ANY_ID,		\
 			PCI_ANY_ID, d)) != NULL)
-#endif
-
-#ifndef DEFINE_PCI_DEVICE_TABLE
-	#define DEFINE_PCI_DEVICE_TABLE(_table) \
-		const struct pci_device_id _table[] __devinitdata
-#endif
-
-#ifdef EFX_NEED_LM87_DRIVER
-#ifdef EFX_HAVE_OLD_I2C_DRIVER_PROBE
-int efx_lm87_probe(struct i2c_client *client);
-#else
-int efx_lm87_probe(struct i2c_client *client, const struct i2c_device_id *);
-#endif
-extern struct i2c_driver efx_lm87_driver;
-#endif
-
-#ifdef EFX_NEED_LM90_DRIVER
-#ifdef EFX_HAVE_OLD_I2C_DRIVER_PROBE
-int efx_lm90_probe(struct i2c_client *client);
-#else
-int efx_lm90_probe(struct i2c_client *client, const struct i2c_device_id *);
-#endif
-extern struct i2c_driver efx_lm90_driver;
 #endif
 
 /*
@@ -3114,6 +3029,28 @@ static inline int skb_inner_transport_offset(const struct sk_buff *skb)
 	return skb_inner_transport_header(skb) - skb->data;
 }
 #endif
+#endif
+
+#ifndef QSTR_INIT
+#define QSTR_INIT(n,l) { .len = l, .name = n }
+#endif
+
+#ifdef EFX_HAVE_NETDEV_REGISTER_RH
+/* The _rh versions of these appear in RHEL7.3.
+ * Wrap them to make the calling code simpler.
+ */
+static inline int efx_register_netdevice_notifier(struct notifier_block *b)
+{
+	return register_netdevice_notifier_rh(b);
+}
+
+static inline int efx_unregister_netdevice_notifier(struct notifier_block *b)
+{
+	return unregister_netdevice_notifier_rh(b);
+}
+
+#define register_netdevice_notifier efx_register_netdevice_notifier
+#define unregister_netdevice_notifier efx_unregister_netdevice_notifier
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

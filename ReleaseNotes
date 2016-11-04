@@ -1,10 +1,165 @@
+OpenOnload-201606-u1
+====================
+
+This release builds on top of the stable OpenOnload-201606 release and
+adds support for the TCPDirect library and API.
+
+See the ChangeLog for a list of bugs fixed.
+
+A brief summary of new features and known limitations are included
+below - for more details see the TCPDirect User Guide and Onload User
+Guide.
+
+
+TCPDirect
+---------
+
+Supported hardware platforms:
+
+TCPDirect is currently only available for the Solarflare Flareon
+Ultra 8500 series of network adapters with a suitable licence
+installed.
+
+
+Documentation:
+
+Installation of TCPDirect follows the same process as OpenOnload.
+Please see the OpenOnload User Guide or Quick Start Guide for details.
+Please see the TCPDirect User Guide for details of configuring and
+using TCPDirect.
+
+
+TCP Alternatives Firmware:
+
+Usage of the TCPDirect Alternatives API needs a more recent
+firmware version than is currently supplied with the Solarflare
+Flareon Ultra 8500 series network adapters.  If you plan to use this
+feature please contact support@solarflare.com to obtain suitable
+firmware.
+
+
+Routing:
+
+TCPDirect makes routing decisions when a connection is established,
+and caches that information.  During the connection lifetime the
+routing information is not updated, so:
+ - it does not detect a change of MAC address of the next hop
+ - it does not do PMTU discovery, it uses the MTU specified in route
+ table entry
+ - it does not detect route changes
+
+TCPDirect also can't use network interfaces other than the interface
+specified in the attribute.  An attempt to use a route via another
+network interface will result in error.
+
+
+Changes compared to preview:
+
+There have been a number of updates to the TCPDirect API since the initial
+preview was made, including
+ - All TCPDirect headers are now accessed by including zf.h
+ - zft_send_single() added for optimised send of a single iovec
+ - zft_send() expanded to support multiple iovecs
+ - zft_send()/zft_send_single() can send partial iovecs, and return ssize_t
+ - Add support for MSG_MORE flag on TCP send calls
+ - API in general uses sockaddr rather than sockaddr_in
+ - zfur_zc_recv() now only returns a single datagram as documented
+ - Add zf_stack_has_pending_work()
+ - Add zft_get_mss()
+ - Removed unimplemented API calls from the headers.  It is still
+ intended to add support for things like hardware timestamps in a
+ future release.
+ - Change zf_muxer_wait() to take a timeout in nanoseconds rather than
+ milliseconds
+ - Added zf_debug wrapper script to make use of debug libraries easier
+ - zf{tcp,udp}pingpong sample apps rewritten, and zfaltpingpong added
+ to demonstrate the alternatives API.
+
+
+Linux distribution support
+--------------------------
+
+This package is supported on:
+- Red Hat Enterprise Linux 6.6 - 6.8
+- Red Hat Enterprise Linux 7.0 - 7.2
+- SuSE Linux Enterprise Server 11 sp2, sp3, sp4
+- SuSE Linux Enterprise Server 12 base and sp1
+- Canonical Ubuntu Server LTS 14.04, 16.04
+- Canonical Ubuntu Server 16.10
+- Debian 7 "Wheezy"
+- Debian 8 "Jessie"
+- Linux kernels 2.6.32 - 4.8
+
+
+New configuration options
+-------------------------
+
+EF_WODA_SINGLE_INTERFACE: This mode removes the constraint on ordering being
+correct across interfaces when using onload_ordered_epoll_wait().  If this
+mode is enabled by setting EF_WODA_SINGLE_INTERFACE=1 then traffic is only
+ordered with respect to other traffic on the same interface.  This can give a
+significant latency benefit with certain traffic patterns.
+
+
+EF_TCP_SHARED_LOCAL_PORTS: This feature improves the performance of
+TCP active-opens.  It reduces the cost of both blocking and
+non-blocking connect() calls, reduces the latency to establish new
+connections, and enables scaling to large numbers of active-open
+connections.  It also reduces the cost of closing these connections
+
+These improvements are achieved by sharing a set of local port numbers
+amongst active-open sockets, which saves the cost and scaling limits
+associated with installing packet steering filters for each active-open
+socket.  Shared local ports are only used when the local port is not
+explicitly assigned by the application."
+
+Set this option to >=1 to enable local port sharing.  The value set gives
+the initial number of local ports to allocate when the Onload stack is
+created.  More shared local ports are allocated on demand as needed up to
+the maximum given by EF_TCP_SHARED_LOCAL_PORTS_MAX.
+
+Note that typically only one local shared port is needed, as different
+local ports are only needed when multiple connections are made to the same
+remote IP:port.
+
+
+Onload Extensions API
+---------------------
+
+This release adds onload_socket_nonaccel() to the Onload extensions
+API.  This function provides a convenient way to allocate a socket
+that is not accelerated by Onload.  Its arguments and return codes are
+identical to socket().
+
+This release also makes the return codes and errno use from the Onload
+extensions API consistent between the main library and the two stub
+implementations.
+
+
+Onload Remote Monitor
+---------------------
+
+The OnloadRemoteMonitor (ORM) system for gathering Onload statistics
+from a monitoring system has been improved and extended in this
+release.  These statistics can now be accessed via http - the example
+webserver is started using 'orm_webserver <port>'.  Alternatively,
+'orm_json' can be invoked directly by a customer script. An example of
+using collectd to gather statistics is provided in
+src/tests/onload/onload_remote_monitor/using_collectd/.  When running
+the example webserver, statistics can now be accessed for an
+individual named stack using a URL like
+http://<server-ip>:<port>/onload/stackname/<name>/lots/
+
+
 OpenOnload-201606 Release Notes
 ===============================
 
 This is a major update release that adds new features to OpenOnload.
 
-Below is a brief summary of the new features and any limitations that we are
-aware of.  See the ChangeLog for further details and a list of bugs fixed.
+A brief summary of new features and known limitations are included
+below - for more details see the Onload user guide.
+
+See the ChangeLog for a list of bugs fixed.
 
 
 Linux distribution support
@@ -47,7 +202,7 @@ EF_HIGH_THROUGHPUT_MODE: This option causes onload to optimise the
 stack and VI configuration for throughput at the cost of latency
 
 In addition, some of the control-plane module options have been moved
-or renamed - please the control plane section below for details.
+or renamed - please see the control plane section below for details.
 
 
 ef_vi Transmit Alternatives API
@@ -56,19 +211,19 @@ ef_vi Transmit Alternatives API
 This release adds a new method for sending data to the ef_vi API.
 Using the ef_vi_transmit_alt* functions a set of alternative packets
 can be queued in the NIC ready to be sent.  Once the decision about
-which alternative to send is made the correct one is released onto
-the network with extremely low latency.
+which alternative set of packets to send is made, it can be released
+onto the network with extremely low latency.
 
-Please refer to the ef_vi documentation for further details.  This is
-supported on 8000-series NICs and later.
+Please refer to the ef_vi documentation for further details.  This API
+is supported on 8000-series NICs and later.
 
 
 ef_vi Capabilities API
 ----------------------
 
-This release adds support for an ef_vi API that will allow users to
-query at runtime what features and capabilities are available on the
-hardware as it is currently configured.  This allows applications to
+This release adds support for an ef_vi API that allows users to query
+at runtime what features and capabilities are available on the
+hardware as it is currently configured.  This allows applications to be
 built once, then run on a variety of Solarflare NICs and tailor the
 feature set they use to the current hardware capabilities.
 

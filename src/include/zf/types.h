@@ -1,38 +1,29 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
+** This file is part of Solarflare TCPDirect.
 **
-** This program is free software; you can redistribute it and/or modify it
-** under the terms of version 2 of the GNU General Public License as
-** published by the Free Software Foundation.
+** Copyright 2015-2016  Solarflare Communications Inc.
+**                       7505 Irvine Center Drive, Irvine, CA 92618, USA
 **
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
+** Proprietary and confidential.  All rights reserved.
+**
+** Please see TCPD-LICENSE.txt included in this distribution for terms of use.
 */
 
 /**************************************************************************\
 *//*! \file
-** <L5_PRIVATE L5_HEADER >
-** \author  mj
-**  \brief  ZF API - various data types
-**   \date  2015/10/20
-**    \cop  (c) SolarFlare Communications.
-** </L5_PRIVATE>
+**  \brief  TCPDirect types
 *//*
 \**************************************************************************/
 
 #ifndef __ZF_TYPES_H__
 #define __ZF_TYPES_H__
 
-#include <zf/zf_platform.h>
+#ifndef __IN_ZF_TOP_H__
+# error "Please include zf.h to use TCPDirect."
+#endif
 
 
 struct zf_stack;
 
-
-
-
 #endif /* __ZF_TYPES_H__ */
+/** @} */

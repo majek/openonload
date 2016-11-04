@@ -86,19 +86,25 @@ oo_resource_alloc(ci_fd_t fp, ci_resource_onload_alloc_t* io)
 #define OO_MMAP_FLAG_READONLY 1
 #define OO_MMAP_FLAG_FIXED    2
 ci_inline int
-oo_resource_mmap(ci_fd_t fp, unsigned map_id, unsigned bytes, int flags,
-                 void** p_out)
+oo_resource_mmap(ci_fd_t fp, ci_uint8 map_type, unsigned long map_id,
+                 unsigned bytes, int flags, void** p_out)
 {
   int mmap_prot = PROT_READ;
   int mmap_flags = MAP_SHARED;
+
+  off_t offset = map_id << OO_MMAP_ID_SHIFT;
+#ifdef OO_MMAP_HAVE_EXTENDED_MAP_TYPES
+  offset |= ((off_t) map_type) << OO_MMAP_TYPE_SHIFT;
+#else
+  ci_assert_equal(map_type, OO_MMAP_TYPE_NETIF);
+#endif
 
   if( ! (flags & OO_MMAP_FLAG_READONLY) )
     mmap_prot |= PROT_WRITE;
   if( flags & OO_MMAP_FLAG_FIXED )
     mmap_flags |= MAP_FIXED;
-  *p_out = mmap((flags & OO_MMAP_FLAG_FIXED) ? *p_out : (void*) 0,
-                bytes, mmap_prot,
-                mmap_flags, fp, map_id << CI_NETIF_MMAP_ID_SHIFT);
+  *p_out = mmap((flags & OO_MMAP_FLAG_FIXED) ? *p_out : (void*) 0, bytes,
+                mmap_prot, mmap_flags, fp, offset);
   return *p_out != MAP_FAILED ? 0 : -errno;
 }
 

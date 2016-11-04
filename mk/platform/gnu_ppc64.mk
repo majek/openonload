@@ -6,4 +6,7 @@ ifndef MMAKE_CTUNE
  endif
 endif
 MMAKE_CARCH := -m64 -mcpu=native $(MMAKE_CTUNE)
+
+MMAKE_RELOCATABLE_LIB := -mrelocatable-lib
+
 include $(TOP)/mk/linux_gcc.mk

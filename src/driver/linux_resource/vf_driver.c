@@ -129,7 +129,7 @@ unsigned long efrm_pt_iova_base;
  * PCI IDs and init
  *
  ****************************************************************************/
-static DEFINE_PCI_DEVICE_TABLE(efrm_pci_vf_table) = {
+static const struct pci_device_id efrm_pci_vf_table[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1000 | 0x0803)},/* SFC9020 */
 	{PCI_DEVICE(PCI_VENDOR_ID_SOLARFLARE, 0x1000 | 0x0813)},/* SFL9021 */
 	{0}			/* end of list */

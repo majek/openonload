@@ -85,6 +85,7 @@ static int cfg_local_port = LOCAL_PORT;
 static int cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
 static int cfg_iter = 10;
 static int cfg_usleep = 0;
+static int cfg_verbose = 0;
 static int n_sent;
 static int ifindex;
 
@@ -94,6 +95,7 @@ static void wait_for_some_completions(void)
   ef_event      evs[EF_VI_EVENT_POLL_MIN_EVS];
   int           n_ev, i;
   struct timespec ts;
+  unsigned ts_flags;
 
   while( 1 ) {
     n_ev = ef_eventq_poll(&vi, evs, sizeof(evs) / sizeof(evs[0]));
@@ -105,10 +107,16 @@ static void wait_for_some_completions(void)
            */
           TEST(EF_EVENT_TX_WITH_TIMESTAMP_RQ_ID(evs[i]) == n_sent);
           ++n_sent;
-          ts.tv_nsec = EF_EVENT_TX_WITH_TIMESTAMP_NSEC(evs[i]);
-          ts.tv_sec = EF_EVENT_TX_WITH_TIMESTAMP_SEC(evs[i]);
-          printf("Timestamp event %ld.%ld sync %d\n", ts.tv_sec, ts.tv_nsec,
-                 EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(evs[i]));
+          if( cfg_verbose ) {
+            ts.tv_nsec = EF_EVENT_TX_WITH_TIMESTAMP_NSEC(evs[i]);
+            ts.tv_sec = EF_EVENT_TX_WITH_TIMESTAMP_SEC(evs[i]);
+            ts_flags = EF_EVENT_TX_WITH_TIMESTAMP_SYNC_FLAGS(evs[i]);
+            printf("Timestamp: %ld.%09ld  sync-flags:%s%s\n", ts.tv_sec,
+                ts.tv_nsec,
+                (ts_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? " ClockSet" : "",
+                (ts_flags & EF_VI_SYNC_FLAG_CLOCK_IN_SYNC) ? " ClockInSync" :
+                                                             "");
+          }
           return;
         }
         else {
@@ -185,7 +193,7 @@ static int parse_opts(int argc, char*argv[])
 {
   int c;
 
-  while( (c = getopt(argc, argv, "n:m:s:l:")) != -1 )
+  while( (c = getopt(argc, argv, "n:m:s:l:v")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -198,6 +206,9 @@ static int parse_opts(int argc, char*argv[])
       break;
     case 's':
       cfg_usleep = atoi(optarg);
+      break;
+    case 'v':
+      cfg_verbose = 1;
       break;
     case '?':
       usage();

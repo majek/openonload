@@ -33,6 +33,7 @@
 #include <onload/oof_interface.h>
 #include <onload/cplane_ops.h>
 #include <onload/version.h>
+#include <onload/dshm.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
@@ -235,7 +236,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   if( (NI_OPTS(&trs->netif).scalable_filter_enable !=
        CITP_SCALABLE_FILTERS_ENABLE) ||
       (fd_type == CI_PRIV_TYPE_UDP_EP) ) {
-    rc = efab_create_os_socket(ep, op->domain, sock_type, flags);
+    rc = efab_create_os_socket(trs, ep, op->domain, sock_type, flags);
     if( rc < 0 ) {
       efab_tcp_helper_close_endpoint(trs, ep->id);
       return rc;
@@ -813,6 +814,7 @@ efab_tcp_helper_os_pollerr_clear(ci_private_t* priv, void *arg)
     return 0;
   oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
                                       os_file, OO_OS_STATUS_ERR);
+  oo_os_sock_put(os_file);
   return 0;
 }
 static int
@@ -1128,6 +1130,42 @@ static int oo_get_cplane_fd(ci_private_t *priv, void *arg)
 }
 
 
+static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
+                                                  void *arg)
+{
+  tcp_helper_resource_t* trs = priv->thr;
+
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  if( trs->netif.state->active_wild_n <
+      NI_OPTS(&trs->netif).tcp_shared_local_ports_max )
+    tcp_helper_alloc_to_active_wild_pool(trs, 1);
+
+  return 0;
+}
+
+
+/* "Donation" shared memory ioctls. */
+
+static int oo_dshm_register_rsop(ci_private_t *priv, void *arg)
+{
+  oo_dshm_register_t* params = arg;
+  return oo_dshm_register_impl(params->shm_class, params->buffer,
+                               params->length, &params->buffer_id,
+                               &priv->dshm_list);
+}
+
+static int oo_dshm_list_rsop(ci_private_t *priv, void *arg)
+{
+  oo_dshm_list_t* params = arg;
+  return oo_dshm_list_impl(params->shm_class, params->buffer_ids,
+                           &params->count);
+}
+
+
 /*************************************************************************
  * ATTENTION! ACHTUNG! ATENCION!                                         *
  * This table MUST be synchronised with enum of OO_OP_* operations!      *
@@ -1223,5 +1261,10 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OFE_GET_LAST_ERROR, efab_ofe_get_last_error),
   op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
   op(OO_IOC_GET_CPLANE_FD, oo_get_cplane_fd),
+
+  op(OO_IOC_DSHM_REGISTER, oo_dshm_register_rsop),
+  op(OO_IOC_DSHM_LIST,     oo_dshm_list_rsop),
+
+  op(OO_IOC_ALLOC_ACTIVE_WILD, efab_tcp_helper_alloc_active_wild_rsop),
 #undef op
 };

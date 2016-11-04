@@ -187,6 +187,7 @@ struct efx_ef10_filter_table {
 	bool uc_promisc;
 	bool mc_promisc;
 	bool mc_promisc_last;
+	bool mc_overflow; /* Too many MC addrs; should always imply mc_promisc */
 	bool vlan_filter;
 	struct list_head vlan_list;
 #ifdef EFX_NOT_UPSTREAM
@@ -242,6 +243,23 @@ efx_ef10_filter_entry_flags(const struct efx_ef10_filter_table *table,
 			    unsigned int filter_idx)
 {
 	return table->entry[filter_idx].spec & EFX_EF10_FILTER_FLAGS;
+}
+
+static u32 efx_ef10_filter_get_unsafe_id(struct efx_nic *efx, u32 filter_id)
+{
+	(void) efx;
+	WARN_ON_ONCE(filter_id == EFX_EF10_FILTER_ID_INVALID);
+	return filter_id & (HUNT_FILTER_TBL_ROWS - 1);
+}
+
+static unsigned int efx_ef10_filter_get_unsafe_pri(u32 filter_id)
+{
+	return filter_id / (HUNT_FILTER_TBL_ROWS * 2);
+}
+
+static u32 efx_ef10_make_filter_id(unsigned int pri, u16 idx)
+{
+	return pri * HUNT_FILTER_TBL_ROWS * 2 + idx;
 }
 
 static int efx_ef10_get_warm_boot_count(struct efx_nic *efx)
@@ -391,11 +409,38 @@ static void efx_ef10_read_licensed_features(struct efx_nic *efx)
 		       MC_CMD_LICENSING_V3_IN_OP_REPORT_LICENSE);
 	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_LICENSING_V3, inbuf, sizeof(inbuf),
 				outbuf, sizeof(outbuf), &outlen);
-	if (rc || (outlen < MC_CMD_LICENSING_V3_OUT_LEN))
-		return;
-
-	nic_data->licensed_features = MCDI_QWORD(outbuf,
+	if (!rc && (outlen >= MC_CMD_LICENSING_V3_OUT_LEN)) {
+		nic_data->licensed_features = MCDI_QWORD(outbuf,
 					 LICENSING_V3_OUT_LICENSED_FEATURES);
+		return;
+	}
+	if (rc != -MC_CMD_ERR_ENOSYS)
+		efx_mcdi_display_error(efx, MC_CMD_LICENSING_V3,
+				       MC_CMD_LICENSING_V3_IN_LEN, outbuf,
+				       outlen, rc);
+
+
+	/* LICENSING_V3 will fail on older firmwares, so fall back to
+	 * LICENSED_APP_STATE.
+	 */
+	BUILD_BUG_ON(MC_CMD_GET_LICENSED_APP_STATE_IN_LEN >
+		     MC_CMD_LICENSING_V3_IN_LEN);
+	BUILD_BUG_ON(MC_CMD_GET_LICENSED_APP_STATE_OUT_LEN >
+		     MC_CMD_LICENSING_V3_OUT_LEN);
+
+	MCDI_SET_DWORD(inbuf, GET_LICENSED_APP_STATE_IN_APP_ID,
+		       LICENSED_APP_ID_PTP);
+	rc = efx_mcdi_rpc(efx, MC_CMD_GET_LICENSED_APP_STATE, inbuf,
+			  MC_CMD_GET_LICENSED_APP_STATE_IN_LEN,
+			  outbuf, MC_CMD_GET_LICENSED_APP_STATE_OUT_LEN,
+			  &outlen);
+	if (rc || (outlen < MC_CMD_GET_LICENSED_APP_STATE_OUT_LEN))
+	    return;
+
+	if (MCDI_QWORD(outbuf, GET_LICENSED_APP_STATE_OUT_STATE) ==
+	    MC_CMD_GET_LICENSED_APP_STATE_OUT_LICENSED)
+		nic_data->licensed_features |=
+			(1 << LICENSED_V3_FEATURES_TX_TIMESTAMPS_LBN);
 }
 
 static int efx_ef10_get_sysclk_freq(struct efx_nic *efx)
@@ -791,9 +836,6 @@ static DEVICE_ATTR(primary_flag, 0444, efx_ef10_show_primary_flag,
 static int efx_ef10_probe(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_DEV_PORT)
-	struct net_device *net_dev = efx->net_dev;
-#endif
 	unsigned int bar_size = efx_ef10_bar_size(efx);
 	int i, rc;
 
@@ -850,6 +892,7 @@ static int efx_ef10_probe(struct efx_nic *efx)
 #endif
 
 	mutex_init(&nic_data->udp_tunnels_lock);
+	nic_data->udp_tunnels_dirty = true;
 
 	/* Reset (most) configuration for this function */
 	rc = efx_mcdi_reset(efx, RESET_TYPE_ALL);
@@ -933,9 +976,6 @@ static int efx_ef10_probe(struct efx_nic *efx)
 	if (rc < 0)
 		goto fail6;
 	efx->port_num = rc;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_DEV_PORT)
-	net_dev->dev_port = rc;
-#endif
 #ifdef EFX_NOT_UPSTREAM
 	rc = device_create_file(&efx->pci_dev->dev, &dev_attr_physical_port);
 	if (rc)
@@ -992,7 +1032,14 @@ static int efx_ef10_probe(struct efx_nic *efx)
         }
 #endif
 
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
+	if (efx_ptp_use_mac_tx_timestamps(efx))
+		efx_ptp_defer_probe_with_channel(efx);
+	else
+		efx_ptp_probe(efx, NULL);
+#else
 	efx_ptp_defer_probe_with_channel(efx);
+#endif
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_PHYSFN)
 #ifdef CONFIG_SFC_SRIOV
@@ -1564,6 +1611,7 @@ static void efx_ef10_remove(struct efx_nic *efx)
 	efx_mcdi_fini(efx);
 	efx_nic_free_buffer(efx, &nic_data->mcdi_buf);
 	kfree(nic_data);
+	efx->nic_data = NULL;
 }
 
 #if !defined(CONFIG_SFC_SRIOV)
@@ -1698,6 +1746,9 @@ static int efx_ef10_dimension_resources(struct efx_nic *efx)
 		if (rc == -ENOSPC)
 			netif_dbg(efx, probe, efx->net_dev,
 				  "out of PIO buffers; cannot allocate more\n");
+		else if (rc == -EPERM)
+			netif_dbg(efx, probe, efx->net_dev,
+				  "not permitted to allocate PIO buffers\n");
 		else if (rc)
 			netif_err(efx, probe, efx->net_dev,
 				  "failed to allocate PIO buffers (%d)\n", rc);
@@ -1860,8 +1911,8 @@ static void efx_ef10_set_tx_queue_csum(struct efx_tx_queue *tx_queue,
 				       unsigned int txq_type)
 {
 	if (tx_queue->csum_offload != txq_type) {
-		bool outer_csum = txq_type == EFX_TXQ_TYPE_CSUM_OFFLOAD;
-		bool inner_csum = txq_type == EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD;
+		bool outer_csum = txq_type & EFX_TXQ_TYPE_CSUM_OFFLOAD;
+		bool inner_csum = txq_type & EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD;
 		bool tso_v2 = ((tx_queue->tso_version == 2) &&
 			       !tx_queue->timestamping);
 		struct efx_tx_buffer *buffer =
@@ -1906,8 +1957,10 @@ efx_ef10_select_tx_queue(struct efx_channel *channel,
 #ifdef EFX_USE_OVERLAY_TX_CSUM
 unsigned int efx_ef10_select_tx_queue_type(struct sk_buff *skb)
 {
+	unsigned int txq_type = EFX_TXQ_TYPE_NO_OFFLOAD;
+
 	if (skb->ip_summed != CHECKSUM_PARTIAL)
-		return EFX_TXQ_TYPE_NO_OFFLOAD;
+		return txq_type;
 
 	if (skb->encapsulation &&
 	    skb_checksum_start_offset(skb) ==
@@ -1916,7 +1969,18 @@ unsigned int efx_ef10_select_tx_queue_type(struct sk_buff *skb)
 		 * encapsulated packets, so if the checksum is for the inner
 		 * packet, it must be one of them; no further checking required.
 		 */
-		return EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD;
+		txq_type = EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD;
+
+#if !defined (EFX_USE_KCOMPAT) || defined (EFX_HAVE_GSO_UDP_TUNNEL_CSUM)
+		/* Do we also need to offload the outer header checksum? */
+		if (skb_shinfo(skb)->gso_segs > 1 &&
+#if !defined (EFX_USE_KCOMPAT) || defined (EFX_HAVE_GSO_PARTIAL)
+		    !(skb_shinfo(skb)->gso_type & SKB_GSO_PARTIAL) &&
+#endif
+		    (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_TUNNEL_CSUM))
+			txq_type |= EFX_TXQ_TYPE_CSUM_OFFLOAD;
+#endif
+		return txq_type;
 	}
 
 	/* similarly, we only advertise features for IPv4 and IPv6 checksums,
@@ -1941,13 +2005,14 @@ efx_ef10_select_tx_queue_overlay(struct efx_channel *channel,
 				 struct sk_buff *skb)
 {
 	unsigned int txq_type = efx_ef10_select_tx_queue_type(skb);
-	/* map both no offload and inner checksum offload to second queue,
-	 * which will be reconfigured with option descriptors if needed.
+	/* map no offload and overlay offload to second queue, which
+	 * will be reconfigured with option descriptors if needed.
 	 */
 	static const unsigned int txq_map[] = {
 		[EFX_TXQ_TYPE_CSUM_OFFLOAD] = EFX_TXQ_TYPE_CSUM_OFFLOAD,
 		[EFX_TXQ_TYPE_NO_OFFLOAD] = EFX_TXQ_TYPE_NO_OFFLOAD,
 		[EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD] = EFX_TXQ_TYPE_NO_OFFLOAD,
+		[EFX_TXQ_TYPE_BOTH_CSUM_OFFLOAD] = EFX_TXQ_TYPE_NO_OFFLOAD,
 	};
 	struct efx_tx_queue *tx_queue = &channel->tx_queue[txq_map[txq_type]];
 
@@ -1961,7 +2026,8 @@ static int efx_ef10_init_nic(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	u32 old_datapath_caps = nic_data->datapath_caps;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_HW_ENC_FEATURES)
+#if !defined(EFX_USE_KCOMPAT) || (defined(EFX_HAVE_HW_ENC_FEATURES) && \
+				  defined(EFX_HAVE_NDO_FEATURES_CHECK))
 #ifdef EFX_USE_OVERLAY_TX_CSUM
 	netdev_features_t hw_enc_features;
 #endif
@@ -2000,8 +2066,14 @@ static int efx_ef10_init_nic(struct efx_nic *efx)
 				efx_ef10_free_piobufs(efx);
 		}
 
-		/* Log an error on failure, but this is non-fatal */
-		if (rc)
+		/* Log an error on failure, but this is non-fatal.
+		 * Permission errors are less important - we've presumably
+		 * had the PIO buffer licence removed.
+		 */
+		if (rc == -EPERM)
+			netif_dbg(efx, drv, efx->net_dev,
+				  "not permitted to restore PIO buffers\n");
+		else if (rc)
 			netif_err(efx, drv, efx->net_dev,
 				  "failed to restore PIO buffers (%d)\n", rc);
 		nic_data->must_restore_piobufs = false;
@@ -2010,7 +2082,8 @@ static int efx_ef10_init_nic(struct efx_nic *efx)
 	/* don't fail init if RSS setup doesn't work */
 	efx->type->rx_push_rss_config(efx, false, efx->rx_indir_table, NULL);
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_HW_ENC_FEATURES)
+#if !defined(EFX_USE_KCOMPAT) || (defined(EFX_HAVE_HW_ENC_FEATURES) && \
+				  defined(EFX_HAVE_NDO_FEATURES_CHECK))
 #ifdef EFX_USE_OVERLAY_TX_CSUM
 	hw_enc_features = 0;
 
@@ -2671,20 +2744,18 @@ static size_t efx_ef10_update_stats_vf(struct efx_nic *efx, u64 *full_stats,
 	return efx_ef10_update_stats_common(efx, full_stats, core_stats);
 }
 
-#define EFX_EF10_VF_STATS_POLL_MS	100
-
 static void efx_ef10_vf_schedule_stats_work(struct efx_nic *efx)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_CANCEL_DELAYED_WORK_SYNC)
 	schedule_delayed_work(&nic_data->vf_stats_work,
-			      msecs_to_jiffies(EFX_EF10_VF_STATS_POLL_MS));
+			      msecs_to_jiffies(efx->stats_period_ms));
 #else
 	spin_lock_bh(&efx->stats_lock);
 	if (nic_data->vf_stats_enabled)
 		queue_delayed_work(efx_workqueue, &nic_data->vf_stats_work,
-				   msecs_to_jiffies(EFX_EF10_VF_STATS_POLL_MS));
+				   msecs_to_jiffies(efx->stats_period_ms));
 	spin_unlock_bh(&efx->stats_lock);
 #endif
 }
@@ -3122,7 +3193,7 @@ static int efx_ef10_tx_tso_desc(struct efx_tx_queue *tx_queue,
 	return 0;
 }
 
-static void efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
+static int efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_INIT_TXQ_EXT_IN_LEN);
 	size_t entries = tx_queue->txd.buf.len / EFX_BUF_SIZE;
@@ -3135,9 +3206,9 @@ static void efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 	int rc;
 	int i;
 	bool outer_csum_offload =
-		tx_queue->csum_offload == EFX_TXQ_TYPE_CSUM_OFFLOAD;
+		tx_queue->csum_offload & EFX_TXQ_TYPE_CSUM_OFFLOAD;
 	bool inner_csum_offload =
-		tx_queue->csum_offload == EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD;
+		tx_queue->csum_offload & EFX_TXQ_TYPE_INNER_CSUM_OFFLOAD;
 
 	BUILD_BUG_ON(MC_CMD_INIT_TXQ_OUT_LEN != 0);
 	EFX_BUG_ON_PARANOID(inner_csum_offload &&
@@ -3290,12 +3361,14 @@ static void efx_ef10_tx_init(struct efx_tx_queue *tx_queue)
 	wmb();
 	efx_ef10_push_tx_desc(tx_queue, txd);
 
-	return;
+	return rc;
 
 fail:
-	if (rc != -ENETDOWN)
+	if (rc != -ENETDOWN && rc != -EAGAIN)
 		netdev_WARN(efx->net_dev, "failed to initialise TXQ %d\n",
 			    tx_queue->queue);
+
+	return rc;
 }
 
 static void efx_ef10_tx_fini(struct efx_tx_queue *tx_queue, bool hw_unavailable)
@@ -3505,8 +3578,10 @@ static void efx_ef10_set_rss_flags(struct efx_nic *efx, u32 context)
 	flags |= RSS_MODE_HASH_PORTS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV4_RSS_MODE_LBN;
 	flags |= RSS_MODE_HASH_PORTS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV6_RSS_MODE_LBN;
 	MCDI_SET_DWORD(inbuf, RSS_CONTEXT_SET_FLAGS_IN_FLAGS, flags);
-	efx_mcdi_rpc(efx, MC_CMD_RSS_CONTEXT_SET_FLAGS, inbuf, sizeof(inbuf),
-		     NULL, 0, NULL);
+	if (!efx_mcdi_rpc(efx, MC_CMD_RSS_CONTEXT_SET_FLAGS, inbuf, sizeof(inbuf),
+			  NULL, 0, NULL))
+		/* Succeeded, so UDP 4-tuple is now enabled */
+		efx->rx_hash_udp_4tuple = true;
 }
 
 static int efx_ef10_alloc_rss_context(struct efx_nic *efx, u32 *context,
@@ -3867,6 +3942,9 @@ static void print_filter(char *s, size_t l, struct efx_filter_spec *spec)
 	if (spec->match_flags & EFX_FILTER_MATCH_ENCAP_TYPE)
 		p += snprintf(s + p, l - p,
 			      ",encap=%d", spec->encap_type);
+	if (spec->match_flags & EFX_FILTER_MATCH_ENCAP_TNI)
+		p += snprintf(s + p, l - p,
+			      ",tni=0x%x", spec->tni);
 	if (spec->match_flags & EFX_FILTER_MATCH_LOC_MAC)
 		p += snprintf(s + p, l - p,
 			      ",lmac=%02x:%02x:%02x:%02x:%02x:%02x",
@@ -3879,6 +3957,12 @@ static void print_filter(char *s, size_t l, struct efx_filter_spec *spec)
 			      spec->rem_mac[0], spec->rem_mac[1],
 			      spec->rem_mac[2], spec->rem_mac[3],
 			      spec->rem_mac[4], spec->rem_mac[5]);
+	if (spec->match_flags & EFX_FILTER_MATCH_OUTER_LOC_MAC)
+		p += snprintf(s + p, l - p,
+			      ",olmac=%02x:%02x:%02x:%02x:%02x:%02x",
+			      spec->outer_loc_mac[0], spec->outer_loc_mac[1],
+			      spec->outer_loc_mac[2], spec->outer_loc_mac[3],
+			      spec->outer_loc_mac[4], spec->outer_loc_mac[5]);
 	if (spec->match_flags & EFX_FILTER_MATCH_ETHER_TYPE)
 		p += snprintf(s + p, l - p,
 			      ",ether=0x%x", spec->ether_type);
@@ -4106,7 +4190,7 @@ static struct efx_debugfs_parameter netdev_debugfs[] = {
 };
 #endif /* CONFIG_SFC_DEBUGFS */
 
-static void efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
+static int efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
 {
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_INIT_RXQ_EXT_IN_LEN);
 	struct efx_channel *channel = efx_rx_queue_channel(rx_queue);
@@ -4154,9 +4238,10 @@ static void efx_ef10_rx_init(struct efx_rx_queue *rx_queue)
 
 	rc = efx_mcdi_rpc(efx, MC_CMD_INIT_RXQ, inbuf,
 			  MC_CMD_INIT_RXQ_EXT_IN_LEN, NULL, 0, NULL);
-	if (rc && (rc != -ENETDOWN))
+	if (rc && rc != -ENETDOWN && rc != -EAGAIN)
 		netdev_WARN(efx->net_dev, "failed to initialise RXQ %d\n",
 			    efx_rx_queue_index(rx_queue));
+	return rc;
 }
 
 
@@ -4470,7 +4555,7 @@ efx_ef10_handle_rx_bad_lbits(struct efx_rx_queue *rx_queue,
 		   dropped, actual, expected);
 
 	atomic_inc(&efx->errors.missing_event);
-	efx_schedule_reset(efx, RESET_TYPE_DISABLE);
+	efx_schedule_reset(efx, RESET_TYPE_DATAPATH);
 }
 
 /* partially received RX was aborted. clean up. */
@@ -4502,13 +4587,17 @@ efx_ef10_handle_rx_event_errors(struct efx_channel *channel,
 				const efx_qword_t *event)
 {
 	struct efx_nic *efx = channel->efx;
+	bool handled = false;
 
-	if (unlikely(EFX_QWORD_FIELD(*event, ESF_DZ_RX_ECRC_ERR)) &&
-	    !efx->forward_fcs) {
-		if (!efx->loopback_selftest)
-			channel->n_rx_eth_crc_err += n_packets;
-		return EFX_RX_PKT_DISCARD;
-	} else if (unlikely(EFX_QWORD_FIELD(*event, ESF_DZ_RX_IPCKSUM_ERR))) {
+	if (EFX_QWORD_FIELD(*event, ESF_DZ_RX_ECRC_ERR)) {
+		if (!efx->forward_fcs) {
+			if (!efx->loopback_selftest)
+				channel->n_rx_eth_crc_err += n_packets;
+			return EFX_RX_PKT_DISCARD;
+		}
+		handled = true;
+	}
+	if (EFX_QWORD_FIELD(*event, ESF_DZ_RX_IPCKSUM_ERR)) {
 		if (unlikely(rx_encap_hdr != ESE_EZ_ENCAP_HDR_VXLAN &&
 			     rx_l3_class != ESE_DZ_L3_CLASS_IP4 &&
 			     rx_l3_class != ESE_DZ_L3_CLASS_IP4_FRAG &&
@@ -4523,8 +4612,8 @@ efx_ef10_handle_rx_event_errors(struct efx_channel *channel,
 				&channel->n_rx_outer_ip_hdr_chksum_err :
 				&channel->n_rx_ip_hdr_chksum_err) += n_packets;
 		return 0;
-	} else if (unlikely(EFX_QWORD_FIELD(*event,
-					    ESF_DZ_RX_TCPUDP_CKSUM_ERR))) {
+	}
+	if (EFX_QWORD_FIELD(*event, ESF_DZ_RX_TCPUDP_CKSUM_ERR)) {
 		if (unlikely(rx_encap_hdr != ESE_EZ_ENCAP_HDR_VXLAN &&
 			     ((rx_l3_class != ESE_DZ_L3_CLASS_IP4 &&
 			       rx_l3_class != ESE_DZ_L3_CLASS_IP6) ||
@@ -4539,8 +4628,8 @@ efx_ef10_handle_rx_event_errors(struct efx_channel *channel,
 				&channel->n_rx_outer_tcp_udp_chksum_err :
 				&channel->n_rx_tcp_udp_chksum_err) += n_packets;
 		return 0;
-	} else if (unlikely(EFX_QWORD_FIELD(*event,
-					    ESF_EZ_RX_IP_INNER_CHKSUM_ERR))) {
+	}
+	if (EFX_QWORD_FIELD(*event, ESF_EZ_RX_IP_INNER_CHKSUM_ERR)) {
 		if (unlikely(!rx_encap_hdr))
 			netdev_WARN(efx->net_dev,
 				    "invalid encapsulation type for RX_IP_INNER_CHKSUM_ERR: event="
@@ -4557,8 +4646,8 @@ efx_ef10_handle_rx_event_errors(struct efx_channel *channel,
 		if (!efx->loopback_selftest)
 			channel->n_rx_inner_ip_hdr_chksum_err += n_packets;
 		return 0;
-	} else if (unlikely(EFX_QWORD_FIELD(*event,
-					    ESF_EZ_RX_TCP_UDP_INNER_CHKSUM_ERR))) {
+	}
+	if (EFX_QWORD_FIELD(*event, ESF_EZ_RX_TCP_UDP_INNER_CHKSUM_ERR)) {
 		if (unlikely(!rx_encap_hdr))
 			netdev_WARN(efx->net_dev, 
 				    "invalid encapsulation type for RX_TCP_UDP_INNER_CHKSUM_ERR: event="
@@ -4577,7 +4666,7 @@ efx_ef10_handle_rx_event_errors(struct efx_channel *channel,
 		return 0;
 	}
 
-	WARN_ON(1);
+	WARN_ON(!handled); /* No error bits were recognised */
 	return 0;
 }
 
@@ -4774,11 +4863,24 @@ efx_ef10_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 		return;
 	}
 
-	/* Transmit timestamps are only availkable for 8XXX series. They result
-	 * in three events per packet. These occur in order, and are:
-	 *  - the normal completion event
+	/* Transmit timestamps are only available for 8XXX series. They result
+	 * in up to three events per packet. These occur in order, and are:
+	 *  - the normal completion event (may be omitted)
 	 *  - the low part of the timestamp
 	 *  - the high part of the timestamp
+	 *
+	 * It's possible for multiple completion events to appear before the
+	 * corresponding timestamps. So we can for example get:
+	 *  COMP N
+	 *  COMP N+1
+	 *  TS_LO N
+	 *  TS_HI N
+	 *  TS_LO N+1
+	 *  TS_HI N+1
+	 *
+	 * In addition it's also possible for the adjacent completions to be
+	 * merged, so we may not see COMP N above. As such, the completion
+	 * events are not very useful here.
 	 *
 	 * Each part of the timestamp is itself split across two 16 bit
 	 * fields in the event.
@@ -4787,17 +4889,7 @@ efx_ef10_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 
 	switch (tx_ev_type) {
 	case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
-		/* In case of Queue flush or FLR, we might have received
-		 * the previous TX completion event but not the Timestamp
-		 * events.
-		 */
-		if (tx_queue->completed_desc_ptr != tx_queue->ptr_mask)
-			efx_xmit_done(tx_queue, tx_queue->completed_desc_ptr);
-
-		tx_ev_desc_ptr = EFX_QWORD_FIELD(*event,
-						 ESF_DZ_TX_DESCR_INDX);
-		tx_queue->completed_desc_ptr =
-					tx_ev_desc_ptr & tx_queue->ptr_mask;
+		/* Ignore this event - see above. */
 		break;
 
 	case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
@@ -4808,9 +4900,7 @@ efx_ef10_handle_tx_event(struct efx_channel *channel, efx_qword_t *event)
 	case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI:
 		ts_part = efx_ef10_extract_event_ts(event);
 		tx_queue->completed_timestamp_major = ts_part;
-
-		efx_xmit_done(tx_queue, tx_queue->completed_desc_ptr);
-		tx_queue->completed_desc_ptr = tx_queue->ptr_mask;
+		efx_xmit_done_single(tx_queue);
 		break;
 
 	default:
@@ -5246,19 +5336,17 @@ efx_ef10_filter_push_prep_set_match_fields(struct efx_nic *efx,
 			    EFX_FILTER_MATCH_ENCAP_TNI) {
 				match_fields |= 1 <<
 					MC_CMD_FILTER_OP_EXT_IN_MATCH_VNI_OR_VSID_LBN;
-				MCDI_POPULATE_DWORD_1(inbuf,
-					FILTER_OP_EXT_IN_VNI_OR_VSID,
-					FILTER_OP_EXT_IN_VNI_VALUE,
-					*(__be32 *)&tni);
 			}
 			/* We always need to set the type field, even if we're
 			 * not matching on the TNI.
 			 */
-			MCDI_POPULATE_DWORD_1(inbuf,
+			MCDI_POPULATE_DWORD_2(inbuf,
 				FILTER_OP_EXT_IN_VNI_OR_VSID,
 				FILTER_OP_EXT_IN_VNI_TYPE,
 				vxlan ? MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_VXLAN :
-					MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_GENEVE);
+					MC_CMD_FILTER_OP_EXT_IN_VNI_TYPE_GENEVE,
+				FILTER_OP_EXT_IN_VNI_VALUE,
+				*(__be32 *)&tni);
 			break;
 		case EFX_ENCAP_TYPE_NVGRE:
 			COPY_VALUE(false, ether_type, ETHER_TYPE);
@@ -5279,6 +5367,7 @@ efx_ef10_filter_push_prep_set_match_fields(struct efx_nic *efx,
 		default:
 			WARN_ON(1);
 		}
+		COPY_FIELD(false, OUTER_LOC_MAC, outer_loc_mac, DST_MAC);
 
 		uc_match =
 		  MC_CMD_FILTER_OP_EXT_IN_MATCH_IFRM_UNKNOWN_UCAST_DST_LBN;
@@ -5299,6 +5388,9 @@ efx_ef10_filter_push_prep_set_match_fields(struct efx_nic *efx,
 	/* VLAN is always outer */
 	COPY_FIELD(false, INNER_VID, inner_vid, INNER_VLAN);
 	COPY_FIELD(false, OUTER_VID, outer_vid, OUTER_VLAN);
+	/* outer MAC only applies if encap */
+	if (encap_type)
+		COPY_FIELD(false, OUTER_LOC_MAC, outer_loc_mac, DST_MAC);
 	/* everything else is inner or outer based on encap type */
 	COPY_FIELD(encap_type, REM_HOST, rem_host, SRC_IP);
 	COPY_FIELD(encap_type, LOC_HOST, loc_host, DST_IP);
@@ -5437,6 +5529,12 @@ static u32 efx_ef10_filter_mcdi_flags_from_spec(const struct efx_filter_spec *sp
 		mcdi_flags |=
 			(1 << MC_CMD_FILTER_OP_EXT_IN_MATCH_ETHER_TYPE_LBN);
 		mcdi_flags |= (1 << MC_CMD_FILTER_OP_EXT_IN_MATCH_IP_PROTO_LBN);
+
+		if (match_flags & EFX_FILTER_MATCH_OUTER_LOC_MAC) {
+			match_flags &= ~EFX_FILTER_MATCH_OUTER_LOC_MAC;
+			mcdi_flags |= (1 <<
+				MC_CMD_FILTER_OP_EXT_IN_MATCH_DST_MAC_LBN);
+		}
 
 		uc_match = MC_CMD_FILTER_OP_EXT_IN_MATCH_IFRM_UNKNOWN_MCAST_DST_LBN;
 		mc_match = MC_CMD_FILTER_OP_EXT_IN_MATCH_IFRM_UNKNOWN_UCAST_DST_LBN;
@@ -5726,7 +5824,7 @@ found:
 
 	/* If successful, return the inserted filter ID */
 	if (rc == 0)
-		rc = match_pri * HUNT_FILTER_TBL_ROWS + ins_index;
+		rc = efx_ef10_make_filter_id(match_pri, ins_index);
 
 	wake_up_all(&table->waitq);
 out_unlock:
@@ -5763,7 +5861,7 @@ static int efx_ef10_filter_remove_internal(struct efx_nic *efx,
 					   unsigned int priority_mask,
 					   u32 filter_id, bool by_index)
 {
-	unsigned int filter_idx = filter_id % HUNT_FILTER_TBL_ROWS;
+	unsigned int filter_idx = efx_ef10_filter_get_unsafe_id(efx, filter_id);
 	struct efx_ef10_filter_table *table = efx->filter_state;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_FILTER_OP_IN_LEN);
 	struct efx_filter_spec *spec;
@@ -5788,7 +5886,7 @@ static int efx_ef10_filter_remove_internal(struct efx_nic *efx,
 	if (!spec ||
 	    (!by_index &&
 	     efx_ef10_filter_pri(table, spec) !=
-	     filter_id / HUNT_FILTER_TBL_ROWS)) {
+	     efx_ef10_filter_get_unsafe_pri(filter_id))) {
 		rc = -ENOENT;
 		goto out_unlock;
 	}
@@ -5880,12 +5978,6 @@ static int efx_ef10_filter_remove_safe_locked(struct efx_nic *efx,
 }
 #endif
 
-static u32 efx_ef10_filter_get_unsafe_id(struct efx_nic *efx, u32 filter_id)
-{
-	EFX_BUG_ON_PARANOID(filter_id == EFX_EF10_FILTER_ID_INVALID);
-	return filter_id % HUNT_FILTER_TBL_ROWS;
-}
-
 static int efx_ef10_filter_remove_unsafe(struct efx_nic *efx,
 					 enum efx_filter_priority priority,
 					 u32 filter_id)
@@ -5898,7 +5990,7 @@ static int efx_ef10_filter_get_safe(struct efx_nic *efx,
 				    enum efx_filter_priority priority,
 				    u32 filter_id, struct efx_filter_spec *spec)
 {
-	unsigned int filter_idx = filter_id % HUNT_FILTER_TBL_ROWS;
+	unsigned int filter_idx = efx_ef10_filter_get_unsafe_id(efx, filter_id);
 	struct efx_ef10_filter_table *table;
 	const struct efx_filter_spec *saved_spec;
 	int rc;
@@ -5911,7 +6003,7 @@ static int efx_ef10_filter_get_safe(struct efx_nic *efx,
 	saved_spec = efx_ef10_filter_entry_spec(table, filter_idx);
 	if (saved_spec && saved_spec->priority == priority &&
 	    efx_ef10_filter_pri(table, saved_spec) ==
-	    filter_id / HUNT_FILTER_TBL_ROWS) {
+	    efx_ef10_filter_get_unsafe_pri(filter_id)) {
 		*spec = *saved_spec;
 		rc = 0;
 	} else {
@@ -5949,7 +6041,7 @@ static int efx_ef10_filter_redirect(struct efx_nic *efx, u32 filter_id,
 {
 	struct efx_ef10_filter_table *table;
 	struct efx_filter_spec *spec, new_spec;
-	unsigned int filter_idx = filter_id % HUNT_FILTER_TBL_ROWS;
+	unsigned int filter_idx = efx_ef10_filter_get_unsafe_id(efx, filter_id);
 	DEFINE_WAIT(wait);
 	int rc;
 
@@ -6028,7 +6120,7 @@ static u32 efx_ef10_filter_get_rx_id_limit(struct efx_nic *efx)
 {
 	struct efx_ef10_filter_table *table = efx->filter_state;
 
-	return table->rx_match_count * HUNT_FILTER_TBL_ROWS;
+	return table->rx_match_count * HUNT_FILTER_TBL_ROWS * 2;
 }
 
 static s32 efx_ef10_filter_get_rx_ids(struct efx_nic *efx,
@@ -6048,8 +6140,9 @@ static s32 efx_ef10_filter_get_rx_ids(struct efx_nic *efx,
 				count = -EMSGSIZE;
 				break;
 			}
-			buf[count++] = (efx_ef10_filter_pri(table, spec) *
-					HUNT_FILTER_TBL_ROWS +
+			buf[count++] =
+				efx_ef10_make_filter_id(
+					efx_ef10_filter_pri(table, spec),
 					filter_idx);
 		}
 	}
@@ -6318,10 +6411,11 @@ static int efx_ef10_filter_match_flags_from_mcdi(bool encap, u32 mcdi_flags)
 			~(1 << MC_CMD_FILTER_OP_EXT_IN_MATCH_IP_PROTO_LBN);
 		mcdi_flags &=
 			~(1 << MC_CMD_FILTER_OP_EXT_IN_MATCH_ETHER_TYPE_LBN);
-		/* VNI/VSID and VLAN tags refer to the outer packet */
+		/* VNI/VSID, VLAN and outer MAC refer to the outer packet */
 		MAP_FLAG(ENCAP_TNI, VNI_OR_VSID);
 		MAP_FLAG(INNER_VID, INNER_VLAN);
 		MAP_FLAG(OUTER_VID, OUTER_VLAN);
+		MAP_FLAG(OUTER_LOC_MAC, DST_MAC);
 		/* everything else refers to the inner packet */
 		MAP_FLAG(LOC_MAC_IG, IFRM_UNKNOWN_UCAST_DST);
 		MAP_FLAG(LOC_MAC_IG, IFRM_UNKNOWN_MCAST_DST);
@@ -6367,12 +6461,19 @@ static void efx_ef10_filter_cleanup_vlans(struct efx_nic *efx)
 		efx_ef10_filter_del_vlan_internal(efx, vlan);
 }
 
-static bool efx_ef10_filter_match_supported(struct efx_ef10_filter_table *table,
+static bool efx_ef10_filter_match_supported(struct efx_nic *efx,
 					    bool encap,
-					    enum efx_filter_match_flags match_flags)
+					    unsigned int match_flags)
 {
+	struct efx_ef10_filter_table *table = efx->filter_state;
 	unsigned int match_pri;
 	int mf;
+
+	if (!table) {
+		netif_warn(efx, drv, efx->net_dev,
+			   "filter match support check before probe\n");
+		return false;
+	}
 
 	for (match_pri = 0;
 	     match_pri < table->rx_match_count;
@@ -6478,32 +6579,6 @@ static int efx_ef10_filter_table_probe(struct efx_nic *efx)
 	if (rc)
 		goto fail;
 
-	if (!efx_ef10_filter_match_supported(table, false,
-					     EFX_FILTER_MATCH_FLAGS_RFS)) {
-		netif_info(efx, probe, efx->net_dev,
-			   "RFS filters are not supported in this firmware variant\n");
-		efx->net_dev->features &= ~NETIF_F_NTUPLE;
-	}
-	if ((efx_supported_features(efx) & NETIF_F_HW_VLAN_CTAG_FILTER) &&
-	    !(efx_ef10_filter_match_supported(table, false,
-		(EFX_FILTER_MATCH_OUTER_VID | EFX_FILTER_MATCH_LOC_MAC)) &&
-	      efx_ef10_filter_match_supported(table, false,
-		(EFX_FILTER_MATCH_OUTER_VID | EFX_FILTER_MATCH_LOC_MAC_IG)))) {
-
-		netif_info(efx, probe, net_dev,
-			   "VLAN filters are not supported in this firmware variant\n");
-		net_dev->features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
-		efx->fixed_features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NETDEV_HW_FEATURES)
-		net_dev->hw_features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
-#elif defined(EFX_HAVE_NETDEV_EXTENDED_HW_FEATURES)
-		netdev_extended(net_dev)->hw_features &=
-			~NETIF_F_HW_VLAN_CTAG_FILTER;
-#else
-		efx->hw_features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
-#endif
-	}
-
 	table->entry = vzalloc(HUNT_FILTER_TBL_ROWS * sizeof(*table->entry));
 	if (!table->entry) {
 		rc = -ENOMEM;
@@ -6528,6 +6603,33 @@ static int efx_ef10_filter_table_probe(struct efx_nic *efx)
 	efx_extend_debugfs_port(efx, efx, 0, filter_debugfs);
 	efx_extend_debugfs_port(efx, efx->net_dev, 0, netdev_debugfs);
 #endif
+
+	if (!efx_ef10_filter_match_supported(efx, false,
+					     EFX_FILTER_MATCH_FLAGS_RFS)) {
+		netif_info(efx, probe, efx->net_dev,
+			   "RFS filters are not supported in this firmware variant\n");
+		efx->net_dev->features &= ~NETIF_F_NTUPLE;
+	}
+	if ((efx_supported_features(efx) & NETIF_F_HW_VLAN_CTAG_FILTER) &&
+	    !(efx_ef10_filter_match_supported(efx, false,
+		(EFX_FILTER_MATCH_OUTER_VID | EFX_FILTER_MATCH_LOC_MAC)) &&
+	      efx_ef10_filter_match_supported(efx, false,
+		(EFX_FILTER_MATCH_OUTER_VID | EFX_FILTER_MATCH_LOC_MAC_IG)))) {
+
+		netif_info(efx, probe, net_dev,
+			   "VLAN filters are not supported in this firmware variant\n");
+		net_dev->features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
+		efx->fixed_features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NETDEV_HW_FEATURES)
+		net_dev->hw_features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
+#elif defined(EFX_HAVE_NETDEV_EXTENDED_HW_FEATURES)
+		netdev_extended(net_dev)->hw_features &=
+			~NETIF_F_HW_VLAN_CTAG_FILTER;
+#else
+		efx->hw_features &= ~NETIF_F_HW_VLAN_CTAG_FILTER;
+#endif
+	}
+
 	return 0;
 
 fail_add_vlan:
@@ -6792,6 +6894,8 @@ static void efx_ef10_filter_mc_addr_list(struct efx_nic *efx)
 
 	WARN_ON(!mutex_is_locked(&efx->mac_lock));
 
+	table->mc_overflow = false;
+
 #ifdef EFX_NOT_UPSTREAM
 	if (table->kernel_blocked[EFX_DL_FILTER_BLOCK_KERNEL_MCAST]) {
 		table->dev_mc_count = 0;
@@ -6805,6 +6909,7 @@ static void efx_ef10_filter_mc_addr_list(struct efx_nic *efx)
 	netdev_for_each_mc_addr(mc, net_dev) {
 		if (i >= EFX_EF10_FILTER_DEV_MC_MAX) {
 			table->mc_promisc = true;
+			table->mc_overflow = true;
 			break;
 		}
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_DEVICE_MC)
@@ -7189,12 +7294,15 @@ static void efx_ef10_filter_vlan_sync_rx_mode(struct efx_nic *efx,
 			}
 		} else {
 			/* If we failed to insert promiscuous filters, don't
-			 * rollback.  Regardless, also insert the mc_list
+			 * rollback.  Regardless, also insert the mc_list,
+			 * unless it's incomplete due to overflow
 			 */
 			efx_ef10_filter_insert_def(efx, vlan,
 						   EFX_ENCAP_TYPE_NONE,
 						   true, false);
-			efx_ef10_filter_insert_addr_list(efx, vlan, true, false);
+			if (!table->mc_overflow)
+				efx_ef10_filter_insert_addr_list(efx, vlan,
+								 true, false);
 		}
 	} else {
 		/* If any filters failed to insert, rollback and fall back to
@@ -7645,28 +7753,33 @@ static int efx_ef10_mac_reconfigure(struct efx_nic *efx, bool mtu_only)
 	return rc;
 }
 
-/* Note that all three timeouts here are identical. This is because there is
- * only a single thread on the MC, so even the shortest operation can be
- * blocked for some time by an operation requested by a different function.
+/* On older firmwares there is only a single thread on the MC, so even
+ * the shortest operation can be blocked for some time by an operation
+ * requested by a different function.
  * See bug61269 for further discussion.
  *
- * We retain the separate timeout definitions and the mcdi_rpc_timeout()
- * function for when the MC supports multithreaded MCDI commands.
+ * On newer firmwares that support multithreaded MCDI commands we extend
+ * the timeout for commands we know can run longer.
  */
 #define MCDI_EF10_RPC_TIMEOUT       (10 * HZ)
-#define MCDI_EF10_RPC_LONG_TIMEOUT  (10 * HZ)
+#define MCDI_EF10_RPC_LONG_TIMEOUT  (60 * HZ)
 #define MCDI_EF10_RPC_POST_RST_TIME (10 * HZ)
 
 static unsigned int efx_ef10_mcdi_rpc_timeout(struct efx_nic *efx,
 					      unsigned int cmd)
 {
+	struct efx_ef10_nic_data *nic_data = efx->nic_data;
+
 	switch (cmd) {
 	case MC_CMD_POLL_BIST:
 	case MC_CMD_NVRAM_ERASE:
-	case MC_CMD_DRV_ATTACH:
-	case MC_CMD_GET_PHY_CFG:
+	case MC_CMD_LICENSING_V3:
+	case MC_CMD_NVRAM_UPDATE_FINISH:
 		/* Potentially longer running commands. */
-		return MCDI_EF10_RPC_LONG_TIMEOUT;
+		if (nic_data->datapath_caps2 &
+		    (1 << MC_CMD_GET_CAPABILITIES_V3_OUT_NVRAM_UPDATE_REPORT_VERIFY_RESULT_LBN))
+			return MCDI_EF10_RPC_LONG_TIMEOUT;
+		/* fall through */
 	default:
 		/* Some things take longer shortly after a reset. */
 		if (time_before(jiffies,
@@ -7674,6 +7787,12 @@ static unsigned int efx_ef10_mcdi_rpc_timeout(struct efx_nic *efx,
 			return MCDI_EF10_RPC_POST_RST_TIME;
 		return MCDI_EF10_RPC_TIMEOUT;
 	}
+}
+
+static unsigned int efx_ef10_mcdi_acquire_timeout(struct efx_nic *efx)
+{
+	/* The longest running command we know */
+	return efx_ef10_mcdi_rpc_timeout(efx, MC_CMD_LICENSING_V3);
 }
 
 static int efx_ef10_start_bist(struct efx_nic *efx, u32 bist_type)
@@ -7783,7 +7902,8 @@ static const struct efx_ef10_nvram_type_info efx_ef10_nvram_types[] = {
 	{ NVRAM_PARTITION_TYPE_FPGA_BACKUP,	   0,    0, "sfc_fpgadiag" },
 	{ NVRAM_PARTITION_TYPE_FC_FIRMWARE,	   0,    0, "sfc_fcfw" },
 	{ NVRAM_PARTITION_TYPE_MUM_FIRMWARE,	   0,    0, "sfc_mumfw" },
-	{ NVRAM_PARTITION_TYPE_EXPANSION_UEFI,	   0,    0, "sfc_uefi" }
+	{ NVRAM_PARTITION_TYPE_EXPANSION_UEFI,	   0,    0, "sfc_uefi" },
+	{ NVRAM_PARTITION_TYPE_STATUS,		   0,    0, "sfc_status" }
 };
 
 static int efx_ef10_mtd_probe_partition(struct efx_nic *efx,
@@ -8097,7 +8217,7 @@ static int efx_ef10_ptp_set_ts_config(struct efx_nic *efx,
 	case HWTSTAMP_FILTER_PTP_V2_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_DELAY_REQ:
 		init->rx_filter = HWTSTAMP_FILTER_ALL;
-		rc = efx_ptp_change_mode(efx, true, 0);
+		rc = efx_ptp_change_mode(efx, true, MC_CMD_PTP_MODE_V2);
 #else
 	/* We need to know which PTP protocol to match in efx_ptp_rx() */
 	case HWTSTAMP_FILTER_PTP_V1_L4_EVENT:
@@ -8106,15 +8226,10 @@ static int efx_ef10_ptp_set_ts_config(struct efx_nic *efx,
 	case HWTSTAMP_FILTER_PTP_V2_L4_EVENT:
 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
 	case HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ:
-		if (init->rx_filter >= HWTSTAMP_FILTER_PTP_V2_L4_EVENT) {
-			init->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
-			rc = efx_ptp_change_mode(efx, true,
-						 MC_CMD_PTP_MODE_V2_ENHANCED);
-		} else {
-			init->rx_filter = HWTSTAMP_FILTER_PTP_V1_L4_EVENT;
-			rc = efx_ptp_change_mode(efx, true,
-						 MC_CMD_PTP_MODE_V1);
-		}
+		init->rx_filter = HWTSTAMP_FILTER_PTP_V2_L4_EVENT;
+		/* this will still work for PTP v1 */
+		rc = efx_ptp_change_mode(efx, true,
+					 MC_CMD_PTP_MODE_V2_ENHANCED);
 #endif
 		if (!rc)
 			rc = efx_ef10_ptp_set_ts_sync_events(efx, true, false);
@@ -8128,8 +8243,8 @@ static int efx_ef10_ptp_set_ts_config(struct efx_nic *efx,
 #endif
 
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
-static int efx_ef10_sriov_get_phys_port_id(struct efx_nic *efx,
-					   struct netdev_phys_item_id *ppid)
+static int efx_ef10_get_phys_port_id(struct efx_nic *efx,
+				     struct netdev_phys_item_id *ppid)
 {
 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 
@@ -8318,7 +8433,8 @@ static int efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 	/* Make sure all TX are stopped while we add to the table, else we
 	 * might race against an efx_features_check().
 	 */
-	efx_device_detach_sync(efx);
+	if (!nic_data->udp_tunnels_dirty)
+		efx_device_detach_sync(efx);
 
 	match = __efx_ef10_udp_tnl_lookup_port(efx, tnl.port);
 	if (match != NULL) {
@@ -8328,7 +8444,7 @@ static int efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 			match->count++;
 			/* No need to cause an MCDI update */
 			rc = 0;
-			goto unlock_out;
+			goto restart;
 		}
 		efx_get_udp_tunnel_type_name(match->type,
 					     typebuf, sizeof(typebuf));
@@ -8336,14 +8452,17 @@ static int efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 			  "UDP port %d is already in use by %s\n",
 			  ntohs(tnl.port), typebuf);
 		rc = -EEXIST;
-		goto unlock_out;
+		goto restart;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(nic_data->udp_tunnels); ++i)
 		if (!nic_data->udp_tunnels[i].count) {
 			nic_data->udp_tunnels[i] = tnl;
 			nic_data->udp_tunnels[i].count = 1;
-			rc = efx_ef10_set_udp_tnl_ports(efx, false);
+			if (!nic_data->udp_tunnels_dirty)
+				rc = efx_ef10_set_udp_tnl_ports(efx, false);
+			else
+				rc = 0;
 			goto unlock_out;
 		}
 
@@ -8353,6 +8472,12 @@ static int efx_ef10_udp_tnl_add_port(struct efx_nic *efx,
 
 	rc = -ENOMEM;
 
+restart:
+	if (!nic_data->udp_tunnels_dirty)
+		/* We didn't do the MCDI, so we won't get a reset, so we
+		 * need to reattach ourselves
+		 */
+		netif_device_attach(efx->net_dev);
 unlock_out:
 	mutex_unlock(&nic_data->udp_tunnels_lock);
 	return rc;
@@ -8400,7 +8525,8 @@ static int efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 	/* Make sure all TX are stopped while we remove from the table, else we
 	 * might race against an efx_features_check().
 	 */
-	efx_device_detach_sync(efx);
+	if (!nic_data->udp_tunnels_dirty)
+		efx_device_detach_sync(efx);
 
 	match = __efx_ef10_udp_tnl_lookup_port(efx, tnl.port);
 	if (match != NULL) {
@@ -8411,9 +8537,12 @@ static int efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 					  "UDP tunnel port %d remains active\n",
 					  ntohs(tnl.port));
 				rc = 0;
-				goto out_unlock;
+				goto restart;
 			}
-			rc = efx_ef10_set_udp_tnl_ports(efx, false);
+			if (!nic_data->udp_tunnels_dirty)
+				rc = efx_ef10_set_udp_tnl_ports(efx, false);
+			else
+				rc = 0;
 			goto out_unlock;
 		}
 		efx_get_udp_tunnel_type_name(match->type,
@@ -8424,6 +8553,12 @@ static int efx_ef10_udp_tnl_del_port(struct efx_nic *efx,
 	}
 	rc = -ENOENT;
 
+restart:
+	if (!nic_data->udp_tunnels_dirty)
+		/* We didn't do the MCDI, so we won't get a reset, so we
+		 * need to reattach ourselves
+		 */
+		netif_device_attach(efx->net_dev);
 out_unlock:
 	mutex_unlock(&nic_data->udp_tunnels_lock);
 	return rc;
@@ -8468,6 +8603,7 @@ const struct efx_nic_type efx_hunt_a0_vf_nic_type = {
 	.start_stats = efx_ef10_start_stats_vf,
 	.pull_stats = efx_ef10_pull_stats_vf,
 	.stop_stats = efx_ef10_stop_stats_vf,
+	.update_stats_period = efx_ef10_vf_schedule_stats_work,
 	.set_id_led = efx_mcdi_set_id_led,
 	.push_irq_moderation = efx_ef10_push_irq_moderation,
 	.calc_mac_mtu = efx_nic_calc_mac_mtu,
@@ -8510,6 +8646,7 @@ const struct efx_nic_type efx_hunt_a0_vf_nic_type = {
 	.filter_table_probe = efx_ef10_filter_table_probe,
 	.filter_table_restore = efx_ef10_filter_table_restore,
 	.filter_table_remove = efx_ef10_filter_table_remove,
+	.filter_match_supported = efx_ef10_filter_match_supported,
 	.filter_update_rx_scatter = efx_ef10_filter_update_rx_scatter,
 #ifdef EFX_NOT_UPSTREAM
 	/* locks only required for driverlink */
@@ -8555,7 +8692,7 @@ const struct efx_nic_type efx_hunt_a0_vf_nic_type = {
 	.get_mac_address = efx_ef10_get_mac_address_vf,
 	.set_mac_address = efx_ef10_set_mac_address,
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
-	.sriov_get_phys_port_id = efx_ef10_sriov_get_phys_port_id,
+	.get_phys_port_id = efx_ef10_get_phys_port_id,
 #endif
 	.revision = EFX_REV_HUNT_A0,
 	.max_dma_mask = DMA_BIT_MASK(ESF_DZ_TX_KER_BUF_ADDR_WIDTH),
@@ -8589,6 +8726,7 @@ const struct efx_nic_type efx_hunt_a0_vf_nic_type = {
 	.offload_features = EF10_OFFLOAD_FEATURES,
 	.mcdi_max_ver = 2,
 	.mcdi_rpc_timeout = efx_ef10_mcdi_rpc_timeout,
+	.mcdi_acquire_timeout = efx_ef10_mcdi_acquire_timeout,
 	.max_rx_ip_filters = HUNT_FILTER_TBL_ROWS,
 	.hwtstamp_filters = 1 << HWTSTAMP_FILTER_NONE |
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)
@@ -8624,6 +8762,7 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.start_stats = efx_mcdi_mac_start_stats,
 	.pull_stats = efx_mcdi_mac_pull_stats,
 	.stop_stats = efx_mcdi_mac_stop_stats,
+	.update_stats_period = efx_mcdi_mac_update_stats_period,
 	.set_id_led = efx_mcdi_set_id_led,
 	.push_irq_moderation = efx_ef10_push_irq_moderation,
 	.calc_mac_mtu = efx_nic_calc_mac_mtu,
@@ -8668,6 +8807,7 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.filter_table_probe = efx_ef10_filter_table_probe,
 	.filter_table_restore = efx_ef10_filter_table_restore,
 	.filter_table_remove = efx_ef10_filter_table_remove,
+	.filter_match_supported = efx_ef10_filter_match_supported,
 	.filter_update_rx_scatter = efx_ef10_filter_update_rx_scatter,
 #ifdef EFX_NOT_UPSTREAM
 	/* locks only required for driverlink */
@@ -8741,7 +8881,9 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.vswitching_remove = efx_ef10_vswitching_remove_pf,
 	.get_mac_address = efx_ef10_get_mac_address_pf,
 	.set_mac_address = efx_ef10_set_mac_address,
-
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_NEED_GET_PHYS_PORT_ID)
+	.get_phys_port_id = efx_ef10_get_phys_port_id,
+#endif
 	.revision = EFX_REV_HUNT_A0,
 	.max_dma_mask = DMA_BIT_MASK(ESF_DZ_TX_KER_BUF_ADDR_WIDTH),
 	.rx_prefix_size = ES_DZ_RX_PREFIX_SIZE,
@@ -8774,6 +8916,7 @@ const struct efx_nic_type efx_hunt_a0_nic_type = {
 	.offload_features = EF10_OFFLOAD_FEATURES,
 	.mcdi_max_ver = 2,
 	.mcdi_rpc_timeout = efx_ef10_mcdi_rpc_timeout,
+	.mcdi_acquire_timeout = efx_ef10_mcdi_acquire_timeout,
 	.max_rx_ip_filters = HUNT_FILTER_TBL_ROWS,
 	.hwtstamp_filters = 1 << HWTSTAMP_FILTER_NONE |
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_NET_TSTAMP)

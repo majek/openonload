@@ -48,7 +48,8 @@ LIB_SRCS	:=		\
 		pipe.c		\
 		common_sockopts.c \
 		tcp_sockopts.c  \
-		tcp_syncookie.c
+		tcp_syncookie.c \
+		active_wild.c
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\

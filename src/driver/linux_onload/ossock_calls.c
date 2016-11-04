@@ -608,7 +608,7 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
 
   if( sock->file->f_flags & O_NONBLOCK )
     op->flags |= MSG_DONTWAIT;
-  rc = sock_recvmsg(sock, &msg, total_bytes, op->flags);
+  rc = sock_recvmsg(sock, &msg, op->flags);
   /* Clear OS RX flag if we've got everything  */
   oo_os_sock_status_bit_clear_handled(
             SP_TO_SOCK(&ep->thr->netif, ep->id), sock->file,
@@ -677,7 +677,8 @@ int efab_tcp_helper_create_os_sock(ci_private_t *priv)
     flags |= O_NONBLOCK;
   if( w->sb_aflags & CI_SB_AFLAG_O_CLOEXEC)
     flags |= O_CLOEXEC;
-  rc = efab_create_os_socket(ep, SP_TO_SOCK(ni, priv->sock_id)->domain,
+  rc = efab_create_os_socket(priv->thr, ep,
+                             SP_TO_SOCK(ni, priv->sock_id)->domain,
                              SOCK_STREAM, flags);
   if( rc < 0 )
     return rc;

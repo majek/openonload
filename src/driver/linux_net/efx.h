@@ -77,9 +77,11 @@ void efx_vlan_rx_register(struct net_device *dev, struct vlan_group *vlan_group)
 /* TX */
 int efx_probe_tx_queue(struct efx_tx_queue *tx_queue);
 void efx_remove_tx_queue(struct efx_tx_queue *tx_queue);
-void efx_init_tx_queue(struct efx_tx_queue *tx_queue);
+void efx_destroy_tx_queue(struct efx_tx_queue *tx_queue);
+int efx_init_tx_queue(struct efx_tx_queue *tx_queue);
 void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue);
 void efx_fini_tx_queue(struct efx_tx_queue *tx_queue);
+void efx_purge_tx_queue(struct efx_tx_queue *tx_queue);
 netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 				struct net_device *net_dev);
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
@@ -96,8 +98,10 @@ u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb);
 int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
 void fastcall efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
+void fastcall efx_xmit_done_single(struct efx_tx_queue *tx_queue);
 #else
 void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
+void efx_xmit_done_single(struct efx_tx_queue *tx_queue);
 #endif
 unsigned int efx_tx_max_skb_descs(struct efx_nic *efx);
 extern unsigned int efx_piobuf_size;
@@ -108,7 +112,8 @@ void efx_set_default_rx_indir_table(struct efx_nic *efx);
 void efx_rx_config_page_split(struct efx_nic *efx);
 int efx_probe_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_remove_rx_queue(struct efx_rx_queue *rx_queue);
-void efx_init_rx_queue(struct efx_rx_queue *rx_queue);
+void efx_destroy_rx_queue(struct efx_rx_queue *rx_queue);
+int efx_init_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic);
 void efx_rx_slow_fill(struct work_struct *data);
@@ -150,7 +155,10 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 #define EFX_RXQ_MIN_ENT		16U
 #define EFX_TXQ_MIN_ENT(efx)	(2 * efx_tx_max_skb_descs(efx))
 
-#define EFX_TXQ_MAX_ENT(efx)	(EFX_WORKAROUND_35388(efx) ? \
+/* All EF10 architecture NICs steal one bit of the DMAQ size for various
+ * other purposes when counting TxQ entries, so we halve the queue size.
+ */
+#define EFX_TXQ_MAX_ENT(efx)	(EFX_WORKAROUND_EF10(efx) ? \
 				 EFX_MAX_DMAQ_SIZE / 2 : EFX_MAX_DMAQ_SIZE)
 
 #ifdef EFX_NOT_UPSTREAM
@@ -399,6 +407,7 @@ int efx_init_irq_moderation(struct efx_nic *efx, unsigned int tx_usecs,
 			    bool rx_may_override_tx);
 void efx_get_irq_moderation(struct efx_nic *efx, unsigned int *tx_usecs,
 			    unsigned int *rx_usecs, bool *rx_adaptive);
+void efx_set_stats_period(struct efx_nic *efx, unsigned int period_ms);
 #ifdef EFX_NOT_UPSTREAM
 extern int efx_target_num_vis;
 #endif

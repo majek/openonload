@@ -290,19 +290,22 @@ static void **find_syscall_table(void)
  */
 static void **find_syscall_table(void)
 {
-  unsigned long *idtbase = NULL;
-  unsigned char *p, *end, idt[6];
+  unsigned char *p = NULL;
+  unsigned char *end;
   void **result = NULL;
 
 #ifdef ERFM_HAVE_NEW_KALLSYMS
   /* Linux-4.4 & 4.5: */
-  idtbase = efrm_find_ksym("do_syscall_32_irqs_on");
+  p = efrm_find_ksym("do_syscall_32_irqs_on");
   /* Linux-4.6: */
-  if( idtbase == NULL )
-    idtbase = efrm_find_ksym("do_int80_syscall_32");
+  if( p == NULL )
+    p = efrm_find_ksym("do_int80_syscall_32");
 #endif
 
-  if( idtbase == NULL ) {
+  if( p == NULL ) {
+    unsigned long *idtbase;
+    unsigned char idt[6];
+
     __asm__("sidt %0" : "=m"(idt));
     idtbase = (unsigned long *)(idt[2] | (idt[3] << 8) | (idt[4] << 16)
                                 | (idt[5] << 24));
@@ -310,9 +313,6 @@ static void **find_syscall_table(void)
                 idtbase[0x80*2], idtbase[0x80*2+1]);
     p = (unsigned char *)((idtbase[0x80*2] & 0xffff)
                           | (idtbase[0x80*2+1] & 0xffff0000));
-  }
-  else {
-    p = (void *)idtbase;
   }
   TRAMP_DEBUG("int 0x80 entry point at %p", p);
   end = p + 1024 - 7;
@@ -366,30 +366,36 @@ static void **find_syscall_table(void)
 static void **find_ia32_syscall_table(void)
 {
   unsigned long result = 0;
-  unsigned char *p, *pend;
-  unsigned int *idtbase;
-  unsigned char idt[10];
+  unsigned char *p = NULL;
+  unsigned char *pend;
 
 #ifdef ERFM_HAVE_NEW_KALLSYMS
-  void *addr;
 
-  /* Linux>=4.2: ia32_sys_call_table is not a local variable any more, so
-   * we can use kallsyms to find it. */
-  addr = efrm_find_ksym("ia32_sys_call_table");
-  if( addr != NULL )
-    return addr;
+  /* Linux-4.4 & 4.5: do_syscall_32_irqs_off is a function, so it does not
+   * require CONFIG_KALLSYMS_ALL=y. */
+  p = efrm_find_ksym("do_syscall_32_irqs_off");
+  /* Linux-4.6: */
+  if( p == NULL )
+    p = efrm_find_ksym("do_int80_syscall_32");
 #endif
 
-  /* linux<4.4: ia32_sys_call_table is an internal variable in
-   * linux/arch/x86/entry/entry_64_compat.S, and we can parse this asm
-   * code. */
-  __asm__("sidt %0" : "=m"(idt));
-  idtbase = *(unsigned int **)(&idt[2]);
-  TRAMP_DEBUG("idt base=%p, entry 0x80=%08x,%08x,%08x", idtbase,
-              idtbase[0x80*4], idtbase[0x80*4+1], idtbase[0x80*4+2]);
-  result = (idtbase[0x80*4] & 0xffff) | (idtbase[0x80*4+1] & 0xffff0000)
-           | ((unsigned long)idtbase[0x80*4+2] << 32);
-  p = (unsigned char *)result;
+  if( p == NULL ) {
+    /* linux<4.4: get ia32_sys_call_table variable from asm code at
+     * linux/arch/x86/entry/entry_64_compat.S. */
+    unsigned int *idtbase;
+    unsigned char idt[10];
+
+    __asm__("sidt %0" : "=m"(idt));
+    idtbase = *(unsigned int **)(&idt[2]);
+    TRAMP_DEBUG("idt base=%p, entry 0x80=%08x,%08x,%08x", idtbase,
+                idtbase[0x80*4], idtbase[0x80*4+1], idtbase[0x80*4+2]);
+    result = (idtbase[0x80*4] & 0xffff) | (idtbase[0x80*4+1] & 0xffff0000)
+             | ((unsigned long)idtbase[0x80*4+2] << 32);
+    p = (unsigned char *)result;
+  }
+  else {
+    result = (unsigned long)p;
+  }
   TRAMP_DEBUG("int 0x80 entry point at %p", p);
   pend = p + 1024 - 7;
   while (p < pend) {

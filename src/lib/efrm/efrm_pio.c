@@ -204,17 +204,20 @@ int efrm_pio_link_vi(struct efrm_pio *pio, struct efrm_vi *vi)
 EXPORT_SYMBOL(efrm_pio_link_vi);
 
 
-int efrm_pio_unlink_vi(struct efrm_pio *pio, struct efrm_vi *vi)
+int efrm_pio_unlink_vi(struct efrm_pio *pio, struct efrm_vi *vi,
+		       bool* freed_resource_out)
 {
 	struct efhw_nic *nic;
-	int rc;
+	int rc, freed_resource;
 
 	nic = efrm_pd_to_resource(vi->pd)->rs_client->nic;
 
 	/* Unlink can fail if the associated txq has already been
 	 * flushed. */
 	rc = ef10_nic_piobuf_unlink(nic, vi->rs.rs_instance);
-	efrm_pio_release(pio, rc != -EALREADY);
+	freed_resource = efrm_pio_release(pio, rc != -EALREADY);
+	if (freed_resource_out != NULL)
+		*freed_resource_out = freed_resource;
 	vi->pio = NULL;
 
 	return rc;
@@ -250,10 +253,14 @@ void efrm_pio_free(struct efrm_pio *pio, bool free_piobuf)
 }
 
 
-void efrm_pio_release(struct efrm_pio *pio, bool free_piobuf)
+bool efrm_pio_release(struct efrm_pio *pio, bool free_piobuf)
 {
-	if (__efrm_resource_release(efrm_pio_to_resource(pio)))
+	if (__efrm_resource_release(efrm_pio_to_resource(pio))) {
 		efrm_pio_free(pio, free_piobuf);
+		return true;
+	}
+
+	return false;
 }
 EXPORT_SYMBOL(efrm_pio_release);
 

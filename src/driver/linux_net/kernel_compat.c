@@ -213,108 +213,6 @@ csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr,
 }
 #endif /* EFX_NEED_CSUM_TCPUDP_NOFOLD */
 
-#ifdef EFX_USE_I2C_LEGACY
-
-#ifdef CONFIG_SFC_HWMON
-
-struct i2c_client *i2c_new_device(struct i2c_adapter *adap,
-				  const struct i2c_board_info *info)
-{
-	return i2c_new_probed_device(adap, info, NULL);
-}
-
-struct i2c_client *i2c_new_probed_device(struct i2c_adapter *adap,
-					 const struct i2c_board_info *info,
-					 const unsigned short *addr_list)
-{
-	int (*probe)(struct i2c_client *, const struct i2c_device_id *);
-	struct i2c_client *client;
-
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
-	if (!client)
-		return NULL;
-
-	client->adapter = adap;
-	client->dev.platform_data = info->platform_data;
-	client->flags = info->flags;
-	client->addr = addr_list ? addr_list[0] : info->addr; /* FIXME */
-	strlcpy(client->name, info->type, sizeof client->name);
-
-	if (!strcmp(client->name, "sfc_lm87")) {
-		client->driver = &efx_lm87_driver;
-		probe = efx_lm87_probe;
-	} else if (!strcmp(client->name, "max6646") ||
-		   !strcmp(client->name, "max6647")) {
-		client->driver = &efx_lm90_driver;
-		probe = efx_lm90_probe;
-	} else {
-		BUG();
-		probe = NULL;
-	}
-
-	if (i2c_attach_client(client))
-		goto fail_client;
-
-	if (probe(client, NULL))
-		goto fail_attached;
-
-	return client;
-
-fail_attached:
-	i2c_detach_client(client);
-fail_client:
-	kfree(client);
-	return NULL;
-}
-
-#endif /* CONFIG_SFC_HWMON */
-
-void i2c_unregister_device(struct i2c_client *client)
-{
-	if (client->driver->detach_client) {
-		client->driver->detach_client(client);
-	} else {
-		if (!i2c_detach_client(client))
-			kfree(client);
-	}
-}
-
-#endif /* EFX_USE_I2C_LEGACY */
-
-#ifdef EFX_NEED_I2C_NEW_DUMMY
-
-struct i2c_driver efx_i2c_dummy_driver = {
-#ifdef EFX_USE_I2C_DRIVER_NAME
-	.name = "sfc_i2c_dummy"
-#else
-	.driver.name = "sfc_i2c_dummy"
-#endif
-};
-
-struct i2c_client *efx_i2c_new_dummy(struct i2c_adapter *adap, u16 address)
-{
-	struct i2c_client *client;
-
-	client = kzalloc(sizeof(*client), GFP_KERNEL);
-	if (!client)
-		return NULL;
-
-	client->adapter = adap;
-	client->addr = address;
-	strcpy(client->name, efx_i2c_dummy_driver.driver.name);
-
-	client->driver = &efx_i2c_dummy_driver;
-
-	if (i2c_attach_client(client)) {
-		kfree(client);
-		return NULL;
-	}
-
-	return client;
-}
-
-#endif /* EFX_NEED_I2C_NEW_DUMMY */
-
 #ifdef EFX_NEED_USLEEP_RANGE
 
 void usleep_range(unsigned long min, unsigned long max)
@@ -801,14 +699,14 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 		rc = pci_enable_msix(dev, entries, nvec);
 		if (rc < 0) {
 			return rc;
-                } else if (rc > 0) {
-                        if (rc < minvec)
-                                return -ENOSPC;
+		} else if (rc > 0) {
+			if (rc < minvec)
+				return -ENOSPC;
 			nvec = rc;
 		}
-        } while (rc);
+	} while (rc);
 
-        return nvec;
+	return nvec;
 }
 EXPORT_SYMBOL(pci_enable_msix_range);
 #endif
@@ -849,3 +747,14 @@ unsigned int cpumask_local_spread(unsigned int i, int node)
 }
 #endif
 
+#ifdef EFX_NEED_D_HASH_AND_LOOKUP
+struct dentry *d_hash_and_lookup(struct dentry *dir, struct qstr *name)
+{
+	/* The real in-kernel function checks for an FS specific hash.
+	 * We only use this in debugfs handling, where there is no such
+	 * hash.
+	 */
+	name->hash = full_name_hash(name->name, name->len);
+	return d_lookup(dir, name);
+}
+#endif

@@ -414,6 +414,7 @@ int citp_epoll_create(int size, int flags)
   citp_epoll_fdi *epi;
   struct citp_epoll_fd* ep;
   int            fd;
+  int            shared_fd;
 
   if( (epi = CI_ALLOC_OBJ(citp_epoll_fdi)) == NULL )
     goto fail0;
@@ -441,6 +442,10 @@ int citp_epoll_create(int size, int flags)
     Log_E(ci_log("%s: ERROR: failed to mmap shared segment errno=%d",
                  __FUNCTION__, errno));
     goto fail4;
+  }
+  if( ep->shared->epfd < CITP_OPTS.fd_base ) {
+    ci_sys_epoll_move_fd(ep->shared->epfd, &shared_fd);
+    ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_MOVE_FD, &shared_fd);
   }
   __citp_fdtable_reserve(ep->shared->epfd, 1);
   CITP_FDTABLE_UNLOCK();
@@ -1108,7 +1113,7 @@ static int citp_epoll_ctl_os(citp_fdinfo* fdi, int op, int fd,
       return -1;
     }
   }
-  else {
+  else if( op != EPOLL_CTL_DEL ) {
     ev.event = *event;
   }
   oop.fd = ev.fd;
@@ -1325,7 +1330,11 @@ static void citp_epoll_get_ready_list(struct oo_ul_epoll_state*
                          &ni->state->ready_lists[eps->ep->ready_list];
   struct citp_epoll_member* eitem;
 
-  citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin);
+  /* If we're ordering then we've only just done a poll to determine the
+   * limiting timestamp, so avoid doing another one here.
+   */
+  if( !eps->ordering_info )
+    citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin);
 
   ci_netif_lock(ni);
   lnk = ci_ni_dllist_start(ni, ready_list);
@@ -1337,8 +1346,13 @@ static void citp_epoll_get_ready_list(struct oo_ul_epoll_state*
     ci_assert(eitem);
     ci_assert_equal(sb->ready_list_id, eps->ep->ready_list);
     ci_dllist_remove(&((struct citp_epoll_member*)eitem)->dllink);
-    ci_dllist_push(&eps->ep->oo_stack_sockets,
-                   &((struct citp_epoll_member*)eitem)->dllink);
+    /* This means that we'll be processing sockets in the order that they got
+     * added to the ready list, so can mean we're close to ordered.  This
+     * provides a noticeable benefit when we're doing WODA with a large
+     * number of sockets.
+     */
+    ci_dllist_push_tail(&eps->ep->oo_stack_sockets,
+                        &((struct citp_epoll_member*)eitem)->dllink);
   }
   ci_netif_unlock(ni);
 }
@@ -1653,6 +1667,15 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
     /* give a chance to close fd from this epoll set */
     CITP_EPOLL_EP_UNLOCK(ep, 0);
     CITP_EPOLL_EP_LOCK(ep);
+
+    /* When we're WODAing we can't return anything we find with later polls,
+     * so we don't poll on individual sockets.  However, we do need to ensure
+     * that the stack continues to be polled, so if we've looked at everything
+     * and nothing's ready yet then poll now.
+     */
+    if( ordering && ordering->ordering_stack)
+      citp_poll_if_needed(ordering->ordering_stack, eps.this_poll_frc,
+                          eps.ul_epoll_spin);
 
     goto poll_again;
   } /* endif ul_epoll_spin spinning*/
@@ -2029,6 +2052,8 @@ citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
                           volatile ci_uint64* sleep_seq_p,
                           int* seq_mismatch)
 {
+  unsigned report = events;
+
   if( eitem->epoll_data.events & EPOLLET ) {
     ci_sleep_seq_t polled_sleep_seq;
     if( sleep_seq != *sleep_seq_p ) {
@@ -2041,15 +2066,17 @@ citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
                     eitem->reported_sleep_seq.rw.rx, polled_sleep_seq.rw.rx,
                     eitem->reported_sleep_seq.rw.tx, polled_sleep_seq.rw.tx));
     if( polled_sleep_seq.all == eitem->reported_sleep_seq.all )
-      events = 0;
+      report = 0;
     else if( polled_sleep_seq.rw.rx == eitem->reported_sleep_seq.rw.rx )
-      events &=~ OO_EPOLL_READ_EVENTS;
+      report &=~ OO_EPOLL_READ_EVENTS;
     else if( polled_sleep_seq.rw.tx == eitem->reported_sleep_seq.rw.tx )
-      events &=~ OO_EPOLL_WRITE_EVENTS;
+      report &=~ OO_EPOLL_WRITE_EVENTS;
     eitem->reported_sleep_seq = polled_sleep_seq;
   }
 
-  if( events != 0 ) {
+  /* If we have some events to report, we should always report
+   * the full mask of events. */
+  if( report != 0 ) {
     citp_ul_epoll_store_event(eps, eitem, events);
     return 1;
   }
@@ -2099,18 +2126,38 @@ static void citp_epoll_get_ordering_limit(ci_netif* ni,
   struct timespec base_ts;
 
   if( ni ) {
-    ci_netif_lock(ni);
-    citp_epoll_latest_rx(ni, &base_ts);
-    ci_netif_poll(ni);
-    citp_epoll_earliest_rx(ni, limit_out);
-    ci_netif_unlock(ni);
+    if( CITP_OPTS.woda_single_if == 0 ) {
+      ci_netif_lock(ni);
+      citp_epoll_latest_rx(ni, &base_ts);
+      ci_netif_poll(ni);
+      citp_epoll_earliest_rx(ni, limit_out);
+      ci_netif_unlock(ni);
 
-    if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
-      limit_out->tv_sec = base_ts.tv_sec;
-      limit_out->tv_nsec = base_ts.tv_nsec;
+      if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
+        limit_out->tv_sec = base_ts.tv_sec;
+        limit_out->tv_nsec = base_ts.tv_nsec;
+      }
+    }
+    else {
+      /* In single interface WODA mode we don't need to ensure that all
+       * interfaces have been polled, as ordering is only relative to other
+       * traffic on the same interface.  This means that we can also do a
+       * limited poll rather than a full poll.
+       */
+      ci_netif_lock(ni);
+      ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
+      ci_netif_unlock(ni);
+
+      /* We don't need a limit as this is only required to avoid returning
+       * traffic on one interface that arrived later than the poll on another
+       * interface.  This gives us an effective limit of The End of Time, but
+       * does assume we're on a system where __time_t is a signed int.
+       */
+      limit_out->tv_sec = CI_MAX_TIME_T;
+      limit_out->tv_nsec = 0;
     }
 
-    Log_POLL(ci_log("%s: poll limit %lu:%09lu", __FUNCTION__,
+    Log_POLL(ci_log("%s: poll limit %ld:%09lu", __FUNCTION__,
                     limit_out->tv_sec, limit_out->tv_nsec));
   }
 }
@@ -2303,6 +2350,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
 
   wait.ordering_info = ep->ordering_info;
   wait.poll_again = 0;
+  wait.ordering_stack = ni;
   /* citp_epoll_wait will do citp_exit_lib */
   rc = citp_epoll_wait(fdi, ep->wait_events, &wait,
                        n_socks, timeout, sigmask, lib_context);

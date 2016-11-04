@@ -1470,7 +1470,8 @@ int citp_ep_dup3(unsigned fromfd, unsigned tofd, int flags)
   if( fdip_is_reserved(tofdip) ) {
     /* ?? FIXME: we can't cope with this at the moment */
     CITP_FDTABLE_UNLOCK();
-    Log_U(log("%s(%d, %d): target is reserved", __FUNCTION__, fromfd, tofd));
+    Log_U(log("%s(%d, %d): target is reserved, see EF_ONLOAD_FD_BASE",
+              __FUNCTION__, fromfd, tofd));
     errno = EBUSY;
     tofd = -1;
     goto out;

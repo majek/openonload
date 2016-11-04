@@ -61,6 +61,8 @@
 
 #define CI_CPU_HAS_IOSPACE 1 /* CPU has a separate IO space */
 
+#define CI_MAX_TIME_T 0x7fffffffL
+
 #endif  /* __CI_COMPAT_X86_H__ */
 
 /*! \cidoxg_end */

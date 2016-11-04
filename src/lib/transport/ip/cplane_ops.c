@@ -277,7 +277,22 @@ cicp_user_retrieve(ci_netif*                    ni,
                           sock_cp->so_bindtodevice);
   if( row != NULL ) {
     lrow = &user->llapinfo_utable->llap[row->llap_rowid];
-    ci_assert_equal(row->dest_ifindex, lrow->ifindex);
+    if( row->dest_ifindex != lrow->ifindex) {
+      /* When llap and route are created, it could be a small time frame when
+       * there is no llap row for this route. In UL, we can just spin for
+       * a while.  In kernel we shouldn't spin without a strong reason so
+       * let's go via OS. */
+      LOG_U(ci_log("WARNING in %s: unexpected data in the control plane "
+                   "tables: route to %s via ifindex=%d llap_rowid=%d, but "
+                   "the llap row has ifindex=%d",
+                   __func__, ip_addr_str(ipcache->ip.ip_daddr_be32),
+                   row->dest_ifindex, row->llap_rowid, lrow->ifindex));
+#ifdef __KERNEL__
+      goto alienroute;
+#else
+      goto again;
+#endif
+    }
   }
 
   if( sock_cp->so_bindtodevice != CI_IFID_BAD ) {
@@ -441,6 +456,11 @@ cicp_user_retrieve(ci_netif*                    ni,
     goto check_verlock_and_out;
   }
   else if( osrc == -EAGAIN ) {
+#ifdef __KERNEL__
+    /* CICP_READ_LOCK is verlock in UL, so no need to "unlock" it;
+     * it is a spinlock in kernel, so we should unlock. */
+    cicp_unlock(_control_plane);
+#endif
     goto again;
   }
   else {

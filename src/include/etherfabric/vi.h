@@ -190,6 +190,16 @@ extern int ef_vi_free(ef_vi* vi, ef_driver_handle nic);
 extern int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
                                     int num_alts, size_t buf_space);
 
+/*! \brief Free a set of TX alternatives
+**
+** \param vi         The virtual interface whose alternatives are to be freed.
+** \param vi_dh      The ef_driver_handle for the NIC hosting the interface.
+**
+** \return  0 on success, or a negative error code.
+**
+** Release the set of TX alternatives allocated by ef_vi_transmit_alt_alloc().
+*/
+extern int ef_vi_transmit_alt_free(struct ef_vi* vi, ef_driver_handle vi_dh);
 
 /*! \brief Flush the virtual interface
 **
@@ -1000,20 +1010,6 @@ ef_vi_stats_query_layout(ef_vi* vi,
 extern int
 ef_vi_stats_query(ef_vi* vi, ef_driver_handle vi_dh,
                   void* data, int do_reset);
-
-
-/*! \brief Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
-**
-** \param vi                The virtual interface to configure.
-** \param discard_err_flags Flags which indicate which errors will cause
-**                          discard events
-**
-** \return 0 on success, or a negative error code.
-**
-** Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
-*/
-extern int
-ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags);
 
 
 #ifdef __cplusplus

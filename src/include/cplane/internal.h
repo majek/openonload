@@ -17,6 +17,7 @@
 #ifndef __CPLANE_INTERNAL_H__
 #define __CPLANE_INTERNAL_H__
 
+#include <ci/compat.h>
 #include <cplane/debug.h>
 #include <cplane/shared_ops.h>
 #include <cplane/prot.h>
@@ -68,10 +69,10 @@ cicpplos_queue_arp(cicp_handle_t *control_plane, ci_ether_arp *arp,
 /*! Work item routine that get scheduled in the work queue and reads ARP
     headers from the fifo and updates the arp table. */
 extern void
-cicppl_handle_arp_data(void);
+cicppl_handle_arp_data(void) CI_DV;
 
 extern void
-cicppl_rx_fifo_push(cicppl_rx_fifo_item_t *item_ptr);
+cicppl_rx_fifo_push(cicppl_rx_fifo_item_t *item_ptr) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -80,11 +81,11 @@ cicppl_rx_fifo_push(cicppl_rx_fifo_item_t *item_ptr);
 
 /*! Initialize memory to hold deferred packets awaiting MAC resolution */
 extern int
-cicppl_pktbuf_ctor(cicp_bufpool_t **out_pool);
+cicppl_pktbuf_ctor(cicp_bufpool_t **out_pool) CI_DV;
 
 /*! Free any memory used to hold deferred packets awaiting MAC resolution */
 extern void
-cicppl_pktbuf_dtor(cicp_bufpool_t **ref_pool);
+cicppl_pktbuf_dtor(cicp_bufpool_t **ref_pool) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -99,7 +100,7 @@ cicppl_pktbuf_dtor(cicp_bufpool_t **ref_pool);
  *  - (user-optional function) see driver header for documentation
  */
 extern void
-cicpos_mac_row_seen(cicp_handle_t *cplane_netif, cicp_mac_verinfo_t *rowinfo);
+cicpos_mac_row_seen(cicp_handle_t *cplane_netif, cicp_mac_verinfo_t *rowinfo) CI_DV;
 
 
 /*!
@@ -110,7 +111,7 @@ cicpos_mac_row_seen(cicp_handle_t *cplane_netif, cicp_mac_verinfo_t *rowinfo);
  *  - (user-optional function) see driver header for documentation
  */
 extern void
-cicpos_mac_purge_unseen(cicp_handle_t *cplane_netif);
+cicpos_mac_purge_unseen(cicp_handle_t *cplane_netif) CI_DV;
 
 
 
@@ -147,7 +148,7 @@ cicpos_ipif_import(cicp_handle_t     *cplane_netif,
 		   ci_ip_addr_net_t   net_ip,
 		   ci_ip_addrset_t    net_ipset,
 		   ci_ip_addr_net_t   net_bcast,
-		   ci_uint8           scope);
+		   ci_uint8           scope) CI_DV;
 
 
 /*! Delete the IP interface row with the given set of subnet addresses
@@ -163,21 +164,21 @@ extern void
 cicpos_ipif_delete(cicp_handle_t   *cplane_netif, 
 		   ci_ifid_t        ifindex,
 		   ci_ip_addr_net_t net_ip,
-		   ci_ip_addrset_t  net_ipset);
+		   ci_ip_addrset_t  net_ipset) CI_DV;
 
 /*!
  * Update the IP interface entry and callbacks when there's a state
  * (onloadable<->not_onloadable) change in the underlying bonded interface
  */
 extern void
-cicpos_ipif_bond_change(cicp_handle_t *control_plane, ci_ifid_t ifindex);
+cicpos_ipif_bond_change(cicp_handle_t *control_plane, ci_ifid_t ifindex) CI_DV;
 
 /*!
  * Query control plane to get an IP addr for the specified ifindex
  */
 extern int
 cicpos_ipif_get_ifindex_ipaddr(cicp_handle_t *control_plane, ci_ifid_t ifindex, 
-                               ci_ip_addr_net_t *addr_out);
+                               ci_ip_addr_net_t *addr_out) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -196,7 +197,7 @@ extern void
 cicpos_route_delete(cicp_handle_t     *cplane_netif, 
 		    ci_ip_addr_t       dest_ip,
 		    ci_ip_addrset_t    dest_ipset,
-                    ci_ifid_t          dest_ifindex);
+                    ci_ifid_t          dest_ifindex) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -232,7 +233,7 @@ cicpos_mac_set(cicp_handle_t *cplane_netif,
 	       ci_ifid_t ifindex,
 	       ci_ip_addr_net_t nexthop_ip,
 	       const ci_mac_addr_t *mac,
-	       const cicpos_mac_row_sync_t *os);
+	       const cicpos_mac_row_sync_t *os) CI_DV;
 
 /*! Initialize kernel synchronization state in a MAC MIB */
 extern int /* rc */
@@ -253,7 +254,7 @@ cicpos_mac_kmib_row_ctor(cicpos_mac_row_t *syn_row,
  *  - (user-optional function) see driver header for documentation
  */
 extern int /* bool */
-cicpos_mact_open(cicp_handle_t *cplane_netif);
+cicpos_mact_open(cicp_handle_t *cplane_netif) CI_DV;
 
 
 /*! Release the "synchronizer" role with respect to the MAC table
@@ -263,7 +264,7 @@ cicpos_mact_open(cicp_handle_t *cplane_netif);
  *  - (user-optional function) see driver header for documentation
  */
 extern void
-cicpos_mact_close(cicp_handle_t *cplane_netif);
+cicpos_mact_close(cicp_handle_t *cplane_netif) CI_DV;
 
 
 /*! Indicate that the original content of this mapping could be altered
@@ -309,18 +310,18 @@ cicpos_mac_kmib_dtor(cicpos_mac_mib_t *sync);
  *---------------------------------------------------------------------------*/
 
 extern cicpos_parse_state_t *
-cicpos_parse_state_alloc(cicp_handle_t *control_plane);
+cicpos_parse_state_alloc(cicp_handle_t *control_plane) CI_DV;
 
-extern void cicpos_parse_state_free(cicpos_parse_state_t *session);
+extern void cicpos_parse_state_free(cicpos_parse_state_t *session) CI_DV;
 
 extern void cicpos_parse_init(cicpos_parse_state_t *session,
-			      cicp_handle_t *control_plane);
+			      cicp_handle_t *control_plane) CI_DV;
 
-extern void cicpos_route_post_poll(cicpos_parse_state_t *session);
+extern void cicpos_route_post_poll(cicpos_parse_state_t *session) CI_DV;
 
-extern void cicpos_llap_post_poll(cicpos_parse_state_t *session);
+extern void cicpos_llap_post_poll(cicpos_parse_state_t *session) CI_DV;
 
-extern void cicpos_ipif_post_poll(cicpos_parse_state_t *session);
+extern void cicpos_ipif_post_poll(cicpos_parse_state_t *session) CI_DV;
 
 
 
@@ -382,7 +383,7 @@ cicpos_route_import(cicp_handle_t      *control_plane,
 		    ci_ip_addr_t        pref_source,
 		    ci_ifid_t           ifindex,
 		    ci_mtu_t            mtu,
-		    int /* bool */      nosort);
+		    int /* bool */      nosort) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -445,7 +446,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
 		   ci_uint8 /* bool */ up,
 		   cicp_llap_type_t type,
 		   const char *name,
-		   ci_mac_addr_t *ref_mac);
+		   ci_mac_addr_t *ref_mac) CI_DV;
 
 
 /*! find the name used by the O/S for a given link layer access point
@@ -460,7 +461,7 @@ cicpos_llap_import(cicp_handle_t *control_plane,
  *  them.
  */
 extern const char *
-_cicp_llap_get_name(const cicp_handle_t *control_plane, ci_ifid_t ifindex);
+_cicp_llap_get_name(const cicp_handle_t *control_plane, ci_ifid_t ifindex) CI_DV;
 
 /*! Update the control plane's "hwport" associated with a link layer
  * access point.
@@ -483,7 +484,7 @@ _cicp_llap_get_name(const cicp_handle_t *control_plane, ci_ifid_t ifindex);
 extern int /* rc */
 cicp_llap_update_active_hwport(cicp_handle_t *control_plane, ci_ifid_t ifindex,
                                ci_hwport_id_t hwport, cicp_rowid_t bond_rowid,
-                               int fatal);
+                               int fatal) CI_DV;
 
 /* Synchronization functions optionally made visible to the user */
 
@@ -495,7 +496,7 @@ cicp_llap_update_active_hwport(cicp_handle_t *control_plane, ci_ifid_t ifindex,
  *  - (user-optional function) see driver header for documentation
  */
 extern void
-cicpos_llap_delete(cicp_handle_t *cplane_netif, ci_ifid_t ifindex);
+cicpos_llap_delete(cicp_handle_t *cplane_netif, ci_ifid_t ifindex) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -504,7 +505,7 @@ cicpos_llap_delete(cicp_handle_t *cplane_netif, ci_ifid_t ifindex);
 
 extern int /* bool */
 cicpos_pmtu_check(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip,
-                  ci_ifid_t ifindex, ci_mtu_t pmtu);
+                  ci_ifid_t ifindex, ci_mtu_t pmtu) CI_DV;
 
 
 /*----------------------------------------------------------------------------
@@ -514,61 +515,61 @@ cicpos_pmtu_check(cicp_handle_t *control_plane, ci_ip_addr_net_t net_ip,
 #if CPLANE_TEAMING
 
 extern int cicp_bond_find_rowid(cicp_handle_t *control_plane, 
-                                ci_ifid_t ifindex);
+                                ci_ifid_t ifindex) CI_DV;
 
 extern int cicp_bond_set_active(cicp_handle_t *control_plane, 
                                 cicp_rowid_t master_rowid,
                                 ci_ifid_t master_ifindex,
                                 cicp_rowid_t slave_rowid,
                                 ci_ifid_t slave_ifindex,
-                                int is_active);
+                                int is_active) CI_DV;
 
 extern int cicp_bond_get_n_active_slaves(cicp_handle_t *control_plane,
                                          cicp_rowid_t rowid,
-                                         ci_ifid_t ifindex);
+                                         ci_ifid_t ifindex) CI_DV;
 
 extern int 
 cicp_bond_check_active_slave_hwport(cicp_handle_t *control_plane,
                                     cicp_rowid_t rowid,
                                     ci_ifid_t ifindex,
                                     ci_hwport_id_t curr_hwport,
-                                    ci_hwport_id_t *hwport);
+                                    ci_hwport_id_t *hwport) CI_DV;
 
 extern int cicp_bond_mark_row(cicp_handle_t *control_plane,
                               cicp_rowid_t rowid, 
-                              ci_ifid_t ifindex);
+                              ci_ifid_t ifindex) CI_DV;
 
 extern void
 cicp_bond_prune_unmarked_in_bond(cicp_handle_t *control_plane,
-                                 ci_ifid_t master_ifindex);
+                                 ci_ifid_t master_ifindex) CI_DV;
 
 extern int cicp_bond_set_hash_policy(cicp_handle_t *control_plane,
                                      cicp_rowid_t rowid, int mode,
                                      ci_ifid_t master_ifindex,
-                                     int hash_policy);
+                                     int hash_policy) CI_DV;
 
 extern int cicp_bond_check_slave_owner(cicp_handle_t *control_plane,
                                        cicp_rowid_t rowid,
                                        ci_ifid_t ifindex,
-                                       ci_ifid_t master_ifindex);
+                                       ci_ifid_t master_ifindex) CI_DV;
 extern int 
 cicp_bond_add_slave(cicp_handle_t *control_plane, 
-                    ci_ifid_t master_ifindex, ci_ifid_t ifindex);
+                    ci_ifid_t master_ifindex, ci_ifid_t ifindex) CI_DV;
 
 extern int 
 cicp_bond_remove_slave(cicp_handle_t *control_plane,
-                       ci_ifid_t master_ifindex, ci_ifid_t ifindex);
+                       ci_ifid_t master_ifindex, ci_ifid_t ifindex) CI_DV;
 
 extern int 
-cicp_bond_remove_master(cicp_handle_t *control_plane, ci_ifid_t ifindex);
+cicp_bond_remove_master(cicp_handle_t *control_plane, ci_ifid_t ifindex) CI_DV;
 
 extern int cicp_bond_update_mode(cicp_handle_t *control_plane,
                                  cicp_rowid_t rowid,
-                                 ci_ifid_t ifindex, int mode);
+                                 ci_ifid_t ifindex, int mode) CI_DV;
 
 extern int cicp_bond_get_mode(cicp_handle_t *control_plane, 
                               cicp_rowid_t rowid, ci_ifid_t ifindex,
-                              int *mode);
+                              int *mode) CI_DV;
 
 extern int
 cicp_bond_get_master_ifindex(cicp_handle_t *control_plane,
@@ -630,13 +631,13 @@ extern oo_os_timestamp_t oo_os_timestamp(void);
 extern int /* rc */
 cicp_ctor(cicp_mibs_kern_t *control_plane, unsigned max_macs, 
           unsigned max_layer2_interfaces, unsigned max_local_addrs,
-          unsigned max_routes);
+          unsigned max_routes) CI_DV;
 
 /*! Finalize and free driver-global control plane state 
  *  \param control_plane   allocated data structure to tidy up
  */
 extern void
-cicp_dtor(cicp_mibs_kern_t *control_plane);
+cicp_dtor(cicp_mibs_kern_t *control_plane) CI_DV;
 
 /*! Initialize any driver-global synchronization control plane state
  */
@@ -666,7 +667,7 @@ extern void cicpos_arp_stale_update(ci_ip_addr_t dst, ci_ifid_t ifindex,
 
 /*! Initialize per-netif shared state memory map from global driver state */
 extern void
-cicp_ns_map(cicp_ns_mmap_info_t *ni_shared, cicp_handle_t *control_plane);
+cicp_ns_map(cicp_ns_mmap_info_t *ni_shared, cicp_handle_t *control_plane) CI_DV;
 
 /*! Map tables from global driver into per-netif handle */
 extern int /* rc */
@@ -691,7 +692,7 @@ cicp_mmap(cicp_handle_t *control_plane, unsigned long *ref_bytes,
 extern int /* bool */
 cicp_nopage_found(cicp_handle_t *cplane,
 		  unsigned long ref_offset,
-		  unsigned int *out_page_frameno);
+		  unsigned int *out_page_frameno) CI_DV;
 
 
 
@@ -700,6 +701,6 @@ enum cp_version_type {
   CP_VERSION_API,
 };
 extern const char *
-cicp_binary_version(enum cp_version_type type);
+cicp_binary_version(enum cp_version_type type) CI_DV;
 
 #endif /* __CPLANE_INTERNAL_H__ */

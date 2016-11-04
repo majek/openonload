@@ -381,6 +381,8 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
   }
 #endif
 
+  vfree(addrs);
+
   mr->pd = pd;
   ch_rs->rs_base = NULL;
   ch_rs->memreg = mr;

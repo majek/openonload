@@ -1189,6 +1189,20 @@ extern int ef_vi_receive_unbundle(ef_vi* ep, const ef_event* event,
                                   ef_request_id* ids);
 
 
+/*! \brief Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
+**
+** \param vi                The virtual interface to configure.
+** \param discard_err_flags Flags which indicate which errors will cause
+**                          discard events
+**
+** \return 0 on success, or a negative error code.
+**
+** Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
+*/
+extern int
+ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags);
+
+
 /**********************************************************************
  * Transmit interface *************************************************
  **********************************************************************/
@@ -1584,7 +1598,7 @@ extern unsigned ef_vi_transmit_alt_num_ids(ef_vi* vi);
 ** the alternative are discarded.
 **
 ** As packets are discarded, events of type EF_EVENT_TYPE_TX_ALT are
-** returned to the applicatino. The application should normally wait until
+** returned to the application. The application should normally wait until
 ** all packets have been discarded before transitioning to a different state.
 **
 ** Memory for the TX alternative remains allocated, and is not freed until
@@ -1628,7 +1642,7 @@ extern void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold);
 **
 ** Returns true if ef_eventq_poll() will return event(s).
 */
-extern int ef_eventq_has_event(ef_vi* vi);
+extern int ef_eventq_has_event(const ef_vi* vi);
 
 
 /*! \brief Returns true if there are a given number of events in the event
@@ -1648,7 +1662,7 @@ extern int ef_eventq_has_event(ef_vi* vi);
 ** This function returns quickly. It is useful for an application to
 ** determine whether it is falling behind in its event processing.
 */
-extern int ef_eventq_has_many_events(ef_vi* evq, int n_events);
+extern int ef_eventq_has_many_events(const ef_vi* evq, int n_events);
 
 
 /*! \brief Prime a virtual interface allowing you to go to sleep blocking

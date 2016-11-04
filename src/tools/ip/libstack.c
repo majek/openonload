@@ -49,7 +49,7 @@
 #define IGNORE(_x)
 
 
-#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_AUXBUF) + 1)
+#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_ACTIVE_WILD) + 1)
 
 
 typedef struct {
@@ -181,6 +181,7 @@ static stat_desc_t more_stats_fields[] = {
   ss(TCP_STATE_PIPE),
 #endif
   ss(TCP_STATE_AUXBUF),
+  ss(TCP_STATE_ACTIVE_WILD),
   stat_desc_nm(more_stats_t, states[N_STATES], "BAD_STATE", 0),
   ns(sock_orphans),
   ns(sock_wake_needed_rx),
@@ -570,6 +571,8 @@ static int libstack_mappings_init(void)
        * ENOENT: process have died while we were running here */
       if( errno == EACCES || errno == ENOENT )
         continue;
+      fprintf(stderr, "%s: error %d (%s)\n",
+                      __FUNCTION__, errno, strerror(errno));
       closedir(proc);
       CI_TRY(-1);
       return -1;
@@ -1222,7 +1225,12 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
     if( w->sb_aflags & CI_SB_AFLAG_ORPHAN       )  ++s->sock_orphans;
     if( w->wake_request & CI_SB_FLAG_WAKE_RX )  ++s->sock_wake_needed_rx;
     if( w->wake_request & CI_SB_FLAG_WAKE_TX )  ++s->sock_wake_needed_tx;
-    if( state >= CI_TCP_SYN_SENT && state <= CI_TCP_TIME_WAIT ) {
+    if( state == CI_TCP_LISTEN ) {
+      ci_tcp_socket_listen* tls = &wo->tcp_listen;
+      s->tcp_n_in_listenq += tls->n_listenq;
+      s->tcp_n_in_acceptq += ci_tcp_acceptq_n(tls);
+    }
+    else if( state & CI_TCP_STATE_TCP ) {
       ci_tcp_state* ts = &wo->tcp;
       if( tcp_rcv_usr(ts) ) {
         ++s->tcp_has_recvq;
@@ -1244,11 +1252,6 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
         s->tcp_sendq_bytes += SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts));
         s->tcp_sendq_pkts += ci_tcp_sendq_n_pkts(ts);
       }
-    }
-    else if( state == CI_TCP_LISTEN ) {
-      ci_tcp_socket_listen* tls = &wo->tcp_listen;
-      s->tcp_n_in_listenq += tls->n_listenq;
-      s->tcp_n_in_acceptq += ci_tcp_acceptq_n(tls);
     }
     else if( state == CI_TCP_STATE_UDP ) {
       ci_udp_state* us = &wo->udp;
@@ -1500,7 +1503,9 @@ static void for_each_tcp_socket(ci_netif* ni,
   int id;
   for( id = 0; id < (int)ni->state->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, id);
-    if( ! (wo->waitable.state & CI_TCP_STATE_TCP_CONN) )  continue;
+    if( wo->waitable.state == CI_TCP_LISTEN ||
+        ! (wo->waitable.state & CI_TCP_STATE_TCP) )
+      continue;
     fn(ni, &wo->tcp);
   }
 }
@@ -2446,8 +2451,8 @@ static const stack_op_t stack_ops[] = {
   STACK_OP(time,               "show stack timers"),
   STACK_OP(time_init,          "(re-)initialize stack timers"),
   STACK_OP(timers,             "dump state of stack timers"),
-  STACK_OP(filter_table,       "show stack filter table"),
-  STACK_OP_F(filters,          "show stack filters (syslog)", FL_ONCE),
+  STACK_OP(filter_table,       "show stack software filter table"),
+  STACK_OP_F(filters,          "show stack hardware filters", FL_ONCE),
   STACK_OP_F(clusters,         "show clusters", FL_ONCE),
   STACK_OP(qs,                 "show queues for each socket in stack"),
   STACK_OP(lock,               "lock the stack"),

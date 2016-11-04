@@ -93,17 +93,36 @@ static int ci_tcp_validate_sa( sa_family_t domain,
 }
 #endif
 
-/*! Perform system bind on the OS backing socket.
- * \param ep       Endpoint context
- * \param fd       Callers FD (ignored in kernel)
+
+/* The flags and state associated with bind are complex.  This function
+ * provides a basic consistency check on the enabled flags.
+ */
+inline void ci_tcp_bind_flags_assert_valid(ci_sock_cmn* s)
+{
+  if( s->s_flags & CI_SOCK_FLAG_DEFERRED_BIND ) {
+    /* If we deferred the bind we need to know that we should bind later */
+    ci_assert( s->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND );
+
+    /* We can only defer bind in cases where the application doesn't bind to
+     * a specific port.
+     */
+    ci_assert( s->s_flags & ~CI_SOCK_FLAG_PORT_BOUND );
+  }
+}
+
+/* Bind a TCP socket, performing an OS socket bind if necessary.
+ * \param ni       Stack
+ * \param s        Socket to be bound
+ * \param fd       File descriptor (unused in kernel)
  * \param ip_addr_be32  Local address to which to bind
  * \param port_be16     [in] requested port [out] assigned port
+ * \param may_defer Whether OS socket bind can be deferred
  * \return         0 - success & [port_be16] updated
  *                 CI_SOCKET_HANDOVER, Pass to OS, OS bound ok, (no error)
  *                 CI_SOCKET_ERROR & errno set
  */
-ci_inline int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
-                            ci_uint32 ip_addr_be32, ci_uint16* port_be16 )
+int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
+                  ci_uint32 ip_addr_be32, ci_uint16* port_be16, int may_defer)
 {
   int rc = 0;
   ci_uint16 user_port; /* Port number specified by user, not by OS.
@@ -111,31 +130,67 @@ ci_inline int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
   union ci_sockaddr_u sa_u;
 
   ci_assert(s->domain == AF_INET || s->domain == AF_INET6);
-
   ci_assert( port_be16 );
+  ci_assert(s->b.state & CI_TCP_STATE_TCP ||
+            s->b.state == CI_TCP_STATE_ACTIVE_WILD);
+  ci_tcp_bind_flags_assert_valid(s);
 
   user_port = *port_be16;
 
-  /* We don't use OS backing sockets for transparent proxy sockets. */
   if( !(s->s_flags & CI_SOCK_FLAG_TPROXY) ) {
+    /* In active-wild mode we might not want to bind yet. */
+    if( !may_defer || !NI_OPTS(ni).tcp_shared_local_ports || user_port != 0 ) {
 #if CI_CFG_FAKE_IPV6
-    ci_assert(s->domain == AF_INET || s->domain == AF_INET6);
-    if( s->domain == AF_INET )
-      ci_make_sockaddr(&sa_u.sin, s->domain, user_port, ip_addr_be32);
-    else
-      ci_make_sockaddr6(&sa_u.sin6, s->domain, user_port, ip_addr_be32);
+      ci_assert(s->domain == AF_INET || s->domain == AF_INET6);
+      if( s->domain == AF_INET )
+        ci_make_sockaddr(&sa_u.sin, s->domain, user_port, ip_addr_be32);
+      else
+        ci_make_sockaddr6(&sa_u.sin6, s->domain, user_port, ip_addr_be32);
 #else
-    ci_assert(s->domain == AF_INET);
-    ci_make_sockaddr(&sa_u.sin, s->domain, user_port, ip_addr_be32);
+      ci_assert(s->domain == AF_INET);
+      ci_make_sockaddr(&sa_u.sin, s->domain, user_port, ip_addr_be32);
 #endif
 
 #ifdef __ci_driver__
-    rc = efab_tcp_helper_bind_os_sock_kernel(netif2tcp_helper_resource(ni),
-                                             SC_SP(s), &sa_u.sa, sizeof(sa_u),
-                                             port_be16);
+      rc = efab_tcp_helper_bind_os_sock_kernel(netif2tcp_helper_resource(ni),
+                                               SC_SP(s), &sa_u.sa,
+                                               sizeof(sa_u), port_be16);
 #else
-    rc = ci_tcp_helper_bind_os_sock(fd, &sa_u.sa, sizeof(sa_u), port_be16);
+      rc = ci_tcp_helper_bind_os_sock(fd, &sa_u.sa, sizeof(sa_u), port_be16);
 #endif
+      if( rc == 0 )
+        s->s_flags &= ~(CI_SOCK_FLAG_CONNECT_MUST_BIND |
+                        CI_SOCK_FLAG_DEFERRED_BIND);
+    }
+    /* We can defer this bind.  We need to make an extra check for the socket
+     * already having been bound.  In the non-deferred case this is enforced by
+     * the binding of the OS socket, but we don't have that luxury here. */
+    else if( s->s_flags & CI_SOCK_FLAG_DEFERRED_BIND ||
+             ! (s->s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND) ) {
+      /* Already bound. */
+      CI_SET_ERROR(rc, EINVAL);
+    }
+    else {
+      /* CI_SOCK_FLAG_DEFERRED_BIND is clear, so either we never set it
+       * (meaning nobody called bind()) or we've since cleared it (meaning that
+       * the deferred bind has been performed).  Only in the former case are we
+       * allowed to bind now, but the latter case should have been checked by
+       * the caller. */
+      ci_tcp_state* c = &SOCK_TO_WAITABLE_OBJ(s)->tcp;
+      ci_assert_equal(s->b.state, CI_TCP_CLOSED);
+      ci_assert(~c->tcpflags & CI_TCPT_FLAG_WAS_ESTAB);
+      (void) c;
+
+      s->s_flags |= CI_SOCK_FLAG_DEFERRED_BIND;
+      rc = 0;
+    }
+  }
+  else {
+    /* CI_SOCK_FLAG_TPROXY is set.  We don't use OS backing sockets for these,
+     * and we don't support deferred binds either.
+     */
+    ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_DEFERRED_BIND);
+    s->s_flags &= ~CI_SOCK_FLAG_CONNECT_MUST_BIND;
   }
 
   /* bug1781: only do this if the earlier bind succeeded. 
@@ -146,7 +201,6 @@ ci_inline int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
     s->s_flags |= CI_SOCK_FLAG_PORT_BOUND;
   if( ip_addr_be32 != INADDR_ANY )
     s->s_flags |= CI_SOCK_FLAG_ADDR_BOUND;
-  s->s_flags &= ~CI_SOCK_FLAG_CONNECT_MUST_BIND;
 
 #ifndef __ci_driver__
   /* We do not call bind() to alien address from in-kernel code */
@@ -155,6 +209,7 @@ ci_inline int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
     s->s_flags |= CI_SOCK_FLAG_BOUND_ALIEN;
 #endif
   
+  ci_tcp_bind_flags_assert_valid(s);
   return rc;
 }
 
@@ -368,6 +423,8 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
 {
   ci_ip_pkt_fmt* pkt;
   int rc = 0;
+  oo_sp active_wild = OO_SP_NULL;
+  ci_uint32 prev_seq = 0;
 
   ci_assert(ts->s.pkt.mtu);
 
@@ -406,14 +463,25 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
   ci_assert_nequal(ts->s.pkt.ip.ip_saddr_be32, INADDR_ANY);
 
   if( ts->s.s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND ) {
-    ci_sock_cmn* s = &ts->s;
     ci_uint16 source_be16 = 0;
+    ci_sock_cmn* s = &ts->s;
 
-    if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
+#ifndef __KERNEL__
+    active_wild = ci_netif_active_wild_get(ni, sock_laddr_be32(&ts->s),
+                                           sock_raddr_be32(&ts->s),
+                                           dport_be16, &source_be16, &prev_seq);
+#endif
+
+    if( active_wild != OO_SP_NULL ) {
+      ts->s.s_flags &= ~(CI_SOCK_FLAG_DEFERRED_BIND |
+                         CI_SOCK_FLAG_CONNECT_MUST_BIND);
+      rc = 0;
+    }
+    else if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
       rc = __ci_tcp_bind(ni, &ts->s, fd, ts->s.pkt.ip.ip_saddr_be32,
-                         &source_be16);
+                         &source_be16, 0);
     else 
-      rc = __ci_tcp_bind(ni, &ts->s, fd, INADDR_ANY, &source_be16);
+      rc = __ci_tcp_bind(ni, &ts->s, fd, INADDR_ANY, &source_be16, 0);
     if(CI_LIKELY( rc == 0 )) {
       TS_TCP(ts)->tcp_source_be16 = source_be16;
       ts->s.cp.lport_be16 = source_be16;
@@ -470,7 +538,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
 #endif
 
   rc = ci_tcp_ep_set_filters(ni, S_SP(ts), ts->s.cp.so_bindtodevice,
-                             OO_SP_NULL);
+                             active_wild);
   if( rc < 0 ) {
     /* Perhaps we've run out of filters?  See if we can push a socket out
      * of timewait and steal its filter.
@@ -479,7 +547,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     if( rc != -EBUSY || ! ci_netif_timewait_try_to_free_filter(ni) ||
         (rc = ci_tcp_ep_set_filters(ni, S_SP(ts),
                                     ts->s.cp.so_bindtodevice,
-                                    OO_SP_NULL)) < 0 ) {
+                                    active_wild)) < 0 ) {
       ci_assert_nequal(rc, -EFILTERSSOME);
       /* Either a different error, or our efforts to free a filter did not
        * work.
@@ -501,8 +569,17 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
 	     (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_dest_be16)));
 
   /* We are going to send the SYN - set states appropriately */
-  tcp_snd_una(ts) = tcp_snd_nxt(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) =
-    ci_tcp_initial_seqno(ni);
+  if( active_wild != OO_SP_NULL )
+    ts->tcpflags |= CI_TCPT_FLAG_ACTIVE_WILD;
+
+  tcp_snd_nxt(ts) = ci_tcp_initial_seqno(ni);
+  if( prev_seq )
+    /* We're reusing a TIME_WAIT.  Set top two bits of ISN to NOT of top
+     * bits of the previous sequence number used by this 4-tuple to ensure
+     * that the new sequence space is a long way away from before.
+     */
+    tcp_snd_nxt(ts) = (tcp_snd_nxt(ts) & 0x3fffffff) | (~prev_seq & 0xc0000000);
+  tcp_snd_una(ts) = tcp_enq_nxt(ts) = tcp_snd_up(ts) = tcp_snd_nxt(ts);
   ts->snd_max = tcp_snd_nxt(ts) + 1;
 
   /* Must be after initialising snd_una. */
@@ -894,7 +971,7 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
 }
 #endif
 
-static int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
+int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
 {
   int i;
   oo_p sp;
@@ -1275,7 +1352,7 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
 
   CI_LOGLEVEL_TRY_RET(LOG_TV,
 		      __ci_tcp_bind(ep->netif, ep->s, fd, addr_be32,
-                                    &new_port));
+                                    &new_port, 1));
   ep->s->s_flags |= CI_SOCK_FLAG_BOUND;
   sock_lport_be16(s) = new_port; 
   sock_laddr_be32(s) = addr_be32;
@@ -1367,7 +1444,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   ci_sock_lock(netif, &ts->s.b);
   ci_netif_lock(ep->netif);
   /* fill in address/ports and all TCP state */
-  if( !(ts->s.s_flags & CI_SOCK_FLAG_BOUND) ) {
+  if( ts->s.s_flags & CI_SOCK_FLAG_CONNECT_MUST_BIND ) {
     ci_uint16 source_be16;
 
     /* They haven't previously done a bind, so we need to choose 
@@ -1375,7 +1452,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
 
     source_be16 = 0;
     rc = __ci_tcp_bind(ep->netif, ep->s, fd, ts->s.pkt.ip.ip_saddr_be32,
-                       &source_be16);
+                       &source_be16, 0);
     if (CI_LIKELY( rc==0 )) {
       TS_TCP(ts)->tcp_source_be16 = source_be16;
       ts->s.cp.lport_be16 = source_be16;
@@ -1613,6 +1690,41 @@ int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
   return rc;
 }
 
+
+int ci_tcp_getsockname(citp_socket* ep, ci_fd_t fd, struct sockaddr* sa,
+                       socklen_t* p_sa_len) {
+  ci_sock_cmn* s = ep->s;
+  int rc = 0;
+
+  /* Check consistency of multitude of bind flags */
+  ci_tcp_bind_flags_assert_valid(s);
+
+  if( s->s_flags & CI_SOCK_FLAG_DEFERRED_BIND ) {
+    ci_uint16 source_be16 = 0;
+
+    if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
+      rc = __ci_tcp_bind(ep->netif, s, fd, s->pkt.ip.ip_saddr_be32,
+                         &source_be16, 0);
+    else
+      rc = __ci_tcp_bind(ep->netif, s, fd, INADDR_ANY, &source_be16, 0);
+
+    if(CI_LIKELY( rc == 0 )) {
+      s->s_flags &= ~(CI_SOCK_FLAG_DEFERRED_BIND |
+                      CI_SOCK_FLAG_CONNECT_MUST_BIND);
+      sock_lport_be16(s) = source_be16;
+      s->cp.lport_be16 = source_be16;
+      LOG_TC(log(NSS_FMT "Deferred bind returned %s:%u",
+                 NSS_PRI_ARGS(ep->netif, s),
+                 ip_addr_str(INADDR_ANY), ntohs(sock_lport_be16(s))));
+    }
+    else {
+      LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", CI_GET_ERROR(rc),
+                   __FILE__, __LINE__));
+    }
+  }
+
+  return rc;
+}
 
 #endif
 

@@ -1210,7 +1210,7 @@ void efx_init_rx_recycle_ring(struct efx_nic *efx,
 }
 #endif
 
-void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
+int efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 {
 	struct efx_nic *efx = rx_queue->efx;
 	unsigned int max_fill, trigger, max_trigger;
@@ -1260,7 +1260,7 @@ void efx_init_rx_queue(struct efx_rx_queue *rx_queue)
 	efx_refill_skb_cache(rx_queue);
 
 	/* Set up RX descriptor ring */
-	efx_nic_init_rx(rx_queue);
+	return efx_nic_init_rx(rx_queue);
 }
 
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
@@ -1314,14 +1314,19 @@ void efx_fini_rx_queue(struct efx_rx_queue *rx_queue)
 void efx_remove_rx_queue(struct efx_rx_queue *rx_queue)
 {
 	netif_dbg(rx_queue->efx, drv, rx_queue->efx->net_dev,
-		  "destroying RX queue %d\n", efx_rx_queue_index(rx_queue));
+		  "removing RX queue %d\n", efx_rx_queue_index(rx_queue));
 
 	efx_nic_remove_rx(rx_queue);
+}
+
+void efx_destroy_rx_queue(struct efx_rx_queue *rx_queue)
+{
+	netif_dbg(rx_queue->efx, drv, rx_queue->efx->net_dev,
+		  "destroying RX queue %d\n", efx_rx_queue_index(rx_queue));
 
 	kfree(rx_queue->buffer);
 	rx_queue->buffer = NULL;
 }
-
 
 #if defined(EFX_NOT_UPSTREAM) && !defined(__VMKLNX__)
 static int __init
@@ -1551,6 +1556,7 @@ void efx_ssr_fini(struct efx_channel *channel)
 	}
 
 	kfree(st->conns_n);
+	st->conns_n = NULL;
 	kfree(st->conns);
 	st->conns = NULL;
 }

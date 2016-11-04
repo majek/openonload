@@ -816,6 +816,7 @@ static int efx_ethtool_get_coalesce(struct net_device *net_dev,
 	coalesce->rx_coalesce_usecs = rx_usecs;
 	coalesce->rx_coalesce_usecs_irq = rx_usecs;
 	coalesce->use_adaptive_rx_coalesce = rx_adaptive;
+	coalesce->stats_block_coalesce_usecs = efx->stats_period_ms * 1000;
 
 	return 0;
 }
@@ -827,6 +828,7 @@ static int efx_ethtool_set_coalesce(struct net_device *net_dev,
 	struct efx_channel *channel;
 	unsigned int tx_usecs, rx_usecs;
 	bool adaptive, rx_may_override_tx;
+	unsigned int stats_usecs;
 	int rc;
 
 	if (coalesce->use_adaptive_tx_coalesce)
@@ -858,6 +860,11 @@ static int efx_ethtool_set_coalesce(struct net_device *net_dev,
 
 	efx_for_each_channel(channel, efx)
 		efx->type->push_irq_moderation(channel);
+
+	stats_usecs = coalesce->stats_block_coalesce_usecs;
+	if (stats_usecs > 0 && stats_usecs < 1000)
+		stats_usecs = 1000;
+	efx_set_stats_period(efx, stats_usecs / 1000);
 
 	return 0;
 }
@@ -1200,20 +1207,28 @@ efx_ethtool_get_rxnfc(struct net_device *net_dev,
 
 		info->data = 0;
 		switch (info->flow_type) {
-		case TCP_V4_FLOW:
-			info->data |= RXH_L4_B_0_1 | RXH_L4_B_2_3;
-			/* fall through */
 		case UDP_V4_FLOW:
+			if (efx->rx_hash_udp_4tuple)
+				/* fall through */
+		case TCP_V4_FLOW:
+				info->data |= RXH_L4_B_0_1 | RXH_L4_B_2_3;
+			/* fall through */
 		case SCTP_V4_FLOW:
 		case AH_ESP_V4_FLOW:
 		case IPV4_FLOW:
 			info->data |= RXH_IP_SRC | RXH_IP_DST;
+#ifdef CONFIG_SFC_FALCON
 			min_revision = EFX_REV_FALCON_B0;
+#else
+			min_revision = EFX_REV_SIENA_A0;
+#endif
 			break;
-		case TCP_V6_FLOW:
-			info->data |= RXH_L4_B_0_1 | RXH_L4_B_2_3;
-			/* fall through */
 		case UDP_V6_FLOW:
+			if (efx->rx_hash_udp_4tuple)
+				/* fall through */
+		case TCP_V6_FLOW:
+				info->data |= RXH_L4_B_0_1 | RXH_L4_B_2_3;
+			/* fall through */
 		case SCTP_V6_FLOW:
 		case AH_ESP_V6_FLOW:
 		case IPV6_FLOW:
@@ -1534,9 +1549,13 @@ static u32 efx_ethtool_get_rxfh_indir_size(struct net_device *net_dev)
 {
 	struct efx_nic *efx = netdev_priv(net_dev);
 
+#ifdef CONFIG_SFC_FALCON
 	return ((efx_nic_rev(efx) < EFX_REV_FALCON_B0 ||
 		 efx->n_rx_channels == 1) ?
 		0 : ARRAY_SIZE(efx->rx_indir_table));
+#else
+	return ARRAY_SIZE(efx->rx_indir_table);
+#endif
 }
 #endif
 
@@ -1708,6 +1727,9 @@ int efx_ethtool_get_ts_info(struct net_device *net_dev,
 
 	/* Software capabilities */
 	ts_info->so_timestamping = (SOF_TIMESTAMPING_RX_SOFTWARE |
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_SKB_TX_TIMESTAMP)
+				    SOF_TIMESTAMPING_TX_SOFTWARE |
+#endif
 				    SOF_TIMESTAMPING_SOFTWARE);
 	ts_info->phc_index = -1;
 

@@ -210,6 +210,10 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
     nis->ready_list_flags[i] = 0;
   }
 
+  ci_ni_dllist_init(ni, &nis->active_wild_pool,
+                    oo_ptr_to_statep(ni, &nis->active_wild_pool),
+                    "active_wild");
+  nis->active_wild_n = 0;
   nis->packet_alloc_numa_nodes = 0;
   nis->sock_alloc_numa_nodes = 0;
   nis->interrupt_numa_nodes = 0;
@@ -275,6 +279,59 @@ ci_setup_ipstack_params_default(void)
   citp_tcp_dsack = CI_CFG_TCP_DSACK;
   
 }
+
+#ifndef __KERNEL__
+static int try_get_hp_sz(const char* line, unsigned* hp_sz)
+{
+  /* attempt to determine size of hugepages on system.
+   * scans lines presented from /proc/meminfo, extracts
+   * size if format is
+   * Hugepagesize:     <N> kB
+   * where <N> is an integer*/
+  unsigned n;
+  if( sscanf(line, "Hugepagesize:     %u kB", &n) != 1)
+    return 0;
+  *hp_sz = n;
+  return 1;
+}
+
+static int check_hp(ci_netif_config_opts* opts){
+  FILE* f;
+  char buf[80];
+  unsigned hp_sz;
+
+  hp_sz=0;
+  f=fopen("/proc/meminfo", "r");
+  if( !f ) {
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "%s failed to open /proc/meminfo with "
+               "error %d. Disabling hugepage support", __FUNCTION__, errno);
+    return -1;
+  }
+
+  while( 1 ) {
+    if( !fgets(buf, sizeof(buf), f) )  {
+      fclose(f);
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "EIO Error: %s failed to "
+                 "read line from proc/meminfo. Disabling hugepage "
+                 "support",__FUNCTION__);
+      return -1;
+    }
+    if( try_get_hp_sz(buf, &hp_sz) ) break;
+  }
+
+  fclose(f);
+
+  if( (hp_sz != 2048) && (hp_sz != 4096) ){
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "Kernel hugepage size %u kB"
+               "is not supported. Disabling hugepage support", hp_sz);
+    opts->huge_pages=0;
+    return -1;
+  }
+
+  return 0;
+}
+#endif
+
 
 
 #ifndef __KERNEL__
@@ -797,13 +854,15 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   if ( (s = getenv("EF_SHARE_WITH")) )
     opts->share_with = atoi(s);
 #if CI_CFG_PKTS_AS_HUGE_PAGES
-  if( (s = getenv("EF_USE_HUGE_PAGES")) ) {
-    opts->huge_pages = atoi(s);
-  }
-  if( opts->huge_pages != 0 && opts->share_with != 0 ) {
-    CONFIG_LOG(opts, CONFIG_WARNINGS, "Turning huge pages off because the "
-               "stack is going to be used by multiple users");
-    opts->huge_pages = 0;
+  if( !check_hp(opts) ){
+    if( (s = getenv("EF_USE_HUGE_PAGES")) ) {
+      opts->huge_pages = atoi(s);
+    }
+    if( opts->huge_pages != 0 && opts->share_with != 0 ) {
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "Turning huge pages off because the "
+                 "stack is going to be used by multiple users");
+      opts->huge_pages = 0;
+    }
   }
 #endif
   if ( (s = getenv("EF_COMPOUND_PAGES_MODE")) )
@@ -1150,6 +1209,11 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->separate_udp_rxq = atoi(s);
 #endif
 
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS")) )
+    opts->tcp_shared_local_ports = atoi(s);
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_MAX")) )
+    opts->tcp_shared_local_ports_max = atoi(s);
+
   if( (s = getenv("EF_HIGH_THROUGHPUT_MODE")) )
     opts->rx_merge_mode = atoi(s);
 
@@ -1344,6 +1408,12 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
 {
   int rc;
 
+  if( ni->timesync != NULL ) {
+    rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
+                            ni->timesync, ni->state->timesync_bytes);
+    if( rc < 0 )  LOG_NV(ci_log("%s: munmap timesync %d", __FUNCTION__, rc));
+  }
+
   /* Buffer mapping. */
   {
     unsigned id;
@@ -1409,6 +1479,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
   int rc;
 
   /* Initialise all mappings with NULL to roll back in case of error. */
+  ni->timesync = NULL;
   ni->io_ptr = NULL;
 #if CI_CFG_PIO
   ni->pio_ptr = NULL;
@@ -1426,6 +1497,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
    */
   if( ns->timesync_bytes != 0 ) {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_TIMESYNC, ns->timesync_bytes,
                           OO_MMAP_FLAG_READONLY, &p);
     if( rc < 0 ) {
@@ -1441,6 +1513,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
    */
   if( ns->io_mmap_bytes != 0 ) {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_IO, ns->io_mmap_bytes,
                           OO_MMAP_FLAG_DEFAULT, &p);
     if( rc < 0 ) {
@@ -1456,6 +1529,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
    */
   if( ns->pio_mmap_bytes != 0 ) {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_PIO, ns->pio_mmap_bytes,
                           OO_MMAP_FLAG_DEFAULT, &p);
     if( rc < 0 ) {
@@ -1474,6 +1548,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
    */
   if( ns->buf_mmap_bytes != 0 ) {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_IOBUFS, ns->buf_mmap_bytes,
                           OO_MMAP_FLAG_DEFAULT, &p);
     if( rc < 0 ) {
@@ -1492,6 +1567,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     enum ofe_status orc;
 
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_OFE_RO, NI_OPTS(ni).ofe_size,
                           OO_MMAP_FLAG_READONLY, &p);
     if( rc < 0 ) {
@@ -1507,6 +1583,7 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     if( orc == OFE_OK && stat.max != 0 ) {
       p = (char*)p + NI_OPTS(ni).ofe_size - stat.max;
       rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                            OO_MMAP_TYPE_NETIF,
                             CI_NETIF_MMAP_ID_OFE_RW, stat.max,
                             OO_MMAP_FLAG_FIXED, &p);
       if( rc < 0 ) {
@@ -1714,6 +1791,7 @@ netif_tcp_helper_restore(ci_netif* ni, unsigned netif_mmap_bytes)
   int rc;
 
   rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                        OO_MMAP_TYPE_NETIF,
                         CI_NETIF_MMAP_ID_STATE, netif_mmap_bytes,
                         OO_MMAP_FLAG_DEFAULT, &p);
   if( rc < 0 ) {
@@ -1831,6 +1909,7 @@ ofe_setup(ef_driver_handle fd, ci_netif* ni, const char* ofe_config_file)
   if( orc == OFE_OK && stat.max != 0 ) {
     void* p = (char*) ni->ofe + NI_OPTS(ni).ofe_size - stat.max;
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_OFE_RW, stat.max,
                           OO_MMAP_FLAG_FIXED, &p);
     if( rc != 0 ) {
@@ -1907,7 +1986,7 @@ netif_tcp_helper_alloc_u(ef_driver_handle fd, ci_netif* ni,
   /****************************************************************************
    * Set up the mem mmaping.
    */
-  rc = oo_resource_mmap(fd, CI_NETIF_MMAP_ID_STATE,
+  rc = oo_resource_mmap(fd, OO_MMAP_TYPE_NETIF, CI_NETIF_MMAP_ID_STATE,
                         ra.out_netif_mmap_bytes, OO_MMAP_FLAG_DEFAULT, &p);
   if( rc < 0 ) {
     LOG_E(ci_log("%s: oo_resource_mmap %d", __FUNCTION__, rc));
@@ -2090,15 +2169,29 @@ static void ci_netif_pkt_prefault_reserve(ci_netif* ni)
 {
   oo_pkt_p pkt_list;
   int n;
+  int actual_max_packets = ni->packets->sets_max * PKTS_PER_SET;
+  /* The maximum number of packet buffers we can have is subject to rounding
+   * due to packet set size. Conservative approach is to use max of this and
+   * configured EF_MAX_PACKETS - ensures we will always max out the buffers
+   * when EF_PREFAULT_PACKETS is bigger than both.
+   */
+  int target_allocated = CI_MIN( NI_OPTS(ni).prefault_packets,
+                                 CI_MAX(NI_OPTS(ni).max_packets,
+                                        actual_max_packets) );
+  int already_reserved = (ni->packets->n_pkts_allocated - ni->packets->n_free);
 
   if( ! NI_OPTS(ni).prefault_packets )
     return;
 
   ci_netif_lock(ni);
-  n = ci_netif_pkt_reserve(ni, NI_OPTS(ni).prefault_packets, &pkt_list);
-  if( n < NI_OPTS(ni).prefault_packets )
-    LOG_E(ci_log("%s: Prefaulted only %d of %d",
-                 __FUNCTION__, n, NI_OPTS(ni).prefault_packets));
+  /* Try to reserve enough so that total allocation reaches target level */
+  n = ci_netif_pkt_reserve(ni, target_allocated - already_reserved, &pkt_list);
+  if( ni->packets->n_pkts_allocated < target_allocated )
+    LOG_E(ci_log("%s: Prefaulting only allocated %d of %d (reserved +%d)",
+                 __FUNCTION__,
+                 ni->packets->n_pkts_allocated,
+                 target_allocated,
+                 n));
   ci_netif_pkt_reserve_free(ni, pkt_list, n);
   ci_netif_unlock(ni);
 }
@@ -2123,8 +2216,8 @@ static int check_pio(ci_netif_config_opts* opts)
 
 void ci_netif_cluster_prefault(ci_netif* ni)
 {
-  ci_netif_pkt_prefault(ni);
   ci_netif_pkt_prefault_reserve(ni);
+  ci_netif_pkt_prefault(ni);
 }
 
 int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
@@ -2134,7 +2227,7 @@ int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
   ni->flags = 0;
   ni->error_flags = 0;
 
-  ni->cplane = cicp_get_handle(CPLANE_API_VERSION, -1);
+  ni->cplane = cicp_get_handle(CPLANE_API_VERSION, -1, CITP_OPTS.fd_base);
   if( ni->cplane == NULL ) {
     LOG_S(ci_log("%s: failed to get control plane handle", __func__));
     return -EINVAL;
@@ -2173,8 +2266,8 @@ int ci_netif_ctor(ci_netif* ni, ef_driver_handle fd, const char* stack_name,
   if( (rc = netif_tcp_helper_alloc_u(fd, ni, opts, flags, stack_name)) < 0 )
     return rc;
 
-  ci_netif_pkt_prefault(ni);
   ci_netif_pkt_prefault_reserve(ni);
+  ci_netif_pkt_prefault(ni);
   oo_atomic_set(&ni->ref_count, 0);
 
   NI_LOG(ni, BANNER,
@@ -2263,10 +2356,10 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
   oo_pkt_p pkt_list;
   int lim, rc, n;
 
-  ci_tcp_helper_more_bufs(ni);
+  rc = ci_tcp_helper_more_bufs(ni);
   if( ni->packets->n_free == 0 ) {
-    LOG_E(ci_log("%s: [%d] ERROR: failed to allocate initial packet set",
-                 __func__, NI_ID(ni)));
+    LOG_E(ci_log("%s: [%d] ERROR: failed to allocate initial packet set: %d",
+                 __func__, NI_ID(ni), rc));
     return -ENOMEM;
   }
   ni->packets->id = 0;
@@ -2492,7 +2585,7 @@ int ci_netif_restore(ci_netif* ni, ef_driver_handle fd,
       goto fail;
     }
 
-    ni->cplane = cicp_get_handle(CPLANE_API_VERSION, fd);
+    ni->cplane = cicp_get_handle(CPLANE_API_VERSION, fd, CITP_OPTS.fd_base);
     if( ni->cplane == NULL ) {
       ci_log("%s: failed to restore control plane handle", __func__);
       goto fail;

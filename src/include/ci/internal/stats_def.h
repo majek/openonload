@@ -411,3 +411,11 @@ OO_STAT("Number of proactive packet buffers allocations because of "
 OO_STAT("Number of times the stack lock was deferred from driverlink "
         "context to workqueue.",
         ci_uint32, stack_locks_deferred, count)
+OO_STAT("Number of TCP active-open sockets that used a shared local port",
+        ci_uint32, tcp_shared_local_ports_used, count)
+OO_STAT("Number of times a TIME_WAIT was reused to use a shared local port",
+        ci_uint32, tcp_shared_local_ports_reused_tw, count)
+OO_STAT("Number of times the shared local port pool was grown",
+        ci_uint32, tcp_shared_local_ports_grow, count)
+OO_STAT("Number of times no active wild filter was available",
+        ci_uint32, tcp_shared_local_ports_exhausted, count)

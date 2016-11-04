@@ -285,6 +285,14 @@ extern int tcp_helper_cluster_alloc_thr(const char* name,
                                         const ci_netif_config_opts* ni_opts,
                                         tcp_helper_resource_t** thr_out);
 
+/*! Tries to allocate up to size active wilds to the active wild pool.
+ *
+ * \return 0 size entries were added to pool
+ *        -1 otherwise
+ */
+extern int tcp_helper_alloc_to_active_wild_pool(tcp_helper_resource_t* rs,
+                                                int size);
+
 /*--------------------------------------------------------------------
  *!
  * Called to release a kernel reference to a stack.  This is called
@@ -455,7 +463,8 @@ efab_tcp_helper_ready_list_events(tcp_helper_resource_t* trs,
 
 
 extern int efab_attach_os_socket(tcp_helper_endpoint_t*, struct file*);
-extern int efab_create_os_socket(tcp_helper_endpoint_t* ep, ci_int32 domain,
+extern int efab_create_os_socket(tcp_helper_resource_t* trs,
+                                 tcp_helper_endpoint_t* ep, ci_int32 domain,
                                  ci_int32 type, int flags);
 
 extern void

@@ -336,6 +336,27 @@ static void get_env_opt_port_list(ci_uint64* opt, const char* name)
   }
 }
 
+static void citp_update_and_crosscheck(ci_netif_config_opts* netif_opts,
+                                       citp_opts_t* citp_opts)
+{
+  /*
+   * ci_netif_config_opts_getenv() is called before
+   * citp_transport_init(), so we need to update
+   * update ci_cfg_opts.netif_opts.accept_inherit_nonblock,
+   * making netifs to inherit flags if the O/S is
+   * being forced to do so
+   */
+  if (citp_opts->accept_force_inherit_nonblock)
+    netif_opts->accept_inherit_nonblock = 1;
+
+  if( citp_opts->ul_epoll == 0 && netif_opts->int_driven == 0 ) {
+    ci_log("EF_INT_DRIVEN=0 and EF_UL_EPOLL=0 are not compatible.  "
+           "EF_INT_DRIVEN can be set to 0 implicitly, because of non-zero "
+           "EF_POLL_USEC.  If you need both spinning and EF_UL_EPOLL=0, "
+           "please set EF_INT_DRIVEN=1 explicitly.");
+  }
+  return;
+}
 
 static void citp_opts_getenv(citp_opts_t* opts)
 {
@@ -369,6 +390,9 @@ static void citp_opts_getenv(citp_opts_t* opts)
       ci_log_options |= CI_LOG_TIME;
     citp_setup_logging_change(citp_log_fn_ul);
   }
+  if( getenv("EF_LOG_THREAD") )
+    ci_log_options |= CI_LOG_TID;
+
 
   if( getenv("EF_POLL_NONBLOCK_FAST_LOOPS") &&
       ! getenv("EF_POLL_NONBLOCK_FAST_USEC") )
@@ -435,16 +459,11 @@ static void citp_opts_getenv(citp_opts_t* opts)
   GET_ENV_OPT_INT("EF_SO_BUSY_POLL_SPIN", so_busy_poll_spin);
 #if CI_CFG_USERSPACE_EPOLL
   GET_ENV_OPT_INT("EF_UL_EPOLL",        ul_epoll);
-  if( opts->ul_epoll == 0 && ci_cfg_opts.netif_opts.int_driven == 0 ) {
-    ci_log("EF_INT_DRIVEN=0 and EF_UL_EPOLL=0 are not compatible.  "
-           "EF_INT_DRIVEN can be set to 0 implicitly, because of non-zero "
-           "EF_POLL_USEC.  If you need both spinning and EF_UL_EPOLL=0, "
-           "please set EF_INT_DRIVEN=1 explicitly.");
-  }
   GET_ENV_OPT_INT("EF_EPOLL_SPIN",      ul_epoll_spin);
   GET_ENV_OPT_INT("EF_EPOLL_CTL_FAST",  ul_epoll_ctl_fast);
   GET_ENV_OPT_INT("EF_EPOLL_CTL_HANDOFF",ul_epoll_ctl_handoff);
   GET_ENV_OPT_INT("EF_EPOLL_MT_SAFE",   ul_epoll_mt_safe);
+  GET_ENV_OPT_INT("EF_WODA_SINGLE_INTERFACE", woda_single_if);
 #endif
   GET_ENV_OPT_INT("EF_FDTABLE_SIZE",	fdtable_size);
   GET_ENV_OPT_INT("EF_SPIN_USEC",	ul_spin_usec);
@@ -495,6 +514,8 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #if CI_CFG_FD_CACHING
   get_env_opt_port_list(&opts->sock_cache_ports, "EF_SOCKET_CACHE_PORTS");
 #endif
+
+  GET_ENV_OPT_INT("EF_ONLOAD_FD_BASE",	fd_base);
 }
 
 
@@ -516,6 +537,7 @@ static void citp_opts_validate_env(void)
     "EF_NO_PRELOAD_RESTORE",
     "EF_LD_PRELOAD",
     "EF_CLUSTER_NAME",
+    "EF_LOG_THREAD",
 #ifdef ONLOAD_OFE
     "EF_OFE_CONFIG_FILE",
 #endif
@@ -602,6 +624,8 @@ citp_transport_init(void)
   citp.select_fast_cycles = 
     citp_usec_to_cycles64(CITP_OPTS.ul_select_fast_usec);
   ci_tp_init(__oo_per_thread_init_thread);
+
+  citp_update_and_crosscheck(&ci_cfg_opts.netif_opts, &CITP_OPTS);
   return 0;
 }
 

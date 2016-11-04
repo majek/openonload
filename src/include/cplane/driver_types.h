@@ -79,7 +79,17 @@ cicpos_ipif_event_fn_t(ci_ip_addr_net_t net_ip, ci_ip_addrset_t  net_ipset,
 
 typedef void
 cicpos_llap_event_fn_t(ci_ifid_t ifindex, void *arg);
+
+/* Members of an unacceleratable bond.  ie. Filters should not be used
+ * with unavailable hwports because traffic arriving on them goes via the
+ * kernel stack.
+ */
+#define OOF_HWPORT_AVAIL_TAG_BOND 0
+/* Black-white lists - not a cplane tag for now */
+#define OOF_HWPORT_AVAIL_TAG_BWL  1
+/* Number of tags */ 
+#define OOF_HWPORT_AVAIL_TAG_NUM  2
 typedef void
-cicpos_hwport_event_fn_t(ci_hwport_id_t hwport, int available, void *arg);
+cicpos_hwport_event_fn_t(ci_hwport_id_t hwport, int available, int tag, void *arg);
 
 #endif /* __CPLANE_DRIVER_TYPES_H__ */

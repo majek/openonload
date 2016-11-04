@@ -233,6 +233,7 @@ install_userland() {
   u32="$(mmaketool --userbuild_base32)"
   userarch="$(mmaketool --userarch)"
   u64="gnu_${userarch}"
+  want_zf=""
   if [ -d "$u64" ]; then
     # Tolerate lack of 32-bit transport library on 64-bit systems.
     install_plib32 "$u32/lib/transport/unix/libcitransport0.so" \
@@ -245,8 +246,14 @@ install_userland() {
     install_slib32 "$u32"/lib/onload_ext/libonload_ext.a "$i_lib32"
     # ZF is x86_64-only.
     if [ "$userarch" = "x86_64" ]; then
-echo
-echo
+      install_dlib "$u64"/lib/zf/libonload_zf.so "$i_lib64"
+      install_slib "$u64"/lib/zf/libonload_zf_static.a "$i_lib64"
+      install_dir "$i_lib64/zf"
+      install_dir "$i_lib64/zf/debug"
+      install_dlib "$u64"/lib/zf/debug/libonload_zf.so "$i_lib64/zf/debug"
+      install_slib "$u64"/lib/zf/debug/libonload_zf_static.a "$i_lib64/zf/debug"
+      install_x "$u64/tools/zf/zf_stackdump" "$i_usrbin/zf_stackdump"
+      want_zf=1
     fi
     if [ -n "$ppc_at" ]; then
       install_plib "${u64}_at/lib/transport/unix/libcitransport0.so" \
@@ -260,6 +267,12 @@ echo
     install_x "$u64/tools/ip/onload_tcpdump.bin" "$i_usrbin/onload_tcpdump.bin"
     install_x "$u64/tools/ip/onload_fuser" "$i_usrbin/onload_fuser"
     [ -f "$u64/tools/ip/onload_fe" ] && install_x "$u64/tools/ip/onload_fe" "$i_usrbin/onload_fe"
+    failorm=true
+    [ -f "$u64/tools/onload_remote_monitor/orm_json" ] && {
+      install_x "$u64/tools/onload_remote_monitor/orm_json" "$i_usrbin/orm_json"
+      install_x "$TOP/src/tools/onload_remote_monitor/orm_webserver" "$i_usrbin/orm_webserver"
+      failorm=false
+    }
     install_solar_clusterd
     $affinity && {
       install_plib32 "$u32/lib/sfcaffinity/libsfcaffinity.so" \
@@ -296,6 +309,7 @@ echo
   install_f onload_misc/onload_sysconfig "$i_etc/sysconfig/openonload"
   install_x onload_tcpdump "$i_usrbin/onload_tcpdump"
   install_x onload_iptables "$i_usrbin/onload_iptables"
+  install_x zf_debug "$i_usrbin/zf_debug"
   $affinity && {
     install_x sfcaffinity_config "$i_usrsbin/sfcaffinity_config"
     install_x sfcaffinity "$i_usrbin/sfcaffinity"
@@ -337,6 +351,16 @@ echo
   install_f onload/extensions.h "$i_include/onload/extensions.h"
   install_f onload/extensions_zc.h "$i_include/onload/extensions_zc.h"
 
+  if [ -n "$want_zf" ]; then
+    # Install TCP direct public headers
+    install_dir "$i_include/zf"
+    install_dir "$i_include/zf/sysdep"
+    /bin/ls zf/*.h zf/sysdep/*.h|
+      while read -r f; do
+        install_f "$f" "$i_include/$f"
+      done;
+  fi
+
   # Install header files for ef_vi app development
   /bin/ls etherfabric/*.h |
     while read -r f; do
@@ -348,6 +372,7 @@ echo
 install_ldconfig() {
   # Run ldconfig.
   [ -d "$i_lib64" ] && ldconfig -n "$i_lib64"
+  [ -d "$i_lib64/zf/debug" ] && ldconfig -n "$i_lib64/zf/debug"
   [ -d "$i_lib32" ] && ldconfig -n "$i_lib32"
 }
 
@@ -379,7 +404,7 @@ install_kernel_modules() {
         $do update-initramfs -u -k $KVER
       # RHEL7: get new sfc.ko into ramfs
       elif which dracut >/dev/null 2>&1; then
-        $do dracut --kver $KVER
+        $do dracut -f --kver $KVER
       else
         log "WARNING: commands to update initrd not found"
         log "WARNING: please update your initrd manually."
@@ -591,6 +616,7 @@ test=false
 do=
 listfiles=false
 fail32=false
+failorm=false
 require32=false
 setuid=true
 force=false
@@ -748,6 +774,13 @@ fi
 
 logprog "Install complete."
 
+if $failorm; then
+  err
+  log "Note: Onload Remote Monitor (ORM) was not installed." \
+      "If ORM is required, please check availability of libtool, autoconf and" \
+      "automake, then rebuild. See build log for further details."
+  err
+fi
 if $fail32; then
   err
   log "WARNING: 32-bit libraries were not installed.  As a result it will" \

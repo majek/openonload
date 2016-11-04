@@ -39,6 +39,10 @@
 #include <ci/net/arp.h>
 
 
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility push(default)
+#endif
+
 /*----------------------------------------------------------------------------
  * O/S-specific Operations
  *---------------------------------------------------------------------------*/
@@ -116,6 +120,9 @@ cicppl_handle_icmp(cicp_handle_t *control_plane,
 		   const ci_ip4_hdr*, size_t ip_len);
 
 
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility pop
+#endif
 
 #endif /* __CI_DRIVER_EFAB_CPLANE_PROT_H__ */
 

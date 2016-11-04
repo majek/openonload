@@ -664,5 +664,6 @@
  */
 #define CI_CFG_N_READY_LISTS (CI_CFG_EPOLL1_SETS_PER_STACK + 1)
 
+
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */

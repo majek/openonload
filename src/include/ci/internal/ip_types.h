@@ -179,6 +179,10 @@ struct ci_netif_s {
    * tcp_helper_resource_rm_alloc_proxy function through ioctl.
    */
 # define CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS 0x2
+  /* can be the same as the above */
+# define CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS \
+    CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS
+
 
 #ifndef __KERNEL__
 

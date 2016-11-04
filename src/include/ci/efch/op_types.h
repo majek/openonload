@@ -199,6 +199,7 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_ETHER_TYPE   0x84
 # define                CI_RSOP_VI_GET_TS_CORRECTION    0x85
 # define                CI_RSOP_VI_TX_ALT_ALLOC         0x86
+# define                CI_RSOP_VI_TX_ALT_FREE          0x87
 
   union {
     struct {
@@ -390,7 +391,7 @@ typedef struct ci_license_challenge_op_s {
 **  BASE_MACADDR[6 bytes],
 **  CURRENT_MACADDR[6 bytes],
 */
-#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (70)
+#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (76)
 
 typedef struct ci_v3_license_challenge_op_s {
   int32_t               fd;

@@ -79,7 +79,7 @@ int onload_stack_opt_set_int(const char* opt, int64_t val)
 __attribute__((weak))
 int onload_stack_opt_get_int(const char* opt, int64_t* val)
 {
-  return 0;
+  return -ENOSYS;
 }
 
 __attribute__((weak))
@@ -182,7 +182,7 @@ int onload_fd_check_feature(int fd, enum onload_fd_feature feature)
 __attribute__((weak))
 int onload_thread_set_spin(enum onload_spin_type type, int spin)
 {
-  return -ENOSYS;
+  return 0;
 }
 /**************************************************************************/
 
@@ -208,7 +208,7 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
 __attribute__((weak))
 int onload_move_fd(int fd)
 {
-  return -EINVAL;
+  return 0;
 }
 
 
@@ -243,7 +243,7 @@ __attribute__((weak))
 int
 oo_raw_send(int fd, int hwport, const struct iovec *iov, int iovcnt)
 {
-  errno = EINVAL;
+  errno = ENOSYS;
   return -1;
 }
 
@@ -253,5 +253,12 @@ onload_get_tcp_info(int fd, struct onload_tcp_info* info, int* len_in_out)
 {
   errno = EINVAL;
   return -1;
+}
+
+__attribute__((weak))
+int
+onload_socket_nonaccel(int domain, int type, int protocol)
+{
+  return socket(domain, type, protocol);
 }
 

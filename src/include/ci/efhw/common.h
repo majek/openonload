@@ -113,6 +113,7 @@ typedef union {
  */
 #define EFHW_VI_ENABLE_RX_MERGE    0x1000000  /*! Enable RX event merging */
 #define EFHW_VI_ENABLE_EV_TIMER    0x2000000  /*! Enable hardware event timer */
+#define EFHW_VI_TX_ALT             0x4000000  /*! Provision for alternatives */
 
 /* Flags indicating effective setings determined at queue
  * allocation/enabling.  Unfortunately these flags are exposed through the

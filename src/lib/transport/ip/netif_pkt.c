@@ -69,6 +69,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
 #endif
   {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_PKTSET(setid),
                           CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET,
                           OO_MMAP_FLAG_DEFAULT,

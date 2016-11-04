@@ -50,6 +50,7 @@
 #include <onload/cplane_ops.h>
 #include <ci/internal/pio_buddy.h>
 #include <onload/tmpl.h>
+#include <onload/dshm.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
@@ -152,6 +153,9 @@ tcp_helper_reset_stack_work(struct work_struct *data);
 static void
 get_os_ready_list(tcp_helper_resource_t* thr, int ready_list);
 
+static void
+efab_tcp_helper_drop_os_socket(tcp_helper_resource_t* trs,
+                               tcp_helper_endpoint_t* ep);
 
 /*----------------------------------------------------------------------------
  *
@@ -942,7 +946,7 @@ static int allocate_pio(tcp_helper_resource_t* trs, int intf_i,
   rc = efrm_pio_map_kernel(nic, trs_nic->thn_vi_rs, 
                            (void**)&netif_nic->pio.pio_io);
   if( rc < 0 ) {
-    efrm_pio_unlink_vi(trs_nic->thn_pio_rs, trs_nic->thn_vi_rs);
+    efrm_pio_unlink_vi(trs_nic->thn_pio_rs, trs_nic->thn_vi_rs, NULL);
     efrm_pio_release(trs_nic->thn_pio_rs, true);
     trs_nic->thn_pio_rs = NULL;
     if( NI_OPTS(ni).pio == 1 ) {
@@ -1318,7 +1322,6 @@ static int allocate_vis(tcp_helper_resource_t* trs,
   ci_netif* ni = &trs->netif;
   ci_netif_state* ns = ni->state;
   int rc, intf_i;
-  const char* pci_dev_name;
 #if CI_CFG_PIO
   unsigned pio_buf_offset = 0;
 #endif
@@ -1425,9 +1428,8 @@ static int allocate_vis(tcp_helper_resource_t* trs,
     nsn->oo_vi_flags = alloc_info.oo_vi_flags;
     nsn->vi_io_mmap_bytes = alloc_info.vi_io_mmap_bytes;
     dev = efrm_vi_get_pci_dev(trs_nic->thn_vi_rs);
-    pci_dev_name = pci_name(dev);
+    strncpy(nsn->pci_dev, pci_name(dev), sizeof(nsn->pci_dev));
     pci_dev_put(dev);
-    strncpy(nsn->pci_dev, pci_dev_name, sizeof(nsn->pci_dev));
     nsn->pci_dev[sizeof(nsn->pci_dev) - 1] = '\0';
     nsn->vi_instance =
       (ci_uint16) EFAB_VI_RESOURCE_INSTANCE(trs_nic->thn_vi_rs);
@@ -1711,6 +1713,12 @@ static void tcp_helper_gracious_dtor(tcp_helper_resource_t* trs)
                       ni->packets->n_pkts_allocated);
     }
   }
+}
+
+
+static void tcp_helper_leak_check(tcp_helper_resource_t* trs)
+{
+  ci_netif* ni = &trs->netif;
 
   /* Check that all aux buffers have been freed before the stack
    * destruction. */
@@ -2290,8 +2298,10 @@ static void tcp_helper_do_non_atomic(struct work_struct *data)
                            __FUNCTION__, trs->id));
       ci_netif_poll(&trs->netif);
       if( NI_OPTS(&trs->netif).int_driven ) {
-        OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i)
-          tcp_helper_request_wakeup_nic(trs, intf_i);
+        ci_netif* ni = &trs->netif;
+        OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+          if( ci_bit_test_and_clear(&ni->state->evq_prime_deferred, intf_i) )
+            tcp_helper_request_wakeup_nic(trs, intf_i);
       }
       else if( ! trs->netif.state->poll_did_wake &&
                tcp_helper_reprime_is_needed(&trs->netif) ) {
@@ -2444,6 +2454,93 @@ int tcp_helper_rm_alloc_proxy(ci_resource_onload_alloc_t* alloc,
 }
 
 
+static void tcp_helper_release_active_wild_pool(tcp_helper_resource_t* trs)
+{
+  ci_netif* ni = &(trs->netif);
+  int i;
+
+  for( i = 0; i < ni->ep_tbl_n; ++i ) {
+    tcp_helper_endpoint_t* ep = ni->ep_tbl[i];
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, i);
+    if( wo->waitable.state == CI_TCP_STATE_ACTIVE_WILD )
+      /* Everything else gets freed by tcp_helper_endpoint_dtor().
+       * (Actually the os_socket does too, but you get a warning in debug
+       * builds).
+       */
+      efab_tcp_helper_drop_os_socket(trs, ep);
+  }
+}
+
+
+static ci_active_wild* tcp_helper_alloc_active_wild(tcp_helper_resource_t* rs)
+{
+  ci_active_wild* aw;
+  ci_netif* netif = &rs->netif;
+  tcp_helper_endpoint_t* ep;
+  ci_uint16 source_be16 = 0;
+  int rc;
+
+  /* Get a sock buf */
+  aw = ci_active_wild_get_state_buf(netif);
+  if( !aw )
+    goto fail;
+
+  /* Give it an OS backing socket */
+  ep = ci_trs_get_valid_ep(rs, SC_SP(&aw->s));
+  rc = efab_create_os_socket(rs, ep, AF_INET, SOCK_STREAM, 0);
+  if( rc != 0 )
+    goto fail_ep;
+
+  /* Bind, to get a port assigned and reserve it */
+  rc = __ci_tcp_bind(netif, &aw->s, NULL, INADDR_ANY, &source_be16,
+                     0);
+  if( rc == 0 )
+    sock_lport_be16(&aw->s) = source_be16;
+  else
+    goto fail_ep;
+
+  /* Install filters */
+  rc = tcp_helper_endpoint_set_filters(ep, CI_IFID_BAD, OO_SP_NULL);
+  if( rc != 0 )
+    goto fail_ep;
+
+  return aw;
+
+ fail_ep:
+  efab_tcp_helper_close_endpoint(rs, ep->id);
+ fail:
+  return NULL;
+}
+
+
+int tcp_helper_alloc_to_active_wild_pool(tcp_helper_resource_t* rs, int size)
+{
+  int i;
+  ci_active_wild* aw;
+  ci_netif* ni = &rs->netif;
+
+  OO_DEBUG_TCPH(ci_log("%s [%u] size %d", __FUNCTION__, rs->id, size));
+
+  for( i = 0; i < size; i++ ) {
+    aw = tcp_helper_alloc_active_wild(rs);
+    if( aw ) {
+      ci_ni_dllist_push(ni, &ni->state->active_wild_pool, &aw->pool_link);
+      ni->state->active_wild_n++;
+    }
+    else {
+      /* Treat the active wild pool as best effort - we can carry on
+       * without it.
+       */
+      NI_LOG(&rs->netif, RESOURCE_WARNINGS, "%s: Only alloced %d of %d active"
+             " shared", __FUNCTION__, CI_MAX(0, i - 1), size);
+      return -ENOBUFS;
+    }
+  }
+
+  return 0;
+}
+
+
 int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
                         const ci_netif_config_opts* opts,
                         int ifindices_len, tcp_helper_cluster_t* thc,
@@ -2576,6 +2673,7 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
   /* Allocate hardware resources */
   ni->ep_tbl = NULL;
   ni->flags = alloc->in_flags;
+  ci_assert( ! (alloc->in_flags & CI_NETIF_FLAG_IN_DL_CONTEXT) );
   rc = allocate_netif_hw_resources(alloc, thc, rs);
   if( rc < 0 ) goto fail6;
 
@@ -2633,6 +2731,9 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
     cicpos_sync_tables(CICP_HANDLE(&rs->netif));
   }
 
+  if( NI_OPTS(ni).tcp_shared_local_ports > 0 )
+    tcp_helper_alloc_to_active_wild_pool(rs,
+                                         NI_OPTS(ni).tcp_shared_local_ports);
 
   /* When requested set up tproxy mode on selected interface(s) */
   if( (NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_ENABLE) &&
@@ -2700,6 +2801,7 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
 
  fail10:
  fail9:
+  tcp_helper_release_active_wild_pool(rs);
  fail8:
 #ifdef EFRM_DO_NAMESPACES
   put_nsproxy(rs->nsproxy);
@@ -2727,6 +2829,8 @@ int tcp_helper_rm_alloc(ci_resource_onload_alloc_t* alloc,
    * Pretend to be in dl context to avoid proactive packet buffer
    * allocation. */
   ni->flags |= CI_NETIF_FLAG_IN_DL_CONTEXT;
+  /* We don't need more packets: */
+  ef_eplock_clear_flags(&ni->state->lock, CI_EPLOCK_NETIF_NEED_PKT_SET);
   efab_tcp_helper_netif_unlock(rs, 1);
   flush_workqueue(rs->reset_wq);
   efab_tcp_helper_netif_try_lock(rs, 0);
@@ -3395,22 +3499,29 @@ tcp_helper_close_pending_endpoints(tcp_helper_resource_t* trs)
 static void
 efab_tcp_helper_rm_reset_untrusted(tcp_helper_resource_t* trs)
 {
+  /* Called when closing a stack and the lock is wedged.  Assume that
+   * shared state is borked.
+   */
   ci_netif *netif = &trs->netif;
   int i;
 
   for( i = 0; i < netif->ep_tbl_n; ++i ) {
     tcp_helper_endpoint_t *ep = netif->ep_tbl[i];
-    citp_waitable_obj* wo;
+    citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, i);
 
-    /* release OS port keeper */
-    if( ep->os_port_keeper )
-      oo_file_ref_drop(ep->os_port_keeper);
-
-    /* reset TCP connection */
-    wo = ID_TO_WAITABLE_OBJ(netif, i);
     if( (wo->waitable.state & CI_TCP_STATE_TCP_CONN) &&
-        wo->waitable.state != CI_TCP_TIME_WAIT )
+        wo->waitable.state != CI_TCP_TIME_WAIT ) {
       ci_tcp_reset_untrusted(netif, &wo->tcp);
+    }
+    else if( wo->waitable.state == CI_TCP_STATE_ACTIVE_WILD ) {
+      /* In the case of normal endpoints they are associated with a file
+       * descriptor, so even with a wedged netif they will have come through
+       * efab_tcp_helper_close_endpoint() resulting in the os socket being
+       * dropped.  Active wilds aren't associated with an fd so we drop the
+       * os socket explicitly here.
+       */
+      efab_tcp_helper_drop_os_socket(trs, ep);
+    }
   }
 }
 
@@ -3585,17 +3696,23 @@ efab_tcp_helper_rm_free_locked(tcp_helper_resource_t* trs,
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(netif, i);
     citp_waitable* w = &wo->waitable;
 
-    if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF )
+    /* We don't expect ACTIVE_WILD endpoints to be freed yet - they're not
+     * associated with a user file descriptor.  We will free them once
+     * all their users have gone in the stack dtor.
+     */
+    if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF ||
+        w->state == CI_TCP_STATE_ACTIVE_WILD )
       continue;
 
     if( w->state == CI_TCP_CLOSED ) {
 #if CI_CFG_FD_CACHING
       OO_DEBUG_ERR(ci_log("%s [%u]: ERROR endpoint %d leaked state "
-                          "(cached=%d/%d)", __FUNCTION__, trs->id,
-                          i, wo->tcp.cached_on_fd, wo->tcp.cached_on_pid));
+                          "(cached=%d/%d flags %x)", __FUNCTION__, trs->id,
+                          i, wo->tcp.cached_on_fd, wo->tcp.cached_on_pid,
+                          w->sb_aflags));
 #else
-      OO_DEBUG_ERR(ci_log("%s [%u:%d]: ERROR endpoint leaked",
-                          __FUNCTION__, trs->id, i));
+      OO_DEBUG_ERR(ci_log("%s [%u:%d]: ERROR endpoint leaked (flags %x)",
+                          __FUNCTION__, trs->id, i, w->sb_aflags));
 #endif
       w->state = CI_TCP_STATE_FREE;
       continue;
@@ -3753,10 +3870,7 @@ void tcp_helper_dtor(tcp_helper_resource_t* trs)
      */
     efab_tcp_helper_rm_reset_untrusted(trs);
 
-  /* Remove all filters - and make sure we do not send anything, while
-   * closing socket or as a reply to a network packet. */
-  release_ep_tbl(trs);
-
+  tcp_helper_release_active_wild_pool(trs);
   /* Make sure we receive all TX complete events */
   if( ~trs->netif.flags & CI_NETIF_FLAG_WEDGED )
     tcp_helper_gracious_dtor(trs);
@@ -3768,6 +3882,20 @@ void tcp_helper_dtor(tcp_helper_resource_t* trs)
    *      => tcp_helper_rm_free_locked must have run to completion
    */
   tcp_helper_stop(trs);
+
+#ifndef NDEBUG
+  /* We are the only user of this stack, so we can grab the lock.
+   * Make ci_netif_filter_remove() happy. */
+  trs->netif.state->lock.lock = CI_EPLOCK_LOCKED;
+#endif
+
+  /* Remove all filters - and make sure we do not send anything, while
+   * closing socket or as a reply to a network packet. */
+  tcp_helper_release_active_wild_pool(trs);
+  release_ep_tbl(trs);
+
+  if( ~trs->netif.flags & CI_NETIF_FLAG_WEDGED )
+    tcp_helper_leak_check(trs);
 
   if( (NI_OPTS(&trs->netif).scalable_filter_enable ==
        CITP_SCALABLE_FILTERS_ENABLE) &&
@@ -3904,6 +4032,8 @@ efab_tcp_driver_ctor()
   efab_tcp_driver.stack_list_seq = 0;
   ci_waitq_ctor(&efab_tcp_driver.stack_list_wq);
 
+  oo_dshm_init();
+
   efab_tcp_driver.load_numa_node = numa_node_id();
 
   return 0;
@@ -3941,6 +4071,8 @@ void
 efab_tcp_driver_dtor(void)
 {
   OO_DEBUG_TCPH(ci_log("%s: free resources", __FUNCTION__));
+
+  oo_dshm_fini();
 
   ci_id_pool_dtor(&efab_tcp_driver.thr_table.instances);
 
@@ -4719,14 +4851,19 @@ static int oo_handle_wakeup_int_driven(void* context, int is_timeout,
 
   trs = CI_CONTAINER(tcp_helper_resource_t, nic[tcph_nic->thn_intf_i],
                      tcph_nic);
+  ni = &trs->netif;
+
   if( trs->trs_aflags & OO_THR_AFLAG_POLL_AND_PRIME ) {
     /* OO_THR_AFLAG_POLL_AND_PRIME is set - i.e. in some sense the
      * previous interrupt handler is already running.
      * Workqueue will handle new events if any and will prime if needed. */
-    return 0;
+    ci_bit_set(&ni->state->evq_prime_deferred, tcph_nic->thn_intf_i);
+    if( trs->trs_aflags & OO_THR_AFLAG_POLL_AND_PRIME ||
+        ! ci_bit_test_and_clear(&ni->state->evq_prime_deferred,
+                                tcph_nic->thn_intf_i) )
+      return 0;
+    /* otherwise continue as though POLL_AND_PRIME wasn't initially set */
   }
-
-  ni = &trs->netif;
 
   ci_assert( ! is_timeout );
   TCP_HELPER_RESOURCE_ASSERT_VALID(trs, -1);
@@ -4752,9 +4889,16 @@ static int oo_handle_wakeup_int_driven(void* context, int is_timeout,
           CITP_STATS_NETIF_INC(&trs->netif, interrupt_budget_limited);
           raw_cpu_write(oo_budget_limit_last_ts, jiffies);
           /* Steal the locks and exit */
+          ci_bit_set(&ni->state->evq_prime_deferred, tcph_nic->thn_intf_i);
           tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_POLL_AND_PRIME);
           return n;
         }
+        /* Make sure the deferred prime bit is clear, in case it was set by an
+         * earlier iteration through the loop when the lock couldn't be taken.
+         * Test it first to avoid unnecessarily locking the bus on this path.
+         */
+        if( ci_bit_test(&ni->state->evq_prime_deferred, tcph_nic->thn_intf_i) )
+          ci_bit_clear(&ni->state->evq_prime_deferred, tcph_nic->thn_intf_i);
         tcp_helper_request_wakeup_nic(trs, tcph_nic->thn_intf_i);
         efab_tcp_helper_netif_unlock(trs, 1);
         break;
@@ -4778,6 +4922,7 @@ static int oo_handle_wakeup_int_driven(void* context, int is_timeout,
        * result in immediate wakeup and we'll try again, but won't get
        * into the feedback loop of repeated wakeups seen in bug42745.
        */
+      ci_bit_set(&ni->state->evq_prime_deferred, tcph_nic->thn_intf_i);
       if( ef_eplock_set_flag_if_locked(&ni->state->lock,
                                        CI_EPLOCK_NETIF_NEED_PRIME) ) {
         break;
@@ -4786,10 +4931,13 @@ static int oo_handle_wakeup_int_driven(void* context, int is_timeout,
                (trs, OO_TRUSTED_LOCK_NEED_PRIME) ) {
         break;
       }
-      tcp_helper_request_wakeup_nic(trs, tcph_nic->thn_intf_i);
+      if( ci_bit_test_and_clear(&ni->state->evq_prime_deferred,
+                                tcph_nic->thn_intf_i) )
+        tcp_helper_request_wakeup_nic(trs, tcph_nic->thn_intf_i);
       break;
     }
 
+    ci_bit_set(&ni->state->evq_prime_deferred, tcph_nic->thn_intf_i);
     if( ef_eplock_set_flags_if_locked(&ni->state->lock,
                                       CI_EPLOCK_NETIF_NEED_POLL |
                                       CI_EPLOCK_NETIF_NEED_PRIME) ) {
@@ -4923,6 +5071,22 @@ tcp_helper_stop_periodic_work(tcp_helper_resource_t* rs)
  *
  *--------------------------------------------------------------------*/
 
+static void
+efab_tcp_helper_drop_os_socket(tcp_helper_resource_t* trs,
+                               tcp_helper_endpoint_t* ep)
+{
+  unsigned long lock_flags;
+  struct oo_file_ref* os_socket;
+
+  spin_lock_irqsave(&ep->lock, lock_flags);
+  os_socket = ep->os_socket;
+  ep->os_socket = NULL;
+  spin_unlock_irqrestore(&ep->lock, lock_flags);
+  oo_os_sock_poll_register(&ep->os_sock_poll, NULL);
+  if( os_socket != NULL )
+    oo_file_ref_drop(os_socket);
+}
+
 /* efab_tcp_helper_close_endpoint() must be called in non-atomic
  * non-driverlink context.
  * (1) There might be postponed works for this ep, and we must process
@@ -4936,17 +5100,20 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
   ci_netif* ni;
   tcp_helper_endpoint_t* tep_p;
   ci_irqlock_state_t lock_flags;
+  citp_waitable* w;
   citp_waitable_obj* wo;
 
   ni = &trs->netif;
   tep_p = ci_trs_ep_get(trs, ep_id);
 
+  w = SP_TO_WAITABLE(ni, ep_id);
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, tep_p->id);
+
   OO_DEBUG_TCPH(ci_log("%s: [%d:%d] k_ref_count=%d %s", __FUNCTION__,
                        trs->id, OO_SP_FMT(ep_id), trs->k_ref_count,
                        ci_tcp_state_str(wo->waitable.state)));
 
-  ci_assert(!(wo->waitable.sb_aflags & CI_SB_AFLAG_ORPHAN));
+  ci_assert(!(w->sb_aflags & CI_SB_AFLAG_ORPHAN));
   ci_assert(! in_atomic());
 
   /* Drop ref to the OS socket.  Won't necessarily be the last reference to it;
@@ -4954,24 +5121,16 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
    * processes.  This needs to be done here rather since fput can block.
    */
   if( tep_p->os_socket != NULL ) {
-    unsigned long flags;
-    struct oo_file_ref* os_socket;
-    ci_assert( !(wo->waitable.sb_flags & CI_SB_FLAG_MOVED) );
+    ci_assert( !(w->sb_flags & CI_SB_FLAG_MOVED) );
 
     /* Shutdown() the os_socket.  This needs to be done in a blocking
      * context.
      */
-    if( wo->waitable.state == CI_TCP_LISTEN )
+    if( w->state == CI_TCP_LISTEN )
       efab_tcp_helper_shutdown_os_sock(tep_p, SHUT_RDWR);
 
-    spin_lock_irqsave(&tep_p->lock, flags);
+    efab_tcp_helper_drop_os_socket(trs, tep_p);
 
-    os_socket = tep_p->os_socket;
-    tep_p->os_socket = NULL;
-    spin_unlock_irqrestore(&tep_p->lock, flags);
-    oo_os_sock_poll_register(&tep_p->os_sock_poll, NULL);
-    if( os_socket != NULL )
-      oo_file_ref_drop(os_socket);
   }
 
   /* SO_LINGER should be handled
@@ -4980,8 +5139,8 @@ efab_tcp_helper_close_endpoint(tcp_helper_resource_t* trs, oo_sp ep_id)
    * (iii) not under the trusted lock.
    */
   if( ! (current->flags & PF_EXITING) &&
-      (wo->waitable.state & CI_TCP_STATE_TCP) &&
-      wo->waitable.state !=  CI_TCP_LISTEN &&
+      (w->state & CI_TCP_STATE_TCP) &&
+      w->state !=  CI_TCP_LISTEN &&
       (wo->sock.s_flags & CI_SOCK_FLAG_LINGER) && wo->sock.so.linger != 0 &&
       ci_netif_lock(&trs->netif) == 0 ) {
     __ci_tcp_shutdown(&trs->netif, &wo->tcp, SHUT_WR);
@@ -5157,13 +5316,13 @@ efab_attach_os_socket(tcp_helper_endpoint_t* ep, struct file* os_file)
 
 
 int
-efab_create_os_socket(tcp_helper_endpoint_t* ep, ci_int32 domain,
-                      ci_int32 type, int flags)
+efab_create_os_socket(tcp_helper_resource_t* trs, tcp_helper_endpoint_t* ep,
+                      ci_int32 domain, ci_int32 type, int flags)
 {
   int rc;
+  struct socket *sock;
   struct file *os_file;
-  struct socket* sock;
-  citp_waitable_obj *wo = SP_TO_WAITABLE_OBJ(&ep->thr->netif, ep->id);
+  citp_waitable_obj* wo;
 
   rc = sock_create(domain, type, 0, &sock);
   if( rc < 0 ) {
@@ -5177,15 +5336,7 @@ efab_create_os_socket(tcp_helper_endpoint_t* ep, ci_int32 domain,
                  __FUNCTION__, PTR_ERR(os_file)));
     sock_release(sock);
     return PTR_ERR(os_file);
-  }         
-
-  wo->sock.ino = os_file->f_dentry->d_inode->i_ino;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
-  wo->sock.uid = os_file->f_dentry->d_inode->i_uid;
-#else
-  wo->sock.uid = __kuid_val(os_file->f_dentry->d_inode->i_uid);
-#endif
-
+  }
   rc = efab_attach_os_socket(ep, os_file);
   if( rc < 0 ) {
     LOG_E(ci_log("%s: ERROR: efab_attach_os_socket failed (%d)",
@@ -5193,6 +5344,15 @@ efab_create_os_socket(tcp_helper_endpoint_t* ep, ci_int32 domain,
     /* NB. efab_attach_os_socket() consumes [os_file] even on error. */
     return rc;
   }
+
+  wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  wo->sock.domain = domain;
+  wo->sock.ino = ep->os_socket->file->f_dentry->d_inode->i_ino;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
+  wo->sock.uid = ep->os_socket->file->f_dentry->d_inode->i_uid;
+#else
+  wo->sock.uid = __kuid_val(ep->os_socket->file->f_dentry->d_inode->i_uid);
+#endif
 
   /* Advertise the existence of the backing socket to user-level. */
   ci_atomic32_or(&wo->waitable.sb_aflags, CI_SB_AFLAG_OS_BACKED);
@@ -5509,12 +5669,9 @@ efab_tcp_helper_netif_lock_callback(eplock_helper_t* epl, ci_uint64 lock_val,
   if( after_unlock_flags & CI_EPLOCK_NETIF_NEED_PRIME ) {
     CITP_STATS_NETIF_INC(&thr->netif, unlock_slow_need_prime);
     if( NI_OPTS(ni).int_driven ) {
-      /* TODO: When interrupt driven, evq_primed is never cleared, so we
-       * don't know here which subset of interfaces needs to be primed.
-       * Would be more efficient if we did.
-       */
       OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
-        tcp_helper_request_wakeup_nic(thr, intf_i);
+        if( ci_bit_test_and_clear(&ni->state->evq_prime_deferred, intf_i) )
+          tcp_helper_request_wakeup_nic(thr, intf_i);
     }
     else {
       tcp_helper_request_wakeup(thr);

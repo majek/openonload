@@ -3008,6 +3008,14 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
      * See bug 10638 for details */
     if( next_state == CI_TCP_CLOSED ) {
       ci_tcp_drop(netif, ts, 0);
+
+      /* If we're sharing an active wild then we've just made our 4-tuple
+       * available for re-use, by removing filters.  The peer will be sitting
+       * in TIME-WAIT however, so we need to be careful about our sequence
+       * numbers if we re-use this quickly.
+       */
+      if( ts->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD )
+        ci_netif_active_wild_sharer_closed(netif, &ts->s);
     }
     else {
       ci_assert(next_state == CI_TCP_TIME_WAIT);
@@ -4159,8 +4167,10 @@ static int ci_tcp_rx_deliver_to_listen(ci_sock_cmn* s, void* opaque_arg)
   }
 #endif
 
-  handle_rx_listen(rxp->ni, SOCK_TO_TCP_LISTEN(s), rxp, 0);
-  rxp->pkt = NULL;
+  if( s->b.state != CI_TCP_STATE_ACTIVE_WILD ) {
+    handle_rx_listen(rxp->ni, SOCK_TO_TCP_LISTEN(s), rxp, 0);
+    rxp->pkt = NULL;
+  }
   return 1;  /* finished -- don't deliver to any other socket */
 }
 

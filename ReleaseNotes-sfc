@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.8.2.1004
+Version:  4.10.0.1012
 
 
 Overview
@@ -15,8 +15,8 @@ The drivers contained in this package support the following Solarflare
 adapters:
 
 - Solarflare Flareon [Ultra] Server Adapters:
-  - Solarflare SFN8022 Dual Port SFP+ Server Adapter
   - Solarflare SFN8522 Dual Port SFP+ Server Adapter
+  - Solarflare SFN8542 Dual Port QSFP+ Server Adapter
   - Solarflare SFN7002F Dual Port SFP+ Server Adapter
   - Solarflare SFN7004F Quad Port SFP+ Server Adapter
   - Solarflare SFN7042Q Dual Port QSFP+ Server Adapter
@@ -73,7 +73,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.8.2.1004
+   version: 4.10.0.1012
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -99,29 +99,26 @@ Linux distribution support for Solarflare Adapters
 This driver package is supported on:
  - RedHat Enterprise Linux		          5.10,  5.11
  - RedHat Enterprise Linux		          6.5, 6.6, 6.7, 6.8
-   - Redhat Messaging Realtime and Grid           2.4, 2.5
+   - Redhat Messaging Realtime and Grid           2.5
  - RedHat Enterprise Linux 		          7.0, 7.1, 7.2
-   - RedHat Enterprise Linux for Realtime	  7.1
+   - RedHat Enterprise Linux for Realtime	  7.1, 7.2
  - SuSE Linux Enterprise Server 11                sp3, sp4
    - SuSE Linux Enterprise RealTime Extension 11  
- - SuSE Linux Enterprise Server 12                base release
- - Canonical Ubuntu Server LTS                    14.04
- - Canonical Ubuntu Server                        14.10, 15.04
- - Debian 7 "Wheezy"                              7.7
- - Debian 8 "Jessie"                              8.0
- - Linux                                          2.6.18 to 4.6
+ - SuSE Linux Enterprise Server 12                base release, sp1
+ - Canonical Ubuntu Server LTS                    14.04, 16.04
+ - Canonical Ubuntu Server                        -
+ - Debian 7 "Wheezy"                              7.X
+ - Debian 8 "Jessie"                              8.X
+ - Linux                                          2.6.18 to 4.9-rc1
 
 
 This driver has been tested as a VF driver using KVM / ESXi 5.5 and ESXi 6.0
 hypervisors on the following guest OSes:
  - RedHat Enterprise Linux		          5.11
  - RedHat Enterprise Linux		          6.5, 6.6, 6.7
- - RedHat Enterprise Linux 		          7.0, 7.1
+ - RedHat Enterprise Linux 		          7.0, 7.1, 7.2
  - SuSE Linux Enterprise Server 11                sp4
  - SuSE Linux Enterprise Server 12                base release
-
-Note RHEL6 and SLES11 have in-built Solarflare adapter drivers but these
-drivers may not support SFN7XXX adapters and will not be suitable as a VF driver.
 
 
 Solarflare aims to support the current and previous major release of each
@@ -138,8 +135,8 @@ Please contact your local Solarflare support representative or email
 <support@solarflare.com>.
 
 
-NIC partitioning, SR-IOV and PF-IOV modes on SFN7XXX adapters
--------------------------------------------------------------
+NIC partitioning, SR-IOV and PF-IOV modes on SFN7XXX/8XXX adapters
+------------------------------------------------------------------
 This release of the Solarflare Linux Net driver supports NIC partitioning
 (multiple PFs) and SR-IOV (VFs).
 
@@ -179,7 +176,7 @@ General:
   ~ At this time PTP will only work with the PF0 on each port and will
     not work with a VF.
 
-NIC partitioning support on SFN7XXX adapters:
+NIC partitioning support on SFN7XXX/8XXX adapters:
   ~ The sfc.ko driver will bind to multiple PFs on the same physical adapter
     port and create a network interface for each PF.
   ~ Configure with "sfboot switch-mode=partitioning pf-count=X" and cold reboot
@@ -205,7 +202,7 @@ NIC partitioning support on SFN7XXX adapters:
     another PF's MAC address. For other PFs there is no change in received
     traffic if the interface is put into promiscuous mode.
 
-SR-IOV support on SFN7XXX adapters:
+SR-IOV support on SFN7XXX/8XXX adapters:
   ~ The sfc.ko driver will bind to all VFs and create network interfaces.
   ~ Configure with "sfboot switch-mode=sriov pf-count=1 vf-count=X" and cold
     reboot the server if warned to do so.
@@ -245,7 +242,7 @@ SR-IOV support on SFN7XXX adapters:
   ~ Setting VF spoofcheck/rate/qos (e.g. via the ip command) is not supported
     at this time.
 
-SR-IOV with NIC partitioning mode support on SFN7XXX adapters:
+SR-IOV with NIC partitioning mode support on SFN7XXX/8XXX adapters:
   ~ This mode offers partitioning of the adapter. Each partition is on a unique
     VLAN and within this layer2 broadcast domain there is switching on the
     adapter between the PF and VFs.
@@ -263,16 +260,16 @@ SR-IOV with NIC partitioning mode support on SFN7XXX adapters:
        vf-count=Y"
     and cold reboot the server if warned to do so.
 
-PF-IOV mode support on SFN7XXX adapters:
+PF-IOV mode support on SFN7XXX/8XXX adapters:
   ~ This mode offers switching between PFs. Use this mode where a server does
     not support SR-IOV (otherwise please use SR-IOV mode as this provides up-to
     240VFs versus only 16PFs)
   ~ Configure with "sfboot switch-mode=pfiov pf-count=X" and cold reboot the
     server if warned to do so.
   ~ In RHEL7 passing through a PCI function uses the new VFIO mechanism.
-    Due to a missing capability flag on SFN7XXX hardware, VFIO will only allow
-    all PFs to be passed into a guest together. This will be addressed with a
-    kernel quirk.
+    Due to a missing capability flag on SFN7XXX/8XXX hardware, VFIO will only
+    allow all PFs to be passed into a guest together. This will be addressed
+    with a kernel quirk.
 
 
 Known issues with the platform (KVM/libvirt/kernel)
@@ -319,10 +316,6 @@ Issue 50873:
 
 Known Issues with Solarflare driver/firmware
 --------------------------------------------
-Issue 48214: SF-113650-KI:
-  ~ SARFS/SXPS is not compatible with changes in linux >=3.0 and has been
-    disabled in this release. In this case please use the kernel ARFS/XPS
-    features.
 Issue 50868:
   ~ If using a SFN7142Q adapter with adapter firmware v4.1.0.6742 and running
     sfupdate, after the update the two network interfaces from the second QSFP+
@@ -333,45 +326,120 @@ Issue 50868:
 Changelog
 ---------
 
-### v4.8.2.1004 -- GA release adding support for SFN8x22 adapters.
+### v4.10.0.1012 -- GA release for overlays support on SFN8XXX adapters.
 
-[SFN8522 support]
- ~ Added full support for SFN8522 series Solarflare adapters.
- ~ BETA quality support for stateless checksum offloads for NVGRE,VXLAN,GENEVE
-   tunnels created as native linux tunnels or as OpenVSwitch (OVS) tunnels.
- ~ Please note that SFN8x42 40G QSFP+ adapters are still going through a test
-   cycle at this time and driver/firmware updates will be made available to
-   accompany the GA of these products.
- ~ Use 4K PIO buffers on SFN8XXX adapters.
- ~ Adds a module parameter "performance_profile" to allow selection of
-   broad tuning options, allowing selection of low latency ('latency') or
-   high throughput ('throughput') profiles. The default is 'auto', in
-   which the profile is selected based off licensed options on the NIC.
-   At present this only changes the event queue initialization options on 8000
-   series adapters.
-
-[BETA support for overlays/tunnels/encapsulation on SFN8XXX adapters]
- ~ Add support for encapsulated TSO for 8000 series NICs.
- ~ Add message when adapter resets due to VXLAN port list change.
- ~ Add debugfs entry "vxlan_ports" to print the list of VXLAN ports.
-
-[onload]
-Issue 62104:
- ~ More conservatively account for the number of wakeup events that the driver
-   might have to handle, one for each possible onload stack. This prevents
-   event queue overflows in rare cases.
-
-
-### v4.8.0.1071 -- Beta feature release
 [General changes]
- ~ BETA quality driver support for SFN8XXX series adapters.
-   Please DO NOT use this driver in production environments as it has not
-   completed the full suite of testing at Solarflare.
- ~ Support for checksum offloads in the presense of encapsulation/overlay
-   networks (tunnels) on SFN8XXX hardware. Outer frames of
-   (NV)GRE / VxLAN / GENEVE are supported.
+ ~ Overlays support now declared as fully supported (was a beta feature).
+ ~ Check MTU against minimum threshold.
+ ~ Better detection of BIOS/kernel failing to provide addresses for PCI BARs.
+
+Issue 65427:
+ ~ Report 4-tuple UDP hashing to ethtool, if it's enabled.
+
+Issue 65511:
+ ~ Avoid kernel warning from efx_ef10_ev_process() when the sfc.ko module
+   parameter forward_fcs=1, as CRCs should be ignored in this case.
+
+Issue 64919:
+ ~ Fix crash seen in efx_pci_probe_main() when sf-boot pf-count was altered and
+   the driver was reloaded.
+
+Issue 64574/65176:
+ (SFN8XXX only) when using TX timestamps (e.g. with sfptpd running)
+ ~ Fixes handling a merged TX timestamp (by the adapter).
+ ~ Fixes handling xmit_more (from the kernel queuing discipline) with TX
+   timestamps.
+ ~ Note the error message seen would be reported on the highest TX queue:
+     sfptpd: retrieved transmit timestamp but no packet
+     kernel: sfc 0000:82:00.1 sfc1: TX queue 4 spurious TX completion id 1a
+
+
+### v4.9.0.1016 -- GA release adding support for SFN8542 adapters.
+
+Please note that network interface names may change across this driver update.
+See issue 64065 below.
+
+Support for stateless checksum offloads for NVGRE,VXLAN,GENEVE encapsulation on
+SFN8XXX adapters is still considered a BETA at this time.
+
+[General changes]
+ ~ Add support for "ethtool -C stats-block-usecs".
+   Default is 1 sec, but this can be reduced in order to accurately sample every
+   second from a script
+ ~ Fail gracefully when PCIe BARs are unassigned (better detection of BIOS
+   issues which have been seen after a PCI bus rescan).
+ ~ Add support for software TX timestamping.
+
+[overlays support]
+ ~ Add encap TNI to debugfs filter dump.
+ ~ Set UDP tunnel port list (for GENEVE and VxLAN) on driver load. This may
+   cause the microcontroller on the adapter to reboot in order to reprogram
+   some elements in the adapter datapath.
+
+Issue 64478:
+ ~ In firmware-variant=low-latency if there are more than 256 multicast filter
+   subscriptions then use multicast promiscuous.
+
+Issue 64065:
+ ~ Stop setting dev_port and instead implement get_phys_port_id for PFs. This
+   makes network interface names assigned by systemd more consistent with other
+   network drivers e.g. enp130s0f1d1 becomes enp130s0f1.
+
+Issue 64013:
+ ~ Correct a kernel WARNING in skb_checksum_help() when using TSO over a VLAN
+   over a bond. The error message seen would be:
+     WARNING: at net/core/dev.c:1907 skb_warn_bad_offload+0xc2/0xf0()
+   This issue was introduced between v4.7.0.1035 and .1036.
+
+Issue 63865:
+ ~ Fix checking of PTP license when interface is taken down and then up. This
+   would affect MCFW <v6 on SFN7XXX  when running sfptpd or ptp4l. The error
+   message seen would be:
+     warning: received Sync with no timestamp
+
+Issue 63820:
+ ~ Improve clean up after "ethtool -t" self-test failure.
+
+Issue 63587:
+ ~ Fix crash seen with EnterpriseOnload v4 at driver/linux_net/ef10.c:4484
+   in efx_ef10_filter_get_unsafe_id(). This was found in an internal test case
+   that exhausted hardware filters and is believed to be highly unlikely in a
+   customer deployment.
+
+Issue 63467:
+ ~ Limit TX ring to 2048 descriptors for SFN7XXX and SFN8XXX adapters.
+   Previously it was possible to get a WARNING from efx_ef10_tx_init() by using:
+     ethtool -G <interface name> tx 4096
+
+Issue 63389:
+ ~ Prevent allocating a PTP interrupt in some cases where it is not required.
+
+Issue 62350:
+ ~ Only claim checksum offload for encapsulation types that SFN8XXX hardware
+   can handle (GENEVE, VXLAN, NVGRE).
+
+Issue 61338:
+ ~ Fix for VFs being broken after sfupdate was run while onload stacks were
+   constructed.
+   The error message seen would be:
+     resetting (DATAPATH)
+     failed to restore vswitching rc=-71, VFs may not function
+     unable to restore all filters
+
+
+### v4.8.4.1000 -- GA release for ESXi adding support for SFN8522 adapters.
+[SFN8522 support]
+ ~ GA support for ESXi and SFN8522 Solarflare adapters.
+ ~ Please note that VXLAN acceleration for ESXi, including VXLAN IOVP
+   certification, will follow in a future driver update.
+
+
+### v4.8.2.1004 -- GA release adding support for SFN8522 adapters.
+[SFN8522 support]
+ ~ GA support for SFN8522 Solarflare adapters, to match all features of the
+   SFN7XXX series including SR-IOV and NIC partitioning.
  ~ Support for more efficient TSO on SFN8XXX adapters.
- ~ Use symmetric RSS hash by default.
+ ~ Use a symmetric RSS hash by default.
    This is most useful when sniffing both sides of a TCP conversation. This
    ensures that all packets are directed to the same RX queue and all are
    handled in-order.
@@ -386,6 +454,29 @@ Issue 62104:
    help improve GRO performance.
  ~ Read adadpter PCIe configuration to warn on PCIe lane width or speed not
    being optimal for the adapter in use.
+ ~ Use 4K PIO buffers on SFN8XXX adapters.
+ ~ Adds a module parameter "performance_profile" to allow selection of
+   broad tuning options, allowing selection of low latency ('latency') or
+   high throughput ('throughput') profiles. The default is 'auto', in
+   which the profile is selected based off licensed options on the adapter.
+   At present this only changes the event queue initialization options on 8000
+   series adapters.
+
+[BETA quality support for stateless checksum offloads for NVGRE,VXLAN,GENEVE
+encapsulation on SFN8XXX adapters]
+ ~ Support for checksum offloads in the presense of encapsulation/
+   overlay networks (tunnels) on SFN8XXX hardware. Outer frames of (NV)GRE /
+   VxLAN / GENEVE are supported. Linux native tunnels and OVS will utilise this
+   checksum offload.
+ ~ Add support for encapsulated TSO for 8000 series adapters.
+ ~ Add message when adapter resets due to VXLAN port list change.
+ ~ Add debugfs entry "vxlan_ports" to print the list of VXLAN ports.
+
+[onload]
+Issue 62104:
+ ~ More conservatively account for the number of wakeup events that the driver
+   might have to handle, one for each possible onload stack. This prevents
+   event queue overflows in rare cases.
 
 [EF-VI support]
  ~ Do not treat a broadcast filter as exclusive in filter logic.

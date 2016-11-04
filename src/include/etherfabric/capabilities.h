@@ -177,6 +177,12 @@ enum ef_vi_capability {
   /** Availability of TX alternatives */
   EF_VI_CAP_TX_ALTERNATIVES,
 
+  /** Number of TX alternatives vFIFOs */
+  EF_VI_CAP_TX_ALTERNATIVES_VFIFOS,
+
+  /** Number of TX alternatives common pool buffers */
+  EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS,
+
   /** Maximum value of capabilities enumeration */
   EF_VI_CAP_MAX, /* Keep this last */
 };

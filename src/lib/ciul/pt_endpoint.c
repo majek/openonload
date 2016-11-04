@@ -63,6 +63,7 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
                                                     EFHW_VI_NO_RX_CUT_THROUGH |
                                                     EFHW_VI_ENABLE_RX_MERGE |
                                                     EFHW_VI_NO_EV_CUT_THROUGH);
+  if( vi_flags & EF_VI_TX_ALT            ) efab_flags |= EFHW_VI_TX_ALT;
   return efab_flags;
 }
 
@@ -176,6 +177,38 @@ int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
   return 0;
 }
 
+int ef_vi_transmit_alt_free(struct ef_vi* vi, ef_driver_handle vi_dh)
+{
+  ci_resource_op_t op;
+  int rc;
+
+  if( ! (vi->vi_flags & EF_VI_TX_ALT) ) {
+    LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT flag not set", __func__));
+    return -EINVAL;
+  }
+
+  if( vi->tx_alt_id2hw == NULL ) {
+    LOGVV(ef_log("%s: ERROR: alloc not called", __func__));
+    return -EINVAL;
+  }
+
+  free(vi->tx_alt_id2hw);
+  vi->tx_alt_id2hw = NULL;
+
+  free(vi->tx_alt_hw2id);
+  vi->tx_alt_hw2id = NULL;
+
+  memset(&op, 0, sizeof(op));
+  op.id = efch_make_resource_id(vi->vi_resource_id);
+  op.op = CI_RSOP_VI_TX_ALT_FREE;
+  if( (rc = ci_resource_op(vi_dh, &op)) < 0 ) {
+    LOGVV(ef_log("%s: ERROR: driver returned %d", __func__, rc));
+    return rc;
+  }
+
+  return 0;
+}
+
 
 /****************************************************************************/
 
@@ -193,9 +226,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "6eb29a59b6a0365c95c78b8ffba2777b") &&
+  if( strcmp(EFCH_INTF_VER, "2633d46e6d9439ae238f34e67fcb465b") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "c217ae46d057c90f295732ada3711ae4") ) {
+      strcmp(EFCH_INTF_VER, "8a82772c217ba9de8a9d4973747f703c") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }

@@ -41,7 +41,7 @@
 # support older distros) to update this spec to use kernel modules packaging
 # templates.
 
-%define pkgversion 201606
+%define pkgversion 201606-u1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -256,7 +256,7 @@ for k in $(cd /lib/modules && /bin/ls); do
   [ -d "/lib/modules/$k/kernel/" ] && depmod -a "$k"
 done
 if [ -x "/sbin/weak-modules" ]; then
-  for m in sfc sfc_resource sfc_char onload sfc_affinity; do
+  for m in sfc sfc_resource sfc_char onload sfc_affinity onload_cplane; do
     echo "/lib/modules/%{kernel}/extra/$m.ko"
   done | /sbin/weak-modules --add-modules
 fi
@@ -267,7 +267,7 @@ for k in $(cd /lib/modules && /bin/ls); do
 done
 if [ "$1" = 0 ]; then  # Erase, not upgrade
   if [ -x "/sbin/weak-modules" ]; then
-    for m in sfc sfc_resource sfc_char onload sfc_affinity; do
+    for m in sfc sfc_resource sfc_char onload sfc_affinity onload_cplane; do
       echo "/lib/modules/%{kernel}/extra/$m.ko"
     done | /sbin/weak-modules --remove-modules
   fi
@@ -280,6 +280,9 @@ rm -fR $RPM_BUILD_ROOT
 %defattr(-,root,root)
 /usr/lib*/lib*.so*
 %attr(644, -, -) /usr/lib*/lib*.a
+%ifarch x86_64
+  /usr/lib*/zf
+%endif
 /usr/libexec/onload/apps
 /usr/libexec/onload/profiles
 %{_bindir}/*
@@ -288,6 +291,9 @@ rm -fR $RPM_BUILD_ROOT
 /sbin/*
 /usr/include/onload*
 /usr/include/etherfabric/*.h
+%ifarch x86_64
+  /usr/include/zf*
+%endif
 %docdir %{_defaultdocdir}/%{name}-%{pkgversion}
 %attr(644, -, -) %{_defaultdocdir}/%{name}-%{pkgversion}/*
 %attr(644, -, -) %{_sysconfdir}/modprobe.d/onload.conf

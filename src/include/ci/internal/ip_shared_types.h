@@ -874,6 +874,11 @@ struct ci_netif_state_s {
 
   ci_uint32             evq_primed;
 
+  /* The bits of this field are used in interrupt-driven mode to track which
+   * interfaces have deferred their priming due to lock contention.
+   */
+  ci_uint32             evq_prime_deferred;
+
   ci_int8               hwport_to_intf_i[CPLANE_MAX_REGISTER_INTERFACES];
   ci_int8               intf_i_to_hwport[CI_CFG_MAX_INTERFACES];
 
@@ -1076,6 +1081,9 @@ struct ci_netif_state_s {
   ci_socket_cache_t     active_cache;
   ci_uint32             active_cache_avail_stack;
 #endif
+
+  ci_ni_dllist_t        active_wild_pool;
+  int                   active_wild_n;
 
   /* Followed by:
   **
@@ -1443,6 +1451,24 @@ struct ci_sock_cmn_s {
 #define CI_SOCK_FLAG_TPROXY       0x00040000   /* IP_TRANSPARENT proxying */
 #define CI_SOCK_FLAG_MAC_FILTER   0x00080000   /* sharing stack MAC filter */
 #define CI_SOCK_FLAG_SET_IP_TTL   0x00100000   /* app has set IP_TTL */
+/* In order to allow active wild filters to be shared with sockets that are
+ * bound to an IP but not a port we need to defer the bind until we know the
+ * full 4-tuple on connect.
+ *
+ * This flag is set in almost exactly the same set of conditions as
+ * CI_SOCK_FLAG_CONNECT_MUST_BIND.  However we need to differentiate between
+ * two cases for getsockname() - a failing connect meaning that rebind
+ * should be done, and connect not having been called yet:
+ *
+ * bind addr -> _BOUND, _ADDR_BOUND, _MUST_BIND, _DEFERRED_BIND
+ * connect -> bind must be done and port selected
+ * connect fails -> _BOUND, _ADDR_BOUND, _MUST_BIND
+ * getsockname -> does not bind, rebind later must be allowed
+ *
+ * bind addr -> _BOUND, _ADDR_BOUND, _MUST_BIND, _DEFERRED_BIND
+ * getsockname -> binds, rebind later must not be allowed
+ */
+#define CI_SOCK_FLAG_DEFERRED_BIND 0x00200000
 
   ci_uint32             s_aflags;
 #define CI_SOCK_AFLAG_CORK              0x01          /* TCP_CORK     */
@@ -1777,6 +1803,20 @@ struct oo_pipe {
 
 
 /*********************************************************************
+***************************** Active wild ****************************
+*********************************************************************/
+
+struct ci_active_wild_s {
+  ci_sock_cmn           s;
+  ci_ni_dllist_link     pool_link;
+  ci_iptime_t           expiry;
+  ci_uint32             last_laddr;
+  ci_uint32             last_raddr;
+  ci_uint32             last_rport;
+};
+
+
+/*********************************************************************
 ***************************** TCP sockets ****************************
 *********************************************************************/
 
@@ -1928,6 +1968,7 @@ struct ci_tcp_state_s {
 #define CI_TCPT_FLAG_MEM_DROP           0x2000 /* drops due to mem_pressure */
 #define CI_TCPT_FLAG_FIN_RECEIVED       0x4000
   /* peer have graciously closed this connection by sending FIN */
+#define CI_TCPT_FLAG_ACTIVE_WILD        0x8000  /* shares active wild */
 
   /* flags advertised on SYN */
 # define CI_TCPT_SYN_FLAGS \
@@ -2279,6 +2320,7 @@ union citp_waitable_obj_u {
   struct oo_pipe        pipe;
 #endif
   struct oo_ep_header   header;
+  ci_active_wild        aw;
 };
 
 

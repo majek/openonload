@@ -148,6 +148,14 @@ ef_vi_inline unsigned ef_vi_next_rx_rq_id(ef_vi* vi)
 }
 
 
+#ifndef __KERNEL__
+#include <sys/uio.h>
+extern int ef10_ef_vi_transmitv_copy_pio(ef_vi* vi, int offset,
+					 const struct iovec* iov, int iovcnt,
+					 ef_request_id dma_id);
+#endif
+
+
 /* Internal interfaces, so exclude from doxygen documentation */
 /*! \endcond internal */
 

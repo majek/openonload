@@ -11,7 +11,8 @@ ONLOAD_SRCS	:= driver.c linux_cplane_netif.c timesync.c \
 		tcp_sendpage.c driverlink_ip.c linux_stats.c pinbuf.c \
 		linux_trampoline.c shmbuf.c compat.c \
 		ossock_calls.c linux_efabcfg.c linux_sock_ops.c mmap.c \
-		epoll_device.c terminate.c sigaction_calls.c onloadfs.c
+		epoll_device.c terminate.c sigaction_calls.c onloadfs.c \
+		dshm.c
 
 
 EFTHRM_SRCS	:= cplane_netif.c eplock_resource_manager.c \

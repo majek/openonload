@@ -822,8 +822,14 @@ oof_manager_alloc(unsigned local_addr_max, void* owner_private)
   fm->fm_hwports_mcast_replicate_capable_new = 0;
   fm->fm_hwports_vlan_filters = 0;
   fm->fm_hwports_vlan_filters_new = 0;
+  {
+    int tag;
+    for( tag = 0; tag < OOF_HWPORT_AVAIL_TAG_NUM; tag++ ) {
+      fm->fm_hwports_avail_per_tag[tag] = (unsigned) -1;
+      fm->fm_hwports_avail_per_tag_new[tag] = (unsigned) -1;
+    }
+  }
   fm->fm_hwports_available = (unsigned) -1;
-  fm->fm_hwports_available_new = (unsigned) -1;
   ci_dllist_init(&fm->fm_cplane_updates);
   the_manager = fm;
   return fm;
@@ -1232,7 +1238,8 @@ oof_manager_update_all_filters(struct oof_manager* fm)
         ci_assert_equal(mf->mf_filter.thc, NULL);
         if( ! oo_hw_filter_is_empty(&mf->mf_filter) ) {
           hwport_mask = oof_mcast_filter_installable_hwports(lp, mf);
-          hwport_mask &= fm->fm_hwports_up & fm->fm_hwports_available;
+          hwport_mask &= fm->fm_hwports_up &
+              fm->fm_hwports_available;
           oof_hw_filter_update(fm, &mf->mf_filter, mf->mf_filter.trs,
                                lp->lp_protocol, 0, 0,
                                mf->mf_maddr, lp->lp_lport,
@@ -1313,7 +1320,8 @@ void oof_hwport_removed(int hwport)
 }
 
 
-void oof_hwport_un_available(ci_hwport_id_t hwport, int available, void *arg)
+void oof_hwport_un_available(ci_hwport_id_t hwport, int available, int tag,
+                             void *arg)
 {
   /* A physical interface is (or isn't) unavailable because it is a member
    * of an unacceleratable bond.  ie. We should(n't) install filters on
@@ -1323,9 +1331,9 @@ void oof_hwport_un_available(ci_hwport_id_t hwport, int available, void *arg)
 
   spin_lock_bh(&fm->fm_cplane_updates_lock);
   if( available )
-    fm->fm_hwports_available_new |= 1 << hwport;
+    fm->fm_hwports_avail_per_tag_new[tag] |= 1 << hwport;
   else
-    fm->fm_hwports_available_new &= ~(1 << hwport);
+    fm->fm_hwports_avail_per_tag_new[tag] &= ~(1 << hwport);
   spin_unlock_bh(&fm->fm_cplane_updates_lock);
 
   oof_cb_defer_work(fm->fm_owner_private);
@@ -1338,8 +1346,9 @@ void oof_do_deferred_work(struct oof_manager* fm)
    * held.  We handle control plane changes here.  Reason for deferring to
    * a workitem is so we can grab locks in the right order.
    */
-  unsigned hwports_up_new, hwports_down_new, hwports_available_new,
+  unsigned hwports_up_new, hwports_down_new,
            hwports_changed, hwports_removed;
+  unsigned hwports_avail_new[OOF_HWPORT_AVAIL_TAG_NUM];
   IPF_LOG("%s:", __FUNCTION__);
 
   mutex_lock(&fm->fm_outer_lock);
@@ -1363,7 +1372,8 @@ void oof_do_deferred_work(struct oof_manager* fm)
   hwports_removed = fm->fm_hwports_removed;
   hwports_up_new = fm->fm_hwports_up_new;
   hwports_down_new = fm->fm_hwports_down_new;
-  hwports_available_new = fm->fm_hwports_available_new;
+  memcpy(hwports_avail_new, fm->fm_hwports_avail_per_tag_new,
+         sizeof(hwports_avail_new));
 
   hwports_changed |= hwports_removed |
     (hwports_up_new ^ fm->fm_hwports_up) |
@@ -1413,12 +1423,25 @@ void oof_do_deferred_work(struct oof_manager* fm)
     }
   }
 
-  if( fm->fm_hwports_available != hwports_available_new ) {
-    IPF_LOG("%s: available=%x unavailable=%x", __FUNCTION__,
-            hwports_available_new &~ fm->fm_hwports_available,
-            ~hwports_available_new & fm->fm_hwports_available);
-    fm->fm_hwports_available = hwports_available_new;
-    oof_manager_update_all_filters(fm);
+  {
+    int tag;
+    unsigned not_available = 0;
+    int changed = 0;
+
+    for( tag = 0; tag < OOF_HWPORT_AVAIL_TAG_NUM; tag++ ) {
+      if( fm->fm_hwports_avail_per_tag[tag] != hwports_avail_new[tag] ) {
+        IPF_LOG("%s: tag %d: available=%x unavailable=%x", __FUNCTION__, tag,
+                hwports_avail_new[tag] &~ fm->fm_hwports_avail_per_tag[tag],
+                ~hwports_avail_new[tag] & fm->fm_hwports_avail_per_tag[tag]);
+        fm->fm_hwports_avail_per_tag[tag] = hwports_avail_new[tag];
+        not_available |= ~fm->fm_hwports_avail_per_tag[tag];
+        changed = 1;
+      }
+    }
+    if( changed ) {
+      fm->fm_hwports_available = ~not_available;
+      oof_manager_update_all_filters(fm);
+    }
   }
 
   BUG_ON(~(fm->fm_hwports_up | fm->fm_hwports_down) &
@@ -1789,13 +1812,14 @@ oof_socket_add_full_hw(struct oof_manager* fm, struct oof_socket* skf,
        * - Out of memory (ENOMEM).
        * - Out of space in h/w filter table (EBUSY).
        * - Clash in h/w filter table (EEXIST).
+       * - Blocked by Onload iptables (EACCES).
        *
        * Is this where we get to if two sockets try to bind/connect to the
        * same 5-tuple?
        *
        * ?? TODO: Handle the various errors elegantly.
        */
-      if( rc == -EBUSY )
+      if( rc == -EBUSY || rc == -EACCES )
         return rc;
       else
         return -EADDRNOTAVAIL;
@@ -4347,4 +4371,45 @@ oof_manager_dump(struct oof_manager* fm,
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
+}
+
+
+int oof_hwports_list(struct oof_manager* fm, struct seq_file* seq)
+{
+  int i;
+
+  for( i = 0; i < 32; i++ ) {
+    unsigned portmask = 1 << i;
+    if( portmask &
+        (fm->fm_hwports_up | fm->fm_hwports_down | fm->fm_hwports_removed) ) {
+      seq_printf(seq, "port %d%s%s%s\t%s%s%s\tcapable of%s%s\n", i,
+                 (portmask & fm->fm_hwports_up) ? " up" : "",
+                 (portmask & fm->fm_hwports_down) ? " down" : "",
+                 (portmask & fm->fm_hwports_removed) ? " removed" : "",
+                 (portmask & fm->fm_hwports_available) ?
+                 "\t\t" : "forbidden by",
+                 (portmask &
+                  fm->fm_hwports_avail_per_tag[OOF_HWPORT_AVAIL_TAG_BOND]) ?
+                 "" : " bond",
+                 (portmask &
+                  fm->fm_hwports_avail_per_tag[OOF_HWPORT_AVAIL_TAG_BWL]) ?
+                 "" : " bwl",
+                 (portmask & fm->fm_hwports_mcast_replicate_capable) ?
+                 " macst_replicate" : "",
+                 (portmask & fm->fm_hwports_vlan_filters) ?
+                 " vlan_filters" : "");
+    }
+  }
+  return 0;
+}
+int oof_ipaddrs_list(struct oof_manager* fm, struct seq_file* seq)
+{
+  int i;
+
+  for( i = 0; i < fm->fm_local_addr_n; i++ ) {
+    seq_printf(seq, IP_FMT": in use by %d sockets\n",
+               IP_ARG(fm->fm_local_addrs[i].la_laddr),
+               fm->fm_local_addrs[i].la_sockets);
+  }
+  return 0;
 }

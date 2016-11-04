@@ -1624,6 +1624,7 @@ fail_vfs:
 fail_dev:
 #endif
 	kfree(nic_data->vf);
+	nic_data->vf = NULL;
 fail_alloc:
 	efx_nic_free_buffer(efx, &nic_data->vfdi_status);
 fail_status:
@@ -1680,6 +1681,7 @@ void efx_siena_sriov_fini(struct efx_nic *efx)
 	efx_siena_sriov_vfs_fini(efx);
 	efx_siena_sriov_free_local(efx);
 	kfree(nic_data->vf);
+	nic_data->vf = NULL;
 	efx_nic_free_buffer(efx, &nic_data->vfdi_status);
 	efx_siena_sriov_cmd(efx, false, NULL, NULL);
 #endif /* CONFIG_SFC_SRIOV */

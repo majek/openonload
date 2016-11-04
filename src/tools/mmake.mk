@@ -12,6 +12,16 @@ $(warning WARNING: onload_remote_monitor will not be available as dependencies a
 endif
 endif
 
+ifndef PREBUILD_ZF
+ifeq (${PLATFORM},gnu_x86_64)
+ifneq ($(ONLOAD_ONLY),1)
+ifneq ($(NO_ZF),1)
+SUBDIRS         += zf
+endif
+endif
+endif
+endif
+
 ifeq ($(WINDOWS),1)
 SUBDIRS		:= win mc-comms
 OTHER_SUBDIRS	:= misc

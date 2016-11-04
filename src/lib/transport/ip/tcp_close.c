@@ -833,7 +833,7 @@ void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls,
    * before calling this function, so we're up-to-date.
    */
   ci_assert(ci_netif_is_locked(ni));
-  ci_assert(tls->s.b.state == CI_TCP_LISTEN);
+  ci_assert_equal(tls->s.b.state, CI_TCP_LISTEN);
 
   __ci_tcp_listen_shutdown(ni, tls, NULL);
   __ci_tcp_listen_to_normal(ni, tls);
