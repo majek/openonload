@@ -253,9 +253,10 @@ following procedure:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}
 [root@server01 Onload-201109]# cd scripts/
 [root@server01 scripts]# export PATH="$PWD:$PATH"
-[root@server01 scripts]# cd ../build/_gnu_x86_64/tests/ef_vi/
+[root@server01 scripts]# mmakebuildtree        And select for example gnu_x86_64
+[root@server01 scripts]# cd ../build/gnu_x86_64/tests/ef_vi/
 [root@server01 ef_vi]# make clean
-[root@serverr01 ef_vi]# make
+[root@serverr01 ef_vi]# make ONLOAD_ONLY=1
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 */
