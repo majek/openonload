@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -182,7 +182,8 @@
 
 #define OOF_IPCACHE_VALID            "%s"
 #define OOFA_IPCACHE_VALID(ni, ipc)                                     \
-  (cicp_ip_cache_is_valid(CICP_HANDLE(ni), (ipc)) ? "Valid" : "Old")
+  (oo_cp_verinfo_is_valid((ni)->cplane, &(ipc)->mac_integrity) ?        \
+   "Valid" : "Old")
 
 
 #define OOF_IPCACHE_STATE            OOF_IPCACHE_STATUS"("OOF_IPCACHE_VALID")"
@@ -213,7 +214,7 @@
   ((ts)->tcpflags & CI_TCPT_FLAG_MEM_DROP         ? "MEM_DROP ":"")
 
 
-#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SOCK_FLAGS_PRI_ARG(s)                                        \
   ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),                \
   ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_RD ? "SHUTRD ":""),          \
@@ -235,6 +236,7 @@
   ((s)->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL ? "SW_FILTER_FULL ":""),  \
   ((s)->s_flags & CI_SOCK_FLAG_TPROXY ? "TRANSPARENT ":""),             \
   ((s)->s_flags & CI_SOCK_FLAG_MAC_FILTER ? "MAC_FILTER ":""),          \
+  ((s)->s_flags & CI_SOCK_FLAG_REUSEPORT  ? "REUSEPORT ":""),           \
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")
 
 
@@ -298,7 +300,7 @@
  * UDP
  */
 
-#define CI_UDP_STATE_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_UDP_STATE_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_UDP_STATE_FLAGS_PRI_ARG(ts)				\
   (UDP_FLAGS(ts) & CI_UDPF_FILTERED     ? "FILT ":""),          \
   (UDP_FLAGS(ts) & CI_UDPF_MCAST_LOOP   ? "MCAST_LOOP ":""),    \
@@ -311,7 +313,8 @@
   (UDP_FLAGS(ts) & CI_UDPF_PEEK_FROM_OS ? "PEEKOS ":""),        \
   (UDP_FLAGS(ts) & CI_UDPF_SO_TIMESTAMP ? "SO_TS ":""),         \
   (UDP_FLAGS(ts) & CI_UDPF_MCAST_JOIN   ? "MC ":""),            \
-  (UDP_FLAGS(ts) & CI_UDPF_MCAST_FILTER ? "MC_FILT ":"")
+  (UDP_FLAGS(ts) & CI_UDPF_MCAST_FILTER ? "MC_FILT ":""),       \
+  (UDP_FLAGS(ts) & CI_UDPF_NO_UCAST_FILTER ? "NO_UC_FILT ":"")
 
 
 extern unsigned ci_tp_log CI_HV;

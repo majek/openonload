@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -74,7 +74,7 @@ static int ci_measure_cpu_khz(unsigned* cpu_khz)
     ci_frc64(&tsc_e);
     gettimeofday(&tv_e, NULL);
     ci_frc64(&tsc_e2);
-    if( tsc_e2 < tsc_e ) {
+    if( tsc_e2 < tsc_e || timercmp(&tv_e, &tv_s, <) ) {
       skew = 1;
       break;
     }

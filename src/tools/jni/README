@@ -31,9 +31,11 @@ And now we can build the java classes, and create the headers from them:
 	javac $ONLOAD/src/tools/jni/OnloadExt.java -d $ONLOAD_LIB
 	javac $ONLOAD/src/tools/jni/OnloadZeroCopy.java -d $ONLOAD_LIB
 	javac $ONLOAD/src/tools/jni/OnloadTemplateSend.java -d $ONLOAD_LIB
+	javac $ONLOAD/src/tools/jni/OnloadWireOrderDelivery.java -d $ONLOAD_LIB
 	javah -classpath $ONLOAD_LIB -d $TMP OnloadExt
 	javah -classpath $ONLOAD_LIB -d $TMP OnloadZeroCopy
 	javah -classpath $ONLOAD_LIB -d $TMP OnloadTemplateSend
+	javah -classpath $ONLOAD_LIB -d $TMP OnloadWireOrderDelivery
 
 Result should be files (class files in the $ONLOAD_LIB directory and header
 files in $TMP):
@@ -42,7 +44,8 @@ files in $TMP):
 	OnloadZeroCopy.h, OnloadZeroCopy.class,
 	OnloadZeroCopy_Callback.h,  OnloadZeroCopy_Callback.class,
 	OnloadTemplateSend.h, OnloadTemplateSend.class,
-	OnloadZeroCopy$1CallbackTest.class
+	OnloadWireOrderDelivery.class, OnloadZeroCopy$1CallbackTest.class
+        OnloadWireOrderDelivery$FdEvent.class, OnloadWireOrderDelivery_FdEvent.h
 
 
 5. And finally build the actual JNI implementation:
@@ -66,6 +69,9 @@ libOnloadExt.so file, or you will get an exception, and error message like:
 	"failed to load the jni shared library"
 You can alter your library path so that this file can be found with:
 	export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ONLOAD_LIB
+Forcing early binding is also a good way to ensure that the library is
+correctly located:
+	export LD_BIND_NOW=y
 
 Extensions library usage
 ========================

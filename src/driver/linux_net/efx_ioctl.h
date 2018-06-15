@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -76,8 +76,7 @@
  * The private ioctl is numbered %SIOCEFX and is implemented on
  * both sockets and a char device (/dev/sfc_control).  Sockets are
  * more reliable as they do not depend on a device node being
- * created on disk.  However, on VMware ESX only char ioctls will
- * work.
+ * created on disk.
  */
 
 /* Efx private ioctl number */
@@ -298,7 +297,7 @@ struct efx_timespec {
 
 #define EFX_TS_INIT_FLAGS_PTP_V2_ENHANCED 0x80000000
 
-#if !defined(__KERNEL__) || defined(__VMKLNX__)
+#if !defined(__KERNEL__)
 
 enum {
 	SOF_TIMESTAMPING_TX_HARDWARE = (1<<0),
@@ -343,7 +342,7 @@ struct hwtstamp_config {
 	int rx_filter;
 };
 
-#endif /* !__KERNEL__ || __VMKLNX__ */
+#endif /* !__KERNEL__ */
 
 #if !defined(EFX_HAVE_NET_TSTAMP)
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -127,3 +127,14 @@ struct efrm_vf *efrm_vi_get_vf(struct efrm_vi *virs)
 {
 	return virs->allocation.vf;
 }
+
+int efrm_vi_get_rx_error_stats(struct efrm_vi* virs,
+			       void* data,
+			       size_t data_len,
+			       int do_reset)
+{
+	struct efhw_nic *nic = efrm_client_get_nic(virs->rs.rs_client);
+	return efhw_nic_get_rx_error_stats(nic, virs->rs.rs_instance,
+					   data, data_len, do_reset);
+}
+EXPORT_SYMBOL(efrm_vi_get_rx_error_stats);

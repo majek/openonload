@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,7 @@
 /*! \cidoxg_lib_citools */
 #include "citools_internal.h"
 
+#include <syslog.h>
 
 # include <sys/uio.h>
 
@@ -54,6 +55,12 @@ void ci_log_stdout(const char* msg)
   v[1].iov_len = 1;
 
   writev(STDOUT_FILENO, v, 2);
+}
+
+
+void ci_log_syslog(const char* msg)
+{
+  syslog(LOG_INFO, "%s\n", msg);
 }
 
 

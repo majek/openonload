@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -120,12 +120,14 @@ __ci_ip_send_tcp(ci_netif* ni, ci_ip_pkt_fmt* pkt, ci_tcp_state* ts)
     return;
   }
   CI_IPV4_STATS_INC_OUT_REQUESTS(ni);
-  if(CI_LIKELY( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) )) {
+  if(CI_LIKELY( ts->s.pkt.status == retrrc_success &&
+                oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) )) {
     ci_ip_set_mac_and_port(ni, &ts->s.pkt, pkt);
     ci_netif_pkt_hold(ni, pkt);
     ci_netif_send(ni, pkt);
   }
   else {
+    cicp_user_retrieve(ni, &ts->s.pkt, &ts->s.cp);
     ci_ip_send_tcp_slow(ni, ts, pkt);
   }
 }

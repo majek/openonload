@@ -49,7 +49,7 @@ sfc_usage() {
   err "  $me [options] <command> <command-args>"
   err
   err "options:"
-  err "  --profile=<profile>    -- comma sep list of config profile(s)"
+  err "  -p,--profile=<profile> -- comma sep list of config profile(s)"
   err "  --force-profiles       -- profile settings override environment"
   err "  --no-app-handler       -- do not use app-specific settings"
   err "  --app=<app-name>       -- identify application to run under onload"

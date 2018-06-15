@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -50,6 +50,7 @@
  ****************************************************************************
  */
 #include <linux/device.h>
+#include <linux/ctype.h>
 #include "linux_resource_internal.h"
 #include <driver/linux_net/driverlink_api.h>
 #include "kernel_compat.h"
@@ -68,6 +69,7 @@
 
 struct efrm_filter_rule_s;
 struct efrm_filter_table_s;
+struct efrm_interface_name_s;
 
 typedef enum efrm_protocol_e {
 	ep_tcp        = 0,
@@ -82,10 +84,9 @@ typedef struct efrm_filter_table_s
 	struct efrm_filter_rule_s*    efrm_ft_last_rule;
 	struct efrm_filter_table_s*   efrm_ft_prev;
 	struct efrm_filter_table_s*   efrm_ft_next;
-	char*                         efrm_ft_interface_name;
+        struct net*                   efrm_ft_netns;
+        struct efrm_interface_name_s* efrm_ft_interface_name;
 	char*                         efrm_ft_pcidev_name;
-	efrm_pd_handle                efrm_ft_directory;
-	efrm_pd_handle                efrm_ft_rules_file;
 } efrm_filter_table_t;
 
 typedef enum efrm_filter_ruletype_e
@@ -131,13 +132,24 @@ typedef struct efrm_filter_rule_s
 	struct efrm_filter_rule_s*            efrm_fr_next;
 }  efrm_filter_rule_t;
 
+typedef struct efrm_interface_name_s
+{
+        struct efrm_interface_name_s* efrm_in_next;
+        struct efrm_interface_name_s* efrm_in_prev;
+	char                          efrm_in_interface_name[IFNAMSIZ];
+	efrm_pd_handle                efrm_in_directory;
+	efrm_pd_handle                efrm_in_rules_file;
+        int                           efrm_in_n_tables;
+        efrm_filter_table_t*          efrm_in_root_table;
+} efrm_interface_name_t;
+
 /* ******* */
 /* Globals */
 /* ******* */
 
 static DEFINE_SPINLOCK(efrm_ft_lock);
 static DEFINE_MUTEX(efrm_ft_mutex);
-static efrm_filter_table_t* efrm_ft_root_table = NULL;
+static efrm_interface_name_t* efrm_in_first_interface = NULL;
 static char const* efrm_protocol_names[5] = {
 	"tcp",
 	"udp",
@@ -194,7 +206,7 @@ static int efrm_hextoi( const char** src, size_t* length )
 	/* This function works much like atoi, but modifies its inputs to make
 	   progress through the data stream. */
 	int rval = 0;
-	while ( length ) {
+	while ( *length ) {
 		char c = **src;
 		if ( c >= '0' && c <= '9' ) {
 			rval *= 16;
@@ -229,11 +241,8 @@ static void efrm_skip_num( const char** src, size_t* length, int num )
 
 static void efrm_skip_whitespace( const char** src, size_t* length )
 {
-	/* Skip past arbitary whitespace */
-	while ( length ) {
-		char c = **src;
-		if ( c != ' ' && c != '\t' && c != '\r' && c != '\0' )
-			break;
+	/* Skip past arbitary whitespace but not '\n' which terminates rules */
+	while ( *length && **src != '\n' && isspace(**src) ) {
 		*src = *src + 1;
 		*length = *length - 1;
 	}
@@ -245,23 +254,23 @@ static int efrm_consume_next_word( const char** src, size_t* length,
 	/* Read non-whitespace until you run out of buffer, or reach
 	   whitespace.*/
 	int rval = 0;
-	
-	if ( !src || !*src || !length || !dest )
+
+	if ( !src || !*src || !length || !*length || !dest )
 		return -EINVAL;
-	
-	while ( length && destlen ) {
-		char c = **src;
-		if ( c == ' ' || c == '\t' || c == '\r'
-		  || c == '\n' || c == '\0' ) {
-			*dest = '\0';
-			break;
-		}
-		*dest++ = c;
+
+  /* Iterate over src buffer copying to dest buffer.  Terminate if
+   *  - there is no more data to copy
+   *  - we are in last entry of dest buffer so it can be '\0' terminated
+   *  - we reach a word separator (space or end of string)
+   */
+	while ( *length && destlen > 1 && !isspace(**src) && **src != '\0' ) {
+		*dest++ = **src;
 		*src = *src + 1;
 		*length = *length - 1;
 		destlen--;
 		rval++;
 	}
+	*dest = '\0';
 	return rval;
 }
 
@@ -271,13 +280,12 @@ static int efrm_compare_and_skip( const char** src, size_t* length,
 	/* Returns strncmp() and moves on if it matches. */
 	size_t compare_length;
 	int mismatch;
-	
+
 	compare_length = strlen(compare);
-	mismatch = strncmp( *src, compare, compare_length );
 	if ( compare_length > *length ) {
 		return -1;
 	}
-	
+	mismatch = strncmp( *src, compare, compare_length );
 	if ( !mismatch ) {
 		efrm_skip_num( src, length, compare_length );
 	}
@@ -305,7 +313,7 @@ static int efrm_fill_top_bits( int n, unsigned char* out, int length )
 	int w;
 	if ( n < 0 || (n > length * 8) )
 		return 0;
-	
+
 	w = 0;
 	while ( n > 0 ) {
 		unsigned char c = 0;
@@ -419,7 +427,7 @@ static int efrm_consume_mac( const char** src, size_t* length,
 static char const* efrm_get_protocol_name( efrm_protocol_t proto )
 {
 	/* Turns a protocol into a printable name */
-	if ( proto < 0 || proto > 3 ) 
+	if ( proto < 0 || proto > 3 )
 		return efrm_protocol_names[4];
 
 	return efrm_protocol_names[proto];
@@ -487,15 +495,6 @@ efrm_get_interfacename_from_index( int ifindex, struct net_device** ndev )
 }
 
 static int
-efrm_correct_table_ifname( efrm_filter_table_t* table, char const* ifname )
-{
-	/* Returns a truth value, is this table for the given interface? */
-	if ( !table )
-		return 0;
-	return strcmp( ifname, table->efrm_ft_interface_name ) == 0;
-}
-
-static int
 efrm_correct_table_pciname( efrm_filter_table_t* table, char const* pciname )
 {
 	/* Returns a truth value, is this table for the given port? */
@@ -509,23 +508,32 @@ efrm_correct_table_pciname( efrm_filter_table_t* table, char const* pciname )
 /* ******************************************************************** */
 /* Table/Rule manipulation functions - these spinlock and the only ones */
 /* ******************************************************************** */
-static void ethrm_link_table( efrm_filter_table_t* table )
+static void ethrm_link_table( efrm_interface_name_t* name,
+                              efrm_filter_table_t* table )
 {
 	/* Add the table to the root list of tables. */
 	spin_lock_bh(&efrm_ft_lock);
 	table->efrm_ft_prev = NULL;
-	table->efrm_ft_next = efrm_ft_root_table;
-	if ( efrm_ft_root_table ) {
-		efrm_ft_root_table->efrm_ft_prev = table;
+	table->efrm_ft_next = name->efrm_in_root_table;
+	if ( name->efrm_in_root_table ) {
+		name->efrm_in_root_table->efrm_ft_prev = table;
 	}
-	efrm_ft_root_table = table;
+	name->efrm_in_root_table = table;
+        table->efrm_ft_interface_name = name;
 
 	spin_unlock_bh(&efrm_ft_lock);
 }
+
 static void ethrm_unlink_table( efrm_filter_table_t* table )
 {
-	/* Remove the table from the list of tables. */
+        efrm_interface_name_t* name;
+
+        /* Remove the table from the list of tables. */
 	if ( !table ) return;
+
+        name = table->efrm_ft_interface_name;
+
+        if ( !name ) return;
 
 	spin_lock_bh(&efrm_ft_lock);
 
@@ -534,14 +542,15 @@ static void ethrm_unlink_table( efrm_filter_table_t* table )
 		table->efrm_ft_prev->efrm_ft_next = table->efrm_ft_next;
 	if ( table->efrm_ft_next )
 		table->efrm_ft_next->efrm_ft_prev = table->efrm_ft_prev;
-	
+
 	/* Update the root of the table, if needed. */
-	if ( efrm_ft_root_table == table ) {
-		efrm_ft_root_table = table->efrm_ft_next;
+	if ( name->efrm_in_root_table == table ) {
+		name->efrm_in_root_table = table->efrm_ft_next;
 	}
-	
+
 	/* Added safety; make sure this table won't be matched in future */
-	*table->efrm_ft_interface_name = '\0';
+	table->efrm_ft_interface_name = NULL;
+        table->efrm_ft_netns = NULL;
 	*table->efrm_ft_pcidev_name = '\0';
 
 	spin_unlock_bh(&efrm_ft_lock);
@@ -565,7 +574,7 @@ ethrm_link_rule( efrm_filter_rule_t* rule, efrm_filter_table_t* table,
 		rule->efrm_fr_next = table->efrm_ft_first_rule;
 		table->efrm_ft_first_rule = rule;
 	}
-	
+
 	/* Was the previous the end of the table?  Update that. */
 	if ( prev == table->efrm_ft_last_rule ) {
 		table->efrm_ft_last_rule = rule;
@@ -586,7 +595,7 @@ ethrm_unlink_rule( efrm_filter_rule_t* rule, efrm_filter_table_t* table,
 		table->efrm_ft_first_rule = rule->efrm_fr_next;
 	}
 	else {
-		prev->efrm_fr_next = rule->efrm_fr_next; 
+		prev->efrm_fr_next = rule->efrm_fr_next;
 	}
 
 	/* Special handling for last rule */
@@ -604,14 +613,24 @@ ethrm_unlink_rule( efrm_filter_rule_t* rule, efrm_filter_table_t* table,
 
 static void efrm_remove_files( efrm_filter_table_t* table )
 {
-	/* Remove the /proc/ files associated with this table. */
-	if ( table && table->efrm_ft_rules_file ) {
-		efrm_proc_remove_file( table->efrm_ft_rules_file );
-		table->efrm_ft_rules_file = NULL;
+        efrm_interface_name_t* name = table->efrm_ft_interface_name;
+        efrm_filter_table_t* t;
+
+        /* We must only remove the files from /proc if _all_ tables
+         * for this ifname are empty. */
+        for( t = name->efrm_in_root_table; t; t = t->efrm_ft_next ) {
+                if( t->efrm_ft_first_rule )
+                        return;
+        }
+
+	/* Remove the /proc/ files associated with this name. */
+	if ( name && name->efrm_in_rules_file ) {
+		efrm_proc_remove_file( name->efrm_in_rules_file );
+		name->efrm_in_rules_file = NULL;
 	}
-	if ( table && table->efrm_ft_directory ) {
-		efrm_proc_intf_dir_put(table->efrm_ft_directory);
-		table->efrm_ft_directory = NULL;
+	if ( name && name->efrm_in_directory ) {
+		efrm_proc_intf_dir_put(name->efrm_in_directory);
+		name->efrm_in_directory = NULL;
 	}
 }
 
@@ -619,30 +638,105 @@ static const struct file_operations efrm_fops_rules;
 
 static void efrm_add_files( efrm_filter_table_t* table )
 {
-	/* Create the /proc/ files for this table. */
-	if ( !table || !table->efrm_ft_first_rule )
+        efrm_interface_name_t* name = table->efrm_ft_interface_name;
+
+	/* Create the /proc/ files for this name. */
+	if ( !name )
 		return;
-	if ( !table->efrm_ft_directory ) {
-		char const* ifname = table->efrm_ft_interface_name;
-		table->efrm_ft_directory = efrm_proc_intf_dir_get(ifname);
+
+	if ( !name->efrm_in_directory ) {
+		char const* ifname = name->efrm_in_interface_name;
+		name->efrm_in_directory = efrm_proc_intf_dir_get(ifname);
 	}
-	if ( table->efrm_ft_directory && !table->efrm_ft_rules_file ) {
-		table->efrm_ft_rules_file = efrm_proc_create_file(
+	if ( name->efrm_in_directory && !name->efrm_in_rules_file ) {
+		name->efrm_in_rules_file = efrm_proc_create_file(
 				"firewall_rules", 0444,
-				table->efrm_ft_directory,
-				&efrm_fops_rules, table
+				name->efrm_in_directory,
+				&efrm_fops_rules, name
 				);
 	}
 }
 
 static int
-find_table_by_ifname( char const* ifname, efrm_filter_table_t** table )
+find_interface_name( char const* ifname,
+                     efrm_interface_name_t** devname )
 {
-	/* Find a table matching this interface name.
+	/* Find an interface name record matching this name.
+	   Returns a truth value, outputs the name. */
+	efrm_interface_name_t* cur_name = efrm_in_first_interface;
+
+	if ( !ifname || !devname ) {
+		EFRM_ERR("%s:Internal error %p %p", __func__, ifname, devname );
+		return 0;
+	}
+
+	while ( cur_name ) {
+		if ( !strcmp( ifname, cur_name->efrm_in_interface_name ) ) {
+			*devname = cur_name;
+			return 1;
+		}
+		cur_name = cur_name->efrm_in_next;
+	}
+
+        cur_name = kmalloc( sizeof(efrm_interface_name_t), GFP_KERNEL );
+        if( !cur_name )
+                return 0;
+        memset( cur_name, 0, sizeof(efrm_interface_name_t) );
+
+        strlcpy( cur_name->efrm_in_interface_name, ifname, IFNAMSIZ );
+        cur_name->efrm_in_n_tables = 0;
+
+        spin_lock_bh(&efrm_ft_lock);
+
+        cur_name->efrm_in_prev = NULL;
+	cur_name->efrm_in_next = efrm_in_first_interface;
+	if ( efrm_in_first_interface ) {
+		efrm_in_first_interface->efrm_in_prev = cur_name;
+	}
+	efrm_in_first_interface = cur_name;
+
+        spin_unlock_bh(&efrm_ft_lock);
+
+        *devname = cur_name;
+	return 1;
+}
+
+static void
+remove_interface_name( efrm_interface_name_t* name )
+{
+        BUG_ON( name == NULL );
+        BUG_ON( name->efrm_in_root_table != NULL );
+
+        spin_lock_bh( &efrm_ft_lock );
+
+        if( name->efrm_in_next )
+                name->efrm_in_next->efrm_in_prev = name->efrm_in_prev;
+
+        if( name->efrm_in_prev )
+                name->efrm_in_prev->efrm_in_next = name->efrm_in_next;
+        else
+                efrm_in_first_interface = name->efrm_in_next;
+
+        spin_unlock_bh( &efrm_ft_lock );
+
+        kfree( name );
+}
+
+static int
+find_table_by_ifname( struct net* netns, char const* ifname,
+                      efrm_filter_table_t** table )
+{
+	/* Find a table matching this interface name in this namespace.
 	   Returns a truth value, outputs the table. */
-	efrm_filter_table_t* cur_table = efrm_ft_root_table;
+        efrm_interface_name_t *name;
+        efrm_filter_table_t* cur_table;
+
+        if( !find_interface_name( ifname, &name ) )
+                return 0;
+
+        cur_table = name->efrm_in_root_table;
 	while ( cur_table ) {
-		if ( efrm_correct_table_ifname( cur_table, ifname ) ) {
+		if ( netns == cur_table->efrm_ft_netns ) {
 			*table = cur_table;
 			return 1;
 		}
@@ -656,29 +750,32 @@ find_table_by_pcidevice( char const* pciname, efrm_filter_table_t** table )
 {
 	/* Find a table matching this pci device name.
 	   Returns a truth value, outputs the table. */
-	efrm_filter_table_t* cur_table = efrm_ft_root_table;
-	
+        efrm_interface_name_t* cur_name = efrm_in_first_interface;
+
 	if ( !pciname || !table ) {
 		EFRM_ERR("%s:Internal error %p %p", __func__, pciname, table );
 		return 0;
 	}
-	
-	
-	while ( cur_table ) {
-		if ( efrm_correct_table_pciname( cur_table, pciname ) ) {
-			*table = cur_table;
-			return 1;
-		}
-		cur_table = cur_table->efrm_ft_next;
+
+	while( cur_name ) {
+                efrm_filter_table_t* cur_table = cur_name->efrm_in_root_table;
+                while ( cur_table ) {
+                        if ( efrm_correct_table_pciname( cur_table, pciname ) ) {
+                                *table = cur_table;
+                                return 1;
+                        }
+                        cur_table = cur_table->efrm_ft_next;
+                }
+                cur_name = cur_name->efrm_in_next;
 	}
 	return 0;
 }
 
 static int
-interface_has_rules( char const* ifname )
+interface_has_rules( struct net* netns, char const* ifname )
 {
 	efrm_filter_table_t* table;
-	int got_table = find_table_by_ifname( ifname, &table );
+	int got_table = find_table_by_ifname( netns, ifname, &table );
 	if ( got_table ) {
 		return table->efrm_ft_first_rule != NULL;
 	}
@@ -686,50 +783,48 @@ interface_has_rules( char const* ifname )
 }
 
 static efrm_filter_table_t*
-efrm_allocate_new_table( char const* pci_name, char const* if_name )
+efrm_allocate_new_table( char const* pci_name,
+                         struct net* netns, char const* if_name )
 {
 	/* Allocates a new, efrm_filter_table_t structure, fills in the name,
 	   and plugs it into the table list.
 	   Returns the table, or NULL if kmalloc() fails.
 	   MUST NOT BE IN THE SPINLOCK */
 	static const size_t size = sizeof(efrm_filter_table_t)
-	                           + IFNAMSIZ + IFNAMSIZ;
+	                           + IFNAMSIZ;
 	char* buf = (char*) kmalloc( size, GFP_KERNEL );
 	efrm_filter_table_t* table = (efrm_filter_table_t*) buf;
 	if ( table ) {
-		char* interface_name = buf + sizeof(efrm_filter_table_t);
 		char* pcidev_name = buf
-		                     + sizeof(efrm_filter_table_t) + IFNAMSIZ;
-		
-		interface_name[0] = '\0';
+		                     + sizeof(efrm_filter_table_t);
+
 		pcidev_name[0] = '\0';
-		
+
+                table->efrm_ft_netns = netns;
 		table->efrm_ft_first_rule = NULL;
 		table->efrm_ft_last_rule = NULL;
 		table->efrm_ft_prev = NULL;
 		table->efrm_ft_next = NULL;
 		table->efrm_ft_pcidev_name = pcidev_name;
-		table->efrm_ft_interface_name = interface_name;
+		table->efrm_ft_interface_name = NULL;
 		if ( pci_name ) {
 			strlcpy( pcidev_name, pci_name, IFNAMSIZ );
 		}
-		if ( if_name ) {
-			strlcpy( interface_name, if_name, IFNAMSIZ );
-		}
-		table->efrm_ft_directory = NULL;
-		table->efrm_ft_rules_file = NULL;
 	}
 	return table;
 }
 
 static efrm_filter_table_t*
-efrm_insert_new_table( char const* pci_name, char const* if_name )
+efrm_insert_new_table( char const* pci_name,
+                       struct net* netns, char const* if_name )
 {
 	/* Create and link a table with these names. */
+        efrm_interface_name_t* name;
 	efrm_filter_table_t* table = efrm_allocate_new_table(pci_name,
+                                                             netns,
 	                                                     if_name );
-	if ( table ) {
-		ethrm_link_table( table );
+	if ( table && find_interface_name( if_name, &name ) ) {
+		ethrm_link_table( name, table );
 	}
 	return table;
 }
@@ -744,7 +839,7 @@ add_rule_to_table( efrm_filter_table_t* table, efrm_filter_rule_t* rule,
 
 	efrm_filter_rule_t* next;
 	efrm_filter_rule_t* prev;
-	
+
 	if ( !table || !rule ) {
 		return -EINVAL;
 	}
@@ -763,7 +858,7 @@ add_rule_to_table( efrm_filter_table_t* table, efrm_filter_rule_t* rule,
 			position -= 1;
 		}
 	}
-	
+
 	if ( position ) {
 		EFRM_ERR( "%s: Rule is %d beyond the end, adding instead.",
 				__func__, position );
@@ -773,8 +868,8 @@ add_rule_to_table( efrm_filter_table_t* table, efrm_filter_rule_t* rule,
 	/* And put the new rule into the table */
 	ethrm_link_rule( rule, table, prev, next );
 	/* In case this was the first rule, create the access files */
-	efrm_add_files( table );
-	
+        efrm_add_files( table );
+
 	return 0;
 }
 
@@ -788,7 +883,7 @@ remove_rule_from_table( efrm_filter_table_t* table, int position )
 	int rc = 0;
 
 	rule = table->efrm_ft_first_rule;
-	
+
 	/* Walk to the correct rule. */
 	while ( rule && position ) {
 		prev_rule = rule;
@@ -806,7 +901,7 @@ remove_rule_from_table( efrm_filter_table_t* table, int position )
 		/* Insufficient rules in table. */
 		rc = -EINVAL;
 	}
-	
+
 	return rc;
 }
 
@@ -827,26 +922,34 @@ static void remove_all_rules_from_table( efrm_filter_table_t* table )
 
 static int remove_table( efrm_filter_table_t* table )
 {
+        efrm_interface_name_t* name;
+
 	/* Free up a table, maintaining the table of tables.
 	   Returns zero or a negative value on failure */
 	if ( !table )
 		return -EINVAL;
-	ethrm_unlink_table(table);
+        name = table->efrm_ft_interface_name;
 	remove_all_rules_from_table(table);
+	ethrm_unlink_table(table);
 	kfree( table );
+        /* If this was the last table for this interface name, free
+         * the interface name too. */
+        if( name->efrm_in_root_table == NULL )
+                remove_interface_name( name );
+
 	return 0;
 }
 
 
-static int remove_all_rules( char const* ifname )
+static int remove_all_rules( struct net* netns, char const* ifname )
 {
 	/* Remove all rules associated with a device.
 	   Returns 0 on success, or a negative failure value. */
 	efrm_filter_table_t* table;
 	int rc = -EINVAL;
 	int found;
-	
-	found = find_table_by_ifname( ifname, &table );
+
+	found = find_table_by_ifname( netns, ifname, &table );
 	if ( found ) {
 		remove_all_rules_from_table(table);
 		rc = 0;
@@ -855,17 +958,45 @@ static int remove_all_rules( char const* ifname )
 }
 
 
-static int remove_rule( char const* ifname, int position )
+static int remove_rule( struct net* netns, char const* ifname, int position )
 {
 	/* Remove the the rule at position from the table associated with
 	   this device.
 	   Returns 0 or a negative error code. */
 	efrm_filter_table_t* table;
-	int found = find_table_by_ifname( ifname, &table );
+	int found;
+        found = find_table_by_ifname( netns, ifname, &table );
 	if ( !found )
 		return -EINVAL;
 	return remove_rule_from_table( table, position );
 }
+
+#ifdef CONFIG_NET_NS
+static void filter_exit_net( struct net* net )
+{
+        efrm_interface_name_t *name, *name_n;
+        efrm_filter_table_t *table, *table_n;
+
+	mutex_lock( &efrm_ft_mutex );
+
+        for( name = efrm_in_first_interface; name; name = name_n ) {
+                name_n = name->efrm_in_next;
+
+                for( table = name->efrm_in_root_table; table; table = table_n ) {
+                        table_n = table->efrm_ft_next;
+
+                        if( table->efrm_ft_netns == net )
+                                remove_table( table );
+                }
+        }
+
+	mutex_unlock( &efrm_ft_mutex );
+}
+
+static struct pernet_operations filter_net_ops = {
+        .exit = filter_exit_net,
+};
+#endif
 
 static int print_eth_rule ( struct seq_file *seq, char const* iface,
                                 int number, char const* action,
@@ -931,7 +1062,7 @@ static int print_rule ( struct seq_file *seq,
 
 	action = efrm_get_action_name( rule->efr_action );
 	table = seq ? (efrm_filter_table_t const*) seq->private : NULL;
-	iface = table ? table->efrm_ft_interface_name : NULL;
+	iface = table ? table->efrm_ft_interface_name->efrm_in_interface_name : NULL;
 
 	if ( rule->efr_protocol == ep_eth ) {
 		return print_eth_rule( seq, iface, number, action,
@@ -956,7 +1087,7 @@ static inline int efx_filter_get_ipv4(const struct efx_filter_spec *spec,
 	    (spec->ether_type == htons(ETH_P_IP)) ) {
 		if( spec->match_flags & EFX_FILTER_MATCH_LOC_HOST )
 			*host2 = spec->loc_host[0];
-		else 
+		else
 			*host2 = 0;
 
 		if( spec->match_flags & EFX_FILTER_MATCH_REM_HOST )
@@ -966,12 +1097,12 @@ static inline int efx_filter_get_ipv4(const struct efx_filter_spec *spec,
 
 		if( spec->match_flags & EFX_FILTER_MATCH_LOC_PORT )
 			*port2 = spec->loc_port;
-		else 
+		else
 			*port2 = 0;
 
 		if( spec->match_flags & EFX_FILTER_MATCH_REM_PORT )
 			*port1 = spec->rem_port;
-		else 
+		else
 			*port1 = 0;
 
 		return 0;
@@ -1051,7 +1182,7 @@ static int efrm_portrange_match( struct efx_filter_spec *spec,
 	rmt_prt = CI_BSWAP_BE16(port1);
 	lcl_prt = CI_BSWAP_BE16(port2);
 	efx_get_vlan( spec, &vlan );
-	
+
 	/* right protocol?  In range?  Ip's match? */
 	return efrm_protocol_matches(spec, protocol ) &&
 	       within( range->efrp_lcl_min, range->efrp_lcl_max, lcl_prt ) &&
@@ -1142,7 +1273,7 @@ static inline int efrm_filter_check (struct efx_dl_device *dl_dev,
 
 check_filter_complete:
 	spin_unlock_bh(&efrm_ft_lock);
-	
+
 	if ( unsupported ) {
 		EFRM_ERR( "efrm_filter_check unsupported rule type %d\n",
 		          rule ? rule->eit_ruletype : -1 );
@@ -1440,11 +1571,14 @@ static int efrm_text_to_table_entry( const char ** buf, size_t* remain )
 	int rule_number = -1;
 	efrm_filter_table_t* table;
 	int rc;
+        struct net* netns;
 
 	efrm_filter_rule_t* rule = efrm_interpret_rule( buf, remain, ifname,
 	                                                &rule_number );
 	if ( !rule )
 		return -ENOMEM;
+
+        netns = get_net(current->nsproxy->net_ns);
 
 	/* And actually apply that rule to the table. */
 	/* Add the specified rule to the table associated with this
@@ -1452,13 +1586,17 @@ static int efrm_text_to_table_entry( const char ** buf, size_t* remain )
 	   'append'.
 	   Returns 0, or a negative error code.
 	   May create a new table. */
-	if ( !find_table_by_ifname( ifname, &table ) ) {
+
+	if ( !find_table_by_ifname( netns, ifname, &table ) ) {
 		EFRM_NOTICE( "%s: Adding rule for unknown interface %s.",
 		             __func__, ifname );
-		table = efrm_insert_new_table( NULL, ifname );
+		table = efrm_insert_new_table( NULL, netns, ifname );
 	}
+
+        put_net(netns);
+
 	if ( !table ) {
-	    return -ENOMEM;
+                return -ENOMEM;
 	}
 	rc = add_rule_to_table( table, rule, rule_number );
 	if ( rc ) {
@@ -1475,13 +1613,53 @@ static int efrm_text_to_table_entry( const char ** buf, size_t* remain )
 /* /proc/driver/sfc_resource/ */
 /* ************************** */
 
-ssize_t efrm_add_rule(struct file *file, const char __user *buf,
+static int create_kstr_from_ubuf( const char __user *ubuf, size_t size,
+				  const char** out_kstr )
+{
+	/* Creates a buffer in kernel space and copies data into it from
+	 * user space buffer. '\0' terminates the output buffer so it
+	 * can be safely passed into string handling functions. */
+	char* kbuf;
+	int rc;
+	if( out_kstr == NULL ) {
+		EFRM_ERR( "%s: Output buffer pointer is NULL.", __func__ );
+		return -EINVAL;
+	}
+	*out_kstr = NULL;
+	kbuf = kmalloc(size + 1, GFP_KERNEL);
+	if( kbuf == NULL ) {
+		EFRM_ERR( "%s: Failed to allocate kernel buffer.", __func__ );
+		return -ENOMEM;
+	}
+	rc = copy_from_user(kbuf, ubuf, size);
+	if( rc != 0 ) {
+		EFRM_ERR( "%s: Failed to copy %d bytes from user buffer.",
+			__func__, rc );
+		kfree(kbuf);
+		return -EFAULT;
+	}
+	kbuf[size] = '\0';
+	*out_kstr = kbuf;
+	return 0;
+}
+
+
+static ssize_t efrm_add_rule(struct file *file, const char __user *ubuf,
 		      size_t count, loff_t *ppos)
 {
 	/* ENTRYPOINT from firewall_add
 	Interpret the provided buffer, and add the rules therein. */
 	size_t remain = count;
-
+	const char* buf;
+	const char* orig_buf;
+	int rc;
+	rc = create_kstr_from_ubuf( ubuf, count, &orig_buf );
+	if( rc != 0 ) {
+		EFRM_ERR( "%s: Failed to create kernel input string, rc=%d.",
+			__func__, rc );
+		return rc;
+	}
+	buf = orig_buf;
 	mutex_lock( &efrm_ft_mutex );
 
 	while ( *buf != '\0' && remain > 0 ) {
@@ -1490,6 +1668,7 @@ ssize_t efrm_add_rule(struct file *file, const char __user *buf,
 	}
 
 	mutex_unlock( &efrm_ft_mutex );
+	kfree(orig_buf);
 	return count;
 }
 static const struct file_operations efrm_fops_add_rule = {
@@ -1497,29 +1676,39 @@ static const struct file_operations efrm_fops_add_rule = {
 	.write		= efrm_add_rule,
 };
 
-ssize_t efrm_del_rule(struct file *file, const char __user *buf,
-		      size_t count, loff_t *ppos)
+static ssize_t efrm_del_rule(struct file *file, const char __user *ubuf,
+			size_t count, loff_t *ppos)
 {
 	/* ENTRYPOINT from firewall_del.
 	   Interpret the buffer and delete the specified rule(s) */
 	size_t remain = count;
 	char ifname [IFNAMSIZ];
+	const char* orig_buf;
+	const char* buf;
 	int is_all = 0;
 	int interface = 0;
 	int rule_number = -1;
 	int rc = 0;
+        struct net* netns;
 
+	rc = create_kstr_from_ubuf(ubuf, count, &orig_buf);
+	if( rc != 0 ) {
+		EFRM_ERR( "%s: Failed to create kernel input string, rc=%d.",
+			__func__, rc );
+		return rc;
+	}
+	buf = orig_buf;
 	efrm_skip_whitespace( &buf, &remain );
 	/* Either if=ethX or ethX supported */
 	efrm_compare_and_skip( &buf, &remain, "if=" );
 	efrm_skip_whitespace( &buf, &remain );
 	interface = efrm_consume_next_word( &buf, &remain, ifname, IFNAMSIZ );
-	
-	if ( interface < 0 ) {
+	if ( interface <= 0 ) {
 		EFRM_ERR( "%s: Failed to understand interface.", __func__ );
+		kfree(orig_buf);
 		return count;
 	}
-	
+
 	/* Either rule= or plain, supported */
 	efrm_skip_whitespace( &buf, &remain );
 	efrm_compare_and_skip( &buf, &remain, "rule=" );
@@ -1531,23 +1720,27 @@ ssize_t efrm_del_rule(struct file *file, const char __user *buf,
 	}
 
 	mutex_lock( &efrm_ft_mutex );
+        netns = get_net(current->nsproxy->net_ns);
+
 	if ( is_all ) {
-		rc = remove_all_rules( ifname );
-		if ( rc == -EINVAL && !interface_has_rules( ifname ) ) {
+		rc = remove_all_rules( netns, ifname );
+		if ( rc == -EINVAL && !interface_has_rules( netns, ifname ) ) {
 			/* While technically invalid to remove all rules from
 			   a nonexistant table, when the result is that table
 			   having no rules, count it as a success. */
 			rc = 0;
 		}
 	} else {
-		rc = remove_rule( ifname, rule_number );
+		rc = remove_rule( netns, ifname, rule_number );
 	}
+        put_net(netns);
 	mutex_unlock( &efrm_ft_mutex );
 
 	if ( rc ) {
 		EFRM_ERR( "%s: Failed to remove rule %d from %s. Code: %d\n",
 		          __func__, rule_number, ifname, rc );
 	}
+	kfree(orig_buf);
 	return count;
 }
 static const struct file_operations efrm_fops_del_rule = {
@@ -1666,10 +1859,17 @@ static struct seq_operations efrm_read_rules_seq_ops = {
 };
 
 static int efrm_read_rules_seq_open(struct inode* inode, struct file* file) {
-  int rc;
-  rc = seq_open(file, &efrm_read_rules_seq_ops);
+  int rc = 0;
+  efrm_interface_name_t* name = PDE_DATA(inode);
+  efrm_filter_table_t* table;
+  struct net* netns = get_net(current->nsproxy->net_ns);
+  if ( !find_table_by_ifname( netns, name->efrm_in_interface_name, &table ) )
+          rc = -ENOENT;
+  put_net(netns);
+  if ( rc >= 0 )
+          rc = seq_open(file, &efrm_read_rules_seq_ops);
   if ( rc >= 0 && file && file->private_data ) {
-    ((struct seq_file*)file->private_data)->private = PDE_DATA(inode);
+          ((struct seq_file*)file->private_data)->private = table;
   }
   return rc;
 }
@@ -1696,27 +1896,46 @@ void efrm_filter_shutdown()
 	/* Complete shutdown */
 	int rc = 0;
 
+#ifdef CONFIG_NET_NS
+        unregister_pernet_subsys( &filter_net_ops );
+#endif
+
 	mutex_lock( &efrm_ft_mutex );
 
 	/* Make sure everything is freed up properly */
-	while ( !rc && efrm_ft_root_table ) {
-		rc = remove_table(efrm_ft_root_table);
-		if ( rc ) {
-			EFRM_ERR( "%s:Error %d removing table", __func__, rc );
-		}
+        while ( !rc && efrm_in_first_interface ) {
+                while ( !rc && efrm_in_first_interface->efrm_in_root_table ) {
+                        rc = remove_table( efrm_in_first_interface->efrm_in_root_table );
+                        if ( rc ) {
+                                EFRM_ERR( "%s:Error %d removing table",
+                                          __func__, rc );
+                        }
+                }
+
+                remove_interface_name( efrm_in_first_interface );
 	}
-	
-	efrm_ft_root_table = NULL;
+
+	efrm_in_first_interface = NULL;
 
 	mutex_unlock( &efrm_ft_mutex );
 }
 
-
 void efrm_filter_init()
 {
 	/* First time init */
-	mutex_lock( &efrm_ft_mutex );
-	efrm_ft_root_table = NULL;
+#ifdef CONFIG_NET_NS
+        int rc;
+
+        rc = register_pernet_subsys( &filter_net_ops );
+        if( rc < 0 ) {
+                EFRM_ERR( "%s: can't register per-namespace ops: %d",
+                          __func__, rc );
+                return;
+        }
+#endif
+
+        mutex_lock( &efrm_ft_mutex );
+        efrm_in_first_interface = NULL;
 	mutex_unlock( &efrm_ft_mutex );
 }
 
@@ -1744,12 +1963,13 @@ int efrm_remove_table_name( char const *pciname )
 	int found = find_table_by_pcidevice( pciname, &table );
 	if ( found ) {
 		*table->efrm_ft_pcidev_name = '\0';
-		efrm_remove_files( table );
+		 efrm_remove_files( table );
 	}
 	return found;
 }
 
-void efrm_map_table( char const* ifname, char const* pciname )
+void efrm_map_table( struct net* netns, char const* ifname,
+                     char const* pciname )
 {
 	int found;
 	efrm_filter_table_t* table = NULL;
@@ -1760,9 +1980,9 @@ void efrm_map_table( char const* ifname, char const* pciname )
 	   Tables belong to *interface* names.
 	   First: Erase any previous mapping to this device. */
 	/* Then: Set the new mapping */
-	found = find_table_by_ifname( ifname, &table );
+	found = find_table_by_ifname( netns, ifname, &table );
 	if ( !found ) {
-		table = efrm_insert_new_table( pciname, ifname );
+		table = efrm_insert_new_table( pciname, netns, ifname );
 	}
 	if ( table ) {
 		efrm_add_files( table );
@@ -1777,17 +1997,17 @@ void efrm_init_resource_filter(struct device *dev, int ifindex)
 	char const* pciname;
 	char const* ifname;
 	struct net_device* ndev;
-	
+
 	mutex_lock( &efrm_ft_mutex );
 
 	pciname = efrm_get_pciname_from_device( dev );
 	ifname = efrm_get_interfacename_from_index( ifindex, &ndev );
-	
+
 	if ( pciname )
 		efrm_remove_table_name( pciname );
 
 	if ( ifname ) {
-		efrm_map_table( ifname, pciname );
+		efrm_map_table( dev_net( ndev ), ifname, pciname );
 		dev_put(ndev);
 	}
 
@@ -1799,14 +2019,15 @@ void efrm_shutdown_resource_filter(struct device *dev)
 {
 	/* Per interface shutdown */
 	char const* pciname;
-	
+
 	if ( !dev )
 		return;
-	
+
 	mutex_lock( &efrm_ft_mutex );
 
 	/* Un-name the table, so its rules won't get used; but don't remove
 	   the rules, as the interface can come back later. */
+
 	pciname = efrm_get_pciname_from_device( dev );
 	if ( pciname )
 		efrm_remove_table_name( pciname );
@@ -1827,7 +2048,7 @@ int efrm_filter_rename( struct efhw_nic *nic, struct net_device *net_dev )
 		EFRM_ERR("%s:Internal error %p %p", __func__, nic, net_dev );
 		return -EINVAL;
 	}
-	
+
 	/* efhw_nic is the device, which has the real id */
 	dl_dev = efhw_nic_acquire_dl_device(nic);
 	if ( !dl_dev ) {
@@ -1852,10 +2073,10 @@ int efrm_filter_rename( struct efhw_nic *nic, struct net_device *net_dev )
 	if ( pciname )
 		efrm_remove_table_name( pciname );
 	if ( ifname )
-		efrm_map_table( ifname, pciname );
-	
+		efrm_map_table( dev_net( net_dev ), ifname, pciname );
+
 	mutex_unlock( &efrm_ft_mutex );
-	
+
 	return 0;
 }
 

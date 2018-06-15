@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -142,14 +142,11 @@ necessary.  It is not clear if such approach makes things faster.
       oo_wqlock_lock(&(ep)->lock);              \
   } while( 0 )
 
-#define CITP_EPOLL_EP_UNLOCK(ep, fdt_locked)                    \
-  do {                                                          \
-    if( (ep)->not_mt_safe )                                     \
-      oo_wqlock_unlock(&(ep)->lock, citp_epoll_unlock_cb,       \
-                       (void*)(uintptr_t) (fdt_locked));        \
+#define CITP_EPOLL_EP_UNLOCK(ep, fdt_locked)                            \
+  do {                                                                  \
+    if( (ep)->not_mt_safe )                                             \
+      oo_wqlock_unlock(&(ep)->lock, (void*)(uintptr_t) (fdt_locked));   \
   } while( 0 )
-
-static void citp_epoll_unlock_cb(void* cb_arg, void* work_list);
 
 
 #ifndef NDEBUG
@@ -254,7 +251,7 @@ static void citp_epoll_cleanup_dead_home_socks(struct citp_epoll_fd* ep,
     if( --ep->oo_stack_sockets_n == 0 )
       citp_epoll_last_stack_socket_gone(ep, fdt_locked);
   }
-  oo_wqlock_unlock(&ep->dead_stack_lock, NULL, NULL);
+  oo_wqlock_unlock(&ep->dead_stack_lock, NULL);
 }
 
 
@@ -290,12 +287,21 @@ static void citp_epoll_cleanup_home_sock_list(struct citp_epoll_fd* ep,
        */
       citp_remove_home_member(ep, eitem, fd_fdi, fdt_locked);
       CI_FREE_OBJ(eitem);
-      citp_fdinfo_release_ref(fd_fdi, 0);
+      citp_fdinfo_release_ref(fd_fdi, fdt_locked);
     }
-    oo_wqlock_unlock(&ep->dead_stack_lock, NULL, NULL);
+    oo_wqlock_unlock(&ep->dead_stack_lock, NULL);
   }
 }
 
+static void citp_epoll_purge_other_socks(struct citp_epoll_fd* ep)
+{
+  struct citp_epoll_member* eitem;
+  struct citp_epoll_member* next_eitem;
+  CI_DLLIST_FOR_EACH3(struct citp_epoll_member, eitem,
+                      dllink, &ep->oo_sockets, next_eitem) {
+    CI_FREE_OBJ(eitem);
+  }
+}
 
 static void citp_epoll_dtor(citp_fdinfo* fdi, int fdt_locked)
 {
@@ -318,6 +324,8 @@ static void citp_epoll_dtor(citp_fdinfo* fdi, int fdt_locked)
   ci_assert(ci_dllist_is_empty(&ep->oo_stack_sockets));
   ci_assert(ci_dllist_is_empty(&ep->oo_stack_not_ready_sockets));
   ci_assert(ci_dllist_is_empty(&ep->dead_stack_sockets));
+
+  citp_epoll_purge_other_socks(ep);
 
   if( ! fdt_locked )  CITP_FDTABLE_LOCK();
   ci_tcp_helper_close_no_trampoline(ep->shared->epfd);
@@ -414,6 +422,7 @@ int citp_epoll_create(int size, int flags)
   citp_epoll_fdi *epi;
   struct citp_epoll_fd* ep;
   int            fd;
+  int            shared_fd;
 
   if( (epi = CI_ALLOC_OBJ(citp_epoll_fdi)) == NULL )
     goto fail0;
@@ -441,6 +450,10 @@ int citp_epoll_create(int size, int flags)
     Log_E(ci_log("%s: ERROR: failed to mmap shared segment errno=%d",
                  __FUNCTION__, errno));
     goto fail4;
+  }
+  if( ep->shared->epfd < CITP_OPTS.fd_base ) {
+    ci_sys_epoll_move_fd(ep->shared->epfd, &shared_fd);
+    ci_sys_ioctl(ep->epfd_os, OO_EPOLL1_IOC_MOVE_FD, &shared_fd);
   }
   __citp_fdtable_reserve(ep->shared->epfd, 1);
   CITP_FDTABLE_UNLOCK();
@@ -548,7 +561,7 @@ citp_epoll_find(struct citp_epoll_fd* ep, const citp_fdinfo* fd_fdi,
     oo_wqlock_lock(&ep->dead_stack_lock);
     *eitem_out = CI_USER_PTR_GET(sock->s->b.eitem);
     fdi_epoll_fd = fd_fdi->epoll_fd;
-    oo_wqlock_unlock(&ep->dead_stack_lock, NULL, NULL);
+    oo_wqlock_unlock(&ep->dead_stack_lock, NULL);
     if( *eitem_out && (sock->s->b.eitem_pid == getpid()) &&
         (fdi_epoll_fd == epoll_fd) ) {
       /* We know that the fd must still exist and not have changed identity -
@@ -852,7 +865,7 @@ static int citp_epoll_ctl_onload_del(struct citp_epoll_member* eitem,
         CI_FREE_OBJ(eitem);
       }
       ci_assert_equal(fd_fdi->epoll_fd, -1);
-      oo_wqlock_unlock(&ep->dead_stack_lock, NULL, NULL);
+      oo_wqlock_unlock(&ep->dead_stack_lock, NULL);
     }
     else {
       ci_dllist_remove(&eitem->dllink);
@@ -960,7 +973,7 @@ static int citp_epoll_ctl_onload2(struct citp_epoll_fd* ep, int op,
 
 
 struct deferred_epoll_ctl {
-  void* next;
+  struct oo_wqlock_work work;
   struct citp_epoll_fd* ep;
   int op;
   struct epoll_event event;
@@ -970,45 +983,34 @@ struct deferred_epoll_ctl {
 };
 
 
-static void citp_epoll_unlock_cb(void* cb_arg, void* work_list)
+static void citp_epoll_deferred_do(struct oo_wqlock_work* work,
+                                   void* unlock_param)
 {
-  struct deferred_epoll_ctl* dec_list = NULL;
-  struct deferred_epoll_ctl* dec = NULL;
-  int fdt_locked = (int)(uintptr_t) cb_arg;
+  struct deferred_epoll_ctl* dec = CI_CONTAINER(struct deferred_epoll_ctl,
+                                                work, work);
+  int fdt_locked = (int)(uintptr_t) unlock_param;
   int rc;
 
   Log_POLL(ci_log("%s:", __FUNCTION__));
 
-  /* Reverse the list. */
-  do {
-    dec = work_list;
-    work_list = dec->next;
-    dec->next = dec_list;
-    dec_list = dec;
-  } while( work_list != NULL );
-
-  do {
-    dec = dec_list;
-    dec_list = dec_list->next;
-    Log_POLL(ci_log("%s: epoll_ctl("EPOLL_CTL_FMT")", __FUNCTION__,
-                    EPOLL_CTL_ARGS(dec->epoll_fd, dec->op, dec->fd_fdi->fd,
-                                   &dec->event)));
-    rc = citp_epoll_ctl_onload2(dec->ep, dec->op, &dec->event, dec->fd_fdi,
-                                dec->epoll_fd, dec->epoll_fd_seq, fdt_locked);
-    if( rc != 0 ) {
-      /* If you see this error message then the optimisation that passes an
-       * epoll_ctl() call from one thread to another has hidden an error
-       * return from the application.  This may or may not be a problem.
-       * Set EF_EPOLL_CTL_FAST=0 to prevent this from happening.
-       */
-      Log_E(ci_log("%s: ERROR: epoll_ctl("EPOLL_CTL_FMT") returned (%d,%d)",
-                   __FUNCTION__,
-                   EPOLL_CTL_ARGS(dec->epoll_fd, dec->op, dec->fd_fdi->fd,
-                                  &dec->event), rc, errno));
-    }
-    citp_fdinfo_release_ref(dec->fd_fdi, fdt_locked);
-    free(dec);
-  } while( dec_list != NULL );
+  Log_POLL(ci_log("%s: epoll_ctl("EPOLL_CTL_FMT")", __FUNCTION__,
+                  EPOLL_CTL_ARGS(dec->epoll_fd, dec->op, dec->fd_fdi->fd,
+                                 &dec->event)));
+  rc = citp_epoll_ctl_onload2(dec->ep, dec->op, &dec->event, dec->fd_fdi,
+                              dec->epoll_fd, dec->epoll_fd_seq, fdt_locked);
+  if( rc != 0 ) {
+    /* If you see this error message then the optimisation that passes an
+     * epoll_ctl() call from one thread to another has hidden an error
+     * return from the application.  This may or may not be a problem.
+     * Set EF_EPOLL_CTL_FAST=0 to prevent this from happening.
+     */
+    Log_E(ci_log("%s: ERROR: epoll_ctl("EPOLL_CTL_FMT") returned (%d,%d)",
+                 __FUNCTION__,
+                 EPOLL_CTL_ARGS(dec->epoll_fd, dec->op, dec->fd_fdi->fd,
+                                &dec->event), rc, errno));
+  }
+  citp_fdinfo_release_ref(dec->fd_fdi, fdt_locked);
+  free(dec);
 
   Log_POLL(ci_log("%s: done", __FUNCTION__));
 }
@@ -1026,6 +1028,7 @@ citp_epoll_ctl_try_defer_to_lock_holder(struct citp_epoll_fd* ep, int op,
     oo_wqlock_lock(&ep->lock);
     return 0;
   }
+  dec->work.fn = citp_epoll_deferred_do;
   dec->ep = ep;
   dec->op = op;
   if( event != NULL )  /* NB. We've already checked op... */
@@ -1034,7 +1037,7 @@ citp_epoll_ctl_try_defer_to_lock_holder(struct citp_epoll_fd* ep, int op,
   citp_fdinfo_ref(fd_fdi);
   dec->epoll_fd = epoll_fd;
   dec->epoll_fd_seq = epoll_fd_seq;
-  if( oo_wqlock_lock_or_queue(&ep->lock, dec, &dec->next) ) {
+  if( oo_wqlock_lock_or_queue(&ep->lock, &dec->work) ) {
     /* We got the lock after all. */
     citp_fdinfo_release_ref(fd_fdi, 0);
     free(dec);
@@ -1108,7 +1111,7 @@ static int citp_epoll_ctl_os(citp_fdinfo* fdi, int op, int fd,
       return -1;
     }
   }
-  else {
+  else if( op != EPOLL_CTL_DEL ) {
     ev.event = *event;
   }
   oop.fd = ev.fd;
@@ -1325,7 +1328,11 @@ static void citp_epoll_get_ready_list(struct oo_ul_epoll_state*
                          &ni->state->ready_lists[eps->ep->ready_list];
   struct citp_epoll_member* eitem;
 
-  citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin);
+  /* If we're ordering then we've only just done a poll to determine the
+   * limiting timestamp, so avoid doing another one here.
+   */
+  if( !eps->ordering_info )
+    citp_poll_if_needed(ni, eps->this_poll_frc, eps->ul_epoll_spin);
 
   ci_netif_lock(ni);
   lnk = ci_ni_dllist_start(ni, ready_list);
@@ -1337,8 +1344,13 @@ static void citp_epoll_get_ready_list(struct oo_ul_epoll_state*
     ci_assert(eitem);
     ci_assert_equal(sb->ready_list_id, eps->ep->ready_list);
     ci_dllist_remove(&((struct citp_epoll_member*)eitem)->dllink);
-    ci_dllist_push(&eps->ep->oo_stack_sockets,
-                   &((struct citp_epoll_member*)eitem)->dllink);
+    /* This means that we'll be processing sockets in the order that they got
+     * added to the ready list, so can mean we're close to ordered.  This
+     * provides a noticeable benefit when we're doing WODA with a large
+     * number of sockets.
+     */
+    ci_dllist_push_tail(&eps->ep->oo_stack_sockets,
+                        &((struct citp_epoll_member*)eitem)->dllink);
   }
   ci_netif_unlock(ni);
 }
@@ -1630,8 +1642,15 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
 #endif
 
     /* See if another thread has queued any epoll_ctl requests. */
-    oo_wqlock_try_drain_work(&ep->lock, citp_epoll_unlock_cb,
-                             (void*)(uintptr_t) 0);
+    if( CITP_OPTS.ul_epoll_ctl_fast ) {
+      oo_wqlock_try_drain_work(&ep->lock, (void*)(uintptr_t) 0);
+    }
+    else {
+      /* epoll_ctl() may be blocking on this lock.
+       * Let's give it a chance. */
+      CITP_EPOLL_EP_UNLOCK(ep, 0);
+      CITP_EPOLL_EP_LOCK(ep);
+    }
 
     /* Timeout while spinning? */
     if( timeout > 0 && (eps.this_poll_frc - poll_start_frc >= timeout_hr) ) {
@@ -1650,9 +1669,14 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
 
     have_spin = 1;
 
-    /* give a chance to close fd from this epoll set */
-    CITP_EPOLL_EP_UNLOCK(ep, 0);
-    CITP_EPOLL_EP_LOCK(ep);
+    /* When we're WODAing we can't return anything we find with later polls,
+     * so we don't poll on individual sockets.  However, we do need to ensure
+     * that the stack continues to be polled, so if we've looked at everything
+     * and nothing's ready yet then poll now.
+     */
+    if( ordering && ordering->ordering_stack)
+      citp_poll_if_needed(ordering->ordering_stack, eps.this_poll_frc,
+                          eps.ul_epoll_spin);
 
     goto poll_again;
   } /* endif ul_epoll_spin spinning*/
@@ -1803,17 +1827,12 @@ int citp_epoll_wait(citp_fdinfo* fdi, struct epoll_event*__restrict__ events,
   return rc;
 }
 
-/* Caller must call CITP_EPOLL_EP_UNLOCK in case of success */
-static int
-citp_epoll_hook_start(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
-                      int fdt_locked,
-                      struct citp_epoll_member** eitem_out)
+/* Caller must lock ep */
+static struct citp_epoll_member*
+citp_epoll_hook_start(struct citp_epoll_fd* ep, citp_fdinfo* fd_fdi,
+                      int fdt_locked)
 {
   struct citp_epoll_member* eitem;
-  struct citp_epoll_fd* ep;
-
-  ep = fdi_to_epoll(epoll_fdi);
-  CITP_EPOLL_EP_LOCK(ep);
 
   /* This hook may be called after a completed handover, ie after the socket
    * buffer has been released, so we need to search through our list, rather
@@ -1821,37 +1840,34 @@ citp_epoll_hook_start(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
    */
   CI_DLLIST_FOR_EACH2(struct citp_epoll_member, eitem,
                       dllink, &ep->oo_stack_sockets) {
-    if( eitem->fd == fd_fdi->fd && eitem->fdi_seq == fd_fdi->seq ) {
-      *eitem_out = eitem;
-      return 0;
-    }
+    if( eitem->fd == fd_fdi->fd && eitem->fdi_seq == fd_fdi->seq )
+      return eitem;
   }
 
   CI_DLLIST_FOR_EACH2(struct citp_epoll_member, eitem,
                       dllink, &ep->oo_sockets) {
-    if( eitem->fd == fd_fdi->fd && eitem->fdi_seq == fd_fdi->seq ) {
-      *eitem_out = eitem;
-      return 0;
-    }
+    if( eitem->fd == fd_fdi->fd && eitem->fdi_seq == fd_fdi->seq )
+      return eitem;
   }
 
   Log_POLL(ci_log("%s: epoll_fd=%d fd=%d not in epoll u/l set",
                   __FUNCTION__, fd_fdi->epoll_fd, fd_fdi->fd));
-  CITP_EPOLL_EP_UNLOCK(ep, fdt_locked);
-  return -ENOENT;
-
+  return NULL;
 }
 
-void citp_epoll_on_move(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
-                        citp_fdinfo* new_fdi, int fdt_locked)
-{
-  struct citp_epoll_member* eitem;
-  struct citp_epoll_fd* ep = fdi_to_epoll(epoll_fdi);
-  int rc;
+struct deferred_on_handover {
+  struct oo_wqlock_work work;
+  citp_fdinfo* epoll_fdi;
+  citp_fdinfo* fd_fdi; 
+  citp_fdinfo* new_fdi; /* NULL for handover, non-NULL for move */
+};
 
-  rc = citp_epoll_hook_start(epoll_fdi, fd_fdi, fdt_locked, &eitem);
-  if( rc != 0 )
-    return;
+void citp_epoll_on_move_do(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
+                           citp_fdinfo* new_fdi,
+                           struct citp_epoll_member* eitem,
+                           int fdt_locked)
+{
+  struct citp_epoll_fd* ep = fdi_to_epoll(epoll_fdi);
 
   Log_POLL(ci_log("%s: epoll_fd=%d fd=%d %s", __FUNCTION__, fd_fdi->epoll_fd,
                   fd_fdi->fd, eitem->ready_list_id > 0 ? "HOME":"OTHER"));
@@ -1881,26 +1897,22 @@ void citp_epoll_on_move(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
     ++ep->epfd_syncs_needed;
   }
 
-  CITP_EPOLL_EP_UNLOCK(fdi_to_epoll(epoll_fdi), fdt_locked);
+  citp_fdinfo_release_ref(fd_fdi, fdt_locked);
+  citp_fdinfo_release_ref(new_fdi, fdt_locked);
 }
 
-void citp_epoll_on_handover(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
-                            int fdt_locked)
+static void citp_epoll_on_handover_do(citp_fdinfo* epoll_fdi,
+                                      citp_fdinfo* fd_fdi,
+                                      struct citp_epoll_member* eitem,
+                                      int fdt_locked)
 {
   /* We've handed [fd_fdi->fd] over to the kernel, but it may be registered
    * in an epoll set.  The handover (probably) caused the underlying file
    * object in the kernel to be freed, which will have removed this fd from
    * the epoll set.  We need to add it back.
    */
-  struct citp_epoll_member* eitem;
-  struct citp_epoll_fd* ep;
+  struct citp_epoll_fd* ep = fdi_to_epoll(epoll_fdi);
   int rc;
-
-  rc = citp_epoll_hook_start(epoll_fdi, fd_fdi, fdt_locked, &eitem);
-  if( rc != 0 )
-    return;
-
-  ep = fdi_to_epoll(epoll_fdi);
 
   Log_POLL(ci_log("%s: epoll_fd=%d fd=%d events=%x data=%llx",
                   __FUNCTION__, fd_fdi->epoll_fd, fd_fdi->fd,
@@ -1915,7 +1927,6 @@ void citp_epoll_on_handover(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
     citp_remove_home_member(ep, eitem, fd_fdi, fdt_locked);
   }
 
-  CITP_EPOLL_EP_UNLOCK(ep, fdt_locked);
   if( fd_fdi->protocol->type == CITP_PASSTHROUGH_FD )
     rc = citp_epoll_ctl(epoll_fdi, EPOLL_CTL_ADD,
                         fdi_to_alien_fdi(fd_fdi)->os_socket,
@@ -1932,8 +1943,79 @@ void citp_epoll_on_handover(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
 
   if( ep->epfd_syncs_needed )
     citp_ul_epoll_ctl_sync(ep, epoll_fdi->fd);
+
+  /* Now we can free fd_fdi */
+  citp_fdinfo_free(fd_fdi);
 }
 
+static void citp_epoll_on_handover_work(struct oo_wqlock_work* work,
+                                      void* unlock_param)
+{
+  struct deferred_on_handover* deh = CI_CONTAINER(struct deferred_on_handover,
+                                                  work, work);
+  int fdt_locked = (int)(uintptr_t) unlock_param;
+  struct citp_epoll_fd* ep = fdi_to_epoll(deh->epoll_fdi);
+  struct citp_epoll_member* eitem;
+
+  eitem = citp_epoll_hook_start(ep, deh->fd_fdi, fdt_locked);
+  if( eitem == NULL ) {
+    free(deh);
+    return;
+  }
+
+  if( deh->new_fdi == NULL ) {
+    citp_epoll_on_handover_do(deh->epoll_fdi, deh->fd_fdi, eitem,
+                              fdt_locked);
+  }
+  else {
+    citp_epoll_on_move_do(deh->epoll_fdi, deh->fd_fdi, deh->new_fdi,
+                          eitem, fdt_locked);
+  }
+
+  citp_fdinfo_release_ref(deh->epoll_fdi, fdt_locked);
+  free(deh);
+}
+
+static void __citp_epoll_on_smth(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
+                                 citp_fdinfo* new_fdi, int fdt_locked)
+{
+  struct citp_epoll_fd* ep = fdi_to_epoll(epoll_fdi);;
+  struct deferred_on_handover* deh;
+
+  if( (deh = malloc(sizeof(*deh))) == NULL ) {
+    /* malloc never fails; and we do not have a good fallback here. */
+    ci_log("%s: malloc unexpectedly fails", __func__);
+    ci_assert(0);
+    return;
+  }
+  deh->work.fn = citp_epoll_on_handover_work;
+  deh->epoll_fdi = epoll_fdi;
+  deh->fd_fdi = fd_fdi;
+  deh->new_fdi = new_fdi;
+
+  if( oo_wqlock_lock_or_queue(&ep->lock, &deh->work) ) {
+    deh->work.fn(&deh->work, (void*)(uintptr_t)fdt_locked);
+    /* deh->work.fn have just freed deh */
+    oo_wqlock_unlock(&ep->lock, (void*)(uintptr_t)fdt_locked);
+  }
+}
+
+/* See citp_epoll_on_move_do which does the real work. */
+void citp_epoll_on_move(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
+                        citp_fdinfo* new_fdi, int fdt_locked)
+{
+  citp_fdinfo_ref(fd_fdi);
+  citp_fdinfo_ref(new_fdi);
+  __citp_epoll_on_smth(epoll_fdi, fd_fdi, new_fdi, fdt_locked);
+
+}
+
+/* See citp_epoll_on_handover_do which does the real work. */
+void citp_epoll_on_handover(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
+                            int fdt_locked)
+{
+  __citp_epoll_on_smth(epoll_fdi, fd_fdi, NULL, fdt_locked);
+}
 
 void citp_epoll_on_close(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
                          int fdt_locked)
@@ -1975,7 +2057,7 @@ void citp_epoll_on_close(citp_fdinfo* epoll_fdi, citp_fdinfo* fd_fdi,
       CI_USER_PTR_SET(sock->s->b.eitem, NULL);
       ci_dllist_push(&ep->dead_stack_sockets, &eitem->dead_stack_link);
     }
-    oo_wqlock_unlock(&ep->dead_stack_lock, NULL, NULL);
+    oo_wqlock_unlock(&ep->dead_stack_lock, NULL);
   }
 }
 
@@ -2029,6 +2111,8 @@ citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
                           volatile ci_uint64* sleep_seq_p,
                           int* seq_mismatch)
 {
+  unsigned report = events;
+
   if( eitem->epoll_data.events & EPOLLET ) {
     ci_sleep_seq_t polled_sleep_seq;
     if( sleep_seq != *sleep_seq_p ) {
@@ -2041,15 +2125,17 @@ citp_ul_epoll_find_events(struct oo_ul_epoll_state*__restrict__ eps,
                     eitem->reported_sleep_seq.rw.rx, polled_sleep_seq.rw.rx,
                     eitem->reported_sleep_seq.rw.tx, polled_sleep_seq.rw.tx));
     if( polled_sleep_seq.all == eitem->reported_sleep_seq.all )
-      events = 0;
+      report = 0;
     else if( polled_sleep_seq.rw.rx == eitem->reported_sleep_seq.rw.rx )
-      events &=~ OO_EPOLL_READ_EVENTS;
+      report &=~ OO_EPOLL_READ_EVENTS;
     else if( polled_sleep_seq.rw.tx == eitem->reported_sleep_seq.rw.tx )
-      events &=~ OO_EPOLL_WRITE_EVENTS;
+      report &=~ OO_EPOLL_WRITE_EVENTS;
     eitem->reported_sleep_seq = polled_sleep_seq;
   }
 
-  if( events != 0 ) {
+  /* If we have some events to report, we should always report
+   * the full mask of events. */
+  if( report != 0 ) {
     citp_ul_epoll_store_event(eps, eitem, events);
     return 1;
   }
@@ -2099,18 +2185,38 @@ static void citp_epoll_get_ordering_limit(ci_netif* ni,
   struct timespec base_ts;
 
   if( ni ) {
-    ci_netif_lock(ni);
-    citp_epoll_latest_rx(ni, &base_ts);
-    ci_netif_poll(ni);
-    citp_epoll_earliest_rx(ni, limit_out);
-    ci_netif_unlock(ni);
+    if( CITP_OPTS.woda_single_if == 0 ) {
+      ci_netif_lock(ni);
+      citp_epoll_latest_rx(ni, &base_ts);
+      ci_netif_poll(ni);
+      citp_epoll_earliest_rx(ni, limit_out);
+      ci_netif_unlock(ni);
 
-    if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
-      limit_out->tv_sec = base_ts.tv_sec;
-      limit_out->tv_nsec = base_ts.tv_nsec;
+      if( citp_timespec_compare(&base_ts, limit_out) > 0 ) {
+        limit_out->tv_sec = base_ts.tv_sec;
+        limit_out->tv_nsec = base_ts.tv_nsec;
+      }
+    }
+    else {
+      /* In single interface WODA mode we don't need to ensure that all
+       * interfaces have been polled, as ordering is only relative to other
+       * traffic on the same interface.  This means that we can also do a
+       * limited poll rather than a full poll.
+       */
+      ci_netif_lock(ni);
+      ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
+      ci_netif_unlock(ni);
+
+      /* We don't need a limit as this is only required to avoid returning
+       * traffic on one interface that arrived later than the poll on another
+       * interface.  This gives us an effective limit of The End of Time, but
+       * does assume we're on a system where __time_t is a signed int.
+       */
+      limit_out->tv_sec = CI_MAX_TIME_T;
+      limit_out->tv_nsec = 0;
     }
 
-    Log_POLL(ci_log("%s: poll limit %lu:%09lu", __FUNCTION__,
+    Log_POLL(ci_log("%s: poll limit %ld:%09lu", __FUNCTION__,
                     limit_out->tv_sec, limit_out->tv_nsec));
   }
 }
@@ -2157,9 +2263,14 @@ int citp_epoll_sort_results(struct epoll_event*__restrict__ events,
    * If a socket has additional data that is after the next socket's, but
    * still earlier than the limit, then reduce the limit to that timestamp.
    */
+  Log_POLL(ci_log("%s: maxevents=%d limit %lus %dns", __func__, maxevents,
+                  (unsigned long)limit->tv_sec, (int)limit->tv_nsec));
   for( i = 0; i < maxevents; i++ ) {
     /* If this event has a valid timestamp, then get ordering data for it. */
     if( ordering_info[i].oo_event.ts.tv_sec != 0 ) {
+      Log_POLL(ci_log("%s: ev=%d ts %lus %dns", __func__, i,
+                      (unsigned long)ordering_info[i].oo_event.ts.tv_sec,
+                      (int)ordering_info[i].oo_event.ts.tv_nsec));
       /* If this event is after the limit, stop here. */
       if( citp_timespec_compare(limit, &ordering_info[i].oo_event.ts) < 0 )
         break;
@@ -2207,7 +2318,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   struct citp_epoll_member* eitem;
   citp_fdinfo* sock_fdi = NULL;
   citp_sock_fdi* sock_epi;
-  ci_netif* ni = NULL;
+  ci_netif* ni;
   struct timespec limit_ts = {0, 0};
   struct citp_ordered_wait wait;
   int n_socks;
@@ -2217,6 +2328,9 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                   ! ci_dllist_is_empty(&ep->oo_sockets),
                   ! ci_dllist_is_empty(&ep->dead_sockets),
                   ep->epfd_syncs_needed));
+
+ new_stack:
+  ni = NULL;
 
   CITP_EPOLL_EP_LOCK(ep);
 
@@ -2303,6 +2417,7 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
 
   wait.ordering_info = ep->ordering_info;
   wait.poll_again = 0;
+  wait.ordering_stack = ni;
   /* citp_epoll_wait will do citp_exit_lib */
   rc = citp_epoll_wait(fdi, ep->wait_events, &wait,
                        n_socks, timeout, sigmask, lib_context);
@@ -2329,13 +2444,18 @@ int citp_epoll_ordered_wait(citp_fdinfo* fdi,
   }
 
   if( rc > 0 ) {
+    /* ordering_info should be protected by the ep lock */
+    CITP_EPOLL_EP_LOCK(ep);
     rc = citp_epoll_sort_results(events, ep->wait_events, oo_events,
                                  ep->ordering_info, rc, maxevents, &limit_ts);
+    CITP_EPOLL_EP_UNLOCK(ep, 0);
     if( rc == 0 && wait.next_timeout != 0 ) {
       citp_reenter_lib(lib_context);
       timeout = wait.next_timeout;
       Log_POLL(ci_log("%s: all events vanished.  Stack change?", __FUNCTION__));
-      goto again;
+      if( ni )
+        citp_netif_release_ref(ni, 0);
+      goto new_stack;
     }
   }
 

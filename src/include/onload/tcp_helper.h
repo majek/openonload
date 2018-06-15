@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,22 +61,47 @@ struct tcp_helper_nic {
 struct tcp_helper_resource_s;
 
 typedef struct tcp_helper_cluster_s {
-  struct efrm_vi_set*           thc_vi_set[CPLANE_MAX_REGISTER_INTERFACES];
-  struct tcp_helper_resource_s* thc_thr_head;
-  char                          thc_name[CI_CFG_CLUSTER_NAME_LEN + 1];
-  int                           thc_cluster_size;
-  uid_t                         thc_euid;
-  ci_dllist                     thc_tlos;
+  struct efrm_vi_set*             thc_vi_set[CI_CFG_MAX_HWPORTS];
+  struct tcp_helper_resource_s*   thc_thr_head;
+  struct tcp_helper_resource_s**  thc_thr_rrobin;
+  /* Indicates which stack in the round robin to switch to next. */
+  int                             thc_thr_rrobin_index;
+#define THC_REHEAT_FLAG_USE_SWITCH_PORT 0x1
+#define THC_REHEAT_FLAG_STICKY_MODE     0x2
+  unsigned                        thc_reheat_flags;
+  /* Port used to determine if we should switch stack for this bind. */
+  uint32_t                        thc_switch_addr;
+  uint16_t                        thc_switch_port;
+  char                            thc_name[CI_CFG_CLUSTER_NAME_LEN + 1];
+  int                             thc_cluster_size;
+  oo_atomic_t                     thc_thr_count;
+  uid_t                           thc_keuid;
+  ci_dllist                       thc_tlos;
 
 #define THC_FLAG_PACKET_BUFFER_MODE 0x1
 #define THC_FLAG_HW_LOOPBACK_ENABLE 0x2
 #define THC_FLAG_TPROXY             0x4
-  unsigned                      thc_flags;
-  int                           thc_tproxy_ifindex;
+  unsigned                        thc_flags;
+  int                             thc_tproxy_ifindex;
 
-  struct tcp_helper_cluster_s*  thc_next;
-  oo_atomic_t                   thc_ref_count;
+  struct tcp_helper_cluster_s*    thc_next;
+  oo_atomic_t                     thc_ref_count;
+
+  wait_queue_head_t               thr_release_done;
+
+  struct oo_cplane_handle*        thc_cplane;
+  struct oo_filter_ns*            thc_filter_ns;
 } tcp_helper_cluster_t;
+
+
+/* Used to backup and, if necessary restore, state during a reuseport bind. */
+typedef struct tcp_helper_reheat_state_s {
+  int       thr_prior_index;
+  pid_t     thc_tid_effective;
+  unsigned  thc_reheat_flags;
+  unsigned  thc_switch_addr;
+  unsigned  thc_switch_port;
+} tcp_helper_reheat_state_t;
 
 
  /*--------------------------------------------------------------------
@@ -145,7 +170,9 @@ typedef struct tcp_helper_resource_s {
   struct completion complete;
 
   /* For deferring work to a non-atomic context. */
-  char wq_name[11 + CI_CFG_STACK_NAME_LEN];
+#define ONLOAD_WQ_NAME "onload-wq:%s"
+#define ONLOAD_WQ_NAME_BASELEN 11
+  char wq_name[ONLOAD_WQ_NAME_BASELEN + ONLOAD_PRETTY_NAME_MAXLEN];
   struct workqueue_struct *wq;
   struct work_struct non_atomic_work;
   struct delayed_work purge_txq_work;
@@ -155,7 +182,7 @@ typedef struct tcp_helper_resource_s {
   /* For deferring resets to a non-atomic context. */
 #define ONLOAD_RESET_WQ_NAME "onload-rst-wq:%s"
 #define ONLOAD_RESET_WQ_NAME_BASELEN 15
-  char reset_wq_name[ONLOAD_RESET_WQ_NAME_BASELEN + CI_CFG_STACK_NAME_LEN];
+  char reset_wq_name[ONLOAD_RESET_WQ_NAME_BASELEN + ONLOAD_PRETTY_NAME_MAXLEN];
   struct workqueue_struct *reset_wq;
   struct work_struct reset_work;
 
@@ -173,6 +200,9 @@ typedef struct tcp_helper_resource_s {
 #endif /* ERFM_HAVE_NEW_KALLSYMS */
 #endif /* CONFIG_NAMESPACES */
 
+#ifdef EFRM_DO_USER_NS
+  struct user_namespace* user_ns;
+#endif
 
 #ifdef  __KERNEL__
   /*! clear to indicate that timer should not restart itself */
@@ -249,6 +279,8 @@ typedef struct tcp_helper_resource_s {
   tcp_helper_cluster_t*         thc;
   /* TID of thread that created this stack within the cluster */
   pid_t                         thc_tid;
+  /* TID of thread with right to do sticky binds on this stack in reheat mode */
+  pid_t                         thc_tid_effective;
   /* Track list of stacks associated with a single thc */
   struct tcp_helper_resource_s* thc_thr_next;
 
@@ -261,7 +293,7 @@ typedef struct tcp_helper_resource_s {
   ci_dllist             os_ready_lists[CI_CFG_N_READY_LISTS];
   spinlock_t            os_ready_list_lock;
 
-  struct file*          cplane_handle;
+  struct oo_filter_ns*  filter_ns;
 } tcp_helper_resource_t;
 
 
@@ -359,6 +391,66 @@ struct tcp_helper_endpoint_s {
 
 
 };
+
+
+#ifdef __KERNEL__
+static inline struct pid_namespace*
+ci_get_pid_ns(struct nsproxy* proxy)
+{
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,11,0))
+  return proxy->pid_ns_for_children;
+#else
+  return proxy->pid_ns;
+#endif
+}
+
+/* Return the PID namespace in which the given ci_netif lives.
+ *
+ * Note that for the lifetime of the stack, thr->nsproxy is a counted
+ * reference, therefore it can't become NULL while this stack is still
+ * alive. */
+ci_inline struct pid_namespace* ci_netif_get_pidns(ci_netif* ni)
+{
+  tcp_helper_resource_t* thr = netif2tcp_helper_resource(ni);
+  struct pid_namespace* ns = ci_get_pid_ns(thr->nsproxy);
+  return ns;
+}
+
+/* Look up a PID in this ci_netif's PID namespace. Must be called with
+ * the tasklist_lock or rcu_read_lock() held. */
+ci_inline struct pid* ci_netif_pid_lookup(ci_netif* ni, pid_t pid)
+{
+  struct pid_namespace* ns = ci_netif_get_pidns(ni);
+  return find_pid_ns(pid, ns);
+}
+
+/* Log an error and return failure if the current process is not in
+ * the right namespaces to operate on the given stack. */
+ci_inline int ci_netif_check_namespace(ci_netif* ni)
+{
+  tcp_helper_resource_t* thr = netif2tcp_helper_resource(ni);
+  if( ni == NULL ) {
+    ci_log("In ci_netif_check_namespace() with ni == NULL");
+    return -EINVAL;
+  }
+  if( current == NULL ) {
+    ci_log("In ci_netif_check_namespace() outside process context");
+    return -EINVAL;
+  }
+  if( current->nsproxy == NULL ) {
+    ci_log("In ci_netif_check_namespace() without valid namespaces");
+    return -EINVAL;
+  }
+  if( (thr->nsproxy->net_ns != current->nsproxy->net_ns) ||
+      (ci_get_pid_ns(thr->nsproxy) != ci_get_pid_ns(current->nsproxy)) )
+  {
+    ci_log("NAMESPACE MISMATCH: pid %d accessed a foreign stack",
+           current->pid);
+    return -EINVAL;
+  }
+  return 0;
+}
+#endif
 
 
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_H__ */

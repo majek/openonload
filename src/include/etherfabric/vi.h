@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -77,10 +77,11 @@ struct in6_addr;
 **                     virtual interface.
 ** \param pd_dh        The ef_driver_handle to associate with the
 **                     protection domain.
-** \param evq_capacity The number of events in the event queue (maximum
-**                     4096), or:\n
+** \param evq_capacity The capacity of the event queue, or:\n
 **                     - 0 for no event queue\n
-**                     - -1 for the default size.
+**                     - -1 for the default size (EF_VI_EVQ_SIZE if set, 
+**                     otherwise it is rxq_capacity + txq_capacity +
+**                     extra bytes if timestamps are enabled).
 ** \param rxq_capacity The number of slots in the RX descriptor ring, or:\n
 **                     - 0 for no event queue\n
 **                     - -1 for the default size (EF_VI_RXQ_SIZE if
@@ -135,7 +136,10 @@ extern int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
 ** This should be called when a virtual interface is no longer needed.
 **
 ** To free up all resources, you must also close the associated driver
-** handle. If successful:
+** handle using ef_driver_close and free up memory from the protection domain
+** ef_pd_free. See \ref using_freeing
+**
+** If successful:
 ** - the memory for state provided for this virtual interface is no longer
 **   required
 ** - no further events from this virtual interface will be delivered to its
@@ -154,12 +158,25 @@ extern int ef_vi_free(ef_vi* vi, ef_driver_handle nic);
 ** \param buf_space  The buffer space required for the set of TX alternatives,
 **                   in bytes.
 **
-** \return  0 on success, or a negative error code.
+** \return 0         Success.
+**
+** \return -EINVAL   The num_alts or buf_space parameters are invalid, or
+**                   the VI was allocated without EF_VI_TX_ALT set.
+**
+** \return -EALREADY A set of TX alternatives has already been allocated
+**                   for use with this VI.
+**
+** \return -ENOMEM   Insufficient memory was available (either host memory
+**                   or packet buffers on the adapter).
+**
+** \return -EBUSY    Too many alternatives requested, or alternatives
+**                   requested on too many distinct VIs.
 **
 ** Allocate a set of TX alternatives for use with a virtual interface. The
 ** virtual interface must have been allocated with the EF_VI_TX_ALT flag.
 **
-** The space remains allocated until the virtual interface is freed.
+** The space remains allocated until ef_vi_transmit_alt_free() is
+** called or the virtual interface is freed.
 **
 ** TX alternatives provide a mechanism to send with very low latency.  They
 ** work by pre-loading packets into the adapter in advance, and then
@@ -190,6 +207,43 @@ extern int ef_vi_free(ef_vi* vi, ef_driver_handle nic);
 extern int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
                                     int num_alts, size_t buf_space);
 
+/*! \brief Free a set of TX alternatives
+**
+** \param vi         The virtual interface whose alternatives are to be freed.
+** \param vi_dh      The ef_driver_handle for the NIC hosting the interface.
+**
+** \return  0 on success, or a negative error code.
+**
+** Release the set of TX alternatives allocated by ef_vi_transmit_alt_alloc().
+*/
+extern int ef_vi_transmit_alt_free(struct ef_vi* vi, ef_driver_handle vi_dh);
+
+/*! \brief Query available buffering
+**
+** \param vi          Interface to be queried
+** \param ifindex     The index of the interface that you wish to query. You
+**                    can use if_nametoindex() to obtain this. This should be
+**                    the underlying physical interface, rather than a bond,
+**                    VLAN, or similar.
+** \param vi_dh       The ef_driver_handle for the NIC hosting the interface.
+** \param n_alts      Intended number of alternatives
+**
+** \return -EINVAL if this VI doesn't support alternatives, else the
+** number of bytes available
+**
+** Owing to per-packet and other overheads, the amount of data which
+** can be stored in TX alternatives is generally slightly less than
+** the amount of memory available on the hardware.
+**
+** This function allows the caller to find out how much user-visible
+** buffering will be available if the given number of alternatives are
+** allocated on the given VI.
+*/
+extern int
+ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
+                                   int ifindex,
+                                   ef_driver_handle vi_dh,
+                                   int n_alts);
 
 /*! \brief Flush the virtual interface
 **
@@ -811,6 +865,9 @@ ef_filter_spec_set_block_kernel_multicast(ef_filter_spec* filter_spec);
 ** support for these filters.  v4.5 firmware supports such filters only
 ** when not combined with a MAC address.  Insertion of such filters on firmware
 ** versions that do not support them will fail.
+**
+** Due to a current firmware limitation, this method does not support ether_type 
+** IP or IPv6 and will return no error if these values are specified.
 */
 extern int
 ef_filter_spec_set_eth_type(ef_filter_spec *filter_spec,
@@ -834,8 +891,11 @@ ef_filter_spec_set_eth_type(ef_filter_spec *filter_spec,
 ** - Other filters: not supported, -EPROTONOSUPPORT is returned.
 **
 ** This filter is not supported by 5000-series and 6000-series adapters.
-** 7000-series adapters require a firmware version of at least v4.5.  Insertion
+** Other adapters require a firmware version of at least v4.5.  Insertion
 ** of such filters on firmware versions that do not support them will fail.
+**
+** Due to a current firmware limitation, this method does not support ip_proto=6 (TCP)
+** or ip_proto=17 (UDP) and will return no error if these values are used.  
 */
 extern int
 ef_filter_spec_set_ip_proto(ef_filter_spec *filter_spec, uint8_t ip_proto);
@@ -996,24 +1056,14 @@ ef_vi_stats_query_layout(ef_vi* vi,
 ** Retrieve a set of statistic values.
 **
 ** If do_reset is true, the statistics are reset after reading.
+**
+** \note This requires full feature firmware. If used with low-latency
+** firmware, no error is given, and the statistics are invalid (typically
+** all zeroes).
 */
 extern int
 ef_vi_stats_query(ef_vi* vi, ef_driver_handle vi_dh,
                   void* data, int do_reset);
-
-
-/*! \brief Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
-**
-** \param vi                The virtual interface to configure.
-** \param discard_err_flags Flags which indicate which errors will cause
-**                          discard events
-**
-** \return 0 on success, or a negative error code.
-**
-** Set which errors cause an EF_EVENT_TYPE_RX_DISCARD event
-*/
-extern int
-ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags);
 
 
 #ifdef __cplusplus

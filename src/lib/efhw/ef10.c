@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -57,6 +57,12 @@
 #include <ci/efhw/ef10.h>
 #include <ci/efhw/mc_driver_pcol.h>
 #include "ef10_mcdi.h"
+
+
+int force_ev_timer = 1;
+module_param(force_ev_timer, int, S_IRUGO);
+MODULE_PARM_DESC(force_ev_timer,
+                 "Set to 0 to avoid forcing allocation of event timer with wakeup queue");
 
 
 /* We base owner ids from 1 within Onload so that we can use owner id 0 as
@@ -385,19 +391,6 @@ ef10_nic_v3_license_check(struct efhw_nic *nic, const uint64_t app_id,
 
 
 static int
-_ef10_nic_check_licence(struct efhw_nic *nic) {
-	int licensed;
-	int rc;
-	if (nic->devtype.variant > 'A')
-		rc = ef10_nic_v3_license_check(nic, LICENSED_APP_ID_ONLOAD, &licensed);
-	else
-		rc = ef10_nic_license_check(nic, LICENSED_APP_ID_ONLOAD, &licensed);
-
-	return rc == 0 ? licensed : rc;
-}
-
-
-static int
 ef10_nic_license_challenge(struct efhw_nic *nic, 
 			   const uint32_t feature, 
 			   const uint8_t* challenge, 
@@ -548,7 +541,7 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 
 	EFHW_MCDI_DECLARE_BUF(ver_out, MC_CMD_GET_VERSION_OUT_LEN);
 	EFHW_MCDI_DECLARE_BUF(in, MC_CMD_GET_CAPABILITIES_V2_IN_LEN);
-	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_V2_OUT_LEN);
+	EFHW_MCDI_DECLARE_BUF(out, MC_CMD_GET_CAPABILITIES_V3_OUT_LEN);
 	EFHW_MCDI_INITIALISE_BUF(ver_out);
 	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_INITIALISE_BUF(out);
@@ -558,15 +551,15 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 	MCDI_CHECK(MC_CMD_GET_CAPABILITIES, rc, out_size, 0);
 	if (rc != 0)
 		return rc;
-	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V2_OUT_FLAGS1);
+	flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V3_OUT_FLAGS1);
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PREFIX_LEN_14_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PREFIX_LEN_14_LBN))
 		*capability_flags |= NIC_FLAG_14BYTE_PREFIX;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_TX_MCAST_UDP_LOOPBACK_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_TX_MCAST_UDP_LOOPBACK_LBN))
 		*capability_flags |= NIC_FLAG_MCAST_LOOP_HW;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PACKED_STREAM_LBN)) {
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PACKED_STREAM_LBN)) {
 		rc = ef10_mcdi_rpc(nic, MC_CMD_GET_VERSION, 0, sizeof(ver_out),
 				   &ver_out_size, NULL, ver_out);
 		if (rc == 0 && ver_out_size == MC_CMD_GET_VERSION_OUT_LEN) {
@@ -591,32 +584,32 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 		}
 	}
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_RSS_LIMITED_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_RSS_LIMITED_LBN))
 		*capability_flags |= NIC_FLAG_RX_RSS_LIMITED;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PACKED_STREAM_VAR_BUFFERS_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PACKED_STREAM_VAR_BUFFERS_LBN))
 		*capability_flags |= NIC_FLAG_VAR_PACKED_STREAM;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_ADDITIONAL_RSS_MODES_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_ADDITIONAL_RSS_MODES_LBN))
 		*capability_flags |= NIC_FLAG_ADDITIONAL_RSS_MODES;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_TIMESTAMP_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_TIMESTAMP_LBN))
 		*capability_flags |= NIC_FLAG_HW_RX_TIMESTAMPING;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_MCAST_FILTER_CHAINING_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_MCAST_FILTER_CHAINING_LBN))
 		*capability_flags |= NIC_FLAG_MULTICAST_FILTER_CHAINING;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_PREFIX_LEN_0_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_PREFIX_LEN_0_LBN))
 		*capability_flags |= NIC_FLAG_ZERO_RX_PREFIX;
 	if (flags & (1u <<
-		     MC_CMD_GET_CAPABILITIES_V2_OUT_RX_BATCHING_LBN))
+		     MC_CMD_GET_CAPABILITIES_V3_OUT_RX_BATCHING_LBN))
 		*capability_flags |= NIC_FLAG_RX_MERGE;
 
 	/* If MAC filters are policed then check we've got the right privileges
 	 * before saying we can do MAC spoofing.
 	 */
 	if (flags & (1u <<
-		MC_CMD_GET_CAPABILITIES_V2_OUT_TX_MAC_SECURITY_FILTERING_LBN)) {
+		MC_CMD_GET_CAPABILITIES_V3_OUT_TX_MAC_SECURITY_FILTERING_LBN)) {
 		if( _ef10_nic_mac_spoofing_privilege(nic) == 1 )
 			*capability_flags |= NIC_FLAG_MAC_SPOOFING;
 	}
@@ -627,15 +620,15 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 
         if (out_size >= MC_CMD_GET_CAPABILITIES_V2_OUT_LEN) {
 		nic->pio_num = EFHW_MCDI_WORD(out,
-					GET_CAPABILITIES_V2_OUT_NUM_PIO_BUFFS);
+					GET_CAPABILITIES_V3_OUT_NUM_PIO_BUFFS);
 		nic->pio_size = EFHW_MCDI_WORD(out,
-					GET_CAPABILITIES_V2_OUT_SIZE_PIO_BUFF);
-		flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V2_OUT_FLAGS2);
+					GET_CAPABILITIES_V3_OUT_SIZE_PIO_BUFF);
+		flags = EFHW_MCDI_DWORD(out, GET_CAPABILITIES_V3_OUT_FLAGS2);
 		if (flags & (1u <<
-			MC_CMD_GET_CAPABILITIES_V2_OUT_TX_VFIFO_ULL_MODE_LBN))
+			MC_CMD_GET_CAPABILITIES_V3_OUT_TX_VFIFO_ULL_MODE_LBN))
 			*capability_flags |= NIC_FLAG_TX_ALTERNATIVES;
 		if (flags & (1u <<
-			     MC_CMD_GET_CAPABILITIES_V2_OUT_INIT_EVQ_V2_LBN))
+			     MC_CMD_GET_CAPABILITIES_V3_OUT_INIT_EVQ_V2_LBN))
 			*capability_flags |= NIC_FLAG_EVQ_V2;
         }
 	else {
@@ -646,6 +639,23 @@ static int _ef10_nic_check_capabilities(struct efhw_nic *nic,
 		nic->pio_num = 16;
 		nic->pio_size = 2048;
 	}
+
+	if (out_size >= MC_CMD_GET_CAPABILITIES_V3_OUT_LEN) {
+		/* If TX alternatives are not supported, these can still be
+		 * set to non-zero values based on whatever MCFW reports.
+		 */
+		nic->tx_alts_vfifos = EFHW_MCDI_BYTE(out,
+						GET_CAPABILITIES_V3_OUT_VFIFO_STUFFING_NUM_VFIFOS);
+		nic->tx_alts_cp_bufs = EFHW_MCDI_WORD(out,
+						GET_CAPABILITIES_V3_OUT_VFIFO_STUFFING_NUM_CP_BUFFERS);
+	}
+	else {
+		nic->tx_alts_vfifos = 0;
+		nic->tx_alts_cp_bufs = 0;
+	}
+
+        nic->rx_variant = EFHW_MCDI_WORD(out, GET_CAPABILITIES_OUT_RX_DPCPU_FW_ID);
+        nic->tx_variant = EFHW_MCDI_WORD(out, GET_CAPABILITIES_OUT_TX_DPCPU_FW_ID);
 
 	return rc;
 }
@@ -755,14 +765,6 @@ ef10_nic_init_hardware(struct efhw_nic *nic,
 		 */
 		nic->rx_ts_correction = -12;
 		nic->tx_ts_correction = 178;
-	}
-
-	rc = _ef10_nic_check_licence(nic);
-	if( rc < 0 ) return rc;
-	if( rc == 0 ) {
-		EFHW_ERR("%s: Firmware reports no Onload licence present",
-			 __FUNCTION__);
-		return -EOPNOTSUPP;
 	}
 
 	/* No buffer_table_ctor() on EF10 */
@@ -985,6 +987,14 @@ ef10_nic_event_queue_enable(struct efhw_nic *nic, uint evq, uint evq_size,
 	int enable_rx_merging = ((flags & EFHW_VI_RX_PACKED_STREAM) != 0) ||
                                 ((flags & EFHW_VI_ENABLE_RX_MERGE) != 0);
 	int enable_timer = (flags & EFHW_VI_ENABLE_EV_TIMER);
+
+	/* See bug66017 - we'd like to sometimes be able to use
+	 * wakeups without an event timer, but that isn't currently
+	 * possible, so force the allocation of a timer
+	 */
+	if( force_ev_timer )
+		enable_timer = 1;
+
 	rc = _ef10_mcdi_cmd_event_queue_enable(nic, evq, evq_size, dma_addrs, 
 					       n_pages, interrupting,
 					       enable_dos_p, enable_cut_through,
@@ -1138,6 +1148,11 @@ ef10_handle_event(struct efhw_nic *nic, struct efhw_ev_handler *h,
 			EFHW_NOTICE("%s: unexpected MCDI RX error event "
 				    "(event code %d)",__FUNCTION__, code);
 			return -EINVAL;
+		case MCDI_EVENT_CODE_AOE:
+			/* This event doesn't signify an error case,
+			 * so just return 0 to avoid logging 
+			 */
+			return -EINVAL;
 		default:
 			EFHW_NOTICE("%s: unexpected MCDI event code %d",
 				    __FUNCTION__, code);
@@ -1220,11 +1235,11 @@ ef10_mcdi_common_pool_alloc(struct efhw_nic *nic, unsigned txq_id,
 	unsigned buf_size = 512;
 	unsigned num_bufs = (num_32b_words * 32 + buf_size - 1) / buf_size;
 
-	/* One buffer gets pre-allocated per CP, which in practice means we
-	 * need any extra one to ensure we get the buffering the user
-	 * expects.
+	/* Up to two buffers get allocated per VFIFO by the hardware,
+	 * which in practice means we need extra buffers to ensure we
+	 * get the buffering the user expects.
 	 */
-	num_bufs += num_alt;
+	num_bufs += 2 * num_alt;
 
 	EFHW_MCDI_INITIALISE_BUF(in);
 	EFHW_MCDI_INITIALISE_BUF(out);

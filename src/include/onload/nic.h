@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -23,25 +23,14 @@
 
 struct oo_nic {
   struct efrm_client* efrm_client;
-  unsigned            black_white_list;
 #define OO_NIC_UP         0x00000001u  /* Interface is currently IFF_UP. */
 #define OO_NIC_UNPLUGGED  0x00000002u  /* Interface has been hot-unplugged. */
   unsigned            oo_nic_flags;
 };
 
 
-struct oo_nic_black_white_list {
-  char* bwl_val;
-  int   bwl_list_type;
-};
-
-extern struct oo_nic_black_white_list oo_nic_white_list;
-extern struct oo_nic_black_white_list oo_nic_black_list;
-
 extern int oo_n_nics;
 extern struct oo_nic oo_nics[];
-
-extern int oo_nic_whitelist_not_empty;
 
 extern void oo_nic_failover_from_hwport(int hwport);
 
@@ -50,12 +39,6 @@ extern struct oo_nic* oo_nic_add(int ifindex);
 extern struct oo_nic* oo_nic_find_ifindex(int ifindex);
 
 extern int oo_nic_hwport(struct oo_nic*);
-
-extern int oo_nic_black_white_list_set(struct oo_nic_black_white_list*,
-                                       const char* val);
-extern int oo_nic_black_white_list_get(struct oo_nic_black_white_list*,
-                                       char* buf, int buflen);
-extern int oo_nic_black_white_list_proc_get(struct seq_file* seq);
 
 extern int oo_check_nic_suitable_for_onload(struct oo_nic* onic);
 

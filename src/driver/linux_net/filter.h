@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2005-2015 Solarflare Communications Inc.
+ * Copyright 2005-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -27,7 +27,28 @@
 
 #include <linux/types.h>
 #include <linux/if_ether.h>
+#if !defined(EFX_NOT_UPSTREAM) || defined(__KERNEL__)
+#include <linux/in6.h>
+#include <linux/etherdevice.h>
+#else
+/* Use userland definition of struct in6_addr */
+#include <netinet/in.h>
+#endif
 #include <asm/byteorder.h>
+
+#if !defined(EFX_USE_KCOMPAT) && defined(EFX_NOT_UPSTREAM) && defined(EFX_NEED_ETHER_ADDR_COPY)
+/* Standalone KCOMPAT for driverlink headers */
+static inline void efx_ether_addr_copy(u8 *dst, const u8 *src)
+{
+	u16 *a = (u16 *)dst;
+	const u16 *b = (const u16 *)src;
+
+	a[0] = b[0];
+	a[1] = b[1];
+	a[2] = b[2];
+}
+#define ether_addr_copy efx_ether_addr_copy
+#endif
 
 /**
  * enum efx_filter_match_flags - Flags for hardware filter match type
@@ -43,6 +64,11 @@
  * @EFX_FILTER_MATCH_IP_PROTO: Match by IP transport protocol
  * @EFX_FILTER_MATCH_LOC_MAC_IG: Match by local MAC address I/G bit.
  *	Used for RX default unicast and multicast/broadcast filters.
+ * @EFX_FILTER_MATCH_ENCAP_TYPE: Match by encapsulation type.
+ * @EFX_FILTER_MATCH_ENCAP_TNI: Match by Tenant Network ID.
+ *	Only applicable for filters with an encapsulation type set.
+ * @EFX_FILTER_MATCH_OUTER_LOC_MAC: Match by outer MAC for encapsulated packets
+ *	Only applicable for filters with an encapsulation type set.
  *
  * Only some combinations are supported, depending on NIC type:
  *
@@ -71,6 +97,7 @@ enum efx_filter_match_flags {
 	EFX_FILTER_MATCH_LOC_MAC_IG =	0x0400,
 	EFX_FILTER_MATCH_ENCAP_TYPE =	0x0800,
 	EFX_FILTER_MATCH_ENCAP_TNI =	0x1000,
+	EFX_FILTER_MATCH_OUTER_LOC_MAC =0x2000,
 };
 
 #define EFX_FILTER_MATCH_FLAGS_RFS (EFX_FILTER_MATCH_ETHER_TYPE | \
@@ -179,6 +206,10 @@ enum efx_encap_type {
  * @rem_host: Remote IP host to match, if %EFX_FILTER_MATCH_REM_HOST is set
  * @loc_port: Local TCP/UDP port to match, if %EFX_FILTER_MATCH_LOC_PORT is set
  * @rem_port: Remote TCP/UDP port to match, if %EFX_FILTER_MATCH_REM_PORT is set
+ * @tni: VXLAN Tenant Network ID.
+ * @encap_type: Type of encapsulation, see efx_encap_type above.
+ * @outer_loc_mac: Outer local MAC address to match, if
+ * 	%EFX_FILTER_MATCH_OUTER_LOC_MAC is set
  *
  * The efx_filter_init_rx() or efx_filter_init_tx() function *must* be
  * used to initialise the structure.  The efx_filter_set_*() functions
@@ -209,7 +240,8 @@ struct efx_filter_spec {
 	__be16	rem_port;
 	u32	tni:24;
 	u32     encap_type:4;
-	/* total 76 bytes */
+	u8	outer_loc_mac[ETH_ALEN];
+	/* total 82 bytes */
 };
 
 enum {
@@ -450,6 +482,20 @@ static inline void efx_filter_set_encap_tni(struct efx_filter_spec *spec,
 {
 	spec->match_flags |= EFX_FILTER_MATCH_ENCAP_TNI;
 	spec->tni = tni;
+}
+
+/**
+ * efx_filter_set_eth_local - specify outer Ethernet address for an
+ *   encapsulated filter
+ * @spec: Specification to initialise
+ * @addr: Local Ethernet MAC address, or %NULL
+ */
+static inline
+void efx_filter_set_encap_outer_loc_mac(struct efx_filter_spec *spec,
+					const u8 *addr)
+{
+	spec->match_flags |= EFX_FILTER_MATCH_OUTER_LOC_MAC;
+	ether_addr_copy(spec->outer_loc_mac, addr);
 }
 
 #endif /* EFX_FILTER_H */

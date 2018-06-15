@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -84,7 +84,7 @@ citp_epollb_postpone_syscall_pre(citp_epollb_fdi *epi,
       if( fd_fdi_using && fd == fd_fdi_using->fd )
         fd_fdi = fd_fdi_using;
       else {
-        fd_fdi = citp_fdtable_lookup_noprobe(fd);
+        fd_fdi = citp_fdtable_lookup_noprobe(fd, 0);
         if( fd_fdi_using )
           ci_assert_nequal(fd_fdi, fd_fdi_using);
       }

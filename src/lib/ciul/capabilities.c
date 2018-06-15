@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -66,6 +66,10 @@ static const char* names[EF_VI_CAP_MAX + 1] = {
   [EF_VI_CAP_NIC_PACE] = "NIC pacing",
   [EF_VI_CAP_RX_MERGE] = "RX event merge mode",
   [EF_VI_CAP_TX_ALTERNATIVES] = "TX alternatives",
+  [EF_VI_CAP_TX_ALTERNATIVES_VFIFOS] = "TX alternatives vFIFOs",
+  [EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS] = "TX alternatives common pool buffers",
+  [EF_VI_CAP_RX_FW_VARIANT] = "RX firmware variant",
+  [EF_VI_CAP_TX_FW_VARIANT] = "TX firmware variant",
   [EF_VI_CAP_MAX] = "Unknown",
 };
 

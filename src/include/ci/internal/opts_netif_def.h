@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -353,6 +353,15 @@ CI_CFG_OPT("EF_TX_TIMESTAMPING", tx_timestamping, ci_uint32,
 " does not succeed;\n",
            2, , 0, 0, 3, count)
 
+CI_CFG_OPT("EF_TCP_TSOPT_MODE", tcp_tsopt_mode, ci_uint32,
+"Enable or disable per-stack TCP header timestamps (as defined in RFC 1323).  "
+"Overrides system setting ipv4.tcp_timestamps and EF_TCP_SYN_OPTS.  "
+"Possible values are:\n"
+"  0  -  Disable TCP header timestamps\n"
+"  1  -  Enable TCP header timestamps\n"
+"  2  -  Use system settings (default)\n",
+        2, , 2, 0, 2, count)
+
 CI_CFG_OPT("EF_CLUSTER_IGNORE", cluster_ignore, ci_uint32,
 "When set, this option instructs Onload to ignore attempts to use clusters and "
 "effectively ignore attempts to set SO_REUSEPORT.",
@@ -509,13 +518,6 @@ CI_CFG_OPT("EF_TCP_RCVBUF_MODE", tcp_rcvbuf_mode, ci_uint32,
 "       size of the buffer for an individual socket."
 "The effect of EF_TCP_RCVBUF_STRICT is independent of this setting.",
 	   1, , 0, 0, 1, yesno)
-
-CI_CFG_OPT("EF_TCP_LISTEN_REPLIES_BACK", tcp_listen_replies_back, ci_uint32,
-"When TCP listening socket replies to incoming SYN, this option forces "
-"Onload to ignore the route table and to reply to the same network "
-"interface the SYN was received from.  This mode could be considered as "
-"a poor man source routing replacement.",
-           1, , 0, 0, 1, yesno)
 
 CI_CFG_OPT("EF_HIGH_THROUGHPUT_MODE", rx_merge_mode, ci_uint32,
 "This option causes onload to optimise for throughput at the cost of latency.",
@@ -674,7 +676,9 @@ CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
 "is time critical."
 "\n"
 "Setting this option to 0 will disable forced sync.  Synchronising data from "
-"the kernel will continue to happen periodically.",
+"the kernel will continue to happen periodically."
+"\n"
+"Sync operation time is limited by cplane_init_timeout onload module option.",
            2, , 2, 0, 2, oneof:never;first;always)
 
 CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
@@ -682,7 +686,8 @@ CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
 "bit 0 (0x1) is set to 1 to enable PAWS and RTTM timestamps (RFC1323),\n"
 "bit 1 (0x2) is set to 1 to enable window scaling (RFC1323),\n"
 "bit 2 (0x4) is set to 1 to enable SACK (RFC2018),\n"
-"bit 3 (0x8) is set to 1 to enable ECN (RFC3128).",
+"bit 3 (0x8) is set to 1 to enable ECN (RFC3128)."
+"Overridden by OS settings if they are available.",
            4, , CI_TCPT_SYN_FLAGS, MIN, MAX, bitmask)
 
 CI_CFG_OPT("EF_TCP_ADV_WIN_SCALE_MAX", tcp_adv_win_scale_max, ci_uint32,
@@ -1326,6 +1331,35 @@ CI_CFG_OPT("EF_SEPARATE_UDP_RXQ", separate_udp_rxq, ci_uint32,
            1, , 0, 0, 1, yesno)
 #endif
 
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS", tcp_shared_local_ports, ci_uint32,
+"This feature improves the performance of TCP active-opens.  It reduces the "
+"cost of both blocking and non-blocking connect() calls, reduces the "
+"latency to establish new connections, and enables scaling to large numbers "
+"of active-open connections.  It also reduces the cost of closing these "
+"connections."
+"\n"
+"These improvements are achieved by sharing a set of local port numbers "
+"amongst active-open sockets, which saves the cost and scaling limits "
+"associated with installing packet steering filters for each active-open "
+"socket.  Shared local ports are only used when the local port is not "
+"explicitly assigned by the application."
+"\n"
+"Set this option to >=1 to enable local port sharing.  The value set gives "
+"the initial number of local ports to allocate when the Onload stack is "
+"created.  More shared local ports are allocated on demand as needed up to "
+"the maximum given by EF_TCP_SHARED_LOCAL_PORTS_MAX."
+"\n"
+"Note that typically only one local shared port is needed, as different "
+"local ports are only needed when multiple connections are made to the same "
+"remote IP:port.",
+           , , 0, 0, MAX, count)
+
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_MAX", tcp_shared_local_ports_max,
+           ci_uint32,
+"This setting sets the maximum size of the pool of local shared ports.  "
+"See EF_TCP_SHARED_LOCAL_PORTS for details.",
+           , , 100, 0, MAX, count)
+
 CI_CFG_OPT("EF_SCALABLE_FILTERS", scalable_filter_ifindex, ci_int32,
 "Specifies the interface on which to enable support for scalable filters, "
 "and configures the scalable filter mode(s) to use.  Scalable filters "
@@ -1376,6 +1410,26 @@ CI_CFG_OPT("EF_SCALABLE_FILTERS_ENABLE", scalable_filter_enable, ci_int32,
 "is set to 0 then scalable filters will not be used for this stack.  If unset "
 "this will default to 1 if EF_SCALABLE_FILTERS is configured.",
            , , 0, 0, 1, yesno)
+
+CI_CFG_STR_OPT("EF_INTERFACE_WHITELIST", iface_whitelist, ci_string256,
+               "List of names of interfaces to use by the stack.  "
+               "Space separated.\n"
+               "Note: beside passing network interface of Solarflare NIC itself, "
+               "it is allowed to provide name of higher order interface such as "
+               "VLAN, MACVLAN, team or bond.  At stack creation time these names "
+               "will be used to identify underlaying Solarflare NICs on which the "
+               "whitelisting operates.\n"
+               "Note: the granularity of whitelisting is limited: all interfaces "
+               "based on whitelisted Solarflare NICs are accelerated.",
+               ,  , "", none, none, )
+
+CI_CFG_STR_OPT("EF_INTERFACE_BLACKLIST", iface_blacklist, ci_string256,
+               "List of names of interfaces not to be used by the stack.  "
+               "Space separated.\n"
+               "See EF_INTERFACE_WHITELIST for notes as the same caveats apply.\n"
+               "Note: blacklist takes priority over whitelist.  That is when "
+               "interface is present on both lists it will not be accelerated." ,
+               ,  , "", none, none, )
 
 #ifdef CI_CFG_OPTGROUP
 /* define some categories - currently more as an example than as the final

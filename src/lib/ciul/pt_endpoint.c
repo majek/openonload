@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,7 @@
 /*! \cidoxg_lib_ef */
 #include <etherfabric/vi.h>
 #include <etherfabric/pd.h>
+#include <etherfabric/capabilities.h>
 #include <ci/efhw/common.h>
 #include "ef_vi_internal.h"
 #include "driver_access.h"
@@ -63,6 +64,7 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
                                                     EFHW_VI_NO_RX_CUT_THROUGH |
                                                     EFHW_VI_ENABLE_RX_MERGE |
                                                     EFHW_VI_NO_EV_CUT_THROUGH);
+  if( vi_flags & EF_VI_TX_ALT            ) efab_flags |= EFHW_VI_TX_ALT;
   return efab_flags;
 }
 
@@ -131,6 +133,14 @@ int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
   int i, rc;
   unsigned max_hw;
 
+  if( num_alts <= 0 ) {
+    LOGVV(ef_log("%s: ERROR: can't allocate < 1 alternative", __func__));
+    return -EINVAL;
+  }
+  if( buf_space == 0 ) {
+    LOGVV(ef_log("%s: ERROR: can't allocate 0 buffer space", __func__));
+    return -EINVAL;
+  }
   if( ! (vi->vi_flags & EF_VI_TX_ALT) ) {
     LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT flag not set", __func__));
     return -EINVAL;
@@ -176,6 +186,91 @@ int ef_vi_transmit_alt_alloc(struct ef_vi* vi, ef_driver_handle vi_dh,
   return 0;
 }
 
+int ef_vi_transmit_alt_free(struct ef_vi* vi, ef_driver_handle vi_dh)
+{
+  ci_resource_op_t op;
+  int rc;
+
+  if( ! (vi->vi_flags & EF_VI_TX_ALT) ) {
+    LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT flag not set", __func__));
+    return -EINVAL;
+  }
+
+  if( vi->tx_alt_id2hw == NULL ) {
+    LOGVV(ef_log("%s: ERROR: alloc not called", __func__));
+    return -EINVAL;
+  }
+
+  free(vi->tx_alt_id2hw);
+  vi->tx_alt_id2hw = NULL;
+
+  free(vi->tx_alt_hw2id);
+  vi->tx_alt_hw2id = NULL;
+
+  memset(&op, 0, sizeof(op));
+  op.id = efch_make_resource_id(vi->vi_resource_id);
+  op.op = CI_RSOP_VI_TX_ALT_FREE;
+  if( (rc = ci_resource_op(vi_dh, &op)) < 0 ) {
+    LOGVV(ef_log("%s: ERROR: driver returned %d", __func__, rc));
+    return rc;
+  }
+
+  return 0;
+}
+
+
+#define MEDFORD_BYTES_PER_BUFFER (512)
+#define MEDFORD_BYTES_PER_WORD   (32)
+
+int ef_vi_transmit_alt_query_buffering(struct ef_vi* vi,
+                                       int ifindex,
+                                       ef_driver_handle dh, 
+                                       int n_alts)
+{
+  unsigned long available_buffering;
+
+  if( ! (vi->vi_flags & EF_VI_TX_ALT) ) {
+    LOGVV(ef_log("%s: ERROR: EF_VI_TX_ALT flag not set", __func__));
+    return -EINVAL;
+  }
+
+  int rc = ef_vi_capabilities_get(dh, ifindex,
+                                  EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS,
+                                  &available_buffering);
+  if( rc != 0 ) {
+    LOGVV(ef_log("%s: ERROR: capabilities failed", __func__));
+    return rc;
+  }
+
+  switch( vi->nic_type.arch ) {
+  case EF_VI_ARCH_EF10:
+    return MEDFORD_BYTES_PER_BUFFER * (available_buffering - 2*n_alts);
+
+  default:
+    return -EINVAL;
+  }
+  
+  return 0;
+}
+
+
+int ef_vi_transmit_alt_query_overhead(ef_vi* vi,
+                                      struct ef_vi_transmit_alt_overhead *out)
+{
+  if( (vi->nic_type.arch != EF_VI_ARCH_EF10) ||
+      (vi->nic_type.variant == 'A') ||
+      ! (vi->vi_flags & EF_VI_TX_ALT) ) {
+    LOGVV(ef_log("%s: ERROR: alts not supported on this VI", __func__));
+    return -EINVAL;
+  }
+
+  out->pre_round = MEDFORD_BYTES_PER_WORD - 1;
+  out->mask = ~(MEDFORD_BYTES_PER_WORD - 1);
+  out->post_round = MEDFORD_BYTES_PER_WORD;
+
+  return 0;
+}
+
 
 /****************************************************************************/
 
@@ -193,9 +288,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "6eb29a59b6a0365c95c78b8ffba2777b") &&
+  if( strcmp(EFCH_INTF_VER, "4f1b39df8be718dd854ab7d32d02f339") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "c217ae46d057c90f295732ada3711ae4") ) {
+      strcmp(EFCH_INTF_VER, "4041523aeb9de689da67344e13fef2af") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }
@@ -242,13 +337,18 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   else if( (q_label = evq->vi_qs_n) == EF_VI_MAX_QS )
     return -EBUSY;
 
-  if( evq_capacity == -1 )
-    evq_capacity = (s = getenv("EF_VI_EVQ_SIZE")) ? atoi(s) : -1;
-  if( txq_capacity == -1 )
-    txq_capacity = (s = getenv("EF_VI_TXQ_SIZE")) ? atoi(s) : -1;
-  if( rxq_capacity == -1 )
-    rxq_capacity = (s = getenv("EF_VI_RXQ_SIZE")) ? atoi(s) : -1;
-  if( evq_capacity == -1 && (vi_flags & EF_VI_RX_PACKED_STREAM) )
+  if( evq_capacity < 0 )
+    evq_capacity = -1 - ef_vi_evq_clear_stride();
+  else if( evq_capacity > 0 )
+    evq_capacity += ef_vi_evq_clear_stride();
+
+  if( evq_capacity < 0 && (s = getenv("EF_VI_EVQ_SIZE")) )
+    evq_capacity = atoi(s);
+  if( txq_capacity < 0 && (s = getenv("EF_VI_TXQ_SIZE")) )
+    txq_capacity = atoi(s);
+  if( rxq_capacity < 0 && (s = getenv("EF_VI_RXQ_SIZE")) )
+    rxq_capacity = atoi(s);
+  if( evq_capacity < 0 && (vi_flags & EF_VI_RX_PACKED_STREAM) )
     /* At time of writing we're doing this at user-level as well as in
      * driver.  Utimately we want this default to be applied in the driver
      * so we don't have to know this magic number (which may change in
@@ -380,10 +480,10 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
          vi->vi_ps_buf_size != 1024*1024);
   vi->vi_clustered = vi_clustered;
   vi->vi_i = ra.u.vi_out.instance;
+  vi->vi_is_packed_stream = !! (vi_flags & EF_VI_RX_PACKED_STREAM);
   ef_vi_init_state(vi);
   rc = ef_vi_add_queue(evq, vi);
   BUG_ON(rc != q_label);
-  vi->vi_is_packed_stream = !! (vi_flags & EF_VI_RX_PACKED_STREAM);
 
   if( vi->vi_is_packed_stream )
     ef_vi_packed_stream_update_credit(vi);
@@ -426,13 +526,6 @@ int ef_vi_alloc_from_pd(ef_vi* vi, ef_driver_handle vi_dh,
     index_in_vi_set = pd->pd_cluster_viset_index;
     vi_clustered = 1;
   }
-#ifdef __powerpc__
-  /* take into account reserved entries see ef10/falcon_event.c */
-  if( evq_capacity < 0 )
-    evq_capacity = -1 - 16;
-  else if( evq_capacity > 0 )
-    evq_capacity += 16;
-#endif
   return __ef_vi_alloc(vi, vi_dh, res_id, pd_dh, index_in_vi_set, evq_capacity,
 		       rxq_capacity, txq_capacity, evq_opt, evq_dh,
 		       vi_clustered, flags);

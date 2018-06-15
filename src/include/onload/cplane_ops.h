@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -17,12 +17,10 @@
 #ifndef __ONLOAD_CPLANE_OPS_H__
 #define __ONLOAD_CPLANE_OPS_H__
 
-#include <cplane/shared_ops.h>
+#include <cplane/cplane.h>
 #include <ci/internal/ip.h>
 
-#ifdef __KERNEL__
-#include <cplane/exported.h>
-#else
+#ifndef __KERNEL__
 #include <onload/unix_intf.h>
 #endif
 
@@ -107,6 +105,10 @@ CICP_SYSBODY(
 #undef CICP_SYSBODY
 #undef CICP_SYSCALL
 
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility push(default)
+#endif
+
 /*!
  * Establish forwarding information.
  *
@@ -159,68 +161,6 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
                           const ci_ip_cached_hdrs* from_ipcache);
 
 
-/*!
- * validate that cached forwarding information is still correct
- *
- * \param user            the user-visible control plane information handle
- * \param handle          the integrity handle
- *
- * \return                0 iff the entry is no longer valid
- *
- * The information validated as "correct" includes all the data returned by
- * the /c cicp_fwd_retrieve function below.
- *
- * The correctness of the implementation of this function depends on the
- * explicit invalidation of the IP-MAC mapping for a nexthop IP address
- * whenever any of the information that should be returned by
- * /c cicp_fwd_retrieve is altered including
- *
- *     - change in first hop MAC address
- *     - change in source IP address associated with source interface
- *     - change in status of source interface (e.g. up/down)
- *     - change in encapsulation used on source interface
- *
- * It must also be invalidated whenever any change to the routing table that
- * might result in the selection of a different nexthop IP address is made
- *
- * This function can be used in the validation of the best   
- * source IP address as well as the next hop address.
- *
- * Note the user argument is not a control plane handle - it is the value
- * that is returned by "CICP_USER_MIBS(CICP_HANDLE(netif))".  The reason for
- * this is to allow the user to cache this value and thus avoid an indirection.
- */
-ci_inline int /* bool */
-cicp_user_is_valid(const cicp_ul_mibs_t *user, 
-                   const cicp_user_verinfo_t *handle)
-{   return cicp_mac_is_valid(user->mac_utable, handle);
-}
-
-/*! Check the ip cache is currently valid
- */
-ci_inline int /* bool */
-cicp_ip_cache_is_valid(cicp_handle_t *cicp_handle,  ci_ip_cached_hdrs *ipcache)
-{
-    return cicp_user_is_valid(&CICP_USER_MIBS(cicp_handle),
-			      &ipcache->mac_integrity);
-}
-
-
-/*! Update MAC entry if necessary */
-ci_inline void
-cicp_ip_cache_mac_update(ci_netif* ni, ci_ip_cached_hdrs *ipcache,
-                         int/*bool*/ confirm)
-{
-    if( (ipcache->flags & CI_IP_CACHE_NEED_UPDATE_STALE) ||
-        (confirm && (ipcache->flags & CI_IP_CACHE_NEED_UPDATE_SOON))) {
-        ipcache->flags &= ~(CI_IP_CACHE_NEED_UPDATE_STALE |
-                            CI_IP_CACHE_NEED_UPDATE_SOON);
-        cicp_mac_update(CICP_HANDLE(ni), &ipcache->mac_integrity,
-                        ipcache->nexthop, ipcache->ifindex,
-                        ci_ip_cache_ether_dhost(ipcache), confirm);
-    }
-}
-
 
 ci_inline void
 cicp_ipcache_vlan_set(ci_ip_cached_hdrs*  ipcache)
@@ -236,13 +176,41 @@ cicp_ipcache_vlan_set(ci_ip_cached_hdrs*  ipcache)
   }
 }
 
+/*! Checks if the given ip address is both local and etherfabric.
+ *  Returns 1 if it is, 0 if it isn't.
+ *  If the address isn't found, it returns 0
+ */
+ci_inline int
+cicp_user_addr_is_local_efab(struct oo_cplane_handle *cplane,
+			     ci_ip_addr_t ip)
+{ 
+  /* Sadly we need to initialize these because gcc 4 is dumb and bitches if we
+   * don't (which is bad, since we compile with -Werror)
+   */
+  cicp_hwport_mask_t hwports = 0;
+  if (CI_UNLIKELY(oo_cp_find_llap_by_ip(cplane, ip,
+					&hwports,
+					/*ifindex*/NULL, /*mac*/NULL,
+                                        /*mtu*/NULL, /*encap*/NULL)))
+    return 0;
+  else
+    return hwports != 0;
+}
 
-#if CPLANE_TEAMING
-#ifndef __KERNEL__
-extern int ci_bond_get_hwport_list(cicp_handle_t* cplane, ci_ifid_t ifindex,
-                               ci_int8 hwports[]);
-#endif
-#endif /* CPLANE_TEAMING */
+ci_inline int /* bool */
+cicp_user_is_local_addr(struct oo_cplane_handle *cplane,
+			ci_ip_addr_t ip)
+{
+  return oo_cp_find_llap_by_ip(cplane, ip, /*hwport*/NULL,
+                             /*ifindex*/NULL, /*mac*/NULL, /*mtu*/NULL,
+                             /*encap*/NULL) == 0;
+}
+
+ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
+                                     const cicp_encap_t *encap)
+{
+  return (hwport != CI_HWPORT_ID_BAD);
+}
 
 
 /*----------------------------------------------------------------------------
@@ -251,7 +219,12 @@ extern int ci_bond_get_hwport_list(cicp_handle_t* cplane, ci_ifid_t ifindex,
 
 
 #ifdef __ci_driver__
-#include <cplane/prot_types.h>
+
+static inline struct cicppl_instance* cicppl_by_netif(ci_netif *netif)
+{
+  return &netif->cplane->cppl;
+}
+
 /*!
  * Very restricted copying of an IP packet in to a packet buffer. 
  *
@@ -290,6 +263,14 @@ extern int /*bool*/
 cicppl_mac_defer_send(ci_netif *netif, int *out_os_rc,
 		      ci_ip_addr_t ip, oo_pkt_p ip_pktid, ci_ifid_t ifindex);
 
+
+/*! Send IP packet via RAW socket.  Computes TCP/UDP checksum if possible */
+extern int cicp_raw_ip_send(struct cicppl_instance* cppl,
+                            const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex);
+
+#ifdef CI_USE_GCC_VISIBILITY
+#pragma GCC visibility pop
+#endif
 
 #endif
 

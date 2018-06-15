@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -154,6 +154,13 @@ extern int onload_stack_opt_set_int(const char* opt, int64_t val);
 
 extern int onload_stack_opt_get_int(const char* opt, int64_t* val);
 
+extern int onload_stack_opt_set_str(const char* opt, const char* val);
+
+/* When buffer is too small -ENOSPC is returned and required buffer size is
+ * stored in val_out_len */
+extern int
+onload_stack_opt_get_str(const char* opt, char* val_out, size_t* val_out_len);
+
 extern int onload_stack_opt_reset(void);
 
 
@@ -222,6 +229,12 @@ enum onload_spin_type {
   ONLOAD_SPIN_SOCK_LOCK,
   ONLOAD_SPIN_SO_BUSY_POLL,
   ONLOAD_SPIN_TCP_CONNECT,
+  ONLOAD_SPIN_MIMIC_EF_POLL, /* thread spin configuration which mimics
+                              * spin settings in EF_POLL_USEC. Note that
+                              * this has no effect on the usec-setting
+                              * part of EF_POLL_USEC. This needs to be
+                              * set separately
+                              */
   ONLOAD_SPIN_MAX /* special value to mark largest valid input */
 };
 
@@ -502,9 +515,43 @@ enum onload_delegated_send_rc {
 /* Resolve ARP if necessary - it might take some time */
 #define ONLOAD_DELEGATED_SEND_FLAG_RESOLVE_ARP 0x2
 
+/* Prepare to make a delegated send.  
+ *
+ * This function reserves up to "size" bytes for future delegated
+ * sends, allocates headers and fills them in with current
+ * Ethernet-IP-TCP header data.
+ *
+ * See the notes above for more details on usage.
+ *
+ * Returns:
+ * ONLOAD_DELEGATED_SEND_RC_OK=0 in case of success;
+ * ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET: invalid socket
+ *     (non-Onloaded, non-TCP, non-connected or write-shutdowned);
+ * ONLOAD_DELEGATED_SEND_RC_SMALL_HEADER: too small headers_len value
+ *     (headers_len is set to the correct size);
+ * ONLOAD_DELEGATED_SEND_RC_SENDQ_BUSY: send queue is not empty;
+ * ONLOAD_DELEGATED_SEND_RC_NOARP: failed to find the destination MAC
+ *      address;
+ * ONLOAD_DELEGATED_SEND_RC_NOWIN: send window or congestion window
+ *      is closed.  send_wnd and cong_wnd fields are filled in,
+ *      so the caller can find out which window is closed.
+ */
+
 extern enum onload_delegated_send_rc
 onload_delegated_send_prepare(int fd, int size, unsigned flags,
                               struct onload_delegated_send* out);
+
+
+/* Update packet headers created by onload_delegated_send_prepare()
+ * with correct data length and push flag details.
+ * 
+ * onload_delegated_send_prepare() assumes that the delegated send
+ * will be the maximum segment size, and that no PUSH flag will be set
+ * in the TCP header.  If this assumption is correct there is no need
+ * to call onload_delegated_send_tcp_update().
+ *
+ * See the notes above for more details on usage.
+ */
 
 static inline void
 onload_delegated_send_tcp_update(struct onload_delegated_send* ds, int bytes,
@@ -528,6 +575,17 @@ onload_delegated_send_tcp_update(struct onload_delegated_send* ds, int bytes,
 #undef TCP_FLAG_PSH
 }
 
+/* Update packet headers created by onload_delegated_send_prepare() to
+ * reflect that a packet of length "bytes" has been sent.
+ * 
+ * onload_delegated_send_prepare() reserves a potentially long area
+ * for delegated sends.  If these bytes are sent in multiple packets,
+ * this function must be used in between each delegated send to update
+ * the TCP headers appropriately.
+ *
+ * See the notes above for more details on usage.
+ */
+
 static inline void
 onload_delegated_send_tcp_advance(struct onload_delegated_send* ds, int bytes)
 {
@@ -544,9 +602,33 @@ onload_delegated_send_tcp_advance(struct onload_delegated_send* ds, int bytes)
   *seq_p = htonl(seq);
 }
 
+
+/* Notify Onload that some data have been sent via delegated sends.
+ * If successful, Onload will handle all further aspects of the TCP
+ * protocol (e.g. acknowledgements, retransmissions) for those bytes.
+ *
+ * See the notes above for more details on usage.
+ *
+ * Returns 0 on success, or -1 with errno set in case of error.
+ */
+
 extern int
 onload_delegated_send_complete(int fd, const struct iovec* iov, int iovlen,
                                int flags);
+
+/* Notify Onload that a previously reserved set of bytes (obtained
+ * using onload_delegated_send_prepare()) are no longer required.
+ *
+ * This must be used if the caller has not called
+ * onload_delegated_send_complete() for all the bytes reserved.  After
+ * successful return, the caller can use standard sockets API calls,
+ * or start another delegated send operation with
+ * onload_delegated_send_prepare().
+ * 
+ * See the notes above for more details on usage.
+ *
+ * Returns 0 on success, or -1 with errno set in case of error.
+ */
 
 extern int
 onload_delegated_send_cancel(int fd);
@@ -616,6 +698,48 @@ struct onload_tcp_info {
 extern int
 onload_get_tcp_info(int fd, struct onload_tcp_info* info, int* len_in_out);
 
+
+/**********************************************************************
+ * onload_socket_nonaccel: create a non-accelerated socket
+ *
+ * This function creates a socket that is not accelerated by Onload.
+ * It is possible to do the same, more flexibly, using the Onload
+ * stackname API.  This can be useful when attempting to reserve a
+ * port for an ephemeral ef_vi instance without installing Onload
+ * filters.
+ *
+ * This function takes arguments and returns values that correspond
+ * exactly to the standard socket() function call.  In addition, it
+ * will return -1 with errno ENOSYS if the onload extensions library
+ * is not in use.
+ */
+extern int
+onload_socket_nonaccel(int domain, int type, int protocol);
+
+
+/**********************************************************************
+ * onload_socket_unicast_nonaccel: create a socket where unicast is
+ *                                 non-accelerated
+ *
+ * This function creates a socket where only multicast traffic is
+ * accelerated by onload.  If this socket is not able to receive multicast,
+ * for example because it's bound to a unicast local address, or it's a TCP
+ * socket, then it will be handed over to the kernel.
+ *
+ * This can be useful in cases where a socket will be used solely for
+ * multicast traffic to avoid consuming limited filter table resource.  This
+ * does not prevent unicast traffic from arriving at the socket, as if
+ * appropriate traffic is received it will still be delivered via the
+ * un-accelerated path.  It is most useful for sockets that are bound to
+ * INADDR_ANY, as for these onload must install a filter per IP address that
+ * is configured on an accelerated interface, on each accelerated hardware
+ * port.
+ *
+ * If a socket is bound to a multicast local address then no unicast filters
+ * will be installed, so there is no need for this function.
+ */
+extern int
+onload_socket_unicast_nonaccel(int domain, int type, int protocol);
 
 #ifdef __cplusplus
 }

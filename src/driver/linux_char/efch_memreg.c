@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -231,7 +231,7 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
   down_read(&current->mm->mmap_sem);
   for (mr->n_pages = 0; mr->n_pages < max_pages; mr->n_pages += rc) {
     rc = get_user_pages(first_page + mr->n_pages * PAGE_SIZE,
-                        max_pages - mr->n_pages, 1, 0,
+                        max_pages - mr->n_pages, FOLL_WRITE,
                         mr->pages + mr->n_pages, NULL);
     if (rc <= 0) {
       EFCH_ERR("%s: ERROR: get_user_pages(%d) returned %d",
@@ -380,6 +380,8 @@ memreg_rm_alloc(ci_resource_alloc_t* alloc_,
       goto fail4;
   }
 #endif
+
+  vfree(addrs);
 
   mr->pd = pd;
   ch_rs->rs_base = NULL;

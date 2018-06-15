@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -211,7 +211,7 @@ int ci_udp_should_handover(citp_socket* ep, const struct sockaddr* addr,
 
   addr_be32 = ci_get_ip4_addr(ep->s->domain, addr);
   if( addr_be32 != CI_BSWAPC_BE32(INADDR_ANY) &&
-      ! cicp_user_addr_is_local_efab(CICP_HANDLE(ep->netif), &addr_be32) && 
+      ! cicp_user_addr_is_local_efab(ep->netif->cplane, addr_be32) && 
       ! CI_IP_IS_MULTICAST(addr_be32) ) {
     /* Either the bind/getsockname indicated that we need to let the OS
       * take this or the local address is not one of ours - so we can safely
@@ -246,8 +246,8 @@ static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
 
   ci_udp_set_laddr(ep, addr_be32, lport);
   us = SOCK_TO_UDP(ep->s);
-  if( addr_be32 != 0 )
-    us->s.cp.sock_cp_flags |= OO_SCP_LADDR_BOUND;
+  if( addr_be32 != 0 && !CI_IP_IS_MULTICAST(addr_be32) )
+    us->s.cp.sock_cp_flags &=~ OO_SCP_UDP_WILD;
   /* reset any rx/tx that have taken place already */
   UDP_CLR_FLAG(us, CI_UDPF_EF_SEND);
 
@@ -274,6 +274,16 @@ static int ci_udp_bind_conclude(citp_socket* ep, const struct sockaddr* addr,
     CITP_STATS_NETIF(++ep->netif->state->stats.udp_bind_no_filter);
     goto handover;
   }
+
+  /* If we don't want unicast filters installed, and we've now got a unicast
+   * laddr, then we're not going to get any accelerated traffic, so let's
+   * just handover now.
+   */
+  if( UDP_GET_FLAG(us, CI_UDPF_NO_UCAST_FILTER) &&
+      (udp_laddr_be32(us) != INADDR_ANY_BE32) &&
+      !CI_IP_IS_MULTICAST(udp_laddr_be32(us)) )
+    goto handover;
+
   return rc;
 
  handover:
@@ -336,8 +346,9 @@ int ci_udp_reuseport_bind(citp_socket* ep, ci_fd_t fd,
 
   if( (rc = ci_tcp_ep_reuseport_bind(fd, CITP_OPTS.cluster_name,
                                      CITP_OPTS.cluster_size,
-                                     CITP_OPTS.cluster_restart_opt, laddr_be32,
-                                     lport_be16)) != 0 ) {
+                                     CITP_OPTS.cluster_restart_opt,
+                                     CITP_OPTS.cluster_hot_restart_opt,
+                                     laddr_be32, lport_be16)) != 0 ) {
     errno = -rc;
     return -1;
   }
@@ -420,7 +431,7 @@ ci_udp_disconnect(citp_socket* ep, ci_udp_state* us, ci_fd_t os_sock)
     /* Not too bad -- should still get packets via OS socket. */
     LOG_U(log(FNS_FMT "ERROR: ci_udp_set_filters failed (%d)",
               FNS_PRI_ARGS(ep->netif, ep->s), errno));
-  us->s.cp.sock_cp_flags &= ~OO_SCP_CONNECTED;
+  us->s.cp.sock_cp_flags |= OO_SCP_UDP_WILD;
   return 0;
 }
 
@@ -464,7 +475,7 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
     goto out;
   }
 
-  us->s.cp.sock_cp_flags |= OO_SCP_CONNECTED;
+  us->s.cp.sock_cp_flags &=~ OO_SCP_UDP_WILD;
   ci_udp_set_raddr(us, dst_be32, serv_sin->sin_port);
   cicp_user_retrieve(ep->netif, &us->s.pkt, &us->s.cp);
 
@@ -498,6 +509,14 @@ int ci_udp_connect_conclude(citp_socket* ep, ci_fd_t fd,
                ip_addr_str(dst_be32), CI_BSWAP_BE16(serv_sin->sin_port)));
     goto handover;
   }
+
+  /* If we don't want unicast filters installed, and we've now got a unicast
+   * laddr, then we're not going to get any accelerated traffic, so let's
+   * just handover now.
+   */
+  if( UDP_GET_FLAG(us, CI_UDPF_NO_UCAST_FILTER) &&
+      !CI_IP_IS_MULTICAST(udp_laddr_be32(us)) )
+    goto handover;
 
   if( onloadable ) {
 #ifdef ONLOAD_OFE
@@ -692,6 +711,14 @@ int ci_udp_getpeername(citp_socket*ep, struct sockaddr* name, socklen_t* namelen
   }
 }
 
+
+void ci_udp_set_no_unicast(citp_socket* ep)
+{
+  CHECK_UEP(ep);
+
+  UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_NO_UCAST_FILTER);
+}
+
 #endif /* !__ci_driver__*/
 
 
@@ -717,6 +744,8 @@ void ci_udp_all_fds_gone(ci_netif* netif, oo_sp sock_id, int do_free)
     UDP_CLR_FLAG(us, CI_UDPF_FILTERED);
     ci_tcp_ep_clear_filters(netif, S_SP(us), 0);
   }
+  ci_assert_equal(ci_netif_get_valid_ep(netif, sock_id)->
+                  oofilter.sf_local_port, NULL);
   ci_udp_recv_q_drop(netif, &us->recv_q);
   ci_ni_dllist_remove(netif, &us->s.reap_link);
 

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -31,13 +31,18 @@
 
 
 static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
-                                        int drop_filter)
+                                        int drop_filter, int do_assert)
 {
 #if CI_CFG_FD_CACHING
   /* Don't support moving cached sockets for now */
   if( ci_tcp_is_cached(ts) ||
-      !ci_ni_dllist_is_self_linked(ni, &ts->epcache_link) )
+      !ci_ni_dllist_is_self_linked(ni, &ts->epcache_link) ) {
+    if( do_assert ) {
+      ci_assert( ! ci_tcp_is_cached(ts) );
+      ci_assert( ci_ni_dllist_is_self_linked(ni, &ts->epcache_link) );
+    }
     return false;
+  }
 #endif
 
   /* TCP closed: supported */
@@ -45,18 +50,28 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
     /* Closed sockets should have no filter, exception being dummy filters,
      * which is the case with bound wild clustered sockets. We cannot move
      * this filter but we can drop it if been told to do so. */
-    ci_assert(! oof_socket_is_armed(&(ci_netif_ep_get(ni, ts->s.b.bufid)->oofilter)));
+    ci_assert(! oof_socket_is_armed(&(ci_netif_ep_get(ni, ts->s.b.bufid)->
+                                      oofilter)));
+    if( do_assert && drop_filter ) {
+      ci_assert_equal(ci_netif_ep_get(ni, ts->s.b.bufid)->
+                      oofilter.sf_local_port,
+                      NULL);
+    }
     return ci_netif_ep_get(ni, ts->s.b.bufid)->oofilter.sf_local_port == NULL ||
            drop_filter;
   }
 
   /* everything except TCP connected is not supported */
-  if( !(ts->s.b.state & CI_TCP_STATE_TCP_CONN) )
+  if( !(ts->s.b.state & CI_TCP_STATE_TCP_CONN) ||
+      ts->local_peer != OO_SP_NULL ||
+      !(ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) ) {
+    if( do_assert ) {
+      ci_assert_flags(ts->s.b.state, CI_TCP_STATE_TCP_CONN);
+      ci_assert_equal(ts->local_peer, OO_SP_NULL);
+      ci_assert_flags(ts->tcpflags, CI_TCPT_FLAG_PASSIVE_OPENED);
+    }
     return false;
-  if( ts->local_peer != OO_SP_NULL )
-    return false;
-  if( !(ts->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED) )
-    return false;
+  }
 
   /* send queue is not supported
    * NB: retrans_ptr is uninitialised when retrans was not used yet,
@@ -70,58 +85,112 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
 #if CI_CFG_TAIL_DROP_PROBE
       ci_ip_timer_pending(ni, &ts->taildrop_tid) ||
 #endif
-      ci_ip_timer_pending(ni, &ts->cork_tid) )
+      ci_ip_timer_pending(ni, &ts->cork_tid) ) {
+    if( do_assert ) {
+      ci_assert(ci_ip_queue_is_empty(&ts->send));
+      ci_assert_equal(ts->send_prequeue, OO_PP_ID_NULL);
+      ci_assert_equal(oo_atomic_read(&ts->send_prequeue_in), 0);
+      ci_assert(ci_ip_queue_is_empty(&ts->retrans));
+      ci_assert(! ci_ip_timer_pending(ni, &ts->rto_tid));
+      ci_assert(! ci_ip_timer_pending(ni, &ts->zwin_tid));
+#if CI_CFG_TAIL_DROP_PROBE
+      ci_assert(! ci_ip_timer_pending(ni, &ts->taildrop_tid));
+#endif
+      ci_assert(! ci_ip_timer_pending(ni, &ts->cork_tid));
+    }
     return false;
+  }
 
   /* non-trivial recv queue is not supported */
-  if( ts->recv1_extract != ts->recv1.head )
+  if( ts->recv1_extract != ts->recv1.head ) {
+    if( do_assert )
+      ci_assert_equal(ts->recv1_extract, ts->recv1.head);
     return false;
+  }
 
   /* Sockets with allocated templates are not supported */
-  if( OO_PP_NOT_NULL(ts->tmpl_head) )
+  if( OO_PP_NOT_NULL(ts->tmpl_head) ) {
+    if( do_assert )
+      ci_assert(OO_PP_IS_NULL(ts->tmpl_head));
     return false;
+  }
 
   return true;
 }
-static int efab_file_move_supported_udp(ci_netif *ni, ci_udp_state *us)
+static int efab_file_move_supported_udp(ci_netif *ni, ci_udp_state *us,
+                                        int do_assert)
 {
   /* Unbound (without filters) sockets only */
-  if( ci_netif_ep_get(ni, us->s.b.bufid)->oofilter.sf_local_port != NULL )
+  if( ci_netif_ep_get(ni, us->s.b.bufid)->oofilter.sf_local_port != NULL ) {
+    if( do_assert ) {
+      ci_assert_equal(ci_netif_ep_get(ni, us->s.b.bufid)->
+                      oofilter.sf_local_port,
+                      NULL);
+    }
     return false;
+  }
 
   /* Do not copy any packets */
   if( ci_udp_recv_q_not_empty(&us->recv_q) ||
       us->zc_kernel_datagram != OO_PP_ID_NULL ||
       us->zc_kernel_datagram_count != 0 ||
-      us->tx_count != 0 || us->tx_async_q != CI_ILL_END )
+      us->tx_count != 0 || us->tx_async_q != CI_ILL_END ) {
+    if( do_assert ) {
+      ci_assert(! ci_udp_recv_q_not_empty(&us->recv_q));
+      ci_assert_equal(us->zc_kernel_datagram, OO_PP_ID_NULL);
+      ci_assert_equal(us->zc_kernel_datagram_count, 0);
+      ci_assert_equal(us->tx_count, 0);
+      ci_assert_equal(us->tx_async_q, CI_ILL_END);
+    }
     return false;
+  }
 
   return true;
 }
 
 /* Returns true if move of this endpoint is supported */
-static int efab_file_move_supported(ci_netif *ni, ci_sock_cmn *s,
-                                    int drop_filter)
+static int __efab_file_move_supported(ci_netif *ni, ci_sock_cmn *s,
+                                      int drop_filter, int do_assert)
 {
 
   /* We do not copy TX timestamping queue yet. */
-  if( s->timestamping_flags != 0 )
+  if( s->timestamping_flags != 0 ) {
+    if( do_assert )
+      ci_assert_equal(s->timestamping_flags, 0);
     return false;
+  }
 
   /* UDP:  */
   if( s->b.state == CI_TCP_STATE_UDP )
-    return efab_file_move_supported_udp(ni, SOCK_TO_UDP(s));
+    return efab_file_move_supported_udp(ni, SOCK_TO_UDP(s), do_assert);
 
   /* TCP or UDP only */
-  if( ! (s->b.state & CI_TCP_STATE_TCP ) )
+  if( ! (s->b.state & CI_TCP_STATE_TCP ) ) {
+    if( do_assert )
+      ci_assert_flags(s->b.state, CI_TCP_STATE_TCP);
     return false;
+  }
 
   /* No listening sockets */
-  if( s->b.state == CI_TCP_LISTEN )
+  if( s->b.state == CI_TCP_LISTEN ) {
+    if( do_assert )
+      ci_assert_nequal(s->b.state, CI_TCP_LISTEN);
     return false;
+  }
 
-  return efab_file_move_supported_tcp(ni, SOCK_TO_TCP(s), drop_filter);
+  return efab_file_move_supported_tcp(ni, SOCK_TO_TCP(s), drop_filter, do_assert);
 }
+static int efab_file_move_supported(ci_netif *ni, ci_sock_cmn *s,
+                                    int drop_filter)
+{
+  return __efab_file_move_supported(ni, s, drop_filter, 0);
+}
+static void efab_assert_file_move_supported(ci_netif *ni, ci_sock_cmn *s,
+                                            int drop_filter)
+{
+  ci_assert(__efab_file_move_supported(ni, s, drop_filter, 1));
+}
+
 
 static void efab_ip_queue_copy(ci_netif *ni_to, ci_ip_pkt_queue *q_to,
                                ci_netif *ni_from, ci_ip_pkt_queue *q_from)
@@ -185,6 +254,23 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
       rc = -EBUSY;
       goto fail1_ni_unlocked;
     }
+    /* We are trying to win a race for locking of the new stack.
+     * The lock might be held either by one of the stack workqueues or
+     * an app.  Workqueue tasks might take long time (pkt set alloc or
+     * reset) but they eventually complete - so let us wait untill
+     * they have finished.
+     * More of an issue is that an app might be spinning on the lock -
+     * we should be able to get it if we spin ourselves for a while; or
+     * might be performing a long op such as hw filter insertion or a
+     * stack poll - empirically we spin long enough to outlive couple of
+     * filter insertions. In all of these cases when we contend with app
+     * there is a fair chance we might give up prematurely and fail to move
+     * the socket.
+     * Finally, an app might have reverse dependency or the stack
+     * lock is stuck - that is why we need to give up eventually.
+     */
+    flush_workqueue(new_thr->wq);
+    flush_workqueue(new_thr->reset_wq);
     rc = ci_netif_lock(&old_thr->netif);
     if( rc != 0 )
       goto fail1_ni_unlocked;
@@ -239,6 +325,14 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   mid_s->b.post_poll_link = new_s->b.post_poll_link;
   mid_s->b.ready_link = new_s->b.ready_link;
   mid_s->reap_link = new_s->reap_link;
+
+  if( tcp_helper_get_user_ns(old_thr) != tcp_helper_get_user_ns(new_thr) ) {
+    /* Need to update the UID associated with this socket to be correct
+     * for the new stack's user namespace.
+     */
+    uid_t kuid = ci_make_kuid(tcp_helper_get_user_ns(old_thr), old_s->uuid);
+    mid_s->uuid = ci_from_kuid_munged(tcp_helper_get_user_ns(new_thr), kuid);
+  }
 
   if( old_s->b.state & CI_TCP_STATE_TCP ) {
     ci_tcp_state *new_ts = SOCK_TO_TCP(new_s);
@@ -321,7 +415,7 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
    * copying of the receive queue. */
   ci_netif_poll(&old_thr->netif);
   tcp_helper_endpoint_move_filters_post(old_ep, new_ep);
-  ci_assert( efab_file_move_supported(&old_thr->netif, old_s, drop_filter) );
+  efab_assert_file_move_supported(&old_thr->netif, old_s, drop_filter);
 
   /* There's a gap between un-registering the old ep, and registering the
    * the new.  However, the notifications shouldn't be in use for sockets
@@ -400,7 +494,7 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   /* Old stack can be unlocked */
   ci_netif_unlock(&old_thr->netif);
 
-  ci_assert( efab_file_move_supported(alien_ni, new_s, drop_filter) );
+  efab_assert_file_move_supported(alien_ni, new_s, drop_filter);
 
   /* Move done: poll for any new data. */
   ci_netif_poll(alien_ni);
@@ -557,6 +651,8 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 
   while( iterate_netifs_unlocked(&alien_ni) == 0 ) {
 
+    if( alien_ni->cplane->cp_netns != priv->thr->netif.cplane->cp_netns )
+      continue; /* can't accelerate inter-namespace connections */
     if( !efab_thr_can_access_stack(netif2tcp_helper_resource(alien_ni),
                                    EFAB_THR_TABLE_LOOKUP_CHECK_USER) )
       continue; /* no permission to look in here */
@@ -572,8 +668,8 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 
     if( NI_OPTS(&priv->thr->netif).tcp_client_loopback !=
         CITP_TCP_LOOPBACK_TO_LISTSTACK &&
-        !efab_thr_user_can_access_stack(alien_ni->uid, alien_ni->euid,
-                                        &priv->thr->netif) )
+        !efab_thr_user_can_access_stack(alien_ni->kuid, alien_ni->keuid,
+                                        priv->thr) )
       continue; /* server can't accept our socket */
 
     tls_id = ci_tcp_connect_find_local_peer(alien_ni, carg->dst_addr,
@@ -636,17 +732,22 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         tcp_helper_resource_t *new_thr;
         ci_resource_onload_alloc_t alloc;
         oo_sp new_sock_id;
+        ci_netif_config_opts opts;
 
         memset(&alloc, 0, sizeof(alloc));
+        memcpy(&opts, &NI_OPTS(&priv->thr->netif), sizeof(opts));
 
         /* create new stack
          * todo: no hardware interfaces are necessary */
         strcpy(alloc.in_version, ONLOAD_VERSION);
         strcpy(alloc.in_uk_intf_ver, oo_uk_intf_ver);
 
+        /* There will be no more active connections in the new stack
+         * - tcp_shared_local_ports is useless. */
+        opts.tcp_shared_local_ports = 0;
+
         /* Note: we will not attempt to create tproxy mode interfaces */
-        rc = tcp_helper_alloc_kernel(&alloc, &NI_OPTS(&priv->thr->netif), 0,
-                                     &new_thr);
+        rc = tcp_helper_alloc_kernel(&alloc, &opts, 0, &new_thr);
         if( rc != 0 ) {
           ci_netif_unlock(&priv->thr->netif);
           efab_thr_release(netif2tcp_helper_resource(alien_ni));

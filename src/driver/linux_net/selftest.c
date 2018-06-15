@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -216,7 +216,7 @@ static int efx_test_interrupts(struct efx_nic *efx,
 	if (rc == -ENOTSUPP) {
 		netif_dbg(efx, drv, efx->net_dev,
 			  "direct interrupt testing not supported\n");
-		tests->interrupt = 1;
+		tests->interrupt = 0;
 		return 0;
 	}
 
@@ -247,18 +247,37 @@ static int efx_test_interrupts(struct efx_nic *efx,
 static int efx_test_eventq_irq(struct efx_nic *efx,
 			       struct efx_self_tests *tests)
 {
-	struct efx_channel *channel;
-	unsigned int read_ptr[EFX_MAX_CHANNELS];
-	unsigned long napi_ran = 0, dma_pend = 0, int_pend = 0;
+	unsigned long *napi_ran, *dma_pend, *int_pend;
+	int dma_pending_count, int_pending_count;
 	unsigned long timeout, wait;
+	struct efx_channel *channel;
+	unsigned int *read_ptr;
+	int bitmap_size;
+	int rc;
 
-	BUILD_BUG_ON(EFX_MAX_CHANNELS > BITS_PER_LONG);
+	read_ptr = kcalloc(efx->n_channels, sizeof(*read_ptr), GFP_KERNEL);
+
+	bitmap_size = DIV_ROUND_UP(efx->n_channels, BITS_PER_LONG);
+
+	napi_ran = kzalloc(bitmap_size * sizeof(unsigned long), GFP_KERNEL);
+	dma_pend = kzalloc(bitmap_size * sizeof(unsigned long), GFP_KERNEL);
+	int_pend = kzalloc(bitmap_size * sizeof(unsigned long), GFP_KERNEL);
+
+	if (!read_ptr || !napi_ran || !dma_pend || !int_pend) {
+		rc = -ENOMEM;
+		goto out_free;
+	}
+
+	dma_pending_count = 0;
+	int_pending_count = 0;
 
 	efx_for_each_channel(channel, efx) {
 		read_ptr[channel->channel] = channel->eventq_read_ptr;
-		set_bit(channel->channel, &dma_pend);
-		set_bit(channel->channel, &int_pend);
+		set_bit(channel->channel, dma_pend);
+		set_bit(channel->channel, int_pend);
 		efx_nic_event_test_start(channel);
+		dma_pending_count++;
+		int_pending_count++;
 	}
 
 	timeout = jiffies + IRQ_TIMEOUT;
@@ -274,24 +293,31 @@ static int efx_test_eventq_irq(struct efx_nic *efx,
 			efx_stop_eventq(channel);
 			if (channel->eventq_read_ptr !=
 			    read_ptr[channel->channel]) {
-				set_bit(channel->channel, &napi_ran);
-				clear_bit(channel->channel, &dma_pend);
-				clear_bit(channel->channel, &int_pend);
+				set_bit(channel->channel, napi_ran);
+				clear_bit(channel->channel, dma_pend);
+				clear_bit(channel->channel, int_pend);
+				dma_pending_count--;
+				int_pending_count--;
 			} else {
-				if (efx_nic_event_present(channel))
-					clear_bit(channel->channel, &dma_pend);
-				if (efx_nic_event_test_irq_cpu(channel) >= 0)
-					clear_bit(channel->channel, &int_pend);
+				if (efx_nic_event_present(channel)) {
+					clear_bit(channel->channel, dma_pend);
+					dma_pending_count--;
+				}
+				if (efx_nic_event_test_irq_cpu(channel) >= 0) {
+					clear_bit(channel->channel, int_pend);
+					int_pending_count--;
+				}
 			}
 			efx_start_eventq(channel);
 		}
 
 		wait *= 2;
-	} while ((dma_pend || int_pend) && time_before(jiffies, timeout));
+	} while ((dma_pending_count || int_pending_count) &&
+		 time_before(jiffies, timeout));
 
 	efx_for_each_channel(channel, efx) {
-		bool dma_seen = !test_bit(channel->channel, &dma_pend);
-		bool int_seen = !test_bit(channel->channel, &int_pend);
+		bool dma_seen = !test_bit(channel->channel, dma_pend);
+		bool int_seen = !test_bit(channel->channel, int_pend);
 
 		tests->eventq_dma[channel->channel] = dma_seen ? 1 : -1;
 		tests->eventq_int[channel->channel] = int_seen ? 1 : -1;
@@ -300,7 +326,7 @@ static int efx_test_eventq_irq(struct efx_nic *efx,
 			netif_dbg(efx, drv, efx->net_dev,
 				  "channel %d event queue passed (with%s NAPI)\n",
 				  channel->channel,
-				  test_bit(channel->channel, &napi_ran) ?
+				  test_bit(channel->channel, napi_ran) ?
 				  "" : "out");
 		} else {
 			/* Report failure and whether either interrupt or DMA
@@ -322,7 +348,15 @@ static int efx_test_eventq_irq(struct efx_nic *efx,
 		}
 	}
 
-	return (dma_pend || int_pend) ? -ETIMEDOUT : 0;
+	rc = (dma_pending_count || int_pending_count) ? -ETIMEDOUT : 0;
+
+out_free:
+	kfree(int_pend);
+	kfree(dma_pend);
+	kfree(napi_ran);
+	kfree(read_ptr);
+
+	return rc;
 }
 
 static int efx_test_phy(struct efx_nic *efx, struct efx_self_tests *tests,
@@ -501,8 +535,7 @@ static int efx_begin_loopback(struct efx_tx_queue *tx_queue)
 
 		/* Copy the payload in, incrementing the source address to
 		 * exercise the rss vectors */
-		payload = ((struct efx_loopback_payload *)
-			   skb_put(skb, sizeof(state->payload)));
+		payload = skb_put(skb, sizeof(state->payload));
 		memcpy(payload, &state->payload, sizeof(state->payload));
 		payload->ip.saddr = htonl(INADDR_LOOPBACK | (i << 2));
 
@@ -563,15 +596,13 @@ static int efx_end_loopback(struct efx_tx_queue *tx_queue,
 	rx_good = atomic_read(&state->rx_good);
 	rx_bad = atomic_read(&state->rx_bad);
 	if (tx_done != state->packet_count) {
-		/* Don't free the skbs; they will be picked up on TX
-		 * overflow or channel teardown.
-		 */
 		netif_err(efx, drv, efx->net_dev,
 			  "TX queue %d saw only %d out of an expected %d "
 			  "TX completion events in %s loopback test\n",
 			  tx_queue->queue, tx_done, state->packet_count,
 			  LOOPBACK_MODE(efx));
 		rc = -ETIMEDOUT;
+		efx_purge_tx_queue(tx_queue);
 		/* Allow to fall through so we see the RX errors as well */
 	}
 
@@ -848,9 +879,13 @@ int efx_selftest(struct efx_nic *efx, struct efx_self_tests *tests,
 	efx_device_detach_sync(efx);
 
 	if (efx->type->test_chip) {
+#ifdef EFX_NOT_UPSTREAM
 		efx_dl_reset_suspend(efx);
+#endif
 		rc_reset = efx->type->test_chip(efx, tests);
+#ifdef EFX_NOT_UPSTREAM
 		efx_dl_reset_resume(efx, rc_reset == 0);
+#endif
 
 		if (rc_reset) {
 			netif_err(efx, hw, efx->net_dev,

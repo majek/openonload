@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -602,7 +602,7 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
      */
     rc = ci_pipe_set_size(epi->ni, p, arg);
     if( rc < 0 ) {
-        errno = EINVAL;
+        errno = -rc;
         rc = CI_SOCKET_ERROR;
         break;
     }
@@ -611,7 +611,7 @@ static int citp_pipe_fcntl(citp_fdinfo* fdinfo, int cmd, long arg)
 #endif
 #ifdef F_GETPIPE_SZ
   case F_GETPIPE_SZ:
-    rc = (p->bufs_max - 1) * OO_PIPE_BUF_MAX_SIZE;
+    rc = p->bufs_max * OO_PIPE_BUF_MAX_SIZE;
     break;
 #endif
   default:

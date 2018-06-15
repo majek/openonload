@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,8 +69,8 @@ extern void usage(void);
   }while(0)
 
 extern int init_udp_pkt(void* pkt_buf, int paylen, ef_vi *vi,
-                        ef_driver_handle dh);
+                        ef_driver_handle dh, int vlan);
 extern void common_usage(void);
-extern void parse_args(char *argv[], int *ifindex, int local_port);
+extern void parse_args(char *argv[], int *ifindex, int local_port, int vlan);
 
 #endif

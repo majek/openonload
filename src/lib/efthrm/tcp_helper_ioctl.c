@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,14 +29,17 @@
 # include <onload/linux_trampoline.h>
 #include <onload/tcp_helper_endpoint.h>
 #include <onload/tcp_helper_fns.h>
-#include <onload/efabcfg.h>
+#include <onload/oof_onload.h>
 #include <onload/oof_interface.h>
 #include <onload/cplane_ops.h>
 #include <onload/version.h>
+#include <onload/dshm.h>
+#include <onload/nic.h>
 #ifdef ONLOAD_OFE
 #include "ofe/onload.h"
 #endif
 #include "onload_kernel_compat.h"
+#include <onload/cplane_driver.h>
 
 
 int
@@ -75,7 +78,7 @@ oo_priv_lookup_and_attach_stack(ci_private_t* priv, const char* name,
 {
   tcp_helper_resource_t* trs;
   int rc;
-  if( (rc = efab_thr_table_lookup(name, id,
+  if( (rc = efab_thr_table_lookup(name, current->nsproxy->net_ns, id,
                                   EFAB_THR_TABLE_LOOKUP_CHECK_USER,
                                   &trs)) == 0 ) {
     if( (rc = oo_priv_set_stack(priv, trs)) == 0 ) {
@@ -118,7 +121,7 @@ efab_tcp_helper_stack_attach(ci_private_t* priv, void *arg)
   /* Re-read the OS socket buffer size settings.  This ensures we'll use
    * up-to-date values for this new socket.
    */
-  efab_get_os_settings(&NI_OPTS_TRS(trs));
+  efab_get_os_settings(trs);
   op->out_nic_set = trs->netif.nic_set;
   op->out_map_size = trs->mem_mmap_bytes;
   return 0;
@@ -171,7 +174,7 @@ efab_tcp_helper_sock_attach_common(tcp_helper_resource_t* trs,
     /* Re-read the OS socket buffer size settings.  This ensures we'll use
      * up-to-date values for this new socket.
      */
-    efab_get_os_settings(&NI_OPTS_TRS(trs));
+    efab_get_os_settings(trs);
   }
 
   return rc;
@@ -235,7 +238,7 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   if( (NI_OPTS(&trs->netif).scalable_filter_enable !=
        CITP_SCALABLE_FILTERS_ENABLE) ||
       (fd_type == CI_PRIV_TYPE_UDP_EP) ) {
-    rc = efab_create_os_socket(ep, op->domain, sock_type, flags);
+    rc = efab_create_os_socket(trs, ep, op->domain, sock_type, flags);
     if( rc < 0 ) {
       efab_tcp_helper_close_endpoint(trs, ep->id);
       return rc;
@@ -415,7 +418,7 @@ efab_ep_filter_mcast_add(ci_private_t *priv, void *arg)
   tcp_helper_endpoint_t* ep;
   int rc = efab_ioctl_get_ep(priv, op->tcp_id, &ep);
   if( rc == 0 )
-    rc = oof_socket_mcast_add(efab_tcp_driver.filter_manager,
+    rc = oof_socket_mcast_add(oo_filter_ns_to_manager(ep->thr->filter_ns),
                               &ep->oofilter, op->addr, op->ifindex);
   return rc;
 }
@@ -426,7 +429,7 @@ efab_ep_filter_mcast_del(ci_private_t *priv, void *arg)
   tcp_helper_endpoint_t* ep;
   int rc = efab_ioctl_get_ep(priv, op->tcp_id, &ep);
   if( rc == 0 )
-    oof_socket_mcast_del(efab_tcp_driver.filter_manager,
+    oof_socket_mcast_del(oo_filter_ns_to_manager(ep->thr->filter_ns),
                          &ep->oofilter, op->addr, op->ifindex);
   return rc;
 }
@@ -594,7 +597,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
     flags |= EFAB_THR_TABLE_LOOKUP_NO_UL;
     info->ni_orphan = 0;
   }
-  rc = efab_thr_table_lookup(NULL, info->ni_index, flags, &thr);
+  rc = efab_thr_table_lookup(NULL, NULL, info->ni_index, flags, &thr);
   if( rc == 0 ) {
     info->ni_exists = 1;
     info->ni_orphan = (thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND);
@@ -621,7 +624,7 @@ efab_tcp_helper_get_info(ci_private_t *unused, void *arg)
     for( index = info->ni_index + 1;
          index < 10000 /* FIXME: magic! */;
          ++index ) {
-      rc = efab_thr_table_lookup(NULL, index, flags, &next_thr);
+      rc = efab_thr_table_lookup(NULL, NULL, index, flags, &next_thr);
       if( rc == 0 ) {
         if( next_thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND )
           efab_tcp_helper_k_ref_count_dec(next_thr);
@@ -813,6 +816,7 @@ efab_tcp_helper_os_pollerr_clear(ci_private_t* priv, void *arg)
     return 0;
   oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
                                       os_file, OO_OS_STATUS_ERR);
+  oo_os_sock_put(os_file);
   return 0;
 }
 static int
@@ -1020,6 +1024,33 @@ ioctl_ep_info(ci_private_t *priv, void *arg)
   return 0;
 }
 static int
+ioctl_vi_stats_query(ci_private_t *priv, void *arg)
+{
+  ci_vi_stats_query_t* vi_stats_query = (ci_vi_stats_query_t*) arg;
+  void __user* user_data = CI_USER_PTR_GET(vi_stats_query->stats_data);
+  void* data;
+  int rc;
+  size_t data_len = vi_stats_query->data_len;
+
+  if( priv->thr == NULL)
+    return -EINVAL;
+  if( data_len > PAGE_SIZE )
+    return -EINVAL;
+
+  data = kmalloc(data_len, GFP_KERNEL);
+  if( data == NULL )
+    return -ENOMEM;
+
+  rc = efab_tcp_helper_vi_stats_query(priv->thr, vi_stats_query->intf_i, data,
+                                      data_len, vi_stats_query->do_reset);
+  if( rc == 0 ) {
+    if( copy_to_user(user_data, data, data_len) )
+      rc = -EFAULT;
+  }
+  kfree(data);
+  return rc;
+}
+static int
 ioctl_clone_fd(ci_private_t *priv, void *arg)
 {
   ci_clone_fd_t *op = arg;
@@ -1053,7 +1084,7 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
   int rc = -EINVAL;
 
   /* find stack */
-  rc = efab_thr_table_lookup(NULL, carg->stack_id,
+  rc = efab_thr_table_lookup(NULL, NULL, carg->stack_id,
                                  EFAB_THR_TABLE_LOOKUP_CHECK_USER |
                                  EFAB_THR_TABLE_LOOKUP_NO_UL,
                                  &thr);
@@ -1112,19 +1143,127 @@ static int oo_get_cpu_khz_rsop(ci_private_t *priv, void *arg)
   return 0;
 }
 
-static int oo_get_cplane_fd(ci_private_t *priv, void *arg)
+static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
+                                                  void *arg)
 {
-  ci_fixed_descriptor_t* pfd = arg;
+  tcp_helper_resource_t* trs = priv->thr;
 
-  if( priv->thr == NULL || priv->thr->cplane_handle == NULL )
-    return -ENOENT;
-  
-  *pfd = get_unused_fd_flags(O_CLOEXEC);
-  if( *pfd < 0 )
-    return *pfd;
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
 
-  fd_install(*pfd, priv->thr->cplane_handle);
+  if( trs->netif.state->active_wild_n <
+      NI_OPTS(&trs->netif).tcp_shared_local_ports_max )
+    tcp_helper_alloc_to_active_wild_pool(trs, 1);
+
   return 0;
+}
+
+
+/* "Donation" shared memory ioctls. */
+
+static int oo_dshm_register_rsop(ci_private_t *priv, void *arg)
+{
+  oo_dshm_register_t* params = arg;
+  return oo_dshm_register_impl(params->shm_class, params->buffer,
+                               params->length, &params->buffer_id,
+                               &priv->dshm_list);
+}
+
+static int oo_dshm_list_rsop(ci_private_t *priv, void *arg)
+{
+  oo_dshm_list_t* params = arg;
+  return oo_dshm_list_impl(params->shm_class, params->buffer_ids,
+                           &params->count);
+}
+
+static int oo_ifindex2hwport(ci_private_t *priv, void *arg)
+{
+  ci_uint32* arg_p = arg;
+  struct oo_nic* nic;
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc < 0 )
+    return rc;
+
+  rtnl_lock();
+  nic = oo_nic_find_ifindex(*arg_p);
+  if( nic == NULL )
+    *arg_p = CI_HWPORT_ID_BAD;
+  else
+    *arg_p = oo_nic_hwport(nic);
+  rtnl_unlock();
+
+  return 0;
+}
+
+static int
+oo_version_check_rsop(ci_private_t *priv, void *arg)
+{
+  oo_version_check_t *ver = arg;
+  return oo_version_check(ver->in_version, ver->in_uk_intf_ver, ver->debug);
+}
+
+static int oo_cplane_ipmod(ci_private_t *priv, void *arg)
+{
+  struct oo_op_cplane_ipmod* op = arg;
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc < 0 )
+    return rc;
+
+  if( op->net_ip == 0 )
+    return -EINVAL;
+
+  if( op->add )
+    oof_onload_on_cplane_ipadd(op->net_ip, op->ifindex,
+                               priv->priv_cp->cp_netns, &efab_tcp_driver);
+  else
+    oof_onload_on_cplane_ipdel(op->net_ip, op->ifindex,
+                               priv->priv_cp->cp_netns, &efab_tcp_driver);
+
+  return 0;
+}
+
+
+static int oo_cplane_llapmod(ci_private_t *priv, void *arg)
+{
+  struct oo_op_cplane_llapmod* op = arg;
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc < 0 )
+    return rc;
+
+  oof_onload_mcast_update_interface(op->ifindex,  op->flags, op->hwport_mask,
+                                    op->vlan_id, op->mac, priv->priv_cp->cp_netns,
+                                    &efab_tcp_driver);
+
+  return 0;
+}
+
+
+static int oo_cplane_llap_update_filters(ci_private_t *priv, void *arg)
+{
+  struct oo_op_cplane_llapmod* op = arg;
+  int rc = cp_acquire_from_priv_if_server(priv, NULL);
+  if( rc < 0 )
+    return rc;
+
+  oof_onload_mcast_update_filters(op->ifindex, priv->priv_cp->cp_netns,
+                                  &efab_tcp_driver);
+
+  return 0;
+}
+
+
+int oo_cp_notify_llap_monitors_rsop(ci_private_t *priv, void *arg)
+{
+  struct oo_cplane_handle* cp;
+  int rc = cp_acquire_from_priv_if_server(priv, &cp);
+  if( rc )
+    return rc;
+
+  rc = oo_cp_llap_change_notify_all(cp);
+  cp_release(cp);
+  return rc;
 }
 
 
@@ -1140,15 +1279,31 @@ oo_operations_table_t oo_operations[] = {
 # define op(ioc, fn)  { (ioc), (fn), #ioc }
 #endif
 
+  /* include/cplane/ioctl.h: */
+  op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
+
+  op(OO_IOC_IFINDEX_TO_HWPORT, oo_ifindex2hwport),
+  op(OO_IOC_CP_MIB_SIZE,       oo_cp_get_mib_size),
+  op(OO_IOC_CP_FWD_RESOLVE,    oo_cp_fwd_resolve_rsop),
+  op(OO_IOC_CP_FWD_RESOLVE_COMPLETE,    oo_cp_fwd_resolve_complete),
+  op(OO_IOC_CP_ARP_RESOLVE,    oo_cp_arp_resolve_rsop),
+  op(OO_IOC_CP_ARP_CONFIRM,    oo_cp_arp_confirm_rsop),
+  op(OO_IOC_CP_WAIT_FOR_SERVER, oo_cp_wait_for_server_rsop),
+  op(OO_IOC_CP_LINK,           oo_cp_link_rsop),
+  op(OO_IOC_CP_READY,          oo_cp_ready),
+  op(OO_IOC_CP_CHECK_VERSION,  oo_cp_check_version),
+
+  op(OO_IOC_OOF_CP_IP_MOD,     oo_cplane_ipmod),
+  op(OO_IOC_OOF_CP_LLAP_MOD,   oo_cplane_llapmod),
+  op(OO_IOC_OOF_CP_LLAP_UPDATE_FILTERS, oo_cplane_llap_update_filters),
+  op(OO_IOC_CP_PRINT,          oo_cp_print_rsop),
+  op(OO_IOC_CP_NOTIFY_LLAP_MONITORS,   oo_cp_notify_llap_monitors_rsop),
+
+  /* include/onload/ioctl.h: */
   op(OO_IOC_DBG_GET_STACK_INFO, efab_tcp_helper_get_info),
   op(OO_IOC_DBG_WAIT_STACKLIST_UPDATE, efab_tcp_helper_wait_stack_list_update),
 
   op(OO_IOC_DEBUG_OP, oo_ioctl_debug_op),
-
-  op(OO_IOC_CFG_SET,   ci_cfg_handle_set_ioctl),
-  op(OO_IOC_CFG_UNSET, ci_cfg_handle_unset_ioctl),
-  op(OO_IOC_CFG_GET,   ci_cfg_handle_get_ioctl),
-  op(OO_IOC_CFG_QUERY, ci_cfg_handle_query_ioctl),
 
   op(OO_IOC_IPID_RANGE_ALLOC, ioctl_ipid_range_alloc),
   op(OO_IOC_IPID_RANGE_FREE,  ioctl_ipid_range_free),
@@ -1157,6 +1312,7 @@ oo_operations_table_t oo_operations[] = {
 
   op(OO_IOC_RESOURCE_ONLOAD_ALLOC, tcp_helper_alloc_rsop),
   op(OO_IOC_EP_INFO,               ioctl_ep_info),
+  op(OO_IOC_VI_STATS_QUERY,        ioctl_vi_stats_query),
   op(OO_IOC_CLONE_FD,              ioctl_clone_fd),
   op(OO_IOC_KILL_SELF_SIGPIPE,     ioctl_kill_self),
 
@@ -1198,7 +1354,6 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_ENDPOINT_SHUTDOWN, tcp_helper_endpoint_shutdown_rsop),
   op(OO_IOC_TCP_BIND_OS_SOCK,      efab_tcp_helper_bind_os_sock_rsop),
   op(OO_IOC_TCP_LISTEN_OS_SOCK,    efab_tcp_helper_listen_os_sock),
-  op(OO_IOC_TCP_CONNECT_OS_SOCK,   efab_tcp_helper_connect_os_sock),
   op(OO_IOC_TCP_HANDOVER,          efab_tcp_helper_handover),
   op(OO_IOC_FILE_MOVED,            oo_file_moved_rsop),
   op(OO_IOC_TCP_CLOSE_OS_SOCK,     efab_tcp_helper_set_tcp_close_os_sock_rsop),
@@ -1221,7 +1376,19 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_OFE_CONFIG,         efab_ofe_config),
   op(OO_IOC_OFE_CONFIG_DONE,    efab_ofe_config_done),
   op(OO_IOC_OFE_GET_LAST_ERROR, efab_ofe_get_last_error),
-  op(OO_IOC_GET_CPU_KHZ, oo_get_cpu_khz_rsop),
-  op(OO_IOC_GET_CPLANE_FD, oo_get_cplane_fd),
+
+  op(OO_IOC_DSHM_REGISTER, oo_dshm_register_rsop),
+  op(OO_IOC_DSHM_LIST,     oo_dshm_list_rsop),
+
+  op(OO_IOC_ALLOC_ACTIVE_WILD, efab_tcp_helper_alloc_active_wild_rsop),
+
+/* Here come non contigous operations only, their position need to match
+ * index accoriding to their placeholder */
+  op(OO_IOC_CHECK_VERSION, oo_version_check_rsop),
 #undef op
 };
+
+#define OO_OP_TABLE_SIZE (sizeof(oo_operations) / sizeof(oo_operations[0]))
+
+CI_BUILD_ASSERT(OO_OP_TABLE_SIZE == OO_OP_END);
+

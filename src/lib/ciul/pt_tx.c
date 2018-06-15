@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -55,6 +55,17 @@ int ef_vi_transmit_init(ef_vi* vi, ef_addr base, int len, ef_request_id dma_id)
 {
   ef_iovec iov = { base, len };
   return ef_vi_transmitv_init(vi, &iov, 1, dma_id);
+}
+
+
+void ef_vi_transmit_init_undo(ef_vi* vi)
+{
+  ef_vi_txq* q = &vi->vi_txq;
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  while ( qs->added != qs->previous ) {
+    unsigned di = --qs->added & q->mask;
+    q->ids[di] = EF_REQUEST_ID_MASK;
+  }
 }
 
 

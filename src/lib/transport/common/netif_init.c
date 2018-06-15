@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -405,6 +405,9 @@ int citp_netif_recreate_probed(ci_fd_t ul_sock_fd,
     Log_E(ci_log("%s: FAILED: ci_tcp_helper_stack_attach %d", __FUNCTION__, rc));
     goto fail2;
   }
+
+  if( rc < CITP_OPTS.fd_base )
+    ef_onload_handle_move_and_do_cloexec(&rc, 1);
 
   /* Restore the netif mmaps and user-level state */
   CI_TRY_RET(ci_netif_restore(ni, (ci_fd_t)rc, map_size));

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -116,6 +116,22 @@ ret fn_name dec_args                                                    \
   }                                                                     \
 }
 
+#define wrap_with_fn(ret, fn_name, dec_args, call_args, fn_null)        \
+ret fn_name dec_args                                                    \
+{                                                                       \
+  static ret (*p##fn_name)dec_args;                                     \
+  if( p##fn_name == NULL ) {                                            \
+    onload_ext_check_ver();                                             \
+    if( disabled || (p##fn_name = dlsym(RTLD_NEXT, #fn_name)) == NULL ) \
+      p##fn_name = (void*)(uintptr_t) 1;                                \
+  }                                                                     \
+  if( (void*) p##fn_name != (void*)(uintptr_t) 1 )                      \
+    return p##fn_name call_args;                                        \
+  else {                                                                \
+    return fn_null call_args;                                           \
+  }                                                                     \
+}
+
 
 wrap(int, onload_set_stackname, (enum onload_stackname_who who, 
                                  enum onload_stackname_scope context, 
@@ -132,7 +148,14 @@ wrap(int, onload_stack_opt_set_int, (const char* opt, int64_t val),
      (opt, val), 0)
 
 wrap(int, onload_stack_opt_get_int, (const char* opt, int64_t* val),
+     (opt, val), -ENOSYS)
+
+wrap(int, onload_stack_opt_set_str, (const char* opt, const char* val),
      (opt, val), 0)
+
+wrap(int, onload_stack_opt_get_str,
+     (const char* opt, char* val_out, size_t* val_out_len),
+     (opt, val_out, val_out_len), -ENOSYS)
 
 wrap(int, onload_stack_opt_reset, (void),
      (), 0)
@@ -182,11 +205,11 @@ wrap(int, onload_recvmsg_kernel, (int fd, struct msghdr* msg, int flags),
      (fd, msg, flags), -ENOSYS)
 
 wrap(int, onload_thread_set_spin, (enum onload_spin_type type, int spin),
-     (type, spin), -ENOSYS)
+     (type, spin), 0)
 
 wrap(int, onload_thread_get_spin, (unsigned* state), (state), -ENOSYS)
 
-wrap(int, onload_move_fd, (int fd), (fd), -ENOSYS)
+wrap(int, onload_move_fd, (int fd), (fd), 0)
 
 wrap( int, onload_fd_check_feature, (int fd, enum onload_fd_feature feature),
      (fd, feature), -ENOSYS)
@@ -199,15 +222,26 @@ wrap( int, onload_ordered_epoll_wait, (int epfd, struct epoll_event *events,
 wrap(enum onload_delegated_send_rc,  onload_delegated_send_prepare,
      (int fd, int size, unsigned flags, struct onload_delegated_send* out),
      (fd, size, flags, out), ONLOAD_DELEGATED_SEND_RC_BAD_SOCKET)
+
 wrap_with_errno(int,  onload_delegated_send_complete,
                 (int fd, const struct iovec* iov, int iovlen, int flags),
                 (fd, iov, iovlen, flags), -1, ENOSYS)
+
 wrap_with_errno(int, onload_delegated_send_cancel, (int fd), (fd), -1, ENOSYS)
 
-wrap( int,  oo_raw_send,
-      (int fd, int hwport, const struct iovec* iov, int iovlen),
-      (fd, hwport, iov, iovlen), -ENOSYS)
+wrap_with_errno(int, oo_raw_send,
+                (int fd, int hwport, const struct iovec* iov, int iovlen),
+                (fd, hwport, iov, iovlen), -1, ENOSYS)
 
-wrap( int,  onload_get_tcp_info,
-      (int fd, struct onload_tcp_info* info, int* len),
-      (fd, info, len), -ENOSYS)
+wrap_with_errno(int, onload_get_tcp_info,
+                (int fd, struct onload_tcp_info* info, int* len),
+                (fd, info, len), -1, EINVAL)
+
+wrap_with_fn(int, onload_socket_nonaccel,
+             (int domain, int type, int protocol),
+             (domain, type, protocol), socket)
+
+wrap_with_fn(int, onload_socket_unicast_nonaccel,
+             (int domain, int type, int protocol),
+             (domain, type, protocol), socket)
+

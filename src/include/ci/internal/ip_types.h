@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,6 +69,7 @@ typedef struct ci_netif_nic_s {
 struct tcp_helper_endpoint_s;
 struct oof_cb_sw_filter_op;
 #endif
+struct oo_cplane_handle;
 
 /* Non-shared packet buffer set structures */
 #ifdef __KERNEL__
@@ -112,17 +113,19 @@ struct ci_netif_s {
 #endif
 
 #ifdef __ci_driver__
-  ci_int8              hwport_to_intf_i[CPLANE_MAX_REGISTER_INTERFACES];
+  cicp_hwport_mask_t   hwport_mask; /* hwports accelearted by the stack */
+  ci_int8              hwport_to_intf_i[CI_CFG_MAX_HWPORTS];
   ci_int8              intf_i_to_hwport[CI_CFG_MAX_INTERFACES];
-  uid_t                uid;
-  uid_t                euid;
+  /* These uid_t are in the kernel init namespace */
+  uid_t                kuid;
+  uid_t                keuid;
   ci_shmbuf_t          pages_buf;
 #endif
 
 
-#ifndef __KERNEL__
-  cicp_handle_t        *cplane;
+  struct oo_cplane_handle *cplane;
 
+#ifndef __KERNEL__
   /* Currently, we do not use timesync from the common code (i.e. from the
    * code which is compiled in both kernel and user space.
    * So, kernel code uses efab_tcp_driver.timesync,
@@ -172,13 +175,15 @@ struct ci_netif_s {
   /* This field must be protected by the netif lock.
    */
   unsigned             flags;
-  /* Sending ONLOAD_MSG_WARM */
-# define CI_NETIF_FLAG_MSG_WARM          0x1
   /* Set to request allocation of scalable filters at stack creation
    * This flag is not stored in netif state.  It is passed to
    * tcp_helper_resource_rm_alloc_proxy function through ioctl.
    */
 # define CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS 0x2
+  /* can be the same as the above */
+# define CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS \
+    CI_NETIF_FLAG_DO_ALLOCATE_SCALABLE_FILTERS_RSS
+
 
 #ifndef __KERNEL__
 

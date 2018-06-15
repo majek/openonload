@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -244,6 +244,7 @@ static void handle_rx_pkt(ci_netif* netif, struct ci_netif_poll_state* ps,
               (unsigned) ip->ip_frag_off_be16,
               ip_tot_len, pkt->pay_len, PKT_DBG_ARGS(pkt)));
     LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+    CI_IPV4_STATS_INC_IN_DISCARDS( netif );
     ci_netif_pkt_release_rx_1ref(netif, pkt);
     return;
   }
@@ -401,6 +402,7 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
   ci_ip4_hdr *ip;
   int ip_paylen;
   int ip_len;
+  int min_ip_paylen;
 
   ci_parse_rx_vlan(pkt);
 
@@ -411,22 +413,39 @@ static int handle_rx_csum_bad(ci_netif* ni, struct ci_netif_poll_state* ps,
 
   pkt->pay_len = frame_len;
   oo_offbuf_init(&pkt->buf, PKT_START(pkt), pkt->pay_len);
-  if( pkt->pay_len <=
-      sizeof(ci_tcp_hdr) + sizeof(ci_ip4_hdr) + oo_ether_hdr_size(pkt) ) {
+
+  /* Check that we have at least a full IP-header's-worth of data before we
+   * start touching it. */
+  if( pkt->pay_len < sizeof(ci_ip4_hdr) + oo_ether_hdr_size(pkt) ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
     LOG_U(log(FN_FMT "BAD frame_len=%d",
               FN_PRI_ARGS(ni), pkt->pay_len));
     goto drop;
   }
-  
+
   ip = oo_ip_hdr(pkt);
   ip_len = CI_BSWAP_BE16(ip->ip_tot_len_be16);
   ip_paylen = ip_len - sizeof(ci_ip4_hdr);
-  if( pkt->pay_len < oo_ether_hdr_size(pkt) + ip_len ||
-      ip_paylen < sizeof(ci_tcp_hdr) ) {
+  /* Strictly speaking, we should validate the IP checksum before relying on
+   * the protocol field, but nothing will go wrong in the event that it's
+   * invalid. */
+  min_ip_paylen = ip->ip_protocol == IPPROTO_UDP ? sizeof(ci_udp_hdr) :
+                                                   sizeof(ci_tcp_hdr);
+
+  /* Check that we have a full-length transport-layer header. */
+  if( pkt->pay_len <
+      min_ip_paylen + sizeof(ci_ip4_hdr) + oo_ether_hdr_size(pkt) ) {
     CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
-    LOG_U(log(FN_FMT "BAD ip_len=%d frame_len=%d",
-              FN_PRI_ARGS(ni), ip_len, pkt->pay_len));
+    LOG_U(log(FN_FMT "BAD min_ip_paylen=%d frame_len=%d",
+              FN_PRI_ARGS(ni), min_ip_paylen, pkt->pay_len));
+    goto drop;
+  }
+
+  if( pkt->pay_len < oo_ether_hdr_size(pkt) + ip_len ||
+      ip_paylen < min_ip_paylen ) {
+    CI_IPV4_STATS_INC_IN_HDR_ERRS(ni);
+    LOG_U(log(FN_FMT "BAD ip_len=%d min_ip_paylen=%d frame_len=%d",
+              FN_PRI_ARGS(ni), ip_len, min_ip_paylen, pkt->pay_len));
     goto drop;
   }
 
@@ -781,8 +800,15 @@ ci_inline void __ci_netif_tx_pkt_complete(ci_netif* ni,
                     ((pkt_tsf & opt_tsf) ?
                      CI_IP_PKT_HW_STAMP_FLAG_IN_SYNC : 0);
     }
+    else if( ev == NULL ) {
+      /* This is NIC reset. The TIMESTAMPED flag needs to stay
+       * to ensure client is notified of missing timestamp -
+       * important to keep TCP timestamps in sync with
+       * TCP stream */
+      pkt->tx_hw_stamp.tv_sec = 0;
+      pkt->tx_hw_stamp.tv_nsec = 0;
+    }
     else {
-      /* Fixme: suppress this message if ev=NULL as a result of reset? */
       if( CI_NETIF_TX_VI(ni, pkt->intf_i, ev->tx_timestamp.q_id)->vi_flags &
           EF_VI_TX_TIMESTAMPS ) {
         ci_log("ERROR: TX timestamp requested, but non-timestamped "

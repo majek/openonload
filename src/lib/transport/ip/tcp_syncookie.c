@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,7 +35,10 @@ static int syncookie_mss[8] =
 struct siphash {
   ci_uint64 v0, v1, v2, v3;
 
-  unsigned char buf[8];
+  union {
+    ci_uint64 a;
+    unsigned char b[8];
+  } buf;
   unsigned char* p;
   ci_uint64 c;
 };
@@ -83,40 +86,37 @@ sip_hash(ci_uint64* key, const void* data, int len)
   h.v1 = 0x646f72616e646f6dULL ^ key[1];
   h.v2 = 0x6c7967656e657261ULL ^ key[0];
   h.v3 = 0x7465646279746573ULL ^ key[1];
-  h.p = h.buf;
+  h.p = h.buf.b;
 
   /* update */
   do {
-    while( p < pe && h.p - h.buf < sizeof(h.buf) )
+    while( p < pe && h.p - h.buf.b < sizeof(h.buf.b) )
       *h.p++ = *p++;
 
-    if( h.p - h.buf < sizeof(h.buf) )
+    if( h.p - h.buf.b < sizeof(h.buf.b) )
       break;
 
-    m = ((ci_uint64)h.buf[0] << 0) | ((ci_uint64)h.buf[1] << 8) |
-        ((ci_uint64)h.buf[2] << 16) | ((ci_uint64)h.buf[3] << 24) |
-        ((ci_uint64)h.buf[2] << 32) | ((ci_uint64)h.buf[3] << 40) |
-        ((ci_uint64)h.buf[2] << 48) | ((ci_uint64)h.buf[3] << 56);
+    m = CI_BSWAP_LE64(h.buf.a);
     h.v3 ^= m;
     sip_round(&h, 2);
     h.v0 ^= m;
 
-    h.p = h.buf;
+    h.p = h.buf.b;
     h.c += 8;
   } while( pe - p > 0 );
 
   /* finish */
-  left = h.p - h.buf;
+  left = h.p - h.buf.b;
   b = (h.c + left) << 56;
 
   switch (left) {
-    case 7: b |= (uint64_t)h.buf[6] << 48;
-    case 6: b |= (uint64_t)h.buf[5] << 40;
-    case 5: b |= (uint64_t)h.buf[4] << 32;
-    case 4: b |= (uint64_t)h.buf[3] << 24;
-    case 3: b |= (uint64_t)h.buf[2] << 16;
-    case 2: b |= (uint64_t)h.buf[1] << 8;
-    case 1: b |= (uint64_t)h.buf[0] << 0;
+    case 7: b |= (uint64_t)h.buf.b[6] << 48;
+    case 6: b |= (uint64_t)h.buf.b[5] << 40;
+    case 5: b |= (uint64_t)h.buf.b[4] << 32;
+    case 4: b |= (uint64_t)h.buf.b[3] << 24;
+    case 3: b |= (uint64_t)h.buf.b[2] << 16;
+    case 2: b |= (uint64_t)h.buf.b[1] << 8;
+    case 1: b |= (uint64_t)h.buf.b[0] << 0;
     case 0: break;
   }
 

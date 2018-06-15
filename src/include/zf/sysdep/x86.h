@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,12 +15,12 @@
 
 /**************************************************************************\
 *//*! \file
-** <L5_PRIVATE L5_HEADER >
-** \author  gd
-**  \brief  ZF x86-specific definitions.
-**   \date  2015/12/23
-**    \cop  (c) Solarflare Communications.
-** </L5_PRIVATE>
+**  \brief  TCPDirect x86-specific definitions
+**
+** This file contains system-dependent code that is used by the other header
+** files. It has no end-user API.
+**
+*//*! \cond NODOC
 *//*
 \**************************************************************************/
 
@@ -31,4 +31,6 @@
 #define ZF_CACHE_LINE_SIZE 64u
 
 #endif /* __ZF_SYSDEP_X86_H__*/
-
+/** @}
+ * \endcond NODOC
+ */

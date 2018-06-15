@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,6 +65,7 @@
 #include <ci/efrm/pd.h>
 #include <ci/efrm/pio.h>
 #include <ci/affinity/k_drv_intf.h>
+#include <ci/tools/utils.h>
 #include "efrm_internal.h"
 #include "efrm_vi_set.h"
 #include "efrm_pd.h"
@@ -815,8 +816,13 @@ __efrm_vi_resource_free(struct efrm_vi *virs)
 					    virs->tx_alt_cp, virs->tx_alt_ids);
 	}
 	if (virs->pio != NULL) {
-		/* Unlink also manages reference accounting. */
-		rc = efrm_pio_unlink_vi(virs->pio, virs);
+		/* Unlink also manages reference accounting.  We don't need to
+		 * worry about whether this actually freed the buffer: other
+		 * callers need to clean up the resource-table if so, to
+		 * prevent double-frees, but the fact that the VI is going away
+		 * is sufficient to guarantee this anyway, so we can pass NULL
+		 * for the last parameter. */
+		rc = efrm_pio_unlink_vi(virs->pio, virs, NULL);
 		if (rc < 0)
 			/* If txq has been flushed already, this can
 			 * fail benignly */
@@ -1432,6 +1438,15 @@ int  efrm_vi_q_get_size(struct efrm_vi *virs, enum efhw_q_type q_type,
 
 	qso->q_len_entries = n_q_entries;
 	qso->q_len_bytes = efrm_vi_q_bytes(virs, q_type, n_q_entries);
+
+	/* This value should always be positive, but if we don't check for this
+	 * explicitly, some compilers will assume that undefined logarithms
+	 * can be taken in get_order() and will generate code that won't link.
+	 * See bug63982. */
+	EFRM_ASSERT(qso->q_len_bytes > 0);
+	if (qso->q_len_bytes <= 0)
+		return -EINVAL;
+
 	qso->q_len_page_order = get_order(qso->q_len_bytes);
 	return 0;
 }
@@ -1630,6 +1645,9 @@ int efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words)
 	struct efhw_nic *nic = virs->rs.rs_client->nic;
 	int rc;
 
+        if ((num_alt <= 0) || (num_32b_words <= 0))
+                return -EINVAL;
+
 	if (virs->tx_alt_num > 0)
 		return -EALREADY;
 
@@ -1641,3 +1659,19 @@ int efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words)
 	return rc;
 }
 EXPORT_SYMBOL(efrm_vi_tx_alt_alloc);
+
+int efrm_vi_tx_alt_free(struct efrm_vi *virs)
+{
+	struct efhw_nic *nic = virs->rs.rs_client->nic;
+	int rc;
+
+	if (virs->tx_alt_num == 0)
+		return 0;
+
+	rc = nic->efhw_func->tx_alt_free(nic, virs->tx_alt_num,
+					 virs->tx_alt_cp, virs->tx_alt_ids);
+	if (rc == 0)
+                virs->tx_alt_num = 0;
+	return rc;
+}
+EXPORT_SYMBOL(efrm_vi_tx_alt_free);

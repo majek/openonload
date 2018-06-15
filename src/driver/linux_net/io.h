@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -26,11 +26,7 @@
 #ifndef EFX_IO_H
 #define EFX_IO_H
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_LINUX_IO_H)
 #include <linux/io.h>
-#else
-#include <asm/io.h>
-#endif
 #include <linux/spinlock.h>
 
 /**************************************************************************

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -256,6 +256,7 @@ void citp_waitable_obj_free_nnl(ci_netif* ni, citp_waitable* w)
 
 #ifdef __KERNEL__
 
+
 void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo, int do_free)
 {
   if( wo->waitable.sb_aflags & CI_SB_AFLAG_MOVED_AWAY ) {
@@ -274,6 +275,8 @@ void citp_waitable_cleanup(ci_netif* ni, citp_waitable_obj* wo, int do_free)
   else if( wo->waitable.state == CI_TCP_STATE_PIPE )
     ci_pipe_all_fds_gone(ni, &wo->pipe, do_free);
 #endif
+  else if( wo->waitable.state == CI_TCP_STATE_ACTIVE_WILD )
+    ci_active_wild_all_fds_gone(ni, &wo->aw, do_free);
   else if( do_free ) {
     /* The only non-TCP and non-UDP state in FREE.  But FREE endpoint is
      * already free, we can't free it again.  Possibly, it is a
@@ -300,7 +303,8 @@ void citp_waitable_all_fds_gone(ci_netif* ni, oo_sp w_id)
    * efab_tcp_helper_close_endpoint().
    * CI_SB_AFLAG_ORPHAN is set earlier in this case.. */
   CI_DEBUG(if( (wo->waitable.sb_aflags & CI_SB_AFLAG_ORPHAN) &&
-               wo->waitable.state != CI_TCP_LISTEN )
+               wo->waitable.state != CI_TCP_LISTEN &&
+               wo->waitable.state != CI_TCP_STATE_ACTIVE_WILD )
 	     ci_log("%s: %d:%d already orphan", __FUNCTION__,
                     NI_ID(ni), OO_SP_FMT(w_id)));
 
@@ -337,6 +341,7 @@ const char* citp_waitable_type_str(citp_waitable* w)
   else if( w->state == CI_TCP_STATE_PIPE )  return "PIPE";
 #endif
   else if( w->state == CI_TCP_STATE_AUXBUF )  return "AUXBUFS";
+  else if( w->state == CI_TCP_STATE_ACTIVE_WILD )  return "ACTIVE_WILD";
   else return "<unknown-citp_waitable-type>";
 }
 
@@ -345,9 +350,10 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
                                 oo_dump_log_fn_t logger, void* log_arg)
 {
   unsigned tmp;
+  ci_sock_cmn* s = NULL;
 
   if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
-    ci_sock_cmn* s = CI_CONTAINER(ci_sock_cmn, b, w);
+    s = CI_CONTAINER(ci_sock_cmn, b, w);
     logger(log_arg, "%s%s "NT_FMT"lcl="OOF_IP4PORT" rmt="OOF_IP4PORT" %s",
            pf, citp_waitable_type_str(w), NI_ID(ni), W_FMT(w),
            OOFA_IP4PORT(sock_laddr_be32(s), sock_lport_be16(s)),
@@ -358,7 +364,8 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
     logger(log_arg, "%s%s "NT_FMT, pf,
            citp_waitable_type_str(w), NI_ID(ni), W_FMT(w));
 
-  if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF )
+  if( w->state == CI_TCP_STATE_FREE || w->state == CI_TCP_STATE_AUXBUF ||
+      w->state == CI_TCP_STATE_ACTIVE_WILD )
     return;
 
   tmp = w->lock.wl_val;
@@ -377,7 +384,7 @@ static void citp_waitable_dump2(ci_netif* ni, citp_waitable* w, const char* pf,
   if( w->spin_cycles == -1 )
     logger(log_arg, "%s  ul_poll: -1 spin cycles -1 usecs", pf);
   else
-    logger(log_arg, "%s  ul_poll: %llu spin cycles %u usec", pf,
+    logger(log_arg, "%s  ul_poll: %"CI_PRIu64" spin cycles %u usec", pf,
          w->spin_cycles, oo_cycles64_to_usec(ni, w->spin_cycles));
 }
 
@@ -395,6 +402,9 @@ void citp_waitable_dump_to_logger(ci_netif* ni, citp_waitable* w,
 
   citp_waitable_dump2(ni, w, pf, logger, log_arg);
   if( CI_TCP_STATE_IS_SOCKET(w->state) ) {
+    if( w->state == CI_TCP_STATE_ACTIVE_WILD )
+      return;
+
     ci_sock_cmn_dump(ni, &wo->sock, pf, logger, log_arg);
     if( w->state == CI_TCP_LISTEN )
       ci_tcp_socket_listen_dump(ni, &wo->tcp_listen, pf, logger, log_arg);

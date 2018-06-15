@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -113,6 +113,12 @@ typedef union {
  */
 #define EFHW_VI_ENABLE_RX_MERGE    0x1000000  /*! Enable RX event merging */
 #define EFHW_VI_ENABLE_EV_TIMER    0x2000000  /*! Enable hardware event timer */
+#define EFHW_VI_TX_ALT             0x4000000  /*! Provision for alternatives */
+
+#define HIGH_THROUGHPUT_EFHW_VI_FLAGS (EFHW_VI_RX_PREFIX | \
+				       EFHW_VI_NO_EV_CUT_THROUGH | \
+				       EFHW_VI_NO_RX_CUT_THROUGH | \
+				       EFHW_VI_ENABLE_RX_MERGE)
 
 /* Flags indicating effective setings determined at queue
  * allocation/enabling.  Unfortunately these flags are exposed through the

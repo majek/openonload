@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -65,6 +65,12 @@
 #define CI_CACHE_LINE_SIZE 128
 
 #define CI_CPU_HAS_IOSPACE 0 /* CPU has a separate IO space */
+
+#ifdef __PPC64__
+# define CI_MAX_TIME_T 0x7fffffffffffffffLL
+#else
+# define CI_MAX_TIME_T 0x7fffffffL
+#endif
 
 #endif  /* __CI_COMPAT_PPC_H__ */
 

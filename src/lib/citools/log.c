@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -203,6 +203,25 @@ void ci_set_log_prefix(const char* prefix)
   ci_log_prefix = prefix;
 
   ci_log_prefix_len = strlen(ci_log_prefix);
+}
+
+
+void ci_rlvlog(int* limit, const char* fmt, va_list args)
+{
+  if( *limit <= 0 )
+    return;
+  ci_vlog(fmt, args);
+  if( --(*limit) == 0 )
+    ci_log("... message limit reached");
+}
+
+void ci_rllog(int* limit, const char* fmt, ...)
+{
+  va_list args;
+
+  va_start(args, fmt);
+  ci_rlvlog(limit, fmt, args);
+  va_end(args);
 }
 
 

@@ -1,0 +1,68 @@
+#!/bin/sh
+
+me=$(basename "$0")
+bin=$(cd "$(dirname "$0")" && /bin/pwd)
+
+zf_usage_msg() {
+  echo
+  echo "usage:"
+  echo "  $me [options] <command> <command-args>"
+  echo
+  echo "options:"
+  echo "  -l --loglevel        -- set mask of logging levels"
+  echo "  -h --help            -- print this usage message"
+  echo
+}
+
+zf_usage_error() {
+  zf_usage_msg >&2
+  exit 1
+}
+
+add_attr() {
+  if [ -n "$ZF_ATTR" ]; then
+    ZF_ATTR="$ZF_ATTR;$1"
+  else
+    ZF_ATTR="$1"
+  fi
+  export ZF_ATTR
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      zf_usage_msg
+      exit 0
+      ;;
+    -l|--loglevel)
+      shift
+      add_attr log_level="$1"
+      ;;
+    --loglevel=*)
+      add_attr log_level="${1#--loglevel=}"
+      ;;
+    -l*)
+      add_attr log_level="${1#-l}"
+      ;;
+    -*)
+      zf_usage_error
+      ;;
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+
+[ $# -gt 0 ] || zf_usage_error
+
+dir="/usr/lib64/zf/debug:/usr/lib/zf/debug:/usr/lib/x86_64-linux-gnu/zf/debug"
+
+if [ -n "$LD_LIBRARY_PATH" ]; then
+  LD_LIBRARY_PATH="$dir:$LD_LIBRARY_PATH"
+else
+  LD_LIBRARY_PATH="$dir"
+fi
+export LD_LIBRARY_PATH
+
+exec "$@"

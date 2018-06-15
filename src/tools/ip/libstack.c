@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -49,8 +49,9 @@
 #define IGNORE(_x)
 
 
-#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_AUXBUF) + 1)
+#define N_STATES  (CI_TCP_STATE_NUM(CI_TCP_STATE_ACTIVE_WILD) + 1)
 
+#define MAX_PATHNAME 300
 
 typedef struct {
   unsigned        rx_evs_per_poll;
@@ -181,6 +182,7 @@ static stat_desc_t more_stats_fields[] = {
   ss(TCP_STATE_PIPE),
 #endif
   ss(TCP_STATE_AUXBUF),
+  ss(TCP_STATE_ACTIVE_WILD),
   stat_desc_nm(more_stats_t, states[N_STATES], "BAD_STATE", 0),
   ns(sock_orphans),
   ns(sock_wake_needed_rx),
@@ -489,8 +491,8 @@ static int is_pid(const char* name)
 static int is_onloaded(pid_t pid, int** ret_stacks_ids)
 {
   int i;
-  char fd_dir_path[256];
-  snprintf(fd_dir_path, 256, "/proc/%d/fd", pid);
+  char fd_dir_path[MAX_PATHNAME];
+  snprintf(fd_dir_path, MAX_PATHNAME, "/proc/%d/fd", pid);
   DIR* fd_dir = opendir(fd_dir_path);
   if( ! fd_dir )
     return -1;
@@ -501,10 +503,10 @@ static int is_onloaded(pid_t pid, int** ret_stacks_ids)
   while( (ent = readdir(fd_dir)) ) {
     if( ent->d_name[0] == '.' )
       continue;
-    char fd_path[256];
-    snprintf(fd_path, 256, "%s/%s", fd_dir_path, ent->d_name);
-    char sym_buf[256];
-    ssize_t rc = readlink(fd_path, sym_buf, 256);
+    char fd_path[MAX_PATHNAME];
+    snprintf(fd_path, MAX_PATHNAME, "%s/%s", fd_dir_path, ent->d_name);
+    char sym_buf[MAX_PATHNAME];
+    ssize_t rc = readlink(fd_path, sym_buf, MAX_PATHNAME);
     if( rc == -1 ) {
       closedir(fd_dir);
       return rc;
@@ -570,6 +572,8 @@ static int libstack_mappings_init(void)
        * ENOENT: process have died while we were running here */
       if( errno == EACCES || errno == ENOENT )
         continue;
+      fprintf(stderr, "%s: error %d (%s)\n",
+                      __FUNCTION__, errno, strerror(errno));
       closedir(proc);
       CI_TRY(-1);
       return -1;
@@ -587,12 +591,21 @@ static int libstack_mappings_init(void)
    */
   ci_netif_info_t info;
   oo_fd fd;
-  rc = oo_fd_open(&fd);
+  rc = oo_fd_open_versioned(&fd);
   if( rc == -ENOENT ) {
     fprintf(stderr, "Could not open /dev/onload (rc=%d) - "
                     "check Onload drivers are loaded\n", rc);
     closedir(proc);
     errno = ENOENT;
+    return -1;
+  }
+  else if( rc == -ELIBACC || rc == -EINVAL ) {
+    /* Note: older drivers not supporting driver check will return -EINVAL,
+     * new libraries will return -ELIBACC */
+    fprintf(stderr, "Could not open /dev/onload (rc=%d) - "
+                    "check Onload driver version matches that of library\n", rc);
+    closedir(proc);
+    errno = ELIBACC;
     return -1;
   }
   CI_TRY(rc);
@@ -782,11 +795,11 @@ void libstack_pid_mapping_print(void)
         printf(" ");
     }
 
-    char cmdline_path[256];
-    snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
+    char cmdline_path[MAX_PATHNAME];
+    snprintf(cmdline_path, MAX_PATHNAME, "/proc/%d/cmdline", pm->pid);
     int cmdline = open(cmdline_path, O_RDONLY);
-    char buf[256];
-    while( (cnt = read(cmdline, buf, 256)) > 0 ) {
+    char buf[MAX_PATHNAME];
+    while( (cnt = read(cmdline, buf, MAX_PATHNAME)) > 0 ) {
       for( i = 0; i < cnt; ++i ) {
         if( buf[i] == '\0' )
           printf(" ");
@@ -802,13 +815,13 @@ void libstack_pid_mapping_print(void)
 }
 
 
-static int get_int_from_tok_str(char * str, const char tok, int i, long * res)
+static int get_int_from_tok_str(char * str, const char * tok, int i, long * res)
 {
   char * p;
 
-  str = strtok_r(str, &tok, &p);
+  str = strtok_r(str, tok, &p);
   while( str && i ) {
-    str = strtok_r(NULL, &tok, &p);
+    str = strtok_r(NULL, tok, &p);
     --i;
   }
 
@@ -822,7 +835,7 @@ static int get_int_from_tok_str(char * str, const char tok, int i, long * res)
 
 int libstack_threads_print(void)
 {
-  char task_path[256];
+  char task_path[MAX_PATHNAME];
 
   if( ! pid_mappings )
     return 0;
@@ -832,7 +845,7 @@ int libstack_threads_print(void)
   printf("#pid thread affinity priority realtime\n");
 
   while( pm ) {
-    snprintf(task_path, 256, "/proc/%d/task", pm->pid);
+    snprintf(task_path, MAX_PATHNAME, "/proc/%d/task", pm->pid);
     DIR* task_dir = opendir(task_path);
 
     struct dirent* ent;
@@ -843,13 +856,14 @@ int libstack_threads_print(void)
       printf("%d %s ", pm->pid, ent->d_name);
 
       /* task affinity */
-      char file_path[256];
-      snprintf(file_path, 256, "/proc/%d/task/%s/status", pm->pid, ent->d_name);
+      char file_path[MAX_PATHNAME];
+      snprintf(file_path, MAX_PATHNAME, "/proc/%d/task/%s/status",
+               pm->pid, ent->d_name);
       FILE* status = fopen(file_path, "r");
       char buf[1000];
       char* c;
       do {
-        c = fgets(buf, 256, status);
+        c = fgets(buf, MAX_PATHNAME, status);
       } while( c && strncmp(buf, "Cpus_allowed:", strlen("Cpus_allowed:")) );
       char* ptr = strchr(buf, ':');
       ++ptr;
@@ -860,14 +874,15 @@ int libstack_threads_print(void)
       printf("%s ", ptr);
       fclose(status);
 
-      snprintf(file_path, 256, "/proc/%d/task/%s/stat", pm->pid, ent->d_name);
+      snprintf(file_path, MAX_PATHNAME, "/proc/%d/task/%s/stat",
+               pm->pid, ent->d_name);
       int stat = open(file_path, O_RDONLY);
       long cnt = read(stat, buf, 1000);
       close(stat);
       while( cnt && (buf[cnt-1] != ')') ) {
         cnt--;
       }
-      if( get_int_from_tok_str(&buf[cnt], ' ', 15, &cnt) ) {
+      if( get_int_from_tok_str(&buf[cnt], " ", 15, &cnt) ) {
         if( cnt < 0 )
           printf("%ld 1\n", (-cnt)-1);
         else
@@ -915,11 +930,11 @@ int libstack_env_print(void)
     printf("--------------------------------------------\n");
     printf("pid: %d\n", pm->pid);
     printf("cmdline: ");
-    char cmdline_path[256];
-    snprintf(cmdline_path, 256, "/proc/%d/cmdline", pm->pid);
+    char cmdline_path[MAX_PATHNAME];
+    snprintf(cmdline_path, MAX_PATHNAME, "/proc/%d/cmdline", pm->pid);
     int cmdline = open(cmdline_path, O_RDONLY);
-    char cmdline_buf[256];
-    while( (cnt = read(cmdline, cmdline_buf, 256)) > 0 ) {
+    char cmdline_buf[MAX_PATHNAME];
+    while( (cnt = read(cmdline, cmdline_buf, MAX_PATHNAME)) > 0 ) {
       for( i = 0; i < cnt; ++i ) {
         if( cmdline_buf[i] == '\0' )
           printf(" ");
@@ -928,8 +943,8 @@ int libstack_env_print(void)
       }
     }
     printf("\n");
-    char env_path[256];
-    snprintf(env_path, 256, "/proc/%d/environ", pm->pid);
+    char env_path[MAX_PATHNAME];
+    snprintf(env_path, MAX_PATHNAME, "/proc/%d/environ", pm->pid);
 
     int file_len = get_file_size(env_path);
     if( file_len == -1 )
@@ -1222,7 +1237,12 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
     if( w->sb_aflags & CI_SB_AFLAG_ORPHAN       )  ++s->sock_orphans;
     if( w->wake_request & CI_SB_FLAG_WAKE_RX )  ++s->sock_wake_needed_rx;
     if( w->wake_request & CI_SB_FLAG_WAKE_TX )  ++s->sock_wake_needed_tx;
-    if( state >= CI_TCP_SYN_SENT && state <= CI_TCP_TIME_WAIT ) {
+    if( state == CI_TCP_LISTEN ) {
+      ci_tcp_socket_listen* tls = &wo->tcp_listen;
+      s->tcp_n_in_listenq += tls->n_listenq;
+      s->tcp_n_in_acceptq += ci_tcp_acceptq_n(tls);
+    }
+    else if( state & CI_TCP_STATE_TCP ) {
       ci_tcp_state* ts = &wo->tcp;
       if( tcp_rcv_usr(ts) ) {
         ++s->tcp_has_recvq;
@@ -1244,11 +1264,6 @@ static void get_more_stats(ci_netif* ni, more_stats_t* s)
         s->tcp_sendq_bytes += SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts));
         s->tcp_sendq_pkts += ci_tcp_sendq_n_pkts(ts);
       }
-    }
-    else if( state == CI_TCP_LISTEN ) {
-      ci_tcp_socket_listen* tls = &wo->tcp_listen;
-      s->tcp_n_in_listenq += tls->n_listenq;
-      s->tcp_n_in_acceptq += ci_tcp_acceptq_n(tls);
     }
     else if( state == CI_TCP_STATE_UDP ) {
       ci_udp_state* us = &wo->udp;
@@ -1411,7 +1426,7 @@ void socket_add(int stack_id, int sock_id)
   if( ! n )  return;
 
   if( sockets_n == sockets_size ) {
-    int new_size = CI_MAX(sockets_size * 2, 256);
+    int new_size = CI_MAX(sockets_size * 2, MAX_PATHNAME);
     sockets = realloc(sockets, new_size * sizeof(sockets[0]));
     CI_TEST(sockets);
     sockets_size = new_size;
@@ -1500,7 +1515,9 @@ static void for_each_tcp_socket(ci_netif* ni,
   int id;
   for( id = 0; id < (int)ni->state->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = SP_TO_WAITABLE_OBJ(ni, id);
-    if( ! (wo->waitable.state & CI_TCP_STATE_TCP_CONN) )  continue;
+    if( wo->waitable.state == CI_TCP_LISTEN ||
+        ! (wo->waitable.state & CI_TCP_STATE_TCP) )
+      continue;
     fn(ni, &wo->tcp);
   }
 }
@@ -1511,7 +1528,7 @@ static void for_each_tcp_socket(ci_netif* ni,
 **********************************************************************/
 
 unsigned arg_u[1];
-const char* arg_s[1];
+const char* arg_s[2];
 
 
 void zombie_stack_dump(int id, void *arg)
@@ -1569,7 +1586,7 @@ static void stack_dump(ci_netif* ni)
 {
   ci_log("============================================================");
   ci_netif_dump(ni);
-  ci_log("============================================================");
+  ci_log("--------------------- sockets ------------------------------");
   ci_netif_dump_sockets(ni);
 }
 
@@ -1608,7 +1625,7 @@ static void stack_opts(ci_netif* ni)
 static void stack_stats(ci_netif* ni)
 {
   ci_netif_stats stats = ni->state->stats;
-  ci_log("==================== ci_netif_stats: %d ====================",
+  ci_log("-------------------- ci_netif_stats: %d ---------------------",
          NI_ID(ni));
   dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 0);
 }
@@ -1616,7 +1633,7 @@ static void stack_stats(ci_netif* ni)
 static void stack_describe_stats(ci_netif* ni)
 {
   ci_netif_stats stats = ni->state->stats;
-  ci_log("==================== ci_netif_stats: %d ====================",
+  ci_log("-------------------- ci_netif_stats: %d ---------------------",
          NI_ID(ni));
   dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 1);
 }
@@ -1630,7 +1647,7 @@ static void stack_dstats(ci_netif* ni)
 {
   dstats_t stats;
   get_dstats(&stats, &ni->state->stats, sizeof(stats));
-  ci_log("==================== ci_netif_stats: %d ====================",
+  ci_log("-------------------- ci_netif_stats: %d ---------------------",
          NI_ID(ni));
   dump_stats(netif_dstats_fields, N_NETIF_DSTATS_FIELDS, &stats, 0);
 }
@@ -1639,7 +1656,8 @@ static void stack_more_stats(ci_netif* ni)
 {
   more_stats_t stats;
   get_more_stats(ni, &stats);
-  ci_log("==================== more_stats: %d ====================",NI_ID(ni));
+  ci_log("-------------------- more_stats: %d -------------------------",
+         NI_ID(ni));
   dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &stats, 0);
 }
 
@@ -1648,7 +1666,7 @@ static void stack_more_stats(ci_netif* ni)
 static void stack_ip_stats(ci_netif* ni)
 {
   ci_ipv4_stats_count stats = ni->state->stats_snapshot.ipv4;
-  ci_log("==================== ci_ipv4_stats_count: %d ====================",
+  ci_log("-------------------- ci_ipv4_stats: %d ----------------------",
          NI_ID(ni));
   dump_stats(ip_stats_fields, N_IP_STATS_FIELDS, &stats, 0);
 }
@@ -1656,7 +1674,7 @@ static void stack_ip_stats(ci_netif* ni)
 static void stack_tcp_stats(ci_netif* ni)
 {
   ci_tcp_stats_count stats = ni->state->stats_snapshot.tcp;
-  ci_log("==================== ci_tcp_stats_count: %d ====================",
+  ci_log("-------------------- ci_tcp_stats: %d -----------------------",
          NI_ID(ni));
   dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &stats, 0);
 }
@@ -1664,7 +1682,7 @@ static void stack_tcp_stats(ci_netif* ni)
 static void stack_tcp_ext_stats(ci_netif* ni)
 {
   ci_tcp_ext_stats_count stats = ni->state->stats_snapshot.tcp_ext;
-  ci_log("=================== ci_tcp_ext_stats_count: %d ===================",
+  ci_log("-------------------- ci_tcp_ext_stats: %d -------------------",
          NI_ID(ni));
   dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &stats, 0);
 }
@@ -1672,7 +1690,7 @@ static void stack_tcp_ext_stats(ci_netif* ni)
 static void stack_udp_stats(ci_netif* ni)
 {
   ci_udp_stats_count stats = ni->state->stats_snapshot.udp;
-  ci_log("==================== ci_udp_stats_count: %d ====================",
+  ci_log("-------------------- ci_udp_stats: %d -----------------------",
          NI_ID(ni));
   dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &stats, 0);
 }
@@ -2267,14 +2285,27 @@ static void stack_watch_more_stats(ci_netif* ni)
 static void stack_set_opt(ci_netif* ni)
 {
   const char* opt_name = arg_s[0];
-  unsigned opt_val = arg_u[0];
 
 #undef CI_CFG_OPTFILE_VERSION
 #undef CI_CFG_OPT
+#undef CI_CFG_STR_OPT
 #undef CI_CFG_OPTGROUP
-#define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, pres)    \
+#define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, pres) \
     if( ! strcmp(opt_name, #name) ) {                                   \
+      unsigned opt_val;                                                 \
+      char dummy;                                                       \
+      if( sscanf(arg_s[1], " %u %c", &opt_val, &dummy) != 1 ) {         \
+        ci_log("Bad argument to '%s' (expected unsigned)", opt_name);   \
+      }                                                                 \
       NI_OPTS(ni).name = opt_val;                                       \
+      return;                                                           \
+    }
+#define CI_CFG_STR_OPT(env, name, type, doc, bits, group, default, min, max, pres) \
+    if( ! strcmp(opt_name, #name) ) {                                   \
+      if( strlen(arg_s[1]) < sizeof(type) ) {                           \
+        ci_log("Bad argument to '%s' (string too long)", opt_name);     \
+      }                                                                 \
+      strcpy(NI_OPTS(ni).name, arg_s[1]);                               \
       return;                                                           \
     }
 #include <ci/internal/opts_netif_def.h>
@@ -2288,10 +2319,16 @@ static void stack_get_opt(ci_netif* ni)
 
 #undef CI_CFG_OPTFILE_VERSION
 #undef CI_CFG_OPT
+#undef CI_CFG_STR_OPT
 #undef CI_CFG_OPTGROUP
 #define CI_CFG_OPT(env, name, type, doc, bits, group, default, min, max, pres) \
     if( ! strcmp(opt_name, #name) ) {                                     \
       ci_log("[%d] %s: %d", NI_ID(ni), opt_name, (int) NI_OPTS(ni).name); \
+      return;                                                             \
+    }
+#define CI_CFG_STR_OPT(env, name, type, doc, bits, group, default, min, max, pres) \
+    if( ! strcmp(opt_name, #name) ) {                                     \
+      ci_log("[%d] %s: %s", NI_ID(ni), opt_name, NI_OPTS(ni).name);       \
       return;                                                             \
     }
 #include <ci/internal/opts_netif_def.h>
@@ -2306,30 +2343,25 @@ static void stack_set_rxq_limit(ci_netif* ni)
 
 static void stack_lots(ci_netif* ni)
 {
-  ci_netif_stats stats;
-  more_stats_t more_stats;
-  ci_tcp_stats_count t_stats;
-  ci_tcp_ext_stats_count te_stats;
-  ci_udp_stats_count u_stats;
-
-  stats = ni->state->stats;
-  get_more_stats(ni, &more_stats);
-  t_stats = ni->state->stats_snapshot.tcp;
-  te_stats = ni->state->stats_snapshot.tcp_ext;
-  u_stats = ni->state->stats_snapshot.udp;
-
   ci_log("============================================================");
   ci_netif_dump(ni);
   ci_netif_dump_extra(ni);
   libstack_stack_mapping_print_pids(NI_ID(ni));
-  ci_log("============================================================");
+  ci_log("--------------------- sockets ------------------------------");
   ci_netif_dump_sockets(ni);
-  dump_stats(netif_stats_fields, N_NETIF_STATS_FIELDS, &stats, 0);
-  dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &more_stats, 0);
-  dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &t_stats, 0);
-  dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &te_stats, 0);
-  dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &u_stats, 0);
+  stack_stats(ni);
+  stack_more_stats(ni);
+
+#if CI_CFG_SUPPORT_STATS_COLLECTION
+  stack_ip_stats(ni);
+  stack_tcp_stats(ni);
+  stack_tcp_ext_stats(ni);
+  stack_udp_stats(ni);
+#endif
+
+  ci_log("--------------------- config opts --------------------------");
   ci_netif_config_opts_dump(&NI_OPTS(ni));
+  ci_log("--------------------- stack time ---------------------------");
   stack_time(ni);
 }
 
@@ -2363,7 +2395,7 @@ static void stack_cicp_user_find_home(ci_netif* ni)
   int rc;
 
   /* for some reason gcc complians about maybe-uninitialized variables. */
-  ci_hwport_id_t hwport = CI_HWPORT_ID_BAD;
+  cicp_hwport_mask_t hwports = 0;
   cicp_encap_t encap = {0,};
   ci_ifid_t ifindex = -1;
   ci_mac_addr_t mac = {0,};
@@ -2374,11 +2406,11 @@ static void stack_cicp_user_find_home(ci_netif* ni)
     return;
   }
   laddr = in_addr.s_addr;
-  rc = cicp_user_find_home(CICP_HANDLE(ni), &laddr, &hwport, &ifindex,
+  rc = oo_cp_find_llap_by_ip(ni->cplane, laddr, &hwports, &ifindex,
                            &mac, &mtu, &encap);
   ci_log("cicp_user_find_home: rc=%d", rc);
   if( rc == 0 ) {
-    ci_log("  hwport: %d", (int) hwport);
+    ci_log(" hwports: %x", (int) hwports);
     ci_log(" ifindex: %d", (int) ifindex);
     ci_log("     mac: "CI_MAC_PRINTF_FORMAT, CI_MAC_PRINTF_ARGS(&mac));
     ci_log("     mtu: %d", (int) mtu);
@@ -2388,12 +2420,15 @@ static void stack_cicp_user_find_home(ci_netif* ni)
 
 static void stack_hwport_to_base_ifindex(ci_netif* ni)
 {
-  const cicp_ul_mibs_t* user = &CICP_USER_MIBS(CICP_HANDLE(ni));
-  cicp_llapinfo_t* llapt = user->llapinfo_utable;
   int i;
-  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
-    ci_log("hwport_to_base_ifindex[%d] = %d", i,
-           (int) llapt->hwport_to_base_ifindex[i]);
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i )
+    ci_log("hwport[%d] ->= %d", i,
+           oo_cp_hwport_vlan_to_ifindex(ni->cplane, i, 0, NULL));
+}
+
+static void stack_vi_stats(ci_netif* ni)
+{
+  ci_netif_dump_vi_stats(ni);
 }
 
 /**********************************************************************
@@ -2446,8 +2481,8 @@ static const stack_op_t stack_ops[] = {
   STACK_OP(time,               "show stack timers"),
   STACK_OP(time_init,          "(re-)initialize stack timers"),
   STACK_OP(timers,             "dump state of stack timers"),
-  STACK_OP(filter_table,       "show stack filter table"),
-  STACK_OP_F(filters,          "show stack filters (syslog)", FL_ONCE),
+  STACK_OP(filter_table,       "show stack software filter table"),
+  STACK_OP_F(filters,          "show stack hardware filters", FL_ONCE),
   STACK_OP_F(clusters,         "show clusters", FL_ONCE),
   STACK_OP(qs,                 "show queues for each socket in stack"),
   STACK_OP(lock,               "lock the stack"),
@@ -2489,7 +2524,7 @@ static const stack_op_t stack_ops[] = {
   STACK_OP_AX(tcp_rx_checks,   "set reception check bitmap option", "<mask>"),
   STACK_OP_AX(tcp_rx_log_flags,"set reception logging bitmap option","<mask>"),
   STACK_OP_A(set_opt,          "set stack option", "<name> <val>", 2,
-             FL_ARG_SU),
+             FL_ARG_SV),
   STACK_OP_A(get_opt,          "get stack option", "<name>", 1, FL_ARG_S),
   STACK_OP_AU(set_rxq_limit,   "set the rxq_limit", "<limit>"),
   STACK_OP(lots,               "dump state, opts, stats"),
@@ -2498,7 +2533,9 @@ static const stack_op_t stack_ops[] = {
   STACK_OP(pkt_reap,           "reap packet buffers from sockets"),
   STACK_OP_A(cicp_user_find_home,"invoke cicp_user_find_home", "<ip>", 1,
              FL_ARG_S),
-  STACK_OP(hwport_to_base_ifindex,"dump hwport_to_base_ifindex table"),
+  STACK_OP(hwport_to_base_ifindex,"dump mapping between hwport and interfaces"),
+  STACK_OP(vi_stats,"show per-VI interface stats. (Higher overhead, so only "
+           "call occasionally)"),
 };
 #define N_STACK_OPS	(sizeof(stack_ops) / sizeof(stack_ops[0]))
 

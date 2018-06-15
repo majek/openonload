@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005      Fen Systems Ltd.
- * Copyright 2005-2015 Solarflare Communications Inc.
+ * Copyright 2005-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -441,7 +441,7 @@ int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 	s32 filter_id = efx_filter_insert_filter(efx_dl_handle(efx_dev)->efx,
 						 spec, replace_equal);
 	if (filter_id >= 0) {
-		EFX_BUG_ON_PARANOID(filter_id & ~EFX_FILTER_ID_MASK);
+		EFX_WARN_ON_PARANOID(filter_id & ~EFX_FILTER_ID_MASK);
 		filter_id |= spec->priority << EFX_FILTER_PRI_SHIFT;
 	}
 	return filter_id;
@@ -461,11 +461,12 @@ EXPORT_SYMBOL(efx_dl_filter_remove);
 int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 			   int filter_id, int rxq_i, int stack_id)
 {
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+
 	if (WARN_ON(filter_id < 0))
 		return -EINVAL;
-	return efx_filter_redirect_id(efx_dl_handle(efx_dev)->efx,
-				      filter_id & EFX_FILTER_ID_MASK,
-				      rxq_i, stack_id);
+	return efx->type->filter_redirect(efx, filter_id & EFX_FILTER_ID_MASK,
+					  rxq_i, stack_id);
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
 

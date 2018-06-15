@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,372 +15,512 @@
 
 /* Stuff that connects the oof module and the rest of onload. */
 
-#include <cplane/exported.h>
-#include <onload/oof_interface.h>
-#include <onload/oof_onload.h>
-#include <ci/internal/ip.h>
-#include <onload/tcp_helper.h>
 #include <onload/tcp_driver.h>
-#include <onload/debug.h>
-#include "tcp_filters_internal.h"
-#include <onload/driverlink_filter.h>
-#include <onload/tcp_helper_fns.h>
+#include <onload/oof_onload.h>
+
+#include "oof_onload_types.h"
+#include "oo_hw_filter.h"
 
 #define skf_to_ep(skf)  CI_CONTAINER(tcp_helper_endpoint_t, oofilter, (skf))
 #define skf_to_ni(skf)  (&skf_to_ep(skf)->thr->netif)
 
 
-static void
-oof_onload_on_cplane_ipadd(ci_ip_addr_net_t net_ip,
-                           ci_ip_addrset_t  net_ipset,
-                           ci_ip_addr_net_t net_bcast,
-                           ci_ifid_t ifindex,
-                           void* arg)
+void oof_onload_on_cplane_ipadd(unsigned net_ip, ci_ifid_t ifindex,
+                                struct net* netns, void* arg)
 {
-  struct oof_manager* filter_manager = arg;
+  struct oo_filter_ns* fns = oo_filter_ns_lookup(arg, netns);
 
-  if( net_ip )
-    oof_manager_addr_add(filter_manager, net_ip, ifindex);
-}
+  ci_assert_nequal(net_ip, 0);
 
-
-static void
-oof_onload_on_cplane_ipdel(ci_ip_addr_net_t net_ip,
-                           ci_ip_addrset_t  net_ipset,
-                           ci_ip_addr_net_t net_bcast,
-                           ci_ifid_t ifindex,
-                           void* arg)
-{
-  struct oof_manager* filter_manager = arg;
-
-  if( net_ip )
-    oof_manager_addr_del(filter_manager, net_ip, ifindex);
-}
-
-static void
-oof_do_deferred_work_fn(struct work_struct *data)
-{
-  oof_do_deferred_work(container_of(data, efab_tcp_driver_t,
-                                    filter_work_item)->filter_manager);
-}
-
-int
-oof_onload_ctor(efab_tcp_driver_t* on_drv)
-{
-  int rc;
-
-  ci_assert(on_drv->filter_manager == NULL);
-  on_drv->filter_manager = oof_manager_alloc(
-                    cicp_get_max_local_addr(&onload_cplane_handle),
-                    on_drv);
-  if( on_drv->filter_manager == NULL )
-    return -ENOMEM;
-  INIT_WORK(&on_drv->filter_work_item, oof_do_deferred_work_fn);
-
-  rc = cicpos_callback_register(&onload_cplane_handle,
-                                oof_onload_on_cplane_ipadd,
-                                oof_onload_on_cplane_ipdel,
-                                oof_mcast_update_filters,
-                                oof_hwport_un_available,
-                                on_drv->filter_manager);
-  if( rc != 0 ) {
-    ci_log("%s: cicpos_ipif_callback_register failed: %d", __FUNCTION__, rc);
-    oof_manager_free(on_drv->filter_manager);
-    on_drv->filter_manager = NULL;
-    return -ENODEV;
+  if( fns ) {
+    oof_manager_addr_add(fns->ofn_filter_manager, net_ip, ifindex);
+    oo_filter_ns_put(arg, fns);
   }
+}
+
+
+void oof_onload_on_cplane_ipdel(unsigned net_ip, ci_ifid_t ifindex,
+                                struct net* netns, void* arg)
+{
+  struct oo_filter_ns* fns = oo_filter_ns_lookup(arg, netns);
+
+  ci_assert_nequal(net_ip, 0);
+
+  if( fns ) {
+    oof_manager_addr_del(fns->ofn_filter_manager, net_ip, ifindex);
+    oo_filter_ns_put(arg, fns);
+  }
+}
+
+
+extern void
+oof_onload_mcast_update_interface(ci_ifid_t ifindex, ci_uint16 flags,
+                                  ci_uint32 hwport_mask,
+                                  ci_uint16 vlan_id, ci_mac_addr_t mac,
+                                  struct net* netns, void *arg)
+{
+  struct efab_tcp_driver_s* drv = (struct efab_tcp_driver_s*)arg;
+  struct oo_filter_ns* fns = oo_filter_ns_lookup(drv, netns);
+
+  if( fns ) {
+    oof_mcast_update_interface(ifindex, flags, hwport_mask, vlan_id, mac,
+                               fns->ofn_filter_manager);
+    oo_filter_ns_put(arg, fns);
+  }
+}
+
+
+extern void
+oof_onload_mcast_update_filters(ci_ifid_t ifindex, struct net* netns,
+                                void *arg)
+{
+  struct efab_tcp_driver_s* drv = (struct efab_tcp_driver_s*)arg;
+  struct oo_filter_ns* fns = oo_filter_ns_lookup(drv, netns);
+
+  if( fns ) {
+    oof_mcast_update_filters(ifindex, fns->ofn_filter_manager);
+    oo_filter_ns_put(arg, fns);
+  }
+}
+
+
+void oof_onload_hwport_removed(efab_tcp_driver_t* drv, int hwport)
+{
+  struct oo_filter_ns* fns;
+  ci_dllink* link;
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+
+  drv->filter_ns_manager->ofnm_hwports_up &= ~(1 << hwport);
+  drv->filter_ns_manager->ofnm_hwports_down |= 1 << hwport;
+
+  CI_DLLIST_FOR_EACH(link, &drv->filter_ns_manager->ofnm_ns_list) {
+    fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    oof_hwport_removed(fns->ofn_filter_manager, hwport);
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+}
+
+
+void oof_onload_hwport_up_down(efab_tcp_driver_t* drv, int hwport, int up,
+                               int mcast_replicate_capable, int vlan_filters,
+                               int sync)
+{
+  struct oo_filter_ns* fns;
+  struct oo_filter_ns_manager* manager = drv->filter_ns_manager;
+  ci_dllink* link;
+
+  mutex_lock(&manager->ofnm_lock);
+
+  mcast_replicate_capable = !! mcast_replicate_capable;
+  vlan_filters = !! vlan_filters;
+
+  if( up ) {
+    /* Reset hwport capabilities when bringing it up */
+    manager->ofnm_hwports_mcast_replicate_capable &= ~(1 << hwport);
+    manager->ofnm_hwports_vlan_filters &= ~(1 << hwport);
+
+    /* Now mark it up and set capabilities based on new information */
+    manager->ofnm_hwports_up |= 1 << hwport;
+    manager->ofnm_hwports_down &= ~(1 << hwport);
+    manager->ofnm_hwports_mcast_replicate_capable |=
+                                           mcast_replicate_capable << hwport;
+    manager->ofnm_hwports_vlan_filters |= vlan_filters << hwport;
+  }
+  else {
+    manager->ofnm_hwports_up &= ~(1 << hwport);
+    manager->ofnm_hwports_down |= 1 << hwport;
+  }
+
+  CI_DLLIST_FOR_EACH(link, &manager->ofnm_ns_list) {
+    fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    oof_hwport_up_down(fns->ofn_filter_manager, hwport, up,
+                       mcast_replicate_capable, vlan_filters, sync);
+  }
+  mutex_unlock(&manager->ofnm_lock);
+}
+
+
+static void oof_do_deferred_work_fn(struct work_struct *data)
+{
+  struct oo_filter_ns* fns = container_of(data, struct oo_filter_ns,
+                                          ofn_filter_work_item);
+  oof_do_deferred_work(fns->ofn_filter_manager);
+  /* XXX: This is a layer violation: Other callers of oo_filter_ns_put() take
+   * an argument specifying the driver, but that's not straightforward on the
+   * workqueue. */
+  oo_filter_ns_put(&efab_tcp_driver, fns);
+}
+
+
+void oof_onload_manager_dump(struct efab_tcp_driver_s* drv,
+                             oo_dump_log_fn_t log, void* log_arg)
+{
+  struct oo_filter_ns* fns;
+  ci_dllink* link;
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH(link, &drv->filter_ns_manager->ofnm_ns_list) {
+    fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    oof_manager_dump(fns->ofn_filter_manager, log, log_arg);
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+}
+
+
+void oof_onload_socket_dump(struct efab_tcp_driver_s* drv,
+                            struct oof_socket* skf,
+                            void (*dump_fn)(void* opaque,const char* fmt,...),
+                            void* opaque)
+{
+  struct oo_filter_ns* fns;
+  ci_dllink* link;
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH(link, &drv->filter_ns_manager->ofnm_ns_list) {
+    fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    oof_socket_dump(fns->ofn_filter_manager, skf, dump_fn, opaque);
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+}
+
+
+int oof_onload_hwports_list(struct efab_tcp_driver_s* drv,
+                            struct seq_file* seq)
+{
+  struct oo_filter_ns* fns;
+  ci_dllink* link;
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH(link, &drv->filter_ns_manager->ofnm_ns_list) {
+    fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    oof_hwports_list(fns->ofn_filter_manager, seq);
+  }
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
 
   return 0;
 }
 
 
-void
-oof_onload_dtor(efab_tcp_driver_t* on_drv)
+
+int oof_onload_ipaddrs_list(struct efab_tcp_driver_s* drv,
+                            struct seq_file* seq)
 {
-  if( on_drv->filter_manager == NULL )
-    return;
+/* FIXME SCJ OOF fix return */
+  struct oo_filter_ns* fns;
+  ci_dllink* link;
 
-  cicpos_callback_deregister(&onload_cplane_handle);
-  oof_manager_free(on_drv->filter_manager);
-}
-
-
-/**********************************************************************
- * Callbacks from oof to onload.
- */
-
-struct tcp_helper_resource_s*
-oof_cb_socket_stack(struct oof_socket* skf)
-{
-  ci_assert_nflags(skf->sf_flags, OOF_SOCKET_NO_STACK);
-  return skf_to_ep(skf)->thr;
-}
-
-
-struct tcp_helper_cluster_s*
-oof_cb_stack_thc(struct tcp_helper_resource_s* skf_stack)
-{
-  return skf_stack->thc;
-}
-
-
-const char*
-oof_cb_thc_name(struct tcp_helper_cluster_s* thc)
-{
-  return thc->thc_name;
-}
-
-
-int
-oof_cb_socket_id(struct oof_socket* skf)
-{
-  return (skf->sf_flags & OOF_SOCKET_NO_STACK) == 0 ?
-         OO_SP_FMT(skf_to_ep(skf)->id) : -1;
-}
-
-
-int
-oof_cb_stack_id(struct tcp_helper_resource_s* stack)
-{
-  return stack ? NI_ID(&stack->netif) : -1;
-}
-
-
-void
-oof_cb_callback_set_filter(struct oof_socket* skf)
-{
-  SP_TO_SOCK_CMN(&oof_cb_socket_stack(skf)->netif,
-                 oof_cb_socket_id(skf))->s_flags |= CI_SOCK_FLAG_FILTER;
-}
-
-
-
-struct oof_cb_sw_filter_op {
-  struct oof_cb_sw_filter_op *next;
-  oo_sp sock_id;
-  unsigned laddr;
-  unsigned raddr;
-  int lport;
-  int rport;
-  int protocol;
-  enum {
-    OOF_CB_SW_FILTER_OP_ADD,
-    OOF_CB_SW_FILTER_OP_REMOVE
-  } op;
-};
-
-
-void
-oof_cb_sw_filter_apply(ci_netif* ni)
-{
-  struct oof_cb_sw_filter_op* op;
-
-  ci_assert(ci_netif_is_locked(ni));
-
-  spin_lock_bh(&ni->swf_update_lock);
-  for( op = ni->swf_update_first; op != NULL; op = ni->swf_update_first) {
-
-    ni->swf_update_first = op->next;
-    if( op->next == NULL )
-      ni->swf_update_last = NULL;
-    spin_unlock_bh(&ni->swf_update_lock);
-
-    if( op->op == OOF_CB_SW_FILTER_OP_ADD ) {
-      ci_netif_filter_insert(ni, op->sock_id, op->laddr, op->lport,
-                             op->raddr, op->rport, op->protocol);
-    }
-    else {
-      ci_netif_filter_remove(ni, op->sock_id, op->laddr, op->lport,
-                             op->raddr, op->rport, op->protocol);
-    }
-
-    ci_free(op);
-    spin_lock_bh(&ni->swf_update_lock);
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  CI_DLLIST_FOR_EACH(link, &drv->filter_ns_manager->ofnm_ns_list) {
+    fns = CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    oof_ipaddrs_list(fns->ofn_filter_manager, seq);
   }
-  spin_unlock_bh(&ni->swf_update_lock);
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+
+  return 0;
 }
+
 
 static void
-oof_cb_sw_filter_postpone(struct oof_socket* skf, unsigned laddr, int lport,
-                          unsigned raddr, int rport, int protocol, int op_op)
+oof_onload_init_hwport_state_locked(struct oo_filter_ns_manager* manager,
+                                    struct oo_filter_ns* fns)
 {
-  ci_netif* ni = skf_to_ni(skf);
-  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
-  struct oof_cb_sw_filter_op* op = CI_ALLOC_OBJ(struct oof_cb_sw_filter_op);
-  
-  if( op == NULL ) {
-    /* Linux complains about failed allocations */
-    return;
-  }
+  int i;
 
-  op->sock_id = OO_SP_FROM_INT(ni, skf_to_ep(skf)->id);
-  op->laddr = laddr;
-  op->raddr = raddr;
-  op->lport = lport;
-  op->rport = rport;
-  op->protocol = protocol;
-  op->op = op_op;
+  ci_assert_equal(manager->ofnm_hwports_up & manager->ofnm_hwports_down, 0);
 
-  op->next = NULL;
-
-  spin_lock_bh(&ni->swf_update_lock);
-  if( ni->swf_update_last == NULL )
-    ni->swf_update_first = op;
-  else
-    ni->swf_update_last->next = op;
-  ni->swf_update_last = op;
-  spin_unlock_bh(&ni->swf_update_lock);
-
-  /* We are holding a spinlock, so claim to be in driverlink context here */
-  if( efab_tcp_helper_netif_lock_or_set_flags(trs, OO_TRUSTED_LOCK_SWF_UPDATE,
-                                              CI_EPLOCK_NETIF_SWF_UPDATE, 1) ) {
-    ef_eplock_holder_set_flag(&ni->state->lock, CI_EPLOCK_NETIF_SWF_UPDATE);
-    efab_tcp_helper_netif_unlock(trs, 1);
+  for( i = 0; i < (sizeof(manager->ofnm_hwports_up) * 8); i++ ) {
+    if( manager->ofnm_hwports_up & (1 << i) ) {
+      oof_hwport_up_down(fns->ofn_filter_manager, i, 1,
+                      manager->ofnm_hwports_mcast_replicate_capable & (1 << i),
+                      manager->ofnm_hwports_vlan_filters & (1 << i), 1);
+    }
+    else if( manager->ofnm_hwports_down & (1 << i) ) {
+      oof_hwport_up_down(fns->ofn_filter_manager, i, 0,
+                      manager->ofnm_hwports_mcast_replicate_capable & (1 << i),
+                      manager->ofnm_hwports_vlan_filters & (1 << i), 1);
+    }
   }
 }
 
-/* Fixme: most callers of oof_cb_sw_filter_insert do not check rc. */
-int
-oof_cb_sw_filter_insert(struct oof_socket* skf, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol,
-                        int stack_locked)
+
+static struct oo_filter_ns* oo_filter_ns_ctor_locked(efab_tcp_driver_t* drv,
+                                                     struct net* netns)
 {
-  ci_netif* ni = skf_to_ni(skf);
-  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
+  struct oo_filter_ns* fns = CI_ALLOC_OBJ(struct oo_filter_ns);
+  if( !fns )
+    return NULL;
+
+  fns->ofn_filter_manager = oof_manager_alloc(CI_CFG_MAX_LOCAL_IPADDRS, fns);
+  if( fns->ofn_filter_manager == NULL ) {
+    CI_FREE_OBJ(fns);
+    return NULL;
+  }
+
+  fns->ofn_ns_manager = drv->filter_ns_manager;
+  INIT_WORK(&fns->ofn_filter_work_item, oof_do_deferred_work_fn);
+  fns->ofn_netns = netns;
+  get_net(fns->ofn_netns);
+  fns->ofn_refcount = 1;
+  spin_lock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  ci_dllist_push_tail(&drv->filter_ns_manager->ofnm_ns_list,
+                      &fns->ofn_ofnm_link);
+  spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+
+  oof_onload_init_hwport_state_locked(drv->filter_ns_manager, fns);
+
+  return fns;
+}
+
+
+/* [ofnm_ns_lock, efnm_ns_lock] must be held at entry, and is never held at exit. */
+static void oo_filter_ns_dtor(efab_tcp_driver_t* drv,
+                              struct oo_filter_ns* fns)
+{
+  ci_assert_equal(fns->ofn_refcount, 0);
+  ci_assert(spin_is_locked(&drv->filter_ns_manager->ofnm_ns_lock));
+  ci_assert(mutex_is_locked(&drv->filter_ns_manager->ofnm_lock));
+
+  ci_dllist_remove(&fns->ofn_ofnm_link);
+
+  /* Now that we've removed [fns] from the list, we can drop the locks. */
+  spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+
+  oof_manager_free(fns->ofn_filter_manager);
+  put_net(fns->ofn_netns);
+  CI_FREE_OBJ(fns);
+
+  /* Exit without the lock. */
+}
+
+
+int oo_filter_ns_manager_ctor(efab_tcp_driver_t* drv)
+{
   int rc = 0;
+  int i;
+  ci_assert(!drv->filter_ns_manager);
+  drv->filter_ns_manager = CI_ALLOC_OBJ(struct oo_filter_ns_manager);
 
-  ci_assert(!stack_locked || ci_netif_is_locked(ni));
-
-  /* We are holding a spinlock, so claim to be in driverlink context here */
-  if( stack_locked || efab_tcp_helper_netif_try_lock(trs, 1) ) {
-    rc = ci_netif_filter_insert(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
-                                laddr, lport, raddr, rport, protocol);
-    if( ! stack_locked )
-      efab_tcp_helper_netif_unlock(trs, 1);
+  if( !drv->filter_ns_manager ) {
+    rc = -ENOMEM;
+    goto out;
   }
-  else
-    oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
-                              OOF_CB_SW_FILTER_OP_ADD);
+
+  CI_ZERO(drv->filter_ns_manager);
+
+  ci_dllist_init(&drv->filter_ns_manager->ofnm_ns_list);
+  mutex_init(&drv->filter_ns_manager->ofnm_lock);
+  mutex_init(&drv->filter_ns_manager->ofnm_tproxy_lock);
+  spin_lock_init(&drv->filter_ns_manager->ofnm_ns_lock);
+
+  for( i = 0; i < OOF_TPROXY_GLOBAL_FILTER_COUNT; ++i ) {
+    struct oo_tproxy_filter* otp;
+    otp = &drv->filter_ns_manager->ofnm_tproxy_filters[i];
+
+    oo_hw_filter_init(&otp->otf_filter);
+    memset(otp->otf_filter_refs, 0, sizeof(otp->otf_filter_refs));
+  }
+
+ out:
   return rc;
 }
 
 
-void
-oof_cb_sw_filter_remove(struct oof_socket* skf, unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol,
-                        int stack_locked)
+void oo_filter_ns_manager_dtor(efab_tcp_driver_t* drv)
 {
-  ci_netif* ni = skf_to_ni(skf);
-  struct tcp_helper_resource_s *trs = netif2tcp_helper_resource(ni);
-
-  if( skf->sf_flags & OOF_SOCKET_SW_FILTER_WAS_REMOVED )
+  if( drv->filter_ns_manager == NULL )
     return;
 
-  /* We MAY call this function with incorrect stack_locked flag
-   * if OOF_SOCKET_SW_FILTER_WAS_REMOVED flag is set. */
-  ci_assert(!stack_locked || ci_netif_is_locked(ni));
+  ci_assert(ci_dllist_is_empty(&drv->filter_ns_manager->ofnm_ns_list));
 
-  /* We are holding a spinlock, so claim to be in driverlink context here */
-  if( stack_locked || efab_tcp_helper_netif_try_lock(trs, 1) ) {
-    ci_netif_filter_remove(ni, OO_SP_FROM_INT(ni, skf_to_ep(skf)->id),
-                           laddr, lport, raddr, rport, protocol);
-    if( ! stack_locked )
-      efab_tcp_helper_netif_unlock(trs, 1);
+  mutex_destroy(&drv->filter_ns_manager->ofnm_tproxy_lock);
+  mutex_destroy(&drv->filter_ns_manager->ofnm_lock);
+  CI_FREE_OBJ(drv->filter_ns_manager);
+}
+
+
+extern void __oo_filter_ns_get(efab_tcp_driver_t* drv, struct oo_filter_ns* fns)
+{
+  spin_lock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  fns->ofn_refcount++;
+  spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+}
+
+
+struct oo_filter_ns* oo_filter_ns_lookup(efab_tcp_driver_t* drv,
+                                         struct net* netns)
+{
+  ci_dllink* link;
+  spin_lock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  CI_DLLIST_FOR_EACH(link, &drv->filter_ns_manager->ofnm_ns_list) {
+    struct oo_filter_ns* fns =
+        CI_CONTAINER(struct oo_filter_ns, ofn_ofnm_link, link);
+    if( fns->ofn_netns == netns && fns->ofn_refcount > 0 ) {
+      fns->ofn_refcount++;
+      spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+      return fns;
+    }
   }
-  else
-    oof_cb_sw_filter_postpone(skf, laddr, lport, raddr, rport, protocol,
-                              OOF_CB_SW_FILTER_OP_REMOVE);
+  spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  return NULL;
 }
 
 
-struct oof_socket*
-oof_cb_sw_filter_lookup(struct tcp_helper_resource_s* stack,
-                        unsigned laddr, int lport,
-                        unsigned raddr, int rport, int protocol)
+struct oo_filter_ns* oo_filter_ns_get(efab_tcp_driver_t* drv,
+                                      struct net* netns, int* oof_preexisted)
 {
-  ci_netif* ni = &stack->netif;
-  int sock_id, tbl_idx;
-  tbl_idx = ci_netif_filter_lookup(ni, laddr, lport, raddr, rport, protocol);
-  if( tbl_idx < 0 )
-    return NULL;
-  sock_id = ni->filter_table->table[tbl_idx].id;
-  if( ! IS_VALID_SOCK_ID(ni, sock_id) ) {
-    OO_DEBUG_ERR(ci_log("%s: ERROR: %d %s "IPPORT_FMT" "IPPORT_FMT,
-                        __FUNCTION__, NI_ID(ni), FMT_PROTOCOL(protocol),
-                        IPPORT_ARG(laddr, lport), IPPORT_ARG(raddr, rport));
-                 ci_log("--> idx=%d sock_id=%d sock_id_max=%d", tbl_idx,
-                        sock_id, ni->ep_tbl_n));
-    return NULL;
+  struct oo_filter_ns* fns;
+
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  fns = oo_filter_ns_lookup(drv, netns);
+
+  *oof_preexisted = fns != NULL;
+  if( fns == NULL )
+    fns = oo_filter_ns_ctor_locked(drv, netns);
+  mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
+
+  return fns;
+}
+
+
+void oo_filter_ns_put(efab_tcp_driver_t* drv, struct oo_filter_ns* fns)
+{
+  mutex_lock(&drv->filter_ns_manager->ofnm_lock);
+  spin_lock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  ci_assert(ci_dllist_is_member(&drv->filter_ns_manager->ofnm_ns_list,
+                                &fns->ofn_ofnm_link));
+  ci_assert_gt(fns->ofn_refcount, 0);
+  fns->ofn_refcount--;
+  if( fns->ofn_refcount == 0 ) {
+    oo_filter_ns_dtor(drv, fns);
   }
-  return &ni->ep_tbl[sock_id]->oofilter;
-}
-
-
-/* dlfilter callbacks are called from oof code to keep hw and dl filters
- * synchronized. */
-void
-oof_dl_filter_set(struct oo_hw_filter* filter, int stack_id, int protocol,
-                  unsigned saddr, int sport, unsigned daddr, int dport)
-{
-  if( filter->dlfilter_handle != EFX_DLFILTER_HANDLE_BAD )
-    efx_dlfilter_remove(efab_tcp_driver.dlfilter, filter->dlfilter_handle);
-  efx_dlfilter_add(efab_tcp_driver.dlfilter, protocol,
-                   daddr, dport, saddr, sport,
-                   stack_id, &filter->dlfilter_handle);
-}
-
-
-void
-oof_dl_filter_del(struct oo_hw_filter* filter)
-{
-  if( filter->dlfilter_handle != EFX_DLFILTER_HANDLE_BAD ) {
-    efx_dlfilter_remove(efab_tcp_driver.dlfilter, filter->dlfilter_handle);
-    filter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
+  else {
+    spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+    mutex_unlock(&drv->filter_ns_manager->ofnm_lock);
   }
+  /* oo_filter_ns_dtor() drops the locks itself. */
 }
 
 
-/* These two must really be the same as we compare a value that is set
- * CI_IFID_ALL with the OO_IFID_ALL constant
- */
-CI_BUILD_ASSERT(CI_IFID_ALL == OO_IFID_ALL);
-
-
-int 
-oof_cb_get_hwport_mask(int ifindex, unsigned *hwport_mask)
+#ifdef __KERNEL__
+void oo_filter_ns_put_atomic(efab_tcp_driver_t* drv, struct oo_filter_ns* fns)
 {
-  int rc;
-  rc = cicp_get_active_hwport_mask(&CI_GLOBAL_CPLANE, ifindex, hwport_mask);
+  spin_lock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+  if( fns->ofn_refcount == 1 ) {
+    /* Queue some work passing the last refcount
+     * The filter_ns will be destroyed when handler drops the ref. */
+    int rc = queue_work(CI_GLOBAL_WORKQUEUE, &fns->ofn_filter_work_item);
+    (void) rc;
+    ci_assert_nequal(rc, 0);
+  }
+  else {
+    fns->ofn_refcount--;
+  }
+  ci_assert_gt(fns->ofn_refcount, 0);
+  spin_unlock_bh(&drv->filter_ns_manager->ofnm_ns_lock);
+}
+#endif
+
+struct oof_manager* oo_filter_ns_to_manager(struct oo_filter_ns* ofn)
+{
+  return ofn->ofn_filter_manager;
+}
+
+struct net* oo_filter_ns_to_netns(struct oo_filter_ns* ofn)
+{
+  return ofn->ofn_netns;
+}
+
+int oo_filter_ns_add_global_tproxy_filter(struct oo_filter_ns* fns,
+                                          struct oo_hw_filter_spec* filter,
+                                          int proto, unsigned hwport_mask,
+                                          unsigned* installed_hwport_mask)
+{
+  int rc = 0;
+  int i;
+  unsigned hwports_got = 0;
+  unsigned hwports_want;
+  struct oo_filter_ns_manager* ofnm = fns->ofn_ns_manager;
+
+  /* As an arbitrator we don't really care what the actual proto is.  What
+   * matters is that a) all oof_managers are in agreement and b) they don't
+   * use more than we expect, so we can track them correctly.
+   */
+  ci_assert_lt(proto, OOF_TPROXY_GLOBAL_FILTER_COUNT);
+
+  /* Asking us to install on a hwport that this caller has already got a
+   * filter on is just asking for trouble.
+   */
+  ci_assert_equal(hwport_mask & *installed_hwport_mask, 0);
+
+  mutex_lock(&ofnm->ofnm_tproxy_lock);
+
+  /* The interface to oo_hw_filter_update requires us to provide a mask of
+   * all ports that should have filters on.  That means we need to ensure we
+   * include any existing filters in our passed mask.
+   */
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; i++ ) {
+    if( ofnm->ofnm_tproxy_filters[proto].otf_filter.filter_id[i] >= 0 )
+      hwports_got |= 1 << i;
+  }
+
+  /* We need filters on any port that is either being requested, or we've
+   * already got a filter for.
+   */
+  hwports_want = hwport_mask | hwports_got;
+  rc = oo_hw_filter_update(&ofnm->ofnm_tproxy_filters[proto].otf_filter,
+                           NULL, filter, hwports_want, hwports_want, 0,
+                           OO_HW_SRC_FLAG_KERNEL_REDIRECT);
+
+  /* Update ref counts for all ports we're reporting we've got to the caller */
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; i++ ) {
+    if( (hwport_mask & (1 << i)) &&
+        (ofnm->ofnm_tproxy_filters[proto].otf_filter.filter_id[i] >= 0) ) {
+      ofnm->ofnm_tproxy_filters[proto].otf_filter_refs[i]++;
+      *installed_hwport_mask |= 1 << i;
+    }
+  }
+
+  mutex_unlock(&ofnm->ofnm_tproxy_lock);
+
   return rc;
 }
 
-
-int
-oof_cb_get_vlan_id(int ifindex, unsigned short *vlan_id)
+int oo_filter_ns_remove_global_tproxy_filter(struct oo_filter_ns* fns,
+                                             int proto, unsigned hwport_mask,
+                                             unsigned* installed_hwport_mask)
 {
-  cicp_encap_t encap;
-  int rc = cicp_llap_get_encapsulation(&CI_GLOBAL_CPLANE, ifindex, &encap);
-  if( rc == 0 )
-    *vlan_id = encap.vlan_id;
+  struct oo_filter_ns_manager* ofnm = fns->ofn_ns_manager;
+  struct oo_tproxy_filter* otp = &ofnm->ofnm_tproxy_filters[proto];
+  unsigned hwports_clear = 0;
+  int i;
 
-  return rc;
-}
+  mutex_lock(&ofnm->ofnm_tproxy_lock);
 
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; i++ ) {
+    if( hwport_mask & (1 << i) ) {
+      /* If the caller is expecting us to clear a filter from this port, then
+       * we better have one to be clearing, and have references to it.  If
+       * not, someone's state is out of sync.
+       */
+      ci_assert_ge(otp->otf_filter.filter_id[i], 0);
+      ci_assert_gt(otp->otf_filter_refs[i], 0);
 
-int
-oof_cb_get_mac(int ifindex, unsigned char out_mac[6])
-{
-  ci_mac_addr_t mac;
-  int rc;
-  rc = cicppl_llap_get_mac(&CI_GLOBAL_CPLANE, ifindex, &mac);
-  if( rc == 0 )
-    memcpy(out_mac, mac, sizeof(mac));
-  return rc;
-}
+      /* Reduce the ref count */
+      otp->otf_filter_refs[i]--;
+      *installed_hwport_mask &= ~(1 << i);
 
-void
-oof_cb_defer_work(void* owner_private)
-{
-  efab_tcp_driver_t* on_drv = owner_private;
-  queue_work(CI_GLOBAL_WORKQUEUE, &on_drv->filter_work_item);
+      /* If there's no-one left we can clear this filter */
+      if( otp->otf_filter_refs[i] == 0 ) {
+        hwports_clear |= 1 << i;
+      }
+    }
+  }
+
+  oo_hw_filter_clear_hwports(&otp->otf_filter, hwports_clear, 1);
+
+  mutex_unlock(&ofnm->ofnm_tproxy_lock);
+
+  return 0;
 }

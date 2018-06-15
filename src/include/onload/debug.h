@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -63,6 +63,7 @@ extern int oo_debug_bits;
 #define __OO_DEBUGBONDING__	0x00020000    /* Bonding */
 #define __OO_DEBUGLOAD__        0x00040000    /* load/unload messages   */
 #define __OO_DEBUGSIGNAL__      0x00080000    /* Signal interception */
+#define __OO_DEBUGCPLANE__      0x00100000    /* Control plane */
 
 /* Note: we cannot use 0x80000000 as a debug flag, since we use
  * MODULE_PARM to parse arguments, and this expects a 32 bit signed
@@ -101,6 +102,7 @@ extern int oo_debug_bits;
 #define OO_DEBUG_BONDING(foo) OO_DYNAMIC_DEBUG(__OO_DEBUGBONDING__, foo)
 #define OO_DEBUG_LOAD(foo)    OO_DYNAMIC_LOG(__OO_DEBUGLOAD__, foo)
 #define OO_DEBUG_SIGNAL(foo)  OO_DYNAMIC_DEBUG(__OO_DEBUGSIGNAL__, foo)
+#define OO_DEBUG_CPLANE(foo)  OO_DYNAMIC_DEBUG(__OO_DEBUGCPLANE__, foo)
 
 
 /* Also used to enable conditional test code for error provocation */ 

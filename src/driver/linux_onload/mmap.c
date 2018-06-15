@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -46,8 +46,10 @@
 #include <onload/debug.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/mmap.h>
+#include <onload/dshm.h>
 #include <onload/linux_trampoline.h>
 #include <driver/linux_resource/kernel_compat.h>
+#include <onload/cplane_driver.h>
 
 
 /* All valid mm_hash structures have their 'magic' member set to this */
@@ -67,10 +69,6 @@ static ci_dllist mm_hash_tbl[MM_HASH_SIZE];
  */
 DEFINE_RWLOCK(oo_mm_tbl_lock);
 
-
-static inline unsigned
-OO_MMAP_OFFSET_TO_MAP_ID(off_t offset)
-{ return offset >> CI_NETIF_MMAP_ID_SHIFT; }
 
 /* Function to hash an 'mm' pointer */
 static inline unsigned int
@@ -244,8 +242,6 @@ void oo_mm_tbl_init(void)
  *
  ****************************************************************************/
 
-#define VMA_OFFSET(vma)  ((vma)->vm_pgoff << PAGE_SHIFT)
-
 static void vm_op_open(struct vm_area_struct* vma)
 {
   tcp_helper_resource_t* map;
@@ -280,35 +276,46 @@ static void vm_op_close(struct vm_area_struct* vma)
 }
 
 
-static struct page* vm_op_nopage(struct vm_area_struct* vma, 
+static struct page*
+__vm_op_nopage(tcp_helper_resource_t* trs, struct vm_area_struct* vma,
+               unsigned long address, int* type)
+{
+  struct page* pg;
+  int map_id = OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma));
+  unsigned long pfn = tcp_helper_rm_nopage(trs, vma, map_id,
+                                           address - vma->vm_start);
+
+  if( pfn == (unsigned) -1 )
+    return NULL;
+
+  pg = pfn_to_page(pfn);
+  get_page(pg);
+
+#ifdef EFRM_VMA_HAS_NOPAGE
+  if( type )  *type = VM_FAULT_MINOR;
+#endif
+
+  OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%lx",
+                 __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
+                 (address - vma->vm_start) >> CI_PAGE_SHIFT,
+                 OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn));
+
+  return pg;
+}
+
+
+static struct page* vm_op_nopage(struct vm_area_struct* vma,
                                  unsigned long address,
 				 int* type)
 {
   tcp_helper_resource_t* trs = (tcp_helper_resource_t*) vma->vm_private_data;
-  unsigned long pfn;
   struct page *pg;
 
   TCP_HELPER_RESOURCE_ASSERT_VALID(trs, 0);
 
-  pfn = tcp_helper_rm_nopage(trs, vma,
-                             OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)),
-                             address - vma->vm_start);
-  if( pfn != (unsigned) -1 ) {
-    pg = pfn_to_page(pfn);
-
-    get_page(pg);
-
-#ifdef EFRM_VMA_HAS_NOPAGE
-    if( type )  *type = VM_FAULT_MINOR;
-#endif
-
-    OO_DEBUG_TRAMP(ci_log("%s: %u vma=%p sz=%lx pageoff=%lx id=%d pfn=%lx",
-		   __FUNCTION__, trs->id, vma, vma->vm_end - vma->vm_start,
-		   (address - vma->vm_start) >> CI_PAGE_SHIFT,
-                   OO_MMAP_OFFSET_TO_MAP_ID(VMA_OFFSET(vma)), pfn));
-
+  pg = __vm_op_nopage(trs, vma, address, type);
+  if( pg != NULL )
     return pg;
-  }
 
   /* Linux walks VMAs on core dump, suppress the message */
   if( ~current->flags & PF_DUMPCORE )
@@ -322,13 +329,51 @@ static struct page* vm_op_nopage(struct vm_area_struct* vma,
 }
 
 #ifndef EFRM_VMA_HAS_NOPAGE
-static int vm_op_fault(struct vm_area_struct *vma, struct vm_fault *vmf) {
+static int vm_op_fault(
+#ifndef EFRM_HAVE_NEW_FAULT
+                       struct vm_area_struct *vma,
+#endif
+                       struct vm_fault *vmf) {
+#ifdef EFRM_HAVE_NEW_FAULT
+  struct vm_area_struct *vma = vmf->vma;
+#endif
   struct page* page;
 
-  page = vm_op_nopage(vma, (long int)vmf->virtual_address, NULL);
+  page = vm_op_nopage(vma, VM_FAULT_ADDRESS(vmf), NULL);
   vmf->page = page;
 
   return ( page == NULL ) ? VM_FAULT_SIGBUS : 0; 
+}
+#endif
+
+
+#ifdef EFRM_VMA_HAS_ACCESS
+/* Implements support for ptrace() as used by gdb.  The kenrel iterates over
+ * the requested region and calls this function until the whole length has been
+ * read. */
+static int vm_op_access(struct vm_area_struct *vma, unsigned long addr,
+			void *buf, int len, int write)
+{
+  void *mapped_addr;
+  int offset = addr & (PAGE_SIZE - 1);
+  struct page* page;
+
+  tcp_helper_resource_t* trs = (tcp_helper_resource_t*) vma->vm_private_data;
+  TCP_HELPER_RESOURCE_ASSERT_VALID(trs, 0);
+
+  page = __vm_op_nopage(trs, vma, addr & PAGE_MASK, NULL);
+  if( page == NULL )
+    return -EIO;
+
+  mapped_addr = kmap(page);
+  if( write )
+    memcpy(mapped_addr + offset, buf, len);
+  else
+    memcpy(buf, mapped_addr + offset, len);
+  kunmap(page);
+  put_page(page);
+
+  return len;
 }
 #endif
 
@@ -337,9 +382,12 @@ static struct vm_operations_struct vm_ops = {
   .open  = vm_op_open,
   .close = vm_op_close,
 #ifdef EFRM_VMA_HAS_NOPAGE
-  .nopage = vm_op_nopage
+  .nopage = vm_op_nopage,
 #else
-  .fault = vm_op_fault
+  .fault = vm_op_fault,
+#endif
+#ifdef EFRM_VMA_HAS_ACCESS
+  .access = vm_op_access,
 #endif
 };
 
@@ -350,25 +398,20 @@ static struct vm_operations_struct vm_ops = {
  *
  ****************************************************************************/
 
-int
-oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
+
+static int
+oo_stack_mmap(ci_private_t* priv, struct vm_area_struct* vma)
 {
-  ci_private_t* priv = (ci_private_t*) file->private_data;
   off_t offset = VMA_OFFSET(vma);
   unsigned long bytes = vma->vm_end - vma->vm_start;
+  int map_id = OO_MMAP_OFFSET_TO_MAP_ID(offset);
   int rc;
 
-  if( !priv )  return -EBADF;
   if( !priv->thr ) return -ENODEV;
-
-  if( bytes == 0 ) {
-    ci_log("%s: bytes == 0", __func__);
-    return -EINVAL;
-  }
 
   ci_assert((offset & PAGE_MASK) == offset);
 
-  if( OO_MMAP_OFFSET_TO_MAP_ID(offset) == CI_NETIF_MMAP_ID_STATE &&
+  if( map_id == CI_NETIF_MMAP_ID_STATE &&
       (rc = efab_add_mm_ref (vma->vm_mm)) < 0 )
     return rc;
 
@@ -380,24 +423,64 @@ oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
   vma->vm_ops = &vm_ops;
   vma->vm_private_data = (void *) priv->thr;
 
-
   OO_DEBUG_TRAMP(ci_log("mmap:  -> %u %d pages offset=0x%lx "
                  "vma=%p ptr=0x%lx-%lx", 
 		 priv->thr->id, (int) (bytes >> CI_PAGE_SHIFT), offset, 
 		 vma, vma->vm_start, vma->vm_end));
 
-  /* We never turn read-only mmaps into read-write.  Forbid it. */
-  if( ! (vma->vm_flags & VM_WRITE) )
-    vma->vm_flags &= ~VM_MAYWRITE;
-
-  rc = efab_tcp_helper_rm_mmap(priv->thr, bytes, vma,
-                               OO_MMAP_OFFSET_TO_MAP_ID(offset),
+  rc = efab_tcp_helper_rm_mmap(priv->thr, bytes, vma, map_id,
                                vma->vm_flags & VM_WRITE);
-  if( OO_MMAP_OFFSET_TO_MAP_ID(offset) == CI_NETIF_MMAP_ID_STATE &&
-      rc < 0 )
+  if( map_id == CI_NETIF_MMAP_ID_STATE && rc < 0 )
     efab_del_mm_ref (vma->vm_mm);
 
   return rc;
 }
 
+
+int
+oo_fop_mmap(struct file* file, struct vm_area_struct* vma)
+{
+  ci_private_t* priv = (ci_private_t*) file->private_data;
+  unsigned char map_type = OO_MMAP_TYPE(VMA_OFFSET(vma));
+
+  if( !priv )
+    return -EBADF;
+
+  if( vma->vm_end == vma->vm_start ) {
+    ci_log("%s: bytes == 0", __func__);
+    return -EINVAL;
+  }
+
+  /* We never turn read-only mmaps into read-write.  Forbid it. */
+  if( ! (vma->vm_flags & VM_WRITE) )
+    vma->vm_flags &= ~VM_MAYWRITE;
+
+  switch( map_type ) {
+  case OO_MMAP_TYPE_NETIF:
+    return oo_stack_mmap(priv, vma);
+  case OO_MMAP_TYPE_CPLANE:
+    return oo_cplane_mmap(priv, vma);
+#ifdef OO_MMAP_TYPE_DSHM
+  case OO_MMAP_TYPE_DSHM:
+    return oo_dshm_mmap_impl(vma);
+#endif
+  default:
+    ci_log("%s: Invalid mapping type %d", __FUNCTION__, map_type);
+    return -EINVAL;
+  }
+}
+
+/* Map any virtual address in the kernel address space to the physical page
+** frame number.
+*/
+unsigned ci_va_to_pfn(void *addr)
+{
+  struct page *page = NULL;
+
+  ci_check(!in_atomic());
+
+  page = vmalloc_to_page(addr);
+
+  return page ? page_to_pfn(page) : -1;
+}
 

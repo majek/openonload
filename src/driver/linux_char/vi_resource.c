@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -154,7 +154,7 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
     if (vi_flags & EFHW_VI_RX_PACKED_STREAM) {
       evq_capacity = 32 * 1024;
     }
-    else if (vi_flags & EFHW_VI_TX_TIMESTAMPS) {
+    else if (vi_flags & (EFHW_VI_TX_TIMESTAMPS | EFHW_VI_TX_ALT)) {
       if (txq_capacity == 0) {
         rc = -EINVAL;
         goto fail_q_alloc;
@@ -166,7 +166,8 @@ vi_resource_alloc(struct efrm_vi_attr *attr,
       evq_capacity = rxq_capacity + 3 * txq_capacity - evq_capacity - 1;
 
       /* Reserve space for time sync events. */
-      evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
+      if( vi_flags & (EFHW_VI_TX_TIMESTAMPS | EFHW_VI_RX_TIMESTAMPS) )
+        evq_capacity += CI_CFG_TIME_SYNC_EVENT_EVQ_CAPACITY;
     }
     else if (vi_flags & EFHW_VI_RX_TIMESTAMPS) {
       evq_capacity = rxq_capacity + txq_capacity - evq_capacity - 1;
@@ -362,6 +363,7 @@ void efch_vi_rm_free(efch_resource_t *rs)
     efrm_port_sniff(rs->rs_base, 0, 0, -1);
   if( rs->vi.sniff_flags & EFCH_TX_SNIFF )
     efrm_tx_port_sniff(rs->rs_base, 0, -1);
+  efrm_vi_tx_alt_free(virs);
 }
 
 
@@ -400,13 +402,10 @@ static int efab_vi_get_mac(struct efrm_vi* virs, void* mac_out)
 
 
 static int efch_vi_get_rx_error_stats(struct efrm_vi* virs,
-                                      void* data, int data_len,
+                                      void* data, size_t data_len,
                                       int do_reset)
 {
-  struct efhw_nic *nic;
-  nic = efrm_client_get_nic(virs->rs.rs_client);
-  return efhw_nic_get_rx_error_stats(nic, virs->rs.rs_instance,
-                                     data, data_len, do_reset);
+  return efrm_vi_get_rx_error_stats(virs, data, data_len, do_reset);
 }
 
 
@@ -416,7 +415,7 @@ static int efch_vi_tx_alt_alloc(struct efrm_vi* virs, ci_resource_op_t* op)
   const int max_alts = ( sizeof(op->u.vi_tx_alt_alloc_out.alt_ids) / 
                          sizeof(op->u.vi_tx_alt_alloc_out.alt_ids[0]) );
   if( num_alts > max_alts )
-    return -E2BIG;
+    return -EBUSY;
 
   rc = efrm_vi_tx_alt_alloc(virs, num_alts,
                             op->u.vi_tx_alt_alloc_in.buf_space_32b);
@@ -426,6 +425,11 @@ static int efch_vi_tx_alt_alloc(struct efrm_vi* virs, ci_resource_op_t* op)
   for( i = 0; i < num_alts; ++i )
     op->u.vi_tx_alt_alloc_out.alt_ids[i] = virs->tx_alt_ids[i];
   return 0;
+}
+
+static int efch_vi_tx_alt_free(struct efrm_vi* virs, ci_resource_op_t* op)
+{
+  return efrm_vi_tx_alt_free(virs);
 }
 
 
@@ -537,7 +541,7 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
 
     case CI_RSOP_VI_GET_RX_ERROR_STATS:
       {
-        int data_len = op->u.vi_stats.data_len;
+        size_t data_len = op->u.vi_stats.data_len;
         void *user_data = (void *)(unsigned long)op->u.vi_stats.data_ptr;
         void *data = kmalloc(data_len, GFP_KERNEL);
     
@@ -559,6 +563,10 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
     case CI_RSOP_VI_TX_ALT_ALLOC:
       rc = efch_vi_tx_alt_alloc(virs, op);
       *copy_out = 1;
+      break;
+
+    case CI_RSOP_VI_TX_ALT_FREE:
+      rc = efch_vi_tx_alt_free(virs, op);
       break;
 
     default:

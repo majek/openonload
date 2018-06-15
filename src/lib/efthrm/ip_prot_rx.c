@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -66,7 +66,7 @@ efab_ipp_get_locked_thr_from_tcp_handle(unsigned tcp_id)
   int rc;
 
   /* ask resource manager to decode to a resource */
-  rc = efab_thr_table_lookup(NULL, tcp_id,
+  rc = efab_thr_table_lookup(NULL, NULL, tcp_id,
                              EFAB_THR_TABLE_LOOKUP_NO_CHECK_USER, &thr);
   if (rc < 0) {
     OO_DEBUG_IPP( ci_log("%s: Invalid TCP helper resource handle %u", 
@@ -94,7 +94,8 @@ efab_ipp_get_locked_thr_from_tcp_handle(unsigned tcp_id)
  * cannot get a lock.  As the mechanism is for protocols that
  * do not guarantee data delivery this is considered acceptible.
  */
-int efab_handle_ipp_pkt_task(int thr_id, const void* in_data, int len)
+int efab_handle_ipp_pkt_task(int thr_id, ci_ifid_t ifindex,
+                             const void* in_data, int len)
 {
   tcp_helper_resource_t* thr;
   const ci_ip4_hdr* in_ip;
@@ -108,6 +109,7 @@ int efab_handle_ipp_pkt_task(int thr_id, const void* in_data, int len)
   /* Have a full IP,ICMP hdr - so [data_only] arg is 0 */
   if( !efab_ipp_icmp_parse( in_ip, len, &addr, 0))
     goto exit_handler;
+  addr.ifindex = ifindex;
 
   if( (thr = efab_ipp_get_locked_thr_from_tcp_handle(thr_id))) {
     ci_sock_cmn* s;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -86,10 +86,9 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
   unsigned start_key_id;
   unsigned id;
   int rc;
-  int restore_creds = 0;
-#ifdef current_cred
+  const struct cred *orig_creds = NULL;
   struct cred *creds;
-#endif
+  struct vm_area_struct* vma;
 
   ci_assert( current->mm );
 
@@ -97,65 +96,13 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
    * So, we give this capability and reset it back.
    * Since we modify per-thread capabilities,
    * there are no side effects. */
-#ifdef current_cred
   if (~current_cred()->cap_effective.cap[0] & (1 << CAP_IPC_LOCK)) {
     creds = prepare_creds();
     if( creds != NULL ) {
       creds->cap_effective.cap[0] |= 1 << CAP_IPC_LOCK;
-      commit_creds(creds);
-      restore_creds = 1;
+      orig_creds = override_creds(creds);
     }
   }
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24) || \
-  !defined(CONFIG_SECURITY)
-  /* we need security_capset_set to be inline here */
-
-#ifdef STRICT_CAP_T_TYPECHECKS
-#define cap2int(cap) ((cap).cap)
-#else
-#define cap2int(cap) (cap)
-#endif
-
-  if (~cap2int(current->cap_effective) & (1 << CAP_IPC_LOCK)) {
-    /* This is bad.
-     * We should take non-exported task_capability_lock.
-     * Or we should use sys_capset, but we do not have
-     * user-space memory to give it to syscall. */
-    kernel_cap_t eff = current->cap_effective;
-    cap2int(eff) |= 1 << CAP_IPC_LOCK;
-    security_capset_set(current, &eff, &current->cap_inheritable,
-                        &current->cap_permitted);
-    restore_creds = 1;
-  }
-#elif LINUX_VERSION_CODE == KERNEL_VERSION(2,6,24)
-  /* CONFIG_SECURITY, 2.6.24 */
-
-#ifdef STRICT_CAP_T_TYPECHECKS
-#define cap2int(cap) ((cap).cap)
-#else
-#define cap2int(cap) (cap)
-#endif
-
-  if (~cap2int(current->cap_effective) & (1 << CAP_IPC_LOCK)) {
-    static int printed = 0;
-    if (!printed) {
-      ci_log("%s: can't allocate huge pages without CAP_IPC_LOCK", __func__);
-      printed = 1;
-    }
-    return -EPERM;
-  }
-#else
-  /* CONFIG_SECURITY, 2.6.25 <= linux <= 2.6.28
-   * (2.6.29 is where current_cred defined) */
-  if (~current->cap_effective.cap[0] & (1 << CAP_IPC_LOCK)) {
-    static int printed = 0;
-    if (!printed) {
-      ci_log("%s: can't allocate huge pages without CAP_IPC_LOCK", __func__);
-      printed = 1;
-    }
-    return -EPERM;
-  }
-#endif
 
   /* Simultaneous access to last_key_id is possible, but we do not care.
    * It is just a hint where we should look for free ids. */
@@ -185,23 +132,63 @@ static int oo_bufpage_huge_alloc(struct oo_buffer_pages *p, int *flags)
     goto out;
   }
 
-  /* We do not need UL mapping, but the only way to obtain the page
-   * is to create (and destroy) UL mapping */
+  /* There is a somewhat intricate dance to be performed around the allocation
+   * of SHM segments and their IDs.  We need shmat() to work at user-level on
+   * the SHM segments for as long as the stack is not orphaned, but we also
+   * need to delete the segments from the context of the IPC namespace in which
+   * they were allocated.  To do the latter reliably, we delete the segments
+   * almost immediately after allocating them.  Deleted segments can still be
+   * attached as long as their reference-count never hits zero, which we
+   * arrange.  Everything eventually gets cleaned up when we release the last
+   * reference when freeing the oo_buffer_pages structure.  */
+
+  /* Map the SHM segment into our address space. */
   uaddr = efab_linux_sys_shmat(shmid, NULL, 0);
   if (uaddr < 0) {
     rc = (int)uaddr;
     goto fail3;
   }
 
-  down_read(&current->mm->mmap_sem);
-  rc = get_user_pages((unsigned long)uaddr, 1,
-                      1/*write*/, 0/*force*/, &(p->pages[0]), NULL);
-  up_read(&current->mm->mmap_sem);
-  if (rc < 0)
+  down_write(&current->mm->mmap_sem);
+
+  /* Pin the pages. */
+  rc = get_user_pages((unsigned long)uaddr, 1, FOLL_WRITE, &(p->pages[0]),
+                      NULL);
+  if (rc < 0) {
+    up_write(&current->mm->mmap_sem);
     goto fail2;
+  }
+
+  /* Before we detach the segment, take out an extra reference to it. */
+  vma = find_vma(current->mm, (unsigned long) uaddr);
+  if (vma == NULL) {
+    up_write(&current->mm->mmap_sem);
+    /* This shouldn't be possible: we mapped the SHM successfully, so its vma
+     * had better be where we expect it to be. */
+    ci_assert(0);
+    rc = -ENOENT;
+    goto fail1;
+  }
+  vma->vm_ops->open(vma);
+
+  /* We need to use the close vm_op to release the reference when we're
+   * finished with it, but it won't be directly available in the context in
+   * which we'll need it, so take a note of it now. */
+  p->close = vma->vm_ops->close;
+  p->shm_map_file = vma->vm_file;
+  get_file(p->shm_map_file);
+
+  up_write(&current->mm->mmap_sem);
+
+  /* Now that we've ensured that the kernel will not free the SHM segment and
+   * we have pinned its pages, we have no further use for the UL mapping. */
   rc = efab_linux_sys_shmdt((char __user *)uaddr);
   if (rc < 0)
     goto fail1;
+
+  /* While we're still in the right namespace, delete the segment.  Anyone who
+   * knows [shmid] can continue to attach to it. */
+  efab_linux_sys_shmctl(shmid, IPC_RMID, NULL);
 
   p->shmid = shmid;
   rc = 0;
@@ -214,32 +201,29 @@ fail2:
 fail3:
   efab_linux_sys_shmctl(shmid, IPC_RMID, NULL);
 out:
-  if (restore_creds) {
-#ifdef current_cred
-    creds = prepare_creds();
-    if( creds != NULL ) {
-      creds->cap_effective.cap[0] &= ~(1 << CAP_IPC_LOCK);
-      commit_creds(creds);
-    }
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,24)
-    kernel_cap_t eff = current->cap_effective;
-    cap2int(eff) &= ~(1 << CAP_IPC_LOCK);
-    security_capset_set(current, &eff, &current->cap_inheritable,
-                        &current->cap_permitted);
-#else
-    ci_assert(0);
-#endif
-  }
+  if (orig_creds != NULL)
+    revert_creds(orig_creds);
   return rc;
 }
 
 static void oo_bufpage_huge_free(struct oo_buffer_pages *p)
 {
+  struct vm_area_struct vma;
+
   ci_assert(p->shmid >= 0);
   ci_assert(current);
 
+  /* Release the reference to the SHM segment.  The only interface that we have
+   * to the function that does this is via the memory mapper, so we have to
+   * mock up a little bit of state.  This is pretty unpleasant.  We zero-
+   * initialise the vma to make any future kernel changes that break our
+   * assumptions about this interface more apparent. */
+  memset(&vma, 0, sizeof(vma));
+  vma.vm_file = p->shm_map_file;
+  p->close(&vma);
+  fput(p->shm_map_file);
+
   put_page(p->pages[0]);
-  efab_linux_sys_shmctl(p->shmid, IPC_RMID, NULL);
   oo_iobufset_kfree(p);
 }
 #endif

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -37,6 +37,10 @@ extern const char* oo_device_name[];
 extern int ef_onload_driver_open(ef_driver_handle* nic_out,
                                  enum oo_device_type dev_type,
                                  int do_cloexec) CI_HF;
+
+/*! Move a driver handle to a valid location, setting O_CLOEXEC if needed */
+int ef_onload_handle_move_and_do_cloexec(ef_driver_handle* pfd,
+                                         int do_cloexec) CI_HF;
 
 /*! Close a driver handle. */
 ci_inline int

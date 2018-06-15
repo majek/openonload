@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -66,6 +66,7 @@
 #include <netdb.h>
 #include <ifaddrs.h>
 #include <stddef.h>
+#include <endian.h>
 
 
 #ifndef MAP_HUGETLB
@@ -144,6 +145,19 @@
 #endif
 
 
+#if __GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 9)
+# if defined(__BYTE_ORDER) && defined(__BIG_ENDIAN)
+#  if __BYTE_ORDER == __BIG_ENDIAN
+#   define le16toh(x) __builtin_bswap16(x)
+#  else
+#   define le16toh(x) (x)
+#  endif
+# else
+#  error "Couldn't determine byte-order on this platform."
+# endif
+#endif
+
+
 #ifdef __EFAB_VI_H__
 extern int
 filter_parse(ef_filter_spec* fs, const char* s_in);
@@ -168,6 +182,8 @@ extern int mk_socket(int family, int socktype,
 
 /* Helper functions to query host configuration */
 extern void get_ipaddr_of_intf(const char* intf, char** ipaddr_out);
+extern void get_ipaddr_of_vlan_intf(const char* intf, int vlan,
+                                    char** ipaddr_out);
 extern int my_getaddrinfo(const char* host, const char* port,
                           struct addrinfo**ai_out);
 extern int parse_host(const char* s, struct in_addr* ip_out);

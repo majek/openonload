@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -58,6 +58,14 @@ extern "C" {
 #endif
 
 
+#if defined(__x86_64__) || defined(__PPC64__)
+/*! \brief True if Programmed I/O regions can be configured */
+# define EF_VI_CONFIG_PIO  1
+#else
+# define EF_VI_CONFIG_PIO  0
+#endif
+
+
 /*! \brief A Programmed I/O region */
 typedef struct ef_pio {
   /** The buffer for the Programmed I/O region */
@@ -75,7 +83,8 @@ typedef struct ef_pio {
 struct ef_pd;
 struct ef_vi;
 
-#if defined(__x86_64__) || defined(__PPC__)
+
+#if EF_VI_CONFIG_PIO
 /*! \brief Allocate a Programmed I/O region
 **
 ** \param pio      Memory to use for the allocated Programmed I/O region.
@@ -137,7 +146,8 @@ extern int ef_pio_free(ef_pio* pio, ef_driver_handle pio_dh);
 **
 ** \return 0 on success, or a negative error code.
 **
-** Link a Programmed I/O region with a virtual interface.
+** Link a Programmed I/O region with a virtual interface. Only one region can 
+** be linked to a virtual interface.
 */
 extern int ef_pio_link_vi(ef_pio* pio, ef_driver_handle pio_dh,
                           struct ef_vi* vi, ef_driver_handle vi_dh);

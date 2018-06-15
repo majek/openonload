@@ -13,12 +13,15 @@ ifndef EFX_UPSTREAM
 # Configuration
 ifndef KERNELRELEASE
 export CONFIG_SFC := m
+ifdef EFX_FOR_UPSTREAM
+# match UNIFDEF_DEFINES in export.sh
+export CONFIG_SFC_DEBUGFS :=
+export EFX_DISABLE_MCDI_PROXY_AUTH := y
+else
 export CONFIG_SFC_DEBUGFS := y
+endif
 export CONFIG_SFC_DUMP := y
-export CONFIG_SFC_HWMON := y
 export CONFIG_SFC_MCDI_MON := y
-export CONFIG_SFC_SFE4001 := y
-export CONFIG_SFC_I2C := y
 export CONFIG_SFC_MTD := y
 export CONFIG_SFC_SRIOV := y
 export CONFIG_SFC_PTP := y
@@ -43,42 +46,18 @@ ifdef CONFIG_SFC_MTD
 override CONFIG_SFC_MTD :=
 endif
 endif
-ifdef CONFIG_SFC_I2C
-ifndef CONFIG_I2C
-$(warning Kernel does not support I2C)
-override CONFIG_SFC_I2C :=
+ifdef CONFIG_SFC_FALCON
+$(warning SFE4001/Falcon is no longer supported)
 endif
-ifndef CONFIG_I2C_ALGOBIT
-$(warning Kernel does not support I2C_ALGOBIT)
-override CONFIG_SFC_I2C :=
-endif
-endif # CONFIG_SFC_I2C
-ifdef CONFIG_SFC_SFE4001
-ifndef CONFIG_SFC_I2C
-$(warning => SFE4001 board will not be supported)
-override CONFIG_SFC_SFE4001 :=
-endif
-endif # CONFIG_SFC_SFE4001
-ifdef CONFIG_SFC_HWMON
+ifdef CONFIG_SFC_MCDI_MON
 ifndef CONFIG_HWMON
 $(warning Kernel does not support HWMON)
-override CONFIG_SFC_HWMON :=
 override CONFIG_SFC_MCDI_MON :=
 endif
-ifndef CONFIG_HWMON_VID
-$(warning Kernel does not support HWMON_VID)
-override CONFIG_SFC_HWMON :=
-endif
-ifndef CONFIG_SFC_I2C
-override CONFIG_SFC_HWMON :=
-endif
-ifndef CONFIG_SFC_HWMON
-$(warning => Temperature and voltage monitoring for SFC4000 boards will be disabled)
-endif
+endif # CONFIG_SFC_MCDI_MON
 ifndef CONFIG_SFC_MCDI_MON
 $(warning => Temperature and voltage reporting for SFC9000-family boards will be disabled)
 endif
-endif # CONFIG_SFC_HWMON
 ifdef CONFIG_SFC_SRIOV
 ifndef CONFIG_PCI_IOV
 $(warning Kernel does not support PCI_IOV)
@@ -143,24 +122,23 @@ sfc-y			+= efx.o nic.o farch.o siena.o ef10.o tx.o \
 			   rx.o selftest.o ethtool.o \
 			   mcdi.o mcdi_port.o mcdi_mon.o ptp.o \
 			   sriov.o siena_sriov.o ef10_sriov.o tx_tso.o
-ifdef EFX_UPSTREAM
-sfc-y			+= falcon.o tenxpress.o txc43128_phy.o falcon_boards.o
-else
-sfc-y			+= driverlink.o
-endif
 sfc-$(CONFIG_SFC_MTD)	+= mtd.o
 ifndef EFX_NO_KCOMPAT
 ifneq ($(MAKECMDGOALS),export)
-sfc-y			+= ioctl.o kernel_compat.o
+ifndef EFX_FOR_UPSTREAM
+sfc-y			+= ioctl.o
+endif
+sfc-y			+= kernel_compat.o
 endif
 endif # !EFX_NO_KCOMPAT
 ifndef EFX_UPSTREAM
 ifeq ($(filter export export-xen,$(MAKECMDGOALS)),)
-sfc-y			+= linux_mdio.o
+ifndef EFX_FOR_UPSTREAM
+sfc-y			+= driverlink.o linux_mdio.o
 sfc-$(CONFIG_SFC_AOE)	+= aoe.o
 sfc-$(CONFIG_SFC_DEBUGFS) += debugfs.o
+endif # !EFX_FOR_UPSTREAM
 sfc-$(CONFIG_SFC_DUMP) += dump.o
-sfc-$(CONFIG_SFC_HWMON)	+= lm87.o lm90.o
 ifneq ($(CONFIG_SFC_PTP),y)
 sfc-y			:= $(filter-out ptp.o,$(sfc-y))
 endif
@@ -172,7 +150,12 @@ obj-$(CONFIG_SFC)	+= sfc.o
 ifndef EFX_UPSTREAM
 
 # Compiler flags
-EXTRA_CFLAGS += -I$(src) -Wall -Wno-unused-label -Wno-deprecated-declarations -DEFX_NOT_UPSTREAM=1 -DEFX_USE_KCOMPAT=1 -DWITH_MCDI_V2
+EXTRA_CFLAGS += -I$(src) -Wall -Wno-deprecated-declarations -DEFX_USE_KCOMPAT=1 -DWITH_MCDI_V2
+ifdef EFX_FOR_UPSTREAM
+EXTRA_CFLAGS += -include config.h
+else
+EXTRA_CFLAGS += -DEFX_NOT_UPSTREAM=1
+endif
 ifdef KMP_RELEASE
 EXTRA_CFLAGS += -DKMP_RELEASE
 endif
@@ -248,7 +231,7 @@ $(obj)/autocompat.h: $(obj)/.kpath $(src)/kernel_compat.sh
 	@touch $@
 
 define filechk_config.h
-	printf "$(foreach name,SFC_DEBUGFS SFC_DUMP SFC_HWMON SFC_MCDI_MON SFC_SFE4001 SFC_I2C SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS SFC_TRACING SFC_MCDI_LOGGING,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
+	printf "$(foreach name,SFC_DEBUGFS SFC_DUMP SFC_MCDI_MON SFC_MTD SFC_SRIOV SFC_PTP SFC_PRIVATE_MDIO SFC_AOE SFC_PPS SFC_TRACING SFC_MCDI_LOGGING,#undef CONFIG_$(name)\n$(if $(filter y,$(CONFIG_$(name))),#define CONFIG_$(name) 1\n))"
 endef
 
 $(obj)/config.h: $(src)/Makefile FORCE
@@ -283,7 +266,7 @@ ifneq ($(filter 2.6.16-% 2.6.16.%,$(KVER)),)
 EXTRA_MAKEFLAGS := KERNELRELEASE=$(KVER)
 endif
 ifneq ($(CC),)
-EXTRA_MAKEFLAGS += CC=$(CC)
+EXTRA_MAKEFLAGS += CC="$(CC)"
 endif
 ifdef KMP_RELEASE
 EXTRA_MAKEFLAGS += KMP_RELEASE=1
@@ -336,7 +319,7 @@ export:
 
 # Export into a Xen kernel tree
 export-xen:
-	./export.sh -k -kk $(KPATH) $(sfc-y:%.o=%.c)
+	./export.sh -k -kk --suffix=xen $(KPATH) $(sfc-y:%.o=%.c)
 
 # Export for SRPM
 export-srpm:

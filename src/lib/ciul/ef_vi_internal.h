@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -126,6 +126,10 @@
 
 #define EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID (1u<<30)
 
+#define EF_VI_EV_SIZE             8
+
+#define EF_VI_EVS_PER_CACHE_LINE  (EF_VI_CACHE_LINE_SIZE / EF_VI_EV_SIZE)
+
 /* required for CI_PAGE_SIZE and related things */
 #include "ci/compat.h"
 
@@ -208,16 +212,16 @@
 /* Firmware aligns DMAs onto this boundary. */
 #define EF_VI_PS_ALIGNMENT               64
 
-/* The negative offset from the start of a packet's DMA to the start of the
- * metadata.
+/* The negative offset from the start of a packet's DMA to where we put the
+ * ef_packed_stream_packet header.
  *
- * This is set larger than the size of the metadata to give space for an empty
- * option record. While there is space available between the DMA start location
- * and the packet contents, we avoid using that since that would mean modifying
- * two cache lines rather than one.
+ * The packet DMA start on a cache line boundary, and starts with the
+ * packet prefix.  We put ef_packed_stream_packet at the end of the prior
+ * cache line so that we only have to write into one cache line, and so
+ * that we don't dirty the cache line that holds packet data.
  */
 #define EF_VI_PS_METADATA_OFFSET                \
-  (sizeof(ef_packed_stream_packet) + sizeof(uint32_t))
+  (sizeof(ef_packed_stream_packet))
 
 /* The amount of space we leave at the start of each buffer before the
  * first DMA.  Needs to be enough space for ef_packed_stream_packet, plus
@@ -269,6 +273,8 @@ extern int
 ef_pd_capabilities_get(ef_driver_handle handle, ef_pd* pd,
                        ef_driver_handle pd_dh, enum ef_vi_capability cap,
                        unsigned long* value);
+
+extern unsigned ef_vi_evq_clear_stride(void);
 
 
 #endif  /* __CI_EF_VI_INTERNAL_H__ */

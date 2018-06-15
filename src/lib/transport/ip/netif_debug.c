@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -27,6 +27,7 @@
 #include "uk_intf_ver.h"
 #include <onload/version.h>
 #include <onload/sleep.h>
+#include <etherfabric/vi.h>
 
 
 /**********************************************************************
@@ -250,8 +251,7 @@ void ci_netif_dump_sockets_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
 
   for( id = 0; id < ns->n_ep_bufs; ++id ) {
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, id);
-    if( wo->waitable.state != CI_TCP_STATE_FREE &&
-        wo->waitable.state != CI_TCP_CLOSED ) {
+    if( wo->waitable.state != CI_TCP_STATE_FREE ) {
       citp_waitable_dump_to_logger(ni, &wo->waitable, "", logger, log_arg);
       logger(log_arg,
              "------------------------------------------------------------");
@@ -333,7 +333,7 @@ void ci_netif_pkt_dump_all(ci_netif* ni)
   ci_buffer_alloc_info_t * alloc;
 
   log("%s: id=%d  "CI_DEBUG("uid=%d pid=%d"), __FUNCTION__, NI_ID(ni)
-      CI_DEBUG_ARG((int) ns->uid) CI_DEBUG_ARG((int) ns->pid));
+      CI_DEBUG_ARG((int) ns->uuid) CI_DEBUG_ARG((int) ns->pid));
 
   ci_netif_dump_pkt_summary(ni, ci_log_dump_fn, NULL);
 
@@ -545,11 +545,11 @@ void ci_netif_dump_reap_list(ci_netif* ni, int verbose)
 void ci_netif_dump_extra(ci_netif* ni)
 {
   ci_netif_state* ns = ni->state;
-  char hp2i[CPLANE_MAX_REGISTER_INTERFACES * 10];
+  char hp2i[CI_CFG_MAX_HWPORTS * 10];
   char i2hp[CI_CFG_MAX_INTERFACES * 10];
   int i, off;
 
-  for( i = 0, off = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0, off = 0; i < CI_CFG_MAX_HWPORTS; ++i )
     off += sprintf(hp2i+off, "%s%d", i?",":"", (int) ns->hwport_to_intf_i[i]);
   for( i = 0, off = 0; i < CI_CFG_MAX_INTERFACES; ++i )
     off += sprintf(i2hp+off, "%s%d", i?",":"", (int) ns->intf_i_to_hwport[i]);
@@ -591,13 +591,21 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
   logger(log_arg, "%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
          NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
          nic->vi_variant, (int) nic->vi_revision);
-  logger(log_arg, "  vi=%d pd_owner=%d channel=%d%s oo_vi_flags=%x",
+  logger(log_arg, "  vi=%d pd_owner=%d channel=%d%s vi_flags=%x oo_vi_flags=%x",
          ef_vi_instance(vi), nic->pd_owner, (int) nic->vi_channel,
-         ni->state->dump_intf[intf_i] ? " tcpdump" : "",
-         nic->oo_vi_flags);
+         ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_ALL ? " tcpdump" : (
+         ni->state->dump_intf[intf_i] == OO_INTF_I_DUMP_NO_MATCH ? " tcpdump --no-match" : ""),
+         vi->vi_flags, nic->oo_vi_flags);
   logger(log_arg, "  evq: cap=%d current=%x is_32_evs=%d is_ev=%d",
          ef_eventq_capacity(vi), (unsigned) ef_eventq_current(vi),
          ef_eventq_has_many_events(vi, 32), ef_eventq_has_event(vi));
+  logger(log_arg, "  evq: sync_major=%x sync_minor=%x sync_min=%x",
+         vi->ep_state->evq.sync_timestamp_major,
+         vi->ep_state->evq.sync_timestamp_minor,
+         vi->ep_state->evq.sync_timestamp_minimum);
+  logger(log_arg, "  evq: sync_synced=%x sync_flags=%x",
+         vi->ep_state->evq.sync_timestamp_synchronised,
+         vi->ep_state->evq.sync_flags);
   logger(log_arg, "  rxq: cap=%d lim=%d spc=%d level=%d total_desc=%d",
          ef_vi_receive_capacity(vi), ni->state->rxq_limit,
          ci_netif_rx_vi_space(ni, vi), ef_vi_receive_fill_level(vi),
@@ -614,9 +622,12 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
          0,
 #endif
          nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
+  logger(log_arg, "  txq: ts_nsec=%x", vi->ep_state->txq.ts_nsec);
   logger(log_arg, "  clk: %s%s",
          (nic->last_sync_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? "SET " : "",
          (nic->last_sync_flags & EF_VI_SYNC_FLAG_CLOCK_IN_SYNC) ? "SYNC" : "");
+  logger(log_arg, "  last_rx_stamp: %x:%x",
+         nic->last_rx_timestamp.tv_sec, nic->last_rx_timestamp.tv_nsec);
   if( nic->nic_error_flags )
     logger(log_arg, "  ERRORS: "CI_NETIF_NIC_ERRORS_FMT,
            CI_NETIF_NIC_ERRORS_PRI_ARG(nic->nic_error_flags));
@@ -638,9 +649,79 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
 #endif
 }
 
+#ifndef __KERNEL__
+static void ci_netif_dump_vi_stats_vi(ci_netif* ni, int intf_i,
+                                 oo_dump_log_fn_t logger,
+                                 void* log_arg)
+{
+  ef_vi* vi = &ni->nic_hw[intf_i].vi;
+  const ef_vi_stats_layout* vi_stats_layout;
+  int i, rc;
+  ef_driver_handle dh = ci_netif_get_driver_handle(ni);
+  uint8_t* stats_data;
+  ci_netif_state_nic_t* nic = &ni->state->nic[intf_i];
+
+  logger(log_arg, "%s: stack=%d intf=%d dev=%s hw=%d%c%d", __FUNCTION__,
+         NI_ID(ni), intf_i, nic->pci_dev, (int) nic->vi_arch,
+         nic->vi_variant, (int) nic->vi_revision);
+
+  rc = ef_vi_stats_query_layout(vi, &vi_stats_layout);
+  if( rc < 0 ) {
+    if( rc == -EINVAL )
+      logger(log_arg, "  This interface doesn't support per-VI stats");
+    else
+      logger(log_arg, "  ef_vi_stats_query_layout error (rc=%d)", rc);
+    return;
+  }
+
+  if( intf_i < 0 || intf_i >= CI_CFG_MAX_INTERFACES ||
+      ! efrm_nic_set_read(&ni->nic_set, intf_i) ) {
+    logger(log_arg, "  stack=%d intf=%d <interface not mapped to this stack>",
+           NI_ID(ni), intf_i);
+    return;
+  }
+
+  stats_data = malloc(vi_stats_layout->evsl_data_size);
+  if( stats_data == NULL ) {
+    logger(log_arg, "  per VI-stats unavailable - malloc failed");
+    return;
+  }
+
+  rc = oo_vi_stats_query(dh, intf_i, stats_data,
+                         vi_stats_layout->evsl_data_size, 0);
+  if( rc < 0 ) {
+    logger(log_arg, "  oo_vi_stats_query error (rc=%d)", rc);
+    free(stats_data);
+    return;
+  }
+
+  for( i = 0; i < vi_stats_layout->evsl_fields_num; ++i ) {
+    const ef_vi_stats_field_layout* f = &vi_stats_layout->evsl_fields[i];
+    switch( f->evsfl_size ) {
+    case sizeof(uint32_t):
+      logger(log_arg, " %32s: %10u", f->evsfl_name,
+             *(uint32_t*)(stats_data + f->evsfl_offset));
+      break;
+    default:
+      logger(log_arg, " %32s: <format not supported>", f->evsfl_name);
+    };
+  }
+
+  free(stats_data);
+}
+#endif
+
+
 void ci_netif_dump(ci_netif* ni)
 {
   ci_netif_dump_to_logger(ni, ci_log_dump_fn, NULL);
+}
+
+void ci_netif_dump_vi_stats(ci_netif* ni)
+{
+#ifndef __KERNEL__
+  ci_netif_dump_vi_stats_to_logger(ni, ci_log_dump_fn, NULL);
+#endif
 }
 
 void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
@@ -657,10 +738,16 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   long diff;
   int intf_i;
 
-  logger(log_arg, "%s: stack=%d name=%s", __FUNCTION__, NI_ID(ni),
-         ni->state->name);
+  logger(log_arg, "%s: stack=%d name=%s",
+         __FUNCTION__, NI_ID(ni), ni->state->name);
+  if(ni->state->cplane_pid != 0) {
+    logger(log_arg, "  cplane_pid=%u", ni->state->cplane_pid);
+  }
+  if(ni->state->netns_id != 0) {
+    logger(log_arg, "  namespace=net:[%u]", ni->state->netns_id);
+  }
   logger(log_arg, "  ver=%s uid=%d pid=%d ns_flags=%x %s %s", ONLOAD_VERSION
-      , (int) ns->uid, (int) ns->pid
+      , (int) ns->uuid, (int) ns->pid
       , ns->flags
       , (ns->flags & CI_NETIF_FLAG_ONLOAD_UNSUPPORTED)
           ? "ONLOAD_UNSUPPORTED" : ""
@@ -673,9 +760,9 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
       );
 
   tmp = ni->state->lock.lock;
-  logger(log_arg, "  lock=%llx "CI_NETIF_LOCK_FMT"  nics=%x primed=%x",
-         (unsigned long long)tmp,
-         CI_NETIF_LOCK_PRI_ARG(tmp), ni->nic_set.nics, ns->evq_primed);
+  logger(log_arg, "  lock=%"CI_PRIx64" "CI_NETIF_LOCK_FMT"  nics=%"CI_PRIx64
+         " primed=%x", tmp, CI_NETIF_LOCK_PRI_ARG(tmp), ni->nic_set.nics,
+         ns->evq_primed);
 #ifdef __KERNEL__
   {
     /* This is useful mostly for orphaned stacks */
@@ -728,6 +815,21 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
     ci_netif_dump_vi(ni, intf_i, logger, log_arg);
 }
 #endif /* __KERNEL__ */
+
+#ifndef __KERNEL__
+void ci_netif_dump_vi_stats_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
+                                      void* log_arg)
+{
+  int intf_i;
+
+  logger(log_arg, "%s: stack=%d name=%s", __FUNCTION__, NI_ID(ni),
+         ni->state->name);
+  logger(log_arg, "  ver=%s", ONLOAD_VERSION);
+
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
+    ci_netif_dump_vi_stats_vi(ni, intf_i, logger, log_arg);
+}
+#endif
 
 
 int ci_netif_bad_hwport(ci_netif* ni, ci_hwport_id_t hwport)

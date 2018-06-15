@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -115,7 +115,6 @@ ci_pio_buddy_ctor(ci_netif* ni, ci_pio_buddy_allocator* b, unsigned pio_len)
   /* Buffer size is sane and within range. */
   ci_assert(CI_IS_POW2(pio_len));
   ci_assert_ge(pio_order, CI_CFG_MIN_PIO_BLOCK_ORDER);
-  ci_assert_le(pio_order, CI_PIO_BUF_ORDER);
 
   /* Initialise the free list for each order. */
   for( o = 0; o <= CI_PIO_BUDDY_MAX_ORDER; ++o )

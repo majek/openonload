@@ -1,0 +1,74 @@
+/*
+** Copyright 2005-2018  Solarflare Communications Inc.
+**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
+** Copyright 2002-2005  Level 5 Networks Inc.
+**
+** This program is free software; you can redistribute it and/or modify it
+** under the terms of version 2 of the GNU General Public License as
+** published by the Free Software Foundation.
+**
+** This program is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+** GNU General Public License for more details.
+*/
+
+
+#ifndef __ONLOAD_CPLANE_DRIVER_HANDLE_H__
+#define __ONLOAD_CPLANE_DRIVER_HANDLE_H__
+
+#include <ci/tools.h>
+#include <onload/cplane_prot_types.h>
+
+struct cp_fwd_req;
+
+struct oo_cplane_handle {
+  struct cp_mibs mib[2];
+
+  /* MIB memory allocation parameters. */
+  void* mem;
+  unsigned long bytes;
+
+  struct net* cp_netns;
+
+  struct task_struct* server;
+
+  ci_dllink link;
+
+
+  /* Requests to add new routes into the cache.
+   * Protected by cp_handle_lock. */
+  struct list_head fwd_req;
+  int fwd_req_id;
+
+  /* See cplane_prot.c and cplane_prot.h: */
+  struct cicppl_instance cppl;
+
+  /* Reference count for the kernel state.  Stacks and ci_private_t structures
+   * take out such references, and when necessary, functions take out
+   * short-lived references for the duration of the call.  Memory mappings
+   * don't need their own references, as the underlying file has one. */
+  atomic_t refcount;
+
+  /* Lock-ordering note: cp_handle_lock should be taken after cp_lock when both
+   * are needed. */
+  spinlock_t cp_handle_lock;
+  wait_queue_head_t cp_waitq;
+
+  /* Workitem to schedule descruction from potentially atomic context. */
+  struct delayed_work destroy_work;
+  int/*bool*/ killed;
+
+  int/*bool*/ usable;
+
+  /* There is no more than 1 oof version per net namespace.  This is the
+   * mib->oof_version value used when the last oof was created. */
+  cp_version_t last_oof_version;
+
+  struct {
+    int fwd_req_complete; /* protected by the lock */
+    atomic_t fwd_req_nonblock;
+    atomic_t oof_req_nonblock;
+  } stats;
+};
+#endif /*__ONLOAD_CPLANE_DRIVER_HANDLE_H__ */

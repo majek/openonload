@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -1909,6 +1909,10 @@
 #define          MC_CMD_AOE_OP_MC_SPI_MASTER 0x17
 /* enum: Commands for FC boot control */
 #define          MC_CMD_AOE_OP_FC_BOOT 0x18
+/* enum: Get number of internal ports */
+#define          MC_CMD_AOE_OP_GET_ASIC_PORTS 0x19
+/* enum: Get FC assert information and register dump */
+#define          MC_CMD_AOE_OP_GET_FC_ASSERT_INFO 0x1a
 
 /* MC_CMD_AOE_OUT msgresponse */
 #define    MC_CMD_AOE_OUT_LEN 0
@@ -2090,6 +2094,14 @@
 #define        MC_CMD_AOE_IN_LINK_STATE_SFP_MASK_LBN 16
 #define        MC_CMD_AOE_IN_LINK_STATE_SFP_MASK_WIDTH 16
 
+/* MC_CMD_AOE_IN_GET_ASIC_PORTS msgrequest */
+#define    MC_CMD_AOE_IN_GET_ASIC_PORTS_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
+/* MC_CMD_AOE_IN_GET_FC_ASSERT_INFO msgrequest */
+#define    MC_CMD_AOE_IN_GET_FC_ASSERT_INFO_LEN 4
+/*            MC_CMD_AOE_IN_CMD_OFST 0 */
+
 /* MC_CMD_AOE_IN_SIENA_STATS msgrequest */
 #define    MC_CMD_AOE_IN_SIENA_STATS_LEN 8
 /*            MC_CMD_AOE_IN_CMD_OFST 0 */
@@ -2160,6 +2172,39 @@
 #define       MC_CMD_AOE_IN_FC_BOOT_CONTROL_OFST 4
 #define        MC_CMD_AOE_IN_FC_BOOT_CONTROL_BOOT_ENABLE_LBN 0
 #define        MC_CMD_AOE_IN_FC_BOOT_CONTROL_BOOT_ENABLE_WIDTH 1
+
+/* MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO msgresponse */
+#define    MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_LEN 144
+/* Assertion status flag. */
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_GLOBAL_FLAGS_OFST 0
+#define        MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_STATE_LBN 8
+#define        MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_STATE_WIDTH 8
+/* enum: No crash data available */
+/*               MC_CMD_FC_GET_ASSERT_FLAGS_STATE_CLEAR 0x0 */
+/* enum: New crash data available */
+/*               MC_CMD_FC_GET_ASSERT_FLAGS_STATE_NEW 0x1 */
+/* enum: Crash data has been sent */
+/*               MC_CMD_FC_GET_ASSERT_FLAGS_STATE_NOTIFIED 0x2 */
+#define        MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_TYPE_LBN 0
+#define        MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_TYPE_WIDTH 8
+/* enum: No crash has been recorded. */
+/*               MC_CMD_FC_GET_ASSERT_FLAGS_TYPE_NONE 0x0 */
+/* enum: Crash due to exception. */
+/*               MC_CMD_FC_GET_ASSERT_FLAGS_TYPE_EXCEPTION 0x1 */
+/* enum: Crash due to assertion. */
+/*               MC_CMD_FC_GET_ASSERT_FLAGS_TYPE_ASSERTION 0x2 */
+/* Failing PC value */
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_SAVED_PC_OFFS_OFST 4
+/* Saved GP regs */
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_GP_REGS_OFFS_OFST 8
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_GP_REGS_OFFS_LEN 4
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_GP_REGS_OFFS_NUM 31
+/* Exception Type */
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_EXCEPTION_TYPE_OFFS_OFST 132
+/* Instruction at which exception occurred */
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_EXCEPTION_PC_ADDR_OFFS_OFST 136
+/* BAD Address that triggered address-based exception */
+#define       MC_CMD_AOE_OUT_GET_FC_ASSERT_INFO_EXCEPTION_BAD_ADDR_OFFS_OFST 140
 
 /* MC_CMD_AOE_OUT_INFO msgresponse */
 #define    MC_CMD_AOE_OUT_INFO_LEN 44
@@ -2394,6 +2439,11 @@
 
 /* MC_CMD_AOE_OUT_FC msgresponse */
 #define    MC_CMD_AOE_OUT_FC_LEN 0
+
+/* MC_CMD_AOE_OUT_GET_ASIC_PORTS msgresponse */
+#define    MC_CMD_AOE_OUT_GET_ASIC_PORTS_LEN 4
+/* get the number of internal ports */
+#define       MC_CMD_AOE_OUT_GET_ASIC_PORTS_COUNT_PORTS_OFST 0
 
 /* MC_CMD_AOE_OUT_DDR_ECC_STATUS msgresponse */
 #define    MC_CMD_AOE_OUT_DDR_ECC_STATUS_LEN 8

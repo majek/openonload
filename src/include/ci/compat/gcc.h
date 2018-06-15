@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -148,7 +148,7 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #endif
 
 
-#define OO_ACCESS_ONCE(p) (*(volatile typeof(p) *)&(p))
+#define OO_ACCESS_ONCE(p) (*(volatile __typeof__(p) *)&(p))
 
 
 /**********************************************************************
@@ -157,9 +157,12 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 #if __GNUC__ >= 3 && defined(NDEBUG)
 # define CI_HF __attribute__((visibility("hidden")))
 # define CI_HV __attribute__((visibility("hidden")))
+# define CI_DV __attribute__((visibility("default")))
+# define CI_USE_GCC_VISIBILITY
 #else
 # define CI_HF
 # define CI_HV
+# define CI_DV
 #endif
 
 #if __GNUC__ >= 4 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 1)
@@ -178,7 +181,7 @@ typedef ci_uint64                       ci_fixed_descriptor_t;
 /* Compiler barrier: prevent compiler from reordering.  (Does nothing to
  * prevent the processor or platform from reordering).
  */
-#define ci_compiler_barrier()    __asm__ __volatile__ ("")
+#define ci_compiler_barrier()    __asm__ __volatile__ ("": : :"memory")
 
 
 #endif  /* __CI_COMPAT_GCC_H__ */

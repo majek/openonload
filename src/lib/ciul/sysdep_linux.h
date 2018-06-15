@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -51,6 +51,7 @@
 #include <asm/io.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/nodemask.h>
 
 
 typedef dma_addr_t ef_vi_dma_addr_t;
@@ -75,6 +76,12 @@ typedef dma_addr_t ef_vi_dma_addr_t;
 /* We don't worry much about optimising these in kernel. */
 #define unordered_writel(data, addr)  __raw_writel(cpu_to_le32(data), (addr))
 #define noswap_writel(data, addr)     writel(le32_to_cpu(data), (addr))
+
+
+static inline int sys_is_numa(void)
+{
+  return num_online_nodes() > 1;
+}
 
 
 #endif  /* __CI_CIUL_SYSDEP_LINUX_H__ */

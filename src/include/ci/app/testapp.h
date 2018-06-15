@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -94,9 +94,11 @@ extern void (*ci_app_usage)(const char* msg);
 
   /*! The default 'usage' function.  Gives details of the 'standard'
   ** options, and any application-specifed options.
-  ** NB: this function does not return.
+  ** NB: this function does not return. To add extra usage
+  ** information, call ci_app_usage_default_noexit() instead.
   */
 extern void ci_app_usage_default(const char* msg);
+extern void ci_app_usage_default_noexit(const char* msg);
 
   /*! The section of the default 'usage' function giving details of the
   ** 'standard' options only.

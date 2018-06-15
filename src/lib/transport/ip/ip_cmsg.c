@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -104,32 +104,42 @@ void ci_put_cmsg(struct cmsg_state *cmsg_state,
 /**
  * Put an IP_PKTINFO control message into msg ancillary data buffer.
  */
-static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
+static void ip_cmsg_recv_pktinfo(ci_netif* netif, ci_udp_state* us,
+                                 const ci_ip_pkt_fmt* pkt,
                                  struct cmsg_state *cmsg_state)
 {
-  /* TODO: This is horribly inefficient -- two system calls.  Could be made
-   * cheap with a user-level llap table.
-   */
   struct in_pktinfo info;
   ci_uint32 addr;
-  int hwport;
-  cicp_llap_row_t *lrow;
+  ci_hwport_id_t hwport;
+  const uint8_t* dst_mac;
 
   addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
-  info.ipi_addr.s_addr = addr;
 
   /* Set the ifindex the pkt was received at. */
-  {
-    ci_ifid_t ifindex = 0;
-    int rc = 0;
+  dst_mac = oo_ether_hdr_const(pkt)->ether_dhost;
 
-    hwport = netif->state->intf_i_to_hwport[pkt->intf_i];
-    rc = cicp_llap_find(CICP_HANDLE(netif), &ifindex,
-                        CI_HWPORT_ID(hwport), pkt->vlan);
-    if( rc != 0 )
-      LOG_E(ci_log("%s: cicp_llap_find(intf_i=%d, hwport=%d) failed rc=%d",
-                   __FUNCTION__, pkt->intf_i, hwport, rc));
-    info.ipi_ifindex = ifindex;
+  /* If the last packet was the same, then we can use the caches info */
+  if( pkt->intf_i == us->ip_pktinfo_cache.intf_i &&
+      pkt->vlan == us->ip_pktinfo_cache.vlan &&
+      addr == us->ip_pktinfo_cache.daddr &&
+      memcmp(dst_mac, us->ip_pktinfo_cache.dmac, ETH_ALEN) == 0) {
+    ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(struct in_pktinfo),
+                &us->ip_pktinfo_cache.ipi);
+    return;
+  }
+
+  if( dst_mac[0] == 1 && dst_mac[1] == 0 && dst_mac[2] == 0x5e )
+    dst_mac = NULL;
+  hwport = netif->state->intf_i_to_hwport[pkt->intf_i];
+  info.ipi_ifindex = oo_cp_hwport_vlan_to_ifindex(netif->cplane,
+                                                  hwport, pkt->vlan,
+                                                  dst_mac);
+  info.ipi_addr.s_addr = addr;
+  if( info.ipi_ifindex <= 0 ) {
+    LOG_E(ci_log("%s: oo_cp_hwport_vlan_to_ifindex(intf_i=%d => hwport=%d, "
+                 "vlan_id=%d mac="CI_MAC_PRINTF_FORMAT" ) failed",
+                 __FUNCTION__, pkt->intf_i, hwport, pkt->vlan,
+                 CI_MAC_PRINTF_ARGS(oo_ether_hdr_const(pkt)->ether_dhost)));
   }
 
   /* RFC1122: The specific-destination address is defined to be the
@@ -141,16 +151,22 @@ static void ip_cmsg_recv_pktinfo(ci_netif* netif, const ci_ip_pkt_fmt* pkt,
    * Onload does not work with broadcast (?), so we check for multicast
    * only.
    */
-  if( CI_IP_ADDR_IS_MULTICAST(&oo_ip_hdr_const(pkt)->ip_daddr_be32) ) {
-    lrow = cicp_llap_find_ifid(
-                      CICP_USER_MIBS(CICP_HANDLE(netif)).llapinfo_utable,
-                      info.ipi_ifindex);
-    info.ipi_spec_dst.s_addr = lrow->ip_addr;
+  if( CI_IP_IS_MULTICAST(oo_ip_hdr_const(pkt)->ip_daddr_be32) ) {
+    info.ipi_spec_dst.s_addr = oo_cp_ifindex_to_ip(netif->cplane,
+                                                   info.ipi_ifindex);
   }
   else
     info.ipi_spec_dst.s_addr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
 
   ci_put_cmsg(cmsg_state, IPPROTO_IP, IP_PKTINFO, sizeof(info), &info);
+
+  /* Cache the info: */
+  us->ip_pktinfo_cache.intf_i = pkt->intf_i;
+  us->ip_pktinfo_cache.vlan = pkt->vlan;
+  us->ip_pktinfo_cache.daddr = oo_ip_hdr_const(pkt)->ip_daddr_be32;
+  memcpy(&us->ip_pktinfo_cache.dmac, oo_ether_hdr_const(pkt)->ether_dhost,
+         ETH_ALEN);
+  memcpy(&us->ip_pktinfo_cache.ipi, &info, sizeof(info));
 }
 
 /**
@@ -273,7 +289,7 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
 
   if (flags & CI_IP_CMSG_PKTINFO) {
     ++us->stats.n_rx_pktinfo;
-    ip_cmsg_recv_pktinfo(ni, pkt, &cmsg_state);
+    ip_cmsg_recv_pktinfo(ni, us, pkt, &cmsg_state);
   }
 
   if (flags & CI_IP_CMSG_TTL)

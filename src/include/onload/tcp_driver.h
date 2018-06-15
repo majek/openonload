@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -66,9 +66,8 @@ typedef struct {
  *
  *---------------------------------------------------------------------------*/
 
-struct oof_manager;
 
-
+struct oo_filter_ns_manager;
 typedef struct efab_tcp_driver_s {
 
   /*! TCP helpers table */
@@ -77,9 +76,8 @@ typedef struct efab_tcp_driver_s {
   /* ID field in the IP header handling */
   efab_ipid_cb_t          ipid;         /* see ipid.h in this dir. */
 
-  /*! Management of RX demux -- s/w and h/w filters. */
-  struct oof_manager*           filter_manager;
-  struct work_struct            filter_work_item;
+  /*! Management of per-namespace filter state */
+  struct oo_filter_ns_manager *filter_ns_manager;
 
   /*! work queue */
   struct workqueue_struct      *workqueue;

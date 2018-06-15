@@ -48,7 +48,8 @@ LIB_SRCS	:=		\
 		pipe.c		\
 		common_sockopts.c \
 		tcp_sockopts.c  \
-		tcp_syncookie.c
+		tcp_syncookie.c \
+		active_wild.c
 
 ifneq ($(DRIVER),1)
 LIB_SRCS	+=		\
@@ -102,7 +103,7 @@ lib: $(TARGET)
 
 clean:
 	@$(MakeClean)
-	rm -f uk_intf_ver.h cplane_api_version.h
+	rm -f uk_intf_ver.h
 
 
 $(TARGET): $(LIB_OBJS)
@@ -127,7 +128,11 @@ _UK_INTF_HDRS	:= ci/internal/ip_shared_types.h	\
 		onload/common.h				\
 		onload/primitive_types.h		\
 		onload/ioctl.h				\
-		onload/mmap.h
+		onload/ioctl_base.h			\
+		cplane/ioctl.h				\
+		onload/mmap.h				\
+		onload/mmap_base.h			\
+		cplane/mmap.h
 
 UK_INTF_HDRS	:= $(_UK_INTF_HDRS:%=$(SRCPATH)/include/%)
 

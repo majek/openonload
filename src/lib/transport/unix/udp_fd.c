@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -96,6 +96,7 @@ static int citp_udp_socket(int domain, int type, int protocol)
   ef_driver_handle fd;
   int rc;
   ci_netif* ni;
+  int /*bool*/ orderly_handover = CI_FALSE;
 
   Log_V(log(LPF "socket(%d, %d, %d)", domain, type, protocol));
 
@@ -113,10 +114,14 @@ static int citp_udp_socket(int domain, int type, int protocol)
     if( rc == CI_SOCKET_HANDOVER ) {
       /* This implies EF_DONT_ACCELERATE is set, so we handover
        * regardless of CITP_OPTS.no_fail */
-      CI_FREE_OBJ(epi);
-      return rc;
+      orderly_handover = CI_TRUE;
     }
     goto fail2;
+  }
+
+  if( ~ni->state->flags & CI_NETIF_FLAG_UDP_SUPPORTED ) {
+    orderly_handover = CI_TRUE;
+    goto fail3;
   }
 
   /* Protect the fdtable entry until we're done initialising. */
@@ -144,7 +149,7 @@ static int citp_udp_socket(int domain, int type, int protocol)
   return fd;
 
  fail3:
-  if( CITP_OPTS.no_fail && errno != ELIBACC )
+  if( (CITP_OPTS.no_fail || orderly_handover) && errno != ELIBACC )
     CITP_STATS_NETIF(++ni->state->stats.udp_handover_socket);
   citp_netif_release_ref(ni, 0);
  fail2:
@@ -152,8 +157,10 @@ static int citp_udp_socket(int domain, int type, int protocol)
  fail1:
   /* BUG1408: Graceful failure. We'll only fail outright if there's a
    * driver/library mismatch */
-  if( CITP_OPTS.no_fail && errno != ELIBACC ) {
-    Log_U(ci_log("%s: failed (errno:%d) - PASSING TO OS", __FUNCTION__, errno));
+  if( (CITP_OPTS.no_fail || orderly_handover) && errno != ELIBACC ) {
+    if( ! orderly_handover )
+      Log_U(ci_log("%s: failed (errno:%d) - PASSING TO OS", __FUNCTION__,
+                   errno));
     return CI_SOCKET_HANDOVER;
   }
   return -1;
@@ -186,10 +193,12 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
       /* The socket has moved so need to reprobe the fd.  This will also
        * map the the new stack into user space of the executing process.
        */
-      fdinfo = citp_fdtable_lookup(fdinfo->fd);
-      fdinfo = citp_reprobe_moved(fdinfo, CI_FALSE, CI_FALSE);
+      fdinfo = citp_reprobe_moved(fdinfo,
+                                  CI_FALSE/* ! from_fast_lookup */,
+                                  CI_FALSE/* ! fdip_is_busy */);
       epi = fdi_to_sock_fdi(fdinfo);
       ep = &epi->sock;
+      UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
       ci_netif_cluster_prefault(ep->netif);
     }
     else {
@@ -657,6 +666,7 @@ int citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
     return 0;
   } 
 
+  ci_rmb(); /* needed for recent q->extract */
   pkt = ci_udp_recv_q_get(epi->sock.netif, &us->recv_q);
   do {
     if( citp_oo_timespec_compare(&pkt->pf.udp.rx_hw_stamp, limit) < 1 ) {

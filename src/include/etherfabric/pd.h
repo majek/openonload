@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -125,7 +125,7 @@ typedef struct ef_pd {
 ** Allocate a protection domain.
 **
 ** Allocates a 'protection domain' which specifies how memory should be
-** protected for your VIs.
+** protected for your VIs. For supported modes - see \ref pb_addressing
 **
 ** \note If you are using a 'hardened' kernel (e.g. Gentoo-hardened) then
 **       this is the first call which will probably fail. Currently, the
@@ -185,6 +185,7 @@ extern int ef_pd_alloc_with_vport(ef_pd* pd, ef_driver_handle pd_dh,
 ** \param pd Memory used by the protection domain.
 **
 ** \return The interface being used by the protection domain.
+**         NULL when interface was not accessible for user context.
 **
 ** Look up the interface being used by the protection domain.
 */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -109,6 +109,7 @@ int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
                                     const char*       cluster_name,
                                     ci_int32          cluster_size,
                                     ci_uint32         cluster_restart_opt,
+                                    ci_uint32         cluster_hot_restart_opt,
                                     ci_uint32         addr_be32,
                                     ci_uint16         port_be16)
 {
@@ -119,6 +120,7 @@ int ci_tcp_helper_ep_reuseport_bind(ci_fd_t           fd,
   op.cluster_name[CI_CFG_CLUSTER_NAME_LEN] = '\0';
   op.cluster_size = cluster_size;
   op.cluster_restart_opt = cluster_restart_opt;
+  op.cluster_hot_restart_opt = cluster_hot_restart_opt,
   op.addr_be32 = addr_be32;
   op.port_be16 = port_be16;
   VERB(ci_log("%s: id=%d", __FUNCTION__, fd));
@@ -462,24 +464,6 @@ int ci_tcp_helper_endpoint_shutdown(ci_fd_t fd, int how, ci_uint32 old_state)
 }
 
 
-int ci_tcp_helper_connect_os_sock(ci_fd_t fd, const struct sockaddr*address,
-                                  size_t addrlen)
-{
-  int rc;
-  oo_tcp_sockaddr_with_len_t op;
-
-  CI_USER_PTR_SET(op.address, address);
-  op.addrlen = addrlen;
-  rc = oo_resource_op(fd, OO_IOC_TCP_CONNECT_OS_SOCK, &op);
-  if (rc < 0) {
-    errno = -rc;
-    return -1;
-  }
-  ci_assert (rc == 0);
-  return rc;
-}
-
-
 int ci_tcp_helper_set_tcp_close_os_sock(ci_netif *ni, oo_sp sock_id)
 {
   return oo_resource_op(ci_netif_get_driver_handle(ni),
@@ -523,3 +507,8 @@ int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
 }
 
 
+int ci_tcp_helper_alloc_active_wild(ci_netif *ni)
+{
+  return oo_resource_op(ci_netif_get_driver_handle(ni),
+                        OO_IOC_ALLOC_ACTIVE_WILD, NULL);
+}

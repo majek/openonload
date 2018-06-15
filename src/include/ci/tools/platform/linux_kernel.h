@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -48,7 +48,7 @@
  * Need to know the kernel version.
  */
 
-#include <driver/linux_net/autocompat.h>
+#include <driver/linux_affinity/autocompat.h>
 
 #ifndef LINUX_VERSION_CODE
 # include <linux/version.h>
@@ -81,6 +81,7 @@
 #include <linux/semaphore.h>
 #endif
 #include <linux/workqueue.h>
+#include <linux/user_namespace.h>
 
 #include <ci/tools/config.h>
 
@@ -143,6 +144,12 @@ ci_inline void  __ci_vfree(void* p)    { return vfree(p);   }
 
 
 #define CI_LOG_FN_DEFAULT  ci_log_syslog
+
+#ifdef EFRM_HAVE_KSTRTOL
+#define ci_kstrtol        kstrtol
+#else
+#define ci_kstrtol        strict_strtol
+#endif
 
 
 /*--------------------------------------------------------------------
@@ -392,19 +399,12 @@ typedef struct iovec ci_iovec;
 #define CI_IOVEC_LEN(i)  ((i)->iov_len)
 
 /**********************************************************************
- * Signals
- */
-#include <linux/sched.h>
-
-ci_inline void
-ci_send_sig(int signum)
-{
-  send_sig(signum, current, 0);
-}
-
-/**********************************************************************
  * UID
  */
+
+#ifdef EFRM_HAVE_CRED_H
+#include <linux/cred.h>
+#endif
 
 ci_inline uid_t ci_geteuid(void)
 {
@@ -441,12 +441,52 @@ ci_inline uid_t ci_getgid(void)
 }
 
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
-#define ci_net_random() net_random()
-#else
+/* net_random was removed in Linux 3.14, and this was backported to
+ * some earlier RedHat kernels (e.g. RHEL 7.4)
+ */
+#ifdef EFRM_HAVE_PRANDOM_U32
 #define ci_net_random() prandom_u32()
+#else
+#define ci_net_random() net_random()
 #endif
 
+
+/* Although some support for user namespaces is present in earlier kernel
+ * versions there's some variation in exactly what is supported, and no
+ * supported distributions enable it with earlier kernels than 3.10.  We
+ * can avoid having to support interim kernel versions by only
+ * supporting user namespaces in more recent kernels.
+ */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)) && defined(CONFIG_USER_NS)
+#define EFRM_DO_USER_NS
+#endif
+
+ci_inline uid_t ci_current_from_kuid_munged(uid_t uid)
+{
+#ifdef EFRM_DO_USER_NS
+  uid = from_kuid_munged(current_user_ns(), KUIDT_INIT(uid));
+#endif
+  return uid;
+}
+
+ci_inline uid_t ci_from_kuid_munged(struct user_namespace* ns, uid_t uid)
+{
+#ifdef EFRM_DO_USER_NS
+  return from_kuid_munged(ns, KUIDT_INIT(uid));
+#else
+  return uid;
+#endif
+}
+
+ci_inline uid_t ci_make_kuid(struct user_namespace*ns, uid_t uid)
+{
+#ifdef EFRM_DO_USER_NS
+  kuid_t kuid = make_kuid(ns, uid);
+  return __kuid_val(kuid);
+#else
+  return uid;
+#endif
+}
 
 #endif  /* __CI_TOOLS_LINUX_KERNEL_H__ */
 /*! \cidoxg_end */

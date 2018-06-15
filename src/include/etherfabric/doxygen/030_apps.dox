@@ -1,6 +1,6 @@
 /****************************************************************************
  * Copyright 2004-2005: Level 5 Networks Inc.
- * Copyright 2005-2016: Solarflare Communications Inc,
+ * Copyright 2005-2017: Solarflare Communications Inc,
  *                      7505 Irvine Center Drive, Suite 100
  *                      Irvine, CA 92618, USA
  *
@@ -113,7 +113,21 @@ It is a very useful jumping off point as it shows:
 - creation and installation of filters
 - polling the event queue.
 
-However, it does not cover sending packets.
+\subsection efsink_usage Usage
+
+To receive a single multicast group:
+
+efsink <code>_local interface_ udp:<multicast-addr>:port</code>
+
+To receive multiple multicast groups:
+
+efsink <code>_interface_ udp:<multicast-addr>:port udp:<multicast-group>:port</code>
+
+To receive all multicast traffic:
+
+efsink <code>_interface_ multicast-all</code>
+
+The efsink application does not send packets.
 
 \section efforward efforward
 
@@ -181,7 +195,7 @@ for a particular socket to some other mechanism.  For example, this
 sample uses the ef_vi layer-2 API in order to get lower latency than is
 possible with a normal send() call.
 
-The API essentially boils down to first retriving the packet headers,
+The API essentially boils down to first retrieving the packet headers,
 adding your own payload to form a raw packet, sending the packet and
 finally telling Onload what it was you sent so it can update the
 internal TCP state of the socket.
@@ -246,14 +260,17 @@ installation and will be present in the
 Source code files for the example applications exist in the 
 `/Onload-&lt;version>/src/tests/ef_vi` subdirectory.
 
+After running the onload_install command, example applications exist in the
+`/Onload-&lt;version>/build/gnu_x86_64/tests/ef_vi` subdirectory.
+
 To rebuild the example applications you must have the 
 `Onload-&lt;version>/scripts` subdirectory in your path and use the 
 following procedure:
 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}
-[root@server01 Onload-201109]# cd scripts/
+[root@server01 Onload-<version>]# cd scripts/
 [root@server01 scripts]# export PATH="$PWD:$PATH"
-[root@server01 scripts]# cd ../build/_gnu_x86_64/tests/ef_vi/
+[root@server01 scripts]# cd ../build/gnu_x86_64/tests/ef_vi/
 [root@server01 ef_vi]# make clean
 [root@serverr01 ef_vi]# make
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

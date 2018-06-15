@@ -125,7 +125,7 @@ class EthInterface(object):
 
     def n_rxqs(self):
         if self.__n_rxqs < 0:
-            self.__n_rxqs = sfc_interface_n_rxqs(self.name)
+            self.__n_rxqs = interface_n_rxqs(self.name)
         return self.__n_rxqs
 
 ######################################################################
@@ -307,18 +307,29 @@ def is_interface(ethname, sfc_only=False):
 # should be named ethx-$n if for rx and tx, ethx-rx-$n for rx only.
 # Therefore to count rxqs, and to find their associated irqs, we need to
 # try ethx-rx-$n first, and if no match then ethx-$n.
-proc_interrupts_rxq_fmts = ['\<%s-rx-', '\<%s-']
+proc_interrupts_rxq_fmts = ['%s-rx-', '%s-']
 
 def __interface_n_rxqs(ethname, fmt):
     match = fmt % ethname
     f = do_popen("grep '\<%s[0-9]' /proc/interrupts | wc -l" % match)
     return int(f.read().strip())
 
-def interface_n_rxqs(ethname):
+
+def __interface_n_rxqs_fmt(ethname):
     for fmt in proc_interrupts_rxq_fmts:
         n = __interface_n_rxqs(ethname, fmt)
-        if n:  return n
-    return 0
+        if n:  return (n, fmt)
+    return (0, None)
+
+
+def interface_n_rxqs(ethname):
+    (n, fmt) = __interface_n_rxqs_fmt(ethname)
+    return n
+
+
+def interface_fmt(ethname):
+    (n, fmt) = __interface_n_rxqs_fmt(ethname)
+    return fmt
 
 
 def sfc_interface_n_rxqs(ethname):
@@ -430,11 +441,9 @@ def irq_get_cpumask(irq):
 
 
 def rxq_get_irq(ethx, rxq):
-    for fmt in proc_interrupts_rxq_fmts:
-        n_rxqs = __interface_n_rxqs(ethx, fmt)
-        if n_rxqs:  break
+    (n_rxqs, fmt) = __interface_n_rxqs_fmt(ethx)
     assert n_rxqs > 0
-    match = fmt % ethx + str(rxq) + '\>'
+    match = '\<' + (fmt % ethx) + str(rxq) + '\>'
     f = do_popen("grep '%s' /proc/interrupts | awk -F: '{print $1}'" % match)
     return int(f.read().strip())
 
@@ -662,13 +671,10 @@ def choose_core_ids(n_irqs, topology, interrupt_topology):
 def interface_auto(ethx, topology, interrupt_topology):
     ret = Bucket()
 
-    irq_names = affinity.irq_names_matching_pattern(str(ethx) + '-rx-[0-9]')
-    if not irq_names:
-        irq_names = affinity.irq_names_matching_pattern(str(ethx) + '-[0-9]')
-    if not irq_names:
+    n_irqs = interface_n_rxqs(str(ethx))
+    if n_irqs == 0:
         warn("interface %s has no rxqs" % ethx)
         return
-    n_irqs = len(irq_names)
 
     core_ids, ret.strategy = \
               choose_core_ids(n_irqs, topology, interrupt_topology)
@@ -705,6 +711,20 @@ def interface_check(ethx):
         ok = False
     else:
         info("%s has %d rxqs" % (ethx, ethx.n_rxqs()))
+        if ethx.n_rxqs() != sfc_interface_n_rxqs(str(ethx)):
+            # Mismatch in rxq count (possibly due to -ptp queue).
+            # List all queues relating to interface that don't match
+            # format and aren't named like a txq
+
+            match = interface_fmt(str(ethx)) % str(ethx)
+            info("Additional rxqs detected not matching format %s:" %
+                                                            (match + '[0-9]'))
+
+            ethx_qs = affinity.irq_names_matching_pattern(str(ethx) + '-')
+            for name in ethx_qs:
+                if not re.match(match + '[0-9]', name) \
+                        and not re.match(str(ethx)+'-tx-', name):
+                    info("\t" + name)
     for rxq in range(ethx.n_rxqs()):
         if not rxq_check_affinity(ethx, rxq):
             ok = False

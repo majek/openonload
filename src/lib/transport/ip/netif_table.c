@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -25,7 +25,8 @@
 \**************************************************************************/
   
 /*! \cidoxg_lib_transport_ip */
-  
+
+#include <onload/hash.h>
 #include "ip_internal.h"
 
 
@@ -35,59 +36,6 @@
 
 #define TOMBSTONE  -1
 #define EMPTY      -2
-
-/*!
-** Hashing alternatives:
-**
-**  linear hashing  (good cache performance, but get clustering)
-**  quadratic hashing  (try positions 1, 4, 9 away...)
-**  double-hashing
-**  re-hashing  (resize table or use different hash fn)
-**
-** Double-hashing: h(k,i) = (h1(k) + i*h2(k)) mod n    for i=0,1,2...
-**   Require h2(k) be relatively prime in n.  eg. n is power 2, and h2(k)
-**   is odd.
-**
-** Note that you get better cache performance w linear hashing, so it might
-** be best on the host.
-**
-** Resources:
-**  http://www.sci.csuhayward.edu/~billard/cs3240/node23.html
-**  http://ciips.ee.uwa.edu.au/~morris/Year2/PLDS210/hash_tables.html
-**  http://algorithm.myrice.com/resources/technical_artile/hashing_rehashed/hashing_rehashed.htm
-**  http://www.cs.nyu.edu/courses/summer03/G22.1170-001/5-Hashing.pdf
-**  http://uiorean.cluj.astral.ro/cursuri/dsa/6_Sda.pdf
-*/
-
-ci_inline unsigned tcp_hash3(ci_netif_filter_table* tbl,
-			     unsigned laddr, unsigned lport,
-			     unsigned raddr, unsigned rport,
-			     unsigned protocol) {
-  unsigned h = CI_BSWAP_BE32(raddr) ^ CI_BSWAP_LE32(laddr) ^
-               (rport << 16 | lport) ^ protocol;
-  h ^= h >> 16;
-  h ^= h >> 8;
-  return h;
-}
-
-
-ci_inline unsigned tcp_hash1(ci_netif_filter_table* tbl,
-			     unsigned laddr, unsigned lport,
-			     unsigned raddr, unsigned rport,
-			     unsigned protocol) {
-  return tcp_hash3(tbl, laddr, lport, raddr, rport, protocol) &
-         tbl->table_size_mask;
-}
-
-
-ci_inline unsigned tcp_hash2(ci_netif_filter_table* tbl,
-			     unsigned laddr, unsigned lport,
-			     unsigned raddr, unsigned rport,
-			     unsigned protocol) {
-  /* N.B. rport and lport are in opposite words with respect to the calculation
-   * in tcp_hash1. */
-  return (CI_BSWAP_LE32(laddr ^ raddr) ^ (lport << 16 | rport) ^ protocol) | 1u;
-}
 
 
 int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
@@ -102,14 +50,14 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
   ci_assert(netif->filter_table);
 
   tbl = netif->filter_table;
-  hash1 = tcp_hash1(tbl, laddr, lport, raddr, rport, protocol);
+  hash1 = onload_hash1(tbl->table_size_mask, laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   LOG_NV(log("tbl_lookup: %s %s:%u->%s:%u hash=%u:%u at=%u",
 	     CI_IP_PROTOCOL_STR(protocol),
 	     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
 	     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-	     first, tcp_hash2(tbl, laddr, lport, raddr, rport, protocol),
+	     first, onload_hash2(laddr, lport, raddr, rport, protocol),
 	     hash1));
 
   while( 1 ) {
@@ -127,7 +75,7 @@ int ci_netif_filter_lookup(ci_netif* netif, unsigned laddr, unsigned lport,
     /* We defer calculating hash2 until it's needed, just to make the fast
      * case that little bit faster. */
     if( hash1 == first )
-      hash2 = tcp_hash2(tbl, laddr, lport, raddr, rport, protocol);
+      hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
     hash1 = (hash1 + hash2) & tbl->table_size_mask;
     if( hash1 == first ) {
       LOG_E(ci_log(FN_FMT "ERROR: LOOP %s:%u->%s:%u hash=%u:%u",
@@ -154,15 +102,15 @@ ci_uint32
 ci_netif_filter_hash(ci_netif* ni, unsigned laddr, unsigned lport,
                      unsigned raddr, unsigned rport, unsigned protocol)
 {
-  return tcp_hash3(ni->filter_table, laddr, lport, raddr, rport, protocol);
+  return onload_hash3(laddr, lport, raddr, rport, protocol);
 }
 
 
 ci_inline int ci_sock_intf_check(ci_netif* ni, ci_sock_cmn* s,
                                  int intf_i, int vlan)
 {
-  return ((s->rx_bind2dev_base_ifindex ==
-           ci_netif_intf_i_to_base_ifindex(ni, intf_i)) &&
+  ci_hwport_id_t hwport = ni->state->intf_i_to_hwport[intf_i];
+  return ((s->rx_bind2dev_hwports & (1ull << hwport)) != 0 &&
           s->rx_bind2dev_vlan == vlan);
 }
 
@@ -180,15 +128,15 @@ int ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
 
   tbl = ni->filter_table;
   if( hash_out != NULL )
-    *hash_out = tcp_hash3(tbl, laddr, lport, raddr, rport, protocol);
-  hash1 = tcp_hash1(tbl, laddr, lport, raddr, rport, protocol);
+    *hash_out = onload_hash3(laddr, lport, raddr, rport, protocol);
+  hash1 = onload_hash1(tbl->table_size_mask, laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   LOG_NV(log("%s: %s %s:%u->%s:%u hash=%u:%u at=%u",
              __FUNCTION__, CI_IP_PROTOCOL_STR(protocol),
 	     ip_addr_str(laddr), (unsigned) CI_BSWAP_BE16(lport),
 	     ip_addr_str(raddr), (unsigned) CI_BSWAP_BE16(rport),
-	     first, tcp_hash2(tbl, laddr, lport, raddr, rport, protocol),
+	     first, onload_hash2(laddr, lport, raddr, rport, protocol),
 	     hash1));
 
   while( 1 ) {
@@ -210,7 +158,7 @@ int ci_netif_filter_for_each_match(ci_netif* ni, unsigned laddr,
     /* We defer calculating hash2 until it's needed, just to make the fast
     ** case that little bit faster. */
     if( hash1 == first )
-      hash2 = tcp_hash2(tbl, laddr, lport, raddr, rport, protocol);
+      hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
     hash1 = (hash1 + hash2) & tbl->table_size_mask;
     if( hash1 == first ) {
       LOG_NV(ci_log(FN_FMT "ITERATE FULL %s:%u->%s:%u hash=%u:%u",
@@ -241,8 +189,8 @@ int ci_netif_filter_insert(ci_netif* netif, oo_sp tcp_id,
   ci_assert(netif->filter_table);
   tbl = netif->filter_table;
 
-  hash1 = tcp_hash1(tbl, laddr, lport, raddr, rport, protocol);
-  hash2 = tcp_hash2(tbl, laddr, lport, raddr, rport, protocol);
+  hash1 = onload_hash1(tbl->table_size_mask, laddr, lport, raddr, rport, protocol);
+  hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   /* Find a free slot. */
@@ -364,8 +312,8 @@ ci_netif_filter_remove(ci_netif* netif, oo_sp sock_p,
 
 
   tbl = netif->filter_table;
-  hash1 = tcp_hash1(tbl, laddr, lport, raddr, rport, protocol);
-  hash2 = tcp_hash2(tbl, laddr, lport, raddr, rport, protocol);
+  hash1 = onload_hash1(tbl->table_size_mask, laddr, lport, raddr, rport, protocol);
+  hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
   first = hash1;
 
   LOG_TC(ci_log("%s: [%d:%d] REMOVE %s %s:%u->%s:%u hash=%u:%u",
@@ -498,8 +446,9 @@ void ci_netif_filter_dump(ci_netif* ni)
       unsigned raddr = sock_raddr_be32(s);
       int rport = sock_rport_be16(s);
       int protocol = sock_protocol(s);
-      unsigned hash1 = tcp_hash1(tbl, laddr, lport, raddr, rport, protocol);
-      unsigned hash2 = tcp_hash2(tbl, laddr, lport, raddr, rport, protocol);
+      unsigned hash1 = onload_hash1(tbl->table_size_mask, laddr, lport,
+                                    raddr, rport, protocol);
+      unsigned hash2 = onload_hash2(laddr, lport, raddr, rport, protocol);
       log("%010d id=%-10d rt_ct=%d %s "CI_IP_PRINTF_FORMAT":%d "
           CI_IP_PRINTF_FORMAT":%d %010d:%010d",
 	  i, id, tbl->table[i].route_count, CI_IP_PROTOCOL_STR(protocol),

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,15 +16,28 @@
 #ifndef __ONLOAD_OOF_INTERFACE_H__
 #define __ONLOAD_OOF_INTERFACE_H__
 
+#include <cplane/mib.h> /* for ci_hwport_id_t */
 
 struct tcp_helper_resource_s;
 struct oof_socket;
 struct oof_manager;
 struct oo_hw_filter;
 struct tcp_helper_cluster_s;
+struct oo_hw_filter_spec;
 
 
 #define OO_IFID_ALL (-2)
+
+enum {
+  /* Members of an unacceleratable bond.  ie. Filters should not be used
+   * with unavailable hwports because traffic arriving on them goes via the
+   * kernel stack. */
+  OOF_HWPORT_AVAIL_TAG_BOND,
+  /* Hwports in the network namespace of this oof_manager. */
+  OOF_HWPORT_AVAIL_TAG_NAMESPACE,
+  /* Number of tags */
+  OOF_HWPORT_AVAIL_TAG_NUM,
+};
 
 
 /**********************************************************************
@@ -48,14 +61,15 @@ extern void
 oof_manager_addr_del(struct oof_manager*, unsigned laddr, unsigned ifindex);
 
 extern void
-oof_hwport_up_down(int hwport, int up, int mcast_replicate_capable,
-                   int vlan_filters, int sync);
+oof_hwport_up_down(struct oof_manager* fm, int hwport, int up,
+                   int mcast_replicate_capable, int vlan_filters, int sync);
 
 extern void
-oof_hwport_removed(int hwport);
+oof_hwport_removed(struct oof_manager* fm, int hwport);
 
 extern void
-oof_hwport_un_available(ci_hwport_id_t hwport, int available, void *arg);
+oof_hwport_un_available(ci_hwport_id_t hwport, int available, int tag,
+                        void *arg);
 
 extern void
 oof_do_deferred_work(struct oof_manager*);
@@ -73,6 +87,7 @@ oof_socket_is_armed(struct oof_socket* skf);
 #define OOF_SOCKET_ADD_FLAG_CLUSTERED 0x1
 #define OOF_SOCKET_ADD_FLAG_DUMMY     0x2
 #define OOF_SOCKET_ADD_FLAG_NO_STACK  0x4
+#define OOF_SOCKET_ADD_FLAG_NO_UCAST  0x8
 extern int
 oof_socket_add(struct oof_manager*, struct oof_socket*,
                int flags, int protocol, unsigned laddr, int lport,
@@ -118,6 +133,11 @@ extern void
 oof_socket_mcast_del_all(struct oof_manager*, struct oof_socket*);
 
 extern void
+oof_mcast_update_interface(ci_ifid_t ifindex,  ci_uint16 flags,
+                           cicp_hwport_mask_t hwport_mask,
+                           ci_uint16 vlan_id, ci_mac_addr_t mac, void *arg);
+
+extern void
 oof_mcast_update_filters(ci_ifid_t ifindex, void *arg);
 
 extern int
@@ -145,6 +165,8 @@ oof_manager_dump(struct oof_manager*,
                  void (*dump_fn)(void* opaque, const char* fmt, ...),
                  void* opaque);
 
+extern int
+oof_is_onloaded(struct oof_manager* fm, int ifindex);
 /**********************************************************************
  * Callbacks.  These are invoked by the oof module.
  */
@@ -154,6 +176,9 @@ oof_cb_socket_stack(struct oof_socket* skf);
 
 extern struct tcp_helper_cluster_s*
 oof_cb_stack_thc(struct tcp_helper_resource_s* skf_stack);
+
+extern void
+oof_cb_thc_ref(struct tcp_helper_cluster_s* thc);
 
 extern const char*
 oof_cb_thc_name(struct tcp_helper_cluster_s* thc);
@@ -193,16 +218,35 @@ extern void
 oof_dl_filter_del(struct oo_hw_filter* filter);
 
 extern int 
-oof_cb_get_hwport_mask(int ifindex, unsigned *hwport_mask);
+oof_cb_get_hwport_mask(int ifindex, cicp_hwport_mask_t *hwport_mask, void* owner_priv);
 
 extern int 
-oof_cb_get_vlan_id(int ifindex, unsigned short *vlan_id);
+oof_cb_get_vlan_id(int ifindex, unsigned short *vlan_id, void* owner_priv);
 
 extern int
-oof_cb_get_mac(int ifindex, unsigned char mac[6]);
+oof_cb_get_mac(int ifindex, unsigned char mac[6], void* owner_priv);
 
 extern void
 oof_cb_defer_work(void* owner_private);
 
+#ifdef EFRM_NET_HAS_USER_NS
+extern struct user_namespace*
+oof_cb_user_ns(void* owner_private);
+#endif
+
+extern int
+oof_hwports_list(struct oof_manager* fm, struct seq_file* seq);
+extern int
+oof_ipaddrs_list(struct oof_manager* fm, struct seq_file* seq);
+
+extern int
+oof_cb_add_global_tproxy_filter(struct oo_hw_filter_spec* filter, int proto,
+                                unsigned hwport_mask,
+                                unsigned* installed_hwport_mask,
+                                void* owner_priv);
+extern int
+oof_cb_remove_global_tproxy_filter(int proto, unsigned hwport_mask,
+                                   unsigned* installed_hwport_mask,
+                                   void* owner_priv);
 
 #endif  /* __ONLOAD_OOF_INTERFACE_H__ */

@@ -112,6 +112,6 @@ Any questions?
 
 
 ==========
- version: openonload-201606
-revision: 519bb8b78d4b openonload-201606
-    date: Thu 30 Jun 11:42:26 BST 2016
+ version: openonload-201710-u1.1
+revision: fcabea617493 (ool1710-u1-hotfix) openonload-201710-u1.1/openonload-201710-u1.1-rc4
+    date: Thu Apr 19 15:40:10 BST 2018

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -199,6 +199,7 @@ typedef struct ci_resource_op_s {
 # define                CI_RSOP_FILTER_ADD_ETHER_TYPE   0x84
 # define                CI_RSOP_VI_GET_TS_CORRECTION    0x85
 # define                CI_RSOP_VI_TX_ALT_ALLOC         0x86
+# define                CI_RSOP_VI_TX_ALT_FREE          0x87
 
   union {
     struct {
@@ -359,11 +360,12 @@ typedef struct ci_license_challenge_op_s {
   efch_resource_id_t    pd_id;
 
   ci_int16          feature;
-/* Feature IDs. Well known. */
-#define CI_LCOP_CHALLENGE_FEATURE_ONLOAD    (1)
-#define CI_LCOP_CHALLENGE_FEATURE_SCPRO     (4)
-#define CI_LCOP_CHALLENGE_FEATURE_SCLIVE    (32)
-#define CI_LCOP_CHALLENGE_FEATURE_SCSI      (64)
+/* Feature IDs. Well known. Defined in SF-116142-SW. */
+#define CI_LCOP_CHALLENGE_FEATURE_ONLOAD    0x0001
+#define CI_LCOP_CHALLENGE_FEATURE_SCPRO     0x0004
+#define CI_LCOP_CHALLENGE_FEATURE_SCLIVE    0x0020
+#define CI_LCOP_CHALLENGE_FEATURE_SCSI      0x0040
+#define CI_LCOP_CHALLENGE_FEATURE_SCALEOUT  0x2000
 
   uint32_t          expiry;
   uint8_t           challenge[CI_LCOP_CHALLENGE_CHALLENGE_LEN];
@@ -390,7 +392,7 @@ typedef struct ci_license_challenge_op_s {
 **  BASE_MACADDR[6 bytes],
 **  CURRENT_MACADDR[6 bytes],
 */
-#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (70)
+#define CI_LCOP_V3_CHALLENGE_MESSAGE_LEN (76)
 
 typedef struct ci_v3_license_challenge_op_s {
   int32_t               fd;

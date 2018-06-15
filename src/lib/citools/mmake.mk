@@ -39,7 +39,8 @@ LIB_SRCS	:= \
 		ip_csum_precompute.c \
 		tcp_csum_precompute.c \
 		udp_csum_precompute.c \
-		ippacket.c
+		ippacket.c \
+		namespace.c
 
 ifeq ($(DRIVER),1)
 LIB_SRCS	+= drv_log_fn.c drv_get_cpu_khz.c memleak_debug.c

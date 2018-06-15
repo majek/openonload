@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -225,8 +225,9 @@ static void uncache_fd(ci_netif* ni, ci_tcp_state* ts)
 {
   int fd  = ts->cached_on_fd;
   int pid = ts->cached_on_pid;
+  int cur_tgid = task_tgid_vnr(current);
   LOG_EP(ci_log("Uncaching fd %d on pid %d running pid %d:%s", fd,
-                pid, current->tgid, current->comm));
+                pid, cur_tgid, current->comm));
   /* No tasklets or other bottom-halves - we always have "current" */
   ci_assert(current);
   if( !(ts->s.b.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD) &&
@@ -245,11 +246,14 @@ static void uncache_fd(ci_netif* ni, ci_tcp_state* ts)
      * we've called ci_netif_timeout_remove() above. */
     struct file* filp;
 
+    if( ci_netif_check_namespace(ni) < 0 )
+      return;
+
     if( current->files != NULL ) {
-      if( pid != current->tgid ) {
+      if( pid != cur_tgid ) {
         NI_LOG(ni, RESOURCE_WARNINGS,
                "%s: pid mismatch: cached_on_pid=%d current=%d:%s", __func__,
-               pid, current->tgid, current->comm);
+               pid, cur_tgid, current->comm);
       }
       else if( (filp = fget(fd)) == NULL ) {
         NI_LOG(ni, RESOURCE_WARNINGS,
@@ -641,7 +645,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
       LOG_TV(log("%s: alien socket %d:%d in accept queue %d:%d", __FUNCTION__,
                  stack_id, OO_SP_FMT(sp), NI_ID(netif), S_FMT(tls)));
 
-      if( efab_thr_table_lookup(NULL, stack_id,
+      if( efab_thr_table_lookup(NULL, NULL, stack_id,
                                 EFAB_THR_TABLE_LOOKUP_CHECK_USER,
                                 &thr) != 0 ) {
         LOG_U(log("%s: listening socket %d:%d can't find "
@@ -833,7 +837,7 @@ void ci_tcp_listen_all_fds_gone(ci_netif* ni, ci_tcp_socket_listen* tls,
    * before calling this function, so we're up-to-date.
    */
   ci_assert(ci_netif_is_locked(ni));
-  ci_assert(tls->s.b.state == CI_TCP_LISTEN);
+  ci_assert_equal(tls->s.b.state, CI_TCP_LISTEN);
 
   __ci_tcp_listen_shutdown(ni, tls, NULL);
   __ci_tcp_listen_to_normal(ni, tls);

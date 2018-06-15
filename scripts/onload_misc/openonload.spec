@@ -30,57 +30,40 @@
 # For PPC platform you can use IBM Advanced Toolchain. For this you should
 # --define 'ppc_at </opt cc path>
 
-# TODO:
-# RHEL and SLES have their own smart systems of kernel packaging. They are
-# under development and for sure are not in RHEL4 and SLES9.
-# RHEL: http://www.kerneldrivers.org/RedHatKernelModulePackages
-# SLES: CODE10
-#
-# kmodtool and sles specic spec macro can be used to generate a template for
-# kernel modules packaging.  Perhaps it's reasonable (when we don't need to
-# support older distros) to update this spec to use kernel modules packaging
-# templates.
 
-%define pkgversion 201606
+%define pkgversion 201710-u1.1
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
 %{!?kpath: %{expand: %%define kpath /lib/modules/%%{kernel}/build}}
 %{!?build32: %{expand: %%define build32 false}}
 
-%define have_lsb %( ! which lsb_release > /dev/null 2>&1; echo $? )
-
 %define knownvariants '@(BOOT|PAE|@(big|huge)mem|debug|enterprise|kdump|?(big|large)smp|uml|xen[0U]?(-PAE)|xen|rt?(-trace|-vanilla)|default|big|pae|vanilla|trace|timing)'
 %define knownvariants2 '%{knownvariants}'?(_'%{knownvariants}')
 
-# Determine distro
-%if %{have_lsb}
-# '\' signs are not recognised by RedHat 4 rpm
-%define redhat %(lsb_release -is | grep -qi -e redhat -e cent -e fedora -e oracle && echo 1; lsb_release -is | grep -qi suse && echo 0)
+# Assume that all non-suse distributions can be treated as redhat
+%define redhat       %( [ "%{_vendor}" = "suse"   ] ; echo $?)
 
+# Determine distro to use for package conflicts with SFC.  This is not
+# accurate in various cases, and should be updated to use the sfc-disttag
+# script that is used by the sfc spec file to generate their package name.
+%define have_lsb %( ! which lsb_release > /dev/null 2>&1; echo $? )
+%if %{have_lsb}
 %define thisdist %(lsb_release -rs | cut -d. -f1)
-# Do we really need this? Why?
 %define maindist %{?for_rhel:%{for_rhel}}%{!?for_rhel:%{thisdist}}
-%else
-# old distros or strange installations
-%define redhat %( ! [ -e /etc/redhat-release ]; echo $? )
 %endif
 
 %define kernel_installed %( [ -e "/lib/modules/%{kernel}" ] && rpm -q --whatprovides /lib/modules/%{kernel} > /dev/null && echo "1" || echo "0")
 
 %if %kernel_installed
 
-%define kernel_pkg %( rpm -q --whatprovides /lib/modules/%{kernel}/kernel/arch | grep kernel) 
-# form a fake kernel name in known format 2.6.32-0.41-rt
-%define kernel_long %( echo %{kernel_pkg} | sed "s/kernel-\\([a-zA-Z_-]*\\)[-\.]\\([2-9].[0-9].*\\)/\\2-\\1/; s/kernel-//")
-
 # kmodtool doesn't count 'rt' as a variant.  So I've stolen the bash
 # regexp.  Only faffing with this because rpmbuild BuildRequires doesn't
 # agree that kernel-rt provides 'kernel = blah-rt' !
 # also some kernels have 2 parts in the variant
-%define kvariantsuffix %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; VAR=${KVER##${KVER%%%${KNOWNVARS}}}; [[ -n "$VAR" ]] && echo $VAR)
+%define kvariantsuffix %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel}; VAR=${KVER##${KVER%%%${KNOWNVARS}}}; [[ -n "$VAR" ]] && echo $VAR)
 %define kvariantsuffix_dash %( KVAR='%{kvariantsuffix}'; [[ -n "${KVAR}" ]] && echo -"${KVAR}" || echo "")
-%define kernel_cut   %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel_long}; echo ${KVER%%%${KNOWNVARS}} | sed "s/-$//; s/_$//")
+%define kernel_cut   %(shopt -s extglob; KNOWNVARS='%{knownvariants2}'; KVER=%{kernel}; echo ${KVER%%%${KNOWNVARS}} | sed "s/-$//; s/_$//")
 # some distros like to add architecture to the kernel name (Fedora)
 %define kverrel        %(shopt -s extglob; KVER=%{kernel_cut}; echo ${KVER%%@(.i386|.i586|.i686|.x86_64|.ppc64)})
 
@@ -93,27 +76,13 @@
 %define kvariantsuffix_dash %( KVAR='%{kvariantsuffix}'; [[ -n "${KVAR}" ]] && echo -"${KVAR}" || echo "")
 %define kverrel %( echo %{kernel})
 
-%endif	# kernel_installed
+%endif  # kernel_installed
 
-# Pre RHEL5 the headers are present in the same package
-%if %{redhat} && %{have_lsb}
-%define libpcap_devel %( [ %{thisdist} -ge 5 ] && echo libpcap-devel || echo libpcap )
-%else
-%define libpcap_devel libpcap-devel
-%endif
-
-# On SLES11 source packages for RT kernels are called kernel-source-rt
-# rather than kernel-source.
-%define rtkernel %( echo %{kernel} | grep -q -- -rt && echo 1 || echo 0 )
-%if 0%{?sles_version} >= 11 && %{rtkernel}
-%define kernelsource  kernel-source-rt
-%else
-%define kernelsource  kernel-source
-%endif
+%define kpkgver %(echo '%{kverrel}' | sed 's/-/_/g')
 
 %{echo: %{target_cpu}}
 
-# do we need this?
+# Inhibit debuginfo package
 %define debug_package %{nil}
 
 ###############################################################################
@@ -125,25 +94,24 @@ Release     	: 1%{?dist}%{?debug:DEBUG}
 Group       	: System Environment/Kernel
 License   	: Various
 URL             : http://www.openonload.org/
-#Packager    	: Acme Widgets, Inc.
 Vendor		: Solarflare Communications, Inc.
 Provides	: openonload = %{version}-%{release}
 Source0		: openonload-%{pkgversion}.tgz
 BuildRoot   	: %{_builddir}/%{name}-root
 AutoReqProv	: no
+ExclusiveArch	: i386 i586 i686 x86_64 ppc64
+BuildRequires	: gawk gcc sed make bash libpcap-devel python-devel automake libtool autoconf
+# The glibc packages we need depend on distro and platform
 %if %{redhat}
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} kernel%{kvariantsuffix_dash}-devel = %{kverrel} glibc-common %{libpcap_devel} python-devel automake libtool autoconf
+BuildRequires	: glibc-common 
 %else
-BuildRequires	: gawk gcc sed make bash kernel%{kvariantsuffix_dash} = %{kverrel} %{kernelsource} = %{kverrel} glibc-devel glibc %{libpcap_devel} python-devel automake libtool autoconf
+BuildRequires	: glibc-devel glibc
 %ifarch x86_64
 %if %{build32}
 BuildRequires   : glibc-devel-32bit
 %endif
 %endif
-
-%endif                          # else redhat
-#BuildArch	: x86_64
-ExclusiveArch	: i386 i586 i686 x86_64 ppc64
+%endif
 
 %description
 OpenOnload is a high performance user-level network stack.  Please see
@@ -156,34 +124,11 @@ This package comprises the user space components of OpenOnload.
 %package kmod-%{kverrel}
 Summary     	: OpenOnload kernel modules
 Group       	: System Environment/Kernel
-
-%if %{redhat}
-
-#RHEL5 PAE kernel dependencies only have PAE at the end of the kernel version
-#RHEL4 hughemem and smp kernels and MRG kernels have dependencies with the variant included in the name (e.g. kernel-rt-x86_64 = ...)
-%ifarch ppc64
-Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
-%else
-%if %( ! echo %{kvariantsuffix} | grep PAE &> /dev/null; echo $? )
-Requires	: openonload = %{version}-%{release}, kernel-%{target_cpu} = %{kverrel}%{kvariantsuffix}
-%else
-%if %( ! echo %{kvariantsuffix} | grep -E trace\|vanilla &> /dev/null; echo $? )
-Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
-%else
-Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash}-%{target_cpu} = %{kverrel}
-%endif
-%endif
-%endif
-
-%else
-Requires	: openonload = %{version}-%{release}, kernel%{kvariantsuffix_dash} = %{kverrel}
-%endif
+Requires	: openonload = %{version}-%{release}
 Conflicts	: kernel-module-sfc-RHEL%{maindist}-%{kverrel}
-Provides	: openonload-kmod = %{kverrel}-%{version}-%{release}
+Provides	: openonload-kmod = %{kpkgver}_%{version}-%{release}
 Provides	: sfc-kmod-symvers = %{kernel}
 AutoReqProv	: no
-
-# %define kmod_name %{name}
 
 %description kmod-%{kverrel}
 OpenOnload is a high performance user-level network stack.  Please see
@@ -191,10 +136,6 @@ www.openonload.org for more information.
 
 This package comprises the kernel module components of OpenOnload.
 
-# http://www.kerneldrivers.org/RedHatKernelModulePackages
-# NOTE: these two extra defines will not be necessary in future.
-# %define kmp_version %{version}
-# %define kmp_release %{release}
 
 ###############################################################################
 %prep
@@ -202,6 +143,25 @@ This package comprises the kernel module components of OpenOnload.
 %setup -n %{name}-%{pkgversion}
 
 %build
+
+# There are a huge variety of package names and formats for the various
+# kernel and debug packages.  Trying to maintain correct BuildRequires has
+# proven to be fragile, leading to repeated bugs as a new name format
+# emerges.  Given that, we've given up, and just fail before build with a
+# (hopefully) helfpul message if we can't find the headers that we need
+# in the same way as the net driver spec file does.
+[ -d "%{kpath}" ] || {
+  set +x
+  echo >&2 "ERROR: Kernel headers not found.  They should be at:"
+  echo >&2 "ERROR:   %{kpath}"
+%if %{redhat}
+  echo >&2 "Hint: Install the $(echo '%{kernel}' | sed -r 's/(.*)(smp|hugemem|largesmp|PAE|xen)$/kernel-\2-devel-\1/; t; s/^/kernel-devel-/') package"
+%else
+  echo >&2 "Hint: Install the kernel-source-$(echo '%kernel}' | sed -r 's/-[^-]*$//') package"
+%endif
+  exit 1
+}
+
 export KPATH=%{kpath}
 %ifarch x86_64 
 ./scripts/onload_build --kernelver "%{kernel}" %{?debug:--debug}
@@ -255,23 +215,11 @@ ldconfig -n /usr/lib /usr/lib64
 for k in $(cd /lib/modules && /bin/ls); do
   [ -d "/lib/modules/$k/kernel/" ] && depmod -a "$k"
 done
-if [ -x "/sbin/weak-modules" ]; then
-  for m in sfc sfc_resource sfc_char onload sfc_affinity; do
-    echo "/lib/modules/%{kernel}/extra/$m.ko"
-  done | /sbin/weak-modules --add-modules
-fi
 
 %postun kmod-%{kverrel}
 for k in $(cd /lib/modules && /bin/ls); do
   [ -d "/lib/modules/$k/kernel/" ] && depmod -a "$k"
 done
-if [ "$1" = 0 ]; then  # Erase, not upgrade
-  if [ -x "/sbin/weak-modules" ]; then
-    for m in sfc sfc_resource sfc_char onload sfc_affinity; do
-      echo "/lib/modules/%{kernel}/extra/$m.ko"
-    done | /sbin/weak-modules --remove-modules
-  fi
-fi
 
 %clean
 rm -fR $RPM_BUILD_ROOT
@@ -280,6 +228,9 @@ rm -fR $RPM_BUILD_ROOT
 %defattr(-,root,root)
 /usr/lib*/lib*.so*
 %attr(644, -, -) /usr/lib*/lib*.a
+%ifarch x86_64
+  /usr/lib*/zf
+%endif
 /usr/libexec/onload/apps
 /usr/libexec/onload/profiles
 %{_bindir}/*
@@ -288,6 +239,9 @@ rm -fR $RPM_BUILD_ROOT
 /sbin/*
 /usr/include/onload*
 /usr/include/etherfabric/*.h
+%ifarch x86_64
+  /usr/include/zf*
+%endif
 %docdir %{_defaultdocdir}/%{name}-%{pkgversion}
 %attr(644, -, -) %{_defaultdocdir}/%{name}-%{pkgversion}/*
 %attr(644, -, -) %{_sysconfdir}/modprobe.d/onload.conf

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -69,6 +69,7 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
 #endif
   {
     rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
                           CI_NETIF_MMAP_ID_PKTSET(setid),
                           CI_CFG_PKT_BUF_SIZE * PKTS_PER_SET,
                           OO_MMAP_FLAG_DEFAULT,
@@ -87,8 +88,11 @@ ci_ip_pkt_fmt* __ci_netif_pkt(ci_netif* ni, unsigned id)
 
  out:
   pthread_mutex_unlock(&citp_pkt_map_lock);
-  if( CI_UNLIKELY(pkt == NULL) )
-    ci_log("Failed to map packets!  Crashing...");
+  if( CI_UNLIKELY(pkt == NULL) ) {
+    ci_log("Failed to map packets!");
+    ci_netif_unlock(ni);
+    ci_fail(("Crashing..."));
+  }
   return pkt;
 }
 

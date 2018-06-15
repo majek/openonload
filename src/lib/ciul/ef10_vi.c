@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -320,11 +320,12 @@ static int ef10_ef_vi_transmitv(ef_vi* vi, const ef_iovec* iov, int iov_len,
 }
 
 
-static inline void ef10_pio_push(ef_vi* vi, ef_vi_txq* q, ef_vi_txq_state* qs,
-				 int offset, int len, ef_request_id dma_id)
+ef_vi_inline void
+ef10_pio_set_desc(ef_vi* vi, ef_vi_txq* q, ef_vi_txq_state* qs,
+                  int offset, int len, ef_request_id dma_id)
 {
   ef_vi_ef10_dma_tx_buf_desc* dp;
-  unsigned di = qs->added++ & q->mask;
+  unsigned di = qs->added & q->mask;
 
   dp = (ef_vi_ef10_dma_tx_buf_desc*) q->descriptors + di;
   CI_POPULATE_QWORD_4(*dp,
@@ -333,6 +334,16 @@ static inline void ef10_pio_push(ef_vi* vi, ef_vi_txq* q, ef_vi_txq_state* qs,
                       ESF_DZ_TX_PIO_BYTE_CNT, len,
                       ESF_DZ_TX_PIO_BUF_ADDR, offset);
   q->ids[di] = dma_id;
+}
+
+
+static inline void ef10_pio_push(ef_vi* vi, ef_vi_txq_state* qs)
+{
+  /* Prior call to ef10_pio_set_desc does not increment queue position as
+   * it is used for pio send path warming.  Increment here before push.
+   */
+  qs->added++;
+
   /* Ensure earlier writes via WC complete and the descriptor is written to
    * mem before the doorbell is sent.
    */
@@ -355,13 +366,16 @@ static int ef10_ef_vi_transmit_pio(ef_vi* vi, int offset, int len,
   EF_VI_ASSERT((unsigned) offset < vi->linked_pio->pio_len);
   EF_VI_ASSERT((unsigned) (offset + len) <= vi->linked_pio->pio_len);
 
-  if( (offset & 63) != 0 )
+  if(CI_UNLIKELY( (offset & 63) != 0 ))
     return -EINVAL;
 
+  ef10_pio_set_desc(vi, q, qs, offset, len, dma_id);
   if( qs->added - qs->removed < q->mask ) {
-    ef10_pio_push(vi, q, qs, offset, len, dma_id);
+    ef10_pio_push(vi, qs);
     return 0;
   } else {
+    /* Undo effect of ef10_pio_set_desc */
+    q->ids[qs->added & q->mask] = EF_REQUEST_ID_MASK;
     return -EAGAIN;
   }
 }
@@ -381,17 +395,105 @@ static int ef10_ef_vi_transmit_copy_pio(ef_vi* vi, int offset,
   EF_VI_ASSERT((unsigned) (offset + len) <= pio->pio_len);
   EF_VI_ASSERT(len >= 16);
 
-  if( (offset & 63) != 0 )
+  if(CI_UNLIKELY( (offset & 63) != 0 ))
+    return -EINVAL;
+
+  memcpy_to_pio(pio->pio_io + offset, src_buf, len);
+  ef10_pio_set_desc(vi, q, qs, offset, len, dma_id);
+  if( qs->added - qs->removed < q->mask ) {
+    ef10_pio_push(vi, qs);
+    return 0;
+  } else {
+    /* Undo effect of ef10_pio_set_desc */
+    q->ids[qs->added & q->mask] = EF_REQUEST_ID_MASK;
+    return -EAGAIN;
+  }
+}
+
+
+static void ef10_ef_vi_transmit_pio_warm(ef_vi* vi)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ef_vi_txq* q = &vi->vi_txq;
+  unsigned save_removed = qs->removed;
+
+  /* qs->removed is modified so ( qs->added - qs->removed < q->mask )
+   * is false and packet is not sent.  Descriptor is written to
+   * qs->added & q->mask.
+   */
+  qs->removed = qs->added - q->mask;
+  ef10_ef_vi_transmit_pio(vi, 0, 0, 0);
+  EF_VI_ASSERT(q->ids[qs->added & q->mask] == EF_REQUEST_ID_MASK);
+  qs->removed = save_removed;
+}
+
+
+static void ef10_ef_vi_transmit_copy_pio_warm(ef_vi* vi, int pio_offset,
+                                              const void* src_buf, int len)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ef_vi_txq* q = &vi->vi_txq;
+  unsigned save_removed = qs->removed;
+
+  /* qs->removed is modified so ( qs->added - qs->removed < q->mask )
+   * is false and packet is not sent.  Descriptor is written to
+   * qs->added & q->mask.
+   */
+  qs->removed = qs->added - q->mask;
+  ef10_ef_vi_transmit_copy_pio(vi, pio_offset, src_buf, len, 0);
+  EF_VI_ASSERT(q->ids[qs->added & q->mask] == EF_REQUEST_ID_MASK);
+  qs->removed = save_removed;
+}
+
+
+#ifndef __KERNEL__
+#include <sys/uio.h>
+/* Somewhat limited implementation of transmitv_.
+ * Up to two iovecs can be given,
+ * First iovec is 64byte aligned: both base and len.
+ * Also as we are user only plain iovec is used.
+ */
+int ef10_ef_vi_transmitv_copy_pio(ef_vi* vi, int offset,
+				  const struct iovec* iov, int iovcnt,
+				  ef_request_id dma_id)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ef_vi_txq* q = &vi->vi_txq;
+  ef_pio* pio = vi->linked_pio;
+
+  EF_VI_ASSERT((dma_id & EF_REQUEST_ID_MASK) == dma_id);
+  EF_VI_ASSERT(dma_id != 0xffffffff);
+  EF_VI_ASSERT((unsigned) offset < pio->pio_len);
+  EF_VI_ASSERT(iovcnt >= 1);
+  EF_VI_ASSERT(iovcnt <= 2);
+  EF_VI_ASSERT((unsigned) (offset + iov[0].iov_len) <= pio->pio_len);
+  EF_VI_ASSERT(iovcnt < 2 ||
+               (unsigned) (offset + iov[0].iov_len + iov[1].iov_len) <=
+                          pio->pio_len);
+  EF_VI_ASSERT(iov[0].iov_len != 0);
+  EF_VI_ASSERT((iov[0].iov_len & 7) == 0 || iovcnt == 1);
+
+  if(CI_UNLIKELY( (offset & 63) != 0 ))
     return -EINVAL;
 
   if( qs->added - qs->removed < q->mask ) {
-    memcpy_to_pio(pio->pio_io + offset, src_buf, len);
-    ef10_pio_push(vi, q, qs, offset, len, dma_id);
+    unsigned char* pio_dst = pio->pio_io + offset;
+    int len = iov[0].iov_len;
+    /* copy multiples of 8 - we make a lot of assumption on first iovec here */
+    memcpy_to_pio_aligned(pio_dst, iov[0].iov_base, (iov[0].iov_len + 7) & ~7);
+
+    if( iovcnt > 1 ) {
+      memcpy_to_pio(pio_dst + len, iov[1].iov_base, iov[1].iov_len);
+      len += iov[1].iov_len;
+    }
+    ef10_pio_set_desc(vi, q, qs, offset, len, dma_id);
+    ef10_pio_push(vi, qs);
     return 0;
   } else {
     return -EAGAIN;
   }
 }
+#endif
 
 
 /* ?? todo: rename and move to host_ef10_common.h (via firmwaresrc) */
@@ -533,14 +635,14 @@ static int ef10_ef_vi_receive_init_ps(ef_vi* vi, ef_addr addr,
 
 static void ef10_ef_vi_receive_push(ef_vi* vi)
 {
-  /* Descriptors can only be posted in batches of 8 */
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
-  if( qs->added - qs->prev_added < 8 )
-    return;
-  writel(((qs->added - ((qs->added - qs->prev_added) & 7)) &
-          vi->vi_rxq.mask), vi->io + ER_DZ_RX_DESC_UPD_REG);
-  qs->prev_added = qs->added - ((qs->added - qs->prev_added) & 7);
-  mmiowb();
+  /* Descriptors can only be posted in batches of 8. */
+  uint32_t posted = qs->added & ~7;
+  if(likely( posted != qs->posted )) {
+    writel(posted & vi->vi_rxq.mask, vi->io + ER_DZ_RX_DESC_UPD_REG);
+    qs->posted = posted;
+    mmiowb();
+  }
 }
 
 
@@ -552,6 +654,8 @@ static void ef10_vi_initialise_ops(ef_vi* vi)
   vi->ops.transmit_push          = ef10_ef_vi_transmit_push;
   vi->ops.transmit_pio           = ef10_ef_vi_transmit_pio;
   vi->ops.transmit_copy_pio      = ef10_ef_vi_transmit_copy_pio;
+  vi->ops.transmit_pio_warm      = ef10_ef_vi_transmit_pio_warm;
+  vi->ops.transmit_copy_pio_warm = ef10_ef_vi_transmit_copy_pio_warm;
   vi->ops.transmit_alt_select    = ef10_ef_vi_transmit_alt_select;
   vi->ops.transmit_alt_select_default = ef10_ef_vi_transmit_alt_select_normal;
   vi->ops.transmit_alt_stop      = ef10_ef_vi_transmit_alt_stop;

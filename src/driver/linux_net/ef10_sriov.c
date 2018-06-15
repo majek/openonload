@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2014 Solarflare Communications Inc.
+ * Copyright 2014-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -49,6 +49,7 @@ MODULE_PARM_DESC(vfs_vlan_restrict,
 		 "[SFC9100-family] Restrict VLANs usage on VFs. VF driver "
 		 "needs to use HW VLAN filtering to get VLAN tagged traffic; "
 		 "default=N");
+
 
 static void efx_ef10_sriov_free_vf_vports(struct efx_nic *efx)
 {
@@ -236,7 +237,9 @@ int efx_ef10_vswitching_probe_pf(struct efx_nic *efx)
 				  &nic_data->vport_id);
 	if (rc)
 		goto fail2;
+#ifdef EFX_NOT_UPSTREAM
 	efx->ef10_resources.vport_id = nic_data->vport_id;
+#endif
 
 	rc = efx_ef10_vport_add_mac(efx, nic_data->vport_id, net_dev->dev_addr);
 	if (rc)
@@ -309,11 +312,7 @@ int efx_ef10_vswitching_restore_vf(struct efx_nic *efx)
 	if (rc)
 		return rc;
 
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_PERM_ADDR)
 	perm_addr = efx->net_dev->perm_addr;
-#else
-	perm_addr = efx->perm_addr;
-#endif
 	if (!ether_addr_equal(perm_addr, new_addr)) {
 #if !defined(EFX_USE_KCOMPAT) || !defined(EFX_USE_PRINT_MAC)
 		netif_warn(efx, drv, efx->net_dev,
@@ -473,11 +472,13 @@ int efx_ef10_sriov_init(struct efx_nic *efx)
 
 	vf_count = min(vf_max, efx->max_vfs);
 
+
 	if (vf_count > 0) {
 		rc = efx->type->sriov_configure(efx, vf_count);
 		if (rc)
 			return rc;
 	}
+
 
 	return 0;
 #else
@@ -652,6 +653,7 @@ int efx_ef10_sriov_set_vf_mac(struct efx_nic *efx, int vf_i, u8 *mac)
 	vf = efx_ef10_vf_info(efx, vf_i);
 	if (!vf)
 		return -EINVAL;
+
 
 	if (ether_addr_equal(mac, vf->mac))
 		return 0;
@@ -908,7 +910,7 @@ static int efx_ef10_sriov_set_privilege_mask(struct efx_nic *efx, int vf_i,
 	int rc;
 	u32 old_mask, new_mask;
 
-	EFX_BUG_ON_PARANOID((value & ~mask) != 0);
+	EFX_WARN_ON_PARANOID((value & ~mask) != 0);
 
 	/* Get privilege mask */
 	MCDI_POPULATE_DWORD_2(pm_inbuf, PRIVILEGE_MASK_IN_FUNCTION,
@@ -975,6 +977,7 @@ int efx_ef10_sriov_set_vf_link_state(struct efx_nic *efx, int vf_i,
 			    NULL, 0, NULL); /* don't care what old mode was */
 }
 #endif /* EFX_HAVE_VF_LINK_STATE */
+
 
 #else /* CONFIG_SFC_SRIOV */
 

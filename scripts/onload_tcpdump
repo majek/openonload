@@ -19,10 +19,15 @@ usage() {
   echo " # onload_tcpdump -o 1 -o one -o '*two*'"
   echo "   - dump stack number 1, dump stack with name 'one', dump all stacks "
   echo "     with 'two' in their names and monitor for new stack with name '*two*'"
+  echo " # onload_tcpdump --no-match"
+  echo "   - of all stacks dump only rx packets that do not match any Onload "
+  echo "     sockets or speficially - packets for which there is no Onload "
+  echo "     software filter present"
   echo "If you do not specify stacks, $script will monitor all onload stacks."
   echo "If you do not specify interface via -i option, $script "
   echo "listens on ALL interfaces instead of the first one."
   echo "Use --dump-os=0 if you do not want to see Onload packets sent via OS"
+  echo "Use --no-match to see packets matching no Onload socket"
   exit 1
 }
 
@@ -62,8 +67,17 @@ while [ -n "$1" ]; do
       stack_names_or_ids+=" ${1:2}"
       shift
       ;;
+    --no-match*)
+      onload_opts+=" $1"
+      shift
+      ;;
     --dump-os*)
       onload_opts+=" $1"
+      shift
+      ;;
+    --time-stamp-precision*)
+      onload_opts+=" $1"
+      tcpdump_opts+=" $1"
       shift
       ;;
     *)

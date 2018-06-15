@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -41,12 +41,6 @@ void efx_netpoll(struct net_device *net_dev);
 #endif
 int efx_net_open(struct net_device *net_dev);
 int efx_net_stop(struct net_device *net_dev);
-#if !defined(EFX_USE_KCOMPAT) || defined(EFX_USE_NETDEV_STATS64)
-struct rtnl_link_stats64 *efx_net_stats(struct net_device *net_dev,
-					struct rtnl_link_stats64 *stats);
-#else
-struct net_device_stats *efx_net_stats(struct net_device *net_dev);
-#endif
 void efx_watchdog(struct net_device *net_dev);
 int efx_change_mtu(struct net_device *net_dev, int new_mtu);
 int efx_set_mac_address(struct net_device *net_dev, void *data);
@@ -77,9 +71,11 @@ void efx_vlan_rx_register(struct net_device *dev, struct vlan_group *vlan_group)
 /* TX */
 int efx_probe_tx_queue(struct efx_tx_queue *tx_queue);
 void efx_remove_tx_queue(struct efx_tx_queue *tx_queue);
-void efx_init_tx_queue(struct efx_tx_queue *tx_queue);
+void efx_destroy_tx_queue(struct efx_tx_queue *tx_queue);
+int efx_init_tx_queue(struct efx_tx_queue *tx_queue);
 void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue);
 void efx_fini_tx_queue(struct efx_tx_queue *tx_queue);
+void efx_purge_tx_queue(struct efx_tx_queue *tx_queue);
 netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 				struct net_device *net_dev);
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_ENABLE_SFC_XPS)
@@ -94,11 +90,8 @@ u16 efx_select_queue(struct net_device *dev, struct sk_buff *skb);
 #endif
 #endif
 int efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
-void fastcall efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
-#else
 void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
-#endif
+void efx_xmit_done_single(struct efx_tx_queue *tx_queue);
 unsigned int efx_tx_max_skb_descs(struct efx_nic *efx);
 extern unsigned int efx_piobuf_size;
 extern bool separate_tx_channels;
@@ -108,18 +101,14 @@ void efx_set_default_rx_indir_table(struct efx_nic *efx);
 void efx_rx_config_page_split(struct efx_nic *efx);
 int efx_probe_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_remove_rx_queue(struct efx_rx_queue *rx_queue);
-void efx_init_rx_queue(struct efx_rx_queue *rx_queue);
+void efx_destroy_rx_queue(struct efx_rx_queue *rx_queue);
+int efx_init_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic);
 void efx_rx_slow_fill(struct work_struct *data);
 void __efx_rx_packet(struct efx_channel *channel);
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
-void fastcall efx_rx_packet(struct efx_rx_queue *rx_queue, unsigned int index,
-			    unsigned int n_frags, unsigned int len, u16 flags);
-#else
 void efx_rx_packet(struct efx_rx_queue *rx_queue, unsigned int index,
 		   unsigned int n_frags, unsigned int len, u16 flags);
-#endif
 static inline void efx_rx_flush_packet(struct efx_channel *channel)
 {
 	if (channel->rx_pkt_n_frags)
@@ -137,7 +126,7 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 #define EFX_MIN_EVQ_SIZE 512UL
 #ifdef EFX_NOT_UPSTREAM
 /* Additional event queue entries to add on channel zero for driverlink. */
-#define EFX_EVQ_DL_EXTRA_ENTRIES 1024UL
+#define EFX_EVQ_DL_EXTRA_ENTRIES 7936UL
 #endif
 
 /* Maximum number of TCP segments we support for soft-TSO */
@@ -150,7 +139,10 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 #define EFX_RXQ_MIN_ENT		16U
 #define EFX_TXQ_MIN_ENT(efx)	(2 * efx_tx_max_skb_descs(efx))
 
-#define EFX_TXQ_MAX_ENT(efx)	(EFX_WORKAROUND_35388(efx) ? \
+/* All EF10 architecture NICs steal one bit of the DMAQ size for various
+ * other purposes when counting TxQ entries, so we halve the queue size.
+ */
+#define EFX_TXQ_MAX_ENT(efx)	(EFX_WORKAROUND_EF10(efx) ? \
 				 EFX_MAX_DMAQ_SIZE / 2 : EFX_MAX_DMAQ_SIZE)
 
 #ifdef EFX_NOT_UPSTREAM
@@ -163,14 +155,10 @@ void efx_cancel_slow_fill(struct efx_rx_queue *rx_queue);
 #define EFX_BW_PCIE_GEN3_X16 (16 << (3 - 1))
 #endif
 
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_WITH_VMWARE_NETQ)
-extern bool efx_rss_enabled(const struct efx_nic *efx);
-#else
 static inline bool efx_rss_enabled(struct efx_nic *efx)
 {
 	return efx->n_rss_channels > 1;
 }
-#endif
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SFC_LRO)
 
@@ -183,17 +171,10 @@ static inline bool efx_ssr_enabled(struct efx_nic *efx)
 #endif
 }
 
-#if defined(EFX_WITH_VMWARE_NETQ)
-static inline bool efx_channel_ssr_enabled(struct efx_channel *channel)
-{
-	return !!(channel->netq_flags & NETQ_USE_LRO);
-}
-#else
 static inline bool efx_channel_ssr_enabled(struct efx_channel *channel)
 {
 	return efx_ssr_enabled(channel->efx);
 }
-#endif
 
 int efx_ssr_init(struct efx_channel *channel, struct efx_nic *efx);
 void efx_ssr_fini(struct efx_channel *channel);
@@ -284,20 +265,6 @@ efx_filter_get_filter_safe(struct efx_nic *efx,
 	return efx->type->filter_get_safe(efx, priority, filter_id, spec);
 }
 
-/**
- * efx_filter_redirect_id - update the queue for an existing RX filter
- * @efx: NIC in which to update the filter
- * @filter_id: ID of filter, as returned by @efx_filter_insert_filter
- * @rxq_i: Index of RX queue
- * @stack_id: Stack id associated with the RX queue
- */
-static inline int efx_filter_redirect_id(struct efx_nic *efx,
-					 u32 filter_id, int rxq_i,
-					 int stack_id)
-{
-	return efx->type->filter_redirect(efx, filter_id, rxq_i, stack_id);
-}
-
 static inline u32 efx_filter_count_rx_used(struct efx_nic *efx,
 					   enum efx_filter_priority priority)
 {
@@ -334,6 +301,7 @@ bool efx_filter_is_mc_recipient(const struct efx_filter_spec *spec);
 int efx_channel_dummy_op_int(struct efx_channel *channel);
 void efx_channel_dummy_op_void(struct efx_channel *channel);
 int efx_realloc_channels(struct efx_nic *efx, u32 rxq_entries, u32 txq_entries);
+
 
 /* Ports */
 int efx_reconfigure_port(struct efx_nic *efx);
@@ -399,6 +367,7 @@ int efx_init_irq_moderation(struct efx_nic *efx, unsigned int tx_usecs,
 			    bool rx_may_override_tx);
 void efx_get_irq_moderation(struct efx_nic *efx, unsigned int *tx_usecs,
 			    unsigned int *rx_usecs, bool *rx_adaptive);
+void efx_set_stats_period(struct efx_nic *efx, unsigned int period_ms);
 #ifdef EFX_NOT_UPSTREAM
 extern int efx_target_num_vis;
 #endif
@@ -426,7 +395,7 @@ void efx_update_sw_stats(struct efx_nic *efx, u64 *stats);
 #ifdef CONFIG_SFC_MTD
 extern bool efx_allow_nvconfig_writes;
 int efx_mtd_add(struct efx_nic *efx, struct efx_mtd_partition *parts,
-		size_t n_parts, size_t sizeof_part);
+		size_t n_parts);
 static inline int efx_mtd_probe(struct efx_nic *efx)
 {
 	return efx->type->mtd_probe(efx);
@@ -497,5 +466,9 @@ static inline void efx_rwsem_assert_write_locked(struct rw_semaphore *sem)
 	}
 #endif
 }
+
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_TX)
+int efx_xdp_tx_buffer(struct efx_nic *efx, struct xdp_buff *xdp);
+#endif
 
 #endif /* EFX_EFX_H */

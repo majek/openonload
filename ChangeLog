@@ -1,3 +1,298 @@
+openonload-201710-u1.1
+----------------------
+
+Update sfc net driver to v4.12.2.1014
+
+Add support for recent Linux kernels (up to 4.16) and those using CONFIG_RETPOLINE
+
+
+openonload-201710-u1
+--------------------
+
+Update sfc net driver to v4.12.2.1006
+
+Add support for recent Linux kernels (up to 4.14.11)
+
+
+openonload-201710
+-----------------
+
+Update sfc net driver to v4.12.1.1016
+
+Add support for ScaleOut Onload NICs
+Add support for multiple namespaces
+Add support for MACVLAN interfaces
+Add support for policy routing (replacing EF_TCP_LISTEN_REPLIES_BACK)
+Improve support for Onload in Docker containers
+Add support for TCPDirect in Docker containers
+Add support for recent Linux kernels (up to 4.13)
+Rework Onload's control plane to avoid non-GPL taint of kernel modules
+Rework Onload's bonding support to avoid polling files in /proc
+Rework Onload's black-listing and white-listing of interfaces
+
+task41754: add support for IP_MULTICAST_IF option for struct ip_mreq
+task43267: add ef_vi functions for warming PIO transmit path
+task45737: add example ef_vi app for receiving jumbo frames
+task51485: add nanosecond pcap-ns format support into onload_tcpdump
+task52751: allow acceleration of up to 16 interfaces when configured
+task53051: include details in efsend sample app for how to achieve high throughput
+task60244: add vlan support to efsend sample application
+task62742: support for per-stack toggling of TCP header timestamp option: EF_TCP_TSOPT_MODE
+task64641: add option EF_PD_MCAST_LOOP to ef_send example
+task65597: add onload_stackdump vi_stats command to report no_desc drops (and others)
+task65597: rename select_primes to muxer_primes in stackdump
+task65597: add more details of timestamping state to stackdump output
+task66897: provide per-socket packet count for TCP sockets in stackdump
+task67177: allow gdb to access Onload's shared memory mappings
+task67689: allow TCPDirect TCP alternatives API callers to calculate their buffer requirements accurately
+task67745: allow pauses between sends in eftsloop sample application
+task68015: add zf_attr_get_* functions to TCPDirect API to read attribute values
+task68726: add meta-option to extension API (ONLOAD_SPIN_MIMIC_EF_POLL) to mimic EF_POLL_USEC
+task69697: improve packet rate achievable with ef_vi sample applications
+task69900: add zero-copy API sample code: tests/onload/extensions/zc_udp_recv.c
+task70734: add test app to demonstrate ef_vi PIO warming: efsend_pio_warm
+task70952: add zfdelegated_client benchmark - TCPDirect equivalent to efdelegated_client
+task72554: Small speedups for efforward_packed
+task73181: add support for gcc-7
+task73219: include IP stats and discard counts in stackdump lots, improve formatting
+
+bug47538: report failure from 'onload_install --nobuild' if there is no build directory
+bug50141: check onload version when opening onload driver handle
+bug51146: fix potential deadlock due to inconsistent fdtable and epoll lock ordering
+bug53979: clarify onload_delegated_send extension API return codes
+bug54427: fix F_SETPIPE_SZ to return EBUSY if too many buffers are busy
+bug55414: add per stack counter handover_accept like per socket counter n_os
+bug59268: correct acceleration behaviour of team with non-acceleratable interface as slave
+bug59520: ensure onload_ordered_epoll_wait() unblocks if epoll_ctl() is called
+bug59819: don't ignore keepalive EF_ variables
+bug60256: don't send unacceptable RST packet when receiving on closed socket
+bug62342: do not install filters on NICs which the stack has no VIs on (e.g. packed stream NICs)
+bug62756: do not warn on installing MAC+PROTO filter if got PROTO filter instead
+bug63194: fix potential segfault when calling onload_ordered_epoll_wait() from several threads
+bug63300: avoid log messages when handing over UDP packets to kernel due to no ARP
+bug64707: include details of -p option in onload usage information
+bug64738, bug68473: reduce long-running tasks with stack lock held to avoid EBUSY from operations that need stack lock
+bug64785: get correct kernel version in dkms scripts when building for a different kernel to the running one
+bug64792: fix receiving 0 byte UDP datagram via OS using zero copy API
+bug65065: fix ef_vi_receive_set_discards() to correctly use the supplied masks
+bug65842: address various issues in openonload spec file
+bug66195: correctly use module_mutex to avoid race causing list corruption on module load/unload
+bug66287: fix filter assertion failure and software filter leak with EF_TCP_SHARED_LOCAL_FILTERS
+bug66508: reject negative alt_count and zero alt_buf_size in TCPDirect TCP alternatives API
+bug66537: avoid caching of IPv6 sockets
+bug66581: fix assertion failure during endpoint move: flush pending atomic operations before moving endpoint
+bug66652: fix assertion failure during stack free: do not free endpoint before its filters are removed
+bug66721: fix crashes with EF_CLUSTER_RESTART
+bug66829: onload_tcpdump: add --no-match option to dump unmatched traffic only
+bug66886: fix '<func> falls through to next function' warnings on RHEL 7.3
+bug66920: fix crash when handling packets with invalid lengths and checksums
+bug67043: do not send RST when aborting SYN-SENT connection in TCPDirect
+bug67159: fix handling of packets with errors with EF_VI_RX_EVENT_MERGE
+bug67181: return -EAGAIN rather than 0 if onload_recvmsg_kernel() called when nothing to do
+bug67185: check msg_iovlen is valid before doing MSG_WARM zc_send()
+bug67225: fix memory leak in epoll mode 1 - free eitems when close(e_fd)
+bug67327: print a message when starting TCPDirect if not using low-latency firmware
+bug67330: increment pio_pkts counter when templated send uses PIO
+bug67356: return error in proper format from send(MSG_WARM) if message too large
+bug67530: disable EF_TCP_SHARED_LOCAL_PORTS for loopback-only stacks
+bug67580: don't complain when receiving ACK packets in TCP TIME_WAIT state
+bug67633: fix counting of time-wait state loopback sockets when orphaning stack
+bug67658: add extension to control filter install for UDP unicast (onload_socket_unicast_nonaccel())
+bug67708: before installing filters clear pending NON_ATOMIC jobs to avoid assertion failures
+bug67839: correct stackdump threads reporting of priority
+bug67851: bug67853: set EPOLLRDHUP when reaching CLOSING state in TCPDirect
+bug67853: handle FIN with zero window and non-empty sendq in TCPDirect
+bug67905: fix potential deadlock in ci_tcp_connect()
+bug67929: make onload robust to non-monotonic clocks
+bug67988: onload_zc_recv(): fix crash when callback modifies args
+bug68091: updated onload spec file to avoid installing weak-updates symlinks for all kernels present
+bug68217: unlock stack before failing on packet-map failure to avoid stuck stack when stack sharing
+bug68405: allow the congestion window to reduce below the amount of unacked data in TCPDirect
+bug68426: make fcntl(F_[SG]ETPIPE_SZ) retuns value consistent with Linux
+bug68473, bug68838: scalable passive: socket stays scalable with so_reuseport and cluster_ignore
+bug68502: do not renege on advertised TCP window when SO_RCVBUF is reduced
+bug68504: fix regression where ef_pio_alloc() was incompatible with older drivers
+bug68754: don't warn in debug build about mismatched UDP packet if stack has scalable filter
+bug68800: avoid hang on dup2 onto new stack fd after exec
+bug68838: allow moving SO_REUSEPORT sockets when cluster_ignore is set
+bug68937: avoid installing sw/hw filters for removed ip adresses
+bug69172: update stack frc before delivering UDP loopback to get accurate timestamps
+bug69175: correctly handle hw TX timestamping when NIC is reset to avoid gap in TCP stream timestamps
+bug69408: avoid long wait for TCP hw TX timestamps if app calls recvmsg(MSG_ERRQUEUE) in tight loop
+bug69633: split packet in send queue if receive window too small for whole segment to avoid unnecessary wait
+bug69675: ef_vi: Fix bad assert that fires when RX EV merge limit is increased
+bug69676: fix overflow in packet count reported by efsink and efsink_packed
+bug69782: ef_vi: Fix failure to handle RX event merging limit of 15
+bug69827: ef_vi: Fix packed stream when on VI linked to separate EVQ
+bug69841: use static with inline in function declarations to help avoid compiler warnings
+bug69848: postpone handling of out-of-order packets when rxq is not fully processed to avoid assertion in TCPDirect
+bug70243: make type cast match function return type in ef_packet_stream_packet_*()
+bug70426: avoid memory leak on cluster allocation failure
+bug70515: improve nested epoll caveat for EF_EPOLL_CTL_FAST documentation
+bug70553: avoid possible send on closed TCP connection race
+bug70575: fix multiple onload_iptables rule parsing issues
+bug70638: document error returns from ef_vi_transmit_alt_alloc()
+bug70651: efpio and efpingpong could ignore events that came after first RX event in each poll
+bug70681: reduce likelihood of exceeding maximum onload_iptables rule length
+bug70682: use spin_lock_bh() in oo_timesync_update() to avoid lockdep warnings
+bug70905: clarify ef_vi_transmit_push() documentation
+bug71053: use syscalls for sendmmsg()/recvmmsg() when passing to kernel instead of dlsym
+bug71134: ensure TCPDirect zockets and handles are freed the right way: fixes leak of packet buffer
+bug71360: provide correct fdtable lock status when dropping fdi ref, avoids potential deadlock
+bug71376: TCPDirect: log sending failures at trace level
+bug71435: TCPDirect: fix buffer size passed to inet_ntop
+bug71447: TCPDirect: set initial ssthresh = 0xffff as per RFC5681
+bug71451: Avoid deadlock when calling citp_fdtable_lookup_noprobe with fdtable lock
+bug71512: TCPDirect: finish route lookup before constructing packet headers to get correct VLAN
+bug71515: TCPDirect: don't use a multicast address as source address
+bug71682: fix handling of single char options in timestamping sample code to avoid app segfault
+bug71727: epoll3: fix unkillable processes following kill -9 of another process with shared stack
+bug71783: fix handling of bind with listen and EF_TCP_SHARED_LOCAL_PORTS
+bug71809: fix handling of bind with handover and EF_TCP_SHARED_LOCAL_PORTS
+bug72036: fix crash in TXQ-purge workitem when stack allocation fails
+bug72065: do not warn about EF_LOG_TIMESTAMPS, it is a known valid option
+bug72147: fix dropping of loopback sockets in acceptq when stack destroyed to avoid leak
+bug72279: improve errors reported from ef_vi_transmit_alt_alloc
+bug72388: correctly handle VLANs in onload_tcpdump
+bug72669: fix behaviour when calling epoll_wait with a bad epoll file descriptor
+bug72773: fix removing sockets from epoll set when epoll fd is closed
+bug73121: fix use-after-free error when unloading resource driver
+bug73274: correctly spread traffic between ports in LACP bonds.
+bug73334, bug62342: fix crash when installing drop filter with clustering
+bug73493: fix 'deallocating None' crashes in solar_clusterd
+bug73582: fix fdi refcounting in reuseport clustering to allow stack to close after fork
+bug73726: avoid long timeout on shutdown of blocking socket in connect()
+bug73855: avoid firmware assertion when changing DROP filters
+bug73869: install correct filters on down hardware ports for reuseport clustering
+bug73871: fix crash with EF_TCP_RCVBUF_STRICT when reaping TCP receive queue
+bug74264: count failures to send due to control plane tables being full
+bug74569: fix crash in onload_ordered_epoll_wait() with concurrent UDP receive
+
+
+openonload-201606-u1.3
+----------------------
+
+Update sfc net driver to v4.10.7.1001
+
+Support for recent Linux kernel versions (4.11)
+Support for recent Linux distributions (RHEL 6.9, Debian 9, Ubuntu 17.04)
+
+SF-117344-KI/bug66544: fix MSG_WARM behaviour when called on different socket but same stack as send()
+SF-118285-KI/bug66847: check fget() result in epoll calls to avoid NULL dereference
+SF-117911-KI/bug67477: retain original security context after allocating packet buffers
+SF-117847-KI/bug68310: improve TCP_CORK behaviour when option is removed with fragmented send queue
+SF-117847-KI/bug68640: ensure setting TCP_NODELAY while TCP_CORK in use results in flush of pending packet
+SF-118230-KI/bug68653: avoid crash in onload_iptables
+SF-118033-KI/bug69492: fix leak of syn-recv socket state and state corruption when failing to allocate internal state
+SF-118296-KI/bug69764: fix detection and handling of non-Ethernet interfaces, e.g. IP tunnels.
+SF-118224-KI/bug70468: fix close() trampolining with kernel built with CONFIG_HARDENED_USERCOPY
+SF-118106-KI/bug70825: fix TCP RTT estimation with ONLOAD_MSG_WARM and no TCP timestamp option
+SF-118231-KI/bug71078: avoid possible deadlock between fd handover, setsockopt, and UDP send without bind()
+SF-118229-KI/bug71157: TCPDirect could send 1 byte beyond advertised receiver's window
+SF-118299-KI:bug71526: correctly detect bonding failure for multicast over VLAN-over-bond interface
+bug67748: report error correctly if ONLOAD_MSG_WARM used after connection is broken
+
+
+openonload-201606-u1.2
+----------------------
+
+Update sfc net driver to v4.10.4.1005
+
+Support for recent Linux kernel versions (4.9, 4.10)
+
+SF-117768-KI/bug65337: ignore changes when time jumps forward during CPU speed estimate
+SF-117352-KI/bug65469: avoid spurious retransmits when ods_complete() called after ACK received
+SF-117777-KI/bug66777: prevent potential crashes with concurrent UDP receive-queue access.
+SF-117771-KI/bug67072: fix race condition causing potential deadlock in oo_rwlock_lock_write()
+SF-117796-KI/bug67325: prevent kernel panic if NIC reset occurs for partially-initialised Onload stack
+SF-117813-KI/bug68405: fix MCDI TX errors with large sends on lossy connections with TCPDirect
+SF-117770-KI/bug68763: send fast retransmits in response to duplicate acknowledgements in TCPDirect
+SF-117704-KI/bug68933: fix close-trampolining on 4.6 and later kernels
+SF-117774-KI/bug69206: detect LACP bond active slaves correctly on recent kernels
+bug64298: Respect EF_ONLOAD_FD_BASE for re-probed netifs
+
+
+openonload-201606-u1.1
+----------------------
+
+task67184: Improved TCPDirect latency by ~50ns on dual-socket systems
+
+SF-117521-KI/bug66871: fix crash caused by failure to complete TCPDirect stack allocation
+SF-117522-KI/bug67797: fix socket and/or packet corruption with templated sends API on 8000-series NICs
+SF-117525-KI/bug67676: accelerate multicast traffic even when interface is brought up before Onload discovers it
+SF-117526-KI/bug67002: don't accelerate traffic for an IP address that has been removed from an interface
+
+
+openonload-201606-u1
+--------------------
+
+Update sfc net driver to v4.10.0.1011
+	
+Add TCPDirect library and API
+Support for recent gcc versions (6.1)
+Support for recent Linux kernel versions (4.8)
+
+task61897: improve TCP active-open latency: see EF_TCP_SHARED_LOCAL_PORTS.
+task65068: add single interface mode to WODA: see EF_WODA_SINGLE_INTERFACE
+task64925: report resources for TX alternatives in ef_vi capabilities API
+task63419: add onload_socket_nonaccel extension API to create non-accelerated socket
+task62869: add JNI bindings for WODA
+
+SF-116522-KI/bug63307: fix RTT calculation without TCP timestamps when loss is occurring.
+SF-117038-KI/bug64298: avoid using low fds for onload internals to fix fd clash with java.
+
+bug62973: show CLOSED TCP sockets in onload_stackdump and OnloadRemoteMonitor.
+bug62104: avoid storm of wakeup events resulting in "MCDI request was completed without an event"
+bug63384: bug62973: Fix EINVAL on listen(); shutdown(); listen();
+bug61421: add SIGFPE to the list of signals we do not intercept by default
+bug51442: fix bashism in onload_tool script
+bug63134: OnloadRemoteMonitor - add option to select a single stack by name
+bug62994: handover TCP listen socket if Onload iptables prevents acceleration.
+bug62994: handover socket during TCP connect() if Onload iptables blocks filters
+bug34753: improve handling of EF_PREFAULT_PACKETS - only error if can't reach EF_MAX_PACKETS
+bug60745: improve onload_stackdump help output for filters
+bug63136: OnloadRemoteMonitor: add ability to retrieve EF_* settings
+bug63134: OnloadRemoteMonitor: add option to select a single stack by name 
+bug63723: handle inconsistent cplane state without assertion
+bug63799: fix timestamp output and decode sync flags in efsend_timestamping.c example app
+bug63763: add onload_cplane with weak-modules in RPM spec file
+bug63322: improve WODA behaviour (return faster) with EF_UL_EPOLL=3.
+bug63982: fix build with gcc 6.1: undefined reference to ____ilog2_NaN.
+bug63319: fix recvmmsg() with zero timeout failing to return data.
+bug63745: try to load sfc_aoe module if installed
+bug64249: avoid leaking stacks that were destroyed before application termination.
+bug61373: onload_install changed to update an existing initrd using dracut --force
+bug64486: fix trampoline code to work without KALLSYMS_ALL
+bug63986: tell filter code to avoid blacklisted hwports
+bug63986: add /proc/driver/onload/filter_*
+bug64221: add /proc/driver/onload_cplane/hwport2ifindex
+bug64680: task59983: Fix panic when passing fds through PF_UNIX sockets.
+bug64732: when handling SO_REUSEPORT bind, only unlock socket if it was locked
+bug64435: add EF_LOG_THREAD environment to include thread id in log messages
+bug64853: fix hexdump option in efrss sample, was printing all zeros
+bug64889: don't generate warnings about unexpected MCDI events for MCDI_EVENT_CODE_AOE (0x18)
+bug63563: OnloadRemoteMonitor - output integer values using signed/unsigned format
+bug57881: provide example of how to use OnloadRemoteMonitor with collectd to record stats
+bug63562: OnloadRemoteMonitor - adjust output formats for special fields e.g. IP addresses
+bug63774: disable huge pages if incorrect hugepage size configured and avoid kernel crash
+bug65144: Onload: with EPOLLET, return all events or nothing, fixes reporting when level-triggered events present
+bug49599: avoid stack-locked assertion when freeing SW filters in stack dtor.
+bug65497: Add extra logging for odd failure cases in libstack_mappings_init
+bug63562: OnloadRemoteMonitor - ci_ifid_t displays as signed
+bug64971: OnloadRemoteMonitor - provide finer-grained control of output
+bug65774: fix packed stream buffer sizes returned by capabilities API
+bug65067: ensure we periodically poll while spinning in WODA to process stack in timely fashion.
+bug63768: install orm_json and orm_webserver on 64-bit systems
+bug63914: fix sfcaffinity_config for interfaces with ethX-ptp irq channels
+bug66047: fix kernel panic when calling ef_pio_unlink_vi() twice.
+bug66190: fix memory leak in memreg_rm_alloc()
+bug66155: initialize sb_aflags in ci_active_wild_state_init() to avoid assertion on close of reuseport socket
+bug64746: permit EPOLL_CTL_DEL with invalid pointer for event structure
+bug65026: correctly initialise EF_ACCEPT_INHERIT_NONBLOCK
+bug66477: use dev_base_lock instead of rtnl to protect for_each_netdev(), makes teaming work on RHEL7.3
+bug66612: fix crash allocating stack when low on memory
+
+
 openonload-201606
 -----------------
 
@@ -87,7 +382,7 @@ Bug62453: licence JNI wrapper with BSD not GPL
 bug62468: avoid -fstack-protector when executing library, fixes segfault on Ubuntu 16.04
 bug62589: fix RPM spec file conflict with python-libs package
 bug62720: Fix EALREADY on ef_vi EVQ-init with timestamps.
-bug63317: fix memory leak in ef_vi statistics API
+SF-116521-KI/bug63317: fix memory leak in ef_vi statistics API
 
 
 openonload-201509-u1

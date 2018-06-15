@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -61,6 +61,10 @@
 #include "utils.h"
 
 
+#define EV_POLL_BATCH_SIZE   16
+#define REFILL_BATCH_SIZE    16
+
+
 /* Hardware delivers at most ef_vi_receive_buffer_len() bytes to each
  * buffer (default 1792), and for best performance buffers should be
  * aligned on a 64-byte boundary.  Also, RX DMA will not cross a 4K
@@ -98,6 +102,9 @@ struct resources {
   struct ef_vi       vi;
   int                rx_prefix_len;
   int                pktlen_offset;
+  int                refill_level;
+  int                refill_min;
+  unsigned           batch_loops;
 
   /* registered memory for DMA */
   void*              pkt_bufs;
@@ -124,6 +131,7 @@ static int cfg_monitor_vi_stats;
 static int cfg_rx_merge;
 static int cfg_eventq_wait;
 static int cfg_fd_wait;
+static int cfg_max_fill = -1;
 
 /* Mutex to protect printing from different threads */
 static pthread_mutex_t printf_mutex;
@@ -237,89 +245,130 @@ static void handle_batched_rx(struct resources* res, int pkt_buf_i)
 {
   struct pkt_buf* pkt_buf = pkt_buf_from_id(res, pkt_buf_i);
   void* dma_ptr = (char*) pkt_buf + RX_DMA_OFF;
+  uint16_t len = *(uint16_t*) ((uint8_t*) dma_ptr + res->pktlen_offset);
+  len = le16toh(len);
 
-  handle_rx(res, pkt_buf_i,
-            *(uint16_t*)((uint8_t*)dma_ptr + res->pktlen_offset));
+  handle_rx(res, pkt_buf_i, len);
 }
 
 
-static void refill_rx_ring(struct resources* res)
+static bool refill_rx_ring(struct resources* res)
 {
-#define REFILL_BATCH_SIZE  16
   struct pkt_buf* pkt_buf;
   int i;
 
-  if( ef_vi_receive_space(&res->vi) < REFILL_BATCH_SIZE ||
+  if( ef_vi_receive_fill_level(&res->vi) > res->refill_level ||
       res->free_pkt_bufs_n < REFILL_BATCH_SIZE )
-    return;
+    return false;
 
-  for( i = 0; i < REFILL_BATCH_SIZE; ++i ) {
-    pkt_buf = res->free_pkt_bufs;
-    res->free_pkt_bufs = res->free_pkt_bufs->next;
-    --(res->free_pkt_bufs_n);
-    ef_vi_receive_init(&res->vi, pkt_buf->ef_addr + RX_DMA_OFF, pkt_buf->id);
-  }
+  do {
+    for( i = 0; i < REFILL_BATCH_SIZE; ++i ) {
+      pkt_buf = res->free_pkt_bufs;
+      res->free_pkt_bufs = res->free_pkt_bufs->next;
+      --(res->free_pkt_bufs_n);
+      ef_vi_receive_init(&res->vi, pkt_buf->ef_addr + RX_DMA_OFF, pkt_buf->id);
+    }
+  } while( ef_vi_receive_fill_level(&res->vi) < res->refill_min &&
+           res->free_pkt_bufs_n >= REFILL_BATCH_SIZE );
   ef_vi_receive_push(&res->vi);
+  return true;
 }
 
 
-static void thread_main_loop(struct resources* res)
+static int poll_evq(struct resources* res)
 {
-  ef_event evs[32];
+  ef_event evs[EV_POLL_BATCH_SIZE];
   ef_request_id ids[EF_VI_RECEIVE_BATCH];
-  int i, j, n_ev, n_rx;
+  int i, j, n_rx;
+
+  int n_ev = ef_eventq_poll(&res->vi, evs, EV_POLL_BATCH_SIZE);
+
+  for( i = 0; i < n_ev; ++i ) {
+    switch( EF_EVENT_TYPE(evs[i]) ) {
+    case EF_EVENT_TYPE_RX:
+      /* This code does not handle scattered jumbos. */
+      TEST( EF_EVENT_RX_SOP(evs[i]) && ! EF_EVENT_RX_CONT(evs[i]) );
+      assert( ! cfg_rx_merge );
+      handle_rx(res, EF_EVENT_RX_RQ_ID(evs[i]),
+                EF_EVENT_RX_BYTES(evs[i]) - res->rx_prefix_len);
+      break;
+    case EF_EVENT_TYPE_RX_MULTI:
+    case EF_EVENT_TYPE_RX_MULTI_DISCARD:
+      /* This code does not handle scattered jumbos. */
+      TEST( EF_EVENT_RX_MULTI_SOP(evs[i]) && ! EF_EVENT_RX_MULTI_CONT(evs[i]) );
+      assert( cfg_rx_merge );
+      n_rx = ef_vi_receive_unbundle(&res->vi, &evs[i], ids);
+      for( j = 0; j < n_rx; ++j )
+        handle_batched_rx(res, ids[j]);
+      res->n_ht_events += 1;
+      break;
+    case EF_EVENT_TYPE_RX_DISCARD:
+      handle_rx_discard(res, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
+                        EF_EVENT_RX_DISCARD_BYTES(evs[i]) - res->rx_prefix_len,
+                        EF_EVENT_RX_DISCARD_TYPE(evs[i]));
+      break;
+    default:
+      LOGE("ERROR: unexpected event type=%d\n", (int) EF_EVENT_TYPE(evs[i]));
+      break;
+    }
+  }
+
+  return n_ev;
+}
+
+
+static void event_loop_throughput(struct resources* res)
+{
+  const int ev_lookahead = EV_POLL_BATCH_SIZE + 7;
 
   while( 1 ) {
-    /* Poll event queue for events */
-    n_ev = ef_eventq_poll(&res->vi, evs, sizeof(evs) / sizeof(evs[0]));
-    if( n_ev > 0 ) {
-      for( i = 0; i < n_ev; ++i ) {
-        switch( EF_EVENT_TYPE(evs[i]) ) {
-        case EF_EVENT_TYPE_RX:
-          /* This code does not handle jumbos. */
-          assert(EF_EVENT_RX_SOP(evs[i]) != 0);
-          assert(EF_EVENT_RX_CONT(evs[i]) == 0);
-          assert(!cfg_rx_merge);
-          handle_rx(res, EF_EVENT_RX_RQ_ID(evs[i]),
-                    EF_EVENT_RX_BYTES(evs[i]) - res->rx_prefix_len);
-          break;
-        case EF_EVENT_TYPE_RX_MULTI:
-          /* This code does not handle jumbos. */
-          assert(EF_EVENT_RX_MULTI_SOP(evs[i]) != 0);
-          assert(EF_EVENT_RX_MULTI_CONT(evs[i]) == 0);
-          assert(cfg_rx_merge);
-          n_rx = ef_vi_receive_unbundle(&res->vi, &evs[i], ids);
-          for( j = 0; j < n_rx; ++j ) {
-            handle_batched_rx(res, ids[j]);
-          }
-          res->n_ht_events += 1;
-          break;
-        case EF_EVENT_TYPE_RX_DISCARD:
-          handle_rx_discard(res, EF_EVENT_RX_DISCARD_RQ_ID(evs[i]),
-                          EF_EVENT_RX_DISCARD_BYTES(evs[i]) - res->rx_prefix_len,
-                          EF_EVENT_RX_DISCARD_TYPE(evs[i]));
-          break;
-        default:
-          LOGE("ERROR: unexpected event type=%d\n", (int) EF_EVENT_TYPE(evs[i]));
-          break;
-        }
-      }
-      refill_rx_ring(res);
-    }
-    /* Wait on eventq or fd until an event occurs if user requested this,
-     * otherwise keep polling in a tight loop.
+    refill_rx_ring(res);
+    /* Avoid reading entries in the EVQ that are in the same cache line
+     * that the network adapter is writing to.
      */
-    else if ( cfg_eventq_wait ) {
-      TRY(ef_eventq_wait(&res->vi, res->dh, ef_eventq_current(&res->vi), 0));
+    if( ef_eventq_has_many_events(&(res->vi), ev_lookahead) ||
+        (res->batch_loops)-- == 0 ) {
+      poll_evq(res);
+      res->batch_loops = 100;
     }
-    else if ( cfg_fd_wait ) {
-      TRY(ef_vi_prime(&res->vi, res->dh, ef_eventq_current(&res->vi)));
-      struct pollfd pollfd = {
-        .fd      = res->dh,
-        .events  = POLLIN,
-        .revents = 0,
-      };
-      TRY(poll(&pollfd, 1, -1));
+  }
+}
+
+
+static void event_loop_low_latency(struct resources* res)
+{
+  while( 1 ) {
+    refill_rx_ring(res);
+    poll_evq(res);
+  }
+}
+
+
+static void event_loop_blocking(struct resources* res)
+{
+  while( 1 ) {
+    if( ! refill_rx_ring(res) && poll_evq(res) == 0 )
+      TRY( ef_eventq_wait(&res->vi, res->dh, ef_eventq_current(&res->vi), 0) );
+  }
+}
+
+
+static void event_loop_blocking_poll(struct resources* res)
+{
+  struct pollfd pollfd = {
+    .fd      = res->dh,
+    .events  = POLLIN,
+    .revents = 0,
+  };
+
+  TRY( ef_vi_prime(&res->vi, res->dh, ef_eventq_current(&res->vi)) );
+
+  while( 1 ) {
+    TRY( poll(&pollfd, 1, -1) );
+    if( pollfd.events & POLLIN ) {
+      while( poll_evq(res) | refill_rx_ring(res) )
+        ;
+      TRY( ef_vi_prime(&res->vi, res->dh, ef_eventq_current(&res->vi)) );
     }
   }
 }
@@ -334,7 +383,7 @@ static void efvi_stats_header_print(struct resources* res,
   TRY(ef_vi_stats_query_layout(&res->vi, vi_stats_layout));
 
   for( i = 0; i < (*vi_stats_layout)->evsl_fields_num; ++i)
-    printf("  %s", (*vi_stats_layout)->evsl_fields[i].evsfl_name);
+    printf("  %10s", (*vi_stats_layout)->evsl_fields[i].evsfl_name);
 }
 
 
@@ -342,19 +391,22 @@ static void efvi_stats_print(struct resources* res, int reset_stats,
                              const ef_vi_stats_layout* vi_stats_layout)
 {
   uint8_t* stats_data;
-  int i;
+  int i, n_pad;
 
   TEST((stats_data = malloc(vi_stats_layout->evsl_data_size)) != NULL);
 
   ef_vi_stats_query(&res->vi, res->dh, stats_data, reset_stats);
   for( i = 0; i < vi_stats_layout->evsl_fields_num; ++i ) {
     const ef_vi_stats_field_layout* f = &vi_stats_layout->evsl_fields[i];
+    n_pad = strlen(f->evsfl_name);
+    if( n_pad < 10 )
+      n_pad = 10;
     switch( f->evsfl_size ) {
       case sizeof(uint32_t):
-        printf("%16d", *(uint32_t*)(stats_data + f->evsfl_offset));
+        printf("  %*d", n_pad, *(uint32_t*)(stats_data + f->evsfl_offset));
         break;
       default:
-        printf("%16s", ".");
+        printf("  %*s", n_pad, ".");
     };
   }
 
@@ -369,14 +421,16 @@ static void monitor(struct resources* res)
 
   uint64_t now_bytes, prev_bytes;
   struct timeval start, end;
-  int prev_pkts, now_pkts;
+  uint64_t prev_pkts, now_pkts;
   int ms, pkt_rate, mbps;
   const ef_vi_stats_layout* vi_stats_layout;
 
   if( cfg_rx_merge )
-    printf("# pkt-rate  bandwidth(Mbps)  pkts  events");
+    printf("#%9s %16s %16s %16s",
+           "pkt-rate", "bandwidth(Mbps)", "total-pkts", "events");
   else
-    printf("# pkt-rate  bandwidth(Mbps)  pkts");
+    printf("#%9s %16s %16s",
+           "pkt-rate", "bandwidth(Mbps)", "total-pkts");
   if( cfg_monitor_vi_stats )
     efvi_stats_header_print(res, &vi_stats_layout);
   printf("\n");
@@ -392,15 +446,14 @@ static void monitor(struct resources* res)
     gettimeofday(&end, NULL);
     ms = (end.tv_sec - start.tv_sec) * 1000;
     ms += (end.tv_usec - start.tv_usec) / 1000;
-    pkt_rate = (int) ((int64_t) (now_pkts - prev_pkts) * 1000 / ms);
+    pkt_rate = (int) ((now_pkts - prev_pkts) * 1000 / ms);
     mbps = (int) ((now_bytes - prev_bytes) * 8 / 1000 / ms);
     pthread_mutex_lock(&printf_mutex);
     if( cfg_rx_merge )
-      printf("%10d %16d %16llu %16llu", pkt_rate, mbps,
-                                        (unsigned long long) now_pkts,
-                                        (unsigned long long) res->n_ht_events);
+      printf("%10d %16d %16"PRIu64" %16"PRIu64,
+             pkt_rate, mbps, now_pkts, res->n_ht_events);
     else
-      printf("%10d %16d %16llu", pkt_rate, mbps, (unsigned long long) now_pkts);
+      printf("%10d %16d %16"PRIu64, pkt_rate, mbps, now_pkts);
     if( cfg_monitor_vi_stats )
       efvi_stats_print(res, 1, vi_stats_layout);
     printf("\n");
@@ -424,7 +477,7 @@ static void* monitor_fn(void* arg)
 static void usage(void)
 {
   fprintf(stderr, "usage:\n");
-  fprintf(stderr, "  efsink <options> <interface> [<filter-spec>...]\n");
+  fprintf(stderr, "  efsink [options] <interface> [<filter-spec>...]\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "filter-spec:\n");
   fprintf(stderr, "  {udp|tcp}:[mcastloop-rx,][vid=<vlan>,]<local-host>:"
@@ -450,6 +503,7 @@ static void usage(void)
   fprintf(stderr, "  -b       use high RX event merge (batched) mode\n");
   fprintf(stderr, "  -e       block on eventq instead of busy wait\n");
   fprintf(stderr, "  -f       block on fd instead of busy wait\n");
+  fprintf(stderr, "  -F <fl>  set max fill level for RX ring\n");
   exit(1);
 }
 
@@ -462,7 +516,7 @@ int main(int argc, char* argv[])
   unsigned vi_flags;
   int c;
 
-  while( (c = getopt (argc, argv, "dtVL:vmbef")) != -1 )
+  while( (c = getopt (argc, argv, "dtVL:vmbefF:")) != -1 )
     switch( c ) {
     case 'd':
       cfg_hexdump = 1;
@@ -490,6 +544,9 @@ int main(int argc, char* argv[])
       break;
     case 'f':
       cfg_fd_wait = 1;
+      break;
+    case 'F':
+      cfg_max_fill = atoi(optarg);
       break;
     case '?':
       usage();
@@ -525,31 +582,37 @@ int main(int argc, char* argv[])
   if( cfg_rx_merge )
     vi_flags |= EF_VI_RX_EVENT_MERGE;
   TRY(ef_vi_alloc_from_pd(&res->vi, res->dh, &res->pd, res->dh,
-                          -1, -1, 0, NULL, -1, vi_flags));
+                          -1, cfg_max_fill, 0, NULL, -1, vi_flags));
   res->rx_prefix_len = ef_vi_receive_prefix_len(&res->vi);
-  assert(!cfg_rx_merge || res->rx_prefix_len);
 
   if( cfg_rx_merge ) {
     const ef_vi_layout_entry* layout;
     int len, i;
-
-    TRY(ef_vi_receive_query_layout(&res->vi, &layout, &len));
-
+    TRY( ef_vi_receive_query_layout(&res->vi, &layout, &len) );
     for( i = 0; i < len; i++ )
       if( layout[i].evle_type == EF_VI_LAYOUT_PACKET_LENGTH )
         res->pktlen_offset = layout[i].evle_offset;
+    TEST( res->pktlen_offset );
+    TEST( res->rx_prefix_len );
+  }
 
-    TEST(res->pktlen_offset);
+  if( cfg_max_fill < 0 )
+    cfg_max_fill = ef_vi_receive_capacity(&res->vi) - 16;
+  if( cfg_max_fill > ef_vi_receive_capacity(&res->vi) ) {
+    LOGE("ERROR: max fill (%d) is bigger than ring capacity (%d)\n",
+         cfg_max_fill, ef_vi_receive_capacity(&res->vi));
+    exit(1);
   }
 
   LOGI("rxq_size=%d\n", ef_vi_receive_capacity(&res->vi));
+  LOGI("max_fill=%d\n", cfg_max_fill);
   LOGI("evq_size=%d\n", ef_eventq_capacity(&res->vi));
   LOGI("rx_prefix_len=%d\n", res->rx_prefix_len);
 
   /* Allocate memory for DMA transfers. Try mmap() with MAP_HUGETLB to get huge
    * pages. If that fails, fall back to posix_memalign() and hope that we do
    * get them. */
-  res->pkt_bufs_n = ef_vi_receive_capacity(&res->vi);
+  res->pkt_bufs_n = cfg_max_fill;
   size_t alloc_size = res->pkt_bufs_n * PKT_BUF_SIZE;
   alloc_size = ROUND_UP(alloc_size, huge_page_size);
   res->pkt_bufs = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
@@ -579,7 +642,9 @@ int main(int argc, char* argv[])
   }
 
   /* Fill the RX ring. */
-  while( ef_vi_receive_space(&res->vi) > REFILL_BATCH_SIZE )
+  res->refill_level = cfg_max_fill - REFILL_BATCH_SIZE;
+  res->refill_min = cfg_max_fill / 2;
+  while( ef_vi_receive_fill_level(&res->vi) <= res->refill_level )
     refill_rx_ring(res);
 
   /* Add filters so that adapter will send packets to this VI. */
@@ -596,6 +661,15 @@ int main(int argc, char* argv[])
   pthread_mutex_init(&printf_mutex, NULL);
 
   TEST(pthread_create(&thread_id, NULL, monitor_fn, res) == 0);
-  thread_main_loop(res);
+
+  if( cfg_eventq_wait )
+    event_loop_blocking(res);
+  else if( cfg_fd_wait )
+    event_loop_blocking_poll(res);
+  else if( 0 )
+    event_loop_low_latency(res);
+  else
+    event_loop_throughput(res);
+
   return 0;
 }

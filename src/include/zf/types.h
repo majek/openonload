@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,24 +15,19 @@
 
 /**************************************************************************\
 *//*! \file
-** <L5_PRIVATE L5_HEADER >
-** \author  mj
-**  \brief  ZF API - various data types
-**   \date  2015/10/20
-**    \cop  (c) SolarFlare Communications.
-** </L5_PRIVATE>
+**  \brief  TCPDirect types
 *//*
 \**************************************************************************/
 
 #ifndef __ZF_TYPES_H__
 #define __ZF_TYPES_H__
 
-#include <zf/zf_platform.h>
+#ifndef __IN_ZF_TOP_H__
+# error "Please include zf.h to use TCPDirect."
+#endif
 
 
 struct zf_stack;
 
-
-
-
 #endif /* __ZF_TYPES_H__ */
+/** @} */

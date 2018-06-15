@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -82,6 +82,11 @@ const char* type_str(int type)
     "<unknown>",              /* 9 */
     "SOCK_PACKET"             /* 10 */
   };
+#ifndef SOCK_TYPE_MASK
+#define SOCK_TYPE_MASK 0xf
+#endif
+
+  type &= SOCK_TYPE_MASK;
 
   if (type < 0 || type >= (sizeof (type_strs) / sizeof (type_strs[0])))
     return "<out of range>";
@@ -160,7 +165,8 @@ const char* ci_tcp_state_num_str(int state_i)
     "FREE",
     "UDP",
     "PIPE",
-    "ALIEN",
+    "AUXBUF",
+    "ACTIVE_WILD",
   };
 
   if( state_i < 0 || state_i >= (sizeof(state_strs) / sizeof(state_strs[0])) )
@@ -899,6 +905,19 @@ void ci_tcp_get_fack(ci_netif* ni, ci_tcp_state* ts,
   int retrans_data = 0;
   unsigned fack;
 
+#ifndef NDEBUG
+  /* We have very occasionally seen the assert following this being hit.
+   * However, we haven't tracked down the reason.  This hope is that by
+   * adding a bit of logging here we'll have a bit more to go on if we hit
+   * it again.
+   */
+  if( ci_ip_queue_is_empty(rtq) ) {
+    ci_log("%s: "NTS_FMT, __FUNCTION__, NTS_PRI_ARGS(ni, ts));
+    ci_tcp_state_dump_id(ni, ts->s.b.bufid);
+    ci_tcp_state_dump_qs(ni, ts->s.b.bufid, 1);
+  }
+#endif
+
   ci_assert(! ci_ip_queue_is_empty(rtq));
 
   block = PKT_CHK(ni, rtq->head);
@@ -1115,10 +1134,9 @@ ci_tcp_rcvbuf_unabuse_socklocked(ci_netif* ni, ci_tcp_state* ts)
 }
 
 void
-ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
+ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_already_locked)
 {
   int rob_dropped = 0;
-  int sock_unlock = 0;
 #ifndef NDEBUG
   int pkts = ts->recv1.num + ts->recv2.num + ts->rob.num;
 #endif
@@ -1142,33 +1160,27 @@ ci_tcp_rcvbuf_unabuse(ci_netif* ni, ci_tcp_state* ts, int sock_locked)
       goto out;
   }
 
-  /* Try to get socket lock */
-  if( ! sock_locked ) {
-    sock_locked = sock_unlock = ci_sock_trylock(ni, &ts->s.b);
-  }
-  if( sock_locked )
-    ci_assert(ci_sock_is_locked(ni, &ts->s.b));
-
-  /* If we've got socket lock, coalesce receive queue.
-   * If receive queue is guilty, try harder to get the lock. */
-  if( sock_locked ) {
-    CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused_recv_coalesced);
-    ci_tcp_rcvbuf_unabuse_socklocked(ni, ts);
-    if( sock_unlock )
-      ci_sock_unlock(ni, &ts->s.b);
-  }
-  else if( ts->recv1.num + ts->recv2.num >
-           (ts->s.so.rcvbuf + ts->rcv_window_max) / ts->amss  ) {
-    int rc = ci_sock_lock(ni, &ts->s.b);
-    if( rc == 0 ) {
-      CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused_recv_guilty);
+  /* Try to get socket lock so that we can coalesce the receive queue.  Note
+   * that we can't do this if one of our callers holds the socket lock, as it
+   * may not be expecting the recvq to change under its feet. */
+  if( ! sock_already_locked ) {
+    if( ci_sock_trylock(ni, &ts->s.b)) {
+      CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused_recv_coalesced);
       ci_tcp_rcvbuf_unabuse_socklocked(ni, ts);
       ci_sock_unlock(ni, &ts->s.b);
-#ifndef NDEBUG
-      sock_locked = sock_unlock = 1;
-#endif
+    }
+    /* If receive queue is guilty, try harder to get the lock. */
+    else if( ts->recv1.num + ts->recv2.num >
+             (ts->s.so.rcvbuf + ts->rcv_window_max) / ts->amss  ) {
+      int rc = ci_sock_lock(ni, &ts->s.b);
+      if( rc == 0 ) {
+        CITP_STATS_NETIF_INC(ni, tcp_rcvbuf_abused_recv_guilty);
+        ci_tcp_rcvbuf_unabuse_socklocked(ni, ts);
+        ci_sock_unlock(ni, &ts->s.b);
+      }
     }
   }
+
   if( ! ci_tcp_rcvbuf_abused(ni, ts) )
     goto out;
 
@@ -1190,9 +1202,9 @@ out:
     }
     LOG_TV(print = 1);
     if( print )
-      ci_log(LNT_FMT" %s(%d): locked=%d from %d to %d limited by %d %s",
+      ci_log(LNT_FMT" %s: already_locked=%d from %d to %d limited by %d %s",
              LNT_PRI_ARGS(ni, ts), __func__,
-             sock_locked && !sock_unlock, sock_locked, pkts,
+             sock_already_locked, pkts,
              ts->recv1.num + ts->recv2.num + ts->rob.num,
              (ts->s.so.rcvbuf + ts->rcv_window_max) / ts->amss,
              ci_tcp_rcvbuf_abused(ni, ts) ? " ABUSED" : "");

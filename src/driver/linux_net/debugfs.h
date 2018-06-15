@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2006-2015 Solarflare Communications Inc.
+ * Copyright 2006-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -165,6 +165,12 @@ int efx_debugfs_read_bool(struct seq_file *, void *);
 #define EFX_BOOL_PARAMETER(container_type, parameter)		\
 	EFX_PARAMETER(container_type, parameter,		\
 		      bool, efx_debugfs_read_bool)
+
+/* utility functions common between farch and ef10 */
+void efx_debugfs_print_filter(char *s, size_t l, struct efx_filter_spec *spec);
+#ifdef EFX_NOT_UPSTREAM
+int efx_debugfs_read_kernel_blocked(struct seq_file *file, void *data);
+#endif
 
 #else /* !CONFIG_SFC_DEBUGFS */
 

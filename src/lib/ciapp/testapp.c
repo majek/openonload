@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -316,7 +316,7 @@ void ci_app_usage_standard_default(void)
 }
 
 
-void ci_app_usage_default(const char* msg)
+void ci_app_usage_default_noexit(const char* msg)
 {
   if( msg ) {
     ci_log(" ");
@@ -337,6 +337,12 @@ void ci_app_usage_default(const char* msg)
   ci_log(" ");
   ci_log("Options can also be given with the environment variable CI_OPTS");
   ci_log(" ");
+}
+
+
+void ci_app_usage_default(const char* msg)
+{
+  ci_app_usage_default_noexit(msg);
   exit(-1);
 }
 

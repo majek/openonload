@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -103,7 +103,7 @@ static ef_vi		 vi;
 struct pkt_buf*          pkt_bufs[N_RX_BUFS + N_TX_BUFS];
 static ef_pd             pd;
 static ef_memreg         memreg;
-#if defined(__x86_64__) || defined(__PPC64__)
+#if EF_VI_CONFIG_PIO
 static ef_pio            pio;
 #endif
 static int               tx_frame_len;
@@ -230,7 +230,7 @@ static const test_t dma_test = {
  * PIO
  */
 
-#if defined(__x86_64__) || defined(__PPC64__)
+#if EF_VI_CONFIG_PIO
 static inline void pio_send(ef_vi* vi)
 {
   TRY(ef_vi_transmit_pio(vi, 0, tx_frame_len, 0));
@@ -282,6 +282,12 @@ static inline void alt_go(ef_vi* vi)
   TRY(ef_vi_transmit_alt_go(vi, tx_alt.send_id++ & TX_ALT_MASK));
 }
 
+static inline void alt_discard(ef_vi* vi)
+{
+  TRY(ef_vi_transmit_alt_discard(vi, tx_alt.send_id & TX_ALT_MASK));
+  TRY(ef_vi_transmit_alt_free(vi, driver_handle));
+}
+
 static inline void alt_send(ef_vi* vi)
 {
   alt_assert_state_validity();
@@ -301,7 +307,7 @@ static const test_t alt_test = {
   .ping = alt_ping,
   .pong = alt_pong,
   /* Flush the alternative before freeing it. */
-  .cleanup = alt_go,
+  .cleanup = alt_discard,
 };
 
 
@@ -443,11 +449,16 @@ static const test_t* do_init(int ifindex)
 
   /* First, try to allocate alternatives. */
   if( vi_flags & EF_VI_TX_ALT ) {
+    /* Check that the packet will fit in the available buffer space. */
+    struct ef_vi_transmit_alt_overhead overhead;
+    TRY(ef_vi_transmit_alt_query_overhead(&vi, &overhead));
+    int pkt_bytes = ef_vi_transmit_alt_usage(&overhead, tx_frame_len);
+    TEST(pkt_bytes <= BUF_SIZE);
     /* Pre-fill the first packet. */
     alt_fill(&vi);
     t = &alt_test;
   }
-#if defined(__x86_64__) || defined(__PPC64__)
+#if EF_VI_CONFIG_PIO
   /* If we couldn't allocate an alternative, try PIO. */
   else if( ef_pio_alloc(&pio, driver_handle, &pd, -1, driver_handle) == 0 ) {
     TRY(ef_pio_link_vi(&pio, driver_handle, &vi, driver_handle));

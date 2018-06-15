@@ -27,3 +27,9 @@ endif
 EXTRA_CFLAGS += $(MMAKE_CFLAGS) $(EXTRA_CPPFLAGS)
 EXTRA_AFLAGS += $(EXTRA_CPPFLAGS)
 
+# Linux 4.6 added some object-file validation, which was also merged into
+# RHEL 7.3.  Unfortunately, it assumes that all functions that don't end with
+# a return or a jump are recorded in a hard-coded table inside objtool.  That
+# is not of much use to an out-of-tree driver, and we have far too many such
+# functions to rewrite them, so we turn off the checks.
+OBJECT_FILES_NON_STANDARD := y

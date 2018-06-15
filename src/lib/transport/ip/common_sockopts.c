@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -81,28 +81,24 @@ static unsigned ci_tos2priority[] = {
 
 int ci_sock_rx_bind2dev(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
 {
-  ci_ifid_t base_ifindex;
-  ci_hwport_id_t hwport;
-  cicp_encap_t encap;
+  cicp_hwport_mask_t hwports = 0;           /* shut up gcc */
+  cicp_encap_t encap = {0,};                /* shut up gcc */
   int rc;
 
   /* Can we accelerate this interface?  If not, best to handover now. */
-  rc = cicp_llap_retrieve(CICP_HANDLE(ni), ifindex, NULL/*mtu*/, &hwport,
-                          NULL/*mac*/, &encap, &base_ifindex, NULL);
+  rc = oo_cp_find_llap(ni->cplane, ifindex, NULL/*mtu*/, NULL /*tx_hwports*/,
+                       &hwports /*rx_hwports*/, NULL/*mac*/, &encap);
   if( rc != 0 ) {
     /* non-Ethernet interface */
     return CI_SOCKET_HANDOVER;
   }
-  if( (unsigned) hwport >= CPLANE_MAX_REGISTER_INTERFACES )
+  if( hwports == 0 )
     return CI_SOCKET_HANDOVER;
-  if( __ci_hwport_to_intf_i(ni, hwport) < 0 )
-    /* ?? FIXME: We should really be checking whether *all* slaves in the
-     * bond are onloadable (for bonds).
-     */
+  if( (hwports & ~ci_netif_get_hwport_mask(ni)) != 0)
     return CI_SOCKET_HANDOVER;
 
   s->rx_bind2dev_ifindex = ifindex;
-  s->rx_bind2dev_base_ifindex = base_ifindex;
+  s->rx_bind2dev_hwports = hwports;
   s->rx_bind2dev_vlan = encap.vlan_id;
   ci_ip_cache_invalidate(&s->pkt);
   if( s->b.state == CI_TCP_STATE_UDP )
@@ -127,7 +123,7 @@ static int ci_sock_bindtodevice(ci_netif* ni, ci_sock_cmn* s,
      * rx_bind2dev_ifindex != CI_IFID_BAD.  But makes stackdump output
      * cleaner this way...
      */
-    s->rx_bind2dev_base_ifindex = 0;
+    s->rx_bind2dev_hwports = 0;
     s->rx_bind2dev_vlan = 0;
     return 0;
   }
@@ -222,7 +218,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
     ci_assert((s->b.state & CI_TCP_STATE_TCP) ||
 	      s->b.state == CI_TCP_STATE_UDP);
 
-    u = s->pkt.ip.ip_tos;
+    u = s->cp.ip_tos;
     break;
 
   case IP_TTL:
@@ -239,7 +235,7 @@ int ci_get_sol_ip( ci_netif* ni, ci_sock_cmn* s, ci_fd_t fd,
       if( sock_raddr_be32(s) != 0 ) {
         ci_ip_cache_invalidate(&s->pkt);
         cicp_user_retrieve(ni, &s->pkt, &s->cp);
-        if( cicp_ip_cache_is_valid(CICP_HANDLE(ni), &s->pkt) ) {
+        if( oo_cp_verinfo_is_valid(ni->cplane, &s->pkt.mac_integrity) ) {
           u = s->pkt.mtu;
           break;
         }
@@ -686,9 +682,10 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
     if( s->b.state & CI_TCP_STATE_TCP ) {
       /* Bug3172: do not allow to change 2 and 1 bits of TOS for TCP socket. */
       val &= ~3;
-      val |= s->pkt.ip.ip_tos & 3;
+      val |= s->cp.ip_tos & 3;
     }
     val = CI_MIN(val, CI_IP_MAX_TOS);
+    s->cp.ip_tos = (ci_uint8)val;
     s->pkt.ip.ip_tos = (ci_uint8)val;
     if( s->b.state == CI_TCP_STATE_UDP )
       SOCK_TO_UDP(s)->ephemeral_pkt.ip.ip_tos = (ci_uint8)val;
@@ -827,6 +824,7 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
         goto fail_fault;
       }
       s->s_flags |= CI_SOCK_FLAG_TPROXY;
+      s->cp.sock_cp_flags |= OO_SCP_TPROXY;
     }
     else {
       /* If we've bound the socket we've inserted only sw filters and we
@@ -844,6 +842,7 @@ int ci_set_sol_ip( ci_netif* netif, ci_sock_cmn* s,
       }
       else {
         s->s_flags &= ~CI_SOCK_FLAG_TPROXY;
+        s->cp.sock_cp_flags &= ~OO_SCP_TPROXY;
       }
     }
     break;
@@ -1214,7 +1213,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
                     "TX timestamps are off on the network interface "
                     "with ifindex=%d.  "
                     "Try setting EF_TX_TIMESTAMPING.",
-                    ci_netif_intf_i_to_base_ifindex(netif, intf_i)));
+                    ci_intf_i_to_ifindex(netif, intf_i)));
       }
       if( ! some_good )
         log("WARNING: Request for SOF_TIMESTAMPING_TX_HARDWARE when "
@@ -1234,7 +1233,7 @@ int ci_set_sol_socket(ci_netif* netif, ci_sock_cmn* s,
                     "RX timestamps are off on the network interface "
                     "with ifindex=%d.  "
                     "Try setting EF_RX_TIMESTAMPING.",
-                    ci_netif_intf_i_to_base_ifindex(netif, intf_i)));
+                    ci_intf_i_to_ifindex(netif, intf_i)));
       }
       if( ! some_good )
         log("WARNING: Request for SOF_TIMESTAMPING_RX_HARDWARE when "
@@ -1329,8 +1328,10 @@ int ci_setsockopt_os_fail_ignore(ci_netif* ni, ci_sock_cmn* s, int err,
 
 /* This function is the common handler for SOL_SOCKET level options that do
  * not require the stack lock to be held.  It is safe to call this function
- * with the lock held though, and this is done in the TCP case, as all options
- * on a TCP socket must be set with the stack lock held.
+ * with the lock held though, and this is done in both the TCP and UDP case.
+ * In the TCP case this is because all options on a TCP socket must be set
+ * with the stack lock held.  In the UDP case we do so because of lock
+ * ordering requirements.
  */
 int ci_set_sol_socket_nolock(ci_netif* ni, ci_sock_cmn* s, int optname,
 			     const void* optval, socklen_t optlen)

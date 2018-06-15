@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -47,8 +47,9 @@
  *
  * Sample app that sends UDP packets on a specified interface.
  *
- * The application sends a UDP packet, waits for transmission of the
- * packet to finish and then sends the next.
+ * The application cycles between posting packets to the TX ring
+ * and handling TX completion events which allows TX ring slots
+ * to be re-used.
  *
  * The number of packets sent, the size of the packet, the amount of
  * time to wait between sends can be controlled.
@@ -69,6 +70,10 @@ static int parse_opts(int argc, char* argv[]);
 #define MAX_UDP_PAYLEN	(1500 - sizeof(ci_ip4_hdr) - sizeof(ci_udp_hdr))
 #define N_BUFS          1
 #define BUF_SIZE        2048
+  /* Must be >= EF_VI_EVENT_POLL_MIN_EVS, but deliberately setting
+   * larger to increase batching, and therefore throughput. */
+#define EVENT_BATCH_SIZE 64
+
 
 /* This gives a frame len of 70, which is the same as:
 **   eth + ip + tcp + tso + 4 bytes payload
@@ -83,47 +88,70 @@ static int                cfg_local_port = LOCAL_PORT;
 static int                cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
 static int                cfg_iter = 10;
 static int                cfg_usleep = 0;
+static int                cfg_loopback = 0;
 static int                cfg_phys_mode;
 static int                cfg_disable_tx_push;
 static int                cfg_use_vf;
+static int                cfg_max_batch = 8192;
+static int                cfg_vlan = -1;
 static int                n_sent;
+static int                n_pushed;
 static int                ifindex;
 
-
-static int wait_for_some_completions(void)
+static void handle_completions(void)
 {
   ef_request_id ids[EF_VI_TRANSMIT_BATCH];
-  ef_event      evs[EF_VI_EVENT_POLL_MIN_EVS];
-  int           n_ev, i, n_unbundled = 0;
+  ef_event      evs[EVENT_BATCH_SIZE];
+  int           n_ev, i, j, n_unbundled = 0;
 
-  while( 1 ) {
-    n_ev = ef_eventq_poll(&vi, evs, sizeof(evs) / sizeof(evs[0]));
-    if( n_ev > 0 )
-      for( i = 0; i < n_ev; ++i )
-        switch( EF_EVENT_TYPE(evs[i]) ) {
-        case EF_EVENT_TYPE_TX:
-          /* One TX event can signal completion of multiple TXs */
-          n_unbundled += ef_vi_transmit_unbundle(&vi, &evs[i], ids);
-          /* We only ever have one packet in flight */
-          assert(n_unbundled == 1);
-          TEST(ids[0] == n_sent);
-          ++n_sent;
-          break;
-        default:
-          TEST(!"Unexpected event received");
-        }
-    if( n_unbundled > 0 )
-      return n_unbundled;
+  n_ev = ef_eventq_poll(&vi, evs, sizeof(evs) / sizeof(evs[0]));
+  if( n_ev > 0 ) {
+    for( i = 0; i < n_ev; ++i ) {
+      switch( EF_EVENT_TYPE(evs[i]) ) {
+      case EF_EVENT_TYPE_TX:
+        /* One TX event can signal completion of multiple TXs */
+        n_unbundled = ef_vi_transmit_unbundle(&vi, &evs[i], ids);
+        for ( j = 0; j < n_unbundled; ++j )
+          TEST(ids[j] == n_sent + j);
+        n_sent += n_unbundled;
+        break;
+      default:
+        TEST(!"Unexpected event received");
+      }
+    }
   }
+  /* No events yet is entirely acceptable */
 }
 
+static inline
+int send_more_packets(int desired, ef_vi* vi, ef_addr dma_buf_addr) {
+  int i;
+  /* Don't try to send more packets than currently fit on the TX ring */
+  int to_send;
+  int possible = ef_vi_transmit_space(vi);
+  to_send = (possible > desired) ? desired : possible;
+  /* Further limit to requested batch size, if needed */
+  to_send = (to_send > cfg_max_batch) ? cfg_max_batch : to_send;
+
+  if( to_send > 0 ) {
+    /* This is sending the same packet buffer over and over again.
+     * a real application would usually send new data. */
+    for( i = 0; i < to_send; ++i )
+      TRY(ef_vi_transmit_init(vi, dma_buf_addr, tx_frame_len,
+          n_pushed + i));
+
+    /* Actually submit the packets to the NIC for transmission. */
+    ef_vi_transmit_push(vi);
+  }
+
+  return to_send;
+}
 
 int main(int argc, char* argv[])
 {
 
   ef_pd pd;
   ef_memreg mr;
-  int i;
   void* p;
   ef_addr dma_buf_addr;
   enum ef_pd_flags pd_flags = EF_PD_DEFAULT;
@@ -131,11 +159,14 @@ int main(int argc, char* argv[])
 
   TRY(parse_opts(argc, argv));
 
+
   /* Set flags for options requested on command line */
   if( cfg_use_vf )
     pd_flags |= EF_PD_VF;
   if( cfg_phys_mode )
     pd_flags |= EF_PD_PHYS_MODE;
+  if( cfg_loopback )
+    pd_flags |= EF_PD_MCAST_LOOP;
   if( cfg_disable_tx_push )
     vi_flags |= EF_VI_TX_PUSH_DISABLE;
 
@@ -157,17 +188,19 @@ int main(int argc, char* argv[])
   /* Store DMA address of the packet buffer memory */
   dma_buf_addr = ef_memreg_dma_addr(&mr, 0);
 
-  /* Prepare packet content */
-  tx_frame_len = init_udp_pkt(p, cfg_payload_len, &vi, dh);
+  /* Prepare packet contents */
+  tx_frame_len = init_udp_pkt(p, cfg_payload_len, &vi, dh, cfg_vlan);
 
-  /* Start sending */
-  for( i = 0; i < cfg_iter; ++i ) {
-    /* Transmit packet pointed by dma buffer address */
-    TRY(ef_vi_transmit(&vi, dma_buf_addr, tx_frame_len, n_sent));
-    wait_for_some_completions();
+  /* Continue until all sends are complete */
+  while( n_sent < cfg_iter ) {
+    /* Try to push up to the requested iterations, likely fewer get sent */
+    n_pushed += send_more_packets(cfg_iter - n_pushed, &vi, dma_buf_addr);
+    /* Check for transmit complete */
+    handle_completions();
     if( cfg_usleep )
       usleep(cfg_usleep);
   }
+  TEST(n_pushed == cfg_iter);
 
   printf("Sent %d packets\n", cfg_iter);
   return 0;
@@ -179,9 +212,13 @@ void usage(void)
 {
   common_usage();
 
+  fprintf(stderr, "  -b                  - enable loopback on the VI\n");
   fprintf(stderr, "  -p                  - enable physical address mode\n");
   fprintf(stderr, "  -t                  - disable tx push (on by default)\n");
+  fprintf(stderr, "  -B                  - maximum send batch size\n");
+  fprintf(stderr, "  -s                  - microseconds to sleep between batches\n");
   fprintf(stderr, "  -v                  - use a VF\n");
+  fprintf(stderr, "  -V <vlan>           - vlan to send to (interface must have an IP)\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "e.g.:\n");
   fprintf(stderr, "  - Send pkts to 239.1.2.3:1234 from eth2:\n"
@@ -190,11 +227,11 @@ void usage(void)
 }
 
 
-static int parse_opts(int argc, char*argv[])
+static int parse_opts(int argc, char *argv[])
 {
   int c;
 
-  while( (c = getopt(argc, argv, "n:m:s:l:ptv")) != -1 )
+  while((c = getopt(argc, argv, "n:m:s:B:l:V:bptv")) != -1)
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -207,6 +244,15 @@ static int parse_opts(int argc, char*argv[])
       break;
     case 's':
       cfg_usleep = atoi(optarg);
+      break;
+    case 'B':
+      cfg_max_batch = atoi(optarg);
+      break;
+    case 'V':
+      cfg_vlan = atoi(optarg);
+      break;
+    case 'b':
+      cfg_loopback = 1;
       break;
     case 'p':
       cfg_phys_mode = 1;
@@ -226,6 +272,7 @@ static int parse_opts(int argc, char*argv[])
 
   argc -= optind;
   argv += optind;
+
   if( argc != 3 )
     usage();
 
@@ -235,6 +282,6 @@ static int parse_opts(int argc, char*argv[])
   }
 
   /* Parse arguments after options */
-  parse_args(argv, &ifindex, cfg_local_port);
+  parse_args(argv, &ifindex, cfg_local_port, cfg_vlan);
   return 0;
 }

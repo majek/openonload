@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -28,51 +28,20 @@
 
 #include <internal.h>
 #include <ci/internal/transport_config_opt.h>
-#include <ci/internal/efabcfg.h>
 #include <ci/tools/sllist.h>
 #include <onload/dup2_lock.h>
-#include <cplane/ul.h>
-#include "cplane_api_version.h"
+#include <cplane/cplane.h>
 
 
 #define LPF "citp_netif_"
 #define LPFIN "-> " LPF
 #define LPFOUT "<- " LPF
 
-static int citp_cplane_init(void)
-{
-  /* We have to open cplane at init time to handle early chroot. */
-  cicp_handle_t *cp;
-  citp_lib_context_t context;
-  int rc = 0;
-
-  citp_enter_lib(&context);
-  CITP_FDTABLE_LOCK();
-  cp = cicp_get_handle(CPLANE_API_VERSION, -1);
-  if( cp == NULL ) {
-    /* We can restore cplane handle from existing sockets, so do not
-     * complain too loud. */
-    Log_S(ci_log("Onload library initialization failed: unable to get "
-                 "control plane handle"));
-    rc = -1;
-  }
-  else {
-    __citp_fdtable_reserve(cp->fd, 1);
-  }
-  CITP_FDTABLE_UNLOCK();
-  citp_exit_lib(&context, 0);
-
-  return rc;
-}
-
 int citp_netif_init_ctor(void)
 {
   Log_S(ci_log("%s()", __FUNCTION__));
 
   citp_set_log_level(CITP_OPTS.log_level);
-
-  /* Errors in citp_oo_get_cpu_khz() are ignored - and we do the same here. */
-  (void)citp_cplane_init();
 
   citp_cmn_netif_init_ctor(CITP_OPTS.netif_dtor);
 
@@ -284,31 +253,6 @@ void citp_netif_pre_bproc_move_hook(void)
 }
 
 
-/* Move a NIC file descriptor away from fds 0, 1 or 2.
- *
- * It is assumed that this is called immediately after ef_onload_driver_open(), if
- * necessary, so we don't need to worry about any updating of the fdtable.
- */
-static int __citp_netif_move_fd(ef_driver_handle* fd)
-{
-  int rc;
-
-  /* means the first available fd >= 3 */
-  rc = oo_fcntl_dupfd_cloexec(*fd, 3);
-  if (rc >= 0) {
-    ci_sys_close(*fd);
-    Log_V(ci_log("%s: fd %d moved to %d", __FUNCTION__, *fd, rc));
-    *fd = rc;
-    rc = 0;
-  }
-  else {
-    Log_E(ci_log("%s: move of fd %d failed", __FUNCTION__, *fd));
-  }
-
-  return rc;
-}
-
-
 /* Checks that the stack config is sane, given the process config.
  *
  * Stack only config should already be checked in ci_netif_sanity_checks()
@@ -346,20 +290,9 @@ static void ci_netif_check_process_config(ci_netif* ni)
 void  citp_netif_ctor_hook(ci_netif* ni, int realloc)
 {
 
-  if (!realloc) {
-    /* Don't want netifs on fds 0..3 - move it elsewhere.
-     * TODO: This is kind of sucks -- not exactly elegant.
-     *       Perhaps a better approach is to grow the fdtable but pretend to
-     *       the user that it's smaller.  Then any FDs we need can be placed in
-     *       the "invisible" part of the fd table.
-     */
-    if (ci_netif_get_driver_handle(ni) <= 3) {
-      CI_DEBUG_TRY(__citp_netif_move_fd(&(ni->driver_handle)));
-    }
-
+  if (!realloc)
     /* Protect the netif's FD table entry */
     __citp_fdtable_reserve(ci_netif_get_driver_handle(ni), 1);
-  }
 
   /* Make sure the trampoline is registered. */
   CI_DEBUG_TRY(citp_init_trampoline(ci_netif_get_driver_handle(ni)));

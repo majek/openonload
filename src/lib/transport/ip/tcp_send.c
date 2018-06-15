@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -102,12 +102,12 @@ static void ci_tcp_tx_advance_nagle(ci_netif* ni, ci_tcp_state* ts)
     /* NB. We call advance() before poll() to get best latency. */
     ci_ip_time_resync(IPTIMER_STATE(ni));
     ci_tcp_tx_advance(ts, ni);
-    if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM ))
+    if(CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_MSG_WARM ))
       return;
     goto poll_and_out;
   }
 
-  ci_assert(! (ni->flags & CI_NETIF_FLAG_MSG_WARM));
+  ci_assert(! (ts->tcpflags & CI_TCPT_FLAG_MSG_WARM));
   /* There can't be a SYN, because connection is established, so the SYN
   ** must already be acked.  There can't be a FIN, because if there was
   ** tx_errno would be non zero, and we would not have attempted to
@@ -605,7 +605,8 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
 
   /* Check for valid cplane information.
    */
-  if(CI_UNLIKELY( ! cicp_ip_cache_is_valid(CICP_HANDLE(ni), ipcache) )) {
+  if(CI_UNLIKELY( ! oo_cp_verinfo_is_valid(ni->cplane,
+                                           &ipcache->mac_integrity) )) {
     cicp_user_retrieve(ni, ipcache, &ts->s.cp);
     switch( ipcache->status ) {
     case retrrc_success:
@@ -883,7 +884,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
     goto out;
   }
 
-  cplane_is_valid = cicp_ip_cache_is_valid(CICP_HANDLE(ni), ipcache);
+  cplane_is_valid = oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity);
   if( cplane_is_valid &&
       ! memcmp(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
                oo_ether_hdr_size(pkt)) &&
@@ -979,6 +980,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
     ci_ip_queue_enqueue(ni, &ts->retrans, pkt);
     --ni->state->n_async_pkts;
     ++ts->stats.tx_tmpl_send_fast;
+    CITP_STATS_NETIF_INC(ni, pio_pkts);
   }
   else {
     /* Unable to send via pio due to tcp state machinery or full TXQ.
@@ -1745,7 +1747,7 @@ unroll_msg_warm(ci_netif* ni, ci_tcp_state* ts, struct tcp_send_info* sinf,
 {
   ci_ip_pkt_fmt* pkt;
   ++ts->stats.tx_msg_warm;
-  ni->flags &= ~CI_NETIF_FLAG_MSG_WARM;
+  ts->tcpflags &= ~CI_TCPT_FLAG_MSG_WARM;
   ci_ip_queue_init(&ts->send);
   ts->send_in = 0;
   tcp_enq_nxt(ts) -= sinf->fill_list_bytes;
@@ -1753,6 +1755,14 @@ unroll_msg_warm(ci_netif* ni, ci_tcp_state* ts, struct tcp_send_info* sinf,
   ts->burst_window = sinf->old_burst_window;
 #endif
   tcp_snd_nxt(ts) = sinf->old_tcp_snd_nxt;
+
+  /* If we updated our rtt seq based on the warm send then timed_seq will
+   * will be the seq for the warm packet.  If so, clear the timing so
+   * the timed values will be reset when we sent the packet for real.
+   */
+  if( SEQ_EQ(tcp_snd_nxt(ts), ts->timed_seq) )
+    ci_tcp_clear_rtt_timing(ts);
+
   --ts->stats.tx_stop_app;
   CI_TCP_STATS_DEC_OUT_SEGS(ni);
   if( ! is_zc_send ) {
@@ -1970,17 +1980,17 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     }
 
   filled_some_pkts:
-    if( ts->s.tx_errno ) {
-      ci_assert(! (flags & ONLOAD_MSG_WARM));
-      ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
-      if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
-      return sinf.rc;
-    }
-
     /* If we can grab the lock now, setup the meta-data and get sending.
      * Otherwise queue the packets for sending by the netif lock holder.
      */
     if( si_trylock(ni, &sinf) ) {
+      if( ts->s.tx_errno ) {
+        ci_assert(! (flags & ONLOAD_MSG_WARM));
+        ci_tcp_sendmsg_handle_tx_errno(ni, ts, flags, &sinf);
+        if( sinf.set_errno ) CI_SET_ERROR(sinf.rc, sinf.rc);
+        return sinf.rc;
+      }
+
       /* eff_mss may now be != ts->eff_mss */
       ts->send_in += ci_tcp_sendmsg_enqueue(ni, ts,
                                             sinf.fill_list,
@@ -2160,7 +2170,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     ++ts->stats.tx_msg_warm_abort;
     if( sinf.stack_locked )
       ci_netif_unlock(ni);
-    return 0;
+    RET_WITH_ERRNO(EPIPE);
   }
 
   if( ci_tcp_sendmsg_notsynchronised(ni, ts, flags, &sinf) == -1 ) {
@@ -2173,7 +2183,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
  slow_path:
   if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
     if( can_do_msg_warm(ni, ts, &sinf, sinf.total_unsent, flags) ) {
-      ni->flags |= CI_NETIF_FLAG_MSG_WARM;
+      ts->tcpflags |= CI_TCPT_FLAG_MSG_WARM;
 #if CI_CFG_BURST_CONTROL
       sinf.old_burst_window = ts->burst_window;
 #endif
@@ -2184,7 +2194,7 @@ int ci_tcp_sendmsg(ci_netif* ni, ci_tcp_state* ts,
     if( sinf.stack_locked )
       ci_netif_unlock(ni);
     if( sinf.total_unsent >= tcp_eff_mss(ts) )
-      return -EINVAL;
+      RET_WITH_ERRNO(EINVAL);
     return 0;
   }
   if( ci_tcp_sendmsg_slowpath(ni, ts, iov, iovlen, flags, &sinf 
@@ -2255,16 +2265,18 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
    */
   if( sinf.sendq_credit <= 0 || flags & ONLOAD_MSG_WARM ) {
     if(CI_UNLIKELY( flags & ONLOAD_MSG_WARM )) {
-      if( ! can_do_msg_warm(ni, ts, &sinf, msg->msg.iov[0].iov_len, flags) ) {
+      if( ! can_do_msg_warm(ni, ts, &sinf, msg->msg.iov[0].iov_len, flags) ||
+          msg->msg.msghdr.msg_iovlen > 1 ) {
         ++ts->stats.tx_msg_warm_abort;
         if( sinf.stack_locked )
           ci_netif_unlock(ni);
         msg->rc = 0;
-        if( msg->msg.iov[0].iov_len >= tcp_eff_mss(ts) )
+        if( msg->msg.iov[0].iov_len >= tcp_eff_mss(ts) ||
+            msg->msg.msghdr.msg_iovlen > 1 )
           msg->rc = -EINVAL;
         return 1;
       }
-      ni->flags |= CI_NETIF_FLAG_MSG_WARM;
+      ts->tcpflags |= CI_TCPT_FLAG_MSG_WARM;
 #if CI_CFG_BURST_CONTROL
       sinf.old_burst_window = ts->burst_window;
 #endif
@@ -2433,7 +2445,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
 
 
  bad_buffer:
-  if(CI_UNLIKELY( ni->flags & CI_NETIF_FLAG_MSG_WARM )) {
+  if(CI_UNLIKELY( ts->tcpflags & CI_TCPT_FLAG_MSG_WARM )) {
     ++ts->stats.tx_msg_warm_abort;
     if( sinf.stack_locked )
       ci_netif_unlock(ni);
@@ -2546,7 +2558,7 @@ ci_tcp_ds_fill_headers(ci_netif* ni, ci_tcp_state* ts, unsigned flags,
   ci_assert(ci_netif_is_locked(ni));
 
   /* Try to get valid cache */
-  if( ! cicp_ip_cache_is_valid(CICP_HANDLE(ni), &ts->s.pkt) &&
+  if( ! oo_cp_verinfo_is_valid(ni->cplane, &ts->s.pkt.mac_integrity) &&
       (~flags & ONLOAD_DELEGATED_SEND_FLAG_IGNORE_ARP ) &&
       ! ci_tcp_ds_get_arp(ni, ts) ) {
     return ONLOAD_DELEGATED_SEND_RC_NOARP;

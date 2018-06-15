@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -52,10 +52,7 @@
 #include <onload/driverlink_filter.h>
 #include <onload/debug.h>
 #include <onload/driverlink_filter_private.h>
-#include <cplane/exported.h>
 #include <onload/id_pool.h> /* for CI_ID_POOL_ID_NONE */
-#include <cplane/prot.h>
-
 
 /* *************************************************************
  * Compilation control
@@ -363,8 +360,9 @@ dlfilter_ipp_icmp_parse(const ci_ip4_hdr *ip, int ip_len, efab_ipp_addr* addr)
  * returns 0 : not for us
  *         1 : want to pass this over the link
  */
-static int dlfilter_handle_icmp( int ifindex, efx_dlfilter_cb_t* fcb,
-				 const ci_ip4_hdr *ip, int len, int* thr_id )
+static int dlfilter_handle_icmp(struct net* netns, int ifindex,
+                                efx_dlfilter_cb_t* fcb,
+                                const ci_ip4_hdr *ip, int len, int* thr_id )
 {
   ci_icmp_hdr* icmp;
   efab_ipp_addr addr;
@@ -398,9 +396,12 @@ static int dlfilter_handle_icmp( int ifindex, efx_dlfilter_cb_t* fcb,
   }
 
   /* Did it arrive on an Onload-enabled device? */
-  if( cicp_llap_get_hwport(&CI_GLOBAL_CPLANE, ifindex) == CI_HWPORT_ID_BAD ) {
-    OO_DEBUG_DLF(ci_log(LPF "handle_icmp: not our device"));
-    return 0;
+  {
+    ci_assert_nequal(fcb->is_onloaded, NULL);
+    if( ! fcb->is_onloaded(fcb->ctx, netns, ifindex) ) {
+      OO_DEBUG_DLF(ci_log(LPF "handle_icmp: not our netns or device"));
+      return 0;
+    }
   }
 
   /* Finally, do we have a filter?
@@ -797,7 +798,9 @@ void efx_dlfilter_add(efx_dlfilter_cb_t* fcb, unsigned protocol,
 }
 
 
-static void dlfilter_init(efx_dlfilter_cb_t* fcb)
+static void
+dlfilter_init(efx_dlfilter_cb_t* fcb, void* ctx,
+              efx_dlfilter_is_onloaded_t is_onloaded)
 {
   int ctr;
 
@@ -833,17 +836,21 @@ static void dlfilter_init(efx_dlfilter_cb_t* fcb)
 
   /* no filters yet */
   fcb->used_slots = 0;
+
+  fcb->ctx = ctx;
+  fcb->is_onloaded = is_onloaded;
 }
 
 
 /* Construct a driverlink filter object.
  * Return     ptr to object or NULL if failed
  */
-efx_dlfilter_cb_t* efx_dlfilter_ctor()
+struct efx_dlfilt_cb_s*
+efx_dlfilter_ctor(void* ctx, efx_dlfilter_is_onloaded_t is_onloaded)
 {
   efx_dlfilter_cb_t* cb = ci_vmalloc(sizeof(efx_dlfilter_cb_t));
   if( cb != NULL )
-    dlfilter_init(cb);
+    dlfilter_init(cb, ctx, is_onloaded);
   return cb;
 }
 
@@ -883,7 +890,7 @@ CI_BUILD_ASSERT(EFAB_DLFILT_ENTRY_COUNT >= EFHW_IP_FILTER_NUM);
  * Returns: 0 - carry on as normal
  *          else - discard SKB etc.
  */
-int efx_dlfilter_handler(int ifindex, efx_dlfilter_cb_t* fcb,
+int efx_dlfilter_handler(struct net* netns, int ifindex, efx_dlfilter_cb_t* fcb,
                          const ci_ether_hdr* hdr, const void* ip_hdr, int len)
 {
   const ci_ip4_hdr* ip;
@@ -907,34 +914,6 @@ int efx_dlfilter_handler(int ifindex, efx_dlfilter_cb_t* fcb,
   /* We do not handle fragmented packets. */
   if( CI_UNLIKELY( CI_IP4_FRAG_OFFSET(ip) ))
     return 0;
-
-#if CI_CFG_NET_TCP_RX_FILTER
-  if( ip->ip_protocol == IPPROTO_TCP ) {
-    ci_tcp_hdr* tcp;
-
-    /*! \todo We just let non-first fragments pass up.
-     *  If this is to remain in use then we have to either:
-     *  1. handle fragments
-     *  2. let the kernel garbage collect
-     *  _and_ we have to verify the input physical device.
-     */
-    if( CI_UNLIKELY(ip_paylen < sizeof(ci_tcp_hdr)) )
-      return 0;
-
-    /* so it jolly-well should have a TCP header! */
-    tcp = (ci_tcp_hdr*)((char*)ip + ip_hlen);
-    if( dlfilter_lookup( fcb, ip->ip_daddr_be32, tcp->tcp_dest_be16,
-			    ip->ip_saddr_be32, tcp->tcp_source_be16,
-			 IPPROTO_TCP, &thr_id) >= 0 ) {
-      ci_log("** DROP RX TCP R:[%s:%u] L:[%s:%u] [s:%u a:%u f:%x] in Net Driver **",
-	     dlfilt_addr_str(ip->ip_saddr_be32), CI_BSWAP_BE16(tcp->tcp_source_be16),
-	     dlfilt_addr_str(ip->ip_daddr_be32), CI_BSWAP_BE16(tcp->tcp_dest_be16),
-	     CI_BSWAP_BE32(tcp->tcp_seq_be32), CI_BSWAP_BE32(tcp->tcp_ack_be32),
-	     tcp->tcp_flags);
-      return 1;
-    }
-  }
-#endif
 
 #if CI_CFG_NET_DHCP_FILTER
   if( ip->ip_protocol == IPPROTO_UDP ) {
@@ -965,14 +944,11 @@ int efx_dlfilter_handler(int ifindex, efx_dlfilter_cb_t* fcb,
     if( CI_UNLIKELY(ip_paylen < sizeof(ci_icmp_hdr)) )
       return 0;
 
-    /* Control Plane ping interception */
-    cicppl_handle_icmp(&CI_GLOBAL_CPLANE, ip, len);
-
-    if( dlfilter_handle_icmp(ifindex, fcb, ip, len, &thr_id) ) {
+    if( dlfilter_handle_icmp(netns, ifindex, fcb, ip, len, &thr_id) ) {
       if( thr_id != -1 ) {
         OO_DEBUG_DLF(ci_log(LPF "handler: pass ICMP len:%d thr:%d", 
                             len, thr_id));
-        efab_handle_ipp_pkt_task(thr_id, ip, len);
+        efab_handle_ipp_pkt_task(thr_id, ifindex, ip, len);
       }
       else {
         OO_DEBUG_DLF(ci_log(LPF "handler: reject ICMP, INVALID THR ID %d",
@@ -984,52 +960,6 @@ int efx_dlfilter_handler(int ifindex, efx_dlfilter_cb_t* fcb,
 
   return 0;
 }
-
-
-#if CI_CFG_NET_TCP_TX_FILTER
-/* *************************************************************
- * Test for Tx packets (to allow filtering)
- * Returns: 0 - carry on as normal
- *          else - discard SKB etc.
- */
-int 
-efx_dlfilter_tcp_tx_filter(efx_dlfilter_cb_t* fcb, char *data, int len)
-{
-  ci_ip4_hdr* ip;
-  ci_tcp_hdr* tcp;
-  int thr_id;
-
-  ci_assert(fcb);
-
-  /* ASSUMED: IP4, IHL sensible */
-  ip = (ci_ip4_hdr*)data;
-
-  if( ip->ip_protocol != IPPROTO_TCP )
-    return 0;
-
-  /*! \todo We just let non-first fragments go.
-   *  If this is to remain in use then we have to either:
-   *  1. handle fragments
-   *  2. let the kernel garbage collect
-   */
-  if( CI_UNLIKELY( CI_IP4_FRAG_OFFSET(ip) ))
-    return 0;
-
-  /* so it jolly-well should have a TCP header! */
-  tcp = (ci_tcp_hdr*)((char*)ip + CI_IP4_IHL(ip));
-  if( dlfilter_lookup( fcb, ip->ip_saddr_be32, tcp->tcp_source_be16,
-		       ip->ip_daddr_be32, tcp->tcp_dest_be16,
-		       IPPROTO_TCP, &thr_id) >= 0 ) {
-    ci_log("** DROP TX TCP R:[%s:%u] L:[%s:%u] [s:%u a:%u f:%x] in Net Driver **",
-	   dlfilt_addr_str(ip->ip_daddr_be32), CI_BSWAP_BE16(tcp->tcp_dest_be16),
-	   dlfilt_addr_str(ip->ip_saddr_be32), CI_BSWAP_BE16(tcp->tcp_source_be16),
-	   CI_BSWAP_BE32(tcp->tcp_seq_be32), CI_BSWAP_BE32(tcp->tcp_ack_be32),
-	   tcp->tcp_flags);
-    return 1;
-  }
-  return 0;
-}
-#endif
 
 
 /* ******************************************************************

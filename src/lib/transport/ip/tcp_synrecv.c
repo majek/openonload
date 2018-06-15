@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -111,6 +111,7 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
 #ifdef __KERNEL__
   int i = 0;
 #endif
+  oo_p nbucket;
 
   LOG_TV(ci_log("%s([%d] level=%d "TSR_FMT")", __func__,
                 NI_ID(ni), level, TSR_ARGS(tsr)));
@@ -136,10 +137,11 @@ ci_tcp_listenq_bucket_insert(ci_netif* ni, ci_tcp_socket_listen* tls,
   if( level > CI_LISTENQ_BUCKET_MAX_DEPTH(ni) )
     return;
 
-  bucket->bucket[idx] = ci_ni_aux_alloc_bucket(ni);
-  if( OO_P_IS_NULL(bucket->bucket[idx]) )
+  nbucket = ci_ni_aux_alloc_bucket(ni);
+  if( OO_P_IS_NULL(nbucket) )
     return;
-  bucket = ci_ni_aux_p2bucket(ni, bucket->bucket[idx]);
+  bucket->bucket[idx] = nbucket;
+  bucket = ci_ni_aux_p2bucket(ni, nbucket);
   tls->n_buckets++;
 
   while( OO_P_NOT_NULL(tsr_p) ) {
@@ -487,8 +489,9 @@ static void ci_tcp_inherit_options(ci_netif* ni, ci_sock_cmn* s,
   ts->s.so = s->so;
   ts->s.cp.so_bindtodevice = s->cp.so_bindtodevice;
   ts->s.cp.ip_ttl = s->cp.ip_ttl;
+  ts->s.cp.ip_tos = s->cp.ip_tos;
   ts->s.rx_bind2dev_ifindex = s->rx_bind2dev_ifindex;
-  ts->s.rx_bind2dev_base_ifindex = s->rx_bind2dev_base_ifindex;
+  ts->s.rx_bind2dev_hwports = s->rx_bind2dev_hwports;
   ts->s.rx_bind2dev_vlan = s->rx_bind2dev_vlan;
   ci_tcp_set_sndbuf(ni, ts);      /* eff_mss must be valid */
   ci_tcp_set_rcvbuf(ni, ts);      /* and amss, and rcv_wscl */
@@ -701,8 +704,6 @@ int ci_tcp_listenq_try_promote(ci_netif* netif, ci_tcp_socket_listen* tls,
     ts->tcpflags = 0;
     ts->tcpflags |= tsr->tcpopts.flags;
     ts->tcpflags |= CI_TCPT_FLAG_PASSIVE_OPENED;
-    if( NI_OPTS(netif).tcp_listen_replies_back )
-      ts->s.cp.so_bindtodevice = ipcache->ifindex;
     ts->outgoing_hdrs_len = sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr);
     if( ts->tcpflags & CI_TCPT_FLAG_WSCL ) {
       ts->snd_wscl = tsr->tcpopts.wscl_shft;

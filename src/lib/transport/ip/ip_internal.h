@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -35,6 +35,7 @@
 #include <onload/ul/tcp_helper.h>
 #ifdef __KERNEL__
 # include <onload/oof_interface.h>
+# include <onload/oof_onload.h>
 #endif
 #include <onload/cplane_ops.h>
 
@@ -222,6 +223,7 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
 ci_inline int
 ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
                          ci_int32 cluster_size, ci_uint32 cluster_restart_opt,
+                         ci_uint32 cluster_hot_restart_opt,
                          ci_uint32 addr_be32, ci_uint16 port_be16)
 {
   int rc;
@@ -229,8 +231,9 @@ ci_tcp_ep_reuseport_bind(ci_fd_t fd, const char* cluster_name,
   LOG_TC(ci_log("%s: %d addr_be32: %d port: %d", __FUNCTION__, fd, addr_be32,
                 port_be16));
   rc = ci_tcp_helper_ep_reuseport_bind(fd, cluster_name, cluster_size,
-                                       cluster_restart_opt, addr_be32,
-                                       port_be16);
+                                       cluster_restart_opt,
+                                       cluster_hot_restart_opt,
+                                       addr_be32, port_be16);
   LOG_TC( if(rc < 0)
             ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
   return rc;
@@ -309,6 +312,7 @@ ci_tcp_ep_clear_filters(ci_netif*         ni,
  *
  *--------------------------------------------------------------------*/
 
+#ifndef __ci_driver__
 ci_inline int
 ci_tcp_ep_mcast_add_del(ci_netif*         ni,
                         oo_sp             sock_id,
@@ -324,27 +328,14 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
                 __FUNCTION__, OO_SP_FMT(sock_id), ifindex,
                 ip_addr_str(mcast_addr)));
 
-#ifdef __ci_driver__
-  {
-    tcp_helper_endpoint_t* ep = ci_netif_get_valid_ep(ni, sock_id);
-    if( add )
-      rc = oof_socket_mcast_add(efab_tcp_driver.filter_manager,
-                                &ep->oofilter, mcast_addr, ifindex);
-    else {
-      oof_socket_mcast_del(efab_tcp_driver.filter_manager,
-                           &ep->oofilter, mcast_addr, ifindex);
-      rc = 0;
-    }
-  }
-#else
   rc = ci_tcp_helper_ep_mcast_add_del(ci_netif_get_driver_handle(ni),
                                       sock_id, mcast_addr, ifindex, add);
-#endif
 
   LOG_TC( if(rc < 0)
             ci_log(" ---> %s (rc=%d)", __FUNCTION__, rc) );
   return rc;
 }
+#endif
 
 
 /*********************************************************************
@@ -756,14 +747,13 @@ extern citp_init_thread_callback init_thread_callback CI_HV;
 #define ci_ts_port_swap(seq, ts) ((seq / tcp_eff_mss(ts)) & 1)
 #endif
 
-ci_inline int ci_netif_intf_i_to_base_ifindex(ci_netif* ni, int intf_i)
+static inline int ci_intf_i_to_ifindex(ci_netif* ni, int intf_i)
 {
   ci_hwport_id_t hwport;
   ci_assert_lt((unsigned) intf_i, CI_CFG_MAX_INTERFACES);
   hwport = ni->state->intf_i_to_hwport[intf_i];
-  ci_assert_lt((unsigned) hwport, CPLANE_MAX_REGISTER_INTERFACES);
-  return cicp_fwd_hwport_to_base_ifindex(&CICP_USER_MIBS(CICP_HANDLE(ni)),
-                                         hwport);
+  ci_assert_lt((unsigned) hwport, CI_CFG_MAX_HWPORTS);
+  return oo_cp_hwport_vlan_to_ifindex(ni->cplane, hwport, 0, NULL);
 }
 
 

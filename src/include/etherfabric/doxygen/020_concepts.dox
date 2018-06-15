@@ -62,7 +62,7 @@ event queue must be specified.
 A virtual interface also has a few hardware resources:
 - a doorbell register to inform the card that new RX buffers are available 
   for it to use
-- a doorbell register to inform the card that new TX buffers are aeady for 
+- a doorbell register to inform the card that new TX buffers are ready for 
   it to send
 - some timers
 - a share of an interrupt.
@@ -110,6 +110,7 @@ A _protection domain_ identifies a separate address space for the DMA
 addresses passed to the adapter. It is used to protect multiple %ef_vi 
 applications from one another, or to allow them to share resources:
 - Each \ref vi is associated with one protection domain.
+- Multiple VIs can be associated with the same protection domain. 
 - Each \ref memory_region is registered with one or more protection domains.
 - A memory region can only be used by a virtual interface that is in the 
   same protection domain.
@@ -138,9 +139,9 @@ meets the requirements of %ef_vi:
   The adapter translates the DMA addresses provided by the application to 
   I/O addresses used on the PCIe bus.
 - The memory region is page-aligned, for performance.
-- The size of the memory region is a muliple of the packet buffer size, so
+- The size of the memory region is a multiple of the packet buffer size, so
   no memory is wasted.
-
+  
 \section packet_buffer Packet Buffer
 
 A _packet buffer_ is a memory allocations on the host which the card will 
@@ -188,7 +189,7 @@ passed to the adapter on the critical path.
 
 \section filters Filters
 
-_Filters_ select which packets are delivered to a virtual interfacen. 
+_Filters_ select which packets are delivered to a virtual interface. 
 Packets that are not selected are ignored and allowed to pass on to the 
 kernel.
 
@@ -228,12 +229,12 @@ handled at a higher level:
 
 \section tx_alternatives TX Alternatives
 
-_TX alternatives_ provide multiple alternative queues for transmission, that 
-can be used to minimize latency. Different possible responses can be pushed 
-through the TX path on the NIC, and held in different queues ready to 
-transmit. When it is decided which response to transmit, the appropriate 
-alternative queue is selected, and the queued packets are sent. Becasue the 
-packets are already prepared, and are held close to the wire, latency is 
-greatly reduced. 
+_TX alternatives_ is a feature available on Solarflare SFN8000 series adapters
+to provide multiple alternative queues for transmission, that can be used to
+minimize latency. Different possible responses can be pushed through the TX path 
+on the NIC, and held in different queues ready to transmit. When it is decided 
+which response to transmit, the appropriate alternative queue is selected, and 
+the queued packets are sent. Because the packets are already prepared, and are held 
+close to the wire, latency is greatly reduced. 
 
 */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,6 +56,8 @@ int efrm_license_challenge(struct efrm_resource *rs,
 
   EFRM_ASSERT(rs);
   EFRM_ASSERT(s);
+  /* Top bit of challenge data must be clear. */
+  EFRM_ASSERT((s->challenge[0] & 0x80) == 0);
 
   rm_nic = efrm_nic_from_rs(rs);
   EFRM_ASSERT(rm_nic);

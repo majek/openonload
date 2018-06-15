@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -448,9 +448,12 @@ extern uint32_t efrm_vi_rm_evq_bytes(struct efrm_vi *virs, int n_entries);
 /*! Get the info needed to use a VI in kernel space. */
 extern void efrm_vi_get_mappings(struct efrm_vi *, struct efrm_vi_mappings *);
 
+extern int efrm_vi_get_rx_error_stats(struct efrm_vi*, void*, size_t, int);
 
 extern int
 efrm_vi_tx_alt_alloc(struct efrm_vi *virs, int num_alt, int num_32b_words);
 
+extern int
+efrm_vi_tx_alt_free(struct efrm_vi *virs);
 
 #endif /* __CI_EFRM_VI_RESOURCE_H__ */

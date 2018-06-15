@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -26,6 +26,7 @@
 #include <onload/tcp_helper_fns.h>
 #include <onload/version.h>
 #include <onload/tcp_helper_endpoint.h>
+#include <onload/oof_onload.h>
 #include <onload/oof_interface.h>
 
 #include <ci/efrm/pd.h>
@@ -46,22 +47,25 @@
 #define IPPORT_ARG(ip,p)   IP_ARG(ip), FMT_PORT(p)
 
 
-/* Head of global linked list of clusters */
+/* Head of global linked list of clusters.
+ * The list is protected by thc_mutex.
+ */
 /* TODO: As all clusters are associated with a oof_local_port, we
  * could iterate over oof_local_port's to get a list of clusters and
  * not need to maintain this list here. */
 static tcp_helper_cluster_t* thc_head;
 
-/* You must hold this mutex if you are accessing anything within
- * thc_head
- */
+/* Mutex for protecting any thc_head list and thc state as well
+ * thc creation and destruction, thr creation, allocation and destruction */
 static DEFINE_MUTEX(thc_mutex);
-/* This mutex is used to ensure only that consistent state is used to decide
- * whether a new cluster is needed.  It should only be taken without thc_mutex
- * or the netif lock held, and can only be used to protect
- * efab_tcp_helper_reuseport_bind.
- */
+
+/* This mutex serializes cluster creation and allocation of thcs and their thrs.
+ * Not to be taken for destructions of clusters and their objects.
+ * Cannot be taken with thc_mutex held already. */
 static DEFINE_MUTEX(thc_init_mutex);
+
+
+static void thc_cluster_free(tcp_helper_cluster_t* thc);
 
 
 static int thc_get_sock_protocol(ci_sock_cmn* sock)
@@ -70,10 +74,21 @@ static int thc_get_sock_protocol(ci_sock_cmn* sock)
 }
 
 
+void tcp_helper_cluster_ref(tcp_helper_cluster_t* thc)
+{
+  ci_assert_gt(oo_atomic_read(&thc->thc_ref_count), 0);
+  oo_atomic_inc(&thc->thc_ref_count);
+}
+
+
 static int thc_is_thr_name_taken(tcp_helper_cluster_t* thc, char* name)
 {
   int i = 0;
-  tcp_helper_resource_t* thr_walk = thc->thc_thr_head;
+  tcp_helper_resource_t* thr_walk;
+
+  ci_assert(mutex_is_locked(&thc_mutex));
+
+  thr_walk = thc->thc_thr_head;
   while( thr_walk != NULL && i < thc->thc_cluster_size ) {
     if( strncmp(name, thr_walk->name, CI_CFG_STACK_NAME_LEN) == 0 )
       return 1;
@@ -85,6 +100,8 @@ static int thc_is_thr_name_taken(tcp_helper_cluster_t* thc, char* name)
 }
 
 
+/* Note: thc_mutex is needed to ensure the name is not taken by the time
+ * the function returns */
 static int thc_get_next_thr_name(tcp_helper_cluster_t* thc, char* name_out)
 {
   int i = 0;
@@ -98,20 +115,30 @@ static int thc_get_next_thr_name(tcp_helper_cluster_t* thc, char* name_out)
 }
 
 
-/* If the thc has any orphan stacks, return one of them. */
+/* If the thc has any orphan stacks, return one of them with a kernel reference.
+ * Returns
+ *  * -EBUSY - if a stack is being destructed (no need to kill)
+ *  * -ENOENT - no stack present
+ *  * 0 on success and if thr_out not NULL gives thr with extra kernel ref
+ */
 static int thc_get_an_orphan(tcp_helper_cluster_t* thc,
                              tcp_helper_resource_t** thr_out)
 {
   tcp_helper_resource_t* thr_walk;
-  int rc = -1;
+  int rc = -ENOENT;
   ci_irqlock_state_t lock_flags;
+
+  ci_assert(mutex_is_locked(&thc_mutex));
   /* Iterating over list of stacks, make sure they don't change. */
   ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
   thr_walk = thc->thc_thr_head;
   while( thr_walk ) {
     if( thr_walk->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND ) {
       rc = 0;
-      *thr_out = thr_walk;
+      if( thr_out != NULL ) {
+        rc = efab_tcp_helper_k_ref_count_inc(thr_walk);
+        *thr_out = thr_walk;
+      }
       break;
     }
     thr_walk = thr_walk->thc_thr_next;
@@ -125,18 +152,17 @@ static int thc_get_an_orphan(tcp_helper_cluster_t* thc,
  */
 static int thc_has_orphans(tcp_helper_cluster_t* thc)
 {
-  tcp_helper_resource_t* thr;
-  return thc_get_an_orphan(thc, &thr) == 0 ? 1 : 0;
+  /* we either have an orphan (0) or a thr being destructed (-EBUSY) */
+  return thc_get_an_orphan(thc, NULL) != -ENOENT ? 1 : 0;
 }
 
 
 /* Allocate a new cluster.
  *
- * You need to hold the thc_mutex before calling this.
- */
+ * On success returns cluster with single reference */
 static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
                      uid_t euid, int cluster_size,
-                     unsigned flags,
+                     unsigned flags, struct net* netns,
                      tcp_helper_cluster_t** thc_out)
 {
   int rc, i;
@@ -145,22 +171,48 @@ static int thc_alloc(const char* cluster_name, int protocol, int port_be16,
   int packet_buffer_mode = flags & THC_FLAG_PACKET_BUFFER_MODE;
   int tproxy = flags & THC_FLAG_TPROXY;
   int hw_loopback_enable = flags & THC_FLAG_HW_LOOPBACK_ENABLE;
+  tcp_helper_cluster_t* thc;
 
-  tcp_helper_cluster_t* thc = kmalloc(sizeof(*thc), GFP_KERNEL);
+  ci_assert(mutex_is_locked(&thc_init_mutex));
+  ci_assert(mutex_is_locked(&thc_mutex));
+
+  thc = kmalloc(sizeof(*thc), GFP_KERNEL);
   if( thc == NULL )
     return -ENOMEM;
   memset(thc, 0, sizeof(*thc));
   ci_dllist_init(&thc->thc_tlos);
 
-  strcpy(thc->thc_name, cluster_name);
-  thc->thc_cluster_size = cluster_size;
-  thc->thc_euid = euid;
-  thc->thc_flags = flags;
+  thc->thc_thr_rrobin = kmalloc(sizeof(tcp_helper_resource_t*) * cluster_size,
+                                GFP_KERNEL);
+  if( thc->thc_thr_rrobin == NULL ) {
+    kfree(thc);
+    return -ENOMEM;
+  }
+  memset(thc->thc_thr_rrobin, 0, sizeof(tcp_helper_resource_t*) * cluster_size);
 
+  if( tcp_helper_get_ns_components(&thc->thc_cplane, &thc->thc_filter_ns,
+                                   0 /* no need to sync oof or MIBs */)
+      != 0 ) {
+    kfree(thc->thc_thr_rrobin);
+    kfree(thc);
+    return -ENOMEM;
+  }
+
+
+  strcpy(thc->thc_name, cluster_name);
+  thc->thc_cluster_size       = cluster_size;
+  thc->thc_keuid              = euid;
+  thc->thc_flags              = flags;
+  thc->thc_thr_rrobin_index   = 0;
+  thc->thc_reheat_flags       = THC_REHEAT_FLAG_USE_SWITCH_PORT;
+  oo_atomic_set(&thc->thc_ref_count, 1);
+  init_waitqueue_head(&thc->thr_release_done);
+  thc->thc_switch_port        = 0;
+  thc->thc_switch_addr        = 0;
   /* Needed to protect against oo_nics changes */
   rtnl_lock();
 
-  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i ) {
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i ) {
     if( oo_nics[i].efrm_client == NULL ||
         ! oo_check_nic_suitable_for_onload(&(oo_nics[i])) )
       continue;
@@ -194,29 +246,34 @@ redo:
 
   thc->thc_next = thc_head;
   thc_head = thc;
+
   *thc_out = thc;
   return 0;
 
  fail:
   rtnl_unlock();
-  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
-    if( thc->thc_vi_set[i] != NULL )
-      efrm_vi_set_release(thc->thc_vi_set[i]);
-  kfree(thc);
+  thc_cluster_free(thc);
   return rc;
 }
 
 
-static int thc_search_by_name(const char* cluster_name, int protocol,
+/*On success
+ *   Returns 1 and cluster with extra reference
+ */
+static int thc_search_by_name(const char* cluster_name, struct net* netns,
+                              int protocol,
                               int port_be16, uid_t euid,
                               tcp_helper_cluster_t** thc_out)
 {
   tcp_helper_cluster_t* thc_walk = thc_head;
+  ci_assert(mutex_is_locked(&thc_mutex));
 
   while( thc_walk != NULL ) {
-    if( strcmp(cluster_name, thc_walk->thc_name) == 0 ) {
-      if( thc_walk->thc_euid != euid )
+    if( thc_walk->thc_cplane->cp_netns == netns &&
+        strcmp(cluster_name, thc_walk->thc_name) == 0 ) {
+      if( thc_walk->thc_keuid != euid )
         return -EPERM;
+      tcp_helper_cluster_ref(thc_walk);
       *thc_out = thc_walk;
       return 1;
     }
@@ -227,14 +284,26 @@ static int thc_search_by_name(const char* cluster_name, int protocol,
 
 
 /* Remove the thr from the list of stacks tracked by the thc.
+ * Remove the thr from the round robin array of stack pointers tracked by the thc.
  *
- * You must hold the thc_mutex before calling this function.
+ * requires thc_mutex
  */
 static void thc_remove_thr(tcp_helper_cluster_t* thc,
                            tcp_helper_resource_t* thr)
 {
   tcp_helper_resource_t* thr_walk = thc->thc_thr_head;
   tcp_helper_resource_t* thr_prev = NULL;
+  int rrobin_i;
+
+  for( rrobin_i = 0; rrobin_i < thc->thc_cluster_size; ++rrobin_i ) {
+    if( thc->thc_thr_rrobin[rrobin_i] != NULL &&
+        thc->thc_thr_rrobin[rrobin_i]->id == thr->id ) {
+      thc->thc_thr_rrobin[rrobin_i] = NULL;
+      break;
+    }
+  }
+
+  ci_assert(mutex_is_locked(&thc_mutex));
 
   while( thr_walk != NULL ) {
     if( thr_walk == thr ) {
@@ -246,6 +315,8 @@ static void thc_remove_thr(tcp_helper_cluster_t* thc,
         thr_prev->thc_thr_next = thr_walk->thc_thr_next;
       }
       thr->thc = NULL;
+      oo_atomic_dec_and_test(&thc->thc_thr_count);
+      ci_assert_ge(oo_atomic_read(&thc->thc_thr_count), 0);
       return;
     }
     thr_prev = thr_walk;
@@ -255,30 +326,65 @@ static void thc_remove_thr(tcp_helper_cluster_t* thc,
 }
 
 
-/* Kill an orphan stack in the thc
- *
- * You must hold the thc_mutex before calling this function.
- *
- * You cannot hold the THR_TABLE.lock when calling this function.
- */
+/* Kill an orphan stack in the thc */
 static void thc_kill_an_orphan(tcp_helper_cluster_t* thc)
 {
   tcp_helper_resource_t* thr = NULL;
   int rc;
 
+  ci_assert(mutex_is_locked(&thc_init_mutex));
+  ci_assert(mutex_is_locked(&thc_mutex));
+
   rc = thc_get_an_orphan(thc, &thr);
-  ci_assert_equal(rc, 0);
-  /* This is generally called when the stack is being freed.  But as
-   * we are holding the thc_mutex, we will deadlock if we took that
-   * path.  So we remove thr from the thc now. */
-  thc_remove_thr(thc, thr);
-  LOG_U(ci_log("Clustering: Killing orphan stack %d", thr->id));
-  rc = tcp_helper_kill_stack_by_id(thr->id);
+  ci_assert_nequal(rc, -ENOENT);
+  /* -EBUSY means the stack is dying already - no need to kill */
+  ci_assert_impl(rc != 0, rc == -EBUSY);
+
+  if( rc == 0 ) {
+    /* This is generally called when the stack is being freed.  But as
+     * we are holding the thc_mutex, we will deadlock if we took that
+     * path.  So we remove thr from the thc now. */
+    LOG_U(ci_log("Clustering: Killing orphan stack %d", thr->id));
+
+    rc = tcp_helper_kill_stack_by_id(thr->id);
+    ci_assert_equal(rc, 0);
+    rc = 0;
+  }
+  else {
 #ifndef NDEBUG
-  if( rc != 0 && rc != -EBUSY )
-    LOG_U(ci_log("%s: tcp_helper_kill_stack_by_id(%d): failed %d", __FUNCTION__,
-                 thr->id, rc));
+    LOG_U(ci_log("%s: a suitable stack is dying - waiting\n", __FUNCTION__));
 #endif
+  }
+  /* Drop mutex so the stack cleanup can proceed,
+   *  * We have got thc refernce so thc cannot go away.
+   *  * We have got thc_init_mutex, so no concurrent cluster or stack creation
+   *    work can proceed - only destruction.
+   */
+  mutex_unlock(&thc_mutex);
+  if( rc == 0 )
+    /* remove reference taken by thc_get_an_orphan()
+     * Note: this will likely trigger stack destruction
+     */
+    efab_tcp_helper_k_ref_count_dec(thr);
+
+  /* wait until stack destruction completes */
+  rc = wait_event_timeout(thc->thr_release_done,
+                          oo_atomic_read(&thc->thc_thr_count) < thc->thc_cluster_size,
+                          10 * HZ);
+  if( rc == 0 ) {
+    LOG_E(ci_log("%s: stack did not die within 10s\n", __FUNCTION__));
+  }
+
+  mutex_lock(&thc_mutex);
+}
+
+
+static int thc_get_prior_round_robin_index(const tcp_helper_cluster_t* thc)
+{
+  int index = thc->thc_thr_rrobin_index;
+  if( --index < 0 )
+    index = thc->thc_cluster_size - 1;
+  return index;
 }
 
 
@@ -288,8 +394,6 @@ static void thc_kill_an_orphan(tcp_helper_cluster_t* thc)
  * when done.
  *
  * You must hold the thc_mutex before calling this function.
- *
- * You cannot hold the THR_TABLE.lock when calling this function.
  */
 static int thc_get_thr(tcp_helper_cluster_t* thc,
                        struct oof_socket* oofilter,
@@ -297,7 +401,7 @@ static int thc_get_thr(tcp_helper_cluster_t* thc,
 {
   tcp_helper_resource_t* thr_walk;
   ci_irqlock_state_t lock_flags;
-  struct oof_manager* fm = efab_tcp_driver.filter_manager;
+  ci_assert(mutex_is_locked(&thc_mutex));
   /* Search for a suitable stack within the thc.  A suitable stack has
    * the same tid as current and we could associate our filter with it.
    * Or in other words does not have a socket filter installed
@@ -305,11 +409,13 @@ static int thc_get_thr(tcp_helper_cluster_t* thc,
    */
   /* Iterating over list of stacks, make sure they don't change. */
   ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+
   thr_walk = thc->thc_thr_head;
   while( thr_walk != NULL ) {
     if( (~thr_walk->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) &&
-        thr_walk->thc_tid == current->pid &&
-        oof_socket_can_update_stack(fm, oofilter, thr_walk) ) {
+       thr_walk->thc_tid == current->pid &&
+       oof_socket_can_update_stack(oo_filter_ns_to_manager(thc->thc_filter_ns),
+                                   oofilter, thr_walk) ) {
       efab_thr_ref(thr_walk);
       *thr_out = thr_walk;
       ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
@@ -322,15 +428,147 @@ static int thc_get_thr(tcp_helper_cluster_t* thc,
 }
 
 
-/* Allocates a new stack in thc.
+/* Performs stack selection and ensures stickiness properties
+ * suitable for a cluster in hot restart mode.
+ *
+ * Returns 0 if successful and stack exists,
+ * 1 if successful except that stack needs to be allocated,
+ * -EADDRINUSE if no more spaces available for reheating.
+ *
+ * If a stack is found for reheating, the stack owner will be updated to
+ * the current pid/tid.
  *
  * You need to efab_thr_release() the stack returned by this function
  * when done.
  *
  * You must hold the thc_mutex before calling this function.
+ *
+ * You cannot hold the THR_TABLE.lock when calling this function.
+ */
+static int thc_get_thr_reheat(tcp_helper_cluster_t* thc,
+                              uint32_t addr,
+                              uint16_t port,
+                              int* backup_index,
+                              pid_t* backup_tid_effective,
+                              tcp_helper_resource_t** thr_out)
+{
+  ci_irqlock_state_t lock_flags;
+  tcp_helper_resource_t* thr = NULL;
+  tcp_helper_resource_t* thr_prior = NULL;
+  int i;
+  int rc = 1;
+
+  ci_assert_nequal(thc->thc_thr_rrobin, NULL);
+
+  ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+
+  /* Try to set prior_stack; sticky binds explicitly unset it. */
+  for( i = 0; i < thc->thc_cluster_size; ++i ) {
+    if( NULL == thc->thc_thr_rrobin[i] )
+      continue;
+    if( thc->thc_thr_rrobin[i]->thc_tid_effective == current->pid ) {
+      thr_prior = thc->thc_thr_rrobin[i];
+      break;
+    }
+  }
+
+  if( thc->thc_reheat_flags & THC_REHEAT_FLAG_USE_SWITCH_PORT ) {
+    /* If both ports and addrs match we need to instead switch stack. */
+    /* Note addr == 0 is valid (wild filter), so this condition could fail if
+     * switch_port == port and switch_addr == 0 by default (hasn't been set)
+     * and addr == 0, although this should be a valid case to enter this code.
+     * This case can never happen as ports are compared first, 0 is invalid for
+     * a port, and if switch_port has been set, switch_addr was set at the
+     * same time (possibly to 0).
+     */
+    if( thc->thc_switch_port != port || thc->thc_switch_addr != addr ) {
+      if( 0 != thc->thc_switch_port ) {
+        thc->thc_reheat_flags |= THC_REHEAT_FLAG_STICKY_MODE;
+      }
+      /* Try to find a stack this worker already uses. */
+      thr = thr_prior;
+      thr_prior = NULL;
+    }
+  }
+  if( NULL == thr ) {
+    thr = thc->thc_thr_rrobin[thc->thc_thr_rrobin_index];
+    if( thr_prior == NULL ) {
+      /* Reheat or multi-worker, else tids would match. */
+      thc->thc_switch_port = port;
+      thc->thc_switch_addr = addr;
+      thc->thc_reheat_flags |= THC_REHEAT_FLAG_USE_SWITCH_PORT;
+      thc->thc_reheat_flags &= ~THC_REHEAT_FLAG_STICKY_MODE;
+    }
+    else {
+      *backup_index = i;
+      *backup_tid_effective = thr_prior->thc_tid_effective;
+      thr_prior->thc_tid_effective = 0;
+      if( ! (thc->thc_reheat_flags & THC_REHEAT_FLAG_STICKY_MODE) )
+        thc->thc_reheat_flags &= ~THC_REHEAT_FLAG_USE_SWITCH_PORT;
+    }
+    if( thr != NULL )
+      thr->thc_tid_effective = current->pid;
+    if( ++thc->thc_thr_rrobin_index >= thc->thc_cluster_size )
+      thc->thc_thr_rrobin_index = 0;
+  }
+  if( thr != NULL ) {
+    if( ~thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND ) {
+      efab_thr_ref(thr);
+      rc = 0;
+    }
+    else {
+      /* Stack is dying; let thc_alloc_thr() kill an orphan. */
+      thr = NULL;
+      rc = 1;
+    }
+  }
+  *thr_out = thr;
+
+  ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+
+  return rc;
+}
+
+
+/* Adds an entry in this cluster's round robin table,
+ * at a position determined using the cluster's round robin index.
+ *
+ * You must hold the thc_mutex before calling this function.
+ *
+ * This function only expects to be called if there is a free space at the
+ * determined position; this and thc_mutex being held are guaranteed via
+ * thc_alloc_thr().
+ */
+static void thc_round_robin_add(tcp_helper_cluster_t*   thc,
+                                tcp_helper_resource_t*  thr_new)
+{
+  tcp_helper_resource_t** stacks = thc->thc_thr_rrobin;
+  int index = thc_get_prior_round_robin_index(thc);
+
+  /* The round robin pointer should have been init'd during cluster alloc */
+  ci_assert_nequal(stacks, NULL);
+  /* Not the space I asked for. I want to talk to the manager! */
+  /* If the thc_mutex is held, nobody else can modify round robin table while
+   * we are looking for a free space in it.
+   *    During bind, thc_alloc_thr() is only called if the stack at the
+   * index is NULL, in which case the index gets incremented mod cluster size,
+   * hence the need for thc_get_prior_round_robin_index() here. This index
+   * should still be for a NULL pointer.
+   */
+  ci_assert_equal(stacks[index], NULL);
+
+  stacks[index] = thr_new;
+}
+
+
+/* Allocates a new stack in thc.
+ *
+ * You need to efab_thr_release() the stack returned by this function
+ * when done.
  */
 static int thc_alloc_thr(tcp_helper_cluster_t* thc,
                          int cluster_restart_opt,
+                         int cluster_hot_restart_opt,
                          const ci_netif_config_opts* ni_opts,
                          int ni_flags,
                          tcp_helper_resource_t** thr_out)
@@ -340,6 +578,9 @@ static int thc_alloc_thr(tcp_helper_cluster_t* thc,
   ci_resource_onload_alloc_t roa;
   ci_netif_config_opts* opts;
   ci_netif* netif;
+
+  ci_assert(mutex_is_locked(&thc_init_mutex));
+  ci_assert(mutex_is_locked(&thc_mutex));
 
   memset(&roa, 0, sizeof(roa));
 
@@ -366,16 +607,25 @@ static int thc_alloc_thr(tcp_helper_cluster_t* thc,
       return rc;
     }
   }
-  roa.in_flags = ni_flags;
+  roa.in_flags = ni_flags & ~(CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS |
+                              CI_NETIF_FLAG_IN_DL_CONTEXT);
   strncpy(roa.in_version, ONLOAD_VERSION, sizeof(roa.in_version));
   strncpy(roa.in_uk_intf_ver, oo_uk_intf_ver, sizeof(roa.in_uk_intf_ver));
   if( (opts = kmalloc(sizeof(*opts), GFP_KERNEL)) == NULL )
     return -ENOMEM;
   memcpy(opts, ni_opts, sizeof(*opts));
+  if( ni_flags & CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS ) {
+    /* disabling tcp shared ports on passive socket clustered stacks */
+    opts->tcp_shared_local_ports = 0;
+    opts->tcp_shared_local_ports_max = 0;
+  }
   rc = tcp_helper_rm_alloc(&roa, opts, -1, thc, &thr_walk);
   kfree(opts);
   if( rc != 0 )
     return rc;
+
+  if( 0 != cluster_hot_restart_opt )
+    thc_round_robin_add(thc, thr_walk);
 
   /* Do not allow clustered stacks to do TCP loopback. */
   netif = &thr_walk->netif;
@@ -386,15 +636,18 @@ static int thc_alloc_thr(tcp_helper_cluster_t* thc,
   NI_OPTS(netif).tcp_server_loopback = NI_OPTS(netif).tcp_client_loopback =
     CITP_TCP_LOOPBACK_OFF;
 
-  thr_walk->thc_tid      = current->pid;
-  thr_walk->thc          = thc;
-  thr_walk->thc_thr_next = thc->thc_thr_head;
-  thc->thc_thr_head      = thr_walk;
-
+  thr_walk->thc_tid           = current->pid;
+  thr_walk->thc_tid_effective = current->pid;
+  thr_walk->thc               = thc;
   if( (thr_walk->thc->thc_flags & THC_FLAG_TPROXY) != 0 )
     netif->state->flags |= CI_NETIF_FLAG_SCALABLE_FILTERS_RSS;
 
-  oo_atomic_inc(&thc->thc_ref_count);
+  tcp_helper_cluster_ref(thc);
+  thr_walk->thc_thr_next      = thc->thc_thr_head;
+  thc->thc_thr_head           = thr_walk;
+
+  oo_atomic_inc(&thc->thc_thr_count);
+
   *thr_out = thr_walk;
   return 0;
 }
@@ -403,7 +656,8 @@ static int thc_alloc_thr(tcp_helper_cluster_t* thc,
 static int thc_install_tproxy(tcp_helper_cluster_t* thc, int ifindex)
 {
   int rc;
-  rc = oof_tproxy_install(efab_tcp_driver.filter_manager, NULL, thc, ifindex);
+  rc = oof_tproxy_install(oo_filter_ns_to_manager(thc->thc_filter_ns), NULL,
+                          thc, ifindex);
   if( rc == 0 )
     thc->thc_tproxy_ifindex = ifindex;
   return rc;
@@ -413,27 +667,17 @@ static int thc_install_tproxy(tcp_helper_cluster_t* thc, int ifindex)
 static void thc_uninstall_tproxy(tcp_helper_cluster_t* thc)
 {
   if( thc->thc_tproxy_ifindex )
-    oof_tproxy_free(efab_tcp_driver.filter_manager, NULL, thc, thc->thc_tproxy_ifindex);
+    oof_tproxy_free(oo_filter_ns_to_manager(thc->thc_filter_ns), NULL, thc,
+                    thc->thc_tproxy_ifindex);
 }
 
 
-/* Free a thc.
- *
- * You must hold the thc_mutex before calling this function.
- */
-static void thc_cluster_free(tcp_helper_cluster_t* thc)
+
+static void thc_cluster_remove(tcp_helper_cluster_t* thc)
 {
-  int i;
   tcp_helper_cluster_t *thc_walk, *thc_prev;
 
-  thc_uninstall_tproxy(thc);
-
-  /* Free up resources within the thc */
-  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
-    if( thc->thc_vi_set[i] != NULL )
-      efrm_vi_set_release(thc->thc_vi_set[i]);
-
-  ci_assert(ci_dllist_is_empty(&thc->thc_tlos));
+  ci_assert(mutex_is_locked(&thc_mutex));
 
   /* Remove from the thc_head list */
   thc_walk = thc_head;
@@ -447,7 +691,6 @@ static void thc_cluster_free(tcp_helper_cluster_t* thc)
       else {
         thc_prev->thc_next = thc_walk->thc_next;
       }
-      kfree(thc_walk);
       return;
     }
     thc_prev = thc_walk;
@@ -457,24 +700,66 @@ static void thc_cluster_free(tcp_helper_cluster_t* thc)
 }
 
 
-static void tcp_helper_cluster_ref(tcp_helper_cluster_t* thc)
+/* Free a thc.
+ * No need for lock.
+ */
+static void thc_cluster_free(tcp_helper_cluster_t* thc)
 {
-  oo_atomic_inc(&thc->thc_ref_count);
+  int i;
+
+  thc_uninstall_tproxy(thc);
+
+  /* Free up resources within the thc */
+  oo_filter_ns_put(&efab_tcp_driver, thc->thc_filter_ns);
+  cp_release(thc->thc_cplane);
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i )
+    if( thc->thc_vi_set[i] != NULL )
+      efrm_vi_set_release(thc->thc_vi_set[i]);
+  kfree(thc->thc_thr_rrobin);
+  ci_assert(ci_dllist_is_empty(&thc->thc_tlos));
+  kfree(thc);
 }
 
-/* Releases tcp_helper_resource_t on the tcp_helper_cluster_t.  If no
- * more tcp_helper_resource_t's, then frees it.
- *
- * This function will acquire the thc_mutex.
+
+/* From given cluster remove thr with its reference or reference alone if
+ * thr not given. Signal thc_release_done waiter when thr is removed.
+ * Free cluster when no references left.
  */
+static void tcp_helper_cluster_release_locked(tcp_helper_cluster_t* thc,
+                                              tcp_helper_resource_t* thr)
+{
+  int do_free_cluster = 0;
+  ci_assert(mutex_is_locked(&thc_mutex));
+
+  /* Make sure that removing thr from thc and thc from thc_head is atomic */
+  if( thr != NULL )
+    /* Remove thr as it no longer holds cluster resources */
+    thc_remove_thr(thc, thr);
+  do_free_cluster = oo_atomic_dec_and_test(&thc->thc_ref_count);
+  if( do_free_cluster )
+    thc_cluster_remove(thc);
+
+  /* thc is detached from thc_head list and technically thc_mutex is
+   * not required.
+   * However having resources freed now might reduce clash with
+   * concurrent cluster creation (especially tproxy one).
+   * TODO: consider adding EF_CLUSTER_REUSE analogue
+   * for entire clusters.
+   */
+  if( do_free_cluster )
+    thc_cluster_free(thc);
+
+  if( ! do_free_cluster && thr != NULL )
+    /* there might be some waiter around - wake him up */
+    wake_up(&thc->thr_release_done);
+}
+
+
 void tcp_helper_cluster_release(tcp_helper_cluster_t* thc,
                                 tcp_helper_resource_t* thr)
 {
   mutex_lock(&thc_mutex);
-  if( thr != NULL )
-    thc_remove_thr(thc, thr);
-  if( oo_atomic_dec_and_test(&thc->thc_ref_count) )
-    thc_cluster_free(thc);
+  tcp_helper_cluster_release_locked(thc, thr);
   mutex_unlock(&thc_mutex);
 }
 
@@ -487,7 +772,7 @@ int tcp_helper_cluster_from_cluster(tcp_helper_resource_t* thr)
 }
 
 
-int tcp_helper_cluster_thc_flags(const ci_netif_config_opts* ni_opts)
+static int tcp_helper_cluster_thc_flags(const ci_netif_config_opts* ni_opts)
 {
   return
     (ni_opts->packet_buffer_mode ?
@@ -522,7 +807,7 @@ int tcp_helper_cluster_alloc_thr(const char* cname,
 {
   tcp_helper_cluster_t* thc = NULL;
   tcp_helper_resource_t* thr = NULL;
-  int alloced = 0;
+  int thc_alloced = 0, thc_found = 0;
   int rc = -ENOENT;
   int thc_flags = tcp_helper_cluster_thc_flags(ni_opts);
   char name[CI_CFG_CLUSTER_NAME_LEN + 1];
@@ -533,36 +818,45 @@ int tcp_helper_cluster_alloc_thr(const char* cname,
 
   gen_cluster_name(cname, name);
 
-  rc = thc_search_by_name(name, 0, 0, ci_geteuid(), &thc);
+  rc = thc_search_by_name(name, current->nsproxy->net_ns, 0, 0,
+                          ci_geteuid(), &thc);
   if( rc < 0 )
     goto fail;
-  if( rc == 1 )
+  if( rc == 1 ) {
     rc = 0;
-  else
+    thc_found = 1;
+  } else {
     rc = -ENOENT;
+  }
 
   if( rc == -ENOENT ) {
-    rc = thc_alloc(name, 0, 0, ci_geteuid(), cluster_size, thc_flags, &thc);
+    /* This is the scalable filter path, where we need to allocate a cluster
+     * at stack creation.  We use the namespace that we're currently in to
+     * select the appropriate filter manager.
+     */
+    rc = thc_alloc(name, 0, 0, ci_geteuid(), cluster_size, thc_flags,
+                   current->nsproxy->net_ns, &thc);
     if( rc < 0 )
       goto fail;
-    alloced = 1;
+    thc_alloced = 1;
   }
   if( rc == 0 )
-    /* Find a suitable stack within the cluster to use */
-    rc = thc_alloc_thr(thc, cluster_restart, ni_opts, ni_flags, &thr);
+    /* Find a suitable stack within the cluster to use, obtains reference to thc */
+    rc = thc_alloc_thr(thc, cluster_restart, 0, ni_opts, ni_flags, &thr);
+
  fail:
   mutex_unlock(&thc_mutex);
-  mutex_unlock(&thc_init_mutex);
-  if( rc == 0 && alloced && thc_flags & THC_FLAG_TPROXY ) {
+  if( rc == 0 && thc_alloced && thc_flags & THC_FLAG_TPROXY ) {
+    /* TODO: wait for resources if another's cluster destruction is in progress */
     rc = thc_install_tproxy(thc, ni_opts->scalable_filter_ifindex);
-    if( rc != 0 ) {
+    if( rc != 0 )
       efab_thr_release(thr);
-      /* this should have freed the thc without other references */
-      alloced = 0;
-    }
   }
-  if( rc != 0 && alloced )
+  if( thc_alloced || thc_found )
+    /* free the reference we have taken in thc_alloc() or thc_search_by_name() */
+    /* unless thr has not been allocated (error), it will get thc freed as well */
     tcp_helper_cluster_release(thc, NULL);
+  mutex_unlock(&thc_init_mutex);
   if( rc == 0 )
    *thr_out = thr;
   return rc;
@@ -580,16 +874,32 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   tcp_helper_resource_t* thr = NULL;
   citp_waitable* waitable;
   ci_sock_cmn* sock;
-  struct oof_manager* fm = efab_tcp_driver.filter_manager;
+  /* We need to try and find an appropriate existing cluster.  To do that
+   * we use the netns and filter manager associated with this socket, which
+   * reflect the namespace the socket was created in.  If we need to create
+   * a new cluster we'll use the netns to get our own reference to an
+   * appropriate filter manager.
+   */
+  struct oof_manager* fm = oo_filter_ns_to_manager(priv->thr->filter_ns);
+  struct net* netns = oo_filter_ns_to_netns(priv->thr->filter_ns);
   struct oof_socket* oofilter;
   struct oof_socket dummy_oofilter;
   int protocol;
   char name[CI_CFG_CLUSTER_NAME_LEN + 1];
   int rc, rc1;
   int flags = 0;
-  tcp_helper_cluster_t* named_thc,* ported_thc;
+  tcp_helper_cluster_t* ported_thc;
   int alloced = 0;
+  int do_sock_unlock = 1;
   oo_sp new_sock_id;
+
+  tcp_helper_reheat_state_t reheat_state = {
+    .thr_prior_index    = -1,
+    .thc_tid_effective  = -1,
+    .thc_reheat_flags   =  0,
+    .thc_switch_port    =  0,
+    .thc_switch_addr    =  0,
+  };
 
   if( NI_OPTS(ni).cluster_ignore == 1 ) {
     LOG_NV(ci_log("%s: Ignored attempt to use clusters due to "
@@ -671,21 +981,42 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
                       &ported_thc);
   if( rc < 0 ) /* non-clustered socket on the tuple */
     goto alloc_fail0;
+  /* if rc == 1 oof_socket_add added reference to the cluster */
 
   if( ! gen_cluster_name(trb->cluster_name, name) ) {
+    tcp_helper_cluster_t* named_thc = NULL; /* set to silence compiler */
     /* user requested a cluster by name.  But we need to make sure
      * that the oof_local_port that the user is interested in is not
      * being used by another cluster.  We search for cluster by name
      * and use results of prior protp:port[:ip] search oof_local_port
      * to then do some sanity checking.
      */
-    rc1 = thc_search_by_name(name, protocol, trb->port_be16, ci_geteuid(),
-                            &named_thc);
+    rc1 = thc_search_by_name(name, ni->cplane->cp_netns,
+                             protocol, trb->port_be16, ci_geteuid(),
+                             &named_thc);
+    /* Note: the check is on oof_socket_add() return code */
+    if( rc == 1 )
+      /* we do not need the reference from oof_socket_add()
+       * as we have second one from thc_search_by_name()
+       * if ported_thc == named_thc, or ported_thc is unusable */
+      tcp_helper_cluster_release_locked(ported_thc, NULL);
+    /* Note: now we are back to checking thc_search_by_name() return code */
     if( rc1 < 0 ) {
       rc = rc1;
       goto alloc_fail;
     }
 
+    /* If search by port and by name were both successful, and match,
+     * user would be trying to add to a cluster they know about,
+     * which probably means this is genuine clustering behaviour.
+     * If a port is in use but the name isn't found, some other
+     * cluster/socket is already on the port.
+     * If name is found but there's no port, suggests cluster is in
+     * use on different port(s).
+     * If neither search is successful, then no cluster exists and
+     * nobody has claimed the port yet, so go ahead and allocate a
+     * stack to claim it.
+     */
     if( rc1 == 0 ) {
       if( rc == 1 ) {
         /* search by oof_local_port found a cluster which search by
@@ -708,6 +1039,8 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
           LOG_E(ci_log("Error: Cluster %s does not handle socket %s:%d.  "
                        "Cluster %s does", name, FMT_PROTOCOL(protocol),
                        trb->port_be16, named_thc->thc_name));
+          /* release outstanding thc_search_by_name() reference */
+          tcp_helper_cluster_release_locked(named_thc, NULL);
           rc = -EEXIST;
           goto alloc_fail;
         }
@@ -724,21 +1057,27 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
      * cluster this process created.  If none found, then allocate one.
      */
     /* If rc == 0, then no cluster found - try to allocate one.
-     * If rc == 1, we found cluster - make sure that euids match and continue. */
+     * If rc == 1, we found cluster - make sure that euids match and continue.
+     * The latter includes the case of hot restarts.
+     */
     if( rc == 1 ) {
       thc = ported_thc;
-      if( thc->thc_euid != ci_geteuid() ) {
+      if( thc->thc_keuid != ci_geteuid() ) {
+        /* release the reference from oof_socket_add() */
+        tcp_helper_cluster_release_locked(thc, NULL);
         rc = -EADDRINUSE;
         goto alloc_fail;
       }
+      /* move on with reference from oof_socket_add() */
       goto cont;
     }
-    rc = thc_search_by_name(name, protocol, trb->port_be16, ci_geteuid(),
+    rc = thc_search_by_name(name, ni->cplane->cp_netns,
+                            protocol, trb->port_be16, ci_geteuid(),
                             &thc);
     if( rc < 0 )
       goto alloc_fail;
     if( rc == 1 )
-      goto cont;
+      goto cont; /* move on with thc reference from thc_search_by_name() */
   }
   /* When an interface is in tproxy mode, all clustered listening socket
    * are assumed to be part of tproxy passive side.  This requires
@@ -747,23 +1086,65 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   flags = tcp_helper_cluster_thc_flags(&NI_OPTS(ni));
 
   if( (rc = thc_alloc(name, protocol, trb->port_be16, ci_geteuid(),
-                      trb->cluster_size, flags, &thc)) != 0 )
+                      trb->cluster_size, flags, netns, &thc)) != 0 )
       goto alloc_fail;
 
   alloced = 1;
 
  cont:
-  tcp_helper_cluster_ref(thc);
-
   /* At this point we have our cluster with one additional reference */
+  /* We should be using a cluster in the correct namespace for this socket */
+  ci_assert_equal(netns, oo_filter_ns_to_netns(thc->thc_filter_ns));
+
+  if( trb->cluster_hot_restart_opt != 0 ) {
+    /* Record state in case alloc fails in reheat mode. */
+    reheat_state.thc_reheat_flags   = thc->thc_reheat_flags;
+    reheat_state.thc_switch_port    = thc->thc_switch_port;
+    reheat_state.thc_switch_addr    = thc->thc_switch_addr;
+    reheat_state.thr_prior_index    = -1;
+    reheat_state.thc_tid_effective  = -1;
+  }
 
   /* Find a suitable stack within the cluster to use */
-  rc = thc_get_thr(thc, &dummy_oofilter, &thr);
+  rc = trb->cluster_hot_restart_opt == 0 ?
+    thc_get_thr(thc, &dummy_oofilter, &thr) :
+    thc_get_thr_reheat(thc, trb->addr_be32, trb->port_be16,
+                       &reheat_state.thr_prior_index,
+                       &reheat_state.thc_tid_effective, &thr);
   if( rc != 0 )
     rc = thc_alloc_thr(thc, trb->cluster_restart_opt,
-                       &ni->opts, ni->flags, &thr);
+                       trb->cluster_hot_restart_opt,
+                       &ni->opts,
+                       ni->flags | CI_NETIF_FLAG_DO_DROP_SHARED_LOCAL_PORTS,
+                       &thr);
 
-  /* If get or alloc succeeded thr holds reference to the cluster,
+  /* Both the above failed, meaning every stack in the cluster is in use,
+   * and there are no free stacks slots left.
+   *
+   * If in hot restart mode, roll back.
+   */
+  if( rc < 0 ) {
+    if( trb->cluster_hot_restart_opt != 0 ) {
+      /* Restore state after alloc failure in reheat mode. */
+      thc->thc_reheat_flags = reheat_state.thc_reheat_flags;
+      thc->thc_switch_port  = reheat_state.thc_switch_port;
+      thc->thc_switch_addr  = reheat_state.thc_switch_addr;
+      if( reheat_state.thr_prior_index != -1 )
+        thc->thc_thr_rrobin[reheat_state.thr_prior_index]->thc_tid_effective =
+          reheat_state.thc_tid_effective;
+      thc->thc_thr_rrobin_index = thc_get_prior_round_robin_index(thc);
+      thc->thc_thr_rrobin[thc->thc_thr_rrobin_index] = NULL;
+    }
+    else if( (-EBUSY == rc) || (-ENOSPC == rc) ) {
+      LOG_TC(ci_log("Unable to bind to port %d. "
+                    "If you need hot/seamless restarts, please use "
+                    "EF_CLUSTER_HOT_RESTART=1.",
+                    trb->port_be16
+                   ));
+    }
+  }
+
+  /* If get, alloc, or reheat succeeded, thr holds reference to the cluster,
    * so the cluster cannot go away.  We'll drop our reference and also
    * will not be accessing state within the cluster anymore so we can
    * drop the lock. */
@@ -801,6 +1182,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   rc = efab_file_move_to_alien_stack(priv, &thr->netif, 0, &new_sock_id);
   if( rc != 0 ) {
     efab_thr_release(thr);
+    do_sock_unlock = 0;
     /* both sockets are unlocked, and there is still single reference to thr */
   }
   else {
@@ -811,6 +1193,7 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
     oof_socket_replace(fm, &dummy_oofilter, oofilter);
     SP_TO_SOCK(&thr->netif, new_sock_id)->s_flags |= CI_SOCK_FLAG_FILTER;
     ci_netif_unlock(&thr->netif);
+
     /* we hold:
      * * two references to thr, of which one belongs to the new socket
      * * lock on the new socket
@@ -826,7 +1209,9 @@ int efab_tcp_helper_reuseport_bind(ci_private_t *priv, void *arg)
   oof_socket_dtor(&dummy_oofilter);
   mutex_unlock(&thc_init_mutex);
 unlock_sock:
-  ci_sock_unlock(ni, waitable);
+  /* Only unlock if the socket was locked in the first place */
+  if( do_sock_unlock != 0 )
+    ci_sock_unlock(ni, waitable);
   return rc;
 
  alloc_fail:
@@ -895,12 +1280,13 @@ static void thc_dump_fn(void* not_used, oo_dump_log_fn_t log, void* log_arg)
   while( walk != NULL ) {
     int hwports = 0;
     int i;
-    for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
+    for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i )
       if( walk->thc_vi_set[i] != NULL )
         hwports |= (1 << i);
     log(log_arg, "--------------------------------------------------------");
     log(log_arg, "%d: name=%s  size=%d  euid=%d flags=%d hwports=0x%x", cnt++,
-        walk->thc_name, walk->thc_cluster_size, walk->thc_euid,
+        walk->thc_name, walk->thc_cluster_size,
+        ci_current_from_kuid_munged(walk->thc_keuid),
         walk->thc_flags, hwports);
     thc_dump_thrs(walk, log, log_arg);
     walk = walk->thc_next;

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -432,6 +432,9 @@ ci_inline void citp_fdinfo_ref_fast(citp_fdinfo* fdinfo) {
     citp_fdinfo_ref(fdinfo);
 }
 
+/* Called when refcount reaches zero. */
+# define citp_fdinfo_free	CI_FREE_OBJ
+
 
 /* Hands-over the socket to the kernel.  That is, it replaces the
 ** user-level socket in the kernel fd table with the O/S socket (which is
@@ -773,7 +776,7 @@ extern citp_fdinfo*  citp_fdtable_lookup(unsigned fd) CI_HF;
 extern citp_fdinfo*  citp_fdtable_lookup_fast(citp_lib_context_t*,
                                               unsigned fd) CI_HF;
 
-extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd) CI_HF;
+extern citp_fdinfo*  citp_fdtable_lookup_noprobe(unsigned fd, int fdt_locked) CI_HF;
 
 extern citp_fdinfo* citp_reprobe_moved(citp_fdinfo* fdinfo,
                                        int from_fast_lookup,
@@ -835,6 +838,10 @@ extern int
 citp_passthrough_accept(citp_fdinfo* fdi,
                         struct sockaddr* sa, socklen_t* p_sa_len, int flags,
                         citp_lib_context_t* lib_context);
+extern int
+citp_passthrough_connect(citp_fdinfo* fdi,
+                         const struct sockaddr* sa, socklen_t sa_len,
+                         citp_lib_context_t* lib_context);
 
 /**********************************************************************
  ** Stack name state access
@@ -1100,7 +1107,7 @@ int citp_ul_do_select(int nfds, fd_set* rds, fd_set* wrs, fd_set* exs,
  * Known bug
  * ---------
  * When spinning for a limited time (i.e. we spin, then block).
- * Is a SIGX is allowed by sigsaved, it MAY be handled silently by
+ * If a SIGX is allowed by sigsaved, it MAY be handled silently by
  * ppoll/pselect/epoll_pwait.  No reasonable application I can imagine
  * should not be broken by this.
  *

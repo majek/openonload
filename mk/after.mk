@@ -261,12 +261,12 @@ else  # ifdef USE_MAKEDEPEND
 
 ifndef MMAKE_USE_KBUILD
 %.d: %.c
-	@set -e; gcc $(mmake_c_compile) -M $< 2>/dev/null |    \
+	@set -e; $(CC) $(mmake_c_compile) -M $< 2>/dev/null |    \
 	 sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.o $@ : /g' >$@
 	@[ -s $@ ] || rm -f $@
 
 %.d: %.cc
-	@set -e; g++ $(mmake_cxx_compile) -M $< 2>/dev/null |  \
+	@set -e; $(CXX) $(mmake_cxx_compile) -M $< 2>/dev/null |  \
 	 sed 's/\($*\)\.o[ :]*/$(MMAKE_OBJ_PREFIX)\1.o $@ : /g' >$@
 	@[ -s $@ ] || rm -f $@
 

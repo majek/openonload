@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -130,7 +130,7 @@ efch_v3_license_challenge(ci_resource_table_t* rt,
            EFRM_V3_LICENSE_CHALLENGE_MACADDR_LEN);
     *copy_out = 1;
   }
-  else {
+  else if( rc != -ENOENT ) {
     EFCH_ERR("%s: V3 Challenge response %d",
       __FUNCTION__, rc);
   }

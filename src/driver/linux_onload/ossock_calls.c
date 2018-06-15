@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -178,6 +178,7 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
   struct file *oo_file = priv->_filp;
   int rc, line, in_epoll, new_fd;
   citp_waitable_obj* wobj;
+  ci_sock_cmn* sock;
   struct file* os_file;
 
   if( priv->fd_type != CI_PRIV_TYPE_TCP_EP &&
@@ -192,21 +193,16 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
     goto unexpected_error;
   }
 
-  /* get locks */
-  wobj = SP_TO_WAITABLE_OBJ(&priv->thr->netif, priv->sock_id);
-  rc = ci_netif_lock(&priv->thr->netif);
-  if( rc != 0 ) {
-    oo_os_sock_put(os_file);
-    return rc;
-  }
+  /* Caller must have taken the stack lock */
+  ci_assert(ci_netif_is_locked(&priv->thr->netif));
 
+  wobj = SP_TO_WAITABLE_OBJ(&priv->thr->netif, priv->sock_id);
   /* shut down fasync */
   if( ep->fasync_queue )
     fasync_helper(-1, oo_file, 0, &ep->fasync_queue);
 
   citp_waitable_cleanup(&priv->thr->netif, wobj, 0);
   efab_ep_handover_setup(priv, &in_epoll);
-  ci_netif_unlock(&priv->thr->netif);
 
   if( in_epoll ) {
     oo_os_sock_put(os_file);
@@ -217,6 +213,10 @@ int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd)
   oo_os_sock_put(os_file);
   if( rc != 0 )
     return rc;
+
+  /* Remove SO_LINGER flag from the old ep: we want to close it silently */
+  sock = SP_TO_SOCK(&priv->thr->netif, priv->sock_id);
+  sock->s_flags &=~ CI_SOCK_FLAG_LINGER;
 
   *(ci_int32*) p_fd = new_fd;
 
@@ -608,7 +608,7 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
 
   if( sock->file->f_flags & O_NONBLOCK )
     op->flags |= MSG_DONTWAIT;
-  rc = sock_recvmsg(sock, &msg, total_bytes, op->flags);
+  rc = sock_recvmsg(sock, &msg, op->flags);
   /* Clear OS RX flag if we've got everything  */
   oo_os_sock_status_bit_clear_handled(
             SP_TO_SOCK(&ep->thr->netif, ep->id), sock->file,
@@ -677,7 +677,8 @@ int efab_tcp_helper_create_os_sock(ci_private_t *priv)
     flags |= O_NONBLOCK;
   if( w->sb_aflags & CI_SB_AFLAG_O_CLOEXEC)
     flags |= O_CLOEXEC;
-  rc = efab_create_os_socket(ep, SP_TO_SOCK(ni, priv->sock_id)->domain,
+  rc = efab_create_os_socket(priv->thr, ep,
+                             SP_TO_SOCK(ni, priv->sock_id)->domain,
                              SOCK_STREAM, flags);
   if( rc < 0 )
     return rc;
@@ -1001,46 +1002,6 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
   return 0;
 }
 
-
-
-extern int efab_tcp_helper_connect_os_sock(ci_private_t *priv, void *arg)
-{
-  oo_tcp_sockaddr_with_len_t *op = arg;
-  ci_sock_cmn* s;
-  size_t addrlen;
-  int rc;
-  tcp_helper_endpoint_t *ep;
-  struct socket* sock;
-  struct sockaddr_storage k_address_buf;
-  struct sockaddr *k_address = (struct sockaddr *)&k_address_buf;
-
-  ci_assert (priv && op);
-  if (!CI_PRIV_TYPE_IS_ENDPOINT(priv->fd_type))
-    return -EINVAL;
-  ci_assert(priv->thr);
-
-  addrlen = op->addrlen;
-
-  /* Get at the OS socket backing the u/l socket for fd */
-  ep = efab_priv_to_ep(priv);
-  s = SP_TO_SOCK(&priv->thr->netif, ep->id);
-
-  sock = get_linux_socket(ep);
-  if( sock == NULL )
-    return -EINVAL;
-
-  rc = move_addr_to_kernel(CI_USER_PTR_GET(op->address), addrlen, k_address);
-  if (rc >=0) {
-    /* We should sync non-blocking state between UL socket and kernel
-     * socket. */
-    if ((s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK))
-      sock->file->f_flags |= O_NONBLOCK;
-    rc = sock->ops->connect(sock, k_address, addrlen, sock->file->f_flags);
-  }
-  put_linux_socket(sock);
-
-  return rc;
-}
 
 
 int efab_tcp_helper_set_tcp_close_os_sock(tcp_helper_resource_t *thr,

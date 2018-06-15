@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2009-2015 Solarflare Communications Inc.
+ * Copyright 2009-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -460,6 +460,17 @@ static void efx_mcdi_phy_decode_link(struct efx_nic *efx,
 	link_state->speed = speed;
 }
 
+#ifdef EFX_NOT_UPSTREAM
+#define MCDI_PORT_SPEED_CAPS   ((1 << MC_CMD_PHY_CAP_10HDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_10FDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_100HDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_100FDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_1000HDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_1000FDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_10000FDX_LBN) | \
+				(1 << MC_CMD_PHY_CAP_40000FDX_LBN))
+#endif
+
 static int efx_mcdi_phy_probe(struct efx_nic *efx)
 {
 	struct efx_mcdi_phy_data *phy_data;
@@ -482,7 +493,6 @@ static int efx_mcdi_phy_probe(struct efx_nic *efx)
 			  outbuf, sizeof(outbuf), NULL);
 	if (rc)
 		goto fail;
-
 	/* Fill out nic state */
 	efx->phy_data = phy_data;
 	efx->phy_type = phy_data->type;
@@ -498,6 +508,23 @@ static int efx_mcdi_phy_probe(struct efx_nic *efx)
 		efx->mdio.mode_support |= MDIO_SUPPORTS_C45 | MDIO_EMULATE_C22;
 
 	caps = MCDI_DWORD(outbuf, GET_LINK_OUT_CAP);
+#ifdef EFX_NOT_UPSTREAM
+	/* If the link isn't advertising any speeds this is almost certainly
+	 * due to an in-distro driver bug, which can have an effect if loaded
+	 * before this out-of-tree driver. It is fixed upstream in:
+	 * 3497ed8c852a ("sfc: report supported link speeds on SFP connections")
+	 *
+	 * Unfortunately this fix is not in a number of released distro kernels.
+	 * In particular:
+	 *   RHEL 6.8, kernel 2.6.32-642.el6 (fixed in 2.6.32-642.13.1.el6)
+	 *   SLES 12 sp2, kernel 4.4.21-68-default
+	 *
+	 * If no speeds are marked as supported by the link we add all those
+	 * that are supported by the NIC.
+	 */
+	if (!(caps & MCDI_PORT_SPEED_CAPS))
+		caps |= phy_data->supported_cap & MCDI_PORT_SPEED_CAPS;
+#endif
 	efx->link_advertising = mcdi_to_ethtool_cap(phy_data->media, caps);
 
 	/* Assert that we can map efx -> mcdi loopback modes */
@@ -1149,7 +1176,7 @@ void efx_mcdi_process_link_change(struct efx_nic *efx, efx_qword_t *ev)
 	u32 flags, fcntl, speed, lpa;
 
 	speed = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_SPEED);
-	EFX_BUG_ON_PARANOID(speed >= ARRAY_SIZE(efx_mcdi_event_link_speed));
+	EFX_WARN_ON_PARANOID(speed >= ARRAY_SIZE(efx_mcdi_event_link_speed));
 	speed = efx_mcdi_event_link_speed[speed];
 
 	flags = EFX_QWORD_FIELD(*ev, MCDI_EVENT_LINKCHANGE_LINK_FLAGS);
@@ -1245,34 +1272,51 @@ enum efx_stats_action {
 	EFX_STATS_ENABLE,
 	EFX_STATS_DISABLE,
 	EFX_STATS_PULL,
+	EFX_STATS_PERIOD,
 };
 
 static int efx_mcdi_mac_stats(struct efx_nic *efx,
 			      enum efx_stats_action action, int clear)
 {
-	struct efx_ef10_nic_data *nic_data = efx->nic_data;
 	MCDI_DECLARE_BUF(inbuf, MC_CMD_MAC_STATS_IN_LEN);
 	int rc;
-	int change = action == EFX_STATS_PULL ? 0 : 1;
-	int enable = action == EFX_STATS_ENABLE ? 1 : 0;
-	int period = action == EFX_STATS_ENABLE ? 1000 : 0;
+	int dma, change;
 	dma_addr_t dma_addr = efx->stats_buffer.dma_addr;
-	u32 dma_len = action != EFX_STATS_DISABLE ?
-		MC_CMD_MAC_NSTATS * sizeof(u64) : 0;
+	u32 dma_len;
+
+	if (action == EFX_STATS_ENABLE)
+		efx->stats_enabled = true;
+	else if (action == EFX_STATS_DISABLE)
+		efx->stats_enabled = false;
+
+	if (action == EFX_STATS_PULL) {
+		dma = 0;
+		change = 0;
+	} else {
+		change = 1;
+		dma = efx->stats_enabled;
+	}
+
+	dma_len = dma ? MC_CMD_MAC_NSTATS * sizeof(u64) : 0;
 
 	BUILD_BUG_ON(MC_CMD_MAC_STATS_OUT_DMA_LEN != 0);
 
 	MCDI_SET_QWORD(inbuf, MAC_STATS_IN_DMA_ADDR, dma_addr);
 	MCDI_POPULATE_DWORD_7(inbuf, MAC_STATS_IN_CMD,
-			      MAC_STATS_IN_DMA, !!enable,
+			      MAC_STATS_IN_DMA, dma,
 			      MAC_STATS_IN_CLEAR, clear,
 			      MAC_STATS_IN_PERIODIC_CHANGE, change,
-			      MAC_STATS_IN_PERIODIC_ENABLE, enable,
+			      MAC_STATS_IN_PERIODIC_ENABLE, efx->stats_enabled,
 			      MAC_STATS_IN_PERIODIC_CLEAR, 0,
 			      MAC_STATS_IN_PERIODIC_NOEVENT, 1,
-			      MAC_STATS_IN_PERIOD_MS, period);
+			      MAC_STATS_IN_PERIOD_MS, efx->stats_period_ms);
 	MCDI_SET_DWORD(inbuf, MAC_STATS_IN_DMA_LEN, dma_len);
-	MCDI_SET_DWORD(inbuf, MAC_STATS_IN_PORT_ID, nic_data->vport_id);
+
+	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0) {
+		struct efx_ef10_nic_data *nic_data = efx->nic_data;
+
+		MCDI_SET_DWORD(inbuf, MAC_STATS_IN_PORT_ID, nic_data->vport_id);
+	}
 
 	rc = efx_mcdi_rpc_quiet(efx, MC_CMD_MAC_STATS, inbuf, sizeof(inbuf),
 				NULL, 0, NULL);
@@ -1295,6 +1339,11 @@ void efx_mcdi_mac_start_stats(struct efx_nic *efx)
 void efx_mcdi_mac_stop_stats(struct efx_nic *efx)
 {
 	efx_mcdi_mac_stats(efx, EFX_STATS_DISABLE, 0);
+}
+
+void efx_mcdi_mac_update_stats_period(struct efx_nic *efx)
+{
+	efx_mcdi_mac_stats(efx, EFX_STATS_PERIOD, 0);
 }
 
 #define EFX_MAC_STATS_WAIT_US 100

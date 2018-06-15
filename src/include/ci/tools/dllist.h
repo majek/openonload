@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -210,8 +210,8 @@ ci_inline ci_dllink* ci_dllist_end(ci_dllist* list)
        (&((p_c)->lnk_mbr) != ci_dllist_end(list)) || ((p_c) = 0,0);     \
        (p_c) = CI_CONTAINER(c_type, lnk_mbr, ((p_c)->lnk_mbr).prev) )
 
-/* Identical to CI_DLLIST_FOR_EACH2 but a temporary of c_type is supplied
-** Precalculates the next entry so that the current entry can be
+/* Identical to CI_DLLIST_FOR_EACH(_REV)2 but a temporary of c_type is supplied
+** Precalculates the next/previous entry so that the current entry can be
 ** trashed/removed
 */
 #define CI_DLLIST_FOR_EACH3(c_type, p_c, lnk_mbr, list, temp_next)	      \
@@ -219,6 +219,12 @@ ci_inline ci_dllink* ci_dllist_end(ci_dllist* list)
        ( temp_next=CI_CONTAINER(c_type, lnk_mbr, ((p_c)->lnk_mbr).next) ) &&  \
 	       ((&((p_c)->lnk_mbr) != ci_dllist_end(list)) || ((p_c) = 0,0)); \
        (p_c) = temp_next )
+
+#define CI_DLLIST_FOR_EACH_REV3(c_type, p_c, lnk_mbr, list, temp_prev)	      \
+  for( (p_c) = CI_CONTAINER(c_type, lnk_mbr, ci_dllist_last(list));	      \
+       ( temp_prev=CI_CONTAINER(c_type, lnk_mbr, ((p_c)->lnk_mbr).prev) ) &&  \
+	       ((&((p_c)->lnk_mbr) != ci_dllist_end(list)) || ((p_c) = 0,0)); \
+       (p_c) = temp_prev )
 
 
 /* Identical to CI_DLLIST_FOR_EACH but a temporary is supplied

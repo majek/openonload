@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -53,6 +53,23 @@
 #define EF_VI_STATE_BYTES(rxq_sz, txq_sz)               \
   (sizeof(ef_vi_state) + (rxq_sz) * sizeof(uint32_t)	\
    + (txq_sz) * sizeof(uint32_t))
+
+
+unsigned ef_vi_evq_clear_stride(void)
+{
+#ifndef __KERNEL__
+  const char* s = getenv("EF_VI_EVQ_CLEAR_STRIDE");
+  if( s != NULL )
+    return atoi(s);
+#endif
+
+# ifdef __x86_64__
+  return sys_is_numa() ? EF_VI_EVS_PER_CACHE_LINE : 0;
+# else
+  return EF_VI_EVS_PER_CACHE_LINE;
+# endif
+}
+
 
 int ef_vi_calc_state_bytes(int rxq_sz, int txq_sz)
 {
@@ -139,8 +156,8 @@ int ef_vi_rxq_reinit(ef_vi* vi, ef_vi_reinit_callback cb, void* cb_arg)
     ++state->rxq.removed;
   }
 
-  state->rxq.added = state->rxq.removed = state->rxq.prev_added = 0;
-  state->rxq.last_completed = vi->vi_rxq.mask;
+  state->rxq.added = state->rxq.removed = state->rxq.posted = 0;
+  state->rxq.last_desc_i = vi->vi_is_packed_stream ? vi->vi_rxq.mask : 0;
   state->rxq.in_jumbo = 0;
   state->rxq.bytes_acc = 0;
 
@@ -342,14 +359,13 @@ void ef_vi_init_out_flags(struct ef_vi* vi, unsigned flags)
 void ef_vi_reset_rxq(struct ef_vi* vi)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
-  qs->prev_added = 0;
+  qs->posted = 0;
   qs->added = 0;
   qs->removed = 0;
   qs->in_jumbo = 0;
   qs->bytes_acc = 0;
-  qs->rx_ps_pkt_count = 0xF;
   qs->rx_ps_credit_avail = 1;
-  qs->last_completed = vi->vi_rxq.mask;
+  qs->last_desc_i = vi->vi_is_packed_stream ? vi->vi_rxq.mask : 0;
   if( vi->vi_rxq.mask ) {
     int i;
     for( i = 0; i <= vi->vi_rxq.mask; ++i )
@@ -378,7 +394,16 @@ void ef_vi_reset_evq(struct ef_vi* vi, int clear_ring)
   if( clear_ring )
     memset(vi->evq_base, (char) 0xff, vi->evq_mask + 1);
   vi->ep_state->evq.evq_ptr = 0;
+  vi->ep_state->evq.evq_clear_stride = -((int) ef_vi_evq_clear_stride());
+  EF_VI_BUG_ON( vi->ep_state->evq.evq_clear_stride > 0 );
   vi->ep_state->evq.sync_timestamp_synchronised = 0;
   vi->ep_state->evq.sync_timestamp_major = ~0u;
   vi->ep_state->evq.sync_flags = 0;
+}
+
+
+int ef_eventq_capacity(ef_vi* vi)
+{
+  EF_VI_ASSERT( vi->ep_state->evq.evq_clear_stride <= 0 );
+  return vi->evq_mask / EF_VI_EV_SIZE - 1u + vi->ep_state->evq.evq_clear_stride;
 }

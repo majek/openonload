@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -254,6 +254,7 @@ ci_tcp_recvmsg_get_nopeek(int peek_off, ci_tcp_state *ts, ci_netif *netif,
       /* We've emptied the receive queue. Return non-zero to report this
        * to the calling function, so that it can return appropriately. */
       return 1;
+    ci_assert(OO_PP_EQ(ts->recv1_extract, OO_PKT_P(*pkt)));
     ts->recv1_extract = (*pkt)->next;
     *pkt = PKT_CHK_NNL(netif, ts->recv1_extract);
     ci_assert(oo_offbuf_not_empty(&(*pkt)->buf));
@@ -297,6 +298,8 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
 
   if( max_bytes <= 0 || OO_PP_IS_NULL(ts->recv1_extract))
     return total;       /* Receive queue is empty. */
+
+  ci_assert(OO_PP_NOT_NULL(ts->recv1.head));
 
   pkt = PKT_CHK_NNL(netif, ts->recv1_extract);
   if( oo_offbuf_is_empty(&pkt->buf) ) {
@@ -682,6 +685,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
     int rc2;
 
     /* This function drops the socket lock, and returns unlocked. */
+    ci_assert(!rinf.stack_locked);
     rc2 = ci_sock_sleep(ni, &ts->s.b, CI_SB_FLAG_WAKE_RX,
                         CI_SLEEP_SOCK_LOCKED | CI_SLEEP_SOCK_RQ,
                         sleep_seq, &timeout);
@@ -713,6 +717,8 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
       struct onload_scm_timestamping_stream stamps;
       struct cmsg_state cmsg_state;
       int tx_hw_stamp_in_sync;
+
+    timestamp_q_nonempty:
 
       ci_rmb();
       pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q);
@@ -755,6 +761,19 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 
       rinf.rc = 0;
       goto unlock_out;
+    }
+    else {
+      /* Try polling to see if there is a TX timestamp event available
+       * to satisfy this request
+       */
+      if( ci_netif_may_poll(ni) &&
+          ci_netif_need_poll_spinning(ni, start_frc) &&
+          ci_netif_trylock(ni) ) {
+        ci_netif_poll_n(ni, NI_OPTS(ni).evs_per_poll);
+        ci_netif_unlock(ni);
+        if( ci_udp_recv_q_not_empty(&ts->timestamp_q) )
+          goto timestamp_q_nonempty;
+      }
     }
     rinf.rc = -EAGAIN;
     CI_SET_ERROR(rinf.rc, -rinf.rc);
@@ -858,6 +877,8 @@ static void move_from_recv2_to_recv1(ci_netif* ni, ci_tcp_state* ts,
        */
       ci_assert(oo_offbuf_is_empty(&(PKT_CHK(ni, ts->recv1_extract)->buf)));
       ts->recv1_extract = OO_PKT_P(head);
+      ci_assert_impl(OO_PP_IS_NULL(recv1->head),
+                     OO_PP_IS_NULL(ts->recv1_extract));
     }
     
   }

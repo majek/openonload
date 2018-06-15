@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -140,6 +140,9 @@ enum {
 #define OO_EPOLL1_IOC_BLOCK_ON \
   _IOWR(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_BLOCK_ON, \
         struct oo_epoll1_block_on_arg)
+  OO_EPOLL1_OP_MOVE_FD,
+#define OO_EPOLL1_IOC_MOVE_FD \
+  _IOW(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_MOVE_FD, ci_fixed_descriptor_t)
 };
 
 #endif /* CI_CFG_USERSPACE_EPOLL */

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -117,7 +117,7 @@ ci_inline void ci_netif_dmaq_and_vi_for_pkt(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 
 #define __ci_netif_dmaq_insert_prep_pkt_warm_undo(ni, pkt)              \
   do {                                                                  \
-    (pkt)->flags &=~ CI_PKT_FLAG_TX_PENDING;                            \
+    (pkt)->flags &=~ (CI_PKT_FLAG_TX_PENDING | CI_PKT_FLAG_MSG_WARM);   \
     --(ni)->state->nic[(pkt)->intf_i].tx_dmaq_insert_seq;               \
     (ni)->state->nic[(pkt)->intf_i].tx_bytes_added-=TX_PKT_LEN(pkt);    \
     ci_netif_pkt_release(ni, pkt);                                      \

@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -153,7 +153,7 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
   /*
   **  - send any pending SYNACK retranmsits 
   */
-  for( retries = 0; retries < max_retries; ++retries ) {
+  for( retries = 0; retries < max_retries && ! out_of_packets; ++retries ) {
     ci_ni_dllist_t* list = &tls->listenq[retries];
     ci_ni_dllist_link* last_l = NULL;
 
@@ -173,7 +173,6 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
       }
 
       ci_assert_equal(tsr->retries & CI_FLAG_TSR_RETRIES_MASK, retries);
-      last_l = l;
 
       /* We have to re-send our SYN-ACK if:
        * - not acked: let's get an ACK!
@@ -189,8 +188,20 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
         int rc = 0;
         ci_ip_pkt_fmt* pkt = ci_netif_pkt_alloc(netif);
 
-        if( pkt == NULL )
-          goto out_of_packet;
+        if( pkt == NULL ) {
+          /* We have no packet buffers to process the synacks any further,
+           * break here and continue to moving processed part of the list
+           * to the next retry list in order to maintain coherency.
+           */
+          LOG_TV(ci_log(LNT_FMT"SYNRECV[retries=%d] no buffers, not re-sending "
+                        "synacks for %d half-opened connections",
+                        LNT_PRI_ARGS(netif, tls), retries,
+                        tls->n_listenq - tls->n_listenq_new));
+          CITP_STATS_NETIF_INC(netif, tcp_listen_synack_retrans_no_buffer);
+          out_of_packets = 1;
+          break;
+        }
+
         rc = ci_tcp_synrecv_send(netif, tls, tsr, pkt,
                                  CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
         if( rc == 0 ) {
@@ -207,6 +218,8 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
                        __FUNCTION__, CI_IP_PRINTF_ARGS(&tsr->r_addr)));
         }
       }
+
+      last_l = l;
 
       if( retries == 0 )
         --tls->n_listenq_new;
@@ -278,13 +291,12 @@ void ci_tcp_timeout_listen(ci_netif* netif, ci_tcp_socket_listen* tls)
     }
   }
 
-out:
   if( synrecv_timeout )
     NI_LOG(netif, CONN_DROP, "%s: [%d] %d half-open timeouts\n", __func__,
            NI_ID(netif), synrecv_timeout);
 
   /* if still any pending connectings */
-  if( next_timeout != ci_tcp_time_now(netif) ) {
+  if(  out_of_packets || next_timeout != ci_tcp_time_now(netif) ) {
     /* If out-of-packets, we should return here soon to send the synacks
      * we've failed to send now.  But not too soon - get a chance to
      * fix the problem as time passes. */
@@ -293,15 +305,6 @@ out:
                             ci_tcp_time_now(netif) + 1 : next_timeout);
   }
   return;
-
-out_of_packet:
-  LOG_TV(ci_log(LNT_FMT"SYNRECV[retries=%d] no buffers, not re-sending synacks "
-                "for %d half-opened connections",
-                LNT_PRI_ARGS(netif, tls), retries,
-                tls->n_listenq - tls->n_listenq_new));
-  CITP_STATS_NETIF_INC(netif, tcp_listen_synack_retrans_no_buffer);
-  out_of_packets = 1;
-  goto out;
 }
 
 
@@ -489,19 +492,34 @@ static void ci_tcp_drop_due_to_rto(ci_netif *ni, ci_tcp_state *ts,
 
 }
 
+
+void ci_tcp_send_corked_packets(ci_netif* netif, ci_tcp_state* ts)
+{
+  /* If the send queue is more than 1 MSS pending, that suggests
+   * there is another reason for it not being sent, so do nothing in
+   * that case.
+   */
+  if( ci_ip_queue_not_empty(&ts->send) &&
+      SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts)) < tcp_eff_mss(ts) ) {
+    /* Remove CI_PKT_FLAG_TX_MORE flag to ensure it gets sent now */
+    oo_pkt_p pp = ts->send.head;
+    ci_ip_pkt_fmt* pkt;
+    do {
+      pkt = PKT_CHK(netif, pp);
+      pp = pkt->next;
+      pkt->flags &=~ CI_PKT_FLAG_TX_MORE;
+    } while( OO_PP_NOT_NULL(pp) );
+    TX_PKT_TCP(pkt)->tcp_flags |= CI_TCP_FLAG_PSH;
+    ci_tcp_tx_advance(ts, netif);
+  }
+}
+
 /* Called as TCP_CORK timeout */
 void ci_tcp_timeout_cork(ci_netif* netif, ci_tcp_state* ts)
 {
-  /* We do not stop the timer when a packet is send (just because we do not
-   * know when we should do it).  So, let's check if we have only one packet
-   * in sendq.  Well, possibly it is not our packet, but there is no harm
-   * here. */
-  if( ts->send.num == 1 ) {
-    TX_PKT_TCP(PKT_CHK(netif, ts->send.head))->tcp_flags |= CI_TCP_FLAG_PSH;
-    ci_tcp_tx_advance(ts, netif);
-  }
-  return;
+  ci_tcp_send_corked_packets(netif, ts);
 }
+
 
 /* Called as action on a retransmission timer timeout (RTO) */
 void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)

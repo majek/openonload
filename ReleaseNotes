@@ -1,196 +1,280 @@
-OpenOnload-201606 Release Notes
-===============================
+OpenOnload-201710-u1.1
+======================
 
-This is a major update release that adds new features to OpenOnload.
+This is a minor update release that adds support for recent kernels
+(up to v4.16) to allow use of Onload with kernels that have
+CONFIG_RETPOLINE enabled.
 
-Below is a brief summary of the new features and any limitations that we are
-aware of.  See the ChangeLog for further details and a list of bugs fixed.
+It also supports enterprise distribution kernels that have backported
+and enabled CONFIG_RETPOLINE.
+
+This package is supported on:
+ - Red Hat Enterprise Linux 6.7 - 6.9
+ - Red Hat Enterprise Linux 7.2 - 7.5*
+ - SuSE Linux Enterprise Server 11 sp4
+ - SuSE Linux Enterprise Server 12 sp2, sp3
+ - Canonical Ubuntu Server LTS 14.04, 16.04
+ - Canonical Ubuntu Server 17.10
+ - Debian 8 "Jessie"
+ - Debian 9 "Stretch"
+ - Linux kernels 3.0 - 4.16
+
+* At time of writing RHEL 7.5 is in beta but we don't expect any
+relevant changes before it is released as GA.
+
+
+OpenOnload-201710-u1
+====================
+
+This is a minor update release that adds support for recent kernels
+(up to v4.14.11) to allow use of Onload with kernels that have KPTI.
+
+It also supports enterprise distribution kernels for RHEL7 and SLES12
+that have backported KPTI.
+
+
+OpenOnload-201710
+=================
+
+This is a major feature release that adds new features to OpenOnload
+and reworks some existing functionality.
+
+A brief summary of new features and known limitations is included
+below - for more details see the Onload user guide.
+
+See the accompanying ChangeLog for a list of bugs fixed.
 
 
 Linux distribution support
 --------------------------
-
-This Onload package is supported on:
-- Red Hat Enterprise Linux 5.10 - 5.11
-- Red Hat Enterprise Linux 6.6 - 6.8
-- Red Hat Enterprise Linux 7.0 - 7.2
-- Red Hat Messaging Realtime and Grid 2.4, 2.5
-- SuSE Linux Enterprise Server 11 sp2, sp3, sp4
-- SuSE Linux Enterprise Realtime Extension 11
-- SuSE Linux Enterprise Server 12 base and sp1
-- Canonical Ubuntu Server LTS 14.04
-- Canonical Ubuntu Server 15.10, 16.04
-- Debian 7 "Wheezy"
-- Debian 8 "Jessie"
-- Linux kernels 2.6.32 - 4.6
+ 
+This package is supported on:
+ - Red Hat Enterprise Linux 6.7 - 6.9
+ - Red Hat Enterprise Linux 7.2 - 7.4
+ - SuSE Linux Enterprise Server 11 sp4
+ - SuSE Linux Enterprise Server 12 sp2, sp3
+ - Canonical Ubuntu Server LTS 14.04, 16.04
+ - Canonical Ubuntu Server 17.04
+ - Debian 8 "Jessie"
+ - Debian 9 "Stretch"
+ - Linux kernels 3.0 - 4.13
 
 
-Solarflare Flareon Ultra 8500 NICs
-----------------------------------
+ScaleOut Onload
+---------------
 
-This release adds full support for the new range of Solarflare Flareon
-Ultra 8500-series NICs.  If you are interested in learning more about
-the improved performance and features available please contact
-sales@solarflare.com
-
-
-New configuration options
--------------------------
-
-EF_TCP_LISTEN_REPLIES_BACK: When a TCP listening socket replies to an
-incoming SYN, this option forces Onload to ignore the route table and
-to reply on the same network interface the SYN was received from.
-This mode could be considered as a way to achieve some basic
-source-based routing
-
-EF_HIGH_THROUGHPUT_MODE: This option causes onload to optimise the
-stack and VI configuration for throughput at the cost of latency
-
-In addition, some of the control-plane module options have been moved
-or renamed - please the control plane section below for details.
+ScaleOut Onload is a new Onload NIC licence that is optimised for use
+in applications where latency is not critical.  Efficiency of packet
+processing and throughput are prioritised over latency.
 
 
-ef_vi Transmit Alternatives API
--------------------------------
-
-This release adds a new method for sending data to the ef_vi API.
-Using the ef_vi_transmit_alt* functions a set of alternative packets
-can be queued in the NIC ready to be sent.  Once the decision about
-which alternative to send is made the correct one is released onto
-the network with extremely low latency.
-
-Please refer to the ef_vi documentation for further details.  This is
-supported on 8000-series NICs and later.
-
-
-ef_vi Capabilities API
-----------------------
-
-This release adds support for an ef_vi API that will allow users to
-query at runtime what features and capabilities are available on the
-hardware as it is currently configured.  This allows applications to
-built once, then run on a variety of Solarflare NICs and tailor the
-feature set they use to the current hardware capabilities.
-
-Please see src/include/etherfabric/capabilites.h for the API
-documentation and details of the features that can currently be queried.
-
-
-IPv6 ef_vi filtering
+Control Plane Server
 --------------------
 
-This release adds support for IPv6 filters in ef_vi.  Please see the
-documentation for ef_filter_spec_set_ip6_local() and
-ef_filter_spec_set_ip6_full() for further details.  This is supported
-on 7000-series NICs and later.
+As part of the changes to add support for network namespaces, and to
+avoid our kernel modules "tainting" the kernel, Onload now uses a
+user-space control plane server daemon.
+
+One onload_cp_server process will be spawned per network namespace in
+which there is an active Onload stack.  This process is spawned when
+the first stack is created in a namespace, and stack-creation will
+wait for the process to be ready, which can result in a noticeable
+delay.  To avoid this delay in the majority of cases Onload will spawn
+a control plane server for the default (main) network namespace at
+load time.
+
+The onload_cp_server process for a namespace will exit after a "grace
+period" has elapsed after the last stack in a namespace has been
+destroyed.  If a new stack is created in the same namespace before the
+grace period has elapsed, it will use the existing onload_cp_server
+and will not experience the delay at stack- creation.  The grace
+period can be controlled using the "cplane_server_grace_timeout"
+module option to the "onload" kernel module.
+
+The compiler architecture (x86_64, i686) of the onload_cp_server
+process should match that of the kernel in the host.
+
+A new tool "onload_mibdump" has been added to access current state of
+the control plane.  This provides similar information (although
+differently formatted) to that which was previously available in
+/proc/driver/onload_cplane/mib-*
+
+The cplane server ipif-max configuration parameter is not handled
+correctly if set to more than 256.  This leads to traffic not being
+correctly accelerated.  This will be addressed in a future release.
+
+If downgrading Onload version from a new one (201710 or later) to an
+old one (201606-u1.3 or earlier) the onload_tool script from the old
+version will not know about the onload_cp_server and how to stop it.
+It is recommended that "onload_tool unload" from the newer version is
+run before "onload_uninstall", as otherwise "onload_tool reload" after
+downgrading will fail to unload the existing drivers.
 
 
-onload_thread_get_spin extension API
-------------------------------------
+Namespaces
+----------
 
-This release adds a new extensions API call to query per-thread spin
-settings, to complement the existing onload_thread_set_spin().
-onload_thread_get_spin() retrieves the spin settings previously
-configured via onload_thread_set_spin().
+This release allows Onload to correctly operate in multiple network
+namespaces.  Other namespace types are also supported.  There are some
+limitations to this, and Onload does not support:
 
-Please refer to src/include/onload/extensions.h for the API documentation.
-
-
-Teamd support for mixed bonds
------------------------------
-
-OpenOnload-201509 added support for bonds configured using teamd in
-addition to the long-standing bonding module.  It has recently become
-apparent that Onload is not correctly dealing with teamd-configured
-bonds that have a mix of Solarflare and non-Solarflare interfaces.
-Onload should recognise these as unacceleratable but currently will
-attempt to accelerate traffic on the Solarflare interfaces in the
-bond, which may lead to unexpected behaviour should the bond failover
-to a non-Solarflare interface.
-
-We will address this in a future update release.  To work around the
-problem we recommend using the bonding module to configure bonds that
-have a mix of Solarflare and non-Solarflare interfaces in them.
+- multiple interfaces with the same IP address
+- multiple interfaces with the same MAC address
+- processes changing namespace after creating or sharing an Onload stack
+- stack sharing between namespaces
+- multicast in namespaces with 5000 and 6000 series NICs
 
 
-sfc_resource /proc file name change
------------------------------------
+Docker Containers
+-----------------
 
-To avoid a naming collision when interfaces are renamed the files that
-used to be at /proc/driver/sfc_resource/ethX/pdY have moved to
-/proc/driver/sfc_resource/devices/0000:0Z.00.0/pdY
+This release of OpenOnload includes support for multiple network
+namespaces and Docker containers using the Docker MACVLAN network
+driver.
 
+In brief, this release supports Docker configurations where a MACVLAN
+interface is used to give the container direct access to the
+appropriate Solarflare NIC.  Onload will not accelerate other types of
+network interface, including software bridged or overlay networks.
+Onload will only currently accelerate traffic between the container
+and the NIC; any traffic between containers on the same host will not
+be accelerated by Onload.
 
-New onload_cplane module
-------------------------
+The version of Onload installed in the container image must match that
+running in the host.
 
-This release of Onload adds a new binary module named onload_cplane.
-This new module provides some of the module parameters that used to be
-handled by other solarflare modules:
-- oo_bond_poll_base 
-- oo_igmp_on_failover 
-- max_layer2_interfaces 
-- max_routes
-- max_neighs 
-- oo_teaming_dump_period
-- oo_teaming_listen_updates
+This functionality currently requires 8000-series adapters.
 
-In previous versions max_layer2_interfaces was used to limit the size
-of both the llap table (table of IP interfaces) and ipif table (table
-of IP addresses).  This has now been separated and max_local_addrs has
-been added to control the size of the ipif table.
+During testing we have focused on Docker 1.12 as packaged in RHEL7.
 
-The onload_cplane module also takes a new parameter cplane_debug_bits,
-similar to the existing oo_debug_bits parameter, to control the level
-of debug logging produced.
-
-A number of /proc files have been changed:
-- All /proc/driver/onload/mib-* have moved to
- /proc/driver/onload_cplane/mib-*; the files themselves are exactly the
- same as previously, apart from /proc/driver/onload/mib-hwport which 
- has been removed.
-- /proc/driver/onload/cplane has been renamed to
- /proc/driver/onload_cplane/stats.
-- /proc/driver/onload_cplane/version is a new file containing version
- information of the onload_cplane module.
-
-Some build-time configuration options have been effectively removed as
-they are set at build time of the onload_cplane module:
-- CI_CFG_MAX_REGISTER_INTERFACES
-- CI_CFG_TEAMING
-
-Finally, some Linux kernel versions break the API symbols used by
-Onload and users should upgrade to a later release where these kernel
-bugs have been fixed:
-- 4.2.0 and 4.2.1: please use 4.2.2 or later
-- 3.7.x and 3.8.x: please use 3.7.10 or >=3.9
-- 3.0.9-rt* from MRG2.1: please use later MRG kernel
+Please see the Onload user guide for details of how to use Onload with
+Docker.
 
 
-sfc_aoe module
+Bonding
+-------
+
+In older versions of Onload knowledge of the current bonding
+configuration was obtained by polling the state exposed by the kernel
+in /proc and /sys.  The frequency of polling was configured using the
+"oo_bond_poll_base" and "oo_bond_poll_peak" module parameters.  This
+took a value in jiffies - the kernel unit of time measurement.
+
+In this version of Onload knowledge of the current bonding
+configuration is where possible obtained by netlink.  I.e. periodic
+polling of /proc and /sys is no longer necessary, and the
+oo_bond_poll_base/peak parameters are not required. However on some
+older supported OSes (e.g. SLES11) netlink does not provide the
+necessary information and so periodic polling is still used.
+
+As part of the change outlined above to introduce the control plane
+server process, these values are now configured through the
+--bond_base_period and --bond_peak_period arguments to
+onload_cp_server.  Their values are in milliseconds rather than
+jiffies.  The arguments used to launch onload_cp_server can in turn be
+configured using the cplane_server_params onload module parameter.
+
+When LACP aggregation is in use, Onload ignores the transmit hash mode
+(and uses Layer3+4) in following cases:
+- the aggregation is set up via team module (as in previous releases);
+- the aggregation is set up via bond module, but Linux kernel is older than
+  3.14. (NB. RHEL6, RHEL7, and SLES12 all have the new kernel
+  behaviour backported, and so use the configured hash mode)
+
+
+Interface blacklisting and whitelisting
+---------------------------------------
+
+The implementation of Onload's black-list and white-list of interfaces
+to use for acceleration has been reworked in this release.  These are
+now a property of a stack, rather than global lists, and are
+configured using new environment variables EF_INTERFACE_WHITELIST and
+EF_INTERFACE_BLACKLIST.  Please see the Onload user guide for details.
+Any systems attempting to configure these lists using the old method
+for configuration (module options, /proc) will fail and this may cause
+modules to refuse to load due to unknown module options.
+
+
+Policy routing
 --------------
 
-The sfc_aoe module is no longer included in the Onload distribution.
-This will in future be distributed separately to allow independent
-releases of these two products. If this causes issues please contact
-support@solarflare.com 
+This release adds support for policy routing for unicast packets, if
+policy rules are based on source or destination IP, TOS, and/or
+outgoing interface (with SO_BINDTODEVICE).
+
+Policy rules based on fwmarks are ignored by Onload. If a socket is
+bound to an address, and the address is removed, then in certain
+circumstances Onload can continue to use this address for sending.
+
+Due to this addition, the previous EF_TCP_LISTEN_REPLIES_BACK option
+has been removed, as source routing effectively replaces it.
 
 
-Interrupt-driven event burst
-----------------------------
+MACVLAN interfaces
+------------------
 
-During testing for this release we have encountered a rare issue when
-running Onload in interrupt-driven mode with multiple threads or
-processes sharing a stack and using both ports of a NIC at high
-traffic rates.  In this situation Onload can cause the NIC to generate
-a large burst of events which in turn will overflow the net driver's
-event queue.  Due to the timings involved this mainly affects the new
-8500 series NICs, but can in theory apply to earlier generations of
-hardware.  It is not a new issue, so if you have not experienced this
-on previous Onload releases there is no additional risk in upgrading
-to this release.  The symptoms include warnings from the kernel driver
-about driverlink handle_event() operations taking a long time and MCDI
-requests completing without an event.  This may cause the driver to
-reset the NIC in an attempt to recover.  Solarflare have a fix to
-resolve this that is currently being tested and will be included in an
-update release.
+This release includes support for MACVLAN interfaces, both with containers
+(see above) and in standard setups.  These will be accelerated when they are
+created over a Solarflare NIC.  If additional functions are in use then due to
+filtering limitations in the NIC either the NIC needs to be configured to use
+the "low-latency" firmware variant, or if using the "full-featured" firmware
+variant insecure_filters=1 sfboot option needs to be specified.  If the sfboot
+tool reports "Physical Functions on this port 1" and "Virtual Functions on
+each PF 0" then this restriction does not apply.
+
+Although there are no specific firmware dependencies we recommend using the
+most recent GA firmware version available.
+
+We do not support multiple layers of MACVLAN, e.g. where one MACVLAN
+is created with another MACVLAN interface as its parent.  In addition,
+TCPDirect does not supported multiple layers of VLAN + MACVLAN
+interfaces.
+
+
+IP_PKTINFO
+----------
+
+The IP_PKTINFO socket option may provide incorrect information for
+incoming multicast packets when there are multiple MACVLAN interfaces
+in the same net namespace, or basic and macvlan interface in the same
+net namespace, as it can't distinguish which interface was used by
+that packet.
+
+
+MRG 2.0 load issue
+------------------
+
+An issue found during testing for this release affects driver load on
+MRG 2.0 systems.  The build succeeds but driver load will fail with
+the error "onload: Unknown symbol __put_task_struct".  If you are
+using MRG 2.0 a fix for this is available from support@solarflare.com
+
+
+VLAN-over-VLAN interfaces
+-------------------------
+
+An issue found during testing for this release shows that interfaces
+where one VLAN interface is layered over the top of another VLAN
+interface are not properly accelerated by Onload.  If you need to use
+these interfaces with an Onload-accelerated application please contact
+support@solarflare.com for a fix.
+
+
+Other new EF_ options
+---------------------
+
+In addition to those mentioned above, the following new EF_* options
+have been added.  Please see the Onload user guide for details.
+
+EF_TCP_TSOPT_MODE - enable or disable TCP header timestamps 
+
+EF_CLUSTER_HOT_RESTART - enable seamless restart of applications using
+SO_REUSEPORT
+
+
+Other Additions
+---------------
+
+* Proprietary binary kernel module present in recent releases is
+  removed, so no kernel taint anymore
+* Debug (lockdep, etc) kernels now work again.

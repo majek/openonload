@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -59,6 +59,13 @@ typedef struct ci_private_s {
   oo_sp                 sock_id;	/*! id of ep */
 
   ci_os_file  _filp;
+
+  /* List of dshm segments owned by this file. */
+  ci_dllist             dshm_list;
+
+  /* Handle to the control plane.  This is only needed in the case where we
+   * don't have a stack. */
+  struct oo_cplane_handle* priv_cp;
 } ci_private_t;
 
 #endif  /* __CI_DRIVER_EFAB_FDPRIVATE_H__ */

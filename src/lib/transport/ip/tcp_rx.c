@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -144,6 +144,8 @@ void ci_tcp_rx_reap_rxq_last_buf(ci_netif* netif, ci_tcp_state* ts)
 
   ci_assert(ci_sock_is_locked(netif, &ts->s.b));
 
+  ci_assert(OO_PP_EQ(ts->recv1_extract, ts->recv1.head));
+
   if( oo_offbuf_is_empty(&pkt->buf) ) {
     ts->recv1_extract = ts->recv1.head = pkt->next;
     ci_netif_pkt_release_rx_1ref(netif, pkt);
@@ -168,11 +170,20 @@ static void ci_tcp_rx_enqueue_packet(ci_netif *netif, ci_tcp_state *ts,
   tcp_rcv_nxt(ts) = pkt->pf.tcp_rx.end_seq;
 
   bytes = oo_offbuf_left(&pkt->buf);
-  ci_ip_queue_enqueue(netif, rxq, pkt);
+
+  pkt->next = OO_PP_NULL;
+  /* Barrier ensures concurring thread is able to read metadata
+   * of pkt buffers pointed to by recv1_extract. */
+  ci_wmb();
+  __ci_ip_queue_enqueue(netif, rxq, pkt);
 
   if( rxq == &ts->recv1 ) {
     if( OO_PP_IS_NULL(prevhead) ) {
       ci_assert(OO_PP_IS_NULL(ts->recv1_extract));
+      /* recv1_extract is protected by socket lock.  However,
+       * modification here is correct as both rxq->head and
+       * recv1_extract have been NULL, which excludes simultaneous
+       * processing. */
       ts->recv1_extract = rxq->head;
     }
     ci_tcp_rx_reap_rxq_bufs(netif, ts);
@@ -278,9 +289,21 @@ int ci_kill_proc(pid_t pid, int sig, int priv)
 #endif
 #endif
 
+#ifdef __ci_driver__
+/* Return the ci_tcp_state's owner PID (in the init namespace) */
+static inline int ci_tcp_get_owner_pid(ci_netif* netif, ci_tcp_state *ts)
+{
+  int upid;
+  rcu_read_lock();
+  upid = pid_nr(ci_netif_pid_lookup(netif, ts->s.b.sigown));
+  rcu_read_unlock();
+  return upid;
+}
+#endif
+
 /*! If appropriate, send a signal the application that it is to go in TCP
     urgent mode. */
-static void ci_tcp_send_sig_urg(ci_tcp_state *ts)
+static void ci_tcp_send_sig_urg(ci_netif* netif, ci_tcp_state *ts)
 {
   int rc;
 
@@ -290,7 +313,7 @@ static void ci_tcp_send_sig_urg(ci_tcp_state *ts)
   LOG_URG(ci_log("%s: sending SIGURG to pid %d", __FUNCTION__,ts->s.b.sigown));
 
 # ifdef __ci_driver__
-  rc = kill_proc(ts->s.b.sigown, SIGURG, 1);
+  rc = kill_proc(ci_tcp_get_owner_pid(netif, ts), SIGURG, 1);
 # else
   rc = kill(ts->s.b.sigown, SIGURG);
 # endif
@@ -340,7 +363,7 @@ static void ci_tcp_urg_pkt_process(ci_tcp_state *ts, ci_netif *netif,
   */
   if( !(tcp_urg_data(ts) & CI_TCP_URG_COMING) ) {
     tcp_rcv_up(ts) = rcv_up;
-    ci_tcp_send_sig_urg(ts);
+    ci_tcp_send_sig_urg(netif, ts);
     tcp_urg_data(ts) |= CI_TCP_URG_COMING | CI_TCP_URG_PTR_VALID;
   }
 
@@ -1071,7 +1094,8 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
 
   if( ci_ip_queue_is_empty(rtq) ) {
     ci_assert(ts->snd_delegated);
-    return;
+    ci_assert(SEQ_GE(tcp_snd_nxt(ts) + ts->snd_delegated, rxp->ack));
+    goto done;
   }
 
   while( 1 ) {
@@ -1118,8 +1142,9 @@ static void ci_tcp_rx_free_acked_bufs(ci_netif* netif, ci_tcp_state* ts,
     ci_tcp_wake(netif, ts, CI_SB_FLAG_WAKE_RX);
   }
 
+ done:
   ci_assert(!ci_ip_queue_is_empty(rtq) || SEQ_EQ(rxp->ack, tcp_snd_nxt(ts)) ||
-            ts-> snd_delegated != 0);
+            ts->snd_delegated != 0);
   tcp_snd_una(ts) = rxp->ack;
 
   /* Wake up TX if necessary */
@@ -1891,29 +1916,6 @@ static int ci_tcp_rx_enqueue_ooo(ci_netif* netif, ci_tcp_state* ts,
 }
 
 
-/* Out-of-line function to avoid doing the memcmp in the handle_rx
- * fast code path 
- */
-ci_noinline void mac_update_if_mac_match(ci_netif* ni, ci_tcp_state* ts,
-                                         ci_ip_pkt_fmt* pkt)
-{
-  if( memcmp(ci_ip_cache_ether_dhost(&ts->s.pkt), oo_ether_shost(pkt),
-             ETH_ALEN) == 0 )
-    cicp_ip_cache_mac_update(ni, &ts->s.pkt, 1 /*confirm*/);
-}
-
-
-ci_noinline void mac_update_if_ack_new_or_mac_match(ci_netif* ni,
-                                                    ci_tcp_state* ts,
-                                                    const ciip_tcp_rx_pkt* rxp)
-{
-  if( SEQ_GT(rxp->ack, tcp_snd_una(ts)) ||
-      memcmp(ci_ip_cache_ether_dhost(&ts->s.pkt),
-             oo_ether_shost(rxp->pkt), ETH_ALEN) == 0 )
-    cicp_ip_cache_mac_update(ni, &ts->s.pkt, 1 /*confirm*/);
-}
-
-
 static void handle_rx_listen_rst(ci_netif* ni, ci_tcp_socket_listen* tls,
                                  ciip_tcp_rx_pkt* rxp)
 {
@@ -1955,8 +1957,8 @@ static void handle_rx_listen_rst(ci_netif* ni, ci_tcp_socket_listen* tls,
   tsr = ci_tcp_listenq_lookup(ni, tls, rxp);
 
   if( tsr ) {
-    unsigned tsr_rcv_wnd = ci_tcp_rcvbuf2window(tls->s.so.rcvbuf,
-                                                tsr->amss, tsr->rcv_wscl);
+    ci_uint32 tsr_rcv_wnd = ci_tcp_rcvbuf2window(tls->s.so.rcvbuf,
+                                                 tsr->amss, tsr->rcv_wscl);
     if( SEQ_LE(tsr->rcv_nxt, rxp->seq) &&
         SEQ_LT(rxp->seq, tsr->rcv_nxt + tsr_rcv_wnd) ) {
       ci_tcp_listenq_remove(ni, tls, tsr);
@@ -2115,10 +2117,9 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
 {
   ci_ip_pkt_fmt* pkt = rxp->pkt;
   ci_tcp_hdr* tcp = rxp->tcp;
-  unsigned tsr_rcv_wnd = ci_tcp_rcvbuf2window(tls->s.so.rcvbuf, tsr->amss,
-                                              tsr->rcv_wscl);
+  ci_uint32 tsr_rcv_wnd = ci_tcp_rcvbuf2window(tls->s.so.rcvbuf, tsr->amss,
+                                               tsr->rcv_wscl);
   ci_tcp_state* ts;
-
   ci_assert(netif);
   ci_assert(tls);
   ci_assert(tls->s.b.state == CI_TCP_LISTEN);
@@ -2252,7 +2253,7 @@ static void handle_rx_synrecv_ack(ci_netif* netif, ci_tcp_socket_listen* tls,
   pkt = ci_netif_pkt_rx_to_tx(netif, pkt);
   if( pkt != NULL )
     ci_tcp_synrecv_send(netif, tls, tsr, pkt,
-                        CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, NULL);
+                        CI_TCP_FLAG_SYN | CI_TCP_FLAG_ACK, ipcache);
   return;
  reset_out:
   /* LOG_U already printed in all paths to here */
@@ -2385,50 +2386,13 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
      * cicp_user_retrieve().  Even if the route table has a strange route,
      * we always should reply back. */
     ipcache.status = retrrc_localroute;
-    ipcache.encap.type = CICP_LLAP_TYPE_SFC;
+    ipcache.encap.type = CICP_LLAP_TYPE_NONE;
     ipcache.ether_offset = 4;
     ipcache.intf_i = OO_INTF_I_LOOPBACK;
     ipcache.mtu = netif->state->max_mss;
-    cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(netif)).mac_utable,
-                              &ipcache.mac_integrity);
-  }
-  else if( NI_OPTS(netif).tcp_listen_replies_back ) {
-    ci_ifid_t ifindex;
-    int rc;
-
-    if( pkt->vlan ) {
-      ipcache.encap.type = CICP_LLAP_TYPE_VLAN;
-      ipcache.encap.vlan_id = pkt->vlan;
-    } else {
-      ipcache.encap.type = CICP_LLAP_TYPE_SFC;
-      ipcache.encap.vlan_id = 0;
-    }
-    cicp_ipcache_vlan_set(&ipcache);
-    ipcache.intf_i = pkt->intf_i;
-    rc = cicp_llap_find(CICP_HANDLE(netif), &ifindex,
-                        netif->state->intf_i_to_hwport[ipcache.intf_i],
-                        ipcache.encap.vlan_id);
-    if( rc == 0 ) {
-      rc = cicp_llap_retrieve(CICP_HANDLE(netif),
-                              ifindex, &ipcache.mtu,
-                              NULL, NULL, NULL, NULL, NULL);
-
-      if( rc == 0 ) {
-        ci_assert(ipcache.mtu);
-        ipcache.ip_saddr_be32 =
-          ipcache.ip.ip_saddr_be32 = ip->ip_daddr_be32;
-        CI_MAC_ADDR_SET(ci_ip_cache_ether_dhost(&ipcache),
-                        oo_ether_shost(pkt));
-        CI_MAC_ADDR_SET(ci_ip_cache_ether_shost(&ipcache),
-                        oo_ether_dhost(pkt));
-        cicp_mac_set_mostly_valid(CICP_USER_MIBS(CICP_HANDLE(netif)).mac_utable,
-                                  &ipcache.mac_integrity);
-        ipcache.status = retrrc_success;
-      }
-      else {
-        ipcache.status = retrrc_alienroute;
-      }
-    }
+    /* Fixme: make this verinfo "valid" so the route is not re-resolved
+     * later. */
+    oo_cp_verinfo_init(&ipcache.mac_integrity);
   }
   else {
     struct oo_sock_cplane sock_cp = tls->s.cp;
@@ -2629,15 +2593,19 @@ static void handle_rx_listen(ci_netif* netif, ci_tcp_socket_listen* tls,
   /* store timestamp in echo reply */
   tsr->timest = ci_tcp_time_now(netif);
   tsr->rcv_nxt = rxp->seq + 1;
-  if( NI_OPTS(netif).tcp_rcvbuf_mode == 1 )
-    /* may overestimate MSS, but this is "OK" */
-    tsr->rcv_wscl = (ci_uint8)
-      ci_tcp_wscl_by_buff(netif,
-			  ci_tcp_max_rcvbuf(netif, netif->state->max_mss));
-  else
-    tsr->rcv_wscl = (ci_uint8)
-      ci_tcp_wscl_by_buff(netif,
-			  ci_tcp_rcvbuf_established(netif, &tls->s));
+  if( tsr->tcpopts.flags & CI_TCPT_FLAG_WSCL ) {
+    if( NI_OPTS(netif).tcp_rcvbuf_mode == 1 ) {
+      /* may overestimate MSS, but this is "OK" */
+      tsr->rcv_wscl = (ci_uint8)
+        ci_tcp_wscl_by_buff(netif,
+                            ci_tcp_max_rcvbuf(netif, netif->state->max_mss));
+    }
+    else {
+      tsr->rcv_wscl = (ci_uint8)
+        ci_tcp_wscl_by_buff(netif,
+                            ci_tcp_rcvbuf_established(netif, &tls->s));
+    }
+  }
 
   if( do_syncookie )
     ci_tcp_syncookie_syn(netif, tls, tsr);
@@ -3008,6 +2976,14 @@ static void handle_rx_last_ack_or_closing(ci_tcp_state* ts, ci_netif* netif,
      * See bug 10638 for details */
     if( next_state == CI_TCP_CLOSED ) {
       ci_tcp_drop(netif, ts, 0);
+
+      /* If we're sharing an active wild then we've just made our 4-tuple
+       * available for re-use, by removing filters.  The peer will be sitting
+       * in TIME-WAIT however, so we need to be careful about our sequence
+       * numbers if we re-use this quickly.
+       */
+      if( ts->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD )
+        ci_netif_active_wild_sharer_closed(netif, &ts->s);
     }
     else {
       ci_assert(next_state == CI_TCP_TIME_WAIT);
@@ -3137,9 +3113,14 @@ static int handle_rx_minor_states(ci_tcp_state* ts, ci_netif* netif,
       else
         LOG_U(log(LPF "SYN in TIME_WAIT has old SEQ - staying in TIME_WAIT"));
     }
-    /* not normal, do nothing! (rfc793 p23) */
-    LOG_U(log(LPF "unexpected packet received while in TIME_WAIT"));
-    LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+    /* Not normal, do nothing! (rfc793 p23)  That being said, pure ACKs can be
+     * generated by the peer if we retransmitted our FIN, so don't complain
+     * about those. */
+    if( pkt->pf.tcp_rx.pay_len > 0 ||
+        (tcp->tcp_flags & CI_TCP_FLAG_MASK) != CI_TCP_FLAG_ACK ) {
+      LOG_U(log(LPF "unexpected packet received while in TIME_WAIT"));
+      LOG_DU(ci_hex_dump(ci_log_fn, PKT_START(pkt), 64, 0));
+    }
     ci_netif_pkt_release_rx(netif, pkt);
     break;
   case CI_TCP_CLOSED:
@@ -3467,22 +3448,9 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
     ts->t_last_recv_ack = ci_tcp_time_now(netif);
 
   /* Reconfirm ARP entry if necessary. */
-  if(CI_UNLIKELY( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON )) {
-    /* If we can't be sure that the other end is getting our data then we
-     * need to compare our dest MAC with the source MAC of the incoming packet
-     * before confirming.
-     *
-     * If this segment acks new data then we're getting data through to the
-     * other end, so confirm MAC unconditionally.  This allows us to handle
-     * cases where incoming and outgoing mac differ.  This happens when
-     * packets arrive and leave on different interfaces, and also when
-     * virtual MAC addresses are in use ((HSRP/VRRP) where the dest MAC for
-     * our outgoing packet (virtual router MAC) does not match the source
-     * MAC for the incoming packet (actual router MAC)).
-     */
-    mac_update_if_ack_new_or_mac_match(netif, ts, rxp);
-  }
-  
+  if( SEQ_GT(rxp->ack, tcp_snd_una(ts)) )
+    oo_cp_arp_confirm(netif->cplane, &ts->s.pkt.mac_integrity);
+
   /* Once you're synchronised rfc793 says all segments must have an ACK.
   ** So we don't even bother to check the ACK flag.  The worst that can
   ** happen is a bad ACK that will be dropped or acknowledge data too soon.
@@ -3606,14 +3574,15 @@ static void handle_rx_slow(ci_tcp_state* ts, ci_netif* netif,
         ** Steven's p238 or rfc1122 4.2.2.13.
         ** Linux queues data in ESTABLISHED + RCV_SHUTDOWN.
         ** Linux sends RST without ACK here, i.e. we should call
-        ** ci_tcp_reply_with_rst() instead of ci_tcp_send_rst().
+        ** ci_tcp_send_rst_with_flags() instead of ci_tcp_send_rst().
         */
         if( (ts->s.b.state & CI_TCP_STATE_RECVD_FIN) ||
             ts->s.tx_errno != 0 )
         {
           LOG_U(log(LNTS_FMT" data arrived with SHUT_RD (rx=%x tx=%x)",
                     LNTS_PRI_ARGS(netif, ts), ts->s.rx_errno, ts->s.tx_errno));
-          ci_tcp_reply_with_rst(netif, rxp);
+          ci_netif_pkt_release_rx(netif, pkt);
+          ci_tcp_send_rst_with_flags(netif, ts, 0);
           ci_tcp_drop(netif, ts, ECONNRESET);
           return;
         }
@@ -3901,6 +3870,13 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
   int reset = 1; /* We send a TCP reset unless we have a good reason
                         not to. See RFC793 p36 */
 
+  if( oo_tcpdump_check_no_match(ni, pkt, pkt->intf_i) ) {
+    /* note: metada of the packet might get overwritten below on reply
+     * with RST. Nonetheless, payload is left intact and
+     * this should pose no problem for tcpdump dump */
+    oo_tcpdump_dump_pkt(ni, pkt);
+  }
+
   LOG_TR(
     /* Do not print message in RST case: it is pretty normal for
      * just-dropped connection with some packets inflight. */
@@ -3921,7 +3897,7 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
    *         results in a system call.
    */
   
-  if( ! cicp_user_is_local_addr(CICP_HANDLE(ni), &ip->ip_daddr_be32) ) {
+  if( ! cicp_user_is_local_addr(ni->cplane, ip->ip_daddr_be32) ) {
     /* The EF1 hardware filter only checks (remote ip, remote port, local
     ** port) matches; it is possible that a correct packet for another flow
     ** matches, so discard it (bug 1119).
@@ -3930,7 +3906,7 @@ static void handle_no_match(ci_netif* ni, ciip_tcp_rx_pkt* rxp)
     	      LN_PRI_ARGS(ni)));
     reset = 0;
   }
-  else if( cicp_user_is_local_addr(CICP_HANDLE(ni), &ip->ip_saddr_be32) ) {
+  else if( cicp_user_is_local_addr(ni->cplane, ip->ip_saddr_be32) ) {
     /* Either someone is lying, or packets are somehow making their way
     ** back to us.  Either way, the proper route for packets to us from us
     ** is via loopback, so just drop this.
@@ -3996,6 +3972,7 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
   ci_netif_put_on_post_poll(ni, &ts->s.b);
 
   CI_IP_SOCK_STATS_ADD_RXBYTE( ts, pkt->pf.tcp_rx.pay_len );
+  ++ts->stats.rx_pkts;
 
   LOG_TR(log(LNTS_FMT RCV_WND_FMT " snd=%08x-%08x-%08x",
              LNTS_PRI_ARGS(ni, ts), RCV_WND_ARGS(ts),
@@ -4116,10 +4093,6 @@ static int ci_tcp_rx_deliver_to_conn(ci_sock_cmn* s, void* opaque_arg)
                    pkt->pf.tcp_rx.pay_len);
     ci_tcp_rx_enqueue_packet(ni, ts, pkt);
 
-    if(CI_UNLIKELY( ts->s.pkt.flags & CI_IP_CACHE_NEED_UPDATE_SOON ))
-      /* This segment does not ACK new data, so MACs must match. */
-      mac_update_if_mac_match(ni, ts, pkt);
-
     rxp->pkt = NULL;
 
     return 1;  /* finished -- don't deliver to any other socket */
@@ -4159,8 +4132,11 @@ static int ci_tcp_rx_deliver_to_listen(ci_sock_cmn* s, void* opaque_arg)
   }
 #endif
 
-  handle_rx_listen(rxp->ni, SOCK_TO_TCP_LISTEN(s), rxp, 0);
-  rxp->pkt = NULL;
+  if( s->b.state != CI_TCP_STATE_ACTIVE_WILD ) {
+    handle_rx_listen(rxp->ni, SOCK_TO_TCP_LISTEN(s), rxp, 0);
+    rxp->pkt = NULL;
+    CITP_STATS_TCP_LISTEN(++SOCK_TO_TCP_LISTEN(s)->stats.n_rx_pkts);
+  }
   return 1;  /* finished -- don't deliver to any other socket */
 }
 

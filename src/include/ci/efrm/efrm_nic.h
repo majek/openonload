@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -73,6 +73,7 @@ struct efrm_nic {
 	struct list_head clients;
 	struct efrm_pd_owner_ids *owner_ids;
 	struct efrm_nic_per_vi *vis;
+        int max_vis;
 	struct efrm_nic_vi      nvi;
 	struct efrm_vi_allocator vi_allocators[EFRM_NIC_N_VI_ALLOCATORS];
 	unsigned falcon_wakeup_mask;

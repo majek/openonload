@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2010-2015 Solarflare Communications Inc.
+ * Copyright 2010-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -142,7 +142,7 @@ struct siena_vf {
 	unsigned int rxq_count;
 	unsigned long rxq_retry_mask[VI_MASK_LENGTH];
 	atomic_t rxq_retry_count;
-#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
+#if defined(EFX_USE_KCOMPAT)
 	struct pci_dev *pci_dev;
 	struct device_attribute dev_attr_mac_addr;
 	struct device_attribute dev_attr_tci;
@@ -794,7 +794,7 @@ static int efx_vfdi_insert_filter(struct siena_vf *vf)
 		if (net_ratelimit())
 			netif_err(efx, hw, efx->net_dev,
 				  "ERROR: Invalid INSERT_FILTER from %s: rxq %d "
-				  "flags 0x%x\n", vf->pci_name, vf_rxq,
+				  "flags %#x\n", vf->pci_name, vf_rxq,
 				  req->u.mac_filter.flags);
 		return VFDI_RC_EINVAL;
 	}
@@ -1095,7 +1095,7 @@ void efx_siena_sriov_probe(struct efx_nic *efx)
 }
 
 #ifdef CONFIG_SFC_SRIOV
-#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
+#if defined(EFX_USE_KCOMPAT)
 static ssize_t show_mac_addr(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
@@ -1135,7 +1135,7 @@ static ssize_t show_tci(struct device *dev, struct device_attribute *attr,
 {
 	struct siena_vf *vf = container_of(attr, struct siena_vf, dev_attr_tci);
 
-	return sprintf(buf, "0x%04x", ntohs(vf->addr.tci));
+	return sprintf(buf, "%#04x", ntohs(vf->addr.tci));
 }
 
 static ssize_t set_tci(struct device *dev, struct device_attribute *attr,
@@ -1159,7 +1159,7 @@ static ssize_t set_tci(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(tci, 0644, show_tci, set_tci);
 
-#endif /* EFX_USE_KCOMPAT && !__VMKLNX__ */
+#endif /* EFX_USE_KCOMPAT */
 
 #ifdef EFX_NOT_UPSTREAM
 
@@ -1454,7 +1454,7 @@ fail:
 	return rc;
 }
 
-#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
+#if defined(EFX_USE_KCOMPAT)
 static void efx_siena_sriov_vf_attrs_init(struct efx_nic *efx)
 {
 	struct siena_nic_data *nic_data = efx->nic_data;
@@ -1478,7 +1478,7 @@ static void efx_siena_sriov_vf_attrs_init(struct efx_nic *efx)
 		vf->pci_dev = pci_get_slot(efx->pci_dev->bus, devfn);
 		if (!vf->pci_dev) {
 			netif_err(efx, probe, efx->net_dev,
-				  "ERROR: unable to find VF devfn 0x%x\n", devfn);
+				  "ERROR: unable to find VF devfn %#x\n", devfn);
 			continue;
 		}
 
@@ -1513,7 +1513,7 @@ static void efx_siena_sriov_vf_attrs_fini(struct efx_nic *efx)
 		}
 	}
 }
-#endif /* EFX_USE_KCOMPAT && !__VMKLNX__ */
+#endif /* EFX_USE_KCOMPAT */
 #endif /* CONFIG_SFC_SRIOV */
 
 int efx_siena_sriov_init(struct efx_nic *efx)
@@ -1525,7 +1525,7 @@ int efx_siena_sriov_init(struct efx_nic *efx)
 	int rc;
 
 	/* Ensure there's room for vf_channel */
-	BUILD_BUG_ON(EFX_MAX_CHANNELS + 1 >= EFX_VI_BASE);
+	BUILD_BUG_ON(EFX_SIENA_MAX_CHANNELS + 1 >= EFX_VI_BASE);
 	/* Ensure that VI_BASE is aligned on VI_SCALE */
 	BUILD_BUG_ON(EFX_VI_BASE & ((1 << EFX_VI_SCALE_MAX) - 1));
 
@@ -1592,7 +1592,7 @@ int efx_siena_sriov_init(struct efx_nic *efx)
 	nic_data->vf_rtnl_count = efx->vf_count;
 	rtnl_unlock();
 
-#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
+#if defined(EFX_USE_KCOMPAT)
 	/* This has to be done after enabling SR-IOV, since there were
 	 * previously no devices to attach the attributes to.
 	 */
@@ -1624,6 +1624,7 @@ fail_vfs:
 fail_dev:
 #endif
 	kfree(nic_data->vf);
+	nic_data->vf = NULL;
 fail_alloc:
 	efx_nic_free_buffer(efx, &nic_data->vfdi_status);
 fail_status:
@@ -1648,7 +1649,7 @@ void efx_siena_sriov_fini(struct efx_nic *efx)
 		return;
 
 	/* Disable all interfaces to reconfiguration */
-#if defined(EFX_USE_KCOMPAT) && !defined(__VMKLNX__)
+#if defined(EFX_USE_KCOMPAT)
 	efx_siena_sriov_vf_attrs_fini(efx);
 #endif
 	BUG_ON(nic_data->vfdi_channel->enabled);
@@ -1680,6 +1681,7 @@ void efx_siena_sriov_fini(struct efx_nic *efx)
 	efx_siena_sriov_vfs_fini(efx);
 	efx_siena_sriov_free_local(efx);
 	kfree(nic_data->vf);
+	nic_data->vf = NULL;
 	efx_nic_free_buffer(efx, &nic_data->vfdi_status);
 	efx_siena_sriov_cmd(efx, false, NULL, NULL);
 #endif /* CONFIG_SFC_SRIOV */
@@ -1701,7 +1703,7 @@ void efx_siena_sriov_event(struct efx_channel *channel, efx_qword_t *event)
 	data = EFX_QWORD_FIELD(*event, VFDI_EV_DATA);
 
 	netif_vdbg(efx, hw, efx->net_dev,
-		   "USR_EV event from qid %d seq 0x%x type %d data 0x%x\n",
+		   "USR_EV event from qid %d seq %#x type %d data %#x\n",
 		   qid, seq, type, data);
 
 	if (map_vi_index(efx, qid, &vf, NULL))

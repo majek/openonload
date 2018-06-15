@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -43,6 +43,7 @@ ci_inline void ci_tcp_tx_finish(ci_netif* netif, ci_tcp_state* ts,
 {
   ci_tcp_hdr* tcp = TX_PKT_TCP(pkt);
   ci_uint8* opt = CI_TCP_HDR_OPTS(tcp);
+  int seq = pkt->pf.tcp_tx.start_seq;
 
   /* Decrement the faststart counter by the number of bytes acked */
   ci_tcp_reduce_faststart(ts, SEQ_SUB(tcp_rcv_nxt(ts),ts->tslastack));
@@ -59,21 +60,21 @@ ci_inline void ci_tcp_tx_finish(ci_netif* netif, ci_tcp_state* ts,
       /* setup new timestamp off this packet
       ** if we are not measuring already */
       if( !SEQ_LE(tcp_snd_una(ts), ts->timed_seq) ) {
-        ci_tcp_set_rtt_timing(netif, ts, tcp);
+        ci_tcp_set_rtt_timing(netif, ts, seq);
       }
     } else {
       /* congested use Karn's algorithm and only measure segments
       ** after the congrecover, anything else must be a retransmit
       */
-      if( SEQ_LE(ts->congrecover, tcp->tcp_seq_be32) &&
+      if( SEQ_LE(ts->congrecover, seq) &&
           !SEQ_LE(tcp_snd_una(ts), ts->timed_seq) ) {
         /* forward transmission while in recovery so timing possible */
-        ci_tcp_set_rtt_timing(netif, ts, tcp);
+        ci_tcp_set_rtt_timing(netif, ts, seq);
       }
     }
   }
 
-  tcp->tcp_seq_be32 = CI_BSWAP_BE32(pkt->pf.tcp_tx.start_seq);
+  tcp->tcp_seq_be32 = CI_BSWAP_BE32(seq);
 }
 
 
@@ -93,6 +94,7 @@ ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts)
   int new_window;
   unsigned new_rhs;
   ci_uint16 tmp;
+  unsigned delta;
 
   new_window = CI_MIN(ts->rcv_window_max,
                       ts->s.so.rcvbuf -
@@ -103,10 +105,11 @@ ci_inline void __ci_tcp_calc_rcv_wnd(ci_tcp_state* ts)
    * as required by RFC1122 silly window avoidance.
    *
    * Do not apply silly window avoidance when we have nothing to read:
-   * probably, rcvbuff is too small.
+   * probably, rcvbuf is too small.
    */
-  if( CI_LIKELY( SEQ_GE(new_rhs, ts->rcv_wnd_right_edge_sent + ts->amss) )
-      || tcp_rcv_usr(ts) == 0 ) {
+  delta = tcp_rcv_usr(ts) ? ts->amss : 0;
+
+  if( CI_LIKELY( SEQ_GE(new_rhs, ts->rcv_wnd_right_edge_sent + delta) ) ) {
     /* We are ready to move on the window right edge. */
     ts->rcv_wnd_advertised = new_window;
     tcp_rcv_wnd_right_edge_sent(ts) = new_rhs;

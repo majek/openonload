@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -15,7 +15,7 @@
 
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
- * Copyright 2014-2015 Solarflare Communications Inc.
+ * Copyright 2014-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -26,6 +26,7 @@
 #define EF10_SRIOV_H
 
 #include "net_driver.h"
+
 
 /**
  * struct ef10_vf - PF's store of VF data
@@ -40,13 +41,6 @@
  *	driver should install filter with VLAN to get corresponding
  *	traffic. GRP_UNRESTRICTED_VLAN privilege controls if the filter
  *	installation is permitted.
-#if defined(__VMKLNX__) && defined(EFX_USE_MCDI_PROXY_AUTH)
- * @rx_mode: Rx mode granted to the VF
- * @mac_mtu: MAC MTU set by the ESX for VF or 0
- * @pending_proxy_req: pending proxied auth request
- * @allowed_vlans: allowed VLANs
- * @active_vlans: VLANs requested by the VF driver
-#endif
  */
 struct ef10_vf {
 	struct efx_nic *efx;
@@ -102,6 +96,7 @@ int efx_ef10_sriov_set_vf_link_state(struct efx_nic *efx, int vf_i,
 				     int link_state);
 #endif
 #endif
+
 
 /* MCFW vswitch operations */
 int efx_ef10_vswitch_alloc(struct efx_nic *efx, unsigned int port_id,

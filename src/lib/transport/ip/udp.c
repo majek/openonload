@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -92,6 +92,7 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   oo_atomic_set(&us->tx_async_q_level, 0);
   us->tx_count = 0;
   us->udpflags = CI_UDPF_MCAST_LOOP;
+  us->ip_pktinfo_cache.intf_i = -1;
   us->stamp = 0;
   memset(&us->stats, 0, sizeof(us->stats));
 }
@@ -155,6 +156,7 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   us->s.rx_errno = 0;
   us->s.tx_errno = 0;
   us->s.so_error = 0;
+  us->s.cp.sock_cp_flags |= OO_SCP_UDP_WILD;
 
   ep->s = &us->s;
   ep->netif = netif;

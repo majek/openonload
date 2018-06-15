@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -146,6 +146,14 @@ ef_vi_inline unsigned ef_vi_next_rx_rq_id(ef_vi* vi)
 {
   return vi->vi_rxq.ids[vi->ep_state->rxq.removed & vi->vi_rxq.mask];
 }
+
+
+#ifndef __KERNEL__
+#include <sys/uio.h>
+extern int ef10_ef_vi_transmitv_copy_pio(ef_vi* vi, int offset,
+					 const struct iovec* iov, int iovcnt,
+					 ef_request_id dma_id);
+#endif
 
 
 /* Internal interfaces, so exclude from doxygen documentation */

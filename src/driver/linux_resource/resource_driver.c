@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -543,6 +543,15 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 			 pci_name(dev) ? pci_name(dev) : "?", rc);
 	}
 
+#ifdef CONFIG_SFC_RESOURCE_VF
+        efrm_resource_manager_add_total(EFRM_RESOURCE_VF,
+                                        res_dim->vf_count);
+#endif
+        efrm_resource_manager_add_total(EFRM_RESOURCE_VI,
+                                        efrm_nic->max_vis);
+        efrm_resource_manager_add_total(EFRM_RESOURCE_PD,
+                                        efrm_nic->max_vis);
+
 	/* Tell NIC to spread wakeup events. */
 	if (nic->devtype.arch == EFHW_ARCH_FALCON) {
 		int n_int = 1;
@@ -587,12 +596,26 @@ failed:
 static void efrm_nic_shutdown(struct linux_efhw_nic *lnic)
 {
 	struct efhw_nic *nic = &lnic->efrm_nic.efhw_nic;
+#ifdef CONFIG_SFC_RESOURCE_VF
+        unsigned vi_base, vi_scale, vf_count;
+#endif
 
 	EFRM_TRACE("%s:", __func__);
 	EFRM_ASSERT(nic);
 
 	efrm_vi_wait_nic_complete_flushes(nic);
 	linux_efrm_nic_dtor(lnic);
+
+#ifdef CONFIG_SFC_RESOURCE_VF
+        efrm_vf_nic_params(nic, &vi_base, &vi_scale, &vf_count);
+
+        efrm_resource_manager_del_total(EFRM_RESOURCE_VF,
+                                        vf_count);
+#endif
+        efrm_resource_manager_del_total(EFRM_RESOURCE_VI,
+                                        lnic->efrm_nic.max_vis);
+        efrm_resource_manager_del_total(EFRM_RESOURCE_PD,
+                                        lnic->efrm_nic.max_vis);
 
 	EFRM_TRACE("%s: done", __func__);
 }
@@ -660,6 +683,17 @@ static int init_sfc_resource(void)
 	efrm_driver_ctor();
 	efrm_filter_init();
 
+        /* efrm_driverlink_register() attempts to create files in
+         * /proc, so it is important that /proc is initialised
+         * first. */
+
+	if (efrm_install_proc_entries() != 0) {
+		/* Do not fail, but print a warning */
+		EFRM_WARN("%s: WARNING: failed to install /proc entries",
+			  __func__);
+	}
+	efrm_filter_install_proc_entries();
+
 	/* Register the driver so that our 'probe' function is called for
 	 * each EtherFabric device in the system.
 	 */
@@ -669,13 +703,6 @@ static int init_sfc_resource(void)
 	if (rc < 0)
 		goto failed_driverlink;
 
-	if (efrm_install_proc_entries() != 0) {
-		/* Do not fail, but print a warning */
-		EFRM_WARN("%s: WARNING: failed to install /proc entries",
-			  __func__);
-	}
-	efrm_filter_install_proc_entries();
-	
 #ifdef CONFIG_SFC_RESOURCE_VF
 	efrm_vf_driver_init();
 #endif
@@ -690,6 +717,8 @@ static int init_sfc_resource(void)
 	return 0;
 
 failed_driverlink:
+	efrm_filter_remove_proc_entries();
+	efrm_uninstall_proc_entries();
 	efrm_driver_stop();
 	efrm_filter_shutdown();
 	efrm_driver_dtor();
@@ -714,13 +743,16 @@ static void cleanup_sfc_resource(void)
 	efrm_vf_driver_fini();
 #endif
 
+	/* Unregister from driverlink first, free
+	 * the per-NIC structures next. */
+	efrm_driverlink_unregister();
+	efrm_nic_shutdown_all();
+	efrm_nic_del_all();
+
 	efrm_filter_shutdown();
 	efrm_filter_remove_proc_entries();
 	efrm_uninstall_proc_entries();
 
-	efrm_nic_shutdown_all();
-	efrm_driverlink_unregister();
-	efrm_nic_del_all();
 	efrm_driver_stop();
 
 	/* Clean up char-driver specific initialisation.

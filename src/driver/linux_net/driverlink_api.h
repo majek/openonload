@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -16,7 +16,7 @@
 /****************************************************************************
  * Driver for Solarflare network controllers and boards
  * Copyright 2005-2006 Fen Systems Ltd.
- * Copyright 2005-2015 Solarflare Communications Inc.
+ * Copyright 2005-2017 Solarflare Communications Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License version 2 as published
@@ -27,14 +27,6 @@
 #define EFX_DRIVERLINK_API_H
 
 #include <linux/list.h>
-#if defined(EFX_USE_KCOMPAT) && !defined(EFX_USE_FASTCALL)
-	#include <linux/version.h>
-	#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
-		#define EFX_USE_FASTCALL yes
-		#include <linux/linkage.h>
-	#endif
-#endif
-
 #include "filter.h"
 
 /* Forward declarations */
@@ -330,9 +322,9 @@ struct efx_dl_aoe_resources {
 };
 
 /**
- * enum efx_dl_falcon_resource_flags - Falcon/Siena resource information flags.
+ * enum efx_dl_ef10_resource_flags - EF10 resource information flags.
  *
- * Flags that describe hardware variations for the current Falcon or
+ * Flags that describe hardware variations for the current EF10 or
  * Siena device.
  *
  * @EFX_DL_EF10_USE_MSI: Port is initialised to use MSI/MSI-X interrupts.
@@ -443,11 +435,7 @@ static inline int efx_dl_register_driver(struct efx_dl_driver *driver)
  * efx_dl_netdev_is_ours() - Check whether device is handled by sfc
  * @net_dev: Net device to be checked
  */
-#if defined(EFX_USE_KCOMPAT) && defined(EFX_USE_FASTCALL)
-bool fastcall efx_dl_netdev_is_ours(const struct net_device *net_dev);
-#else
 bool efx_dl_netdev_is_ours(const struct net_device *net_dev);
-#endif
 
 /**
  * efx_dl_dev_from_netdev() - Find Driverlink device structure for net device
@@ -467,6 +455,13 @@ int efx_dl_filter_insert(struct efx_dl_device *efx_dev,
 			 const struct efx_filter_spec *spec,
 			 bool replace_equal);
 int efx_dl_filter_remove(struct efx_dl_device *efx_dev, int filter_id);
+
+/**
+ * efx_dl_filter_redirect - update the queue for an existing RX filter
+ * @efx_dev: NIC in which to update the filter
+ * @filter_id: ID of filter, as returned by @efx_dl_filter_insert
+ * @rxq_i: Index of RX queue
+ */
 int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 			   int filter_id, int rxq_i, int stack_id);
 

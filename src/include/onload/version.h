@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -29,12 +29,12 @@
 
 
 #ifndef ONLOAD_VERSION
-# define ONLOAD_VERSION "201606"
+# define ONLOAD_VERSION "201710-u1.1"
 #endif
 
 #define ONLOAD_PRODUCT "OpenOnload"
 
-#define ONLOAD_COPYRIGHT "Copyright 2006-2016 Solarflare Communications, 2002-2005 Level 5 Networks"
+#define ONLOAD_COPYRIGHT "Copyright 2006-2018 Solarflare Communications, 2002-2005 Level 5 Networks"
 
 
 #endif  /* __ONLOAD_VERSION_H__ */

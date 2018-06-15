@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -39,19 +39,13 @@
 *//*
 \**************************************************************************/
 
-#include <cplane/exported.h>
-#include <onload/debug.h>
-#include <onload/tcp_helper_endpoint.h>
-#include <onload/driverlink_filter.h>
-#include <ci/efrm/efrm_client.h>
-#include <ci/efrm/efrm_filter.h>
-#include <ci/efrm/vi_resource.h>
-#include <ci/efrm/vi_set.h>
-#include <ci/driver/efab/hardware.h>
 #include "tcp_filters_internal.h"
-#include "oo_hw_filter.h"
-#include <driver/linux_net/driverlink_api.h>
-#include <onload/nic.h>
+
+/* All header dependencies are included via this private header to allow us
+ * to allow us to easily replace them with something useable in the user
+ * level unit tests.
+ */
+#include "tcp_filters_deps.h"
 
 #define KERNEL_REDIRECT_VI_ID 0
 
@@ -67,7 +61,7 @@ int oof_all_ports_required = 1;
 
 static struct efrm_client* get_client(int hwport)
 {
-  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CI_CFG_MAX_HWPORTS);
   return oo_nics[hwport].efrm_client;
 }
 
@@ -80,7 +74,7 @@ void oo_hw_filter_init2(struct oo_hw_filter* oofilter,
   oofilter->dlfilter_handle = EFX_DLFILTER_HANDLE_BAD;
   oofilter->trs = trs;
   oofilter->thc = thc;
-  for( i = 0; i < CPLANE_MAX_REGISTER_INTERFACES; ++i )
+  for( i = 0; i < CI_CFG_MAX_HWPORTS; ++i )
     oofilter->filter_id[i] = -1;
 }
 
@@ -94,7 +88,7 @@ void oo_hw_filter_init(struct oo_hw_filter* oofilter)
 static void oo_hw_filter_clear_hwport(struct oo_hw_filter* oofilter,
                                       int hwport)
 {
-  ci_assert((unsigned) hwport < CPLANE_MAX_REGISTER_INTERFACES);
+  ci_assert((unsigned) hwport < CI_CFG_MAX_HWPORTS);
   if( oofilter->filter_id[hwport] >= 0 ) {
     efrm_filter_remove(get_client(hwport), oofilter->filter_id[hwport]);
     oofilter->filter_id[hwport] = -1;
@@ -107,13 +101,13 @@ void oo_hw_filter_clear(struct oo_hw_filter* oofilter)
   int hwport;
 
   if( oofilter->trs != NULL || oofilter->thc != NULL ) {
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       oo_hw_filter_clear_hwport(oofilter, hwport);
     oofilter->trs = NULL;
     oofilter->thc = NULL;
   }
   else {
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       ci_assert(oofilter->filter_id[hwport] < 0);
   }
 }
@@ -125,7 +119,7 @@ void oo_hw_filter_clear_hwports(struct oo_hw_filter* oofilter,
   int hwport;
 
   if( redirect || oofilter->trs != NULL || oofilter->thc != NULL )
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       if( hwport_mask & (1 << hwport) )
         oo_hw_filter_clear_hwport(oofilter, hwport);
 }
@@ -143,7 +137,9 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
   int replace = false;
   int kernel_redirect = src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT;
   int drop = src_flags & OO_HW_SRC_FLAG_DROP;
-  int cluster = (oofilter->thc != NULL) && ! kernel_redirect && ! drop;
+  int cluster = (oofilter->thc != NULL) && ! kernel_redirect;
+
+  ci_assert_impl(cluster, ! drop);
 
   if( ! kernel_redirect )
     ci_assert_nequal(oofilter->trs == NULL, oofilter->thc == NULL);
@@ -151,8 +147,6 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
 
   if( kernel_redirect )
     vi_id = KERNEL_REDIRECT_VI_ID;
-  else if( drop )
-    vi_id = EFX_FILTER_RX_DMAQ_ID_DROP;
   else {
     vi_id = cluster ?
       tcp_helper_cluster_vi_base(oofilter->thc, hwport) :
@@ -165,17 +159,20 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
     int hw_rx_loopback_supported = (cluster || kernel_redirect || drop) ?
       0 : tcp_helper_vi_hw_rx_loopback_supported(oofilter->trs, hwport);
 
+    if( drop )
+      vi_id = EFX_FILTER_RX_DMAQ_ID_DROP;
+
     ci_assert( hw_rx_loopback_supported >= 0 );
     if( hw_rx_loopback_supported && (src_flags & OO_HW_SRC_FLAG_LOOPBACK) ) {
       flags |= EFX_FILTER_FLAG_TX;
     }
 
-    if( cluster )
+    if( cluster && ! drop )
       flags |= EFX_FILTER_FLAG_RX_RSS;
 
     efx_filter_init_rx(&spec, EFX_FILTER_PRI_REQUIRED, flags, vi_id);
 
-    if( cluster ) {
+    if( cluster && ! drop ) {
       int rss_context = -1;
       if( src_flags & OO_HW_SRC_FLAG_RSS_DST )
         rss_context = efrm_vi_set_get_rss_context
@@ -188,7 +185,7 @@ oo_hw_filter_set_hwport(struct oo_hw_filter* oofilter, int hwport,
     }
 
 #if EFX_DRIVERLINK_API_VERSION >= 15
-    if( ! kernel_redirect && ! drop ) {
+    if( ! kernel_redirect ) {
       unsigned stack_id = cluster ?
         tcp_helper_cluster_vi_hw_stack_id(oofilter->thc, hwport) :
         tcp_helper_vi_hw_stack_id(oofilter->trs, hwport);
@@ -284,7 +281,7 @@ int oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
   if( (src_flags & OO_HW_SRC_FLAG_KERNEL_REDIRECT) == 0 )
     ci_assert_nequal(oofilter->trs != NULL, oofilter->thc != NULL);
 
-  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
     if( (hwport_mask & (1u << hwport)) && oofilter->filter_id[hwport] < 0 ) {
       /* If we've been told to set the vlan when installing the filter on this
        * port then use provided vlan_id, otherwise use OO_HW_VLAN_UNSPEC.
@@ -353,7 +350,7 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
 
   oo_hw_filter_clear_hwports(oofilter, ~hwport_mask, redirect);
 
-  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
     if( hwport_mask & (1 << hwport) ) {
       /* has the target stack got hwport */
       if( drop_hwport_mask & (1 << hwport) ||
@@ -400,8 +397,7 @@ int oo_hw_filter_update(struct oo_hw_filter* oofilter,
       else {
         /* Move filter between stacks we attempt this even when new_stack
          * == old_stack */
-        unsigned stack_id = vi_id == EFX_FILTER_RX_DMAQ_ID_DROP ? 0 :
-                            tcp_helper_vi_hw_stack_id(new_stack, hwport);
+        unsigned stack_id = tcp_helper_vi_hw_stack_id(new_stack, hwport);
         int rc;
         ci_assert_ge( stack_id, 0 );
         rc = efrm_filter_redirect(get_client(hwport),
@@ -436,7 +432,7 @@ void oo_hw_filter_transfer(struct oo_hw_filter* oofilter_old,
 
   ci_assert_equal(oofilter_old->trs, oofilter_new->trs);
 
-  for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+  for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
     if( (hwport_mask & (1u << hwport)) &&
         oofilter_old->filter_id[hwport] >= 0 ) {
       ci_assert(oofilter_new->filter_id[hwport] < 0);
@@ -452,7 +448,7 @@ unsigned oo_hw_filter_hwports(struct oo_hw_filter* oofilter)
   int hwport;
 
   if( oofilter->trs != NULL || oofilter->thc != NULL )
-    for( hwport = 0; hwport < CPLANE_MAX_REGISTER_INTERFACES; ++hwport )
+    for( hwport = 0; hwport < CI_CFG_MAX_HWPORTS; ++hwport )
       if( oofilter->filter_id[hwport] >= 0 )
         hwport_mask |= 1 << hwport;
   return hwport_mask;

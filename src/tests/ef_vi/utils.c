@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -515,6 +515,19 @@ void get_ipaddr_of_intf(const char* intf, char** ipaddr_out)
   *ipaddr_out = ipaddr;
 }
 
+
+/* Handles both vlan and non-vlan interfaces, set vlan negative to skip vlan */
+void get_ipaddr_of_vlan_intf(const char* intf, int vlan, char** ipaddr_out)
+{
+  char full_intf[NI_MAXHOST];
+  if ( vlan < 0 ) {
+    get_ipaddr_of_intf(intf, ipaddr_out);
+  }
+  else {
+    TRY(snprintf(full_intf, NI_MAXHOST, "%s.%d", intf, vlan));
+    get_ipaddr_of_intf(full_intf, ipaddr_out);
+  }
+}
 
 int my_getaddrinfo(const char* host, const char* port,
                           struct addrinfo**ai_out)

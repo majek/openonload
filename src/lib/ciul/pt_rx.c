@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -56,28 +56,25 @@ int ef_vi_receive_unbundle(ef_vi* vi, const ef_event* ev,
   ef_request_id* ids_in = ids;
   ef_vi_rxq* q = &vi->vi_rxq;
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
-  unsigned i, stop = ev->rx_multi.desc_id & q->mask;
+  unsigned i;
 
-  EF_VI_BUG_ON(EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_RX_MULTI);
+  EF_VI_BUG_ON( EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_RX_MULTI &&
+                EF_EVENT_TYPE(*ev) != EF_EVENT_TYPE_RX_MULTI_DISCARD );
+  EF_VI_BUG_ON( ev->rx_multi.n_descs > EF_VI_RECEIVE_BATCH );
 
-  /* Shouldn't be batching more than 15 descriptors, and should not go
-   * backwards.
-   */
-  EF_VI_BUG_ON(((ev->rx_multi.desc_id - qs->removed) & q->mask)
-                 > EF_VI_RECEIVE_BATCH);
-  /* Should not remove more than we've posted. */
-  EF_VI_BUG_ON(((ev->rx_multi.desc_id - qs->removed) & q->mask) >
-               qs->added - qs->removed);
-
-  for( i = qs->removed & q->mask; i != stop; i = ++qs->removed & q->mask )
-    if( q->ids[i] != EF_REQUEST_ID_MASK ) {
-      *ids++ = q->ids[i];
-      q->ids[i] = EF_REQUEST_ID_MASK;
+  for( i = 0; i < ev->rx_multi.n_descs; ++i ) {
+    unsigned di = qs->removed & q->mask;
+    ++(qs->removed);
+    if( q->ids[di] != EF_REQUEST_ID_MASK ) {
+      *ids++ = q->ids[di];
+      q->ids[di] = EF_REQUEST_ID_MASK;
     }
+  }
 
-  EF_VI_BUG_ON(ids - ids_in > EF_VI_RECEIVE_BATCH);
+  /* Check we didn't remove more than we've added. */
+  EF_VI_ASSERT( qs->added - qs->removed <= q->mask );
+
   return (int) (ids - ids_in);
 }
-
 
 /*! \cidoxg_end */

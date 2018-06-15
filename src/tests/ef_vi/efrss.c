@@ -1,5 +1,5 @@
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -14,7 +14,7 @@
 */
 
 /*
-** Copyright 2005-2016  Solarflare Communications Inc.
+** Copyright 2005-2018  Solarflare Communications Inc.
 **                      7505 Irvine Center Drive, Irvine, CA 92618, USA
 ** Copyright 2002-2005  Level 5 Networks Inc.
 **
@@ -274,6 +274,7 @@ static int init_vi(struct vi_state* vi_state)
 
   for( i = 0; i < vi_state->num; ++i ) {
     struct pkt_buf* pkt_buf = pkt_buf_from_id(vi_state, i);
+    pkt_buf->id = i;
     pkt_buf->rx_ef_addr =
       ef_memreg_dma_addr(&vi_state->memreg, i * PKT_BUF_SIZE) + RX_DMA_OFF;
     pkt_buf->rx_ptr = (char*) pkt_buf + RX_DMA_OFF +
