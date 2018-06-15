@@ -305,6 +305,10 @@ int efch_capabilities_op(struct efch_capabilities_in* in,
     out->val = nic->tx_variant;
     break;
 
+  case EF_VI_CAP_CTPIO:
+    get_from_nic_flags(nic, NIC_FLAG_TX_CTPIO, out);
+    break;
+
   default:
     out->support_rc = -ENOSYS;
     out->val = 0;

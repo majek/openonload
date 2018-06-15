@@ -35,6 +35,7 @@
 #include "efch_intf_ver.h"
 #include <stdio.h>
 
+#define CTPIO_MMAP_LEN CI_PAGE_SIZE
 
 /* ****************************************************************************
  * This set of functions provides the equivalent functionality of the
@@ -65,7 +66,19 @@ static unsigned vi_flags_to_efab_flags(unsigned vi_flags)
                                                     EFHW_VI_ENABLE_RX_MERGE |
                                                     EFHW_VI_NO_EV_CUT_THROUGH);
   if( vi_flags & EF_VI_TX_ALT            ) efab_flags |= EFHW_VI_TX_ALT;
+  if( vi_flags & EF_VI_TX_CTPIO          ) efab_flags |= EFHW_VI_TX_CTPIO;
+  if( vi_flags & EF_VI_TX_CTPIO_NO_POISON ) efab_flags |=
+                                                    EFHW_VI_TX_CTPIO_NO_POISON;
   return efab_flags;
+}
+
+
+/* While Onload always sets a buffer for VI statistics, ef_vi only does so if
+ * we need to maintain statistics to track non-errors. */
+static int /*bool*/ need_vi_stats_buf(unsigned vi_flags)
+{
+  /* At present, we don't record any non-errors in the statistics buffer. */
+  return 0;
 }
 
 
@@ -99,6 +112,26 @@ static int check_nic_compatibility(unsigned vi_flags, unsigned ef_vi_arch)
   default:
     return -EINVAL;
   }
+}
+
+
+static int get_ts_format(ef_driver_handle vi_dh, int res_id,
+                         enum ef_timestamp_format* ts_format)
+{
+  ci_resource_op_t op;
+  int rc;
+  op.id = efch_make_resource_id(res_id);
+  op.op = CI_RSOP_VI_GET_TS_FORMAT;
+  rc = ci_resource_op(vi_dh, &op);
+  if( rc == 0 ) {
+    *ts_format = op.u.vi_ts_format.out_ts_format;
+    return 0;
+  }
+  /* This driver can't tell us the TX format.  So this must be a Hunti
+   * chip, and the appropriate format is...
+   */
+  *ts_format = TS_FORMAT_SECONDS_27FRACTION;
+  return 0;
 }
 
 
@@ -288,9 +321,9 @@ void ef_vi_set_intf_ver(char* intf_ver, size_t len)
    */
   strncpy(intf_ver, "1518b4f7ec6834a578c7a807736097ce", len);
       /* when built from repo */
-  if( strcmp(EFCH_INTF_VER, "4f1b39df8be718dd854ab7d32d02f339") &&
+  if( strcmp(EFCH_INTF_VER, "f93c9d1605ef209e0953c74dbddc6275") &&
       /* when built from distro */
-      strcmp(EFCH_INTF_VER, "4041523aeb9de689da67344e13fef2af") ) {
+      strcmp(EFCH_INTF_VER, "67db91857bc2a611e6653f61edd02188") ) {
     fprintf(stderr, "ef_vi: ERROR: char interface has changed\n");
     abort();
   }
@@ -309,6 +342,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   ci_resource_alloc_t ra;
   char *mem_mmap_ptr_orig, *mem_mmap_ptr;
   char *io_mmap_ptr, *io_mmap_base;
+  char* ctpio_mmap_ptr;
   ef_vi_state* state;
   int rc;
   const char* s;
@@ -331,6 +365,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   io_mmap_ptr = NULL;
   io_mmap_base = NULL;
   mem_mmap_ptr = mem_mmap_ptr_orig = NULL;
+  ctpio_mmap_ptr = NULL;
 
   if( evq == NULL )
     q_label = 0;
@@ -427,6 +462,16 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     mem_mmap_ptr = mem_mmap_ptr_orig = (char*) p;
   }
 
+  if( vi_flags & EF_VI_TX_CTPIO ) {
+    rc = ci_resource_mmap(vi_dh, ra.out_id.index, EFCH_VI_MMAP_CTPIO,
+			  CTPIO_MMAP_LEN, &p);
+    if( rc < 0 ) {
+      LOGVV(ef_log("%s: ci_resource_mmap (ctpio) %d", __FUNCTION__, rc));
+      goto fail4;
+    }
+    ctpio_mmap_ptr = (char*) p;
+  }
+
   rc = ef_vi_arch_from_efhw_arch(ra.u.vi_out.nic_arch);
   EF_VI_BUG_ON(rc < 0);
   nic_type.arch = (unsigned char) rc;
@@ -435,7 +480,7 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
 
   rc = check_nic_compatibility(vi_flags, nic_type.arch);
   if( rc != 0 )
-    goto fail4;
+    goto fail5;
 
   ids = (void*) (state + 1);
 
@@ -456,19 +501,33 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
     ids += rxq_capacity;
     if( vi_flags & (EF_VI_RX_TIMESTAMPS | EF_VI_TX_TIMESTAMPS) ) {
       int rx_ts_correction, tx_ts_correction;
+      enum ef_timestamp_format ts_format;
       rc = get_ts_correction(vi_dh, ra.out_id.index,
                              &rx_ts_correction, &tx_ts_correction);
       if( rc < 0 )
-        goto fail4;
+        goto fail5;
       ef_vi_init_rx_timestamping(vi, rx_ts_correction);
       ef_vi_init_tx_timestamping(vi, tx_ts_correction);
+      rc = get_ts_format(vi_dh, ra.out_id.index,
+                         &ts_format);
+      if( rc < 0 )
+        goto fail5;
+      ef_vi_set_ts_format(vi, ts_format);
     }
   }
   if( txq_capacity )
     ef_vi_init_txq(vi, txq_capacity, mem_mmap_ptr, ids);
 
+  if( need_vi_stats_buf(vi_flags) ) {
+    ef_vi_stats* stats = calloc(1, sizeof(ef_vi_stats));
+    if( stats == NULL )
+      goto fail5;
+    ef_vi_set_stats_buf(vi, stats);
+  }
+
   vi->vi_io_mmap_ptr = io_mmap_base;
   vi->vi_mem_mmap_ptr = mem_mmap_ptr_orig;
+  vi->vi_ctpio_mmap_ptr = ctpio_mmap_ptr;
   vi->vi_io_mmap_bytes = ra.u.vi_out.io_mmap_bytes;
   vi->vi_mem_mmap_bytes = ra.u.vi_out.mem_mmap_bytes;
   vi->vi_resource_id = ra.out_id.index;
@@ -485,14 +544,19 @@ int __ef_vi_alloc(ef_vi* vi, ef_driver_handle vi_dh,
   rc = ef_vi_add_queue(evq, vi);
   BUG_ON(rc != q_label);
 
+  if( vi->vi_flags & EF_VI_TX_CTPIO )
+    ef_vi_ctpio_init(vi);
   if( vi->vi_is_packed_stream )
     ef_vi_packed_stream_update_credit(vi);
 
   return q_label;
 
+ fail5:
+  if( ctpio_mmap_ptr != NULL )
+    ci_resource_munmap(vi_dh, ctpio_mmap_ptr, CTPIO_MMAP_LEN);
  fail4:
-  if( mem_mmap_ptr != NULL )
-    ci_resource_munmap(vi_dh, mem_mmap_ptr, ra.u.vi_out.mem_mmap_bytes);
+  if( mem_mmap_ptr_orig != NULL )
+    ci_resource_munmap(vi_dh, mem_mmap_ptr_orig, ra.u.vi_out.mem_mmap_bytes);
  fail3:
   if( io_mmap_base != NULL )
     ci_resource_munmap(vi_dh, io_mmap_base, ra.u.vi_out.io_mmap_bytes);
@@ -555,6 +619,14 @@ int ef_vi_free(ef_vi* ep, ef_driver_handle fd)
 {
   int rc;
 
+  if( ep->vi_ctpio_mmap_ptr != NULL ) {
+    rc = ci_resource_munmap(fd, ep->vi_ctpio_mmap_ptr, CTPIO_MMAP_LEN);
+    if( rc < 0 ) {
+      LOGV(ef_log("%s: ci_resource_munmap CTPIO %d", __FUNCTION__, rc));
+      return rc;
+    }
+  }
+
   if( ep->vi_io_mmap_ptr != NULL ) {
     rc = ci_resource_munmap(fd, ep->vi_io_mmap_ptr, ep->vi_io_mmap_bytes);
     if( rc < 0 ) {
@@ -575,6 +647,7 @@ int ef_vi_free(ef_vi* ep, ef_driver_handle fd)
   free(ep->ep_state);
   free(ep->tx_alt_id2hw);
   free(ep->tx_alt_hw2id);
+  free(ep->vi_stats);
 
   EF_VI_DEBUG(memset(ep, 0, sizeof(*ep)));
 

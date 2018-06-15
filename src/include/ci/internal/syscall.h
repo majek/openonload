@@ -127,16 +127,6 @@ my_do_syscall3(int num, long a1, long a2, long a3)
    return (int) __sc_ret;
 }
 
-#elif defined(__ia64__)
-
-ci_inline int my_do_syscall3(int num, __attribute__((unused)) long a1, 
-			     __attribute__((unused)) long a2, 
-			     __attribute__((unused)) long a3)
-{
-/* SPH: This is wrong */
-  return syscall(num, a1, a2, a3);
-}
-
 #else
 
 # error my_do_syscall3() unimplemented
@@ -145,7 +135,6 @@ ci_inline int my_do_syscall3(int num, __attribute__((unused)) long a1,
 
 #define	my_syscall3(call, a1, a2, a3) \
         my_do_syscall3(__NR_##call, (a1), (a2), (a3))
-
 
 
 #endif /* __CI_INTERNAL_SYSCALL3_H__ */

@@ -109,6 +109,7 @@ static void efab_zap_other_threads(struct task_struct *p)
 }
 
 static void (*efab_my_zap_other_threads)(struct task_struct *p);
+static void (*efab_coredump)(const siginfo_t *siginfo);
 
 
 /* Find all stacks in multithreaded application.
@@ -142,33 +143,42 @@ efab_terminate_find_all_stacks(tcp_helper_resource_t *stacks[],
 
     set = efx_get_open_fds(j++, fdt);
 
-    while( set ) {
-      if( set & 1 ) {
-        struct file * file = fdt->fd[i];
+    for( ; set != 0; i++, set >>= 1 ) {
+      struct file *file;
+      tcp_helper_resource_t *thr;
+        
+      if( (set & 1) == 0 )
+        continue;
 
-        if( file && file->f_op == &oo_fops ) {
-          /* it's a netif FD */
-          tcp_helper_resource_t *thr;
-
-          ci_assert(file->private_data);
-          thr = ((ci_private_t* )file->private_data)->thr;
-          /* skip unspecialized fds */
-          if( thr != NULL ) {
-            if( stacks_num == max_stacks_num ) {
-              OO_DEBUG_ERR(ci_log("%s: stack count overflow", __FUNCTION__));
-              goto unlock;
-            }
-    
-            /* We already keep a ref for this thr via file, but we need
-             * one more ref because other threads may close this file
-             * before we'll kill them. */
-            efab_thr_ref(thr);
-            stacks[stacks_num++] = thr;
-          }
-        }
+      rcu_read_lock();
+      file = fcheck_files(files, i);
+      if( file == NULL || file->f_op != &oo_fops ) {
+        rcu_read_unlock();
+        continue;
       }
-      i++;
-      set >>= 1;
+      if( ! get_file_rcu(file) ) {
+        rcu_read_unlock();
+        continue;
+      }
+      rcu_read_unlock();
+
+      ci_assert(file->private_data);
+      thr = ((ci_private_t* )file->private_data)->thr;
+      /* skip unspecialized fds */
+      if( thr != NULL ) {
+        if( stacks_num == max_stacks_num ) {
+          OO_DEBUG_ERR(ci_log("%s: stack count overflow", __FUNCTION__));
+          fput(file);
+          goto unlock;
+        }
+
+        /* We already keep a ref for this thr via file, but we need
+         * one more ref because other threads may close this file
+         * before we'll kill them. */
+        efab_thr_ref(thr);
+        stacks[stacks_num++] = thr;
+      }
+      fput(file);
     }
   }
 
@@ -390,7 +400,7 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
   ci_uint32 stacks_num = 0;
 
   if( sig_kernel_only(sig) || sig_kernel_ignore(sig) ||
-      sig_kernel_stop(sig) || sig_kernel_coredump(sig) )
+      sig_kernel_stop(sig) )
     return -EINVAL;
 
   BUILD_BUG_ON(sizeof(ci_uint64) * 8 < TERMINATE_STACKS_NUM);
@@ -401,8 +411,15 @@ efab_signal_die(ci_private_t *priv_unused, void *arg)
 
     /* lock all the stacks */
     efab_terminate_lock_all_stacks(stacks, stacks_num);
-    /* kill all threads while they do not have netif locks (we have them!) */
-    efab_exit_group(&status);
+    /* kill all threads while they do not have netif locks (we have them!),
+     * dump the core with all the threads. */
+    if( sig_kernel_coredump(sig) && efab_coredump != NULL ) {
+      siginfo_t siginfo;
+      siginfo.si_signo = sig;
+      efab_coredump(&siginfo);
+    }
+    else
+      efab_exit_group(&status);
     /* now when everybody is dead we can release netifs */
     efab_terminate_unlock_all_stacks(stacks, stacks_num);
   }
@@ -423,14 +440,18 @@ void efab_linux_termination_ctor(void)
 {
 #ifdef ERFM_HAVE_NEW_KALLSYMS
   efab_my_zap_other_threads = efrm_find_ksym("zap_other_threads");
-  TERM_DEBUG("Find zap_other_threads via kallsyms at %p", t.addr);
+  efab_coredump = efrm_find_ksym("do_coredump");
+  TERM_DEBUG("Find zap_other_threads,do_coredump via kallsyms at %p,%p",
+             efab_my_zap_other_threads, efab_coredump);
 
   if( efab_my_zap_other_threads == NULL )
 #endif
-  {
     efab_my_zap_other_threads = efab_zap_other_threads;
-    TERM_DEBUG("Using our zap_other_threads implementation");
-  }
 
+  if( efab_coredump == NULL ) {
+    ci_log("WARNING: failed to find do_coredump() symbol.  Use "
+           "module parameter safe_signals_and_exit=0 if you want SIGSEGV "
+           "to produce core dump.");
+  }
 }
 

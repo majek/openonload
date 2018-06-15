@@ -38,47 +38,6 @@
 #define EFRM_HAVE_STRUCT_PATH
 #endif
 
-/* >=2.6.24 has sig_kernel_* macros in the header;
- * 2.6.18 has them in .c */
-#ifndef sig_kernel_only
-
-#ifdef SIGEMT
-#define M_SIGEMT	M(SIGEMT)
-#else
-#define M_SIGEMT	0
-#endif
-
-#if SIGRTMIN > BITS_PER_LONG
-#define M(sig) (1ULL << ((sig)-1))
-#else
-#define M(sig) (1UL << ((sig)-1))
-#endif
-#define T(sig, mask) (M(sig) & (mask))
-
-#define SIG_KERNEL_ONLY_MASK (\
-	M(SIGKILL)   |  M(SIGSTOP)                                   )
-
-#define SIG_KERNEL_STOP_MASK (\
-	M(SIGSTOP)   |  M(SIGTSTP)   |  M(SIGTTIN)   |  M(SIGTTOU)   )
-
-#define SIG_KERNEL_COREDUMP_MASK (\
-        M(SIGQUIT)   |  M(SIGILL)    |  M(SIGTRAP)   |  M(SIGABRT)   | \
-        M(SIGFPE)    |  M(SIGSEGV)   |  M(SIGBUS)    |  M(SIGSYS)    | \
-        M(SIGXCPU)   |  M(SIGXFSZ)   |  M_SIGEMT                     )
-
-#define SIG_KERNEL_IGNORE_MASK (\
-        M(SIGCONT)   |  M(SIGCHLD)   |  M(SIGWINCH)  |  M(SIGURG)    )
-
-#define sig_kernel_only(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_ONLY_MASK))
-#define sig_kernel_coredump(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_COREDUMP_MASK))
-#define sig_kernel_ignore(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_IGNORE_MASK))
-#define sig_kernel_stop(sig) \
-		(((sig) < SIGRTMIN)  && T(sig, SIG_KERNEL_STOP_MASK))
-
-#endif
 
 #ifndef __NFDBITS
 # define __NFDBITS BITS_PER_LONG
@@ -133,6 +92,12 @@ extern int
 ci_call_usermodehelper(char *path, char **argv, char **envp, int wait);
 #endif
 
+
+#ifndef get_file_rcu
+/* Linux <= 4.0 */
+#define get_file_rcu(x) atomic_long_inc_not_zero(&(x)->f_count)
+#endif
+
 /* A change to module_param_call() in Linux 4.15 highlighted that our
  * callbacks should have had a const argument.  The change to use a
  * const argument is much older than that (2.6.36)
@@ -151,4 +116,5 @@ ci_call_usermodehelper(char *path, char **argv, char **envp, int wait);
   (timer)->data = 0;                            \
   (timer)->function = &callback;
 #endif
+
 #endif /* __ONLOAD_KERNEL_COMPAT_H__ */

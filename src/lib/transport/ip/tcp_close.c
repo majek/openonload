@@ -47,7 +47,7 @@ void __ci_tcp_listen_to_normal(ci_netif* netif, ci_tcp_socket_listen* tls)
   ci_assert_equal(ci_tcp_acceptq_n(tls), 0);
   ci_assert_equal(ci_tcp_acceptq_not_empty(tls), 0);
 
-  if( ~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN )
+  if( ci_tcp_listen_has_timer(tls) )
     ci_ip_timer_clear(netif, &tls->listenq_tid);
   ci_ni_dllist_remove_safe(netif, &tls->s.b.post_poll_link);
   ci_tcp_state_reinit(netif, &wo->tcp);
@@ -246,8 +246,10 @@ static void uncache_fd(ci_netif* ni, ci_tcp_state* ts)
      * we've called ci_netif_timeout_remove() above. */
     struct file* filp;
 
+#ifdef EFRM_DO_NAMESPACES
     if( ci_netif_check_namespace(ni) < 0 )
       return;
+#endif
 
     if( current->files != NULL ) {
       if( pid != cur_tgid ) {
@@ -345,14 +347,22 @@ static void uncache_ep(ci_netif *netif, ci_tcp_socket_listen* tls,
     efab_tcp_helper_close_endpoint(netif2tcp_helper_resource(netif), S_SP(ts));
 
   if( tls ) {
+    /* increase per socket counter even if passive cache is shared */
     ci_atomic32_inc((volatile ci_uint32*)
                     CI_NETIF_PTR(netif, tls->epcache.avail_stack));
     ci_atomic32_inc(&tls->cache_avail_sock);
 
     ci_assert_le(netif->state->passive_cache_avail_stack,
                  netif->state->opts.sock_cache_max);
-    ci_assert_le(tls->cache_avail_sock,
-                 netif->state->opts.per_sock_cache_max);
+    if( ~NI_OPTS(netif).scalable_filter_mode & CITP_SCALABLE_MODE_PASSIVE )
+      ci_assert_le(tls->cache_avail_sock,
+                   netif->state->opts.per_sock_cache_max);
+  }
+  else if( ts->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE ) {
+    ci_atomic32_inc(&netif->state->passive_cache_avail_stack);
+    /* we do not know tls, so per-socket statistic cannot be updated */
+    ci_assert_le(netif->state->passive_cache_avail_stack,
+                 netif->state->opts.sock_cache_max);
   }
   else {
     ci_netif_state* ns = netif->state;
@@ -392,8 +402,12 @@ uncache_ep_list(ci_netif *netif, ci_tcp_socket_listen* tls,
  * correct context. */
 void ci_tcp_listen_uncache_fds(ci_netif* netif, ci_tcp_socket_listen* tls)
 {
+  /* For scalable passive there will be nothing to do here */
   ci_ni_dllist_link* l = ci_ni_dllist_concurrent_start(netif,
                                                        &tls->epcache.fd_states);
+
+  if( tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE )
+    return;
   while( l != ci_ni_dllist_end(netif, &tls->epcache.fd_states) ) {
     ci_tcp_state* cached_state = CI_CONTAINER(ci_tcp_state, epcache_fd_link, l);
     ci_ni_dllist_iter(netif, l);
@@ -437,6 +451,15 @@ void ci_tcp_active_cache_drop_cache(ci_netif* ni)
   ci_assert(ci_netif_is_locked(ni));
   uncache_ep_list(ni, NULL, &ns->active_cache.pending);
   uncache_ep_list(ni, NULL, &ns->active_cache.cache);
+}
+
+
+void ci_tcp_passive_scalable_cache_drop_cache(ci_netif* ni)
+{
+  ci_netif_state* ns = ni->state;
+  ci_assert(ci_netif_is_locked(ni));
+  uncache_ep_list(ni, NULL, &ns->passive_scalable_cache.pending);
+  uncache_ep_list(ni, NULL, &ns->passive_scalable_cache.cache);
 }
 
 #endif
@@ -599,8 +622,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
   /* clear up synrecv queue */
   LOG_TV(ci_log("%s: %d clear out synrecv queue", __FUNCTION__,
 		S_FMT(tls)));
-  if( tls->n_listenq != 0  &&
-     (~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) )
+  if( tls->n_listenq != 0 && ci_tcp_listen_has_timer(tls) )
     ci_ip_timer_clear(netif, &tls->listenq_tid);
   synrecvs = ci_tcp_listenq_drop_all(netif, tls);
   ci_assert_equal(tls->n_listenq, synrecvs);
@@ -660,6 +682,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
         LOG_U(log("%s: listening socket %d:%d has non-TCP "
                   "acceptq memeber %d:%d", __FUNCTION__,
                   netif->state->stack_id, tls->s.b.bufid, stack_id, sp));
+        efab_thr_release(thr);
         continue;
       }
       ats = SP_TO_TCP(ani, sp);
@@ -714,6 +737,7 @@ void ci_tcp_listen_shutdown_queues(ci_netif* netif, ci_tcp_socket_listen* tls)
    * then the accept queue.  Here we ensure that any EPs on cached on the
    * cached list are uncached (and freed).
    */
+  /* There will be nothing to do here for scalable passive */
   LOG_EP(ci_log("listen_shutdown - uncache all on cache list"));
   uncache_ep_list(netif, tls, &tls->epcache.cache);
   LOG_EP(ci_log("listen_shutdown - uncache all on pending list"));
@@ -735,6 +759,9 @@ void ci_tcp_listen_update_cached(ci_netif* netif, ci_tcp_socket_listen* tls)
    * while they can share our wild filter, but the details need to be correct
    * before they get their own full match filter.
    */
+  if( tls->s.s_flags & CI_SOCK_FLAG_SCALPASSIVE )
+    return;
+
   while( (l = ci_ni_dllist_try_pop(netif, &tls->epcache_connected)) ) {
     cached_state = CI_CONTAINER(ci_tcp_state, epcache_link, l);
     ci_ni_dllist_self_link(netif, &cached_state->epcache_link);

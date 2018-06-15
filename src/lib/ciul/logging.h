@@ -29,7 +29,7 @@
 #define __EF_VI_LOGGING_H__
 
 
-#if !defined(NDEBUG) && !defined(__KERNEL__)
+#if !defined(__KERNEL__)
 extern int ef_log_level;
 #endif
 
@@ -41,6 +41,7 @@ extern __printf(1, 2) void ef_log(const char* fmt, ...);
 # define EF_VI_LOG(l,x)	do{ if(unlikely(ef_log_level>=(l))) {x;} }while(0)
 #endif
 
+#define LOGAV(x)	EF_VI_LOG(1,x)
 #ifdef NDEBUG
 # define LOG(x)
 # define LOGV(x)

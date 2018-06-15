@@ -70,6 +70,7 @@ static const char* names[EF_VI_CAP_MAX + 1] = {
   [EF_VI_CAP_TX_ALTERNATIVES_CP_BUFFERS] = "TX alternatives common pool buffers",
   [EF_VI_CAP_RX_FW_VARIANT] = "RX firmware variant",
   [EF_VI_CAP_TX_FW_VARIANT] = "TX firmware variant",
+  [EF_VI_CAP_CTPIO] = "CTPIO",
   [EF_VI_CAP_MAX] = "Unknown",
 };
 

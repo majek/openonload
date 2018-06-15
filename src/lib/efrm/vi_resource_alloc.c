@@ -66,6 +66,8 @@
 #include <ci/efrm/pio.h>
 #include <ci/affinity/k_drv_intf.h>
 #include <ci/tools/utils.h>
+#include <etherfabric/vi.h>
+#include <etherfabric/internal/internal.h>
 #include "efrm_internal.h"
 #include "efrm_vi_set.h"
 #include "efrm_pd.h"
@@ -173,6 +175,15 @@ static int efrm_vi_set_alloc_instance_try(struct efrm_vi *virs,
 	efrm_resource_ref(efrm_vi_set_to_resource(vi_set));
 	return 0;
 }
+
+
+int efrm_vi_set_get_vi_instance(struct efrm_vi *virs)
+{
+	if( virs->vi_set == NULL )
+		return -1;
+	return virs->allocation.instance - virs->vi_set->allocation.instance;
+}
+EXPORT_SYMBOL(efrm_vi_set_get_vi_instance);
 
 
 /* Try to allocate an instance out of the VIset.  If no free instances
@@ -405,6 +416,10 @@ static unsigned q_flags_to_vi_flags(unsigned q_flags, enum efhw_q_type q_type)
 			vi_flags |= EFHW_VI_TX_TIMESTAMPS;
 		if (q_flags & EFRM_VI_TX_LOOPBACK)
 			vi_flags |= EFHW_VI_TX_LOOPBACK;
+		if (q_flags & EFRM_VI_TX_CTPIO)
+			vi_flags |= EFHW_VI_TX_CTPIO;
+		if (q_flags & EFRM_VI_TX_CTPIO_NO_POISON)
+			vi_flags |= EFHW_VI_TX_CTPIO_NO_POISON;
 		break;
 	case EFHW_RXQ:
 		if (!(q_flags & EFRM_VI_CONTIGUOUS))
@@ -464,6 +479,10 @@ static unsigned vi_flags_to_q_flags(unsigned vi_flags, enum efhw_q_type q_type)
 			q_flags |= EFRM_VI_TX_TIMESTAMPS;
 		if (vi_flags & EFHW_VI_TX_LOOPBACK)
 			q_flags |= EFRM_VI_TX_LOOPBACK;
+		if (vi_flags & EFHW_VI_TX_CTPIO)
+			q_flags |= EFRM_VI_TX_CTPIO;
+		if (vi_flags & EFHW_VI_TX_CTPIO_NO_POISON)
+			q_flags |= EFRM_VI_TX_CTPIO_NO_POISON;
 		break;
 	case EFHW_RXQ:
 		if (!(vi_flags & EFHW_VI_JUMBO_EN))
@@ -670,7 +689,7 @@ efrm_vi_io_map(struct efrm_vi* virs, struct efhw_nic *nic, int instance)
 		virs->io_page = nic->bar_ioaddr + offset;
 		break;
 	case EFHW_ARCH_EF10:
-		offset = instance * ER_DZ_EVQ_RPTR_REG_STEP;
+		offset = instance * nic->vi_stride;
 		virs->io_page = ioremap_nocache(nic->ctr_ap_dma_addr +
 						offset, PAGE_SIZE);
 		if (virs->io_page == NULL)
@@ -1007,13 +1026,14 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi **virs_out,
 		       uint32_t *out_io_mmap_bytes,
 		       uint32_t *out_mem_mmap_bytes,
+                       uint32_t *out_ctpio_mmap_bytes,
 		       uint32_t *out_txq_capacity,
 		       uint32_t *out_rxq_capacity,
-		       int print_resource_warnings,
-		       enum efrm_vi_alloc_failure *out_failure_reason)
+		       int print_resource_warnings)
 {
 	struct efrm_vi_attr attr;
 	struct efrm_vi *virs;
+        unsigned ctpio_mmap_bytes = 0;
 	int rc;
 
 	EFRM_ASSERT(pd != NULL);
@@ -1029,11 +1049,8 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		efrm_vi_attr_set_wakeup_channel(&attr, wakeup_channel);
 
 	if ((rc = efrm_vi_alloc(client, &attr, print_resource_warnings,
-				name, &virs)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_VI_FAILED;
+				name, &virs)) < 0)
 		goto fail_vi_alloc;
-	}
 
 	/* We have to jump through some hoops here:
 	 * - EF10 needs the event queue allocated before rx and tx queues
@@ -1044,48 +1061,38 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 	 */
 
 	rc = efrm_vi_q_alloc_sanitize_size(virs, EFHW_TXQ, txq_capacity);
-	if (rc < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_TXQ_FAILED;
+	if (rc < 0)
 		goto fail_q_alloc;
-	}
 	txq_capacity = rc;
 	
 	rc = efrm_vi_q_alloc_sanitize_size(virs, EFHW_RXQ, rxq_capacity);
-	if (rc < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_RXQ_FAILED;
+	if (rc < 0)
 		goto fail_q_alloc;
-	}
 	rxq_capacity = rc;
 
 	if (evq_virs == NULL && evq_capacity < 0)
 		evq_capacity = rxq_capacity + txq_capacity;
 
 	if ((rc = efrm_vi_q_alloc(virs, EFHW_EVQ, evq_capacity,
-				  0, vi_flags, NULL)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_EVQ_FAILED;
+				  0, vi_flags, NULL)) < 0)
 		goto fail_q_alloc;
-	}
 
 	if ((rc = efrm_vi_q_alloc(virs, EFHW_TXQ, txq_capacity,
-				  tx_q_tag, vi_flags, evq_virs)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_TXQ_FAILED;
+				  tx_q_tag, vi_flags, evq_virs)) < 0)
 		goto fail_q_alloc;
-	}
 	if ((rc = efrm_vi_q_alloc(virs, EFHW_RXQ, rxq_capacity,
-				  rx_q_tag, vi_flags, evq_virs)) < 0) {
-		if (out_failure_reason != NULL )
-			*out_failure_reason= EFRM_VI_ALLOC_RXQ_FAILED;
+				  rx_q_tag, vi_flags, evq_virs)) < 0)
 		goto fail_q_alloc;
-	}
+
+        if( vi_flags & EFHW_VI_TX_CTPIO )
+                ctpio_mmap_bytes = EF_VI_CTPIO_APERTURE_SIZE;
 
 	if (out_io_mmap_bytes != NULL)
 		*out_io_mmap_bytes = PAGE_SIZE;
 	if (out_mem_mmap_bytes != NULL)
 		*out_mem_mmap_bytes = virs->mem_mmap_bytes;
+	if (out_ctpio_mmap_bytes != NULL)
+                *out_ctpio_mmap_bytes = ctpio_mmap_bytes;
 	if (out_txq_capacity != NULL)
 		*out_txq_capacity = virs->q[EFHW_TXQ].capacity;
 	if (out_rxq_capacity != NULL)

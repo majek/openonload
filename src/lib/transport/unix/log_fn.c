@@ -28,7 +28,6 @@
  
 #include <internal.h>
 
-
 /*
 ** We can't just use the default log function, as it uses the standard I/O
 ** mechanisms, which we intercept, leading to recursive nastiness.

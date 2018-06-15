@@ -276,5 +276,4 @@ ef_pd_capabilities_get(ef_driver_handle handle, ef_pd* pd,
 
 extern unsigned ef_vi_evq_clear_stride(void);
 
-
 #endif  /* __CI_EF_VI_INTERNAL_H__ */

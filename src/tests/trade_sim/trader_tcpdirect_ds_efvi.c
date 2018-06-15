@@ -13,78 +13,46 @@
 ** GNU General Public License for more details.
 */
 
-/*
-** Copyright 2005-2018  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** Redistribution and use in source and binary forms, with or without
-** modification, are permitted provided that the following conditions are
-** met:
-**
-** * Redistributions of source code must retain the above copyright notice,
-**   this list of conditions and the following disclaimer.
-**
-** * Redistributions in binary form must reproduce the above copyright
-**   notice, this list of conditions and the following disclaimer in the
-**   documentation and/or other materials provided with the distribution.
-**
-** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
-** IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
-** TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
-** PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-** HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-** SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
-** TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-** PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-** LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-** NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-** SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-
-
-/* efdelegated_client
+/* trader_tcpdirect_ds_efvi
  *
- * Copyright 2015 Solarflare Communications Inc.
- * Author: David Riddoch
+ * Copyright 2018 Solarflare Communications Inc.
+ * Author: Sami Farhat, David Riddoch
  *
- * This is a sample application to demonstrate usage of OpenOnload's
- * "Delegated Sends" feature.  This API allows you to do delegate TCP sends
- * for a particular socket to some other mechanism.  For example, this
- * sample uses the ef_vi layer-2 API in order to get lower latency than is
- * possible with a normal send() call.
+ * This is a sample application to demonstrate usage of TCPDirect's
+ * "delegated sends" feature.  Please read README for details of what this
+ * application does and how to run it.
+ *
+ * The delegated sends API allows applications to take over the send
+ * critical path for TCP sockets, whilst continuing to use TCPDirect to
+ * manage most of the complexity of TCP.  This sample application uses the
+ * ef_vi layer-2 API in order to get even lower latency than is possible
+ * with a zft_send() call.
  *
  * The API essentially boils down to first retriving the packet headers,
  * adding your own payload to form a raw packet, sending the packet and
  * finally telling Onload what it was you sent so it can update the
  * internal TCP state of the socket.
  *
- * This sample application allows you to compare the performance of normal
- * sends using the kernel stack, using OpenOnload and using ef_vi with the
- * delegated sends API.  It establishes a TCP connection to the server
- * process, which starts sending UDP multicast messages.  The client
- * receives these messages, and replies to a subset of them with a TCP
- * message.  The server measures the latency from the UDP send to the TCP
- * receive.
+ * For normal socket-based sends, run as follows:
  *
- * For normal sockt-based sends, run as follows:
- *
- *   onload -p latency ./efdelegated_server <mcast-intf>
- *   onload -p latency ./efdelegated_client <mcast-intf> <server>
+ *   onload -p latency-best ./exchange <mcast-intf>
+ *   ./trader_tcpdirect_ds_efvi <mcast-intf> <server>
  *
  * For "delegated" sends, run as follows:
  *
- *   onload -p latency ./efdelegated_server <mcast-intf>
- *   onload -p latency ./efdelegated_client -d <mcast-intf> <server>
+ *   onload -p latency-best ./exchange <mcast-intf>
+ *   ./trader_tcpdirect_ds_efvi -d <mcast-intf> <server>
  */
 
+#include "utils.h"
+
+#include <zf/zf.h>
 #include <etherfabric/vi.h>
 #include <etherfabric/pio.h>
 #include <etherfabric/pd.h>
 #include <etherfabric/memreg.h>
-#include <onload/extensions.h>
-#include "utils.h"
 
+#include <unistd.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <sys/types.h>
@@ -94,6 +62,7 @@
 #include <ifaddrs.h>
 #include <stdbool.h>
 #include <netdb.h>
+#include <pthread.h>
 
 
 #define MTU                   1500
@@ -113,8 +82,9 @@ static const char* cfg_mcast_addr = "224.1.2.3";
 struct client_state {
   unsigned                     alarm_usec;
   bool                         alarm;
-  int                          tcp_sock;
-  int                          udp_sock;
+  struct zf_stack*             stack;
+  struct zft*                  tcp_sock;
+  struct zfur*                 udp_sock;
   ef_pd                        pd;
   ef_pio                       pio;
   ef_driver_handle             dh;
@@ -124,8 +94,7 @@ struct client_state {
   /* pio_pkt_len: Non-zero means that we have a prepared send ready to go. */
   int                          pio_pkt_len;
   bool                         pio_in_use;
-  bool                         send_is_delegated;
-  struct onload_delegated_send ods;
+  struct zf_ds                 zfds;
   char                         pkt_buf[MAX_PACKET];
   char                         recv_buf[MTU];
   unsigned                     n_normal_sends;
@@ -163,30 +132,36 @@ static void evq_poll(struct client_state* cs)
 
 static int poll_udp_rx(struct client_state* cs)
 {
-  int rc = recv(cs->udp_sock, cs->recv_buf,
-                sizeof(cs->recv_buf) - 1, MSG_DONTWAIT);
-  if( rc >= 0 ) {
-    cs->recv_buf[rc] = '\0';
-    return strncmp(cs->recv_buf, "hit me", 6) == 0;
-  }
-  else if( rc == -1 && errno == EAGAIN )
+  struct {
+    struct zfur_msg msg;
+    struct iovec iov[1];
+  } msg;
+
+  zf_reactor_perform(cs->stack);
+  msg.msg.iovcnt = 1;
+  zfur_zc_recv(cs->udp_sock, &(msg.msg), 0);
+  if( msg.msg.iovcnt == 0 )
     return -1;
-  else
-    TEST(0);
+
+  int is_hit_me = msg.msg.iov[0].iov_len >= 6 &&
+                  strncmp(msg.msg.iov[0].iov_base, "hit me", 6) == 0;
+  zfur_zc_recv_done(cs->udp_sock, &(msg.msg));
+
+  return is_hit_me;
 }
 
 
 static void normal_send(struct client_state* cs)
 {
-  if( cs->send_is_delegated ) {
-    TRY( onload_delegated_send_cancel(cs->tcp_sock) );
-    cs->send_is_delegated = false;
+  if( cs->zfds.delegated_wnd ) {
+    TRY( zf_delegated_send_cancel(cs->tcp_sock) );
+    cs->zfds.delegated_wnd = 0;
   }
 
-  ssize_t rc = send(cs->tcp_sock, cs->msg_buf, cs->msg_len, 0);
+  ssize_t rc = zft_send_single(cs->tcp_sock, cs->msg_buf, cs->msg_len, 0);
   if( rc != cs->msg_len )
-    fprintf(stderr, "normal_send: len=%d rc=%d errno=%d pio_in_use=%d\n",
-            cs->msg_len, (int) rc, errno, cs->pio_in_use);
+    fprintf(stderr, "zft_send_single: len=%d rc=%zd pio_in_use=%d\n",
+            cs->msg_len, rc, cs->pio_in_use);
   TEST( rc == cs->msg_len );
   ++(cs->n_normal_sends);
 }
@@ -203,55 +178,54 @@ static void normal_send(struct client_state* cs)
  * In this app, we call this function right after having done the
  * previous send and while we wait for the next ping from the client.
  *
- * This function can be called speculatively.  If later on you decide
- * that you don't want to do a delegated send, you can call
- * onload_delegated_send_cancel().
+ * This function can be called speculatively.  If later on you decide that
+ * you don't want to do a delegated send, you can call
+ * zf_delegated_send_cancel().
  */
 static void delegated_prepare(struct client_state* s)
 {
-  /* Prepare to do a delegated send: Tell Onload how much data we might
+  /* Prepare to do a delegated send: Tell the stack how much data we might
    * send, and retrieve the current packet headers.  In this sample
    * application we always send a message of length s->msg_len, but we pass
-   * a larger value to onload_delegated_send_prepare() just to show that
-   * this is possible.
+   * a larger value to zf_delegated_send_prepare() just to show that this
+   * is supported.
    */
-  s->ods.headers = s->pkt_buf;
-  s->ods.headers_len = MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
-  TEST( onload_delegated_send_prepare(s->tcp_sock, s->msg_len * 2, 0, &(s->ods))
-          == ONLOAD_DELEGATED_SEND_RC_OK );
-  s->send_is_delegated = true;
+  s->zfds.headers = s->pkt_buf;
+  s->zfds.headers_size = MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
+  enum zf_delegated_send_rc rc;
+  rc = zf_delegated_send_prepare(s->tcp_sock, s->msg_len * 2, 0, 0, &(s->zfds));
+  if( rc != ZF_DELEGATED_SEND_RC_OK ) {
+    fprintf(stderr, "ERROR: zf_delegated_send_prepare: rc=%d\n", (int) rc);
+    exit(3);
+  }
 
   /* We've probably put the headers in the wrong place, because we've
    * allowed enough space for worst-case headers (including VLAN tag and
    * TCP options).  Move the headers up so that the end of the headers
    * meets the start of the message.
    */
-  s->ods.headers = s->msg_buf - s->ods.headers_len;
-  memmove(s->ods.headers, s->pkt_buf, s->ods.headers_len);
+  s->zfds.headers = s->msg_buf - s->zfds.headers_len;
+  memmove(s->zfds.headers, s->pkt_buf, s->zfds.headers_len);
 
   /* If we want to send more than MSS (maximum segment size), we will have
    * to segment the message into multiple packets.  We do not handle that
    * case in this demo app.
    */
-  TEST( s->msg_len <= s->ods.mss );
-
-  /* Figure out how much we are actually allowed to send. */
-  int allowed_to_send = min(s->ods.send_wnd, s->ods.cong_wnd);
-  allowed_to_send = min(allowed_to_send, s->ods.mss);
+  int allowed_to_send = min(s->zfds.delegated_wnd, s->zfds.mss);
 
   if( s->msg_len <= allowed_to_send ) {
-    s->pio_pkt_len = s->ods.headers_len + s->msg_len;
-    onload_delegated_send_tcp_update(&(s->ods), s->msg_len, 1);
-    TRY( ef_pio_memcpy(&(s->vi), s->ods.headers, 0, s->pio_pkt_len) );
+    s->pio_pkt_len = s->zfds.headers_len + s->msg_len;
+    zf_delegated_send_tcp_update(&(s->zfds), s->msg_len, 1);
+    TRY( ef_pio_memcpy(&(s->vi), s->zfds.headers, 0, s->pio_pkt_len) );
   }
   else {
-    /* We can't send at the moment, due to congestion window or receive
-     * window being closed (or message larger than MSS).  Cancel the
-     * delegated send and use normal send instead.
+    /* We can't do a delegated send at the moment, due to congestion window
+     * or receive window being closed, or message size being larger than
+     * the MSS.  Cancel the delegated send and use normal send instead.
      */
-    TRY(onload_delegated_send_cancel(s->tcp_sock));
+    TRY( zf_delegated_send_cancel(s->tcp_sock) );
+    s->zfds.delegated_wnd = 0;
     s->pio_pkt_len = 0;
-    s->send_is_delegated = false;
   }
 }
 
@@ -273,27 +247,33 @@ static void delegated_send(struct client_state* cs)
   struct iovec iov;
   iov.iov_len  = cs->msg_len;
   iov.iov_base = cs->msg_buf;
-  TRY( onload_delegated_send_complete(cs->tcp_sock, &iov, 1, 0) );
+  TRY( zf_delegated_send_complete(cs->tcp_sock, &iov, 1, 0) );
 
   ++(cs->n_delegated_sends);
 }
 
 
-static void ev_loop_sock(struct client_state* cs)
+static ssize_t zft_recv_single(struct zft* ts, void* buf, size_t len, int flags)
+{
+  struct iovec iov = { buf, len };
+  return zft_recv(ts, &iov, 1, flags);
+}
+
+
+static void ev_loop(struct client_state* cs)
 {
   while( 1 ) {
     /* Spend most of our time polling the UDP socket, since that is the
      * latency sensitive path.
      */
     int i;
-    for( i = 0; i < 100; ++i ) {
+    for( i = 0; i < 10; ++i )
       if( poll_udp_rx(cs) > 0 ) {
         if( cs->pio_pkt_len )
           delegated_send(cs);
         else
           normal_send(cs);
       }
-    }
 
     /* Less often poll ef_vi to pick-up TX completions, get ready for sends
      * and poll for TCP receives.
@@ -304,14 +284,14 @@ static void ev_loop_sock(struct client_state* cs)
       delegated_prepare(cs);
       cs->alarm = false;
     }
-    if( recv(cs->tcp_sock, cs->recv_buf,
-             sizeof(cs->recv_buf), MSG_DONTWAIT) == 0 )
+    if( zft_recv_single(cs->tcp_sock, cs->recv_buf,
+                        sizeof(cs->recv_buf), 0) == 0 )
       break;
   }
 
   if( cs->pio_pkt_len )
-    TRY(onload_delegated_send_cancel(cs->tcp_sock));
-  close(cs->tcp_sock);
+    TRY( zf_delegated_send_cancel(cs->tcp_sock) );
+  zft_free(cs->tcp_sock);
 
   printf("n_normal_sends: %u\n", cs->n_normal_sends);
   printf("n_delegated_sends: %u\n", cs->n_delegated_sends);
@@ -341,23 +321,27 @@ static void* alarm_thread(void* arg)
  * Initialisation code follows...
  */
 
-static void ef_vi_init(struct client_state* cs)
+static void zock_put_int(struct zft* ts, int i)
 {
-  int ifindex;
+  i = htonl(i);
+  TEST( zft_send_single(ts, &i, sizeof(i), 0) == sizeof(i) );
+}
 
+
+static void ef_vi_init(struct client_state* cs, const char* interface)
+{
   cs->pio_pkt_len = 0;
   cs->pio_in_use = ! cfg_delegated;
-  TRY( sock_get_ifindex(cs->tcp_sock, &ifindex) );
   TRY( ef_driver_open(&(cs->dh)) );
-  TRY( ef_pd_alloc(&(cs->pd), cs->dh, ifindex, EF_PD_DEFAULT) );
+  TRY( ef_pd_alloc_by_name(&(cs->pd), cs->dh, interface, EF_PD_DEFAULT) );
   TRY( ef_vi_alloc_from_pd(&(cs->vi), cs->dh, &(cs->pd), cs->dh,
-                           -1, 0,-1, NULL, -1, EF_VI_FLAGS_DEFAULT) );
+                              -1, 0,-1, NULL, -1, EF_VI_FLAGS_DEFAULT) );
   TRY( ef_pio_alloc(&(cs->pio), cs->dh, &(cs->pd), -1, cs->dh));
   TRY( ef_pio_link_vi(&(cs->pio), cs->dh, &(cs->vi), cs->dh));
 }
 
 
-static void init(struct client_state* cs, const char* mcast_intf,
+static void init(struct client_state* cs, const char* interface,
                  const char* server, const char* port)
 {
   cs->alarm = false;
@@ -365,33 +349,54 @@ static void init(struct client_state* cs, const char* mcast_intf,
   cs->msg_len = cfg_tx_size;
   cs->msg_buf = cs->pkt_buf + MAX_ETH_HEADERS + MAX_IP_TCP_HEADERS;
 
-  /* Create TCP socket, connect to server, give it configuration. */
-  TRY( cs->tcp_sock = mk_socket(0, SOCK_STREAM, connect, server, port) );
-  int one = 1;
-  TRY( setsockopt(cs->tcp_sock, SOL_TCP, TCP_NODELAY, &one, sizeof(one)) );
-  sock_put_int(cs->tcp_sock, cfg_tx_size);
-  sock_put_int(cs->tcp_sock, cfg_rx_size);
+  TRY( zf_init() );
+  struct zf_attr* attr;
+  TRY( zf_attr_alloc(&attr) );
+  TRY( zf_attr_set_str(attr, "interface", interface) );
+  TRY( zf_attr_set_str(attr, "ctpio_mode", "ct") );
+  TRY( zf_stack_alloc(attr, &(cs->stack)) );
 
-  /* Create UDP socket, bind, join multicast group. */
-  TRY( cs->udp_sock = mk_socket(0, SOCK_DGRAM, bind,
-                                cfg_mcast_addr, cfg_port) );
-  if( mcast_intf != NULL ) {
-    struct ip_mreqn mreqn;
-    TEST( inet_aton(cfg_mcast_addr, &mreqn.imr_multiaddr) );
-    mreqn.imr_address.s_addr = htonl(INADDR_ANY);
-    TEST( (mreqn.imr_ifindex = if_nametoindex(mcast_intf)) != 0 );
-    TRY( setsockopt(cs->udp_sock, SOL_IP, IP_ADD_MEMBERSHIP,
-                    &mreqn, sizeof(mreqn)) );
+  struct addrinfo hints, *ai;
+  memset(&hints, 0, sizeof(hints));
+  int rc = getaddrinfo(server, port, &hints, &ai);
+  if( rc != 0 ) {
+    fprintf(stderr, "ERROR: failed to lookup address '%s:%s': %s\n",
+            server, port, gai_strerror(rc));
+    exit(2);
   }
 
-  ef_vi_init(cs);
+  /* Create TCP socket, connect to server, give it configuration. */
+  struct zft_handle* tcp_handle;
+  TRY( zft_alloc(cs->stack, attr, &tcp_handle) );
+  TRY( zft_connect(tcp_handle, ai->ai_addr, ai->ai_addrlen,
+                      &(cs->tcp_sock)) );
+  freeaddrinfo(ai);
+  while( zft_state(cs->tcp_sock) == TCP_SYN_SENT )
+    zf_reactor_perform(cs->stack);
+  TEST( zft_state(cs->tcp_sock) == TCP_ESTABLISHED );
+  zock_put_int(cs->tcp_sock, cfg_tx_size);
+  zock_put_int(cs->tcp_sock, cfg_rx_size);
+
+  /* Create UDP socket, bind, join multicast group. */
+  rc = getaddrinfo(cfg_mcast_addr, cfg_port, &hints, &ai);
+  if( rc != 0 ) {
+    fprintf(stderr, "ERROR: failed to lookup address '%s:%s': %s\n",
+            cfg_mcast_addr, cfg_port, gai_strerror(rc));
+    exit(2);
+  }
+  TRY( zfur_alloc(&cs->udp_sock, cs->stack, attr) );
+  TRY( zfur_addr_bind(cs->udp_sock, ai->ai_addr, ai->ai_addrlen,
+                         NULL, 0, 0) );
+  freeaddrinfo(ai);
+
+  ef_vi_init(cs, interface);
 }
 
 
 static void usage_msg(FILE* f)
 {
   fprintf(f, "\nusage:\n");
-  fprintf(f, "  efdelegated_client [options] <mcast-interface> <server>\n");
+  fprintf(f, "  trader_tcpdirect_ds_efvi [options] <interface> <server>\n");
   fprintf(f, "\noptions:\n");
   fprintf(f, "  -h                - print usage info\n");
   fprintf(f, "  -d                - use delegated sends API to send\n");
@@ -442,19 +447,14 @@ int main(int argc, char* argv[])
   argv += optind;
   if( argc != 2 )
     usage_err();
-  const char* mcast_intf = argv[0];
+  const char* interface = argv[0];
   const char* server = argv[1];
 
-  if( cfg_delegated && ! onload_is_present() ) {
-    fprintf(stderr, "ERROR: Must run with Onload to use delegated sends\n");
-    exit(1);
-  }
-
   struct client_state* cs = calloc(1, sizeof(*cs));
-  init(cs, mcast_intf, server, cfg_port);
+  init(cs, interface, server, cfg_port);
   pthread_t tid;
   TEST( pthread_create(&tid, NULL, alarm_thread, cs) == 0 );
-  ev_loop_sock(cs);
+  ev_loop(cs);
   return 0;
 }
 

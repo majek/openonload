@@ -274,6 +274,23 @@ int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
   return op.fd;
 }
 
+#if CI_CFG_FD_CACHING
+int ci_tcp_helper_sock_attach_to_existing_file(ci_fd_t stack_fd, oo_sp ep_id)
+{
+  int rc;
+  oo_sock_attach_t op;
+
+  op.ep_id = ep_id;
+  oo_rwlock_lock_read(&citp_dup2_lock);
+  rc = oo_resource_op(stack_fd, OO_IOC_SOCK_ATTACH_TO_EXISTING, &op);
+  oo_rwlock_unlock_read (&citp_dup2_lock);
+  if( rc < 0 )
+    return rc;
+  return op.fd;
+}
+
+#endif
+
 
 int ci_tcp_helper_tcp_accept_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                          int type)
@@ -291,6 +308,7 @@ int ci_tcp_helper_tcp_accept_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
   return op.fd;
 }
 
+#if CI_CFG_USERSPACE_PIPE
 int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
                               int flags, int fds[2])
 {
@@ -306,6 +324,7 @@ int ci_tcp_helper_pipe_attach(ci_fd_t stack_fd, oo_sp ep_id,
   fds[1] = op.wfd;
   return rc;
 }
+#endif
 
 int ci_tcp_helper_close_no_trampoline(int fd) {
   int res;
@@ -365,12 +384,6 @@ int ci_tcp_helper_close_no_trampoline(int fd) {
       return -1;
     }
   }
-#elif defined(__ia64__)
-  /* SPH: This is wrong */
-  {
-    __attribute__((unused)) int i = call_num;
-  }
-  res = 0;
 #else
 #error "Unsupported close system call"
 #endif
@@ -406,7 +419,6 @@ int ci_tcp_helper_rel_sock_fd(ci_fd_t fd)
   oo_rwlock_unlock_read (&citp_dup2_lock);
   return rc;
 }
-
 
 
 int ci_tcp_helper_bind_os_sock(ci_fd_t fd, const struct sockaddr* address,
@@ -491,12 +503,17 @@ int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
    * we need to have created the OS socket (if needed) before installing a
    * filter.
    */
-  ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER);
+  ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
   /* This must be called before we turn into a listening socket.  If F_SETFL
    * is used after a socket enters the listening state onload filters the
    * request to ensure that the OS socket remains non-blocking.
    */
   ci_assert_nequal(s->b.state, CI_TCP_LISTEN);
+
+  /* no timers expected */
+  if( (s->b.state & CI_TCP_STATE_TCP) ) {
+    ci_tcp_state_verify_no_timers(ni, SOCK_TO_TCP(s));
+  }
 
   op.level = level;
   op.optname = optname;
@@ -507,8 +524,11 @@ int ci_tcp_helper_os_sock_create_and_set(ci_netif *ni, ci_fd_t fd,
 }
 
 
-int ci_tcp_helper_alloc_active_wild(ci_netif *ni)
+int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_uint32 laddr_be32)
 {
+  oo_alloc_active_wild_t aaw = {
+    .laddr_be32 = laddr_be32,
+  };
   return oo_resource_op(ci_netif_get_driver_handle(ni),
-                        OO_IOC_ALLOC_ACTIVE_WILD, NULL);
+                        OO_IOC_ALLOC_ACTIVE_WILD, &aaw);
 }

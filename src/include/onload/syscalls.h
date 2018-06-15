@@ -45,7 +45,6 @@
 # include <sys/sendfile.h>
 #endif
 
-
 /*! Generate declarations of pointers to the system calls */
 #define CI_MK_DECL(ret, fn, args)  extern ret onload_##fn args
 #include <onload/declare_syscalls.h.tmpl>

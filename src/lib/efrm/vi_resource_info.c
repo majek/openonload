@@ -40,6 +40,7 @@ static void common_vi_get_mappings(struct efrm_vi* vi_rs, struct efhw_nic* nic,
     vm->rxq_descriptors = efhw_iopages_ptr(&vi_rs->q[EFHW_RXQ].pages);
   vm->rx_ts_correction = nic->rx_ts_correction;
   vm->tx_ts_correction = nic->tx_ts_correction;
+  vm->ts_format = nic->ts_format;
 
   vm->txq_size = vi_rs->q[EFHW_TXQ].capacity;
   if( vm->txq_size != 0 )

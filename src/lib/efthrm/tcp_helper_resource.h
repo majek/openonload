@@ -32,6 +32,7 @@ struct vi_allocate_info {
   unsigned efhw_flags;
   unsigned efhw_flags_extra;
   unsigned oo_vi_flags;
+  unsigned char llap_flags;
   int evq_capacity;
   int txq_capacity;
   int rxq_capacity;
@@ -40,6 +41,10 @@ struct vi_allocate_info {
   tcp_helper_cluster_t* cluster;
   unsigned vi_mem_mmap_bytes;
   unsigned vi_io_mmap_bytes;
+  unsigned vi_ctpio_mmap_bytes;
+  unsigned ctpio_threshold;
+  int try_ctpio;
+  int retry_without_ctpio;
 
   int release_pd;
   int log_resource_warnings;

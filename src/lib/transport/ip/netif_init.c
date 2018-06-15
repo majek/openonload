@@ -172,6 +172,9 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
             __oo_usec_to_cycles64(cpu_khz, NI_OPTS(ni).buzz_usec);
   nis->timer_prime_cycles =
             __oo_usec_to_cycles64(cpu_khz, NI_OPTS(ni).timer_prime_usec);
+  nis->kernel_packets_cycles =
+            __oo_usec_to_cycles64(cpu_khz,
+                                  NI_OPTS(ni).kernel_packets_timer_usec);
 
   ci_ip_timer_state_init(ni, cpu_khz);
   nis->last_spin_poll_frc = IPTIMER_STATE(ni)->frc;
@@ -189,7 +192,11 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
 #endif
 
   nis->uuid = ci_current_from_kuid_munged(ni->kuid);
+#ifdef EFRM_DO_NAMESPACES
   nis->pid = task_pid_nr_ns(current, ci_netif_get_pidns(ni));
+#else
+  nis->pid = task_pid_vnr(current);
+#endif
 
 #if CI_CFG_FD_CACHING
   nis->passive_cache_avail_stack = nis->opts.sock_cache_max;
@@ -201,17 +208,24 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   if( nis->opts.tcp_syncookies )
     get_random_bytes(&nis->hash_salt, sizeof(nis->hash_salt));
 
-  nis->ready_lists_in_use = 1;
+  nis->ready_lists_in_use = 0;
   for( i = 0; i < CI_CFG_N_READY_LISTS; i++ ) {
     ci_ni_dllist_init(ni, &nis->ready_lists[i],
                       oo_ptr_to_statep(ni, &nis->ready_lists[i]),
                       "ready_list");
+    ci_ni_dllist_init(ni, &nis->unready_lists[i],
+                      oo_ptr_to_statep(ni, &nis->unready_lists[i]),
+                      "unready_list");
     nis->ready_list_flags[i] = 0;
   }
 
-  ci_ni_dllist_init(ni, &nis->active_wild_pool,
-                    oo_ptr_to_statep(ni, &nis->active_wild_pool),
-                    "active_wild");
+  for( i = 0;
+       i < nis->active_wild_table_entries_n * nis->active_wild_pools_n;
+       ++i ) {
+    ci_ni_dllist_init(ni, &ni->active_wild_table[i],
+                      oo_ptr_to_statep(ni, &ni->active_wild_table[i]),
+                      "active_wild");
+  }
   nis->active_wild_n = 0;
   nis->packet_alloc_numa_nodes = 0;
   nis->sock_alloc_numa_nodes = 0;
@@ -229,7 +243,20 @@ void ci_netif_state_init(ci_netif* ni, int cpu_khz, const char* name)
   nis->active_cache.avail_stack = oo_ptr_to_statep(ni,
                                               &nis->active_cache_avail_stack);
   nis->active_cache_avail_stack = nis->opts.sock_cache_max;
+
+  ci_ni_dllist_init(ni, &nis->passive_scalable_cache.cache,
+                    oo_ptr_to_statep(ni, &nis->passive_scalable_cache.cache), "psch");
+  ci_ni_dllist_init(ni, &nis->passive_scalable_cache.pending,
+                    oo_ptr_to_statep(ni, &nis->passive_scalable_cache.pending), "pspd");
+  ci_ni_dllist_init(ni, &nis->passive_scalable_cache.fd_states,
+                    oo_ptr_to_statep(ni, &nis->passive_scalable_cache.fd_states), "psfd");
+  nis->passive_scalable_cache.avail_stack = oo_ptr_to_statep
+    (ni, &ni->state->passive_cache_avail_stack);
 #endif
+
+  nis->kernel_packets_head = nis->kernel_packets_tail = OO_PP_NULL;
+  assert_zero(nis->kernel_packets_last_forwarded);
+  assert_zero(nis->kernel_packets_pending);
 }
 
 #endif
@@ -473,7 +500,6 @@ ci_setup_ipstack_params(void)
 
 #endif /* __KERNEL__ */
 
-
 void ci_netif_config_opts_defaults(ci_netif_config_opts* opts)
 {
 # undef  CI_CFG_OPTFILE_VERSION
@@ -592,6 +618,54 @@ void ci_netif_config_opts_rangecheck(ci_netif_config_opts* opts)
 # include <ci/internal/opts_netif_def.h>
 }
 
+#ifdef __KERNEL__
+/* This function returns an upper bound on the number of interfaces on which
+ * the user has requested that scalable interfaces be created. */
+int ci_netif_requested_scalable_intf_count(struct oo_cplane_handle* cp,
+                                           const ci_netif_config_opts* ni_opts)
+{
+  ci_assert_equiv(ni_opts->scalable_filter_ifindex_active ==
+                  CITP_SCALABLE_FILTERS_ALL,
+                  ni_opts->scalable_filter_ifindex_passive ==
+                  CITP_SCALABLE_FILTERS_ALL);
+
+  if( ni_opts->scalable_filter_ifindex_passive == CITP_SCALABLE_FILTERS_ALL )
+    return oo_cp_get_acceleratable_llap_count(cp);
+
+  /* When specifying interfaces explicitly, we support at most one passive and
+   * one active. */
+  return 2;
+}
+
+
+int
+ci_netif_requested_scalable_interfaces(struct oo_cplane_handle* cp,
+                                       const ci_netif_config_opts* ni_opts,
+                                       ci_ifid_t* ifindices, int max_count)
+{
+  int count;
+
+  ci_assert_equiv(ni_opts->scalable_filter_ifindex_active ==
+                  CITP_SCALABLE_FILTERS_ALL,
+                  ni_opts->scalable_filter_ifindex_passive ==
+                  CITP_SCALABLE_FILTERS_ALL);
+
+  if( ni_opts->scalable_filter_ifindex_passive == CITP_SCALABLE_FILTERS_ALL )
+    return oo_cp_get_acceleratable_ifindices(cp, ifindices, max_count);
+
+  /* Report the passive and active scalable interfaces if they are specified.
+   */
+  count = 0;
+  if( count < max_count && ni_opts->scalable_filter_ifindex_active > 0 )
+    ifindices[count++] = ni_opts->scalable_filter_ifindex_active;
+  if( count < max_count && ni_opts->scalable_filter_ifindex_passive > 0 )
+    ifindices[count++] = ni_opts->scalable_filter_ifindex_passive;
+
+  return count;
+}
+#endif
+
+
 
 #ifndef __KERNEL__
 
@@ -673,9 +747,15 @@ static void ci_netif_config_opts_getenv_ef_log(ci_netif_config_opts* opts)
 static void
 ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts);
 
-static void
+
+static int
 handle_str_opt(ci_netif_config_opts* opts,
                const char* optname, char* optval_buf, size_t optval_buflen);
+
+static int
+parse_enum(ci_netif_config_opts* opts,
+           const char* name, const char* const* options,
+           const char* default_val);
 
 
 void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
@@ -823,16 +903,14 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     if( opts->max_tx_packets > opts->max_packets )
       opts->max_tx_packets = opts->max_packets;
   }
+  if ( (s = getenv("EF_PREALLOC_PACKETS")) )
+    opts->prealloc_packets = atoi(s);
   if ( (s = getenv("EF_RXQ_MIN")) )
     opts->rxq_min = atoi(s);
   if ( (s = getenv("EF_MIN_FREE_PACKETS")) )
     opts->min_free_packets = atoi(s);
   if( (s = getenv("EF_PREFAULT_PACKETS")) )
     opts->prefault_packets = atoi(s);
-#if CI_CFG_PIO
-  if ( (s = getenv("EF_PIO")) )
-    opts->pio = atoi(s);
-#endif
   if ( (s = getenv("EF_MAX_ENDPOINTS")) )
     opts->max_ep_bufs = atoi(s);
   if ( (s = getenv("EF_SHARE_WITH")) )
@@ -851,9 +929,6 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 #endif
   if ( (s = getenv("EF_COMPOUND_PAGES_MODE")) )
     opts->compound_pages = atoi(s);
-  if ( (s = getenv("EF_SYNC_CPLANE_AT_CREATE")) ) {
-    opts->sync_cplane = atoi(s);
-  }
   if ( (s = getenv("EF_RXQ_SIZE")) )
     opts->rxq_size = atoi(s);
   if ( (s = getenv("EF_RXQ_LIMIT")) )
@@ -899,7 +974,7 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->sock_cache_max = atoi(s);
   if ( (s = getenv("EF_PER_SOCKET_CACHE_MAX")) )
     opts->per_sock_cache_max = atoi(s);
-  if( opts->per_sock_cache_max <= 0 )
+  if( opts->per_sock_cache_max < 0 )
     opts->per_sock_cache_max = opts->sock_cache_max;
 #endif
 
@@ -1110,6 +1185,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->initial_cwnd = atoi(s);
   if ( (s = getenv("EF_TCP_LOSS_MIN_CWND")) )
     opts->loss_min_cwnd = atoi(s);
+  if ( (s = getenv("EF_TCP_MIN_CWND")) )
+    opts->min_cwnd = atoi(s);
 #if CI_CFG_TCP_FASTSTART
   if ( (s = getenv("EF_TCP_FASTSTART_INIT")) )
     opts->tcp_faststart_init = atoi(s);
@@ -1168,6 +1245,8 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     opts->free_packets_low = opts->rxq_size / 2;
 
 #if CI_CFG_PIO
+  if ( (s = getenv("EF_PIO")) )
+    opts->pio = atoi(s);
   if( opts->pio == 0 )
     /* Makes for more efficient checking on fast data path */
     opts->pio_thresh = 0;
@@ -1193,6 +1272,16 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
     }
   }
 
+  if( (s = getenv("EF_PERIODIC_TIMER_CPU")) ) {
+    int cpu = atoi(s);
+    if( cpu >= sysconf(_SC_NPROCESSORS_ONLN) ) {
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "Value of EF_PERIODIC_TIMER_CPU is "
+                 "invalid. Periodic work will not be affinitised.");
+      cpu = -1;
+    }
+    opts->periodic_timer_cpu = cpu;
+  }
+
   if( (s = getenv("EF_TCP_SYNCOOKIES")) )
     opts->tcp_syncookies = atoi(s);
 
@@ -1210,8 +1299,15 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
 
   if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS")) )
     opts->tcp_shared_local_ports = atoi(s);
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST")) )
+    opts->tcp_shared_local_ports_reuse_fast = atoi(s);
   if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_MAX")) )
     opts->tcp_shared_local_ports_max = atoi(s);
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK")) )
+    opts->tcp_shared_local_no_fallback = atoi(s) &&
+      opts->tcp_shared_local_ports > 0;
+  if( (s = getenv("EF_TCP_SHARED_LOCAL_PORTS_PER_IP")) )
+    opts->tcp_shared_local_ports_per_ip = atoi(s);
 
   if( (s = getenv("EF_HIGH_THROUGHPUT_MODE")) )
     opts->rx_merge_mode = atoi(s);
@@ -1221,10 +1317,35 @@ void ci_netif_config_opts_getenv(ci_netif_config_opts* opts)
   handle_str_opt(opts, "EF_INTERFACE_BLACKLIST", opts->iface_blacklist,
                  sizeof(opts->iface_blacklist));
 
+  if( (s = getenv("EF_KERNEL_PACKETS_BATCH_SIZE")) )
+    opts->kernel_packets_batch_size = atoi(s);
+
+  if( (s = getenv("EF_KERNEL_PACKETS_TIMER_USEC")) )
+    opts->kernel_packets_timer_usec = atoi(s);
+
   ci_netif_config_opts_getenv_ef_scalable_filters(opts);
+
+#if CI_CFG_CTPIO
+  if( (s = getenv("EF_CTPIO")) )
+    opts->ctpio = atoi(s);
+
+  static const char* const ctpio_opts[] = { "sf", "sf-np", "ct", 0 };
+  opts->ctpio_mode = parse_enum(opts, "EF_CTPIO_MODE", ctpio_opts, "sf-np");
+
+  if( (s = getenv("EF_CTPIO_MAX_FRAME_LEN")) )
+    opts->ctpio_max_frame_len = atoi(s);
+  else if( opts->ctpio_mode == EF_CTPIO_MODE_CT )
+    opts->ctpio_max_frame_len = 1518;
+  else
+    opts->ctpio_max_frame_len = 500;
+  if( (s = getenv("EF_CTPIO_CT_THRESH")) )
+    opts->ctpio_ct_thresh = atoi(s);
+  if( (s = getenv("EF_CTPIO_SWITCH_BYPASS")) )
+    opts->ctpio_switch_bypass = atoi(s);
+#endif
 }
 
-static void
+static int
 handle_str_opt(ci_netif_config_opts* opts,
                const char* optname, char* optval_buf, size_t optval_buflen)
 {
@@ -1236,129 +1357,327 @@ handle_str_opt(ci_netif_config_opts* opts,
     }
     strncpy(optval_buf, s, optval_buflen);
     optval_buf[optval_buflen - 1] = 0;
+
+    return 1;
+  }
+  else {
+    return 0;
   }
 }
+
+static int
+parse_enum(ci_netif_config_opts* opts,
+           const char* name, const char* const* options,
+           const char* default_val)
+{
+  const char* value;
+  int i;
+
+  if( (value = getenv(name)) == NULL )
+    value = default_val;
+
+  while( 1 ) {
+    for( i = 0; options[i]; ++i )
+      if( ! strcasecmp(value, options[i]) )
+        return i;
+
+    CONFIG_LOG(opts, CONFIG_WARNINGS,
+               "%s='%s' not recognised, defaulting to '%s'",
+               name, value, default_val);
+    value = default_val;
+  }
+}
+
+static const char* strmchrnul(const char *s, const char* delims)
+{
+  const char* r = NULL;
+  while( *delims ) {
+   const char * t = strchrnul(s, *delims);
+   if( !r || t < r )
+     r = t;
+   ++delims;
+  }
+  return r;
+}
+
+
+/* Note that all ifindices in this function must be signed to allow for the
+ * extra magic values such as CITP_SCALABLE_FILTERS_ALL. */
+static int ci_opts_parse_scalable_filters_nic(ci_netif_config_opts* opts,
+                                              const char** spec_in_out,
+                                              int* mode_out,
+                                              ci_int32* ifindex_out)
+{
+  char ifname[IFNAMSIZ] = {};
+  const char* s = *spec_in_out;
+  const char* modestr;
+  ci_int32 ifindex = 0;
+  int mode = -1;
+  int rc = 0;
+
+  modestr = strmchrnul(s, "=,");
+  strncpy(ifname, s, CI_MIN(modestr - s, sizeof(ifname) - 1));
+  ifindex = if_nametoindex(ifname);
+
+  if( ifindex == CI_IFID_BAD && (strcmp(ifname, "any") == 0 ||
+                                 strcmp(ifname, ".") == 0) )
+    ifindex = CITP_SCALABLE_FILTERS_ALL;
+
+  /* If we've got a valid ifindex then we need to determine the mode */
+  if( ifindex > 0 || ifindex == CITP_SCALABLE_FILTERS_ALL ) {
+    /* If a mode isn't present in the EF_SCALABLE_FILTERS option check
+     * EF_SCALABLE_FILTERS_MODE.
+     */
+    if( *modestr != '=' )
+      modestr = getenv("EF_SCALABLE_FILTERS_MODE");
+    else
+      ++modestr;
+
+    /* If the mode is set explicitly then parse that */
+    if( modestr && modestr != strmchrnul(modestr, ",") ) {
+      int mode_value = CITP_SCALABLE_MODE_NONE;
+      int mode_set = 0;
+      struct {const char* name; int mode;} modes[] = {
+        {"transparent_active", CITP_SCALABLE_MODE_TPROXY_ACTIVE},
+        {"passive", CITP_SCALABLE_MODE_PASSIVE},
+        {"active",  CITP_SCALABLE_MODE_ACTIVE},
+        {"rss",     CITP_SCALABLE_MODE_RSS},
+      };
+      while ( modestr != strmchrnul(modestr, ",") ) {
+        const char* mode_end = strmchrnul(modestr, ":,");
+        int len  = mode_end - modestr;
+        int i;
+        for( i = 0; i < sizeof(modes) / sizeof(*modes); ++i )
+          if( strncmp(modes[i].name, modestr, len) == 0 &&
+              modes[i].name[len] == 0 ) {
+            mode_value |=  modes[i].mode;
+            mode_set |= 3;
+            break;
+        }
+        if( ! (mode_set & 1) ) {
+          CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Error parsing "
+                     "EF_SCALABLE_FILTERS, token '%s', disabling scalable "
+                     "filter mode", modestr);
+          mode = CITP_SCALABLE_MODE_NONE;
+          mode_set = 0;
+          rc = -EINVAL;
+          break;
+        }
+        modestr = mode_end;
+        if( *modestr == ':' )
+          ++modestr;
+        mode_set &= ~1;
+      }
+
+      if( mode_set ) {
+        int modes_supported[] = {
+          CITP_SCALABLE_MODE_TPROXY_ACTIVE,
+          CITP_SCALABLE_MODE_PASSIVE,
+          CITP_SCALABLE_MODE_ACTIVE,
+          CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_PASSIVE,
+          CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_RSS,
+          CITP_SCALABLE_MODE_ACTIVE | CITP_SCALABLE_MODE_RSS,
+          CITP_SCALABLE_MODE_PASSIVE | CITP_SCALABLE_MODE_RSS,
+          CITP_SCALABLE_MODE_ACTIVE | CITP_SCALABLE_MODE_PASSIVE |
+                                      CITP_SCALABLE_MODE_RSS
+        };
+        int n_modes = sizeof(modes_supported)/sizeof(*modes_supported);
+        int fail = 1;
+        int i;
+
+        mode = mode_value;
+
+        for( i = 0; i < n_modes; ++i) {
+          if( mode == modes_supported[i] ) {
+            fail = 0;
+            break;
+          }
+        }
+        if( fail ) {
+          CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Unsupported scalable "
+                     "mode selected, disabling scalable filter mode.");
+          mode = CITP_SCALABLE_MODE_NONE;
+          rc = -EINVAL;
+        }
+      }
+    }
+  }
+  else {
+    CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Could not determine ifindex "
+               "from name '%s', disabling scalable filter mode.", ifname);
+    mode = CITP_SCALABLE_MODE_NONE;
+    rc = -EINVAL;
+  }
+
+  if( modestr && *modestr )
+    ++modestr;
+
+  *spec_in_out = modestr;
+  *mode_out = mode;
+  *ifindex_out = ifindex;
+  return rc;
+}
+
+
+#define swap(x,y) ({ typeof(x) t = (x); (x) = (y); (y) = (t); })
 
 static void
 ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts)
 {
   const char* s;
+  int enable = 0;
+  int mode = CITP_SCALABLE_MODE_NONE;
+  int listen_mode = CITP_SCALABLE_LISTEN_BOUND;
+  int active_wilds_need_filter = 1;
+  int rc = 0;
+  ci_int32 ifindexes[2] = {};
 
   /* Nothing is interesting unless EF_SCALABLE_FILTERS is set */
   if( (s = getenv("EF_SCALABLE_FILTERS")) ) {
-    char ifname[IFNAMSIZ] = {};
-    const char* mode;
+    int modes[2] = {};
+    int cluster_name_len;
+    int i;
 
-    mode = strchr(s, '=');
-    strncpy(ifname, s, CI_MIN(mode - s, sizeof(ifname) - 1));
-    opts->scalable_filter_ifindex = if_nametoindex(ifname);
+    strncpy(opts->scalable_filter_string, s,
+            sizeof(opts->scalable_filter_string));
+    opts->scalable_filter_string[sizeof(opts->scalable_filter_string) - 1] = 0;
 
-    /* If we've got a valid ifindex then we need to determine the mode */
-    if( opts->scalable_filter_ifindex > 0 ) {
-      /* If a mode isn't present in the EF_SCALABLE_FILTERS option check
-       * EF_SCALABLE_FILTERS_MODE.
-       */
-      if( mode == NULL )
-        mode = getenv("EF_SCALABLE_FILTERS_MODE");
-      else
-        ++mode;
+    /* parse interfaces in EF_SCALABLE_FILTERS until: got two of them,
+     * run out of the string or hit parsing error */
+    for( i = 0;
+         i < 2 && s && *s &&
+         0 == (rc = ci_opts_parse_scalable_filters_nic(opts, &s, &modes[i],
+                                                       &ifindexes[i]));
+         ++i);
 
-      /* If the mode is set explicitly then parse that */
-      if( mode && *mode ) {
-        int mode_value = CITP_SCALABLE_MODE_NONE;
-        int mode_set = 0;
-        struct {const char* name; int mode;} modes[] = {
-          {"transparent_active", CITP_SCALABLE_MODE_TPROXY_ACTIVE},
-          {"passive", CITP_SCALABLE_MODE_PASSIVE},
-          {"rss",     CITP_SCALABLE_MODE_RSS},
-        };
-        while ( *mode ) {
-          const char* mode_end = strchrnul(mode, ':');
-          int len  = mode_end - mode;
-          int i;
-          for( i = 0; i < sizeof(modes) / sizeof(*modes); ++i )
-            if( strncmp(modes[i].name, mode, len) == 0 &&
-                modes[i].name[len] == 0 ) {
-              mode_value |=  modes[i].mode;
-              mode_set |= 3;
-              break;
-          }
-          if( ! (mode_set & 1) ) {
-            CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Error parsing "
-                       "EF_SCALABLE_FILTERS, token '%s', disabling scalable "
-                       "filter mode", mode);
-            opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
-            mode_set = 0;
-            break;
-          }
-          mode = mode_end;
-          if( *mode )
-            ++mode;
-          mode_set &= ~1;
-        }
+    if( rc != 0 ) {
+      /* message has already been printed */
+      goto invalid_mode;
+    }
+    else if( i == 0 ) {
+      mode = CITP_SCALABLE_MODE_NONE;
+    }
+    else if( i == 1 ) {
+      /* If the mode was not set explicitly then default to non-rss mode,
+       * otherwise check the mode is supported */
+      if( modes[0] < 0 )
+        modes[0] = CITP_SCALABLE_MODE_TPROXY_ACTIVE |
+                   CITP_SCALABLE_MODE_PASSIVE;
+      ifindexes[1] = ifindexes[0];
+    }
+    else {
+      /* Multiple modes specified. */
 
-        if( mode_set ) {
-          int modes_supported[] = {
-            CITP_SCALABLE_MODE_TPROXY_ACTIVE,
-            CITP_SCALABLE_MODE_PASSIVE,
-            CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_PASSIVE,
-            CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_RSS};
-          int n_modes = sizeof(modes_supported)/sizeof(*modes_supported);
-          int fail = 1;
-          int i;
+      if( ifindexes[0] == CITP_SCALABLE_FILTERS_ALL ||
+          ifindexes[1] == CITP_SCALABLE_FILTERS_ALL ) {
+        CONFIG_LOG(opts, CONFIG_WARNINGS,
+                   "config: Multiple scalable interfaces specified when "
+                   "requesting scalable filters on all interfaces.");
+        goto invalid_mode;
+      }
 
-          opts->scalable_filter_mode = mode_value;
-
-          for( i = 0; i < n_modes; ++i) {
-            if( opts->scalable_filter_mode == modes_supported[i] ) {
-              fail = 0;
-              break;
-            }
-          }
-          if( fail ) {
-            CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Unsupported scalable "
-                       "mode selected, disabling scalable filter mode.");
-            opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
-          }
-        }
-        else {
-          opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
-        }
+      if( modes[0] < 0 && modes[1] < 0 ) {
+        modes[0] = CITP_SCALABLE_MODE_PASSIVE;
+        modes[1] = CITP_SCALABLE_MODE_TPROXY_ACTIVE;
       }
       else {
-        /* If the mode was not set explicitly then default to non-rss mode,
-         * otherwise check the mode is supported */
-        if ( opts->scalable_filter_mode < 0 ) {
-          opts->scalable_filter_mode = opts->scalable_filter_ifindex > 0 ?
-                                       (CITP_SCALABLE_MODE_TPROXY_ACTIVE |
-                                        CITP_SCALABLE_MODE_PASSIVE) :
-                                       CITP_SCALABLE_MODE_NONE;
+        if( modes[1] < 0 ) {
+          swap(modes[0], modes[1]);
+          swap(ifindexes[0], ifindexes[1]);
         }
+        if( modes[0] < 0 ) {
+          if( modes[1] & (CITP_SCALABLE_MODE_ACTIVE | CITP_SCALABLE_MODE_TPROXY_ACTIVE) ) {
+            if( modes[1] & CITP_SCALABLE_MODE_PASSIVE ) {
+              CONFIG_LOG(opts, CONFIG_WARNINGS, "config: With two scalable interfaces "
+                         "one needs to be exclusively active while other exclusively passive.");
+              goto invalid_mode;
+            }
+            modes[0] = CITP_SCALABLE_MODE_PASSIVE | (modes[1] & CITP_SCALABLE_MODE_RSS);
+          }
+          else if( modes[1] & CITP_SCALABLE_MODE_PASSIVE ) {
+            modes[0] = CITP_SCALABLE_MODE_TPROXY_ACTIVE | (modes[1] & CITP_SCALABLE_MODE_RSS);
+            swap(modes[0], modes[1]);
+            swap(ifindexes[0], ifindexes[1]);
+          }
+        }
+        /* now we have both modes resolved, passive at index 1 */
+        ci_assert_nflags(modes[1], CITP_SCALABLE_MODE_ACTIVE | CITP_SCALABLE_MODE_TPROXY_ACTIVE);
+        ci_assert(modes[0] & (CITP_SCALABLE_MODE_ACTIVE | CITP_SCALABLE_MODE_TPROXY_ACTIVE));
+        ci_assert_flags(modes[1], CITP_SCALABLE_MODE_PASSIVE);
+        ci_assert_nflags(modes[0], CITP_SCALABLE_MODE_PASSIVE);
+      }
+
+      if( (modes[0] ^ modes[1]) & CITP_SCALABLE_MODE_RSS ) {
+        CONFIG_LOG(opts, CONFIG_WARNINGS, "config: When specifying two scalable "
+                   "modes RSS setting needs to be identical.");
+        goto invalid_mode;
       }
     }
+
+    mode = modes[0] | modes[1];
+
+    if( mode != CITP_SCALABLE_MODE_NONE ) {
+      if( (s = getenv("EF_SCALABLE_FILTERS_ENABLE")) )
+        enable = atoi(s);
+      else
+        enable = CITP_SCALABLE_FILTERS_ENABLE;
+
+      if( (s = getenv("EF_SCALABLE_LISTEN_MODE")) )
+        listen_mode = atoi(s);
+      if( mode & CITP_SCALABLE_MODE_ACTIVE )
+        active_wilds_need_filter = 0;
+      if( (s = getenv("EF_SCALABLE_ACTIVE_WILDS_NEED_FILTER")) )
+        active_wilds_need_filter = atoi(s);
+    }
     else {
-      CONFIG_LOG(opts, CONFIG_WARNINGS, "config: Could not determine ifindex "
-                 "from name '%s', disabling scalable filter mode.", ifname);
-      opts->scalable_filter_mode = CITP_SCALABLE_MODE_NONE;
+      enable = CITP_SCALABLE_FILTERS_DISABLE;
     }
 
-    if( opts->scalable_filter_mode != CITP_SCALABLE_MODE_NONE ) {
-      if( (s = getenv("EF_SCALABLE_FILTERS_ENABLE")) )
-        opts->scalable_filter_enable = atoi(s);
-      else
-        opts->scalable_filter_enable = CITP_SCALABLE_FILTERS_ENABLE;
-    }
-    else {
-      opts->scalable_filter_enable = CITP_SCALABLE_FILTERS_DISABLE;
+    /* Stacks cannot be named by EF_NAME in clustered scalable modes. */
+    if( enable == CITP_SCALABLE_FILTERS_ENABLE &&
+        mode & CITP_SCALABLE_MODE_RSS &&
+        (s = getenv("EF_NAME")) && s[0] != '\0' )
+      CONFIG_LOG(opts, CONFIG_WARNINGS,
+                 "config: Stacks cannot be named by EF_NAME while in a "
+                 "clustered scalable mode.")
+
+    /* In scalable mode, cluster name has a max length of 5. See bug78935. */
+    cluster_name_len = 5 - (CITP_OPTS.cluster_size > 9);
+    if( strlen(CITP_OPTS.cluster_name) > cluster_name_len ) {
+      CITP_OPTS.cluster_name[cluster_name_len] = '\0';
+      CONFIG_LOG(opts, CONFIG_WARNINGS,
+                 "config: The supplied EF_CLUSTER_NAME is too long and is "
+                 "being truncated to: %s.", CITP_OPTS.cluster_name);
     }
   }
   else {
     if( (s = getenv("EF_SCALABLE_FILTERS_ENABLE")) )
       CONFIG_LOG(opts, CONFIG_WARNINGS, "config: EF_SCALABLE_FILTERS_ENABLE "
                  "ignored as no valid config for EF_SCALABLE_FILTERS found.");
-    opts->scalable_filter_enable = CITP_SCALABLE_FILTERS_DISABLE;
+    enable = CITP_SCALABLE_FILTERS_DISABLE;
   }
+
+  if( enable == CITP_SCALABLE_FILTERS_DISABLE ) {
+    if( (s = getenv("EF_SCALABLE_LISTEN_MODE")) )
+      CONFIG_LOG(opts, CONFIG_WARNINGS, "config: EF_SCALABLE_LISTEN_MODE "
+                 "ignored as no valid config for EF_SCALABLE_FILTERS found.");
+    if( (s = getenv("EF_SCALABLE_ACTIVE_WILDS_NEED_FILTER")) )
+      CONFIG_LOG(opts, CONFIG_WARNINGS,
+                 "config: EF_SCALABLE_ACTIVE_WILDS_NEED_FILTER "
+                 "ignored as no valid config for EF_SCALABLE_FILTERS found.");
+  }
+  opts->scalable_filter_ifindex_passive = ifindexes[1];
+  opts->scalable_filter_ifindex_active = ifindexes[0];
+  opts->scalable_filter_enable = enable;
+  opts->scalable_filter_mode = mode;
+  opts->scalable_listen = listen_mode;
+  opts->scalable_active_wilds_need_filter = active_wilds_need_filter;
+  return;
+invalid_mode:
+  return; /* ideally, exit application */
 }
+
+
 
 
 #endif
@@ -1366,7 +1685,7 @@ ci_netif_config_opts_getenv_ef_scalable_filters(ci_netif_config_opts* opts)
 
 void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
 {
-  const ci_netif_config_opts defaults = {
+  static const ci_netif_config_opts defaults = {
     #undef CI_CFG_OPTFILE_VERSION
     #undef CI_CFG_OPT
     #undef CI_CFG_STR_OPT
@@ -1387,8 +1706,10 @@ void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
 
   #define ci_uint32_fmt   "%u"
   #define ci_uint16_fmt   "%u"
+  #define ci_uint8_fmt    "%u"
   #define ci_int32_fmt    "%d"
   #define ci_int16_fmt    "%d"
+  #define ci_int8_fmt     "%d"
   #define ci_iptime_t_fmt "%u"
   #define ci_string256_fmt "\"%s\""
 
@@ -1427,6 +1748,8 @@ void ci_netif_config_opts_dump(ci_netif_config_opts* opts)
 
 static void netif_tcp_helper_build2(ci_netif* ni)
 {
+  ni->active_wild_table =
+    (ci_ni_dllist_t*) ((char*) ni->state + ni->state->active_wild_ofs);
   ni->filter_table =
     (ci_netif_filter_table*) ((char*) ni->state + ni->state->table_ofs);
   ni->packets = (oo_pktbuf_manager*) ((char*) ni->state + ni->state->buf_ofs);
@@ -1446,7 +1769,7 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
   }
 
   /* Buffer mapping. */
-  {
+  if( ni->packets != NULL ) {
     unsigned id;
 
     /* Unmap packets pages */
@@ -1490,6 +1813,14 @@ static void netif_tcp_helper_munmap(ci_netif* ni)
   }
 #endif
 
+#if CI_CFG_CTPIO
+  if( ni->ctpio_bytes_mapped != 0 && ni->ctpio_ptr != NULL ) {
+    rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
+                            ni->ctpio_ptr, ni->ctpio_bytes_mapped);
+    if( rc < 0 )  LOG_NV(ci_log("%s: munmap pio %d", __FUNCTION__, rc));
+  }
+#endif
+
   if( ni->io_ptr != NULL ) {
     rc = oo_resource_munmap(ci_netif_get_driver_handle(ni),
                             ni->io_ptr, ni->state->io_mmap_bytes);
@@ -1515,6 +1846,10 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
 #if CI_CFG_PIO
   ni->pio_ptr = NULL;
   ni->pio_bytes_mapped = 0;
+#endif
+#if CI_CFG_CTPIO
+  ni->ctpio_ptr = NULL;
+  ni->ctpio_bytes_mapped = 0;
 #endif
   ni->buf_ptr = NULL;
   ni->packets = NULL;
@@ -1571,6 +1906,26 @@ static int netif_tcp_helper_mmap(ci_netif* ni)
     /* Record length actually mapped as the value in the shared state can
      * change across NIC reboots. */
     ni->pio_bytes_mapped = ns->pio_mmap_bytes;
+  }
+#endif
+
+#if CI_CFG_CTPIO
+  /****************************************************************************
+   * Create the CTPIO mapping.
+   */
+  if( ns->ctpio_mmap_bytes != 0 ) {
+    rc = oo_resource_mmap(ci_netif_get_driver_handle(ni),
+                          OO_MMAP_TYPE_NETIF,
+                          CI_NETIF_MMAP_ID_CTPIO, ns->ctpio_mmap_bytes,
+                          OO_MMAP_FLAG_DEFAULT, &p);
+    if( rc < 0 ) {
+      LOG_NV(ci_log("%s: oo_resource_mmap ctpio %d", __FUNCTION__, rc));
+      goto fail2;
+    }
+    ni->ctpio_ptr = (uint8_t*) p;
+    /* Record length actually mapped as the value in the shared state can
+     * change across NIC reboots. */
+    ni->ctpio_bytes_mapped = ns->ctpio_mmap_bytes;
   }
 #endif
 
@@ -1661,6 +2016,7 @@ static void init_ef_vi(ci_netif* ni, int nic_i, int vi_state_offset,
   vi->vi_i = vi_instance;
   ef_vi_init_rx_timestamping(vi, nsn->rx_ts_correction);
   ef_vi_init_tx_timestamping(vi, nsn->tx_ts_correction);
+  ef_vi_set_ts_format(vi, nsn->ts_format);
   *vi_mem_offset += (ef_vi_tx_ring_bytes(vi) + CI_PAGE_SIZE-1) & CI_PAGE_MASK;
   ef_vi_add_queue(vi, vi);
   ef_vi_set_stats_buf(vi, vi_stats);
@@ -1682,7 +2038,10 @@ static int netif_tcp_helper_build(ci_netif* ni)
   int udp_rxq_vi_state_bytes = 0;
 #endif
 #if CI_CFG_PIO
-  unsigned pio_io_offset, pio_buf_offset = 0, vi_bar_off;
+  unsigned pio_io_offset = 0, pio_buf_offset = 0, vi_bar_off;
+#endif
+#if CI_CFG_CTPIO
+  unsigned ctpio_io_offset = 0;
 #endif
 
   /****************************************************************************
@@ -1700,14 +2059,20 @@ static int netif_tcp_helper_build(ci_netif* ni)
   ** nic_index.
   */
   vi_io_offset = 0;
-#if CI_CFG_PIO
-  pio_io_offset = 0;
-#endif
   vi_mem_offset = 0;
   vi_state_offset = sizeof(*ni->state);
 
   OO_STACK_FOR_EACH_INTF_I(ni, nic_i) {
     ci_netif_state_nic_t* nsn = &ns->nic[nic_i];
+    ci_uint8 pio_len_shift;
+    ci_uint32 ctpio_start_offset;
+
+    /* Get interface properties. */
+    rc = oo_cp_get_hwport_properties(ni->cplane, ns->intf_i_to_hwport[nic_i],
+                                     NULL, NULL, NULL, &pio_len_shift,
+                                     &ctpio_start_offset);
+    if( rc < 0 )
+      return rc;
 
     LOG_NV(ci_log("%s: ni->io_ptr=%p io_offset=%d mem_offset=%d "
                   "state_offset=%d", __FUNCTION__, ni->io_ptr,
@@ -1769,7 +2134,19 @@ static int netif_tcp_helper_build(ci_netif* ni)
       pio_io_offset += nsn->pio_io_mmap_bytes;
     }
 #endif
+#if CI_CFG_CTPIO
+    if( ni->nic_hw[nic_i].vi.vi_flags & EF_VI_TX_CTPIO ) {
+      void* ctpio_ptr = ni->ctpio_ptr + ctpio_io_offset +
+                        (ctpio_start_offset << pio_len_shift);
+      ci_assert_lt(ctpio_io_offset, ns->ctpio_mmap_bytes);
+      ni->nic_hw[nic_i].vi.vi_ctpio_mmap_ptr = ctpio_ptr;
+      ctpio_io_offset += CI_PAGE_SIZE;
+      ef_vi_ctpio_init(&(ni->nic_hw[nic_i].vi));
+    }
+#endif
   }
+
+  ci_assert_equal(ctpio_io_offset, ns->ctpio_mmap_bytes);
 
   /* Initialise timer related stuff that is only used at user level */
   ci_ip_timer_state_init_ul(ni);
@@ -1783,7 +2160,7 @@ static int netif_tcp_helper_build(ci_netif* ni)
    * the array (if we have had trouble allocating packet buffers), so
    * we need to be aware of that when checking the sizes are sane
    */
-  size = ns->table_ofs - ns->buf_ofs - sizeof(oo_pktbuf_manager);
+  size = ns->active_wild_ofs - ns->buf_ofs - sizeof(oo_pktbuf_manager);
 
   if( ns->buf_ofs != sizeof(ci_netif_state) +
       ns->vi_state_bytes * oo_stack_intf_max(ni) ||
@@ -1806,6 +2183,14 @@ static int netif_tcp_helper_build(ci_netif* ni)
     return -EINVAL;
   }
 
+  /* FIXME check error, free - why ni->pkt_bufs does not do this */
+  ni->eps = CI_ALLOC_ARRAY(typeof(*ni->eps), ni->state->max_ep_bufs);
+  {
+    int i;
+    struct ci_extra_ep ref = { CI_FD_BAD };
+    for( i = 0; i < ni->state->max_ep_bufs; ++ i )
+      ni->eps[i] = ref;
+  }
   return 0;
 }
 
@@ -2248,8 +2633,14 @@ static int check_pio(ci_netif_config_opts* opts)
 
 void ci_netif_cluster_prefault(ci_netif* ni)
 {
+  if( ni->flags & CI_NETIF_FLAGS_PREFAULTED )
+    return;
   ci_netif_pkt_prefault_reserve(ni);
   ci_netif_pkt_prefault(ni);
+
+  /* Fixme: in theory, we should protect the flag change with the stack
+   * lock. */
+  ni->flags |= CI_NETIF_FLAGS_PREFAULTED;
 }
 
 static int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
@@ -2265,7 +2656,7 @@ static int ci_netif_init(ci_netif* ni, ef_driver_handle fd)
   if( ni->cplane == NULL )
     return -ENOMEM;
 
-  rc = oo_cp_create(fd, ni->cplane);
+  rc = oo_cp_create(fd, ni->cplane, CITP_OPTS.sync_cplane);
   if( rc != 0 ) {
     ci_log("%s: failed to get control plane handle: %d", __func__, rc);
     goto fail;
@@ -2404,7 +2795,7 @@ static int __ci_netif_init_fill_rx_rings(ci_netif* ni)
 int ci_netif_init_fill_rx_rings(ci_netif* ni)
 {
   oo_pkt_p pkt_list;
-  int lim, rc, n;
+  int lim, rc, n_reserved, n_requested, n_accounted;
 
   rc = ci_tcp_helper_more_bufs(ni);
   if( ni->packets->n_free == 0 ) {
@@ -2419,12 +2810,27 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
     return rc;
 
   /* Reserve some packet buffers for the free pool. */
-  n = ci_netif_pkt_reserve(ni, NI_OPTS(ni).min_free_packets, &pkt_list);
-  if( n < NI_OPTS(ni).min_free_packets ) {
-    LOG_E(ci_log("%s: ERROR: Insufficient packet buffers available for "
-                 "EF_MIN_FREE_PACKETS=%d", __FUNCTION__,
-                 NI_OPTS(ni).min_free_packets));
+  if( NI_OPTS(ni).prealloc_packets )
+    n_requested = NI_OPTS(ni).max_packets;
+  else
+    n_requested = NI_OPTS(ni).min_free_packets;
+  n_accounted = n_reserved = ci_netif_pkt_reserve(ni, n_requested, &pkt_list);
+  if( NI_OPTS(ni).prealloc_packets )
+    n_accounted += ni->state->mem_pressure_pkt_pool_n;
+  if( n_accounted < n_requested ) {
+    if( NI_OPTS(ni).prealloc_packets )
+      LOG_E(ci_log("%s: ERROR: Insufficient packet buffers available for "
+                   "EF_PREALLOC_PKTS=1 EF_MAX_PACKETS=%d got %d", __FUNCTION__,
+                   n_requested, n_accounted));
+    else
+      LOG_E(ci_log("%s: ERROR: Insufficient packet buffers available for "
+                   "EF_MIN_FREE_PACKETS=%d", __FUNCTION__, n_requested));
     return -ENOMEM;
+  }
+
+  if( NI_OPTS(ni).prealloc_packets ) {
+    /* Free the packets now, so they can be used to fill rings */
+    ci_netif_pkt_reserve_free(ni, pkt_list, n_reserved);
   }
 
   /* Fill the RX rings a little at a time.  Reason is to ensure that if we
@@ -2451,8 +2857,11 @@ int ci_netif_init_fill_rx_rings(ci_netif* ni)
       break;
     }
   }
-
-  ci_netif_pkt_reserve_free(ni, pkt_list, n);
+  if( ! NI_OPTS(ni).prealloc_packets ) {
+    /* Free the packets now, once rings are full, to ensure availability of
+     * packets as indicated by EF_MIN_FREE_PACKETS */
+    ci_netif_pkt_reserve_free(ni, pkt_list, n_reserved);
+  }
   ni->state->rxq_limit =  NI_OPTS(ni).rxq_limit;
 
 #if CI_CFG_PKTS_AS_HUGE_PAGES

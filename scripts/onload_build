@@ -28,6 +28,7 @@ usage() {
   if is_ppc ; then
   err "  --ppc-at <path>    - Path to IBM Advanced Toolchain install"
   fi
+  err "  --build-profile    - Specify a build profile"
   err
   exit 1
 }
@@ -70,6 +71,7 @@ ppc_at=
 NDEBUG=1; export NDEBUG
 filter_engine_def="/opt/onload_filter_engine"
 withofe=true
+build_profile=
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -85,6 +87,8 @@ while [ $# -gt 0 ]; do
   --ppc-at)     is_ppc || usage; ppc_at="$2"; shift;;
   --filter-engine=*) filter_engine=${1#--filter-engine=} ;;
   --no-filter-engine) withofe=false ;;
+  --build-profile)   [ $# -gt 1 ] || usage; build_profile="$2"; shift;;
+  --build-profile=*) build_profile=${1#--build-profile=};;
   -*)           usage;;
   *)            break;;
   esac
@@ -115,6 +119,13 @@ else
   # We allow compiler warnings by default.
   MMAKE_LIBERAL=1; export MMAKE_LIBERAL
   NOWERROR=1; export NOWERROR
+fi
+
+# Use build profile if specified
+if [ -n "$build_profile" ]
+then
+    TRANSPORT_CONFIG_OPT_HDR="ci/internal/transport_config_opt_${build_profile}.h"
+    export TRANSPORT_CONFIG_OPT_HDR
 fi
 
 try cd "$bin/.."

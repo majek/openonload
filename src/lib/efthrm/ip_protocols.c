@@ -355,10 +355,14 @@ ci_ipp_pmtu_rx(ci_netif *netif, ci_pmtu_state_t *pmtus,
   /* ... (proof that i'm not great at predictions) by april 2005 it was picked
    *  up by the media as part of a world-spanning problem :-) */
   if( CI_UNLIKELY(len < plateau[0]) ) {
-    int i = 4;
+    int i = CI_PMTU_PLATEAU_ENTRY_MAX;
     ci_uint16 npl;
-    ci_assert(i < CI_PMTU_PLATEAU_ENTRY_MAX);
+    ci_assert_ge(ipcache->mtu, plateau[0]);
+    while( plateau[i] > ipcache->mtu )
+      i--;
     npl = plateau[i];
+    if( ipcache->mtu == npl && i != 0 )
+      npl = plateau[i-1];
     /* see bug 3667 where ANVL requires us to reduce the PMTU a bit
        from default; this matches the Linux behaviour, and also
        prevents the DoS attack */

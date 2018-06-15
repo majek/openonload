@@ -49,6 +49,7 @@
 #include <ci/efrm/private.h>
 #include <ci/efrm/vi_set.h>
 #include <ci/efrm/efrm_client.h>
+#include <ci/efrm/efrm_filter.h>
 #include <ci/efrm/pd.h>
 #include <ci/tools/log2.h>
 #include "efrm_internal.h"
@@ -58,33 +59,27 @@
 #define efrm_vi_set(rs1)  container_of((rs1), struct efrm_vi_set, rs)
 
 
-/* These values are defined by hardware. */
-#define RSS_KEY_LEN 40
-#define RSS_TABLE_LEN 128
-
-
-static int efrm_rss_context_alloc(struct efrm_pd *pd,
-				  struct efrm_client *client,
-				  int num_qs,
-				  int rss_mode,
-				  unsigned *rss_context_out)
+static int
+efrm_rss_context_alloc_and_init(struct efrm_pd *pd,
+				struct efrm_client *client,
+				int num_qs,
+				int rss_mode,
+				unsigned *rss_context_out)
 {
 	int rc;
 	int shared = 0;
 	int index;
-	unsigned rss_flags;
-	unsigned rss_context;
 	/* Copied from efx_rss_fixed_key from linux_net/efx.c.
 	 * FIXME: maintain consistency with net driver and tests. */
-	static const uint8_t rx_hash_key[RSS_KEY_LEN] = {
+	static const uint8_t rx_hash_key_default[EFRM_RSS_KEY_LEN] = {
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 		0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a, 0x6d, 0x5a,
 	};
-	uint8_t rx_indir_table[RSS_TABLE_LEN];
-
+        const uint8_t* rx_hash_key = rx_hash_key_default;
+	uint32_t rx_indir_table[EFRM_RSS_INDIRECTION_TABLE_LEN];
 	if (num_qs > 1 && rss_mode != EFRM_RSS_MODE_DEFAULT &&
 	    !(efrm_client_get_nic(client)->flags & NIC_FLAG_ADDITIONAL_RSS_MODES))
 		return -EOPNOTSUPP;
@@ -114,14 +109,10 @@ static int efrm_rss_context_alloc(struct efrm_pd *pd,
 	 */
 	shared = 0;
 
-	rc = efhw_nic_rss_context_alloc(client->nic, efrm_pd_get_vport_id(pd),
-					num_qs, shared, &rss_context);
-
-	if (rc < 0 || shared) {
-		if (rc == 0)
-			*rss_context_out = rss_context;
-		return rc;
-	}
+	/* Set up the indirection table to stripe evenly(ish) across VIs.
+	 * FIXME: maintain consistency with net driver */
+	for (index = 0; index < EFRM_RSS_INDIRECTION_TABLE_LEN; index++)
+		rx_indir_table[index] = index % num_qs;
 
 	/* If we have an exclusive context we need to set up the key and
 	 * indirection table.
@@ -141,49 +132,11 @@ static int efrm_rss_context_alloc(struct efrm_pd *pd,
 	 * reconfiguration or fallover.
 	 * Also Transparent proxy requires identical rss key on its devices.
 	 */
-	rc = efhw_nic_rss_context_set_key(client->nic, rss_context,
-					  rx_hash_key);
-	if (rc < 0)
-		goto fail;
 
-	/* Set up the indirection table to stripe evenly(ish) across VIs.
-	 * FIXME: maintain consistency with net driver */
-	for (index = 0; index < RSS_TABLE_LEN; index++)
-		rx_indir_table[index] = index % num_qs;
-
-	rc = efhw_nic_rss_context_set_table(client->nic, rss_context,
-					    rx_indir_table);
-	if (rc <  0)
-		goto fail;
-
-	switch(rss_mode) {
-	case EFRM_RSS_MODE_SRC:
-		rss_flags = EFHW_RSS_FLAG_SRC_ADDR | EFHW_RSS_FLAG_SRC_PORT;
-		break;
-	case EFRM_RSS_MODE_DST:
-		rss_flags = EFHW_RSS_FLAG_DST_ADDR | EFHW_RSS_FLAG_DST_PORT;
-		break;
-	case EFRM_RSS_MODE_DEFAULT:
-		rss_flags = 0;
-		break;
-	default:
-		EFHW_ASSERT(!"Unknown rss mode");
-		rc = -EINVAL;
-		goto fail;
-	};
-
-	if (rss_flags) {
-		rc = efhw_nic_rss_context_set_flags(client->nic, rss_context,
-						    rss_flags);
-		if (rc < 0)
-			goto fail;
-	}
-
-	*rss_context_out = rss_context;
-	return rc;
-
-fail:
-	efhw_nic_rss_context_free(client->nic, rss_context);
+	rc = efrm_rss_context_alloc(client, efrm_pd_get_vport_id(pd),
+				    shared, rx_indir_table,
+				    rx_hash_key, rss_mode, num_qs,
+				    rss_context_out);
 	return rc;
 }
 
@@ -229,9 +182,9 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
 		/* least significant bit of rss_modes */
 		int rss_mode = rss_modes ^ (rss_modes & (rss_modes -1));
 		rss_modes &= ~rss_mode;
-		rc = efrm_rss_context_alloc(pd, client, n_vis,
-					    rss_mode,
-					    &vi_set->rss_context[j]);
+		rc = efrm_rss_context_alloc_and_init(pd, client, n_vis,
+						     rss_mode,
+						     &vi_set->rss_context[j]);
 		/* If we failed to allocate an RSS context fall back to
 		* using the netdriver's default context.
 		*
@@ -278,8 +231,7 @@ int efrm_vi_set_alloc(struct efrm_pd *pd, int n_vis, unsigned vi_props,
  fail1:
 	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i)
 		if (vi_set->rss_context[i] != -1)
-			efhw_nic_rss_context_free(client->nic,
-						  vi_set->rss_context[i]);
+			efrm_rss_context_free(client, vi_set->rss_context[i]);
 
 	return rc;
 }
@@ -305,8 +257,8 @@ void efrm_vi_set_free(struct efrm_vi_set *vi_set)
 
 	for (i = 0; i <= EFRM_RSS_MODE_ID_MAX; ++i)
 		if (vi_set->rss_context[i] != -1)
-			efhw_nic_rss_context_free(vi_set->rs.rs_client->nic,
-						  vi_set->rss_context[i]);
+			efrm_rss_context_free(vi_set->rs.rs_client,
+					      vi_set->rss_context[i]);
 	efrm_vi_allocator_free_set(efrm_nic, &vi_set->allocation);
 	efrm_pd_release(vi_set->pd);
 	efrm_client_put(vi_set->rs.rs_client);

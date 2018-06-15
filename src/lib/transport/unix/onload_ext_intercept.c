@@ -70,7 +70,6 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
 {
   citp_fdinfo* fdi;
   citp_sock_fdi* sock_epi;
-  citp_pipe_fdi* pipe_epi;
   citp_alien_fdi* alien_epi;
   int rc;
   citp_lib_context_t lib_context;
@@ -102,6 +101,7 @@ int onload_fd_stat(int fd, struct onload_stat* stat)
         rc = 1;
       }
       else {
+        citp_pipe_fdi* pipe_epi;
         pipe_epi = fdi_to_pipe_fdi(fdi);
         stat->endpoint_id = W_FMT(&pipe_epi->pipe->b);
         stat->endpoint_state = pipe_epi->pipe->b.state;
@@ -261,10 +261,10 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
                               struct onload_ordered_epoll_event *oo_events,
                               int maxevents, int timeout)
 {
-  citp_fdinfo* fdi;
   int rc = -EINVAL;
 
-#if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_USERSPACE_EPOLL && CI_CFG_TIMESTAMPING
+  citp_fdinfo* fdi;
   citp_lib_context_t lib_context;
   citp_enter_lib(&lib_context);
 
@@ -282,6 +282,8 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
 
   citp_exit_lib(&lib_context, FALSE);
 
+#else
+  rc = -EOPNOTSUPP;
 #endif
   return rc;
 }

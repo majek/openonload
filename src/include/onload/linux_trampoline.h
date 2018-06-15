@@ -110,7 +110,12 @@ efab_linux_trampoline_sigaction(int sig, const struct sigaction *act,
                                 struct sigaction *oact, size_t sigsetsize);
 #ifdef CONFIG_COMPAT
 #if ! defined (__PPC__)
-#include <asm/ia32.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,9,0)
+# include <linux/compat.h>
+# define sigaction32 compat_sigaction
+#else
+# include <asm/ia32.h>
+#endif
 #else
 #include <linux/compat.h>
 /* sigaction32 is not public on PPC, extracted from arch/powerpc/kernel/ppc32.h */

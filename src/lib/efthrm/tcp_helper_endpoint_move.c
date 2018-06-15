@@ -115,6 +115,15 @@ static int efab_file_move_supported_tcp(ci_netif *ni, ci_tcp_state *ts,
     return false;
   }
 
+  /* Sockets in time-wait linked lists are not supported.
+   * It is easy to unlink the old and link up the new socket, but this have
+   * not been done. */
+  if( ! ci_ni_dllist_is_free(&ts->timeout_q_link) ) {
+    if( do_assert )
+      ci_assert( ci_ni_dllist_is_free(&ts->timeout_q_link) );
+    return false;
+  }
+
   return true;
 }
 static int efab_file_move_supported_udp(ci_netif *ni, ci_udp_state *us,
@@ -153,12 +162,14 @@ static int __efab_file_move_supported(ci_netif *ni, ci_sock_cmn *s,
                                       int drop_filter, int do_assert)
 {
 
+#if CI_CFG_TIMESTAMPING
   /* We do not copy TX timestamping queue yet. */
   if( s->timestamping_flags != 0 ) {
     if( do_assert )
       ci_assert_equal(s->timestamping_flags, 0);
     return false;
   }
+#endif
 
   /* UDP:  */
   if( s->b.state == CI_TCP_STATE_UDP )
@@ -323,7 +334,8 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   mid_s->b.sb_aflags |= CI_SB_AFLAG_ORPHAN;
   mid_s->b.bufid = new_s->b.bufid;
   mid_s->b.post_poll_link = new_s->b.post_poll_link;
-  mid_s->b.ready_link = new_s->b.ready_link;
+  mid_s->b.epoll = new_s->b.epoll;
+  mid_s->b.ready_lists_in_use = 0;
   mid_s->reap_link = new_s->reap_link;
 
   if( tcp_helper_get_user_ns(old_thr) != tcp_helper_get_user_ns(new_thr) ) {
@@ -393,6 +405,8 @@ int efab_file_move_to_alien_stack(ci_private_t *priv, ci_netif *alien_ni,
   if( rc != 0 )
     goto fail4;
   ci_assert(old_ep->alien_ref);
+
+  new_ep->file_ptr = priv->_filp;
 
   /* Copy F_SETOWN_EX, F_SETSIG to the new file */
 #ifdef F_SETOWN_EX
@@ -623,6 +637,7 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
   struct oo_op_loopback_connect *carg = arg;
   ci_netif *alien_ni = NULL;
   oo_sp tls_id;
+  int stack_locked;
 
   ci_assert(ci_netif_is_locked(&priv->thr->netif));
   carg->out_moved = 0;
@@ -649,7 +664,7 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
       efab_tcp_helper_create_os_sock(priv);
   }
 
-  while( iterate_netifs_unlocked(&alien_ni) == 0 ) {
+  while( iterate_netifs_unlocked(&alien_ni, 0, 0) == 0 ) {
 
     if( alien_ni->cplane->cp_netns != priv->thr->netif.cplane->cp_netns )
       continue; /* can't accelerate inter-namespace connections */
@@ -672,15 +687,33 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
                                         priv->thr) )
       continue; /* server can't accept our socket */
 
-    tls_id = ci_tcp_connect_find_local_peer(alien_ni, carg->dst_addr,
-                                            carg->dst_port);
+    tls_id = ci_tcp_connect_find_local_peer(alien_ni, 0 /* unlocked */,
+                                            carg->dst_addr, carg->dst_port);
 
     if( OO_SP_NOT_NULL(tls_id) ) {
       int rc;
+      ci_irqlock_state_t lock_flags;
+      tcp_helper_resource_t* alien_thr = netif2tcp_helper_resource(alien_ni);
 
-      /* We are going to exit in this or other way: get ref and
-       * drop kref of alien_ni */
-      efab_thr_ref(netif2tcp_helper_resource(alien_ni));
+      /* We need to check that the stack that we've found still has a user
+       * ref before going ahead and using it.  By taking the ref with the
+       * THR_TABLE.lock held we ensure that the stack won't be released before
+       * we've got our user ref.  If we find that it has already been released
+       * then we simply continue looking through the stack list.
+       */
+      ci_irqlock_lock(&THR_TABLE.lock, &lock_flags);
+      if( !(alien_thr->k_ref_count & TCP_HELPER_K_RC_NO_USERLAND) ) {
+        efab_thr_ref(alien_thr);
+      }
+      else {
+        ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+        continue;
+      }
+      ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
+
+      /* Now we know we're going to stop iterating the stack list, and we
+       * have a user ref, so can drop our kref from iteration.
+       */
       iterate_netifs_unlocked_dropref(alien_ni);
 
       switch( NI_OPTS(&priv->thr->netif).tcp_client_loopback ) {
@@ -720,8 +753,10 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         /* Connect again, using new endpoint */
         carg->out_rc =
             ci_tcp_connect_lo_samestack(
-                          alien_ni, SP_TO_TCP(alien_ni, new_sock_id), tls_id);
-        ci_netif_unlock(alien_ni);
+                          alien_ni, SP_TO_TCP(alien_ni, new_sock_id),
+                          tls_id, &stack_locked);
+        if( stack_locked )
+          ci_netif_unlock(alien_ni);
         ci_sock_unlock(alien_ni, SP_TO_WAITABLE(alien_ni, new_sock_id));
         carg->out_moved = 1;
         return 0;
@@ -732,10 +767,17 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
         tcp_helper_resource_t *new_thr;
         ci_resource_onload_alloc_t alloc;
         oo_sp new_sock_id;
-        ci_netif_config_opts opts;
+        ci_netif_config_opts *opts;
 
         memset(&alloc, 0, sizeof(alloc));
-        memcpy(&opts, &NI_OPTS(&priv->thr->netif), sizeof(opts));
+
+        opts = ci_alloc(sizeof(*opts));
+        if( opts == NULL ) {
+          ci_netif_unlock(&priv->thr->netif);
+          efab_thr_release(netif2tcp_helper_resource(alien_ni));
+          return -ECONNREFUSED;
+        }
+        memcpy(opts, &NI_OPTS(&priv->thr->netif), sizeof(*opts));
 
         /* create new stack
          * todo: no hardware interfaces are necessary */
@@ -744,10 +786,11 @@ int efab_tcp_loopback_connect(ci_private_t *priv, void *arg)
 
         /* There will be no more active connections in the new stack
          * - tcp_shared_local_ports is useless. */
-        opts.tcp_shared_local_ports = 0;
+        opts->tcp_shared_local_ports = 0;
 
         /* Note: we will not attempt to create tproxy mode interfaces */
-        rc = tcp_helper_alloc_kernel(&alloc, &opts, 0, &new_thr);
+        rc = tcp_helper_alloc_kernel(&alloc, opts, 0, &new_thr);
+        ci_free(opts);
         if( rc != 0 ) {
           ci_netif_unlock(&priv->thr->netif);
           efab_thr_release(netif2tcp_helper_resource(alien_ni));

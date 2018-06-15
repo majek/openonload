@@ -157,19 +157,19 @@ ci_inline int ci_tcp_tx_n_pkts_needed(int eff_mss, int maxbytes,
 }
 
 
-ci_inline void __ci_tcp_tx_pkt_init(ci_ip_pkt_fmt* pkt, int hdrlen, int maxlen)
+ci_inline void __ci_tcp_tx_pkt_init(ci_ip_pkt_fmt* pkt, int hdrlen, int mss)
 {
-  oo_offbuf_init(&pkt->buf, (uint8_t*) oo_tx_ether_data(pkt) + hdrlen, maxlen);
-  pkt->buf_len = pkt->pay_len = hdrlen + oo_ether_hdr_size(pkt);
+  oo_offbuf_init(&pkt->buf, (uint8_t*) oo_tx_l3_hdr(pkt) + hdrlen, mss);
+  pkt->buf_len = pkt->pay_len = oo_tx_ether_hdr_size(pkt) + hdrlen;
   pkt->pf.tcp_tx.start_seq = hdrlen;
   pkt->pf.tcp_tx.end_seq = 0;
 }
 
 
-ci_inline void ci_tcp_tx_pkt_init(ci_ip_pkt_fmt* pkt, int hdrlen, int maxlen)
+ci_inline void ci_tcp_tx_pkt_init(ci_ip_pkt_fmt* pkt, int hdrlen, int mss)
 {
   oo_tx_pkt_layout_init(pkt);
-  __ci_tcp_tx_pkt_init(pkt, hdrlen, maxlen);
+  __ci_tcp_tx_pkt_init(pkt, hdrlen, mss);
 }
 
 
@@ -188,7 +188,7 @@ int ci_tcp_sendmsg_fill_pkt(ci_netif* ni, ci_tcp_state* ts,
   ci_assert(! ci_iovec_ptr_is_empty_proper(piov));
   ci_tcp_tx_pkt_init(pkt, hdrlen, maxlen);
   oo_pkt_filler_init(&sinf->pf, pkt,
-                     (uint8_t*) oo_tx_ether_data(pkt) + hdrlen);
+                     (uint8_t*) oo_tx_l3_hdr(pkt) + hdrlen);
 
 #ifndef NDEBUG
   ci_assert_equal(pkt->n_buffers, 1);
@@ -367,15 +367,14 @@ ci_inline void ci_tcp_sendmsg_prep_pkt(ci_netif* ni, ci_tcp_state* ts,
   extra_opts = ts->outgoing_hdrs_len - orig_hdrlen;
   if( extra_opts )
     ci_tcp_tx_insert_option_space(ni, ts, pkt, 
-                                  orig_hdrlen + oo_ether_hdr_size(pkt),
+                                  orig_hdrlen + oo_tx_ether_hdr_size(pkt),
                                   extra_opts);
 
   /* The sequence space consumed should match the bytes in the buffer. */
-  ci_assert_equal((oo_offbuf_ptr(&pkt->buf) -
-                   (PKT_START(pkt) + oo_ether_hdr_size(pkt) +
-                    sizeof(ci_ip4_hdr) +
-                    sizeof(ci_tcp_hdr) + CI_TCP_HDR_OPT_LEN(TX_PKT_TCP(pkt)))),
-                  SEQ_SUB(pkt->pf.tcp_tx.end_seq,pkt->pf.tcp_tx.start_seq));
+  ci_assert_equal(oo_tx_l3_len(pkt),
+                  sizeof(ci_ip4_hdr) + sizeof(ci_tcp_hdr)
+                  + CI_TCP_HDR_OPT_LEN(TX_PKT_TCP(pkt))
+                  + SEQ_SUB(pkt->pf.tcp_tx.end_seq, pkt->pf.tcp_tx.start_seq));
 
   /* Correct offbuf end as might have been constructed with diff eff_mss */
   ci_tcp_tx_pkt_set_end(ts, pkt);
@@ -727,10 +726,12 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
   pkt->next = ts->tmpl_head;
   ts->tmpl_head = OO_PKT_P(pkt);
 
+#if CI_CFG_TIMESTAMPING
   /* This flag should not be set on a segment of length 0,
    * we assume this is never the case with templated sends */
   if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
     pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
+#endif
 
   /* XXX: Do I have to worry about MSG_CORK? */
   /* TODO: look at this sinf stuff */
@@ -750,7 +751,7 @@ int ci_tcp_tmpl_alloc(ci_netif* ni, ci_tcp_state* ts,
    * always be rewritten when we do the actual send. */
   ip = oo_tx_ip_hdr(pkt);
   ci_tcp_tx_finish(ni, ts, pkt);
-  ci_tcp_ip_hdr_init(ip, TX_PKT_LEN(pkt) - oo_ether_hdr_size(pkt));
+  ci_tcp_ip_hdr_init(ip, oo_tx_l3_len(pkt));
 
   /* XXX: Do I need to ci_tcp_tx_set_urg_ptr(ts, ni, tcp);
    *
@@ -887,7 +888,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
   cplane_is_valid = oo_cp_verinfo_is_valid(ni->cplane, &ipcache->mac_integrity);
   if( cplane_is_valid &&
       ! memcmp(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
-               oo_ether_hdr_size(pkt)) &&
+               oo_tx_ether_hdr_size(pkt)) &&
       pkt->pio_addr != -1 ) {
     /* Socket has valid cplane info, the same info is on the pkt, and
      * it has a pio region allocated so we can send using pio.
@@ -911,7 +912,7 @@ ci_tcp_tmpl_update(ci_netif* ni, ci_tcp_state* ts,
      */
     ci_assert_ge(pkt->pio_addr, 0);
     ci_ip_set_mac_and_port(ni, ipcache, pkt);
-    if( oo_ether_hdr_size(pkt) == 
+    if( oo_tx_ether_hdr_size(pkt) == 
         (char*)&ipcache->ip - (char*)ci_ip_cache_ether_hdr(ipcache) )
       /* TODO: we need to copy just the ethernet header here. */
       rc = ef_pio_memcpy(vi, PKT_START(pkt), pkt->pio_addr,
@@ -1336,6 +1337,7 @@ static void ci_tcp_sendmsg_handle_rc_or_tx_errno(ci_netif* ni,
         sinf->set_errno = 1;
       }
     }
+
     if( sinf->rc == 0 && ts->s.tx_errno ) {
       LOG_TC(log(LNT_FMT "tx_errno=%d flags=%x total_sent=%d",
                  LNT_PRI_ARGS(ni, ts), ts->s.tx_errno, flags, sinf->total_sent));
@@ -2311,7 +2313,7 @@ int ci_tcp_zc_send(ci_netif* ni, ci_tcp_state* ts, struct onload_zc_mmsg* msg,
       goto bad_buffer;
 
     __ci_tcp_tx_pkt_init(pkt, ((uint8_t*) msg->msg.iov[j].iov_base - 
-                               (uint8_t*) oo_tx_ether_data(pkt)), eff_mss);
+                               (uint8_t*) oo_tx_l3_hdr(pkt)), eff_mss);
     pkt->n_buffers = 1;
     pkt->buf_len += msg->msg.iov[j].iov_len;
     pkt->pay_len += msg->msg.iov[j].iov_len;

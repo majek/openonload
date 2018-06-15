@@ -67,11 +67,13 @@ extern unsigned efrm_driverlink_generation(struct efrm_nic* nic);
 
 extern int
 efrm_nic_add(struct efx_dl_device *dl_device, unsigned int opts,
-	     const uint8_t *mac_addr,
+	     struct net_device *net_dev,
 	     struct linux_efhw_nic **lnic_out, spinlock_t *reg_lock,
-	     const struct vi_resource_dimensions *, int ifindex,
+	     const struct vi_resource_dimensions *,
 	     unsigned timer_quantum_ns, unsigned rx_prefix_len,
 	     unsigned rx_usr_buf_size);
+extern int
+efrm_nic_unplug(struct efhw_nic* nic, struct efx_dl_device *dl_device);
 
 extern int efrm_install_proc_entries(void);
 extern void efrm_uninstall_proc_entries(void);

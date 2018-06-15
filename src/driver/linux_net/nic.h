@@ -308,6 +308,29 @@ enum {
 	EF10_STAT_tx_bad,
 	EF10_STAT_tx_bad_bytes,
 	EF10_STAT_tx_overflow,
+	EF10_STAT_V1_COUNT,
+	EF10_STAT_fec_uncorrected_errors = EF10_STAT_V1_COUNT,
+	EF10_STAT_fec_corrected_errors,
+	EF10_STAT_fec_corrected_symbols_lane0,
+	EF10_STAT_fec_corrected_symbols_lane1,
+	EF10_STAT_fec_corrected_symbols_lane2,
+	EF10_STAT_fec_corrected_symbols_lane3,
+	EF10_STAT_ctpio_vi_busy_fallback,
+	EF10_STAT_ctpio_long_write_success,
+	EF10_STAT_ctpio_missing_dbell_fail,
+	EF10_STAT_ctpio_overflow_fail,
+	EF10_STAT_ctpio_underflow_fail,
+	EF10_STAT_ctpio_timeout_fail,
+	EF10_STAT_ctpio_noncontig_wr_fail,
+	EF10_STAT_ctpio_frm_clobber_fail,
+	EF10_STAT_ctpio_invalid_wr_fail,
+	EF10_STAT_ctpio_vi_clobber_fallback,
+	EF10_STAT_ctpio_unqualified_fallback,
+	EF10_STAT_ctpio_runt_fallback,
+	EF10_STAT_ctpio_success,
+	EF10_STAT_ctpio_fallback,
+	EF10_STAT_ctpio_poison,
+	EF10_STAT_ctpio_erase,
 	EF10_STAT_COUNT
 };
 
@@ -328,6 +351,8 @@ enum {
  * @vi_base: Absolute index of first VI in this function
  * @n_allocated_vis: Number of VIs allocated to this function
  * @must_realloc_vis: Flag: VIs have yet to be reallocated after MC reboot
+ * @must_restore_rss_contexts: Flag: RSS contexts have yet to be restored after
+ *	MC reboot
  * @must_restore_filters: Flag: filters have yet to be restored after MC reboot
  * @n_piobufs: Number of PIO buffers allocated to this function
  * @wc_membase: Base address of write-combining mapping of the memory BAR
@@ -337,7 +362,6 @@ enum {
  * @piobuf_size: size of a single PIO buffer
  * @must_restore_piobufs: Flag: PIO buffers have yet to be restored after MC
  *	reboot
- * @rx_rss_context: Firmware handle for our RSS context
  * @rx_rss_context_exclusive: Whether our RSS context is exclusive or shared
  * @stats: Hardware statistics
  * @vf_stats_work: Work item to poll hardware statistics (VF driver only)
@@ -377,6 +401,7 @@ struct efx_ef10_nic_data {
 	unsigned int vi_base;
 	unsigned int n_allocated_vis;
 	bool must_realloc_vis;
+	bool must_restore_rss_contexts;
 	bool must_restore_filters;
 	unsigned int n_piobufs;
 	void __iomem *wc_membase, *pio_write_base;
@@ -384,7 +409,6 @@ struct efx_ef10_nic_data {
 	unsigned int piobuf_handle[EF10_TX_PIOBUF_COUNT];
 	u16 piobuf_size;
 	bool must_restore_piobufs;
-	u32 rx_rss_context;
 	bool rx_rss_context_exclusive;
 	u64 stats[EF10_STAT_COUNT];
 	struct delayed_work vf_stats_work;
@@ -416,6 +440,9 @@ struct efx_ef10_nic_data {
 	struct mutex udp_tunnels_lock;
 	u64 licensed_features;
 };
+
+#define efx_ef10_has_cap(caps, flag) \
+	(!!((caps) & BIT_ULL(MC_CMD_GET_CAPABILITIES_V4_OUT_ ## flag ## _LBN)))
 
 int efx_init_sriov(void);
 void efx_fini_sriov(void);
@@ -618,6 +645,10 @@ efx_nic_process_eventq(struct efx_channel *channel, int quota)
 {
 	return channel->efx->type->ev_process(channel, quota);
 }
+static inline bool efx_nic_mcdi_ev_pending(struct efx_channel *channel)
+{
+	return channel->efx->type->ev_mcdi_pending(channel);
+}
 static inline void efx_nic_eventq_read_ack(struct efx_channel *channel)
 {
 	channel->efx->type->ev_read_ack(channel);
@@ -650,6 +681,7 @@ int efx_farch_ev_init(struct efx_channel *channel);
 void efx_farch_ev_fini(struct efx_channel *channel);
 void efx_farch_ev_remove(struct efx_channel *channel);
 int efx_farch_ev_process(struct efx_channel *channel, int quota);
+bool efx_farch_ev_mcdi_pending(struct efx_channel *channel);
 void efx_farch_ev_read_ack(struct efx_channel *channel);
 void efx_farch_ev_test_generate(struct efx_channel *channel);
 
@@ -676,20 +708,13 @@ u32 efx_farch_filter_get_rx_id_limit(struct efx_nic *efx);
 s32 efx_farch_filter_get_rx_ids(struct efx_nic *efx,
 				enum efx_filter_priority priority, u32 *buf,
 				u32 size);
-#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
-s32 efx_farch_filter_async_insert(struct efx_nic *efx,
-				  const struct efx_filter_spec *spec);
-#endif
 #ifdef CONFIG_RFS_ACCEL
 bool efx_farch_filter_rfs_expire_one(struct efx_nic *efx, u32 flow_id,
 				     unsigned int index);
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-int efx_farch_filter_async_remove(struct efx_nic *efx, unsigned int index);
-#endif
 #ifdef EFX_NOT_UPSTREAM
-int efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id, int rxq_i,
-			      int stack_id);
+int efx_farch_filter_redirect(struct efx_nic *efx, u32 filter_id,
+			      u32 *rss_context, int rxq_i, int stack_id);
 int efx_farch_filter_block_kernel(struct efx_nic *efx, enum
 				  efx_dl_filter_block_kernel_type type);
 void efx_farch_filter_unblock_kernel(struct efx_nic *efx, enum

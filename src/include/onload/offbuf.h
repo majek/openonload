@@ -51,6 +51,9 @@ ci_inline void oo_offbuf_init2(oo_offbuf* b, void* start, void* end) {
 ci_inline void oo_offbuf_set_start(oo_offbuf* b, void* start)
 { b->off = (ci_uint32) ((char*) start - (char*) b); }
 
+ci_inline void oo_offbuf_set_end(oo_offbuf* b, void* end)
+{ b->end = (ci_uint32) ((char*) end - (char*) b); }
+
 ci_inline void oo_offbuf_set_len(oo_offbuf* b, int len)
 { b->end = b->off + len; }
 

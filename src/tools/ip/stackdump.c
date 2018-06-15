@@ -43,6 +43,7 @@ static ci_cfg_desc cfg_opts[] = {
   {   0, "samples",   CI_CFG_UINT, &cfg_samples, "number of samples"        },
   { 't', "notable",   CI_CFG_FLAG, &cfg_notable, "toggle table mode"},
   { 'z', "zombie",    CI_CFG_FLAG, &cfg_zombie,  "force dump of orphan stacks"},
+  {   0, "nopids",    CI_CFG_FLAG, &cfg_nopids,  "disable dumping of PIDs"},
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
@@ -193,9 +194,10 @@ static void usage(const char* msg)
   ci_log(" ");
   ci_log("misc commands:");
   ci_log("  doc");
-  ci_log("  threads            Show thread information of onload processes");
-  ci_log("  env                Show onload related environment of processes");
-  ci_log("  processes          Show list of onloaded processes");
+  ci_log("  threads   Show thread information of onload processes");
+  ci_log("  env       Show onload related environment of processes");
+  ci_log("  processes Show list of onloaded processes");
+  ci_log("  stacks    Show list of stacks, names, PIDs (default if no args)");
 
   ci_log(" ");
   ci_log("stack commands:");
@@ -449,18 +451,29 @@ int main(int argc, char* argv[])
     }
     else if( ! strcmp(argv[0], "threads") ) {
       if( doing_sockets || doing_stacks )
-        ci_app_usage("Cannot mix doc with other commands");
-      CI_TRY(libstack_threads_print());
+        ci_app_usage("Cannot mix threads with other commands");
+       if( cfg_nopids )
+        ci_app_usage("Cannot mix threads command with --nopids");
+     CI_TRY(libstack_threads_print());
     }
     else if( ! strcmp(argv[0], "env") ) {
       if( doing_sockets || doing_stacks )
-        ci_app_usage("Cannot mix doc with other commands");
+        ci_app_usage("Cannot mix env with other commands");
+      if( cfg_nopids )
+        ci_app_usage("Cannot mix env command with --nopids");
       CI_TRY(libstack_env_print());
     }
     else if( ! strcmp(argv[0], "processes") ) {
       if( doing_sockets || doing_stacks )
-        ci_app_usage("Cannot mix doc with other commands");
+        ci_app_usage("Cannot mix processes with other commands");
+      if( cfg_nopids )
+        ci_app_usage("Cannot mix processes command with --nopids");
       libstack_pid_mapping_print();
+    }
+    else if( ! strcmp(argv[0], "stacks") ) {
+      if( doing_sockets || doing_stacks )
+        ci_app_usage("Cannot mix stacks with other commands");
+      libstack_stack_mapping_print();
     }
     else if( ! cfg_zombie && ! strcmp(argv[0], "kill") ) {
       ci_app_usage("Cannot use kill without -z");

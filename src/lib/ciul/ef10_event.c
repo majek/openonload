@@ -76,6 +76,8 @@ typedef ci_qword_t ef_vi_event;
       ++(vi)->vi_stats->name;                   \
   } while (0)
 
+#define INC_VI_STAT INC_ERROR_STAT
+
 
 /* The space occupied by a minimum sized (60 byte) packet. */
 #define EF_VI_PS_MIN_PKT_SPACE						\
@@ -93,10 +95,17 @@ ef_vi_inline unsigned discard_type(uint64_t error_bits)
 {
   const uint64_t l2_errors = ( (1llu << ESF_DZ_RX_ECC_ERR_LBN) |
                                (1llu << ESF_DZ_RX_ECRC_ERR_LBN) );
+  const uint64_t l3_errors = ( (1llu << ESF_DZ_RX_TCPUDP_CKSUM_ERR_LBN) |
+                               (1llu << ESF_DZ_RX_IPCKSUM_ERR_LBN) );
+
   if( error_bits & l2_errors )
     return EF_EVENT_RX_DISCARD_CRC_BAD;
-  else
+  else if( error_bits & l3_errors )
     return EF_EVENT_RX_DISCARD_CSUM_BAD;
+  else
+    return EF_EVENT_RX_DISCARD_INNER_CSUM_BAD;
+
+
 }
 
 
@@ -348,8 +357,12 @@ static inline void ef10_tx_event_ts_lo(ef_vi* evq, const ef_vi_event* ev)
 {
   ef_vi_txq_state* qs = &evq->ep_state->txq;
   EF_VI_DEBUG(EF_VI_BUG_ON(qs->ts_nsec != EF_VI_TX_TIMESTAMP_TS_NSEC_INVALID));
-  qs->ts_nsec =
-    (((uint64_t) timestamp_extract(*ev) * 1000000000UL) >> 29) << 2;
+  if( evq->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS )
+    qs->ts_nsec = ((uint64_t) timestamp_extract(*ev) >> 4) << 2;
+  else
+    qs->ts_nsec =
+      (((uint64_t) timestamp_extract(*ev) * 1000000000UL) >> 29) << 2;
+
   qs->ts_nsec |= evq->ep_state->evq.sync_flags;
 }
 
@@ -425,36 +438,53 @@ static void ef10_tx_event_ts_enabled(ef_vi* evq, const ef_vi_event* ev,
    * EF_EVENT_TYPE_TX_WITH_TIMESTAMP event to send to the user.
    */
   ef_event* ev_out;
-  switch( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ) {
+  uint32_t ev_type = QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev);
+  switch( ev_type ) {
   case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION:
     break;
   case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_TS_LO:
     ef10_tx_event_ts_lo(evq, ev);
     break;
   case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_HI:
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_TS_HI:
     ev_out = (*evs)++;
     --(*evs_len);
     ev_out->tx.type = EF_EVENT_TYPE_TX_WITH_TIMESTAMP;
+    if( ev_type == TX_TIMESTAMP_EVENT_TX_EV_CTPIO_TS_HI )
+      ev_out->tx.flags = EF_EVENT_FLAG_CTPIO;
+    else
+      ev_out->tx.flags = 0;
     ef10_tx_event_ts_hi(evq, ev, ev_out);
     ef10_tx_event_ts_rq_id(evq, ev_out);
     break;
   default:
     ef_log("%s:%d: ERROR: soft1=%x ev="CI_QWORD_FMT, __FUNCTION__,
-           __LINE__, (unsigned) QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev),
+           __LINE__, (unsigned) QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev),
            CI_QWORD_VAL(*ev));
     break;
   }
 }
 
 
-static inline void ef10_tx_event_completion(const ef_vi_event* ev,
+static inline void ef10_tx_event_completion(ef_vi* evq, const ef_vi_event* ev,
                                             ef_event** evs, int* evs_len)
 {
   ef_event* ev_out = (*evs)++;
+  unsigned ev_type = QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev);
+
+  EF_VI_ASSERT( ev_type == TX_TIMESTAMP_EVENT_TX_EV_COMPLETION ||
+                ev_type == TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION );
+
   --(*evs_len);
   ev_out->tx.q_id = QWORD_GET_U(ESF_DZ_TX_QLABEL, *ev);
   ev_out->tx.desc_id = QWORD_GET_U(ESF_DZ_TX_DESCR_INDX, *ev) + 1;
   ev_out->tx.type = EF_EVENT_TYPE_TX;
+  if( ev_type == TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION )
+    ev_out->tx.flags = EF_EVENT_FLAG_CTPIO;
+  else
+    ev_out->tx.flags = 0;
 }
 
 
@@ -471,9 +501,10 @@ static void ef10_tx_event_alt(ef_vi* evq, const ef_vi_event* ev,
    */
   EF_VI_ASSERT( ! (evq->vi_flags & EF_VI_TX_TIMESTAMPS) );
 
-  switch( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ) {
+  switch( QWORD_GET_U(ESF_EZ_TX_SOFT1, *ev) ) {
   case TX_TIMESTAMP_EVENT_TX_EV_COMPLETION:
-    ef10_tx_event_completion(ev, evs, evs_len);
+  case TX_TIMESTAMP_EVENT_TX_EV_CTPIO_COMPLETION:
+    ef10_tx_event_completion(evq, ev, evs, evs_len);
     break;
   case TX_TIMESTAMP_EVENT_TX_EV_TSTAMP_LO:
     break;
@@ -501,9 +532,7 @@ ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
     /* Transmit completion event.  Indicates how many descriptors have been
      * consumed and that DMA reads have completed.
      */
-    EF_VI_ASSERT( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-                  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION );
-    ef10_tx_event_completion(ev, evs, evs_len);
+    ef10_tx_event_completion(evq, ev, evs, evs_len);
   }
   /* It would make sense to check (evq->vi_flags & EF_VI_TX_ALT)
    * instead of tx_alt_num here, but we don't because although the VI
@@ -519,24 +548,21 @@ ef_vi_inline void ef10_tx_event(ef_vi* evq, const ef_vi_event* ev,
 		  evq->vi_flags & EF_VI_TX_TIMESTAMPS );
     if( evq->vi_flags & EF_VI_TX_TIMESTAMPS )
       ef10_tx_event_ts_enabled(evq, ev, evs, evs_len);
-    else {
-      EF_VI_ASSERT( QWORD_GET_U(ESF_DZ_TX_SOFT1, *ev) ==
-                  TX_TIMESTAMP_EVENT_TX_EV_COMPLETION );
-      ef10_tx_event_completion(ev, evs, evs_len);
-    }
+    else
+      ef10_tx_event_completion(evq, ev, evs, evs_len);
   }
 }
 
 ef_vi_inline int
-ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
-                                           struct timespec* ts_out,
-                                           unsigned* flags_out)
+ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync(ef_vi* vi,
+	const void* pkt, struct timespec* ts_out, unsigned* flags_out,
+	uint32_t tsync_minor, uint32_t tsync_major)
 {
-#define FLAG_NO_TIMESTAMP        0x80000000
-#define ONE_SEC                  0x8000000
-#define MAX_RX_PKT_DELAY         0xCCCCCC  /* ONE_SECOND / 10 */
-#define MAX_TIME_SYNC_DELAY      0x1999999 /* ONE_SECOND * 2 / 10 */
-#define SYNC_EVENTS_PER_SECOND   4
+  const uint32_t FLAG_NO_TIMESTAMP = 0x80000000;
+  const uint32_t ONE_SEC = 0x8000000;
+  const uint32_t MAX_RX_PKT_DELAY = 0xCCCCCC;  /* ONE_SECOND / 10 */
+  const uint32_t MAX_TIME_SYNC_DELAY = 0x1999999; /* ONE_SECOND * 2 / 10 */
+  const uint32_t SYNC_EVENTS_PER_SECOND = 4;
 
   /* sync_timestamp_major contains the number of seconds and
    * sync_timestamp_minor contains the upper bits of ns.
@@ -572,7 +598,7 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
     uint32_t pkt_minor =
       ( pkt_minor_raw + vi->rx_ts_correction) & 0x7FFFFFF;
     ts_out->tv_nsec = ((uint64_t) pkt_minor * 1000000000) >> 27;
-    diff = (pkt_minor - evqs->sync_timestamp_minor) & (ONE_SEC - 1);
+    diff = (pkt_minor - tsync_minor) & (ONE_SEC - 1);
     if (diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) +
         MAX_TIME_SYNC_DELAY) {
       /* pkt_minor taken after sync event in the
@@ -580,9 +606,9 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
        * happened, then the second boundary, and
        * then the pkt_minor.
        */
-      ts_out->tv_sec = evqs->sync_timestamp_major;
+      ts_out->tv_sec = tsync_major;
       ts_out->tv_sec +=
-        diff + evqs->sync_timestamp_minor >= ONE_SEC;
+        diff + tsync_minor >= ONE_SEC;
       *flags_out = evqs->sync_flags;
       return 0;
     } else if (diff > ONE_SEC - MAX_RX_PKT_DELAY) {
@@ -591,9 +617,9 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
        * happened, then the second boundary, and
        * then the sync event.
        */
-      ts_out->tv_sec = evqs->sync_timestamp_major;
+      ts_out->tv_sec = tsync_major;
       ts_out->tv_sec -=
-        diff + evqs->sync_timestamp_minor <= ONE_SEC;
+        diff + tsync_minor <= ONE_SEC;
       *flags_out = evqs->sync_flags;
       return 0;
     } else {
@@ -608,9 +634,112 @@ ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
   ts_out->tv_nsec = 0;
   if( (pkt_minor_raw & FLAG_NO_TIMESTAMP) != 0 )
     return -ENODATA;
-  return (evqs->sync_timestamp_major == ~0u) ? -ENOMSG : -EL2NSYNC;
+  return (tsync_major == ~0u) ? -ENOMSG : -EL2NSYNC;
 }
 
+ef_vi_inline int
+ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
+	(ef_vi* vi, const void* pkt, struct timespec* ts_out,
+	 unsigned* flags_out, uint32_t tsync_minor, uint32_t tsync_major)
+{
+  const uint32_t NO_TIMESTAMP = 0xFFFFFFFF;
+  /* Since M2, timestamp_minor unit is quarter nanoseconds */
+  const uint32_t ONE_SEC = 0xEE6B2800;
+  const uint32_t MAX_RX_PKT_DELAY = 0x17D78400; /* ONE_SEC / 10 */
+  const uint32_t MAX_TIME_SYNC_DELAY = 0x2FAF0800; /* ONE_SEC * 2 / 10 */
+  const uint32_t WRAP_CORRECTION = 0x1194D7FF;
+  const uint32_t SYNC_EVENTS_PER_SECOND = 4;
+
+  /* Comments in sibling function,
+   * ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync apply here.
+   */
+
+  ef_eventq_state* evqs = &(vi->ep_state->evq);
+  uint32_t* data = (uint32_t*) ((uint8_t*)pkt + ES_DZ_RX_PREFIX_TSTAMP_OFST);
+  uint32_t pkt_minor_raw = le32_to_cpu(*data);
+
+  if( pkt_minor_raw == NO_TIMESTAMP )
+    return -ENODATA;
+
+  if( evqs->sync_timestamp_synchronised ) {
+    uint32_t pkt_minor = pkt_minor_raw + vi->rx_ts_correction;
+    uint32_t diff;
+    int c1, c2;
+
+    /* If the packet arrived more than halfway through a nanosecond
+     * then the resulting timestamp will be more accurate if we round
+     * it up, rather than down. */
+    pkt_minor += 2;
+
+    /* See bug75412 */
+    if(unlikely( pkt_minor >= 4000000000U ))
+      pkt_minor -= 4000000000U;
+
+    ts_out->tv_nsec = pkt_minor >> 2;
+    ts_out->tv_sec = tsync_major;
+
+    diff = pkt_minor - tsync_minor;
+    if( pkt_minor < tsync_minor )
+      diff -= WRAP_CORRECTION;
+
+    /* tsync minor before pkt minor */
+    c1 = diff < (ONE_SEC / SYNC_EVENTS_PER_SECOND) + MAX_TIME_SYNC_DELAY;
+    /* pkt minor before tsync minor */
+    c2 = diff > ONE_SEC - MAX_RX_PKT_DELAY;
+
+    if(unlikely( ! (c1 | c2) ))
+      goto invalid;
+
+    /* Adjust seconds in case of wrapping. One of these will do nothing. */
+    ts_out->tv_sec += c1 & (pkt_minor < tsync_minor);
+    ts_out->tv_sec -= c2 & (tsync_minor < pkt_minor);
+
+    *flags_out = evqs->sync_flags;
+
+    return 0;
+  }
+
+invalid:
+  evqs->sync_timestamp_synchronised = 0;
+  /* Zero ts_out in case of failure to avoid returning garbage. */
+  *ts_out = (struct timespec) { 0 };
+  return (tsync_major == ~0u) ? -ENOMSG : -EL2NSYNC;
+}
+
+int ef10_receive_get_timestamp_with_sync_flags_internal
+	(ef_vi* vi, const void* pkt, struct timespec* ts_out,
+	 unsigned* flags_out, uint32_t tsync_minor, uint32_t tsync_major)
+{
+  /* This function is where TCPDirect hooks in to implement its own
+   * timestamping API; making changes hereon has the benefit of not needing
+   * any TCPDirect changes.
+   */
+  if( vi->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS )
+    return ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync_qns
+             (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+  else
+    return ef10_ef_vi_receive_get_timestamp_with_sync_flags_from_tsync
+             (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+}
+
+int
+ef10_receive_get_timestamp_with_sync_flags(ef_vi* vi, const void* pkt,
+					   struct timespec* ts_out,
+					   unsigned* flags_out)
+{
+
+  /* Divided so we can calculate timestamps for packets using older
+   * `sync_timstamp`s. Useful in finding a way around the interaction with
+   * ef_eventq_poll.
+   **/
+
+  ef_eventq_state* evqs = &(vi->ep_state->evq);
+  uint32_t tsync_minor = evqs->sync_timestamp_minor;
+  uint32_t tsync_major = evqs->sync_timestamp_major;
+
+  return ef10_receive_get_timestamp_with_sync_flags_internal
+	  (vi, pkt, ts_out, flags_out, tsync_minor, tsync_major);
+}
 
 static void
 ef10_receive_get_bytes(ef_vi* vi, const void* pkt, uint16_t* bytes_out)
@@ -679,7 +808,10 @@ static void ef10_mcdi_event(ef_vi* evq, const ef_vi_event* ev,
   switch( code ) {
   case MCDI_EVENT_CODE_PTP_TIME:
     major = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MAJOR, *ev);
-    minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 21;
+    if( evq->ts_format == TS_FORMAT_SECONDS_QTR_NANOSECONDS )
+      minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 26;
+    else
+      minor = QWORD_GET_U(MCDI_EVENT_PTP_TIME_MINOR_26_21, *ev) << 21;
     if( evq->vi_out_flags & EF_VI_OUT_CLOCK_SYNC_STATUS )
       sync_flags =
         (QWORD_GET_U(MCDI_EVENT_PTP_TIME_NIC_CLOCK_VALID, *ev) ?

@@ -181,20 +181,24 @@ static inline int iommu_unmap_my(struct iommu_domain *domain,
 #endif
 
 
-/* VM_RESERVED prevents the MM from attempting to swap-out these
- * pages.
+/* VM_IO is used on mappings of PCI space to inform the kernel that the mapping
+ * is not backed by host memory, and so to prevent it from doing anything that
+ * it shouldn't.
  *
- * VM_IO is there to avoid people getting references to our pages to
- * do direct-IO.  This has been recommended on the LKML.
- * http://www.forbiddenweb.org/viewtopic.php?id=83167&page=3#347912
- *
- * From linux-3.7, VM_RESERVED is removed.
- * VM_DONTEXPAND | VM_DONTDUMP is recommended as a replacement.
+ * VM_DONTEXPAND prevents the MM from attempting to swap-out these
+ * pages.  On very old kernels (2.4) this property belonged instead to
+ * VM_RESERVED, but that also prevents core dumps, and we don't require it on
+ * any of our supported kernels.  We continue to set it when setting VM_IO,
+ * though, for consistency with other users in the kernel, even though its
+ * effects are implied by VM_IO.  Similarly, on modern (>= 3.7) kernels in
+ * which VM_RESERVED has been purged, we set VM_DONTDUMP if and only if we have
+ * set VM_IO.
  */
+#define EFRM_VM_BASE_FLAGS VM_DONTEXPAND
 #ifdef VM_RESERVED
-#define EFRM_VM_IO_FLAGS (VM_IO | VM_RESERVED | VM_DONTEXPAND)
+#define EFRM_VM_IO_FLAGS   (EFRM_VM_BASE_FLAGS | VM_IO | VM_RESERVED)
 #else
-#define EFRM_VM_IO_FLAGS (VM_IO | VM_DONTDUMP | VM_DONTEXPAND)
+#define EFRM_VM_IO_FLAGS   (EFRM_VM_BASE_FLAGS | VM_IO | VM_DONTDUMP)
 #endif
 
 

@@ -99,6 +99,9 @@ struct efrm_pd {
 	 * multicast loopback */
 	int stack_id;
 
+	/* serializes remapping of buffers on NIC reset */
+	struct mutex remap_lock;
+
 	/* Buffer table manager.  Needed iff vf==NULL.
 	 * For Huntington, we'll need separate managers for different
 	 * page orders.*/
@@ -326,6 +329,7 @@ int efrm_pd_alloc(struct efrm_pd **pd_out, struct efrm_client *client_opt,
 	pd->min_nic_order = 0;
 	pd->vport_id = EFRM_PD_VPORT_ID_NONE;
 
+	mutex_init(&pd->remap_lock);
 	if (flags & EFRM_PD_ALLOC_FLAG_HW_LOOPBACK) {
 		if ((rc = efrm_pd_stack_id_alloc(pd)) != 0) {
 			efrm_pd_release(pd);
@@ -356,6 +360,8 @@ EXPORT_SYMBOL(efrm_pd_release);
 void efrm_pd_free(struct efrm_pd *pd)
 {
 	struct efrm_pd_owner_ids *owner_ids;
+
+	mutex_destroy(&pd->remap_lock);
 
 	efrm_pd_os_stats_dtor(pd, pd->os_data);
 
@@ -1095,6 +1101,8 @@ int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 	if (pd->owner_id == OWNER_ID_PHYS_MODE)
 		return -ENOSYS;
 
+	mutex_lock(&pd->remap_lock);
+
 	for (bt_num = 0; bt_num < bt_alloc->num_allocs; bt_num++) {
 		int ord_idx;
 		if (bt_alloc->allocs[bt_num].bta_size == 0)
@@ -1108,12 +1116,13 @@ int efrm_pd_dma_remap_bt(struct efrm_pd *pd, int n_pages, int nic_order,
 		if (rc != 0 && rc1 == 0)
 			rc1 = rc;
 	}
-
-	if (rc1 != 0)
-		return rc1;
-	return efrm_pd_bt_map(pd, nic_order, pci_addrs, pci_addrs_stride,
-			      user_addrs, user_addrs_stride, user_addr_put,
-			      bt_alloc, 0);
+        rc = rc1;
+	if (rc == 0)
+		rc = efrm_pd_bt_map(pd, nic_order, pci_addrs, pci_addrs_stride,
+				    user_addrs, user_addrs_stride, user_addr_put,
+				    bt_alloc, 0);
+        mutex_unlock(&pd->remap_lock);
+        return rc;
 }
 EXPORT_SYMBOL(efrm_pd_dma_remap_bt);
 

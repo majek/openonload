@@ -309,33 +309,41 @@ fail:
 }
 
 
-int efrm_pio_map_kernel(struct efhw_nic *nic, struct efrm_vi *vi, void **io)
+static void* efrm_ioremap_wc(phys_addr_t addr, size_t size)
 {
-	int bar_off = ef10_tx_dma_page_base(vi->rs.rs_instance) + 4096;
-	int bar_page_off = bar_off & PAGE_MASK;
-
 #ifdef CONFIG_FORCE_PIO_NON_CACHED
 	EFRM_WARN("%s: mapping PIO in non cached mode", __FUNCTION__);
-	*io = ioremap_nocache(
-		nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
+	return ioremap_nocache(addr, size);
 #elif defined EFRM_HAVE_IOREMAP_WC
-	*io = ioremap_wc(
-		nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
+	return ioremap_wc(addr, size);
 #elif defined HAS_COMPAT_PAT_WC
-	if( !compat_pat_wc_is_initialized() ) {
+	if( ! compat_pat_wc_is_initialized() ) {
 		EFRM_ERR("%s: write combining compatibility module not "
-			" initialized. Consider enabling it or not using PIO.",
-			__FUNCTION__);
-		return -EINVAL;
+			 " initialized. Consider enabling it or not using PIO.",
+			 __FUNCTION__);
+		return NULL;
 	}
-	*io = compat_pat_wc_ioremap_wc(
-		nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
+	return compat_pat_wc_ioremap_wc(addr, size);
 #else
 	EFRM_ERR("%s: This kernel does not seem to support write"
 		 " combining.  Consider disabling it or not using PIO.",
 		 __FUNCTION__);
-	return -EINVAL;
+	return NULL;
 #endif
+}
+
+
+int efrm_pio_map_kernel(struct efrm_vi *vi, void **io)
+{
+	const size_t VI_WINDOW_PIO_OFFSET = 4096;
+	struct efhw_nic* nic = vi->rs.rs_client->nic;
+	size_t bar_off, bar_page_off;
+	bar_off = ef10_tx_dma_page_base(nic->vi_stride, vi->rs.rs_instance);
+	bar_off += VI_WINDOW_PIO_OFFSET;
+	bar_page_off = bar_off & PAGE_MASK;
+	*io = efrm_ioremap_wc(nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
+	if( *io == NULL )
+		return -EINVAL;
 	*io = (char*) *io + (bar_off & (PAGE_SIZE - 1u));
 	return 0;
 }
@@ -354,3 +362,27 @@ int efrm_pio_get_size(struct efrm_pio *pio)
 	return pio->epio_len;
 }
 EXPORT_SYMBOL(efrm_pio_get_size);
+
+
+int efrm_ctpio_map_kernel(struct efrm_vi *vi, void **io)
+{
+	const size_t VI_WINDOW_CTPIO_OFFSET = 12*1024;
+	struct efhw_nic* nic = vi->rs.rs_client->nic;
+	size_t bar_off, bar_page_off;
+	bar_off = ef10_tx_dma_page_base(nic->vi_stride, vi->rs.rs_instance);
+	bar_off += VI_WINDOW_CTPIO_OFFSET;
+	bar_page_off = bar_off & PAGE_MASK;
+	*io = efrm_ioremap_wc(nic->ctr_ap_dma_addr + bar_page_off, PAGE_SIZE);
+	if( *io == NULL )
+		return -EINVAL;
+	*io = (char*) *io + (bar_off & (PAGE_SIZE - 1u));
+	return 0;
+}
+EXPORT_SYMBOL(efrm_ctpio_map_kernel);
+
+
+void efrm_ctpio_unmap_kernel(struct efrm_vi *vi, void *io)
+{
+	iounmap((void*) ((unsigned long) io & PAGE_MASK));
+}
+EXPORT_SYMBOL(efrm_ctpio_unmap_kernel);

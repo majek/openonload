@@ -89,5 +89,4 @@ int cithread_join(cithread_t kt)
 }
 
 
-
 /*! \cidoxg_end */

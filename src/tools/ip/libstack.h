@@ -68,6 +68,7 @@ extern unsigned		cfg_usec;
 extern unsigned		cfg_samples;
 extern int		cfg_notable;
 extern int		cfg_zombie;
+extern int              cfg_nopids;
 extern int		ci_cfg_verbose;
 
 /**********************************************************************

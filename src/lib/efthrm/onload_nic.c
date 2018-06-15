@@ -86,7 +86,7 @@ oo_efrm_reset_hook_generic(struct efrm_client* client,
     ci_irqlock_unlock(&THR_TABLE.lock, &lock_flags);
 
     ni = NULL;
-    while( iterate_netifs_unlocked(&ni) == 0 )
+    while( iterate_netifs_unlocked(&ni, 0, 0) == 0 )
       if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
         impl_fn(ni, intf_i);
   }

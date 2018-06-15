@@ -80,6 +80,13 @@ typedef struct oo_buffer_pages* ci_pkt_bufs;
 typedef char* ci_pkt_bufs;
 #endif
 
+#ifndef __KERNEL__
+struct ci_extra_ep {
+  /* stores the current process cached FD to the endpoint or CI_FD_BAD */
+  ci_fd_t fd;
+};
+#endif
+
 /*!
 ** ci_netif
 **
@@ -108,6 +115,10 @@ struct ci_netif_s {
 #if CI_CFG_PIO
   uint8_t*             pio_ptr;
   ci_uint32            pio_bytes_mapped;
+#endif
+#if CI_CFG_CTPIO
+  uint8_t*             ctpio_ptr;
+  ci_uint32            ctpio_bytes_mapped;
 #endif
   char*                buf_ptr;
 #endif
@@ -141,6 +152,7 @@ struct ci_netif_s {
 #endif
 
   ci_netif_filter_table* filter_table;
+  ci_ni_dllist_t*      active_wild_table;
 
 
 #ifdef __ci_driver__
@@ -169,6 +181,7 @@ struct ci_netif_s {
   ** reference count to govern the lifetime of the UL netif.
   */
   oo_atomic_t          ref_count;
+  unsigned             cached_count;
 #endif /* __ci_driver__ */
 
   /* General flags */  
@@ -193,6 +206,8 @@ struct ci_netif_s {
 # define CI_NETIF_FLAGS_DTOR_PROTECTED   0x20
   /* Don't use this stack for new sockets unless name says otherwise */
 # define CI_NETIF_FLAGS_DONT_USE_ANON    0x40
+  /* Packets have been prefaulted */
+# define CI_NETIF_FLAGS_PREFAULTED       0x80
 
 #else
 
@@ -210,6 +225,8 @@ struct ci_netif_s {
 #endif
   /* Shared state wedged */
 #define CI_NETIF_FLAG_WEDGED             0x4000
+  /* May inject packets to kernel */
+#define CI_NETIF_FLAG_MAY_INJECT_TO_KERNEL 0x8000
 
 #endif
 
@@ -243,6 +260,14 @@ struct ci_netif_s {
 #ifdef ONLOAD_OFE
   struct ofe_engine*  ofe;
   struct ofe_channel* ofe_channel;
+#endif
+
+
+#ifndef __KERNEL__
+#define ID_TO_EPS(ni,id) (&(ni)->eps[id])
+#define S_TO_EPS(ni,s) ID_TO_EPS(ni,S_ID(s))
+#define SC_TO_EPS(ni,s) ID_TO_EPS(ni,SC_ID(s))
+  struct ci_extra_ep* eps;
 #endif
 };
 

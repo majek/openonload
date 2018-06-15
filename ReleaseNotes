@@ -1,280 +1,370 @@
-OpenOnload-201710-u1.1
-======================
-
-This is a minor update release that adds support for recent kernels
-(up to v4.16) to allow use of Onload with kernels that have
-CONFIG_RETPOLINE enabled.
-
-It also supports enterprise distribution kernels that have backported
-and enabled CONFIG_RETPOLINE.
-
-This package is supported on:
- - Red Hat Enterprise Linux 6.7 - 6.9
- - Red Hat Enterprise Linux 7.2 - 7.5*
- - SuSE Linux Enterprise Server 11 sp4
- - SuSE Linux Enterprise Server 12 sp2, sp3
- - Canonical Ubuntu Server LTS 14.04, 16.04
- - Canonical Ubuntu Server 17.10
- - Debian 8 "Jessie"
- - Debian 9 "Stretch"
- - Linux kernels 3.0 - 4.16
-
-* At time of writing RHEL 7.5 is in beta but we don't expect any
-relevant changes before it is released as GA.
-
-
-OpenOnload-201710-u1
-====================
-
-This is a minor update release that adds support for recent kernels
-(up to v4.14.11) to allow use of Onload with kernels that have KPTI.
-
-It also supports enterprise distribution kernels for RHEL7 and SLES12
-that have backported KPTI.
-
-
-OpenOnload-201710
+OpenOnload-201805
 =================
 
-This is a major feature release that adds new features to OpenOnload
-and reworks some existing functionality.
+ This is a major feature release that adds new features to OpenOnload, in
+ particular support for the new X2 adapters from Solarflare, extensions
+ to TCPDirect and new Onload scalable filter capabilities.
 
-A brief summary of new features and known limitations is included
-below - for more details see the Onload user guide.
+ The support for X2 adapters includes the new cut-through PIO (CTPIO)
+ mechanism, which reduces latency on the send path.
 
-See the accompanying ChangeLog for a list of bugs fixed.
+ The notes below describe some of the new features, including CTPIO and
+ how it is used with OpenOnload, TCPDirect and ef_vi.
+
+ See the Onload user guide for full details of new features and associated
+ configuration options.
+
+ See the accompanying ChangeLog for a list of bugs fixed.
 
 
 Linux distribution support
 --------------------------
- 
-This package is supported on:
+
+ This package is supported on:
  - Red Hat Enterprise Linux 6.7 - 6.9
- - Red Hat Enterprise Linux 7.2 - 7.4
+ - Red Hat Enterprise Linux 7.1 - 7.5
  - SuSE Linux Enterprise Server 11 sp4
- - SuSE Linux Enterprise Server 12 sp2, sp3
- - Canonical Ubuntu Server LTS 14.04, 16.04
- - Canonical Ubuntu Server 17.04
+ - SuSE Linux Enterprise Server 12 sp2 and sp3
+ - Canonical Ubuntu Server LTS 16.04, 18.04
+ - Canonical Ubuntu Server 17.10
  - Debian 8 "Jessie"
  - Debian 9 "Stretch"
- - Linux kernels 3.0 - 4.13
+ - Linux kernels 3.0 - 4.16.6
 
 
-ScaleOut Onload
----------------
+CTPIO
+-----
 
-ScaleOut Onload is a new Onload NIC licence that is optimised for use
-in applications where latency is not critical.  Efficiency of packet
-processing and throughput are prioritised over latency.
+ CTPIO improves send latency by moving packets from the PCIe bus to network
+ port with minimal latency.  It can be used in three modes:
 
+   1) Cut-through: The frame is transmitted onto the network as it is
+      streamed across the PCIe bus.  This mode offers the best latency.
 
-Control Plane Server
---------------------
+   2) Store-and-forward: The frame is buffered on the adapter before
+      transmiting onto the network.
 
-As part of the changes to add support for network namespaces, and to
-avoid our kernel modules "tainting" the kernel, Onload now uses a
-user-space control plane server daemon.
+   3) Store-and-forward with poison disabled: As for (2), except that it is
+      guaranteed that frames are never poisoned.  When this mode is enabled
+      on any VI, all VIs are placed into store-and-forward mode.
 
-One onload_cp_server process will be spawned per network namespace in
-which there is an active Onload stack.  This process is spawned when
-the first stack is created in a namespace, and stack-creation will
-wait for the process to be ready, which can result in a noticeable
-delay.  To avoid this delay in the majority of cases Onload will spawn
-a control plane server for the default (main) network namespace at
-load time.
+ Underrun, poisoning and fallback:
 
-The onload_cp_server process for a namespace will exit after a "grace
-period" has elapsed after the last stack in a namespace has been
-destroyed.  If a new stack is created in the same namespace before the
-grace period has elapsed, it will use the existing onload_cp_server
-and will not experience the delay at stack- creation.  The grace
-period can be controlled using the "cplane_server_grace_timeout"
-module option to the "onload" kernel module.
+ When using cut-through mode, if the frame is not streamed to the adapter
+ at at least line rate, then the frame is likely to be poisoned.  This is
+ most likely to happen if the application thread is interrupted while
+ writing the frame to the adapter.  In the underrun case, the frame is
+ terminated with an invalid FCS -- this is referred to as "poisoning" --
+ and so will be discarded by the link partner.  Cut-through mode is
+ currently expected to perform well only on 10G links.
 
-The compiler architecture (x86_64, i686) of the onload_cp_server
-process should match that of the kernel in the host.
+ CTPIO may be aborted for other reasons, including timeout while writing a
+ frame, contention between threads using CTPIO at the same time, and the
+ CPU writing data to the adapter in the wrong order.
 
-A new tool "onload_mibdump" has been added to access current state of
-the control plane.  This provides similar information (although
-differently formatted) to that which was previously available in
-/proc/driver/onload_cplane/mib-*
+ In all of the above failure cases the adapter falls-back to sending via
+ the traditional DMA mechanism, which incurs a latency penalty.  So a valid
+ copy of the packet is always transmitted, whether the CTPIO operation
+ succeeds or not.
 
-The cplane server ipif-max configuration parameter is not handled
-correctly if set to more than 256.  This leads to traffic not being
-correctly accelerated.  This will be addressed in a future release.
-
-If downgrading Onload version from a new one (201710 or later) to an
-old one (201606-u1.3 or earlier) the onload_tool script from the old
-version will not know about the onload_cp_server and how to stop it.
-It is recommended that "onload_tool unload" from the newer version is
-run before "onload_uninstall", as otherwise "onload_tool reload" after
-downgrading will fail to unload the existing drivers.
+ Normally only an underrun in cut-through mode will result in a poisoned
+ frame being transmitted.  In rare cases it is also possible for a poisoned
+ frame to be emitted in store-and-forward mode.  If it is necessary to
+ strictly prevent poisoned packets from reaching the network, then
+ poisoning can be disabled globally.
 
 
-Namespaces
-----------
-
-This release allows Onload to correctly operate in multiple network
-namespaces.  Other namespace types are also supported.  There are some
-limitations to this, and Onload does not support:
-
-- multiple interfaces with the same IP address
-- multiple interfaces with the same MAC address
-- processes changing namespace after creating or sharing an Onload stack
-- stack sharing between namespaces
-- multicast in namespaces with 5000 and 6000 series NICs
-
-
-Docker Containers
------------------
-
-This release of OpenOnload includes support for multiple network
-namespaces and Docker containers using the Docker MACVLAN network
-driver.
-
-In brief, this release supports Docker configurations where a MACVLAN
-interface is used to give the container direct access to the
-appropriate Solarflare NIC.  Onload will not accelerate other types of
-network interface, including software bridged or overlay networks.
-Onload will only currently accelerate traffic between the container
-and the NIC; any traffic between containers on the same host will not
-be accelerated by Onload.
-
-The version of Onload installed in the container image must match that
-running in the host.
-
-This functionality currently requires 8000-series adapters.
-
-During testing we have focused on Docker 1.12 as packaged in RHEL7.
-
-Please see the Onload user guide for details of how to use Onload with
-Docker.
-
-
-Bonding
--------
-
-In older versions of Onload knowledge of the current bonding
-configuration was obtained by polling the state exposed by the kernel
-in /proc and /sys.  The frequency of polling was configured using the
-"oo_bond_poll_base" and "oo_bond_poll_peak" module parameters.  This
-took a value in jiffies - the kernel unit of time measurement.
-
-In this version of Onload knowledge of the current bonding
-configuration is where possible obtained by netlink.  I.e. periodic
-polling of /proc and /sys is no longer necessary, and the
-oo_bond_poll_base/peak parameters are not required. However on some
-older supported OSes (e.g. SLES11) netlink does not provide the
-necessary information and so periodic polling is still used.
-
-As part of the change outlined above to introduce the control plane
-server process, these values are now configured through the
---bond_base_period and --bond_peak_period arguments to
-onload_cp_server.  Their values are in milliseconds rather than
-jiffies.  The arguments used to launch onload_cp_server can in turn be
-configured using the cplane_server_params onload module parameter.
-
-When LACP aggregation is in use, Onload ignores the transmit hash mode
-(and uses Layer3+4) in following cases:
-- the aggregation is set up via team module (as in previous releases);
-- the aggregation is set up via bond module, but Linux kernel is older than
-  3.14. (NB. RHEL6, RHEL7, and SLES12 all have the new kernel
-  behaviour backported, and so use the configured hash mode)
-
-
-Interface blacklisting and whitelisting
----------------------------------------
-
-The implementation of Onload's black-list and white-list of interfaces
-to use for acceleration has been reworked in this release.  These are
-now a property of a stack, rather than global lists, and are
-configured using new environment variables EF_INTERFACE_WHITELIST and
-EF_INTERFACE_BLACKLIST.  Please see the Onload user guide for details.
-Any systems attempting to configure these lists using the old method
-for configuration (module options, /proc) will fail and this may cause
-modules to refuse to load due to unknown module options.
-
-
-Policy routing
---------------
-
-This release adds support for policy routing for unicast packets, if
-policy rules are based on source or destination IP, TOS, and/or
-outgoing interface (with SO_BINDTODEVICE).
-
-Policy rules based on fwmarks are ignored by Onload. If a socket is
-bound to an address, and the address is removed, then in certain
-circumstances Onload can continue to use this address for sending.
-
-Due to this addition, the previous EF_TCP_LISTEN_REPLIES_BACK option
-has been removed, as source routing effectively replaces it.
-
-
-MACVLAN interfaces
-------------------
-
-This release includes support for MACVLAN interfaces, both with containers
-(see above) and in standard setups.  These will be accelerated when they are
-created over a Solarflare NIC.  If additional functions are in use then due to
-filtering limitations in the NIC either the NIC needs to be configured to use
-the "low-latency" firmware variant, or if using the "full-featured" firmware
-variant insecure_filters=1 sfboot option needs to be specified.  If the sfboot
-tool reports "Physical Functions on this port 1" and "Virtual Functions on
-each PF 0" then this restriction does not apply.
-
-Although there are no specific firmware dependencies we recommend using the
-most recent GA firmware version available.
-
-We do not support multiple layers of MACVLAN, e.g. where one MACVLAN
-is created with another MACVLAN interface as its parent.  In addition,
-TCPDirect does not supported multiple layers of VLAN + MACVLAN
-interfaces.
-
-
-IP_PKTINFO
-----------
-
-The IP_PKTINFO socket option may provide incorrect information for
-incoming multicast packets when there are multiple MACVLAN interfaces
-in the same net namespace, or basic and macvlan interface in the same
-net namespace, as it can't distinguish which interface was used by
-that packet.
-
-
-MRG 2.0 load issue
-------------------
-
-An issue found during testing for this release affects driver load on
-MRG 2.0 systems.  The build succeeds but driver load will fail with
-the error "onload: Unknown symbol __put_task_struct".  If you are
-using MRG 2.0 a fix for this is available from support@solarflare.com
-
-
-VLAN-over-VLAN interfaces
--------------------------
-
-An issue found during testing for this release shows that interfaces
-where one VLAN interface is layered over the top of another VLAN
-interface are not properly accelerated by Onload.  If you need to use
-these interfaces with an Onload-accelerated application please contact
-support@solarflare.com for a fix.
-
-
-Other new EF_ options
+CTPIO with OpenOnload
 ---------------------
 
-In addition to those mentioned above, the following new EF_* options
-have been added.  Please see the Onload user guide for details.
+ When using a suitable adapter, CTPIO is enabled by default in "sf-np"
+ mode.  The operation of CTPIO can be controlled via the following
+ Onload configuration variables:
 
-EF_TCP_TSOPT_MODE - enable or disable TCP header timestamps 
+   EF_CTPIO: 0 (disabled)
+             1 (enable) (default)
+             2 (enable, fail if not available)
 
-EF_CLUSTER_HOT_RESTART - enable seamless restart of applications using
-SO_REUSEPORT
+   EF_CTPIO_MODE: ct      (cut-through mode)
+                  sf      (store-and-forward mode)
+                  sf-np   (store-and-forward with no poisoning)
+
+   EF_CTPIO_MAX_FRAME_LEN: CTPIO is only used for packets whose length does
+                           not exceed this value.  Packets exceeding this
+                           length are sent using another mechanism (DMA or
+                           PIO).
+
+ CTPIO bypasses the main adapter datapath, and as a result, packets sent
+ by CTPIO cannot be looped back in hardware.  As a result, CTPIO will not
+ be enabled by default on interfaces running full-featured firmware.  This
+ behaviour can be overridden using the EF_CTPIO_SWITCH_BYPASS configuration
+ variable.
 
 
-Other Additions
+CTPIO with TCPDirect
+--------------------
+
+ When using a suitable adapter CTPIO is enabled by default in "sf-np"
+ mode.  The operation of CTPIO can be controlled via the following
+ TCPDirect attributes:
+
+   ctpio: 0 (disable)
+          1 (enable) (default)
+          2 (enable, warn if not available)
+          3 (enable, fail if not available)
+
+   ctpio_mode: ct      (cut-through mode)
+               sf      (store-and-forward mode)
+               sf-np   (store-and-forward with no poisoning)
+
+
+CTPIO with ef_vi
+----------------
+
+ A complete example showing the use of CTPIO with ef_vi is given in
+ openonload/src/tests/rtt/rtt_efvi.c.
+
+ N.B.  CTPIO bypasses the main adapter datapath, and as a result does not
+ support checksum offload: Frames sent with CTPIO are placed on the wire
+ without modification, so checksum fields must be completed in software before
+ sending.  For the same reason, frames sent with CTPIO cannot be looped
+ back by the adapter.
+
+ Here is the sequence of steps needed:
+
+   1) When allocating a VI (ef_vi_alloc_from_pd()) set the EF_VI_TX_CTPIO
+      flag.
+
+   2) To initiate a send, form a complete Ethernet frame (including L3/L4
+      checksums, but excluding FCS) in host memory.  Initiate the send with
+      ef_vi_transmit_ctpio() or ef_vi_transmitv_ctpio().
+
+   3) Post a fall-back descriptor using ef_vi_transmit_ctpio_fallback() or
+      ef_vi_transmitv_ctpio_fallback().  These calls are used just like the
+      standard DMA send calls (ef_vi_transmit() etc.), and so must be
+      provided with a copy of the frame in registered memory.
+
+      The posting of a fall-back descriptor is not on the latency critical
+      path, provided the CTPIO operation succeeds.  However, it must be
+      posted before posting any further sends on the same VI.
+
+
+CTPIO diagnostics
+-----------------
+
+ The adapter maintains counters that show whether CTPIO is being used, and
+ any reasons for CTPIO sends failing.  These can be inspected as follows:
+
+   ethtool -S ethX | grep ctpio
+
+ Note that some of these counters are maintained on a per-adapter basis,
+ whereas others are per network port.
+
+
+Delegated sends in TCPDirect: technology preview
+------------------------------------------------
+
+ This release adds new API functions to TCPDirect that allow the user to
+ have TCPDirect handle the TCP state machine while performing critical
+ sends through another mechanism (such as ef_vi) to achieve lower
+ latency.  This is analogous both in principle and in the arrangement of
+ the API to the delegated sends feature of Onload.  The new API is
+ offered as a technology preview: it is functionally complete but has
+ had limited testing, and the API may change if we find problems.
+ Customers are invited to experiment with the feature and to direct
+ feedback to support@solarflare.com.
+
+ Zockets are created through the TCPDirect API as normal.  The user can
+ then request that TCPDirect delegate sending to their application.
+ Once the application has completed a send through (for example) ef_vi,
+ it updates TCPDirect and TCPDirect will handle the TCP state machinery,
+ retransmissions, and so on.
+
+ There is an example application at
+
+   <onload_install_dir>/src/tests/trade_sim/trader_tcpdirect_ds_efvi.c
+
+ Please see the README file in the same directory for further details.
+
+ The delegated sends API should be used carefully as there are windows of
+ time (while the send has been delegated to the application) when the TCP
+ sequence numbers used by TCPDirect (for ACKs) and the application (for
+ messages) differ.  Delegated sends has been implemented in a way that
+ should make this harmless, but it is important to ensure the API is used
+ correctly, and there is potential to confuse other TCP implementations.
+
+
+Onload scalable filters
+-----------------------
+
+ A major overhaul to clustering and scalable filters enables new data
+ center use cases.
+
+ Scalable filters direct all traffic for a given VI to Onload so that
+ the filter table size is not a constraint on the number of concurrent
+ connections supported efficiently. This release allows scalable filters
+ to be combined for both passive and active open connections and with RSS,
+ enabling very high transaction rates for use cases such as a reverse web
+ proxy.
+
+ The extended feature requires modern CPUs that support the CLMUL
+ instruction.
+
+ See the user guide on how to work with the new scalable filter modes
+ using new and existing Onload configuration options including:
+
+ EF_SCALABLE_FILTERS:                  any=rss:active:passive
+
+   This option has been extended to support active-open sockets, and to
+   support multiple interfaces.
+
+ EF_SCALABLE_LISTEN_MODE:              1
+
+   This option avoids the performance limitations of kernel listening
+   sockets when there is a very large number of listening sockets.
+
+ The most effective way to use scalable filters is with a dedicated
+ VI created with a MACVLAN. The new kernel option inject_kernel_gid
+ controls the injection of packets not handled by Onload back to the
+ kernel when the VI is instead shared with other functions.
+
+
+NGINX application support
+-------------------------
+
+ Onload's clustering capability can support the NGINX application's
+ master process pattern and hot restart operation by correctly
+ associating Onload stacks and application worker processes, e.g.:
+
+ EF_SCALABLE_FILTERS_ENABLE:           2
+ EF_CLUSTER_HOT_RESTART:               1
+
+ See the user guide for full details. The Onload runtime profile
+ "nginx_reverse_proxy.opf" has an example set of relevant configurations.
+
+ Use of this mode is not compatible with use of the onload extensions
+ stackname API.
+
+
+Improvements to socket caching and EF_TCP_SHARED_LOCAL_PORTS
+------------------------------------------------------------
+
+ Applications such as web proxies that create and close large numbers of
+ sockets can benefit significantly from Onload's reduced overhead
+ compared to the kernel in the handling of the socket lifecycle.  With
+ these use cases in mind, some configuration options have been added to
+ the EF_TCP_SHARED_LOCAL_PORTS feature:
+
+ EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST allows the pool of shared local
+ ports to be recycled more rapidly, and EF_TCP_SHARED_LOCAL_PORTS_PER_IP
+ enables shared local ports to be reserved dynamically for the IP
+ addresses that require them, avoiding exhaustion of the ephemeral port
+ range.
+
+ Similarly, socket caching has been extended to improve the support for
+ such applications.  Applications using many listening sockets with
+ scalable filters can now use a common cache of sockets accepted from
+ them, improving utilization of the cache.  Also, when a listening
+ socket is used by multiple processes simultaneously, file descriptors
+ can now be cached per-process, whereas before, accepted sockets were
+ cachable only in the process that originated them.  This is of
+ particular benefit to server applications such as NGINX that support
+ dynamic reconfiguration by spawning a new process reusing existing
+ listening sockets.  This feature is not compatible with sockets that
+ require O_CLOEXEC.
+
+ The default value for EF_PER_SOCKET_CACHE_MAX has changed from 0 to -1,
+ but the significance is unchanged: the default is still that there is
+ no per-listen-socket limit to the number of cached accepted sockets.  A
+ value of 0 now means that no accepted sockets will be cached for any
+ listening sockets; this allows active-open socket caching to be enabled
+ without also enabling passive-open socket caching.
+
+ Please see the User Guide for full details of these features.
+
+
+Changes to EF_UL_EPOLL=3
+------------------------
+
+ EF_UL_EPOLL=3 allows epoll_wait() to perform well on epoll sets that
+ contain a large number of accelerated sockets.  Previously, each socket
+ could gain this scalability benefit in at most one epoll set at a time.
+ Now, this is possible in up to four epoll sets for any given socket,
+ provided that each epoll set is in a different process.
+
+
+Other new Onload configuration options
+--------------------------------------
+
+ In addition to those already mentioned, this release of Onload
+ introduces the following new environmental options:
+
+  - EF_KERNEL_PACKETS_BATCH_SIZE
+  - EF_KERNEL_PACKETS_TIMER_USEC
+    Controls how often packets destined for the kernel are forwarded
+    there when kernel packet injection is enabled using the
+    inject_kernel_gid module option.
+
+  - EF_PERIODIC_TIMER_CPU
+    Specifies CPU affinity for periodic kernel tasks.
+
+  - EF_PREALLOC_PACKETS
+    Allocates the maximum number of packet buffers when the stack is
+    created.
+
+  - EF_SCALABLE_ACTIVE_WILDS_NEED_FILTER
+    Normally this option is set automatically according to the
+    scalable-filter mode, but it may be used manually to override
+    whether TCP shared local ports use IP hardware filters.
+
+  - EF_SLEEP_SPIN_USEC
+    Sleeps periodically during epoll_wait() after the initial spin
+    timeout has elapsed.
+
+  - EF_SYNC_CPLANE_AT_CREATE
+    Controls how Onload queries network interface configuration when
+    creating stacks.
+
+  - EF_TCP_MIN_CWND
+    Sets the minimum size of the congestion window for TCP connections.
+
+  - EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK
+    Causes connect() to fail for TCP sockets if no shared local ports
+    are available.
+
+ Finally, the default value, but not the default behaviour, of the
+ EF_PER_SOCKET_CACHE_MAX variable has changed: please see the section above
+ on socket caching.
+
+ Please see the User Guide for more details.
+
+
+32-bit kernels
+--------------
+
+ This release drops support for 32-bit kernels. 32-bit userspace
+ applications are still supported.
+
+
+CONFIG_KALLSYMS
 ---------------
 
-* Proprietary binary kernel module present in recent releases is
-  removed, so no kernel taint anymore
-* Debug (lockdep, etc) kernels now work again.
+ The CONFIG_KALLSYMS kernel configuration option is required for Onload to
+ operate correctly.  The dependency of Onload on this option is not new in
+ this release, but very recent kernels -- namely, those containing the
+ commit 21d375b6b34ff511a507de27bf316b3dde6938d9 that removes the x86
+ syscall-dispatch fast path -- will be unable to load the Onload driver
+ when CONFIG_KALLSYSMS is not defined.  All of the Linux distributions
+ listed in the table at the start of this file set this option in their
+ default kernel configurations and so are not affected.
+
+
+Monitoring tools
+----------------
+
+ The 'orm_json' tool for monitoring Onload stacks and reporting statistics
+ has been improved to include more comprehensive statistics and further
+ details of Onload stacks' status.  To ease integration with standard
+ performance monitoring tools, the new version features an additional, more
+ machine-friendly output format, as well as the facility to generate
+ metadata for the reported statistics.

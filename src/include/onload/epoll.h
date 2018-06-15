@@ -41,14 +41,10 @@
 
 /* Array of such structures is used to pass postponed epoll_ctl operations */
 struct oo_epoll_item {
-  ci_fixed_descriptor_t op;
+  ci_fixed_descriptor_t op CI_ALIGN(8);
   ci_fixed_descriptor_t fd;
   ci_uint64             fdi_seq; /**< ignored in kernel */
   struct epoll_event    event;
-  /* [unused_pad] is needed to ensure that oo_epoll_item is the same size
-   * in 32 and 64-bit builds.
-   */
-  ci_uint32             unused_pad;
 };
 
 /* epoll_wait/epoll_pwait */
@@ -80,22 +76,20 @@ struct oo_epoll1_wait_arg {
 };
 
 struct oo_epoll1_set_home_arg {
-  ci_fixed_descriptor_t sockfd;      /**< descriptor for fd in stack */
+  ci_fixed_descriptor_t sockfd CI_ALIGN(8); /**< descriptor for fd in stack */
   ci_int32              ready_list;  /**< id of ready list to use */
-  /* [unused_pad] is needed to ensure that oo_epoll_item is the same size
-   * in 32 and 64-bit builds.
-   */
-  ci_uint32             unused_pad;
 };
 
 struct oo_epoll1_block_on_arg {
-  ci_uint64     sigmask;
+  ci_uint64     sigmask CI_ALIGN(8);
   ci_fixed_descriptor_t epoll_fd;
   ci_uint32     timeout_ms;
+  ci_uint32     sleep_iter_us;
   ci_uint32     flags; /* INOUT */
 #define OO_EPOLL1_EVENT_ON_HOME  1 /* OUT */
 #define OO_EPOLL1_EVENT_ON_OTHER 2 /* OUT */
 #define OO_EPOLL1_HAS_SIGMASK    4 /* IN */
+#define OO_EPOLL1_EVENT_ON_EVQ   8 /* OUT */
 };
 
 struct oo_epoll1_shared {
@@ -143,6 +137,13 @@ enum {
   OO_EPOLL1_OP_MOVE_FD,
 #define OO_EPOLL1_IOC_MOVE_FD \
   _IOW(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_MOVE_FD, ci_fixed_descriptor_t)
+  OO_EPOLL1_OP_SPIN_ON,
+#define OO_EPOLL1_IOC_SPIN_ON \
+  _IOWR(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_SPIN_ON, \
+        struct oo_epoll1_block_on_arg)
+  OO_EPOLL1_OP_INIT,
+#define OO_EPOLL1_IOC_INIT \
+  _IO(OO_EPOLL_IOC_BASE, OO_EPOLL1_OP_INIT)
 };
 
 #endif /* CI_CFG_USERSPACE_EPOLL */

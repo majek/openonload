@@ -202,17 +202,17 @@ cmd_configure_container() {
 ######################################################################
 
 have_stacks() {
-  grep -q . /proc/driver/onload/stacks
+  [ -f /proc/driver/onload/ul_stacks ] && grep -q . /proc/driver/onload/ul_stacks
 }
 
 kill_cplane() {
   pkill -f onload_cp_server
   local count=0
   while [ $count -lt 5 ]; do
+    sleep 1
     if ! pgrep -f onload_cp_server > /dev/null; then
       return 0
     fi
-    sleep 1
     count=$[$count+1]
   done
   echo Timed out waiting for control plane to stop, trying SIGKILL...
@@ -227,19 +227,21 @@ kill_cplane() {
 
 do_unload() {
   rc=0
-  modusedby sfc_resource sfc_affinity &&
-    tryunload sfc_affinity
-  tryunload af_onload
+  # onload_cp_server can take a while to die, let's do it first if no stacks present
   have_stacks || kill_cplane
-  tryunload onload || ( [ -x "$(which onload_fuser)" ] && onload_fuser -v )
+  # Old (pre-2011) systems had inverse dependency of sfc_affinity on 
+  # sfc_resource to modern ones. To allow old versions to unload try that first
+  modusedby sfc_resource sfc_affinity && tryunload sfc_affinity
+  tryunload af_onload      # Present in historical Onload versions
+  tryunload onload || ( [ -x "$(which onload_fuser 2>/dev/null)" ] && onload_fuser -v )
   tryunload onload_cplane  # Present in historical Onload versions.
   tryunload sfc_char
   tryunload sfc_resource
   tryunload sfc_affinity
   tryunload sfc_tune       # Present in historical Onload versions.
   tryunload sfc_mtd
-  tryunload sfc_control
-  tryunload sfc_aoe
+  tryunload sfc_control    # Present in historical Onload versions.
+  tryunload sfc_aoe        # Present in historical Onload versions.
   tryunload sfc
   grep -q sfc/sfc.ko /lib/modules/$(uname -r)/modules.dep && \
       log "WARNING: sfc driver may reload due to an in-distro driver"

@@ -262,7 +262,6 @@ extern void ci_log_buffer_dump(void) CI_HF;
   (((x) & MSG_CONFIRM     ) ? "CONFIRM "     :"")
 
 
-
 #ifdef __cplusplus
 }
 #endif

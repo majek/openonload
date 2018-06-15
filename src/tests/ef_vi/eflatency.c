@@ -56,6 +56,7 @@
 #include <etherfabric/pio.h>
 #include <etherfabric/memreg.h>
 #include <etherfabric/capabilities.h>
+#include <etherfabric/checksum.h>
 #include <ci/tools.h>
 #include <ci/tools/ippacket.h>
 
@@ -77,6 +78,8 @@ static inline void rx_wait_with_ts(ef_vi*);
 static int              cfg_iter = 100000;
 static int              cfg_warmups = 10000;
 static unsigned		cfg_payload_len = DEFAULT_PAYLOAD_SIZE;
+static int              cfg_ctpio_no_poison;
+static unsigned         cfg_ctpio_thresh = 64;
 
 
 #define N_RX_BUFS	256u
@@ -121,6 +124,7 @@ static void init_udp_pkt(void* pkt_buf, int paylen)
   ci_ether_hdr* eth;
   ci_ip4_hdr* ip4;
   ci_udp_hdr* udp;
+  struct iovec iov;
 
   /* Use a broadcast destination MAC to ensure that the packet is not dropped
    * by 5000- and 6000-series NICs. */
@@ -136,6 +140,12 @@ static void init_udp_pkt(void* pkt_buf, int paylen)
   ci_ip4_hdr_init(ip4, CI_NO_OPTS, ip_len, 0, IPPROTO_UDP, htonl(laddr_he),
                   htonl(raddr_he), 0);
   ci_udp_hdr_init(udp, ip4, htons(port_he), htons(port_he), udp + 1, paylen, 0);
+
+  iov.iov_base = udp + 1;
+  iov.iov_len = paylen;
+  ip4->ip_check_be16 = ef_ip_checksum((const struct iphdr*) ip4);
+  udp->udp_check_be16 = ef_udp_checksum((const struct iphdr*) ip4,
+                                        (const struct udphdr*) udp, &iov, 1);
 }
 
 
@@ -312,6 +322,39 @@ static const test_t alt_test = {
 
 
 
+/*
+ * CTPIO
+ */
+
+static inline void ctpio_send(ef_vi* vi)
+{
+  /* TODO: May be desirable to compute cut-through threshold from frame
+   * length.
+   */
+  struct pkt_buf* pb = pkt_bufs[FIRST_TX_BUF];
+  ef_vi_transmit_ctpio(vi, pb->dma_buf, tx_frame_len, cfg_ctpio_thresh);
+  TRY(ef_vi_transmit_ctpio_fallback(vi, pb->dma_buf_addr, tx_frame_len, 0));
+}
+
+static void ctpio_ping(ef_vi* vi)
+{
+  generic_ping(vi, rx_wait_no_ts, ctpio_send);
+}
+
+static void ctpio_pong(ef_vi* vi)
+{
+  generic_pong(vi, rx_wait_no_ts, ctpio_send);
+}
+
+static const test_t ctpio_test = {
+  .name = "CTPIO",
+  .ping = ctpio_ping,
+  .pong = ctpio_pong,
+  .cleanup = NULL,
+};
+
+
+
 /**********************************************************************/
 
 static void
@@ -342,6 +385,16 @@ generic_rx_wait(ef_vi* vi)
         TEST(n_rx == 1);
         ++i;
         return;
+      case EF_EVENT_TYPE_RX_DISCARD:
+        if( EF_EVENT_RX_DISCARD_TYPE(evs[i]) == EF_EVENT_RX_DISCARD_CRC_BAD &&
+            (ef_vi_flags(vi) & EF_VI_TX_CTPIO) && ! cfg_ctpio_no_poison ) {
+          /* Likely a poisoned frame caused by underrun.  A good copy will
+           * follow.
+           */
+          rx_post(vi);
+          break;
+        }
+        /* Otherwise, fall through. */
       default:
         fprintf(stderr, "ERROR: unexpected event "EF_EVENT_FMT"\n",
                 EF_EVENT_PRI_ARG(evs[i]));
@@ -386,15 +439,24 @@ static const test_t* do_init(int ifindex)
   TRY(ef_driver_open(&driver_handle));
   TRY(ef_pd_alloc(&pd, driver_handle, ifindex, pd_flags));
 
-  /* We want to enable TX timestamps if and only if we use alternatives. */
-  /* XXX: Hack to detect Medford until such a time as the NIC reports the
-   * TX_VFIFO_ULL_MODE capability bit. */
-  if( ef_vi_capabilities_get(driver_handle, ifindex, EF_VI_CAP_PIO_BUFFER_SIZE,
-                             &capability_val) == 0 && capability_val == 4096 )
-    vi_flags |= EF_VI_TX_ALT;
+  if( cfg_ctpio_no_poison )
+    vi_flags |= EF_VI_TX_CTPIO_NO_POISON;
 
-  /* Allocate virtual interface. */
-  if( vi_flags & EF_VI_TX_ALT ) {
+  /* Try with CTPIO first. */
+  if( ef_vi_capabilities_get(driver_handle, ifindex, EF_VI_CAP_CTPIO,
+                             &capability_val) == 0 && capability_val ) {
+    vi_flags |= EF_VI_TX_CTPIO;
+    if( ef_vi_alloc_from_pd(&vi, driver_handle, &pd, driver_handle,
+                            -1, -1, -1, NULL, -1, vi_flags) == 0 )
+        goto got_vi;
+    fprintf(stderr, "Failed to allocate VI with CTPIO.\n");
+    vi_flags &= ~(EF_VI_TX_CTPIO | EF_VI_TX_CTPIO_NO_POISON);
+  }
+
+  /* Try with TX alternatives if CTPIO failed. */
+  if( ef_vi_capabilities_get(driver_handle, ifindex, EF_VI_CAP_TX_ALTERNATIVES,
+                             &capability_val) == 0 && capability_val ) {
+    vi_flags |= EF_VI_TX_ALT;
     if( ef_vi_alloc_from_pd(&vi, driver_handle, &pd, driver_handle,
                             -1, -1, -1, NULL, -1, vi_flags) == 0 ) {
       if( ef_vi_transmit_alt_alloc(&vi, driver_handle,
@@ -447,8 +509,12 @@ static const test_t* do_init(int ifindex)
   init_udp_pkt(pkt_bufs[FIRST_TX_BUF]->dma_buf, cfg_payload_len);
   tx_frame_len = cfg_payload_len + HEADER_SIZE;
 
-  /* First, try to allocate alternatives. */
-  if( vi_flags & EF_VI_TX_ALT ) {
+  /* First, try CTPIO. */
+  if( vi_flags & EF_VI_TX_CTPIO ) {
+    t = &ctpio_test;
+  }
+  /* Next, try to allocate alternatives. */
+  else if( vi_flags & EF_VI_TX_ALT ) {
     /* Check that the packet will fit in the available buffer space. */
     struct ef_vi_transmit_alt_overhead overhead;
     TRY(ef_vi_transmit_alt_query_overhead(&vi, &overhead));
@@ -483,6 +549,8 @@ static void usage(void)
   fprintf(stderr, "  -n <iterations>     - set number of iterations\n");
   fprintf(stderr, "  -s <message-size>   - set udp payload size\n");
   fprintf(stderr, "  -w <iterations>     - set number of warmup iterations\n");
+  fprintf(stderr, "  -c <cut-through>    - CTPIO cut-through threshold\n");
+  fprintf(stderr, "  -p                  - CTPIO no-poison mode\n");
   fprintf(stderr, "\n");
   exit(1);
 }
@@ -497,7 +565,7 @@ int main(int argc, char* argv[])
 
   printf("# ef_vi_version_str: %s\n", ef_vi_version_str());
 
-  while( (c = getopt (argc, argv, "n:s:w:")) != -1 )
+  while( (c = getopt (argc, argv, "n:s:w:c:p")) != -1 )
     switch( c ) {
     case 'n':
       cfg_iter = atoi(optarg);
@@ -507,6 +575,12 @@ int main(int argc, char* argv[])
       break;
     case 'w':
       cfg_warmups = atoi(optarg);
+      break;
+    case 'c':
+      cfg_ctpio_thresh = atoi(optarg);
+      break;
+    case 'p':
+      cfg_ctpio_no_poison = 1;
       break;
     case '?':
       usage();

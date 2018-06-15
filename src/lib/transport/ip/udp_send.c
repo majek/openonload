@@ -68,7 +68,7 @@
 #define si_trylock_and_inc(ni, sinf, cntr)              \
   trylock_and_inc((ni), (sinf)->stack_locked, (cntr))
 
-# define msg_namelen_ok(namelen)  ((namelen) >= sizeof(struct sockaddr_in))
+#define msg_namelen_ok(namelen)  ((namelen) >= sizeof(struct sockaddr_in))
 
 #define oo_tx_udp_hdr(pkt)  ((ci_udp_hdr*) oo_tx_ip_data(pkt))
 
@@ -160,7 +160,7 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 {
   int os_rc = 0;
 
-  ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
+  ci_assert_equal(oo_tx_ether_type_get(pkt), CI_ETHERTYPE_IP);
   ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
 
   /* Release the ref we've taken in ci_udp_sendmsg_fill() for
@@ -170,7 +170,7 @@ static void ci_ip_send_udp_slow(ci_netif* ni, ci_ip_pkt_fmt* pkt,
   --pkt->refcount;
 
   cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt), 
-                       ipcache->ifindex);
+                       ipcache->ifindex, ipcache->nexthop);
 
   /* Update size of transmit queue now, because we do not have any callback
    * when the packet will go out or dropped.
@@ -309,9 +309,11 @@ ci_inline void prep_send_pkt(ci_netif* ni, ci_udp_state* us,
   CI_UDP_STATS_INC_OUT_DGRAMS( ni );
 
   if( (ip->ip_frag_off_be16 & CI_IP4_OFFSET_MASK) == 0 ) {
+#if CI_CFG_TIMESTAMPING
     /* Request TX timestamp for the first segment */
     if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
       pkt->flags |= CI_PKT_FLAG_TX_TIMESTAMPED;
+#endif
     if( ip->ip_frag_off_be16 & CI_IP4_FRAG_MORE ) {
       /* First fragmented chunk: calculate UDP checksum. */
       ci_udp_sendmsg_chksum(ni, pkt, ip);
@@ -322,7 +324,7 @@ ci_inline void prep_send_pkt(ci_netif* ni, ci_udp_state* us,
 
 #ifdef __KERNEL__
 
-static int do_sys_sendmsg(ci_sock_cmn *s, oo_os_file os_sock,
+static int do_sys_sendmsg(tcp_helper_endpoint_t *ep, oo_os_file os_sock,
                           const ci_msghdr* msg,
                           int flags, int user_buffers, int atomic)
 {
@@ -358,7 +360,7 @@ static int do_sys_sendmsg(ci_sock_cmn *s, oo_os_file os_sock,
   }
 
   /* Clear OS TX flag if necessary  */
-  oo_os_sock_status_bit_clear_handled(s, os_sock, OO_OS_STATUS_TX);
+  oo_os_sock_status_bit_clear_handled(ep, os_sock, OO_OS_STATUS_TX);
   return bytes;
 }
 
@@ -367,13 +369,14 @@ static int ci_udp_sendmsg_os(ci_netif* ni, ci_udp_state* us,
                              int user_buffers, int atomic)
 {
   int rc;
+  tcp_helper_endpoint_t *ep = ci_netif_ep_get(ni, us->s.b.bufid);
   oo_os_file os_sock;
 
   ++us->stats.n_tx_os;
 
-  rc = oo_os_sock_get(ni, S_ID(us), &os_sock);
+  rc = oo_os_sock_get_from_ep(ep, &os_sock);
   if( rc == 0 ) {
-    rc = do_sys_sendmsg(&us->s, os_sock, msg, flags, user_buffers, atomic);
+    rc = do_sys_sendmsg(ep, os_sock, msg, flags, user_buffers, atomic);
     oo_os_sock_put(os_sock);
   }
   return rc;
@@ -487,7 +490,7 @@ static int ci_udp_sendmsg_os_get_binding(citp_socket *ep, ci_fd_t fd,
     /* Add a filter if the local addressing is appropriate. */
     if( sa.sin_port != 0 &&
         (sa.sin_addr.s_addr == INADDR_ANY ||
-         cicp_user_addr_is_local_efab(ni->cplane, sa.sin_addr.s_addr)) ) {
+         cicp_user_addr_is_local_efab(ni, sa.sin_addr.s_addr)) ) {
       ci_assert( ! (us->udpflags & CI_UDPF_FILTERED) );
 
 #ifdef ONLOAD_OFE
@@ -912,7 +915,6 @@ static int ci_udp_name_is_ok(ci_udp_state* us, const struct msghdr* msg)
   }
 #endif
 
-
   return msg->msg_namelen >= sizeof(struct sockaddr_in) && 
     CI_SIN(msg->msg_name)->sin_family == AF_INET;
 }
@@ -1314,10 +1316,12 @@ void ci_udp_sendmsg_onload(ci_netif* ni, ci_udp_state* us,
     return;
   }
   rc = ci_udp_sendmsg_fill(ni, us, &piov, bytes_to_send, flags, &pf, sinf);
+#if CI_CFG_TIMESTAMPING
   if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_OPT_ID ) {
     pf.pkt->ts_key = us->s.ts_key;
     ci_atomic32_inc(&us->s.ts_key);
   }
+#endif
   if( sinf->stack_locked && ! was_locked )
     ++us->stats.n_tx_lock_pkt;
   if(CI_LIKELY( rc >= 0 )) {

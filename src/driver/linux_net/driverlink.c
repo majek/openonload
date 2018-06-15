@@ -146,6 +146,15 @@ static void efx_dl_try_add_device(struct efx_nic *efx,
 	bool added = false;
 	u64 before, after, duration;
 
+	/* First check if device is supported by driver */
+	if ((efx->pci_dev->device & 0x0f00) >= 0x0b00 &&
+	    !(driver->flags & EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE)) {
+		netif_info(efx, drv, efx->net_dev,
+			   "%s driverlink client skipped: does not support X2 adapters\n",
+			   driver->name);
+		return;
+	}
+
 	efx_handle = kzalloc(sizeof(*efx_handle), GFP_KERNEL);
 	if (!efx_handle)
 		goto fail;
@@ -244,6 +253,10 @@ int __efx_dl_register_driver(struct efx_dl_driver *driver)
 		return -EPERM;
 	}
 	driver->flags |= EFX_DL_DRIVER_SUPPORTS_MINOR_VER;
+
+	if (driver->rx_packet)
+		pr_warn("Efx driverlink: %s includes rx_packet handler, but this feature is deprecated and will be removed in a future release of this driver.\n",
+			driver->name);
 
 	printk(KERN_INFO "Efx driverlink registering %s driver\n",
 		 driver->name);
@@ -428,6 +441,119 @@ bool efx_dl_rx_packet(struct efx_nic *efx, int channel, u8 *pkt_hdr, int len)
 	return discard;
 }
 
+u32 efx_dl_rss_flags_default(struct efx_dl_device *efx_dev)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+
+	if (efx->type->rx_get_default_rss_flags)
+		return efx->type->rx_get_default_rss_flags(efx);
+	/* NIC does not support RSS flags, so any value will do */
+	return 0;
+}
+EXPORT_SYMBOL(efx_dl_rss_flags_default);
+
+int efx_dl_rss_context_new(struct efx_dl_device *efx_dev, const u32 *indir,
+			   const u8 *key, u32 flags, u8 num_queues,
+			   u32 *rss_context)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	struct efx_rss_context *ctx;
+	int rc;
+
+	/* num_queues=0 is used internally by the driver to represent
+	 * efx->rss_spread, and is not appropriate for driverlink clients
+	 */
+	if (!num_queues)
+		return -EINVAL;
+
+	if (!efx->type->rx_push_rss_context_config)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->rss_lock);
+	ctx = efx_alloc_rss_context_entry(efx);
+	if (!ctx) {
+		rc = -ENOMEM;
+		goto out_unlock;
+	}
+	if (!indir) {
+		efx_set_default_rx_indir_table(efx, ctx);
+		indir = ctx->rx_indir_table;
+	}
+	if (!key) {
+		netdev_rss_key_fill(ctx->rx_hash_key, sizeof(ctx->rx_hash_key));
+		key = ctx->rx_hash_key;
+	}
+	ctx->flags = flags;
+	ctx->num_queues = num_queues;
+	rc = efx->type->rx_push_rss_context_config(efx, ctx, indir, key);
+	if (rc)
+		efx_free_rss_context_entry(ctx);
+	else
+		*rss_context = ctx->user_id;
+out_unlock:
+	mutex_unlock(&efx->rss_lock);
+	return rc;
+}
+EXPORT_SYMBOL(efx_dl_rss_context_new);
+
+int efx_dl_rss_context_set(struct efx_dl_device *efx_dev, const u32 *indir,
+			   const u8 *key, u32 flags, u32 rss_context)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	struct efx_rss_context *ctx;
+	u32 old_flags;
+	int rc;
+
+	if (!efx->type->rx_push_rss_context_config)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->rss_lock);
+	ctx = efx_find_rss_context_entry(efx, rss_context);
+	if (!ctx) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+
+	if (!indir) /* no change */
+		indir = ctx->rx_indir_table;
+	if (!key) /* no change */
+		key = ctx->rx_hash_key;
+	old_flags = ctx->flags;
+	ctx->flags = flags;
+	rc = efx->type->rx_push_rss_context_config(efx, ctx, indir, key);
+	if (rc) /* restore old RSS flags on failure */
+		ctx->flags = old_flags;
+out_unlock:
+	mutex_unlock(&efx->rss_lock);
+	return rc;
+}
+EXPORT_SYMBOL(efx_dl_rss_context_set);
+
+int efx_dl_rss_context_free(struct efx_dl_device *efx_dev, u32 rss_context)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+	struct efx_rss_context *ctx;
+	int rc;
+
+	if (!efx->type->rx_push_rss_context_config)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&efx->rss_lock);
+	ctx = efx_find_rss_context_entry(efx, rss_context);
+	if (!ctx) {
+		rc = -ENOENT;
+		goto out_unlock;
+	}
+
+	rc = efx->type->rx_push_rss_context_config(efx, ctx, NULL, NULL);
+	if (!rc)
+		efx_free_rss_context_entry(ctx);
+out_unlock:
+	mutex_unlock(&efx->rss_lock);
+	return rc;
+}
+EXPORT_SYMBOL(efx_dl_rss_context_free);
+
 /* We additionally include priority in the filter ID so that we
  * can pass it back into efx_filter_remove_id_safe().
  */
@@ -466,9 +592,22 @@ int efx_dl_filter_redirect(struct efx_dl_device *efx_dev,
 	if (WARN_ON(filter_id < 0))
 		return -EINVAL;
 	return efx->type->filter_redirect(efx, filter_id & EFX_FILTER_ID_MASK,
-					  rxq_i, stack_id);
+					  NULL, rxq_i, stack_id);
 }
 EXPORT_SYMBOL(efx_dl_filter_redirect);
+
+int efx_dl_filter_redirect_rss(struct efx_dl_device *efx_dev,
+			       int filter_id, int rxq_i, u32 rss_context,
+			       int stack_id)
+{
+	struct efx_nic *efx = efx_dl_handle(efx_dev)->efx;
+
+	if (WARN_ON(filter_id < 0))
+		return -EINVAL;
+	return efx->type->filter_redirect(efx, filter_id & EFX_FILTER_ID_MASK,
+					  &rss_context, rxq_i, stack_id);
+}
+EXPORT_SYMBOL(efx_dl_filter_redirect_rss);
 
 int efx_dl_vport_filter_insert(struct efx_dl_device *efx_dev,
 			       unsigned int vport_id,

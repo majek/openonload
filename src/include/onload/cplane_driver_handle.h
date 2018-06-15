@@ -31,7 +31,7 @@ struct oo_cplane_handle {
 
   struct net* cp_netns;
 
-  struct task_struct* server;
+  struct pid* server_pid;
 
   ci_dllink link;
 
@@ -60,15 +60,14 @@ struct oo_cplane_handle {
   int/*bool*/ killed;
 
   int/*bool*/ usable;
-
-  /* There is no more than 1 oof version per net namespace.  This is the
-   * mib->oof_version value used when the last oof was created. */
-  cp_version_t last_oof_version;
+  int/*bool*/ server_initialized;
 
   struct {
     int fwd_req_complete; /* protected by the lock */
     atomic_t fwd_req_nonblock;
     atomic_t oof_req_nonblock;
+    atomic_t arp_confirm_try;
+    atomic_t arp_confirm_do;
   } stats;
 };
 #endif /*__ONLOAD_CPLANE_DRIVER_HANDLE_H__ */

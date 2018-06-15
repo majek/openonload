@@ -30,6 +30,7 @@
  * - CI_NETIF_MMAP_ID_IOBUFS    VI resource: queues
  *   + if CI_CFG_PKTS_AS_HUGE_PAGES=1, mmap pkt_shm_id array
  * - CI_NETIF_MMAP_ID_PIO       VI resource: PIO IO BAR
+ * - CI_NETIF_MMAP_ID_CTPIO     VI resource: CTPIO IO BAR
  * - CI_NETIF_MMAP_ID_OFE_RO    OFE read-only part of engine
  * - CI_NETIF_MMAP_ID_OFE_RW    OFE read-write part of engine
  * - CI_NETIF_MMAP_ID_CPLANE    Control plame MIBs mapping
@@ -43,11 +44,14 @@
 #if CI_CFG_PIO
 #define CI_NETIF_MMAP_ID_PIO      4
 #endif
-#ifdef ONLOAD_OFE
-#define CI_NETIF_MMAP_ID_OFE_RO   5
-#define CI_NETIF_MMAP_ID_OFE_RW   6
+#if CI_CFG_CTPIO
+#define CI_NETIF_MMAP_ID_CTPIO    5
 #endif
-#define CI_NETIF_MMAP_ID_PKTS     7
+#ifdef ONLOAD_OFE
+#define CI_NETIF_MMAP_ID_OFE_RO   6
+#define CI_NETIF_MMAP_ID_OFE_RW   7
+#endif
+#define CI_NETIF_MMAP_ID_PKTS     8
 #define CI_NETIF_MMAP_ID_PKTSET(id) (CI_NETIF_MMAP_ID_PKTS+(id))
 
 

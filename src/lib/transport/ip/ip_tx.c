@@ -46,7 +46,6 @@ void ci_ip_send_pkt_lookup(ci_netif* ni,
     sock_cp = *sock_cp_opt;
   else
     oo_sock_cplane_init(&sock_cp);
-  ci_ip_cache_init(ipcache);
   sock_cp.ip_laddr_be32 = pkt_ip->ip_saddr_be32;
   ipcache->ip.ip_daddr_be32 = pkt_ip->ip_daddr_be32;
 
@@ -78,7 +77,7 @@ int ci_ip_send_pkt_send(ci_netif* ni, ci_ip_pkt_fmt* pkt,
     return 0;
   case retrrc_nomac:
     cicp_user_defer_send(ni, retrrc_nomac, &os_rc, OO_PKT_P(pkt),
-                         ipcache->ifindex);
+                         ipcache->ifindex, ipcache->nexthop);
     return 0;
   case retrrc_noroute:
     return -EHOSTUNREACH;
@@ -102,6 +101,7 @@ int ci_ip_send_pkt(ci_netif* ni, const struct oo_sock_cplane* sock_cp_opt,
                    ci_ip_pkt_fmt* pkt)
 {
   ci_ip_cached_hdrs ipcache;
+  ci_ip_cache_init(&ipcache);
   ci_ip_send_pkt_lookup(ni, sock_cp_opt, pkt, &ipcache);
   return ci_ip_send_pkt_send(ni, pkt, &ipcache);
 }
@@ -155,7 +155,7 @@ void ci_ip_send_tcp_slow(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_fmt* pkt)
     /* Fall through. */
   case retrrc_alienroute:
     cicp_user_defer_send(ni, ts->s.pkt.status, &rc, OO_PKT_P(pkt),
-                         ts->s.pkt.ifindex);
+                         ts->s.pkt.ifindex, ts->s.pkt.nexthop);
     return;
   case retrrc_noroute:
     rc = -EHOSTUNREACH;

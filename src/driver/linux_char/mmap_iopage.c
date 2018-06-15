@@ -25,7 +25,9 @@
 /* HACK FIXME: PPC kernels that we support do have pgprot_writecombine(),
  * but kernel-compat doesn't detect (I think because it is a macro).
  */
+#ifndef EFRM_HAVE_PGPROT_WRITECOMBINE
 # define EFRM_HAVE_PGPROT_WRITECOMBINE
+#endif
 #endif
 
 

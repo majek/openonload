@@ -124,6 +124,10 @@ enum efrm_vi_q_flags {
 	EFRM_VI_ENABLE_RX_MERGE       = 0x10000,
 	/** EVQ: Enable hardare event timer */
 	EFRM_VI_ENABLE_EV_TIMER       = 0x20000,
+	/** TXQ: Enable CTPIO. */
+	EFRM_VI_TX_CTPIO              = 0x40000,
+	/** TXQ: CTPIO: Require store-and-forward. */
+	EFRM_VI_TX_CTPIO_NO_POISON    = 0x80000,
 };
 
 
@@ -137,6 +141,7 @@ struct efrm_vi_mappings {
 	unsigned         timer_quantum_ns;
 	int              rx_ts_correction;
 	int              tx_ts_correction;
+        enum ef_timestamp_format ts_format;
 
 	unsigned         rxq_size;
 	void*            rxq_descriptors;
@@ -304,6 +309,7 @@ extern struct pci_dev *efrm_vi_get_pci_dev(struct efrm_vi *);
 extern int efrm_vi_get_channel(struct efrm_vi *);
 
 extern struct efrm_vf *efrm_vi_get_vf(struct efrm_vi *);
+extern int efrm_vi_set_get_vi_instance(struct efrm_vi *);
 
 
 /* Make these inline instead of macros for type checking */
@@ -325,13 +331,6 @@ efrm_resource *efrm_from_vi_resource(struct efrm_vi *rs)
 #define EFAB_VI_RESOURCE_PRI_ARG(virs) \
     (efrm_from_vi_resource(virs)->rs_instance)
 
-enum efrm_vi_alloc_failure {
-	EFRM_VI_ALLOC_VI_FAILED,
-	EFRM_VI_ALLOC_EVQ_FAILED,
-	EFRM_VI_ALLOC_RXQ_FAILED,
-	EFRM_VI_ALLOC_TXQ_FAILED,
-};
-
 extern int
 efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi *evq_virs,
@@ -344,10 +343,10 @@ efrm_vi_resource_alloc(struct efrm_client *client,
 		       struct efrm_vi **virs_in_out,
 		       uint32_t *out_io_mmap_bytes,
 		       uint32_t *out_mem_mmap_bytes,
+                       uint32_t *out_ctpio_mmap_bytes,
 		       uint32_t *out_txq_capacity,
 		       uint32_t *out_rxq_capacity,
-		       int print_resource_warnings,
-		       enum efrm_vi_alloc_failure *out_failure_reason);
+		       int print_resource_warnings);
 
 extern void efrm_vi_resource_release(struct efrm_vi *);
 extern void efrm_vi_resource_stop_callback(struct efrm_vi *virs);

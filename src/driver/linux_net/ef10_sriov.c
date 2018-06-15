@@ -603,8 +603,7 @@ static int efx_ef10_vport_reconfigure(struct efx_nic *efx, unsigned int port_id,
 	size_t outlen;
 	int rc;
 
-	if (!(nic_data->datapath_caps &
-	      (1 << MC_CMD_GET_CAPABILITIES_OUT_VPORT_RECONFIGURE_LBN)))
+	if (!efx_ef10_has_cap(nic_data->datapath_caps, VPORT_RECONFIGURE))
 		return -EOPNOTSUPP;
 
 	MCDI_SET_DWORD(inbuf, VPORT_RECONFIGURE_IN_VPORT_ID, port_id);

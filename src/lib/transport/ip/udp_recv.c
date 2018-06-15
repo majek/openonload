@@ -210,6 +210,7 @@ oo_copy_pkt_to_iovec_no_adv(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
 
 
 #ifndef __KERNEL__
+#if CI_CFG_TIMESTAMPING
 /* Very similar to oo_copy_pkt_to_iovec_no_adv() but doesn't use pkt->buf */
 static int 
 ci_udp_timestamp_q_pkt_to_iovec(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
@@ -218,8 +219,10 @@ ci_udp_timestamp_q_pkt_to_iovec(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
   int rc;
   struct oo_copy_state ocs;
   ocs.bytes_copied = 0;
+  /* We have to copy all chunks of jumbo frame, so pkt->buf_len is wrong
+   * here. */
   ocs.bytes_to_copy = CI_BSWAP_BE16(oo_ip_hdr_const(pkt)->ip_tot_len_be16) +
-    oo_ether_hdr_size(pkt);
+    oo_tx_pre_l3_len(pkt);
   ocs.pkt_off = 0;
   ocs.pkt = pkt;
   while( 1 ) {
@@ -239,6 +242,7 @@ ci_udp_timestamp_q_pkt_to_iovec(ci_netif* ni, const ci_ip_pkt_fmt* pkt,
       ci_assert(0);
   }
 }
+#endif
 #endif
 
 
@@ -298,12 +302,8 @@ static int ci_udp_recvmsg_get(ci_udp_recv_info* rinf, ci_iovec_ptr* piov)
 
   /* NB. [msg] can be NULL for async recv. */
 
-  if( ci_udp_recv_q_is_empty(&us->recv_q) )
+  if( (pkt = ci_udp_recv_q_get(ni, &us->recv_q)) == NULL )
     goto recv_q_is_empty;
-
-  ci_rmb();
-
-  pkt = ci_udp_recv_q_get(ni, &us->recv_q);
 
 #if defined(__linux__) && !defined(__KERNEL__)
   if( msg != NULL && msg->msg_controllen != 0 ) {
@@ -355,8 +355,7 @@ static int __ci_udp_recvmsg_try_os(ci_netif *ni, ci_udp_state *us,
   else {
     if( rc == -EAGAIN )
       return 0;
-    ci_assert(-rc == errno);
-    rc = -1;
+    CI_SET_ERROR(rc, -rc);
     ++us->stats.n_rx_os_error;
   }
 
@@ -370,6 +369,7 @@ static int __ci_udp_recvmsg_try_os(ci_netif *ni, ci_udp_state *us,
                                    ci_msghdr* msg, int flags, int* prc)
 {
   int rc, total_bytes, i;
+  tcp_helper_endpoint_t *ep = ci_netif_ep_get(ni, us->s.b.bufid);
   struct socket *sock;
   oo_os_file os_sock;
   struct msghdr kmsg;
@@ -381,7 +381,7 @@ static int __ci_udp_recvmsg_try_os(ci_netif *ni, ci_udp_state *us,
   if( total_bytes < 0 )
     return -EINVAL;
 
-  rc = oo_os_sock_get(ni, S_ID(us), &os_sock);
+  rc = oo_os_sock_get_from_ep(ep, &os_sock);
   if( rc != 0 )
     return rc;
   ci_assert(S_ISSOCK(os_sock->f_dentry->d_inode->i_mode));
@@ -397,7 +397,7 @@ static int __ci_udp_recvmsg_try_os(ci_netif *ni, ci_udp_state *us,
   kmsg.msg_controllen = 0;
   rc = sock_recvmsg(sock, &kmsg, flags | MSG_DONTWAIT);
   /* Clear OS RX flag if we've got everything  */
-  oo_os_sock_status_bit_clear_handled(&us->s, os_sock, OO_OS_STATUS_RX);
+  oo_os_sock_status_bit_clear_handled(ep, os_sock, OO_OS_STATUS_RX);
   oo_os_sock_put(os_sock);
 
   if( rc >= 0 ) {
@@ -459,8 +459,9 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
 
 #ifndef __KERNEL__
   if( rinf->flags & MSG_ERRQUEUE_CHK ) {
-    if( ci_udp_recv_q_not_empty(&us->timestamp_q) ) {
-      ci_ip_pkt_fmt* pkt;
+#if CI_CFG_TIMESTAMPING
+    ci_ip_pkt_fmt* pkt;
+    if( (pkt = ci_udp_recv_q_get(ni, &us->timestamp_q)) != NULL ) {
       struct timespec ts[3];
       struct cmsg_state cmsg_state;
 
@@ -468,11 +469,6 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
         struct oo_sock_extended_err ee;
         struct sockaddr_in          offender;
       } errhdr;
-
-      /* TODO is this necessary? - mirroring ci_udp_recvmsg_get() */
-      ci_rmb();
-      
-      pkt = ci_udp_recv_q_get(ni, &us->timestamp_q);
 
       cmsg_state.msg = rinf->msg;
       cmsg_state.cm = rinf->msg->msg_control;
@@ -516,11 +512,11 @@ static int ci_udp_recvmsg_socklocked_slowpath(ci_udp_recv_info* rinf,
       rinf->msg_flags |= MSG_ERRQUEUE_CHK;
       return rc;
     }
+#endif
     /* ICMP is handled via OS, so get OS error */
     rc = oo_os_sock_recvmsg(ni, SC_SP(&us->s), rinf->msg, rinf->flags);
     if( rc < 0 ) {
-      ci_assert(-rc == errno);
-      return -1;
+      RET_WITH_ERRNO(-rc);
     }
     else {
       rinf->msg_flags = rinf->msg->msg_flags;
@@ -1173,15 +1169,11 @@ int ci_udp_zc_recv(ci_udp_iomsg_args* a, struct onload_zc_recv_args* args)
     goto empty;
 
   while( 1 ) {
+    ci_ip_pkt_fmt* pkt;
   not_empty:
     cb_flags = 0;
 
-    while( ci_udp_recv_q_not_empty(&us->recv_q) ) {
-      ci_ip_pkt_fmt* pkt;
-      ci_rmb();
-
-      pkt = ci_udp_recv_q_get(ni, &us->recv_q);
-
+    while( (pkt = ci_udp_recv_q_get(ni, &us->recv_q)) != NULL ) {
       /* Reinitialise our own state within [args] each time around the loop, as
        * the app's callback might have changed it. */
       args->msg.iov = iovec;

@@ -38,6 +38,8 @@
 /*! Comment? */
 extern int ci_cpu_features_check(int verbose);
 
+extern int ci_cpu_has_feature(char* feature);
+
 #endif  /* __CI_TOOLS_CPU_FEATURES_H__ */
 
 /*! \cidoxg_end */

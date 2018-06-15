@@ -61,11 +61,6 @@ extern int oo_cp_check_version(struct ci_private_s*, void* arg);
 extern int oo_cp_get_server_pid(struct oo_cplane_handle* cp);
 extern int oo_cp_print_rsop(struct ci_private_s *priv, void *arg);
 extern int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp);
-extern int oo_cp_oof_sync_start(struct oo_cplane_handle* cp);
-extern int oo_cp_oof_sync_wait(struct oo_cplane_handle* cp);
-extern int cp_sync_tables_start(struct oo_cplane_handle* cp,
-                                cp_version_t* ver_out);
-extern int cp_sync_tables_wait(struct oo_cplane_handle* cp,
-                               cp_version_t old_ver);
+extern int oo_cp_oof_sync(struct oo_cplane_handle* cp);
 
 #endif /* __ONLOAD_CPLANE_DRIVER_H__ */

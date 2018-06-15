@@ -1,6 +1,6 @@
 Solarflare 4.X Linux network driver
 ===================================
-Version:  4.12.2.1014
+Version:  4.13.1.1034
 
 
 Overview
@@ -15,6 +15,7 @@ The drivers contained in this package support the following Solarflare
 adapters:
 
 - Solarflare Server Adapters:
+  - Solarflare X2522 Dual Port SFP28 10/25G Adapter
   - Solarflare SFN8522M Dual Port SFP+ Server Adapter
   - Solarflare SFN8042 Dual Port QSFP+ Server Adapter
   - Solarflare SFN8522 Dual Port SFP+ Server Adapter
@@ -76,7 +77,7 @@ kernel
 Installation of the driver can be confirmed by typing:
    modinfo sfc | grep version
 and checking for the line:
-   version: 4.12.2.1014
+   version: 4.13.1.1034
 
 All network interfaces available on the system can be found with:
   ifconfig -a
@@ -100,9 +101,9 @@ Linux distribution support for Solarflare Adapters
 --------------------------------------------------
 
 This driver package is supported on:
- - RedHat Enterprise Linux              6.7, 6.8, 6.9
- - RedHat Enterprise Linux              7.3, 7.4, 7.5beta
-   - RedHat Enterprise Linux for Realtime   7.3, 7.4
+ - RedHat Enterprise Linux		          6.7, 6.8, 6.9
+ - RedHat Enterprise Linux		          7.3, 7.4, 7.5
+   - RedHat Enterprise Linux for Realtime	  7.3, 7.4
  - SuSE Linux Enterprise Server 11                sp4
    - SuSE Linux Enterprise RealTime Extension 11  sp4
  - SuSE Linux Enterprise Server 12                sp3
@@ -110,15 +111,6 @@ This driver package is supported on:
  - Debian 8 "Jessie"                              8.10
  - Debian 9 "Stretch"                             9.4
  - Kernel.org linux kernels                       3.0 to 4.16-rc1
-
-
-This driver has been tested as a VF driver using KVM / ESXi 5.5 and ESXi 6.0
-hypervisors on the following guest OSes:
- - RedHat Enterprise Linux              5.11
- - RedHat Enterprise Linux              6.5, 6.6, 6.7
- - RedHat Enterprise Linux              7.0, 7.1, 7.2
- - SuSE Linux Enterprise Server 11                sp4
- - SuSE Linux Enterprise Server 12                base release
 
 
 Solarflare aims to support the current and previous major release of each
@@ -135,226 +127,132 @@ Please contact your local Solarflare support representative or email
 <support@solarflare.com>.
 
 
-NIC partitioning, SR-IOV and PF-IOV modes on SFN7XXX/8XXX adapters
-------------------------------------------------------------------
-This release of the Solarflare Linux Net driver supports NIC partitioning
-(multiple PFs) and SR-IOV (VFs).
+Deprecation warnings
+--------------------
 
-See "Solarflare Server Adapter User's Guide" SF-103837-CD Issue >=12
-available from https://support.solarflare.com for more detailed information
-on setting up NIC partitioning, SR-IOV or PF-IOV modes.
+The following features are being deprecated and may not be available in future releases
+of the Solarflare linux net driver. Please check the release notes to see whether these
+features have been removed.
 
-Some additional details as well as known issues are documented below:
-General:
-  ~ NIC partitioning/SRIOV/PF-IOV features require sfutils >=v4.3.0.1010 which
-    contains adapter firmware v4.2.1.1014 and firmware-variant=full-feature
-    (setup with sfboot)
-  ~ Please note that Hybrid SR-IOV support for SFN5XXX|6XXX drivers is now
-    deprecated. Please use an older driver to continue using this feature.
-  ~ Link control (e.g. setting pause frames with ethtool and controlling MTU) is
-    only available on the first PF on each port; (this is referred to as "PF0"
-    or the "primary PF")
-  ~ Only link control functions have the full MAC statistics available to them
-    (via ethtool -S). All statistics that come from the MAC are now prefixed
-    "port_" as they refer to a single physical network port.
-    All other functions have statistics which show the number of packets and
-    bytes both received and transmitted by that function, classified into
-    unicast, multicast and broadcast traffic.
-  ~ MTD partitions are only exposed from PF0 on each port, hence the utilities
-    sfupdate, sfboot and sfkey need to be run where they have access to PF0.
-  ~ It is now possible to identify which physical port an interface is bound to.
-    See /sys/class/net/<interface>/device/physical_port (note this is zero
-    based whereas the identifiers printed on the adapter brackets are one based)
-  ~ The driver supports the use of shared RSS indirection tables, after the
-    16 unique hardware RSS indirection tables entries have been consumed.
-  ~ In order for active-backup bonding to work, the slave interface normally
-    takes the MAC address of the master interface. Only PF0 is allowed to
-    change its MAC address. Therefore for this to work with other functions it
-    is necessary to set "sfboot mac-spoofing=enabled". An alternative is to
-    set the bonding module option "fail_over_mac" and allow the gratuitous ARP
-    to inform the other link partners of the change in MAC address.
-  ~ At this time PTP will only work with the PF0 on each port and will
-    not work with a VF.
+Use of these features will currently only cause a warning message to be printed to the
+kernel console.
 
-NIC partitioning support on SFN7XXX/8XXX adapters:
-  ~ The sfc.ko driver will bind to multiple PFs on the same physical adapter
-    port and create a network interface for each PF.
-  ~ Configure with "sfboot switch-mode=partitioning pf-count=X" and cold reboot
-    the server if warned to do so.
-  ~ If using NIC partitioning in the same layer2 broadcast domain you may
-    need the kernel parameter "arp_ignore=2" as linux will reply to ARP
-    on any interface. This might cause traffic to go over unexpected interfaces.
-  ~ If using NIC partitioning with VLANs all PFs must be on a unique VLAN
-    (which can include VLAN 0). Traffic that is sent/received from this PF will
-    have VLAN tags transparently inserted/stripped by the adapter. A single PF
-    on each port can be on VLAN0 where it will both receive and transmit
-    untagged traffic.
-  ~ Configure NIC partitioning with VLANs using
-    "sfboot pf-vlans=<VLAN>,<VLAN>..."
-  ~ Do not use LACP bonding modes when using NIC partitioning as the LACP
-    partner (switch) will not be aware of the partitioning.
-  ~ The driver parameter "num_vis" is now more important. This controls how many
-    extra VIs (RX/TX/event rings) are allocated for the use of onload on each
-    PF. If not using onload you may wish to set "num_vis=0" so that there
-    are no false resource limitations when using multiple PFs.
-  ~ When PF0 is put into promiscuous mode it will receive traffic for its own
-    MAC address as well as any other incoming traffic that does not match
-    another PF's MAC address. For other PFs there is no change in received
-    traffic if the interface is put into promiscuous mode.
+Note that nothing has currently been changed and the full functionality remains in
+this release.
 
-SR-IOV support on SFN7XXX/8XXX adapters:
-  ~ The sfc.ko driver will bind to all VFs and create network interfaces.
-  ~ Configure with "sfboot switch-mode=sriov pf-count=1 vf-count=X" and cold
-    reboot the server if warned to do so.
-  ~ RHEL6.5 and RHEL7 are supported for the host/hypervisor OS.
-  ~ It is possible to consume the VFs using these KVM/libirt modes:
-     - network hostdev (VF passed into the VM; migration is only possible if
-                        the VF is hot-unplugged)
-     - direct-passthrough  (macvtap interface used over the VF and virtio-net
-                            driver used in the VM guest)
-  ~ Note that VFs will initially be assigned random MAC addresses, but libvirt
-    (and ip link) can override the MAC address.
-  ~ A VF in a VM will be unable to set its own MAC address. See the item on
-    active-backup bonding.
-  ~ To enable VFs (for RHEL6.5 and RHEL 7)
-      echo <num vfs> > /sys/class/ethX/device/sriov_numvfs
-  ~ To enable VFs on older operating systems set the sfc.ko module parameter
-    "max_vfs". If set to a single integer this is the number of VFs to enable
-    and will apply to all PFs. If you wish to configure this to be a different
-    value for each PF set this to a comma separated list.
-  ~ Please ensure that you enable all BIOS settings that refer to virtualization
-    and SR-IOV (note there might be several e.g. SRIOV, IOMMU, VT, VT-x, VT-d,
-    IO virtualization)
-  ~ Solarflare recommends setting "pci=realloc" as a kernel parameter
-    (e.g. in /boot/grub/grub.conf). This allows the kernel to reprogram the
-    initial BIOS PCI apertures in case PCI aperture space for the VFs is not
-    assigned by the BIOS.
-  ~ To view which VFs are associated with which PFs and the VF MAC addresses
-    please use "ip link show"
-  ~ A PF put into promiscuous mode will not see the traffic to/from a VF.
-  ~ A VF put into promiscuous mode will not see any additional traffic.
-  ~ Setting VF MAC/VLANs/link state is possible via the ip command
-    (or libvirt configuration). From "ip link help"
-      "ip link set { dev DEVICE}
-         [ vf NUM [ mac LLADDR ]
-                  [ vlan VLANID ]
-                  [ state { auto | enable | disable} ] ]"
-  ~ Setting VF spoofcheck/rate/qos (e.g. via the ip command) is not supported
-    at this time.
+SARFS:
+ ~ This is a feature similar to the kernel feature ARFS (Accelerated Receive Flow
+   Steering) but implemented purely within the sfc.ko driver. All kernels that this
+   driver supports are new enough to support ARFS. Information on using in-kernel ARFS
+   is at https://www.kernel.org/doc/Documentation/networking/scaling.txt or please
+   consult the Solarflare Server Adapter User's Guide [SF-103837-CD] available at
+   https://support.solarflare.com
 
-SR-IOV with NIC partitioning mode support on SFN7XXX/8XXX adapters:
-  ~ This mode offers partitioning of the adapter. Each partition is on a unique
-    VLAN and within this layer2 broadcast domain there is switching on the
-    adapter between the PF and VFs.
-  ~ This support is currently considered EXPERIMENTAL i.e. all features are
-    present, but there has only been limited testing. Solarflare will support
-    the use of this feature in a test environment, but does not recommend use
-    in a production environment until this feature becomes GA.
-    Note that both SR-IOV and NIC partitioning as individual features are both
-    considered GA quality.
-  ~ Ensure you are using adapter firmware >= v4.4.2.1011
-  ~ It is necessary to configure NIC partitioning with unique VLANs in this mode
-  ~ Configure with:
-    "sfboot switch-mode=partitioning-with-sriov \
-       pf-count=X  pf-vlans=<VLAN>[,<VLAN>]... \
-       vf-count=Y"
-    and cold reboot the server if warned to do so.
+SXPS:
+ ~ This is a feature similar to the kernel feature XPS (Transmit Packet Steering) but
+   implemented purely within the sfc.ko driver. All kernels that this driver supports
+   are new enough to support XPS. Information on using in-kernel XPS is at
+   https://www.kernel.org/doc/Documentation/networking/scaling.txt or please consult
+   the Solarflare Server Adapter User's Guide [SF-103837-CD] available at
+   https://support.solarflare.com
 
-PF-IOV mode support on SFN7XXX/8XXX adapters:
-  ~ This mode offers switching between PFs. Use this mode where a server does
-    not support SR-IOV (otherwise please use SR-IOV mode as this provides up-to
-    240VFs versus only 16PFs)
-  ~ Configure with "sfboot switch-mode=pfiov pf-count=X" and cold reboot the
-    server if warned to do so.
-  ~ In RHEL7 passing through a PCI function uses the new VFIO mechanism.
-    Due to a missing capability flag on SFN7XXX/8XXX hardware, VFIO will only
-    allow all PFs to be passed into a guest together. This will be addressed
-    with a kernel quirk.
+Proxy MCDI authorization:
+ ~ This feature had been used in a proof-of-concept to allow a userland utility to vet
+   and control requests to subscribe to a multicast group from an unprivileged
+   function (e.g. a VF in a VM).
 
-
-Known issues with the platform (KVM/libvirt/kernel)
----------------------------------------------------
-  ~ libvirt direct-bridged mode on-top of a VF is not supported. Please use
-    libvirt direct-bridged mode over a PF or direct-passthrough mode with VFs.
-Issue 46876:
-  ~ Multicast does not work in libvirt direct-passthrough mode.
-    This is because the multicast address list is not propagated to the network
-    interface below the macvtap driver. Without this the sfc.ko driver is unable
-    to program the adapter switch to efficiently replicate multicast traffic to
-    only the subscribed functions. Solarflare will work with upstream to find a
-    solution to this issue.
-Issue 47742:
-  ~ IPv6 traffic does not pass in direct-bridged and direct-passthrough modes.
-    In direct-passthrough mode multicast neighbour solicitation fails as per the
-    previous point.
-    In direct-bridged mode this is because an interface calculates an IPv6 link
-    address based on its MAC address. There will be a neighbour solicitation
-    multicast filter in the host, but when a global address is assigned in the
-    VM guest, a multicast filter corresponding to the new global address is not
-    inserted in the host because macvtap doesn't propagate this information.
-Issue 46948:
-  ~ The macvtap driver does not propagate the link state from the real network
-    interface. This means that it is not possible to use bonded interfaces that
-    use link state detection (miimon). Instead please use ARP probes. This
-    affects libvirt direct-bridged and direct-passthrough modes.
-Issue 47490:
-  ~ Bad interactions can occur with NetworkManager scripts when it sees
-    new VFs with random MAC addresses. Alternatively use the older networking
-    service/scripts.
-Issue 50308:
-  ~ For RHEL 7.0 disabling GRO after passing traffic is unsafe, and can lead to
-    a kernel NULL pointer deference. This is believed to be addressed by Redhat
-    in RHEL 7.1. This will only happen when LRO is also disabled. For
-    configurations that disable GRO and LRO, please disable GRO after the driver
-    is loaded, but before the interface is brought up.
-Issue 50873:
-  ~ Changing the MTU across the page size (4K for x86) on a network team in
-    RHEL 7.0 can cause a hang. As a workaround please change the MTU of the
-    component interfaces of the team before creating it. This is fixed in
-    RHEL 7.1
-
-
-Known Issues with Solarflare driver/firmware
---------------------------------------------
-SF-119015-KI / Issue 72914:
- ~ [SFN7xxx series firmware only].
-   There is an issue when using MCFW where a transmit queue using TSO may lockup
-   and cause a NETDEV watchdog.
- ~ In the default configuration of "pf-count=1" (where there is no NIC
-   partitioning) the NETDEV watchdog will occur on TX queue >=31, this will
-   only be used if there are more than 32 logical CPUs in the machine, or if the
-   "rss_cpus" module parameter is explicitly set.
- ~ As a workaround please set the module parameter to at most "rss_cpus=31".
- ~ As a fix please update adapter firmware using the "sfutils" package from
-   https://support.solarflare.com to MCFW >= v6.2.7.1000
-
-Issue 50868:
-  ~ If using a SFN7142Q adapter with adapter firmware v4.1.0.6742 and running
-    sfupdate, after the update the two network interfaces from the second QSFP+
-    port will be in a disabled state. Please reload the driver to correct this.
-    This issue has been resolved in adapter firmware >=v4.1.1.1022.
+Driverlink RX packet callback:
+ ~ This was used for inspecting/permitting all RX packets via a driverlink callback.
 
 
 Changelog
 ---------
 
-### v4.12.2.1014 -- update release for OpenOnload-201710
+### v4.13.1.1034 -- X2 GA release
 [General changes]
- ~ Kernel compatibility for upstream 4.15, 4.16-rc5 and RHEL 7.5.
+ ~ Kernel compat fixes to support linux 4.15
+   [timespec_add_ns(), setup_timer(), mtd_erase_callback(), TICK_USEC ]
+ ~ Support RSS spreading of ethtool ntuple filters and add this to driverlink APIs.
+   To configure this requires upstreamed ethtool changes or a copy of sfctool2 from the
+   sfutils package.
+ ~ Remove "ctpio_dmabuf_start" that was erroneously included in ethtool stats.
+ ~ Expose flash partitions with default settings via MTD. These are now used by sfboot.
+ ~ Replace asynchronous filter operations (e.g. ARFS) to ensure all filter table
+   functions are called in a sleepable context.
 
- ~ Increase the number of multicast filters used before reverting to the
-   'multicast all' filter. In response to customer feedback the maximum number
-   of multicast filters inserted has been increased from 256 to 512. Above
-   that the individual filters will still be replaced with a 'multicast all'
-   filter.
+[Deprecation warnings]
+ ~ Warnings will be printed if the following features of the driver are used:
+   SARFS, SXPS, driverlink RX packet callback, proxy MCDI authorization.
+ ~ Please see the section on deprecated features elsewhere in this release note.
 
-SF-119883-KI / Issue 78131:
- ~ A race condition in the MCDI (driver<=>adapter communication) state machine
-   could result in stack data being accessed from a different thread after it
-   had gone out of scope. This would result in invalid addresses being read or
-   a hard lockup, both with efx_mcdi_rpc_completer and __wake_up in the call
-   stack. A similar race (not observed in use) was identified and fixed in the
-   PTP/MCDI interaction.
+Issue 79102:
+ ~ Filter locking improvements.
+ ~ This had been seen to cause a command such as "ip link set enp4s0f0 vf 0 vlan 100"
+   to cause hung task timeouts with "efx_ef10_filter_insert+0x94/0x900" in the stack.
+
+Issue 78429:
+ ~ Avoid using RSS files with "capture-packed-stream" firmware variant.
+   The error seen would be "efx_ef10_filter_insert failed rc=-95".
+
+SF-119883-KI / Issue 78299:
+ ~ Fix for kernel panic or NMI. The backtrace will include "efx_mcdi_rpc_completer"
+   and a "__wake_up" function.
+
+Issue 77962:
+ ~ Handle delayed release of MTD memory by reference counting partition info memory.
+ ~ This could cause a kernel WARNING and backtrace at:
+     drivers/mtd/mtdcore.c:508 add_mtd_device+0x246/0x350 [mtd]
+
+Issue 77898:
+ ~ Clean up channel->tx_queues when retrying after VI shortage.
+ ~ This was only seen with 16PFs (sfboot pf-count=16) and resulted in the error
+   "failed to initialise TXQ 8"
+
+Issue 77378:
+ ~ Avoid "Unable to set UDP tunnel ports" when using L3xUDP firmware variant.
+
+
+### v4.13.1.1021 -- X2 pre-production release
+[General changes]
+ ~ Initial support for Solarflare X2 adapter series. This has not completed
+   testing and qualification at Solarflare and hence should not be used in a
+   production environment.
+ ~ Kernel compatibility for upstream 4.16-rc1.
+ ~ Kernel compatibility for RHEL 7.5.
+ ~ Improve error handling when removing an MTD partition fails. This can lead to
+   repeated messages of the form "Removing MTD device #0 with use count 1".
+ ~ Fix build error with gcc version 7.2.1.
+ ~ Expose the PHC clock for 1 VF per VM.
+ ~ Increase the number of multicast filters to 512.
+ ~ Disabled SKB cache on recent kernels due to netdev_alloc_skb improvements
+   making it redundant.
+ ~ Check if MCDI event pending, when MCDI times out.
+ ~ Expose FEC statistics on X2 adapters.
+ ~ Add support for 25/50/100G supported/advertised speeds.
+ ~ expose CTPIO stats on NICs on X2 adapters.
+ ~ Add control of forward_fcs through ethtool feature flags.
+ ~ support X2 VI strides other than 8k.
+
+SF-119883-KI / Issue 78131: 
+ ~ Address a potential kernel panic where the backtrace will include
+   "efx_mcdi_rpc_completer".
+ ~ This affected systems running sfc v4.12 prior to v4.12.2.1013.
+
+Issue 78042:
+ ~ Don't restore filters marked BUSY in efx_ef10_filter_table_restore().
+ ~ This could lead to the following errors, but only after the rare event that
+   the MC resets:
+     MC command 0x8a inlen 108 failed rc=-22 (raw=0) arg=0
+
+Issue 76297:
+ ~ Add 'immediate send' feature to async MCDI and use it to ensure that PTP
+   time sync commands are sent in the same thread as the process_times logic
+   is done in.
+
+[Stratus ftServer support] - Note these issues only affect PCI hot-plug cases
+Issue 76858:
+ ~ Fix kernel crash in show_max_adjfreq+0x20/0x40.
+
 
 ### v4.12.2.1006 -- update release for OpenOnload-201710
 [General changes]
@@ -2113,6 +2011,206 @@ Issue 19951
 
 
 ### v3.0.5.2175 -- Update release
+
+
+NIC partitioning, SR-IOV and PF-IOV modes on SFN7XXX/8XXX adapters
+------------------------------------------------------------------
+This release of the Solarflare Linux Net driver supports NIC partitioning
+(multiple PFs) and SR-IOV (VFs).
+
+See "Solarflare Server Adapter User's Guide" SF-103837-CD Issue >=12
+available from https://support.solarflare.com for more detailed information
+on setting up NIC partitioning, SR-IOV or PF-IOV modes.
+
+Some additional details as well as known issues are documented below:
+General:
+  ~ NIC partitioning/SRIOV/PF-IOV features require sfutils >=v4.3.0.1010 which
+    contains adapter firmware v4.2.1.1014 and firmware-variant=full-feature
+    (setup with sfboot)
+  ~ Please note that Hybrid SR-IOV support for SFN5XXX|6XXX drivers is now
+    deprecated. Please use an older driver to continue using this feature.
+  ~ Link control (e.g. setting pause frames with ethtool and controlling MTU) is
+    only available on the first PF on each port; (this is referred to as "PF0"
+    or the "primary PF")
+  ~ Only link control functions have the full MAC statistics available to them
+    (via ethtool -S). All statistics that come from the MAC are now prefixed
+    "port_" as they refer to a single physical network port.
+    All other functions have statistics which show the number of packets and
+    bytes both received and transmitted by that function, classified into
+    unicast, multicast and broadcast traffic.
+  ~ MTD partitions are only exposed from PF0 on each port, hence the utilities
+    sfupdate, sfboot and sfkey need to be run where they have access to PF0.
+  ~ It is now possible to identify which physical port an interface is bound to.
+    See /sys/class/net/<interface>/device/physical_port (note this is zero
+    based whereas the identifiers printed on the adapter brackets are one based)
+  ~ The driver supports the use of shared RSS indirection tables, after the
+    16 unique hardware RSS indirection tables entries have been consumed.
+  ~ In order for active-backup bonding to work, the slave interface normally
+    takes the MAC address of the master interface. Only PF0 is allowed to
+    change its MAC address. Therefore for this to work with other functions it
+    is necessary to set "sfboot mac-spoofing=enabled". An alternative is to
+    set the bonding module option "fail_over_mac" and allow the gratuitous ARP
+    to inform the other link partners of the change in MAC address.
+  ~ At this time PTP will only work with the PF0 on each port and will
+    not work with a VF.
+
+NIC partitioning support on SFN7XXX/8XXX adapters:
+  ~ The sfc.ko driver will bind to multiple PFs on the same physical adapter
+    port and create a network interface for each PF.
+  ~ Configure with "sfboot switch-mode=partitioning pf-count=X" and cold reboot
+    the server if warned to do so.
+  ~ If using NIC partitioning in the same layer2 broadcast domain you may
+    need the kernel parameter "arp_ignore=2" as linux will reply to ARP
+    on any interface. This might cause traffic to go over unexpected interfaces.
+  ~ If using NIC partitioning with VLANs all PFs must be on a unique VLAN
+    (which can include VLAN 0). Traffic that is sent/received from this PF will
+    have VLAN tags transparently inserted/stripped by the adapter. A single PF
+    on each port can be on VLAN0 where it will both receive and transmit
+    untagged traffic.
+  ~ Configure NIC partitioning with VLANs using
+    "sfboot pf-vlans=<VLAN>,<VLAN>..."
+  ~ Do not use LACP bonding modes when using NIC partitioning as the LACP
+    partner (switch) will not be aware of the partitioning.
+  ~ The driver parameter "num_vis" is now more important. This controls how many
+    extra VIs (RX/TX/event rings) are allocated for the use of onload on each
+    PF. If not using onload you may wish to set "num_vis=0" so that there
+    are no false resource limitations when using multiple PFs.
+  ~ When PF0 is put into promiscuous mode it will receive traffic for its own
+    MAC address as well as any other incoming traffic that does not match
+    another PF's MAC address. For other PFs there is no change in received
+    traffic if the interface is put into promiscuous mode.
+
+SR-IOV support on SFN7XXX/8XXX adapters:
+  ~ The sfc.ko driver will bind to all VFs and create network interfaces.
+  ~ Configure with "sfboot switch-mode=sriov pf-count=1 vf-count=X" and cold
+    reboot the server if warned to do so.
+  ~ RHEL6.5 and RHEL7 are supported for the host/hypervisor OS.
+  ~ It is possible to consume the VFs using these KVM/libirt modes:
+     - network hostdev (VF passed into the VM; migration is only possible if
+                        the VF is hot-unplugged)
+     - direct-passthrough  (macvtap interface used over the VF and virtio-net
+                            driver used in the VM guest)
+  ~ Note that VFs will initially be assigned random MAC addresses, but libvirt
+    (and ip link) can override the MAC address.
+  ~ A VF in a VM will be unable to set its own MAC address. See the item on
+    active-backup bonding.
+  ~ To enable VFs (for RHEL6.5 and RHEL 7)
+      echo <num vfs> > /sys/class/ethX/device/sriov_numvfs
+  ~ To enable VFs on older operating systems set the sfc.ko module parameter
+    "max_vfs". If set to a single integer this is the number of VFs to enable
+    and will apply to all PFs. If you wish to configure this to be a different
+    value for each PF set this to a comma separated list.
+  ~ Please ensure that you enable all BIOS settings that refer to virtualization
+    and SR-IOV (note there might be several e.g. SRIOV, IOMMU, VT, VT-x, VT-d,
+    IO virtualization)
+  ~ Solarflare recommends setting "pci=realloc" as a kernel parameter
+    (e.g. in /boot/grub/grub.conf). This allows the kernel to reprogram the
+    initial BIOS PCI apertures in case PCI aperture space for the VFs is not
+    assigned by the BIOS.
+  ~ To view which VFs are associated with which PFs and the VF MAC addresses
+    please use "ip link show"
+  ~ A PF put into promiscuous mode will not see the traffic to/from a VF.
+  ~ A VF put into promiscuous mode will not see any additional traffic.
+  ~ Setting VF MAC/VLANs/link state is possible via the ip command
+    (or libvirt configuration). From "ip link help"
+      "ip link set { dev DEVICE}
+         [ vf NUM [ mac LLADDR ]
+                  [ vlan VLANID ]
+                  [ state { auto | enable | disable} ] ]"
+  ~ Setting VF spoofcheck/rate/qos (e.g. via the ip command) is not supported
+    at this time.
+
+SR-IOV with NIC partitioning mode support on SFN7XXX/8XXX adapters:
+  ~ This mode offers partitioning of the adapter. Each partition is on a unique
+    VLAN and within this layer2 broadcast domain there is switching on the
+    adapter between the PF and VFs.
+  ~ This support is currently considered EXPERIMENTAL i.e. all features are
+    present, but there has only been limited testing. Solarflare will support
+    the use of this feature in a test environment, but does not recommend use
+    in a production environment until this feature becomes GA.
+    Note that both SR-IOV and NIC partitioning as individual features are both
+    considered GA quality.
+  ~ Ensure you are using adapter firmware >= v4.4.2.1011
+  ~ It is necessary to configure NIC partitioning with unique VLANs in this mode
+  ~ Configure with:
+    "sfboot switch-mode=partitioning-with-sriov \
+       pf-count=X  pf-vlans=<VLAN>[,<VLAN>]... \
+       vf-count=Y"
+    and cold reboot the server if warned to do so.
+
+PF-IOV mode support on SFN7XXX/8XXX adapters:
+  ~ This mode offers switching between PFs. Use this mode where a server does
+    not support SR-IOV (otherwise please use SR-IOV mode as this provides up-to
+    240VFs versus only 16PFs)
+  ~ Configure with "sfboot switch-mode=pfiov pf-count=X" and cold reboot the
+    server if warned to do so.
+  ~ In RHEL7 passing through a PCI function uses the new VFIO mechanism.
+    Due to a missing capability flag on SFN7XXX/8XXX hardware, VFIO will only
+    allow all PFs to be passed into a guest together. This will be addressed
+    with a kernel quirk.
+
+
+Known issues with the platform (KVM/libvirt/kernel)
+---------------------------------------------------
+  ~ libvirt direct-bridged mode on-top of a VF is not supported. Please use
+    libvirt direct-bridged mode over a PF or direct-passthrough mode with VFs.
+Issue 46876:
+  ~ Multicast does not work in libvirt direct-passthrough mode.
+    This is because the multicast address list is not propagated to the network
+    interface below the macvtap driver. Without this the sfc.ko driver is unable
+    to program the adapter switch to efficiently replicate multicast traffic to
+    only the subscribed functions. Solarflare will work with upstream to find a
+    solution to this issue.
+Issue 47742:
+  ~ IPv6 traffic does not pass in direct-bridged and direct-passthrough modes.
+    In direct-passthrough mode multicast neighbour solicitation fails as per the
+    previous point.
+    In direct-bridged mode this is because an interface calculates an IPv6 link
+    address based on its MAC address. There will be a neighbour solicitation
+    multicast filter in the host, but when a global address is assigned in the
+    VM guest, a multicast filter corresponding to the new global address is not
+    inserted in the host because macvtap doesn't propagate this information.
+Issue 46948:
+  ~ The macvtap driver does not propagate the link state from the real network
+    interface. This means that it is not possible to use bonded interfaces that
+    use link state detection (miimon). Instead please use ARP probes. This
+    affects libvirt direct-bridged and direct-passthrough modes.
+Issue 47490:
+  ~ Bad interactions can occur with NetworkManager scripts when it sees
+    new VFs with random MAC addresses. Alternatively use the older networking
+    service/scripts.
+Issue 50308:
+  ~ For RHEL 7.0 disabling GRO after passing traffic is unsafe, and can lead to
+    a kernel NULL pointer deference. This is believed to be addressed by Redhat
+    in RHEL 7.1. This will only happen when LRO is also disabled. For
+    configurations that disable GRO and LRO, please disable GRO after the driver
+    is loaded, but before the interface is brought up.
+Issue 50873:
+  ~ Changing the MTU across the page size (4K for x86) on a network team in
+    RHEL 7.0 can cause a hang. As a workaround please change the MTU of the
+    component interfaces of the team before creating it. This is fixed in
+    RHEL 7.1
+
+
+Known Issues with Solarflare driver/firmware
+--------------------------------------------
+SF-119015-KI / Issue 72914:
+ ~ [SFN7xxx series firmware only].
+   There is an issue when using MCFW where a transmit queue using TSO may lockup
+   and cause a NETDEV watchdog.
+ ~ In the default configuration of "pf-count=1" (where there is no NIC
+   partitioning) the NETDEV watchdog will occur on TX queue >=31, this will
+   only be used if there are more than 32 logical CPUs in the machine, or if the
+   "rss_cpus" module parameter is explicitly set.
+ ~ As a workaround please set the module parameter to at most "rss_cpus=31".
+ ~ As a fix please update adapter firmware using the "sfutils" package from
+   https://support.solarflare.com to MCFW >= v6.2.7.1000
+
+Issue 50868:
+  ~ If using a SFN7142Q adapter with adapter firmware v4.1.0.6742 and running
+    sfupdate, after the update the two network interfaces from the second QSFP+
+    port will be in a disabled state. Please reload the driver to correct this.
+    This issue has been resolved in adapter firmware >=v4.1.1.1022.
 
 
 Copyright

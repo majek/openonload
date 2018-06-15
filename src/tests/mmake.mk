@@ -8,14 +8,16 @@ SUBDIRS		:= ciul \
                    runbench_scripts \
 		   rtt \
                    syscalls \
-                   tap
+                   tap \
+		   trade_sim
 
 OTHER_SUBDIRS	:=
 
 ifeq ($(ONLOAD_ONLY),1)
 SUBDIRS		:= ef_vi \
                    onload \
-                   rtt
+                   rtt \
+                   trade_sim
 endif
 
 ifneq ($(NO_ZF),1)

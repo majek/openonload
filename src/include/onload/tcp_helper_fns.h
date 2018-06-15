@@ -58,12 +58,8 @@ extern int tcp_helper_alloc_ul(ci_resource_onload_alloc_t* alloc,
                                int ifindices_len,
                                tcp_helper_resource_t** rs_out);
 
-#define NS_COMP_OOF_WAIT            1
-#define NS_COMP_DUMP_WAIT_NEW       2
-#define NS_COMP_DUMP_WAIT_ALWAYS    4
 extern int tcp_helper_get_ns_components(struct oo_cplane_handle** cplane,
-                                        struct oo_filter_ns**  filter_ns,
-                                        ci_uint32 flags);
+                                        struct oo_filter_ns**  filter_ns);
 
 struct user_namespace;
 extern struct user_namespace* tcp_helper_get_user_ns(tcp_helper_resource_t*);
@@ -189,7 +185,8 @@ extern int efab_thr_table_lookup(const char* name, struct net* netns,
 
 /*! Dump a stack's netif state to a buffer or (if NULL) to syslog */
 extern int tcp_helper_dump_stack(unsigned id, unsigned orphan_only,
-                                 void* user_buf, int user_buf_len);
+                                 void* user_buf, int user_buf_len,
+                                 int op);
 
 /*! Try to kill an orphan/zombie stack */
 extern int tcp_helper_kill_stack_by_id(unsigned id);
@@ -247,6 +244,8 @@ extern int efab_tcp_helper_bind_os_sock_kernel(tcp_helper_resource_t* trs,
                                                struct sockaddr *addr,
                                                int addrlen,
                                                ci_uint16 *out_port);
+extern int /*bool*/
+tcp_helper_active_wilds_need_filters(tcp_helper_resource_t*);
 
 extern int efab_tcp_helper_listen_os_sock(ci_private_t *priv, void *p_backlog);
 
@@ -295,14 +294,6 @@ extern int tcp_helper_cluster_alloc_thr(const char* name,
                                         int ni_flags,
                                         const ci_netif_config_opts* ni_opts,
                                         tcp_helper_resource_t** thr_out);
-
-/*! Tries to allocate up to size active wilds to the active wild pool.
- *
- * \return 0 size entries were added to pool
- *        -1 otherwise
- */
-extern int tcp_helper_alloc_to_active_wild_pool(tcp_helper_resource_t* rs,
-                                                int size);
 
 /*--------------------------------------------------------------------
  *!
@@ -383,7 +374,8 @@ efab_tcp_helper_netif_unlock(tcp_helper_resource_t*, int in_dl_context);
 /**********************************************************************
 ***************** Iterators to find netifs ***************************
 **********************************************************************/
-extern int iterate_netifs_unlocked(ci_netif **p_ni);
+extern int iterate_netifs_unlocked(ci_netif **p_ni, int only_orphans,
+                                   int skip_orphans);
 
 ci_inline void
 iterate_netifs_unlocked_dropref(ci_netif * netif)
@@ -438,7 +430,6 @@ int efab_tcp_helper_setsockopt(tcp_helper_resource_t* trs, oo_sp sock_id,
 
 
 
-
 extern int efab_tcp_helper_handover(ci_private_t* priv, void *p_fd);
 extern int oo_file_moved_rsop(ci_private_t* priv, void *p_fd);
 
@@ -479,20 +470,28 @@ extern int efab_create_os_socket(tcp_helper_resource_t* trs,
                                  ci_int32 type, int flags);
 
 extern void
+oo_os_sock_status_bit_clear_handled(tcp_helper_endpoint_t *ep,
+                                    struct file* os_sock,
+                                    ci_uint32 bits_handled);
+
+extern void
 tcp_helper_defer_dl2work(tcp_helper_resource_t* trs, ci_uint32 flag);
 
 
 extern int
-oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type);
+oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type,
+             ci_os_file* _file_ptr);
 static inline int
 oo_create_ep_fd(tcp_helper_endpoint_t* ep, int flags, int fd_type)
 {
-  return oo_create_fd(ep->thr, ep->id, flags, fd_type);
+  return oo_create_fd(ep->thr, ep->id, flags, fd_type,
+                      (fd_type == -1 || (fd_type == CI_PRIV_TYPE_TCP_EP)) ?
+                      &ep->file_ptr : NULL);
 }
 static inline int
 oo_create_stack_fd(tcp_helper_resource_t *thr)
 {
-  return oo_create_fd(thr, OO_SP_NULL, O_CLOEXEC, CI_PRIV_TYPE_NETIF);
+  return oo_create_fd(thr, OO_SP_NULL, O_CLOEXEC, CI_PRIV_TYPE_NETIF, NULL);
 }
 
 extern int onloadfs_get_dev_t(ci_private_t* priv, void* arg);
@@ -609,6 +608,55 @@ extern void oo_timesync_update(struct oo_timesync*);
 
 extern int oo_timesync_ctor(struct oo_timesync *oo_ts);
 extern void oo_timesync_dtor(struct oo_timesync *oo_ts);
+
+
+extern int
+tcp_helper_install_tproxy(int install,
+                          tcp_helper_resource_t* thr,
+                          tcp_helper_cluster_t* thc,
+                          const ci_netif_config_opts* ni_opts,
+                          ci_uint16* ifindexes_out, int out_count);
+
+
+/*----------------------------------------------------------------------------
+ * Shared local ports
+ *---------------------------------------------------------------------------*/
+
+extern int
+efab_alloc_ephemeral_port(ci_uint32 laddr_be32,
+                          struct efab_ephemeral_port_keeper** keeper_out);
+extern void
+efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper);
+
+extern struct efab_ephemeral_port_head*
+tcp_helper_alloc_ephem_table(ci_uint32 min_entries, ci_uint32* entries_out);
+
+extern int
+tcp_helper_get_ephemeral_port_list(struct efab_ephemeral_port_head* table,
+                                   uint32_t laddr_be32,
+                                   ci_uint32 table_entries,
+                                   struct efab_ephemeral_port_head** list_out);
+
+/*! Tries to allocate up to size active wilds to the active wild pool.
+ *
+ * \return 0 size entries were added to pool
+ *        -1 otherwise
+ */
+extern int tcp_helper_alloc_to_active_wild_pool(tcp_helper_resource_t* rs,
+                                                ci_uint32 laddr_be32,
+                                                ci_dllist* ephemeral_ports);
+
+extern int tcp_helper_increase_active_wild_pool(tcp_helper_resource_t* rs,
+                                                ci_uint32 laddr_be);
+
+extern int
+tcp_helper_alloc_ephemeral_ports(struct efab_ephemeral_port_head* list_head,
+                                 ci_uint32 laddr_be32, int count);
+
+extern void
+tcp_helper_free_ephemeral_ports(struct efab_ephemeral_port_head* table,
+                                ci_uint32 entries);
+
 
 #endif /* __CI_DRIVER_EFAB_TCP_HELPER_FNS_H__ */
 /*! \cidoxg_end */

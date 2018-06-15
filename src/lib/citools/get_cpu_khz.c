@@ -35,7 +35,7 @@ unsigned ci_cpu_khz;
 
 
 
-# if defined(__i386__) || defined(__x86_64__) || defined(__ia64__)
+# if defined(__i386__) || defined(__x86_64__)
 
 ci_inline int try_get_hz(const char* line, unsigned* cpu_khz_out)
 {
@@ -200,7 +200,6 @@ ci_get_cpu_khz(unsigned* cpu_khz_out)
 }
 
 #endif	/*__FreeBSD__*/
-
 
 
 

@@ -105,6 +105,5 @@ extern int ci_sys_sendmmsg(int fd, struct mmsghdr* msg, unsigned vlen,
 # endif
 
 
-
 #endif /* defined(__unix__) && defined(__GNUC__) */
 #endif  /* __CI_UL_SYSCALL_UNIX_H__ */

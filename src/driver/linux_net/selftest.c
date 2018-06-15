@@ -213,7 +213,7 @@ static int efx_test_interrupts(struct efx_nic *efx,
 	tests->interrupt = -1;
 
 	rc = efx_nic_irq_test_start(efx);
-	if (rc == -ENOTSUPP) {
+	if (rc == -EOPNOTSUPP) {
 		netif_dbg(efx, drv, efx->net_dev,
 			  "direct interrupt testing not supported\n");
 		tests->interrupt = 0;

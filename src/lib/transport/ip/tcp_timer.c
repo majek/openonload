@@ -495,13 +495,13 @@ static void ci_tcp_drop_due_to_rto(ci_netif *ni, ci_tcp_state *ts,
 
 void ci_tcp_send_corked_packets(ci_netif* netif, ci_tcp_state* ts)
 {
-  /* If the send queue is more than 1 MSS pending, that suggests
-   * there is another reason for it not being sent, so do nothing in
-   * that case.
+  /* Remove CI_PKT_FLAG_TX_MORE flag flag to ensure that we no more defer
+   * sending unnecessarily.
+   * ci_tcp_tx_advance() may be unable to send all the packets because of
+   * congestion window or other limitations, but we have to ensure that the
+   * packets are sent as soon as these other limitations cease to exist.
    */
-  if( ci_ip_queue_not_empty(&ts->send) &&
-      SEQ_SUB(tcp_enq_nxt(ts), tcp_snd_nxt(ts)) < tcp_eff_mss(ts) ) {
-    /* Remove CI_PKT_FLAG_TX_MORE flag to ensure it gets sent now */
+  if( ci_ip_queue_not_empty(&ts->send) ) {
     oo_pkt_p pp = ts->send.head;
     ci_ip_pkt_fmt* pkt;
     do {
@@ -620,6 +620,7 @@ void ci_tcp_timeout_rto(ci_netif* netif, ci_tcp_state* ts)
 
   /* Reset congestion window to one segment (RFC2581 p5). */
   ts->cwnd = CI_MAX(tcp_eff_mss(ts), NI_OPTS(netif).loss_min_cwnd);
+  ts->cwnd = CI_MAX(ts->cwnd, NI_OPTS(netif).min_cwnd);
   ts->bytes_acked = 0;
 
   /* Backoff RTO timer and restart. */

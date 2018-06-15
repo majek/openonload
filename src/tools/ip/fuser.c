@@ -150,7 +150,9 @@ main(int argc, char* argv[])
         break;
        }
     }
+    closedir(fd_dir);
   }
+  closedir(proc_dir);
 
   /* print or kill */
   for( proc = proc_head; proc != NULL; proc = proc->next ) {

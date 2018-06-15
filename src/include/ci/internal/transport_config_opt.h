@@ -343,12 +343,12 @@
 /* TCP sndbuf */
 #define CI_CFG_TCP_SNDBUF_MIN	        CI_SOCK_MIN_SNDBUF
 # define CI_CFG_TCP_SNDBUF_DEFAULT	65535
-#define CI_CFG_TCP_SNDBUF_MAX		65535
+#define CI_CFG_TCP_SNDBUF_MAX		4194304
 
 #define CI_CFG_TCP_RCVBUF_MIN           CI_SOCK_MIN_RCVBUF
 
 # define CI_CFG_TCP_RCVBUF_DEFAULT	65535
-#define CI_CFG_TCP_RCVBUF_MAX		65535
+#define CI_CFG_TCP_RCVBUF_MAX		6291456
 
 /* These configuration "options" describe whether the host O/S normally
  * inherits specific socket state when accept() is called.
@@ -632,14 +632,17 @@
 #define CI_CFG_PIO 1
 #define CI_CFG_MIN_PIO_BLOCK_ORDER 7
 
-/* Whether this build should use PIO or not.  
+/* Whether to include code to transmit packets via CTPIO */
+#define CI_CFG_CTPIO 1
+
+/* Whether this build should use PIO/CTPIO or not.
  *
- * This is needed in addition to CI_CFG_PIO as on some 32 bit systems
- * PIO is suspected to not be safe, but those builds may be sharing a
+ * This is needed in addition to CI_CFG_PIO and CI_CFG_CTPIO as on some 32 bit
+ * systems PIO is suspected to not be safe, but those builds may be sharing a
  * stack with a 64 bit system that is using PIO safely.
  */
 #define CI_CFG_USE_PIO  (EF_VI_CONFIG_PIO && CI_CFG_PIO)
-
+#define CI_CFG_USE_CTPIO (EF_VI_CONFIG_PIO && CI_CFG_CTPIO)
 
 /* Include support for an additional RXQ for UDP receives.
  */
@@ -647,16 +650,21 @@
 
 /* How many epolls sets will have a ready list maintained by the stack */
 #define CI_CFG_EPOLL1_SETS_PER_STACK 4
-/* How many ready lists are maintained - one dummy list for sockets that
- * aren't asssociated with a specific set's ready list, plus the ones assigned
- * for epolls sets - CI_CFG_EPOLL1_SETS_PER_STACK.
- */
-#define CI_CFG_N_READY_LISTS (CI_CFG_EPOLL1_SETS_PER_STACK + 1)
+/* How many ready lists are maintained */
+#define CI_CFG_N_READY_LISTS CI_CFG_EPOLL1_SETS_PER_STACK
 
 /* Control behaviour of Onload sender when receiver advertises window
  * below 1 MSS
  */
 #define CI_CFG_SPLIT_SEND_PACKETS_FOR_SMALL_RECEIVE_WINDOWS 0
+
+#define CI_CFG_MAX_SUPPORTED_INTERFACES 16
+
+/* Do we need SO_TIMESTAMPING, WODA, ...? */
+#define CI_CFG_TIMESTAMPING 1
+
+/* Include "extra" transport_config_opt to allow build-time profiles */
+#include TRANSPORT_CONFIG_OPT_HDR
 
 #endif /* __CI_INTERNAL_TRANSPORT_CONFIG_OPT_H__ */
 /*! \cidoxg_end */

@@ -1,0 +1,18 @@
+# OpenOnload lowest latency profile.  Includes the standard "latency"
+# profile and adds further options that are likely to improve latency for
+# many applications.  NB. This may include options that are not safe for
+# all applications and all environments, so please use with care.
+
+onload_import latency
+
+# Use cut-through mode for CTPIO feature on X2 (and later) adapters.
+# NB. This can result in poisoned packets being emitted.
+onload_set EF_CTPIO_MODE ct
+
+# Enable CTPIO even if using full-featured firmware.  N.B. This is
+# incompatible with multicast loopback.
+onload_set EF_CTPIO_SWITCH_BYPASS 1
+
+# Assume that application does not invoke calls on a single epoll object
+# concurrently.
+onload_set EF_EPOLL_MT_SAFE 1

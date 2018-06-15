@@ -36,6 +36,7 @@
 
 
 static bool cfg_quiet = false;
+static bool cfg_rx_timestamping = false;
 
 
 static void usage_msg(FILE* f)
@@ -47,6 +48,7 @@ static void usage_msg(FILE* f)
   fprintf(f, "  -h       Print this usage message\n");
   fprintf(f, "  -m       Use the zf multiplexer\n");
   fprintf(f, "  -w       Use the zf waitable fd\n");
+  fprintf(f, "  -r       Enable rx timestamping\n");
   fprintf(f, "  -q       Quiet -- do not emit progress messages\n");
 }
 
@@ -85,7 +87,23 @@ static void try_recv(struct zfur* ur)
 
     /* Do something useful with the datagram here! */
 
+
     vlog("Received datagram of length %zu\n", rd.iov[0].iov_len);
+
+    /* In the case rx timestamping capabilities are enabled, we can retrieve
+     * the time at which the packet was received.
+     * */
+    if( cfg_rx_timestamping ) {
+      unsigned flags;
+      struct timespec ts;
+      int rc = zfur_pkt_get_timestamp(ur, &rd.msg, &ts, 0, &flags);
+
+      if( rc == 0 )
+        vlog("At time: %lld.%.9ld\n", ts.tv_sec, ts.tv_nsec);
+      else
+        vlog("Error retrieving timestamp! Return code: %d\n", rc);
+    }
+
     zfur_zc_recv_done(ur, &rd.msg);
   } while( rd.msg.dgrams_left );
 }
@@ -158,7 +176,7 @@ int main(int argc, char* argv[])
   int cfg_waitable_fd = 0;
 
   int c;
-  while( (c = getopt(argc, argv, "hmwq")) != -1 )
+  while( (c = getopt(argc, argv, "hmrwq")) != -1 )
     switch( c ) {
     case 'h':
       usage_msg(stdout);
@@ -169,6 +187,8 @@ int main(int argc, char* argv[])
     case 'w':
       cfg_waitable_fd = 1;
       break;
+    case 'r':
+      cfg_rx_timestamping = 1;
     case 'q':
       cfg_quiet = true;
       break;
@@ -198,6 +218,9 @@ int main(int argc, char* argv[])
 
   struct zf_attr* attr;
   ZF_TRY(zf_attr_alloc(&attr));
+
+  if( cfg_rx_timestamping )
+    ZF_TRY(zf_attr_set_int(attr, "rx_timestamping", 1));
 
   struct zf_stack* stack;
   ZF_TRY(zf_stack_alloc(attr, &stack));

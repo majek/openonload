@@ -31,6 +31,7 @@
 
 #include <ci/internal/ip.h>
 #include "netif_tx.h"
+#include "l3xudp_encap.h"
 
 
 /* Send packet to the IP layer.
@@ -93,7 +94,7 @@ ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
   ci_assert_equal(ipcache->ether_type, CI_ETHERTYPE_IP);
   oo_tx_pkt_layout_update(pkt, ipcache->ether_offset);
   memcpy(oo_tx_ether_hdr(pkt), ci_ip_cache_ether_hdr(ipcache),
-         oo_ether_hdr_size(pkt));
+         oo_tx_ether_hdr_size(pkt));
   pkt->intf_i = ipcache->intf_i;
 #if CI_CFG_PORT_STRIPING
   /* ?? FIXME: This code assumes that the two ports we're striping over
@@ -103,7 +104,7 @@ ci_ip_set_mac_and_port(ci_netif* ni, const ci_ip_cached_hdrs* ipcache,
   oo_ether_dhost(pkt)[5]  ^= pkt->netif.tx.intf_swap;
   oo_ether_shost(pkt)[5]  ^= pkt->netif.tx.intf_swap;
 #endif
-  ci_assert_equal(oo_ether_type_get(pkt), CI_ETHERTYPE_IP);
+  ci_assert_equal(oo_tx_ether_type_get(pkt), CI_ETHERTYPE_IP);
   ci_assert_equal(CI_IP4_IHL(oo_tx_ip_hdr(pkt)), sizeof(ci_ip4_hdr));
 }
 

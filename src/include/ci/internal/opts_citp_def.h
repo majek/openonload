@@ -505,6 +505,15 @@ CI_CFG_OPT("EF_SPIN_USEC", ul_spin_usec, ci_uint32,
 OO_SPIN_BLURB,
            , , 0, MIN, MAX, time:usec)
 
+CI_CFG_OPT("EF_SLEEP_SPIN_USEC", sleep_spin_usec, ci_uint32, 
+"Sets the duration in microseconds of sleep after each spin iteration. "
+"Currently applies to EPOLL3 epoll_wait only. "
+"Enabling the option trades some of the benefits of spinning - latency - for reduction "
+"in CPU utilisation and power consumption. "
+"\n"
+OO_SPIN_BLURB,
+           , , 0, MIN, MAX, time:usec)
+
 CI_CFG_OPT("EF_POLL_FAST_USEC", ul_poll_fast_usec, ci_uint32,
 "When spinning in a poll() call, causes accelerated sockets to be polled for N "
 "usecs before unaccelerated sockets are polled.  This reduces "
@@ -563,12 +572,12 @@ CI_CFG_OPT("EF_SIGNALS_NOPOSTPONE", signals_no_postpone, ci_uint64,
 "function.  By default, the list includes SIGBUS, SIGFPE, SIGSEGV and "
 "SIGPROF.\n"
 "Please specify numbers, not string aliases: EF_SIGNALS_NOPOSTPONE=7,11,27 "
-"instead of EF_SIGNALS_NOPOSTPONE=SIGBUS,SIGSEGV,SIGPROF.\n"
+"instead of EF_SIGNALS_NOPOSTPONE=SIGILL,SIGBUS,SIGSEGV,SIGPROF.\n"
 "You can set EF_SIGNALS_NOPOSTPONE to empty value to postpone "
 "all signal handlers in the same way if you suspect these signals "
 "to call network functions.",
         A8,,
-        (1 << (SIGBUS-1)) | (1 << (SIGFPE-1)) |
+        (1 << (SIGILL-1)) | (1 << (SIGBUS-1)) | (1 << (SIGFPE-1)) |
         (1 << (SIGSEGV-1)) | (1 << (SIGPROF-1)),
         0, (ci_uint64)(-1), bitmask)
 
@@ -595,7 +604,7 @@ CI_CFG_OPT("EF_CLUSTER_SIZE", cluster_size, ci_uint32,
 "sockets than specified here join the cluster, then some traffic will"
 "be lost.  Refer to the SO_REUSEPORT section in the manual for more"
 "detail.\n",
-           , , 2, 2, MAX, count)
+           , , 2, 1, MAX, count)
 
 # define CITP_CLUSTER_RESTART_FAIL              0
 # define CITP_CLUSTER_RESTART_TERMINATE_ORPHANS 1
@@ -650,6 +659,22 @@ CI_CFG_OPT("EF_ONLOAD_FD_BASE", fd_base, ci_uint32,
 "the application to direct onload to a part of the fd space that it is not "
 "expecting to explicitly use.\n",
            A8, , 4, MIN, MAX, count)
+
+CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
+"When this option is set to 2 Onload will force a sync of control plane "
+"information from the kernel when a stack is created.  This can help to "
+"ensure up to date information is used where a stack is created immediately "
+"following interface configuration."
+"\n"
+"If this option is set to 1 then Onload will perform a lightweight sync of "
+"control plane information without performing a full dump.  "
+"It is the default mode."
+"\n"
+"Setting this option to 0 will disable forced sync.  Synchronising data from "
+"the kernel will continue to happen periodically."
+"\n"
+"Sync operation time is limited by cplane_init_timeout onload module option.",
+           2, , 1, 0, 2, oneof:never;first;always)
 
 #ifdef CI_CFG_OPTGROUP
 /* put definitions of categories and expertise levels here */

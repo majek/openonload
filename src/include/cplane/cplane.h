@@ -43,9 +43,22 @@
 extern "C" {
 #endif
 
+#ifndef __KERNEL__
 #ifndef __CI_UL_SYSCALL_UNIX_H__
 /* libonload provides this; cp_client provides this in another way */
 extern int (* ci_sys_ioctl)(int, long unsigned int, ...);
+#endif
+
+static inline int cp_ioctl(int fd, long unsigned int op, void* arg)
+{
+  int saved_errno = errno;
+  int rc = ci_sys_ioctl(fd, op, arg);
+  if( rc == 0 )
+    return 0;
+  rc = -errno;
+  errno = saved_errno;
+  return rc;
+}
 #endif
 
 
@@ -66,6 +79,12 @@ typedef struct oo_cp_version_check_s {
 
 extern oo_cp_version_check_t oo_cplane_api_version;
 
+enum cp_sync_mode {
+  CP_SYNC_NONE  = 0,
+  CP_SYNC_LIGHT = 1,
+  CP_SYNC_DUMP  = 2
+};
+
 #ifndef __KERNEL__
 struct oo_cplane_handle {
   struct cp_mibs mib[2];
@@ -73,7 +92,8 @@ struct oo_cplane_handle {
   uint32_t bytes;
 };
 
-int oo_cp_create(int fd, struct oo_cplane_handle* cp);
+int oo_cp_create(int fd, struct oo_cplane_handle* cp,
+                 enum cp_sync_mode mode);
 void oo_cp_destroy(struct oo_cplane_handle* cp);
 
 #else
@@ -86,6 +106,10 @@ extern int
 __oo_cp_arp_resolve(struct oo_cplane_handle* cp, cicp_verinfo_t* verinfo);
 extern cicp_hwport_mask_t
 oo_cp_get_licensed_hwports(struct oo_cplane_handle*);
+extern int oo_cp_get_acceleratable_llap_count(struct oo_cplane_handle*);
+extern int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle*,
+                                             ci_ifid_t* ifindices,
+                                             int max_count);
 #endif
 
 extern int
@@ -93,7 +117,8 @@ oo_cp_get_hwport_properties(struct oo_cplane_handle*, ci_hwport_id_t hwport,
                             ci_uint8* out_mib_flags,
                             ci_uint32* out_oo_vi_flags_mask,
                             ci_uint32* out_efhw_flags_extra,
-                            ci_uint8* out_pio_len_shift);
+                            ci_uint8* out_pio_len_shift,
+                            ci_uint32* out_ctpio_start_offset);
 
 
 /* Initialize verinfo before the first use */
@@ -114,15 +139,19 @@ oo_cp_arp_confirm(struct oo_cplane_handle* cp,
                   cicp_verinfo_t* verinfo)
 {
   struct cp_mibs* mib = &cp->mib[0];
+  struct cp_fwd_rw_row* fwd_rw;
 
   if( ! CICP_MAC_ROWID_IS_VALID(verinfo->id) ||
       ! cp_fwd_version_matches(mib, verinfo) )
     return;
-  if( ! (cp_get_fwd(mib, verinfo)->flags & CICP_FWD_FLAG_ARP_NEED_REFRESH) )
+
+  fwd_rw = cp_get_fwd_rw(mib, verinfo);
+  if( ! (fwd_rw->flags & CICP_FWD_RW_FLAG_ARP_NEED_REFRESH) )
     return;
+  ci_atomic32_and(&fwd_rw->flags, ~CICP_FWD_RW_FLAG_ARP_NEED_REFRESH);
 
 #ifndef __KERNEL__
-  ci_sys_ioctl(cp->fd, OO_IOC_CP_ARP_CONFIRM, verinfo);
+  cp_ioctl(cp->fd, OO_IOC_CP_ARP_CONFIRM, verinfo);
 #else
   __oo_cp_arp_confirm(cp, verinfo);
 #endif
@@ -147,7 +176,7 @@ oo_cp_arp_resolve(struct oo_cplane_handle* cp,
     return;
 
 #ifndef __KERNEL__
-  ci_sys_ioctl(cp->fd, OO_IOC_CP_ARP_RESOLVE, verinfo);
+  cp_ioctl(cp->fd, OO_IOC_CP_ARP_RESOLVE, verinfo);
 #else
   __oo_cp_arp_resolve(cp, verinfo);
 #endif
@@ -239,54 +268,79 @@ oo_cp_hwport_vlan_to_ifindex(struct oo_cplane_handle* cp,
 
 }
 
-/* Keep this function inline to guarantee that it is properly optimized
- * when the most of the parameters are NULL. */
-static inline int
-oo_cp_find_llap_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
-                      cicp_hwport_mask_t *out_hwports,
-                      ci_ifid_t *out_ifindex, ci_mac_addr_t *out_mac,
-                      ci_mtu_t *out_mtu, cicp_encap_t *out_encap)
+
+typedef int/*bool*/ (*oo_cp_ipif_check)(
+        struct oo_cplane_handle* cp,
+        cicp_ipif_row_t* ipif,
+        void* data);
+
+/* Find the network interface by an IP address.  Returns 1 if found,
+ * 0 otherwise.  The "check" parameter is the local function which checks if
+ * the interface parameters fulfil the caller requirements and saves any
+ * additional ipif parameters if necessary.
+ *
+ * The "data" parameter is passed to the "check" callback.  It can be used
+ * ot pass Onload stack handle or to store ipif row parameters ti make them
+ * available to the caller.
+ */
+static inline int/*bool*/
+oo_cp_find_ipif_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
+                      oo_cp_ipif_check check, void* data)
 {
   struct cp_mibs* mib;
   cicp_rowid_t id;
-  ci_ifid_t ifindex = 0;
   cp_version_t version;
   int rc = 0;
 
   CP_VERLOCK_START(version, mib, cp)
 
   for( id = 0; id < mib->dim->ipif_max; id++ ) {
-    if( cicp_ipif_row_is_free(&mib->ipif[id]) ) {
-      rc = -ENOENT;
-      goto out;
-    }
-    if( mib->ipif[id].net_ip == ip ) {
-      ifindex = mib->ipif[id].ifindex;
+    if( cicp_ipif_row_is_free(&mib->ipif[id]) )
       break;
+
+    if( mib->ipif[id].net_ip == ip ) {
+      if( check(cp, &mib->ipif[id], data) ) {
+        rc = 1;
+        break;
+      }
+    }
+  }
+  CP_VERLOCK_STOP(version, mib)
+  return rc;
+}
+
+
+typedef int/*bool*/ (*oo_cp_ipif_llap_check)(
+        struct oo_cplane_handle* cp,
+        cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
+        void* data);
+/* Same as oo_cp_find_ipif_by_ip(), but also looks up a llap row. */
+static inline int
+oo_cp_find_llap_by_ip(struct oo_cplane_handle* cp, ci_ip_addr_t ip,
+                      oo_cp_ipif_llap_check check, void* data)
+{
+  struct cp_mibs* mib;
+  cicp_rowid_t id;
+  cp_version_t version;
+  int rc = 0;
+
+  CP_VERLOCK_START(version, mib, cp)
+
+  for( id = 0; id < mib->dim->ipif_max; id++ ) {
+    if( cicp_ipif_row_is_free(&mib->ipif[id]) )
+      break;
+
+    if( mib->ipif[id].net_ip == ip ) {
+      cicp_rowid_t llap_id = cp_llap_find_row(mib, mib->ipif[id].ifindex);
+      if( llap_id == CICP_ROWID_BAD )
+        continue;
+      if( check(cp, &mib->llap[llap_id], &mib->ipif[id], data) ) {
+        rc = 1;
+        break;
+      }
     }
   }
 
-  if( ifindex == 0 ) {
-    rc = -ENOENT;
-    goto out;
-  }
-
-  id = cp_llap_find_row(mib, ifindex);
-  if( id == CICP_ROWID_BAD ) {
-    rc = -ENOENT;
-    goto out;
-  }
-
-  if( out_hwports != NULL )
-    *out_hwports = mib->llap[id].tx_hwports;
-  if( out_ifindex != NULL )
-    *out_ifindex = ifindex;
-  if( out_mac != NULL )
-    memcpy(out_mac, mib->llap[id].mac, sizeof(*out_mac));
-  if( out_encap != NULL )
-    *out_encap = mib->llap[id].encap;
-
- out:
   CP_VERLOCK_STOP(version, mib)
   return rc;
 }

@@ -157,6 +157,10 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 	case 0x0a03:
 		ef10_device_type_init(dt, 'B', device_id, class_revision);
 		break;
+	case 0x1b03:
+	case 0x0b03:
+		ef10_device_type_init(dt, 'C', device_id, class_revision);
+		break;
 	default:
 		return 0;
 	}
@@ -178,7 +182,7 @@ int efhw_device_type_init(struct efhw_device_type *dt,
 void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		   struct efhw_device_type *dev_type, unsigned map_min,
 		   unsigned map_max, unsigned vi_base, unsigned vi_shift,
-		   unsigned vport_id)
+		   unsigned mem_bar, unsigned vi_stride, unsigned vport_id)
 {
 	nic->devtype = *dev_type;
 	nic->flags = flags;
@@ -233,8 +237,18 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		nic->q_sizes[EFHW_TXQ] = 512 | 1024 | 2048;
 		nic->q_sizes[EFHW_RXQ] = 512 | 1024 | 2048 | 4096;
 
-		nic->ctr_ap_bar = dev_type->function == EFHW_FUNCTION_PF ?
-			EF10_PF_P_CTR_AP_BAR : EF10_VF_P_CTR_AP_BAR;
+		switch (dev_type->variant) {
+		case 'C':
+			nic->ctr_ap_bar = EF10_MEDFORD2_P_CTR_AP_BAR;
+			break;
+		default:
+			nic->ctr_ap_bar = dev_type->function == EFHW_FUNCTION_PF ?
+				EF10_PF_P_CTR_AP_BAR : EF10_VF_P_CTR_AP_BAR;
+		}
+
+		if (mem_bar != EFHW_MEM_BAR_UNDEFINED)
+			nic->ctr_ap_bar = mem_bar;
+
 		nic->num_evqs   = 1024;
 		nic->num_dmaqs  = 1024;
 		nic->num_timers = 1024;
@@ -247,6 +261,7 @@ void efhw_nic_init(struct efhw_nic *nic, unsigned flags, unsigned options,
 		nic->vi_base = vi_base;
 		nic->vi_shift = vi_shift;
 		nic->vport_id = vport_id;
+		nic->vi_stride = vi_stride;
 		break;
 	default:
 		EFHW_ASSERT(0);
@@ -299,4 +314,19 @@ struct pci_dev* efhw_nic_get_pci_dev(struct efhw_nic* nic)
 	spin_unlock_bh(&nic->pci_dev_lock);
 	return dev;
 }
+
+/* Returns the struct net_device for the NIC, taking out a reference to it.
+ * Callers should call dev_put() on the returned pointer to release that
+ * reference when they're finished. */
+struct net_device* efhw_nic_get_net_dev(struct efhw_nic* nic)
+{
+	struct net_device* dev;
+	spin_lock_bh(&nic->pci_dev_lock);
+	dev = nic->net_dev;
+	if( dev != NULL )
+		dev_hold(dev);
+	spin_unlock_bh(&nic->pci_dev_lock);
+	return dev;
+}
+EXPORT_SYMBOL(efhw_nic_get_net_dev);
 

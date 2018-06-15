@@ -28,10 +28,13 @@
 #    --define 'dist .el5'
 #
 # For PPC platform you can use IBM Advanced Toolchain. For this you should
-# --define 'ppc_at </opt cc path>
+#    --define 'ppc_at </opt cc path>
+#
+# If you want to specify a build profile add:
+#    --define "build_profile <profile>"
 
 
-%define pkgversion 201710-u1.1
+%define pkgversion 201805
 
 %{!?kernel:  %{expand: %%define kernel %%(uname -r)}}
 %{!?target_cpu:  %{expand: %%define target_cpu %{_host_cpu}}}
@@ -164,14 +167,17 @@ This package comprises the kernel module components of OpenOnload.
 
 export KPATH=%{kpath}
 %ifarch x86_64 
-./scripts/onload_build --kernelver "%{kernel}" %{?debug:--debug}
+./scripts/onload_build %{?build_profile:--build-profile %build_profile} \
+  --kernelver "%{kernel}" %{?debug:--debug}
 %else
 %ifarch ppc64
 # Don't try to build 32-bit userland on PPC
-./scripts/onload_build --kernelver "%{kernel}" --kernel --user64 %{?debug:--debug} %{?ppc_at:--ppc-at %ppc_at}
+./scripts/onload_build %{?build_profile:--build-profile %build_profile} \
+  --kernelver "%{kernel}" --kernel --user64 %{?debug:--debug} %{?ppc_at:--ppc-at %ppc_at}
 %else
 # Don't try to build 64-bit userland in case of 32-bit userland
-./scripts/onload_build --kernelver "%{kernel}" --kernel --user32 %{?debug:--debug} %{?ppc_at:--ppc-at %ppc_at}
+./scripts/onload_build %{?build_profile:--build-profile %build_profile} \
+  --kernelver "%{kernel}" --kernel --user32 %{?debug:--debug} %{?ppc_at:--ppc-at %ppc_at}
 %endif
 %endif
 
@@ -180,6 +186,7 @@ export i_prefix=%{buildroot}
 mkdir -p "$i_prefix/etc/modprobe.d"
 mkdir -p "$i_prefix/etc/depmod.d"
 ./scripts/onload_install --verbose --kernelver "%{kernel}" \
+  %{?build_profile:--build-profile %build_profile} \
   %{?debug:--debug} rpm_install
 rm -f "%{buildroot}/etc/modprobe.conf"  # may be created by onload_install
 docdir="$i_prefix%{_defaultdocdir}/%{name}-%{pkgversion}"
@@ -212,14 +219,10 @@ fi
 ldconfig -n /usr/lib /usr/lib64
 
 %post kmod-%{kverrel}
-for k in $(cd /lib/modules && /bin/ls); do
-  [ -d "/lib/modules/$k/kernel/" ] && depmod -a "$k"
-done
+depmod -a "%{kernel}"
 
 %postun kmod-%{kverrel}
-for k in $(cd /lib/modules && /bin/ls); do
-  [ -d "/lib/modules/$k/kernel/" ] && depmod -a "$k"
-done
+depmod -a "%{kernel}"
 
 %clean
 rm -fR $RPM_BUILD_ROOT

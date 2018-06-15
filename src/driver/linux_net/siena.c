@@ -485,6 +485,14 @@ static int siena_dimension_resources(struct efx_nic *efx)
 #endif /* EFX_NOT_UPSTREAM */
 }
 
+/* On all Falcon-architecture NICs, PFs use BAR 0 for I/O space and BAR 2(&3)
+ * for memory.
+ */
+static unsigned int siena_mem_bar(struct efx_nic *efx)
+{
+	return 2;
+}
+
 static unsigned int siena_mem_map_size(struct efx_nic *efx)
 {
 	return FR_CZ_MC_TREG_SMEM +
@@ -630,11 +638,11 @@ static int siena_rx_pull_rss_config(struct efx_nic *efx)
 	 * siena_rx_push_rss_config, below)
 	 */
 	efx_reado(efx, &temp, FR_CZ_RX_RSS_IPV6_REG1);
-	memcpy(efx->rx_hash_key, &temp, sizeof(temp));
+	memcpy(efx->rss_context.rx_hash_key, &temp, sizeof(temp));
 	efx_reado(efx, &temp, FR_CZ_RX_RSS_IPV6_REG2);
-	memcpy(efx->rx_hash_key + sizeof(temp), &temp, sizeof(temp));
+	memcpy(efx->rss_context.rx_hash_key + sizeof(temp), &temp, sizeof(temp));
 	efx_reado(efx, &temp, FR_CZ_RX_RSS_IPV6_REG3);
-	memcpy(efx->rx_hash_key + 2 * sizeof(temp), &temp,
+	memcpy(efx->rss_context.rx_hash_key + 2 * sizeof(temp), &temp,
 	       FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8);
 	efx_farch_rx_pull_indir_table(efx);
 	return 0;
@@ -647,26 +655,26 @@ static int siena_rx_push_rss_config(struct efx_nic *efx, bool user,
 
 	/* Set hash key for IPv4 */
 	if (key)
-		memcpy(efx->rx_hash_key, key, sizeof(temp));
-	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
+		memcpy(efx->rss_context.rx_hash_key, key, sizeof(temp));
+	memcpy(&temp, efx->rss_context.rx_hash_key, sizeof(temp));
 	efx_writeo(efx, &temp, FR_BZ_RX_RSS_TKEY);
 
 	/* Enable IPv6 RSS */
-	BUILD_BUG_ON(sizeof(efx->rx_hash_key) <
+	BUILD_BUG_ON(sizeof(efx->rss_context.rx_hash_key) <
 		     2 * sizeof(temp) + FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8 ||
 		     FRF_CZ_RX_RSS_IPV6_TKEY_HI_LBN != 0);
-	memcpy(&temp, efx->rx_hash_key, sizeof(temp));
+	memcpy(&temp, efx->rss_context.rx_hash_key, sizeof(temp));
 	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG1);
-	memcpy(&temp, efx->rx_hash_key + sizeof(temp), sizeof(temp));
+	memcpy(&temp, efx->rss_context.rx_hash_key + sizeof(temp), sizeof(temp));
 	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG2);
 	EFX_POPULATE_OWORD_2(temp, FRF_CZ_RX_RSS_IPV6_THASH_ENABLE, 1,
 			     FRF_CZ_RX_RSS_IPV6_IP_THASH_ENABLE, 1);
-	memcpy(&temp, efx->rx_hash_key + 2 * sizeof(temp),
+	memcpy(&temp, efx->rss_context.rx_hash_key + 2 * sizeof(temp),
 	       FRF_CZ_RX_RSS_IPV6_TKEY_HI_WIDTH / 8);
 	efx_writeo(efx, &temp, FR_CZ_RX_RSS_IPV6_REG3);
 
-	memcpy(efx->rx_indir_table, rx_indir_table,
-		sizeof(efx->rx_indir_table));
+	memcpy(efx->rss_context.rx_indir_table, rx_indir_table,
+		sizeof(efx->rss_context.rx_indir_table));
 	efx_farch_rx_push_indir_table(efx);
 	return 0;
 }
@@ -714,9 +722,9 @@ static int siena_init_nic(struct efx_nic *efx)
 			    EFX_RX_USR_BUF_SIZE >> 5);
 	efx_writeo(efx, &temp, FR_AZ_RX_CFG);
 
-	siena_rx_push_rss_config(efx, false, efx->rx_indir_table, NULL);
-	efx->rss_flags = RSS_CONTEXT_FLAGS_DEFAULT; /* IPv4 and IPv6 enabled */
-	efx->rss_active = true;
+	siena_rx_push_rss_config(efx, false, efx->rss_context.rx_indir_table, NULL);
+	efx->rss_context.flags = RSS_CONTEXT_FLAGS_DEFAULT; /* IPv4 and IPv6 enabled */
+	efx->rss_context.context_id = 0; /* indicates RSS is active */
 
 	/* Enable event logging */
 	rc = efx_mcdi_log_ctrl(efx, true, false, 0);
@@ -859,7 +867,7 @@ static int siena_try_update_nic_stats(struct efx_nic *efx)
 
 	dma_stats = efx->stats_buffer.addr;
 
-	generation_end = dma_stats[MC_CMD_MAC_GENERATION_END];
+	generation_end = dma_stats[efx->num_mac_stats - 1];
 	if (generation_end == EFX_MC_STATS_GENERATION_INVALID)
 		return 0;
 	rmb();
@@ -1277,7 +1285,7 @@ static int siena_mtd_probe(struct efx_nic *efx)
 			if (rc == 0)
 				n_parts++;
 			else if (rc != -ENODEV)
-				goto fail;
+				goto fail_free;
 		}
 		type++;
 		nvram_types >>= 1;
@@ -1285,10 +1293,14 @@ static int siena_mtd_probe(struct efx_nic *efx)
 
 	rc = siena_mtd_get_fw_subtypes(efx, parts, n_parts);
 	if (rc)
-		goto fail;
+		goto fail_free;
 
-	rc = efx_mtd_add(efx, parts, n_parts);
-fail:
+	/* Once we've passed parts to efx_mtd_add it becomes responsible for
+	 * freeing it.
+	 */
+	return efx_mtd_add(efx, parts, n_parts);
+
+fail_free:
 	if (rc)
 		kfree(parts);
 	return rc;
@@ -1305,7 +1317,7 @@ fail:
 
 const struct efx_nic_type siena_a0_nic_type = {
 	.is_vf = false,
-	.mem_bar = EFX_MEM_BAR,
+	.mem_bar = siena_mem_bar,
 	.mem_map_size = siena_mem_map_size,
 	.probe = siena_probe_nic,
 	.dimension_resources = siena_dimension_resources,
@@ -1377,6 +1389,7 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.ev_fini = efx_farch_ev_fini,
 	.ev_remove = efx_farch_ev_remove,
 	.ev_process = efx_farch_ev_process,
+	.ev_mcdi_pending = efx_farch_ev_mcdi_pending,
 	.ev_read_ack = efx_farch_ev_read_ack,
 	.ev_test_generate = efx_farch_ev_test_generate,
 	.filter_table_probe = efx_farch_filter_table_probe,
@@ -1391,14 +1404,8 @@ const struct efx_nic_type siena_a0_nic_type = {
 	.filter_count_rx_used = efx_farch_filter_count_rx_used,
 	.filter_get_rx_id_limit = efx_farch_filter_get_rx_id_limit,
 	.filter_get_rx_ids = efx_farch_filter_get_rx_ids,
-#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
-	.filter_async_insert = efx_farch_filter_async_insert,
-#endif
 #ifdef CONFIG_RFS_ACCEL
 	.filter_rfs_expire_one = efx_farch_filter_rfs_expire_one,
-#endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-	.filter_async_remove = efx_farch_filter_async_remove,
 #endif
 #ifdef EFX_NOT_UPSTREAM
 	.filter_redirect = efx_farch_filter_redirect,

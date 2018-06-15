@@ -29,6 +29,7 @@
 #include <internal.h>
 #include <onload/ul.h>
 #include <ci/app.h>
+#include <sys/sysmacros.h>
 
 
 enum kfd_fmt_rc {

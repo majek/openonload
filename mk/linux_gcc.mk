@@ -119,6 +119,12 @@ ifdef GCOV
   MMAKE_DIR_LINKFLAGS += -fprofile-arcs
 endif
 
+ifdef TRANSPORT_CONFIG_OPT_HDR
+  MMAKE_CFLAGS += -DTRANSPORT_CONFIG_OPT_HDR='<$(TRANSPORT_CONFIG_OPT_HDR)>'
+else
+  MMAKE_CFLAGS += -DTRANSPORT_CONFIG_OPT_HDR='<ci/internal/transport_config_opt_extra.h>'
+endif
+
 ######################################################################
 # How to compile, link etc.
 #

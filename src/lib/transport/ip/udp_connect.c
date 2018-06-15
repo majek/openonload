@@ -211,7 +211,7 @@ int ci_udp_should_handover(citp_socket* ep, const struct sockaddr* addr,
 
   addr_be32 = ci_get_ip4_addr(ep->s->domain, addr);
   if( addr_be32 != CI_BSWAPC_BE32(INADDR_ANY) &&
-      ! cicp_user_addr_is_local_efab(ep->netif->cplane, addr_be32) && 
+      ! cicp_user_addr_is_local_efab(ep->netif, addr_be32) && 
       ! CI_IP_IS_MULTICAST(addr_be32) ) {
     /* Either the bind/getsockname indicated that we need to let the OS
       * take this or the local address is not one of ours - so we can safely

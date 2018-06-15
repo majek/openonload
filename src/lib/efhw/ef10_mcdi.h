@@ -245,3 +245,55 @@ ci_inline ci_uint16 efhw_mcdi_read(char *addr)
 					      MC_CMD_ ## _name6, _value6,\
 					      MC_CMD_ ## _name7, _value7,\
 					      MC_CMD_ ## _name8, _value8)
+#define EFHW_MCDI_POPULATE_DWORD_9(_buf, _field, _name1, _value1,        \
+				   _name2, _value2, _name3, _value3,     \
+				   _name4, _value4, _name5, _value5,     \
+				   _name6, _value6, _name7, _value7,     \
+				   _name8, _value8, _name9, _value9)     \
+	CI_POPULATE_DWORD_9(*_EFHW_MCDI_DWORD(_buf, _field),             \
+					      MC_CMD_ ## _name1, _value1,\
+					      MC_CMD_ ## _name2, _value2,\
+					      MC_CMD_ ## _name3, _value3,\
+					      MC_CMD_ ## _name4, _value4,\
+					      MC_CMD_ ## _name5, _value5,\
+					      MC_CMD_ ## _name6, _value6,\
+					      MC_CMD_ ## _name7, _value7,\
+					      MC_CMD_ ## _name8, _value8,\
+					      MC_CMD_ ## _name9, _value9)
+
+#define EFHW_MCDI_POPULATE_DWORD_10(_buf, _field, _name1, _value1,	\
+				    _name2, _value2, _name3, _value3,	\
+				    _name4, _value4, _name5, _value5,	\
+				    _name6, _value6, _name7, _value7,	\
+				    _name8, _value8, _name9, _value9,	\
+				    _name10, _value10)			\
+	CI_POPULATE_DWORD_10(*_EFHW_MCDI_DWORD(_buf, _field),             \
+			     MC_CMD_ ## _name1, _value1,		\
+			     MC_CMD_ ## _name2, _value2,		\
+			     MC_CMD_ ## _name3, _value3,		\
+			     MC_CMD_ ## _name4, _value4,		\
+			     MC_CMD_ ## _name5, _value5,		\
+			     MC_CMD_ ## _name6, _value6,		\
+			     MC_CMD_ ## _name7, _value7,		\
+			     MC_CMD_ ## _name8, _value8,		\
+			     MC_CMD_ ## _name9, _value9,		\
+			     MC_CMD_ ## _name10, _value10)
+
+#define EFHW_MCDI_POPULATE_DWORD_11(_buf, _field, _name1, _value1,	\
+				    _name2, _value2, _name3, _value3,	\
+				    _name4, _value4, _name5, _value5,	\
+				    _name6, _value6, _name7, _value7,	\
+				    _name8, _value8, _name9, _value9,	\
+				    _name10, _value10, _name11, _value11) \
+	CI_POPULATE_DWORD_11(*_EFHW_MCDI_DWORD(_buf, _field),             \
+			     MC_CMD_ ## _name1, _value1,		\
+			     MC_CMD_ ## _name2, _value2,		\
+			     MC_CMD_ ## _name3, _value3,		\
+			     MC_CMD_ ## _name4, _value4,		\
+			     MC_CMD_ ## _name5, _value5,		\
+			     MC_CMD_ ## _name6, _value6,		\
+			     MC_CMD_ ## _name7, _value7,		\
+			     MC_CMD_ ## _name8, _value8,		\
+			     MC_CMD_ ## _name9, _value9,		\
+			     MC_CMD_ ## _name10, _value10,		\
+			     MC_CMD_ ## _name11, _value11)

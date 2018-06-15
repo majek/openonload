@@ -82,7 +82,7 @@ ci_inline void ci_tcp_ip_hdr_init(ci_ip4_hdr* ip, unsigned len)
 {
   ci_assert_equal(CI_IP4_IHL(ip), sizeof(ci_ip4_hdr));
   ip->ip_tot_len_be16 = CI_BSWAP_BE16((ci_uint16) len);
-  ci_assert_equal(ip->ip_check_be16, 0);
+  ip->ip_check_be16 = 0;
   ci_assert_equal(ip->ip_id_be16, 0);
 }
 

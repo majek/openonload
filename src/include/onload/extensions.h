@@ -336,9 +336,12 @@ int onload_ordered_epoll_wait(int epfd, struct epoll_event *events,
  * ONLOAD_DELEGATED_SEND_RC_SENDQ_BUSY: send queue is not empty;
  * ONLOAD_DELEGATED_SEND_RC_NOARP: failed to find the destination MAC
  *      address;
- * ONLOAD_DELEGATED_SEND_RC_NOWIN: send window or congestion window
- *      is closed.  send_wnd and cong_wnd fields are filled in,
- *      so the caller can find out which window is closed.
+ * ONLOAD_DELEGATED_SEND_RC_NOWIN: send window is closed, the peer is
+ *      unable to receive more data.
+ * ONLOAD_DELEGATED_SEND_RC_NOCWIN: congestion window
+ *      is closed.  It is a violation of the TCP protocol to send anything.
+ *      However, all the headers are filled in and the caller may use them
+ *      for sending.
  *
  * ARP resolution in onload_delegated_send_prepare():
  * default (flags=0):
@@ -507,6 +510,7 @@ enum onload_delegated_send_rc {
   ONLOAD_DELEGATED_SEND_RC_SENDQ_BUSY,
   ONLOAD_DELEGATED_SEND_RC_NOWIN,
   ONLOAD_DELEGATED_SEND_RC_NOARP,
+  ONLOAD_DELEGATED_SEND_RC_NOCWIN,
 };
 
 /* Do not try to find the destination MAC address -

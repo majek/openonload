@@ -47,6 +47,7 @@ enum {
 extern int oof_shared_keep_thresh;
 extern int oof_shared_steal_thresh;
 extern int oof_all_ports_required;
+extern int oof_use_all_local_ip_addresses;
 
 extern struct oof_manager*
 oof_manager_alloc(unsigned local_addr_max, void* owner_private);
@@ -143,8 +144,7 @@ oof_mcast_update_filters(ci_ifid_t ifindex, void *arg);
 extern int
 oof_tproxy_install(struct oof_manager* fm,
                    struct tcp_helper_resource_s* trs,
-                   struct tcp_helper_cluster_s* thc,
-                   int ifindex);
+                   struct tcp_helper_cluster_s* thc, int ifindex);
 
 extern int
 oof_tproxy_free(struct oof_manager* fm,

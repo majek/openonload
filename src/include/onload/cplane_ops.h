@@ -85,7 +85,7 @@
 CICP_SYSCALL int /* bool */
 cicp_user_defer_send(ci_netif *netif, cicpos_retrieve_rc_t retrieve_rc,
 		     ci_uerr_t *ref_os_rc, oo_pkt_p pkt_id,
-                     ci_ifid_t ifindex)
+                     ci_ifid_t ifindex, ci_uint32 next_hop)
 CICP_SYSBODY(
     cp_user_defer_send_t op;
 
@@ -93,6 +93,7 @@ CICP_SYSBODY(
     op.os_rc       = *ref_os_rc;
     op.pkt         = pkt_id;
     op.ifindex     = ifindex;
+    op.next_hop    = next_hop;
 
     oo_resource_op(ci_netif_get_driver_handle(netif),
                    OO_IOC_CP_USER_DEFER_SEND, &op);
@@ -176,34 +177,29 @@ cicp_ipcache_vlan_set(ci_ip_cached_hdrs*  ipcache)
   }
 }
 
+extern int
+cicp_llap_ipif_check_onloaded(struct oo_cplane_handle* cp,
+                              cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
+                              void* data);
 /*! Checks if the given ip address is both local and etherfabric.
  *  Returns 1 if it is, 0 if it isn't.
  *  If the address isn't found, it returns 0
  */
 ci_inline int
-cicp_user_addr_is_local_efab(struct oo_cplane_handle *cplane,
-			     ci_ip_addr_t ip)
+cicp_user_addr_is_local_efab(ci_netif* ni, ci_ip_addr_t ip)
 { 
-  /* Sadly we need to initialize these because gcc 4 is dumb and bitches if we
-   * don't (which is bad, since we compile with -Werror)
-   */
-  cicp_hwport_mask_t hwports = 0;
-  if (CI_UNLIKELY(oo_cp_find_llap_by_ip(cplane, ip,
-					&hwports,
-					/*ifindex*/NULL, /*mac*/NULL,
-                                        /*mtu*/NULL, /*encap*/NULL)))
-    return 0;
-  else
-    return hwports != 0;
+  return oo_cp_find_llap_by_ip(ni->cplane, ip,
+                               cicp_llap_ipif_check_onloaded, ni);
 }
 
+extern int
+cicp_ipif_check_ok(struct oo_cplane_handle* cp,
+                   cicp_ipif_row_t* ipif, void* data);
 ci_inline int /* bool */
 cicp_user_is_local_addr(struct oo_cplane_handle *cplane,
 			ci_ip_addr_t ip)
 {
-  return oo_cp_find_llap_by_ip(cplane, ip, /*hwport*/NULL,
-                             /*ifindex*/NULL, /*mac*/NULL, /*mtu*/NULL,
-                             /*encap*/NULL) == 0;
+  return oo_cp_find_ipif_by_ip(cplane, ip, cicp_ipif_check_ok, NULL);
 }
 
 ci_inline int ci_hwport_check_onload(ci_hwport_id_t hwport,
@@ -266,7 +262,8 @@ cicppl_mac_defer_send(ci_netif *netif, int *out_os_rc,
 
 /*! Send IP packet via RAW socket.  Computes TCP/UDP checksum if possible */
 extern int cicp_raw_ip_send(struct cicppl_instance* cppl,
-                            const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex);
+                            const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex,
+                            ci_ip_addr_t next_hop);
 
 #ifdef CI_USE_GCC_VISIBILITY
 #pragma GCC visibility pop

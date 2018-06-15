@@ -960,7 +960,7 @@ static void efx_mcdi_poll_start(struct efx_mcdi_iface *mcdi,
 	 * because generally mcdi responses are fast. After that, back off
 	 * and poll once a jiffy (approximately)
 	 */
-	int spins = copybuf ? TICK_USEC : 0;
+	int spins = copybuf ? USER_TICK_USEC : 0;
 
 	while (spins) {
 		if (efx_mcdi_poll_once(mcdi, cmd)) {
@@ -1059,9 +1059,21 @@ static void efx_mcdi_cmd_work(struct work_struct *context)
 		efx_mcdi_proxy_timeout_cmd(mcdi, cmd, &cleanup_list);
 	/* else running, check for completion */
 	} else if (efx_mcdi_poll_once(mcdi, cmd)) {
-		if (!cmd->polled)
-			netif_err(mcdi->efx, drv, mcdi->efx->net_dev,
-				  "MCDI request was completed without an event\n");
+		if (!cmd->polled) {
+			/* check whether the event is pending on EVQ0 */
+			if (efx_nic_mcdi_ev_pending(efx_get_channel(mcdi->efx, 0)))
+				netif_err(mcdi->efx, drv, mcdi->efx->net_dev,
+					  "MC command 0x%x inlen %zu mode %d completed without an interrupt after %u ms\n",
+					  cmd->cmd, cmd->inlen,
+					  cmd->polled ? MCDI_MODE_POLL : MCDI_MODE_EVENTS,
+					  jiffies_to_msecs(jiffies - cmd->started));
+			else
+				netif_err(mcdi->efx, drv, mcdi->efx->net_dev,
+					  "MC command 0x%x inlen %zu mode %d completed without an event after %u ms\n",
+					  cmd->cmd, cmd->inlen,
+					  cmd->polled ? MCDI_MODE_POLL : MCDI_MODE_EVENTS,
+					  jiffies_to_msecs(jiffies - cmd->started));
+		}
 		efx_mcdi_complete_cmd(mcdi, cmd, copybuf, &cleanup_list);
 	/* then check for timeout. If evented, it must have timed out */
 	} else if (!cmd->polled || efx_mcdi_check_timeout(mcdi, cmd)) {
@@ -2716,6 +2728,9 @@ int efx_mcdi_mtd_sync(struct mtd_info *mtd)
 void efx_mcdi_mtd_rename(struct efx_mtd_partition *part)
 {
 	struct efx_nic *efx = part->efx;
+
+	if (!efx)
+		return;
 
 	snprintf(part->name, sizeof(part->name), "%s %s:%02x",
 		 efx->name, part->type_name, part->fw_subtype);

@@ -221,6 +221,7 @@ void ip_cmsg_recv_timestampns(ci_netif *ni, ci_uint64 timestamp,
 }
 
 
+#if CI_CFG_TIMESTAMPING
 /**
  * Put a SO_TIMESTAMPING control message into msg ancillary data buffer.
  */
@@ -252,6 +253,7 @@ void ip_cmsg_recv_timestamping(ci_netif *ni,
 
   ci_put_cmsg(cmsg_state, SOL_SOCKET, ONLOAD_SO_TIMESTAMPING, sizeof(ts), &ts);
 }
+#endif
 
 void ci_ip_cmsg_finish(struct cmsg_state* cmsg_state)
 {
@@ -304,6 +306,7 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
     if( flags & CI_IP_CMSG_TIMESTAMP )
       ip_cmsg_recv_timestamp(ni, pkt->pf.udp.rx_stamp, &cmsg_state);
 
+#if CI_CFG_TIMESTAMPING
   if( flags & CI_IP_CMSG_TIMESTAMPING ) {
     int flags = us->s.timestamping_flags;
     if( flags & (ONLOAD_SOF_TIMESTAMPING_RAW_HARDWARE
@@ -318,6 +321,7 @@ void ci_ip_cmsg_recv(ci_netif* ni, ci_udp_state* us, const ci_ip_pkt_fmt *pkt,
                                 flags, &cmsg_state);
     }
   }
+#endif
 
   ci_ip_cmsg_finish(&cmsg_state);
 }

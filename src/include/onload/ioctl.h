@@ -136,6 +136,14 @@ enum {
 #define OO_IOC_PIPE_ATTACH          OO_IOC_RW(PIPE_ATTACH, \
                                               oo_pipe_attach_t)
 #endif
+#if CI_CFG_FD_CACHING
+  OO_OP_SOCK_DETACH,
+#define OO_IOC_SOCK_DETACH          OO_IOC_RW(SOCK_DETACH, \
+                                              oo_sock_attach_t)
+  OO_OP_SOCK_ATTACH_TO_EXISTING,
+#define OO_IOC_SOCK_ATTACH_TO_EXISTING OO_IOC_RW(SOCK_ATTACH_TO_EXISTING, \
+                                                 oo_sock_attach_t)
+#endif
 
   /* OS-specific TCP helper operations */
 
@@ -234,8 +242,8 @@ enum {
 #define OO_IOC_DSHM_LIST          OO_IOC_RW(DSHM_LIST, oo_dshm_list_t)
 
   OO_OP_ALLOC_ACTIVE_WILD,
-#define OO_IOC_ALLOC_ACTIVE_WILD  OO_IOC_NONE(ALLOC_ACTIVE_WILD)
-
+#define OO_IOC_ALLOC_ACTIVE_WILD  OO_IOC_W(ALLOC_ACTIVE_WILD, \
+                                           oo_alloc_active_wild_t)
 
 
   OO_OP_CONTIG_END,  /* This is the last in range of contigous opcodes */

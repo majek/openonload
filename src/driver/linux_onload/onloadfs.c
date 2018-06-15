@@ -112,15 +112,16 @@ static const char *priv_type_to_str(char fd_type)
 static int onloadfs_name(ci_private_t *priv, char *buffer, int buflen)
 {
   int len;
+  int sock_id = priv->sock_id;
 
   if( priv->fd_type == CI_PRIV_TYPE_NETIF)
     len = snprintf(buffer, buflen, "[stack:%d]", priv->thr->id);
 #ifdef EFRM_HAVE_D_DNAME
   /* without d_dname, this is called before listen(), so
    * we have no chance to print tcpl:N:N. */
-  else if( priv->fd_type == CI_PRIV_TYPE_TCP_EP &&
+  else if( priv->fd_type == CI_PRIV_TYPE_TCP_EP && sock_id >= 0 &&
            SP_TO_WAITABLE_OBJ(&priv->thr->netif,
-                              priv->sock_id)->waitable.state ==
+                              sock_id)->waitable.state ==
            CI_TCP_LISTEN)
     len = snprintf(buffer, buflen, "[tcpl:%d:%d]",
                    priv->thr->id, priv->sock_id);
@@ -428,7 +429,8 @@ void onload_priv_free(ci_private_t *priv)
 
 
 int
-oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type)
+oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type,
+             struct file** _filp)
 {
   int fd, rc;
   ci_private_t *priv;
@@ -437,18 +439,43 @@ oo_create_fd(tcp_helper_resource_t* thr, oo_sp ep_id, int flags, int fd_type)
   if( fd < 0 )
     return fd;
 
-  rc = onload_alloc_file(thr, ep_id, flags, fd_type, &priv);
-  if( rc != 0 ) {
-    OO_DEBUG_ERR(ci_log("%s: ERROR: onload_alloc_file failed (%d) "
-                        "for [%d:%d]", __func__,
-                        rc, thr->id, ep_id));
-    put_unused_fd(fd);
-    return rc;
+  if( _filp && *_filp ) {
+    rcu_read_lock();
+    rc = get_file_rcu(*_filp);
+    rcu_read_unlock();
+    if( rc == 0 ) {
+      OO_DEBUG_TCPH(ci_log("%s: fd=%d reuses file", __FUNCTION__, fd));
+      CITP_STATS_NETIF_INC(&thr->netif, sock_attach_fd_more_fail);
+      rc = -ENOANO;
+      goto ret_put_fd;
+    }
+    priv = (*_filp)->private_data;
+    ci_assert_equal(priv->fd_type, CI_PRIV_TYPE_TCP_EP);
+    CITP_STATS_NETIF_INC(&thr->netif, sock_attach_fd_more);
+  }
+  else {
+    if( fd_type == -1 ) {
+      rc = -EINVAL;
+      goto ret_put_fd;
+    }
+    rc = onload_alloc_file(thr, ep_id, flags, fd_type, &priv);
+    if( rc != 0 ) {
+      OO_DEBUG_ERR(ci_log("%s: ERROR: onload_alloc_file failed (%d) "
+                          "for [%d:%d]", __func__,
+                          rc, thr->id, ep_id));
+      goto ret_put_fd;
+    }
+    efab_thr_ref(thr);
   }
 
-  efab_thr_ref(thr);
   fd_install(fd, priv->_filp);
+  if( _filp )
+    *_filp = priv->_filp;
   return fd;
+
+ret_put_fd:
+  put_unused_fd(fd);
+  return rc;
 }
 
 

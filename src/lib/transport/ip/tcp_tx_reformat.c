@@ -106,11 +106,10 @@ static ci_ip_pkt_fmt* ci_tcp_tx_allocate_pkt(ci_netif* ni, ci_tcp_state* ts,
   /* Initially make a buffer large enough to fit all the data in, since we
   ** may have to put more than [eff_mss] into [next].
   */
-  oo_offbuf_init(&next->buf, (uint8_t*) oo_tx_ether_data(next) + hdrlen,
-                 old_len);
+  oo_offbuf_init(&next->buf, (uint8_t*) oo_tx_l3_hdr(next) + hdrlen, old_len);
 
   /* ?? todo: put pkt hdr initialisation in an inline fn shared w tcp_send */
-  next->buf_len = next->pay_len = hdrlen + oo_ether_hdr_size(next);
+  next->buf_len = next->pay_len = oo_tx_ether_hdr_size(next) + hdrlen;
   ci_assert_equal(next->n_buffers, 1);
   /* Initialise headers, and set the sequence numbers. */
   pkt->pf.tcp_tx.end_seq    = pkt->pf.tcp_tx.start_seq + new_paylen;
@@ -176,7 +175,7 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
   next = ci_tcp_tx_allocate_pkt(ni, ts, qu, pkt, hdrlen, old_len, new_paylen);
   if( next == NULL )  return -1;
 
-  n = new_paylen + hdrlen + oo_ether_hdr_size(pkt);
+  n = new_paylen + hdrlen + oo_tx_pre_l3_len(pkt);
   /* Assume that we have all we need in the first segment */
   ci_assert_ge(pkt->buf_len, n);
   ci_assert_equal(pkt->n_buffers, 1);
@@ -202,10 +201,9 @@ extern int ci_tcp_tx_split(ci_netif* ni, ci_tcp_state* ts, ci_ip_pkt_queue* qu,
 
   /* Reposition the "end" of the packet buffer to where it should be. */
   ci_tcp_tx_pkt_set_end(ts, next);
-
-  pkt->buf.off =
-    (ci_uint32)((char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len
-                + new_paylen - (char*) &pkt->buf);
+  oo_offbuf_set_start(&(pkt->buf),
+                      (char*) oo_tx_l3_hdr(pkt) + ts->outgoing_hdrs_len
+                      + new_paylen);
 
   ci_tcp_tx_add_to_queue(qu, pkt, next);
   if( is_sendq )
@@ -247,7 +245,7 @@ static void ci_tcp_tx_chomp(ci_netif* ni, ci_tcp_state* ts,
   pkt->intf_i = 0;
   ci_netif_pkt_to_iovec(ni, pkt, &one_segment, 1);
   ef_iovec_ptr_init_nz(&segs, &one_segment, pkt->n_buffers);
-  ef_iovec_ptr_advance(&segs, ts->outgoing_hdrs_len+oo_ether_hdr_size(pkt));
+  ef_iovec_ptr_advance(&segs, oo_tx_pre_l3_len(pkt) + ts->outgoing_hdrs_len);
 
   /* Advance through the bytes we're skipping. */
   do {
@@ -257,8 +255,7 @@ static void ci_tcp_tx_chomp(ci_netif* ni, ci_tcp_state* ts,
     ci_assert_gt(segs.io.iov_len, 0);
   } while( bytes );
 
-  pkt->buf_len = pkt->pay_len = 
-    ts->outgoing_hdrs_len + oo_ether_hdr_size(pkt);
+  pkt->buf_len = pkt->pay_len = oo_tx_pre_l3_len(pkt) + ts->outgoing_hdrs_len;
   pkt->pf.tcp_tx.end_seq = pkt->pf.tcp_tx.start_seq;
 
   /* We need to initialise an over large buffer here, because the size of
@@ -327,7 +324,7 @@ int ci_tcp_tx_coalesce(ci_netif* ni, ci_tcp_state* ts,
   ci_netif_pkt_to_iovec(ni, next, &one_segment, 1);
   ef_iovec_ptr_init_nz(&next_iov, &one_segment, pkt->n_buffers);
   ef_iovec_ptr_advance(&next_iov,
-                       ts->outgoing_hdrs_len + oo_ether_hdr_size(pkt));
+                       oo_tx_pre_l3_len(pkt) + ts->outgoing_hdrs_len);
 
   while( 1 ) {
     ci_assert_gt(oo_offbuf_left(&pkt->buf), 0);

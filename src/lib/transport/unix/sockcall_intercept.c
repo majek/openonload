@@ -466,15 +466,13 @@ OO_INTERCEPT(int, connect,
      );
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
-    {
-      /* NOTE
-       * 1. All protocol handlers MUST do their own call to
-       * citp_fdinfo_release_ref()
-       * 2. After the call to the protocol connect handler the fd
-       * and all associated resources may have been deleted
-       */
-      rc = citp_fdinfo_get_ops(fdi)->connect(fdi, sa, sa_len, &lib_context);
-    }
+    /* NOTE
+     * 1. All protocol handlers MUST do their own call to
+     * citp_fdinfo_release_ref()
+     * 2. After the call to the protocol connect handler the fd
+     * and all associated resources may have been deleted
+     */
+    rc = citp_fdinfo_get_ops(fdi)->connect(fdi, sa, sa_len, &lib_context);
   }
   else {
     Log_PT(log("PT: sys_connect(%d, , %d)", fd, sa_len));
@@ -507,8 +505,7 @@ OO_INTERCEPT(int, shutdown,
   Log_CALL(ci_log("%s(%d,%d)", __FUNCTION__, fd, how));
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
-    /* Validate 'how' parameter at first. 
-     * Solaris validates it after validation of the socket state. */
+    /* Validate 'how' parameter at first. */
     if (!citp_shutdown_how_is_valid(how)) {
       errno = EINVAL;
       citp_fdinfo_release_ref(fdi, 0);
@@ -552,9 +549,7 @@ OO_INTERCEPT(int, getsockname,
     rc = -1;
   } else {
     if( (fdi = citp_fdtable_lookup(fd)) ) {
-      {
-        rc = citp_fdinfo_get_ops(fdi)->getsockname(fdi, sa, p_sa_len);
-      }
+      rc = citp_fdinfo_get_ops(fdi)->getsockname(fdi, sa, p_sa_len);
       citp_fdinfo_release_ref(fdi, 0);
       citp_exit_lib(&lib_context, rc == 0);
     } else {
@@ -584,9 +579,7 @@ OO_INTERCEPT(int, getpeername,
   Log_CALL(ci_log("%s(%d,%p,%p)", __FUNCTION__, fd, sa, p_sa_len));
 
   if( (fdi = citp_fdtable_lookup(fd)) ) {
-    {
-      rc = citp_fdinfo_get_ops(fdi)->getpeername(fdi, sa, p_sa_len);
-    }
+    rc = citp_fdinfo_get_ops(fdi)->getpeername(fdi, sa, p_sa_len);
     citp_fdinfo_release_ref(fdi, 0);
     citp_exit_lib(&lib_context, rc == 0);
   } else {
@@ -1693,17 +1686,15 @@ OO_INTERCEPT(ssize_t, writev,
   Log_CALL(ci_log("%s(%d, %p, %d)", __FUNCTION__, fd, vector, count));
 
   if( (fdi = citp_fdtable_lookup_fast(&lib_context, fd)) ) {
-    {
-      /* See note about convertions above in this file */
-      CI_DEBUG(m.msg_name = CI_NOT_NULL);
-      m.msg_namelen = 0;
-      m.msg_iov = (struct iovec*) vector;
-      m.msg_iovlen = count;
-      CI_DEBUG(m.msg_control = CI_NOT_NULL);
-      m.msg_controllen = 0;
-      /* msg_flags is output only */
-      rc = citp_fdinfo_get_ops(fdi)->send(fdi, &m, 0);
-    }
+    /* See note about convertions above in this file */
+    CI_DEBUG(m.msg_name = CI_NOT_NULL);
+    m.msg_namelen = 0;
+    m.msg_iov = (struct iovec*) vector;
+    m.msg_iovlen = count;
+    CI_DEBUG(m.msg_control = CI_NOT_NULL);
+    m.msg_controllen = 0;
+    /* msg_flags is output only */
+    rc = citp_fdinfo_get_ops(fdi)->send(fdi, &m, 0);
     citp_fdinfo_release_ref_fast(fdi);
     citp_exit_lib(&lib_context, rc >= 0);
   }
@@ -1721,6 +1712,7 @@ OO_INTERCEPT(ssize_t, writev,
 OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
                                              int out_fd, loff_t* out_off,
                                              size_t len, unsigned int flags))
+#if CI_CFG_USERSPACE_PIPE
 {
   citp_lib_context_t lib_context;
   citp_fdinfo *out_fdi, *in_fdi;
@@ -1731,7 +1723,6 @@ OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
     citp_do_init(CITP_INIT_SYSCALLS);
     return ci_sys_splice(in_fd, in_off, out_fd, out_off, len, flags);
   }
-
   citp_enter_lib(&lib_context);
   Log_CALL(ci_log("%s(%d, %p, %d, %p, %u, 0x%x)", __FUNCTION__,
                   in_fd, in_off, out_fd, out_off, (unsigned)len, flags ));
@@ -1789,6 +1780,13 @@ OO_INTERCEPT(ci_splice_return_type, splice, (int in_fd, loff_t* in_off,
   Log_CALL_RESULT(rc);
   return rc;
 }
+#else
+{
+  if( CI_UNLIKELY(citp.init_level < CITP_INIT_ALL) )
+    citp_do_init(CITP_INIT_SYSCALLS);
+  return ci_sys_splice(in_fd, in_off, out_fd, out_off, len, flags);
+}
+#endif
 #endif
 
 
@@ -2416,8 +2414,6 @@ OO_INTERCEPT(int, __fxstat64,
   return rc;
 }
 #endif
-
-
 
 
 OO_INTERCEPT(int, chroot,

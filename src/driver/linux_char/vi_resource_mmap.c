@@ -54,6 +54,7 @@ efab_vi_rm_mmap_io(struct efrm_vi *virs,
   int len;
   int instance;
   int base;
+  unsigned vi_stride;
   struct efhw_nic *nic;
 
   nic = efrm_client_get_nic(virs->rs.rs_client);
@@ -74,11 +75,12 @@ efab_vi_rm_mmap_io(struct efrm_vi *virs,
     break;
 
   case EFHW_ARCH_EF10:
-    ci_assert_lt(ef10_tx_dma_page_offset(instance), CI_PAGE_SIZE);
-    ci_assert_lt(ef10_rx_dma_page_offset(instance), CI_PAGE_SIZE);
-    ci_assert_equal(ef10_tx_dma_page_base(instance),
-                    ef10_rx_dma_page_base(instance));
-    base = ef10_tx_dma_page_base(instance);
+    vi_stride = nic->vi_stride;
+    ci_assert_lt(ef10_tx_dma_page_offset(vi_stride, instance), CI_PAGE_SIZE);
+    ci_assert_lt(ef10_rx_dma_page_offset(vi_stride, instance), CI_PAGE_SIZE);
+    ci_assert_equal(ef10_tx_dma_page_base(vi_stride, instance),
+                    ef10_rx_dma_page_base(vi_stride, instance));
+    base = ef10_tx_dma_page_base(vi_stride, instance);
     break;
 
   default:
@@ -122,12 +124,49 @@ efab_vi_rm_mmap_pio(struct efrm_vi *virs,
   /* Map the control page. */
   len = CI_MIN(*bytes, CI_PAGE_SIZE);
   *bytes -= len;
-  bar_off = (ef10_tx_dma_page_base(instance) + 4096) & PAGE_MASK;
+  bar_off = (ef10_tx_dma_page_base(nic->vi_stride, instance) + 4096) &
+            PAGE_MASK;
   rc = ci_mmap_bar(nic, bar_off, len, opaque, map_num, offset, 1);
   if( rc < 0 )
     EFCH_ERR("%s: ERROR: ci_mmap_bar failed rc=%d", __FUNCTION__, rc);
   return rc;
 }
+
+
+static int
+efab_vi_rm_mmap_ctpio(struct efrm_vi *virs, unsigned long *bytes, void *opaque,
+                      int *map_num, unsigned long *offset)
+{
+  int rc;
+  int len;
+  int instance;
+  struct efhw_nic *nic;
+  int bar_off;
+
+  /* The CTPIO region is 12K from the start of the VI's aperture. */
+  const int CTPIO_OFFSET = 12 * 1024;
+
+  instance = virs->rs.rs_instance;
+
+  if( ! (virs->flags & EFHW_VI_TX_CTPIO) ) {
+    EFRM_ERR("%s: CTPIO is not enabled on VI instance %d\n", __FUNCTION__,
+	     instance);
+    return -EINVAL;
+  }
+
+  /* Map the CTPIO region, which is 12K from the start of the VI's aperture. */
+  len = CI_MIN(*bytes, CI_PAGE_SIZE);
+  *bytes -= len;
+  nic = efrm_client_get_nic(virs->rs.rs_client);
+  ci_assert_ge(nic->vi_stride, CTPIO_OFFSET + len);
+  bar_off = (ef10_tx_dma_page_base(nic->vi_stride, instance) + CTPIO_OFFSET) &
+            PAGE_MASK;
+  rc = ci_mmap_bar(nic, bar_off, len, opaque, map_num, offset, 1);
+  if( rc < 0 )
+    EFCH_ERR("%s: ERROR: ci_mmap_bar failed rc=%d", __FUNCTION__, rc);
+  return rc;
+}
+
 
 static int 
 efab_vi_rm_mmap_mem(struct efrm_vi *virs,
@@ -182,6 +221,9 @@ int efab_vi_resource_mmap(struct efrm_vi *virs, unsigned long *bytes,
       break;
     case EFCH_VI_MMAP_PIO:
       rc = efab_vi_rm_mmap_pio(virs, bytes, opaque, map_num, offset);
+      break;
+    case EFCH_VI_MMAP_CTPIO:
+      rc = efab_vi_rm_mmap_ctpio(virs, bytes, opaque, map_num, offset);
       break;
     default:
       ci_assert(0);

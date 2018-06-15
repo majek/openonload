@@ -39,7 +39,9 @@ struct tcp_recv_info {
   int stack_locked;
   ci_iovec_ptr piov;
   ci_uint64 timestamp;
+#if CI_CFG_TIMESTAMPING
   struct timespec hw_timestamp;
+#endif
   const ci_tcp_recvmsg_args* a;
   int msg_flags;
 };
@@ -314,8 +316,10 @@ ci_tcp_recvmsg_get(struct tcp_recv_info *rinf)
    * if zero bytes received so far. */
   if( rinf->rc == 0 ) {
     rinf->timestamp = pkt->pf.tcp_rx.rx_stamp;
+#if CI_CFG_TIMESTAMPING
     rinf->hw_timestamp.tv_sec = pkt->pf.tcp_rx.rx_hw_stamp.tv_sec;
     rinf->hw_timestamp.tv_nsec = pkt->pf.tcp_rx.rx_hw_stamp.tv_nsec;
+#endif
   }
   else if( rinf->rc > 0 ) {
     /* If we've already got data that we're returning to the app then we
@@ -460,6 +464,7 @@ static int ci_tcp_recvmsg_spin(ci_netif* ni, ci_tcp_state* ts,
 
 
 #ifndef __KERNEL__
+#if CI_CFG_TIMESTAMPING
 /* We currently don't need to do any cmsg recvmsg stuff in-kernel
  * as calls are all via recv/read
  */
@@ -500,6 +505,7 @@ ci_tcp_fill_recv_timestamp(struct tcp_recv_info* rinf)
   }
 }
 #endif
+#endif
 
 
 int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
@@ -523,7 +529,6 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
   rinf.a = a;
   rinf.rc = 0;
   rinf.msg_flags = 0;
-
 
   /* ?? TODO: MSG_TRUNC */
 
@@ -697,7 +702,9 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 #ifndef __KERNEL__
         ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                                  &a->msg->msg_namelen);
+#if CI_CFG_TIMESTAMPING
         ci_tcp_fill_recv_timestamp(&rinf);
+#endif
 #endif
       } else
         CI_SET_ERROR(rinf.rc, -rc2);
@@ -712,16 +719,15 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
  slow_path:
 
   if( flags & MSG_ERRQUEUE ) {
-    if( ci_udp_recv_q_not_empty(&ts->timestamp_q) ) {
-      ci_ip_pkt_fmt* pkt;
+#if CI_CFG_TIMESTAMPING
+    ci_ip_pkt_fmt* pkt;
+    if( (pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q)) != NULL ) {
       struct onload_scm_timestamping_stream stamps;
       struct cmsg_state cmsg_state;
       int tx_hw_stamp_in_sync;
 
     timestamp_q_nonempty:
 
-      ci_rmb();
-      pkt = ci_udp_recv_q_get(ni, &ts->timestamp_q);
       ci_udp_recv_q_deliver(ni, &ts->timestamp_q, pkt);
 
       cmsg_state.msg = a->msg;
@@ -775,6 +781,7 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
           goto timestamp_q_nonempty;
       }
     }
+#endif
     rinf.rc = -EAGAIN;
     CI_SET_ERROR(rinf.rc, -rinf.rc);
     goto check_errno;
@@ -816,7 +823,9 @@ int ci_tcp_recvmsg(const ci_tcp_recvmsg_args* a)
 #ifndef __KERNEL__
   ci_tcp_recv_fill_msgname(ts, (struct sockaddr*) a->msg->msg_name,
                            &a->msg->msg_namelen);  /*!\TODO fixme remove cast*/
+#if CI_CFG_TIMESTAMPING
   ci_tcp_fill_recv_timestamp(&rinf);
+#endif
 #endif
  unlock_out:
 

@@ -51,7 +51,7 @@ distribution directory:
 
 \section compiling Compiling and Linking
 
-Applications or libraries using ef_vi will need to include the header
+Applications or libraries using %ef_vi will need to include the header
 files in src/include/etherfabric/
 
 The application will need to be linked with libciul1.a or libciul.so,
@@ -61,12 +61,12 @@ scripts/onload_build or scripts/onload_install.
 If compiling your application against one version of Onload, and
 running on a system with a different version of Onload, some care is
 required.  Onload currently preserves compatibility and provides a
-stable API between the ef_vi user-space and the kernel drivers, so
-that applications compiled using an older ef_vi library will work when
+stable API between the %ef_vi user-space and the kernel drivers, so
+that applications compiled using an older %ef_vi library will work when
 run with newer drivers.  Compatibility in the other direction (newer
 ef_vi libraries running with older drivers) is not guaranteed.
 Finally, Onload does not currently maintain compatibility between
-compiling against one version of the ef_vi libraries, and then running
+compiling against one version of the %ef_vi libraries, and then running
 against another.
 
 The simplest approach is to link statically to libciul, as this
@@ -77,7 +77,7 @@ onload_install does not install libciul.so into system directories to
 avoid the installed version being used in place of the version you
 compiled against.
 
-For those wishing to use ef_vi in combination with Onload there should
+For those wishing to use %ef_vi in combination with Onload there should
 be no problem linking statically to libciul and dynamically to the
 other libraries to allow the Onload intercepts to take effect.  The
 ef_delegated example application does exactly this.
@@ -252,6 +252,33 @@ Data is copied into the PIO buffer with ef_pio_memcpy().
 When the PIO buffer is no longer required it should be unlinked by calling 
 ef_pio_unlink_vi(), and then freed by calling ef_pio_free().
 
+\subsection using_ctpio Cut-through PIO
+
+A complete example showing the use of CTPIO with %ef_vi is given in
+`Onload-&lt;version>/src/tests/rtt/rtt_efvi.c`.
+
+\note CTPIO bypasses the main adapter datapath, and as a result does not 
+support checksum offload. Frames sent with CTPIO are placed on the wire 
+without modification, so checksum fields must be completed in software before 
+sending.
+
+Here is the sequence of steps needed:
+
+-# When allocating a VI (ef_vi_alloc_from_pd()) set the EF_VI_TX_CTPIO flag.
+
+-# To initiate a send, form a complete Ethernet frame (including L3/L4 
+   checksums, but excluding FCS) in host memory.  Initiate the send with 
+   ef_vi_transmit_ctpio() or ef_vi_transmitv_ctpio().
+
+-# Post a fall-back descriptor using ef_vi_transmit_ctpio_fallback() or 
+   ef_vi_transmitv_ctpio_fallback().  These calls are used just like the 
+   standard DMA send calls (ef_vi_transmit() etc.), and so must be provided 
+   with a copy of the frame in registered memory.
+
+The posting of a fall-back descriptor is not on the latency critical path, 
+provided the CTPIO operation succeeds.  However, it must be posted before 
+posting any further sends on the same VI.
+
 \subsection using_tx_alternatives TX Alternatives
 
 TX alternatives is a features available on Solarflare SFN8000 series adapters. 
@@ -300,13 +327,13 @@ to transmit, and discard any that are no longer required:
   DISCARD state by calling ef_vi_transmit_alt_discard().
   
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}
-int ef_vi_transmit_alt_select(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_select(struct ef_vi* vi, unsigned alt_id);
 
-int ef_vi_transmit_alt_stop(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_stop(struct ef_vi* vi, unsigned alt_id);
 
-int ef_vi_transmit_alt_go(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_go(struct ef_vi* vi, unsigned alt_id);
 
-int ef_vi_transmit_alt_discard(struct ef_vi*, unsigned alt_id);
+int ef_vi_transmit_alt_discard(struct ef_vi* vi, unsigned alt_id);
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 As packets are transmitted or discarded, events of type EF_EVENT_TYPE_TX_ALT
@@ -871,7 +898,7 @@ Different configuration modes are available for addressing packet buffers.
   variable `EF_VI_PD_FLAGS=phys`.
   
   The sfc_char module option must also be enabled in a file in the /etc/modprobe.d
-  directory where N is the integer group ID of the user running the ef_vi application. 
+  directory where N is the integer group ID of the user running the %ef_vi application. 
   Set to -1 means ALL users are permitted access.:
   
   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.c}

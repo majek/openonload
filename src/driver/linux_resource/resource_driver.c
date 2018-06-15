@@ -189,8 +189,9 @@ efrm_nic_bar_is_good(struct efhw_nic* nic, struct pci_dev* dev)
 
 
 static int
-linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
-		    spinlock_t *reg_lock, unsigned nic_flags, int ifindex,
+linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct efx_dl_device *dl_device,
+		    spinlock_t *reg_lock, unsigned nic_flags,
+		    struct net_device *net_dev,
 		    const struct vi_resource_dimensions *res_dim,
 		    struct efhw_device_type *dev_type)
 {
@@ -199,16 +200,23 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	unsigned map_min, map_max;
 	unsigned vi_base = 0;
 	unsigned vi_shift = 0;
+	unsigned mem_bar = EFHW_MEM_BAR_UNDEFINED;
+	unsigned vi_stride = 0;
 	unsigned vport_id = 0;
+	struct pci_dev *dev = dl_device->pci_dev;
 
 	/* Tie the lifetime of the kernel's state to that of our own. */
 	pci_dev_get(dev);
+	dev_hold(net_dev);
 
 	if (dev_type->arch == EFHW_ARCH_EF10) {
 		map_min = res_dim->vi_min;
 		map_max = res_dim->vi_lim;
 		vi_base = res_dim->vi_base;
 		vi_shift = res_dim->vi_shift;
+		if( res_dim->mem_bar != VI_RES_MEM_BAR_UNDEFINED )
+			mem_bar = res_dim->mem_bar;
+		vi_stride = res_dim->vi_stride;
 		vport_id = res_dim->vport_id;
 	}
 	else if (dev_type->arch == EFHW_ARCH_FALCON) {
@@ -226,8 +234,9 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	}
 
 	efhw_nic_init(nic, nic_flags, NIC_OPT_DEFAULT, dev_type, map_min,
-		      map_max, vi_base, vi_shift, vport_id);
+		      map_max, vi_base, vi_shift, mem_bar, vi_stride, vport_id);
 	lnic->efrm_nic.efhw_nic.pci_dev = dev;
+	lnic->efrm_nic.efhw_nic.net_dev = net_dev;
 	lnic->efrm_nic.efhw_nic.bus_number = dev->bus->number;
 	lnic->efrm_nic.efhw_nic.ctr_ap_dma_addr =
 		pci_resource_start(dev, nic->ctr_ap_bar);
@@ -240,7 +249,7 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	if (rc < 0)
 		goto fail;
 
-	rc = efrm_nic_ctor(&lnic->efrm_nic, ifindex, res_dim);
+	rc = efrm_nic_ctor(&lnic->efrm_nic, net_dev->ifindex, res_dim);
 	if (rc < 0) {
 		if (nic->bar_ioaddr) {
 			iounmap(nic->bar_ioaddr);
@@ -257,12 +266,13 @@ linux_efrm_nic_ctor(struct linux_efhw_nic *lnic, struct pci_dev *dev,
 	if (dev_type->arch == EFHW_ARCH_FALCON)
 		nic->reg_lock = reg_lock;
 	
-	efrm_init_resource_filter(&dev->dev, ifindex);
+	efrm_init_resource_filter(&dev->dev, net_dev->ifindex);
 
 	return 0;
 
 fail:
 	pci_dev_put(dev);
+	dev_put(net_dev);
 	return rc;
 }
 
@@ -271,32 +281,47 @@ fail:
  * NIC state (i.e. when a new NIC is compatible with one that had gone away).
  */
 static void
-linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic, struct pci_dev *dev,
+linux_efrm_nic_reclaim(struct linux_efhw_nic *lnic,
+                       struct efx_dl_device *dl_device,
+		       struct net_device *net_dev,
 		       const struct vi_resource_dimensions *res_dim,
-                       struct efhw_device_type *dev_type, int ifindex)
+                       struct efhw_device_type *dev_type)
 {
 	struct efhw_nic* nic = &lnic->efrm_nic.efhw_nic;
-	struct pci_dev* old_pci_dev = nic->pci_dev;
+	struct pci_dev* old_pci_dev;
+	struct pci_dev* dev = dl_device->pci_dev;
+#ifndef NDEBUG
+	struct net_device* old_net_dev;
+#endif
+
+	/* Replace the net & pci devs */
+	pci_dev_get(dev);
+	dev_hold(net_dev);
+	spin_lock_bh(&nic->pci_dev_lock);
+	old_pci_dev = nic->pci_dev;
+	nic->pci_dev = dev;
+#ifndef NDEBUG
+	old_net_dev = nic->net_dev;
+#endif
+	nic->net_dev = net_dev;
+	spin_unlock_bh(&nic->pci_dev_lock);
 
 	/* Tidy up old state. */
 	efrm_shutdown_resource_filter(&old_pci_dev->dev);
 
 	/* Bring up new state. */
-	pci_dev_get(dev);
-	spin_lock_bh(&nic->pci_dev_lock);
-	nic->pci_dev = dev;
-	spin_unlock_bh(&nic->pci_dev_lock);
 	nic->bus_number = dev->bus->number;
-	nic->ifindex = ifindex;
+	nic->ifindex = net_dev->ifindex;
 	if (dev_type->arch == EFHW_ARCH_EF10) {
 		nic->vi_base = res_dim->vi_base;
 		nic->vport_id = res_dim->vport_id;
         }
-	efrm_init_resource_filter(&nic->pci_dev->dev, ifindex);
+	efrm_init_resource_filter(&nic->pci_dev->dev, net_dev->ifindex);
 
 	/* Drop reference to [old_pci_dev] now that the race window has been
 	 * closed for someone else trying to take out a new reference. */
 	pci_dev_put(old_pci_dev);
+	EFRM_ASSERT(old_net_dev == NULL);
 }
 
 static void linux_efrm_nic_dtor(struct linux_efhw_nic *lnic)
@@ -312,6 +337,7 @@ static void linux_efrm_nic_dtor(struct linux_efhw_nic *lnic)
 	}
 	efrm_shutdown_resource_filter(&nic->pci_dev->dev);
 	pci_dev_put(nic->pci_dev);
+	EFRM_ASSERT(nic->net_dev == NULL);
 }
 
 static void efrm_dev_show(struct pci_dev *dev, int revision,
@@ -373,9 +399,9 @@ static int n_nics_probed;
  ****************************************************************************/
 int
 efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags, 
-	     const uint8_t *mac_addr,
+	     struct net_device *net_dev,
 	     struct linux_efhw_nic **lnic_out, spinlock_t *reg_lock,
-	     const struct vi_resource_dimensions *res_dim, int ifindex,
+	     const struct vi_resource_dimensions *res_dim,
 	     unsigned timer_quantum_ns, unsigned rx_prefix_len,
 	     unsigned rx_usr_buf_size)
 {
@@ -406,7 +432,7 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 		return -ENODEV;
 	}
 
-	efrm_dev_show(dev, class_revision, &dev_type, ifindex, res_dim);
+	efrm_dev_show(dev, class_revision, &dev_type, net_dev->ifindex, res_dim);
 
 	if (n_nics_probed == 0) {
 		rc = efrm_resources_init();
@@ -443,7 +469,8 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 	 * unloads. */
 
 	if (lnic != NULL) {
-		linux_efrm_nic_reclaim(lnic, dev, res_dim, &dev_type, ifindex);
+		linux_efrm_nic_reclaim(lnic, dl_device, net_dev, res_dim,
+				       &dev_type);
 		/* We have now taken ownership of the state and should pull it
 		 * down on failure. */
 		constructed = registered_nic = 1;
@@ -462,8 +489,8 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 		lnic->ev_handlers = &ev_handler;
 
 		/* OS specific hardware mappings */
-		rc = linux_efrm_nic_ctor(lnic, dev, reg_lock, flags, ifindex,
-					 res_dim, &dev_type);
+		rc = linux_efrm_nic_ctor(lnic, dl_device, reg_lock, flags,
+					 net_dev, res_dim, &dev_type);
 		if (rc < 0) {
 			EFRM_ERR("%s: ERROR: linux_efrm_nic_ctor failed (%d)",
 				 __func__, rc);
@@ -526,7 +553,7 @@ efrm_nic_add(struct efx_dl_device *dl_device, unsigned flags,
 	   we want to make sure that we maximise our chances, so we
 	   loop a few times until all is good. */
 	for (count = 0; count < max_hardware_init_repeats; count++) {
-		rc = efhw_nic_init_hardware(nic, &ev_handler, mac_addr,
+		rc = efhw_nic_init_hardware(nic, &ev_handler, net_dev->dev_addr,
 					    res_dim->non_irq_evq, 
 					    res_dim->bt_min, res_dim->bt_lim);
 		if (rc >= 0)
@@ -587,6 +614,25 @@ failed:
 		efrm_resources_fini();
 	return rc;
 }
+
+int
+efrm_nic_unplug(struct efhw_nic* nic, struct efx_dl_device *dl_device)
+{
+	struct net_device* net_dev;
+
+	/* We keep the pci device to reclaim it after hot-plug, but release
+	 * the net device. */
+	spin_lock_bh(&nic->pci_dev_lock);
+	net_dev = nic->net_dev;
+	nic->net_dev = NULL;
+	spin_unlock_bh(&nic->pci_dev_lock);
+
+	EFRM_ASSERT(net_dev != NULL);
+	dev_put(net_dev);
+
+	return 0;
+}
+
 
 /****************************************************************************
  *

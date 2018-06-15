@@ -315,7 +315,8 @@ typedef union ci_oword {
                                 field7, value7,               \
                                 field8, value8,               \
                                 field9, value9,               \
-                                field10, value10)             \
+                                field10, value10,             \
+                                field11, value11)             \
   (CI_INSERT_FIELD_NATIVE((min), (max), field1, (value1)) |   \
    CI_INSERT_FIELD_NATIVE((min), (max), field2, (value2)) |   \
    CI_INSERT_FIELD_NATIVE((min), (max), field3, (value3)) |   \
@@ -325,7 +326,8 @@ typedef union ci_oword {
    CI_INSERT_FIELD_NATIVE((min), (max), field7, (value7)) |   \
    CI_INSERT_FIELD_NATIVE((min), (max), field8, (value8)) |   \
    CI_INSERT_FIELD_NATIVE((min), (max), field9, (value9)) |   \
-   CI_INSERT_FIELD_NATIVE((min), (max), field10, (value10)))
+   CI_INSERT_FIELD_NATIVE((min), (max), field10, (value10)) |   \
+   CI_INSERT_FIELD_NATIVE((min), (max), field11, (value11)))
 
 #define CI_INSERT_FIELDS64(...)                     \
   cpu_to_le64(CI_INSERT_FIELDS_NATIVE(__VA_ARGS__))
@@ -367,7 +369,9 @@ typedef union ci_oword {
 #endif
 
 /* Populate an octword field with various numbers of arguments */
-#define CI_POPULATE_OWORD_10 CI_POPULATE_OWORD
+#define CI_POPULATE_OWORD_11 CI_POPULATE_OWORD
+#define CI_POPULATE_OWORD_10(oword, ...)                       \
+  CI_POPULATE_OWORD_11(oword, CI_DUMMY_FIELD, 0, __VA_ARGS__)
 #define CI_POPULATE_OWORD_9(oword, ...)                       \
   CI_POPULATE_OWORD_10(oword, CI_DUMMY_FIELD, 0, __VA_ARGS__)
 #define CI_POPULATE_OWORD_8(oword, ...)                       \
@@ -396,7 +400,9 @@ typedef union ci_oword {
                       CI_DWORD_3, 0xffffffff)
 
 /* Populate a quadword field with various numbers of arguments */
-#define CI_POPULATE_QWORD_10 CI_POPULATE_QWORD
+#define CI_POPULATE_QWORD_11 CI_POPULATE_QWORD
+#define CI_POPULATE_QWORD_10(qword, ...)                       \
+  CI_POPULATE_QWORD_11(qword, CI_DUMMY_FIELD, 0, __VA_ARGS__)
 #define CI_POPULATE_QWORD_9(qword, ...)                       \
   CI_POPULATE_QWORD_10(qword, CI_DUMMY_FIELD, 0, __VA_ARGS__)
 #define CI_POPULATE_QWORD_8(qword, ...)                       \
@@ -423,7 +429,9 @@ typedef union ci_oword {
                       CI_DWORD_1, 0xffffffff)
 
 /* Populate a dword field with various numbers of arguments */
-#define CI_POPULATE_DWORD_10 CI_POPULATE_DWORD
+#define CI_POPULATE_DWORD_11 CI_POPULATE_DWORD
+#define CI_POPULATE_DWORD_10(dword, ...)                       \
+  CI_POPULATE_DWORD_11(dword, CI_DUMMY_FIELD, 0, __VA_ARGS__)
 #define CI_POPULATE_DWORD_9(dword, ...)                       \
   CI_POPULATE_DWORD_10(dword, CI_DUMMY_FIELD, 0, __VA_ARGS__)
 #define CI_POPULATE_DWORD_8(dword, ...)                       \

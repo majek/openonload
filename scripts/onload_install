@@ -48,6 +48,7 @@ usage() {
   err "                       by default - /opt/onload_filter_engine"
   err "  --no-filter-engine - Don't include filter engine support even if it's"
   err "                       present in the system"
+  err "  --build-profile    - Specify a build profile"
   err
   exit 1
 }
@@ -683,6 +684,8 @@ while [ $# -gt 0 ]; do
                 logprog=false; build=false; uninstall=false; sfccheck=false;;
   --filter-engine=*) buildargs="$buildargs $1 ${1#--filter-engine}" ;;
   --no-filter-engine) withofe=false; "$buildargs $1";;
+  --build-profile)   [ $# -gt 1 ] || usage; buildargs="$buildargs $1=$2"; shift;;
+  --build-profile=*) buildargs="$buildargs $1";;
   -*)           usage;;
   *)            break;;
   esac

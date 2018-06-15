@@ -106,6 +106,9 @@ struct vi_resource_dimensions {
 	/* EF10 Only */
 	unsigned vi_min, vi_lim;
 	unsigned vi_base, vi_shift;
+#define VI_RES_MEM_BAR_UNDEFINED ((unsigned)~0)
+	unsigned mem_bar;
+	unsigned vi_stride;
 	unsigned vport_id;
 
 	/* SRIOV Only */

@@ -485,17 +485,30 @@ CI_BUILD_ASSERT(CI_SB_AFLAG_O_NONBLOCK == MSG_DONTWAIT);
 
 
 /* Onload fcntl always sets OS flags, but not vice-versa.  So, in case of
- * mismatch the last was an OS call. */
+ * mismatch the last was an OS call.
+ * Exception is the cached socket, where we see
+ * CI_SB_AFLAG_O_NONBLOCK_UNSYNCED as a sign that we must trust Onload,
+ * not OS. */
 static void
 fix_nonblock_flag(struct file *filp, ci_sock_cmn* s)
 {
   if( ! (filp->f_flags & O_NONBLOCK) !=
       ! (s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK) ) {
-    if( filp->f_flags & O_NONBLOCK )
+    if( s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK_UNSYNCED ) {
+      spin_lock(&filp->f_lock);
+      if( s->b.sb_aflags & CI_SB_AFLAG_O_NONBLOCK )
+        filp->f_flags |= O_NONBLOCK;
+      else
+        filp->f_flags &=~ O_NONBLOCK;
+      spin_unlock(&filp->f_lock);
+    }
+    else if( filp->f_flags & O_NONBLOCK )
       ci_atomic32_or(&s->b.sb_aflags, CI_SB_AFLAG_O_NONBLOCK);
     else
       ci_atomic32_and(&s->b.sb_aflags, ~CI_SB_AFLAG_O_NONBLOCK);
   }
+  /* OS and Onload flags are synced.  Remove the UNSYNCEd flag. */
+  ci_atomic32_and(&s->b.sb_aflags, ~CI_SB_AFLAG_O_NONBLOCK_UNSYNCED);
 }
 
 
@@ -1223,6 +1236,29 @@ static short efab_os_wakup_fix_mask(tcp_helper_endpoint_t *ep, short mask,
   return mask;
 }
 
+
+static void
+efab_os_wakeup_epoll3_locked(tcp_helper_resource_t* trs,
+                             citp_waitable* sb)
+{
+  ci_sb_epoll_state* epoll;
+  ci_uint8 i, tmp;
+
+  ci_assert(OO_PP_NOT_NULL(sb->epoll));
+  epoll = ci_ni_aux_p2epoll(&trs->netif, sb->epoll);
+
+  CI_READY_LIST_EACH(sb->ready_lists_in_use, tmp, i) {
+    ci_ni_dllist_remove(&trs->netif, &epoll->e[i].ready_link);
+    ci_ni_dllist_put(&trs->netif, &trs->netif.state->ready_lists[i],
+                   &epoll->e[i].ready_link);
+    ci_waitable_wakeup_all(&trs->ready_list_waitqs[i]);
+  }
+
+  tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK_TRUSTED);
+  /* do not insert anything here - we should return immediately */
+}
+
+
 /* Tell any waiters that there is an OS event.  This function is not
  * Linux-specific and should be moved to tcp_helper_endpoint.c. */
 static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
@@ -1275,17 +1311,12 @@ static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
    * ready list, as the epoll code will always start off assuming that things
    * may be ready, and this check is after we've set the os ready status.
    */
-  if( s->b.ready_list_id > 0 ) {
+  if( s->b.ready_lists_in_use != 0 ) {
     /* The best thing is if we can just get the lock - in that case we can
      * just bung this socket straight on the ready list.
      */
     if( efab_tcp_helper_netif_try_lock(trs, 1) ) {
-      ci_ni_dllist_remove(&trs->netif, &s->b.ready_link);
-      ci_ni_dllist_put(&trs->netif,
-                       &trs->netif.state->ready_lists[s->b.ready_list_id],
-                       &s->b.ready_link);
-      ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
-      tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK_TRUSTED);
+      efab_os_wakeup_epoll3_locked(trs, &s->b);
       /* do not insert anything here - we should return immediately */
     }
     else {
@@ -1294,10 +1325,13 @@ static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
        * flag though until we've got the work ready to do, ie queued it on
        * the os ready list.
        */
+      ci_uint8 i, tmp;
+
       spin_lock_irqsave(&trs->os_ready_list_lock, flags);
-      ci_dllist_remove(&ep->os_ready_link);
-      ci_dllist_put(&trs->os_ready_lists[s->b.ready_list_id],
-                    &ep->os_ready_link);
+      CI_READY_LIST_EACH(s->b.ready_lists_in_use, tmp, i) {
+        ci_dllist_remove(&ep->epoll[i].os_ready_link);
+        ci_dllist_put(&trs->os_ready_lists[i], &ep->epoll[i].os_ready_link);
+      }
       spin_unlock_irqrestore(&trs->os_ready_list_lock, flags);
 
       if( efab_tcp_helper_netif_lock_or_set_flags(trs,
@@ -1305,21 +1339,68 @@ static void efab_os_wakeup_event(tcp_helper_endpoint_t *ep,
                                                   CI_EPLOCK_NETIF_NEED_WAKE,
                                                   1) ) {
         spin_lock_irqsave(&trs->os_ready_list_lock, flags);
-        ci_dllist_remove_safe(&ep->os_ready_link);
+        CI_READY_LIST_EACH(s->b.ready_lists_in_use, tmp, i)
+          ci_dllist_remove_safe(&ep->epoll[i].os_ready_link);
         spin_unlock_irqrestore(&trs->os_ready_list_lock, flags);
 
-        ci_ni_dllist_remove(&trs->netif, &s->b.ready_link);
-        ci_ni_dllist_put(&trs->netif,
-                         &trs->netif.state->ready_lists[s->b.ready_list_id],
-                         &s->b.ready_link);
-        ci_waitable_wakeup_all(&trs->ready_list_waitqs[s->b.ready_list_id]);
-        tcp_helper_defer_dl2work(trs, OO_THR_AFLAG_UNLOCK_TRUSTED);
+        efab_os_wakeup_epoll3_locked(trs, &s->b);
         /* do not insert anything here - we should return immediately */
       }
     }
   }
 }
 
+void
+oo_os_sock_status_bit_clear_handled(tcp_helper_endpoint_t *ep,
+                                    struct file* os_sock,
+                                    ci_uint32 bits_handled)
+{
+  ci_sock_cmn* s = SP_TO_SOCK(&ep->thr->netif, ep->id);
+  ci_uint32 tmp;
+  ci_uint32 new_os_status;
+  int mask;
+
+  do {
+    tmp = s->os_sock_status;
+
+    /* If all bits are already clear, go out. */
+    if( (tmp & bits_handled) == 0 )
+      return;
+
+    /* Find the current state of affair. */
+    new_os_status = oo_os_sock_status_from_mask(
+                                    os_sock->f_op->poll(os_sock, NULL));
+
+    /* Have we really handled any bits from bits_handled? */
+    if( (new_os_status & bits_handled) == bits_handled )
+      return;
+
+    /* Fill in the sequence number. */
+    new_os_status = new_os_status |
+        (((tmp >> OO_OS_STATUS_SEQ_SHIFT) + 1) << OO_OS_STATUS_SEQ_SHIFT);
+
+    /* This ci_cas32u_fail() does following:
+     * - bump sequence number;
+     * - remove some of our bits_handled.
+     * - Possibly remove some other bits, which were not handled by us.
+     *   However, if the event is not reported by f_op->poll() any more,
+     *   someone should have handled it.  The handler will call this
+     *   function, and (tmp & bits_handled) will be 0.  Nothing bad.
+     * - Possibly set some bits.  efab_os_wakeup_event() will be called
+     *   soon, and it will wake up any waiters even if the bit is already
+     *   here (this is important to get EPOLLET work properly).
+     * So, we can do more than removing handled bits, but we do not do any
+     * harm.
+     */
+  } while( ci_cas32u_fail(&s->os_sock_status, tmp, new_os_status) );
+
+  mask = os_sock->f_op->poll(os_sock, NULL);
+  if( oo_os_sock_status_from_mask(mask) & bits_handled & ~new_os_status ) {
+    /* We've raced with efab_os_wakeup_event().  Call it again to wake up
+     * users about the real mask. */
+    efab_os_wakeup_event(ep, mask, 0);
+  }
+}
 
 /* This function is a handler for events on the OS socket.  It is called by
  * Linux function __wake_up after spin_lock_irqsave(), so all this code

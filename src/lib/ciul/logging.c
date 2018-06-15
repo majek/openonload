@@ -36,8 +36,10 @@
 
 #if !defined(__KERNEL__)
 # include <stdio.h>
+# include <stdlib.h>
 #  include <sys/uio.h>
 #  include <sys/types.h>
+#   include <sys/syscall.h>
 #  include <unistd.h>
 #else
 #  include <linux/slab.h>
@@ -52,7 +54,8 @@
 static void __ef_log(const char* msg);
 
 void (*ef_log_fn)(const char* msg) = __ef_log;
-int    ef_log_level                = 0; /*Critical*/
+#define EF_LOG_LEVEL_UNINITIALISED -1
+int    ef_log_level                = EF_LOG_LEVEL_UNINITIALISED;
 int    ef_log_options		   = 0;
 
 /* ****************************************************************************
@@ -71,7 +74,7 @@ static void __ef_log(const char* msg)
   v[1].iov_base = (char*) "\n";
   v[1].iov_len = 1;
 
-  writev(STDERR_FILENO, v, 2);
+  syscall(__NR_writev, STDERR_FILENO, v, 2);
 #endif
 }
 
@@ -189,5 +192,19 @@ void ef_log(const char* fmt, ...)
   ef_vlog(fmt, args);
   va_end(args);
 }
+
+
+#ifndef __KERNEL__
+static void __attribute__((constructor)) ef_log_init(void)
+{
+  if( ef_log_level == EF_LOG_LEVEL_UNINITIALISED ) {
+    const char* s = getenv("EF_VI_LOG_LEVEL");
+    if( s != NULL )
+      ef_log_level = atoi(s);
+    else
+      ef_log_level = 0; /* Critical */
+  }
+}
+#endif
 
 /*! \cidoxg_end */

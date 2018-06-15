@@ -54,7 +54,6 @@ struct oo_file_ref {
    typedef struct file * ci_os_file;
 
 
-
 #endif
 
 

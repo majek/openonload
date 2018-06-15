@@ -123,7 +123,8 @@ oo_fd_replace_file(struct file* old_filp, struct file* new_filp,
   rcu_read_unlock();
   task_unlock(current);
 
-  synchronize_rcu();
+  /* No synchronize_rcu() is needed here.  See do_dup2() for an example,
+   * and file_free() for the reason. */
   fput(old_filp);
 
   *new_fd_p = old_fd;
@@ -479,8 +480,7 @@ int efab_tcp_helper_os_sock_sendmsg(ci_private_t* priv, void *arg)
 
   rc = sock_sendmsg(sock, &msg);
   /* Clear OS TX flag if necessary  */
-  oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
-                                      sock->file, OO_OS_STATUS_TX);
+  oo_os_sock_status_bit_clear_handled(ep, sock->file, OO_OS_STATUS_TX);
 
  out:
   if( p_iovec != local_iovec && p_iovec != NULL)
@@ -517,8 +517,7 @@ int efab_tcp_helper_os_sock_sendmsg_raw(ci_private_t* priv, void *arg)
   /* Clear OS TX flag if necessary  */
   sock = get_linux_socket(ep);
   if( sock != NULL ) {
-    oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
-                                        sock->file, OO_OS_STATUS_TX);
+    oo_os_sock_status_bit_clear_handled(ep, sock->file, OO_OS_STATUS_TX);
     put_linux_socket(sock);
   }
   efab_linux_sys_close(fd);
@@ -610,8 +609,7 @@ int efab_tcp_helper_os_sock_recvmsg(ci_private_t* priv, void *arg)
     op->flags |= MSG_DONTWAIT;
   rc = sock_recvmsg(sock, &msg, op->flags);
   /* Clear OS RX flag if we've got everything  */
-  oo_os_sock_status_bit_clear_handled(
-            SP_TO_SOCK(&ep->thr->netif, ep->id), sock->file,
+  oo_os_sock_status_bit_clear_handled(ep, sock->file,
             OO_OS_STATUS_RX | (op->msg_controllen ? OO_OS_STATUS_ERR : 0));
   if( rc < 0 )
     goto out;
@@ -661,6 +659,29 @@ efab_move_addr_to_kernel(void __user *uaddr, int ulen, struct sockaddr *kaddr)
 #endif
 
 
+static int __efab_tcp_helper_destroy_os_sock(tcp_helper_endpoint_t* ep)
+{
+  struct oo_file_ref* os_socket;
+  unsigned long lock_flags;
+  citp_waitable *w = SP_TO_WAITABLE(&ep->thr->netif, ep->id);
+
+  ci_atomic32_and(&w->sb_aflags, ~CI_SB_AFLAG_OS_BACKED);
+  spin_lock_irqsave(&ep->lock, lock_flags);
+  os_socket = ep->os_socket;
+  ep->os_socket = NULL;
+  spin_unlock_irqrestore(&ep->lock, lock_flags);
+  if( os_socket != NULL ) {
+    oo_file_ref_drop(os_socket);
+  }
+  return 0;
+}
+
+
+int efab_tcp_helper_destroy_os_sock(ci_private_t *priv)
+{
+  return __efab_tcp_helper_destroy_os_sock(efab_priv_to_ep(priv));
+}
+
 int efab_tcp_helper_create_os_sock(ci_private_t *priv)
 {
   struct socket *sock;
@@ -706,16 +727,7 @@ int efab_tcp_helper_create_os_sock(ci_private_t *priv)
 
   if( rc < 0 ) {
     /* Drop the OS socket to leave this endpoint in a consistent state. */
-    struct oo_file_ref* os_socket;
-    unsigned long lock_flags;
-    ci_atomic32_and(&w->sb_aflags, ~CI_SB_AFLAG_OS_BACKED);
-    spin_lock_irqsave(&ep->lock, lock_flags);
-    os_socket = ep->os_socket;
-    ep->os_socket = NULL;
-    spin_unlock_irqrestore(&ep->lock, lock_flags);
-    if( os_socket != NULL ) {
-      oo_file_ref_drop(os_socket);
-     }
+    efab_tcp_helper_destroy_os_sock(priv);
   }
 
   return rc;
@@ -747,6 +759,61 @@ int efab_tcp_helper_bind_os_sock_common(struct socket* sock,
 }
 
 
+void efab_free_ephemeral_port(struct efab_ephemeral_port_keeper* keeper)
+{
+  if( keeper->os_file )
+    fput(keeper->os_file); /* socket released implicitely */
+  kfree(keeper);
+}
+
+
+int
+efab_alloc_ephemeral_port(ci_uint32 laddr_be32,
+                          struct efab_ephemeral_port_keeper** keeper_out)
+{
+  struct efab_ephemeral_port_keeper* keeper;
+  struct sockaddr_in addr = {
+    .sin_family      = AF_INET,
+    .sin_addr.s_addr = laddr_be32,
+  };
+  int rc;
+
+  keeper = kmalloc(sizeof(*keeper), GFP_KERNEL);
+  keeper->laddr_be32 = laddr_be32;
+  keeper->next = NULL;
+
+  rc = sock_create(AF_INET, SOCK_STREAM, 0, &keeper->sock);
+  if( rc != 0 ) {
+    LOG_TC(ci_log("%s: Failed to create socket: rc=%d", __FUNCTION__, rc));
+    goto fail1;
+  }
+  rc = efab_tcp_helper_bind_os_sock_common(keeper->sock,
+                                             (struct sockaddr*) &addr,
+                                             sizeof(addr), &keeper->port_be16);
+  if( rc != 0 ) {
+    LOG_TC(ci_log("%s: Failed to bind socket: rc=%d", __FUNCTION__, rc));
+    goto fail2;
+  }
+
+  keeper->os_file = sock_alloc_file(keeper->sock, 0, NULL);
+  if( IS_ERR(keeper->os_file) ) {
+    rc = PTR_ERR(keeper->os_file);
+    LOG_TC(ci_log("%s: Failed to allocate file: rc=%d", __FUNCTION__, rc));
+    goto fail2;
+  }
+
+  *keeper_out = keeper;
+  return 0;
+
+ fail2:
+  sock_release(keeper->sock);
+ fail1:
+  kfree(keeper);
+  return rc;
+}
+
+
+
 /* This function handles the OS socket bind when done from the kernel.  In
  * this case we are already expected to have an OS socket.
  */
@@ -758,8 +825,11 @@ extern int efab_tcp_helper_bind_os_sock_kernel(tcp_helper_resource_t *trs,
   int rc;
   tcp_helper_endpoint_t *ep;
   struct socket *sock;
+  struct sockaddr_storage orig_addr;
 
   ci_assert(trs);
+
+  memcpy(&orig_addr, addr, addrlen);
 
   ep = ci_trs_get_valid_ep(trs, sock_id);
   if( ep == NULL )
@@ -940,7 +1010,7 @@ efab_tcp_helper_os_sock_accept(ci_private_t* priv, void *arg)
   rc = kernel_accept(sock, &newsock, op->flags | O_NONBLOCK);
 
   /* Clear OS RX flag if we've got everything  */
-  oo_os_sock_status_bit_clear_handled(s, sock->file, OO_OS_STATUS_RX);
+  oo_os_sock_status_bit_clear_handled(ep, sock->file, OO_OS_STATUS_RX);
   put_linux_socket(sock);
 
   if( rc != 0 )

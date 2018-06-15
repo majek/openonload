@@ -60,6 +60,9 @@
     __attribute__((unused))
 #endif
 
+/* verifies compile time expression is 0 or positive - no-op for runtime expressions */
+#define CI_BUILD_ASSERT_CONSTANT_NON_NEGATIVE(c) \
+  do {(void) sizeof(struct { int x[(int)(c)]; });} while(0)
 
 #ifdef _PREFAST_
 

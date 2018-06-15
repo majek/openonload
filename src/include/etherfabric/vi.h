@@ -166,11 +166,10 @@ extern int ef_vi_free(ef_vi* vi, ef_driver_handle nic);
 ** \return -EALREADY A set of TX alternatives has already been allocated
 **                   for use with this VI.
 **
-** \return -ENOMEM   Insufficient memory was available (either host memory
-**                   or packet buffers on the adapter).
-**
-** \return -EBUSY    Too many alternatives requested, or alternatives
-**                   requested on too many distinct VIs.
+** \return -EBUSY   Insufficient memory was available (either host memory
+**                  or packet buffers on the adapter); or
+**                  too many alternatives requested, or alternatives
+**                  requested on too many distinct VIs.
 **
 ** Allocate a set of TX alternatives for use with a virtual interface. The
 ** virtual interface must have been allocated with the EF_VI_TX_ALT flag.

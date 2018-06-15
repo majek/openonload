@@ -337,14 +337,26 @@ void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction)
 }
 
 
+void ef_vi_set_ts_format(struct ef_vi* vi, enum ef_timestamp_format ts_format)
+{
+  vi->ts_format = ts_format;
+}
+
+
 void ef_vi_init_tx_timestamping(struct ef_vi* vi, int tx_ts_correction)
 {
+  /* Driver gives TX correction in ns for hunti and medford, and ticks for
+   * medford2 and later.
+   */
+  if( vi->nic_type.variant >= 'C' )
+    tx_ts_correction /= 4;  /* convert to ns */
+
   /* Bottom two bits of the nsec field contain the sync flags, and we
    * don't want to affect those when we add in the correction, so
    * ensure those bits are zero 
    */
-  vi->tx_ts_correction_ns = tx_ts_correction &=~ 
-    EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK;
+  vi->tx_ts_correction_ns =
+    tx_ts_correction &~ EF_EVENT_TX_WITH_TIMESTAMP_SYNC_MASK;
   vi->inited |= EF_VI_INITED_TX_TIMESTAMPING;
 }
 

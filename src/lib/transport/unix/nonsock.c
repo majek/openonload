@@ -191,12 +191,14 @@ int citp_nonsock_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
 
 
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
 int citp_nonsock_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
                               struct timespec* first_out, int* bytes_out)
 {
   Log_V(log(LPF "ordered_data(%d)", fdi->fd));
   return -EOPNOTSUPP;
 }
+#endif
 #endif
 
 int citp_nonsock_is_spinning(citp_fdinfo* fdi)

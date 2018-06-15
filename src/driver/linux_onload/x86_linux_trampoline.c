@@ -188,6 +188,9 @@
  */
 static void **syscall_table = 0;
 
+/* The address of the syscall entry point. */
+static void *oo_entry_SYSCALL_64_addr = NULL;
+
 #ifdef CONFIG_COMPAT
 
 /* The address of the 32-bit compatibility system call table.
@@ -278,26 +281,24 @@ static void* oo_entry_sys_call_table(void)
 
   if( res != NULL )
     return res;
+#ifdef ERFM_HAVE_NEW_KALLSYMS
   /* It works with CONFIG_KALLSYMS_ALL=y only. */
   res = efrm_find_ksym("sys_call_table");
+#endif
   return res;
 }
 
 static void* oo_entry_SYSCALL_64(void)
 {
-  static void* res = NULL;
   unsigned long result = 0;
 
-  if( res != NULL )
-    return res;
-  res = efrm_find_ksym("entry_SYSCALL_64");
-  if( res != NULL )
-    return res;
+  if( oo_entry_SYSCALL_64_addr != NULL )
+    return oo_entry_SYSCALL_64_addr;
 
   /* linux<4.2 does not define entry_SYSCALL_64().  It uses system_call(). */
   rdmsrl(MSR_LSTAR, result);
-  res = (void*)result;
-  return res;
+  oo_entry_SYSCALL_64_addr = (void*)result;
+  return oo_entry_SYSCALL_64_addr;
 }
 
 static void **find_syscall_table(void)
@@ -401,21 +402,6 @@ static void **find_ia32_syscall_table(void)
   return NULL;
 }
 #endif
-
-#elif defined(__ia64__)
-
-/* tramplines not used on ia64 */
-
-asmlinkage int efab_linux_trampoline_close(__attribute__((unused)) int unused)
-{
-  TRAMP_DEBUG ("ia64 efab_linux_trampoline_close() called");
-  return 0;
-}
-
-static void **find_syscall_table(void)
-{
-  return NULL;
-}
 
 #else
 #error "Don't know how to find syscall table on this platform"
@@ -1461,8 +1447,12 @@ int efab_linux_trampoline_ctor(int no_sct)
   } else {
     /* syscall_table wasn't found, so we may have no way to sys_close()... */
     OO_DEBUG_ERR(ci_log("ERROR: syscall table not found"));
-    return 0;
+    return -ENOEXEC;
   }
+
+#ifdef ERFM_HAVE_NEW_KALLSYMS
+  oo_entry_SYSCALL_64_addr = efrm_find_ksym("entry_SYSCALL_64");
+#endif
 
 #ifdef CONFIG_COMPAT
 

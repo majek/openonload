@@ -28,6 +28,8 @@ size_t cp_init_mibs(void* romem, struct cp_mibs* mibs)
   ptr += sizeof(cp_version_t);
   mibs->dump_version = (void*)ptr;
   ptr += sizeof(cp_version_t);
+  mibs->idle_version = (void*)ptr;
+  ptr += sizeof(cp_version_t);
   mibs->oof_version = (void*)ptr;
   ptr += sizeof(cp_version_t);
   mibs->fwd = (void*)ptr;
@@ -122,4 +124,37 @@ cp_fwd_find_match(struct cp_mibs* mib, struct cp_fwd_key* key)
   }
 
   return CICP_ROWID_BAD;
+}
+
+
+int cp_get_acceleratable_llap_count(struct cp_mibs* mib)
+{
+  int count = 0;
+  int rowid;
+
+  for( rowid = 0; rowid < mib->dim->llap_max; ++rowid ) {
+    if( cicp_llap_row_is_free(&mib->llap[rowid]) )
+      break;
+    if( mib->llap[rowid].rx_hwports != 0 )
+      ++count;
+  }
+
+  return count;
+}
+
+
+int cp_get_acceleratable_ifindices(struct cp_mibs* mib, ci_ifid_t* ifindices,
+                                   int max_count)
+{
+  int count = 0;
+  int rowid;
+
+  for( rowid = 0; rowid < mib->dim->llap_max && count < max_count; ++rowid ) {
+    if( cicp_llap_row_is_free(&mib->llap[rowid]) )
+      break;
+    if( mib->llap[rowid].rx_hwports != 0 )
+      ifindices[count++] = mib->llap[rowid].ifindex;
+  }
+
+  return count;
 }

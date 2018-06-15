@@ -37,7 +37,7 @@
 #include <zf/zf_reactor.h>
 #include <zf/types.h>
 #include <zf/zf_alts.h>
-
+#include <zf/zf_ds.h>
 
 #undef __IN_ZF_TOP_H__
 #endif  /* __ZF_TOP_H__ */

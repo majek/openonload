@@ -457,20 +457,20 @@ CI_CFG_OPT("EF_TCP_SNDBUF_MODE", tcp_sndbuf_mode, ci_uint32,
            "the send queue only."
            "When this option is set to 2, the SNDBUF size is automatically "
            "adjusted for each TCP socket to match the window advertised by "
-           "the peer (limited by EF_TCP_SOCKBUF_MAX_FRACTION). If the"
-           "application sets SO_SNDBUF explictly then automatic adjustment is"
-           "not used for that socket. The limit is applied to the size of the"
-           "send queue and retransmit queue combined. You may also want to set"
+           "the peer (limited by EF_TCP_SOCKBUF_MAX_FRACTION). If the "
+           "application sets SO_SNDBUF explictly then automatic adjustment is "
+           "not used for that socket. The limit is applied to the size of the "
+           "send queue and retransmit queue combined. You may also want to set "
            "EF_TCP_RCVBUF_MODE to give automatic adjustment of RCVBUF.",
            2, , 1, 0, 2, oneof:no;yes;auto)
 
 CI_CFG_OPT("EF_TCP_SOCKBUF_MAX_FRACTION", tcp_sockbuf_max_fraction, ci_uint32,
-           "This option controls the maximum fraction of the TX buffers"
-           "that may be allocated to a single socket with EF_TCP_SNDBUF_MODE=2."
-           "It also controls the maximum fraction of the RX buffers that may"
-           "be allocated to a single socket with EF_TCP_RCVBUF_MODE=1."
-           "The maximum allocation for a socket is EF_MAX_TX_PACKETS/(2^N)"
-           "for TX and EF_MAX_RX_PACKETS/(2^N) for RX, where N is specified"
+           "This option controls the maximum fraction of the TX buffers "
+           "that may be allocated to a single socket with EF_TCP_SNDBUF_MODE=2.  "
+           "It also controls the maximum fraction of the RX buffers that may "
+           "be allocated to a single socket with EF_TCP_RCVBUF_MODE=1.  "
+           "The maximum allocation for a socket is EF_MAX_TX_PACKETS/(2^N) "
+           "for TX and EF_MAX_RX_PACKETS/(2^N) for RX, where N is specified "
            "here.",
            4, , 1, 1, 10, count)
 
@@ -654,7 +654,7 @@ CI_CFG_OPT("EF_PIO", pio, ci_uint32,
 "Mode 1 will fall back to DMA if PIO is not currently available.\n"
 "Mode 2 will fail to create the stack if the hardware supports PIO but "
 "PIO is not currently available.  On hardware that does not support PIO "
-"there is no difference between mode 1 and mode 2\n"
+"there is no difference between mode 1 and mode 2.\n"
 "In all cases, PIO will only be used for small packets (see EF_PIO_THRESHOLD) "
 "and if the VI's transmit queue is currently empty.  If these conditions are "
 "not met DMA will be used, even in mode 2.\n"
@@ -665,21 +665,43 @@ CI_CFG_OPT("EF_PIO", pio, ci_uint32,
            2, , 1, 0, 2, oneof:no;try;always)
 #endif
 
-CI_CFG_OPT("EF_SYNC_CPLANE_AT_CREATE", sync_cplane, ci_uint32,
-"When this option is set to 2 Onload will force a sync of control plane "
-"information from the kernel when a stack is created.  This can help to "
-"ensure up to date information is used where a stack is created immediately "
-"following interface configuration."
-"\n"
-"If this option is set to 1 then Onload will only force a sync for the first "
-"stack created.  This can be used if stack creation time for later stacks "
-"is time critical."
-"\n"
-"Setting this option to 0 will disable forced sync.  Synchronising data from "
-"the kernel will continue to happen periodically."
-"\n"
-"Sync operation time is limited by cplane_init_timeout onload module option.",
-           2, , 2, 0, 2, oneof:never;first;always)
+#if CI_CFG_CTPIO
+CI_CFG_OPT("EF_CTPIO", ctpio, ci_uint32,
+"Controls whether the CTPIO low-latency transmit mechanism is enabled:\n"
+"  0 - no (use DMA and/or PIO);\n"
+"  1 - enable CTPIO if available (default);\n"
+"  2 - enable CTPIO and fail stack creation if not available.\n"
+"Mode 1 will fall back to DMA or PIO if CTPIO is not currently available.  "
+"Mode 2 will fail to create the stack if the hardware supports CTPIO but "
+"CTPIO is not currently available.  On hardware that does not support CTPIO "
+"there is no difference between mode 1 and mode 2.\n"
+"In all cases, CTPIO is only be used for packets if length <= "
+"EF_CTPIO_MAX_FRAME_LEN and when the VI's transmit queue is empty.  If these "
+"conditions are not met DMA or PIO is used, even in mode 2.\n"
+"Note: CTPIO is currently only available on x86_64 systems.\n"
+"Note: Mode 2 will not prevent a stack from operating without CTPIO in the\n"
+"      event that CTPIO allocation is originally successful but then fails\n"
+"      after an adapter is rebooted or hotplugged while that stack exists.",
+           2, , 1, 0, 2, oneof:no;try;always)
+
+#define EF_CTPIO_MODE_SF 0
+#define EF_CTPIO_MODE_SF_NP 1
+#define EF_CTPIO_MODE_CT 2
+CI_CFG_OPT("EF_CTPIO_MODE", ctpio_mode, ci_uint16,
+"CTPIO transmission mode: \n"
+"  sf    - store and forward - the NIC will buffer the entire packet before\n"
+"          starting to send it on the wire.\n"
+"  sf-np - store and forward, no poison - similar to mode 0 but the NIC will\n"
+"          guarantee never to emit a poisoned frame under any circumstances.\n"
+"          This will force store-and-forward semantics for all users of CTPIO\n"
+"          on the same port.\n"
+"  ct    - cut-through - the NIC will start to send the outgoing packet onto\n"
+"          the wire before it has been fully received, improving latency at\n"
+"          the cost of occasionally transmitting a poisoned frame under some\n"
+"          circumstances (such as the process being descheduled before it\n"
+"          has finished writing the packet to the NIC).\n",
+           2, , EF_CTPIO_MODE_SF_NP, 0, 2, oneof:sf;sf-np;ct)
+#endif
 
 CI_CFG_OPT("EF_TCP_SYN_OPTS", syn_opts, ci_uint32,
 "A bitmask specifying the TCP options to advertise in SYN segments.\n"
@@ -876,14 +898,14 @@ CI_CFG_OPT("EF_SOCKET_CACHE_MAX", sock_cache_max, ci_uint32,
 "set > 0, OpenOnload will cache resources associated with sockets in order "
 "to improve connection set-up and tear-down performance.  This improves "
 "performance for applications that make new TCP connections at a high rate.",
-           , , 0, MIN, MAX, count)
+           , , 0, MIN, SMAX, count)
 
-CI_CFG_OPT("EF_PER_SOCKET_CACHE_MAX", per_sock_cache_max, ci_uint32,
+CI_CFG_OPT("EF_PER_SOCKET_CACHE_MAX", per_sock_cache_max, ci_int32,
 "When socket caching is enabled, (i.e. when EF_SOCKET_CACHE_MAX > 0), this "
 "sets a further limit on the size of the cache for each socket. If set to "
-"zero, no limit is set beyond the global limit specified by "
+"-1, no limit is set beyond the global limit specified by "
 "EF_SOCKET_CACHE_MAX.",
-           , , 0, MIN, MAX, count)
+           , , -1, -1, SMAX, count)
 #endif
 
 CI_CFG_OPT("EF_ACCEPTQ_MIN_BACKLOG", acceptq_min_backlog, ci_uint16,
@@ -1050,6 +1072,12 @@ CI_CFG_OPT("EF_PREFAULT_PACKETS", prefault_packets, ci_int32,
 "reserved.  Set to 0 to prevent prefaulting.",
            , , 1, 0, 1000000000, count)
 
+CI_CFG_OPT("EF_PREALLOC_PACKETS", prealloc_packets, ci_int32,
+"If set ensures all packet buffers (EF_MAX_PACKETS) get allocated during "
+"stack creation or the stack creation fails.  Also when set "
+"EF_MIN_FREE_PACKETS option is not taken into account.",
+           , , 0, 0, 1, yesno)
+
 /* Max is currently 2^21 EPs.
  * We allocate ep in pages, EP_BUF_PER_PAGE=4 ep per page, so min is 4.
  * 7 synrecv states consume one endpoint, but we also use aux buffers for
@@ -1194,6 +1222,17 @@ CI_CFG_OPT("EF_TCP_LOSS_MIN_CWND", loss_min_cwnd, ci_int32,
 "Sets the minimum size of the congestion window for TCP connections following "
 "loss."
 "\n"
+"WARNING: Modifying this option may violate the TCP protocol."
+"\n"
+"Deprecated.  Please use EF_TCP_MIN_CWND instead."
+,
+           ,  , 0, 0, SMAX, count)
+
+CI_CFG_OPT("EF_TCP_MIN_CWND", min_cwnd, ci_int32,
+"Sets the minimum size of the congestion window for TCP connections. "
+"This value is used for any congestion window changes: connection start, "
+"packet loss, connection being idle, etc."
+"\n"
 "WARNING: Modifying this option may violate the TCP protocol.",
            ,  , 0, 0, SMAX, count)
 
@@ -1294,10 +1333,39 @@ CI_CFG_OPT("EF_FREE_PACKETS_LOW_WATERMARK", free_packets_low, ci_uint16,
 
 #if CI_CFG_PIO
 CI_CFG_OPT("EF_PIO_THRESHOLD", pio_thresh, ci_uint16,
-"Sets a threshold for the size of packet that will use PIO, if turned on "
-"using EF_PIO.  Packets up to the threshold will use PIO.  Larger packets "
-"will not.",
+"Sets a threshold for the size of packet that will use PIO (if turned on "
+"using EF_PIO) or CTPIO (if turned on using EF_CTPIO).  Packets up to the "
+"threshold will use PIO or CTPIO.  Larger packets will not.",
            , , 1514, 0, MAX, count)
+#endif
+
+#if CI_CFG_CTPIO
+CI_CFG_OPT("EF_CTPIO_MAX_FRAME_LEN", ctpio_max_frame_len, ci_uint16,
+"Sets the maximum frame length for the CTPIO low-latency transmit mechanism.  "
+"Packets up to this length will use CTPIO, if CTPIO is supported by the "
+"adapter and if CTPIO is enabled (see EF_CTPIO).  Longer packets will use "
+"PIO and/or DMA.  The cost per byte of packet payload varies between host "
+"architectures, as does the effect of packet size on the probability of "
+"poisoning, and so on some hosts it may be beneficial to reduce this value.",
+           , , 0, 0, MAX, count)
+#endif
+
+#if CI_CFG_CTPIO
+CI_CFG_OPT("EF_CTPIO_CT_THRESH", ctpio_ct_thresh, ci_uint16,
+"Experimental: Sets the cut-through threshold for CTPIO transmits, when "
+"EF_CTPIO_MODE=ct.  This option is for test purposes only and is likely to be "
+"changed or removed in a future release.",
+           , , 64, 0, MAX, count)
+#endif
+
+#if CI_CFG_CTPIO
+CI_CFG_OPT("EF_CTPIO_SWITCH_BYPASS", ctpio_switch_bypass, ci_uint32,
+"Allows CTPIO to be enabled on interfaces using the adapter's internal "
+"switch.  This switching functionality is used to implement hardware "
+"multicast loopback and hardware loopback between interfaces, as used by "
+"virtual machines.  CTPIO bypasses the switch, and hence is not compatible "
+"with those features.",
+           1, , 0, 0, 1, yesno)
 #endif
 
 CI_CFG_OPT("EF_TX_PUSH_THRESHOLD", tx_push_thresh, ci_uint16,
@@ -1354,13 +1422,34 @@ CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS", tcp_shared_local_ports, ci_uint32,
 "remote IP:port.",
            , , 0, 0, MAX, count)
 
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST",
+           tcp_shared_local_ports_reuse_fast, ci_uint32,
+"When enabled, this option allows shared local ports (as controlled by the "
+"EF_TCP_SHARED_LOCAL_PORTS option) to be reused immediately when the previous "
+"socket using that port has reached the CLOSED state, even if it did so via "
+"LAST-ACK.",
+           1, , 0, 0, 1, yesno)
+
 CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_MAX", tcp_shared_local_ports_max,
            ci_uint32,
 "This setting sets the maximum size of the pool of local shared ports.  "
 "See EF_TCP_SHARED_LOCAL_PORTS for details.",
            , , 100, 0, MAX, count)
 
-CI_CFG_OPT("EF_SCALABLE_FILTERS", scalable_filter_ifindex, ci_int32,
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK",
+           tcp_shared_local_no_fallback, ci_uint32,
+"When set, connecting TCP sockets will use ports only from the TCP shared "
+"local port pool (unless explicitly bound).  If all shared local ports are in "
+"use, the connect() call will fail.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_OPT("EF_TCP_SHARED_LOCAL_PORTS_PER_IP",
+           tcp_shared_local_ports_per_ip, ci_uint32,
+"When set, ports reserved for the pool of shared local ports will be reserved "
+"per local IP address on demand.",
+           1, , 0, 0, 1, yesno)
+
+CI_CFG_STR_OPT("EF_SCALABLE_FILTERS", scalable_filter_string, ci_string256,
 "Specifies the interface on which to enable support for scalable filters, "
 "and configures the scalable filter mode(s) to use.  Scalable filters "
 "allow Onload to use a single hardware MAC-address filter to avoid "
@@ -1374,41 +1463,114 @@ CI_CFG_OPT("EF_SCALABLE_FILTERS", scalable_filter_ifindex, ci_int32,
 "Depending on the mode selected this option will enable support for:\n"
 " - scalable listening sockets;\n"
 " - IP_TRANSPARENT socket option;\n"
+" - scalable active open;\n"
 "\n"
 "The interface specified must be a SFN7000 or later NIC."
 "\n"
 "Format of EF_SCALABLE_FILTERS variable is as follows:\n"
-"  EF_SCALABLE_FILTERS=<interface-name>[=mode[:mode]]\n"
+"  EF_SCALABLE_FILTERS=[<interface-name>[=mode[:mode]],]<interface-name>[=mode[:mode]]\n"
 "      where mode is one of: transparent_active,passive,rss\n"
 "The following modes and their combinations can be specified:\n"
-"  transparent_active, passive, rss:transparent_active, "
-"transparent_active:passive",
-           ,  , 0, 0, SMAX, count)
+"  transparent_active, rss:transparent_active, passive,"
+" rss:passive, transparent_active:passive, active, rss:active, rss:passive:active.\n "
+"It is possible to specify both an active mode interface and a passive mode "
+"interface.  If two interfaces are specfied then both the active and passive "
+"interfaces must have the same rss qualifier. ",
+               ,  , "", none, none, )
 
 #define CITP_SCALABLE_MODE_NONE              0x0
 #define CITP_SCALABLE_MODE_RSS               0x1
 #define CITP_SCALABLE_MODE_TPROXY_ACTIVE     0x2
 #define CITP_SCALABLE_MODE_PASSIVE           0x4
+#define CITP_SCALABLE_MODE_ACTIVE            0x8
 
 #define CITP_SCALABLE_MODE_TPROXY_ACTIVE_RSS (CITP_SCALABLE_MODE_TPROXY_ACTIVE | \
                                               CITP_SCALABLE_MODE_RSS)
+#define CITP_SCALABLE_MODE_ACTIVE_RSS (CITP_SCALABLE_MODE_ACTIVE | \
+                                       CITP_SCALABLE_MODE_RSS)
+#define CITP_SCALABLE_MODE_PASSIVE_RSS (CITP_SCALABLE_MODE_PASSIVE | \
+                                       CITP_SCALABLE_MODE_RSS)
+
+#define CITP_SCALABLE_MODE_PASSIVE_ACTIVE_RSS (CITP_SCALABLE_MODE_ACTIVE | \
+                                       CITP_SCALABLE_MODE_PASSIVE | \
+                                       CITP_SCALABLE_MODE_RSS)
+
+/* Use scalable filters on all interfaces if scalable ifindex is set to this
+ * magic value. */
+#define CITP_SCALABLE_FILTERS_ALL   -1
+#define CITP_SCALABLE_FILTERS_MIN   CITP_SCALABLE_FILTERS_ALL
+
+CI_CFG_OPT("EF_SCALABLE_FILTERS_IFINDEX_ACTIVE", scalable_filter_ifindex_active,
+           /* N.B. This must be signed to allow CITP_SCALABLE_FILTERS_ALL. */
+           ci_int32,
+           "Stores active scalable filter interface set with EF_SCALABLE_FILTERS.  "
+           "To be set indirectly with EF_SCALABLE_FILTERS variable",
+           , , 0, CITP_SCALABLE_FILTERS_MIN, SMAX, count)
+
+CI_CFG_OPT("EF_SCALABLE_FILTERS_IFINDEX_PASSIVE", scalable_filter_ifindex_passive,
+           /* N.B. This must be signed to allow CITP_SCALABLE_FILTERS_ALL. */
+           ci_int32,
+           "Stores passive scalable filter interface set with EF_SCALABLE_FILTERS.  "
+           "To be set indirectly with EF_SCALABLE_FILTERS variable",
+           , , 0, CITP_SCALABLE_FILTERS_MIN, SMAX, count)
 
 CI_CFG_OPT("EF_SCALABLE_FILTERS_MODE", scalable_filter_mode, ci_int32,
            "Stores scalable filter mode set with EF_SCALABLE_FILTERS.  "
            "To be set indirectly with EF_SCALABLE_FILTERS variable",
-           ,  , -1, -1, 6, oneof:
+           ,  , -1, -1, 13, oneof:
            auto;
+/* Note: the enumerated values need to match flags above */
            none;reserved1;transparent_active;rss_transparent_active;
-           passive;reserved5;passive_tproxy_active;
+           passive;rss_passive;passive_tproxy_active;reserved7;
+           active;rss_active;reserved10;reserved11;
+           passive_active;rss_passive_active;
            )
+
+CI_CFG_OPT("EF_PERIODIC_TIMER_CPU", periodic_timer_cpu, ci_int32,
+           "Affinitises Onload's periodic tasks to the specified CPU core. "
+           "To ensure that Onload internal tasks such as polling timers are "
+           "correctly serviced, the user should select a CPU that is receiving "
+           "periodic timer ticks."
+           , , , -1, -1, SMAX, count)
 
 #define CITP_SCALABLE_FILTERS_DISABLE 0
 #define CITP_SCALABLE_FILTERS_ENABLE  1
+#define CITP_SCALABLE_FILTERS_ENABLE_WORKER  2
 CI_CFG_OPT("EF_SCALABLE_FILTERS_ENABLE", scalable_filter_enable, ci_int32,
-"Turn the scalable filter feature on or off on a stack.  If this is set to 1 "
-"then the configuration selected in EF_SCALABLE_FILTERS will be used.  If this "
-"is set to 0 then scalable filters will not be used for this stack.  If unset "
-"this will default to 1 if EF_SCALABLE_FILTERS is configured.",
+"Turn the scalable filter feature on or off on a stack.  Takes one of the "
+"following values:\n"
+" 0 - Scalable filters are not used for this stack.\n"
+" 1 - The configuration selected in EF_SCALABLE_FILTERS will be used.\n"
+" 2 - Indicates a special mode to address a master-worker hierarchy of some "
+"event driven applications.  The scalable filter get created for reuseport "
+"bound sockets in the master process context.  However, active mode will become"
+" available in worker processes once they add one of the sockets "
+"to their epoll set.  Applies to rss:*active scalable mode.  This mode is not "
+"compatible with use of the onload extensions stackname API.\n"
+"If unset this will default to 1 if EF_SCALABLE_FILTERS is configured.",
+           , , 0, 0, 2, yesno)
+
+#define CITP_SCALABLE_LISTEN_BOUND 0
+#define CITP_SCALABLE_LISTEN_ACCELERATED_ONLY 1
+CI_CFG_OPT("EF_SCALABLE_LISTEN_MODE", scalable_listen, ci_uint32,
+"Choose behaviour of scalable listening sockets when using EF_SCALABLE_INTERFACE:\n"
+"  0  -  Listening sockets bound to a local address configured on the scalable"
+"        interface use the scalable filter(default).  Connections on other interfaces"
+"        are not accelerated.\n"
+"  1  -  Listening sockets bound to a local address configured on the scalable"
+"        interface use the scalable filter.  Connections on other interfaces"
+"        including loopback are refused.  This mode avoids kernel scalability"
+"        issue with large numbers of listen sockets.\n",
+         , , 0, 0, 1, oneof:bound;accelerated_only;)
+
+CI_CFG_OPT("EF_SCALABLE_ACTIVE_WILDS_NEED_FILTER",
+           scalable_active_wilds_need_filter, ci_uint32,
+"When set to 1, IP filter is installed for every cached active-opened socket "
+"(see EF_TCP_SHARED_LOCAL_PORTS).  Otherwise it is assumed that scalable "
+"filters do the job."
+"\n"
+"Default: 1 if EF_SCALABLE_FILTERS_ENABLE=1 and scalable mode in "
+"EF_SCALABLE_FILTERS_MODE is \"active\"; 0 otherwise.",
            , , 0, 0, 1, yesno)
 
 CI_CFG_STR_OPT("EF_INTERFACE_WHITELIST", iface_whitelist, ci_string256,
@@ -1430,6 +1592,20 @@ CI_CFG_STR_OPT("EF_INTERFACE_BLACKLIST", iface_blacklist, ci_string256,
                "Note: blacklist takes priority over whitelist.  That is when "
                "interface is present on both lists it will not be accelerated." ,
                ,  , "", none, none, )
+
+CI_CFG_OPT("EF_KERNEL_PACKETS_BATCH_SIZE", kernel_packets_batch_size, ci_uint32,
+"In some cases (for example, when using scalable filters), packets that "
+"should be delivered to the kernel stack are "
+"instead delivered to Onload.  Onload will forward these packets to the "
+"kernel, and may do so in batches of size up to the value of this option.",
+           , , 1, 0, 64/* 64 in NAPI weight*/, count)
+
+CI_CFG_OPT("EF_KERNEL_PACKETS_TIMER_USEC", kernel_packets_timer_usec,
+           ci_uint32,
+"Controls the maximum time for which Onload will queue up a packet that was "
+"received by Onload but should be forwarded to the kernel.",
+           , , 500, MIN, MAX, count)
+
 
 #ifdef CI_CFG_OPTGROUP
 /* define some categories - currently more as an example than as the final

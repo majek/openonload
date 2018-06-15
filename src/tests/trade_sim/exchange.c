@@ -13,67 +13,26 @@
 ** GNU General Public License for more details.
 */
 
-/*
-** Copyright 2005-2018  Solarflare Communications Inc.
-**                      7505 Irvine Center Drive, Irvine, CA 92618, USA
-** Copyright 2002-2005  Level 5 Networks Inc.
-**
-** Redistribution and use in source and binary forms, with or without
-** modification, are permitted provided that the following conditions are
-** met:
-**
-** * Redistributions of source code must retain the above copyright notice,
-**   this list of conditions and the following disclaimer.
-**
-** * Redistributions in binary form must reproduce the above copyright
-**   notice, this list of conditions and the following disclaimer in the
-**   documentation and/or other materials provided with the distribution.
-**
-** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
-** IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
-** TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
-** PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-** HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-** SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
-** TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-** PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-** LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-** NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-** SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
-
-
-/* efdelegated_server
+/* exchange.c
  *
  * Copyright 2015 Solarflare Communications Inc.
  * Author: David Riddoch
  *
- * This sample application is used together with efdelegated_client to
- * measure the performance of OpenOnload's "Delegated Sends" feature.
- *
- * This application is a very basic simulation of an exchange: It accepts a
- * TCP connection from a client.  It sends UDP multicast messages, and
- * expects that the client will send a message over the TCP connection in
- * response to a subset of the UDP messages.  It measures the time taken
- * from sending a UDP message to receiving the corresponding reply.
- *
- * When used with OpenOnload this application uses hardware timestamps
- * taken on the adapter so that the latency measured is very accurate.
- * (Note that for 7000-series adapters this requires a Performance Monitor
- * license).
+ * Please see README for details.
  */
 
 #include "utils.h"
 
 #include <onload/extensions.h>
-#include <stdarg.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <time.h>
 #include <net/if.h>
+#include <stdarg.h>
 
 
 /* We use a special message to trigger the client to send a message on the
@@ -424,11 +383,11 @@ static void init(struct server_state* ss, const char* mcast_intf)
 static void usage_msg(FILE* f)
 {
   fprintf(f, "\nusage:\n");
-  fprintf(f, "  efdelegated_server [options] <mcast-interface>\n");
+  fprintf(f, "  exchange [options] <mcast-interface>\n");
   fprintf(f, "\noptions:\n");
   fprintf(f, "  -h                - print usage info\n");
   fprintf(f, "  -r <send-rate>    - set UDP message send rate\n");
-  fprintf(f, "  -n <n>            - measure RTT for 1-in-n sends\n");
+  fprintf(f, "  -n <n>            - measure latency for 1-in-n sends\n");
   fprintf(f, "  -i <num-iter>     - number of samples to measure\n");
   fprintf(f, "  -n <num-warmups>  - number of warmup samples\n");
   fprintf(f, "  -s                - use software timestamps\n");

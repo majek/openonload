@@ -134,7 +134,7 @@ endif # !EFX_NO_KCOMPAT
 ifndef EFX_UPSTREAM
 ifeq ($(filter export export-xen,$(MAKECMDGOALS)),)
 ifndef EFX_FOR_UPSTREAM
-sfc-y			+= driverlink.o linux_mdio.o
+sfc-y			+= driverlink.o linux_mdio.o sfctool.o
 sfc-$(CONFIG_SFC_AOE)	+= aoe.o
 sfc-$(CONFIG_SFC_DEBUGFS) += debugfs.o
 endif # !EFX_FOR_UPSTREAM

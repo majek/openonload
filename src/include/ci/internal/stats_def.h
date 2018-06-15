@@ -329,12 +329,39 @@ OO_STAT("Number of RSTs sent due to remote side sending a sequence number "
         "far too far away from normal for us to accept.  (i.e. it's not just "
         "some lost packets).",
         ci_uint32, rst_sent_bad_seq, count)
-OO_STAT("We got a packet; but don't have a socket to match.  So we sent a "
-        "RST.  This can happen if the socket was closed recently, but "
-        "otherwise the packet shouldn't have made it through to Onload.  "
-        "If it did not, and went to the kernel; the kernel would also send "
-        "a RST.",
+OO_STAT("We got a packet, but we didn't have a socket to match and decided not "
+        "to forward it to the kernel, so we replied with a RST.",
         ci_uint32, rst_sent_no_match, count)
+OO_STAT("Number of times that we forwarded a batch of packets to the kernel.",
+        ci_uint32, no_match_pass_to_kernel_batches, count)
+OO_STAT("We got a TCP packet, but we didn't have a socket to match, so we "
+        "decided to forward it to the kernel.",
+        ci_uint32, no_match_pass_to_kernel_tcp, count)
+OO_STAT("We got a UDP packet, but we didn't have a socket to match, so we "
+        "decided to forward it to the kernel.",
+        ci_uint32, no_match_pass_to_kernel_udp, count)
+OO_STAT("We got a non-TCP-non-UDP IP packet, so we decided to forward it to "
+        "the kernel.",
+        ci_uint32, no_match_pass_to_kernel_ip_other, count)
+OO_STAT("We got a non-IP packet, so we decided to forward it to the kernel.",
+        ci_uint32, no_match_pass_to_kernel_non_ip, count)
+OO_STAT("We got a packet, but we didn't have a socket to match, and we didn't "
+        "forward it to the kernel because it didn't come via the network.",
+        ci_uint32, no_match_bad_intf_i, count)
+OO_STAT("We got a packet, but we didn't have a socket to match, and we didn't "
+        "forward it to the kernel because we couldn't find the net device.",
+        ci_uint32, no_match_bad_netdev, count)
+OO_STAT("We got a packet, but we didn't have a socket to match, and we didn't "
+        "forward it to the kernel because we couldn't allocate memory.",
+        ci_uint32, no_match_oom, count)
+OO_STAT("We got a packet, but we didn't have a socket to match, and it looks "
+        "corrupted, so we do not forward it to the kernel",
+        ci_uint32, no_match_corrupted, count)
+OO_STAT("We got a packet, but we didn't have a socket to match, and we do "
+        "not not have permission to forward it to the kernel (see "
+        "inject_kernel_gid onload module parameter).",
+        ci_uint32, no_match_dropped, count)
+
 
 OO_STAT("Number of unacceptable (out of range) ACKs received.",
         ci_uint32, unacceptable_acks, count)
@@ -373,6 +400,10 @@ OO_STAT("Number of times accept() was accelerated.",
         ci_uint32, ul_accepts, count)
 OO_STAT("Number of times accept() returned EAGAIN.",
         ci_uint32, accept_eagain, count)
+OO_STAT("Number of failed aux-buffer allocations.",
+        ci_uint32, aux_alloc_fails, count)
+OO_STAT("Number of failed bucket-aux-buffer allocations.",
+        ci_uint32, aux_bucket_alloc_fails, count)
 OO_STAT("Times that accept() was called, but as a result of the "
         "TCP_DEFER_ACCEPT socket option (on the listening socket), we do not "
         "promote a half-opened connection from listen to accept queue until "
@@ -402,6 +433,8 @@ OO_STAT("Number of EF_EVENT_TYPE_TX_ERROR events.  A transmit failed.",
         ci_uint32, tx_error_events, count)
 OO_STAT("Number of RX discards (checksum bad).",
         ci_uint32, rx_discard_csum_bad, count)
+OO_STAT("Number of RX discards (inner checksum bad).",
+        ci_uint32, rx_discard_inner_csum_bad, count)
 OO_STAT("Number of RX discards (multicast mismatch).  On 7000 and newer, "
         "these will usually be discarded by the hardware; but some can get "
         "through if the socket was recently closed.",
@@ -434,6 +467,10 @@ OO_STAT("Deferred work is used to mitigate jitter due to contention.  But "
         "to prevent a thread monopolising the lock completely, there is a "
         "cap - which has been reached.  See EF_DEFER_WORK_LIMIT.",
         ci_uint32, defer_work_limited, count)
+OO_STAT("Deferred work is used to mitigate jitter due to contention.  But "
+        "if 2 threads try to defer work on the same socket, we sometimes "
+        "fail to do the right thing.",
+        ci_uint32, defer_work_contended_unsafe, count)
 OO_STAT("Indicates that you're sending faster than we can push packets on to "
         "the wire; and the TX ring (default size 512, controlled via "
         "EF_TXQ_SIZE) has filled.  So we've has to hold packets in a queue.  "
@@ -509,6 +546,12 @@ OO_STAT("Number of times PIO was not used due to flags",
 OO_STAT("Number of times PIO was not used due to an error",
         ci_uint32, no_pio_err, count)
 #endif
+#if CI_CFG_CTPIO
+OO_STAT("Number of times CTPIO has been used to send a packet",
+        ci_uint32, ctpio_pkts, count)
+OO_STAT("Number of times CTPIO transmits have fallen back to DMA",
+        ci_uint32, ctpio_dma_fallbacks, count)
+#endif
 #if CI_CFG_SENDFILE
 OO_STAT("Number of calls to sendpage() for a connected TCP socket.",
         ci_uint32, tcp_sendpages, count)
@@ -561,6 +604,14 @@ OO_STAT("Number of active sockets not cached owing to stack limit  "
         ci_uint32, active_sockcache_stacklim, count)
 OO_STAT("Number of active sockets not cached as being non-IPv4",
         ci_uint32, active_sockcache_non_ip4, count)
+OO_STAT("Number of times active cached sockets had their fd attached to "
+        "existing file",
+        ci_uint32, active_attach_fd, count)
+OO_STAT("Number of times active cached sockets had their fd already present",
+        ci_uint32, active_attach_fd_reuse, count)
+OO_STAT("Number of times active cached sockets couldn't have their fd attached "
+         "to existing file",
+        ci_uint32, active_attach_fd_fail, count)
 OO_STAT("Number of sockets not cached owing to per-socket limit  "
         "See EF_SOCKET_CACHE_MAX",
         ci_uint32, sockcache_socklim, count)
@@ -579,6 +630,20 @@ OO_STAT("Number of active-cache hits",
         ci_uint32, activecache_hit, count)
 OO_STAT("Number of active-cache hits after reaping",
         ci_uint32, activecache_hit_reap, count)
+OO_STAT("Number of times that cached endpoint had its fd forcecully detached.",
+        ci_uint32, sock_attach_fd_detach, count)
+OO_STAT("Number of times fd detach failed legitimately. ",
+        ci_uint32, sock_attach_fd_detach_fail_soft, count)
+OO_STAT("Number of times fd detach failed unexpectedly. ",
+        ci_uint32, sock_attach_fd_detach_fail_hard, count)
+OO_STAT("Number of times that cached endpoint had more than one fd attached.",
+        ci_uint32, sock_attach_fd_more, count)
+OO_STAT("Number of times that attaching subsequent fd to endpoint failed. ",
+        ci_uint32, sock_attach_fd_more_fail, count)
+OO_STAT("Number of times fd got uncached. ",
+        ci_uint32, epoll_fd_uncache, count)
+OO_STAT("Number of times attach fd required retry in accept. ",
+        ci_uint32, accept_attach_fd_retry, count)
 #endif
 OO_STAT("Number of times when TCP SO_RCVBUF value was found to be abused "
         "by too small incoming segments",
@@ -616,6 +681,24 @@ OO_STAT("Number of times a TIME_WAIT was reused to use a shared local port",
         ci_uint32, tcp_shared_local_ports_reused_tw, count)
 OO_STAT("Number of times the shared local port pool was grown",
         ci_uint32, tcp_shared_local_ports_grow, count)
+OO_STAT("Number of times an attempt to grow the shared local port pool failed",
+        ci_uint32, tcp_shared_local_ports_grow_failed, count)
 OO_STAT("Number of times no active wild filter was available",
         ci_uint32, tcp_shared_local_ports_exhausted, count)
-
+OO_STAT("Number of times a socket from this stack was added to an epoll set "
+        "with a different home stack.",
+        ci_uint32, epoll_add_non_home, count)
+OO_STAT("Number of times a socket could be added to a epoll set with "
+        "a matching home stack, but epoll state allocation failed.  "
+        "You probably want to increase EF_MAX_ENDPOINTS if this count "
+        "is non-zero.",
+        ci_uint32, epoll_sb_state_alloc_failed, count)
+OO_STAT("Number of times that fd allocation failed for a socket in this stack.",
+        ci_uint32, sock_attach_fd_alloc_fail, count)
+OO_STAT("Number of times that a socket has used a MAC filter.",
+        ci_uint32, mac_filter_shares, count)
+OO_STAT("Number of times that we rejected a shared local port for any reason.",
+        ci_uint32, tcp_shared_local_ports_skipped, count)
+OO_STAT("Number of times that we rejected a shared local port because it "
+        "would have resulted in a duplicate four-tuple.",
+        ci_uint32, tcp_shared_local_ports_skipped_in_use, count)

@@ -52,7 +52,6 @@ struct cicppl_stat {
 
 
 struct cicppl_instance {
-  struct socket *raw_sock;
   struct socket *bindtodev_raw_sock;
   ci_ifid_t bindtodevice_ifindex;
   cicp_bufpool_t *pktpool;

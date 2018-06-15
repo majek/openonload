@@ -29,6 +29,8 @@ struct rtt_endpoint {
   void (*ping)(struct rtt_endpoint*);
   void (*pong)(struct rtt_endpoint*);
   void (*cleanup)(struct rtt_endpoint*);
+  void (*reset_stats)(struct rtt_endpoint*);
+  void (*dump_info)(struct rtt_endpoint*, FILE*);
 };
 
 

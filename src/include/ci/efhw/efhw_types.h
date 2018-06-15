@@ -59,6 +59,7 @@
 #include <ci/efhw/sysdep.h>
 #include <ci/efhw/common.h>
 #include <ci/compat.h>
+#include <etherfabric/ef_vi.h>
 
 /*--------------------------------------------------------------------
  *
@@ -400,6 +401,7 @@ struct pci_dev;
 #define NIC_FLAG_RX_MERGE 0x4000000000LL
 #define NIC_FLAG_TX_ALTERNATIVES 0x8000000000LL
 #define NIC_FLAG_EVQ_V2 0x10000000000LL
+#define NIC_FLAG_TX_CTPIO 0x20000000000LL
 
 
 /*! */
@@ -407,8 +409,10 @@ struct efhw_nic {
 	/*! zero base index in efrm_nic_tablep->nic array */
 	int index;
 	int ifindex;		/*!< OS level nic index */
-	struct pci_dev *pci_dev;	/*!< pci descriptor */
-	spinlock_t pci_dev_lock;        /*!< Protects access to pci_dev. */
+
+	struct net_device *net_dev; /*!< Network device */
+	struct pci_dev *pci_dev;    /*!< pci descriptor */
+	spinlock_t pci_dev_lock;    /*!< Protects access to pci_dev & net_dev */
 
 	struct efhw_device_type devtype;
 
@@ -440,6 +444,8 @@ struct efhw_nic {
 	unsigned               ctr_ap_bytes;
 	/*! DMA address of the control aperture. */
 	dma_addr_t             ctr_ap_dma_addr;
+	/*! Stride between VIs on mem_bar */
+	unsigned vi_stride;
 
 	uint8_t mac_addr[ETH_ALEN];	/*!< mac address  */
 
@@ -485,6 +491,9 @@ struct efhw_nic {
 	/* Corrections for TX and RX timestamps. */
 	int rx_ts_correction;
 	int tx_ts_correction;
+
+        /* PTP timestamp format. */
+        enum ef_timestamp_format ts_format;
 
 	/* Base offset of queues used when dealing with absolute numbers, 
 	 * e.g. wakeup events.  Can change when NIC is reset.

@@ -27,26 +27,27 @@
  * control plane and its clients.  On failure, this function will clean up any
  * partially-initialised state. */
 int
-oo_cp_create(int fd, struct oo_cplane_handle* cp)
+oo_cp_create(int fd, struct oo_cplane_handle* cp, enum cp_sync_mode mode)
 {
   struct cp_mibs* mibs = cp->mib;
   int rc;
   void* mem;
+  ci_uint32 op = mode;
 
   /* Check user-kernel interface version. */
-  rc = ci_sys_ioctl(fd, OO_IOC_CP_CHECK_VERSION, &oo_cplane_api_version);
+  rc = cp_ioctl(fd, OO_IOC_CP_CHECK_VERSION, &oo_cplane_api_version);
   if( rc != 0 )
-    return -errno;
+    return rc;
 
   /* Wait for the control plane server to start if necessary. */
-  rc = ci_sys_ioctl(fd, OO_IOC_CP_WAIT_FOR_SERVER, NULL);
+  rc = cp_ioctl(fd, OO_IOC_CP_WAIT_FOR_SERVER, &op);
   if( rc != 0 )
-    return -errno;
+    return rc;
 
   /* Find out the MIB size */
-  rc = ci_sys_ioctl(fd, OO_IOC_CP_MIB_SIZE, &cp->bytes);
+  rc = cp_ioctl(fd, OO_IOC_CP_MIB_SIZE, &cp->bytes);
   if( rc != 0 )
-    return -errno;
+    return rc;
 
   ci_assert(cp->bytes);
   ci_assert_equal(cp->bytes & (CI_PAGE_SIZE - 1), 0);
@@ -106,10 +107,10 @@ oo_op_route_resolve(struct oo_cplane_handle* cp, struct cp_fwd_key* key)
 {
   int rc;
 
-  rc = ci_sys_ioctl(cp->fd, OO_IOC_CP_FWD_RESOLVE, key);
+  rc = cp_ioctl(cp->fd, OO_IOC_CP_FWD_RESOLVE, key);
   /* Fixme: should we re-start in case of EAGAIN? */
   if( rc < 0 )
-    return -errno;
+    return rc;
   return 0;
 }
 #endif
@@ -167,7 +168,8 @@ oo_cp_get_hwport_properties(struct oo_cplane_handle* cp, ci_hwport_id_t hwport,
                             ci_uint8* out_mib_flags,
                             ci_uint32* out_oo_vi_flags_mask,
                             ci_uint32* out_efhw_flags_extra,
-                            ci_uint8* out_pio_len_shift)
+                            ci_uint8* out_pio_len_shift,
+                            ci_uint32* out_ctpio_start_offset)
 {
   struct cp_mibs* mib;
   cp_version_t version;
@@ -190,6 +192,8 @@ oo_cp_get_hwport_properties(struct oo_cplane_handle* cp, ci_hwport_id_t hwport,
     *out_efhw_flags_extra = mib->hwport[hwport].efhw_flags_extra;
   if( out_pio_len_shift != NULL )
     *out_pio_len_shift = mib->hwport[hwport].pio_len_shift;
+  if( out_ctpio_start_offset != NULL )
+    *out_ctpio_start_offset = mib->hwport[hwport].ctpio_start_offset;
 
  out:
   CP_VERLOCK_STOP(version, mib)
@@ -217,5 +221,41 @@ cicp_hwport_mask_t oo_cp_get_licensed_hwports(struct oo_cplane_handle* cp)
   CP_VERLOCK_STOP(version, mib)
 
   return licensed_hwports;
+}
+
+
+int oo_cp_get_acceleratable_llap_count(struct oo_cplane_handle* cp)
+{
+  struct cp_mibs* mib;
+  cp_version_t version;
+  int llap_count = 0;
+
+  ci_assert(cp);
+
+  CP_VERLOCK_START(version, mib, cp)
+  llap_count = cp_get_acceleratable_llap_count(mib);
+  CP_VERLOCK_STOP(version, mib)
+
+  return llap_count;
+}
+
+
+/* The current use-case for this function is the installation of scalable
+ * filters on all interfaces.  Otherwise, iterating over ifindices is probably
+ * the wrong approach. */
+int oo_cp_get_acceleratable_ifindices(struct oo_cplane_handle* cp,
+                                      ci_ifid_t* ifindices, int max_count)
+{
+  struct cp_mibs* mib;
+  cp_version_t version;
+  int llap_count = 0;
+
+  ci_assert(cp);
+
+  CP_VERLOCK_START(version, mib, cp)
+  llap_count = cp_get_acceleratable_ifindices(mib, ifindices, max_count);
+  CP_VERLOCK_STOP(version, mib)
+
+  return llap_count;
 }
 #endif

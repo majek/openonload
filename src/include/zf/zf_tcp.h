@@ -33,6 +33,7 @@
 struct zftl;
 struct zft;
 struct zft_msg;
+struct timespec;
 
 /*
  * ------------------------------------------------------------------------
@@ -308,6 +309,7 @@ zft_connect(struct zft_handle* handle, const struct sockaddr* raddr,
 ** \return -EAGAIN    Not enough space (either bytes or buffers) in the send
 **                    queue.
 ** \return -ENOMEM    Not enough packet buffers available.
+** \return -EBUSY     Delegated send in progress
 */
 ZF_LIBENTRY ZF_COLD int
 zft_shutdown_tx(struct zft* ts);
@@ -511,6 +513,45 @@ zft_recv(struct zft* ts,
          int flags);
 
 
+/*! \brief Retrieve the UTC timestamp associated with a received packet,
+ **        and the clock sync status flags.
+ **
+ ** \param ts     TCP zocket.
+ ** \param msg    Pointer to the received message for which the RX timestamp
+ **               will be retrieved.
+ ** \param ts_out Pointer to a timespec that is updated on return with the
+ **               UTC timestamp for the packet.
+ ** \param pktind Index of packet within @p msg->iov.
+ ** \param flags  Pointer to an unsigned that is updated on return with the
+ **               sync flags for the packet.
+ **
+ ** \return 0          Success.
+ ** \return -ENOMSG    Synchronisation with adapter has not yet been achieved.
+ **                    This only happens with old firmware.
+ ** \return -ENODATA   Packet does not have a timestamp.
+ **                    On current Solarflare adapters, packets that are
+ **                    switched from TX to RX do not get timestamped.
+ ** \return -EL2NSYNC  Synchronisation with adapter has been lost.
+ **                    This should never happen!
+ **
+ ** \note This function must be called after zf_reactor_perform() returns a value
+ **       greater than zero, and before zf_reactor_perform() is called again.
+ **
+ ** \note If RX timestamps were not enabled during stack initialisation, the
+ **       behaviour of this function is undefined.
+ **
+ ** On success the @p ts_out and @p flags_out fields are updated, and a value of
+ ** zero is returned. The @p flags_out field contains the following flags:
+ ** - EF_VI_SYNC_FLAG_CLOCK_SET is set if the adapter clock has ever been
+ **   set (in sync with system)
+ ** - EF_VI_SYNC_FLAG_CLOCK_IN_SYNC is set if the adapter clock is in sync
+ **   with the external clock (PTP).
+ **
+ */
+ZF_LIBENTRY ZF_HOT int
+zft_pkt_get_timestamp(struct zft* ts, const struct zft_msg* msg,
+                      struct timespec* ts_out, int pktind, unsigned* flags);
+
 /*
  * ------------------------------------------------------------------------
  * TCP TX
@@ -607,8 +648,38 @@ zft_send(struct zft *ts, const struct iovec* iov, int iov_cnt, int flags);
 **  * during stack polling TCP state machine intends to send ACK in
 **    response to incoming data.
 */
-ZF_LIBENTRY ZF_HOT ssize_t
+ZF_LIBENTRY ZF_HOT ZF_NOCLONE ssize_t
 zft_send_single(struct zft *ts, const void* buf, size_t buflen, int flags);
+
+
+/*! \brief Warms code path used by zft_send_single() without sending data.
+**
+** \param ts       The TCP zocket to send on.
+** \param buf      The buffer of data to send.
+** \param buflen   The length of buffer.
+**
+** \return -EAGAIN    Events need to be processed before warming.
+                      Call zf_reactor_perform()
+** \return -EMSGSIZE  Data buffer too long.
+** \return -ENOTCONN  Zocket is not in a valid TCP state for sending.
+**
+** This function can be called repeatedly while the application waits
+** for an input that will trigger a call to zft_send_single().
+** Doing so warms the code path to avoid cache and TLB misses when
+** actually sending data in the subsequent zft_send_single() call.
+** @p buf need not contain the exact data that will eventually
+** be sent.
+**
+** This function only supports warming the code path where the send
+** queue is empty and a PIO send would be performed.  If @p buflen
+** is too large for PIO then -EMSGSIZE will be returned.  If previous
+** sends may still be in progress -EAGAIN will be returned.  In this case,
+** the application can call zf_reactor_perform() and then try again.
+**
+** \see zft_send_single()
+**/
+ZF_LIBENTRY ZF_HOT ssize_t
+zft_send_single_warm(struct zft *ts, const void* buf, size_t buflen);
 
 
 /*! \brief Query available space in the send queue.

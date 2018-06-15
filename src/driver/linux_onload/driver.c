@@ -60,6 +60,22 @@ MODULE_AUTHOR("Solarflare Communications");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(ONLOAD_VERSION);
 
+int inject_kernel_gid = 0;
+module_param(inject_kernel_gid, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(inject_kernel_gid,
+                 "When Onload receives a packet, but does not have a socket "
+                 "to match, Onload can inject the packet into kernel.  "
+                 "Because of security consideration, you can disallow such "
+                 "injection using this option.\n"
+                 "\t-2 : always disallow injection;\n"
+                 "\t-1 : always allow injection;\n"
+                 "\tother values : group id to allow injection.\n"
+                 "Default is 0.\n\n"
+                 "Namespace warning: this feature makes it possible to inject "
+                 "a packet to the SFC interface from a net namespace "
+                 "which owns vlan or macvlan interface over the SFC one.  "
+                 "UID namespaces are taken into account when comparing "
+                 "the group ids.\n");
 
 /*--------------------------------------------------------------------
  *
@@ -118,6 +134,12 @@ MODULE_PARM_DESC(oof_all_ports_required,
                  "physical port - this is not necessary, and setting to 0 will "
                  "allow Onload to tolerate these filter errors.");
 
+module_param(oof_use_all_local_ip_addresses, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(oof_use_all_local_ip_addresses,
+                 "By default Onload only those local IP addresses which are "
+                 "assigned to Onloadable network interfaces.  This option "
+                 "allows to tell Onload that it should handle all local IP "
+                 "addresses regardless of the network interface type.");
 
 #ifdef EFRM_DO_USER_NS
 /* The code in this function and below are based on the kernel's
@@ -295,7 +317,18 @@ MODULE_PARM_DESC(cplane_server_params,
                  "Set additional parameters for the onload_cp_server "
                  "server when it is spawned on-demand.");
 
-module_param(cplane_server_grace_timeout, int, S_IRUGO | S_IWUSR);
+#ifdef EFRM_HAVE_KERNEL_PARAM_OPS
+static const struct kernel_param_ops cplane_server_grace_timeout_ops = {
+  .set = cplane_server_grace_timeout_set,
+  .get = param_get_int,
+};
+module_param_cb(cplane_server_grace_timeout, &cplane_server_grace_timeout_ops, 
+                &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
+#else
+module_param_call(cplane_server_grace_timeout,
+                  cplane_server_grace_timeout_set, param_get_int,
+                  &cplane_server_grace_timeout, S_IRUGO | S_IWUSR);
+#endif
 MODULE_PARM_DESC(cplane_server_grace_timeout,
                  "Time in seconds to wait before killing the control plane "
                  "server after the last user has gone (i.e. the last Onload "
@@ -535,9 +568,15 @@ long oo_fop_unlocked_ioctl(struct file* filp, unsigned cmd, unsigned long arg)
        */
       if( cmd != TCGETS && cmd != TIOCGPGRP) {
 #endif 
-        OO_DEBUG_ERR(ci_log("%s: bad cmd=%x type=%d(%d) nr=%d(%d)",
-                            __FUNCTION__, cmd, _IOC_TYPE(cmd), OO_LINUX_IOC_BASE,
-                            ioc_nr, OO_OP_END));
+        if( _IOC_TYPE(cmd) != OO_LINUX_IOC_BASE ) {
+          OO_DEBUG_ERR(ci_log("%s: Unsupported ioctl cmd=%x type=%d(%d) nr=%d",
+                              __FUNCTION__, cmd, _IOC_TYPE(cmd),
+                              OO_LINUX_IOC_BASE, ioc_nr));
+        }
+        else {
+          OO_DEBUG_ERR(ci_log("%s: bad cmd=%x nr=%d(%d)",
+                              __FUNCTION__, cmd, ioc_nr, OO_OP_END));
+        }
       }
       return -EINVAL;
     }
@@ -652,15 +691,21 @@ static int onload_sanity_checks(void)
    */
   CI_BUILD_ASSERT(CI_MEMBER_OFFSET(ci_ip_pkt_fmt, dma_start) <= 256);
 
+  /* Ensure that the number of interfaces we've been asked to build with in
+   * within the range that we expect to work.
+   */
+  CI_BUILD_ASSERT(CI_CFG_MAX_INTERFACES <= CI_CFG_MAX_SUPPORTED_INTERFACES);
+
   /* This assertion is trying to check that, ignoring the padding before
    * dma_start, there is space in the ci_ip_pkt_fmt_s structure for us
-   * to grow it to 16 interfaces (the current default is 8).  This makes
+   * to grow it to the max interfaces (the current default is 8).  This makes
    * assumptions that other padding in the structure doesn't change by
-   * changing CI_CFG_MAX_INTERFACES to 16
+   * changing CI_CFG_MAX_INTERFACES to CI_CFG_MAX_SUPPORTED_INTERFACES.
    */
-  CI_BUILD_ASSERT(CI_MEMBER_OFFSET(ci_ip_pkt_fmt, vlan_pad__do_not_use) +
-		  4 /*sizeof(vlan_pad__do_not_use)*/ +
-		  (16 - CI_CFG_MAX_INTERFACES) * sizeof(ef_addr) <= 256);
+  CI_BUILD_ASSERT( (uintptr_t)
+                   (&((ci_ip_pkt_fmt*) NULL)->space_for_encap__do_not_use + 1)
+                   + (CI_CFG_MAX_SUPPORTED_INTERFACES - CI_CFG_MAX_INTERFACES)
+                   * sizeof(ef_addr) <= 256 );
 
   if( FALCON_RX_USR_BUF_SIZE + dma_start_off > CI_CFG_PKT_BUF_SIZE ) {
     ci_log("ERROR: FALCON_RX_USR_BUF_SIZE=%d dma_start_off=%d BUF_SIZE=%d",

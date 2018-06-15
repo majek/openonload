@@ -370,7 +370,7 @@ ci_char_fop_mmap(struct file* file, struct vm_area_struct* vma)
   if( (rc = efch_add_mm_ref (vma->vm_mm)) < 0 )
     return rc;
 
-  vma->vm_flags |= EFRM_VM_IO_FLAGS;
+  vma->vm_flags |= EFRM_VM_BASE_FLAGS;
 
   /* Hook into the VM so we can keep a proper reference count on this
   ** resource.

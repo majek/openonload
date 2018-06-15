@@ -197,7 +197,11 @@ typedef struct ci_iscsi_bhs_s {
 /* From RFC 3720 setion 10.2 */
 typedef struct ci_iscsi_pkt_s {
   ci_iscsi_bhs_t bhs;
+#if defined(NDEBUG)
   ci_uint32 ahs[];
+#else	/* unknown length, CTF debug info problem */
+  ci_uint32 ahs[1];
+#endif
   /* Followed by:
   ci_uint32 header_digest; (optional - negotiated)
   ci_uint32 data[];

@@ -34,8 +34,6 @@
 
 #define VERB(x)
 
-
-
 int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd,
                             int cmd, long arg, const char* cmd_str,
                             int *fcntl_result)
@@ -86,7 +84,7 @@ int citp_sock_fcntl_os_sock(citp_sock_fdi* epi, int fd,
            "(fd=%d state=%s cmd=%s error=%d)",
            __func__, fd, ci_tcp_state_str(epi->sock.s->b.state),
            cmd_str, -os_sock);
-    ci_assert_equal(os_sock, -ENFILE);
+    ci_assert(os_sock == -ENFILE || os_sock == -EMFILE);
     return os_sock;
   }
 

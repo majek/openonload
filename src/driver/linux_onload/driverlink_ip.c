@@ -30,7 +30,18 @@
 
 #include <ci/internal/ip.h>
 #include <onload/driverlink_filter.h>
+
+/* For Medford 2 features. */
+#define EFX_DRIVERLINK_API_VERSION_MINOR 0
 #include <driver/linux_net/driverlink_api.h>
+
+/* When driverlink API version is updated we'll need to select a different
+ * MINOR version.  Put this here to make sure we remember.
+ */
+#if EFX_DRIVERLINK_API_VERSION != 23
+#error "EFX_DRIVERLINK_API_VERSION_MINOR needs updating"
+#endif
+
 #include <onload/linux_onload_internal.h>
 #include <onload/tcp_helper_fns.h>
 #include <onload/nic.h>
@@ -370,7 +381,7 @@ static void oo_dl_remove(struct efx_dl_device* dl_dev)
     efrm_client_disable_post_reset(onic->efrm_client);
 
     onic->oo_nic_flags |= OO_NIC_UNPLUGGED;
-    while( iterate_netifs_unlocked(&ni) == 0 )
+    while( iterate_netifs_unlocked(&ni, 0, 0) == 0 )
       tcp_helper_flush_resets(ni);
 
     /* The actual business of flushing the queues will be handled by the
@@ -406,7 +417,7 @@ static void oo_fixup_wakeup_breakage(int ifindex)
   int hwport, intf_i;
   if( (onic = oo_nic_find_ifindex(ifindex)) != NULL ) {
     hwport = onic - oo_nics;
-    while( iterate_netifs_unlocked(&ni) == 0 )
+    while( iterate_netifs_unlocked(&ni, 0, 0) == 0 )
       if( (intf_i = ni->hwport_to_intf_i[hwport]) >= 0 )
         ci_bit_clear(&ni->state->evq_primed, intf_i);
   }
@@ -464,6 +475,31 @@ static int oo_netdev_event(struct notifier_block *this,
 
   case NETDEV_CHANGEMTU:
     oo_fixup_wakeup_breakage(netdev->ifindex);
+
+#ifdef EFRM_RTMSG_IFINFO_EXPORTED
+    /* The control plane has to know about the new MTU value.
+     * rtnetlink_event() converts most of NETDEV_* events into RTM_NEWLINK
+     * messages, but it ignores NETDEV_CHANGEMTU.
+     *
+     * For older kernels rtmsg_ifinfo() is not available, so we rely on
+     * periodic dump of the OS state in the onload_cp_server.  In many
+     * cases (such as MTU change for an SFC NIC) the RTM_NEWLINK message
+     * is delivered because of interface flags change; the only known issue
+     * is with the bond interface.  See bug 74973 for details.
+     */
+    rtmsg_ifinfo(RTM_NEWLINK, netdev, 0
+#ifdef EFRM_RTMSG_IFINFO_NEEDS_GFP_FLAGS
+                 /* linux >= 3.13 require gfp_t argument */
+                 , GFP_KERNEL
+#endif
+                 );
+#else
+    /* rtmsg_ifinfo() is exported in linux >= 3.9 and in the last
+     * RHEL6 updates.  In 4.15 it is no longer exported, but
+     * rtnetlink_event() doesn't ignore NETDEV_CHANGEMTU, so we don't
+     * need to do anything.
+     */
+#endif
     break;
 
   default:
@@ -482,7 +518,12 @@ static struct notifier_block oo_netdev_notifier = {
 static struct efx_dl_driver oo_dl_driver = {
   .name = "onload",
 #if EFX_DRIVERLINK_API_VERSION >= 8
-  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE,
+  .flags = EFX_DL_DRIVER_CHECKS_FALCON_RX_USR_BUF_SIZE
+#if EFX_DRIVERLINK_API_VERSION > 22 || (EFX_DRIVERLINK_API_VERSION == 22 && \
+                                        EFX_DRIVERLINK_API_VERSION_MINOR > 4)
+           | EFX_DL_DRIVER_CHECKS_MEDFORD2_VI_STRIDE
+#endif
+    ,
 #endif
   .probe = oo_dl_probe,
   .remove = oo_dl_remove,

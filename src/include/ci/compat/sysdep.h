@@ -115,9 +115,6 @@
 # elif defined(__PPC__)
 #  include <ci/compat/ppc.h>
 #  include <ci/compat/gcc_ppc.h>
-# elif defined(__ia64__)
-#  include <ci/compat/ia64.h>
-#  include <ci/compat/gcc_ia64.h>
 # elif defined(__mips__)
 #  include <ci/compat/mips.h>
 #  include <ci/compat/gcc_mips.h>
@@ -161,7 +158,6 @@
 /**********************************************************************
  * Misc stuff (that probably shouldn't be here).
  */
-
 
 #if defined(__ci_storport__)
 typedef ULONG   ci_irqlock_t;

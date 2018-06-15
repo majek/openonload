@@ -319,7 +319,7 @@ driverbuild_base() {
   if [ "$k" = "linux" ]; then
     case "$kv" in
       2.6.* | [3-9].* | [1-9][0-9]*)
-	echo "${us}2.6"
+	echo "${us}"
 	;;
       *)
 	err "mmaketool:driverbuild_base: Linux version <2.6"; exit 1

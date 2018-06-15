@@ -26,7 +26,6 @@ LIB_SRCS	:= \
 		log_buffer.c \
 		log_nth.c \
 		log_unique.c \
-		memcpy.c \
 		parse_eth_addr.c \
 		sys_fail.c \
 		pktdump.c \
@@ -68,8 +67,12 @@ ifndef MMAKE_NO_RULES
 MMAKE_OBJ_PREFIX := ci_tools_
 LIB_OBJS	 := $(LIB_SRCS:%.c=$(MMAKE_OBJ_PREFIX)%.o)
 
+ifeq (${PLATFORM},gnu_x86_64)
+MMAKE_CFLAGS	+= -mpclmul -msse4.1
+endif
+
 ifneq ($(WINDOWS),1)
-LIB_OBJS	+=  ci_tools_asm_memcpy.o
+# Only needed for i386 
 LIB_OBJS	+=  ci_tools_cas64u.o
 endif
 

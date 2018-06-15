@@ -198,6 +198,22 @@
 	#define NETIF_F_GSO_UDP_TUNNEL_CSUM 0
 #endif
 
+#ifndef NETIF_F_RXFCS
+	#define NETIF_F_RXFCS 0
+#endif
+#ifndef NETIF_F_RXALL
+	#define NETIF_F_RXALL 0
+#endif
+
+/* RHEL 6.2 introduced XPS support but didn't add it under CONFIG_XPS.
+ * Instead the code was simply included directly, so it's enabled in all
+ * configurations. We check for the presence of CONFIG_XPS in other code.
+ */
+#if (LINUX_VERSION_CODE == KERNEL_VERSION(2,6,32)) && \
+    defined(RHEL_MAJOR) && (RHEL_MAJOR == 6) &&  \
+    defined(RHEL_MINOR) && (RHEL_MINOR >= 2)
+# define CONFIG_XPS
+#endif
 
 /* Cope with small changes in PCI constants between minor kernel revisions */
 #if PCI_X_STATUS != 4
@@ -518,6 +534,9 @@
 #ifndef FLOW_EXT
 	#define	FLOW_EXT	0x80000000
 #endif
+#ifndef FLOW_RSS
+	#define	FLOW_RSS	0x20000000
+#endif
 #ifndef RXH_L2DA
 	#define	RXH_L2DA	(1 << 1)
 	#define	RXH_VLAN	(1 << 2)
@@ -595,7 +614,10 @@
 		__u32				flow_type;
 		__u64				data;
 		struct efx_ethtool_rx_flow_spec	fs;
-		__u32				rule_cnt;
+		union {
+			__u32			rule_cnt;
+			__u32			rss_context;
+		};
 		__u32				rule_locs[0];
 	};
 	#define EFX_HAVE_EFX_ETHTOOL_RXNFC yes
@@ -1616,6 +1638,20 @@ static inline struct tcphdr *inner_tcp_hdr(const struct sk_buff *skb)
 #endif /* !NETIF_F_GSO_GRE */
 #endif /* EFX_HAVE_SKB_ENCAPSULATION */
 
+#ifndef EFX_HAVE_ETHTOOL_LINKSETTINGS
+/* We use an array of size 1 so that legacy code using index [0] will
+ * work with both this and a real link_mode_mask.
+ */
+#define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
+#endif
+
+#ifndef EFX_HAVE_ETHTOOL_LINKSETTINGS
+/* We use an array of size 1 so that legacy code using index [0] will
+ * work with both this and a real link_mode_mask.
+ */
+#define __ETHTOOL_DECLARE_LINK_MODE_MASK(name)  unsigned long name[1]
+#endif
+
 /**************************************************************************
  *
  * Missing functions provided by kernel_compat.c
@@ -2593,13 +2629,6 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 #define EFX_NEED_GET_PHYS_PORT_ID
 #endif
 
-/* get_rxfh_indir_size is used both directly via ethtool_ops and also via
- * the old rxfh_indir implementation.
- */
-#if defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR_SIZE) || !defined(EFX_HAVE_ETHTOOL_RXFH_INDIR) || (defined(EFX_HAVE_ETHTOOL_GET_RXFH_INDIR) && defined(EFX_HAVE_OLD_ETHTOOL_RXFH_INDIR))
-#define EFX_NEED_ETHTOOL_GET_RXFH_INDIR_SIZE
-#endif
-
 #ifdef EFX_NEED_SKB_GSO_TCPV6
 #define SKB_GSO_TCPV6 0
 #endif
@@ -2839,9 +2868,17 @@ static inline void page_frag_free(void *p)
 #endif
 #endif
 
+#ifndef BIT_ULL
+#define BIT_ULL(nr)		(1ULL << (nr))
+#endif
+
 #ifdef EFX_NEED_PCI_DEV_TO_EEH_DEV
 #define pci_dev_to_eeh_dev(pci_dev) \
 	of_node_to_eeh_dev(pci_device_to_OF_node((pci_dev)))
+#endif
+
+#ifndef USER_TICK_USEC
+#define USER_TICK_USEC TICK_USEC
 #endif
 
 #endif /* EFX_KERNEL_COMPAT_H */

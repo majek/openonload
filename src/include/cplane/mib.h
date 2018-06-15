@@ -37,6 +37,7 @@
 #include <ci/compat.h>
 #include <ci/tools/sysdep.h>
 #include <ci/tools/byteorder.h>
+#include <ci/net/ipv4.h>
 #include <linux/neighbour.h>
 
 /* At user level, net/if.h and linux/if.h cannot both be #included.  However,
@@ -175,9 +176,6 @@ typedef struct cicp_llap_row_s {
    * OS may reply with RST. */
   cicp_hwport_mask_t tx_hwports;
   cicp_hwport_mask_t rx_hwports;
-
-  /* /proc/sys/net/ipv4/neigh/<ifname>/base_reachable_time_ms, in ms  */
-  ci_uint32 arp_base_reachable;
 } cicp_llap_row_t;
 
 /* Bitmask including all licences that allow the use of Onload. */
@@ -197,6 +195,7 @@ struct cp_hwport_row {
   ci_uint32 oo_vi_flags_mask;
   ci_uint32 efhw_flags_extra;
   ci_uint8  pio_len_shift;
+  ci_uint32 ctpio_start_offset;
 };
 
 
@@ -271,6 +270,11 @@ struct cp_fwd_key {
 #define CP_FWD_KEY_UDP          0x10
 #define CP_FWD_KEY_SOURCELESS   0x08
 };
+#define CP_FWD_KEY_FMT \
+  "from "CI_IP_PRINTF_FORMAT" to "CI_IP_PRINTF_FORMAT" via %d tos %d"
+#define CP_FWD_KEY_ARGS(key) \
+  CI_IP_PRINTF_ARGS(&(key)->src), CI_IP_PRINTF_ARGS(&(key)->dst), \
+  (key)->ifindex, (key)->tos
 
 struct cp_fwd_key_ext {
   /* This is part of "key", but only ever stored in fwd_row */
@@ -361,8 +365,6 @@ struct cp_fwd_row {
 #define CICP_FWD_FLAG_OCCUPIED        0x80
 /* data field has been filled once */
 #define CICP_FWD_FLAG_DATA_VALID      0x40
-/* ARP entry is almost-stale and should be confirmed when possible */
-#define CICP_FWD_FLAG_ARP_NEED_REFRESH 0x20
 };
 
 static inline int/*bool*/
@@ -408,15 +410,14 @@ struct cp_tables_dim {
   ci_uint8 fwd_ln2;
   cicp_mac_rowid_t fwd_mask; /* 2^fwd_ln2 - 1 */
 
-  /* Number of "resolve route" requests we can handle */
-  cicp_rowid_t fwd_req_max;
-
   /* RT signal used to notify about new route requests */
   ci_int32 fwd_req_sig;
   /* RT signal used to notify about new oof instances */
   ci_int32 oof_req_sig;
   /* signal used to notify about update of main cp server */
   ci_int32 llap_update_sig;
+  /* signal to request sync with OS */
+  ci_int32 os_sync_sig;
 
 #ifdef CP_UNIT
   ci_uint16 server_pid;
@@ -440,7 +441,12 @@ enum {
  */
 struct cp_fwd_rw_row {
   /* Last time this row was used. */
-  uint64_t frc_used;
+  ci_uint64 frc_used CI_ALIGN(8);
+
+  /* Use ci_atomic32_* operations to modify flags: */
+  ci_uint32 flags;
+/* ARP entry is almost-stale and should be confirmed when possible */
+#define CICP_FWD_RW_FLAG_ARP_NEED_REFRESH 0x1
 };
 
 
@@ -457,6 +463,12 @@ struct cp_mibs {
    * It is increased when dump is started and when it finishes
    * successfully. */
   cp_version_t* dump_version;
+
+  /* Number of times when the cplane server have nothing to do (blocked in
+   * epoll) multiplied by 2.  As with dump_version, an odd value means that
+   * cplane is updating something right now.
+   */
+  cp_version_t* idle_version;
 
   /* Version exposed to oof subsystem. */
   cp_version_t* oof_version;
@@ -614,6 +626,12 @@ cp_get_licensed_hwports(struct cp_mibs* mib, cicp_hwport_mask_t hwports, int fla
   return licensed_hwports;
 }
 
+
+extern int cp_get_acceleratable_llap_count(struct cp_mibs*);
+extern int cp_get_acceleratable_ifindices(struct cp_mibs*,
+                                          ci_ifid_t* ifindices, int max_count);
+
+
 /* This is an arbitrary limit of re-hashing when searching or adding
  * destination in MAC or FWD tables. */
 #define CP_REHASH_LIMIT(mask) ((mask) >> 2)
@@ -650,13 +668,6 @@ cp_fwd_find_row_found_perfect_match(struct cp_mibs* mib, cicp_mac_rowid_t id,
 {
   return id != CICP_MAC_ROWID_BAD &&
          ! cp_fwd_udp_route_needs_promotion(mib, id, key);
-}
-
-/* Find if the cplane have already notified OOF about its MIBs state */
-static inline int /*bool*/
-cp_is_usable_for_oof(struct cp_mibs* mib, cp_version_t version)
-{
-  return (int)((*mib->oof_version) - version) >= 0;
 }
 
 #endif /* __TOOLS_CPLANE_PUBLIC_H__ */

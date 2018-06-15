@@ -242,7 +242,9 @@ ci_inline void citp_signal_run_now(int signum, siginfo_t *info,
 void citp_signal_intercept(int signum, siginfo_t *info, void *context)
 {
   citp_signal_info *our_info = citp_signal_get_specific_inited();
-  LOG_SIG(log("%s(%d, %p, %p)", __func__, signum, info, context));
+  LOG_SIG(log("%s(%d, %p, %p) %smasked", __func__,
+              signum, info, context,
+              CITP_OPTS.signals_no_postpone & (1 << (signum-1)) ? "" : "not "));
   /* Note: our thread-specific data is initialised on the way in to the our
    * library if necessary, so if our_info is NULL, we can assume that this
    * thread is not currently running inside the library.  (This can happen
@@ -342,7 +344,8 @@ void *citp_signal_sarestorer_get(void)
 /*! Our signal handlers for various interception types */
 sa_sigaction_t citp_signal_handlers[OO_SIGHANGLER_DFL_MAX+1] = {
   citp_signal_terminate  /*OO_SIGHANGLER_TERM*/,
-  NULL, NULL /*OO_SIGHANGLER_STOP, OO_SIGHANGLER_CORE - TODO */
+  NULL, /*OO_SIGHANGLER_STOP - do not break gdb! */
+  citp_signal_terminate /*OO_SIGHANGLER_CORE*/
 };
 
 

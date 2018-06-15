@@ -67,7 +67,9 @@ static void ci_udp_state_init(ci_netif* netif, ci_udp_state* us)
   /*! \todo This should be part of sock_cmn reinit, but the comment to that
    * function suggests that it's possibly not a good plan to move it there */
 
+#if CI_CFG_TIMESTAMPING
   ci_udp_recv_q_init(&us->timestamp_q);
+#endif
 
   /*! \todo These two should really be handled in ci_sock_cmn_init() */
 
@@ -145,8 +147,12 @@ ci_fd_t ci_udp_ep_ctor(citp_socket* ep, ci_netif* netif, int domain, int type)
   fd = ci_tcp_helper_sock_attach(ci_netif_get_driver_handle(netif),  
                                  SC_SP(&us->s), domain, type);
   if( fd < 0 ) {
-    LOG_E(ci_log("%s: ci_tcp_helper_sock_attach(domain=%d, type=%d) failed %d",
-                 __FUNCTION__, domain, type, fd));
+    if( fd == -EAFNOSUPPORT )
+      LOG_U(ci_log("%s: ci_tcp_helper_sock_attach (domain=%d, type=%d) "
+                   "failed %d", __FUNCTION__, domain, type, fd));
+    else
+      LOG_E(ci_log("%s: ci_tcp_helper_sock_attach (domain=%d, type=%d) "
+                   "failed %d", __FUNCTION__, domain, type, fd));
     ci_netif_unlock(netif);
     return fd;
   }
@@ -267,9 +273,11 @@ void ci_udp_state_dump(ci_netif* ni, ci_udp_state* us, const char* pf,
   (void) rx_total;  /* unused on 32-bit builds in kernel */
   (void) tx_total;
 
+#if CI_CFG_TIMESTAMPING
   if( us->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
     ci_udp_recvq_dump(ni, &us->timestamp_q, pf, "  TX timestamping queue:",
                       logger, log_arg);
+#endif
 
   /* General. */
   logger(log_arg, "%s  udpflags: "CI_UDP_STATE_FLAGS_FMT, pf,

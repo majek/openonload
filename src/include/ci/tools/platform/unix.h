@@ -37,7 +37,6 @@
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 
-
 #include <pthread.h>
 #include <assert.h>
 #include <stdlib.h>

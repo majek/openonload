@@ -56,8 +56,6 @@ i386_TARGET_SRCS    := $(x86_TARGET_SRCS)
 
 x86_64_TARGET_SRCS := $(x86_TARGET_SRCS)
 
-ia64_TARGET_SRCS := $(x86_TARGET_SRCS)
-
 powerpc_TARGET_SRCS    := ppc64_linux_trampoline_asm.o \
 			ppc64_linux_trampoline.o ppc64_linux_trampoline_internal.o
 

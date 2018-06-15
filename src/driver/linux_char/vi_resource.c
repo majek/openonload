@@ -569,6 +569,13 @@ efch_vi_rm_rsops(efch_resource_t* rs, ci_resource_table_t* rt,
       rc = efch_vi_tx_alt_free(virs, op);
       break;
 
+    case CI_RSOP_VI_GET_TS_FORMAT:
+      op->u.vi_ts_format.out_ts_format =
+        efrm_client_get_nic(virs->rs.rs_client)->ts_format;
+      rc = 0;
+      *copy_out = 1;
+      break;
+
     default:
       rc = efch_filter_list_op_add(rs->rs_base, efrm_vi_get_pd(virs),
                                    &rs->vi.fl, op, copy_out, 0u, -1);

@@ -53,6 +53,12 @@ DECLARE_COMPLETION(cpu_khz_stabilized_completion);
 /* Look at comments above oo_timesync_cpu_khz */
 void oo_timesync_wait_for_cpu_khz_to_stabilize(void)
 {
+  /* There are a technically limited number of completions available, so
+   * don't consume them when it's already known we don't have to wait.
+   */
+  if( signal_cpu_khz_stabilized == 2 )
+    return;
+
   wait_for_completion(&cpu_khz_stabilized_completion);
 }
 
@@ -172,9 +178,9 @@ static void oo_timesync_stabilize_cpu_khz(struct oo_timesync* oo_ts)
   }
 }
 
-/* Linux 4.15 changed the argument type for the timer callback
+/* Linux 4.14 changed the argument type for the timer callback
  * function */
-#ifdef EFRM_HAVE_TIMER_CALLBACK_TIMERLIST
+#ifdef EFRM_HAVE_TIMER_SETUP
 static void stabilize_cpu_khz_timer(struct timer_list *unused)
 #else
 static void stabilize_cpu_khz_timer(unsigned long unused)

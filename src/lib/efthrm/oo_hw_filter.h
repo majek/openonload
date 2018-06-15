@@ -38,6 +38,7 @@ struct tcp_helper_resource_s;
 #define OO_HW_SRC_FLAG_RSS_DST           (0x2)
 #define OO_HW_SRC_FLAG_KERNEL_REDIRECT   (0x4)
 #define OO_HW_SRC_FLAG_DROP              (0x8)
+#define OO_HW_SRC_FLAG_REDIRECT          (0x10)
 
 
 /* Initialise filter object. */
@@ -110,6 +111,7 @@ extern int
 oo_hw_filter_add_hwports(struct oo_hw_filter* oofilter,
                          const struct oo_hw_filter_spec* oo_filter_spec,
                          unsigned set_vlan_mask, unsigned hwport_mask,
+                         unsigned redirect_mask,
                          unsigned drop_hwport_mask,
                          unsigned src_flags);
 

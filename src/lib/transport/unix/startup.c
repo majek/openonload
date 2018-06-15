@@ -200,6 +200,7 @@ static void citp_dump_opts(citp_opts_t *o)
 #endif
   DUMP_OPT_INT("EF_FDTABLE_SIZE",	fdtable_size);
   DUMP_OPT_INT("EF_SPIN_USEC",		ul_spin_usec);
+  DUMP_OPT_INT("EF_SLEEP_SPIN_USEC",	sleep_spin_usec);
   DUMP_OPT_INT("EF_STACK_PER_THREAD",	stack_per_thread);
   DUMP_OPT_INT("EF_DONT_ACCELERATE",	dont_accelerate);
   DUMP_OPT_INT("EF_FDTABLE_STRICT",	fdtable_strict);
@@ -213,6 +214,7 @@ static void citp_dump_opts(citp_opts_t *o)
   DUMP_OPT_INT("EF_PIPE", ul_pipe);
 #endif
   DUMP_OPT_HEX("EF_SIGNALS_NOPOSTPONE", signals_no_postpone);
+  DUMP_OPT_HEX("EF_SYNC_CPLANE_AT_CREATE", sync_cplane);
   DUMP_OPT_INT("EF_CLUSTER_SIZE",  cluster_size);
   DUMP_OPT_INT("EF_CLUSTER_RESTART",  cluster_restart_opt);
   DUMP_OPT_INT("EF_CLUSTER_HOT_RESTART", cluster_hot_restart_opt);
@@ -269,7 +271,6 @@ static void citp_get_process_name(void)
            citp.process_name[-1] != '/')
       --citp.process_name;
   }
-
 }
 
 
@@ -411,6 +412,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
      * ONLOAD_SPIN_MIMIC_EF_POLL
      */
     GET_ENV_OPT_INT("EF_POLL_USEC", ul_spin_usec);
+    GET_ENV_OPT_INT("EF_SLEEP_SPIN_USEC", sleep_spin_usec);
     opts->ul_select_spin = 1;
     opts->ul_poll_spin = 1;
 #if CI_CFG_USERSPACE_EPOLL
@@ -473,6 +475,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #endif
   GET_ENV_OPT_INT("EF_FDTABLE_SIZE",	fdtable_size);
   GET_ENV_OPT_INT("EF_SPIN_USEC",	ul_spin_usec);
+  GET_ENV_OPT_INT("EF_SLEEP_SPIN_USEC",	sleep_spin_usec);
   GET_ENV_OPT_INT("EF_STACK_PER_THREAD",stack_per_thread);
   GET_ENV_OPT_INT("EF_DONT_ACCELERATE",	dont_accelerate);
   GET_ENV_OPT_INT("EF_FDTABLE_STRICT",	fdtable_strict);
@@ -484,6 +487,7 @@ static void citp_opts_getenv(citp_opts_t* opts)
 #if CI_CFG_USERSPACE_PIPE
   GET_ENV_OPT_INT("EF_PIPE",        ul_pipe);
 #endif
+  GET_ENV_OPT_INT("EF_SYNC_CPLANE_AT_CREATE",	sync_cplane);
 
   if( (s = getenv("EF_FORK_NETIF")) && sscanf(s, "%x", &v) == 1 ) {
     opts->fork_netif = CI_MIN(v, CI_UNIX_FORK_NETIF_BOTH);
@@ -511,8 +515,8 @@ static void citp_opts_getenv(citp_opts_t* opts)
     opts->cluster_name[0] = '\0';
   }
   GET_ENV_OPT_INT("EF_CLUSTER_SIZE",	cluster_size);
-  if( opts->cluster_size < 2 )
-    log("ERROR: cluster_size < 2 are not supported");
+  if( opts->cluster_size < 1 )
+    log("ERROR: cluster_size needs to be a positive number");
   GET_ENV_OPT_INT("EF_CLUSTER_RESTART",	cluster_restart_opt);
   GET_ENV_OPT_INT("EF_CLUSTER_HOT_RESTART", cluster_hot_restart_opt);
   get_env_opt_port_list(&opts->tcp_reuseports, "EF_TCP_FORCE_REUSEPORT");
@@ -702,6 +706,7 @@ void _init(void)
 void _fini(void)
 {
   Log_S(log("citp: finishing up"));
+  uncache_active_netifs();
 }
 
 

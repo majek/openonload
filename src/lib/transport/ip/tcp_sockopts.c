@@ -146,11 +146,7 @@ ci_tcp_info_get(ci_netif* netif, ci_sock_cmn* s, struct ci_tcp_info* uinfo,
 int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s, int optname, void *optval,
                    socklen_t *optlen )
 {
-#if defined(__linux__) || \
-    defined(__sun__) && defined(TCP_KEEPALIVE_THRESHOLD) || \
-    defined(__sun__) && defined(TCP_KEEPALIVE_ABORT_THRESHOLD)
   ci_tcp_socket_cmn *c = &(SOCK_TO_WAITABLE_OBJ(s)->tcp.c);
-#endif
   unsigned u = 0;
 
   switch(optname){
@@ -173,7 +169,6 @@ int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s, int optname, void *optval,
     u = ((s->s_aflags & CI_SOCK_AFLAG_CORK) != 0);
     goto u_out;
 # endif
-
 
   case TCP_KEEPIDLE:
     {
@@ -215,10 +210,8 @@ int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s, int optname, void *optval,
   case TCP_QUICKACK:
     {
       u = 0;
-      if( s->b.state & CI_TCP_STATE_TCP_CONN ) {
-        ci_tcp_state* ts = SOCK_TO_TCP(s);
-        u = ci_tcp_is_in_faststart(ts);
-      }
+      if( s->b.state & CI_TCP_STATE_TCP_CONN )
+        u = ci_tcp_is_in_faststart(SOCK_TO_TCP(s));
       goto u_out;
     }
   default:
@@ -260,7 +253,6 @@ int ci_tcp_getsockopt(citp_socket* ep, ci_fd_t fd, int level,
    */
 
   if(level == SOL_SOCKET) {
-
     if( optname == SO_SNDBUF &&
 	NI_OPTS(netif).tcp_sndbuf_mode == 2 &&
 	s->b.state & CI_TCP_STATE_TCP_CONN ) {
@@ -300,11 +292,7 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
 				socklen_t optlen )
 {
   ci_sock_cmn* s = ep->s;
-#if defined(__linux__) || \
-    defined(__sun__) && defined(TCP_KEEPALIVE_THRESHOLD) || \
-    defined(__sun__) && defined(TCP_KEEPALIVE_ABORT_THRESHOLD)
   ci_tcp_socket_cmn* c = &(SOCK_TO_WAITABLE_OBJ(s)->tcp.c);
-#endif
   ci_netif* netif = ep->netif;
   int zeroval = 0;
   int rc;
@@ -404,7 +392,6 @@ static int ci_tcp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, int level,
       else
         ci_bit_clear(&s->s_aflags, CI_SOCK_AFLAG_NODELAY_BIT);
       break;
-
      
     case TCP_MAXSEG:
       /* sets the MSS size for this connection */

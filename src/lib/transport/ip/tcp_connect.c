@@ -205,7 +205,7 @@ int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
 #ifndef __ci_driver__
   /* We do not call bind() to alien address from in-kernel code */
   if( ! (s->s_flags & CI_SOCK_FLAG_TPROXY) && ip_addr_be32 != INADDR_ANY &&
-      ! cicp_user_addr_is_local_efab(ni->cplane, ip_addr_be32) )
+      ! cicp_user_addr_is_local_efab(ni, ip_addr_be32) )
     s->s_flags |= CI_SOCK_FLAG_BOUND_ALIEN;
 #endif
   
@@ -214,14 +214,33 @@ int __ci_tcp_bind(ci_netif *ni, ci_sock_cmn *s, ci_fd_t fd,
 }
 
 
-oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni,
+oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni, int locked,
                                      ci_ip_addr_t dst_be32, int dport_be16)
 {
-  int i;
+  ci_tcp_socket_listen* tls;
+  int i = -1;
+
+  if( locked ) {
+    /* SW filter table look-up does not find socket in scenarios where client
+     * attempts to connect with non-SF IP address to INADDR_ANY bound listening
+     * socket */
+    /* FIXME: make ci_netif_listener_lookup() work for unlocked stacks */
+    i = ci_netif_listener_lookup(ni, dst_be32, dport_be16);
+  }
+
+  if( i >= 0 ) {
+    tls = ID_TO_TCP_LISTEN(ni, CI_NETIF_FILTER_ID_TO_SOCK_ID(ni, i));
+    if( ( ~tls->s.b.sb_aflags & CI_SB_AFLAG_ORPHAN ) &&
+        ( tls->s.cp.so_bindtodevice == CI_IFID_BAD ) )
+      goto found;
+  }
+
+  /* Socket has not been found through SW filter table look-up.
+   * Perform full search to cover the case when destination address
+   * does not belong to SF interface. */
 
   for( i = 0; i < (int)ni->state->n_ep_bufs; ++i ) {
     citp_waitable_obj* wo = ID_TO_WAITABLE_OBJ(ni, i);
-    ci_tcp_socket_listen* tls;
     if( wo->waitable.state != CI_TCP_LISTEN ) continue;
     if( wo->waitable.sb_aflags & CI_SB_AFLAG_ORPHAN ) continue;
     tls = SOCK_TO_TCP_LISTEN(&wo->sock);
@@ -229,14 +248,16 @@ oo_sp ci_tcp_connect_find_local_peer(ci_netif *ni,
     if( tls->s.cp.ip_laddr_be32 != INADDR_ANY &&
         tls->s.cp.ip_laddr_be32 != dst_be32) continue;
     if( tls->s.cp.so_bindtodevice != CI_IFID_BAD ) continue;
-
-    /* this is our tls - connect to it! */
-    if( (int)ci_tcp_acceptq_n(tls) < tls->acceptq_max )
-      return tls->s.b.bufid;
-    else
-      return OO_SP_INVALID;
+    goto found;
   }
   return OO_SP_NULL;
+
+found:
+  /* this is our tls - connect to it! */
+  if( (int)ci_tcp_acceptq_n(tls) < tls->acceptq_max )
+    return tls->s.b.bufid;
+  else
+    return OO_SP_INVALID;
 }
 
 
@@ -278,8 +299,8 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
 
     ep->s->s_flags |= CI_SOCK_FLAG_BOUND_ALIEN;
     if( NI_OPTS(ep->netif).tcp_server_loopback != CITP_TCP_LOOPBACK_OFF )
-      ts->local_peer = ci_tcp_connect_find_local_peer(ep->netif, dst_be32,
-                                                      dport_be16);
+      ts->local_peer = ci_tcp_connect_find_local_peer(ep->netif, 1 /* locked */,
+                                                      dst_be32, dport_be16);
     else
       ts->local_peer = OO_SP_NULL;
 
@@ -304,6 +325,50 @@ static int ci_tcp_connect_check_dest(citp_socket* ep, ci_ip_addr_t dst_be32,
 #endif
 
 
+static int/*bool*/
+cicp_check_ipif_ifindex(struct oo_cplane_handle* cp,
+                        cicp_ipif_row_t* ipif, void* data)
+{
+  return ipif->ifindex == *(ci_ifid_t*)data;
+}
+
+int
+ci_tcp_use_mac_filter_listen(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex)
+{
+  int mode;
+
+  if( NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_DISABLE )
+    return 0;
+
+  mode = NI_OPTS(ni).scalable_filter_mode;
+  if( (mode & CITP_SCALABLE_MODE_PASSIVE) == 0 )
+    return 0;
+
+  /* Listening sockets bound to an IP address on an interface that we have
+   * a MAC filter for share that MAC filter.  Clustering setting of listening
+   * socket needs to match scalable mode rss-wise. */
+  if( ((NI_OPTS(ni).cluster_ignore == 1 ) ||
+         ! (s->s_flags & CI_SOCK_FLAG_REUSEPORT)) ==
+       !(mode & CITP_SCALABLE_MODE_RSS) ) {
+    /* If we've been configured to use scalable filters on all interfaces, then
+     * we can do so without further ado. */
+    if( NI_OPTS(ni).scalable_filter_ifindex_passive ==
+        CITP_SCALABLE_FILTERS_ALL )
+      return 1;
+
+    /* based on bind to device we might be using scalable iface */
+    if( ifindex <= 0 ) {
+      /* Determine which ifindex the IP address being bound to is on. */
+        ifindex = NI_OPTS(ni).scalable_filter_ifindex_passive;
+        return oo_cp_find_ipif_by_ip(ni->cplane, sock_laddr_be32(s),
+                                     cicp_check_ipif_ifindex, &ifindex);
+    }
+    return (NI_OPTS(ni).scalable_filter_ifindex_passive == ifindex);
+  }
+  return 0;
+}
+
+
 int
 ci_tcp_use_mac_filter(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex,
                       oo_sp from_tcp_id)
@@ -315,11 +380,11 @@ ci_tcp_use_mac_filter(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex,
     return 0;
 
   mode = NI_OPTS(ni).scalable_filter_mode;
-  if( mode & CITP_SCALABLE_MODE_TPROXY_ACTIVE ) {
+  if( mode & (CITP_SCALABLE_MODE_TPROXY_ACTIVE | CITP_SCALABLE_MODE_ACTIVE) ) {
     /* TPROXY sockets don't get associated with a hw filter, so don't need
      * oof management.
      */
-    use_mac_filter |= (s->s_flags & CI_SOCK_FLAG_TPROXY);
+    use_mac_filter |= (s->s_flags & CI_SOCK_FLAGS_SCALABLE);
   }
 
   if( ! use_mac_filter && (mode & CITP_SCALABLE_MODE_PASSIVE) ) {
@@ -329,32 +394,14 @@ ci_tcp_use_mac_filter(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex,
     use_mac_filter |= OO_SP_NOT_NULL(from_tcp_id) &&
              (SP_TO_SOCK(ni, from_tcp_id)->s_flags & CI_SOCK_FLAG_MAC_FILTER);
 
-    /* Listening sockets bound to an IP address on an interface that we have
-     * a MAC filter for share that MAC filter.  Clustered listening sockets
-     * are not eligible, though, as they need an RSSed filter.
-     */
     if( (use_mac_filter == 0) && (s->b.state == CI_TCP_LISTEN) &&
-        ((NI_OPTS(ni).cluster_ignore == 1 ) ||
-         ! (s->s_flags & CI_SOCK_FLAG_REUSEPORT)) ) {
-      /* based on bind to device we might be using scalable iface */
-      if( ifindex <= 0 ) {
-        /* Determine which ifindex the IP address being bound to is on. */
-        oo_cp_find_llap_by_ip(ni->cplane, sock_laddr_be32(s),
-                              NULL, &ifindex, NULL, NULL, NULL);
-      }
-      use_mac_filter |= (NI_OPTS(ni).scalable_filter_ifindex == ifindex);
-    }
+        ci_tcp_use_mac_filter_listen(ni, s, ifindex) )
+      use_mac_filter = 1;
   }
 
   if( use_mac_filter ) {
     /* Only TCP sockets support use of MAC filters at the moment */
     ci_assert_flags(s->b.state, CI_TCP_STATE_TCP);
-    /* Loopback sockets should not be using a MAC filter - the LISTEN check
-     * is because we're using the SOCK_TO_TCP macro to check for loopback,
-     * and we don't want to do that on a listener.
-     */
-    ci_assert(s->b.state == CI_TCP_LISTEN ||
-              OO_SP_IS_NULL(SOCK_TO_TCP(s)->local_peer));
   }
 
   return use_mac_filter;
@@ -364,13 +411,19 @@ ci_tcp_use_mac_filter(ci_netif* ni, ci_sock_cmn* s, ci_ifid_t ifindex,
 #ifndef __KERNEL__
 int ci_tcp_can_set_filter_in_ul(ci_netif *ni, ci_sock_cmn* s)
 {
-  if( (s->s_flags & CI_SOCK_FLAG_TPROXY) == 0 )
+  if( (s->s_flags & CI_SOCK_FLAGS_SCALABLE) == 0 )
     return 0;
+  if( s->b.state == CI_TCP_LISTEN )
+    return 0;
+  if( (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0 )
+    return 0;
+  if( (s->s_flags & CI_SOCK_FLAG_SCALPASSIVE) != 0 &&
+      NI_OPTS(ni).scalable_listen != CITP_SCALABLE_LISTEN_ACCELERATED_ONLY )
+    return 0;
+
   ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_FILTER);
   ci_assert_flags(s->b.state, CI_TCP_STATE_TCP);
   ci_assert_nequal(s->b.state, CI_TCP_LISTEN);
-  ci_assert_nflags(SOCK_TO_TCP(s)->tcpflags, CI_TCPT_FLAG_PASSIVE_OPENED);
-  ci_assert(OO_SP_IS_NULL(SOCK_TO_TCP(s)->local_peer));
   ci_assert_nequal(sock_laddr_be32(s), 0);
   ci_assert_nequal(sock_lport_be16(s), 0);
   return 1;
@@ -378,24 +431,26 @@ int ci_tcp_can_set_filter_in_ul(ci_netif *ni, ci_sock_cmn* s)
 #endif
 
 
-int ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_tcp_state* ts)
+int ci_tcp_sock_set_scalable_filter(ci_netif *ni, ci_sock_cmn* s)
 {
   int rc;
-  LOG_TC(log( LNT_FMT " %s", LNT_PRI_ARGS(ni, ts), __FUNCTION__));
-  ci_assert((ts->s.s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
+  LOG_TC(log( NSS_FMT " %s", NSS_PRI_ARGS(ni, s), __FUNCTION__));
+  ci_assert((s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
 
-  rc = ci_netif_filter_lookup(ni, tcp_laddr_be32(ts),
-                              tcp_lport_be16(ts), tcp_raddr_be32(ts),
-                              tcp_rport_be16(ts), tcp_protocol(ts));
+  rc = ci_netif_filter_lookup(ni, sock_laddr_be32(s),
+                              sock_lport_be16(s), sock_raddr_be32(s),
+                              sock_rport_be16(s), sock_protocol(s));
 
   if( rc >= 0 )
     return -EADDRINUSE;
 
-  rc = ci_netif_filter_insert(ni, S_ID(ts), tcp_laddr_be32(ts),
-                              tcp_lport_be16(ts), tcp_raddr_be32(ts),
-                              tcp_rport_be16(ts), tcp_protocol(ts));
-  if( rc == 0 )
-    ts->s.s_flags |= CI_SOCK_FLAG_MAC_FILTER;
+  rc = ci_netif_filter_insert(ni, SC_ID(s), sock_laddr_be32(s),
+                              sock_lport_be16(s), sock_raddr_be32(s),
+                              sock_rport_be16(s), sock_protocol(s));
+  if( rc == 0 ) {
+    s->s_flags |= CI_SOCK_FLAG_MAC_FILTER;
+    CITP_STATS_NETIF_INC(ni, mac_filter_shares);
+  }
   return rc;
 }
 
@@ -417,6 +472,7 @@ void ci_tcp_sock_clear_scalable_filter(ci_netif *ni, ci_tcp_state* ts)
 #define CI_CONNECT_UL_FAIL              -1
 #define CI_CONNECT_UL_START_AGAIN	-2
 #define CI_CONNECT_UL_LOCK_DROPPED	-3
+#define CI_CONNECT_UL_ALIEN_BOUND	-4
 
 /* The fd parameter is ignored when this is called in the kernel */
 static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
@@ -477,7 +533,23 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     if( active_wild != OO_SP_NULL ) {
       ts->s.s_flags &= ~(CI_SOCK_FLAG_DEFERRED_BIND |
                          CI_SOCK_FLAG_CONNECT_MUST_BIND);
+
+      /* If we're in scalable-active mode, then sharing an active-wild gives us
+       * the last ingredient that allows the socket to be scalable. */
+      if( ~s->s_flags & CI_SOCK_FLAG_TPROXY &&
+          NI_OPTS(ni).scalable_filter_enable == CITP_SCALABLE_FILTERS_ENABLE &&
+          NI_OPTS(ni).scalable_filter_mode & CITP_SCALABLE_MODE_ACTIVE &&
+          (NI_OPTS(ni).scalable_filter_ifindex_active == ts->s.pkt.ifindex ||
+           NI_OPTS(ni).scalable_filter_ifindex_active ==
+           CITP_SCALABLE_FILTERS_ALL) ) {
+        s->s_flags |= CI_SOCK_FLAG_SCALACTIVE;
+      }
+
       rc = 0;
+    }
+    else if( NI_OPTS(ni).tcp_shared_local_no_fallback ) {
+      /* error matching exhaustion of ephemeral ports */
+      CI_SET_ERROR(rc, EADDRNOTAVAIL);
     }
     else if( s->s_flags & CI_SOCK_FLAG_ADDR_BOUND )
       rc = __ci_tcp_bind(ni, &ts->s, fd, ts->s.pkt.ip.ip_saddr_be32,
@@ -493,7 +565,7 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
                  (unsigned) CI_BSWAP_BE16(TS_TCP(ts)->tcp_source_be16)));
     }
     else {
-      LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", CI_GET_ERROR(rc),
+      LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", rc,
                    __FILE__, __LINE__));
       *fail_rc = rc;
       return CI_CONNECT_UL_FAIL;
@@ -504,6 +576,18 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     }
   }
 
+  /* In the normal case, we only install filters for IP addresses configured on
+   * acceleratable interfaces, and so if the socket is bound to an alien
+   * address, we can't accelerate it.  Using a MAC filter overcomes this
+   * limitation, however. */
+  if( (ts->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN) &&
+      ! (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ||
+         ts->s.s_flags & (CI_SOCK_FLAG_TPROXY | CI_SOCK_FLAG_SCALACTIVE)) )
+    return CI_CONNECT_UL_ALIEN_BOUND;
+
+  /* Any failures below this point might need to clear the SCALACTIVE flag, and
+   * so should jump to the "fail" label. */
+
   ci_tcp_set_peer(ts, dst_be32, dport_be16);
 
   /* Make sure we can get a buffer before we change state. */
@@ -513,20 +597,23 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     if( NI_OPTS(ni).tcp_nonblock_no_pkts_mode &&
         (ts->s.b.sb_aflags & (CI_SB_AFLAG_O_NONBLOCK | CI_SB_AFLAG_O_NDELAY)) ) {
       CI_SET_ERROR(*fail_rc, ENOBUFS);
-      return CI_CONNECT_UL_FAIL;
+      rc = CI_CONNECT_UL_FAIL;
+      goto fail;
     }
     /* NB. We've already done a poll above. */
     rc = ci_netif_pkt_wait(ni, &ts->s, CI_SLEEP_NETIF_LOCKED|CI_SLEEP_NETIF_RQ);
     if( ci_netif_pkt_wait_was_interrupted(rc) ) {
       CI_SET_ERROR(*fail_rc, -rc);
-      return CI_CONNECT_UL_LOCK_DROPPED;
+      rc = CI_CONNECT_UL_LOCK_DROPPED;
+      goto fail;
     }
     /* OK, there are (probably) packets available - go try again.  Note we
      * jump back to the top of the function because someone may have
      * connected this socket in the mean-time, so we need to check the
      * state once more.
      */
-    return CI_CONNECT_UL_START_AGAIN;
+    rc = CI_CONNECT_UL_START_AGAIN;
+    goto fail;
   }
 
 #ifdef ONLOAD_OFE
@@ -560,7 +647,8 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
       }
       ci_netif_pkt_release(ni, pkt);
       CI_SET_ERROR(*fail_rc, -rc);
-      return CI_CONNECT_UL_FAIL;
+      rc = CI_CONNECT_UL_FAIL;
+      goto fail;
     }
   }
 
@@ -604,7 +692,13 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     CI_IP_SOCK_STATS_VAL_RXWSCL(ts, 0);
   }
   ci_tcp_set_rcvbuf(ni, ts);
-  ci_tcp_init_rcv_wnd(ts, "CONNECT");
+  TS_TCP(ts)->tcp_window_be16 = ci_tcp_calc_rcv_wnd_syn(ts->s.so.rcvbuf,
+                                                        ts->amss,
+                                                        ts->rcv_wscl);
+  tcp_rcv_wnd_right_edge_sent(ts) = tcp_rcv_nxt(ts) + TS_TCP(ts)->tcp_window_be16;
+  ts->rcv_wnd_advertised = TS_TCP(ts)->tcp_window_be16;
+  TS_TCP(ts)->tcp_window_be16 = CI_BSWAP_BE16(TS_TCP(ts)->tcp_window_be16);
+
 
   /* outgoing_hdrs_len is initialised to include timestamp option. */
   if( ! (ts->tcpflags & CI_TCPT_FLAG_TSO) )
@@ -636,10 +730,17 @@ static int ci_tcp_connect_ul_start(ci_netif *ni, ci_tcp_state* ts, ci_fd_t fd,
     LOG_TC(log( LNT_FMT "Non-blocking connect - return EINPROGRESS",
 		LNT_PRI_ARGS(ni, ts)));
     CI_SET_ERROR(*fail_rc, EINPROGRESS);
+    /* We don't jump to the "fail" label here, as this is a failure only from
+     * the point of view of the connect() API, and we don't want to tear down
+     * the socket. */
     return CI_CONNECT_UL_FAIL;
   }
 
   return CI_CONNECT_UL_OK;
+
+ fail:
+  ts->s.s_flags &= ~CI_SOCK_FLAG_SCALACTIVE;
+  return rc;
 }
 
 ci_inline int ci_tcp_connect_handle_so_error(ci_sock_cmn *s)
@@ -811,7 +912,7 @@ static int ci_tcp_connect_ul_syn_sent(ci_netif *ni, ci_tcp_state *ts)
 
 
 #ifndef __KERNEL__
-static void
+static int
 complete_deferred_bind(ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd)
 {
   ci_uint16 source_be16 = 0;
@@ -838,6 +939,7 @@ complete_deferred_bind(ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd)
     LOG_U(ci_log("__ci_tcp_bind returned %d at %s:%d", CI_GET_ERROR(rc),
                  __FILE__, __LINE__));
   }
+  return rc;
 }
 
 
@@ -970,25 +1072,25 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
     if( op.out_rc == -EINPROGRESS )
       RET_WITH_ERRNO( EINPROGRESS );
     else if( op.out_rc == -EAGAIN )
-      return -EAGAIN;
+      RET_WITH_ERRNO(EAGAIN);
     else if( op.out_rc != 0 )
       return CI_SOCKET_HANDOVER;
     return 0;
   }
 
-  /* filters can't handle alien source address */
-  if( (s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN) &&
-      ! (ts->s.pkt.flags & CI_IP_CACHE_IS_LOCALROUTE ||
-         s->s_flags & CI_SOCK_FLAG_TPROXY) ) {
-    rc = CI_SOCKET_HANDOVER;
-    goto unlock_out;
-  }
 
   crc = ci_tcp_connect_ul_start(ep->netif, ts, fd, dst_be32, inaddr->sin_port,
                                 &rc);
   if( crc != CI_CONNECT_UL_OK ) {
     switch( crc ) {
+    case CI_CONNECT_UL_ALIEN_BOUND:
+      rc = CI_SOCKET_HANDOVER;
+      /* Fall through. */
     case CI_CONNECT_UL_FAIL:
+      /* Check non-blocking */
+      if( errno == EINPROGRESS ) {
+        CI_TCP_STATS_INC_ACTIVE_OPENS( ep->netif );
+      }
       goto unlock_out;
     case CI_CONNECT_UL_LOCK_DROPPED:
       goto out;
@@ -1004,8 +1106,11 @@ int ci_tcp_connect(citp_socket* ep, const struct sockaddr* serv_addr,
  unlock_out:
   ci_netif_unlock(ep->netif);
  out:
-  if( rc == CI_SOCKET_HANDOVER && (s->s_flags & CI_SOCK_FLAG_DEFERRED_BIND) )
-    complete_deferred_bind(ep->netif, &ts->s, fd);
+  if( rc == CI_SOCKET_HANDOVER && (s->s_flags & CI_SOCK_FLAG_DEFERRED_BIND) ) {
+    int rc1 = complete_deferred_bind(ep->netif, &ts->s, fd);
+    if( rc1 < 0 )
+      return rc1;
+  }
   return rc;
 }
 #endif
@@ -1068,11 +1173,13 @@ int ci_tcp_listen_init(ci_netif *ni, ci_tcp_socket_listen *tls)
 
 
 #ifdef __KERNEL__
-int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id)
+int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id,
+                                int *stack_locked)
 {
   int crc, rc = 0;
 
   ci_assert(ci_netif_is_locked(ni));
+  *stack_locked = 1;
 
   ts->local_peer = tls_id;
   crc = ci_tcp_connect_ul_start(ni, ts, CI_FD_BAD, ts->s.pkt.ip_saddr_be32,
@@ -1082,6 +1189,8 @@ int ci_tcp_connect_lo_samestack(ci_netif *ni, ci_tcp_state *ts, oo_sp tls_id)
    * for non-blocking connect and 0 for normal. */
   if( crc == CI_CONNECT_UL_OK )
     rc = ci_tcp_connect_ul_syn_sent(ni, ts);
+  else if( crc == CI_CONNECT_UL_LOCK_DROPPED )
+    *stack_locked = 0;
   return rc;
 }
 
@@ -1095,6 +1204,7 @@ int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
   citp_waitable_obj *wo;
   citp_waitable *w;
   int rc;
+  int stack_locked;
 
   ci_assert(ci_netif_is_locked(c_ni));
   ci_assert(OO_SP_NOT_NULL(c_id));
@@ -1140,12 +1250,29 @@ int ci_tcp_connect_lo_toconn(ci_netif *c_ni, oo_sp c_id, ci_uint32 dst,
   rc = ci_tcp_listen_init(c_ni, tls);
   if( rc != 0 ) {
     citp_waitable_obj_free(c_ni, &tls->s.b);
+    ci_netif_unlock(c_ni);
     return rc;
   }
 
   /* Connect c_id to tls */
   ts = SP_TO_TCP(c_ni, c_id);
-  rc = ci_tcp_connect_lo_samestack(c_ni, ts, tls->s.b.bufid);
+  rc = ci_tcp_connect_lo_samestack(c_ni, ts, tls->s.b.bufid, &stack_locked);
+
+  /* We have to destroy the shadow listener in the connecting stack,
+   * so we really need to get the stack lock. */
+  if( ! stack_locked ) {
+    int rc1 = ci_netif_lock(c_ni);
+    if( rc1 != 0 ) {
+      /* we leak the shadow listener and a synrecv state, but so be it */
+      ci_log("%s([%d:%d] to [%d:%d]): leaking the shadow listener "
+             "[%d:%d] rc=%d",
+             __func__, c_ni->state->stack_id, OO_SP_TO_INT(c_id),
+             l_ni->state->stack_id, OO_SP_TO_INT(l_id),
+             c_ni->state->stack_id, tls->s.b.bufid, rc);
+      /* rc is usually -ERESTARTSYS, and it does not help user */
+      return -ENOBUFS;
+    }
+  }
 
   /* Accept as from tls */
   if( !ci_tcp_acceptq_not_empty(tls) ) {
@@ -1300,7 +1427,6 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   if (my_addr == NULL)
     RET_WITH_ERRNO( EINVAL );
 
-
   if (s->b.state != CI_TCP_CLOSED)
     RET_WITH_ERRNO( EINVAL );
 
@@ -1319,44 +1445,36 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
   if (s->domain == PF_INET6 && addrlen < SIN6_LEN_RFC2133)
     RET_WITH_ERRNO( EINVAL );
 
-  if( s->domain == PF_INET6 && !ci_tcp_ipv6_is_ipv4(my_addr) ) {
-    if( !(ep->s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) ) {
-      rc = ci_tcp_helper_os_sock_create_and_set(ep->netif, fd, s, -1, 0, NULL,
-                                                0);
-      if( rc < 0 )
-        RET_WITH_ERRNO(errno);
-    }
-    return CI_SOCKET_HANDOVER;
-  }
+  if( s->domain == PF_INET6 && !ci_tcp_ipv6_is_ipv4(my_addr) )
+    goto handover;
 #endif
 
   if( ((s->s_flags & CI_SOCK_FLAG_TPROXY) != 0) &&
       (my_addr_in->sin_port == 0) ) {
     NI_LOG(ep->netif, USAGE_WARNINGS, "Sockets with IP_TRANSPARENT set must "
            "be explicitly bound to a port to be accelerated");
-    if( !(ep->s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) ) {
-      rc = ci_tcp_helper_os_sock_create_and_set(ep->netif, fd, s, -1, 0, NULL,
-                                                0);
-      if( rc < 0 )
-        RET_WITH_ERRNO(errno);
-    }
-    return CI_SOCKET_HANDOVER;
+    goto handover;
   }
 
   addr_be32 = ci_get_ip4_addr(s->domain, my_addr);
 
+  /* In scalable RSS mode accelerated 127.* sockets cause issues:
+   *  * with SO_REUSEPORT they would fail at listen
+   *  * without SO_REUSEPORT they would end up in non-rss stack degrading performance
+   *    with lock contention, epoll3 and accelerated loopback */
+  if( CI_IP_IS_LOOPBACK(addr_be32) &&
+      NI_OPTS(ep->netif).scalable_filter_enable != CITP_SCALABLE_FILTERS_DISABLE &&
+      ((NI_OPTS(ep->netif).scalable_filter_mode &
+                       (CITP_SCALABLE_MODE_PASSIVE | CITP_SCALABLE_MODE_RSS)) ==
+                       (CITP_SCALABLE_MODE_PASSIVE | CITP_SCALABLE_MODE_RSS)) )
+    goto handover;
+
   if( ((s->s_flags & CI_SOCK_FLAG_TPROXY) != 0) && (addr_be32 == 0) ) {
     NI_LOG(ep->netif, USAGE_WARNINGS, "Sockets with IP_TRANSPARENT set must "
            "be explicitly bound to an address to be accelerated");
-    if( !(ep->s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) ) {
-      rc = ci_tcp_helper_os_sock_create_and_set(ep->netif, fd, s, -1, 0, NULL,
-                                                0);
-      if( rc < 0 )
-        RET_WITH_ERRNO(errno);
-    }
-    return CI_SOCKET_HANDOVER;
+    goto handover;
   }
- 
+
   /* Using the port number provided, see if we can do this bind */
   new_port = my_addr_in->sin_port;
 
@@ -1408,6 +1526,15 @@ int ci_tcp_bind(citp_socket* ep, const struct sockaddr* my_addr,
 	     CI_BSWAP_BE16(new_port), CI_BSWAP_BE16(sock_lport_be16(s)))); 
 
   return 0;
+
+ handover:
+  if( !(ep->s->b.sb_aflags & CI_SB_AFLAG_OS_BACKED) ) {
+    rc = ci_tcp_helper_os_sock_create_and_set(ep->netif, fd, s, -1, 0, NULL,
+                                              0);
+    if( rc < 0 )
+      RET_WITH_ERRNO(errno);
+  }
+  return CI_SOCKET_HANDOVER;
 }
 
 
@@ -1435,17 +1562,21 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   unsigned ul_backlog = backlog;
   int rc;
   oo_p sp;
+  int scalable;
+  int will_accelerate;
 
   LOG_TC(log("%s "SK_FMT" listen backlog=%d", __FUNCTION__, SK_PRI_ARGS(ep), 
              backlog));
   CHECK_TEP(ep);
+
+  scalable = ci_tcp_use_mac_filter_listen(netif, s, s->cp.so_bindtodevice);
 
   if( s->s_flags & CI_SOCK_FLAG_DEFERRED_BIND )
     complete_deferred_bind(netif, s, fd);
 
   if( NI_OPTS(netif).tcp_listen_handover )
     return CI_SOCKET_HANDOVER;
-  if( !NI_OPTS(netif).tcp_server_loopback) {
+  if( !NI_OPTS(netif).tcp_server_loopback && ! scalable ) {
     /* We should handover if the socket is bound to alien address. */
     if( s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN )
       return CI_SOCKET_HANDOVER;
@@ -1460,7 +1591,9 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
     tls = SOCK_TO_TCP_LISTEN(s);
     ci_netif_lock(ep->netif);
     tls->acceptq_max = ul_backlog;
-    ci_tcp_helper_listen_os_sock(fd, ul_backlog);
+    if( (s->s_flags & CI_SOCK_FLAG_SCALPASSIVE) == 0 ||
+        NI_OPTS(netif).scalable_listen != CITP_SCALABLE_LISTEN_ACCELERATED_ONLY )
+      ci_tcp_helper_listen_os_sock(fd, ul_backlog);
     ci_netif_unlock(ep->netif);
     return 0;
   }
@@ -1479,7 +1612,6 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
    */
 
   ts->s.tx_errno = EPIPE;
-
 
 
   ts->s.rx_errno = ENOTCONN;
@@ -1521,13 +1653,12 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
 
   ci_assert_equal(tls->s.tx_errno, EPIPE);
 
-
-
   ci_assert_equal(tls->s.rx_errno, ENOTCONN);
 
   /* setup listen timer - do it before the first return statement,
    * because __ci_tcp_listen_to_normal() will be called on error path. */
-  if( ~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN ) {
+  will_accelerate = ~tls->s.s_flags & CI_SOCK_FLAG_BOUND_ALIEN || scalable;
+  if( will_accelerate ) {
     sp = TS_OFF(netif, tls);
     OO_P_ADD(sp, CI_MEMBER_OFFSET(ci_tcp_socket_listen, listenq_tid));
     ci_ip_timer_init(netif, &tls->listenq_tid, sp, "lstq");
@@ -1557,7 +1688,7 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
    *        physical L5 port index
    *  TODO: handle REUSEADDR by setting last paramter to TRUE
    */
-  if( ~s->s_flags & CI_SOCK_FLAG_BOUND_ALIEN ) {
+  if( will_accelerate ) {
 #ifdef ONLOAD_OFE
     if( netif->ofe_channel != NULL ) {
       tls->s.ofe_code_start = ofe_socktbl_find(
@@ -1574,6 +1705,9 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
       tls->ofe_promote = OFE_ADDR_NULL;
     }
 #endif
+    if( scalable )
+      tls->s.s_flags |= CI_SOCK_FLAG_SCALPASSIVE;
+
     rc = ci_tcp_ep_set_filters(netif, S_SP(tls), tls->s.cp.so_bindtodevice,
                                OO_SP_NULL);
     if( rc == -EFILTERSSOME ) {
@@ -1593,19 +1727,23 @@ int ci_tcp_listen(citp_socket* ep, ci_fd_t fd, int backlog)
   }
 
 
+  ci_assert_equal(rc, 0);
+
   /* 
    * Call of system listen() is required for listen any, local host
    * communications server and multi-homed server (to accept connections
    * to L5 assigned address(es), but incoming from other interfaces).
-   */
+   * The exception is scalable passive mode where we avoid listen on
+   * OS socket to avoid kernel LHTABLE related performance degradation. */
+  if( (s->s_flags & CI_SOCK_FLAG_SCALPASSIVE) == 0 ||
+      NI_OPTS(netif).scalable_listen != CITP_SCALABLE_LISTEN_ACCELERATED_ONLY ) {
 #ifdef __ci_driver__
-  {
     rc = efab_tcp_helper_listen_os_sock( netif2tcp_helper_resource(netif),
 					 S_SP(tls), backlog);
-  }
 #else
-  rc = ci_tcp_helper_listen_os_sock(fd, backlog);
+    rc = ci_tcp_helper_listen_os_sock(fd, backlog);
 #endif
+  }
   if ( rc < 0 ) {
     /* clear the filter we've just set */
     ci_tcp_ep_clear_filters(netif, S_SP(tls), 0);
@@ -1686,26 +1824,15 @@ int ci_tcp_shutdown(citp_socket* ep, int how, ci_fd_t fd)
     if( how == SHUT_WR || how == SHUT_RDWR )
       flags |= CI_SOCK_AFLAG_NEED_SHUT_WR;
     ci_atomic32_or(&s->s_aflags, flags);
-    if( ! ci_netif_lock_or_defer_work(ep->netif, &s->b) )
-      return 0;
-    ci_atomic32_and(&s->s_aflags, ~flags);
+    if( ci_netif_lock_or_defer_work(ep->netif, &s->b) )
+      ci_netif_unlock(ep->netif);
+    return 0;
   }
 
-  if( 0 ) {
-    /* Poll to get up-to-date.  This is slightly spurious but done to ensure
-     * ordered response to all packets preceding this FIN (e.g. ANVL tcp_core
-     * 9.18)
-     *
-     * DJR: I've disabled this because it can hurt performance for
-     * high-connection-rate apps.  May consider adding back (as option?) if
-     * needed.
-     */
-    ci_netif_poll(ep->netif);
-  }
   rc = __ci_tcp_shutdown(ep->netif, SOCK_TO_TCP(s), how);
+  ci_netif_unlock(ep->netif);
   if( rc < 0 )
     CI_SET_ERROR(rc, -rc);
-  ci_netif_unlock(ep->netif);
   return rc;
 }
 
@@ -1725,9 +1852,11 @@ int ci_tcp_getpeername(citp_socket* ep, struct sockaddr* name,
   else if( name == NULL || namelen == NULL )
     CI_SET_ERROR(rc, EFAULT);
   else {
-    ci_addr_to_user(name, namelen, s->domain, 
-                    S_TCP_HDR(s)->tcp_dest_be16, s->pkt.ip.ip_daddr_be32);
     rc = 0;
+    if( s->b.state != CI_TCP_LISTEN ) {
+      ci_addr_to_user(name, namelen, s->domain, 
+                      S_TCP_HDR(s)->tcp_dest_be16, s->pkt.ip.ip_daddr_be32);
+    }
   }
 
   return rc;

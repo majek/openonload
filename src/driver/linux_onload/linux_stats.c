@@ -141,7 +141,7 @@ efab_stacks_seq_start(struct seq_file *seq, loff_t *ppos)
   int i, rc;
 
   for( i = 0; i <= *ppos; i++) {
-    rc = iterate_netifs_unlocked(&ni);
+    rc = iterate_netifs_unlocked(&ni, 0, 0);
     if( rc != 0 )
       return NULL;
   }
@@ -154,7 +154,7 @@ efab_stacks_seq_next(struct seq_file *seq, void *v, loff_t *ppos)
   ci_netif *ni = v;
   int rc;
   (*ppos)++;
-  rc = iterate_netifs_unlocked(&ni);
+  rc = iterate_netifs_unlocked(&ni, 0, 0);
   if( rc != 0 )
     return NULL;
   return ni;
@@ -214,6 +214,109 @@ static struct file_operations efab_stacks_seq_fops = {
   .llseek   = seq_lseek,
   .release  = seq_release_private,
 };
+
+
+/* /proc/driver/onload/stacks_ul - user-level mapped stacks (excluding
+ * orphans/zombies)
+ */
+
+static void *
+efab_stacks_seq_start_ul(struct seq_file *seq, loff_t *ppos)
+{
+  ci_netif *ni = NULL;
+  int i, rc;
+
+  for( i = 0; i <= *ppos; i++) {
+    rc = iterate_netifs_unlocked(&ni, 0, 1);
+    if( rc != 0 )
+      return NULL;
+  }
+  return ni;
+}
+
+static void *
+efab_stacks_seq_next_ul(struct seq_file *seq, void *v, loff_t *ppos)
+{
+  ci_netif *ni = v;
+  int rc;
+  (*ppos)++;
+  rc = iterate_netifs_unlocked(&ni, 0, 1);
+  if( rc != 0 )
+    return NULL;
+  return ni;
+}
+
+static struct seq_operations efab_stacks_ul_seq_ops = {
+  .start    = efab_stacks_seq_start_ul,
+  .next     = efab_stacks_seq_next_ul,
+  .stop     = efab_stacks_seq_stop,
+  .show     = efab_stacks_seq_show,
+};
+
+static int
+efab_stacks_ul_seq_open(struct inode *inode, struct file *file)
+{
+  return seq_open(file, &efab_stacks_ul_seq_ops);
+
+}
+static struct file_operations efab_stacks_ul_seq_fops = {
+  .owner    = THIS_MODULE,
+  .open     = efab_stacks_ul_seq_open,
+  .read     = seq_read,
+  .llseek   = seq_lseek,
+  .release  = seq_release_private,
+};
+
+
+/* /proc/driver/onload/stacks_k - kernel-only stacks (aka orphans/zombies) */
+
+static void *
+efab_stacks_seq_start_k(struct seq_file *seq, loff_t *ppos)
+{
+  ci_netif *ni = NULL;
+  int i, rc;
+
+  for( i = 0; i <= *ppos; i++) {
+    rc = iterate_netifs_unlocked(&ni, 1, 0);
+    if( rc != 0 )
+      return NULL;
+  }
+  return ni;
+}
+
+static void *
+efab_stacks_seq_next_k(struct seq_file *seq, void *v, loff_t *ppos)
+{
+  ci_netif *ni = v;
+  int rc;
+  (*ppos)++;
+  rc = iterate_netifs_unlocked(&ni, 1, 0);
+  if( rc != 0 )
+    return NULL;
+  return ni;
+}
+
+static struct seq_operations efab_stacks_k_seq_ops = {
+  .start    = efab_stacks_seq_start_k,
+  .next     = efab_stacks_seq_next_k,
+  .stop     = efab_stacks_seq_stop,
+  .show     = efab_stacks_seq_show,
+};
+
+static int
+efab_stacks_k_seq_open(struct inode *inode, struct file *file)
+{
+  return seq_open(file, &efab_stacks_k_seq_ops);
+
+}
+static struct file_operations efab_stacks_k_seq_fops = {
+  .owner    = THIS_MODULE,
+  .open     = efab_stacks_k_seq_open,
+  .read     = seq_read,
+  .llseek   = seq_lseek,
+  .release  = seq_release_private,
+};
+
 
 #endif
 
@@ -390,6 +493,8 @@ ci_install_proc_entries(void)
 
 #if CI_CFG_STATS_NETIF
   proc_create("stacks", 0, oo_proc_root, &efab_stacks_seq_fops);
+  proc_create("stacks_ul", 0, oo_proc_root, &efab_stacks_ul_seq_fops);
+  proc_create("stacks_k", 0, oo_proc_root, &efab_stacks_k_seq_fops);
 #endif
 
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
@@ -427,7 +532,9 @@ void ci_uninstall_proc_entries(void)
   ci_proc_files_uninstall(oo_proc_root, ci_proc_efab_table,
                           CI_PROC_EFAB_TABLE_SIZE);
 #if CI_CFG_STATS_NETIF
-    remove_proc_entry("stacks", oo_proc_root);
+  remove_proc_entry("stacks_ul", oo_proc_root);
+  remove_proc_entry("stacks_k", oo_proc_root);
+  remove_proc_entry("stacks", oo_proc_root);
 #endif
 #if CI_MEMLEAK_DEBUG_ALLOC_TABLE
   remove_proc_entry("mem", oo_proc_root);

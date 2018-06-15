@@ -271,7 +271,7 @@ static void ci_netif_check_process_config(ci_netif* ni)
       NI_LOG(ni, CONFIG_WARNINGS, "Sockets that are added to an epoll set can "
                                   "only be cached if EF_UL_EPOLL=3");
   }
-  if( (NI_OPTS(ni).scalable_filter_ifindex != 0) &&
+  if( (NI_OPTS(ni).scalable_filter_enable) &&
       (CITP_OPTS.ul_epoll != 1) && (CITP_OPTS.ul_epoll != 3) ) {
     NI_LOG(ni, CONFIG_WARNINGS, "When using a scalable filters mode handover "
                                 "of TCP sockets in an epoll set is only "
@@ -304,6 +304,7 @@ void  citp_netif_ctor_hook(ci_netif* ni, int realloc)
 /* Platform specific code, called proir to netif destruction */
 void  citp_netif_free_hook(ci_netif* ni)
 {
+  citp_uncache_fds_ul(ni);
   /* Unprotect the netif's FD table entry */
   __citp_fdtable_reserve(ci_netif_get_driver_handle(ni), 0);
 }

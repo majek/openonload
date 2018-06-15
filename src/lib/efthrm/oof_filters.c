@@ -90,6 +90,8 @@ int oof_shared_keep_thresh = 100;
  */
 int oof_shared_steal_thresh = 200;
 
+/* Module option to handle all local IP addresses. */
+int oof_use_all_local_ip_addresses = 0;
 
 #define IPF_LOG(...)  OO_DEBUG_IPF(ci_log(__VA_ARGS__))
 #define ERR_LOG(...)  OO_DEBUG_ERR(ci_log(__VA_ARGS__))
@@ -857,7 +859,7 @@ oof_socket_has_cluster_sibling(ci_dllist* list, struct oof_socket* skf)
  *  * there is no other socket - 0 is returned, or
  *  * there is already a socket belonging to a cluster,
       though the socket must not be present in the same stack, then
-      1 is returned and thc_out is populated with the reference
+      0 is returned and thc_out is populated with the reference
  *    to the cluster.
  *  * no-unicast sockets are ignored in any considerations and
  *    allowed to be intalled as compatible
@@ -917,7 +919,7 @@ oof_socket_insert_probe(ci_dllist* list, struct oof_socket* skf,
       if( thc != NULL )
         oof_cb_thc_ref(thc);
       *thc_out = thc;
-      return 1; /* we have found a cluster */
+      return 0;
     }
   }
   /* Either our space no space in our cluster or another cluster claimed
@@ -1214,12 +1216,20 @@ __oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
 void
 oof_manager_addr_add(struct oof_manager* fm, unsigned laddr, unsigned ifindex)
 {
+  struct oof_local_interface_details* lid;
+
   IPF_LOG("%s: addr="IP_FMT" ifindex=%d", __FUNCTION__, IP_ARG(laddr),ifindex);
 
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
 
-  __oof_manager_addr_add(fm, laddr, ifindex);
+  lid = oof_local_interface_details_find(fm, ifindex);
+
+  if( oof_use_all_local_ip_addresses ||
+      (lid != NULL && lid->lid_hwport_mask != 0) )
+    __oof_manager_addr_add(fm, laddr, ifindex);
+  else
+    __oof_manager_addr_del(fm, laddr, ifindex);
 
   spin_unlock_bh(&fm->fm_inner_lock);
   mutex_unlock(&fm->fm_outer_lock);
@@ -2244,6 +2254,12 @@ int oof_socket_replace(struct oof_manager* fm,
   mutex_lock(&fm->fm_outer_lock);
   spin_lock_bh(&fm->fm_inner_lock);
 
+  /* skf socket should not be in any list, but if it is, then we just
+   * remove it. */
+  ci_assert_equal(skf->sf_local_port, NULL);
+  if( skf->sf_local_port != NULL )
+    oof_socket_remove_from_list(skf);
+
   ci_assert_nequal(old_skf->sf_local_port, NULL);
   ci_assert(! ci_dllink_is_free(&old_skf->sf_lp_link));
   ci_assert_flags(old_skf->sf_flags, OOF_SOCKET_DUMMY | OOF_SOCKET_NO_STACK);
@@ -2335,7 +2351,6 @@ int oof_socket_can_update_stack(struct oof_manager* fm, struct oof_socket* skf,
  *
  * Return values:
  * 0 - socket added successfully
- * 1 - socket added thc_out filled (important for dummy stackless sockets)
  * <0 - error
  */
 
@@ -2371,6 +2386,9 @@ oof_socket_add(struct oof_manager* fm, struct oof_socket* skf,
   ci_assert(! dummy || ! do_arm_only);
   ci_assert(lp == NULL || oof_socket_is_dummy(skf));
   ci_assert(dummy || ! no_stack);
+
+  if( thc_out != NULL )
+    *thc_out = NULL;
 
   rc = -EINVAL;
   if( lport == 0 || ((raddr || rport) && ! (raddr && rport)) ) {
@@ -4179,8 +4197,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
   memcpy(oo_filter_spec.addr.mac.mac, mac, sizeof(oo_filter_spec.addr.mac.mac));
   oo_filter_spec.vlan_id = vlan_id;
   rc = oo_hw_filter_update(&ft->ft_filter, trs, &oo_filter_spec,
-                           effective_hwport_mask, effective_hwport_mask,
-                           0,
+                           effective_hwport_mask, effective_hwport_mask, 0,
                            OO_HW_SRC_FLAG_RSS_DST);
 
 #define ETHERTYPE_ARP 0x806
@@ -4199,7 +4216,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
   IPF_LOG("%s: if=%u hwports=%x/%x MAC=%02x%02x%02x%02x%02x%02x "
           "vlan=%d rc=%d rc1=%d",
           __FUNCTION__, ifindex, hwport_mask, effective_hwport_mask,
-         mac[0], mac[1],mac[2], mac[3], mac[4], mac[5], vlan_id, rc, rc1 );
+         mac[0], mac[1],mac[2], mac[3], mac[4], mac[5], vlan_id, rc, rc1);
 
   /* Install the IP-protocol-to-kernel filters. */
   for( i = 0; i < OOF_TPROXY_IPPROTO_FILTER_COUNT; ++i ) {
@@ -4256,8 +4273,7 @@ oof_tproxy_filter_update(struct oof_manager* fm, struct oof_tproxy* ft)
  */
 static int oof_tproxy_alloc(struct oof_manager* fm,
                             struct tcp_helper_resource_s* trs,
-                            struct tcp_helper_cluster_s* thc,
-                            unsigned ifindex)
+                            struct tcp_helper_cluster_s* thc, unsigned ifindex)
 {
   struct oof_tproxy* ft;
   int rc;
@@ -4309,12 +4325,13 @@ oof_tproxy_find(struct oof_manager* fm,
 }
 
 
-/* Add tproxy instance */
+/* Add tproxy instance
+ * rss_idx is index  (0 or 1) of RSS context allocated for vi_set
+ */
 int
 oof_tproxy_install(struct oof_manager* fm,
                    struct tcp_helper_resource_s* trs,
-                   struct tcp_helper_cluster_s* thc,
-                   int ifindex)
+                   struct tcp_helper_cluster_s* thc, int ifindex)
 {
   struct oof_tproxy* ft;
   int rc;

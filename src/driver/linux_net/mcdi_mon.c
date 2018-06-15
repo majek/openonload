@@ -158,6 +158,10 @@ static const struct {
 	SENSOR(BOARD_BACK_TEMP,		"Board back temp.",	    temp, -1),
 	SENSOR(IN_I1V8,			"1.8V supply current",	    curr, -1),
 	SENSOR(IN_I2V5,			"2.5V supply current",	    curr, -1),
+	SENSOR(IN_I3V3,			"3.3V supply current",	    curr, -1),
+	SENSOR(IN_I12V0,		"12V supply current",	    curr, -1),
+	SENSOR(IN_1V3,			"1.3V supply",		    in,   -1),
+	SENSOR(IN_I1V3,			"1.3V supply current",	    curr, -1),
 #undef SENSOR
 };
 

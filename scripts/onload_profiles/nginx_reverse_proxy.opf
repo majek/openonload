@@ -1,0 +1,159 @@
+#
+# Tuning profile for nginx in reverse-proxy configuration with OpenOnload
+# acceleration.
+#
+# User may supply the following environment variables:
+#
+#   NGINX_NUM_WORKERS        - the number of workers that nginx is
+#                              configured to use. Overrides value
+#                              automatically detected from nginx
+#                              configuration
+#
+
+set -o pipefail
+
+# For diagnostic output
+module="nginx profile"
+
+# Regular expressions to match nginx config directives
+worker_processes_pattern="/(^|;)\s*worker_processes\s+(\w+)\s*;/"
+include_pattern="/(^|;)\s*include\s+(\S+)\s*;/"
+
+# Identify the config file that nginx would use
+identify_config_file() {
+  local file
+
+  # Look for a -c option
+  local state="IDLE"
+  for option in "$@"
+  do
+    if [ "$state" = "MINUS_C" ]
+    then
+      file=$option
+      state="FOUND"
+    elif [ "$option" = "-c" ]
+    then
+      state="MINUS_C"
+    fi
+  done
+
+  # Extract the compile-time default if config not specified on command line
+  if [ "$state" != "FOUND" ]
+  then
+    file=$($1 -h 2>&1 | perl -ne 'print $1 if '"$worker_processes_pattern")
+  fi
+
+  [ -f "$file" ] && echo $file
+}
+
+# Recursively look in included config files for a setting of worker_processes.
+# NB If this quantity is set in more than one place then the wrong setting might
+# be found, but this would be invalid anyway and is rejected by Nginx.
+read_config_file() {
+  local setting
+  local worker_values=$(perl -ne 'print "$2 " if '"$worker_processes_pattern" $1)
+  local include_values=$(perl -ne 'print "$2 " if '"$include_pattern" $1)
+
+  # First look in included files
+  for file in $include_values
+  do
+    local possible=$(read_config_file $file)
+    if [ -n "$possible" ]
+    then
+      setting=$possible
+    fi
+  done
+
+  # Then look in explicit settings at this level
+  for workers in $worker_values
+  do
+    setting=$workers
+  done
+  echo $setting
+}
+
+# Method to parse configuration files directly
+try_config_files() {
+  local config_file=$(identify_config_file "$@")
+  [ -n "$config_file" ] && read_config_file $config_file
+}
+
+# Method to parse configuration via nginx, if supported
+try_nginx_minus_t() {
+  "$@" -T | perl -ne 'print "$2" if '"$worker_processes_pattern"
+}
+
+# Method to parse configuration via tengine, if supported
+try_tengine_minus_d() {
+  "$@" -d | perl -ne 'print "$2" if '"$worker_processes_pattern"
+}
+
+# Determine the number of workers nginx will use
+determine_worker_processes() {
+  # Prefer nginx's own parser, if available, for robustness
+  local workers=$(try_nginx_minus_t "$@" || try_tengine_minus_d "$@" || try_config_files "$@")
+  if [ "$workers" = "auto" ]
+  then
+    # Default to the number of process cores
+    workers=$(nproc)
+  fi
+  echo $workers
+}
+
+# Define the number of workers
+num_workers=${NGINX_NUM_WORKERS:-$(determine_worker_processes "$@")}
+if ! [ -n "$num_workers" ]; then
+  fail "ERROR: Environment variable NGINX_NUM_WORKERS is not set and worker count cannot be determined from nginx configuration"
+fi
+log "$module: configuring for $num_workers workers"
+
+# Enable scalable epoll implementation.
+onload_set EF_UL_EPOLL 3
+onload_set EF_EPOLL_MT_SAFE 1
+
+# Enable clustering to spread connections over workers.
+onload_set EF_CLUSTER_SIZE "$num_workers"
+onload_set EF_CLUSTER_NAME prox
+onload_set EF_CLUSTER_RESTART 1
+onload_set EF_CLUSTER_HOT_RESTART 1
+
+# Improve performance with many sockets.
+onload_set EF_SCALABLE_FILTERS "any=rss:active:passive"
+onload_set EF_SCALABLE_FILTERS_ENABLE 2
+onload_set EF_SCALABLE_LISTEN_MODE 1
+onload_set EF_TCP_SHARED_LOCAL_PORTS_REUSE_FAST 1
+onload_set EF_TCP_SHARED_LOCAL_PORTS 32000
+onload_set EF_TCP_SHARED_LOCAL_PORTS_MAX $EF_TCP_SHARED_LOCAL_PORTS
+onload_set EF_TCP_SHARED_LOCAL_PORTS_NO_FALLBACK 1
+onload_set EF_TCP_SHARED_LOCAL_PORTS_PER_IP 1
+
+# Support lots of sockets and enable socket caching.
+onload_set EF_MAX_ENDPOINTS 1000000
+onload_set EF_SOCKET_CACHE_MAX $(( $EF_MAX_ENDPOINTS / 4 ))
+
+# Enable spinning and sleep-spin mode.
+onload_set EF_POLL_USEC 1000000
+onload_set EF_SLEEP_SPIN_USEC 50
+
+# Allocate plenty of packet memory and force hugepages.
+onload_set EF_MAX_PACKETS $(( (60000*32) / $num_workers ))
+onload_set EF_PREALLOC_PACKETS 1
+onload_set EF_USE_HUGE_PAGES 2
+
+# Tune TCP socket parameters.
+onload_set EF_TCP_SYNRECV_MAX 10000
+
+# Disable low-latency sends to minimise CPU overheads.
+onload_set EF_TX_PUSH 0
+
+# Prevent spinning inside socket calls.
+onload_set EF_PKT_WAIT_SPIN 0
+onload_set EF_TCP_RECV_SPIN 0
+onload_set EF_TCP_SEND_SPIN 0
+onload_set EF_TCP_CONNECT_SPIN 0
+onload_set EF_TCP_ACCEPT_SPIN 0
+onload_set EF_UDP_RECV_SPIN 0
+onload_set EF_UDP_SEND_SPIN 0
+
+# Kernel packet injection
+onload_set EF_KERNEL_PACKETS_BATCH_SIZE 1

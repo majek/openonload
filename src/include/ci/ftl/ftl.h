@@ -57,7 +57,7 @@ typedef pthread_t thread_os_t;
 #define OS_FS_NOWHERE "/dev/null"
 #define OS_FS_DIR_HERE "."
 
-#if defined(__ia64__) || defined(__x86_64__)
+#if defined(__x86_64__)
 #define _SIZEOF_LONG 8
 #endif
 

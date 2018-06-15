@@ -178,6 +178,16 @@ int ci_cpu_features_check(int verbose)
   return CI_CPU_OK;
 }
 
+#elif defined(__x86_64__)
+
+ci_inline void
+get_cpuid(int op, int *eax, int *ebx, int *ecx, int *edx)
+{
+  __asm__ __volatile__ ("cpuid\n\t"
+                        : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
+                        : "a" (op));
+}
+
 #else
 
 /*****************************************************************************
@@ -192,5 +202,21 @@ extern int ci_cpu_features_check(int verbose)
 }
 
 #endif
+
+int ci_cpu_has_feature(char* feature)
+{
+#if defined(__x86_64__) || defined(__i386__)
+  int eax, ebx, ecx, edx;
+
+  /* Leaf 1 = CPUID feature bits */
+  get_cpuid(1, &eax, &ebx, &ecx, &edx);
+
+  if( ! strcmp(feature, "pclmul") )
+    return ecx & 0x00000002;
+#endif
+
+  /* Not supported on platforms that don't implement the CPUID instruction */
+  return 0;
+}
 
 /*! \cidoxg_end */

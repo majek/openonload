@@ -187,7 +187,59 @@ the packet data can optionally be updated before being transmitted. This
 improves latency because it reduces the amount of data that needs to be 
 passed to the adapter on the critical path.
 
-\section filters Filters
+\section ctpio Cut-through PIO
+
+CTPIO (Cut-through PIO) improves send latency by moving packets from the PCIe 
+bus to network port with minimal latency.  It can be used in three modes:
+-# Cut-through: The frame is transmitted onto the network as it is streamed 
+   across the PCIe bus.  This mode offers the best latency.
+-# Store-and-forward: The frame is buffered on the adapter before 
+   transmitting onto the network.
+-# Store-and-forward with poison disabled: As for (2), except that it is 
+   guaranteed that frames are never poisoned.  When this mode is enabled on 
+   any VI, all VIs are placed into store-and-forward mode.
+
+Due to differences in hardware architecture, CTPIO is not available on
+SFN8000-series or earlier adapters.
+   
+\subsection poisoning Underrun, poisoning and fallback:
+
+When using cut-through mode, if the frame is not streamed to the adapter
+at at least line rate, then the frame is likely to be poisoned.  This is
+most likely to happen if the application thread is interrupted while
+writing the frame to the adapter.  In the underrun case, the frame is
+terminated with an invalid FCS -- this is referred to as "poisoning" --
+and so will be discarded by the link partner.  Cut-through mode is
+currently expected to perform well only on 10G links.
+
+CTPIO may be aborted for other reasons, including timeout while writing a
+frame, contention between threads using CTPIO at the same time, and the
+CPU writing data to the adapter in the wrong order.
+
+In all of the above failure cases the adapter falls-back to sending via
+the traditional DMA mechanism, which incurs a latency penalty.  So a valid
+copy of the packet is always transmitted, whether the CTPIO operation
+succeeds or not.
+
+Normally only an underrun in cut-through mode will result in a poisoned
+frame being transmitted.  In rare cases it is also possible for a poisoned
+frame to be emitted in store-and-forward mode.  If it is necessary to
+strictly prevent poisoned packets from reaching the network, then
+poisoning can be disabled globally.
+
+\subsection ctpio_diagnostics CTPIO diagnostics
+
+The adapter maintains counters that show whether CTPIO is being used, and any 
+reasons for CTPIO sends failing.  These can be inspected as follows: 
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~{.sh}
+ethtool -S ethX | grep ctpio
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Note that some of these counters are maintained on a per-adapter basis, 
+whereas others are per network port.
+
+ \section filters Filters
 
 _Filters_ select which packets are delivered to a virtual interface. 
 Packets that are not selected are ignored and allowed to pass on to the 

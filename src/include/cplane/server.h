@@ -55,9 +55,15 @@
  * onload_mibdump. */
 #define CP_SERVER_PRINT_STATE_SIGNAL  SIGUSR1
 
-/* When the server received this signal, it dumps the OS control
- * information and refreshes its internal state.  The OO_IOC_CP_DUMP_DONE
- * ioctl is called by the server when the operation is complete. */
-#define CP_SERVER_DUMP_STATE_SIGNAL   SIGUSR2
+
+#include <cplane/mib.h> /* for cp_fwd_key */
+static inline struct cp_fwd_key* cp_siginfo2key(siginfo_t* info)
+{
+/* Linux sometimes overwrites ._kill._pid field when sending a signal. */
+#define CP_SIGINFO_REQ_OFFSET 64
+  CI_BUILD_ASSERT(sizeof(info->_sifields) >=
+                  sizeof(struct cp_fwd_key) + CP_SIGINFO_REQ_OFFSET);
+  return (void*)((ci_uintptr_t)&info->_sifields + CP_SIGINFO_REQ_OFFSET);
+}
 
 #endif /* defined(__ONLOAD_CPLANE_SERVER_H__) */

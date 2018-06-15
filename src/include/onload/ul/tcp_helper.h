@@ -42,6 +42,8 @@ extern int ci_tcp_helper_stack_attach(ci_fd_t from_fd,
 /*! Allocate fd for socket ep_id and create OS socket for UDP socks */
 extern int ci_tcp_helper_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                      int domain, int type);
+extern int
+ci_tcp_helper_sock_attach_to_existing_file(ci_fd_t stack_fd, oo_sp ep_id);
 /*! Allocate fd for accepted tcp socket ep_id */
 extern int ci_tcp_helper_tcp_accept_sock_attach(ci_fd_t stack_fd, oo_sp ep_id,
                                                int type);
@@ -218,7 +220,12 @@ extern int ci_tcp_helper_set_tcp_close_os_sock(ci_netif *ni,
  *!
  * Try and expand the active wild pool
  *--------------------------------------------------------------------*/
-extern int ci_tcp_helper_alloc_active_wild(ci_netif *ni);
+extern int ci_tcp_helper_alloc_active_wild(ci_netif *ni, ci_uint32 laddr_be32);
+
+extern int
+ci_tcp_inject_packets(ci_netif *ni, int ifindex, struct iovec* kernel_packets,
+                      int num);
+
 
 #endif /* __CI_UL_TCP_HELPER_H__ */
 

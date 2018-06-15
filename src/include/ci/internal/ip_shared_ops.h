@@ -523,20 +523,10 @@ ci_inline uint8_t* oo_ether_shost(ci_ip_pkt_fmt* pkt)
   return oo_ether_hdr(pkt)->ether_shost;
 }
 
-ci_inline void* oo_ether_data(ci_ip_pkt_fmt* pkt)
-{
-  return pkt->dma_start + pkt->pkt_eth_payload_off;
-}
-
-ci_inline int oo_ether_hdr_size(const ci_ip_pkt_fmt* pkt)
+/* Length of headers ahead of L3 header.  Includes encap if any. */
+ci_inline int oo_pre_l3_len(const ci_ip_pkt_fmt* pkt)
 {
   return pkt->pkt_eth_payload_off - pkt->pkt_start_off;
-}
-
-ci_inline uint16_t oo_ether_type_get(const ci_ip_pkt_fmt* pkt)
-{
-  const uint16_t* p = (const void*) oo_ether_data((ci_ip_pkt_fmt*) pkt);
-  return p[-1];
 }
 
 
@@ -544,14 +534,19 @@ ci_inline uint16_t oo_ether_type_get(const ci_ip_pkt_fmt* pkt)
 ************************ IP header access ****************************
 *********************************************************************/
 
+ci_inline void* oo_l3_hdr(ci_ip_pkt_fmt* pkt)
+{
+  return pkt->dma_start + pkt->pkt_eth_payload_off;
+}
+
 ci_inline ci_ip4_hdr* oo_ip_hdr(ci_ip_pkt_fmt* pkt)
 {
-  return (ci_ip4_hdr*) oo_ether_data(pkt);
+  return oo_l3_hdr(pkt);
 }
 
 ci_inline const ci_ip4_hdr* oo_ip_hdr_const(const ci_ip_pkt_fmt* pkt)
 {
-  return (const ci_ip4_hdr*) oo_ether_data((ci_ip_pkt_fmt*) pkt);
+  return oo_l3_hdr((ci_ip_pkt_fmt*) pkt);
 }
 
 ci_inline void* oo_ip_data(ci_ip_pkt_fmt* pkt)
@@ -576,20 +571,32 @@ ci_inline void oo_tx_pkt_layout_init(ci_ip_pkt_fmt* pkt)
   ci_assert_equal(pkt->pkt_eth_payload_off, 0xff);
   pkt->pkt_start_off = 0;
   pkt->pkt_eth_payload_off = ETH_HLEN;
+  pkt->pkt_outer_l3_off = ETH_HLEN;
 }
 
 ci_inline void oo_tx_pkt_layout_update(ci_ip_pkt_fmt* pkt, int ether_offset)
 {
-  int delta;
+  /* ether_offset==0 means VLAN tag is present.  ==4 means no VLAN. */
+  int eth_hdr_len = (ETH_HLEN + ETH_VLAN_HLEN) - ether_offset;
+  int8_t new_start_off = pkt->pkt_outer_l3_off - eth_hdr_len;
+  int16_t delta = new_start_off - pkt->pkt_start_off;
+
+  /* Sanity check the consistency of the values.  We only support two options,
+   * ethernet header with VLAN or ethernet header without VLAN.  The
+   * ethernet header (with or without VLAN) occurs directly before the
+   * outer l3 header.  The only change we can make in this function is to
+   * add or remove a VLAN.
+   */
   ci_assert(ether_offset == 0 || ether_offset == ETH_VLAN_HLEN);
   ci_assert_equal(pkt->pkt_eth_payload_off, ETH_HLEN);
-  ci_assert(pkt->pkt_start_off == 0 || pkt->pkt_start_off == -ETH_VLAN_HLEN);
-  ether_offset -= ETH_VLAN_HLEN;
-  delta = (int) pkt->pkt_start_off - ether_offset;
+  ci_assert(pkt->pkt_start_off == pkt->pkt_outer_l3_off - ETH_HLEN ||
+            pkt->pkt_start_off == pkt->pkt_outer_l3_off -
+                                  (ETH_HLEN + ETH_VLAN_HLEN));
   ci_assert(delta == 0 || delta == ETH_VLAN_HLEN || delta == -ETH_VLAN_HLEN);
-  pkt->buf_len += delta;
-  pkt->pay_len += delta;
-  pkt->pkt_start_off = ether_offset;
+
+  pkt->pkt_start_off = new_start_off;
+  pkt->buf_len -= delta;
+  pkt->pay_len -= delta;
 }
 
 ci_inline struct oo_eth_hdr* oo_tx_ether_hdr(ci_ip_pkt_fmt* pkt)
@@ -597,21 +604,48 @@ ci_inline struct oo_eth_hdr* oo_tx_ether_hdr(ci_ip_pkt_fmt* pkt)
   return oo_ether_hdr(pkt);
 }
 
-ci_inline void* oo_tx_ether_data(ci_ip_pkt_fmt* pkt)
+ci_inline int oo_tx_ether_hdr_size(const ci_ip_pkt_fmt* pkt)
+{
+  return pkt->pkt_outer_l3_off - pkt->pkt_start_off;
+}
+
+/* Length of headers ahead of L3 header.  Includes encap if any. */
+ci_inline int oo_tx_pre_l3_len(const ci_ip_pkt_fmt* pkt)
+{
+  return pkt->pkt_eth_payload_off - pkt->pkt_start_off;
+}
+
+ci_inline int oo_tx_l3_len(const ci_ip_pkt_fmt* pkt)
+{
+  return pkt->pay_len - (pkt->pkt_eth_payload_off - pkt->pkt_start_off);
+}
+
+ci_inline uint16_t oo_tx_ether_type_get(const ci_ip_pkt_fmt* pkt)
+{
+  const uint16_t* p = (const void*) (pkt->dma_start + pkt->pkt_outer_l3_off);
+  return p[-1];
+}
+
+ci_inline void oo_tx_ether_type_set(ci_ip_pkt_fmt* pkt, uint16_t ether_type)
+{
+  uint16_t* p = (void*) (pkt->dma_start + pkt->pkt_outer_l3_off);
+  p[-1] = ether_type;
+}
+
+ci_inline void* oo_tx_outer_l3_hdr(ci_ip_pkt_fmt* pkt)
+{
+  return pkt->dma_start + pkt->pkt_outer_l3_off;
+}
+
+ci_inline void* oo_tx_l3_hdr(ci_ip_pkt_fmt* pkt)
 {
   ci_assert_equal(pkt->pkt_eth_payload_off, ETH_HLEN);
   return pkt->dma_start + ETH_HLEN;
 }
 
-ci_inline void oo_tx_ether_type_set(ci_ip_pkt_fmt* pkt, uint16_t ether_type)
-{
-  uint16_t* p = oo_tx_ether_data(pkt);
-  p[-1] = ether_type;
-}
-
 ci_inline ci_ip4_hdr* oo_tx_ip_hdr(ci_ip_pkt_fmt* pkt)
 {
-  return (ci_ip4_hdr*) oo_tx_ether_data(pkt);
+  return oo_tx_l3_hdr(pkt);
 }
 
 ci_inline void* oo_tx_ip_data(ci_ip_pkt_fmt* pkt)
@@ -627,6 +661,10 @@ ci_inline void* oo_tx_ip_data(ci_ip_pkt_fmt* pkt)
 ci_inline void *ci_ip_cache_ether_hdr(const ci_ip_cached_hdrs *ipcache)
 {
   return (void *)(ipcache->ether_header + ipcache->ether_offset);
+}
+ci_inline int ci_ip_cache_ether_hdr_len(const ci_ip_cached_hdrs *ipcache)
+{
+  return ETH_HLEN + ETH_VLAN_HLEN - ipcache->ether_offset;
 }
 ci_inline void *ci_ip_cache_ether_dhost(const ci_ip_cached_hdrs *ipcache)
 {

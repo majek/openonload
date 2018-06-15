@@ -15,7 +15,8 @@ MMAKE_LIB_DEPS	:= $(CIIP_LIB_DEPEND) $(CIAPP_LIB_DEPEND) \
 MMAKE_LIBS	:= $(LINK_CIIP_LIB) $(LINK_CIAPP_LIB) \
 		   $(LINK_CIUL_LIB) $(LINK_CITOOLS_LIB) \
 		   -lpthread $(JANSSON_LIB) $(LINK_CPLANE_LIB)
-MMAKE_INCLUDE	+= -I$(TOP)/src/tools/jansson-2.7/src
+MMAKE_INCLUDE	+= -I$(TOP)/src/tools/jansson-2.7/src \
+                 -I$(TOP)/src/tools/ip
 
 LIBS      += $(MMAKE_LIBS)
 INCS      += $(MMAKE_INCLUDE)

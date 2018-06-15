@@ -61,6 +61,8 @@
 #include <ci/efrm/kernel_proc.h>
 #include <ci/efrm/efrm_client.h>
 #include <ci/efhw/nic.h>
+#include <ci/efhw/mc_driver_pcol.h>
+#include <ci/tools/bitfield.h>
 
 
 /* ************************************* */
@@ -1903,18 +1905,17 @@ void efrm_filter_shutdown()
 	mutex_lock( &efrm_ft_mutex );
 
 	/* Make sure everything is freed up properly */
-        while ( !rc && efrm_in_first_interface ) {
-                while ( !rc && efrm_in_first_interface->efrm_in_root_table ) {
-                        rc = remove_table( efrm_in_first_interface->efrm_in_root_table );
-                        if ( rc ) {
-                                EFRM_ERR( "%s:Error %d removing table",
-                                          __func__, rc );
-                        }
-                }
-
-                remove_interface_name( efrm_in_first_interface );
+	while( !rc && efrm_in_first_interface &&
+	       efrm_in_first_interface->efrm_in_root_table ) {
+		rc = remove_table(efrm_in_first_interface->efrm_in_root_table);
+		if( rc ) {
+			EFRM_ERR( "%s:Error %d removing table",
+				  __func__, rc );
+		}
 	}
 
+	if( efrm_in_first_interface != NULL )
+		remove_interface_name( efrm_in_first_interface );
 	efrm_in_first_interface = NULL;
 
 	mutex_unlock( &efrm_ft_mutex );
@@ -2080,6 +2081,138 @@ int efrm_filter_rename( struct efhw_nic *nic, struct net_device *net_dev )
 	return 0;
 }
 
+ci_inline u32 efrm_rss_mode_to_nic_flags(u32 default_nic_flags, u32 efrm_rss_mode)
+{
+	u32 nic_tcp_mode;
+	u32 nic_src_mode = (1 << RSS_MODE_HASH_SRC_ADDR_LBN) |
+			   (1 << RSS_MODE_HASH_SRC_PORT_LBN);
+	u32 nic_dst_mode = (1 << RSS_MODE_HASH_DST_ADDR_LBN) |
+			   (1 << RSS_MODE_HASH_DST_PORT_LBN);
+	u32 nic_all_mode = nic_src_mode | nic_dst_mode;
+	ci_dword_t nic_flags = { {default_nic_flags} };
+
+	switch(efrm_rss_mode) {
+	case EFRM_RSS_MODE_SRC:
+		nic_tcp_mode = nic_src_mode;
+		break;
+	case EFRM_RSS_MODE_DST:
+		nic_tcp_mode = nic_dst_mode;
+		break;
+	case EFRM_RSS_MODE_DEFAULT:
+		nic_tcp_mode = nic_all_mode;
+		break;
+	default:
+		EFHW_ASSERT(!"Unknown rss mode");
+		return -EINVAL;
+	};
+
+	CI_POPULATE_DWORD_2(nic_flags,
+		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TOEPLITZ_TCPV4_EN, 1,
+		MC_CMD_RSS_CONTEXT_SET_FLAGS_IN_TCP_IPV4_RSS_MODE, nic_tcp_mode
+		);
+	return nic_flags.u32[0];
+}
+
+int efrm_rss_context_alloc(struct efrm_client* client, u32 vport_id,
+			   int shared,
+			   const u32 *indir,
+			   const u8 *key, u32 efrm_rss_mode,
+			   int num_qs,
+			   u32 *rss_context_out)
+{
+	int rc;
+	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
+#if EFX_DRIVERLINK_API_VERSION >= 23
+	struct efx_dl_device *efx_dev;
+	u32 nic_default_rss_flags;
+	u32 nic_rss_flags;
+	if (vport_id != EVB_PORT_ID_ASSIGNED)
+		return -ENOTSUPP;
+
+	efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
+	/* If [efx_dev] is NULL, the hardware is morally absent. */
+	if (efx_dev == NULL)
+		return -ENETDOWN;
+	nic_default_rss_flags = efx_dl_rss_flags_default(efx_dev);
+	nic_rss_flags = efrm_rss_mode_to_nic_flags(nic_default_rss_flags,
+						   efrm_rss_mode);
+	/* Driverlink API takes ef10 MCDI compatible RSS flags */
+	rc = efx_dl_rss_context_new(efx_dev, indir, key, nic_rss_flags,
+				    num_qs, rss_context_out);
+	efhw_nic_release_dl_device(efhw_nic, efx_dev);
+	return rc;
+#else
+	u32 rss_context;
+	u32 rss_flags;
+
+	switch(efrm_rss_mode) {
+	case EFRM_RSS_MODE_SRC:
+		rss_flags = EFHW_RSS_FLAG_SRC_ADDR | EFHW_RSS_FLAG_SRC_PORT;
+		break;
+	case EFRM_RSS_MODE_DST:
+		rss_flags = EFHW_RSS_FLAG_DST_ADDR | EFHW_RSS_FLAG_DST_PORT;
+		break;
+	case EFRM_RSS_MODE_DEFAULT:
+		rss_flags = 0;
+		break;
+	default:
+		EFHW_ASSERT(!"Unknown rss mode");
+		return -EINVAL;
+	};
+
+	rc = efhw_nic_rss_context_alloc(efhw_nic, vport_id,
+					num_qs, shared, &rss_context);
+	if (rc < 0 || shared) {
+		if (rc == 0)
+			*rss_context_out = rss_context;
+		return rc;
+	}
+	rc = efhw_nic_rss_context_set_key(efhw_nic, rss_context, key);
+	if (rc < 0)
+		goto fail;
+	{
+		u8 indir8[EFRM_RSS_INDIRECTION_TABLE_LEN];
+		int i;
+		for(i = 0; i < sizeof(indir8) / sizeof(*indir8); ++i)
+			indir8[i] = indir[i];
+		rc = efhw_nic_rss_context_set_table(efhw_nic, rss_context, indir8);
+	}
+	if (rc < 0)
+		goto fail;
+	if (rss_flags) {
+		rc = efhw_nic_rss_context_set_flags(efhw_nic, rss_context,
+						    rss_flags);
+		if (rc < 0)
+			goto fail;
+	}
+	*rss_context_out = rss_context;
+	return 0;
+fail:
+	efhw_nic_rss_context_free(efhw_nic, rss_context);
+	return rc;
+#endif
+}
+EXPORT_SYMBOL(efrm_rss_context_alloc);
+
+int efrm_rss_context_free(struct efrm_client* client, u32 rss_context_id)
+{
+	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
+#if EFX_DRIVERLINK_API_VERSION >= 23
+        struct efx_dl_device *efx_dev;
+        int rc;
+        efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
+        /* If [efx_dev] is NULL, the hardware is morally absent. */
+        if (efx_dev == NULL)
+                return -ENETDOWN;
+        rc = efx_dl_rss_context_free(efx_dev, rss_context_id);
+        efhw_nic_release_dl_device(efhw_nic, efx_dev);
+        return rc;
+#else
+	return efhw_nic_rss_context_free(efhw_nic, rss_context_id);
+#endif
+}
+EXPORT_SYMBOL(efrm_rss_context_free);
+
 /* ************************************************************* */
 /* Entry point: check if a filter is valid, and insert it if so. */
 /* ************************************************************* */
@@ -2131,19 +2264,26 @@ EXPORT_SYMBOL(efrm_filter_remove);
 
 
 int efrm_filter_redirect(struct efrm_client *client, int filter_id,
-			  int rxq_i, int stack_id)
+			 struct efx_filter_spec *spec)
 {
 	struct efhw_nic *efhw_nic = efrm_client_get_nic(client);
 	struct efx_dl_device *efx_dev = efhw_nic_acquire_dl_device(efhw_nic);
-	if ( efx_dev != NULL ) {
-		int rc = efx_dl_filter_redirect(efx_dev, filter_id, rxq_i,
-						stack_id);
-		efhw_nic_release_dl_device(efhw_nic, efx_dev);
-		return rc;
-	}
+	int stack_id = spec->flags & EFX_FILTER_FLAG_STACK_ID ? spec->stack_id : 0;
+	int rc;
 	/* If [efx_dev] is NULL, the hardware is morally absent and so there's
 	 * nothing to do. */
-        return -ENODEV;
+	if (efx_dev == NULL)
+		return -ENODEV;
+#if EFX_DRIVERLINK_API_VERSION >= 23
+	if (spec->flags & EFX_FILTER_FLAG_RX_RSS )
+		rc = efx_dl_filter_redirect_rss(efx_dev, filter_id, spec->dmaq_id,
+						spec->rss_context, stack_id);
+	else
+#endif
+		rc = efx_dl_filter_redirect(efx_dev, filter_id, spec->dmaq_id,
+					    stack_id);
+	efhw_nic_release_dl_device(efhw_nic, efx_dev);
+	return rc;
 }
 EXPORT_SYMBOL(efrm_filter_redirect);
 
@@ -2188,3 +2328,10 @@ out:
 	return rc;
 }
 EXPORT_SYMBOL(efrm_filter_block_kernel);
+
+ci_inline void build_tests(void) {
+	CI_BUILD_ASSERT(EFRM_RSS_KEY_LEN ==
+			MC_CMD_RSS_CONTEXT_SET_KEY_IN_TOEPLITZ_KEY_LEN);
+	CI_BUILD_ASSERT(EFRM_RSS_INDIRECTION_TABLE_LEN ==
+			MC_CMD_RSS_CONTEXT_SET_TABLE_IN_INDIRECTION_TABLE_LEN);
+}

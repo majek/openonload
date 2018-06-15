@@ -19,5 +19,6 @@
 #define EFCH_VI_MMAP_IO  0
 #define EFCH_VI_MMAP_MEM 1
 #define EFCH_VI_MMAP_PIO 2
+#define EFCH_VI_MMAP_CTPIO 3
 
 #endif

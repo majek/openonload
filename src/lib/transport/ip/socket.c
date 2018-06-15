@@ -38,7 +38,9 @@ void ci_sock_cmn_reinit(ci_netif* ni, ci_sock_cmn* s)
   s->pkt.ether_type = CI_ETHERTYPE_IP;
   ci_ip_cache_init(&s->pkt);
 
-  s->s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
+  s->s_flags &= ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER |
+                  CI_SOCK_FLAG_SCALPASSIVE);
+  ci_assert_nflags(s->s_flags, CI_SOCK_FLAG_SCALACTIVE);
 }
 
 
@@ -93,7 +95,9 @@ void ci_sock_cmn_init(ci_netif* ni, ci_sock_cmn* s, int can_poison)
   s->rx_bind2dev_vlan = 0;
 
   s->cmsg_flags = 0u;
+#if CI_CFG_TIMESTAMPING
   s->timestamping_flags = 0u;
+#endif
   s->os_sock_status = OO_OS_STATUS_TX;
 
 
@@ -134,10 +138,10 @@ void ci_sock_cmn_dump(ci_netif* ni, ci_sock_cmn* s, const char* pf,
          (s->os_sock_status & OO_OS_STATUS_RX) ? ",RX":"",
          (s->os_sock_status & OO_OS_STATUS_TX) ? ",TX":"");
 
-  if( s->b.ready_list_id > 0 )
-    logger(log_arg, "%s  epoll3: ready_list_id %d epoll_pid %d",
-           pf, s->b.ready_list_id, s->b.eitem_pid);
-  else
-    logger(log_arg, "%s  epoll3: ready_list_id %d", pf, s->b.ready_list_id);
+  if( s->b.ready_lists_in_use != 0 ) {
+    ci_uint32 tmp, i;
+    CI_READY_LIST_EACH(s->b.ready_lists_in_use, tmp, i)
+      logger(log_arg, "%s  epoll3: ready_list_id %d", pf, i);
+  }
 }
 

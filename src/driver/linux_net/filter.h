@@ -163,6 +163,9 @@ enum efx_filter_flags {
 	EFX_FILTER_FLAG_LOOPBACK = 0x80,
 };
 
+/* user_id of the driver-default RSS context */
+#define EFX_FILTER_RSS_CONTEXT_DEFAULT	0
+
 /** enum efx_encap_type - types of encapsulation
  * @EFX_ENCAP_TYPE_NONE: no encapsulation
  * @EFX_ENCAP_TYPE_VXLAN: VXLAN encapsulation
@@ -188,7 +191,9 @@ enum efx_encap_type {
  * @match_flags: Match type flags, from &enum efx_filter_match_flags
  * @priority: Priority of the filter, from &enum efx_filter_priority
  * @flags: Miscellaneous flags, from &enum efx_filter_flags
- * @rss_context: RSS context to use, if %EFX_FILTER_FLAG_RX_RSS is set
+ * @rss_context: RSS context to use, if %EFX_FILTER_FLAG_RX_RSS is set.  This
+ *	is a user_id (with %EFX_FILTER_RSS_CONTEXT_DEFAULT meaning the
+ *	driver/default RSS context), not an MCFW context_id.
  * @dmaq_id: Source/target queue index, or %EFX_FILTER_RX_DMAQ_ID_DROP for
  *	an RX drop filter
  * @stack_id: Stack id associated with RX queue, used for
@@ -245,7 +250,6 @@ struct efx_filter_spec {
 };
 
 enum {
-	EFX_FILTER_RSS_CONTEXT_DEFAULT = 0xffffffff,
 	EFX_FILTER_RX_DMAQ_ID_DROP = 0xfff
 };
 
@@ -257,7 +261,7 @@ static inline void efx_filter_init_rx(struct efx_filter_spec *spec,
 	memset(spec, 0, sizeof(*spec));
 	spec->priority = priority;
 	spec->flags = EFX_FILTER_FLAG_RX | flags;
-	spec->rss_context = EFX_FILTER_RSS_CONTEXT_DEFAULT;
+	spec->rss_context = 0;
 	spec->dmaq_id = rxq_id;
 }
 

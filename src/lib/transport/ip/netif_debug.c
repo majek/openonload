@@ -259,8 +259,8 @@ void ci_netif_dump_sockets_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   }
 }
 
-
-void ci_netif_print_sockets(ci_netif* ni)
+void ci_netif_netstat_sockets_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
+                                        void *log_arg)
 {
   ci_netif_state* ns = ni->state;
   unsigned id;
@@ -270,9 +270,14 @@ void ci_netif_print_sockets(ci_netif* ni)
     if( wo->waitable.state != CI_TCP_STATE_FREE &&
         wo->waitable.state != CI_TCP_CLOSED &&
         CI_TCP_STATE_IS_SOCKET(wo->waitable.state) ) {
-      citp_waitable_print(&wo->waitable);
+      citp_waitable_print_to_logger(&wo->waitable, logger, log_arg);
     }
   }
+}
+
+void ci_netif_print_sockets(ci_netif* ni)
+{
+  ci_netif_netstat_sockets_to_logger(ni, ci_log_dump_fn, NULL);
 }
 
 
@@ -435,21 +440,13 @@ void ci_netif_pkt_dump(ci_netif* ni, ci_ip_pkt_fmt* pkt, int is_recv, int dump)
   ci_log("%s: id=%d flags=%x "CI_PKT_FLAGS_FMT,
          __FUNCTION__, OO_PKT_FMT(pkt), pkt->flags, CI_PKT_FLAGS_PRI_ARG(pkt));
 
-  switch( oo_ether_type_get(pkt) ) {
-  case CI_ETHERTYPE_IP:
-    switch( oo_ip_hdr(pkt)->ip_protocol ) {
-    case IPPROTO_TCP:
-      ci_tcp_pkt_dump(ni, pkt, is_recv, dump);
-      break;
-    default:
-      log("%s: pkt=%d unsupported ip_protocol=%d",
-	  __FUNCTION__, OO_PKT_FMT(pkt), (int) oo_ip_hdr(pkt)->ip_protocol);
-      break;
-    }
+  switch( oo_ip_hdr(pkt)->ip_protocol ) {
+  case IPPROTO_TCP:
+    ci_tcp_pkt_dump(ni, pkt, is_recv, dump);
     break;
   default:
-    log("%s: pkt=%d unsupported ethertype=%x", __FUNCTION__, OO_PKT_FMT(pkt),
-	(unsigned) CI_BSWAP_BE16(oo_ether_type_get(pkt)));
+    log("%s: pkt=%d unsupported ip_protocol=%d",
+        __FUNCTION__, OO_PKT_FMT(pkt), (int) oo_ip_hdr(pkt)->ip_protocol);
     break;
   }
 }
@@ -623,11 +620,18 @@ static void ci_netif_dump_vi(ci_netif* ni, int intf_i, oo_dump_log_fn_t logger,
 #endif
          nic->tx_dmaq_done_seq, nic->tx_bytes_added - nic->tx_bytes_removed);
   logger(log_arg, "  txq: ts_nsec=%x", vi->ep_state->txq.ts_nsec);
+#if CI_CFG_TIMESTAMPING
   logger(log_arg, "  clk: %s%s",
          (nic->last_sync_flags & EF_VI_SYNC_FLAG_CLOCK_SET) ? "SET " : "",
          (nic->last_sync_flags & EF_VI_SYNC_FLAG_CLOCK_IN_SYNC) ? "SYNC" : "");
   logger(log_arg, "  last_rx_stamp: %x:%x",
          nic->last_rx_timestamp.tv_sec, nic->last_rx_timestamp.tv_nsec);
+#endif
+#if CI_CFG_CTPIO
+  logger(log_arg, "  ctpio: max_frame_len=%u frame_len_check=%u ct_thresh=%u",
+         nic->ctpio_max_frame_len, nic->ctpio_frame_len_check,
+         nic->ctpio_ct_threshold);
+#endif
   if( nic->nic_error_flags )
     logger(log_arg, "  ERRORS: "CI_NETIF_NIC_ERRORS_FMT,
            CI_NETIF_NIC_ERRORS_PRI_ARG(nic->nic_error_flags));
@@ -737,6 +741,7 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   ci_uint64 tmp;
   long diff;
   int intf_i;
+  int i;
 
   logger(log_arg, "%s: stack=%d name=%s",
          __FUNCTION__, NI_ID(ni), ni->state->name);
@@ -777,9 +782,12 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
   logger(log_arg, "  sock_bufs: max=%u n_allocated=%u",
          NI_OPTS(ni).max_ep_bufs, ns->n_ep_bufs);
   /* aux buffers number is limited by tcp_synrecv_max*2 */
-  logger(log_arg, "  aux_bufs: max=%u allocated=%u free=%u",
-         NI_OPTS(ni).tcp_synrecv_max * 2, ni->state->n_aux_bufs,
+  logger(log_arg, "  aux_bufs: free=%u",
          ns->n_free_aux_bufs);
+  for( i = 0; i < CI_TCP_AUX_TYPE_NUM; i++ ) {
+    logger(log_arg, "  aux_bufs[%s]: n=%d max=%d",
+           ci_tcp_aux_type2str(i), ns->n_aux_bufs[i], ns->max_aux_bufs[i]);
+  }
   ci_netif_dump_pkt_summary(ni, logger, log_arg);
 
 
@@ -808,9 +816,19 @@ void ci_netif_dump_to_logger(ci_netif* ni, oo_dump_log_fn_t logger,
          *(ci_uint32*)CI_NETIF_PTR(ni, ns->active_cache.avail_stack), 
          ci_ni_dllist_is_empty(ni, &ns->active_cache.cache) ? "EMPTY":"yes",
          ci_ni_dllist_is_empty(ni, &ns->active_cache.pending) ? "EMPTY":"yes");
-
+  logger(log_arg, "  passive scalable cache: cache=%s pending=%s",
+         ci_ni_dllist_is_empty(ni, &ns->passive_scalable_cache.cache) ? "EMPTY":"yes",
+         ci_ni_dllist_is_empty(ni, &ns->passive_scalable_cache.pending) ? "EMPTY":"yes");
 #endif
-
+  {
+    int i, tmp;
+    CI_READY_LIST_EACH(ns->ready_lists_in_use, tmp, i)
+      logger(log_arg, "  readylist: id=%d pid=%d ready=%s unready=%s flags=%x", i,
+           ns->ready_list_pid[i],
+           ci_ni_dllist_is_empty(ni, &ns->ready_lists[i]) ? "EMPTY":"yes",
+           ci_ni_dllist_is_empty(ni, &ns->unready_lists[i]) ? "EMPTY":"yes",
+           ns->ready_list_flags[i]);
+  }
   OO_STACK_FOR_EACH_INTF_I(ni, intf_i)
     ci_netif_dump_vi(ni, intf_i, logger, log_arg);
 }

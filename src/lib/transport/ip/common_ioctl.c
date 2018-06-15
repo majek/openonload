@@ -26,7 +26,6 @@
 
 /*! \cidoxg_lib_transport_ip */
 
-
 # include <linux/sockios.h>
 
 #include "ip_internal.h"

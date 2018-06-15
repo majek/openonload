@@ -104,6 +104,47 @@ extern int ef_vi_evq_reinit(ef_vi* vi);
 
 
 /**********************************************************************
+ * TX Warming *********************************************************
+ **********************************************************************/
+
+typedef unsigned ef_vi_tx_warm_state;
+
+/* This prevents ef_vi transmit functions from sending by modifying
+ * TXQ removed account to make the queue appear full.  This is
+ * used to warm the transmit path without sending data. */
+ef_vi_inline void
+ef_vi_start_transmit_warm(ef_vi* vi, ef_vi_tx_warm_state* saved_state)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+  ef_vi_txq* q = &vi->vi_txq;
+  *saved_state = qs->removed;
+/* qs->removed is modified so ( qs->added - qs->removed < q->mask )
+ * is false and packet is not sent.  Descriptor will be written to
+ * qs->added & q->mask.  */
+  qs->removed = qs->added - q->mask;
+}
+
+
+/* This resets the state of the transmit queue so sending can continue
+ * after warming.  saved_state should be the return value of the
+ * last call to ef_vi_start_transmit_warm for the same VI. */
+#ifndef __KERNEL__
+#include <assert.h>
+#endif
+ef_vi_inline void ef_vi_stop_transmit_warm(ef_vi* vi, ef_vi_tx_warm_state state)
+{
+  ef_vi_txq_state* qs = &vi->ep_state->txq;
+#if ! defined(__KERNEL__) && ! defined(NDEBUG)
+  /* We assert that the queue id was not modified by any transmit
+   * since warming was started. */
+  ef_vi_txq* q = &vi->vi_txq;
+  assert(q->ids[qs->added & q->mask] == EF_REQUEST_ID_MASK);
+#endif
+  qs->removed = state;
+}
+
+
+/**********************************************************************
  * Misc ***************************************************************
  **********************************************************************/
 
@@ -127,6 +168,7 @@ extern void ef_vi_init_timer(struct ef_vi* vi, int timer_quantum_ns);
 
 extern void ef_vi_init_rx_timestamping(struct ef_vi* vi, int rx_ts_correction);
 extern void ef_vi_init_tx_timestamping(struct ef_vi* vi, int tx_ts_correction);
+extern void ef_vi_set_ts_format(struct ef_vi* vi, enum ef_timestamp_format ts_format);
 
 extern void ef_vi_init_out_flags(struct ef_vi* vi, unsigned flags);
 
@@ -153,8 +195,19 @@ ef_vi_inline unsigned ef_vi_next_rx_rq_id(ef_vi* vi)
 extern int ef10_ef_vi_transmitv_copy_pio(ef_vi* vi, int offset,
 					 const struct iovec* iov, int iovcnt,
 					 ef_request_id dma_id);
+
+/* Exported for use by TCPDirect */
+extern int ef10_receive_get_timestamp_with_sync_flags_internal
+	(ef_vi* vi, const void* pkt, struct timespec* ts_out,
+	 unsigned* flags, uint32_t t_minor, uint32_t t_major);
+
 #endif
 
+/*! Size of the CTPIO aperture in bytes (if present) */
+#define EF_VI_CTPIO_APERTURE_SIZE     4096
+
+/*! Calibrate the CTPIO write timing loop */
+extern int ef_vi_ctpio_init(ef_vi* vi);
 
 /* Internal interfaces, so exclude from doxygen documentation */
 /*! \endcond internal */

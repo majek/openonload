@@ -77,14 +77,15 @@ void ci_tcp_tx_pkt_assert_valid(ci_netif* ni, ci_tcp_state* ts,
     if( i < pkt->n_buffers-1 ) 
       next_pkt = PKT_CHK(ni, next_pkt->frag_next);
   }
-  verify(len == paylen + CI_TCP_HDR_LEN(tcp) +
-         CI_IP4_IHL(oo_tx_ip_hdr(pkt)) + oo_ether_hdr_size(pkt));
+  verify(len ==
+         oo_tx_pre_l3_len(pkt) + CI_IP4_IHL(oo_tx_ip_hdr(pkt))
+         + CI_TCP_HDR_LEN(tcp) + paylen);
   verify(len == pkt->pay_len);
 
   verify(oo_offbuf_ptr(&pkt->buf) ==
-         (char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + paylen);
+         (char*) oo_tx_l3_hdr(pkt) + ts->outgoing_hdrs_len + paylen);
   verify(oo_offbuf_end(&pkt->buf) ==
-         (char*) oo_tx_ether_data(pkt) + ts->outgoing_hdrs_len + ts->eff_mss);
+         (char*) oo_tx_l3_hdr(pkt) + ts->outgoing_hdrs_len + ts->eff_mss);
   verify(oo_offbuf_end(&pkt->buf) <= (char*) pkt + CI_CFG_PKT_BUF_SIZE);
 }
 
@@ -98,7 +99,6 @@ void ci_tcp_state_listen_assert_valid(ci_netif* netif,
                                       const char* file, int line)
 {
   verify(tsl->s.tx_errno == EPIPE);
-
 
 
   verify(tsl->s.rx_errno == ENOTCONN);
@@ -545,12 +545,12 @@ void ci_tcp_pkt_dump(ci_netif *ni, ci_ip_pkt_fmt* pkt, int is_recv, int dump)
         CI_TCP_HDR_FLAGS_PRI_ARG(tcp), oo_offbuf_left(buf));
     if( dump & 1 )
       ci_hex_dump(ci_log_fn, oo_ether_hdr(pkt),
-                  oo_ip_hdr(pkt)->ip_tot_len_be16 + oo_ether_hdr_size(pkt), 0);
+                  oo_pre_l3_len(pkt) + oo_ip_hdr(pkt)->ip_tot_len_be16, 0);
   }
   else {
     int i, paylen = TX_PKT_LEN(pkt) -
-      (oo_ether_hdr_size(pkt) + CI_IP4_IHL(oo_ip_hdr(pkt)) +
-       CI_TCP_HDR_LEN(tcp));
+      (oo_tx_pre_l3_len(pkt) + CI_IP4_IHL(oo_ip_hdr(pkt))
+       + CI_TCP_HDR_LEN(tcp));
 
     if( CI_IP_PKT_SEGMENTS_MAX != 6 )
       ci_log("FIXME: %s:%d", __FILE__, __LINE__);
@@ -694,10 +694,11 @@ void ci_tcp_socket_listen_dump(ci_netif* ni, ci_tcp_socket_listen* tls,
          tls->acceptq_max, ci_tcp_acceptq_n(tls), tls->acceptq_n_out);
   logger(log_arg, "%s  defer_accept=%d", pf, tls->c.tcp_defer_accept);
 #if CI_CFG_FD_CACHING
-  logger(log_arg, "%s  sockcache: n=%d sock_n=%d cache=%s pending=%s",
+  logger(log_arg, "%s  sockcache: n=%d sock_n=%d cache=%s pending=%s connected=%s",
          pf, ni->state->passive_cache_avail_stack, tls->cache_avail_sock,
          ci_ni_dllist_is_empty(ni, &tls->epcache.cache) ? "EMPTY":"yes",
-         ci_ni_dllist_is_empty(ni, &tls->epcache.pending) ? "EMPTY":"yes");
+         ci_ni_dllist_is_empty(ni, &tls->epcache.pending) ? "EMPTY":"yes",
+         ci_ni_dllist_is_empty(ni, &tls->epcache_connected) ? "EMPTY":"yes");
 #endif
 #if CI_CFG_STATS_TCP_LISTEN
   {
@@ -757,9 +758,11 @@ void ci_tcp_state_dump(ci_netif* ni, ci_tcp_state* ts,
   char buf[LINE_LEN + 1];
   int n;
 
+#if CI_CFG_TIMESTAMPING
   if( ts->s.timestamping_flags & ONLOAD_SOF_TIMESTAMPING_TX_HARDWARE )
     ci_udp_recvq_dump(ni, &ts->timestamp_q, pf, "  TX timestamping queue:",
                       logger, log_arg);
+#endif
 
   ci_tcp_socket_cmn_dump(ni, &ts->c, pf, logger, log_arg);
 

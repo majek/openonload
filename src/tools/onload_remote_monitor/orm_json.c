@@ -27,7 +27,6 @@
 /* XXX: We are not handling the following types of stats from
  * 'onload_stackdump lots' yet.
  *
- * dump_stats(more_stats_fields, N_MORE_STATS_FIELDS, &more_stats, 0);
  * dump_stats(tcp_stats_fields, N_TCP_STATS_FIELDS, &t_stats, 0);
  * dump_stats(tcp_ext_stats_fields, N_TCP_EXT_STATS_FIELDS, &te_stats, 0);
  * dump_stats(udp_stats_fields, N_UDP_STATS_FIELDS, &u_stats, 0);
@@ -36,6 +35,7 @@
 #define _GNU_SOURCE
 
 #include <ci/internal/ip.h>
+#include <ci/internal/ip_stats_ops.h>
 #include <ci/efhw/common.h>
 #include <ci/app/testapp.h>
 #include <onload/ioctl.h>
@@ -49,6 +49,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
+
+#include "more_stats.h"
 
 #define TRY(x)                                                  \
   do {                                                          \
@@ -76,11 +79,18 @@
 /* flags to control which info gets output */
 #define ORM_OUTPUT_NONE 0
 #define ORM_OUTPUT_STATS 0x1
+#define ORM_OUTPUT_MORE_STATS 0x2
+#define ORM_OUTPUT_TCP_STATS_COUNT 0x4
+#define ORM_OUTPUT_TCP_EXT_STATS_COUNT 0x8
 #define ORM_OUTPUT_STACK 0x10
+#define ORM_OUTPUT_SOCKETS 0x20
+#define ORM_OUTPUT_VIS 0x40
 #define ORM_OUTPUT_OPTS 0x100
 #define ORM_OUTPUT_EXTRA 0x1000
 #define ORM_OUTPUT_LOTS 0xFFF
-
+#define ORM_OUTPUT_SUM (ORM_OUTPUT_STATS | ORM_OUTPUT_MORE_STATS | \
+                        ORM_OUTPUT_TCP_STATS_COUNT | \
+                        ORM_OUTPUT_TCP_EXT_STATS_COUNT)
 
 /* output formats for the datatypes we support */
 #define ci_uint64_fmt   "\"%llu\"" /* use string 
@@ -122,9 +132,18 @@
 
 
 static char* cfg_stackname = NULL;
+static int cfg_sum = 0;
+static int cfg_meta = 0;
+static int cfg_flat = 0;
 static ci_cfg_desc cfg_opts[] = {
   { 'h', "help", CI_CFG_USAGE, 0, "this message" },
-  { 0, "name",  CI_CFG_STR,  &cfg_stackname, "select a single stack name" }
+  { 0, "name",  CI_CFG_STR,  &cfg_stackname, "select a single stack name" },
+  { 0, "sum-all",  CI_CFG_FLAG,  &cfg_sum,
+                                  "present sum of all the stacks's stats" },
+  { 0, "metadata", CI_CFG_FLAG, &cfg_meta,
+                                    "dump metadata describing statistics" },
+  { 0, "flat", CI_CFG_FLAG,     &cfg_flat,
+                                    "dump flatter json structure" },
 };
 #define N_CFG_OPTS (sizeof(cfg_opts) / sizeof(cfg_opts[0]))
 
@@ -219,15 +238,19 @@ static struct dump_buf db = {
 };
 
 
-static void __dump_buf_cat(const char* buf, int len)
+/* Append to dump_buf, ensuring that there is a
+   trailing NUL character, which is not included in
+   the content length count. */
+static void __dump_buf_cat0(const char* buf, int len)
 {
-  while( db.db_used + len > db.db_len ) {
+  while( db.db_used + len + 1 > db.db_len ) {
     db.db_buf = realloc(db.db_buf, db.db_len + DUMP_BUF_INC);
     TEST(db.db_buf);
     db.db_len += DUMP_BUF_INC;
   }
   memcpy(db.db_buf + db.db_used, buf, len);
   db.db_used += len;
+  db.db_buf[db.db_used] = '\0';
 }
 
 
@@ -236,7 +259,7 @@ static void dump_buf_catv(const char* fmt, va_list va)
   int len;
   char* buf;
   TRY(len = vasprintf(&buf, fmt, va));
-  __dump_buf_cat(buf, len);
+  __dump_buf_cat0(buf, len);
   free(buf);
 }
 
@@ -262,8 +285,11 @@ static void dump_buf_cleanup(void)
 }
 
 
+/* Return a NUL-terminated string from the dump_buf. */
 static const char* dump_buf_get(void)
 {
+  assert(db.db_used + 1 <= db.db_len);
+  assert(db.db_buf[db.db_used] == '\0');
   return db.db_buf;
 }
 
@@ -308,22 +334,160 @@ static int orm_oo_opts_dump(ci_netif* ni)
 /* Dump ci_netif_stats */
 /**********************************************************/
 
-static int orm_oo_stats_dump(ci_netif* ni)
-{
-  ci_netif_stats* stats = &ni->state->stats;
-
-  dump_buf_cat("\"stats\": {");
-
-#undef  OO_STAT
 #define OO_STAT(desc, type, name, kind)                                 \
   dump_buf_cat("\"%s\": " type##_fmt ", ", #name, stats->name);
 
+static int orm_oo_stats_dump(const char* label, const ci_netif_stats* stats)
+{
+  dump_buf_cat("\"%s\": {", label);
 #include <ci/internal/stats_def.h>
-
   dump_buf_cleanup();
   dump_buf_cat("}");
   return 0;
 }
+
+
+static void orm_dump_struct_ci_netif_stats(char* label, const ci_netif_stats* stats, int flags)
+{
+  if( ~flags & ORM_OUTPUT_STACK )
+    return;
+  orm_oo_stats_dump(label, stats);
+  dump_buf_cat(",");
+}
+
+
+static int orm_oo_more_stats_dump(const char* label, const more_stats_t* stats)
+{
+  dump_buf_cat("\"%s\": {", label);
+#include "more_stats_def.h"
+  dump_buf_cleanup();
+  dump_buf_cat("}");
+  return 0;
+}
+
+
+static int orm_oo_tcp_stats_count_dump(const char* label, const ci_tcp_stats_count* stats)
+{
+  dump_buf_cat("\"%s\": {", label);
+#include <ci/internal/tcp_stats_count_def.h>
+  dump_buf_cleanup();
+  dump_buf_cat("}");
+  return 0;
+}
+
+
+static void orm_dump_struct_ci_tcp_stats_count(char* label, const ci_tcp_stats_count* stats, int flags)
+{
+  if( ~flags & ORM_OUTPUT_STACK )
+    return;
+  orm_oo_tcp_stats_count_dump(label, stats);
+  dump_buf_cat(",");
+}
+
+
+static int orm_oo_tcp_ext_stats_count_dump(const char* label, const ci_tcp_ext_stats_count* stats)
+{
+  dump_buf_cat("\"%s\": {", label);
+#include <ci/internal/tcp_ext_stats_count_def.h>
+  dump_buf_cleanup();
+  dump_buf_cat("}");
+  return 0;
+}
+
+
+static void orm_dump_struct_ci_tcp_ext_stats_count(char* label, const ci_tcp_ext_stats_count* stats, int flags)
+{
+  if( ~flags & ORM_OUTPUT_STACK )
+    return;
+  orm_oo_tcp_ext_stats_count_dump(label, stats);
+  dump_buf_cat(",");
+}
+
+
+#undef  OO_STAT
+
+
+#define OO_STAT(desc, type, name, kind)                                 \
+  stats_sum->name += stats->name;
+
+static void orm_oo_stats_sum(ci_netif_stats* stats_sum, ci_netif_stats* stats)
+{
+#include <ci/internal/stats_def.h>
+}
+
+
+static void orm_oo_more_stats_sum(more_stats_t* stats_sum, more_stats_t* stats)
+{
+#include "more_stats_def.h"
+}
+
+#undef OO_STAT
+
+/* Metadata contains description of the stats.
+ * The format is Performance-Co-Pilot compilant
+ * The 'pointer' paths refer to summary statistics only.
+ */
+#define OO_STAT(desc, datatype, name, kind)     \
+  OO_STAT_##kind(name, (desc))
+#define OO_STAT_count_zero(name, desc) /* ignore always 0 counters */
+#define OO_STAT_count(name, desc) \
+  dump_buf_cat( " { "          \
+"\"name\": \"%s%s%s\", "           \
+"\"pointer\": \"%s/%s/%s\", " \
+"\"type\": \"integer\", "      \
+"\"units\": \"count\", "       \
+"\"semantics\": \"counter\", "  \
+"\"description\": \"%s\" "     \
+"}, ", (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, OO_STAT_key, #name, desc);
+#define OO_STAT_val(name, desc) \
+  dump_buf_cat( " { "          \
+"\"name\": \"%s%s%s\", "           \
+"\"pointer\": \"%s/%s/%s\", " \
+"\"type\": \"integer\", "      \
+"\"semantics\": \"instant\", "  \
+"\"description\": \"%s\" "     \
+"}, ", (cfg_flat ? "" : OO_STAT_key), (cfg_flat ? "": "."), #name, xpath, OO_STAT_key, #name, desc);
+
+static int orm_oo_stats_meta_dump(const char* xpath)
+{
+#define OO_STAT_key "stats"
+#include <ci/internal/stats_def.h>
+#undef OO_STAT_key
+  return 0;
+}
+
+
+static int orm_oo_more_stats_meta_dump(const char* xpath)
+{
+#define OO_STAT_key "more_stats"
+#include "more_stats_def.h"
+#undef OO_STAT_key
+  return 0;
+}
+
+
+static int orm_oo_tcp_stats_count_meta_dump(const char* xpath)
+{
+#define OO_STAT_key "tcp_stats"
+#include <ci/internal/tcp_stats_count_def.h>
+#undef OO_STAT_key
+  return 0;
+}
+
+
+static int orm_oo_tcp_ext_stats_count_meta_dump(const char* xpath)
+{
+#define OO_STAT_key "tcp_ext_stats"
+#include <ci/internal/tcp_ext_stats_count_def.h>
+#undef OO_STAT_key
+  return 0;
+}
+
+
+#undef  OO_STAT
+#undef  OO_STAT_count_zero
+#undef  OO_STAT_count
+#undef  OO_STAT_val
 
 
 /*********************************************************/
@@ -358,10 +522,6 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
   static void __attribute__((unused))                                   \
   orm_dump_struct_##name(const char* label, name* stats, int output_flags) \
   {                                                                     \
-    /* ci_netif_stats got dumped separately above. */                   \
-    if( ! strcmp(#name, "ci_netif_stats") )                             \
-      return;                                                           \
-                                                                        \
     dump_buf_cat("\"%s\": ", label);                                    \
     orm_dump_struct_body_##name(stats, output_flags);                   \
   }                                                                     \
@@ -374,32 +534,62 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
 #define FTL_TUNION_BEGIN(ctx, name, tag)        \
   FTL_TSTRUCT_BEGIN(ctx, name, tag)
 
-#define FTL_TFIELD_INT(ctx, struct_name, type, field_name, display_flags) \
+#define FTL_TFIELD_INT(ctx, type, field_name, display_flags) \
   if (output_flags & display_flags) {                                   \
     dump_buf_cat("\"%s\": ", #field_name);                              \
     dump_buf_cat(type##_fmt ", ", stats->field_name);                   \
   }
 
-#define FTL_TFIELD_CONSTINT(ctx, struct_name, type, field_name, display_flags) \
-  FTL_TFIELD_INT(ctx, struct_name, type, field_name, display_flags)
+#define FTL_TFIELD_CONSTINT(ctx, type, field_name, display_flags) \
+  FTL_TFIELD_INT(ctx, type, field_name, display_flags)
 
-#define FTL_TFIELD_KINT(ctx, struct_name, type, field_name, display_flags) \
-  FTL_TFIELD_INT(ctx, struct_name, type, field_name, display_flags)
+#define FTL_TFIELD_KINT(ctx, type, field_name, display_flags) \
+  FTL_TFIELD_INT(ctx, type, field_name, display_flags)
+
+#define FTL_TFIELD_IPADDR(ctx, uname, flags) \
+    FTL_TFIELD_INTBE(ctx, ci_uint32, uname, "\"" OOF_IP4 "\"", OOFA_IP4, flags)
+
+#define FTL_TFIELD_PORT(ctx, name, flags) \
+    FTL_TFIELD_INTBE(ctx, ci_uint16, name, OOF_PORT, OOFA_PORT, flags) \
+
+#define FTL_TFIELD_INTBE16(ctx, name, flags) \
+    FTL_TFIELD_INTBE(ctx, ci_uint16, name, "%u", (unsigned) CI_BSWAP_BE16, flags)
+
+#define FTL_TFIELD_INTBE32(ctx, name, flags) \
+    FTL_TFIELD_INTBE(ctx, ci_uint32, name, "%u", (unsigned) CI_BSWAP_BE32, flags)
 
 /* the _INT2 variant is to cope for specials like IP addresses which are
    stored in one format, but need converting to another format for output */
-#define FTL_TFIELD_INT2(ctx, struct_name, type, field_name, format_string, conversion_function, display_flags) \
+#define FTL_TFIELD_INT2(ctx, type, field_name, format_string, conversion_function, display_flags) \
   if (output_flags & display_flags) {                                   \
     dump_buf_cat("\"%s\": ", #field_name);                              \
     dump_buf_cat(format_string ", ", conversion_function(stats->field_name)); \
   }
 
-#define FTL_TFIELD_STRUCT(ctx, struct_name, type, field_name, display_flags) \
+/* the _INT3 comparing to _INT2 allows to truncate display name e.g. to remove suffix */
+#define FTL_TFIELD_INT3(ctx, type, field_name, name_display_len, format_string, conversion_function, display_flags) \
+  if (output_flags & display_flags) {                                   \
+    dump_buf_cat("\"%.*s\": ", name_display_len, #field_name);                              \
+    dump_buf_cat(format_string ", ", conversion_function(stats->field_name)); \
+  }
+
+/* function that truncates _bexx suffixes automatically from the display field name */
+#define FTL_TFIELD_INTBE(ctx, type, field_name, format_string, conversion_function, display_flags) \
+  { \
+    int new_len = strlen(#field_name); \
+    if( new_len > 5 && ( \
+        strcmp(#field_name + new_len - 5, "_be32") == 0 || \
+        strcmp(#field_name + new_len - 5, "_be16") == 0) ) \
+      new_len -= 5; \
+    FTL_TFIELD_INT3(ctx, type, field_name, new_len, format_string, conversion_function, display_flags) \
+  }
+
+#define FTL_TFIELD_STRUCT(ctx, type, field_name, display_flags) \
   if (output_flags & display_flags) {                                   \
     orm_dump_struct_##type(#field_name, &stats->field_name, output_flags); \
   }
 
-#define FTL_TFIELD_ARRAYOFINT(ctx, struct_name, type, field_name, len, display_flags) \
+#define FTL_TFIELD_ARRAYOFINT(ctx, type, field_name, len, display_flags) \
   if (output_flags & display_flags) {                                   \
     {                                                                   \
       int i;                                                            \
@@ -412,49 +602,59 @@ static void orm_dump_struct_ci_netif_config_opts(char* label, ci_netif_config_op
     }                                                                   \
   }
 
-#define FTL_TFIELD_ARRAYOFSTRUCT(ctx, struct_name, type, field_name, len, display_flags) \
+#define FTL_TFIELD_SSTR(ctx, field_name, display_flags)    \
+  if (output_flags & display_flags) {                                   \
+    dump_buf_cat("\"%s\": ", #field_name);                              \
+    dump_buf_cat("\"%.*s\", ", sizeof(stats->field_name),               \
+                               stats->field_name);                      \
+  }
+
+#define FTL_TFIELD_ARRAYOFSTRUCT(ctx, type, field_name, len, display_flags, field_cond) \
   if (output_flags & display_flags) {                                   \
     {                                                                   \
       int i;                                                            \
       dump_buf_cat("\"%s\": [", #field_name);                           \
       for( i = 0; i < (len); ++i ) {                                    \
-        orm_dump_struct_body_##type(&stats->field_name[i], output_flags); \
-      }                                                                 \
+        if( field_cond ) \
+          orm_dump_struct_body_##type(&stats->field_name[i], output_flags); \
+       else \
+          dump_buf_cat("{ },");                                         \
+       } \
       dump_buf_cleanup();                                               \
       dump_buf_cat("], ");                                              \
     }                                                                   \
   }
 
-#define FTL_TFIELD_ANON_STRUCT_BEGIN(ctx, struct_name, field_name, display_flags) \
+#define FTL_TFIELD_ANON_STRUCT_BEGIN(ctx, field_name, display_flags) \
      if (output_flags & display_flags) {                                \
       dump_buf_cat("\"%s\": {", #field_name);
 
-#define FTL_TFIELD_ANON_STRUCT(ctx, struct_name, type, field_name, child) \
+#define FTL_TFIELD_ANON_STRUCT(ctx, type, field_name, child) \
       dump_buf_cat("\"%s\": ", #child);                                 \
       dump_buf_cat(type##_fmt ", ", stats->field_name.child);
 
-#define FTL_TFIELD_ANON_STRUCT_END(ctx, struct_name, field_name)        \
+#define FTL_TFIELD_ANON_STRUCT_END(ctx, field_name)        \
       dump_buf_cleanup();                                               \
       dump_buf_cat("}, ");                                              \
     }
 
 /* anon union not yet implemented (only used for TCP/UDP headers) */
-#define FTL_TFIELD_ANON_UNION_BEGIN(ctx, struct_name, field_name, display_flags)
-#define FTL_TFIELD_ANON_UNION(ctx, struct_name, type, field_name, child)
-#define FTL_TFIELD_ANON_UNION_END(ctx, struct_name, field_name)
+#define FTL_TFIELD_ANON_UNION_BEGIN(ctx, field_name, display_flags)
+#define FTL_TFIELD_ANON_UNION(ctx, type, field_name, child)
+#define FTL_TFIELD_ANON_UNION_END(ctx, field_name)
 
-#define FTL_TFIELD_ANON_ARRAYOFSTRUCT_BEGIN(ctx, struct_name, field_name, len, display_flags) \
+#define FTL_TFIELD_ANON_ARRAYOFSTRUCT_BEGIN(ctx, field_name, len, display_flags) \
     if (output_flags & display_flags) {                                 \
       int i;                                                            \
       dump_buf_cat("\"%s\": [", #field_name);                           \
       for( i = 0; i < (len); ++i ) {                                    \
         dump_buf_cat("{");
 
-#define FTL_TFIELD_ANON_ARRAYOFSTRUCT(ctx, struct_name, type, field_name, child, len) \
+#define FTL_TFIELD_ANON_ARRAYOFSTRUCT(ctx, type, field_name, child, len) \
         dump_buf_cat("\"%s\": ", #child);                               \
         dump_buf_cat(type##_fmt ", ", stats->field_name[i].child);
 
-#define FTL_TFIELD_ANON_ARRAYOFSTRUCT_END(ctx, struct_name, field_name, len) \
+#define FTL_TFIELD_ANON_ARRAYOFSTRUCT_END(ctx, field_name, len) \
         dump_buf_cleanup();                                             \
         dump_buf_cat("}, ");                                            \
       }                                                                 \
@@ -530,13 +730,42 @@ static int orm_shared_state_dump(ci_netif* ni, int output_flags)
   ci_netif_state* ns = ni->state;
 
   dump_buf_cat("\"stack\": {");
-  orm_dump_struct_ci_netif_state("stack_state", ns, output_flags);
-  orm_waitable_dump(ni, "tcp_listen", output_flags);
-  orm_waitable_dump(ni, "tcp", output_flags);
-  orm_waitable_dump(ni, "udp", output_flags);
-  orm_waitable_dump(ni, "pipe", output_flags);
+  if( output_flags & ORM_OUTPUT_STACK )
+    orm_dump_struct_ci_netif_state("stack_state", ns, output_flags);
+  if( output_flags & ORM_OUTPUT_SOCKETS ) {
+    orm_waitable_dump(ni, "tcp_listen", output_flags);
+    orm_waitable_dump(ni, "tcp", output_flags);
+    orm_waitable_dump(ni, "udp", output_flags);
+    orm_waitable_dump(ni, "pipe", output_flags);
+  }
   dump_buf_cleanup();
   dump_buf_cat("}");
+
+  return 0;
+}
+
+
+static int orm_vis_dump(ci_netif* ni, int output_flags)
+{
+  int intf_i;
+
+  dump_buf_cat("\"vis\": [");
+  OO_STACK_FOR_EACH_INTF_I(ni, intf_i) {
+    dump_buf_cat("{");
+    orm_dump_struct_ef_vi_rxq_state("rxq",
+                                    &ni->nic_hw[intf_i].vi.ep_state->rxq,
+                                    output_flags);
+    orm_dump_struct_ef_vi_txq_state("txq",
+                                    &ni->nic_hw[intf_i].vi.ep_state->txq,
+                                    output_flags);
+    orm_dump_struct_ef_eventq_state("evq",
+                                    &ni->nic_hw[intf_i].vi.ep_state->evq,
+                                    output_flags);
+    dump_buf_cleanup();
+    dump_buf_cat("}, ");
+  }
+  dump_buf_cleanup();
+  dump_buf_cat("]");
 
   return 0;
 }
@@ -551,16 +780,46 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
 {
   int rc;
 
-  if (stackname != NULL) {
+  if (stackname != NULL)
     if ( strcmp(stackname, ni->state->name) != 0 )
       return 0;
-    dump_buf_cat("{\"%s\": {", stackname);
+
+  if( ! cfg_flat ) {
+    if (stackname != NULL)
+      dump_buf_cat("{\"%s\": {", stackname);
+    else
+      dump_buf_cat("{\"%d\": {", id);
   }
   else {
-    dump_buf_cat("{\"%d\": {", id);
+    const char* pname = ni->state->pretty_name;
+    const char* name = ni->state->name;
+    char index[CI_CFG_STACK_NAME_LEN + 1];
+    dump_buf_cat("{");
+    dump_buf_cat("\"id\": %d,", id);
+    if( name && name[0] ) {
+      const char* s = name;
+      char* d = index;
+      for( ; *s; ++s, ++d )
+        *d = isalnum(*s) ? *s : '_';
+      *d = 0;
+      dump_buf_cat("\"index\": \"%s\",", index);
+    }
+    else {
+      dump_buf_cat("\"index\": \"%d\",", id);
+    }
+    dump_buf_cat("\"name\": \"%s\",", name ? name : "");
+    dump_buf_cat("\"pretty_name\": \"%s\",", pname);
   }
 
-  if (output_flags & ORM_OUTPUT_STACK) {
+  if (output_flags & ORM_OUTPUT_VIS) {
+    if( (rc = orm_vis_dump(ni, output_flags)) != 0 ) {
+      fprintf(stderr, "VIs error code %d\n",rc);
+      return rc;
+    }
+    dump_buf_cleanup();
+    dump_buf_cat(", ");
+  }
+  if (output_flags & (ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS)) {
     if( (rc = orm_shared_state_dump(ni, output_flags)) != 0 ) {
       fprintf(stderr,"stack error code %d\n",rc);
       return rc;
@@ -569,8 +828,36 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
     dump_buf_cat(", ");
   }
   if (output_flags & ORM_OUTPUT_STATS) {
-    if( (rc = orm_oo_stats_dump(ni)) != 0 ) {
+    if( (rc = orm_oo_stats_dump("stats", &ni->state->stats)) != 0 ) {
       fprintf(stderr,"stats error code %d\n",rc);
+      return rc;
+    }
+    dump_buf_cleanup();
+    dump_buf_cat(", ");
+  }
+  if (output_flags & ORM_OUTPUT_MORE_STATS) {
+    more_stats_t more_stats;
+    get_more_stats(ni, &more_stats);
+    if( (rc = orm_oo_more_stats_dump("more_stats", &more_stats)) != 0 ) {
+      fprintf(stderr,"more stats error code %d\n",rc);
+      return rc;
+    }
+    dump_buf_cleanup();
+    dump_buf_cat(", ");
+  }
+  if (output_flags & ORM_OUTPUT_TCP_STATS_COUNT) {
+    ci_tcp_stats_count* tcp = &ni->state->stats_snapshot.tcp;
+    if( (rc = orm_oo_tcp_stats_count_dump("tcp_stats", tcp)) != 0 ) {
+      fprintf(stderr,"tcp stats error code %d\n",rc);
+      return rc;
+    }
+    dump_buf_cleanup();
+    dump_buf_cat(", ");
+  }
+  if (output_flags & ORM_OUTPUT_TCP_EXT_STATS_COUNT) {
+    ci_tcp_ext_stats_count* tcp_ext = &ni->state->stats_snapshot.tcp_ext;
+    if( (rc = orm_oo_tcp_ext_stats_count_dump("tcp_ext_stats", tcp_ext)) != 0 ) {
+      fprintf(stderr,"tcp ext stats error code %d\n",rc);
       return rc;
     }
     dump_buf_cleanup();
@@ -585,12 +872,26 @@ static int orm_netif_dump(ci_netif* ni, int id, int output_flags,
     dump_buf_cat(", ");
   }
   dump_buf_cleanup();
-  dump_buf_cat("}}");
+  if( ! cfg_flat )
+    dump_buf_cat("}}");
+  else
+    dump_buf_cat("}");
   dump_buf_cat(", ");
 
   return 0;
 }
 
+static void orm_oo_stats_meta_all(int output_flags, const char* xpath)
+{
+  if( output_flags & ORM_OUTPUT_STATS )
+    orm_oo_stats_meta_dump(xpath);
+  if( output_flags & ORM_OUTPUT_MORE_STATS )
+    orm_oo_more_stats_meta_dump(xpath);
+  if( output_flags & ORM_OUTPUT_TCP_STATS_COUNT )
+    orm_oo_tcp_stats_count_meta_dump(xpath);
+  if( output_flags & ORM_OUTPUT_TCP_EXT_STATS_COUNT )
+    orm_oo_tcp_ext_stats_count_meta_dump(xpath);
+}
 
 int main(int argc, char* argv[])
 {
@@ -602,8 +903,10 @@ int main(int argc, char* argv[])
   int output_flags = ORM_OUTPUT_NONE;
 
   ci_app_standard_opts = 0;
-  ci_app_getopt("[stats] [stack] [opts] [lots] [extra] [all]",
-                &argc, argv, cfg_opts, N_CFG_OPTS);
+  ci_app_getopt(
+    "[stats] [more_stats] [tcp_stats] [stack] [stack_state] [vis] [opts] "
+    "[lots] [extra] [all]",
+    &argc, argv, cfg_opts, N_CFG_OPTS);
   ++argv;  --argc;
 
   if (argc == 0)
@@ -611,8 +914,20 @@ int main(int argc, char* argv[])
   for (i=0; i<argc; i++) {
     if ( !strcmp(argv[i], "stats") )
       output_flags |= ORM_OUTPUT_STATS;
-    if ( !strcmp(argv[i], "stack") )
+    if ( !strcmp(argv[i], "more_stats") )
+      output_flags |= ORM_OUTPUT_MORE_STATS;
+    if ( !strcmp(argv[i], "tcp_stats") )
+      output_flags |= ORM_OUTPUT_TCP_STATS_COUNT;
+    if ( !strcmp(argv[i], "tcp_ext_stats") )
+      output_flags |= ORM_OUTPUT_TCP_EXT_STATS_COUNT;
+    if ( !strcmp(argv[i], "stack_state") )
       output_flags |= ORM_OUTPUT_STACK;
+    if ( !strcmp(argv[i], "sockets") )
+      output_flags |= ORM_OUTPUT_SOCKETS;
+    if ( !strcmp(argv[i], "stack") )
+      output_flags |= ORM_OUTPUT_STACK | ORM_OUTPUT_SOCKETS;
+    if ( !strcmp(argv[i], "vis") )
+      output_flags |= ORM_OUTPUT_VIS;
     if ( !strcmp(argv[i], "opts") )
       output_flags |= ORM_OUTPUT_OPTS;
     if ( !strcmp(argv[i], "lots") )
@@ -623,14 +938,111 @@ int main(int argc, char* argv[])
       output_flags |= ORM_OUTPUT_LOTS | ORM_OUTPUT_EXTRA;
   }
 
+  if( cfg_meta ) {
+    const char* xpath = cfg_flat ? "/all" : "/json/all/0";
+    dump_buf_cat("{");
+    dump_buf_cat("\"metrics\": [");
+    orm_oo_stats_meta_all(output_flags, xpath);
+    if( cfg_flat ) {
+      xpath = "";
+      dump_buf_cat( "{"
+        "\"name\": \"stacks\", "
+        "\"pointer\": \"/stacks\", "
+        "\"type\": \"array\", "
+        "\"description\": \"List of stacks and their stats\","
+        "\"index\": \"/index\","
+        "\"metrics\": [");
+
+      /* include per stack stats */
+      orm_oo_stats_meta_all(output_flags, xpath);
+      dump_buf_cleanup();
+      dump_buf_cat("]},");
+    }
+    dump_buf_cleanup();
+    dump_buf_cat("]}");
+    goto done;
+  }
+
   if( orm_map_stacks() != 0 )
     exit(EXIT_FAILURE);
   if( n_orm_stacks == 0 )
     return 0;
 
   dump_buf_cat("{\"onload_version\": \"%s\", ", ONLOAD_VERSION);
-  dump_buf_cat("\"json\": [");
+  if( ! cfg_flat )
+    dump_buf_cat("\"json\": [");
 
+  if( cfg_sum && (output_flags & ORM_OUTPUT_SUM) ) {
+    ci_netif_stats stats_sum = {};
+    more_stats_t more_stats_sum = {};
+    ci_tcp_stats_count tcp_stats_sum = {};
+    ci_tcp_ext_stats_count tcp_ext_stats_sum = {};
+
+    int rc;
+    /* this needs to be printed before stacks to be at fixed index 0
+     * in the json array to match *_meta_dump() functions above. */
+    for( i = 0; i < n_orm_stacks; ++i ) {
+      ci_netif* ni = &orm_stacks[i]->os_ni;
+      if( output_flags & ORM_OUTPUT_STATS )
+        orm_oo_stats_sum(&stats_sum, &ni->state->stats);
+      if( output_flags & ORM_OUTPUT_MORE_STATS ) {
+        more_stats_t more_stats;
+        get_more_stats(ni, &more_stats);
+        orm_oo_more_stats_sum(&more_stats_sum, &more_stats);
+      }
+      if( output_flags & ORM_OUTPUT_TCP_STATS_COUNT ) {
+        ci_tcp_stats_count_update(&tcp_stats_sum, &ni->state->stats_snapshot.tcp);
+      }
+      if( output_flags & ORM_OUTPUT_TCP_EXT_STATS_COUNT ) {
+        ci_tcp_ext_stats_count_update(&tcp_ext_stats_sum,
+                                      &ni->state->stats_snapshot.tcp_ext);
+      }
+    }
+    if( ! cfg_flat )
+      dump_buf_cat("{\"%s\": {", "all");
+    else
+      dump_buf_cat("\"all\": {");
+    if( output_flags & ORM_OUTPUT_STATS ) {
+      if( (rc = orm_oo_stats_dump("stats", &stats_sum)) != 0 ) {
+        fprintf(stderr,"stats error code %d\n",rc);
+        exit(EXIT_FAILURE);
+      }
+      dump_buf_cleanup();
+      dump_buf_cat(", ");
+    }
+    if( output_flags & ORM_OUTPUT_MORE_STATS ) {
+      if( (rc = orm_oo_more_stats_dump("more_stats", &more_stats_sum)) != 0 ) {
+        fprintf(stderr,"more_stats error code %d\n",rc);
+        exit(EXIT_FAILURE);
+      }
+      dump_buf_cleanup();
+      dump_buf_cat(", ");
+    }
+    if( output_flags & ORM_OUTPUT_TCP_STATS_COUNT ) {
+      if( (rc = orm_oo_tcp_stats_count_dump("tcp_stats", &tcp_stats_sum)) != 0 ) {
+        fprintf(stderr,"tcp stats error code %d\n",rc);
+        exit(EXIT_FAILURE);
+      }
+      dump_buf_cleanup();
+      dump_buf_cat(", ");
+    }
+    if( output_flags & ORM_OUTPUT_TCP_EXT_STATS_COUNT ) {
+      if( (rc = orm_oo_tcp_ext_stats_count_dump("tcp_ext_stats", &tcp_ext_stats_sum)) != 0 ) {
+        fprintf(stderr,"tcp ext stats error code %d\n",rc);
+        exit(EXIT_FAILURE);
+      }
+      dump_buf_cleanup();
+      dump_buf_cat(", ");
+    }
+    dump_buf_cleanup();
+    if( ! cfg_flat )
+      dump_buf_cat("}}");
+    else
+      dump_buf_cat("}");
+    dump_buf_cat(", ");
+  }
+  if( cfg_flat )
+    dump_buf_cat("\"stacks\": [");
   for( i = 0; i < n_orm_stacks; ++i ) {
     ci_netif* ni = &orm_stacks[i]->os_ni;
     int id       = orm_stacks[i]->os_id;
@@ -641,6 +1053,9 @@ int main(int argc, char* argv[])
 
   dump_buf_cleanup();
   dump_buf_cat("]}");
+
+done:
+
   buf = dump_buf_get();
   if( (root = json_loads(buf, 0, &error)) == NULL ) {
     /* This should only fail if we're out of memory or we passed an

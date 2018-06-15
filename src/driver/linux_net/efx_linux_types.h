@@ -50,4 +50,11 @@ typedef __s32 s32;
 typedef __u64 u64;
 #endif
 
+/* Empty define of __user, for use in struct efx_sfctool */
+#define __user
+
+#ifndef noinline_for_stack
+#define noinline_for_stack noinline
+#endif
+
 #endif /* !EFX_LINUX_TYPES_H */

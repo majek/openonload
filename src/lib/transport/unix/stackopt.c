@@ -122,8 +122,10 @@ int onload_stack_opt_set_int(const char* opt_env, int64_t opt_val)
 
   #define ci_uint32_fmt   "%u"
   #define ci_uint16_fmt   "%u"
+  #define ci_uint8_fmt    "%u"
   #define ci_int32_fmt    "%d"
   #define ci_int16_fmt    "%d"
+  #define ci_int8_fmt     "%d"
   #define ci_iptime_t_fmt "%u"
 
   #define _CI_CFG_BITVAL   _optbits

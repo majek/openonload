@@ -44,6 +44,7 @@
 
 #include "onload_internal.h"
 #include "onload/cplane_prot.h"
+#include "onload/cplane_ops.h"
 #include "onload/debug.h"
 #include <ci/net/arp.h>
 
@@ -115,6 +116,8 @@
 /*! create the raw socket */
 static int cicp_raw_sock_ctor(struct socket **raw_sock)
 {
+  int on = 1;
+  mm_segment_t oldfs;
   int rc = sock_create(PF_INET, SOCK_RAW, IPPROTO_RAW, raw_sock);
   if (CI_UNLIKELY(rc < 0)) {
     ci_log("%s: failed to create the raw socket, rc=%d", __FUNCTION__, rc);
@@ -125,6 +128,17 @@ static int cicp_raw_sock_ctor(struct socket **raw_sock)
     ci_log("ERROR:%s: cicp_raw_sock->sk is zero!", __FUNCTION__);
     sock_release(*raw_sock);
     return -EINVAL;
+  }
+
+  /* We've already done all the routing decisions.  Set SO_DONTROUTE */
+  oldfs = get_fs();
+  set_fs(KERNEL_DS);
+  rc = sock_setsockopt(*raw_sock, SOL_SOCKET, SO_DONTROUTE, (void*)&on, sizeof(on));
+  set_fs(oldfs);
+  if( rc != 0 ) {
+    /* If user does not use any complex policy routing, things will work
+     * for them. */
+    ci_log("ERROR: %s failed to set SO_DONTROUTE", __func__);
   }
   
   (*raw_sock)->sk->sk_allocation = GFP_ATOMIC;
@@ -228,7 +242,8 @@ cicp_raw_sock_send_bindtodev(struct cicppl_instance* cppl,
 
 
 int cicp_raw_ip_send(struct cicppl_instance* cppl,
-                     const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex)
+                     const ci_ip4_hdr* ip, int len, ci_ifid_t ifindex,
+                     ci_ip_addr_t next_hop)
 {
   void* ip_data = (char*) ip + CI_IP4_IHL(ip);
   ci_tcp_hdr* tcp;
@@ -255,11 +270,10 @@ int cicp_raw_ip_send(struct cicppl_instance* cppl,
   }
   }
 
-  if( ifindex != CI_IFID_BAD )
-    return cicp_raw_sock_send_bindtodev(cppl, ifindex,
-                                        ip->ip_daddr_be32, ip, len);
-  else 
-    return cicp_raw_sock_send(cppl->raw_sock, ip->ip_daddr_be32, ip, len);
+  ci_assert(next_hop);
+  ci_assert_ge(ifindex, 1);
+
+  return cicp_raw_sock_send_bindtodev(cppl, ifindex, next_hop, ip, len);
 }
 
 
@@ -268,6 +282,7 @@ struct cicp_raw_sock_work_parcel {
   int pktid;
   struct cicppl_instance *cppl;
   ci_ifid_t ifindex;
+  ci_ip_addr_t ip;
 };
 
 
@@ -293,10 +308,10 @@ cicppl_arp_pkt_tx_queue(struct work_struct *data)
   }
   ip = (void*) (pkt + 1);
 
-  rc = cicp_raw_ip_send(wp->cppl, ip, pkt->len, wp->ifindex);
+  rc = cicp_raw_ip_send(wp->cppl, ip, pkt->len, wp->ifindex, wp->ip);
   OO_DEBUG_ARP(ci_log("%s: send packet to "CI_IP_PRINTF_FORMAT" via raw "
                     "socket, rc=%d", __FUNCTION__,
-                    CI_IP_PRINTF_ARGS(&ip->ip_daddr_be32), rc));
+                    CI_IP_PRINTF_ARGS(&wp->ip), rc));
   if (CI_UNLIKELY(rc < 0)) {
     /* NB: we have not got a writeable pointer to the control plane -
            so we shouldn't really increment the statistics in it.
@@ -335,6 +350,7 @@ cicpplos_pktbuf_defer_send(struct cicppl_instance *cppl,
     wp->pktid = pendable_pktid;
     wp->cppl = cppl;
     wp->ifindex = ifindex;
+    wp->ip = ip;
     INIT_WORK(&wp->wqi, cicppl_arp_pkt_tx_queue);
     if( !in_atomic() )
       cicppl_arp_pkt_tx_queue(&wp->wqi);
@@ -493,18 +509,9 @@ cicpplos_ctor(struct cicppl_instance* cppl)
   ci_assert_equal(current->nsproxy->net_ns, cppl->cp->cp_netns);
 
   /* construct raw socket */
-  if (CI_UNLIKELY((rc = cicp_raw_sock_ctor(&cppl->raw_sock)) < 0)) {
-    ci_log(CODEID": ERROR - couldn't construct raw socket module, rc=%d",
-           -rc);
-    cicppl_pktbuf_dtor(&cppl->pktpool);
-    return rc;
-  } 
-  
-  /* construct raw socket */
   if (CI_UNLIKELY((rc = cicp_raw_sock_ctor(&cppl->bindtodev_raw_sock)) < 0)) {
     ci_log(CODEID": ERROR - couldn't construct raw socket module, rc=%d",
            -rc);
-    cicp_raw_sock_dtor(cppl->raw_sock);
     cicppl_pktbuf_dtor(&cppl->pktpool);
     return rc;
   } 
@@ -523,8 +530,6 @@ cicpplos_dtor(struct cicppl_instance *cppl)
 {
   if( cppl->bindtodev_raw_sock != NULL )
     cicp_raw_sock_dtor(cppl->bindtodev_raw_sock);
-  if( cppl->raw_sock != NULL )
-    cicp_raw_sock_dtor(cppl->raw_sock);
   cicppl_pktbuf_dtor(&cppl->pktpool);
 }
 

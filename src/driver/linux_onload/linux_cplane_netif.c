@@ -80,6 +80,7 @@
 #include <onload/tcp_driver.h> /* for CI_GLOBAL_WORKQUEUE */
 #include <onload/cplane_ops.h>
 #include <onload/cplane_prot.h>
+#include <onload/linux_onload_internal.h>
 
 
 
@@ -233,6 +234,18 @@ cicppl_ip_pkt_handover(ci_netif *netif, oo_pkt_p src_pktid)
 }
 
 
+#ifndef NDEBUG
+static void
+cicppl_mac_defer_send_failed(ci_ip4_hdr *iph, ci_ip_addr_t dst, int err)
+{
+  ci_log(CODEID": IP "CI_IP_PRINTF_FORMAT"->"CI_IP_PRINTF_FORMAT
+         " %s pkt handover failed, rc %d",
+         CI_IP_PRINTF_ARGS(&iph->ip_saddr_be32),
+         CI_IP_PRINTF_ARGS(&dst),\
+         iph->ip_protocol == IPPROTO_TCP ? "TCP" : "UDP",
+         err);
+}
+#endif
 
 /**
  * Queue ARP packet request and the ip packet that triggered it.
@@ -262,13 +275,16 @@ cicppl_mac_defer_send(ci_netif *netif, int *ref_os_rc,
     pendable_pktid = cicppl_ip_pkt_handover(netif, ip_pktid);
     if (pendable_pktid < 0) {
       LOG_U(
-          ci_ip4_hdr *iph = oo_tx_ip_hdr(PKT(netif, ip_pktid));
-          ci_log(CODEID": IP "CI_IP_PRINTF_FORMAT"->"CI_IP_PRINTF_FORMAT
-                   " %s pkt handover failed, rc %d",
-                   CI_IP_PRINTF_ARGS(&iph->ip_saddr_be32),
-                   CI_IP_PRINTF_ARGS(&ip),
-	           iph->ip_protocol == IPPROTO_TCP ? "TCP" : "UDP",
-                   pendable_pktid);
+        static ci_uint32 last_dst = 0;
+        ci_ip4_hdr *iph = oo_tx_ip_hdr(PKT(netif, ip_pktid));
+        if( last_dst != ip ) {
+          cicppl_mac_defer_send_failed(iph, ip, pendable_pktid);
+          last_dst = ip;
+        }
+        else {
+          CI_LOG_LIMITED(cicppl_mac_defer_send_failed(iph, ip,
+                                                      pendable_pktid));
+        }
         );
       *ref_os_rc = pendable_pktid;
       return FALSE;

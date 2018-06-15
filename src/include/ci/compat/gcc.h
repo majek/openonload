@@ -62,24 +62,12 @@ typedef __u64                 ci_uintptr_t;
 # endif
 
 
-/* it's not obvious to me why the below is wrong for x64_64, but
- * gcc seems to complain on this platform
- */
-# if defined(__ia64__)
-#  define CI_PRId64            "ld"
-#  define CI_PRIi64            "li"
-#  define CI_PRIo64            "lo"
-#  define CI_PRIu64            "lu"
-#  define CI_PRIx64            "lx"
-#  define CI_PRIX64            "lX"
-# else
-#  define CI_PRId64            "lld"
-#  define CI_PRIi64            "lli"
-#  define CI_PRIo64            "llo"
-#  define CI_PRIu64            "llu"
-#  define CI_PRIx64            "llx"
-#  define CI_PRIX64            "llX"
-# endif
+# define CI_PRId64            "lld"
+# define CI_PRIi64            "lli"
+# define CI_PRIo64            "llo"
+# define CI_PRIu64            "llu"
+# define CI_PRIx64            "llx"
+# define CI_PRIX64            "llX"
 
 # define CI_PRId32            "d"
 # define CI_PRIi32            "i"

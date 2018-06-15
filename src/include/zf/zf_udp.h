@@ -211,6 +211,44 @@ zfur_pkt_get_header(struct zfur* us, const struct zfur_msg* msg,
                     const struct iphdr** iphdr, const struct udphdr** udphdr,
                     int pktind);
 
+/*! \brief Retrieve the UTC timestamp associated with a received packet,
+**        and the clock sync status flags.
+**
+** \param us     UDP zocket.
+** \param msg    Pointer to the received message for which the RX timestamp
+**               will be retrieved.
+** \param ts_out Pointer to a timespec that is updated on return with the
+**               UTC timestamp for the packet.
+** \param pktind Index of packet within @p msg->iov.
+** \param flags  Pointer to an unsigned that is updated on return with the
+**               sync flags for the packet.
+**
+** \return 0          Success.
+** \return -ENOMSG    Synchronisation with adapter has not yet been achieved.
+**                    This only happens with old firmware.
+** \return -ENODATA   Packet does not have a timestamp.
+**                    On current Solarflare adapters, packets that are
+**                    switched from TX to RX do not get timestamped.
+** \return -EL2NSYNC  Synchronisation with adapter has been lost.
+**                    This should never happen!
+**
+** \note This function must be called after zf_reactor_perform() returns a value
+**       greater than zero, and before zf_reactor_perform() is called again.
+**
+** \note If RX timestamps were not enabled during stack initialisation, the
+**       behaviour of this function is undefined.
+**
+** On success the @p ts_out and @p flags_out fields are updated, and a value of
+** zero is returned. The @p flags_out field contains the following flags:
+** - EF_VI_SYNC_FLAG_CLOCK_SET is set if the adapter clock has ever been
+**   set (in sync with system)
+** - EF_VI_SYNC_FLAG_CLOCK_IN_SYNC is set if the adapter clock is in sync
+**   with the external clock (PTP).
+**
+*/
+ZF_LIBENTRY int
+zfur_pkt_get_timestamp(struct zfur* us, const struct zfur_msg* msg,
+                       struct timespec *ts_out, int pktind, unsigned* flags);
 
 /*! \brief Returns a #zf_waitable representing the given #zfur.
 **
@@ -321,8 +359,38 @@ zfut_get_mss(struct zfut *us);
 **
 ** \see zfut_get_mss() zfut_send()
 */
-ZF_LIBENTRY ZF_HOT int
+ZF_LIBENTRY ZF_HOT ZF_NOCLONE int
 zfut_send_single(struct zfut *us, const void* buf, size_t buflen);
+
+
+/*! \brief Warms code path used by zfut_send_single() without sending data.
+**
+** \param us      The UDP zocket to warm for subsequent send
+** \param buf     A buffer of the data to send.
+** \param buflen  The length of the buffer, in bytes.
+**
+** \return  Payload bytes that would have been sent (i.e. @p buflen)
+**          on success.
+** \return -EAGAIN         Events need to be processed before warming.
+                           Call zf_reactor_perform()
+** \return -EMSGSIZE       Message too large.
+**
+** This function can be called repeatedly while the application waits
+** for an input that will trigger a call to zfut_send_single().
+** Doing so warms the code path to avoid cache and TLB misses when
+** actually sending data in the subsequent zfut_send_single() call.
+** @p buf need not contain the data that will eventually be sent.
+**
+** This function only supports warming the code path where a PIO
+** send would be performed. If @p buflen is too large for PIO then
+** -EMSGSIZE will be returned. If PIO is currently in use then -EAGAIN
+** will be returned.  In this case, the application can call
+** zf_reactor_perform() and then try again.
+**
+** \see zfut_send_single()
+**/
+ZF_LIBENTRY ZF_HOT int
+zfut_send_single_warm(struct zfut *us, const void* buf, size_t buflen);
 
 
 /**

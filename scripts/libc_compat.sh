@@ -54,12 +54,14 @@ done
 {
 echo -n "#define CI_HAVE_PCAP "
 check_library_presence pcap.h pcap
-echo -n "#define CI_HAVE_SPLICE_RETURNS_INT "
-check_prototype fcntl.h splice \
-    "int (*foo)(int, loff_t*, int, loff_t*, size_t, unsigned int)"
 echo -n "#define CI_HAVE_SPLICE_RETURNS_SSIZE_T "
 check_prototype fcntl.h splice \
     "ssize_t (*foo)(int, loff_t*, int, loff_t*, size_t, unsigned int)"
+# libc 2.26 changes splice proto again
+echo -n "#define CI_HAVE_SPLICE_RETURNS___SSIZE_T "
+check_prototype fcntl.h splice \
+    "__ssize_t (*foo)(int, __off64_t*, int, __off64_t*, size_t, unsigned int)"
+
 # Some Ubuntus (1504) have timespec parameter in recvmmsg without
 # "const" keyword.  We assume normal definition of recvmmsg if it is not
 # present in libc.

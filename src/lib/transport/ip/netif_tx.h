@@ -39,7 +39,7 @@ ci_inline void ci_netif_pkt_tx_assert_len(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 }
 
 
-ci_inline void ci_netif_pkt_to_iovec(ci_netif* ni, ci_ip_pkt_fmt* pkt, 
+ci_inline void ci_netif_pkt_to_iovec(ci_netif* ni, ci_ip_pkt_fmt* pkt,
                                      ef_iovec* iov, unsigned iovlen)
 {
   int i, intf_i = pkt->intf_i;
@@ -65,6 +65,74 @@ ci_inline void ci_netif_pkt_to_iovec(ci_netif* ni, ci_ip_pkt_fmt* pkt,
 }
 
 
+ci_inline unsigned ci_netif_pkt_to_host_iovec(ci_netif* ni,
+                                              ci_ip_pkt_fmt* pkt,
+                                              struct iovec* iov,
+                                              unsigned iovlen)
+{
+  unsigned n = pkt->n_buffers;
+  int i;
+  unsigned total_length = 0;
+
+  ci_assert_lt((unsigned) pkt->intf_i, CI_CFG_MAX_INTERFACES);
+  ci_assert_ge(iovlen, n);
+
+#if CI_CFG_NETIF_HARDEN
+  if( n > iovlen )
+    n = iovlen;
+#endif
+
+  ci_netif_pkt_tx_assert_len(ni, pkt, n);
+
+  for( i = 0; ; ) {
+    iov[i].iov_base = pkt->dma_start + pkt->pkt_start_off;
+    iov[i].iov_len = pkt->buf_len;
+    total_length += pkt->buf_len;
+    if( ++i == n )
+      return total_length;
+    pkt = PKT_CHK(ni, pkt->frag_next);
+  }
+}
+
+
+/**********************************************************************
+ * CTPIO.
+ */
+
+ci_inline int /*bool*/ ci_netif_may_ctpio(ci_netif* ni, int intf_i,
+                                          size_t frame_len)
+{
+#if CI_CFG_USE_CTPIO && ! defined(__KERNEL__)
+  /* Only use CTPIO if not desisted, frame length is below threshold, and
+   * TX ring is not very full.  (It is essential that we have room to post
+   * a fallback).
+   */
+  const ci_netif_state_nic_t* nsn = &ni->state->nic[intf_i];
+  const ci_netif_nic_t* nnic = &ni->nic_hw[intf_i];
+  int max_fill = ef_vi_transmit_capacity(&nnic->vi) >> 2;
+  return frame_len <= nsn->ctpio_frame_len_check &&
+         ef_vi_transmit_fill_level(&nnic->vi) < max_fill;
+#else
+  return 0;
+#endif
+}
+
+ci_inline void ci_netif_ctpio_desist(ci_netif* ni, int intf_i)
+{
+#if CI_CFG_CTPIO
+  ci_netif_state_nic_t* nsn = &ni->state->nic[intf_i];
+  nsn->ctpio_frame_len_check = 0;
+#endif
+}
+
+ci_inline void ci_netif_ctpio_resume(ci_netif* ni, int intf_i)
+{
+#if CI_CFG_CTPIO
+  ci_netif_state_nic_t* nsn = &ni->state->nic[intf_i];
+  nsn->ctpio_frame_len_check = nsn->ctpio_max_frame_len;
+#endif
+}
+
 /**********************************************************************
  * DMA queues.
  */
@@ -77,7 +145,7 @@ extern void ci_netif_dmaq_shove1(ci_netif*, int intf_i);
 /* Moves packets from the overflow queue to the hardware ring if the
  * hardware queue has at least space for one packet.
  */
-extern void ci_netif_dmaq_shove2(ci_netif*, int intf_i);
+extern void ci_netif_dmaq_shove2(ci_netif*, int intf_i, int is_fresh);
 
 
 #define ci_netif_dmaq(ni, nic_i)  (&(ni)->state->nic[nic_i].dmaq)

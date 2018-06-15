@@ -49,9 +49,9 @@ done
 [ $# = 1 ] || usage
 tarball="$1"
 
-# We build Onload source rpm on RHEL5, as the srpm then seems to work fine
-# on other distros.
-try egrep -q "Red Hat Enterprise Linux.*release 5|CentOS release 5" \
+# We build Onload source rpm on RHEL5 or RHEL6, as the srpm then seems to work
+# fine on other supported distros.
+try egrep -q "Red Hat Enterprise Linux.*release [56]|CentOS release [56]" \
   /etc/redhat-release
 
 # We must be root, else get problems at install time.
@@ -87,7 +87,7 @@ try mkdir -p rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 try rpmbuild --nodeps --define "_topdir $PWD/rpmbuild" -ts "$tarball"
 srpm=$(/bin/ls rpmbuild/SRPMS/*.rpm)
 srpmbase=$(basename "$srpm")
-destfile="$original_wd/$srpmbase"
+destfile="$original_wd/$(echo "$srpmbase" | sed -e 's/\.el6//')"
 [ -f "$destfile" ] &&
   fail "ERROR: '$destfile' already exists.  I will not overwrite."
 try cp "$srpm" "$destfile"

@@ -76,12 +76,19 @@ efrm_pio_unlink_vi(struct efrm_pio *, struct efrm_vi *,
 		   bool* freed_resource_out);
 
 extern int
-efrm_pio_map_kernel(struct efhw_nic *, struct efrm_vi *, void **);
+efrm_pio_map_kernel(struct efrm_vi *, void **);
 
 extern void
 efrm_pio_unmap_kernel(struct efrm_vi *, void *);
 
 extern int 
 efrm_pio_get_size(struct efrm_pio *);
+
+extern int
+efrm_ctpio_map_kernel(struct efrm_vi *, void **);
+
+extern void
+efrm_ctpio_unmap_kernel(struct efrm_vi *, void *);
+
 
 #endif /* __CI_EFRM_PIO_H__ */

@@ -76,42 +76,93 @@ static void efx_mtd_sync(struct mtd_info *mtd)
 		       part->name, part->dev_type_name, rc);
 }
 
+static void efx_mtd_free_parts(struct kref *kref)
+{
+	struct efx_nic *efx = container_of(kref, struct efx_nic, mtd_parts_kref);
+
+	kfree(efx->mtd_parts);
+	efx->mtd_parts = NULL;
+}
+
+static void efx_mtd_scrub(struct efx_mtd_partition *part)
+{
+	/* The MTD wrappers check for NULL, except for the read
+	 * function. We render that harmless by setting the
+	 * size to 0.
+	 */
+#if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_MTD_DIRECT_ACCESS)
+	part->mtd.erase = NULL;
+	part->mtd.write = NULL;
+	part->mtd.sync = NULL;
+#else
+	part->mtd._erase = NULL;
+	part->mtd._write = NULL;
+	part->mtd._sync = NULL;
+#endif
+	part->mtd.priv = NULL;
+	part->mtd.size = 0;
+}
+
 #ifdef EFX_NOT_UPSTREAM
 /* Free the MTD device after all references have gone away. */
 static void efx_mtd_release_partition(struct device *dev)
 {
 	struct mtd_info *mtd = dev_get_drvdata(dev);
 	struct efx_mtd_partition *part = mtd->priv;
-	struct efx_nic *efx;
 
 	/* Call mtd_release to remove the /dev/mtdXro node */
 	if (dev->type && dev->type->release)
 		(dev->type->release)(dev);
 
+	efx_mtd_scrub(part);
 	list_del(&part->node);
-
-	/* Free memory if all MTD devices have been removed */
-	efx = part->efx;
-	if (list_empty(&efx->mtd_list)) {
-		kfree(efx->mtd_parts);
-		efx->mtd_parts = NULL;
-	}
+	kref_put(&part->efx->mtd_parts_kref, efx_mtd_free_parts);
 }
 #endif
 
-static void efx_mtd_remove_partition(struct efx_mtd_partition *part)
+static void efx_mtd_remove_partition(struct efx_nic *efx,
+				     struct efx_mtd_partition *part)
 {
 	int rc;
+#ifdef EFX_WORKAROUND_63680
+	unsigned retry;
 
+	if (!part->mtd.size)
+		return;
+
+	for (retry = 15; retry; retry--) {
+#else
 	for (;;) {
+#endif
 		rc = mtd_device_unregister(&part->mtd);
 		if (rc != -EBUSY)
 			break;
+#ifdef EFX_WORKAROUND_63680
+		/* Try to disown the other process */
+		if ((retry <= 5) && (part->mtd.usecount > 0)) {
+			netif_err(efx, hw, efx->net_dev,
+				  "MTD device %s stuck for %d seconds, disowning it\n",
+				  part->name, 15-retry);
+			part->mtd.usecount--;
+		}
+#endif
 		ssleep(1);
 	}
-	WARN_ON(rc);
+#ifdef EFX_WORKAROUND_63680
+	if (rc || !retry) {
+#else
+	if (rc) {
+#endif
+		netif_err(efx, hw, efx->net_dev,
+			  "Error %d removing MTD device %s. A reboot is needed to fix this\n",
+			  rc, part->name);
+		part->name[0] = '\0';
+	}
+
 #ifndef EFX_NOT_UPSTREAM
+	efx_mtd_scrub(part);
 	list_del(&part->node);
+	kref_put(&efx->mtd_parts_kref, efx_mtd_free_parts);
 #endif
 }
 
@@ -122,6 +173,7 @@ int efx_mtd_add(struct efx_nic *efx, struct efx_mtd_partition *parts,
 	size_t i;
 
 	efx->mtd_parts = parts;
+	kref_init(&efx->mtd_parts_kref);
 
 	for (i = 0; i < n_parts; i++) {
 		part = &parts[i];
@@ -130,7 +182,8 @@ int efx_mtd_add(struct efx_nic *efx, struct efx_mtd_partition *parts,
 		if (!part->mtd.writesize)
 			part->mtd.writesize = 1;
 #endif
-		if (efx_allow_nvconfig_writes)
+		if (efx_allow_nvconfig_writes &&
+		    !(part->mtd.flags & MTD_NO_ERASE))
 			part->mtd.flags |= MTD_WRITEABLE;
 
 		part->mtd.owner = THIS_MODULE;
@@ -153,6 +206,8 @@ int efx_mtd_add(struct efx_nic *efx, struct efx_mtd_partition *parts,
 		if (mtd_device_register(&part->mtd, NULL, 0))
 			goto fail;
 
+		kref_get(&efx->mtd_parts_kref);
+
 #ifdef EFX_NOT_UPSTREAM
 		/* The core MTD functionality does not comply completely with
 		 * the device API. When it does we may need to change the way
@@ -170,7 +225,9 @@ int efx_mtd_add(struct efx_nic *efx, struct efx_mtd_partition *parts,
 
 fail:
 	while (i--)
-		efx_mtd_remove_partition(&parts[i]);
+		efx_mtd_remove_partition(efx, &parts[i]);
+	kref_put(&efx->mtd_parts_kref, efx_mtd_free_parts);
+
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_HAVE_MTD_TABLE)
 	/* The number of MTDs is limited (to 16 or 32 by default) and
 	 * we probably reached that limit.
@@ -192,12 +249,8 @@ void efx_mtd_remove(struct efx_nic *efx)
 		return;
 
 	list_for_each_entry_safe(part, next, &efx->mtd_list, node)
-		efx_mtd_remove_partition(part);
-#ifndef EFX_NOT_UPSTREAM
-
-	kfree(efx->mtd_parts);
-	efx->mtd_parts = NULL;
-#endif
+		efx_mtd_remove_partition(efx, part);
+	kref_put(&efx->mtd_parts_kref, efx_mtd_free_parts);
 }
 
 void efx_mtd_rename(struct efx_nic *efx)

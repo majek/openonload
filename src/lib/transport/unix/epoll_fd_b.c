@@ -230,7 +230,9 @@ citp_protocol_impl citp_epollb_protocol_impl = {
     .tmpl_update    = citp_nonsock_tmpl_update,
     .tmpl_abort     = citp_nonsock_tmpl_abort,
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
     .ordered_data   = citp_nonsock_ordered_data,
+#endif
 #endif
     .is_spinning    = citp_nonsock_is_spinning,
 #if CI_CFG_FD_CACHING
@@ -528,6 +530,13 @@ int citp_epollb_ctl(citp_fdinfo* fdi, int eop, int fd,
     citp_fdinfo_release_ref(fd_fdi, 0);
     errno = EBADF;
     return -1;
+  }
+
+  if( fd_fdi->protocol->type == CITP_EPOLLB_FD ) {
+    citp_epollb_fdi *epi_low = fdi_to_epollb_fdi(fd_fdi);
+    int low_fd = epi_low->kepfd;
+    citp_fdinfo_release_ref(fd_fdi, 0);
+    return ci_sys_epoll_ctl(epi->kepfd, eop, low_fd, event);
   }
 
   /* This is onload fd now. */

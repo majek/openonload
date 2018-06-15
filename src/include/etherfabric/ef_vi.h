@@ -58,13 +58,15 @@
  * Primitive types ****************************************************
  **********************************************************************/
 
-/* We standardise on the types from stdint.h and synthesise these types
+/* We standardize on the types from stdint.h and synthesize these types
  * for compilers/platforms that don't provide them */
 
 #if defined(__GNUC__)
 # if defined(__linux__) && defined(__KERNEL__)
 #  include <linux/types.h>
 #  include <linux/time.h>
+#  include <asm/errno.h>
+#  include <linux/uio.h>
 # else
 #  include <stdint.h>
 #  ifndef __STDC_FORMAT_MACROS
@@ -73,6 +75,8 @@
 #  include <inttypes.h>
 #  include <time.h>
 #   include <sys/types.h>
+#   include <sys/uio.h>
+#  include <errno.h>
 # endif
 # define EF_VI_ALIGN(x) __attribute__ ((aligned (x)))
 # define ef_vi_inline static inline
@@ -169,7 +173,8 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_RX */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       rq_id      :32;
     unsigned       len        :16;
     unsigned       flags      :16;
@@ -177,7 +182,8 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_RX_DISCARD */
   struct {  /* This *must* have same initial layout as [rx]. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       rq_id      :32;
     unsigned       len        :16;
     unsigned       flags      :16;
@@ -186,20 +192,23 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_TX */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       flags      :8;
     unsigned       desc_id    :16;
   } tx;
   /** An event of type EF_EVENT_TYPE_TX_ERROR */
   struct {  /* This *must* have same layout as [tx]. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       flags      :8;
     unsigned       desc_id    :16;
     unsigned       subtype    :16;
   } tx_error;
   /** An event of type EF_EVENT_TYPE_TX_WITH_TIMESTAMP */
-  struct {
+  struct {  /* This *must* have same layout as [tx] up to [flags]. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       flags      :8;
     unsigned       rq_id      :32;
     unsigned       ts_sec     :32;
     unsigned       ts_nsec    :32;
@@ -207,18 +216,20 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_TX_ALT */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       alt_id     :16;
   } tx_alt;
   /** An event of type EF_EVENT_TYPE_RX_NO_DESC_TRUNC */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
   } rx_no_desc_trunc;
   /** An event of type EF_EVENT_TYPE_RX_PACKED_STREAM */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       flags      :16;
     unsigned       n_pkts     :16;
     unsigned       ps_flags   :8;
@@ -231,14 +242,16 @@ typedef union {
   /** An event of type EF_EVENT_TYPE_RX_MULTI */
   struct {
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       n_descs    :16;
     unsigned       flags      :16;
   } rx_multi;
   /** An event of type EF_EVENT_TYPE_RX_MULTI_DISCARD */
   struct {  /* Common layout with rx_multi. */
     unsigned       type       :16;
-    unsigned       q_id       :16;
+    unsigned       q_id       :8;
+    unsigned       __reserved :8;
     unsigned       n_descs    :16;
     unsigned       flags      :16;
     unsigned       subtype    :16;
@@ -297,6 +310,8 @@ enum {
 /*! \brief True if the iSCSIOK flag is set for an RX event */
 #define EF_EVENT_RX_ISCSI_OKAY(e)       ((e).rx.flags & EF_EVENT_FLAG_ISCSI_OK)
 
+/* RX-event flags. */
+
 /*! \brief Start Of Packet flag. */
 #define EF_EVENT_FLAG_SOP             0x1
 /*! \brief CONTinuation Of Packet flag. */
@@ -308,8 +323,16 @@ enum {
 /*! \brief Packed Stream Next Buffer flag. */
 #define EF_EVENT_FLAG_PS_NEXT_BUFFER  0x10
 
+/* TX-event flags. */
+
+/*! \brief Packets were sent successfully with CTPIO. */
+#define EF_EVENT_FLAG_CTPIO           0x1
+
 /*! \brief Get the TX descriptor ring ID used for a transmitted packet. */
 #define EF_EVENT_TX_Q_ID(e)     ((e).tx.q_id)
+
+/*! \brief True if packets were sent successfully with CTPIO. */
+#define EF_EVENT_TX_CTPIO(e)    ((e).tx.flags & EF_EVENT_FLAG_CTPIO)
 
 /*! \brief Get the RX descriptor ring ID used for a discarded packet. */
 #define EF_EVENT_RX_DISCARD_Q_ID(e)  ((e).rx_discard.q_id)
@@ -333,6 +356,8 @@ enum {
 /*! \brief True if the Start Of Packet flag is set for an RX HT event */
 #define EF_EVENT_RX_MULTI_SOP(e)              ((e).rx_multi.flags & \
                                                EF_EVENT_FLAG_SOP)
+/*! \brief Get the reason for an EF_EVENT_TYPE_RX_MULTI_DISCARD event */
+#define EF_EVENT_RX_MULTI_DISCARD_TYPE(e)     ((e).rx_multi_discard.subtype)
 
 /*! \brief The reason for an EF_EVENT_TYPE_RX_DISCARD event */
 enum {
@@ -350,6 +375,8 @@ enum {
   EF_EVENT_RX_DISCARD_EV_ERROR,
   /** Other unspecified reason */
   EF_EVENT_RX_DISCARD_OTHER,
+  /** Inner IP header or TCP/UDP checksum error */
+  EF_EVENT_RX_DISCARD_INNER_CSUM_BAD,
 };
 
 /*! \brief Get the TX descriptor ring ID used for a transmit error */
@@ -501,6 +528,11 @@ enum ef_vi_flags {
   /** Controls whether the hardware event timer is enabled (8000 series and
    ** newer) */
   EF_VI_ENABLE_EV_TIMER = 0x800000,
+  /** Enable the "cut-through PIO" feature (X2000 series and newer). */
+  EF_VI_TX_CTPIO           = 0x1000000,
+  /** When using CTPIO, prevent poisoned frames from reaching the wire (X2000
+   ** series and newer). */
+  EF_VI_TX_CTPIO_NO_POISON = 0x2000000,
 };
 
 
@@ -514,16 +546,30 @@ enum ef_vi_out_flags {
 /*! \brief Flags that define which errors will cause RX_DISCARD events. */
 enum ef_vi_rx_discard_err_flags {
   /** TCP or UDP checksum error */
-  EF_VI_DISCARD_RX_L4_CSUM_ERR      = 0x1,
+  EF_VI_DISCARD_RX_L4_CSUM_ERR       = 0x1,
   /** IP checksum error */
-  EF_VI_DISCARD_RX_L3_CSUM_ERR      = 0x2,
+  EF_VI_DISCARD_RX_L3_CSUM_ERR       = 0x2,
   /** Ethernet FCS error */
-  EF_VI_DISCARD_RX_ETH_FCS_ERR      = 0x4,
+  EF_VI_DISCARD_RX_ETH_FCS_ERR       = 0x4,
   /** Ethernet frame length error */
-  EF_VI_DISCARD_RX_ETH_LEN_ERR      = 0x8,      /* ef10 only */
+  EF_VI_DISCARD_RX_ETH_LEN_ERR       = 0x8,      /* ef10 only */
   /** To be discard in software (includes frame length error) */
-  EF_VI_DISCARD_RX_TOBE_DISC        = 0x10      /* Siena only */
+  EF_VI_DISCARD_RX_TOBE_DISC         = 0x10,     /* Siena only */
+  /* Inner TCP or UDP checksum error */
+  EF_VI_DISCARD_RX_INNER_L4_CSUM_ERR = 0x20,
+  /* Inner IP checksum error */
+  EF_VI_DISCARD_RX_INNER_L3_CSUM_ERR = 0x40
+
+
 };
+
+
+/*! \brief Timestamp formats supported by various cards. */
+enum ef_timestamp_format {
+        TS_FORMAT_SECONDS_27FRACTION = 0,
+        TS_FORMAT_SECONDS_QTR_NANOSECONDS = 1
+};
+
 
 /**********************************************************************
  * ef_vi data structure ***********************************************
@@ -588,9 +634,9 @@ typedef struct {
   uint32_t      sync_timestamp_minor;
   /** Smallest possible seconds value for given sync_timestamp_major */
   uint32_t      sync_timestamp_minimum;
-  /** Timestamp synchronised with adapter */
+  /** Timestamp synchronized with adapter */
   uint32_t      sync_timestamp_synchronised; /* with adapter */
-  /** Time synchronisation flags */
+  /** Time synchronization flags */
   uint32_t      sync_flags;
 } ef_eventq_state;
 
@@ -710,6 +756,8 @@ typedef struct ef_vi {
   int                           rx_ts_correction;
   /** The timestamp correction (ns) for transmitted packets */
   int                           tx_ts_correction_ns;
+  /** The timestamp format used by the hardware */
+  enum ef_timestamp_format      ts_format;
   /** Pointer to virtual interface memory */
   char*                         vi_mem_mmap_ptr;
   /** Length of virtual interface memory */
@@ -718,6 +766,10 @@ typedef struct ef_vi {
   char*                         vi_io_mmap_ptr;
   /** Length of virtual interface I/O region */
   int                           vi_io_mmap_bytes;
+  /** Pointer to CTPIO region */
+  char*                         vi_ctpio_mmap_ptr;
+  /** Controls rate of writes into CTPIO aperture */
+  uint32_t                      vi_ctpio_wb_ticks;
   /** True if the virtual interface is in a cluster */
   int                           vi_clustered;
   /** True if packed stream mode is enabled for the virtual interface */
@@ -799,6 +851,10 @@ typedef struct ef_vi {
     /** Copy a packet to Programmed I/O region and warm transmit path */
     void (*transmit_copy_pio_warm)(struct ef_vi*, int pio_offset,
                                    const void* src_buf, int len);
+    /** Transmit a vector of packet buffers using CTPIO */
+    void (*transmitv_ctpio)(struct ef_vi*, size_t frame_len,
+                            const struct iovec* iov,
+                            int iov_len, unsigned threshold);
     /** Select a TX alternative as the destination for future sends */
     int (*transmit_alt_select)(struct ef_vi*, unsigned alt_id);
     /** Select the "normal" data path as the destination for future sends */
@@ -906,6 +962,7 @@ extern const char* ef_vi_version_str(void);
 extern const char* ef_vi_driver_interface_str(void);
 
 
+
 /**********************************************************************
  * Receive interface **************************************************
  **********************************************************************/
@@ -924,7 +981,7 @@ extern const char* ef_vi_driver_interface_str(void);
 **
 ** When a large packet is received that is scattered over multiple packet
 ** buffers, the prefix is only present in the first buffer.
-*/ef_vi_inline int ef_vi_receive_prefix_len(ef_vi* vi)
+*/ef_vi_inline int ef_vi_receive_prefix_len(const ef_vi* vi)
 {
   return vi->rx_prefix_len;
 }
@@ -945,7 +1002,7 @@ extern const char* ef_vi_driver_interface_str(void);
 ** as the value returned by this function, else there is a risk that a DMA
 ** may overrun the buffer.
 */
-ef_vi_inline int ef_vi_receive_buffer_len(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_buffer_len(const ef_vi* vi)
 {
   return vi->rx_buffer_len;
 }
@@ -979,7 +1036,7 @@ ef_vi_inline void ef_vi_receive_set_buffer_len(ef_vi* vi, unsigned buf_len)
 ** number of slots that are available for pushing a new descriptor (and an
 ** associated unfilled packet buffer).
 */
-ef_vi_inline int ef_vi_receive_space(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_space(const ef_vi* vi)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
   return vi->vi_rxq.mask - (qs->added - qs->removed);
@@ -998,7 +1055,7 @@ ef_vi_inline int ef_vi_receive_space(ef_vi* vi)
 ** The fill level should be kept as high as possible, so there are enough
 ** slots available to handle a burst of incoming packets.
 */
-ef_vi_inline int ef_vi_receive_fill_level(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_fill_level(const ef_vi* vi)
 {
   ef_vi_rxq_state* qs = &vi->ep_state->rxq;
   return qs->added - qs->removed;
@@ -1014,7 +1071,7 @@ ef_vi_inline int ef_vi_receive_fill_level(ef_vi* vi)
 **
 ** Returns the total capacity of the RX descriptor ring.
 */
-ef_vi_inline int ef_vi_receive_capacity(ef_vi* vi)
+ef_vi_inline int ef_vi_receive_capacity(const ef_vi* vi)
 {
   return vi->vi_rxq.mask;
 }
@@ -1127,13 +1184,13 @@ extern int ef_vi_receive_get_timestamp(ef_vi* vi, const void* pkt,
 **                  the sync flags for the packet.
 **
 ** \return 0 on success, or a negative error code:\n
-**         - ENOMSG - Synchronisation with adapter has not yet been
+**         - ENOMSG - Synchronization with adapter has not yet been
 **           achieved.\n
 **           This only happens with old firmware.\n
 **         - ENODATA - Packet does not have a timestamp.\n
 **           On current Solarflare adapters, packets that are switched from
 **           TX to RX do not get timestamped.\n
-**         - EL2NSYNC - Synchronisation with adapter has been lost.\n
+**         - EL2NSYNC - Synchronization with adapter has been lost.\n
 **           This should never happen!
 **
 ** Retrieve the UTC timestamp associated with a received packet, and the
@@ -1254,7 +1311,7 @@ ef_vi_receive_set_discards(ef_vi* vi, unsigned discard_err_flags);
 ** number of slots that are available for pushing a new descriptor (and an
 ** associated filled packet buffer).
 */
-ef_vi_inline int ef_vi_transmit_space(ef_vi* vi)
+ef_vi_inline int ef_vi_transmit_space(const ef_vi* vi)
 {
   ef_vi_txq_state* qs = &vi->ep_state->txq;
   return vi->vi_txq.mask - (qs->added - qs->removed);
@@ -1274,7 +1331,7 @@ ef_vi_inline int ef_vi_transmit_space(ef_vi* vi)
 ** recently been posted for transmission. A consistently high fill level
 ** should be investigated.
 */
-ef_vi_inline int ef_vi_transmit_fill_level(ef_vi* vi)
+ef_vi_inline int ef_vi_transmit_fill_level(const ef_vi* vi)
 {
   ef_vi_txq_state* qs = &vi->ep_state->txq;
   return qs->added - qs->removed;
@@ -1290,7 +1347,7 @@ ef_vi_inline int ef_vi_transmit_fill_level(ef_vi* vi)
 **
 ** Returns the total capacity of the TX descriptor ring.
 */
-ef_vi_inline int ef_vi_transmit_capacity(ef_vi* vi)
+ef_vi_inline int ef_vi_transmit_capacity(const ef_vi* vi)
 {
   return vi->vi_txq.mask;
 }
@@ -1798,6 +1855,142 @@ ef_vi_transmit_alt_usage(const struct ef_vi_transmit_alt_overhead* params,
 ** 7000-series NICs support this, but it is ignored by earlier NICs.
 */
 extern void ef_vi_set_tx_push_threshold(ef_vi* vi, unsigned threshold);
+
+
+/*! \brief Transmit a packet using CTPIO from an array of buffers
+**
+** \param vi            The virtual interface on which to transmit.
+** \param frame_len     Frame length in bytes.
+** \param frame_iov     Buffers containing the frame to transmit.
+** \param frame_iov_len Length of frame_iov.
+** \param ct_threshold  Number of bytes of the packet to buffer before
+**                      starting to cut-through to the wire.
+**
+** Transmit a packet using the CTPIO datapath.  The CTPIO interface gives
+** the lowest latency in most cases, and can be used by any number of VIs.
+**
+** This function implements the latency critical part of a CTPIO send.  It
+** should be followed by a call to ef_vi_transmit_ctpio_fallback() or
+** similar before doing any further send calls on the same VI.
+** ef_vi_transmit_ctpio_fallback() provides a fallback frame which is sent
+** in cases where the CTPIO send fails.
+**
+** It is possible for a CTPIO send to fail for a number of reasons,
+** including contention for adapter resources, and timeout due to the whole
+** frame not being written to the adapter sufficiently quickly.
+**
+** The @p ct_threshold indicates how many bytes of the packet should be
+** buffered by the adapter before starting to emit the packet.  To disable
+** cut-through behavior this must be at least as large as the frame
+** length.  To disable cut-through across all packet sizes, use
+** EF_VI_CTPIO_CT_THRESHOLD_SNF.
+**
+** The CTPIO path bypasses the adapter's normal transmit path, including
+** checksum offloads, and so the packet is transmitted unmodified.  The
+** Ethernet FCS is appended as normal.
+**
+** The caller must ensure that @p frame_len is equal to the sum of the
+** lengths in @p frame_iov.
+**
+** The buffers referenced by @p frame_iov can be reused as soon as this
+** call returns.
+*/
+#define ef_vi_transmitv_ctpio(vi, frame_len, frame_iov,         \
+                              frame_iov_len, ct_threshold)         \
+  (vi)->ops.transmitv_ctpio((vi), (frame_len), (frame_iov),     \
+                            (frame_iov_len), (ct_threshold))
+
+
+/*! \brief Transmit a packet using CTPIO
+**
+** \param vi            The virtual interface on which to transmit.
+** \param frame_buf     Buffer containing the frame to transmit.
+** \param frame_len     Frame length in bytes.
+** \param ct_threshold  Number of bytes of the packet to buffer before
+**                      starting to cut-through to the wire.
+**
+** Transmit a packet using the CTPIO datapath.  The CTPIO interface gives
+** the lowest latency in most cases, and can be used by any number of VIs.
+**
+** This function implements the latency critical part of a CTPIO send.  It
+** should be followed by a call to ef_vi_transmit_ctpio_fallback() or
+** similar before doing any further send calls on the same VI.
+** ef_vi_transmit_ctpio_fallback() provides a fallback frame which is sent
+** in cases where the CTPIO send fails.
+**
+** It is possible for a CTPIO send to fail for a number of reasons,
+** including contention for adapter resources, and timeout due to the whole
+** frame not being written to the adapter sufficiently quickly.
+**
+** The @p ct_threshold indicates how many bytes of the packet should be
+** buffered by the adapter before starting to emit the packet.  To disable
+** cut-through behavior this must be at least as large as the frame
+** length.  To disable cut-through across all packet sizes, use
+** EF_VI_CTPIO_CT_THRESHOLD_SNF.
+**
+** The CTPIO path bypasses the adapter's normal transmit path, including
+** checksum offloads, and so the packet is transmitted unmodified.  The
+** Ethernet FCS is appended as normal.
+**
+** The buffer @p frame_buf can be reused as soon as this call returns.
+*/
+ef_vi_inline void
+ef_vi_transmit_ctpio(ef_vi* vi, const void* frame_buf, size_t frame_len,
+                     unsigned ct_threshold)
+{
+  struct iovec iov = { (void*) frame_buf, frame_len };
+  ef_vi_transmitv_ctpio(vi, frame_len, &iov, 1, ct_threshold);
+}
+
+
+/*! \brief Post fallback frame for a CTPIO transmit
+**
+** \param vi            The virtual interface on which to transmit.
+** \param dma_addr      DMA address of frame.
+** \param len           Frame length in bytes.
+** \param dma_id        DMA ID to be returned on completion.
+**
+** \return 0 on success, or a negative error code:\n
+**         -EAGAIN if the descriptor ring is full.
+**
+** This should be called after ef_vi_transmit_ctpio() or similar.  It
+** provides the fallback frame which is sent in the event that a CTPIO
+** transmit fails.
+**
+** Ordinarily the fallback frame will be the same as the CTPIO frame, but
+** it doesn't have to be.
+*/
+extern int ef_vi_transmit_ctpio_fallback(ef_vi* vi, ef_addr dma_addr,
+                                         size_t len, ef_request_id dma_id);
+
+
+/*! \brief Post fallback frame for a CTPIO transmit
+**
+** \param vi            The virtual interface on which to transmit.
+** \param dma_iov       Array of source buffer DMA addresses.
+** \param dma_iov_len   Length of dma_iov.
+** \param dma_id        DMA ID to be returned on completion.
+**
+** \return 0 on success, or a negative error code:\n
+**         -EAGAIN if the descriptor ring is full.
+**
+** This should be called after ef_vi_transmit_ctpio() or similar.  It
+** provides the fallback frame which is sent in the event that a CTPIO
+** transmit fails.
+**
+** Ordinarily the fallback frame will be the same as the CTPIO frame, but
+** it doesn't have to be.
+*/
+extern int ef_vi_transmitv_ctpio_fallback(ef_vi* vi, const ef_iovec* dma_iov,
+                                          int dma_iov_len,
+                                          ef_request_id dma_id);
+
+
+/*! Cut-through threshold to use if store-and-forward behavior is wanted
+** for all packet sizes.  For use with ef_vi_transmit_ctpio() and
+** ef_vi_transmitv_ctpio().
+*/
+#define EF_VI_CTPIO_CT_THRESHOLD_SNF  0xffff
 
 
 /**********************************************************************

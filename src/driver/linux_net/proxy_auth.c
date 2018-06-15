@@ -312,6 +312,8 @@ int efx_proxy_auth_configure_list(struct efx_nic *efx,
 	int block_count;
 	int rc;
 
+	netif_warn(efx, drv, efx->net_dev, "Proxy MCDI authorization is a deprecated feature and will be removed in a future release of this driver.\n");
+
 	if (default_result > MC_CMD_PROXY_COMPLETE_IN_TIMEDOUT)
 		return -EINVAL;
 

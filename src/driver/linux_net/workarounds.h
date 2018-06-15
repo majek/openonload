@@ -49,6 +49,8 @@
 #define EFX_WORKAROUND_59975(efx) 0
 /* Driverlink probe can take >1 sec to perform license challenge */
 #define EFX_WORKAROUND_62649 defined
+/* MTD can leave a bad usecount */
+#define EFX_WORKAROUND_63680
 #endif
 
 

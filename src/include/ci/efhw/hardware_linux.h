@@ -78,11 +78,6 @@
 #ifndef mmiowb
 	#if defined(__i386__) || defined(__x86_64__)
 		#define mmiowb()
-	#elif defined(__ia64__)
-		#ifndef ia64_mfa
-			#define ia64_mfa() asm volatile ("mf.a" ::: "memory")
-		#endif
-	#define mmiowb ia64_mfa
 	#elif defined(__PPC32__)
 		#define mmiowb
 	#elif defined(__PPC64__)

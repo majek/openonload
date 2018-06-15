@@ -132,7 +132,7 @@ ci_ip_cache_is_onloadable(ci_netif* ni, ci_ip_cached_hdrs* ipcache)
 static int
 cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
                                cicp_hwport_mask_t hwports,
-                               ci_uint16 src_port_be16)
+                               ci_uint16 src_port_be16, uint32_t daddr_be32)
 {
   /* For an active-active bond that uses hashing, choose the appropriate
    * interface to send out of.
@@ -147,7 +147,7 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
   memcpy(&hs.dst_mac, ci_ip_cache_ether_dhost(ipcache), ETH_ALEN);
   memcpy(&hs.src_mac, ci_ip_cache_ether_shost(ipcache), ETH_ALEN);
   hs.src_addr_be32 = ipcache->ip_saddr_be32;
-  hs.dst_addr_be32 = ipcache->ip.ip_daddr_be32;
+  hs.dst_addr_be32 = daddr_be32;
   hs.src_port_be16 = src_port_be16;
   hs.dst_port_be16 = ipcache->dport_be16;
   ipcache->hwport = oo_cp_hwport_bond_get(ni->cplane, ipcache->ifindex,
@@ -159,6 +159,7 @@ cicp_user_bond_hash_get_hwport(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
 #ifdef __KERNEL__
 #include <net/flow.h>
 #include <net/route.h>
+#include <net/arp.h>
 
 static void
 cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
@@ -183,7 +184,7 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
     return;
   }
   data->src = fl.fl4_src;
-  data->ifindex = rt->u.dst.dev->ifindex;
+#define DST_DEV(rt) rt->u.dst.dev
 #else /* linux-2.6.39 and newer */
   struct flowi4 fl4;
 
@@ -202,10 +203,13 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
     return;
   }
   data->src = fl4.saddr;
-  data->ifindex = rt->dst.dev->ifindex;
+#define DST_DEV(rt) rt->dst.dev
 #endif /* 2.6.39 */
 
+  data->ifindex = DST_DEV(rt)->ifindex;
   data->next_hop = rt->rt_gateway;
+  if( data->next_hop == 0 )
+    data->next_hop = key->dst;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
   data->mtu = 0;
@@ -215,6 +219,20 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
 #else
   data->mtu = rt->rt_pmtu;
 #endif
+
+  data->arp_valid = 0;
+  if( data->ifindex != 1 ) {
+    /* In theory the rt->dst structure has a reference to the neigh,
+     * but in practice it is not easy to dig the neigh out. */
+    struct neighbour *neigh = neigh_lookup(&arp_tbl, &rt->rt_gateway,
+                                           DST_DEV(rt));
+    if( neigh != NULL && (neigh->nud_state & NUD_VALID) ) {
+      data->arp_valid = 1;
+      memcpy(data->dst_mac, neigh->ha, ETH_ALEN);
+    }
+    if( neigh != NULL )
+      neigh_release(neigh);
+  }
 
   ip_rt_put(rt);
 
@@ -233,7 +251,6 @@ cicp_kernel_resolve(ci_netif* ni, struct cp_fwd_key* key,
     data->type = CICP_ROUTE_ALIEN;
   else
     data->type = CICP_ROUTE_NORMAL;
-  data->arp_valid = 0;
 }
 #endif
 
@@ -270,6 +287,7 @@ cicp_user_retrieve(ci_netif*                    ni,
   struct cp_fwd_key key;
   struct cp_fwd_data data;
   int rc;
+  uint32_t daddr_be32 = ipcache->ip.ip_daddr_be32;
 
   /* This function must be called when "the route is unusable".  I.e. when
    * the route is invalid or if there is no ARP.  In the second case, we
@@ -285,7 +303,8 @@ cicp_user_retrieve(ci_netif*                    ni,
       return;
   }
 
-  key.dst = ipcache->ip.ip_daddr_be32;
+
+  key.dst = daddr_be32;
   key.tos = sock_cp->ip_tos;
   key.flag = 0;
 
@@ -293,7 +312,14 @@ cicp_user_retrieve(ci_netif*                    ni,
     key.flag |= CP_FWD_KEY_UDP;
 
   key.ifindex = sock_cp->so_bindtodevice;
-  if( CI_IP_IS_MULTICAST(key.dst) ) {
+  if( CI_IP_IS_MULTICAST(daddr_be32) ) {
+    if( sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST ) {
+      ipcache->status = retrrc_alienroute;
+      ipcache->hwport = CI_HWPORT_ID_BAD;
+      ipcache->intf_i = -1;
+      return;
+    }
+
     /* In linux, SO_BINDTODEVICE has the priority over IP_MULTICAST_IF */
     if( key.ifindex == 0 )
       key.ifindex = sock_cp->ip_multicast_if;
@@ -305,14 +331,6 @@ cicp_user_retrieve(ci_netif*                    ni,
     key.src = sock_cp->ip_laddr_be32;
     if( sock_cp->sock_cp_flags & OO_SCP_TPROXY )
       key.flag |= CP_FWD_KEY_TRANSPARENT;
-  }
-
-  if(CI_UNLIKELY( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) &&
-                  (sock_cp->sock_cp_flags & OO_SCP_NO_MULTICAST) )) {
-    ipcache->status = retrrc_alienroute;
-    ipcache->hwport = CI_HWPORT_ID_BAD;
-    ipcache->intf_i = -1;
-    return;
   }
 
   if( key.src == 0 && sock_cp->sock_cp_flags & OO_SCP_UDP_WILD )
@@ -362,7 +380,7 @@ cicp_user_retrieve(ci_netif*                    ni,
 #if CI_CFG_TEAMING
   if( ipcache->encap.type & CICP_LLAP_TYPE_USES_HASH ) {
      if( cicp_user_bond_hash_get_hwport(ni, ipcache, data.hwports,
-                                    sock_cp->lport_be16) != 0 ) {
+                                    sock_cp->lport_be16, daddr_be32) != 0 ) {
       ipcache->status = retrrc_alienroute;
       ipcache->intf_i = -1;
       return;
@@ -391,7 +409,7 @@ cicp_user_retrieve(ci_netif*                    ni,
   if( data.arp_valid )
     memcpy(ci_ip_cache_ether_dhost(ipcache), &data.dst_mac, ETH_ALEN);
 
-  if( CI_IP_IS_MULTICAST(ipcache->ip.ip_daddr_be32) )
+  if( CI_IP_IS_MULTICAST(daddr_be32) )
     ipcache->ip.ip_ttl = sock_cp->ip_mcast_ttl;
   else
     ipcache->ip.ip_ttl = sock_cp->ip_ttl;
@@ -425,4 +443,21 @@ cicp_ip_cache_update_from(ci_netif* ni, ci_ip_cached_hdrs* ipcache,
          sizeof(ipcache->ether_header));
 }
 
+
+int
+cicp_ipif_check_ok(struct oo_cplane_handle* cp,
+                   cicp_ipif_row_t* ipif, void* data)
+{
+  return 1;
+}
+
+int
+cicp_llap_ipif_check_onloaded(struct oo_cplane_handle* cp,
+                              cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
+                              void* data)
+{
+  ci_netif* ni = data;
+  return llap->rx_hwports != 0 &&
+         (llap->rx_hwports & ~ci_netif_get_hwport_mask(ni)) == 0;
+}
 

@@ -44,6 +44,8 @@ tcp_helper_endpoint_ctor(tcp_helper_endpoint_t *ep,
                          tcp_helper_resource_t * thr,
                          int id)
 {
+  int i;
+
   OO_DEBUG_VERB(ci_log("%s: ID=%d", __FUNCTION__, id));
 
   CI_ZERO(ep);
@@ -66,7 +68,8 @@ tcp_helper_endpoint_ctor(tcp_helper_endpoint_t *ep,
   oo_os_sock_poll_ctor(&ep->os_sock_poll);
   init_waitqueue_func_entry(&ep->os_sock_poll.wait, efab_os_sock_callback);
 
-  ci_dllink_self_link(&ep->os_ready_link);
+  for( i = 0; i < CI_CFG_N_READY_LISTS; i++ )
+    ci_dllink_self_link(&ep->epoll[i].os_ready_link);
 
   oof_socket_ctor(&ep->oofilter);
 }
@@ -79,6 +82,7 @@ void
 tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
 {
   unsigned long lock_flags;
+  ci_sock_cmn* s = SP_TO_SOCK(&ep->thr->netif, ep->id);
 
   /* We need to release zero, one or two file references after dropping a
    * spinlock. */
@@ -90,6 +94,9 @@ tcp_helper_endpoint_dtor(tcp_helper_endpoint_t * ep)
      it is freed - therefore ensure properly cleaned up */
   OO_DEBUG_VERB(ci_log(FEP_FMT, FEP_PRI_ARGS(ep)));
 
+  if( s->s_flags & CI_SOCK_FLAG_MAC_FILTER )
+    ci_tcp_sock_clear_scalable_filter(&ep->thr->netif,
+                                      SP_TO_TCP(&ep->thr->netif, ep->id));
   oof_socket_del(oo_filter_ns_to_manager(ep->thr->filter_ns), &ep->oofilter);
   oof_socket_mcast_del_all(oo_filter_ns_to_manager(ep->thr->filter_ns),
                            &ep->oofilter);
@@ -248,6 +255,7 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
   int protocol, lport, rport;
   int rc;
   unsigned long lock_flags;
+  int use_mac_filter;
 
   OO_DEBUG_TCPH(ci_log("%s: [%d:%d] bindto_ifindex=%d from_tcp_id=%d",
                        __FUNCTION__, ep->thr->id,
@@ -268,11 +276,19 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
    * flag only. */
   ci_assert( ci_netif_is_locked(&ep->thr->netif) );
 
+#if CI_CFG_FD_CACHING
+  /* The special cases that allow active-wild sharers to be cacheable depend on
+   * not entering this function, which takes a port-keeper reference to the OS
+   * socket on the underlying active-wild. */
+  ci_assert(! ci_tcp_is_cacheable_active_wild_sharer(s));
+#endif
+
   laddr = sock_laddr_be32(s);
   raddr = sock_raddr_be32(s);
   lport = sock_lport_be16(s);
   rport = sock_rport_be16(s);
   protocol = sock_protocol(s);
+  use_mac_filter = ci_tcp_use_mac_filter(ni, s, bindto_ifindex, from_tcp_id);
 
   /* Grab reference to the O/S socket.  This will be consumed by
    * oof_socket_add() if it succeeds.  [from_tcp_id] identifies a listening
@@ -280,7 +296,11 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
    * opened TCP connection.
    */
   spin_lock_irqsave(&ep->lock, lock_flags);
-  if( OO_SP_NOT_NULL(from_tcp_id) ) {
+  if( OO_SP_NOT_NULL(from_tcp_id) &&
+      ! ( use_mac_filter &&
+          NI_OPTS(ni).scalable_listen ==
+          CITP_SCALABLE_LISTEN_ACCELERATED_ONLY ) ) {
+
     listen_ep = ci_trs_get_valid_ep(ep->thr, from_tcp_id);
     os_sock_ref = listen_ep->os_socket;
   }
@@ -359,8 +379,8 @@ tcp_helper_endpoint_set_filters(tcp_helper_endpoint_t* ep,
    * We would have no information on how to clear the MAC filter. */
   ci_assert((s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
 
-  if( ci_tcp_use_mac_filter(ni, s, bindto_ifindex, from_tcp_id) )
-    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_TCP(ni, ep->id));
+  if( use_mac_filter )
+    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_SOCK(ni, ep->id));
   else if( OO_SP_NOT_NULL(from_tcp_id) )
     rc = oof_socket_share(oo_filter_ns_to_manager(ep->thr->filter_ns),
                           &ep->oofilter, &listen_ep->oofilter,
@@ -432,11 +452,15 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
                        in_atomic() ? "ATOMIC":"",
                        supress_hw_ops ? "SUPRESS_HW":""));
 
-  ci_assert((s->s_flags & CI_SOCK_FLAG_FILTER) == 0 ||
-            (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
+  /* Sockets have either FILTER or MAC_FILTER with exception of
+   * scalable SO_REUSEPORT listen sockets, which can have both */
+  ci_assert_impl(! (s->b.state == CI_TCP_LISTEN &&
+                    (s->s_flags & CI_SOCK_FLAG_REUSEPORT) != 0),
+                 (s->s_flags & CI_SOCK_FLAG_FILTER) == 0 ||
+                 (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) == 0);
 
 #if CI_CFG_FD_CACHING
-  if( need_update && !(s->s_flags & CI_SOCK_FLAG_MAC_FILTER) )
+  if( need_update && !(s->s_flags & CI_SOCK_FLAGS_SCALABLE) )
     tcp_helper_endpoint_update_filter_details(ep);
 #endif
 
@@ -444,15 +468,22 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
     ci_assert( supress_hw_ops );
   }
 
-  if( (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) != 0 ) {
-    ci_tcp_sock_clear_scalable_filter(&ep->thr->netif,
-                                      SP_TO_TCP(&ep->thr->netif,ep->id));
+  if( (s->s_flags & (CI_SOCK_FLAGS_SCALABLE | CI_SOCK_FLAG_MAC_FILTER)) != 0 ) {
+    if( (s->s_flags & CI_SOCK_FLAG_MAC_FILTER) != 0 )
+      ci_tcp_sock_clear_scalable_filter(&ep->thr->netif,
+                                        SP_TO_TCP(&ep->thr->netif,ep->id));
 
-    os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
-    if( os_sock_ref != NULL )
-      oo_file_ref_drop(os_sock_ref);
+    if( (s->s_flags & CI_SOCK_FLAG_FILTER) == 0 ) {
+      os_sock_ref = oo_file_ref_xchg(&ep->os_port_keeper, NULL);
+      if( os_sock_ref != NULL )
+        oo_file_ref_drop(os_sock_ref);
+      goto bail_out;
+    }
+    /* scalable rss listen socket can have both MAC_FILTER flag
+     * (for SW filter) as well as FILTER flag for dummy cluster oof
+     * filter. */
   }
-  else if( supress_hw_ops ) {
+  if( supress_hw_ops ) {
     /* Remove software filters immediately to ensure packets are not
      * delivered to this endpoint.  Defer oof_socket_del() if needed
      * to non-atomic context.
@@ -481,6 +512,7 @@ tcp_helper_endpoint_clear_filters(tcp_helper_endpoint_t* ep,
       oo_file_ref_drop(os_sock_ref);
   }
 
+bail_out:
   SP_TO_SOCK(&ep->thr->netif, ep->id)->s_flags &=
                               ~(CI_SOCK_FLAG_FILTER | CI_SOCK_FLAG_MAC_FILTER);
 
@@ -597,7 +629,7 @@ tcp_helper_endpoint_update_filter_details(tcp_helper_endpoint_t* ep)
   ci_sock_cmn* s = SP_TO_SOCK(ni, ep->id);
   struct oof_manager* om = oo_filter_ns_to_manager(ep->thr->filter_ns);
 
-  if( !(s->s_flags & CI_SOCK_FLAG_MAC_FILTER) )
+  if( !(s->s_flags & (CI_SOCK_FLAG_MAC_FILTER | CI_SOCK_FLAGS_SCALABLE)) )
     oof_socket_update_sharer_details(om, &ep->oofilter,
                                      sock_raddr_be32(s), sock_rport_be16(s));
 }

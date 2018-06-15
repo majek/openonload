@@ -136,6 +136,15 @@
       ci_log(__VA_ARGS__);                                 \
   } while( 0 );
 
+#define NI_LOG_ONCE(ni, lg, ...)                           \
+  do {                                                     \
+    static int printed = 0;                                \
+    if( ! printed ) {                                      \
+      printed = 1;                                         \
+      NI_LOG(ni, lg, __VA_ARGS__);                         \
+    }                                                      \
+  } while( 0 );
+
 
 #define CONFIG_LOG(opts, lg, ...)                          \
   do {                                                     \
@@ -199,22 +208,30 @@
  * Format various flags fields etc.
  */
 
-#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_TCP_SOCKET_FLAGS_FMT		"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_TCP_SOCKET_FLAGS_PRI_ARG(ts)                                \
   ((ts)->tcpflags & CI_TCPT_FLAG_TSO    ? "TSO " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_WSCL   ? "WSCL ":""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_SACK   ? "SACK ":""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_ECN    ? "ECN " :""),                 \
   ((ts)->tcpflags & CI_TCPT_FLAG_STRIPE ? "STRIPE ":""),               \
+  ((ts)->tcpflags & CI_TCPT_FLAG_SYNCOOKIE        ? "SYNCOOKIE ":""),  \
   ((ts)->tcpflags & CI_TCPT_FLAG_WAS_ESTAB        ? "ESTAB "     :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NONBLOCK_CONNECT ? "NONBCON "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_PASSIVE_OPENED   ? "PASSIVE "   :""), \
   ((ts)->tcpflags & CI_TCPT_FLAG_NO_ARP           ? "ARP_FAIL "  :""), \
-  ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":""), \
-  ((ts)->tcpflags & CI_TCPT_FLAG_MEM_DROP         ? "MEM_DROP ":"")
+  ((ts)->tcpflags & CI_TCPT_FLAG_NO_TX_ADVANCE    ? "NO_TX_ADVANCE "  :""), \
+  ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_DEFERRED    ? "LOOP_DEFER ":""),  \
+  ((ts)->tcpflags & CI_TCPT_FLAG_NO_QUICKACK      ? "NO_QUICKACK ":""), \
+  ((ts)->tcpflags & CI_TCPT_FLAG_MEM_DROP         ? "MEM_DROP ":""),    \
+  ((ts)->tcpflags & CI_TCPT_FLAG_FIN_RECEIVED     ? "FIN_RECV ":""),    \
+  ((ts)->tcpflags & CI_TCPT_FLAG_ACTIVE_WILD      ? "ACTIVE_WILD ":""), \
+  ((ts)->tcpflags & CI_TCPT_FLAG_MSG_WARM         ? "MSG_WARM ":""),    \
+  ((ts)->tcpflags & CI_TCPT_FLAG_LOOP_FAKE        ? "LOOP_FAKE ":""),   \
+  ((ts)->tcpflags & CI_TCPT_FLAG_TOA              ? "TOA ":"")          \
 
 
-#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
+#define CI_SOCK_FLAGS_FMT  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s"
 #define CI_SOCK_FLAGS_PRI_ARG(s)                                        \
   ((s)->s_aflags & CI_SOCK_AFLAG_CORK     ? "CORK ":""),                \
   ((s)->s_aflags & CI_SOCK_AFLAG_NEED_SHUT_RD ? "SHUTRD ":""),          \
@@ -235,6 +252,8 @@
   ((s)->s_flags & CI_SOCK_FLAG_SET_RCVBUF ? "RCVBUF ":""),              \
   ((s)->s_flags & CI_SOCK_FLAG_SW_FILTER_FULL ? "SW_FILTER_FULL ":""),  \
   ((s)->s_flags & CI_SOCK_FLAG_TPROXY ? "TRANSPARENT ":""),             \
+  ((s)->s_flags & CI_SOCK_FLAG_SCALACTIVE ? "SCALACTIVE ":""),          \
+  ((s)->s_flags & CI_SOCK_FLAG_SCALPASSIVE ? "SCALPASSIVE ":""),        \
   ((s)->s_flags & CI_SOCK_FLAG_MAC_FILTER ? "MAC_FILTER ":""),          \
   ((s)->s_flags & CI_SOCK_FLAG_REUSEPORT  ? "REUSEPORT ":""),           \
   ((s)->cp.sock_cp_flags & OO_SCP_NO_MULTICAST ? "NOMCAST ":"")

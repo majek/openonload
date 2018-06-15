@@ -75,6 +75,7 @@
 #include "enum.h"
 #include "bitfield.h"
 #ifdef EFX_NOT_UPSTREAM
+#include "sfctool.h" /* Provides missing 'struct ethtool_*' declarations */
 #define EFX_DRIVERLINK_API_VERSION_MINOR EFX_DRIVERLINK_API_VERSION_MINOR_MAX
 #include "driverlink_api.h" /* Indirectly includes filter.h */
 #include "driverlink.h"
@@ -88,7 +89,7 @@
  *
  **************************************************************************/
 
-#define EFX_DRIVER_VERSION	"4.12.2.1014"
+#define EFX_DRIVER_VERSION	"4.13.1.1034"
 
 #ifdef DEBUG
 #define EFX_WARN_ON_ONCE_PARANOID(x) WARN_ON_ONCE(x)
@@ -360,7 +361,6 @@ struct efx_tx_buffer {
  * @notify_count: Count of notified descriptors to the NIC
  * @sarfs_sample_count: Number of TCP packets since we last inspected
  *	one for SARFS.
- * @sarfs_update: Number of updates to SARFS filter requested from this queue
  * @xmit_pending: Are any packets waiting to be pushed to the NIC
  * @empty_read_count: If the completion path has seen the queue as empty
  *	and the transmission path has not yet checked this, the value of
@@ -418,9 +418,6 @@ struct efx_tx_queue {
 	unsigned int notify_count;
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
 	unsigned int sarfs_sample_count;
-#ifdef CONFIG_SFC_DEBUGFS
-	unsigned int sarfs_update;
-#endif
 #endif
 	/* Statistics to supplement MAC stats */
 #ifdef EFX_NOT_UPSTREAM
@@ -688,10 +685,36 @@ struct efx_sarfs_state {
 	unsigned int conns_mask;
 	struct efx_sarfs_entry *conns;
 	unsigned long last_modified;
-	spinlock_t lock;
+	struct mutex lock;
 };
 #endif
 
+
+/* The reserved RSS context value */
+#define EFX_EF10_RSS_CONTEXT_INVALID	0xffffffff
+/**
+ * struct efx_rss_context - A user-defined RSS context for filtering
+ * @list: node of linked list on which this struct is stored
+ * @context_id: the RSS_CONTEXT_ID returned by MC firmware, or
+ *	%EFX_EF10_RSS_CONTEXT_INVALID if this context is not present on the NIC.
+ *	For Siena, 0 if RSS is active, else %EFX_EF10_RSS_CONTEXT_INVALID.
+ * @user_id: the rss_context ID exposed to userspace over ethtool.
+ * @flags: Hashing flags for this RSS context
+ * @rx_hash_key: Toeplitz hash key for this RSS context
+ * @indir_table: Indirection table for this RSS context
+ */
+struct efx_rss_context {
+	struct list_head list;
+	u32 context_id;
+	u32 user_id;
+	u32 flags;
+#ifdef EFX_NOT_UPSTREAM
+	/* Number of queues targeted by this context (set at alloc time) */
+	u8 num_queues;
+#endif
+	u8 rx_hash_key[40];
+	u32 rx_indir_table[128];
+};
 
 /**
  * struct efx_channel - An Efx channel
@@ -719,6 +742,7 @@ struct efx_sarfs_state {
  * @event_test_cpu: Last CPU to handle interrupt or test event for this channel
  * @irq_count: Number of IRQs since last adaptive moderation decision
  * @irq_mod_score: IRQ moderation score
+ * @filter_work: Work item for efx_filter_rfs_expire()
  * @rps_flow_id: Flow IDs of filters allocated for accelerated RFS,
  *      indexed by filter ID
  * @n_rx_tobe_disc: Count of RX_TOBE_DISC errors
@@ -781,6 +805,7 @@ struct efx_channel {
 	unsigned int irq_mod_score;
 #ifdef CONFIG_RFS_ACCEL
 	unsigned int rfs_filters_added;
+	struct work_struct filter_work;
 #define RPS_FLOW_ID_INVALID 0xFFFFFFFF
 	u32 *rps_flow_id;
 #endif
@@ -1097,6 +1122,10 @@ static inline bool efx_link_state_equal(const struct efx_link_state *left,
  *	Serialised by the mac_lock.
  * @get_settings: Get ethtool settings. Serialised by the mac_lock.
  * @set_settings: Set ethtool settings. Serialised by the mac_lock.
+ * @get_ksettings: Get ethtool link settings.  Serialised by the mac_lock.
+ * @set_ksettings: Set ethtool link settings.  Serialised by the mac_lock.
+ * @get_fecparam: Get Forward Error Correction settings. Serialised by mac_lock.
+ * @set_fecparam: Set Forward Error Correction settings. Serialised by mac_lock.
  * @set_npage_adv: Set abilities advertised in (Extended) Next Page
  *	(only needed where AN bit is set in mmds)
  * @test_alive: Test that PHY is 'alive' (online)
@@ -1115,6 +1144,15 @@ struct efx_phy_operations {
 			      struct ethtool_cmd *ecmd);
 	int (*set_settings) (struct efx_nic *efx,
 			     struct ethtool_cmd *ecmd);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_ETHTOOL_LINKSETTINGS)
+	void (*get_ksettings) (struct efx_nic *efx,
+			       struct ethtool_link_ksettings *settings);
+	int (*set_ksettings) (struct efx_nic *efx,
+			      const struct ethtool_link_ksettings *settings);
+#endif
+	int (*get_fecparam)(struct efx_nic *efx, struct ethtool_fecparam *fec);
+	int (*set_fecparam)(struct efx_nic *efx,
+			    const struct ethtool_fecparam *fec);
 	void (*set_npage_adv) (struct efx_nic *efx, u32);
 	int (*test_alive) (struct efx_nic *efx);
 	const char *(*test_name) (struct efx_nic *efx, unsigned int index);
@@ -1207,6 +1245,56 @@ struct vfdi_status;
 		RSS_MODE_HASH_ADDRS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_UDP_IPV6_RSS_MODE_LBN |\
 		RSS_MODE_HASH_ADDRS << MC_CMD_RSS_CONTEXT_GET_FLAGS_OUT_OTHER_IPV6_RSS_MODE_LBN)
 
+#ifdef CONFIG_RFS_ACCEL
+/* Order of these is important, since filter_id >= %EFX_ARFS_FILTER_ID_PENDING
+ * is used to test if filter does or will exist.
+ */
+#define EFX_ARFS_FILTER_ID_PENDING	-1
+#define EFX_ARFS_FILTER_ID_ERROR	-2
+#define EFX_ARFS_FILTER_ID_REMOVING	-3
+/**
+ * struct efx_arfs_rule - record of an ARFS filter and its IDs
+ * @node: linkage into hash table
+ * @spec: details of the filter (used as key for hash table).  Use efx->type to
+ *	determine which member to use.
+ * @rxq_index: channel to which the filter will steer traffic.
+ * @arfs_id: filter ID which was returned to ARFS
+ * @filter_id: index in software filter table.  May be
+ *	%EFX_ARFS_FILTER_ID_PENDING if filter was not inserted yet,
+ *	%EFX_ARFS_FILTER_ID_ERROR if filter insertion failed, or
+ *	%EFX_ARFS_FILTER_ID_REMOVING if expiry is currently removing the filter.
+ */
+struct efx_arfs_rule {
+	struct hlist_node node;
+	struct efx_filter_spec spec;
+	u16 rxq_index;
+	u16 arfs_id;
+	s32 filter_id;
+};
+
+/* Size chosen so that the table is one page (4kB) */
+#define EFX_ARFS_HASH_TABLE_SIZE	512
+
+/**
+ * struct efx_async_filter_insertion - Request to asynchronously insert a filter
+ * @net_dev: Reference to the netdevice
+ * @spec: The filter to insert
+ * @work: Workitem for this request
+ * @rxq_index: Identifies the channel for which this request was made
+ * @flow_id: Identifies the kernel-side flow for which this request was made
+ */
+struct efx_async_filter_insertion {
+	struct net_device *net_dev;
+	struct efx_filter_spec spec;
+	struct work_struct work;
+	u16 rxq_index;
+	u32 flow_id;
+};
+
+/* Maximum number of ARFS workitems that may be in flight on an efx_nic */
+#define EFX_RPS_MAX_IN_FLIGHT	8
+#endif /* CONFIG_RFS_ACCEL */
+
 /**
  * struct efx_nic - an Efx NIC
  * @name: Device name (net device name or bus id before net device registered)
@@ -1224,6 +1312,7 @@ struct vfdi_status;
  * @reset_work: Scheduled reset workitem
  * @membase_phys: Memory BAR value as physical address
  * @membase: Memory BAR value
+ * @vi_stride: step between per-VI registers / memory regions
  * @interrupt_mode: Interrupt mode
  * @timer_quantum_ns: Interrupt timer quantum, in nanoseconds
  * @timer_max_ns: Interrupt timer maximum value, in nanoseconds
@@ -1276,11 +1365,10 @@ struct vfdi_status;
  *	(valid only for NICs that set %EFX_RX_PKT_PREFIX_LEN; always negative)
  * @rx_packet_ts_offset: Offset of timestamp from start of packet data
  *	(valid only if channel->sync_timestamps_enabled; always negative)
- * @rx_hash_key: Toeplitz hash key for RSS
- * @rx_indir_table: Indirection table for RSS
- * @rss_flags: Firmware flags for RSS mode
  * @rx_scatter: Scatter mode enabled for receives
- * @rss_active: RSS enabled on hardware
+ * @rss_context: Main RSS context.  Its @list member is the head of the list of
+ *	RSS contexts created by user requests
+ * @rss_lock: Protects custom RSS context software state in @rss_context.list
  * @cpu_channel_map_lock: Lock used to serialise rebuilding the map.
  *	Doesn't need to be locked to read the map.
  * @cpu_channel_map: Mapping of CPUs to channels. Used to assign flows.
@@ -1311,6 +1399,8 @@ struct vfdi_status;
 #if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_NETDEV_HW_FEATURES) && !defined(EFX_HAVE_NETDEV_EXTENDED_HW_FEATURES)
  * @hw_features: Features which may be enabled/disabled
 #endif
+ * @num_mac_stats: Number of MAC stats reported by firmware (MAC_STATS_NUM_STATS
+ *	field of %MC_CMD_GET_CAPABILITIES_V4 response, or %MC_CMD_MAC_NSTATS)
  * @stats_buffer: DMA buffer for statistics
  * @phy_type: PHY type
  * @phy_op: PHY interface
@@ -1321,6 +1411,8 @@ struct vfdi_status;
  * @phy_power_follows_link: PHY powers off when link is taken down.
  * @phy_power_force_off: PHY always powered off - only useful for test.
  * @link_advertising: Autonegotiation advertising flags
+ * @fec_config: Forward Error Correction configuration flags.  For bit positions
+ *	see &enum ethtool_fec_config_bits.
  * @link_state: Current state of the link
  * @n_link_state_changes: Number of times the link has changed state
  * @unicast_filter: Flag for Falcon-arch simple unicast filter.
@@ -1334,12 +1426,18 @@ struct vfdi_status;
  * @loopback_mode: Loopback status
  * @loopback_modes: Supported loopback mode bitmask
  * @loopback_selftest: Offline self-test private state
- * @filter_sem: Filter table rw_semaphore, for freeing the table
- * @filter_lock: Filter table lock, for mere content changes
+ * @filter_sem: Filter table rw_semaphore, protects existence of @filter_state
  * @filter_state: Architecture-dependent filter table state
+ * @rps_mutex: Protects RPS state of all channels
  * @rps_expire_channel: Next channel to check for expiry
  * @rps_expire_index: Next index to check for expiry in
  *	@rps_expire_channel's @rps_flow_id
+ * @rps_slot_map: bitmap of in-flight entries in @rps_slot
+ * @rps_slot: array of ARFS insertion requests for efx_filter_rfs_work()
+ * @rps_hash_lock: Protects ARFS filter mapping state (@rps_hash_table and
+ *	@rps_next_id).
+ * @rps_hash_table: Mapping between ARFS filters and their various IDs
+ * @rps_next_id: next arfs_id for an ARFS filter
  * @active_queues: Count of RX and TX queues that haven't been flushed and drained.
  * @rxq_flush_pending: Count of number of receive queues that need to be flushed.
  *	Decremented when the efx_flush_rx_queue() is called.
@@ -1362,7 +1460,9 @@ struct vfdi_status;
  *	and must be released by caller after statistics processing/copying
  *	if required.
  * @n_rx_noskb_drops: Count of RX packets dropped due to failure to allocate an skb
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_FCS)
  * @forward_fcs: Flag to enable appending of 4-byte Frame Checksum to Rx packet
+#endif
  * @proxy_admin: State for proxy auth admin
  * @proxy_admin_lock: RW lock for proxy auth admin locking
  * @proxy_admin_mutex: Mutex for serialising proxy auth admin shutdown
@@ -1388,6 +1488,8 @@ struct efx_nic {
 #endif
 	resource_size_t membase_phys;
 	void __iomem *membase;
+
+	unsigned int vi_stride;
 
 	enum efx_int_mode interrupt_mode;
 	unsigned int timer_quantum_ns;
@@ -1456,11 +1558,9 @@ struct efx_nic {
 	int rx_packet_hash_offset;
 	int rx_packet_len_offset;
 	int rx_packet_ts_offset;
-	u8 rx_hash_key[40];
-	u32 rx_indir_table[128];
-	u32 rss_flags;
 	bool rx_scatter;
-	bool rss_active;
+	struct efx_rss_context rss_context;
+	struct mutex rss_lock;
 
 #ifdef EFX_TX_STEERING
 	struct mutex cpu_channel_map_lock;
@@ -1486,6 +1586,7 @@ struct efx_nic {
 #ifdef CONFIG_SFC_MTD
 	struct list_head mtd_list;
 	void *mtd_parts;
+	struct kref mtd_parts_kref;
 #endif
 
 #if defined(EFX_USE_KCOMPAT) && defined(EFX_NEED_PCI_VPD_ATTR)
@@ -1518,6 +1619,7 @@ struct efx_nic {
 #endif
 
 	bool stats_enabled;
+	u16 num_mac_stats;
 	unsigned int stats_period_ms;
 
 	struct efx_buffer stats_buffer;
@@ -1539,7 +1641,8 @@ struct efx_nic {
 	bool phy_power_follows_link;
 	bool phy_power_force_off;
 
-	u32 link_advertising;
+	__ETHTOOL_DECLARE_LINK_MODE_MASK(link_advertising);
+	u32 fec_config;
 	struct efx_link_state link_state;
 	unsigned int n_link_state_changes;
 
@@ -1553,11 +1656,16 @@ struct efx_nic {
 	void *loopback_selftest;
 
 	struct rw_semaphore filter_sem;
-	spinlock_t filter_lock;
 	void *filter_state;
 #ifdef CONFIG_RFS_ACCEL
+	struct mutex rps_mutex;
 	unsigned int rps_expire_channel;
 	unsigned int rps_expire_index;
+	unsigned long rps_slot_map;
+	struct efx_async_filter_insertion rps_slot[EFX_RPS_MAX_IN_FLIGHT];
+	spinlock_t rps_hash_lock;
+	struct hlist_head *rps_hash_table;
+	u32 rps_next_id;
 #endif
 
 #ifdef EFX_NOT_UPSTREAM
@@ -1623,7 +1731,9 @@ struct efx_nic {
 	spinlock_t stats_lock;
 	atomic_t n_rx_noskb_drops;
 	char *vpd_sn;
+#if defined(EFX_USE_KCOMPAT) && !defined(EFX_HAVE_ETHTOOL_FCS)
 	bool forward_fcs;
+#endif
 #ifdef EFX_USE_MCDI_PROXY_AUTH
 	struct proxy_admin_state *proxy_admin_state;
 	rwlock_t proxy_admin_lock;
@@ -1753,9 +1863,13 @@ struct efx_udp_tunnel {
  * @tx_write: Write TX descriptors and doorbell
  * @rx_push_rss_config: Write RSS hash key and indirection table to the NIC
  * @rx_pull_rss_config: Read RSS hash key and indirection table back from the NIC
+ * @rx_push_rss_context_config: Write RSS hash key and indirection table for
+ *	user RSS context to the NIC
+ * @rx_pull_rss_context_config: Read RSS hash key and indirection table for user
+ *	RSS context back from the NIC
+ * @rx_restore_rss_contexts: Restore user RSS contexts removed from hardware
  * @rx_set_rss_flags: Write RSS flow-hashing flags to the NIC
- * @rx_get_rss_flags: Read RSS flow-hashing flags back from the NIC, into
- *	@efx->rss_flags
+ * @rx_get_rss_flags: Read RSS flow-hashing flags back from the NIC
  * @rx_probe: Allocate resources for RX queue
  * @rx_init: Initialise RX queue on the NIC
  * @rx_remove: Free resources for RX queue
@@ -1766,6 +1880,7 @@ struct efx_udp_tunnel {
  * @ev_fini: Deinitialise event queue on the NIC
  * @ev_remove: Free resources for event queue
  * @ev_process: Process events for a queue, up to the given NAPI quota
+ * @ev_mcdi_pending: Peek at event queue, return whether MCDI event is pending
  * @ev_read_ack: Acknowledge read events on a queue, rearming its IRQ
  * @ev_test_generate: Generate a test event
  * @filter_table_probe: Probe filter capabilities and set up filter software state
@@ -1781,10 +1896,6 @@ struct efx_udp_tunnel {
  * @filter_count_rx_used: Get the number of filters in use at a given priority
  * @filter_get_rx_id_limit: Get maximum value of a filter id, plus 1
  * @filter_get_rx_ids: Get list of RX filters at a given priority
- * @filter_rfs_insert: Add or replace a filter for RFS.  This must be
- *	atomic.  The hardware change may be asynchronous but should
- *	not be delayed for long.  It may fail if this can't be done
- *	atomically.
  * @filter_rfs_expire_one: Consider expiring a filter inserted for RFS.
  *	This must check whether the specified table entry is used by RFS
  *	and that rps_may_expire_flow() returns true for it.
@@ -1853,7 +1964,7 @@ struct efx_udp_tunnel {
  */
 struct efx_nic_type {
 	bool is_vf;
-	unsigned int mem_bar;
+	unsigned int (*mem_bar)(struct efx_nic *efx);
 	unsigned int (*mem_map_size)(struct efx_nic *efx);
 	int (*probe)(struct efx_nic *efx);
 	int (*dimension_resources)(struct efx_nic *efx);
@@ -1928,8 +2039,17 @@ struct efx_nic_type {
 	int (*rx_push_rss_config)(struct efx_nic *efx, bool user,
 				  const u32 *rx_indir_table, const u8 *key);
 	int (*rx_pull_rss_config)(struct efx_nic *efx);
-	int (*rx_set_rss_flags)(struct efx_nic *efx, u32 flags);
-	int (*rx_get_rss_flags)(struct efx_nic *efx);
+	int (*rx_push_rss_context_config)(struct efx_nic *efx,
+					  struct efx_rss_context *ctx,
+					  const u32 *rx_indir_table,
+					  const u8 *key);
+	int (*rx_pull_rss_context_config)(struct efx_nic *efx,
+					  struct efx_rss_context *ctx);
+	void (*rx_restore_rss_contexts)(struct efx_nic *efx);
+	u32 (*rx_get_default_rss_flags)(struct efx_nic *efx);
+	int (*rx_set_rss_flags)(struct efx_nic *efx, struct efx_rss_context *ctx,
+				u32 flags);
+	int (*rx_get_rss_flags)(struct efx_nic *efx, struct efx_rss_context *ctx);
 	int (*rx_probe)(struct efx_rx_queue *rx_queue);
 	int (*rx_init)(struct efx_rx_queue *rx_queue);
 	void (*rx_remove)(struct efx_rx_queue *rx_queue);
@@ -1940,6 +2060,7 @@ struct efx_nic_type {
 	void (*ev_fini)(struct efx_channel *channel);
 	void (*ev_remove)(struct efx_channel *channel);
 	int (*ev_process)(struct efx_channel *channel, int quota);
+	bool (*ev_mcdi_pending)(struct efx_channel *channel);
 	void (*ev_read_ack)(struct efx_channel *channel);
 	void (*ev_test_generate)(struct efx_channel *channel);
 	int (*filter_table_probe)(struct efx_nic *efx);
@@ -1964,21 +2085,14 @@ struct efx_nic_type {
 	s32 (*filter_get_rx_ids)(struct efx_nic *efx,
 				 enum efx_filter_priority priority,
 				 u32 *buf, u32 size);
-#if (defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)) || defined(CONFIG_RFS_ACCEL)
-	s32 (*filter_async_insert)(struct efx_nic *efx,
-				   const struct efx_filter_spec *spec);
-#endif
 #ifdef CONFIG_RFS_ACCEL
 	bool (*filter_rfs_expire_one)(struct efx_nic *efx, u32 flow_id,
 				      unsigned int index);
 #endif
-#if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
-	int (*filter_async_remove)(struct efx_nic *efx, u32 filter_id);
-#endif
 #ifdef EFX_NOT_UPSTREAM
-/* update the queue for an existing RX filter */
-	int (*filter_redirect)(struct efx_nic *efx, u32 filter_id, int rxq_i,
-			       int stack_id);
+/* update the queue (and RSS context if not NULL) for an existing RX filter */
+	int (*filter_redirect)(struct efx_nic *efx, u32 filter_id,
+			       u32 *rss_context, int rxq_i, int stack_id);
 /* Block kernel from receiving packets except through explicit
  * configuration, i.e. remove and disable filters with priority < MANUAL
  */

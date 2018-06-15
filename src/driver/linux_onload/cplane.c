@@ -58,9 +58,16 @@ size_t cplane_server_params_array_len = 0;
 char** cplane_server_params_array = NULL;
 
 const char* cplane_server_const_params[] = {
-#ifdef EFRM_HAVE_IFLA_INFO_SLAVE_KIND
+#ifdef IFLA_BOND_SLAVE_MAX
     /* If the kernel publishes bonding state over netlink, tell the cplane
-     * server so.  This means that the bonding timer will never have to run. */
+     * server so.  This means that the bonding timer will never have to run.
+     *
+     * There are a lot of "intermediate" kernel versions which publish
+     * **some** info over netlink.  We may not disable the bonding timer
+     * unless we have **all** the needed info, including
+     * IFLA_BOND_SLAVE_MII_STATUS.  If IFLA_BOND_SLAVE_MAX is defined,
+     * then IFLA_BOND_SLAVE_MII_STATUS is published as well.
+     */
     "--"CPLANE_SERVER_FORCE_BONDING_NETLINK,
 #endif
     "--"CPLANE_SERVER_DAEMONISE_CMDLINE_OPT,
@@ -165,6 +172,13 @@ static void cp_table_insert(struct net* netns, struct oo_cplane_handle* cp)
 }
 
 
+/* If this function returns true, then user may call all functions from
+ * include/cplane/cplane.h without crash or other unexpected consequence. */
+static int cp_is_usable(struct oo_cplane_handle* cp)
+{
+  return cp->usable;
+}
+
 /* Onload requires oof to be populated.  As oof instances
  * might come and go, cplane is asked each time new oof appears to
  * populate it with its state.  The oof_version tracks oof-populate
@@ -172,16 +186,9 @@ static void cp_table_insert(struct net* netns, struct oo_cplane_handle* cp)
  * or timeout happens (see oo_cp_wait_for_server and oo_cp_oof_ready).
  */
 static int
-__cp_is_usable_for_oof(struct oo_cplane_handle* cp, cp_version_t version)
+cp_is_usable_for_oof(struct oo_cplane_handle* cp, cp_version_t version)
 {
-  return cp_is_usable_for_oof(cp->mib, version);
-}
-
-/* If this function returns true, then user may call all functions from
- * include/cplane/cplane.h without crash or other unexpected consequence. */
-static int cp_is_usable(struct oo_cplane_handle* cp)
-{
-  return cp->usable;
+  return cp_is_usable(cp) && version != OO_ACCESS_ONCE(*cp->mib->oof_version);
 }
 
 
@@ -193,9 +200,9 @@ static void cp_destroy(struct oo_cplane_handle* cp)
   ci_assert(! in_atomic());
 
   /* The memory mapping held by the server holds a reference to [cp], and when
-   * that mapping is destroyed, [cp->server] is released before the reference
-   * to [cp] is dropped. */
-  ci_assert_equal(cp->server, NULL);
+   * that mapping is destroyed, [cp->server_pid] is released before the
+   * reference to [cp] is dropped. */
+  ci_assert_equal(cp->server_pid, NULL);
 
   vfree(mib->fwd_rw);
   mib->fwd_rw = NULL;
@@ -219,10 +226,10 @@ static void cp_kill(struct oo_cplane_handle* cp)
 
   ci_dllist_remove_safe(&cp->link);
 
-  /* Holding cp_handle_lock ensures that cp->server is not going to be released
-   * under our feet.  Calling send_sig() is safe in atomic context. */
-  if( cp->server != NULL )
-    send_sig(SIGQUIT, cp->server, 1);
+  /* Holding cp_handle_lock ensures that cp->server_pid is not going to be
+   * released under our feet.  Calling kill_pid() is safe in atomic context. */
+  if( cp->server_pid != NULL )
+    kill_pid(cp->server_pid, SIGQUIT, 1);
 
 }
 
@@ -295,14 +302,14 @@ void cp_release(struct oo_cplane_handle* cp)
       }
       /* else the refcount owner will release it in time */
     }
-    else if( cp->server != NULL ) {
+    else if( cp->server_pid != NULL ) {
       cp->killed = 1;
       atomic_inc(&cp->refcount);
       queue_delayed_work(CI_GLOBAL_WORKQUEUE, &cp->destroy_work,
                          HZ * cplane_server_grace_timeout);
       OO_DEBUG_CPLANE(ci_log("%s: Schedule killing orphaned server: cp=%p "
-                             "netns=%p server=%p", __FUNCTION__,
-                             cp, cp->cp_netns, cp->server));
+                             "netns=%p server_pid=%p", __FUNCTION__,
+                             cp, cp->cp_netns, cp->server_pid));
     }
     else {
       OO_DEBUG_CPLANE(ci_log("%s:  One reference with no server. --bootstrap? "
@@ -351,16 +358,16 @@ static void vm_op_close(struct vm_area_struct* vma)
      * and kernel, tear that association down. */
     if( cp_vm_data->cp_vm_flags & CP_VM_PRIV_FLAG_SERVERLINK ) {
       struct oo_cplane_handle* cp = cp_vm_data->cp;
-      struct task_struct* server = cp->server;
+      struct pid* server_pid = cp->server_pid;
 
-      ci_assert(server);
+      ci_assert(server_pid);
 
       /* Interlock with cp_kill_work(). */
       spin_lock_bh(&cp->cp_handle_lock);
-      cp->server = NULL;
+      cp->server_pid = NULL;
       spin_unlock_bh(&cp->cp_handle_lock);
 
-      put_task_struct(server);
+      put_pid(server_pid);
     }
 
     kfree(cp_vm_data);
@@ -404,7 +411,7 @@ static int vm_op_fault(
 
   /* Is the server running?  It is silly to use cplane when server has
    * already gone. */
-  if( cp->server == NULL )
+  if( cp->server_pid == NULL )
     return VM_FAULT_SIGBUS;
 
   switch( vma->vm_pgoff >> OO_MMAP_TYPE_WIDTH ) {
@@ -460,10 +467,10 @@ cp_mmap_mib(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
     spin_lock_bh(&cp->cp_handle_lock);
     /* Check that there isn't already a server running for this control plane.
      */
-    if( cp->server != NULL ) {
+    if( cp->server_pid != NULL ) {
       OO_DEBUG_CPLANE(ci_log("%s: Already have a server: cp=%p "
-                             "pid(cp->server)=%d pid(current)=%d", __FUNCTION__,
-                             cp, task_tgid_nr(cp->server),
+                             "pid(server)=%d pid(current)=%d", __FUNCTION__,
+                             cp, pid_nr(cp->server_pid),
                              task_tgid_nr(current)));
       rc = -EBUSY;
     }
@@ -493,11 +500,12 @@ cp_mmap_mib(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
       spin_unlock_bh(&cp->cp_handle_lock);
       return rc;
     }
-    /* get_task_struct() needn't be done inside the spinlock, so we drop the
-     * lock first. */
-    cp->server = current;
+    /* get_pid() needn't be done inside the spinlock, so we drop the lock
+     * first. */
+    cp->server_pid = task_pid(current);
     spin_unlock_bh(&cp->cp_handle_lock);
-    get_task_struct(current);
+    get_pid(cp->server_pid);
+
 
     /* Since the association of the kernel state with the UL server has
      * happened here in the mmap() handler, we wish to break that association
@@ -536,7 +544,7 @@ cp_mmap_fwd_rw(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
     return -EACCES;
 
   /* If it is the server, then finish all the allocations and setup */
-  if( current == cp->server ) {
+  if( task_pid(current) == cp->server_pid ) {
     /* Server have filled in the mib->dim structure before calling this, so
      * we can set up the mib structure.  We also copy the dimension structure
      * to UL-unaccessible memory, so that cplane server can't crash kernel. */
@@ -559,6 +567,9 @@ cp_mmap_fwd_rw(struct oo_cplane_handle* cp, struct vm_area_struct* vma)
       kfree(mib->dim);
       return -ENOMEM;
     }
+    /* mark server ready to accept notifications from the main netns cp_server */
+    ci_wmb();
+    cp->server_initialized = 1;
   }
   else if( mib->fwd_rw == NULL )
     return -ENOENT;
@@ -790,7 +801,7 @@ cp_acquire_from_priv_if_server(ci_private_t* priv,
   if( cp == NULL )
     return -ENOENT;
 
-  if( cp->server != current ) {
+  if( cp->server_pid != task_pid(current) ) {
     cp_release(cp);
     return -EACCES;
   }
@@ -813,8 +824,7 @@ oo_cplane_mmap(ci_private_t* priv, struct vm_area_struct* vma)
   struct cp_vm_private_data* cp_vm_data;
   int rc;
 
-  ci_assert_equal(vma->vm_pgoff & ((1 << OO_MMAP_TYPE_WIDTH) - 1),
-                  OO_MMAP_TYPE_CPLANE);
+  ci_assert_equal(OO_MMAP_TYPE(VMA_OFFSET(vma)), OO_MMAP_TYPE_CPLANE);
   cp = cp_acquire_from_priv(priv);
   if( cp == NULL )
     return -ENOMEM;
@@ -829,7 +839,7 @@ oo_cplane_mmap(ci_private_t* priv, struct vm_area_struct* vma)
   vma->vm_ops = &vm_ops;
   vma->vm_private_data = (void*) cp_vm_data;
 
-  switch( vma->vm_pgoff >> OO_MMAP_TYPE_WIDTH ) {
+  switch( OO_MMAP_ID(VMA_OFFSET(vma)) ) {
     case OO_MMAP_CPLANE_ID_MIB:
       rc = cp_mmap_mib(cp, vma);
       break;
@@ -887,11 +897,32 @@ static int/*bool*/ cp_fwd_req_id_ge(int large, int small)
                                             cplane_route_request_limit;
 }
 
+/* This is similar to kill_pid_info() in the kernel, but the key difference is
+ * that we call send_sig_info() directly, meaning that we bypass the
+ * permissions check. */
+static int cp_send_sig_info(int sig, struct siginfo* info, struct pid* pid)
+{
+  int rc = -ESRCH;
+  struct task_struct* task;
+
+  rcu_read_lock();
+ retry:
+  task = pid_task(pid, PIDTYPE_PID);
+  if( task != NULL ) {
+    rc = send_sig_info(sig, info, task);
+    if( rc == -ESRCH )
+      goto retry;
+  }
+  rcu_read_unlock();
+
+  return rc;
+}
+
 int oo_op_route_resolve(struct oo_cplane_handle* cp,
                         struct cp_fwd_key* key)
 {
   struct cp_mibs* mib = &cp->mib[0];
-  struct siginfo info;
+  struct siginfo info = {};
   int rc;
   struct cp_fwd_req* req;
 
@@ -899,16 +930,15 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp,
     return -ENOMEM;
 
   info.si_signo = mib->dim->fwd_req_sig;
-  info.si_errno = 0;
   /* si_code MUST be negative to force copy_siginfo copy the key properly */
   { CI_BUILD_ASSERT(CP_FWD_FLAG_REQ == 0x80000000); }
   info.si_code = CP_FWD_FLAG_REQ;
-  memcpy(&info._sifields, key, sizeof(*key));
+  memcpy(cp_siginfo2key(&info), key, sizeof(*key));
   if( ! (key->flag & CP_FWD_KEY_REQ_WAIT) ) {
     atomic_inc(&cp->stats.fwd_req_nonblock);
     spin_lock_bh(&cp->cp_handle_lock);
-    if( cp->server != NULL )
-      rc = send_sig_info(info.si_signo, &info, cp->server);
+    if( cp->server_pid != NULL )
+      rc = cp_send_sig_info(info.si_signo, &info, cp->server_pid);
     else
       rc = -ESRCH;
     spin_unlock_bh(&cp->cp_handle_lock);
@@ -924,8 +954,8 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp,
   spin_lock_bh(&cp->cp_handle_lock);
   req->id = cp->fwd_req_id++ & CP_FWD_FLAG_REQ_MASK;
   info.si_code |= req->id;
-  if( cp->server != NULL )
-    rc = send_sig_info(info.si_signo, &info, cp->server);
+  if( cp->server_pid != NULL )
+    rc = cp_send_sig_info(info.si_signo, &info, cp->server_pid);
   else
     rc = -ESRCH;
   if( rc != 0 ) {
@@ -961,9 +991,10 @@ int oo_op_route_resolve(struct oo_cplane_handle* cp,
 }
 
 
+typedef int(* cp_wait_check_fn)(struct oo_cplane_handle* cp, cp_version_t arg);
+
 static int
-cp_wait_interruptible(struct oo_cplane_handle* cp,
-                      int(* check)(struct oo_cplane_handle* cp, cp_version_t arg),
+cp_wait_interruptible(struct oo_cplane_handle* cp, cp_wait_check_fn check,
                       cp_version_t arg)
 {
   /* Wait for a server.  The wait_event...() functions return immediately if we
@@ -991,34 +1022,26 @@ cp_wait_interruptible(struct oo_cplane_handle* cp,
 }
 
 
-int oo_cp_oof_sync_wait(struct oo_cplane_handle* cp)
-{
-  return cp_wait_interruptible(cp, __cp_is_usable_for_oof,
-                               cp->last_oof_version);
-}
-
-int oo_cp_oof_sync_start(struct oo_cplane_handle* cp)
+int oo_cp_oof_sync(struct oo_cplane_handle* cp)
 {
   struct cp_mibs* mib = &cp->mib[0];
-  struct siginfo info = {};
   int rc;
+  cp_version_t ver;
 
   if( cp == NULL )
     return -ENOMEM;
 
-  info.si_signo = mib->dim->oof_req_sig;
   atomic_inc(&cp->stats.oof_req_nonblock);
-  info.si_code = (*cp->mib->oof_version) + 1;
-  if( cp->server != NULL )
-    rc = send_sig_info(info.si_signo, &info, cp->server);
+  ver = *cp->mib->oof_version;
+
+  spin_lock_bh(&cp->cp_handle_lock);
+  if( cp->server_pid != NULL )
+    rc = kill_pid(cp->server_pid, mib->dim->oof_req_sig, 1);
   else
     rc = -ESRCH;
+  spin_unlock_bh(&cp->cp_handle_lock);
 
-  /* The last_oof_version use is protected by caller; the caller guarantees
-   * that it does not call oo_cp_oof_sync_start() in the same net namespace
-   * simultaneously. */
-  cp->last_oof_version = info.si_code;
-  return rc;
+  return cp_wait_interruptible(cp, cp_is_usable_for_oof, ver);
 }
 
 
@@ -1162,6 +1185,17 @@ int oo_cp_arp_resolve_rsop(ci_private_t *priv, void *arg)
   return rc;
 }
 
+static int oo_cp_neigh_update(struct neighbour *neigh, int state)
+{
+  return neigh_update(neigh, NULL, state, NEIGH_UPDATE_F_ADMIN
+#ifndef EFRM_OLD_NEIGH_UPDATE
+                      /* linux>=4.12 needs nlmsg_pid parameter */
+                      , 0
+#endif
+                      );
+
+}
+
 int __oo_cp_arp_confirm(struct oo_cplane_handle* cp,
                         cicp_verinfo_t* op)
 {
@@ -1170,6 +1204,8 @@ int __oo_cp_arp_confirm(struct oo_cplane_handle* cp,
   int rc;
   ci_ip_addr_t next_hop;
   struct cp_mibs* mib = &cp->mib[0];
+
+  atomic_inc(&cp->stats.arp_confirm_try);
 
   rc = verinfo2arp_req(cp, op, &dev, &next_hop);
   if( rc != 0 )
@@ -1189,13 +1225,14 @@ int __oo_cp_arp_confirm(struct oo_cplane_handle* cp,
    * It is not sufficient to set neigh->confirmed, because we need
    * a netlink update to get the new "confirmed" value in the Cplane
    * server. */
-  if( neigh->nud_state & (NUD_STALE | NUD_REACHABLE) )
-    neigh_update(neigh, NULL, NUD_REACHABLE, NEIGH_UPDATE_F_ADMIN
-#ifndef EFRM_OLD_NEIGH_UPDATE
-                 /* linux>=4.12 needs nlmsg_pid parameter */
-                 , 0
-#endif
-                 );
+  if( neigh->nud_state & (NUD_STALE | NUD_REACHABLE) ) {
+    /* We need the neigh timer to be restarted, so we must *change*
+     * the state value.  So we change to NUD_DELAY and then back to
+     * NUD_REACHABLE. */
+    oo_cp_neigh_update(neigh, NUD_DELAY);
+    oo_cp_neigh_update(neigh, NUD_REACHABLE);
+    atomic_inc(&cp->stats.arp_confirm_do);
+  }
   rc = 0;
 
  fail2:
@@ -1303,7 +1340,8 @@ static int cp_spawn_server(ci_uint32 flags)
 
   ci_assert(flags & (CP_SPAWN_SERVER_SWITCH_NS | CP_SPAWN_SERVER_BOOTSTRAP));
   if( cplane_spawn_server && ! (flags & CP_SPAWN_SERVER_BOOTSTRAP) &&
-      current->nsproxy->net_ns == &init_net ) {
+      current->nsproxy->net_ns == &init_net &&
+      cplane_server_grace_timeout != 0 ) {
     flags = CP_SPAWN_SERVER_BOOTSTRAP;
   }
 
@@ -1394,7 +1432,7 @@ oo_cp_driver_ctor(void)
 
   cp_lock_init();
   cplane_route_request_timeout_proceed();
-  if( cplane_spawn_server )
+  if( cplane_spawn_server && cplane_server_grace_timeout != 0 )
     cp_spawn_server(CP_SPAWN_SERVER_BOOTSTRAP);
   cp_initialized = 1;
 
@@ -1414,17 +1452,99 @@ static int cp_is_usable_hook(struct oo_cplane_handle* cp, cp_version_t ver)
   return cp_is_usable(cp);
 }
 
+static int
+cp_sync_tables_start(struct oo_cplane_handle* cp, enum cp_sync_mode mode,
+                     cp_version_t* ver_out)
+{
+  cp_version_t old_ver = 0;
+  int rc = 0;
+  struct siginfo info = {};
+
+  info.si_signo = cp->mib->dim->os_sync_sig;
+  info.si_code = mode;
+
+  switch( mode ) {
+    case CP_SYNC_NONE:
+      ci_assert(0);
+      break;
+    case CP_SYNC_LIGHT:
+      old_ver = *cp->mib->idle_version;
+      break;
+    case CP_SYNC_DUMP:
+      old_ver = *cp->mib->dump_version;
+      /* Odd version means "dump in progress" - so we should wait for next-next
+       * even version. */
+      if( old_ver & 1 )
+        old_ver++;
+      break;
+
+  }
+
+  spin_lock_bh(&cp->cp_handle_lock);
+  if( cp->server_pid != NULL )
+    cp_send_sig_info(cp->mib->dim->os_sync_sig, &info, cp->server_pid);
+  else
+    rc = -ESRCH;
+  spin_unlock_bh(&cp->cp_handle_lock);
+
+  *ver_out = old_ver;
+  return rc;
+}
+static int cp_dump_synced(struct oo_cplane_handle* cp, cp_version_t old_ver)
+{
+  return cp_is_usable(cp) &&
+         (old_ver ^ OO_ACCESS_ONCE(*cp->mib->dump_version)) & ~1;
+}
+static int cp_light_synced(struct oo_cplane_handle* cp, cp_version_t old_ver)
+{
+  return cp_is_usable(cp) &&
+         (old_ver ^ OO_ACCESS_ONCE(*cp->mib->idle_version)) & ~1;
+}
+
+
 /* Spawns a control plane server if one is not running, and waits for it to
  * initialise up to a module-parameter-configurable timeout. */
-static int oo_cp_wait_for_server(struct oo_cplane_handle* cp)
+static int
+oo_cp_wait_for_server(struct oo_cplane_handle* cp, enum cp_sync_mode mode)
 {
   int rc;
+  cp_version_t ver = 0;
+  cp_wait_check_fn fn;
 
-  if( cp_is_usable(cp) )
-    return 0;
+  switch( mode ) {
+    case CP_SYNC_NONE:
+      fn = cp_is_usable_hook;
+      break;
+    case CP_SYNC_LIGHT:
+      fn = cp_light_synced;
+      break;
+    case CP_SYNC_DUMP:
+      fn = cp_dump_synced;
+      break;
+    default:
+      ci_assert(0);
+      return -EINVAL;
+  }
 
-  /* We have no server.  Try to spawn one. */
-  if( cplane_spawn_server ) {
+
+  if( cp->server_pid != NULL ) {
+    /* Cplane server has been started, but it may be unusable yet.
+     * We probably need to re-sync it with OS depending on the mode.
+     *
+     * The server may disappear under our feet.  We'll misbehave but do not
+     * crash in this case. */
+    switch( mode ) {
+      case CP_SYNC_NONE:
+        return cp_wait_interruptible(cp, fn, ver);
+      case CP_SYNC_LIGHT:
+      case CP_SYNC_DUMP:
+        rc = cp_sync_tables_start(cp, mode, &ver);
+        if( rc != 0 )
+          return rc;
+    }
+  }
+  else if( cplane_spawn_server ) {
+    /* We have no server.  Try to spawn one. */
     rc = cp_spawn_server(CP_SPAWN_SERVER_SWITCH_NS);
     if( rc < 0 ) {
       ci_log("%s: Failed to spawn server: rc=%d", __FUNCTION__, rc);
@@ -1434,17 +1554,22 @@ static int oo_cp_wait_for_server(struct oo_cplane_handle* cp)
     /* Ploughing on is almost certain to block, so schedule to give ourselves a
      * chance of being lucky. */
     schedule();
+
+    /* We've just spawned server.  It is fresh.  No need to sync with OS. */
+    fn = cp_is_usable_hook;
+  }
+  else {
+    return -ENOENT;
   }
 
-  return cp_wait_interruptible(cp, cp_is_usable_hook, 0);
+  return cp_wait_interruptible(cp, fn, ver);
 }
 
 
 /* Entered via an ioctl in order to wait for the presence of a UL server for
  * the control plane for the current namespace.  If a server already exists, we
  * will return without blocking. */
-int oo_cp_wait_for_server_rsop(ci_private_t *priv,
-                               void* arg __attribute__((unused)))
+int oo_cp_wait_for_server_rsop(ci_private_t *priv, void* arg)
 {
   struct oo_cplane_handle* cp = cp_acquire_from_priv(priv);
   int rc;
@@ -1452,7 +1577,7 @@ int oo_cp_wait_for_server_rsop(ci_private_t *priv,
   if( cp == NULL )
     return -ENOMEM;
 
-  rc = oo_cp_wait_for_server(cp);
+  rc = oo_cp_wait_for_server(cp, *(ci_uint32*)arg);
 
   cp_release(cp);
   return rc;
@@ -1529,7 +1654,8 @@ static void cp_respawn_init_server(void)
       return;
     }
   }
-  cp_spawn_server(CP_SPAWN_SERVER_BOOTSTRAP);
+  if( cplane_server_grace_timeout != 0 )
+    cp_spawn_server(CP_SPAWN_SERVER_BOOTSTRAP);
 }
 
 int cplane_server_path_set(const char* val,
@@ -1591,6 +1717,10 @@ static int cp_proc_stats_show(struct seq_file *m,
              cp->fwd_req_id - cp->stats.fwd_req_complete);
   seq_printf(m, "Filter engine requests (non-waiting):\t%d\n",
              atomic_read(&cp->stats.oof_req_nonblock));
+  seq_printf(m, "ARP confirmations (tried):\t%d\n",
+             atomic_read(&cp->stats.arp_confirm_try));
+  seq_printf(m, "ARP confirmations (successful):\t%d\n",
+             atomic_read(&cp->stats.arp_confirm_do));
   seq_printf(m, "Dropped IP packets routed via OS:\t%d\n",
              cp->cppl.stat.dropped_ip);
 
@@ -1694,8 +1824,8 @@ static int cp_server_pids_show(struct seq_file* s, void* state_)
   pid_t pid = 0;
 
   spin_lock_bh(&cp->cp_handle_lock);
-  if( cp->server != NULL )
-    pid = task_pid_vnr(cp->server);
+  if( cp->server_pid != NULL )
+    pid = pid_vnr(cp->server_pid);
   spin_unlock_bh(&cp->cp_handle_lock);
 
   if( pid != 0 )
@@ -1734,6 +1864,7 @@ int cplane_server_params_set(const char* val,
   char** old;
   char** new = NULL;
   int n = 0;
+  size_t old_len;
   size_t len = 0;
   char* new_string = kstrdup(skip_spaces(val), GFP_KERNEL);
 
@@ -1763,12 +1894,14 @@ int cplane_server_params_set(const char* val,
   cp_lock_init();
   spin_lock(&cp_lock);
   old = cplane_server_params_array;
+  old_len = cplane_server_params_array_len;
   cplane_server_params_array = new;
   cplane_server_params_array_num = n;
   cplane_server_params_array_len = len;
   spin_unlock(&cp_lock);
 
-  if( old == NULL || memcmp(*old, cplane_server_params_array, len) != 0 )
+  if( (old == NULL) != (new == NULL) || old_len != len ||
+      (old != NULL && new != NULL && memcmp(*old, *new, len) != 0) )
     cp_respawn_init_server();
 
   if( old != NULL ) {
@@ -1825,11 +1958,23 @@ int oo_cp_get_server_pid(struct oo_cplane_handle* cp)
   int pid = 0;
 
   spin_lock_bh(&cp->cp_handle_lock);
-  if( cp->server != NULL )
-    pid = task_tgid_nr(cp->server);
+  if( cp->server_pid != NULL )
+    pid = pid_nr(cp->server_pid);
   spin_unlock_bh(&cp->cp_handle_lock);
 
   return pid;
+}
+
+int cplane_server_grace_timeout_set(const char* val,
+                                    ONLOAD_MPC_CONST struct kernel_param* kp)
+{
+  int old_val = cplane_server_grace_timeout;
+  int rc = param_set_int(val, kp);
+  if( rc != 0 )
+    return rc;
+  if( (cplane_server_grace_timeout == 0) != (old_val == 0) )
+    cp_respawn_init_server();
+  return 0;
 }
 
 int cplane_route_request_timeout_set(const char* val,
@@ -1852,10 +1997,10 @@ int oo_cp_print_rsop(ci_private_t *priv, void *arg)
     return -ENOMEM;
 
   spin_lock_bh(&cp->cp_handle_lock);
-  /* Holding cp_handle_lock ensures that cp->server is not going to be released
-   * under our feet.  Calling send_sig() is safe in atomic context. */
-  if( cp->server != NULL )
-    rc = send_sig(CP_SERVER_PRINT_STATE_SIGNAL, cp->server, 1);
+  /* Holding cp_handle_lock ensures that cp->server_pid is not going to be
+   * released under our feet.  Calling kill_pid() is safe in atomic context. */
+  if( cp->server_pid != NULL )
+    rc = kill_pid(cp->server_pid, CP_SERVER_PRINT_STATE_SIGNAL, 1);
   else
     rc = -ESRCH;
   spin_unlock_bh(&cp->cp_handle_lock);
@@ -1875,11 +2020,14 @@ int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp)
     CI_DLLIST_FOR_EACH(link, &cp_hash_table[hash]) {
       struct oo_cplane_handle* cp = CI_CONTAINER(struct oo_cplane_handle,
                                                  link, link);
-      if( cp == main_cp )
+      if( cp == main_cp || ! cp->server_initialized )
           continue;
       spin_lock_bh(&cp->cp_handle_lock);
-      if( cp->server != NULL )
-        rc += !rc * send_sig(cp->mib[0].dim->llap_update_sig, cp->server, 1);
+      if( cp->server_pid != NULL ) {
+        int rc1 = kill_pid(cp->server_pid, cp->mib[0].dim->llap_update_sig, 1);
+        if( rc == 0 )
+          rc = rc1;
+      }
       spin_unlock_bh(&cp->cp_handle_lock);
     }
   }
@@ -1887,32 +2035,3 @@ int oo_cp_llap_change_notify_all(struct oo_cplane_handle* main_cp)
   return rc;
 }
 
-int cp_sync_tables_start(struct oo_cplane_handle* cp, cp_version_t* ver_out)
-{
-  cp_version_t old_ver = *cp->mib->dump_version;
-  int rc = 0;
-
-  /* Odd version means "dump in progress" - so we should wait for next-next
-   * even version. */
-  if( old_ver & 1 )
-    old_ver++;
-
-  spin_lock_bh(&cp->cp_handle_lock);
-  if( cp->server != NULL )
-    send_sig(CP_SERVER_DUMP_STATE_SIGNAL, cp->server, 1);
-  else
-    rc = -ESRCH;
-  spin_unlock_bh(&cp->cp_handle_lock);
-
-  *ver_out = old_ver;
-  return rc;
-}
-
-static int cp_synced(struct oo_cplane_handle* cp, cp_version_t old_ver)
-{
-  return (old_ver ^ OO_ACCESS_ONCE(*cp->mib->dump_version)) & ~1;
-}
-int cp_sync_tables_wait(struct oo_cplane_handle* cp, cp_version_t old_ver)
-{
-  return cp_wait_interruptible(cp, cp_synced, old_ver);
-}

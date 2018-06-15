@@ -46,6 +46,7 @@
 #include "mcdi.h"
 #include "mcdi_pcol.h"
 #include "aoe.h"
+#include "sfctool.h"
 
 #include <linux/module.h>
 #include <linux/skbuff.h>
@@ -228,7 +229,7 @@ struct efx_compat_ethtool_rxnfc {
 };
 #endif
 
-static int efx_ioctl_rxnfc(struct efx_nic *efx, void __user *useraddr)
+int efx_ioctl_rxnfc(struct efx_nic *efx, void __user *useraddr)
 {
 #ifdef CONFIG_COMPAT
 	struct efx_compat_ethtool_rxnfc __user *compat_rxnfc = useraddr;
@@ -329,7 +330,7 @@ static int
 efx_ioctl_rxfh_indir(struct efx_nic *efx, union efx_ioctl_data *data)
 {
 	BUILD_BUG_ON(ARRAY_SIZE(data->rxfh_indir.table) !=
-		     ARRAY_SIZE(efx->rx_indir_table));
+		     ARRAY_SIZE(efx->rss_context.rx_indir_table));
 
 	switch (data->rxfh_indir.head.cmd) {
 	case ETHTOOL_GRXFHINDIR:
@@ -671,6 +672,21 @@ efx_ioctl_dump(struct efx_nic *efx, union efx_ioctl_data __user *useraddr)
 }
 #endif
 
+static int efx_ioctl_sfctool(struct efx_nic *efx,
+			     union efx_ioctl_data __user *useraddr)
+{
+	struct efx_sfctool sfctool;
+	u32 ethcmd;
+
+	if (copy_from_user(&sfctool, useraddr, sizeof(sfctool)))
+		return -EFAULT;
+
+	if (copy_from_user(&ethcmd, sfctool.data, sizeof(ethcmd)))
+		return -EFAULT;
+
+	return efx_sfctool(efx, ethcmd, sfctool.data);
+}
+
 /*****************************************************************************/
 
 int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
@@ -812,6 +828,8 @@ int efx_private_ioctl(struct efx_nic *efx, u16 cmd,
 	case EFX_DUMP:
 		return efx_ioctl_dump(efx, user_data);
 #endif
+	case EFX_SFCTOOL:
+		return efx_ioctl_sfctool(efx, user_data);
 	default:
 		netif_err(efx, drv, efx->net_dev,
 			  "unknown private ioctl cmd %x\n", cmd);

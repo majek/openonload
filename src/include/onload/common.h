@@ -65,7 +65,6 @@ enum oo_device_type {
   OO_MAX_DEV /* not a device type */
 };
 
-
 # define EFAB_DEV_NAME  "onload"  
 
 # define OO_EPOLL_DEV_NAME "onload_epoll"
@@ -293,13 +292,13 @@ typedef struct {
 } oo_ofe_config_t;
 
 
-
 typedef struct {
   oo_pkt_p	pkt;
   ci_uint32	retrieve_rc;
   ci_uerr_t	os_rc;
   ci_uerr_t	rc;
   ci_ifid_t     ifindex;
+  ci_uint32     next_hop;
 } cp_user_defer_send_t;
 
 typedef struct {
@@ -367,14 +366,15 @@ typedef struct {
   ci_uint32      count;
 } oo_dshm_list_t;
 
+typedef struct {
+  ci_int32       laddr_be32;
+} oo_alloc_active_wild_t;
 
 /*--------------------------------------------------------------------
  *
  * Platform dependent IOCTLS
  *
  *--------------------------------------------------------------------*/
-
-
 
 
 
@@ -424,6 +424,7 @@ struct oo_op_tcp_drop_from_acceptq {
   ci_uint32 stack_id;
   oo_sp sock_id;
 };
+
 
 /*----------------------------------------------------------------------------
  *

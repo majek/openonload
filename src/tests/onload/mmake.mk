@@ -1,5 +1,5 @@
 SUBDIRS	:= wire_order tproxy_preload woda_preload hwtimestamping oof \
-           sync_preload
+           sync_preload l3xudp_preload
 
 
 ifeq ($(BUILDORM),1)

@@ -161,7 +161,10 @@ efab_tcp_helper_sock_attach_common(tcp_helper_resource_t* trs,
 
   /* Create a new file descriptor to attach the socket to. */
   rc = oo_create_ep_fd(ep, flags, fd_type);
-  if( rc >= 0 ) {
+  if( fd_type == -1 ) {
+    /* FIXME: perhaps we should check flag compatibility ? */
+  }
+  else if( rc >= 0 ) {
 #ifdef SOCK_NONBLOCK
     if( sock_type & SOCK_NONBLOCK )
       ci_bit_mask_set(&wo->waitable.sb_aflags, CI_SB_AFLAG_O_NONBLOCK);
@@ -175,6 +178,9 @@ efab_tcp_helper_sock_attach_common(tcp_helper_resource_t* trs,
      * up-to-date values for this new socket.
      */
     efab_get_os_settings(trs);
+  }
+  else {
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_alloc_fail);
   }
 
   return rc;
@@ -234,6 +240,8 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
    * support that for the IP_TRANSPARENT case, but until this feature has
    * matured a bit we'll err on the side of caution and only use it where it
    * might actually be needed.
+   * Note: in scalable active (non transparent mode) we always create OS backing
+   * socket to reserve their own local ip/port
    */
   if( (NI_OPTS(&trs->netif).scalable_filter_enable !=
        CITP_SCALABLE_FILTERS_ENABLE) ||
@@ -262,6 +270,8 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   }
 
   rc = efab_tcp_helper_sock_attach_common(trs, ep, op->type, fd_type, flags);
+  /* File should have not existed */
+  ci_assert_nequal(rc, -ENOANO);
   if( rc < 0 ) {
     efab_tcp_helper_close_endpoint(trs, ep->id);
     return rc;
@@ -270,6 +280,209 @@ efab_tcp_helper_sock_attach(ci_private_t* priv, void *arg)
   op->fd = rc;
   return 0;
 }
+
+
+#if CI_CFG_FD_CACHING
+/* Endpoint must have IN_CACHE flag set to avoid side effects
+ * (e.g. dropping endpoint).
+ *
+ * The detaching of the foreign FD can only work for FDs
+ * that are coming out of endpoint cache (no user or onload stack references)
+ * and is technically an orhpan.
+ * The only concurrent operation expected is FD close when the process
+ * owning the FD is about to die or dying.
+ * In presence of IN_CACHE flag the concurrent generic_tcp_helper_close()
+ * can perform only:
+ *   {ep->file_ptr = NULL; ep->sb_aflags |= NO_FD}.
+ * The following function performs effectively:
+ *   {load file_ptr , load sb_aflags}
+ * and needs to deal with the following three outcomes:
+ *  * file_ptr == NULL and sb_aflags[NO_FD] == 1 - FD already freed
+ *  * file_ptr == NULL and sb_aflags[NO_FD] == 0 - definitely in the
+ *    middle of the generic_tcp_helper_close()
+ *  * file_ptr == &foreign_file and sb_aflags[NO_FD] == 0 - file close not
+ *    called yet at all or in deferred/in-progress depending on the outcome
+ *    of get_file_rcu(file_ptr).
+ *    And if close() has not been called yet detaching of the FD is performed.
+ */
+static int
+efab_tcp_helper_detach_file(tcp_helper_endpoint_t* ep,
+                            citp_waitable_obj *wo)
+{
+  /* in cache and with some fd, we only expect of different process here */
+  /* could there be some races here */
+  int pid = wo->tcp.cached_on_pid;
+  int fd = wo->tcp.cached_on_fd;
+  /* keep IN_CACHE flag while closing the foreign file */
+  ci_private_t* priv = NULL;
+  struct file* filp;
+  int rc = 0;
+  tcp_helper_resource_t* trs = ep->thr;
+
+  ci_assert_flags(wo->waitable.sb_aflags, CI_SB_AFLAG_IN_CACHE);
+  ci_assert_nflags(wo->waitable.sb_aflags, CI_SB_AFLAG_ORPHAN);
+
+  ci_assert_nequal(pid, task_pid_nr_ns(current, ci_netif_get_pidns(&trs->netif)));
+  ci_assert_ge(fd, 0);
+
+  rcu_read_lock();
+  /* Once again check NO_FD flag
+   * We need to perform this check after taking rcu_read_lock
+   * which prevents weakly referenced filp object from being freed */
+  if( wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ) {
+    /* cleaned NO_FD flag means that the filp close operation finished
+     * and EP can be reused */
+    goto rcu_unlock;
+  }
+  filp = ep->file_ptr;
+  /* filp might be NULL if we raced with FD close, other than that
+   * filp is still valid even if close completed concurrently thanks to rcu_lock */
+  if( filp == NULL || ! get_file_rcu(filp) ) {
+    /* filp is being freed concurrently, best to back off until it is completed */
+    OO_DEBUG_TCPH(ci_log("%s: pid=%d fd=%d => is being freed", __FUNCTION__, pid, fd));
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach_fail_soft);
+    rc = -EINVAL;
+    goto rcu_unlock;
+  }
+  if( filp->f_op != &linux_tcp_helper_fops_tcp ) {
+    LOG_E(ci_log("%s: pid=%d fd=%d => non TCP", __FUNCTION__, pid, fd));
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach_fail_hard);
+    rc = -EINVAL;
+    goto file_put;
+  }
+  priv = (ci_private_t*) filp->private_data;
+  if( priv == NULL ) {
+    rc = -EINVAL;
+    LOG_E(ci_log("%s: pid=%d fd=%d => no TCP priv", __FUNCTION__, pid, fd));
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach_fail_hard);
+    goto file_put;
+  }
+  if( priv->fd_type != CI_PRIV_TYPE_TCP_EP ) {
+    rc = -EINVAL;
+    LOG_E(ci_log("%s: pid=%d fd=%d => fd priv type not TCP",
+          __FUNCTION__, pid, fd));
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach_fail_hard);
+    goto file_put;
+  }
+  if( priv->thr != trs ) {
+    rc = -EINVAL;
+    LOG_E(ci_log("%s: [%d] file refers to stack %d",
+                 __FUNCTION__, trs->id, priv->thr->id));
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach_fail_hard);
+    goto file_put;
+  }
+  if( priv->sock_id != ep->id ) {
+    rc = -EINVAL;
+    LOG_E(ci_log("%s: wrong ep expected %d:%d while file refers to %d",
+          __FUNCTION__, trs->id, ep->id, priv->sock_id));
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach_fail_hard);
+    goto file_put;
+  }
+
+/* redirect foreign file to magic sock_id */
+  {
+    //ci_tcp_state* s = ci_tcp_get_state_buf(&trs->netif);
+    priv->sock_id = -1; // s->s.b.bufid;
+    ep->file_ptr = NULL;
+    CITP_STATS_NETIF_INC(&trs->netif, sock_attach_fd_detach);
+  }
+
+ file_put:
+  fput(filp);
+ rcu_unlock:
+  rcu_read_unlock();
+  return rc;
+}
+
+
+static int
+efab_tcp_helper_sock_detach_file(ci_private_t* priv, void *arg)
+{
+  oo_tcp_accept_sock_attach_t* op = arg;
+  tcp_helper_resource_t* trs = priv->thr;
+  tcp_helper_endpoint_t* ep = NULL;
+  citp_waitable_obj *wo;
+  int rc;
+
+  OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  /* Validate and find the endpoint. */
+  if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) ) {
+    LOG_E(ci_log("%s: invalid endp", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  ep = ci_trs_get_valid_ep(trs, op->ep_id);
+  wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+  ci_assert_flags(wo->waitable.state, CI_TCP_STATE_TCP);
+  ci_assert_nflags(wo->waitable.sb_aflags,
+                   CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+  if( (~wo->waitable.state & CI_TCP_STATE_TCP) ||
+      (wo->waitable.sb_aflags &
+       (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ)) )
+    return -ENOTSUPP;
+
+  rc = efab_tcp_helper_detach_file(ep, wo);
+  if( rc == 0 ) {
+    ci_atomic32_and(&wo->waitable.sb_aflags, ~CI_SB_AFLAG_IN_CACHE_NO_FD);
+    wo->tcp.cached_on_fd = -1;
+    wo->tcp.cached_on_pid = -1;
+    op->fd = 0;
+  }
+  return rc;
+}
+
+
+static int
+efab_tcp_helper_sock_attach_to_existing_file(ci_private_t* priv, void *arg)
+{
+  oo_tcp_accept_sock_attach_t* op = arg;
+  tcp_helper_resource_t* trs = priv->thr;
+  tcp_helper_endpoint_t* ep = NULL;
+  citp_waitable_obj *wo;
+  int rc;
+
+  OO_DEBUG_TCPH(ci_log("%s: ep_id=%d", __FUNCTION__, op->ep_id));
+  if( trs == NULL ) {
+    LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  /* Validate and find the endpoint. */
+  if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) ) {
+    LOG_E(ci_log("%s: invalid endp", __FUNCTION__));
+    return -EINVAL;
+  }
+
+  ep = ci_trs_get_valid_ep(trs, op->ep_id);
+  wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
+
+  /* expected on EP cache path (thus TCP) from ci_tcp_ep_ctor (no passive/orphan)*/
+  ci_assert_flags(wo->waitable.state, CI_TCP_STATE_TCP);
+  ci_assert_nflags(wo->waitable.sb_aflags,
+                   CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+  if( (~wo->waitable.state & CI_TCP_STATE_TCP) ||
+      (wo->waitable.sb_aflags &
+       (CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ)) )
+    return -ENOTSUPP;
+
+  /* Fail if there is no existing file attached to this EP */
+  if( ep->file_ptr == NULL )
+    return -EINVAL;
+
+  rc = efab_tcp_helper_sock_attach_common(trs, ep, 0,
+                                          -1 /* clone only */, 0);
+  if( rc < 0 )
+    return rc;
+
+  op->fd = rc;
+  return 0;
+}
+#endif
 
 
 static int
@@ -290,43 +503,59 @@ efab_tcp_helper_tcp_accept_sock_attach(ci_private_t* priv, void *arg)
   }
 
   /* Validate and find the endpoint. */
-  if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) )
+  if( ! IS_VALID_SOCK_P(&trs->netif, op->ep_id) ) {
+    LOG_E(ci_log("%s: invalid endp", __FUNCTION__));
     return -EINVAL;
+  }
 
   ep = ci_trs_get_valid_ep(trs, op->ep_id);
   wo = SP_TO_WAITABLE_OBJ(&trs->netif, ep->id);
   ci_assert(wo->waitable.state & CI_TCP_STATE_TCP);
 
+  /* clear NONBLOCK/CLOEXEC flag as these will be set according to
+   * sock_type in efab_tcp_helper_sock_attach_common() */
   ci_atomic32_and(&wo-> waitable.sb_aflags,
-                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ));
+                  ~(CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ |
+                    CI_SB_AFLAG_O_CLOEXEC | CI_SB_AFLAG_O_NONBLOCK));
+
+  flags = efab_tcp_helper_sock_attach_setup_flags(&sock_type);
+  rc = efab_tcp_helper_sock_attach_common(trs, ep, op->type,
+                                          CI_PRIV_TYPE_TCP_EP, flags);
+  if( rc < 0 )
+    goto on_error;
 
 #if CI_CFG_FD_CACHING
   /* There are ways that a cached socket may have had its fd closed.  If
    * that happens we come through this ioctl to get a new one, so update the
    * state to reflect that.
    */
-  if( wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD ) {
-    ci_assert(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE);
-    ci_atomic32_and(&wo->waitable.sb_aflags, ~CI_SB_AFLAG_CACHE_PRESERVE);
+  if( wo->waitable.sb_aflags & (CI_SB_AFLAG_IN_CACHE_NO_FD |
+                                CI_SB_AFLAG_IN_CACHE) ) {
+    ci_assert_impl(wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE_NO_FD,
+                   wo->waitable.sb_aflags & CI_SB_AFLAG_IN_CACHE);
+    /* we clear the relevant flags apart from O_CLOEXEC and O_NONBLOCK as
+     * they have been set as needed in efab_tcp_helper_sock_attach_common()
+     * along with the FD's counterpart */
+    ci_atomic32_and(&wo->waitable.sb_aflags, (~CI_SB_AFLAG_CACHE_PRESERVE) |
+                                             CI_SB_AFLAG_O_CLOEXEC |
+                                             CI_SB_AFLAG_O_NONBLOCK);
     wo->tcp.cached_on_fd = -1;
     wo->tcp.cached_on_pid = -1;
   }
 #endif
 
-  flags = efab_tcp_helper_sock_attach_setup_flags(&sock_type);
-  rc = efab_tcp_helper_sock_attach_common(trs, ep, op->type,
-                                          CI_PRIV_TYPE_TCP_EP, flags);
-  if( rc < 0 ) {
-    /* - accept() does not touch the ep - no need to clear it up;
-     * - accept() needs the tcp state survive
-     */
-    ci_atomic32_or(&wo-> waitable.sb_aflags,
-                   CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
-    return rc;
-  }
- 
-  op->fd = rc; 
+  op->fd = rc;
   return 0;
+
+ on_error:
+  /* - accept() does not touch the ep - no need to clear it up;
+   * - accept() needs the tcp state survive
+   * Note: we can lose O_NONBLOCK and O_CLOEXEC - they will be reapplied on
+   * another attempt.
+   */
+  ci_atomic32_or(&wo-> waitable.sb_aflags,
+                 CI_SB_AFLAG_ORPHAN | CI_SB_AFLAG_TCP_IN_ACCEPTQ);
+  return rc;
 }
 
 
@@ -814,8 +1043,7 @@ efab_tcp_helper_os_pollerr_clear(ci_private_t* priv, void *arg)
 
   if( rc != 0 )
     return 0;
-  oo_os_sock_status_bit_clear_handled(SP_TO_SOCK(&ep->thr->netif, ep->id),
-                                      os_file, OO_OS_STATUS_ERR);
+  oo_os_sock_status_bit_clear_handled(ep, os_file, OO_OS_STATUS_ERR);
   oo_os_sock_put(os_file);
   return 0;
 }
@@ -871,7 +1099,8 @@ cicp_user_defer_send_rsop(ci_private_t *priv, void *arg)
   if (priv->thr == NULL)
     return -EINVAL;
   op->rc = cicp_user_defer_send(&priv->thr->netif, op->retrieve_rc,
-                                &op->os_rc, op->pkt, op->ifindex);
+                                &op->os_rc, op->pkt, op->ifindex,
+                                op->next_hop);
   /* We ALWAYS want os_rc in the UL, so we always return 0 and ioctl handler
    * copies os_rc to UL. */
   return 0;
@@ -925,10 +1154,12 @@ oo_ioctl_debug_op(ci_private_t *priv, void *arg)
     rc = efab_fds_dump(op->u.fds_dump_pid);
     break;
   case __CI_DEBUG_OP_DUMP_STACK__:
+  case __CI_DEBUG_OP_NETSTAT_STACK__:
     rc = tcp_helper_dump_stack(op->u.dump_stack.stack_id, 
                                op->u.dump_stack.orphan_only,
                                CI_USER_PTR_GET(op->u.dump_stack.user_buf),
-                               op->u.dump_stack.user_buf_len);
+                               op->u.dump_stack.user_buf_len,
+                               op->what);
     break;
   case __CI_DEBUG_OP_KILL_STACK__:
     rc = tcp_helper_kill_stack_by_id(op->u.stack_id);
@@ -1095,12 +1326,16 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
 
   /* find endpoint and drop OS socket */
   ep = ci_trs_get_valid_ep(thr, carg->sock_id);
-  if( ep == NULL )
-    goto fail1;
+  if( ep == NULL ) {
+    rc = -EINVAL;
+    goto fail;
+  }
 
   w = SP_TO_WAITABLE(&thr->netif, carg->sock_id);
-  if( !(w->state & CI_TCP_STATE_TCP) || w->state == CI_TCP_LISTEN )
-    goto fail2;
+  if( !(w->state & CI_TCP_STATE_TCP) || w->state == CI_TCP_LISTEN ) {
+    rc = -EINVAL;
+    goto fail;
+  }
   ts = SP_TO_TCP(&thr->netif, carg->sock_id);
   ci_assert(ep->os_port_keeper);
   ci_assert_equal(ep->os_socket, NULL);
@@ -1113,7 +1348,7 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
   if( rc != 0 ) {
     ci_assert_equal(rc, -EINTR);
     rc = -ERESTARTSYS;
-    goto fail2;
+    goto fail;
   }
   ci_bit_clear(&ts->s.b.sb_aflags, CI_SB_AFLAG_TCP_IN_ACCEPTQ_BIT);
   /* We have no way to close this connection from the other side:
@@ -1127,9 +1362,8 @@ efab_tcp_drop_from_acceptq(ci_private_t *priv, void *arg)
   efab_tcp_helper_k_ref_count_dec(thr);
   return 0;
 
-fail1:
-  efab_thr_release(thr);
-fail2:
+fail:
+  efab_tcp_helper_k_ref_count_dec(thr);
   ci_log("%s: inconsistent ep %d:%d", __func__, carg->stack_id, carg->sock_id);
   return rc;
 }
@@ -1147,6 +1381,7 @@ static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
                                                   void *arg)
 {
   tcp_helper_resource_t* trs = priv->thr;
+  oo_alloc_active_wild_t* aaw = arg;
 
   if( trs == NULL ) {
     LOG_E(ci_log("%s: ERROR: not attached to a stack", __FUNCTION__));
@@ -1155,11 +1390,10 @@ static int efab_tcp_helper_alloc_active_wild_rsop(ci_private_t *priv,
 
   if( trs->netif.state->active_wild_n <
       NI_OPTS(&trs->netif).tcp_shared_local_ports_max )
-    tcp_helper_alloc_to_active_wild_pool(trs, 1);
+    return tcp_helper_increase_active_wild_pool(trs, aaw->laddr_be32);
 
-  return 0;
+  return -ENOBUFS;
 }
-
 
 /* "Donation" shared memory ioctls. */
 
@@ -1343,6 +1577,10 @@ oo_operations_table_t oo_operations[] = {
   op(OO_IOC_TCP_ACCEPT_SOCK_ATTACH,efab_tcp_helper_tcp_accept_sock_attach ),
 #if CI_CFG_USERSPACE_PIPE
   op(OO_IOC_PIPE_ATTACH,       efab_tcp_helper_pipe_attach ),
+#endif
+#if CI_CFG_FD_CACHING
+  op(OO_IOC_SOCK_DETACH,       efab_tcp_helper_sock_detach_file),
+  op(OO_IOC_SOCK_ATTACH_TO_EXISTING, efab_tcp_helper_sock_attach_to_existing_file),
 #endif
 
   op(OO_IOC_OS_SOCK_CREATE_AND_SET,efab_tcp_helper_os_sock_create_and_set_rsop),

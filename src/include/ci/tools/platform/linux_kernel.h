@@ -436,7 +436,7 @@ ci_inline uid_t ci_getgid(void)
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)
   return current_gid();
 #else
-  return __kgid_val(current_gid());
+  return from_kgid(&init_user_ns, current_gid());
 #endif
 }
 

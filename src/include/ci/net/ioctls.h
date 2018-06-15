@@ -29,7 +29,6 @@
 #ifndef __CI_NET_IOCTLS_H__
 #define __CI_NET_IOCTLS_H__
 
-
 # define SIOCINQ  FIONREAD
 # define SIOCOUTQ TIOCOUTQ
 # ifndef SIOCOUTQNSD

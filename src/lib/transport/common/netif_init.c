@@ -206,7 +206,7 @@ int citp_netif_by_id(ci_uint32 stack_id, ci_netif** out_ni, int locked)
   }
   __citp_add_netif(ni);
   ni->flags |= CI_NETIF_FLAGS_SHARED;
-  citp_netif_add_ref(ni);
+  citp_netif_init_ref(ni);
   citp_netif_ctor_hook(ni, 0);
 
   if( ! locked )
@@ -239,8 +239,14 @@ ci_netif* citp_find_ul_netif( int id, int locked )
 
   ci_assert( citp_netifs_inited );
 
+  /* Although we're not modifying the fdtable we take the write lock here.
+   * This is because we want this to be usable on paths that are trying to
+   * clear the busy status of an fd.  The existence of any busy waiters will
+   * prevent the read lock from being taken, but we are still able to take
+   * the write lock.
+   */
   if( !locked )
-    CITP_FDTABLE_LOCK_RD();
+    CITP_FDTABLE_LOCK();
     
   CI_DLLIST_FOR_EACH2( ci_netif, ni, link, &citp_active_netifs )
     if( NI_ID(ni) == id )
@@ -250,7 +256,7 @@ ci_netif* citp_find_ul_netif( int id, int locked )
 
  exit_find:
   if( !locked )
-    CITP_FDTABLE_UNLOCK_RD();
+    CITP_FDTABLE_UNLOCK();
   return ni;
 }
 
@@ -421,7 +427,13 @@ int citp_netif_recreate_probed(ci_fd_t ul_sock_fd,
   ** process.  If they weren't shared they wouldn't exist to be restored.
   */
   ni->flags |= CI_NETIF_FLAGS_SHARED;
-  
+
+  /* We wouldn't be recreating this unless we had an endpoint to attach.
+  ** We add the reference for the endpoint here to prevent a race
+  ** condition.
+  */
+  citp_netif_init_ref(ni);
+
   /* If we shouldn't destruct netifs at user-level add an extra 'destruct
   ** protect' reference to prevent it ever happening.
   **
@@ -430,12 +442,6 @@ int citp_netif_recreate_probed(ci_fd_t ul_sock_fd,
   */
   if( citp_netif_dtor_mode == CITP_NETIF_DTOR_NONE )
     citp_netif_add_ref(ni);
-
-  /* We wouldn't be recreating this unless we had an endpoint to attach.
-  ** We add the reference for the endpoint here to prevent a race
-  ** condition.
-  */
-  citp_netif_add_ref(ni);
 
   /* Call the platform specifc netif ctor hook */
   citp_netif_ctor_hook(ni, 0);
@@ -663,4 +669,23 @@ void __citp_netif_free(ci_netif* ni)
 }
 
 
+void uncache_active_netifs(void)
+{
+  ci_netif* ni;
+  citp_lib_context_t lib_context;
+  citp_enter_lib(&lib_context);
+
+  Log_V(ci_log("%s:", __FUNCTION__));
+  CITP_FDTABLE_LOCK_RD();
+  CITP_FDTABLE_ASSERT_LOCKED(1);
+  // citp_netif_cache_disable();
+  /* Disable caching on every netif. */
+  if( ci_dllist_not_empty(&citp_active_netifs) ) {
+    CI_DLLIST_FOR_EACH2(ci_netif, ni, link, &citp_active_netifs) {
+      citp_uncache_fds_ul(ni);
+    }
+  }
+  CITP_FDTABLE_UNLOCK_RD();
+  citp_exit_lib(&lib_context, 1);
+}
 /*! \cidoxg_end */

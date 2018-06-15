@@ -196,10 +196,24 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
       fdinfo = citp_reprobe_moved(fdinfo,
                                   CI_FALSE/* ! from_fast_lookup */,
                                   CI_FALSE/* ! fdip_is_busy */);
-      epi = fdi_to_sock_fdi(fdinfo);
-      ep = &epi->sock;
-      UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
-      ci_netif_cluster_prefault(ep->netif);
+      /* We want to prefault the packets for the new clustered stack.  This
+       * is only needed if we successfully reprobed a valid fd.  This might
+       * not happen if the fd has been closed or re-used under our feet.
+       *
+       * This doesn't properly verify that what we've reprobed is really
+       * the same thing as we had before.  Fixing this properly is covered
+       * by bug77888.
+       */
+      if( fdinfo && fdinfo->protocol == &citp_udp_protocol_impl ) {
+        epi = fdi_to_sock_fdi(fdinfo);
+        ep = &epi->sock;
+        UDP_SET_FLAG(SOCK_TO_UDP(ep->s), CI_UDPF_FILTERED);
+        ci_netif_cluster_prefault(ep->netif);
+      }
+      else {
+        CI_SET_ERROR(rc, EBADF);
+        goto done;
+      }
     }
     else {
       goto done;
@@ -217,7 +231,8 @@ static int citp_udp_bind(citp_fdinfo* fdinfo, const struct sockaddr* sa,
     return 0;
   }
 
-  citp_fdinfo_release_ref( fdinfo, 0 );
+  if( fdinfo )
+    citp_fdinfo_release_ref( fdinfo, 0 );
   return rc;
 }
 
@@ -650,8 +665,10 @@ int citp_udp_tmpl_abort(citp_fdinfo* fdi, struct oo_msg_template* omt)
 
 
 #if CI_CFG_USERSPACE_EPOLL
-int citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
-                          struct timespec* next_out, int* bytes_out)
+#if CI_CFG_TIMESTAMPING
+static int
+citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
+                      struct timespec* next_out, int* bytes_out)
 {
   citp_sock_fdi* epi = fdi_to_sock_fdi(fdi);
   ci_udp_state* us = SOCK_TO_UDP(epi->sock.s);
@@ -661,13 +678,11 @@ int citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
 
   ci_sock_lock(epi->sock.netif, &us->s.b);
 
-  if( ci_udp_recv_q_is_empty(&us->recv_q) ) {
+  if( (pkt = ci_udp_recv_q_get(epi->sock.netif, &us->recv_q)) == NULL ) {
     ci_sock_unlock(epi->sock.netif, &us->s.b);
     return 0;
   } 
 
-  ci_rmb(); /* needed for recent q->extract */
-  pkt = ci_udp_recv_q_get(epi->sock.netif, &us->recv_q);
   do {
     if( citp_oo_timespec_compare(&pkt->pf.udp.rx_hw_stamp, limit) < 1 ) {
       /* We have data before the limit, add on the number of readable bytes. */
@@ -687,6 +702,7 @@ int citp_udp_ordered_data(citp_fdinfo* fdi, struct timespec* limit,
   ci_sock_unlock(epi->sock.netif, &us->s.b);
   return 1;
 }
+#endif
 #endif
 
 citp_protocol_impl citp_udp_protocol_impl = {
@@ -719,6 +735,7 @@ citp_protocol_impl citp_udp_protocol_impl = {
     .poll	 = citp_udp_poll,
 #if CI_CFG_USERSPACE_EPOLL
     .epoll       = citp_udp_epoll,
+    .sleep_seq   = citp_sock_sleep_seq,
 #endif
 #endif
     .zc_send     = citp_udp_zc_send,
@@ -728,7 +745,9 @@ citp_protocol_impl citp_udp_protocol_impl = {
     .tmpl_update    = citp_udp_tmpl_update,
     .tmpl_abort     = citp_udp_tmpl_abort,
 #if CI_CFG_USERSPACE_EPOLL
+#if CI_CFG_TIMESTAMPING
     .ordered_data   = citp_udp_ordered_data,
+#endif
 #endif
     .is_spinning    = citp_sock_is_spinning,
 #if CI_CFG_FD_CACHING

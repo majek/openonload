@@ -189,6 +189,9 @@ enum ef_vi_capability {
   /** TX firmware variant */
   EF_VI_CAP_TX_FW_VARIANT,
 
+  /** Availability of CTPIO */
+  EF_VI_CAP_CTPIO,
+
   /** Maximum value of capabilities enumeration */
   EF_VI_CAP_MAX, /* Keep this last */
 };

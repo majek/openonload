@@ -531,10 +531,30 @@ static inline bool efx_tx_may_pio(struct efx_channel *channel,
 /* Whether to do XPS in the SFC driver, for use when kernel XPS is not enabled
  * or not configured
  */
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NON_CONST_KERNEL_PARAM)
+static int sxps_warn_set(const char *val, const struct kernel_param *kp)
+#else
+static int sxps_warn_set(const char *val, struct kernel_param *kp)
+#endif
+{
+	pr_warn("SXPS is a deprecated feature and will be removed in a future release of this driver. "
+		"Use of SXPS should be replaced by kernel XPS.\n");
+	return param_set_bool(val, kp);
+}
+
 static bool sxps_enabled = false;
-module_param(sxps_enabled, bool, 0444);
-MODULE_PARM_DESC(sxps_enabled, "Whether to perform TX flow steering at the "
-			       "driver level. This or XPS is required for "
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_KERNEL_PARAM_OPS)
+static const struct kernel_param_ops sxps_enabled_ops = {
+	.set = sxps_warn_set,
+	.get = param_get_bool,
+};
+module_param_cb(sxps_enabled, &sxps_enabled_ops, &sxps_enabled, 0444);
+#else
+module_param_call(sxps_enabled, sxps_warn_set, param_get_bool,
+		  &sxps_enabled, 0444);
+#endif
+MODULE_PARM_DESC(sxps_enabled, "DEPRECATED. Whether to perform TX flow steering "
+			       "at the driver level. This or XPS is required for "
 			       "SARFS.");
 #endif
 
@@ -558,10 +578,30 @@ static const unsigned int sarfs_entry_holdoff_ms = 1000;
 
 /* The rate at which we'll sample TCP packets for new flows and CPU switches.
  * 0 = disable alt arfs. */
+#if !defined(EFX_USE_KCOMPAT) || !defined(EFX_HAVE_NON_CONST_KERNEL_PARAM)
+static int sarfs_warn_set(const char *val, const struct kernel_param *kp)
+#else
+static int sarfs_warn_set(const char *val, struct kernel_param *kp)
+#endif
+{
+	pr_warn("SARFS is a deprecated feature and will be removed in a future release of this driver. "
+		"Use of SARFS should be replaced by kernel ARFS.\n");
+	return param_set_uint(val, kp);
+}
+
 static unsigned int sarfs_sample_rate;
-module_param(sarfs_sample_rate, uint, 0444);
+#if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_KERNEL_PARAM_OPS)
+static const struct kernel_param_ops sarfs_sample_rate_ops = {
+	.set = sarfs_warn_set,
+	.get = param_get_uint,
+};
+module_param_cb(sarfs_sample_rate, &sarfs_sample_rate_ops, &sarfs_sample_rate, 0444);
+#else
+module_param_call(sarfs_sample_rate, sarfs_warn_set, param_get_uint,
+		  &sarfs_sample_rate, 0444);
+#endif
 MODULE_PARM_DESC(sarfs_sample_rate,
-	"Frequency which SARFS samples packets. "
+	"DEPRECATED. Frequency which SARFS samples packets. "
 	"0 = disable, N = sample every N packets.");
 
 /* Use destination only filters. This is the local IP and Port from the point
@@ -625,6 +665,7 @@ void efx_sarfs_fini(struct efx_nic *efx)
 	int i;
 	struct efx_sarfs_state *st = &efx->sarfs_state;
 
+	mutex_lock(&st->lock);
 	if (st->enabled)
 		for (i = 0; i < sarfs_table_size; ++i)
 			if (st->conns[i].filter_inserted)
@@ -634,6 +675,7 @@ void efx_sarfs_fini(struct efx_nic *efx)
 	kfree(st->conns);
 	st->conns = NULL;
 	st->enabled = false;
+	mutex_unlock(&st->lock);
 }
 
 static int efx_sarfs_filter_insert(struct efx_nic *efx,
@@ -656,13 +698,7 @@ static int efx_sarfs_filter_insert(struct efx_nic *efx,
 	spec.rem_port = key->rport;
 	spec.loc_port = key->lport;
 
-	return efx->type->filter_async_insert(efx, &spec);
-}
-
-static int efx_sarfs_filter_remove(struct efx_nic *efx,
-			 	   struct efx_sarfs_entry *entry)
-{
-	return efx->type->filter_async_remove(efx, entry->filter_id);
+	return efx->type->filter_insert(efx, &spec, true);
 }
 
 /* Disable insertion of any new SARFS filters.
@@ -687,7 +723,8 @@ static void efx_sarfs_insert(struct efx_nic *efx,
 	 */
 	if (entry->filter_inserted && !efx_sarfs_keys_eq(&entry->key, key)) {
 		/* remove old filter */
-		int rc = efx_sarfs_filter_remove(efx, entry);
+		int rc = efx_filter_remove_id_safe(efx, EFX_FILTER_PRI_SARFS,
+						   entry->filter_id);
 
 		if (rc != 0 && rc != -ENOENT) {
 			/* reassert entry holdoff period so we don't try to
@@ -710,7 +747,9 @@ static void efx_sarfs_insert(struct efx_nic *efx,
 		efx->sarfs_state.last_modified = jiffies;
 		entry->queue = rxq_id;
 	} else {
-		entry->filter_inserted = false;
+		/* if a previous filter existed, it's still there.  So don't
+		 * change entry->filter_inserted
+		 */
 		/* assert entry holdoff period so we don't try to spam insert a
 		 * problem filter
 		 */
@@ -735,48 +774,86 @@ static inline bool efx_sarfs_entry_in_holdoff(struct efx_sarfs_entry *entry)
 		msecs_to_jiffies(sarfs_entry_holdoff_ms);
 }
 
-static void efx_sarfs(struct efx_nic *efx,
-		      struct efx_tx_queue *txq,
-		      struct efx_sarfs_key *key)
+static inline bool efx_sarfs_entry_needs_update(struct efx_sarfs_entry *entry,
+						struct efx_sarfs_key key,
+						int rxq_id)
 {
-	u32 index = efx_sarfs_hash(key, sarfs_dest_only) % sarfs_table_size;
+	if (efx_sarfs_keys_eq(&entry->key, &key))
+		return (!entry->filter_inserted ||
+			entry->queue != rxq_id) &&
+		       !(entry->problem &&
+			 efx_sarfs_entry_in_holdoff(entry));
+
+	return !efx_sarfs_entry_in_holdoff(entry);
+}
+
+/**
+ * struct efx_async_sarfs - Request to perform a SARFS update
+ * @net_dev: Reference to the netdevice
+ * @key: The SARFS key of the flow
+ * @work: Workitem for this request
+ * @channel: Index of the channel for which this request was made
+ */
+struct efx_async_sarfs {
+	struct net_device *net_dev;
+	struct efx_sarfs_key key;
+	struct work_struct work;
+	int channel;
+};
+
+static void efx_sarfs_work(struct work_struct *data)
+{
+	struct efx_async_sarfs *req = container_of(data, struct efx_async_sarfs,
+						   work);
+	struct efx_nic *efx = netdev_priv(req->net_dev);
+	u32 index = efx_sarfs_hash(&req->key, sarfs_dest_only) % sarfs_table_size;
 	struct efx_sarfs_entry *entry = &efx->sarfs_state.conns[index];
-	int rxq_id = efx_rx_queue_index(efx_channel_get_rx_queue(txq->channel));
-	bool keys_eq = efx_sarfs_keys_eq(&entry->key, key);
+	struct efx_channel *channel = efx_get_channel(efx, req->channel);
+	int rxq_id = efx_rx_queue_index(efx_channel_get_rx_queue(channel));
 
-#define EFX_SARFS_ENTRY_NEEDS_UPDATE                                 \
-		((keys_eq &&                                            \
-		  (!entry->filter_inserted ||                           \
-		   (entry->queue != rxq_id &&                           \
-		    !(entry->problem &&                                 \
-		      efx_sarfs_entry_in_holdoff(entry))))) ||       \
-		 (!keys_eq && !efx_sarfs_entry_in_holdoff(entry)))
+	mutex_lock(&efx->sarfs_state.lock);
 
-	/* do the check first without the spinlock. this is ok because if we
+	/* recheck the global holdoff and entry now we have the lock */
+	if (jiffies - efx->sarfs_state.last_modified >=
+			msecs_to_jiffies(sarfs_global_holdoff_ms)) {
+		if (efx_sarfs_entry_needs_update(entry, req->key, rxq_id))
+			efx_sarfs_insert(efx, entry, rxq_id, &req->key);
+	}
+
+	mutex_unlock(&efx->sarfs_state.lock);
+
+	/* Release references */
+	dev_put(req->net_dev);
+	kfree(req);
+}
+
+static void efx_sarfs(struct efx_nic *efx, struct efx_tx_queue *txq,
+		      struct efx_sarfs_key key)
+{
+	u32 index = efx_sarfs_hash(&key, sarfs_dest_only) % sarfs_table_size;
+	struct efx_sarfs_entry *entry = &efx->sarfs_state.conns[index];
+	struct efx_channel *channel = efx_get_channel(efx, txq->channel->channel);
+	int rxq_id = efx_rx_queue_index(efx_channel_get_rx_queue(channel));
+	struct efx_async_sarfs *req;
+
+	/* do the check first without the mutex. this is ok because if we
 	 * get an inconsistent set of values and get a false negative we'll
 	 * miss an update but hopefully get it right at our next sample of this
 	 * flow, and if we get a false positive we'll discard it when we check
-	 * again with the spinlock.
+	 * again with the mutex.
 	 */
-	if (EFX_SARFS_ENTRY_NEEDS_UPDATE) {
-		spin_lock_bh(&efx->sarfs_state.lock);
+	if (!efx_sarfs_entry_needs_update(entry, key, rxq_id))
+		return;
 
-		/* recheck the global holdoff and entry now we have the lock */
-		if (jiffies - efx->sarfs_state.last_modified >=
-				msecs_to_jiffies(sarfs_global_holdoff_ms)) {
-			keys_eq = efx_sarfs_keys_eq(&entry->key, key);
-			if (EFX_SARFS_ENTRY_NEEDS_UPDATE) {
-				efx_sarfs_insert(efx,  entry, rxq_id, key);
-#ifdef CONFIG_SFC_DEBUGFS
-				++txq->sarfs_update;
-#endif
-			}
-		}
+	req = kmalloc(sizeof(*req), GFP_ATOMIC);
+	if (!req)
+		return;
 
-		spin_unlock_bh(&efx->sarfs_state.lock);
-	}
-
-#undef EFX_SARFS_ENTRY_NEEDS_UPDATE
+	dev_hold(req->net_dev = efx->net_dev);
+	INIT_WORK(&req->work, efx_sarfs_work);
+	req->key = key;
+	req->channel = channel->channel;
+	schedule_work(&req->work);
 }
 
 /* Inspect an skb for SARFS.
@@ -801,8 +878,7 @@ static void _efx_sarfs_skb(struct efx_nic *efx,
 		if (iphdr->protocol == IPPROTO_TCP) {
 			struct tcphdr *tcphdr = tcp_hdr(skb);
 			if ((++txq->sarfs_sample_count == sarfs_sample_rate) ||
-				(tcphdr->syn)) {
-
+			    (tcphdr->syn)) {
 				struct efx_sarfs_key key = {
 					.laddr = iphdr->saddr,
 					.raddr = iphdr->daddr,
@@ -810,8 +886,8 @@ static void _efx_sarfs_skb(struct efx_nic *efx,
 					.rport = tcphdr->dest
 				};
 
-				efx_sarfs(efx, txq, &key);
 				txq->sarfs_sample_count = 0;
+				efx_sarfs(efx, txq, key);
 			}
 		}
 	}

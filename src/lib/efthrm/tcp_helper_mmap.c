@@ -146,6 +146,31 @@ static int tcp_helper_rm_mmap_pio(tcp_helper_resource_t* trs,
 }
 #endif
 
+#if CI_CFG_CTPIO
+static int tcp_helper_rm_mmap_ctpio(tcp_helper_resource_t* trs,
+                                    unsigned long bytes,
+                                    void* opaque)
+{
+  int rc, intf_i;
+  int map_num = 0;
+  unsigned long offset = 0;
+
+  OO_DEBUG_VM(ci_log("%s: %u bytes=0x%lx", __func__, trs->id, bytes));
+
+  OO_STACK_FOR_EACH_INTF_I(&trs->netif, intf_i) {
+    if( trs->nic[intf_i].thn_ctpio_io_mmap_bytes != 0 ) {
+      rc = efab_vi_resource_mmap(trs->nic[intf_i].thn_vi_rs, &bytes, opaque,
+                                 &map_num, &offset, EFCH_VI_MMAP_CTPIO);
+      if( rc < 0 )
+        return rc;
+    }
+  }
+  ci_assert_equal(bytes, 0);
+
+  return 0;
+}
+#endif
+
 
 static int tcp_helper_rm_mmap_buf(tcp_helper_resource_t* trs,
                                   unsigned long bytes,
@@ -281,6 +306,11 @@ int efab_tcp_helper_rm_mmap(tcp_helper_resource_t* trs, unsigned long bytes,
 #if CI_CFG_PIO
     case CI_NETIF_MMAP_ID_PIO:
       rc = tcp_helper_rm_mmap_pio(trs, bytes, opaque);
+      break;
+#endif
+#if CI_CFG_CTPIO
+    case CI_NETIF_MMAP_ID_CTPIO:
+      rc = tcp_helper_rm_mmap_ctpio(trs, bytes, opaque);
       break;
 #endif
     case CI_NETIF_MMAP_ID_IOBUFS:

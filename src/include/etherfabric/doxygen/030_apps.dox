@@ -50,19 +50,21 @@ release; but source code is available on request.
 Most of these applications have additional options to test physical
 addressing mode, or hardware timestamping. Run with "--help" to check this.
 
-| Application              | Description
-| :----------------------- | :------------------------------------------------
-| \ref eflatency           | Measure latency by pinging a simple message between two interfaces.
-| \ref efsend              | Send UDP packets on a specified interface.
-| \ref efsink              | Receive streams of packets on a single interface.
-| \ref efforward           | Forward packets between two interfaces without modification.
-| \ref efsend_timestamping | Send UDP packets on a specified interface, with TX timestamping.
-| \ref efsend_pio          | Send UDP packets on a specified interface using Programmed I/O.
-| \ref efsink_packed       | Receive streams of packets on a single interface using packed streams.
-| \ref efforward_packed    | Forward packets between two interfaces without modification using packed stream mode for receive.
-| \ref efrss               | Forward packets between two interfaces without modification, spreading the load over multiple virtual interfaces and threads.
-| \ref efdelegated_client  | Delegate TCP sends to the ef_vi layer-2 API in order to get lower latency.
-| \ref efdelegated_server  | Server application used together with \ref efdelegated_client.
+| Application                 | Description
+| :-------------------------- | :------------------------------------------------
+| \ref eflatency              | Measure latency by pinging a simple message between two interfaces.
+| \ref efsend                 | Send UDP packets on a specified interface.
+| \ref efsink                 | Receive streams of packets on a single interface.
+| \ref efforward              | Forward packets between two interfaces without modification.
+| \ref efsend_timestamping    | Send UDP packets on a specified interface, with TX timestamping.
+| \ref efsend_pio             | Send UDP packets on a specified interface using Programmed I/O.
+| \ref efsend_pio_warm        | Send UDP packets on a specified interface using Programmed I/O with transmit warming.
+| \ref efsink_packed          | Receive streams of packets on a single interface using packed streams.
+| \ref efforward_packed       | Forward packets between two interfaces without modification using packed stream mode for receive.
+| \ref efrss                  | Forward packets between two interfaces without modification, spreading the load over multiple virtual interfaces and threads.
+| \ref efjumborx              | Receive jumbo packets
+| \ref exchange               | Simplified electronic trading exchange.
+| \ref trader_onload_ds_efvi  | Simplified electronic trader.
 
 \section eflatency eflatency
 
@@ -158,7 +160,7 @@ time to wait between sends can be controlled.
 
 \section efsend_pio efsend_pio
 
-The efsend_pio application that sends UDP packets on a specified interface.
+The efsend_pio application sends UDP packets on a specified interface.
 
 Packet data is copied to the NIC's PIO buffer before being sent,
 which typically results in lower latency sends compared to accessing
@@ -170,6 +172,22 @@ packet to finish and then sends the next.
 
 The number of packets sent, the size of the packet, the amount of
 time to wait between sends can be controlled.
+
+\section efsend_pio_warm efsend_pio_warm
+
+The efsend_pio_warm application demonstrates PIO transmit warming.
+
+The application sends a UDP packet using PIO each time a trigger fires.  
+While waiting for a trigger, the application can warm the PIO transmit path 
+to reduce latency of the subsequent send.
+
+The effect of warming can be assessed by measuring the time from when the 
+trigger fires to when the corresponding packet leaves the adapter.
+
+Several parameters can be controlled including the delay between triggers, 
+the enablement of warming and the frequency of warming while waiting for a 
+trigger.
+
 
 \section efsink_packed efsink_packed
 
@@ -192,7 +210,7 @@ RSS.
 The efdelegated_client application demonstrates usage of OpenOnload's
 "Delegated Sends" feature.  This API allows you to do delegate TCP sends
 for a particular socket to some other mechanism.  For example, this
-sample uses the ef_vi layer-2 API in order to get lower latency than is
+sample uses the %ef_vi layer-2 API in order to get lower latency than is
 possible with a normal send() call.
 
 The API essentially boils down to first retrieving the packet headers,
@@ -201,24 +219,51 @@ finally telling Onload what it was you sent so it can update the
 internal TCP state of the socket.
 
 This sample application allows you to compare the performance of normal
-sends using the kernel stack, using OpenOnload and using ef_vi with the
+sends using the kernel stack, using OpenOnload and using %ef_vi with the
 delegated sends API.  It establishes a TCP connection to the server
 process, which starts sending UDP multicast messages.  The client
 receives these messages, and replies to a subset of them with a TCP
 message.  The server measures the latency from the UDP send to the TCP
 receive.
 
-\subsection efdelegated_client_usage Usage
+\section efjumborx efjumborx
+
+The efjumborx application demonstrates receiving jumbo packets.
+
+Various parameters can be set, including the interface, IP address and port 
+to use. Verbose output can be enabled to view progress. The received packet 
+can be printed as text or in hexadecimal.
+ 
+\section exchange exchange
+
+The exchange application plays the role of a simplified electronic trading exchange. It is to be used in conjunction with the \ref trader_onload_ds_efvi application.
+
+\section trader_onload_ds_efvi trader_onload_ds_efvi
+
+The trader_onload_ds_efvi application demonstrates various techniques to 
+reduce latency. These techniques are often useful in electronic trading 
+applications, and so this example takes the form of an extremely simplified 
+electronic trading system.
+
+The \ref exchange application provides a simplified electronic trading exchange, and this application provides a simplified electronic trader.
+
+A trader_onload_ds_efvi application demonstrates similar techniques for Onload.
+
+For full details, see the `README` file in the `tests/trade_sim` directory.
+
+\subsection trader_onload_ds_efvi_usage Usage
 
 For normal socket-based sends, run as follows:
 
-__Server:__ <code>onload -p latency ./efdelegated_server _mcast-intf_</code>
-__Client:__ <code>onload -p latency ./efdelegated_client _mcast-intf_ _server_</code>
+__Server:__ <code>onload -p latency-best ./exchange _mcast-intf_</code>
+
+__Client:__ <code>onload -p latency-best ./trader_onload_ds_efvi _mcast-intf_ _server_</code>
 
 For "delegated" sends, run as follows:
 
-__Server:__ <code>onload -p latency ./efdelegated_server _mcast-intf_</code>
-__Client:__ <code>onload -p latency ./efdelegated_client -d _mcast-intf_ _server_</code>
+__Server:__ <code>onload -p latency-best ./exchange _mcast-intf_</code>
+
+__Client:__ <code>onload -p latency-best ./trader_onload_ds_efvi -d _mcast-intf_ _server_</code>
 
 where:
 - _mcast-intf_ is the multicast interface on the server or client machine
@@ -227,26 +272,6 @@ where:
 
 There are various additional options. See the help text for details.
 
-\section efdelegated_server efdelegated_server
-
-The efdelegated_server application is used together with efdelegated_client
-to measure the performance of OpenOnload's "Delegated Sends" feature.
-
-This application is a very basic simulation of an exchange: It accepts a
-TCP connection from a client.  It sends UDP multicast messages, and
-expects that the client will send a message over the TCP connection in
-response to a subset of the UDP messages.  It measures the time taken
-from sending a UDP message to receiving the corresponding reply.
-
-When used with OpenOnload this application uses hardware timestamps
-taken on the adapter so that the latency measured is very accurate.
-(Note that for 7000-series adapters this requires a Performance Monitor
-license).
-
-\subsection efdelegated_server_usage Usage
-
-See \ref efdelegated_client_usage for \ref efdelegated_client.
- 
 \section building Building the Example Applications
 
 The %ef_vi example applications are built along with the Onload 

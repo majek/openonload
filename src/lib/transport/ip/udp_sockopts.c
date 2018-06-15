@@ -47,6 +47,14 @@ static void ci_mcast_opts_updated(ci_netif* ni, ci_udp_state* us)
 }
 
 
+static int/*bool*/
+ip_to_ifindex_check(struct oo_cplane_handle* cp,
+                    cicp_ipif_row_t* ipif, void* data)
+{
+  *(ci_ifid_t*)data = ipif->ifindex;
+  /* as in Linux, we accept any interface */
+  return 1;
+}
 static void ci_mcast_set_outgoing_if(ci_netif* ni, ci_udp_state* us,
                                      int ifindex, ci_uint32 laddr)
 {
@@ -58,10 +66,9 @@ static void ci_mcast_set_outgoing_if(ci_netif* ni, ci_udp_state* us,
       us->s.cp.ip_multicast_if = CI_IFID_BAD;
       return;
     }
-    rc = oo_cp_find_llap_by_ip(ni->cplane, laddr,
-                               NULL/*hwport*/, &us->s.cp.ip_multicast_if,
-                               NULL/*smac*/, NULL/*mtu*/, NULL/*encap*/);
-    if(CI_UNLIKELY( rc != 0 ))
+    rc = oo_cp_find_ipif_by_ip(ni->cplane, laddr,
+                               ip_to_ifindex_check, &us->s.cp.ip_multicast_if);
+    if(CI_UNLIKELY( rc == 0 ))
       /* Unlikely because when we invoked this on the kernel socket, it
        * thought that given ifindex does exist.
        *
@@ -75,6 +82,23 @@ static void ci_mcast_set_outgoing_if(ci_netif* ni, ci_udp_state* us,
   }
 }
 
+
+struct llap_param_data {
+  cicp_encap_t* encap;
+  cicp_hwport_mask_t* hwports;
+  ci_ifid_t* ifindex;
+};
+static int/*bool*/
+llap_param_from_ip(struct oo_cplane_handle* cp,
+                   cicp_llap_row_t* llap, cicp_ipif_row_t* ipif,
+                   void* data)
+{
+  struct llap_param_data* d = data;
+  *d->encap = llap->encap;
+  *d->hwports = llap->rx_hwports;
+  *d->ifindex = llap->ifindex;
+  return 1;
+}
 
 static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
                                ci_ifid_t ifindex, ci_uint32 laddr,
@@ -97,15 +121,29 @@ static int ci_mcast_join_leave(ci_netif* ni, ci_udp_state* us,
                          &encap);
   else {
     if( laddr != 0 ) {
-      rc = oo_cp_find_llap_by_ip(ni->cplane, laddr, &hwports, &ifindex,
-                                 NULL, NULL, &encap);
+      struct llap_param_data data;
+      data.encap = &encap;
+      data.hwports = &hwports;
+      data.ifindex = &ifindex;
+      rc = ! oo_cp_find_llap_by_ip(ni->cplane, laddr, llap_param_from_ip,
+                                   &data);
     }
     else {
       ci_ip_cached_hdrs ipcache;
+      struct oo_sock_cplane sock_cp = us->s.cp;
+
       ci_ip_cache_init(&ipcache);
       ipcache.ip.ip_daddr_be32 = maddr;
       ipcache.dport_be16 = 0;
-      cicp_user_retrieve(ni, &ipcache, &us->s.cp);
+
+      /* OO_SCP_NO_MULTICAST may forbid multicast send through this socket.
+       * Here we are not going to send anything; we want to receive, and we
+       * need a route resolution even if sending is forbidden.
+       * We use a copy of sock_cp to resolve this multicast route;
+       * original flag is not changed. */
+      sock_cp.sock_cp_flags &=~ OO_SCP_NO_MULTICAST;
+      cicp_user_retrieve(ni, &ipcache, &sock_cp);
+
       /* Fixme: we need all hwports here, but ipcache does not store them */
       hwports = cp_hwport_make_mask(ipcache.hwport);
       encap = ipcache.encap;
@@ -300,10 +338,22 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
    * in the following code. */
   ci_assert( CI_IS_VALID_SOCKET( os_sock ) );
 
+#define CHECK_MCAST_JOIN_LEAVE_RC(_rc, os_sock, optname, optval, optlen) \
+  do {                                                                   \
+    int _tmp_errno = errno;                                              \
+                                                                         \
+    if( ((_rc) != 0) && ((_rc) != CI_SOCKET_HANDOVER) ) {                \
+      ci_sys_setsockopt((os_sock), SOL_IP, (optname),                    \
+                        (optval), (optlen));                             \
+      errno = _tmp_errno;                                                \
+    }                                                                    \
+  } while (0)
+
   if(level == SOL_SOCKET) {
     /* socket level options valid for UDP */
     switch(optname) {
     case SO_SNDBUF:
+    case SO_SNDBUFFORCE:
       /* sets the maximum socket send buffer in bytes */
       if( (rc = opt_not_ok(optval,optlen,int)) )
         goto fail_inval;
@@ -317,7 +367,20 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
         ** Emulate the OS behaviour. */
         v = *(int*) optval;
         v = CI_MAX(v, (int)NI_OPTS(netif).udp_sndbuf_min);
-        v = CI_MIN(v, (int)NI_OPTS(netif).udp_sndbuf_max);
+        if( optname == SO_SNDBUF ) {
+          v = CI_MIN(v, (int)NI_OPTS(netif).udp_sndbuf_max);
+        }
+        else {
+          int lim = CI_MAX((int)NI_OPTS(netif).udp_sndbuf_max,
+                           netif->packets->sets_max * CI_CFG_PKT_BUF_SIZE / 2);
+          if( v > lim ) {
+            NI_LOG_ONCE(netif, RESOURCE_WARNINGS,
+                        "SO_SNDBUFFORCE: limiting user-provided value %d "
+                        "to %d.  "
+                        "Consider increasing of EF_MAX_PACKETS.", v, lim);
+            v = lim;
+          }
+        }
         v = oo_adjust_SO_XBUF(v);
       }
       else if( NI_OPTS(netif).udp_sndbuf_user ) {
@@ -328,6 +391,7 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       break;
 
     case SO_RCVBUF:
+    case SO_RCVBUFFORCE:
       /* sets the maximum socket receive buffer in bytes */
       if( (rc = opt_not_ok(optval,optlen,int)) )
         goto fail_inval;
@@ -342,7 +406,20 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
         ** Emulate the OS behaviour. */
         v = *(int*) optval;
         v = CI_MAX(v, (int)NI_OPTS(netif).udp_rcvbuf_min);
-        v = CI_MIN(v, (int)NI_OPTS(netif).udp_rcvbuf_max);
+        if( optname == SO_RCVBUF ) {
+          v = CI_MIN(v, (int)NI_OPTS(netif).udp_rcvbuf_max);
+        }
+        else {
+          int lim = CI_MAX((int)NI_OPTS(netif).udp_rcvbuf_max,
+                           netif->packets->sets_max * CI_CFG_PKT_BUF_SIZE / 2);
+          if( v > lim ) {
+            NI_LOG_ONCE(netif, RESOURCE_WARNINGS,
+                        "SO_RCVBUFFORCE: limiting user-provided value %d "
+                        "to %d.  "
+                        "Consider increasing of EF_MAX_PACKETS.", v, lim);
+            v = lim;
+          }
+        }
         v = oo_adjust_SO_XBUF(v);
       }
       else if( NI_OPTS(netif).udp_rcvbuf_user ) {
@@ -404,14 +481,11 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       }
       else
         RET_WITH_ERRNO(EFAULT);
-      if( rc ) {
-        if( optname == IP_ADD_MEMBERSHIP ) {
-          ci_sys_setsockopt(os_sock, SOL_IP, IP_DROP_MEMBERSHIP,
-                            optval, optlen);
-        }
-        return rc;
-      }
-      break;
+
+      if (optname == IP_ADD_MEMBERSHIP)
+        CHECK_MCAST_JOIN_LEAVE_RC(rc, os_sock, IP_DROP_MEMBERSHIP, optval,
+                                  optlen);
+      return rc;
     }
 
 #ifdef IP_ADD_SOURCE_MEMBERSHIP
@@ -435,14 +509,11 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       }
       else
         RET_WITH_ERRNO(EFAULT);
-      if( rc ) {
-        if( optname == IP_ADD_SOURCE_MEMBERSHIP ) {
-          ci_sys_setsockopt(os_sock, SOL_IP, IP_DROP_SOURCE_MEMBERSHIP,
-                            optval, optlen);
-        }
-        return rc;
-      }
-      break;
+
+      if (optname == IP_ADD_SOURCE_MEMBERSHIP)
+        CHECK_MCAST_JOIN_LEAVE_RC(rc, os_sock, IP_DROP_SOURCE_MEMBERSHIP,
+                                  optval, optlen);
+      return rc;
     }
 #endif
 
@@ -459,14 +530,11 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       rc = ci_mcast_join_leave(netif, us, greq->gr_interface, 0,
                 CI_SIN(&greq->gr_group)->sin_addr.s_addr,
                 optname == MCAST_JOIN_GROUP);
-      if( rc ) {
-        if( optname == MCAST_JOIN_GROUP ) {
-          ci_sys_setsockopt(os_sock, SOL_IP, MCAST_LEAVE_GROUP,
-                            optval, optlen);
-        }
-        return rc;
-      }
-      break;
+
+      if (optname == MCAST_JOIN_GROUP)
+        CHECK_MCAST_JOIN_LEAVE_RC(rc, os_sock, MCAST_LEAVE_GROUP, optval,
+                                  optlen);
+      return rc;
     }
 #endif
 
@@ -491,14 +559,12 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
       rc = ci_mcast_join_leave(netif, us, gsreq->gsr_interface, 0,
                 CI_SIN(&gsreq->gsr_group)->sin_addr.s_addr,
                 optname == MCAST_JOIN_SOURCE_GROUP);
-      if( rc ) {
-        if( optname == MCAST_JOIN_SOURCE_GROUP ) {
-          ci_sys_setsockopt(os_sock, SOL_IP, MCAST_LEAVE_SOURCE_GROUP,
-                            optval, optlen);
-        }
-        return rc;
-      }
-      break;
+
+      if (optname == MCAST_JOIN_SOURCE_GROUP)
+        CHECK_MCAST_JOIN_LEAVE_RC(rc, os_sock, MCAST_LEAVE_SOURCE_GROUP,
+                                  optval, optlen);
+
+      return rc;
     }
 #endif
 
@@ -570,6 +636,8 @@ static int ci_udp_setsockopt_lk(citp_socket* ep, ci_fd_t fd, ci_fd_t os_sock,
     LOG_U(log(FNS_FMT "unknown level=%d optname=%d accepted by O/S",
               FNS_PRI_ARGS(netif, ep->s), level, optname));
   }
+
+#undef CHECK_MCAST_JOIN_LEAVE_RC
 
   return 0;
 

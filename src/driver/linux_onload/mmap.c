@@ -347,37 +347,6 @@ static int vm_op_fault(
 #endif
 
 
-#ifdef EFRM_VMA_HAS_ACCESS
-/* Implements support for ptrace() as used by gdb.  The kenrel iterates over
- * the requested region and calls this function until the whole length has been
- * read. */
-static int vm_op_access(struct vm_area_struct *vma, unsigned long addr,
-			void *buf, int len, int write)
-{
-  void *mapped_addr;
-  int offset = addr & (PAGE_SIZE - 1);
-  struct page* page;
-
-  tcp_helper_resource_t* trs = (tcp_helper_resource_t*) vma->vm_private_data;
-  TCP_HELPER_RESOURCE_ASSERT_VALID(trs, 0);
-
-  page = __vm_op_nopage(trs, vma, addr & PAGE_MASK, NULL);
-  if( page == NULL )
-    return -EIO;
-
-  mapped_addr = kmap(page);
-  if( write )
-    memcpy(mapped_addr + offset, buf, len);
-  else
-    memcpy(buf, mapped_addr + offset, len);
-  kunmap(page);
-  put_page(page);
-
-  return len;
-}
-#endif
-
-
 static struct vm_operations_struct vm_ops = {
   .open  = vm_op_open,
   .close = vm_op_close,
@@ -385,9 +354,6 @@ static struct vm_operations_struct vm_ops = {
   .nopage = vm_op_nopage,
 #else
   .fault = vm_op_fault,
-#endif
-#ifdef EFRM_VMA_HAS_ACCESS
-  .access = vm_op_access,
 #endif
 };
 
@@ -415,7 +381,7 @@ oo_stack_mmap(ci_private_t* priv, struct vm_area_struct* vma)
       (rc = efab_add_mm_ref (vma->vm_mm)) < 0 )
     return rc;
 
-  vma->vm_flags |= EFRM_VM_IO_FLAGS;
+  vma->vm_flags |= EFRM_VM_BASE_FLAGS;
 
   /* Hook into the VM so we can keep a proper reference count on this
   ** resource.

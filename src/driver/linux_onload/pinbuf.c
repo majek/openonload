@@ -94,7 +94,8 @@ struct page* ci_follow_page(ci_addr_spc_t addr_spc, caddr_t uaddr)
     if( ci_pte_valid(pte) )
       pg = pte_page(pte);
     else
-      FPL(ci_log("follow_page: %lx pfn=%lx not valid", (long)address, pte_pfn(pte)));
+      FPL(ci_log("follow_page: %lx pfn=%lx not valid", (long)address, 
+                 (long)pte_pfn(pte)));
     get_page(pg);
   }
   else

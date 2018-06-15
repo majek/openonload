@@ -268,7 +268,6 @@ EFX_HAVE_SKB_VLANTCI                     member    struct_sk_buff vlan_tci      
 EFX_HAVE_BUSY_POLL			file				include/net/busy_poll.h
 EFX_NEED_USLEEP_RANGE			nsymbol	usleep_range		include/linux/delay.h
 EFX_HAVE_SRIOV_GET_TOTALVFS		symbol	pci_sriov_get_totalvfs	include/linux/pci.h
-EFX_HAVE_RWSEM_IS_LOCKED		symbol	rwsem_is_locked		include/linux/rwsem.h
 EFX_HAVE_OLD_GENL_INFO			member	struct_genl_info snd_pid	include/net/genetlink.h
 EFX_NEED_SIGNED_NLA			nsymbol	nla_put_s32		include/net/netlink.h
 EFX_NEED_SKB_VLAN_TAG_GET		nsymbol	skb_vlan_tag_get	include/linux/if_vlan.h
@@ -361,8 +360,14 @@ EFX_HAVE_XDP_EXT	member	struct_net_device_ops_extended	ndo_xdp	include/linux/net
 EFX_NEED_PAGE_FRAG_FREE	nsymbol	page_frag_free	include/linux/gfp.h
 EFX_HAVE_FREE_PAGE_FRAG	symbol	__free_page_frag	include/linux/gfp.h
 EFX_NEED_VOID_SKB_PUT	nsymtype	skb_pub	include/linux/skbuff.h	void *skb_put(struct sk_buff *, unsigned int)
+EFX_HAVE_ETHTOOL_FCS	symbol	NETIF_F_RXALL	include/linux/netdev_features.h
+EFX_HAVE_ETHTOOL_LINKSETTINGS	symbol	ethtool_link_ksettings	include/linux/ethtool.h
+EFX_HAVE_LINK_MODE_25_50_100	symbol	ETHTOOL_LINK_MODE_25000baseCR_Full_BIT	include/uapi/linux/ethtool.h
 EFX_HAVE_NETDEV_EXT_MTU_LIMITS	member	struct_net_device_extended	max_mtu	include/linux/netdevice.h
 EFX_HAVE_NDO_EXT_CHANGE_MTU	memtype	struct_net_device_ops_extended	ndo_change_mtu	include/linux/netdevice.h	int (*)(struct net_device *, int)
+EFX_HAVE_ETHTOOL_FECPARAM	member	struct_ethtool_ops	get_fecparam	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_RXFH_CONTEXT	member	struct_ethtool_ops	get_rxfh_context	include/linux/ethtool.h
+EFX_HAVE_ETHTOOL_RXNFC_CONTEXT	member	struct_ethtool_rxnfc	rss_context	include/linux/ethtool.h
 " | egrep -v -e '^#' -e '^$' | sed 's/[ \t][ \t]*/:/g'
 }
 

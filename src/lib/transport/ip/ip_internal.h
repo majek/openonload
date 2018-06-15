@@ -208,7 +208,7 @@ ci_tcp_ep_set_filters(ci_netif *        ni,
 
 #else
   if( ci_tcp_can_set_filter_in_ul(ni, SP_TO_SOCK(ni, sock_id)) )
-    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_TCP(ni, sock_id));
+    rc = ci_tcp_sock_set_scalable_filter(ni, SP_TO_SOCK(ni, sock_id));
   else
     rc = ci_tcp_helper_ep_set_filters(ci_netif_get_driver_handle(ni), sock_id,
                                       bindto_ifindex, from_tcp_id);
@@ -373,6 +373,7 @@ ci_tcp_ep_mcast_add_del(ci_netif*         ni,
 # define SO_REUSEPORT   15
 #endif
 
+#if CI_CFG_TIMESTAMPING
 /* The following value needs to match its counterpart
  * in kernel headers.
  */
@@ -400,6 +401,7 @@ enum {
 	ONLOAD_SOF_TIMESTAMPING_MASK =
 	( (ONLOAD_SOF_TIMESTAMPING_LAST << 1) - 1 )
 };
+#endif
 
 /* Replica of sock_extended_err - just in case we do not have ee_data in
  * the headers in use. */
@@ -482,6 +484,9 @@ extern int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s,
 			  int optname, void *optval,
 			  socklen_t *optlen) CI_HF;
 
+#ifdef __KERNEL__
+extern int ci_ip_mtu_discover_from_sflags(int s_flags) CI_HF;
+#else
 /*! Handler for common getsockopt:SOL_IP options. The handlers here will
  * cope with both TCP & UDP.
  * \param netif   [in] Netif context
@@ -495,6 +500,7 @@ extern int ci_get_sol_tcp(ci_netif* netif, ci_sock_cmn* s,
 extern int ci_get_sol_ip( ci_netif* netif, ci_sock_cmn* s, ci_fd_t fd,
 			  int optname, void *optval,
 			  socklen_t *optlen ) CI_HF;
+#endif
 
 #if CI_CFG_FAKE_IPV6
 /*! Handler for common getsockopt:SOL_IPV6 options. The handlers here will
@@ -812,6 +818,8 @@ extern void ci_netif_set_merge_atomic_flag(ci_netif* ni);
   do { mod##mod ni->state->field; } while(0)
 #endif
 
+void oo_pkt_calc_checksums(ci_netif* ni, ci_ip_pkt_fmt* pkt,
+                           struct iovec* host_iov);
 
 #endif /* __CI_LIB_IP_INTERNAL_H__ */
 /*! \cidoxg_end */

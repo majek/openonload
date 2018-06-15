@@ -131,8 +131,16 @@ struct citp_epoll_member {
   ci_uint64             fdi_seq;    /*!< fdi->seq */
   int                   fd;         /*!< Onload fd */
   ci_sleep_seq_t        reported_sleep_seq;
+  /*!< indicates after which eitem on ready list socket we should look
+   * on other and os sockets */
+  int                   poll_end;
 };
 
+
+enum {
+  EPOLL_PHASE_DONE_ACCELERATED = 1,
+  EPOLL_PHASE_DONE_OTHER = 2,
+};
 
 #define EPOLL_STACK_EITEM 1
 #define EPOLL_NON_STACK_EITEM 2
@@ -184,9 +192,17 @@ struct citp_epoll_fd {
   /* Avoid spinning in next epoll_pwait call */
   int avoid_spin_once;
 
+  /* We've entered the citp_epoll_dtor() function */
+  int closing;
+
   ci_netif* home_stack;
   int ready_list;
 
+  /*!< phase of the poll to ensure fairness between groups of sockets
+   * value of highest bit matters */
+  int phase;
+
+#if CI_CFG_TIMESTAMPING
   /* When using WODA with large numbers of sockets performance can be harmed
    * by repeated large alloc/free calls, so we cache memory allocated for this
    * purpose.
@@ -194,6 +210,7 @@ struct citp_epoll_fd {
   struct citp_ordering_info* ordering_info;
   struct epoll_event* wait_events;
   int n_woda_events;
+#endif
 };
 
 
@@ -249,6 +266,8 @@ struct oo_ul_epoll_state {
   /* Have we incremented statistics for this spin round? */
   int stat_incremented;
 #endif
+
+  int phase;
 };
 
 
@@ -266,6 +285,7 @@ extern void citp_epoll_on_handover(citp_fdinfo*, citp_fdinfo*,
 extern void citp_epoll_on_close(citp_fdinfo*, citp_fdinfo*,
                                 int fdt_locked) CI_HF;
 
+#if CI_CFG_TIMESTAMPING
 struct onload_ordered_epoll_event;
 extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                                    struct epoll_event*__restrict__ events,
@@ -273,6 +293,7 @@ extern int citp_epoll_ordered_wait(citp_fdinfo* fdi,
                                    int maxevents, int timeout,
                                    const sigset_t *sigmask,
                                    citp_lib_context_t *lib_context);
+#endif
 extern void citp_epoll_remove_if_not_ready(struct oo_ul_epoll_state* eps,
                                            struct citp_epoll_member* eitem,
                                            ci_netif* ni, citp_waitable* w);
@@ -326,6 +347,8 @@ citp_ul_epoll_set_ul_events(struct oo_ul_epoll_state*__restrict__ eps,
       citp_ul_epoll_find_events(eps, eitem, events,
                                 sleep_seq, sleep_seq_p, seq_mismatch) : 0;
 }
+
+ci_uint64 citp_sock_sleep_seq(citp_fdinfo* fdi);
 
 
 

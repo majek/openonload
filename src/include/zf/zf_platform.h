@@ -42,6 +42,11 @@
 #  define ZF_HOT
 #  define ZF_COLD
 # endif
+# if __GNUC__ > 4 || (__GNUC__ >= 4 && __GNUC_MINOR__ >= 5)
+#  define ZF_NOCLONE __attribute__((noclone))
+# else
+#  define ZF_NOCLONE
+# endif
 # define ZF_CONSTFUNC __attribute__((const))
 # define ZF_LIKELY(t)    __builtin_expect((t), 1)
 # define ZF_UNLIKELY(t)  __builtin_expect((t), 0)

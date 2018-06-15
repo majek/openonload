@@ -127,6 +127,13 @@ extern ci_uint32 ci_toeplitz_hash(const ci_uint8 *key, const ci_uint8 *input,
                                   int n);
   /*!< Toeplitz hash */
 
+#if !defined(__KERNEL__)
+
+extern ci_uint32
+ci_toeplitz_hash_ul(const ci_uint8 *key, const ci_uint8* sse_key,
+                    const ci_uint8 *input, int n);
+#endif
+
 /**********************************************************************
  * system info
  **********************************************************************/ 

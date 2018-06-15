@@ -1048,7 +1048,7 @@ static void efx_rx_deliver(struct efx_channel *channel, u8 *eh,
  * Returns true if packet should still be delivered.
  */
 static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
-		       struct efx_rx_buffer *rx_buf, u8 **eh)
+		       struct efx_rx_buffer *rx_buf, u8 **ehp)
 {
 	u8 rx_prefix[EFX_MAX_RX_PREFIX_SIZE];
 	struct efx_rx_queue *rx_queue;
@@ -1085,10 +1085,10 @@ static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
 
 	/* Save the rx prefix. */
 	EFX_WARN_ON_PARANOID(efx->rx_prefix_size > EFX_MAX_RX_PREFIX_SIZE);
-	memcpy(rx_prefix, *eh - efx->rx_prefix_size,
+	memcpy(rx_prefix, *ehp - efx->rx_prefix_size,
 	       efx->rx_prefix_size);
 
-	xdp.data = *eh;
+	xdp.data = *ehp;
 #if !defined(EFX_USE_KCOMPAT) || defined(EFX_HAVE_XDP_HEAD)
 	xdp.data_hard_start = xdp.data - XDP_PACKET_HEADROOM;
 #endif
@@ -1100,16 +1100,16 @@ static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
 	xdp_act = bpf_prog_run_xdp(xdp_prog, &xdp);
 	rcu_read_unlock();
 
-	offset = (u8 *)xdp.data - *eh;
+	offset = (u8 *)xdp.data - *ehp;
 
 	switch (xdp_act) {
 	case XDP_PASS:
 		/* Fix up rx prefix. */
 		if (offset) {
-			*eh += offset;
+			*ehp += offset;
 			rx_buf->page_offset += offset;
 			rx_buf->len -= offset;
-			memcpy(*eh - efx->rx_prefix_size, rx_prefix,
+			memcpy(*ehp - efx->rx_prefix_size, rx_prefix,
 			       efx->rx_prefix_size);
 		}
 		break;
@@ -1164,7 +1164,7 @@ static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
 }
 #else
 static bool efx_do_xdp(struct efx_nic *efx, struct efx_channel *channel,
-		       struct efx_rx_buffer *rx_buf, u8 **eh)
+		       struct efx_rx_buffer *rx_buf, u8 **ehp)
 {
 	return true;
 }
@@ -2281,51 +2281,141 @@ int efx_rfs_filter_spec(struct efx_nic *efx, const struct sk_buff *skb,
 }
 #endif /* EFX_HAVE_NEW_FLOW_KEYS */
 
-int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
-		   u16 rxq_index, u32 flow_id)
+static void efx_filter_rfs_work(struct work_struct *data)
 {
-	struct efx_nic *efx = netdev_priv(net_dev);
-	struct efx_channel *channel;
-	struct efx_filter_spec spec;
+	struct efx_async_filter_insertion *req = container_of(data, struct efx_async_filter_insertion,
+							      work);
+	struct efx_nic *efx = netdev_priv(req->net_dev);
+	struct efx_channel *channel = efx_get_channel(efx, req->rxq_index);
+	int slot_idx = req - efx->rps_slot;
+	struct efx_arfs_rule *rule;
+	u16 arfs_id = 0;
 	int rc;
 
-	if (flow_id == RPS_FLOW_ID_INVALID)
-		return -EINVAL;
+	rc = efx->type->filter_insert(efx, &req->spec, true);
+	if (rc >= 0)
+		rc %= efx->type->max_rx_ip_filters;
+	if (efx->rps_hash_table) {
+		spin_lock_bh(&efx->rps_hash_lock);
+		rule = efx_rps_hash_find(efx, &req->spec);
+		/* The rule might have already gone, if someone else's request
+		 * for the same spec was already worked and then expired before
+		 * we got around to our work.  In that case we have nothing
+		 * tying us to an arfs_id, meaning that as soon as the filter
+		 * is considered for expiry it will be removed.
+		 */
+		if (rule) {
+			if (rc < 0)
+				rule->filter_id = EFX_ARFS_FILTER_ID_ERROR;
+			else
+				rule->filter_id = rc;
+			arfs_id = rule->arfs_id;
+		}
+		spin_unlock_bh(&efx->rps_hash_lock);
+	}
+	if (rc >= 0) {
+		/* Remember this so we can check whether to expire the filter
+		 * later.
+		 */
+		mutex_lock(&efx->rps_mutex);
+		channel->rps_flow_id[rc] = req->flow_id;
+		++channel->rfs_filters_added;
+		mutex_unlock(&efx->rps_mutex);
 
-	efx_filter_init_rx(&spec, EFX_FILTER_PRI_HINT,
-			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
-			   rxq_index);
-	rc = efx_rfs_filter_spec(efx, skb, &spec);
-	if (rc < 0)
-		return rc;
-
-	rc = efx->type->filter_async_insert(efx, &spec);
-	if (rc < 0)
-		return rc;
-
-	/* Remember this so we can check whether to expire the filter later */
-	channel = efx_get_channel(efx, rxq_index);
-	channel->rps_flow_id[rc] = flow_id;
-	++channel->rfs_filters_added;
-
-	if (spec.ether_type == htons(ETH_P_IP))
-		netif_info(efx, rx_status, efx->net_dev,
-			   "steering %s %pI4:%u:%pI4:%u to queue %u [flow %u filter %d]\n",
-			   (spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
-			   spec.rem_host, ntohs(spec.rem_port), spec.loc_host,
-			   ntohs(spec.loc_port), rxq_index, flow_id, rc);
-	else
-		netif_info(efx, rx_status, efx->net_dev,
-			   "steering %s [%pI6]:%u:[%pI6]:%u to queue %u [flow %u filter %d]\n",
-			   (spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
-			   spec.rem_host, ntohs(spec.rem_port), spec.loc_host,
-			   ntohs(spec.loc_port), rxq_index, flow_id, rc);
+		if (req->spec.ether_type == htons(ETH_P_IP))
+			netif_info(efx, rx_status, efx->net_dev,
+				   "steering %s %pI4:%u:%pI4:%u to queue %u [flow %u filter %d id %u]\n",
+				   (req->spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
+				   req->spec.rem_host, ntohs(req->spec.rem_port),
+				   req->spec.loc_host, ntohs(req->spec.loc_port),
+				   req->rxq_index, req->flow_id, rc, arfs_id);
+		else
+			netif_info(efx, rx_status, efx->net_dev,
+				   "steering %s [%pI6]:%u:[%pI6]:%u to queue %u [flow %u filter %d id %u]\n",
+				   (req->spec.ip_proto == IPPROTO_TCP) ? "TCP" : "UDP",
+				   req->spec.rem_host, ntohs(req->spec.rem_port),
+				   req->spec.loc_host, ntohs(req->spec.loc_port),
+				   req->rxq_index, req->flow_id, rc, arfs_id);
+	}
 
 #if defined(EFX_NOT_UPSTREAM) && defined(EFX_USE_SARFS)
 	/* since we have real ARFS, disable SARFS */
 	efx_sarfs_disable(efx);
 #endif
 
+	/* Release references */
+	clear_bit(slot_idx, &efx->rps_slot_map);
+	dev_put(req->net_dev);
+
+	return;
+}
+
+int efx_filter_rfs(struct net_device *net_dev, const struct sk_buff *skb,
+		   u16 rxq_index, u32 flow_id)
+{
+	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_async_filter_insertion *req;
+	struct efx_arfs_rule *rule;
+	int slot_idx;
+	bool new;
+	int rc;
+
+	if (flow_id == RPS_FLOW_ID_INVALID)
+		return -EINVAL;
+
+	/* find a free slot */
+	for (slot_idx = 0; slot_idx < EFX_RPS_MAX_IN_FLIGHT; slot_idx++)
+		if (!test_and_set_bit(slot_idx, &efx->rps_slot_map))
+			break;
+	if (slot_idx >= EFX_RPS_MAX_IN_FLIGHT)
+		return -EBUSY;
+
+	req = efx->rps_slot + slot_idx;
+	efx_filter_init_rx(&req->spec, EFX_FILTER_PRI_HINT,
+			   efx->rx_scatter ? EFX_FILTER_FLAG_RX_SCATTER : 0,
+			   rxq_index);
+	rc = efx_rfs_filter_spec(efx, skb, &req->spec);
+	if (rc < 0)
+		goto out_clear;
+
+	if (efx->rps_hash_table) {
+		/* Add it to ARFS hash table */
+		spin_lock(&efx->rps_hash_lock);
+		rule = efx_rps_hash_add(efx, &req->spec, &new);
+		if (!rule) {
+			rc = -ENOMEM;
+			goto out_unlock;
+		}
+		if (new)
+			rule->arfs_id = efx->rps_next_id++ % RPS_NO_FILTER;
+		rc = rule->arfs_id;
+		/* Skip if existing or pending filter already does the right thing */
+		if (!new && rule->rxq_index == rxq_index &&
+		    rule->filter_id >= EFX_ARFS_FILTER_ID_PENDING)
+			goto out_unlock;
+		rule->rxq_index = rxq_index;
+		rule->filter_id = EFX_ARFS_FILTER_ID_PENDING;
+		spin_unlock(&efx->rps_hash_lock);
+	} else {
+		/* Without an ARFS hash table, we just use arfs_id 0 for all
+		 * filters.  This means if multiple flows hash to the same
+		 * flow_id, all but the most recently touched will be eligible
+		 * for expiry.
+		 */
+		rc = 0;
+	}
+
+	/* Queue the request */
+	dev_hold(req->net_dev = net_dev);
+	INIT_WORK(&req->work, efx_filter_rfs_work);
+	req->rxq_index = rxq_index;
+	req->flow_id = flow_id;
+	schedule_work(&req->work);
+	return rc;
+out_unlock:
+	spin_unlock(&efx->rps_hash_lock);
+out_clear:
+	clear_bit(slot_idx, &efx->rps_slot_map);
 	return rc;
 }
 
@@ -2335,9 +2425,8 @@ bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota)
 	unsigned int channel_idx, index, size;
 	u32 flow_id;
 
-	if (!spin_trylock_bh(&efx->filter_lock))
+	if (!mutex_trylock(&efx->rps_mutex))
 		return false;
-
 	expire_one = efx->type->filter_rfs_expire_one;
 	channel_idx = efx->rps_expire_channel;
 	index = efx->rps_expire_index;
@@ -2362,7 +2451,7 @@ bool __efx_filter_rfs_expire(struct efx_nic *efx, unsigned int quota)
 	efx->rps_expire_channel = channel_idx;
 	efx->rps_expire_index = index;
 
-	spin_unlock_bh(&efx->filter_lock);
+	mutex_unlock(&efx->rps_mutex);
 	return true;
 }
 

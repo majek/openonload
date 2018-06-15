@@ -43,6 +43,8 @@ extern int phys_mode_gid;
 
 extern struct rw_semaphore handover_rwlock;
 
+extern int inject_kernel_gid;
+
 /*--------------------------------------------------------------------
  *
  * Linux file operations.
@@ -114,6 +116,21 @@ extern int efab_fds_dump(unsigned pid);
     ( FILE_IS_ENDPOINT_SOCK(f) || FILE_IS_ENDPOINT_PIPE(f) || \
       FILE_IS_ENDPOINT_EPOLL(f) || FILE_IS_ENDPOINT_SPECIAL(f) )
 
+
+#define CI_LOG_LIMITED(x) do { \
+    static uint64_t last_jiffy;                                 \
+    static int suppressed;                                      \
+    if (jiffies - last_jiffy > HZ) {                            \
+      if( suppressed )                                          \
+        ci_log("Rate limiting suppressed %d msgs", suppressed); \
+      x;                                                        \
+      suppressed = 0;                                           \
+      last_jiffy = jiffies;                                     \
+    }                                                           \
+    else {                                                      \
+      ++suppressed;                                             \
+    }                                                           \
+  } while(0)
 
 
 #endif  /* __LINUX_ONLOAD_INTERNAL__ */
